@@ -8,16 +8,16 @@ import {
 } from "./live-preview-perf-model";
 import { runLivePreviewBaselineScenario } from "./live-preview-perf-scenario";
 
-async function runBaselineScenario(): Promise<LivePreviewPerfArtifact> {
+async function runProjectionScenario(): Promise<LivePreviewPerfArtifact> {
   return {
     schema_version: livePreviewPerfSchemaVersion,
-    scenario: "fp11a-8mib-1000-input-baseline",
+    scenario: "fp11b-8mib-1000-editable-projection",
     counters: await runLivePreviewBaselineScenario(),
   };
 }
 
-const first = await runBaselineScenario();
-const second = await runBaselineScenario();
+const first = await runProjectionScenario();
+const second = await runProjectionScenario();
 validateLivePreviewPerfArtifact(first);
 validateLivePreviewPerfArtifact(second);
 if (JSON.stringify(first) !== JSON.stringify(second))

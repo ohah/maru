@@ -2,9 +2,13 @@ import { Text } from "@codemirror/state";
 import type { ViewUpdate } from "@codemirror/view";
 import { JSDOM } from "jsdom";
 import { createMarkdownEditor } from "../src/editor";
-import { LivePreviewEditorController } from "../src/live-preview-editor";
-import type { LivePreviewRequest, ProjectionResult } from "../src/live-preview-protocol";
+import { EditableProjectionController } from "../src/editable-projection-view";
+import {
+  createLivePreviewDiagnosticsSnapshot,
+  projectionFallbackReasons,
+} from "../src/live-preview-diagnostics";
 import { maxLivePreviewProjectionCodeUnits } from "../src/live-preview-protocol";
+import { startMathDelimiterScanProbe } from "../src/markdown-language";
 import { EditorRevisionClock } from "../src/live-preview-state";
 import type { LivePreviewPerfCounters } from "./live-preview-perf-model";
 
@@ -42,43 +46,6 @@ export function startDocumentCopyProbe(): CopyProbe {
   };
 }
 
-class ControlledWorker {
-  readonly sent: LivePreviewRequest[] = [];
-  private replyIndex = 0;
-  terminated = false;
-  maxOutstanding = 0;
-  onmessage: ((event: MessageEvent<unknown>) => void) | null = null;
-  onerror: ((event: Event) => void) | null = null;
-  onmessageerror: ((event: MessageEvent<unknown>) => void) | null = null;
-
-  postMessage(message: LivePreviewRequest): void {
-    this.sent.push(message);
-    this.maxOutstanding = Math.max(this.maxOutstanding, this.sent.length - this.replyIndex);
-    if (this.maxOutstanding > 1)
-      throw new Error("live preview worker exceeded one in-flight request");
-  }
-
-  terminate(): void {
-    this.terminated = true;
-  }
-
-  drain(): void {
-    while (this.replyIndex < this.sent.length) {
-      const request = this.sent[this.replyIndex];
-      this.replyIndex += 1;
-      if (request === undefined) throw new Error("missing live preview worker request");
-      const result: ProjectionResult = {
-        type: "result",
-        documentRevision:
-          request.type === "apply" ? request.targetRevision : request.documentRevision,
-        projectionGeneration: request.type === "seed" ? 0 : request.projectionGeneration,
-        fragments: [],
-      };
-      this.onmessage?.({ data: result } as MessageEvent<unknown>);
-    }
-  }
-}
-
 function installDom(dom: JSDOM): () => void {
   const previous = new Map<string, PropertyDescriptor | undefined>();
   const globals: Array<[string, unknown]> = [
@@ -109,10 +76,16 @@ export async function runLivePreviewBaselineScenario(): Promise<LivePreviewPerfC
     pretendToBeVisual: true,
   });
   const restoreDom = installDom(dom);
-  // Short paragraphs keep the visible CM6 line bounded while preserving the exact 8 MiB document fixture.
-  const initial = `${"a".repeat(62)}\n\n`.repeat(128 * 1024);
+  // The visible prefix exercises real style/hidden/atomic projection. Short filler paragraphs preserve an exact
+  // 8 MiB source without turning one CM6 line into a document-sized parse or DOM node.
+  const prefix = "# heading ![alt](image.png)\n\n**strong** text\n\n$unclosed\n\n";
+  const targetCodeUnits = 8 * 1024 * 1024;
+  const paragraph = `${"a".repeat(62)}\n\n`;
+  const repeated = paragraph.repeat(
+    Math.floor((targetCodeUnits - prefix.length) / paragraph.length),
+  );
+  const initial = `${prefix}${repeated}${"a".repeat(targetCodeUnits - prefix.length - repeated.length)}`;
   const revisions = new EditorRevisionClock();
-  const workers: ControlledWorker[] = [];
   let domMutations = 0;
   let iframeCreate = 0;
   let iframeDestroy = 0;
@@ -124,25 +97,45 @@ export async function runLivePreviewBaselineScenario(): Promise<LivePreviewPerfC
     for (const record of records) {
       const added = [...record.addedNodes].reduce((sum, node) => sum + countIframes(node), 0);
       const removed = [...record.removedNodes].reduce((sum, node) => sum + countIframes(node), 0);
-      if (added > 0 || removed > 0) domMutations += 1;
       iframeCreate += added;
       iframeDestroy += removed;
+      const touchesProjection = [...record.addedNodes, ...record.removedNodes].some((node) => {
+        if (!(node instanceof dom.window.Element)) return false;
+        return (
+          [...node.classList].some((name) => name.startsWith("maru-projection-")) ||
+          node.querySelector('[class*="maru-projection-"]') !== null
+        );
+      });
+      if (touchesProjection) domMutations += 1;
     }
   });
-  let controller: LivePreviewEditorController | null = null;
+  let controller: EditableProjectionController | null = null;
   let sourceTransactions = 0;
-  let projectionTransactions = 0;
+  const latestFallbackCounts = Object.fromEntries(
+    projectionFallbackReasons.map((reason) => [reason, 0]),
+  ) as Record<(typeof projectionFallbackReasons)[number], number>;
+  const livePreviewDiagnostics = createLivePreviewDiagnosticsSnapshot();
   const updates = (update: ViewUpdate) => {
-    if (!update.docChanged) {
-      projectionTransactions += 1;
-      controller?.handleUpdate(update, revisions.documentRevision, revisions.documentRevision);
-      return;
-    }
-    const baseRevision = revisions.documentRevision;
-    const targetRevision = revisions.documentChanged();
-    sourceTransactions += 1;
-    controller?.handleUpdate(update, baseRevision, targetRevision);
+    if (update.docChanged) revisions.documentChanged();
+    if (update.docChanged) sourceTransactions += 1;
+    controller?.handleUpdate(update);
   };
+  // A separate product EditorView forces the adversarial repeated-dollar parse without changing the canonical
+  // projection fixture/fallback counts. The parser-site counter must remain at the context-wide hard cap.
+  const denseHost = dom.window.document.createElement("aside");
+  dom.window.document.body.append(denseHost);
+  const denseMathProbe = startMathDelimiterScanProbe();
+  const denseEditor = createMarkdownEditor(
+    denseHost,
+    "$1".repeat(8_192),
+    () => {},
+    () => {},
+  );
+  denseEditor.destroy();
+  denseHost.remove();
+  const denseMathScannedCodeUnits = denseMathProbe.stop();
+
+  const mathScanProbe = startMathDelimiterScanProbe();
   const editor = createMarkdownEditor(
     dom.window.document.querySelector("main") as HTMLElement,
     initial,
@@ -150,65 +143,61 @@ export async function runLivePreviewBaselineScenario(): Promise<LivePreviewPerfC
     () => {},
   );
   projectionObserver.observe(editor.dom, { childList: true, subtree: true });
-  const WorkerConstructor = class {
-    constructor() {
-      const worker = new ControlledWorker();
-      workers.push(worker);
-      return worker;
-    }
-  } as unknown as typeof Worker;
-  controller = new LivePreviewEditorController(editor, 1, revisions, WorkerConstructor);
+  controller = new EditableProjectionController(editor, 1, revisions, () => {
+    if (controller === null) return;
+    controller.writeDiagnostics(livePreviewDiagnostics);
+    for (const reason of projectionFallbackReasons)
+      latestFallbackCounts[reason] = livePreviewDiagnostics.fallbackCounts[reason];
+  });
   controller.enable();
-  const worker = workers[0];
-  if (worker === undefined) throw new Error("live preview product path did not create a worker");
-  worker.drain();
+  // Initial projection is the only admitted decoration commit. Its DOM records are outside the 1,000-input
+  // same-fingerprint segment, whose projection-owned DOM mutation budget is exactly zero.
+  projectionObserver.takeRecords();
+  domMutations = 0;
+  iframeCreate = 0;
+  iframeDestroy = 0;
 
   const copyProbe = startDocumentCopyProbe();
   let copiedBytes = 0;
-  let measuredProjectionTransactions = 0;
+  let mathScannedCodeUnits = 0;
+  let metrics = controller.metrics();
+  let measuredFallbackCounts = { ...latestFallbackCounts };
   try {
     for (let index = 0; index < 1_000; index += 1) {
-      editor.dispatch({ changes: { from: 0, to: 1, insert: index % 2 === 0 ? "b" : "a" } });
-      worker.drain();
+      editor.dispatch({ changes: { from: 2, to: 3, insert: index % 2 === 0 ? "H" : "h" } });
     }
     await new Promise<void>((resolve) => dom.window.requestAnimationFrame(() => resolve()));
-    measuredProjectionTransactions = projectionTransactions;
+    metrics = controller.metrics();
+    measuredFallbackCounts = { ...latestFallbackCounts };
   } finally {
     copiedBytes = copyProbe.stop();
+    mathScannedCodeUnits = mathScanProbe.stop();
     controller.destroy();
     editor.destroy();
     projectionObserver.disconnect();
     restoreDom();
   }
-  const applyRequests = worker.sent.filter(({ type }) => type === "apply").length;
-  if (sourceTransactions !== 1_000 || applyRequests !== 1_000)
-    throw new Error("live preview perf fixture bypassed the product input/worker path");
-  if (worker.maxOutstanding !== 1)
-    throw new Error("live preview perf fixture did not exercise bounded worker admission");
-  if (!worker.terminated) throw new Error("live preview perf fixture leaked its worker");
+  if (sourceTransactions !== 1_000)
+    throw new Error("live preview perf fixture bypassed the product input path");
 
   return {
-    visited_code_units: 0,
-    visited_syntax_nodes: 0,
-    emitted_decorations: 0,
-    diffed_decorations: 0,
+    visited_code_units: metrics.visitedCodeUnits,
+    visited_syntax_nodes: metrics.visitedSyntaxNodes,
+    selection_range_checks: metrics.selectionRangeChecks,
+    math_scanned_code_units: mathScannedCodeUnits,
+    dense_math_scanned_code_units: denseMathScannedCodeUnits,
+    emitted_decorations: metrics.emittedDecorations,
+    diffed_decorations: metrics.diffedDecorations,
     copied_bytes: copiedBytes,
     source_transactions: sourceTransactions,
-    projection_transactions: measuredProjectionTransactions,
+    projection_transactions: metrics.projectionTransactions,
     dom_mutations: domMutations,
     iframe_create: iframeCreate,
     iframe_destroy: iframeDestroy,
     retained_html_bytes: 0,
     generated_outside_retention: 0,
-    projection_fallback_counts: {
-      "incomplete-tree": 0,
-      "ambiguous-syntax": 0,
-      "projection-limit": 0,
-      "table-limit": 0,
-      "atomic-not-enabled": 0,
-      "rich-source-limit": 0,
-      "renderer-unavailable": 0,
-      "stale-capability": 0,
-    },
+    projection_fallback_counts: Object.fromEntries(
+      projectionFallbackReasons.map((reason) => [reason, measuredFallbackCounts[reason]]),
+    ),
   };
 }

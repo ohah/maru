@@ -984,11 +984,10 @@ pub fn build(b: *std.Build) void {
                 "rg -q '^file_viewer_images=1$' \"$summary\"; " ++
                 "rg -q '^file_viewer_loaded_images=1$' \"$summary\"; " ++
                 "rg -q '^file_viewer_editor_hydrated=true$' \"$summary\"; " ++
-                "rg -q '^file_viewer_live_worker=running$' \"$summary\"; " ++
-                "rg -q '^file_viewer_live_worker_failure=none$' \"$summary\"; " ++
-                "rg -q '^file_viewer_live_fragments=[1-8]$' \"$summary\"; " ++
-                "rg -q '^file_viewer_live_fragments_desired=[1-8]$' \"$summary\"; " ++
-                "rg -q '^file_viewer_live_fragments_mounted=[1-8]$' \"$summary\"; " ++
+                "rg -q '^file_viewer_live_projection=running$' \"$summary\"; " ++
+                "rg -q '^file_viewer_live_projection_decorations=[1-9][0-9]*$' \"$summary\"; " ++
+                "rg -q '^file_viewer_live_projection_generation=[1-9][0-9]*$' \"$summary\"; " ++
+                "rg -q '^file_viewer_live_general_fragments=0$' \"$summary\"; " ++
                 "rg -q '^file_viewer_default_mode=live-preview$' \"$summary\"; " ++
                 "rg -q '^file_viewer_edit=true$' \"$summary\"; " ++
                 "rg -q '^file_viewer_cmd_s_route=web-editor$' \"$summary\"; " ++

@@ -1,5 +1,6 @@
 export const maxLivePreviewSyntaxNodes = 8_192;
 export const maxLivePreviewProjectionEntries = 4_096;
+export const maxLivePreviewTableCells = 256;
 
 export type StyleRole =
   | "heading-1"

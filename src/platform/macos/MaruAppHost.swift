@@ -2278,11 +2278,10 @@ private func browserCtlExecuteScriptStream(
 final class FilePanelEditingSmokeProbe {
     weak var panel: MaruWebPanelView?
     var editor = "pending"
-    var liveWorker = "pending"
-    var liveWorkerFailure = "pending"
-    var liveFragments = "pending"
-    var liveFragmentsDesired = "pending"
-    var liveFragmentsMounted = "pending"
+    var liveProjection = "pending"
+    var liveProjectionDecorations = "pending"
+    var liveProjectionGeneration = "pending"
+    var liveGeneralFragments = "pending"
     var defaultMode = "pending"
     var edit = "pending"
     var cmdSRoute = "pending"
@@ -2302,11 +2301,10 @@ final class FilePanelEditingSmokeProbe {
         navigationEpoch &+= 1
         saveStartedEpoch = nil
         editor = "pending"
-        liveWorker = "pending"
-        liveWorkerFailure = "pending"
-        liveFragments = "pending"
-        liveFragmentsDesired = "pending"
-        liveFragmentsMounted = "pending"
+        liveProjection = "pending"
+        liveProjectionDecorations = "pending"
+        liveProjectionGeneration = "pending"
+        liveGeneralFragments = "pending"
         defaultMode = "pending"
         edit = "pending"
         cmdSRoute = "pending"
@@ -2329,11 +2327,10 @@ final class FilePanelEditingSmokeProbe {
         let script = """
         JSON.stringify({
           editor: document.querySelector('.cm-content')?.textContent?.includes('FP4 viewer fixture') === true,
-          worker: document.getElementById('viewer-status')?.dataset.liveWorker || 'pending',
-          failure: document.getElementById('viewer-status')?.dataset.liveWorkerFailure || 'none',
-          fragments: document.querySelectorAll('.maru-live-fragment-frame[data-fragment-rendered="true"]').length,
-          desired: document.getElementById('viewer-status')?.dataset.liveFragmentsDesired || 'pending',
-          mounted: document.getElementById('viewer-status')?.dataset.liveFragmentsMounted || 'pending'
+          projection: document.getElementById('viewer-status')?.dataset.liveProjection || 'pending',
+          decorations: Number(document.getElementById('viewer-status')?.dataset.liveProjectionDecorations || '0'),
+          generation: Number(document.getElementById('viewer-status')?.dataset.liveProjectionGeneration || '0'),
+          generalFragments: document.querySelectorAll('.maru-live-fragment-frame').length
         })
         """
         panel.webView.evaluateJavaScript(script) { [weak self] value, _ in
@@ -2341,15 +2338,16 @@ final class FilePanelEditingSmokeProbe {
                   let raw = value as? String, let data = raw.data(using: .utf8),
                   let probe = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
             let editorReady = probe["editor"] as? Bool ?? false
-            let worker = probe["worker"] as? String ?? "pending"
-            let fragments = probe["fragments"] as? Int ?? 0
+            let projection = probe["projection"] as? String ?? "pending"
+            let decorations = probe["decorations"] as? Int ?? 0
+            let generation = probe["generation"] as? Int ?? 0
+            let generalFragments = probe["generalFragments"] as? Int ?? 0
             self.editor = String(editorReady)
-            self.liveWorker = worker
-            self.liveWorkerFailure = probe["failure"] as? String ?? "none"
-            self.liveFragments = String(fragments)
-            self.liveFragmentsDesired = probe["desired"] as? String ?? "pending"
-            self.liveFragmentsMounted = probe["mounted"] as? String ?? "pending"
-            if editorReady, worker == "running", fragments > 0 {
+            self.liveProjection = projection
+            self.liveProjectionDecorations = String(decorations)
+            self.liveProjectionGeneration = String(generation)
+            self.liveGeneralFragments = String(generalFragments)
+            if editorReady, projection == "running", decorations > 0, generation > 0, generalFragments == 0 {
                 self.startEditingSave(epoch: epoch)
                 return
             }
@@ -8769,11 +8767,10 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             file_viewer_images=\(wp?.fileViewerImagesProbe ?? "pending")
             file_viewer_loaded_images=\(wp?.fileViewerLoadedImagesProbe ?? "pending")
             file_viewer_editor_hydrated=\(wp?.fileEditingSmokeProbe.editor ?? "pending")
-            file_viewer_live_worker=\(wp?.fileEditingSmokeProbe.liveWorker ?? "pending")
-            file_viewer_live_worker_failure=\(wp?.fileEditingSmokeProbe.liveWorkerFailure ?? "pending")
-            file_viewer_live_fragments=\(wp?.fileEditingSmokeProbe.liveFragments ?? "pending")
-            file_viewer_live_fragments_desired=\(wp?.fileEditingSmokeProbe.liveFragmentsDesired ?? "pending")
-            file_viewer_live_fragments_mounted=\(wp?.fileEditingSmokeProbe.liveFragmentsMounted ?? "pending")
+            file_viewer_live_projection=\(wp?.fileEditingSmokeProbe.liveProjection ?? "pending")
+            file_viewer_live_projection_decorations=\(wp?.fileEditingSmokeProbe.liveProjectionDecorations ?? "pending")
+            file_viewer_live_projection_generation=\(wp?.fileEditingSmokeProbe.liveProjectionGeneration ?? "pending")
+            file_viewer_live_general_fragments=\(wp?.fileEditingSmokeProbe.liveGeneralFragments ?? "pending")
             file_viewer_default_mode=\(wp?.fileEditingSmokeProbe.defaultMode ?? "pending")
             file_viewer_edit=\(wp?.fileEditingSmokeProbe.edit ?? "pending")
             file_viewer_cmd_s_route=\(wp?.fileEditingSmokeProbe.cmdSRoute ?? "pending")

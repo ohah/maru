@@ -13,7 +13,7 @@ import {
   type ResolveExternalChangeRequest,
   type WriteRequest,
 } from "./file-bridge-request";
-import type { EditorView } from "@codemirror/view";
+import type { EditorView, ViewUpdate } from "@codemirror/view";
 import type { Text } from "@codemirror/state";
 import { EditorRevisionClock, isEditableFileMode, type FilePanelMode } from "./live-preview-state";
 import {
@@ -23,7 +23,8 @@ import {
   isFragmentRender,
   type RendererCapability,
 } from "./renderer-capability";
-import { LivePreviewEditorController } from "./live-preview-editor";
+import { EditableProjectionController } from "./editable-projection-view";
+import { createLivePreviewDiagnosticsSnapshot } from "./live-preview-diagnostics";
 
 export const viewerChannel = "maru.file.viewer.v1";
 export const maxAssetRequests = 64;
@@ -454,7 +455,8 @@ export function bootShell(document: Document, targetWindow: Window): void {
   if (frame === null || editorHost === null) return;
 
   let editor: EditorView | null = null;
-  let livePreviewController: LivePreviewEditorController | null = null;
+  let livePreviewController: EditableProjectionController | null = null;
+  const livePreviewDiagnostics = createLivePreviewDiagnosticsSnapshot();
   let savedContent = "";
   let savedDocument: Text | null = null;
   let contentLoaded = false;
@@ -462,7 +464,6 @@ export function bootShell(document: Document, targetWindow: Window): void {
   let editorEpoch: number | null = null;
   const revisions = new EditorRevisionClock();
   let mode: FilePanelMode = "read";
-  let livePreviewAdmitted = false;
   let rendererReady = false;
   // didFinish의 native dirty-sync가 shell beginDocument+initial read보다 먼저 올 수 있다. 모든 mutation은 이
   // hydration barrier 뒤에서 기다리고, start 자체는 queue 밖에서 barrier를 해소해 순환 대기를 만들지 않는다.
@@ -473,6 +474,7 @@ export function bootShell(document: Document, targetWindow: Window): void {
   let dirtySyncInFlight: Promise<boolean> | null = null;
   let closeLockRequestId: number | null = null;
   let applyingDiskContent = false;
+  let pendingDiskUpdate: ViewUpdate | null = null;
 
   const currentDocumentIsDirty = (): boolean =>
     editor !== null && documentIsDirtyAgainstSnapshot(editor.state.doc, savedDocument);
@@ -632,40 +634,39 @@ export function bootShell(document: Document, targetWindow: Window): void {
       editorHost,
       savedContent,
       (update) => {
-        if (applyingDiskContent) return;
-        const baseRevision = revisions.documentRevision;
-        let targetRevision = baseRevision;
+        if (applyingDiskContent) {
+          pendingDiskUpdate = update;
+          return;
+        }
         if (update.docChanged) {
-          targetRevision = revisions.documentChanged();
+          revisions.documentChanged();
           reportDirty(savedDocument === null || !update.state.doc.eq(savedDocument));
         }
-        livePreviewController?.handleUpdate(update, baseRevision, targetRevision);
+        livePreviewController?.handleUpdate(update);
       },
       () => void save(),
     );
     savedDocument = editor.state.doc;
-    const workerConstructor =
-      "Worker" in targetWindow
-        ? ((targetWindow as Window & { Worker: typeof Worker }).Worker ?? null)
-        : null;
-    livePreviewController = new LivePreviewEditorController(
+    livePreviewController = new EditableProjectionController(
       editor,
       editorEpoch,
       revisions,
-      workerConstructor,
-      (state, reason) => {
+      ({ state, metrics }) => {
         if (status === null) return;
-        status.dataset.liveWorker = state;
-        if (reason !== undefined) status.dataset.liveWorkerFailure = reason;
-        if (state === "recovering") status.textContent = "라이브 프리뷰를 복구하는 중입니다.";
-        else if (state === "disabled")
-          status.textContent = "라이브 프리뷰를 사용할 수 없어 소스를 유지합니다.";
-        else if (status.textContent?.includes("라이브 프리뷰")) status.textContent = "";
-      },
-      (desired, mounted) => {
-        if (status === null) return;
-        status.dataset.liveFragmentsDesired = String(desired);
-        status.dataset.liveFragmentsMounted = String(mounted);
+        livePreviewController?.writeDiagnostics(livePreviewDiagnostics);
+        const diagnostics = livePreviewDiagnostics;
+        status.dataset.liveProjection = state;
+        status.dataset.liveProjectionDecorations = String(diagnostics.decorationCount);
+        status.dataset.liveProjectionGeneration = String(diagnostics.projectionGeneration);
+        status.dataset.liveProjectionDocumentRevision = String(diagnostics.documentRevision);
+        status.dataset.liveProjectionActiveSourceRanges = String(
+          diagnostics.activeSourceRangeCount,
+        );
+        status.dataset.liveProjectionAtomicFallbacks = String(
+          diagnostics.fallbackCounts["atomic-not-enabled"],
+        );
+        status.dataset.liveProjectionVisitedNodes = String(metrics.visitedSyntaxNodes);
+        status.dataset.liveGeneralFragments = "0";
       },
     );
     if (closeLockRequestId !== null) editor.contentDOM.contentEditable = "false";
@@ -679,7 +680,7 @@ export function bootShell(document: Document, targetWindow: Window): void {
       editorHost.hidden = false;
       if (contentLoaded) {
         ensureEditor().focus();
-        if (mode === "live-preview" && livePreviewAdmitted) livePreviewController?.enable();
+        if (mode === "live-preview") livePreviewController?.enable();
         else livePreviewController?.disable();
       }
     } else {
@@ -709,10 +710,9 @@ export function bootShell(document: Document, targetWindow: Window): void {
   targetWindow.addEventListener("maru:file-live-preview-active", (event) => {
     const detail = (event as CustomEvent<unknown>).detail;
     if (!isRecord(detail) || typeof detail.active !== "boolean") return;
-    livePreviewAdmitted = detail.active;
-    if (mode !== "live-preview" || !contentLoaded) return;
-    if (livePreviewAdmitted) livePreviewController?.enable();
-    else livePreviewController?.disable();
+    // FP11b 일반 text projection은 worker/widget admission을 소비하지 않는다. 이 신호는 FP11e atomic
+    // renderer가 물리 slot을 연결할 때까지 관측만 하며, false가 CM6 decoration을 source로 되돌리면 안 된다.
+    if (status !== null) status.dataset.liveAtomicAdmitted = String(detail.active);
   });
   const loadFromDisk = async (
     syncNative: boolean,
@@ -728,19 +728,28 @@ export function bootShell(document: Document, targetWindow: Window): void {
     if (abortIfEditedDuringRead && revisions.documentRevision !== revisionBeforeRead) {
       throw new Error("file was edited during external reload");
     }
+    const previousSavedContent = savedContent;
     savedContent = result.content;
     contentLoaded = true;
     if (editor !== null) {
-      applyingDiskContent = true;
-      try {
-        editor.dispatch({
-          changes: { from: 0, to: editor.state.doc.length, insert: result.content },
-        });
-        savedDocument = editor.state.doc;
-      } finally {
-        applyingDiskContent = false;
+      const previousDocument = editor.state.doc;
+      if (dirty || result.content !== previousSavedContent) {
+        applyingDiskContent = true;
+        pendingDiskUpdate = null;
+        try {
+          editor.dispatch({
+            changes: { from: 0, to: editor.state.doc.length, insert: result.content },
+          });
+        } finally {
+          applyingDiskContent = false;
+        }
       }
-      livePreviewController?.resync();
+      savedDocument = editor.state.doc;
+      if (!editor.state.doc.eq(previousDocument)) revisions.documentChanged();
+      if (pendingDiskUpdate !== null) {
+        livePreviewController?.handleUpdate(pendingDiskUpdate);
+        pendingDiskUpdate = null;
+      }
     } else {
       savedDocument = null;
     }

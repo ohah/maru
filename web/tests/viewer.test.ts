@@ -435,7 +435,19 @@ describe("file viewer bridge boundary", () => {
     installGlobal("cancelAnimationFrame", dom.window.cancelAnimationFrame.bind(dom.window));
 
     const requests: unknown[] = [];
-    const initial = "a".repeat(8 * 1024 * 1024);
+    const prefix = "# heading\n\n";
+    const initial = `${prefix}${"a".repeat(8 * 1024 * 1024 - prefix.length)}`;
+    let diskContent = initial;
+    let workerConstructions = 0;
+    Object.defineProperty(dom.window, "Worker", {
+      configurable: true,
+      value: class {
+        constructor() {
+          workerConstructions += 1;
+          throw new Error("general live preview worker must stay retired");
+        }
+      },
+    });
     dom.window.document.addEventListener("maru:file-request", () => {
       const node = dom.window.document.querySelector<HTMLElement>(
         '[data-maru-file-request="pending"]',
@@ -447,7 +459,7 @@ describe("file viewer bridge boundary", () => {
         request.method === "beginDocument"
           ? { editor_epoch: 9 }
           : request.method === "read"
-            ? { content: initial }
+            ? { content: diskContent }
             : { ok: true };
       node.textContent = JSON.stringify({ jsonrpc: "2.0", id: 1, result });
       node.dataset.maruFileRequest = "done";
@@ -480,9 +492,36 @@ describe("file viewer bridge boundary", () => {
       dom.window.dispatchEvent(
         new dom.window.CustomEvent("maru:file-mode", { detail: { mode: "live-preview" } }),
       );
+      dom.window.dispatchEvent(
+        new dom.window.CustomEvent("maru:file-live-preview-active", {
+          detail: { active: false },
+        }),
+      );
       const editorHost = dom.window.document.querySelector<HTMLElement>("#editor");
       editor = editorHost === null ? null : EditorView.findFromDOM(editorHost);
       expect(editor).not.toBeNull();
+      const status = dom.window.document.querySelector<HTMLElement>("#viewer-status");
+      expect(status?.dataset.liveProjection).toBe("running");
+      expect(status?.dataset.liveProjectionDocumentRevision).toBe("0");
+      expect(status?.dataset.liveAtomicAdmitted).toBe("false");
+      expect(status?.dataset.liveGeneralFragments).toBe("0");
+      expect(workerConstructions).toBe(0);
+      expect(dom.window.document.querySelector(".maru-live-fragment-frame")).toBeNull();
+
+      diskContent = "# external\n\n**updated**";
+      dom.window.dispatchEvent(
+        new dom.window.CustomEvent("maru:file-reload", { detail: { conflict: false } }),
+      );
+      for (let turn = 0; turn < 10; turn += 1) await Promise.resolve();
+      expect(editor?.state.doc.toString()).toBe(diskContent);
+      expect(status?.dataset.liveProjectionDocumentRevision).toBe("1");
+
+      // A duplicate FSEvents notification for the same clean snapshot must not advance document identity.
+      dom.window.dispatchEvent(
+        new dom.window.CustomEvent("maru:file-reload", { detail: { conflict: false } }),
+      );
+      for (let turn = 0; turn < 10; turn += 1) await Promise.resolve();
+      expect(status?.dataset.liveProjectionDocumentRevision).toBe("1");
 
       let serializations = 0;
       textPrototype.toString = function (this: Text) {
@@ -503,7 +542,7 @@ describe("file viewer bridge boundary", () => {
         method: "setDirty",
         dirty: true,
         editor_epoch: 9,
-        revision: 1,
+        revision: 2,
         request_id: 0,
       });
     } finally {

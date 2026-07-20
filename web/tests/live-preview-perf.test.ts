@@ -12,22 +12,28 @@ import { startDocumentCopyProbe } from "../scripts/live-preview-perf-scenario";
 function artifact(): LivePreviewPerfArtifact {
   return {
     schema_version: livePreviewPerfSchemaVersion,
-    scenario: "fp11a-8mib-1000-input-baseline",
+    scenario: "fp11b-8mib-1000-editable-projection",
     counters: {
-      visited_code_units: 0,
-      visited_syntax_nodes: 0,
-      emitted_decorations: 0,
-      diffed_decorations: 0,
+      visited_code_units: 64_000,
+      visited_syntax_nodes: 8_000,
+      selection_range_checks: 1_000,
+      math_scanned_code_units: 1_000,
+      dense_math_scanned_code_units: 32_768,
+      emitted_decorations: 4,
+      diffed_decorations: 5_000,
       copied_bytes: 0,
       source_transactions: 1_000,
-      projection_transactions: 0,
+      projection_transactions: 1,
       dom_mutations: 0,
       iframe_create: 0,
       iframe_destroy: 0,
       retained_html_bytes: 0,
       generated_outside_retention: 0,
       projection_fallback_counts: Object.fromEntries(
-        projectionFallbackReasons.map((reason) => [reason, 0]),
+        projectionFallbackReasons.map((reason) => [
+          reason,
+          reason === "atomic-not-enabled" ? 1 : 0,
+        ]),
       ),
     },
   };
@@ -40,17 +46,11 @@ describe("live preview performance artifact", () => {
     expect(probe.stop()).toBeGreaterThan(0);
   });
 
-  test("requires the closed schema and exact baseline thresholds", () => {
+  test("requires the closed FP11b schema and bounded nonzero projection counters", () => {
     const current = artifact();
     expect(() => validateLivePreviewPerfArtifact(current)).not.toThrow();
     for (const name of [
-      "visited_code_units",
-      "visited_syntax_nodes",
-      "emitted_decorations",
-      "diffed_decorations",
       "copied_bytes",
-      "projection_transactions",
-      "dom_mutations",
       "iframe_create",
       "iframe_destroy",
       "retained_html_bytes",
@@ -63,7 +63,9 @@ describe("live preview performance artifact", () => {
         }),
       ).toThrow();
     }
-    for (const reason of projectionFallbackReasons) {
+    for (const reason of projectionFallbackReasons.filter(
+      (candidate) => candidate !== "atomic-not-enabled",
+    )) {
       expect(() =>
         validateLivePreviewPerfArtifact({
           ...current,
@@ -75,13 +77,38 @@ describe("live preview performance artifact", () => {
             },
           },
         }),
-      ).toThrow("projection fallback");
+      ).toThrow("projection fallback mismatch");
     }
+    expect(() =>
+      validateLivePreviewPerfArtifact({
+        ...current,
+        counters: {
+          ...current.counters,
+          projection_fallback_counts: {
+            ...current.counters.projection_fallback_counts,
+            "atomic-not-enabled": 0,
+          },
+        },
+      }),
+    ).toThrow("projection fallback mismatch");
     expect(() =>
       validateLivePreviewPerfArtifact({
         ...current,
         counters: { ...current.counters, source_transactions: 999 },
       }),
     ).toThrow("fixture incomplete");
+    for (const [name, value] of [
+      ["projection_transactions", 2],
+      ["dom_mutations", 1],
+      ["dense_math_scanned_code_units", 32_769],
+      ["dense_math_scanned_code_units", 1_000_000],
+    ] as const) {
+      expect(() =>
+        validateLivePreviewPerfArtifact({
+          ...current,
+          counters: { ...current.counters, [name]: value },
+        }),
+      ).toThrow("budget exceeded");
+    }
   });
 });

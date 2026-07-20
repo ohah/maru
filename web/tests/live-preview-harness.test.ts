@@ -151,13 +151,14 @@ describe("FP11 live preview contract harness", () => {
 
   test("copies diagnostics into caller storage without exposing source offsets", () => {
     const store = new LivePreviewDiagnosticsStore(7);
-    const ranges = Array.from({ length: 18 }, (_, index) => ({ from: index, to: index + 1 }));
+    const ranges = Array.from({ length: 16 }, (_, index) => ({ from: index, to: index + 1 }));
     store.commit({
       documentRevision: 3,
       projectionGeneration: 5,
       decorationCount: 2,
       desiredWidgets: 3,
       mountedWidgets: 2,
+      activeSourceRangeCount: 18,
       activeSourceRanges: ranges,
       fallbackCounts: { "atomic-not-enabled": 1 },
     });
@@ -180,7 +181,17 @@ describe("FP11 live preview contract harness", () => {
     expect(serialized).not.toContain("content");
     expect(serialized).not.toContain("path");
     expect(serialized).not.toContain("url");
-    expect(() => store.commit({ ...first, decorationCount: -1, activeSourceRanges: [] })).toThrow();
+    expect(() =>
+      store.commit({
+        documentRevision: 3,
+        projectionGeneration: 5,
+        decorationCount: -1,
+        desiredWidgets: 0,
+        mountedWidgets: 0,
+        activeSourceRangeCount: 0,
+        activeSourceRanges: [],
+      }),
+    ).toThrow();
   });
 
   test("mounts an actual EditorView with the FP11 extension boundary", () => {

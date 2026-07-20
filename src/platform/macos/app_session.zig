@@ -172,7 +172,7 @@ fn navButtonAt(x_px: f64, band_x: u32, cw: u32) ?NavButton {
 // 별도 물리 CAMetalLayer로 분리, 두 drawable을 한 command buffer에 present + 단일 commit으로 전이 원자성). host↔renderer
 // draw 계약 변경이라 버전을 올린다. **MetalFrame/세션 struct·export 시그니처는 불변**(overlay_layer는 Zig가 아니라
 // Swift가 소유한 CAMetalLayer라 struct offset·layout test는 그대로 green). 렌더러 분할·컨테이너 재편은 Swift/ObjC 레이어.
-pub const abi_version: u32 = 137;
+pub const abi_version: u32 = 138;
 // 137: Explorer presented state + directory picker replace/add root one-shots. fixed-width struct layout 불변.
 // 136: WebSurfaceTransition의 단일 divider grab 폭을 최종 padded frame과 실제 Zig hit target 교집합에서
 // 계산한 left/right/bottom별 f64 pt 폭으로 교체한다. native pass-through가 resize target 밖 dead strip을 만들지 않는다.
@@ -3550,7 +3550,7 @@ pub const AppSession = struct {
     /// 시작하지 않으며 할당도 하지 않는다. caller가 가진 기존 chrome 순회에 projection을 융합하므로 focus border를
     /// 위해 두 번째 leaf scan을 만들지 않는다. layout이 완주하지 못했으면 partial prefix를 신뢰하지 않고 null을 유지한다.
     fn captureActivePaneGeometry(
-        self: *const AppSession,
+        self: *AppSession,
         layout_complete: bool,
         active_pane: *Pane,
         leaf_rect: PaneTree.LeafRect,
@@ -11682,6 +11682,23 @@ pub const AppSession = struct {
         if (!self.dock_initialized) return null;
         const entry = self.dock.entryForSurfaceId(surface_id) orelse return null;
         return .{ .path = entry.path, .kind = entry.kind };
+    }
+
+    /// Mermaid bridge admission의 native document gate. 렌더 결과의 revision/generation current 판정은
+    /// 같은 shell registry가 소유하고, native는 replacement document가 이전 epoch를 재사용하지 못하게 한다.
+    pub fn filePanelMermaidDocumentActive(
+        self: *AppSession,
+        surface_id: u64,
+        editor_epoch: u64,
+    ) bool {
+        if (!self.dock_initialized or editor_epoch == 0) return false;
+        const entry = self.dock.entryForSurfaceId(surface_id) orelse return false;
+        return entry.kind == .markdown and
+            entry.mode == .live_preview and
+            entry.editor_document_active and
+            entry.editor_epoch == editor_epoch and
+            !entry.editor_recovery_required and
+            entry.mutation_pending_id == 0;
     }
 
     /// native WKWebView가 firstResponder가 된 파일 surface를 그룹 포커스로 승격한다. 본문 클릭은 AppKit이 먼저
@@ -50385,6 +50402,8 @@ test "FP6 file panel write atomically replaces only the pinned markdown and pres
     group.entries.items[2].surface_id = 903;
 
     const doc_epoch = try session.beginFilePanelDocument(901, 1);
+    try std.testing.expect(session.filePanelMermaidDocumentActive(901, doc_epoch));
+    try std.testing.expect(!session.filePanelMermaidDocumentActive(901, doc_epoch + 1));
     const initial_doc = try session.readFilePanel(allocator, 901, doc_epoch);
     allocator.free(initial_doc);
     try session.setFilePanelDirty(901, true);

@@ -2,11 +2,13 @@ import { describe, expect, test } from "bun:test";
 import {
   atomicProjectionBatchWireBytes,
   atomicSourceHash,
+  startAtomicSourceHashProbe,
   maxAtomicSourceBytes,
   type AtomicProjectionRequest,
 } from "../src/atomic-projection";
 import { projectAtomicRequests } from "../src/project-atomic";
 import { isProjectionResult, maxLivePreviewResultBytes } from "../src/live-preview-protocol";
+import { startSha256SourceProbe } from "../src/sha256";
 
 function request(
   source: string,
@@ -140,14 +142,40 @@ describe("atomic projection worker", () => {
     expect(result?.sanitizedPayload).not.toContain("<img");
   });
 
-  test("uses a deterministic worker-owned source hash and leaves Mermaid unavailable", () => {
+  test("uses deterministic hashes and emits a helper-ready Mermaid source", () => {
     expect(atomicSourceHash("same")).toBe(atomicSourceHash("same"));
     expect(atomicSourceHash("same")).not.toBe(atomicSourceHash("different"));
     const mermaid = "```mermaid\ngraph TD\n```";
     expect(projectAtomicRequests(mermaid, [request(mermaid, "mermaid")])).toMatchObject({
-      results: [],
-      rejected: [{ requestNonce: 1, reason: "renderer-unavailable" }],
-      hashedBytes: 0,
+      results: [
+        {
+          request: expect.objectContaining({ kind: "mermaid" }),
+          sourceHash: "2151a7a6ec2eaff56c93602c3b07382d7bd484e8e572852da1ffe6b874656bd8",
+          sanitizedPayload: "",
+          assetGrants: [],
+          mermaidSource: mermaid,
+        },
+      ],
+      rejected: [],
+      hashedBytes: 23,
     });
+  });
+
+  test("hashes Mermaid only once with SHA-256 and rejects cap plus one before either hash", () => {
+    const exact = "x".repeat(maxAtomicSourceBytes.mermaid);
+    const fnv = startAtomicSourceHashProbe();
+    const sha = startSha256SourceProbe();
+    const batch = projectAtomicRequests(exact, [request(exact, "mermaid", 501)]);
+    expect(fnv.stop()).toBe(0);
+    expect(sha.stop()).toBe(maxAtomicSourceBytes.mermaid);
+    expect(batch.hashedBytes).toBe(maxAtomicSourceBytes.mermaid);
+
+    const over = `${exact}x`;
+    const overFnv = startAtomicSourceHashProbe();
+    const overSha = startSha256SourceProbe();
+    const rejected = projectAtomicRequests(over, [request(over, "mermaid", 502)]);
+    expect(overFnv.stop()).toBe(0);
+    expect(overSha.stop()).toBe(0);
+    expect(rejected.hashedBytes).toBe(0);
   });
 });

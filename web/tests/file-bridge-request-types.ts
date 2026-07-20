@@ -15,6 +15,19 @@ void encodeFileBridgeRequest({
   href: "https://example.com",
   forceSystem: false,
 });
+void encodeFileBridgeRequest({
+  method: "renderMermaid",
+  editor_epoch: 1,
+  document_revision: 0,
+  projection_generation: 1,
+  widget_id: 1,
+  widget_generation: 1,
+  renderer_instance: 1,
+  fence_id: 1,
+  source_hash: "a".repeat(64),
+  source: "```mermaid\ngraph TD\n```",
+});
+void encodeFileBridgeRequest({ method: "livePreviewReady", editor_epoch: 1 });
 
 void encodeFileBridgeRequest({
   method: "setDirty",

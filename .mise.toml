@@ -90,6 +90,10 @@ run = "zig build macos-mermaid-helper-build"
 description = "Run the isolated Mermaid helper lifecycle smoke"
 run = "zig build macos-mermaid-helper-smoke"
 
+[tasks.macos-live-preview-perf]
+description = "Run the native live-preview performance artifact gate"
+run = "zig build macos-live-preview-perf"
+
 [tasks.macos-app-build]
 description = "Build the runnable macOS Swift app host dev shell"
 run = "zig build macos-app-build"

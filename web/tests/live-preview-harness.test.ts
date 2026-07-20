@@ -256,9 +256,10 @@ describe("FP11 live preview contract harness", () => {
     };
     const result: AtomicProjectionResult = {
       request,
-      sourceHash: "a".repeat(64),
+      sourceHash: "a".repeat(16),
       sanitizedPayload: "<img>",
       assetGrants: [grant],
+      mermaidSource: null,
     };
     expect(result.assetGrants[0]).toEqual(grant);
 

@@ -6,7 +6,7 @@
 const std = @import("std");
 
 pub const magic = "MRU1".*;
-pub const version: u16 = 1;
+pub const version: u16 = 2;
 pub const max_source_bytes: usize = 32 * 1024;
 pub const max_svg_bytes: usize = 512 * 1024;
 pub const max_request_frame_bytes: usize = 40 * 1024;
@@ -15,7 +15,7 @@ pub const max_retained_bytes: usize = max_result_frame_bytes + 4;
 
 const prefix_len = 4;
 const common_len = magic.len + @sizeOf(u16) + @sizeOf(u8);
-const identity_len = 8 * @sizeOf(u64) + 32;
+const identity_len = 9 * @sizeOf(u64) + 32;
 
 pub const Tag = enum(u8) {
     hello = 0,
@@ -30,6 +30,7 @@ pub const ResultStatus = enum(u8) {
 };
 
 pub const RendererCapability = struct {
+    editor_epoch: u64,
     document_revision: u64,
     projection_generation: u64,
     widget_id: u64,
@@ -233,6 +234,7 @@ fn readHello(cursor: *ReadCursor) Error!Hello {
 fn writeCapability(cursor: *Cursor, value: JobCapability) Error!void {
     try cursor.writeU64(value.helper_instance);
     try cursor.writeU64(value.job_id);
+    try cursor.writeU64(value.renderer.editor_epoch);
     try cursor.writeU64(value.renderer.document_revision);
     try cursor.writeU64(value.renderer.projection_generation);
     try cursor.writeU64(value.renderer.widget_id);
@@ -246,6 +248,7 @@ fn readCapability(cursor: *ReadCursor) Error!JobCapability {
     var value: JobCapability = undefined;
     value.helper_instance = try cursor.readU64();
     value.job_id = try cursor.readU64();
+    value.renderer.editor_epoch = try cursor.readU64();
     value.renderer.document_revision = try cursor.readU64();
     value.renderer.projection_generation = try cursor.readU64();
     value.renderer.widget_id = try cursor.readU64();
@@ -346,13 +349,14 @@ fn testCapability() JobCapability {
         .helper_instance = 1,
         .job_id = 2,
         .renderer = .{
-            .document_revision = 3,
-            .projection_generation = 4,
-            .widget_id = 5,
-            .widget_generation = 6,
-            .renderer_instance = 7,
+            .editor_epoch = 3,
+            .document_revision = 4,
+            .projection_generation = 5,
+            .widget_id = 6,
+            .widget_generation = 7,
+            .renderer_instance = 8,
         },
-        .fence_id = 8,
+        .fence_id = 9,
         .source_hash = [_]u8{0xab} ** 32,
     };
 }
@@ -361,13 +365,26 @@ test "hello byte golden is big endian and round trips" {
     var encoded: [64]u8 = undefined;
     const len = try encode(.{ .hello = .{ .helper_instance = 0x0102030405060708, .nonce = 0x1112131415161718 } }, &encoded);
     try std.testing.expectEqualSlices(u8, &.{
-        0,  0,  0,  23, 'M', 'R', 'U', '1', 0,  1,  0,
+        0,  0,  0,  23, 'M', 'R', 'U', '1', 0,  2,  0,
         1,  2,  3,  4,  5,   6,   7,   8,   17, 18, 19,
         20, 21, 22, 23, 24,
     }, encoded[0..len]);
     const decoded = try decodeExact(encoded[0..len]);
     try std.testing.expectEqual(@as(u64, 0x0102030405060708), decoded.hello.helper_instance);
     try std.testing.expectEqual(@as(u64, 0x1112131415161718), decoded.hello.nonce);
+}
+
+test "v2 request byte golden puts editor epoch directly after job id" {
+    var encoded: [max_request_frame_bytes]u8 = undefined;
+    var capability = testCapability();
+    capability.source_hash = sourceHash("x");
+    const len = try encode(.{ .request = .{ .capability = capability, .source = "x" } }, &encoded);
+    const identity_start = prefix_len + common_len;
+    try std.testing.expectEqual(@as(u64, 1), std.mem.readInt(u64, encoded[identity_start..][0..8], .big));
+    try std.testing.expectEqual(@as(u64, 2), std.mem.readInt(u64, encoded[identity_start + 8 ..][0..8], .big));
+    try std.testing.expectEqual(@as(u64, 3), std.mem.readInt(u64, encoded[identity_start + 16 ..][0..8], .big));
+    try std.testing.expectEqual(@as(u64, 4), std.mem.readInt(u64, encoded[identity_start + 24 ..][0..8], .big));
+    try std.testing.expectEqual(@as(usize, prefix_len + common_len + identity_len + 4 + 1), len);
 }
 
 test "request and result round trip exact identity and UTF-8" {
@@ -430,7 +447,7 @@ test "decoder rejects malformed closed fields lengths and trailing bytes" {
     bad[4] = 'X';
     try std.testing.expectError(error.InvalidMagic, decodeExact(bad[0..len]));
     bad = encoded;
-    bad[9] = 2;
+    bad[9] = 1;
     try std.testing.expectError(error.UnsupportedVersion, decodeExact(bad[0..len]));
     bad = encoded;
     bad[10] = 9;
@@ -442,6 +459,23 @@ test "decoder rejects malformed closed fields lengths and trailing bytes" {
     try std.testing.expectError(error.IncompleteFrame, decodeExact(encoded[0 .. len - 1]));
     encoded[len] = 0;
     try std.testing.expectError(error.TrailingBytes, decodeExact(encoded[0 .. len + 1]));
+}
+
+test "v1 and v2 frames reject each other without an adapter" {
+    var v2: [max_request_frame_bytes]u8 = undefined;
+    var capability = testCapability();
+    capability.source_hash = sourceHash("graph TD");
+    const len = try encode(.{ .request = .{ .capability = capability, .source = "graph TD" } }, &v2);
+    var v1 = v2;
+    v1[prefix_len + magic.len] = 0;
+    v1[prefix_len + magic.len + 1] = 1;
+    try std.testing.expectError(error.UnsupportedVersion, decodeExact(v1[0..len]));
+
+    var hello: [64]u8 = undefined;
+    const hello_len = try encode(.{ .hello = .{ .helper_instance = 1, .nonce = 2 } }, &hello);
+    hello[prefix_len + magic.len] = 0;
+    hello[prefix_len + magic.len + 1] = 1;
+    try std.testing.expectError(error.UnsupportedVersion, decodeExact(hello[0..hello_len]));
 }
 
 test "request source hash mismatch and result unknown status fail closed" {

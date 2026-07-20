@@ -36,6 +36,9 @@ pub const AppAssetRole = enum(u32) {
         // FP10b same-fd reader는 bundle root의 flat closed set만 descriptor-relative no-follow open한다.
         // 중간 component를 허용하지 않아 ancestor symlink 교체가 trusted origin read로 이어질 수 없다.
         if (std.mem.indexOfScalar(u8, normalized_path, '/') != null) return false;
+        // Mermaid runtime은 sandboxed helper의 전용 code resource다. 메인 app origin은 script-src
+        // 'self'이므로 이 이름(대소문자 alias 포함)을 허용하면 main WKWebView에서 실행될 수 있다.
+        if (std.ascii.eqlIgnoreCase(normalized_path, "mermaid-helper.js")) return false;
         if (self == .app) return true;
         return std.mem.eql(u8, normalized_path, "render.html") or
             std.mem.eql(u8, normalized_path, "bundle.js") or
@@ -136,6 +139,9 @@ test "asset role pins exact origin CSP and keeps the worker app-only" {
     try std.testing.expect(appAssetRoleForOrigin("maru-app", "app", true) == null);
     try std.testing.expect(appAssetRoleForOrigin("https", "app", false) == null);
     try std.testing.expect(AppAssetRole.app.pathAllowed("live-preview-worker.js"));
+    try std.testing.expect(!AppAssetRole.app.pathAllowed("mermaid-helper.js"));
+    try std.testing.expect(!AppAssetRole.app.pathAllowed("MERMAID-HELPER.JS"));
+    try std.testing.expect(!AppAssetRole.render.pathAllowed("mermaid-helper.js"));
     try std.testing.expect(!AppAssetRole.render.pathAllowed("live-preview-worker.js"));
     try std.testing.expect(!AppAssetRole.render.pathAllowed("LIVE-PREVIEW-WORKER.JS"));
     try std.testing.expect(AppAssetRole.render.pathAllowed("bundle.js"));

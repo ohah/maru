@@ -16,6 +16,7 @@ pub const failure_limit: usize = 3;
 pub const max_completion_drain_per_tick: usize = 8;
 
 const slot_count = max_pending_jobs + 1; // pending 32개와 실행 중 1개를 동시에 보존한다.
+pub const max_terminal_results: usize = max_pending_jobs + slot_count * 2;
 
 pub const AdmissionError = error{
     Disabled,
@@ -26,6 +27,8 @@ pub const AdmissionError = error{
     InvalidUtf8,
     QueueFull,
     PendingSourceFull,
+    SourceHashMismatch,
+    TerminalFull,
 };
 
 pub const RendererCapability = protocol.RendererCapability;
@@ -63,8 +66,26 @@ pub const CompletionOutcome = enum {
 };
 
 pub const AcceptedResult = struct {
+    window_id: u64,
     capability: JobCapability,
     svg_len: usize,
+};
+
+pub const TerminalReason = enum(u32) {
+    superseded = 1,
+    deadline = 2,
+    transient_failure = 3,
+    integrity_failure = 4,
+    invalid_result = 5,
+    capacity_exceeded = 6,
+    failure_latched = 7,
+};
+
+pub const TerminalResult = struct {
+    window_id: u64,
+    job_id: u64,
+    renderer: RendererCapability,
+    reason: TerminalReason,
 };
 
 pub const Snapshot = struct {
@@ -72,6 +93,7 @@ pub const Snapshot = struct {
     pending_source_bytes: usize,
     accepted_results: usize,
     accepted_svg_bytes: usize,
+    terminal_results: usize,
     helper_instance: u64,
     in_flight: bool,
     disabled: bool,
@@ -93,6 +115,7 @@ const JobSlot = struct {
     fence_id: u64 = 0,
     source_hash: [32]u8 = [_]u8{0} ** 32,
     source_len: usize = 0,
+    revoked: bool = false,
     source: [protocol.max_source_bytes]u8 = undefined,
 
     fn capability(self: *const JobSlot, helper_instance: u64) JobCapability {
@@ -114,6 +137,7 @@ const JobSlot = struct {
         self.fence_id = 0;
         self.source_hash = [_]u8{0} ** 32;
         self.source_len = 0;
+        self.revoked = false;
     }
 };
 
@@ -161,6 +185,12 @@ pub const MermaidCoordinatorState = struct {
     accepted_bytes: [max_accepted_svg_bytes]u8 = undefined,
     accepted_len: usize = 0,
 
+    // Pending coalesce와 모든 failure reclaim을 Swift Promise에 즉시 전달하는 fixed terminal queue다.
+    // 최대 backlog + pending/in-flight slots + accepted entries를 동시에 담아 disable도 유실 없이 끝낸다.
+    terminals: [max_terminal_results]TerminalResult = undefined,
+    terminal_head: usize = 0,
+    terminal_count: usize = 0,
+
     // 테스트/summary가 cap+1에서 source copy가 0임을 직접 확인하는 관측값이다.
     admission_copies: u64 = 0,
 
@@ -170,6 +200,7 @@ pub const MermaidCoordinatorState = struct {
             .pending_source_bytes = self.pending_source_bytes,
             .accepted_results = self.accepted_count,
             .accepted_svg_bytes = self.accepted_len,
+            .terminal_results = self.terminal_count,
             .helper_instance = self.helper_instance,
             .in_flight = self.in_flight_index != null,
             .disabled = self.disabled,
@@ -181,17 +212,46 @@ pub const MermaidCoordinatorState = struct {
         };
     }
 
+    /// Native display tick이 process/pipe work를 무조건 호출하지 않도록 하는 allocation-free gate다.
+    /// Swift completion은 in-flight lease가 살아 있는 동안 도착하므로 이 상태와 분기하지 않는다.
+    pub fn hasWork(self: *const MermaidCoordinatorState) bool {
+        return self.pending_jobs != 0 or
+            self.in_flight_index != null or
+            self.accepted_count != 0 or
+            self.terminal_count != 0 or
+            self.terminate_pending != 0 or
+            self.termination_in_progress != 0 or
+            self.action_lease_helper != 0;
+    }
+
     /// 같은 widget의 아직 실행되지 않은 job은 제자리에서 latest로 교체한다. 모든 상한과 identity를
     /// 먼저 검사하므로 거부 경로는 기존 queue와 source bytes를 바꾸지 않는다.
     pub fn admit(self: *MermaidCoordinatorState, request: JobRequest) AdmissionError!u64 {
+        return self.admitHashed(request, protocol.sourceHash(request.source));
+    }
+
+    /// Worker가 전달한 SHA-256과 Zig의 exact UTF-8 source 재계산이 같을 때만 queue storage를 쓴다.
+    pub fn admitHashed(
+        self: *MermaidCoordinatorState,
+        request: JobRequest,
+        expected_source_hash: [32]u8,
+    ) AdmissionError!u64 {
         if (self.disabled) return error.Disabled;
         if (!validRenderer(request.window_id, request.renderer, request.fence_id)) return error.InvalidCapability;
         if (request.source.len == 0) return error.EmptySource;
         if (request.source.len > protocol.max_source_bytes) return error.SourceTooLarge;
         if (!std.unicode.utf8ValidateSlice(request.source)) return error.InvalidUtf8;
         if (hasLongLine(request.source)) return error.LineTooLong;
+        const actual_source_hash = protocol.sourceHash(request.source);
+        if (!std.crypto.timing_safe.eql([32]u8, actual_source_hash, expected_source_hash))
+            return error.SourceHashMismatch;
 
         const replacement = self.findPendingWidget(request.window_id, request.renderer.widget_id);
+        const live_jobs = self.pending_jobs + self.accepted_count + @intFromBool(self.in_flight_index != null);
+        const terminal_growth: usize = @intFromBool(replacement != null);
+        const live_growth: usize = @intFromBool(replacement == null);
+        if (self.terminal_count + live_jobs + terminal_growth + live_growth > self.terminals.len)
+            return error.TerminalFull;
         const old_len = if (replacement) |index| self.slots[index].source_len else 0;
         const projected_bytes = self.pending_source_bytes - old_len + request.source.len;
         if (projected_bytes > max_pending_source_bytes) return error.PendingSourceFull;
@@ -201,13 +261,16 @@ pub const MermaidCoordinatorState = struct {
         const job_id = self.takeJobId();
         const sequence = self.takeSequence();
         const slot = &self.slots[index];
+        if (replacement != null) {
+            self.enqueueTerminal(slot.window_id, slot.job_id, slot.renderer, .superseded);
+        }
         slot.state = .pending;
         slot.window_id = request.window_id;
         slot.enqueue_sequence = sequence;
         slot.job_id = job_id;
         slot.renderer = request.renderer;
         slot.fence_id = request.fence_id;
-        slot.source_hash = protocol.sourceHash(request.source);
+        slot.source_hash = actual_source_hash;
         slot.source_len = request.source.len;
         @memcpy(slot.source[0..request.source.len], request.source);
         self.admission_copies +%= 1;
@@ -260,7 +323,7 @@ pub const MermaidCoordinatorState = struct {
     pub fn expireDeadline(self: *MermaidCoordinatorState, now_ms: u64) bool {
         if (self.in_flight_index == null or now_ms <= self.in_flight_deadline_ms) return false;
         self.deadline_expirations +%= 1;
-        self.failRunning(now_ms, false);
+        self.failRunning(now_ms, .deadline);
         return true;
     }
 
@@ -276,23 +339,39 @@ pub const MermaidCoordinatorState = struct {
         if (!std.meta.eql(slot.capability(self.helper_instance), capability)) return .stale;
         if (arrival_ms > self.in_flight_deadline_ms) {
             self.deadline_expirations +%= 1;
-            self.failRunning(arrival_ms, false);
+            self.failRunning(arrival_ms, .deadline);
             return .deadline_expired;
+        }
+
+        // Web lifecycle revoke makes the capability terminal immediately, but an already executing
+        // synchronous Mermaid render is allowed to finish so rapid edits do not recreate Process/WKWebView.
+        // Protocol/body validity is still checked before stale-discard; a revoked hang still hits the same
+        // two-second deadline and failure budget.
+        if (slot.revoked) {
+            if ((status == .render_error and body.len != 0) or
+                (status == .ok and (body.len > protocol.max_svg_bytes or !std.unicode.utf8ValidateSlice(body))))
+            {
+                self.failRunning(arrival_ms, .invalid_result);
+                return .invalid_body;
+            }
+            self.releaseRunning();
+            return .stale;
         }
 
         if (status == .render_error) {
             if (body.len != 0) {
-                self.failRunning(arrival_ms, false);
+                self.failRunning(arrival_ms, .invalid_result);
                 return .invalid_body;
             }
             self.releaseRunning();
             return .render_error;
         }
         if (body.len > protocol.max_svg_bytes or !std.unicode.utf8ValidateSlice(body)) {
-            self.failRunning(arrival_ms, false);
+            self.failRunning(arrival_ms, .invalid_result);
             return .invalid_body;
         }
         if (self.accepted_count >= self.accepted.len or body.len > self.accepted_bytes.len - self.accepted_len) {
+            self.enqueueRunningTerminal(.capacity_exceeded);
             self.releaseRunning();
             return .accepted_capacity_exceeded;
         }
@@ -327,26 +406,36 @@ pub const MermaidCoordinatorState = struct {
         }
         self.accepted_count -= 1;
         self.accepted_len -= removed_end;
-        return .{ .capability = first.capability, .svg_len = first.len };
+        return .{ .window_id = first.window_id, .capability = first.capability, .svg_len = first.len };
+    }
+
+    /// Coalesce/failure로 회수한 exact job을 FIFO로 한 번만 넘긴다. SVG/source bytes는 없다.
+    pub fn takeTerminal(self: *MermaidCoordinatorState) ?TerminalResult {
+        if (self.terminal_count == 0) return null;
+        const result = self.terminals[self.terminal_head];
+        self.terminal_head = (self.terminal_head + 1) % self.terminals.len;
+        self.terminal_count -= 1;
+        if (self.terminal_count == 0) self.terminal_head = 0;
+        return result;
     }
 
     /// I/O/crash/malformed 같은 재시도 가능한 실패. 60초 rolling window의 세 번째 실패가 모든
     /// queue/result/helper를 회수하고 app-lifetime disabled latch를 건다.
     pub fn transientFailure(self: *MermaidCoordinatorState, helper_instance: u64, now_ms: u64) bool {
         if (self.disabled or helper_instance == 0 or helper_instance != self.helper_instance) return false;
-        self.failRunning(now_ms, false);
+        self.failRunning(now_ms, .transient_failure);
         return true;
     }
 
     /// bundle/path/signature/protocol/Hello mismatch는 재시도로 회복되지 않으므로 첫 회에 latch한다.
     pub fn integrityFailure(self: *MermaidCoordinatorState, helper_instance: u64) bool {
         if (self.disabled or helper_instance == 0 or helper_instance != self.helper_instance) return false;
-        self.disableAndReclaim();
+        self.disableAndReclaim(.integrity_failure);
         return true;
     }
 
     /// navigation/widget revoke는 공격 실패가 아니라 capability 수명 종료다. 실행 중이면 old result를
-    /// 물리적으로 막기 위해 helper만 교체하고 failure budget은 소비하지 않는다.
+    /// stale-discard로 표시해 동일 helper를 재사용하고, hang만 기존 deadline/failure budget이 종료한다.
     pub fn revokeWidget(self: *MermaidCoordinatorState, window_id: u64, widget_id: u64) void {
         for (&self.slots, 0..) |*slot, index| {
             if (slot.state == .pending and slot.window_id == window_id and slot.renderer.widget_id == widget_id) {
@@ -355,22 +444,61 @@ pub const MermaidCoordinatorState = struct {
                 slot.clear();
             } else if (slot.state == .in_flight and slot.window_id == window_id and slot.renderer.widget_id == widget_id) {
                 std.debug.assert(self.in_flight_index == index);
-                self.releaseRunning();
-                self.retireHelper();
+                slot.revoked = true;
             }
         }
         self.dropAcceptedWidget(window_id, widget_id);
+        self.dropTerminalWidget(window_id, widget_id);
+    }
+
+    /// Web lifecycle은 renderer 6-field capability 전체를 돌려준다. 새 navigation이 widget id를 다시
+    /// 사용해도 이전 page의 revoke가 현재 job을 취소하지 못하도록 exact identity만 회수한다.
+    pub fn revokeRenderer(self: *MermaidCoordinatorState, window_id: u64, renderer: RendererCapability) void {
+        for (&self.slots, 0..) |*slot, index| {
+            if (slot.window_id != window_id or !std.meta.eql(slot.renderer, renderer)) continue;
+            if (slot.state == .pending) {
+                self.pending_jobs -= 1;
+                self.pending_source_bytes -= slot.source_len;
+                slot.clear();
+            } else if (slot.state == .in_flight) {
+                std.debug.assert(self.in_flight_index == index);
+                slot.revoked = true;
+            }
+        }
+        self.dropAcceptedRenderer(window_id, renderer);
+        self.dropTerminalRenderer(window_id, renderer);
+    }
+
+    /// Native timeout/cancel은 이미 알고 있는 job_id까지 대조한다. 같은 renderer identity로 pending job이
+    /// 교체됐더라도 이전 Promise의 늦은 timeout이 replacement를 취소하지 못한다.
+    pub fn revokeJob(self: *MermaidCoordinatorState, window_id: u64, job_id: u64, renderer: RendererCapability) void {
+        if (job_id == 0) return;
+        for (&self.slots, 0..) |*slot, index| {
+            if (slot.window_id != window_id or slot.job_id != job_id or !std.meta.eql(slot.renderer, renderer)) continue;
+            if (slot.state == .pending) {
+                self.pending_jobs -= 1;
+                self.pending_source_bytes -= slot.source_len;
+                slot.clear();
+            } else if (slot.state == .in_flight) {
+                std.debug.assert(self.in_flight_index == index);
+                slot.revoked = true;
+            }
+        }
+        self.dropAcceptedJob(window_id, job_id, renderer);
+        self.dropTerminalJob(window_id, job_id, renderer);
     }
 
     /// App termination의 최종 model barrier. Platform executor/process가 먼저 quiesce된 뒤 호출하므로
     /// leased frame과 retirement token까지 즉시 회수해도 빌린 pointer 사용자가 남지 않는다.
     pub fn shutdown(self: *MermaidCoordinatorState) void {
-        self.disableAndReclaim();
+        self.disableAndReclaim(null);
         self.terminate_pending = 0;
         self.termination_in_progress = 0;
         self.action_lease_helper = 0;
         self.action_lease_job = 0;
         self.action_frame_len = 0;
+        self.terminal_head = 0;
+        self.terminal_count = 0;
     }
 
     /// Swift Process termination handler의 exact ack. 이전 helper의 늦은 handler는 새 helper start를
@@ -391,10 +519,11 @@ pub const MermaidCoordinatorState = struct {
         return true;
     }
 
-    fn failRunning(self: *MermaidCoordinatorState, now_ms: u64, permanent: bool) void {
+    fn failRunning(self: *MermaidCoordinatorState, now_ms: u64, reason: TerminalReason) void {
+        self.enqueueRunningTerminal(reason);
         if (self.in_flight_index != null) self.releaseRunning();
         self.retireHelper();
-        if (permanent or self.recordFailure(now_ms)) self.disableAndReclaim();
+        if (self.recordFailure(now_ms)) self.disableAndReclaim(.failure_latched);
     }
 
     fn recordFailure(self: *MermaidCoordinatorState, now_ms: u64) bool {
@@ -415,8 +544,21 @@ pub const MermaidCoordinatorState = struct {
         return kept_len >= failure_limit;
     }
 
-    fn disableAndReclaim(self: *MermaidCoordinatorState) void {
+    fn disableAndReclaim(self: *MermaidCoordinatorState, reason: ?TerminalReason) void {
         self.disabled = true;
+        if (reason) |terminal_reason| {
+            if (self.in_flight_index) |index| {
+                const slot = &self.slots[index];
+                self.enqueueTerminal(slot.window_id, slot.job_id, slot.renderer, terminal_reason);
+            }
+            for (&self.slots) |*slot| {
+                if (slot.state != .pending) continue;
+                self.enqueueTerminal(slot.window_id, slot.job_id, slot.renderer, terminal_reason);
+            }
+            for (self.accepted[0..self.accepted_count]) |item| {
+                self.enqueueTerminal(item.window_id, item.capability.job_id, item.capability.renderer, terminal_reason);
+            }
+        }
         if (self.in_flight_index != null) self.releaseRunning();
         self.retireHelper();
         for (&self.slots) |*slot| slot.clear();
@@ -424,6 +566,30 @@ pub const MermaidCoordinatorState = struct {
         self.pending_source_bytes = 0;
         self.accepted_count = 0;
         self.accepted_len = 0;
+    }
+
+    fn enqueueRunningTerminal(self: *MermaidCoordinatorState, reason: TerminalReason) void {
+        const index = self.in_flight_index orelse return;
+        const slot = &self.slots[index];
+        self.enqueueTerminal(slot.window_id, slot.job_id, slot.renderer, reason);
+    }
+
+    fn enqueueTerminal(
+        self: *MermaidCoordinatorState,
+        window_id: u64,
+        job_id: u64,
+        renderer: RendererCapability,
+        reason: TerminalReason,
+    ) void {
+        std.debug.assert(self.terminal_count < self.terminals.len);
+        const index = (self.terminal_head + self.terminal_count) % self.terminals.len;
+        self.terminals[index] = .{
+            .window_id = window_id,
+            .job_id = job_id,
+            .renderer = renderer,
+            .reason = reason,
+        };
+        self.terminal_count += 1;
     }
 
     fn retireHelper(self: *MermaidCoordinatorState) void {
@@ -458,6 +624,87 @@ pub const MermaidCoordinatorState = struct {
         }
         self.accepted_count = write_index;
         self.accepted_len = write_offset;
+    }
+
+    fn dropAcceptedRenderer(self: *MermaidCoordinatorState, window_id: u64, renderer: RendererCapability) void {
+        var write_index: usize = 0;
+        var write_offset: usize = 0;
+        var read_index: usize = 0;
+        while (read_index < self.accepted_count) : (read_index += 1) {
+            const item = self.accepted[read_index];
+            if (item.window_id == window_id and std.meta.eql(item.capability.renderer, renderer)) continue;
+            if (item.offset != write_offset) {
+                std.mem.copyForwards(u8, self.accepted_bytes[write_offset..][0..item.len], self.accepted_bytes[item.offset..][0..item.len]);
+            }
+            self.accepted[write_index] = item;
+            self.accepted[write_index].offset = write_offset;
+            write_index += 1;
+            write_offset += item.len;
+        }
+        self.accepted_count = write_index;
+        self.accepted_len = write_offset;
+    }
+
+    fn dropAcceptedJob(self: *MermaidCoordinatorState, window_id: u64, job_id: u64, renderer: RendererCapability) void {
+        var write_index: usize = 0;
+        var write_offset: usize = 0;
+        var read_index: usize = 0;
+        while (read_index < self.accepted_count) : (read_index += 1) {
+            const item = self.accepted[read_index];
+            if (item.window_id == window_id and item.capability.job_id == job_id and
+                std.meta.eql(item.capability.renderer, renderer)) continue;
+            if (item.offset != write_offset) {
+                std.mem.copyForwards(u8, self.accepted_bytes[write_offset..][0..item.len], self.accepted_bytes[item.offset..][0..item.len]);
+            }
+            self.accepted[write_index] = item;
+            self.accepted[write_index].offset = write_offset;
+            write_index += 1;
+            write_offset += item.len;
+        }
+        self.accepted_count = write_index;
+        self.accepted_len = write_offset;
+    }
+
+    fn dropTerminalRenderer(self: *MermaidCoordinatorState, window_id: u64, renderer: RendererCapability) void {
+        var kept: [max_terminal_results]TerminalResult = undefined;
+        var kept_count: usize = 0;
+        for (0..self.terminal_count) |offset| {
+            const item = self.terminals[(self.terminal_head + offset) % self.terminals.len];
+            if (item.window_id == window_id and std.meta.eql(item.renderer, renderer)) continue;
+            kept[kept_count] = item;
+            kept_count += 1;
+        }
+        @memcpy(self.terminals[0..kept_count], kept[0..kept_count]);
+        self.terminal_head = 0;
+        self.terminal_count = kept_count;
+    }
+
+    fn dropTerminalWidget(self: *MermaidCoordinatorState, window_id: u64, widget_id: u64) void {
+        var kept: [max_terminal_results]TerminalResult = undefined;
+        var kept_count: usize = 0;
+        for (0..self.terminal_count) |offset| {
+            const item = self.terminals[(self.terminal_head + offset) % self.terminals.len];
+            if (item.window_id == window_id and item.renderer.widget_id == widget_id) continue;
+            kept[kept_count] = item;
+            kept_count += 1;
+        }
+        @memcpy(self.terminals[0..kept_count], kept[0..kept_count]);
+        self.terminal_head = 0;
+        self.terminal_count = kept_count;
+    }
+
+    fn dropTerminalJob(self: *MermaidCoordinatorState, window_id: u64, job_id: u64, renderer: RendererCapability) void {
+        var kept: [max_terminal_results]TerminalResult = undefined;
+        var kept_count: usize = 0;
+        for (0..self.terminal_count) |offset| {
+            const item = self.terminals[(self.terminal_head + offset) % self.terminals.len];
+            if (item.window_id == window_id and item.job_id == job_id and std.meta.eql(item.renderer, renderer)) continue;
+            kept[kept_count] = item;
+            kept_count += 1;
+        }
+        @memcpy(self.terminals[0..kept_count], kept[0..kept_count]);
+        self.terminal_head = 0;
+        self.terminal_count = kept_count;
     }
 
     fn findPendingWidget(self: *const MermaidCoordinatorState, window_id: u64, widget_id: u64) ?usize {
@@ -519,7 +766,7 @@ pub const MermaidCoordinatorState = struct {
 };
 
 fn validRenderer(window_id: u64, renderer: RendererCapability, fence_id: u64) bool {
-    return window_id != 0 and fence_id != 0 and renderer.document_revision != 0 and renderer.projection_generation != 0 and
+    return window_id != 0 and fence_id != 0 and renderer.editor_epoch != 0 and renderer.projection_generation != 0 and
         renderer.widget_id != 0 and renderer.widget_generation != 0 and renderer.renderer_instance != 0;
 }
 
@@ -540,6 +787,7 @@ fn testRequest(window_id: u64, widget_id: u64, source: []const u8) JobRequest {
     return .{
         .window_id = window_id,
         .renderer = .{
+            .editor_epoch = 1,
             .document_revision = 1,
             .projection_generation = 1,
             .widget_id = widget_id,
@@ -553,12 +801,19 @@ fn testRequest(window_id: u64, widget_id: u64, source: []const u8) JobRequest {
 
 test "admission coalesces latest per widget and schedules windows round robin" {
     var state: MermaidCoordinatorState = .{};
-    _ = try state.admit(testRequest(1, 1, "old"));
+    const original_id = try state.admit(testRequest(1, 1, "old"));
     const replacement_id = try state.admit(testRequest(1, 1, "latest"));
     _ = try state.admit(testRequest(1, 2, "same-window"));
     _ = try state.admit(testRequest(2, 3, "other-window"));
     try std.testing.expectEqual(@as(usize, 3), state.snapshot().pending_jobs);
     try std.testing.expectEqual(@as(usize, 29), state.snapshot().pending_source_bytes);
+    try std.testing.expectEqual(@as(usize, 1), state.snapshot().terminal_results);
+    const superseded = state.takeTerminal().?;
+    try std.testing.expectEqual(original_id, superseded.job_id);
+    try std.testing.expectEqual(@as(u64, 1), superseded.window_id);
+    try std.testing.expectEqual(@as(u64, 1), superseded.renderer.widget_id);
+    try std.testing.expectEqual(TerminalReason.superseded, superseded.reason);
+    try std.testing.expect(state.takeTerminal() == null);
 
     const first = state.drainAction(100).?.start_job;
     try std.testing.expectEqual(replacement_id, first.capability.job_id);
@@ -576,6 +831,37 @@ test "admission coalesces latest per widget and schedules windows round robin" {
 
     const third = state.drainAction(300).?.start_job;
     try std.testing.expectEqual(@as(u64, 2), third.capability.renderer.widget_id);
+}
+
+test "terminal queue is bounded and rejects before replacing the current pending job" {
+    var state: MermaidCoordinatorState = .{};
+    var last_job_id = try state.admit(testRequest(1, 1, "initial"));
+    for (0..max_terminal_results - 1) |_| {
+        last_job_id = try state.admit(testRequest(1, 1, "replacement"));
+    }
+    const before = state.snapshot();
+    try std.testing.expectEqual(max_terminal_results - 1, before.terminal_results);
+    try std.testing.expectError(error.TerminalFull, state.admit(testRequest(1, 1, "rejected")));
+    const after = state.snapshot();
+    try std.testing.expectEqual(before.pending_jobs, after.pending_jobs);
+    try std.testing.expectEqual(before.pending_source_bytes, after.pending_source_bytes);
+    try std.testing.expectEqual(before.terminal_results, after.terminal_results);
+    try std.testing.expectEqual(before.admission_copies, after.admission_copies);
+
+    const start = state.drainAction(0).?.start_job;
+    try std.testing.expectEqual(last_job_id, start.capability.job_id);
+}
+
+test "late superseded job revoke cannot cancel a same-identity replacement" {
+    var state: MermaidCoordinatorState = .{};
+    const request = testRequest(1, 1, "first");
+    const old_job_id = try state.admit(request);
+    const replacement_job_id = try state.admit(testRequest(1, 1, "second"));
+    state.revokeJob(1, old_job_id, request.renderer);
+    try std.testing.expectEqual(@as(usize, 1), state.snapshot().pending_jobs);
+    try std.testing.expectEqual(@as(usize, 0), state.snapshot().terminal_results);
+    const start = state.drainAction(0).?.start_job;
+    try std.testing.expectEqual(replacement_job_id, start.capability.job_id);
 }
 
 test "queue and source cap plus one do not copy or mutate admission" {
@@ -601,6 +887,27 @@ test "admission rejects overlong lines and invalid UTF-8 before copying" {
     try std.testing.expectEqual(@as(u64, 0), state.snapshot().admission_copies);
 }
 
+test "admission rejects zero editor epoch before copying" {
+    var state: MermaidCoordinatorState = .{};
+    var request = testRequest(1, 1, "graph TD");
+    request.renderer.editor_epoch = 0;
+    try std.testing.expectError(error.InvalidCapability, state.admit(request));
+    try std.testing.expectEqual(@as(u64, 0), state.snapshot().admission_copies);
+    try std.testing.expectEqual(@as(usize, 0), state.snapshot().pending_jobs);
+}
+
+test "worker hash mismatch rejects before queue copy" {
+    var state: MermaidCoordinatorState = .{};
+    var wrong = protocol.sourceHash("other");
+    wrong[0] ^= 1;
+    try std.testing.expectError(
+        error.SourceHashMismatch,
+        state.admitHashed(testRequest(1, 1, "graph TD"), wrong),
+    );
+    try std.testing.expectEqual(@as(u64, 0), state.snapshot().admission_copies);
+    try std.testing.expectEqual(@as(usize, 0), state.snapshot().pending_jobs);
+}
+
 test "deadline failures restart at most three helpers then latch" {
     var state: MermaidCoordinatorState = .{};
     var iteration: u64 = 0;
@@ -615,10 +922,12 @@ test "deadline failures restart at most three helpers then latch" {
                 try std.testing.expect(state.completeTermination(helper_instance));
                 const start = state.drainAction(iteration * 10_000).?.start_job;
                 try std.testing.expect(state.completeActionHandoff(start.capability.helper_instance, start.capability.job_id));
+                if (iteration == failure_limit - 1) _ = try state.admit(testRequest(2, 10_000, "queued-before-latch"));
                 try std.testing.expect(state.expireDeadline(start.deadline_ms + 1));
             },
             .start_job => |start| {
                 try std.testing.expect(state.completeActionHandoff(start.capability.helper_instance, start.capability.job_id));
+                if (iteration == failure_limit - 1) _ = try state.admit(testRequest(2, 10_000, "queued-before-latch"));
                 try std.testing.expect(state.expireDeadline(start.deadline_ms + 1));
             },
         };
@@ -627,12 +936,56 @@ test "deadline failures restart at most three helpers then latch" {
     try std.testing.expect(snap.disabled);
     try std.testing.expectEqual(@as(u64, 3), snap.helper_starts);
     try std.testing.expectEqual(@as(usize, 0), snap.pending_jobs);
+    try std.testing.expectEqual(@as(usize, 4), snap.terminal_results);
+    var deadlines: usize = 0;
+    var latched: usize = 0;
+    while (state.takeTerminal()) |terminal| switch (terminal.reason) {
+        .deadline => deadlines += 1,
+        .failure_latched => latched += 1,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqual(@as(usize, 3), deadlines);
+    try std.testing.expectEqual(@as(usize, 1), latched);
 }
 
-test "integrity failure latches once and stale result cannot mutate accepted bytes" {
+test "transient failure terminals only the running job and preserves queued work" {
     var state: MermaidCoordinatorState = .{};
-    _ = try state.admit(testRequest(1, 1, "graph TD"));
+    const running_id = try state.admit(testRequest(1, 1, "running"));
+    const pending_id = try state.admit(testRequest(2, 2, "pending"));
     const start = state.drainAction(10).?.start_job;
+    try std.testing.expectEqual(running_id, start.capability.job_id);
+    try std.testing.expect(state.completeActionHandoff(start.capability.helper_instance, start.capability.job_id));
+    try std.testing.expect(state.transientFailure(start.capability.helper_instance, 11));
+
+    const snap = state.snapshot();
+    try std.testing.expectEqual(@as(usize, 1), snap.pending_jobs);
+    try std.testing.expectEqual(@as(usize, 1), snap.terminal_results);
+    try std.testing.expect(!snap.in_flight);
+    const terminal = state.takeTerminal().?;
+    try std.testing.expectEqual(running_id, terminal.job_id);
+    try std.testing.expectEqual(TerminalReason.transient_failure, terminal.reason);
+    try std.testing.expectEqual(CompletionOutcome.stale, state.completeResult(start.capability, .render_error, "", 12));
+    try std.testing.expect(!state.expireDeadline(start.deadline_ms + 1));
+
+    const helper = state.drainAction(12).?.terminate_helper;
+    try std.testing.expectEqual(start.capability.helper_instance, helper);
+    try std.testing.expect(state.completeTermination(helper));
+    const next = state.drainAction(13).?.start_job;
+    try std.testing.expectEqual(pending_id, next.capability.job_id);
+    try std.testing.expect(next.spawn_helper);
+}
+
+test "integrity failure terminals accepted running and pending jobs exactly once" {
+    var state: MermaidCoordinatorState = .{};
+    const accepted_id = try state.admit(testRequest(1, 1, "accepted"));
+    const accepted_start = state.drainAction(1).?.start_job;
+    try std.testing.expect(state.completeActionHandoff(accepted_start.capability.helper_instance, accepted_start.capability.job_id));
+    try std.testing.expectEqual(CompletionOutcome.accepted, state.completeResult(accepted_start.capability, .ok, "<svg/>", 2));
+
+    const running_id = try state.admit(testRequest(1, 2, "running"));
+    const pending_id = try state.admit(testRequest(1, 3, "pending"));
+    const start = state.drainAction(10).?.start_job;
+    try std.testing.expectEqual(running_id, start.capability.job_id);
     try std.testing.expect(state.completeActionHandoff(start.capability.helper_instance, start.capability.job_id));
     var stale = start.capability;
     stale.helper_instance += 1;
@@ -644,9 +997,49 @@ test "integrity failure latches once and stale result cannot mutate accepted byt
     const snap = state.snapshot();
     try std.testing.expect(snap.disabled);
     try std.testing.expectEqual(@as(usize, 0), snap.accepted_svg_bytes);
+    try std.testing.expectEqual(@as(usize, 3), snap.terminal_results);
     try std.testing.expectError(error.Disabled, state.admit(testRequest(1, 2, "later")));
+    var saw_accepted = false;
+    var saw_running = false;
+    var saw_pending = false;
+    while (state.takeTerminal()) |terminal| {
+        try std.testing.expectEqual(TerminalReason.integrity_failure, terminal.reason);
+        if (terminal.job_id == accepted_id) saw_accepted = true;
+        if (terminal.job_id == running_id) saw_running = true;
+        if (terminal.job_id == pending_id) saw_pending = true;
+    }
+    try std.testing.expect(saw_accepted and saw_running and saw_pending);
+    try std.testing.expectEqual(CompletionOutcome.stale, state.completeResult(start.capability, .ok, "<svg/>", 12));
     try std.testing.expect(state.drainAction(11).? == .terminate_helper);
     try std.testing.expect(state.drainAction(12) == null);
+}
+
+test "invalid result and accepted capacity failure emit exact terminals" {
+    var state: MermaidCoordinatorState = .{};
+    const invalid_id = try state.admit(testRequest(1, 1, "invalid"));
+    const invalid = state.drainAction(0).?.start_job;
+    try std.testing.expect(state.completeActionHandoff(invalid.capability.helper_instance, invalid.capability.job_id));
+    try std.testing.expectEqual(CompletionOutcome.invalid_body, state.completeResult(invalid.capability, .render_error, "unexpected", 1));
+    const invalid_terminal = state.takeTerminal().?;
+    try std.testing.expectEqual(invalid_id, invalid_terminal.job_id);
+    try std.testing.expectEqual(TerminalReason.invalid_result, invalid_terminal.reason);
+    const helper = state.drainAction(1).?.terminate_helper;
+    try std.testing.expect(state.completeTermination(helper));
+
+    for (0..slot_count) |index| {
+        _ = try state.admit(testRequest(1, @intCast(index + 10), "accepted"));
+        const action = state.drainAction(@intCast(index + 2)).?.start_job;
+        try std.testing.expect(state.completeActionHandoff(action.capability.helper_instance, action.capability.job_id));
+        try std.testing.expectEqual(CompletionOutcome.accepted, state.completeResult(action.capability, .ok, "", @intCast(index + 2)));
+    }
+    const overflow_id = try state.admit(testRequest(1, 100, "overflow"));
+    const overflow = state.drainAction(100).?.start_job;
+    try std.testing.expect(state.completeActionHandoff(overflow.capability.helper_instance, overflow.capability.job_id));
+    try std.testing.expectEqual(CompletionOutcome.accepted_capacity_exceeded, state.completeResult(overflow.capability, .ok, "", 101));
+    const overflow_terminal = state.takeTerminal().?;
+    try std.testing.expectEqual(overflow_id, overflow_terminal.job_id);
+    try std.testing.expectEqual(TerminalReason.capacity_exceeded, overflow_terminal.reason);
+    try std.testing.expect(state.takeTerminal() == null);
 }
 
 test "accepted SVG quota is one-shot and widget revoke removes matching result" {
@@ -669,19 +1062,104 @@ test "accepted SVG quota is one-shot and widget revoke removes matching result" 
     try std.testing.expect((try state.takeAccepted(&out)) == null);
 }
 
-test "widget revoke retires running helper without charging failure budget" {
+test "widget revoke stale-discards the running result and reuses the helper" {
     var state: MermaidCoordinatorState = .{};
     _ = try state.admit(testRequest(1, 1, "running"));
     const first = state.drainAction(0).?.start_job;
     try std.testing.expect(state.completeActionHandoff(first.capability.helper_instance, first.capability.job_id));
     state.revokeWidget(1, 1);
-    try std.testing.expectEqual(first.capability.helper_instance, state.drainAction(1).?.terminate_helper);
-    try std.testing.expect(state.completeTermination(first.capability.helper_instance));
+    _ = try state.admit(testRequest(1, 2, "next"));
+    try std.testing.expectEqual(.stale, state.completeResult(first.capability, .ok, "<svg/>", 1));
+    const next = state.drainAction(2).?.start_job;
+    try std.testing.expect(!next.spawn_helper);
+    try std.testing.expectEqual(first.capability.helper_instance, next.capability.helper_instance);
+    try std.testing.expect(!state.snapshot().disabled);
+}
+
+test "renderer revoke before handoff ack preserves the lease and stale-discards after exact ack" {
+    var state: MermaidCoordinatorState = .{};
+    const request = testRequest(1, 1, "running");
+    _ = try state.admit(request);
+    const first = state.drainAction(0).?.start_job;
+    state.revokeRenderer(1, request.renderer);
+    try std.testing.expect(state.snapshot().action_handoff_pending);
+    try std.testing.expect(!state.completeActionHandoff(first.capability.helper_instance, first.capability.job_id + 1));
+    try std.testing.expect(state.snapshot().action_handoff_pending);
+    try std.testing.expect(state.completeActionHandoff(first.capability.helper_instance, first.capability.job_id));
+    try std.testing.expectEqual(.stale, state.completeResult(first.capability, .ok, "<svg/>", 1));
+
     _ = try state.admit(testRequest(1, 2, "next"));
     const next = state.drainAction(2).?.start_job;
-    try std.testing.expect(next.spawn_helper);
-    try std.testing.expect(next.capability.helper_instance != first.capability.helper_instance);
-    try std.testing.expect(!state.snapshot().disabled);
+    try std.testing.expect(!next.spawn_helper);
+    try std.testing.expectEqual(first.capability.helper_instance, next.capability.helper_instance);
+}
+
+test "renderer revoke before handoff ack keeps the original deadline for a hung helper" {
+    var state: MermaidCoordinatorState = .{};
+    const request = testRequest(1, 1, "hang");
+    _ = try state.admit(request);
+    const start = state.drainAction(10).?.start_job;
+    state.revokeRenderer(1, request.renderer);
+    try std.testing.expect(state.completeActionHandoff(start.capability.helper_instance, start.capability.job_id));
+    try std.testing.expect(!state.expireDeadline(start.deadline_ms));
+    try std.testing.expect(state.expireDeadline(start.deadline_ms + 1));
+    try std.testing.expectEqual(start.capability.helper_instance, state.drainAction(start.deadline_ms + 1).?.terminate_helper);
+    try std.testing.expect(state.drainAction(start.deadline_ms + 2) == null);
+}
+
+test "exact renderer revoke cannot cancel a reused widget id from a newer page" {
+    var state: MermaidCoordinatorState = .{};
+    const old_request = testRequest(1, 1, "old");
+    _ = try state.admit(old_request);
+    const old = state.drainAction(0).?.start_job;
+    try std.testing.expect(state.completeActionHandoff(old.capability.helper_instance, old.capability.job_id));
+
+    var current_request = testRequest(1, 1, "current");
+    current_request.renderer.editor_epoch = 2;
+    current_request.renderer.renderer_instance = 2;
+    _ = try state.admit(current_request);
+    state.revokeRenderer(1, old_request.renderer);
+    try std.testing.expectEqual(@as(usize, 1), state.snapshot().pending_jobs);
+    try std.testing.expectEqual(.stale, state.completeResult(old.capability, .ok, "<svg/>", 1));
+    const current = state.drainAction(2).?.start_job;
+    try std.testing.expect(std.meta.eql(current_request.renderer, current.capability.renderer));
+    try std.testing.expect(!current.spawn_helper);
+}
+
+test "one hundred in-flight edit revokes reuse one helper and accept only the latest" {
+    var state: MermaidCoordinatorState = .{};
+    var iteration: u64 = 1;
+    while (iteration <= 100) : (iteration += 1) {
+        const request = testRequest(1, iteration, "graph TD");
+        _ = try state.admit(request);
+        const start = state.drainAction(iteration).?.start_job;
+        try std.testing.expect(state.completeActionHandoff(start.capability.helper_instance, start.capability.job_id));
+        if (iteration < 100) {
+            state.revokeRenderer(1, request.renderer);
+            try std.testing.expectEqual(.stale, state.completeResult(start.capability, .ok, "<svg/>", iteration));
+        } else {
+            try std.testing.expectEqual(.accepted, state.completeResult(start.capability, .ok, "<svg/>", iteration));
+        }
+    }
+    const snapshot = state.snapshot();
+    try std.testing.expectEqual(@as(u64, 1), snapshot.helper_starts);
+    try std.testing.expectEqual(@as(usize, 1), snapshot.accepted_results);
+    try std.testing.expectEqual(@as(usize, 0), snapshot.pending_jobs);
+    try std.testing.expect(!snapshot.disabled);
+}
+
+test "result with only a different editor epoch is stale and keeps the current job" {
+    var state: MermaidCoordinatorState = .{};
+    _ = try state.admit(testRequest(1, 1, "graph TD"));
+    const start = state.drainAction(0).?.start_job;
+    try std.testing.expect(state.completeActionHandoff(start.capability.helper_instance, start.capability.job_id));
+    var stale = start.capability;
+    stale.renderer.editor_epoch += 1;
+    try std.testing.expectEqual(.stale, state.completeResult(stale, .ok, "<svg/>", 1));
+    const snapshot = state.snapshot();
+    try std.testing.expect(snapshot.in_flight);
+    try std.testing.expectEqual(@as(usize, 0), snapshot.accepted_results);
+    try std.testing.expectEqual(@as(usize, 0), snapshot.accepted_svg_bytes);
 }
 
 test "stale termination ack cannot release a current physical retirement" {
@@ -689,14 +1167,14 @@ test "stale termination ack cannot release a current physical retirement" {
     _ = try state.admit(testRequest(1, 1, "running"));
     const start = state.drainAction(0).?.start_job;
     try std.testing.expect(state.completeActionHandoff(start.capability.helper_instance, start.capability.job_id));
-    state.revokeWidget(1, 1);
-    const helper = state.drainAction(1).?.terminate_helper;
+    try std.testing.expect(state.expireDeadline(start.deadline_ms + 1));
+    const helper = state.drainAction(start.deadline_ms + 1).?.terminate_helper;
     try std.testing.expectEqual(start.capability.helper_instance, helper);
     try std.testing.expect(!state.completeTermination(helper + 1));
     _ = try state.admit(testRequest(1, 2, "waiting"));
-    try std.testing.expect(state.drainAction(2) == null);
+    try std.testing.expect(state.drainAction(start.deadline_ms + 2) == null);
     try std.testing.expect(state.completeTermination(helper));
-    try std.testing.expect(state.drainAction(3).?.start_job.spawn_helper);
+    try std.testing.expect(state.drainAction(start.deadline_ms + 3).?.start_job.spawn_helper);
 }
 
 test "request frame lease survives timeout and slot reuse until exact handoff ack" {

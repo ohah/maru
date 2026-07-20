@@ -42,26 +42,47 @@ echo "==> lipo merge -> universal .app"
 # arm64 빌드를 베이스로 쓰고(Info.plist·Resources 동일), 실행파일만 두 아키텍처로 합친다.
 cp -R "$work/arm.app" "$work/Maru.app"
 app="$work/Maru.app"
+helper_rel="Contents/Helpers/MaruMermaidRenderer.app"
+helper_bin_rel="$helper_rel/Contents/MacOS/maru-mermaid-renderer"
 for bin in maru-macos-app maru; do
     lipo -create \
         "$work/arm.app/Contents/MacOS/$bin" \
         "$work/x86.app/Contents/MacOS/$bin" \
         -output "$app/Contents/MacOS/$bin"
 done
+# Helper의 Swift executable만 lipo 대상이다. Info/resource가 arch build 사이에서 달라지면 arm
+# 번들을 임의 선택하지 않고 실패해 embedded digest와 nested resource seal의 결합을 보존한다.
+cmp "$work/arm.app/$helper_rel/Contents/Info.plist" "$work/x86.app/$helper_rel/Contents/Info.plist"
+cmp "$work/arm.app/$helper_rel/Contents/Resources/web/mermaid-helper.js" "$work/x86.app/$helper_rel/Contents/Resources/web/mermaid-helper.js"
 lipo -create \
-    "$work/arm.app/Contents/Helpers/maru-mermaid-renderer" \
-    "$work/x86.app/Contents/Helpers/maru-mermaid-renderer" \
-    -output "$app/Contents/Helpers/maru-mermaid-renderer"
+    "$work/arm.app/$helper_bin_rel" \
+    "$work/x86.app/$helper_bin_rel" \
+    -output "$app/$helper_bin_rel"
 version=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$app/Contents/Info.plist")
 echo "    universal archs: $(lipo -archs "$app/Contents/MacOS/maru-macos-app")"
+for universal_bin in \
+    "$app/Contents/MacOS/maru-macos-app" \
+    "$app/Contents/MacOS/maru" \
+    "$app/$helper_bin_rel"
+do
+    archs=$(lipo -archs "$universal_bin")
+    case "$archs" in
+        "arm64 x86_64"|"x86_64 arm64") ;;
+        *) echo "error: non-universal executable: $universal_bin ($archs)" >&2; exit 1 ;;
+    esac
+done
+test ! -e "$app/Contents/Helpers/maru-mermaid-renderer"
+test ! -e "$app/Contents/Resources/web/mermaid-helper.js"
 
 echo "==> codesign (Developer ID, hardened runtime, timestamp)"
 # 중첩 실행파일을 먼저 서명하고 마지막에 번들을 서명한다.
-codesign --force --options runtime --timestamp --sign "$SIGN_ID" "$app/Contents/Helpers/maru-mermaid-renderer"
+codesign --force --options runtime --timestamp \
+    --entitlements src/platform/macos/MaruMermaidRenderer.entitlements \
+    --sign "$SIGN_ID" "$app/$helper_rel"
 codesign --force --options runtime --timestamp --sign "$SIGN_ID" "$app/Contents/MacOS/maru"
 codesign --force --options runtime --timestamp --sign "$SIGN_ID" "$app/Contents/MacOS/maru-macos-app"
 codesign --force --options runtime --timestamp --sign "$SIGN_ID" "$app"
-codesign --verify --strict "$app"
+codesign --verify --strict --deep "$app"
 
 echo "==> notarize .app + staple (티켓을 .app에 부착 — dmg에서 꺼내 복사해도 Gatekeeper 통과)"
 ditto -c -k --keepParent "$app" "$work/app.zip"

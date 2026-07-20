@@ -10,6 +10,8 @@ import {
   type FileMethod,
   type OpenLinkRequest,
   type ReadRequest,
+  type RenderMermaidRequest,
+  type RevokeMermaidRequest,
   type ResolveExternalChangeRequest,
   type WriteRequest,
 } from "./file-bridge-request";
@@ -275,6 +277,24 @@ export function requestFileBridge(
 ): Promise<BridgeResult>;
 export function requestFileBridge(
   document: Document,
+  method: "revokeMermaid",
+  value: RevokeMermaidRequest,
+  timeoutMs?: number,
+): Promise<BridgeResult>;
+export function requestFileBridge(
+  document: Document,
+  method: "livePreviewReady",
+  value: ReadRequest,
+  timeoutMs?: number,
+): Promise<BridgeResult>;
+export function requestFileBridge(
+  document: Document,
+  method: "renderMermaid",
+  value: RenderMermaidRequest,
+  timeoutMs?: number,
+): Promise<BridgeResult>;
+export function requestFileBridge(
+  document: Document,
   method: "beginDocument",
   value: BeginDocumentRequest,
   timeoutMs?: number,
@@ -405,6 +425,81 @@ export function requestFileBridge(
           href: value.href,
           forceSystem: value.forceSystem,
         };
+        break;
+      case "renderMermaid":
+        if (
+          !isRecord(value) ||
+          !Number.isSafeInteger(value.editor_epoch) ||
+          value.editor_epoch <= 0 ||
+          !Number.isSafeInteger(value.document_revision) ||
+          value.document_revision < 0 ||
+          !Number.isSafeInteger(value.projection_generation) ||
+          value.projection_generation <= 0 ||
+          !Number.isSafeInteger(value.widget_id) ||
+          value.widget_id <= 0 ||
+          !Number.isSafeInteger(value.widget_generation) ||
+          value.widget_generation <= 0 ||
+          !Number.isSafeInteger(value.renderer_instance) ||
+          value.renderer_instance <= 0 ||
+          !Number.isSafeInteger(value.fence_id) ||
+          value.fence_id <= 0 ||
+          typeof value.source_hash !== "string" ||
+          !/^[0-9a-f]{64}$/.test(value.source_hash) ||
+          typeof value.source !== "string" ||
+          value.source.length === 0 ||
+          new TextEncoder().encode(value.source).byteLength > 32 * 1024
+        ) {
+          throw new TypeError("invalid renderMermaid payload");
+        }
+        request = {
+          method,
+          editor_epoch: value.editor_epoch as number,
+          document_revision: value.document_revision as number,
+          projection_generation: value.projection_generation as number,
+          widget_id: value.widget_id as number,
+          widget_generation: value.widget_generation as number,
+          renderer_instance: value.renderer_instance as number,
+          fence_id: value.fence_id as number,
+          source_hash: value.source_hash,
+          source: value.source,
+        };
+        break;
+      case "revokeMermaid":
+        if (
+          !isRecord(value) ||
+          !Number.isSafeInteger(value.editor_epoch) ||
+          value.editor_epoch <= 0 ||
+          !Number.isSafeInteger(value.document_revision) ||
+          value.document_revision < 0 ||
+          !Number.isSafeInteger(value.projection_generation) ||
+          value.projection_generation <= 0 ||
+          !Number.isSafeInteger(value.widget_id) ||
+          value.widget_id <= 0 ||
+          !Number.isSafeInteger(value.widget_generation) ||
+          value.widget_generation <= 0 ||
+          !Number.isSafeInteger(value.renderer_instance) ||
+          value.renderer_instance <= 0
+        ) {
+          throw new TypeError("invalid revokeMermaid payload");
+        }
+        request = {
+          method,
+          editor_epoch: value.editor_epoch as number,
+          document_revision: value.document_revision as number,
+          projection_generation: value.projection_generation as number,
+          widget_id: value.widget_id as number,
+          widget_generation: value.widget_generation as number,
+          renderer_instance: value.renderer_instance as number,
+        };
+        break;
+      case "livePreviewReady":
+        if (
+          !isRecord(value) ||
+          !Number.isSafeInteger(value.editor_epoch) ||
+          value.editor_epoch <= 0
+        )
+          throw new TypeError("invalid livePreviewReady payload");
+        request = { method, editor_epoch: value.editor_epoch as number };
         break;
     }
     node.textContent = JSON.stringify(encodeFileBridgeRequest(request));
@@ -862,6 +957,50 @@ export function bootShell(document: Document, targetWindow: Window): void {
         );
       },
       enqueueLivePreviewIntent,
+      async (capability, fenceId, sourceHash, source) => {
+        if (status !== null) status.dataset.liveMermaidRequest = "pending";
+        try {
+          const result = await requestFileBridge(
+            document,
+            "renderMermaid",
+            {
+              editor_epoch: capability.editorEpoch,
+              document_revision: capability.documentRevision,
+              projection_generation: capability.projectionGeneration,
+              widget_id: capability.widgetId,
+              widget_generation: capability.widgetGeneration,
+              renderer_instance: capability.rendererInstance,
+              fence_id: fenceId,
+              source_hash: sourceHash,
+              source,
+            },
+            2_500,
+          );
+          const svg = typeof result.svg === "string" ? result.svg : null;
+          if (status !== null) {
+            status.dataset.liveMermaidRequest = svg === null ? "invalid" : "ok";
+          }
+          return svg;
+        } catch {
+          if (status !== null) status.dataset.liveMermaidRequest = "error";
+          return null;
+        }
+      },
+      (capability) => {
+        void requestFileBridge(
+          document,
+          "revokeMermaid",
+          {
+            editor_epoch: capability.editorEpoch,
+            document_revision: capability.documentRevision,
+            projection_generation: capability.projectionGeneration,
+            widget_id: capability.widgetId,
+            widget_generation: capability.widgetGeneration,
+            renderer_instance: capability.rendererInstance,
+          },
+          2_500,
+        ).catch(() => {});
+      },
     );
     if (atomicProjectionAdmitted && mode === "live-preview") atomicProjectionController.enable();
     if (closeLockRequestId !== null) editor.contentDOM.contentEditable = "false";
@@ -1024,7 +1163,9 @@ export function bootShell(document: Document, targetWindow: Window): void {
       )
         throw new Error("invalid editor document epoch");
       editorEpoch = documentResult.editor_epoch as number;
+      if (status !== null) status.dataset.editorEpoch = String(editorEpoch);
       await loadFromDisk(false);
+      await requestFileBridge(document, "livePreviewReady", { editor_epoch: editorEpoch });
     })();
     try {
       await operation;
@@ -1266,12 +1407,9 @@ export function bootRenderer(document: Document, targetWindow: Window): void {
         }
         const images = [...root.querySelectorAll<HTMLImageElement>("img")];
         if (!(await waitForAtomicImages(images))) return;
-        await new Promise<void>((resolve) =>
-          (
-            targetWindow.requestAnimationFrame ??
-            ((callback) => targetWindow.setTimeout(callback, 0))
-          )(() => resolve()),
-        );
+        // WKWebView may indefinitely throttle requestAnimationFrame inside an offscreen replacement iframe.
+        // The reads below force a current layout after all admitted images settle, so no visual-frame callback
+        // is needed to establish the measured-height acknowledgement.
         if (
           atomicPort !== renderPort ||
           atomicCapability === null ||
@@ -1359,11 +1497,15 @@ export function bootRenderer(document: Document, targetWindow: Window): void {
     })();
   });
 
-  const ready: RendererReady = {
-    channel: viewerChannel,
-    type: "renderer-ready",
-    ...rendererCapabilityTypes(targetWindow),
-  };
-  targetWindow.parent.postMessage(ready, "*");
+  if (new URL(targetWindow.location.href).searchParams.get("atomic") === "1") {
+    targetWindow.parent.postMessage({ channel: atomicRendererChannel, type: "atomic-boot" }, "*");
+  } else {
+    const ready: RendererReady = {
+      channel: viewerChannel,
+      type: "renderer-ready",
+      ...rendererCapabilityTypes(targetWindow),
+    };
+    targetWindow.parent.postMessage(ready, "*");
+  }
   targetWindow.addEventListener("pagehide", revokeAtomic, { once: true });
 }

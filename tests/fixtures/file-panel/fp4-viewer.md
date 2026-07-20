@@ -10,3 +10,9 @@
 | --- | --- |
 | sanitizer | active |
 | renderer bridge | absent |
+
+```mermaid
+flowchart TD
+  Worker --> Helper
+  Helper --> Renderer
+```

@@ -14,6 +14,7 @@ import type {
   AtomicProjectionRejection,
   AtomicProjectionRejectionReason,
 } from "./live-preview-protocol";
+import { sha256Fingerprint } from "./sha256";
 
 export type AtomicProjectionBatch = Readonly<{
   results: readonly AtomicProjectionResult[];
@@ -65,13 +66,29 @@ export function projectAtomicRequests(
       rejected.push(reject(request, "invalid-request"));
       continue;
     }
-    if (request.kind === "mermaid") {
-      rejected.push(reject(request, "renderer-unavailable"));
-      continue;
-    }
     const selected = source.slice(request.from, request.to);
     if (!atomicSourceWithinLimit(request.kind, selected)) {
       rejected.push(reject(request, "rich-source-limit"));
+      continue;
+    }
+    if (request.kind === "mermaid") {
+      // Mermaid's coordinator contract requires SHA-256. Avoid a second legacy FNV pass over the same source.
+      const fingerprint = sha256Fingerprint(selected);
+      hashedBytes += fingerprint.sourceBytes;
+      const result = {
+        request,
+        sourceHash: fingerprint.sourceHash,
+        sanitizedPayload: "",
+        assetGrants: [],
+        mermaidSource: selected,
+      } satisfies AtomicProjectionResult;
+      const remainingTerminalCount = requests.length - requestIndex - 1;
+      if (
+        atomicProjectionBatchWireBytes([...results, result], rejected, remainingTerminalCount) >
+        maxLivePreviewResultBytes
+      ) {
+        rejected.push(reject(request, "rich-source-limit"));
+      } else results.push(result);
       continue;
     }
     const fingerprint = atomicSourceFingerprint(selected);
@@ -101,6 +118,7 @@ export function projectAtomicRequests(
       sourceHash: fingerprint.sourceHash,
       sanitizedPayload: rendered.html,
       assetGrants,
+      mermaidSource: null,
     } satisfies AtomicProjectionResult;
     const remainingTerminalCount = requests.length - requestIndex - 1;
     if (

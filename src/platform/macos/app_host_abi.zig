@@ -2054,6 +2054,35 @@ const FileBridgeContext = struct {
         const self: *FileBridgeContext = @ptrCast(@alignCast(raw));
         return self.session.openFilePanelDocumentLink(self.surface_id, editor_epoch, href, force_system);
     }
+
+    fn renderMermaid(
+        raw: *anyopaque,
+        request: maru.session.control_bridge.MermaidRenderRequest,
+    ) anyerror!u64 {
+        const self: *FileBridgeContext = @ptrCast(@alignCast(raw));
+        if (!self.session.filePanelMermaidDocumentActive(self.surface_id, request.renderer.editor_epoch))
+            return error.StaleDocument;
+        return session_mod.mermaidCoordinator().admitHashed(.{
+            .window_id = self.surface_id,
+            .renderer = request.renderer,
+            .fence_id = request.fence_id,
+            .source = request.source,
+        }, request.source_hash);
+    }
+
+    fn revokeMermaid(
+        raw: *anyopaque,
+        renderer: mermaid_protocol.RendererCapability,
+    ) anyerror!void {
+        const self: *FileBridgeContext = @ptrCast(@alignCast(raw));
+        session_mod.mermaidCoordinator().revokeRenderer(self.surface_id, renderer);
+    }
+
+    fn livePreviewReady(raw: *anyopaque, editor_epoch: u64) anyerror!void {
+        const self: *FileBridgeContext = @ptrCast(@alignCast(raw));
+        if (!self.session.filePanelMermaidDocumentActive(self.surface_id, editor_epoch))
+            return error.StaleDocument;
+    }
 };
 
 // FP4: surface-pinned file provider를 넣는 session-scoped bridge. query/fill 모두 같은 정책을 다시 계산하므로 파일이
@@ -2079,6 +2108,9 @@ pub export fn maru_macos_app_session_bridge_dispatch(
         .set_dirty_fn = FileBridgeContext.setDirty,
         .resolve_external_change_fn = FileBridgeContext.resolveExternalChange,
         .open_link_fn = FileBridgeContext.openLink,
+        .render_mermaid_fn = FileBridgeContext.renderMermaid,
+        .revoke_mermaid_fn = FileBridgeContext.revokeMermaid,
+        .live_preview_ready_fn = FileBridgeContext.livePreviewReady,
     };
     const reply = maru.session.control_bridge.dispatchBridgeWithFileAccess(
         allocator,
@@ -2148,6 +2180,7 @@ const mermaid_protocol = maru.session.mermaid_protocol;
 const mermaid_coordinator = maru.session.mermaid_coordinator;
 
 pub const MermaidRendererCapabilityAbi = extern struct {
+    editor_epoch: u64,
     document_revision: u64,
     projection_generation: u64,
     widget_id: u64,
@@ -2188,6 +2221,7 @@ pub const MermaidCoordinatorSnapshotAbi = extern struct {
     pending_source_bytes: usize,
     accepted_results: usize,
     accepted_svg_bytes: usize,
+    terminal_results: usize,
     helper_instance: u64,
     helper_starts: u64,
     deadline_expirations: u64,
@@ -2196,6 +2230,19 @@ pub const MermaidCoordinatorSnapshotAbi = extern struct {
     disabled: u32,
     action_handoff_pending: u32,
     termination_in_progress: u32,
+};
+
+pub const MermaidAcceptedResultAbi = extern struct {
+    window_id: u64,
+    capability: MermaidJobCapabilityAbi,
+    svg_len: usize,
+};
+
+pub const MermaidTerminalResultAbi = extern struct {
+    window_id: u64,
+    job_id: u64,
+    renderer: MermaidRendererCapabilityAbi,
+    reason: u32,
 };
 
 const MermaidDecoder = mermaid_protocol.StreamingDecoder;
@@ -2387,6 +2434,7 @@ pub export fn maru_macos_mermaid_snapshot(out_snapshot: ?*MermaidCoordinatorSnap
         .pending_source_bytes = snap.pending_source_bytes,
         .accepted_results = snap.accepted_results,
         .accepted_svg_bytes = snap.accepted_svg_bytes,
+        .terminal_results = snap.terminal_results,
         .helper_instance = snap.helper_instance,
         .helper_starts = snap.helper_starts,
         .deadline_expirations = snap.deadline_expirations,
@@ -2396,6 +2444,53 @@ pub export fn maru_macos_mermaid_snapshot(out_snapshot: ?*MermaidCoordinatorSnap
         .action_handoff_pending = @intFromBool(snap.action_handoff_pending),
         .termination_in_progress = @intFromBool(snap.termination_in_progress),
     };
+}
+
+pub export fn maru_macos_mermaid_has_work() u32 {
+    return @intFromBool(session_mod.mermaidCoordinator().hasWork());
+}
+
+pub export fn maru_macos_mermaid_revoke_renderer(window_id: u64, renderer: ?*const MermaidRendererCapabilityAbi) void {
+    if (window_id == 0) return;
+    const value = renderer orelse return;
+    session_mod.mermaidCoordinator().revokeRenderer(window_id, rendererFromAbi(value.*));
+}
+
+pub export fn maru_macos_mermaid_revoke_job(window_id: u64, job_id: u64, renderer: ?*const MermaidRendererCapabilityAbi) void {
+    if (window_id == 0 or job_id == 0) return;
+    const value = renderer orelse return;
+    session_mod.mermaidCoordinator().revokeJob(window_id, job_id, rendererFromAbi(value.*));
+}
+
+pub export fn maru_macos_mermaid_take_accepted(
+    out_result: ?*MermaidAcceptedResultAbi,
+    out_svg: ?[*]u8,
+    out_cap: usize,
+) i32 {
+    const result = out_result orelse return -1;
+    if (out_cap > 0 and out_svg == null) return -1;
+    const accepted = session_mod.mermaidCoordinator().takeAccepted(
+        if (out_svg) |bytes| bytes[0..out_cap] else &.{},
+    ) catch return -2;
+    const value = accepted orelse return 0;
+    result.* = .{
+        .window_id = value.window_id,
+        .capability = capabilityToAbi(value.capability),
+        .svg_len = value.svg_len,
+    };
+    return 1;
+}
+
+pub export fn maru_macos_mermaid_take_terminal(out_result: ?*MermaidTerminalResultAbi) i32 {
+    const result = out_result orelse return -1;
+    const value = session_mod.mermaidCoordinator().takeTerminal() orelse return 0;
+    result.* = .{
+        .window_id = value.window_id,
+        .job_id = value.job_id,
+        .renderer = rendererToAbi(value.renderer),
+        .reason = @intFromEnum(value.reason),
+    };
+    return 1;
 }
 
 fn maruMacosMermaidTestReset() callconv(.c) void {
@@ -2435,6 +2530,7 @@ fn decodedFrameAbi(message: mermaid_protocol.Message) MermaidDecodedFrameAbi {
 
 fn rendererFromAbi(value: MermaidRendererCapabilityAbi) mermaid_protocol.RendererCapability {
     return .{
+        .editor_epoch = value.editor_epoch,
         .document_revision = value.document_revision,
         .projection_generation = value.projection_generation,
         .widget_id = value.widget_id,
@@ -2445,6 +2541,7 @@ fn rendererFromAbi(value: MermaidRendererCapabilityAbi) mermaid_protocol.Rendere
 
 fn rendererToAbi(value: mermaid_protocol.RendererCapability) MermaidRendererCapabilityAbi {
     return .{
+        .editor_epoch = value.editor_epoch,
         .document_revision = value.document_revision,
         .projection_generation = value.projection_generation,
         .widget_id = value.widget_id,
@@ -2485,12 +2582,22 @@ test "Mermaid codec ABI keeps header constants and opaque frame behavior aligned
     try std.testing.expectEqual(@as(usize, c.MARU_MERMAID_MAX_PENDING_JOBS), mermaid_coordinator.max_pending_jobs);
     try std.testing.expectEqual(@as(usize, c.MARU_MERMAID_MAX_PENDING_SOURCE_BYTES), mermaid_coordinator.max_pending_source_bytes);
     try std.testing.expectEqual(@as(usize, c.MARU_MERMAID_MAX_ACCEPTED_SVG_BYTES), mermaid_coordinator.max_accepted_svg_bytes);
+    try std.testing.expectEqual(@as(usize, c.MARU_MERMAID_MAX_TERMINAL_RESULTS), mermaid_coordinator.max_terminal_results);
     try std.testing.expectEqual(@as(usize, c.MARU_MERMAID_MAX_COMPLETIONS_PER_TICK), mermaid_coordinator.max_completion_drain_per_tick);
+    try std.testing.expectEqual(@as(u32, c.MARU_MERMAID_TERMINAL_SUPERSEDED), @intFromEnum(mermaid_coordinator.TerminalReason.superseded));
+    try std.testing.expectEqual(@as(u32, c.MARU_MERMAID_TERMINAL_DEADLINE), @intFromEnum(mermaid_coordinator.TerminalReason.deadline));
+    try std.testing.expectEqual(@as(u32, c.MARU_MERMAID_TERMINAL_TRANSIENT_FAILURE), @intFromEnum(mermaid_coordinator.TerminalReason.transient_failure));
+    try std.testing.expectEqual(@as(u32, c.MARU_MERMAID_TERMINAL_INTEGRITY_FAILURE), @intFromEnum(mermaid_coordinator.TerminalReason.integrity_failure));
+    try std.testing.expectEqual(@as(u32, c.MARU_MERMAID_TERMINAL_INVALID_RESULT), @intFromEnum(mermaid_coordinator.TerminalReason.invalid_result));
+    try std.testing.expectEqual(@as(u32, c.MARU_MERMAID_TERMINAL_CAPACITY_EXCEEDED), @intFromEnum(mermaid_coordinator.TerminalReason.capacity_exceeded));
+    try std.testing.expectEqual(@as(u32, c.MARU_MERMAID_TERMINAL_FAILURE_LATCHED), @intFromEnum(mermaid_coordinator.TerminalReason.failure_latched));
     try std.testing.expectEqual(@sizeOf(c.MaruMermaidRendererCapability), @sizeOf(MermaidRendererCapabilityAbi));
     try std.testing.expectEqual(@sizeOf(c.MaruMermaidJobCapability), @sizeOf(MermaidJobCapabilityAbi));
     try std.testing.expectEqual(@sizeOf(c.MaruMermaidDecodedFrame), @sizeOf(MermaidDecodedFrameAbi));
     try std.testing.expectEqual(@sizeOf(c.MaruMermaidCoordinatorAction), @sizeOf(MermaidCoordinatorActionAbi));
     try std.testing.expectEqual(@sizeOf(c.MaruMermaidCoordinatorSnapshot), @sizeOf(MermaidCoordinatorSnapshotAbi));
+    try std.testing.expectEqual(@sizeOf(c.MaruMermaidAcceptedResult), @sizeOf(MermaidAcceptedResultAbi));
+    try std.testing.expectEqual(@sizeOf(c.MaruMermaidTerminalResult), @sizeOf(MermaidTerminalResultAbi));
 
     var bytes: [64]u8 = undefined;
     const len = maru_mermaid_protocol_encode_hello(0, 7, 9, &bytes, bytes.len);
@@ -2517,6 +2624,7 @@ test "Mermaid coordinator ABI uses the AppRuntime singleton and rejects stale co
     maruMacosMermaidTestReset();
     defer maruMacosMermaidTestReset();
     const renderer: MermaidRendererCapabilityAbi = .{
+        .editor_epoch = 9,
         .document_revision = 1,
         .projection_generation = 2,
         .widget_id = 3,
@@ -2550,6 +2658,40 @@ test "Mermaid coordinator ABI uses the AppRuntime singleton and rejects stale co
     try std.testing.expectEqual(@as(u32, 0), snap.in_flight);
     try std.testing.expectEqual(@as(u32, 0), snap.action_handoff_pending);
     try std.testing.expectEqual(@as(u32, 0), snap.termination_in_progress);
+}
+
+test "Mermaid coordinator ABI drains exact terminals and exact old job revoke preserves replacement" {
+    maruMacosMermaidTestReset();
+    defer maruMacosMermaidTestReset();
+    const renderer: MermaidRendererCapabilityAbi = .{
+        .editor_epoch = 1,
+        .document_revision = 1,
+        .projection_generation = 1,
+        .widget_id = 7,
+        .widget_generation = 1,
+        .renderer_instance = 9,
+    };
+    try std.testing.expectEqual(@as(i32, 0), maru_macos_mermaid_admit(3, &renderer, 11, "first".ptr, "first".len));
+    try std.testing.expectEqual(@as(i32, 0), maru_macos_mermaid_admit(3, &renderer, 12, "second".ptr, "second".len));
+    var snap: MermaidCoordinatorSnapshotAbi = undefined;
+    maru_macos_mermaid_snapshot(&snap);
+    try std.testing.expectEqual(@as(usize, 1), snap.pending_jobs);
+    try std.testing.expectEqual(@as(usize, 1), snap.terminal_results);
+
+    var terminal_result: MermaidTerminalResultAbi = undefined;
+    try std.testing.expectEqual(@as(i32, 1), maru_macos_mermaid_take_terminal(&terminal_result));
+    try std.testing.expectEqual(@as(u64, 3), terminal_result.window_id);
+    try std.testing.expectEqual(@as(u64, 1), terminal_result.job_id);
+    try std.testing.expectEqual(renderer.widget_id, terminal_result.renderer.widget_id);
+    try std.testing.expectEqual(@as(u32, @intFromEnum(mermaid_coordinator.TerminalReason.superseded)), terminal_result.reason);
+    try std.testing.expectEqual(@as(i32, 0), maru_macos_mermaid_take_terminal(&terminal_result));
+
+    maru_macos_mermaid_revoke_job(3, 1, &renderer);
+    maru_macos_mermaid_snapshot(&snap);
+    try std.testing.expectEqual(@as(usize, 1), snap.pending_jobs);
+    var action: MermaidCoordinatorActionAbi = undefined;
+    try std.testing.expectEqual(@as(i32, 1), maru_macos_mermaid_drain_action(0, &action));
+    try std.testing.expectEqual(@as(u64, 2), action.capability.job_id);
 }
 
 test "maru_macos_app_bridge_dispatch export: hello=len>0, 미지원=method_not_found 응답, null=-2" {
@@ -2686,6 +2828,19 @@ test "resolveAppAsset: live preview worker is served only to the app role" {
     const app_worker = try resolveAppAsset(io, .app, root_abs, "live-preview-worker.js", &out);
     try std.testing.expect(std.mem.endsWith(u8, app_worker, "/live-preview-worker.js"));
     try std.testing.expectError(AppAssetError.Reject, resolveAppAsset(io, .render, root_abs, "live-preview-worker.js", &out));
+}
+
+test "resolveAppAsset: Mermaid runtime is helper-only even when present under the app root" {
+    const io = std.testing.io;
+    var root_tmp = std.testing.tmpDir(.{});
+    defer root_tmp.cleanup();
+    try root_tmp.dir.writeFile(io, .{ .sub_path = "mermaid-helper.js", .data = "helper-only" });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root_abs = root_buf[0..try root_tmp.dir.realPath(io, &root_buf)];
+    var out: [std.fs.max_path_bytes]u8 = undefined;
+    try std.testing.expectError(AppAssetError.Reject, resolveAppAsset(io, .app, root_abs, "mermaid-helper.js", &out));
+    try std.testing.expectError(AppAssetError.Reject, resolveAppAsset(io, .app, root_abs, "MERMAID-HELPER.JS", &out));
+    try std.testing.expectError(AppAssetError.Reject, resolveAppAsset(io, .render, root_abs, "mermaid-helper.js", &out));
 }
 
 test "resolveAppAsset: worker symlink hardlink and case aliases are denied" {

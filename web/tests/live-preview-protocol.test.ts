@@ -82,6 +82,7 @@ describe("atomic live preview worker protocol", () => {
       sourceHash: "0123456789abcdef",
       sanitizedPayload: "<p>safe</p>",
       assetGrants: [],
+      mermaidSource: null,
     } as const;
     const result = {
       type: "result",
@@ -108,6 +109,32 @@ describe("atomic live preview worker protocol", () => {
     ).toBe(false);
   });
 
+  test("revalidates Mermaid UTF-8 bytes and line count at the worker result boundary", () => {
+    const request = { ...atomic, kind: "mermaid" as const };
+    const result = (mermaidSource: string) => ({
+      type: "result" as const,
+      editorEpoch: 1,
+      documentRevision: 3,
+      projectionGeneration: 5,
+      results: [
+        {
+          request,
+          sourceHash: "a".repeat(64),
+          sanitizedPayload: "",
+          assetGrants: [],
+          mermaidSource,
+        },
+      ],
+      rejected: [],
+    });
+    expect(isProjectionResult(result("x".repeat(32 * 1024)))).toBe(true);
+    expect(isProjectionResult(result("x".repeat(32 * 1024 + 1)))).toBe(false);
+    expect(isProjectionResult(result("😀".repeat(8 * 1024)))).toBe(true);
+    expect(isProjectionResult(result(`${"😀".repeat(8 * 1024)}x`))).toBe(false);
+    expect(isProjectionResult(result(`${"x\n".repeat(511)}x`))).toBe(true);
+    expect(isProjectionResult(result(`${"x\n".repeat(512)}x`))).toBe(false);
+  });
+
   test("counts envelope, grant, and rejection metadata in exact whole-batch admission", () => {
     const grant = {
       editorEpoch: 1,
@@ -121,6 +148,7 @@ describe("atomic live preview worker protocol", () => {
       sourceHash: "0123456789abcdef",
       sanitizedPayload: "",
       assetGrants: [grant],
+      mermaidSource: null,
     };
     const singleOverhead = atomicProjectionBatchWireBytes([base], []);
     const exact = {

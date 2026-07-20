@@ -496,7 +496,8 @@ TDD 방식:
   `maru-sessiond` → 다중 workspace crash-safe manifest → 개별 `maru attach` 순서로 진행한다. 앱 종료 후 PTY 유지,
   기존 `maru.workspace.v1`의 `workspace-binding-id`/`runtime-handle` optional scalar와 singleton `quick-window` tail,
   멀티윈도우 writer lease, `runtime_handle`/`surface_id` 분리, `MRSH` framed JSON-control/binary-stream protocol,
-  `maru host status`·`runtime list/get/end`·`attach`, multi-client resize owner와 무인 TDD/E2E gate는
+  `maru host status`·`runtime list/get/end`·`attach`, same-login-UID SSH, controller 1+observer N capability, signal-safe
+  `SIGWINCH`→`runtime.resize` ACK/broadcast, canonical Term owner 1개와 무인 TDD/E2E gate는
   [영속 터미널 세션 호스트](persistent-session-host.md)를 단일 출처로 둔다. quick terminal의 현재
   `chrome=minimal` UI는 유지하되 hide/relaunch/config 재구성이 같은 host runtime에 reattach하도록 P4에서 배선한다.
 

@@ -87,8 +87,9 @@ surface custom-name="" title="scratch" cwd="/repo" command="/bin/zsh" cols=100 r
 - 키가 있는데 quoted 형식, 길이, lowercase hex, `:` 구분이 깨졌으면 `BadLine`이며 기존 "존재하는 optional 손상은 숨기지
   않는다" 규칙대로 checkpoint 전체를 거부한다. `runtime-handle`을 두 키로 나눠 partial state를 만들지 않는다.
 - writer는 ID를 의미 있는 숫자나 path로 인코딩하지 않고, 같은 값의 재사용·자동 재발급으로 손상을 숨기지 않는다.
-- publish 전 전체 모델을 검증한다. `workspace-binding-id`는 manifest 전체에서 유일해야 하고, 하나의 `runtime-handle`은 하나의
-  writable terminal surface에만 나타나야 한다. 중복이면 현재 live 모델과 마지막 완전 파일을 보존하고 새 checkpoint를 쓰지 않는다.
+- publish 전 전체 모델을 검증한다. `workspace-binding-id`는 manifest 전체에서 유일해야 하고, 하나의 `runtime-handle`은
+  canonical owner terminal surface 하나에만 나타나야 한다. v1 manifest에는 같은 handle의 read-only mirror도 저장하지 않는다.
+  중복이면 현재 live 모델과 마지막 완전 파일을 보존하고 새 checkpoint를 쓰지 않는다.
 - reader도 어떤 runtime attach/spawn이나 Window publish보다 먼저 전역 중복을 검사한다. 검증 실패 때 일부 창만 attach하는
   side effect를 만들지 않는다.
 - 올바른 handle인데 현재 host/runtime 목록에 없으면 파일 손상이 아니라 ended 상태다. 해당 surface만 종료 placeholder로 두고
@@ -106,6 +107,8 @@ surface custom-name="" title="scratch" cwd="/repo" command="/bin/zsh" cols=100 r
   `workspace-binding-id`와 그 아래 `runtime-handle`은 byte-identical로 유지되고 runtime/PTY를 재시작하지 않는다.
 - Term/Panes 이동도 handle을 유지한 채 위치만 바꾼다. Workspace 복제는 새 `workspace-binding-id`를 발급하며 writable
   `runtime-handle`을 복제하지 않는다. 복제 UI가 필요하면 새 runtime을 만들거나 explicit placeholder로 둔다.
+- GUI/CLI/SSH observer N개가 같은 runtime에 붙는 것은 host의 client subscription이며 manifest 중복이 아니다. Maru 내부
+  Mirror Term은 owner close/terminate·알림 위치·독립 viewport 계약이 필요한 별도 non-owning surface이므로 v1에는 넣지 않는다.
 - app-wide Quit은 모든 Window를 한 checkpoint로 publish한 뒤 GUI client를 detach한다. 비마지막 Window/Workspace/Term의
   명시적 close는 기존 close 의미대로 소속 runtime 종료 확인을 먼저 거친다.
 - manifest writer는 `Maru.app` process 하나다. 비정상적으로 두 GUI process가 같은 파일을 열면 파일 writer lease를 얻은
@@ -418,6 +421,8 @@ restore가 실패해도 workspace 전체를 버리지 않는다.
 - binding 필드가 없는 기존 fixture의 byte-stable parse/serialize와 옛 reader의 미지 binding key skip.
 - `workspace-binding-id`와 `runtime-handle` exact length/lowercase hex/구분자, 부재, 손상, duplicate exact-cap/cap+1.
 - writer가 duplicate workspace/runtime binding에서 새 파일을 publish하지 않고 기존 완전본을 보존하는 fail-before-effect 테스트.
+- 같은 runtime의 canonical owner Term 중복과 read-only mirror 표기를 모두 거부하되 host의 observer subscription N개는 허용하는
+  layout-vs-client 경계 테스트.
 - reader가 전체 semantic validation 전 host attach/spawn/Window publish를 정확히 0회 수행하는 fake backend 테스트.
 - 2 Window+3 Workspace의 cross-window Workspace/Pane/Term 이동에서 binding byte identity, child/runtime 재생성 0, source/target
   원자 publish를 검증하는 headless transaction 테스트.

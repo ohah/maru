@@ -227,7 +227,9 @@ pub export fn maru_macos_app_session_key_down(
     const raw_event = (event orelse return @intFromEnum(Status.null_out)).*;
     const out = out_summary orelse return @intFromEnum(Status.null_out);
     const key_event = keyEventFromAbi(raw_event) catch return @intFromEnum(Status.invalid_config);
-    out.* = app_session.handleKeyEvent(key_event) catch return @intFromEnum(Status.key_failed);
+    // 이 export는 MaruMetalTerminalView 전용이다. WebView app shortcut은 surface-aware
+    // dispatch_web_app_action을 쓰므로, Metal provenance를 잃지 않는 별도 funnel로 보낸다.
+    out.* = app_session.handleMetalKeyEvent(key_event) catch return @intFromEnum(Status.key_failed);
     return @intFromEnum(Status.ok);
 }
 
@@ -4938,6 +4940,53 @@ test "FP7 watch-root ABI short output reports required length without consuming 
     try std.testing.expectEqual(required, maru_macos_app_session_take_file_tree_watch_root(session, out.ptr, out.len));
     try std.testing.expectEqual(@as(usize, 0), maru_macos_app_session_take_file_tree_watch_root(session, out.ptr, out.len));
 }
+
+test "Metal key-down ABI repairs stale dock focus before routing Cmd+W" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "dirty.md", .data = "# dirty" });
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = path_buf[0..try tmp.dir.realPath(io, &path_buf)];
+    const path = try std.fs.path.join(std.testing.allocator, &.{ root, "dirty.md" });
+    defer std.testing.allocator.free(path);
+
+    const config: AppSessionConfig = .{
+        .abi_version = abi_version,
+        .cols = 80,
+        .rows = 24,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(AppCommandKind.controlled_smoke),
+    };
+    var session: ?*AppSession = null;
+    try std.testing.expectEqual(@as(c_int, @intFromEnum(Status.ok)), maru_macos_app_session_create(&config, &session));
+    defer maru_macos_app_session_destroy(session);
+    try std.testing.expectEqual(@as(u32, 1), maru_macos_app_session_open_file_panel_path(session, path.ptr, path.len));
+    const entry = &session.?.dock.singleGroup().?.entries.items[0];
+    entry.mode = .source_edit;
+    entry.dirty = true;
+    session.?.focus_owner = .{ .dock_surface = entry.surface_id }; // TerminalView가 실제 source인 stale logical owner.
+
+    const event: KeyEvent = .{
+        .codepoint = 'w',
+        .base_codepoint = 'w',
+        .key_code = 0,
+        .modifier_shift = 0,
+        .modifier_control = 0,
+        .modifier_option = 0,
+        .modifier_command = 1,
+        .is_repeat = 0,
+        .raw_key_code = 0x0D,
+    };
+    var summary: AppFrameSummary = undefined;
+    try std.testing.expectEqual(@as(c_int, @intFromEnum(Status.ok)), maru_macos_app_session_key_down(session, &event, &summary));
+    var request_id: u64 = 0;
+    try std.testing.expectEqual(@as(u64, 0), maru_macos_app_session_take_file_panel_dirty_sync_action_v2(session, &request_id));
+    try std.testing.expect(session.?.pending_file_panel_close == null);
+    try std.testing.expect(session.?.focus_owner == .workspace);
+}
+
 test "macOS app exported session API reports null outputs as ABI errors" {
     const config: AppSessionConfig = .{
         .abi_version = abi_version,

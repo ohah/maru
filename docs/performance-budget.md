@@ -94,6 +94,18 @@ RSS는 Maru 앱 프로세스와 해당 WebContent process를 분리해서 재고
 
 계측은 1,000회 pointer move와 projected frame을 반복해 누적값과 event/frame별 최댓값을 함께 남긴다. cap+1 admission은 split/group allocation 0과 다음 layout frame allocation 0도 단언한다.
 
+## 파일 탐색기 scrollbar/icon 예산
+
+이 절은 [파일 패널 §7](file-panel.md#7-파일-트리-도크-영역-내)의 후속 PR 2 hot path를 소유한다. 16,384 materialized row와 1,000회 pointer/frame fixture가 아래 누적값과 event/frame별 최댓값을 artifact로 남긴다.
+
+| 경로 | hard gate | 실패 조건·구현 제약 |
+| --- | --- | --- |
+| row projection icon classify | row visit ≤ 16,384, row당 classify ≤ 1, allocator call = 0, lock = 0, FS/MIME I/O = 0, worker hop = 0 | basename/extension ASCII 비교만 허용한다. render/pointer event에서 재분류하거나 filesystem metadata·MIME database를 조회하면 실패한다. |
+| scrollbar pointer move/drag | geometry build ≤ 1, allocator call = 0, lock = 0, FS I/O = 0, worker hop = 0, dock layout rebuild = 0 | 저장된 total/visible/effective-scroll과 drag snapshot만 소비한다. divider/tab gesture owner 전환, generation 변경 뒤 commit, 매 move row scan은 실패한다. |
+| projected frame | classifier call = 0, scrollbar geometry build ≤ 1, allocator call = 0, FS/MIME I/O = 0, 신규 CoreText shape/raster call = 0 | row에 저장된 semantic kind와 coverage PUA를 사용한다. thumb는 native quad≤1, icon glyph quad는 visible row당≤1이며 fade 때문에 row projection을 재실행하지 않는다. |
+
+PR 2 required gate는 이 구조 counter artifact와 `mise run perf`를 함께 실행한다. wall-clock은 기존 runner 변동을 따르되 위 zero/bounded counter 하나라도 어기면 시간과 무관하게 실패한다.
+
 ## 파일 도크 FP10 Markdown 라이브 프리뷰 예산
 
 | 경로 | hard gate | 실패 조건·구현 제약 |

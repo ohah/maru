@@ -11,6 +11,9 @@ struct MermaidHelperSmoke {
         }
         let helperURL = URL(fileURLWithPath: rawPath)
         var checks: [String: Any] = [:]
+        // Helper가 반복 시작되어도 합성 custom-scheme base URL을 구성하지 않아야 한다.
+        // 실제 alert 부재는 UI gate이고, smoke는 helper와 공유하는 page 계약의 nil 값을 증명한다.
+        checks["blank_document_base_url_is_nil"] = MermaidRendererPage.baseURL == nil
 
         maru_macos_mermaid_test_reset()
         var before = MaruMermaidCoordinatorSnapshot()

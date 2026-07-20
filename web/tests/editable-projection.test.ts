@@ -361,6 +361,43 @@ describe("CM6 editable Markdown projection", () => {
     });
   });
 
+  test("publishes the same advanced interaction and diagnostics identity when disabled", () => {
+    withEditorDom((dom) => {
+      const revisions = new EditorRevisionClock();
+      const diagnostics = createLivePreviewDiagnosticsSnapshot();
+      const editor = createMarkdownEditor(
+        dom.window.document.querySelector("main") as HTMLElement,
+        "- [ ] task",
+        () => {},
+        () => {},
+      );
+      const controller = new EditableProjectionController(editor, 7, revisions);
+      try {
+        controller.enable();
+        const before = controller.interactionIdentity();
+        controller.disable();
+        const after = controller.interactionIdentity();
+        controller.writeDiagnostics(diagnostics);
+        expect(after).toEqual({
+          editorEpoch: 7,
+          documentRevision: before.documentRevision,
+          projectionGeneration: before.projectionGeneration + 1,
+        });
+        expect(diagnostics).toEqual(
+          expect.objectContaining({
+            editorEpoch: after.editorEpoch,
+            documentRevision: after.documentRevision,
+            projectionGeneration: after.projectionGeneration,
+            decorationCount: 0,
+          }),
+        );
+      } finally {
+        controller.destroy();
+        editor.destroy();
+      }
+    });
+  });
+
   test("publishes an externally replaced document only after its revision advances", () => {
     withEditorDom((dom) => {
       const revisions = new EditorRevisionClock();

@@ -11415,6 +11415,7 @@ pub const AppSession = struct {
         InvalidLink,
         OpenFailed,
         LinkBusy,
+        StaleDocument,
     };
 
     fn queueFilePanelExternalLink(
@@ -11457,6 +11458,23 @@ pub const AppSession = struct {
         defer self.allocator.free(target);
         _ = self.dock.focusGroup(source_group);
         if (self.openFilePanelPath(target) != .opened) return error.OpenFailed;
+    }
+
+    /// Trusted Markdown shell bridge entry. The document epoch remains part of the capability until the native
+    /// action admission, so a late request cannot resolve a relative path against a replacement document.
+    pub fn openFilePanelDocumentLink(
+        self: *AppSession,
+        surface_id: u64,
+        editor_epoch: u64,
+        href: []const u8,
+        force_system: bool,
+    ) FilePanelLinkError!void {
+        if (!self.dock_initialized) return error.SurfaceNotFound;
+        const source = self.dock.entryForSurfaceId(surface_id) orelse return error.SurfaceNotFound;
+        if (source.kind != .markdown) return error.WrongKind;
+        if (!source.editor_document_active or source.editor_epoch != editor_epoch)
+            return error.StaleDocument;
+        return self.openFilePanelLink(surface_id, href, force_system);
     }
 
     /// 외부 링크 action을 caller-owned 버퍼로 복사한 뒤 1회 소비한다. 버퍼가 작으면 pending을 보존해 재시도할 수 있다.
@@ -39740,7 +39758,14 @@ test "FP5 file panel routing: picker one-shot, md/html open, duplicate activatio
     try std.testing.expectEqual(@as(usize, 2), group.entries.items.len);
 
     var external_buf: [std.fs.max_path_bytes]u8 = undefined;
-    try session.openFilePanelLink(md_surface_id, "https://example.com/guide?q=1#usage", false);
+    const first_editor_epoch = try session.beginFilePanelDocument(md_surface_id, 1001);
+    const current_editor_epoch = try session.beginFilePanelDocument(md_surface_id, 1002);
+    try std.testing.expectError(
+        error.StaleDocument,
+        session.openFilePanelDocumentLink(md_surface_id, first_editor_epoch, "https://stale.example", false),
+    );
+    try std.testing.expect(session.takeFilePanelExternalLinkAction(&external_buf) == null);
+    try session.openFilePanelDocumentLink(md_surface_id, current_editor_epoch, "https://example.com/guide?q=1#usage", false);
     try std.testing.expect(session.takeFilePanelExternalLinkAction(external_buf[0..8]) == null); // 작은 버퍼는 소비하지 않는다.
     const in_app = session.takeFilePanelExternalLinkAction(&external_buf).?;
     try std.testing.expectEqual(FilePanelExternalLinkActionKind.in_app, in_app.kind);

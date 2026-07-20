@@ -25,6 +25,12 @@ import {
 } from "./renderer-capability";
 import { EditableProjectionController } from "./editable-projection-view";
 import { createLivePreviewDiagnosticsSnapshot } from "./live-preview-diagnostics";
+import {
+  LivePreviewIntentCoordinator,
+  type LivePreviewDispatchResult,
+  type LivePreviewIntentQueueMetrics,
+} from "./live-preview-interaction";
+import type { LivePreviewIntent } from "./live-preview-intent";
 
 export const viewerChannel = "maru.file.viewer.v1";
 export const maxAssetRequests = 64;
@@ -42,6 +48,18 @@ export function assetBase64BudgetAllowed(currentBytes: number, nextBytes: number
     nextBytes >= 0 &&
     currentBytes <= maxAssetBase64Bytes - nextBytes
   );
+}
+
+export function writeLivePreviewIntentQueueMetrics(
+  target: HTMLElement,
+  metrics: LivePreviewIntentQueueMetrics,
+  bridgeCalls: number,
+): void {
+  target.dataset.liveIntentQueueRetained = String(metrics.retained);
+  target.dataset.liveIntentQueueMaxRetained = String(metrics.maxRetained);
+  target.dataset.liveIntentQueueDropped = String(metrics.dropped);
+  target.dataset.liveIntentQueueCompleted = String(metrics.completed);
+  target.dataset.liveIntentBridgeCalls = String(bridgeCalls);
 }
 
 type BridgeResult = Record<string, unknown>;
@@ -372,12 +390,19 @@ export function requestFileBridge(
       case "openLink":
         if (
           !isRecord(value) ||
+          !Number.isSafeInteger(value.editor_epoch) ||
+          value.editor_epoch <= 0 ||
           typeof value.href !== "string" ||
           typeof value.forceSystem !== "boolean"
         ) {
           throw new TypeError("invalid openLink payload");
         }
-        request = { method, href: value.href, forceSystem: value.forceSystem };
+        request = {
+          method,
+          editor_epoch: value.editor_epoch as number,
+          href: value.href,
+          forceSystem: value.forceSystem,
+        };
         break;
     }
     node.textContent = JSON.stringify(encodeFileBridgeRequest(request));
@@ -475,12 +500,19 @@ export function bootShell(document: Document, targetWindow: Window): void {
   let closeLockRequestId: number | null = null;
   let applyingDiskContent = false;
   let pendingDiskUpdate: ViewUpdate | null = null;
+  let liveIntentCm6Transactions = 0;
+  let liveIntentExternalActions = 0;
+  let liveIntentDualEffects = 0;
+  let liveIntentRejections = 0;
+  let liveIntentBridgeCalls = 0;
+  let livePreviewIntentCoordinator: LivePreviewIntentCoordinator | null = null;
 
   const currentDocumentIsDirty = (): boolean =>
     editor !== null && documentIsDirtyAgainstSnapshot(editor.state.doc, savedDocument);
 
   const setCloseLocked = (requestId: number | null) => {
     closeLockRequestId = requestId;
+    if (requestId !== null) livePreviewIntentCoordinator?.clearPending();
     if (editor !== null) editor.contentDOM.contentEditable = requestId === null ? "true" : "false";
   };
 
@@ -627,6 +659,81 @@ export function bootShell(document: Document, targetWindow: Window): void {
     }
   };
 
+  const publishLiveIntentQueueMetrics = (metrics?: LivePreviewIntentQueueMetrics) => {
+    if (status === null) return;
+    const current = metrics ?? livePreviewIntentCoordinator?.metrics();
+    if (current === undefined) return;
+    writeLivePreviewIntentQueueMetrics(status, current, liveIntentBridgeCalls);
+  };
+
+  const recordLivePreviewDispatch = (dispatch: LivePreviewDispatchResult) => {
+    liveIntentCm6Transactions += dispatch.cm6Transactions;
+    liveIntentExternalActions += dispatch.externalActions;
+    liveIntentDualEffects += Number(dispatch.cm6Transactions > 0 && dispatch.externalActions > 0);
+    liveIntentRejections += Number(dispatch.result.type !== "committed");
+    if (status !== null) {
+      status.dataset.liveIntentResult = dispatch.result.type;
+      status.dataset.liveIntentCm6Transactions = String(liveIntentCm6Transactions);
+      status.dataset.liveIntentExternalActions = String(liveIntentExternalActions);
+      status.dataset.liveIntentDualEffects = String(liveIntentDualEffects);
+      status.dataset.liveIntentRejections = String(liveIntentRejections);
+    }
+  };
+
+  livePreviewIntentCoordinator = new LivePreviewIntentCoordinator({
+    scheduleDocumentOperation: (operation) => {
+      const scheduled = mutationQueue.then(operation);
+      mutationQueue = scheduled.then(
+        () => undefined,
+        () => undefined,
+      );
+      return scheduled;
+    },
+    currentContext: (intent) => {
+      if (editor === null || editorEpoch === null || livePreviewController === null) return null;
+      const projectionIdentity = livePreviewController.interactionIdentity();
+      return {
+        view: editor,
+        guard: {
+          editorEpoch,
+          documentRevision: revisions.documentRevision,
+          projectionGeneration: projectionIdentity.projectionGeneration,
+          mode,
+          closeLockRequestId,
+          composing: editor.composing,
+          readonly: mode !== "live-preview" || editor.contentDOM.contentEditable === "false",
+        },
+        currentEntry: livePreviewController.entryForIntent(intent),
+      };
+    },
+    hrefAllowed: (href) =>
+      isLinkActivation({
+        channel: viewerChannel,
+        type: "link-activate",
+        href,
+        forceSystem: false,
+      }),
+    openExternalAction: async (intent, action) => {
+      liveIntentBridgeCalls += 1;
+      publishLiveIntentQueueMetrics();
+      await requestFileBridge(document, "openLink", {
+        editor_epoch: intent.editorEpoch,
+        href: action.href,
+        forceSystem: action.forceSystem,
+      });
+    },
+    onDispatch: recordLivePreviewDispatch,
+    onError: () => {
+      if (status !== null) status.textContent = "라이브 프리뷰 동작을 완료할 수 없습니다.";
+    },
+    onMetricsChanged: publishLiveIntentQueueMetrics,
+  });
+
+  const enqueueLivePreviewIntent = (intent: LivePreviewIntent) => {
+    if (livePreviewIntentCoordinator?.enqueue(intent) !== true && status !== null)
+      status.dataset.liveIntentResult = "queue-full";
+  };
+
   const ensureEditor = (): EditorView => {
     if (editor !== null) return editor;
     if (editorEpoch === null) throw new Error("editor document epoch is unavailable");
@@ -639,6 +746,7 @@ export function bootShell(document: Document, targetWindow: Window): void {
           return;
         }
         if (update.docChanged) {
+          livePreviewIntentCoordinator?.clearPending();
           revisions.documentChanged();
           reportDirty(savedDocument === null || !update.state.doc.eq(savedDocument));
         }
@@ -668,6 +776,7 @@ export function bootShell(document: Document, targetWindow: Window): void {
         status.dataset.liveProjectionVisitedNodes = String(metrics.visitedSyntaxNodes);
         status.dataset.liveGeneralFragments = "0";
       },
+      enqueueLivePreviewIntent,
     );
     if (closeLockRequestId !== null) editor.contentDOM.contentEditable = "false";
     return editor;
@@ -675,6 +784,7 @@ export function bootShell(document: Document, targetWindow: Window): void {
 
   const applyMode = (next: FilePanelMode) => {
     mode = next;
+    if (mode !== "live-preview") livePreviewIntentCoordinator?.clearPending();
     if (isEditableFileMode(mode)) {
       frame.hidden = true;
       editorHost.hidden = false;
@@ -875,7 +985,9 @@ export function bootShell(document: Document, targetWindow: Window): void {
       return;
     }
     if (isLinkActivation(event.data)) {
+      if (editorEpoch === null) return;
       void requestFileBridge(document, "openLink", {
+        editor_epoch: editorEpoch,
         href: event.data.href,
         forceSystem: event.data.forceSystem,
       }).catch(() => {
@@ -916,6 +1028,7 @@ export function bootShell(document: Document, targetWindow: Window): void {
   targetWindow.addEventListener(
     "pagehide",
     () => {
+      livePreviewIntentCoordinator?.destroy();
       livePreviewController?.destroy();
       editor?.destroy();
       editor = null;

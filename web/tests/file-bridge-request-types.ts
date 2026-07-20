@@ -11,6 +11,7 @@ void encodeFileBridgeRequest({
 });
 void encodeFileBridgeRequest({
   method: "openLink",
+  editor_epoch: 1,
   href: "https://example.com",
   forceSystem: false,
 });

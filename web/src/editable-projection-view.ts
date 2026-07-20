@@ -14,6 +14,7 @@ import {
 } from "./live-preview-diagnostics";
 import { compareProjectionEntries, type ProjectionEntry } from "./live-preview-projection";
 import type { EditorRevisionClock } from "./live-preview-state";
+import type { LivePreviewIntent } from "./live-preview-intent";
 
 type DecorationPatch = Readonly<{
   remove: ReadonlySet<Decoration>;
@@ -49,6 +50,7 @@ export type EditableProjectionControllerMetrics = Readonly<{
   emittedDecorations: number;
   diffedDecorations: number;
   projectionTransactions: number;
+  interactionRangeChecks: number;
 }>;
 
 export type EditableProjectionControllerState = "running" | "disabled";
@@ -57,6 +59,16 @@ type ProjectionCommit = Readonly<{
   state: EditableProjectionControllerState;
   metrics: EditableProjectionControllerMetrics;
 }>;
+
+type IntentSink = (intent: LivePreviewIntent) => void;
+
+export function livePreviewGestureCaptureAllowed(
+  trusted: boolean,
+  composing: boolean,
+  repeat = false,
+): boolean {
+  return trusted && !composing && !repeat;
+}
 
 function styleClass(entry: Extract<ProjectionEntry, { type: "style" }>): string {
   switch (entry.role) {
@@ -222,6 +234,154 @@ export class EditableProjectionController {
   private emittedDecorations = 0;
   private diffedDecorations = 0;
   private projectionTransactions = 0;
+  private interactionRangeChecks = 0;
+  private documentRevision = 0;
+  private projectionGeneration = 0;
+  private nextGestureNonce = 1;
+
+  private identityForIntent() {
+    return {
+      editorEpoch: this.editorEpoch,
+      documentRevision: this.documentRevision,
+      projectionGeneration: this.projectionGeneration,
+    } as const;
+  }
+
+  private nextTrustedGestureNonce(): number | null {
+    const nonce = this.nextGestureNonce;
+    if (!Number.isSafeInteger(nonce) || nonce <= 0) return null;
+    this.nextGestureNonce += 1;
+    return nonce;
+  }
+
+  private findInteractionEntry(owns: (entry: ProjectionEntry) => boolean): ProjectionEntry | null {
+    for (const { entry } of this.records) {
+      this.interactionRangeChecks += 1;
+      if (owns(entry)) return entry;
+    }
+    return null;
+  }
+
+  private entryAtDomTarget(target: EventTarget | null): ProjectionEntry | null {
+    const elementConstructor = this.view.dom.ownerDocument.defaultView?.Element;
+    if (elementConstructor === undefined || !(target instanceof elementConstructor)) return null;
+    const element = target as Element;
+    if (!this.view.dom.contains(element)) return null;
+    const task = element.closest(".maru-projection-task, .maru-projection-task-checked");
+    const link = element.closest(".maru-projection-link");
+    const owner = task ?? link;
+    if (owner === null) return null;
+    const position = this.view.posAtDOM(owner, 0);
+    return this.findInteractionEntry((entry) => {
+      if (task !== null)
+        return entry.type === "task" && entry.from <= position && position < entry.to;
+      return entry.type === "link" && entry.labelFrom <= position && position < entry.labelTo;
+    });
+  }
+
+  private entryAtSelection(): ProjectionEntry | null {
+    const position = this.view.state.selection.main.head;
+    return this.findInteractionEntry((entry) => {
+      if (entry.type === "task") return entry.from <= position && position < entry.to;
+      if (entry.type === "link") return entry.labelFrom <= position && position < entry.labelTo;
+      return false;
+    });
+  }
+
+  private readonly pointerPressed = (event: MouseEvent) => {
+    if (!this.enabled || this.destroyed || event.button !== 0) return;
+    const entry = this.entryAtDomTarget(event.target);
+    if (entry === null) return;
+    const ownsTask =
+      entry.type === "task" && !event.metaKey && !event.ctrlKey && !event.altKey && !event.shiftKey;
+    const ownsLink = entry.type === "link" && event.metaKey && !event.ctrlKey && !event.altKey;
+    if (!ownsTask && !ownsLink) return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    if (
+      !livePreviewGestureCaptureAllowed(
+        event.isTrusted,
+        this.view.composing || this.deferredComposition,
+      )
+    )
+      return;
+    if (ownsTask && entry.type === "task") {
+      // This exact projected gesture belongs to the closed intent dispatcher. Stopping it here also keeps a
+      // synthetic event from falling through to CM6's generic pointer selection before the trust gate rejects it.
+      this.onIntent({
+        type: "toggle-task",
+        ...this.identityForIntent(),
+        from: entry.from,
+        to: entry.to,
+        trusted: event.isTrusted,
+        input: "pointer",
+        gestureNonce: null,
+      });
+      return;
+    }
+    if (entry.type !== "link") return;
+    const nonce = this.nextTrustedGestureNonce();
+    if (nonce === null) return;
+    this.onIntent({
+      type: "activate-link",
+      ...this.identityForIntent(),
+      from: entry.from,
+      to: entry.to,
+      trusted: event.isTrusted,
+      disposition: event.shiftKey ? "command-shift-pointer" : "command-pointer",
+      gestureNonce: nonce,
+    });
+  };
+
+  private readonly keyPressed = (event: KeyboardEvent) => {
+    if (
+      !this.enabled ||
+      this.destroyed ||
+      event.key !== "Enter" ||
+      !event.metaKey ||
+      event.ctrlKey ||
+      event.altKey ||
+      event.shiftKey
+    ) {
+      return;
+    }
+    const entry = this.entryAtSelection();
+    if (entry === null) return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    if (
+      !livePreviewGestureCaptureAllowed(
+        event.isTrusted,
+        event.isComposing || this.view.composing || this.deferredComposition,
+        event.repeat,
+      )
+    ) {
+      return;
+    }
+    if (entry.type === "task") {
+      this.onIntent({
+        type: "toggle-task",
+        ...this.identityForIntent(),
+        from: entry.from,
+        to: entry.to,
+        trusted: event.isTrusted,
+        input: "keyboard",
+        gestureNonce: null,
+      });
+      return;
+    }
+    const nonce = this.nextTrustedGestureNonce();
+    if (nonce === null) return;
+    this.onIntent({
+      type: "activate-link",
+      ...this.identityForIntent(),
+      from: entry.from,
+      to: entry.to,
+      trusted: event.isTrusted,
+      disposition: "keyboard",
+      gestureNonce: nonce,
+    });
+  };
 
   private readonly compositionEnded = () => {
     if (!this.enabled || this.destroyed || !this.deferredComposition) return;
@@ -231,12 +391,15 @@ export class EditableProjectionController {
 
   constructor(
     private readonly view: EditorView,
-    editorEpoch: number,
+    private readonly editorEpoch: number,
     private readonly revisions: EditorRevisionClock,
     private readonly onCommit: (commit: ProjectionCommit) => void = () => {},
+    private readonly onIntent: IntentSink = () => {},
   ) {
     this.diagnostics = new LivePreviewDiagnosticsStore(editorEpoch);
     this.view.contentDOM.addEventListener("compositionend", this.compositionEnded);
+    this.view.dom.addEventListener("mousedown", this.pointerPressed, true);
+    this.view.dom.addEventListener("keydown", this.keyPressed, true);
   }
 
   enable(): void {
@@ -251,6 +414,8 @@ export class EditableProjectionController {
     this.enabled = false;
     this.deferredComposition = false;
     const projection = this.revisions.nextProjection();
+    this.documentRevision = projection.documentRevision;
+    this.projectionGeneration = projection.projectionGeneration;
     const remove = new Set<Decoration>();
     for (const record of this.records) {
       if (record.decoration !== null) remove.add(record.decoration);
@@ -280,6 +445,8 @@ export class EditableProjectionController {
     this.disable();
     this.destroyed = true;
     this.view.contentDOM.removeEventListener("compositionend", this.compositionEnded);
+    this.view.dom.removeEventListener("mousedown", this.pointerPressed, true);
+    this.view.dom.removeEventListener("keydown", this.keyPressed, true);
   }
 
   handleUpdate(update: ViewUpdate): void {
@@ -312,11 +479,37 @@ export class EditableProjectionController {
       emittedDecorations: this.emittedDecorations,
       diffedDecorations: this.diffedDecorations,
       projectionTransactions: this.projectionTransactions,
+      interactionRangeChecks: this.interactionRangeChecks,
     };
   }
 
   writeDiagnostics(target: LivePreviewDiagnostics): void {
     this.diagnostics.writeSnapshot(target);
+  }
+
+  interactionIdentity(): Readonly<{
+    editorEpoch: number;
+    documentRevision: number;
+    projectionGeneration: number;
+  }> {
+    return {
+      editorEpoch: this.editorEpoch,
+      documentRevision: this.documentRevision,
+      projectionGeneration: this.projectionGeneration,
+    };
+  }
+
+  entryForIntent(intent: LivePreviewIntent): ProjectionEntry | null {
+    return this.findInteractionEntry(
+      (entry) =>
+        entry.from === intent.from &&
+        entry.to === intent.to &&
+        ((intent.type === "toggle-task" && entry.type === "task") ||
+          (intent.type === "activate-link" && entry.type === "link") ||
+          (intent.type === "select-atomic" && entry.type === "atomic") ||
+          ((intent.type === "move-table-cell" || intent.type === "append-table-row") &&
+            entry.type === "table-cell")),
+    );
   }
 
   private project(): void {
@@ -326,6 +519,8 @@ export class EditableProjectionController {
       return;
     }
     const identity = this.revisions.nextProjection();
+    this.documentRevision = identity.documentRevision;
+    this.projectionGeneration = identity.projectionGeneration;
     const projection = buildEditableProjection(
       this.view.state,
       editableProjectionWindow(this.view),

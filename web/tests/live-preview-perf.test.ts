@@ -12,7 +12,7 @@ import { startDocumentCopyProbe } from "../scripts/live-preview-perf-scenario";
 function artifact(): LivePreviewPerfArtifact {
   return {
     schema_version: livePreviewPerfSchemaVersion,
-    scenario: "fp11b-8mib-1000-editable-projection",
+    scenario: "fp11c-8mib-1000-editable-projection-interactions",
     counters: {
       visited_code_units: 64_000,
       visited_syntax_nodes: 8_000,
@@ -29,6 +29,16 @@ function artifact(): LivePreviewPerfArtifact {
       iframe_destroy: 0,
       retained_html_bytes: 0,
       generated_outside_retention: 0,
+      intent_events: 6,
+      intent_cm6_transactions: 1,
+      intent_external_actions: 1,
+      intent_dual_effects: 0,
+      intent_zero_effect_rejections: 4,
+      intent_range_checks: 4,
+      intent_queue_capacity: 8,
+      intent_queue_max_retained: 8,
+      intent_queue_dropped: 1,
+      intent_bridge_calls: 2,
       projection_fallback_counts: Object.fromEntries(
         projectionFallbackReasons.map((reason) => [
           reason,
@@ -46,7 +56,7 @@ describe("live preview performance artifact", () => {
     expect(probe.stop()).toBeGreaterThan(0);
   });
 
-  test("requires the closed FP11b schema and bounded nonzero projection counters", () => {
+  test("requires the closed FP11c schema and exact interaction effect counters", () => {
     const current = artifact();
     expect(() => validateLivePreviewPerfArtifact(current)).not.toThrow();
     for (const name of [
@@ -55,6 +65,7 @@ describe("live preview performance artifact", () => {
       "iframe_destroy",
       "retained_html_bytes",
       "generated_outside_retention",
+      "intent_dual_effects",
     ] as const) {
       expect(() =>
         validateLivePreviewPerfArtifact({
@@ -102,6 +113,15 @@ describe("live preview performance artifact", () => {
       ["dom_mutations", 1],
       ["dense_math_scanned_code_units", 32_769],
       ["dense_math_scanned_code_units", 1_000_000],
+      ["intent_events", 7],
+      ["intent_cm6_transactions", 2],
+      ["intent_external_actions", 2],
+      ["intent_zero_effect_rejections", 3],
+      ["intent_range_checks", 0],
+      ["intent_queue_capacity", 9],
+      ["intent_queue_max_retained", 9],
+      ["intent_queue_dropped", 0],
+      ["intent_bridge_calls", 3],
     ] as const) {
       expect(() =>
         validateLivePreviewPerfArtifact({

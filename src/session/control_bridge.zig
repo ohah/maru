@@ -47,7 +47,7 @@ pub const FileAccess = struct {
     write_fn: *const fn (context: *anyopaque, editor_epoch: u64, content: []const u8) anyerror!void,
     set_dirty_fn: *const fn (context: *anyopaque, report: DirtyReport) anyerror!void,
     resolve_external_change_fn: *const fn (context: *anyopaque, editor_epoch: u64, success: bool) anyerror!void,
-    open_link_fn: *const fn (context: *anyopaque, href: []const u8, force_system: bool) anyerror!void,
+    open_link_fn: *const fn (context: *anyopaque, editor_epoch: u64, href: []const u8, force_system: bool) anyerror!void,
 
     fn beginDocument(self: FileAccess, document_id: u64) anyerror!u64 {
         return self.begin_document_fn(self.context, document_id);
@@ -73,8 +73,8 @@ pub const FileAccess = struct {
         return self.resolve_external_change_fn(self.context, editor_epoch, success);
     }
 
-    fn openLink(self: FileAccess, href: []const u8, force_system: bool) anyerror!void {
-        return self.open_link_fn(self.context, href, force_system);
+    fn openLink(self: FileAccess, editor_epoch: u64, href: []const u8, force_system: bool) anyerror!void {
+        return self.open_link_fn(self.context, editor_epoch, href, force_system);
     }
 };
 
@@ -179,18 +179,18 @@ pub fn dispatchBridgeWithFileAccess(
         const href = params.href;
         if (href.len == 0 or href.len > std.fs.max_path_bytes)
             return errorResponse(gpa, req.id, .invalid_params);
-        access.openLink(href, params.force_system) catch return errorResponse(gpa, req.id, .internal_error);
+        access.openLink(params.editor_epoch, href, params.force_system) catch return errorResponse(gpa, req.id, .internal_error);
         return serializeFileMutationResult(gpa, req.id, "opened", true);
     }
     return errorResponse(gpa, req.id, .method_not_found);
 }
 
-fn openLinkParams(params: ?std.json.Value) error{InvalidParams}!struct { href: []const u8, force_system: bool } {
+fn openLinkParams(params: ?std.json.Value) error{InvalidParams}!struct { editor_epoch: u64, href: []const u8, force_system: bool } {
     const obj = switch (params orelse return error.InvalidParams) {
         .object => |obj| obj,
         else => return error.InvalidParams,
     };
-    if (obj.count() != 2) return error.InvalidParams;
+    if (obj.count() != 3) return error.InvalidParams;
     const href = switch (obj.get("href") orelse return error.InvalidParams) {
         .string => |value| value,
         else => return error.InvalidParams,
@@ -199,7 +199,11 @@ fn openLinkParams(params: ?std.json.Value) error{InvalidParams}!struct { href: [
         .bool => |value| value,
         else => return error.InvalidParams,
     };
-    return .{ .href = href, .force_system = force_system };
+    return .{
+        .editor_epoch = try positiveInteger(obj.get("editor_epoch") orelse return error.InvalidParams),
+        .href = href,
+        .force_system = force_system,
+    };
 }
 
 fn dirtyReportParam(params: ?std.json.Value) error{InvalidParams}!DirtyReport {
@@ -414,6 +418,7 @@ const FakeFileAccess = struct {
     resolve_calls: usize = 0,
     last_open_link: [std.fs.max_path_bytes]u8 = undefined,
     last_open_link_len: usize = 0,
+    last_open_link_editor_epoch: u64 = 0,
     last_open_link_force_system: bool = false,
 
     fn beginDocument(context: *anyopaque, document_id: u64) anyerror!u64 {
@@ -464,11 +469,12 @@ const FakeFileAccess = struct {
         self.external_change_resolved = success;
     }
 
-    fn openLink(context: *anyopaque, href: []const u8, force_system: bool) anyerror!void {
+    fn openLink(context: *anyopaque, editor_epoch: u64, href: []const u8, force_system: bool) anyerror!void {
         const self: *FakeFileAccess = @ptrCast(@alignCast(context));
         if (self.fail or href.len > self.last_open_link.len) return error.OpenFailed;
         @memcpy(self.last_open_link[0..href.len], href);
         self.last_open_link_len = href.len;
+        self.last_open_link_editor_epoch = editor_epoch;
         self.last_open_link_force_system = force_system;
     }
 
@@ -625,16 +631,17 @@ test "dispatchBridge: file.write and revision-scoped dirty are pinned provider m
 
 test "dispatchBridge: file.openLink is an exact-parameter pinned provider mutation" {
     var fake: FakeFileAccess = .{};
-    const req = "{\"jsonrpc\":\"2.0\",\"id\":16,\"method\":\"maru.file.openLink\",\"params\":{\"href\":\"https://example.com/guide\",\"forceSystem\":true}}";
+    const req = "{\"jsonrpc\":\"2.0\",\"id\":16,\"method\":\"maru.file.openLink\",\"params\":{\"editor_epoch\":7,\"href\":\"https://example.com/guide\",\"forceSystem\":true}}";
     const resp = try dispatchBridgeWithFileAccess(testing.allocator, req, "0.1.0", fake.access());
     defer testing.allocator.free(resp);
     var parsed = try parseValue(testing.allocator, resp);
     defer parsed.deinit();
     try testing.expect(parsed.value.object.get("result") != null);
     try testing.expectEqualStrings("https://example.com/guide", fake.last_open_link[0..fake.last_open_link_len]);
+    try testing.expectEqual(@as(u64, 7), fake.last_open_link_editor_epoch);
     try testing.expect(fake.last_open_link_force_system);
 
-    const bad = "{\"jsonrpc\":\"2.0\",\"id\":17,\"method\":\"maru.file.openLink\",\"params\":{\"href\":\"next.md\",\"forceSystem\":false,\"path\":\"/tmp/escape.md\"}}";
+    const bad = "{\"jsonrpc\":\"2.0\",\"id\":17,\"method\":\"maru.file.openLink\",\"params\":{\"editor_epoch\":7,\"href\":\"next.md\",\"forceSystem\":false,\"path\":\"/tmp/escape.md\"}}";
     const bad_resp = try dispatchBridgeWithFileAccess(testing.allocator, bad, "0.1.0", fake.access());
     defer testing.allocator.free(bad_resp);
     var bad_parsed = try parseValue(testing.allocator, bad_resp);
@@ -644,6 +651,7 @@ test "dispatchBridge: file.openLink is an exact-parameter pinned provider mutati
     for ([_][]const u8{
         "{\"jsonrpc\":\"2.0\",\"id\":18,\"method\":\"maru.file.openLink\",\"params\":{\"href\":\"https://example.com\"}}",
         "{\"jsonrpc\":\"2.0\",\"id\":19,\"method\":\"maru.file.openLink\",\"params\":{\"href\":\"https://example.com\",\"forceSystem\":\"true\"}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":20,\"method\":\"maru.file.openLink\",\"params\":{\"editor_epoch\":0,\"href\":\"https://example.com\",\"forceSystem\":false}}",
     }) |invalid| {
         const invalid_resp = try dispatchBridgeWithFileAccess(testing.allocator, invalid, "0.1.0", fake.access());
         defer testing.allocator.free(invalid_resp);

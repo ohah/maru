@@ -161,7 +161,7 @@ export function interactionGuardRejection(
   if (intent.documentRevision !== guard.documentRevision) return "stale-revision";
   if (intent.projectionGeneration !== guard.projectionGeneration) return "stale-projection";
   if (guard.closeLockRequestId !== null) return "close-locked";
-  if (guard.readonly || guard.mode === "read") return "readonly";
+  if (guard.readonly || guard.mode !== "live-preview") return "readonly";
   if (guard.composing) return "composing";
   if (!intent.trusted) return "untrusted-event";
   if (intent.type === "activate-link") {

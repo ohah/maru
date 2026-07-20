@@ -12710,8 +12710,9 @@ pub const AppSession = struct {
         return action;
     }
 
-    /// 핀된 Markdown 경로의 lexical parent를 directory handle로 연 뒤, 상대 asset의 모든 하위 component를
-    /// descriptor-relative + no-follow로 순회한다. 같은 fd에서 stat/read하므로 symlink/rename TOCTOU 탈출이 없다.
+    /// 핀된 Markdown 경로의 lexical parent도 root fd부터 component별 no-follow로 연 뒤, 상대 asset의 모든 하위
+    /// component를 같은 capability 아래에서 순회한다. 최초 parent 재개방까지 symlink를 거부해야 열린 문서의
+    /// ancestor가 교체된 뒤에도 새 namespace나 root 밖 파일을 읽지 않는다.
     pub fn readFilePanelAsset(
         self: *AppSession,
         gpa: std.mem.Allocator,
@@ -12724,10 +12725,8 @@ pub const AppSession = struct {
 
         var normalized_buf: [std.fs.max_path_bytes]u8 = undefined;
         const normalized = file_panel_bridge.normalizeAssetPath(raw_path, &normalized_buf) catch return error.InvalidPath;
-        const parent = std.fs.path.dirname(entry.path) orelse ".";
-        const cwd = std.Io.Dir.cwd();
-        const parent_dir = cwd.openDir(self.io, parent, .{}) catch return error.NotFound;
-        defer parent_dir.close(self.io);
+        const pinned = openPinnedFilePanelParent(self.io, entry.path) catch return error.OutsideRoot;
+        defer pinned.dir.close(self.io);
 
         var opened_dirs: [std.fs.max_path_bytes / 2]std.Io.Dir = undefined;
         var opened_count: usize = 0;
@@ -12736,7 +12735,7 @@ pub const AppSession = struct {
             opened_dirs[opened_count].close(self.io);
         };
 
-        var current = parent_dir;
+        var current = pinned.dir;
         if (std.fs.path.dirname(normalized)) |subdir| {
             var components = std.mem.splitScalar(u8, subdir, '/');
             while (components.next()) |component| {
@@ -50317,6 +50316,40 @@ test "FP4 file panel readAsset: symlink escape and html surfaces are denied" {
     try std.testing.expectError(error.OutsideRoot, session.readFilePanelAsset(allocator, 801, "escape-dir/secret.png"));
     try std.testing.expectError(error.WrongKind, session.readFilePanel(allocator, 802, 1));
     try std.testing.expectError(error.WrongKind, session.readFilePanelAsset(allocator, 802, "escape.png"));
+}
+
+test "FP4 file panel readAsset: replaced lexical parent symlink is denied" {
+    const io = std.testing.io;
+    const allocator = std.testing.allocator;
+    var root_tmp = std.testing.tmpDir(.{});
+    defer root_tmp.cleanup();
+    var outside_tmp = std.testing.tmpDir(.{});
+    defer outside_tmp.cleanup();
+    try root_tmp.dir.createDirPath(io, "pinned");
+    try root_tmp.dir.writeFile(io, .{ .sub_path = "pinned/doc.md", .data = "![x](secret.png)" });
+    try outside_tmp.dir.writeFile(io, .{ .sub_path = "secret.png", .data = "OUTSIDE" });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try root_tmp.dir.realPath(io, &root_buf)];
+    var outside_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const outside = outside_buf[0..try outside_tmp.dir.realPath(io, &outside_buf)];
+    const doc_path = try std.fmt.allocPrint(allocator, "{s}/pinned/doc.md", .{root});
+    defer allocator.free(doc_path);
+
+    var session: AppSession = undefined;
+    session.io = io;
+    session.dock = try dock_panel.DockPanel.init(allocator, &app_runtime.entry_ids);
+    session.dock_initialized = true;
+    defer session.dock.deinit();
+    const group = session.dock.singleGroup().?;
+    _ = try session.dock.open(group, doc_path, .markdown);
+    group.entries.items[0].surface_id = 803;
+
+    try root_tmp.dir.rename("pinned", root_tmp.dir, "moved", io);
+    try root_tmp.dir.symLink(io, outside, "pinned", .{});
+    try std.testing.expectError(
+        error.OutsideRoot,
+        session.readFilePanelAsset(allocator, 803, "secret.png"),
+    );
 }
 
 test "FP6 file panel write atomically replaces only the pinned markdown and preserves dirty until shell ack" {

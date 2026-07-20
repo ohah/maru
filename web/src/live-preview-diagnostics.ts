@@ -14,6 +14,18 @@ export const projectionFallbackReasons = [
 export type ProjectionFallbackReason = (typeof projectionFallbackReasons)[number];
 export type ProjectionFallbackCounts = Record<ProjectionFallbackReason, number>;
 
+export type AtomicWidgetMetrics = Readonly<{
+  editorEpoch: number;
+  documentRevision: number;
+  projectionGeneration: number;
+  desired: number;
+  mounted: number;
+  richSourceLimit: number;
+  rendererUnavailable: number;
+  staleCapability: number;
+  staleCapabilityTotal: number;
+}>;
+
 export type LivePreviewDiagnostics = {
   editorEpoch: number;
   documentRevision: number;

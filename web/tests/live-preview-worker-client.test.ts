@@ -7,7 +7,7 @@ import {
   type WorkerPort,
 } from "../src/live-preview-worker-client";
 
-const viewport = { from: 0, to: 0, active: false } as const;
+const requests = [] as const;
 
 class FakeWorker implements WorkerPort {
   readonly sent: LivePreviewRequest[] = [];
@@ -32,7 +32,14 @@ class FakeWorker implements WorkerPort {
 }
 
 function result(documentRevision: number, projectionGeneration: number): ProjectionResult {
-  return { type: "result", documentRevision, projectionGeneration, fragments: [] };
+  return {
+    type: "result",
+    editorEpoch: 1,
+    documentRevision,
+    projectionGeneration,
+    results: [],
+    rejected: [],
+  };
 }
 
 describe("live preview worker latest-only client", () => {
@@ -49,10 +56,11 @@ describe("live preview worker latest-only client", () => {
         return worker;
       },
       () => ({
+        editorEpoch: 1,
         documentRevision: revision,
         projectionGeneration: generation,
         source,
-        visibleRanges: [{ from: 0, to: source.length, active: false }],
+        requests,
       }),
       (value) => projections.push(value),
     );
@@ -63,9 +71,7 @@ describe("live preview worker latest-only client", () => {
     source = "aBc";
     revision = 1;
     generation = 2;
-    client.submitChanges(0, 1, ChangeSet.of({ from: 1, to: 2, insert: "B" }, 3), 2, [
-      { from: 0, to: 3, active: false },
-    ]);
+    client.submitChanges(0, 1, ChangeSet.of({ from: 1, to: 2, insert: "B" }, 3), 2, requests);
     expect(worker.sent).toHaveLength(1);
     worker.reply(result(0, 0));
     expect(worker.sent.map(({ type }) => type)).toEqual(["seed", "apply"]);
@@ -73,16 +79,11 @@ describe("live preview worker latest-only client", () => {
     source = "aBC";
     revision = 2;
     generation = 3;
-    client.submitChanges(1, 2, ChangeSet.of({ from: 2, to: 3, insert: "C" }, 3), 3, [
-      { from: 0, to: 3, active: false },
-    ]);
+    client.submitChanges(1, 2, ChangeSet.of({ from: 2, to: 3, insert: "C" }, 3), 3, requests);
     source = "ABC";
     revision = 3;
     generation = 4;
-    client.submitChanges(2, 3, ChangeSet.of({ from: 0, to: 1, insert: "A" }, 3), 4, [
-      { from: 0, to: 3, active: false },
-      { from: 0, to: 3, active: true },
-    ]);
+    client.submitChanges(2, 3, ChangeSet.of({ from: 0, to: 1, insert: "A" }, 3), 4, requests);
     worker.reply(result(1, 1));
     expect(worker.sent).toHaveLength(2);
     expect(projections).toEqual([]);
@@ -106,19 +107,25 @@ describe("live preview worker latest-only client", () => {
       () => {
         snapshotCalls += 1;
         return {
+          editorEpoch: 1,
           documentRevision: snapshotCalls === 1 ? 0 : 7,
           projectionGeneration: snapshotCalls === 1 ? 1 : 8,
           source: snapshotCalls === 1 ? "old" : "latest",
-          visibleRanges: [{ from: 0, to: 6, active: false }],
+          requests,
         };
       },
       () => {},
     );
     client.start();
-    client.submitChanges(6, 7, ChangeSet.of({ from: 0, insert: "x" }, 6), 8, [viewport]);
+    client.submitChanges(6, 7, ChangeSet.of({ from: 0, insert: "x" }, 6), 8, requests);
     worker.reply(result(0, 0));
     expect(worker.sent).toHaveLength(2);
-    expect(worker.sent[1]).toEqual({ type: "seed", documentRevision: 7, source: "latest" });
+    expect(worker.sent[1]).toEqual({
+      type: "seed",
+      editorEpoch: 1,
+      documentRevision: 7,
+      source: "latest",
+    });
     expect(worker.terminated).toBe(false);
     worker.reply(result(7, 0));
     expect(worker.sent[2]).toMatchObject({ type: "project", documentRevision: 7 });
@@ -129,17 +136,18 @@ describe("live preview worker latest-only client", () => {
     const client = new LivePreviewWorkerClient(
       () => worker,
       () => ({
+        editorEpoch: 1,
         documentRevision: 0,
         projectionGeneration: 1,
         source: "abc",
-        visibleRanges: [viewport],
+        requests,
       }),
       () => {},
     );
     client.start();
     worker.reply(result(0, 0));
     worker.reply(result(0, 1));
-    client.submitChanges(0, 1, ChangeSet.of({ from: 1, to: 2, insert: "B" }, 3), 2, [viewport]);
+    client.submitChanges(0, 1, ChangeSet.of({ from: 1, to: 2, insert: "B" }, 3), 2, requests);
     expect(worker.sent.at(-1)).toMatchObject({
       type: "apply",
       baseRevision: 0,
@@ -160,10 +168,11 @@ describe("live preview worker latest-only client", () => {
         return worker;
       },
       () => ({
+        editorEpoch: 1,
         documentRevision: 0,
         projectionGeneration: 1,
         source: "seed",
-        visibleRanges: [viewport],
+        requests,
       }),
       () => {},
       (state) => states.push(state),
@@ -209,10 +218,11 @@ describe("live preview worker latest-only client", () => {
         return worker;
       },
       () => ({
+        editorEpoch: 1,
         documentRevision: 0,
         projectionGeneration: 1,
         source: "x",
-        visibleRanges: [viewport],
+        requests,
       }),
       () => {},
       (state) => states.push(state),
@@ -242,10 +252,11 @@ describe("live preview worker latest-only client", () => {
         return worker;
       },
       () => ({
+        editorEpoch: 1,
         documentRevision: 0,
         projectionGeneration: 1,
         source: "x",
-        visibleRanges: [viewport],
+        requests,
       }),
       (projection) => projections.push(projection),
       () => {},
@@ -275,10 +286,11 @@ describe("live preview worker latest-only client", () => {
     const client = new LivePreviewWorkerClient(
       () => worker,
       () => ({
+        editorEpoch: 1,
         documentRevision: revision,
         projectionGeneration: 1,
         source,
-        visibleRanges: [viewport],
+        requests,
       }),
       () => {},
     );
@@ -289,7 +301,7 @@ describe("live preview worker latest-only client", () => {
     );
     revision = 1;
     source = "latest";
-    client.submitChanges(0, 1, changes, 2, [viewport]);
+    client.submitChanges(0, 1, changes, 2, requests);
     worker.reply(result(0, 0));
     expect(worker.sent.some(({ type }) => type === "apply")).toBe(false);
     expect(worker.sent.at(-1)?.type).toBe("seed");
@@ -304,10 +316,11 @@ describe("live preview worker latest-only client", () => {
         return new FakeWorker();
       },
       () => ({
+        editorEpoch: 1,
         documentRevision: 0,
         projectionGeneration: 1,
         source: "x".repeat(8 * 1024 * 1024 + 1),
-        visibleRanges: [viewport],
+        requests,
       }),
       () => {},
       (state) => states.push(state),
@@ -325,10 +338,11 @@ describe("live preview worker latest-only client", () => {
     const client = new LivePreviewWorkerClient(
       () => worker,
       () => ({
+        editorEpoch: 1,
         documentRevision: revision,
         projectionGeneration: 1,
         source,
-        visibleRanges: [viewport],
+        requests,
       }),
       () => {},
       (state, reason) => states.push({ state, reason }),
@@ -336,7 +350,7 @@ describe("live preview worker latest-only client", () => {
     client.start();
     source = "x".repeat(8 * 1024 * 1024 + 1);
     revision = 7;
-    client.submitChanges(6, 7, ChangeSet.of({ from: 0, insert: "y" }, 1), 2, [viewport]);
+    client.submitChanges(6, 7, ChangeSet.of({ from: 0, insert: "y" }, 1), 2, requests);
     worker.reply(result(0, 0));
     expect(worker.sent).toHaveLength(1);
     expect(worker.terminated).toBe(true);
@@ -348,17 +362,18 @@ describe("live preview worker latest-only client", () => {
     const exact = new LivePreviewWorkerClient(
       () => exactWorker,
       () => ({
+        editorEpoch: 1,
         documentRevision: revision,
         projectionGeneration: 1,
         source,
-        visibleRanges: [viewport],
+        requests,
       }),
       () => {},
     );
     exact.start();
     source = "x".repeat(8 * 1024 * 1024);
     revision = 7;
-    exact.submitChanges(6, 7, ChangeSet.of({ from: 0, insert: "y" }, 1), 2, [viewport]);
+    exact.submitChanges(6, 7, ChangeSet.of({ from: 0, insert: "y" }, 1), 2, requests);
     exactWorker.reply(result(0, 0));
     expect(exactWorker.sent.at(-1)).toMatchObject({ type: "seed", documentRevision: 7 });
   });

@@ -4,11 +4,15 @@ import {
   maxLivePreviewSyntaxNodes,
   maxLivePreviewTableCells,
 } from "../src/live-preview-projection";
-import { maxLivePreviewProjectionCodeUnits } from "../src/live-preview-protocol";
+import {
+  maxLivePreviewProjectionCodeUnits,
+  maxLivePreviewResultBytes,
+} from "../src/live-preview-protocol";
 import { maxMathDelimiterScanCodeUnits } from "../src/markdown-language";
 import { maxRetainedLivePreviewIntents } from "../src/live-preview-interaction";
+import { maxAtomicSourceBytes, maxAtomicProjectionRequests } from "../src/atomic-projection";
 
-export const livePreviewPerfSchemaVersion = 4;
+export const livePreviewPerfSchemaVersion = 5;
 
 export type LivePreviewPerfCounters = Readonly<{
   visited_code_units: number;
@@ -26,6 +30,19 @@ export type LivePreviewPerfCounters = Readonly<{
   iframe_destroy: number;
   retained_html_bytes: number;
   generated_outside_retention: number;
+  atomic_requests: number;
+  atomic_results: number;
+  atomic_asset_grants: number;
+  atomic_worker_hashed_bytes_max: number;
+  atomic_worker_hashed_bytes_batch_max: number;
+  atomic_result_payload_bytes: number;
+  atomic_cap_plus_one_hashed_bytes: number;
+  atomic_main_hashed_bytes: number;
+  atomic_main_copied_bytes: number;
+  atomic_mounted_max: number;
+  atomic_iframe_create_max_per_frame: number;
+  atomic_iframe_destroy_max_per_frame: number;
+  atomic_generated_outside_retention: number;
   intent_events: number;
   intent_cm6_transactions: number;
   intent_external_actions: number;
@@ -63,7 +80,7 @@ export type LivePreviewPerfCounters = Readonly<{
 
 export type LivePreviewPerfArtifact = Readonly<{
   schema_version: typeof livePreviewPerfSchemaVersion;
-  scenario: "fp11d-8mib-1000-editable-projection-table-interactions";
+  scenario: "fp11e-8mib-1000-editable-projection-atomic-widgets";
   counters: LivePreviewPerfCounters;
 }>;
 
@@ -83,6 +100,19 @@ const counterNames = [
   "iframe_destroy",
   "retained_html_bytes",
   "generated_outside_retention",
+  "atomic_requests",
+  "atomic_results",
+  "atomic_asset_grants",
+  "atomic_worker_hashed_bytes_max",
+  "atomic_worker_hashed_bytes_batch_max",
+  "atomic_result_payload_bytes",
+  "atomic_cap_plus_one_hashed_bytes",
+  "atomic_main_hashed_bytes",
+  "atomic_main_copied_bytes",
+  "atomic_mounted_max",
+  "atomic_iframe_create_max_per_frame",
+  "atomic_iframe_destroy_max_per_frame",
+  "atomic_generated_outside_retention",
   "intent_events",
   "intent_cm6_transactions",
   "intent_external_actions",
@@ -121,7 +151,7 @@ const counterNames = [
 export function validateLivePreviewPerfArtifact(artifact: LivePreviewPerfArtifact): void {
   if (artifact.schema_version !== livePreviewPerfSchemaVersion)
     throw new Error("live preview perf schema mismatch");
-  if (artifact.scenario !== "fp11d-8mib-1000-editable-projection-table-interactions")
+  if (artifact.scenario !== "fp11e-8mib-1000-editable-projection-atomic-widgets")
     throw new Error("live preview perf scenario mismatch");
   const actualNames = Object.keys(artifact.counters).sort();
   const expectedNames = [...counterNames].sort();
@@ -165,6 +195,21 @@ export function validateLivePreviewPerfArtifact(artifact: LivePreviewPerfArtifac
     artifact.counters.iframe_destroy !== 0 ||
     artifact.counters.retained_html_bytes !== 0 ||
     artifact.counters.generated_outside_retention !== 0 ||
+    artifact.counters.atomic_requests !== 3 ||
+    artifact.counters.atomic_results !== 3 ||
+    artifact.counters.atomic_asset_grants !== 1 ||
+    artifact.counters.atomic_worker_hashed_bytes_max !== maxAtomicSourceBytes["fenced-code"] ||
+    artifact.counters.atomic_worker_hashed_bytes_batch_max !==
+      maxAtomicProjectionRequests * maxAtomicSourceBytes["fenced-code"] ||
+    artifact.counters.atomic_result_payload_bytes <= 0 ||
+    artifact.counters.atomic_result_payload_bytes > maxLivePreviewResultBytes ||
+    artifact.counters.atomic_cap_plus_one_hashed_bytes !== 0 ||
+    artifact.counters.atomic_main_hashed_bytes !== 0 ||
+    artifact.counters.atomic_main_copied_bytes !== 0 ||
+    artifact.counters.atomic_mounted_max !== maxAtomicProjectionRequests ||
+    artifact.counters.atomic_iframe_create_max_per_frame !== 2 ||
+    artifact.counters.atomic_iframe_destroy_max_per_frame !== 2 ||
+    artifact.counters.atomic_generated_outside_retention !== 0 ||
     artifact.counters.intent_events !== 6 ||
     artifact.counters.intent_cm6_transactions !== 1 ||
     artifact.counters.intent_external_actions !== 1 ||
@@ -204,11 +249,11 @@ export function validateLivePreviewPerfArtifact(artifact: LivePreviewPerfArtifac
     artifact.counters.table_group_build_record_checks_max > maxLivePreviewProjectionEntries ||
     artifact.counters.table_group_cell_arrays_created_max !== 1
   ) {
-    throw new Error("FP11d editable projection and table interaction budget exceeded");
+    throw new Error("FP11e editable projection and atomic widget budget exceeded");
   }
   for (const reason of projectionFallbackReasons) {
-    const expected = reason === "atomic-not-enabled" ? 1 : 0;
+    const expected = 0;
     if (artifact.counters.projection_fallback_counts[reason] !== expected)
-      throw new Error("FP11d projection fallback mismatch");
+      throw new Error("FP11e projection fallback mismatch");
   }
 }

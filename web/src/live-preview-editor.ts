@@ -2,7 +2,7 @@ import {
   Annotation,
   StateEffect,
   StateField,
-  type ChangeDesc,
+  type ChangeSet,
   type Extension,
 } from "@codemirror/state";
 import {
@@ -12,19 +12,24 @@ import {
   type DecorationSet,
   type ViewUpdate,
 } from "@codemirror/view";
+import {
+  maxAtomicProjectionRequests,
+  type AssetGrant,
+  type AtomicProjectionRequest,
+} from "./atomic-projection";
+import type { LivePreviewIntent } from "./live-preview-intent";
+import type { AtomicWidgetMetrics } from "./live-preview-diagnostics";
+import type { ProjectionEntry } from "./live-preview-projection";
+import { editableProjectionWindow } from "./editable-projection";
 import type { EditorRevisionClock } from "./live-preview-state";
+import { isProjectionResult, type ProjectionResult } from "./live-preview-protocol";
 import {
-  isProjectionResult,
-  maxLivePreviewProjectionCodeUnits,
-  type ProjectionRange,
-  type ProjectionResult,
-} from "./live-preview-protocol";
-import {
+  atomicRendererChannel,
+  atomicRendererMessageMatches,
   capabilitiesEqual,
-  fragmentChannel,
-  fragmentMessageMatches,
-  isFragmentReady,
-  isFragmentRendered,
+  isAtomicRendererReady,
+  isAtomicRendererRendered,
+  type AtomicRenderAsset,
   type RendererCapability,
 } from "./renderer-capability";
 import {
@@ -33,40 +38,33 @@ import {
   type WorkerPort,
 } from "./live-preview-worker-client";
 
-const setLivePreviewDecorations = StateEffect.define<DecorationSet>();
-const livePreviewDecorationTransaction = Annotation.define<boolean>();
+const setAtomicDecorations = StateEffect.define<DecorationSet>();
+export const atomicProjectionTransaction = Annotation.define<boolean>();
+export const maxConsumedAtomicAssetNonces = 64;
 
-const livePreviewDecorationField = StateField.define<DecorationSet>({
+const atomicDecorationField = StateField.define<DecorationSet>({
   create: () => Decoration.none,
   update(value, transaction) {
     if (transaction.docChanged) value = value.map(transaction.changes);
     for (const effect of transaction.effects) {
-      if (effect.is(setLivePreviewDecorations)) value = effect.value;
+      if (effect.is(setAtomicDecorations)) value = effect.value;
     }
     return value;
   },
   provide: (field) => EditorView.decorations.from(field),
 });
 
-export const livePreviewEditorExtension: Extension = livePreviewDecorationField;
+export const livePreviewEditorExtension: Extension = atomicDecorationField;
 
-type FragmentRecord = Readonly<{
+type AtomicEntry = Extract<ProjectionEntry, { type: "atomic" }>;
+
+type AtomicRecord = Readonly<{
   capability: RendererCapability;
-  fragment: Readonly<{ from: number; to: number; kind: string }>;
-  widget: FragmentWidget;
+  request: AtomicProjectionRequest;
+  widget: AtomicWidget;
 }>;
 
-export function mapLivePreviewRange(
-  range: Readonly<{ from: number; to: number }>,
-  changes: ChangeDesc,
-  documentLength: number,
-): Readonly<{ from: number; to: number }> {
-  const from = Math.min(documentLength, changes.mapPos(range.from, -1));
-  const to = Math.min(documentLength, changes.mapPos(range.to, 1));
-  return { from: Math.min(from, to), to: Math.max(from, to) };
-}
-
-export function reconcileFragmentBatch<T>(
+export function reconcileAtomicBatch<T>(
   current: readonly T[],
   desired: readonly T[],
   equal: (left: T, right: T) => boolean,
@@ -83,17 +81,35 @@ export function reconcileFragmentBatch<T>(
   return { next, removed: removals.length, added: additions.length };
 }
 
-export function fragmentRecordCanBeReused(
+export function atomicRecordCanBeReused(
   capability: RendererCapability,
-  result: Readonly<{ documentRevision: number; projectionGeneration: number }>,
-  currentRange: Readonly<{ from: number; to: number }>,
-  nextRange: Readonly<{ from: number; to: number }>,
+  request: AtomicProjectionRequest,
+  candidate: AtomicProjectionRequest,
 ): boolean {
   return (
-    capability.documentRevision === result.documentRevision &&
-    capability.projectionGeneration === result.projectionGeneration &&
-    currentRange.from === nextRange.from &&
-    currentRange.to === nextRange.to
+    capability.editorEpoch === candidate.editorEpoch &&
+    capability.documentRevision === candidate.documentRevision &&
+    request.editorEpoch === candidate.editorEpoch &&
+    request.documentRevision === candidate.documentRevision &&
+    request.kind === candidate.kind &&
+    request.from === candidate.from &&
+    request.to === candidate.to
+  );
+}
+
+export function atomicRangeRetained(
+  range: Readonly<{ from: number; to: number }>,
+  discovery: Readonly<{ from: number; to: number }>,
+  viewport: Readonly<{ from: number; to: number }>,
+  documentLength: number,
+): boolean {
+  const viewportLength = Math.max(1, viewport.to - viewport.from);
+  const retentionFrom = Math.max(0, viewport.from - viewportLength * 2);
+  const retentionTo = Math.min(documentLength, viewport.to + viewportLength * 2);
+  return (
+    (range.to <= discovery.from || range.from >= discovery.to) &&
+    range.to > retentionFrom &&
+    range.from < retentionTo
   );
 }
 
@@ -102,133 +118,114 @@ let nextWidgetGeneration = 0;
 let nextRendererInstance = Math.max(1, Date.now() % 1_000_000_000);
 
 function nextIdentity(counter: "widget" | "generation" | "renderer"): number {
-  if (counter === "widget") {
-    if (nextWidgetId >= Number.MAX_SAFE_INTEGER) throw new RangeError("widget identity exhausted");
-    return (nextWidgetId += 1);
-  }
-  if (counter === "generation") {
-    if (nextWidgetGeneration >= Number.MAX_SAFE_INTEGER)
-      throw new RangeError("widget generation exhausted");
-    return (nextWidgetGeneration += 1);
-  }
-  if (nextRendererInstance >= Number.MAX_SAFE_INTEGER)
-    throw new RangeError("renderer identity exhausted");
+  if (counter === "widget") return (nextWidgetId += 1);
+  if (counter === "generation") return (nextWidgetGeneration += 1);
   return (nextRendererInstance += 1);
-}
-
-function projectionRanges(view: EditorView): ProjectionRange[] {
-  const ranges: ProjectionRange[] = [];
-  const viewportLength = Math.max(1, view.viewport.to - view.viewport.from);
-  const overscan = viewportLength * 2;
-  const desiredFrom = Math.max(0, view.viewport.from - overscan);
-  const desiredTo = Math.min(view.state.doc.length, view.viewport.to + overscan);
-  const anchor = view.state.selection.main.head;
-  const maxFrom = Math.max(desiredFrom, desiredTo - maxLivePreviewProjectionCodeUnits);
-  const centeredFrom = Math.max(
-    desiredFrom,
-    anchor - Math.floor(maxLivePreviewProjectionCodeUnits / 2),
-  );
-  const viewportFrom = Math.min(maxFrom, centeredFrom);
-  ranges.push({
-    from: viewportFrom,
-    to: Math.min(desiredTo, viewportFrom + maxLivePreviewProjectionCodeUnits),
-    active: false,
-  });
-  for (const range of view.state.selection.ranges.slice(0, 15)) {
-    ranges.push({ from: range.from, to: range.to, active: true });
-  }
-  return ranges;
 }
 
 class BrowserWorkerPort implements WorkerPort {
   constructor(private readonly worker: Worker) {}
-
   postMessage(message: Parameters<Worker["postMessage"]>[0]): void {
     this.worker.postMessage(message);
   }
-
   terminate(): void {
     this.worker.terminate();
   }
-
   get onmessage(): ((event: MessageEvent<unknown>) => void) | null {
     return this.worker.onmessage as ((event: MessageEvent<unknown>) => void) | null;
   }
-
   set onmessage(value: ((event: MessageEvent<unknown>) => void) | null) {
     this.worker.onmessage = value as ((this: Worker, event: MessageEvent) => unknown) | null;
   }
-
   get onerror(): ((event: Event) => void) | null {
     return this.worker.onerror as ((event: Event) => void) | null;
   }
-
   set onerror(value: ((event: Event) => void) | null) {
     this.worker.onerror = value as ((this: AbstractWorker, event: ErrorEvent) => unknown) | null;
   }
-
   get onmessageerror(): ((event: MessageEvent<unknown>) => void) | null {
     return this.worker.onmessageerror as ((event: MessageEvent<unknown>) => void) | null;
   }
-
   set onmessageerror(value: ((event: MessageEvent<unknown>) => void) | null) {
     this.worker.onmessageerror = value as ((this: Worker, event: MessageEvent) => unknown) | null;
   }
 }
 
-class FragmentWidget extends WidgetType {
+class AtomicWidget extends WidgetType {
   private port: MessagePort | null = null;
+  private transferPort: MessagePort | null = null;
   private deadline: ReturnType<typeof setTimeout> | null = null;
+  private revoked = false;
   private ready = false;
   private rendered = false;
-  private revoked = false;
 
   constructor(
     readonly capability: RendererCapability,
-    private html: string,
+    private payload: string,
+    private assets: readonly AtomicRenderAsset[],
     private readonly isCurrent: (capability: RendererCapability) => boolean,
     private readonly onFailure: (capability: RendererCapability) => void,
+    private readonly onSelect: (trusted: boolean) => void,
   ) {
     super();
   }
 
-  eq(other: FragmentWidget): boolean {
-    return capabilitiesEqual(this.capability, other.capability) && this.html === other.html;
+  eq(other: AtomicWidget): boolean {
+    return capabilitiesEqual(this.capability, other.capability);
+  }
+
+  isRendered(): boolean {
+    return this.rendered && !this.revoked;
   }
 
   toDOM(view: EditorView): HTMLElement {
     const document = view.dom.ownerDocument;
     const container = document.createElement("div");
-    container.className = "maru-live-fragment";
+    container.className = "maru-live-atomic";
+    container.addEventListener("mousedown", (event) => {
+      if (event.button !== 0 || this.revoked) return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      this.onSelect(event.isTrusted);
+    });
     const iframe = document.createElement("iframe");
-    iframe.className = "maru-live-fragment-frame";
-    iframe.title = "Markdown 라이브 프리뷰 조각";
+    iframe.className = "maru-live-atomic-frame";
+    iframe.title = "Markdown 라이브 프리뷰 원자 블록";
     iframe.setAttribute("sandbox", "allow-scripts allow-same-origin");
     iframe.setAttribute("tabindex", "-1");
+    iframe.style.pointerEvents = "none";
 
     const channel = new MessageChannel();
     this.port = channel.port1;
+    this.transferPort = channel.port2;
     this.port.onmessage = (event) => {
       if (!this.isCurrent(this.capability)) return;
-      if (isFragmentReady(event.data) && fragmentMessageMatches(event.data, this.capability)) {
+      if (
+        isAtomicRendererReady(event.data) &&
+        atomicRendererMessageMatches(event.data, this.capability)
+      ) {
         if (this.ready) return;
         this.ready = true;
         this.port?.postMessage({
-          channel: fragmentChannel,
-          type: "fragment-render",
+          channel: atomicRendererChannel,
+          type: "atomic-render",
           capability: this.capability,
-          html: this.html,
+          payload: this.payload,
+          assets: this.assets,
         });
-        // structured clone는 postMessage 반환 전에 끝난다. 이후 parent가 raw HTML을 보유할 이유가 없다.
-        this.html = "";
+        this.payload = "";
+        this.assets = [];
         return;
       }
-      if (isFragmentRendered(event.data) && fragmentMessageMatches(event.data, this.capability)) {
+      if (
+        isAtomicRendererRendered(event.data) &&
+        atomicRendererMessageMatches(event.data, this.capability)
+      ) {
         if (!this.ready || this.rendered) return;
         this.rendered = true;
         this.clearDeadline();
         iframe.style.height = `${Math.ceil(event.data.height)}px`;
-        iframe.dataset.fragmentRendered = "true";
+        iframe.dataset.atomicRendered = "true";
         view.requestMeasure();
         this.port?.close();
         this.port = null;
@@ -239,16 +236,18 @@ class FragmentWidget extends WidgetType {
       "load",
       () => {
         if (!this.isCurrent(this.capability)) return;
-        iframe.contentWindow?.postMessage(
-          { channel: fragmentChannel, type: "fragment-init", capability: this.capability },
+        const transferPort = this.transferPort;
+        const contentWindow = iframe.contentWindow;
+        if (transferPort === null || contentWindow === null) return;
+        contentWindow.postMessage(
+          { channel: atomicRendererChannel, type: "atomic-init", capability: this.capability },
           "*",
-          [channel.port2],
+          [transferPort],
         );
+        this.transferPort = null;
       },
       { once: true },
     );
-    // Install the load listener and capability port before assigning src/attaching. A cached custom-scheme
-    // renderer can otherwise complete while the iframe is still detached and lose its only init capability.
     iframe.src = "maru-app://render/render.html";
     container.append(iframe);
     this.deadline = setTimeout(() => this.onFailure(this.capability), 2_000);
@@ -262,13 +261,12 @@ class FragmentWidget extends WidgetType {
   revoke(): void {
     this.revoked = true;
     this.clearDeadline();
-    this.html = "";
+    this.payload = "";
+    this.assets = [];
     this.port?.close();
     this.port = null;
-  }
-
-  canReuse(): boolean {
-    return !this.revoked;
+    this.transferPort?.close();
+    this.transferPort = null;
   }
 
   private clearDeadline(): void {
@@ -277,172 +275,376 @@ class FragmentWidget extends WidgetType {
   }
 }
 
-export class LivePreviewEditorController {
+export class AtomicProjectionController {
   private client: LivePreviewWorkerClient | null = null;
   private enabled = false;
-  private records: FragmentRecord[] = [];
-  private desiredRecords: FragmentRecord[] = [];
+  private destroyed = false;
+  private entries: readonly AtomicEntry[] = [];
+  private requests: readonly AtomicProjectionRequest[] = [];
+  private records: AtomicRecord[] = [];
+  private desiredRecords: AtomicRecord[] = [];
+  private pendingUpdate: Readonly<{
+    baseRevision: number;
+    targetRevision: number;
+    changes: ChangeSet;
+  }> | null = null;
+  private applyingProjection = false;
+  private pendingProjection: ProjectionResult | null = null;
+  private nextRequestNonce = 1;
   private reconcileScheduled = false;
   private reconcileGeneration = 0;
   private reconcileAnimationFrame: number | null = null;
   private reconcileWatchdog: number | null = null;
-  private state: LivePreviewWorkerState = "running";
+  private richSourceLimit = 0;
+  private rendererUnavailable = 0;
+  private staleCapability = 0;
+  private staleCapabilityTotal = 0;
+  private lifecycleToken = 0;
+  private metricsDocumentRevision = 0;
+  private metricsProjectionGeneration = 1;
+  private readonly consumedAssetNonces = new Set<number>();
+
   constructor(
     private readonly view: EditorView,
     private readonly editorEpoch: number,
     private readonly revisions: EditorRevisionClock,
     private readonly workerConstructor: typeof Worker | null,
+    private readonly loadAsset: (grant: AssetGrant) => Promise<string | null>,
     private readonly onState: (state: LivePreviewWorkerState, reason?: string) => void = () => {},
-    private readonly onFragments: (desired: number, mounted: number) => void = () => {},
+    private readonly onWidgets: (metrics: AtomicWidgetMetrics) => void = () => {},
+    private readonly onIntent: (intent: LivePreviewIntent) => void = () => {},
   ) {}
 
   enable(): void {
-    if (this.enabled) {
-      this.project();
-      return;
-    }
+    if (this.destroyed || this.enabled) return;
+    this.lifecycleToken += 1;
     this.enabled = true;
+    this.requests = this.requestsForEntries(
+      this.metricsDocumentRevision,
+      this.metricsProjectionGeneration,
+      this.entries,
+    );
     if (this.workerConstructor === null) {
-      this.state = "disabled";
-      this.onState(this.state);
+      this.onState("disabled", "worker-unavailable");
+      this.publishMetrics();
       return;
     }
     this.client = new LivePreviewWorkerClient(
       () =>
-        new BrowserWorkerPort(
-          // WebKit custom schemes do not reliably instantiate module workers. zntc emits one self-contained
-          // bundle with no import graph, so a classic same-origin worker preserves the exact CSP/URL boundary.
-          new this.workerConstructor("maru-app://app/live-preview-worker.js"),
-        ),
+        new BrowserWorkerPort(new this.workerConstructor!("maru-app://app/live-preview-worker.js")),
       () => ({
+        editorEpoch: this.editorEpoch,
         documentRevision: this.revisions.documentRevision,
         projectionGeneration: this.revisions.projectionGeneration,
         source: this.view.state.doc.toString(),
-        visibleRanges: projectionRanges(this.view),
+        requests: this.requests,
       }),
-      (result) => this.applyProjection(result),
+      (result) => this.enqueueProjection(result),
       (state, reason) => {
-        this.state = state;
         this.onState(state, reason);
-        if (state === "recovering" || state === "disabled") this.clear();
+        if (state === "running") {
+          this.publishMetrics();
+        }
+        if (state === "recovering" || state === "disabled") {
+          this.requests = this.requestsForEntries(
+            this.metricsDocumentRevision,
+            this.metricsProjectionGeneration,
+            this.entries,
+          );
+          this.clear();
+        }
       },
     );
-    const projection = this.revisions.nextProjection();
     this.client.start();
-    this.client.submitProjection(
-      projection.documentRevision,
-      projection.projectionGeneration,
-      projectionRanges(this.view),
-    );
+    this.submitCurrentProjection();
   }
 
   disable(): void {
     if (!this.enabled) return;
     this.enabled = false;
+    this.pendingUpdate = null;
+    this.pendingProjection = null;
     this.client?.dispose();
     this.client = null;
     this.clear();
   }
 
   destroy(): void {
-    this.enabled = false;
-    this.client?.dispose();
-    this.client = null;
+    if (this.destroyed) return;
+    this.disable();
+    this.destroyed = true;
     this.cancelReconcile();
-    for (const record of [...this.records, ...this.desiredRecords]) record.widget.revoke();
-    this.records = [];
-    this.desiredRecords = [];
-    try {
-      this.view.dispatch({
-        effects: setLivePreviewDecorations.of(Decoration.none),
-        annotations: livePreviewDecorationTransaction.of(true),
-      });
-    } catch {
-      // The owner may already have destroyed EditorView during page teardown.
-    }
   }
 
   handleUpdate(update: ViewUpdate, baseRevision: number, targetRevision: number): void {
     if (
+      this.destroyed ||
       update.transactions.some(
-        (transaction) => transaction.annotation(livePreviewDecorationTransaction) === true,
+        (transaction) => transaction.annotation(atomicProjectionTransaction) === true,
       )
     ) {
       return;
     }
     if (update.docChanged) {
-      this.records = this.records.map((record) => ({
-        ...record,
-        fragment: {
-          ...record.fragment,
-          ...mapLivePreviewRange(record.fragment, update.changes, update.state.doc.length),
-        },
-      }));
+      const pending = this.pendingUpdate;
+      if (pending !== null && pending.targetRevision === baseRevision) {
+        try {
+          this.pendingUpdate = {
+            baseRevision: pending.baseRevision,
+            targetRevision,
+            changes: pending.changes.compose(update.changes),
+          };
+        } catch {
+          // A malformed or oversized composition deliberately falls back to the client's bounded full resync.
+          this.pendingUpdate = { baseRevision, targetRevision, changes: update.changes };
+        }
+      } else this.pendingUpdate = { baseRevision, targetRevision, changes: update.changes };
+      this.clear();
     }
-    if (!this.enabled || this.client === null) return;
-    if (update.docChanged) {
-      this.setDesiredRecords([]);
-      const projection = this.revisions.nextProjection();
-      this.client.submitChanges(
-        baseRevision,
-        targetRevision,
-        update.changes,
-        projection.projectionGeneration,
-        projectionRanges(update.view),
+  }
+
+  submitEntries(
+    documentRevision: number,
+    projectionGeneration: number,
+    entries: readonly AtomicEntry[],
+  ): void {
+    this.metricsDocumentRevision = documentRevision;
+    this.metricsProjectionGeneration = projectionGeneration;
+    this.richSourceLimit = 0;
+    this.rendererUnavailable = 0;
+    this.staleCapability = 0;
+    this.entries = entries.slice(0, maxAtomicProjectionRequests);
+    const discovery = editableProjectionWindow(this.view);
+    const available = [...this.desiredRecords, ...this.records].filter(
+      (record, index, records) =>
+        records.findIndex(({ capability }) => capabilitiesEqual(capability, record.capability)) ===
+        index,
+    );
+    const reused: AtomicRecord[] = [];
+    const pendingEntries: AtomicEntry[] = [];
+    for (const entry of this.entries) {
+      const candidateRequest: AtomicProjectionRequest = {
+        editorEpoch: this.editorEpoch,
+        documentRevision,
+        projectionGeneration,
+        requestNonce: 1,
+        kind: entry.role,
+        from: entry.from,
+        to: entry.to,
+      };
+      const candidate = available.find(
+        (record) =>
+          record.widget.isRendered() &&
+          !reused.includes(record) &&
+          atomicRecordCanBeReused(record.capability, record.request, candidateRequest),
       );
+      if (candidate === undefined) pendingEntries.push(entry);
+      else reused.push(candidate);
+    }
+    const retained: AtomicRecord[] = [];
+    for (const record of available) {
+      const range = record.request;
+      const stillDiscovered = this.entries.some(
+        (entry) => entry.role === range.kind && entry.from === range.from && entry.to === range.to,
+      );
+      if (
+        record.widget.isRendered() &&
+        !stillDiscovered &&
+        atomicRangeRetained(range, discovery, this.view.viewport, this.view.state.doc.length) &&
+        range.documentRevision === documentRevision &&
+        retained.length < maxAtomicProjectionRequests - this.entries.length &&
+        !retained.some(({ capability }) => capabilitiesEqual(capability, record.capability))
+      ) {
+        retained.push(record);
+      }
+    }
+    this.requests = this.requestsForEntries(documentRevision, projectionGeneration, pendingEntries);
+    this.setDesiredRecords([...reused, ...retained]);
+    if (!this.enabled || this.client === null) {
+      this.publishMetrics();
       return;
     }
-    if (update.selectionSet || update.viewportChanged) this.project();
+    const pending = this.pendingUpdate;
+    this.pendingUpdate = null;
+    if (pending !== null && pending.targetRevision === documentRevision) {
+      this.client.submitChanges(
+        pending.baseRevision,
+        pending.targetRevision,
+        pending.changes,
+        projectionGeneration,
+        this.requests,
+      );
+    } else this.client.submitProjection(documentRevision, projectionGeneration, this.requests);
+    this.publishMetrics();
   }
 
-  resync(): void {
-    if (!this.enabled) return;
-    this.client?.dispose();
-    this.client = null;
-    this.enabled = false;
-    this.clear();
-    this.enable();
-  }
-
-  private project(): void {
+  private submitCurrentProjection(): void {
     if (!this.enabled || this.client === null) return;
-    const projection = this.revisions.nextProjection();
     this.client.submitProjection(
-      projection.documentRevision,
-      projection.projectionGeneration,
-      projectionRanges(this.view),
+      this.revisions.documentRevision,
+      this.revisions.projectionGeneration,
+      this.requests,
     );
   }
 
-  private applyProjection(result: ProjectionResult): void {
+  private nextNonce(): number {
+    const nonce = this.nextRequestNonce;
+    if (!Number.isSafeInteger(nonce) || nonce <= 0) throw new RangeError("atomic nonce exhausted");
+    this.nextRequestNonce += 1;
+    return nonce;
+  }
+
+  private requestsForEntries(
+    documentRevision: number,
+    projectionGeneration: number,
+    entries: readonly AtomicEntry[],
+  ): AtomicProjectionRequest[] {
+    // Replay state belongs to the current exact request batch. Request nonces are monotonic, so an older result
+    // cannot become current after this reset, while successful future image projections do not accumulate into
+    // an editor-lifetime admission limit.
+    this.consumedAssetNonces.clear();
+    return entries.map((entry) => ({
+      editorEpoch: this.editorEpoch,
+      documentRevision,
+      projectionGeneration,
+      requestNonce: this.nextNonce(),
+      kind: entry.role,
+      from: entry.from,
+      to: entry.to,
+    }));
+  }
+
+  private enqueueProjection(result: ProjectionResult): void {
+    if (this.applyingProjection) {
+      this.pendingProjection = result;
+      return;
+    }
+    this.applyingProjection = true;
+    void this.drainProjectionQueue(result);
+  }
+
+  private async drainProjectionQueue(first: ProjectionResult): Promise<void> {
+    let current: ProjectionResult | null = first;
+    try {
+      while (current !== null) {
+        try {
+          await this.applyProjection(current);
+        } catch {
+          // A rejected bridge promise or unexpected renderer adapter failure is range-local. Keep draining the
+          // latest-only slot so an older failed result cannot strand or reorder a newer current projection.
+          this.rendererUnavailable += 1;
+          this.publishMetrics();
+        }
+        current = this.pendingProjection;
+        this.pendingProjection = null;
+      }
+    } finally {
+      this.applyingProjection = false;
+    }
+  }
+
+  private async applyProjection(result: ProjectionResult): Promise<void> {
+    const lifecycleToken = this.lifecycleToken;
     if (
       !this.enabled ||
+      this.destroyed ||
       this.view.composing ||
       !isProjectionResult(result) ||
+      result.editorEpoch !== this.editorEpoch ||
       result.documentRevision !== this.revisions.documentRevision ||
       result.projectionGeneration !== this.revisions.projectionGeneration
     ) {
+      this.staleCapabilityTotal += 1;
+      this.publishMetrics();
       return;
     }
-    const records: FragmentRecord[] = [];
-    const reusable = [...this.desiredRecords, ...this.records];
-    for (const fragment of result.fragments) {
+    const expectedNonces = new Set(this.requests.map(({ requestNonce }) => requestNonce));
+    const terminalNonces = [
+      ...result.results.map(({ request }) => request.requestNonce),
+      ...result.rejected.map(({ requestNonce }) => requestNonce),
+    ];
+    if (
+      terminalNonces.length !== expectedNonces.size ||
+      new Set(terminalNonces).size !== expectedNonces.size ||
+      terminalNonces.some((nonce) => !expectedNonces.has(nonce))
+    ) {
+      this.staleCapability += Math.max(1, expectedNonces.size);
+      this.staleCapabilityTotal += Math.max(1, expectedNonces.size);
+      this.publishMetrics();
+      return;
+    }
+    this.richSourceLimit = result.rejected.filter(
+      ({ reason }) => reason === "rich-source-limit",
+    ).length;
+    this.rendererUnavailable = result.rejected.filter(
+      ({ reason }) => reason === "renderer-unavailable" || reason === "invalid-request",
+    ).length;
+    const resultAssetNonces = result.results.flatMap(({ assetGrants }) =>
+      assetGrants.map(({ assetNonce }) => assetNonce),
+    );
+    if (
+      new Set(resultAssetNonces).size !== resultAssetNonces.length ||
+      resultAssetNonces.some((nonce) => this.consumedAssetNonces.has(nonce)) ||
+      this.consumedAssetNonces.size > maxConsumedAtomicAssetNonces - resultAssetNonces.length
+    ) {
+      if (this.consumedAssetNonces.size > maxConsumedAtomicAssetNonces - resultAssetNonces.length)
+        this.rendererUnavailable += Math.max(1, resultAssetNonces.length);
+      else {
+        this.staleCapability += 1;
+        this.staleCapabilityTotal += 1;
+      }
+      this.publishMetrics();
+      return;
+    }
+    const records: AtomicRecord[] = [...this.desiredRecords];
+    for (const projected of result.results) {
+      const currentRequest = this.requests.find(
+        ({ requestNonce }) => requestNonce === projected.request.requestNonce,
+      );
       if (
-        typeof fragment.html !== "string" ||
-        fragment.from < 0 ||
-        fragment.from >= fragment.to ||
-        fragment.to > this.view.state.doc.length
+        currentRequest === undefined ||
+        currentRequest.editorEpoch !== projected.request.editorEpoch ||
+        currentRequest.documentRevision !== projected.request.documentRevision ||
+        currentRequest.projectionGeneration !== projected.request.projectionGeneration ||
+        currentRequest.kind !== projected.request.kind ||
+        currentRequest.from !== projected.request.from ||
+        currentRequest.to !== projected.request.to
       ) {
+        this.staleCapability += 1;
+        this.staleCapabilityTotal += 1;
         continue;
       }
-      const existing = reusable.find(
-        (record) =>
-          fragmentRecordCanBeReused(record.capability, result, record.fragment, fragment) &&
-          record.widget.canReuse() &&
-          !records.some(({ capability }) => capabilitiesEqual(capability, record.capability)),
-      );
-      if (existing !== undefined) {
-        records.push(existing);
+      const assets: AtomicRenderAsset[] = [];
+      let assetFailure = false;
+      for (const grant of projected.assetGrants) {
+        this.consumedAssetNonces.add(grant.assetNonce);
+        let dataUrl: string | null = null;
+        try {
+          dataUrl = await this.loadAsset(grant);
+        } catch {
+          // Bridge timeout/mailbox failure has the same terminal policy as a rejected asset: preserve source and
+          // expose renderer-unavailable without rejecting the controller's fire-and-forget drain.
+          dataUrl = null;
+        }
+        if (
+          !this.enabled ||
+          lifecycleToken !== this.lifecycleToken ||
+          result.documentRevision !== this.revisions.documentRevision ||
+          result.projectionGeneration !== this.revisions.projectionGeneration ||
+          !this.requests.includes(currentRequest)
+        ) {
+          this.staleCapabilityTotal += 1;
+          this.publishMetrics();
+          return;
+        }
+        if (dataUrl === null) {
+          assetFailure = true;
+          this.rendererUnavailable += 1;
+          break;
+        }
+        assets.push({ opaqueId: grant.opaqueId, dataUrl });
+      }
+      if (assetFailure) {
         continue;
       }
       const capability: RendererCapability = {
@@ -453,49 +655,76 @@ export class LivePreviewEditorController {
         widgetGeneration: nextIdentity("generation"),
         rendererInstance: nextIdentity("renderer"),
       };
-      const widget = new FragmentWidget(
+      const request = projected.request;
+      const widget = new AtomicWidget(
         capability,
-        fragment.html,
+        projected.sanitizedPayload,
+        assets,
         (candidate) =>
           this.desiredRecords.some(({ capability: current }) =>
             capabilitiesEqual(candidate, current),
           ),
         (failed) => this.removeFailed(failed),
+        (trusted) => {
+          if (!trusted) return;
+          this.onIntent({
+            type: "select-atomic",
+            editorEpoch: this.editorEpoch,
+            documentRevision: this.revisions.documentRevision,
+            projectionGeneration: this.revisions.projectionGeneration,
+            from: request.from,
+            to: request.to,
+            trusted,
+            input: "pointer",
+            gestureNonce: null,
+          });
+        },
       );
-      records.push({
-        capability,
-        fragment: { from: fragment.from, to: fragment.to, kind: fragment.kind },
-        widget,
-      });
+      records.push({ capability, request, widget });
     }
     this.setDesiredRecords(records);
   }
 
   private removeFailed(failed: RendererCapability): void {
-    if (!this.enabled) return;
+    this.rendererUnavailable += 1;
     this.desiredRecords = this.desiredRecords.filter(
       ({ capability }) => !capabilitiesEqual(capability, failed),
     );
     this.scheduleReconcile();
+    this.publishMetrics();
   }
 
   private clear(): void {
+    this.lifecycleToken += 1;
     this.setDesiredRecords([]);
   }
 
-  private setDesiredRecords(records: FragmentRecord[]): void {
+  private setDesiredRecords(records: AtomicRecord[]): void {
     for (const record of [...this.desiredRecords, ...this.records]) {
-      if (!records.some(({ capability }) => capabilitiesEqual(capability, record.capability))) {
+      if (!records.some(({ capability }) => capabilitiesEqual(capability, record.capability)))
         record.widget.revoke();
-      }
     }
     this.desiredRecords = records;
-    this.onFragments(this.desiredRecords.length, this.records.length);
+    this.publishMetrics();
     this.scheduleReconcile();
   }
 
+  private publishMetrics(): void {
+    this.onWidgets({
+      editorEpoch: this.editorEpoch,
+      documentRevision: this.metricsDocumentRevision,
+      projectionGeneration: this.metricsProjectionGeneration,
+      desired: this.enabled ? Math.min(maxAtomicProjectionRequests, this.desiredRecords.length) : 0,
+      mounted: this.records.length,
+      richSourceLimit: this.richSourceLimit,
+      rendererUnavailable: this.rendererUnavailable,
+      staleCapability: this.staleCapability,
+      staleCapabilityTotal: this.staleCapabilityTotal,
+    });
+  }
+
   private scheduleReconcile(): void {
-    if (this.reconcileScheduled) return;
+    if (this.reconcileScheduled || this.destroyed) return;
     this.reconcileScheduled = true;
     const targetWindow = this.view.dom.ownerDocument.defaultView;
     const generation = (this.reconcileGeneration += 1);
@@ -506,61 +735,43 @@ export class LivePreviewEditorController {
       this.reconcileFrame();
     };
     this.reconcileAnimationFrame = targetWindow?.requestAnimationFrame?.(run) ?? null;
-    // WKWebView may suspend RAF while AppKit is starting or occluding a panel. The watchdog drains one capped
-    // batch only when no animation frame arrived; the later RAF becomes a no-op through reconcileScheduled.
     this.reconcileWatchdog = (targetWindow?.setTimeout.bind(targetWindow) ?? setTimeout)(run, 100);
   }
 
   private reconcileFrame(): void {
-    const desired = (record: FragmentRecord) =>
-      this.desiredRecords.some(({ capability }) =>
-        capabilitiesEqual(record.capability, capability),
-      );
-    const mounted = (record: FragmentRecord) =>
-      this.records.some(({ capability }) => capabilitiesEqual(record.capability, capability));
-
-    const batch = reconcileFragmentBatch(this.records, this.desiredRecords, (left, right) =>
+    const batch = reconcileAtomicBatch(this.records, this.desiredRecords, (left, right) =>
       capabilitiesEqual(left.capability, right.capability),
     );
-    const next = batch.next;
-
     if (batch.removed > 0 || batch.added > 0) {
       try {
         const decorations = Decoration.set(
-          next.map(({ fragment, widget }) =>
-            Decoration.replace({ widget, block: true }).range(fragment.from, fragment.to),
+          batch.next.map(({ request, widget }) =>
+            Decoration.replace({ widget, block: true }).range(request.from, request.to),
           ),
           true,
         );
         this.view.dispatch({
-          effects: setLivePreviewDecorations.of(decorations),
-          annotations: livePreviewDecorationTransaction.of(true),
+          effects: setAtomicDecorations.of(decorations),
+          annotations: atomicProjectionTransaction.of(true),
         });
-        this.records = next;
-        this.onFragments(this.desiredRecords.length, this.records.length);
+        this.records = batch.next;
+        this.publishMetrics();
       } catch (error) {
-        for (const record of [...this.records, ...this.desiredRecords]) record.widget.revoke();
-        this.desiredRecords = [];
-        this.records = [];
-        try {
-          this.view.dispatch({
-            effects: setLivePreviewDecorations.of(Decoration.none),
-            annotations: livePreviewDecorationTransaction.of(true),
-          });
-        } catch {
-          // Preserve the original failure diagnostic below.
-        }
-        this.state = "disabled";
+        this.clear();
         this.client?.dispose();
         this.client = null;
         const reason = error instanceof Error ? error.message : "unknown decoration error";
-        this.onState(this.state, `fragment-decoration:${reason}`);
+        this.onState("disabled", `atomic-decoration:${reason}`);
         return;
       }
     }
+    const desired = new Set(this.desiredRecords.map(({ capability }) => capability));
     if (
-      this.records.some((record) => !desired(record)) ||
-      this.desiredRecords.some((r) => !mounted(r))
+      this.records.some(({ capability }) => !desired.has(capability)) ||
+      this.desiredRecords.some(
+        ({ capability }) =>
+          !this.records.some((record) => capabilitiesEqual(record.capability, capability)),
+      )
     ) {
       this.scheduleReconcile();
     }
@@ -581,5 +792,16 @@ export class LivePreviewEditorController {
     this.reconcileGeneration += 1;
     this.reconcileScheduled = false;
     this.cancelScheduledHandles(this.view.dom.ownerDocument.defaultView);
+    for (const record of [...this.records, ...this.desiredRecords]) record.widget.revoke();
+    this.records = [];
+    this.desiredRecords = [];
+    try {
+      this.view.dispatch({
+        effects: setAtomicDecorations.of(Decoration.none),
+        annotations: atomicProjectionTransaction.of(true),
+      });
+    } catch {
+      // EditorView may already be destroyed by page teardown.
+    }
   }
 }

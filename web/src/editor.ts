@@ -3,6 +3,7 @@ import { markdown, markdownLanguage } from "@codemirror/lang-markdown";
 import { EditorState } from "@codemirror/state";
 import { EditorView, keymap, lineNumbers, type ViewUpdate } from "@codemirror/view";
 import { editableProjectionExtension } from "./editable-projection-view";
+import { livePreviewEditorExtension } from "./live-preview-editor";
 import { maruMathMarkdownExtension } from "./markdown-language";
 
 export function createMarkdownEditor(
@@ -21,6 +22,7 @@ export function createMarkdownEditor(
         history(),
         markdown({ base: markdownLanguage, extensions: maruMathMarkdownExtension }),
         editableProjectionExtension,
+        livePreviewEditorExtension,
         EditorView.lineWrapping,
         keymap.of([
           {

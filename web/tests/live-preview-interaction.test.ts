@@ -259,6 +259,8 @@ describe("live preview interaction dispatcher", () => {
         () => {},
       );
       try {
+        editor.dispatch({ selection: EditorSelection.cursor(editor.state.doc.length) });
+        updates = 0;
         const entries = buildEditableProjection(editor.state, {
           from: 0,
           to: editor.state.doc.length,

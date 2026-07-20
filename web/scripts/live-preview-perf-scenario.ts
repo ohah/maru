@@ -24,8 +24,441 @@ import {
 } from "../src/live-preview-interaction";
 import type { EditorInteractionGuard, LivePreviewIntent } from "../src/live-preview-intent";
 import { isLinkActivation, requestFileBridge, viewerChannel } from "../src/viewer";
+import {
+  maxAtomicProjectionRequests,
+  maxAtomicSourceBytes,
+  startAtomicSourceHashProbe,
+} from "../src/atomic-projection";
+import { projectAtomicRequests } from "../src/project-atomic";
+import { AtomicProjectionController } from "../src/live-preview-editor";
+import {
+  applySourceChangesBounded,
+  utf8Length,
+  type LivePreviewRequest,
+  type ProjectionResult,
+} from "../src/live-preview-protocol";
+import { atomicRendererChannel } from "../src/renderer-capability";
 
 type CopyProbe = Readonly<{ stop: () => number }>;
+
+function runAtomicProjectionProbe() {
+  const sources = [
+    { kind: "image" as const, source: "![x](image.png)" },
+    { kind: "math" as const, source: "$x^2$" },
+    {
+      kind: "fenced-code" as const,
+      source: `\`\`\`\n${"x".repeat(maxAtomicSourceBytes["fenced-code"] - 8)}\n\`\`\``,
+    },
+  ];
+  let results = 0;
+  let assetGrants = 0;
+  let hashedBytesMax = 0;
+  let resultPayloadBytes = 0;
+  for (const [index, candidate] of sources.entries()) {
+    const request = {
+      editorEpoch: 1,
+      documentRevision: 0,
+      projectionGeneration: 1,
+      requestNonce: index + 1,
+      kind: candidate.kind,
+      from: 0,
+      to: candidate.source.length,
+    } as const;
+    const batch = projectAtomicRequests(candidate.source, [request]);
+    results += batch.results.length;
+    assetGrants += batch.results.reduce((sum, result) => sum + result.assetGrants.length, 0);
+    hashedBytesMax = Math.max(hashedBytesMax, batch.hashedBytes);
+    resultPayloadBytes += batch.results.reduce(
+      (sum, result) => sum + new TextEncoder().encode(result.sanitizedPayload).byteLength,
+      0,
+    );
+  }
+  const over = `${sources[2]!.source}x`;
+  const overBatch = projectAtomicRequests(over, [
+    {
+      editorEpoch: 1,
+      documentRevision: 0,
+      projectionGeneration: 1,
+      requestNonce: 4,
+      kind: "fenced-code",
+      from: 0,
+      to: over.length,
+    },
+  ]);
+  const batchParts = Array.from(
+    { length: maxAtomicProjectionRequests },
+    (_, index) =>
+      `\`\`\`\n${String(index).repeat(maxAtomicSourceBytes["fenced-code"] - 8)}\n\`\`\``,
+  );
+  const batchSource = batchParts.join("\n");
+  let offset = 0;
+  const batchRequests = batchParts.map((part, index) => {
+    const request = {
+      editorEpoch: 1,
+      documentRevision: 0,
+      projectionGeneration: 1,
+      requestNonce: index + 10,
+      kind: "fenced-code" as const,
+      from: offset,
+      to: offset + part.length,
+    };
+    offset += part.length + 1;
+    return request;
+  });
+  const exactBatch = projectAtomicRequests(batchSource, batchRequests);
+  if (exactBatch.results.length + exactBatch.rejected.length !== maxAtomicProjectionRequests)
+    throw new Error("atomic batch probe did not produce one terminal outcome per request");
+  return {
+    atomic_requests: sources.length,
+    atomic_results: results,
+    atomic_asset_grants: assetGrants,
+    atomic_worker_hashed_bytes_max: hashedBytesMax,
+    atomic_worker_hashed_bytes_batch_max: exactBatch.hashedBytes,
+    atomic_result_payload_bytes: resultPayloadBytes,
+    atomic_cap_plus_one_hashed_bytes: overBatch.hashedBytes,
+  };
+}
+
+class PerfAtomicWorker {
+  static latest: PerfAtomicWorker | null = null;
+  static instances: PerfAtomicWorker[] = [];
+  static projectedRequests = 0;
+  readonly sent: LivePreviewRequest[] = [];
+  onmessage: ((event: MessageEvent<unknown>) => void) | null = null;
+  onerror: ((event: Event) => void) | null = null;
+  onmessageerror: ((event: MessageEvent<unknown>) => void) | null = null;
+  private source = "";
+  private sourceBytes = 0;
+  private documentRevision = 0;
+
+  constructor(_url: string) {
+    PerfAtomicWorker.latest = this;
+    PerfAtomicWorker.instances.push(this);
+  }
+
+  static reset(): void {
+    PerfAtomicWorker.latest = null;
+    PerfAtomicWorker.instances = [];
+    PerfAtomicWorker.projectedRequests = 0;
+  }
+
+  postMessage(message: LivePreviewRequest): void {
+    this.sent.push(message);
+    // The fake executes in the test realm, unlike a real Worker. Snapshot its Seed before the main-thread input
+    // probe starts so worker-owned UTF-8 accounting is not misattributed to the shell hot path.
+    if (message.type === "seed") {
+      this.source = message.source;
+      this.sourceBytes = utf8Length(this.source);
+      this.documentRevision = message.documentRevision;
+    }
+    queueMicrotask(() => {
+      let result: ProjectionResult;
+      if (message.type === "seed") {
+        result = {
+          type: "result",
+          editorEpoch: message.editorEpoch,
+          documentRevision: message.documentRevision,
+          projectionGeneration: 0,
+          results: [],
+          rejected: [],
+        };
+      } else {
+        if (message.type === "apply") {
+          const next = applySourceChangesBounded(this.source, this.sourceBytes, message.changes);
+          if (next === null) throw new Error("atomic perf probe received an invalid Apply");
+          this.source = next.source;
+          this.sourceBytes = next.sourceBytes;
+          this.documentRevision = message.targetRevision;
+        }
+        PerfAtomicWorker.projectedRequests += message.requests.length;
+        const batch = projectAtomicRequests(this.source, message.requests);
+        result = {
+          type: "result",
+          editorEpoch: message.editorEpoch,
+          documentRevision: this.documentRevision,
+          projectionGeneration: message.projectionGeneration,
+          results: batch.results,
+          rejected: batch.rejected,
+        };
+      }
+      this.onmessage?.({ data: result } as MessageEvent<unknown>);
+    });
+  }
+
+  terminate(): void {}
+}
+
+async function settleAtomicFrames(dom: JSDOM, editor: ReturnType<typeof createMarkdownEditor>) {
+  const frames = [...editor.dom.querySelectorAll<HTMLIFrameElement>(".maru-live-atomic-frame")];
+  for (const frame of frames) {
+    if (frame.dataset.atomicRendered === "true") continue;
+    let rendererPort: MessagePort | null = null;
+    let capability: unknown = null;
+    if (frame.contentWindow !== null) {
+      frame.contentWindow.postMessage = ((
+        message: unknown,
+        _target: string,
+        ports?: Transferable[],
+      ) => {
+        capability = (message as { capability?: unknown }).capability;
+        rendererPort = (ports?.[0] as MessagePort | undefined) ?? null;
+      }) as typeof frame.contentWindow.postMessage;
+    }
+    frame.dispatchEvent(new dom.window.Event("load"));
+    if (rendererPort === null)
+      throw new Error("atomic perf iframe did not receive a renderer port");
+    rendererPort.onmessage = (event) => {
+      if ((event.data as { type?: string }).type !== "atomic-render") return;
+      rendererPort?.postMessage({
+        channel: atomicRendererChannel,
+        type: "atomic-rendered",
+        capability,
+        height: 32,
+      });
+      rendererPort?.close();
+    };
+    rendererPort.start();
+    rendererPort.postMessage({
+      channel: atomicRendererChannel,
+      type: "atomic-ready",
+      capability,
+    });
+  }
+  for (
+    let turn = 0;
+    turn < 10 && frames.some((frame) => frame.dataset.atomicRendered !== "true");
+    turn += 1
+  )
+    await new Promise((resolve) => dom.window.setTimeout(resolve, 0));
+  if (frames.some((frame) => frame.dataset.atomicRendered !== "true"))
+    throw new Error("atomic perf iframe did not reach terminal rendered state");
+}
+
+async function runAtomicControllerProbe(dom: JSDOM) {
+  PerfAtomicWorker.reset();
+  const host = dom.window.document.createElement("aside");
+  dom.window.document.body.append(host);
+  const sources = Array.from(
+    { length: maxAtomicProjectionRequests * 2 },
+    (_, index) => `![image-${index}](image-${index}.png)`,
+  );
+  const source = sources.join("\n\n");
+  const entries = sources.map((item, index) => {
+    const from = sources.slice(0, index).reduce((sum, value) => sum + value.length + 2, 0);
+    return { type: "atomic" as const, role: "image" as const, from, to: from + item.length };
+  });
+  const editor = createMarkdownEditor(
+    host,
+    source,
+    () => {},
+    () => {},
+  );
+  const revisions = new EditorRevisionClock();
+  const identity = revisions.nextProjection();
+  let assetReads = 0;
+  const controller = new AtomicProjectionController(
+    editor,
+    91,
+    revisions,
+    PerfAtomicWorker as unknown as typeof Worker,
+    async () => {
+      assetReads += 1;
+      return "data:image/png;base64,iVBORw0KGgo=";
+    },
+  );
+  let pendingCreated = 0;
+  let pendingDestroyed = 0;
+  const observer = new dom.window.MutationObserver((records) => {
+    for (const record of records) {
+      for (const node of record.addedNodes) pendingCreated += countIframesInNode(dom, node);
+      for (const node of record.removedNodes) pendingDestroyed += countIframesInNode(dom, node);
+    }
+  });
+  observer.observe(editor.dom, { childList: true, subtree: true });
+  let createMax = 0;
+  let destroyMax = 0;
+  let mountedMax = 0;
+  const sampleFrame = async () => {
+    await new Promise<void>((resolve) => dom.window.requestAnimationFrame(() => resolve()));
+    await Promise.resolve();
+    createMax = Math.max(createMax, pendingCreated);
+    destroyMax = Math.max(destroyMax, pendingDestroyed);
+    pendingCreated = 0;
+    pendingDestroyed = 0;
+    mountedMax = Math.max(
+      mountedMax,
+      editor.dom.querySelectorAll(".maru-live-atomic-frame").length,
+    );
+  };
+  try {
+    controller.submitEntries(
+      identity.documentRevision,
+      identity.projectionGeneration,
+      entries.slice(0, 8),
+    );
+    controller.enable();
+    for (let frame = 0; frame < 12; frame += 1) await sampleFrame();
+    await settleAtomicFrames(dom, editor);
+    const initialFrames = [...editor.dom.querySelectorAll(".maru-live-atomic-frame")];
+    const workerMessages = PerfAtomicWorker.latest?.sent.length ?? 0;
+    const initialAssetReads = assetReads;
+    for (let selection = 0; selection < 100; selection += 1) {
+      const next = revisions.nextProjection();
+      controller.submitEntries(
+        next.documentRevision,
+        next.projectionGeneration,
+        entries.slice(0, 8),
+      );
+    }
+    await sampleFrame();
+    if (
+      (PerfAtomicWorker.latest?.sent.length ?? 0) !== workerMessages ||
+      assetReads !== initialAssetReads ||
+      initialFrames.some((frame) => !editor.dom.contains(frame))
+    )
+      throw new Error("selection-only projection churned a sealed atomic widget");
+
+    const replacement = revisions.nextProjection();
+    controller.submitEntries(
+      replacement.documentRevision,
+      replacement.projectionGeneration,
+      entries.slice(8, 16),
+    );
+    for (let frame = 0; frame < 12; frame += 1) await sampleFrame();
+    if (createMax > 2 || destroyMax > 2 || mountedMax > maxAtomicProjectionRequests)
+      throw new Error("atomic controller exceeded its per-frame iframe budget");
+    return {
+      atomic_mounted_max: mountedMax,
+      atomic_iframe_create_max_per_frame: createMax,
+      atomic_iframe_destroy_max_per_frame: destroyMax,
+    };
+  } finally {
+    observer.disconnect();
+    controller.destroy();
+    editor.destroy();
+    host.remove();
+  }
+}
+
+async function waitAtomicTurns(dom: JSDOM, turns = 8): Promise<void> {
+  for (let turn = 0; turn < turns; turn += 1) {
+    await Promise.resolve();
+    await new Promise<void>((resolve) => dom.window.requestAnimationFrame(() => resolve()));
+  }
+}
+
+async function runAtomicFacadeRetentionProbe(dom: JSDOM) {
+  PerfAtomicWorker.reset();
+  const host = dom.window.document.createElement("aside");
+  dom.window.document.body.append(host);
+  const source = `![near](near.png)\n\n${"plain text\n".repeat(180)}\n![far](far.png)`;
+  const revisions = new EditorRevisionClock();
+  let editable: EditableProjectionController | null = null;
+  let atomic: AtomicProjectionController | null = null;
+  let viewport = { from: 0, to: 100 };
+  let assetReads = 0;
+  const editor = createMarkdownEditor(
+    host,
+    source,
+    (update) => {
+      const baseRevision = revisions.documentRevision;
+      if (update.docChanged) revisions.documentChanged();
+      atomic?.handleUpdate(update, baseRevision, revisions.documentRevision);
+      editable?.handleUpdate(update);
+    },
+    () => {},
+  );
+  Object.defineProperty(editor, "viewport", {
+    configurable: true,
+    get: () => viewport,
+  });
+  editor.dispatch({ selection: EditorSelection.cursor(30) });
+  atomic = new AtomicProjectionController(
+    editor,
+    92,
+    revisions,
+    PerfAtomicWorker as unknown as typeof Worker,
+    async () => {
+      assetReads += 1;
+      return "data:image/png;base64,iVBORw0KGgo=";
+    },
+  );
+  editable = new EditableProjectionController(editor, 92, revisions, ({ atomicEntries }) => {
+    const identity = editable?.interactionIdentity();
+    if (identity !== undefined)
+      atomic?.submitEntries(
+        identity.documentRevision,
+        identity.projectionGeneration,
+        atomicEntries,
+      );
+  });
+  try {
+    atomic.enable();
+    editable.enable();
+    await waitAtomicTurns(dom);
+    await settleAtomicFrames(dom, editor);
+    const initialFrame = editor.dom.querySelector<HTMLIFrameElement>(".maru-live-atomic-frame");
+    if (initialFrame === null) throw new Error("atomic facade did not mount its visible image");
+    const initialMessages = PerfAtomicWorker.instances.reduce(
+      (sum, worker) => sum + worker.sent.length,
+      0,
+    );
+    const initialAssetReads = assetReads;
+    for (let selection = 0; selection < 100; selection += 1) {
+      editor.dispatch({ selection: EditorSelection.cursor(30 + (selection % 2)) });
+    }
+    await waitAtomicTurns(dom, 2);
+    const afterSelectionMessages = PerfAtomicWorker.instances.reduce(
+      (sum, worker) => sum + worker.sent.length,
+      0,
+    );
+    if (
+      afterSelectionMessages !== initialMessages ||
+      assetReads !== initialAssetReads ||
+      !editor.dom.contains(initialFrame)
+    )
+      throw new Error("product selection path churned a sealed atomic widget");
+
+    // The deterministic viewport getter stands in for WebKit layout while the actual CM6 scroll transaction and
+    // both product controllers own discovery, retention, worker admission, and decoration lifetime.
+    viewport = { from: 150, to: 250 };
+    editor.dispatch({ selection: EditorSelection.cursor(200), scrollIntoView: true });
+    await waitAtomicTurns(dom, 2);
+    if (!editor.dom.contains(initialFrame))
+      throw new Error("atomic widget was not retained inside the two-viewport hysteresis");
+
+    const generatedBeforeOutsideMove = PerfAtomicWorker.projectedRequests;
+    viewport = { from: 700, to: 800 };
+    editor.dispatch({ selection: EditorSelection.cursor(750), scrollIntoView: true });
+    await waitAtomicTurns(dom, 4);
+    const generatedOutsideRetention =
+      PerfAtomicWorker.projectedRequests - generatedBeforeOutsideMove;
+    if (generatedOutsideRetention !== 0)
+      throw new Error("atomic payload was generated outside the retention window");
+    if (editor.dom.contains(initialFrame))
+      throw new Error("atomic widget survived outside the retention window");
+
+    viewport = { from: 0, to: 100 };
+    editor.dispatch({ selection: EditorSelection.cursor(30), scrollIntoView: true });
+    await waitAtomicTurns(dom, 4);
+    const regeneratedAfterReentry = PerfAtomicWorker.projectedRequests - generatedBeforeOutsideMove;
+    if (regeneratedAfterReentry <= 0 || regeneratedAfterReentry > maxAtomicProjectionRequests)
+      throw new Error(
+        `atomic widget regeneration was not bounded: count=${regeneratedAfterReentry}`,
+      );
+    return { atomic_generated_outside_retention: generatedOutsideRetention };
+  } finally {
+    editable.destroy();
+    atomic.destroy();
+    editor.destroy();
+    host.remove();
+  }
+}
+
+function countIframesInNode(dom: JSDOM, node: Node): number {
+  if (!(node instanceof dom.window.Element)) return 0;
+  return Number(node.matches("iframe")) + node.querySelectorAll("iframe").length;
+}
 
 /** Counts only document-scale copies; bounded inserted text and viewport slices are intentionally excluded. */
 export function startDocumentCopyProbe(): CopyProbe {
@@ -60,6 +493,14 @@ export function startDocumentCopyProbe(): CopyProbe {
 }
 
 function installDom(dom: JSDOM): () => void {
+  const rangePrototype = dom.window.Range.prototype as Range & {
+    getClientRects?: () => DOMRectList;
+    getBoundingClientRect?: () => DOMRect;
+  };
+  if (rangePrototype.getClientRects === undefined)
+    rangePrototype.getClientRects = () => [] as unknown as DOMRectList;
+  if (rangePrototype.getBoundingClientRect === undefined)
+    rangePrototype.getBoundingClientRect = () => new dom.window.DOMRect(0, 0, 0, 0);
   const previous = new Map<string, PropertyDescriptor | undefined>();
   const globals: Array<[string, unknown]> = [
     ["window", dom.window],
@@ -744,8 +1185,10 @@ export async function runLivePreviewBaselineScenario(): Promise<LivePreviewPerfC
   ) as Record<(typeof projectionFallbackReasons)[number], number>;
   const livePreviewDiagnostics = createLivePreviewDiagnosticsSnapshot();
   const updates = (update: ViewUpdate) => {
+    const baseRevision = revisions.documentRevision;
     if (update.docChanged) revisions.documentChanged();
     if (update.docChanged) sourceTransactions += 1;
+    atomicController?.handleUpdate(update, baseRevision, revisions.documentRevision);
     controller?.handleUpdate(update);
   };
   // A separate product EditorView forces the adversarial repeated-dollar parse without changing the canonical
@@ -764,8 +1207,13 @@ export async function runLivePreviewBaselineScenario(): Promise<LivePreviewPerfC
   const denseMathScannedCodeUnits = denseMathProbe.stop();
   const interactionCounters = await runInteractionProbe(dom);
   const tableInteractionCounters = await runTableInteractionProbe(dom);
+  const atomicProjectionCounters = runAtomicProjectionProbe();
+  const atomicControllerCounters = await runAtomicControllerProbe(dom);
+  const atomicFacadeCounters = await runAtomicFacadeRetentionProbe(dom);
 
   const mathScanProbe = startMathDelimiterScanProbe();
+  PerfAtomicWorker.reset();
+  let atomicController: AtomicProjectionController | null = null;
   const editor = createMarkdownEditor(
     dom.window.document.querySelector("main") as HTMLElement,
     initial,
@@ -773,12 +1221,29 @@ export async function runLivePreviewBaselineScenario(): Promise<LivePreviewPerfC
     () => {},
   );
   projectionObserver.observe(editor.dom, { childList: true, subtree: true });
-  controller = new EditableProjectionController(editor, 1, revisions, () => {
+  controller = new EditableProjectionController(editor, 1, revisions, ({ state }) => {
+    if (state === "running") {
+      const identity = controller?.interactionIdentity();
+      if (identity !== undefined)
+        atomicController?.submitEntries(
+          identity.documentRevision,
+          identity.projectionGeneration,
+          [],
+        );
+    }
     if (controller === null) return;
     controller.writeDiagnostics(livePreviewDiagnostics);
     for (const reason of projectionFallbackReasons)
       latestFallbackCounts[reason] = livePreviewDiagnostics.fallbackCounts[reason];
   });
+  atomicController = new AtomicProjectionController(
+    editor,
+    1,
+    revisions,
+    PerfAtomicWorker as unknown as typeof Worker,
+    async () => null,
+  );
+  atomicController.enable();
   controller.enable();
   // Initial projection is the only admitted decoration commit. Its DOM records are outside the 1,000-input
   // same-fingerprint segment, whose projection-owned DOM mutation budget is exactly zero.
@@ -788,7 +1253,9 @@ export async function runLivePreviewBaselineScenario(): Promise<LivePreviewPerfC
   iframeDestroy = 0;
 
   const copyProbe = startDocumentCopyProbe();
+  const atomicHashProbe = startAtomicSourceHashProbe();
   let copiedBytes = 0;
+  let atomicMainHashedBytes = 0;
   let mathScannedCodeUnits = 0;
   let metrics = controller.metrics();
   let measuredFallbackCounts = { ...latestFallbackCounts };
@@ -796,12 +1263,32 @@ export async function runLivePreviewBaselineScenario(): Promise<LivePreviewPerfC
     for (let index = 0; index < 1_000; index += 1) {
       editor.dispatch({ changes: { from: 2, to: 3, insert: index % 2 === 0 ? "H" : "h" } });
     }
+    atomicMainHashedBytes = atomicHashProbe.stop();
     await new Promise<void>((resolve) => dom.window.requestAnimationFrame(() => resolve()));
+    await Promise.resolve();
+    const atomicMessages = PerfAtomicWorker.instances.flatMap(({ sent }) => sent);
+    const atomicSeeds = atomicMessages.filter(({ type }) => type === "seed");
+    const atomicApplies = atomicMessages.filter(({ type }) => type === "apply");
+    if (
+      atomicSeeds.length !== 1 ||
+      atomicApplies.length !== 1 ||
+      atomicApplies[0]?.baseRevision !== 0 ||
+      atomicApplies[0]?.targetRevision !== 1_000
+    )
+      throw new Error("8 MiB atomic input path did not compose into one Apply");
     metrics = controller.metrics();
     measuredFallbackCounts = { ...latestFallbackCounts };
   } finally {
+    if (atomicMainHashedBytes === 0) {
+      try {
+        atomicMainHashedBytes = atomicHashProbe.stop();
+      } catch {
+        // The probe was already stopped after the synchronous input segment.
+      }
+    }
     copiedBytes = copyProbe.stop();
     mathScannedCodeUnits = mathScanProbe.stop();
+    atomicController.destroy();
     controller.destroy();
     editor.destroy();
     projectionObserver.disconnect();
@@ -826,6 +1313,11 @@ export async function runLivePreviewBaselineScenario(): Promise<LivePreviewPerfC
     iframe_destroy: iframeDestroy,
     retained_html_bytes: 0,
     generated_outside_retention: 0,
+    ...atomicProjectionCounters,
+    atomic_main_hashed_bytes: atomicMainHashedBytes,
+    atomic_main_copied_bytes: copiedBytes,
+    ...atomicControllerCounters,
+    ...atomicFacadeCounters,
     ...interactionCounters,
     ...tableInteractionCounters,
     projection_fallback_counts: Object.fromEntries(

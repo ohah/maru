@@ -37,16 +37,29 @@ test("live preview worker bundle selects DOM-free worker package exports", async
         clearTimeout(timer);
         reject(event.error ?? new Error(event.message));
       };
-      worker.postMessage({ type: "seed", documentRevision: 0, source: "# worker" });
+      worker.postMessage({
+        type: "seed",
+        editorEpoch: 1,
+        documentRevision: 0,
+        source: "# worker",
+      });
     });
     worker.terminate();
     expect(result).toEqual({
       type: "result",
+      editorEpoch: 1,
       documentRevision: 0,
       projectionGeneration: 0,
-      fragments: [],
+      results: [],
+      rejected: [],
     });
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test("atomic renderer mode removes document viewport padding and legacy fragment selectors", async () => {
+  const css = await readFile(join(import.meta.dir, "..", "src", "app.css"), "utf8");
+  expect(css).toContain('body[data-renderer-mode="atomic"] #app');
+  expect(css).not.toContain('body[data-renderer-mode="fragment"]');
 });

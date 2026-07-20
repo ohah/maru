@@ -6,7 +6,7 @@ import {
   type ProjectionResult,
   utf8Length,
 } from "./live-preview-protocol";
-import { MarkdownProjectionIndex } from "./project-markdown";
+import { projectAtomicRequests } from "./project-atomic";
 
 type WorkerScope = Readonly<{
   postMessage: (message: LivePreviewResponse) => void;
@@ -17,8 +17,8 @@ type WorkerScope = Readonly<{
 const workerScope = globalThis as unknown as WorkerScope;
 let source = "";
 let sourceBytes = 0;
+let editorEpoch: number | null = null;
 let documentRevision: number | null = null;
-let projectionIndex = new MarkdownProjectionIndex("");
 
 function fail(reason: string): void {
   workerScope.postMessage({ type: "failure", reason: reason.slice(0, 128) });
@@ -41,18 +41,24 @@ workerScope.onmessage = (event) => {
   if (request.type === "seed") {
     source = request.source;
     sourceBytes = utf8Length(source);
-    projectionIndex = new MarkdownProjectionIndex(source);
+    editorEpoch = request.editorEpoch;
     documentRevision = request.documentRevision;
     sendResult({
       type: "result",
+      editorEpoch,
       documentRevision,
       projectionGeneration: 0,
-      fragments: [],
+      results: [],
+      rejected: [],
     });
     return;
   }
-  if (documentRevision === null) {
+  if (documentRevision === null || editorEpoch === null) {
     fail("seed-required");
+    return;
+  }
+  if (request.editorEpoch !== editorEpoch) {
+    fail("epoch-mismatch");
     return;
   }
   if (request.type === "apply") {
@@ -67,13 +73,15 @@ workerScope.onmessage = (event) => {
     }
     source = next.source;
     sourceBytes = next.sourceBytes;
-    projectionIndex = new MarkdownProjectionIndex(source);
     documentRevision = request.targetRevision;
+    const batch = projectAtomicRequests(source, request.requests);
     sendResult({
       type: "result",
+      editorEpoch,
       documentRevision,
       projectionGeneration: request.projectionGeneration,
-      fragments: projectionIndex.project(request.visibleRanges),
+      results: batch.results,
+      rejected: batch.rejected,
     });
     return;
   }
@@ -81,10 +89,13 @@ workerScope.onmessage = (event) => {
     fail("revision-gap");
     return;
   }
+  const batch = projectAtomicRequests(source, request.requests);
   sendResult({
     type: "result",
+    editorEpoch,
     documentRevision,
     projectionGeneration: request.projectionGeneration,
-    fragments: projectionIndex.project(request.visibleRanges),
+    results: batch.results,
+    rejected: batch.rejected,
   });
 };

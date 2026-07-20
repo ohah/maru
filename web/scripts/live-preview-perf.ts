@@ -11,7 +11,7 @@ import { runLivePreviewBaselineScenario } from "./live-preview-perf-scenario";
 async function runProjectionScenario(): Promise<LivePreviewPerfArtifact> {
   return {
     schema_version: livePreviewPerfSchemaVersion,
-    scenario: "fp11d-8mib-1000-editable-projection-table-interactions",
+    scenario: "fp11e-8mib-1000-editable-projection-atomic-widgets",
     counters: await runLivePreviewBaselineScenario(),
   };
 }

@@ -1,49 +1,66 @@
+import {
+  atomicProjectionBatchWireBytes,
+  atomicProjectionRequestShapeValid,
+  atomicProjectionResultShapeValid,
+  maxAtomicProjectionRequests,
+  type AtomicProjectionRequest,
+  type AtomicProjectionResult,
+} from "./atomic-projection";
+
 export const maxLivePreviewSourceBytes = 8 * 1024 * 1024;
 export const maxLivePreviewResultBytes = 2 * 1024 * 1024;
 export const maxLivePreviewWorkers = 8;
-export const maxLivePreviewFragments = 8;
 export const maxLivePreviewChanges = 1_024;
 export const maxLivePreviewProjectionCodeUnits = 64 * 1024;
 
 export type SourceChange = Readonly<{ from: number; to: number; insert: string }>;
-export type ProjectionRange = Readonly<{ from: number; to: number; active: boolean }>;
 
 export type SeedRequest = Readonly<{
   type: "seed";
+  editorEpoch: number;
   documentRevision: number;
   source: string;
 }>;
 
 export type ApplyRequest = Readonly<{
   type: "apply";
+  editorEpoch: number;
   baseRevision: number;
   targetRevision: number;
   changes: readonly SourceChange[];
   projectionGeneration: number;
-  visibleRanges: readonly ProjectionRange[];
+  requests: readonly AtomicProjectionRequest[];
 }>;
 
 export type ProjectRequest = Readonly<{
   type: "project";
+  editorEpoch: number;
   documentRevision: number;
   projectionGeneration: number;
-  visibleRanges: readonly ProjectionRange[];
+  requests: readonly AtomicProjectionRequest[];
 }>;
 
 export type LivePreviewRequest = SeedRequest | ApplyRequest | ProjectRequest;
 
-export type ProjectedFragment = Readonly<{
-  from: number;
-  to: number;
-  kind: string;
-  html?: string;
+export const atomicProjectionRejectionReasons = [
+  "rich-source-limit",
+  "renderer-unavailable",
+  "invalid-request",
+] as const;
+export type AtomicProjectionRejectionReason = (typeof atomicProjectionRejectionReasons)[number];
+
+export type AtomicProjectionRejection = Readonly<{
+  requestNonce: number;
+  reason: AtomicProjectionRejectionReason;
 }>;
 
 export type ProjectionResult = Readonly<{
   type: "result";
+  editorEpoch: number;
   documentRevision: number;
   projectionGeneration: number;
-  fragments: readonly ProjectedFragment[];
+  results: readonly AtomicProjectionResult[];
+  rejected: readonly AtomicProjectionRejection[];
 }>;
 
 export type WorkerFailure = Readonly<{ type: "failure"; reason: string }>;
@@ -53,8 +70,21 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+function hasExactKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
+  const actual = Object.keys(value).sort();
+  const sortedExpected = [...expected].sort();
+  return (
+    actual.length === sortedExpected.length &&
+    actual.every((key, index) => key === sortedExpected[index])
+  );
+}
+
 function isSafeRevision(value: unknown): value is number {
   return Number.isSafeInteger(value) && Number(value) >= 0;
+}
+
+function isPositiveSafeInteger(value: unknown): value is number {
+  return Number.isSafeInteger(value) && Number(value) > 0;
 }
 
 export function utf8Length(value: string): number {
@@ -71,28 +101,10 @@ export function insertedBytes(changes: readonly SourceChange[]): number {
   return total;
 }
 
-export function isProjectionRange(value: unknown): value is ProjectionRange {
-  return (
-    isRecord(value) &&
-    isSafeRevision(value.from) &&
-    isSafeRevision(value.to) &&
-    value.from <= value.to &&
-    typeof value.active === "boolean"
-  );
-}
-
-function projectionRangesAreBounded(value: unknown): value is readonly ProjectionRange[] {
-  if (!Array.isArray(value) || value.length > 16 || !value.every(isProjectionRange)) return false;
-  const viewports = value.filter((range) => !range.active);
-  return (
-    viewports.length === 1 &&
-    viewports[0]!.to - viewports[0]!.from <= maxLivePreviewProjectionCodeUnits
-  );
-}
-
 export function isSourceChange(value: unknown): value is SourceChange {
   return (
     isRecord(value) &&
+    hasExactKeys(value, ["from", "insert", "to"]) &&
     isSafeRevision(value.from) &&
     isSafeRevision(value.to) &&
     value.from <= value.to &&
@@ -101,10 +113,35 @@ export function isSourceChange(value: unknown): value is SourceChange {
   );
 }
 
+function atomicRequestsValid(
+  value: unknown,
+  editorEpoch: number,
+  documentRevision: number,
+  projectionGeneration: number,
+): value is readonly AtomicProjectionRequest[] {
+  if (!Array.isArray(value) || value.length > maxAtomicProjectionRequests) return false;
+  const nonces = new Set<number>();
+  for (const request of value) {
+    if (
+      !atomicProjectionRequestShapeValid(request, Number.MAX_SAFE_INTEGER) ||
+      request.editorEpoch !== editorEpoch ||
+      request.documentRevision !== documentRevision ||
+      request.projectionGeneration !== projectionGeneration ||
+      nonces.has(request.requestNonce)
+    ) {
+      return false;
+    }
+    nonces.add(request.requestNonce);
+  }
+  return true;
+}
+
 export function isLivePreviewRequest(value: unknown): value is LivePreviewRequest {
   if (!isRecord(value) || typeof value.type !== "string") return false;
   if (value.type === "seed") {
     return (
+      hasExactKeys(value, ["documentRevision", "editorEpoch", "source", "type"]) &&
+      isPositiveSafeInteger(value.editorEpoch) &&
       isSafeRevision(value.documentRevision) &&
       typeof value.source === "string" &&
       utf8Length(value.source) <= maxLivePreviewSourceBytes
@@ -112,6 +149,16 @@ export function isLivePreviewRequest(value: unknown): value is LivePreviewReques
   }
   if (value.type === "apply") {
     return (
+      hasExactKeys(value, [
+        "baseRevision",
+        "changes",
+        "editorEpoch",
+        "projectionGeneration",
+        "requests",
+        "targetRevision",
+        "type",
+      ]) &&
+      isPositiveSafeInteger(value.editorEpoch) &&
       isSafeRevision(value.baseRevision) &&
       isSafeRevision(value.targetRevision) &&
       value.targetRevision > value.baseRevision &&
@@ -119,55 +166,90 @@ export function isLivePreviewRequest(value: unknown): value is LivePreviewReques
       value.changes.length <= maxLivePreviewChanges &&
       value.changes.every(isSourceChange) &&
       insertedBytes(value.changes) <= maxLivePreviewSourceBytes &&
-      isSafeRevision(value.projectionGeneration) &&
-      projectionRangesAreBounded(value.visibleRanges)
+      isPositiveSafeInteger(value.projectionGeneration) &&
+      atomicRequestsValid(
+        value.requests,
+        value.editorEpoch,
+        value.targetRevision,
+        value.projectionGeneration,
+      )
     );
   }
   if (value.type === "project") {
     return (
+      hasExactKeys(value, [
+        "documentRevision",
+        "editorEpoch",
+        "projectionGeneration",
+        "requests",
+        "type",
+      ]) &&
+      isPositiveSafeInteger(value.editorEpoch) &&
       isSafeRevision(value.documentRevision) &&
-      isSafeRevision(value.projectionGeneration) &&
-      projectionRangesAreBounded(value.visibleRanges)
+      isPositiveSafeInteger(value.projectionGeneration) &&
+      atomicRequestsValid(
+        value.requests,
+        value.editorEpoch,
+        value.documentRevision,
+        value.projectionGeneration,
+      )
     );
   }
   return false;
 }
 
+function rejectionValid(value: unknown): value is AtomicProjectionRejection {
+  return (
+    isRecord(value) &&
+    hasExactKeys(value, ["reason", "requestNonce"]) &&
+    isPositiveSafeInteger(value.requestNonce) &&
+    typeof value.reason === "string" &&
+    atomicProjectionRejectionReasons.includes(value.reason as AtomicProjectionRejectionReason)
+  );
+}
+
 export function isProjectionResult(value: unknown): value is ProjectionResult {
   if (
     !isRecord(value) ||
+    !hasExactKeys(value, [
+      "documentRevision",
+      "editorEpoch",
+      "projectionGeneration",
+      "rejected",
+      "results",
+      "type",
+    ]) ||
     value.type !== "result" ||
+    !isPositiveSafeInteger(value.editorEpoch) ||
     !isSafeRevision(value.documentRevision) ||
     !isSafeRevision(value.projectionGeneration) ||
-    !Array.isArray(value.fragments) ||
-    value.fragments.length > maxLivePreviewFragments
+    !Array.isArray(value.results) ||
+    !Array.isArray(value.rejected) ||
+    value.results.length + value.rejected.length > maxAtomicProjectionRequests ||
+    !value.results.every((result) =>
+      atomicProjectionResultShapeValid(result, Number.MAX_SAFE_INTEGER),
+    ) ||
+    !value.rejected.every(rejectionValid)
   ) {
     return false;
   }
-  let resultBytes = 0;
-  for (const fragment of value.fragments) {
+  const nonces = new Set<number>();
+  for (const result of value.results) {
     if (
-      !isRecord(fragment) ||
-      !isSafeRevision(fragment.from) ||
-      !isSafeRevision(fragment.to) ||
-      fragment.from >= fragment.to ||
-      typeof fragment.kind !== "string" ||
-      fragment.kind.length === 0 ||
-      fragment.kind.length > 32 ||
-      (fragment.html !== undefined && typeof fragment.html !== "string")
+      result.request.editorEpoch !== value.editorEpoch ||
+      result.request.documentRevision !== value.documentRevision ||
+      result.request.projectionGeneration !== value.projectionGeneration ||
+      nonces.has(result.request.requestNonce)
     ) {
       return false;
     }
-    if (typeof fragment.html === "string") {
-      const next = utf8Length(fragment.html);
-      if (resultBytes > maxLivePreviewResultBytes - next) return false;
-      resultBytes += next;
-    }
-    const metadataBytes = utf8Length(fragment.kind) + 32;
-    if (resultBytes > maxLivePreviewResultBytes - metadataBytes) return false;
-    resultBytes += metadataBytes;
+    nonces.add(result.request.requestNonce);
   }
-  return true;
+  for (const rejection of value.rejected) {
+    if (nonces.has(rejection.requestNonce)) return false;
+    nonces.add(rejection.requestNonce);
+  }
+  return atomicProjectionBatchWireBytes(value.results, value.rejected) <= maxLivePreviewResultBytes;
 }
 
 export function applySourceChanges(
@@ -213,10 +295,12 @@ function isUtf16Boundary(source: string, offset: number): boolean {
 
 export function projectionResultIsCurrent(
   result: ProjectionResult,
+  editorEpoch: number,
   documentRevision: number,
   projectionGeneration: number,
 ): boolean {
   return (
+    result.editorEpoch === editorEpoch &&
     result.documentRevision === documentRevision &&
     result.projectionGeneration === projectionGeneration
   );

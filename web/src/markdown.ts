@@ -14,6 +14,9 @@ import { normalizeAssetReference } from "./asset-path";
 const sourceStartProperty = "dataMaruSourceStart";
 const sourceEndProperty = "dataMaruSourceEnd";
 const assetPathProperty = "dataMaruAssetPath";
+const assetIdProperty = "dataMaruAssetId";
+
+type AssetRenderMode = "path" | "opaque";
 
 // 위치 attribute는 raw HTML을 HAST로 승격하기 전에가 아니라, raw HTML을 버린 뒤
 // renderer가 직접 붙인다. 그래서 문서가 같은 이름을 위조해도 sanitize allowlist에 닿지 않는다.
@@ -30,19 +33,27 @@ function rehypeSourcePositions() {
 
 // FP4의 readAsset URL 재작성 전에는 문서가 어떤 네트워크/번들 asset도 선행 로드하지
 // 못하게 resource 속성을 없앤다. href는 클릭 정책이 소비할 데이터라 별도다.
-function rehypeBlockResourceLoads() {
-  return (tree: Root) => {
+function rehypeBlockResourceLoads(mode: AssetRenderMode) {
+  return (tree: Root, file: { data: Record<string, unknown> }) => {
+    const atomicPaths: string[] = [];
     visit(tree, "element", (node: Element) => {
       // Markdown image의 원래 src를 네트워크 sink로 남기지 않고, 검증된 상대 경로만 renderer-owned data attribute로
       // 옮긴다. FP4 viewer가 readAsset 결과를 data URL로 바꿀 때 이 값만 소비한다.
       if (node.tagName === "img" && typeof node.properties.src === "string") {
         const normalized = normalizeAssetReference(node.properties.src);
-        if (normalized !== null) node.properties[assetPathProperty] = normalized;
+        if (normalized !== null) {
+          if (mode === "path") node.properties[assetPathProperty] = normalized;
+          else {
+            atomicPaths.push(normalized);
+            node.properties[assetIdProperty] = String(atomicPaths.length);
+          }
+        }
       }
       delete node.properties.src;
       delete node.properties.srcSet;
       delete node.properties.poster;
     });
+    file.data.maruAtomicAssetPaths = atomicPaths;
   };
 }
 
@@ -78,6 +89,7 @@ const schema = {
       sourceStartProperty,
       sourceEndProperty,
       assetPathProperty,
+      assetIdProperty,
     ],
   },
   protocols: {
@@ -89,22 +101,42 @@ const schema = {
   },
 };
 
-const processor = unified()
-  .use(remarkParse)
-  .use(remarkGfm)
-  .use(remarkMath)
-  // allowDangerousHtml을 켜지 않는다. Markdown raw HTML node는 이 경계에서 폐기된다.
-  .use(remarkRehype)
-  .use(rehypeSourcePositions)
-  .use(rehypeBlockResourceLoads)
-  .use(rehypeSanitize, schema)
-  // sanitizer 뒤에는 사용자 AST가 아니라 핀된 renderer만 마크업을 만든다.
-  // MathML-only는 KaTeX HTML의 inline style을 피해서 Markdown 파생 markup의 inline style 금지를 지킨다.
-  .use(rehypeKatex, { output: "mathml", strict: "error", throwOnError: false })
-  .use(rehypePrism, { ignoreMissing: true })
-  .use(rehypeHardenTrustedOutput)
-  .use(rehypeStringify);
+function createProcessor(mode: AssetRenderMode) {
+  return (
+    unified()
+      .use(remarkParse)
+      .use(remarkGfm)
+      .use(remarkMath)
+      // allowDangerousHtml을 켜지 않는다. Markdown raw HTML node는 이 경계에서 폐기된다.
+      .use(remarkRehype)
+      .use(rehypeSourcePositions)
+      .use(rehypeBlockResourceLoads, mode)
+      .use(rehypeSanitize, schema)
+      // sanitizer 뒤에는 사용자 AST가 아니라 핀된 renderer만 마크업을 만든다.
+      // MathML-only는 KaTeX HTML의 inline style을 피해서 Markdown 파생 markup의 inline style 금지를 지킨다.
+      .use(rehypeKatex, { output: "mathml", strict: "error", throwOnError: false })
+      .use(rehypePrism, { ignoreMissing: true })
+      .use(rehypeHardenTrustedOutput)
+      .use(rehypeStringify)
+  );
+}
+
+const processor = createProcessor("path");
+const atomicProcessor = createProcessor("opaque");
 
 export function renderMarkdown(markdown: string): string {
   return String(processor.processSync(markdown));
+}
+
+export function renderAtomicMarkdown(
+  markdown: string,
+): Readonly<{ html: string; assetPaths: readonly string[] }> {
+  const result = atomicProcessor.processSync(markdown);
+  const assetPaths = result.data.maruAtomicAssetPaths;
+  return {
+    html: String(result),
+    assetPaths: Array.isArray(assetPaths)
+      ? assetPaths.filter((value): value is string => typeof value === "string")
+      : [],
+  };
 }

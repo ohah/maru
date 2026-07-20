@@ -154,14 +154,14 @@ body[data-file-mode="live-preview"] #editor .cm-gutters {
   background: color-mix(in srgb, CanvasText 4%, Canvas);
 }
 
-.maru-live-fragment {
+.maru-live-atomic {
   box-sizing: border-box;
   width: 100%;
   min-height: 2.25rem;
   overflow: hidden;
 }
 
-.maru-live-fragment-frame {
+.maru-live-atomic-frame {
   display: block;
   width: 100%;
   height: 4rem;
@@ -178,11 +178,11 @@ body[data-file-mode="live-preview"] #editor .cm-gutters {
   line-height: 1.6;
 }
 
-body[data-renderer-mode="fragment"] {
+body[data-renderer-mode="atomic"] {
   overflow: hidden;
 }
 
-body[data-renderer-mode="fragment"] #app {
+body[data-renderer-mode="atomic"] #app {
   width: 100%;
   max-width: none;
   min-height: 1px;

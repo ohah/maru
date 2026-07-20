@@ -190,6 +190,10 @@ run = "bun run --cwd web web:build"
 description = "Run file-panel renderer and sanitizer tests"
 run = "bun run --cwd web web:test"
 
+[tasks."web:live-preview-perf"]
+description = "Run the deterministic Markdown live-preview performance gate"
+run = "bun run --cwd web web:live-preview-perf"
+
 [tasks."web:lint"]
 description = "Lint file-panel TypeScript with oxlint"
 run = "bun run --cwd web web:lint"

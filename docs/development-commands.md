@@ -16,6 +16,7 @@ Maru 작업에서 사용하는 기본 명령이다.
 - 파일 패널 웹 의존성 설치: `bun install --cwd web --frozen-lockfile`
 - 파일 패널 zntc 번들+SRI+production third-party notice 검증: `mise run web:build`
 - 파일 패널 renderer/sanitizer 테스트: `mise run web:test`
+- Markdown 라이브 프리뷰 결정적 성능 게이트: `mise run web:live-preview-perf` (`tests/artifacts/perf/live-preview.json` 생성·schema/threshold 검증)
 - 파일 패널 lint/format/license/전체 게이트: `mise run web:lint`, `mise run web:fmt-check`, `mise run web:licenses`, `mise run web:check` (기존 Zig `mise run check`와 분리된 opt-in 경로)
 - 빌드: `mise run build`
 - headless PTY 데모 실행: `mise run demo`

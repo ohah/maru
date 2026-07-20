@@ -525,6 +525,7 @@ describe("bridge-free renderer", () => {
     });
     bootRenderer(dom.window.document, dom.window as unknown as Window);
     const capability = {
+      editorEpoch: 2,
       documentRevision: 3,
       projectionGeneration: 4,
       widgetId: 5,

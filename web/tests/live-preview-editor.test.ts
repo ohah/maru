@@ -1,8 +1,40 @@
 import { describe, expect, test } from "bun:test";
 import { ChangeSet } from "@codemirror/state";
-import { mapLivePreviewRange, reconcileFragmentBatch } from "../src/live-preview-editor";
+import {
+  fragmentRecordCanBeReused,
+  mapLivePreviewRange,
+  reconcileFragmentBatch,
+} from "../src/live-preview-editor";
 
 describe("live preview fragment frame budget", () => {
+  test("never revives a capability from a stale projection generation", () => {
+    const capability = {
+      editorEpoch: 1,
+      documentRevision: 2,
+      projectionGeneration: 3,
+      widgetId: 4,
+      widgetGeneration: 5,
+      rendererInstance: 6,
+    };
+    const range = { from: 10, to: 20 };
+    expect(
+      fragmentRecordCanBeReused(
+        capability,
+        { documentRevision: 2, projectionGeneration: 3 },
+        range,
+        range,
+      ),
+    ).toBe(true);
+    expect(
+      fragmentRecordCanBeReused(
+        capability,
+        { documentRevision: 2, projectionGeneration: 4 },
+        range,
+        range,
+      ),
+    ).toBe(false);
+  });
+
   test("removes before adding and changes at most two iframe memberships per batch", () => {
     let current = [1, 2, 3, 4, 5, 6, 7, 8];
     const desired = [11, 12, 13, 14, 15, 16, 17, 18];

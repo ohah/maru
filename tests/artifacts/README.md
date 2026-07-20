@@ -24,6 +24,7 @@ tests/artifacts/stress/*/*.screen.txt
 tests/artifacts/stress/*/*.snapshot.txt
 tests/artifacts/stress/*/*.summary.txt
 tests/artifacts/perf/*.txt
+tests/artifacts/perf/live-preview.json
 tests/artifacts/integration/pty/*.raw.txt
 tests/artifacts/integration/pty/*.screen.txt
 tests/artifacts/integration/pty/*.snapshot.txt

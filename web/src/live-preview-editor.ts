@@ -83,6 +83,20 @@ export function reconcileFragmentBatch<T>(
   return { next, removed: removals.length, added: additions.length };
 }
 
+export function fragmentRecordCanBeReused(
+  capability: RendererCapability,
+  result: Readonly<{ documentRevision: number; projectionGeneration: number }>,
+  currentRange: Readonly<{ from: number; to: number }>,
+  nextRange: Readonly<{ from: number; to: number }>,
+): boolean {
+  return (
+    capability.documentRevision === result.documentRevision &&
+    capability.projectionGeneration === result.projectionGeneration &&
+    currentRange.from === nextRange.from &&
+    currentRange.to === nextRange.to
+  );
+}
+
 let nextWidgetId = 0;
 let nextWidgetGeneration = 0;
 let nextRendererInstance = Math.max(1, Date.now() % 1_000_000_000);
@@ -273,9 +287,9 @@ export class LivePreviewEditorController {
   private reconcileAnimationFrame: number | null = null;
   private reconcileWatchdog: number | null = null;
   private state: LivePreviewWorkerState = "running";
-
   constructor(
     private readonly view: EditorView,
+    private readonly editorEpoch: number,
     private readonly revisions: EditorRevisionClock,
     private readonly workerConstructor: typeof Worker | null,
     private readonly onState: (state: LivePreviewWorkerState, reason?: string) => void = () => {},
@@ -423,10 +437,8 @@ export class LivePreviewEditorController {
       }
       const existing = reusable.find(
         (record) =>
-          record.capability.documentRevision === result.documentRevision &&
+          fragmentRecordCanBeReused(record.capability, result, record.fragment, fragment) &&
           record.widget.canReuse() &&
-          record.fragment.from === fragment.from &&
-          record.fragment.to === fragment.to &&
           !records.some(({ capability }) => capabilitiesEqual(capability, record.capability)),
       );
       if (existing !== undefined) {
@@ -434,6 +446,7 @@ export class LivePreviewEditorController {
         continue;
       }
       const capability: RendererCapability = {
+        editorEpoch: this.editorEpoch,
         documentRevision: result.documentRevision,
         projectionGeneration: result.projectionGeneration,
         widgetId: nextIdentity("widget"),

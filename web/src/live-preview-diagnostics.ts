@@ -32,6 +32,7 @@ export type DiagnosticsCommit = Readonly<{
   decorationCount: number;
   desiredWidgets: number;
   mountedWidgets: number;
+  activeSourceRangeCount: number;
   activeSourceRanges: readonly Readonly<{ from: number; to: number }>[];
   fallbackCounts?: Readonly<Partial<ProjectionFallbackCounts>>;
 }>;
@@ -72,7 +73,10 @@ export class LivePreviewDiagnosticsStore {
       !isPositiveSafeInteger(commit.projectionGeneration) ||
       !isNonNegativeSafeInteger(commit.decorationCount) ||
       !isNonNegativeSafeInteger(commit.desiredWidgets) ||
-      !isNonNegativeSafeInteger(commit.mountedWidgets)
+      !isNonNegativeSafeInteger(commit.mountedWidgets) ||
+      !isNonNegativeSafeInteger(commit.activeSourceRangeCount) ||
+      commit.activeSourceRanges.length > maxDiagnosticTestRanges ||
+      commit.activeSourceRanges.length > commit.activeSourceRangeCount
     ) {
       throw new RangeError("invalid live preview diagnostics scalar");
     }
@@ -90,9 +94,10 @@ export class LivePreviewDiagnosticsStore {
     this.decorationCount = commit.decorationCount;
     this.desiredWidgets = commit.desiredWidgets;
     this.mountedWidgets = commit.mountedWidgets;
-    this.activeSourceRangeCount = commit.activeSourceRanges.length;
-    this.activeSourceRangesTruncated = commit.activeSourceRanges.length > maxDiagnosticTestRanges;
-    this.testRangeCount = Math.min(commit.activeSourceRanges.length, maxDiagnosticTestRanges);
+    this.activeSourceRangeCount = commit.activeSourceRangeCount;
+    this.activeSourceRangesTruncated =
+      commit.activeSourceRangeCount > commit.activeSourceRanges.length;
+    this.testRangeCount = commit.activeSourceRanges.length;
     for (let index = 0; index < this.testRangeCount; index += 1) {
       const range = commit.activeSourceRanges[index];
       if (range === undefined) break;

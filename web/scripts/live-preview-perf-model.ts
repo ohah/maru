@@ -1,10 +1,19 @@
 import { projectionFallbackReasons } from "../src/live-preview-diagnostics";
+import {
+  maxLivePreviewProjectionEntries,
+  maxLivePreviewSyntaxNodes,
+} from "../src/live-preview-projection";
+import { maxLivePreviewProjectionCodeUnits } from "../src/live-preview-protocol";
+import { maxMathDelimiterScanCodeUnits } from "../src/markdown-language";
 
-export const livePreviewPerfSchemaVersion = 1;
+export const livePreviewPerfSchemaVersion = 2;
 
 export type LivePreviewPerfCounters = Readonly<{
   visited_code_units: number;
   visited_syntax_nodes: number;
+  selection_range_checks: number;
+  math_scanned_code_units: number;
+  dense_math_scanned_code_units: number;
   emitted_decorations: number;
   diffed_decorations: number;
   copied_bytes: number;
@@ -20,13 +29,16 @@ export type LivePreviewPerfCounters = Readonly<{
 
 export type LivePreviewPerfArtifact = Readonly<{
   schema_version: typeof livePreviewPerfSchemaVersion;
-  scenario: "fp11a-8mib-1000-input-baseline";
+  scenario: "fp11b-8mib-1000-editable-projection";
   counters: LivePreviewPerfCounters;
 }>;
 
 const counterNames = [
   "visited_code_units",
   "visited_syntax_nodes",
+  "selection_range_checks",
+  "math_scanned_code_units",
+  "dense_math_scanned_code_units",
   "emitted_decorations",
   "diffed_decorations",
   "copied_bytes",
@@ -43,7 +55,7 @@ const counterNames = [
 export function validateLivePreviewPerfArtifact(artifact: LivePreviewPerfArtifact): void {
   if (artifact.schema_version !== livePreviewPerfSchemaVersion)
     throw new Error("live preview perf schema mismatch");
-  if (artifact.scenario !== "fp11a-8mib-1000-input-baseline")
+  if (artifact.scenario !== "fp11b-8mib-1000-editable-projection")
     throw new Error("live preview perf scenario mismatch");
   const actualNames = Object.keys(artifact.counters).sort();
   const expectedNames = [...counterNames].sort();
@@ -67,20 +79,32 @@ export function validateLivePreviewPerfArtifact(artifact: LivePreviewPerfArtifac
   if (artifact.counters.source_transactions !== 1_000)
     throw new Error("live preview source transaction fixture incomplete");
   if (
-    artifact.counters.visited_code_units !== 0 ||
-    artifact.counters.visited_syntax_nodes !== 0 ||
-    artifact.counters.emitted_decorations !== 0 ||
-    artifact.counters.diffed_decorations !== 0 ||
-    artifact.counters.projection_transactions !== 0 ||
+    artifact.counters.visited_code_units <= 0 ||
+    artifact.counters.visited_code_units > maxLivePreviewProjectionCodeUnits * 1_100 ||
+    artifact.counters.visited_syntax_nodes <= 0 ||
+    artifact.counters.visited_syntax_nodes > maxLivePreviewSyntaxNodes * 1_100 ||
+    artifact.counters.selection_range_checks <= 0 ||
+    artifact.counters.selection_range_checks > maxLivePreviewSyntaxNodes * 1_100 ||
+    artifact.counters.math_scanned_code_units <= 0 ||
+    artifact.counters.math_scanned_code_units > maxMathDelimiterScanCodeUnits * 1_100 ||
+    artifact.counters.dense_math_scanned_code_units <= 0 ||
+    artifact.counters.dense_math_scanned_code_units > maxMathDelimiterScanCodeUnits ||
+    artifact.counters.emitted_decorations <= 0 ||
+    artifact.counters.emitted_decorations > maxLivePreviewProjectionEntries ||
+    artifact.counters.diffed_decorations <= 0 ||
+    artifact.counters.diffed_decorations > maxLivePreviewProjectionEntries * 1_100 ||
+    artifact.counters.projection_transactions !== 1 ||
     artifact.counters.dom_mutations !== 0 ||
     artifact.counters.iframe_create !== 0 ||
     artifact.counters.iframe_destroy !== 0 ||
     artifact.counters.retained_html_bytes !== 0 ||
     artifact.counters.generated_outside_retention !== 0
   ) {
-    throw new Error("FP11a baseline changed product projection behavior");
+    throw new Error("FP11b editable projection budget exceeded");
   }
-  for (const count of Object.values(artifact.counters.projection_fallback_counts)) {
-    if (count !== 0) throw new Error("FP11a baseline produced a projection fallback");
+  for (const reason of projectionFallbackReasons) {
+    const expected = reason === "atomic-not-enabled" ? 1 : 0;
+    if (artifact.counters.projection_fallback_counts[reason] !== expected)
+      throw new Error("FP11b projection fallback mismatch");
   }
 }

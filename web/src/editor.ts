@@ -1,8 +1,9 @@
 import { defaultKeymap, history, historyKeymap } from "@codemirror/commands";
-import { markdown } from "@codemirror/lang-markdown";
+import { markdown, markdownLanguage } from "@codemirror/lang-markdown";
 import { EditorState } from "@codemirror/state";
 import { EditorView, keymap, lineNumbers, type ViewUpdate } from "@codemirror/view";
-import { livePreviewEditorExtension } from "./live-preview-editor";
+import { editableProjectionExtension } from "./editable-projection-view";
+import { maruMathMarkdownExtension } from "./markdown-language";
 
 export function createMarkdownEditor(
   parent: HTMLElement,
@@ -15,10 +16,11 @@ export function createMarkdownEditor(
     state: EditorState.create({
       doc: content,
       extensions: [
+        EditorState.allowMultipleSelections.of(true),
         lineNumbers(),
         history(),
-        markdown(),
-        livePreviewEditorExtension,
+        markdown({ base: markdownLanguage, extensions: maruMathMarkdownExtension }),
+        editableProjectionExtension,
         EditorView.lineWrapping,
         keymap.of([
           {

@@ -74,6 +74,86 @@ body {
   border-right-color: color-mix(in srgb, CanvasText 14%, Canvas);
 }
 
+body[data-file-mode="live-preview"] #editor .cm-gutters {
+  display: none;
+}
+
+/* EditableProjection maps its closed roles to this fixed class set. No source text, URL, or worker HTML is
+   interpolated into trusted shell DOM/CSS. System colors keep the projection readable across native themes. */
+.maru-projection-heading-1 {
+  font-size: 1.8em;
+  font-weight: 700;
+}
+
+.maru-projection-heading-2 {
+  font-size: 1.55em;
+  font-weight: 700;
+}
+
+.maru-projection-heading-3 {
+  font-size: 1.32em;
+  font-weight: 650;
+}
+
+.maru-projection-heading-4,
+.maru-projection-heading-5,
+.maru-projection-heading-6 {
+  font-weight: 650;
+}
+
+.maru-projection-emphasis {
+  font-style: italic;
+}
+
+.maru-projection-strong {
+  font-weight: 700;
+}
+
+.maru-projection-strike {
+  text-decoration: line-through;
+  color: color-mix(in srgb, CanvasText 62%, Canvas);
+}
+
+.maru-projection-inline-code {
+  border-radius: 0.25em;
+  background: color-mix(in srgb, CanvasText 9%, Canvas);
+  color: color-mix(in srgb, LinkText 78%, CanvasText);
+}
+
+.maru-projection-quote {
+  color: color-mix(in srgb, CanvasText 70%, Canvas);
+}
+
+.maru-projection-list {
+  padding-inline-start: 0.15em;
+}
+
+.maru-projection-thematic-break {
+  color: color-mix(in srgb, CanvasText 48%, Canvas);
+}
+
+.maru-projection-link {
+  color: LinkText;
+  text-decoration: underline;
+  text-decoration-color: color-mix(in srgb, LinkText 48%, Canvas);
+  text-underline-offset: 0.16em;
+}
+
+.maru-projection-task,
+.maru-projection-task-checked {
+  border-radius: 0.2em;
+  color: AccentColorText;
+  background: AccentColor;
+}
+
+.maru-projection-task-checked {
+  opacity: 0.72;
+}
+
+.maru-projection-table-cell {
+  background: color-mix(in srgb, CanvasText 4%, Canvas);
+}
+
 .maru-live-fragment {
   box-sizing: border-box;
   width: 100%;

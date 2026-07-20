@@ -46,10 +46,89 @@ workspace restore와 persistent-session attach는 서로 대체하지 않는다.
 | host가 없음·종료됨·재부팅됨 | 기존 handle은 ended. 새 shell을 열 수는 있지만 동일 session continuation 아님 |
 | host에만 runtime이 남음 | 삭제하지 않고 `Recovered Sessions`에서 복구 |
 
-현재 `maru.workspace.v1`에는 `runtime_handle`/`workspace_binding_id`가 없다. 구현 PR은 key-addressed optional scalar로
-안전하게 표현 가능한지 먼저 증명하고, 구조 변경이 필요하면 v2 migration/fallback 영향을 사용자와 논의한다. 또한 정상 종료
-한 번에만 저장하는 현재 방식은 GUI crash 직전 layout을 잃을 수 있으므로, 영속 session 기본 전환 전에 구조 mutation을
-atomic incremental checkpoint로 저장해야 한다. 세부 소유권·ID·접속 실패 행렬은 persistent-session 문서를 따른다.
+현재 `maru.workspace.v1`에는 `runtime_handle`/`workspace_binding_id`와 quick layout이 없다. 아래 binding scalar와 마지막
+`quick-window` tail wire는 설계가 확정됐지만 아직 코드에는 구현되지 않았다. 또한 정상 종료 한 번에만 저장하는 현재 방식은
+GUI crash 직전 layout을 잃을 수 있으므로, 영속 session 기본 전환 전에 구조 mutation을 atomic incremental checkpoint로
+저장해야 한다. 세부 소유권·ID·접속 실패 행렬은 persistent-session 문서를 따른다.
+
+## 영속 session binding wire (계획, 미구현)
+
+새 DB나 창별 파일을 만들지 않고 기존 `~/Library/Application Support/maru/workspace.v1` 하나가 Window/Workspace 배치의
+단일 출처다. 현재 직렬화 모델에서 `Window`=OS 창, `Tab`=Workspace, `Pane`=split leaf, `Surface`=terminal Term이므로
+일반 layout에는 optional quoted scalar를 추가하고, 현재 저장에서 빠지는 quick singleton은 normal window 뒤의 tail로 붙인다.
+
+```text
+maru.workspace.v1
+window tabs=1 active-tab=0 active-window=1
+tab panes=1 active-pane=0 custom-name="work" pinned=0 background-color=0 accent-color=0 workspace-binding-id="8b5f36a0f56d4a479ecb6077a87ac41c"
+tree-node leaf pane=0
+pane surfaces=1 active-term=0 custom-name=""
+surface custom-name="" title="shell" cwd="/repo" command="/bin/zsh" cols=120 rows=40 runtime-handle="f16fe6b415c84f1a9c0df52448852955:3020a9d49cef45adb9fe56f25dad4f18"
+quick-window tabs=1 active-tab=0
+tab panes=1 active-pane=0 custom-name="quick" pinned=0 background-color=0 accent-color=0 workspace-binding-id="e47de1e44a60495aa48f02e939b5fc81"
+tree-node leaf pane=0
+pane surfaces=1 active-term=0 custom-name=""
+surface custom-name="" title="scratch" cwd="/repo" command="/bin/zsh" cols=100 rows=30 runtime-handle="f16fe6b415c84f1a9c0df52448852955:b616db544aca443bab267404e15fb777"
+```
+
+| 필드 | 위치 | 형식·수명 | 키가 없을 때 |
+| --- | --- | --- | --- |
+| `workspace-binding-id` | `tab` line | Workspace 생성 때 발급한 opaque 128-bit random ID의 lowercase 32 hex. cross-window 이동 중 유지 | 옛/ephemeral Workspace. restore가 새 ID를 발급하되 동일 live workspace라고 주장하지 않음 |
+| `runtime-handle` | terminal `surface` line | `<host-id>:<runtime-id>`, 양쪽 모두 lowercase 32 hex. 한 quoted scalar로 all-or-none | 선언적 surface. 설정에 맞는 새 runtime 생성 후보이며 기존 process continuation 아님 |
+| `quick-window` | 모든 normal `window` 뒤의 optional tail | 0개 또는 1개. `tabs`/`active-tab` 뒤에 일반 tab/tree/pane/surface subtree 재사용 | quick을 아직 만들지 않았거나 옛 파일. 첫 toggle이 새 persistent quick runtime 생성 |
+
+규칙:
+
+- 두 binding 필드는 기존 `LineFields`의 순서 무관 optional scalar다. 옛 reader는 미지 키로 skip하고 새 reader는 부재를 legacy/default로
+  읽으므로 header는 `maru.workspace.v1`을 유지한다.
+- `quick-window`는 기존 normal `window` loop가 끝난 뒤에만 오는 self-delimiting tail이다. 옛 reader는 첫 미지 trailing line에서
+  정상 종료해 전체 quick subtree를 무시하므로 이를 일반 Window로 잘못 열지 않는다. 새 reader는 최대 1개만 인식하고 subtree를
+  끝까지 검증한다. 이 증명이 깨지는 위치/형식으로 옮기면 v1 변경으로 허용하지 않는다.
+- 키가 있는데 quoted 형식, 길이, lowercase hex, `:` 구분이 깨졌으면 `BadLine`이며 기존 "존재하는 optional 손상은 숨기지
+  않는다" 규칙대로 checkpoint 전체를 거부한다. `runtime-handle`을 두 키로 나눠 partial state를 만들지 않는다.
+- writer는 ID를 의미 있는 숫자나 path로 인코딩하지 않고, 같은 값의 재사용·자동 재발급으로 손상을 숨기지 않는다.
+- publish 전 전체 모델을 검증한다. `workspace-binding-id`는 manifest 전체에서 유일해야 하고, 하나의 `runtime-handle`은 하나의
+  writable terminal surface에만 나타나야 한다. 중복이면 현재 live 모델과 마지막 완전 파일을 보존하고 새 checkpoint를 쓰지 않는다.
+- reader도 어떤 runtime attach/spawn이나 Window publish보다 먼저 전역 중복을 검사한다. 검증 실패 때 일부 창만 attach하는
+  side effect를 만들지 않는다.
+- 올바른 handle인데 현재 host/runtime 목록에 없으면 파일 손상이 아니라 ended 상태다. 해당 surface만 종료 placeholder로 두고
+  나머지는 attach한다. host에는 있지만 manifest에 없는 runtime은 `Recovered Sessions`에 둔다.
+- runtime이 살아 있는 attach는 saved `cwd`/`command`로 새 shell을 spawn하지 않는다. `cwd`/`title`은 초기 표시 fallback이고
+  host snapshot/metadata가 도착하면 live 값을 따른다.
+- `runtime-handle`은 secret/capability가 아니다. workspace 파일을 읽은 client도 별도 session-host 인증 없이는 output/input을
+  얻지 못한다.
+
+### 멀티윈도우 저장·이동·동시 쓰기
+
+- 기존 한 header 아래 `window` block N개가 모든 OS Window를 저장한다. 각 Window가 같은 host connection을 공유하지만 layout은
+  계속 자기 `tab`/`pane`/`surface` block에 인라인으로 저장한다.
+- Workspace cross-window 이동은 source `window`에서 같은 `tab` subtree를 제거해 target `window`에 삽입한다.
+  `workspace-binding-id`와 그 아래 `runtime-handle`은 byte-identical로 유지되고 runtime/PTY를 재시작하지 않는다.
+- Term/Panes 이동도 handle을 유지한 채 위치만 바꾼다. Workspace 복제는 새 `workspace-binding-id`를 발급하며 writable
+  `runtime-handle`을 복제하지 않는다. 복제 UI가 필요하면 새 runtime을 만들거나 explicit placeholder로 둔다.
+- app-wide Quit은 모든 Window를 한 checkpoint로 publish한 뒤 GUI client를 detach한다. 비마지막 Window/Workspace/Term의
+  명시적 close는 기존 close 의미대로 소속 runtime 종료 확인을 먼저 거친다.
+- manifest writer는 `Maru.app` process 하나다. 비정상적으로 두 GUI process가 같은 파일을 열면 파일 writer lease를 얻은
+  process만 restore mutation/checkpoint를 수행한다. 다른 process와 `maru attach` CLI는 observer/개별 attach만 가능하고
+  manifest를 쓰지 않는다.
+- workspace 생성/삭제, split, rename/group/pin, Term 이동/닫기, cross-window 이동, binding 변경은 dirty를 만들고 짧은
+  debounce 뒤 같은 디렉터리 temp write·file sync·atomic rename으로 전체 manifest를 교체한다. crash는 이전 또는 새 완전본
+  중 하나만 남겨야 하며, 창별로 따로 publish하지 않는다.
+
+### quick terminal 저장·재연결
+
+- quick은 app-global singleton `AppSession`이며 normal Window count, active-window, frame, dock/explorer에 포함하지 않는다.
+  `quick-window`는 Workspace/Pane/terminal Term layout과 binding만 저장한다. panel position/size/screen/chrome/minimal-tabs는
+  config, visible/hidden 상태는 transient라 앱 시작 시 항상 숨김이다.
+- quick이 한 번도 생성되지 않았으면 tail이 없다. 생성된 quick을 hide/auto-hide/Esc로 숨겨도 tail과 runtime은 유지한다.
+  첫 toggle 때 dormant layout을 materialize하고 live handle에 attach하며 새 shell을 중복 spawn하지 않는다.
+- quick runtime의 notification click으로 cold launch하면 normal Window가 아니라 quick panel을 lazy 생성하고 발신
+  Workspace/Pane/Term을 활성화해 보여 준다.
+- quick은 cross-window move/merge의 source/target이 아니다. quick Term을 normal Window로 이동하거나 그 반대의 UX는 별도
+  trust-boundary 설계 전 비범위다.
+- config의 chrome 변경은 GUI session만 다시 만들고 같은 handles에 reattach한다. `minimal-tabs=false`로 바뀌어도 기존 여러
+  Workspace/Term/split을 삭제하지 않고 이후 생성 command만 막는다.
+- manifest의 normal windows와 quick tail 전체가 한 writer lease·한 atomic checkpoint다. quick만 별도 파일/DB에 쓰지 않는다.
 
 ## 자동 복구와 명령 재실행은 다르다
 
@@ -109,7 +188,11 @@ no-op으로 읽고 UI에서는 숨긴다. 상태 표시의 새 경계는 [에이
 - 이 값을 저장할 경우에도 민감정보 redaction과 사용자 동의가 필요하다.
 - claude/codex도 예외가 아니며 사용자가 셸에서 직접 다시 실행한다.
 
-## 저장 모델 초안
+## 저장 모델의 초기 개념
+
+아래 블록은 선언적 restore와 live object의 경계를 설명하기 위해 남긴 초기 개념 모델이며 실제 wire가 아니다. 현재 구현의
+실제 line 형식은 뒤의 key-addressed 절과 `src/session/workspace.zig`, 영속 binding의 추가 형식은 위
+“영속 session binding wire”를 따른다.
 
 ```text
 maru.workspace.v1
@@ -128,9 +211,13 @@ layout
   tab 1 surface=1
 ```
 
-실제 직렬화는 나중에 정한다. 중요한 것은 저장 대상이 live object가 아니라 선언적 상태라는 점이다. 첫 줄 schema 토큰은 snapshot/trace와 같은 규칙으로 bare 토큰(`maru.workspace.v1`)을 쓰고 `schema=` 접두어를 두지 않는다.
+중요한 것은 저장 대상이 live object가 아니라 선언적 상태라는 점이다. 첫 줄 schema 토큰은 snapshot/trace와 같은 규칙으로
+bare 토큰(`maru.workspace.v1`)을 쓰고 `schema=` 접두어를 두지 않는다.
 
-멀티윈도우와 live surface 소유권(AppRuntime/WindowGraph) 모델은 [윈도우와 Surface 이동성](window-surface-mobility.md)을 단일 출처로 둔다. 그 모델이 도입되면 저장 대상은 단일 창에서 `WindowGraph` 기준(windows, active window, workspace order, pane tree, surface refs)으로 확장되고, 각 surface는 복원 시 새 generation으로 생성된다. live PTY fd·child pid·WKWebView process handle·JS heap snapshot은 여전히 저장하지 않는다.
+멀티윈도우와 live surface 소유권은 [윈도우와 Surface 이동성](window-surface-mobility.md)을 단일 출처로 둔다. 현재 v1은 이미
+한 header 아래 Window N개, 각 Window의 workspace order·pane tree·surface metadata, active window와 geometry를 저장한다.
+GUI `surface_id + generation`은 재실행 때 새로 발급하되, persistent terminal은 저장된 `runtime-handle`에 다시 bind한다.
+live PTY fd·child pid·WKWebView process handle·JS heap snapshot은 여전히 저장하지 않는다.
 
 ## 사용자 지정 이름(custom_name)과 자동 제목
 
@@ -173,8 +260,10 @@ surface custom-name="<term custom_name>" title="<auto OSC title>" cwd=... ...
 
 - custom_name은 트리 내 위치(인덱스)로 round-trip한다(cwd/title과 같은 식별).
 - 자동 제목(surface `title`)은 복원 직후 셸이 OSC를 다시 보내기 전까지의 폴백 표시용으로만 저장·소비한다. custom_name이 있으면 표시 규칙상 자동 제목보다 우선한다.
-- **하위 호환**: additive 스칼라 필드는 key-addressed로 하위호환된다(옛 파일이 그 키의 기본값으로 복원 — 폴백 없음). 단
-  **구조 변경**(새 블록 타입·tree 인코딩·카운트 의미 변경)은 하위호환 없이 스키마 버전을 올리거나 통째 폴백+self-heal한다(아래 참조).
+- **하위 호환**: additive 스칼라 필드는 key-addressed로 하위호환된다(옛 파일이 그 키의 기본값으로 복원 — 폴백 없음).
+  구조 변경은 원칙적으로 스키마 버전을 올리거나 통째 폴백+self-heal한다. 유일하게 허용한 예외는 모든 normal Window 뒤에
+  위치해 옛 reader가 통째로 무시하는 self-delimiting `quick-window` tail이다(위 binding wire 절). 다른 새 block/tree/count는
+  이 예외를 일반화하지 않는다.
 
 ## 직렬화 전략: 스칼라 필드 key-addressed 파싱
 
@@ -210,8 +299,9 @@ surface custom-name="<term custom_name>" title="<auto OSC title>" cwd=... ...
 **반복 키.** `surface`의 `agent-arg`는 반복 키라 필드를 나온 순서대로 순회해 수집하고, 개수는 구조 키 `agent-argc`와 일치해야
 한다(불일치=손상=BadLine — self-delimiting 정합).
 
-**범위 밖(하위호환 안 되는 변경).** 새 블록 타입 추가·`tree-node` 인코딩 변경·카운트 의미 변경은 구조 파괴라 스키마 버전
-bump(`maru.workspace.v1`→`.v2`) 또는 통째 폴백+self-heal 대상이다("[저장 파일을 통째로 파싱 못 할 때](#저장-파일을-통째로-파싱-못-할-때)"). additive 스칼라 필드는 버전을 안 올린다.
+**범위 밖(하위호환 안 되는 변경).** 위에서 명시한 마지막 `quick-window` tail 외 새 블록 타입 추가·`tree-node` 인코딩 변경·
+카운트 의미 변경은 구조 파괴라 스키마 버전 bump(`maru.workspace.v1`→`.v2`) 또는 통째 폴백+self-heal 대상이다
+("[저장 파일을 통째로 파싱 못 할 때](#저장-파일을-통째로-파싱-못-할-때)"). additive 스칼라 필드는 버전을 안 올린다.
 
 **writer.** writer는 항상 전체 키를 `key=value`로 쓴다(불변) → round-trip 고정점 유지. reader만 순서 무관·기본값이라, writer가 낸
 최신 포맷은 정확히, 옛 파일은 관대하게 읽는다.
@@ -315,13 +405,29 @@ restore가 실패해도 workspace 전체를 버리지 않는다.
 
 헤더 불일치·**구조 파괴 포맷 변경**(새 블록·tree 인코딩·카운트 의미 — 위 "직렬화 전략"의 하위호환 범위 밖)·손상으로 저장 파일을 **통째로** 파싱 못 하면, **알림(notice) 없이 조용히 기본 단일 창으로 시작**한다. 복원 불가는 사용자 잘못이 아니고, 특히 구조가 바뀌면 이전 버전 저장 파일이 모두 여기로 떨어지는데 이를 "손상" 모달로 알리면 업데이트 후 첫 실행마다 키를 막는 중앙 팝업이 떠 UX가 나쁘다. 저장본은 다음 정상 종료 때 새 포맷으로 덮어써져 자연히 해소된다(self-heal). 빈 workspace(저장 없음)와 같은 조용한 기본 창 동작이다. **additive 스칼라 필드 추가는 key-addressed 하위호환이라 여기로 안 떨어진다**(옛 파일이 기본값으로 정상 복원). 일부만 복원 실패(파싱은 됐으나 일부 창 적용 실패)는 이와 별개로 안내할 수 있다.
 
-## 초기 테스트
+## 자동 테스트
 
 - workspace fixture round-trip.
-- live PTY handle이 저장 모델에 들어가지 않는지 테스트.
+- live PTY fd·child pid가 저장 모델에 들어가지 않고 opaque `runtime-handle`만 들어가는지 테스트.
 - 민감 env key가 저장되면 실패하는 테스트.
 - `shell_entry`와 `startup_recipe argv`가 round-trip되는 테스트.
 - `last_observed_command`가 자동 실행 후보로 저장되지 않는 테스트.
 - cwd가 없을 때 surface별 restore failure artifact를 남기는 테스트.
 - 구버전 `agent_kind`·`agent_session`·`agent_argv`를 파싱하되 복원 실행에는 쓰지 않는 테스트.
 - 새 저장에는 agent 필드가 없고 shell/cwd/layout round-trip만 유지되는 테스트.
+- binding 필드가 없는 기존 fixture의 byte-stable parse/serialize와 옛 reader의 미지 binding key skip.
+- `workspace-binding-id`와 `runtime-handle` exact length/lowercase hex/구분자, 부재, 손상, duplicate exact-cap/cap+1.
+- writer가 duplicate workspace/runtime binding에서 새 파일을 publish하지 않고 기존 완전본을 보존하는 fail-before-effect 테스트.
+- reader가 전체 semantic validation 전 host attach/spawn/Window publish를 정확히 0회 수행하는 fake backend 테스트.
+- 2 Window+3 Workspace의 cross-window Workspace/Pane/Term 이동에서 binding byte identity, child/runtime 재생성 0, source/target
+  원자 publish를 검증하는 headless transaction 테스트.
+- temp write/file sync/atomic rename 각 fail-index와 GUI SIGKILL에서 이전 또는 새 완전 manifest만 읽히는 process 테스트.
+- writer lease를 동시에 경쟁한 두 GUI test process 중 하나만 checkpoint하고 loser/CLI write가 0인 통합 테스트.
+- 실제 signed app을 종료·재실행해 같은 `runtime-handle`이 같은 child/scrollback에 붙는 무인 macOS E2E.
+- quick tail 0/1/2개, normal window 앞/사이/뒤 위치, truncated subtree, 옛 reader가 quick 전체를 무시하고 normal windows를
+  byte-identical하게 복원하는 호환 테스트.
+- quick hide/show/app quit/relaunch/config chrome 변경에서 runtime ID·child pid·scrollback 불변, 새 spawn 0, panel 시작 hidden,
+  notification click이 exact quick Term을 여는 무인 macOS E2E.
+
+이 목록은 [영속 터미널 세션 호스트](persistent-session-host.md#14-무인-tdde2e성능-gate)의 TDD 층과 함께 적용한다.
+수동 창 조작만 가능한 항목은 구현 완료로 세지 않으며 자동 runner가 없으면 해당 phase를 미완료로 둔다.

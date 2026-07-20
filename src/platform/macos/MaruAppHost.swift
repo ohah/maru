@@ -679,6 +679,7 @@ final class MaruAppSchemeHandler: NSObject, WKURLSchemeHandler {
     struct RoleSchemeSmokeResult {
         let appWorkerStatus: Int
         let appWorkerCSP: String
+        let appMermaidStatus: Int
         let renderWorkerStatus: Int
         let renderWorkerCSP: String
         let renderDocumentStatus: Int
@@ -693,6 +694,7 @@ final class MaruAppSchemeHandler: NSObject, WKURLSchemeHandler {
             try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
             defer { try? FileManager.default.removeItem(at: root) }
             try Data("self.onmessage=()=>{}".utf8).write(to: root.appendingPathComponent("live-preview-worker.js"))
+            try Data("globalThis.mermaid={}".utf8).write(to: root.appendingPathComponent("mermaid-helper.js"))
             try Data("<!doctype html><title>render</title>".utf8).write(to: root.appendingPathComponent("render.html"))
             let handler = MaruAppSchemeHandler(assetRoot: root.path)
             func run(_ rawURL: String) -> MaruSchemeSmokeTask? {
@@ -706,6 +708,7 @@ final class MaruAppSchemeHandler: NSObject, WKURLSchemeHandler {
                 return task.finished ? task : nil
             }
             guard let appWorker = run("maru-app://app/live-preview-worker.js"),
+                  let appMermaid = run("maru-app://app/mermaid-helper.js"),
                   let renderWorker = run("maru-app://render/live-preview-worker.js"),
                   let renderDocument = run("maru-app://render/render.html") else { return nil }
             let appWorkerStatus = appWorker.response?.statusCode ?? -1
@@ -717,6 +720,7 @@ final class MaruAppSchemeHandler: NSObject, WKURLSchemeHandler {
             return RoleSchemeSmokeResult(
                 appWorkerStatus: appWorkerStatus,
                 appWorkerCSP: appWorkerCSP,
+                appMermaidStatus: appMermaid.response?.statusCode ?? -1,
                 renderWorkerStatus: renderWorkerStatus,
                 renderWorkerCSP: renderWorkerCSP,
                 renderDocumentStatus: renderDocumentStatus,
@@ -922,6 +926,30 @@ final class MaruBridgeHandler: NSObject, WKScriptMessageHandlerWithReply {
             replyHandler(nil, "bad request")
             return
         }
+        if body["method"] as? String == "maru.file.renderMermaid",
+           let reply = replyObj as? [String: Any],
+           let result = reply["result"] as? [String: Any],
+           let job = result["job_id"] as? NSNumber,
+           let params = body["params"] as? [String: Any],
+           let controller,
+           controller.registerMermaidReply(
+             surfaceId: surfaceId,
+             jobId: job.uint64Value,
+             requestId: body["id"] ?? NSNull(),
+             params: params,
+             replyHandler: replyHandler
+           ) {
+            return
+        }
+        if body["method"] as? String == "maru.file.livePreviewReady",
+           let reply = replyObj as? [String: Any], reply["result"] != nil {
+            controller?.livePreviewBridgeReady(surfaceId)
+        }
+        if body["method"] as? String == "maru.file.revokeMermaid",
+           let reply = replyObj as? [String: Any], reply["result"] != nil,
+           let params = body["params"] as? [String: Any] {
+            controller?.revokeMermaidReply(surfaceId: surfaceId, params: params)
+        }
         replyHandler(replyObj, nil) // JSON-RPC 응답 객체로 Promise 해소(shim의 request()가 이걸 반환).
     }
 
@@ -931,7 +959,7 @@ final class MaruBridgeHandler: NSObject, WKScriptMessageHandlerWithReply {
         guard let session = controller?.bridgeSession(for: surfaceId) else { return nil }
         // write/dirty/openLink는 side effect라 size-query가 dispatch를 두 번 실행하면 안 된다. 응답은 작은 고정 JSON이므로
         // 단일 1 KiB fill 호출로 끝낸다. read/readAsset만 아래 query/fill 재계산 경로를 쓴다.
-        if method == "maru.file.beginDocument" || method == "maru.file.write" || method == "maru.file.setDirty" || method == "maru.file.resolveExternalChange" || method == "maru.file.openLink" {
+        if method == "maru.file.beginDocument" || method == "maru.file.write" || method == "maru.file.setDirty" || method == "maru.file.resolveExternalChange" || method == "maru.file.openLink" || method == "maru.file.renderMermaid" || method == "maru.file.revokeMermaid" || method == "maru.file.livePreviewReady" {
             var out = [UInt8](repeating: 0, count: 1024)
             let written = reqBytes.withUnsafeBufferPointer { rp in
                 out.withUnsafeMutableBufferPointer { op in
@@ -990,6 +1018,15 @@ final class MaruBridgeHandler: NSObject, WKScriptMessageHandlerWithReply {
           },
           openLink: function (editorEpoch, href, forceSystem) {
             return window.maru.request("maru.file.openLink", { editor_epoch: editorEpoch, href: href, forceSystem: forceSystem });
+          },
+          renderMermaid: function (request) {
+            return window.maru.request("maru.file.renderMermaid", request);
+          },
+          revokeMermaid: function (request) {
+            return window.maru.request("maru.file.revokeMermaid", request);
+          },
+          livePreviewReady: function (editorEpoch) {
+            return window.maru.request("maru.file.livePreviewReady", { editor_epoch: editorEpoch });
           }
         }
       };
@@ -1023,6 +1060,45 @@ final class MaruBridgeHandler: NSObject, WKScriptMessageHandlerWithReply {
           } else if (request.method === "openLink" && Number.isSafeInteger(request.editor_epoch) && request.editor_epoch > 0 &&
                      typeof request.href === "string" && request.href.length <= 4096 && typeof request.forceSystem === "boolean") {
             promise = window.maru.file.openLink(request.editor_epoch, request.href, request.forceSystem);
+          } else if (request.method === "renderMermaid" &&
+                     Number.isSafeInteger(request.editor_epoch) && request.editor_epoch > 0 &&
+                     Number.isSafeInteger(request.document_revision) && request.document_revision >= 0 &&
+                     Number.isSafeInteger(request.projection_generation) && request.projection_generation > 0 &&
+                     Number.isSafeInteger(request.widget_id) && request.widget_id > 0 &&
+                     Number.isSafeInteger(request.widget_generation) && request.widget_generation > 0 &&
+                     Number.isSafeInteger(request.renderer_instance) && request.renderer_instance > 0 &&
+                     Number.isSafeInteger(request.fence_id) && request.fence_id > 0 &&
+                     typeof request.source_hash === "string" && /^[0-9a-f]{64}$/.test(request.source_hash) &&
+                     typeof request.source === "string" && request.source.length > 0 && request.source.length <= 32768) {
+            promise = window.maru.file.renderMermaid({
+              editor_epoch: request.editor_epoch,
+              document_revision: request.document_revision,
+              projection_generation: request.projection_generation,
+              widget_id: request.widget_id,
+              widget_generation: request.widget_generation,
+              renderer_instance: request.renderer_instance,
+              fence_id: request.fence_id,
+              source_hash: request.source_hash,
+              source: request.source
+            });
+          } else if (request.method === "revokeMermaid" &&
+                     Number.isSafeInteger(request.editor_epoch) && request.editor_epoch > 0 &&
+                     Number.isSafeInteger(request.document_revision) && request.document_revision >= 0 &&
+                     Number.isSafeInteger(request.projection_generation) && request.projection_generation > 0 &&
+                     Number.isSafeInteger(request.widget_id) && request.widget_id > 0 &&
+                     Number.isSafeInteger(request.widget_generation) && request.widget_generation > 0 &&
+                     Number.isSafeInteger(request.renderer_instance) && request.renderer_instance > 0) {
+            promise = window.maru.file.revokeMermaid({
+              editor_epoch: request.editor_epoch,
+              document_revision: request.document_revision,
+              projection_generation: request.projection_generation,
+              widget_id: request.widget_id,
+              widget_generation: request.widget_generation,
+              renderer_instance: request.renderer_instance
+            });
+          } else if (request.method === "livePreviewReady" &&
+                     Number.isSafeInteger(request.editor_epoch) && request.editor_epoch > 0) {
+            promise = window.maru.file.livePreviewReady(request.editor_epoch);
           } else {
             node.textContent = JSON.stringify({ error: "invalid request" });
             finish(node);
@@ -2283,6 +2359,14 @@ final class FilePanelEditingSmokeProbe {
     var liveProjectionDecorations = "pending"
     var liveProjectionGeneration = "pending"
     var liveGeneralFragments = "pending"
+    var liveAtomicMounted = "pending"
+    var liveAtomicRendered = "pending"
+    var liveAtomicAdmitted = "pending"
+    var liveAtomicState = "pending"
+    var liveAtomicFailure = "pending"
+    var liveMermaidRequest = "pending"
+    var mermaidNavigationInFlight = "pending"
+    var mermaidNavigationCancelled = "pending"
     var defaultMode = "pending"
     var edit = "pending"
     var cmdSRoute = "pending"
@@ -2291,6 +2375,8 @@ final class FilePanelEditingSmokeProbe {
 
     private var navigationEpoch: UInt64 = 0
     private var saveStartedEpoch: UInt64?
+    private var mermaidNavigationStarted = false
+    private var observedEditorEpoch = 0
     nonisolated private static let marker = "FP10d actual Cmd+S marker"
     nonisolated private static let diskProbeTailBytes = 4096
 
@@ -2301,11 +2387,20 @@ final class FilePanelEditingSmokeProbe {
     func invalidateNavigation() {
         navigationEpoch &+= 1
         saveStartedEpoch = nil
+        // 탐색 취소 probe는 정상 편집·저장 E2E를 모두 끝낸 뒤 마지막에 실행한다. 그 reload는 editable
+        // document recovery latch를 의도대로 세우므로, 직전 성공 증거를 지우거나 새 문서에서 편집을 재시작하지 않는다.
+        if mermaidNavigationStarted { return }
         editor = "pending"
         liveProjection = "pending"
         liveProjectionDecorations = "pending"
         liveProjectionGeneration = "pending"
         liveGeneralFragments = "pending"
+        liveAtomicMounted = "pending"
+        liveAtomicRendered = "pending"
+        liveAtomicAdmitted = "pending"
+        liveAtomicState = "pending"
+        liveAtomicFailure = "pending"
+        liveMermaidRequest = "pending"
         defaultMode = "pending"
         edit = "pending"
         cmdSRoute = "pending"
@@ -2320,7 +2415,9 @@ final class FilePanelEditingSmokeProbe {
         let epoch = navigationEpoch
         defaultMode = requestedMode == Int32(MARU_FILE_PANEL_MODE_LIVE_PREVIEW)
             ? "live-preview" : "unexpected-\(requestedMode)"
-        captureEditor(epoch: epoch, attemptsRemaining: 24)
+        // A cold signed helper plus its bridge-free WKWebView may finish after the shell/editor is already
+        // interactive. Keep the probe alive for the product smoke lifetime instead of declaring failure at 6 s.
+        captureEditor(epoch: epoch, attemptsRemaining: 48)
     }
 
     private func captureEditor(epoch: UInt64, attemptsRemaining: Int) {
@@ -2331,7 +2428,14 @@ final class FilePanelEditingSmokeProbe {
           projection: document.getElementById('viewer-status')?.dataset.liveProjection || 'pending',
           decorations: Number(document.getElementById('viewer-status')?.dataset.liveProjectionDecorations || '0'),
           generation: Number(document.getElementById('viewer-status')?.dataset.liveProjectionGeneration || '0'),
-          generalFragments: document.querySelectorAll('.maru-live-fragment-frame').length
+          generalFragments: document.querySelectorAll('.maru-live-fragment-frame').length,
+          atomicMounted: Number(document.getElementById('viewer-status')?.dataset.liveAtomicMounted || '0'),
+          atomicRendered: document.querySelectorAll('.maru-live-atomic-frame[data-atomic-rendered="true"]').length,
+          atomicAdmitted: document.getElementById('viewer-status')?.dataset.liveAtomicAdmitted || 'pending',
+          atomicState: document.getElementById('viewer-status')?.dataset.liveAtomicState || 'pending',
+          atomicFailure: document.getElementById('viewer-status')?.dataset.liveAtomicFailure || 'pending',
+          mermaidRequest: document.getElementById('viewer-status')?.dataset.liveMermaidRequest || 'pending',
+          editorEpoch: Number(document.getElementById('viewer-status')?.dataset.editorEpoch || '0')
         })
         """
         panel.webView.evaluateJavaScript(script) { [weak self] value, _ in
@@ -2343,12 +2447,27 @@ final class FilePanelEditingSmokeProbe {
             let decorations = probe["decorations"] as? Int ?? 0
             let generation = probe["generation"] as? Int ?? 0
             let generalFragments = probe["generalFragments"] as? Int ?? 0
+            let atomicMounted = probe["atomicMounted"] as? Int ?? 0
+            let atomicRendered = probe["atomicRendered"] as? Int ?? 0
+            let atomicAdmitted = probe["atomicAdmitted"] as? String ?? "pending"
+            let atomicState = probe["atomicState"] as? String ?? "pending"
+            let atomicFailure = probe["atomicFailure"] as? String ?? "pending"
+            let mermaidRequest = probe["mermaidRequest"] as? String ?? "pending"
+            let editorEpoch = probe["editorEpoch"] as? Int ?? 0
+            self.observedEditorEpoch = editorEpoch
             self.editor = String(editorReady)
             self.liveProjection = projection
             self.liveProjectionDecorations = String(decorations)
             self.liveProjectionGeneration = String(generation)
             self.liveGeneralFragments = String(generalFragments)
-            if editorReady, projection == "running", decorations > 0, generation > 0, generalFragments == 0 {
+            self.liveAtomicMounted = String(max(Int(self.liveAtomicMounted) ?? 0, atomicMounted))
+            self.liveAtomicRendered = String(max(Int(self.liveAtomicRendered) ?? 0, atomicRendered))
+            self.liveAtomicAdmitted = atomicAdmitted
+            self.liveAtomicState = atomicState
+            self.liveAtomicFailure = atomicFailure
+            self.liveMermaidRequest = mermaidRequest
+            if editorReady, projection == "running", decorations > 0, generation > 0,
+               generalFragments == 0, atomicMounted >= 2, atomicRendered >= 2 {
                 self.startEditingSave(epoch: epoch)
                 return
             }
@@ -2357,6 +2476,70 @@ final class FilePanelEditingSmokeProbe {
                 self?.captureEditor(epoch: epoch, attemptsRemaining: attemptsRemaining - 1)
             }
         }
+    }
+
+    /// 제품 isolated bridge에 실제 hang job을 등록하고 helper가 in-flight가 된 뒤 같은 WKWebView를 reload한다.
+    /// didStartProvisionalNavigation이 pending Promise를 취소하고 exact Zig job을 revoke하는지를 실제 delegate 수명으로 잰다.
+    private func startMermaidNavigationProbe(epoch: UInt64, editorEpoch: Int) {
+        guard epoch == navigationEpoch, editorEpoch > 0, !mermaidNavigationStarted,
+              let panel, let world = panel.bridgeWorld else {
+            mermaidNavigationInFlight = "false"
+            mermaidNavigationCancelled = "false"
+            return
+        }
+        mermaidNavigationStarted = true
+        panel.webView.callAsyncJavaScript(
+            """
+            void window.maru.file.renderMermaid({
+              editor_epoch: editorEpoch,
+              document_revision: 9001,
+              projection_generation: 9001,
+              widget_id: 9001,
+              widget_generation: 1,
+              renderer_instance: 9001,
+              fence_id: 9001,
+              source_hash: "1b6fbbe23d2b88f55acfe0fbdf8823b240e7693a7eb9ac978bf76f2d1934714d",
+              source: "__MARU_TEST_HANG__"
+            }).catch(() => {});
+            return true;
+            """,
+            arguments: ["editorEpoch": editorEpoch],
+            in: nil,
+            in: world
+        ) { [weak self] result in
+            guard let self, epoch == self.navigationEpoch,
+                  case .success(let value) = result, value as? Bool == true else {
+                self?.mermaidNavigationInFlight = "false"
+                self?.mermaidNavigationCancelled = "false"
+                return
+            }
+            self.waitForMermaidInFlight(epoch: epoch, attemptsRemaining: 40)
+        }
+    }
+
+    private func waitForMermaidInFlight(epoch: UInt64, attemptsRemaining: Int) {
+        guard epoch == navigationEpoch, let panel else { return }
+        var snapshot = MaruMermaidCoordinatorSnapshot()
+        maru_macos_mermaid_snapshot(&snapshot)
+        if snapshot.in_flight != 0 {
+            mermaidNavigationInFlight = "true"
+            panel.webView.reload()
+            return
+        }
+        guard attemptsRemaining > 1 else {
+            mermaidNavigationInFlight = "false"
+            mermaidNavigationCancelled = "false"
+            return
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
+            self?.waitForMermaidInFlight(epoch: epoch, attemptsRemaining: attemptsRemaining - 1)
+        }
+    }
+
+    func observeMermaidNavigationCancellation(inFlight: Bool, cancelledReplies: Int) {
+        guard mermaidNavigationStarted, mermaidNavigationCancelled == "pending" else { return }
+        mermaidNavigationInFlight = String(inFlight)
+        mermaidNavigationCancelled = cancelledReplies == 1 ? "true" : "false-\(cancelledReplies)"
     }
 
     private func startEditingSave(epoch: UInt64) {
@@ -2478,6 +2661,7 @@ final class FilePanelEditingSmokeProbe {
                 if saved {
                     self.diskSaved = "true"
                     self.write = "true"
+                    self.startMermaidNavigationProbe(epoch: epoch, editorEpoch: self.observedEditorEpoch)
                     return
                 }
                 guard attemptsRemaining > 1 else {
@@ -3206,6 +3390,18 @@ extension MaruWebPanelView: WKNavigationDelegate {
         if filePanelKind == 1 {
             // 새 document에서는 이전 page Promise와 retry callback을 무효화한다. pending intent 자체는 보존해
             // didFinish exact-origin에서 한 번만 재개한다.
+            var mermaidSnapshot = MaruMermaidCoordinatorSnapshot()
+            maru_macos_mermaid_snapshot(&mermaidSnapshot)
+            let cancelledReplies = controller?.cancelMermaidReplies(
+                surfaceId: surfaceId,
+                error: "file panel navigated"
+            ) ?? 0
+            if controller?.isFileEditingSmokeMode == true {
+                fileEditingSmokeProbe.observeMermaidNavigationCancellation(
+                    inFlight: mermaidSnapshot.in_flight != 0,
+                    cancelledReplies: cancelledReplies
+                )
+            }
             fileDirtySyncEpoch &+= 1
             fileDirtySyncInFlight = false
             if controller?.isFileEditingSmokeMode == true { fileEditingSmokeProbe.invalidateNavigation() }
@@ -3302,6 +3498,10 @@ extension MaruWebPanelView: WKNavigationDelegate {
             resumeFileDirtySyncIfPending()
         }
         guard controller?.isSmokeMode == true else { return }
+        // Navigation cancellation probe는 정상 viewer/edit/save 증거를 얻은 뒤 마지막에 의도적으로 editable
+        // document를 reload한다. 새 document는 recovery latch로 read를 거부하는 것이 계약이므로 두 번째 probe가
+        // 첫 성공값을 덮지 않게 한다. didStart 취소·Zig revoke·helper deadline은 그대로 실제 경로를 지난다.
+        if filePanelKind == 1, fileEditingSmokeProbe.mermaidNavigationCancelled != "pending" { return }
         if filePanelKind == 1, fileDirtySyncRecoveryProbe == nil {
             // didFinish 직후 file read/CM6 hydration과 경쟁시켜, 일반 tab-leave sync가 page hook 준비 전에도
             // completion형 retry를 거쳐 clean ACK로 회복하는 실제 WKWebView 경로를 고정한다.
@@ -3907,6 +4107,14 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     // FP10c1: 앱 전역 Zig mermaid_queue action을 실행할 유일한 native adapter. Mermaid fence admission과
     // frame-tick pump는 FP10c2의 pending-work/perf gate 전까지 배선하지 않는다.
     private let mermaidRenderCoordinator = MermaidRenderCoordinator()
+    // 제품 display tick과 native perf smoke가 공유하는 유일한 has-work/pump/drain 순서 경계다.
+    // 이 타입에는 FS/WebView/process/pipe/wait capability가 없어서 hot path의 허용 책임이 좁게 고정된다.
+    private let mermaidProductTick = MermaidProductTickAdapter()
+    private let mermaidAcceptedDrainer = MermaidAcceptedResultDrainer()
+    private static let maxMermaidPendingReplies = Int(MARU_MERMAID_MAX_PENDING_JOBS) + 1
+    private lazy var mermaidReplyDelivery = MermaidReplyDeliveryAdapter(
+        maxPending: Self.maxMermaidPendingReplies
+    )
     // 알림 클릭 라우팅 토큰 채번기(makeTerminalSurface가 단조 증가로 부여 — 창마다 유일). 0은 미설정 sentinel이라 1부터.
     private var nextSurfaceToken: UInt64 = 1
     // 앱-전역 "메인/첫 일반 창" 별칭(= windows.first). 앱 요약·종료처럼 특정 한 창이 기준일 때 쓴다. 창별
@@ -4169,6 +4377,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     func applicationDidFinishLaunching(_ notification: Notification) {
         _ = notification
         cleanupPasteImages() // 이전 세션이 남긴 임시 paste 이미지 청소(누적 방지 — 정상/비정상 종료 모두 커버).
+        mermaidRenderCoordinator.onRenderError = { [weak self] capability in
+            self?.failMermaidReply(capability: capability, error: "mermaid render failed")
+        }
 
         // 라이브 프리뷰 admission은 dock visibility/focus transition에서 반복 호출된다. 평상시 후보 수를
         // 시작 시 한 번 확보해 해당 전환 경로가 배열 storage를 매번 만들지 않게 한다.
@@ -4242,9 +4453,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
 
         if smokeMode {
             if filePanelHookEnabled {
-                // FP4 실제 WKWebView fixture가 iframe→read→render→readAsset까지 끝나기 전에 controlled PTY가 `a\n`을
-                // 받아 종료하지 않게 입력을 늦춘다. 일반 smoke는 기존 즉시 입력 동작을 유지한다.
-                DispatchQueue.main.asyncAfter(deadline: .now() + 4.5) { [weak self] in
+                // FP11f cold helper/WKWebView Mermaid와 iframe→read→render→edit→save가 끝나기 전에 controlled
+                // PTY가 `a\n`을 받아 종료하지 않게 입력을 늦춘다. 일반 smoke는 기존 즉시 입력 동작을 유지한다.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 13.5) { [weak self] in
                     self?.sendSmokeDevEvents()
                 }
             } else {
@@ -4342,6 +4553,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         tickTimer = nil
         smokeTimer?.invalidate()
         smokeTimer = nil
+        cancelAllMermaidReplies(error: "application terminating")
         mermaidRenderCoordinator.shutdown()
         // physical control/I/O executor가 완전히 quiesce된 뒤 Zig app-global queue/latch/lease를
         // 최종 종료한다. 이 순서만 leased request frame의 pointer 수명을 안전하게 끝낸다.
@@ -4637,6 +4849,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     }
 
     func filePanelDidTerminateWebContent(_ surfaceId: UInt64, panel: MaruWebPanelView) -> Bool {
+        cancelMermaidReplies(surfaceId: surfaceId, error: "file panel terminated")
         // WebContent crash는 worker termination ack와 동등하다. slot을 회수한 뒤 다른 visible candidate를
         // 승격하고, reload didFinish가 여전히 desired면 새 page에 reservation을 다시 적용한다.
         let currentPanel = surfaceOwning(byId: surfaceId)?.webPanels[surfaceId]
@@ -4685,6 +4898,18 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         guard count >= 0, count <= livePreviewOutput.count else { return }
         livePreviewTransitionState.replaceDesired(livePreviewOutput.prefix(Int(count)))
         pumpLivePreviewAdmission()
+    }
+
+    /// didFinish와 page script boot 사이에 보낸 CustomEvent는 listener가 없어도 JS 평가 자체는 성공한다. Web의
+    /// explicit ready에서는 이미 예약된 slot을 해제/재계산하지 않고 true를 재전달한다. 아직 reservation이 없을 때만
+    /// 같은 Zig budget을 조정해, 중복 ready가 worker 수명·전역 cap 회계를 갈라놓지 않게 한다.
+    func livePreviewBridgeReady(_ surfaceId: UInt64) {
+        if livePreviewTransitionState.applied.contains(surfaceId),
+           let panel = livePreviewPanel(byId: surfaceId) {
+            panel.applyLivePreviewAdmission(true) { _ in }
+            return
+        }
+        reconcileLivePreviewBudget()
     }
 
     private func pumpLivePreviewAdmission() {
@@ -4756,6 +4981,139 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     /// 캡처하지 않으며, dict 등록 전에는 nil이라 load를 시작하지 않는 생성 순서와 함께 오라우팅을 막는다.
     func bridgeSession(for surfaceId: UInt64) -> OpaquePointer? {
         surfaceOwning(byId: surfaceId)?.appSession
+    }
+
+    /// Zig admission이 반환한 `job_id`와 WebKit reply closure를 같은 bounded table에 묶는다. helper 결과가
+    /// 도착하기 전에는 page-world Promise를 해소하지 않으므로 별도 polling이나 frame별 JSON allocation이 없다.
+    func registerMermaidReply(
+        surfaceId: UInt64,
+        jobId: UInt64,
+        requestId: Any,
+        params: [String: Any],
+        replyHandler: @escaping (Any?, String?) -> Void
+    ) -> Bool {
+        guard surfaceId != 0, jobId != 0,
+              let identity = mermaidIdentity(params) else { return false }
+        let key = MermaidReplyKey(surfaceId: surfaceId, jobId: jobId)
+        let timeout = DispatchWorkItem { [weak self] in
+            self?.finishMermaidReply(key: key, svg: nil, error: "mermaid render timeout", revoke: true)
+        }
+        guard mermaidReplyDelivery.register(
+            key: key,
+            requestId: requestId,
+            identity: identity,
+            timeout: timeout,
+            replyHandler: replyHandler
+        ) else {
+            // Zig admission already owns this job. A bounded Swift table rejection must revoke the exact widget
+            // immediately instead of leaving an orphan helper action that can consume source/SVG capacity.
+            revokeMermaidJob(key: key, identity: identity)
+            return false
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(2_250), execute: timeout)
+        return true
+    }
+
+    private func mermaidIdentity(_ params: [String: Any]) -> MermaidReplyIdentity? {
+        func number(_ key: String) -> UInt64? { (params[key] as? NSNumber)?.uint64Value }
+        guard let editorEpoch = number("editor_epoch"), editorEpoch != 0,
+              let documentRevision = number("document_revision"),
+              let projectionGeneration = number("projection_generation"), projectionGeneration != 0,
+              let widgetId = number("widget_id"), widgetId != 0,
+              let widgetGeneration = number("widget_generation"), widgetGeneration != 0,
+              let rendererInstance = number("renderer_instance"), rendererInstance != 0 else { return nil }
+        return MermaidReplyIdentity(
+            editorEpoch: editorEpoch,
+            documentRevision: documentRevision,
+            projectionGeneration: projectionGeneration,
+            widgetId: widgetId,
+            widgetGeneration: widgetGeneration,
+            rendererInstance: rendererInstance
+        )
+    }
+
+    private func revokeMermaidJob(key: MermaidReplyKey, identity: MermaidReplyIdentity) {
+        var renderer = MaruMermaidRendererCapability(
+            editor_epoch: identity.editorEpoch,
+            document_revision: identity.documentRevision,
+            projection_generation: identity.projectionGeneration,
+            widget_id: identity.widgetId,
+            widget_generation: identity.widgetGeneration,
+            renderer_instance: identity.rendererInstance
+        )
+        maru_macos_mermaid_revoke_job(key.surfaceId, key.jobId, &renderer)
+    }
+
+    func revokeMermaidReply(surfaceId: UInt64, params: [String: Any]) {
+        guard let identity = mermaidIdentity(params) else { return }
+        mermaidReplyDelivery.finishMatching(
+            surfaceId: surfaceId,
+            identity: identity,
+            error: "mermaid render revoked"
+        ) { [weak self] key, targetIdentity in
+            self?.revokeMermaidJob(key: key, identity: targetIdentity)
+        }
+    }
+
+    private func deliverMermaidAcceptedResult(_ payload: MermaidAcceptedPayload) {
+        mermaidReplyDelivery.deliver(payload) { [weak self] key, identity in
+            self?.revokeMermaidJob(key: key, identity: identity)
+        }
+    }
+
+    private func deliverMermaidTerminalResult(_ terminal: MaruMermaidTerminalResult) {
+        let key = MermaidReplyKey(surfaceId: terminal.window_id, jobId: terminal.job_id)
+        let error: String
+        switch terminal.reason {
+        case MARU_MERMAID_TERMINAL_SUPERSEDED: error = "mermaid render superseded"
+        case MARU_MERMAID_TERMINAL_DEADLINE: error = "mermaid render deadline expired"
+        case MARU_MERMAID_TERMINAL_TRANSIENT_FAILURE: error = "mermaid helper failed"
+        case MARU_MERMAID_TERMINAL_INTEGRITY_FAILURE: error = "mermaid helper integrity failure"
+        case MARU_MERMAID_TERMINAL_INVALID_RESULT: error = "invalid mermaid result"
+        case MARU_MERMAID_TERMINAL_CAPACITY_EXCEEDED: error = "mermaid result capacity exceeded"
+        case MARU_MERMAID_TERMINAL_FAILURE_LATCHED: error = "mermaid renderer disabled after repeated failures"
+        default: error = "mermaid render failed"
+        }
+        mermaidReplyDelivery.finishExact(
+            key: key,
+            identity: MermaidReplyIdentity(renderer: terminal.renderer),
+            error: error
+        )
+    }
+
+    private func failMermaidReply(capability: MaruMermaidJobCapability, error: String) {
+        mermaidReplyDelivery.fail(capability: capability, error: error) { [weak self] key, identity in
+            self?.revokeMermaidJob(key: key, identity: identity)
+        }
+    }
+
+    private func finishMermaidReply(
+        key: MermaidReplyKey,
+        svg: String?,
+        error: String?,
+        revoke: Bool
+    ) {
+        mermaidReplyDelivery.finish(
+            key: key,
+            svg: svg,
+            error: error,
+            revoke: revoke
+        ) { [weak self] key, identity in
+            self?.revokeMermaidJob(key: key, identity: identity)
+        }
+    }
+
+    @discardableResult
+    func cancelMermaidReplies(surfaceId: UInt64, error: String) -> Int {
+        mermaidReplyDelivery.cancelSurface(surfaceId, error: error) { [weak self] key, identity in
+            self?.revokeMermaidJob(key: key, identity: identity)
+        }
+    }
+
+    private func cancelAllMermaidReplies(error: String) {
+        mermaidReplyDelivery.cancelAll(error: error) { [weak self] key, identity in
+            self?.revokeMermaidJob(key: key, identity: identity)
+        }
     }
 
     // 4e-4(web-panel §10): 창 간 이동 시 대상 창의 create 전이가 다른 창의 기존 WKWebView를 훔쳐 재부모화한다. 어느 창(quick 포함)의
@@ -5371,6 +5729,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                 maru_macos_control_push_browser_closed(surfaceId)
                 browserDidCloseSurface(surfaceId)
             }
+            cancelMermaidReplies(surfaceId: surfaceId, error: "file panel closed")
             let retainedForWorkerAck = retainRetiringLivePreviewPanel(panel, surfaceId: surfaceId)
             panel.removeFromSuperview()
             if !retainedForWorkerAck { panel.controller = nil }
@@ -5573,8 +5932,15 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         drainConsoleBuffers() // §9.5.9: capture-active 패널의 page ring을 throttled로 서버 버퍼에 옮김(네비 넘어 보존).
         maybeRunBrowserControlSmoke() // 5e-2b-2 테스트 전용(MARU_TEST_BROWSER_CAP): 소켓 browser.* E2E를 1회 kick(무설정=무동작).
         maybeRunGrantSmoke() // 1e-confirm-1c-2 테스트 전용(MARU_TEST_GRANT_DECISION): 무-cap browser.navigate가 grant 흐름으로 성공하는지 1회 kick.
-        // FP10c1은 helper foundation만 설치하고 제품 admission/render는 inert다. FP10c2가 pending-work
-        // gate와 byte/tick 성능 artifact를 함께 연결할 때만 coordinator pump를 frame loop에 배선한다.
+        // Mermaid native hot path는 allocation-free Zig gate 뒤에서만 helper completion 최대 8개와 action 하나를
+        // 처리한다. process/signature/pipe I/O는 coordinator executor가 맡고 display tick은 accepted SVG를
+        // 사전 할당 버퍼로 one-shot 이동해 대기 중 WebKit reply만 해소한다.
+        mermaidProductTick.tick(
+            coordinator: mermaidRenderCoordinator,
+            drainer: mermaidAcceptedDrainer,
+            consume: deliverMermaidAcceptedResult,
+            consumeTerminal: deliverMermaidTerminalResult
+        )
         restartFrameLoopTicksIfNeeded()
     }
 
@@ -6976,6 +7342,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                             maru_macos_control_push_browser_closed(t.surface_id)
                             browserDidCloseSurface(t.surface_id)
                         }
+                        cancelMermaidReplies(surfaceId: t.surface_id, error: "file panel closed")
                         let retainedForWorkerAck = retainRetiringLivePreviewPanel(v, surfaceId: t.surface_id)
                         v.removeFromSuperview()
                         if !retainedForWorkerAck { v.controller = nil }
@@ -8664,6 +9031,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         let sortedPumpMs = browserResultPumpSamplesMs.sorted()
         let pumpP95Ms = sortedPumpMs.isEmpty ? 0 : sortedPumpMs[max(0, Int(ceil(Double(sortedPumpMs.count) * 0.95)) - 1)]
         let pumpMaxMs = sortedPumpMs.last ?? 0
+        let mermaidDiagnostics = mermaidRenderCoordinator.diagnostics()
+        var mermaidSnapshot = MaruMermaidCoordinatorSnapshot()
+        maru_macos_mermaid_snapshot(&mermaidSnapshot)
         var summary = """
         maru.macos-app.v1
         visible_ui=\(visibleUI)
@@ -8699,6 +9069,22 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         final_frame_ended=\(frameEnded)
         smoke_mode=\(smokeMode)
         smoke_duration_ms=\(duration)
+        mermaid_pending_replies=\(mermaidReplyDelivery.count)
+        mermaid_product_tick_calls=\(mermaidProductTick.tickCalls)
+        mermaid_product_work_ticks=\(mermaidProductTick.workTicks)
+        mermaid_product_tick_pump_calls=\(mermaidProductTick.pumpCalls)
+        mermaid_product_tick_drain_calls=\(mermaidProductTick.acceptedDrainCalls)
+        mermaid_product_completion_drain_max=\(mermaidProductTick.maxCompletionDrain)
+        mermaid_product_tick_max_elapsed_us=\(mermaidProductTick.maxElapsedMicroseconds)
+        mermaid_product_accepted_svg_bytes_max=\(mermaidAcceptedDrainer.acceptedBytesMax)
+        mermaid_pump_calls=\(mermaidDiagnostics.pumpCalls)
+        mermaid_helper_starts=\(mermaidDiagnostics.physicalStarts)
+        mermaid_hello_frames=\(mermaidDiagnostics.helloFrames)
+        mermaid_request_frames=\(mermaidDiagnostics.requestFrames)
+        mermaid_terminal_results=\(mermaidRenderCoordinator.terminalResultCount)
+        mermaid_stale_results=\(mermaidRenderCoordinator.staleResultCount)
+        mermaid_accepted_results=\(mermaidSnapshot.accepted_results)
+        mermaid_deadline_expirations=\(mermaidSnapshot.deadline_expirations)
 
         """
 
@@ -8795,6 +9181,14 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             file_viewer_live_projection_decorations=\(wp?.fileEditingSmokeProbe.liveProjectionDecorations ?? "pending")
             file_viewer_live_projection_generation=\(wp?.fileEditingSmokeProbe.liveProjectionGeneration ?? "pending")
             file_viewer_live_general_fragments=\(wp?.fileEditingSmokeProbe.liveGeneralFragments ?? "pending")
+            file_viewer_live_atomic_mounted=\(wp?.fileEditingSmokeProbe.liveAtomicMounted ?? "pending")
+            file_viewer_live_atomic_rendered=\(wp?.fileEditingSmokeProbe.liveAtomicRendered ?? "pending")
+            file_viewer_live_atomic_admitted=\(wp?.fileEditingSmokeProbe.liveAtomicAdmitted ?? "pending")
+            file_viewer_live_atomic_state=\(wp?.fileEditingSmokeProbe.liveAtomicState ?? "pending")
+            file_viewer_live_atomic_failure=\(wp?.fileEditingSmokeProbe.liveAtomicFailure ?? "pending")
+            file_viewer_live_mermaid_request=\(wp?.fileEditingSmokeProbe.liveMermaidRequest ?? "pending")
+            file_viewer_mermaid_navigation_in_flight=\(wp?.fileEditingSmokeProbe.mermaidNavigationInFlight ?? "pending")
+            file_viewer_mermaid_navigation_cancelled=\(wp?.fileEditingSmokeProbe.mermaidNavigationCancelled ?? "pending")
             file_viewer_default_mode=\(wp?.fileEditingSmokeProbe.defaultMode ?? "pending")
             file_viewer_edit=\(wp?.fileEditingSmokeProbe.edit ?? "pending")
             file_viewer_cmd_s_route=\(wp?.fileEditingSmokeProbe.cmdSRoute ?? "pending")
@@ -8874,6 +9268,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             summary += """
             web_role_scheme_app_worker_status=\(roleSmoke.appWorkerStatus)
             web_role_scheme_app_worker_self=\(roleSmoke.appWorkerCSP.contains("worker-src 'self'"))
+            web_role_scheme_app_mermaid_status=\(roleSmoke.appMermaidStatus)
             web_role_scheme_render_worker_status=\(roleSmoke.renderWorkerStatus)
             web_role_scheme_render_worker_csp=\(roleSmoke.renderWorkerCSP)
             web_role_scheme_render_document_status=\(roleSmoke.renderDocumentStatus)

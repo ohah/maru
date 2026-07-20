@@ -196,6 +196,22 @@ describe("file viewer bridge boundary", () => {
       { editor_epoch: 4, success: false },
       100,
     );
+    await requestFileBridge(
+      document,
+      "renderMermaid",
+      {
+        editor_epoch: 4,
+        document_revision: 7,
+        projection_generation: 9,
+        widget_id: 10,
+        widget_generation: 11,
+        renderer_instance: 12,
+        fence_id: 13,
+        source_hash: "a".repeat(64),
+        source: "```mermaid\ngraph TD\n```",
+      },
+      100,
+    );
     expect(requests).toEqual([
       { method: "beginDocument", document_id: 1 },
       { method: "write", editor_epoch: 4, content: "# 저장" },
@@ -208,6 +224,18 @@ describe("file viewer bridge boundary", () => {
       },
       { method: "setDirty", dirty: false, editor_epoch: 4, revision: 7, request_id: 11 },
       { method: "resolveExternalChange", editor_epoch: 4, success: false },
+      {
+        method: "renderMermaid",
+        editor_epoch: 4,
+        document_revision: 7,
+        projection_generation: 9,
+        widget_id: 10,
+        widget_generation: 11,
+        renderer_instance: 12,
+        fence_id: 13,
+        source_hash: "a".repeat(64),
+        source: "```mermaid\ngraph TD\n```",
+      },
     ]);
     expect(JSON.stringify(requests)).not.toContain("path");
   });
@@ -282,6 +310,24 @@ describe("file viewer bridge boundary", () => {
         100,
       ),
     ).rejects.toThrow("invalid openLink payload");
+    await expect(
+      requestFileBridge(
+        document,
+        "renderMermaid",
+        {
+          editor_epoch: 1,
+          document_revision: 0,
+          projection_generation: 1,
+          widget_id: 1,
+          widget_generation: 1,
+          renderer_instance: 1,
+          fence_id: 1,
+          source_hash: "not-a-sha256",
+          source: "```mermaid\ngraph TD\n```",
+        },
+        100,
+      ),
+    ).rejects.toThrow("invalid renderMermaid payload");
     await expect(
       requestFileBridge(
         document,

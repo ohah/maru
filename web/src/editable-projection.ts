@@ -496,8 +496,13 @@ export function buildEditableProjection(
             info.to - info.from <= 64 &&
             state.sliceDoc(info.from, info.to).trim().toLowerCase() === "mermaid";
           if (selectionTouches(node.from, node.to)) recordSourceRange(node.from, node.to);
-          else if (isMermaid) fallback("renderer-unavailable", node.from, node.to);
-          else emit({ type: "atomic", role: "fenced-code", from: node.from, to: node.to });
+          else
+            emit({
+              type: "atomic",
+              role: isMermaid ? "mermaid" : "fenced-code",
+              from: node.from,
+              to: node.to,
+            });
           return false;
         }
 

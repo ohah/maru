@@ -49,6 +49,7 @@ function runAtomicProjectionProbe() {
       kind: "fenced-code" as const,
       source: `\`\`\`\n${"x".repeat(maxAtomicSourceBytes["fenced-code"] - 8)}\n\`\`\``,
     },
+    { kind: "mermaid" as const, source: "```mermaid\nflowchart TD\n  A --> B\n```" },
   ];
   let results = 0;
   let assetGrants = 0;
@@ -85,6 +86,21 @@ function runAtomicProjectionProbe() {
       to: over.length,
     },
   ]);
+  const mermaid = sources[3]!;
+  const mermaidRequest = {
+    editorEpoch: 1,
+    documentRevision: 0,
+    projectionGeneration: 1,
+    requestNonce: 5,
+    kind: "mermaid" as const,
+    from: 0,
+    to: mermaid.source.length,
+  };
+  const mermaidBatch = projectAtomicRequests(mermaid.source, [mermaidRequest]);
+  const oversizedMermaid = "x".repeat(maxAtomicSourceBytes.mermaid + 1);
+  const oversizedMermaidBatch = projectAtomicRequests(oversizedMermaid, [
+    { ...mermaidRequest, requestNonce: 6, to: oversizedMermaid.length },
+  ]);
   const batchParts = Array.from(
     { length: maxAtomicProjectionRequests },
     (_, index) =>
@@ -116,6 +132,9 @@ function runAtomicProjectionProbe() {
     atomic_worker_hashed_bytes_batch_max: exactBatch.hashedBytes,
     atomic_result_payload_bytes: resultPayloadBytes,
     atomic_cap_plus_one_hashed_bytes: overBatch.hashedBytes,
+    mermaid_requests: mermaidBatch.results.length,
+    mermaid_worker_hashed_bytes: mermaidBatch.hashedBytes,
+    mermaid_cap_plus_one_hashed_bytes: oversizedMermaidBatch.hashedBytes,
   };
 }
 
@@ -188,6 +207,154 @@ class PerfAtomicWorker {
   terminate(): void {}
 }
 
+class ManualAtomicWorker {
+  static latest: ManualAtomicWorker | null = null;
+  readonly sent: LivePreviewRequest[] = [];
+  onmessage: ((event: MessageEvent<unknown>) => void) | null = null;
+  onerror: ((event: Event) => void) | null = null;
+  onmessageerror: ((event: MessageEvent<unknown>) => void) | null = null;
+
+  constructor(_url: string) {
+    ManualAtomicWorker.latest = this;
+  }
+
+  postMessage(message: LivePreviewRequest): void {
+    this.sent.push(message);
+  }
+
+  reply(result: ProjectionResult): void {
+    this.onmessage?.({ data: result } as MessageEvent<unknown>);
+  }
+
+  terminate(): void {}
+}
+
+async function settleMicrotasks(): Promise<void> {
+  for (let turn = 0; turn < 8; turn += 1) await Promise.resolve();
+}
+
+async function runMermaidControllerProbe(dom: JSDOM) {
+  ManualAtomicWorker.latest = null;
+  const host = dom.window.document.createElement("aside");
+  dom.window.document.body.append(host);
+  const fence = "```mermaid\nflowchart TD\n  A --> B\n```";
+  const initialSource = `${fence}\n\nplain`;
+  const entry = { type: "atomic" as const, role: "mermaid" as const, from: 0, to: fence.length };
+  const revisions = new EditorRevisionClock();
+  let controller: AtomicProjectionController | null = null;
+  let nativeRequests = 0;
+  let mainReceivedSourceBytes = 0;
+  const editor = createMarkdownEditor(
+    host,
+    initialSource,
+    (update) => {
+      const baseRevision = revisions.documentRevision;
+      if (update.docChanged) revisions.documentChanged();
+      controller?.handleUpdate(update, baseRevision, revisions.documentRevision);
+    },
+    () => {},
+  );
+  controller = new AtomicProjectionController(
+    editor,
+    93,
+    revisions,
+    ManualAtomicWorker as unknown as typeof Worker,
+    async () => null,
+    () => {},
+    () => {},
+    () => {},
+    async (_capability, _fenceId, _sourceHash, source) => {
+      nativeRequests += 1;
+      mainReceivedSourceBytes += new TextEncoder().encode(source).byteLength;
+      return '<svg xmlns="http://www.w3.org/2000/svg"><text>mermaid</text></svg>';
+    },
+  );
+  try {
+    let identity = revisions.nextProjection();
+    controller.submitEntries(identity.documentRevision, identity.projectionGeneration, [entry]);
+    controller.enable();
+    const worker = ManualAtomicWorker.latest;
+    if (worker === null) throw new Error("Mermaid perf worker was not created");
+    worker.reply({
+      type: "result",
+      editorEpoch: 93,
+      documentRevision: 0,
+      projectionGeneration: 0,
+      results: [],
+      rejected: [],
+    });
+    const project = worker.sent.at(-1);
+    if (project?.type !== "project" || project.requests[0] === undefined)
+      throw new Error("Mermaid perf initial project was not sent");
+    const sourceHash = "d".repeat(64);
+    const mainHashProbe = startAtomicSourceHashProbe();
+    worker.reply({
+      type: "result",
+      editorEpoch: 93,
+      documentRevision: 0,
+      projectionGeneration: identity.projectionGeneration,
+      results: [
+        {
+          request: project.requests[0],
+          sourceHash,
+          sanitizedPayload: "",
+          assetGrants: [],
+          mermaidSource: fence,
+        },
+      ],
+      rejected: [],
+    });
+    await settleMicrotasks();
+    const firstMetrics = controller.mermaidCacheMetrics();
+
+    editor.dispatch({ changes: { from: editor.state.doc.length, insert: "!" } });
+    identity = revisions.nextProjection();
+    controller.submitEntries(identity.documentRevision, identity.projectionGeneration, [entry]);
+    const apply = worker.sent.at(-1);
+    if (apply?.type !== "apply" || apply.requests[0] === undefined)
+      throw new Error("Mermaid perf unrelated edit did not use Apply");
+    worker.reply({
+      type: "result",
+      editorEpoch: 93,
+      documentRevision: identity.documentRevision,
+      projectionGeneration: identity.projectionGeneration,
+      results: [
+        {
+          request: apply.requests[0],
+          sourceHash,
+          sanitizedPayload: "",
+          assetGrants: [],
+          mermaidSource: fence,
+        },
+      ],
+      rejected: [],
+    });
+    await settleMicrotasks();
+    const secondMetrics = controller.mermaidCacheMetrics();
+    const mermaidMainHashedBytes = mainHashProbe.stop();
+    controller.disable();
+    const disabledMetrics = controller.mermaidCacheMetrics();
+    return {
+      mermaid_main_hashed_bytes: mermaidMainHashedBytes,
+      mermaid_main_received_source_bytes: mainReceivedSourceBytes,
+      mermaid_native_requests: nativeRequests,
+      mermaid_native_requests_after_unrelated_edit: nativeRequests,
+      mermaid_cache_entries_max: Math.max(firstMetrics.entries, secondMetrics.entries),
+      mermaid_cache_source_bytes_max: Math.max(firstMetrics.sourceBytes, secondMetrics.sourceBytes),
+      mermaid_cache_svg_code_units_max: Math.max(
+        firstMetrics.svgCodeUnits,
+        secondMetrics.svgCodeUnits,
+      ),
+      mermaid_cache_entries_after_disable: disabledMetrics.entries,
+      mermaid_cache_svg_code_units_after_disable: disabledMetrics.svgCodeUnits,
+    };
+  } finally {
+    controller.destroy();
+    editor.destroy();
+    host.remove();
+  }
+}
+
 async function settleAtomicFrames(dom: JSDOM, editor: ReturnType<typeof createMarkdownEditor>) {
   const frames = [...editor.dom.querySelectorAll<HTMLIFrameElement>(".maru-live-atomic-frame")];
   for (const frame of frames) {
@@ -204,7 +371,12 @@ async function settleAtomicFrames(dom: JSDOM, editor: ReturnType<typeof createMa
         rendererPort = (ports?.[0] as MessagePort | undefined) ?? null;
       }) as typeof frame.contentWindow.postMessage;
     }
-    frame.dispatchEvent(new dom.window.Event("load"));
+    dom.window.dispatchEvent(
+      new dom.window.MessageEvent("message", {
+        source: frame.contentWindow,
+        data: { channel: atomicRendererChannel, type: "atomic-boot" },
+      }),
+    );
     if (rendererPort === null)
       throw new Error("atomic perf iframe did not receive a renderer port");
     rendererPort.onmessage = (event) => {
@@ -1210,6 +1382,7 @@ export async function runLivePreviewBaselineScenario(): Promise<LivePreviewPerfC
   const atomicProjectionCounters = runAtomicProjectionProbe();
   const atomicControllerCounters = await runAtomicControllerProbe(dom);
   const atomicFacadeCounters = await runAtomicFacadeRetentionProbe(dom);
+  const mermaidControllerCounters = await runMermaidControllerProbe(dom);
 
   const mathScanProbe = startMathDelimiterScanProbe();
   PerfAtomicWorker.reset();
@@ -1315,6 +1488,7 @@ export async function runLivePreviewBaselineScenario(): Promise<LivePreviewPerfC
     generated_outside_retention: 0,
     ...atomicProjectionCounters,
     atomic_main_hashed_bytes: atomicMainHashedBytes,
+    ...mermaidControllerCounters,
     atomic_main_copied_bytes: copiedBytes,
     ...atomicControllerCounters,
     ...atomicFacadeCounters,

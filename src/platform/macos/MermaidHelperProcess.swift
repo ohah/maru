@@ -7,6 +7,9 @@ import Darwin
 extension MaruMermaidCoordinatorAction: @retroactive @unchecked Sendable {}
 
 final class MermaidRenderCoordinator: @unchecked Sendable {
+    /// `pump`가 main thread에서 Zig terminal 판정을 끝낸 뒤 제품 shell에 range-local 실패를 알린다.
+    /// process/I/O executor는 이 closure를 직접 호출하지 않는다.
+    var onRenderError: ((MaruMermaidJobCapability) -> Void)?
     enum Validation {
         case productionBundle
         case smoke(URL)
@@ -22,6 +25,13 @@ final class MermaidRenderCoordinator: @unchecked Sendable {
         let requestFrames: UInt64
         let shutdownProbeCallbacks: UInt64
         let pendingControls: Int
+        let pumpCalls: UInt64
+        let maxCompletionDrain: UInt64
+        let mainThreadProcessOperations: UInt64
+        let mainThreadPipeSetups: UInt64
+        let mainThreadPipeIO: UInt64
+        let mainThreadBlockingWaits: UInt64
+        let abaRestoreSuccesses: UInt64
     }
 
     private struct ResultCompletion {
@@ -131,6 +141,14 @@ final class MermaidRenderCoordinator: @unchecked Sendable {
     private var helloFrameCount: UInt64 = 0
     private var requestFrameCount: UInt64 = 0
     private var shutdownProbeCallbackCount: UInt64 = 0
+    private var pumpCallCount: UInt64 = 0
+    private var maxCompletionDrainCount: UInt64 = 0
+    private var mainThreadProcessOperationCount: UInt64 = 0
+    private var mainThreadPipeSetupCount: UInt64 = 0
+    private var mainThreadPipeIOCount: UInt64 = 0
+    private var mainThreadBlockingWaitCount: UInt64 = 0
+    private var abaRestoreSuccessCount: UInt64 = 0
+    private var pumpActive = false
     private var running: Running? // controlExecutor-owned
     private var shuttingDown = false // controlExecutor-owned
     private(set) var staleResultCount: UInt64 = 0
@@ -162,8 +180,22 @@ final class MermaidRenderCoordinator: @unchecked Sendable {
                 controls.integrityFailure != nil,
                 controls.transientFailure != nil,
                 controls.termination != nil,
-            ].filter { $0 }.count
+            ].filter { $0 }.count,
+            pumpCalls: pumpCallCount,
+            maxCompletionDrain: maxCompletionDrainCount,
+            mainThreadProcessOperations: mainThreadProcessOperationCount,
+            mainThreadPipeSetups: mainThreadPipeSetupCount,
+            mainThreadPipeIO: mainThreadPipeIOCount,
+            mainThreadBlockingWaits: mainThreadBlockingWaitCount,
+            abaRestoreSuccesses: abaRestoreSuccessCount
         )
+    }
+
+    func stderrTail() -> String {
+        controlExecutor.sync {
+            guard let running else { return "" }
+            return ioExecutor.sync { String(decoding: running.stderrRing, as: UTF8.self) }
+        }
     }
 
     func scheduleShutdownBarrierProbe() {
@@ -187,6 +219,9 @@ final class MermaidRenderCoordinator: @unchecked Sendable {
     /// spawn/signature/termination은 control executor, bounded pipe read/write는 별도 I/O executor다.
     func pump(nowMs: UInt64 = MermaidRenderCoordinator.monotonicMilliseconds()) {
         precondition(Thread.isMainThread)
+        pumpActive = true
+        defer { pumpActive = false }
+        pumpCallCount += 1
         drainCompletions(nowMs: nowMs)
         _ = maru_macos_mermaid_expire_deadline(nowMs)
 
@@ -217,6 +252,7 @@ final class MermaidRenderCoordinator: @unchecked Sendable {
                 try? running.input.close()
                 if running.process.isRunning { running.process.terminate() }
                 let terminateDeadline = DispatchTime.now().uptimeNanoseconds + 250_000_000
+                recordMainThreadOperation(.blockingWait)
                 while running.process.isRunning && DispatchTime.now().uptimeNanoseconds < terminateDeadline {
                     usleep(5_000)
                 }
@@ -237,6 +273,7 @@ final class MermaidRenderCoordinator: @unchecked Sendable {
     }
 
     private func start(action: inout MaruMermaidCoordinatorAction) {
+        recordMainThreadOperation(.process)
         if case let .smokeDelayedStart(_, delayMs) = validation { usleep(useconds_t(delayMs * 1_000)) }
         let helper = action.capability.helper_instance
         let job = action.capability.job_id
@@ -273,6 +310,7 @@ final class MermaidRenderCoordinator: @unchecked Sendable {
         }
 
         let process = Process()
+        recordMainThreadOperation(.pipeSetup)
         let stdin = Pipe()
         let stdout = Pipe()
         let stderr = Pipe()
@@ -321,23 +359,40 @@ final class MermaidRenderCoordinator: @unchecked Sendable {
                     if record.wasExpectedTermination() {
                         self.enqueueTermination(helper: record.helperInstance)
                     } else {
-                        self.enqueueFailure(helper: record.helperInstance, integrity: false)
+                        // Exit 12 is reserved for the embedded-digest/resource loader boundary.
+                        // A validly re-signed but digest-mismatched bundle is therefore permanent,
+                        // not a transient crash retried three times.
+                        let resourceIntegrityFailure = process.terminationReason == .exit && process.terminationStatus == 12
+                        self.enqueueFailure(helper: record.helperInstance, integrity: resourceIntegrityFailure)
                     }
                 }
             }
         }
 
+        var pathRestore: URL?
         do {
-            let pathRestore = try installABAFixtureIfRequested(helperURL: helperURL)
-            defer { restoreABAFixture(pathRestore, helperURL: helperURL) }
+            pathRestore = try installABAFixtureIfRequested(helperURL: helperURL)
             try process.run()
             completionLock.lock()
             physicalStartCount += 1
             completionLock.unlock()
         } catch {
+            try? restoreABAFixture(pathRestore, helperURL: helperURL)
             running = nil
             record.deactivate(expected: false)
             enqueueFailure(helper: helper, integrity: false)
+            return
+        }
+        do {
+            try restoreABAFixture(pathRestore, helperURL: helperURL)
+            if pathRestore != nil {
+                completionLock.lock()
+                abaRestoreSuccessCount += 1
+                completionLock.unlock()
+            }
+        } catch {
+            enqueueFailure(helper: helper, integrity: true)
+            terminateRecord(record)
             return
         }
 
@@ -372,6 +427,9 @@ final class MermaidRenderCoordinator: @unchecked Sendable {
             return Bundle.main.bundleURL
                 .appendingPathComponent("Contents", isDirectory: true)
                 .appendingPathComponent("Helpers", isDirectory: true)
+                .appendingPathComponent("MaruMermaidRenderer.app", isDirectory: true)
+                .appendingPathComponent("Contents", isDirectory: true)
+                .appendingPathComponent("MacOS", isDirectory: true)
                 .appendingPathComponent("maru-mermaid-renderer", isDirectory: false)
         case let .smoke(url):
             return url
@@ -393,6 +451,7 @@ final class MermaidRenderCoordinator: @unchecked Sendable {
             guard let self, let record, record.isActive() else { return }
             var bytes = [UInt8](repeating: 0, count: 64 * 1024)
             let count = Darwin.read(record.output.fileDescriptor, &bytes, bytes.count)
+            self.recordMainThreadOperation(.pipeIO)
             if count >= 0 {
                 let arrival = Self.monotonicMilliseconds()
                 let data = Data(bytes: bytes, count: count)
@@ -421,6 +480,7 @@ final class MermaidRenderCoordinator: @unchecked Sendable {
             guard let self, let record, record.isActive() else { return }
             var bytes = [UInt8](repeating: 0, count: 16 * 1024)
             let count = Darwin.read(record.error.fileDescriptor, &bytes, bytes.count)
+            self.recordMainThreadOperation(.pipeIO)
             if count > 0 {
                 record.stderrRing.append(bytes, count: count)
                 if record.stderrRing.count > 64 * 1024 {
@@ -508,6 +568,7 @@ final class MermaidRenderCoordinator: @unchecked Sendable {
                 guard let base = raw.baseAddress else { return 0 }
                 return Darwin.write(record.input.fileDescriptor, base.advanced(by: record.writeOffset), raw.count - record.writeOffset)
             }
+            recordMainThreadOperation(.pipeIO)
             if written > 0 {
                 record.writeOffset += written
                 if record.writeOffset == first.count {
@@ -562,6 +623,7 @@ final class MermaidRenderCoordinator: @unchecked Sendable {
     }
 
     private func terminateRecord(_ record: Running) {
+        recordMainThreadOperation(.process)
         record.deactivate(expected: true)
         scheduleStopIO(record)
         if record.process.isRunning {
@@ -632,6 +694,7 @@ final class MermaidRenderCoordinator: @unchecked Sendable {
         let drainedControls = controls
         controls = ControlLane()
         completionLock.unlock()
+        maxCompletionDrainCount = max(maxCompletionDrainCount, UInt64(resultDrain.count))
 
         if let consumed = drainedControls.actionConsumed {
             _ = maru_macos_mermaid_complete_action_handoff(consumed.helper, consumed.job)
@@ -657,9 +720,31 @@ final class MermaidRenderCoordinator: @unchecked Sendable {
                 let outcome = maru_macos_mermaid_complete_decoded(&frame, completion.arrivalMs)
                 if outcome == 0 { staleResultCount += 1 }
                 if outcome == 1 || outcome == 2 { terminalResultCount += 1 }
+                if outcome == 2 { onRenderError?(completion.capability) }
             }
         }
         resultDrain.removeAll(keepingCapacity: true)
+    }
+
+    private enum MainThreadOperation {
+        case process
+        case pipeSetup
+        case pipeIO
+        case blockingWait
+    }
+
+    /// Platform operation의 실제 실행 지점에서 main-thread 귀속을 센다. 정상 구조에서는 process/control과
+    /// pipe I/O가 각 executor에 있으므로 모두 0이며, 향후 pump 안으로 옮기면 native perf artifact가 실패한다.
+    private func recordMainThreadOperation(_ operation: MainThreadOperation) {
+        guard Thread.isMainThread && pumpActive else { return }
+        completionLock.lock()
+        switch operation {
+        case .process: mainThreadProcessOperationCount += 1
+        case .pipeSetup: mainThreadPipeSetupCount += 1
+        case .pipeIO: mainThreadPipeIOCount += 1
+        case .blockingWait: mainThreadBlockingWaitCount += 1
+        }
+        completionLock.unlock()
     }
 
     private func validateHelper(at url: URL) -> HelperFileIdentity? {
@@ -673,7 +758,22 @@ final class MermaidRenderCoordinator: @unchecked Sendable {
         guard SecStaticCodeCreateWithPath(url as CFURL, [], &helperCode) == errSecSuccess,
               let helperCode,
               SecStaticCodeCheckValidity(helperCode, [], nil) == errSecSuccess,
+              staticCodeHasRequiredSandbox(helperCode),
               let code = staticCodeIdentity(helperCode) else { return nil }
+        // Validate the containing nested app as code as well. This checks Info.plist and the
+        // CodeResources seal before spawn; executable-only validation cannot authenticate them.
+        let helperBundle = url
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        guard helperBundle.pathExtension == "app" else { return nil }
+        var bundleCode: SecStaticCode?
+        guard SecStaticCodeCreateWithPath(helperBundle as CFURL, [], &bundleCode) == errSecSuccess,
+              let bundleCode,
+              SecStaticCodeCheckValidity(bundleCode, [], nil) == errSecSuccess,
+              staticCodeHasRequiredSandbox(bundleCode),
+              let bundleIdentity = staticCodeIdentity(bundleCode),
+              bundleIdentity == code else { return nil }
         let identity = HelperFileIdentity(device: UInt64(info.st_dev), inode: UInt64(info.st_ino), code: code)
         switch validation {
         case .smoke, .smokeNoRead, .smokeClosedPipes, .smokeDelayedStart, .smokePathABA:
@@ -685,6 +785,9 @@ final class MermaidRenderCoordinator: @unchecked Sendable {
         let expected = Bundle.main.bundleURL
             .appendingPathComponent("Contents", isDirectory: true)
             .appendingPathComponent("Helpers", isDirectory: true)
+            .appendingPathComponent("MaruMermaidRenderer.app", isDirectory: true)
+            .appendingPathComponent("Contents", isDirectory: true)
+            .appendingPathComponent("MacOS", isDirectory: true)
             .appendingPathComponent("maru-mermaid-renderer", isDirectory: false)
         guard standardized.path == expected.standardizedFileURL.path,
               let executableURL = Bundle.main.executableURL else { return nil }
@@ -730,10 +833,10 @@ final class MermaidRenderCoordinator: @unchecked Sendable {
         return backup
     }
 
-    private func restoreABAFixture(_ backup: URL?, helperURL: URL) {
+    private func restoreABAFixture(_ backup: URL?, helperURL: URL) throws {
         guard let backup else { return }
-        try? FileManager.default.removeItem(at: helperURL)
-        try? FileManager.default.moveItem(at: backup, to: helperURL)
+        try FileManager.default.removeItem(at: helperURL)
+        try FileManager.default.moveItem(at: backup, to: helperURL)
     }
 
     private func staticCodeIdentity(_ code: SecStaticCode) -> CodeIdentity? {
@@ -746,6 +849,22 @@ final class MermaidRenderCoordinator: @unchecked Sendable {
             identifier: dictionary[kSecCodeInfoIdentifier as String] as? String,
             teamIdentifier: dictionary[kSecCodeInfoTeamIdentifier as String] as? String
         )
+    }
+
+    /// A signed process boundary is insufficient when it retains ambient user-file or network authority.
+    /// Admission therefore requires App Sandbox and rejects every entitlement that could grant those rights.
+    private func staticCodeHasRequiredSandbox(_ code: SecStaticCode) -> Bool {
+        var information: CFDictionary?
+        guard SecCodeCopySigningInformation(code, SecCSFlags(rawValue: kSecCSSigningInformation), &information) == errSecSuccess,
+              let dictionary = information as? [String: Any],
+              let entitlements = dictionary[kSecCodeInfoEntitlementsDict as String] as? [String: Any],
+              entitlements["com.apple.security.app-sandbox"] as? Bool == true else { return false }
+        guard entitlements["com.apple.security.network.client"] as? Bool == true else { return false }
+        let allowed = Set([
+            "com.apple.security.app-sandbox",
+            "com.apple.security.network.client",
+        ])
+        return Set(entitlements.keys) == allowed
     }
 
     private func dynamicCodeIdentity(_ code: SecCode) -> CodeIdentity? {

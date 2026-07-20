@@ -21,6 +21,7 @@ export type AtomicProjectionResult = Readonly<{
   sourceHash: string;
   sanitizedPayload: string;
   assetGrants: readonly AssetGrant[];
+  mermaidSource: string | null;
 }>;
 
 const atomicResultFixedWireBytes = 128;
@@ -37,7 +38,8 @@ export function atomicProjectionResultWireBytes(result: AtomicProjectionResult):
   let bytes =
     atomicResultFixedWireBytes +
     atomicWireEncoder.encode(result.sourceHash).byteLength +
-    atomicWireEncoder.encode(result.sanitizedPayload).byteLength;
+    atomicWireEncoder.encode(result.sanitizedPayload).byteLength +
+    (result.mermaidSource === null ? 0 : atomicWireEncoder.encode(result.mermaidSource).byteLength);
   for (const grant of result.assetGrants) {
     bytes +=
       atomicGrantFixedWireBytes +
@@ -193,14 +195,32 @@ export function atomicProjectionResultShapeValid(
 ): value is AtomicProjectionResult {
   if (
     !isRecord(value) ||
-    !hasExactKeys(value, ["request", "sourceHash", "sanitizedPayload", "assetGrants"]) ||
+    !hasExactKeys(value, [
+      "request",
+      "sourceHash",
+      "sanitizedPayload",
+      "assetGrants",
+      "mermaidSource",
+    ]) ||
     !atomicProjectionRequestShapeValid(value.request, documentLength) ||
     typeof value.sourceHash !== "string" ||
-    !/^[0-9a-f]{16}$/.test(value.sourceHash) ||
+    !(
+      (value.request.kind === "mermaid" && /^[0-9a-f]{64}$/.test(value.sourceHash)) ||
+      (value.request.kind !== "mermaid" && /^[0-9a-f]{16}$/.test(value.sourceHash))
+    ) ||
     typeof value.sanitizedPayload !== "string" ||
     !Array.isArray(value.assetGrants) ||
     value.assetGrants.length > maxAtomicAssetGrants ||
-    !value.assetGrants.every(assetGrantShapeValid)
+    !value.assetGrants.every(assetGrantShapeValid) ||
+    !(
+      (value.request.kind === "mermaid" &&
+        typeof value.mermaidSource === "string" &&
+        value.mermaidSource.length > 0 &&
+        atomicSourceWithinLimit("mermaid", value.mermaidSource) &&
+        value.sanitizedPayload.length === 0 &&
+        value.assetGrants.length === 0) ||
+      (value.request.kind !== "mermaid" && value.mermaidSource === null)
+    )
   ) {
     return false;
   }

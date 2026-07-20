@@ -60,6 +60,30 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  # FP11f Mermaid 제품 pump는 macOS helper/WKWebView와 native tick adapter가 모두 필요하다.
+  # 1,000 tick artifact가 process/pipe/wait 0과 completion drain 상한을 어기면 merge하지 않는다.
+  live-preview-macos:
+    name: live preview macOS product path
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+      - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac # v2
+        with:
+          version: 2026.2.7
+          sha256: f8becf318705e1bd91227ed0efee4f9fd988d1d5c66bb48e996f030792a0d3b7 # macos-arm64 binary
+      - run: bun install --cwd web --frozen-lockfile
+      - run: mise run macos-live-preview-perf
+      - name: Upload native live preview performance artifact
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: maru-live-preview-macos-artifacts
+          path: tests/artifacts/perf/live-preview-macos.json
+          if-no-files-found: error
+          retention-days: 14
+
   # 외부 reference 오라클(opt-in). 손으로 기록한 golden을 실제 VT 구현과 대조한다.
   # CI에서는 설치가 가벼운 libvterm(apt)과 Alacritty(runner 기본 Rust)만 돌린다.
   # Ghostty libghostty-vt 오라클은 Zig 0.15.2 + 무거운 Ghostty 빌드가 필요해

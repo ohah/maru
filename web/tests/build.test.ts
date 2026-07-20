@@ -58,6 +58,32 @@ test("live preview worker bundle selects DOM-free worker package exports", async
   }
 });
 
+test("Mermaid helper stays isolated from trusted origins and universal packaging preserves its seal", async () => {
+  const repository = join(import.meta.dir, "..", "..");
+  const source = await readFile(join(import.meta.dir, "..", "src", "mermaid-helper.ts"), "utf8");
+  const build = await readFile(join(import.meta.dir, "..", "scripts", "build.ts"), "utf8");
+  const nativeBuild = await readFile(join(repository, "build.zig"), "utf8");
+  const appScheme = await readFile(join(repository, "src", "session", "app_scheme.zig"), "utf8");
+  const universalBuild = await readFile(
+    join(repository, "tools", "build-macos-universal-dmg.sh"),
+    "utf8",
+  );
+  expect(source).toContain("window.__maruRenderMermaid");
+  expect(source).toContain("sanitizeMermaidSvg");
+  expect(build).toContain('"mermaid-helper.js"');
+  expect(nativeBuild).toContain("helper-only Mermaid runtime leaked into main app resources");
+  expect(nativeBuild).toContain("Mermaid runtime must have exactly one nested-helper copy");
+  expect(appScheme).toContain('eqlIgnoreCase(normalized_path, "mermaid-helper.js")');
+  expect(universalBuild).toContain('helper_rel="Contents/Helpers/MaruMermaidRenderer.app"');
+  expect(universalBuild).toContain(
+    'cmp "$work/arm.app/$helper_rel/Contents/Resources/web/mermaid-helper.js"',
+  );
+  expect(universalBuild).toContain(
+    "--entitlements src/platform/macos/MaruMermaidRenderer.entitlements",
+  );
+  expect(universalBuild).toContain("codesign --verify --strict --deep");
+});
+
 test("atomic renderer mode removes document viewport padding and legacy fragment selectors", async () => {
   const css = await readFile(join(import.meta.dir, "..", "src", "app.css"), "utf8");
   expect(css).toContain('body[data-renderer-mode="atomic"] #app');

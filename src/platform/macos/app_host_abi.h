@@ -8,7 +8,7 @@
 /* 이 header는 실제 앱 동작을 구현하지 않고 Swift/Zig 사이의 약속만 고정한다.
    Swift가 AppKit object나 Swift struct layout을 바로 넘기면 Zig 쪽에서 안전하게
    해석할 수 없으므로, 제품 host가 시작되기 전에 fixed-width C record만 허용한다. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 137u
+#define MARU_MACOS_APP_HOST_ABI_VERSION 138u
 #define MARU_FILE_PANEL_MODE_READ 0u
 #define MARU_FILE_PANEL_MODE_SOURCE_EDIT 1u
 #define MARU_FILE_PANEL_MODE_LIVE_PREVIEW 2u
@@ -25,6 +25,7 @@
 #define MARU_MERMAID_MAX_PENDING_JOBS 32u
 #define MARU_MERMAID_MAX_PENDING_SOURCE_BYTES 1048576u
 #define MARU_MERMAID_MAX_ACCEPTED_SVG_BYTES 2097152u
+#define MARU_MERMAID_MAX_TERMINAL_RESULTS 98u
 #define MARU_MERMAID_MAX_COMPLETIONS_PER_TICK 8u
 #define MARU_MERMAID_TAG_HELLO 0u
 #define MARU_MERMAID_TAG_HELLO_ACK 1u
@@ -32,6 +33,13 @@
 #define MARU_MERMAID_TAG_RESULT 3u
 #define MARU_MERMAID_RESULT_OK 0u
 #define MARU_MERMAID_RESULT_RENDER_ERROR 1u
+#define MARU_MERMAID_TERMINAL_SUPERSEDED 1u
+#define MARU_MERMAID_TERMINAL_DEADLINE 2u
+#define MARU_MERMAID_TERMINAL_TRANSIENT_FAILURE 3u
+#define MARU_MERMAID_TERMINAL_INTEGRITY_FAILURE 4u
+#define MARU_MERMAID_TERMINAL_INVALID_RESULT 5u
+#define MARU_MERMAID_TERMINAL_CAPACITY_EXCEEDED 6u
+#define MARU_MERMAID_TERMINAL_FAILURE_LATCHED 7u
 #define MARU_MERMAID_ACTION_NONE 0u
 #define MARU_MERMAID_ACTION_TERMINATE_HELPER 1u
 #define MARU_MERMAID_ACTION_START_JOB 2u
@@ -1316,6 +1324,7 @@ int32_t maru_macos_live_preview_budget_reconcile(
    fixed-width identity와 opaque body bytes만 운반하며 frame header/endianness를 직접 해석하지 않는다. */
 
 typedef struct MaruMermaidRendererCapability {
+    uint64_t editor_epoch;
     uint64_t document_revision;
     uint64_t projection_generation;
     uint64_t widget_id;
@@ -1356,6 +1365,7 @@ typedef struct MaruMermaidCoordinatorSnapshot {
     size_t pending_source_bytes;
     size_t accepted_results;
     size_t accepted_svg_bytes;
+    size_t terminal_results;
     uint64_t helper_instance;
     uint64_t helper_starts;
     uint64_t deadline_expirations;
@@ -1365,6 +1375,19 @@ typedef struct MaruMermaidCoordinatorSnapshot {
     uint32_t action_handoff_pending;
     uint32_t termination_in_progress;
 } MaruMermaidCoordinatorSnapshot;
+
+typedef struct MaruMermaidAcceptedResult {
+    uint64_t window_id;
+    MaruMermaidJobCapability capability;
+    size_t svg_len;
+} MaruMermaidAcceptedResult;
+
+typedef struct MaruMermaidTerminalResult {
+    uint64_t window_id;
+    uint64_t job_id;
+    MaruMermaidRendererCapability renderer;
+    uint32_t reason;
+} MaruMermaidTerminalResult;
 
 typedef struct MaruMermaidDecoder MaruMermaidDecoder;
 
@@ -1396,6 +1419,14 @@ uint32_t maru_macos_mermaid_complete_termination(uint64_t helper_instance);
 /* physical adapter가 quiesce된 app 종료에서 queue/latch/lease를 최종 회수한다. */
 void maru_macos_mermaid_shutdown(void);
 void maru_macos_mermaid_snapshot(MaruMermaidCoordinatorSnapshot *out_snapshot);
+/* allocation-free frame-tick gate와 exact renderer lifetime revoke. */
+uint32_t maru_macos_mermaid_has_work(void);
+void maru_macos_mermaid_revoke_renderer(uint64_t window_id, const MaruMermaidRendererCapability *renderer);
+void maru_macos_mermaid_revoke_job(uint64_t window_id, uint64_t job_id, const MaruMermaidRendererCapability *renderer);
+/* accepted SVG 한 건을 caller buffer로 one-shot 이동한다. 1=result, 0=none, -1=invalid, -2=buffer too small. */
+int32_t maru_macos_mermaid_take_accepted(MaruMermaidAcceptedResult *out_result, uint8_t *out_svg, size_t out_cap);
+/* coalesce/failure가 회수한 exact Promise terminal. reason은 닫힌 Zig enum. 1=result, 0=none, -1=invalid. */
+int32_t maru_macos_mermaid_take_terminal(MaruMermaidTerminalResult *out_result);
 
 /* ── 세션 컨트롤 플레인 라이브 서버(Track C A2b) ──────────────────────────────────────────────
    앱 인스턴스 전역 컨트롤 소켓 + accept 스레드 + 메인 marshal. Swift는 (1) 시작 시 start를 한 번,

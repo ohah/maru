@@ -55,6 +55,23 @@ const atomicDecorationField = StateField.define<DecorationSet>({
 });
 
 export const livePreviewEditorExtension: Extension = atomicDecorationField;
+export const maxCachedMermaidEntries = maxAtomicProjectionRequests;
+export const maxCachedMermaidSvgCodeUnits = 512 * 1024;
+
+export function mermaidSvgWithinCacheLimit(svg: string): boolean {
+  return svg.length <= maxCachedMermaidSvgCodeUnits;
+}
+
+export type MermaidCacheMetrics = Readonly<{
+  entries: number;
+  sourceBytes: number;
+  svgCodeUnits: number;
+  pending: number;
+}>;
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
 
 type AtomicEntry = Extract<ProjectionEntry, { type: "atomic" }>;
 
@@ -158,6 +175,8 @@ class AtomicWidget extends WidgetType {
   private revoked = false;
   private ready = false;
   private rendered = false;
+  private hostWindow: Window | null = null;
+  private initListener: ((event: MessageEvent<unknown>) => void) | null = null;
 
   constructor(
     readonly capability: RendererCapability,
@@ -232,23 +251,34 @@ class AtomicWidget extends WidgetType {
       }
     };
     this.port.start();
-    iframe.addEventListener(
-      "load",
-      () => {
-        if (!this.isCurrent(this.capability)) return;
-        const transferPort = this.transferPort;
-        const contentWindow = iframe.contentWindow;
-        if (transferPort === null || contentWindow === null) return;
-        contentWindow.postMessage(
-          { channel: atomicRendererChannel, type: "atomic-init", capability: this.capability },
-          "*",
-          [transferPort],
-        );
-        this.transferPort = null;
-      },
-      { once: true },
-    );
-    iframe.src = "maru-app://render/render.html";
+    const hostWindow = document.defaultView;
+    this.hostWindow = hostWindow;
+    this.initListener = (event) => {
+      const contentWindow = iframe.contentWindow;
+      if (
+        event.source !== contentWindow ||
+        !isRecord(event.data) ||
+        Object.keys(event.data).length !== 2 ||
+        event.data.channel !== atomicRendererChannel ||
+        event.data.type !== "atomic-boot" ||
+        !this.isCurrent(this.capability)
+      )
+        return;
+      const transferPort = this.transferPort;
+      if (transferPort === null || contentWindow === null) return;
+      contentWindow.postMessage(
+        { channel: atomicRendererChannel, type: "atomic-init", capability: this.capability },
+        "*",
+        [transferPort],
+      );
+      this.transferPort = null;
+      if (this.hostWindow !== null && this.initListener !== null)
+        this.hostWindow.removeEventListener("message", this.initListener);
+      this.initListener = null;
+      this.hostWindow = null;
+    };
+    hostWindow?.addEventListener("message", this.initListener);
+    iframe.src = "maru-app://render/render.html?atomic=1";
     container.append(iframe);
     this.deadline = setTimeout(() => this.onFailure(this.capability), 2_000);
     return container;
@@ -267,6 +297,10 @@ class AtomicWidget extends WidgetType {
     this.port = null;
     this.transferPort?.close();
     this.transferPort = null;
+    if (this.hostWindow !== null && this.initListener !== null)
+      this.hostWindow.removeEventListener("message", this.initListener);
+    this.initListener = null;
+    this.hostWindow = null;
   }
 
   private clearDeadline(): void {
@@ -303,6 +337,8 @@ export class AtomicProjectionController {
   private metricsDocumentRevision = 0;
   private metricsProjectionGeneration = 1;
   private readonly consumedAssetNonces = new Set<number>();
+  private readonly mermaidCache = new Map<string, Readonly<{ source: string; svg: string }>>();
+  private readonly pendingMermaid = new Map<number, RendererCapability>();
 
   constructor(
     private readonly view: EditorView,
@@ -313,6 +349,13 @@ export class AtomicProjectionController {
     private readonly onState: (state: LivePreviewWorkerState, reason?: string) => void = () => {},
     private readonly onWidgets: (metrics: AtomicWidgetMetrics) => void = () => {},
     private readonly onIntent: (intent: LivePreviewIntent) => void = () => {},
+    private readonly renderMermaid: (
+      capability: RendererCapability,
+      fenceId: number,
+      sourceHash: string,
+      source: string,
+    ) => Promise<string | null> = async () => null,
+    private readonly revokeMermaid: (capability: RendererCapability) => void = () => {},
   ) {}
 
   enable(): void {
@@ -329,9 +372,14 @@ export class AtomicProjectionController {
       this.publishMetrics();
       return;
     }
+    // zntc가 `new this.workerConstructor(...)` member-expression을 `new this.workerConstructor()(... )`로
+    // 잘못 낮추지 않게 검증된 constructor를 local binding으로 고정한다(WebKit 실제 smoke가 이 경계를 검증한다).
+    const WorkerConstructor = this.workerConstructor;
     this.client = new LivePreviewWorkerClient(
       () =>
-        new BrowserWorkerPort(new this.workerConstructor!("maru-app://app/live-preview-worker.js")),
+        new BrowserWorkerPort(
+          new WorkerConstructor("maru-app://app/live-preview-worker.js", { type: "classic" }),
+        ),
       () => ({
         editorEpoch: this.editorEpoch,
         documentRevision: this.revisions.documentRevision,
@@ -367,13 +415,34 @@ export class AtomicProjectionController {
     this.client?.dispose();
     this.client = null;
     this.clear();
+    // Cache lifetime follows the app-global applied worker budget. Hidden/source/read panels keep their
+    // WKWebView alive, so retaining per-editor SVG here would bypass the global memory bound.
+    this.mermaidCache.clear();
   }
 
   destroy(): void {
     if (this.destroyed) return;
     this.disable();
+    this.mermaidCache.clear();
     this.destroyed = true;
     this.cancelReconcile();
+  }
+
+  /** Deterministic perf/test snapshot; product policy continues to be owned by the private bounded maps. */
+  mermaidCacheMetrics(): MermaidCacheMetrics {
+    let sourceBytes = 0;
+    let svgCodeUnits = 0;
+    const encoder = new TextEncoder();
+    for (const value of this.mermaidCache.values()) {
+      sourceBytes += encoder.encode(value.source).byteLength;
+      svgCodeUnits += value.svg.length;
+    }
+    return {
+      entries: this.mermaidCache.size,
+      sourceBytes,
+      svgCodeUnits,
+      pending: this.pendingMermaid.size,
+    };
   }
 
   handleUpdate(update: ViewUpdate, baseRevision: number, targetRevision: number): void {
@@ -408,6 +477,9 @@ export class AtomicProjectionController {
     projectionGeneration: number,
     entries: readonly AtomicEntry[],
   ): void {
+    // submitEntries replaces the exact worker request batch. Any helper promise for the previous batch is
+    // already stale even if its source range happens to be identical.
+    this.revokePendingMermaid();
     this.metricsDocumentRevision = documentRevision;
     this.metricsProjectionGeneration = projectionGeneration;
     this.richSourceLimit = 0;
@@ -614,6 +686,69 @@ export class AtomicProjectionController {
         this.staleCapabilityTotal += 1;
         continue;
       }
+      const capability: RendererCapability = {
+        editorEpoch: this.editorEpoch,
+        documentRevision: result.documentRevision,
+        projectionGeneration: result.projectionGeneration,
+        widgetId: nextIdentity("widget"),
+        widgetGeneration: nextIdentity("generation"),
+        rendererInstance: nextIdentity("renderer"),
+      };
+      let payload = projected.sanitizedPayload;
+      if (currentRequest.kind === "mermaid") {
+        const source = projected.mermaidSource;
+        let svg: string | null = null;
+        let renderedFresh = false;
+        if (source !== null) {
+          const cached = this.mermaidCache.get(projected.sourceHash);
+          if (cached?.source === source) svg = cached.svg;
+          else {
+            this.pendingMermaid.set(capability.widgetId, capability);
+            try {
+              svg = await this.renderMermaid(
+                capability,
+                currentRequest.requestNonce,
+                projected.sourceHash,
+                source,
+              );
+              renderedFresh = svg !== null;
+            } catch {
+              svg = null;
+            } finally {
+              if (this.pendingMermaid.get(capability.widgetId) === capability)
+                this.pendingMermaid.delete(capability.widgetId);
+            }
+          }
+        }
+        if (
+          !this.enabled ||
+          lifecycleToken !== this.lifecycleToken ||
+          result.documentRevision !== this.revisions.documentRevision ||
+          result.projectionGeneration !== this.revisions.projectionGeneration ||
+          !this.requests.includes(currentRequest)
+        ) {
+          this.staleCapabilityTotal += 1;
+          this.publishMetrics();
+          return;
+        }
+        if (svg === null || !mermaidSvgWithinCacheLimit(svg)) {
+          this.rendererUnavailable += 1;
+          continue;
+        }
+        if (renderedFresh) {
+          if (
+            !this.mermaidCache.has(projected.sourceHash) &&
+            this.mermaidCache.size >= maxCachedMermaidEntries
+          ) {
+            const oldest = this.mermaidCache.keys().next().value;
+            if (oldest !== undefined) this.mermaidCache.delete(oldest);
+          }
+          // SHA-256는 lookup key일 뿐이다. exact source까지 같을 때만 재사용해 collision이 다른
+          // diagram의 trusted helper 결과를 선택하는 SSOT 분기를 만들지 않는다.
+          this.mermaidCache.set(projected.sourceHash, { source, svg });
+        }
+        payload = svg;
+      }
       const assets: AtomicRenderAsset[] = [];
       let assetFailure = false;
       for (const grant of projected.assetGrants) {
@@ -647,18 +782,10 @@ export class AtomicProjectionController {
       if (assetFailure) {
         continue;
       }
-      const capability: RendererCapability = {
-        editorEpoch: this.editorEpoch,
-        documentRevision: result.documentRevision,
-        projectionGeneration: result.projectionGeneration,
-        widgetId: nextIdentity("widget"),
-        widgetGeneration: nextIdentity("generation"),
-        rendererInstance: nextIdentity("renderer"),
-      };
       const request = projected.request;
       const widget = new AtomicWidget(
         capability,
-        projected.sanitizedPayload,
+        payload,
         assets,
         (candidate) =>
           this.desiredRecords.some(({ capability: current }) =>
@@ -696,7 +823,13 @@ export class AtomicProjectionController {
 
   private clear(): void {
     this.lifecycleToken += 1;
+    this.revokePendingMermaid();
     this.setDesiredRecords([]);
+  }
+
+  private revokePendingMermaid(): void {
+    for (const capability of this.pendingMermaid.values()) this.revokeMermaid(capability);
+    this.pendingMermaid.clear();
   }
 
   private setDesiredRecords(records: AtomicRecord[]): void {

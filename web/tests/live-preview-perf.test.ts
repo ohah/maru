@@ -13,7 +13,7 @@ import { startDocumentCopyProbe } from "../scripts/live-preview-perf-scenario";
 function artifact(): LivePreviewPerfArtifact {
   return {
     schema_version: livePreviewPerfSchemaVersion,
-    scenario: "fp11e-8mib-1000-editable-projection-atomic-widgets",
+    scenario: "fp11f-8mib-1000-editable-projection-mermaid",
     counters: {
       visited_code_units: 64_000,
       visited_syntax_nodes: 8_000,
@@ -30,8 +30,8 @@ function artifact(): LivePreviewPerfArtifact {
       iframe_destroy: 0,
       retained_html_bytes: 0,
       generated_outside_retention: 0,
-      atomic_requests: 3,
-      atomic_results: 3,
+      atomic_requests: 4,
+      atomic_results: 4,
       atomic_asset_grants: 1,
       atomic_worker_hashed_bytes_max: 256 * 1024,
       atomic_worker_hashed_bytes_batch_max: 8 * 256 * 1024,
@@ -43,6 +43,18 @@ function artifact(): LivePreviewPerfArtifact {
       atomic_iframe_create_max_per_frame: 2,
       atomic_iframe_destroy_max_per_frame: 2,
       atomic_generated_outside_retention: 0,
+      mermaid_requests: 1,
+      mermaid_worker_hashed_bytes: 38,
+      mermaid_cap_plus_one_hashed_bytes: 0,
+      mermaid_main_hashed_bytes: 0,
+      mermaid_main_received_source_bytes: 38,
+      mermaid_native_requests: 1,
+      mermaid_native_requests_after_unrelated_edit: 1,
+      mermaid_cache_entries_max: 1,
+      mermaid_cache_source_bytes_max: 38,
+      mermaid_cache_svg_code_units_max: 64,
+      mermaid_cache_entries_after_disable: 0,
+      mermaid_cache_svg_code_units_after_disable: 0,
       intent_events: 6,
       intent_cm6_transactions: 1,
       intent_external_actions: 1,
@@ -95,7 +107,7 @@ describe("live preview performance artifact", () => {
     expect(probe.stop()).toBe(8);
   });
 
-  test("requires the closed FP11e schema and exact atomic/interaction effect counters", () => {
+  test("requires the closed FP11f schema and exact Mermaid/atomic/interaction counters", () => {
     const current = artifact();
     expect(() => validateLivePreviewPerfArtifact(current)).not.toThrow();
     for (const name of [
@@ -108,6 +120,10 @@ describe("live preview performance artifact", () => {
       "atomic_main_hashed_bytes",
       "atomic_main_copied_bytes",
       "atomic_generated_outside_retention",
+      "mermaid_cap_plus_one_hashed_bytes",
+      "mermaid_main_hashed_bytes",
+      "mermaid_cache_entries_after_disable",
+      "mermaid_cache_svg_code_units_after_disable",
       "intent_dual_effects",
       "table_cap_plus_one_transactions",
       "table_multirange_transactions",
@@ -149,14 +165,17 @@ describe("live preview performance artifact", () => {
       ["dom_mutations", 1],
       ["dense_math_scanned_code_units", 32_769],
       ["dense_math_scanned_code_units", 1_000_000],
-      ["atomic_requests", 4],
-      ["atomic_results", 2],
+      ["atomic_requests", 3],
+      ["atomic_results", 3],
       ["atomic_asset_grants", 2],
       ["atomic_worker_hashed_bytes_max", 262_143],
       ["atomic_result_payload_bytes", 0],
       ["atomic_mounted_max", 9],
       ["atomic_iframe_create_max_per_frame", 3],
       ["atomic_iframe_destroy_max_per_frame", 3],
+      ["mermaid_requests", 0],
+      ["mermaid_worker_hashed_bytes", 0],
+      ["mermaid_worker_hashed_bytes", 32_769],
       ["intent_events", 7],
       ["intent_cm6_transactions", 2],
       ["intent_external_actions", 2],

@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- The renderer receives source and returns sanitized SVG only through inherited pipes. -->
+    <key>com.apple.security.app-sandbox</key>
+    <true/>
+    <!-- WKWebView refuses to launch its WebContent service without this entitlement even for
+         loadHTMLString(baseURL: nil). Page-level CSP and request instrumentation remain the
+         external-request authority; no file or network-server entitlement is granted. -->
+    <key>com.apple.security.network.client</key>
+    <true/>
+</dict>
+</plist>

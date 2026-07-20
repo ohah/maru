@@ -179,9 +179,9 @@ describe("CM6 editable Markdown projection", () => {
     expect(
       result.entries.filter(({ type, role }) => type === "atomic" && role === "math"),
     ).toHaveLength(2);
-    expect(hasEntry(result.entries, { type: "atomic", role: "mermaid" })).toBe(false);
+    expect(hasEntry(result.entries, { type: "atomic", role: "mermaid" })).toBe(true);
     expect(result.fallbackCounts["atomic-not-enabled"]).toBe(0);
-    expect(result.fallbackCounts["renderer-unavailable"]).toBe(1);
+    expect(result.fallbackCounts["renderer-unavailable"]).toBe(0);
     expect(JSON.stringify(result)).not.toContain("<iframe");
     expect(JSON.stringify(result)).not.toContain("<img");
   });

@@ -4,6 +4,8 @@ import {
   AtomicProjectionController,
   atomicRecordCanBeReused,
   atomicRangeRetained,
+  maxCachedMermaidSvgCodeUnits,
+  mermaidSvgWithinCacheLimit,
   reconcileAtomicBatch,
 } from "../src/live-preview-editor";
 import { createMarkdownEditor } from "../src/editor";
@@ -43,6 +45,7 @@ function imageProjection(
     request,
     sourceHash: "0123456789abcdef",
     sanitizedPayload: '<img data-maru-asset-id="1">',
+    mermaidSource: null,
     assetGrants: [
       {
         editorEpoch: request.editorEpoch,
@@ -56,6 +59,11 @@ function imageProjection(
 }
 
 describe("live preview atomic frame budget", () => {
+  test("bounds each cached Mermaid SVG at the exact code-unit limit", () => {
+    expect(mermaidSvgWithinCacheLimit("x".repeat(maxCachedMermaidSvgCodeUnits))).toBe(true);
+    expect(mermaidSvgWithinCacheLimit("x".repeat(maxCachedMermaidSvgCodeUnits + 1))).toBe(false);
+  });
+
   test("reuses only same-document geometry while rejecting a different document revision", () => {
     const capability = {
       editorEpoch: 1,
@@ -160,6 +168,330 @@ describe("live preview atomic frame budget", () => {
     expect(atomicRangeRetained({ from: 400, to: 420 }, discovery, viewport, 1_000)).toBe(false);
   });
 
+  test("admits Mermaid through the exact renderer capability and drops a late completion", async () => {
+    await withEditorDom(async (dom) => {
+      const source = "```mermaid\ngraph TD\n```";
+      const editor = createMarkdownEditor(
+        dom.window.document.querySelector("main") as HTMLElement,
+        source,
+        () => {},
+        () => {},
+      );
+      editor.dispatch({ selection: EditorSelection.cursor(source.length) });
+      const revisions = new EditorRevisionClock();
+      const identity = revisions.nextProjection();
+      let resolveRender: ((svg: string | null) => void) | null = null;
+      const renderCalls: unknown[] = [];
+      const revoked: unknown[] = [];
+      const controller = new AtomicProjectionController(
+        editor,
+        8,
+        revisions,
+        FakeAtomicWorker as unknown as typeof Worker,
+        async () => null,
+        () => {},
+        () => {},
+        () => {},
+        async (capability, fenceId, sourceHash, mermaidSource) => {
+          renderCalls.push({ capability, fenceId, sourceHash, mermaidSource });
+          return new Promise((resolve) => {
+            resolveRender = resolve;
+          });
+        },
+        (capability) => revoked.push(capability),
+      );
+      try {
+        controller.submitEntries(identity.documentRevision, identity.projectionGeneration, [
+          { type: "atomic", role: "mermaid", from: 0, to: source.length },
+        ]);
+        controller.enable();
+        const worker = FakeAtomicWorker.latest;
+        worker?.reply({
+          type: "result",
+          editorEpoch: 8,
+          documentRevision: 0,
+          projectionGeneration: 0,
+          results: [],
+          rejected: [],
+        });
+        const project = worker?.sent[1];
+        if (project?.type !== "project" || project.requests[0] === undefined)
+          throw new Error("missing Mermaid request");
+        worker.reply({
+          type: "result",
+          editorEpoch: 8,
+          documentRevision: 0,
+          projectionGeneration: 1,
+          results: [
+            {
+              request: project.requests[0],
+              sourceHash: "a".repeat(64),
+              sanitizedPayload: "",
+              assetGrants: [],
+              mermaidSource: source,
+            },
+          ],
+          rejected: [],
+        });
+        await Promise.resolve();
+        expect(renderCalls).toEqual([
+          expect.objectContaining({
+            fenceId: project.requests[0].requestNonce,
+            sourceHash: "a".repeat(64),
+            mermaidSource: source,
+            capability: expect.objectContaining({ editorEpoch: 8, documentRevision: 0 }),
+          }),
+        ]);
+        controller.disable();
+        expect(revoked).toEqual([expect.objectContaining({ editorEpoch: 8, documentRevision: 0 })]);
+        if (resolveRender === null) throw new Error("missing Mermaid completion");
+        resolveRender("<svg><text>late</text></svg>");
+        await new Promise((resolve) => dom.window.requestAnimationFrame(() => resolve(undefined)));
+        expect(revoked).toHaveLength(1);
+        expect(editor.dom.querySelector(".maru-live-atomic-frame")).toBeNull();
+      } finally {
+        controller.destroy();
+        editor.destroy();
+      }
+    });
+  });
+
+  test("reuses a bounded exact-source Mermaid render across an unrelated document revision", async () => {
+    await withEditorDom(async (dom) => {
+      const mermaidSource = "```mermaid\nflowchart TD\n  A --> B\n```";
+      const revisions = new EditorRevisionClock();
+      let controller: AtomicProjectionController | null = null;
+      const editor = createMarkdownEditor(
+        dom.window.document.querySelector("main") as HTMLElement,
+        mermaidSource,
+        (update) => {
+          if (!update.docChanged) return;
+          const baseRevision = revisions.documentRevision;
+          const targetRevision = revisions.documentChanged();
+          controller?.handleUpdate(update, baseRevision, targetRevision);
+        },
+        () => {},
+      );
+      editor.dispatch({ selection: EditorSelection.cursor(mermaidSource.length) });
+      let renderCalls = 0;
+      controller = new AtomicProjectionController(
+        editor,
+        81,
+        revisions,
+        FakeAtomicWorker as unknown as typeof Worker,
+        async () => null,
+        () => {},
+        () => {},
+        () => {},
+        async () => {
+          renderCalls += 1;
+          return "<svg><text>cached</text></svg>";
+        },
+      );
+      const entry = {
+        type: "atomic" as const,
+        role: "mermaid" as const,
+        from: 0,
+        to: mermaidSource.length,
+      };
+      const hash = "b".repeat(64);
+      try {
+        let identity = revisions.nextProjection();
+        controller.submitEntries(identity.documentRevision, identity.projectionGeneration, [entry]);
+        controller.enable();
+        const worker = FakeAtomicWorker.latest;
+        worker?.reply({
+          type: "result",
+          editorEpoch: 81,
+          documentRevision: 0,
+          projectionGeneration: 0,
+          results: [],
+          rejected: [],
+        });
+        const first = worker?.sent.at(-1);
+        if (first?.type !== "project" || first.requests[0] === undefined)
+          throw new Error("missing initial Mermaid projection");
+        worker.reply({
+          type: "result",
+          editorEpoch: 81,
+          documentRevision: identity.documentRevision,
+          projectionGeneration: identity.projectionGeneration,
+          results: [
+            {
+              request: first.requests[0],
+              sourceHash: hash,
+              sanitizedPayload: "",
+              assetGrants: [],
+              mermaidSource,
+            },
+          ],
+          rejected: [],
+        });
+        for (let turn = 0; turn < 4; turn += 1) await Promise.resolve();
+        expect(renderCalls).toBe(1);
+
+        editor.dispatch({ changes: { from: mermaidSource.length, insert: "\n\nunrelated" } });
+        identity = revisions.nextProjection();
+        controller.submitEntries(identity.documentRevision, identity.projectionGeneration, [entry]);
+        const second = worker?.sent.at(-1);
+        if (
+          (second?.type !== "project" && second?.type !== "apply") ||
+          second.requests[0] === undefined
+        )
+          throw new Error("missing updated Mermaid projection");
+        worker.reply({
+          type: "result",
+          editorEpoch: 81,
+          documentRevision: identity.documentRevision,
+          projectionGeneration: identity.projectionGeneration,
+          results: [
+            {
+              request: second.requests[0],
+              sourceHash: hash,
+              sanitizedPayload: "",
+              assetGrants: [],
+              mermaidSource,
+            },
+          ],
+          rejected: [],
+        });
+        for (let turn = 0; turn < 4; turn += 1) await Promise.resolve();
+        expect(renderCalls).toBe(1);
+      } finally {
+        controller.destroy();
+        editor.destroy();
+      }
+    });
+  });
+
+  test("separates hash collisions, evicts the ninth Mermaid entry, and clears cache on disable", async () => {
+    await withEditorDom(async (dom) => {
+      const editorSource = "```mermaid\nflowchart TD\n  A --> B\n```";
+      const editor = createMarkdownEditor(
+        dom.window.document.querySelector("main") as HTMLElement,
+        editorSource,
+        () => {},
+        () => {},
+      );
+      editor.dispatch({ selection: EditorSelection.cursor(editorSource.length) });
+      const revisions = new EditorRevisionClock();
+      const renderedSources: string[] = [];
+      const controller = new AtomicProjectionController(
+        editor,
+        82,
+        revisions,
+        FakeAtomicWorker as unknown as typeof Worker,
+        async () => null,
+        () => {},
+        () => {},
+        () => {},
+        async (_capability, _fenceId, _sourceHash, source) => {
+          renderedSources.push(source);
+          return `<svg><text>${renderedSources.length}</text></svg>`;
+        },
+      );
+      const entry = {
+        type: "atomic" as const,
+        role: "mermaid" as const,
+        from: 0,
+        to: editorSource.length,
+      };
+      const source = (label: string) => `\`\`\`mermaid\nflowchart TD\n  ${label} --> Z\n\`\`\``;
+      try {
+        let identity = revisions.nextProjection();
+        controller.submitEntries(identity.documentRevision, identity.projectionGeneration, [entry]);
+        controller.enable();
+        let worker = FakeAtomicWorker.latest;
+        worker?.reply({
+          type: "result",
+          editorEpoch: 82,
+          documentRevision: 0,
+          projectionGeneration: 0,
+          results: [],
+          rejected: [],
+        });
+
+        const project = async (mermaidSource: string, sourceHash: string) => {
+          const request = worker?.sent.at(-1);
+          if (request?.type !== "project" || request.requests[0] === undefined)
+            throw new Error("missing bounded Mermaid projection");
+          worker.reply({
+            type: "result",
+            editorEpoch: 82,
+            documentRevision: identity.documentRevision,
+            projectionGeneration: identity.projectionGeneration,
+            results: [
+              {
+                request: request.requests[0],
+                sourceHash,
+                sanitizedPayload: "",
+                assetGrants: [],
+                mermaidSource,
+              },
+            ],
+            rejected: [],
+          });
+          for (let turn = 0; turn < 4; turn += 1) await Promise.resolve();
+        };
+
+        const collisionHash = "c".repeat(64);
+        await project(source("collision-a"), collisionHash);
+        identity = revisions.nextProjection();
+        controller.submitEntries(identity.documentRevision, identity.projectionGeneration, [entry]);
+        await project(source("collision-b"), collisionHash);
+        expect(renderedSources).toHaveLength(2);
+
+        for (let index = 1; index <= 8; index += 1) {
+          identity = revisions.nextProjection();
+          controller.submitEntries(identity.documentRevision, identity.projectionGeneration, [
+            entry,
+          ]);
+          await project(source(`unique-${index}`), index.toString(16).repeat(64));
+        }
+        identity = revisions.nextProjection();
+        controller.submitEntries(identity.documentRevision, identity.projectionGeneration, [entry]);
+        await project(source("collision-b"), collisionHash);
+        expect(renderedSources).toHaveLength(11);
+
+        controller.disable();
+        controller.enable();
+        worker = FakeAtomicWorker.latest;
+        worker?.reply({
+          type: "result",
+          editorEpoch: 82,
+          documentRevision: identity.documentRevision,
+          projectionGeneration: 0,
+          results: [],
+          rejected: [],
+        });
+        const afterEnable = worker?.sent.at(-1);
+        if (afterEnable?.type !== "project" || afterEnable.requests[0] === undefined)
+          throw new Error("missing post-disable Mermaid projection");
+        worker.reply({
+          type: "result",
+          editorEpoch: 82,
+          documentRevision: identity.documentRevision,
+          projectionGeneration: identity.projectionGeneration,
+          results: [
+            {
+              request: afterEnable.requests[0],
+              sourceHash: collisionHash,
+              sanitizedPayload: "",
+              assetGrants: [],
+              mermaidSource: source("collision-b"),
+            },
+          ],
+          rejected: [],
+        });
+        for (let turn = 0; turn < 4; turn += 1) await Promise.resolve();
+        expect(renderedSources).toHaveLength(12);
+      } finally {
+        controller.destroy();
+        editor.destroy();
+      }
+    });
+  });
+
   test("mounts only the current epoch request and removes the widget when source is selected", async () => {
     await withEditorDom(async (dom) => {
       const source = "![alt](image.png)\n\nplain";
@@ -212,6 +544,7 @@ describe("live preview atomic frame budget", () => {
               request,
               sourceHash: "0123456789abcdef",
               sanitizedPayload: "<p>image</p>",
+              mermaidSource: null,
               assetGrants: [],
             },
           ],
@@ -234,7 +567,12 @@ describe("live preview atomic frame budget", () => {
             rendererPort = (ports?.[0] as MessagePort | undefined) ?? null;
           }) as typeof frame.contentWindow.postMessage;
         }
-        frame?.dispatchEvent(new dom.window.Event("load"));
+        dom.window.dispatchEvent(
+          new dom.window.MessageEvent("message", {
+            source: frame?.contentWindow ?? null,
+            data: { channel: atomicRendererChannel, type: "atomic-boot" },
+          }),
+        );
         expect(rendererPort).not.toBeNull();
         (rendererPort as MessagePort | null)!.onmessage = (event) => {
           if ((event.data as { type?: string }).type !== "atomic-render") return;
@@ -324,6 +662,7 @@ describe("live preview atomic frame budget", () => {
               request: project.requests[0],
               sourceHash: "0123456789abcdef",
               sanitizedPayload: '<img data-maru-asset-id="1">',
+              mermaidSource: null,
               assetGrants: [
                 {
                   editorEpoch: 11,
@@ -844,6 +1183,7 @@ describe("live preview atomic frame budget", () => {
               request: oldProject.requests[0],
               sourceHash: "0123456789abcdef",
               sanitizedPayload: '<img data-maru-asset-id="1">',
+              mermaidSource: null,
               assetGrants: [
                 {
                   editorEpoch: 13,
@@ -884,6 +1224,7 @@ describe("live preview atomic frame budget", () => {
               request: newProject.requests[0],
               sourceHash: "0123456789abcdef",
               sanitizedPayload: '<img data-maru-asset-id="1">',
+              mermaidSource: null,
               assetGrants: [
                 {
                   editorEpoch: 13,
@@ -1134,6 +1475,7 @@ describe("live preview atomic frame budget", () => {
               request: staleRequest,
               sourceHash: "0123456789abcdef",
               sanitizedPayload: '<img data-maru-asset-id="1">',
+              mermaidSource: null,
               assetGrants: [
                 {
                   editorEpoch: 18,

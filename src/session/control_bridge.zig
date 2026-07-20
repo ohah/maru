@@ -15,6 +15,7 @@
 const std = @import("std");
 const cp = @import("control_plane.zig");
 const file_policy = @import("file_panel_bridge.zig");
+const mermaid_protocol = @import("mermaid_protocol.zig");
 
 /// 브리지 method 이름(5b 최소: `hello` 1개). `window.maru` shim의 `maru.hello()`가 이 method 요청으로 매핑된다.
 /// 소켓 핸드셰이크의 `hello` notification(cp.hello_method)과 이름은 같지만 문맥이 다르다 — 이건 id 있는 **request**로
@@ -27,6 +28,9 @@ pub const file_write_method = "maru.file.write";
 pub const file_set_dirty_method = "maru.file.setDirty";
 pub const file_resolve_external_change_method = "maru.file.resolveExternalChange";
 pub const file_open_link_method = "maru.file.openLink";
+pub const file_render_mermaid_method = "maru.file.renderMermaid";
+pub const file_revoke_mermaid_method = "maru.file.revokeMermaid";
+pub const file_live_preview_ready_method = "maru.file.livePreviewReady";
 /// 모든 bridge 정수는 JavaScript `Number`를 왕복하므로 이 상한 안에서만 identity가 정확하다.
 pub const max_js_safe_integer: u64 = 9_007_199_254_740_991;
 
@@ -35,6 +39,13 @@ pub const DirtyReport = struct {
     editor_epoch: u64 = 0,
     revision: u64,
     request_id: u64 = 0,
+};
+
+pub const MermaidRenderRequest = struct {
+    renderer: mermaid_protocol.RendererCapability,
+    fence_id: u64,
+    source_hash: [32]u8,
+    source: []const u8,
 };
 
 /// 실제 파일 시스템 접근을 platform 계층에서 주입한다. 반환 slice는 `gpa` 소유이며 dispatch가 해제한다.
@@ -48,6 +59,9 @@ pub const FileAccess = struct {
     set_dirty_fn: *const fn (context: *anyopaque, report: DirtyReport) anyerror!void,
     resolve_external_change_fn: *const fn (context: *anyopaque, editor_epoch: u64, success: bool) anyerror!void,
     open_link_fn: *const fn (context: *anyopaque, editor_epoch: u64, href: []const u8, force_system: bool) anyerror!void,
+    render_mermaid_fn: *const fn (context: *anyopaque, request: MermaidRenderRequest) anyerror!u64,
+    revoke_mermaid_fn: *const fn (context: *anyopaque, renderer: mermaid_protocol.RendererCapability) anyerror!void,
+    live_preview_ready_fn: *const fn (context: *anyopaque, editor_epoch: u64) anyerror!void,
 
     fn beginDocument(self: FileAccess, document_id: u64) anyerror!u64 {
         return self.begin_document_fn(self.context, document_id);
@@ -75,6 +89,18 @@ pub const FileAccess = struct {
 
     fn openLink(self: FileAccess, editor_epoch: u64, href: []const u8, force_system: bool) anyerror!void {
         return self.open_link_fn(self.context, editor_epoch, href, force_system);
+    }
+
+    fn renderMermaid(self: FileAccess, request: MermaidRenderRequest) anyerror!u64 {
+        return self.render_mermaid_fn(self.context, request);
+    }
+
+    fn revokeMermaid(self: FileAccess, renderer: mermaid_protocol.RendererCapability) anyerror!void {
+        return self.revoke_mermaid_fn(self.context, renderer);
+    }
+
+    fn livePreviewReady(self: FileAccess, editor_epoch: u64) anyerror!void {
+        return self.live_preview_ready_fn(self.context, editor_epoch);
     }
 };
 
@@ -182,7 +208,69 @@ pub fn dispatchBridgeWithFileAccess(
         access.openLink(params.editor_epoch, href, params.force_system) catch return errorResponse(gpa, req.id, .internal_error);
         return serializeFileMutationResult(gpa, req.id, "opened", true);
     }
+    if (std.mem.eql(u8, req.method, file_render_mermaid_method)) {
+        const params = mermaidRenderParams(req.params) catch return errorResponse(gpa, req.id, .invalid_params);
+        const job_id = access.renderMermaid(params) catch return errorResponse(gpa, req.id, .internal_error);
+        return serializeFileMutationResult(gpa, req.id, "job_id", job_id);
+    }
+    if (std.mem.eql(u8, req.method, file_revoke_mermaid_method)) {
+        const renderer = mermaidRendererParams(req.params) catch return errorResponse(gpa, req.id, .invalid_params);
+        access.revokeMermaid(renderer) catch return errorResponse(gpa, req.id, .internal_error);
+        return serializeFileMutationResult(gpa, req.id, "revoked", true);
+    }
+    if (std.mem.eql(u8, req.method, file_live_preview_ready_method)) {
+        const editor_epoch = positiveIntegerParam(req.params, "editor_epoch") catch return errorResponse(gpa, req.id, .invalid_params);
+        access.livePreviewReady(editor_epoch) catch return errorResponse(gpa, req.id, .internal_error);
+        return serializeFileMutationResult(gpa, req.id, "ready", true);
+    }
     return errorResponse(gpa, req.id, .method_not_found);
+}
+
+fn mermaidRenderParams(params: ?std.json.Value) error{InvalidParams}!MermaidRenderRequest {
+    const obj = switch (params orelse return error.InvalidParams) {
+        .object => |value| value,
+        else => return error.InvalidParams,
+    };
+    if (obj.count() != 9) return error.InvalidParams;
+    const source = switch (obj.get("source") orelse return error.InvalidParams) {
+        .string => |value| value,
+        else => return error.InvalidParams,
+    };
+    if (source.len == 0 or source.len > mermaid_protocol.max_source_bytes or !std.unicode.utf8ValidateSlice(source))
+        return error.InvalidParams;
+    const hash_hex = switch (obj.get("source_hash") orelse return error.InvalidParams) {
+        .string => |value| value,
+        else => return error.InvalidParams,
+    };
+    if (hash_hex.len != 64) return error.InvalidParams;
+    var source_hash: [32]u8 = undefined;
+    _ = std.fmt.hexToBytes(&source_hash, hash_hex) catch return error.InvalidParams;
+    return .{
+        .renderer = try rendererCapability(obj),
+        .fence_id = try positiveInteger(obj.get("fence_id") orelse return error.InvalidParams),
+        .source_hash = source_hash,
+        .source = source,
+    };
+}
+
+fn mermaidRendererParams(params: ?std.json.Value) error{InvalidParams}!mermaid_protocol.RendererCapability {
+    const obj = switch (params orelse return error.InvalidParams) {
+        .object => |value| value,
+        else => return error.InvalidParams,
+    };
+    if (obj.count() != 6) return error.InvalidParams;
+    return rendererCapability(obj);
+}
+
+fn rendererCapability(obj: std.json.ObjectMap) error{InvalidParams}!mermaid_protocol.RendererCapability {
+    return .{
+        .editor_epoch = try positiveInteger(obj.get("editor_epoch") orelse return error.InvalidParams),
+        .document_revision = try nonNegativeInteger(obj.get("document_revision") orelse return error.InvalidParams),
+        .projection_generation = try positiveInteger(obj.get("projection_generation") orelse return error.InvalidParams),
+        .widget_id = try positiveInteger(obj.get("widget_id") orelse return error.InvalidParams),
+        .widget_generation = try positiveInteger(obj.get("widget_generation") orelse return error.InvalidParams),
+        .renderer_instance = try positiveInteger(obj.get("renderer_instance") orelse return error.InvalidParams),
+    };
 }
 
 fn openLinkParams(params: ?std.json.Value) error{InvalidParams}!struct { editor_epoch: u64, href: []const u8, force_system: bool } {
@@ -420,6 +508,12 @@ const FakeFileAccess = struct {
     last_open_link_len: usize = 0,
     last_open_link_editor_epoch: u64 = 0,
     last_open_link_force_system: bool = false,
+    mermaid_calls: usize = 0,
+    mermaid_revoke_calls: usize = 0,
+    live_preview_ready_calls: usize = 0,
+    last_mermaid: ?MermaidRenderRequest = null,
+    last_mermaid_revoke: ?mermaid_protocol.RendererCapability = null,
+    last_mermaid_source_len: usize = 0,
 
     fn beginDocument(context: *anyopaque, document_id: u64) anyerror!u64 {
         const self: *FakeFileAccess = @ptrCast(@alignCast(context));
@@ -478,6 +572,28 @@ const FakeFileAccess = struct {
         self.last_open_link_force_system = force_system;
     }
 
+    fn renderMermaid(context: *anyopaque, request: MermaidRenderRequest) anyerror!u64 {
+        const self: *FakeFileAccess = @ptrCast(@alignCast(context));
+        if (self.fail) return error.RenderFailed;
+        self.mermaid_calls += 1;
+        self.last_mermaid = request;
+        self.last_mermaid_source_len = request.source.len;
+        return 77;
+    }
+
+    fn revokeMermaid(context: *anyopaque, renderer: mermaid_protocol.RendererCapability) anyerror!void {
+        const self: *FakeFileAccess = @ptrCast(@alignCast(context));
+        if (self.fail) return error.RevokeFailed;
+        self.mermaid_revoke_calls += 1;
+        self.last_mermaid_revoke = renderer;
+    }
+
+    fn livePreviewReady(context: *anyopaque, _: u64) anyerror!void {
+        const self: *FakeFileAccess = @ptrCast(@alignCast(context));
+        if (self.fail) return error.ReadyFailed;
+        self.live_preview_ready_calls += 1;
+    }
+
     fn access(self: *FakeFileAccess) FileAccess {
         return .{
             .context = self,
@@ -488,6 +604,9 @@ const FakeFileAccess = struct {
             .set_dirty_fn = setDirty,
             .resolve_external_change_fn = resolveExternalChange,
             .open_link_fn = openLink,
+            .render_mermaid_fn = renderMermaid,
+            .revoke_mermaid_fn = revokeMermaid,
+            .live_preview_ready_fn = livePreviewReady,
         };
     }
 };
@@ -629,6 +748,27 @@ test "dispatchBridge: file.write and revision-scoped dirty are pinned provider m
     try testing.expectEqual(@as(usize, 1), fake.resolve_calls);
 }
 
+test "dispatchBridge: live preview ready is exact and epoch scoped" {
+    var fake: FakeFileAccess = .{};
+    const response = try dispatchBridgeWithFileAccess(
+        testing.allocator,
+        "{\"jsonrpc\":\"2.0\",\"id\":30,\"method\":\"maru.file.livePreviewReady\",\"params\":{\"editor_epoch\":7}}",
+        "0.1.0",
+        fake.access(),
+    );
+    defer testing.allocator.free(response);
+    try testing.expectEqual(@as(usize, 1), fake.live_preview_ready_calls);
+
+    const invalid = try dispatchBridgeWithFileAccess(
+        testing.allocator,
+        "{\"jsonrpc\":\"2.0\",\"id\":31,\"method\":\"maru.file.livePreviewReady\",\"params\":{\"editor_epoch\":0}}",
+        "0.1.0",
+        fake.access(),
+    );
+    defer testing.allocator.free(invalid);
+    try testing.expectEqual(@as(usize, 1), fake.live_preview_ready_calls);
+}
+
 test "dispatchBridge: file.openLink is an exact-parameter pinned provider mutation" {
     var fake: FakeFileAccess = .{};
     const req = "{\"jsonrpc\":\"2.0\",\"id\":16,\"method\":\"maru.file.openLink\",\"params\":{\"editor_epoch\":7,\"href\":\"https://example.com/guide\",\"forceSystem\":true}}";
@@ -659,6 +799,55 @@ test "dispatchBridge: file.openLink is an exact-parameter pinned provider mutati
         defer invalid_parsed.deinit();
         try testing.expectEqual(@as(i64, -32602), invalid_parsed.value.object.get("error").?.object.get("code").?.integer);
     }
+}
+
+test "dispatchBridge Mermaid admission keeps exact renderer identity and SHA-256" {
+    var fake: FakeFileAccess = .{};
+    const req =
+        "{\"jsonrpc\":\"2.0\",\"id\":21,\"method\":\"maru.file.renderMermaid\",\"params\":{" ++
+        "\"editor_epoch\":7,\"document_revision\":0,\"projection_generation\":2," ++
+        "\"widget_id\":3,\"widget_generation\":4,\"renderer_instance\":5,\"fence_id\":6," ++
+        "\"source_hash\":\"2151a7a6ec2eaff56c93602c3b07382d7bd484e8e572852da1ffe6b874656bd8\"," ++
+        "\"source\":\"```mermaid\\ngraph TD\\n```\"}}";
+    const response = try dispatchBridgeWithFileAccess(testing.allocator, req, "1", fake.access());
+    defer testing.allocator.free(response);
+    try testing.expect(std.mem.indexOf(u8, response, "\"job_id\":77") != null);
+    try testing.expectEqual(@as(usize, 1), fake.mermaid_calls);
+    const captured = fake.last_mermaid.?;
+    try testing.expectEqual(@as(u64, 7), captured.renderer.editor_epoch);
+    try testing.expectEqual(@as(u64, 0), captured.renderer.document_revision);
+    try testing.expectEqual(@as(u64, 6), captured.fence_id);
+    try testing.expectEqual(@as(usize, "```mermaid\ngraph TD\n```".len), fake.last_mermaid_source_len);
+
+    const revoke =
+        "{\"jsonrpc\":\"2.0\",\"id\":23,\"method\":\"maru.file.revokeMermaid\",\"params\":{" ++
+        "\"editor_epoch\":7,\"document_revision\":0,\"projection_generation\":2," ++
+        "\"widget_id\":3,\"widget_generation\":4,\"renderer_instance\":5}}";
+    const revoke_response = try dispatchBridgeWithFileAccess(testing.allocator, revoke, "1", fake.access());
+    defer testing.allocator.free(revoke_response);
+    try testing.expect(std.mem.indexOf(u8, revoke_response, "\"revoked\":true") != null);
+    try testing.expectEqual(@as(usize, 1), fake.mermaid_revoke_calls);
+    try testing.expect(std.meta.eql(captured.renderer, fake.last_mermaid_revoke.?));
+
+    const bad =
+        "{\"jsonrpc\":\"2.0\",\"id\":22,\"method\":\"maru.file.renderMermaid\",\"params\":{" ++
+        "\"editor_epoch\":0,\"document_revision\":0,\"projection_generation\":2," ++
+        "\"widget_id\":3,\"widget_generation\":4,\"renderer_instance\":5,\"fence_id\":6," ++
+        "\"source_hash\":\"2151a7a6ec2eaff56c93602c3b07382d7bd484e8e572852da1ffe6b874656bd8\"," ++
+        "\"source\":\"```mermaid\\ngraph TD\\n```\"}}";
+    const rejected = try dispatchBridgeWithFileAccess(testing.allocator, bad, "1", fake.access());
+    defer testing.allocator.free(rejected);
+    try testing.expect(std.mem.indexOf(u8, rejected, "-32602") != null);
+    try testing.expectEqual(@as(usize, 1), fake.mermaid_calls);
+
+    const bad_revoke =
+        "{\"jsonrpc\":\"2.0\",\"id\":24,\"method\":\"maru.file.revokeMermaid\",\"params\":{" ++
+        "\"editor_epoch\":7,\"document_revision\":0,\"projection_generation\":2," ++
+        "\"widget_id\":3,\"widget_generation\":4,\"renderer_instance\":0}}";
+    const bad_revoke_response = try dispatchBridgeWithFileAccess(testing.allocator, bad_revoke, "1", fake.access());
+    defer testing.allocator.free(bad_revoke_response);
+    try testing.expect(std.mem.indexOf(u8, bad_revoke_response, "-32602") != null);
+    try testing.expectEqual(@as(usize, 1), fake.mermaid_revoke_calls);
 }
 
 test "dispatchBridge: provider failures are uniform internal errors" {

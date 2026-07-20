@@ -11,8 +11,9 @@ import {
 import { maxMathDelimiterScanCodeUnits } from "../src/markdown-language";
 import { maxRetainedLivePreviewIntents } from "../src/live-preview-interaction";
 import { maxAtomicSourceBytes, maxAtomicProjectionRequests } from "../src/atomic-projection";
+import { maxCachedMermaidEntries, maxCachedMermaidSvgCodeUnits } from "../src/live-preview-editor";
 
-export const livePreviewPerfSchemaVersion = 5;
+export const livePreviewPerfSchemaVersion = 7;
 
 export type LivePreviewPerfCounters = Readonly<{
   visited_code_units: number;
@@ -43,6 +44,18 @@ export type LivePreviewPerfCounters = Readonly<{
   atomic_iframe_create_max_per_frame: number;
   atomic_iframe_destroy_max_per_frame: number;
   atomic_generated_outside_retention: number;
+  mermaid_requests: number;
+  mermaid_worker_hashed_bytes: number;
+  mermaid_cap_plus_one_hashed_bytes: number;
+  mermaid_main_hashed_bytes: number;
+  mermaid_main_received_source_bytes: number;
+  mermaid_native_requests: number;
+  mermaid_native_requests_after_unrelated_edit: number;
+  mermaid_cache_entries_max: number;
+  mermaid_cache_source_bytes_max: number;
+  mermaid_cache_svg_code_units_max: number;
+  mermaid_cache_entries_after_disable: number;
+  mermaid_cache_svg_code_units_after_disable: number;
   intent_events: number;
   intent_cm6_transactions: number;
   intent_external_actions: number;
@@ -80,7 +93,7 @@ export type LivePreviewPerfCounters = Readonly<{
 
 export type LivePreviewPerfArtifact = Readonly<{
   schema_version: typeof livePreviewPerfSchemaVersion;
-  scenario: "fp11e-8mib-1000-editable-projection-atomic-widgets";
+  scenario: "fp11f-8mib-1000-editable-projection-mermaid";
   counters: LivePreviewPerfCounters;
 }>;
 
@@ -113,6 +126,18 @@ const counterNames = [
   "atomic_iframe_create_max_per_frame",
   "atomic_iframe_destroy_max_per_frame",
   "atomic_generated_outside_retention",
+  "mermaid_requests",
+  "mermaid_worker_hashed_bytes",
+  "mermaid_cap_plus_one_hashed_bytes",
+  "mermaid_main_hashed_bytes",
+  "mermaid_main_received_source_bytes",
+  "mermaid_native_requests",
+  "mermaid_native_requests_after_unrelated_edit",
+  "mermaid_cache_entries_max",
+  "mermaid_cache_source_bytes_max",
+  "mermaid_cache_svg_code_units_max",
+  "mermaid_cache_entries_after_disable",
+  "mermaid_cache_svg_code_units_after_disable",
   "intent_events",
   "intent_cm6_transactions",
   "intent_external_actions",
@@ -151,7 +176,7 @@ const counterNames = [
 export function validateLivePreviewPerfArtifact(artifact: LivePreviewPerfArtifact): void {
   if (artifact.schema_version !== livePreviewPerfSchemaVersion)
     throw new Error("live preview perf schema mismatch");
-  if (artifact.scenario !== "fp11e-8mib-1000-editable-projection-atomic-widgets")
+  if (artifact.scenario !== "fp11f-8mib-1000-editable-projection-mermaid")
     throw new Error("live preview perf scenario mismatch");
   const actualNames = Object.keys(artifact.counters).sort();
   const expectedNames = [...counterNames].sort();
@@ -195,8 +220,8 @@ export function validateLivePreviewPerfArtifact(artifact: LivePreviewPerfArtifac
     artifact.counters.iframe_destroy !== 0 ||
     artifact.counters.retained_html_bytes !== 0 ||
     artifact.counters.generated_outside_retention !== 0 ||
-    artifact.counters.atomic_requests !== 3 ||
-    artifact.counters.atomic_results !== 3 ||
+    artifact.counters.atomic_requests !== 4 ||
+    artifact.counters.atomic_results !== 4 ||
     artifact.counters.atomic_asset_grants !== 1 ||
     artifact.counters.atomic_worker_hashed_bytes_max !== maxAtomicSourceBytes["fenced-code"] ||
     artifact.counters.atomic_worker_hashed_bytes_batch_max !==
@@ -210,6 +235,23 @@ export function validateLivePreviewPerfArtifact(artifact: LivePreviewPerfArtifac
     artifact.counters.atomic_iframe_create_max_per_frame !== 2 ||
     artifact.counters.atomic_iframe_destroy_max_per_frame !== 2 ||
     artifact.counters.atomic_generated_outside_retention !== 0 ||
+    artifact.counters.mermaid_requests !== 1 ||
+    artifact.counters.mermaid_worker_hashed_bytes <= 0 ||
+    artifact.counters.mermaid_worker_hashed_bytes > maxAtomicSourceBytes.mermaid ||
+    artifact.counters.mermaid_cap_plus_one_hashed_bytes !== 0 ||
+    artifact.counters.mermaid_main_hashed_bytes !== 0 ||
+    artifact.counters.mermaid_main_received_source_bytes <= 0 ||
+    artifact.counters.mermaid_main_received_source_bytes > maxAtomicSourceBytes.mermaid ||
+    artifact.counters.mermaid_native_requests !== 1 ||
+    artifact.counters.mermaid_native_requests_after_unrelated_edit !== 1 ||
+    artifact.counters.mermaid_cache_entries_max !== 1 ||
+    artifact.counters.mermaid_cache_entries_max > maxCachedMermaidEntries ||
+    artifact.counters.mermaid_cache_source_bytes_max !==
+      artifact.counters.mermaid_main_received_source_bytes ||
+    artifact.counters.mermaid_cache_svg_code_units_max <= 0 ||
+    artifact.counters.mermaid_cache_svg_code_units_max > maxCachedMermaidSvgCodeUnits ||
+    artifact.counters.mermaid_cache_entries_after_disable !== 0 ||
+    artifact.counters.mermaid_cache_svg_code_units_after_disable !== 0 ||
     artifact.counters.intent_events !== 6 ||
     artifact.counters.intent_cm6_transactions !== 1 ||
     artifact.counters.intent_external_actions !== 1 ||
@@ -249,11 +291,11 @@ export function validateLivePreviewPerfArtifact(artifact: LivePreviewPerfArtifac
     artifact.counters.table_group_build_record_checks_max > maxLivePreviewProjectionEntries ||
     artifact.counters.table_group_cell_arrays_created_max !== 1
   ) {
-    throw new Error("FP11e editable projection and atomic widget budget exceeded");
+    throw new Error("FP11f editable projection and Mermaid budget exceeded");
   }
   for (const reason of projectionFallbackReasons) {
     const expected = 0;
     if (artifact.counters.projection_fallback_counts[reason] !== expected)
-      throw new Error("FP11e projection fallback mismatch");
+      throw new Error("FP11f projection fallback mismatch");
   }
 }

@@ -988,8 +988,8 @@ final class MaruBridgeHandler: NSObject, WKScriptMessageHandlerWithReply {
           resolveExternalChange: function (editorEpoch, success) {
             return window.maru.request("maru.file.resolveExternalChange", { editor_epoch: editorEpoch, success: success });
           },
-          openLink: function (href, forceSystem) {
-            return window.maru.request("maru.file.openLink", { href: href, forceSystem: forceSystem });
+          openLink: function (editorEpoch, href, forceSystem) {
+            return window.maru.request("maru.file.openLink", { editor_epoch: editorEpoch, href: href, forceSystem: forceSystem });
           }
         }
       };
@@ -1020,8 +1020,9 @@ final class MaruBridgeHandler: NSObject, WKScriptMessageHandlerWithReply {
                      Number.isSafeInteger(request.editor_epoch) && request.editor_epoch > 0 &&
                      typeof request.success === "boolean") {
             promise = window.maru.file.resolveExternalChange(request.editor_epoch, request.success);
-          } else if (request.method === "openLink" && typeof request.href === "string" && request.href.length <= 4096 && typeof request.forceSystem === "boolean") {
-            promise = window.maru.file.openLink(request.href, request.forceSystem);
+          } else if (request.method === "openLink" && Number.isSafeInteger(request.editor_epoch) && request.editor_epoch > 0 &&
+                     typeof request.href === "string" && request.href.length <= 4096 && typeof request.forceSystem === "boolean") {
+            promise = window.maru.file.openLink(request.editor_epoch, request.href, request.forceSystem);
           } else {
             node.textContent = JSON.stringify({ error: "invalid request" });
             finish(node);

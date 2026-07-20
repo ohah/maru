@@ -19,6 +19,7 @@ import {
   maxAssetBase64Bytes,
   maxAssetRequests,
   viewerChannel,
+  writeLivePreviewIntentQueueMetrics,
 } from "../src/viewer";
 
 describe("file viewer bridge boundary", () => {
@@ -34,6 +35,27 @@ describe("file viewer bridge boundary", () => {
     expect(documentIsDirtyAgainstSnapshot(edited, saved)).toBe(true);
     expect(documentIsDirtyAgainstSnapshot(undoneContentAtNewerRevision, saved)).toBe(false);
     expect(documentIsDirtyAgainstSnapshot(saved, null)).toBe(true);
+  });
+
+  test("publishes the exact queue SSOT snapshot after every coordinator transition", () => {
+    const dom = new JSDOM('<!doctype html><p id="status"></p>');
+    const status = dom.window.document.querySelector<HTMLElement>("#status");
+    if (status === null) throw new Error("missing status fixture");
+    writeLivePreviewIntentQueueMetrics(
+      status,
+      { retained: 0, maxRetained: 8, dropped: 1, completed: 9 },
+      2,
+    );
+    expect(status.dataset).toEqual(
+      expect.objectContaining({
+        liveIntentQueueRetained: "0",
+        liveIntentQueueMaxRetained: "8",
+        liveIntentQueueDropped: "1",
+        liveIntentQueueCompleted: "9",
+        liveIntentBridgeCalls: "2",
+      }),
+    );
+    dom.window.close();
   });
 
   test("close lock acquisition is monotonic and same-request idempotent", () => {
@@ -159,7 +181,7 @@ describe("file viewer bridge boundary", () => {
     await requestFileBridge(
       document,
       "openLink",
-      { href: "../guide/next.md#usage", forceSystem: false },
+      { editor_epoch: 4, href: "../guide/next.md#usage", forceSystem: false },
       100,
     );
     await requestFileBridge(
@@ -178,7 +200,12 @@ describe("file viewer bridge boundary", () => {
       { method: "beginDocument", document_id: 1 },
       { method: "write", editor_epoch: 4, content: "# 저장" },
       { method: "setDirty", dirty: true, editor_epoch: 4, revision: 1, request_id: 0 },
-      { method: "openLink", href: "../guide/next.md#usage", forceSystem: false },
+      {
+        method: "openLink",
+        editor_epoch: 4,
+        href: "../guide/next.md#usage",
+        forceSystem: false,
+      },
       { method: "setDirty", dirty: false, editor_epoch: 4, revision: 7, request_id: 11 },
       { method: "resolveExternalChange", editor_epoch: 4, success: false },
     ]);
@@ -247,6 +274,22 @@ describe("file viewer bridge boundary", () => {
         100,
       ),
     ).rejects.toThrow("invalid resolveExternalChange payload");
+    await expect(
+      requestFileBridge(
+        document,
+        "openLink",
+        { editor_epoch: 0, href: "next.md", forceSystem: false },
+        100,
+      ),
+    ).rejects.toThrow("invalid openLink payload");
+    await expect(
+      requestFileBridge(
+        document,
+        "openLink",
+        { editor_epoch: -1, href: "next.md", forceSystem: false },
+        100,
+      ),
+    ).rejects.toThrow("invalid openLink payload");
 
     expect(requestEvents).toBe(0);
     expect(document.querySelector("[data-maru-file-request]")).toBeNull();
@@ -377,14 +420,22 @@ describe("file viewer bridge boundary", () => {
         '[data-maru-file-request="pending"]',
       );
       if (node === null) return;
-      requests.push(JSON.parse(node.textContent ?? "null"));
-      node.textContent = JSON.stringify({ jsonrpc: "2.0", id: 1, result: { opened: true } });
+      const request = JSON.parse(node.textContent ?? "null") as { method?: string };
+      requests.push(request);
+      const result =
+        request.method === "beginDocument"
+          ? { editor_epoch: 9 }
+          : request.method === "read"
+            ? { content: "" }
+            : { opened: true };
+      node.textContent = JSON.stringify({ jsonrpc: "2.0", id: 1, result });
       node.dataset.maruFileRequest = "done";
       dom.window.document.dispatchEvent(new dom.window.Event("maru:file-response"));
     });
     bootShell(dom.window.document, dom.window as unknown as Window);
     const frame = dom.window.document.querySelector<HTMLIFrameElement>("#renderer");
     expect(frame?.contentWindow).not.toBeNull();
+    for (let turn = 0; turn < 6; turn += 1) await Promise.resolve();
 
     dom.window.dispatchEvent(
       new dom.window.MessageEvent("message", {
@@ -410,9 +461,15 @@ describe("file viewer bridge boundary", () => {
     );
     await Promise.resolve();
 
-    expect(requests).toEqual([
-      { method: "beginDocument", document_id: 1 },
-      { method: "openLink", href: "../guide/next.md#usage", forceSystem: false },
+    expect(
+      requests.filter((request) => (request as { method?: string }).method === "openLink"),
+    ).toEqual([
+      {
+        method: "openLink",
+        editor_epoch: 9,
+        href: "../guide/next.md#usage",
+        forceSystem: false,
+      },
     ]);
   });
 

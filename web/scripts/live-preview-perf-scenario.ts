@@ -11,6 +11,14 @@ import { maxLivePreviewProjectionCodeUnits } from "../src/live-preview-protocol"
 import { startMathDelimiterScanProbe } from "../src/markdown-language";
 import { EditorRevisionClock } from "../src/live-preview-state";
 import type { LivePreviewPerfCounters } from "./live-preview-perf-model";
+import { buildEditableProjection } from "../src/editable-projection";
+import {
+  LivePreviewIntentCoordinator,
+  maxRetainedLivePreviewIntents,
+  type LivePreviewDispatchResult,
+} from "../src/live-preview-interaction";
+import type { EditorInteractionGuard, LivePreviewIntent } from "../src/live-preview-intent";
+import { isLinkActivation, requestFileBridge, viewerChannel } from "../src/viewer";
 
 type CopyProbe = Readonly<{ stop: () => number }>;
 
@@ -69,6 +77,244 @@ function installDom(dom: JSDOM): () => void {
     }
     dom.window.close();
   };
+}
+
+async function runInteractionProbe(dom: JSDOM): Promise<
+  Readonly<{
+    intent_events: number;
+    intent_cm6_transactions: number;
+    intent_external_actions: number;
+    intent_dual_effects: number;
+    intent_zero_effect_rejections: number;
+    intent_range_checks: number;
+    intent_queue_capacity: number;
+    intent_queue_max_retained: number;
+    intent_queue_dropped: number;
+    intent_bridge_calls: number;
+  }>
+> {
+  const host = dom.window.document.createElement("aside");
+  dom.window.document.body.append(host);
+  const revisions = new EditorRevisionClock();
+  let controller: EditableProjectionController | null = null;
+  const editor = createMarkdownEditor(
+    host,
+    "- [ ] task\n\n[label](next.md)",
+    (update) => {
+      if (update.docChanged) revisions.documentChanged();
+      controller?.handleUpdate(update);
+    },
+    () => {},
+  );
+  try {
+    controller = new EditableProjectionController(editor, 1, revisions);
+    controller.enable();
+    const projectedLink = editor.dom.querySelector(".maru-projection-link");
+    if (projectedLink === null) throw new Error("live preview interaction DOM target missing");
+    projectedLink.dispatchEvent(
+      new dom.window.MouseEvent("mousedown", { bubbles: true, button: 0, metaKey: true }),
+    );
+    const interactionRangeChecks = controller.metrics().interactionRangeChecks;
+    if (interactionRangeChecks <= 0)
+      throw new Error("live preview interaction DOM resolver was bypassed");
+
+    const entries = buildEditableProjection(editor.state, {
+      from: 0,
+      to: editor.state.doc.length,
+    }).entries;
+    const task = entries.find((entry) => entry.type === "task");
+    const link = entries.find((entry) => entry.type === "link");
+    if (task?.type !== "task" || link?.type !== "link")
+      throw new Error("live preview interaction perf projection missing");
+    const identity = controller.interactionIdentity();
+    const guard: EditorInteractionGuard = {
+      ...identity,
+      mode: "live-preview",
+      closeLockRequestId: null,
+      composing: false,
+      readonly: false,
+    };
+    const taskIntent: LivePreviewIntent = {
+      type: "toggle-task",
+      ...identity,
+      from: task.from,
+      to: task.to,
+      trusted: true,
+      input: "pointer",
+      gestureNonce: null,
+    };
+    const linkIntent: LivePreviewIntent = {
+      type: "activate-link",
+      ...identity,
+      from: link.from,
+      to: link.to,
+      trusted: true,
+      disposition: "command-pointer",
+      gestureNonce: 1,
+    };
+    const staleIntent: LivePreviewIntent = { ...taskIntent, documentRevision: 1 };
+    const composingIntent: LivePreviewIntent = { ...taskIntent };
+    const untrustedIntent: LivePreviewIntent = { ...taskIntent, trusted: false };
+    const results: LivePreviewDispatchResult[] = [];
+    let bridgeCalls = 0;
+    let pendingBridgeNode: HTMLElement | null = null;
+    let stallBridge = false;
+    const bridgeListener = () => {
+      bridgeCalls += 1;
+      pendingBridgeNode = dom.window.document.querySelector<HTMLElement>(
+        '[data-maru-file-request="pending"]',
+      );
+      if (pendingBridgeNode === null || stallBridge) return;
+      pendingBridgeNode.textContent = JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        result: { opened: true },
+      });
+      pendingBridgeNode.dataset.maruFileRequest = "done";
+      dom.window.document.dispatchEvent(new dom.window.Event("maru:file-response"));
+    };
+    dom.window.document.addEventListener("maru:file-request", bridgeListener);
+    let documentQueue = Promise.resolve();
+    const scheduleDocumentOperation = <T>(operation: () => T): Promise<T> => {
+      const scheduled = documentQueue.then(operation);
+      documentQueue = scheduled.then(
+        () => undefined,
+        () => undefined,
+      );
+      return scheduled;
+    };
+    const hrefAllowed = (href: string) =>
+      isLinkActivation({
+        channel: viewerChannel,
+        type: "link-activate",
+        href,
+        forceSystem: false,
+      });
+    const coordinator = new LivePreviewIntentCoordinator({
+      scheduleDocumentOperation,
+      currentContext: (intent) => ({
+        view: editor,
+        guard: intent === composingIntent ? { ...guard, composing: true } : guard,
+        currentEntry: controller?.entryForIntent(intent) ?? null,
+      }),
+      hrefAllowed,
+      openExternalAction: async (intent, action) => {
+        await requestFileBridge(
+          dom.window.document,
+          "openLink",
+          {
+            editor_epoch: intent.editorEpoch,
+            href: action.href,
+            forceSystem: action.forceSystem,
+          },
+          1_000,
+        );
+      },
+      onDispatch: (dispatch) => results.push(dispatch),
+    });
+    try {
+      for (const intent of [
+        linkIntent,
+        linkIntent,
+        staleIntent,
+        composingIntent,
+        untrustedIntent,
+        taskIntent,
+      ]) {
+        if (!coordinator.enqueue(intent))
+          throw new Error("live preview product coordinator rejected a baseline intent");
+      }
+      for (let turn = 0; turn < 20 && coordinator.metrics().completed < 6; turn += 1)
+        await Promise.resolve();
+      if (results.length !== 6 || bridgeCalls !== 1)
+        throw new Error("live preview product coordinator path was bypassed");
+
+      stallBridge = true;
+      const burstIdentity = controller.interactionIdentity();
+      const burstLinkIntent: LivePreviewIntent = {
+        ...linkIntent,
+        ...burstIdentity,
+        gestureNonce: 10,
+      };
+      const burstCoordinator = new LivePreviewIntentCoordinator({
+        scheduleDocumentOperation,
+        currentContext: (intent) => ({
+          view: editor,
+          guard: {
+            ...burstIdentity,
+            mode: "live-preview",
+            closeLockRequestId: null,
+            composing: false,
+            readonly: false,
+          },
+          currentEntry: controller?.entryForIntent(intent) ?? null,
+        }),
+        hrefAllowed,
+        openExternalAction: async (intent, action) => {
+          await requestFileBridge(
+            dom.window.document,
+            "openLink",
+            {
+              editor_epoch: intent.editorEpoch,
+              href: action.href,
+              forceSystem: action.forceSystem,
+            },
+            1_000,
+          );
+        },
+      });
+      for (let index = 0; index < maxRetainedLivePreviewIntents; index += 1)
+        if (!burstCoordinator.enqueue({ ...burstLinkIntent, gestureNonce: index + 10 }))
+          throw new Error("live preview bounded queue rejected an in-cap intent");
+      if (burstCoordinator.enqueue({ ...burstLinkIntent, gestureNonce: 99 }))
+        throw new Error("live preview bounded queue admitted cap+1");
+      const saturated = burstCoordinator.metrics();
+      for (let turn = 0; turn < 8 && bridgeCalls < 2; turn += 1) await Promise.resolve();
+      if (pendingBridgeNode === null || bridgeCalls !== 2)
+        throw new Error("live preview perf bridge path was bypassed");
+      burstCoordinator.clearPending();
+      pendingBridgeNode.textContent = JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        result: { ok: true },
+      });
+      pendingBridgeNode.dataset.maruFileRequest = "done";
+      dom.window.document.dispatchEvent(new dom.window.Event("maru:file-response"));
+      for (let turn = 0; turn < 4; turn += 1) await Promise.resolve();
+      burstCoordinator.destroy();
+      return {
+        intent_events: results.length,
+        intent_cm6_transactions: results.reduce((sum, result) => sum + result.cm6Transactions, 0),
+        intent_external_actions: results.reduce((sum, result) => sum + result.externalActions, 0),
+        intent_dual_effects: results.reduce(
+          (sum, result) => sum + Number(result.cm6Transactions > 0 && result.externalActions > 0),
+          0,
+        ),
+        intent_zero_effect_rejections: results.reduce(
+          (sum, result) =>
+            sum +
+            Number(
+              result.result.type !== "committed" &&
+                result.cm6Transactions === 0 &&
+                result.externalActions === 0,
+            ),
+          0,
+        ),
+        intent_range_checks: controller.metrics().interactionRangeChecks,
+        intent_queue_capacity: maxRetainedLivePreviewIntents,
+        intent_queue_max_retained: saturated.maxRetained,
+        intent_queue_dropped: saturated.dropped,
+        intent_bridge_calls: bridgeCalls,
+      };
+    } finally {
+      coordinator.destroy();
+      dom.window.document.removeEventListener("maru:file-request", bridgeListener);
+    }
+  } finally {
+    controller?.destroy();
+    editor.destroy();
+    host.remove();
+  }
 }
 
 export async function runLivePreviewBaselineScenario(): Promise<LivePreviewPerfCounters> {
@@ -134,6 +380,7 @@ export async function runLivePreviewBaselineScenario(): Promise<LivePreviewPerfC
   denseEditor.destroy();
   denseHost.remove();
   const denseMathScannedCodeUnits = denseMathProbe.stop();
+  const interactionCounters = await runInteractionProbe(dom);
 
   const mathScanProbe = startMathDelimiterScanProbe();
   const editor = createMarkdownEditor(
@@ -196,6 +443,7 @@ export async function runLivePreviewBaselineScenario(): Promise<LivePreviewPerfC
     iframe_destroy: iframeDestroy,
     retained_html_bytes: 0,
     generated_outside_retention: 0,
+    ...interactionCounters,
     projection_fallback_counts: Object.fromEntries(
       projectionFallbackReasons.map((reason) => [reason, measuredFallbackCounts[reason]]),
     ),

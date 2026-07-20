@@ -2050,9 +2050,9 @@ const FileBridgeContext = struct {
         return self.session.completeFileConflictReloadForDocument(self.surface_id, editor_epoch, success);
     }
 
-    fn openLink(raw: *anyopaque, href: []const u8, force_system: bool) anyerror!void {
+    fn openLink(raw: *anyopaque, editor_epoch: u64, href: []const u8, force_system: bool) anyerror!void {
         const self: *FileBridgeContext = @ptrCast(@alignCast(raw));
-        return self.session.openFilePanelLink(self.surface_id, href, force_system);
+        return self.session.openFilePanelDocumentLink(self.surface_id, editor_epoch, href, force_system);
     }
 };
 

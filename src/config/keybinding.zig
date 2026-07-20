@@ -488,6 +488,7 @@ fn isWebEditorDefault(chord: KeyChord) bool {
             'A', 'C', 'F', 'S', 'V', 'X', 'Z' => true,
             else => false,
         },
+        .enter => !chord.modifiers.shift,
         .backspace, .delete, .arrow_left, .arrow_right, .arrow_up, .arrow_down, .home, .end => true,
         else => false,
     };
@@ -809,9 +810,12 @@ test "web context gives editable defaults to WebKit after user override and unbi
     const save = terminal.KeyEvent{ .key = .{ .char = 's' }, .modifiers = .{ .command = true } };
     const find = terminal.KeyEvent{ .key = .{ .char = 'f' }, .modifiers = .{ .command = true } };
     const close = terminal.KeyEvent{ .key = .{ .char = 'w' }, .modifiers = .{ .command = true } };
+    const activate = terminal.KeyEvent{ .key = .enter, .modifiers = .{ .command = true } };
     const defaults: KeyBindingResolver = .{};
     try std.testing.expectEqual(WebKeyRoute.web_editor, defaults.resolveWeb(save, true));
     try std.testing.expectEqual(WebKeyRoute.web_editor, defaults.resolveWeb(find, true));
+    try std.testing.expectEqual(WebKeyRoute.web_editor, defaults.resolveWeb(activate, true));
+    try std.testing.expectEqual(WebKeyRoute.pass_through, defaults.resolveWeb(activate, false));
     try std.testing.expectEqual(WebKeyRoute.app_action, defaults.resolveWeb(close, true));
     try std.testing.expectEqual(WebKeyRoute.app_action, defaults.resolveWeb(find, false));
 
@@ -822,6 +826,13 @@ test "web context gives editable defaults to WebKit after user override and unbi
     try std.testing.expectEqual(WebKeyRoute.consume_unbound, unbound.resolveWeb(save, true));
     const macro: KeyBindingResolver = .{ .terminal_bindings = &.{.{ .chord = try KeyChord.parse("Cmd+S"), .input = .{ .send_text = "leak" } }} };
     try std.testing.expectEqual(WebKeyRoute.consume_unbound, macro.resolveWeb(save, true));
+
+    const activate_rebound: KeyBindingResolver = .{ .app_bindings = &.{.{ .chord = try KeyChord.parse("Cmd+Enter"), .action = .new_tab }} };
+    try std.testing.expectEqual(WebKeyRoute.app_action, activate_rebound.resolveWeb(activate, true));
+    const activate_unbound: KeyBindingResolver = .{ .unbinds = &.{try KeyChord.parse("Cmd+Enter")} };
+    try std.testing.expectEqual(WebKeyRoute.consume_unbound, activate_unbound.resolveWeb(activate, true));
+    const activate_macro: KeyBindingResolver = .{ .terminal_bindings = &.{.{ .chord = try KeyChord.parse("Cmd+Enter"), .input = .{ .send_text = "leak" } }} };
+    try std.testing.expectEqual(WebKeyRoute.consume_unbound, activate_macro.resolveWeb(activate, true));
 }
 
 test "web context keeps terminal navigation defaults inside an editable WebView" {

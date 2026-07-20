@@ -8,7 +8,7 @@ export type BeginDocumentRequest = { document_id: number };
 export type ReadRequest = { editor_epoch: number };
 export type WriteRequest = { editor_epoch: number; content: string };
 export type ResolveExternalChangeRequest = { editor_epoch: number; success: boolean };
-export type OpenLinkRequest = { href: string; forceSystem: boolean };
+export type OpenLinkRequest = { editor_epoch: number; href: string; forceSystem: boolean };
 
 export type FileBridgeRequest =
   | ({ method: "read" } & ReadRequest)
@@ -52,6 +52,7 @@ export function encodeFileBridgeRequest(request: FileBridgeRequest): Record<stri
     case "openLink":
       return {
         method: request.method,
+        editor_epoch: request.editor_epoch,
         href: request.href,
         forceSystem: request.forceSystem,
       };

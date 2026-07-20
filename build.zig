@@ -661,7 +661,7 @@ pub fn build(b: *std.Build) void {
         });
 
         const macos_mermaid_product_symbol_check = b.addSystemCommand(&.{
-            "sh", "-eu", "-c", "if nm -gU \"$1\" | rg -q 'maru_macos_mermaid_test_reset'; then echo 'error: smoke reset leaked into product ABI' >&2; exit 1; fi", "sh",
+            "sh", "-eu", "-c", "if nm -gU \"$1\" | /usr/bin/grep -q 'maru_macos_mermaid_test_reset'; then echo 'error: smoke reset leaked into product ABI' >&2; exit 1; fi", "sh",
         });
         macos_mermaid_product_symbol_check.addFileArg(macos_app_host_abi_lib.getEmittedBin());
 

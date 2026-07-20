@@ -829,11 +829,17 @@ struct MermaidHelperSmoke {
         ]
         perf.shutdown()
 
-        let passed = checks.values.compactMap { $0 as? Bool }.allSatisfy { $0 }
+        let failedChecks = checks.compactMap { key, value -> String? in
+            guard let boolean = value as? Bool, !boolean else { return nil }
+            return key
+        }.sorted()
+        let passed = failedChecks.isEmpty
         checks["passed"] = passed
         writeSummary(checks)
         writePerformance(performance)
-        if !passed { fail("one or more Mermaid helper smoke checks failed") }
+        if !passed {
+            fail("Mermaid helper smoke checks failed: \(failedChecks.joined(separator: ", "))")
+        }
     }
 
     private static func replyRenderer(seed: UInt64) -> MaruMermaidRendererCapability {

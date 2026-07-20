@@ -45,7 +45,18 @@ export type ProjectionEntry =
         destinationFrom: number;
         destinationTo: number;
       }>)
-  | (SourceRange & Readonly<{ type: "table-cell"; row: number; column: number }>)
+  | (SourceRange &
+      Readonly<{
+        type: "table-cell";
+        tableFrom: number;
+        tableTo: number;
+        appendPrefixFrom: number;
+        appendPrefixTo: number;
+        row: number;
+        column: number;
+        rowCount: number;
+        columnCount: number;
+      }>)
   | (SourceRange & Readonly<{ type: "atomic"; role: AtomicRole }>);
 
 function compareNumber(left: number, right: number): number {
@@ -78,7 +89,16 @@ export function compareProjectionEntries(left: ProjectionEntry, right: Projectio
     }
     case "table-cell": {
       const candidate = right as typeof left;
-      return compareNumber(left.row, candidate.row) || compareNumber(left.column, candidate.column);
+      return (
+        compareNumber(left.tableFrom, candidate.tableFrom) ||
+        compareNumber(left.tableTo, candidate.tableTo) ||
+        compareNumber(left.appendPrefixFrom, candidate.appendPrefixFrom) ||
+        compareNumber(left.appendPrefixTo, candidate.appendPrefixTo) ||
+        compareNumber(left.row, candidate.row) ||
+        compareNumber(left.column, candidate.column) ||
+        compareNumber(left.rowCount, candidate.rowCount) ||
+        compareNumber(left.columnCount, candidate.columnCount)
+      );
     }
   }
 }

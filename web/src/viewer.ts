@@ -692,6 +692,7 @@ export function bootShell(document: Document, targetWindow: Window): void {
     currentContext: (intent) => {
       if (editor === null || editorEpoch === null || livePreviewController === null) return null;
       const projectionIdentity = livePreviewController.interactionIdentity();
+      const interaction = livePreviewController.interactionContextForIntent(intent);
       return {
         view: editor,
         guard: {
@@ -703,7 +704,8 @@ export function bootShell(document: Document, targetWindow: Window): void {
           composing: editor.composing,
           readonly: mode !== "live-preview" || editor.contentDOM.contentEditable === "false",
         },
-        currentEntry: livePreviewController.entryForIntent(intent),
+        currentEntry: interaction.currentEntry,
+        currentTableCells: interaction.currentTableCells,
       };
     },
     hrefAllowed: (href) =>

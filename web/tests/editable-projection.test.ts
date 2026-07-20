@@ -157,7 +157,24 @@ describe("CM6 editable Markdown projection", () => {
       "- [x] done\n\n| A | B |\n| - | - |\n| c | d |\n\n$inline$\n\n$$\nblock math\n$$\n\n![alt](image.png)\n\n```mermaid\ngraph TD\n```\n\nplain";
     const result = project(source);
     expect(hasEntry(result.entries, { type: "task", checked: true })).toBe(true);
-    expect(result.entries.filter(({ type }) => type === "table-cell")).toHaveLength(4);
+    const tableCells = result.entries.filter(({ type }) => type === "table-cell");
+    expect(tableCells).toHaveLength(4);
+    expect(tableCells).toEqual([
+      expect.objectContaining({
+        type: "table-cell",
+        row: 0,
+        column: 0,
+        rowCount: 2,
+        columnCount: 2,
+      }),
+      expect.objectContaining({ type: "table-cell", row: 0, column: 1 }),
+      expect.objectContaining({ type: "table-cell", row: 1, column: 0 }),
+      expect.objectContaining({ type: "table-cell", row: 1, column: 1 }),
+    ]);
+    expect(new Set(tableCells.map(({ tableFrom }) => tableFrom))).toEqual(new Set([12]));
+    expect(new Set(tableCells.map(({ tableTo }) => tableTo))).toEqual(
+      new Set([source.indexOf("\n\n$inline$")]),
+    );
     expect(hasEntry(result.entries, { type: "atomic", role: "image" })).toBe(true);
     expect(
       result.entries.filter(({ type, role }) => type === "atomic" && role === "math"),
@@ -229,6 +246,61 @@ describe("CM6 editable Markdown projection", () => {
     expect(over.entries.filter(({ type }) => type === "table-cell")).toHaveLength(0);
     expect(over.fallbackCounts["table-limit"]).toBe(1);
     expect(over.activeSourceRanges).toEqual([{ from: 0, to: source.length }]);
+  });
+
+  test("derives empty and escaped cells from syntax delimiters and rejects ragged geometry", () => {
+    const exactSource = "| A | B |\n| - | - |\n|   | c\\|d |";
+    const exact = project(exactSource);
+    const exactCells = exact.entries.filter(({ type }) => type === "table-cell");
+    expect(exactCells).toHaveLength(4);
+    expect(exactCells[2]).toEqual(
+      expect.objectContaining({
+        type: "table-cell",
+        row: 1,
+        column: 0,
+        from: exactSource.indexOf("|   |") + 1,
+        to: exactSource.indexOf("|   |") + 4,
+      }),
+    );
+    expect(exactCells[3]).toEqual(
+      expect.objectContaining({
+        type: "table-cell",
+        row: 1,
+        column: 1,
+        from: exactSource.indexOf("c\\|d") - 1,
+        to: exactSource.indexOf("c\\|d") + 5,
+      }),
+    );
+    expect(exact.fallbackCounts["ambiguous-syntax"]).toBe(0);
+
+    const raggedSource = "| A | B |\n| - | - |\n| only-one |";
+    const ragged = project(raggedSource);
+    expect(ragged.entries.filter(({ type }) => type === "table-cell")).toHaveLength(0);
+    expect(ragged.fallbackCounts["ambiguous-syntax"]).toBe(1);
+    expect(ragged.activeSourceRanges).toEqual([{ from: 0, to: raggedSource.length }]);
+  });
+
+  test("projects all four valid GFM outer-pipe forms into the same rectangular geometry", () => {
+    for (const source of [
+      "| A | B |\n| --- | --- |\n| c | d |",
+      "| A | B\n| --- | ---\n| c | d",
+      "A | B |\n--- | --- |\nc | d |",
+      "A | B\n--- | ---\nc | d",
+    ]) {
+      const result = project(source);
+      const cells = result.entries.filter(({ type }) => type === "table-cell");
+      expect(cells).toHaveLength(4);
+      expect(cells.map(({ row, column }) => [row, column])).toEqual([
+        [0, 0],
+        [0, 1],
+        [1, 0],
+        [1, 1],
+      ]);
+      expect(cells.every(({ rowCount, columnCount }) => rowCount === 2 && columnCount === 2)).toBe(
+        true,
+      );
+      expect(result.fallbackCounts["ambiguous-syntax"]).toBe(0);
+    }
   });
 
   test("finds a syntax owner across many cursors with logarithmic selection checks", () => {
@@ -353,6 +425,112 @@ describe("CM6 editable Markdown projection", () => {
         const before = controller.metrics().projectionTransactions;
         editor.dispatch({ selection: editor.state.selection });
         expect(controller.metrics().projectionTransactions).toBe(before);
+      } finally {
+        controller.destroy();
+        controller = null;
+        editor.destroy();
+      }
+    });
+  });
+
+  test("reuses table groups for selection-only projection and rebuilds once after a document change", () => {
+    withEditorDom((dom) => {
+      const revisions = new EditorRevisionClock();
+      const source = "| A | B |\n| - | - |\n| c | d |";
+      const editor = createMarkdownEditor(
+        dom.window.document.querySelector("main") as HTMLElement,
+        source,
+        (update) => {
+          if (update.docChanged) revisions.documentChanged();
+          controller?.handleUpdate(update);
+        },
+        () => {},
+      );
+      let controller: EditableProjectionController | null = new EditableProjectionController(
+        editor,
+        1,
+        revisions,
+      );
+      try {
+        editor.dispatch({ selection: EditorSelection.cursor(source.indexOf("A")) });
+        controller.enable();
+        const initial = controller.metrics();
+        expect(initial.tableCellRecordCount).toBe(4);
+
+        editor.dispatch({ selection: EditorSelection.cursor(source.indexOf("B")) });
+        const selectionOnly = controller.metrics();
+        expect(selectionOnly.diffedDecorations - initial.diffedDecorations).toBe(
+          initial.projectionRecordCount,
+        );
+        expect(selectionOnly.tableGroupBuildRecordChecks).toBe(initial.tableGroupBuildRecordChecks);
+        expect(selectionOnly.tableGroupCellArraysCreated).toBe(initial.tableGroupCellArraysCreated);
+
+        editor.dispatch({
+          changes: { from: source.lastIndexOf("d"), to: source.lastIndexOf("d") + 1, insert: "e" },
+        });
+        const changed = controller.metrics();
+        expect(changed.tableGroupBuildRecordChecks).toBeGreaterThan(
+          selectionOnly.tableGroupBuildRecordChecks,
+        );
+        expect(changed.tableGroupCellArraysCreated).toBe(
+          selectionOnly.tableGroupCellArraysCreated + 1,
+        );
+
+        editor.contentDOM.dispatchEvent(new dom.window.CompositionEvent("compositionstart"));
+        const beforeComposition = controller.metrics();
+        editor.dispatch({
+          changes: { from: source.lastIndexOf("d"), to: source.lastIndexOf("d") + 1, insert: "f" },
+          annotations: Transaction.userEvent.of("input.type.compose"),
+        });
+        const duringComposition = controller.metrics();
+        expect(duringComposition.visitedSyntaxNodes).toBe(beforeComposition.visitedSyntaxNodes);
+        expect(duringComposition.tableGroupBuildRecordChecks).toBeGreaterThan(
+          beforeComposition.tableGroupBuildRecordChecks,
+        );
+        expect(duringComposition.tableGroupCellArraysCreated).toBe(
+          beforeComposition.tableGroupCellArraysCreated + 1,
+        );
+        expect(
+          controller.tableKeyCapture({
+            key: "Tab",
+            metaKey: false,
+            ctrlKey: false,
+            altKey: false,
+            shiftKey: false,
+            trusted: true,
+            composing: false,
+            repeat: false,
+          }).owned,
+        ).toBeTrue();
+
+        editor.contentDOM.dispatchEvent(new dom.window.CompositionEvent("compositionend"));
+        const afterComposition = controller.metrics();
+        expect(afterComposition.visitedSyntaxNodes).toBeGreaterThan(
+          beforeComposition.visitedSyntaxNodes,
+        );
+        expect(afterComposition.tableGroupBuildRecordChecks).toBe(
+          duringComposition.tableGroupBuildRecordChecks,
+        );
+        expect(afterComposition.tableGroupCellArraysCreated).toBe(
+          duringComposition.tableGroupCellArraysCreated,
+        );
+
+        controller.disable();
+        expect(controller.metrics()).toEqual(
+          expect.objectContaining({ projectionRecordCount: 0, tableCellRecordCount: 0 }),
+        );
+        expect(
+          controller.tableKeyCapture({
+            key: "Tab",
+            metaKey: false,
+            ctrlKey: false,
+            altKey: false,
+            shiftKey: false,
+            trusted: true,
+            composing: false,
+            repeat: false,
+          }),
+        ).toEqual({ owned: false, intent: null });
       } finally {
         controller.destroy();
         controller = null;

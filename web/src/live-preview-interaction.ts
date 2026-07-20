@@ -7,6 +7,8 @@ import {
   type LivePreviewIntent,
 } from "./live-preview-intent";
 import type { ProjectionEntry } from "./live-preview-projection";
+import { maxLivePreviewTableCells, projectionEntriesEqual } from "./live-preview-projection";
+import { maxLivePreviewProjectionCodeUnits } from "./live-preview-protocol";
 
 export const maxRetainedLivePreviewIntents = 8;
 
@@ -140,7 +142,10 @@ export type LivePreviewIntentContext = Readonly<{
   view: EditorView;
   guard: EditorInteractionGuard;
   currentEntry: ProjectionEntry | null;
+  currentTableCells: readonly TableCellProjection[];
 }>;
+
+export type TableCellProjection = Extract<ProjectionEntry, { type: "table-cell" }>;
 
 export type LivePreviewIntentCoordinatorOptions = Readonly<{
   scheduleDocumentOperation: <T>(operation: () => T) => Promise<T>;
@@ -173,6 +178,7 @@ export class LivePreviewIntentCoordinator {
             context.currentEntry,
             this.gestureNonces,
             this.options.hrefAllowed,
+            context.currentTableCells,
           );
           this.options.onDispatch?.(result);
           return result;
@@ -242,6 +248,101 @@ function entryOwnsIntent(entry: ProjectionEntry | null, intent: LivePreviewInten
   }
 }
 
+function validatedTableCellIndex(
+  view: EditorView,
+  currentEntry: ProjectionEntry | null,
+  cells: readonly TableCellProjection[],
+): number | null {
+  if (
+    currentEntry?.type !== "table-cell" ||
+    cells.length === 0 ||
+    cells.length > maxLivePreviewTableCells ||
+    currentEntry.tableFrom < 0 ||
+    currentEntry.tableFrom >= currentEntry.tableTo ||
+    currentEntry.tableTo > view.state.doc.length ||
+    currentEntry.tableTo - currentEntry.tableFrom > maxLivePreviewProjectionCodeUnits ||
+    currentEntry.appendPrefixFrom < 0 ||
+    currentEntry.appendPrefixFrom > currentEntry.appendPrefixTo ||
+    currentEntry.appendPrefixTo > currentEntry.tableTo ||
+    currentEntry.rowCount <= 0 ||
+    currentEntry.columnCount <= 0 ||
+    !Number.isSafeInteger(currentEntry.rowCount) ||
+    !Number.isSafeInteger(currentEntry.columnCount) ||
+    currentEntry.rowCount * currentEntry.columnCount !== cells.length ||
+    view.state.selection.ranges.length !== 1
+  ) {
+    return null;
+  }
+  const head = view.state.selection.main.head;
+  if (head < currentEntry.from || head > currentEntry.to) return null;
+
+  for (let index = 0; index < cells.length; index += 1) {
+    const cell = cells[index];
+    if (
+      cell === undefined ||
+      cell.tableFrom !== currentEntry.tableFrom ||
+      cell.tableTo !== currentEntry.tableTo ||
+      cell.appendPrefixFrom !== currentEntry.appendPrefixFrom ||
+      cell.appendPrefixTo !== currentEntry.appendPrefixTo ||
+      cell.rowCount !== currentEntry.rowCount ||
+      cell.columnCount !== currentEntry.columnCount ||
+      cell.row !== Math.floor(index / currentEntry.columnCount) ||
+      cell.column !== index % currentEntry.columnCount ||
+      cell.from < cell.tableFrom ||
+      cell.from > cell.to ||
+      cell.to > cell.tableTo
+    ) {
+      return null;
+    }
+  }
+  const index = currentEntry.row * currentEntry.columnCount + currentEntry.column;
+  const indexed = cells[index];
+  return indexed !== undefined && projectionEntriesEqual(indexed, currentEntry) ? index : null;
+}
+
+function appendEmptyTableRow(
+  view: EditorView,
+  current: TableCellProjection,
+  targetColumn: number,
+): LivePreviewDispatchResult {
+  if (
+    current.row !== current.rowCount - 1 ||
+    targetColumn < 0 ||
+    targetColumn >= current.columnCount ||
+    (current.rowCount + 1) * current.columnCount > maxLivePreviewTableCells
+  ) {
+    return noEffect({ type: "rejected", reason: "invalid-intent" });
+  }
+  // Only the new row receives canonical spacing. Existing pipes, alignment markers, and whitespace are never
+  // rewritten, so entering live preview and table navigation are byte-preserving until this explicit edit.
+  const emptyCell = "   ";
+  const prefixLength = current.appendPrefixTo - current.appendPrefixFrom;
+  const rowLength = current.columnCount * (emptyCell.length + 1) + 1;
+  const insertedLength = 1 + prefixLength + rowLength;
+  if (
+    !Number.isSafeInteger(insertedLength) ||
+    current.tableTo - current.tableFrom + insertedLength > maxLivePreviewProjectionCodeUnits
+  )
+    return noEffect({ type: "rejected", reason: "invalid-intent" });
+  const prefix = view.state.sliceDoc(current.appendPrefixFrom, current.appendPrefixTo);
+  if (prefix.length !== prefixLength || /[\r\n]/.test(prefix))
+    return noEffect({ type: "rejected", reason: "invalid-intent" });
+  const inserted = `\n${prefix}|${Array.from({ length: current.columnCount }, () => emptyCell).join("|")}|`;
+  const rowFrom = current.tableTo + 1 + prefixLength;
+  const selection = rowFrom + 2 + targetColumn * (emptyCell.length + 1);
+  view.dispatch({
+    changes: { from: current.tableTo, insert: inserted },
+    selection: EditorSelection.cursor(selection),
+    annotations: Transaction.userEvent.of("input"),
+  });
+  return {
+    result: { type: "committed" },
+    externalAction: null,
+    cm6Transactions: 1,
+    externalActions: 0,
+  };
+}
+
 /**
  * Revalidates one closed intent against the current CM6 state and commits either one CM6 transaction or one
  * external action. It never performs both, so save/close can serialize the returned action in their own queue.
@@ -253,6 +354,7 @@ export function dispatchLivePreviewIntent(
   currentEntry: ProjectionEntry | null,
   gestureNonces: GestureNonceLedger,
   hrefAllowed: (href: string) => boolean,
+  currentTableCells: readonly TableCellProjection[],
 ): LivePreviewDispatchResult {
   const rejection = interactionGuardRejection(
     intent,
@@ -331,8 +433,43 @@ export function dispatchLivePreviewIntent(
         cm6Transactions: 1,
         externalActions: 0,
       };
-    case "move-table-cell":
-    case "append-table-row":
-      return noEffect({ type: "rejected", reason: "invalid-intent" });
+    case "move-table-cell": {
+      const index = validatedTableCellIndex(view, currentEntry, currentTableCells);
+      if (index === null || currentEntry?.type !== "table-cell")
+        return noEffect({ type: "rejected", reason: "invalid-intent" });
+      let targetIndex: number;
+      switch (intent.direction) {
+        case "forward":
+          if (index === currentTableCells.length - 1)
+            return appendEmptyTableRow(view, currentEntry, 0);
+          targetIndex = index + 1;
+          break;
+        case "backward":
+          if (index === 0)
+            return noEffect({ type: "consumed-no-change", reason: "invalid-intent" });
+          targetIndex = index - 1;
+          break;
+        case "down":
+          targetIndex = index + currentEntry.columnCount;
+          if (targetIndex >= currentTableCells.length)
+            return noEffect({ type: "rejected", reason: "invalid-intent" });
+          break;
+      }
+      const target = currentTableCells[targetIndex];
+      if (target === undefined) return noEffect({ type: "rejected", reason: "invalid-intent" });
+      view.dispatch({ selection: EditorSelection.cursor(target.from) });
+      return {
+        result: { type: "committed" },
+        externalAction: null,
+        cm6Transactions: 1,
+        externalActions: 0,
+      };
+    }
+    case "append-table-row": {
+      const index = validatedTableCellIndex(view, currentEntry, currentTableCells);
+      if (index === null || currentEntry?.type !== "table-cell")
+        return noEffect({ type: "rejected", reason: "invalid-intent" });
+      return appendEmptyTableRow(view, currentEntry, currentEntry.column);
+    }
   }
 }

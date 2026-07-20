@@ -127,7 +127,8 @@ restore의 단일 출처는 [Workspace Restore 전략](workspace-restore.md)이�
 
 - 저장 모델의 **권위 출처**를 바꾼다. 현재 `saveWorkspace`/`restoreWorkspace`는 이미 멀티 창을 창별 per-session `Model` 블록(`maru.workspace.v1`)으로 저장·복원한다(첫 블록 primary + 나머지 블록마다 새 창) — 즉 멀티 창 저장은 stale 미구현이 아니라 현재형이다. **정정(drift)**: M1/M2는 배치 권위를 아직 올리지 **않았다** — `WindowGraph`(M1)·registry generic(M2a)은 순수 L2 골격 + 헤드리스 테스트만이고 production 라이브 트리(per-window `AppSession`)가 여전히 배치 권위다. **§8A.6 설계 결정**: `WindowGraph`는 **라이브 미러가 아니라** (1) 순수 move 알고리즘/테스트 오라클 + (2) 직렬화 포맷이고, 라이브 배치 권위는 per-window 트리로 유지한다. **M3e 정정(사용자 리뷰 — v2 하드 브레이크 기각·과설계)**: cross-window 이동 배치는 **이미 v1으로 재시작 후 유지된다**(각 세션이 자기 라이브 트리를 창별 블록으로 저장·복원 — M3 핵심 목표 충족). 유일한 유용 델타인 **활성(key) 창 보존**만 `maru.workspace.v1`에 **옵션 additive 필드 `active-window`**로 더한다(헤더 bump 없음·`window_id`/`window_kind` 없음 — dead 필드라 미도입). `group-collapsed`와 동일한 옵션-키 패턴(false=writer 생략=round-trip 고정점, reader 없으면 기본값, 옛 리더 미지 키 skip)이라 **완전 하위호환**: 옛 파일은 마커 없이 정상 로드(현행 동작 유지), 새 파일은 옛 리더가 `active-window`를 skip. 복원 loop가 `activeWindowIndex`로 활성 창을 `makeKeyAndOrderFront`한다. NO 헤더 bump·NO v1 reject·NO 마이그레이션.
 - live PTY fd·child pid·WKWebView process handle·JS heap snapshot은 계속 저장하지 않는다(기존 정책 유지).
-- 복원 시 live surface는 새 generation으로 생성된다. agent session resume처럼 별도 영속 상관키가 있는 항목만 재연결을 시도한다.
+- 현재 복원 시 live surface는 새 generation으로 생성된다. persistent-session P4 이후 terminal Term만 Maru
+  `runtime_handle`이 살아 있을 때 재연결하며, provider session resume/fork는 시도하지 않는다.
 - 하위 호환은 없으므로 옛 저장 파일은 workspace-restore.md의 "조용한 기본 창 폴백"을 따른다.
 
 ## 8. 구현 순서

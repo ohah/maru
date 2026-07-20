@@ -1,7 +1,8 @@
 # 탭 · split(panel) · 레이아웃 전략
 
-이 문서는 Maru의 탭/split(panel) UI를 어떻게 만들지의 단일 출처다. 목표 UX, 아키텍처 결정(모델 vs
-드라이버 분리), 렌더링 방식, 단계 분해, 레퍼런스 비교(clean-room)를 정한다.
+이 문서는 Maru의 탭/split(panel) UI를 어떻게 만들지의 단일 출처다. 목표 UX, 아키텍처 결정(레이아웃 모델과
+terminal runtime 소유 분리), 렌더링 방식, 단계 분해, 레퍼런스 비교(clean-room)를 정한다. 앱 종료를 건너 PTY와
+프로세스를 유지하는 계약은 [영속 터미널 세션 호스트](persistent-session-host.md)를 단일 출처로 둔다.
 
 ## 목표 UX
 
@@ -52,25 +53,28 @@ cmux 같은 유연한 레이아웃:
 - **탭마다 split(panel)** — 각 탭은 surface 1개가 아니라 가로/세로로 나눌 수 있는 surface 트리.
 - **드래그 재배치** — panel을 끌어 split을 재배열, 탭을 끌어 순서 변경.
 
-## 핵심 결정: 모델과 드라이버를 분리한다
+## 핵심 결정: 레이아웃 모델과 terminal runtime 수명을 분리한다
 
-탭/split UI **모델**과 그걸 채우는 **드라이버(소스)** 를 분리한다. 그래야 같은 UI가 "그냥 탭"과 "tmux 탭"
-양쪽에서 동작한다.
+탭/split UI **모델**은 Maru 하나만 소유한다. terminal Term의 실행 runtime이 같은 앱 프로세스에 있는지, 향후
+`maru-sessiond`에 있는지는 별도 backend 경계로 분리한다.
 
 ```
-탭/split UI 모델 (SplitTree + 탭 리스트 + 렌더 + 드래그)   ← 하나, 드라이버 무관
-        ↑ populate / 조작
-  ┌─────────────┴──────────────┐
-네이티브 드라이버(기본)          tmux-CC 드라이버(옵션, 후속)
-- 탭 = 새 셸 PTY 1개             - tmux 창 → 탭
-- split = pane에 새 셸 PTY        - tmux pane → split
-- 사용자 액션이 직접 생성/삭제     - 액션을 tmux 제어 명령으로 되보냄
+Maru 레이아웃 모델 (Window → Workspace → SplitTree → Pane → Term)
+                              │ runtime_handle
+                   ┌──────────┴──────────┐
+             in-process backend     maru-sessiond backend
+             현재 구현·동작          영속 세션, 구현 전
 ```
 
-- **기본은 네이티브** — `createTab`이 셸 PTY를 띄운다(tmux 없이 그냥 탭/split). 지금까지 만든 게 이 드라이버다.
-- **tmux는 옵션 드라이버** — `tmux -CC`(control mode) 공개 프로토콜로 tmux 창/pane이 같은 모델을 구동(후속). iTerm2가 원조이나 GPL이라 **프로토콜 명세(tmux `control-mode`)로만** 구현한다.
-- **불변식**: surface/탭/split 모델은 "출력이 어디서 오는지"를 몰라야 한다(네이티브 PTY든 tmux pane이든
-  그냥 surface로 본다). 현재 `SurfaceRuntime`이 `surface_id`로만 라우팅하므로 이미 그렇다 — 이 중립성을 유지한다.
+- **현재는 in-process** — `createTerm`이 셸 PTY와 `LiveSurface`를 앱 전역 `AppRuntime` registry에 만든다.
+- **장기 기본은 Maru session host** — GUI가 종료되어도 `TerminalCore + LivePtySession`을 유지하고, 새 GUI surface가
+  동일 runtime에 attach한다. 단일 출처는 [영속 터미널 세션 호스트](persistent-session-host.md)다.
+- **tmux-CC layout driver는 기본 계획에서 제외** — tmux window/pane과 Maru의 Workspace/Pane/Term 탭 계층이 일치하지
+  않고 두 layout 권위를 동기화해야 하기 때문이다. 외부 tmux 세션 import 수요가 생길 때만 별도 adapter로 재검토한다.
+- **연결 ID도 Maru 소유** — Term은 tmux session/window/pane ID가 아니라 Maru `runtime_handle`을 가리킨다. tmux ID
+  mirror나 변환표는 canonical layout에 들어가지 않는다.
+- **불변식**: workspace/split 재배치는 runtime을 재시작하지 않는다. layout 모델은 live PTY 포인터를 직접 소유하지 않고
+  opaque runtime binding을 사용한다. renderer는 runtime 위치와 무관하게 surface snapshot을 소비한다.
 
 ## 렌더링 결정: Maru가 직접 그린다(native 최소)
 
@@ -137,7 +141,9 @@ Node = leaf(Pane)
 4. **PR3d — 탭 드래그 재정렬**(사이드바 내 순서 변경).
 5. **PR4 — 탭 close**(active_tab clamp).
 6. **split 단계(별도, 큼)**: SplitTree 모델 → 멀티-panel 렌더 → split 키/드래그 drop-zone.
-7. **tmux-CC 드라이버(별도, 큼)**: control-mode 프로토콜 파서 + tmux 창/pane → 모델 매핑(양방향).
+7. **영속 terminal runtime backend(별도, 큼)**: `TermRuntimeBackend` seam → `maru-sessiond` → crash-safe manifest →
+   개별 `maru attach` 순서. 구체 단계와 gate는 [영속 터미널 세션 호스트](persistent-session-host.md) §13을 따른다.
+   tmux-CC 양방향 layout 매핑은 이 단계의 완료 조건이 아니다.
 
 ### split 키·방향·포커스 (구현됨, PR3b-1b)
 

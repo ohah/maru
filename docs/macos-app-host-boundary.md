@@ -28,6 +28,11 @@
 
 실행 중인 포그라운드 명령이 있는 터미널을 실수로 닫아 작업/데이터를 잃지 않도록, 닫기 전에 확인 모달을 띄운다. **창 하나 닫기**는 그 닫기가 teardown할 Term에 실행 중 명령이 있을 때만 묻고, **앱 전체 종료(Cmd+Q)**는 열린 모든 창·탭이 함께 사라져 더 파괴적이라 실행 중 명령 유무와 무관하게 **항상** 묻는다.
 
+> **현재 동작과 후속 계획:** 현재 `applicationWillTerminate`는 workspace를 저장한 뒤 모든 app session과 live PTY를
+> teardown한다. [영속 터미널 세션 호스트](persistent-session-host.md) P4가 종료 gate를 통과하면 앱 전체 quit은
+> terminal runtime detach로 바뀔 수 있지만, Term/Workspace의 명시 close는 계속 terminate다. 그 전까지 이 절의
+> 현재 종료 확인·dirty file 보호·teardown 계약이 제품 동작의 단일 기준이다.
+
 - **베이스/결정(사실상 표준)**: iTerm2·Terminal.app·Ghostty는 닫으려는 surface/창에 **셸이 아닌 실행 중 프로세스**가 있으면 닫기 확인 시트/다이얼로그를 띄운다. maru도 같은 관례를 택한다 — 단, 다이얼로그는 네이티브 NSAlert가 아니라 **maru 자체 오버레이**(`chrome/components/confirm.zig`)로 통일해 모든 닫기 경로에서 같은 룩/키(Enter·Y=닫기, Esc·N=취소)를 쓴다.
 - **트리거 판정("무엇이 실행 중인가")**: 코어의 `TerminalCore.cursorIsAtPrompt()`(OS-중립)로 판정한다 — **셸 통합(OSC 133 semantic prompt)** 상태와 **alt 화면** 여부만 본다. alt 화면(vim·claude 등 풀스크린 TUI)이면 프롬프트 아님(=실행 중), 아니면 `semantic_state`로: `prompt`(A~B)·`input`(B~C)=프롬프트, `command`(C~D)·`unknown`=프롬프트 아님. 닫기 확인은 `!cursorIsAtPrompt()`를 "실행 중 명령 있음"으로 쓴다(`termHasRunningJob`; 단 `process_state==exited`·attach 전이면 명령 없음으로 단락). `ProcessState`는 "셸 살아있음"만 알고 "명령 실행 중"은 모른다.
   - **레퍼런스 간 선택(베이스/결정)**: 세 레퍼런스는 판정 **메커니즘**이 다르다 — iTerm2·Terminal.app은 포그라운드 프로세스 **이름을 안전 목록과 대조**하고, Ghostty는 **셸 통합**(`Terminal.cursorIsAtPrompt`)을 쓴다. maru는 **Ghostty 모델**을 택했다. 근거 둘:

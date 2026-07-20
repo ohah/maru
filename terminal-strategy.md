@@ -21,13 +21,17 @@ Maru는 IDE 터미널이나 Warp식 워크플로우 제품이 아니라, 가볍�
 
 처음부터 하지 않을 것:
 
-- tmux 대체
+- tmux 호환 대체물(tmux window/pane UI·prefix/command mode·설정 언어)
 - IDE형 워크스페이스 제품
 - Warp식 command block UI
 - AI 터미널
 - 클라우드/계정 기반 제품
 - 플러그인 플랫폼 우선 제품
 - 첫 버전부터 완전한 크로스 플랫폼 앱
+
+앱 종료 뒤 PTY를 유지하는 Maru 전용 session host는 tmux 호환 대체물을 만드는 일이 아니다. 기존 Maru
+Workspace/Pane/Term 모델을 그대로 두고 terminal runtime 수명만 GUI process 밖으로 옮기는 후속 설계이며, 단일 출처는
+[영속 터미널 세션 호스트](docs/persistent-session-host.md)다.
 
 짧게 정리하면:
 

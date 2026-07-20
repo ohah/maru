@@ -387,7 +387,7 @@ TDD 방식:
 - **PR1d-2a 완료(`tab: Tab` 단일 → `tabs: ArrayList(*Tab)` 동적 컨테이너)**: per-tab 상태를 동적 컨테이너로 전환했다. `createTab`(Tab을 `allocator.create`로 heap-pin → 셸 PTY spawn → surface → runtime attach → pump → `tabs`/`surface_ptrs` append → `app_window.tabs` 재바인딩 → 새 탭 활성; 부분 실패 errdefer 정리), `activeTab()`(`tabs.items[active_tab]`), `next_id`로 surface_id·pty_id 유일 발급. init은 `runtime`를 먼저 세우고 `createTab`을 1회 호출. tick drain은 `activeTab().pump`, close/deinit은 `tabs.items` 순회(closeAndDetach는 runtime.deinit 전, surface.deinit+Tab destroy+ArrayList 해제는 runtime.deinit 후 — 원래 순서 보존). 단일 탭이라 **동작 불변**. 단위 테스트 6곳은 로컬 surface로 마이그레이션(partial 세션은 `session.tabs` 미사용 — surface-읽기 메서드는 `activeSurface()`=app_window 경로). **검증**: 헤드리스 단위 전부 통과 + 실 macOS app smoke(createTab→drain→렌더→resize→close→deinit 전체, `output_events=4 close_events=1 ended=true`, `real_exit=0`). `createTab`은 PR1d-2b가 2번째 탭에 그대로 호출한다.
 - **PR1d-2b 완료(멀티-탭 drain + create/switch — 반-E2E)**: 실제로 2번째 탭이 동작한다. tick이 **모든 탭의 pump를 순회 drain**(백그라운드 탭도 자기 surface로 출력 수신, 누적 summary를 frame builder에 보고), `Tab.terminated` per-tab 종료 추적 + 세션(창) 종료는 `allTabsTerminated()`(live 탭 전부 종료 시 — 단일 탭이면 기존 동작 보존), `switchTab`(`app_window.selectTab` + metal_dirty). **검증(반-E2E, 실 PTY macOS 게이트)**: `init`(탭0) 후 `createTab`으로 controlled 셸(탭1) spawn → tick이 둘 다 drain → **탭1 surface가 자기 출력(`TAB_TWO_MARK`)을 받음**을 결정적 단언(`expect(saw)` 반전 시 실패 3건으로 실행 증명), `switchTab(0)`이 `activeSurface`를 탭0으로 라우팅·범위 밖은 false. 헤드리스 단위 전부 통과(단일탭 동작 불변) + app smoke `real_exit=0`. ABI 불변.
 - **PR2 완료(Cmd+T → 새 탭, 키 경로로 native 최소)**: ABI create 함수를 새로 안 만들고 **기존 keyDown 경로**로 Cmd+T가 탭을 연다. `keybinding.zig`에 빌트인 `default_app_bindings`(Cmd+T=`new_tab`; 'T'는 글자라 `normalizeEventChar` 대문자 fold로 Shift 무관 매칭, layout 안전)를 `resolve`가 사용자 바인딩·빌트인 terminal 다음, Cmd-무시 fallthrough 전에 본다. `AppSession.handleKeyEvent`의 `.app_action`이 `dispatchAppAction`으로 → `new_tab`→`newTab`(첫 탭과 같은 종류 셸을 '현재 창 크기'로; spawn 파라미터 `new_tab_config`/`new_tab_zdotdir`를 init에서 보관해 deinit에서 해제), `next_tab`/`previous_tab`/`select_tab`→`switchTab`. Swift는 키만 보내고 판정·실행은 Zig(native 최소). **검증**: 헤드리스 keybinding 단위(빈 resolver가 Cmd+T→`new_tab`, Cmd+S→`ignored`) + macOS 키-경로 테스트(Cmd+T → `tabs.len` 1→2·새 탭 활성·app_key 회계, Cmd+S는 무동작). 전 게이트 green + app smoke `real_exit=0`. `macos-app`에서 Cmd+T를 누르면 새 셸로 전환(탭바 전이라도 인터랙티브 동작). Cmd+Shift+]/[(다음/이전 탭)은 Shift+문자 layout 이슈로 탭바와 함께(PR3).
-- **UI 방향 결정(문서화)**: 탭/split UI는 cmux식 — **세로 탭 사이드바 + 탭마다 split(panel) + 드래그**, tmux는 옵션 드라이버(네이티브 탭이 기본). 탭바·split을 **Maru가 Metal 프레임에 직접 그린다**(native 최소, AppKit 탭 위젯 안 씀). 모델(SplitTree+탭)과 드라이버(네이티브 PTY 기본 / tmux-CC 옵션)를 분리한다. 단일 출처는 [탭·split·레이아웃 전략](tabs-splits-layout.md)(Ghostty MIT 동작 비교·cmux GPL UX 참고·clean-room). → 앞서 "Swift NSWindow 탭 UI"는 폐기(네이티브 창 탭이 아니라 커스텀 세로 사이드바).
+- **UI 방향 결정(문서화)**: 탭/split UI는 cmux식 — **세로 탭 사이드바 + 탭마다 split(panel) + 드래그**. 탭바·split을 **Maru가 Metal 프레임에 직접 그린다**(native 최소, AppKit 탭 위젯 안 씀). Window→Workspace→SplitTree→Pane→Term 레이아웃 모델은 Maru 하나가 소유하고, terminal runtime 수명만 backend seam으로 분리한다(현재 in-process, 후속 `maru-sessiond`). tmux-CC 양방향 layout driver는 기본 계획에서 제외하고 외부 tmux import 수요가 생길 때만 별도 adapter로 재검토한다. 단일 출처는 [탭·split·레이아웃 전략](tabs-splits-layout.md)과 [영속 터미널 세션 호스트](persistent-session-host.md). → 앞서 "Swift NSWindow 탭 UI"는 폐기(네이티브 창 탭이 아니라 커스텀 세로 사이드바).
 - **PR3a 완료(세로 사이드바 레이아웃 + "surface→rect" 렌더 메커니즘)**: 드로어블 왼쪽에 사이드바 strip을 예약하고 터미널을 그 폭만큼 오른쪽 사각형에 그린다 — split이 그대로 확장할 **"surface를 (origin+size) 사각형에 그린다"** 메커니즘을 깔고 사이드바를 첫 적용으로 썼다. `gridFromBacking(...,sidebar_width_px)`가 터미널 폭에서 사이드바를 빼고(언더플로 saturate), `sidebar_width_px = sidebar_width_pt(180)×scale`은 `refreshCellMetrics`가 메트릭과 같은 단일 출처로 환산. `MetalFrame` DTO에 `terminal_origin_x_px`+`sidebar_bg` 추가(`metalFrame()`이 세팅, 사이드바색=테마 배경+24로 코히어런트·가시), 렌더러(`maru_metal_renderer_draw`)가 셀을 `origin_x+col*cw`로 offset + 왼쪽 strip에 배경 quad(UV(-1) sentinel=배경만)를 그린다. **검증**: 헤드리스 `gridFromBacking` 단위(사이드바만큼 cols 감소·과대 사이드바 saturate) + ABI 계약(DTO .h↔.zig) + swift-check + 실 macOS app smoke(`surface_cols` 150→127로 축소, 셀 offset+사이드바 quad가 크래시 없이 렌더, `real_exit=0`). 사이드바가 실제로 '보이는지'(밝은 strip·터미널 우측 이동)는 `macos-app` 수동.
 - **PR3b 분해(텍스트 렌더 위험 격리)**: 사이드바 탭 엔트리는 "메커니즘(두 번째 cell 배열)"과 "glyph 텍스트(공유 atlas 두 번째 패스)"의 위험도가 달라 둘로 나눈다. **PR3b-1 = 렌더 메커니즘 + 활성 하이라이트(이번)**, **PR3b-2 = 탭 번호·제목 glyph**.
 - **PR3b-1 완료(사이드바 두 번째 cell 배열 + 활성 탭 하이라이트 밴드)**: `MetalFrame`/ABI(.h, abi_version 22→23)에 `sidebar_cells`+`sidebar_cell_count`를 더해 **사이드바 rect(x:0..origin_x)에 origin 0으로 그리는 두 번째 셀 배열**을 만들었다 — "surface→rect"의 두 번째 surface(사이드바)로, split이 rect별 cell 배열로 그대로 확장한다. 렌더러(`maru_metal_renderer_draw`)는 셀→quad 채우기를 `maru_fill_cell_quad` 헬퍼로 추출해 터미널(origin_x)·사이드바(origin 0)가 공유하고, quad 순서 `[터미널 cells][사이드바 배경 quad][사이드바 cells]`로 밴드가 배경 위에 블렌딩되게 한다. `rebuildSidebar`는 순수 `sidebarBandCell`(사이드바 폭/cell 폭을 floor해 칸 수 환산 — origin_x 침범 방지 — sentinel-UV 배경 셀)로 **활성 탭 행에 하이라이트 밴드 1개**(테마 배경+48)를 만들어 owned ArrayList에 담고, `metalFrame()`이 그걸 가리키는 view를 노출한다. 탭 추가(createTab)·전환(switchTab)·메트릭 변경(refreshCellMetrics)마다 다시 만든다(탭 i=행 i). **검증**: 헤드리스 `sidebarBandCell` 단위(폭 floor·sentinel UV·0칸 null) + macOS-게이트 통합(실 init이 사이드바 밴드 1개 emit, createTab→row 1·switchTab→row 0 추적) + ABI 계약(.h↔.zig sizeOf) + swift-check + 앱 빌드(렌더러 .m 링크). 텍스트 없음 — PR3b-2가 제목 glyph를 더한다. 한계: 한 줄 높이 밴드라 탭 수가 행 수 초과 시 화면 밖(슬롯 패딩/스크롤은 후속).
@@ -492,7 +492,11 @@ TDD 방식:
 - **quick terminal 묶음 리뷰 후속 수정(50db1ab..HEAD, 당시 구현 기록)**: 6개 커밋(center·minimal-tabs·인디케이터·테두리·center width)을 `/code-review max`로 훑었다 — **correctness 버그 0건**, 다음 3건 처리(나머지 altitude/문서화 한계는 백로그). ① **stale 진단 메시지**: `quick-terminal.position` 오류 안내가 `center` 추가 후에도 `top|bottom|left|right`만 나열 → `…|center`로 정정. ② **인디케이터 fit 가드**: 점 band(`2*count+1`)가 화면 폭에 안 들어가면 `band_start`가 0으로 saturate돼 좌상단에 전폭으로 그려지던 걸, `band_width+margin > cols`면 아예 안 그리게 가드(우상단 의도 보존). ③ **당시 테두리/divider 리팩터**: `appendActivePaneBorder`와 `appendActiveTabDividers`가 공유 헬퍼를 소비했다. 이후 `appendActivePaneBorder`는 위 FP9 대체 기록대로 제거됐고 divider helper만 유지한다.
 - **quick terminal 토글 더블-토글 race 수정(quickAnimating 가드)**: 리뷰 백로그 항목. `toggleQuickTerminal`이 `isVisible`로만 분기하고 `quickAnimating` 가드가 없어, 슬라이드/페이드(0.12~0.16s) 중 재토글하면 애니메이션이 겹쳐 — 먼저 시작한 hide의 완료 핸들러(`orderOut`)가 그 사이 새로 show한 패널을 닫아 버리는 race가 있었다. `toggleQuickTerminal` 맨 앞에 `if quickAnimating { return }`를 더해 애니메이션 중 토글을 무시한다(겹침 자체가 없어져 stale 완료 핸들러가 새 패널을 못 닫는다; 짧은 애니메이션 후 다시 토글하면 된다). `quickTerminalLostKey`(자동 숨김)의 기존 `!quickAnimating` 가드와 같은 패턴이라 일관. show/hide 양 경로(슬라이드·center 페이드) 공통. 검증: swift-check + coretext/metal 스모크 + 전체 테스트(Swift 애니메이션은 헤드리스 테스트 불가 — 실제 더블 토글은 앱 수동). **ABI·Zig 무변경**.
 - **quick terminal 인디케이터+테두리 코너 겹침 수정(z-order, 당시 구현 기록)**: 옛 minimal grid ring과 탭 점 인디케이터가 겹칠 때 인디케이터를 뒤에 append해 위로 올렸다. 현재 grid ring은 위 FP9 대체에 따라 제거됐으므로 이 z-order 예외도 제품 경로에는 남지 않는다.
-- 미정 폴리시: tmux-CC 드라이버(control-mode 파서, 큼)는 split 후 별도. quick terminal `chrome=minimal`로 사이드바/탭 UI 없는 전용 모드 선택 가능(완료).
+- **영속 terminal runtime 후속(설계 확정, 구현 전)**: tmux-CC layout driver 대신 `TermRuntimeBackend` seam →
+  `maru-sessiond` → 다중 workspace crash-safe manifest → 개별 `maru attach` 순서로 진행한다. 앱 종료 후 PTY 유지,
+  `runtime_handle`/`surface_id` 분리, 외부 terminal attach, multi-client resize owner와 단계별 gate는
+  [영속 터미널 세션 호스트](persistent-session-host.md)를 단일 출처로 둔다. quick terminal의
+  `chrome=minimal` 사이드바/탭 UI 없는 전용 모드는 별개이며 구현 완료다.
 
 이 단계에서 다루지 않고 별도로 확장하는 입력 영역:
 
@@ -804,17 +808,22 @@ TDD 방식:
   2. **New Window** — 세션·atlas 소유권이라는 가장 큰 가정을 먼저 확정(뒤 항목이 이를 전제).
   3. **9단계 Workspace restore** — 이제 자연히 window-aware.
   4. **chrome 고급화** — 확정된 atlas 소유권 위에서 점진(C1 rounded-rect부터).
-  5. **tmux-CC / 10단계 Plugin** — 독립 / 먼 미래(Plugin은 착수 전 별도 논의).
+  5. **영속 session host / 10단계 Plugin** — 독립 / 먼 미래. session host는 tmux-CC layout driver가 아니라
+     Maru runtime backend이며 [영속 터미널 세션 호스트](persistent-session-host.md)의 P1~P6 순서를 따른다.
+     외부 tmux import adapter와 Plugin은 각각 실제 수요·착수 전 별도 논의.
 - **검토했으나 미채택한 대안**(UI 완성도 먼저, 구조 리스크 뒤로): chrome 고급화를 New Window보다 앞에 두는 안. atlas 소유권 캡슐화 + restore 스키마 window-aware면 재작업은 낮으나, 큰 구조 변경을 미루는 대신 나중에 공유 검토할 atlas가 2개가 되는 트레이드오프 — 사용자가 "토대 먼저"를 택해 미채택.
 
-## Workspace agent restore fork 보완(역사, 제거됨)
+## Provider session continuity 잔여 제거(persistent-session P1)
 
-아래는 이전 구현의 기록이다. 현재 정책은 provider 세션을 자동 복원하지 않으며
-[Workspace Restore 전략](workspace-restore.md)의 read-old/write-new 전환이 대체한다.
+Claude/Codex provider-native resume/fork는 제품 경로로 되살리지 않는다. 현재 남은 것은 실행 기능이 아니라 한 릴리스
+호환용 workspace legacy 필드 reader, restore 설정 no-op, 과거 hook/mapping cleanup과 환경변수 차단이다.
 
-- **직접 resume → provider-native fork(사용자 확정, 실 CLI 검증)**: 같은 source session을 다른 터미널이 열고 있을 수 있는데, 옛 복원은 Claude `--resume <id>` / Codex `resume <id>`로 같은 transcript/head를 재사용했다. Claude Code 2.1.209·Codex CLI 0.144.5에서 원본 TUI를 살아 있게 둔 실측으로 direct resume은 같은 id에 기록되고, 두 개의 fork는 서로 다른 id·고유 marker 격리를 보였다. 복원 명령을 Claude `--resume <source-id> --fork-session`, Codex `fork <source-id>`로 바꾸고 자동 positional prompt는 제거한다. exact id가 없으면 `--continue`/`--last` 추측 없이 일반 셸로 복원한다.
-- **옛 훅 격리 방식**: Term별 mapping id와 provider hook event로 session을 연결하던 경로는 제거됐다. 새 runtime은 `MARU_PANE_ID`만 컨트롤 플레인 selector로 유지하고 agent 전용 mapping 환경변수를 주입하지 않는다.
-- **현재 검증**: 구 workspace 필드는 읽되 새 저장에서 생략하고, deprecated 설정은 no-op으로만 읽으며, 과거 hook cleanup은 marker 항목만 제거·백업 no-clobber·완료 전 실패 시 재시도한다. 단일 출처: [workspace-restore.md](workspace-restore.md) · [agent-session.md](agent-session.md).
+- P1 코드 PR에서 이 호환 코드를 제거하고 구 workspace의 미지 scalar는 일반 key-addressed 규칙으로 무시한다.
+- foreground process·screen 기반 live `agent_kind/agent_state` observer는 provider session continuity가 아니므로 유지한다.
+- 같은 PR에서 [Workspace Restore 전략](workspace-restore.md), [에이전트 상태 감지](agent-session.md),
+  `configuration.md`, verification matrix의 deprecated/역사 문구를 “제거됨”으로 갱신한다.
+- host/runtime 종료 뒤 provider ID로 복구하는 fallback은 구현하지 않는다. 영속성은 host가 동일 PTY/process를 계속
+  소유하는 동안에만 성립한다.
 
 ## 개발 순서 단일 출처
 

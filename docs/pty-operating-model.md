@@ -2,6 +2,11 @@
 
 이 문서는 macOS 초기 `PtySession`을 어떻게 운영할지 정한다.
 
+> **현재 계약:** 이 문서의 close는 PTY/process를 실제 종료한다. 향후 앱 전체 quit만 client detach로 바꾸고
+> `TerminalCore + LivePtySession`을 별도 Maru process가 소유하는 계획은
+> [영속 터미널 세션 호스트](persistent-session-host.md)를 단일 출처로 둔다. 그 P4 전까지 현재 app teardown과
+> Term/Workspace 명시 close의 bounded terminate 계약은 바뀌지 않는다.
+
 ## 결론
 
 초기 macOS 구현은 `openpty`를 사용한다.

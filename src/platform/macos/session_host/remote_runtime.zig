@@ -100,18 +100,26 @@ pub const RemoteRuntime = struct {
         self.allocator.free(resp);
     }
 
-    /// 다음 화면 stream 배치 하나를 소비해 원격 화면에 반영한다(§9/§10). frame-loop(e3)가 매 프레임 부른다 — **논블로킹**이라
-    /// 변화가 없으면 조용히 반환한다. host가 grid/alt 변화 시 delta 대신 fresh snapshot을 push하므로 둘 다 처리한다(is_snapshot이면
-    /// 화면 리셋, 아니면 증분). 다른 runtime의 배치는 무시한다(멀티 runtime 라우팅은 e3 프레임 루프 몫).
-    pub fn pumpDelta(self: *RemoteRuntime) (client_mod.ClientError || screen_assembler.ApplyError)!void {
-        const batch = (try self.client.readStreamBatch(self.allocator)) orelse return; // idle → no-op.
+    /// 다음 화면 stream 배치 하나를 소비해 원격 화면에 반영한다(§9/§10). **논블로킹** — 배치가 없으면(idle) `false`를, 하나
+    /// 소비했으면 `true`를 돌려준다(caller가 배치가 있는 동안 반복해 다 비운다 — `RemoteTermBackend`의 drain이 이걸로
+    /// `RuntimeEventPump.drainAvailable`과 같은 의미를 만든다). host가 grid/alt 변화 시 delta 대신 fresh snapshot을 push하므로
+    /// 둘 다 처리한다(is_snapshot이면 화면 리셋, 아니면 증분). 다른 runtime의 배치는 화면엔 반영 안 하되 소비는 됐으니 `true`.
+    pub fn pumpDelta(self: *RemoteRuntime) (client_mod.ClientError || screen_assembler.ApplyError)!bool {
+        const batch = (try self.client.readStreamBatch(self.allocator)) orelse return false; // idle.
         defer self.allocator.free(batch.bytes);
-        if (batch.stream_id != self.stream_id) return;
+        if (batch.stream_id != self.stream_id) return true; // 다른 runtime(멀티) — 소비만, 화면 미반영(라우팅은 e3 프레임 루프).
         if (batch.is_snapshot) {
             try self.remote_screen.applySnapshot(batch.bytes, self.io); // §9 fresh snapshot(grid/alt 변화) → 화면 리셋.
         } else {
             try self.remote_screen.applyDelta(batch.bytes, self.io);
         }
+        return true;
+    }
+
+    /// host runtime을 종료한다(client-side 자원은 남긴다 — 회수는 `deinit`). `TermRuntimeBackend.close_and_detach`/`close`가
+    /// 부른다(계약: routing 끊고 프로세스 kill). 멱등(host가 없는 id 무시). client 객체는 이후 `remove`→`deinit`에서 회수한다.
+    pub fn terminate(self: *RemoteRuntime) void {
+        self.terminateBestEffort();
     }
 
     fn terminateBestEffort(self: *RemoteRuntime) void {
@@ -201,7 +209,7 @@ test "remote runtime: spawns over the wire, renders host screen into a Surface, 
     var found = false;
     var attempts: usize = 0;
     while (attempts < 100 and !found) : (attempts += 1) {
-        rr.pumpDelta() catch break;
+        _ = rr.pumpDelta() catch break;
         surface.lockCore(io);
         const c0 = surface.renderSnapshot().cells[0].codepoint;
         surface.unlockCore(io);

@@ -90,6 +90,13 @@ pub const remote_runtime = if (builtin.os.tag == .macos)
     @import("session_host/remote_runtime.zig")
 else
     struct {};
+// remote_term_backend(host-backed TermRuntimeBackend — P2 계약의 원격 구현)도 client·Surface·app 계약을 써서 macOS 전용이다.
+// InProcessTermBackend의 형제로, spawn/pump/입력/resize/close를 client RPC+RemoteRuntime에 매핑한다(e3-2). app_session이
+// 이걸 termBackend()로 반환하면(e3-4) GUI가 in-process와 같은 계약으로 host-backed 터미널을 몬다.
+pub const remote_term_backend = if (builtin.os.tag == .macos)
+    @import("session_host/remote_term_backend.zig")
+else
+    struct {};
 
 test {
     // 자식 파일의 inline test를 이 barrel의 test 그래프에 모은다(refAllDecls는 얕아 명시 참조가 필요).

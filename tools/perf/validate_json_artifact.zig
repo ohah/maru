@@ -55,6 +55,11 @@ const live_preview_macos_fields = [_]Field{
     .{ .name = "product_tick_calls", .rule = .{ .exact_int = 1000 } },
     .{ .name = "product_tick_drain_calls", .rule = .{ .at_least = 1 } },
     .{ .name = "product_tick_max_elapsed_us", .rule = .{ .at_most = 20000 } },
+    // 메인 액터 tick의 completionLock 대기(정상 경로)와 hang/latch 경로의 whole-tick elapsed·lock 대기.
+    // ≤20ms 예산 안이면 통과(값은 artifact에 기록돼 회귀·추세를 본다).
+    .{ .name = "product_tick_lock_wait_max_us", .rule = .{ .at_most = 20000 } },
+    .{ .name = "failure_latch_product_tick_max_elapsed_us", .rule = .{ .at_most = 20000 } },
+    .{ .name = "failure_latch_product_tick_lock_wait_max_us", .rule = .{ .at_most = 20000 } },
     .{ .name = "product_tick_pump_calls", .rule = .{ .at_least = 1 } },
     .{ .name = "product_work_ticks", .rule = .{ .at_least = 1 } },
     .{ .name = "reply_fallback_grace_ms", .rule = .{ .exact_int = 250 } },
@@ -317,6 +322,9 @@ const good_live_preview =
     \\  "product_tick_calls": 1000,
     \\  "product_tick_drain_calls": 8,
     \\  "product_tick_max_elapsed_us": 1135,
+    \\  "product_tick_lock_wait_max_us": 42,
+    \\  "failure_latch_product_tick_max_elapsed_us": 1980,
+    \\  "failure_latch_product_tick_lock_wait_max_us": 63,
     \\  "product_tick_pump_calls": 8,
     \\  "product_work_ticks": 8,
     \\  "reply_fallback_grace_ms": 250,
@@ -365,6 +373,12 @@ test "tick counter nonzero fails" {
 
 test "elapsed over budget fails" {
     const bad = try std.mem.replaceOwned(u8, testing.allocator, good_live_preview, "\"product_tick_max_elapsed_us\": 1135", "\"product_tick_max_elapsed_us\": 20001");
+    defer testing.allocator.free(bad);
+    try testing.expect(try countFailures(live_preview_macos_schema, bad) > 0);
+}
+
+test "failure-latch elapsed over budget fails (hang 경로 계측 gate)" {
+    const bad = try std.mem.replaceOwned(u8, testing.allocator, good_live_preview, "\"failure_latch_product_tick_max_elapsed_us\": 1980", "\"failure_latch_product_tick_max_elapsed_us\": 20001");
     defer testing.allocator.free(bad);
     try testing.expect(try countFailures(live_preview_macos_schema, bad) > 0);
 }

@@ -27,7 +27,8 @@
 //!     - e2d-3b ✅: delta async push — `serveConnection` poll-loop(delta tick)이 `collectDeltas`로 stream별 base 대비 diff해 `delta_chunk`를 push. `RuntimeOps.delta` seam + `StreamUpdate`, `Subscription.base` 추적. geometry 변화는 fresh snapshot 재전송. (observer fan-out=P4, dirty-gate 최적화=후속.)
 //!   - P3-e2e: host-backed `TermRuntimeBackend`(P2 계약의 원격 구현).
 //!     - e2e-1 ✅: `screen_assembler`(snapshot/delta records → client 화면 모델, 투영의 역, 순수). applySnapshot/applyDelta/toSnapshot, generation gap.
-//!     - e2e-2: client 위 remote `TermRuntimeBackend` vtable(assembler를 화면 모델로) + GUI 배선. ← 다음
+//!     - e2e-2a ✅: `remote_screen`(조립기 runs → `terminal.RenderSnapshot` cells). 렌더 경로가 로컬/원격에서 같은 DTO를 소비하는 SSOT 변환(Run→Cell·wide·cluster·rgb).
+//!     - e2e-2b/c: `Surface`가 화면 소스 추상(로컬 core vs 원격 assembler) + remote `TermRuntimeBackend` vtable(client 위 spawn/attach/input/resize/delta). ← 다음
 //!   - P3-e3: `app_session` 배선(discovery→launch→attach) + GUI 재접속(manifest runtime_handle).
 
 const builtin = @import("builtin");
@@ -73,6 +74,12 @@ else
 // 투영 자체는 순수 로직이지만 terminal 타입 의존이라 barrel에서 조건부로 둔다(screen_stream codec은 그대로 순수 유지).
 pub const screen_snapshot = if (builtin.os.tag == .macos)
     @import("session_host/screen_snapshot.zig")
+else
+    struct {};
+// remote_screen(조립기 runs → terminal.RenderSnapshot cells)도 terminal.Cell/Style를 만들어 macOS 전용이다. 렌더 경로가
+// 로컬/원격에서 같은 RenderSnapshot을 소비하게 하는 SSOT 변환(e2e-2a). 조립기(screen_assembler)는 순수라 그대로 둔다.
+pub const remote_screen = if (builtin.os.tag == .macos)
+    @import("session_host/remote_screen.zig")
 else
     struct {};
 

@@ -14,7 +14,8 @@
 //!   - P3-d1 ✅: `server`(connection dispatch state machine — hello 협상 + read-only command dispatch, 순수).
 //!   - P3-d2a ✅: `socket_server`(실 unix socket bind/accept·peer-cred same-UID·read/write I/O loop, self-contained macOS adapter).
 //!   - P3-d2b ✅: `discovery`(§10 socket 발견 state machine·경로 — connect-first·auto-start 정책·start lock winner, 순수).
-//!   - P3-d2c: 실 connect·flock start lock·detached-helper launch(`maru __session-host`)·entrypoint·bounded queue. ← 다음
+//!   - P3-d2c ✅: `daemon`(`maru-sessiond` entrypoint — host_id·bind·poll-gated accept loop·dispatch, fork/setsid process smoke).
+//!   - P3-d2d: `maru __session-host` CLI + detached launch(fork+setsid+exec) + discovery 실 실행 + host 수명·bounded queue. ← 다음
 //!   - P3-e: client(hello/RPC/stream demux) + host-backed `TermRuntimeBackend` + GUI 재접속.
 
 const builtin = @import("builtin");
@@ -30,6 +31,11 @@ pub const discovery = @import("session_host/discovery.zig");
 // codec/state machine(protocol/framing/screen_stream/registry/server)은 OS 중립이라 그대로 두어 non-macOS에서도 회귀를 잡는다.
 pub const socket_server = if (builtin.os.tag == .macos)
     @import("session_host/socket_server.zig")
+else
+    struct {};
+// daemon(maru-sessiond entrypoint)도 실 socket/signal/fork syscall을 써서 macOS에서만 컴파일한다(barrel 조건부 제외).
+pub const daemon = if (builtin.os.tag == .macos)
+    @import("session_host/daemon.zig")
 else
     struct {};
 

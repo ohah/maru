@@ -19,7 +19,8 @@
 //!   - P3-e1 ✅: `client`(GUI/CLI hello/RPC — connect·hello·host_id 확정·read-only command 왕복, fork host roundtrip smoke).
 //!   - P3-e2a ✅: `server`에 runtime.spawn/terminate dispatch + `RuntimeOps` seam(중립 vtable, host만 설정, read-only는 unauthorized).
 //!   - P3-e2b ✅: 실 `runtime_manager`(app `InProcessTermBackend` 재사용 + runtime_id↔handle 매핑) + daemon 배선(SocketServer.runtime_ops).
-//!   - P3-e2c/d/e: attach+input/resize / snapshot·delta stream demux / host-backed `TermRuntimeBackend`. ← 다음
+//!   - P3-e2c ✅: attach/detach/resize dispatch + input_bytes 라우팅(§9 capability) + `RuntimeOps` write_input/resize. runtime.resized broadcast는 e2d.
+//!   - P3-e2d/e: snapshot·delta stream demux / host-backed `TermRuntimeBackend`. ← 다음
 //!   - P3-e3: `app_session` 배선(discovery→launch→attach) + GUI 재접속(manifest runtime_handle).
 
 const builtin = @import("builtin");

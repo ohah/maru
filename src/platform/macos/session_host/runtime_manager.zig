@@ -75,7 +75,7 @@ pub const RuntimeManager = struct {
 
     /// server.zig가 dispatch에 넘길 중립 vtable. `ctx`는 이 매니저다.
     pub fn runtimeOps(self: *RuntimeManager) server.RuntimeOps {
-        return .{ .ctx = self, .spawn = spawnOp, .terminate = terminateOp };
+        return .{ .ctx = self, .spawn = spawnOp, .terminate = terminateOp, .write_input = writeInputOp, .resize = resizeOp };
     }
 
     fn spawnOp(ctx: *anyopaque, params: server.RuntimeSpawnParams) anyerror!u128 {
@@ -86,6 +86,25 @@ pub const RuntimeManager = struct {
     fn terminateOp(ctx: *anyopaque, runtime_id: u128) void {
         const self: *RuntimeManager = @ptrCast(@alignCast(ctx));
         self.terminateRuntime(runtime_id);
+    }
+
+    fn writeInputOp(ctx: *anyopaque, runtime_id: u128, bytes: []const u8) anyerror!void {
+        const self: *RuntimeManager = @ptrCast(@alignCast(ctx));
+        const handle = self.handleFor(runtime_id) orelse return error.RuntimeNotFound;
+        return self.backend_impl.backend().writeInput(handle, bytes);
+    }
+
+    fn resizeOp(ctx: *anyopaque, runtime_id: u128, cols: u16, rows: u16) anyerror!void {
+        const self: *RuntimeManager = @ptrCast(@alignCast(ctx));
+        const handle = self.handleFor(runtime_id) orelse return error.RuntimeNotFound;
+        return self.backend_impl.backend().resize(handle, .{ .cols = cols, .rows = rows }, self.io);
+    }
+
+    /// runtime_id → in-process handle. registry entry의 opaque 슬롯에서 되읽는다(spawn이 심어 둔 값). 없으면 null.
+    fn handleFor(self: *RuntimeManager, runtime_id: u128) ?RuntimeHandle {
+        const entry = self.host_registry.get(runtime_id) orelse return null;
+        const slot = entry.runtime orelse return null;
+        return @intFromPtr(slot);
     }
 
     /// 실 PTY runtime을 띄운다: backend.spawn(forkpty) → attach(reader 시작) → host registry 등록. `runtime_id`를 돌려준다.
@@ -195,6 +214,33 @@ test "runtime manager: spawns a real PTY runtime through RuntimeOps and terminat
     try std.testing.expectEqual(@as(usize, 0), host_registry.count());
     // 두 번째 terminate는 no-op(없는 id 무시) — 멱등.
     ops.terminate(ops.ctx, rid);
+}
+
+test "runtime manager: writeInput and resize reach a real runtime through RuntimeOps" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+
+    var host_registry = reg.TerminalRuntimeRegistry.init(allocator);
+    defer host_registry.deinit();
+    var mgr: RuntimeManager = undefined;
+    mgr.init(allocator, std.testing.io, &host_registry);
+    defer mgr.deinit();
+
+    const ops = mgr.runtimeOps();
+    // cat은 입력 EOF까지 살아 있어 writeInput/resize를 적용할 실 runtime을 준다.
+    const rid = try ops.spawn(ops.ctx, .{ .argv = &.{"/bin/cat"}, .cwd = null, .cols = 40, .rows = 10 });
+
+    // writeInput/resize가 실 backend에 에러 없이 위임된다(실제 화면 반영은 e2d stream이 검증). 매니저 resizeOp는 backend
+    // 적용만 하고 canonical(registry) 갱신은 server.dispatchResize의 몫이라, 여기선 backend 위임 성공만 본다.
+    try ops.write_input(ops.ctx, rid, "hello\n");
+    try ops.resize(ops.ctx, rid, 100, 30);
+
+    // 없는 runtime_id는 RuntimeNotFound(다른 runtime으로 새지 않는다).
+    try std.testing.expectError(error.RuntimeNotFound, ops.write_input(ops.ctx, 0xDEADBEEF, "x"));
+    try std.testing.expectError(error.RuntimeNotFound, ops.resize(ops.ctx, 0xDEADBEEF, 10, 10));
+
+    ops.terminate(ops.ctx, rid);
+    try std.testing.expectEqual(@as(usize, 0), host_registry.count());
 }
 
 test "runtime manager: empty argv is rejected before allocating a handle" {

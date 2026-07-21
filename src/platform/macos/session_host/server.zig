@@ -45,6 +45,18 @@ pub const RuntimeOps = struct {
     /// runtime의 현재 화면을 §12 screen_stream 레코드 스트림(length-prefixed)으로 투영한다(attach 첫 snapshot). caller가
     /// 소유하는 바이트를 돌려주며(host가 core lock 아래 투영), server가 이를 snapshot_chunk frame으로 나눠 보낸다.
     snapshot: *const fn (ctx: *anyopaque, runtime_id: u128, allocator: std.mem.Allocator) anyerror![]u8,
+    /// `base`(client가 마지막으로 받은 full snapshot 바이트) 대비 현재 화면 변화를 계산한다(§9 delta). host가 core lock
+    /// 아래 diff하고 `StreamUpdate`를 돌려준다 — `send`(delta 또는 fresh snapshot)와 다음 diff의 base가 될 현재 snapshot.
+    delta: *const fn (ctx: *anyopaque, runtime_id: u128, base: []const u8, allocator: std.mem.Allocator) anyerror!StreamUpdate,
+};
+
+/// `RuntimeOps.delta` 결과. `send`/`new_base`는 caller 소유이고 **항상 별개 버퍼**다(둘 다 free해도 안전). `send.len==0`이면
+/// 변화 없음(아무것도 안 보냄). `is_snapshot`이면 `send`가 fresh snapshot(snapshot_chunk로, client가 화면을 교체), 아니면
+/// delta(delta_chunk로, client가 증분 적용). `new_base`는 다음 diff의 base가 될 현재 full snapshot이다.
+pub const StreamUpdate = struct {
+    send: []u8,
+    is_snapshot: bool,
+    new_base: []u8,
 };
 
 /// `handleFrame`이 caller(socket write loop)에게 지시하는 것. `reply`/`reply_and_close`의 바이트는 **caller 소유**다
@@ -73,11 +85,16 @@ pub const Connection = struct {
     state: State = .pre_hello,
     selected_version: u16 = 0,
     client_kind: ClientKind = .unknown,
-    /// 이 connection이 연 `stream_id`→`runtime_id` 매핑(§9 attach subscription). input_bytes/resize/detach가 stream_id로
-    /// runtime을 찾고, connection 종료 시 이 목록을 모두 detach한다. host가 stream_id를 발급한다(현재 per-connection 단조 —
-    /// serial serve 전제라 stream_id가 겹치지 않는다; 동시 연결을 여는 후속에서 host-global 발급으로 승격한다).
-    attachments: std.AutoHashMapUnmanaged(reg.StreamId, u128) = .empty,
+    /// 이 connection이 연 stream 구독 표(§9 attach subscription). key=`stream_id`, value=`Subscription`(runtime_id +
+    /// 마지막 full snapshot base). input_bytes/resize/detach가 stream_id로 runtime을 찾고, delta push는 base 대비 diff한다.
+    /// connection 종료 시 모두 detach하고 base를 해제한다. host가 stream_id를 발급한다(현재 per-connection 단조 — serial serve
+    /// 전제라 겹치지 않는다; 동시 연결 후속에서 host-global 발급으로 승격).
+    attachments: std.AutoHashMapUnmanaged(reg.StreamId, Subscription) = .empty,
     next_stream_id: reg.StreamId = 1,
+
+    /// 한 stream 구독의 상태. `base`는 이 stream에 마지막으로 보낸 full snapshot 바이트(다음 delta diff의 기준). attach
+    /// 직후 첫 snapshot으로 채워지고, delta push마다 갱신된다. null이면 아직 base가 없다(read-only host 또는 snapshot 실패).
+    pub const Subscription = struct { runtime_id: u128, base: ?[]u8 = null };
 
     pub const State = enum { pre_hello, ready, closed };
 
@@ -85,12 +102,13 @@ pub const Connection = struct {
         return .{ .allocator = allocator, .host_id = host_id, .registry = registry };
     }
 
-    /// connection 종료(EOF/close) 시 이 connection의 모든 subscription을 registry에서 뗀다(§9 "EOF는 모든 stream을
-    /// detach하지만 runtime/child에는 종료 신호를 보내지 않는다"). runtime이 이미 없으면(동시 terminate) 무시한다.
+    /// connection 종료(EOF/close) 시 이 connection의 모든 subscription을 registry에서 떼고 base를 해제한다(§9 "EOF는 모든
+    /// stream을 detach하지만 runtime/child에는 종료 신호를 보내지 않는다"). runtime이 이미 없으면(동시 terminate) 무시한다.
     pub fn deinit(self: *Connection) void {
         var it = self.attachments.iterator();
         while (it.next()) |e| {
-            _ = self.registry.detach(e.value_ptr.*, e.key_ptr.*) catch {};
+            _ = self.registry.detach(e.value_ptr.runtime_id, e.key_ptr.*) catch {};
+            if (e.value_ptr.base) |b| self.allocator.free(b);
         }
         self.attachments.deinit(self.allocator);
         self.* = undefined;
@@ -279,7 +297,7 @@ pub const Connection = struct {
             error.OutOfMemory => return error.OutOfMemory,
             else => return self.replyError(request_id, .internal),
         };
-        self.attachments.put(self.allocator, stream, id.?) catch {
+        self.attachments.put(self.allocator, stream, .{ .runtime_id = id.? }) catch {
             _ = self.registry.detach(id.?, stream) catch {}; // 매핑 실패 시 registry subscription을 되돌린다(유령 subscription 방지).
             return error.OutOfMemory;
         };
@@ -303,7 +321,8 @@ pub const Connection = struct {
         // read-only host면 실 runtime이 없어 응답만. snapshot 실패도 attach를 깨지 않고 응답만 보낸다(best-effort).
         const ops = self.runtime_ops orelse return .{ .reply = reply_frame };
         const snap_bytes = ops.snapshot(ops.ctx, id.?, self.allocator) catch return .{ .reply = reply_frame };
-        defer self.allocator.free(snap_bytes);
+        // snapshot을 이 stream의 delta base로 보관한다(free하지 않고 subscription이 소유). chunk frame은 payload를 복사한다.
+        if (self.attachments.getPtr(stream)) |sub| sub.base = snap_bytes else self.allocator.free(snap_bytes);
 
         // 응답 frame + snapshot_chunk*를 순서대로 실어 보낸다(§10). errdefer가 부분 조립 시 전부 회수한다.
         var list: std.ArrayListUnmanaged([]u8) = .empty;
@@ -315,20 +334,21 @@ pub const Connection = struct {
             self.allocator.free(reply_frame); // 아직 list 밖이라 직접 회수.
             return error.OutOfMemory;
         };
-        try self.appendSnapshotChunks(&list, stream, snap_bytes);
+        try self.appendChunks(&list, .snapshot_chunk, stream, snap_bytes);
         return .{ .frames = list.toOwnedSlice(self.allocator) catch return error.OutOfMemory };
     }
 
-    /// snapshot 레코드 바이트를 `snapshot_chunk` frame(각 ≤ `max_binary_chunk`)으로 잘라 `list`에 덧붙인다. 마지막 chunk에
-    /// `end_stream` flag를 세운다(§10). 빈 snapshot도 end_stream 한 frame으로 종료를 알린다. 각 chunk는 attach의 `stream_id`를 싣는다.
-    fn appendSnapshotChunks(self: *Connection, list: *std.ArrayListUnmanaged([]u8), stream: u64, snap_bytes: []const u8) HandleError!void {
+    /// record 바이트를 `kind` frame(각 ≤ `max_binary_chunk`)으로 잘라 `list`에 덧붙인다. 마지막 chunk에 `end_stream` flag를
+    /// 세운다(§10 — 한 batch의 끝). 빈 바이트도 end_stream 한 frame으로 batch 종료를 알린다. 각 chunk는 `stream`을 싣는다.
+    /// snapshot(snapshot_chunk)과 delta(delta_chunk)가 같은 chunk 규칙을 공유한다.
+    fn appendChunks(self: *Connection, list: *std.ArrayListUnmanaged([]u8), kind: protocol.Kind, stream: u64, bytes: []const u8) HandleError!void {
         const chunk_size = protocol.max_binary_chunk;
         var off: usize = 0;
         while (true) {
-            const end = @min(off + chunk_size, snap_bytes.len);
-            const is_last = end >= snap_bytes.len;
+            const end = @min(off + chunk_size, bytes.len);
+            const is_last = end >= bytes.len;
             const flags: u32 = if (is_last) protocol.Flags.end_stream else 0;
-            const f = self.encodeWithFlags(.snapshot_chunk, 0, stream, flags, snap_bytes[off..end]) catch |e| switch (e) {
+            const f = self.encodeWithFlags(kind, 0, stream, flags, bytes[off..end]) catch |e| switch (e) {
                 error.OutOfMemory => return error.OutOfMemory,
                 error.PayloadTooLarge => unreachable, // chunk를 max_binary_chunk 이하로 자르므로 도달 불가.
             };
@@ -345,8 +365,9 @@ pub const Connection = struct {
     fn dispatchDetach(self: *Connection, request_id: u64, params: ?std.json.ObjectMap) HandleError!Action {
         const p = params orelse return self.replyError(request_id, .invalid_request);
         const stream = intFieldU64(p, "stream_id") orelse return self.replyError(request_id, .invalid_request);
-        const runtime_id = self.attachments.get(stream) orelse return self.replyError(request_id, .invalid_request);
-        _ = self.registry.detach(runtime_id, stream) catch {};
+        const sub = self.attachments.get(stream) orelse return self.replyError(request_id, .invalid_request);
+        _ = self.registry.detach(sub.runtime_id, stream) catch {};
+        if (sub.base) |b| self.allocator.free(b); // 이 stream의 delta base 해제.
         _ = self.attachments.remove(stream);
         const body = try self.stringify(.{ .result = .{ .detached = true } });
         defer self.allocator.free(body);
@@ -363,7 +384,7 @@ pub const Connection = struct {
         const cols = intField(p, "cols") orelse return self.replyError(request_id, .invalid_request);
         const rows = intField(p, "rows") orelse return self.replyError(request_id, .invalid_request);
         const seq = intFieldU64(p, "client_sequence") orelse 0;
-        const runtime_id = self.attachments.get(stream) orelse return self.replyError(request_id, .invalid_request);
+        const runtime_id = (self.attachments.get(stream) orelse return self.replyError(request_id, .invalid_request)).runtime_id;
 
         const outcome = self.registry.resize(runtime_id, stream, cols, rows, seq) catch |e| switch (e) {
             error.NotController => return self.replyError(request_id, .unauthorized),
@@ -400,11 +421,49 @@ pub const Connection = struct {
     /// detach 직후 도착한 stray input은 benign race라 연결을 끊지 않는다).
     fn routeInput(self: *Connection, frame: framing.Frame) HandleError!Action {
         const stream = frame.header.stream_id;
-        const runtime_id = self.attachments.get(stream) orelse return .none;
+        const runtime_id = (self.attachments.get(stream) orelse return .none).runtime_id;
         if (!reg.Capability.has(self.registry.capabilitiesOf(runtime_id, stream), reg.Capability.input)) return .none;
         const ops = self.runtime_ops orelse return .none;
         ops.write_input(ops.ctx, runtime_id, frame.payload) catch {};
         return .none;
+    }
+
+    /// attach된 각 stream의 화면 변화를 모아 push할 frame들을 만든다(§9·§10 delta stream). stream별 `base`(마지막 full
+    /// snapshot) 대비 `RuntimeOps.delta`로 diff해, 변화가 있으면 `delta_chunk`(또는 geometry 변화면 fresh `snapshot_chunk`)
+    /// frame으로 싣고 base를 갱신한다. 보낼 게 없으면 null. caller(socket serve loop)가 poll tick마다 불러 그 프레임을
+    /// 순서대로 write한다(단일 스레드 push — reader는 core만 쓰고 이 diff는 host가 core lock 아래 한다). read-only host는 항상 null.
+    pub fn collectDeltas(self: *Connection) HandleError!?[][]u8 {
+        const ops = self.runtime_ops orelse return null;
+        var list: std.ArrayListUnmanaged([]u8) = .empty;
+        errdefer {
+            for (list.items) |f| self.allocator.free(f);
+            list.deinit(self.allocator);
+        }
+        var it = self.attachments.iterator();
+        while (it.next()) |entry| {
+            const stream = entry.key_ptr.*;
+            const sub = entry.value_ptr;
+            const base = sub.base orelse continue; // base가 없으면(read-only/실패) 이 stream은 아직 delta 대상이 아니다.
+            const update = ops.delta(ops.ctx, sub.runtime_id, base, self.allocator) catch continue; // diff 실패는 이 tick만 건너뛴다.
+            // base를 현재 snapshot으로 교체한다(다음 diff 기준). send는 별개 버퍼다.
+            self.allocator.free(base);
+            sub.base = update.new_base;
+            if (update.send.len == 0) {
+                self.allocator.free(update.send); // 변화 없음.
+                continue;
+            }
+            const kind: protocol.Kind = if (update.is_snapshot) .snapshot_chunk else .delta_chunk;
+            self.appendChunks(&list, kind, stream, update.send) catch {
+                self.allocator.free(update.send);
+                return error.OutOfMemory;
+            };
+            self.allocator.free(update.send);
+        }
+        if (list.items.len == 0) {
+            list.deinit(self.allocator);
+            return null;
+        }
+        return list.toOwnedSlice(self.allocator) catch return error.OutOfMemory;
     }
 
     // ── JSON 응답 빌더 ──────────────────────────────────────────────────────
@@ -828,6 +887,8 @@ const FakeRuntimeOps = struct {
     resized_cols: u16 = 0,
     resized_rows: u16 = 0,
     resized_runtime: u128 = 0,
+    delta_base_seen: [64]u8 = undefined,
+    delta_base_seen_len: usize = 0,
 
     fn spawnFn(ctx: *anyopaque, params: RuntimeSpawnParams) anyerror!u128 {
         const self: *FakeRuntimeOps = @ptrCast(@alignCast(ctx));
@@ -861,8 +922,20 @@ const FakeRuntimeOps = struct {
         _ = runtime_id;
         return allocator.dupe(u8, "SNAPSHOT-BYTES");
     }
+    /// 받은 base를 기록하고 고정 delta + 새 base를 돌려준다(둘 다 별개 owned 버퍼). delta 라우팅·base 갱신을 검증한다.
+    fn deltaFn(ctx: *anyopaque, runtime_id: u128, base: []const u8, allocator: std.mem.Allocator) anyerror!StreamUpdate {
+        const self: *FakeRuntimeOps = @ptrCast(@alignCast(ctx));
+        _ = runtime_id;
+        const n = @min(base.len, self.delta_base_seen.len);
+        @memcpy(self.delta_base_seen[0..n], base[0..n]);
+        self.delta_base_seen_len = n;
+        const send = try allocator.dupe(u8, "DELTA-BYTES");
+        errdefer allocator.free(send);
+        const new_base = try allocator.dupe(u8, "NEW-BASE");
+        return .{ .send = send, .is_snapshot = false, .new_base = new_base };
+    }
     fn ops(self: *FakeRuntimeOps) RuntimeOps {
-        return .{ .ctx = self, .spawn = spawnFn, .terminate = terminateFn, .write_input = writeInputFn, .resize = resizeFn, .snapshot = snapshotFn };
+        return .{ .ctx = self, .spawn = spawnFn, .terminate = terminateFn, .write_input = writeInputFn, .resize = resizeFn, .snapshot = snapshotFn, .delta = deltaFn };
     }
 };
 
@@ -1053,4 +1126,58 @@ test "server: read-only host attach replies without a snapshot stream" {
     defer if (r.frame) |f| f.deinit(allocator);
     try testing.expectEqualStrings("reply", r.action);
     try testing.expect(std.mem.indexOf(u8, r.frame.?.payload, "stream_id") != null);
+}
+
+test "server: collectDeltas pushes delta_chunk for attached streams and advances the base" {
+    const allocator = testing.allocator;
+    var registry = reg.TerminalRuntimeRegistry.init(allocator);
+    defer registry.deinit();
+    _ = try registry.register(0xAA, 80, 24);
+
+    var fake: FakeRuntimeOps = .{};
+    var conn = Connection.init(allocator, 1, &registry);
+    defer conn.deinit();
+    conn.runtime_ops = fake.ops();
+    {
+        const h = try feedJson(&conn, .hello, 1, "{\"protocol_min\":1,\"protocol_max\":1}");
+        if (h.frame) |f| f.deinit(allocator);
+    }
+    // attach → base가 fake snapshot("SNAPSHOT-BYTES")로 세팅된다.
+    {
+        const frames = try feedExpectFrames(&conn, .request, 2, "{\"method\":\"runtime.attach\",\"params\":{\"runtime_id\":\"aa\",\"mode\":\"observer\"}}");
+        defer {
+            for (frames) |f| f.deinit(allocator);
+            allocator.free(frames);
+        }
+    }
+    // read-only host가 아니므로 collectDeltas가 stream을 diff한다. delta가 delta_chunk(end_stream)로 나온다.
+    const maybe = try conn.collectDeltas();
+    try testing.expect(maybe != null);
+    const frames = maybe.?;
+    defer {
+        for (frames) |f| allocator.free(f);
+        allocator.free(frames);
+    }
+    // fake.delta가 attach 때 세팅된 base("SNAPSHOT-BYTES")를 받았다.
+    try testing.expectEqualStrings("SNAPSHOT-BYTES", fake.delta_base_seen[0..fake.delta_base_seen_len]);
+    // 프레임을 파싱: delta_chunk(end_stream), stream_id 1, payload는 fake delta 바이트.
+    try testing.expectEqual(@as(usize, 1), frames.len);
+    {
+        var rp = framing.FrameParser.init(allocator);
+        defer rp.deinit();
+        try rp.push(frames[0]);
+        const f = (try rp.next()).?;
+        defer f.deinit(allocator);
+        try testing.expectEqual(protocol.Kind.delta_chunk, f.header.kind);
+        try testing.expect(protocol.Flags.hasEndStream(f.header.flags));
+        try testing.expectEqual(@as(u64, 1), f.header.stream_id);
+        try testing.expectEqualStrings("DELTA-BYTES", f.payload);
+    }
+    // base가 새 값("NEW-BASE")으로 전진했다 — 다음 diff의 기준.
+    try testing.expectEqualStrings("NEW-BASE", conn.attachments.get(1).?.base.?);
+
+    // read-only host(runtime_ops=null)는 collectDeltas가 항상 null이다.
+    var ro = Connection.init(allocator, 1, &registry);
+    defer ro.deinit();
+    try testing.expectEqual(@as(?[][]u8, null), try ro.collectDeltas());
 }

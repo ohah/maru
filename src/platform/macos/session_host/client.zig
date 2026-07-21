@@ -93,11 +93,16 @@ pub const Client = struct {
         defer self.allocator.free(frame_bytes);
         socket_server.writeAll(self.fd, frame_bytes) catch return error.WriteFailed;
 
-        const resp = try self.readFrame();
-        defer resp.deinit(self.allocator);
-        // kind와 request_id를 함께 확인한다 — unsolicited/out-of-order frame을 이 call의 응답으로 오귀속하지 않는다.
-        if (resp.header.kind != .response or resp.header.request_id != request_id) return error.ProtocolError;
-        return self.allocator.dupe(u8, resp.payload) catch return error.OutOfMemory;
+        // 응답을 기다리는 동안 host가 비동기로 push하는 stream frame(delta_chunk/snapshot_chunk)은 건너뛴다 — 이 간단한
+        // 동기 client는 그 화면 stream을 소비하지 않으므로(GUI event loop가 라우팅) 여기선 무시하고 응답만 골라낸다.
+        while (true) {
+            const resp = try self.readFrame();
+            defer resp.deinit(self.allocator);
+            if (resp.header.kind == .delta_chunk or resp.header.kind == .snapshot_chunk) continue;
+            // kind와 request_id를 함께 확인한다 — out-of-order frame을 이 call의 응답으로 오귀속하지 않는다.
+            if (resp.header.kind != .response or resp.header.request_id != request_id) return error.ProtocolError;
+            return self.allocator.dupe(u8, resp.payload) catch return error.OutOfMemory;
+        }
     }
 
     /// attach 직후 host가 보내는 `snapshot_chunk` stream을 `end_stream`까지 읽어 record 바이트를 이어 돌려준다(§10 attach
@@ -110,6 +115,22 @@ pub const Client = struct {
             const frame = try self.readFrame();
             defer frame.deinit(self.allocator);
             if (frame.header.kind != .snapshot_chunk or frame.header.stream_id != stream_id) return error.ProtocolError;
+            out.appendSlice(self.allocator, frame.payload) catch return error.OutOfMemory;
+            if (protocol.Flags.hasEndStream(frame.header.flags)) break;
+        }
+        return out.toOwnedSlice(self.allocator) catch return error.OutOfMemory;
+    }
+
+    /// 다음 delta batch(host가 push한 `delta_chunk` stream)를 `end_stream`까지 읽어 record 바이트로 잇는다(caller 소유,
+    /// `screen_stream.RecordStream`으로 순회). 화면이 바뀌면 host가 poll tick마다 보낸다. `stream_id`로 구분한다. 응답/
+    /// snapshot_chunk를 만나면 ProtocolError(이 helper는 delta batch 전용 — 실 GUI는 event loop가 모든 frame을 라우팅한다).
+    pub fn readDelta(self: *Client, stream_id: u64) ClientError![]u8 {
+        var out: std.ArrayListUnmanaged(u8) = .empty;
+        errdefer out.deinit(self.allocator);
+        while (true) {
+            const frame = try self.readFrame();
+            defer frame.deinit(self.allocator);
+            if (frame.header.kind != .delta_chunk or frame.header.stream_id != stream_id) return error.ProtocolError;
             out.appendSlice(self.allocator, frame.payload) catch return error.OutOfMemory;
             if (protocol.Flags.hasEndStream(frame.header.flags)) break;
         }
@@ -443,6 +464,85 @@ test "client: attach, input, resize, and detach a real runtime over the wire" {
     try testing.expect(std.mem.indexOf(u8, detach_resp, "detached") != null);
 
     // 정리: runtime 종료.
+    var term_buf: [64]u8 = undefined;
+    const term_params = std.fmt.bufPrint(&term_buf, "{{\"runtime_id\":\"{s}\"}}", .{rid}) catch return error.SkipZigTest;
+    const term_resp = try client.call("runtime.terminate", term_params);
+    defer allocator.free(term_resp);
+    try testing.expect(std.mem.indexOf(u8, term_resp, "terminated") != null);
+}
+
+test "client: receives a delta_chunk stream reflecting input echoed onto the screen" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+
+    var dir_buf: [256]u8 = undefined;
+    const dir_path = std.fmt.bufPrintZ(&dir_buf, "/tmp/maru-sh-delta-{d}", .{c.getpid()}) catch return error.SkipZigTest;
+    var sp_buf: [320]u8 = undefined;
+    const socket_path = std.fmt.bufPrintZ(&sp_buf, "{s}/control.sock", .{dir_path}) catch return error.SkipZigTest;
+
+    const child = c.fork();
+    if (child < 0) return error.SkipZigTest;
+    if (child == 0) {
+        _ = c.setsid();
+        daemon.runSessionHost(std.heap.page_allocator, testing.io, dir_path, socket_path) catch {};
+        std.c._exit(0);
+    }
+    defer {
+        _ = c.kill(child, posix.SIG.TERM);
+        var status: c_int = undefined;
+        _ = c.waitpid(child, &status, 0);
+        _ = c.unlink(socket_path.ptr);
+        _ = c.rmdir(dir_path.ptr);
+    }
+
+    var client: Client = blk: {
+        var attempts: usize = 0;
+        while (attempts < 150) : (attempts += 1) {
+            if (Client.connect(allocator, socket_path, "gui")) |cl| break :blk cl else |_| _ = usleepMs(20);
+        }
+        try testing.expect(false);
+        return;
+    };
+    defer client.deinit();
+
+    const spawn_resp = try client.call("runtime.spawn", "{\"argv\":[\"/bin/cat\"],\"cols\":40,\"rows\":10}");
+    defer allocator.free(spawn_resp);
+    const rid = extractRuntimeId(spawn_resp) orelse {
+        try testing.expect(false);
+        return;
+    };
+    var attach_buf: [96]u8 = undefined;
+    const attach_params = std.fmt.bufPrint(&attach_buf, "{{\"runtime_id\":\"{s}\",\"mode\":\"controller\"}}", .{rid}) catch return error.SkipZigTest;
+    const attach_resp = try client.call("runtime.attach", attach_params);
+    defer allocator.free(attach_resp);
+    const stream_id = extractU64Field(attach_resp, "\"stream_id\":") orelse {
+        try testing.expect(false);
+        return;
+    };
+    const snap = try client.readSnapshot(stream_id);
+    defer allocator.free(snap);
+
+    // input을 보내면 PTY가 echo → 화면 row0이 바뀐다. host의 poll tick이 delta_chunk로 push한다.
+    try client.sendInput(stream_id, "hello\n");
+
+    // delta batch를 몇 번 읽어 row0 set_runs의 첫 run이 "h"(echo된 "hello"의 시작)인지 확인한다(부분 echo·tick 타이밍 견딤).
+    var found = false;
+    var attempts: usize = 0;
+    while (attempts < 8 and !found) : (attempts += 1) {
+        const delta = client.readDelta(stream_id) catch break;
+        defer allocator.free(delta);
+        var rs = screen_stream.RecordStream{ .bytes = delta };
+        while (try rs.next()) |rec| {
+            const s = try screen_stream.RecordStream.split(rec);
+            if (s.header.kind == .set_runs) {
+                const sr = try screen_stream.decodeSetRuns(allocator, s.body);
+                defer sr.deinit(allocator);
+                if (sr.row_index == 0 and sr.runs.len > 0 and std.mem.eql(u8, sr.runs[0].grapheme, "h")) found = true;
+            }
+        }
+    }
+    try testing.expect(found);
+
     var term_buf: [64]u8 = undefined;
     const term_params = std.fmt.bufPrint(&term_buf, "{{\"runtime_id\":\"{s}\"}}", .{rid}) catch return error.SkipZigTest;
     const term_resp = try client.call("runtime.terminate", term_params);

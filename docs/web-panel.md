@@ -59,7 +59,7 @@
   2. **터미널 IME 무회귀**: 웹 래퍼(`MaruWebPanelView`)의 override는 **웹이 포커스일 때만** 동작하고(그 외엔 `false`만 반환) 터미널 뷰의 keyDown/`NSTextInputClient`/`performKeyEquivalent`를 **한 줄도 건드리지 않는다**. local event monitor는 매 keystroke(한글 조합 포함)를 앱 전역에서 가로채는 병렬 경로라 터미널 IME 폭발반경이 크고, 현행 performKeyEquivalent+`anyOverlayOpen` 패턴과도 이질적이라 기각.
   3. **모달 responder 전이**: 웹 포커스 중 모달이 열리면(`anyOverlayOpen` false→true 엣지) `makeFirstResponder(터미널 뷰)`로 전이해 모달 입력·IME preedit가 터미널 `NSTextInputClient`로 흐르고, 닫히면(true→false) 직전 웹뷰로 복원한다. 전이는 **기존** `becomeFirstResponder`(imeFocus true)/`resignFirstResponder`(commitComposition)를 그대로 태운다 — 새 IME 로직 없음. 엣지는 매 tick + 모달 여는 조합 직후 동기로 조정한다(조합 직후 타이핑이 웹뷰로 새지 않게).
   - **자동으로 못 잡는 부분(수동 필수)**: 실제 포커스 전이·한글 preedit 라우팅·복원·기존 터미널 IME 무회귀는 GUI 손 테스트만 확정한다(§11). smoke는 `web_panel_focused`(시작 시 웹이 firstResponder를 안 훔침 = false)만 결정적으로 단언한다.
-  - **범위 밖(Phase 5)**: 웹 소유 키(⌘C/⌘V/⌘A 편집·⌘F 페이지 내 find, §8)를 WebKit에 양보하는 **포커스 기준 분기** — 4d 최소 spike는 빈 about:blank라 웹 콘텐츠가 없어 Cmd-조합을 전부 maru로 라우팅한다(⌘C/⌘V가 웹이 아니라 터미널에 작용하지만 빈 페이지라 무해). 실콘텐츠에서 이 분기 정책은 Zig/config가 소유한다.
+  - **포커스 기준 분기(웹 소유 키 → WebKit 양보)**: **클립보드 키 `⌘C`/`⌘V`/`⌘A`는 구현 완료(2026-07-21)** — 웹 패널 포커스 시 메뉴바 편집 항목이 표준 셀렉터를 WebKit responder chain으로 넘긴다(§4.2 단일 출처). `⌘F` 페이지 내 find(§8)의 포커스 분기는 **후속**. 초기 4d 최소 spike는 빈 about:blank라 Cmd-조합을 전부 maru로 라우팅했고(⌘C/⌘V가 웹이 아니라 터미널에 작용하지만 빈 페이지라 무해), 실콘텐츠에서 이 분기 정책은 Zig/config와 §4.2가 소유한다.
 
 ### 4.1 웹↔터미널 포커스 동기 불변식 (4g — 흩어진 포커스 패치 통합, 계획)
 
@@ -91,6 +91,18 @@
 - **4g-4 (파일 도크 교차 영역 입력 회귀 — 완료, 2026-07-18)**: 도크가 열린 mouse-down 경로의 `dockGroupAtPoint(...) orelse return`이 도크 밖 클릭까지 함수 전체에서 종료해, workspace browser는 보이지만 주소창·탭·터미널을 조작할 수 없었다. group hit는 조건부로 처리하고 **실제 dock rect 안** Metal 클릭만 소비하도록 바꿔 바깥 클릭은 workspace hit-test로 흐른다. 도크를 연 browser 주소창 클릭→`addr_edit_surface`/`terminalOwnsInput`→문자 입력까지 red→green 통합 테스트로 고정했다.
 
 **리스크·검증**: 코어 포커스라 회귀 시 **모달·타이핑·IME가 깨진다** → firstResponder는 AppKit이라 헤드리스 불가, **GUI 손 테스트가 유일 안전망**(§11). 특히 `reconcileWebModalFocus`(검증된 모달 Enter 동작)를 대체하므로 그 무회귀를 재확인한다. Zig getter(4g-0)만 헤드리스. 기존 터미널 IME/keyDown은 **한 줄도 안 건드림**(4d 규율 유지 — override는 makeFirstResponder만).
+
+### 4.2 메뉴바 편집 키(Copy·Paste·Select All) 포커스 인지 분기 — 클립보드 복붙 단일 출처
+
+`performKeyEquivalent`의 `WebKeyRoute`가 `web_editor`/`pass_through`에서 이벤트를 소비하지 않고 넘겨도(§4 spike), **앱 메뉴바의 편집 항목이 자체 keyEquivalent로 그 키를 먼저 가져간다**. `Edit▸Copy(⌘C)`·`Paste(⌘V)`는 컨트롤러 셀렉터 `menuCopy`/`menuPaste`(각각 터미널 선택 복사·PTY 붙여넣기), `Select All(⌘A)`은 카탈로그 `select_all`(터미널 전체 선택)에 배선돼 **first responder와 무관하게 발화**한다. 그래서 이 세 키만은 `WebKeyRoute`가 "WebKit에 양보"해도 실제로는 터미널로 갔고, 이것이 도크·브라우저에서 웹 선택 복사/붙여넣기가 안 되던 근본 원인이다(`⌘X`/`⌘Z`/`⌘S`/`⌘F`는 충돌 메뉴 항목이 없어 이미 `WebKeyRoute`로 CM6/WebKit에 도달하므로 저장 smoke는 통과하고 복붙만 깨진 관측과 정합).
+
+**계약(단일 출처)**: 이 세 메뉴 항목은 **key window의 first responder가 웹 패널(도크 파일 뷰 `filePanelKind∈{1,2}` 또는 워크스페이스 브라우저 `filePanelKind==0`) 안쪽이면 표준 편집 셀렉터를 responder chain으로 넘긴다** — `Copy→copy:`, `Paste→paste:`, `Select All→selectAll:`. 그러면 first responder인 WKWebView(WKContentView)가 WebKit 네이티브 복사/붙여넣기/전체 선택을 수행한다. first responder가 웹 패널이 아니면(터미널·모달·`.dock_group` publish 대기 등 `terminalOwnsInput` 상태 포함) 기존 터미널 경로 그대로다. 판정 소스는 Swift `firstResponderWebPanel()`(key window firstResponder의 superview 사슬에서 `MaruWebPanelView` 탐색) 하나이며, 세 진입점(`menuCopy`·`menuPaste`·`runCatalogAction`의 `select_all`)이 이를 공유한다.
+
+**모드별 결과**: `live`·`source` 마크다운은 CM6가 복사·붙여넣기·전체 선택을 모두 처리한다. `read` 마크다운·`html`은 편집기가 아니므로 **선택 텍스트 복사(⌘C)와 전체 선택(⌘A)만** WebKit이 수행하고 붙여넣기(⌘V)는 삽입 대상이 없어 no-op이다. 이는 [key-input-and-shortcuts.md](key-input-and-shortcuts.md)의 `web_editor`/`pass_through` "WebKit에 양보" 계약을 **메뉴바 축에서 실제로 성립**시키는 보완이다.
+
+**베이스·결정**: responder chain 표준 셀렉터 dispatch(macOS 관용 — WKWebView는 `copy:`/`paste:`/`selectAll:`을 이미 지원). 대안인 "터미널 Metal 뷰에 `copy:`/`paste:`/`selectAll:` NSResponder 구현 + 메뉴 `target=nil` 표준 체인 전환"은 가장 관용적이나 **가장 민감한 터미널 입력·IME 경로**를 건드려 블라스트 반경이 커 기각(사용자 결정 2026-07-21). `⌘F` 페이지 내 find 포커스 분기는 §8 후속으로 남긴다.
+
+**검증**: firstResponder는 AppKit이라 헤드리스 불가 — **GUI 손 테스트가 유일 안전망**(§11). ⑴ 도크 `read` `.md`·`.html`에서 텍스트 선택 후 `⌘C`→외부 앱 붙여넣기로 확인, ⑵ `live`/`source`에서 `⌘C`/`⌘V`/`⌘A`가 CM6에 작용, ⑶ 터미널 포커스에서 `⌘C`/`⌘V`/`⌘A`가 기존대로 터미널에 동작(무회귀), ⑷ 모달 열림·`.dock_group` publish 대기 중에는 터미널 경로.
 
 ## 5. WKWebView가 막는 터미널-chrome 인터랙션
 
@@ -220,6 +232,7 @@ Phase 4~5도 한 PR로 밀어 넣지 않는다. [control-plane.md] §11의 micro
   열림=`nil`로 아래 터미널 통과), **maru 키바인딩 가로채기 = `performKeyEquivalent` override**(웹 포커스 중 Cmd-조합을
   ABI v132 typed `WebKeyRoute`로 조회한다. `app_action`만 가로채 같은 resolver의 `Action`을 전용 direct-dispatch ABI로 실행하고,
   `web_editor`/`pass_through`는 메뉴바 keyEquivalent 또는 WebKit에 양보하며 `consume_unbound`와 unknown raw는 fail-closed 소비한다.
+  단 메뉴바 편집 항목(Copy ⌘C·Paste ⌘V·Select All ⌘A)은 자체 keyEquivalent가 first responder와 무관하게 발화하므로, 웹 포커스 시 표준 편집 셀렉터를 WebKit responder chain으로 넘기는 **§4.2 분기**가 이 "양보"를 메뉴바 축에서 실제로 성립시킨다(없으면 그 메뉴가 무조건 터미널로 복사/붙여넣기).
   direct dispatch는 범용 `handleKeyDown`의 terminal copy/paste·scroll·macro 전처리와 PTY write를 타지 않고, route 뒤 config/mode가
   달라졌으면 action 0회다. 따라서 사용자 rebind된 ⌘C/⌘V/⌘Backspace도 정확한 app action 하나만 실행하고 셸로 새지 않는다.
   옛 spike는 **모든** Cmd 조합을 가로채 셸로 흘려 ⌘Q가 종료 안 되고 키보드가 갇혔었다[code-review 4c/4d]. 웹 포커스가

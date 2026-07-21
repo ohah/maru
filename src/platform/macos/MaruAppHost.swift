@@ -4789,6 +4789,19 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         return fr.isDescendant(of: wp)
     }
 
+    /// key window의 first responder가 웹 패널(도크 파일 뷰 또는 워크스페이스 브라우저) 안쪽이면 그 패널을 돌려준다.
+    /// 메뉴바 편집 키(⌘C/⌘V/⌘A)는 keyEquivalent가 first responder와 무관하게 발화하므로, 웹 포커스 시 표준 편집
+    /// 셀렉터를 WebKit responder chain으로 넘길지 판정하는 단일 소스다([web-panel.md] §4.2). 아니면 nil → 터미널 경로.
+    private func firstResponderWebPanel() -> MaruWebPanelView? {
+        guard let fr = NSApp.keyWindow?.firstResponder as? NSView else { return nil }
+        var view: NSView? = fr
+        while let current = view {
+            if let panel = current as? MaruWebPanelView { return panel }
+            view = current.superview
+        }
+        return nil
+    }
+
     // WKWebView의 명시적 primary-down만 direct focus intent로 승격한다. A lazy focus가 retained된 동안 이미
     // responder인 file/browser B를 다시 클릭해도 이 event가 A token을 취소하므로, 늦은 A create가 focus를 되훔치지 못한다.
     func webPanelPrimaryDown(_ wp: MaruWebPanelView) {
@@ -7984,6 +7997,12 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     /// appSession(활성 surface)에 적용해, quick terminal이 key면 그쪽에 동작한다(메뉴는 포커스된 터미널에 작용).
     @objc private func runCatalogAction(_ sender: NSMenuItem) {
         guard let key = sender.representedObject as? String, let session = appSession else { return }
+        // Select All(⌘A)은 keyEquivalent가 first responder와 무관하게 발화하므로, 웹 패널 포커스면 터미널 전체 선택
+        // 대신 WebKit selectAll:을 responder chain으로 넘긴다([web-panel.md] §4.2). 다른 카탈로그 액션은 불변.
+        if key == "select_all", firstResponderWebPanel() != nil {
+            NSApp.sendAction(#selector(NSText.selectAll(_:)), to: nil, from: self)
+            return
+        }
         // 메뉴 액션은 keyDown을 안 거친다 — next/previous_tab은 keyEquivalent가 달려 키 단축키로 와도
         // 메뉴가 가로채 여기로 온다. 조합 중이면 먼저 확정해, 탭 전환으로 입력기 세션이 새 탭으로 새지 않게 한다.
         activeSurface?.view?.commitMarkedTextIfComposing()
@@ -8099,11 +8118,23 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
 
     @objc private func menuCopy(_ sender: Any?) {
         _ = sender
+        // 웹 패널(도크·브라우저)이 first responder면 WebKit이 자기 DOM 선택을 복사하도록 표준 copy:를 responder
+        // chain으로 넘긴다([web-panel.md] §4.2). 아니면 터미널/주소창 선택 복사.
+        if firstResponderWebPanel() != nil {
+            NSApp.sendAction(#selector(NSText.copy(_:)), to: nil, from: self)
+            return
+        }
         copySelectionToPasteboard()
     }
 
     @objc private func menuPaste(_ sender: Any?) {
         _ = sender
+        // 웹 포커스면 WebKit이 편집 영역(CM6 등)에 붙여넣도록 표준 paste:를 넘긴다(read·HTML은 삽입 대상이 없어
+        // no-op). 아니면 터미널 PTY 붙여넣기.
+        if firstResponderWebPanel() != nil {
+            NSApp.sendAction(#selector(NSText.paste(_:)), to: nil, from: self)
+            return
+        }
         pastePasteboardText()
     }
 

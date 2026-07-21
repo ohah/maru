@@ -15,6 +15,7 @@ const screen_stream = @import("screen_stream.zig");
 const screen_assembler = @import("screen_assembler.zig");
 
 const Run = screen_stream.Run;
+const ScreenSource = maru.session.surface.ScreenSource;
 
 /// 조립기에서 편 소유 cell 격자. `RenderSnapshot`이 이 `cells`/`graphemes`를 빌려 렌더러에 노출한다(cells·cluster store를
 /// 이 격자가 소유 — snapshot은 alias). 원격 화면이 바뀌면(delta 적용) 렌더 시점에 다시 `build`한다.
@@ -147,6 +148,75 @@ fn runStyle(run: Run) terminal.Style {
     };
 }
 
+/// 원격 host runtime의 client 쪽 화면 소스(P3-e2e-2c). 조립기(runs 모델)를 소유하고, snapshot/delta를 적용할 때마다
+/// 렌더용 `CellGrid`를 다시 편다. `Surface`에 `screenSource()`로 주입하면 그 Surface의 `renderSnapshot()`/`lockCore`가
+/// 로컬 `TerminalCore` 대신 이걸 쓴다 — GUI 렌더는 로컬/원격을 모른다(SSOT, docs/persistent-session-host.md §8).
+///
+/// 스레딩: delta를 받는 쪽(client read)과 렌더 쪽이 다른 스레드라, 자체 `mutex`로 apply와 render를 직렬화한다(로컬
+/// `core_mutex`와 동형 역할 — 단 core가 아니라 조립 화면 캐시라 owner-추적 없이 단순 std.Io.Mutex). `render_snapshot`이
+/// 돌려주는 slice는 `grid`를 alias하므로 caller(Surface)가 `lock`/`unlock` 안에서 읽고 복사한다.
+pub const RemoteScreen = struct {
+    allocator: std.mem.Allocator,
+    assembler: screen_assembler.ScreenAssembler,
+    grid: CellGrid, // 현재 조립 상태를 편 cell 격자(apply마다 재구축, render가 읽음).
+    mutex: std.Io.Mutex = .init,
+
+    const source_vtable = ScreenSource.VTable{ .render_snapshot = srcRenderSnapshot, .lock = srcLock, .unlock = srcUnlock };
+
+    pub fn init(allocator: std.mem.Allocator) error{OutOfMemory}!RemoteScreen {
+        var assembler = screen_assembler.ScreenAssembler.init(allocator);
+        errdefer assembler.deinit();
+        const grid = try build(allocator, &assembler); // 빈 조립기 → 0x0 격자.
+        return .{ .allocator = allocator, .assembler = assembler, .grid = grid };
+    }
+
+    pub fn deinit(self: *RemoteScreen) void {
+        self.grid.deinit();
+        self.assembler.deinit();
+        self.* = undefined;
+    }
+
+    /// `Surface.remote`에 넣을 화면 소스 핸들. Surface는 이 vtable만 알고 RemoteScreen 구체타입을 모른다(레이어 경계).
+    pub fn screenSource(self: *RemoteScreen) ScreenSource {
+        return .{ .ctx = self, .vtable = &source_vtable };
+    }
+
+    /// host의 snapshot record로 화면을 리셋한다(attach 첫 화면·gap 복구). 조립기를 갱신하고 렌더 격자를 다시 편다.
+    pub fn applySnapshot(self: *RemoteScreen, bytes: []const u8, io: std.Io) (screen_assembler.ApplyError || error{OutOfMemory})!void {
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+        try self.assembler.applySnapshot(bytes);
+        try self.rebuildGrid();
+    }
+
+    /// host의 delta record를 적용한다(화면 증분). base_generation gap이면 `GenerationGap`(caller가 fresh snapshot 재요청).
+    pub fn applyDelta(self: *RemoteScreen, bytes: []const u8, io: std.Io) (screen_assembler.ApplyError || error{OutOfMemory})!void {
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+        try self.assembler.applyDelta(bytes);
+        try self.rebuildGrid();
+    }
+
+    fn rebuildGrid(self: *RemoteScreen) error{OutOfMemory}!void {
+        const new_grid = try build(self.allocator, &self.assembler);
+        self.grid.deinit();
+        self.grid = new_grid;
+    }
+
+    fn srcRenderSnapshot(ctx: *anyopaque) terminal.RenderSnapshot {
+        const self: *RemoteScreen = @ptrCast(@alignCast(ctx));
+        return self.grid.renderSnapshot();
+    }
+    fn srcLock(ctx: *anyopaque, io: std.Io) void {
+        const self: *RemoteScreen = @ptrCast(@alignCast(ctx));
+        self.mutex.lockUncancelable(io);
+    }
+    fn srcUnlock(ctx: *anyopaque, io: std.Io) void {
+        const self: *RemoteScreen = @ptrCast(@alignCast(ctx));
+        self.mutex.unlock(io);
+    }
+};
+
 // ─────────────────────────────────────────────────────────────────────────────
 // 단위 테스트 (macOS — terminal.Cell/Style 필요)
 //
@@ -234,4 +304,46 @@ test "remote screen: projection→assembler→cells preserves a real screen's te
     }
     try testing.expectEqual(local.cursor.col, remote.cursor.col);
     try testing.expectEqual(local.cursor.row, remote.cursor.row);
+}
+
+test "remote screen: a Surface backed by RemoteScreen renders the assembled remote screen, updated by delta" {
+    const allocator = testing.allocator;
+    const io = testing.io;
+    const Surface = maru.session.Surface;
+
+    // host 화면을 투영해 원격 screen에 적용한다("remote!").
+    var core = try terminal.TerminalCore.init(allocator, .{ .cols = 10, .rows = 2 });
+    defer core.deinit();
+    try core.write("remote!");
+    const snap = try screen_snapshot.projectSnapshot(allocator, &core, .{ .generation = 1 });
+    defer allocator.free(snap);
+
+    var rs = try RemoteScreen.init(allocator);
+    defer rs.deinit();
+    try rs.applySnapshot(snap, io);
+
+    // Surface에 원격 소스를 주입한다. 로컬 core는 빈 화면 — renderSnapshot이 로컬이 아니라 조립된 원격을 줘야 한다.
+    var surface = try Surface.init(allocator, 1, .{ .cols = 10, .rows = 2 });
+    defer surface.deinit();
+    surface.remote = rs.screenSource();
+
+    surface.lockCore(io);
+    const rendered = surface.renderSnapshot();
+    const c0 = rendered.cells[0].codepoint; // lock 아래에서 값만 복사(현행 계약).
+    const c1 = rendered.cells[1].codepoint;
+    surface.unlockCore(io);
+    try testing.expectEqual(@as(u21, 'r'), c0); // 로컬 core라면 공백이었을 것 — 원격이 반영됐다.
+    try testing.expectEqual(@as(u21, 'e'), c1);
+
+    // host 화면을 바꾸고 delta를 적용하면 Surface.renderSnapshot이 반영한다.
+    try core.write("\r\nsecond"); // row1 = "second".
+    const d = try screen_snapshot.computeDelta(allocator, snap, &core, .{ .generation = 1 });
+    defer allocator.free(d);
+    try rs.applyDelta(d, io);
+
+    surface.lockCore(io);
+    const r2 = surface.renderSnapshot();
+    const row1_c0 = r2.cells[10].codepoint; // row1 col0.
+    surface.unlockCore(io);
+    try testing.expectEqual(@as(u21, 's'), row1_c0);
 }

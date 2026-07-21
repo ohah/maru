@@ -17,6 +17,22 @@ pub const RestorableSurfaceMetadata = struct {
     env: []const []const u8 = &.{},
 };
 
+/// 원격 host runtime의 화면 소스 계약(P3-e2e-2c). `Surface`가 로컬 `TerminalCore` 대신 이걸로 화면을 읽을 수 있게 한다 —
+/// 렌더는 로컬/원격을 모르게 `surface.renderSnapshot()`/`lockCore`만 부른다(docs/persistent-session-host.md §8 중립 DTO).
+/// 구현은 platform 계층(session_host의 `RemoteScreen` = 조립기+CellGrid)이 제공해 주입한다(session→platform 역참조 회피 —
+/// `session/`은 이 vtable만 안다). `render_snapshot`이 돌려주는 snapshot은 소스 메모리를 alias하므로 caller가 `lock`/
+/// `unlock` 안에서 읽고 복사한다(로컬 `core_mutex` 계약과 동형).
+pub const ScreenSource = struct {
+    ctx: *anyopaque,
+    vtable: *const VTable,
+
+    pub const VTable = struct {
+        render_snapshot: *const fn (ctx: *anyopaque) terminal.RenderSnapshot,
+        lock: *const fn (ctx: *anyopaque, io: std.Io) void,
+        unlock: *const fn (ctx: *anyopaque, io: std.Io) void,
+    };
+};
+
 // `Surface`는 [Facade 계약](../../docs/facade-contracts.md)의 단일 출처 이름을 따른다.
 // 하나의 사용 가능한 terminal surface(TerminalCore + metadata)를 나타낸다.
 // live PtySession handle은 여기 저장하지 않는다. 장차 SurfaceRuntime이
@@ -41,6 +57,10 @@ pub const Surface = struct {
     // 렌더 스레드의 snapshot 읽기와 경합한다. 그 계약을 지금 형식화한다. **attach 이후 Surface를
     // 이동/복사하면 안 된다**(락을 잡는 코드가 포인터를 들고 있음 — reader 포인터 불변식과 동일).
     core_mutex: std.Io.Mutex = .init,
+    // 원격 host runtime backing(P3-e2e-2c). null이면 로컬 `core`가 화면 소스다(현행). 설정되면 렌더/락이 이 원격 소스로
+    // 갈린다(host의 snapshot/delta를 조립한 화면). 이때 로컬 `core`는 unused placeholder다(원격 runtime의 input/resize/
+    // metadata는 backend·host query로 가고 이 core를 만지지 않는다). 소유는 caller(주입한 쪽) — Surface.deinit은 안 건드린다.
+    remote: ?ScreenSource = null,
 
     pub fn init(allocator: std.mem.Allocator, id: u64, size: terminal.Size) !Surface {
         return .{
@@ -58,10 +78,18 @@ pub const Surface = struct {
     /// 디버그 panic으로 노출한다(docs/io-render-threading.md §6-5). reader는 Surface가 없어 같은
     /// owner를 core.owner_dbg.lock으로 직접 공유한다(단일 출처).
     pub fn lockCore(self: *Surface, io: std.Io) void {
+        if (self.remote) |r| {
+            r.vtable.lock(r.ctx, io); // 원격 backing이면 그 소스의 락(render↔delta-apply 직렬화). 로컬 core는 미사용.
+            return;
+        }
         self.core.owner_dbg.lock(&self.core_mutex, io);
     }
 
     pub fn unlockCore(self: *Surface, io: std.Io) void {
+        if (self.remote) |r| {
+            r.vtable.unlock(r.ctx, io);
+            return;
+        }
         self.core.owner_dbg.unlock(&self.core_mutex, io);
     }
 
@@ -71,6 +99,7 @@ pub const Surface = struct {
     /// 반환 snapshot은 화면 소스 메모리를 alias하므로 caller가 `lockCore`/`unlockCore` 안에서 읽고 복사해야 한다(현행
     /// 계약 그대로, docs/io-render-threading.md — snapshot 슬라이스는 lock 밖으로 새면 안 됨).
     pub fn renderSnapshot(self: *Surface) terminal.RenderSnapshot {
+        if (self.remote) |r| return r.vtable.render_snapshot(r.ctx); // 원격 backing이면 조립된 화면(cells)을 준다.
         return self.core.renderSnapshot();
     }
 

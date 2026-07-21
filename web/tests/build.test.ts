@@ -62,6 +62,7 @@ test("Mermaid helper stays isolated from trusted origins and universal packaging
   const repository = join(import.meta.dir, "..", "..");
   const source = await readFile(join(import.meta.dir, "..", "src", "mermaid-helper.ts"), "utf8");
   const build = await readFile(join(import.meta.dir, "..", "scripts", "build.ts"), "utf8");
+  const readme = await readFile(join(import.meta.dir, "..", "README.md"), "utf8");
   const nativeBuild = await readFile(join(repository, "build.zig"), "utf8");
   const appScheme = await readFile(join(repository, "src", "session", "app_scheme.zig"), "utf8");
   const universalBuild = await readFile(
@@ -71,6 +72,13 @@ test("Mermaid helper stays isolated from trusted origins and universal packaging
   expect(source).toContain("window.__maruRenderMermaid");
   expect(source).toContain("sanitizeMermaidSvg");
   expect(build).toContain('"mermaid-helper.js"');
+  expect(readme).toContain("`bundle.js`");
+  expect(readme).toContain("`live-preview-worker.js`");
+  expect(readme).toContain("`mermaid-helper.js`");
+  expect(readme).toContain("세 bundle");
+  expect(readme).toContain("FP11f");
+  expect(readme).toContain("`@zntc/core` `0.1.4`");
+  expect(readme).not.toContain("Mermaid 소스는 FP4에서도 inert code로 남긴다");
   expect(nativeBuild).toContain("helper-only Mermaid runtime leaked into main app resources");
   expect(nativeBuild).toContain("Mermaid runtime must have exactly one nested-helper copy");
   expect(appScheme).toContain('eqlIgnoreCase(normalized_path, "mermaid-helper.js")');

@@ -4380,6 +4380,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         mermaidRenderCoordinator.onRenderError = { [weak self] capability in
             self?.failMermaidReply(capability: capability, error: "mermaid render failed")
         }
+        mermaidReplyDelivery.bindFallback(to: mermaidRenderCoordinator)
 
         // 라이브 프리뷰 admission은 dock visibility/focus transition에서 반복 호출된다. 평상시 후보 수를
         // 시작 시 한 번 확보해 해당 전환 경로가 배열 storage를 매번 만들지 않게 한다.
@@ -5010,7 +5011,6 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             revokeMermaidJob(key: key, identity: identity)
             return false
         }
-        DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(2_250), execute: timeout)
         return true
     }
 

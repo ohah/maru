@@ -56,7 +56,7 @@ await writeFile(
 
 console.log(
   JSON.stringify({
-    bundler: "@zntc/core@0.1.3",
+    bundler: "@zntc/core@0.1.4",
     bundle: scriptName,
     bytes: script.byteLength,
     sri,

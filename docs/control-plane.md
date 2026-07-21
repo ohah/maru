@@ -18,7 +18,7 @@ tmux(`list-panes`/`send-keys`/`capture-pane`)·cmux가 푸는 문제를 다루�
 - **동시성 = 단일 디스패치 지점(메인으로 marshal) + 출력 스트림은 I/O 스레드 직송.** 제어·조회는 메인 frame loop로 marshal해 코어/레지스트리/트리에 안전 접근하고, 고처리량 출력(`subscribeOutput`)은 메인을 거치지 않고 I/O 스레드에서 per-subscriber 큐로 직송한다(§5).
 - **보안 = 같은 uid 안의 신뢰 차등까지.** 웹 브리지는 신뢰 콘텐츠에만 노출, 외부 소켓은 peer-cred + 0700/0600, write는 per-surface capability(§8).
 - **`browser.*` = WKWebView 직접 제어(코어) + W3C WebDriver 어댑터(외부, 인증 필수).** CDP가 아니라 WebDriver다(§9).
-- **웹 패널 프론트엔드 개발환경 = zntc로 확정, FP2 편입 완료.** `@zntc/core@0.1.3`을 dev-only exact lock해 build/bundle을 맡기고, vanilla 단일 앱에 불필요한 PostCSS/Sass/HMR controller `@zntc/web`은 넣지 않는다. `web/` Bun workspace는 `bun.lock`·Bun test·SHA-384 SRI 재대조·oxlint/oxfmt·설치된 전체 lock graph license audit를 맡고 별도 path-filtered CI에서 실행한다. 기존 dependency-free Zig `mise run check`에는 합치지 않는다. Vite/Vitest/tsgo는 현재 필요가 입증되지 않아 추가하지 않는다.
+- **웹 패널 프론트엔드 개발환경 = zntc로 확정, FP2 편입 완료.** `@zntc/core@0.1.4`를 dev-only exact lock해 build/bundle을 맡기고, vanilla 단일 앱에 불필요한 PostCSS/Sass/HMR controller `@zntc/web`은 넣지 않는다. `web/` Bun workspace는 `bun.lock`·Bun test·SHA-384 SRI 재대조·oxlint/oxfmt·설치된 전체 lock graph license audit를 맡고 별도 path-filtered CI에서 실행한다. 기존 dependency-free Zig `mise run check`에는 합치지 않는다. Vite/Vitest/tsgo는 현재 필요가 입증되지 않아 추가하지 않는다.
 - **리치 패널 렌더 = WKWebView (네이티브 뷰 비사용 원칙의 명시적 예외).** 원칙의 근거는 이식성인데, 웹 콘텐츠(HTML/JS/CSS)는 WKWebView/WebKitGTK/WebView2 어디서나 그대로 돌아 목적을 충족한다(SwiftUI와 달리 UI 코드가 Apple 전용이 아님). 예외는 **닫힌 열거**다: 마크다운 WYSIWYG 편집, 인앱 브라우저(임의 웹이라 진짜 엔진 필요). **diff 뷰어는 GPU 셀로 그리고 예외에 넣지 않는다**(색입힌 등폭 텍스트라 셀로 충분). 새 종류 추가는 사용자 승인이 필요하다. macOS=시스템 WebKit(의존 0)이나 이식 타깃은 WebKitGTK/WebView2로 의존 0이 깨진다(GPU 경로 WebGPU와 대칭).
 
 ## 2. 목표 위상
@@ -755,7 +755,7 @@ Phase 0~6은 서드파티 0. 1~3(컨트롤 플레인)과 4(웹뷰 껍데기)는 
 - 이벤트 background 소스(폴링 게이트 확장/진짜 소스)가 Phase 3 선결.
 - WebDriver 외부 도구 통합(agent-browser endpoint 연결)은 코어+서버 후속.
 - capability fd와 self-origin 증명은 shell 환경에 민감하다. 현재 login wrapper는 fd를 닫는 것으로 실측됐으므로 일반 login shell에 `read-output` fd grant를 붙이면 동작하지 않는다. 일반 login shell의 `metadata:self`도 `$MARU_SESSION`만으로 열지 않고 peer pid의 controlling tty/foreground pgrp가 해당 surface PTY와 맞는지 제품 경로로 실측해야 한다. startup file은 fd를 닫을 수 있고, background child는 fd를 오래 붙잡을 수 있다. tmux/screen pane은 로컬 smoke에서 fd가 닫혔지만, nested PTY 때문에 self-origin도 실패할 수 있으므로 결과를 regression gate로 유지한다. Phase 1의 `read-output`은 non-login trusted profile부터 열고, TTL/revocation 테스트 없이는 기본 grant로 열지 않는다.
-- zntc는 pre-release 외부 npm이라 upgrade 때마다 supply-chain 재검증이 필요하다. FP2는 `@zntc/core@0.1.3` exact lock·SRI·CI cache·license audit를 고정했고, `@zntc/web`은 불필요하다고 실측해 제외했다. 완전 offline vendoring은 하지 않으며 clean CI는 registry+lock integrity를 사용한다.
+- zntc는 pre-release 외부 npm이라 upgrade 때마다 supply-chain 재검증이 필요하다. 현재는 `@zntc/core@0.1.4` exact lock·SRI·CI cache·license audit를 고정했고, `@zntc/web`은 불필요하다고 실측해 제외했다. 완전 offline vendoring은 하지 않으며 clean CI는 registry+lock integrity를 사용한다.
 
 ## 15. 선결 사항 (구현 직전 결정)
 

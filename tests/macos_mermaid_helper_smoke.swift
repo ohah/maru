@@ -69,7 +69,7 @@ struct MermaidHelperSmoke {
             var snapshot = MaruMermaidCoordinatorSnapshot()
             maru_macos_mermaid_snapshot(&snapshot)
             return snapshot.accepted_results == 1
-        }, timeout: 4.0)
+        }, timeout: 7.0)
         var accepted = MaruMermaidAcceptedResult()
         var svg = [UInt8](repeating: 0, count: Int(MARU_MERMAID_PROTOCOL_MAX_SVG_BYTES))
         let takeStatus = svg.withUnsafeMutableBufferPointer {
@@ -99,6 +99,31 @@ struct MermaidHelperSmoke {
         checks["normal_external_csp_violations_zero"] = checks["actual_mermaid_svg"] as? Bool == true
         checks["normal_external_navigation_attempts_zero"] = checks["actual_mermaid_svg"] as? Bool == true
         rendering.shutdown()
+
+        // 이전 2초 gate보다 느리지만 새 cold 5초 안인 결과는 정상 commit되어야 한다. helper env는 smoke에서만
+        // 주입되며 제품 입력 문자열이 timing hook을 열지 않는다.
+        maru_macos_mermaid_test_reset()
+        let delayedResult = MermaidRenderCoordinator(
+            validation: .smokeDelayedResult(helperURL, delayMs: 2_600)
+        )
+        precondition(admit(widget: 97, source: Data("__MARU_TEST_MAX_SVG__".utf8)) == 0)
+        pump(delayedResult, until: {
+            var snapshot = MaruMermaidCoordinatorSnapshot()
+            maru_macos_mermaid_snapshot(&snapshot)
+            return snapshot.accepted_results == 1
+        }, timeout: 4.5)
+        var delayedAccepted = MaruMermaidAcceptedResult()
+        var delayedSvg = [UInt8](repeating: 0, count: Int(MARU_MERMAID_PROTOCOL_MAX_SVG_BYTES))
+        let delayedTake = delayedSvg.withUnsafeMutableBufferPointer {
+            maru_macos_mermaid_take_accepted(&delayedAccepted, $0.baseAddress, $0.count)
+        }
+        var delayedResultSnapshot = MaruMermaidCoordinatorSnapshot()
+        maru_macos_mermaid_snapshot(&delayedResultSnapshot)
+        checks["slow_cold_result_before_five_seconds_accepted"] = delayedTake == 1 &&
+            delayedAccepted.svg_len == Int(MARU_MERMAID_PROTOCOL_MAX_SVG_BYTES) &&
+            delayedResultSnapshot.deadline_expirations == 0 &&
+            delayedResult.diagnostics().physicalStarts == 1
+        delayedResult.shutdown()
 
         // The actual signed/sandboxed WKWebView guard must count and reject every closed API family.
         maru_macos_mermaid_test_reset()
@@ -195,7 +220,7 @@ struct MermaidHelperSmoke {
             var snapshot = MaruMermaidCoordinatorSnapshot()
             maru_macos_mermaid_snapshot(&snapshot)
             return snapshot.deadline_expirations == 1 && snapshot.termination_in_progress == 0
-        }, timeout: 4.0)
+        }, timeout: 7.0)
         var noReadSnapshot = MaruMermaidCoordinatorSnapshot()
         maru_macos_mermaid_snapshot(&noReadSnapshot)
         let shutdownStart = ProcessInfo.processInfo.systemUptime
@@ -213,7 +238,7 @@ struct MermaidHelperSmoke {
             var snapshot = MaruMermaidCoordinatorSnapshot()
             maru_macos_mermaid_snapshot(&snapshot)
             return snapshot.termination_in_progress == 0 && closedPipes.terminationAckCount == 1
-        }, timeout: 4.0)
+        }, timeout: 7.0)
         let eofCounts = closedPipes.pipeEOFCounts()
         var closedPipesSnapshot = MaruMermaidCoordinatorSnapshot()
         maru_macos_mermaid_snapshot(&closedPipesSnapshot)
@@ -225,13 +250,13 @@ struct MermaidHelperSmoke {
         // control executor에서 action 처리가 deadline 뒤로 밀리면 Zig가 한 번만 terminal 처리하고,
         // Swift의 물리 안전 precheck는 새 process/Hello/Request를 만들지 않는다.
         maru_macos_mermaid_test_reset()
-        let delayedStart = MermaidRenderCoordinator(validation: .smokeDelayedStart(helperURL, delayMs: 2_100))
+        let delayedStart = MermaidRenderCoordinator(validation: .smokeDelayedStart(helperURL, delayMs: 5_100))
         precondition(admit(widget: 7, source: Data("delayed-start".utf8)) == 0)
         pump(delayedStart, until: {
             var snapshot = MaruMermaidCoordinatorSnapshot()
             maru_macos_mermaid_snapshot(&snapshot)
             return snapshot.termination_in_progress == 0 && delayedStart.terminationAckCount == 1
-        }, timeout: 4.0)
+        }, timeout: 7.0)
         let delayedDiagnostics = delayedStart.diagnostics()
         var delayedSnapshot = MaruMermaidCoordinatorSnapshot()
         maru_macos_mermaid_snapshot(&delayedSnapshot)
@@ -348,16 +373,18 @@ struct MermaidHelperSmoke {
         // 100개 hang 요청을 넣어도 queue는 bounded이고 rolling 세 번째 timeout에서 app-lifetime latch가 걸린다.
         maru_macos_mermaid_test_reset()
         let hanging = MermaidRenderCoordinator(validation: .smoke(helperURL))
+        let hangingProductTick = MermaidProductTickAdapter()
+        let hangingAcceptedDrainer = MermaidAcceptedResultDrainer()
         var admitted = 0
         for widget in 10..<110 {
             if admit(widget: UInt64(widget), source: Data("__MARU_TEST_HANG__".utf8)) == 0 { admitted += 1 }
         }
-        pump(hanging, until: {
+        pumpProductTick(hanging, tick: hangingProductTick, drainer: hangingAcceptedDrainer, until: {
             var snapshot = MaruMermaidCoordinatorSnapshot()
             maru_macos_mermaid_snapshot(&snapshot)
             return snapshot.disabled != 0
-        }, timeout: 8.0)
-        pump(hanging, until: {
+        }, timeout: 20.0)
+        pumpProductTick(hanging, tick: hangingProductTick, drainer: hangingAcceptedDrainer, until: {
             var snapshot = MaruMermaidCoordinatorSnapshot()
             maru_macos_mermaid_snapshot(&snapshot)
             return snapshot.termination_in_progress == 0 && snapshot.action_handoff_pending == 0
@@ -371,6 +398,8 @@ struct MermaidHelperSmoke {
         checks["three_deadlines_expired"] = final.deadline_expirations == 3
         checks["termination_acknowledged_exactly"] = hanging.terminationAckCount == final.helper_starts
         checks["pending_reclaimed"] = final.pending_jobs == 0 && final.pending_source_bytes == 0
+        checks["failure_latch_uses_product_tick"] = hangingProductTick.pumpCalls > 0 &&
+            hangingProductTick.maxCompletionDrain <= UInt64(MARU_MERMAID_MAX_COMPLETIONS_PER_TICK)
         hanging.shutdown()
 
         // Product bridge admission and reply registration are synchronous, while same-widget latest coalesce
@@ -421,7 +450,7 @@ struct MermaidHelperSmoke {
         checks["coalesce_late_old_timeout_keeps_replacement"] = coalesceAfterLateRevoke.pending_jobs == 1 &&
             coalesceAfterLateRevoke.terminal_results == 0
 
-        // Zig failure reducer가 회수한 exact terminal은 native 2.25초 fallback을 기다리지 않고 제품과 같은
+        // Zig failure reducer가 회수한 exact terminal은 native 5.25초 safety fallback을 기다리지 않고 제품과 같은
         // adapter에서 즉시 one-shot 완료된다. 늦은 timer/result는 이미 비워진 key와 stale capability라 무동작이다.
         maru_macos_mermaid_test_reset()
         let deadlineWidget: UInt64 = 710
@@ -559,8 +588,9 @@ struct MermaidHelperSmoke {
         checks["integrity_late_failure_and_result_noop"] = lateIntegrityFailure == 0 && lateIntegrityResult == 0 &&
             integrityRunningCallbacks == 1 && integrityPendingCallbacks == 1
 
-        // 제품 tick과 같은 allocation-free `has_work` gate를 정확히 1,000회 통과시킨다. cold helper의 실제
-        // Mermaid 결과를 한 번 소비한 뒤 남은 idle tick은 pump를 호출하지 않아 process/pipe churn이 0이어야 한다.
+        // 제품 tick과 같은 allocation-free `has_work` gate를 정확히 1,000회 통과시킨다. 결과 대기 cadence는
+        // 8ms라 전체 loop window가 cold 5초보다 충분히 길고, deadline 직전 completion 뒤에도 마지막 drain tick이
+        // 남는다. 결과를 소비한 뒤 남은 idle tick은 pump를 호출하지 않아 process/pipe churn이 0이어야 한다.
         maru_macos_mermaid_test_reset()
         let perf = MermaidRenderCoordinator(validation: .smoke(helperURL))
         precondition(admit(widget: 500, source: Data("__MARU_TEST_MAX_SVG__".utf8)) == 0)
@@ -600,7 +630,7 @@ struct MermaidHelperSmoke {
                 },
                 consumeTerminal: { _ in }
             )
-            if !perfAccepted { RunLoop.current.run(until: Date().addingTimeInterval(0.005)) }
+            if !perfAccepted { RunLoop.current.run(until: Date().addingTimeInterval(0.008)) }
         }
 
         // The product reply table is security- and lifetime-sensitive even though its operations are
@@ -724,6 +754,116 @@ struct MermaidHelperSmoke {
 
         let otherRenderer = replyRenderer(seed: 2)
         let otherIdentity = MermaidReplyIdentity(renderer: otherRenderer)
+        // Fallback은 admission 때 arm되지 않는다. 각 exact start action의 deadline+250ms만 소비하므로
+        // 앞선 cold 작업을 기다린 B도 자기 warm 2초를 온전히 가진다.
+        let fallbackAdapter = MermaidReplyDeliveryAdapter(maxPending: 2)
+        let fallbackColdKey = MermaidReplyKey(surfaceId: 46, jobId: 106)
+        let fallbackWarmKey = MermaidReplyKey(surfaceId: 47, jobId: 107)
+        precondition(fallbackAdapter.register(
+            key: fallbackColdKey,
+            requestId: 106,
+            identity: expectedIdentity,
+            timeout: DispatchWorkItem {},
+            replyHandler: { _, _ in }
+        ))
+        precondition(fallbackAdapter.register(
+            key: fallbackWarmKey,
+            requestId: 107,
+            identity: otherIdentity,
+            timeout: DispatchWorkItem {},
+            replyHandler: { _, _ in }
+        ))
+        var coldCapability = MaruMermaidJobCapability()
+        coldCapability.job_id = fallbackColdKey.jobId
+        coldCapability.renderer = expectedRenderer
+        var warmCapability = MaruMermaidJobCapability()
+        warmCapability.job_id = fallbackWarmKey.jobId
+        warmCapability.renderer = otherRenderer
+        var fallbackDelays: [Int] = []
+        let coldArmed = fallbackAdapter.armFallback(
+            capability: coldCapability,
+            deadlineMs: 6_000,
+            nowMs: 1_000
+        ) { delayMs, _ in fallbackDelays.append(delayMs) }
+        let coldDuplicateRejected = !fallbackAdapter.armFallback(
+            capability: coldCapability,
+            deadlineMs: 6_000,
+            nowMs: 1_000
+        ) { _, _ in }
+        fallbackAdapter.deliver(
+            replyPayload(surfaceId: fallbackColdKey.surfaceId, jobId: fallbackColdKey.jobId, renderer: expectedRenderer)
+        ) { _, _ in }
+        let warmArmedAfterQueueWait = fallbackAdapter.armFallback(
+            capability: warmCapability,
+            deadlineMs: 9_000,
+            nowMs: 7_000
+        ) { delayMs, _ in fallbackDelays.append(delayMs) }
+        checks["reply_fallback_arms_from_exact_action_deadline"] = coldArmed && coldDuplicateRejected &&
+            warmArmedAfterQueueWait && fallbackDelays == [5_250, 2_250]
+        fallbackAdapter.cancelAll(error: "cleanup") { _, _ in }
+
+        // The product binding itself must observe real coordinator start actions. Admit B before pumping A so
+        // B waits in the native queue, then verify the same helper yields cold 5.25s and warm 2.25s fallbacks.
+        maru_macos_mermaid_test_reset()
+        let boundCoordinator = MermaidRenderCoordinator(validation: .smoke(helperURL))
+        let boundAdapter = MermaidReplyDeliveryAdapter(maxPending: 2)
+        let boundAWidget: UInt64 = 610
+        let boundBWidget: UInt64 = 611
+        let boundARenderer = renderer(widget: boundAWidget)
+        let boundBRenderer = renderer(widget: boundBWidget)
+        let boundAKey = MermaidReplyKey(surfaceId: surfaceId(widget: boundAWidget), jobId: 1)
+        let boundBKey = MermaidReplyKey(surfaceId: surfaceId(widget: boundBWidget), jobId: 2)
+        var boundCallbacks = 0
+        precondition(boundAdapter.register(
+            key: boundAKey,
+            requestId: 1,
+            identity: MermaidReplyIdentity(renderer: boundARenderer),
+            timeout: DispatchWorkItem {},
+            replyHandler: { response, error in
+                if response != nil && error == nil { boundCallbacks += 1 }
+            }
+        ))
+        precondition(boundAdapter.register(
+            key: boundBKey,
+            requestId: 2,
+            identity: MermaidReplyIdentity(renderer: boundBRenderer),
+            timeout: DispatchWorkItem {},
+            replyHandler: { response, error in
+                if response != nil && error == nil { boundCallbacks += 1 }
+            }
+        ))
+        var boundFallbackDelays: [Int] = []
+        boundAdapter.bindFallback(to: boundCoordinator) { delayMs, _ in
+            boundFallbackDelays.append(delayMs)
+        }
+        precondition(admit(widget: boundAWidget, source: Data("```mermaid\ngraph TD\nA --> B\n```".utf8)) == 0)
+        precondition(admit(widget: boundBWidget, source: Data("```mermaid\ngraph TD\nB --> C\n```".utf8)) == 0)
+        let boundTick = MermaidProductTickAdapter()
+        let boundDrainer = MermaidAcceptedResultDrainer()
+        let boundDeadline = Date().addingTimeInterval(7.0)
+        while boundAdapter.count != 0 && Date() < boundDeadline {
+            boundTick.tick(
+                coordinator: boundCoordinator,
+                drainer: boundDrainer,
+                consume: { payload in
+                    boundAdapter.deliver(payload) { _, _ in }
+                },
+                consumeTerminal: { terminal in
+                    boundAdapter.finishExact(
+                        key: MermaidReplyKey(surfaceId: terminal.window_id, jobId: terminal.job_id),
+                        identity: MermaidReplyIdentity(renderer: terminal.renderer),
+                        error: "unexpected terminal"
+                    )
+                }
+            )
+            if boundAdapter.count != 0 {
+                RunLoop.current.run(until: Date().addingTimeInterval(0.005))
+            }
+        }
+        checks["reply_fallback_product_pump_wiring"] = boundCallbacks == 2 && boundAdapter.count == 0 &&
+            boundFallbackDelays == [5_250, 2_250]
+        boundCoordinator.shutdown()
+
         let targeted = MermaidReplyDeliveryAdapter(maxPending: 4)
         let targetA = MermaidReplyKey(surfaceId: 51, jobId: 201)
         let targetB = MermaidReplyKey(surfaceId: 51, jobId: 202)
@@ -809,6 +949,8 @@ struct MermaidHelperSmoke {
             "failure_latch_helper_starts": final.helper_starts,
             "failure_latch_deadlines": final.deadline_expirations,
             "failure_latched": final.disabled,
+            "failure_latch_product_tick_calls": hangingProductTick.tickCalls,
+            "failure_latch_product_completion_drain_max": hangingProductTick.maxCompletionDrain,
             "completion_drain_max": productTick.maxCompletionDrain,
             "helper_result_drain_max": perfDiagnostics.maxCompletionDrain,
             "completion_drain_cap": MARU_MERMAID_MAX_COMPLETIONS_PER_TICK,
@@ -818,6 +960,10 @@ struct MermaidHelperSmoke {
             "product_tick_drain_calls": productTick.acceptedDrainCalls,
             "product_tick_max_elapsed_us": productTick.maxElapsedMicroseconds,
             "accepted_svg_bytes_max": acceptedDrainer.acceptedBytesMax,
+            "cold_response_deadline_ms": MARU_MERMAID_COLD_RESPONSE_DEADLINE_MS,
+            "warm_response_deadline_ms": MARU_MERMAID_WARM_RESPONSE_DEADLINE_MS,
+            "reply_fallback_grace_ms": MARU_MERMAID_REPLY_FALLBACK_GRACE_MS,
+            "reply_fallback_ms": MARU_MERMAID_REPLY_FALLBACK_MS,
             "tick_process_spawn_terminate": perfDiagnostics.mainThreadProcessOperations,
             "tick_pipe_setup": perfDiagnostics.mainThreadPipeSetups,
             "tick_pipe_read_write": perfDiagnostics.mainThreadPipeIO,
@@ -917,6 +1063,25 @@ struct MermaidHelperSmoke {
         let deadline = Date().addingTimeInterval(timeout)
         while !done() && Date() < deadline {
             coordinator.pump()
+            RunLoop.current.run(until: Date().addingTimeInterval(0.01))
+        }
+    }
+
+    private static func pumpProductTick(
+        _ coordinator: MermaidRenderCoordinator,
+        tick: MermaidProductTickAdapter,
+        drainer: MermaidAcceptedResultDrainer,
+        until done: () -> Bool,
+        timeout: TimeInterval
+    ) {
+        let deadline = Date().addingTimeInterval(timeout)
+        while !done() && Date() < deadline {
+            tick.tick(
+                coordinator: coordinator,
+                drainer: drainer,
+                consume: { _ in },
+                consumeTerminal: { _ in }
+            )
             RunLoop.current.run(until: Date().addingTimeInterval(0.01))
         }
     }

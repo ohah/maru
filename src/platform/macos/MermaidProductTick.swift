@@ -56,6 +56,7 @@ final class MermaidReplyDeliveryAdapter {
         let identity: MermaidReplyIdentity
         let replyHandler: ReplyHandler
         let timeout: DispatchWorkItem
+        var fallbackArmed: Bool
     }
 
     private let maxPending: Int
@@ -81,9 +82,55 @@ final class MermaidReplyDeliveryAdapter {
             requestId: requestId,
             identity: identity,
             replyHandler: replyHandler,
-            timeout: timeout
+            timeout: timeout,
+            fallbackArmed: false
         )
         return true
+    }
+
+    /// Admission queue에서 기다린 시간은 Zig response deadline에 포함되지 않는다. 따라서 fallback도
+    /// 실제 start action의 absolute deadline을 받은 뒤에만 arm하고, 그 전에는 pending reply를 보존한다.
+    @discardableResult
+    func armFallback(
+        capability: MaruMermaidJobCapability,
+        deadlineMs: UInt64,
+        nowMs: UInt64,
+        schedule: (Int, DispatchWorkItem) -> Void = { delayMs, item in
+            DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(delayMs), execute: item)
+        }
+    ) -> Bool {
+        let identity = MermaidReplyIdentity(renderer: capability.renderer)
+        guard let key = pending.first(where: {
+            $0.key.jobId == capability.job_id && $0.value.identity == identity
+        })?.key,
+              var current = pending[key], !current.fallbackArmed else { return false }
+        current.fallbackArmed = true
+        pending[key] = current
+        let grace = UInt64(MARU_MERMAID_REPLY_FALLBACK_GRACE_MS)
+        let fallbackDeadline = deadlineMs.addingReportingOverflow(grace)
+        let absolute = fallbackDeadline.overflow ? UInt64.max : fallbackDeadline.partialValue
+        let remaining = absolute > nowMs ? absolute - nowMs : 0
+        let delayMs = remaining > UInt64(Int.max) ? Int.max : Int(remaining)
+        schedule(delayMs, current.timeout)
+        return true
+    }
+
+    /// Product wiring and native smoke share this exact start-action seam. Keeping the binding beside the
+    /// pending table prevents the app host from reimplementing when and how a fallback becomes armed.
+    func bindFallback(
+        to coordinator: MermaidRenderCoordinator,
+        schedule: @escaping (Int, DispatchWorkItem) -> Void = { delayMs, item in
+            DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(delayMs), execute: item)
+        }
+    ) {
+        coordinator.onStartJob = { [weak self] capability, deadlineMs, nowMs in
+            _ = self?.armFallback(
+                capability: capability,
+                deadlineMs: deadlineMs,
+                nowMs: nowMs,
+                schedule: schedule
+            )
+        }
     }
 
     func deliver(

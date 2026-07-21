@@ -2584,6 +2584,10 @@ test "Mermaid codec ABI keeps header constants and opaque frame behavior aligned
     try std.testing.expectEqual(@as(usize, c.MARU_MERMAID_MAX_ACCEPTED_SVG_BYTES), mermaid_coordinator.max_accepted_svg_bytes);
     try std.testing.expectEqual(@as(usize, c.MARU_MERMAID_MAX_TERMINAL_RESULTS), mermaid_coordinator.max_terminal_results);
     try std.testing.expectEqual(@as(usize, c.MARU_MERMAID_MAX_COMPLETIONS_PER_TICK), mermaid_coordinator.max_completion_drain_per_tick);
+    try std.testing.expectEqual(@as(u64, c.MARU_MERMAID_COLD_RESPONSE_DEADLINE_MS), mermaid_coordinator.cold_response_deadline_ms);
+    try std.testing.expectEqual(@as(u64, c.MARU_MERMAID_WARM_RESPONSE_DEADLINE_MS), mermaid_coordinator.warm_response_deadline_ms);
+    try std.testing.expectEqual(@as(u64, c.MARU_MERMAID_REPLY_FALLBACK_GRACE_MS), mermaid_coordinator.reply_fallback_grace_ms);
+    try std.testing.expectEqual(@as(u64, c.MARU_MERMAID_REPLY_FALLBACK_MS), mermaid_coordinator.reply_fallback_ms);
     try std.testing.expectEqual(@as(u32, c.MARU_MERMAID_TERMINAL_SUPERSEDED), @intFromEnum(mermaid_coordinator.TerminalReason.superseded));
     try std.testing.expectEqual(@as(u32, c.MARU_MERMAID_TERMINAL_DEADLINE), @intFromEnum(mermaid_coordinator.TerminalReason.deadline));
     try std.testing.expectEqual(@as(u32, c.MARU_MERMAID_TERMINAL_TRANSIENT_FAILURE), @intFromEnum(mermaid_coordinator.TerminalReason.transient_failure));

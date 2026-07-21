@@ -59,9 +59,11 @@ src/
                         server.zig(connection dispatch state machine — hello 협상 + read-only command dispatch(host.info·runtime.list·get)·
                         pong echo·typed error, 순수 로직 — **구현됨, P3-d1**),
                         socket_server.zig(실 unix socket bind(0700 dir·0600 socket·symlink 방어)·accept·peer-cred same-UID·read/write
-                        I/O loop, self-contained macOS adapter(maru 무관)·process smoke — **구현됨, P3-d2a**);
-                        이후 계획: socket 발견(flock stale·start lock·경로 정책) + detached-helper launch + main.zig(`maru-sessiond`
-                        entrypoint, P3-d2b) + connection별 bounded queue, client.zig(hello/RPC/stream demux, P3-e). control-plane/browser
+                        I/O loop, self-contained macOS adapter(maru 무관)·process smoke — **구현됨, P3-d2a**),
+                        discovery.zig(§10 socket 발견 state machine·경로 — connect-first·조회 auto-start 금지·spawn 의도 start lock
+                        winner·control-plane과 경로 분리, 순수 — **구현됨, P3-d2b**);
+                        이후 계획: 실 connect·flock start lock·detached-helper launch(`maru __session-host`) + main.zig(`maru-sessiond`
+                        entrypoint, P3-d2c) + connection별 bounded queue, client.zig(hello/RPC/stream demux, P3-e). control-plane/browser
                         server와 ID·wire를 공유하지 않으며, macOS launch/peer-cred/socket adapter만 platform 경계에 두고
                         codec/state machine은 OS 중립(platform import 0)으로 둔다. 테스트는 `mise run test-session-host`(기본 `test`에도 편입)
     windows/

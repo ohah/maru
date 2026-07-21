@@ -292,6 +292,7 @@ export function requestFileBridge(
   method: "renderMermaid",
   value: RenderMermaidRequest,
   timeoutMs?: number | null,
+  signal?: AbortSignal,
 ): Promise<BridgeResult>;
 export function requestFileBridge(
   document: Document,
@@ -334,6 +335,7 @@ export function requestFileBridge(
   method: FileMethod,
   value?: unknown,
   timeoutMs: number | null = 15_000,
+  signal?: AbortSignal,
 ): Promise<BridgeResult> {
   return new Promise((resolve, reject) => {
     const node = document.createElement("span");
@@ -505,9 +507,13 @@ export function requestFileBridge(
     node.textContent = JSON.stringify(encodeFileBridgeRequest(request));
     document.documentElement.append(node);
 
+    let settled = false;
     const cleanup = () => {
+      if (settled) return;
+      settled = true;
       if (timer !== null) clearTimeout(timer);
       document.removeEventListener("maru:file-response", onResponse);
+      signal?.removeEventListener("abort", onAbort);
       node.remove();
     };
     const onResponse = () => {
@@ -524,6 +530,12 @@ export function requestFileBridge(
         reject(error instanceof Error ? error : new Error("invalid file bridge response"));
       }
     };
+    // 수명 전환(disable/destroy/replacement)이 응답 없는 mailbox를 로컬에서 정확히 한 번 종료한다. native
+    // 응답 timeout(있으면)과 별개로 listener·hidden node를 즉시 회수하고 Promise를 reject해 stuck await를 푼다.
+    const onAbort = () => {
+      cleanup();
+      reject(new DOMException("file bridge request aborted", "AbortError"));
+    };
     const timer =
       timeoutMs === null
         ? null
@@ -532,6 +544,13 @@ export function requestFileBridge(
             reject(new Error("file bridge timeout"));
           }, timeoutMs);
     document.addEventListener("maru:file-response", onResponse);
+    if (signal !== undefined) {
+      if (signal.aborted) {
+        onAbort();
+        return;
+      }
+      signal.addEventListener("abort", onAbort);
+    }
     const EventConstructor = document.defaultView?.Event ?? Event;
     document.dispatchEvent(new EventConstructor("maru:file-request"));
   });
@@ -546,6 +565,7 @@ export async function renderMermaidFromBridge(
   fenceId: number,
   sourceHash: string,
   source: string,
+  signal?: AbortSignal,
 ): Promise<string | null> {
   if (status !== null) status.dataset.liveMermaidRequest = "pending";
   try {
@@ -564,6 +584,7 @@ export async function renderMermaidFromBridge(
         source,
       },
       null,
+      signal,
     );
     const svg = typeof result.svg === "string" ? result.svg : null;
     if (status !== null) status.dataset.liveMermaidRequest = svg === null ? "invalid" : "ok";
@@ -1018,8 +1039,8 @@ export function bootShell(document: Document, targetWindow: Window): void {
         );
       },
       enqueueLivePreviewIntent,
-      (capability, fenceId, sourceHash, source) =>
-        renderMermaidFromBridge(document, status, capability, fenceId, sourceHash, source),
+      (capability, fenceId, sourceHash, source, signal) =>
+        renderMermaidFromBridge(document, status, capability, fenceId, sourceHash, source, signal),
       (capability) => {
         void revokeMermaidFromBridge(document, capability).catch(() => {});
       },

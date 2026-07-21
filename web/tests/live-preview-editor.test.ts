@@ -256,6 +256,94 @@ describe("live preview atomic frame budget", () => {
     });
   });
 
+  test("aborts the in-flight Mermaid mailbox on disable so a hung render is reclaimed", async () => {
+    await withEditorDom(async (dom) => {
+      const source = "```mermaid\ngraph TD\n```";
+      const editor = createMarkdownEditor(
+        dom.window.document.querySelector("main") as HTMLElement,
+        source,
+        () => {},
+        () => {},
+      );
+      editor.dispatch({ selection: EditorSelection.cursor(source.length) });
+      const revisions = new EditorRevisionClock();
+      const identity = revisions.nextProjection();
+      let capturedSignal: AbortSignal | null = null;
+      let rendererSettled = false;
+      const controller = new AtomicProjectionController(
+        editor,
+        8,
+        revisions,
+        FakeAtomicWorker as unknown as typeof Worker,
+        async () => null,
+        () => {},
+        () => {},
+        () => {},
+        // 응답 없는 render를 모사한다: 자체로는 settle하지 않고 signal이 abort될 때만 reject해,
+        // 제품의 로컬 mailbox 회수(수명 전환 시 원 Promise 종료)를 검증한다.
+        async (_capability, _fenceId, _sourceHash, _mermaidSource, signal) => {
+          capturedSignal = signal ?? null;
+          return new Promise<string | null>((_resolve, reject) => {
+            signal?.addEventListener("abort", () => {
+              rendererSettled = true;
+              reject(new Error("aborted"));
+            });
+          });
+        },
+        () => {},
+      );
+      try {
+        controller.submitEntries(identity.documentRevision, identity.projectionGeneration, [
+          { type: "atomic", role: "mermaid", from: 0, to: source.length },
+        ]);
+        controller.enable();
+        const worker = FakeAtomicWorker.latest;
+        worker?.reply({
+          type: "result",
+          editorEpoch: 8,
+          documentRevision: 0,
+          projectionGeneration: 0,
+          results: [],
+          rejected: [],
+        });
+        const project = worker?.sent[1];
+        if (project?.type !== "project" || project.requests[0] === undefined)
+          throw new Error("missing Mermaid request");
+        worker.reply({
+          type: "result",
+          editorEpoch: 8,
+          documentRevision: 0,
+          projectionGeneration: 1,
+          results: [
+            {
+              request: project.requests[0],
+              sourceHash: "a".repeat(64),
+              sanitizedPayload: "",
+              assetGrants: [],
+              mermaidSource: source,
+            },
+          ],
+          rejected: [],
+        });
+        await Promise.resolve();
+        // render가 in-flight로 hang한다: signal은 전달됐고 아직 abort되지 않았다.
+        expect(capturedSignal).not.toBeNull();
+        expect((capturedSignal as unknown as AbortSignal).aborted).toBe(false);
+        expect(rendererSettled).toBe(false);
+        // 수명 전환(disable)이 원 mailbox를 로컬에서 정확히 한 번 abort한다.
+        controller.disable();
+        expect((capturedSignal as unknown as AbortSignal).aborted).toBe(true);
+        await Promise.resolve();
+        await Promise.resolve();
+        // 응답 없던 render가 settle돼(stuck await 해소) 이후 projection 적용이 재개될 수 있다.
+        expect(rendererSettled).toBe(true);
+      } finally {
+        controller.destroy();
+        editor.destroy();
+      }
+    });
+  });
+
   test("reuses a bounded exact-source Mermaid render across an unrelated document revision", async () => {
     await withEditorDom(async (dom) => {
       const mermaidSource = "```mermaid\nflowchart TD\n  A --> B\n```";

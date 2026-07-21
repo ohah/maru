@@ -339,6 +339,10 @@ export class AtomicProjectionController {
   private readonly consumedAssetNonces = new Set<number>();
   private readonly mermaidCache = new Map<string, Readonly<{ source: string; svg: string }>>();
   private readonly pendingMermaid = new Map<number, RendererCapability>();
+  // 각 in-flight renderMermaid의 취소 핸들. 수명 전환(disable/destroy/replacement)에서 원 mailbox
+  // (Promise·listener·hidden node)를 정확히 한 번 회수해, 응답 없는 render의 stuck await로 applyingProjection이
+  // 고착되고 이후 projection 적용이 멈추는 것을 막는다.
+  private readonly pendingMermaidAborts = new Map<number, AbortController>();
 
   constructor(
     private readonly view: EditorView,
@@ -354,6 +358,7 @@ export class AtomicProjectionController {
       fenceId: number,
       sourceHash: string,
       source: string,
+      signal?: AbortSignal,
     ) => Promise<string | null> = async () => null,
     private readonly revokeMermaid: (capability: RendererCapability) => void = () => {},
   ) {}
@@ -704,12 +709,15 @@ export class AtomicProjectionController {
           if (cached?.source === source) svg = cached.svg;
           else {
             this.pendingMermaid.set(capability.widgetId, capability);
+            const abort = new AbortController();
+            this.pendingMermaidAborts.set(capability.widgetId, abort);
             try {
               svg = await this.renderMermaid(
                 capability,
                 currentRequest.requestNonce,
                 projected.sourceHash,
                 source,
+                abort.signal,
               );
               renderedFresh = svg !== null;
             } catch {
@@ -717,6 +725,8 @@ export class AtomicProjectionController {
             } finally {
               if (this.pendingMermaid.get(capability.widgetId) === capability)
                 this.pendingMermaid.delete(capability.widgetId);
+              if (this.pendingMermaidAborts.get(capability.widgetId) === abort)
+                this.pendingMermaidAborts.delete(capability.widgetId);
             }
           }
         }
@@ -828,6 +838,10 @@ export class AtomicProjectionController {
   }
 
   private revokePendingMermaid(): void {
+    // 응답 없는 원 render mailbox를 먼저 로컬에서 abort(정확히 한 번)해 stuck await를 풀고 applyingProjection
+    // 고착을 해소한 뒤, native에 revoke를 통지한다. abort는 별도 2.5s revoke 요청과 무관하게 즉시 회수한다.
+    for (const abort of this.pendingMermaidAborts.values()) abort.abort();
+    this.pendingMermaidAborts.clear();
     for (const capability of this.pendingMermaid.values()) this.revokeMermaid(capability);
     this.pendingMermaid.clear();
   }

@@ -9,6 +9,9 @@ const protocol = @import("mermaid_protocol.zig");
 pub const max_pending_jobs: usize = 32;
 pub const max_pending_source_bytes: usize = 1024 * 1024;
 pub const max_accepted_svg_bytes: usize = 2 * 1024 * 1024;
+/// 한 줄의 **바이트** 상한(줄바꿈 사이 바이트 수). Web `maxMermaidSourceLines`(atomic-projection.ts)는 같은
+/// 512지만 **줄 개수** 상한으로 축이 다르다: 513바이트 단일 줄은 여기서, 513개 짧은 줄은 Web이 먼저
+/// source-preserving으로 강등한다(둘 다 fail-safe라 correctness 문제 없음). docs/file-panel.md 단일 출처.
 pub const max_line_bytes: usize = 512;
 /// 첫 요청은 helper validation/spawn/Hello와 cold WKWebView 기동까지 포함한다. 이미 검증·기동된
 /// helper의 후속 요청은 renderer 응답만 기다리므로 더 짧은 deadline을 유지한다.
@@ -891,6 +894,18 @@ test "admission rejects overlong lines and invalid UTF-8 before copying" {
     try std.testing.expectError(error.LineTooLong, state.admit(testRequest(1, 1, &long_line)));
     try std.testing.expectError(error.InvalidUtf8, state.admit(testRequest(1, 2, &.{ 0xc3, 0x28 })));
     try std.testing.expectEqual(@as(u64, 0), state.snapshot().admission_copies);
+}
+
+// max_line_bytes는 한 줄의 **바이트** 상한이다(Web maxMermaidSourceLines의 줄 **개수** 상한과 축이 다름).
+// 정확히 512바이트 줄은 통과하고 513바이트부터 LineTooLong이다. 짧은 줄이 아무리 많아도(줄 개수는 여기서
+// 안 본다) 각 줄이 512바이트 이하면 통과한다 — 줄 개수 강등은 Web 계약이 소유한다.
+test "hasLongLine brackets max_line_bytes on the per-line byte axis" {
+    const at_cap = [_]u8{'a'} ** max_line_bytes;
+    try std.testing.expect(!hasLongLine(&at_cap));
+    const over_cap = [_]u8{'a'} ** (max_line_bytes + 1);
+    try std.testing.expect(hasLongLine(&over_cap));
+    const many_short_lines = [_]u8{'\n'} ** 1000;
+    try std.testing.expect(!hasLongLine(&many_short_lines));
 }
 
 test "admission rejects zero editor epoch before copying" {

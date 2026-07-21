@@ -246,6 +246,12 @@ describe("FP11 live preview contract harness", () => {
     expect(atomicSourceWithinLimit("math", "a".repeat(maxAtomicSourceBytes.math + 1))).toBe(false);
     expect(atomicSourceWithinLimit("mermaid", "\n".repeat(511))).toBe(true);
     expect(atomicSourceWithinLimit("mermaid", "\n".repeat(512))).toBe(false);
+    // 축이 다름을 고정한다: Web은 줄 **개수**(≤512)와 총 바이트만 본다. 513바이트 **단일 줄**(1줄)은
+    // 여기서 통과하고(한 줄의 바이트는 Zig admission의 max_line_bytes가 잡는다), 총 바이트 상한만 별도로 강제한다.
+    expect(atomicSourceWithinLimit("mermaid", "a".repeat(513))).toBe(true);
+    expect(atomicSourceWithinLimit("mermaid", "a".repeat(maxAtomicSourceBytes.mermaid + 1))).toBe(
+      false,
+    );
 
     const grant: AssetGrant = {
       editorEpoch: 2,

@@ -23,6 +23,9 @@ pub const ApplyError = screen_stream.DecodeError || error{
     /// 부분 열 set_runs(start_col>0)는 아직 지원하지 않는다. 현재 producer(`computeDelta`)는 항상 전체 행(start_col=0)만
     /// 낸다 — 열 splice는 producer가 부분 갱신을 최적화할 때의 forward 확장이다.
     PartialRowUnsupported,
+    /// 받은 행의 Σ(width*count)가 cols와 다르다(§12: wide-cell continuation 불일치·손상·버전 스큐) — 조용히 truncate/blank로
+    /// 렌더하지 않고 reject해 caller가 fresh snapshot을 재요청하게 한다.
+    MalformedRow,
 };
 
 /// 한 행의 소유 runs(grapheme는 `pool`을 참조). record 버퍼는 일시적이라 조립기가 grapheme을 복사해 delta 사이에 유지한다.
@@ -94,8 +97,11 @@ pub const ScreenAssembler = struct {
             const dr = try screen_stream.decodeRow(self.allocator, s.body);
             defer dr.deinit(self.allocator);
             if (dr.row_index >= self.rows_count) continue; // 범위 밖 row_index 무시.
+            if (!screen_stream.rowWidthMatches(dr, self.cols)) return error.MalformedRow; // §12 계약 검증(reject-and-request-fresh).
+            // ownRuns를 **먼저** — 실패해도 기존 슬롯이 불변이라, 중복 row_index + OOM에서 해제된 포인터 재해제(double free)를 막는다.
+            const owned = try ownRuns(self.allocator, dr.runs);
             self.rows[dr.row_index].deinit(self.allocator);
-            self.rows[dr.row_index] = try ownRuns(self.allocator, dr.runs);
+            self.rows[dr.row_index] = owned;
         }
     }
 
@@ -112,6 +118,7 @@ pub const ScreenAssembler = struct {
                     if (sr.base_generation != self.generation) return error.GenerationGap;
                     if (sr.row_index >= self.rows_count) return error.GeometryMismatch;
                     if (sr.start_col != 0) return error.PartialRowUnsupported; // 현재 producer는 전체 행만 낸다.
+                    if (!screen_stream.rowWidthMatches(.{ .row_index = sr.row_index, .runs = sr.runs }, self.cols)) return error.MalformedRow; // §12 검증.
                     const owned = try ownRuns(self.allocator, sr.runs);
                     self.rows[sr.row_index].deinit(self.allocator);
                     self.rows[sr.row_index] = owned;

@@ -25,6 +25,7 @@ pub const RemoteRuntime = struct {
     io: std.Io,
     runtime_id_hex: [32]u8, // host 발급 runtime_id(hex) — terminate에 되먹인다.
     stream_id: u64, // attach가 발급한 stream — input/resize/delta 라우팅.
+    resize_seq: u64, // 단조 증가 client_sequence — registry가 이하 sequence를 stale로 거부하므로 매 resize마다 올린다.
     remote_screen: remote_screen.RemoteScreen, // 조립기+cell 격자(surface의 화면 소스).
     surface: Surface, // 원격-backed(surface.remote = remote_screen.screenSource()). GUI가 이걸 렌더.
 
@@ -42,6 +43,7 @@ pub const RemoteRuntime = struct {
         self.client = client;
         self.allocator = allocator;
         self.io = io;
+        self.resize_seq = 0;
 
         // 1. runtime.spawn — host가 실 PTY를 띄우고 runtime_id를 준다.
         const spawn_params = buildSpawnParams(allocator, argv, size) catch return error.OutOfMemory;
@@ -91,18 +93,25 @@ pub const RemoteRuntime = struct {
 
     /// canonical PTY size를 바꾼다(host `runtime.resize`). host가 실 `TerminalCore`+`TIOCSWINSZ`에 적용한다.
     pub fn resize(self: *RemoteRuntime, cols: u16, rows: u16) client_mod.ClientError!void {
+        self.resize_seq += 1; // 단조 증가 — registry가 이하 sequence를 stale로 거부(첫 resize만 적용되는 버그 방지).
         var buf: [96]u8 = undefined;
-        const params = std.fmt.bufPrint(&buf, "{{\"stream_id\":{d},\"cols\":{d},\"rows\":{d},\"client_sequence\":0}}", .{ self.stream_id, cols, rows }) catch return error.OutOfMemory;
+        const params = std.fmt.bufPrint(&buf, "{{\"stream_id\":{d},\"cols\":{d},\"rows\":{d},\"client_sequence\":{d}}}", .{ self.stream_id, cols, rows, self.resize_seq }) catch return error.OutOfMemory;
         const resp = try self.client.call("runtime.resize", params);
         self.allocator.free(resp);
     }
 
-    /// 다음 delta batch 하나를 소비해 원격 화면에 반영한다(§10 delta_chunk stream). frame-loop(e3)가 매 프레임 부른다.
-    /// GenerationGap이면 caller가 fresh snapshot을 재요청해야 한다(§9 — 이 재요청 배선도 e3).
+    /// 다음 화면 stream 배치 하나를 소비해 원격 화면에 반영한다(§9/§10). frame-loop(e3)가 매 프레임 부른다 — **논블로킹**이라
+    /// 변화가 없으면 조용히 반환한다. host가 grid/alt 변화 시 delta 대신 fresh snapshot을 push하므로 둘 다 처리한다(is_snapshot이면
+    /// 화면 리셋, 아니면 증분). 다른 runtime의 배치는 무시한다(멀티 runtime 라우팅은 e3 프레임 루프 몫).
     pub fn pumpDelta(self: *RemoteRuntime) (client_mod.ClientError || screen_assembler.ApplyError)!void {
-        const d = try self.client.readDelta(self.stream_id);
-        defer self.allocator.free(d);
-        try self.remote_screen.applyDelta(d, self.io);
+        const batch = (try self.client.readStreamBatch(self.allocator)) orelse return; // idle → no-op.
+        defer self.allocator.free(batch.bytes);
+        if (batch.stream_id != self.stream_id) return;
+        if (batch.is_snapshot) {
+            try self.remote_screen.applySnapshot(batch.bytes, self.io); // §9 fresh snapshot(grid/alt 변화) → 화면 리셋.
+        } else {
+            try self.remote_screen.applyDelta(batch.bytes, self.io);
+        }
     }
 
     fn terminateBestEffort(self: *RemoteRuntime) void {
@@ -186,16 +195,17 @@ test "remote runtime: spawns over the wire, renders host screen into a Surface, 
     surface.unlockCore(io);
     try testing.expectEqual(@as(u16, 40), cols0);
 
-    // 입력을 보내면 host가 echo → 화면 row0이 바뀌고 delta가 온다. delta batch를 몇 번 소비해 Surface에 "h"가 반영되는지 본다.
+    // 입력을 보내면 host가 echo → 화면 row0이 바뀌고 delta가 온다. pumpDelta는 논블로킹이라 delta가 도착할 때까지 폴링한다
+    // (host delta tick ~20ms). Surface에 "h"가 반영되는지 본다.
     try rr.sendInput("hello\n");
     var found = false;
     var attempts: usize = 0;
-    while (attempts < 8 and !found) : (attempts += 1) {
+    while (attempts < 100 and !found) : (attempts += 1) {
         rr.pumpDelta() catch break;
         surface.lockCore(io);
         const c0 = surface.renderSnapshot().cells[0].codepoint;
         surface.unlockCore(io);
-        if (c0 == 'h') found = true;
+        if (c0 == 'h') found = true else _ = usleep(20 * 1000);
     }
     try testing.expect(found); // 원격 runtime의 화면 변화가 client Surface에 반영됐다.
 }

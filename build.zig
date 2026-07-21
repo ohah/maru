@@ -581,6 +581,20 @@ pub fn build(b: *std.Build) void {
     const test_macos_file_explorer_perf_step = b.step("test-macos-file-explorer-perf", "Run the macOS AppSession file-explorer performance artifact gate");
     test_macos_file_explorer_perf_step.dependOn(&run_macos_file_explorer_perf_tests.step);
 
+    const provider_no_mutation_tests = b.addTest(.{
+        .root_module = macos_app_host_abi_tests.root_module,
+        .filters = &.{
+            "provider files remain unchanged across AppSession.init",
+            "legacy provider workspace fields are ignored across multi-window parse apply and write-new",
+            "workspace restore ABI preserves multi-window count active and apply",
+        },
+    });
+    const run_provider_no_mutation_tests = b.addRunArtifact(provider_no_mutation_tests);
+    run_provider_no_mutation_tests.setCwd(b.path("."));
+    run_provider_no_mutation_tests.setEnvironmentVariable("MARU_TEST_PROVIDER_NO_MUTATION", "1");
+    const test_provider_session_removal_step = b.step("test-provider-session-removal", "Verify provider continuity removal on the macOS product path");
+    test_provider_session_removal_step.dependOn(&run_provider_no_mutation_tests.step);
+
     const macos_app_host_abi_lib = b.addLibrary(.{
         .name = "maru-macos-app-host-abi",
         .linkage = .static,

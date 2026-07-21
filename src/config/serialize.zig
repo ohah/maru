@@ -145,9 +145,6 @@ test "round-trip: configKeyValues → updateConfigText → parse가 모든 필�
     var arena = std.heap.ArenaAllocator.init(a);
     defer arena.deinit();
     const kvs = try configKeyValues(arena.allocator(), cfg);
-    try std.testing.expect(valueForKey(kvs, "workspace.restore-claude") == null);
-    try std.testing.expect(valueForKey(kvs, "workspace.restore-codex") == null);
-    try std.testing.expect(valueForKey(kvs, "notifications.agent-complete") == null);
     const text = try loader.updateConfigText(a, "", kvs); // 빈 원본 → 전 키 append
     defer a.free(text);
 
@@ -246,7 +243,11 @@ test "updateForKeys: 넘긴 키만 현재값으로 부분 갱신, 나머지/주�
     cfg.cursor.blink = false; // 기본 true에서 변경
     cfg.font.size = 16; // 변경했지만 키를 안 넘기면 안 써져야 함(override-only)
 
-    const original = "# 사용자 주석\ncursor.blink = true\nfont.family = Menlo\n";
+    const removed_settings =
+        "workspace.restore-claude = true\n" ++
+        "workspace.restore-codex = false\n" ++
+        "notifications.agent-complete = true\n";
+    const original = "# 사용자 주석\ncursor.blink = true\nfont.family = Menlo\n" ++ removed_settings;
     // cursor.blink만 갱신 요청(+ configKeyValues에 없는 키 keybind는 스킵돼야 — keybind/preset/오타는 valueForKey null)
     const text = try updateForKeys(a, original, cfg, &.{ "cursor.blink", "keybind" });
     defer a.free(text);
@@ -257,5 +258,6 @@ test "updateForKeys: 넘긴 키만 현재값으로 부분 갱신, 나머지/주�
     try std.testing.expectEqual(@as(f32, 14), p.config.font.size); // 안 넘김 → 텍스트에 없음 → 기본 14(override-only)
     try std.testing.expectEqualStrings("Menlo", p.config.font.family); // 원본 다른 줄 보존
     try std.testing.expect(std.mem.indexOf(u8, text, "# 사용자 주석") != null); // 주석 보존
+    try std.testing.expect(std.mem.indexOf(u8, text, removed_settings) != null); // 제거된 미지 키도 사용자 원문 그대로 보존
     try std.testing.expect(std.mem.indexOf(u8, text, "keybind") == null); // configKeyValues에 없는 키는 스킵(안 써짐)
 }

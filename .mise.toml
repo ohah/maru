@@ -82,6 +82,10 @@ run = "zig build macos-app-host-swift-check"
 description = "Run the macOS AppSession file-explorer performance artifact gate"
 run = "zig build test-macos-file-explorer-perf"
 
+[tasks.test-provider-session-removal]
+description = "Verify provider continuity removal on the macOS product path"
+run = "zig build test-provider-session-removal"
+
 [tasks.macos-mermaid-helper-build]
 description = "Build the isolated Mermaid renderer helper"
 run = "zig build macos-mermaid-helper-build"

@@ -22,17 +22,10 @@ pub const header = "maru.workspace.v1";
 /// 없어 sane 상한을 우리가 정함 — Ghostty는 바이너리 아카이버라 이 텍스트-깊은중첩 벡터 자체가 없다.
 pub const max_panes_per_tab = 1024;
 
-/// 한 surface가 보존하는 agent argv 토큰 수 sanity 상한 — 손상/변조 파일이 `agent-argc`를 부풀려 거대 루프를
-/// 돌지 않게 parseSurface가 먼저 가둔다. 현실 에이전트 argv는 한 자릿수~수십 개라 256은 어떤 정상 호출보다 크다.
-pub const max_agent_argv = 256;
-
 /// 한 라인의 key=value 필드 수 sanity 상한 — key-addressed 리더(LineFields)는 라인을 통째 토큰화하므로, 손상/변조
-/// 파일이 한 줄에 토큰을 무한정 채우면(예: agent-argc는 작은데 agent-arg를 수백만 개) 토큰화 작업·메모리가 라인
-/// 길이만큼 부풀 수 있다. max_agent_argv가 argc *값*만 가두던 방어를 라인 *토큰 수*로도 유지한다. 상한은 정상·forward-compat
-/// 라인을 절대 거부하지 않게 넉넉히 잡는다(DoS는 어떤 작은 상수로도 막히므로): 정상 최대 라인 = surface의 스칼라 키
-/// + agent-argv(≤max_agent_argv). scalar 키가 미래에 늘어도 한 라인에 256개(=max_agent_argv 여유)를 넘길 일은 없으므로,
-/// 이 여유면 순수 손상만 거르고 정상 확장은 통과한다(code-review high: 여유가 좁으면 미래 포맷을 통째 폴백시킬 수 있음).
-pub const max_line_fields = max_agent_argv + 256;
+/// 파일이 한 줄에 토큰을 무한정 채우면 토큰화 작업·메모리가 라인 길이만큼 부풀 수 있다. 512는 현재 최대 window line과
+/// additive scalar 확장 여유를 함께 보존하면서 손상된 unknown-field 폭주를 고정된 작업량으로 가두는 일반 상한이다.
+pub const max_line_fields: usize = 512;
 
 /// 한 창에 영속할 파일 도크 entry sanity 상한. 라이브 WKWebView 상한(기본 8)과 달리 해제된 탭 metadata는 남으므로
 /// 더 넉넉해야 하지만, window 한 줄의 반복 키가 손상 파일에서 무한히 늘어나는 것은 막아야 한다. 256은 실제 열린 파일
@@ -73,10 +66,6 @@ pub const Surface = struct {
     command: []const u8 = "",
     cols: u16 = 0,
     rows: u16 = 0,
-    // 구버전 workspace reader 호환 전용. 새 writer는 쓰지 않고 app layer도 실행에 사용하지 않는다.
-    agent_kind: []const u8 = "",
-    agent_session: []const u8 = "",
-    agent_argv: []const []const u8 = &.{},
 };
 
 /// split leaf 한 칸(panel) — 가로 탭으로 여러 Term을 들 수 있다(탭→pane 모델). active-term = 보이는 Term.
@@ -798,19 +787,6 @@ fn parseSurface(a: std.mem.Allocator, lines: *LineIter) ParseError!Surface {
     const command = try f.getQuoted(a, "command", "");
     const cols = try f.getUint("cols", u16, 80);
     const rows = try f.getUint("rows", u16, 24);
-    const agent_kind = try f.getQuoted(a, "agent-kind", "");
-    const agent_session = try f.getQuoted(a, "agent-session", "");
-    // 구버전 writer가 남긴 에이전트 복원 메타데이터는 한 릴리스 동안 읽되 실행에는 사용하지 않는다. 새 writer는
-    // 이 키들을 내보내지 않으므로 agent-argc가 없으면 0으로 본다.
-    const argc = try f.getUint("agent-argc", usize, 0);
-    if (argc > max_agent_argv) return error.BadLine; // 손상/변조 방어(거대 루프 차단)
-    var argv: std.ArrayList([]const u8) = .empty;
-    for (f.fields) |field| { // 반복 키 agent-arg를 나온 순서대로 수집(key-addressed find는 첫 매치만이라 직접 순회)
-        if (!std.mem.eql(u8, field.key, "agent-arg")) continue;
-        if (!field.is_quoted) return error.BadLine;
-        try argv.append(a, try unescapeQuoted(a, field.raw));
-    }
-    if (argv.items.len != argc) return error.BadLine; // self-delimiting 정합: agent-argc == 실제 agent-arg 개수(불일치=손상)
     return .{
         .custom_name = custom_name,
         .title = title,
@@ -818,9 +794,6 @@ fn parseSurface(a: std.mem.Allocator, lines: *LineIter) ParseError!Surface {
         .command = command,
         .cols = cols,
         .rows = rows,
-        .agent_kind = agent_kind,
-        .agent_session = agent_session,
-        .agent_argv = try argv.toOwnedSlice(a),
     };
 }
 
@@ -904,10 +877,10 @@ fn unescapeQuoted(a: std.mem.Allocator, raw: []const u8) ParseError![]const u8 {
 }
 
 /// 스칼라 속성 라인(`<kind> key=val key="quoted" ...`)을 **순서 무관** key=value 필드로 토큰화한다(key-addressed —
-/// docs/workspace-restore.md "직렬화 진화 계획"). 구조 키(개수: `tabs`/`panes`/`surfaces`/`agent-argc`)는 `requireUint`으로
+/// docs/workspace-restore.md "직렬화 진화 계획"). 구조 키(개수: `tabs`/`panes`/`surfaces`)는 `requireUint`으로
 /// 없으면 BadLine(손상 탐지 loud-fail 유지), 스칼라 속성은 `getUint`/`getQuoted`로 없으면 기본값(additive 하위호환 —
-/// 옛 파일이 안 깨짐). 미지 키는 조회 안 되어 자연히 skip(forward-compat). 값은 조회 시점에 파싱(quoted는 그때
-/// escape 해제 → arena). 반복 키(`agent-arg`)는 `fields`를 직접 순회해 순서대로 수집한다.
+/// 옛 파일이 안 깨짐). 미지 키는 조회 안 되어 자연히 skip(forward-compat). 값은 조회 시점에 파싱한다(quoted는 그때
+/// escape 해제 → arena).
 const LineFields = struct {
     const Field = struct { key: []const u8, raw: []const u8, is_quoted: bool }; // raw: uint=숫자 슬라이스 / quoted=따옴표 안 원바이트(escape 미해제)
 
@@ -1366,12 +1339,12 @@ test "workspace parse: 옛 v1 파일(active-window 키 없음) 하위호환 — 
         "tab panes=1 custom-name=\"w0\"\n" ++
         "tree-node leaf pane=0\n" ++
         "pane surfaces=1 custom-name=\"\"\n" ++
-        "surface custom-name=\"\" title=\"\" cwd=\"/a\" command=\"/bin/zsh\" cols=80 rows=24 agent-kind=\"\" agent-session=\"\" agent-argc=0\n" ++
+        "surface custom-name=\"\" title=\"\" cwd=\"/a\" command=\"/bin/zsh\" cols=80 rows=24\n" ++
         "window tabs=1 active-tab=0\n" ++ // 두 번째 창도 마커 없음
         "tab panes=1 custom-name=\"w1\"\n" ++
         "tree-node leaf pane=0\n" ++
         "pane surfaces=1 custom-name=\"\"\n" ++
-        "surface custom-name=\"\" title=\"\" cwd=\"/b\" command=\"/bin/zsh\" cols=80 rows=24 agent-kind=\"\" agent-session=\"\" agent-argc=0\n";
+        "surface custom-name=\"\" title=\"\" cwd=\"/b\" command=\"/bin/zsh\" cols=80 rows=24\n";
     var parsed = try parse(std.testing.allocator, old); // BadHeader/크래시 없이 성공
     defer parsed.deinit();
     try std.testing.expectEqual(@as(usize, 2), parsed.workspace.windows.len);
@@ -1528,7 +1501,7 @@ test "workspace parse: 옛 v1 파일(win-* 키 없음) 하위호환 — 크래�
         "tab panes=1 custom-name=\"w0\"\n" ++
         "tree-node leaf pane=0\n" ++
         "pane surfaces=1 custom-name=\"\"\n" ++
-        "surface custom-name=\"\" title=\"\" cwd=\"/a\" command=\"/bin/zsh\" cols=80 rows=24 agent-kind=\"\" agent-session=\"\" agent-argc=0\n";
+        "surface custom-name=\"\" title=\"\" cwd=\"/a\" command=\"/bin/zsh\" cols=80 rows=24\n";
     var parsed = try parse(std.testing.allocator, old); // BadHeader/크래시 없이 성공
     defer parsed.deinit();
     try std.testing.expectEqual(@as(usize, 1), parsed.workspace.windows.len);
@@ -1547,7 +1520,7 @@ test "workspace parse: 부분 win-* 필드(일부만)는 frame null(손상 방�
         "tab panes=1 custom-name=\"\"\n" ++
         "tree-node leaf pane=0\n" ++
         "pane surfaces=1 custom-name=\"\"\n" ++
-        "surface custom-name=\"\" title=\"\" cwd=\"/a\" command=\"/bin/zsh\" cols=80 rows=24 agent-kind=\"\" agent-session=\"\" agent-argc=0\n";
+        "surface custom-name=\"\" title=\"\" cwd=\"/a\" command=\"/bin/zsh\" cols=80 rows=24\n";
     var parsed = try parse(std.testing.allocator, partial); // 성공(부분 필드는 손상 아님·스칼라 부재)
     defer parsed.deinit();
     try std.testing.expectEqual(@as(?Frame, null), parsed.workspace.windows[0].frame); // 부분 → null(넷 다 필요)
@@ -1562,7 +1535,7 @@ test "workspace parse: win-* 키가 있는데 값이 깨지면 BadLine(존재하
         "tab panes=1 custom-name=\"\"\n" ++
         "tree-node leaf pane=0\n" ++
         "pane surfaces=1 custom-name=\"\"\n" ++
-        "surface custom-name=\"\" title=\"\" cwd=\"/a\" command=\"/bin/zsh\" cols=80 rows=24 agent-kind=\"\" agent-session=\"\" agent-argc=0\n";
+        "surface custom-name=\"\" title=\"\" cwd=\"/a\" command=\"/bin/zsh\" cols=80 rows=24\n";
     try std.testing.expectError(error.BadLine, parse(std.testing.allocator, broken));
 }
 
@@ -1575,9 +1548,9 @@ test "workspace parse: 구조·escape 해제·forgiving" {
         "tree-node leaf pane=0\n" ++
         "tree-node leaf pane=1\n" ++
         "pane surfaces=1 active-term=0 custom-name=\"left pane\"\n" ++
-        "surface custom-name=\"editor\" title=\"top\" cwd=\"/a b\\\"c\" command=\"/bin/zsh\" cols=80 rows=24 agent-kind=\"\" agent-session=\"\" agent-argc=0\n" ++
+        "surface custom-name=\"editor\" title=\"top\" cwd=\"/a b\\\"c\" command=\"/bin/zsh\" cols=80 rows=24\n" ++
         "pane surfaces=1 active-term=0 custom-name=\"\"\n" ++
-        "surface custom-name=\"\" title=\"\" cwd=\"\" command=\"/bin/bash\" cols=80 rows=10 agent-kind=\"\" agent-session=\"\" agent-argc=0\n" ++
+        "surface custom-name=\"\" title=\"\" cwd=\"\" command=\"/bin/bash\" cols=80 rows=10\n" ++
         "trailing-garbage that should be ignored\n";
 
     var parsed = try parse(std.testing.allocator, text);
@@ -1614,7 +1587,7 @@ test "workspace parse: key-addressed 하위호환·순서무관·미지키 skip�
         "tab panes=1 custom-name=\"legacy\"\n" ++ // background-color·accent-color·active-pane·pinned 없음(구버전)
         "tree-node leaf pane=0\n" ++
         "pane surfaces=1 custom-name=\"\"\n" ++ // active-term 없음
-        "surface custom-name=\"\" title=\"\" cwd=\"/w\" command=\"/bin/zsh\" cols=100 rows=30 agent-kind=\"\" agent-session=\"\" agent-argc=0\n";
+        "surface custom-name=\"\" title=\"\" cwd=\"/w\" command=\"/bin/zsh\" cols=100 rows=30\n";
     var op = try parse(std.testing.allocator, old);
     defer op.deinit();
     const ot = op.workspace.windows[0].tabs[0];
@@ -1634,7 +1607,7 @@ test "workspace parse: key-addressed 하위호환·순서무관·미지키 skip�
         "tab accent-color=100 panes=1 future-key=\"ignored\" pinned=1 custom-name=\"x\" background-color=200 active-pane=0\n" ++
         "tree-node leaf pane=0\n" ++
         "pane surfaces=1 active-term=0 custom-name=\"\"\n" ++
-        "surface custom-name=\"\" title=\"\" cwd=\"\" command=\"/bin/zsh\" cols=80 rows=24 agent-kind=\"\" agent-session=\"\" agent-argc=0\n";
+        "surface custom-name=\"\" title=\"\" cwd=\"\" command=\"/bin/zsh\" cols=80 rows=24\n";
     var rp = try parse(std.testing.allocator, reordered);
     defer rp.deinit();
     const rt = rp.workspace.windows[0].tabs[0];
@@ -1725,77 +1698,24 @@ test "workspace serialize: 선언적 — env/fd/pid/last-observed 필드 없음(
     try std.testing.expect(std.mem.indexOf(u8, text, "cwd=\"/home/user/.secret-proj\"") != null);
 }
 
-test "workspace migration: 구 agent 메타데이터는 읽되 새 저장에서 생략" {
-    const argv = [_][]const u8{ "claude", "--resume", "legacy-id" };
-    const surfaces = [_]Surface{.{
-        .command = "/Users/me/.local/bin/claude",
-        .cols = 80,
-        .rows = 24,
-        .agent_kind = "claude",
-        .agent_session = "legacy-id",
-        .agent_argv = &argv,
-    }};
-    const panes = [_]Pane{.{ .surfaces = &surfaces }};
-    const tree = [_]TreeNode{.{ .leaf = 0 }};
-    const tabs = [_]Tab{.{ .tree = &tree, .panes = &panes }};
-    const windows = [_]Window{.{ .tabs = &tabs }};
-
-    const text = try serialize(std.testing.allocator, .{ .windows = &windows });
-    defer std.testing.allocator.free(text);
-    try std.testing.expect(std.mem.indexOf(u8, text, "agent-kind") == null);
-    try std.testing.expect(std.mem.indexOf(u8, text, "agent-session") == null);
-    try std.testing.expect(std.mem.indexOf(u8, text, "agent-arg") == null);
-
-    var parsed = try parse(std.testing.allocator, text);
-    defer parsed.deinit();
-    const s = parsed.workspace.windows[0].tabs[0].panes[0].surfaces[0];
-    try std.testing.expectEqualStrings("", s.agent_kind);
-    try std.testing.expectEqualStrings("", s.agent_session);
-    try std.testing.expectEqual(@as(usize, 0), s.agent_argv.len);
-
-    const legacy =
-        header ++ "\n" ++
-        "window tabs=1 active-tab=0\n" ++
-        "tab panes=1 active-pane=0 custom-name=\"\" pinned=0 background-color=0 accent-color=0\n" ++
-        "tree-node leaf pane=0\n" ++
-        "pane surfaces=1 active-term=0 custom-name=\"\"\n" ++
-        "surface custom-name=\"\" title=\"\" cwd=\"/tmp\" command=\"\" cols=80 rows=24 agent-kind=\"claude\" agent-session=\"legacy-id\" agent-argc=3 agent-arg=\"claude\" agent-arg=\"--resume\" agent-arg=\"legacy-id\"\n";
-    var old = try parse(std.testing.allocator, legacy);
-    defer old.deinit();
-    const old_surface = old.workspace.windows[0].tabs[0].panes[0].surfaces[0];
-    try std.testing.expectEqualStrings("claude", old_surface.agent_kind);
-    try std.testing.expectEqualStrings("legacy-id", old_surface.agent_session);
-    try std.testing.expectEqual(@as(usize, 3), old_surface.agent_argv.len);
+test "workspace Surface contains only declarative terminal fields" {
+    const expected = [_][]const u8{ "custom_name", "title", "cwd", "command", "cols", "rows" };
+    inline for (expected) |name| try std.testing.expect(@hasField(Surface, name));
+    inline for (.{ "agent_kind", "agent_session", "agent_argv" }) |name| try std.testing.expect(!@hasField(Surface, name));
 }
 
-test "workspace parse: agent-argc 과대값은 graceful 차단(BadLine)" {
-    // 손상/변조 파일이 agent-argc를 부풀려도 max_agent_argv에서 먼저 막아 거대 루프를 돈다(복원 측은 기본 창 폴백).
-    const huge =
-        header ++ "\n" ++
-        "window tabs=1 active-tab=0\n" ++
-        "tab panes=1 active-pane=0 custom-name=\"\" pinned=0 background-color=0 accent-color=0\n" ++
-        "tree-node leaf pane=0\n" ++
-        "pane surfaces=1 active-term=0 custom-name=\"\"\n" ++
-        "surface custom-name=\"\" title=\"\" cwd=\"\" command=\"/bin/zsh\" cols=80 rows=24 agent-kind=\"claude\" agent-session=\"\" agent-argc=999999\n";
-    try std.testing.expectError(error.BadLine, parse(std.testing.allocator, huge));
-}
-
-test "workspace parse: 라인 필드 수 상한 초과는 BadLine(key-addressed 토큰 폭주 방어)" {
-    // agent-argc는 작지만(2) agent-arg 토큰을 max_line_fields 넘게 채운 라인 — count 불일치 이전에 LineFields.parse의
-    // 필드 상한에서 먼저 BadLine. max_agent_argv가 argc 값만 가두던 방어를 key-addressed 리더의 라인 토큰 수로도 유지함을 고정.
+test "workspace line field cap accepts 512 neutral fields and rejects the 513th" {
     const a = std.testing.allocator;
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(a);
-    try buf.appendSlice(a, header ++ "\n" ++
-        "window tabs=1 active-tab=0\n" ++
-        "tab panes=1 custom-name=\"\"\n" ++
-        "tree-node leaf pane=0\n" ++
-        "pane surfaces=1 active-term=0 custom-name=\"\"\n" ++
-        "surface custom-name=\"\" title=\"\" cwd=\"\" command=\"/bin/zsh\" cols=80 rows=24 agent-kind=\"\" agent-session=\"\" agent-argc=2");
-    var k: usize = 0;
-    while (k < max_line_fields + 8) : (k += 1) try buf.appendSlice(a, " agent-arg=\"x\""); // 기본 9키 + 이만큼 → 상한 초과
-    try buf.appendSlice(a, "\n");
-    try std.testing.expectError(error.BadLine, parse(a, buf.items));
+    var line: std.ArrayList(u8) = .empty;
+    defer line.deinit(a);
+    try line.appendSlice(a, "future");
+    for (0..max_line_fields) |_| try line.appendSlice(a, " future-field=0");
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const fields = try LineFields.parse(arena.allocator(), line.items);
+    try std.testing.expectEqual(@as(usize, 512), fields.fields.len);
+    try line.appendSlice(a, " future-field-overflow=0");
+    try std.testing.expectError(error.BadLine, LineFields.parse(arena.allocator(), line.items));
 }
 
 test "workspace dock FP1: 기본 상태는 키를 생략하고 옛 파일은 기본 도크로 읽힌다" {
@@ -1864,7 +1784,7 @@ test "workspace Explorer v137: malformed packed roots degrade only explorer meta
         "tab panes=1 active-pane=0 custom-name=\"kept tab\" pinned=0 background-color=0 accent-color=0\n" ++
         "tree-node leaf pane=0\n" ++
         "pane surfaces=1 active-term=0 custom-name=\"kept pane\"\n" ++
-        "surface custom-name=\"kept surface\" title=\"shell\" cwd=\"/work\" command=\"/bin/zsh\" cols=80 rows=24 agent-kind=\"\" agent-session=\"\" agent-argc=0\n";
+        "surface custom-name=\"kept surface\" title=\"shell\" cwd=\"/work\" command=\"/bin/zsh\" cols=80 rows=24\n";
     var parsed = try parse(std.testing.allocator, text);
     defer parsed.deinit();
     try std.testing.expectEqual(@as(usize, 1), parsed.workspace.windows.len);
@@ -1994,7 +1914,7 @@ test "workspace dock FP1: 미래 kind나 mode는 도크만 기본값으로 강�
         "tab panes=1 custom-name=\"kept\"\n" ++
         "tree-node leaf pane=0\n" ++
         "pane surfaces=1 custom-name=\"\"\n" ++
-        "surface custom-name=\"\" title=\"\" cwd=\"/work\" command=\"/bin/zsh\" cols=80 rows=24 agent-kind=\"\" agent-session=\"\" agent-argc=0\n";
+        "surface custom-name=\"\" title=\"\" cwd=\"/work\" command=\"/bin/zsh\" cols=80 rows=24\n";
     var parsed_kind = try parse(std.testing.allocator, future_kind);
     defer parsed_kind.deinit();
     try std.testing.expectEqual(@as(usize, 1), parsed_kind.workspace.windows[0].tabs.len);

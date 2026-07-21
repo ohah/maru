@@ -136,6 +136,13 @@ test "facade layers do not import forbidden layers" {
     try std.testing.expectEqual(@as(usize, 0), violations);
 }
 
+test "provider cleanup module remains absent" {
+    try std.testing.expectError(
+        error.FileNotFound,
+        std.Io.Dir.cwd().statFile(std.testing.io, "src/platform/macos/agent_hook_cleanup.zig", .{}),
+    );
+}
+
 fn checkDirectory(
     allocator: std.mem.Allocator,
     rule: Rule,

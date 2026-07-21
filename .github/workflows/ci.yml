@@ -38,7 +38,7 @@ jobs:
           retention-days: 14
 
   # AppSession 제품 glue는 macOS에서만 활성화된다. Ubuntu의 기본 test가 이 경로를
-  # skip하므로 별도 PR job에서 16,384-row/1,000-event 탐색기 artifact를 실행한다.
+  # skip하므로 이 PR job에서 provider 파일 무변경 계약과 16,384-row/1,000-event 탐색기 artifact를 실행한다.
   file-explorer-macos:
     name: file explorer macOS product path
     runs-on: macos-15
@@ -50,6 +50,8 @@ jobs:
         with:
           version: 2026.2.7
           sha256: f8becf318705e1bd91227ed0efee4f9fd988d1d5c66bb48e996f030792a0d3b7 # macos-arm64 binary
+      - name: Verify provider continuity removal
+        run: mise run test-provider-session-removal
       - run: mise run macos-file-explorer-perf
       - name: Upload file explorer performance artifact
         if: always()

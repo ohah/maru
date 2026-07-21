@@ -24,9 +24,8 @@
 저장·resume/fork해서가 아니라, 그 프로세스가 붙은 동일 PTY runtime을 `maru-sessiond`가 계속 소유하기 때문이다.
 host 또는 agent process가 끝나면 그 실행 세션도 끝난 것이며 provider 복구는 하지 않는다.
 
-현재 한 릴리스 호환을 위해 남아 있는 workspace legacy agent 필드, restore 설정 no-op, 과거 hook cleanup은
-persistent-session P1에서 제거한다. 실제 코드 제거 PR이 이 문서의 마이그레이션 절을 함께 “제거됨”으로 갱신하기 전에는
-완료로 표시하지 않는다. live foreground process/screen observer와 `Term.agent_kind/agent_state`는 session restore가 아니므로 유지한다.
+provider session continuity용 workspace typed field/parser, restore 설정 alias, 과거 hook cleanup은 persistent-session P1에서
+제거했다. live foreground process/screen observer와 `Term.agent_kind/agent_state`는 session restore가 아니므로 유지한다.
 
 ## 관측 입력
 
@@ -101,8 +100,8 @@ v1 provider allowlist는 현재 UI·브랜드가 있는 claude/codex다. manifes
 유지하고, 색은 그 상태를 제공한 Term의 kind를 쓴다.
 
 완료 알림은 `running → idle`만으로 보내지 않는다. 새 `idle`은 완료뿐 아니라 ESC 중단 뒤 prompt 복귀도 포함하므로
-그 전이를 완료로 해석하면 가짜 알림이 된다. 구조화된 완료 신호가 없는 v1에서는 `notifications.agent-complete`를
-deprecated no-op으로 두고 UI/설정에서 제거한다. OSC 9/777 알림은 별개로 유지한다.
+그 전이를 완료로 해석하면 가짜 알림이 된다. 구조화된 완료 신호가 없는 v1에서는 agent 완료 알림을 제공하지 않는다.
+OSC 9/777 알림은 별개로 유지한다.
 
 ## 컨트롤 플레인 계약
 
@@ -114,30 +113,20 @@ deprecated no-op으로 두고 UI/설정에서 제거한다. OSC 9/777 알림은 
 상태 변경 이벤트는 observer가 안정화된 상태를 publish할 때만 발생한다. PTY byte마다 이벤트를 내지 않으며, 같은 상태의
 visible blocker는 향후 attention refresh가 필요할 때만 별도 이벤트 정책을 논의한다.
 
-## 마이그레이션과 하위호환
+## 과거 source build 훅 수동 정리
 
-### provider 훅 정리
+P1 이후 Maru는 provider config나 mapping 파일을 읽거나 신뢰하거나 수정하지 않는다. 과거 source build/dev 버전이 설치한
+훅은 provider가 계속 실행할 수 있으므로 필요할 때만 아래 경계로 수동 정리한다.
 
-업데이트 후 첫 시작에서 과거 Maru marker가 있는 claude/codex user config를 **한 번만 자동 정리**한다.
+- provider config에서 `MARU_AGENT_MAP_HOOK_V2` 또는 `MARU_PANE_MAP_HOOK` marker를 찾는다.
+- marker만으로 지우지 않는다. 같은 command가 `agent-sessions`, `cat`, pane/mapping selector를 함께 포함하는 **그 hook group만**
+  제거한다. 다른 사용자 hook이나 config 파일 전체를 삭제하지 않는다.
+- mapping은 Maru config 아래 `agent-sessions`의 숫자 파일 가운데 알려진 hook event와 `session_id` 또는
+  `transcript_path` payload가 함께 있는 파일만 개별 확인해 제거한다. 디렉터리를 통째로 삭제하지 않는다.
+- Maru는 이 정리를 자동 수행하거나 완료 marker/backup을 만들지 않는다. 확신할 수 없는 항목은 그대로 둔다.
 
-- Maru가 만든 marker와 command만 제거하고 같은 배열의 사용자 hook 순서와 나머지 JSON은 보존한다.
-- 파싱 실패, 권한 오류, 4MiB 초과 파일은 무접촉하고 구조화 로그만 남긴다.
-- 변경 전 `.maru-backup`을 만들며 기존 백업을 덮어쓰지 않는다. 일반 파일의 POSIX mode·ACL·확장 속성을 backup과
-  replacement에 보존하고, symlink나 비정규 파일은 자동 변경하지 않고 다음 시작에 재시도한다.
-- marker 문자열만 우연히 포함한 사용자 값은 제거 근거가 아니다. 과거 Maru command 구조까지 일치한 hook group만 지운다.
-- cleanup 완료 여부는 Maru config/runtime marker로 기록한다. 실패는 다음 시작에 재시도한다.
-- 기존 `Re-register/Unregister Agent Session Hooks` command와 action/config 문법은 제거한다.
-- `<config>/maru/agent-sessions/` 잔여 mapping은 session id와 transcript path를 포함할 수 있는 민감한 과거 생성물이다.
-  cleanup 성공 뒤 Maru payload 형식 파일만 정리하고 디렉터리 전체를 무조건 삭제하지 않는다.
-- `MARU_AGENT_MAPPING_ID`는 상위 프로세스 상속·명시 env·사용자 env override 어느 경로에서도 자식에 전달하지 않는다.
-
-### workspace restore
-
-기존 workspace의 `agent_kind`, `agent_session`, `agent_argv` 필드는 **읽을 수는 있지만 무시**한다. 복원은 해당 Term의
-정상 `shell_entry`와 cwd만 연다. 새 workspace 저장에는 이 세 필드를 쓰지 않는다(read-old/write-new). 이 방식은 오래된
-workspace 파일을 깨뜨리지 않으면서 provider 세션 자동 실행을 제거하고, 한 번 새로 저장하면 private session id와 argv가
-자연스럽게 사라지게 한다. `workspace.restore-claude`와 `workspace.restore-codex` 설정은 deprecated no-op으로 한 릴리스
-읽은 뒤 제거 대상으로 두되, UI에서는 즉시 숨긴다.
+구 workspace의 provider scalar는 일반 미지 scalar와 같이 건너뛰며, 새 저장에서는 나오지 않는다. 복원은 해당 Term의
+정상 `shell_entry`, cwd, layout만 연다. 삭제된 설정 이름은 일반 unknown key 진단 대상이다.
 
 ## 성능과 관측 가능성
 
@@ -154,7 +143,8 @@ workspace 파일을 깨뜨리지 않으면서 provider 세션 자동 실행을 �
 
 1. **문서 PR**: 이 계약과 workspace/control-plane/sidebar/notification 정책을 먼저 일치시킨다.
 2. **observer PR**: OS-중립 manifest matcher·상태 안정화·fixture, Term runtime 배선, 사이드바/control-plane 상태를 구현한다.
-3. **migration PR**: transcript/hook/session-fork 코드를 제거하고, 1회 hook cleanup과 workspace read-old/write-new를 구현한다.
+3. **migration PR(P1 완료)**: transcript/hook/session-fork 호환 코드와 자동 cleanup을 제거하고 일반 unknown-scalar
+   read-old/write-new 경계를 고정한다.
 
 ## 검증
 
@@ -162,9 +152,8 @@ workspace 파일을 깨뜨리지 않으면서 provider 세션 자동 실행을 �
 - 전이 테스트: output activity→running, visible idle 즉시 전환, evidence loss 700ms grace 뒤 unknown, process exit/kind change reset.
 - ESC 회귀: running 화면에서 ESC 뒤 idle fixture가 오면 다음 publish가 running이 아니며 완료 알림도 생성하지 않음.
 - 다중 Term: background blocked가 workspace 대표가 되고, running Term의 탭 플래그와 dirty gate가 정확히 갱신됨.
-- migration: 사용자 hook 보존·Maru command만 제거·marker collision no-op·parse/read 실패 무접촉·재시도·백업 no-clobber·
-  0600/ACL/xattr 보존·symlink 거부·옛 mapping env 차단.
-- workspace: 옛 agent 필드 parse 성공+무시, 새 저장에 필드 없음, cwd/shell/일반 layout round-trip 불변.
+- migration: `AppSession.init` 전후 provider config/mapping bytes와 디렉터리 manifest 불변, cleanup 파일·호출·전용 env filter 부재.
+- workspace: 옛 provider scalar parse 성공+무시, 새 저장에 필드 없음, 멀티윈도우 cwd/layout/active round-trip 불변.
 - 수동 E2E: 실제 claude/codex에서 prompt, 작업, 권한 질문, ESC 중단, pane/Term 전환을 반복해 카드와 control 상태 확인.
 
 ## 한계

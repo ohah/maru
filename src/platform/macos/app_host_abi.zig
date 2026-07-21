@@ -686,11 +686,11 @@ pub export fn maru_macos_app_session_pending_clipboard(
     return @intFromEnum(Status.ok);
 }
 
-// OSC 9/777·에이전트 완료 데스크톱 알림 데이터(title, body, surface_id, foreground). has_out=1이면 알림 있음
+// OSC 9/777 데스크톱 알림 데이터(title, body, surface_id, foreground). has_out=1이면 알림 있음
 // (title/body 채움 — title은 빈 문자열일 수 있어 len으로 판단), 0이면 없음. surface_id_out=발신 Term의 surface.id로,
 // Swift가 알림 userInfo에 (창 토큰, surface_id)로 실어 클릭 시 발신 터미널로 점프한다(activate_surface).
-// foreground_out=앱이 전면일 때도 배너로 띄울지(1=에이전트 완료, 안 보는 탭이라 배너 / 0=OSC, 활성 surface가 보내
-// 사용자가 보고 있을 수 있어 전면이면 목록만) — Swift willPresent가 읽어 표시 스타일을 정한다. 반환 버퍼는 Zig 소유로
+// foreground_out=앱이 전면일 때도 배너로 띄울지(1=background surface / 0=현재 보고 있는 surface라 목록만)이며,
+// Swift willPresent가 읽어 표시 스타일을 정한다. 반환 버퍼는 Zig 소유로
 // 다음 pending_notification/destroy까지 유효. Swift가 tick마다 호출해 UNUserNotificationCenter로 띄운다(알림은 OS
 // 소유 — 코어/Zig는 데이터만 넘긴다). 네 값을 같은 drain 한 번으로 원자적으로 돌려준다(race 없음).
 pub export fn maru_macos_app_session_pending_notification(
@@ -5140,6 +5140,52 @@ test "Explorer v137 root picker ABI drains typed operations and cancel or invali
     try std.testing.expectEqual(@as(c_int, @intFromEnum(Status.ok)), maru_macos_app_session_provide_file_tree_root_pick(session, "relative", "relative".len));
     try std.testing.expectEqual(generation, session.?.file_tree.rootGeneration());
     try std.testing.expect(session.?.file_tree_root_validation == null);
+}
+
+test "workspace restore ABI preserves multi-window count active and apply" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    const config: AppSessionConfig = .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(AppCommandKind.controlled_smoke),
+    };
+    var session0: ?*AppSession = null;
+    try std.testing.expectEqual(@as(c_int, @intFromEnum(Status.ok)), maru_macos_app_session_create(&config, &session0));
+    defer maru_macos_app_session_destroy(session0);
+    var session1: ?*AppSession = null;
+    try std.testing.expectEqual(@as(c_int, @intFromEnum(Status.ok)), maru_macos_app_session_create(&config, &session1));
+    defer maru_macos_app_session_destroy(session1);
+
+    const text =
+        "maru.workspace.v1\n" ++
+        "window tabs=1 active-tab=0\n" ++
+        "tab panes=2 active-pane=1 custom-name=\"first\"\n" ++
+        "tree-node split vertical ratio=300\n" ++
+        "tree-node leaf pane=0\n" ++
+        "tree-node leaf pane=1\n" ++
+        "pane surfaces=1 active-term=0 custom-name=\"left\"\n" ++
+        "surface custom-name=\"one\" title=\"\" cwd=\"/tmp\" command=\"\" cols=40 rows=12\n" ++
+        "pane surfaces=1 active-term=0 custom-name=\"right\"\n" ++
+        "surface custom-name=\"two\" title=\"\" cwd=\"/\" command=\"\" cols=40 rows=12\n" ++
+        "window tabs=1 active-tab=0 active-window=1\n" ++
+        "tab panes=1 active-pane=0 custom-name=\"second\"\n" ++
+        "tree-node leaf pane=0\n" ++
+        "pane surfaces=1 active-term=0 custom-name=\"only\"\n" ++
+        "surface custom-name=\"three\" title=\"\" cwd=\"/tmp\" command=\"\" cols=50 rows=15\n";
+
+    try std.testing.expectEqual(@as(i64, 2), maru_macos_app_session_workspace_window_count(session0, text.ptr, text.len));
+    try std.testing.expectEqual(@as(i64, 1), maru_macos_app_session_workspace_active_window(session0, text.ptr, text.len));
+    try std.testing.expectEqual(@as(c_int, @intFromEnum(Status.ok)), maru_macos_app_session_apply_workspace_window(session0, text.ptr, text.len, 0));
+    try std.testing.expectEqual(@as(c_int, @intFromEnum(Status.ok)), maru_macos_app_session_apply_workspace_window(session1, text.ptr, text.len, 1));
+    try std.testing.expectEqual(@as(usize, 1), session0.?.tabs.items.len);
+    try std.testing.expectEqual(@as(usize, 2), session0.?.tabs.items[0].panes.items.len);
+    try std.testing.expectEqual(@as(usize, 1), session0.?.tabs.items[0].active_pane);
+    try std.testing.expectEqualStrings("first", session0.?.tabs.items[0].custom_name.?);
+    try std.testing.expectEqual(@as(usize, 1), session1.?.tabs.items.len);
+    try std.testing.expectEqual(@as(usize, 1), session1.?.tabs.items[0].panes.items.len);
+    try std.testing.expectEqualStrings("second", session1.?.tabs.items[0].custom_name.?);
 }
 
 test "Metal key-down ABI repairs stale dock focus before routing Cmd+W" {

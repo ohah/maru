@@ -24,6 +24,7 @@ const maru = @import("maru");
 const terminal = maru.terminal;
 const color = maru.color;
 const screen_stream = @import("screen_stream.zig");
+const screen_assembler = @import("screen_assembler.zig");
 
 const Run = screen_stream.Run;
 
@@ -522,4 +523,36 @@ test "screen snapshot: computeDelta requires a fresh snapshot when the grid geom
 
     try core.resize(20, 5); // grid가 바뀌면 delta로는 못 잇는다.
     try testing.expectError(error.SnapshotRequired, computeDelta(allocator, a, &core, .{ .generation = 2 }));
+}
+
+test "screen snapshot: projection and assembler are inverses on a real screen (snapshot + delta round-trip)" {
+    const allocator = testing.allocator;
+    var core = try terminal.TerminalCore.init(allocator, .{ .cols = 20, .rows = 3 });
+    defer core.deinit();
+    try core.write("\x1b[32mgreen\x1b[0m"); // row0 = 초록 "green".
+
+    // project → assemble → re-serialize == projection(조립기가 화면을 무손실 재구성).
+    const p = try projectSnapshot(allocator, &core, .{ .generation = 4 });
+    defer allocator.free(p);
+    var asm_ = screen_assembler.ScreenAssembler.init(allocator);
+    defer asm_.deinit();
+    try asm_.applySnapshot(p);
+    {
+        const re = try asm_.toSnapshot(allocator);
+        defer allocator.free(re);
+        try testing.expectEqualSlices(u8, p, re);
+    }
+
+    // 화면을 바꾸고 delta를 계산해 조립기에 적용하면, 새 projection과 같아진다(증분 재구성).
+    try core.write("\r\nsecond"); // row1 = "second", 커서 이동.
+    const d = try computeDelta(allocator, p, &core, .{ .generation = 4 });
+    defer allocator.free(d);
+    try testing.expect(d.len > 0);
+    try asm_.applyDelta(d);
+
+    const p2 = try projectSnapshot(allocator, &core, .{ .generation = 4 });
+    defer allocator.free(p2);
+    const re2 = try asm_.toSnapshot(allocator);
+    defer allocator.free(re2);
+    try testing.expectEqualSlices(u8, p2, re2); // delta 적용 후 조립기 == 새 화면 projection.
 }

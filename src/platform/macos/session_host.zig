@@ -25,7 +25,9 @@
 //!     - e2d-2 ✅: attach가 `RuntimeOps.snapshot`(core lock 아래 투영)을 얻어 응답에 이어 `snapshot_chunk` frame으로 전송(§10 순서, 마지막 end_stream). `Action.frames` 확장, client `readSnapshot`.
 //!     - e2d-3a ✅: `screen_snapshot.computeDelta`(이전 snapshot 바이트 vs 현재 화면 diff → set_runs/cursor/modes delta record, 순수). row builder 재사용, geometry 변화는 SnapshotRequired.
 //!     - e2d-3b ✅: delta async push — `serveConnection` poll-loop(delta tick)이 `collectDeltas`로 stream별 base 대비 diff해 `delta_chunk`를 push. `RuntimeOps.delta` seam + `StreamUpdate`, `Subscription.base` 추적. geometry 변화는 fresh snapshot 재전송. (observer fan-out=P4, dirty-gate 최적화=후속.)
-//!   - P3-e2e: host-backed `TermRuntimeBackend`(P2 계약의 원격 구현). ← 다음
+//!   - P3-e2e: host-backed `TermRuntimeBackend`(P2 계약의 원격 구현).
+//!     - e2e-1 ✅: `screen_assembler`(snapshot/delta records → client 화면 모델, 투영의 역, 순수). applySnapshot/applyDelta/toSnapshot, generation gap.
+//!     - e2e-2: client 위 remote `TermRuntimeBackend` vtable(assembler를 화면 모델로) + GUI 배선. ← 다음
 //!   - P3-e3: `app_session` 배선(discovery→launch→attach) + GUI 재접속(manifest runtime_handle).
 
 const builtin = @import("builtin");
@@ -33,6 +35,9 @@ const builtin = @import("builtin");
 pub const protocol = @import("session_host/protocol.zig");
 pub const framing = @import("session_host/framing.zig");
 pub const screen_stream = @import("session_host/screen_stream.zig");
+// screen_assembler(records → client 화면 모델, screen_snapshot 투영의 역)는 screen_stream codec만 써서 순수 계층으로
+// 둔다(platform-import-0, non-macOS에서도 테스트). 실 렌더/backend 배선은 macOS 전용 후속(e2e-2)에서 이 조립기를 쓴다.
+pub const screen_assembler = @import("session_host/screen_assembler.zig");
 pub const registry = @import("session_host/registry.zig");
 pub const server = @import("session_host/server.zig");
 pub const discovery = @import("session_host/discovery.zig");

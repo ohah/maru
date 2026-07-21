@@ -38,6 +38,21 @@ CI에서는 이 파일을 `maru-performance-artifacts` artifact로 업로드한�
 
 PR 경로의 성능 workflow 실패는 머지를 막는다. 예산은 runner 변동을 흡수할 만큼 여유 있게 잡으므로 실패는 대부분 구조 회귀다 — 실패 artifact와 변경 범위를 보고 루트커즈를 고치거나, 근거를 남기고 예산을 조정한다.
 
+## 필수 CI 체크
+
+`main` branch protection의 required status check는 이 절을 단일 출처로 둔다. 문서에 hard gate·"머지할 수 없다"로 적힌 검사는 이 목록에 있어야 하고, 목록과 실제 `required_status_checks.contexts`가 어긋나면 이 표를 기준으로 맞춘다.
+
+| required 컨텍스트 | 생성 워크플로 · job | 실행 조건 |
+| --- | --- | --- |
+| `check` | ci.yml `check` | 매 PR(ubuntu). fmt-check·unit·e2e·oracle·stress·boundary·build. |
+| `require label and assignee=ohah` | pr-metadata.yml `require-label-and-assignee` | 매 PR. 라벨 1개 이상 + assignee=ohah. |
+| `core performance budget` | performance.yml `core-performance-budget` | 매 PR(paths 필터 없음). core perf guardrail. |
+| `file explorer macOS product path` | ci.yml `file-explorer-macos` | 매 PR(macos-15). 16,384-row/1,000-event 탐색기 artifact. |
+| `live preview macOS product path` | ci.yml `live-preview-macos` | 매 PR(macos-15). Mermaid 제품 1,000 tick·helper smoke artifact. |
+| `web build and security fixtures` | web.yml `check` | 매 PR(paths 필터 없음). web build·보안 fixture·live-preview perf. |
+
+path-filter가 있는 워크플로를 required로 두면 무관한 PR에서 skip돼 required 컨텍스트가 영원히 pending으로 머지를 막는다. 그래서 required로 쓰는 워크플로는 `pull_request`에 paths 필터를 두지 않고 모든 PR에서 돈다(performance.yml·web.yml). ci.yml의 macOS job은 원래 paths 필터가 없어 매 PR 실행되므로 그대로 required로 등록한다. 이 목록을 바꿀 때는 `gh api repos/<owner>/<repo>/branches/main/protection/required_status_checks`의 `contexts`도 함께 갱신한다.
+
 ## 현재 자동 예산
 
 | 항목 | 현재 예산 | 측정 범위 | 이유 |
@@ -104,7 +119,7 @@ RSS는 Maru 앱 프로세스와 해당 WebContent process를 분리해서 재고
 | scrollbar pointer move/drag | geometry build ≤ 1, allocator call = 0, dock layout rebuild = 0 | 저장된 total/visible/effective-scroll과 drag snapshot만 소비한다. divider/tab gesture owner 전환, generation 변경 뒤 commit, 매 move row scan은 실패한다. lock/I/O/worker 부재는 AppSession entrypoint review 항목이며 artifact counter로 과장하지 않는다. |
 | projected scrollbar update | classifier call = 0, scrollbar geometry build ≤ 1, allocator call = 0 | row에 저장된 semantic kind와 coverage PUA를 사용한다. thumb는 native quad≤1이고, icon cell은 draw-list 자동 테스트에서 visible row당≤1이다. fade는 L2 row projection/classifier를 재실행하지 않는다. 일반 text/icon shaping 전체의 0회는 주장하지 않는다. |
 
-PR 2 검증은 branch protection에 이미 등록된 Ubuntu `mise run check`/`mise run perf`와 별도 macOS PR job의 전용 `mise run macos-file-explorer-perf`를 함께 실행한다. AppSession 제품-path test는 Ubuntu에서 skip되므로 macOS job만 artifact를 생성·업로드하며 누락은 그 job을 실패시킨다. 현재 macOS job 자체는 branch protection required status가 아니므로 완료자는 green을 확인한 뒤에만 merge한다. 실제 계측하는 zero/bounded counter 하나라도 어기거나 artifact가 없으면 시간과 무관하게 실패한다.
+PR 2 검증은 branch protection에 이미 등록된 Ubuntu `mise run check`/`mise run perf`와 별도 macOS PR job의 전용 `mise run macos-file-explorer-perf`를 함께 실행한다. AppSession 제품-path test는 Ubuntu에서 skip되므로 macOS job만 artifact를 생성·업로드하며 누락은 그 job을 실패시킨다. 이 macOS job(`file explorer macOS product path`)은 branch protection required status다([필수 CI 체크](#필수-ci-체크) 참조). 실제 계측하는 zero/bounded counter 하나라도 어기거나 artifact가 없으면 시간과 무관하게 실패한다.
 
 ## 파일 도크 FP10 Markdown 라이브 프리뷰 예산
 

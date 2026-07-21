@@ -9,13 +9,10 @@ on:
       - "web/**"
       - "docs/file-panel.md"
       - "docs/web-panel.md"
+  # PR 필수 체크로 쓰므로 모든 PR에서 돈다(paths 필터를 두면 무관한 PR에서 skip돼 required 체크가
+  # 영원히 pending으로 머지를 막는다 — performance.yml과 같은 이유). 필수 CI 체크 목록의 단일 출처는
+  # docs/performance-budget.md "필수 CI 체크"다.
   pull_request:
-    paths:
-      - ".github/workflows/web.yml"
-      - ".mise.toml"
-      - "web/**"
-      - "docs/file-panel.md"
-      - "docs/web-panel.md"
 
 concurrency:
   group: web-${{ github.ref }}

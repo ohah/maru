@@ -182,6 +182,35 @@
 - macOS window/app event loop에서 시작되는 interactive shell shutdown lifecycle.
 - 대량 stdout backpressure의 RSS/latency/UI responsiveness 성능 예산.
 
+## `TermRuntimeBackend`
+
+persistent-session P2의 seam이다. GUI layout(`session_model.Term`)이 terminal runtime 하나의 수명·입출력·관측을 다루는 유일한 표면으로, 구현 세부(in-process인지 원격 host인지)를 숨긴다. 단일 출처는 [영속 터미널 세션 호스트](persistent-session-host.md) §13 P2, API 계약은 [SurfaceRuntime API 계약](surface-runtime-api.md)과 같은 결이다.
+
+책임:
+
+- terminal runtime의 action을 spawn/attach/input/resize/pump/terminate/observe로 계약화한다. `runtime.PtyIo`와 같은 ctx+fn 포인터 vtable이다.
+- runtime을 opaque `RuntimeHandle`로 가리킨다. handle 의미를 비트에 인코딩하지 않는다(P3에서 host 발급 `runtime_id`로 승격).
+- `spawn`은 복구 가능한 `*Surface`만 돌려주고 live PTY handle은 노출하지 않는다.
+- in-process 구현(`InProcessTermBackend`)은 기존 `LiveSurfaceRegistry`+`LivePtySession`+`SurfaceRuntime`을 감쌀 뿐 새 소유 자원을 만들지 않는다.
+
+몰라야 하는 것:
+
+- 호출자가 GUI인지 CLI인지, runtime이 in-process인지 원격 host인지(계약은 같다).
+- renderer resource, workspace 저장 포맷, window 좌표.
+- web surface(sentinel, PTY 없음)의 표시 정책 — terminal runtime만 다룬다.
+
+초기 테스트:
+
+- fake backend가 계약만으로 spawn→attach→input→resize를 수행하고, 입력이 그 runtime의 PTY 더블에 도달한다.
+- `closeAndDetach` 뒤 같은 handle 입력이 `UnknownSurface`로 거부되고 살아 있는 다른 runtime으로 새지 않는다(late event).
+- 미등록/web-arm handle의 attach/pump는 다른 runtime에 잘못 붙지 않고 거부된다.
+- in-process 구현이 실 PTY로 controlled command를 종료까지 몰고 슬롯을 누수 없이 회수한다(macOS opt-in).
+
+아직 하지 않는다:
+
+- `app_session`을 이 계약으로 배선하는 것(P2-b). 현재 GUI(`TermRuntime.live_pty`)는 여전히 `*LivePtySession`을 직접 참조한다.
+- 원격 host transport(P3 `maru-sessiond`)와 snapshot/delta 스트림.
+
 ## `AppHost`
 
 책임:

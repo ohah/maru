@@ -818,13 +818,20 @@ TDD 방식:
 
 ## Provider session continuity 잔여 제거(persistent-session P1)
 
-Claude/Codex provider-native resume/fork는 제품 경로로 되살리지 않는다. 현재 남은 것은 실행 기능이 아니라 한 릴리스
-호환용 workspace legacy 필드 reader, restore 설정 no-op, 과거 hook/mapping cleanup과 환경변수 차단이다.
+Claude/Codex provider-native resume/fork는 제품 경로로 되살리지 않는다. 현재 남은 것은 실행 기능이 아니라 legacy
+호환용 workspace legacy 필드 reader, restore 설정·`notifications.agent-complete` no-op, 과거 hook/mapping cleanup과
+환경변수 차단이다.
 
-- P1 코드 PR에서 이 호환 코드를 제거하고 구 workspace의 미지 scalar는 일반 key-addressed 규칙으로 무시한다.
+- P1 코드 PR에서 provider continuity 호환과 같은 loader branch의 dead notification alias를 제거하고 세 설정 key는 일반
+  unknown-key 진단으로 돌린다. 구 workspace의 미지 scalar는 일반 key-addressed 규칙으로 무시하되 독립
+  `max_line_fields=512`, 512-field 성공과 513번째 거부를 유지한다.
+- 과거 source build가 provider config에 설치한 Maru hook도 더 이상 자동 회수하지 않는다. 잔여 hook/config/mapping은 Maru의
+  소유 범위 밖에 두고 읽거나 신뢰하지 않는다. provider가 고아 hook을 계속 실행할 수 있다는 결과는 사용자 문서에 명시하고,
+  정리가 필요하면 P1에서 갱신하는 `agent-session.md` support runbook으로 정확히 식별된 Maru 항목만 제거한다.
 - foreground process·screen 기반 live `agent_kind/agent_state` observer는 provider session continuity가 아니므로 유지한다.
 - 같은 PR에서 [Workspace Restore 전략](workspace-restore.md), [에이전트 상태 감지](agent-session.md),
-  `configuration.md`, verification matrix의 deprecated/역사 문구를 “제거됨”으로 갱신한다.
+  [알림 전략](notifications.md), `configuration.md`, verification matrix를 현재 계약으로 갱신하고 삭제된 구현 역사는 Git/PR로
+  보낸다.
 - host/runtime 종료 뒤 provider ID로 복구하는 fallback은 구현하지 않는다. 영속성은 host가 동일 PTY/process를 계속
   소유하는 동안에만 성립한다.
 

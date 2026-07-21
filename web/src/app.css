@@ -88,7 +88,8 @@ body {
   border-right-color: color-mix(in srgb, CanvasText 14%, Canvas);
 }
 
-body[data-file-mode="live-preview"] #editor .cm-gutters {
+body[data-file-mode="live-preview"] #editor .cm-gutters,
+body[data-file-mode="source-edit"] #editor .cm-gutters {
   display: none;
 }
 

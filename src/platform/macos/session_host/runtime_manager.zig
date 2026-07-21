@@ -77,7 +77,7 @@ pub const RuntimeManager = struct {
 
     /// server.zig가 dispatch에 넘길 중립 vtable. `ctx`는 이 매니저다.
     pub fn runtimeOps(self: *RuntimeManager) server.RuntimeOps {
-        return .{ .ctx = self, .spawn = spawnOp, .terminate = terminateOp, .write_input = writeInputOp, .resize = resizeOp, .snapshot = snapshotOp };
+        return .{ .ctx = self, .spawn = spawnOp, .terminate = terminateOp, .write_input = writeInputOp, .resize = resizeOp, .snapshot = snapshotOp, .delta = deltaOp };
     }
 
     fn spawnOp(ctx: *anyopaque, params: server.RuntimeSpawnParams) anyerror!u128 {
@@ -113,6 +113,31 @@ pub const RuntimeManager = struct {
         surface.lockCore(self.io);
         defer surface.unlockCore(self.io);
         return screen_snapshot.projectSnapshot(allocator, &surface.core, .{ .generation = generation });
+    }
+
+    /// `base`(client가 마지막으로 받은 full snapshot) 대비 현재 화면 변화를 계산한다(§9 delta). core lock 아래에서 현재
+    /// full snapshot(다음 base)과 delta를 함께 만든다. grid/alt-screen 변화면 delta 대신 fresh snapshot을 보낸다(client가
+    /// 화면 교체). `send`와 `new_base`는 항상 별개 버퍼다(caller가 둘 다 free해도 안전).
+    fn deltaOp(ctx: *anyopaque, runtime_id: u128, base: []const u8, allocator: std.mem.Allocator) anyerror!server.StreamUpdate {
+        const self: *RuntimeManager = @ptrCast(@alignCast(ctx));
+        const handle = self.handleFor(runtime_id) orelse return error.RuntimeNotFound;
+        const surface = self.backend_impl.surfaceFor(handle) orelse return error.RuntimeNotFound;
+        const generation = if (self.host_registry.get(runtime_id)) |e| e.resize_generation else 0;
+        const opts = screen_snapshot.ProjectOptions{ .generation = generation };
+        surface.lockCore(self.io);
+        defer surface.unlockCore(self.io);
+
+        const cur = try screen_snapshot.projectSnapshot(allocator, &surface.core, opts); // 새 base(현재 full snapshot).
+        errdefer allocator.free(cur);
+        const delta = screen_snapshot.computeDelta(allocator, base, &surface.core, opts) catch |e| switch (e) {
+            error.SnapshotRequired => {
+                // grid/alt 변화 → fresh snapshot. send는 new_base와 별개 버퍼여야 하므로 복사한다.
+                const send = allocator.dupe(u8, cur) catch return error.OutOfMemory;
+                return .{ .send = send, .is_snapshot = true, .new_base = cur };
+            },
+            else => return e,
+        };
+        return .{ .send = delta, .is_snapshot = false, .new_base = cur };
     }
 
     /// runtime_id → in-process handle. registry entry의 opaque 슬롯에서 되읽는다(spawn이 심어 둔 값). 없으면 null.

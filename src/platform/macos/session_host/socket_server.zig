@@ -154,51 +154,75 @@ pub const SocketServer = struct {
         return cfd;
     }
 
-    /// accept한 연결 하나를 EOF/close까지 처리한다: read → `FrameParser` → `Connection.handleFrame` → write.
-    /// codec/protocol 위반(BadMagic·cap·unknown required)은 연결만 닫고 runtime은 유지한다(§10). fd는 여기서 닫는다.
+    /// delta push tick(ms). blocking read 대신 이 주기로 poll이 깨어나, client frame이 없어도 attach된 runtime의 화면
+    /// 변화를 delta로 push한다(§9·§10). 단일 스레드 push라 cross-thread queue가 필요 없다(P3 단일 client). 매 tick 화면을
+    /// 투영해 변화를 감지하므로(dirty-gate 최적화는 후속) idle에도 이 주기의 가벼운 투영 비용이 든다.
+    pub const delta_tick_ms: i32 = 20;
+
+    /// accept한 연결 하나를 EOF/close까지 처리한다. **poll-loop**: `poll(cfd, delta_tick_ms)`로 socket 입력과 delta tick을
+    /// 겸한다 — readable이면 read→`FrameParser`→`Connection.handleFrame`→write, 그리고 매 tick마다 `collectDeltas`로
+    /// 화면 변화를 push한다. codec/protocol 위반(BadMagic·cap·unknown required)은 연결만 닫고 runtime은 유지한다(§10). fd는 여기서 닫는다.
     pub fn serveConnection(self: *SocketServer, cfd: c.fd_t) ServeError!void {
         defer _ = c.close(cfd);
         var parser = framing.FrameParser.init(self.allocator);
         defer parser.deinit();
         var conn = server_mod.Connection.init(self.allocator, self.host_id, self.registry);
         defer conn.deinit(); // 연결 종료 시 이 connection의 attach subscription을 모두 detach한다(runtime은 유지, §9).
-        conn.runtime_ops = self.runtime_ops; // host면 spawn/terminate/input/resize 위임, read-only면 null(unauthorized).
+        conn.runtime_ops = self.runtime_ops; // host면 spawn/terminate/input/resize/delta 위임, read-only면 null(unauthorized).
 
         var buf: [4096]u8 = undefined;
         while (true) {
-            const n = c.read(cfd, &buf, buf.len);
-            if (n < 0) {
-                if (posix.errno(n) == .INTR) continue; // 시그널 인터럽트(SIGCHLD 등)는 재시도 — EOF로 오인해 연결을 끊지 않는다.
-                return; // 그 외 read 오류 — 연결 종료(runtime 유지).
+            var fds = [_]c.pollfd{.{ .fd = cfd, .events = c.POLL.IN, .revents = 0 }};
+            const prc = c.poll(&fds, 1, delta_tick_ms);
+            if (prc < 0) {
+                if (posix.errno(prc) == .INTR) continue; // 시그널 인터럽트는 재-poll.
+                return; // poll 오류 — 연결 종료.
             }
-            if (n == 0) return; // EOF.
-            parser.push(buf[0..@intCast(n)]) catch return error.OutOfMemory;
-            while (true) {
-                const maybe = parser.next() catch return; // codec 위반 → 연결만 닫는다.
-                const frame = maybe orelse break; // 더 조립할 frame 없음 — 다음 read.
-                defer frame.deinit(self.allocator);
-                const action = try conn.handleFrame(frame);
-                switch (action) {
-                    .reply => |bytes| {
-                        defer self.allocator.free(bytes);
-                        try writeAll(cfd, bytes);
-                    },
-                    .reply_and_close => |bytes| {
-                        defer self.allocator.free(bytes);
-                        try writeAll(cfd, bytes);
-                        return;
-                    },
-                    .close => return,
-                    .none => {}, // fire-and-forget stream frame(input_bytes) 처리 후 — 응답 없이 계속 읽는다.
-                    .frames => |list| {
-                        // attach 응답 + snapshot_chunk*를 순서대로 write한다. 중간 write 실패해도 defer가 전부 회수한다(누수 방지).
-                        defer {
-                            for (list) |f| self.allocator.free(f);
-                            self.allocator.free(list);
+            if (prc > 0) {
+                if (fds[0].revents & c.POLL.IN == 0) return; // POLLERR/HUP/NVAL 등 — 연결 종료(hangup).
+                const n = c.read(cfd, &buf, buf.len);
+                if (n < 0) {
+                    if (posix.errno(n) != .INTR) return; // INTR는 아래 delta push로 진행(EOF 오인 방지).
+                } else if (n == 0) {
+                    return; // EOF.
+                } else {
+                    parser.push(buf[0..@intCast(n)]) catch return error.OutOfMemory;
+                    while (true) {
+                        const maybe = parser.next() catch return; // codec 위반 → 연결만 닫는다.
+                        const frame = maybe orelse break; // 더 조립할 frame 없음.
+                        defer frame.deinit(self.allocator);
+                        const action = try conn.handleFrame(frame);
+                        switch (action) {
+                            .reply => |bytes| {
+                                defer self.allocator.free(bytes);
+                                try writeAll(cfd, bytes);
+                            },
+                            .reply_and_close => |bytes| {
+                                defer self.allocator.free(bytes);
+                                try writeAll(cfd, bytes);
+                                return;
+                            },
+                            .close => return,
+                            .none => {}, // fire-and-forget stream frame(input_bytes) 처리 후.
+                            .frames => |list| {
+                                // attach 응답 + snapshot_chunk*를 순서대로 write. 중간 실패해도 defer가 전부 회수(누수 방지).
+                                defer {
+                                    for (list) |f| self.allocator.free(f);
+                                    self.allocator.free(list);
+                                }
+                                for (list) |f| try writeAll(cfd, f);
+                            },
                         }
-                        for (list) |f| try writeAll(cfd, f);
-                    },
+                    }
                 }
+            }
+            // 매 tick(timeout 또는 read 후): attach된 stream의 화면 변화를 delta_chunk로 push한다(read-only host는 null).
+            if (try conn.collectDeltas()) |list| {
+                defer {
+                    for (list) |f| self.allocator.free(f);
+                    self.allocator.free(list);
+                }
+                for (list) |f| try writeAll(cfd, f);
             }
         }
     }

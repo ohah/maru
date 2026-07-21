@@ -80,6 +80,14 @@ pub const InProcessTermBackend = struct {
         };
     }
 
+    /// handle의 복구 가능한 `Surface`(그리드/스크롤백/코어)를 돌려준다 — terminal arm이면 그 surface, web/미등록이면 null.
+    /// session-host(P3-e2d)가 화면 snapshot을 투영하려 코어를 lock한 채 읽을 때 이 accessor로 surface를 얻는다(LiveSurface
+    /// arm 구조를 이 app 계층에 가둔다 — caller는 `*Surface`만 안다).
+    pub fn surfaceFor(self: *InProcessTermBackend, handle: RuntimeHandle) ?*surface_mod.Surface {
+        const t = self.terminalSlot(handle) orelse return null;
+        return &t.surface;
+    }
+
     fn spawn(ctx: *anyopaque, params: SpawnParams) anyerror!*surface_mod.Surface {
         const self: *InProcessTermBackend = @ptrCast(@alignCast(ctx));
         // control-plane self selector(MARU_PANE_ID)는 handle과 같은 값이어야 한다 — caller가 안 채웠어도 여기서 고정한다.

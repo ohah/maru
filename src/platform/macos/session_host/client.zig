@@ -15,6 +15,7 @@ const posix = std.posix;
 const protocol = @import("protocol.zig");
 const framing = @import("framing.zig");
 const socket_server = @import("socket_server.zig");
+const screen_stream = @import("screen_stream.zig");
 
 pub const ClientError = error{
     ConnectFailed,
@@ -97,6 +98,22 @@ pub const Client = struct {
         // kind와 request_id를 함께 확인한다 — unsolicited/out-of-order frame을 이 call의 응답으로 오귀속하지 않는다.
         if (resp.header.kind != .response or resp.header.request_id != request_id) return error.ProtocolError;
         return self.allocator.dupe(u8, resp.payload) catch return error.OutOfMemory;
+    }
+
+    /// attach 직후 host가 보내는 `snapshot_chunk` stream을 `end_stream`까지 읽어 record 바이트를 이어 돌려준다(§10 attach
+    /// 순서: response → snapshot_chunk*). 반환 바이트는 caller 소유(screen_stream.RecordStream으로 순회). **attach 응답을
+    /// 받은 뒤 다음 request 전에 반드시 이걸로 stream을 비운다** — 안 그러면 leftover chunk가 다음 응답으로 오독된다.
+    pub fn readSnapshot(self: *Client, stream_id: u64) ClientError![]u8 {
+        var out: std.ArrayListUnmanaged(u8) = .empty;
+        errdefer out.deinit(self.allocator);
+        while (true) {
+            const frame = try self.readFrame();
+            defer frame.deinit(self.allocator);
+            if (frame.header.kind != .snapshot_chunk or frame.header.stream_id != stream_id) return error.ProtocolError;
+            out.appendSlice(self.allocator, frame.payload) catch return error.OutOfMemory;
+            if (protocol.Flags.hasEndStream(frame.header.flags)) break;
+        }
+        return out.toOwnedSlice(self.allocator) catch return error.OutOfMemory;
     }
 
     /// terminal input bytes를 attach된 `stream_id`로 보낸다(§9 `input_bytes` — 응답 없는 fire-and-forget). controller만
@@ -393,6 +410,19 @@ test "client: attach, input, resize, and detach a real runtime over the wire" {
         try testing.expect(false);
         return;
     };
+
+    // attach 직후 host가 보내는 화면 snapshot stream을 end_stream까지 비운다(§10 순서). 첫 record는 screen_meta여야 한다.
+    const snap = try client.readSnapshot(stream_id);
+    defer allocator.free(snap);
+    try testing.expect(snap.len > 0);
+    {
+        var rs = screen_stream.RecordStream{ .bytes = snap };
+        const first = (try rs.next()).?;
+        const s = try screen_stream.RecordStream.split(first);
+        try testing.expectEqual(screen_stream.RecordKind.screen_meta, s.header.kind);
+        const meta = try screen_stream.decodeScreenMeta(s.body);
+        try testing.expectEqual(@as(u16, 40), meta.cols); // spawn한 cols=40이 snapshot에 반영됐다.
+    }
 
     // input(fire-and-forget) → controller라 host가 PTY로 전달한다(에러 없이 전송됨만 본다; 반영은 e2d).
     try client.sendInput(stream_id, "hello\n");

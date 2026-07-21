@@ -42,6 +42,9 @@ pub const RuntimeOps = struct {
     write_input: *const fn (ctx: *anyopaque, runtime_id: u128, bytes: []const u8) anyerror!void,
     /// canonical PTY size를 실 `TerminalCore`+`TIOCSWINSZ`에 적용한다(§9). registry가 controller/sequence를 검증한 뒤 호출.
     resize: *const fn (ctx: *anyopaque, runtime_id: u128, cols: u16, rows: u16) anyerror!void,
+    /// runtime의 현재 화면을 §12 screen_stream 레코드 스트림(length-prefixed)으로 투영한다(attach 첫 snapshot). caller가
+    /// 소유하는 바이트를 돌려주며(host가 core lock 아래 투영), server가 이를 snapshot_chunk frame으로 나눠 보낸다.
+    snapshot: *const fn (ctx: *anyopaque, runtime_id: u128, allocator: std.mem.Allocator) anyerror![]u8,
 };
 
 /// `handleFrame`이 caller(socket write loop)에게 지시하는 것. `reply`/`reply_and_close`의 바이트는 **caller 소유**다
@@ -52,6 +55,10 @@ pub const Action = union(enum) {
     close,
     /// 응답 없이 connection을 유지한다(input_bytes 같은 fire-and-forget stream frame 처리 후). caller는 아무것도 write하지 않는다.
     none,
+    /// 여러 frame을 **순서대로** write하고 connection을 유지한다(attach 응답 + snapshot_chunk* — §10 attach 순서). 바깥
+    /// 슬라이스와 각 `[]u8`은 caller 소유다(순서대로 write한 뒤 각 frame free, 마지막에 바깥 슬라이스 free). `frames[0]`이
+    /// 응답 frame, 이후가 snapshot_chunk들이다.
+    frames: [][]u8,
 };
 
 pub const HandleError = error{OutOfMemory};
@@ -255,8 +262,10 @@ pub const Connection = struct {
     }
 
     /// `runtime.attach`: runtime에 subscription을 연다(§8·§9). mode(observer/controller/takeover)에 따라 capability를
-    /// 부여하고 host가 발급한 `stream_id`·granted·`controller_busy`를 응답한다. 실 화면 stream(snapshot/delta)과 takeover
-    /// revocation 이벤트는 이 subscription 위에 e2d(event fan-out)에서 얹는다 — attach 자체는 capability state만 세운다.
+    /// 부여하고 host가 발급한 `stream_id`·granted·`controller_busy`를 응답한 뒤, **현재 화면 snapshot을 `snapshot_chunk`
+    /// frame으로 이어 보낸다**(§10 attach 순서: response → snapshot_chunk*의 마지막 end_stream → delta_chunk*). delta_chunk
+    /// stream과 takeover revocation event fan-out은 e2d-3에서 얹는다. read-only host나 snapshot 실패 시엔 응답만 보낸다
+    /// (attach는 성공 — client가 나중에 fresh snapshot을 요청한다, e2d-3 stream_ack).
     fn dispatchAttach(self: *Connection, request_id: u64, params: ?std.json.ObjectMap) HandleError!Action {
         const p = params orelse return self.replyError(request_id, .invalid_request);
         const id = if (strField(p, "runtime_id")) |h| parseHex128(h) else null;
@@ -286,7 +295,50 @@ pub const Connection = struct {
             .controller_busy = outcome.controller_busy,
         } });
         defer self.allocator.free(body);
-        return self.replyResult(request_id, body);
+        const reply_frame = self.encode(.response, request_id, 0, body) catch |e| switch (e) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.PayloadTooLarge => return self.replyError(request_id, .payload_too_large),
+        };
+
+        // read-only host면 실 runtime이 없어 응답만. snapshot 실패도 attach를 깨지 않고 응답만 보낸다(best-effort).
+        const ops = self.runtime_ops orelse return .{ .reply = reply_frame };
+        const snap_bytes = ops.snapshot(ops.ctx, id.?, self.allocator) catch return .{ .reply = reply_frame };
+        defer self.allocator.free(snap_bytes);
+
+        // 응답 frame + snapshot_chunk*를 순서대로 실어 보낸다(§10). errdefer가 부분 조립 시 전부 회수한다.
+        var list: std.ArrayListUnmanaged([]u8) = .empty;
+        errdefer {
+            for (list.items) |f| self.allocator.free(f);
+            list.deinit(self.allocator);
+        }
+        list.append(self.allocator, reply_frame) catch {
+            self.allocator.free(reply_frame); // 아직 list 밖이라 직접 회수.
+            return error.OutOfMemory;
+        };
+        try self.appendSnapshotChunks(&list, stream, snap_bytes);
+        return .{ .frames = list.toOwnedSlice(self.allocator) catch return error.OutOfMemory };
+    }
+
+    /// snapshot 레코드 바이트를 `snapshot_chunk` frame(각 ≤ `max_binary_chunk`)으로 잘라 `list`에 덧붙인다. 마지막 chunk에
+    /// `end_stream` flag를 세운다(§10). 빈 snapshot도 end_stream 한 frame으로 종료를 알린다. 각 chunk는 attach의 `stream_id`를 싣는다.
+    fn appendSnapshotChunks(self: *Connection, list: *std.ArrayListUnmanaged([]u8), stream: u64, snap_bytes: []const u8) HandleError!void {
+        const chunk_size = protocol.max_binary_chunk;
+        var off: usize = 0;
+        while (true) {
+            const end = @min(off + chunk_size, snap_bytes.len);
+            const is_last = end >= snap_bytes.len;
+            const flags: u32 = if (is_last) protocol.Flags.end_stream else 0;
+            const f = self.encodeWithFlags(.snapshot_chunk, 0, stream, flags, snap_bytes[off..end]) catch |e| switch (e) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.PayloadTooLarge => unreachable, // chunk를 max_binary_chunk 이하로 자르므로 도달 불가.
+            };
+            list.append(self.allocator, f) catch {
+                self.allocator.free(f);
+                return error.OutOfMemory;
+            };
+            off = end;
+            if (is_last) break;
+        }
     }
 
     /// `runtime.detach`: 이 connection의 한 subscription을 뗀다(§9). runtime은 유지된다. 모르는 stream_id는 invalid_request.
@@ -410,13 +462,17 @@ pub const Connection = struct {
 
     const FrameError = error{ OutOfMemory, PayloadTooLarge };
 
-    fn encode(self: *Connection, kind: protocol.Kind, request_id: u64, stream_id: u64, payload: []const u8) FrameError![]u8 {
-        return framing.encodeFrame(self.allocator, .{ .kind = kind, .request_id = request_id, .stream_id = stream_id }, payload) catch |e| switch (e) {
+    fn encodeWithFlags(self: *Connection, kind: protocol.Kind, request_id: u64, stream_id: u64, flags: u32, payload: []const u8) FrameError![]u8 {
+        return framing.encodeFrame(self.allocator, .{ .kind = kind, .request_id = request_id, .stream_id = stream_id, .flags = flags }, payload) catch |e| switch (e) {
             error.OutOfMemory => error.OutOfMemory,
             error.PayloadTooLarge => error.PayloadTooLarge,
             // encodeFrame은 직렬화만 하므로 decode 계열(magic·unknown kind) error를 낼 수 없다.
             error.BadMagic, error.UnknownRequiredFrame => unreachable,
         };
+    }
+
+    fn encode(self: *Connection, kind: protocol.Kind, request_id: u64, stream_id: u64, payload: []const u8) FrameError![]u8 {
+        return self.encodeWithFlags(kind, request_id, stream_id, 0, payload);
     }
 
     /// 크기가 고정적으로 작은 body(hello_ack·typed error·pong nonce)를 frame으로 싣는다. 이들은 control cap(256 KiB)을
@@ -562,7 +618,52 @@ fn runWire(conn: *Connection, wire: []const u8) !FedResult {
             const out = (try rp.next()).?; // caller가 out.deinit
             return .{ .action = if (action == .reply) "reply" else "reply_and_close", .frame = out };
         },
+        .frames => |list| {
+            // 첫 frame(응답)만 파싱해 돌려주고 나머지(snapshot_chunk)는 이 helper에선 버린다. 전 frame 검사는 feedExpectFrames.
+            defer {
+                for (list) |f| allocator.free(f);
+                allocator.free(list);
+            }
+            var rp = framing.FrameParser.init(allocator);
+            defer rp.deinit();
+            try rp.push(list[0]);
+            const out = (try rp.next()).?;
+            return .{ .action = "frames", .frame = out };
+        },
     }
+}
+
+/// `.frames` action(attach 응답 + snapshot_chunk*)을 기대하고 각 frame을 파싱해 돌려준다(caller가 각 Frame.deinit + 슬라이스 free).
+fn feedExpectFrames(conn: *Connection, kind: protocol.Kind, request_id: u64, json: []const u8) ![]framing.Frame {
+    const allocator = testing.allocator;
+    const wire = try framing.encodeFrame(allocator, .{ .kind = kind, .request_id = request_id }, json);
+    defer allocator.free(wire);
+    var parser = framing.FrameParser.init(allocator);
+    defer parser.deinit();
+    try parser.push(wire);
+    const in = (try parser.next()).?;
+    defer in.deinit(allocator);
+
+    const action = try conn.handleFrame(in);
+    if (action != .frames) return error.TestUnexpectedResult;
+    const list = action.frames;
+    defer {
+        for (list) |f| allocator.free(f);
+        allocator.free(list);
+    }
+    var out: std.ArrayListUnmanaged(framing.Frame) = .empty;
+    errdefer {
+        for (out.items) |f| f.deinit(allocator);
+        out.deinit(allocator);
+    }
+    for (list) |fbytes| {
+        var rp = framing.FrameParser.init(allocator);
+        defer rp.deinit();
+        try rp.push(fbytes);
+        const f = (try rp.next()).?;
+        try out.append(allocator, f);
+    }
+    return out.toOwnedSlice(allocator);
 }
 
 /// 테스트 helper: JSON payload로 request/response frame(request_id 헤더)을 만들어 넣는다.
@@ -754,8 +855,14 @@ const FakeRuntimeOps = struct {
         self.resized_rows = rows;
         self.resized_runtime = runtime_id;
     }
+    /// 고정 snapshot 바이트를 caller 소유로 돌려준다(server가 이걸 snapshot_chunk로 나눠 보낸다).
+    fn snapshotFn(ctx: *anyopaque, runtime_id: u128, allocator: std.mem.Allocator) anyerror![]u8 {
+        _ = ctx;
+        _ = runtime_id;
+        return allocator.dupe(u8, "SNAPSHOT-BYTES");
+    }
     fn ops(self: *FakeRuntimeOps) RuntimeOps {
-        return .{ .ctx = self, .spawn = spawnFn, .terminate = terminateFn, .write_input = writeInputFn, .resize = resizeFn };
+        return .{ .ctx = self, .spawn = spawnFn, .terminate = terminateFn, .write_input = writeInputFn, .resize = resizeFn, .snapshot = snapshotFn };
     }
 };
 
@@ -897,4 +1004,53 @@ test "server: observer attach is denied input and resize" {
         try testing.expect(std.mem.indexOf(u8, r.frame.?.payload, "unauthorized") != null);
     }
     try testing.expectEqual(@as(u16, 0), fake.resized_cols);
+}
+
+test "server: attach streams the runtime snapshot as snapshot_chunk frames after the reply" {
+    const allocator = testing.allocator;
+    var registry = reg.TerminalRuntimeRegistry.init(allocator);
+    defer registry.deinit();
+    _ = try registry.register(0xAA, 80, 24);
+
+    var fake: FakeRuntimeOps = .{};
+    var conn = Connection.init(allocator, 1, &registry);
+    defer conn.deinit();
+    conn.runtime_ops = fake.ops();
+    {
+        const h = try feedJson(&conn, .hello, 1, "{\"protocol_min\":1,\"protocol_max\":1}");
+        if (h.frame) |f| f.deinit(allocator);
+    }
+    // attach → 응답 frame + snapshot_chunk(end_stream) frame이 순서대로 온다(§10).
+    const frames = try feedExpectFrames(&conn, .request, 2, "{\"method\":\"runtime.attach\",\"params\":{\"runtime_id\":\"aa\",\"mode\":\"observer\"}}");
+    defer {
+        for (frames) |f| f.deinit(allocator);
+        allocator.free(frames);
+    }
+    try testing.expectEqual(@as(usize, 2), frames.len);
+    // frames[0] = attach 응답(stream_id 포함).
+    try testing.expectEqual(protocol.Kind.response, frames[0].header.kind);
+    try testing.expect(std.mem.indexOf(u8, frames[0].payload, "stream_id") != null);
+    // frames[1] = snapshot_chunk(end_stream), attach가 발급한 stream_id(1), payload는 host가 투영한 snapshot 바이트.
+    try testing.expectEqual(protocol.Kind.snapshot_chunk, frames[1].header.kind);
+    try testing.expect(protocol.Flags.hasEndStream(frames[1].header.flags));
+    try testing.expectEqual(@as(u64, 1), frames[1].header.stream_id);
+    try testing.expectEqualStrings("SNAPSHOT-BYTES", frames[1].payload);
+}
+
+test "server: read-only host attach replies without a snapshot stream" {
+    const allocator = testing.allocator;
+    var registry = reg.TerminalRuntimeRegistry.init(allocator);
+    defer registry.deinit();
+    _ = try registry.register(0xBB, 80, 24);
+    var conn = Connection.init(allocator, 1, &registry); // runtime_ops = null (read-only host).
+    defer conn.deinit();
+    {
+        const h = try feedJson(&conn, .hello, 1, "{\"protocol_min\":1,\"protocol_max\":1}");
+        if (h.frame) |f| f.deinit(allocator);
+    }
+    // 실 runtime이 없으면 attach는 capability만 세우고 응답만 보낸다(.frames가 아니라 .reply — snapshot stream 없음).
+    const r = try feedJson(&conn, .request, 2, "{\"method\":\"runtime.attach\",\"params\":{\"runtime_id\":\"bb\",\"mode\":\"observer\"}}");
+    defer if (r.frame) |f| f.deinit(allocator);
+    try testing.expectEqualStrings("reply", r.action);
+    try testing.expect(std.mem.indexOf(u8, r.frame.?.payload, "stream_id") != null);
 }

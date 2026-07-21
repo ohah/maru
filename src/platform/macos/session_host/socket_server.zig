@@ -190,6 +190,14 @@ pub const SocketServer = struct {
                     },
                     .close => return,
                     .none => {}, // fire-and-forget stream frame(input_bytes) 처리 후 — 응답 없이 계속 읽는다.
+                    .frames => |list| {
+                        // attach 응답 + snapshot_chunk*를 순서대로 write한다. 중간 write 실패해도 defer가 전부 회수한다(누수 방지).
+                        defer {
+                            for (list) |f| self.allocator.free(f);
+                            self.allocator.free(list);
+                        }
+                        for (list) |f| try writeAll(cfd, f);
+                    },
                 }
             }
         }

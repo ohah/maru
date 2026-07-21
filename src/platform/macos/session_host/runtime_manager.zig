@@ -25,6 +25,8 @@ const builtin = @import("builtin");
 const maru = @import("maru");
 const server = @import("server.zig");
 const reg = @import("registry.zig");
+const screen_snapshot = @import("screen_snapshot.zig");
+const screen_stream = @import("screen_stream.zig");
 
 const InProcessTermBackend = maru.app.InProcessTermBackend;
 const LiveRegistry = maru.app.in_process_term_backend.LiveRegistry;
@@ -75,7 +77,7 @@ pub const RuntimeManager = struct {
 
     /// server.zig가 dispatch에 넘길 중립 vtable. `ctx`는 이 매니저다.
     pub fn runtimeOps(self: *RuntimeManager) server.RuntimeOps {
-        return .{ .ctx = self, .spawn = spawnOp, .terminate = terminateOp, .write_input = writeInputOp, .resize = resizeOp };
+        return .{ .ctx = self, .spawn = spawnOp, .terminate = terminateOp, .write_input = writeInputOp, .resize = resizeOp, .snapshot = snapshotOp };
     }
 
     fn spawnOp(ctx: *anyopaque, params: server.RuntimeSpawnParams) anyerror!u128 {
@@ -98,6 +100,19 @@ pub const RuntimeManager = struct {
         const self: *RuntimeManager = @ptrCast(@alignCast(ctx));
         const handle = self.handleFor(runtime_id) orelse return error.RuntimeNotFound;
         return self.backend_impl.backend().resize(handle, .{ .cols = cols, .rows = rows }, self.io);
+    }
+
+    /// runtime의 현재 화면을 screen_stream 레코드 스트림으로 투영한다(§12, P3-e2d). reader 스레드가 core를 쓰므로
+    /// **core_mutex를 잡은 채** 투영하고(투영이 grapheme·색을 소유 버퍼로 복사), 반환된 소유 바이트만 unlock 뒤 caller가
+    /// snapshot_chunk로 나눠 보낸다(io-render-threading.md — snapshot 슬라이스는 core alias라 lock 밖으로 새면 안 됨).
+    fn snapshotOp(ctx: *anyopaque, runtime_id: u128, allocator: std.mem.Allocator) anyerror![]u8 {
+        const self: *RuntimeManager = @ptrCast(@alignCast(ctx));
+        const handle = self.handleFor(runtime_id) orelse return error.RuntimeNotFound;
+        const surface = self.backend_impl.surfaceFor(handle) orelse return error.RuntimeNotFound;
+        const generation = if (self.host_registry.get(runtime_id)) |e| e.resize_generation else 0;
+        surface.lockCore(self.io);
+        defer surface.unlockCore(self.io);
+        return screen_snapshot.projectSnapshot(allocator, &surface.core, .{ .generation = generation });
     }
 
     /// runtime_id → in-process handle. registry entry의 opaque 슬롯에서 되읽는다(spawn이 심어 둔 값). 없으면 null.
@@ -241,6 +256,35 @@ test "runtime manager: writeInput and resize reach a real runtime through Runtim
 
     ops.terminate(ops.ctx, rid);
     try std.testing.expectEqual(@as(usize, 0), host_registry.count());
+}
+
+test "runtime manager: snapshot projects the runtime's live screen through RuntimeOps" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    var host_registry = reg.TerminalRuntimeRegistry.init(allocator);
+    defer host_registry.deinit();
+    var mgr: RuntimeManager = undefined;
+    mgr.init(allocator, std.testing.io, &host_registry);
+    defer mgr.deinit();
+
+    const ops = mgr.runtimeOps();
+    const rid = try ops.spawn(ops.ctx, .{ .argv = &.{"/bin/cat"}, .cwd = null, .cols = 24, .rows = 6 });
+
+    // snapshot이 실 core를 lock한 채 투영해 첫 record(screen_meta)에 spawn 크기(24x6)를 담는다.
+    const snap = try ops.snapshot(ops.ctx, rid, allocator);
+    defer allocator.free(snap);
+    var rs = screen_stream.RecordStream{ .bytes = snap };
+    const first = (try rs.next()).?;
+    const s = try screen_stream.RecordStream.split(first);
+    try std.testing.expectEqual(screen_stream.RecordKind.screen_meta, s.header.kind);
+    const meta = try screen_stream.decodeScreenMeta(s.body);
+    try std.testing.expectEqual(@as(u16, 24), meta.cols);
+    try std.testing.expectEqual(@as(u16, 6), meta.rows);
+
+    // 없는 runtime_id는 RuntimeNotFound(다른 runtime으로 새지 않는다).
+    try std.testing.expectError(error.RuntimeNotFound, ops.snapshot(ops.ctx, 0xDEADBEEF, allocator));
+
+    ops.terminate(ops.ctx, rid);
 }
 
 test "runtime manager: empty argv is rejected before allocating a handle" {

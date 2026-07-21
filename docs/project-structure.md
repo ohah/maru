@@ -66,9 +66,11 @@ src/
                         Connection dispatch, fork+setsid process smoke로 부모-독립 host 생존 실증, macOS 전용 — **구현됨, P3-d2c**),
                         launcher.zig(detached-helper spawn — double-fork+setsid+`/dev/null` fd+execv로 host를 부모-독립 orphan으로
                         띄움, argv 순수 조립·marker process smoke, macOS 전용 — **구현됨, P3-d2d**. `maru __session-host` CLI는
-                        src/main.zig hidden 서브커맨드);
-                        이후 계획: client.zig(hello/RPC/stream demux) + host-backed `TermRuntimeBackend` + discovery→launch→attach
-                        app 배선 + GUI 재접속 + host 수명(idle grace)·connection별 bounded queue(P3-e). control-plane/browser
+                        src/main.zig hidden 서브커맨드),
+                        client.zig(GUI/CLI 측 host connect·hello·host_id 확정·read-only command 왕복 — server dispatch의 대칭,
+                        순수 JSON helper·fork host roundtrip smoke, macOS 전용 — **구현됨, P3-e1**);
+                        이후 계획: host-backed `TermRuntimeBackend`(client에 runtime.spawn/attach/input/resize/terminate + snapshot/delta
+                        demux, P3-e2) + `app_session` 배선(discovery→launch→attach) + GUI 재접속(P3-e3) + host 수명·bounded queue. control-plane/browser
                         server와 ID·wire를 공유하지 않으며, macOS launch/peer-cred/socket adapter만 platform 경계에 두고
                         codec/state machine은 OS 중립(platform import 0)으로 둔다. 테스트는 `mise run test-session-host`(기본 `test`에도 편입)
     windows/

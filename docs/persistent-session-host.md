@@ -771,7 +771,19 @@ GUI가 `*LivePtySession`을 안 드는 컴파일 타임 red test, boundary check
   진입한다. argv 조립은 순수 TDD, detached spawn 메커니즘은 관찰 가능한 자식(marker 파일)으로 process smoke한다(macOS 전용).
   실 connect·flock start lock으로 discovery(P3-d2b)를 실행하고 앱이 이 launcher를 호출하는 **app 배선과 GUI 종료→재실행
   재접속 end-to-end는 client 쪽(P3-e)** 에서 host-backed backend와 함께 붙인다(그 경로가 discovery→launch→attach이므로).
-- **P3-e(client + 재접속)**: GUI 측 hello/RPC/stream demux와 host-backed `TermRuntimeBackend`(§13 P2 계약의 원격 구현)로 GUI 종료→재실행 재접속.
+P3-e도 슬라이스로 나눈다(제품 통합이라 크다).
+
+- **P3-e1(client hello/RPC) ✅**: `session_host/client.zig`에 GUI/CLI 측 client를 구현했다 — host socket에 connect, hello로
+  protocol/`host_id` 확정(§4 stale 판정), `request`/`response`로 read-only command 왕복. `server.zig` dispatch의 대칭이고
+  frame codec(P3-a)·host 진입점(P3-d2c)을 재사용한다. hello/request JSON 조립·host_id 파싱은 순수, 실제 fork된 host에
+  connect→hello→host.info 왕복과 host_id 일치는 process smoke로 검증한다(macOS 전용). runtime attach subscription·stream
+  demux는 P3-e2에 얹는다.
+- **P3-e2(host-backed `TermRuntimeBackend`)**: client에 `runtime.spawn/attach/input/resize/terminate`와 snapshot/delta stream
+  demux를 더해, §13 P2 `TermRuntimeBackend` 계약의 **원격 구현**을 만든다(in-process adapter의 형제). GUI는 같은 계약 뒤에서
+  runtime이 원격 host에 있는지 모른다.
+- **P3-e3(app 배선 + GUI 재접속)**: `app_session`이 `keep-alive` 경로에서 discovery(P3-d2b)→launch(P3-d2d)→attach를 실행해
+  host-backed backend를 쓰고, GUI 종료→재실행 시 manifest의 `runtime_handle`로 재접속한다. §14 OS E2E(pre-authorized macOS
+  runner)로 "controlled command 띄우고 GUI 종료·재실행 → PID/runtime_id/output/scrollback 동일" gate를 검증한다.
 
 종료 gate: 무인 실제 별도 process smoke, detach 중 output, reconnect first snapshot, input/resize roundtrip, bounded shutdown.
 

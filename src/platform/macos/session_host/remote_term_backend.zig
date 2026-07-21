@@ -27,6 +27,8 @@ const TermRuntimeBackend = term_backend.TermRuntimeBackend;
 const RuntimeHandle = term_backend.RuntimeHandle;
 const SpawnParams = term_backend.SpawnParams;
 const RuntimeLink = maru.app.RuntimeLink;
+const SurfaceRuntime = maru.app.SurfaceRuntime;
+const PtyIo = maru.app.runtime.PtyIo;
 const runtime_pump = maru.app.runtime_pump;
 const RuntimeEventPump = runtime_pump.RuntimeEventPump;
 const DrainSummary = runtime_pump.DrainSummary;
@@ -41,6 +43,11 @@ pub const RemoteTermBackend = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
     client: *client_mod.Client,
+    // 앱의 in-process 라우팅 표(borrowed — 소유는 AppRuntime). attach가 원격 Term을 여기에 **원격 PtyIo**로 등록해,
+    // GUI 입력 hot path(self.runtime.writeInput/resize/enqueueCoreCommand, surface.id 라우팅)가 in-process와 똑같이
+    // 원격 Term에 도달하게 한다 — sink만 write_queue→client.sendInput/resize RPC로 갈린다(app_session hot path 무변경).
+    // in-process Term은 write_queue PtyIo로 등록되는 것과 대칭. `remove`가 뗀다.
+    surface_runtime: *SurfaceRuntime,
     runtimes: std.AutoHashMapUnmanaged(RuntimeHandle, *RemoteRuntime) = .empty,
 
     const vtable = term_backend.VTable{
@@ -59,16 +66,18 @@ pub const RemoteTermBackend = struct {
         .foreground_process_names = foregroundProcessNames,
     };
 
-    pub fn init(allocator: std.mem.Allocator, io: std.Io, client: *client_mod.Client) RemoteTermBackend {
-        return .{ .allocator = allocator, .io = io, .client = client };
+    pub fn init(allocator: std.mem.Allocator, io: std.Io, client: *client_mod.Client, surface_runtime: *SurfaceRuntime) RemoteTermBackend {
+        return .{ .allocator = allocator, .io = io, .client = client, .surface_runtime = surface_runtime };
     }
 
-    /// 남은 원격 runtime을 회수한다(각각 host terminate + client-side deinit). client connection은 borrowed라 안 닫는다.
+    /// 남은 원격 runtime을 회수한다(각각 라우팅 표에서 detach + host terminate + client-side deinit). client connection과
+    /// surface_runtime은 borrowed라 안 건드린다(소유는 caller).
     pub fn deinit(self: *RemoteTermBackend) void {
-        var it = self.runtimes.valueIterator();
-        while (it.next()) |rr| {
-            rr.*.deinit();
-            self.allocator.destroy(rr.*);
+        var it = self.runtimes.iterator();
+        while (it.next()) |kv| {
+            self.surface_runtime.detachSurface(kv.key_ptr.*); // link(원격 PtyIo)를 먼저 뗀다 — rr.surface가 곧 무효.
+            kv.value_ptr.*.deinit();
+            self.allocator.destroy(kv.value_ptr.*);
         }
         self.runtimes.deinit(self.allocator);
         self.* = undefined;
@@ -99,8 +108,11 @@ pub const RemoteTermBackend = struct {
     fn attach(ctx: *anyopaque, handle: RuntimeHandle, process_in_reader: bool) anyerror!RuntimeLink {
         const self: *RemoteTermBackend = @ptrCast(@alignCast(ctx));
         _ = process_in_reader; // 원격은 spawn이 이미 host에 controller attach했다(output은 host가 처리, 로컬 reader 없음).
-        if (!self.runtimes.contains(handle)) return error.UnknownSurface;
-        return .{ .surface_id = handle, .pty_id = handle }; // in-process 라우팅 상관 쌍의 원격 대응(handle이 두 역할 겸함).
+        const rr = self.runtimes.get(handle) orelse return error.UnknownSurface;
+        // 원격 Term을 앱 라우팅 표에 **원격 PtyIo**로 등록한다(in-process가 write_queue PtyIo로 등록되는 것과 대칭).
+        // 이후 self.runtime.writeInput/resize/enqueueCoreCommand(handle)가 이 PtyIo로 갈려 sendInput/resize RPC로 간다 —
+        // GUI 입력 hot path는 로컬/원격을 모른다. handle=surface_id=pty_id라 라우팅 키 변환이 없다.
+        return self.surface_runtime.attach(&rr.surface, handle, remotePtyIo(rr));
     }
 
     fn pump(ctx: *anyopaque, handle: RuntimeHandle) anyerror!RuntimeEventPump {
@@ -177,6 +189,7 @@ pub const RemoteTermBackend = struct {
     fn remove(ctx: *anyopaque, handle: RuntimeHandle) void {
         const self: *RemoteTermBackend = @ptrCast(@alignCast(ctx));
         if (self.runtimes.fetchRemove(handle)) |kv| {
+            self.surface_runtime.detachSurface(handle); // 라우팅 link(원격 PtyIo)를 먼저 뗀다 — rr.surface가 곧 무효.
             kv.value.deinit(); // host terminate(멱등) + surface/remote_screen 회수. 이후 handle과 surface 포인터는 무효.
             self.allocator.destroy(kv.value);
         }
@@ -193,6 +206,38 @@ pub const RemoteTermBackend = struct {
         _ = handle;
         _ = out;
         return 0;
+    }
+
+    // ── 원격 PtyIo(SurfaceRuntime link의 input/resize sink) ─────────────────────────
+    //
+    // in-process는 link의 PtyIo가 live_pty write_queue를 가리키지만, 원격은 여기 세 함수가 그 자리를 채워 sendInput/
+    // resize RPC로 보낸다. ctx=*RemoteRuntime. `enqueue_command`는 null로 둔다 — 원격 core command wire RPC가 없어
+    // SurfaceRuntime이 placeholder core에 직접 적용으로 폴백한다(후속 e3; placeholder는 렌더 안 되므로 무해하나 config
+    // 명령이 host core엔 도달 안 함). `write_input_nb`는 채운다(paste 논블로킹 계약 — socket write는 전량 전송으로 본다).
+
+    fn remotePtyIo(rr: *RemoteRuntime) PtyIo {
+        return .{
+            .ctx = rr,
+            .write_input = ioWriteInput,
+            .resize_fn = ioResize,
+            .write_input_nb = ioWriteInputNonBlocking,
+        };
+    }
+
+    fn ioWriteInput(ctx: *anyopaque, bytes: []const u8) anyerror!void {
+        const rr: *RemoteRuntime = @ptrCast(@alignCast(ctx));
+        return rr.sendInput(bytes);
+    }
+
+    fn ioWriteInputNonBlocking(ctx: *anyopaque, bytes: []const u8) anyerror!usize {
+        const rr: *RemoteRuntime = @ptrCast(@alignCast(ctx));
+        try rr.sendInput(bytes); // socket blocking writeAll — 전량 전송으로 본다(host가 흡수).
+        return bytes.len;
+    }
+
+    fn ioResize(ctx: *anyopaque, size: maru.terminal.Size) anyerror!void {
+        const rr: *RemoteRuntime = @ptrCast(@alignCast(ctx));
+        return rr.resize(size.cols, size.rows);
     }
 };
 
@@ -247,7 +292,11 @@ test "remote term backend: drives a real host runtime through the TermRuntimeBac
     };
     defer client.deinit();
 
-    var be_impl = RemoteTermBackend.init(allocator, io, &client);
+    // 앱 라우팅 표(GUI 입력 hot path가 쓰는 그 표). backend가 원격 Term을 여기 등록한다.
+    var surface_runtime = maru.app.SurfaceRuntime.init(allocator);
+    defer surface_runtime.deinit();
+
+    var be_impl = RemoteTermBackend.init(allocator, io, &client, &surface_runtime);
     defer be_impl.deinit();
     const be = be_impl.backend();
 
@@ -266,12 +315,14 @@ test "remote term backend: drives a real host runtime through the TermRuntimeBac
     surface.unlockCore(io);
     try testing.expectEqual(@as(u16, 40), cols0);
 
-    _ = try be.attach(1, true); // 원격은 no-op이지만 계약 표면을 탄다(RuntimeLink 반환).
+    const link = try be.attach(1, true); // 원격 Term을 SurfaceRuntime에 원격 PtyIo로 등록한다(RuntimeLink 반환).
+    try testing.expectEqual(@as(u64, 1), link.surface_id);
     var frame_pump = try be.pump(1); // 원격 모드 RuntimeEventPump.
 
-    // 입력을 계약으로 보내면 host가 echo → delta가 온다. pump.drainAvailable()(원격 drain)로 소비해 Surface에 "h"가
-    // 반영되는지 폴링한다(host delta tick ~20ms).
-    try be.writeInput(1, "hello\n");
+    // **핵심**: GUI 키 입력 hot path와 **똑같이** self.runtime.writeInput(surface.id, ...)로 보낸다 — 계약 vtable을 우회해도
+    // 원격 PtyIo→client.sendInput→host로 라우팅된다(app_session 무변경으로 원격 입력이 도달함을 증명). host가 echo → delta →
+    // pump.drainAvailable()(원격 drain)로 소비해 Surface에 "h"가 반영되는지 폴링(host delta tick ~20ms).
+    try surface_runtime.writeInput(1, .{ .bytes = "hello\n" });
     var found = false;
     var attempts: usize = 0;
     while (attempts < 100 and !found) : (attempts += 1) {
@@ -284,9 +335,14 @@ test "remote term backend: drives a real host runtime through the TermRuntimeBac
             try testing.expect(ds.output_events > 0); // 배치가 적용된 tick은 렌더 트리거를 낸다.
         } else _ = usleep(20 * 1000);
     }
-    try testing.expect(found); // 계약을 통한 원격 runtime의 화면 변화가 Surface에 반영됐다.
+    try testing.expect(found); // hot path(SurfaceRuntime)를 통한 원격 입력이 host를 거쳐 Surface에 반영됐다.
+
+    // resize도 hot path(self.runtime.resize)로 원격 PtyIo→resize RPC에 도달한다(에러 없이 위임).
+    try surface_runtime.resize(1, .{ .cols = 80, .rows = 24 }, io);
 
     be.closeAndDetach(1);
-    be.remove(1); // client-side 회수(map에서 제거 + host terminate 멱등).
+    be.remove(1); // client-side 회수(map 제거 + SurfaceRuntime detach + host terminate 멱등).
     try testing.expectEqual(@as(usize, 0), be_impl.runtimes.count());
+    // remove가 라우팅 표에서도 뗐다 — 이제 hot path 입력은 UnknownSurface(dangling link 없음).
+    try testing.expectError(error.UnknownSurface, surface_runtime.writeInput(1, .{ .bytes = "x" }));
 }

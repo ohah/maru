@@ -74,7 +74,7 @@ pub fn buildFrameAfterDrain(
     // 코어 메모리를 DrawList로 복사)는 **락 아래**, shaping(buildFrameFromDrawList — DrawList 복사본만
     // 봄)은 **락 밖**. PR3에서 리더의 core.write가 렌더 shaping에 안 막히게 한다.
     active.lockCore(io);
-    const list_or = renderer.buildDrawList(allocator, active.core.renderSnapshot());
+    const list_or = renderer.buildDrawList(allocator, active.renderSnapshot());
     active.unlockCore(io);
     var list = try list_or;
     errdefer list.deinit(allocator);

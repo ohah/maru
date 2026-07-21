@@ -22636,7 +22636,7 @@ pub const AppSession = struct {
                         pane_surface.lockCore(self.io);
                         // 창이 포커스를 잃었으면 config.cursor.unfocused(block/hollow/hidden)를 커서에 반영한다 — 포커스
                         // 있으면(또는 block) 현행(normal). renderer가 이 모드로 cursor overlay의 hollow/visible를 정한다(F1-4b-2).
-                        const dl_or = renderer.buildDrawListWithUnfocused(self.allocator, pane_core.renderSnapshot(), self.unfocusedCursorMode());
+                        const dl_or = renderer.buildDrawListWithUnfocused(self.allocator, pane_surface.renderSnapshot(), self.unfocusedCursorMode());
                         // palette를 소유 버퍼로 복사(코어 alias 제거). 예약 capacity 부족(OOM)이면 코어 포인터 폴백.
                         const pane_palette_ptr = if (self.pane_palette_copies.items.len < self.pane_palette_copies.capacity) blk: {
                             self.pane_palette_copies.appendAssumeCapacity(pane_core.paletteOverride().*);
@@ -22763,7 +22763,7 @@ pub const AppSession = struct {
                     active_surface.core.setCellMetrics(self.cell_width_px, self.cell_height_px);
                     // OSC 10/11 색 질의 응답용 theme 전경/배경 RGB도 주입(코어는 Color.default 추상만 알아 실제 색 필요).
                     active_surface.core.setDefaultColors(self.appearance.theme.foreground, self.appearance.theme.background);
-                    const snap = active_surface.core.renderSnapshot();
+                    const snap = active_surface.renderSnapshot();
                     // K4c: 살아있는 이미지 id 집합(활성 surface 저장소). Swift가 이 집합에 없는 텍스처를 evict.
                     for (snap.images) |img| kg_live_ids.append(self.allocator, img.image_id) catch {};
                     // kitty_uploaded를 같은 집합으로 prune — 텍스처가 evict된(=live 아님) 이미지는 dedup 상태에서도
@@ -35625,7 +35625,7 @@ test "placeAndDistribute: 멀티 페인 collect를 dest별로 분배 + collected
     for (dests) |dest| {
         const active = session.app_window.active().?;
         active.lockCore(session.io);
-        const dl_or = renderer.buildDrawListWithUnfocused(allocator, active.core.renderSnapshot(), .normal);
+        const dl_or = renderer.buildDrawListWithUnfocused(allocator, active.renderSnapshot(), .normal);
         active.unlockCore(session.io);
         const dl = dl_or catch continue;
         session.collectShaped(&collected, dl, builder, dest);

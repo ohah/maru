@@ -28,7 +28,8 @@
 //!   - P3-e2e: host-backed `TermRuntimeBackend`(P2 계약의 원격 구현).
 //!     - e2e-1 ✅: `screen_assembler`(snapshot/delta records → client 화면 모델, 투영의 역, 순수). applySnapshot/applyDelta/toSnapshot, generation gap.
 //!     - e2e-2a ✅: `remote_screen`(조립기 runs → `terminal.RenderSnapshot` cells). 렌더 경로가 로컬/원격에서 같은 DTO를 소비하는 SSOT 변환(Run→Cell·wide·cluster·rgb).
-//!     - e2e-2b/c: `Surface`가 화면 소스 추상(로컬 core vs 원격 assembler) + remote `TermRuntimeBackend` vtable(client 위 spawn/attach/input/resize/delta). ← 다음
+//!     - e2e-2b ✅: `Surface.renderSnapshot()` 렌더 seam 도입(로컬 core 위임). GUI 렌더 read를 `surface.core.renderSnapshot()`→`surface.renderSnapshot()`로 이관 — 원격 backing이 갈릴 단일 접근점.
+//!     - e2e-2c: `Surface`에 원격 화면 소스(assembler-backed `CellGrid`) 주입 + remote `TermRuntimeBackend` vtable(client 위 spawn/attach/input/resize/delta). ← 다음
 //!   - P3-e3: `app_session` 배선(discovery→launch→attach) + GUI 재접속(manifest runtime_handle).
 
 const builtin = @import("builtin");

@@ -65,6 +65,15 @@ pub const Surface = struct {
         self.core.owner_dbg.unlock(&self.core_mutex, io);
     }
 
+    /// 렌더 draw 경로의 **화면 소스 단일 접근점**(SSOT — docs/persistent-session-host.md §8 "중립 screen DTO"). 지금은
+    /// 로컬 `TerminalCore`(뷰포트 합성 포함)에 위임한다. 원격 host runtime backing이 붙는 후속(P3-e2e-2c)에서 이 accessor가
+    /// 원격 화면 모델(조립기 → cells)로 갈린다 — GUI 렌더 코드는 로컬/원격을 모르게 `surface.renderSnapshot()`만 부른다.
+    /// 반환 snapshot은 화면 소스 메모리를 alias하므로 caller가 `lockCore`/`unlockCore` 안에서 읽고 복사해야 한다(현행
+    /// 계약 그대로, docs/io-render-threading.md — snapshot 슬라이스는 lock 밖으로 새면 안 됨).
+    pub fn renderSnapshot(self: *Surface) terminal.RenderSnapshot {
+        return self.core.renderSnapshot();
+    }
+
     pub fn restorableMetadata(self: *const Surface) RestorableSurfaceMetadata {
         // env는 allowlist/redaction 정책이 정해질 때까지 저장하지 않는다.
         // workspace restore가 민감한 환경변수를 실수로 기록하지 않도록 비워 둔다.

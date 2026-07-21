@@ -86,10 +86,27 @@ pub const PumpedEvent = struct {
     termination: ?Termination = null,
 };
 
+/// 원격(host-backed) runtime의 이벤트 소스 계약(P3-e3). in-process pump는 로컬 `*PtyEventQueue`를 비우지만, 원격 runtime은
+/// host(`maru-sessiond`)가 push하는 화면 delta stream(socket)을 소비한다. frame loop는 그 차이를 모르게 `drainAvailable`만
+/// 부른다 — `remote`가 설정되면 그쪽 vtable이 delta batch를 소비해 **같은 `DrainSummary`**(output_events→metal_dirty,
+/// exit_events/ended→lifecycle)를 만든다. 구현은 platform 계층(session_host의 RemoteRuntime 래퍼)이 제공해 주입한다
+/// (app→platform 역참조 회피 — 이 계층은 vtable만 안다). `Surface.remote`(ScreenSource) 패턴과 동형이다.
+pub const RemotePump = struct {
+    ctx: *anyopaque,
+    /// 원격 delta stream을 **논블로킹**으로 비운다. 적용된 배치가 있으면 output_events>0(→ 렌더 트리거), host 종료를
+    /// 관측하면 ended에 종료 원인을 담는다. wire 오류는 error로 던지지 말고 로컬 read_error처럼 종료 데이터로 바꾼다
+    /// (frame loop가 표시만 갱신하도록 — 로컬 drain 계약과 동형).
+    drain: *const fn (ctx: *anyopaque) DrainSummary,
+};
+
 pub const RuntimeEventPump = struct {
     allocator: std.mem.Allocator,
     queue: *pty_reader.PtyEventQueue,
     runtime: *runtime_mod.SurfaceRuntime,
+    // 원격 backing(P3-e3). null이면 로컬 `queue`를 비운다(현행). 설정되면 `drainAvailable`이 로컬 큐 대신 이 vtable로
+    // 갈린다(host delta stream 소비). 이때 `queue`/`runtime`은 undefined일 수 있으므로(원격은 로컬 큐가 없다), 이 필드를
+    // 보는 분기가 그것들을 만지기 전에 먼저 온다. `initRemote`로만 설정한다.
+    remote: ?RemotePump = null,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -103,7 +120,22 @@ pub const RuntimeEventPump = struct {
         };
     }
 
+    /// 원격(host-backed) pump. 로컬 `queue`/`runtime`이 없어 undefined로 두고 — `drainAvailable`의 remote 분기가 그것들을
+    /// 만지기 전에 반환하므로 안전하다(frame_loop.zig가 이미 "pump.queue는 undefined일 수 있다"를 전제로 방어하는 것과 동형).
+    /// **원격 pump에는 `drainBlockingUntilTermination`/`applyQueuedEvent`나 `pump.queue` 직접 접근을 하면 안 된다**(로컬 전용).
+    pub fn initRemote(allocator: std.mem.Allocator, remote: RemotePump) RuntimeEventPump {
+        return .{
+            .allocator = allocator,
+            .queue = undefined,
+            .runtime = undefined,
+            .remote = remote,
+        };
+    }
+
     pub fn drainAvailable(self: *RuntimeEventPump) PumpError!DrainSummary {
+        // 원격 backing이면 로컬 큐 대신 delta stream을 소비한다(§P3-e3). queue/runtime이 undefined일 수 있으므로 이 분기가
+        // 반드시 먼저 온다(그것들을 역참조하기 전에 반환).
+        if (self.remote) |r| return r.drain(r.ctx);
         var summary: DrainSummary = .{};
         while (self.queue.tryPop()) |event| {
             const pumped = try self.applyQueuedEvent(event);
@@ -346,6 +378,28 @@ test "runtime event pump keeps output summary before a read error termination" {
     try std.testing.expectEqual(@as(usize, 0), summary.exit_events);
     try std.testing.expectEqualStrings("SessionClosed", summary.ended.?.read_error);
     try std.testing.expectEqual(surface_mod.ProcessState.exited, surface.process_state);
+}
+
+test "runtime event pump routes drainAvailable to the remote source without touching the local queue" {
+    // 원격(host-backed) pump는 로컬 큐가 없다(queue/runtime = undefined). drainAvailable이 remote vtable로 위임하고 그
+    // summary를 그대로 돌려주는지 — 그리고 undefined queue/runtime을 만지지 않는지 — 고정한다. 이게 e3 frame-loop 배선의
+    // 토대다: tick 루프의 term.rt.pump.drainAvailable()가 로컬/원격을 모르게 같은 DrainSummary를 받는다.
+    const Fake = struct {
+        calls: usize = 0,
+        fn drain(ctx: *anyopaque) DrainSummary {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            self.calls += 1;
+            return .{ .output_events = 3, .exit_events = 1, .ended = .{ .exited = .{ .exited = 0 } } };
+        }
+    };
+    var fake: Fake = .{};
+    var pump = RuntimeEventPump.initRemote(std.testing.allocator, .{ .ctx = &fake, .drain = Fake.drain });
+
+    const summary = try pump.drainAvailable();
+    try std.testing.expectEqual(@as(usize, 3), summary.output_events);
+    try std.testing.expectEqual(@as(usize, 1), summary.exit_events);
+    try std.testing.expectEqual(pty.ExitStatus{ .exited = 0 }, summary.ended.?.exited);
+    try std.testing.expectEqual(@as(usize, 1), fake.calls); // remote drain이 정확히 한 번 위임됐다.
 }
 
 test "runtime event pump releases output bytes even when runtime rejects the pty" {

@@ -420,6 +420,15 @@ export class AtomicProjectionController {
     this.client?.dispose();
     this.client = null;
     this.clear();
+    // clear()는 desired를 []로 두고 rAF reconcile(프레임당 위젯 2개씩 제거)에 위임할 뿐이라, source/read 전환이나
+    // budget suspend 직후에도 `Decoration.replace({widget, block:true})` 블록 위젯이 CM6에 남는다. offscreen
+    // throttling으로 rAF가 지연되면 그대로 고착돼 소스 모드에서 본문이 위젯에 가려지고 라인 높이가 phantom으로 커진다
+    // (source-preserving 즉시 성립 실패). destroy와 같은 동기 purge로 atomic decoration을 지금 비운다. iframe/mermaid
+    // revoke는 clear()가 이미 처리했고, ≤2/frame은 정상 reconcile 정책이라 mode-leave 전체 teardown에는 적용하지 않는다.
+    this.cancelReconcile();
+    // block widget을 지워도 CM6 height map은 그 라인들의 측정 높이(widget 높이)를 유지해, 소스 모드에서 라인 간격이
+    // 들쭉날쭉하고 첫 줄이 phantom 높이만큼 밀린다. 위젯 제거 DOM reflow 뒤 측정이 필요하므로 재측정을 강제한다.
+    this.view.requestMeasure();
     // Cache lifetime follows the app-global applied worker budget. Hidden/source/read panels keep their
     // WKWebView alive, so retaining per-editor SVG here would bypass the global memory bound.
     this.mermaidCache.clear();

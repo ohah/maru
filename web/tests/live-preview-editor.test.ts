@@ -700,6 +700,74 @@ describe("live preview atomic frame budget", () => {
     });
   });
 
+  test("disable synchronously purges mounted atomic widgets so source mode has no leftover block decorations", async () => {
+    await withEditorDom(async (dom) => {
+      const source = "![alt](image.png)\n\nplain";
+      const editor = createMarkdownEditor(
+        dom.window.document.querySelector("main") as HTMLElement,
+        source,
+        () => {},
+        () => {},
+      );
+      editor.dispatch({ selection: EditorSelection.cursor(source.length) });
+      const revisions = new EditorRevisionClock();
+      const identity = revisions.nextProjection();
+      const controller = new AtomicProjectionController(
+        editor,
+        9,
+        revisions,
+        FakeAtomicWorker as unknown as typeof Worker,
+        async () => null,
+        () => {},
+        () => {},
+      );
+      try {
+        controller.submitEntries(identity.documentRevision, identity.projectionGeneration, [
+          { type: "atomic", role: "image", from: 0, to: 17 },
+        ]);
+        controller.enable();
+        const worker = FakeAtomicWorker.latest;
+        worker?.reply({
+          type: "result",
+          editorEpoch: 9,
+          documentRevision: 0,
+          projectionGeneration: 0,
+          results: [],
+          rejected: [],
+        });
+        const project = worker?.sent[1];
+        if (project?.type !== "project" || project.requests[0] === undefined)
+          throw new Error("missing atomic request");
+        worker.reply({
+          type: "result",
+          editorEpoch: 9,
+          documentRevision: 0,
+          projectionGeneration: 1,
+          results: [
+            {
+              request: project.requests[0],
+              sourceHash: "0123456789abcdef",
+              sanitizedPayload: "<p>image</p>",
+              mermaidSource: null,
+              assetGrants: [],
+            },
+          ],
+          rejected: [],
+        });
+        await new Promise((resolve) => dom.window.requestAnimationFrame(() => resolve(undefined)));
+        // live 모드: block widget이 마운트돼 원본 source range를 대체한다.
+        expect(editor.dom.querySelector(".maru-live-atomic-frame")).not.toBeNull();
+        // source/read 전환 = disable. rAF reconcile을 기다리지 않고 **동기적으로** 데코를 비워야 소스 모드에서
+        // 본문이 블록 위젯에 가려지거나 phantom 라인 높이가 남지 않는다(offscreen throttling으로 rAF가 지연돼도).
+        controller.disable();
+        expect(editor.dom.querySelector(".maru-live-atomic-frame")).toBeNull();
+      } finally {
+        controller.destroy();
+        editor.destroy();
+      }
+    });
+  });
+
   test("drops an asset grant that completes after its projection is retired", async () => {
     await withEditorDom(async (dom) => {
       const source = "![alt](image.png)\n\nplain";

@@ -1400,6 +1400,9 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/platform/macos/session_host.zig"),
             .target = target,
             .optimize = optimize,
+            // socket_server(P3-d2a)가 unix socket syscall(socket/bind/accept/getpeereid)을 써서 libc를 링크한다.
+            // codec/state machine(protocol/framing/screen_stream/registry/server)은 여전히 std만 쓴다.
+            .link_libc = true,
         }),
     });
     const run_session_host_tests = b.addRunArtifact(session_host_tests);

@@ -12,14 +12,24 @@
 //!   - P3-b ✅: `screen_stream`(snapshot/delta record codec, §12).
 //!   - P3-c ✅: `registry`(`TerminalRuntimeRegistry` + controller/observer capability state machine, §9).
 //!   - P3-d1 ✅: `server`(connection dispatch state machine — hello 협상 + read-only command dispatch, 순수).
-//!   - P3-d2: 실 unix socket bind/accept·peer-cred·I/O loop·bounded queue + detached-helper launch + entrypoint. ← 다음
+//!   - P3-d2a ✅: `socket_server`(실 unix socket bind/accept·peer-cred same-UID·read/write I/O loop, self-contained macOS adapter).
+//!   - P3-d2b: socket 발견(flock stale·start lock·경로 정책) + detached-helper launch + entrypoint + bounded queue. ← 다음
 //!   - P3-e: client(hello/RPC/stream demux) + host-backed `TermRuntimeBackend` + GUI 재접속.
+
+const builtin = @import("builtin");
 
 pub const protocol = @import("session_host/protocol.zig");
 pub const framing = @import("session_host/framing.zig");
 pub const screen_stream = @import("session_host/screen_stream.zig");
 pub const registry = @import("session_host/registry.zig");
 pub const server = @import("session_host/server.zig");
+// socket_server는 macOS 전용 unix socket syscall(c.fstatat/mkdir/getpeereid, SO_NOSIGPIPE)을 써서 macOS에서만 컴파일한다
+// (§10 macOS endpoint). Linux에선 그 syscall 시그니처가 없어 참조만으로 컴파일이 깨지므로 barrel에서 조건부로 제외한다.
+// codec/state machine(protocol/framing/screen_stream/registry/server)은 OS 중립이라 그대로 두어 non-macOS에서도 회귀를 잡는다.
+pub const socket_server = if (builtin.os.tag == .macos)
+    @import("session_host/socket_server.zig")
+else
+    struct {};
 
 test {
     // 자식 파일의 inline test를 이 barrel의 test 그래프에 모은다(refAllDecls는 얕아 명시 참조가 필요).

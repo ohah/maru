@@ -1393,16 +1393,18 @@ pub fn build(b: *std.Build) void {
     const boundary_step = b.step("check-boundaries", "Check facade import boundaries");
     boundary_step.dependOn(&run_boundary_tests.step);
 
-    // session-host MRSH codec/framing 단위 테스트(P3). 순수 codec(std만)이라 imports 없이 barrel을 루트로 돌린다.
-    // 기본 `test` 스텝에 편입해 wire 회귀를 항상 잡고, `test-session-host`로 개별 실행도 가능하게 한다.
+    // session-host MRSH codec/framing 단위 테스트(P3). codec(protocol/framing/screen_stream/registry/server)은 std만
+    // 쓰는 순수 계층이지만, macOS 전용 `runtime_manager`(P3-e2b)가 `@import("maru")`로 app InProcessTermBackend를
+    // 재사용하므로 `maru` 모듈을 import로 준다(non-macOS 크로스컴파일에선 barrel이 runtime_manager를 제외해 maru가
+    // 도달되지 않는다). 기본 `test` 스텝에 편입해 wire 회귀를 항상 잡고, `test-session-host`로 개별 실행도 가능하게 한다.
     const session_host_tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/platform/macos/session_host.zig"),
             .target = target,
             .optimize = optimize,
             // socket_server(P3-d2a)가 unix socket syscall(socket/bind/accept/getpeereid)을 써서 libc를 링크한다.
-            // codec/state machine(protocol/framing/screen_stream/registry/server)은 여전히 std만 쓴다.
             .link_libc = true,
+            .imports = &.{.{ .name = "maru", .module = maru_mod }},
         }),
     });
     const run_session_host_tests = b.addRunArtifact(session_host_tests);

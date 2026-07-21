@@ -190,6 +190,47 @@ pub const max_image_blob: usize = 1024 * 1024;
 /// 한 row의 run 수 cap. 폭 8K 화면도 8K run 미만이라 넉넉하며 손상 count를 막는다.
 pub const max_runs_per_row: usize = 65536;
 
+// ── record stream framing ─────────────────────────────────────────────────────
+//
+// snapshot/delta payload은 여러 record(각 28-byte header + body)를 이어 담는다. record header에는 body 길이가 없어
+// 그대로 이어 붙이면 경계를 못 찾으므로, stream 레벨에서 record마다 `u32 length`(record 전체 = header+body 바이트 수)를
+// 앞세운다. 이렇게 하면 (1) chunk(1 MiB) 경계와 무관하게 record를 자르고, (2) **모르는 record kind도 length만큼 건너뛴다**
+// (MRSH frame의 unknown-skip과 같은 forward-compat). client는 여러 snapshot_chunk payload를 이어 붙인 뒤 이 reader로 순회한다.
+
+/// record(header+body 완성 바이트)를 length-prefixed로 stream 버퍼에 덧붙인다. caller가 버퍼를 소유한다.
+pub fn appendRecord(stream: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocator, record: []const u8) DecodeError!void {
+    if (record.len > std.math.maxInt(u32)) return error.LengthOverflow;
+    var len_buf: [4]u8 = undefined;
+    std.mem.writeInt(u32, &len_buf, @intCast(record.len), .big);
+    stream.appendSlice(allocator, &len_buf) catch return error.OutOfMemory;
+    stream.appendSlice(allocator, record) catch return error.OutOfMemory;
+}
+
+/// length-prefixed record stream을 순회한다(빌린 슬라이스 — 원본 버퍼 수명 안에서 유효). `next`가 record(header+body)
+/// 슬라이스를 하나씩 준다. `split`으로 header/body를 가른 뒤 kind별 `decode*`를 부른다.
+pub const RecordStream = struct {
+    bytes: []const u8,
+    pos: usize = 0,
+
+    pub fn next(self: *RecordStream) DecodeError!?[]const u8 {
+        if (self.pos == self.bytes.len) return null;
+        if (self.pos + 4 > self.bytes.len) return error.Truncated;
+        const len = std.mem.readInt(u32, self.bytes[self.pos..][0..4], .big);
+        self.pos += 4;
+        if (self.pos + len > self.bytes.len) return error.Truncated;
+        const rec = self.bytes[self.pos .. self.pos + len];
+        self.pos += len;
+        return rec;
+    }
+
+    /// record 슬라이스에서 28-byte header를 떼고 body를 준다.
+    pub fn split(record: []const u8) DecodeError!struct { header: RecordHeader, body: []const u8 } {
+        if (record.len < record_header_size) return error.Truncated;
+        const header = try RecordHeader.decode(record[0..record_header_size]);
+        return .{ .header = header, .body = record[record_header_size..] };
+    }
+};
+
 // ── primitive writer/reader ──────────────────────────────────────────────────
 
 /// body를 big-endian으로 쌓는다. 문자열은 `length:u32 + UTF-8`. 실패는 OOM만(cap은 caller가 확인).
@@ -710,4 +751,59 @@ test "screen-stream: run count cap rejects a corrupt declared count before alloc
     try w.u16v(0); // row_index
     try w.u32v(@intCast(max_runs_per_row + 1)); // 손상된 거대 run_count
     try testing.expectError(error.TooManyItems, decodeRow(allocator, body.items));
+}
+
+test "screen-stream: length-prefixed record stream splits records across chunk boundaries" {
+    const allocator = testing.allocator;
+    // 여러 record(screen_meta + row 2개)를 length-prefix로 한 stream에 담는다.
+    var stream: std.ArrayListUnmanaged(u8) = .empty;
+    defer stream.deinit(allocator);
+
+    const meta_rec = try encodeScreenMeta(allocator, .{ .kind = .screen_meta, .generation = 5 }, .{ .cols = 4, .rows = 2, .cursor = .{ .col = 1, .row = 0 } });
+    defer allocator.free(meta_rec);
+    try appendRecord(&stream, allocator, meta_rec);
+
+    var runs0 = [_]Run{.{ .grapheme = "x", .width = 1, .count = 4 }};
+    const row0 = try encodeRow(allocator, .{ .kind = .row, .generation = 5 }, .{ .row_index = 0, .runs = &runs0 });
+    defer allocator.free(row0);
+    try appendRecord(&stream, allocator, row0);
+
+    var runs1 = [_]Run{.{ .grapheme = " ", .width = 1, .count = 4 }};
+    const row1 = try encodeRow(allocator, .{ .kind = .row, .generation = 5 }, .{ .row_index = 1, .runs = &runs1 });
+    defer allocator.free(row1);
+    try appendRecord(&stream, allocator, row1);
+
+    // reader가 세 record를 순서대로 돌려주고, header/body 분리 후 kind별 decode가 원본과 일치한다.
+    var rs = RecordStream{ .bytes = stream.items };
+
+    const r0 = (try rs.next()).?;
+    const s0 = try RecordStream.split(r0);
+    try testing.expectEqual(RecordKind.screen_meta, s0.header.kind);
+    try testing.expectEqual(@as(u64, 5), s0.header.generation);
+    const meta = try decodeScreenMeta(s0.body);
+    try testing.expectEqual(@as(u16, 4), meta.cols);
+    try testing.expectEqual(@as(u16, 1), meta.cursor.col);
+
+    const r1 = (try rs.next()).?;
+    const s1 = try RecordStream.split(r1);
+    try testing.expectEqual(RecordKind.row, s1.header.kind);
+    const dr0 = try decodeRow(allocator, s1.body);
+    defer dr0.deinit(allocator);
+    try testing.expectEqual(@as(u16, 0), dr0.row_index);
+    try testing.expectEqualStrings("x", dr0.runs[0].grapheme);
+    try testing.expectEqual(@as(u32, 4), dr0.runs[0].count);
+
+    const r2 = (try rs.next()).?;
+    const s2 = try RecordStream.split(r2);
+    const dr1 = try decodeRow(allocator, s2.body);
+    defer dr1.deinit(allocator);
+    try testing.expectEqual(@as(u16, 1), dr1.row_index);
+
+    try testing.expect((try rs.next()) == null); // 더 없음
+
+    // 잘린 length는 Truncated(부분 chunk).
+    var bad = RecordStream{ .bytes = stream.items[0 .. stream.items.len - 2] };
+    _ = try bad.next(); // 첫 record는 온전
+    _ = try bad.next(); // 둘째도 온전
+    try testing.expectError(error.Truncated, bad.next()); // 셋째 length가 남은 바이트를 넘음
 }

@@ -20,6 +20,26 @@ const reg = @import("registry.zig");
 /// hello가 밝히는 client 종류. GUI window인지 CLI(`maru attach`)인지 — 권한/표시에 쓴다(§9).
 pub const ClientKind = enum { gui, cli, unknown };
 
+/// `runtime.spawn`의 중립 파라미터(server가 JSON에서 파싱해 넘긴다). host가 이 argv/크기로 실 PTY를 띄운다.
+pub const RuntimeSpawnParams = struct {
+    /// `[command, args...]` — argv[0]은 실행 파일 경로. server는 JSON string 배열만 파싱하고 프로세스는 host가 띄운다.
+    argv: []const []const u8,
+    cwd: ?[]const u8 = null,
+    cols: u16,
+    rows: u16,
+};
+
+/// host의 실 runtime 소유(spawn/terminate)를 dispatch가 위임하는 vtable(`runtime.PtyIo` 선례, layering-and-portability.md
+/// §3.1). server.zig는 이 계약만 알아 codec 순수성을 지키고, host 측 `runtime_manager`(app `InProcessTermBackend` 재사용)가
+/// 이를 구현한다. read-only host(테스트·조회 전용)는 null이라 spawn/terminate 요청이 unauthorized로 떨어진다.
+pub const RuntimeOps = struct {
+    ctx: *anyopaque,
+    /// 실 PTY runtime을 띄우고 발급한 `runtime_id`(u128, §4)를 돌려준다. 실패는 anyerror(host 내부 오류로 매핑).
+    spawn: *const fn (ctx: *anyopaque, params: RuntimeSpawnParams) anyerror!u128,
+    /// runtime을 종료한다(§8 `runtime end`). 멱등 — 없는 id는 무시.
+    terminate: *const fn (ctx: *anyopaque, runtime_id: u128) void,
+};
+
 /// `handleFrame`이 caller(socket write loop)에게 지시하는 것. `reply`/`reply_and_close`의 바이트는 **caller 소유**다
 /// (socket에 write한 뒤 free). `close`는 응답 없이 connection을 닫으라는 뜻이다(runtime에는 손대지 않는다).
 pub const Action = union(enum) {
@@ -35,6 +55,8 @@ pub const Connection = struct {
     allocator: std.mem.Allocator,
     host_id: u128,
     registry: *reg.TerminalRuntimeRegistry,
+    /// 실 runtime 소유 위임(host만 설정). null이면 read-only host라 spawn/terminate가 unauthorized다.
+    runtime_ops: ?RuntimeOps = null,
     state: State = .pre_hello,
     selected_version: u16 = 0,
     client_kind: ClientKind = .unknown,
@@ -148,8 +170,59 @@ pub const Connection = struct {
             const body = try self.runtimeMetaJson(entry);
             defer self.allocator.free(body);
             return .{ .reply = try self.encodeResult(frame.header.request_id, body) };
+        } else if (std.mem.eql(u8, method, "runtime.spawn")) {
+            return self.dispatchSpawn(frame.header.request_id, params);
+        } else if (std.mem.eql(u8, method, "runtime.terminate")) {
+            return self.dispatchTerminate(frame.header.request_id, params);
         }
         return self.replyError(frame.header.request_id, .invalid_request);
+    }
+
+    /// `runtime.spawn`: read-only host면 unauthorized. argv/cwd/cols/rows를 파싱해 `RuntimeOps`로 실 PTY를 띄우고
+    /// `runtime_id`(hex)를 응답한다. argv는 비어 있으면 invalid_request, spawn 실패는 internal.
+    fn dispatchSpawn(self: *Connection, request_id: u64, params: ?std.json.ObjectMap) HandleError!Action {
+        const ops = self.runtime_ops orelse return self.replyError(request_id, .unauthorized);
+        const p = params orelse return self.replyError(request_id, .invalid_request);
+        const argv_val = switch (p.get("argv") orelse std.json.Value.null) {
+            .array => |arr| arr,
+            else => return self.replyError(request_id, .invalid_request),
+        };
+        var arena = std.heap.ArenaAllocator.init(self.allocator);
+        defer arena.deinit();
+        const a = arena.allocator();
+        var argv: std.ArrayListUnmanaged([]const u8) = .empty;
+        for (argv_val.items) |item| {
+            const s = switch (item) {
+                .string => |str| str,
+                else => return self.replyError(request_id, .invalid_request),
+            };
+            argv.append(a, s) catch return error.OutOfMemory;
+        }
+        if (argv.items.len == 0) return self.replyError(request_id, .invalid_request);
+        const runtime_id = ops.spawn(ops.ctx, .{
+            .argv = argv.items,
+            .cwd = strField(p, "cwd"),
+            .cols = intField(p, "cols") orelse 80,
+            .rows = intField(p, "rows") orelse 24,
+        }) catch return self.replyError(request_id, .internal);
+
+        const id_hex = try self.hex128(runtime_id);
+        defer self.allocator.free(id_hex);
+        const body = try self.stringify(.{ .result = .{ .runtime_id = id_hex } });
+        defer self.allocator.free(body);
+        return .{ .reply = try self.encode(.response, request_id, 0, body) };
+    }
+
+    /// `runtime.terminate`: read-only host면 unauthorized. `runtime_id`를 파싱해 `RuntimeOps.terminate`로 종료(멱등).
+    fn dispatchTerminate(self: *Connection, request_id: u64, params: ?std.json.ObjectMap) HandleError!Action {
+        const ops = self.runtime_ops orelse return self.replyError(request_id, .unauthorized);
+        const p = params orelse return self.replyError(request_id, .invalid_request);
+        const id = if (strField(p, "runtime_id")) |h| parseHex128(h) else null;
+        if (id == null) return self.replyError(request_id, .invalid_request);
+        ops.terminate(ops.ctx, id.?);
+        const body = try self.stringify(.{ .result = .{ .terminated = true } });
+        defer self.allocator.free(body);
+        return .{ .reply = try self.encode(.response, request_id, 0, body) };
     }
 
     // ── JSON 응답 빌더 ──────────────────────────────────────────────────────
@@ -435,4 +508,68 @@ test "server: hex128 parse rejects malformed runtime ids" {
     try testing.expectEqual(@as(?u128, null), parseHex128("")); // 빈 문자열
     try testing.expectEqual(@as(?u128, null), parseHex128("xyz")); // hex 아님
     try testing.expectEqual(@as(?u128, null), parseHex128("0" ** 33)); // 32자 초과
+}
+
+/// dispatch가 실 runtime 소유를 위임하는 계약(RuntimeOps)을 검증하는 fake. argv[0]과 terminate된 id를 기록한다.
+const FakeRuntimeOps = struct {
+    spawn_argv0: [64]u8 = undefined,
+    spawn_argv0_len: usize = 0,
+    spawn_cols: u16 = 0,
+    terminated_id: u128 = 0,
+    next_id: u128 = 0xCAFE,
+
+    fn spawnFn(ctx: *anyopaque, params: RuntimeSpawnParams) anyerror!u128 {
+        const self: *FakeRuntimeOps = @ptrCast(@alignCast(ctx));
+        const a0 = params.argv[0];
+        const n = @min(a0.len, self.spawn_argv0.len);
+        @memcpy(self.spawn_argv0[0..n], a0[0..n]);
+        self.spawn_argv0_len = n;
+        self.spawn_cols = params.cols;
+        return self.next_id;
+    }
+    fn terminateFn(ctx: *anyopaque, id: u128) void {
+        const self: *FakeRuntimeOps = @ptrCast(@alignCast(ctx));
+        self.terminated_id = id;
+    }
+    fn ops(self: *FakeRuntimeOps) RuntimeOps {
+        return .{ .ctx = self, .spawn = spawnFn, .terminate = terminateFn };
+    }
+};
+
+test "server: runtime.spawn/terminate dispatch through RuntimeOps; read-only host is unauthorized" {
+    const allocator = testing.allocator;
+    var registry = reg.TerminalRuntimeRegistry.init(allocator);
+    defer registry.deinit();
+
+    // runtime_ops가 있는 host: spawn/terminate가 vtable로 위임된다.
+    var fake: FakeRuntimeOps = .{};
+    var conn = Connection.init(allocator, 1, &registry);
+    conn.runtime_ops = fake.ops();
+    {
+        const h = try feedJson(&conn, .hello, 1, "{\"protocol_min\":1,\"protocol_max\":1}");
+        if (h.frame) |f| f.deinit(allocator);
+    }
+    {
+        const r = try feedJson(&conn, .request, 2, "{\"method\":\"runtime.spawn\",\"params\":{\"argv\":[\"/bin/sh\",\"-c\",\"cat\"],\"cols\":100,\"rows\":40}}");
+        defer if (r.frame) |f| f.deinit(allocator);
+        try testing.expect(std.mem.indexOf(u8, r.frame.?.payload, "cafe") != null); // runtime_id hex(0xCAFE)
+    }
+    try testing.expectEqualStrings("/bin/sh", fake.spawn_argv0[0..fake.spawn_argv0_len]);
+    try testing.expectEqual(@as(u16, 100), fake.spawn_cols);
+    {
+        const r = try feedJson(&conn, .request, 3, "{\"method\":\"runtime.terminate\",\"params\":{\"runtime_id\":\"cafe\"}}");
+        defer if (r.frame) |f| f.deinit(allocator);
+        try testing.expect(std.mem.indexOf(u8, r.frame.?.payload, "terminated") != null);
+    }
+    try testing.expectEqual(@as(u128, 0xCAFE), fake.terminated_id);
+
+    // read-only host(runtime_ops=null): spawn은 unauthorized다(§10, §11 — attach 역할에 spawn을 암묵 부여하지 않는다).
+    var conn2 = Connection.init(allocator, 1, &registry);
+    {
+        const h = try feedJson(&conn2, .hello, 1, "{\"protocol_min\":1,\"protocol_max\":1}");
+        if (h.frame) |f| f.deinit(allocator);
+    }
+    const r = try feedJson(&conn2, .request, 2, "{\"method\":\"runtime.spawn\",\"params\":{\"argv\":[\"/bin/sh\"],\"cols\":80,\"rows\":24}}");
+    defer if (r.frame) |f| f.deinit(allocator);
+    try testing.expect(std.mem.indexOf(u8, r.frame.?.payload, "unauthorized") != null);
 }

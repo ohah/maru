@@ -56,8 +56,9 @@ src/
                         registry.zig(`TerminalRuntimeRegistry` + controller/observer capability state machine — runtime_id 소유표·
                         attach/detach/takeover·resize sequence/generation·client 0 크기 유지, 실 runtime handle은 opaque 슬롯 —
                         **구현됨, P3-c**),
-                        server.zig(connection dispatch state machine — hello 협상 + read-only command dispatch(host.info·runtime.list·get)·
-                        pong echo·typed error, 순수 로직 — **구현됨, P3-d1**),
+                        server.zig(connection dispatch state machine — hello 협상 + command dispatch(host.info·runtime.list·get read-only;
+                        runtime.spawn/terminate는 `RuntimeOps` 중립 vtable로 위임, host만 설정·read-only는 unauthorized)·pong echo·
+                        typed error, 순수 로직 — **구현됨, P3-d1 + P3-e2a**),
                         socket_server.zig(실 unix socket bind(0700 dir·0600 socket·symlink 방어)·accept·peer-cred same-UID·read/write
                         I/O loop, self-contained macOS adapter(maru 무관)·process smoke — **구현됨, P3-d2a**),
                         discovery.zig(§10 socket 발견 state machine·경로 — connect-first·조회 auto-start 금지·spawn 의도 start lock

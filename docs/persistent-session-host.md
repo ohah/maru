@@ -778,9 +778,21 @@ P3-e도 슬라이스로 나눈다(제품 통합이라 크다).
   frame codec(P3-a)·host 진입점(P3-d2c)을 재사용한다. hello/request JSON 조립·host_id 파싱은 순수, 실제 fork된 host에
   connect→hello→host.info 왕복과 host_id 일치는 process smoke로 검증한다(macOS 전용). runtime attach subscription·stream
   demux는 P3-e2에 얹는다.
-- **P3-e2(host-backed `TermRuntimeBackend`)**: client에 `runtime.spawn/attach/input/resize/terminate`와 snapshot/delta stream
-  demux를 더해, §13 P2 `TermRuntimeBackend` 계약의 **원격 구현**을 만든다(in-process adapter의 형제). GUI는 같은 계약 뒤에서
-  runtime이 원격 host에 있는지 모른다.
+- **P3-e2(host-backed `TermRuntimeBackend`)**: host가 실 PTY/`TerminalCore`를 소유하고(§3) client가 원격 제어한다. 소유 방식은
+  **P2 `InProcessTermBackend` 재사용 + `runtime_id`↔surface handle 매핑**으로 확정했다(layering-and-portability.md §3.1의
+  "`src/app`=이식 시 재사용하는 공통 런타임" 규정, `PtyIo` vtable 선례). 크기가 커서 다시 나눈다:
+  - **P3-e2a(server dispatch + RuntimeOps seam) ✅**: `server.zig`에 `runtime.spawn`/`runtime.terminate` command와 `RuntimeOps`
+    vtable(중립 spawn/terminate 위임)을 더했다. server codec의 순수성을 지키려 실 runtime 소유는 이 vtable로 위임하고(host만
+    설정), read-only host는 spawn/terminate가 `unauthorized`다. fake `RuntimeOps`로 argv/cols 전달·terminate id·unauthorized를
+    non-macOS에서 고정한다.
+  - **P3-e2b(실 runtime_manager)**: host 측 `runtime_manager`가 `app.InProcessTermBackend`를 재사용해 실 `LivePtySession`/
+    `TerminalCore`를 소유하고 `runtime_id`(u128)↔surface handle(u64)을 매핑해 `RuntimeOps`를 구현한다. `daemon`이 이를 배선하고,
+    client가 실제로 `runtime.spawn`→`runtime_id`→`runtime.list`→`runtime.terminate`를 왕복하는 process smoke로 검증한다.
+    (host가 app/pty/terminal 스택을 링크 — `test-session-host` build module에 maru dep 추가.)
+  - **P3-e2c(attach + input/resize)**: `runtime.attach` subscription과 controller input/resize를 실 runtime에 연결.
+  - **P3-e2d(snapshot/delta stream demux)**: §12 screen-stream codec을 실 `TerminalCore` 화면에 연결(attach 첫 snapshot + delta).
+  - **P3-e2e(host-backed `TermRuntimeBackend`)**: client 위에 §13 P2 `TermRuntimeBackend` 계약의 원격 vtable 구현(in-process
+    adapter의 형제). GUI는 같은 계약 뒤에서 runtime이 원격 host에 있는지 모른다.
 - **P3-e3(app 배선 + GUI 재접속)**: `app_session`이 `keep-alive` 경로에서 discovery(P3-d2b)→launch(P3-d2d)→attach를 실행해
   host-backed backend를 쓰고, GUI 종료→재실행 시 manifest의 `runtime_handle`로 재접속한다. §14 OS E2E(pre-authorized macOS
   runner)로 "controlled command 띄우고 GUI 종료·재실행 → PID/runtime_id/output/scrollback 동일" gate를 검증한다.

@@ -30,8 +30,8 @@
 //!     - e2e-2a ✅: `remote_screen`(조립기 runs → `terminal.RenderSnapshot` cells). 렌더 경로가 로컬/원격에서 같은 DTO를 소비하는 SSOT 변환(Run→Cell·wide·cluster·rgb).
 //!     - e2e-2b ✅: `Surface.renderSnapshot()` 렌더 seam 도입(로컬 core 위임). GUI 렌더 read를 `surface.core.renderSnapshot()`→`surface.renderSnapshot()`로 이관 — 원격 backing이 갈릴 단일 접근점.
 //!     - e2e-2c-1 ✅: `Surface`에 화면 소스 추상(`ScreenSource` vtable) + `RemoteScreen`(조립기+CellGrid+mutex) source. Surface.remote 설정 시 renderSnapshot/lockCore가 원격 조립 화면으로 갈린다.
-//!     - e2e-2c-2: client 위 remote `TermRuntimeBackend` vtable(spawn→assembler-backed Surface, attach/pump→delta stream 소비, input/resize→client RPC). ← 다음
-//!   - P3-e3: `app_session` 배선(discovery→launch→attach) + GUI 재접속(manifest runtime_handle).
+//!     - e2e-2c-2 ✅: `remote_runtime`(client 쪽 원격 runtime — host runtime_manager의 상대). spawn(runtime.spawn+attach+snapshot)→원격-backed Surface, sendInput/resize→client RPC, pumpDelta→delta 소비, terminate. **`TermRuntimeBackend` vtable 어댑터+frame-loop pump 배선은 e3**(pump=RuntimeEventPump가 frame-loop와 얽힘).
+//!   - P3-e3: `app_session` 배선(discovery→launch→attach) + `TermRuntimeBackend` vtable 어댑터(remote_runtime 래핑, pump 재해석) + GUI 종료→재실행 재접속(manifest runtime_handle). ← 다음
 
 const builtin = @import("builtin");
 
@@ -82,6 +82,12 @@ else
 // 로컬/원격에서 같은 RenderSnapshot을 소비하게 하는 SSOT 변환(e2e-2a). 조립기(screen_assembler)는 순수라 그대로 둔다.
 pub const remote_screen = if (builtin.os.tag == .macos)
     @import("session_host/remote_screen.zig")
+else
+    struct {};
+// remote_runtime(client 쪽 원격 runtime — host runtime_manager의 상대)도 client·Surface·terminal을 써서 macOS 전용이다.
+// client RPC로 host runtime을 spawn/제어하고 snapshot/delta를 RemoteScreen으로 조립해 원격-backed Surface로 노출한다(e2e-2c-2).
+pub const remote_runtime = if (builtin.os.tag == .macos)
+    @import("session_host/remote_runtime.zig")
 else
     struct {};
 

@@ -16,6 +16,7 @@
 
 pub const protocol = @import("session_host/protocol.zig");
 pub const framing = @import("session_host/framing.zig");
+pub const screen_stream = @import("session_host/screen_stream.zig");
 
 test {
     // 자식 파일의 inline test를 이 barrel의 test 그래프에 모은다(refAllDecls는 얕아 명시 참조가 필요).

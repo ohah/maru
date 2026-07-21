@@ -17,7 +17,9 @@
 //!   - P3-d2c ✅: `daemon`(`maru-sessiond` entrypoint — host_id·bind·poll-gated accept loop·dispatch, fork/setsid process smoke).
 //!   - P3-d2d ✅: `launcher`(double-fork+setsid+execv detached spawn, marker smoke) + `maru __session-host` CLI(main.zig).
 //!   - P3-e1 ✅: `client`(GUI/CLI hello/RPC — connect·hello·host_id 확정·read-only command 왕복, fork host roundtrip smoke).
-//!   - P3-e2: host-backed `TermRuntimeBackend`(client에 runtime.spawn/attach/input/resize/terminate + snapshot/delta demux). ← 다음
+//!   - P3-e2a ✅: `server`에 runtime.spawn/terminate dispatch + `RuntimeOps` seam(중립 vtable, host만 설정, read-only는 unauthorized).
+//!   - P3-e2b: 실 `runtime_manager`(app InProcessTermBackend 재사용 + runtime_id↔handle 매핑) + daemon 배선 + client 실 spawn smoke. ← 다음
+//!   - P3-e2c/d/e: attach+input/resize / snapshot·delta stream demux / host-backed `TermRuntimeBackend`.
 //!   - P3-e3: `app_session` 배선(discovery→launch→attach) + GUI 재접속(manifest runtime_handle).
 
 const builtin = @import("builtin");

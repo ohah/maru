@@ -740,7 +740,12 @@ GUI가 `*LivePtySession`을 안 드는 컴파일 타임 red test, boundary check
   28-byte record header, snapshot record(screen_meta·row/run·image_placement·image_blob), delta record(set_runs·clear_rect·
   scroll_rect·cursor·modes·image_place·image_remove) encode/decode와 `rowWidthMatches`(폭·continuation 검증)·UTF-8/truncation/
   cap 거부. 순수 codec이라 non-macOS에서 wire 회귀를 고정한다(`test-session-host`).
-- **P3-c(runtime registry)**: `TerminalRuntimeRegistry`가 `TerminalCore + LivePtySession`을 소유하고 controller/observer capability state machine을 둔다.
+- **P3-c(runtime registry) ✅**: `session_host/registry.zig`에 `TerminalRuntimeRegistry`와 controller/observer capability
+  state machine(§9)을 구현했다 — runtime_id(u128) 소유표, attach(observer/controller/takeover)·detach·resize를 결정한다.
+  두 번째 controller는 조용히 observer로 강등(`controller_busy`), takeover만 기존 controller를 revoke하고 원자 이전,
+  controller detach는 자동 승격 없음, resize는 controller만·stale sequence 무시·실제 변경 시만 generation++·client 0에서도
+  크기 유지. 실 `TerminalCore`+`LivePtySession` 소유와 `TIOCSWINSZ`/core resize 적용은 이 결정을 받아 server(P3-d)가
+  수행한다(state machine은 opaque `RuntimeEntry.runtime` 슬롯만 둔다 — 순수 로직이라 non-macOS에서 controller 정책 회귀를 고정).
 - **P3-d(server + launch)**: unix socket accept·hello/command dispatch·connection별 bounded queue와 detached-helper on-demand launch, `maru-sessiond` entrypoint.
 - **P3-e(client + 재접속)**: GUI 측 hello/RPC/stream demux와 host-backed `TermRuntimeBackend`(§13 P2 계약의 원격 구현)로 GUI 종료→재실행 재접속.
 

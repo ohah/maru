@@ -877,85 +877,50 @@ pub fn build(b: *std.Build) void {
         macos_mermaid_smoke_run.step.dependOn(&macos_mermaid_digest_mismatch_fixture.step);
         macos_mermaid_smoke_run.step.dependOn(&macos_mermaid_smoke_compile.step);
         macos_mermaid_smoke_run.step.dependOn(&file_panel_web_build.step);
-        const macos_mermaid_smoke_assert = b.addSystemCommand(&.{
-            "sh", "-eu", "-c",
-            "summary=zig-out/maru-macos-mermaid-helper-smoke/mermaid-helper.summary.json; " ++
-                "test -f \"$summary\"; " ++
-                "/usr/bin/grep -Eq '\"passed\"[[:space:]]*:[[:space:]]*true' \"$summary\"; " ++
-                "/usr/bin/grep -Eq '\"blank_document_base_url_is_nil\"[[:space:]]*:[[:space:]]*true' \"$summary\"; " ++
-                "/usr/bin/grep -Eq '\"actual_mermaid_svg\"[[:space:]]*:[[:space:]]*true' \"$summary\"; " ++
-                "/usr/bin/grep -Eq '\"actual_mermaid_sanitized\"[[:space:]]*:[[:space:]]*true' \"$summary\"; " ++
-                "/usr/bin/grep -Eq '\"normal_external_api_attempts_zero\"[[:space:]]*:[[:space:]]*true' \"$summary\"; " ++
-                "/usr/bin/grep -Eq '\"normal_external_csp_violations_zero\"[[:space:]]*:[[:space:]]*true' \"$summary\"; " ++
-                "/usr/bin/grep -Eq '\"normal_external_navigation_attempts_zero\"[[:space:]]*:[[:space:]]*true' \"$summary\"; " ++
-                "/usr/bin/grep -Eq '\"external_api_probe_counted_and_rejected\"[[:space:]]*:[[:space:]]*true' \"$summary\"; " ++
-                "/usr/bin/grep -Eq '\"external_counter_is_per_render_on_same_helper\"[[:space:]]*:[[:space:]]*true' \"$summary\"; " ++
-                "/usr/bin/grep -Eq '\"external_subresource_csp_probe_counted_and_rejected\"[[:space:]]*:[[:space:]]*true' \"$summary\"; " ++
-                "/usr/bin/grep -Eq '\"external_navigation_probe_counted_and_rejected\"[[:space:]]*:[[:space:]]*true' \"$summary\"; " ++
-                "/usr/bin/grep -Eq '\"renderer_script_exact_digest_accepted\"[[:space:]]*:[[:space:]]*true' \"$summary\"; " ++
-                "/usr/bin/grep -Eq '\"renderer_script_digest_mismatch_rejected\"[[:space:]]*:[[:space:]]*true' \"$summary\"; " ++
-                "/usr/bin/grep -Eq '\"renderer_script_symlink_rejected\"[[:space:]]*:[[:space:]]*true' \"$summary\"; " ++
-                "/usr/bin/grep -Eq '\"helper_starts_at_most_three\"[[:space:]]*:[[:space:]]*true' \"$summary\"; " ++
-                "/usr/bin/grep -Eq '\"termination_acknowledged_exactly\"[[:space:]]*:[[:space:]]*true' \"$summary\"; " ++
-                "/usr/bin/grep -Eq '\"no_read_shutdown_bounded\"[[:space:]]*:[[:space:]]*true' \"$summary\"; " ++
-                "/usr/bin/grep -Eq '\"closed_pipe_eof_once\"[[:space:]]*:[[:space:]]*true' \"$summary\"; " ++
-                "/usr/bin/grep -Eq '\"delayed_start_physical_zero\"[[:space:]]*:[[:space:]]*true' \"$summary\"; " ++
-                "/usr/bin/grep -Eq '\"path_aba_result_commit_zero\"[[:space:]]*:[[:space:]]*true' \"$summary\"; " ++
-                "/usr/bin/grep -Eq '\"path_aba_capability_frames_zero\"[[:space:]]*:[[:space:]]*true' \"$summary\"; " ++
-                "/usr/bin/grep -Eq '\"path_aba_a_restored_before_pid_check\"[[:space:]]*:[[:space:]]*true' \"$summary\"; " ++
-                "/usr/bin/grep -Eq '\"tampered_bundle_seal_rejected_before_spawn\"[[:space:]]*:[[:space:]]*true' \"$summary\"; " ++
-                "/usr/bin/grep -Eq '\"digest_mismatch_permanent_after_one_start\"[[:space:]]*:[[:space:]]*true' \"$summary\"; " ++
-                "/usr/bin/grep -Eq '\"coalesce_old_reply_terminal_exactly_once\"[[:space:]]*:[[:space:]]*true' \"$summary\"; " ++
-                "/usr/bin/grep -Eq '\"coalesce_late_old_timeout_keeps_replacement\"[[:space:]]*:[[:space:]]*true' \"$summary\"; " ++
-                "/usr/bin/grep -Eq '\"deadline_terminal_reply_immediate_once\"[[:space:]]*:[[:space:]]*true' \"$summary\"; " ++
-                "/usr/bin/grep -Eq '\"deadline_late_result_and_timer_noop\"[[:space:]]*:[[:space:]]*true' \"$summary\"; " ++
-                "/usr/bin/grep -Eq '\"transient_terminal_reply_immediate_once\"[[:space:]]*:[[:space:]]*true' \"$summary\"; " ++
-                "/usr/bin/grep -Eq '\"integrity_terminals_running_and_pending_once\"[[:space:]]*:[[:space:]]*true' \"$summary\"; " ++
-                "/usr/bin/grep -Eq '\"integrity_late_failure_and_result_noop\"[[:space:]]*:[[:space:]]*true' \"$summary\"; " ++
-                "/usr/bin/grep -Eq '\"reply_wrong_identity_exact_revoke\"[[:space:]]*:[[:space:]]*true' \"$summary\"; " ++
-                "/usr/bin/grep -Eq '\"reply_unknown_duplicate_one_shot\"[[:space:]]*:[[:space:]]*true' \"$summary\"; " ++
-                "/usr/bin/grep -Eq '\"reply_superseded_requires_exact_identity\"[[:space:]]*:[[:space:]]*true' \"$summary\"; " ++
-                "/usr/bin/grep -Eq '\"reply_deliver_timeout_race_one_shot\"[[:space:]]*:[[:space:]]*true' \"$summary\"; " ++
-                "/usr/bin/grep -Eq '\"reply_targeted_finish_and_cancel\"[[:space:]]*:[[:space:]]*true' \"$summary\"; " ++
-                "/usr/bin/grep -Eq '\"reply_cap_plus_one_rejected_without_mutation\"[[:space:]]*:[[:space:]]*true' \"$summary\"; " ++
-                "/usr/bin/grep -Eq '\"shutdown_barrier_no_late_callbacks\"[[:space:]]*:[[:space:]]*true' \"$summary\"",
+        const perf_validate_exe = b.addExecutable(.{
+            .name = "maru-perf-validate",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tools/perf/validate_json_artifact.zig"),
+                .target = target,
+                .optimize = optimize,
+            }),
+        });
+
+        // 이전 gate는 앵커 없는 grep 체인이라 "ticks":10000이 1000을 부분 문자열로 포함해 통과했다
+        // (예산 10배 악화 false-green). 이제 tools/perf/validate_json_artifact.zig가 JSON을 실제로
+        // 파싱해 exact/bound로 판정한다. has_side_effects=true라 매 실행 새 artifact를 재검증한다.
+        const macos_mermaid_smoke_assert = b.addRunArtifact(perf_validate_exe);
+        macos_mermaid_smoke_assert.addArgs(&.{
+            "mermaid-helper-summary",
+            "zig-out/maru-macos-mermaid-helper-smoke/mermaid-helper.summary.json",
         });
         macos_mermaid_smoke_assert.setCwd(b.path("."));
+        macos_mermaid_smoke_assert.has_side_effects = true;
         macos_mermaid_smoke_assert.step.dependOn(&macos_mermaid_smoke_run.step);
         const macos_mermaid_helper_smoke_step = b.step("macos-mermaid-helper-smoke", "Run the isolated Mermaid helper lifecycle smoke");
         macos_mermaid_helper_smoke_step.dependOn(&macos_mermaid_smoke_assert.step);
-        const macos_live_preview_perf_assert = b.addSystemCommand(&.{
-            "sh", "-eu", "-c",
-            "artifact=tests/artifacts/perf/live-preview-macos.json; " ++
-                "test -f \"$artifact\"; " ++
-                "/usr/bin/grep -Eq '\"schema\"[[:space:]]*:[[:space:]]*\"maru.live-preview-macos.v1\"' \"$artifact\"; " ++
-                "/usr/bin/grep -Eq '\"ticks\"[[:space:]]*:[[:space:]]*1000' \"$artifact\"; " ++
-                "/usr/bin/grep -Eq '\"actual_svg\"[[:space:]]*:[[:space:]]*true' \"$artifact\"; " ++
-                "/usr/bin/grep -Eq '\"product_reply_delivered\"[[:space:]]*:[[:space:]]*true' \"$artifact\"; " ++
-                "/usr/bin/grep -Eq '\"product_reply_pending_after_delivery\"[[:space:]]*:[[:space:]]*0' \"$artifact\"; " ++
-                "/usr/bin/grep -Eq '\"product_reply_serialized_bytes\"[[:space:]]*:[[:space:]]*[5-9][0-9][0-9][0-9][0-9][0-9]' \"$artifact\"; " ++
-                "/usr/bin/grep -Eq '\"failure_latched\"[[:space:]]*:[[:space:]]*1' \"$artifact\"; " ++
-                "/usr/bin/grep -Eq '\"failure_latch_product_tick_calls\"[[:space:]]*:[[:space:]]*[1-9][0-9]*' \"$artifact\"; " ++
-                "/usr/bin/grep -Eq '\"failure_latch_product_completion_drain_max\"[[:space:]]*:[[:space:]]*[0-8][,]?$' \"$artifact\"; " ++
-                "/usr/bin/grep -Eq '\"completion_drain_max\"[[:space:]]*:[[:space:]]*[0-8][,]?$' \"$artifact\"; " ++
-                "/usr/bin/grep -Eq '\"product_tick_calls\"[[:space:]]*:[[:space:]]*1000' \"$artifact\"; " ++
-                "/usr/bin/grep -Eq '\"product_tick_pump_calls\"[[:space:]]*:[[:space:]]*[1-9][0-9]*' \"$artifact\"; " ++
-                "/usr/bin/grep -Eq '\"product_tick_drain_calls\"[[:space:]]*:[[:space:]]*[1-9][0-9]*' \"$artifact\"; " ++
-                "/usr/bin/grep -Eq '\"accepted_svg_bytes_max\"[[:space:]]*:[[:space:]]*524288' \"$artifact\"; " ++
-                "/usr/bin/grep -Eq '\"cold_response_deadline_ms\"[[:space:]]*:[[:space:]]*5000' \"$artifact\"; " ++
-                "/usr/bin/grep -Eq '\"warm_response_deadline_ms\"[[:space:]]*:[[:space:]]*2000' \"$artifact\"; " ++
-                "/usr/bin/grep -Eq '\"reply_fallback_grace_ms\"[[:space:]]*:[[:space:]]*250' \"$artifact\"; " ++
-                "/usr/bin/grep -Eq '\"reply_fallback_ms\"[[:space:]]*:[[:space:]]*5250' \"$artifact\"; " ++
-                "awk -F'[: ,]+' '/\"product_tick_max_elapsed_us\"/{ if ($3 + 0 <= 20000) ok=1 } END { exit !ok }' \"$artifact\"; " ++
-                "if /usr/bin/grep -En 'FileManager|WKWebView|Process\\(|Pipe\\(|sleep\\(|waitUntilExit|Data\\(contentsOf:|write\\(to:' src/platform/macos/MermaidProductTick.swift; then " ++
-                "echo 'forbidden capability in MermaidProductTick.swift' >&2; exit 1; fi; " ++
-                "for field in tick_process_spawn_terminate tick_pipe_setup tick_pipe_read_write tick_blocking_wait; do " ++
-                "/usr/bin/grep -Eq \"\\\"$field\\\"[[:space:]]*:[[:space:]]*0\" \"$artifact\"; done",
+
+        const macos_live_preview_perf_validate = b.addRunArtifact(perf_validate_exe);
+        macos_live_preview_perf_validate.addArgs(&.{
+            "live-preview-macos",
+            "tests/artifacts/perf/live-preview-macos.json",
         });
-        macos_live_preview_perf_assert.setCwd(b.path("."));
-        macos_live_preview_perf_assert.step.dependOn(&macos_mermaid_smoke_assert.step);
+        macos_live_preview_perf_validate.setCwd(b.path("."));
+        macos_live_preview_perf_validate.has_side_effects = true;
+        macos_live_preview_perf_validate.step.dependOn(&macos_mermaid_smoke_assert.step);
+
+        // JSON 예산과 별개 축: 공용 tick 파일에 FS·WebView·process·pipe·sleep·blocking-wait API가
+        // 새로 유입되면 실패시키는 source-policy gate(operation-site 계측을 tick에서 배제).
+        const macos_live_preview_source_policy = b.addSystemCommand(&.{
+            "sh", "-eu", "-c",
+            "if /usr/bin/grep -En 'FileManager|WKWebView|Process\\(|Pipe\\(|sleep\\(|waitUntilExit|Data\\(contentsOf:|write\\(to:' src/platform/macos/MermaidProductTick.swift; then " ++
+                "echo 'forbidden capability in MermaidProductTick.swift' >&2; exit 1; fi",
+        });
+        macos_live_preview_source_policy.setCwd(b.path("."));
+
         const macos_live_preview_perf_step = b.step("macos-live-preview-perf", "Run the native live-preview performance artifact gate");
-        macos_live_preview_perf_step.dependOn(&macos_live_preview_perf_assert.step);
+        macos_live_preview_perf_step.dependOn(&macos_live_preview_perf_validate.step);
+        macos_live_preview_perf_step.dependOn(&macos_live_preview_source_policy.step);
 
         // bare 터미널 실행파일은 HiDPI(NSHighResolutionCapable)를 신뢰성 있게 못 켠다. 정식
         // .app 번들을 만들고 그 안의 바이너리를 직접 실행하면, AppKit이 실행파일 경로에서
@@ -1232,6 +1197,17 @@ pub fn build(b: *std.Build) void {
     });
     const run_update_check_tests = b.addRunArtifact(update_check_tests);
     test_step.dependOn(&run_update_check_tests.step);
+    // validate_json_artifact.zig는 std만 의존하는 perf artifact 스키마 validator다. 부분 문자열
+    // false-green 회귀(예산 10배가 통과하던 grep)와 스키마 락(누락·추가 키·타입)을 기본 test에서 고정한다.
+    const perf_validate_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/perf/validate_json_artifact.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_perf_validate_tests = b.addRunArtifact(perf_validate_tests);
+    test_step.dependOn(&run_perf_validate_tests.step);
     // control_socket.zig(Track C 1b)는 실제 unix domain socket을 bind/accept하는 L4 컨트롤 플레인 부트스트랩이다.
     // getpeereid + std.c로 이식 가능하게 썼지만, 검증이 macOS에서만 되고 후속 slice(1e/1g)가 macOS 전용
     // xucred/LOCAL_PEERPID를 더하므로 **macOS에서만** test step에 배선한다(ubuntu CI에 미검증 Linux 소켓

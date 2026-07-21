@@ -99,6 +99,14 @@ pub const Client = struct {
         return self.allocator.dupe(u8, resp.payload) catch return error.OutOfMemory;
     }
 
+    /// terminal input bytes를 attach된 `stream_id`로 보낸다(§9 `input_bytes` — 응답 없는 fire-and-forget). controller만
+    /// 유효하고, host는 비controller/미attach stream의 input을 조용히 버린다. attach 응답의 stream_id를 그대로 쓴다.
+    pub fn sendInput(self: *Client, stream_id: u64, bytes: []const u8) ClientError!void {
+        const frame_bytes = framing.encodeFrame(self.allocator, .{ .kind = .input_bytes, .stream_id = stream_id }, bytes) catch return error.OutOfMemory;
+        defer self.allocator.free(frame_bytes);
+        socket_server.writeAll(self.fd, frame_bytes) catch return error.WriteFailed;
+    }
+
     /// 다음 완성 frame을 읽는다(partial read 재조립). EOF/timeout는 ConnectionClosed, codec 위반은 ProtocolError.
     fn readFrame(self: *Client) ClientError!framing.Frame {
         var buf: [4096]u8 = undefined;
@@ -265,6 +273,19 @@ fn extractRuntimeId(payload: []const u8) ?[32]u8 {
     return out;
 }
 
+/// response JSON에서 `"<key>":` 뒤의 unsigned 정수를 읽는다. 없으면 null. 테스트 helper(attach 응답의 stream_id 되읽기).
+fn extractU64Field(payload: []const u8, key: []const u8) ?u64 {
+    const at = std.mem.indexOf(u8, payload, key) orelse return null;
+    var i = at + key.len;
+    var v: u64 = 0;
+    var any = false;
+    while (i < payload.len and payload[i] >= '0' and payload[i] <= '9') : (i += 1) {
+        v = v * 10 + (payload[i] - '0');
+        any = true;
+    }
+    return if (any) v else null;
+}
+
 test "client: spawns, lists, and terminates a real runtime on a forked host over the wire" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = testing.allocator;
@@ -313,6 +334,85 @@ test "client: spawns, lists, and terminates a real runtime on a forked host over
     try testing.expect(std.mem.indexOf(u8, list_resp, rid[0..]) != null);
 
     // runtime.terminate: 그 runtime을 내린다(host가 PTY/자식/reader를 회수).
+    var term_buf: [64]u8 = undefined;
+    const term_params = std.fmt.bufPrint(&term_buf, "{{\"runtime_id\":\"{s}\"}}", .{rid}) catch return error.SkipZigTest;
+    const term_resp = try client.call("runtime.terminate", term_params);
+    defer allocator.free(term_resp);
+    try testing.expect(std.mem.indexOf(u8, term_resp, "terminated") != null);
+}
+
+test "client: attach, input, resize, and detach a real runtime over the wire" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+
+    var dir_buf: [256]u8 = undefined;
+    const dir_path = std.fmt.bufPrintZ(&dir_buf, "/tmp/maru-sh-attach-{d}", .{c.getpid()}) catch return error.SkipZigTest;
+    var sp_buf: [320]u8 = undefined;
+    const socket_path = std.fmt.bufPrintZ(&sp_buf, "{s}/control.sock", .{dir_path}) catch return error.SkipZigTest;
+
+    const child = c.fork();
+    if (child < 0) return error.SkipZigTest;
+    if (child == 0) {
+        _ = c.setsid();
+        daemon.runSessionHost(std.heap.page_allocator, testing.io, dir_path, socket_path) catch {};
+        std.c._exit(0);
+    }
+    defer {
+        _ = c.kill(child, posix.SIG.TERM);
+        var status: c_int = undefined;
+        _ = c.waitpid(child, &status, 0);
+        _ = c.unlink(socket_path.ptr);
+        _ = c.rmdir(dir_path.ptr);
+    }
+
+    var client: Client = blk: {
+        var attempts: usize = 0;
+        while (attempts < 150) : (attempts += 1) {
+            if (Client.connect(allocator, socket_path, "gui")) |cl| break :blk cl else |_| _ = usleepMs(20);
+        }
+        try testing.expect(false);
+        return;
+    };
+    defer client.deinit();
+
+    // cat runtime을 띄운다(입력 EOF까지 생존).
+    const spawn_resp = try client.call("runtime.spawn", "{\"argv\":[\"/bin/cat\"],\"cols\":40,\"rows\":10}");
+    defer allocator.free(spawn_resp);
+    const rid = extractRuntimeId(spawn_resp) orelse {
+        try testing.expect(false);
+        return;
+    };
+
+    // controller로 attach → input+resize capability와 stream_id를 받는다.
+    var attach_buf: [96]u8 = undefined;
+    const attach_params = std.fmt.bufPrint(&attach_buf, "{{\"runtime_id\":\"{s}\",\"mode\":\"controller\"}}", .{rid}) catch return error.SkipZigTest;
+    const attach_resp = try client.call("runtime.attach", attach_params);
+    defer allocator.free(attach_resp);
+    try testing.expect(std.mem.indexOf(u8, attach_resp, "\"input\":true") != null);
+    const stream_id = extractU64Field(attach_resp, "\"stream_id\":") orelse {
+        try testing.expect(false);
+        return;
+    };
+
+    // input(fire-and-forget) → controller라 host가 PTY로 전달한다(에러 없이 전송됨만 본다; 반영은 e2d).
+    try client.sendInput(stream_id, "hello\n");
+
+    // resize(controller) → applied 응답(changed=true, 새 canonical size).
+    var resize_buf: [96]u8 = undefined;
+    const resize_params = std.fmt.bufPrint(&resize_buf, "{{\"stream_id\":{d},\"cols\":100,\"rows\":30,\"client_sequence\":1}}", .{stream_id}) catch return error.SkipZigTest;
+    const resize_resp = try client.call("runtime.resize", resize_params);
+    defer allocator.free(resize_resp);
+    try testing.expect(std.mem.indexOf(u8, resize_resp, "\"changed\":true") != null);
+    try testing.expect(std.mem.indexOf(u8, resize_resp, "\"cols\":100") != null);
+
+    // detach → subscription 해제.
+    var detach_buf: [48]u8 = undefined;
+    const detach_params = std.fmt.bufPrint(&detach_buf, "{{\"stream_id\":{d}}}", .{stream_id}) catch return error.SkipZigTest;
+    const detach_resp = try client.call("runtime.detach", detach_params);
+    defer allocator.free(detach_resp);
+    try testing.expect(std.mem.indexOf(u8, detach_resp, "detached") != null);
+
+    // 정리: runtime 종료.
     var term_buf: [64]u8 = undefined;
     const term_params = std.fmt.bufPrint(&term_buf, "{{\"runtime_id\":\"{s}\"}}", .{rid}) catch return error.SkipZigTest;
     const term_resp = try client.call("runtime.terminate", term_params);

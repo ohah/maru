@@ -161,7 +161,8 @@ pub const SocketServer = struct {
         var parser = framing.FrameParser.init(self.allocator);
         defer parser.deinit();
         var conn = server_mod.Connection.init(self.allocator, self.host_id, self.registry);
-        conn.runtime_ops = self.runtime_ops; // host면 spawn/terminate 위임, read-only면 null(unauthorized).
+        defer conn.deinit(); // 연결 종료 시 이 connection의 attach subscription을 모두 detach한다(runtime은 유지, §9).
+        conn.runtime_ops = self.runtime_ops; // host면 spawn/terminate/input/resize 위임, read-only면 null(unauthorized).
 
         var buf: [4096]u8 = undefined;
         while (true) {
@@ -188,6 +189,7 @@ pub const SocketServer = struct {
                         return;
                     },
                     .close => return,
+                    .none => {}, // fire-and-forget stream frame(input_bytes) 처리 후 — 응답 없이 계속 읽는다.
                 }
             }
         }

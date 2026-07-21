@@ -38,6 +38,10 @@ pub const RuntimeOps = struct {
     spawn: *const fn (ctx: *anyopaque, params: RuntimeSpawnParams) anyerror!u128,
     /// runtime을 종료한다(§8 `runtime end`). 멱등 — 없는 id는 무시.
     terminate: *const fn (ctx: *anyopaque, runtime_id: u128) void,
+    /// controller가 보낸 terminal input을 runtime PTY로 보낸다(§9 `input` capability). registry가 controller임을 확인한 뒤 호출.
+    write_input: *const fn (ctx: *anyopaque, runtime_id: u128, bytes: []const u8) anyerror!void,
+    /// canonical PTY size를 실 `TerminalCore`+`TIOCSWINSZ`에 적용한다(§9). registry가 controller/sequence를 검증한 뒤 호출.
+    resize: *const fn (ctx: *anyopaque, runtime_id: u128, cols: u16, rows: u16) anyerror!void,
 };
 
 /// `handleFrame`이 caller(socket write loop)에게 지시하는 것. `reply`/`reply_and_close`의 바이트는 **caller 소유**다
@@ -46,6 +50,8 @@ pub const Action = union(enum) {
     reply: []u8,
     reply_and_close: []u8,
     close,
+    /// 응답 없이 connection을 유지한다(input_bytes 같은 fire-and-forget stream frame 처리 후). caller는 아무것도 write하지 않는다.
+    none,
 };
 
 pub const HandleError = error{OutOfMemory};
@@ -55,16 +61,32 @@ pub const Connection = struct {
     allocator: std.mem.Allocator,
     host_id: u128,
     registry: *reg.TerminalRuntimeRegistry,
-    /// 실 runtime 소유 위임(host만 설정). null이면 read-only host라 spawn/terminate가 unauthorized다.
+    /// 실 runtime 소유 위임(host만 설정). null이면 read-only host라 spawn/terminate/input/resize가 unauthorized다.
     runtime_ops: ?RuntimeOps = null,
     state: State = .pre_hello,
     selected_version: u16 = 0,
     client_kind: ClientKind = .unknown,
+    /// 이 connection이 연 `stream_id`→`runtime_id` 매핑(§9 attach subscription). input_bytes/resize/detach가 stream_id로
+    /// runtime을 찾고, connection 종료 시 이 목록을 모두 detach한다. host가 stream_id를 발급한다(현재 per-connection 단조 —
+    /// serial serve 전제라 stream_id가 겹치지 않는다; 동시 연결을 여는 후속에서 host-global 발급으로 승격한다).
+    attachments: std.AutoHashMapUnmanaged(reg.StreamId, u128) = .empty,
+    next_stream_id: reg.StreamId = 1,
 
     pub const State = enum { pre_hello, ready, closed };
 
     pub fn init(allocator: std.mem.Allocator, host_id: u128, registry: *reg.TerminalRuntimeRegistry) Connection {
         return .{ .allocator = allocator, .host_id = host_id, .registry = registry };
+    }
+
+    /// connection 종료(EOF/close) 시 이 connection의 모든 subscription을 registry에서 뗀다(§9 "EOF는 모든 stream을
+    /// detach하지만 runtime/child에는 종료 신호를 보내지 않는다"). runtime이 이미 없으면(동시 terminate) 무시한다.
+    pub fn deinit(self: *Connection) void {
+        var it = self.attachments.iterator();
+        while (it.next()) |e| {
+            _ = self.registry.detach(e.value_ptr.*, e.key_ptr.*) catch {};
+        }
+        self.attachments.deinit(self.allocator);
+        self.* = undefined;
     }
 
     /// MRSH frame 하나를 처리한다. connection state에 따라 hello 협상 또는 command dispatch를 하고, 응답 frame을
@@ -126,13 +148,14 @@ pub const Connection = struct {
                 return .{ .reply = wire };
             },
             .request => return self.dispatchRequest(frame),
+            .input_bytes => return self.routeInput(frame),
             .hello => {
                 // hello는 connection당 한 번. 두 번째 hello는 protocol 위반.
                 self.state = .closed;
                 return .close;
             },
             else => {
-                // input_bytes/stream_ack 등은 attach subscription 이후(P3-e). d1은 request/ping만 안다.
+                // stream_ack 등 stream demux frame은 e2d에서 처리한다. 그 전까지 미지 kind는 connection을 닫는다.
                 self.state = .closed;
                 return .close;
             },
@@ -174,6 +197,12 @@ pub const Connection = struct {
             return self.dispatchSpawn(frame.header.request_id, params);
         } else if (std.mem.eql(u8, method, "runtime.terminate")) {
             return self.dispatchTerminate(frame.header.request_id, params);
+        } else if (std.mem.eql(u8, method, "runtime.attach")) {
+            return self.dispatchAttach(frame.header.request_id, params);
+        } else if (std.mem.eql(u8, method, "runtime.detach")) {
+            return self.dispatchDetach(frame.header.request_id, params);
+        } else if (std.mem.eql(u8, method, "runtime.resize")) {
+            return self.dispatchResize(frame.header.request_id, params);
         }
         return self.replyError(frame.header.request_id, .invalid_request);
     }
@@ -223,6 +252,107 @@ pub const Connection = struct {
         const body = try self.stringify(.{ .result = .{ .terminated = true } });
         defer self.allocator.free(body);
         return self.replyResult(request_id, body);
+    }
+
+    /// `runtime.attach`: runtime에 subscription을 연다(§8·§9). mode(observer/controller/takeover)에 따라 capability를
+    /// 부여하고 host가 발급한 `stream_id`·granted·`controller_busy`를 응답한다. 실 화면 stream(snapshot/delta)과 takeover
+    /// revocation 이벤트는 이 subscription 위에 e2d(event fan-out)에서 얹는다 — attach 자체는 capability state만 세운다.
+    fn dispatchAttach(self: *Connection, request_id: u64, params: ?std.json.ObjectMap) HandleError!Action {
+        const p = params orelse return self.replyError(request_id, .invalid_request);
+        const id = if (strField(p, "runtime_id")) |h| parseHex128(h) else null;
+        if (id == null) return self.replyError(request_id, .invalid_request);
+        const mode = parseAttachMode(strField(p, "mode"));
+
+        const stream = self.next_stream_id;
+        const outcome = self.registry.attach(id.?, stream, mode) catch |e| switch (e) {
+            error.RuntimeNotFound => return self.replyError(request_id, .runtime_not_found),
+            error.AlreadyAttached => return self.replyError(request_id, .invalid_request),
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return self.replyError(request_id, .internal),
+        };
+        self.attachments.put(self.allocator, stream, id.?) catch {
+            _ = self.registry.detach(id.?, stream) catch {}; // 매핑 실패 시 registry subscription을 되돌린다(유령 subscription 방지).
+            return error.OutOfMemory;
+        };
+        self.next_stream_id += 1;
+
+        const body = try self.stringify(.{ .result = .{
+            .stream_id = stream,
+            .granted = .{
+                .observe = reg.Capability.has(outcome.granted, reg.Capability.observe),
+                .input = reg.Capability.has(outcome.granted, reg.Capability.input),
+                .resize = reg.Capability.has(outcome.granted, reg.Capability.resize),
+            },
+            .controller_busy = outcome.controller_busy,
+        } });
+        defer self.allocator.free(body);
+        return self.replyResult(request_id, body);
+    }
+
+    /// `runtime.detach`: 이 connection의 한 subscription을 뗀다(§9). runtime은 유지된다. 모르는 stream_id는 invalid_request.
+    fn dispatchDetach(self: *Connection, request_id: u64, params: ?std.json.ObjectMap) HandleError!Action {
+        const p = params orelse return self.replyError(request_id, .invalid_request);
+        const stream = intFieldU64(p, "stream_id") orelse return self.replyError(request_id, .invalid_request);
+        const runtime_id = self.attachments.get(stream) orelse return self.replyError(request_id, .invalid_request);
+        _ = self.registry.detach(runtime_id, stream) catch {};
+        _ = self.attachments.remove(stream);
+        const body = try self.stringify(.{ .result = .{ .detached = true } });
+        defer self.allocator.free(body);
+        return self.replyResult(request_id, body);
+    }
+
+    /// `runtime.resize`: controller가 canonical PTY size를 바꾼다(§9). registry가 controller/sequence를 검증하고, 실제
+    /// 크기가 바뀔 때만 runtime_ops(실 `TerminalCore`+`TIOCSWINSZ`)에 적용한 뒤 applied size/generation을 응답한다.
+    /// observer의 resize는 unauthorized, stale sequence는 `{stale:true}`. 모든 subscription으로의 `runtime.resized`
+    /// broadcast는 e2d(event fan-out)에서 얹는다. (registry가 canonical을 먼저 commit하므로 실 적용 실패는 드문 error 경로다.)
+    fn dispatchResize(self: *Connection, request_id: u64, params: ?std.json.ObjectMap) HandleError!Action {
+        const p = params orelse return self.replyError(request_id, .invalid_request);
+        const stream = intFieldU64(p, "stream_id") orelse return self.replyError(request_id, .invalid_request);
+        const cols = intField(p, "cols") orelse return self.replyError(request_id, .invalid_request);
+        const rows = intField(p, "rows") orelse return self.replyError(request_id, .invalid_request);
+        const seq = intFieldU64(p, "client_sequence") orelse 0;
+        const runtime_id = self.attachments.get(stream) orelse return self.replyError(request_id, .invalid_request);
+
+        const outcome = self.registry.resize(runtime_id, stream, cols, rows, seq) catch |e| switch (e) {
+            error.NotController => return self.replyError(request_id, .unauthorized),
+            error.RuntimeNotFound => return self.replyError(request_id, .runtime_not_found),
+            else => return self.replyError(request_id, .internal),
+        };
+        switch (outcome) {
+            .stale => {
+                const body = try self.stringify(.{ .result = .{ .stale = true } });
+                defer self.allocator.free(body);
+                return self.replyResult(request_id, body);
+            },
+            .applied => |a| {
+                if (a.changed) {
+                    if (self.runtime_ops) |ops| {
+                        ops.resize(ops.ctx, runtime_id, a.cols, a.rows) catch return self.replyError(request_id, .internal);
+                    }
+                }
+                const body = try self.stringify(.{ .result = .{
+                    .cols = a.cols,
+                    .rows = a.rows,
+                    .client_sequence = seq,
+                    .resize_generation = a.resize_generation,
+                    .changed = a.changed,
+                } });
+                defer self.allocator.free(body);
+                return self.replyResult(request_id, body);
+            },
+        }
+    }
+
+    /// `input_bytes`: controller가 보낸 terminal input을 runtime PTY로 보낸다(§9 `input` capability). 응답 없는 stream
+    /// frame이라 항상 `.none`이다. 미attach stream·비controller·runtime_ops 없음이면 조용히 버린다(connection은 유지 —
+    /// detach 직후 도착한 stray input은 benign race라 연결을 끊지 않는다).
+    fn routeInput(self: *Connection, frame: framing.Frame) HandleError!Action {
+        const stream = frame.header.stream_id;
+        const runtime_id = self.attachments.get(stream) orelse return .none;
+        if (!reg.Capability.has(self.registry.capabilitiesOf(runtime_id, stream), reg.Capability.input)) return .none;
+        const ops = self.runtime_ops orelse return .none;
+        ops.write_input(ops.ctx, runtime_id, frame.payload) catch {};
+        return .none;
     }
 
     // ── JSON 응답 빌더 ──────────────────────────────────────────────────────
@@ -353,6 +483,21 @@ fn intField(obj: std.json.ObjectMap, key: []const u8) ?u16 {
     };
 }
 
+/// stream_id·client_sequence(u64) 필드. std.json integer는 i64라 음수만 거른다 — host 발급 값은 작아 표현 범위 안이다.
+fn intFieldU64(obj: std.json.ObjectMap, key: []const u8) ?u64 {
+    return switch (obj.get(key) orelse return null) {
+        .integer => |n| if (n >= 0) @intCast(n) else null,
+        else => null,
+    };
+}
+
+fn parseAttachMode(s: ?[]const u8) reg.AttachMode {
+    const v = s orelse return .observer;
+    if (std.mem.eql(u8, v, "controller")) return .controller;
+    if (std.mem.eql(u8, v, "takeover")) return .takeover;
+    return .observer;
+}
+
 fn strField(obj: std.json.ObjectMap, key: []const u8) ?[]const u8 {
     return switch (obj.get(key) orelse return null) {
         .string => |s| s,
@@ -394,11 +539,11 @@ fn parseHex128(s: []const u8) ?u128 {
 
 const testing = std.testing;
 
-/// 테스트 helper: JSON payload로 frame을 만들고 handleFrame에 넣어 응답 frame을 파싱해 돌려준다.
-fn feedJson(conn: *Connection, kind: protocol.Kind, request_id: u64, json: []const u8) !struct { action: []const u8, frame: ?framing.Frame } {
+const FedResult = struct { action: []const u8, frame: ?framing.Frame };
+
+/// 완성된 wire frame 하나를 handleFrame에 넣고 응답을 파싱해 돌려주는 공통 경로.
+fn runWire(conn: *Connection, wire: []const u8) !FedResult {
     const allocator = testing.allocator;
-    const wire = try framing.encodeFrame(allocator, .{ .kind = kind, .request_id = request_id }, json);
-    defer allocator.free(wire);
     var parser = framing.FrameParser.init(allocator);
     defer parser.deinit();
     try parser.push(wire);
@@ -408,6 +553,7 @@ fn feedJson(conn: *Connection, kind: protocol.Kind, request_id: u64, json: []con
     const action = try conn.handleFrame(in);
     switch (action) {
         .close => return .{ .action = "close", .frame = null },
+        .none => return .{ .action = "none", .frame = null },
         .reply, .reply_and_close => |bytes| {
             defer allocator.free(bytes);
             var rp = framing.FrameParser.init(allocator);
@@ -417,6 +563,22 @@ fn feedJson(conn: *Connection, kind: protocol.Kind, request_id: u64, json: []con
             return .{ .action = if (action == .reply) "reply" else "reply_and_close", .frame = out };
         },
     }
+}
+
+/// 테스트 helper: JSON payload로 request/response frame(request_id 헤더)을 만들어 넣는다.
+fn feedJson(conn: *Connection, kind: protocol.Kind, request_id: u64, json: []const u8) !FedResult {
+    const allocator = testing.allocator;
+    const wire = try framing.encodeFrame(allocator, .{ .kind = kind, .request_id = request_id }, json);
+    defer allocator.free(wire);
+    return runWire(conn, wire);
+}
+
+/// 테스트 helper: stream frame(input_bytes 등, stream_id 헤더)을 만들어 넣는다. request_id가 아니라 stream_id로 라우팅.
+fn feedStream(conn: *Connection, kind: protocol.Kind, stream_id: u64, payload: []const u8) !FedResult {
+    const allocator = testing.allocator;
+    const wire = try framing.encodeFrame(allocator, .{ .kind = kind, .stream_id = stream_id }, payload);
+    defer allocator.free(wire);
+    return runWire(conn, wire);
 }
 
 test "server: first non-hello frame closes the connection" {
@@ -551,13 +713,20 @@ test "server: hex128 parse rejects malformed runtime ids" {
     try testing.expectEqual(@as(?u128, null), parseHex128("0" ** 33)); // 32자 초과
 }
 
-/// dispatch가 실 runtime 소유를 위임하는 계약(RuntimeOps)을 검증하는 fake. argv[0]과 terminate된 id를 기록한다.
+/// dispatch가 실 runtime 소유를 위임하는 계약(RuntimeOps)을 검증하는 fake. spawn/terminate에 더해 write_input/resize도
+/// 기록해 input capability 라우팅과 resize 적용이 controller에게만 위임되는지 본다.
 const FakeRuntimeOps = struct {
     spawn_argv0: [64]u8 = undefined,
     spawn_argv0_len: usize = 0,
     spawn_cols: u16 = 0,
     terminated_id: u128 = 0,
     next_id: u128 = 0xCAFE,
+    last_input: [64]u8 = undefined,
+    last_input_len: usize = 0,
+    input_runtime: u128 = 0,
+    resized_cols: u16 = 0,
+    resized_rows: u16 = 0,
+    resized_runtime: u128 = 0,
 
     fn spawnFn(ctx: *anyopaque, params: RuntimeSpawnParams) anyerror!u128 {
         const self: *FakeRuntimeOps = @ptrCast(@alignCast(ctx));
@@ -572,8 +741,21 @@ const FakeRuntimeOps = struct {
         const self: *FakeRuntimeOps = @ptrCast(@alignCast(ctx));
         self.terminated_id = id;
     }
+    fn writeInputFn(ctx: *anyopaque, runtime_id: u128, bytes: []const u8) anyerror!void {
+        const self: *FakeRuntimeOps = @ptrCast(@alignCast(ctx));
+        const n = @min(bytes.len, self.last_input.len);
+        @memcpy(self.last_input[0..n], bytes[0..n]);
+        self.last_input_len = n;
+        self.input_runtime = runtime_id;
+    }
+    fn resizeFn(ctx: *anyopaque, runtime_id: u128, cols: u16, rows: u16) anyerror!void {
+        const self: *FakeRuntimeOps = @ptrCast(@alignCast(ctx));
+        self.resized_cols = cols;
+        self.resized_rows = rows;
+        self.resized_runtime = runtime_id;
+    }
     fn ops(self: *FakeRuntimeOps) RuntimeOps {
-        return .{ .ctx = self, .spawn = spawnFn, .terminate = terminateFn };
+        return .{ .ctx = self, .spawn = spawnFn, .terminate = terminateFn, .write_input = writeInputFn, .resize = resizeFn };
     }
 };
 
@@ -613,4 +795,106 @@ test "server: runtime.spawn/terminate dispatch through RuntimeOps; read-only hos
     const r = try feedJson(&conn2, .request, 2, "{\"method\":\"runtime.spawn\",\"params\":{\"argv\":[\"/bin/sh\"],\"cols\":80,\"rows\":24}}");
     defer if (r.frame) |f| f.deinit(allocator);
     try testing.expect(std.mem.indexOf(u8, r.frame.?.payload, "unauthorized") != null);
+}
+
+test "server: attach grants capabilities; controller input/resize dispatch through RuntimeOps; stale/detach honored" {
+    const allocator = testing.allocator;
+    var registry = reg.TerminalRuntimeRegistry.init(allocator);
+    defer registry.deinit();
+    _ = try registry.register(0xAA, 80, 24);
+
+    var fake: FakeRuntimeOps = .{};
+    var conn = Connection.init(allocator, 1, &registry);
+    defer conn.deinit(); // attach subscription을 registry에서 뗀다(deinit는 registry.deinit보다 먼저 — defer LIFO).
+    conn.runtime_ops = fake.ops();
+    {
+        const h = try feedJson(&conn, .hello, 1, "{\"protocol_min\":1,\"protocol_max\":1}");
+        if (h.frame) |f| f.deinit(allocator);
+    }
+
+    // controller attach → granted에 input+resize, host가 stream_id 발급.
+    {
+        const r = try feedJson(&conn, .request, 2, "{\"method\":\"runtime.attach\",\"params\":{\"runtime_id\":\"aa\",\"mode\":\"controller\"}}");
+        defer if (r.frame) |f| f.deinit(allocator);
+        try testing.expect(std.mem.indexOf(u8, r.frame.?.payload, "\"input\":true") != null);
+        try testing.expect(std.mem.indexOf(u8, r.frame.?.payload, "\"resize\":true") != null);
+        try testing.expect(std.mem.indexOf(u8, r.frame.?.payload, "\"stream_id\":1") != null);
+    }
+
+    // input_bytes(stream 1) → controller라 runtime_ops.write_input에 라우팅된다(응답 없음 = none).
+    {
+        const r = try feedStream(&conn, .input_bytes, 1, "echo hi\n");
+        try testing.expectEqualStrings("none", r.action);
+    }
+    try testing.expectEqualStrings("echo hi\n", fake.last_input[0..fake.last_input_len]);
+    try testing.expectEqual(@as(u128, 0xAA), fake.input_runtime);
+
+    // resize(controller, seq 1) → registry 적용 + runtime_ops.resize 위임 + applied 응답(changed=true).
+    {
+        const r = try feedJson(&conn, .request, 3, "{\"method\":\"runtime.resize\",\"params\":{\"stream_id\":1,\"cols\":100,\"rows\":40,\"client_sequence\":1}}");
+        defer if (r.frame) |f| f.deinit(allocator);
+        try testing.expect(std.mem.indexOf(u8, r.frame.?.payload, "\"changed\":true") != null);
+        try testing.expect(std.mem.indexOf(u8, r.frame.?.payload, "\"cols\":100") != null);
+    }
+    try testing.expectEqual(@as(u16, 100), fake.resized_cols);
+    try testing.expectEqual(@as(u16, 40), fake.resized_rows);
+    try testing.expectEqual(@as(u128, 0xAA), fake.resized_runtime);
+
+    // 같은/이하 sequence 재요청 → stale(재적용하지 않는다). runtime_ops.resize는 다시 호출되지 않는다.
+    fake.resized_cols = 0;
+    {
+        const r = try feedJson(&conn, .request, 4, "{\"method\":\"runtime.resize\",\"params\":{\"stream_id\":1,\"cols\":50,\"rows\":10,\"client_sequence\":1}}");
+        defer if (r.frame) |f| f.deinit(allocator);
+        try testing.expect(std.mem.indexOf(u8, r.frame.?.payload, "stale") != null);
+    }
+    try testing.expectEqual(@as(u16, 0), fake.resized_cols); // stale이라 위임 안 됨.
+
+    // detach → subscription 해제, 이후 input은 조용히 버려진다(none, write_input 미호출).
+    {
+        const r = try feedJson(&conn, .request, 5, "{\"method\":\"runtime.detach\",\"params\":{\"stream_id\":1}}");
+        defer if (r.frame) |f| f.deinit(allocator);
+        try testing.expect(std.mem.indexOf(u8, r.frame.?.payload, "detached") != null);
+    }
+    fake.last_input_len = 99;
+    {
+        const r = try feedStream(&conn, .input_bytes, 1, "late");
+        try testing.expectEqualStrings("none", r.action);
+    }
+    try testing.expectEqual(@as(usize, 99), fake.last_input_len); // 미attach stream이라 write_input 미호출(값 그대로).
+}
+
+test "server: observer attach is denied input and resize" {
+    const allocator = testing.allocator;
+    var registry = reg.TerminalRuntimeRegistry.init(allocator);
+    defer registry.deinit();
+    _ = try registry.register(0xBB, 80, 24);
+
+    var fake: FakeRuntimeOps = .{};
+    var conn = Connection.init(allocator, 1, &registry);
+    defer conn.deinit();
+    conn.runtime_ops = fake.ops();
+    {
+        const h = try feedJson(&conn, .hello, 1, "{\"protocol_min\":1,\"protocol_max\":1}");
+        if (h.frame) |f| f.deinit(allocator);
+    }
+    // observer attach → observe만.
+    {
+        const r = try feedJson(&conn, .request, 2, "{\"method\":\"runtime.attach\",\"params\":{\"runtime_id\":\"bb\",\"mode\":\"observer\"}}");
+        defer if (r.frame) |f| f.deinit(allocator);
+        try testing.expect(std.mem.indexOf(u8, r.frame.?.payload, "\"observe\":true") != null);
+        try testing.expect(std.mem.indexOf(u8, r.frame.?.payload, "\"input\":false") != null);
+    }
+    // observer input_bytes는 write_input에 도달하지 않는다(input capability 없음).
+    {
+        const r = try feedStream(&conn, .input_bytes, 1, "nope");
+        try testing.expectEqualStrings("none", r.action);
+    }
+    try testing.expectEqual(@as(usize, 0), fake.last_input_len);
+    // observer resize는 unauthorized(controller 아님).
+    {
+        const r = try feedJson(&conn, .request, 3, "{\"method\":\"runtime.resize\",\"params\":{\"stream_id\":1,\"cols\":90,\"rows\":30,\"client_sequence\":1}}");
+        defer if (r.frame) |f| f.deinit(allocator);
+        try testing.expect(std.mem.indexOf(u8, r.frame.?.payload, "unauthorized") != null);
+    }
+    try testing.expectEqual(@as(u16, 0), fake.resized_cols);
 }

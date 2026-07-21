@@ -20,7 +20,10 @@
 //!   - P3-e2a ✅: `server`에 runtime.spawn/terminate dispatch + `RuntimeOps` seam(중립 vtable, host만 설정, read-only는 unauthorized).
 //!   - P3-e2b ✅: 실 `runtime_manager`(app `InProcessTermBackend` 재사용 + runtime_id↔handle 매핑) + daemon 배선(SocketServer.runtime_ops).
 //!   - P3-e2c ✅: attach/detach/resize dispatch + input_bytes 라우팅(§9 capability) + `RuntimeOps` write_input/resize. runtime.resized broadcast는 e2d.
-//!   - P3-e2d/e: snapshot·delta stream demux / host-backed `TermRuntimeBackend`. ← 다음
+//!   - P3-e2d(snapshot/delta stream demux): §12 codec을 실 TerminalCore 화면에 연결.
+//!     - e2d-1 ✅: `screen_snapshot`(TerminalCore 화면 → screen_stream 레코드 투영, resolved RGB·wide cell·cursor·modes) + `screen_stream` length-prefixed record-stream framing.
+//!     - e2d-2/3: attach가 snapshot_chunk 전송(core lock + Action 확장) / delta 생산 + async push + event fan-out(runtime.resized·takeover revocation). ← 다음
+//!   - P3-e2e: host-backed `TermRuntimeBackend`(P2 계약의 원격 구현).
 //!   - P3-e3: `app_session` 배선(discovery→launch→attach) + GUI 재접속(manifest runtime_handle).
 
 const builtin = @import("builtin");
@@ -57,6 +60,12 @@ else
 // 컴파일한다. codec(protocol/framing/screen_stream/registry/server)은 여전히 maru를 모르는 platform-import-0 순수 계층이다.
 pub const runtime_manager = if (builtin.os.tag == .macos)
     @import("session_host/runtime_manager.zig")
+else
+    struct {};
+// screen_snapshot(실 TerminalCore 화면 → screen_stream 레코드 투영)도 `@import("maru")`로 terminal을 읽어 macOS 전용이다.
+// 투영 자체는 순수 로직이지만 terminal 타입 의존이라 barrel에서 조건부로 둔다(screen_stream codec은 그대로 순수 유지).
+pub const screen_snapshot = if (builtin.os.tag == .macos)
+    @import("session_host/screen_snapshot.zig")
 else
     struct {};
 

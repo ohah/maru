@@ -101,19 +101,30 @@ pub fn composeModes(core: *const terminal.TerminalCore) u32 {
 /// 임시 run(grapheme는 pool 오프셋으로 참조 — pool realloc이 슬라이스를 무효화하지 않게 offset/len으로 든다).
 const RunTmp = struct { g_off: usize, g_len: usize, width: u8, count: u32, fg: u32, bg: u32, ul: u32, flags: u32 };
 
-fn appendRowRecord(
+/// 한 행의 runs(소유 — grapheme는 pool을 참조). caller가 `deinit`으로 runs 슬라이스와 grapheme pool을 함께 해제한다.
+/// snapshot(encodeRow)과 delta(runsEqual 비교 + encodeSetRuns) 둘 다 이 빌더를 재사용해 같은 압축 규칙을 공유한다.
+const RowRuns = struct {
+    runs: []Run,
+    pool: []u8,
+    fn deinit(self: RowRuns, allocator: std.mem.Allocator) void {
+        allocator.free(self.runs);
+        allocator.free(self.pool);
+    }
+};
+
+/// 한 행 셀을 RLE run으로 압축해 소유 `RowRuns`를 만든다(wide=width2·continuation 생략·resolved RGB·StyleFlags).
+fn buildRowRuns(
     allocator: std.mem.Allocator,
     snap: terminal.RenderSnapshot,
     palette: *const [256]?terminal.Rgb,
     opts: ProjectOptions,
     row: u16,
-    stream: *std.ArrayListUnmanaged(u8),
-) screen_stream.DecodeError!void {
+) screen_stream.DecodeError!RowRuns {
     const cols = snap.size.cols;
     var tmp: std.ArrayListUnmanaged(RunTmp) = .empty;
     defer tmp.deinit(allocator);
     var pool: std.ArrayListUnmanaged(u8) = .empty; // run별 grapheme 바이트 풀(offset으로 참조).
-    defer pool.deinit(allocator);
+    errdefer pool.deinit(allocator);
     var cur: std.ArrayListUnmanaged(u8) = .empty; // 현재 셀 grapheme 임시(coalesce 비교용).
     defer cur.deinit(allocator);
 
@@ -149,15 +160,123 @@ fn appendRowRecord(
         col += width;
     }
 
-    // pool이 이제 안정 — RunTmp를 실 Run으로 실체화(grapheme = pool 슬라이스)한 뒤 row 레코드로 encode한다.
+    // pool을 소유 슬라이스로 확정한 뒤 RunTmp를 실 Run으로 실체화한다(grapheme = 안정 pool 슬라이스).
     const runs = allocator.alloc(Run, tmp.items.len) catch return error.OutOfMemory;
-    defer allocator.free(runs);
+    errdefer allocator.free(runs);
+    const pool_slice = pool.toOwnedSlice(allocator) catch return error.OutOfMemory;
     for (tmp.items, 0..) |t, i| {
-        runs[i] = .{ .grapheme = pool.items[t.g_off..][0..t.g_len], .width = t.width, .count = t.count, .fg = t.fg, .bg = t.bg, .underline_color = t.ul, .style_flags = t.flags };
+        runs[i] = .{ .grapheme = pool_slice[t.g_off..][0..t.g_len], .width = t.width, .count = t.count, .fg = t.fg, .bg = t.bg, .underline_color = t.ul, .style_flags = t.flags };
     }
-    const rec = try screen_stream.encodeRow(allocator, .{ .kind = .row, .generation = opts.generation }, .{ .row_index = row, .runs = runs });
+    return .{ .runs = runs, .pool = pool_slice };
+}
+
+fn appendRowRecord(
+    allocator: std.mem.Allocator,
+    snap: terminal.RenderSnapshot,
+    palette: *const [256]?terminal.Rgb,
+    opts: ProjectOptions,
+    row: u16,
+    stream: *std.ArrayListUnmanaged(u8),
+) screen_stream.DecodeError!void {
+    const rr = try buildRowRuns(allocator, snap, palette, opts, row);
+    defer rr.deinit(allocator);
+    const rec = try screen_stream.encodeRow(allocator, .{ .kind = .row, .generation = opts.generation }, .{ .row_index = row, .runs = rr.runs });
     defer allocator.free(rec);
     try screen_stream.appendRecord(stream, allocator, rec);
+}
+
+/// 두 run 목록이 같은가(같은 grapheme·width·count·색·스타일). delta가 바뀐 행만 골라내는 비교 기준이다.
+fn runsEqual(a: []const Run, b: []const Run) bool {
+    if (a.len != b.len) return false;
+    for (a, b) |x, y| {
+        if (x.width != y.width or x.count != y.count or x.fg != y.fg or x.bg != y.bg or
+            x.underline_color != y.underline_color or x.style_flags != y.style_flags or
+            !std.mem.eql(u8, x.grapheme, y.grapheme)) return false;
+    }
+    return true;
+}
+
+fn cursorsEqual(a: screen_stream.Cursor, b: screen_stream.Cursor) bool {
+    return a.col == b.col and a.row == b.row and a.visible == b.visible and a.shape == b.shape;
+}
+
+pub const DeltaError = screen_stream.DecodeError || error{
+    /// grid 크기나 alt-screen이 바뀌어 delta로 표현할 수 없다 — caller가 fresh snapshot을 보내야 한다(§9). delta는
+    /// 같은 grid 위 증분(set_runs/cursor/modes)만 담는다.
+    SnapshotRequired,
+};
+
+/// 이전 snapshot(`projectSnapshot`이 낸 record 바이트)과 현재 화면을 비교해 **바뀐 것만** delta record 스트림으로 만든다
+/// (caller 소유, length-prefixed). 바뀐 행은 `set_runs`(start_col=0 전체 행 덮어쓰기), 커서 변화는 `cursor`, mode 변화는
+/// `modes`. 아무것도 안 바뀌면 빈 스트림(len 0)이다. grid 크기/alt-screen이 바뀌면 `error.SnapshotRequired`(delta 불가).
+/// **동시 core 쓰기가 있으면 caller가 core lock을 잡고 부른다**(`projectSnapshot`과 동일). base_generation은 `opts.generation`.
+pub fn computeDelta(allocator: std.mem.Allocator, prev_bytes: []const u8, core: *const terminal.TerminalCore, opts: ProjectOptions) DeltaError![]u8 {
+    // 이전 snapshot을 decode한다: screen_meta + rows.
+    var rs = screen_stream.RecordStream{ .bytes = prev_bytes };
+    const first = (try rs.next()) orelse return error.SnapshotRequired; // 빈 prev면 delta base가 없다.
+    const fs = try screen_stream.RecordStream.split(first);
+    if (fs.header.kind != .screen_meta) return error.SnapshotRequired;
+    const prev_meta = try screen_stream.decodeScreenMeta(fs.body);
+
+    const prev_rows = allocator.alloc(?[]Run, prev_meta.rows) catch return error.OutOfMemory;
+    @memset(prev_rows, null);
+    defer {
+        for (prev_rows) |maybe| if (maybe) |r| allocator.free(r);
+        allocator.free(prev_rows);
+    }
+    while (try rs.next()) |rec| {
+        const s = try screen_stream.RecordStream.split(rec);
+        if (s.header.kind != .row) continue; // 현재 투영은 row만 내지만, 미래 image record 등은 delta 비교에서 건너뛴다.
+        const dr = try screen_stream.decodeRow(allocator, s.body);
+        if (dr.row_index < prev_meta.rows) {
+            if (prev_rows[dr.row_index]) |old| allocator.free(old); // 중복 row_index 방어.
+            prev_rows[dr.row_index] = dr.runs;
+        } else {
+            dr.deinit(allocator);
+        }
+    }
+
+    // 현재 화면을 읽는다. grid/alt-screen이 바뀌면 delta로는 못 잇는다 → fresh snapshot 필요.
+    const snap = core.snapshot();
+    const palette = core.paletteOverride();
+    const cur_active: u8 = if (core.alt_active) 1 else 0;
+    const cur_modes = composeModes(core);
+    if (snap.size.cols != prev_meta.cols or snap.size.rows != prev_meta.rows or cur_active != prev_meta.active_screen) {
+        return error.SnapshotRequired;
+    }
+
+    var stream: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer stream.deinit(allocator);
+
+    // 행 diff → 바뀐 행만 set_runs(전체 행 교체).
+    var row: u16 = 0;
+    while (row < snap.size.rows) : (row += 1) {
+        const rr = try buildRowRuns(allocator, snap, palette, opts, row);
+        defer rr.deinit(allocator);
+        const prev = prev_rows[row] orelse &[_]Run{};
+        if (!runsEqual(rr.runs, prev)) {
+            const rec = try screen_stream.encodeSetRuns(allocator, .{ .kind = .set_runs, .generation = opts.generation }, .{ .base_generation = opts.generation, .row_index = row, .start_col = 0, .runs = rr.runs });
+            defer allocator.free(rec);
+            try screen_stream.appendRecord(&stream, allocator, rec);
+        }
+    }
+
+    // 커서 변화 → cursor delta.
+    const cur_cursor = screen_stream.Cursor{ .col = snap.cursor.col, .row = snap.cursor.row, .visible = snap.cursor.visible, .shape = @intFromEnum(snap.cursor_shape) };
+    if (!cursorsEqual(cur_cursor, prev_meta.cursor)) {
+        const rec = try screen_stream.encodeCursor(allocator, .{ .kind = .cursor, .generation = opts.generation }, .{ .base_generation = opts.generation, .cursor = cur_cursor });
+        defer allocator.free(rec);
+        try screen_stream.appendRecord(&stream, allocator, rec);
+    }
+
+    // mode 변화 → modes delta.
+    if (cur_modes != prev_meta.modes) {
+        const rec = try screen_stream.encodeModes(allocator, .{ .kind = .modes, .generation = opts.generation }, .{ .base_generation = opts.generation, .modes = cur_modes });
+        defer allocator.free(rec);
+        try screen_stream.appendRecord(&stream, allocator, rec);
+    }
+
+    return stream.toOwnedSlice(allocator) catch return error.OutOfMemory;
 }
 
 /// 셀의 표시 grapheme을 UTF-8로 만든다(base codepoint + grapheme_store cluster 본체). 빈 셀(codepoint 0)은 공백.
@@ -336,4 +455,71 @@ test "screen snapshot: style flags and alt-screen/modes are captured" {
         defer dec.deinit(allocator);
         try testing.expectEqual(@as(u8, 1), dec.meta.active_screen); // alternate.
     }
+}
+
+test "screen snapshot: computeDelta emits set_runs for changed rows and a cursor delta" {
+    const allocator = testing.allocator;
+    var core = try terminal.TerminalCore.init(allocator, .{ .cols = 20, .rows = 3 });
+    defer core.deinit();
+    try core.write("hi"); // row0="hi", cursor (row0,col2).
+    const a = try projectSnapshot(allocator, &core, .{ .generation = 1 });
+    defer allocator.free(a);
+
+    try core.write("\r\nworld"); // row1="world", cursor (row1,col5). row0은 그대로.
+    const delta = try computeDelta(allocator, a, &core, .{ .generation = 1 });
+    defer allocator.free(delta);
+    try testing.expect(delta.len > 0);
+
+    var rs = screen_stream.RecordStream{ .bytes = delta };
+    var saw_row0 = false;
+    var saw_row1 = false;
+    var saw_cursor = false;
+    while (try rs.next()) |rec| {
+        const s = try screen_stream.RecordStream.split(rec);
+        switch (s.header.kind) {
+            .set_runs => {
+                const sr = try screen_stream.decodeSetRuns(allocator, s.body);
+                defer sr.deinit(allocator);
+                if (sr.row_index == 0) saw_row0 = true;
+                if (sr.row_index == 1) {
+                    saw_row1 = true;
+                    try testing.expectEqual(@as(u16, 0), sr.start_col); // 전체 행 교체.
+                    try testing.expectEqualStrings("w", sr.runs[0].grapheme);
+                }
+            },
+            .cursor => {
+                const cd = try screen_stream.decodeCursor(s.body);
+                saw_cursor = true;
+                try testing.expectEqual(@as(u16, 1), cd.cursor.row);
+                try testing.expectEqual(@as(u16, 5), cd.cursor.col);
+            },
+            else => {},
+        }
+    }
+    try testing.expect(saw_row1 and saw_cursor);
+    try testing.expect(!saw_row0); // row0은 안 바뀌어 set_runs를 내지 않는다(증분만).
+}
+
+test "screen snapshot: computeDelta is empty when the screen is unchanged" {
+    const allocator = testing.allocator;
+    var core = try terminal.TerminalCore.init(allocator, .{ .cols = 10, .rows = 2 });
+    defer core.deinit();
+    try core.write("abc");
+    const a = try projectSnapshot(allocator, &core, .{ .generation = 3 });
+    defer allocator.free(a);
+    const delta = try computeDelta(allocator, a, &core, .{ .generation = 3 });
+    defer allocator.free(delta);
+    try testing.expectEqual(@as(usize, 0), delta.len); // 변화 없음 → 빈 delta(caller는 아무것도 안 보낸다).
+}
+
+test "screen snapshot: computeDelta requires a fresh snapshot when the grid geometry changes" {
+    const allocator = testing.allocator;
+    var core = try terminal.TerminalCore.init(allocator, .{ .cols = 10, .rows = 3 });
+    defer core.deinit();
+    try core.write("resize me");
+    const a = try projectSnapshot(allocator, &core, .{ .generation = 1 });
+    defer allocator.free(a);
+
+    try core.resize(20, 5); // grid가 바뀌면 delta로는 못 잇는다.
+    try testing.expectError(error.SnapshotRequired, computeDelta(allocator, a, &core, .{ .generation = 2 }));
 }

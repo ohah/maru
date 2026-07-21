@@ -100,6 +100,10 @@ pub const RuntimeEntry = struct {
     controller: ?StreamId = null,
     /// controller가 마지막으로 적용한 client_sequence. controller가 바뀌면(takeover/재attach) 0으로 리셋한다.
     controller_sequence: u64 = 0,
+    /// 현재 controller가 resize sequence를 한 번이라도 적용했는가. `controller_sequence==0`을 "아직 없음"과 "마지막이
+    /// 0"이라는 두 의미로 겹쳐 쓰지 않기 위한 명시 sentinel이다 — 그래야 seq 0을 유효한 첫 값으로 받되 seq 0 재전송은
+    /// stale로 막는다. controller가 바뀌면(controller/takeover 획득) `controller_sequence`와 함께 false로 리셋한다.
+    resize_seq_seen: bool = false,
     observers: std.ArrayListUnmanaged(StreamId) = .empty,
     /// server가 실 runtime handle을 실어 두는 opaque 슬롯. state machine은 미해석.
     runtime: ?*anyopaque = null,
@@ -183,6 +187,7 @@ pub const TerminalRuntimeRegistry = struct {
                 if (entry.controller == null) {
                     entry.controller = stream;
                     entry.controller_sequence = 0; // 새 controller — sequence 창을 새로 연다.
+                    entry.resize_seq_seen = false;
                     return .{ .granted = Capability.observe | Capability.input | Capability.resize };
                 }
                 // 이미 controller가 있으면 조용히 빼앗지 않고 observer로 강등한다(§8).
@@ -202,6 +207,7 @@ pub const TerminalRuntimeRegistry = struct {
                 _ = entry.removeObserver(stream); // 이 stream이 observer였다면 승격(observer 목록에서 제거).
                 entry.controller = stream;
                 entry.controller_sequence = 0;
+                entry.resize_seq_seen = false;
                 return .{
                     .granted = Capability.observe | Capability.input | Capability.resize,
                     .revoked_controller = revoked,
@@ -241,9 +247,10 @@ pub const TerminalRuntimeRegistry = struct {
     ) RegistryError!ResizeOutcome {
         const entry = self.entries.get(id) orelse return error.RuntimeNotFound;
         if (entry.controller != stream) return error.NotController;
-        if (client_sequence <= entry.controller_sequence and entry.controller_sequence != 0) {
-            return .stale; // controller별 last sequence 이하 — 재적용하지 않는다.
+        if (entry.resize_seq_seen and client_sequence <= entry.controller_sequence) {
+            return .stale; // controller별 last sequence 이하 — 재적용하지 않는다(seq 0도 첫 적용 뒤엔 stale).
         }
+        entry.resize_seq_seen = true;
         entry.controller_sequence = client_sequence;
 
         const new_cols = clampCols(cols);
@@ -385,6 +392,29 @@ test "registry: resize applies only for controller, bumps generation only on rea
     const r3 = try reg.resize(1, 100, 1, 0, 3);
     try testing.expectEqual(min_cols, r3.applied.cols);
     try testing.expectEqual(min_rows, r3.applied.rows);
+}
+
+test "registry: sequence 0 is a valid first resize but a replayed 0 is stale" {
+    var reg = TerminalRuntimeRegistry.init(testing.allocator);
+    defer reg.deinit();
+    _ = try reg.register(1, 80, 24);
+    _ = try reg.attach(1, 100, .controller);
+
+    // client_sequence=0을 첫 resize로 쓰는 client도 정상 적용된다(0이 sentinel과 겹치지 않음).
+    const r0 = try reg.resize(1, 100, 100, 30, 0);
+    try testing.expect(r0.applied.changed);
+    // 같은 seq=0 재전송(중복/재생)은 stale로 무시되고, 첫 적용 크기를 되돌리지 못한다.
+    try testing.expectEqual(ResizeOutcome.stale, try reg.resize(1, 100, 120, 40, 0));
+    const e = reg.get(1).?;
+    try testing.expectEqual(@as(u16, 100), e.cols);
+    try testing.expectEqual(@as(u16, 30), e.rows);
+    // 다음 유효 sequence(1)는 적용된다.
+    const r1 = try reg.resize(1, 100, 120, 40, 1);
+    try testing.expect(r1.applied.changed);
+    // takeover한 새 controller는 sequence 창이 리셋돼 다시 seq=0을 받아들인다.
+    _ = try reg.attach(1, 200, .takeover);
+    const r2 = try reg.resize(1, 200, 90, 20, 0);
+    try testing.expect(r2.applied.changed);
 }
 
 test "registry: canonical size survives all clients detaching (client 0)" {

@@ -24,6 +24,8 @@ const server_mod = @import("server.zig");
 /// peer 프로세스의 effective uid/gid(§11 LOCAL_PEERCRED(macOS·xucred)/SO_PEERCRED(Linux)를 libc가 래핑). std.c
 /// 미노출이라 직접 extern. session-host는 uid만 쓴다(same-UID 게이트).
 extern "c" fn getpeereid(fd: c.fd_t, euid: *posix.uid_t, egid: *posix.gid_t) c_int;
+/// accept-fail backoff용(std.c 미노출). fd 고갈 시 tight-spin을 막는 짧은 sleep.
+extern "c" fn usleep(usec: c_uint) c_int;
 
 /// sockaddr_un.sun_path 바이트 용량(macOS 104). 컴파일타임에 읽어 매직넘버를 피한다.
 pub const sun_path_cap: usize = @typeInfo(@FieldType(posix.sockaddr.un, "path")).array.len;
@@ -131,6 +133,9 @@ pub const SocketServer = struct {
             const rc = c.accept(self.listen_fd, null, null);
             if (rc < 0) {
                 if (posix.errno(rc) == .INTR) continue;
+                // EMFILE/ENFILE 등 fd 고갈: pending 연결이 listen fd를 계속 readable로 둬(pollReady가 즉시 .ready) accept
+                // 루프가 100% CPU tight-spin이 된다. 짧게 backoff해 fd가 풀릴 때까지 CPU를 태우지 않는다.
+                _ = usleep(10_000);
                 return null;
             }
             break rc;
@@ -157,7 +162,11 @@ pub const SocketServer = struct {
         var buf: [4096]u8 = undefined;
         while (true) {
             const n = c.read(cfd, &buf, buf.len);
-            if (n <= 0) return; // EOF 또는 read 오류 — 연결 종료(runtime 유지).
+            if (n < 0) {
+                if (posix.errno(n) == .INTR) continue; // 시그널 인터럽트(SIGCHLD 등)는 재시도 — EOF로 오인해 연결을 끊지 않는다.
+                return; // 그 외 read 오류 — 연결 종료(runtime 유지).
+            }
+            if (n == 0) return; // EOF.
             parser.push(buf[0..@intCast(n)]) catch return error.OutOfMemory;
             while (true) {
                 const maybe = parser.next() catch return; // codec 위반 → 연결만 닫는다.

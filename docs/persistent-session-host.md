@@ -687,6 +687,18 @@ parent 또는 explicit base와 `env.*` upsert의 mapping env 회귀, live agent 
 - GUI layout이 `LivePtySession` 포인터를 직접 소유하지 않는 방향을 red test로 고정한다.
 - 아직 daemon을 띄우지 않고 제품 동작은 동일하다.
 
+큰 diff를 리뷰 가능하게 두 슬라이스로 나눈다(단계 자체는 P2 하나다 — 두 슬라이스가 끝나야 P2 완료).
+
+- **P2-a(seam 도입, 진행 중)**: terminal runtime의 수명·입출력·관측을 GUI layout에서 분리하는 vtable 계약
+  `src/app/term_runtime_backend.zig`(`TermRuntimeBackend`·opaque `RuntimeHandle`·`SpawnParams`, 기존 `runtime.PtyIo`와
+  같은 ctx+fn 관용구)와 그 in-process 구현 `src/app/in_process_term_backend.zig`(기존 `LiveSurfaceRegistry`+
+  `LivePtySession`+`SurfaceRuntime`을 감쌈)를 **추가만** 한다. `app_session`은 아직 안 바꾸고 제품 경로에 배선하지 않으므로
+  제품 동작은 byte-identical이다. fake backend가 non-macOS에서 spawn/attach/input/resize/terminate/late-event 계약을,
+  in-process adapter가 실 macOS PTY에서 같은 계약(spawn→attach→pump drain→종료→슬롯 회수, web arm 비대상)을 고정한다.
+- **P2-b(배선 전환, 후속)**: `app_session`의 `TermRuntime.live_pty: *LivePtySession` 직접 참조와 `.session.foregroundProcess*`
+  관통 접근을 `RuntimeHandle`+계약 호출로 전환하고, GUI layout이 `LivePtySession`을 더는 들지 않음을 red test로 고정한다.
+  `host.zig`/`FrameLoop`/`LivePtyRegistry.closeActive`는 단일-pane 시절 smoke/test 계약이라 프로덕션과 별개로 다룬다.
+
 종료 gate: 기존 PTY/input/resize/close 전체 회귀, backend fake의 attach/detach/late event 단위 테스트, boundary check.
 
 ### P3 — local host와 단일 GUI 재접속

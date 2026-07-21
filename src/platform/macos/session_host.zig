@@ -11,13 +11,15 @@
 //!   - P3-a ✅: `protocol`(MRSH 32-byte header·kind/flag·error 어휘) + `framing`(partial I/O parser·cap).
 //!   - P3-b ✅: `screen_stream`(snapshot/delta record codec, §12).
 //!   - P3-c ✅: `registry`(`TerminalRuntimeRegistry` + controller/observer capability state machine, §9).
-//!   - P3-d: server(unix socket·hello/command dispatch·bounded queue) + detached-helper on-demand launch + entrypoint. ← 다음
+//!   - P3-d1 ✅: `server`(connection dispatch state machine — hello 협상 + read-only command dispatch, 순수).
+//!   - P3-d2: 실 unix socket bind/accept·peer-cred·I/O loop·bounded queue + detached-helper launch + entrypoint. ← 다음
 //!   - P3-e: client(hello/RPC/stream demux) + host-backed `TermRuntimeBackend` + GUI 재접속.
 
 pub const protocol = @import("session_host/protocol.zig");
 pub const framing = @import("session_host/framing.zig");
 pub const screen_stream = @import("session_host/screen_stream.zig");
 pub const registry = @import("session_host/registry.zig");
+pub const server = @import("session_host/server.zig");
 
 test {
     // 자식 파일의 inline test를 이 barrel의 test 그래프에 모은다(refAllDecls는 얕아 명시 참조가 필요).

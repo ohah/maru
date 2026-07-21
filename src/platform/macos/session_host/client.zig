@@ -299,9 +299,9 @@ fn usleepMs(ms: c_uint) c_int {
     return usleep(ms * 1000);
 }
 
-/// response JSON에서 `runtime_id`(server가 `{x:0>32}`로 낸 32-hex)를 뽑는다. 없으면 null. 테스트 helper — 실 wire
-/// 응답에서 runtime_id를 되읽어 terminate에 되먹인다(nested JSON 파싱 없이 고정 폭 hex만 복사).
-fn extractRuntimeId(payload: []const u8) ?[32]u8 {
+/// response JSON에서 `runtime_id`(server가 `{x:0>32}`로 낸 32-hex)를 뽑는다. 없으면 null. 실 wire 응답에서 runtime_id를
+/// 되읽어 terminate에 되먹인다(nested JSON 파싱 없이 고정 폭 hex만 복사). `RemoteRuntime`(e2e-2c-2)도 이걸 재사용한다.
+pub fn extractRuntimeId(payload: []const u8) ?[32]u8 {
     const key = "\"runtime_id\":\"";
     const start = std.mem.indexOf(u8, payload, key) orelse return null;
     const hex_start = start + key.len;
@@ -311,8 +311,8 @@ fn extractRuntimeId(payload: []const u8) ?[32]u8 {
     return out;
 }
 
-/// response JSON에서 `"<key>":` 뒤의 unsigned 정수를 읽는다. 없으면 null. 테스트 helper(attach 응답의 stream_id 되읽기).
-fn extractU64Field(payload: []const u8, key: []const u8) ?u64 {
+/// response JSON에서 `"<key>":` 뒤의 unsigned 정수를 읽는다. 없으면 null(attach 응답의 stream_id 되읽기). `RemoteRuntime`도 재사용.
+pub fn extractU64Field(payload: []const u8, key: []const u8) ?u64 {
     const at = std.mem.indexOf(u8, payload, key) orelse return null;
     var i = at + key.len;
     var v: u64 = 0;

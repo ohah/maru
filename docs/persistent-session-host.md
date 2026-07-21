@@ -756,9 +756,13 @@ GUI가 `*LivePtySession`을 안 드는 컴파일 타임 red test, boundary check
   `Connection.handleFrame`→`writeAll`)를 구현했다. control-plane socket과 코드를 공유하지 않는 self-contained adapter라
   session_host codec의 순수성을 지킨다(socket path는 caller 주입). 실 macOS unix socket에 별도 스레드 client가 connect해
   hello→hello_ack→host.info를 왕복하고 socket이 0600인지 확인하는 process smoke로 검증한다(non-macOS skip).
-- **P3-d2b(socket 발견 + launch)**: flock 기반 stale 회수, §10 socket 발견(connect-first·start lock·경로 정책), detached-helper
-  on-demand launch, `maru-sessiond` entrypoint, connection별 bounded queue(고처리량 stream backpressure). 여러 인스턴스 수명이
-  걸린 부분이라 실제 별도 프로세스 spawn smoke로 검증한다("GUI를 죽여도 host가 살아 hello에 응답"의 최초 성립 지점).
+- **P3-d2b(socket 발견 정책) ✅**: `session_host/discovery.zig`에 §10 발견 state machine과 경로를 순수로 구현했다 —
+  connect-first, **조회 의도는 auto-start 금지**(`host_unavailable`), spawn 의도만 start lock, **lock winner만 spawn·loser는
+  대기 후 connect**, lock 직전 race면 기존 host 사용(중복 spawn 방지). 경로는 `<base>/session-host/control.sock`·`control.lock`
+  으로 control-plane(`<base>/control`)과 분리한다. 실 connect/flock/spawn·entrypoint는 P3-d2c.
+- **P3-d2c(detached launch + entrypoint)**: 실 connect·flock start lock·detached-helper on-demand spawn(`maru __session-host`)·
+  `maru-sessiond` entrypoint(bind + accept loop + serve)·connection별 bounded queue. 실제 별도 프로세스를 spawn하고 부모를
+  종료한 뒤 host가 살아 hello/host.info에 응답하는 process smoke로 검증한다("GUI를 죽여도 host 생존"의 최초 성립 지점).
 - **P3-e(client + 재접속)**: GUI 측 hello/RPC/stream demux와 host-backed `TermRuntimeBackend`(§13 P2 계약의 원격 구현)로 GUI 종료→재실행 재접속.
 
 종료 gate: 무인 실제 별도 process smoke, detach 중 output, reconnect first snapshot, input/resize roundtrip, bounded shutdown.

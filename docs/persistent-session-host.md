@@ -765,10 +765,12 @@ GUI가 `*LivePtySession`을 안 드는 컴파일 타임 red test, boundary check
   client로 connect해 hello→hello_ack→host.info를 왕복하는 process smoke로, 부모와 독립된 프로세스가 socket을 소유하고
   재접속에 응답함을 실증한다("GUI를 죽여도 host 생존"의 최초 성립). d2c host는 registry가 비어 hello·host.info·runtime.list에
   응답하는 살아 있는 빈 host다(실 runtime.spawn은 P3-e). macOS 전용(barrel 조건부).
-- **P3-d2d(detached launch + CLI + 배선)**: `maru __session-host <socket>` CLI 노출, 앱이 첫 persistent runtime이 필요할 때
-  이 helper를 detached spawn(fork+setsid+exec, fd close)하고 discovery(P3-d2b)의 connect·flock start lock을 실 syscall로
-  실행하는 배선, host 수명(idle grace 종료·SIGTERM 우아 종료)·connection별 bounded queue. 두 프로세스가 동시에 발견해도
-  host가 하나만 뜨는지 process smoke로 검증한다.
+- **P3-d2d(detached launcher + CLI) ✅**: host를 **별도 프로세스로 띄우는 메커니즘**을 구현했다. `session_host/launcher.zig`가
+  `spawnDetached`(**double-fork + setsid** + std fd를 `/dev/null`로 + `execv`)로 helper를 부모와 독립된 orphan으로 띄우고
+  (부모는 중간 자식만 reap해 zombie 없음), `main.zig`가 hidden `maru __session-host <socket>` 서브커맨드로 daemon(P3-d2c)에
+  진입한다. argv 조립은 순수 TDD, detached spawn 메커니즘은 관찰 가능한 자식(marker 파일)으로 process smoke한다(macOS 전용).
+  실 connect·flock start lock으로 discovery(P3-d2b)를 실행하고 앱이 이 launcher를 호출하는 **app 배선과 GUI 종료→재실행
+  재접속 end-to-end는 client 쪽(P3-e)** 에서 host-backed backend와 함께 붙인다(그 경로가 discovery→launch→attach이므로).
 - **P3-e(client + 재접속)**: GUI 측 hello/RPC/stream demux와 host-backed `TermRuntimeBackend`(§13 P2 계약의 원격 구현)로 GUI 종료→재실행 재접속.
 
 종료 gate: 무인 실제 별도 process smoke, detach 중 output, reconnect first snapshot, input/resize roundtrip, bounded shutdown.

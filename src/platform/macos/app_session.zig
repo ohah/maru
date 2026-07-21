@@ -1046,15 +1046,17 @@ const NormalizedConfig = struct {
 /// 결합부. session 모델(`session_model.Model(TermRuntime).Term`)에 generic `Rt`로 주입된다(§3.1). 모델 struct
 /// (Term/Pane/Tab)는 session core(src/session/session_model.zig)가 소유하고, 이 런타임 결합 타입만 platform에 남는다(S2-4b).
 const TermRuntime = struct {
-    // M3a: 런타임 소유는 앱 전역 `app_runtime.live_registry`(LiveSurfaceRegistry(LiveSurface))에 있고, terminal Term은 그
-    // 번들 슬롯 terminal arm의 `&slot.terminal.live_pty`를 가리키는 포인터만 든다(docs/window-surface-mobility.md §8A.1).
-    // registry가 `allocator.create`로 각 `LiveSurface` 번들을 개별 heap 슬롯에 두므로 reader thread가 잡는 `&live_pty.reader`
-    // 주소는 Term-inline 시절과 **같은 heap-pin 메커니즘**으로 안정적이다(소유 위치만 Term→registry로 옮겼을 뿐, 슬롯은
-    // 수명 내내 안 움직인다). 필드가 포인터라 대부분의 `live_pty.X` 접근은 Zig auto-deref로 그대로 유효하고, 소유/수명
-    // (create·remove)만 registry를 거친다. `Term.surface`는 같은 번들 슬롯의 `&slot.terminal.surface`를 가리킨다(두 포인터가
-    // 한 슬롯 = surface_id 하나). **4e-1**: web Term(kind==.web)은 live PTY가 없어 이 필드를 세우지 않고(undefined) 아래
-    // `live_initialized=false`로 둔다 — `Term.surface`는 web arm sentinel(`&slot.web.surface`)을 가리킨다.
-    live_pty: *app.LivePtySession = undefined,
+    // persistent-session P2 seam(docs/persistent-session-host.md §13 P2): 런타임 소유는 앱 전역
+    // `app_runtime.live_registry`(LiveSurfaceRegistry(LiveSurface))에 있고, GUI(Term)는 그 runtime을 가리키는 opaque
+    // `RuntimeHandle`만 든다 — 더 이상 `*LivePtySession` 포인터를 직접 들지 않는다. spawn/attach/pump/close/observe는
+    // 전부 `AppSession.termBackend()`(= `TermRuntimeBackend` 계약)에 이 handle을 넘겨 수행하므로, GUI는 runtime이
+    // in-process인지 원격 host(P3 maru-sessiond)인지 모른다. in-process에서 handle 값은 surface_id(=pty_id)와 같아
+    // registry/routing 조회가 1:1이다(그래도 GUI는 이 값을 surface_id로 해석하지 않고 backend에 되돌려 주는 불투명
+    // handle로만 다룬다). reader thread가 잡는 `&live_pty.reader`·`&surface.core` 주소는 registry heap 슬롯이 고정하며
+    // (backend 내부 계약), 그 heap-pin은 seam 전환과 무관하게 유지된다. **4e-1**: web Term(kind==.web)은 live PTY가
+    // 없어 아래 `live_initialized=false`로 두고 handle을 미할당(0)으로 둔다. `Term.surface`는 backend `spawn`이 돌려준
+    // 번들 슬롯 surface 포인터(web은 sentinel)를 참조한다.
+    handle: app.TermRuntimeHandle = 0,
     pump: app.RuntimeEventPump = undefined,
     live_initialized: bool = false,
     // 이 Term의 PTY가 종료(exit/read_error) 관측 후 finishAfterTermination까지 끝났는가. tick drain이 Term별로
@@ -1066,6 +1068,18 @@ const TermRuntime = struct {
     // 100ms probe에서 foreground pgid 변화만 싸게 감지해 kind를 즉시 재분류한다. 0=null/미관측.
     agent_observer_pgid: i32 = 0,
 };
+
+// 이 테스트가 증명하는 것(그리고 터미널에서 왜 중요한가): persistent-session P2 seam의 완료 조건은 "GUI layout이
+// terminal runtime의 프로세스 경계(`*LivePtySession`)를 직접 들지 않는다"는 것이다. GUI가 live PTY 포인터를 쥐고
+// 있으면 P3에서 runtime을 앱 밖(`maru-sessiond`)으로 옮길 수 없다. `TermRuntime`은 opaque `RuntimeHandle`과
+// `TermRuntimeBackend` 계약만으로 runtime을 다뤄야 하며, `*LivePtySession` 필드가 다시 생기면 이 seam이 무너진다
+// (docs/persistent-session-host.md §13 P2). 컴파일 타임 필드 검사라 회귀가 즉시 실패로 드러난다.
+test "P2-b: TermRuntime는 opaque handle을 들고 *LivePtySession을 직접 참조하지 않는다" {
+    inline for (@typeInfo(TermRuntime).@"struct".fields) |f| {
+        if (f.type == *app.LivePtySession) return error.TermRuntimeStillHoldsLivePtyPointer;
+    }
+    try std.testing.expect(@hasField(TermRuntime, "handle"));
+}
 
 /// 닫기 확인이 보류한 닫기 **진입점**(어떤 UI 동작이 닫기를 요청했나). 진입점마다 cascade 정책이 달라, 확정 시 같은
 /// 판단을 다시 하려고 어느 경로였는지 기억한다. 진입점 → 실제 teardown 범위(CloseScope) 변환은 resolveCloseScope가
@@ -1796,6 +1810,13 @@ pub const AppSession = struct {
     // `self.* = .{...}`·reset이 모두 같은 표를 가리킨다(surface_ids/live_registry 패턴과 동형). **주의**:
     // `var session: AppSession = undefined` 테스트가 라우팅을 타면 이 포인터를 명시 초기화해야 한다(attachTestRuntime).
     runtime: *app.SurfaceRuntime = &app_runtime.routing,
+    // P2 seam(docs/persistent-session-host.md §13 P2): terminal runtime의 수명·입출력·관측을 opaque handle 기반
+    // 계약으로 다루는 in-process backend. GUI(Term.rt)는 `*LivePtySession`을 직접 안 들고 `termBackend()`가 돌려주는
+    // `TermRuntimeBackend`에 handle을 넘겨 spawn/attach/pump/close/observe를 수행한다. init에서 이 창의 io/allocator와
+    // 앱 전역 registry/runtime으로 배선한다 — 모든 창이 같은 io/allocator(abi create)와 같은 registry/runtime을 쓰므로
+    // 창마다 backend를 만들어도 handle로 같은 슬롯을 조회한다(cross-window 이동 무관). AppSession이 heap-pin
+    // (allocator.create)이라 `&self.term_backend`가 안정적이라 vtable ctx로 안전하다. undefined 기본값 — init 전 접근 금지.
+    term_backend: app.InProcessTermBackend = undefined,
     // surface teardown의 단일 chokepoint(destroyTerm + deinit direct pass)가 알리는 선택적 관찰 훅. cross-window move는
     // destroy가 아니라 소유 이전이므로 호출하지 않는다. app_host_abi가 browser grant/wait 수명에 연결한다.
     surface_closed_context: ?*anyopaque = null,
@@ -2718,6 +2739,11 @@ pub const AppSession = struct {
         self.runtime.debug_input = diag_gate.maruDebugEnabled(); // MARU_DEBUG면 zsh redraw 시퀀스 로깅
         self.runtime_initialized = true;
 
+        // P2 seam: terminal runtime 계약 backend를 이 창의 io/allocator와 앱 전역 registry/routing으로 배선한다.
+        // io/allocator/registry/runtime이 모두 채워진 뒤라야 backend가 유효한 참조를 든다(이 지점 이후 createTerm이
+        // termBackend()로 spawn한다). backend는 참조만 드는 stateless 값이라 별도 teardown이 없다(deinit 불요).
+        self.term_backend = app.InProcessTermBackend.init(self.allocator, self.io, self.live_registry, self.runtime);
+
         // MARU_TRACE=<파일경로>: 라이브 trace 레코딩을 켠다. 파일을 열어(truncate) self 소유 file writer를 세우고,
         // 레코더가 이벤트마다 그 writer에 쓰고 flush한다(증분 append → 크래시 복원). 파일 생성 실패면 조용히 건너뛴다
         // (opt-in — graceful). 수명/최종 flush·sync·close는 deinit이 맡는다.
@@ -2781,8 +2807,9 @@ pub const AppSession = struct {
 
         // 첫 탭을 만든다 — Tab + 첫 panel(셸 PTY spawn + surface + runtime attach + pump) + tabs/surface_ptrs
         // append + app_window 갱신을 createTab이 한 묶음으로 한다(create/switch 후속도 같은 경로를 쓴다).
-        // Swift는 opaque handle만 보유하고 AppSession은 heap에 고정된다(LivePtySession reader가
-        // `&pane.rt.live_pty.reader`를 잡으므로 Pane도 heap-pin — createPane이 allocator.create로 띄운다).
+        // Swift는 opaque handle만 보유하고 AppSession은 heap에 고정된다(P2 seam: Term은 opaque handle로 runtime을
+        // 다루고, LivePtySession reader가 잡는 `&live_pty.reader`는 backend 내부에서 registry heap 슬롯이 고정한다 —
+        // Pane도 heap-pin이라 createPane이 allocator.create로 띄운다).
         var first_req = spawnRequest(spawn_config, self.loaded_config.config.term, self.loaded_config.config.shell, self.loaded_config.config.env, integ_dir, self.new_tab_ssh_bin);
         // launch cwd가 `/`인지 한 번 캐시(.app 더블클릭 home 승격용 — workspaceRootCwd가 매번 getcwd하지 않게).
         self.launch_cwd_is_root = detectLaunchCwdIsRoot(io);
@@ -5295,12 +5322,20 @@ pub const AppSession = struct {
         self.focusPane(tab.panes.items.len - 1);
     }
 
-    /// 한 Term(터미널)을 heap-pin(`create`)으로 만든다 — registry가 `LiveSurface` 번들 슬롯 소유 → 슬롯에 live_pty·surface
-    /// 제자리 init → runtime attach → pump. M3a: `surface`·`live_pty` 소유가 둘 다 앱 전역 `live_registry`의 번들 슬롯에
-    /// 있다(`create`가 안정 heap 슬롯) — reader가 잡는 `&live_pty.reader`·`&surface.core`를 그 슬롯이 고정한다. Term은 두
-    /// 필드를 포인터로 참조만 한다(surface_id·pty_id 발급=앱 전역 surface_ids). 부분 실패는 errdefer로 정리 — 슬롯 확보 뒤
-    /// live_pty/surface 각각의 in-place init 성공 플래그만큼 sub-deinit + `removeUninitialized`(번들 deinit=remove는 둘 다
-    /// inited 가정이라 부분 상태엔 못 씀). Pane에 거는 건 호출자(createPane/⌘T)가 한다.
+    /// P2 seam(docs/persistent-session-host.md §13 P2): 이 창의 terminal runtime 계약 표면. GUI는 이 backend에
+    /// opaque handle(`Term.rt.handle`)을 넘겨 spawn/attach/pump/close/terminate/observe를 수행하고 `*LivePtySession`을
+    /// 직접 만지지 않는다. backend는 참조만 드는 값이라 매번 만들어도 무해하고, 반환된 vtable의 ctx는
+    /// `&self.term_backend`(heap-pin AppSession)라 호출 스코프 안에서 안정적이다.
+    fn termBackend(self: *AppSession) app.TermRuntimeBackend {
+        return self.term_backend.backend();
+    }
+
+    /// 한 Term(터미널)을 만든다 — backend가 registry `LiveSurface` 번들 슬롯 소유 + live PTY spawn + surface init을
+    /// 한 단위로 하고(P2 seam), GUI에는 복구 가능한 `*Surface`와 opaque handle만 준다. M3a: `surface`·`live_pty` 소유가
+    /// 둘 다 앱 전역 `live_registry` 번들 슬롯에 있어(안정 heap 슬롯) reader가 잡는 `&live_pty.reader`·`&surface.core`를
+    /// 그 슬롯이 고정한다. Term은 surface를 포인터로 참조하고 runtime은 handle로 다룬다(surface_id·pty_id 발급=앱 전역
+    /// surface_ids). spawn 성공 후 이후 단계 실패는 `errdefer be.remove(id)`로 번들을 회수하고, spawn 자체 실패는 backend
+    /// 내부 2-pass 정리가 맡는다. Pane에 거는 건 호출자(createPane/⌘T)가 한다.
     fn createTerm(
         self: *AppSession,
         request: maru.pty.SpawnRequest,
@@ -5316,28 +5351,20 @@ pub const AppSession = struct {
         const id = self.surface_ids.next(); // 앱 전역 allocator에서 발급. surface_id·pty_id 동일 값(서로 다른 네임스페이스라 무방), 재사용 안 함
         var req = request;
         req.pane_id = id; // 컨트롤 플레인 self selector는 계속 surface.id
-        // M3a: surface·live_pty 소유를 앱 전역 registry의 `LiveSurface` 번들로. `create`가 안정 heap 슬롯을 잡아 Term은
-        // 그 두 필드 포인터만 든다 — reader가 잡는 `&live_pty.reader`·`&surface.core` 주소를 슬롯이 고정한다(Term-inline과
-        // 같은 heap-pin). generation=0으로 시작(M2a는 보존만 — respawn 시 증가는 미도입, §8 M0a). id는 앱 전역 유일이라
-        // 중복 등록 없음. 번들 내부 owned string(custom_name) 해제는 이 창 allocator를 슬롯에 실어 deinit이 흡수한다.
-        const slot = try self.live_registry.create(id, 0);
-        // 4e-1: LiveSurface는 union — terminal arm을 확정한 뒤 그 arm 필드(surface·live_pty)를 in-place init한다.
-        // (undefined 슬롯에 arm 태그를 먼저 심어야 아래 &slot.terminal.X가 활성 arm을 가리킨다.)
-        slot.* = .{ .terminal = .{ .internal_allocator = self.allocator } };
-        term.surface = &slot.terminal.surface; // 번들 슬롯 terminal arm의 surface를 참조(소유는 registry)
-        term.rt.live_pty = &slot.terminal.live_pty; // 같은 슬롯 terminal arm의 live_pty를 참조(두 포인터 = 한 슬롯)
-        // 부분 init 정리: live_pty/surface 각각 in-place init 성공 플래그로 갈라, 그만큼만 sub-deinit + removeUninitialized로
-        // 슬롯 메모리만 해제(deinit 없이). remove(=번들 deinit)는 둘 다 inited 가정이라 부분 상태엔 못 쓴다 —
-        // create/removeUninitialized 계약(live_surface_registry.zig)의 짝을 두 하위자원으로 확장.
-        var live_initialized = false;
-        var surface_initialized = false;
-        errdefer {
-            if (live_initialized) term.rt.live_pty.deinit();
-            if (surface_initialized) term.surface.deinit();
-            self.live_registry.removeUninitialized(id) catch {};
-        }
-        try term.rt.live_pty.init(self.io, self.allocator, id, req, queue_capacity);
-        live_initialized = true;
+        // P2 seam(docs/persistent-session-host.md §13 P2): terminal runtime 계약 backend로 spawn한다. backend가 앱 전역
+        // registry의 `LiveSurface` 번들 슬롯 생성 + live PTY spawn(live_pty.init) + surface init을 한 단위로(내부 2-pass
+        // 부분-init 정리 포함) 수행하고, GUI에는 복구 가능한 *Surface와 opaque handle(id)만 준다 — GUI는 `*LivePtySession`을
+        // 직접 안 든다. handle 값은 surface_id(=pty_id)와 같지만 backend에 되돌려 주는 불투명 handle로만 다룬다. reader가
+        // 잡는 `&live_pty.reader`·`&surface.core`는 backend 내부에서 registry heap 슬롯이 고정한다(heap-pin 유지 — Term-inline
+        // 시절과 같은 메커니즘). generation=0으로 시작. id는 앱 전역 유일이라 중복 등록 없음.
+        const be = self.termBackend();
+        const surface = try be.spawn(.{ .handle = id, .request = req, .size = size, .queue_capacity = queue_capacity });
+        // spawn 성공 후 이후 단계(config·attach·pump) 실패 시 번들 슬롯을 회수한다(backend.remove = 번들 deinit = live_pty
+        // reader join + surface.deinit + 슬롯 해제). spawn 자체 실패는 backend 내부 2-pass 정리(removeUninitialized)가
+        // 처리하므로 이 errdefer는 spawn 성공 후에만 등록돼 이후 단계 실패만 잡는다.
+        errdefer be.remove(id);
+        term.surface = surface; // backend가 init한 번들 슬롯 surface를 참조(소유는 registry)
+        term.rt.handle = id; // opaque runtime handle(= surface_id, in-process) — 이후 backend 호출의 라우팅 키
         term.rt.live_initialized = true;
         term.rt.spawned_at_ns = std.Io.Clock.awake.now(self.io).nanoseconds; // uptime(비정상 시작 사망 grace) 기준 시각
         // 비정상 시작 사망으로 held된 창에 새 셸이 뜨면 held를 풀어(re-arm), 이 새 세션이 정상 종료할 때 세션 종료
@@ -5351,8 +5378,9 @@ pub const AppSession = struct {
         }
         self.startup_held = false;
 
-        term.surface.* = try maru.session.Surface.init(self.allocator, id, size); // 번들 슬롯에 제자리 init
-        surface_initialized = true;
+        // config: backend가 돌려준 surface에 GUI가 표시 정책을 적용한다(config는 GUI layout 소유 — backend는 프로세스
+        // 수명만 안다). surface init 자체는 backend.spawn이 이미 했고, 모든 surface가 이 chokepoint를 첫 출력 전에
+        // 지나므로 arena 교체·palette 주입이 안전하다.
         // 스크롤백 cell arena를 mmap 기반 page_allocator로(§11 P4 — demand-commit + 콜드 OS swap + free 즉시 반납,
         // history > RAM). 이 chokepoint는 모든 live surface가 첫 출력 전(페이지 0개)에 지나므로 arena 교체가 안전하다.
         term.surface.core.setScrollbackArena(std.heap.page_allocator);
@@ -5373,13 +5401,14 @@ pub const AppSession = struct {
 
         // interactive 셸(login 래핑)만 리더 코어-처리를 켠다 — 렌더 tick에 안 묶여 OSC 응답이 즉시 나간다
         // (docs/io-render-threading.md PR3). controlled_smoke(login=false, 테스트)는 큐-드레인 유지.
-        _ = try term.rt.live_pty.attachSurface(self.runtime, term.surface, request.login); // term.surface는 이미 *Surface(번들 슬롯)
+        _ = try be.attach(id, request.login); // interactive(login)만 process_in_reader — 계약이 attachSurface로 위임
         // MARU_TRACE: 이 창의 trace 레코더를 방금 attach한 링크에 per-link로 붙인다(모든 surface spawn 단일 chokepoint —
         // 첫탭·⌘T·split·restore 다 여기). 앱-전역 runtime이라 창끼리 안 섞이도록 싱글톤이 아니라 링크별로 건다(리뷰 [0]).
         // recorder는 self 소유(안정 주소)라 링크가 든 포인터가 세션 내내 유효하다. 붙는 순간 초기 grid baseline resize 기록.
         if (self.trace_recorder != null) try self.runtime.setSurfaceTraceRecorder(term.surface.id, &self.trace_recorder.?);
         // pump를 **앱 전역 라우팅**에 바인딩(M3b) — 창을 옮겨도(M3d) surface_id 키드 라우팅이 그대로 유효하다(§8A.2).
-        term.rt.pump = term.rt.live_pty.pump(self.runtime);
+        // backend가 handle의 live PTY 이벤트 큐로 pump를 만든다(계약이 LivePtySession.pump로 위임).
+        term.rt.pump = try be.pump(id);
         return term;
     }
 
@@ -5414,13 +5443,13 @@ pub const AppSession = struct {
             // surface_id는 remove 실행 전에 읽는다(remove가 슬롯을 해제하므로 이후 term.surface deref 금지).
             self.live_registry.remove(surface_id) catch {};
         } else if (term.rt.live_initialized) {
-            // M3a: detach(runtime routing) 선행 → registry.remove가 번들 소유를 teardown(deinit=live_pty reader join →
-            // custom_name 해제 → surface.deinit → 슬롯 해제). remove는 surface_id로 키드 — Term은 슬롯을 참조만 하므로
-            // 소유 해제는 registry가 단일 출처로 한다. closeAndDetach가 reader를 먼저 join하므로(멱등) reader가 잡던
-            // `&surface.core`가 번들 deinit의 surface.deinit 순간까지 살아 있다. surface_id는 remove 실행 전에 읽는다
-            // (remove가 슬롯을 해제하므로 이후 term.surface deref 금지).
-            if (self.runtime_initialized) term.rt.live_pty.closeAndDetach(self.runtime);
-            self.live_registry.remove(surface_id) catch {};
+            // P2 seam: detach(runtime routing) 선행 → backend.remove가 번들 소유를 teardown(deinit=live_pty reader join →
+            // custom_name 해제 → surface.deinit → 슬롯 해제). backend 계약에 handle을 넘겨 수행하며, GUI는 `*LivePtySession`을
+            // 직접 만지지 않는다. closeAndDetach가 reader를 먼저 join하므로(멱등) reader가 잡던 `&surface.core`가 번들
+            // deinit의 surface.deinit 순간까지 살아 있다. handle(= surface_id)은 remove 실행 전에 읽었다(remove가 슬롯을
+            // 해제하므로 이후 term.surface/handle deref 금지).
+            if (self.runtime_initialized) self.termBackend().closeAndDetach(term.rt.handle);
+            self.termBackend().remove(term.rt.handle);
             term.rt.live_initialized = false;
         }
         // git 브랜치 캐시·auto_title(Term-owned)만 여기서 해제 — custom_name·surface는 번들 deinit이 소유한다(M3a §8A.1).
@@ -21459,12 +21488,12 @@ pub const AppSession = struct {
             for (tab.panes.items) |pane| {
                 for (pane.terms.items) |term| {
                     if (!term.rt.live_initialized or term.rt.terminated) continue; // 종료(미reap) Term은 건너뜀(dispatchBell과 동형)
-                    const pgid = if (observer_probe) term.rt.live_pty.session.foregroundProcessGroup() orelse 0 else term.rt.agent_observer_pgid;
+                    const pgid = if (observer_probe) (self.termBackend().foregroundProcessGroup(term.rt.handle) orelse 0) else term.rt.agent_observer_pgid;
                     const pgid_changed = observer_probe and pgid != term.rt.agent_observer_pgid;
                     if (observer_probe) term.rt.agent_observer_pgid = pgid;
                     if (periodic_kind_probe or pgid_changed) {
                         const prev = term.agent_kind;
-                        const process_count = term.rt.live_pty.session.foregroundProcessNames(&processes);
+                        const process_count = self.termBackend().foregroundProcessNames(term.rt.handle, &processes);
                         term.agent_kind = classifyAgentProcesses(processes[0..process_count]);
                         if (diag_gate.maruDebugEnabled()) std.log.scoped(.agentdiag).info("kind={s} pgid_changed={} live={} term=0x{x}", .{ @tagName(term.agent_kind), pgid_changed, term.rt.live_initialized, @intFromPtr(term) });
                         if (term.agent_kind != prev) {
@@ -21762,7 +21791,7 @@ pub const AppSession = struct {
                     if (ds.ended) |ended| {
                         if (terminationClosesWorkspace(ended)) {
                             if (!term.rt.terminated) {
-                                term.rt.live_pty.finishAfterTermination();
+                                self.termBackend().finishAfterTermination(term.rt.handle);
                                 term.rt.terminated = true;
                                 // 이 Term의 uptime(spawn→exit, ms) — 비정상 시작 사망 grace 판정(holdOnStartupExit)이 쓴다.
                                 // spawned_at_ns=0(미스탬프)이면 판정 생략(직전 값 유지 — 보수적).
@@ -22914,9 +22943,9 @@ pub const AppSession = struct {
             for (tab.panes.items) |pane| {
                 for (pane.terms.items) |term| {
                     if (term.rt.live_initialized and self.runtime_initialized) {
-                        term.rt.live_pty.closeAndDetach(self.runtime);
+                        self.termBackend().closeAndDetach(term.rt.handle);
                     } else if (term.rt.live_initialized) {
-                        term.rt.live_pty.close();
+                        self.termBackend().close(term.rt.handle);
                     }
                 }
             }
@@ -26101,7 +26130,7 @@ pub const AppSession = struct {
             for (tab.panes.items) |pane| {
                 for (pane.terms.items) |term| {
                     if (term.rt.live_initialized and self.runtime_initialized) {
-                        term.rt.live_pty.closeAndDetach(self.runtime);
+                        self.termBackend().closeAndDetach(term.rt.handle);
                     }
                 }
             }
@@ -34380,15 +34409,16 @@ test "M3a: 앱 전역 live registry를 모든 창(AppSession)이 공유 — surf
     try std.testing.expectEqual(s1.live_registry, s2.live_registry);
     try std.testing.expectEqual(&app_runtime.live_registry, s1.live_registry);
 
-    // 각 창의 첫 Term의 surface·런타임이 그 창의 surface_id로 registry 번들에 소유돼 있고, Term이 든 두 포인터가
-    // 번들 슬롯의 두 필드와 **동일**하다(소유는 registry, Term은 참조 — 이 단언이 M3a 배선을 못박는다).
+    // 각 창의 첫 Term의 surface·런타임이 그 창의 surface_id로 registry 번들에 소유돼 있고, Term은 surface 포인터(참조)와
+    // opaque runtime handle(P2 seam — live_pty 포인터 대신)을 든다. handle이 surface_id와 같아 registry 번들 슬롯을
+    // 찾는 키가 된다(소유는 registry, Term은 참조·handle — 이 단언이 M3a 배선 + P2 seam을 못박는다).
     const sid1 = s1.activeSurface().id;
     const sid2 = s2.activeSurface().id;
     try std.testing.expect(sid1 != sid2); // M0a: 앱 전역 유일
     const b1 = s1.live_registry.findBySurface(sid1).?; // *LiveSurface 번들 슬롯
     const b2 = s2.live_registry.findBySurface(sid2).?;
-    try std.testing.expectEqual(s1.activePane().activeTerm().rt.live_pty, &b1.terminal.live_pty);
-    try std.testing.expectEqual(s2.activePane().activeTerm().rt.live_pty, &b2.terminal.live_pty);
+    try std.testing.expectEqual(s1.activePane().activeTerm().rt.handle, sid1);
+    try std.testing.expectEqual(s2.activePane().activeTerm().rt.handle, sid2);
     // M3a 핵심: Term.surface가 이제 번들 슬롯의 surface를 가리킨다(Term-inline이 아니라 registry 소유).
     try std.testing.expectEqual(s1.activePane().activeTerm().surface, &b1.terminal.surface);
     try std.testing.expectEqual(s2.activePane().activeTerm().surface, &b2.terminal.surface);
@@ -34472,15 +34502,17 @@ test "M3a: 번들 이전 후에도 reader의 &live_pty.reader·&surface.core 주
     });
     defer session.deinit();
 
-    // 첫 Term(T0)의 번들 포인터·reader/surface embedded 주소·surface_id를 잡는다.
+    // 첫 Term(T0)의 번들 포인터·reader/surface embedded 주소·surface_id를 잡는다. P2 seam: Term은 live_pty 포인터
+    // 대신 opaque handle(= surface_id)을 들므로, 번들 슬롯 live_pty 주소는 registry 조회로 얻는다.
     const t0 = session.tabs.items[0].activePane().activeTerm();
-    const p0 = t0.rt.live_pty; // 번들 슬롯의 &live_pty(안정)
     const surface0 = t0.surface; // 번들 슬롯의 &surface(안정)
+    const sid0 = t0.surface.id;
+    const handle0 = t0.rt.handle; // opaque runtime handle(= surface_id, in-process)
+    const b0 = session.live_registry.findBySurface(sid0).?; // *LiveSurface 번들 슬롯
+    const p0 = &b0.terminal.live_pty; // 번들 슬롯의 &live_pty(안정) — registry 조회로 얻음(rt.live_pty 대신)
     const reader_addr0 = &p0.reader; // reader thread가 잡는 embedded 필드 주소 — 절대 이동 금지
     const core_addr0 = &surface0.core; // reader가 잡는 다른 바인딩(&surface.core) — 절대 이동 금지
-    const sid0 = t0.surface.id;
-    const b0 = session.live_registry.findBySurface(sid0).?; // *LiveSurface 번들 슬롯
-    try std.testing.expectEqual(p0, &b0.terminal.live_pty);
+    try std.testing.expectEqual(handle0, sid0); // P2: handle이 surface_id와 같아 registry 조회 키가 된다
     try std.testing.expectEqual(surface0, &b0.terminal.surface);
     try std.testing.expectEqual(before + 1, session.live_registry.count());
 
@@ -34511,7 +34543,7 @@ test "M3a: 번들 이전 후에도 reader의 &live_pty.reader·&surface.core 주
     try std.testing.expectEqual(surface0, &b0_after.terminal.surface);
     try std.testing.expectEqual(reader_addr0, &b0_after.terminal.live_pty.reader);
     try std.testing.expectEqual(core_addr0, &b0_after.terminal.surface.core);
-    try std.testing.expectEqual(p0, t0.rt.live_pty);
+    try std.testing.expectEqual(handle0, t0.rt.handle); // P2: handle 불변(등록 realloc에도)
     try std.testing.expectEqual(surface0, t0.surface);
     try std.testing.expectEqual(scrollback_before, b0_after.terminal.surface.core.scrollbackLen());
 
@@ -34559,9 +34591,10 @@ test "M3a: Term close가 registry 번들을 제거하고 남은 번들은 불변
     session.setSurfaceClosedCallback(&close_recorder, CloseRecorder.record);
 
     const keep = session.tabs.items[0].activePane().activeTerm();
-    const keep_ptr = keep.rt.live_pty; // 번들 슬롯의 &live_pty
     const keep_surface = keep.surface; // 번들 슬롯의 &surface
     const keep_sid = keep.surface.id;
+    const keep_handle = keep.rt.handle; // P2: opaque runtime handle(= surface_id) — live_pty 포인터 대신
+    const keep_ptr = &session.live_registry.findBySurface(keep_sid).?.terminal.live_pty; // 번들 슬롯 &live_pty(registry 조회)
 
     // 두 번째 워크스페이스(런타임)를 추가 → registry 소유 2개.
     _ = try session.createTab(
@@ -34585,7 +34618,7 @@ test "M3a: Term close가 registry 번들을 제거하고 남은 번들은 불변
     const keep_bundle = session.live_registry.findBySurface(keep_sid).?;
     try std.testing.expectEqual(keep_ptr, &keep_bundle.terminal.live_pty);
     try std.testing.expectEqual(keep_surface, &keep_bundle.terminal.surface);
-    try std.testing.expectEqual(keep_ptr, keep.rt.live_pty);
+    try std.testing.expectEqual(keep_handle, keep.rt.handle); // P2: handle 불변(다른 워크스페이스 close에도)
     try std.testing.expectEqual(keep_surface, keep.surface);
 }
 
@@ -34888,6 +34921,10 @@ const ReportCaptureCtx = struct {
 // M3b: `runtime`이 앱-전역 공유 포인터가 됐으므로(app_runtime.routing), `var session = undefined` 테스트는 공유 표를
 // 쓰지 않고 **테스트-로컬** SurfaceRuntime을 소유해야 한다(테스트 격리 + testing.allocator leak 검출). 호출자가
 // `var test_rt: app.SurfaceRuntime = undefined`를 스택에 두고 그 주소를 넘긴다 — session.runtime이 그 로컬을 가리킨다.
+//
+// **함정(P2 seam)**: 이 helper는 scroll/mouse/ime처럼 `session.runtime`만 직접 쓰는 테스트용이다. `session.term_backend`는
+// 배선하지 않으므로(undefined 유지), 이 helper로 세팅한 세션에서 `termBackend()`를 타는 경로(createTerm/destroyTerm/
+// close/pollAgentKinds)를 부르면 안 된다 — 그런 경로가 필요하면 `session.init`을 쓰는 실 세션 테스트를 만든다.
 fn attachTestRuntime(session: *AppSession, rt: *app.SurfaceRuntime, surface: *maru.session.Surface) !void {
     session.io = std.testing.io;
     rt.* = app.SurfaceRuntime.init(std.testing.allocator);
@@ -49994,7 +50031,8 @@ test "M3d-2a-i moveWorkspaceToSession: cross-window 무재시작(동일 *LiveSur
     const moved_surface = moved_term.surface; // *Surface(번들 슬롯 참조)
     const moved_id = moved_surface.id;
     const slot_before = src.live_registry.findBySurface(moved_id).?; // *LiveSurface(registry 소유 슬롯)
-    const live_pty_before = moved_term.rt.live_pty; // *LivePtySession(같은 슬롯 필드)
+    const moved_handle = moved_term.rt.handle; // P2: opaque runtime handle(= surface_id) — live_pty 포인터 대신
+    const live_pty_before = &slot_before.terminal.live_pty; // 슬롯 live_pty 주소(registry 조회)
     const entries_before = src.live_registry.entries.items.len;
 
     // 코어 스크롤백에 마커를 심어 이동이 터미널 상태를 보존하는지 본다(재생성이면 사라진다).
@@ -50024,7 +50062,8 @@ test "M3d-2a-i moveWorkspaceToSession: cross-window 무재시작(동일 *LiveSur
     const adopted_term = dst.tabs.items[1].activeTerm();
     const slot_after = dst.live_registry.findBySurface(moved_id).?;
     try std.testing.expectEqual(slot_before, slot_after);
-    try std.testing.expectEqual(live_pty_before, adopted_term.rt.live_pty);
+    try std.testing.expectEqual(live_pty_before, &slot_after.terminal.live_pty); // 슬롯 live_pty 주소 불변(registry 무변경)
+    try std.testing.expectEqual(moved_handle, adopted_term.rt.handle); // P2: 창을 옮겨도 handle 불변(무재시작)
     try std.testing.expectEqual(moved_surface, adopted_term.surface);
     try std.testing.expectEqual(entries_before, dst.live_registry.entries.items.len);
     // dst 대표 surface_ptr가 옮겨온 워크스페이스의 활성 surface(정합).

@@ -680,26 +680,30 @@ config와 숫자 이름의 recognized hook-event/session/transcript mapping을 �
 manifest가 같고 `.maru-backup`·`agent-hook-cleanup-v2`·신규/삭제 파일이 0이어야 한다.
 parent 또는 explicit base와 `env.*` upsert의 mapping env 회귀, live agent observer L2와 AppSession DTO 회귀도 자동 검증한다.
 
-### P2 — process 경계 없는 `TermRuntimeBackend` seam
+### P2 — process 경계 없는 `TermRuntimeBackend` seam ✅
 
-- 기존 in-process `AppRuntime.live_registry`를 `TermRuntimeBackend` 계약 뒤에 둔다.
-- terminal runtime action을 spawn/attach/input/resize/snapshot/terminate로 분리한다.
-- GUI layout이 `LivePtySession` 포인터를 직접 소유하지 않는 방향을 red test로 고정한다.
-- 아직 daemon을 띄우지 않고 제품 동작은 동일하다.
+완료. terminal runtime의 수명·입출력·관측을 `TermRuntimeBackend` 계약 뒤에 두었고, GUI layout(`TermRuntime`)은
+`*LivePtySession`을 직접 들지 않고 opaque `RuntimeHandle`과 계약만으로 spawn/attach/input/resize/pump/terminate/observe를
+수행한다. 아직 daemon은 없고 in-process 구현 하나만 있으며 제품 동작은 동일하다.
 
-큰 diff를 리뷰 가능하게 두 슬라이스로 나눈다(단계 자체는 P2 하나다 — 두 슬라이스가 끝나야 P2 완료).
+큰 diff를 리뷰 가능하게 두 슬라이스로 나눴다(단계 자체는 P2 하나).
 
-- **P2-a(seam 도입, 진행 중)**: terminal runtime의 수명·입출력·관측을 GUI layout에서 분리하는 vtable 계약
+- **P2-a(seam 도입) ✅**: terminal runtime의 수명·입출력·관측을 GUI layout에서 분리하는 vtable 계약
   `src/app/term_runtime_backend.zig`(`TermRuntimeBackend`·opaque `RuntimeHandle`·`SpawnParams`, 기존 `runtime.PtyIo`와
   같은 ctx+fn 관용구)와 그 in-process 구현 `src/app/in_process_term_backend.zig`(기존 `LiveSurfaceRegistry`+
-  `LivePtySession`+`SurfaceRuntime`을 감쌈)를 **추가만** 한다. `app_session`은 아직 안 바꾸고 제품 경로에 배선하지 않으므로
-  제품 동작은 byte-identical이다. fake backend가 non-macOS에서 spawn/attach/input/resize/terminate/late-event 계약을,
-  in-process adapter가 실 macOS PTY에서 같은 계약(spawn→attach→pump drain→종료→슬롯 회수, web arm 비대상)을 고정한다.
-- **P2-b(배선 전환, 후속)**: `app_session`의 `TermRuntime.live_pty: *LivePtySession` 직접 참조와 `.session.foregroundProcess*`
-  관통 접근을 `RuntimeHandle`+계약 호출로 전환하고, GUI layout이 `LivePtySession`을 더는 들지 않음을 red test로 고정한다.
-  `host.zig`/`FrameLoop`/`LivePtyRegistry.closeActive`는 단일-pane 시절 smoke/test 계약이라 프로덕션과 별개로 다룬다.
+  `LivePtySession`+`SurfaceRuntime`을 감쌈)를 추가했다. fake backend가 non-macOS에서
+  spawn/attach/input/resize/terminate/late-event 계약을, in-process adapter가 실 macOS PTY에서 같은 계약
+  (spawn→attach→pump drain→종료→슬롯 회수, web arm 비대상)을 고정한다.
+- **P2-b(배선 전환) ✅**: `app_session`의 `TermRuntime.live_pty: *LivePtySession` 직접 참조를 `handle: RuntimeHandle`로
+  바꾸고, createTerm(spawn/attach/pump)·destroyTerm/close/deinit(terminate)·pollAgentKinds(`foregroundProcess*` 관통 관측)를
+  전부 `AppSession.termBackend()`(= `InProcessTermBackend`) + handle 호출로 전환했다. `TermRuntime`에 `*LivePtySession`
+  필드가 없고 `handle`이 있음을 컴파일 타임 red test로 고정한다. web Term은 live PTY가 없어 계약 대상이 아니며(handle
+  미할당, `live_registry.remove` 직접 유지) terminal arm과 구분한다. cross-window 이동/재정렬 후에도 handle이 불변임을
+  테스트가 검증한다. `host.zig`/`FrameLoop`/`LivePtyRegistry.closeActive`는 단일-pane 시절 smoke/test 계약이라 손대지 않았다.
 
-종료 gate: 기존 PTY/input/resize/close 전체 회귀, backend fake의 attach/detach/late event 단위 테스트, boundary check.
+종료 gate: 기존 PTY/input/resize/close 전체 회귀(`test`·`test-pty`), backend fake의 attach/detach/late event 단위 테스트,
+GUI가 `*LivePtySession`을 안 드는 컴파일 타임 red test, boundary check. 실 `.app` headless 스크린샷으로 터미널 spawn·렌더
+·git/agent 관측 동일성도 확인했다.
 
 ### P3 — local host와 단일 GUI 재접속
 

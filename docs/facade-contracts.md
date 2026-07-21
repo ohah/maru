@@ -206,10 +206,12 @@ persistent-session P2의 seam이다. GUI layout(`session_model.Term`)이 termina
 - 미등록/web-arm handle의 attach/pump는 다른 runtime에 잘못 붙지 않고 거부된다.
 - in-process 구현이 실 PTY로 controlled command를 종료까지 몰고 슬롯을 누수 없이 회수한다(macOS opt-in).
 
+이미 배선됨(P2-b): `app_session`의 GUI layout(`TermRuntime`)이 `*LivePtySession` 대신 opaque `handle`을 들고, createTerm(spawn/attach/pump)·destroyTerm/close/deinit(terminate)·pollAgentKinds(`foregroundProcess*` 관통 관측)를 전부 `AppSession.termBackend()` + handle로 수행한다. `TermRuntime`에 `*LivePtySession` 필드가 없음을 컴파일 타임 test가 고정한다.
+
 아직 하지 않는다:
 
-- `app_session`을 이 계약으로 배선하는 것(P2-b). 현재 GUI(`TermRuntime.live_pty`)는 여전히 `*LivePtySession`을 직접 참조한다.
 - 원격 host transport(P3 `maru-sessiond`)와 snapshot/delta 스트림.
+- web surface를 이 계약으로 다루는 것(web arm은 PTY 없는 sentinel이라 대상 밖 — `live_registry` 직접 정리).
 
 ## `AppHost`
 

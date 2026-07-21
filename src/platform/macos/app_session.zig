@@ -36,7 +36,6 @@ const coretext_bridge = @import("coretext_smoke_bridge.zig");
 const coretext_frame_builder = @import("coretext_frame_builder.zig");
 const file_tree_backend = @import("file_tree_backend.zig");
 const file_tree_mutation_backend = @import("file_tree_mutation_backend.zig");
-const agent_hook_cleanup = @import("agent_hook_cleanup.zig"); // 구버전 Maru provider hook 1회 정리
 const metal_frame = renderer.metal_frame; // §8: metal_frame이 renderer로 이주 — maru.renderer barrel 경유(중립 frame DTO)
 const shell_integration = @import("shell_integration.zig");
 const global_hotkey = @import("global_hotkey.zig");
@@ -309,7 +308,7 @@ pub const abi_version: u32 = 139;
 // 출력 전체에 곱해 반투명 커서가 아래 본문 셀에 정확히 합성). app updateCursorBlink가 반주기 끝에서 1000→0·0→1000으로 램프해
 // (config cursor.blink-fade-ms, 주사율 무관 ms→tick) 하드 on/off 대신 부드럽게 잇는다. fade_milli==0이면 커서 pass 생략(옛 chop과
 // 동일). 텍스트 blink(SGR 5)·rename/검색 caret은 blink_visible 하드 토글 유지. 끝에 2필드/2인자 추가해 기존 offset·인자 순서 불변.
-// 94: MetalFrame.divider_thickness_px + maru_metal_renderer_draw 마지막 인자(pane divider 두께 — config split.divider-thickness pt를 scale_milli로 환산해 스탬프; renderer가 reserved 30 세로·31 가로 strip을 seam 중앙정렬·셀 clamp로 이 값 두께로 그린다. 활성 pane focus 테두리는 divider와 분리돼 reserved 2~5 셀 15% 유지). 겸사로 c351a19(자간 자연폭 셀당 2 quad) 회귀 수정: 배경 quad가 reserved=0으로 강제돼 divider·커서 bar/underline·SGR 밑줄(색을 background에 담은 sentinel strip)이 셀폭 블록으로 번지던 것을 reserved!=0 셀은 셀당 1 quad strip으로 되돌림. 끝에 1필드/1인자 추가해 기존 offset·인자 순서 불변. 90: request_app_quit + FrameSummary.quit_decision(끝에 1필드 추가 — 기존 offset 불변). Cmd+Q/메뉴/Dock 종료가 windowShouldClose를 안 거치므로 applicationShouldTerminate에서 request_app_quit으로 "maru를 종료할까요?" 확인 모달을 항상(실행 중 명령 무관) 띄우고 .terminateLater 반환; confirm 확정/취소가 quit_decision(0=대기·1=accepted·2=cancelled)에 latch되면 Swift가 NSApp.reply로 종료 진행/취소. 빨간 버튼 ended latch와 같은 tick 폴 패턴. docs/macos-app-host-boundary.md "닫기 확인". 89: url_at에 out_kind(0=url,1=file_path) 추가 — 파일 경로 링크를 Swift가 URL(fileURLWithPath:)로 열게(docs/link-detection.md). 88: key_hint_on_flags/on_timer/cancel(단축키 힌트 홀드 **상태머신**을 keyhint_hold.zig 순수 Zig로 이주 — 간헐 미표시 루트커즈[옛 Swift가 타이머 만료 시 NSEvent.modifierFlags라는 2번째 출처를 재읽기해 stale/빈 값에 트리거 유지여도 미표시] 수정. Swift는 flagsChanged·timer·keyDown/blur를 머신에 흘리고 반환 Action으로 타이머·redraw만; visible은 머신이 소유. set_key_hints 제거[머신이 toggle]. key_hints_config는 delay만 Swift가 씀). 87: set_key_hints + key_hints_config(단축키 힌트 HUD — KH-4). Swift flagsChanged가 트리거 모디파이어 단독 홀드(delay ms)를 감지하면 set_key_hints(1)로 각 chrome 요소 우상단에 단축키 배지를 켜고(markMetalNeedsRedraw 후 buildChromeOverlayPrep이 buildKeyHintBadges로 그림), 떼거나 다른 키·포커스 상실에 set_key_hints(0). key_hints_config는 enabled/delay/modifier(0=cmd,1=ctrl,2=opt)를 config에서 읽어 Swift에 준다(gesture 정책=Zig·타이머 clock=Swift). 패시브라 anyOverlayOpen 비포함(커서 blink·keyEquivalent 불변), 빌드 게이트에만 더함. export 2개 추가 — 구조체 offset 불변. 86: MetalFrame.sidebar_scroll_offset_px + maru_metal_renderer_draw 마지막 인자(사이드바 세로 스크롤 — 워크스페이스 카드가 헤더 아래 뷰포트를 넘으면 휠/트랙패드로 스무스 스크롤. 렌더러가 사이드바 셀 py_top에서 빼 카드를 위로 밀고 >0이면 [header_h, drawable_h] scissor로 헤더 위로 샌 카드를 자른다; GPU quad 밴드·tint는 host lowering이 같은 값으로 이미 빼 클립. 우측에 pane 스크롤바 동형 fade thumb. 끝에 1필드/1인자 추가해 기존 offset·인자 순서 불변). 85: take_command_catalog_dirty(커맨드 카탈로그 런타임 재빌드 신호 — keybind rebind/unbind·reload·reset이 rebuildCommandCatalog로 카탈로그를 다시 빌드하며 command_catalog_dirty를 세우면 Swift가 tick마다 drain해 1이면 buildMainMenu로 메뉴바 keyEquivalent를 다시 깐다. reset은 확인 모달-확정 후 tick에서 갱신되므로 동기 호출이 아니라 이 신호가 단일 경로 — 인앱 rebind·멀티창 활성 세션도 커버. take_global_hotkeys_dirty와 같은 1회성, 끝에 export 추가 — 구조체 offset 불변). 84: MetalFrame.modal_clip_x/y/w/h_px(모달 오버레이 px 클리핑 인프라 — chrome draw.Op.clip을 lowering이 OverlayRaster.clip_rect로 모으면 렌더러가 모달 셀 draw에 setScissorRect 적용; w==0=클리핑 없음[기존 동작]. 부분 카드 픽셀 스크롤[알림 패널 등] 재사용 인프라, 컴포넌트 적용은 후속. 끝에 4필드 추가해 구조체 offset 불변). 83: take_color_sample_request + provide_sampled_color(HSV picker `i` 스포이드 → Swift가 NSColorSampler[OS 화면 색 추출기]를 열고 사용자가 고른 화면 픽셀 RGB를 picker에 반영. Zig가 color_sample_pending을 세우고 Swift가 tick마다 take_color_sample_request로 drain해 1이면 NSColorSampler.show[비동기], 콜백에서 provide_sampled_color[r,g,b u32]로 되돌린다 → settings.setPickerRgb로 pick h/s/v 반영. file-pick take/provide 패턴이나 provide가 비동기 콜백. 끝에 export 2개 추가 — 구조체 offset 불변). 82: take_global_hotkeys_dirty(글로벌 핫키 라이브 OS 재등록 — 세팅 GUI 녹음/해제[rebind/unbind]·reload·reset이 global_hotkeys를 다시 빌드하고 dirty를 세우면 Swift가 tick마다 drain해 1이면 unregisterGlobalHotkeys 후 registerGlobalHotkeys로 새 descriptor를 OS에 재등록. global_hotkeys getter는 그대로 재사용. take_bell류 1회성, 끝에 export 추가 — 구조체 offset 불변). 81: take_file_pick_request + provide_picked_file(세팅 window.background-image 행 활성 → 파일 선택창. Zig가 file_pick_pending을 세우고 Swift가 tick마다 take_file_pick_request로 drain해 1이면 NSOpenPanel[PNG]을 열어 고른 절대경로를 provide_picked_file로 되돌린다 → Zig가 setText + 라이브 반영 + dirty. OSC52 read take/provide와 같은 패턴, 끝에 export 2개 추가 — 구조체 offset 불변). 80: any_overlay_open getter(세팅 등 chrome 오버레이/녹음 열림 — Swift performKeyEquivalent가 1이면 메뉴바 keyEquivalent를 양보해 ⌘조합을 keyDown→handleKeyEvent 모달/녹음 가드로 보낸다. 순수 read getter, 구조체 offset 불변). 79: window_blur_radius(config window.blur getter — 창 뒤 데스크톱 배경 블러 반경 px. window.opacity>=1이면 0[불투명 창=블러 안 보임]. 블러는 GPU 아니라 OS 창 속성이라 host가 적용: macOS=CGSSetWindowBackgroundBlurRadius[Ghostty·Terminal.app 비공개 CGS], Win=DwmSetWindowAttribute·Linux=컴포지터 속성[추후]. 게이트 정책은 Zig 단일 출처[windowBlurRadius], 순수 read getter라 구조체 offset 불변). 78: pending_notification에 surface_id_out·foreground_out 추가 + activate_surface(u32 found) export — 데스크톱 알림(OSC 9/777·에이전트 완료) 클릭 시 발신 surface로 점프. Swift가 알림 userInfo에 (창 토큰, surface_id)를 실어, 클릭 시 토큰으로 창/세션을 고르고 surface_id를 activate_surface로 넘기면 Zig가 activateSurfaceById(switchTab→focusPaneByPtr→focusTerm 순서 단일 출처)로 활성화. id는 세션-로컬·재사용 안 함이라 stale 안전. foreground_out=전면 배너 여부(에이전트 완료=1, OSC=0 전면이면 목록만) → willPresent가 자기 화면 알림 노이즈 억제. 끝에 export 1개 추가 + pending_notification 시그니처 확장 — 구조체 offset 불변. 77: set_system_appearance(theme.follow-system — Swift가 macOS NSAppearance light/dark를 생성 직후·변경마다 알려주고, follow-system이 켜져 있으면 Zig가 theme.preset-light/dark 색 세트로 라이브 교체(write-back 없음). 끝에 export 추가, 구조체 offset 불변). 76: take_bell_badge(bell.dock-badge — dispatchBell이 BEL+언포커스 시 bell_badge_pending을 세우고 Swift가 tick마다 drain해 NSApp.dockTile.badgeLabel ● 표시, 포커스 복귀 시 Swift가 지움. take_bell과 같은 1회성 export 추가. 시각 벨 bell.visual은 GpuQuad라 ABI 무변). 75: OSC 52 read(input.osc52.read=allow|deny — take_clipboard_read_request[정책 게이트, allow면 1]·provide_clipboard_read[Swift가 읽은 클립보드 바이트 → base64 OSC 52 응답을 요청 surface PTY로]. 코어는 `?` 쿼리 파싱만, 정책·실제 클립보드 읽기는 platform. deny 기본=탈취 방지. 끝에 export 2개 추가 — 구조체 offset 불변). 74: take_clipboard_action(input.right-click=paste·menu의 OS 클립보드 1회성 동작 — Zig가 우클릭/터미널 메뉴에서 pending_clipboard_action을 세우고 Swift가 tick마다 take_clipboard_action으로 drain해 0=무동작/1=copy(copySelectionToPasteboard)/2=paste(pastePasteboardText) 실행. 클립보드는 OS 소유라 Swift 실행, "언제"는 Zig 결정. take_bell과 같은 1회성 패턴, 끝에 export 추가 — 구조체 offset 불변). 73: option_as_meta(config input.option-as-meta getter — Swift keyDown이 읽어 Option-단독 키를 입력기 조합 경로로 보낼지[false] meta 인코딩 경로로 보낼지[true=현행] 가른다. 순수 read getter, 구조체 offset 불변). 72: take_mouse_hide(타이핑 중 마우스 숨김 — config input.mouse-hide-while-typing. handleKeyEvent가 .terminal_input 글자 입력 시 mouse_hide_pending을 켜고, Swift가 tick마다 take_mouse_hide로 drain해 NSCursor.setHiddenUntilMouseMoves(true) 호출. 복원은 다음 마우스 이동에서 AppKit 자동. take_bell과 같은 1회성 export 추가 — 기존 구조 불변). 71: hover/url_at의 cmd_held(bool) → mods(i32 xterm 비트: shift=4·alt=8·ctrl=16·cmd=32) — URL 클릭/hover 수식키를 config input.url-click-modifier로(기본 command=현행 Cmd). modifier 판정을 Zig 단일 출처(urlModifierHeld)로 이주 — Swift는 NSEvent 수식키를 비트로 변환만(네이티브 최소·이식성). url_at에 mods 인자 추가(안 맞으면 len 0=일반 클릭). 70: MetalFrame.window_opacity_milli(window.opacity 배경 투명도 × 1000 → 화면 clear color alpha; default 배경/기본 배경 셀만 투명, 명시적 배경색 셀은 불투명 유지 — iTerm2/Ghostty background-opacity 모델. Swift가 metal layer/NSWindow도 opacity<1이면 비불투명으로. 셰이더·셀 불변. 끝에 추가해 기존 offset 불변). 69: drop_image(클립보드 이미지 Cmd+V → maru ssh 원격이면 control socket 업로드 후 원격 경로 paste[1], 로컬이면 무처리[0]; 바이트 직접+pasted-<pid>-N.png 이름 — 스크린샷 over SSH). 68: drop_files(드래그앤드롭 파일 경로 NUL 구분 → maru ssh 원격 세션이면 각 파일을 control socket으로 백그라운드 업로드 후 원격 절대경로 paste, 로컬이면 경로 셸 이스케이프 paste; 분기는 Zig handleDroppedFiles. Swift는 fileURL 드롭일 때만 호출, 웹 URL·텍스트는 paste_text 유지 — 이미지 드롭 over SSH 3단계, docs/ssh-integration.md §4). 67: paste_text.escape_each(드래그/붙여넣기 파일 경로·URL의 셸 이스케이프 메커니즘을 Swift host에서 Zig로 이주 — escape_each!=0이면 bytes를 NUL 구분 토큰으로 보고 각 토큰을 셸 이스케이프 후 공백 join; 평문·Cmd+V 웹 URL은 0=raw. "무엇을 이스케이프할지"는 pasteboard 타입에 묶여 host가 정하고, 메커니즘은 Zig가 단일 출처 — 네이티브 레이어 최소화 정책). 66: MetalFrame.titlebar_strip_px(상단 타이틀바 띠 높이 — 렌더러가 접힘 펼치기 토글 ◧ 글리프를 이 띠 [0, titlebar_strip_px] 안에 세로 중앙 배치해 신호등과 정렬; 펼침 헤더 아이콘은 terminal_origin_x_px>0이라 영향 없음. 끝에 추가해 기존 offset 불변). 65: request_window_close(빨간 닫기 버튼/창 단위 닫기에 실행 중 명령이 있으면 Zig가 확인 모달을 열고 deferred(1) 반환 — Swift windowShouldClose가 false로 보류; 확정 시 tick session-ended가 창을 닫음. iTerm2/Terminal.app/Ghostty의 "running process 닫기 확인" 관례. in-app 닫기(close_tab/close_term 액션·사이드바/탭바 ✕)는 ABI 없이 requestClose가 같은 모달을 띄움). 64: is_window_drag_region(사이드바 헤더 빈 영역 hit-test — Swift가 1이면 네이티브 타이틀바처럼 창 이동 performDrag·더블클릭 확대 zoom; MaruMetalTerminalView.mouseDownCanMoveWindow=false로 콘텐츠 자동 드래그를 끈 뒤 이 영역만 드래그). 63: take_sidebar_config_dirty(view options ⚙ 메뉴에서 사이드바 표시 토글 show-branch/show-folder를 바꾸면 dirty 신호 — Swift가 tick마다 drain해 serialize_sidebar_config를 config 파일에 atomic write; take_bell과 같은 1회성 신호). 62: MetalFrame.sidebar_header_height_px(사이드바 상단 헤더 — 검색바·view options·새 워크스페이스 아이콘 — 높이; 렌더러가 사이드바 셀 밴드·카드 glyph를 이만큼 아래로 민다). 61: serialize_sidebar_config(view options 사이드바 토글 show-branch/show-folder → config 파일 부분 갱신 저장, 주석 보존; 앱↔config 양방향). 60: reset_input_modes(Reset 메뉴 ⌘⇧R — ssh 비정상 종료 후 잔류 입력 모드 focus 1004·mouse·kitty keyboard만 끄는 비파괴 리셋; 셸 통합 precmd 자동 리셋의 수동 백업 경로). 59: mouse_moved(버튼 없는 hover 이동 → mouse reporting; DECSET 1003 any-event일 때만 Zig가 SGR/x10 motion 리포트, click/wheel과 같은 reportMouse 경로). 58: send_text 제거 — 드래그 삽입을 paste 경로(pasteText→encodePaste; DECSET 2004 켜졌을 때만 bracketed)로 되돌림. Ghostty도 드래그를 completeClipboardPaste로 보내 TUI가 2004를 켜면 bracketed paste라 경로를 한-덩어리([Image])로 인식한다 — v57에서 직접 입력으로 바꾼 게 Ghostty와 어긋나 그 인식이 깨졌던 것을 정정. 57: send_text 도입(드래그 직접 입력 — v58에서 되돌림). 56: reload_config/reset_defaults(Reload Config·Reset to Defaults 메뉴 — 재시작 없이 config 파일 재로드 / 통합 리셋 확인 모달 후 전체 기본값+config 파일 덮어쓰기). 55: SessionConfig.width_px/height_px/scale_milli(셸을 처음부터 실제 창 크기로 spawn — 80×24→resize 핸드셰이크/zsh PROMPT_EOL_MARK % 잔상 제거). 54: config_path(Open Config 메뉴 — config 파일 경로 노출, Swift가 열기). 53: take_bell(G12 BEL → 시스템 벨 NSSound.beep). 52: pending_notification(OSC 9/777 데스크톱 알림 drain — VT 갭 G2e platform wiring). 51: MetalFrame.terminal_bg(OSC 11 배경 set → 화면 clear color — VT 갭 G2d). 50: pending_clipboard(OSC 52 클립보드 쓰기 drain — VT 갭 G2b platform wiring). 49: MetalFrame.live_image_ids(kitty graphics K4c 텍스처 eviction). 48: MetalFrame.gpu_images/image_uploads/image_pixels(kitty graphics K2 이미지 렌더 채널). 47: KeyEvent.base_codepoint(kitty CSI u base-layout key). 46: mouse.button/mods(mouse reporting — 8b). 45: focus_changed(DECSET 1004 focus reporting → CSI I/O). 44: scroll_wheel.delta_x(트랙패드 가로 → 탭 바 스크롤). 43: MetalFrame.modal_cells_start(모달 over quad 경계 — C4b 모달). 42: GpuQuad.layer. 41: gpu_quads/gpu_shadows. 40: show_notice
+// 94: MetalFrame.divider_thickness_px + maru_metal_renderer_draw 마지막 인자(pane divider 두께 — config split.divider-thickness pt를 scale_milli로 환산해 스탬프; renderer가 reserved 30 세로·31 가로 strip을 seam 중앙정렬·셀 clamp로 이 값 두께로 그린다. 활성 pane focus 테두리는 divider와 분리돼 reserved 2~5 셀 15% 유지). 겸사로 c351a19(자간 자연폭 셀당 2 quad) 회귀 수정: 배경 quad가 reserved=0으로 강제돼 divider·커서 bar/underline·SGR 밑줄(색을 background에 담은 sentinel strip)이 셀폭 블록으로 번지던 것을 reserved!=0 셀은 셀당 1 quad strip으로 되돌림. 끝에 1필드/1인자 추가해 기존 offset·인자 순서 불변. 90: request_app_quit + FrameSummary.quit_decision(끝에 1필드 추가 — 기존 offset 불변). Cmd+Q/메뉴/Dock 종료가 windowShouldClose를 안 거치므로 applicationShouldTerminate에서 request_app_quit으로 "maru를 종료할까요?" 확인 모달을 항상(실행 중 명령 무관) 띄우고 .terminateLater 반환; confirm 확정/취소가 quit_decision(0=대기·1=accepted·2=cancelled)에 latch되면 Swift가 NSApp.reply로 종료 진행/취소. 빨간 버튼 ended latch와 같은 tick 폴 패턴. docs/macos-app-host-boundary.md "닫기 확인". 89: url_at에 out_kind(0=url,1=file_path) 추가 — 파일 경로 링크를 Swift가 URL(fileURLWithPath:)로 열게(docs/link-detection.md). 88: key_hint_on_flags/on_timer/cancel(단축키 힌트 홀드 **상태머신**을 keyhint_hold.zig 순수 Zig로 이주 — 간헐 미표시 루트커즈[옛 Swift가 타이머 만료 시 NSEvent.modifierFlags라는 2번째 출처를 재읽기해 stale/빈 값에 트리거 유지여도 미표시] 수정. Swift는 flagsChanged·timer·keyDown/blur를 머신에 흘리고 반환 Action으로 타이머·redraw만; visible은 머신이 소유. set_key_hints 제거[머신이 toggle]. key_hints_config는 delay만 Swift가 씀). 87: set_key_hints + key_hints_config(단축키 힌트 HUD — KH-4). Swift flagsChanged가 트리거 모디파이어 단독 홀드(delay ms)를 감지하면 set_key_hints(1)로 각 chrome 요소 우상단에 단축키 배지를 켜고(markMetalNeedsRedraw 후 buildChromeOverlayPrep이 buildKeyHintBadges로 그림), 떼거나 다른 키·포커스 상실에 set_key_hints(0). key_hints_config는 enabled/delay/modifier(0=cmd,1=ctrl,2=opt)를 config에서 읽어 Swift에 준다(gesture 정책=Zig·타이머 clock=Swift). 패시브라 anyOverlayOpen 비포함(커서 blink·keyEquivalent 불변), 빌드 게이트에만 더함. export 2개 추가 — 구조체 offset 불변. 86: MetalFrame.sidebar_scroll_offset_px + maru_metal_renderer_draw 마지막 인자(사이드바 세로 스크롤 — 워크스페이스 카드가 헤더 아래 뷰포트를 넘으면 휠/트랙패드로 스무스 스크롤. 렌더러가 사이드바 셀 py_top에서 빼 카드를 위로 밀고 >0이면 [header_h, drawable_h] scissor로 헤더 위로 샌 카드를 자른다; GPU quad 밴드·tint는 host lowering이 같은 값으로 이미 빼 클립. 우측에 pane 스크롤바 동형 fade thumb. 끝에 1필드/1인자 추가해 기존 offset·인자 순서 불변). 85: take_command_catalog_dirty(커맨드 카탈로그 런타임 재빌드 신호 — keybind rebind/unbind·reload·reset이 rebuildCommandCatalog로 카탈로그를 다시 빌드하며 command_catalog_dirty를 세우면 Swift가 tick마다 drain해 1이면 buildMainMenu로 메뉴바 keyEquivalent를 다시 깐다. reset은 확인 모달-확정 후 tick에서 갱신되므로 동기 호출이 아니라 이 신호가 단일 경로 — 인앱 rebind·멀티창 활성 세션도 커버. take_global_hotkeys_dirty와 같은 1회성, 끝에 export 추가 — 구조체 offset 불변). 84: MetalFrame.modal_clip_x/y/w/h_px(모달 오버레이 px 클리핑 인프라 — chrome draw.Op.clip을 lowering이 OverlayRaster.clip_rect로 모으면 렌더러가 모달 셀 draw에 setScissorRect 적용; w==0=클리핑 없음[기존 동작]. 부분 카드 픽셀 스크롤[알림 패널 등] 재사용 인프라, 컴포넌트 적용은 후속. 끝에 4필드 추가해 구조체 offset 불변). 83: take_color_sample_request + provide_sampled_color(HSV picker `i` 스포이드 → Swift가 NSColorSampler[OS 화면 색 추출기]를 열고 사용자가 고른 화면 픽셀 RGB를 picker에 반영. Zig가 color_sample_pending을 세우고 Swift가 tick마다 take_color_sample_request로 drain해 1이면 NSColorSampler.show[비동기], 콜백에서 provide_sampled_color[r,g,b u32]로 되돌린다 → settings.setPickerRgb로 pick h/s/v 반영. file-pick take/provide 패턴이나 provide가 비동기 콜백. 끝에 export 2개 추가 — 구조체 offset 불변). 82: take_global_hotkeys_dirty(글로벌 핫키 라이브 OS 재등록 — 세팅 GUI 녹음/해제[rebind/unbind]·reload·reset이 global_hotkeys를 다시 빌드하고 dirty를 세우면 Swift가 tick마다 drain해 1이면 unregisterGlobalHotkeys 후 registerGlobalHotkeys로 새 descriptor를 OS에 재등록. global_hotkeys getter는 그대로 재사용. take_bell류 1회성, 끝에 export 추가 — 구조체 offset 불변). 81: take_file_pick_request + provide_picked_file(세팅 window.background-image 행 활성 → 파일 선택창. Zig가 file_pick_pending을 세우고 Swift가 tick마다 take_file_pick_request로 drain해 1이면 NSOpenPanel[PNG]을 열어 고른 절대경로를 provide_picked_file로 되돌린다 → Zig가 setText + 라이브 반영 + dirty. OSC52 read take/provide와 같은 패턴, 끝에 export 2개 추가 — 구조체 offset 불변). 80: any_overlay_open getter(세팅 등 chrome 오버레이/녹음 열림 — Swift performKeyEquivalent가 1이면 메뉴바 keyEquivalent를 양보해 ⌘조합을 keyDown→handleKeyEvent 모달/녹음 가드로 보낸다. 순수 read getter, 구조체 offset 불변). 79: window_blur_radius(config window.blur getter — 창 뒤 데스크톱 배경 블러 반경 px. window.opacity>=1이면 0[불투명 창=블러 안 보임]. 블러는 GPU 아니라 OS 창 속성이라 host가 적용: macOS=CGSSetWindowBackgroundBlurRadius[Ghostty·Terminal.app 비공개 CGS], Win=DwmSetWindowAttribute·Linux=컴포지터 속성[추후]. 게이트 정책은 Zig 단일 출처[windowBlurRadius], 순수 read getter라 구조체 offset 불변). 78: pending_notification에 surface_id_out·foreground_out 추가 + activate_surface(u32 found) export — 데스크톱 알림(OSC 9/777) 클릭 시 발신 surface로 점프. Swift가 알림 userInfo에 (창 토큰, surface_id)를 실어, 클릭 시 토큰으로 창/세션을 고르고 surface_id를 activate_surface로 넘기면 Zig가 activateSurfaceById(switchTab→focusPaneByPtr→focusTerm 순서 단일 출처)로 활성화. id는 세션-로컬·재사용 안 함이라 stale 안전. foreground_out=전면 배너 여부(현재 보지 않는 OSC=1, 현재 surface OSC=0 전면이면 목록만) → willPresent가 자기 화면 알림 노이즈 억제. 끝에 export 1개 추가 + pending_notification 시그니처 확장 — 구조체 offset 불변. 77: set_system_appearance(theme.follow-system — Swift가 macOS NSAppearance light/dark를 생성 직후·변경마다 알려주고, follow-system이 켜져 있으면 Zig가 theme.preset-light/dark 색 세트로 라이브 교체(write-back 없음). 끝에 export 추가, 구조체 offset 불변). 76: take_bell_badge(bell.dock-badge — dispatchBell이 BEL+언포커스 시 bell_badge_pending을 세우고 Swift가 tick마다 drain해 NSApp.dockTile.badgeLabel ● 표시, 포커스 복귀 시 Swift가 지움. take_bell과 같은 1회성 export 추가. 시각 벨 bell.visual은 GpuQuad라 ABI 무변). 75: OSC 52 read(input.osc52.read=allow|deny — take_clipboard_read_request[정책 게이트, allow면 1]·provide_clipboard_read[Swift가 읽은 클립보드 바이트 → base64 OSC 52 응답을 요청 surface PTY로]. 코어는 `?` 쿼리 파싱만, 정책·실제 클립보드 읽기는 platform. deny 기본=탈취 방지. 끝에 export 2개 추가 — 구조체 offset 불변). 74: take_clipboard_action(input.right-click=paste·menu의 OS 클립보드 1회성 동작 — Zig가 우클릭/터미널 메뉴에서 pending_clipboard_action을 세우고 Swift가 tick마다 take_clipboard_action으로 drain해 0=무동작/1=copy(copySelectionToPasteboard)/2=paste(pastePasteboardText) 실행. 클립보드는 OS 소유라 Swift 실행, "언제"는 Zig 결정. take_bell과 같은 1회성 패턴, 끝에 export 추가 — 구조체 offset 불변). 73: option_as_meta(config input.option-as-meta getter — Swift keyDown이 읽어 Option-단독 키를 입력기 조합 경로로 보낼지[false] meta 인코딩 경로로 보낼지[true=현행] 가른다. 순수 read getter, 구조체 offset 불변). 72: take_mouse_hide(타이핑 중 마우스 숨김 — config input.mouse-hide-while-typing. handleKeyEvent가 .terminal_input 글자 입력 시 mouse_hide_pending을 켜고, Swift가 tick마다 take_mouse_hide로 drain해 NSCursor.setHiddenUntilMouseMoves(true) 호출. 복원은 다음 마우스 이동에서 AppKit 자동. take_bell과 같은 1회성 export 추가 — 기존 구조 불변). 71: hover/url_at의 cmd_held(bool) → mods(i32 xterm 비트: shift=4·alt=8·ctrl=16·cmd=32) — URL 클릭/hover 수식키를 config input.url-click-modifier로(기본 command=현행 Cmd). modifier 판정을 Zig 단일 출처(urlModifierHeld)로 이주 — Swift는 NSEvent 수식키를 비트로 변환만(네이티브 최소·이식성). url_at에 mods 인자 추가(안 맞으면 len 0=일반 클릭). 70: MetalFrame.window_opacity_milli(window.opacity 배경 투명도 × 1000 → 화면 clear color alpha; default 배경/기본 배경 셀만 투명, 명시적 배경색 셀은 불투명 유지 — iTerm2/Ghostty background-opacity 모델. Swift가 metal layer/NSWindow도 opacity<1이면 비불투명으로. 셰이더·셀 불변. 끝에 추가해 기존 offset 불변). 69: drop_image(클립보드 이미지 Cmd+V → maru ssh 원격이면 control socket 업로드 후 원격 경로 paste[1], 로컬이면 무처리[0]; 바이트 직접+pasted-<pid>-N.png 이름 — 스크린샷 over SSH). 68: drop_files(드래그앤드롭 파일 경로 NUL 구분 → maru ssh 원격 세션이면 각 파일을 control socket으로 백그라운드 업로드 후 원격 절대경로 paste, 로컬이면 경로 셸 이스케이프 paste; 분기는 Zig handleDroppedFiles. Swift는 fileURL 드롭일 때만 호출, 웹 URL·텍스트는 paste_text 유지 — 이미지 드롭 over SSH 3단계, docs/ssh-integration.md §4). 67: paste_text.escape_each(드래그/붙여넣기 파일 경로·URL의 셸 이스케이프 메커니즘을 Swift host에서 Zig로 이주 — escape_each!=0이면 bytes를 NUL 구분 토큰으로 보고 각 토큰을 셸 이스케이프 후 공백 join; 평문·Cmd+V 웹 URL은 0=raw. "무엇을 이스케이프할지"는 pasteboard 타입에 묶여 host가 정하고, 메커니즘은 Zig가 단일 출처 — 네이티브 레이어 최소화 정책). 66: MetalFrame.titlebar_strip_px(상단 타이틀바 띠 높이 — 렌더러가 접힘 펼치기 토글 ◧ 글리프를 이 띠 [0, titlebar_strip_px] 안에 세로 중앙 배치해 신호등과 정렬; 펼침 헤더 아이콘은 terminal_origin_x_px>0이라 영향 없음. 끝에 추가해 기존 offset 불변). 65: request_window_close(빨간 닫기 버튼/창 단위 닫기에 실행 중 명령이 있으면 Zig가 확인 모달을 열고 deferred(1) 반환 — Swift windowShouldClose가 false로 보류; 확정 시 tick session-ended가 창을 닫음. iTerm2/Terminal.app/Ghostty의 "running process 닫기 확인" 관례. in-app 닫기(close_tab/close_term 액션·사이드바/탭바 ✕)는 ABI 없이 requestClose가 같은 모달을 띄움). 64: is_window_drag_region(사이드바 헤더 빈 영역 hit-test — Swift가 1이면 네이티브 타이틀바처럼 창 이동 performDrag·더블클릭 확대 zoom; MaruMetalTerminalView.mouseDownCanMoveWindow=false로 콘텐츠 자동 드래그를 끈 뒤 이 영역만 드래그). 63: take_sidebar_config_dirty(view options ⚙ 메뉴에서 사이드바 표시 토글 show-branch/show-folder를 바꾸면 dirty 신호 — Swift가 tick마다 drain해 serialize_sidebar_config를 config 파일에 atomic write; take_bell과 같은 1회성 신호). 62: MetalFrame.sidebar_header_height_px(사이드바 상단 헤더 — 검색바·view options·새 워크스페이스 아이콘 — 높이; 렌더러가 사이드바 셀 밴드·카드 glyph를 이만큼 아래로 민다). 61: serialize_sidebar_config(view options 사이드바 토글 show-branch/show-folder → config 파일 부분 갱신 저장, 주석 보존; 앱↔config 양방향). 60: reset_input_modes(Reset 메뉴 ⌘⇧R — ssh 비정상 종료 후 잔류 입력 모드 focus 1004·mouse·kitty keyboard만 끄는 비파괴 리셋; 셸 통합 precmd 자동 리셋의 수동 백업 경로). 59: mouse_moved(버튼 없는 hover 이동 → mouse reporting; DECSET 1003 any-event일 때만 Zig가 SGR/x10 motion 리포트, click/wheel과 같은 reportMouse 경로). 58: send_text 제거 — 드래그 삽입을 paste 경로(pasteText→encodePaste; DECSET 2004 켜졌을 때만 bracketed)로 되돌림. Ghostty도 드래그를 completeClipboardPaste로 보내 TUI가 2004를 켜면 bracketed paste라 경로를 한-덩어리([Image])로 인식한다 — v57에서 직접 입력으로 바꾼 게 Ghostty와 어긋나 그 인식이 깨졌던 것을 정정. 57: send_text 도입(드래그 직접 입력 — v58에서 되돌림). 56: reload_config/reset_defaults(Reload Config·Reset to Defaults 메뉴 — 재시작 없이 config 파일 재로드 / 통합 리셋 확인 모달 후 전체 기본값+config 파일 덮어쓰기). 55: SessionConfig.width_px/height_px/scale_milli(셸을 처음부터 실제 창 크기로 spawn — 80×24→resize 핸드셰이크/zsh PROMPT_EOL_MARK % 잔상 제거). 54: config_path(Open Config 메뉴 — config 파일 경로 노출, Swift가 열기). 53: take_bell(G12 BEL → 시스템 벨 NSSound.beep). 52: pending_notification(OSC 9/777 데스크톱 알림 drain — VT 갭 G2e platform wiring). 51: MetalFrame.terminal_bg(OSC 11 배경 set → 화면 clear color — VT 갭 G2d). 50: pending_clipboard(OSC 52 클립보드 쓰기 drain — VT 갭 G2b platform wiring). 49: MetalFrame.live_image_ids(kitty graphics K4c 텍스처 eviction). 48: MetalFrame.gpu_images/image_uploads/image_pixels(kitty graphics K2 이미지 렌더 채널). 47: KeyEvent.base_codepoint(kitty CSI u base-layout key). 46: mouse.button/mods(mouse reporting — 8b). 45: focus_changed(DECSET 1004 focus reporting → CSI I/O). 44: scroll_wheel.delta_x(트랙패드 가로 → 탭 바 스크롤). 43: MetalFrame.modal_cells_start(모달 over quad 경계 — C4b 모달). 42: GpuQuad.layer. 41: gpu_quads/gpu_shadows. 40: show_notice
 pub const default_queue_capacity: u32 = 16;
 
 /// 전역(OS) 단축키 한 개의 OS 등록 기술자(C ABI). Swift가 `maru_macos_app_session_global_hotkeys`로
@@ -856,14 +855,14 @@ fn workspaceLabel(tab: *Tab) []const u8 {
 
 /// 데스크톱 알림 제목에 붙일 **위치 라벨** — 알림이 온 워크스페이스(탭)와 Term(surface/pane)을 `탭 › 팬`으로 조립한다
 /// (사용자 요청: 배너엔 앱 아이콘만 떠 소스 구분이 안 되니 어느 탭·어느 팬에서 왔는지 제목에서 바로 식별). 단일 출처는
-/// 여기다 — 에이전트 완료(enqueueAgentCompletion)·OSC 9/777(drainOscNotificationFrom) 두 발화 지점이 공유한다.
+/// 여기다 — OSC 9/777 drain 경로가 모든 발신 surface에 공통으로 사용한다.
 /// workspaceLabel(탭)과 termLabel(Term)이 **같으면**(단일 Term 탭·custom_name 없음 등 workspaceLabel이 그 Term 라벨로
 /// 폴백) 중복이라 **하나만** 쓴다 — 단일 워크스페이스·단일 Term 사용자는 예전 제목과 동일하게 보인다. `›`(U+203A)는
 /// 계층(탭⊃팬) 구분, `·`(U+00B7)는 상위 구분자로 알림 전체에서 일관되게 쓴다. 두 라벨은 borrowed(auto_title=메인
 /// 스레드 캐시·custom_name=세션 소유·surface.title=정적, reader 미접근)라 즉시 buf로 복사한다 — 반환 슬라이스는
 /// buf(호출자 스택) 또는 borrowed pane 라벨을 가리켜 호출자의 즉시 소비(allocPrint/dupe)까지 유효(수명 의존 없음).
 /// buf가 모자라면(NoSpaceLeft) 팬 라벨만 돌려준다(알림 제목은 어차피 OS가 말줄임 — 위치보다 팬이 더 구체적).
-/// 호출자 스택 버퍼 크기 단일 출처(두 발화 지점이 같은 상한을 쓰게) — 512는 대다수 라벨을 담고도 남으며,
+/// 호출자 스택 버퍼 크기 단일 출처(모든 OSC drain 경로가 같은 상한을 쓰게) — 512는 대다수 라벨을 담고도 남으며,
 /// 넘치면 위 fallback으로 팬 라벨만 담긴다.
 const notification_location_buf_len = 512;
 fn notificationLocation(buf: []u8, tab: *Tab, term: *const Term) []const u8 {
@@ -1193,14 +1192,13 @@ const AgentKind = maru.session.session_model.AgentKind;
 
 /// 인앱 알림 센터에 보관하는 알림 한 건(owned title/body). OSC 9/777이 pendingNotification()으로
 /// 드레인하는 단일 funnel에서 push된다. surface_id로 클릭 시 그 터미널로 점프(activateSurfaceById). timestamp_ns는
-/// 상대시간("N분 전") 표시용, is_read=목록에서 클릭하면 true(안읽음 점/배지 계산), is_agent=에이전트/OSC 구분.
+/// 상대시간("N분 전") 표시용, is_read=목록에서 클릭하면 true(안읽음 점/배지 계산).
 const NotificationHistoryItem = struct {
     title: []u8,
     body: []u8,
     surface_id: u64,
     timestamp_ns: i128,
     is_read: bool = false,
-    is_agent: bool = false,
 };
 
 // 알림 히스토리 보관 상한(ring)은 config `notifications.history-limit`(기본 64, 8~512)가 단일 출처다 —
@@ -2704,8 +2702,6 @@ pub const AppSession = struct {
         // init 끝에 free하지 않고 보관한다(새 탭 Cmd+T spawn에도 필요) — deinit에서 푼다. 바로 store해
         // 이후 init 실패도 errdefer self.deinit()가 정리하게 한다.
         self.new_tab_zdotdir = integ_dir;
-        // 구버전 Maru가 user config에 남긴 provider hook을 marker 기반으로 한 번만 정리한다. 실패는 다음 시작에 재시도.
-        agent_hook_cleanup.cleanupOnce(io, allocator);
         // opt-in ssh 라우팅(`shell-integration.ssh`): 통합 .zshenv가 로드될 때(integ_dir != null = zsh 통합)만
         // ssh() 함수가 정의되므로 그때만 의미가 있다. 켜졌으면 현재 maru 실행 파일 경로를 잡아 두고 spawn 때
         // MARU_BIN/MARU_SSH_INTEGRATION으로 주입한다(같은 바이너리가 `maru ssh`를 처리 — main.zig). 경로
@@ -5575,7 +5571,7 @@ pub const AppSession = struct {
     }
 
     /// surface.id로 그 surface가 속한 (탭, panel, Term)을 찾아 그 자리로 활성화한다(찾으면 true). 데스크톱 알림
-    /// (OSC 9/777·에이전트 완료) 클릭이 발신 터미널로 점프하는 단일 경로다 — Swift가 알림 식별자의 (창 토큰,
+    /// OSC 9/777 클릭이 발신 터미널로 점프하는 단일 경로다 — Swift가 알림 식별자의 (창 토큰,
     /// surface_id)에서 토큰으로 올바른 창(세션)을 고른 뒤, 이 세션에 surface_id만 넘긴다(surface.id는 이제 앱 전역
     /// surface_ids로 발급돼 창 간 유일하다 — M0a. 창 토큰은 id 충돌 방지용 복합키가 아니라 대상 창을 빠르게 고르는
     /// 위치 메타데이터고, 세션 내 (탭·panel·Term) 역조회는 Zig가 분담한다).
@@ -9190,7 +9186,7 @@ pub const AppSession = struct {
             var seed: usize = std.fmt.parseInt(usize, std.mem.span(cv), 10) catch 3;
             if (seed == 0) seed = 3;
             var i: usize = 0;
-            while (i < seed) : (i += 1) _ = self.pushNotificationHistory("Maru", "에이전트 작업 완료 — 빌드 통과", 0, true);
+            while (i < seed) : (i += 1) _ = self.pushNotificationHistory("Maru", "빌드 알림 예시", 0);
             if (!self.sidebar_collapsed) self.toggleSidebarCollapsed();
         }
         // MARU_OPEN_NOTIFICATIONS=N — 첫 frame에 테스트 알림 N개(미설정/0→2)를 시드하고 알림 패널을 연다(헤더 밴드·
@@ -9199,7 +9195,7 @@ pub const AppSession = struct {
             var seed: usize = std.fmt.parseInt(usize, std.mem.span(nv), 10) catch 2;
             if (seed == 0) seed = 2;
             var i: usize = 0;
-            while (i < seed) : (i += 1) _ = self.pushNotificationHistory("Maru", "에이전트 작업 완료 — 빌드 통과", 0, true);
+            while (i < seed) : (i += 1) _ = self.pushNotificationHistory("Maru", "빌드 알림 예시", 0);
             self.openNotificationPanel();
             // MARU_NOTIF_HOVER=K — 위에서 시드한 카드 K에 마우스 호버 강조(tab_hover_bg)를 건 채로 연다. 호버는 마우스
             // 이동(hoverCursor→hitTest)으로만 갱신돼 헤드리스 스크린샷 하니스로는 재현이 안 되므로, 호버 카드 색을 self-verify
@@ -17050,7 +17046,7 @@ pub const AppSession = struct {
     }
 
     pub fn focusChanged(self: *AppSession, gained: bool) void {
-        self.window_focused = gained; // 완료 알림: 포커스 창의 활성 탭만 "보고 있는" 것으로 친다.
+        self.window_focused = gained; // OSC 전면 표시와 커서 렌더에서 포커스 창의 활성 탭만 "보고 있는" 것으로 친다.
         if (!gained) self.cancelPointerGesture();
         // 포커스 변화는 PTY와 무관한 시각 변화다(cursor.unfocused가 window_focused로 커서 모드를 정한다) — frame 빌드가
         // metal_dirty 게이트(idle tick은 빌드 생략) 뒤에 있어 여기서 dirty를 안 세우면 출력 없는 셸에선 Cmd+Tab 후에도
@@ -19342,7 +19338,7 @@ pub const AppSession = struct {
         const title = std.fmt.bufPrint(&title_buf, "새 버전 {s} 사용 가능", .{self.update_tag_buf[0..len]}) catch "새 버전 사용 가능";
         // push가 성공했을 때만 처리 완료로 표시한다 — 일시적 할당 실패면 update_notified를 남겨 다음 tick에
         // 재시도(알림 유실 방지). 안내 문구는 설치 출처에 맞춘다(아래 updateUpgradeHint).
-        if (self.pushNotificationHistory(title, self.updateUpgradeHint(), 0, false)) self.update_notified = true;
+        if (self.pushNotificationHistory(title, self.updateUpgradeHint(), 0)) self.update_notified = true;
     }
 
     /// 설치 출처별 업그레이드 안내 문구(distribution.md). 실행 파일 경로가 brew(Cellar/homebrew)면 brew
@@ -19883,9 +19879,9 @@ pub const AppSession = struct {
         // OSC 9/777: 발신 surface의 코어가 자기 시퀀스를 파싱한다(reader 스레드가 core_mutex 아래 적용). 예전엔
         // activeSurface().core만 drain해 **비활성 pane/Term이 보낸 OSC 알림이 영영 안 나왔다** — 모든 Term의 코어를
         // 훑어 첫 pending을 그 surface.id로 실어 보낸다(클릭이 발신 Term으로 점프, activateSurfaceById). 한 호출에
-        // 하나씩 drain하므로 여러 surface가 동시에 pending이면 다음 tick들에 이어 나온다(에이전트 큐 drain과 같은 결).
+        // 하나씩 drain하므로 여러 surface가 동시에 pending이면 다음 tick들에 이어 나온다.
         // 전면 배너 결정용: 사용자가 지금 그 안에 있는 Term(포커스 창의 활성 탭·pane·Term). 발신 Term이 이것이면 OSC
-        // 배너를 전면에서 억제(목록만), 그 외 background pane/가로탭/비활성 탭이면 전면에서도 배너(에이전트 is_current 대칭).
+        // 배너를 전면에서 억제(목록만), 그 외 background pane/가로탭/비활성 탭이면 전면에서도 배너를 띄운다.
         const focused_term: ?*Term = if (self.window_focused) self.activeTab().activePane().activeTerm() else null;
         for (self.tabs.items) |tab| {
             for (tab.panes.items) |pane| {
@@ -19903,10 +19899,10 @@ pub const AppSession = struct {
     /// (pendingNotification 반환 슬라이스는 코어 메모리를 가리켜, 락 없이 들고 dupe하면 reader가 clearNotification으로
     /// 비우는 사이 torn read가 난다 — focusedTermCwd와 같은 함정). 반환 슬라이스는 self.notification_*_out 소유라
     /// 락 밖에서도 유효하다. config notifications.osc=false면 pending만 비우고(다음 tick 재발화 방지) null — 호출 루프가
-    /// 다음 surface로 넘어가 모든 pending을 정리한다(종류별 on/off를 발화 지점에서 단일하게 막는 정책, 에이전트와 대칭).
-    /// dupe 실패도 pending을 비우고 null(best-effort). 인앱 히스토리에도 dupe 보관한다(OSC라 is_agent=false).
+    /// 다음 surface로 넘어가 모든 pending을 정리한다(종류별 on/off를 발화 지점에서 단일하게 막는 정책).
+    /// dupe 실패도 pending을 비우고 null(best-effort). 인앱 히스토리에도 dupe 보관한다.
     /// `focused_term`=지금 보고 있는 그 Term(없으면 null=창 비포커스) — 발신 Term이 이것이면 foreground_banner=false
-    /// (전면에서 자기 화면 노이즈 억제, 목록만), 그 외면 true(전면이어도 배너). 에이전트 완료 is_current 게이트와 대칭.
+    /// (전면에서 자기 화면 노이즈 억제, 목록만), 그 외면 true(전면이어도 배너).
     /// `tab`=발신 Term이 속한 워크스페이스(호출부 pendingNotification의 tabs 루프에서 넘김) — 제목 위치 접두용.
     fn drainOscNotificationFrom(self: *AppSession, tab: *Tab, term: *Term, focused_term: ?*Term) ?PendingNotification {
         term.surface.lockCore(self.io);
@@ -19924,7 +19920,7 @@ pub const AppSession = struct {
             self.allocator.free(self.notification_body_out);
             self.notification_body_out = &.{};
         }
-        // 제목에 **위치(탭 › 팬)**를 접두해 어느 터미널에서 온 알림인지 보인다(에이전트 완료와 대칭). OSC가 준 title이
+        // 제목에 **위치(탭 › 팬)**를 접두해 어느 터미널에서 온 알림인지 보인다. OSC가 준 title이
         // 있으면 `위치 · title`, OSC 9처럼 title이 없으면 위치만. body는 앱 메시지 그대로. 포맷/dupe 실패면 그 알림은
         // 버린다(best-effort, 코어 pending은 비운다). 위치 라벨은 lockCore 밖 메인 스레드 상태(auto_title/custom_name/
         // surface.title)만 읽어 코어 락과 무관하다(pending.title/body만 코어 메모리 — 락 아래에서 소비).
@@ -19948,16 +19944,16 @@ pub const AppSession = struct {
         // 발신 Term이 지금 보고 있는 그 Term이면 전면 배너 억제(목록만), 그 외(background pane/가로탭/비활성 탭)면 배너.
         const fg_banner = !(focused_term != null and term == focused_term.?);
         // 코어 락을 든 채지만 pushNotificationHistory는 코어를 안 만져(히스토리 ring + alloc) 데드락이 없다.
-        _ = self.pushNotificationHistory(self.notification_title_out, self.notification_body_out, osc_surface_id, false);
+        _ = self.pushNotificationHistory(self.notification_title_out, self.notification_body_out, osc_surface_id);
         return .{ .title = self.notification_title_out, .body = self.notification_body_out, .surface_id = osc_surface_id, .foreground_banner = fg_banner };
     }
 
     /// 인앱 알림 센터 히스토리에 한 건 보관한다(title/body dupe — pendingNotification이 드레인하는 owned 버퍼와
     /// 소유권이 겹치지 않게 복사한다). 상한(config notifications.history-limit) 초과면 가장 오래된 걸 버리고, 그게 안
-    /// 읽음이면 unread를 보정한다. dupe/append 실패는 best-effort로 버린다(알림 보관은 부가 기능 — enqueueAgentCompletion 규율).
+    /// 읽음이면 unread를 보정한다. dupe/append 실패는 best-effort로 버린다(알림 보관은 부가 기능).
     /// 알림을 인앱 센터에 추가하고 성공하면 true. 할당 실패(title/body dup·append)면 false를 돌려준다 —
     /// drainUpdateCheck가 이 결과로 "성공했을 때만" 1회 가드를 닫아 일시적 실패 시 재시도하게 한다.
-    fn pushNotificationHistory(self: *AppSession, title: []const u8, body: []const u8, surface_id: u64, is_agent: bool) bool {
+    fn pushNotificationHistory(self: *AppSession, title: []const u8, body: []const u8, surface_id: u64) bool {
         const title_dup = self.allocator.dupe(u8, title) catch return false;
         const body_dup = self.allocator.dupe(u8, body) catch {
             self.allocator.free(title_dup);
@@ -19975,7 +19971,6 @@ pub const AppSession = struct {
             .surface_id = surface_id,
             .timestamp_ns = @as(i128, std.Io.Clock.awake.now(self.io).nanoseconds),
             .is_read = false,
-            .is_agent = is_agent,
         }) catch {
             self.allocator.free(title_dup);
             self.allocator.free(body_dup);
@@ -24633,8 +24628,8 @@ pub const AppSession = struct {
             for (path_lines.items) |l| self.allocator.free(l);
             path_lines.deinit(self.allocator);
         }
-        // 상태줄(4번째 줄): 에이전트 포그라운드일 때만 — running이면 "● 진행중", idle이면 "✓ {답변}"(완료 답변
-        // 미리보기). none/unknown이면 ""(그 줄 생략). 아이콘 펄스와 함께 진행 상태를 보여준다(docs/agent-session.md).
+        // 상태줄(4번째 줄): 에이전트 포그라운드일 때만 — running/blocked/idle/unknown을 짧은 상태 문구로 표시한다.
+        // provider 답변이나 완료 의미를 추측하지 않는다. none이면 ""라 그 줄을 생략한다(docs/agent-session.md).
         var status_lines: std.ArrayList([]const u8) = .empty;
         defer {
             for (status_lines.items) |l| self.allocator.free(l);
@@ -24802,7 +24797,7 @@ pub const AppSession = struct {
         // 이 i로 슬롯을 인코딩·비교하므로 도메인이 일치한다(SG3c). 헤더 row는 위 루프가 close_row를 안 세워 ✕가 안 붙는다.
         var draw_list = try coretext_frame_builder.buildSidebarDrawList(self.allocator, names.items, branch_lines.items, path_lines.items, status_lines.items, agents.items, pins.items, sidebar_cols, fg, close_row, null, active_row, active_fg, editing_row);
         // 에이전트 아이콘(✶ claude / ◆ codex)과 상태줄 running 스피너(이퀄라이저 바 ▁~█)에 **브랜드색**을 입힌다 — claude=Anthropic 코랄,
-        // codex=OpenAI 청록. 종류를 색으로 구분하고, **진행/완료는 상태줄**(running=이퀄라이저 파형[브랜드색]·idle=✓)이 담당한다
+        // codex=OpenAI 청록. 종류를 색으로 구분하고, **관측 상태는 상태줄**(running=이퀄라이저 파형[브랜드색]·idle=✓ 대기중)이 담당한다
         // (옛 아이콘 밝기 펄스는 폐기 — 아래 루프는 아이콘·스피너 모두 솔리드 브랜드색). 색은 `term.agent_kind` 단일 출처로 고른다.
         // **오염 방지**: 아이콘은 gutter `col 0` + 합성 codepoint로 좁히고, 스피너는 **상태줄(카드 마지막 줄)**에만 색칠한다 —
         // 워크스페이스 이름/브랜치/경로 줄(line_index<line_count-1)에 블록 글자가 들어가도 안 오염(code-review high #2).
@@ -24819,8 +24814,8 @@ pub const AppSession = struct {
             // 셀 row에서 표시 슬롯 인덱스를 디코드(row=slot*sidebar_line_base+줄offset, 줄offset<base라 아이콘/스피너 같은 슬롯).
             const slot = c.row / coretext_frame_builder.sidebar_line_base; // = card_kinds/card_running 인덱스(조립 순서와 동일)
             if (slot >= card_kinds.items.len) continue;
-            // 스피너 색칠은 **어느 Term이든 running일 때만** — idle 카드의 답변 미리보기('✓ {답변}')가 같은 상태줄 row에 블록/막대
-            // 글자(스파크라인·progress bar 등)를 담아도 브랜드색 오염 안 되게(넓힌 블록 게이트 부작용 차단, code-review high). 아이콘은 상태 무관 솔리드.
+            // 스피너 색칠은 **어느 Term이든 running일 때만** — idle/blocked/unknown 상태 문구에 블록 글자가 우연히 있어도
+            // 브랜드색으로 오염되지 않게 한다(넓힌 블록 게이트 부작용 차단, code-review high). 아이콘은 상태 무관 솔리드.
             if (is_spinner and !card_running.items[slot]) continue;
             const brand = agentBrandColor(card_kinds.items[slot]) orelse continue; // kind=none(이름 글자 등) — 색칠 안 함.
             // 아이콘·스피너 모두 **솔리드 브랜드색**(running 펄스 폐기). 작업 중 애니메이션은 상태줄 파형이 담당, 아이콘은 종류/presence.
@@ -26390,6 +26385,191 @@ fn processStateCode(state: maru.session.ProcessState) u32 {
 
 fn boolCode(value: bool) u32 {
     return if (value) 1 else 0;
+}
+
+const ProviderFixtureEntry = struct { name: []const u8, kind: std.Io.File.Kind };
+
+fn expectProviderFixtureEntries(io: std.Io, base: []const u8, expected: []const ProviderFixtureEntry) !void {
+    var dir = try std.Io.Dir.cwd().openDir(io, base, .{ .iterate = true });
+    defer dir.close(io);
+    var seen: usize = 0;
+    var it = dir.iterate();
+    while (try it.next(io)) |entry| {
+        var matched = false;
+        for (expected) |want| {
+            if (!std.mem.eql(u8, entry.name, want.name)) continue;
+            try std.testing.expectEqual(want.kind, entry.kind);
+            matched = true;
+            break;
+        }
+        try std.testing.expect(matched);
+        seen += 1;
+    }
+    try std.testing.expectEqual(expected.len, seen);
+}
+
+extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
+extern "c" fn unsetenv(name: [*:0]const u8) c_int;
+
+test "provider files remain unchanged across AppSession.init" {
+    if (builtin.os.tag != .macos or std.c.getenv("MARU_TEST_PROVIDER_NO_MUTATION") == null) return error.SkipZigTest;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const a = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const env_names = [_][:0]const u8{ "HOME", "CLAUDE_CONFIG_DIR", "CODEX_HOME", "XDG_CONFIG_HOME", "MARU_CONFIG" };
+    var env_before: [env_names.len]?[:0]u8 = .{null} ** env_names.len;
+    defer {
+        for (env_names, env_before) |name, old| {
+            if (old) |value| {
+                _ = setenv(name.ptr, value.ptr, 1);
+                a.free(value);
+            } else {
+                _ = unsetenv(name.ptr);
+            }
+        }
+    }
+    for (env_names, &env_before) |name, *slot| {
+        if (std.c.getenv(name.ptr)) |raw| slot.* = try a.dupeZ(u8, std.mem.span(raw));
+    }
+    try tmp.dir.createDirPath(io, "home");
+    try tmp.dir.createDirPath(io, "claude");
+    try tmp.dir.createDirPath(io, "codex");
+    try tmp.dir.createDirPath(io, "xdg/maru/agent-sessions");
+
+    const marker_command = "if [ -n \\\"$MARU_AGENT_MAPPING_ID\\\" ]; then key=\\\"$MARU_AGENT_MAPPING_ID\\\"; else key=\\\"$MARU_PANE_ID\\\"; fi; cat > \\\"/tmp/agent-sessions/$key\\\" # MARU_AGENT_MAP_HOOK_V2";
+    const provider_config = "{\"hooks\":{\"Stop\":[{\"hooks\":[{\"command\":\"" ++ marker_command ++ "\"}]}]}}";
+    const mapping_42 = "{\"hook_event_name\":\"Stop\",\"session_id\":\"legacy\"}";
+    const mapping_77 = "{\"hook_event_name\":\"SessionStart\",\"transcript_path\":\"/tmp/legacy.jsonl\"}";
+    try tmp.dir.writeFile(io, .{ .sub_path = "claude/settings.json", .data = provider_config });
+    try tmp.dir.writeFile(io, .{ .sub_path = "codex/hooks.json", .data = provider_config });
+    try tmp.dir.writeFile(io, .{ .sub_path = "xdg/maru/agent-sessions/42", .data = mapping_42 });
+    try tmp.dir.writeFile(io, .{ .sub_path = "xdg/maru/agent-sessions/77", .data = mapping_77 });
+
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
+    const home = try std.fmt.allocPrintSentinel(a, "{s}/home", .{root}, 0);
+    defer a.free(home);
+    const claude = try std.fmt.allocPrintSentinel(a, "{s}/claude", .{root}, 0);
+    defer a.free(claude);
+    const codex = try std.fmt.allocPrintSentinel(a, "{s}/codex", .{root}, 0);
+    defer a.free(codex);
+    const xdg = try std.fmt.allocPrintSentinel(a, "{s}/xdg", .{root}, 0);
+    defer a.free(xdg);
+    const config = try std.fmt.allocPrintSentinel(a, "{s}/missing-config", .{root}, 0);
+    defer a.free(config);
+    try std.testing.expectEqual(@as(c_int, 0), setenv("HOME", home.ptr, 1));
+    try std.testing.expectEqual(@as(c_int, 0), setenv("CLAUDE_CONFIG_DIR", claude.ptr, 1));
+    try std.testing.expectEqual(@as(c_int, 0), setenv("CODEX_HOME", codex.ptr, 1));
+    try std.testing.expectEqual(@as(c_int, 0), setenv("XDG_CONFIG_HOME", xdg.ptr, 1));
+    try std.testing.expectEqual(@as(c_int, 0), setenv("MARU_CONFIG", config.ptr, 1));
+
+    var session: AppSession = undefined;
+    try session.init(io, a, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    session.deinit();
+
+    const claude_after = try tmp.dir.readFileAlloc(io, "claude/settings.json", a, .limited(4096));
+    defer a.free(claude_after);
+    const codex_after = try tmp.dir.readFileAlloc(io, "codex/hooks.json", a, .limited(4096));
+    defer a.free(codex_after);
+    const mapping_42_after = try tmp.dir.readFileAlloc(io, "xdg/maru/agent-sessions/42", a, .limited(4096));
+    defer a.free(mapping_42_after);
+    const mapping_77_after = try tmp.dir.readFileAlloc(io, "xdg/maru/agent-sessions/77", a, .limited(4096));
+    defer a.free(mapping_77_after);
+    try std.testing.expectEqualStrings(provider_config, claude_after);
+    try std.testing.expectEqualStrings(provider_config, codex_after);
+    try std.testing.expectEqualStrings(mapping_42, mapping_42_after);
+    try std.testing.expectEqualStrings(mapping_77, mapping_77_after);
+    try expectProviderFixtureEntries(io, root, &.{
+        .{ .name = "home", .kind = .directory },
+        .{ .name = "claude", .kind = .directory },
+        .{ .name = "codex", .kind = .directory },
+        .{ .name = "xdg", .kind = .directory },
+    });
+    try expectProviderFixtureEntries(io, home, &.{});
+    try expectProviderFixtureEntries(io, claude, &.{.{ .name = "settings.json", .kind = .file }});
+    try expectProviderFixtureEntries(io, codex, &.{.{ .name = "hooks.json", .kind = .file }});
+    try expectProviderFixtureEntries(io, xdg, &.{.{ .name = "maru", .kind = .directory }});
+    const maru_dir = try std.fmt.allocPrint(a, "{s}/maru", .{xdg});
+    defer a.free(maru_dir);
+    try expectProviderFixtureEntries(io, maru_dir, &.{.{ .name = "agent-sessions", .kind = .directory }});
+    const mapping_dir = try std.fmt.allocPrint(a, "{s}/maru/agent-sessions", .{xdg});
+    defer a.free(mapping_dir);
+    try expectProviderFixtureEntries(io, mapping_dir, &.{
+        .{ .name = "42", .kind = .file },
+        .{ .name = "77", .kind = .file },
+    });
+
+    // 같은 계약을 explicit override가 전혀 없는 기본 HOME 경로에서도 검증한다. 옛 cleanup은 이 두 경로를 별도로
+    // 계산했으므로 한 쪽만 막으면 실제 사용자 기본 설정이 여전히 수정되는 false-green이 된다.
+    try tmp.dir.createDirPath(io, "fallback-home/.claude");
+    try tmp.dir.createDirPath(io, "fallback-home/.codex");
+    try tmp.dir.createDirPath(io, "fallback-home/.config/maru/agent-sessions");
+    try tmp.dir.writeFile(io, .{ .sub_path = "fallback-home/.claude/settings.json", .data = provider_config });
+    try tmp.dir.writeFile(io, .{ .sub_path = "fallback-home/.codex/hooks.json", .data = provider_config });
+    try tmp.dir.writeFile(io, .{ .sub_path = "fallback-home/.config/maru/agent-sessions/42", .data = mapping_42 });
+    try tmp.dir.writeFile(io, .{ .sub_path = "fallback-home/.config/maru/agent-sessions/77", .data = mapping_77 });
+    const fallback_home = try std.fmt.allocPrintSentinel(a, "{s}/fallback-home", .{root}, 0);
+    defer a.free(fallback_home);
+    const fallback_config = try std.fmt.allocPrintSentinel(a, "{s}/fallback-home/missing-config", .{root}, 0);
+    defer a.free(fallback_config);
+    try std.testing.expectEqual(@as(c_int, 0), setenv("HOME", fallback_home.ptr, 1));
+    try std.testing.expectEqual(@as(c_int, 0), unsetenv("CLAUDE_CONFIG_DIR"));
+    try std.testing.expectEqual(@as(c_int, 0), unsetenv("CODEX_HOME"));
+    try std.testing.expectEqual(@as(c_int, 0), unsetenv("XDG_CONFIG_HOME"));
+    try std.testing.expectEqual(@as(c_int, 0), setenv("MARU_CONFIG", fallback_config.ptr, 1));
+
+    var fallback_session: AppSession = undefined;
+    try fallback_session.init(io, a, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    fallback_session.deinit();
+
+    try expectProviderFixtureEntries(io, fallback_home, &.{
+        .{ .name = ".claude", .kind = .directory },
+        .{ .name = ".codex", .kind = .directory },
+        .{ .name = ".config", .kind = .directory },
+    });
+    const fallback_claude = try std.fmt.allocPrint(a, "{s}/.claude", .{fallback_home});
+    defer a.free(fallback_claude);
+    try expectProviderFixtureEntries(io, fallback_claude, &.{.{ .name = "settings.json", .kind = .file }});
+    const fallback_codex = try std.fmt.allocPrint(a, "{s}/.codex", .{fallback_home});
+    defer a.free(fallback_codex);
+    try expectProviderFixtureEntries(io, fallback_codex, &.{.{ .name = "hooks.json", .kind = .file }});
+    const fallback_config_root = try std.fmt.allocPrint(a, "{s}/.config", .{fallback_home});
+    defer a.free(fallback_config_root);
+    try expectProviderFixtureEntries(io, fallback_config_root, &.{.{ .name = "maru", .kind = .directory }});
+    const fallback_maru = try std.fmt.allocPrint(a, "{s}/.config/maru", .{fallback_home});
+    defer a.free(fallback_maru);
+    try expectProviderFixtureEntries(io, fallback_maru, &.{.{ .name = "agent-sessions", .kind = .directory }});
+    const fallback_mappings = try std.fmt.allocPrint(a, "{s}/.config/maru/agent-sessions", .{fallback_home});
+    defer a.free(fallback_mappings);
+    try expectProviderFixtureEntries(io, fallback_mappings, &.{
+        .{ .name = "42", .kind = .file },
+        .{ .name = "77", .kind = .file },
+    });
+    const fallback_claude_after = try tmp.dir.readFileAlloc(io, "fallback-home/.claude/settings.json", a, .limited(4096));
+    defer a.free(fallback_claude_after);
+    const fallback_codex_after = try tmp.dir.readFileAlloc(io, "fallback-home/.codex/hooks.json", a, .limited(4096));
+    defer a.free(fallback_codex_after);
+    const fallback_mapping_42_after = try tmp.dir.readFileAlloc(io, "fallback-home/.config/maru/agent-sessions/42", a, .limited(4096));
+    defer a.free(fallback_mapping_42_after);
+    const fallback_mapping_77_after = try tmp.dir.readFileAlloc(io, "fallback-home/.config/maru/agent-sessions/77", a, .limited(4096));
+    defer a.free(fallback_mapping_77_after);
+    try std.testing.expectEqualStrings(provider_config, fallback_claude_after);
+    try std.testing.expectEqualStrings(provider_config, fallback_codex_after);
+    try std.testing.expectEqualStrings(mapping_42, fallback_mapping_42_after);
+    try std.testing.expectEqualStrings(mapping_77, fallback_mapping_77_after);
 }
 
 test "macOS app session config rejects unsafe fixed-width ABI input" {
@@ -33307,7 +33487,7 @@ test "advanceAgentSpinner: 출력 독립 + wall-clock 경과 기반 위상 진�
 }
 
 test "activateSurfaceById: surface.id로 (탭·split panel·가로탭)을 역조회해 그 자리로 활성화한다" {
-    // 데스크톱 알림(OSC 9/777·에이전트 완료) 클릭이 발신 터미널로 점프하는 경로의 핵심이다. Swift는 창 토큰으로
+    // OSC 9/777 데스크톱 알림 클릭이 발신 터미널로 점프하는 경로의 핵심이다. Swift는 창 토큰으로
     // '어느 창(세션)'까지만 고르고, 그 세션 안에서 surface_id로 '어느 탭/split panel/가로탭'인지 찾아 포커스하는 건
     // Zig가 소유한다. 순서(switchTab→focusPaneByPtr→focusTerm)가 틀리면 비활성 탭의 panel/term을 못 찾으므로,
     // 비활성 탭의 둘째 panel 둘째 가로탭을 표적으로 삼아 세 단계 모두 정확히 들어가는지 검증한다. 터미널에서
@@ -33439,13 +33619,11 @@ test "알림 히스토리: push 상한 ring + unread 증감 + markRead + formatR
     });
     defer session.deinit();
 
-    // push 2건(에이전트/OSC) → len 2, unread 2, owned dupe.
-    _ = session.pushNotificationHistory("ws1", "done", 1, true);
-    _ = session.pushNotificationHistory("ws2", "fail", 2, false);
+    // push 2건 → len 2, unread 2, owned dupe.
+    _ = session.pushNotificationHistory("ws1", "done", 1);
+    _ = session.pushNotificationHistory("ws2", "fail", 2);
     try std.testing.expectEqual(@as(usize, 2), session.notification_history.items.len);
     try std.testing.expectEqual(@as(usize, 2), session.notification_unread);
-    try std.testing.expect(session.notification_history.items[0].is_agent);
-    try std.testing.expect(!session.notification_history.items[1].is_agent);
     try std.testing.expectEqual(@as(u64, 2), session.notification_history.items[1].surface_id);
 
     // markRead(0) → unread 1, 다시 호출은 무동작(이미 읽음).
@@ -33459,7 +33637,7 @@ test "알림 히스토리: push 상한 ring + unread 증감 + markRead + formatR
     // 상한 초과: cap+5건 더 push → len은 cap(config notifications.history-limit) 유지(ring), 누수 없이 오래된 것 free.
     const cap: usize = @intCast(session.loaded_config.config.notifications.history_limit);
     var i: usize = 0;
-    while (i < cap + 5) : (i += 1) _ = session.pushNotificationHistory("x", "y", 100, false);
+    while (i < cap + 5) : (i += 1) _ = session.pushNotificationHistory("x", "y", 100);
     try std.testing.expectEqual(cap, session.notification_history.items.len);
 
     // formatRelativeTime 경계(arena).
@@ -33490,9 +33668,9 @@ test "acceptNotification: 목록 역순 매핑(0=최신) + 클릭 surface 전체
     });
     defer session.deinit();
 
-    _ = session.pushNotificationHistory("old-A", "1", 11, true); // history 0: surface 11
-    _ = session.pushNotificationHistory("other", "2", 22, true); // history 1: surface 22(다른 터미널)
-    _ = session.pushNotificationHistory("new-A", "3", 11, false); // history 2(최신): surface 11(또 한 번)
+    _ = session.pushNotificationHistory("old-A", "1", 11); // history 0: surface 11
+    _ = session.pushNotificationHistory("other", "2", 22); // history 1: surface 22(다른 터미널)
+    _ = session.pushNotificationHistory("new-A", "3", 11); // history 2(최신): surface 11(또 한 번)
     session.chrome_host.notifications.show(0, 0, 3);
     session.chrome_host.notifications.selected = 0; // 목록 0 = 최신("new-A") = surface 11
     try std.testing.expectEqual(@as(usize, 3), session.notification_unread);
@@ -33520,9 +33698,9 @@ test "알림 액션: deleteNotification(역순) + markAllNotificationsRead + cle
     });
     defer session.deinit();
 
-    _ = session.pushNotificationHistory("a", "1", 11, true); // 히스토리 idx 0(가장 오래됨)
-    _ = session.pushNotificationHistory("b", "2", 22, true); // idx 1
-    _ = session.pushNotificationHistory("c", "3", 33, false); // idx 2(최신) — 목록 역순 [c, b, a]
+    _ = session.pushNotificationHistory("a", "1", 11); // 히스토리 idx 0(가장 오래됨)
+    _ = session.pushNotificationHistory("b", "2", 22); // idx 1
+    _ = session.pushNotificationHistory("c", "3", 33); // idx 2(최신) — 목록 역순 [c, b, a]
     try std.testing.expectEqual(@as(usize, 3), session.notification_unread);
 
     // 목록 list_index 0 = 최신("c") = 히스토리 끝. 삭제 → "c" 제거, unread 1 감소.
@@ -33556,9 +33734,9 @@ test "markNotificationsReadBySurface: 배너 클릭→그 surface 안읽음 모�
     });
     defer session.deinit();
 
-    _ = session.pushNotificationHistory("a", "1", 11, true); // surface 11
-    _ = session.pushNotificationHistory("b", "2", 22, true); // surface 22
-    _ = session.pushNotificationHistory("c", "3", 11, false); // surface 11 (또 한 번)
+    _ = session.pushNotificationHistory("a", "1", 11); // surface 11
+    _ = session.pushNotificationHistory("b", "2", 22); // surface 22
+    _ = session.pushNotificationHistory("c", "3", 11); // surface 11 (또 한 번)
     try std.testing.expectEqual(@as(usize, 3), session.notification_unread);
 
     // surface 11 배너 클릭 → surface 11의 안읽음(a·c) 모두 읽음, surface 22(b)는 유지.
@@ -41056,23 +41234,34 @@ test "applyWorkspaceWindow: 모델 적용 → 캡처 round-trip(탭/split/Term �
     try std.testing.expectEqual(@as(?[]const u8, null), cap.tabs[1].group_start);
 }
 
-test "workspace 복원 text → parse → applyWorkspaceWindow (R4b ABI 경로)" {
+test "legacy provider workspace fields are ignored across multi-window parse apply and write-new" {
     if (builtin.os.tag != .macos) return error.SkipZigTest; // 실 PTY spawn
     const allocator = std.testing.allocator;
-    const session = try allocator.create(AppSession);
-    defer allocator.destroy(session);
-    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+    const session0 = try allocator.create(AppSession);
+    defer allocator.destroy(session0);
+    try session0.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
         .abi_version = abi_version,
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
         .command_kind = @intFromEnum(CommandKind.controlled_smoke),
     });
-    defer session.deinit();
-    _ = try session.resize(800, 600, 1000);
+    defer session0.deinit();
+    _ = try session0.resize(800, 600, 1000);
+    const session1 = try allocator.create(AppSession);
+    defer allocator.destroy(session1);
+    try session1.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session1.deinit();
+    _ = try session1.resize(800, 600, 1000);
 
-    // 저장 텍스트(한 창: 단일 탭, split vertical 2 pane, cwd /tmp). apply ABI가 받는 것과 같은 형태.
-    // custom_name(사용자 rename)을 세 계층에 심어 parse→apply(라이브 구조체 복원)→capture 라운드트립을 증명한다.
+    // 삭제 전 writer가 만들던 provider 필드는 일반 unknown scalar로만 취급한다. invalid argc와 bare arg도 구조 필드가
+    // 아니므로 복원을 막지 않는다. 이 raw fixture 한 곳만 옛 wire spelling을 보존해 history가 제품 모델로 번지는 것을 막는다.
     const text =
         "maru.workspace.v1\n" ++
         "window tabs=1 active-tab=0\n" ++
@@ -41081,27 +41270,89 @@ test "workspace 복원 text → parse → applyWorkspaceWindow (R4b ABI 경로)"
         "tree-node leaf pane=0\n" ++
         "tree-node leaf pane=1\n" ++
         "pane surfaces=1 active-term=0 custom-name=\"left\"\n" ++
-        "surface custom-name=\"editor\" title=\"\" cwd=\"/tmp\" command=\"\" cols=40 rows=12 agent-kind=\"\" agent-session=\"\" agent-argc=0\n" ++
-        "pane surfaces=1 active-term=0 custom-name=\"\"\n" ++
-        "surface custom-name=\"\" title=\"\" cwd=\"/tmp\" command=\"\" cols=40 rows=12 agent-kind=\"\" agent-session=\"\" agent-argc=0\n";
+        "surface custom-name=\"editor\" title=\"\" cwd=\"/tmp\" command=\"/definitely/must-not-exec-provider\" cols=40 rows=12 agent-kind=\"claude\" agent-session=\"legacy-a\" agent-argc=not-a-number agent-arg=unquoted\n" ++
+        "pane surfaces=1 active-term=0 custom-name=\"right\"\n" ++
+        "surface custom-name=\"shell\" title=\"\" cwd=\"/\" command=\"/definitely/must-not-exec-provider\" cols=40 rows=12 agent-kind=\"codex\" agent-session=\"legacy-b\" agent-argc=999999\n" ++
+        "window tabs=1 active-tab=0 active-window=1\n" ++
+        "tab panes=1 active-pane=0 custom-name=\"second window\" pinned=0 background-color=0 accent-color=0\n" ++
+        "tree-node leaf pane=0\n" ++
+        "pane surfaces=1 active-term=0 custom-name=\"only\"\n" ++
+        "surface custom-name=\"monitor\" title=\"\" cwd=\"/tmp\" command=\"\" cols=50 rows=15\n";
 
     var parsed = try maru.session.workspace.parse(allocator, text);
     defer parsed.deinit();
-    try session.applyWorkspaceWindow(parsed.workspace.windows[0]);
+    try std.testing.expectEqual(@as(usize, 2), parsed.workspace.windows.len);
+    try std.testing.expectEqual(@as(?usize, 1), maru.session.workspace.activeWindowIndex(parsed.workspace));
+    try std.testing.expectEqualStrings("my work", parsed.workspace.windows[0].tabs[0].custom_name);
+    try std.testing.expectEqualStrings("second window", parsed.workspace.windows[1].tabs[0].custom_name);
+    // 제품 AppHost가 쓰는 interactive_shell 분기에서 복원 요청을 만든다. 저장된 command는 실행하지 않고 현재 설정의
+    // login shell과 argv를 그대로 사용해야 한다. 실제 layout apply는 아래에서 deterministic controlled PTY로 별도 검증한다.
+    const controlled_config = session0.new_tab_config;
+    const controlled_shell = session0.loaded_config.config.shell;
+    defer {
+        session0.new_tab_config = controlled_config;
+        session0.loaded_config.config.shell = controlled_shell;
+    }
+    session0.new_tab_config.command_kind = .interactive_shell;
+    session0.loaded_config.config.shell.command = "/bin/sh";
+    session0.loaded_config.config.shell.args = &.{"-i"};
+    const restored0 = session0.restoreSpawn(parsed.workspace.windows[0].tabs[0].panes[0].surfaces[0]).req;
+    const restored1 = session0.restoreSpawn(parsed.workspace.windows[0].tabs[0].panes[1].surfaces[0]).req;
+    try std.testing.expectEqualStrings("/tmp", restored0.cwd.?);
+    try std.testing.expectEqualStrings("/", restored1.cwd.?);
+    try std.testing.expectEqualStrings("/bin/sh", restored0.command);
+    try std.testing.expectEqualStrings("/bin/sh", restored1.command);
+    try std.testing.expect(restored0.login);
+    try std.testing.expect(restored1.login);
+    try std.testing.expectEqual(@as(usize, 1), restored0.args.len);
+    try std.testing.expectEqualStrings("-i", restored0.args[0]);
+    try std.testing.expect(!std.mem.eql(u8, "/definitely/must-not-exec-provider", restored0.command));
+    try std.testing.expect(!std.mem.eql(u8, "/definitely/must-not-exec-provider", restored1.command));
+    session0.new_tab_config = controlled_config;
+    session0.loaded_config.config.shell = controlled_shell;
 
-    var arena = std.heap.ArenaAllocator.init(allocator);
-    defer arena.deinit();
-    const cap = try session.captureWorkspaceWindow(arena.allocator(), false, null);
-    try std.testing.expectEqual(@as(usize, 1), cap.tabs.len);
-    try std.testing.expectEqual(@as(usize, 2), cap.tabs[0].panes.len);
-    try std.testing.expectEqual(@as(usize, 1), cap.tabs[0].active_pane);
-    try std.testing.expect(cap.tabs[0].tree[0].split.direction == .vertical);
-    try std.testing.expectEqual(@as(u16, 300), cap.tabs[0].tree[0].split.ratio_milli);
-    // custom_name 라운드트립(parse→applyWorkspaceWindow 라이브 복원→captureWorkspaceWindow): 세 계층 모두 유지.
-    try std.testing.expectEqualStrings("my work", cap.tabs[0].custom_name); // 워크스페이스
-    try std.testing.expectEqualStrings("left", cap.tabs[0].panes[0].custom_name); // Pane
-    try std.testing.expectEqualStrings("editor", cap.tabs[0].panes[0].surfaces[0].custom_name); // Term
-    try std.testing.expectEqualStrings("", cap.tabs[0].panes[1].custom_name); // 빈 custom_name = 이름 없음
+    try session0.applyWorkspaceWindow(parsed.workspace.windows[0]);
+    try session1.applyWorkspaceWindow(parsed.workspace.windows[1]);
+
+    var arena0 = std.heap.ArenaAllocator.init(allocator);
+    defer arena0.deinit();
+    const cap0 = try session0.captureWorkspaceWindow(arena0.allocator(), false, null);
+    try std.testing.expectEqual(@as(usize, 1), cap0.tabs.len);
+    try std.testing.expectEqual(@as(usize, 2), cap0.tabs[0].panes.len);
+    try std.testing.expectEqual(@as(usize, 1), cap0.tabs[0].active_pane);
+    try std.testing.expect(cap0.tabs[0].tree[0].split.direction == .vertical);
+    try std.testing.expectEqual(@as(u16, 300), cap0.tabs[0].tree[0].split.ratio_milli);
+    try std.testing.expectEqualStrings("my work", cap0.tabs[0].custom_name);
+    try std.testing.expectEqualStrings("left", cap0.tabs[0].panes[0].custom_name);
+    try std.testing.expectEqualStrings("editor", cap0.tabs[0].panes[0].surfaces[0].custom_name);
+    try std.testing.expectEqualStrings("right", cap0.tabs[0].panes[1].custom_name);
+    try std.testing.expectEqualStrings("shell", cap0.tabs[0].panes[1].surfaces[0].custom_name);
+
+    var arena1 = std.heap.ArenaAllocator.init(allocator);
+    defer arena1.deinit();
+    const cap1 = try session1.captureWorkspaceWindow(arena1.allocator(), true, null);
+    try std.testing.expectEqual(@as(usize, 1), cap1.tabs.len);
+    try std.testing.expectEqual(@as(usize, 1), cap1.tabs[0].panes.len);
+    try std.testing.expectEqualStrings("second window", cap1.tabs[0].custom_name);
+    try std.testing.expectEqualStrings("only", cap1.tabs[0].panes[0].custom_name);
+    try std.testing.expectEqualStrings("monitor", cap1.tabs[0].panes[0].surfaces[0].custom_name);
+
+    // 저장된 provider continuity와 현재 프로세스 관측은 별개라 복원 직후 runtime 상태를 채우지 않는다.
+    for (session0.tabs.items) |tab| for (tab.panes.items) |pane| for (pane.terms.items) |term|
+        try std.testing.expectEqual(maru.session.session_model.AgentKind.none, term.agent_kind);
+
+    const rewritten = try maru.session.workspace.serialize(allocator, parsed.workspace);
+    defer allocator.free(rewritten);
+    inline for (.{ "agent-kind", "agent-session", "agent-argc", "agent-arg" }) |legacy_key|
+        try std.testing.expect(std.mem.indexOf(u8, rewritten, legacy_key) == null);
+    var reparsed = try maru.session.workspace.parse(allocator, rewritten);
+    defer reparsed.deinit();
+    try std.testing.expectEqual(@as(usize, 2), reparsed.workspace.windows.len);
+    try std.testing.expectEqual(@as(?usize, 1), maru.session.workspace.activeWindowIndex(reparsed.workspace));
+    try std.testing.expectEqualStrings("my work", reparsed.workspace.windows[0].tabs[0].custom_name);
+    try std.testing.expectEqualStrings("/tmp", reparsed.workspace.windows[0].tabs[0].panes[0].surfaces[0].cwd);
+    try std.testing.expectEqualStrings("/", reparsed.workspace.windows[0].tabs[0].panes[1].surfaces[0].cwd);
+    try std.testing.expectEqualStrings("second window", reparsed.workspace.windows[1].tabs[0].custom_name);
 }
 
 test "usableRestoreCwd: 절대경로 형식 필터(존재·디렉터리는 childExec graceful이 담당)" {
@@ -43227,7 +43478,6 @@ test "captureWorkspaceTab: web Term 스킵 + web-only pane은 셸 placeholder" {
         try std.testing.expectEqual(@as(usize, 1), wtab.panes[0].surfaces.len); // 빈 pane 방지 placeholder
         const s = wtab.panes[0].surfaces[0];
         try std.testing.expectEqualStrings("", s.command); // 기본 로그인 셸(command 빈값)
-        try std.testing.expectEqualStrings("", s.agent_kind);
         try std.testing.expect(s.cols > 0 and s.rows > 0);
     }
 }
@@ -44815,7 +45065,7 @@ test "notice 토스트와 알림 패널 공존: 입력이 notice를 먼저 닫�
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
 
     // 알림 패널을 연 채(카드 1개 시드) notice 토스트를 띄운다 — 둘 다 열린 상태(서로 안 닫음).
-    _ = session.pushNotificationHistory("Maru", "에이전트 작업 완료", 0, true);
+    _ = session.pushNotificationHistory("Maru", "빌드 알림 예시", 0);
     session.openNotificationPanel();
     try std.testing.expect(session.chrome_host.notifications.open);
     session.showNotice("초기화했습니다");
@@ -48555,7 +48805,7 @@ test "collapsed notification bell: hit-test rect is concentric with the glyph, c
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
 
     try std.testing.expect(session.collapsedNotificationRect() == null); // 펼침일 땐 종 rect 없음(접힘 전제)
-    _ = session.pushNotificationHistory("t", "b", 0, true); // 안읽음 1 → 배지 표시(종 좌측)
+    _ = session.pushNotificationHistory("t", "b", 0); // 안읽음 1 → 배지 표시(종 좌측)
     session.toggleSidebarCollapsed();
     try std.testing.expect(session.sidebar_collapsed);
 

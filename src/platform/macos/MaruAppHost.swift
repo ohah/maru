@@ -7114,7 +7114,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         NSWorkspace.shared.open(url)
     }
 
-    // OSC 9/777·에이전트 완료: 코어가 모은 데스크톱 알림(title/body/surface_id)을 활성 세션에서 drain해 네이티브
+    // OSC 9/777: 코어가 모은 데스크톱 알림(title/body/surface_id)을 활성 세션에서 drain해 네이티브
     // 알림으로 띄운다(매 tick). 알림이 없으면 Zig가 has=0을 줘 아무 것도 안 한다. OSC 9는 title이 없어(빈 문자열) 앱
     // 이름으로 폴백한다. 번들 ID가 없으면(app shell 일부) UNUserNotificationCenter를 못 써 조용히 건너뛴다(GUI 수동
     // 검증은 제품 앱). userInfo에 (창 토큰, surface_id)를 실어 클릭 시 didReceive가 발신 터미널로 점프하게 한다.
@@ -7189,9 +7189,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         }
     }
 
-    // 앱이 전면일 때 배너를 띄울지 결정한다. fg(Zig foreground_banner): 1=에이전트 완료(지금 안 보는 탭, !is_current
-    // 게이트)는 전면에서도 배너+소리로 알려야 유용 / 0=OSC 9·777(활성 surface가 보내 사용자가 보고 있을 수 있음)은
-    // 배너 없이 알림 센터 목록에만(.list) — 자기 화면 알림 노이즈 억제. fg 누락(외부/레거시 알림)은 보수적으로 배너.
+    // 앱이 전면일 때 배너를 띄울지 결정한다. fg(Zig foreground_banner): 1=현재 보고 있지 않은 surface의 OSC라
+    // 전면에서도 배너+소리로 알림 / 0=현재 보고 있는 surface의 OSC라 배너 없이 알림 센터 목록에만(.list) —
+    // 자기 화면 알림 노이즈 억제. fg 누락(외부/레거시 알림)은 보수적으로 배너.
     // "전면 배너 여부"는 알림 종류가 정하는 정책이라 Zig가, 표시 스타일 적용은 OS 표면이라 Swift가 한다(경계).
     // self 접근이 없어 assumeIsolated 없이 nonisolated 본문에서 바로 completionHandler를 호출한다.
     nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter,

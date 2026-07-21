@@ -153,17 +153,6 @@ fn applyKey(
         config.shell.args = try list.toOwnedSlice(a);
         return;
     }
-    // 제거된 설정은 한 릴리스 동안 read-old/no-op으로 받아 기존 파일에 unknown-key 진단을 만들지 않는다. bool 문법은
-    // 계속 검증해 오타까지 조용히 삼키지는 않으며, 스키마/GUI/직렬화에는 노출하지 않는다.
-    if (std.mem.eql(u8, key, "workspace.restore-claude") or
-        std.mem.eql(u8, key, "workspace.restore-codex") or
-        std.mem.eql(u8, key, "notifications.agent-complete"))
-    {
-        if (!std.mem.eql(u8, value, "true") and !std.mem.eql(u8, value, "false")) {
-            try diags.append(a, .{ .line = line_no, .message = "bool 값은 true 또는 false여야 함 — 무시" });
-        }
-        return;
-    }
     // 스키마-주도 스칼라(CS-1+CS-2: font.*·theme 색·cursor.*·input.*·quick-terminal.*·sidebar.*·notifications.*·
     // scrollback.*·bell.*·shell-integration.*·workspace.{tab,split}-inherit·shell.command). 매칭되면 파싱·적용하고 끝.
     // 미매칭이면 false → 아래 if-else(특수 5종 + 최상위 스칼라)로 폴백. 단일 출처: docs/config-schema.md.
@@ -1001,7 +990,6 @@ test "parse: full config sets every field" {
         \\input.ime-enter = commit-only
         \\window.padding-x = 12
         \\window.padding-y = 6
-        \\notifications.agent-complete = false
         \\notifications.osc = false
         \\notifications.history-limit = 100
         \\keyhint.enabled = false
@@ -1038,18 +1026,24 @@ test "parse: full config sets every field" {
     try std.testing.expectEqual(@as(usize, 0), p.diagnostics.len);
 }
 
-test "parse: deprecated agent settings are accepted as no-op for compatibility" {
-    var parsed = try parse(std.testing.allocator,
+test "parse: removed compatibility settings use the generic unknown-key diagnostic" {
+    const text =
         \\workspace.restore-claude = true
-        \\workspace.restore-codex = false
+        \\workspace.restore-codex = true
         \\notifications.agent-complete = true
-    );
+        \\workspace.restore-claude = not-a-bool
+        \\workspace.restore-codex = not-a-bool
+        \\notifications.agent-complete = not-a-bool
+        \\font.size = 17
+    ;
+    var parsed = try parse(std.testing.allocator, text);
     defer parsed.deinit();
-    try std.testing.expectEqual(@as(usize, 0), parsed.diagnostics.len);
-
-    var invalid = try parse(std.testing.allocator, "workspace.restore-claude = yes");
-    defer invalid.deinit();
-    try std.testing.expectEqual(@as(usize, 1), invalid.diagnostics.len);
+    try std.testing.expectEqual(@as(usize, 6), parsed.diagnostics.len);
+    for (parsed.diagnostics, 1..) |diag, line| {
+        try std.testing.expectEqual(line, diag.line);
+        try std.testing.expectEqualStrings("알 수 없는 key — 무시", diag.message);
+    }
+    try std.testing.expectEqual(@as(f32, 17), parsed.config.font.size);
 }
 
 test "parse: file panel external link target defaults in-app and accepts system" {

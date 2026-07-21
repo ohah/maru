@@ -336,8 +336,7 @@ dirty file editor는 session host가 보호하지 못한다. `Quit Maru`도 기�
 - 배너 클릭은 Maru를 cold launch한 뒤 `runtime_handle`을 attach하고 현재 manifest 위치를 찾는다. binding이 없으면
   `Recovered Sessions`에서 해당 runtime을 연다.
 - `notifications.osc=false`는 GUI 유무와 관계없이 host 발화를 막는다. config snapshot/version 변경은 host에 전달한다.
-- agent `running → idle` 완료 알림은 현재와 같이 deprecated no-op이다. 구조화된 완료 신호가 없으므로 영속 host가
-  이를 추측해 되살리지 않는다.
+- agent `running → idle`은 완료 알림을 만들지 않는다. 구조화된 완료 신호가 없으므로 영속 host가 이를 추측하지 않는다.
 - visual bell과 인앱 overlay는 GUI가 있을 때만 표시할 수 있다. GUI가 없는 동안 보장하는 background 알림은 OSC 9/777
   OS 배너와 pending history다.
 
@@ -649,17 +648,15 @@ green을 만든 뒤 stress/실제 앱 gate를 붙인다. 이미 구현되어 red
 종료 gate: `git diff --check`, 문서 링크/old tmux 계획 grep, PR 사용자 리뷰. P0는 설계 승인 단계라 사용자 리뷰가 필요하지만,
 P1 이후 구현 gate는 아래 자동화 계약을 만족해야 한다.
 
-### P1 — legacy provider session continuity 잔여 제거
+### P1 — legacy provider session continuity 잔여 제거 ✅
 
-현재 제품은 provider session을 실행에 복원하지 않지만 이전 source build/dev 호환용 reader/no-op/cleanup 코드가 남아 있다. 영속 host를
-도입하면서 이 코드를 새로운 fallback으로 재사용하지 않고 제거한다.
+완료. provider session을 실행에 복원하던 이전 source build/dev 호환용 typed reader/no-op/cleanup 코드를 제거했으며,
+영속 host의 fallback으로 재사용하지 않는다.
 
-- `workspace.restore-claude`/`workspace.restore-codex` loader no-op·테스트를 제거한다. 동일 deprecated loader 분기에 남은 dead
-  alias `notifications.agent-complete`도 함께 제거한다. 이후 세 key는 모두 일반 unknown key 진단이다.
-- workspace `Surface.agent_kind/agent_session/agent_argv`, typed legacy parser와 provider 의미를 단언하는 migration fixture를 제거한다.
-  구 파일 raw fixture 하나는 이 필드들을 미지 scalar로 무시한 채 2개 이상 window/pane의 이름·cwd·active 상태를 parse/apply하는
-  호환 계약으로 남기고, parse→serialize하면 legacy field가 사라져야 한다. 새 writer에는 계속 나오지 않는다.
-- legacy agent 상수에 수치가 결합된 line field 상한은 일반 unknown field 폭주를 제한하는 독립 `max_line_fields=512`로 재정의한다.
+- provider continuity용 loader alias와 workspace typed model/parser를 제거했다. 삭제된 설정 이름은 일반 unknown key 진단이며,
+  구 파일 raw fixture 하나는 옛 scalar를 무시한 채 2개 이상 window/pane의 이름·cwd·active 상태를 parse/apply한다.
+  parse→serialize하면 옛 scalar가 사라지고 새 writer에는 나오지 않는다.
+- legacy agent 상수에 수치가 결합된 line field 상한은 일반 unknown field 폭주를 제한하는 독립 `max_line_fields=512`로 재정의했다.
   중립 `future-field` fixture에서 정확히 512 field는 허용하고 513번째는 거부한다. field-cap fixture에는 provider literal을 쓰지 않는다.
 - 1회 provider hook/mapping cleanup과 `MARU_AGENT_MAPPING_ID` 전용 차단도 P1에서 제거한다. 이후 Maru는 과거 provider
   config/mapping을 자동 수정하지 않고, 남아 있는 사용자 파일은 그대로 둔다. cleanup 전 과거 source build가 설치한 hook은
@@ -669,14 +666,15 @@ P1 이후 구현 gate는 아래 자동화 계약을 만족해야 한다.
   `agent-session.md` support runbook이 식별하는 Maru marker hook·Maru mapping 파일만 사용자가 직접 제거하며, 다른 사용자
   hook이나 mapping 디렉터리 전체를 일괄 삭제하지 않는다.
 - 현재 foreground process·screen 관측에 쓰는 **live** `Term.agent_kind/agent_state`는 provider session continuity가 아니므로 유지한다.
-- 같은 코드 PR에서 `agent-session.md`, `workspace-restore.md`, `configuration.md`, `notifications.md`, implementation plan,
-  verification matrix를 현재 계약으로 갱신한다. 삭제된 parser/hook/transcript 절차와 deprecated 설정 상세는 제품 SSOT에
-  “제거됨” 역사로 계속 복제하지 않고 Git/PR 이력으로 보낸다. `agent-session.md` support runbook에는 안전한 수동
-  식별·제거 경계만 남긴다.
+- `agent-session.md`, `workspace-restore.md`, `configuration.md`, `notifications.md`, implementation plan, verification matrix는
+  현재 계약으로 갱신했다. 삭제된 parser/hook/transcript 절차와 설정 상세는 제품 SSOT에 역사로 복제하지 않고 Git/PR 이력으로
+  보낸다. `agent-session.md` support runbook에는 안전한 수동 식별·제거 경계만 남긴다.
 
-종료 gate: legacy typed field·parser branch·cleanup import/call·전용 환경변수 filter가 제품 코드에서 0이고, legacy literal은
-명명된 unknown-key 호환 fixture에서만 허용한다. 세 제거 설정 각각의 유효·잘못된 값에 대한 generic unknown-key 진단,
-구 workspace의 invalid legacy scalar 무시·multi-window parse/apply·write-new, 중립 512/513 field cap, 일반 shell restore를 검증한다.
+완료 gate: legacy typed field·parser branch·cleanup import/call·전용 환경변수 filter가 제품 코드에서 0이다. legacy workspace
+wire literal은 명명된 raw fixture 한 곳에만, 제거 config key와 cleanup marker/mapping literal은 각각의 전용 회귀 fixture에만 둔다.
+세 제거 설정 각각의 유효·잘못된 값에 대한 generic unknown-key 진단,
+구 workspace의 invalid legacy scalar 무시·multi-window parse/apply·write-new, 중립 512/513 field cap,
+제품 interactive login-shell 복원 요청과 controlled PTY layout apply를 검증한다.
 격리 subprocess의 임시 HOME·provider/XDG 경로에는 현재 cleanup이라면 변경할 Maru marker+legacy command 구조의 Claude/Codex
 config와 숫자 이름의 recognized hook-event/session/transcript mapping을 둔다. `AppSession.init` 전후 bytes와 디렉터리
 manifest가 같고 `.maru-backup`·`agent-hook-cleanup-v2`·신규/삭제 파일이 0이어야 한다.

@@ -112,8 +112,6 @@ file-panel.external-link-target = in-app # 파일 패널 외부 링크: in-app |
 | `workspace.root` | 경로 | (없음) | 고정 시작 디렉터리(Ghostty `working-directory` 대응). 첫 창 + 상속이 꺼졌거나 상속할 cwd가 없을 때 폴백. 비어 있으면 maru cwd 상속(단 `/`면 `~`). `~`·`~/…`는 $HOME으로 확장. 아래 참조 |
 | `workspace.tab-inherit-cwd` | `true`\|`false` | `true` | 새 워크스페이스 탭(`new_tab`)·새 Term(`new_term`)이 포커스 Term의 현재 cwd(OSC 7)를 상속할지. `false`면 `workspace.root`에서 연다(Ghostty `tab-inherit-working-directory`). 아래 참조 |
 | `workspace.split-inherit-cwd` | `true`\|`false` | `true` | 새 분할(`split_*`, 팬)이 포커스 Term의 현재 cwd를 상속할지. `false`면 `workspace.root`에서 연다(Ghostty `split-inherit-working-directory`). 아래 참조 |
-| `workspace.restore-claude` | `true`\|`false` | deprecated | 구버전 config 호환을 위해 한 릴리스 읽지만 동작하지 않는다. workspace restore는 provider 세션을 자동 실행하지 않으며 세팅 GUI에서 숨긴다 |
-| `workspace.restore-codex` | `true`\|`false` | deprecated | 구버전 config 호환을 위해 한 릴리스 읽지만 동작하지 않는다. workspace restore는 provider 세션을 자동 실행하지 않으며 세팅 GUI에서 숨긴다 |
 | `workspace.hold-on-startup-failure` | `true`\|`false` | `true` | 첫(유일) 셸이 시작 직후 **비정상 종료**해 usable 세션에 도달 못 하면 앱을 종료하지 않고 창을 유지(원인·복구 표시, ⏎로 재시작). 잘못된 `shell.command`/`shell.args`로 앱이 시작하자마자 꺼지던 것 방지. `false`면 기존처럼 종료(Terminal.app "shell 종료 시 닫기" 취향) |
 | `scrollback.lines` | 정수(0~100000) | `1000` | 가시 화면 위로 보관할 과거 줄 수. `0`이면 스크롤백 비활성(과거 줄 안 보관). 범위 밖/비정수는 무시(기본 유지) |
 | `file-panel.max-live-views` | 정수(1~256) | `8` | 파일 도크에서 동시에 유지할 WKWebView 상한. 초과하면 가장 오래 안 본 non-dirty view만 해제하고 탭 metadata는 유지한다. dirty이거나 source editor 이탈 snapshot ack가 대기 중인 view는 해제하지 않으며 재선택한 탭은 새 surface id로 다시 생성한다. |
@@ -123,7 +121,6 @@ file-panel.external-link-target = in-app # 파일 패널 외부 링크: in-app |
 | `bell.audible` | `true`\|`false` | `true` | BEL(0x07) 수신 시 시스템 소리(NSSound.beep)를 낼지. `false`면 음소거(코어 플래그는 정상 소비) |
 | `bell.visual` | `true`\|`false` | `false` | BEL 수신 시 **화면을 잠깐 번쩍**이는 시각 벨. `true`면 활성 화면 위에 전경색 반투명 오버레이를 덮고 ~250ms 페이드아웃한다(소리를 못 듣는 환경 보조). `audible`과 독립이라 둘 다 켤 수 있다. 기본 `false`(현행 — 소리만) |
 | `bell.dock-badge` | `true`\|`false` | `false` | BEL 수신 시 **창이 포커스 없을 때만** Dock 아이콘에 `●` 배지를 띄울지. `true`면 백그라운드에서 벨이 울리면 Dock에 배지가 뜨고 앱으로 돌아오면 사라진다(놓친 알림 표시 — Terminal.app/iTerm2 관례). 포커스 중이면 안 띄운다. 기본 `false` |
-| `notifications.agent-complete` | `true`\|`false` | deprecated | 하위호환을 위해 한 릴리스 읽지만 동작하지 않는다. terminal observer는 완료와 ESC 중단 뒤 idle 복귀를 구분하지 않으므로 가짜 완료 알림을 보내지 않는다. 세팅 GUI에서는 숨긴다 |
 | `notifications.osc` | `true`\|`false` | `true` | 셸/TUI가 보낸 OSC 9(iTerm2)/777(rxvt) 데스크톱 알림을 띄울지. `false`면 OSC 알림을 무시한다(데스크톱 배너·인앱 알림 센터 둘 다). 세팅 GUI에서 `false`→`true`로 켜면 macOS 데스크톱 알림 권한 요청을 시도한다. 그 외 값은 무시 |
 | `notifications.update-check` | `true`\|`false` | `true` | 새 버전이 나왔는지 앱 시작 시 1회 백그라운드로 확인해 인앱 알림으로 안내할지. 업그레이드를 자동 실행하지 않고 안내만 한다([배포·업데이트 전략](distribution.md)). 외부 요청(GitHub releases API)이라 끌 수 있다. 그 외 값은 무시 |
 | `notifications.history-limit` | `8`~`512` | `64` | 인앱 알림 센터(종 아이콘 패널)에 보관할 최대 알림 수. 초과하면 가장 오래된 것부터 버린다. 범위 밖은 무시 |
@@ -340,7 +337,6 @@ workspace.root = ~/projects
 workspace.tab-inherit-cwd   = true   # 새 워크스페이스 탭(⌘⇧T) + 새 Term(⌘T)
 workspace.split-inherit-cwd = true   # 새 분할(⌘D, 팬)
 
-# workspace.restore-claude / restore-codex는 deprecated no-op
 ```
 
 - **`workspace.root`** — 고정 시작 디렉터리. **절대경로 또는 `~`/`~/…`만** 받는다 — 상대경로나 `~user`(다른
@@ -358,10 +354,6 @@ workspace.split-inherit-cwd = true   # 새 분할(⌘D, 팬)
 
 - **`workspace.split-inherit-cwd`** — 새 분할(`split_*`, 팬)의 cwd 상속 여부. `true`(기본)면 포커스 cwd
   상속, `false`면 `root`.
-
-- **`workspace.restore-claude`** / **`workspace.restore-codex`** — deprecated no-op. 구버전 config를 깨뜨리지
-  않기 위해 한 릴리스 파싱하지만 UI에서 숨기며 provider 세션을 자동 실행하지 않는다. Workspace는 shell/cwd/layout만
-  복원한다. 자세한 read-old/write-new 정책은 [Workspace Restore 전략](workspace-restore.md)이 단일 출처다.
 
 > **베이스/결정**: 동작·기본값·키 의미를 모두 **Ghostty**(`working-directory`,
 > `window/tab/split-inherit-working-directory`, 모두 기본 `true`)에 맞췄다(레퍼런스는 동작만 비교, 코드

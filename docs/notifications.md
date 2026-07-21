@@ -1,19 +1,20 @@
 # 알림(Notifications) 전략
 
 > 단일 출처(design). Maru의 알림은 **두 면**을 가진다 — ① OS 데스크톱 배너(macOS 알림 센터), ② 앱 안 알림 센터
-> (maru chrome 오버레이). 둘은 같은 알림 소스를 공유하고, "정책·데이터·역조회는 Zig, OS 표시·창 활성화는 Swift"
-> 경계를 따른다. 에이전트 상태는 [agent-session.md](agent-session.md)가 단일 출처이며, terminal observer만으로 완료와
-> ESC 중단을 구분할 수 없으므로 에이전트 완료 알림은 deprecated no-op이다.
+> (maru chrome 오버레이). OSC 알림은 두 면에 함께 나타나고 업데이트 안내는 인앱 센터에만 나타난다.
+> "정책·데이터·역조회는 Zig, OS 표시·창 활성화는 Swift" 경계를 따른다. 에이전트 상태는
+> [agent-session.md](agent-session.md)가 단일 출처이며, terminal observer만으로 완료와
+> ESC 중단을 구분할 수 없으므로 에이전트 완료 알림은 제공하지 않는다.
 
 ## 1. 알림 소스
 
 | 소스 | 트리거 | 발신 surface | 단일 출처 |
 |---|---|---|---|
 | **OSC 9 / OSC 777** | 셸/TUI가 `ESC ] 9 ; … ST`(iTerm2) 또는 `ESC ] 777 ; notify ; … ST`(rxvt)를 출력 | **시퀀스를 출력한 그 surface**(background split pane·가로탭 포함) — 코어가 각 surface에서 파싱 | `src/terminal/osc.zig` `dispatchNotify9/777` + `app_session.zig` `drainOscNotificationFrom` |
-| **에이전트 완료** | emit하지 않음. `running → idle`은 완료와 ESC 중단을 모두 포함하므로 완료로 해석하지 않는다 | 해당 없음 | `notifications.agent-complete`는 deprecated no-op |
+| **업데이트 안내** | 시작 시 새 버전을 확인하고 새 버전이 있을 때 인앱 히스토리에 추가 | 해당 없음 | `app_session.zig` `drainUpdateCheck` + [배포 전략](distribution.md) |
 
-두 소스는 `AppSession.pendingNotification()` 한 funnel로 합류한다(에이전트 큐를 OSC보다 먼저 드레인). 반환은
-`{ title, body, surface_id, foreground_banner }`(`PendingNotification`) — Swift가 tick마다 poll한다.
+OSC는 `AppSession.pendingNotification()`이 `{ title, body, surface_id, foreground_banner }`(`PendingNotification`)로
+드레인해 Swift에 넘기고 동시에 인앱 히스토리에 보관한다. 업데이트 안내는 OS 배너로 보내지 않고 인앱 히스토리에 직접 추가한다.
 
 ### 영속 session host와 GUI 종료 상태 (계획, 미구현)
 
@@ -26,26 +27,22 @@
 - GUI가 없으면 signed app bundle의 macOS notification sink가 OS 배너를 게시하고, 다음 GUI가 host의 bounded pending
   history를 인앱 알림 이력으로 가져간다.
 - 배너 클릭 cold launch는 tmux/provider ID가 아니라 Maru `runtime_handle`로 attach한다.
-- 구조화된 완료 신호가 없는 agent completion은 계속 deprecated no-op이다. host가 `running → idle`을 완료로 추측하지 않는다.
+- 구조화된 완료 신호가 없는 agent completion은 emit하지 않는다. host가 `running → idle`을 완료로 추측하지 않는다.
 - pre-authorized macOS runner에서 실제 signed `.app` 종료 상태의 OSC 발화→배너→클릭→정확한 runtime attach가 **무인 자동
   artifact**로 증명돼야 P4 완료다. runner가 없으면 수동 클릭으로 대체하지 않고 P4와 기본값 전환을 미완료로 둔다.
 
-**모든 pane·Term을 본다(핵심)**: 두 소스 모두 활성(보이는) surface만이 아니라 **모든 탭의 모든 split pane·모든 가로탭
-(Term)**을 본다 — 에이전트는 `pollAgentKinds`가 탭당 활성 Term 하나만이 아니라 모든 Term을 poll하고(예전엔 활성 Term만
-poll해 background pane/Term 완료가 아예 알림 안 됐다), OSC는 `pendingNotification`이 `activeSurface().core`만이 아니라 모든
-Term의 코어를 훑어 첫 pending을 그 surface.id로 실어 보낸다. 이래야 알림의 `surface_id`가 **발신 Term**을 가리켜, 클릭이
-탭뿐 아니라 그 split pane·가로탭까지 정확히 점프한다(`activateSurfaceById`, §2 클릭 절). 비용 가드: 에이전트
-`foregroundProcessNames` process-group 조회는 ≈0.5s throttle, `metal_dirty`(재렌더)는 **사이드바에 보이는** Term(워크스페이스별 활성
-pane의 활성 Term) 변화에만 — 안 보이는 Term 변화로 헛 재렌더하지 않는다. reader 스레드가 `core_mutex` 아래 OSC pending·
-cwd를 쓰므로, main이 background Term의 코어를 읽을 땐 `lockCore` 아래에서 읽어 owned 버퍼로 복사한다(torn read/UAF 방지).
+**모든 pane·Term을 본다(핵심)**: OSC는 활성 surface만이 아니라 **모든 탭의 모든 split pane·모든 가로탭(Term)**을 본다.
+`pendingNotification`이 각 Term 코어를 훑어 첫 pending을 발신 `surface.id`와 함께 보내므로 클릭이 탭뿐 아니라 해당 split
+pane·가로탭까지 정확히 점프한다(`activateSurfaceById`, §2 클릭 절). reader 스레드가 `core_mutex` 아래 OSC pending을 쓰므로,
+main은 `lockCore` 아래에서 읽어 owned 버퍼로 복사한다(torn read/UAF 방지). agent observer는 상태 표시 전용이며 알림 소스가 아니다.
 
-종류별 표시는 config `notifications.*`가 각 발화 지점에서 게이트한다 — `agent-complete`는 deprecated no-op이고,
-`osc`(OSC 9/777, `pendingNotification`)를 끄면 데스크톱 배너·인앱 센터 둘 다 안 만든다. 인앱 센터 보관 개수는
+종류별 표시는 config `notifications.*`가 각 발화 지점에서 게이트한다. `osc`(OSC 9/777, `pendingNotification`)를 끄면
+데스크톱 배너·인앱 센터 둘 다 안 만든다. 인앱 센터 보관 개수는
 `history-limit`(8~512, 기본 64). 단일 출처는 [config 스키마](configuration.md)다(스키마-주도라 세팅 화면에도 자동 노출).
 
 ### 제목 구성 — 위치(`탭 › 팬`) 접두
 
-두 소스 모두 알림 제목에 **발신 위치**(워크스페이스=탭, Term=surface/pane)를 실어, 여러 탭·split·가로탭을 띄운 채
+OSC 알림 제목에는 **발신 위치**(워크스페이스=탭, Term=surface/pane)를 실어, 여러 탭·split·가로탭을 띄운 채
 받은 알림이 **어느 터미널에서 왔는지** 제목에서 바로 식별된다(사용자 요청 — 배너엔 앱 아이콘만 떠 소스 구분이 안 됐다).
 
 - **위치 라벨(단일 출처: `app_session.zig` `notificationLocation`)**: `workspaceLabel(탭) › termLabel(Term)`.
@@ -103,16 +100,16 @@ cwd를 쓰므로, main이 background Term의 코어를 읽을 땐 `lockCore` 아
 앱이 전면일 때 OS는 `willPresent`를 부른다. `foreground_banner`(Zig 결정)로 표시 스타일을 가른다:
 - **OSC 9/777**: 발신 Term이 **지금 보고 있는 그 Term이면 =0** — 사용자가 그 화면을 보고 있어 전면이면 `[.list]`로 알림
   센터 목록에만 남긴다(자기 화면 배너 노이즈 억제). **그 외(background split pane·가로탭·비활성 탭)면 =1** — 안 보는
-  곳이라 전면에서도 배너로 알린다(`drainOscNotificationFrom`이 `focused_term` 비교로 결정 — 에이전트 is_current와 대칭).
+  곳이라 전면에서도 배너로 알린다(`drainOscNotificationFrom`이 `focused_term` 비교로 결정).
 
 ## 3. 인앱 알림 센터 (maru chrome, 2단계)
 
 데스크톱 배너는 드레인되면 사라진다. 인앱 알림 센터는 알림을 **보관·열람**한다 — `.app` 번들이 아니어도, 놓친
 알림도 다시 볼 수 있다.
 
-- **히스토리(ring buffer)**: `NotificationHistoryItem { title, body, surface_id, timestamp_ns, is_read, is_agent }`.
-  `pendingNotification()`이 드레인하는 단일 funnel에서 `pushNotificationHistory`로 보관한다(에이전트 큐 버퍼는 OS 배너로
-  move되므로 히스토리는 **다시 dupe**). 상한은 config `notifications.history-limit`(기본 64, 8~512 — §1과 같은 단일 출처)이고,
+- **히스토리(ring buffer)**: `NotificationHistoryItem { title, body, surface_id, timestamp_ns, is_read }`.
+  OSC drain과 업데이트 확인이 `pushNotificationHistory`로 owned 사본을 보관한다. 상한은 config
+  `notifications.history-limit`(기본 64, 8~512 — §1과 같은 단일 출처)이고,
   push마다 다시 읽어 초과 시 가장 오래된 것을 버린다(cap-drop은 `pushNotificationHistory` 안). `notification_unread`는
   안 읽은 개수 캐시(아래 "읽음/지우기 액션"의 5곳 — push/markRead/delete/markAll/clear 헬퍼에서만 증감, 단일 출처).
 - **사이드바 헤더 종 + 배지**: 헤더 우측 아이콘 줄에 종(🔔)·접기(◧)·view options(⚙)·새 워크스페이스(+)를 우측
@@ -158,7 +155,7 @@ cwd를 쓰므로, main이 background Term의 코어를 읽을 땐 `lockCore` 아
   platform `hoverCursor`가 패널 열림 시 `hitTest`로 매 마우스 이동마다 갱신한다(카드/✕=그 카드 + pointingHand, 그 외 해제).
   알림 패널은 최상위 모달이라 열려 있는 동안 뒤 사이드바/탭/스크롤바 호버는 끈다(클릭 라우팅과 같은 게이트).
 - **빈 상태 일러스트**: 알림이 없으면 헤더 아래 본문에 **종-슬래시 아이콘(🔕) + 굵은 제목("아직 알림이 없습니다") +
-  부제("데스크톱 알림이 여기에 표시됩니다.")**를 가로 가운데로 그린다(예전 좌상단 "알림 없음" 한 줄을 대체). 아이콘은
+  부제("알림이 여기에 표시됩니다.")**를 가로 가운데로 그린다(예전 좌상단 "알림 없음" 한 줄을 대체). 아이콘은
   이모지라 CoreText fallback에 의존 — 실제 렌더로 확인하고 깨지면 BMP 기호로 교체한다(종 글리프와 같은 규율, §5).
 - **폭 cap·말줄임**: 패널 폭은 `[min_panel_cols=30, max_panel_cols=44]`로 cap한다(내용이 길어도 패널이 화면을 가로지를
   만큼 넓어지지 않게 — 사용자 피드백 "maxwidth가 있어서 적당한 크기"). cap을 넘는 제목/본문은 `overlay_input.truncateToCols`
@@ -202,7 +199,7 @@ cwd를 쓰므로, main이 background Term의 코어를 읽을 땐 `lockCore` 아
 
 ## 4. 경계 분담 (단일 출처)
 
-- **Zig**: 알림 파싱·합류(`pendingNotification`), **제목 위치 접두**(`notificationLocation` — `탭 › 팬`), 전면 배너 여부
+- **Zig**: OSC 알림 drain(`pendingNotification`), 업데이트 안내, **제목 위치 접두**(`notificationLocation` — `탭 › 팬`), 전면 배너 여부
   (`foreground_banner`), surface 역조회·활성화 순서(`activateSurfaceById`), 히스토리 모델·정렬·상대시간 포맷, chrome
   컴포넌트(state·hit-test·draw ops), 헤더 zone.
 - **Swift**: `UNUserNotificationCenter` 표시/권한/delegate(거부 상태에선 `NSWorkspace`로 시스템 알림 설정 열기), 창 키

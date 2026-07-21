@@ -852,7 +852,6 @@ const EnvStorage = struct {
         } else {
             // 명시 env(테스트 등): 부모 상속·maru override 없이 그대로 쓴다(term 인자 무시 — 기존 동작 보존).
             for (env) |entry| {
-                if (isLegacyAgentMappingEnv(entry)) continue;
                 try appendOwnedEnv(allocator, &entries, try allocator.dupeZ(u8, entry));
             }
         }
@@ -860,7 +859,6 @@ const EnvStorage = struct {
         // 사용자 config `env.<KEY>`를 부모/명시 env + 일반 maru override(TERM 등) 위에 적용한다. 단 아래 내부
         // selector는 Term identity의 단일 출처라 사용자 값보다 마지막에 다시 upsert한다.
         for (env_overrides) |ov| {
-            if (isLegacyAgentMappingEnv(ov)) continue;
             try upsertEnv(allocator, &entries, ov);
         }
 
@@ -907,10 +905,6 @@ const EnvStorage = struct {
         };
     }
 
-    fn isLegacyAgentMappingEnv(entry: []const u8) bool {
-        return std.mem.startsWith(u8, entry, "MARU_AGENT_MAPPING_ID=");
-    }
-
     // 부모 환경(std.c.environ)을 entries에 복사하되 TERM은 인자 값(기본 xterm-256color, 사용자 config로 변경
     // 가능)으로, COLORTERM은 truecolor로 교체한다. zdotdir이 있으면 ZDOTDIR을 그 값으로 주입하고(셸 통합),
     // 기존 ZDOTDIR은 MARU_ZDOTDIR_PREV로 보존해 통합 .zshenv가 복원한다. ssh_integration_bin이 있으면(opt-in)
@@ -936,9 +930,6 @@ const EnvStorage = struct {
             // CLICOLOR_FORCE=1 때문에 codex가 입력창 회색 컴포저를 truecolor로 못 그림 — GUI 실행 시엔 없어 정상).
             // maru가 터미널이므로 색 capability는 위 COLORTERM/TERM으로만 알린다 — 이 force 변수는 자식에 안 넘긴다.
             if (std.mem.startsWith(u8, slice, "CLICOLOR_FORCE=") or std.mem.startsWith(u8, slice, "FORCE_COLOR=")) continue;
-            // 훅 기반 세션 매핑은 제거됐으므로 상위 Maru나 오래된 launcher가 남긴 key도 자식 agent에 전달하지 않는다.
-            // 남겨 두면 cleanup이 실패한 과거 훅이 다시 mapping 파일을 써 observer와 무관한 stale 상태를 만든다.
-            if (isLegacyAgentMappingEnv(slice)) continue;
             if (zdotdir != null) {
                 if (std.mem.startsWith(u8, slice, "ZDOTDIR=")) {
                     old_zdotdir = slice["ZDOTDIR=".len..];
@@ -1585,29 +1576,75 @@ test "EnvStorage keeps MARU_PANE_ID as the surface selector" {
     }
 }
 
-test "EnvStorage strips legacy MARU_AGENT_MAPPING_ID from every input source" {
-    _ = setenv("MARU_AGENT_MAPPING_ID", "parent-stale", 1);
-    defer _ = unsetenv("MARU_AGENT_MAPPING_ID");
+test "EnvStorage treats MARU_AGENT_MAPPING_ID as an ordinary environment key" {
+    const old_value: ?[:0]u8 = if (std.c.getenv("MARU_AGENT_MAPPING_ID")) |raw|
+        try std.testing.allocator.dupeZ(u8, std.mem.span(raw))
+    else
+        null;
+    defer if (old_value) |value| {
+        _ = setenv("MARU_AGENT_MAPPING_ID", value.ptr, 1);
+        std.testing.allocator.free(value);
+    } else {
+        _ = unsetenv("MARU_AGENT_MAPPING_ID");
+    };
+    _ = setenv("MARU_AGENT_MAPPING_ID", "parent-value", 1);
 
-    // 부모 상속 경로.
+    // 부모 base만 선택하면 일반 키처럼 그대로 상속된다.
     {
         var storage = try EnvStorage.init(std.testing.allocator, &.{}, &.{}, "xterm-256color", null, null, null);
         defer storage.deinit();
-        try std.testing.expectEqual(@as(usize, 0), envValueCount(&storage, "MARU_AGENT_MAPPING_ID=").count);
+        const got = envValueCount(&storage, "MARU_AGENT_MAPPING_ID=");
+        try std.testing.expectEqual(@as(usize, 1), got.count);
+        try std.testing.expectEqualStrings("parent-value", got.last.?);
     }
-    // 명시 env와 사용자 override 경로도 예약된 옛 키를 되살리지 못한다.
+    // 부모 base 뒤 env.* upsert가 마지막 값을 갖는다.
     {
         var storage = try EnvStorage.init(
             std.testing.allocator,
-            &.{ "FOO=ok", "MARU_AGENT_MAPPING_ID=explicit-stale" },
-            &.{"MARU_AGENT_MAPPING_ID=override-stale"},
+            &.{},
+            &.{"MARU_AGENT_MAPPING_ID=override-value"},
             "xterm-256color",
             null,
             null,
             null,
         );
         defer storage.deinit();
-        try std.testing.expectEqual(@as(usize, 0), envValueCount(&storage, "MARU_AGENT_MAPPING_ID=").count);
+        const got = envValueCount(&storage, "MARU_AGENT_MAPPING_ID=");
+        try std.testing.expectEqual(@as(usize, 1), got.count);
+        try std.testing.expectEqualStrings("override-value", got.last.?);
+    }
+    // explicit base는 부모와 합치지 않고 명시된 값을 그대로 쓴다.
+    {
+        var storage = try EnvStorage.init(
+            std.testing.allocator,
+            &.{ "MARU_AGENT_MAPPING_ID=explicit-value", "MARU_AGENT_MAPPING_IDX=keep" },
+            &.{},
+            "xterm-256color",
+            null,
+            null,
+            null,
+        );
+        defer storage.deinit();
+        const got = envValueCount(&storage, "MARU_AGENT_MAPPING_ID=");
+        try std.testing.expectEqual(@as(usize, 1), got.count);
+        try std.testing.expectEqualStrings("explicit-value", got.last.?);
+        try std.testing.expectEqualStrings("keep", envValueCount(&storage, "MARU_AGENT_MAPPING_IDX=").last.?);
+    }
+    // explicit base에서도 같은 upsert 규칙을 쓴다.
+    {
+        var storage = try EnvStorage.init(
+            std.testing.allocator,
+            &.{ "FOO=ok", "MARU_AGENT_MAPPING_ID=explicit-value" },
+            &.{"MARU_AGENT_MAPPING_ID=override-value"},
+            "xterm-256color",
+            null,
+            null,
+            null,
+        );
+        defer storage.deinit();
+        const got = envValueCount(&storage, "MARU_AGENT_MAPPING_ID=");
+        try std.testing.expectEqual(@as(usize, 1), got.count);
+        try std.testing.expectEqualStrings("override-value", got.last.?);
         try std.testing.expectEqualStrings("ok", envValueCount(&storage, "FOO=").last.?);
     }
 }

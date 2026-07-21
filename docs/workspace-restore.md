@@ -161,14 +161,9 @@ Workspace restore는 provider 세션 id·트랜스크립트·argv를 수집하�
 않는다. 에이전트는 계정·권한·네트워크·외부 세션 상태를 가진 대화형 프로그램이므로, 사용자가 명시하지 않은 재실행은
 일반 명령 재실행 금지와 같은 경계를 따른다. 복원되는 것은 해당 Term의 `shell_entry`, cwd, 레이아웃뿐이다.
 
-구버전 workspace의 `agent_kind`, `agent_session`, `agent_argv` 필드는 파서 호환을 위해 읽되 무시한다. 새 저장에는
-이 필드를 쓰지 않는 read-old/write-new 방식으로, 기존 파일을 열 수 있으면서 한 번 저장한 파일에서는 provider 식별자와
-argv가 자연스럽게 사라진다. `workspace.restore-claude`와 `workspace.restore-codex`는 한 릴리스 동안 deprecated
-no-op으로 읽고 UI에서는 숨긴다. 상태 표시의 새 경계는 [에이전트 상태 감지](agent-session.md)가 단일 출처다.
-
-이 호환 reader/no-op/과거 hook cleanup은 아직 코드에 남아 있다. persistent-session 계획 P1에서 실제 코드를 제거하고,
-그 PR이 통과할 때 이 단락과 `configuration.md`를 “deprecated”가 아니라 “제거됨”으로 함께 갱신한다. host/runtime 종료를
-이 legacy provider 경로로 복구하는 fallback은 만들지 않는다.
+구버전 workspace의 provider 관련 scalar는 전용 typed model 없이 일반 미지 scalar로 건너뛴다. 새 저장에는 해당 scalar가
+나오지 않는 read-old/write-new 방식이므로 한 번 저장하면 자연스럽게 사라진다. 관련 옛 설정 이름도 일반 unknown key다.
+상태 표시는 [에이전트 상태 감지](agent-session.md)가 단일 출처이며 host/runtime 종료를 provider 경로로 복구하지 않는다.
 
 ## command 관련 용어
 
@@ -282,7 +277,7 @@ surface custom-name="<term custom_name>" title="<auto OSC title>" cwd=... ...
 
 **실패 모델 — required vs optional.** "없는 키=기본값"이 손상 파일을 조용히 그럴듯한-틀린 상태로 만들지 않게, 키를 둘로 나눈다:
 
-- **required(구조 키)** — 없으면 블록 파싱이 불가능한 개수 키(`window.tabs`·`tab.panes`·`pane.surfaces`·`surface.agent-argc`).
+- **required(구조 키)** — 없으면 블록 파싱이 불가능한 개수 키(`window.tabs`·`tab.panes`·`pane.surfaces`).
   없으면 `BadLine → 통째 폴백`(loud-fail, 손상 탐지 유지). `requireUint`. 값이 비숫자·거대값이어도 BadLine.
 - **optional(스칼라 속성)** — 합리적 기본값이 있는 키(`custom-name`=""·`pinned`=0·`background-color`=0·`accent-color`=0·
   `group-collapsed`=0·`group-depth`=1·`group-color`=0·`local-pinned`=0·`top-level`=0·`title`=""·`cols`=80·`rows`=24·
@@ -298,9 +293,6 @@ surface custom-name="<term custom_name>" title="<auto OSC title>" cwd=... ...
 
 **미지 키.** 조회하지 않는 키는 자연히 skip된다(forward-compat — 옛 바이너리가 새 파일의 모르는 스칼라 키를 무시). 오타 키가
 조용히 무시되는 트레이드오프는 optional 속성이라 감수하고, 구조 이상은 required 규칙이 잡는다(미지 키 진단 로그는 후속).
-
-**반복 키.** `surface`의 `agent-arg`는 반복 키라 필드를 나온 순서대로 순회해 수집하고, 개수는 구조 키 `agent-argc`와 일치해야
-한다(불일치=손상=BadLine — self-delimiting 정합).
 
 **범위 밖(하위호환 안 되는 변경).** 위에서 명시한 마지막 `quick-window` tail 외 새 블록 타입 추가·`tree-node` 인코딩 변경·
 카운트 의미 변경은 구조 파괴라 스키마 버전 bump(`maru.workspace.v1`→`.v2`) 또는 통째 폴백+self-heal 대상이다
@@ -416,8 +408,8 @@ restore가 실패해도 workspace 전체를 버리지 않는다.
 - `shell_entry`와 `startup_recipe argv`가 round-trip되는 테스트.
 - `last_observed_command`가 자동 실행 후보로 저장되지 않는 테스트.
 - cwd가 없을 때 surface별 restore failure artifact를 남기는 테스트.
-- 구버전 `agent_kind`·`agent_session`·`agent_argv`를 파싱하되 복원 실행에는 쓰지 않는 테스트.
-- 새 저장에는 agent 필드가 없고 shell/cwd/layout round-trip만 유지되는 테스트.
+- 구버전 provider scalar를 일반 미지 키로 무시한 채 두 창을 실제 적용하는 테스트.
+- 새 저장에는 provider scalar가 없고 shell/cwd/layout/active round-trip만 유지되는 테스트.
 - binding 필드가 없는 기존 fixture의 byte-stable parse/serialize와 옛 reader의 미지 binding key skip.
 - `workspace-binding-id`와 `runtime-handle` exact length/lowercase hex/구분자, 부재, 손상, duplicate exact-cap/cap+1.
 - writer가 duplicate workspace/runtime binding에서 새 파일을 publish하지 않고 기존 완전본을 보존하는 fail-before-effect 테스트.

@@ -716,10 +716,10 @@ int32_t maru_macos_app_session_pending_clipboard(
     const uint8_t **out_ptr,
     size_t *out_len
 );
-/* OSC 9/777·에이전트 완료 데스크톱 알림 데이터(title, body, UTF-8, surface_id, foreground). *has=1이면 알림 있음
+/* OSC 9/777 데스크톱 알림 데이터(title, body, UTF-8, surface_id, foreground). *has=1이면 알림 있음
    (title은 빈 문자열일 수 있어 len으로 판단), 0이면 없음. *surface_id=발신 Term의 surface.id로, Swift가 알림
    userInfo에 (창 토큰, surface_id)로 실어 클릭 시 발신 터미널로 점프한다(activate_surface). *foreground=앱이 전면일
-   때도 배너로 띄울지(1=에이전트 완료 / 0=OSC, 전면이면 목록만) — Swift willPresent가 읽는다. 버퍼는 Zig 소유로 다음
+   때도 배너로 띄울지(1=background surface / 0=현재 보고 있는 surface, 전면이면 목록만) — Swift willPresent가 읽는다. 버퍼는 Zig 소유로 다음
    pending_notification/destroy까지 유효. Swift가 tick마다 호출해 UNUserNotificationCenter로 띄운다(알림은 OS 소유). v76. */
 int32_t maru_macos_app_session_pending_notification(
     MaruAppHostSession *session,

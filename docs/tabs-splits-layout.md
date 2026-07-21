@@ -21,7 +21,8 @@ cmux 같은 유연한 레이아웃:
   현재 구현은 3줄. 카드 높이는 cell의 3.8×. **베이스/결정**: git 브랜치는 OSC 7 cwd에서 `.git/HEAD` walk-up(cwd 변경
   시에만 읽어 per-Term 캐시; 파생값·영속 안 함; `readGitBranch`/`termGitBranch`), repo 밖이면 보조줄 생략.
 - **에이전트 아이콘** — 그 Term 포그라운드가 claude/codex CLI인 동안만, 카드 **줄과 무관하게 슬롯 세로 중앙·좌측에 독립**
-  배치한다(아바타식; 텍스트 줄은 그만큼 우측으로 들여씀). 아이콘 존재=그 에이전트 진행중, 사라지면 종료(파생값, 영속 안 함).
+  배치한다(아바타식; 텍스트 줄은 그만큼 우측으로 들여씀). 아이콘 존재=그 Term의 foreground agent 종류,
+  사라지면 agent가 아님(파생값, 영속 안 함).
   - 감지: PTY 포그라운드 프로세스명(`tcgetpgrp`+libproc `proc_name`)을 ≈0.5s마다 polling(`pollAgentKinds`/`classifyAgent`).
     comm이 인터프리터(node 등)면 `KERN_PROCARGS2`로 argv[1] 스크립트 basename을 꺼내 분류 — codex가 `#!/usr/bin/env node`
     스크립트라 comm="node"로 떠도 잡힌다(claude는 네이티브라 comm="claude"). 공개 sysctl API(ps·libproc와 동일), clean-room.
@@ -34,7 +35,7 @@ cmux 같은 유연한 레이아웃:
     `assets/icons/{sparkle,diamond}.svg`→coverage)다. **claude sparkle는 두꺼운 4갈래 별로 코덱스 diamond와 잉크 mass를 맞췄다** —
     얇은 4갈래 스파클이 작은 gutter 크기에서 다이아보다 작고 흐려 보인다는 사용자 피드백 반영(SVG arms를 두껍게 → `svg_to_coverage.py` 재생성,
     잉크 ≈diamond). **색은 종류**를 따른다 —
-    claude=Anthropic 공식 코랄 `#CC785C`, codex=OpenAI 청록 `#10A37F`(`term.agent_kind` 기준 단일 출처). **진행/완료**는 카드
+    claude=Anthropic 공식 코랄 `#CC785C`, codex=OpenAI 청록 `#10A37F`(`term.agent_kind` 기준 단일 출처). **관측 상태**는 카드
     **상태줄**(running=**`▁▅▇▃ 진행중` 이퀄라이저 스피너**, blocked=`? 입력 대기`, idle=`✓ 대기중`,
     unknown=`· 상태 확인 중`)이 구분한다 — running 스피너는 블록 문자
     `▁▂▃▄▅▆▇█`(U+2581~2588, `renderer/block_glyph.zig` 절차 합성) 4칸 바운싱 바로, 각 바 높이는 삼각 파형(`spinner_wave`)을

@@ -407,6 +407,8 @@ struct MermaidHelperSmoke {
         checks["pending_reclaimed"] = final.pending_jobs == 0 && final.pending_source_bytes == 0
         checks["failure_latch_uses_product_tick"] = hangingProductTick.pumpCalls > 0 &&
             hangingProductTick.maxCompletionDrain <= UInt64(MARU_MERMAID_MAX_COMPLETIONS_PER_TICK)
+        // hang/restart/latch 경로의 lock 대기는 shutdown 전에 캡처한다(shutdown 뒤 상태를 읽지 않도록).
+        let hangingLockWaitMaxMicros = hanging.diagnostics().maxCompletionLockWaitMicros
         hanging.shutdown()
 
         // Product bridge admission and reply registration are synchronous, while same-widget latest coalesce
@@ -966,6 +968,9 @@ struct MermaidHelperSmoke {
             "product_tick_pump_calls": productTick.pumpCalls,
             "product_tick_drain_calls": productTick.acceptedDrainCalls,
             "product_tick_max_elapsed_us": productTick.maxElapsedMicroseconds,
+            "product_tick_lock_wait_max_us": perfDiagnostics.maxCompletionLockWaitMicros,
+            "failure_latch_product_tick_max_elapsed_us": hangingProductTick.maxElapsedMicroseconds,
+            "failure_latch_product_tick_lock_wait_max_us": hangingLockWaitMaxMicros,
             "accepted_svg_bytes_max": acceptedDrainer.acceptedBytesMax,
             "cold_response_deadline_ms": MARU_MERMAID_COLD_RESPONSE_DEADLINE_MS,
             "warm_response_deadline_ms": MARU_MERMAID_WARM_RESPONSE_DEADLINE_MS,

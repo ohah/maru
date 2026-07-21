@@ -36,6 +36,9 @@ final class MermaidRenderCoordinator: @unchecked Sendable {
         let mainThreadPipeIO: UInt64
         let mainThreadBlockingWaits: UInt64
         let abaRestoreSuccesses: UInt64
+        // 메인 액터 tick(pump→drainCompletions)이 worker와 공유하는 completionLock을 획득하려고
+        // 기다린 최대 시간(µs). "worker wait 0 / ≤20ms" 계약을 증명하기 위한 계측이다.
+        let maxCompletionLockWaitMicros: UInt64
     }
 
     private struct ResultCompletion {
@@ -147,6 +150,9 @@ final class MermaidRenderCoordinator: @unchecked Sendable {
     private var shutdownProbeCallbackCount: UInt64 = 0
     private var pumpCallCount: UInt64 = 0
     private var maxCompletionDrainCount: UInt64 = 0
+    // 메인 스레드 drainCompletions가 completionLock 획득에 기다린 최대 µs(worker 공유 lock 대기 계측).
+    // 메인 스레드에서만 갱신하고 lock 아래에서 읽는다. 값만 기록하며 동작은 불변이다.
+    private var maxCompletionLockWaitMicros: UInt64 = 0
     private var mainThreadProcessOperationCount: UInt64 = 0
     private var mainThreadPipeSetupCount: UInt64 = 0
     private var mainThreadPipeIOCount: UInt64 = 0
@@ -191,7 +197,8 @@ final class MermaidRenderCoordinator: @unchecked Sendable {
             mainThreadPipeSetups: mainThreadPipeSetupCount,
             mainThreadPipeIO: mainThreadPipeIOCount,
             mainThreadBlockingWaits: mainThreadBlockingWaitCount,
-            abaRestoreSuccesses: abaRestoreSuccessCount
+            abaRestoreSuccesses: abaRestoreSuccessCount,
+            maxCompletionLockWaitMicros: maxCompletionLockWaitMicros
         )
     }
 
@@ -698,7 +705,12 @@ final class MermaidRenderCoordinator: @unchecked Sendable {
     }
 
     private func drainCompletions(nowMs: UInt64) {
+        // 메인 액터 tick의 lock 대기를 계측한다(finding: worker 공유 lock wait 미계측). critical section이
+        // 짧아 실 stall 위험은 낮지만, 값을 artifact에 남겨 ≤20ms 계약을 증명하고 회귀를 잡는다.
+        let lockWaitStart = ProcessInfo.processInfo.systemUptime
         completionLock.lock()
+        let lockWaited = UInt64(max(0, (ProcessInfo.processInfo.systemUptime - lockWaitStart) * 1_000_000))
+        maxCompletionLockWaitMicros = max(maxCompletionLockWaitMicros, lockWaited)
         swap(&results, &resultDrain)
         resultBytes = 0
         let drainedControls = controls

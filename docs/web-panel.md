@@ -192,7 +192,7 @@ Phase 5 세 번째 슬라이스(신뢰 UI 경로)는 `maru-app://`를 안정적 
 - **배경 정합**: 신뢰 Markdown 파일 패널의 **초기 paint**는 [file-panel.md](file-panel.md) §1 계약대로 생성 시 공개 API `underPageBackgroundColor`와 hash-pinned critical CSS를 함께 써 기본 흰 backing을 노출하지 않는다. 반면 터미널·chrome이 반투명(`window.opacity<1`)인 창에서 임의 browser/로컬 HTML 본문까지 투명화할지는 여전히 별도 결정이다. 그 경우에도 공개 API `underPageBackgroundColor`(macOS 12+)만 쓰고, `drawsBackground`는 비공개 KVC 키라 의존하지 않는다.
 - **테마/다크모드 동기화**: 터미널은 `viewDidChangeEffectiveAppearance`로 테마 교체. 웹 패널 콘텐츠(maru-app:// UI)가 maru 테마·다크/라이트를 따르도록 브리지로 CSS 변수/토큰 주입.
 - **⌘F 분기**: 포커스가 터미널이면 maru find(스크롤백), 웹 패널이면 페이지 내 find. 포커스 기준 라우팅 명시.
-- **컨텍스트 메뉴**: WKWebView 기본 우클릭 메뉴(Inspect Element 포함)는 "chrome는 Zig" 원칙·보안과 충돌 → 억제 또는 maru 메뉴로 대체.
+- **컨텍스트 메뉴(구현 완료)**: WKWebView 기본 우클릭 메뉴(Inspect Element·**Reload** 포함)는 "chrome는 Zig" 원칙·보안과 충돌하고, 특히 Reload는 편집 중 WebContent를 재시작해 editor recovery latch로 파일 작업을 차단한다 → **신뢰 maru-app 콘텐츠(파일 패널 셸+렌더 iframe)의 셸 entry(`main.ts`)에서 `contextmenu` preventDefault로 억제**한다(브라우저 패널=외부 콘텐츠는 `main.ts`를 로드하지 않아 무영향). 복사·붙여넣기는 메뉴바/⌘ 단축키(§4.2)가 소유한다. maru 자체 메뉴로 대체는 후속.
 - **접근성(AX)**: WKWebView는 네이티브 AX 트리, 터미널·모달(Metal)은 없음 → 혼합 상태. 마크다운 편집기에 AX 필요.
 - **콘텐츠 프로세스 크래시 복구**: `webContentProcessDidTerminate` 시 reload·에러 상태.
 - **폰트/줌·인쇄**: 저우선.

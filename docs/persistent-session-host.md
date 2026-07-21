@@ -751,9 +751,14 @@ GUI가 `*LivePtySession`을 안 드는 컴파일 타임 red test, boundary check
   닫고(runtime 유지), 겹치는 major가 없으면 `incompatible_version` 후 닫고, unknown method는 typed error, ping은 pong으로
   echo한다. registry(P3-c)를 조회해 redacted runtime metadata를 낸다. 순수 로직이라 실 socket 없이 non-macOS에서 hello/command
   계약을 고정한다.
-- **P3-d2(server socket + launch)**: 실 unix socket bind/accept·peer-cred(same-UID) 검증·read/write loop(`FrameParser`→
-  `Connection.handleFrame`→write)·connection별 bounded queue와 detached-helper on-demand launch, `maru-sessiond` entrypoint.
-  실 프로세스가 뜨는 슬라이스라 무인 별도 process smoke로 검증한다("GUI를 죽여도 PTY 살아있음"의 최초 성립 지점).
+- **P3-d2a(실 socket adapter) ✅**: `session_host/socket_server.zig`에 실 unix socket bind(owner-only 0700 dir + 0600
+  socket + `SYMLINK_NOFOLLOW` 위장 방어)·accept·peer-cred(same-UID 하드 게이트)·read/write loop(`FrameParser`→
+  `Connection.handleFrame`→`writeAll`)를 구현했다. control-plane socket과 코드를 공유하지 않는 self-contained adapter라
+  session_host codec의 순수성을 지킨다(socket path는 caller 주입). 실 macOS unix socket에 별도 스레드 client가 connect해
+  hello→hello_ack→host.info를 왕복하고 socket이 0600인지 확인하는 process smoke로 검증한다(non-macOS skip).
+- **P3-d2b(socket 발견 + launch)**: flock 기반 stale 회수, §10 socket 발견(connect-first·start lock·경로 정책), detached-helper
+  on-demand launch, `maru-sessiond` entrypoint, connection별 bounded queue(고처리량 stream backpressure). 여러 인스턴스 수명이
+  걸린 부분이라 실제 별도 프로세스 spawn smoke로 검증한다("GUI를 죽여도 host가 살아 hello에 응답"의 최초 성립 지점).
 - **P3-e(client + 재접속)**: GUI 측 hello/RPC/stream demux와 host-backed `TermRuntimeBackend`(§13 P2 계약의 원격 구현)로 GUI 종료→재실행 재접속.
 
 종료 gate: 무인 실제 별도 process smoke, detach 중 output, reconnect first snapshot, input/resize roundtrip, bounded shutdown.

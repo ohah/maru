@@ -15,8 +15,8 @@
 //!   - P3-d2a ✅: `socket_server`(실 unix socket bind/accept·peer-cred same-UID·read/write I/O loop, self-contained macOS adapter).
 //!   - P3-d2b ✅: `discovery`(§10 socket 발견 state machine·경로 — connect-first·auto-start 정책·start lock winner, 순수).
 //!   - P3-d2c ✅: `daemon`(`maru-sessiond` entrypoint — host_id·bind·poll-gated accept loop·dispatch, fork/setsid process smoke).
-//!   - P3-d2d: `maru __session-host` CLI + detached launch(fork+setsid+exec) + discovery 실 실행 + host 수명·bounded queue. ← 다음
-//!   - P3-e: client(hello/RPC/stream demux) + host-backed `TermRuntimeBackend` + GUI 재접속.
+//!   - P3-d2d ✅: `launcher`(double-fork+setsid+execv detached spawn, marker smoke) + `maru __session-host` CLI(main.zig).
+//!   - P3-e: client(hello/RPC/stream demux) + host-backed `TermRuntimeBackend` + GUI 재접속(discovery→launch→attach 배선). ← 다음
 
 const builtin = @import("builtin");
 
@@ -36,6 +36,11 @@ else
 // daemon(maru-sessiond entrypoint)도 실 socket/signal/fork syscall을 써서 macOS에서만 컴파일한다(barrel 조건부 제외).
 pub const daemon = if (builtin.os.tag == .macos)
     @import("session_host/daemon.zig")
+else
+    struct {};
+// launcher(detached-helper spawn)도 실 fork/exec/setsid를 써서 macOS에서만 컴파일한다(순수 argv 조립 test도 함께 macOS-gated).
+pub const launcher = if (builtin.os.tag == .macos)
+    @import("session_host/launcher.zig")
 else
     struct {};
 

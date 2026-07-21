@@ -63,9 +63,12 @@ src/
                         discovery.zig(§10 socket 발견 state machine·경로 — connect-first·조회 auto-start 금지·spawn 의도 start lock
                         winner·control-plane과 경로 분리, 순수 — **구현됨, P3-d2b**),
                         daemon.zig(`maru-sessiond` entrypoint `runSessionHost` — host_id 발급·socket bind·poll-gated accept loop·
-                        Connection dispatch, fork+setsid process smoke로 부모-독립 host 생존 실증, macOS 전용 — **구현됨, P3-d2c**);
-                        이후 계획: `maru __session-host` CLI + detached launch(fork+setsid+exec) + discovery 실 실행(connect·flock) +
-                        host 수명(idle grace·SIGTERM)·connection별 bounded queue(P3-d2d), client.zig(hello/RPC/stream demux, P3-e). control-plane/browser
+                        Connection dispatch, fork+setsid process smoke로 부모-독립 host 생존 실증, macOS 전용 — **구현됨, P3-d2c**),
+                        launcher.zig(detached-helper spawn — double-fork+setsid+`/dev/null` fd+execv로 host를 부모-독립 orphan으로
+                        띄움, argv 순수 조립·marker process smoke, macOS 전용 — **구현됨, P3-d2d**. `maru __session-host` CLI는
+                        src/main.zig hidden 서브커맨드);
+                        이후 계획: client.zig(hello/RPC/stream demux) + host-backed `TermRuntimeBackend` + discovery→launch→attach
+                        app 배선 + GUI 재접속 + host 수명(idle grace)·connection별 bounded queue(P3-e). control-plane/browser
                         server와 ID·wire를 공유하지 않으며, macOS launch/peer-cred/socket adapter만 platform 경계에 두고
                         codec/state machine은 OS 중립(platform import 0)으로 둔다. 테스트는 `mise run test-session-host`(기본 `test`에도 편입)
     windows/

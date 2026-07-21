@@ -111,7 +111,7 @@ fn dispatch(
     // hidden: `maru __session-host <socket>` — 영속 세션 host 프로세스 본체(§10, P3-d2c/d). 앱이 detached spawn한
     // 자식이 이 인자로 재실행돼 host 모드로 진입한다(사용자가 직접 칠 명령이 아니라 usage에 안 넣는다). macOS 전용.
     if (std.mem.eql(u8, command, "__session-host")) {
-        try runSessionHostDaemon(allocator, &args, stderr);
+        try runSessionHostDaemon(io, allocator, &args, stderr);
         return;
     }
 
@@ -254,7 +254,7 @@ fn runAppPtySmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Writ
 /// `maru __session-host <socket>` — 영속 세션 host 프로세스 본체로 진입한다(P3-d2c/d, §10). 앱 launcher가 detached
 /// spawn한 자식이 이 경로를 탄다. macOS 전용(실 socket/fork). non-macOS에서는 daemon 참조를 comptime으로 배제해
 /// 컴파일을 보존한다. dir은 socket 경로의 parent이고, host는 SIGTERM(프로세스 종료)까지 accept loop를 돈다.
-fn runSessionHostDaemon(allocator: std.mem.Allocator, args: anytype, stderr: *std.Io.Writer) !void {
+fn runSessionHostDaemon(io: std.Io, allocator: std.mem.Allocator, args: anytype, stderr: *std.Io.Writer) !void {
     if (builtin.os.tag == .macos) {
         const session_host = @import("platform/macos/session_host.zig");
         const socket_path = args.next() orelse {
@@ -269,7 +269,7 @@ fn runSessionHostDaemon(allocator: std.mem.Allocator, args: anytype, stderr: *st
         defer allocator.free(dir_z);
         const socket_z = try allocator.dupeZ(u8, socket_path);
         defer allocator.free(socket_z);
-        session_host.daemon.runSessionHost(allocator, dir_z, socket_z) catch |err| {
+        session_host.daemon.runSessionHost(allocator, io, dir_z, socket_z) catch |err| {
             try stderr.print("maru __session-host failed: {s}\n", .{@errorName(err)});
             return error.UnknownCommand;
         };

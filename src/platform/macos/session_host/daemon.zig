@@ -19,6 +19,7 @@ const c = std.c;
 const posix = std.posix;
 const socket_server = @import("socket_server.zig");
 const reg = @import("registry.zig");
+const runtime_manager = @import("runtime_manager.zig");
 
 pub const RunError = socket_server.BindError || error{OutOfMemory};
 
@@ -38,16 +39,24 @@ fn newHostId() u128 {
 
 /// session host 본체. `dir_path`(0700)에 `socket_path`(0600)로 bind하고 SIGTERM(프로세스 종료)까지 accept loop를 돈다.
 /// 개별 연결의 serve 오류는 무시하고 다른 client를 계속 받는다(한 client가 host를 못 죽인다, §9 bounded client).
+/// `io`는 `runtime_manager`가 실 PTY runtime(reader/큐)을 소유하는 데 쓴다 — spawn/terminate가 이 io 위에서 돈다.
 pub fn runSessionHost(
     allocator: std.mem.Allocator,
+    io: std.Io,
     dir_path: [:0]const u8,
     socket_path: [:0]const u8,
 ) RunError!void {
     var registry = reg.TerminalRuntimeRegistry.init(allocator);
     defer registry.deinit();
 
+    // 실 runtime 소유자(app InProcessTermBackend 재사용). registry를 함께 참조해 spawn이 재접속 조회 대상으로 등록한다.
+    var manager: runtime_manager.RuntimeManager = undefined;
+    manager.init(allocator, io, &registry);
+    defer manager.deinit();
+
     var server = try socket_server.SocketServer.bind(allocator, dir_path, socket_path, newHostId(), &registry);
     defer server.deinit();
+    server.runtime_ops = manager.runtimeOps(); // 이제 이 host는 read-only가 아니라 runtime.spawn/terminate를 처리한다.
 
     while (true) {
         switch (server.pollReady(poll_timeout_ms)) {
@@ -102,8 +111,9 @@ test "daemon: forked host survives parent-independent (setsid) and answers hello
     if (child == 0) {
         // 자식 = host. setsid로 부모와 독립된 세션 리더가 된다(부모가 죽어도 SIGHUP·세션 종료에 안 묶임).
         _ = c.setsid();
-        // 자식은 곧 _exit하므로 leak 검증이 필요 없다 — page_allocator로 충분.
-        runSessionHost(std.heap.page_allocator, dir_path, socket_path) catch {};
+        // 자식은 곧 _exit하므로 leak 검증이 필요 없다 — page_allocator로 충분. io는 blocking testing.io면 족하다
+        // (이 host 테스트는 runtime을 spawn하지 않고 hello/host.info만 응답하므로 io는 backend 생성에만 쓰인다).
+        runSessionHost(std.heap.page_allocator, testing.io, dir_path, socket_path) catch {};
         std.c._exit(0); // atexit/deinit 재실행 없이 즉시 종료(fork 자식 규약).
     }
 

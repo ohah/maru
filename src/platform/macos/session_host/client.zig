@@ -212,7 +212,7 @@ test "client: connects to a forked host, agrees on host_id, and calls host.info"
     if (child < 0) return error.SkipZigTest;
     if (child == 0) {
         _ = c.setsid();
-        daemon.runSessionHost(std.heap.page_allocator, dir_path, socket_path) catch {};
+        daemon.runSessionHost(std.heap.page_allocator, testing.io, dir_path, socket_path) catch {};
         std.c._exit(0);
     }
     defer {
@@ -251,4 +251,71 @@ test "client: connects to a forked host, agrees on host_id, and calls host.info"
 extern "c" fn usleep(usec: c_uint) c_int;
 fn usleepMs(ms: c_uint) c_int {
     return usleep(ms * 1000);
+}
+
+/// response JSON에서 `runtime_id`(server가 `{x:0>32}`로 낸 32-hex)를 뽑는다. 없으면 null. 테스트 helper — 실 wire
+/// 응답에서 runtime_id를 되읽어 terminate에 되먹인다(nested JSON 파싱 없이 고정 폭 hex만 복사).
+fn extractRuntimeId(payload: []const u8) ?[32]u8 {
+    const key = "\"runtime_id\":\"";
+    const start = std.mem.indexOf(u8, payload, key) orelse return null;
+    const hex_start = start + key.len;
+    if (hex_start + 32 > payload.len) return null;
+    var out: [32]u8 = undefined;
+    @memcpy(&out, payload[hex_start .. hex_start + 32]);
+    return out;
+}
+
+test "client: spawns, lists, and terminates a real runtime on a forked host over the wire" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+
+    var dir_buf: [256]u8 = undefined;
+    const dir_path = std.fmt.bufPrintZ(&dir_buf, "/tmp/maru-sh-spawn-{d}", .{c.getpid()}) catch return error.SkipZigTest;
+    var sp_buf: [320]u8 = undefined;
+    const socket_path = std.fmt.bufPrintZ(&sp_buf, "{s}/control.sock", .{dir_path}) catch return error.SkipZigTest;
+
+    const child = c.fork();
+    if (child < 0) return error.SkipZigTest;
+    if (child == 0) {
+        _ = c.setsid();
+        daemon.runSessionHost(std.heap.page_allocator, testing.io, dir_path, socket_path) catch {};
+        std.c._exit(0);
+    }
+    defer {
+        _ = c.kill(child, posix.SIG.TERM);
+        var status: c_int = undefined;
+        _ = c.waitpid(child, &status, 0);
+        _ = c.unlink(socket_path.ptr);
+        _ = c.rmdir(dir_path.ptr);
+    }
+
+    var client: Client = blk: {
+        var attempts: usize = 0;
+        while (attempts < 150) : (attempts += 1) {
+            if (Client.connect(allocator, socket_path, "gui")) |cl| break :blk cl else |_| _ = usleepMs(20);
+        }
+        try testing.expect(false); // host가 3초 안에 안 떴다.
+        return;
+    };
+    defer client.deinit();
+
+    // runtime.spawn: 실 PTY runtime을 host에 띄우고 runtime_id를 받는다(client→socket→dispatch→RuntimeOps→forkpty 전 경로).
+    const spawn_resp = try client.call("runtime.spawn", "{\"argv\":[\"/bin/sh\",\"-c\",\"exit 0\"],\"cols\":40,\"rows\":10}");
+    defer allocator.free(spawn_resp);
+    const rid = extractRuntimeId(spawn_resp) orelse {
+        try testing.expect(false); // 응답에 runtime_id가 없다.
+        return;
+    };
+
+    // runtime.list: 방금 띄운 runtime이 재접속 조회에 보인다(같은 32-hex).
+    const list_resp = try client.call("runtime.list", null);
+    defer allocator.free(list_resp);
+    try testing.expect(std.mem.indexOf(u8, list_resp, rid[0..]) != null);
+
+    // runtime.terminate: 그 runtime을 내린다(host가 PTY/자식/reader를 회수).
+    var term_buf: [64]u8 = undefined;
+    const term_params = std.fmt.bufPrint(&term_buf, "{{\"runtime_id\":\"{s}\"}}", .{rid}) catch return error.SkipZigTest;
+    const term_resp = try client.call("runtime.terminate", term_params);
+    defer allocator.free(term_resp);
+    try testing.expect(std.mem.indexOf(u8, term_resp, "terminated") != null);
 }

@@ -61,6 +61,9 @@ pub const SocketServer = struct {
     allocator: std.mem.Allocator,
     host_id: u128,
     registry: *reg.TerminalRuntimeRegistry,
+    /// host가 실 runtime 소유(spawn/terminate)를 위임하는 vtable(§4). null이면 read-only host(조회만) — daemon이
+    /// bind 후 `runtime_manager.runtimeOps()`로 채운다. connection마다 이 값을 그대로 넘겨 spawn/terminate를 라우팅한다.
+    runtime_ops: ?server_mod.RuntimeOps = null,
 
     pub const backlog: c_uint = 16;
 
@@ -158,6 +161,7 @@ pub const SocketServer = struct {
         var parser = framing.FrameParser.init(self.allocator);
         defer parser.deinit();
         var conn = server_mod.Connection.init(self.allocator, self.host_id, self.registry);
+        conn.runtime_ops = self.runtime_ops; // host면 spawn/terminate 위임, read-only면 null(unauthorized).
 
         var buf: [4096]u8 = undefined;
         while (true) {

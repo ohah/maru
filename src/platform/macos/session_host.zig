@@ -18,8 +18,8 @@
 //!   - P3-d2d ✅: `launcher`(double-fork+setsid+execv detached spawn, marker smoke) + `maru __session-host` CLI(main.zig).
 //!   - P3-e1 ✅: `client`(GUI/CLI hello/RPC — connect·hello·host_id 확정·read-only command 왕복, fork host roundtrip smoke).
 //!   - P3-e2a ✅: `server`에 runtime.spawn/terminate dispatch + `RuntimeOps` seam(중립 vtable, host만 설정, read-only는 unauthorized).
-//!   - P3-e2b: 실 `runtime_manager`(app InProcessTermBackend 재사용 + runtime_id↔handle 매핑) + daemon 배선 + client 실 spawn smoke. ← 다음
-//!   - P3-e2c/d/e: attach+input/resize / snapshot·delta stream demux / host-backed `TermRuntimeBackend`.
+//!   - P3-e2b ✅: 실 `runtime_manager`(app `InProcessTermBackend` 재사용 + runtime_id↔handle 매핑) + daemon 배선(SocketServer.runtime_ops).
+//!   - P3-e2c/d/e: attach+input/resize / snapshot·delta stream demux / host-backed `TermRuntimeBackend`. ← 다음
 //!   - P3-e3: `app_session` 배선(discovery→launch→attach) + GUI 재접속(manifest runtime_handle).
 
 const builtin = @import("builtin");
@@ -50,6 +50,12 @@ else
 // client(GUI/CLI가 host에 connect)도 실 socket을 써서 macOS에서만 컴파일한다(순수 JSON helper test도 함께 macOS-gated).
 pub const client = if (builtin.os.tag == .macos)
     @import("session_host/client.zig")
+else
+    struct {};
+// runtime_manager(실 runtime 소유 — app InProcessTermBackend 재사용)는 `@import("maru")`로 app 스택을 끌어와 macOS에서만
+// 컴파일한다. codec(protocol/framing/screen_stream/registry/server)은 여전히 maru를 모르는 platform-import-0 순수 계층이다.
+pub const runtime_manager = if (builtin.os.tag == .macos)
+    @import("session_host/runtime_manager.zig")
 else
     struct {};
 

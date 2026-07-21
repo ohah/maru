@@ -62,6 +62,8 @@ export function atomicProjectionBatchWireBytes(
   return bytes;
 }
 
+// 활성 atomic widget(이미지·수식·fenced·Mermaid)의 batch·retention 상한. 문서의 "atomic widget batch≤8"이
+// 이 상수다. 제거된 legacy fragment 모델의 "fragment당 4 diagrams"와는 무관하다(docs/file-panel.md 참조).
 export const maxAtomicProjectionRequests = 8;
 export const maxAtomicAssetGrants = 8;
 
@@ -79,6 +81,9 @@ export const maxAtomicSourceBytes = {
   "fenced-code": 256 * 1024,
   mermaid: 32 * 1024,
 } as const satisfies Readonly<Record<AtomicRole, number>>;
+// Mermaid source의 **줄 개수** 상한(줄바꿈 수 기준). Zig admission의 `max_line_bytes`(mermaid_coordinator.zig)는
+// 같은 512지만 **한 줄의 바이트** 상한으로 축이 다르다: 513개 짧은 줄은 여기서, 513바이트 단일 줄은 Zig가
+// 먼저 source-preserving으로 강등한다(둘 다 fail-safe). docs/file-panel.md "Mermaid fence 계약" 단일 출처.
 export const maxMermaidSourceLines = 512;
 
 let atomicSourceHashProbe: ((bytes: number) => void) | null = null;

@@ -102,6 +102,11 @@ struct MermaidHelperSmoke {
 
         // 이전 2초 gate보다 느리지만 새 cold 5초 안인 결과는 정상 commit되어야 한다. helper env는 smoke에서만
         // 주입되며 제품 입력 문자열이 timing hook을 열지 않는다.
+        //
+        // harness outer timeout은 제품 cold deadline(5.0s) + fallback grace(→ 5.25s)보다 커야 한다.
+        // 그렇지 않으면(옛 4.5s) 느린 runner에서 제품이 아직 정상 accept할 결과를 harness가 먼저 잘라
+        // false-fail이 난다. 성공·실패 판정은 여전히 Zig deadline(`deadline_expirations==0`)이 소유하고
+        // harness는 그 판정을 관측할 시간 여유만 준다. 정상 cold render pump(위 7.0s)와 같은 값으로 맞춘다.
         maru_macos_mermaid_test_reset()
         let delayedResult = MermaidRenderCoordinator(
             validation: .smokeDelayedResult(helperURL, delayMs: 2_600)
@@ -111,7 +116,7 @@ struct MermaidHelperSmoke {
             var snapshot = MaruMermaidCoordinatorSnapshot()
             maru_macos_mermaid_snapshot(&snapshot)
             return snapshot.accepted_results == 1
-        }, timeout: 4.5)
+        }, timeout: 7.0)
         var delayedAccepted = MaruMermaidAcceptedResult()
         var delayedSvg = [UInt8](repeating: 0, count: Int(MARU_MERMAID_PROTOCOL_MAX_SVG_BYTES))
         let delayedTake = delayedSvg.withUnsafeMutableBufferPointer {
@@ -129,7 +134,9 @@ struct MermaidHelperSmoke {
         maru_macos_mermaid_test_reset()
         let externalAPIs = MermaidRenderCoordinator(validation: .smoke(helperURL))
         precondition(admit(widget: 91, source: Data("__MARU_TEST_EXTERNAL_APIS__".utf8)) == 0)
-        pump(externalAPIs, until: { externalAPIs.terminalResultCount == 1 }, timeout: 4.0)
+        // cold helper의 첫 full render→terminal을 기다린다(정상 cold render pump와 같은 7.0s: harness가
+        // 제품 cold deadline 5.25s를 삼키지 않게). 아래 subresource/navigation/duplicate/flood 동일.
+        pump(externalAPIs, until: { externalAPIs.terminalResultCount == 1 }, timeout: 7.0)
         var externalAPISnapshot = MaruMermaidCoordinatorSnapshot()
         maru_macos_mermaid_snapshot(&externalAPISnapshot)
         checks["external_api_probe_counted_and_rejected"] = externalAPIs.terminalResultCount == 1 &&
@@ -154,7 +161,7 @@ struct MermaidHelperSmoke {
         maru_macos_mermaid_test_reset()
         let externalSubresource = MermaidRenderCoordinator(validation: .smoke(helperURL))
         precondition(admit(widget: 95, source: Data("__MARU_TEST_EXTERNAL_SUBRESOURCE__".utf8)) == 0)
-        pump(externalSubresource, until: { externalSubresource.terminalResultCount == 1 }, timeout: 4.0)
+        pump(externalSubresource, until: { externalSubresource.terminalResultCount == 1 }, timeout: 7.0)
         var externalSubresourceSnapshot = MaruMermaidCoordinatorSnapshot()
         maru_macos_mermaid_snapshot(&externalSubresourceSnapshot)
         checks["external_subresource_csp_probe_counted_and_rejected"] =
@@ -166,7 +173,7 @@ struct MermaidHelperSmoke {
         maru_macos_mermaid_test_reset()
         let externalNavigation = MermaidRenderCoordinator(validation: .smoke(helperURL))
         precondition(admit(widget: 92, source: Data("__MARU_TEST_EXTERNAL_NAVIGATION__".utf8)) == 0)
-        pump(externalNavigation, until: { externalNavigation.terminalResultCount == 1 }, timeout: 4.0)
+        pump(externalNavigation, until: { externalNavigation.terminalResultCount == 1 }, timeout: 7.0)
         var externalNavigationSnapshot = MaruMermaidCoordinatorSnapshot()
         maru_macos_mermaid_snapshot(&externalNavigationSnapshot)
         checks["external_navigation_probe_counted_and_rejected"] = externalNavigation.terminalResultCount == 1 &&
@@ -177,7 +184,7 @@ struct MermaidHelperSmoke {
         maru_macos_mermaid_test_reset()
         let duplicate = MermaidRenderCoordinator(validation: .smoke(helperURL))
         precondition(admit(widget: 2, source: Data("__MARU_TEST_DUPLICATE__".utf8)) == 0)
-        pump(duplicate, until: { duplicate.staleResultCount == 1 }, timeout: 3.0)
+        pump(duplicate, until: { duplicate.staleResultCount == 1 }, timeout: 7.0)
         var duplicateSnapshot = MaruMermaidCoordinatorSnapshot()
         maru_macos_mermaid_snapshot(&duplicateSnapshot)
         let duplicateDiagnostics = duplicate.diagnostics()
@@ -201,7 +208,7 @@ struct MermaidHelperSmoke {
             var snapshot = MaruMermaidCoordinatorSnapshot()
             maru_macos_mermaid_snapshot(&snapshot)
             return snapshot.in_flight == 0 && snapshot.termination_in_progress == 0 && flooding.terminationAckCount == 1
-        }, timeout: 3.0)
+        }, timeout: 7.0)
         var floodSnapshot = MaruMermaidCoordinatorSnapshot()
         maru_macos_mermaid_snapshot(&floodSnapshot)
         checks["result_overflow_fail_closed"] = flooding.terminalResultCount == 0 && flooding.staleResultCount > 0

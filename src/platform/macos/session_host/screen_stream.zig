@@ -84,9 +84,10 @@ pub const Rect = struct {
     h: u16 = 0,
 };
 
-/// 같은 스타일의 연속 cell 묶음. `width`는 grapheme 셀 폭(1/2), `count`는 이 run이 채우는 **grid cell 수**(wide면
-/// width=2이고 count는 여전히 셀 수라 grapheme 하나가 2 cell을 차지하면 count=2다 — 조립기가 continuation 불일치를
-/// 검증한다). `grapheme`은 UTF-8이고 codec 버퍼를 참조한다(decode 후 caller가 버퍼를 유지하는 zero-copy). 색은 resolved RGB.
+/// 같은 스타일·같은 grapheme의 연속 묶음. `width`는 grapheme 셀 폭(1/2), `count`는 그 grapheme의 **반복 수**다.
+/// 이 run이 채우는 grid cell 수 = `width * count`(wide "한" 하나면 width=2·count=1·cell=2, "aaa"면 width=1·count=3·cell=3).
+/// 조립기는 Σ(width*count)==cols로 wide-cell continuation 불일치를 검증한다(rowWidthMatches). `grapheme`은 UTF-8이고
+/// codec 버퍼를 참조한다(decode 후 caller가 버퍼를 유지하는 zero-copy). 색은 resolved RGB.
 pub const Run = struct {
     grapheme: []const u8,
     width: u8 = 1,
@@ -180,8 +181,12 @@ pub const DecodeError = error{
     OutOfMemory,
 };
 
-/// str/blob length cap(바이트). 단일 grapheme·mime는 이보다 훨씬 작지만, 손상 length가 거대 alloc을 유발하지 않게 막는다.
+/// str(grapheme·mime) length cap(바이트). 단일 grapheme·mime는 이보다 훨씬 작지만, 손상 length가 거대 alloc을 유발하지 않게 막는다.
 pub const max_string_len: usize = 64 * 1024;
+/// image_blob 원본 바이트 cap. grapheme/mime과 달리 kitty/sixel 이미지 원본은 수백 KiB라, str cap(64 KiB)이 아니라 단일
+/// binary chunk 상한(1 MiB)에 맞춘다 — 64 KiB로 막으면 큰 인라인 이미지가 있는 화면을 재접속 시 직렬화하지 못한다.
+/// screen_stream은 protocol을 import하지 않으므로 그 `max_binary_chunk`(1 MiB)를 자체 상수로 미러한다.
+pub const max_image_blob: usize = 1024 * 1024;
 /// 한 row의 run 수 cap. 폭 8K 화면도 8K run 미만이라 넉넉하며 손상 count를 막는다.
 pub const max_runs_per_row: usize = 65536;
 
@@ -282,10 +287,10 @@ const BodyReader = struct {
         self.pos += len;
         return s;
     }
-    /// 임의 바이트 blob(UTF-8 검증 안 함 — image 원본). length는 별도 u32.
+    /// 임의 바이트 blob(UTF-8 검증 안 함 — image 원본). length는 별도 u32. cap은 image 전용(1 MiB), str(64 KiB) 아님.
     fn bytesField(self: *BodyReader) DecodeError![]const u8 {
         const len = try self.u32v();
-        if (len > max_string_len) return error.LengthOverflow;
+        if (len > max_image_blob) return error.LengthOverflow;
         try self.need(len);
         const s = self.bytes[self.pos .. self.pos + len];
         self.pos += len;
@@ -404,7 +409,7 @@ pub fn encodeImageBlob(allocator: std.mem.Allocator, header: RecordHeader, blob:
     const w = BodyWriter{ .buf = &body, .allocator = allocator };
     try w.u64v(blob.blob_id);
     try w.str(blob.mime);
-    if (blob.bytes.len > max_string_len) return error.LengthOverflow;
+    if (blob.bytes.len > max_image_blob) return error.LengthOverflow; // image 전용 cap(1 MiB) — str(64 KiB) 아님
     try w.u32v(@intCast(blob.bytes.len));
     body.appendSlice(allocator, blob.bytes) catch return error.OutOfMemory;
     return finishRecord(allocator, .{ .kind = .image_blob, .generation = header.generation, .sequence = header.sequence, .chunk_index = header.chunk_index, .chunk_count = header.chunk_count }, body.items);

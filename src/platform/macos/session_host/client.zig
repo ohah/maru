@@ -42,9 +42,15 @@ pub const Client = struct {
     /// host socket에 connect하고 hello를 왕복한다. 성공하면 `host_id`가 채워진 Client다. host가 없으면 ConnectFailed
     /// (discovery가 이 신호로 spawn/host_unavailable을 가른다, P3-d2b). version 불일치는 IncompatibleVersion.
     pub fn connect(allocator: std.mem.Allocator, socket_path: [:0]const u8, client_kind: []const u8) ClientError!Client {
+        // over-long path는 sun_path(104B)를 넘겨 slice-bounds panic이 되므로 syscall 전에 거부한다(bind의 socketPathFits 대칭).
+        if (!socket_server.socketPathFits(socket_path.len)) return error.ConnectFailed;
         const fd = c.socket(posix.AF.UNIX, posix.SOCK.STREAM, 0);
         if (fd < 0) return error.ConnectFailed;
         errdefer _ = c.close(fd);
+        // host가 죽은 socket에 write하면 SIGPIPE로 **프로세스가 죽는다** — EPIPE로 바꿔 catchable하게 한다(server accept 경로와 대칭).
+        socket_server.setNoSigPipe(fd);
+        // host가 연결만 받고(backlog) 응답하지 않으면 read가 영원히 막힌다 — recv timeout으로 ConnectionClosed로 빠져나온다.
+        setReadTimeoutMs(fd, 5000);
         var addr = posix.sockaddr.un{ .family = posix.AF.UNIX, .path = undefined };
         @memset(&addr.path, 0);
         @memcpy(addr.path[0..socket_path.len], socket_path);
@@ -88,23 +94,40 @@ pub const Client = struct {
 
         const resp = try self.readFrame();
         defer resp.deinit(self.allocator);
-        if (resp.header.kind != .response) return error.ProtocolError;
+        // kind와 request_id를 함께 확인한다 — unsolicited/out-of-order frame을 이 call의 응답으로 오귀속하지 않는다.
+        if (resp.header.kind != .response or resp.header.request_id != request_id) return error.ProtocolError;
         return self.allocator.dupe(u8, resp.payload) catch return error.OutOfMemory;
     }
 
-    /// 다음 완성 frame을 읽는다(partial read 재조립). EOF는 ConnectionClosed, codec 위반은 ProtocolError.
+    /// 다음 완성 frame을 읽는다(partial read 재조립). EOF/timeout는 ConnectionClosed, codec 위반은 ProtocolError.
     fn readFrame(self: *Client) ClientError!framing.Frame {
         var buf: [4096]u8 = undefined;
         while (true) {
             if (self.parser.next() catch return error.ProtocolError) |frame| return frame;
             const n = c.read(self.fd, &buf, buf.len);
-            if (n <= 0) return error.ConnectionClosed;
+            if (n < 0) {
+                if (posix.errno(n) == .INTR) continue; // 시그널 인터럽트는 재시도(timeout/EAGAIN·기타 오류는 종료로).
+                return error.ConnectionClosed;
+            }
+            if (n == 0) return error.ConnectionClosed; // EOF.
             self.parser.push(buf[0..@intCast(n)]) catch return error.OutOfMemory;
         }
     }
 };
 
+/// recv timeout(ms)을 건다 — host가 연결만 받고 응답하지 않을 때 `readFrame`이 영원히 막히지 않게 한다(control_socket 관용구).
+fn setReadTimeoutMs(fd: c.fd_t, ms: u32) void {
+    var tv = posix.timeval{ .sec = @intCast(ms / 1000), .usec = @intCast((ms % 1000) * 1000) };
+    _ = c.setsockopt(fd, c.SOL.SOCKET, c.SO.RCVTIMEO, &tv, @sizeOf(posix.timeval));
+}
+
 // ── 순수 JSON helper(client wire) ────────────────────────────────────────────
+//
+// 신뢰 계약: `client_kind`·`method`는 **코드 내부 고정 리터럴**만 받는다(client_kind∈{"gui","cli"}, method는 정의된
+// 명령 이름 집합). 그래서 JSON escape 없이 그대로 interpolate한다 — 이 값들엔 `"`·`\`·제어문자가 없다. `params_json`은
+// 이미 유효한 JSON object 문자열이라는 계약이라 raw로 싣는다(호출자가 조립 시 escape 책임). runtime.spawn(P3-e2b)처럼
+// **임의 바이트(argv/cwd)**를 실어야 하는 params는 반드시 실 JSON encoder(server.zig `stringify` 대칭)로 만들어 넘긴다
+// — 여기서 hand-interpolation하지 않는다.
 
 fn buildHello(allocator: std.mem.Allocator, client_kind: []const u8) error{OutOfMemory}![]u8 {
     return std.fmt.allocPrint(allocator, "{{\"protocol_min\":{d},\"protocol_max\":{d},\"client_kind\":\"{s}\"}}", .{ protocol.version_major, protocol.version_major, client_kind });

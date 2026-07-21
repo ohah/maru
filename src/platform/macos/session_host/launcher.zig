@@ -17,6 +17,8 @@ const posix = std.posix;
 
 // execv는 std.c 미노출이라 직접 extern(현재 environ 상속). launcher는 macOS 전용이라 링크 대상이 libc다.
 extern "c" fn execv(path: [*:0]const u8, argv: [*:null]const ?[*:0]const u8) c_int;
+// 상속 fd를 명시적으로 닫기 위한 descriptor table 크기(soft limit, macOS는 OPEN_MAX로 상한). std.c 미노출이라 extern.
+extern "c" fn getdtablesize() c_int;
 
 /// `maru <exe>`를 session host로 전환하는 hidden 서브커맨드 이름. main.zig dispatch와 이 launcher가 공유하는 단일 출처다.
 pub const subcommand = "__session-host";
@@ -55,6 +57,10 @@ pub fn spawnDetached(allocator: std.mem.Allocator, exe_path: [:0]const u8, args:
         const pid2 = c.fork();
         if (pid2 < 0) std.c._exit(127);
         if (pid2 == 0) {
+            // stdio 위 상속 fd(GUI socket·PTY master·control-plane·capability fd)를 exec 전에 모두 닫는다. fork는 부모
+            // fd 테이블을 복제하고 exec는 CLOEXEC 아닌 fd를 그대로 넘기므로, 닫지 않으면 detached host가 GUI 자원을
+            // 물려받아 fd 누수·정보 노출이 생긴다(§11). 그다음 0/1/2를 /dev/null로 돌린다(닫힌 3번을 재사용).
+            closeInheritedFds();
             redirectStdioToDevNull();
             _ = execv(exe_path.ptr, @ptrCast(argv.ptr));
             std.c._exit(127); // execv는 성공 시 반환하지 않는다 — 여기 오면 exec 실패.
@@ -64,6 +70,18 @@ pub fn spawnDetached(allocator: std.mem.Allocator, exe_path: [:0]const u8, args:
     // 부모(GUI): 중간 자식을 reap해 zombie를 안 남긴다. 손자(host)는 부모와 무관하게 산다.
     var status: c_int = undefined;
     _ = c.waitpid(pid1, &status, 0);
+}
+
+/// stdio(0·1·2) 위의 상속 fd를 모두 닫는다. CLOEXEC에 의존하지 않고 fd 3..getdtablesize()를 명시적으로 close해
+/// detached host가 부모(GUI) fd를 하나도 물려받지 않게 한다(best-effort — 이미 닫힌 fd의 close는 무해). redirect보다
+/// **먼저** 불러야 /dev/null redirect가 쓰는 fd 3이 곧바로 닫히지 않는다.
+fn closeInheritedFds() void {
+    const max_fd = getdtablesize();
+    if (max_fd <= 3) return;
+    var fd: c_int = 3;
+    while (fd < max_fd) : (fd += 1) {
+        _ = c.close(fd);
+    }
 }
 
 /// detached host의 std fd를 `/dev/null`로 돌린다(부모 터미널 미점유). 열기 실패해도 exec는 진행한다(best-effort).

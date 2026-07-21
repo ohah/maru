@@ -105,7 +105,7 @@ pub const Connection = struct {
         if (!(pmin <= protocol.version_major and protocol.version_major <= pmax)) {
             const body = try self.errorJson(.incompatible_version);
             defer self.allocator.free(body);
-            const wire = try self.encode(.hello_ack, frame.header.request_id, 0, body);
+            const wire = try self.encodeSmall(.hello_ack, frame.header.request_id, 0, body);
             self.state = .closed;
             return .{ .reply_and_close = wire };
         }
@@ -114,15 +114,15 @@ pub const Connection = struct {
         self.state = .ready;
         const ack = try self.helloAckJson();
         defer self.allocator.free(ack);
-        const wire = try self.encode(.hello_ack, frame.header.request_id, 0, ack);
+        const wire = try self.encodeSmall(.hello_ack, frame.header.request_id, 0, ack);
         return .{ .reply = wire };
     }
 
     fn handleReady(self: *Connection, frame: framing.Frame) HandleError!Action {
         switch (frame.header.kind) {
             .ping => {
-                // diagnostic nonce를 그대로 되돌린다(payload passthrough).
-                const wire = try self.encode(.pong, frame.header.request_id, frame.header.stream_id, frame.payload);
+                // diagnostic nonce를 그대로 되돌린다(payload passthrough). ping·pong cap이 같아 재초과 없음.
+                const wire = try self.encodeSmall(.pong, frame.header.request_id, frame.header.stream_id, frame.payload);
                 return .{ .reply = wire };
             },
             .request => return self.dispatchRequest(frame),
@@ -157,11 +157,11 @@ pub const Connection = struct {
         if (std.mem.eql(u8, method, "host.info")) {
             const body = try self.hostInfoJson();
             defer self.allocator.free(body);
-            return .{ .reply = try self.encodeResult(frame.header.request_id, body) };
+            return self.replyResult(frame.header.request_id, body);
         } else if (std.mem.eql(u8, method, "runtime.list")) {
             const body = try self.runtimeListJson();
             defer self.allocator.free(body);
-            return .{ .reply = try self.encodeResult(frame.header.request_id, body) };
+            return self.replyResult(frame.header.request_id, body);
         } else if (std.mem.eql(u8, method, "runtime.get")) {
             const id_hex = if (params) |p| strField(p, "runtime_id") else null;
             const id = if (id_hex) |h| parseHex128(h) else null;
@@ -169,7 +169,7 @@ pub const Connection = struct {
             const entry = self.registry.get(id.?) orelse return self.replyError(frame.header.request_id, .runtime_not_found);
             const body = try self.runtimeMetaJson(entry);
             defer self.allocator.free(body);
-            return .{ .reply = try self.encodeResult(frame.header.request_id, body) };
+            return self.replyResult(frame.header.request_id, body);
         } else if (std.mem.eql(u8, method, "runtime.spawn")) {
             return self.dispatchSpawn(frame.header.request_id, params);
         } else if (std.mem.eql(u8, method, "runtime.terminate")) {
@@ -210,7 +210,7 @@ pub const Connection = struct {
         defer self.allocator.free(id_hex);
         const body = try self.stringify(.{ .result = .{ .runtime_id = id_hex } });
         defer self.allocator.free(body);
-        return .{ .reply = try self.encode(.response, request_id, 0, body) };
+        return self.replyResult(request_id, body);
     }
 
     /// `runtime.terminate`: read-only host면 unauthorized. `runtime_id`를 파싱해 `RuntimeOps.terminate`로 종료(멱등).
@@ -222,7 +222,7 @@ pub const Connection = struct {
         ops.terminate(ops.ctx, id.?);
         const body = try self.stringify(.{ .result = .{ .terminated = true } });
         defer self.allocator.free(body);
-        return .{ .reply = try self.encode(.response, request_id, 0, body) };
+        return self.replyResult(request_id, body);
     }
 
     // ── JSON 응답 빌더 ──────────────────────────────────────────────────────
@@ -272,24 +272,41 @@ pub const Connection = struct {
 
     // ── low-level helpers ──────────────────────────────────────────────────
 
-    /// result body(JSON object)를 `{"result": <body>}`가 아니라 이미 `result`를 포함한 완성 JSON으로 만들지 않고,
-    /// dispatch가 넘긴 완성 JSON(예: `{"result":{...}}`)을 그대로 response frame에 싣는다.
-    fn encodeResult(self: *Connection, request_id: u64, json: []const u8) HandleError![]u8 {
-        return self.encode(.response, request_id, 0, json);
-    }
-
     fn replyError(self: *Connection, request_id: u64, code: protocol.ErrorCode) HandleError!Action {
         const body = try self.errorJson(code);
         defer self.allocator.free(body);
-        return .{ .reply = try self.encode(.response, request_id, 0, body) };
+        return .{ .reply = try self.encodeSmall(.response, request_id, 0, body) };
     }
 
-    fn encode(self: *Connection, kind: protocol.Kind, request_id: u64, stream_id: u64, payload: []const u8) HandleError![]u8 {
+    const FrameError = error{ OutOfMemory, PayloadTooLarge };
+
+    fn encode(self: *Connection, kind: protocol.Kind, request_id: u64, stream_id: u64, payload: []const u8) FrameError![]u8 {
         return framing.encodeFrame(self.allocator, .{ .kind = kind, .request_id = request_id, .stream_id = stream_id }, payload) catch |e| switch (e) {
             error.OutOfMemory => error.OutOfMemory,
-            // 응답이 control cap을 넘는 건 내부 결함이다(host가 만든 응답이므로). 닫기보다 OOM으로 상위에 알린다.
-            error.PayloadTooLarge, error.BadMagic, error.UnknownRequiredFrame => error.OutOfMemory,
+            error.PayloadTooLarge => error.PayloadTooLarge,
+            // encodeFrame은 직렬화만 하므로 decode 계열(magic·unknown kind) error를 낼 수 없다.
+            error.BadMagic, error.UnknownRequiredFrame => unreachable,
         };
+    }
+
+    /// 크기가 고정적으로 작은 body(hello_ack·typed error·pong nonce)를 frame으로 싣는다. 이들은 control cap(256 KiB)을
+    /// 넘을 수 없어 PayloadTooLarge는 도달 불가다(넘으면 codec 불변식 위반). result body는 `replyResult`를 써야 한다.
+    fn encodeSmall(self: *Connection, kind: protocol.Kind, request_id: u64, stream_id: u64, payload: []const u8) HandleError![]u8 {
+        return self.encode(kind, request_id, stream_id, payload) catch |e| switch (e) {
+            error.OutOfMemory => error.OutOfMemory,
+            error.PayloadTooLarge => unreachable,
+        };
+    }
+
+    /// result JSON을 response frame으로 싣되, control cap을 넘으면 connection을 끊지 않고 `payload_too_large` typed
+    /// error로 응답한다(client가 request_id로 상관지을 수 있게, §10). runtime.list처럼 runtime 수에 비례해 커지는
+    /// 응답을 조용히 드롭하지 않기 위함이다. error body는 짧아 재초과하지 않는다.
+    fn replyResult(self: *Connection, request_id: u64, json: []const u8) HandleError!Action {
+        const wire = self.encode(.response, request_id, 0, json) catch |e| switch (e) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.PayloadTooLarge => return self.replyError(request_id, .payload_too_large),
+        };
+        return .{ .reply = wire };
     }
 
     fn stringify(self: *Connection, value: anytype) HandleError![]u8 {
@@ -474,6 +491,30 @@ test "server: host.info and runtime.list/get dispatch registry state after hello
         defer if (r.frame) |f| f.deinit(testing.allocator);
         try testing.expect(std.mem.indexOf(u8, r.frame.?.payload, "runtime_not_found") != null);
     }
+}
+
+test "server: oversize result replies payload_too_large instead of dropping the connection" {
+    const allocator = testing.allocator;
+    var registry = reg.TerminalRuntimeRegistry.init(allocator);
+    defer registry.deinit();
+    // runtime.list JSON이 control cap(256 KiB)을 넘도록 충분히 많은 runtime을 등록한다(각 meta ~135B).
+    var i: u128 = 1;
+    while (i <= 2600) : (i += 1) {
+        _ = try registry.register(i, 80, 24);
+    }
+    var conn = Connection.init(allocator, 0xF00D, &registry);
+    {
+        const h = try feedJson(&conn, .hello, 1, "{\"protocol_min\":1,\"protocol_max\":1}");
+        if (h.frame) |f| f.deinit(allocator);
+    }
+    // cap 초과 응답은 connection을 끊지 않고 payload_too_large typed error로 돌아오며 상관 request_id를 유지한다.
+    const r = try feedJson(&conn, .request, 2, "{\"method\":\"runtime.list\"}");
+    defer if (r.frame) |f| f.deinit(allocator);
+    try testing.expectEqualStrings("reply", r.action);
+    try testing.expectEqual(protocol.Kind.response, r.frame.?.header.kind);
+    try testing.expectEqual(@as(u64, 2), r.frame.?.header.request_id);
+    try testing.expect(std.mem.indexOf(u8, r.frame.?.payload, "payload_too_large") != null);
+    try testing.expectEqual(Connection.State.ready, conn.state); // runtime·connection 유지
 }
 
 test "server: unknown method returns invalid_request; a request before hello closes" {

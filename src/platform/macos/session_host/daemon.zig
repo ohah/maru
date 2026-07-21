@@ -1,0 +1,165 @@
+//! `maru-sessiond` entrypoint — 별도 프로세스로 뜨는 session host의 accept loop(§6 host 수명, §10) — P3-d2c.
+//!
+//! GUI가 `maru __session-host <socket_path>`로 detached spawn하면(P3-d2c launcher/main 배선) 이 함수가 그 자식
+//! 프로세스의 본체가 된다: host_id를 발급하고, 주입받은 경로에 unix socket을 bind(P3-d2a `SocketServer`)한 뒤, poll-gated
+//! accept loop로 client 연결을 받아 `Connection` dispatch(P3-d1)로 hello/command에 응답한다. 부모(GUI)가 종료해도 이
+//! 프로세스는 자기 세션(`setsid`)에서 독립적으로 살아 남는다 — 그것이 "GUI를 죽여도 host 생존"의 실체다.
+//!
+//! macOS 전용(실 socket/fork syscall). registry는 비어 시작한다 — runtime.spawn(실 PTY 소유)은 P3-e 이후라 d2c host는
+//! hello·host.info·runtime.list(빈 목록)에 응답하는 살아 있는 빈 host다. 그래도 "부모와 독립된 프로세스가 socket을
+//! 소유하고 재접속에 응답한다"는 P3의 핵심 계약을 이 슬라이스가 처음으로 실증한다.
+//!
+//! 종료: 이 loop는 `SIGTERM`(launcher/사용자가 host를 내릴 때)의 **기본 동작(프로세스 종료)** 으로 끝난다 — 우아한
+//! deinit(socket unlink)까지 하는 signal handler 배선은 host 수명·idle grace 정책(§6)이 붙는 후속(P3-d2d launcher)에서
+//! 다룬다. d2c는 "떠서 응답하고 kill로 내려간다"까지다. 남은 socket 파일은 다음 bind가 unlink한다(P3-d2a bind 계약).
+
+const std = @import("std");
+const builtin = @import("builtin");
+const c = std.c;
+const posix = std.posix;
+const socket_server = @import("socket_server.zig");
+const reg = @import("registry.zig");
+
+pub const RunError = socket_server.BindError || error{OutOfMemory};
+
+// macOS/BSD libc의 CSPRNG와 sleep(std.posix 미노출이라 직접 extern — daemon은 macOS 전용).
+extern "c" fn arc4random_buf(buf: [*]u8, nbytes: usize) void;
+extern "c" fn usleep(usec: c_uint) c_int;
+
+/// accept loop 한 tick의 poll timeout(ms). 이 주기로 깨어나 listen fd 상태를 확인한다(향후 idle-grace 종료 판정 자리).
+pub const poll_timeout_ms: i32 = 200;
+
+/// 128-bit host_id를 발급한다(§4 opaque random). macOS `arc4random_buf`는 실패하지 않는 CSPRNG라 별도 fallback이 없다.
+fn newHostId() u128 {
+    var bytes: [16]u8 = undefined;
+    arc4random_buf(&bytes, bytes.len);
+    return std.mem.readInt(u128, &bytes, .big);
+}
+
+/// session host 본체. `dir_path`(0700)에 `socket_path`(0600)로 bind하고 SIGTERM(프로세스 종료)까지 accept loop를 돈다.
+/// 개별 연결의 serve 오류는 무시하고 다른 client를 계속 받는다(한 client가 host를 못 죽인다, §9 bounded client).
+pub fn runSessionHost(
+    allocator: std.mem.Allocator,
+    dir_path: [:0]const u8,
+    socket_path: [:0]const u8,
+) RunError!void {
+    var registry = reg.TerminalRuntimeRegistry.init(allocator);
+    defer registry.deinit();
+
+    var server = try socket_server.SocketServer.bind(allocator, dir_path, socket_path, newHostId(), &registry);
+    defer server.deinit();
+
+    while (true) {
+        switch (server.pollReady(poll_timeout_ms)) {
+            .ready => server.serveOnce() catch {}, // 개별 연결 오류(write 실패 등)는 host를 죽이지 않는다.
+            .timeout => {}, // 재-poll(향후 idle grace 종료 판정 자리).
+            .broken => break, // listen fd 회복 불가 — 루프 종료.
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// process smoke (실 macOS: fork된 host가 부모와 독립돼 살아 client에 응답)
+//
+// 이 테스트가 증명하는 것(그리고 터미널에서 왜 중요한가): 영속 세션의 핵심은 "GUI 프로세스가 죽어도 host가 살아
+// 재접속에 응답한다"는 것이다. 실제로 fork한 자식을 `setsid`로 독립 세션에 두고 session host를 돌린 뒤, 부모가 client로
+// connect해 hello→host.info를 왕복하고, 마지막에 SIGTERM으로 host를 내린다. 부모가 자식 fd를 잡지 않고 자식이 독립
+// 세션이라, 부모 수명과 무관하게 host가 socket을 소유한다. 실 fork/socket이라 macOS opt-in이다.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const testing = std.testing;
+const framing = @import("framing.zig");
+const protocol = @import("protocol.zig");
+
+fn waitConnect(socket_path: [:0]const u8, deadline_ms: u64) ?c.fd_t {
+    // host가 bind할 때까지 짧게 재시도하며 connect한다(fork 직후 socket이 아직 없을 수 있다).
+    var waited: u64 = 0;
+    while (waited < deadline_ms) : (waited += 20) {
+        const fd = c.socket(posix.AF.UNIX, posix.SOCK.STREAM, 0);
+        if (fd < 0) return null;
+        var addr = posix.sockaddr.un{ .family = posix.AF.UNIX, .path = undefined };
+        @memset(&addr.path, 0);
+        @memcpy(addr.path[0..socket_path.len], socket_path);
+        if (c.connect(fd, @ptrCast(&addr), @sizeOf(posix.sockaddr.un)) == 0) return fd;
+        _ = c.close(fd);
+        _ = usleep(20 * 1000); // 20ms
+    }
+    return null;
+}
+
+test "daemon: forked host survives parent-independent (setsid) and answers hello/host.info" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+
+    var dir_buf: [256]u8 = undefined;
+    const pid0 = c.getpid();
+    const dir_path = std.fmt.bufPrintZ(&dir_buf, "/tmp/maru-sh-daemon-{d}", .{pid0}) catch return error.SkipZigTest;
+    var sp_buf: [320]u8 = undefined;
+    const socket_path = std.fmt.bufPrintZ(&sp_buf, "{s}/control.sock", .{dir_path}) catch return error.SkipZigTest;
+
+    const child = c.fork();
+    if (child < 0) return error.SkipZigTest;
+    if (child == 0) {
+        // 자식 = host. setsid로 부모와 독립된 세션 리더가 된다(부모가 죽어도 SIGHUP·세션 종료에 안 묶임).
+        _ = c.setsid();
+        // 자식은 곧 _exit하므로 leak 검증이 필요 없다 — page_allocator로 충분.
+        runSessionHost(std.heap.page_allocator, dir_path, socket_path) catch {};
+        std.c._exit(0); // atexit/deinit 재실행 없이 즉시 종료(fork 자식 규약).
+    }
+
+    // 부모 = client. host가 bind할 때까지 재시도 connect. 끝에 host를 내리고 자식을 reap한다.
+    defer {
+        _ = c.kill(child, posix.SIG.TERM);
+        var status: c_int = undefined;
+        _ = c.waitpid(child, &status, 0);
+        _ = c.unlink(socket_path.ptr);
+        _ = c.rmdir(dir_path.ptr);
+    }
+
+    const fd = waitConnect(socket_path, 3000) orelse {
+        try testing.expect(false); // host가 3초 안에 socket을 안 열었다.
+        return;
+    };
+    defer _ = c.close(fd);
+
+    // hello → hello_ack.
+    const hello = try framing.encodeFrame(allocator, .{ .kind = .hello, .request_id = 1 }, "{\"protocol_min\":1,\"protocol_max\":1,\"client_kind\":\"cli\"}");
+    defer allocator.free(hello);
+    try socket_server.writeAll(fd, hello);
+
+    var parser = framing.FrameParser.init(allocator);
+    defer parser.deinit();
+    try testing.expect(readKind(fd, &parser, allocator, .hello_ack));
+
+    // host.info → 살아 있는 host가 응답(runtime_count 포함).
+    const req = try framing.encodeFrame(allocator, .{ .kind = .request, .request_id = 2 }, "{\"method\":\"host.info\"}");
+    defer allocator.free(req);
+    try socket_server.writeAll(fd, req);
+    try testing.expect(readKindContains(fd, &parser, allocator, .response, "runtime_count"));
+}
+
+fn readKind(fd: c.fd_t, parser: *framing.FrameParser, a: std.mem.Allocator, want: protocol.Kind) bool {
+    var buf: [1024]u8 = undefined;
+    while (true) {
+        if (parser.next() catch return false) |f| {
+            defer f.deinit(a);
+            return f.header.kind == want;
+        }
+        const n = c.read(fd, &buf, buf.len);
+        if (n <= 0) return false;
+        parser.push(buf[0..@intCast(n)]) catch return false;
+    }
+}
+
+fn readKindContains(fd: c.fd_t, parser: *framing.FrameParser, a: std.mem.Allocator, want: protocol.Kind, needle: []const u8) bool {
+    var buf: [1024]u8 = undefined;
+    while (true) {
+        if (parser.next() catch return false) |f| {
+            defer f.deinit(a);
+            return f.header.kind == want and std.mem.indexOf(u8, f.payload, needle) != null;
+        }
+        const n = c.read(fd, &buf, buf.len);
+        if (n <= 0) return false;
+        parser.push(buf[0..@intCast(n)]) catch return false;
+    }
+}

@@ -185,6 +185,19 @@ pub const SocketServer = struct {
         const cfd = self.acceptOne() orelse return;
         try self.serveConnection(cfd);
     }
+
+    /// accept-loop(entrypoint, P3-d2c)용 3상 poll gate. blocking accept만 쓰면 종료 시 accept를 깨우기 위해 self-connect
+    /// 같은 fragile 트릭이 필요하므로, poll timeout으로 주기적으로 깨어나 종료 플래그를 확인한다. `.broken`(POLLERR/HUP/NVAL)은
+    /// 회복 불가라 호출자가 accept 루프를 종료해야 한다(재-poll하면 tight-spin).
+    pub const PollResult = enum { ready, timeout, broken };
+
+    pub fn pollReady(self: *const SocketServer, timeout_ms: i32) PollResult {
+        var fds = [_]c.pollfd{.{ .fd = self.listen_fd, .events = c.POLL.IN, .revents = 0 }};
+        const rc = c.poll(&fds, 1, timeout_ms);
+        if (rc < 0 or rc == 0) return .timeout; // EINTR/timeout — 호출자가 종료 확인 후 재-poll.
+        if (fds[0].revents & c.POLL.IN != 0) return .ready;
+        return .broken; // rc>0인데 POLLIN 없음 = sticky 치명 revent → 루프 종료.
+    }
 };
 
 /// 닫힌 소켓 write에 SIGPIPE 대신 EPIPE(프로세스 사망 방지). accept 직후 설정. `SO_NOSIGPIPE`는 macOS/BSD 전용이라

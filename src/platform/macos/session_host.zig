@@ -23,7 +23,8 @@
 //!   - P3-e2d(snapshot/delta stream demux): §12 codec을 실 TerminalCore 화면에 연결.
 //!     - e2d-1 ✅: `screen_snapshot`(TerminalCore 화면 → screen_stream 레코드 투영, resolved RGB·wide cell·cursor·modes) + `screen_stream` length-prefixed record-stream framing.
 //!     - e2d-2 ✅: attach가 `RuntimeOps.snapshot`(core lock 아래 투영)을 얻어 응답에 이어 `snapshot_chunk` frame으로 전송(§10 순서, 마지막 end_stream). `Action.frames` 확장, client `readSnapshot`.
-//!     - e2d-3: delta 생산 + async push + event fan-out(runtime.resized·takeover revocation·stream_ack). ← 다음
+//!     - e2d-3a ✅: `screen_snapshot.computeDelta`(이전 snapshot 바이트 vs 현재 화면 diff → set_runs/cursor/modes delta record, 순수). row builder 재사용, geometry 변화는 SnapshotRequired.
+//!     - e2d-3b: delta async push(serveConnection poll-loop tick + core lock diff) + runtime.resized event. ← 다음
 //!   - P3-e2e: host-backed `TermRuntimeBackend`(P2 계약의 원격 구현).
 //!   - P3-e3: `app_session` 배선(discovery→launch→attach) + GUI 재접속(manifest runtime_handle).
 

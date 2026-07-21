@@ -609,6 +609,20 @@ chunk_index:u32 | chunk_count:u32 | record_bytes...
 - codec decoder는 unknown optional record를 length로 skip하고 unknown required record, run이 row 폭을 넘는 경우, wide-cell
   continuation 불일치, UTF-8/length/cap 손상을 snapshot 전체 reject로 처리한다.
 
+구현이 확정한 바이트 레이아웃(§12 필드 목록을 바이트로 확정 — **단일 출처는 `src/platform/macos/session_host/screen_stream.zig`**,
+각 record struct 주석이 미러다):
+
+- record header는 **28바이트**다: `codec_version:u16=1 | record_kind:u16 | generation:u64 | sequence:u64 | chunk_index:u32 | chunk_count:u32`.
+- `record_kind`는 snapshot 대역 1~9(`screen_meta=1`, `row=2`, `image_placement=3`, `image_blob=4`)와 delta 대역 10~19
+  (`set_runs=10`, `clear_rect=11`, `scroll_rect=12`, `cursor=13`, `modes=14`, `image_place=15`, `image_remove=16`)로 나눈 open
+  enum이다(미래 record는 새 값 — decoder가 optional이면 skip, required면 reject).
+- `run`은 `grapheme(u32 len + UTF-8) | width:u8 | count:u32 | fg:u32 | bg:u32 | underline_color:u32 | style_flags:u32`다. 색은
+  resolved RGB(0xRRGGBB), `count`는 이 run이 채우는 **grid cell 수**(wide면 width=2). `style_flags`는 resolved bitmask
+  (bold/dim/italic/underline{,_double,_curly}/blink/inverse/invisible/strikethrough/overline). row 폭 검증은 `Σ(width*count)==cols`
+  (`rowWidthMatches`)로 wide-cell continuation 불일치를 잡는다.
+- delta record는 body 첫 필드로 `base_generation:u64`를 둔다. `str/blob`은 `length:u32 + bytes`이고 grapheme/mime는 UTF-8을
+  검증하되 image blob 바이트는 검증하지 않는다. 손상 방어 cap은 문자열 64 KiB·row당 run 65536이다.
+
 client overflow·generation mismatch는 full snapshot 재동기화하며 renderer/ANSI adapter는 완전 검증된 snapshot만 원자 publish한다.
 
 로그, trace, replay, inspector는 runtime 수명 이벤트를 같은 도메인 데이터로 소비한다.
@@ -722,7 +736,10 @@ GUI가 `*LivePtySession`을 안 드는 컴파일 타임 red test, boundary check
   kind별 payload cap)와 `session_host/framing.zig`(partial I/O incremental `FrameParser`·`encodeFrame`·cap을 payload 적재 전
   거부·unknown required 닫기·unknown optional skip)를 추가했다. 순수 OS-중립 codec(platform import 0)이라 non-macOS에서
   wire 회귀를 고정한다(`test-session-host`).
-- **P3-b(screen-stream codec)**: §12 `maru.screen-stream.v1` snapshot/delta record encode/decode.
+- **P3-b(screen-stream codec) ✅**: `session_host/screen_stream.zig`에 §12 `maru.screen-stream.v1` codec을 구현했다 —
+  28-byte record header, snapshot record(screen_meta·row/run·image_placement·image_blob), delta record(set_runs·clear_rect·
+  scroll_rect·cursor·modes·image_place·image_remove) encode/decode와 `rowWidthMatches`(폭·continuation 검증)·UTF-8/truncation/
+  cap 거부. 순수 codec이라 non-macOS에서 wire 회귀를 고정한다(`test-session-host`).
 - **P3-c(runtime registry)**: `TerminalRuntimeRegistry`가 `TerminalCore + LivePtySession`을 소유하고 controller/observer capability state machine을 둔다.
 - **P3-d(server + launch)**: unix socket accept·hello/command dispatch·connection별 bounded queue와 detached-helper on-demand launch, `maru-sessiond` entrypoint.
 - **P3-e(client + 재접속)**: GUI 측 hello/RPC/stream demux와 host-backed `TermRuntimeBackend`(§13 P2 계약의 원격 구현)로 GUI 종료→재실행 재접속.

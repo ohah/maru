@@ -1393,6 +1393,22 @@ pub fn build(b: *std.Build) void {
     const boundary_step = b.step("check-boundaries", "Check facade import boundaries");
     boundary_step.dependOn(&run_boundary_tests.step);
 
+    // session-host MRSH codec/framing 단위 테스트(P3). 순수 codec(std만)이라 imports 없이 barrel을 루트로 돌린다.
+    // 기본 `test` 스텝에 편입해 wire 회귀를 항상 잡고, `test-session-host`로 개별 실행도 가능하게 한다.
+    const session_host_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/session_host.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_session_host_tests = b.addRunArtifact(session_host_tests);
+    run_session_host_tests.setCwd(b.path("."));
+    test_step.dependOn(&run_session_host_tests.step);
+
+    const session_host_step = b.step("test-session-host", "MRSH protocol/framing codec unit tests (session host)");
+    session_host_step.dependOn(&run_session_host_tests.step);
+
     // Opt-in external oracle: validates committed goldens against system libvterm.
     // Intentionally NOT wired into the default `test` step or `mise run check` so
     // the default build stays free of the libvterm dependency. Run it explicitly

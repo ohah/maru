@@ -712,6 +712,21 @@ GUI가 `*LivePtySession`을 안 드는 컴파일 타임 red test, boundary check
 - controlled command를 띄운 뒤 GUI client를 종료·재실행해 PID/runtime_id/output/scrollback 동일성을 검증한다.
 - incompatible hello가 runtime을 조용히 kill하지 않고 client attach만 거부하는 실패 artifact를 남긴다.
 
+**host launch 방식은 detached helper로 확정**(§15 결정 해소): 앱이 첫 persistent runtime이 필요할 때 자식으로 spawn한
+뒤 부모(GUI)와 독립되게 detach하는 helper 프로세스다. launchd-managed agent는 배포·업데이트·로그아웃 수명이 OS 정책에
+묶여 P3 범위를 넘으므로 채택하지 않는다(필요하면 후속에서 재검토).
+
+큰 diff를 리뷰 가능하게 슬라이스로 나눈다(단계 자체는 P3 하나 — 모든 슬라이스가 끝나야 P3 완료).
+
+- **P3-a(MRSH codec) ✅**: `session_host/protocol.zig`(32-byte header encode/decode·`Kind` open enum·`Flags`·`ErrorCode` 어휘·
+  kind별 payload cap)와 `session_host/framing.zig`(partial I/O incremental `FrameParser`·`encodeFrame`·cap을 payload 적재 전
+  거부·unknown required 닫기·unknown optional skip)를 추가했다. 순수 OS-중립 codec(platform import 0)이라 non-macOS에서
+  wire 회귀를 고정한다(`test-session-host`).
+- **P3-b(screen-stream codec)**: §12 `maru.screen-stream.v1` snapshot/delta record encode/decode.
+- **P3-c(runtime registry)**: `TerminalRuntimeRegistry`가 `TerminalCore + LivePtySession`을 소유하고 controller/observer capability state machine을 둔다.
+- **P3-d(server + launch)**: unix socket accept·hello/command dispatch·connection별 bounded queue와 detached-helper on-demand launch, `maru-sessiond` entrypoint.
+- **P3-e(client + 재접속)**: GUI 측 hello/RPC/stream demux와 host-backed `TermRuntimeBackend`(§13 P2 계약의 원격 구현)로 GUI 종료→재실행 재접속.
+
 종료 gate: 무인 실제 별도 process smoke, detach 중 output, reconnect first snapshot, input/resize roundtrip, bounded shutdown.
 
 ### P4 — 다중 Window/Workspace·기본 설정·background 알림
@@ -797,8 +812,10 @@ fake notification sink는 payload·routing·bounded history TDD에 사용하지�
 
 다음은 이 설계 PR 리뷰에서 방향을 확인하되, 확인되지 않으면 해당 단계 구현을 시작하지 않는다.
 
-1. host launch 방식: 앱이 spawn한 detached helper와 launchd-managed agent의 배포·업데이트·로그아웃 의미 비교.
+1. ~~host launch 방식~~ **해소됨(2026-07-21)**: **detached helper**로 확정했다 — 앱이 첫 persistent runtime이 필요할 때
+   자식으로 spawn한 뒤 부모와 독립되게 detach하는 helper 프로세스다. launchd-managed agent는 배포·업데이트·로그아웃
+   수명이 OS 정책에 묶여 P3 범위를 넘으므로 채택하지 않는다(필요 시 후속 재검토). 상세는 P3-d에서 배선한다.
 
 tmux-CC layout driver 제거, Maru-owned session host, `keep-alive-after-quit=true` 완성 후 기본값, provider session
-resume/fork 비도입, 기존 `maru.workspace.v1`의 binding scalar+`quick-window` tail, §10의 command/framing/stream 계약은 이
-문서의 확정 결정이다. v1 외부 attach는 same-login-UID로 확정했고, 위 항목은 그 방향 안에서 host 배포를 결정하는 gate다.
+resume/fork 비도입, 기존 `maru.workspace.v1`의 binding scalar+`quick-window` tail, §10의 command/framing/stream 계약,
+host launch = detached helper는 이 문서의 확정 결정이다. v1 외부 attach는 same-login-UID로 확정했다.

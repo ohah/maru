@@ -48,10 +48,14 @@ src/
   renderer/             Metal-first renderer internals, future WebGPU backend boundary, font layout, font identity registry, persistent renderer state, glyph atlas, frame stats
   platform/             OS별 process/window/input bridge
     macos/              AppKit/Metal/CoreText smoke bridge, Swift app host app shell, Swift/Zig C ABI 계약, control_socket.zig(1b: 컨트롤 플레인 unix socket bind/accept/peer-cred/hello + A2a `serveReadOnly` per-connection read-only serve 함수(`readInto`+`Framer`→`dispatchReadOnly`→응답+`\n`) + poll-gated accept·read-timeout 헬퍼(A2b용) — macOS-gated 테스트), control_server.zig(**A2b 라이브 서버**: 앱-전역 소켓+accept 스레드+메인 marshal 큐(`ControlRequestQueue`·`PendingRequest`, generic·AppSession 비의존, §8.8 lock-order 준수) — macOS-gated 테스트), app_host_abi.zig(A2b start/drain/stop ABI + collectSessionsInto 멀티창 조립·auth(metadata:self)·dispatch 배선), app_session.zig 안 A1 컨트롤 플레인 per-session collector(collectSessionInto/collectSession — 실 트리→중립 SurfaceDto[]+membership, private 자산 재사용 위해 세션 모듈에 co-locate)
-    session_host/        계획(P3, 미구현): protocol.zig(`MRSH` header·kind/flag·JSON command/error), framing.zig(partial I/O·caps),
-                        client.zig(hello/RPC/stream demux), registry.zig(TerminalRuntimeRegistry·controller), server.zig(connection별
-                        bounded queue), main.zig(`maru-sessiond` entrypoint). control-plane/browser server와 ID·wire를 공유하지
-                        않으며, macOS launch/peer-cred/socket adapter만 platform 경계에 두고 codec/state machine은 OS 중립으로 둔다
+    session_host.zig     P3 barrel(protocol·framing re-export + test 집약). 구현은 session_host/에 목적별로.
+    session_host/        P3 진행: protocol.zig(`MRSH` 32-byte header·kind/flag·error 어휘 codec — **구현됨, P3-a**),
+                        framing.zig(partial I/O incremental parser·kind별 cap·unknown optional skip — **구현됨, P3-a**);
+                        이후 계획: screen-stream codec(snapshot/delta, P3-b), registry.zig(TerminalRuntimeRegistry·controller, P3-c),
+                        server.zig(connection별 bounded queue)·main.zig(`maru-sessiond` entrypoint, P3-d), client.zig(hello/RPC/stream
+                        demux, P3-e). control-plane/browser server와 ID·wire를 공유하지 않으며, macOS launch/peer-cred/socket
+                        adapter만 platform 경계에 두고 codec/state machine은 OS 중립(platform import 0)으로 둔다. 테스트는
+                        `mise run test-session-host`(기본 `test`에도 편입)
     windows/
     linux/
   workspace/            project workspace, layout restore, recent workspaces

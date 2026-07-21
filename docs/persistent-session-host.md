@@ -651,20 +651,36 @@ P1 이후 구현 gate는 아래 자동화 계약을 만족해야 한다.
 
 ### P1 — legacy provider session continuity 잔여 제거
 
-현재 제품은 provider session을 실행에 복원하지 않지만 한 릴리스 호환용 reader/no-op/cleanup 코드가 남아 있다. 영속 host를
+현재 제품은 provider session을 실행에 복원하지 않지만 이전 source build/dev 호환용 reader/no-op/cleanup 코드가 남아 있다. 영속 host를
 도입하면서 이 코드를 새로운 fallback으로 재사용하지 않고 제거한다.
 
-- `workspace.restore-claude`/`workspace.restore-codex` loader no-op과 테스트를 제거한다. 이후에는 일반 unknown key 진단이다.
-- workspace `Surface.agent_kind/agent_session/agent_argv`, legacy parser와 migration fixture를 제거한다. 구 파일의 미지 scalar는
-  일반 key-addressed 규칙으로 무시하고 새 writer에는 계속 나오지 않는다.
+- `workspace.restore-claude`/`workspace.restore-codex` loader no-op·테스트를 제거한다. 동일 deprecated loader 분기에 남은 dead
+  alias `notifications.agent-complete`도 함께 제거한다. 이후 세 key는 모두 일반 unknown key 진단이다.
+- workspace `Surface.agent_kind/agent_session/agent_argv`, typed legacy parser와 provider 의미를 단언하는 migration fixture를 제거한다.
+  구 파일 raw fixture 하나는 이 필드들을 미지 scalar로 무시한 채 2개 이상 window/pane의 이름·cwd·active 상태를 parse/apply하는
+  호환 계약으로 남기고, parse→serialize하면 legacy field가 사라져야 한다. 새 writer에는 계속 나오지 않는다.
+- legacy agent 상수에 수치가 결합된 line field 상한은 일반 unknown field 폭주를 제한하는 독립 `max_line_fields=512`로 재정의한다.
+  중립 `future-field` fixture에서 정확히 512 field는 허용하고 513번째는 거부한다. field-cap fixture에는 provider literal을 쓰지 않는다.
 - 1회 provider hook/mapping cleanup과 `MARU_AGENT_MAPPING_ID` 전용 차단도 P1에서 제거한다. 이후 Maru는 과거 provider
-  config/mapping을 자동 수정하지 않고, 남아 있는 사용자 파일은 그대로 둔다.
+  config/mapping을 자동 수정하지 않고, 남아 있는 사용자 파일은 그대로 둔다. cleanup 전 과거 source build가 설치한 hook은
+  provider가 계속 실행해 더 이상 쓰이지 않는 mapping 파일을 만들거나 실패할 수 있지만 P1 이후 Maru는 해당 hook/mapping을
+  읽거나 신뢰하거나 다시 자동 정리하지 않는다. 전용 filter가 사라진 `MARU_AGENT_MAPPING_ID`는 기존 `EnvStorage`의 선택된
+  base(parent 또는 explicit env)와 그 뒤 `env.*` upsert 규칙을 따른다. 정리가 필요하면 P1에서 갱신하는
+  `agent-session.md` support runbook이 식별하는 Maru marker hook·Maru mapping 파일만 사용자가 직접 제거하며, 다른 사용자
+  hook이나 mapping 디렉터리 전체를 일괄 삭제하지 않는다.
 - 현재 foreground process·screen 관측에 쓰는 **live** `Term.agent_kind/agent_state`는 provider session continuity가 아니므로 유지한다.
-- 같은 코드 PR에서 `agent-session.md`, `workspace-restore.md`, `configuration.md`, verification matrix의 deprecated/역사 문구를
-  “제거됨” 상태로 갱신한다. 코드를 먼저 제거하고 문서만 deprecated로 남기거나, 반대로 문서만 제거 완료라고 쓰지 않는다.
+- 같은 코드 PR에서 `agent-session.md`, `workspace-restore.md`, `configuration.md`, `notifications.md`, implementation plan,
+  verification matrix를 현재 계약으로 갱신한다. 삭제된 parser/hook/transcript 절차와 deprecated 설정 상세는 제품 SSOT에
+  “제거됨” 역사로 계속 복제하지 않고 Git/PR 이력으로 보낸다. `agent-session.md` support runbook에는 안전한 수동
+  식별·제거 경계만 남긴다.
 
-종료 gate: `restore-claude|restore-codex|agent-session|agent-argv|MARU_AGENT_MAPPING_ID` 제품 경로 grep 0(일반 live
-agent state 제외), 구 workspace unknown-key load, 일반 shell restore, agent observer 회귀, provider config 자동 변경 0.
+종료 gate: legacy typed field·parser branch·cleanup import/call·전용 환경변수 filter가 제품 코드에서 0이고, legacy literal은
+명명된 unknown-key 호환 fixture에서만 허용한다. 세 제거 설정 각각의 유효·잘못된 값에 대한 generic unknown-key 진단,
+구 workspace의 invalid legacy scalar 무시·multi-window parse/apply·write-new, 중립 512/513 field cap, 일반 shell restore를 검증한다.
+격리 subprocess의 임시 HOME·provider/XDG 경로에는 현재 cleanup이라면 변경할 Maru marker+legacy command 구조의 Claude/Codex
+config와 숫자 이름의 recognized hook-event/session/transcript mapping을 둔다. `AppSession.init` 전후 bytes와 디렉터리
+manifest가 같고 `.maru-backup`·`agent-hook-cleanup-v2`·신규/삭제 파일이 0이어야 한다.
+parent 또는 explicit base와 `env.*` upsert의 mapping env 회귀, live agent observer L2와 AppSession DTO 회귀도 자동 검증한다.
 
 ### P2 — process 경계 없는 `TermRuntimeBackend` seam
 

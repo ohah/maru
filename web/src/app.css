@@ -39,6 +39,13 @@ body {
   background: Canvas;
 }
 
+/* mode 전환 시 shell이 frame.hidden=true로 iframe을 숨긴다. 위 `#renderer{display:block}`(id 선택자)이 UA의
+   `[hidden]{display:none}`를 오버라이드하므로, editable(live/source) 모드에서 iframe이 계속 뷰포트를 채워 #editor를
+   덮던 것을 막는다. #editor[hidden]과 대칭. */
+#renderer[hidden] {
+  display: none;
+}
+
 #editor {
   box-sizing: border-box;
   width: 100%;

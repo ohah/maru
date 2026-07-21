@@ -63,6 +63,13 @@ body {
   height: 100%;
 }
 
+/* CM6 baseTheme는 .cm-scroller에 overflow-x:auto만 주므로, 높이 제한(height:100%) 안에서 세로 스크롤이 되도록
+   overflow-y:auto를 명시한다(CM6 문서가 요구하는 방식). 없으면 라이브/소스 편집에서 세로 스크롤바가 안 생기고
+   긴 문서가 뷰포트를 넘겨도 스크롤되지 않는다. */
+#editor .cm-scroller {
+  overflow-y: auto;
+}
+
 #editor .cm-editor {
   color: CanvasText;
   background: Canvas;

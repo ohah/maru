@@ -48,7 +48,7 @@ if (
 ) {
   throw new Error("worker and Mermaid helper bundles must not be loaded as document scripts");
 }
-if (!notices.includes("dompurify@3.4.12") || notices.includes("@zntc/core@0.1.3")) {
+if (!notices.includes("dompurify@3.4.12") || notices.includes("@zntc/core@0.1.4")) {
   throw new Error("runtime notices must cover production dependencies only");
 }
 

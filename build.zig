@@ -867,44 +867,44 @@ pub fn build(b: *std.Build) void {
             "sh", "-eu", "-c",
             "summary=zig-out/maru-macos-mermaid-helper-smoke/mermaid-helper.summary.json; " ++
                 "test -f \"$summary\"; " ++
-                "rg -q '\"passed\"[[:space:]]*:[[:space:]]*true' \"$summary\"; " ++
-                "rg -q '\"blank_document_base_url_is_nil\"[[:space:]]*:[[:space:]]*true' \"$summary\"; " ++
-                "rg -q '\"actual_mermaid_svg\"[[:space:]]*:[[:space:]]*true' \"$summary\"; " ++
-                "rg -q '\"actual_mermaid_sanitized\"[[:space:]]*:[[:space:]]*true' \"$summary\"; " ++
-                "rg -q '\"normal_external_api_attempts_zero\"[[:space:]]*:[[:space:]]*true' \"$summary\"; " ++
-                "rg -q '\"normal_external_csp_violations_zero\"[[:space:]]*:[[:space:]]*true' \"$summary\"; " ++
-                "rg -q '\"normal_external_navigation_attempts_zero\"[[:space:]]*:[[:space:]]*true' \"$summary\"; " ++
-                "rg -q '\"external_api_probe_counted_and_rejected\"[[:space:]]*:[[:space:]]*true' \"$summary\"; " ++
-                "rg -q '\"external_counter_is_per_render_on_same_helper\"[[:space:]]*:[[:space:]]*true' \"$summary\"; " ++
-                "rg -q '\"external_subresource_csp_probe_counted_and_rejected\"[[:space:]]*:[[:space:]]*true' \"$summary\"; " ++
-                "rg -q '\"external_navigation_probe_counted_and_rejected\"[[:space:]]*:[[:space:]]*true' \"$summary\"; " ++
-                "rg -q '\"renderer_script_exact_digest_accepted\"[[:space:]]*:[[:space:]]*true' \"$summary\"; " ++
-                "rg -q '\"renderer_script_digest_mismatch_rejected\"[[:space:]]*:[[:space:]]*true' \"$summary\"; " ++
-                "rg -q '\"renderer_script_symlink_rejected\"[[:space:]]*:[[:space:]]*true' \"$summary\"; " ++
-                "rg -q '\"helper_starts_at_most_three\"[[:space:]]*:[[:space:]]*true' \"$summary\"; " ++
-                "rg -q '\"termination_acknowledged_exactly\"[[:space:]]*:[[:space:]]*true' \"$summary\"; " ++
-                "rg -q '\"no_read_shutdown_bounded\"[[:space:]]*:[[:space:]]*true' \"$summary\"; " ++
-                "rg -q '\"closed_pipe_eof_once\"[[:space:]]*:[[:space:]]*true' \"$summary\"; " ++
-                "rg -q '\"delayed_start_physical_zero\"[[:space:]]*:[[:space:]]*true' \"$summary\"; " ++
-                "rg -q '\"path_aba_result_commit_zero\"[[:space:]]*:[[:space:]]*true' \"$summary\"; " ++
-                "rg -q '\"path_aba_capability_frames_zero\"[[:space:]]*:[[:space:]]*true' \"$summary\"; " ++
-                "rg -q '\"path_aba_a_restored_before_pid_check\"[[:space:]]*:[[:space:]]*true' \"$summary\"; " ++
-                "rg -q '\"tampered_bundle_seal_rejected_before_spawn\"[[:space:]]*:[[:space:]]*true' \"$summary\"; " ++
-                "rg -q '\"digest_mismatch_permanent_after_one_start\"[[:space:]]*:[[:space:]]*true' \"$summary\"; " ++
-                "rg -q '\"coalesce_old_reply_terminal_exactly_once\"[[:space:]]*:[[:space:]]*true' \"$summary\"; " ++
-                "rg -q '\"coalesce_late_old_timeout_keeps_replacement\"[[:space:]]*:[[:space:]]*true' \"$summary\"; " ++
-                "rg -q '\"deadline_terminal_reply_immediate_once\"[[:space:]]*:[[:space:]]*true' \"$summary\"; " ++
-                "rg -q '\"deadline_late_result_and_timer_noop\"[[:space:]]*:[[:space:]]*true' \"$summary\"; " ++
-                "rg -q '\"transient_terminal_reply_immediate_once\"[[:space:]]*:[[:space:]]*true' \"$summary\"; " ++
-                "rg -q '\"integrity_terminals_running_and_pending_once\"[[:space:]]*:[[:space:]]*true' \"$summary\"; " ++
-                "rg -q '\"integrity_late_failure_and_result_noop\"[[:space:]]*:[[:space:]]*true' \"$summary\"; " ++
-                "rg -q '\"reply_wrong_identity_exact_revoke\"[[:space:]]*:[[:space:]]*true' \"$summary\"; " ++
-                "rg -q '\"reply_unknown_duplicate_one_shot\"[[:space:]]*:[[:space:]]*true' \"$summary\"; " ++
-                "rg -q '\"reply_superseded_requires_exact_identity\"[[:space:]]*:[[:space:]]*true' \"$summary\"; " ++
-                "rg -q '\"reply_deliver_timeout_race_one_shot\"[[:space:]]*:[[:space:]]*true' \"$summary\"; " ++
-                "rg -q '\"reply_targeted_finish_and_cancel\"[[:space:]]*:[[:space:]]*true' \"$summary\"; " ++
-                "rg -q '\"reply_cap_plus_one_rejected_without_mutation\"[[:space:]]*:[[:space:]]*true' \"$summary\"; " ++
-                "rg -q '\"shutdown_barrier_no_late_callbacks\"[[:space:]]*:[[:space:]]*true' \"$summary\"",
+                "/usr/bin/grep -Eq '\"passed\"[[:space:]]*:[[:space:]]*true' \"$summary\"; " ++
+                "/usr/bin/grep -Eq '\"blank_document_base_url_is_nil\"[[:space:]]*:[[:space:]]*true' \"$summary\"; " ++
+                "/usr/bin/grep -Eq '\"actual_mermaid_svg\"[[:space:]]*:[[:space:]]*true' \"$summary\"; " ++
+                "/usr/bin/grep -Eq '\"actual_mermaid_sanitized\"[[:space:]]*:[[:space:]]*true' \"$summary\"; " ++
+                "/usr/bin/grep -Eq '\"normal_external_api_attempts_zero\"[[:space:]]*:[[:space:]]*true' \"$summary\"; " ++
+                "/usr/bin/grep -Eq '\"normal_external_csp_violations_zero\"[[:space:]]*:[[:space:]]*true' \"$summary\"; " ++
+                "/usr/bin/grep -Eq '\"normal_external_navigation_attempts_zero\"[[:space:]]*:[[:space:]]*true' \"$summary\"; " ++
+                "/usr/bin/grep -Eq '\"external_api_probe_counted_and_rejected\"[[:space:]]*:[[:space:]]*true' \"$summary\"; " ++
+                "/usr/bin/grep -Eq '\"external_counter_is_per_render_on_same_helper\"[[:space:]]*:[[:space:]]*true' \"$summary\"; " ++
+                "/usr/bin/grep -Eq '\"external_subresource_csp_probe_counted_and_rejected\"[[:space:]]*:[[:space:]]*true' \"$summary\"; " ++
+                "/usr/bin/grep -Eq '\"external_navigation_probe_counted_and_rejected\"[[:space:]]*:[[:space:]]*true' \"$summary\"; " ++
+                "/usr/bin/grep -Eq '\"renderer_script_exact_digest_accepted\"[[:space:]]*:[[:space:]]*true' \"$summary\"; " ++
+                "/usr/bin/grep -Eq '\"renderer_script_digest_mismatch_rejected\"[[:space:]]*:[[:space:]]*true' \"$summary\"; " ++
+                "/usr/bin/grep -Eq '\"renderer_script_symlink_rejected\"[[:space:]]*:[[:space:]]*true' \"$summary\"; " ++
+                "/usr/bin/grep -Eq '\"helper_starts_at_most_three\"[[:space:]]*:[[:space:]]*true' \"$summary\"; " ++
+                "/usr/bin/grep -Eq '\"termination_acknowledged_exactly\"[[:space:]]*:[[:space:]]*true' \"$summary\"; " ++
+                "/usr/bin/grep -Eq '\"no_read_shutdown_bounded\"[[:space:]]*:[[:space:]]*true' \"$summary\"; " ++
+                "/usr/bin/grep -Eq '\"closed_pipe_eof_once\"[[:space:]]*:[[:space:]]*true' \"$summary\"; " ++
+                "/usr/bin/grep -Eq '\"delayed_start_physical_zero\"[[:space:]]*:[[:space:]]*true' \"$summary\"; " ++
+                "/usr/bin/grep -Eq '\"path_aba_result_commit_zero\"[[:space:]]*:[[:space:]]*true' \"$summary\"; " ++
+                "/usr/bin/grep -Eq '\"path_aba_capability_frames_zero\"[[:space:]]*:[[:space:]]*true' \"$summary\"; " ++
+                "/usr/bin/grep -Eq '\"path_aba_a_restored_before_pid_check\"[[:space:]]*:[[:space:]]*true' \"$summary\"; " ++
+                "/usr/bin/grep -Eq '\"tampered_bundle_seal_rejected_before_spawn\"[[:space:]]*:[[:space:]]*true' \"$summary\"; " ++
+                "/usr/bin/grep -Eq '\"digest_mismatch_permanent_after_one_start\"[[:space:]]*:[[:space:]]*true' \"$summary\"; " ++
+                "/usr/bin/grep -Eq '\"coalesce_old_reply_terminal_exactly_once\"[[:space:]]*:[[:space:]]*true' \"$summary\"; " ++
+                "/usr/bin/grep -Eq '\"coalesce_late_old_timeout_keeps_replacement\"[[:space:]]*:[[:space:]]*true' \"$summary\"; " ++
+                "/usr/bin/grep -Eq '\"deadline_terminal_reply_immediate_once\"[[:space:]]*:[[:space:]]*true' \"$summary\"; " ++
+                "/usr/bin/grep -Eq '\"deadline_late_result_and_timer_noop\"[[:space:]]*:[[:space:]]*true' \"$summary\"; " ++
+                "/usr/bin/grep -Eq '\"transient_terminal_reply_immediate_once\"[[:space:]]*:[[:space:]]*true' \"$summary\"; " ++
+                "/usr/bin/grep -Eq '\"integrity_terminals_running_and_pending_once\"[[:space:]]*:[[:space:]]*true' \"$summary\"; " ++
+                "/usr/bin/grep -Eq '\"integrity_late_failure_and_result_noop\"[[:space:]]*:[[:space:]]*true' \"$summary\"; " ++
+                "/usr/bin/grep -Eq '\"reply_wrong_identity_exact_revoke\"[[:space:]]*:[[:space:]]*true' \"$summary\"; " ++
+                "/usr/bin/grep -Eq '\"reply_unknown_duplicate_one_shot\"[[:space:]]*:[[:space:]]*true' \"$summary\"; " ++
+                "/usr/bin/grep -Eq '\"reply_superseded_requires_exact_identity\"[[:space:]]*:[[:space:]]*true' \"$summary\"; " ++
+                "/usr/bin/grep -Eq '\"reply_deliver_timeout_race_one_shot\"[[:space:]]*:[[:space:]]*true' \"$summary\"; " ++
+                "/usr/bin/grep -Eq '\"reply_targeted_finish_and_cancel\"[[:space:]]*:[[:space:]]*true' \"$summary\"; " ++
+                "/usr/bin/grep -Eq '\"reply_cap_plus_one_rejected_without_mutation\"[[:space:]]*:[[:space:]]*true' \"$summary\"; " ++
+                "/usr/bin/grep -Eq '\"shutdown_barrier_no_late_callbacks\"[[:space:]]*:[[:space:]]*true' \"$summary\"",
         });
         macos_mermaid_smoke_assert.setCwd(b.path("."));
         macos_mermaid_smoke_assert.step.dependOn(&macos_mermaid_smoke_run.step);
@@ -914,23 +914,29 @@ pub fn build(b: *std.Build) void {
             "sh", "-eu", "-c",
             "artifact=tests/artifacts/perf/live-preview-macos.json; " ++
                 "test -f \"$artifact\"; " ++
-                "rg -q '\"schema\"[[:space:]]*:[[:space:]]*\"maru.live-preview-macos.v1\"' \"$artifact\"; " ++
-                "rg -q '\"ticks\"[[:space:]]*:[[:space:]]*1000' \"$artifact\"; " ++
-                "rg -q '\"actual_svg\"[[:space:]]*:[[:space:]]*true' \"$artifact\"; " ++
-                "rg -q '\"product_reply_delivered\"[[:space:]]*:[[:space:]]*true' \"$artifact\"; " ++
-                "rg -q '\"product_reply_pending_after_delivery\"[[:space:]]*:[[:space:]]*0' \"$artifact\"; " ++
-                "rg -q '\"product_reply_serialized_bytes\"[[:space:]]*:[[:space:]]*[5-9][0-9][0-9][0-9][0-9][0-9]' \"$artifact\"; " ++
-                "rg -q '\"failure_latched\"[[:space:]]*:[[:space:]]*1' \"$artifact\"; " ++
-                "rg -q '\"completion_drain_max\"[[:space:]]*:[[:space:]]*[0-8][,]?$' \"$artifact\"; " ++
-                "rg -q '\"product_tick_calls\"[[:space:]]*:[[:space:]]*1000' \"$artifact\"; " ++
-                "rg -q '\"product_tick_pump_calls\"[[:space:]]*:[[:space:]]*[1-9][0-9]*' \"$artifact\"; " ++
-                "rg -q '\"product_tick_drain_calls\"[[:space:]]*:[[:space:]]*[1-9][0-9]*' \"$artifact\"; " ++
-                "rg -q '\"accepted_svg_bytes_max\"[[:space:]]*:[[:space:]]*524288' \"$artifact\"; " ++
+                "/usr/bin/grep -Eq '\"schema\"[[:space:]]*:[[:space:]]*\"maru.live-preview-macos.v1\"' \"$artifact\"; " ++
+                "/usr/bin/grep -Eq '\"ticks\"[[:space:]]*:[[:space:]]*1000' \"$artifact\"; " ++
+                "/usr/bin/grep -Eq '\"actual_svg\"[[:space:]]*:[[:space:]]*true' \"$artifact\"; " ++
+                "/usr/bin/grep -Eq '\"product_reply_delivered\"[[:space:]]*:[[:space:]]*true' \"$artifact\"; " ++
+                "/usr/bin/grep -Eq '\"product_reply_pending_after_delivery\"[[:space:]]*:[[:space:]]*0' \"$artifact\"; " ++
+                "/usr/bin/grep -Eq '\"product_reply_serialized_bytes\"[[:space:]]*:[[:space:]]*[5-9][0-9][0-9][0-9][0-9][0-9]' \"$artifact\"; " ++
+                "/usr/bin/grep -Eq '\"failure_latched\"[[:space:]]*:[[:space:]]*1' \"$artifact\"; " ++
+                "/usr/bin/grep -Eq '\"failure_latch_product_tick_calls\"[[:space:]]*:[[:space:]]*[1-9][0-9]*' \"$artifact\"; " ++
+                "/usr/bin/grep -Eq '\"failure_latch_product_completion_drain_max\"[[:space:]]*:[[:space:]]*[0-8][,]?$' \"$artifact\"; " ++
+                "/usr/bin/grep -Eq '\"completion_drain_max\"[[:space:]]*:[[:space:]]*[0-8][,]?$' \"$artifact\"; " ++
+                "/usr/bin/grep -Eq '\"product_tick_calls\"[[:space:]]*:[[:space:]]*1000' \"$artifact\"; " ++
+                "/usr/bin/grep -Eq '\"product_tick_pump_calls\"[[:space:]]*:[[:space:]]*[1-9][0-9]*' \"$artifact\"; " ++
+                "/usr/bin/grep -Eq '\"product_tick_drain_calls\"[[:space:]]*:[[:space:]]*[1-9][0-9]*' \"$artifact\"; " ++
+                "/usr/bin/grep -Eq '\"accepted_svg_bytes_max\"[[:space:]]*:[[:space:]]*524288' \"$artifact\"; " ++
+                "/usr/bin/grep -Eq '\"cold_response_deadline_ms\"[[:space:]]*:[[:space:]]*5000' \"$artifact\"; " ++
+                "/usr/bin/grep -Eq '\"warm_response_deadline_ms\"[[:space:]]*:[[:space:]]*2000' \"$artifact\"; " ++
+                "/usr/bin/grep -Eq '\"reply_fallback_grace_ms\"[[:space:]]*:[[:space:]]*250' \"$artifact\"; " ++
+                "/usr/bin/grep -Eq '\"reply_fallback_ms\"[[:space:]]*:[[:space:]]*5250' \"$artifact\"; " ++
                 "awk -F'[: ,]+' '/\"product_tick_max_elapsed_us\"/{ if ($3 + 0 <= 20000) ok=1 } END { exit !ok }' \"$artifact\"; " ++
-                "if rg -n 'FileManager|WKWebView|Process\\(|Pipe\\(|sleep\\(|waitUntilExit|Data\\(contentsOf:|write\\(to:' src/platform/macos/MermaidProductTick.swift; then " ++
+                "if /usr/bin/grep -En 'FileManager|WKWebView|Process\\(|Pipe\\(|sleep\\(|waitUntilExit|Data\\(contentsOf:|write\\(to:' src/platform/macos/MermaidProductTick.swift; then " ++
                 "echo 'forbidden capability in MermaidProductTick.swift' >&2; exit 1; fi; " ++
                 "for field in tick_process_spawn_terminate tick_pipe_setup tick_pipe_read_write tick_blocking_wait; do " ++
-                "rg -q \"\\\"$field\\\"[[:space:]]*:[[:space:]]*0\" \"$artifact\"; done",
+                "/usr/bin/grep -Eq \"\\\"$field\\\"[[:space:]]*:[[:space:]]*0\" \"$artifact\"; done",
         });
         macos_live_preview_perf_assert.setCwd(b.path("."));
         macos_live_preview_perf_assert.step.dependOn(&macos_mermaid_smoke_assert.step);
@@ -1108,52 +1114,52 @@ pub fn build(b: *std.Build) void {
             "sh", "-eu", "-c",
             "summary=zig-out/maru-macos-app/app.summary.txt; " ++
                 "test -f \"$summary\"; " ++
-                "rg -q '^file_viewer_ready=true$' \"$summary\"; " ++
-                "rg -q '^file_viewer_renderer_loaded=true$' \"$summary\"; " ++
-                "rg -q '^file_viewer_renderer_script=true$' \"$summary\"; " ++
-                "rg -q '^file_viewer_read=true$' \"$summary\"; " ++
-                "rg -q '^file_viewer_text=.*FP4 viewer fixture' \"$summary\"; " ++
-                "rg -q '^file_viewer_images=1$' \"$summary\"; " ++
-                "rg -q '^file_viewer_loaded_images=1$' \"$summary\"; " ++
-                "rg -q '^file_viewer_editor_hydrated=true$' \"$summary\"; " ++
-                "rg -q '^file_viewer_live_projection=running$' \"$summary\"; " ++
-                "rg -q '^file_viewer_live_projection_decorations=[1-9][0-9]*$' \"$summary\"; " ++
-                "rg -q '^file_viewer_live_projection_generation=[1-9][0-9]*$' \"$summary\"; " ++
-                "rg -q '^file_viewer_live_general_fragments=0$' \"$summary\"; " ++
-                "rg -q '^file_viewer_live_atomic_mounted=[2-8]$' \"$summary\"; " ++
-                "rg -q '^file_viewer_live_atomic_rendered=[2-8]$' \"$summary\"; " ++
-                "rg -q '^file_viewer_live_mermaid_request=ok$' \"$summary\"; " ++
-                "rg -q '^file_viewer_mermaid_navigation_in_flight=true$' \"$summary\"; " ++
-                "rg -q '^file_viewer_mermaid_navigation_cancelled=true$' \"$summary\"; " ++
-                "rg -q '^mermaid_pending_replies=0$' \"$summary\"; " ++
-                "rg -q '^mermaid_product_tick_calls=[1-9][0-9]*$' \"$summary\"; " ++
-                "rg -q '^mermaid_product_tick_pump_calls=[1-9][0-9]*$' \"$summary\"; " ++
-                "rg -q '^mermaid_product_tick_drain_calls=[1-9][0-9]*$' \"$summary\"; " ++
+                "/usr/bin/grep -Eq '^file_viewer_ready=true$' \"$summary\"; " ++
+                "/usr/bin/grep -Eq '^file_viewer_renderer_loaded=true$' \"$summary\"; " ++
+                "/usr/bin/grep -Eq '^file_viewer_renderer_script=true$' \"$summary\"; " ++
+                "/usr/bin/grep -Eq '^file_viewer_read=true$' \"$summary\"; " ++
+                "/usr/bin/grep -Eq '^file_viewer_text=.*FP4 viewer fixture' \"$summary\"; " ++
+                "/usr/bin/grep -Eq '^file_viewer_images=1$' \"$summary\"; " ++
+                "/usr/bin/grep -Eq '^file_viewer_loaded_images=1$' \"$summary\"; " ++
+                "/usr/bin/grep -Eq '^file_viewer_editor_hydrated=true$' \"$summary\"; " ++
+                "/usr/bin/grep -Eq '^file_viewer_live_projection=running$' \"$summary\"; " ++
+                "/usr/bin/grep -Eq '^file_viewer_live_projection_decorations=[1-9][0-9]*$' \"$summary\"; " ++
+                "/usr/bin/grep -Eq '^file_viewer_live_projection_generation=[1-9][0-9]*$' \"$summary\"; " ++
+                "/usr/bin/grep -Eq '^file_viewer_live_general_fragments=0$' \"$summary\"; " ++
+                "/usr/bin/grep -Eq '^file_viewer_live_atomic_mounted=[2-8]$' \"$summary\"; " ++
+                "/usr/bin/grep -Eq '^file_viewer_live_atomic_rendered=[2-8]$' \"$summary\"; " ++
+                "/usr/bin/grep -Eq '^file_viewer_live_mermaid_request=ok$' \"$summary\"; " ++
+                "/usr/bin/grep -Eq '^file_viewer_mermaid_navigation_in_flight=true$' \"$summary\"; " ++
+                "/usr/bin/grep -Eq '^file_viewer_mermaid_navigation_cancelled=true$' \"$summary\"; " ++
+                "/usr/bin/grep -Eq '^mermaid_pending_replies=0$' \"$summary\"; " ++
+                "/usr/bin/grep -Eq '^mermaid_product_tick_calls=[1-9][0-9]*$' \"$summary\"; " ++
+                "/usr/bin/grep -Eq '^mermaid_product_tick_pump_calls=[1-9][0-9]*$' \"$summary\"; " ++
+                "/usr/bin/grep -Eq '^mermaid_product_tick_drain_calls=[1-9][0-9]*$' \"$summary\"; " ++
                 "awk -F= '$1==\"mermaid_product_tick_max_elapsed_us\" { if ($2 + 0 <= 20000) ok=1 } END { exit !ok }' \"$summary\"; " ++
-                "rg -q '^mermaid_helper_starts=1$' \"$summary\"; " ++
-                "rg -q '^mermaid_request_frames=2$' \"$summary\"; " ++
-                "rg -q '^mermaid_terminal_results=1$' \"$summary\"; " ++
-                "rg -q '^mermaid_deadline_expirations=1$' \"$summary\"; " ++
-                "rg -q '^file_viewer_default_mode=live-preview$' \"$summary\"; " ++
-                "rg -q '^file_viewer_edit=true$' \"$summary\"; " ++
-                "rg -q '^file_viewer_cmd_s_route=web-editor$' \"$summary\"; " ++
-                "rg -q '^file_viewer_disk_saved=true$' \"$summary\"; " ++
-                "rg -q '^file_viewer_write=true$' \"$summary\"; " ++
-                "rg -q '^file_viewer_dirty_sync_recovered=true$' \"$summary\"; " ++
-                "rg -q 'FP10d actual Cmd\\+S marker' zig-out/maru-macos-app/fp10d-live-preview.md; " ++
-                "rg -q '^file_viewer_under_page_background=true$' \"$summary\"; " ++
-                "rg -q '^file_viewer_critical_style=true$' \"$summary\"; " ++
-                "rg -q '^file_panel_mode_unknown_rejected=true$' \"$summary\"; " ++
-                "rg -q '^web_role_scheme_app_worker_status=200$' \"$summary\"; " ++
-                "rg -q '^web_role_scheme_app_mermaid_status=404$' \"$summary\"; " ++
-                "rg -q '^web_role_scheme_app_worker_self=true$' \"$summary\"; " ++
-                "rg -q '^web_role_scheme_render_worker_status=404$' \"$summary\"; " ++
-                "rg -q '^web_role_scheme_render_worker_csp=missing$' \"$summary\"; " ++
-                "rg -q '^web_role_scheme_render_document_status=200$' \"$summary\"; " ++
-                "rg -q '^web_role_scheme_render_document_none=true$' \"$summary\"; " ++
-                "rg -q '^renderer_bridge_type=undefined$' \"$summary\"; " ++
-                "rg -q '^renderer_handler_type=undefined$' \"$summary\"; " ++
-                "rg -q '^renderer_parent_accessible=false$' \"$summary\"; " ++
+                "/usr/bin/grep -Eq '^mermaid_helper_starts=1$' \"$summary\"; " ++
+                "/usr/bin/grep -Eq '^mermaid_request_frames=2$' \"$summary\"; " ++
+                "/usr/bin/grep -Eq '^mermaid_terminal_results=1$' \"$summary\"; " ++
+                "/usr/bin/grep -Eq '^mermaid_deadline_expirations=1$' \"$summary\"; " ++
+                "/usr/bin/grep -Eq '^file_viewer_default_mode=live-preview$' \"$summary\"; " ++
+                "/usr/bin/grep -Eq '^file_viewer_edit=true$' \"$summary\"; " ++
+                "/usr/bin/grep -Eq '^file_viewer_cmd_s_route=web-editor$' \"$summary\"; " ++
+                "/usr/bin/grep -Eq '^file_viewer_disk_saved=true$' \"$summary\"; " ++
+                "/usr/bin/grep -Eq '^file_viewer_write=true$' \"$summary\"; " ++
+                "/usr/bin/grep -Eq '^file_viewer_dirty_sync_recovered=true$' \"$summary\"; " ++
+                "/usr/bin/grep -Eq 'FP10d actual Cmd\\+S marker' zig-out/maru-macos-app/fp10d-live-preview.md; " ++
+                "/usr/bin/grep -Eq '^file_viewer_under_page_background=true$' \"$summary\"; " ++
+                "/usr/bin/grep -Eq '^file_viewer_critical_style=true$' \"$summary\"; " ++
+                "/usr/bin/grep -Eq '^file_panel_mode_unknown_rejected=true$' \"$summary\"; " ++
+                "/usr/bin/grep -Eq '^web_role_scheme_app_worker_status=200$' \"$summary\"; " ++
+                "/usr/bin/grep -Eq '^web_role_scheme_app_mermaid_status=404$' \"$summary\"; " ++
+                "/usr/bin/grep -Eq '^web_role_scheme_app_worker_self=true$' \"$summary\"; " ++
+                "/usr/bin/grep -Eq '^web_role_scheme_render_worker_status=404$' \"$summary\"; " ++
+                "/usr/bin/grep -Eq '^web_role_scheme_render_worker_csp=missing$' \"$summary\"; " ++
+                "/usr/bin/grep -Eq '^web_role_scheme_render_document_status=200$' \"$summary\"; " ++
+                "/usr/bin/grep -Eq '^web_role_scheme_render_document_none=true$' \"$summary\"; " ++
+                "/usr/bin/grep -Eq '^renderer_bridge_type=undefined$' \"$summary\"; " ++
+                "/usr/bin/grep -Eq '^renderer_handler_type=undefined$' \"$summary\"; " ++
+                "/usr/bin/grep -Eq '^renderer_parent_accessible=false$' \"$summary\"; " ++
                 "cp \"$summary\" zig-out/maru-macos-app/markdown.summary.txt",
         });
         macos_app_smoke_assert.setCwd(b.path("."));
@@ -1171,19 +1177,19 @@ pub fn build(b: *std.Build) void {
             "sh", "-eu", "-c",
             "summary=zig-out/maru-macos-app/app.summary.txt; " ++
                 "test -f \"$summary\"; " ++
-                "rg -q '^web_panel_present=true$' \"$summary\"; " ++
-                "rg -q '^web_panel_kind=1$' \"$summary\"; " ++
-                "rg -q '^web_panel_scheme_handler_registered=false$' \"$summary\"; " ++
-                "rg -q '^web_panel_data_store_persistent=false$' \"$summary\"; " ++
-                "rg -q '^bridge_world_registered=false$' \"$summary\"; " ++
-                "rg -q '^file_html_kind=2$' \"$summary\"; " ++
-                "rg -q '^file_html_read_access=.*/tests/fixtures/file-panel$' \"$summary\"; " ++
-                "rg -q '^file_html_data_store_isolated=true$' \"$summary\"; " ++
-                "rg -q '^file_html_script=true$' \"$summary\"; " ++
-                "rg -q '^file_html_asset=true$' \"$summary\"; " ++
-                "rg -q '^file_html_outside_asset=false$' \"$summary\"; " ++
-                "rg -q '^file_html_about_attempt=true$' \"$summary\"; " ++
-                "rg -q '^file_html_pinned=true$' \"$summary\"",
+                "/usr/bin/grep -Eq '^web_panel_present=true$' \"$summary\"; " ++
+                "/usr/bin/grep -Eq '^web_panel_kind=1$' \"$summary\"; " ++
+                "/usr/bin/grep -Eq '^web_panel_scheme_handler_registered=false$' \"$summary\"; " ++
+                "/usr/bin/grep -Eq '^web_panel_data_store_persistent=false$' \"$summary\"; " ++
+                "/usr/bin/grep -Eq '^bridge_world_registered=false$' \"$summary\"; " ++
+                "/usr/bin/grep -Eq '^file_html_kind=2$' \"$summary\"; " ++
+                "/usr/bin/grep -Eq '^file_html_read_access=.*/tests/fixtures/file-panel$' \"$summary\"; " ++
+                "/usr/bin/grep -Eq '^file_html_data_store_isolated=true$' \"$summary\"; " ++
+                "/usr/bin/grep -Eq '^file_html_script=true$' \"$summary\"; " ++
+                "/usr/bin/grep -Eq '^file_html_asset=true$' \"$summary\"; " ++
+                "/usr/bin/grep -Eq '^file_html_outside_asset=false$' \"$summary\"; " ++
+                "/usr/bin/grep -Eq '^file_html_about_attempt=true$' \"$summary\"; " ++
+                "/usr/bin/grep -Eq '^file_html_pinned=true$' \"$summary\"",
         });
         macos_app_html_smoke_assert.setCwd(b.path("."));
         macos_app_html_smoke_assert.step.dependOn(&macos_app_html_smoke.step);

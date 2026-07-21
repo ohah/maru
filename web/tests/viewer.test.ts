@@ -16,6 +16,8 @@ import {
   isAssetRequest,
   isRendererReport,
   requestFileBridge,
+  renderMermaidFromBridge,
+  revokeMermaidFromBridge,
   maxAssetBase64Bytes,
   maxAssetRequests,
   viewerChannel,
@@ -90,6 +92,96 @@ describe("file viewer bridge boundary", () => {
       content: "# FP4",
     });
     expect(document.querySelector("[data-maru-file-request]")).toBeNull();
+  });
+
+  test("product Mermaid adapter waits for the native exact terminal without scheduling a Web timeout", async () => {
+    const dom = new JSDOM('<!doctype html><html><body><p id="status"></p></body></html>');
+    const document = dom.window.document;
+    const status = document.querySelector<HTMLElement>("#status");
+    const originalSetTimeout = globalThis.setTimeout;
+    let scheduledTimeouts = 0;
+    globalThis.setTimeout = ((..._arguments: Parameters<typeof setTimeout>) => {
+      scheduledTimeouts += 1;
+      throw new Error("product Mermaid adapter scheduled an independent Web timeout");
+    }) as typeof setTimeout;
+    let pending: HTMLElement | null = null;
+    document.addEventListener("maru:file-request", () => {
+      const node = document.querySelector<HTMLElement>('[data-maru-file-request="pending"]');
+      if (node === null) return;
+      pending = node;
+    });
+
+    try {
+      const result = renderMermaidFromBridge(
+        document,
+        status,
+        {
+          editorEpoch: 1,
+          documentRevision: 1,
+          projectionGeneration: 1,
+          widgetId: 1,
+          widgetGeneration: 1,
+          rendererInstance: 1,
+        },
+        1,
+        "0".repeat(64),
+        "graph TD\nA --> B",
+      );
+      expect(status?.dataset.liveMermaidRequest).toBe("pending");
+      expect(scheduledTimeouts).toBe(0);
+      const node = pending as unknown as HTMLElement;
+      node.textContent = JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        result: { job_id: 9, svg: "<svg></svg>" },
+      });
+      node.dataset.maruFileRequest = "done";
+      document.dispatchEvent(new dom.window.Event("maru:file-response"));
+      await expect(result).resolves.toBe("<svg></svg>");
+      expect(status?.dataset.liveMermaidRequest).toBe("ok");
+    } finally {
+      globalThis.setTimeout = originalSetTimeout;
+    }
+    expect(document.querySelector("[data-maru-file-request]")).toBeNull();
+  });
+
+  test("product Mermaid revoke adapter bounds and cleans an unresponsive lifecycle mailbox", async () => {
+    const dom = new JSDOM("<!doctype html><html><body></body></html>");
+    const document = dom.window.document;
+    const originalSetTimeout = globalThis.setTimeout;
+    const originalClearTimeout = globalThis.clearTimeout;
+    let scheduledDelay = -1;
+    let scheduledCallback: (() => void) | null = null;
+    let clearedTimeouts = 0;
+    globalThis.setTimeout = ((callback: TimerHandler, delay?: number) => {
+      scheduledDelay = delay ?? 0;
+      scheduledCallback = callback as () => void;
+      return 1 as unknown as ReturnType<typeof setTimeout>;
+    }) as typeof setTimeout;
+    globalThis.clearTimeout = ((_handle?: ReturnType<typeof setTimeout>) => {
+      clearedTimeouts += 1;
+    }) as typeof clearTimeout;
+
+    try {
+      const result = revokeMermaidFromBridge(document, {
+        editorEpoch: 1,
+        documentRevision: 1,
+        projectionGeneration: 1,
+        widgetId: 1,
+        widgetGeneration: 1,
+        rendererInstance: 1,
+      });
+      expect(scheduledDelay).toBe(2_500);
+      expect(document.querySelector('[data-maru-file-request="pending"]')).not.toBeNull();
+      const callback = scheduledCallback as unknown as () => void;
+      callback();
+      await expect(result).rejects.toThrow("file bridge timeout");
+      expect(document.querySelector("[data-maru-file-request]")).toBeNull();
+      expect(clearedTimeouts).toBe(1);
+    } finally {
+      globalThis.setTimeout = originalSetTimeout;
+      globalThis.clearTimeout = originalClearTimeout;
+    }
   });
 
   test("dirty snapshot request before editor hydration completes with a clean native ack", async () => {

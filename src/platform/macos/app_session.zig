@@ -172,7 +172,9 @@ fn navButtonAt(x_px: f64, band_x: u32, cw: u32) ?NavButton {
 // 별도 물리 CAMetalLayer로 분리, 두 drawable을 한 command buffer에 present + 단일 commit으로 전이 원자성). host↔renderer
 // draw 계약 변경이라 버전을 올린다. **MetalFrame/세션 struct·export 시그니처는 불변**(overlay_layer는 Zig가 아니라
 // Swift가 소유한 CAMetalLayer라 struct offset·layout test는 그대로 green). 렌더러 분할·컨테이너 재편은 Swift/ObjC 레이어.
-pub const abi_version: u32 = 138;
+pub const abi_version: u32 = 139;
+// 139: Mermaid cold helper 5초/warm helper 2초 response deadline과 action-relative Swift fallback grace
+// 250ms를 C/Zig 공용 상수로 노출한다. fixed-width struct layout과 export 시그니처는 불변이다.
 // 137: Explorer presented state + directory picker replace/add root one-shots. fixed-width struct layout 불변.
 // 136: WebSurfaceTransition의 단일 divider grab 폭을 최종 padded frame과 실제 Zig hit target 교집합에서
 // 계산한 left/right/bottom별 f64 pt 폭으로 교체한다. native pass-through가 resize target 밖 dead strip을 만들지 않는다.

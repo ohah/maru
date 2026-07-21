@@ -10,7 +10,12 @@ pub const max_pending_jobs: usize = 32;
 pub const max_pending_source_bytes: usize = 1024 * 1024;
 pub const max_accepted_svg_bytes: usize = 2 * 1024 * 1024;
 pub const max_line_bytes: usize = 512;
-pub const response_deadline_ms: u64 = 2_000;
+/// 첫 요청은 helper validation/spawn/Hello와 cold WKWebView 기동까지 포함한다. 이미 검증·기동된
+/// helper의 후속 요청은 renderer 응답만 기다리므로 더 짧은 deadline을 유지한다.
+pub const cold_response_deadline_ms: u64 = 5_000;
+pub const warm_response_deadline_ms: u64 = 2_000;
+pub const reply_fallback_grace_ms: u64 = 250;
+pub const reply_fallback_ms: u64 = cold_response_deadline_ms + reply_fallback_grace_ms;
 pub const failure_window_ms: u64 = 60_000;
 pub const failure_limit: usize = 3;
 pub const max_completion_drain_per_tick: usize = 8;
@@ -279,8 +284,9 @@ pub const MermaidCoordinatorState = struct {
         return job_id;
     }
 
-    /// terminate는 항상 start보다 먼저 drain된다. start commit 시점의 `now_ms`가 2초 end-to-end
-    /// deadline의 유일한 시작점이며 platform 대기/spawn/handshake를 모두 포함한다.
+    /// terminate는 항상 start보다 먼저 drain된다. start commit 시점의 `now_ms`가 end-to-end
+    /// deadline의 유일한 시작점이다. cold 5초는 platform 대기/spawn/handshake를 포함하고,
+    /// 이미 기동된 helper의 warm 요청은 2초를 쓴다.
     pub fn drainAction(self: *MermaidCoordinatorState, now_ms: u64) ?Action {
         if (self.terminate_pending != 0) {
             const helper = self.terminate_pending;
@@ -296,9 +302,9 @@ pub const MermaidCoordinatorState = struct {
         slot.state = .in_flight;
         self.in_flight_index = index;
         self.last_window_id = slot.window_id;
-        self.in_flight_deadline_ms = now_ms +| response_deadline_ms;
-
         const spawn = self.helper_instance == 0;
+        const response_deadline_ms = if (spawn) cold_response_deadline_ms else warm_response_deadline_ms;
+        self.in_flight_deadline_ms = now_ms +| response_deadline_ms;
         if (spawn) {
             self.helper_instance = self.takeHelperInstance();
             self.helper_nonce = self.takeHelloNonce();
@@ -346,7 +352,7 @@ pub const MermaidCoordinatorState = struct {
         // Web lifecycle revoke makes the capability terminal immediately, but an already executing
         // synchronous Mermaid render is allowed to finish so rapid edits do not recreate Process/WKWebView.
         // Protocol/body validity is still checked before stale-discard; a revoked hang still hits the same
-        // two-second deadline and failure budget.
+        // selected cold/warm deadline and failure budget.
         if (slot.revoked) {
             if ((status == .render_error and body.len != 0) or
                 (status == .ok and (body.len > protocol.max_svg_bytes or !std.unicode.utf8ValidateSlice(body))))
@@ -908,6 +914,21 @@ test "worker hash mismatch rejects before queue copy" {
     try std.testing.expectEqual(@as(usize, 0), state.snapshot().pending_jobs);
 }
 
+test "cold helper gets five-second deadline and warm helper stays two seconds" {
+    var state: MermaidCoordinatorState = .{};
+    _ = try state.admit(testRequest(1, 1, "cold"));
+    const cold = state.drainAction(100).?.start_job;
+    try std.testing.expect(cold.spawn_helper);
+    try std.testing.expectEqual(@as(u64, 100 + cold_response_deadline_ms), cold.deadline_ms);
+    try std.testing.expect(state.completeActionHandoff(cold.capability.helper_instance, cold.capability.job_id));
+    try std.testing.expectEqual(.render_error, state.completeResult(cold.capability, .render_error, "", 101));
+
+    _ = try state.admit(testRequest(1, 2, "warm"));
+    const warm = state.drainAction(200).?.start_job;
+    try std.testing.expect(!warm.spawn_helper);
+    try std.testing.expectEqual(@as(u64, 200 + warm_response_deadline_ms), warm.deadline_ms);
+}
+
 test "deadline failures restart at most three helpers then latch" {
     var state: MermaidCoordinatorState = .{};
     var iteration: u64 = 0;
@@ -1248,6 +1269,6 @@ test "failures outside the rolling window do not latch" {
         const helper = state.drainAction(start.deadline_ms + 1).?.terminate_helper;
         try std.testing.expect(state.completeTermination(helper));
         try std.testing.expect(!state.snapshot().disabled);
-        now += failure_window_ms + response_deadline_ms + 1;
+        now += failure_window_ms + cold_response_deadline_ms + 1;
     }
 }

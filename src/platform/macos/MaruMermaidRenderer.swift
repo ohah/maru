@@ -64,7 +64,17 @@ struct MaruMermaidRenderer {
                     } ?? ""
                     if source == "__MARU_TEST_HANG__" { return }
                     if source == "__MARU_TEST_MAX_SVG__" {
-                        writeMaxSvg(frame.capability)
+                        let capability = frame.capability
+                        if let rawDelay = ProcessInfo.processInfo.environment["MARU_MERMAID_SMOKE_RESULT_DELAY_MS"],
+                           let delayMs = UInt64(rawDelay), delayMs > 0 {
+                            DispatchQueue.main.asyncAfter(
+                                deadline: .now() + .milliseconds(Int(delayMs))
+                            ) {
+                                writeMaxSvg(capability)
+                            }
+                        } else {
+                            writeMaxSvg(capability)
+                        }
                         return
                     }
                     if source == "__MARU_TEST_EXTERNAL_APIS__" {

@@ -7,6 +7,9 @@ import Darwin
 extension MaruMermaidCoordinatorAction: @retroactive @unchecked Sendable {}
 
 final class MermaidRenderCoordinator: @unchecked Sendable {
+    /// Reply fallback은 admission 시점이 아니라 Zig가 정한 exact action deadline에 결박한다.
+    /// `pump`의 main-thread start branch에서만 호출되고 executor는 이 closure를 보지 않는다.
+    var onStartJob: ((MaruMermaidJobCapability, UInt64, UInt64) -> Void)?
     /// `pump`가 main thread에서 Zig terminal 판정을 끝낸 뒤 제품 shell에 range-local 실패를 알린다.
     /// process/I/O executor는 이 closure를 직접 호출하지 않는다.
     var onRenderError: ((MaruMermaidJobCapability) -> Void)?
@@ -16,6 +19,7 @@ final class MermaidRenderCoordinator: @unchecked Sendable {
         case smokeNoRead(URL)
         case smokeClosedPipes(URL)
         case smokeDelayedStart(URL, delayMs: UInt64)
+        case smokeDelayedResult(URL, delayMs: UInt64)
         case smokePathABA(URL, replacement: URL)
     }
 
@@ -232,6 +236,7 @@ final class MermaidRenderCoordinator: @unchecked Sendable {
             let helper = action.capability.helper_instance
             controlExecutor.async { [weak self] in self?.terminate(helperInstance: helper) }
         case UInt32(MARU_MERMAID_ACTION_START_JOB):
+            onStartJob?(action.capability, action.deadline_ms, nowMs)
             controlExecutor.async { [weak self] in
                 guard let self else { return }
                 var copiedAction = action
@@ -324,6 +329,9 @@ final class MermaidRenderCoordinator: @unchecked Sendable {
         ]
         if case .smokeNoRead = validation { environment["MARU_MERMAID_SMOKE_NO_STDIN"] = "1" }
         if case .smokeClosedPipes = validation { environment["MARU_MERMAID_SMOKE_CLOSE_PIPES"] = "1" }
+        if case let .smokeDelayedResult(_, delayMs) = validation {
+            environment["MARU_MERMAID_SMOKE_RESULT_DELAY_MS"] = String(delayMs)
+        }
         process.environment = environment
         process.standardInput = stdin
         process.standardOutput = stdout
@@ -438,6 +446,8 @@ final class MermaidRenderCoordinator: @unchecked Sendable {
         case let .smokeClosedPipes(url):
             return url
         case let .smokeDelayedStart(url, _):
+            return url
+        case let .smokeDelayedResult(url, _):
             return url
         case let .smokePathABA(url, _):
             return url
@@ -776,7 +786,7 @@ final class MermaidRenderCoordinator: @unchecked Sendable {
               bundleIdentity == code else { return nil }
         let identity = HelperFileIdentity(device: UInt64(info.st_dev), inode: UInt64(info.st_ino), code: code)
         switch validation {
-        case .smoke, .smokeNoRead, .smokeClosedPipes, .smokeDelayedStart, .smokePathABA:
+        case .smoke, .smokeNoRead, .smokeClosedPipes, .smokeDelayedStart, .smokeDelayedResult, .smokePathABA:
             return identity
         case .productionBundle:
             break

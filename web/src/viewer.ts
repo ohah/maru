@@ -279,7 +279,7 @@ export function requestFileBridge(
   document: Document,
   method: "revokeMermaid",
   value: RevokeMermaidRequest,
-  timeoutMs?: number,
+  timeoutMs?: number | null,
 ): Promise<BridgeResult>;
 export function requestFileBridge(
   document: Document,
@@ -291,7 +291,7 @@ export function requestFileBridge(
   document: Document,
   method: "renderMermaid",
   value: RenderMermaidRequest,
-  timeoutMs?: number,
+  timeoutMs?: number | null,
 ): Promise<BridgeResult>;
 export function requestFileBridge(
   document: Document,
@@ -333,7 +333,7 @@ export function requestFileBridge(
   document: Document,
   method: FileMethod,
   value?: unknown,
-  timeoutMs = 15_000,
+  timeoutMs: number | null = 15_000,
 ): Promise<BridgeResult> {
   return new Promise((resolve, reject) => {
     const node = document.createElement("span");
@@ -506,7 +506,7 @@ export function requestFileBridge(
     document.documentElement.append(node);
 
     const cleanup = () => {
-      clearTimeout(timer);
+      if (timer !== null) clearTimeout(timer);
       document.removeEventListener("maru:file-response", onResponse);
       node.remove();
     };
@@ -524,14 +524,75 @@ export function requestFileBridge(
         reject(error instanceof Error ? error : new Error("invalid file bridge response"));
       }
     };
-    const timer = setTimeout(() => {
-      cleanup();
-      reject(new Error("file bridge timeout"));
-    }, timeoutMs);
+    const timer =
+      timeoutMs === null
+        ? null
+        : setTimeout(() => {
+            cleanup();
+            reject(new Error("file bridge timeout"));
+          }, timeoutMs);
     document.addEventListener("maru:file-response", onResponse);
     const EventConstructor = document.defaultView?.Event ?? Event;
     document.dispatchEvent(new EventConstructor("maru:file-request"));
   });
+}
+
+/// Product Mermaid adapter. The native exact terminal and the action-relative Swift fallback are the
+/// only timeout authorities, so this mailbox deliberately has no independent Web timer.
+export async function renderMermaidFromBridge(
+  document: Document,
+  status: HTMLElement | null,
+  capability: RendererCapability,
+  fenceId: number,
+  sourceHash: string,
+  source: string,
+): Promise<string | null> {
+  if (status !== null) status.dataset.liveMermaidRequest = "pending";
+  try {
+    const result = await requestFileBridge(
+      document,
+      "renderMermaid",
+      {
+        editor_epoch: capability.editorEpoch,
+        document_revision: capability.documentRevision,
+        projection_generation: capability.projectionGeneration,
+        widget_id: capability.widgetId,
+        widget_generation: capability.widgetGeneration,
+        renderer_instance: capability.rendererInstance,
+        fence_id: fenceId,
+        source_hash: sourceHash,
+        source,
+      },
+      null,
+    );
+    const svg = typeof result.svg === "string" ? result.svg : null;
+    if (status !== null) status.dataset.liveMermaidRequest = svg === null ? "invalid" : "ok";
+    return svg;
+  } catch {
+    if (status !== null) status.dataset.liveMermaidRequest = "error";
+    return null;
+  }
+}
+
+/// Revoke is a best-effort lifecycle command rather than a render result. Bound its page mailbox so an
+/// unresponsive isolated bridge cannot retain retired widget nodes/listeners for the generic 15s timeout.
+export function revokeMermaidFromBridge(
+  document: Document,
+  capability: RendererCapability,
+): Promise<BridgeResult> {
+  return requestFileBridge(
+    document,
+    "revokeMermaid",
+    {
+      editor_epoch: capability.editorEpoch,
+      document_revision: capability.documentRevision,
+      projection_generation: capability.projectionGeneration,
+      widget_id: capability.widgetId,
+      widget_generation: capability.widgetGeneration,
+      renderer_instance: capability.rendererInstance,
+    },
+    2_500,
+  );
 }
 
 function bytesToBase64(bytes: Uint8Array, targetWindow: Window): string {
@@ -957,49 +1018,10 @@ export function bootShell(document: Document, targetWindow: Window): void {
         );
       },
       enqueueLivePreviewIntent,
-      async (capability, fenceId, sourceHash, source) => {
-        if (status !== null) status.dataset.liveMermaidRequest = "pending";
-        try {
-          const result = await requestFileBridge(
-            document,
-            "renderMermaid",
-            {
-              editor_epoch: capability.editorEpoch,
-              document_revision: capability.documentRevision,
-              projection_generation: capability.projectionGeneration,
-              widget_id: capability.widgetId,
-              widget_generation: capability.widgetGeneration,
-              renderer_instance: capability.rendererInstance,
-              fence_id: fenceId,
-              source_hash: sourceHash,
-              source,
-            },
-            2_500,
-          );
-          const svg = typeof result.svg === "string" ? result.svg : null;
-          if (status !== null) {
-            status.dataset.liveMermaidRequest = svg === null ? "invalid" : "ok";
-          }
-          return svg;
-        } catch {
-          if (status !== null) status.dataset.liveMermaidRequest = "error";
-          return null;
-        }
-      },
+      (capability, fenceId, sourceHash, source) =>
+        renderMermaidFromBridge(document, status, capability, fenceId, sourceHash, source),
       (capability) => {
-        void requestFileBridge(
-          document,
-          "revokeMermaid",
-          {
-            editor_epoch: capability.editorEpoch,
-            document_revision: capability.documentRevision,
-            projection_generation: capability.projectionGeneration,
-            widget_id: capability.widgetId,
-            widget_generation: capability.widgetGeneration,
-            renderer_instance: capability.rendererInstance,
-          },
-          2_500,
-        ).catch(() => {});
+        void revokeMermaidFromBridge(document, capability).catch(() => {});
       },
     );
     if (atomicProjectionAdmitted && mode === "live-preview") atomicProjectionController.enable();

@@ -19,8 +19,8 @@ export async function emitZntcBundle(
   outputName = "bundle.js",
   conditions?: string[],
 ): Promise<EmittedBundle> {
-  // write:false is the fail-closed boundary. zntc 0.1.3 can return diagnostics and
-  // an output file together, so no bytes may reach dist before errors are checked.
+  // write:false is the fail-closed boundary. 0.1.3에서 확인된 diagnostics+output 동시 반환 가능성을
+  // 0.1.4에서도 보수적으로 방어하므로, 오류 확인 전에는 어떤 bytes도 dist에 쓰지 않는다.
   const result = await build({
     entryPoints: [entry],
     bundle: true,
@@ -30,9 +30,9 @@ export async function emitZntcBundle(
     jobs: 1,
     conditions,
     outdir,
-    // zntc 0.1.3 syntax minifier can emit a bundle that its own safari16 target accepts but the macOS
-    // JavaScriptCore parser rejects once the CM6 graph is present. Identifier/whitespace minification remains
-    // deterministic; syntax rewriting stays off and the real WKWebView smoke is the executable compatibility gate.
+    // 0.1.3에서 zntc syntax minifier가 자기 safari16 target은 통과하지만 CM6 graph를 실제 macOS
+    // JavaScriptCore가 거부하는 bundle을 생성했다. 0.1.4에서도 검증된 보수 정책을 유지해 identifier/whitespace만
+    // 결정적으로 줄이고 syntax rewrite는 끄며, 실제 WKWebView smoke를 실행 호환 gate로 둔다.
     minify: false,
     minifyIdentifiers: true,
     minifyWhitespace: true,

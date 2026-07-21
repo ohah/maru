@@ -127,17 +127,18 @@ pub const RuntimeManager = struct {
         surface.lockCore(self.io);
         defer surface.unlockCore(self.io);
 
-        const cur = try screen_snapshot.projectSnapshot(allocator, &surface.core, opts); // 새 base(현재 full snapshot).
-        errdefer allocator.free(cur);
-        const delta = screen_snapshot.computeDelta(allocator, base, &surface.core, opts) catch |e| switch (e) {
+        // computeDelta가 delta와 새 base(현재 full snapshot)를 **한 번의 row build로** 함께 준다(재투영 없음).
+        const result = screen_snapshot.computeDelta(allocator, base, &surface.core, opts) catch |e| switch (e) {
             error.SnapshotRequired => {
-                // grid/alt 변화 → fresh snapshot. send는 new_base와 별개 버퍼여야 하므로 복사한다.
-                const send = allocator.dupe(u8, cur) catch return error.OutOfMemory;
-                return .{ .send = send, .is_snapshot = true, .new_base = cur };
+                // grid/alt 변화 → delta 불가, fresh snapshot을 보낸다. send는 new_base와 별개 버퍼여야 하므로 복사한다.
+                const snap = try screen_snapshot.projectSnapshot(allocator, &surface.core, opts);
+                errdefer allocator.free(snap);
+                const send = allocator.dupe(u8, snap) catch return error.OutOfMemory;
+                return .{ .send = send, .is_snapshot = true, .new_base = snap };
             },
             else => return e,
         };
-        return .{ .send = delta, .is_snapshot = false, .new_base = cur };
+        return .{ .send = result.delta, .is_snapshot = false, .new_base = result.snapshot };
     }
 
     /// runtime_id → in-process handle. registry entry의 opaque 슬롯에서 되읽는다(spawn이 심어 둔 값). 없으면 null.

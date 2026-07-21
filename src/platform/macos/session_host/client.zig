@@ -31,6 +31,15 @@ pub const ClientError = error{
     OutOfMemory,
 };
 
+/// `readStreamBatch`가 돌려주는 한 화면 stream 배치. `is_snapshot`이면 fresh full snapshot(화면 리셋), 아니면 delta 증분이다
+/// (§9 — host가 grid/alt 변화 시 delta 대신 snapshot을 push하므로 소비자는 둘 다 받는다). `bytes`는 `end_stream`까지 이은
+/// record 바이트(caller 소유), `stream_id`는 어느 runtime의 화면인지다(멀티 runtime 라우팅).
+pub const StreamBatch = struct {
+    is_snapshot: bool,
+    stream_id: u64,
+    bytes: []u8,
+};
+
 /// host와의 한 connection. `host_id`는 hello_ack로 받은 값이다(§4 stale handle 판정에 쓴다). `call`은 read-only
 /// command를 왕복한다.
 pub const Client = struct {
@@ -39,6 +48,9 @@ pub const Client = struct {
     host_id: u128,
     parser: framing.FrameParser,
     next_request_id: u64 = 1,
+    // 응답을 기다리는 `call` 중에 host가 비동기로 push한 stream frame(delta_chunk/snapshot_chunk)을 여기 버퍼한다 — 드롭하면
+    // 화면 갱신이 유실되므로(§9 delta는 증분이라 하나만 놓쳐도 desync), 다음 `readStreamBatch`가 소켓보다 먼저 이걸 비운다.
+    pending_stream: std.ArrayListUnmanaged(framing.Frame) = .empty,
 
     /// host socket에 connect하고 hello를 왕복한다. 성공하면 `host_id`가 채워진 Client다. host가 없으면 ConnectFailed
     /// (discovery가 이 신호로 spawn/host_unavailable을 가른다, P3-d2b). version 불일치는 IncompatibleVersion.
@@ -78,6 +90,8 @@ pub const Client = struct {
 
     pub fn deinit(self: *Client) void {
         _ = c.close(self.fd);
+        for (self.pending_stream.items) |f| f.deinit(self.allocator); // 미소비 버퍼 stream frame 회수.
+        self.pending_stream.deinit(self.allocator);
         self.parser.deinit();
         self.* = undefined;
     }
@@ -93,12 +107,18 @@ pub const Client = struct {
         defer self.allocator.free(frame_bytes);
         socket_server.writeAll(self.fd, frame_bytes) catch return error.WriteFailed;
 
-        // 응답을 기다리는 동안 host가 비동기로 push하는 stream frame(delta_chunk/snapshot_chunk)은 건너뛴다 — 이 간단한
-        // 동기 client는 그 화면 stream을 소비하지 않으므로(GUI event loop가 라우팅) 여기선 무시하고 응답만 골라낸다.
+        // 응답을 기다리는 동안 host가 비동기로 push하는 stream frame(delta_chunk/snapshot_chunk)은 **버퍼에 쌓는다** — 드롭하면
+        // 그 사이 화면 갱신이 유실된다(§9 delta는 증분이라 한 배치만 놓쳐도 desync). 다음 `readStreamBatch`가 이 버퍼부터 소비한다.
         while (true) {
             const resp = try self.readFrame();
+            if (resp.header.kind == .delta_chunk or resp.header.kind == .snapshot_chunk) {
+                self.pending_stream.append(self.allocator, resp) catch {
+                    resp.deinit(self.allocator);
+                    return error.OutOfMemory;
+                };
+                continue;
+            }
             defer resp.deinit(self.allocator);
-            if (resp.header.kind == .delta_chunk or resp.header.kind == .snapshot_chunk) continue;
             // kind와 request_id를 함께 확인한다 — out-of-order frame을 이 call의 응답으로 오귀속하지 않는다.
             if (resp.header.kind != .response or resp.header.request_id != request_id) return error.ProtocolError;
             return self.allocator.dupe(u8, resp.payload) catch return error.OutOfMemory;
@@ -121,20 +141,55 @@ pub const Client = struct {
         return out.toOwnedSlice(self.allocator) catch return error.OutOfMemory;
     }
 
-    /// 다음 delta batch(host가 push한 `delta_chunk` stream)를 `end_stream`까지 읽어 record 바이트로 잇는다(caller 소유,
-    /// `screen_stream.RecordStream`으로 순회). 화면이 바뀌면 host가 poll tick마다 보낸다. `stream_id`로 구분한다. 응답/
-    /// snapshot_chunk를 만나면 ProtocolError(이 helper는 delta batch 전용 — 실 GUI는 event loop가 모든 frame을 라우팅한다).
-    pub fn readDelta(self: *Client, stream_id: u64) ClientError![]u8 {
+    /// 다음 **화면 stream 배치**(host가 push한 delta_chunk 또는 snapshot_chunk stream)를 `end_stream`까지 읽어 하나의
+    /// `StreamBatch`로 돌려준다(caller가 `bytes` free). **논블로킹**: 배치가 아직 없으면(idle) `null`을 준다 — 그래서 frame-loop가
+    /// 매 프레임 불러도 화면 변화가 없으면 조용히 넘어가고, recv timeout을 세션 종료로 오인하지 않는다(§9). delta든 snapshot이든
+    /// 둘 다 받는다 — host는 grid/alt 변화 시 delta 대신 fresh snapshot을 push하므로(SnapshotRequired), 소비자는 `is_snapshot`을
+    /// 보고 applySnapshot(리셋)/applyDelta(증분)를 가른다. `call`이 버퍼해 둔 stream frame을 소켓보다 먼저 소비한다.
+    pub fn readStreamBatch(self: *Client, allocator: std.mem.Allocator) ClientError!?StreamBatch {
         var out: std.ArrayListUnmanaged(u8) = .empty;
-        errdefer out.deinit(self.allocator);
+        errdefer out.deinit(allocator);
+        var stream_id: u64 = 0;
+        var is_snapshot = false;
+        var started = false;
         while (true) {
-            const frame = try self.readFrame();
+            const frame = (try self.nextStreamFrame(started)) orelse {
+                // 배치 시작 전이면 그냥 "아직 없음". 시작 후 데이터가 끊기면(rare) 미완성 배치는 버린다 — host가 다음 tick에
+                // 새 delta/snapshot으로 다시 잇는다(부분 배치를 반영하는 것보다 안전).
+                out.deinit(allocator);
+                return null;
+            };
             defer frame.deinit(self.allocator);
-            if (frame.header.kind != .delta_chunk or frame.header.stream_id != stream_id) return error.ProtocolError;
-            out.appendSlice(self.allocator, frame.payload) catch return error.OutOfMemory;
-            if (protocol.Flags.hasEndStream(frame.header.flags)) break;
+            if (frame.header.kind != .snapshot_chunk and frame.header.kind != .delta_chunk) return error.ProtocolError;
+            if (!started) {
+                stream_id = frame.header.stream_id;
+                is_snapshot = frame.header.kind == .snapshot_chunk;
+                started = true;
+            }
+            out.appendSlice(allocator, frame.payload) catch return error.OutOfMemory;
+            if (protocol.Flags.hasEndStream(frame.header.flags)) {
+                return .{ .is_snapshot = is_snapshot, .stream_id = stream_id, .bytes = out.toOwnedSlice(allocator) catch return error.OutOfMemory };
+            }
         }
-        return out.toOwnedSlice(self.allocator) catch return error.OutOfMemory;
+    }
+
+    /// stream 배치를 잇는 다음 stream frame을 준다. 우선순위: `call`이 버퍼한 frame → parser에 남은 완성 frame → 소켓 read.
+    /// `started`=false(배치 첫 frame)면 소켓을 `pollReadable`로 논블로킹 확인해 데이터가 없으면 `null`(idle). `started`=true면
+    /// 배치의 나머지 frame이 곧 오므로(host가 한 번에 write) blocking read를 허용하되, EOF만 ConnectionClosed로 올린다.
+    fn nextStreamFrame(self: *Client, started: bool) ClientError!?framing.Frame {
+        if (self.pending_stream.items.len > 0) return self.pending_stream.orderedRemove(0);
+        var buf: [4096]u8 = undefined;
+        while (true) {
+            if (self.parser.next() catch return error.ProtocolError) |frame| return frame;
+            if (!started and !pollReadable(self.fd)) return null; // 배치 시작 전 + 데이터 없음 → idle.
+            const n = c.read(self.fd, &buf, buf.len);
+            if (n < 0) {
+                if (posix.errno(n) == .INTR) continue; // 시그널 인터럽트는 재시도.
+                return null; // EAGAIN/timeout → 더 없음(idle). 세션을 죽이지 않는다.
+            }
+            if (n == 0) return error.ConnectionClosed; // EOF — host 종료.
+            self.parser.push(buf[0..@intCast(n)]) catch return error.OutOfMemory;
+        }
     }
 
     /// terminal input bytes를 attach된 `stream_id`로 보낸다(§9 `input_bytes` — 응답 없는 fire-and-forget). controller만
@@ -160,6 +215,15 @@ pub const Client = struct {
         }
     }
 };
+
+/// 소켓에 읽을 데이터가 즉시 있는지 논블로킹 확인한다(timeout 0). `readStreamBatch`가 배치 첫 frame에서 idle이면 곧장
+/// 빠져나오게 한다(blocking read로 recv timeout까지 매달리지 않음 — socket_server serveConnection의 poll gate와 대칭).
+fn pollReadable(fd: c.fd_t) bool {
+    var fds = [_]c.pollfd{.{ .fd = fd, .events = c.POLL.IN, .revents = 0 }};
+    const rc = c.poll(&fds, 1, 0);
+    if (rc <= 0) return false; // EINTR/timeout/오류 → 없음으로 취급(다음 tick에 재확인).
+    return fds[0].revents & c.POLL.IN != 0;
+}
 
 /// recv timeout(ms)을 건다 — host가 연결만 받고 응답하지 않을 때 `readFrame`이 영원히 막히지 않게 한다(control_socket 관용구).
 fn setReadTimeoutMs(fd: c.fd_t, ms: u32) void {
@@ -525,13 +589,17 @@ test "client: receives a delta_chunk stream reflecting input echoed onto the scr
     // input을 보내면 PTY가 echo → 화면 row0이 바뀐다. host의 poll tick이 delta_chunk로 push한다.
     try client.sendInput(stream_id, "hello\n");
 
-    // delta batch를 몇 번 읽어 row0 set_runs의 첫 run이 "h"(echo된 "hello"의 시작)인지 확인한다(부분 echo·tick 타이밍 견딤).
+    // stream 배치를 폴링해 row0 set_runs의 첫 run이 "h"(echo된 "hello"의 시작)인지 확인한다(부분 echo·tick 타이밍 견딤).
+    // readStreamBatch는 논블로킹이라 delta가 도착할 때까지 짧게 잔다(host delta tick ~20ms).
     var found = false;
     var attempts: usize = 0;
-    while (attempts < 8 and !found) : (attempts += 1) {
-        const delta = client.readDelta(stream_id) catch break;
-        defer allocator.free(delta);
-        var rs = screen_stream.RecordStream{ .bytes = delta };
+    while (attempts < 100 and !found) : (attempts += 1) {
+        const batch = (client.readStreamBatch(allocator) catch break) orelse {
+            _ = usleepMs(20);
+            continue;
+        };
+        defer allocator.free(batch.bytes);
+        var rs = screen_stream.RecordStream{ .bytes = batch.bytes };
         while (try rs.next()) |rec| {
             const s = try screen_stream.RecordStream.split(rec);
             if (s.header.kind == .set_runs) {

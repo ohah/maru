@@ -338,8 +338,8 @@ test "remote screen: a Surface backed by RemoteScreen renders the assembled remo
     // host 화면을 바꾸고 delta를 적용하면 Surface.renderSnapshot이 반영한다.
     try core.write("\r\nsecond"); // row1 = "second".
     const d = try screen_snapshot.computeDelta(allocator, snap, &core, .{ .generation = 1 });
-    defer allocator.free(d);
-    try rs.applyDelta(d, io);
+    defer d.deinit(allocator);
+    try rs.applyDelta(d.delta, io);
 
     surface.lockCore(io);
     const r2 = surface.renderSnapshot();

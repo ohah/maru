@@ -207,11 +207,23 @@ pub const DeltaError = screen_stream.DecodeError || error{
     SnapshotRequired,
 };
 
-/// 이전 snapshot(`projectSnapshot`이 낸 record 바이트)과 현재 화면을 비교해 **바뀐 것만** delta record 스트림으로 만든다
-/// (caller 소유, length-prefixed). 바뀐 행은 `set_runs`(start_col=0 전체 행 덮어쓰기), 커서 변화는 `cursor`, mode 변화는
-/// `modes`. 아무것도 안 바뀌면 빈 스트림(len 0)이다. grid 크기/alt-screen이 바뀌면 `error.SnapshotRequired`(delta 불가).
+/// `computeDelta` 결과. `delta`는 바뀐 것만(빈 스트림 가능), `snapshot`은 현재 full snapshot(다음 base이자 render용).
+/// **같은 row build 한 번에서** 둘 다 도출한다(재투영 없음). 둘 다 caller 소유이고 별개 버퍼다.
+pub const DeltaResult = struct {
+    delta: []u8,
+    snapshot: []u8,
+
+    pub fn deinit(self: DeltaResult, allocator: std.mem.Allocator) void {
+        allocator.free(self.delta);
+        allocator.free(self.snapshot);
+    }
+};
+
+/// 이전 snapshot(`projectSnapshot`이 낸 record 바이트)과 현재 화면을 비교해 `delta`(바뀐 것만: `set_runs` 전체 행·`cursor`·
+/// `modes`)와 `snapshot`(현재 full snapshot)을 **한 번의 row build로** 함께 만든다(caller 소유, length-prefixed). 안 바뀌면
+/// delta는 빈 스트림. grid 크기/alt-screen이 바뀌면 `error.SnapshotRequired`(delta 불가 — caller가 fresh snapshot 전송).
 /// **동시 core 쓰기가 있으면 caller가 core lock을 잡고 부른다**(`projectSnapshot`과 동일). base_generation은 `opts.generation`.
-pub fn computeDelta(allocator: std.mem.Allocator, prev_bytes: []const u8, core: *const terminal.TerminalCore, opts: ProjectOptions) DeltaError![]u8 {
+pub fn computeDelta(allocator: std.mem.Allocator, prev_bytes: []const u8, core: *const terminal.TerminalCore, opts: ProjectOptions) DeltaError!DeltaResult {
     // 이전 snapshot을 decode한다: screen_meta + rows.
     var rs = screen_stream.RecordStream{ .bytes = prev_bytes };
     const first = (try rs.next()) orelse return error.SnapshotRequired; // 빈 prev면 delta base가 없다.
@@ -246,38 +258,58 @@ pub fn computeDelta(allocator: std.mem.Allocator, prev_bytes: []const u8, core: 
         return error.SnapshotRequired;
     }
 
-    var stream: std.ArrayListUnmanaged(u8) = .empty;
-    errdefer stream.deinit(allocator);
+    var delta: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer delta.deinit(allocator);
+    var snapshot: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer snapshot.deinit(allocator);
 
-    // 행 diff → 바뀐 행만 set_runs(전체 행 교체).
+    // snapshot의 screen_meta(현재 커서/모드) — projectSnapshot과 같은 첫 레코드.
+    const cur_cursor = screen_stream.Cursor{ .col = snap.cursor.col, .row = snap.cursor.row, .visible = snap.cursor.visible, .shape = @intFromEnum(snap.cursor_shape) };
+    {
+        const meta_rec = try screen_stream.encodeScreenMeta(allocator, .{ .kind = .screen_meta, .generation = opts.generation }, .{
+            .cols = snap.size.cols,
+            .rows = snap.size.rows,
+            .active_screen = cur_active,
+            .cursor = cur_cursor,
+            .modes = cur_modes,
+        });
+        defer allocator.free(meta_rec);
+        try screen_stream.appendRecord(&snapshot, allocator, meta_rec);
+    }
+
+    // 각 행을 **한 번만** build해서 (a) snapshot의 row 레코드로 담고 (b) prev와 다르면 delta의 set_runs로 담는다(재투영 제거).
     var row: u16 = 0;
     while (row < snap.size.rows) : (row += 1) {
         const rr = try buildRowRuns(allocator, snap, palette, opts, row);
         defer rr.deinit(allocator);
+        const row_rec = try screen_stream.encodeRow(allocator, .{ .kind = .row, .generation = opts.generation }, .{ .row_index = row, .runs = rr.runs });
+        defer allocator.free(row_rec);
+        try screen_stream.appendRecord(&snapshot, allocator, row_rec);
+
         const prev = prev_rows[row] orelse &[_]Run{};
         if (!runsEqual(rr.runs, prev)) {
             const rec = try screen_stream.encodeSetRuns(allocator, .{ .kind = .set_runs, .generation = opts.generation }, .{ .base_generation = opts.generation, .row_index = row, .start_col = 0, .runs = rr.runs });
             defer allocator.free(rec);
-            try screen_stream.appendRecord(&stream, allocator, rec);
+            try screen_stream.appendRecord(&delta, allocator, rec);
         }
     }
 
-    // 커서 변화 → cursor delta.
-    const cur_cursor = screen_stream.Cursor{ .col = snap.cursor.col, .row = snap.cursor.row, .visible = snap.cursor.visible, .shape = @intFromEnum(snap.cursor_shape) };
+    // 커서/모드 변화 → delta.
     if (!cursorsEqual(cur_cursor, prev_meta.cursor)) {
         const rec = try screen_stream.encodeCursor(allocator, .{ .kind = .cursor, .generation = opts.generation }, .{ .base_generation = opts.generation, .cursor = cur_cursor });
         defer allocator.free(rec);
-        try screen_stream.appendRecord(&stream, allocator, rec);
+        try screen_stream.appendRecord(&delta, allocator, rec);
     }
-
-    // mode 변화 → modes delta.
     if (cur_modes != prev_meta.modes) {
         const rec = try screen_stream.encodeModes(allocator, .{ .kind = .modes, .generation = opts.generation }, .{ .base_generation = opts.generation, .modes = cur_modes });
         defer allocator.free(rec);
-        try screen_stream.appendRecord(&stream, allocator, rec);
+        try screen_stream.appendRecord(&delta, allocator, rec);
     }
 
-    return stream.toOwnedSlice(allocator) catch return error.OutOfMemory;
+    const delta_owned = delta.toOwnedSlice(allocator) catch return error.OutOfMemory;
+    errdefer allocator.free(delta_owned);
+    const snapshot_owned = snapshot.toOwnedSlice(allocator) catch return error.OutOfMemory;
+    return .{ .delta = delta_owned, .snapshot = snapshot_owned };
 }
 
 /// 셀의 표시 grapheme을 UTF-8로 만든다(base codepoint + grapheme_store cluster 본체). 빈 셀(codepoint 0)은 공백.
@@ -467,8 +499,9 @@ test "screen snapshot: computeDelta emits set_runs for changed rows and a cursor
     defer allocator.free(a);
 
     try core.write("\r\nworld"); // row1="world", cursor (row1,col5). row0은 그대로.
-    const delta = try computeDelta(allocator, a, &core, .{ .generation = 1 });
-    defer allocator.free(delta);
+    const result = try computeDelta(allocator, a, &core, .{ .generation = 1 });
+    defer result.deinit(allocator);
+    const delta = result.delta;
     try testing.expect(delta.len > 0);
 
     var rs = screen_stream.RecordStream{ .bytes = delta };
@@ -508,9 +541,9 @@ test "screen snapshot: computeDelta is empty when the screen is unchanged" {
     try core.write("abc");
     const a = try projectSnapshot(allocator, &core, .{ .generation = 3 });
     defer allocator.free(a);
-    const delta = try computeDelta(allocator, a, &core, .{ .generation = 3 });
-    defer allocator.free(delta);
-    try testing.expectEqual(@as(usize, 0), delta.len); // 변화 없음 → 빈 delta(caller는 아무것도 안 보낸다).
+    const result = try computeDelta(allocator, a, &core, .{ .generation = 3 });
+    defer result.deinit(allocator);
+    try testing.expectEqual(@as(usize, 0), result.delta.len); // 변화 없음 → 빈 delta(caller는 아무것도 안 보낸다).
 }
 
 test "screen snapshot: computeDelta requires a fresh snapshot when the grid geometry changes" {
@@ -545,14 +578,15 @@ test "screen snapshot: projection and assembler are inverses on a real screen (s
 
     // 화면을 바꾸고 delta를 계산해 조립기에 적용하면, 새 projection과 같아진다(증분 재구성).
     try core.write("\r\nsecond"); // row1 = "second", 커서 이동.
-    const d = try computeDelta(allocator, p, &core, .{ .generation = 4 });
-    defer allocator.free(d);
-    try testing.expect(d.len > 0);
-    try asm_.applyDelta(d);
+    const result = try computeDelta(allocator, p, &core, .{ .generation = 4 });
+    defer result.deinit(allocator);
+    try testing.expect(result.delta.len > 0);
+    try asm_.applyDelta(result.delta);
 
     const p2 = try projectSnapshot(allocator, &core, .{ .generation = 4 });
     defer allocator.free(p2);
     const re2 = try asm_.toSnapshot(allocator);
     defer allocator.free(re2);
     try testing.expectEqualSlices(u8, p2, re2); // delta 적용 후 조립기 == 새 화면 projection.
+    try testing.expectEqualSlices(u8, p2, result.snapshot); // computeDelta의 snapshot == 별도 projection(#6: 한 번 build 재사용).
 }

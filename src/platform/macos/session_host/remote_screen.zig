@@ -465,3 +465,114 @@ test "remote screen: build exposes kitty images + placements from the assembler 
     try testing.expectEqual(@as(u64, 9), snap.images[0].generation); // 렌더러 GPU 캐시 키.
     try testing.expectEqualSlices(u8, &px, snap.images[0].pixels);
 }
+
+/// **원격 파이프라인 parity 인프라(#1 이후 드리프트 방어).** in-process `renderSnapshot`과 원격 파이프라인
+/// (`projectSnapshot`→`ScreenAssembler`→`build`)의 결과가 **렌더 관점에서 동등**한지 단언한다. 원격이 싣기로 한 축
+/// (size·cursor·cursor_shape·cells[style·색 intent·grapheme 해석]·placements·images)을 비교하고, 의도적 드롭
+/// (cursor_blink 하드코딩·prompt_marks·last_command_exit·dirty)은 제외한다. **comptime로 `RenderSnapshot`의 모든 필드가
+/// "비교" 또는 "드롭"으로 분류됐는지 강제**한다 — 새 필드가 추가되면 여기서 **컴파일 에러**가 나 원격 경로 배선(투영/조립/
+/// 노출)을 잊지 않게 한다. 색·이미지가 조용히 유실됐던 재발을 막는 안전망이다.
+fn expectSnapshotParity(local: terminal.RenderSnapshot, remote: terminal.RenderSnapshot) !void {
+    // ── comptime 필드 커버리지: RenderSnapshot 새 필드는 반드시 아래 둘 중 하나로 분류돼야 한다 ──
+    const compared = [_][]const u8{ "size", "cursor", "cursor_shape", "cells", "graphemes", "placements", "images" };
+    const dropped = [_][]const u8{ "cursor_blink", "prompt_marks", "last_command_exit", "dirty" };
+    comptime {
+        for (@typeInfo(terminal.RenderSnapshot).@"struct".fields) |f| {
+            var classified = false;
+            for (compared) |c| {
+                if (std.mem.eql(u8, f.name, c)) classified = true;
+            }
+            for (dropped) |d| {
+                if (std.mem.eql(u8, f.name, d)) classified = true;
+            }
+            if (!classified) @compileError("RenderSnapshot 필드 '" ++ f.name ++ "'가 parity 테스트에서 미분류다 — 원격 경로에 실었으면 `compared`에, 의도적 드롭이면 `dropped`에 추가하라(드리프트 방어).");
+        }
+    }
+
+    // size.
+    try testing.expectEqual(local.size.cols, remote.size.cols);
+    try testing.expectEqual(local.size.rows, remote.size.rows);
+    // cursor(+shape). cursor_blink는 원격이 항상 true(의도적 드롭)라 제외.
+    try testing.expectEqual(local.cursor.col, remote.cursor.col);
+    try testing.expectEqual(local.cursor.row, remote.cursor.row);
+    try testing.expectEqual(local.cursor.visible, remote.cursor.visible);
+    try testing.expectEqual(local.cursor_shape, remote.cursor_shape);
+    // cells: codepoint(0→space 정규화)·width·continuation·style(색 Color intent 포함 전 필드)·grapheme cluster(store id 번호는
+    // 다를 수 있어 해석된 본체로 대조).
+    try testing.expectEqual(local.cells.len, remote.cells.len);
+    for (local.cells, remote.cells) |lc, rc| {
+        const lcp: u21 = if (lc.codepoint == 0) ' ' else lc.codepoint; // 투영은 빈 셀(0)을 공백으로 낸다.
+        try testing.expectEqual(lcp, rc.codepoint);
+        try testing.expectEqual(lc.width, rc.width);
+        try testing.expectEqual(lc.continuation, rc.continuation);
+        try testing.expectEqual(lc.style, rc.style); // foreground/background/underline_color(Color intent) + bold/dim/italic/… 전부.
+        if (lc.grapheme_id != 0) {
+            try testing.expect(rc.grapheme_id != 0);
+            try testing.expectEqualSlices(u21, local.graphemes[lc.grapheme_id - 1], remote.graphemes[rc.grapheme_id - 1]);
+        } else {
+            try testing.expectEqual(@as(u32, 0), rc.grapheme_id);
+        }
+    }
+    // placements: 순서·전 필드 동일(원격 placement_list = 투영 순서 = local buildPlacementViews 순서).
+    try testing.expectEqual(local.placements.len, remote.placements.len);
+    for (local.placements, remote.placements) |lp, rp| try testing.expectEqual(lp, rp);
+    // images: local은 전체(map 순), remote는 placement 참조분(placement 순)이라 image_id로 매칭 비교(순서 무관).
+    for (remote.images) |ri| {
+        var matched = false;
+        for (local.images) |li| {
+            if (li.image_id != ri.image_id) continue;
+            try testing.expectEqual(li.width, ri.width);
+            try testing.expectEqual(li.height, ri.height);
+            try testing.expectEqual(li.bpp, ri.bpp);
+            try testing.expectEqual(li.generation, ri.generation);
+            try testing.expectEqualSlices(u8, li.pixels, ri.pixels);
+            matched = true;
+        }
+        try testing.expect(matched); // 원격이 노출한 이미지는 로컬에 반드시 있다.
+    }
+    // 원격 placement가 참조하는 이미지가 원격 images에 다 있는지(누락 방어).
+    for (remote.placements) |rp| {
+        if (rp.image_id == 0) continue;
+        var have = false;
+        for (remote.images) |ri| {
+            if (ri.image_id == rp.image_id) have = true;
+        }
+        try testing.expect(have);
+    }
+}
+
+test "remote screen: full RenderSnapshot parity with in-process (styles, colors, wide, grapheme, cursor shape, image)" {
+    const allocator = testing.allocator;
+    var core = try terminal.TerminalCore.init(allocator, .{ .cols = 20, .rows = 4 });
+    defer core.deinit();
+
+    // 다양한 스타일·색축을 한 화면에 태운다 — 하나라도 원격 경로에서 유실되면 parity가 깨진다.
+    try core.write("\x1b[1;31mB\x1b[0m"); // bold + indexed(ANSI 1 red)
+    try core.write("\x1b[3;38;5;120mI\x1b[0m"); // italic + 256색(120)
+    try core.write("\x1b[4;38;2;10;20;30mU\x1b[0m"); // underline + truecolor rgb
+    try core.write("\x1b[7mR\x1b[0m"); // reverse
+    try core.write("\x1b[2;9mD\x1b[0m"); // dim + strikethrough
+    try core.write("한"); // wide CJK(width 2 + continuation)
+    try core.write("e\u{0301}"); // grapheme cluster(e + combining acute)
+    try core.write("\x1b[4 q"); // DECSCUSR: underline 커서 모양
+
+    // kitty 이미지 transmit+display(2x2 RGBA, i=1).
+    var raw = [_]u8{ 0x10, 0x20, 0x30, 0x40, 0x50, 0x60, 0x70, 0x80, 0x90, 0xA0, 0xB0, 0xC0, 0xD0, 0xE0, 0xF0, 0x11 };
+    var b64: [32]u8 = undefined;
+    const b64s = std.base64.standard.Encoder.encode(&b64, &raw);
+    var seq: [96]u8 = undefined;
+    try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=T,f=32,s=2,v=2,i=1;{s}\x1b\\", .{b64s}));
+
+    // 원격 파이프라인: 투영 → 조립 → 격자.
+    const p = try screen_snapshot.projectSnapshot(allocator, &core, .{ .generation = 7 });
+    defer allocator.free(p);
+    var asm_ = screen_assembler.ScreenAssembler.init(allocator);
+    defer asm_.deinit();
+    try asm_.applySnapshot(p);
+    var grid = try build(allocator, &asm_);
+    defer grid.deinit();
+
+    // in-process 기준 화면(뷰포트 인지 — projectSnapshot과 같은 소스)과 렌더 관점 동등성 단언.
+    const local = core.renderSnapshot();
+    try expectSnapshotParity(local, grid.renderSnapshot());
+}

@@ -51,26 +51,60 @@ pub const RemoteRuntime = struct {
         const spawn_resp = try client.call("runtime.spawn", spawn_params);
         defer allocator.free(spawn_resp);
         self.runtime_id_hex = client_mod.extractRuntimeId(spawn_resp) orelse return error.SpawnFailed;
-        // 이 지점부터 실패하면 방금 띄운 host runtime을 회수한다(orphan 방지).
+        // 이 지점부터 실패하면 방금 띄운 host runtime을 회수한다(orphan 방지) — spawn한 건 우리 소유다.
         errdefer self.terminateBestEffort();
 
+        try self.attachAndAssemble(surface_id, size);
+    }
+
+    /// **이미 host에 있는 runtime에 재접속**한다(spawn 없이) — GUI를 재실행하면 workspace가 저장한 `runtime_id_hex`로 같은
+    /// host runtime에 붙어 화면·PID·scrollback을 잇는다(§7). runtime이 없으면(host 재시작·runtime 종료 등) attach가
+    /// `error.AttachFailed`(host RuntimeNotFound → 응답에 stream_id 없음)를 내고, caller가 fresh `spawn`으로 폴백한다.
+    /// **`spawn`과 달리 실패해도 runtime을 terminate하지 않는다** — 우리가 띄운 게 아니라 pre-existing이므로(남의 runtime을
+    /// attach 실패로 죽이면 안 됨). 성공 뒤 이 RemoteRuntime은 spawn한 것과 동일하게 다룬다(input/resize/pump/terminate).
+    pub fn attachExisting(
+        self: *RemoteRuntime,
+        client: *client_mod.Client,
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        surface_id: u64,
+        runtime_id_hex: [32]u8,
+        size: terminal.Size,
+    ) anyerror!void {
+        self.client = client;
+        self.allocator = allocator;
+        self.io = io;
+        self.resize_seq = 0;
+        self.runtime_id_hex = runtime_id_hex;
+        // terminate errdefer 없음(pre-existing runtime을 attach 실패로 죽이지 않는다).
+        try self.attachAndAssemble(surface_id, size);
+    }
+
+    /// spawn/attachExisting 공통(§10 attach 순서): controller attach(stream_id) → 첫 snapshot 조립 → 원격-backed Surface.
+    /// `self.runtime_id_hex`가 이미 채워져 있어야 한다(spawn=runtime.spawn 응답, attachExisting=저장된 값).
+    fn attachAndAssemble(self: *RemoteRuntime, surface_id: u64, size: terminal.Size) anyerror!void {
         // 2. runtime.attach(controller) — stream_id + snapshot 순서(§10).
         var attach_buf: [96]u8 = undefined;
         const attach_params = std.fmt.bufPrint(&attach_buf, "{{\"runtime_id\":\"{s}\",\"mode\":\"controller\"}}", .{self.runtime_id_hex}) catch return error.AttachFailed;
-        const attach_resp = try client.call("runtime.attach", attach_params);
-        defer allocator.free(attach_resp);
+        const attach_resp = try self.client.call("runtime.attach", attach_params);
+        defer self.allocator.free(attach_resp);
         self.stream_id = client_mod.extractU64Field(attach_resp, "\"stream_id\":") orelse return error.AttachFailed;
 
         // 3. 첫 snapshot을 읽어 원격 화면을 조립한다.
-        const snap = try client.readSnapshot(self.stream_id);
-        defer allocator.free(snap);
-        self.remote_screen = try remote_screen.RemoteScreen.init(allocator);
+        const snap = try self.client.readSnapshot(self.stream_id);
+        defer self.allocator.free(snap);
+        self.remote_screen = try remote_screen.RemoteScreen.init(self.allocator);
         errdefer self.remote_screen.deinit();
-        try self.remote_screen.applySnapshot(snap, io);
+        try self.remote_screen.applySnapshot(snap, self.io);
 
         // 4. 원격-backed Surface를 세운다(로컬 core는 placeholder — 렌더는 remote 소스로 간다).
-        self.surface = try Surface.init(allocator, surface_id, size);
+        self.surface = try Surface.init(self.allocator, surface_id, size);
         self.surface.remote = self.remote_screen.screenSource();
+    }
+
+    /// host가 발급한 runtime_id(hex)를 돌려준다 — workspace가 저장해 재실행 시 `attachExisting`으로 재접속한다(§7, e3-5).
+    pub fn runtimeIdHex(self: *const RemoteRuntime) [32]u8 {
+        return self.runtime_id_hex;
     }
 
     /// runtime을 종료하고(host `runtime.terminate`) client-side 자원을 회수한다. 멱등 시도(종료 실패는 무시).
@@ -216,4 +250,79 @@ test "remote runtime: spawns over the wire, renders host screen into a Surface, 
         if (c0 == 'h') found = true else _ = usleep(20 * 1000);
     }
     try testing.expect(found); // 원격 runtime의 화면 변화가 client Surface에 반영됐다.
+}
+
+test "remote runtime: attachExisting reconnects to a pre-existing host runtime and renders its screen" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    const io = testing.io;
+
+    var dir_buf: [256]u8 = undefined;
+    const dir_path = std.fmt.bufPrintZ(&dir_buf, "/tmp/maru-sh-rr-att-{d}", .{c.getpid()}) catch return error.SkipZigTest;
+    var sp_buf: [320]u8 = undefined;
+    const socket_path = std.fmt.bufPrintZ(&sp_buf, "{s}/control.sock", .{dir_path}) catch return error.SkipZigTest;
+
+    const child = c.fork();
+    if (child < 0) return error.SkipZigTest;
+    if (child == 0) {
+        _ = c.setsid();
+        daemon.runSessionHost(std.heap.page_allocator, io, dir_path, socket_path) catch {};
+        std.c._exit(0);
+    }
+    defer {
+        _ = c.kill(child, posix.SIG.TERM);
+        var status: c_int = undefined;
+        _ = c.waitpid(child, &status, 0);
+        _ = c.unlink(socket_path.ptr);
+        _ = c.rmdir(dir_path.ptr);
+    }
+
+    var client: client_mod.Client = blk: {
+        var attempts: usize = 0;
+        while (attempts < 150) : (attempts += 1) {
+            if (client_mod.Client.connect(allocator, socket_path, "gui")) |cl| break :blk cl else |_| _ = usleep(20 * 1000);
+        }
+        try testing.expect(false);
+        return;
+    };
+    defer client.deinit();
+
+    // host에 runtime을 하나 띄운다(raw runtime.spawn — client controller 없이). runtime_id를 얻어 "재실행 후 재접속" 상황을 만든다.
+    const spawn_resp = try client.call("runtime.spawn", "{\"argv\":[\"/bin/cat\"],\"cols\":40,\"rows\":10}");
+    defer allocator.free(spawn_resp);
+    const rid = client_mod.extractRuntimeId(spawn_resp) orelse {
+        try testing.expect(false);
+        return;
+    };
+
+    // **재접속**: attachExisting으로 그 runtime에 붙어 원격-backed Surface를 세운다(spawn 없이 — 저장된 runtime_id로).
+    var rr: RemoteRuntime = undefined;
+    try rr.attachExisting(&client, allocator, io, 1, rid, .{ .cols = 40, .rows = 10 });
+    defer rr.deinit();
+    try testing.expectEqual(rid, rr.runtimeIdHex()); // 재접속한 runtime_id가 저장한 값과 같다.
+
+    const surface = rr.surfacePtr();
+    surface.lockCore(io);
+    const cols0 = surface.renderSnapshot().size.cols;
+    surface.unlockCore(io);
+    try testing.expectEqual(@as(u16, 40), cols0); // 그 runtime의 화면(빈 40x10 cat)을 조립했다.
+
+    // 재접속한 controller로 입력→echo→화면 반영(재접속이 실제 제어권을 얻었다).
+    try rr.sendInput("hi\n");
+    var found = false;
+    var attempts: usize = 0;
+    while (attempts < 100 and !found) : (attempts += 1) {
+        _ = rr.pumpDelta() catch break;
+        surface.lockCore(io);
+        const c0 = surface.renderSnapshot().cells[0].codepoint;
+        surface.unlockCore(io);
+        if (c0 == 'h') found = true else _ = usleep(20 * 1000);
+    }
+    try testing.expect(found);
+
+    // 없는 runtime_id에 attachExisting → error.AttachFailed(host RuntimeNotFound). app_session restore가 이 신호로 fresh
+    // spawn 폴백한다. 실패해도 남의 runtime을 안 죽인다(terminate errdefer 없음).
+    var bogus: RemoteRuntime = undefined;
+    const bogus_id: [32]u8 = "deadbeefdeadbeefdeadbeefdeadbeef".*;
+    try testing.expectError(error.AttachFailed, bogus.attachExisting(&client, allocator, io, 2, bogus_id, .{ .cols = 40, .rows = 10 }));
 }

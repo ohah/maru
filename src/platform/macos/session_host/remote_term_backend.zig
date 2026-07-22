@@ -88,6 +88,26 @@ pub const RemoteTermBackend = struct {
         return .{ .ctx = self, .vtable = &vtable };
     }
 
+    /// **이미 host에 있는 runtime에 재접속**해 원격-backed Surface를 만든다(§7 GUI 재접속, e3-5). spawn과 달리 새 runtime을
+    /// 안 띄우고 저장된 `runtime_id_hex`에 붙는다. runtime이 없으면(host 재시작 등) attachExisting이 error를 내고 caller
+    /// (app_session restore)가 fresh spawn으로 폴백한다. **vtable 밖 — host 전용**이라 app_session이 restore 경로에서 직접
+    /// 부른다. spawn과 동일하게 반환 뒤 `attach`(vtable)로 원격 PtyIo를 라우팅 표에 등록해야 입력이 흐른다.
+    pub fn attachTerm(self: *RemoteTermBackend, handle: RuntimeHandle, runtime_id_hex: [32]u8, size: maru.terminal.Size) anyerror!*Surface {
+        const rr = try self.allocator.create(RemoteRuntime);
+        errdefer self.allocator.destroy(rr);
+        try rr.attachExisting(self.client, self.allocator, self.io, handle, runtime_id_hex, size);
+        errdefer rr.deinit();
+        try self.runtimes.put(self.allocator, handle, rr);
+        return &rr.surface;
+    }
+
+    /// handle의 host runtime_id(hex)를 돌려준다 — workspace capture가 저장해 재실행 시 `attachTerm`으로 재접속한다(§7, e3-5).
+    /// 없으면(원격 아님·미등록) null.
+    pub fn runtimeIdFor(self: *RemoteTermBackend, handle: RuntimeHandle) ?[32]u8 {
+        const rr = self.runtimes.get(handle) orelse return null;
+        return rr.runtimeIdHex();
+    }
+
     fn spawn(ctx: *anyopaque, params: SpawnParams) anyerror!*Surface {
         const self: *RemoteTermBackend = @ptrCast(@alignCast(ctx));
         // argv = [command] ++ args (host의 spawnRuntime이 argv[0]=command, argv[1..]=args로 되돌린다). rr.spawn이 동기적으로

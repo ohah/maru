@@ -39,6 +39,7 @@ const session_host = @import("session_host.zig"); // P3-e3: 영속 세션 host(k
 const is_macos = builtin.os.tag == .macos;
 const RemoteSessionClient = if (is_macos) session_host.client.Client else void;
 const RemoteSessionBackend = if (is_macos) session_host.remote_term_backend.RemoteTermBackend else void;
+extern "c" fn usleep(usec: c_uint) c_int; // P3-e3 통합 스모크(fork host 대기·pump 폴링)용. libc라 cross-platform 선언.
 const coretext_bridge = @import("coretext_smoke_bridge.zig");
 const coretext_frame_builder = @import("coretext_frame_builder.zig");
 const file_tree_backend = @import("file_tree_backend.zig");
@@ -34573,6 +34574,100 @@ test "M3b: 앱-전역 SurfaceRuntime — 두 창이 한 라우팅 표 공유 + �
     s1.deinit();
     try std.testing.expectError(error.UnknownSurface, s2.runtime.writeInput(sid1, .{ .bytes = "" })); // s1 링크 제거됨
     try s2.runtime.writeInput(sid2, .{ .bytes = "" }); // s2는 생존 — 공유 표가 s1 close에 파괴되지 않았다
+}
+
+// P3-e3 통합 스모크 — keep-alive AppSession가 새 Term을 **host-backed backend**로 실제 spawn하고, 입력이 host를 거쳐
+// 화면에 반영되며, teardown이 in-process/원격 Term과 원격 backend/연결을 누수·크래시 없이 회수하는지 고정한다. 이 경로
+// (createTerm→backendForNew→원격 spawn, backendFor(term) 라우팅, deinit 원격 회수)는 부품 스모크(remote_term_backend·
+// host_connect)가 못 잡던 **AppSession 통합**이다. 실 fork host + 실 AppSession(PTY/CoreText)이라 macOS 게이트.
+// (session_host.* 심볼은 non-macOS에서 barrel이 struct {}로 제외하므로 본문 전체를 `if (is_macos)` comptime 가지치기에 둔다.)
+test "P3-e3 통합: keep-alive AppSession가 새 Term을 host-backed backend로 spawn하고 clean teardown한다" {
+    if (is_macos) {
+        const allocator = std.testing.allocator;
+        const io = std.Io.Threaded.global_single_threaded.io();
+
+        // 격리된 cache base + 소켓(사용자 실 host와 무관). host는 <base>/session-host/control.sock에 bind.
+        var base_buf: [96]u8 = undefined;
+        const base = std.fmt.bufPrintZ(&base_buf, "/tmp/maru-e3-app-{d}", .{std.c.getpid()}) catch return error.SkipZigTest;
+        _ = std.c.mkdir(base.ptr, 0o700); // host는 <base>/session-host만 mkdir하므로 base를 먼저 만든다.
+        var dir_buf: [160]u8 = undefined;
+        const dir = session_host.discovery.sessionHostDirPath(&dir_buf, base) catch return error.SkipZigTest;
+        var sock_buf: [224]u8 = undefined;
+        const socket = session_host.discovery.socketPathIn(&sock_buf, dir) catch return error.SkipZigTest;
+
+        const child = std.c.fork();
+        if (child < 0) return error.SkipZigTest;
+        if (child == 0) {
+            _ = std.c.setsid();
+            session_host.daemon.runSessionHost(std.heap.page_allocator, io, dir, socket) catch {};
+            std.c._exit(0);
+        }
+        defer {
+            _ = std.c.kill(child, std.posix.SIG.TERM);
+            var status: c_int = undefined;
+            _ = std.c.waitpid(child, &status, 0);
+            _ = std.c.unlink(socket.ptr);
+            var lpb: [224]u8 = undefined;
+            if (session_host.discovery.lockPathIn(&lpb, dir)) |p| _ = std.c.unlink(p.ptr) else |_| {}
+            _ = std.c.rmdir(dir.ptr);
+            _ = std.c.rmdir(base.ptr);
+        }
+
+        // host가 bind할 때까지 대기(connect 성공). 그래야 아래 connectOrLaunch가 connect-first로 붙어 spawn을 시도하지 않는다.
+        var up = false;
+        var w: usize = 0;
+        while (w < 250) : (w += 1) {
+            if (session_host.client.Client.connect(allocator, socket, "gui")) |cl| {
+                var probe = cl;
+                probe.deinit();
+                up = true;
+                break;
+            } else |_| _ = usleep(20 * 1000);
+        }
+        try std.testing.expect(up);
+
+        // AppSession 구성(첫 탭 = in-process — 테스트 config는 keep-alive off라 원격 세팅 전 spawn된다).
+        const session = try allocator.create(AppSession);
+        defer allocator.destroy(session);
+        try session.init(io, allocator, .{ .abi_version = abi_version, .cols = 40, .rows = 10, .queue_capacity = 16, .command_kind = @intFromEnum(CommandKind.controlled_smoke) });
+        defer session.deinit();
+
+        // 격리된 host로 원격 backend를 세운다(setupRemoteBackend와 같은 배선이되 base를 명시해 XDG env 의존 없이).
+        const client = session_host.host_connect.connectOrLaunch(allocator, "/unused-maru-helper", base, .{ .connect_attempts = 30, .connect_delay_ms = 10 }) orelse {
+            try std.testing.expect(false);
+            return;
+        };
+        session.session_client = client;
+        session.remote_backend = session_host.remote_term_backend.RemoteTermBackend.init(allocator, io, &session.session_client.?, session.runtime);
+
+        // 첫 탭 term은 in-process다(원격 backend 세팅 전에 spawn됨 → surface.remote == null).
+        const first = session.tabs.items[0].panes.items[0].terms.items[0];
+        try std.testing.expect(first.surface.remote == null);
+
+        // createTerm으로 /bin/cat을 띄운다 — backendForNew가 이제 원격 backend를 고른다. 반환 Term은 tab에 안 들어가므로
+        // 아래 destroyTerm으로 회수한다(원격 라우팅 backendFor(term)을 탄다).
+        const term = try session.createTerm(.{ .command = "/bin/cat" }, .{ .cols = 40, .rows = 10 }, 16, "cat", "/bin/cat");
+        try std.testing.expect(term.surface.remote != null); // **host-backed!**(surface.remote 세팅 = 원격 조립 화면)
+
+        // 입력 hot path(self.runtime.writeInput)가 원격 PtyIo→host로 라우팅되고, host echo delta가 pump→화면에 반영되는지.
+        try session.runtime.writeInput(term.surface.id, .{ .bytes = "hello\n" });
+        var found = false;
+        var it: usize = 0;
+        while (it < 100 and !found) : (it += 1) {
+            _ = term.rt.pump.drainAvailable() catch break; // 원격 pump = delta stream 소비.
+            term.surface.lockCore(io);
+            const c0 = term.surface.renderSnapshot().cells[0].codepoint;
+            term.surface.unlockCore(io);
+            if (c0 == 'h') found = true else _ = usleep(20 * 1000);
+        }
+        try std.testing.expect(found); // 원격 Term 입력이 host를 거쳐 Surface에 반영됐다(end-to-end).
+
+        session.destroyTerm(term); // 원격 term 회수(backendFor→remote: closeAndDetach+remove+SurfaceRuntime detach).
+        // 여기서 defer가 session.deinit()(in-process 첫 탭 + remote_backend 빈 runtimes + client 회수) → destroy → host kill을
+        // 순서대로 돌린다. testing.allocator가 누수를, deinit이 크래시를 잡는다(통합 teardown 검증).
+    } else {
+        return error.SkipZigTest;
+    }
 }
 
 // M3a 핵심 불변식(주소 안정성) — surface·런타임 소유를 registry 번들로 옮겨도 reader thread가 잡는 두 embedded

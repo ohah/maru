@@ -2989,6 +2989,10 @@ pub const AppSession = struct {
             if (len >= out.len) return null;
             const geometry = dock_layout.groupGeometry(parent, leaf.rect);
             const metrics = dock_layout.tabMetrics(geometry, self.cell_width_px, leaf.leaf.entries.items.len);
+            const eff_scroll: u32 = if (metrics) |m|
+                if (dock_layout.dockTabScroll(m.tab_cols, leaf.leaf.entries.items.len, leaf.leaf.tab_scroll_cols)) |ts| ts.eff_scroll else 0
+            else
+                0;
             out[len] = .{
                 .group_id = leaf.leaf.runtime_id,
                 .group = leaf.leaf,
@@ -2997,6 +3001,7 @@ pub const AppSession = struct {
                 .content = geometry.content,
                 .entry_count = leaf.leaf.entries.items.len,
                 .tab_width_px = if (metrics) |m| @as(u32, m.tab_width) * self.cell_width_px else dock_layout.default_tab_cols * self.cell_width_px,
+                .scroll_px = eff_scroll * self.cell_width_px,
             };
             len += 1;
         }
@@ -3206,6 +3211,7 @@ pub const AppSession = struct {
                 self.markFilePanelDirtySyncPending(&group.entries.items[old]);
             group.active = index;
         }
+        self.ensureActiveDockTabVisible(group); // 스크롤 밖 탭을 활성화하면 보이게 따라간다
         const entry = &group.entries.items[index];
         if (entry.surface_id == 0) entry.surface_id = self.surface_ids.next();
         self.touchFilePanelEntry(entry);
@@ -11061,6 +11067,7 @@ pub const AppSession = struct {
             group.active = index;
             self.file_tree_rows_dirty = true;
         }
+        self.ensureActiveDockTabVisible(group); // 스크롤 밖 파일을 열면 그 탭이 보이게 따라간다
         _ = self.dock.focusGroup(group);
         self.touchFilePanelEntry(&group.entries.items[index]);
         self.enforceFilePanelLiveViewLimit();
@@ -13002,6 +13009,26 @@ pub const AppSession = struct {
         return self.readOpenedFile(gpa, file);
     }
 
+    /// FP14: 이미지 패널이 **자기 자신의 파일** 바이너리를 읽어 mime와 함께 돌려준다(readSelfImage bridge). 경로 인자가
+    /// 없어 readAsset의 상대경로 traversal이 필요 없고, 자기 entry.path의 부모를 pin한 뒤 no-follow로 basename만 연다
+    /// (심링크·`..` 탈출 불가). image kind만 허용(다른 kind는 자기 바이너리 노출 이유 없음). bytes는 gpa 소유.
+    pub fn readFilePanelSelfImage(
+        self: *AppSession,
+        gpa: std.mem.Allocator,
+        surface_id: u64,
+    ) FilePanelReadError!maru.session.control_bridge.SelfImage {
+        if (!self.dock_initialized) return error.SurfaceNotFound;
+        const entry = self.dock.entryForSurfaceId(surface_id) orelse return error.SurfaceNotFound;
+        if (entry.kind != .image) return error.WrongKind;
+
+        const pinned = openPinnedFilePanelParent(self.io, entry.path) catch return error.OutsideRoot;
+        defer pinned.dir.close(self.io);
+        const file = try openFilePanelRead(pinned.dir, std.fs.path.basename(entry.path), false);
+        defer file.close(self.io);
+        const bytes = try self.readOpenedFile(gpa, file);
+        return .{ .mime = file_panel_bridge.mimeForPath(entry.path), .bytes = bytes };
+    }
+
     /// backing px·좌상단 rect를 pt·좌하단(WKWebView frame·컨테이너 좌표)으로 변환한다(4a 순수 함수 소비). 컨테이너
     /// content view의 backing 높이(backing_height_px)를 y-flip 기준으로 쓴다(§3 — OS 타이틀바 포함 전체 창이 아니라
     /// pane rect가 사는 그 좌표 공간의 높이).
@@ -13205,11 +13232,11 @@ pub const AppSession = struct {
                     try out.append(self.allocator, .{
                         .surface_id = entry.surface_id,
                         .panel_kind = switch (entry.kind) {
-                            // text·svg는 markdown과 같은 신뢰 config(maru-app:// 스킴·bridge). shell URL의 `?lang=`·
-                            // `?kind=svg`가 편집기/프리뷰 모드를 고른다(§2.2·§2.3). html·image·pdf는 격리 loadFileURL
-                            // browser config다(비신뢰, filePanelKind=2).
-                            .markdown, .text, .svg => .markdown,
-                            .html, .image, .pdf => .browser,
+                            // text·svg·image는 markdown과 같은 신뢰 config(maru-app:// 스킴·bridge). shell URL의 `?lang=`·
+                            // `?kind=svg|image`가 편집기/프리뷰 모드를 고른다(§2.2·§2.3). image(FP14)는 readSelfImage로
+                            // 자기 바이너리를 읽어 panzoom 표시. html·pdf는 격리 loadFileURL browser config다(비신뢰, filePanelKind=2).
+                            .markdown, .text, .svg, .image => .markdown,
+                            .html, .pdf => .browser,
                         },
                         .seam_edges = seam_edges,
                         .divider_grab_bands_pt = if (self.dividerThicknessPx() != 0) grab_bands else .{},
@@ -17240,7 +17267,10 @@ pub const AppSession = struct {
         if (std.math.isFinite(delta_x) and delta_x != 0) {
             if (delta_x * self.tab_wheel_accum < 0) self.tab_wheel_accum = 0; // 방향 전환 시 잔여 버림(세로와 같은 규율)
             const cols = wheelDeltaToLines(&self.tab_wheel_accum, delta_x, precise, self.cell_width_px, self.scale_milli); // 셀 환산 범용 — 가로는 cell_width
-            if (cols != 0) self.scrollTabBarAt(x_px, y_px, cols);
+            if (cols != 0) {
+                self.scrollTabBarAt(x_px, y_px, cols); // 커서 아래 터미널 pane 탭 바(있으면)
+                self.scrollDockTabBarAt(x_px, y_px, cols); // 커서 아래 도크 그룹 탭 바(있으면) — pane과 영역이 안 겹쳐 둘 중 하나만 매치
+            }
         }
     }
 
@@ -17339,6 +17369,49 @@ pub const AppSession = struct {
             const mag: u32 = @intCast(@abs(cols));
             lr.leaf.tab_scroll_cols = if (cols > 0) eff -| mag else eff + mag; // cols>0(오른쪽 스와이프)→왼쪽 탭(감소), cols<0→오른쪽(증가, 렌더서 [0,max] clamp)
             self.metal_dirty = true;
+            return;
+        }
+    }
+
+    /// 가로 스와이프(delta_x→cols)를 커서 아래 도크 그룹의 탭 바 가로 스크롤로 바꾼다(scrollTabBarAt의 도크 대응).
+    /// 그 그룹이 탭 넘침(has_scroll)이 아니면 무동작. eff(=[0,max] clamp된 값) 기준이라 stale tab_scroll_cols가
+    /// 자동 정정된다. natural 방향은 터미널 탭 바와 동일(오른쪽 스와이프 cols>0 → 왼쪽 탭, scroll 감소).
+    fn scrollDockTabBarAt(self: *AppSession, x_px: f64, y_px: f64, cols: i32) void {
+        if (!self.refreshDockGroupLayout()) return;
+        const parent = self.dockGeometry();
+        for (self.dock_leaf_rects_scratch.items) |leaf| {
+            const geometry = dock_layout.groupGeometry(parent, leaf.rect);
+            if (!layout_math.pointInRect(x_px, y_px, geometry.tab_bar)) continue; // 커서가 이 그룹 탭 바일 때만
+            const group = leaf.leaf;
+            const metrics = dock_layout.tabMetrics(geometry, self.cell_width_px, group.entries.items.len) orelse return;
+            const ts = dock_layout.dockTabScroll(metrics.tab_cols, group.entries.items.len, group.tab_scroll_cols) orelse return;
+            if (!ts.has_scroll) return; // 탭이 안 넘침 — 가로 스크롤할 것 없음
+            const mag: u32 = @intCast(@abs(cols));
+            group.tab_scroll_cols = if (cols > 0) ts.eff_scroll -| mag else ts.eff_scroll + mag; // 렌더에서 [0,max] clamp
+            self.metal_dirty = true;
+            return;
+        }
+    }
+
+    /// 스크롤 밖 탭이 활성화되면(클릭·파일 열기) 그 탭이 보이게 tab_scroll_cols를 조정한다(ensureActiveTermVisible의
+    /// 도크 대응). 수동 스크롤을 되돌리지 않도록 렌더가 아니라 select 지점에서만 호출한다. 그룹 geometry가
+    /// 없거나(레이아웃 실패) 안 넘치면 무동작.
+    fn ensureActiveDockTabVisible(self: *AppSession, group: *dock_panel.DockGroup) void {
+        const active = group.active orelse return;
+        if (!self.refreshDockGroupLayout()) return;
+        const parent = self.dockGeometry();
+        for (self.dock_leaf_rects_scratch.items) |leaf| {
+            if (leaf.leaf != group) continue;
+            const geometry = dock_layout.groupGeometry(parent, leaf.rect);
+            const metrics = dock_layout.tabMetrics(geometry, self.cell_width_px, group.entries.items.len) orelse return;
+            const ts = dock_layout.dockTabScroll(metrics.tab_cols, group.entries.items.len, group.tab_scroll_cols) orelse return;
+            if (!ts.has_scroll) return; // 안 넘침 — 다 보임
+            const abs_start = @as(u32, @intCast(active)) * @as(u32, ts.tab_width);
+            if (abs_start < ts.eff_scroll) {
+                group.tab_scroll_cols = abs_start; // 좌단 잘림 → 좌단이 보이게
+            } else if (abs_start + ts.tab_width > ts.eff_scroll + metrics.tab_cols) {
+                group.tab_scroll_cols = abs_start + ts.tab_width - metrics.tab_cols; // 우단 잘림 → 우단이 보이게
+            }
             return;
         }
     }
@@ -17962,7 +18035,7 @@ pub const AppSession = struct {
                 if (self.dockGroupAtPoint(x_px, y_px)) |hit| {
                     const g = hit.geometry;
                     const group = hit.group;
-                    if (dock_layout.tabCloseIndexAt(g, self.cell_width_px, group.entries.items.len, x_px, y_px)) |index| {
+                    if (dock_layout.tabCloseIndexAt(g, self.cell_width_px, group.entries.items.len, x_px, y_px, group.tab_scroll_cols)) |index| {
                         if (index < group.entries.items.len) {
                             const surface_id = group.entries.items[index].surface_id;
                             if (surface_id != 0) {
@@ -17978,7 +18051,7 @@ pub const AppSession = struct {
                         }
                         return;
                     }
-                    if (dock_layout.tabIndexAt(g, self.cell_width_px, group.entries.items.len, x_px, y_px)) |index| {
+                    if (dock_layout.tabIndexAt(g, self.cell_width_px, group.entries.items.len, x_px, y_px, group.tab_scroll_cols)) |index| {
                         if (index < group.entries.items.len) {
                             self.armDockEntryDrag(group, group.entries.items[index].id, x_px, y_px);
                             self.metal_dirty = true;
@@ -19752,7 +19825,7 @@ pub const AppSession = struct {
         self.setHoveredFileTreeRow(if (self.dockVisible()) self.fileTreeRowAt(x_px, y_px) else null);
         var hovered_dock_tab: ?DockTabRef = null;
         if (self.dockVisible()) if (self.dockGroupAtPoint(x_px, y_px)) |hit| {
-            if (dock_layout.tabIndexAt(hit.geometry, self.cell_width_px, hit.group.entries.items.len, x_px, y_px)) |index|
+            if (dock_layout.tabIndexAt(hit.geometry, self.cell_width_px, hit.group.entries.items.len, x_px, y_px, hit.group.tab_scroll_cols)) |index|
                 hovered_dock_tab = .{ .group_id = hit.group.runtime_id, .tab = index };
         };
         self.setHoveredFilePanelTab(hovered_dock_tab);
@@ -19858,7 +19931,7 @@ pub const AppSession = struct {
                 const g = hit.geometry;
                 self.setHoveredTab(null);
                 self.clearHoverUrlAnchor();
-                if (dock_layout.tabIndexAt(g, self.cell_width_px, group.entries.items.len, x_px, y_px) != null) return .link;
+                if (dock_layout.tabIndexAt(g, self.cell_width_px, group.entries.items.len, x_px, y_px, group.tab_scroll_cols) != null) return .link;
                 if (layout_math.pointInRect(x_px, y_px, g.header)) {
                     if (group.active) |index| if (index < group.entries.items.len and
                         group.entries.items[index].external_change)
@@ -22476,7 +22549,7 @@ pub const AppSession = struct {
                             if (dock_layout.headerModeRect(gg, self.cell_width_px, entry.kind, entry.mode, entry.dirty, entry.external_change)) |mode_rect|
                                 self.appendBarBgQuad(mode_rect, self.chromeQuadBg(self.sidebarActiveBg()));
                         };
-                        if (group.active) |active| if (dock_layout.tabRect(gg, self.cell_width_px, group.entries.items.len, active)) |r| {
+                        if (group.active) |active| if (dock_layout.tabRect(gg, self.cell_width_px, group.entries.items.len, active, group.tab_scroll_cols)) |r| {
                             self.appendBarBgQuad(r, self.chromeQuadBg(self.sidebarActiveBg()));
                             // Artifact처럼 활성 파일 탭의 **해당 세그먼트만** accent top strip을 갖는다. 옛 구현은
                             // focused group 전체 위에 1px 중립선을 그려 어떤 파일이 활성인지 약했다.
@@ -22809,6 +22882,7 @@ pub const AppSession = struct {
                                 if (active_entry) |entry| entry.dirty else false,
                                 if (active_entry) |entry| entry.external_change else false,
                                 @intCast(cols),
+                                group.tab_scroll_cols,
                                 dock_fg,
                                 dock_active_fg,
                             )) |ddl| {
@@ -40190,8 +40264,7 @@ test "FP9 dock tab drag: same-group reorder, dock-local split, and terminal-doma
     try std.testing.expect(session.refreshDockGroupLayout());
     const parent = session.dockGeometry();
     var geometry = dock_layout.groupGeometry(parent, session.dock_leaf_rects_scratch.items[0].rect);
-    const first = dock_layout.tabRect(geometry, session.cell_width_px, 2, 0).?;
-    const tab_width = first.w;
+    const first = dock_layout.tabRect(geometry, session.cell_width_px, 2, 0, 0).?;
     // outer divider의 10pt WebView-side grab band를 피한 실제 tab chrome에서 시작한다.
     const down_x: f64 = @floatFromInt(first.x + session.dockDividerGrabBandPx() + 2);
     const down_y: f64 = @floatFromInt(first.y + first.h / 2);
@@ -40203,8 +40276,8 @@ test "FP9 dock tab drag: same-group reorder, dock-local split, and terminal-doma
     try std.testing.expect(session.fileTreeRowAt(down_x, down_y) == null);
     try std.testing.expect(!layout_math.pointInRect(down_x, down_y, parent.tree));
     try std.testing.expect(session.dockGroupDividerAtPoint(down_x, down_y) == null);
-    try std.testing.expectEqual(@as(?usize, null), dock_layout.tabCloseIndexAt(geometry, session.cell_width_px, 2, down_x, down_y));
-    try std.testing.expectEqual(@as(?usize, 0), dock_layout.tabIndexAt(geometry, session.cell_width_px, 2, down_x, down_y));
+    try std.testing.expectEqual(@as(?usize, null), dock_layout.tabCloseIndexAt(geometry, session.cell_width_px, 2, down_x, down_y, 0));
+    try std.testing.expectEqual(@as(?usize, 0), dock_layout.tabIndexAt(geometry, session.cell_width_px, 2, down_x, down_y, 0));
     session.mouse(1, down_x, down_y, 0, 0);
     try std.testing.expect(session.dockDragSessionConst() != null and !session.dockDragIsDragging());
     try std.testing.expect(session.dock_drag_title_frame != null);
@@ -40224,7 +40297,10 @@ test "FP9 dock tab drag: same-group reorder, dock-local split, and terminal-doma
     for (cached_native) |cell| try std.testing.expectEqual(@as(u32, 0), cell.background);
     try std.testing.expectEqual(@as(?usize, 1), group.active); // background tab mouse-down은 click activation 전이다.
     try std.testing.expect(session.focus_owner == .workspace);
-    const after_last_x: f64 = @floatFromInt(first.x + tab_width * 2 - 2);
+    // 마지막 탭 우측 절반 = reorder-to-end(boundary=entry_count). 탭이 고정폭이라 좁은 도크에선 2탭이 넘쳐(오버플로우)
+    // 탭 바 폭 < 2*tab_width가 될 수 있어, first.x+tab_width*2는 바를 벗어난다. 항상 바 안쪽인 우측 끝 픽셀을 쓴다
+    // (스크롤 0이라 화면 좌표=절대 좌표 → tabBoundary가 마지막 탭 중점을 넘겨 boundary=2를 준다).
+    const after_last_x: f64 = @floatFromInt(geometry.tab_bar.x + geometry.tab_bar.w - 2);
     session.window_padding_px = .{ .left = 9, .right = 13, .top = 5, .bottom = 7 };
     const workspace_geometry = session.paneGeometry(session.termRect());
     try std.testing.expect(workspace_geometry.body.x < workspace_geometry.grid.x);
@@ -40282,7 +40358,7 @@ test "FP9 dock tab drag: same-group reorder, dock-local split, and terminal-doma
 
     // reordered A tab을 같은 leaf의 왼쪽 X-zone에 drop하면 새 left group을 만들고 source leaf는 유지한다.
     geometry = dock_layout.groupGeometry(parent, session.dock_leaf_rects_scratch.items[0].rect);
-    const a_tab = dock_layout.tabRect(geometry, session.cell_width_px, 2, 1).?;
+    const a_tab = dock_layout.tabRect(geometry, session.cell_width_px, 2, 1, 0).?;
     session.mouse(1, @floatFromInt(a_tab.x + session.dockDividerGrabBandPx() + 2), @floatFromInt(a_tab.y + a_tab.h / 2), 0, 0);
     const split_x: f64 = @floatFromInt(geometry.content.x + 2);
     const split_y: f64 = @floatFromInt(geometry.content.y + geometry.content.h / 2);
@@ -40324,7 +40400,7 @@ test "FP9 dock tab drag: same-group reorder, dock-local split, and terminal-doma
         if (leaf.leaf == live_b_location.group) live_b_geometry = gg;
         if (leaf.leaf == live_a_location.group) live_a_geometry = gg;
     }
-    const live_b_tab = dock_layout.tabRect(live_b_geometry.?, session.cell_width_px, 1, 0).?;
+    const live_b_tab = dock_layout.tabRect(live_b_geometry.?, session.cell_width_px, 1, 0, 0).?;
     const live_destination_tab = live_a_geometry.?.tab_bar;
     session.mouse(1, @floatFromInt(live_b_tab.x + session.dockDividerGrabBandPx() + 2), @floatFromInt(live_b_tab.y + live_b_tab.h / 2), 0, 0);
     session.mouse(2, @floatFromInt(live_destination_tab.x + live_destination_tab.w / 2), @floatFromInt(live_destination_tab.y + live_destination_tab.h / 2), 0, 0);
@@ -40362,7 +40438,7 @@ test "FP9 dock tab drag: same-group reorder, dock-local split, and terminal-doma
     for (session.dock_leaf_rects_scratch.items) |leaf| {
         if (leaf.leaf == a_location.group) a_geometry = dock_layout.groupGeometry(session.dockGeometry(), leaf.rect);
     }
-    const a_only = dock_layout.tabRect(a_geometry.?, session.cell_width_px, 1, 0).?;
+    const a_only = dock_layout.tabRect(a_geometry.?, session.cell_width_px, 1, 0, 0).?;
     session.mouse(1, @floatFromInt(a_only.x + session.dockDividerGrabBandPx() + 2), @floatFromInt(a_only.y + a_only.h / 2), 0, 0);
     const terminal_rect = session.termRect();
     const terminal_x: f64 = @floatFromInt(terminal_rect.x + terminal_rect.w / 2);
@@ -40392,6 +40468,7 @@ test "FP9 dock tab drag: same-group reorder, dock-local split, and terminal-doma
         session.cell_width_px,
         b_location_before.group.entries.items.len,
         b_location_before.index,
+        0,
     ).?;
     session.mouse(1, @floatFromInt(b_tab.x + session.dockDividerGrabBandPx() + 2), @floatFromInt(b_tab.y + b_tab.h / 2), 0, 0);
     try std.testing.expectEqual(@as(u16, 8), session.dock_drag_title_cols);
@@ -51694,6 +51771,56 @@ test "FP4 file panel readAsset: symlink escape and html surfaces are denied" {
     try std.testing.expectError(error.OutsideRoot, session.readFilePanelAsset(allocator, 801, "escape-dir/secret.png"));
     try std.testing.expectError(error.WrongKind, session.readFilePanel(allocator, 802, 1));
     try std.testing.expectError(error.WrongKind, session.readFilePanelAsset(allocator, 802, "escape.png"));
+}
+
+test "FP14 readSelfImage: reads own image bytes, denies non-image kinds and symlink escape" {
+    const io = std.testing.io;
+    const allocator = std.testing.allocator;
+    var root_tmp = std.testing.tmpDir(.{});
+    defer root_tmp.cleanup();
+    var outside_tmp = std.testing.tmpDir(.{});
+    defer outside_tmp.cleanup();
+    const png_bytes = [_]u8{ 0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a };
+    try root_tmp.dir.writeFile(io, .{ .sub_path = "pic.png", .data = &png_bytes });
+    try root_tmp.dir.writeFile(io, .{ .sub_path = "doc.md", .data = "# doc" });
+    try outside_tmp.dir.writeFile(io, .{ .sub_path = "secret.png", .data = "SECRET" });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try root_tmp.dir.realPath(io, &root_buf)];
+    var secret_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const secret = secret_buf[0..try outside_tmp.dir.realPathFile(io, "secret.png", &secret_buf)];
+    try root_tmp.dir.symLink(io, secret, "escape.png", .{}); // basename이 심링크인 image entry
+
+    const png_path = try std.fmt.allocPrint(allocator, "{s}/pic.png", .{root});
+    defer allocator.free(png_path);
+    const md_path = try std.fmt.allocPrint(allocator, "{s}/doc.md", .{root});
+    defer allocator.free(md_path);
+    const escape_path = try std.fmt.allocPrint(allocator, "{s}/escape.png", .{root});
+    defer allocator.free(escape_path);
+
+    var session: AppSession = undefined;
+    session.io = io;
+    session.dock = try dock_panel.DockPanel.init(allocator, &app_runtime.entry_ids);
+    session.dock_initialized = true;
+    defer session.dock.deinit();
+    const group = session.dock.singleGroup().?;
+    _ = try session.dock.open(group, png_path, .image);
+    group.entries.items[0].surface_id = 901;
+    _ = try session.dock.open(group, md_path, .markdown);
+    group.entries.items[1].surface_id = 902;
+    _ = try session.dock.open(group, escape_path, .image);
+    group.entries.items[2].surface_id = 903;
+
+    // 자기 image 파일 바이트+mime을 돌려준다(경로 인자 없음).
+    const image = try session.readFilePanelSelfImage(allocator, 901);
+    defer allocator.free(image.bytes);
+    try std.testing.expectEqualSlices(u8, &png_bytes, image.bytes);
+    try std.testing.expectEqualStrings("image/png", image.mime);
+    // non-image kind(markdown)는 자기 바이너리를 못 뽑는다.
+    try std.testing.expectError(error.WrongKind, session.readFilePanelSelfImage(allocator, 902));
+    // basename이 심링크면 NOFOLLOW로 탈출 거부.
+    try std.testing.expectError(error.OutsideRoot, session.readFilePanelSelfImage(allocator, 903));
+    // 없는 surface는 SurfaceNotFound.
+    try std.testing.expectError(error.SurfaceNotFound, session.readFilePanelSelfImage(allocator, 999));
 }
 
 test "FP4 file panel readAsset: replaced lexical parent symlink is denied" {

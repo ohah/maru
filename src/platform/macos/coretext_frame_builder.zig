@@ -741,7 +741,7 @@ pub fn buildPaneGripDrawList(
 }
 
 /// FP3 파일 도크 크롬. 0행은 고정폭 우선 탭(접기 버튼은 titlebar 띠 우측 dock 토글로 이동), 1행은 breadcrumb와 모드 선택이다.
-/// 탭 분할은 session/dock_layout.tabMetrics와 동일하게 18칸 상한을 쓰고, 넘칠 때만 균등 축소한다.
+/// 탭은 고정폭(default_tab_cols)이고 넘치면 scroll_cols만큼 가로 스크롤한다(session/dock_layout.tabCellLayout).
 pub fn buildFileDockChromeDrawList(
     allocator: std.mem.Allocator,
     titles: []const []const u8,
@@ -753,6 +753,7 @@ pub fn buildFileDockChromeDrawList(
     active_dirty: bool,
     active_external_change: bool,
     cols: u16,
+    scroll_cols: u32,
     fg: terminal.Color,
     active_fg: terminal.Color,
 ) !renderer.DrawList {
@@ -761,7 +762,8 @@ pub fn buildFileDockChromeDrawList(
     if (cols >= 1 and titles.len > 0) {
         const tab_cols: u16 = cols;
         for (titles, 0..) |title, i| {
-            const tab = dock_layout.tabCellLayout(tab_cols, titles.len, i) orelse break;
+            // 스크롤아웃된 탭은 null → continue(좌측 잘림 이후에도 보이는 탭이 나오므로 break 불가).
+            const tab = dock_layout.tabCellLayout(tab_cols, titles.len, i, scroll_cols) orelse continue;
             const style: terminal.Style = if (active != null and active.? == i) .{ .foreground = active_fg, .bold = true } else .{ .foreground = fg };
             if (tab.title_end > tab.title_start)
                 _ = try appendEllipsizedTitle(allocator, &cells, title, 0, tab.title_start, tab.title_end, style, false, .head);
@@ -2016,6 +2018,7 @@ test "file dock header draws source mode and dirty marker in the reserved contro
         true,
         false,
         48,
+        0,
         dim,
         bright,
     );

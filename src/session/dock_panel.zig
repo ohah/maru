@@ -32,7 +32,8 @@ pub const EntryKind = enum {
     pub fn usesEditorBridge(self: EntryKind) bool {
         return switch (self) {
             .markdown, .text, .svg => true,
-            // html·image·pdf는 격리 loadFileURL(신뢰 shell·CM6·브리지 미사용)이라 read 전용이다(§2.2).
+            // image(FP14)는 신뢰 shell이지만 CM6 편집기가 없다(readSelfImage로 자기 바이너리만 읽어 panzoom read
+            // 프리뷰). html·pdf는 격리 loadFileURL. 셋 다 CM6 편집기·editor_epoch 문서 흐름을 쓰지 않는다(§2.2).
             .html, .image, .pdf => false,
         };
     }
@@ -52,7 +53,8 @@ pub const Mode = enum(u32) {
         return switch (kind) {
             // 라이브 프리뷰는 백로그(2026-07-22)라 markdown도 읽기로 시작한다. 라이브 재도입 시 .live_preview로 되돌린다.
             .markdown => .read,
-            .html, .image, .pdf => .read, // 격리 loadFileURL read 전용.
+            // html·pdf=격리 loadFileURL, image=신뢰 뷰어+readSelfImage(FP14) — 셋 다 read 뷰 전용(편집·모드 없음).
+            .html, .image, .pdf => .read,
             .text => .source_edit,
             .svg => .read, // 이미지 미리보기가 먼저(VSCode SVG 프리뷰 관례).
         };
@@ -206,6 +208,9 @@ pub const DockGroup = struct {
     runtime_id: u64,
     entries: std.ArrayList(Entry) = .empty,
     active: ?usize = null,
+    /// 탭 바 가로 스크롤 오프셋(컬럼). 탭은 고정폭이라 넘치면 스크롤한다(터미널 pane.tab_scroll_cols와 동형).
+    /// 요청값은 렌더/히트테스트에서 [0,max]로 clamp되므로 stale 값이 자동 정정된다(런타임 전용, 영속 안 함).
+    tab_scroll_cols: u32 = 0,
 
     fn init(allocator: std.mem.Allocator, runtime_id: u64) DockGroup {
         return .{ .allocator = allocator, .runtime_id = runtime_id };

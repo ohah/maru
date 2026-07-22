@@ -944,18 +944,20 @@ pub export fn maru_macos_app_session_file_panel_entry(
     const info = app_session.filePanelEntryInfo(surface_id) orelse return 0;
     if (out_path) |p| p.* = info.path.ptr;
     if (out_len) |p| p.* = info.path.len;
-    // text·svg는 markdown과 같은 신뢰 config(1)로 태우고, 소스 CM6 언어·svg 프리뷰 선택은 file_panel_language의
-    // `?lang=`과 file_panel_shell_kind의 `?kind=svg` 힌트가 맡는다(§2.2·§2.3). Swift의 filePanelKind==1 신뢰 분기를 안 건드린다.
+    // text·svg·image는 markdown과 같은 신뢰 config(1)로 태우고, 소스 CM6 언어·svg/image 프리뷰 선택은
+    // file_panel_language의 `?lang=`과 file_panel_shell_kind의 `?kind=svg|image` 힌트가 맡는다(§2.2·§2.3).
+    // image(FP14)는 신뢰 shell에서 readSelfImage로 자기 바이너리를 base64로 읽어 panzoom `<img>`로 표시한다.
     return switch (info.kind) {
-        .markdown, .text, .svg => 1,
-        // html·image·pdf는 격리 loadFileURL(2). Swift가 filePanelPath를 loadFileURL(_:allowingReadAccessTo:)로
-        // 로드하고 WebKit이 HTML/이미지/PDF를 네이티브 렌더한다(§2.2). 신뢰 shell URL·bridge를 쓰지 않는다.
-        .html, .image, .pdf => 2,
+        .markdown, .text, .svg, .image => 1,
+        // html·pdf는 격리 loadFileURL(2). Swift가 filePanelPath를 loadFileURL(_:allowingReadAccessTo:)로
+        // 로드하고 WebKit이 HTML/PDF를 네이티브 렌더한다(§2.2). 신뢰 shell URL·bridge를 쓰지 않는다.
+        .html, .pdf => 2,
     };
 }
 
-/// 신뢰 shell surface의 shell-kind 힌트(§2.3). svg면 "svg"를 out에 쓰고 1을 반환한다(Swift가 shell URL에 `?kind=svg`
-/// 추가 → bootShell이 read 프리뷰+xml 소스 두 모드로 동작). markdown/text/html이거나 도크 아니면 0(out 비움).
+/// 신뢰 shell surface의 shell-kind 힌트(§2.3). svg면 "svg"·image면 "image"를 out에 쓰고 1을 반환한다(Swift가
+/// shell URL에 `?kind=svg|image` 추가 → bootShell이 svg=read 프리뷰+xml 소스, image=readSelfImage panzoom 프리뷰로
+/// 동작). markdown/text/html/pdf이거나 도크 아니면 0(out 비움).
 pub export fn maru_macos_app_session_file_panel_shell_kind(
     session: ?*AppSession,
     surface_id: u64,
@@ -966,8 +968,11 @@ pub export fn maru_macos_app_session_file_panel_shell_kind(
     if (out_len) |p| p.* = 0;
     const app_session = session orelse return 0;
     const info = app_session.filePanelEntryInfo(surface_id) orelse return 0;
-    if (info.kind != .svg) return 0;
-    const token = "svg";
+    const token = switch (info.kind) {
+        .svg => "svg",
+        .image => "image",
+        else => return 0,
+    };
     if (out_ptr) |p| p.* = token.ptr;
     if (out_len) |p| p.* = token.len;
     return 1;
@@ -2091,6 +2096,11 @@ const FileBridgeContext = struct {
         return self.session.readFilePanelAsset(gpa, self.surface_id, path);
     }
 
+    fn readSelfImage(raw: *anyopaque, gpa: std.mem.Allocator) anyerror!maru.session.control_bridge.SelfImage {
+        const self: *FileBridgeContext = @ptrCast(@alignCast(raw));
+        return self.session.readFilePanelSelfImage(gpa, self.surface_id);
+    }
+
     fn write(raw: *anyopaque, editor_epoch: u64, content: []const u8) anyerror!void {
         const self: *FileBridgeContext = @ptrCast(@alignCast(raw));
         return self.session.writeFilePanel(self.surface_id, editor_epoch, content);
@@ -2160,6 +2170,7 @@ pub export fn maru_macos_app_session_bridge_dispatch(
         .begin_document_fn = FileBridgeContext.beginDocument,
         .read_fn = FileBridgeContext.read,
         .read_asset_fn = FileBridgeContext.readAsset,
+        .read_self_image_fn = FileBridgeContext.readSelfImage,
         .write_fn = FileBridgeContext.write,
         .set_dirty_fn = FileBridgeContext.setDirty,
         .resolve_external_change_fn = FileBridgeContext.resolveExternalChange,

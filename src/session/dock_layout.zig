@@ -65,15 +65,44 @@ pub const TabCellLayout = struct {
     close_col: u16,
 };
 
-/// cell-space 탭 레이아웃의 단일 출처. CoreText title/X와 px-space tabRect/tabCloseRect가 같은 결과를 쓴다.
-pub fn tabCellLayout(tab_cols: u16, entry_count: usize, index: usize) ?TabCellLayout {
-    if (tab_cols == 0 or entry_count == 0 or index >= entry_count) return null;
-    const count: u16 = @intCast(@min(entry_count, std.math.maxInt(u16)));
-    const tab_width = @min(default_tab_cols, @max(@as(u16, 1), tab_cols / count));
-    const start_u32 = std.math.mul(u32, @intCast(index), tab_width) catch return null;
-    if (start_u32 >= tab_cols) return null;
+pub const TabScroll = struct {
+    tab_width: u16, // 탭 하나의 고정 폭(default_tab_cols)
+    has_scroll: bool, // 전체 탭 폭 > tab_cols(넘침)
+    eff_scroll: u32, // [0,max_scroll]로 clamp된 실제 스크롤(stale 요청값 자동 정정)
+    max_scroll: u32, // 최대 스크롤(넘칠 때만 >0)
+};
+
+/// 도크 탭 바 가로 스크롤 메트릭의 단일 출처. 탭은 고정폭(default_tab_cols)이라 total>tab_cols면 넘쳐 스크롤한다.
+/// scroll_cols(요청값)를 [0,max]로 clamp하므로 창 크기·탭 수가 바뀌어 생긴 stale 값이 자동 정정된다(터미널
+/// barMetrics와 동형). 셀·탭 0이면 null(호출자가 탭 처리 건너뜀).
+pub fn dockTabScroll(tab_cols: u16, entry_count: usize, scroll_cols: u32) ?TabScroll {
+    if (tab_cols == 0 or entry_count == 0) return null;
+    const count: u32 = @intCast(@min(entry_count, std.math.maxInt(u16)));
+    const tab_width: u16 = default_tab_cols;
+    const total: u32 = count * @as(u32, tab_width);
+    const has_scroll = total > tab_cols;
+    const max_scroll: u32 = if (has_scroll) total - tab_cols else 0;
+    return .{
+        .tab_width = tab_width,
+        .has_scroll = has_scroll,
+        .eff_scroll = @min(scroll_cols, max_scroll),
+        .max_scroll = max_scroll,
+    };
+}
+
+/// cell-space 탭 레이아웃의 단일 출처. CoreText title/X와 px-space tabRect/tabCloseRect가 같은 결과를 쓴다. 탭은
+/// 고정폭이고 scroll_cols만큼 좌측으로 밀린다(넘칠 때만). 좌·우로 완전히 스크롤아웃된 탭은 null(호출자는 렌더에서
+/// continue, 히트테스트에서 miss). 부분 클립(좌단·우단 걸침)은 보이는 구간만 반환한다.
+pub fn tabCellLayout(tab_cols: u16, entry_count: usize, index: usize, scroll_cols: u32) ?TabCellLayout {
+    if (index >= entry_count) return null;
+    const ts = dockTabScroll(tab_cols, entry_count, scroll_cols) orelse return null;
+    const abs_start: u32 = @as(u32, @intCast(index)) * @as(u32, ts.tab_width);
+    // 화면 컬럼 = 절대 컬럼 - eff_scroll(saturating). 좌측 스크롤아웃은 0, 우측은 tab_cols clamp(tabbar.segCols와 동일).
+    const start_u32 = @min(abs_start -| ts.eff_scroll, @as(u32, tab_cols));
+    const end_u32 = @min((abs_start + ts.tab_width) -| ts.eff_scroll, @as(u32, tab_cols));
+    if (end_u32 <= start_u32) return null;
     const start: u16 = @intCast(start_u32);
-    const end: u16 = @intCast(@min(start_u32 + tab_width, tab_cols));
+    const end: u16 = @intCast(end_u32);
     return .{
         .start = start,
         .end = end,
@@ -223,37 +252,38 @@ pub fn tabMetrics(g: Geometry, cell_width_px: u32, entry_count: usize) ?TabMetri
     const cols: u16 = @intCast(@min(g.tab_bar.w / cell_width_px, @as(u32, std.math.maxInt(u16))));
     if (cols < 1) return null;
     const tab_cols = cols; // 접기 버튼은 titlebar 띠 우측 dock 토글로 일원화 — 탭바는 예약 없이 전폭.
-    const count: u16 = @intCast(@min(entry_count, std.math.maxInt(u16)));
-    const tab_width = @min(default_tab_cols, @max(@as(u16, 1), tab_cols / count));
+    const tab_width: u16 = default_tab_cols; // 고정폭 — 넘치면 축소 대신 가로 스크롤(dockTabScroll).
     return .{ .cols = cols, .tab_cols = tab_cols, .tab_width = tab_width };
 }
 
-pub fn tabRect(g: Geometry, cell_width_px: u32, entry_count: usize, index: usize) ?Rect {
+pub fn tabRect(g: Geometry, cell_width_px: u32, entry_count: usize, index: usize, scroll_cols: u32) ?Rect {
     const m = tabMetrics(g, cell_width_px, entry_count) orelse return null;
-    const cell = tabCellLayout(m.tab_cols, entry_count, index) orelse return null;
+    const cell = tabCellLayout(m.tab_cols, entry_count, index, scroll_cols) orelse return null;
     return .{ .x = g.tab_bar.x + @as(u32, cell.start) * cell_width_px, .y = g.tab_bar.y, .w = @as(u32, cell.end - cell.start) * cell_width_px, .h = g.tab_bar.h };
 }
 
 /// 탭 제목·hover·hit-test가 공유하는 닫기 영역. 한 칸 탭은 전체를 닫기 버튼으로 쓰고, 그보다 넓으면 우측
 /// 한 칸을 예약한다. tabRect 밖을 절대 벗어나지 않는다.
-pub fn tabCloseRect(g: Geometry, cell_width_px: u32, entry_count: usize, index: usize) ?Rect {
+pub fn tabCloseRect(g: Geometry, cell_width_px: u32, entry_count: usize, index: usize, scroll_cols: u32) ?Rect {
     const m = tabMetrics(g, cell_width_px, entry_count) orelse return null;
-    const cell = tabCellLayout(m.tab_cols, entry_count, index) orelse return null;
+    const cell = tabCellLayout(m.tab_cols, entry_count, index, scroll_cols) orelse return null;
     return .{ .x = g.tab_bar.x + @as(u32, cell.close_col) * cell_width_px, .y = g.tab_bar.y, .w = cell_width_px, .h = g.tab_bar.h };
 }
 
-pub fn tabCloseIndexAt(g: Geometry, cell_width_px: u32, entry_count: usize, x_px: f64, y_px: f64) ?usize {
-    const index = tabIndexAt(g, cell_width_px, entry_count, x_px, y_px) orelse return null;
-    const r = tabCloseRect(g, cell_width_px, entry_count, index) orelse return null;
+pub fn tabCloseIndexAt(g: Geometry, cell_width_px: u32, entry_count: usize, x_px: f64, y_px: f64, scroll_cols: u32) ?usize {
+    const index = tabIndexAt(g, cell_width_px, entry_count, x_px, y_px, scroll_cols) orelse return null;
+    const r = tabCloseRect(g, cell_width_px, entry_count, index, scroll_cols) orelse return null;
     return if (layout_math.pointInRect(x_px, y_px, r)) index else null;
 }
 
-pub fn tabIndexAt(g: Geometry, cell_width_px: u32, entry_count: usize, x_px: f64, y_px: f64) ?usize {
+pub fn tabIndexAt(g: Geometry, cell_width_px: u32, entry_count: usize, x_px: f64, y_px: f64, scroll_cols: u32) ?usize {
     if (!layout_math.pointInRect(x_px, y_px, g.tab_bar)) return null;
     const m = tabMetrics(g, cell_width_px, entry_count) orelse return null;
+    const ts = dockTabScroll(m.tab_cols, entry_count, scroll_cols) orelse return null;
     const col: u32 = @intFromFloat((x_px - @as(f64, @floatFromInt(g.tab_bar.x))) / @as(f64, @floatFromInt(cell_width_px)));
     if (col >= m.tab_cols) return null;
-    const index: usize = @intCast(col / m.tab_width);
+    // 화면 컬럼 + eff_scroll = 절대 컬럼. 고정폭이므로 index = 절대 컬럼 / tab_width(tabCellLayout 역연산).
+    const index: usize = @intCast((col + ts.eff_scroll) / ts.tab_width);
     return if (index < entry_count) index else null;
 }
 
@@ -530,31 +560,61 @@ test "resize pointer maps backing pixels to persisted points and rejects non-fin
 
 test "dock tab metrics use the full tab bar and share render hit rects" {
     const g = compute(.{ .backing_width_px = 1400, .backing_height_px = 900, .sidebar_width_px = 200, .titlebar_height_px = 40, .cell_width_px = 10, .cell_height_px = 20, .scale_milli = 1000, .divider_px = 2, .side = .right, .size_pt = 420, .visible = true });
-    const second = tabRect(g, 10, 3, 1).?;
-    try std.testing.expectEqual(@as(?usize, 1), tabIndexAt(g, 10, 3, @floatFromInt(second.x + 1), @floatFromInt(second.y + 1)));
-    // 접기 버튼은 탭바에서 제거(titlebar 띠 dock 토글로 일원화) — 우측 끝도 탭 영역이다.
-    const one = tabRect(g, 10, 1, 0).?;
+    const second = tabRect(g, 10, 3, 1, 0).?;
+    try std.testing.expectEqual(@as(?usize, 1), tabIndexAt(g, 10, 3, @floatFromInt(second.x + 1), @floatFromInt(second.y + 1), 0));
+    // 접기 버튼은 탭바에서 제거(titlebar 띠 dock 토글로 일원화) — 우측 끝도 탭 영역이다. 탭은 고정폭(스크롤 0)이라
+    // 단일 탭은 default_tab_cols 폭을 그대로 갖는다.
+    const one = tabRect(g, 10, 1, 0, 0).?;
     try std.testing.expectEqual(@as(u32, default_tab_cols * 10), one.w);
-    try std.testing.expectEqual(@as(?usize, null), tabIndexAt(g, 10, 1, @floatFromInt(one.x + one.w + 1), @floatFromInt(one.y + 1)));
+    try std.testing.expectEqual(@as(?usize, null), tabIndexAt(g, 10, 1, @floatFromInt(one.x + one.w + 1), @floatFromInt(one.y + 1), 0));
 }
 
-test "dock close rect stays inside normal and one-column tabs" {
-    const g = Geometry{
+test "dock close rect sits at the visible right edge and clips on overflow" {
+    // 넉넉한 탭 바(40칸): 탭은 고정폭(18칸)이라 안 잘리고, close는 탭의 우측 끝 칸(col 17)에 온다.
+    const wide = Geometry{
         .terminal = .{ .x = 0, .y = 0, .w = 0, .h = 0 },
-        .tab_bar = .{ .x = 100, .y = 20, .w = 60, .h = 18 },
+        .tab_bar = .{ .x = 100, .y = 20, .w = 400, .h = 18 },
     };
-    const normal = tabCloseRect(g, 10, 2, 0).?;
-    try std.testing.expectEqual(Rect{ .x = 120, .y = 20, .w = 10, .h = 18 }, normal);
-    try std.testing.expectEqual(@as(?usize, 0), tabCloseIndexAt(g, 10, 2, 125, 25));
-    try std.testing.expectEqual(@as(?usize, null), tabCloseIndexAt(g, 10, 2, 105, 25));
+    const normal = tabCloseRect(wide, 10, 2, 0, 0).?;
+    try std.testing.expectEqual(Rect{ .x = 270, .y = 20, .w = 10, .h = 18 }, normal); // 100 + 17*10
+    try std.testing.expectEqual(@as(?usize, 0), tabCloseIndexAt(wide, 10, 2, 275, 25, 0));
+    try std.testing.expectEqual(@as(?usize, null), tabCloseIndexAt(wide, 10, 2, 105, 25, 0)); // 제목 영역 — close 아님
 
+    // 좁은 탭 바(2칸): 고정폭 탭이 넘쳐 스크롤한다. scroll 0이면 탭 0이 [0,2)로 잘리고 close는 보이는 우측 끝(col 1).
+    // 탭 1은 완전히 스크롤아웃(col 18~)이라 안 보인다.
     const narrow = Geometry{
         .terminal = .{ .x = 0, .y = 0, .w = 0, .h = 0 },
         .tab_bar = .{ .x = 4, .y = 8, .w = 20, .h = 18 },
     };
-    const one = tabCloseRect(narrow, 10, 2, 1).?;
-    try std.testing.expectEqual(Rect{ .x = 14, .y = 8, .w = 10, .h = 18 }, one);
-    try std.testing.expectEqual(@as(?usize, 1), tabCloseIndexAt(narrow, 10, 2, 15, 9));
+    const clipped = tabCloseRect(narrow, 10, 2, 0, 0).?;
+    try std.testing.expectEqual(Rect{ .x = 14, .y = 8, .w = 10, .h = 18 }, clipped); // 4 + 1*10
+    try std.testing.expectEqual(@as(?usize, 0), tabCloseIndexAt(narrow, 10, 2, 15, 9, 0));
+    try std.testing.expectEqual(@as(?Rect, null), tabCloseRect(narrow, 10, 2, 1, 0)); // 탭 1은 스크롤아웃
+}
+
+test "dock tab bar scrolls fixed-width tabs when they overflow" {
+    // 탭 바 30칸, 탭 3개 × 18칸 = 54칸 → 넘침. dockTabScroll이 has_scroll + max_scroll=24를 보고한다.
+    const g = Geometry{
+        .terminal = .{ .x = 0, .y = 0, .w = 0, .h = 0 },
+        .tab_bar = .{ .x = 0, .y = 0, .w = 300, .h = 18 },
+    };
+    const ts = dockTabScroll(30, 3, 0).?;
+    try std.testing.expect(ts.has_scroll);
+    try std.testing.expectEqual(@as(u32, 24), ts.max_scroll); // 54 - 30
+    try std.testing.expectEqual(@as(u16, default_tab_cols), ts.tab_width);
+
+    // scroll 0: 탭 0은 [0,18) 온전, 탭 2는 [36,54)라 우측이 [36,30)로 완전 스크롤아웃.
+    try std.testing.expect(tabCellLayout(30, 3, 0, 0) != null);
+    try std.testing.expectEqual(@as(?TabCellLayout, null), tabCellLayout(30, 3, 2, 0));
+
+    // scroll 24(max): 탭 2가 우측 끝에 오고, 탭 0이 [−24..−6)→완전 스크롤아웃, tabIndexAt도 좌측 miss.
+    const tail = tabCellLayout(30, 3, 2, 24).?;
+    try std.testing.expectEqual(@as(u16, 30), tail.end); // 우단이 탭 바 끝에 붙는다
+    try std.testing.expectEqual(@as(?usize, 2), tabIndexAt(g, 10, 3, 295, 9, 24)); // 우측 끝 클릭 → 탭 2
+    try std.testing.expectEqual(@as(?TabCellLayout, null), tabCellLayout(30, 3, 0, 24));
+
+    // 요청 스크롤이 max를 넘으면 clamp(stale 자동 정정).
+    try std.testing.expectEqual(@as(u32, 24), dockTabScroll(30, 3, 1000).?.eff_scroll);
 }
 
 test "dock header control rect is right-aligned and bounded on narrow docks" {

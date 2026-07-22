@@ -1,3 +1,4 @@
+import createPanzoom, { type PanZoom } from "panzoom";
 import { normalizeAssetReference } from "./asset-path";
 import { renderMarkdown } from "./markdown";
 import { sanitizeMermaidSvg } from "./rich-render";
@@ -309,6 +310,12 @@ export function requestFileBridge(
 ): Promise<BridgeResult>;
 export function requestFileBridge(
   document: Document,
+  method: "readSelfImage",
+  value?: undefined,
+  timeoutMs?: number,
+): Promise<BridgeResult>;
+export function requestFileBridge(
+  document: Document,
   method: "write",
   value: WriteRequest,
   timeoutMs?: number,
@@ -362,6 +369,9 @@ export function requestFileBridge(
       case "readAsset":
         if (typeof value !== "string") throw new TypeError("invalid readAsset payload");
         request = { method, path: value };
+        break;
+      case "readSelfImage":
+        request = { method };
         break;
       case "write":
         if (
@@ -707,8 +717,11 @@ export function bootShell(document: Document, targetWindow: Window): void {
   const shellParams = new URL(targetWindow.location.href).searchParams;
   const sourceLanguageWire = shellParams.get("lang");
   const isSvg = shellParams.get("kind") === "svg";
-  // text = read 모드 없는 소스 전용. svg는 read 프리뷰가 있어 source-only가 아니다.
-  const isSourceOnly = sourceLanguageWire !== null && !isSvg;
+  // FP14 image = read 전용 프리뷰. editor_epoch/loadFromDisk 없이 readSelfImage로 자기 바이너리를 base64로 읽어
+  // render iframe에 renderImage로 보내 panzoom `<img>`로 표시한다(바이너리라 텍스트 read 경로를 못 씀).
+  const isImage = shellParams.get("kind") === "image";
+  // text = read 모드 없는 소스 전용. svg·image는 read 프리뷰가 있어 source-only가 아니다.
+  const isSourceOnly = sourceLanguageWire !== null && !isSvg && !isImage;
 
   let editor: EditorView | null = null;
   let livePreviewController: EditableProjectionController | null = null;
@@ -718,6 +731,9 @@ export function bootShell(document: Document, targetWindow: Window): void {
   let savedContent = "";
   let savedDocument: Text | null = null;
   let contentLoaded = false;
+  // FP14: readSelfImage로 받은 이미지 데이터 URL(`data:<mime>;base64,<..>`). null이면 아직 안 읽힘. render iframe이
+  // 준비되고 이 값이 있으면 postPreview가 renderImage를 보낸다.
+  let imageSource: string | null = null;
   let dirty = false;
   let editorEpoch: number | null = null;
   const revisions = new EditorRevisionClock();
@@ -1099,10 +1115,19 @@ export function bootShell(document: Document, targetWindow: Window): void {
     return editor;
   };
 
-  // 읽기 모드 프리뷰를 render iframe에 보낸다. svg=sanitize 프리뷰(`renderSvg`), markdown=`render`. text는 프리뷰가
-  // 없어 no-op이다. 현재 편집 중 내용(editor)이 있으면 그걸, 없으면 마지막 로드/저장 snapshot을 쓴다.
+  // 읽기 모드 프리뷰를 render iframe에 보낸다. image=panzoom 프리뷰(`renderImage`, 데이터 URL), svg=sanitize
+  // 프리뷰(`renderSvg`), markdown=`render`. text는 프리뷰가 없어 no-op이다. 현재 편집 중 내용(editor)이 있으면
+  // 그걸, 없으면 마지막 로드/저장 snapshot을 쓴다.
   const postPreview = () => {
     if (!rendererReady || isSourceOnly) return;
+    if (isImage) {
+      if (imageSource === null) return; // 아직 readSelfImage 미완 — read 완료 콜백이 다시 postPreview 한다.
+      frame.contentWindow?.postMessage(
+        { channel: viewerChannel, type: "renderImage", src: imageSource },
+        "*",
+      );
+      return;
+    }
     const content = editor?.state.doc.toString() ?? savedContent;
     frame.contentWindow?.postMessage(
       isSvg
@@ -1151,6 +1176,11 @@ export function bootShell(document: Document, targetWindow: Window): void {
     // svg는 read|source 두 모드만(라이브 없음).
     if (isSvg) {
       if (detail.mode === "read" || detail.mode === "source-edit") applyMode(detail.mode);
+      return;
+    }
+    // image는 read 단일 프리뷰(모드 선택기 없음 — native도 read만 보냄).
+    if (isImage) {
+      if (detail.mode === "read") applyMode("read");
       return;
     }
     if (detail.mode === "read" || detail.mode === "source-edit" || detail.mode === "live-preview")
@@ -1216,12 +1246,32 @@ export function bootShell(document: Document, targetWindow: Window): void {
     if (isEditableFileMode(mode)) applyMode(mode);
   };
 
+  // FP14 이미지 read/재read의 단일 출처. editor_epoch/loadFromDisk(텍스트) 없이 readSelfImage로 자기 바이너리를
+  // base64로 받아 데이터 URL을 만들고 postPreview가 renderImage로 표시한다. start()와 maru:file-reload(외부 변경)가
+  // 공유한다. 실패는 호출자가 status로 처리한다.
+  const loadImageFromDisk = async () => {
+    const result = await requestFileBridge(document, "readSelfImage");
+    const mime = typeof result.mime === "string" ? result.mime : "";
+    const data = typeof result.data_base64 === "string" ? result.data_base64 : "";
+    if (!mime.startsWith("image/") || mime === "image/svg+xml" || data.length === 0)
+      throw new Error("invalid image payload");
+    imageSource = `data:${mime};base64,${data}`;
+    contentLoaded = true;
+    postPreview();
+  };
+
   targetWindow.addEventListener("maru:file-reload", (event) => {
     const detail = (event as CustomEvent<unknown>).detail;
     const conflict = isRecord(detail) && detail.conflict === true;
     mutationQueue = mutationQueue
       .then(async () => {
-        await loadFromDisk(false, !conflict, true);
+        // 이미지는 텍스트 loadFromDisk 대신 readSelfImage로 재읽기한다(editor_epoch 없음). 이미지는 dirty가
+        // 없어 native가 clean auto-reload(conflict=false)만 보내므로 아래 resolveExternalChange 분기는 안 탄다.
+        if (isImage) {
+          await loadImageFromDisk();
+        } else {
+          await loadFromDisk(false, !conflict, true);
+        }
         if (conflict) {
           if (editorEpoch === null) throw new Error("editor document epoch is unavailable");
           await requestFileBridge(document, "resolveExternalChange", {
@@ -1254,7 +1304,25 @@ export function bootShell(document: Document, targetWindow: Window): void {
     if (started) return;
     started = true;
     if (status !== null) status.dataset.rendererLoaded = "true";
-    const operation = (async () => {
+    if (isImage) {
+      // 이미지: editor_epoch/loadFromDisk 없이 readSelfImage로 자기 바이너리를 읽어 renderImage로 표시한다
+      // (rendererReady와 imageSource가 모두 준비되면 postPreview가 보냄). read 실패만 사용자 에러다.
+      try {
+        await loadImageFromDisk();
+        if (status !== null) status.dataset.fileRead = "true";
+        if (status !== null) status.textContent = "";
+      } catch {
+        if (status !== null) status.dataset.fileRead = "false";
+        if (status !== null) status.textContent = "파일을 읽을 수 없습니다.";
+      }
+      settleDocumentInitialization();
+      return;
+    }
+    // 실제 파일 읽기(beginDocument + loadFromDisk)와 live-preview gate(livePreviewReady)를 **분리**한다. read가
+    // 성공해 내용이 이미 렌더된 뒤 gate가 StaleDocument 등으로 일시 실패해도 "파일을 읽을 수 없습니다"로 덮어
+    // 에러 텍스트와 렌더 내용이 겹치던 버그를 없앤다(간헐 race, 2026-07-22). read 실패만 사용자 에러다.
+    let readOk = false;
+    try {
       const documentId = Number(new URL(targetWindow.location.href).searchParams.get("document"));
       if (!Number.isSafeInteger(documentId) || documentId <= 0)
         throw new Error("invalid editor document id");
@@ -1269,22 +1337,25 @@ export function bootShell(document: Document, targetWindow: Window): void {
       editorEpoch = documentResult.editor_epoch as number;
       if (status !== null) status.dataset.editorEpoch = String(editorEpoch);
       await loadFromDisk(false);
-      // livePreviewReady는 markdown+live 전용 native gate라 text·svg에서 호출하면 StaleDocument로 실패한다(§2.2).
-      if (!isSourceOnly && !isSvg)
-        await requestFileBridge(document, "livePreviewReady", { editor_epoch: editorEpoch });
-    })();
-    try {
-      await operation;
+      readOk = true;
       if (status !== null) status.dataset.fileRead = "true";
       if (status !== null) status.textContent = "";
     } catch {
       if (status !== null) status.dataset.fileRead = "false";
       if (status !== null) status.textContent = "파일을 읽을 수 없습니다.";
-    } finally {
-      // 실패도 barrier를 해소한다. 뒤의 mutation은 editorEpoch null 검사로 false/error가 되어 native 보호를
-      // 유지하며, 영구 대기 Promise를 남기지 않는다.
-      settleDocumentInitialization();
     }
+    // livePreviewReady는 markdown+live 전용 native gate라 text·svg에서 호출하면 StaleDocument로 실패한다(§2.2).
+    // read 성공 후에만 시도하고, 일시 실패는 조용히 삼킨다 — 내용은 이미 표시됐으므로 read-error로 덮지 않는다.
+    if (readOk && !isSourceOnly && !isSvg && editorEpoch !== null) {
+      try {
+        await requestFileBridge(document, "livePreviewReady", { editor_epoch: editorEpoch });
+      } catch {
+        // live gate 일시 실패 — 렌더된 내용을 유지한다(에러 표시 없음).
+      }
+    }
+    // read 실패도 barrier를 해소한다. 뒤의 mutation은 editorEpoch null 검사로 false/error가 되어 native 보호를
+    // 유지하며, 영구 대기 Promise를 남기지 않는다.
+    settleDocumentInitialization();
   };
   frame.addEventListener(
     "load",
@@ -1384,6 +1455,8 @@ export function bootRenderer(document: Document, targetWindow: Window): void {
   let generation = 0;
   let requestSequence = 0;
   const pending = new Map<string, (value: AssetResult) => void>();
+  // FP14: 현재 이미지 프리뷰의 panzoom 인스턴스. 재렌더/모드 전환마다 dispose해 리스너·transform 누수를 막는다.
+  let imagePanzoom: PanZoom | null = null;
   let atomicPort: MessagePort | null = null;
   let atomicCapability: RendererCapability | null = null;
   let atomicRenderConsumed = false;
@@ -1612,6 +1685,75 @@ export function bootRenderer(document: Document, targetWindow: Window): void {
         },
         "*",
       );
+      return;
+    }
+    if (event.data.type === "renderImage" && typeof event.data.src === "string") {
+      // FP14 이미지 프리뷰: shell이 readSelfImage로 읽은 데이터 URL(`data:<raster mime>;base64,..`)을 `<img>`로
+      // 표시하고 panzoom으로 팬/줌한다. src는 신뢰 shell이 native 검증 파일에서 만든 데이터 URL이라 raster만 온다
+      // (svg는 renderSvg 경로). #app이 체커 배경 뷰포트(overflow hidden)라 이미지가 그 안에서만 움직인다.
+      // generation을 캡처해, 겹친 재렌더(정상 open은 rendererReady·applyMode가 각각 renderImage를 보내 2회)에서
+      // 앞선 렌더의 늦은 load/error가 detach된 `<img>`에 panzoom을 붙이거나 최신 DOM을 덮는 것을 막는다(render 핸들러 동형).
+      const currentGeneration = ++generation;
+      for (const resolve of pending.values())
+        resolve({
+          channel: viewerChannel,
+          type: "asset-result",
+          requestId: "stale",
+          error: "stale",
+        });
+      pending.clear();
+      if (imagePanzoom !== null) {
+        imagePanzoom.dispose();
+        imagePanzoom = null;
+      }
+      const src = event.data.src;
+      root.replaceChildren();
+      const img = document.createElement("img");
+      img.className = "maru-image-preview";
+      img.alt = "이미지 미리보기";
+      img.draggable = false;
+      img.decoding = "async";
+      const finishImage = (loaded: boolean) => {
+        if (currentGeneration !== generation) return; // 겹친 재렌더가 이미 이 img를 detach했다 — panzoom·report 생략
+        if (loaded) {
+          // 자연 크기를 안 뒤 panzoom을 붙여 bounds가 정확하다. 부모(#app)를 컨테이너로 팬/스크롤·핀치 줌한다.
+          imagePanzoom = createPanzoom(img, {
+            bounds: true,
+            boundsPadding: 0.2,
+            minZoom: 0.2,
+            maxZoom: 20,
+            zoomDoubleClickSpeed: 2.5,
+            smoothScroll: false,
+          });
+        }
+        targetWindow.parent.postMessage(
+          {
+            channel: viewerChannel,
+            type: "rendered",
+            text: "image",
+            imageCount: 1,
+            loadedImageCount: loaded ? 1 : 0,
+            ...rendererCapabilityTypes(targetWindow),
+          },
+          "*",
+        );
+      };
+      img.addEventListener("load", () => finishImage(true), { once: true });
+      img.addEventListener(
+        "error",
+        () => {
+          if (currentGeneration !== generation) return; // stale error는 최신 렌더 DOM을 건드리지 않는다
+          root.replaceChildren();
+          const notice = document.createElement("p");
+          notice.textContent = "이 이미지를 표시할 수 없습니다.";
+          notice.className = "maru-svg-error";
+          root.appendChild(notice);
+          finishImage(false);
+        },
+        { once: true },
+      );
+      img.src = src;
+      root.appendChild(img);
       return;
     }
     if (event.data.type !== "render" || typeof event.data.markdown !== "string") return;

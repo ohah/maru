@@ -134,19 +134,40 @@ pub const Row = struct {
     }
 };
 
-/// 화면 위 이미지 배치. wire: blob_id:u64 | rect(x,y,w,h:u16) | z:i32.
+/// 화면 위 kitty graphics placement(표시 중인 이미지 인스턴스). client가 `terminal.KittyPlacement`로 1:1 매핑한다.
+/// 좌표는 뷰포트 상대(row는 i32라 화면 위로 벗어난 앵커도 노출 — 셀 span을 아는 렌더러가 가시성/클립 결정). crop/offset/
+/// columns/rows까지 실어 kitty display 의미를 보존한다(픽셀→셀 환산은 셀 메트릭을 가진 렌더러 몫). wire: image_id:u32 |
+/// placement_id:u32 | row:i32 | col:u16 | cell_x_offset:u32 | cell_y_offset:u32 | src_x:u32 | src_y:u32 | src_width:u32 |
+/// src_height:u32 | columns:u32 | rows:u32 | z:i32.
 pub const ImagePlacement = struct {
-    blob_id: u64,
-    rect: Rect = .{},
+    image_id: u32,
+    placement_id: u32 = 0,
+    row: i32,
+    col: u16,
+    cell_x_offset: u32 = 0,
+    cell_y_offset: u32 = 0,
+    src_x: u32 = 0,
+    src_y: u32 = 0,
+    src_width: u32 = 0,
+    src_height: u32 = 0,
+    columns: u32 = 0,
+    rows: u32 = 0,
     z: i32 = 0,
 };
 
-/// 이미지 원본 바이트(kitty/sixel 등). blob은 **문자열 field가 아니라** 전용 record로 나른다(§12). wire:
-/// blob_id:u64 | mime(str) | byte_len:u32 | bytes.
+/// kitty graphics 이미지의 **디코드된 픽셀**(host가 굽지 않고 raw RGB/RGBA 그대로 — client 디코더 불필요). client가
+/// `terminal.KittyImageView`로 1:1 매핑해 렌더러가 image_id로 GPU 텍스처를 캐시하고 `generation`이 바뀔 때만 업로드한다.
+/// per-record cap(1 MiB)을 넘는 이미지는 record header의 chunk_index/chunk_count로 청크해 나른다 — `pixels`는 이 청크의
+/// 슬라이스이고, 메타(width/height/bpp/generation)는 자기서술을 위해 **매 청크 반복**한다(재조립은 소비자 몫, §12). blob은
+/// 문자열 field가 아니라 전용 record로 나른다. wire: image_id:u32 | generation:u64 | width:u32 | height:u32 | bpp:u8 |
+/// pixel_len:u32 | pixels.
 pub const ImageBlob = struct {
-    blob_id: u64,
-    mime: []const u8,
-    bytes: []const u8,
+    image_id: u32,
+    generation: u64 = 0,
+    width: u32,
+    height: u32,
+    bpp: u8,
+    pixels: []const u8,
 };
 
 /// 28-byte record header. body는 record_kind에 따라 이 뒤에 이어진다.
@@ -449,32 +470,67 @@ pub fn encodeImagePlacement(allocator: std.mem.Allocator, header: RecordHeader, 
     var body: std.ArrayListUnmanaged(u8) = .empty;
     defer body.deinit(allocator);
     const w = BodyWriter{ .buf = &body, .allocator = allocator };
-    try w.u64v(p.blob_id);
-    try w.rect(p.rect);
+    try w.u32v(p.image_id);
+    try w.u32v(p.placement_id);
+    try w.i32v(p.row);
+    try w.u16v(p.col);
+    try w.u32v(p.cell_x_offset);
+    try w.u32v(p.cell_y_offset);
+    try w.u32v(p.src_x);
+    try w.u32v(p.src_y);
+    try w.u32v(p.src_width);
+    try w.u32v(p.src_height);
+    try w.u32v(p.columns);
+    try w.u32v(p.rows);
     try w.i32v(p.z);
     return finishRecord(allocator, .{ .kind = header.kind, .generation = header.generation, .sequence = header.sequence, .chunk_index = header.chunk_index, .chunk_count = header.chunk_count }, body.items);
 }
 
 pub fn decodeImagePlacement(body: []const u8) DecodeError!ImagePlacement {
     var r = BodyReader{ .bytes = body };
-    return .{ .blob_id = try r.u64v(), .rect = try r.rect(), .z = try r.i32v() };
+    // 필드 순서 = encode wire 순서(struct 리터럴 초기화는 소스 순으로 평가된다 — decodeRun 등과 같은 규약).
+    return .{
+        .image_id = try r.u32v(),
+        .placement_id = try r.u32v(),
+        .row = try r.i32v(),
+        .col = try r.u16v(),
+        .cell_x_offset = try r.u32v(),
+        .cell_y_offset = try r.u32v(),
+        .src_x = try r.u32v(),
+        .src_y = try r.u32v(),
+        .src_width = try r.u32v(),
+        .src_height = try r.u32v(),
+        .columns = try r.u32v(),
+        .rows = try r.u32v(),
+        .z = try r.i32v(),
+    };
 }
 
 pub fn encodeImageBlob(allocator: std.mem.Allocator, header: RecordHeader, blob: ImageBlob) DecodeError![]u8 {
     var body: std.ArrayListUnmanaged(u8) = .empty;
     defer body.deinit(allocator);
     const w = BodyWriter{ .buf = &body, .allocator = allocator };
-    try w.u64v(blob.blob_id);
-    try w.str(blob.mime);
-    if (blob.bytes.len > max_image_blob) return error.LengthOverflow; // image 전용 cap(1 MiB) — str(64 KiB) 아님
-    try w.u32v(@intCast(blob.bytes.len));
-    body.appendSlice(allocator, blob.bytes) catch return error.OutOfMemory;
+    try w.u32v(blob.image_id);
+    try w.u64v(blob.generation);
+    try w.u32v(blob.width);
+    try w.u32v(blob.height);
+    try w.u8v(blob.bpp);
+    if (blob.pixels.len > max_image_blob) return error.LengthOverflow; // 청크당 cap(1 MiB) — 초과 이미지는 caller가 청크한다
+    try w.u32v(@intCast(blob.pixels.len));
+    body.appendSlice(allocator, blob.pixels) catch return error.OutOfMemory;
     return finishRecord(allocator, .{ .kind = .image_blob, .generation = header.generation, .sequence = header.sequence, .chunk_index = header.chunk_index, .chunk_count = header.chunk_count }, body.items);
 }
 
 pub fn decodeImageBlob(body: []const u8) DecodeError!ImageBlob {
     var r = BodyReader{ .bytes = body };
-    return .{ .blob_id = try r.u64v(), .mime = try r.str(), .bytes = try r.bytesField() };
+    return .{
+        .image_id = try r.u32v(),
+        .generation = try r.u64v(),
+        .width = try r.u32v(),
+        .height = try r.u32v(),
+        .bpp = try r.u8v(),
+        .pixels = try r.bytesField(),
+    };
 }
 
 // ── delta record encode/decode ───────────────────────────────────────────────
@@ -706,17 +762,6 @@ test "screen-stream: decode rejects truncated body and invalid UTF-8 grapheme" {
     try testing.expectError(error.InvalidUtf8, decodeRow(allocator, body.items));
 }
 
-test "screen-stream: image blob carries opaque bytes without UTF-8 checks" {
-    const allocator = testing.allocator;
-    const blob = ImageBlob{ .blob_id = 42, .mime = "image/png", .bytes = &[_]u8{ 0x89, 0x50, 0x4E, 0x47, 0x00, 0xFF } };
-    const rec = try encodeImageBlob(allocator, .{ .kind = .image_blob, .generation = 3 }, blob);
-    defer allocator.free(rec);
-    const back = try decodeImageBlob(rec[record_header_size..]);
-    try testing.expectEqual(@as(u64, 42), back.blob_id);
-    try testing.expectEqualStrings("image/png", back.mime);
-    try testing.expectEqualSlices(u8, blob.bytes, back.bytes);
-}
-
 test "screen-stream: delta ops round-trip (set_runs, scroll_rect, clear_rect, cursor, modes, image)" {
     const allocator = testing.allocator;
 
@@ -750,13 +795,56 @@ test "screen-stream: delta ops round-trip (set_runs, scroll_rect, clear_rect, cu
     defer allocator.free(mo);
     try testing.expectEqual(@as(u32, 0xBEEF), (try decodeModes(mo[record_header_size..])).modes);
 
-    const ip = try encodeImagePlacement(allocator, .{ .kind = .image_place }, .{ .blob_id = 5, .rect = .{ .x = 1, .y = 1, .w = 10, .h = 5 }, .z = 2 });
+    const ip = try encodeImagePlacement(allocator, .{ .kind = .image_place }, .{ .image_id = 5, .placement_id = 3, .row = 1, .col = 2, .src_width = 64, .columns = 10, .rows = 5, .z = 2 });
     defer allocator.free(ip);
-    try testing.expectEqual(@as(u64, 5), (try decodeImagePlacement(ip[record_header_size..])).blob_id);
+    const ip_dec = try decodeImagePlacement(ip[record_header_size..]);
+    try testing.expectEqual(@as(u32, 5), ip_dec.image_id);
+    try testing.expectEqual(@as(u32, 3), ip_dec.placement_id);
+    try testing.expectEqual(@as(i32, 1), ip_dec.row);
+    try testing.expectEqual(@as(u16, 2), ip_dec.col);
+    try testing.expectEqual(@as(u32, 64), ip_dec.src_width);
+    try testing.expectEqual(@as(u32, 10), ip_dec.columns);
+    try testing.expectEqual(@as(i32, 2), ip_dec.z);
 
     const ir = try encodeImageRemove(allocator, .{ .kind = .image_remove }, .{ .base_generation = 10, .blob_id = 5 });
     defer allocator.free(ir);
     try testing.expectEqual(@as(u64, 5), (try decodeImageRemove(ir[record_header_size..])).blob_id);
+}
+
+test "screen-stream: image_blob round-trips decoded pixels + chunk header, rejects oversized chunk" {
+    const allocator = testing.allocator;
+    const pixels = [_]u8{ 0xDE, 0xAD, 0xBE, 0xEF, 0x01, 0x02, 0x03, 0x04 }; // 2px RGBA(디코드된 raw)
+    // 청크 헤더(chunk_index/count)와 디코드 픽셀 메타(image_id/generation/w/h/bpp)가 왕복한다.
+    const rec = try encodeImageBlob(allocator, .{ .kind = .image_blob, .chunk_index = 1, .chunk_count = 3 }, .{
+        .image_id = 42,
+        .generation = 7,
+        .width = 2,
+        .height = 1,
+        .bpp = 4,
+        .pixels = &pixels,
+    });
+    defer allocator.free(rec);
+    const hdr = try RecordHeader.decode(rec[0..record_header_size]);
+    try testing.expectEqual(@as(u32, 1), hdr.chunk_index);
+    try testing.expectEqual(@as(u32, 3), hdr.chunk_count);
+    const blob = try decodeImageBlob(rec[record_header_size..]);
+    try testing.expectEqual(@as(u32, 42), blob.image_id);
+    try testing.expectEqual(@as(u64, 7), blob.generation);
+    try testing.expectEqual(@as(u32, 2), blob.width);
+    try testing.expectEqual(@as(u32, 1), blob.height);
+    try testing.expectEqual(@as(u8, 4), blob.bpp);
+    try testing.expectEqualSlices(u8, &pixels, blob.pixels);
+
+    // per-record cap 초과 픽셀은 alloc 전에 거부(손상/폭주 방어) — 초과 이미지는 caller가 청크로 나눠야 한다.
+    const big = try allocator.alloc(u8, max_image_blob + 1);
+    defer allocator.free(big);
+    try testing.expectError(error.LengthOverflow, encodeImageBlob(allocator, .{ .kind = .image_blob }, .{
+        .image_id = 1,
+        .width = 1,
+        .height = 1,
+        .bpp = 4,
+        .pixels = big,
+    }));
 }
 
 test "screen-stream: run count cap rejects a corrupt declared count before allocating" {

@@ -608,8 +608,10 @@ chunk_index:u32 | chunk_count:u32 | record_bytes...
 
 - 모든 정수는 network byte order, 문자열은 `length:u32 + UTF-8 bytes`, arbitrary input/output blob은 문자열 field에 넣지 않는다.
 - snapshot record는 `screen_meta(cols,rows,active_screen,cursor,modes)`, `row(row_index,run*)`,
-  `image_placement(blob_id,rect,z)`, `image_blob(blob_id,mime,bytes)`다. row run은 grapheme UTF-8, cell width/count와 resolved
-  foreground/background/underline/style flags를 명시하고 Zig/Swift padding이나 pointer를 포함하지 않는다.
+  `image_placement(image_id,placement_id,row,col,cell_x/y_offset,src_x/y/w/h,columns,rows,z)`(kitty display 충실),
+  `image_blob(image_id,generation,width,height,bpp,pixels)`(디코드된 raw 픽셀 — client 디코더 불필요, >1 MiB는 header
+  chunk_index/count로 청크)다. row run은 grapheme UTF-8, cell width/count와 태그드 Color intent(default/indexed/rgb)·style
+  flags를 명시하고 Zig/Swift padding이나 pointer를 포함하지 않는다.
 - delta record는 `set_runs`, `clear_rect`, `scroll_rect`, `cursor`, `modes`, `image_place/remove`의 bounded operation list다.
   metadata title/cwd/process/agent/notification은 screen delta에 섞지 않고 JSON `event` kind로 보낸다.
 - snapshot은 하나의 generation과 `sequence=0`, delta는 `base_generation`을 record body에 추가하고 sequence를 1씩 올린다.
@@ -890,6 +892,16 @@ fake notification sink는 payload·routing·bounded history TDD에 사용하지�
 
 정확한 latency/RSS 숫자는 P3 구현 전에 baseline artifact를 측정해 `performance-budget.md`에 추가한다. 근거 없는 숫자를 이
 설계 PR에서 약속하지 않지만, 측정·상한 없는 default 전환도 허용하지 않는다.
+
+**입력 echo 지연(측정됨, default 전환 선결)**: host-backed 터미널의 키 입력→화면 반영은 in-process 대비 **약 20ms 더 느리다**
+(실측: 실 fork host + `/bin/cat` tty echo 왕복, 위상 분산 후에도 flat ~21–23ms; in-process 입력→모델은 tick 게이트가 없어
+~1–2ms). 원인은 무작위 tick 위상이 아니라 **구조적**이다 — reader 스레드는 core를 즉시 갱신하지만, delta **push**가 serve
+루프의 `poll(cfd, delta_tick_ms=20)`(`socket_server.zig`)에 묶여, 격리된 키 입력 뒤 poll이 풀 20ms를 블로킹한 다음에야
+`collectDeltas`가 밀어낸다. 이 20ms는 **의도적 단순화**(단일 스레드 push, cross-thread queue 불필요)의 대가이며, keep-alive가
+opt-in인 동안은 수용한다(체감 ~9ms→~30ms, Electron/SSH 터미널 수준). **해소책(후속·default 전환 선결)**: reader 스레드가
+core 갱신 시 self-pipe/eventfd로 serve 루프를 깨워 즉시 push(추가분 ~1–2ms, tmux식 이벤트 기반) — 단, 지금의 단일 스레드
+불변식(core lock 위 push)을 넘으므로 wakeup 정확성(놓친/스퍼리어스)에 주의한다. 급하면 중간값으로 `delta_tick_ms`를 4~8ms로
+낮춰 floor만 줄일 수 있다(복잡도 0, CPU wakeup↑). 이 지연 제거는 default `keep-alive-after-quit=true` 전환의 선결 항목이다.
 
 ## 15. 구현 전 남은 사용자 결정
 

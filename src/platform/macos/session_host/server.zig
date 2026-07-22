@@ -56,7 +56,15 @@ pub const RuntimeOps = struct {
     /// view_offset을 바꾸면 다음 snapshot/delta(renderSnapshot=뷰포트)가 그 스크롤 화면을 투영한다. codec 순수성 유지를 위해
     /// server는 primitive(op 문자열·arg)만 넘기고, runtime_manager가 CoreCommand로 매핑해 적용한다(선택/config는 후속 #6b).
     core_command: *const fn (ctx: *anyopaque, runtime_id: u128, op: []const u8, arg: i64) anyerror!void,
+    /// §6b 원격 선택 복사: client가 보낸 뷰포트 선택 span을 host `TerminalCore`에 적용해 `extractSelection`(로컬과 같은
+    /// 함수, soft-wrap 이음·스크롤백 충실)으로 텍스트를 뽑아 JSON `{text}`로 준다. host가 콘텐츠를 소유하므로(client는 렌더만)
+    /// 선택 의미론이 한 곳(host core)에 산다. codec 순수성 위해 span은 primitive(SelectSpan), runtime_manager가 core 연산으로 매핑.
+    selected_text: *const fn (ctx: *anyopaque, runtime_id: u128, span: SelectSpan, allocator: std.mem.Allocator) anyerror![]u8,
 };
+
+/// §6b 원격 선택 복사용 뷰포트 선택 span(primitive — codec 순수 유지). client가 보고 있는 화면(host의 뷰포트) 기준
+/// 시작/끝 셀 좌표와 block(직사각형) 여부. host가 `selectionStart/Extend`로 자기 core에 적용(뷰포트→abs는 host view_offset 기준).
+pub const SelectSpan = struct { sr: u16, sc: u16, er: u16, ec: u16, block: bool };
 
 /// `RuntimeOps.delta` 결과. `send`/`new_base`는 caller 소유이고 **항상 별개 버퍼**다(둘 다 free해도 안전). `send.len==0`이면
 /// 변화 없음(아무것도 안 보냄). `is_snapshot`이면 `send`가 fresh snapshot(snapshot_chunk로, client가 화면을 교체), 아니면
@@ -240,6 +248,8 @@ pub const Connection = struct {
             return self.dispatchResync(frame.header.request_id, params);
         } else if (std.mem.eql(u8, method, "runtime.core_command")) {
             return self.dispatchCoreCommand(frame.header.request_id, params);
+        } else if (std.mem.eql(u8, method, "runtime.selected_text")) {
+            return self.dispatchSelectedText(frame.header.request_id, params);
         } else if (std.mem.eql(u8, method, "runtime.resize")) {
             return self.dispatchResize(frame.header.request_id, params);
         } else if (std.mem.eql(u8, method, "runtime.notification")) {
@@ -432,6 +442,28 @@ pub const Connection = struct {
             ops.core_command(ops.ctx, runtime_id, op, arg) catch return self.replyError(request_id, .internal);
         }
         const body = try self.stringify(.{ .result = .{ .applied = true } });
+        defer self.allocator.free(body);
+        return self.replyResult(request_id, body);
+    }
+
+    /// `runtime.selected_text`(§6b 원격 선택 복사): client가 보낸 뷰포트 선택 span을 host core에 적용해 `extractSelection`으로
+    /// 텍스트를 뽑아 `{text}`로 응답한다(host가 콘텐츠 소유 = 선택 의미론 단일 출처, client는 span만 보내고 host가 해석). 모르는
+    /// stream_id는 invalid_request. read-only host면 빈 text. 추출 텍스트는 임의 바이트라 host가 실 JSON encoder로 escape한다.
+    fn dispatchSelectedText(self: *Connection, request_id: u64, params: ?std.json.ObjectMap) HandleError!Action {
+        const p = params orelse return self.replyError(request_id, .invalid_request);
+        const stream = intFieldU64(p, "stream_id") orelse return self.replyError(request_id, .invalid_request);
+        const runtime_id = (self.attachments.get(stream) orelse return self.replyError(request_id, .invalid_request)).runtime_id;
+        const span = SelectSpan{
+            .sr = intField(p, "sr") orelse 0,
+            .sc = intField(p, "sc") orelse 0,
+            .er = intField(p, "er") orelse 0,
+            .ec = intField(p, "ec") orelse 0,
+            .block = boolField(p, "block"),
+        };
+        const body = if (self.runtime_ops) |ops|
+            ops.selected_text(ops.ctx, runtime_id, span, self.allocator) catch return self.replyError(request_id, .internal)
+        else
+            (self.allocator.dupe(u8, "{\"text\":\"\"}") catch return error.OutOfMemory);
         defer self.allocator.free(body);
         return self.replyResult(request_id, body);
     }
@@ -692,6 +724,14 @@ fn intFieldI64(obj: std.json.ObjectMap, key: []const u8) ?i64 {
     return switch (obj.get(key) orelse return null) {
         .integer => |n| n,
         else => null,
+    };
+}
+
+/// bool 필드(§6b block 선택). 없거나 타입 다르면 false.
+fn boolField(obj: std.json.ObjectMap, key: []const u8) bool {
+    return switch (obj.get(key) orelse return false) {
+        .bool => |b| b,
+        else => false,
     };
 }
 
@@ -982,6 +1022,8 @@ const FakeRuntimeOps = struct {
     last_core_op_len: usize = 0,
     last_core_arg: i64 = 0,
     core_command_runtime: u128 = 0,
+    last_select_span: SelectSpan = .{ .sr = 0, .sc = 0, .er = 0, .ec = 0, .block = false },
+    selected_text_runtime: u128 = 0,
 
     fn spawnFn(ctx: *anyopaque, params: RuntimeSpawnParams) anyerror!u128 {
         const self: *FakeRuntimeOps = @ptrCast(@alignCast(ctx));
@@ -1042,8 +1084,15 @@ const FakeRuntimeOps = struct {
         self.last_core_arg = arg;
         self.core_command_runtime = runtime_id;
     }
+    /// 받은 선택 span(+runtime)을 기록하고 고정 텍스트를 준다 — server 라우팅·파싱 검증(실 extractSelection은 runtime_manager smoke).
+    fn selectedTextFn(ctx: *anyopaque, runtime_id: u128, span: SelectSpan, allocator: std.mem.Allocator) anyerror![]u8 {
+        const self: *FakeRuntimeOps = @ptrCast(@alignCast(ctx));
+        self.last_select_span = span;
+        self.selected_text_runtime = runtime_id;
+        return allocator.dupe(u8, "{\"text\":\"PICKED\"}");
+    }
     fn ops(self: *FakeRuntimeOps) RuntimeOps {
-        return .{ .ctx = self, .spawn = spawnFn, .terminate = terminateFn, .write_input = writeInputFn, .resize = resizeFn, .snapshot = snapshotFn, .delta = deltaFn, .notification = notificationFn, .core_command = coreCommandFn };
+        return .{ .ctx = self, .spawn = spawnFn, .terminate = terminateFn, .write_input = writeInputFn, .resize = resizeFn, .snapshot = snapshotFn, .delta = deltaFn, .notification = notificationFn, .core_command = coreCommandFn, .selected_text = selectedTextFn };
     }
 };
 
@@ -1411,6 +1460,48 @@ test "server: runtime.core_command routes scroll op/arg to RuntimeOps (§6a 원�
     // 모르는 stream_id → invalid_request(라우팅 안 함).
     {
         const r = try feedJson(&conn, .request, 5, "{\"method\":\"runtime.core_command\",\"params\":{\"stream_id\":99,\"op\":\"scroll\",\"arg\":1}}");
+        defer if (r.frame) |f| f.deinit(allocator);
+        try testing.expect(std.mem.indexOf(u8, r.frame.?.payload, "invalid_request") != null);
+    }
+}
+
+test "server: runtime.selected_text routes span to RuntimeOps and returns text (§6b 원격 선택 복사)" {
+    const allocator = testing.allocator;
+    var registry = reg.TerminalRuntimeRegistry.init(allocator);
+    defer registry.deinit();
+    _ = try registry.register(0xAA, 80, 24);
+
+    var fake: FakeRuntimeOps = .{};
+    var conn = Connection.init(allocator, 1, &registry);
+    defer conn.deinit();
+    conn.runtime_ops = fake.ops();
+    {
+        const h = try feedJson(&conn, .hello, 1, "{\"protocol_min\":1,\"protocol_max\":1}");
+        if (h.frame) |f| f.deinit(allocator);
+    }
+    {
+        const frames = try feedExpectFrames(&conn, .request, 2, "{\"method\":\"runtime.attach\",\"params\":{\"runtime_id\":\"aa\",\"mode\":\"controller\"}}");
+        defer {
+            for (frames) |f| f.deinit(allocator);
+            allocator.free(frames);
+        }
+    }
+    // 선택 span(sr1,sc2,er3,ec4,block) → RuntimeOps.selected_text로 라우팅 + host 텍스트("PICKED")를 응답에 담는다.
+    {
+        const r = try feedJson(&conn, .request, 3, "{\"method\":\"runtime.selected_text\",\"params\":{\"stream_id\":1,\"sr\":1,\"sc\":2,\"er\":3,\"ec\":4,\"block\":true}}");
+        defer if (r.frame) |f| f.deinit(allocator);
+        try testing.expect(std.mem.indexOf(u8, r.frame.?.payload, "PICKED") != null);
+    }
+    try testing.expectEqual(@as(u16, 1), fake.last_select_span.sr);
+    try testing.expectEqual(@as(u16, 2), fake.last_select_span.sc);
+    try testing.expectEqual(@as(u16, 3), fake.last_select_span.er);
+    try testing.expectEqual(@as(u16, 4), fake.last_select_span.ec);
+    try testing.expect(fake.last_select_span.block);
+    try testing.expectEqual(@as(u128, 0xAA), fake.selected_text_runtime);
+
+    // 모르는 stream_id → invalid_request.
+    {
+        const r = try feedJson(&conn, .request, 4, "{\"method\":\"runtime.selected_text\",\"params\":{\"stream_id\":99,\"sr\":0,\"sc\":0,\"er\":0,\"ec\":0,\"block\":false}}");
         defer if (r.frame) |f| f.deinit(allocator);
         try testing.expect(std.mem.indexOf(u8, r.frame.?.payload, "invalid_request") != null);
     }

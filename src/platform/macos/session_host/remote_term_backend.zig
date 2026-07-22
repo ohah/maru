@@ -120,6 +120,14 @@ pub const RemoteTermBackend = struct {
         return rr.takeNotification() catch return null;
     }
 
+    /// host-backed Term(handle)의 현재 뷰포트 선택 텍스트를 host에서 뽑는다(§6b — host의 `extractSelection` 재사용). 없거나
+    /// 연결 오류면 null(best-effort — 복사는 부가라 세션에 전파 않음). caller가 free. 선택 span은 placeholder core가 렌더용으로
+    /// 든 것을 app_session이 넘긴다(하이라이트=client 좌표, 복사 콘텐츠=host 해석).
+    pub fn selectedTextFor(self: *RemoteTermBackend, handle: RuntimeHandle, span: maru.terminal.SelectionSpan) ?[]u8 {
+        const rr = self.runtimes.get(handle) orelse return null;
+        return (rr.selectedText(span) catch return null) orelse null;
+    }
+
     fn spawn(ctx: *anyopaque, params: SpawnParams) anyerror!*Surface {
         const self: *RemoteTermBackend = @ptrCast(@alignCast(ctx));
         // argv = [command] ++ args (host의 spawnRuntime이 argv[0]=command, argv[1..]=args로 되돌린다). rr.spawn이 동기적으로
@@ -293,7 +301,13 @@ pub const RemoteTermBackend = struct {
             .scroll_to_bottom => try rr.sendCoreCommand("scroll_to_bottom", 0),
             .scroll_to_abs => |a| try rr.sendCoreCommand("scroll_to_abs", @intCast(@min(a, max_i64))),
             .scroll_to_offset => |o| try rr.sendCoreCommand("scroll_to_offset", @intCast(@min(o, max_i64))),
-            else => {}, // 선택/config/IME는 후속 — placeholder core는 미렌더라 무시.
+            // §6b-1 드래그 선택: 하이라이트 span은 client 좌표라 **placeholder core에 적용해 즉시** 반영한다(렌더가 이미
+            // surface.core.selectionViewportSpan을 읽음 — 새 렌더 배선/span-push 불요, 왕복 지연 없음). 복사(콘텐츠 연산)는
+            // app_session.copyText가 이 span을 host로 보내 host의 extractSelection으로 한다(선택 의미론=host 단일 출처).
+            // 콘텐츠 인지 경계(word/line)는 빈 placeholder에선 부정확하므로 후속(#6b-2, host 계산). scroll_and_extend(autoscroll
+            // 드래그)도 후속. select_all은 placeholder 뷰포트 전체 선택 → 보이는 화면 복사(host가 스크롤백까지는 후속).
+            .select_start, .select_extend, .select_extend_or_collapse, .select_all => core_command.apply(&rr.surface.core, cmd),
+            else => {}, // word/line/scroll_and_extend/config/IME는 후속 — 무시.
         }
     }
 

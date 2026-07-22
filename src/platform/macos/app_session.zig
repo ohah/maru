@@ -19989,6 +19989,20 @@ pub const AppSession = struct {
             self.copy_buffer = self.allocator.dupe(u8, slice) catch return &.{};
             return self.copy_buffer;
         }
+        // §6b-1 host-backed: 선택 텍스트는 **host가 뽑는다**(host가 콘텐츠 소유 = `extractSelection` 단일 출처, soft-wrap 이음·
+        // 스크롤백 충실 — "client 렌더/host 해석" 불변식). 하이라이트 span(placeholder core가 렌더용으로 든 것)만 host로 보내
+        // host가 자기 core에 적용해 추출한다. 원격 판정 SSOT=surface.remote. placeholder 선택 읽기는 메인스레드라 락 불요.
+        if (is_macos and self.activeSurface().remote != null) {
+            const rs = self.activeSurface();
+            const span = rs.core.selectionViewportSpan() orelse return &.{};
+            if (app_remote_backend) |*rb| {
+                if (rb.selectedTextFor(rs.id, span)) |text| {
+                    self.copy_buffer = text; // owned(host 추출 바이트 dupe) — 다음 copyText까지 유효.
+                    return self.copy_buffer;
+                }
+            }
+            return &.{};
+        }
         // extractSelection은 선택 + 스크롤백을 읽는다 — 락 아래(docs/io-render-threading.md §9.1). full (a)에서 선택이
         // 이제 reader 스레드가 async로 mutate하므로, 락 없이 읽으면 드래그-선택 직후 Cmd+C가 torn/stale 선택을 본다
         // (렌더 경로는 이미 락 아래 selectionViewportSpan을 읽는다 — copyText만 노출됐던 갭). 추출 바이트는 owned이라 unlock 후 안전.

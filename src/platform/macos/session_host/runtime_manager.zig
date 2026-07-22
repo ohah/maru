@@ -78,7 +78,7 @@ pub const RuntimeManager = struct {
 
     /// server.zig가 dispatch에 넘길 중립 vtable. `ctx`는 이 매니저다.
     pub fn runtimeOps(self: *RuntimeManager) server.RuntimeOps {
-        return .{ .ctx = self, .spawn = spawnOp, .terminate = terminateOp, .write_input = writeInputOp, .resize = resizeOp, .snapshot = snapshotOp, .delta = deltaOp, .notification = notificationOp, .core_command = coreCommandOp };
+        return .{ .ctx = self, .spawn = spawnOp, .terminate = terminateOp, .write_input = writeInputOp, .resize = resizeOp, .snapshot = snapshotOp, .delta = deltaOp, .notification = notificationOp, .core_command = coreCommandOp, .selected_text = selectedTextOp };
     }
 
     fn spawnOp(ctx: *anyopaque, params: server.RuntimeSpawnParams) anyerror!u128 {
@@ -185,6 +185,31 @@ pub const RuntimeManager = struct {
         surface.lockCore(self.io);
         defer surface.unlockCore(self.io);
         core_command.apply(&surface.core, cmd);
+    }
+
+    /// 원격 client가 보낸 뷰포트 선택 span을 host core에 적용해 텍스트를 뽑는다(§6b 원격 선택 복사). **로컬과 같은
+    /// `extractSelection`** 을 재사용하므로 soft-wrap 이음·블록·스크롤백 걸친 선택까지 충실하다(선택 의미론 단일 출처). host
+    /// core의 선택은 평소 미사용(client가 렌더용 span 소유)이라 **core lock 아래 transient set-extract-clear**가 안전하다.
+    /// span의 뷰포트 좌표는 host의 현재 view_offset 기준으로 abs 변환된다(selectionStart/Extend가 내부에서). JSON `{text}`(임의
+    /// 바이트라 실 encoder로 escape). 추출 실패/빈 선택은 `{text:""}`.
+    fn selectedTextOp(ctx: *anyopaque, runtime_id: u128, span: server.SelectSpan, allocator: std.mem.Allocator) anyerror![]u8 {
+        const self: *RuntimeManager = @ptrCast(@alignCast(ctx));
+        const handle = self.handleFor(runtime_id) orelse return error.RuntimeNotFound;
+        const surface = self.backend_impl.surfaceFor(handle) orelse return error.RuntimeNotFound;
+        surface.lockCore(self.io);
+        defer surface.unlockCore(self.io);
+        surface.core.selectionStart(span.sr, span.sc);
+        if (span.block) surface.core.setSelectionBlock(true);
+        surface.core.selectionExtend(span.er, span.ec);
+        const extracted = surface.core.extractSelection(allocator) catch null;
+        defer if (extracted) |e| allocator.free(e);
+        surface.core.selectionClear(); // transient — host core 선택 원복.
+        const text: []const u8 = extracted orelse "";
+        var out: std.Io.Writer.Allocating = .init(allocator);
+        defer out.deinit();
+        var js: std.json.Stringify = .{ .writer = &out.writer, .options = .{} };
+        js.write(.{ .text = text }) catch return error.OutOfMemory;
+        return allocator.dupe(u8, out.written()) catch return error.OutOfMemory;
     }
 
     /// runtime_id → in-process handle. registry entry의 opaque 슬롯에서 되읽는다(spawn이 심어 둔 값). 없으면 null.

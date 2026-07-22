@@ -944,10 +944,64 @@ pub export fn maru_macos_app_session_file_panel_entry(
     const info = app_session.filePanelEntryInfo(surface_id) orelse return 0;
     if (out_path) |p| p.* = info.path.ptr;
     if (out_len) |p| p.* = info.path.len;
+    // text·svg는 markdown과 같은 신뢰 config(1)로 태우고, 소스 CM6 언어·svg 프리뷰 선택은 file_panel_language의
+    // `?lang=`과 file_panel_shell_kind의 `?kind=svg` 힌트가 맡는다(§2.2·§2.3). Swift의 filePanelKind==1 신뢰 분기를 안 건드린다.
     return switch (info.kind) {
-        .markdown => 1,
+        .markdown, .text, .svg => 1,
         .html => 2,
     };
+}
+
+/// 신뢰 shell surface의 shell-kind 힌트(§2.3). svg면 "svg"를 out에 쓰고 1을 반환한다(Swift가 shell URL에 `?kind=svg`
+/// 추가 → bootShell이 read 프리뷰+xml 소스 두 모드로 동작). markdown/text/html이거나 도크 아니면 0(out 비움).
+pub export fn maru_macos_app_session_file_panel_shell_kind(
+    session: ?*AppSession,
+    surface_id: u64,
+    out_ptr: ?*?[*]const u8,
+    out_len: ?*usize,
+) u32 {
+    if (out_ptr) |p| p.* = null;
+    if (out_len) |p| p.* = 0;
+    const app_session = session orelse return 0;
+    const info = app_session.filePanelEntryInfo(surface_id) orelse return 0;
+    if (info.kind != .svg) return 0;
+    const token = "svg";
+    if (out_ptr) |p| p.* = token.ptr;
+    if (out_len) |p| p.* = token.len;
+    return 1;
+}
+
+/// text kind surface의 CM6 하이라이트 언어 wire 이름을 반환한다(§2.2). markdown/html이거나 도크 파일이 아니면
+/// 0을 반환하고 out을 비운다(→ Swift는 기존 markdown shell URL을 그대로 쓴다). 반환 문자열은 static이라 borrow다.
+pub export fn maru_macos_app_session_file_panel_language(
+    session: ?*AppSession,
+    surface_id: u64,
+    out_ptr: ?*?[*]const u8,
+    out_len: ?*usize,
+) u32 {
+    if (out_ptr) |p| p.* = null;
+    if (out_len) |p| p.* = 0;
+    const app_session = session orelse return 0;
+    const language = app_session.filePanelLanguage(surface_id) orelse return 0;
+    const name = language.wireName();
+    if (out_ptr) |p| p.* = name.ptr;
+    if (out_len) |p| p.* = name.len;
+    return 1;
+}
+
+/// 현재 터미널 색상 테마에서 파생한 text 소스 편집기 syntax 색(§2.3)을 `--maru-syntax-*` CSS 변수로 설정하는
+/// JS 스니펫을 out에 쓴다. 신뢰 shell webview가 로드된 뒤·테마 변경 시 Swift가 evaluateJavaScript로 실행한다.
+/// 반환=쓴 바이트 수(0=세션 없음/버퍼 부족). 색은 검증된 #RRGGBB라 주입 위험이 없다.
+pub export fn maru_macos_app_session_syntax_style_js(
+    session: ?*AppSession,
+    out_ptr: ?[*]u8,
+    out_cap: usize,
+) usize {
+    const app_session = session orelse return 0;
+    const op = out_ptr orelse return 0;
+    const colors = maru.session.syntax_theme.fromTheme(app_session.appearance.theme);
+    const js = maru.session.syntax_theme.writeCssVarsJs(colors, op[0..out_cap]) orelse return 0;
+    return js.len;
 }
 
 pub export fn maru_macos_app_session_file_panel_mode(session: ?*AppSession, surface_id: u64) i32 {

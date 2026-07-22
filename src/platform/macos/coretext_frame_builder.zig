@@ -771,12 +771,10 @@ pub fn buildFileDockChromeDrawList(
         if (dock_layout.headerCellLayout(cols, active_dirty, active_external_change)) |header| {
             if (header.control_start > 1)
                 _ = try appendEllipsizedTitle(allocator, &cells, active_path, 1, 1, header.control_start, .{ .foreground = fg }, false, .head);
-            if (active_kind == .markdown) {
-                inline for (dock_layout.header_modes) |descriptor| {
-                    const range = dock_layout.headerModeCellRange(header, descriptor.mode).?;
-                    if (range.end > range.start + 1)
-                        _ = try appendEllipsizedTitle(allocator, &cells, descriptor.label, 1, range.start + 1, range.end, .{ .foreground = active_fg, .bold = active_mode == descriptor.mode }, false, .head);
-                }
+            for (dock_layout.modesForKind(active_kind)) |descriptor| {
+                const range = dock_layout.headerModeCellRange(header, active_kind, descriptor.mode) orelse continue;
+                if (range.end > range.start + 1)
+                    _ = try appendEllipsizedTitle(allocator, &cells, descriptor.label, 1, range.start + 1, range.end, .{ .foreground = active_fg, .bold = active_mode == descriptor.mode }, false, .head);
             }
             if (header.dirty_col) |col|
                 try cells.append(allocator, .{ .row = 1, .col = col, .codepoint = 0x25CF, .width = 1, .style = .{ .foreground = active_fg } }); // ●

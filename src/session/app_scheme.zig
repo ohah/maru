@@ -17,8 +17,16 @@ const std = @import("std");
 /// `maru-app://` 응답에 항상 붙이는 엄격 CSP(§7.1 ③). 외부 네트워크는 닫고, iframe은 FP4의 bridge-free renderer
 /// exact origin(`maru-app://render`) 하나만 허용한다. renderer frame은
 /// `sandbox=allow-scripts allow-same-origin`이지만 app/render host가 달라 shell과 cross-origin이고,
-/// 브리지 handler는 main-frame `maru-app://app`의 port 없는 origin만 받는다. `'unsafe-inline'`·외부 CDN은 열지 않는다.
-pub const app_csp_header = "default-src 'none'; script-src 'self'; worker-src 'self'; img-src 'self' data:; style-src 'self' 'sha256-Xeh9es1AoJEyNnawqxMjG30+czqjDUSJ+JDkbXALfVg='; connect-src 'none'; frame-src maru-app://render; base-uri 'none'; form-action 'none'";
+/// 브리지 handler는 main-frame `maru-app://app`의 port 없는 origin만 받는다. 외부 CDN·script inline은 열지 않는다.
+///
+/// **style-src 'unsafe-inline'는 app origin만 허용(FP12b, 사용자 결정 2026-07-22)**: CodeMirror 6는 `syntaxHighlighting`
+/// 등 테마·하이라이트를 style-mod StyleModule의 **런타임 `<style>` 주입**으로 넣는데, 그 내용은 URL도 고정 hash도
+/// 아니라 CSP `'self'`/hash로 허용할 수 없다(WebKit이 "Refused to apply a stylesheet"로 차단 — text/code 소스
+/// 에디터 하이라이트가 전부 기본색이 되던 근본원인). app origin은 **우리 번들만** 실행하고 파일 내용은 CM6 `Text`
+/// 문서로만 들어가(HTML/CSS로 shell DOM에 삽입되지 않음, §7) CSS 주입 벡터가 없으므로 `'unsafe-inline'`이 안전하다.
+/// **render origin은 md 파생·비신뢰 HTML을 materialize하므로 strict style-src(hash 핀)를 그대로 유지**해 sanitizer
+/// 우회 시 style 주입을 막는다. 'unsafe-inline'가 있으면 hash는 무시되므로(CSP 규약) app에서는 hash를 뺀다.
+pub const app_csp_header = "default-src 'none'; script-src 'self'; worker-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; connect-src 'none'; frame-src maru-app://render; base-uri 'none'; form-action 'none'";
 pub const render_csp_header = "default-src 'none'; script-src 'self'; worker-src 'none'; img-src 'self' data:; style-src 'self' 'sha256-Xeh9es1AoJEyNnawqxMjG30+czqjDUSJ+JDkbXALfVg='; connect-src 'none'; frame-src 'none'; base-uri 'none'; form-action 'none'";
 
 pub const AppAssetRole = enum(u32) {
@@ -336,11 +344,15 @@ test "validateAppPath: TooLong(out 버퍼 초과) 방어" {
 test "CSP: both roles close network and only app may frame the renderer" {
     inline for (.{ app_csp_header, render_csp_header }) |csp| {
         try testing.expect(std.mem.indexOf(u8, csp, "connect-src 'none'") != null);
-        try testing.expect(std.mem.indexOf(u8, csp, "'sha256-Xeh9es1AoJEyNnawqxMjG30+czqjDUSJ+JDkbXALfVg='") != null);
-        try testing.expect(std.mem.indexOf(u8, csp, "unsafe-inline") == null);
         try testing.expect(std.mem.indexOf(u8, csp, "http:") == null);
         try testing.expect(std.mem.indexOf(u8, csp, "https:") == null);
+        try testing.expect(std.mem.indexOf(u8, csp, "script-src 'self'") != null); // script는 양쪽 다 'self'만
     }
+    // style-src 정책 분기(FP12b): app은 CM6 StyleModule 때문에 'unsafe-inline'(hash 무의미→제거), render는 strict hash 유지.
+    try testing.expect(std.mem.indexOf(u8, app_csp_header, "style-src 'self' 'unsafe-inline'") != null);
+    try testing.expect(std.mem.indexOf(u8, app_csp_header, "sha256-") == null);
+    try testing.expect(std.mem.indexOf(u8, render_csp_header, "'sha256-Xeh9es1AoJEyNnawqxMjG30+czqjDUSJ+JDkbXALfVg='") != null);
+    try testing.expect(std.mem.indexOf(u8, render_csp_header, "unsafe-inline") == null);
     try testing.expect(std.mem.indexOf(u8, app_csp_header, "frame-src maru-app://render") != null);
     try testing.expect(std.mem.indexOf(u8, render_csp_header, "frame-src 'none'") != null);
 }

@@ -522,21 +522,29 @@ describe("live preview atomic frame budget", () => {
           for (let turn = 0; turn < 4; turn += 1) await Promise.resolve();
         };
 
+        // 각 재projection을 새 documentRevision(내용 편집)으로 모델링한다. isReusable 재사용은 같은 revision·range의
+        // in-flight 위젯을 이어 붙이므로(gen-thrash 무한 루프 방지 — 렌더 전 위젯이 매 gen마다 파기되지 않게 함),
+        // 서로 다른 mermaid source는 실제 편집(revision 증가)으로 렌더된다. Mermaid 캐시는 sourceHash 키라 collision
+        // 병합·9번째 eviction 동작은 revision과 무관하게 그대로 검증된다.
+        const nextEdit = () => {
+          revisions.documentChanged();
+          identity = revisions.nextProjection();
+        };
         const collisionHash = "c".repeat(64);
         await project(source("collision-a"), collisionHash);
-        identity = revisions.nextProjection();
+        nextEdit();
         controller.submitEntries(identity.documentRevision, identity.projectionGeneration, [entry]);
         await project(source("collision-b"), collisionHash);
         expect(renderedSources).toHaveLength(2);
 
         for (let index = 1; index <= 8; index += 1) {
-          identity = revisions.nextProjection();
+          nextEdit();
           controller.submitEntries(identity.documentRevision, identity.projectionGeneration, [
             entry,
           ]);
           await project(source(`unique-${index}`), index.toString(16).repeat(64));
         }
-        identity = revisions.nextProjection();
+        nextEdit();
         controller.submitEntries(identity.documentRevision, identity.projectionGeneration, [entry]);
         await project(source("collision-b"), collisionHash);
         expect(renderedSources).toHaveLength(11);
@@ -943,13 +951,18 @@ describe("live preview atomic frame budget", () => {
           worker.reply({
             type: "result",
             editorEpoch: 20,
-            documentRevision: 0,
+            documentRevision: identity.documentRevision,
             projectionGeneration: identity.projectionGeneration,
             results: [imageProjection(project.requests[0], cycle)],
             rejected: [],
           });
           for (let turn = 0; turn < 3; turn += 1) await Promise.resolve();
           if (cycle < 65) {
+            // 각 사이클을 새 documentRevision(내용 편집)으로 모델링한다. isReusable 재사용은 같은 revision·range의
+            // in-flight 위젯을 이어 붙이므로(gen-thrash 무한 루프 방지 — 렌더 전 위젯이 매 projection마다 파기되지
+            // 않게 함), asset admission 재검증은 실제 편집(revision 증가)마다 일어난다. 이 배치-스코프 admission이
+            // editor-lifetime 한도에 누적되지 않고 65회 반복 admit됨을 검증한다.
+            revisions.documentChanged();
             identity = revisions.nextProjection();
             controller.submitEntries(identity.documentRevision, identity.projectionGeneration, [
               entry,

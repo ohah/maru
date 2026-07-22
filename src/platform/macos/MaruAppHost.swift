@@ -2702,6 +2702,11 @@ final class MaruWebPanelView: NSView {
     // FP5 도크 파일 종류: 0=워크스페이스 browser, 1=도크 markdown, 2=도크 html. panelKind은 기존 trust ABI를
     // 유지하고, 이 값이 browser와 같은 untrusted panelKind을 쓰는 로컬 HTML을 구별한다.
     let filePanelKind: UInt32
+    // FP12: text kind면 CM6 소스 문법 wire 토큰("json"·"python"…), svg면 "xml", markdown/html은 nil. 신뢰 shell URL에
+    // `?lang=`으로 실려 web bootShell이 소스 편집기 문법을 고르게 한다(§2.2). 토큰은 Zig enum @tagName이라 [a-z] ASCII다.
+    let filePanelLanguage: String?
+    // FP13: svg면 "svg"(shell URL `?kind=svg` → read 프리뷰+xml 소스 두 모드), 그 외 nil(§2.3).
+    let filePanelShellKind: String?
     let pinnedFileHTMLURL: URL?
     private(set) var fileHTMLReadAccessURL: URL?
     // 5b: 신뢰 패널의 브리지 isolated world(page-world와 격리, window.maru 주입처). 비신뢰=nil. 스모크 격리 probe에 쓴다.
@@ -2825,10 +2830,12 @@ final class MaruWebPanelView: NSView {
 
     func clearConsoleBuffer() { consoleBuffer.removeAll() }
 
-    init(frame frameRect: NSRect, surfaceId: UInt64, panelKind: UInt32, filePanelKind: UInt32, filePanelPath: String?, controller: MaruAppHostController) {
+    init(frame frameRect: NSRect, surfaceId: UInt64, panelKind: UInt32, filePanelKind: UInt32, filePanelPath: String?, filePanelLanguage: String?, filePanelShellKind: String?, controller: MaruAppHostController) {
         self.surfaceId = surfaceId
         self.panelKind = panelKind
         self.filePanelKind = filePanelKind
+        self.filePanelLanguage = filePanelLanguage
+        self.filePanelShellKind = filePanelShellKind
         self.pinnedFileHTMLURL = filePanelKind == 2 ? filePanelPath.map { URL(fileURLWithPath: $0) } : nil
         // 트러스트 분기(5c-2c): markdown(0)=신뢰만 maru-app:// 스킴 핸들러를 config에 등록하고 신뢰 UI를 로드한다.
         // browser(1)=비신뢰엔 스킴 핸들러를 **애초에 등록하지 않는다**(origin 위장 탈취 1차 차단, §7 ④). 핸들러는
@@ -2865,7 +2872,7 @@ final class MaruWebPanelView: NSView {
             config.userContentController.addScriptMessageHandler(MaruBridgeHandler(surfaceId: surfaceId, controller: controller), contentWorld: world, name: "maru")
             config.userContentController.addUserScript(WKUserScript(source: MaruBridgeHandler.shim, injectionTime: .atDocumentStart, forMainFrameOnly: true, in: world))
             bridgeWorldLocal = world
-            appURL = URL(string: "\(MaruAppSchemeHandler.scheme)://app/index.html?document=1") // query는 origin을 바꾸지 않는다.
+            appURL = Self.trustedShellURL(document: 1, language: filePanelLanguage, shellKind: filePanelShellKind) // query는 origin을 바꾸지 않는다.
         }
         self.webView = WKWebView(frame: NSRect(origin: .zero, size: frameRect.size), configuration: config)
         if filePanelKind == 1, #available(macOS 12.0, *) {
@@ -2918,9 +2925,19 @@ final class MaruWebPanelView: NSView {
         webView.loadFileURL(url, allowingReadAccessTo: access)
     }
 
+    // 신뢰 shell(markdown·text·svg) 문서 URL. `&lang=`은 소스 편집기 문법, `&kind=svg`는 svg의 read 프리뷰+소스 두
+    // 모드를 고르게 한다(§2.2·§2.3). 토큰은 Zig enum @tagName([a-z] ASCII)라 query 인코딩이 불필요하고, `document`
+    // 파서(trustedDocumentId)는 name 필터라 무영향.
+    private static func trustedShellURL(document: UInt64, language: String?, shellKind: String?) -> URL? {
+        var query = "document=\(document)"
+        if let language { query += "&lang=\(language)" }
+        if let shellKind { query += "&kind=\(shellKind)" }
+        return URL(string: "\(MaruAppSchemeHandler.scheme)://app/index.html?\(query)")
+    }
+
     private func loadFreshTrustedDocument() -> Bool {
         guard filePanelKind == 1, trustedDocumentId < Self.maxTrustedDocumentId,
-              let url = URL(string: "\(MaruAppSchemeHandler.scheme)://app/index.html?document=\(trustedDocumentId + 1)")
+              let url = Self.trustedShellURL(document: trustedDocumentId + 1, language: filePanelLanguage, shellKind: filePanelShellKind)
         else { return false }
         trustedDocumentId += 1
         webView.load(URLRequest(url: url))
@@ -2933,6 +2950,19 @@ final class MaruWebPanelView: NSView {
         guard values.count == 1, let raw = values[0].value, let value = UInt64(raw),
               value > 0, value <= Self.maxTrustedDocumentId else { return nil }
         return value
+    }
+
+    // §2.3: 현재 터미널 색상 테마에서 파생한 text 소스 편집기 syntax 색을 `--maru-syntax-*` CSS 변수로 shell에 주입한다.
+    // 신뢰 shell(text/markdown)에만 적용하고, CSS 변수라 이미 마운트된 CM6 span도 즉시 재도색된다(app.css 폴백 위에 override).
+    func applySyntaxThemeStyle() {
+        guard filePanelKind == 1, let session = controller?.bridgeSession(for: surfaceId) else { return }
+        var buf = [UInt8](repeating: 0, count: 1024)
+        let n = buf.withUnsafeMutableBufferPointer { p -> Int in
+            maru_macos_app_session_syntax_style_js(session, p.baseAddress, p.count)
+        }
+        guard n > 0, n <= buf.count else { return }
+        let js = String(decoding: buf[0 ..< n], as: UTF8.self)
+        webView.evaluateJavaScript(js, in: nil, in: .page) { _ in }
     }
 
     func applyFilePanelMode(_ rawMode: Int32) {
@@ -3181,6 +3211,8 @@ final class MaruWebPanelView: NSView {
         self.surfaceId = surfaceId
         self.panelKind = 1
         self.filePanelKind = 0
+        self.filePanelLanguage = nil // 팝업 browser는 신뢰 shell/text가 아니다.
+        self.filePanelShellKind = nil
         self.pinnedFileHTMLURL = nil
         self.bridgeWorld = nil // browser=브리지 없음(신뢰 전용)
         configuration.userContentController.addUserScript(WKUserScript(
@@ -3493,6 +3525,7 @@ extension MaruWebPanelView: WKNavigationDelegate {
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         if filePanelKind == 1 {
             livePreviewPageReady = true
+            applySyntaxThemeStyle()
             applyFilePanelMode(requestedFileMode)
             controller?.livePreviewNavigationDidFinish(surfaceId)
             resumeFileDirtySyncIfPending()
@@ -4694,6 +4727,23 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         }
         if let session = quick?.appSession {
             _ = maru_macos_app_session_set_system_appearance(session, dark)
+        }
+        // follow-system이면 위 set_system_appearance가 테마 색을 바꿨을 수 있으므로 열린 소스 편집기 syntax 색도 갱신.
+        refreshFilePanelSyntaxTheme()
+    }
+
+    // §2.3: 터미널 테마 변경 시 열린 모든 신뢰 shell(text/markdown)의 syntax 색을 다시 주입한다. CSS 변수라
+    // 마운트된 CM6도 즉시 재도색된다. reload/reset/follow-system appearance 등 테마가 바뀌는 경로에서 호출한다.
+    func refreshFilePanelSyntaxTheme() {
+        for surface in windows {
+            for panel in surface.webPanels.values where panel.filePanelKind == 1 {
+                panel.applySyntaxThemeStyle()
+            }
+        }
+        if let quick = quick {
+            for panel in quick.webPanels.values where panel.filePanelKind == 1 {
+                panel.applySyntaxThemeStyle()
+            }
         }
     }
 
@@ -7325,12 +7375,30 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                     let filePanelPath = filePathPtr.map {
                         String(decoding: UnsafeBufferPointer(start: $0, count: filePathLen), as: UTF8.self)
                     }
+                    var langPtr: UnsafePointer<UInt8>? = nil
+                    var langLen: size_t = 0
+                    let hasLang = maru_macos_app_session_file_panel_language(
+                        session, t.surface_id, &langPtr, &langLen
+                    )
+                    let filePanelLanguage: String? = (hasLang == 1) ? langPtr.map {
+                        String(decoding: UnsafeBufferPointer(start: $0, count: langLen), as: UTF8.self)
+                    } : nil
+                    var shellKindPtr: UnsafePointer<UInt8>? = nil
+                    var shellKindLen: size_t = 0
+                    let hasShellKind = maru_macos_app_session_file_panel_shell_kind(
+                        session, t.surface_id, &shellKindPtr, &shellKindLen
+                    )
+                    let filePanelShellKind: String? = (hasShellKind == 1) ? shellKindPtr.map {
+                        String(decoding: UnsafeBufferPointer(start: $0, count: shellKindLen), as: UTF8.self)
+                    } : nil
                     let v = MaruWebPanelView(
                         frame: frame,
                         surfaceId: t.surface_id,
                         panelKind: t.panel_kind,
                         filePanelKind: filePanelKind,
                         filePanelPath: filePanelPath,
+                        filePanelLanguage: filePanelLanguage,
+                        filePanelShellKind: filePanelShellKind,
                         controller: self
                     )
                     v.seamEdges = t.seam_edges // divider grab 통과용(hitTest) — 어느 가장자리가 divider에 맞닿나.
@@ -7597,8 +7665,16 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         panel.canChooseFiles = true
         panel.canChooseDirectories = false
         panel.allowsMultipleSelection = false
-        panel.allowedContentTypes = ["md", "html"].compactMap { UTType(filenameExtension: $0) }
-        panel.message = "도크에서 열 Markdown 또는 HTML 파일을 고르세요"
+        // openKindForPath(file_panel_bridge.zig)의 지원 확장자를 미러한다(§2.2·§6). picker는 편의 필터일 뿐이고
+        // ABI 경계가 kind·regular-file·용량을 다시 검증하므로 여기가 다소 관대해도 안전하다. 미러가 드리프트하면
+        // 지원 파일이 picker에서 회색으로 보일 뿐이다.
+        panel.allowedContentTypes = [
+            "md", "html", // markdown·html
+            "txt", "text", "log", "json", // text: plain·json
+            "js", "mjs", "cjs", "jsx", "ts", "mts", "cts", "tsx", // text: javascript/typescript
+            "py", "css", "scss", "sass", "less", "xml", "yaml", "yml", // text: python·css·xml·yaml
+        ].compactMap { UTType(filenameExtension: $0) }
+        panel.message = "도크에서 열 파일을 고르세요 (Markdown·HTML·텍스트/코드)"
         guard panel.runModal() == .OK, let path = panel.url?.path else { return }
         let bytes = Array(path.utf8)
         let result = bytes.withUnsafeBufferPointer { p in
@@ -8168,6 +8244,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         _ = maru_macos_app_session_reload_config(session)
         // reload가 keybind를 바꾸면 Zig가 rebuildCommandCatalog로 command_catalog_dirty를 세운다 → 다음 tick의 drainMenuDirty가
         // 메뉴바를 다시 빌드한다(여기서 동기 호출하지 않는다 — reset/인앱 경로와 단일 경로로 통일, 멀티창 활성 세션 정합).
+        refreshFilePanelSyntaxTheme() // 테마·palette가 바뀌었을 수 있으므로 열린 소스 편집기 syntax 색 갱신(§2.3).
     }
 
     /// view options에서 sidebar 토글(show-branch/show-folder)을 바꿨을 때, 갱신된 config 텍스트를 받아 config

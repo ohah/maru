@@ -215,6 +215,18 @@ pub const RemoteTermBackend = struct {
         }
     }
 
+    /// 원격 Term을 **terminate 없이** 회수한다(§6 app-quit=detach, e3-6). `remove`와 대칭이되 host `runtime.terminate`를 안
+    /// 보낸다 — 라우팅 link를 떼고 client-side rr만 free하므로 runtime이 host에 남아 재접속 대상이 된다(연결이 닫히면 host가
+    /// controller를 detach로 처리해 유지). 앱 quit 시 host-backed Term에 쓴다(윈도우/탭 명시 close는 `remove`=terminate).
+    /// **vtable 밖** — app_session deinit이 app_quitting일 때 직접 부른다.
+    pub fn detachTerm(self: *RemoteTermBackend, handle: RuntimeHandle) void {
+        if (self.runtimes.fetchRemove(handle)) |kv| {
+            self.surface_runtime.detachSurface(handle);
+            kv.value.detachClientSide(); // surface/remote_screen만 회수 — terminate 안 함(runtime 생존).
+            self.allocator.destroy(kv.value);
+        }
+    }
+
     fn foregroundProcessGroup(ctx: *anyopaque, handle: RuntimeHandle) ?i32 {
         _ = ctx;
         _ = handle;

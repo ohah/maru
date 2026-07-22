@@ -192,8 +192,10 @@ pub fn appendBoolFields(arena: std.mem.Allocator, config: theme.Config, list: *s
         inline for (@typeInfo(@TypeOf(theme.Config.schema)).@"struct".fields) |sf| {
             if (@TypeOf(@field(config, sf.name)) == bool) {
                 const meta: theme.Meta = @field(theme.Config.schema, sf.name);
-                const full_key = comptime topKey(sf.name, meta);
-                try list.append(arena, .{ .key = full_key, .doc = meta.doc, .value = @field(config, sf.name), .section = meta.section });
+                if (!meta.hidden) {
+                    const full_key = comptime topKey(sf.name, meta);
+                    try list.append(arena, .{ .key = full_key, .doc = meta.doc, .value = @field(config, sf.name), .section = meta.section });
+                }
             }
         }
     }
@@ -204,8 +206,10 @@ pub fn appendBoolFields(arena: std.mem.Allocator, config: theme.Config, list: *s
             inline for (@typeInfo(@TypeOf(sch)).@"struct".fields) |sf| {
                 if (@TypeOf(@field(@field(config, cf.name), sf.name)) == bool) {
                     const meta: theme.Meta = @field(sch, sf.name);
-                    const full_key = comptime keyOf(cf.name, sf.name, meta);
-                    try list.append(arena, .{ .key = full_key, .doc = meta.doc, .value = @field(@field(config, cf.name), sf.name), .section = meta.section });
+                    if (!meta.hidden) {
+                        const full_key = comptime keyOf(cf.name, sf.name, meta);
+                        try list.append(arena, .{ .key = full_key, .doc = meta.doc, .value = @field(@field(config, cf.name), sf.name), .section = meta.section });
+                    }
                 }
             }
         }
@@ -275,6 +279,7 @@ fn appendNumberField(arena: std.mem.Allocator, config: theme.Config, comptime C:
     const FieldT = @TypeOf(@field(config, sf.name));
     if (FieldT != f32 and FieldT != u32) return;
     const meta: theme.Meta = @field(sch, sf.name);
+    if (meta.hidden) return; // 설정 GUI 숨김(code-review #8) — 파일 저장/파싱은 appendSerialized가 그대로.
     const r = comptime (meta.range orelse @compileError(full_key ++ ": 숫자 필드엔 range 필수"));
     const v: f64 = if (FieldT == u32) @floatFromInt(@field(config, sf.name)) else @field(config, sf.name);
     try list.append(arena, .{ .key = full_key, .doc = meta.doc, .value = v, .min = r[0], .max = r[1], .is_int = FieldT == u32, .section = meta.section });
@@ -286,6 +291,7 @@ fn appendNumberFieldSub(arena: std.mem.Allocator, config: theme.Config, comptime
     const FieldT = @TypeOf(@field(@field(config, cf.name), sf.name));
     if (FieldT != f32 and FieldT != u32) return;
     const meta: theme.Meta = @field(sch, sf.name);
+    if (meta.hidden) return; // 설정 GUI 숨김(code-review #8) — 파일 저장/파싱은 appendSerialized가 그대로.
     const r = comptime (meta.range orelse @compileError(full_key ++ ": 숫자 필드엔 range 필수"));
     const v: f64 = if (FieldT == u32) @floatFromInt(@field(@field(config, cf.name), sf.name)) else @field(@field(config, cf.name), sf.name);
     try list.append(arena, .{ .key = full_key, .doc = meta.doc, .value = v, .min = r[0], .max = r[1], .is_int = FieldT == u32, .section = meta.section });
@@ -348,6 +354,7 @@ pub fn appendEnumFields(arena: std.mem.Allocator, config: theme.Config, list: *s
 fn appendEnumField(arena: std.mem.Allocator, value: anytype, comptime meta: theme.Meta, comptime full_key: []const u8, list: *std.ArrayList(EnumField)) !void {
     const T = @TypeOf(value);
     if (@typeInfo(T) != .@"enum") return;
+    if (meta.hidden) return; // 설정 GUI 숨김(code-review #8) — 파일 저장/파싱은 appendSerialized가 그대로.
     // current는 정적 @tagName(소유/해제 불요 — 핸들러가 self.allocator로 호출해도 누수 없음). 표시 토큰의 '_'→'-'
     // 변환(config 규약)은 표시 시점(dropdown.view, frame arena)에 한다 — 여기서 dupe하면 핸들러 경로가 누수된다.
     try list.append(arena, .{ .key = full_key, .doc = meta.doc, .current = @tagName(value), .section = meta.section });
@@ -541,7 +548,7 @@ pub fn appendTextFields(arena: std.mem.Allocator, config: theme.Config, list: *s
         inline for (@typeInfo(@TypeOf(theme.Config.schema)).@"struct".fields) |sf| {
             if (@TypeOf(@field(config, sf.name)) == []const u8) {
                 const meta: theme.Meta = @field(theme.Config.schema, sf.name);
-                if (meta.widget == .text) {
+                if (meta.widget == .text and !meta.hidden) { // hidden=설정 GUI 숨김(code-review #8)
                     const full_key = comptime topKey(sf.name, meta);
                     try list.append(arena, .{ .key = full_key, .doc = meta.doc, .value = @field(config, sf.name), .section = meta.section });
                 }
@@ -555,7 +562,7 @@ pub fn appendTextFields(arena: std.mem.Allocator, config: theme.Config, list: *s
             inline for (@typeInfo(@TypeOf(sch)).@"struct".fields) |sf| {
                 if (@TypeOf(@field(@field(config, cf.name), sf.name)) == []const u8) {
                     const meta: theme.Meta = @field(sch, sf.name);
-                    if (meta.widget == .text) {
+                    if (meta.widget == .text and !meta.hidden) { // hidden=설정 GUI 숨김(code-review #8)
                         const full_key = comptime keyOf(cf.name, sf.name, meta);
                         try list.append(arena, .{ .key = full_key, .doc = meta.doc, .value = @field(@field(config, cf.name), sf.name), .section = meta.section });
                     }
@@ -584,7 +591,7 @@ pub fn appendColorFields(arena: std.mem.Allocator, config: theme.Config, list: *
         inline for (@typeInfo(@TypeOf(theme.Config.schema)).@"struct".fields) |sf| {
             if (@TypeOf(@field(config, sf.name)) == []const u8) {
                 const meta: theme.Meta = @field(theme.Config.schema, sf.name);
-                if (meta.widget == .color) {
+                if (meta.widget == .color and !meta.hidden) { // hidden=설정 GUI 숨김(code-review #8)
                     const full_key = comptime topKey(sf.name, meta);
                     try list.append(arena, .{ .key = full_key, .doc = meta.doc, .value = @field(config, sf.name), .section = meta.section });
                 }
@@ -598,7 +605,7 @@ pub fn appendColorFields(arena: std.mem.Allocator, config: theme.Config, list: *
             inline for (@typeInfo(@TypeOf(sch)).@"struct".fields) |sf| {
                 if (@TypeOf(@field(@field(config, cf.name), sf.name)) == []const u8) {
                     const meta: theme.Meta = @field(sch, sf.name);
-                    if (meta.widget == .color) {
+                    if (meta.widget == .color and !meta.hidden) { // hidden=설정 GUI 숨김(code-review #8)
                         const full_key = comptime keyOf(cf.name, sf.name, meta);
                         try list.append(arena, .{ .key = full_key, .doc = meta.doc, .value = @field(@field(config, cf.name), sf.name), .section = meta.section });
                     }
@@ -1010,6 +1017,11 @@ test "schema appendBoolFields/setBool: bool 필드만 열거하고 키로 설정
         if (std.mem.eql(u8, f.key, "text.blink")) saw_text_blink = true;
     }
     try std.testing.expect(saw_cursor_blink and saw_text_blink);
+
+    // code-review #8: hidden 필드(session.keep-alive-after-quit)는 설정 GUI 행 목록에 **안** 나온다(config 파일로만 편집).
+    // section=null만으론 "기타" 그룹에 노출되므로 Meta.hidden=true로 append*Fields가 건너뛴다. 파일 저장/파싱(loader
+    // round-trip 테스트)은 그대로라 config로는 켤 수 있다.
+    for (list.items) |f| try std.testing.expect(!std.mem.eql(u8, f.key, "session.keep-alive-after-quit"));
 
     // setBool: 키로 flip.
     try std.testing.expect(setBool(&cfg, "cursor.blink", false));

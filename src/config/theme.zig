@@ -31,6 +31,10 @@ pub const Meta = struct {
     /// GUI 위젯(.auto면 타입에서 유추: bool→toggle, enum→dropdown, f32→number, color→color, []const u8→text).
     widget: Widget = .auto,
     section: ?Section = null,
+    /// **설정 GUI에서 숨김**(config 파일로만 편집). true면 append*Fields(세팅 폼 행·좌측 섹션 네비 소스)가 이 필드를 건너뛴다
+    /// — section 유무와 무관(section=null은 "기타" 그룹에 노출될 뿐 숨김이 아니다, code-review #8). 파일 저장/파싱(appendSerialized·
+    /// parseAndSet)은 그대로라 config 파일로는 켤 수 있다. 미완성·실험 opt-in을 일반 사용자 UI에서 가리는 데 쓴다.
+    hidden: bool = false,
     /// text 필드가 **절대경로**를 요구하는지(예: shell.command). true면 파일 파싱(parseAndSet)이 비절대(`~`·상대)
     /// 값을 diagnostic + 기본값 유지로 거른다 — GUI·파일이 같은 "절대경로" 규칙을 쓰게 한다(config-gui.md §1
     /// 드리프트 방지). GUI(commitSelectedText)는 저장된 값에 access(X_OK) 안내를 별도로 띄운다.
@@ -729,8 +733,9 @@ pub const SessionConfig = struct {
     keep_alive_after_quit: bool = false,
 
     pub const schema = .{ // 키: session.keep-alive-after-quit (namespace=Config 필드명 session)
-        // section 없음(null) — P4 전 실험적 opt-in이라 설정 UI에 노출하지 않고 config 파일로만 켠다(widget은 bool→toggle 자동).
-        .keep_alive_after_quit = Meta{ .doc = "GUI 종료 후에도 터미널을 host(maru-sessiond)에서 유지·재접속(실험적 opt-in)" },
+        // hidden — 실험적 opt-in(원격 스크롤백/선택 등 미완성 경로)이라 설정 UI에 노출하지 않고 **config 파일로만** 켠다.
+        // section=null만으론 "기타" 그룹에 노출되므로(code-review #8) hidden으로 명시해 append*Fields가 건너뛰게 한다.
+        .keep_alive_after_quit = Meta{ .hidden = true, .doc = "GUI 종료 후에도 터미널을 host(maru-sessiond)에서 유지·재접속(실험적 opt-in)" },
     };
 };
 

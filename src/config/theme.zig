@@ -719,6 +719,21 @@ pub const KeyHintConfig = struct {
     };
 };
 
+/// 영속 터미널 세션(GUI 종료 후 유지) 설정. 단일 host(`maru-sessiond`)가 PTY/자식/화면을 소유해 GUI 종료·크래시에도
+/// 살아남게 한다(§10, docs/persistent-session-host.md). loader가 `session.*` 키로 파싱한다(스키마-주도).
+pub const SessionConfig = struct {
+    /// GUI를 종료해도 터미널 runtime(PTY·자식·화면)을 별도 host에서 유지할지. **기본 false**(현행 — 터미널이 GUI 프로세스
+    /// 소유라 종료 시 함께 죽음). true면 새 Workspace/Term/split/quick terminal을 host(`maru-sessiond`)에 생성해 GUI 종료·
+    /// 크래시에도 살아남고 재실행 시 재접속한다(§10). **P4 종료 gate 완성 전엔 기본값을 바꾸지 않는다**(opt-in — 아직 미완성
+    /// 경로라 실험적). host 연결에 실패하면 조용히 in-process로 폴백한다(host 문제가 GUI를 막지 않는다).
+    keep_alive_after_quit: bool = false,
+
+    pub const schema = .{ // 키: session.keep-alive-after-quit (namespace=Config 필드명 session)
+        // section 없음(null) — P4 전 실험적 opt-in이라 설정 UI에 노출하지 않고 config 파일로만 켠다(widget은 bool→toggle 자동).
+        .keep_alive_after_quit = Meta{ .doc = "GUI 종료 후에도 터미널을 host(maru-sessiond)에서 유지·재접속(실험적 opt-in)" },
+    };
+};
+
 /// quick terminal(전역 토글 오버레이 패널)을 어느 화면에 띄울지. main=주 디스플레이, mouse=마우스 포인터가
 /// 있는 화면(멀티 모니터에서 지금 보는 화면). 실제 NSScreen 선택은 플랫폼(Swift)이 한다.
 pub const QuickTerminalScreen = enum {
@@ -883,6 +898,8 @@ pub const Config = struct {
     sidebar: SidebarConfig = .{},
     /// 단축키 힌트 HUD(모디파이어 홀드 시 활성 pane 우상단에 현재 단축키 표시). loader가 `keyhint.*` 키로 파싱(스키마-주도).
     keyhint: KeyHintConfig = .{},
+    /// 영속 터미널 세션(GUI 종료 후 host에서 유지) 설정. loader가 `session.*` 키로 파싱(스키마-주도).
+    session: SessionConfig = .{},
     /// SGR 5(blink) 글자를 실제로 깜빡일지(true)·정적으로 둘지(false). **기본 false** — 깜빡이는 콘텐츠는 접근성
     /// (WCAG 발작 위험) 우려라 다수 터미널이 기본으로 끈다. loader가 `text.blink` 키로 파싱.
     blink_text: bool = false,

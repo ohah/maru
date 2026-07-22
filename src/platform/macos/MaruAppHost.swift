@@ -852,7 +852,14 @@ final class MaruAppSchemeHandler: NSObject, WKURLSchemeHandler {
         ]
         // 서빙 asset(app 콘텐츠)엔 엄격 CSP를 붙인다(외부 네트워크·iframe·base-uri·form-action 차단). 정적 error page는
         // 활성 콘텐츠가 없어 CSP를 생략한다(위 404 주석 — 인라인 흰 배경이 차단되지 않게).
-        if attachCSP { headers["Content-Security-Policy"] = csp }
+        if attachCSP {
+            headers["Content-Security-Policy"] = csp
+            // asset(bundle.js·app.css·render.html 등)은 앱 수명 동안 불변이므로 WebKit이 캐시하게 한다. 없으면
+            // 커스텀 스킴 응답이 캐시되지 않아, 라이브 프리뷰의 atomic 위젯 iframe마다 bundle.js(≈1.9 MiB)를 단일
+            // serial IO로 매번 다시 읽어, 코드펜스가 많은 큰 문서에서 뒤쪽 위젯이 deadline 안에 못 부팅해 소스로
+            // 폴백하던 것을 없앤다(첫 로드만 느리고 이후는 캐시 히트). 앱 갱신 시 새 WebKit 세션이라 stale 없음.
+            headers["Cache-Control"] = "max-age=3600"
+        }
         guard let resp = HTTPURLResponse(url: url, statusCode: status, httpVersion: "HTTP/1.1", headerFields: headers) else {
             task.didFailWithError(URLError(.cannotParseResponse))
             return

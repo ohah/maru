@@ -20,6 +20,7 @@ const builtin = @import("builtin");
 const maru = @import("maru");
 const client_mod = @import("client.zig");
 const remote_runtime = @import("remote_runtime.zig");
+const core_command = maru.session.core_command; // §6a 원격 스크롤 명령 라우팅
 
 const Surface = maru.session.Surface;
 const term_backend = maru.app.term_runtime_backend;
@@ -277,7 +278,23 @@ pub const RemoteTermBackend = struct {
             .write_input = ioWriteInput,
             .resize_fn = ioResize,
             .write_input_nb = ioWriteInputNonBlocking,
+            .enqueue_command = ioEnqueueCommand, // §6a: 스크롤 core command를 host로 라우팅(원격 스크롤백).
         };
+    }
+
+    /// §6a 원격 스크롤백: SurfaceRuntime.enqueueCoreCommand가 host-backed Term에 부르는 hook. **스크롤 계열만** host로
+    /// 라우팅한다(host가 자기 core view_offset을 바꿔 스크롤백 화면을 투영→RemoteScreen이 렌더). 선택(select_*)·config·IME는
+    /// placeholder core에 적용해도 렌더 안 되므로 **drop**(후속 #6b/config). arg는 signed(scroll delta 음수).
+    fn ioEnqueueCommand(ctx: *anyopaque, cmd: core_command.CoreCommand) anyerror!void {
+        const rr: *RemoteRuntime = @ptrCast(@alignCast(ctx));
+        const max_i64: usize = @intCast(std.math.maxInt(i64)); // usize→i64 방어(스크롤백 abs가 i64 초과=비현실적, 패닉 회피).
+        switch (cmd) {
+            .scroll => |d| try rr.sendCoreCommand("scroll", @intCast(d)),
+            .scroll_to_bottom => try rr.sendCoreCommand("scroll_to_bottom", 0),
+            .scroll_to_abs => |a| try rr.sendCoreCommand("scroll_to_abs", @intCast(@min(a, max_i64))),
+            .scroll_to_offset => |o| try rr.sendCoreCommand("scroll_to_offset", @intCast(@min(o, max_i64))),
+            else => {}, // 선택/config/IME는 후속 — placeholder core는 미렌더라 무시.
+        }
     }
 
     fn ioWriteInput(ctx: *anyopaque, bytes: []const u8) anyerror!void {

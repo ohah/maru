@@ -52,6 +52,10 @@ pub const RuntimeOps = struct {
     /// GUI가 종료된 동안의 알림 — host가 core와 함께 알림을 소유). host가 core lock 아래 읽고 clearNotification한다(off-thread
     /// 동기화, snapshot과 동형). 없으면 `{title:"",body:""}`. caller 소유 바이트.
     notification: *const fn (ctx: *anyopaque, runtime_id: u128, allocator: std.mem.Allocator) anyerror![]u8,
+    /// §6a 원격 스크롤백: 스크롤 core command를 host `TerminalCore`에 적용한다(op=scroll 계열 태그, arg=정수 인자). host가
+    /// view_offset을 바꾸면 다음 snapshot/delta(renderSnapshot=뷰포트)가 그 스크롤 화면을 투영한다. codec 순수성 유지를 위해
+    /// server는 primitive(op 문자열·arg)만 넘기고, runtime_manager가 CoreCommand로 매핑해 적용한다(선택/config는 후속 #6b).
+    core_command: *const fn (ctx: *anyopaque, runtime_id: u128, op: []const u8, arg: i64) anyerror!void,
 };
 
 /// `RuntimeOps.delta` 결과. `send`/`new_base`는 caller 소유이고 **항상 별개 버퍼**다(둘 다 free해도 안전). `send.len==0`이면
@@ -234,6 +238,8 @@ pub const Connection = struct {
             return self.dispatchDetach(frame.header.request_id, params);
         } else if (std.mem.eql(u8, method, "runtime.resync")) {
             return self.dispatchResync(frame.header.request_id, params);
+        } else if (std.mem.eql(u8, method, "runtime.core_command")) {
+            return self.dispatchCoreCommand(frame.header.request_id, params);
         } else if (std.mem.eql(u8, method, "runtime.resize")) {
             return self.dispatchResize(frame.header.request_id, params);
         } else if (std.mem.eql(u8, method, "runtime.notification")) {
@@ -408,6 +414,24 @@ pub const Connection = struct {
         const sub = self.attachments.getPtr(stream) orelse return self.replyError(request_id, .invalid_request);
         sub.resync_pending = true;
         const body = try self.stringify(.{ .result = .{ .resync = true } });
+        defer self.allocator.free(body);
+        return self.replyResult(request_id, body);
+    }
+
+    /// `runtime.core_command`(§6a 원격 스크롤백): 스크롤 core command를 이 stream의 runtime에 라우팅한다. host가 core view_offset을
+    /// 바꾸면 다음 snapshot/delta가 그 스크롤 화면을 투영한다. 모르는 stream_id는 invalid_request. read-only host면 응답만(no-op).
+    /// ⚠️capability 게이팅(controller만 스크롤) 없음 — 현 단일-GUI 설계는 runtime당 controller 하나뿐이라 무해하나, observer(P5)
+    /// 도입 시 controller-gate 후속(observer가 공유 view를 흔들지 않게). arg는 signed(scroll delta 음수).
+    fn dispatchCoreCommand(self: *Connection, request_id: u64, params: ?std.json.ObjectMap) HandleError!Action {
+        const p = params orelse return self.replyError(request_id, .invalid_request);
+        const stream = intFieldU64(p, "stream_id") orelse return self.replyError(request_id, .invalid_request);
+        const op = strField(p, "op") orelse return self.replyError(request_id, .invalid_request);
+        const arg = intFieldI64(p, "arg") orelse 0;
+        const runtime_id = (self.attachments.get(stream) orelse return self.replyError(request_id, .invalid_request)).runtime_id;
+        if (self.runtime_ops) |ops| {
+            ops.core_command(ops.ctx, runtime_id, op, arg) catch return self.replyError(request_id, .internal);
+        }
+        const body = try self.stringify(.{ .result = .{ .applied = true } });
         defer self.allocator.free(body);
         return self.replyResult(request_id, body);
     }
@@ -659,6 +683,14 @@ fn intField(obj: std.json.ObjectMap, key: []const u8) ?u16 {
 fn intFieldU64(obj: std.json.ObjectMap, key: []const u8) ?u64 {
     return switch (obj.get(key) orelse return null) {
         .integer => |n| if (n >= 0) @intCast(n) else null,
+        else => null,
+    };
+}
+
+/// signed i64 필드(§6a core_command arg — scroll delta는 음수 가능). std.json integer가 그대로 i64다.
+fn intFieldI64(obj: std.json.ObjectMap, key: []const u8) ?i64 {
+    return switch (obj.get(key) orelse return null) {
+        .integer => |n| n,
         else => null,
     };
 }
@@ -946,6 +978,10 @@ const FakeRuntimeOps = struct {
     resized_runtime: u128 = 0,
     delta_base_seen: [64]u8 = undefined,
     delta_base_seen_len: usize = 0,
+    last_core_op: [32]u8 = undefined,
+    last_core_op_len: usize = 0,
+    last_core_arg: i64 = 0,
+    core_command_runtime: u128 = 0,
 
     fn spawnFn(ctx: *anyopaque, params: RuntimeSpawnParams) anyerror!u128 {
         const self: *FakeRuntimeOps = @ptrCast(@alignCast(ctx));
@@ -997,8 +1033,17 @@ const FakeRuntimeOps = struct {
         _ = runtime_id;
         return allocator.dupe(u8, "{\"title\":\"\",\"body\":\"\"}");
     }
+    /// 받은 scroll core command(op·arg·runtime)를 기록한다 — server 라우팅 검증(실 core mutate는 runtime_manager smoke).
+    fn coreCommandFn(ctx: *anyopaque, runtime_id: u128, op: []const u8, arg: i64) anyerror!void {
+        const self: *FakeRuntimeOps = @ptrCast(@alignCast(ctx));
+        const n = @min(op.len, self.last_core_op.len);
+        @memcpy(self.last_core_op[0..n], op[0..n]);
+        self.last_core_op_len = n;
+        self.last_core_arg = arg;
+        self.core_command_runtime = runtime_id;
+    }
     fn ops(self: *FakeRuntimeOps) RuntimeOps {
-        return .{ .ctx = self, .spawn = spawnFn, .terminate = terminateFn, .write_input = writeInputFn, .resize = resizeFn, .snapshot = snapshotFn, .delta = deltaFn, .notification = notificationFn };
+        return .{ .ctx = self, .spawn = spawnFn, .terminate = terminateFn, .write_input = writeInputFn, .resize = resizeFn, .snapshot = snapshotFn, .delta = deltaFn, .notification = notificationFn, .core_command = coreCommandFn };
     }
 };
 
@@ -1320,6 +1365,52 @@ test "server: runtime.resync makes collectDeltas push a fresh snapshot_chunk, no
     // 모르는 stream_id resync → invalid_request(runtime 유지).
     {
         const r = try feedJson(&conn, .request, 4, "{\"method\":\"runtime.resync\",\"params\":{\"stream_id\":99}}");
+        defer if (r.frame) |f| f.deinit(allocator);
+        try testing.expect(std.mem.indexOf(u8, r.frame.?.payload, "invalid_request") != null);
+    }
+}
+
+test "server: runtime.core_command routes scroll op/arg to RuntimeOps (§6a 원격 스크롤백)" {
+    const allocator = testing.allocator;
+    var registry = reg.TerminalRuntimeRegistry.init(allocator);
+    defer registry.deinit();
+    _ = try registry.register(0xAA, 80, 24);
+
+    var fake: FakeRuntimeOps = .{};
+    var conn = Connection.init(allocator, 1, &registry);
+    defer conn.deinit();
+    conn.runtime_ops = fake.ops();
+    {
+        const h = try feedJson(&conn, .hello, 1, "{\"protocol_min\":1,\"protocol_max\":1}");
+        if (h.frame) |f| f.deinit(allocator);
+    }
+    {
+        const frames = try feedExpectFrames(&conn, .request, 2, "{\"method\":\"runtime.attach\",\"params\":{\"runtime_id\":\"aa\",\"mode\":\"controller\"}}");
+        defer {
+            for (frames) |f| f.deinit(allocator);
+            allocator.free(frames);
+        }
+    }
+    // scroll up 5 → op="scroll", arg=5, runtime=0xAA로 라우팅.
+    {
+        const r = try feedJson(&conn, .request, 3, "{\"method\":\"runtime.core_command\",\"params\":{\"stream_id\":1,\"op\":\"scroll\",\"arg\":5}}");
+        defer if (r.frame) |f| f.deinit(allocator);
+        try testing.expect(std.mem.indexOf(u8, r.frame.?.payload, "\"applied\":true") != null);
+    }
+    try testing.expectEqualStrings("scroll", fake.last_core_op[0..fake.last_core_op_len]);
+    try testing.expectEqual(@as(i64, 5), fake.last_core_arg);
+    try testing.expectEqual(@as(u128, 0xAA), fake.core_command_runtime);
+
+    // 음수 delta(scroll down)도 그대로 전달된다(signed arg).
+    {
+        const r = try feedJson(&conn, .request, 4, "{\"method\":\"runtime.core_command\",\"params\":{\"stream_id\":1,\"op\":\"scroll\",\"arg\":-3}}");
+        defer if (r.frame) |f| f.deinit(allocator);
+    }
+    try testing.expectEqual(@as(i64, -3), fake.last_core_arg);
+
+    // 모르는 stream_id → invalid_request(라우팅 안 함).
+    {
+        const r = try feedJson(&conn, .request, 5, "{\"method\":\"runtime.core_command\",\"params\":{\"stream_id\":99,\"op\":\"scroll\",\"arg\":1}}");
         defer if (r.frame) |f| f.deinit(allocator);
         try testing.expect(std.mem.indexOf(u8, r.frame.?.payload, "invalid_request") != null);
     }

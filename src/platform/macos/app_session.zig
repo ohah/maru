@@ -1838,6 +1838,10 @@ pub const AppSession = struct {
     // app_runtime 옆). keep-alive면 `ensureRemoteBackend`가 세우고(첫 창), createTerm은 `backendForNew()`로, 기존 Term은
     // `backendFor(term)`(surface.remote 판정)로 라우팅한다. 창 deinit은 이 창의 원격 Term만 회수하고 공유 backend/연결은
     // 안 닫는다(routing과 동일 — 앱 프로세스 수명).
+    // P3-e3-5 workspace 재접속 임시 채널: restore가 이 값(host runtime_id hex)을 세우고 곧바로 createTerm/createPane을 부르면,
+    // createTerm이 읽어 spawn 대신 attach로 같은 host runtime에 재접속한다(읽고 즉시 클리어 — 다음 createTerm으로 안 샌다).
+    // ""=재접속 없음(일반 spawn). new_tab_zdotdir처럼 create 호출로 흐르는 transient 입력이다.
+    restore_runtime_id: []const u8 = "",
     // surface teardown의 단일 chokepoint(destroyTerm + deinit direct pass)가 알리는 선택적 관찰 훅. cross-window move는
     // destroy가 아니라 소유 이전이므로 호출하지 않는다. app_host_abi가 browser grant/wait 수명에 연결한다.
     surface_closed_context: ?*anyopaque = null,
@@ -5447,7 +5451,21 @@ pub const AppSession = struct {
         // 잡는 `&live_pty.reader`·`&surface.core`는 backend 내부에서 registry heap 슬롯이 고정한다(heap-pin 유지 — Term-inline
         // 시절과 같은 메커니즘). generation=0으로 시작. id는 앱 전역 유일이라 중복 등록 없음.
         const be = self.backendForNew(); // P3-e3: keep-alive+연결 성공 시 원격 backend, 아니면 in-process(기본).
-        const surface = try be.spawn(.{ .handle = id, .request = req, .size = size, .queue_capacity = queue_capacity });
+        // P3-e3-5 재접속: restore가 restore_runtime_id를 세웠고(host-backed였던 Term) 원격 backend가 있으면, spawn 대신 저장된
+        // runtime_id에 attach해 같은 host runtime(화면·PID·scrollback)을 잇는다(§7). host가 그 runtime을 잃었으면(재시작 등)
+        // attachTerm이 실패→아래 fresh spawn으로 폴백한다. 읽고 즉시 클리어(다음 createTerm으로 안 샘).
+        const reconnect_id = self.restore_runtime_id;
+        self.restore_runtime_id = "";
+        const surface = surface: {
+            if (is_macos and reconnect_id.len == 32) {
+                if (app_remote_backend) |*rb| {
+                    var rid: [32]u8 = undefined;
+                    @memcpy(&rid, reconnect_id[0..32]);
+                    if (rb.attachTerm(id, rid, size)) |s| break :surface s else |_| {} // 재접속 실패 → fresh spawn 폴백.
+                }
+            }
+            break :surface try be.spawn(.{ .handle = id, .request = req, .size = size, .queue_capacity = queue_capacity });
+        };
         // spawn 성공 후 이후 단계(config·attach·pump) 실패 시 번들 슬롯을 회수한다(backend.remove = 번들 deinit = live_pty
         // reader join + surface.deinit + 슬롯 해제). spawn 자체 실패는 backend 내부 2-pass 정리(removeUninitialized)가
         // 처리하므로 이 errdefer는 spawn 성공 후에만 등록돼 이후 단계 실패만 잡는다.
@@ -20890,12 +20908,20 @@ pub const AppSession = struct {
                 // (workspace.Surface에 kind 필드가 없어 web 콘텐츠를 영속할 수 없다; Phase 5서 포맷에 kind 추가 전까지).
                 if (term.kind == .web) continue;
                 const core = &term.surface.core;
+                // P3-e3-5: host-backed Term이면 runtime_id(hex)를 저장한다 — 재실행 시 attach로 재접속(§7). in-process면 "".
+                var runtime_id: []const u8 = "";
+                if (is_macos and term.surface.remote != null) {
+                    if (app_remote_backend) |*rb| {
+                        if (rb.runtimeIdFor(term.rt.handle)) |rid| runtime_id = try arena.dupe(u8, &rid);
+                    }
+                }
                 try surfaces.append(arena, .{
                     // custom_name = 사용자 rename(owned, 없으면 ""), title = 자동 제목(OSC). 둘은 별도 필드로 저장한다.
                     .custom_name = try arena.dupe(u8, term.surface.custom_name orelse ""),
                     .title = try arena.dupe(u8, core.windowTitle()),
                     .cwd = try arena.dupe(u8, core.currentCwd()),
                     .command = try arena.dupe(u8, term.surface.command orelse ""),
+                    .runtime_id = runtime_id,
                     .cols = core.size.cols,
                     .rows = core.size.rows,
                 });
@@ -21340,6 +21366,9 @@ pub const AppSession = struct {
     /// (존재하는 디렉터리) cwd면 그걸 쓴다 — 마지막 create 호출만 두 함수가 다르다. 모델의 command(argv[0])·title은
     /// v1 복원에선 쓰지 않는다(기본 셸·"Maru"로 spawn; 정확한 argv·제목 복원은 후속) — 저장은 향후 복원용으로만.
     fn restoreSpawn(self: *AppSession, sm: maru.session.workspace.Surface) struct { req: maru.pty.SpawnRequest, size: terminal.Size } {
+        // P3-e3-5: 이 surface가 host-backed였으면(runtime_id 저장) 곧 부를 createTerm이 spawn 대신 attach로 재접속한다.
+        // ""면 일반 spawn. sm.runtime_id는 parse arena 소유라 createTerm이 동기적으로 읽는(memcpy) 동안 유효하다.
+        self.restore_runtime_id = sm.runtime_id;
         var cfg = self.new_tab_config;
         const size = restoreSurfaceSize(sm);
         cfg.size = size;
@@ -34696,6 +34725,102 @@ test "P3-e3 통합: keep-alive AppSession가 새 Term을 host-backed backend로 
         session.destroyTerm(term); // 원격 term 회수(backendFor→remote: remove + SurfaceRuntime detach + rr free).
         // 블록 끝 defer(LIFO): s2.deinit → destroy(s2) → reset(공유 backend/client) → session.deinit → destroy(session) → host
         // kill. in-process 첫 탭들 + 공유 backend를 누수·크래시 없이 회수(testing.allocator 누수, deinit 크래시 검출).
+    } else {
+        return error.SkipZigTest;
+    }
+}
+
+// P3-e3-5 재접속 통합 스모크 — restore가 저장한 runtime_id로 createTerm이 **spawn 대신 attach**해 기존 host runtime에
+// 재접속하는지 고정한다(§7). "이전 실행"을 raw runtime.spawn(controller 없는 runtime)으로 흉내 내고, 그 runtime_id를
+// restore_runtime_id에 실어 createTerm을 부르면 새 Term이 그 runtime에 붙어야 한다(fresh spawn이면 다른 runtime_id).
+// 실 fork host + 실 AppSession이라 macOS 게이트. 실제 "껐다 켜서 재접속" full E2E는 e3-6(종료 후 생존) 후 OS E2E.
+test "P3-e3-5 재접속: restore_runtime_id로 createTerm이 기존 host runtime에 attach한다" {
+    if (is_macos) {
+        const allocator = std.testing.allocator;
+        const io = std.Io.Threaded.global_single_threaded.io();
+
+        var base_buf: [96]u8 = undefined;
+        const base = std.fmt.bufPrintZ(&base_buf, "/tmp/maru-e3-rc-{d}", .{std.c.getpid()}) catch return error.SkipZigTest;
+        _ = std.c.mkdir(base.ptr, 0o700);
+        var dir_buf: [160]u8 = undefined;
+        const dir = session_host.discovery.sessionHostDirPath(&dir_buf, base) catch return error.SkipZigTest;
+        var sock_buf: [224]u8 = undefined;
+        const socket = session_host.discovery.socketPathIn(&sock_buf, dir) catch return error.SkipZigTest;
+
+        const child = std.c.fork();
+        if (child < 0) return error.SkipZigTest;
+        if (child == 0) {
+            _ = std.c.setsid();
+            session_host.daemon.runSessionHost(std.heap.page_allocator, io, dir, socket) catch {};
+            std.c._exit(0);
+        }
+        defer {
+            _ = std.c.kill(child, std.posix.SIG.TERM);
+            var status: c_int = undefined;
+            _ = std.c.waitpid(child, &status, 0);
+            _ = std.c.unlink(socket.ptr);
+            var lpb: [224]u8 = undefined;
+            if (session_host.discovery.lockPathIn(&lpb, dir)) |p| _ = std.c.unlink(p.ptr) else |_| {}
+            _ = std.c.rmdir(dir.ptr);
+            _ = std.c.rmdir(base.ptr);
+        }
+
+        var up = false;
+        var w: usize = 0;
+        while (w < 250) : (w += 1) {
+            if (session_host.client.Client.connect(allocator, socket, "gui")) |cl| {
+                var p = cl;
+                p.deinit();
+                up = true;
+                break;
+            } else |_| _ = usleep(20 * 1000);
+        }
+        try std.testing.expect(up);
+
+        const session = try allocator.create(AppSession);
+        defer allocator.destroy(session);
+        try session.init(io, allocator, .{ .abi_version = abi_version, .cols = 40, .rows = 10, .queue_capacity = 16, .command_kind = @intFromEnum(CommandKind.controlled_smoke) });
+        defer session.deinit();
+
+        const client = session_host.host_connect.connectOrLaunch(allocator, "/unused", base, .{ .connect_attempts = 30, .connect_delay_ms = 10 }) orelse {
+            try std.testing.expect(false);
+            return;
+        };
+        app_remote_client = client;
+        app_remote_backend = session_host.remote_term_backend.RemoteTermBackend.init(allocator, io, &app_remote_client.?, session.runtime);
+        defer {
+            if (app_remote_backend) |*rb| {
+                rb.deinit();
+                app_remote_backend = null;
+            }
+            if (app_remote_client) |*cl| {
+                cl.deinit();
+                app_remote_client = null;
+            }
+        }
+
+        // "이전 실행"이 남긴 host runtime 하나(controller 없이 raw spawn) — workspace가 이 runtime_id를 저장했다고 본다.
+        const spawn_resp = try app_remote_client.?.call("runtime.spawn", "{\"argv\":[\"/bin/cat\"],\"cols\":40,\"rows\":10}");
+        defer allocator.free(spawn_resp);
+        const prev_rid = session_host.client.extractRuntimeId(spawn_resp) orelse {
+            try std.testing.expect(false);
+            return;
+        };
+
+        // restore가 restore_runtime_id를 세우고 createTerm을 부른다 → spawn 대신 그 runtime에 **attach**(재접속).
+        session.restore_runtime_id = &prev_rid;
+        const term = try session.createTerm(.{ .command = "/bin/cat" }, .{ .cols = 40, .rows = 10 }, 16, "cat", "/bin/cat");
+        try std.testing.expect(term.surface.remote != null); // host-backed
+        // **재접속 확인**: 새 Term이 저장된 runtime_id에 붙었다(fresh spawn이면 다른 id였을 것).
+        const attached_rid = app_remote_backend.?.runtimeIdFor(term.rt.handle) orelse {
+            try std.testing.expect(false);
+            return;
+        };
+        try std.testing.expectEqual(prev_rid, attached_rid);
+        // restore_runtime_id는 읽고 즉시 클리어됐다(다음 createTerm은 일반 spawn).
+        try std.testing.expectEqualStrings("", session.restore_runtime_id);
+
+        session.destroyTerm(term); // 재접속 term 회수(remove + 그 runtime terminate).
     } else {
         return error.SkipZigTest;
     }

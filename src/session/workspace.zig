@@ -66,6 +66,10 @@ pub const Surface = struct {
     command: []const u8 = "",
     cols: u16 = 0,
     rows: u16 = 0,
+    // 영속 세션 host runtime_id(hex, P3-e3-5). host-backed Term만 채워지고(keep-alive), in-process면 ""다. GUI 재실행 시
+    // 이 값이 있으면 spawn 대신 같은 host runtime에 attach해 화면·PID·scrollback을 잇는다(§7). host가 그 runtime을 잃었으면
+    // (재시작·종료) attach 실패→fresh spawn 폴백. 추가 스칼라 필드(v1 additive — 옛 reader는 무시, 옛 파일엔 없어 "" 기본).
+    runtime_id: []const u8 = "",
 };
 
 /// split leaf 한 칸(panel) — 가로 탭으로 여러 Term을 들 수 있다(탭→pane 모델). active-term = 보이는 Term.
@@ -390,7 +394,15 @@ fn writeSurface(w: *std.Io.Writer, s: Surface) !void {
     try writeEscaped(w, s.cwd);
     try w.writeAll("\" command=\"");
     try writeEscaped(w, s.command);
-    try w.print("\" cols={d} rows={d}\n", .{ s.cols, s.rows });
+    try w.writeAll("\"");
+    // runtime-id는 host-backed Term만 있어 값이 있을 때만 쓴다(in-process surface 라인을 빈 필드로 부풀리지 않게 — 대다수
+    // 경로가 in-process다). reader는 없으면 "" 기본이라 round-trip에 영향 없다.
+    if (s.runtime_id.len > 0) {
+        try w.writeAll(" runtime-id=\"");
+        try writeEscaped(w, s.runtime_id);
+        try w.writeAll("\"");
+    }
+    try w.print(" cols={d} rows={d}\n", .{ s.cols, s.rows });
 }
 
 // ── R2: reader/parser ──────────────────────────────────────────────────────────
@@ -785,6 +797,7 @@ fn parseSurface(a: std.mem.Allocator, lines: *LineIter) ParseError!Surface {
     const title = try f.getQuoted(a, "title", "");
     const cwd = try f.getQuoted(a, "cwd", "");
     const command = try f.getQuoted(a, "command", "");
+    const runtime_id = try f.getQuoted(a, "runtime-id", ""); // P3-e3-5: 있으면 재접속(attach), 없으면 fresh spawn.
     const cols = try f.getUint("cols", u16, 80);
     const rows = try f.getUint("rows", u16, 24);
     return .{
@@ -792,6 +805,7 @@ fn parseSurface(a: std.mem.Allocator, lines: *LineIter) ParseError!Surface {
         .title = title,
         .cwd = cwd,
         .command = command,
+        .runtime_id = runtime_id,
         .cols = cols,
         .rows = rows,
     };
@@ -1065,6 +1079,35 @@ test "workspace round-trip: serialize → parse → 다시 serialize 동일(중�
     defer std.testing.allocator.free(text2);
 
     try std.testing.expectEqualStrings(text1, text2); // writer↔reader 고정점
+}
+
+test "workspace round-trip: surface runtime-id 보존(host-backed는 값, in-process는 키 생략)" {
+    // P3-e3-5: host-backed Term은 runtime_id(hex)를 저장해 재실행 시 attach로 재접속한다(§7). in-process는 ""라 writer가
+    // 키를 생략한다(in-process surface 라인을 빈 필드로 부풀리지 않는 round-trip 고정점 — 옛 리더는 미지 키 없이 그대로 읽음).
+    const rid = "0123456789abcdef0123456789abcdef";
+    const surfs = [_]Surface{
+        .{ .command = "/bin/zsh", .runtime_id = rid, .cols = 40, .rows = 24 }, // host-backed
+        .{ .command = "/bin/zsh", .cols = 40, .rows = 24 }, // in-process(runtime_id="")
+    };
+    const panes = [_]Pane{.{ .surfaces = &surfs }};
+    const tree = [_]TreeNode{.{ .leaf = 0 }};
+    const tabs = [_]Tab{.{ .tree = &tree, .panes = &panes }};
+    const windows = [_]Window{.{ .active_tab = 0, .tabs = &tabs }};
+
+    const text1 = try serialize(std.testing.allocator, .{ .windows = &windows });
+    defer std.testing.allocator.free(text1);
+    // host-backed 라인엔 runtime-id 키가 있고, in-process 라인엔 없다(생략 고정점).
+    try std.testing.expect(std.mem.indexOf(u8, text1, "runtime-id=\"0123456789abcdef0123456789abcdef\"") != null);
+
+    var parsed = try parse(std.testing.allocator, text1);
+    defer parsed.deinit();
+    const rs = parsed.workspace.windows[0].tabs[0].panes[0].surfaces;
+    try std.testing.expectEqualStrings(rid, rs[0].runtime_id); // host-backed 보존
+    try std.testing.expectEqualStrings("", rs[1].runtime_id); // in-process는 "" (키 생략 → 기본)
+
+    const text2 = try serialize(std.testing.allocator, parsed.workspace);
+    defer std.testing.allocator.free(text2);
+    try std.testing.expectEqualStrings(text1, text2); // 고정점
 }
 
 test "workspace round-trip: tab pinned·background_color·accent_color 보존" {

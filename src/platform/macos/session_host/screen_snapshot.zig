@@ -9,10 +9,11 @@
 //! app 스택을 재사용하는 `runtime_manager`와 같은 부류다. 투영 자체는 OS 중립 순수 로직(syscall 없음)이라 실 core만 있으면
 //! 테스트한다. §8 ANSI CLI client도 같은 중립 레코드를 소비하므로(새 parser 금지) 이 투영이 그 단일 출처다.
 //!
-//! 색 해석: 이 슬라이스는 config-light 기준선이다 — `.rgb`는 그대로, `.indexed`는 OSC4 override(`paletteOverride`) →
-//! `xterm256` fallback, `.default`는 caller가 준 theme 기본 fg/bg로 푼다. reverse/dim/blink/conceal은 RGB에 **굽지 않고**
-//! `StyleFlags`(inverse/dim/blink/invisible)로 실어 client 표시층이 적용한다(§9 표시 정책은 client). 완전한 theme-aware
-//! 해석(config 16색 base·min-contrast·bold-is-bright·unfocused dim)은 config 배선이 붙는 후속(e2d-2/e3)에서 얹는다.
+//! 색 해석: host는 색을 **굽지 않고 Color intent를 실어 보낸다**(`packColorIntent` → 태그드 u32, §screen_stream.ColorTag).
+//! `.default`/`.indexed`/`.rgb`를 그대로 실어, client가 자기 theme로 in-process와 **동일하게** 푼다(config 16색 base·
+//! bold-is-bright·min-contrast·default 색). 예외: OSC4 override(`paletteOverride`)된 indexed는 override가 host per-terminal
+//! 상태(client가 못 가짐)라 host가 그 rgb로 구워 실어 회귀를 막는다. reverse/dim/blink/conceal도 RGB에 안 굽고
+//! `StyleFlags`(inverse/dim/blink/invisible)로 실어 client 표시층이 적용한다(§9 표시 정책은 client).
 //!
 //! 동시성: 이 투영은 순수 함수다(입력 `*const TerminalCore` → 소유 바이트). reader 스레드가 core를 쓰는 host 경로에선
 //! **caller가 `Surface.core_mutex`를 잡은 채** 이 함수를 부르고(투영 동안 lock 유지, ~0.12ms), 반환된 소유 바이트만
@@ -22,7 +23,6 @@
 const std = @import("std");
 const maru = @import("maru");
 const terminal = maru.terminal;
-const color = maru.color;
 const screen_stream = @import("screen_stream.zig");
 const screen_assembler = @import("screen_assembler.zig");
 
@@ -43,7 +43,8 @@ pub const ModeBit = struct {
 };
 
 /// 투영 정책. `generation`은 이 snapshot의 base generation(client가 이후 delta의 base로 대조 — 보통 runtime의 resize
-/// generation 등 host가 정한 단조 값). `default_fg`/`default_bg`는 `.default` 색을 풀 theme 기본값(0x00RRGGBB).
+/// generation 등 host가 정한 단조 값). `default_fg`/`default_bg`는 이제 **미사용**이다 — host가 색을 굽지 않고 `.default`
+/// intent를 실어(§packColorIntent) client가 자기 theme 기본 fg/bg로 풀기 때문이다. 필드는 wire/caller 호환을 위해 남긴다.
 pub const ProjectOptions = struct {
     generation: u64 = 0,
     default_fg: u32 = 0xFFFFFF,
@@ -116,12 +117,11 @@ const RowRuns = struct {
     }
 };
 
-/// 한 행 셀을 RLE run으로 압축해 소유 `RowRuns`를 만든다(wide=width2·continuation 생략·resolved RGB·StyleFlags).
+/// 한 행 셀을 RLE run으로 압축해 소유 `RowRuns`를 만든다(wide=width2·continuation 생략·태그드 Color intent·StyleFlags).
 fn buildRowRuns(
     allocator: std.mem.Allocator,
     snap: terminal.RenderSnapshot,
     palette: *const [256]?terminal.Rgb,
-    opts: ProjectOptions,
     row: u16,
 ) screen_stream.DecodeError!RowRuns {
     const cols = snap.size.cols;
@@ -142,9 +142,10 @@ fn buildRowRuns(
         }
         const width: u8 = if (cell.width >= 2) 2 else 1;
         try encodeCellGrapheme(&cur, allocator, cell, snap.graphemes);
-        const fg = resolveColor(cell.style.foreground, opts.default_fg, palette);
-        const bg = resolveColor(cell.style.background, opts.default_bg, palette);
-        const ul = resolveColor(cell.style.underline_color, fg, palette); // default 밑줄색 = 전경색.
+        const fg = packColorIntent(cell.style.foreground, palette);
+        const bg = packColorIntent(cell.style.background, palette);
+        // underline은 intent를 그대로 싣는다 — `.default`면 client가 전경색으로 푼다(draw_list.lineOverlay).
+        const ul = packColorIntent(cell.style.underline_color, palette);
         const flags = styleFlags(cell.style);
 
         // 직전 run과 grapheme·width·색·스타일이 모두 같으면 count만 늘린다(RLE — 공백/반복 문자 압축).
@@ -182,7 +183,7 @@ fn appendRowRecord(
     row: u16,
     stream: *std.ArrayListUnmanaged(u8),
 ) screen_stream.DecodeError!void {
-    const rr = try buildRowRuns(allocator, snap, palette, opts, row);
+    const rr = try buildRowRuns(allocator, snap, palette, row);
     defer rr.deinit(allocator);
     const rec = try screen_stream.encodeRow(allocator, .{ .kind = .row, .generation = opts.generation }, .{ .row_index = row, .runs = rr.runs });
     defer allocator.free(rec);
@@ -285,7 +286,7 @@ pub fn computeDelta(allocator: std.mem.Allocator, prev_bytes: []const u8, core: 
     // 각 행을 **한 번만** build해서 (a) snapshot의 row 레코드로 담고 (b) prev와 다르면 delta의 set_runs로 담는다(재투영 제거).
     var row: u16 = 0;
     while (row < snap.size.rows) : (row += 1) {
-        const rr = try buildRowRuns(allocator, snap, palette, opts, row);
+        const rr = try buildRowRuns(allocator, snap, palette, row);
         defer rr.deinit(allocator);
         const row_rec = try screen_stream.encodeRow(allocator, .{ .kind = .row, .generation = opts.generation }, .{ .row_index = row, .runs = rr.runs });
         defer allocator.free(row_rec);
@@ -336,12 +337,19 @@ fn appendUtf8(cur: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocator, cp
     cur.appendSlice(allocator, buf[0..n]) catch return error.OutOfMemory;
 }
 
-/// terminal 색을 resolved 0x00RRGGBB로 푼다. `.default`는 caller theme 기본값, `.indexed`는 OSC4 override → xterm256.
-fn resolveColor(c: terminal.Color, default_rgb: u32, palette: *const [256]?terminal.Rgb) u32 {
+/// terminal 색을 Run wire의 **태그드 u32 Color intent**로 싣는다(§screen_stream.ColorTag). host는 색을 굽지 않고 의도를
+/// 실어 client가 자기 theme로 해석하게 한다(config 16색 base·bold-is-bright·min-contrast·default 색 — in-process와 동일).
+/// 예외: `.indexed`에 OSC4 override(`palette[n]`)가 있으면 그 rgb로 구워 실는다 — override는 host per-terminal 상태라
+/// client가 못 가지므로, 굽지 않으면 회귀한다(그 셀은 bold-is-bright/config-base 적용 대상에서 빠지지만 OSC4 원색은 보존).
+fn packColorIntent(c: terminal.Color, palette: *const [256]?terminal.Rgb) u32 {
+    const Tag = screen_stream.ColorTag;
     return switch (c) {
-        .default => default_rgb,
-        .rgb => |v| packRgb(v),
-        .indexed => |n| if (palette[n]) |ov| packRgb(ov) else packRgb(color.xterm256(n)),
+        .default => Tag.default << Tag.shift, // == 0
+        .rgb => |v| (Tag.rgb << Tag.shift) | packRgb(v),
+        .indexed => |n| if (palette[n]) |ov|
+            (Tag.rgb << Tag.shift) | packRgb(ov)
+        else
+            (Tag.indexed << Tag.shift) | @as(u32, n),
     };
 }
 
@@ -418,7 +426,7 @@ test "screen snapshot: projects a real TerminalCore screen to decodable records 
     // 빨간 전경으로 "hi", 커서는 그 뒤.
     try core.write("\x1b[31mhi\x1b[0m");
 
-    const bytes = try projectSnapshot(allocator, &core, .{ .generation = 7, .default_fg = 0xCCCCCC, .default_bg = 0x101010 });
+    const bytes = try projectSnapshot(allocator, &core, .{ .generation = 7 });
     defer allocator.free(bytes);
 
     const dec = try decodeSnapshot(allocator, bytes);
@@ -430,19 +438,34 @@ test "screen snapshot: projects a real TerminalCore screen to decodable records 
     try testing.expectEqual(@as(usize, 3), dec.rows.len);
     try testing.expectEqual(@as(u16, 2), dec.meta.cursor.col);
 
-    // row 0: 첫 run "h"는 빨강(indexed 1 → xterm256 → 0x00RRGGBB, non-zero). 각 행은 Σ(width*count)==cols.
+    // row 0: 첫 run "h"는 빨강(SGR 31 → indexed 1). host는 굽지 않고 intent를 실으므로 태그드 u32 = ColorTag.indexed|1.
+    const Tag = screen_stream.ColorTag;
     const row0 = dec.rows[0];
     try testing.expect(screen_stream.rowWidthMatches(row0, 10));
     try testing.expectEqualStrings("h", row0.runs[0].grapheme);
-    try testing.expect(row0.runs[0].fg != 0xCCCCCC); // 빨강이 default_fg가 아니게 풀렸다.
-    // 마지막 run은 공백(default fg/bg)이고 RLE로 뭉쳐 있다.
+    try testing.expectEqual((Tag.indexed << Tag.shift) | 1, row0.runs[0].fg); // 빨강 = indexed 1 intent.
+    // 마지막 run은 공백(default fg/bg → ColorTag.default = 0)이고 RLE로 뭉쳐 있다. client가 자기 theme 기본색으로 푼다.
     const last = row0.runs[row0.runs.len - 1];
     try testing.expectEqualStrings(" ", last.grapheme);
-    try testing.expectEqual(@as(u32, 0xCCCCCC), last.fg);
-    try testing.expectEqual(@as(u32, 0x101010), last.bg);
+    try testing.expectEqual(@as(u32, 0), last.fg);
+    try testing.expectEqual(@as(u32, 0), last.bg);
     // 빈 행(row 1,2)은 공백 한 run(count=cols)으로 압축된다.
     try testing.expectEqual(@as(usize, 1), dec.rows[1].runs.len);
     try testing.expectEqual(@as(u32, 10), dec.rows[1].runs[0].count);
+}
+
+test "packColorIntent: default/indexed/rgb intent + OSC4 override는 rgb로 굽는다" {
+    const Tag = screen_stream.ColorTag;
+    var palette = [_]?terminal.Rgb{null} ** 256;
+
+    // default → 태그만(0). indexed(override 없음) → 인덱스 intent 유지(client가 config 16색·bold-is-bright 적용). rgb → 그대로.
+    try testing.expectEqual(@as(u32, 0), packColorIntent(.default, &palette));
+    try testing.expectEqual((Tag.indexed << Tag.shift) | 5, packColorIntent(.{ .indexed = 5 }, &palette));
+    try testing.expectEqual((Tag.rgb << Tag.shift) | 0x123456, packColorIntent(.{ .rgb = .{ .r = 0x12, .g = 0x34, .b = 0x56 } }, &palette));
+
+    // OSC4 override된 indexed는 그 rgb로 구워 싣는다(회귀 방지) — override는 client가 못 가지는 host per-terminal 상태.
+    palette[3] = .{ .r = 0xAB, .g = 0xCD, .b = 0xEF };
+    try testing.expectEqual((Tag.rgb << Tag.shift) | 0xABCDEF, packColorIntent(.{ .indexed = 3 }, &palette));
 }
 
 test "screen snapshot: wide CJK cell projects width=2 and skips the continuation cell" {

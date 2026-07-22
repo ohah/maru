@@ -87,7 +87,8 @@ pub const Rect = struct {
 /// 같은 스타일·같은 grapheme의 연속 묶음. `width`는 grapheme 셀 폭(1/2), `count`는 그 grapheme의 **반복 수**다.
 /// 이 run이 채우는 grid cell 수 = `width * count`(wide "한" 하나면 width=2·count=1·cell=2, "aaa"면 width=1·count=3·cell=3).
 /// 조립기는 Σ(width*count)==cols로 wide-cell continuation 불일치를 검증한다(rowWidthMatches). `grapheme`은 UTF-8이고
-/// codec 버퍼를 참조한다(decode 후 caller가 버퍼를 유지하는 zero-copy). 색은 resolved RGB.
+/// codec 버퍼를 참조한다(decode 후 caller가 버퍼를 유지하는 zero-copy). 색(fg/bg/underline_color)은 resolved RGB가
+/// 아니라 **태그드 Color intent**다(§ColorTag) — client가 자기 theme로 해석한다(config 16색·bold-is-bright·min-contrast).
 pub const Run = struct {
     grapheme: []const u8,
     width: u8 = 1,
@@ -96,6 +97,21 @@ pub const Run = struct {
     bg: u32 = 0,
     underline_color: u32 = 0,
     style_flags: u32 = 0,
+};
+
+/// Run.fg/bg/underline_color 색 인코딩: resolved RGB가 아니라 **Color intent**를 태그드 u32로 싣는다. host가 색을 굽지
+/// 않고 의도(default/indexed/rgb)를 실어, client가 자기 theme로 해석하게 한다(config 16색 base·bold-is-bright·min-contrast·
+/// default 색 — in-process 렌더와 동일). 상위 바이트(비트 24~25)가 태그, 하위 24비트가 payload다.
+/// host(`screen_snapshot.packColorIntent`)가 싣고 client(`remote_screen.unpackColorIntent`)가 푼다. OSC4 override된 indexed는
+/// override가 host per-terminal 상태(client가 못 가짐)라 host가 rgb로 구워 실어 회귀를 막는다. 이 모듈은 순수 codec이라
+/// terminal.Color를 모른다 — 태그 값만 SSOT로 정의하고 매핑은 host/client 경계가 각자 한다.
+pub const ColorTag = struct {
+    pub const shift: u5 = 24;
+    pub const default: u32 = 0; // payload 없음(v == 0)
+    pub const indexed: u32 = 1; // payload = index(하위 8비트)
+    pub const rgb: u32 = 2; // payload = 0xRRGGBB(하위 24비트)
+    pub const index_mask: u32 = 0xFF;
+    pub const rgb_mask: u32 = 0xFFFFFF;
 };
 
 /// 화면 메타(snapshot의 첫 record). cols/rows·active/alternate screen·커서·mode bitmask.

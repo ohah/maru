@@ -116,7 +116,8 @@ pub fn modesForKind(kind: dock_panel.EntryKind) []const HeaderModeDescriptor {
     return switch (kind) {
         .markdown => &header_modes,
         .svg => &svg_header_modes,
-        .html, .text => &.{},
+        // html·text·image·pdf는 헤더 mode 선택기가 없다(단일 모드).
+        .html, .text, .image, .pdf => &.{},
     };
 }
 

@@ -10188,6 +10188,8 @@ pub const AppSession = struct {
             .html => .html,
             .text => .text,
             .svg => .svg,
+            .image => .image,
+            .pdf => .pdf,
         };
     }
 
@@ -11911,7 +11913,8 @@ pub const AppSession = struct {
         return switch (entry.kind) {
             .text => file_panel_bridge.textLanguageForPath(entry.path),
             .svg => .xml,
-            .markdown, .html => null,
+            // markdown은 기존 shell URL, html·image·pdf는 격리 loadFileURL이라 언어가 없다.
+            .markdown, .html, .image, .pdf => null,
         };
     }
 
@@ -13203,9 +13206,10 @@ pub const AppSession = struct {
                         .surface_id = entry.surface_id,
                         .panel_kind = switch (entry.kind) {
                             // text·svg는 markdown과 같은 신뢰 config(maru-app:// 스킴·bridge). shell URL의 `?lang=`·
-                            // `?kind=svg`가 편집기/프리뷰 모드를 고른다(§2.2·§2.3). html만 비신뢰 browser config다.
+                            // `?kind=svg`가 편집기/프리뷰 모드를 고른다(§2.2·§2.3). html·image·pdf는 격리 loadFileURL
+                            // browser config다(비신뢰, filePanelKind=2).
                             .markdown, .text, .svg => .markdown,
-                            .html => .browser,
+                            .html, .image, .pdf => .browser,
                         },
                         .seam_edges = seam_edges,
                         .divider_grab_bands_pt = if (self.dividerThicknessPx() != 0) grab_bands else .{},

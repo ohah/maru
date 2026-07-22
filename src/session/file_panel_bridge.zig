@@ -13,7 +13,7 @@ pub const max_file_bytes: usize = 8 * 1024 * 1024;
 /// 서로 다른 파일 집합을 열지 않게 한다(docs/file-panel.md §2.2·§6). **정책(FP12, 사용자 결정 2026-07-22)**:
 /// VSCode처럼 `.md`/`.html`과 알려진 바이너리를 뺀 **나머지는 전부 `text`로 연다**. 알려진 확장자는 문법
 /// 하이라이트, 그 외 text는 plain 편집이다. image·media·pdf는 FP14~FP15에서 바이너리 집합의 일부를 자기 kind로 뺀다.
-pub const OpenKind = enum { markdown, html, text, svg };
+pub const OpenKind = enum { markdown, html, text, svg, image, pdf };
 
 /// `text` kind의 CM6 하이라이트 언어. `wireName`은 shell URL `?lang=` 힌트와 web `source-language.ts` 언어 선택의
 /// wire 값(§2.2). 색은 theme 책임이고 여기서는 문법 선택만 정한다. `plain`은 문법 없이 편집만(색은 CanvasText).
@@ -141,12 +141,23 @@ fn isBinaryExtension(ext: []const u8) bool {
     return false;
 }
 
+/// WebKit이 top-level 문서로 신뢰성 있게 렌더하는 이미지 확장자(FP14). 여기 없는 이미지(.icns 등)는 isBinaryExtension으로
+/// 떨어져 외부 앱 폴백이라, 깨진 프리뷰를 만들지 않는다(디코드 실패 자동 폴백은 후속 — §2.2 한계).
+fn imageExtension(ext: []const u8) bool {
+    const eq = std.ascii.eqlIgnoreCase;
+    const img = [_][]const u8{ ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".ico", ".webp", ".avif", ".heic", ".heif", ".tif", ".tiff" };
+    for (img) |candidate| if (eq(ext, candidate)) return true;
+    return false;
+}
+
 pub fn openKindForPath(path: []const u8) ?OpenKind {
     const ext = std.fs.path.extension(path);
     if (std.ascii.eqlIgnoreCase(ext, ".md")) return .markdown;
     if (std.ascii.eqlIgnoreCase(ext, ".html")) return .html;
     if (std.ascii.eqlIgnoreCase(ext, ".svg")) return .svg; // FP13: read 프리뷰 + xml 소스 편집.
-    if (isBinaryExtension(ext)) return null; // 외부 앱(또는 FP14~ image/media/pdf kind).
+    if (imageExtension(ext)) return .image; // FP14: 격리 loadFileURL 네이티브 렌더(§2.2).
+    if (std.ascii.eqlIgnoreCase(ext, ".pdf")) return .pdf; // FP15: WebKit 내장 PDF loadFileURL(§2.2).
+    if (isBinaryExtension(ext)) return null; // 외부 앱(비디오·오디오·아카이브 등 — media는 후속 FP15).
     return .text; // VSCode식: 나머지는 전부 텍스트로 연다.
 }
 
@@ -343,11 +354,16 @@ test "mimeForPath: known image extensions and inert fallback" {
 test "openKindForPath: md, html, binary-blocked, everything-else-is-text (VSCode 정책)" {
     try testing.expectEqual(OpenKind.markdown, openKindForPath("/tmp/readme.MD").?);
     try testing.expectEqual(OpenKind.html, openKindForPath("/tmp/page.HTML").?);
-    // 알려진 바이너리는 텍스트로 열지 않는다(→ 외부 앱, FP14~ image/media/pdf kind).
+    // 이미지·pdf는 자기 kind(FP14/FP15, 격리 loadFileURL). basename이 아닌 확장자 기준.
+    try testing.expectEqual(OpenKind.image, openKindForPath("/tmp/photo.PNG").?);
+    try testing.expectEqual(OpenKind.image, openKindForPath("/tmp/pic.jpeg").?);
+    try testing.expectEqual(OpenKind.image, openKindForPath("/tmp/anim.gif").?);
+    try testing.expectEqual(OpenKind.image, openKindForPath("/tmp/shot.webp").?);
+    try testing.expectEqual(OpenKind.pdf, openKindForPath("/tmp/doc.PDF").?);
+    // 아직 kind가 없는 바이너리(비디오·오디오·아카이브)는 null=외부 앱(media는 후속 FP15).
     try testing.expect(openKindForPath("/tmp/archive.zip") == null);
-    try testing.expect(openKindForPath("/tmp/photo.png") == null);
     try testing.expect(openKindForPath("/tmp/clip.MP4") == null);
-    try testing.expect(openKindForPath("/tmp/doc.pdf") == null);
+    try testing.expect(openKindForPath("/tmp/icon.icns") == null); // 이미지지만 WebKit 비신뢰 렌더 → 외부 앱.
     // 나머지는 전부 text — 알려진 확장자, 미지의 확장자, 확장자 없는 파일 모두.
     try testing.expectEqual(OpenKind.text, openKindForPath("/tmp/config.JSON").?);
     try testing.expectEqual(OpenKind.text, openKindForPath("/tmp/main.py").?);

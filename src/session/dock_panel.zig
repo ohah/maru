@@ -22,6 +22,8 @@ pub const EntryKind = enum {
     html,
     text,
     svg,
+    image,
+    pdf,
 
     /// 신뢰 shell에서 CM6를 마운트하고 `maru.file.read/write` 브리지로 편집하는 kind인지. read/write·dirty·저장·
     /// document epoch·외부변경·초기 hydration identity 보호 게이트가 이 술어를 공유한다(§2.2·§3). markdown 라이브
@@ -30,7 +32,8 @@ pub const EntryKind = enum {
     pub fn usesEditorBridge(self: EntryKind) bool {
         return switch (self) {
             .markdown, .text, .svg => true,
-            .html => false,
+            // html·image·pdf는 격리 loadFileURL(신뢰 shell·CM6·브리지 미사용)이라 read 전용이다(§2.2).
+            .html, .image, .pdf => false,
         };
     }
 };
@@ -48,7 +51,7 @@ pub const Mode = enum(u32) {
     pub fn defaultFor(kind: EntryKind) Mode {
         return switch (kind) {
             .markdown => .live_preview,
-            .html => .read,
+            .html, .image, .pdf => .read, // 격리 loadFileURL read 전용.
             .text => .source_edit,
             .svg => .read, // 이미지 미리보기가 먼저(VSCode SVG 프리뷰 관례).
         };
@@ -57,7 +60,7 @@ pub const Mode = enum(u32) {
     pub fn allowedFor(self: Mode, kind: EntryKind) bool {
         return switch (kind) {
             .markdown => true,
-            .html => self == .read,
+            .html, .image, .pdf => self == .read, // read 뷰 전용(편집·모드 없음).
             .text => self == .source_edit,
             .svg => self == .read or self == .source_edit, // 라이브 없음.
         };
@@ -930,14 +933,19 @@ test "EntryKind/Mode policy: markdown, html, text (FP12 §2.2)" {
     try std.testing.expectEqual(Mode.live_preview, Mode.defaultFor(.markdown));
     try std.testing.expectEqual(Mode.read, Mode.defaultFor(.html));
     try std.testing.expectEqual(Mode.source_edit, Mode.defaultFor(.text));
+    try std.testing.expectEqual(Mode.read, Mode.defaultFor(.image)); // FP14: read 뷰 전용.
+    try std.testing.expectEqual(Mode.read, Mode.defaultFor(.pdf)); // FP15: read 뷰 전용.
 
-    // 허용 모드: markdown=전부, html=read만, text=source_edit만.
+    // 허용 모드: markdown=전부, html=read만, text=source_edit만, image/pdf=read만(격리 loadFileURL).
     try std.testing.expect(Mode.read.allowedFor(.markdown) and Mode.source_edit.allowedFor(.markdown) and Mode.live_preview.allowedFor(.markdown));
     try std.testing.expect(Mode.read.allowedFor(.html) and !Mode.source_edit.allowedFor(.html) and !Mode.live_preview.allowedFor(.html));
     try std.testing.expect(Mode.source_edit.allowedFor(.text) and !Mode.read.allowedFor(.text) and !Mode.live_preview.allowedFor(.text));
+    inline for (.{ EntryKind.image, EntryKind.pdf }) |kind| {
+        try std.testing.expect(Mode.read.allowedFor(kind) and !Mode.source_edit.allowedFor(kind) and !Mode.live_preview.allowedFor(kind));
+    }
 
-    // 새 entry의 기본 모드는 항상 자기 kind에서 허용된다(복원 검증 불변식과 일치).
-    inline for (.{ EntryKind.markdown, EntryKind.html, EntryKind.text }) |kind| {
+    // 새 entry의 기본 모드는 항상 자기 kind에서 허용된다(복원 검증 불변식과 일치). 모든 kind를 exhaustive하게 검증한다.
+    inline for (std.enums.values(EntryKind)) |kind| {
         try std.testing.expect(Mode.defaultFor(kind).allowedFor(kind));
     }
 }

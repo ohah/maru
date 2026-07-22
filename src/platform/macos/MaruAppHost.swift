@@ -7669,12 +7669,14 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         // ABI 경계가 kind·regular-file·용량을 다시 검증하므로 여기가 다소 관대해도 안전하다. 미러가 드리프트하면
         // 지원 파일이 picker에서 회색으로 보일 뿐이다.
         panel.allowedContentTypes = [
-            "md", "html", // markdown·html
+            "md", "html", "svg", // markdown·html·svg
             "txt", "text", "log", "json", // text: plain·json
             "js", "mjs", "cjs", "jsx", "ts", "mts", "cts", "tsx", // text: javascript/typescript
             "py", "css", "scss", "sass", "less", "xml", "yaml", "yml", // text: python·css·xml·yaml
+            "png", "jpg", "jpeg", "gif", "bmp", "ico", "webp", "avif", "heic", "heif", "tif", "tiff", // image(FP14)
+            "pdf", // pdf(FP15)
         ].compactMap { UTType(filenameExtension: $0) }
-        panel.message = "도크에서 열 파일을 고르세요 (Markdown·HTML·텍스트/코드)"
+        panel.message = "도크에서 열 파일을 고르세요 (Markdown·HTML·SVG·텍스트/코드·이미지·PDF)"
         guard panel.runModal() == .OK, let path = panel.url?.path else { return }
         let bytes = Array(path.utf8)
         let result = bytes.withUnsafeBufferPointer { p in

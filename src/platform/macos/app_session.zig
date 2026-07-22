@@ -1723,6 +1723,10 @@ var app_remote_backend: ?RemoteSessionBackend = null;
 // (§6 app-wide Quit=detach). 윈도우/탭 **명시 close**(destroyTerm/close)는 이 플래그와 무관하게 terminate(destructive)한다.
 // 프로세스 전역 이벤트라 module-var(모든 창의 deinit이 본다). 실 앱은 곧 프로세스 종료라 리셋 불요(테스트만 명시 리셋).
 var app_quitting: bool = false;
+// P4 "Quit and End All Sessions"(§6 종료 매트릭스 row 3). 종료 확인의 **alternate 버튼**("종료 및 세션 끝내기")을 누르면
+// app_quitting과 함께 켜진다 → deinit이 host-backed Term을 detach(생존)가 아니라 **terminate**(runtime 종료)한다. keep-alive
+// 기본 quit은 detach(생존), 이 alternate만 명시적으로 다 끝낸다. app_quitting과 짝으로 리셋한다.
+var app_quit_end_all: bool = false;
 
 /// FP10c1 C ABI가 앱 전역 Mermaid 정책 인스턴스를 찾는 유일한 접근점. 새 handle을 만들지 않아 모든 창과
 /// Swift adapter가 `AppRuntime.mermaid_queue` 하나를 공유한다.
@@ -6153,7 +6157,14 @@ pub const AppSession = struct {
             self.quit_decision = .cancelled;
             return;
         }
-        self.showConfirmButtons(.quit, "maru를 종료할까요?", .{ .confirm = "종료", .cancel = "취소" });
+        // P4 §6 row 3: host-backed runtime(keep-alive)이 살아 있으면 "종료 및 세션 끝내기" alternate를 함께 띄운다 — 기본
+        // "종료"는 detach(runtime 생존, e3-6), alternate는 terminate(다 끝냄). host-backed가 없으면(in-process뿐) alternate가
+        // 무의미하니 기존 2버튼(종료/취소)을 쓴다.
+        if (is_macos and app_remote_backend != null and app_remote_backend.?.runtimes.count() > 0) {
+            self.showConfirmChoices(.quit, "maru를 종료할까요? 열린 터미널은 백그라운드에서 유지됩니다.", .{ .primary = "종료", .alternate = "종료 및 세션 끝내기", .cancel = "취소" });
+        } else {
+            self.showConfirmButtons(.quit, "maru를 종료할까요?", .{ .confirm = "종료", .cancel = "취소" });
+        }
         self.quit_decision = .none;
     }
 
@@ -15974,14 +15985,21 @@ pub const AppSession = struct {
             .confirm_alternate => {
                 const owner = self.pending_confirm;
                 self.pending_confirm = .none;
-                if (owner == .file_panel_close) if (self.pending_file_panel_close) |pending| {
-                    if (pending.phase == .confirm_dirty) {
-                        if (self.filePanelCloseEntry(pending) != null)
-                            _ = self.closeFilePanelSurfaceNow(pending.surface_id)
-                        else
-                            self.abortStaleFilePanelClose();
-                    }
-                } else self.cancelPendingConfirm();
+                if (owner == .quit) {
+                    // P4 "종료 및 세션 끝내기"(§6 row 3): 기본 "종료"(detach·생존)와 달리 host-backed runtime도 다 terminate한다.
+                    self.quit_decision = .accepted;
+                    app_quitting = true;
+                    app_quit_end_all = true;
+                } else if (owner == .file_panel_close) {
+                    if (self.pending_file_panel_close) |pending| {
+                        if (pending.phase == .confirm_dirty) {
+                            if (self.filePanelCloseEntry(pending) != null)
+                                _ = self.closeFilePanelSurfaceNow(pending.surface_id)
+                            else
+                                self.abortStaleFilePanelClose();
+                        }
+                    } else self.cancelPendingConfirm();
+                }
                 self.metal_dirty = true;
             },
             .confirm_cancel => { // Esc/N — 보류한 동작(닫기/리셋/종료/붙여넣기/grant)을 버린다.
@@ -26256,10 +26274,10 @@ pub const AppSession = struct {
             for (tab.panes.items) |pane| {
                 for (pane.terms.items) |term| {
                     if (term.rt.live_initialized and self.runtime_initialized) {
-                        // P3-e3-6: 앱 quit + host-backed면 terminate(closeAndDetach)를 건너뛴다 — runtime을 host에 남겨야
-                        // 재실행 시 재접속한다(detach는 아래 pass 2 detachTerm이 client-side만 회수). 그 외(in-process·명시
-                        // 창 close=app_quitting=false)는 기존대로 closeAndDetach로 종료한다(§6 destructive close).
-                        if (is_macos and app_quitting and term.surface.remote != null) continue;
+                        // P3-e3-6: 앱 quit(detach) + host-backed면 terminate(closeAndDetach)를 건너뛴다 — runtime을 host에
+                        // 남겨야 재실행 시 재접속한다(detach는 아래 pass 2 detachTerm이 client-side만 회수). 단 P4 "종료 및 세션
+                        // 끝내기"(app_quit_end_all)면 skip 안 하고 종료한다. 그 외(in-process·명시 창 close)도 기존대로 closeAndDetach.
+                        if (is_macos and app_quitting and !app_quit_end_all and term.surface.remote != null) continue;
                         self.backendFor(term).closeAndDetach(term.rt.handle);
                     }
                 }
@@ -26293,9 +26311,10 @@ pub const AppSession = struct {
                     // detach + rr deinit + 공유 backend map에서 제거). 창 close가 이 창의 원격 Term만 뺀다(공유 backend 자체는 안
                     // 닫음). in-process/web Term은 기존대로 live_registry.remove.
                     if (is_macos and term.surface.remote != null) {
-                        // P3-e3-6: 앱 quit이면 detachTerm(terminate 없이 회수 → host runtime 생존, 재접속 대상). 명시 창 close
-                        // (app_quitting=false)면 remove(terminate + 회수, destructive). 공유 backend는 어느 쪽도 안 닫는다.
-                        if (app_quitting) {
+                        // P3-e3-6: 앱 quit(detach)이면 detachTerm(terminate 없이 회수 → host runtime 생존, 재접속 대상). P4 "종료
+                        // 및 세션 끝내기"(app_quit_end_all) 또는 명시 창 close(app_quitting=false)면 remove(terminate + 회수,
+                        // destructive). 공유 backend는 어느 쪽도 안 닫는다.
+                        if (app_quitting and !app_quit_end_all) {
                             if (app_remote_backend) |*rb| rb.detachTerm(term.rt.handle);
                         } else {
                             self.backendFor(term).remove(term.rt.handle);
@@ -34900,6 +34919,7 @@ test "P3-e3-6 app-quit: host-backed Term을 detach해 host runtime이 생존하�
         app_remote_backend = session_host.remote_term_backend.RemoteTermBackend.init(allocator, io, &app_remote_client.?, &app_runtime.routing);
         defer { // 테스트 격리: 앱 전역 상태 리셋(명시 close 뒤엔 null이라 skip).
             app_quitting = false;
+            app_quit_end_all = false;
             if (app_remote_backend) |*rb| {
                 rb.deinit();
                 app_remote_backend = null;
@@ -34944,6 +34964,98 @@ test "P3-e3-6 app-quit: host-backed Term을 detach해 host runtime이 생존하�
         var rr: session_host.remote_runtime.RemoteRuntime = undefined;
         try rr.attachExisting(&client2, allocator, io, 1, rid, .{ .cols = 40, .rows = 10 }); // 생존한 runtime에 재접속 성공!
         rr.deinit(); // 검증 끝 — 이제 terminate로 정리.
+    } else {
+        return error.SkipZigTest;
+    }
+}
+
+// P4 "Quit and End All Sessions"(§6 종료 매트릭스 row 3) 통합 스모크 — 종료 확인의 **alternate**("종료 및 세션 끝내기")를
+// 누르면 e3-6의 detach(생존)와 **반대로** host-backed runtime을 terminate한다(생존 안 함). 같은 셋업에서 detach 스모크는
+// attachExisting 성공(생존), 이 end-all 스모크는 AttachFailed(종료)로 갈려 종료 gate의 두 분기를 함께 고정한다.
+test "P4 Quit-End-All: alternate가 host-backed runtime을 terminate한다(재접속 실패)" {
+    if (is_macos) {
+        const allocator = std.testing.allocator;
+        const io = std.Io.Threaded.global_single_threaded.io();
+
+        var base_buf: [96]u8 = undefined;
+        const base = std.fmt.bufPrintZ(&base_buf, "/tmp/maru-p4-ea-{d}", .{std.c.getpid()}) catch return error.SkipZigTest;
+        _ = std.c.mkdir(base.ptr, 0o700);
+        var dir_buf: [160]u8 = undefined;
+        const dir = session_host.discovery.sessionHostDirPath(&dir_buf, base) catch return error.SkipZigTest;
+        var sock_buf: [224]u8 = undefined;
+        const socket = session_host.discovery.socketPathIn(&sock_buf, dir) catch return error.SkipZigTest;
+
+        const child = std.c.fork();
+        if (child < 0) return error.SkipZigTest;
+        if (child == 0) {
+            _ = std.c.setsid();
+            session_host.daemon.runSessionHost(std.heap.page_allocator, io, dir, socket) catch {};
+            std.c._exit(0);
+        }
+        defer {
+            _ = std.c.kill(child, std.posix.SIG.TERM);
+            var status: c_int = undefined;
+            _ = std.c.waitpid(child, &status, 0);
+            _ = std.c.unlink(socket.ptr);
+            var lpb: [224]u8 = undefined;
+            if (session_host.discovery.lockPathIn(&lpb, dir)) |p| _ = std.c.unlink(p.ptr) else |_| {}
+            _ = std.c.rmdir(dir.ptr);
+            _ = std.c.rmdir(base.ptr);
+        }
+
+        var up = false;
+        var w: usize = 0;
+        while (w < 250) : (w += 1) {
+            if (session_host.client.Client.connect(allocator, socket, "gui")) |cl| {
+                var p = cl;
+                p.deinit();
+                up = true;
+                break;
+            } else |_| _ = usleep(20 * 1000);
+        }
+        try std.testing.expect(up);
+
+        const client = session_host.host_connect.connectOrLaunch(allocator, "/unused", base, .{ .connect_attempts = 30, .connect_delay_ms = 10 }) orelse {
+            try std.testing.expect(false);
+            return;
+        };
+        app_remote_client = client;
+        app_remote_backend = session_host.remote_term_backend.RemoteTermBackend.init(allocator, io, &app_remote_client.?, &app_runtime.routing);
+        defer {
+            app_quitting = false;
+            app_quit_end_all = false;
+            if (app_remote_backend) |*rb| {
+                rb.deinit();
+                app_remote_backend = null;
+            }
+            if (app_remote_client) |*cl| {
+                cl.deinit();
+                app_remote_client = null;
+            }
+        }
+
+        const session = try allocator.create(AppSession);
+        defer allocator.destroy(session);
+        try session.init(io, allocator, .{ .abi_version = abi_version, .cols = 40, .rows = 10, .queue_capacity = 16, .command_kind = @intFromEnum(CommandKind.controlled_smoke) });
+        const first = session.tabs.items[0].panes.items[0].terms.items[0];
+        try std.testing.expect(first.surface.remote != null);
+        const rid = app_remote_backend.?.runtimeIdFor(first.rt.handle) orelse {
+            try std.testing.expect(false);
+            return;
+        };
+
+        // 종료 확인 → **alternate**("종료 및 세션 끝내기"). host-backed가 살아 있어 3버튼 confirm이 뜬다(pending_confirm=.quit).
+        session.requestAppQuit();
+        session.dispatchChromeAction(.confirm_alternate);
+        try std.testing.expect(app_quitting);
+        try std.testing.expect(app_quit_end_all); // end-all 분기 선택됨.
+
+        // deinit이 host-backed Term을 **terminate**한다(detach 아님).
+        session.deinit();
+
+        // 검증: 그 runtime_id에 재접속 시도 → AttachFailed(host RuntimeNotFound = 종료됨). e3-6(detach) 생존과 정반대.
+        var rr2: session_host.remote_runtime.RemoteRuntime = undefined;
+        try std.testing.expectError(error.AttachFailed, rr2.attachExisting(&app_remote_client.?, allocator, io, 99, rid, .{ .cols = 40, .rows = 10 }));
     } else {
         return error.SkipZigTest;
     }

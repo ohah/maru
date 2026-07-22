@@ -38,6 +38,28 @@ const OwnedRow = struct {
     }
 };
 
+/// 조립기가 소유한 kitty 이미지 한 장(디코드된 raw 픽셀). remote_screen(macOS)이 이걸 `terminal.KittyImageView`로 환산해
+/// 렌더러에 넘긴다. `generation`은 렌더러 GPU 텍스처 업로드 캐시 무효화 키(host storage가 (재)transmit마다 올린 값).
+pub const StoredImage = struct {
+    generation: u64 = 0,
+    width: u32 = 0,
+    height: u32 = 0,
+    bpp: u8 = 0,
+    pixels: []u8 = &.{}, // 조립기 소유(deinit/replace가 free).
+};
+
+/// 여러 image_blob 청크를 재조립하는 중간 버퍼. 청크는 chunk_index 0..count-1로 연속 도착하므로 순서대로 누적하고,
+/// 마지막(next_index==count)에 커밋한다. 어긋난 순서/카운트면 폐기(손상 방어).
+const PendingImage = struct {
+    generation: u64,
+    width: u32,
+    height: u32,
+    bpp: u8,
+    next_index: u32,
+    count: u32,
+    buf: std.ArrayListUnmanaged(u8) = .empty,
+};
+
 /// record로부터 조립되는 client 화면 모델. runs를 host wire와 같은 형태로 들고(렌더러가 Run→cell 변환), snapshot으로
 /// 리셋하고 delta로 증분 갱신한다. 소유는 caller(init/deinit).
 pub const ScreenAssembler = struct {
@@ -49,6 +71,11 @@ pub const ScreenAssembler = struct {
     modes: u32 = 0,
     generation: u64 = 0,
     rows: []OwnedRow = &.{}, // len == rows_count
+    // kitty 이미지 상태(#1 원격 이미지 전송, I3). image_store=완성된 이미지(id→픽셀), placement_list=표시 목록,
+    // pending_images=재조립 중인 청크. snapshot은 이 셋을 리셋하고 record로 다시 채운다(host가 full snapshot에 전량 재송).
+    image_store: std.AutoHashMapUnmanaged(u32, StoredImage) = .{},
+    placement_list: std.ArrayListUnmanaged(screen_stream.ImagePlacement) = .empty,
+    pending_images: std.AutoHashMapUnmanaged(u32, PendingImage) = .{},
 
     pub fn init(allocator: std.mem.Allocator) ScreenAssembler {
         return .{ .allocator = allocator };
@@ -56,6 +83,10 @@ pub const ScreenAssembler = struct {
 
     pub fn deinit(self: *ScreenAssembler) void {
         self.clearRows();
+        self.clearImages();
+        self.image_store.deinit(self.allocator);
+        self.placement_list.deinit(self.allocator);
+        self.pending_images.deinit(self.allocator);
         self.* = undefined;
     }
 
@@ -63,6 +94,77 @@ pub const ScreenAssembler = struct {
         for (self.rows) |row| row.deinit(self.allocator);
         if (self.rows.len != 0) self.allocator.free(self.rows);
         self.rows = &.{};
+    }
+
+    /// 이미지 상태를 비운다(snapshot 리셋·deinit 공용) — 완성 이미지 픽셀·placement·재조립 중 청크 버퍼를 모두 해제한다.
+    /// 맵/리스트 자체(capacity)는 재사용을 위해 `clearRetainingCapacity`로 두고, 최종 해제는 deinit이 한다.
+    fn clearImages(self: *ScreenAssembler) void {
+        var it = self.image_store.valueIterator();
+        while (it.next()) |img| self.allocator.free(img.pixels);
+        self.image_store.clearRetainingCapacity();
+        self.placement_list.clearRetainingCapacity();
+        var pit = self.pending_images.valueIterator();
+        while (pit.next()) |p| p.buf.deinit(self.allocator);
+        self.pending_images.clearRetainingCapacity();
+    }
+
+    /// 완성된 이미지 픽셀(소유권 이전 — caller가 dupe/toOwnedSlice로 넘긴다)을 image_store에 넣는다(같은 id 교체 시 옛 픽셀 free).
+    fn putImage(self: *ScreenAssembler, id: u32, gen: u64, w: u32, h: u32, bpp: u8, owned_pixels: []u8) ApplyError!void {
+        const gop = self.image_store.getOrPut(self.allocator, id) catch {
+            self.allocator.free(owned_pixels);
+            return error.OutOfMemory;
+        };
+        if (gop.found_existing) self.allocator.free(gop.value_ptr.pixels);
+        gop.value_ptr.* = .{ .generation = gen, .width = w, .height = h, .bpp = bpp, .pixels = owned_pixels };
+    }
+
+    /// image_blob record 하나를 재조립한다. 단일 청크(count<=1)면 바로 저장, 다중 청크면 chunk_index 순서대로 누적하고
+    /// 마지막에 커밋한다. 순서/카운트가 어긋나면 그 이미지 pending을 폐기(조용히 — 손상 방어, 다음 fresh snapshot이 복구).
+    fn handleImageBlob(self: *ScreenAssembler, header: screen_stream.RecordHeader, body: []const u8) ApplyError!void {
+        const blob = try screen_stream.decodeImageBlob(body);
+        if (header.chunk_count <= 1) {
+            const owned = self.allocator.dupe(u8, blob.pixels) catch return error.OutOfMemory;
+            return self.putImage(blob.image_id, blob.generation, blob.width, blob.height, blob.bpp, owned);
+        }
+        if (header.chunk_index == 0) {
+            if (self.pending_images.getPtr(blob.image_id)) |old| old.buf.deinit(self.allocator); // 재시작 — 이전 미완 폐기.
+            var pend = PendingImage{ .generation = blob.generation, .width = blob.width, .height = blob.height, .bpp = blob.bpp, .next_index = 0, .count = header.chunk_count };
+            pend.buf.appendSlice(self.allocator, blob.pixels) catch {
+                pend.buf.deinit(self.allocator);
+                return error.OutOfMemory;
+            };
+            pend.next_index = 1;
+            self.pending_images.put(self.allocator, blob.image_id, pend) catch {
+                pend.buf.deinit(self.allocator);
+                return error.OutOfMemory;
+            };
+        } else {
+            const p = self.pending_images.getPtr(blob.image_id) orelse return; // 0번 없이 온 청크 — 스킵.
+            if (header.chunk_index != p.next_index or header.chunk_count != p.count) { // 순서/카운트 어긋남 — 폐기.
+                p.buf.deinit(self.allocator);
+                _ = self.pending_images.remove(blob.image_id);
+                return;
+            }
+            p.buf.appendSlice(self.allocator, blob.pixels) catch return error.OutOfMemory;
+            p.next_index += 1;
+        }
+        // 마지막 청크면 커밋(소유권을 image_store로 이전).
+        const p = self.pending_images.getPtr(blob.image_id) orelse return;
+        if (p.next_index == p.count) {
+            const owned = p.buf.toOwnedSlice(self.allocator) catch return error.OutOfMemory;
+            _ = self.pending_images.remove(blob.image_id);
+            try self.putImage(blob.image_id, blob.generation, blob.width, blob.height, blob.bpp, owned);
+        }
+    }
+
+    /// 현재 표시 중인 이미지 placement 목록(렌더 입력). remote_screen이 각 placement의 image_id로 `imageById`를 찾아 그린다.
+    pub fn imagePlacements(self: *const ScreenAssembler) []const screen_stream.ImagePlacement {
+        return self.placement_list.items;
+    }
+
+    /// image_id로 저장된 이미지를 찾는다(없으면 null — placement가 아직 안 온 blob을 가리키는 경우).
+    pub fn imageById(self: *const ScreenAssembler, id: u32) ?StoredImage {
+        return self.image_store.get(id);
     }
 
     /// 이 행의 runs(렌더 입력). 범위를 벗어나면 빈 슬라이스.
@@ -81,6 +183,7 @@ pub const ScreenAssembler = struct {
         const meta = try screen_stream.decodeScreenMeta(fs.body);
 
         self.clearRows();
+        self.clearImages(); // snapshot은 이미지도 리셋 — host가 full snapshot에 현재 이미지/placement를 전량 재송한다.
         const new_rows = self.allocator.alloc(OwnedRow, meta.rows) catch return error.OutOfMemory;
         for (new_rows) |*row| row.* = .{}; // 빈 행으로 초기화(누락 row record 대비).
         self.rows = new_rows;
@@ -93,15 +196,24 @@ pub const ScreenAssembler = struct {
 
         while (try rs.next()) |rec| {
             const s = try screen_stream.RecordStream.split(rec);
-            if (s.header.kind != .row) continue; // 미래 image record 등은 이 슬라이스에서 건너뛴다.
-            const dr = try screen_stream.decodeRow(self.allocator, s.body);
-            defer dr.deinit(self.allocator);
-            if (dr.row_index >= self.rows_count) continue; // 범위 밖 row_index 무시.
-            if (!screen_stream.rowWidthMatches(dr, self.cols)) return error.MalformedRow; // §12 계약 검증(reject-and-request-fresh).
-            // ownRuns를 **먼저** — 실패해도 기존 슬롯이 불변이라, 중복 row_index + OOM에서 해제된 포인터 재해제(double free)를 막는다.
-            const owned = try ownRuns(self.allocator, dr.runs);
-            self.rows[dr.row_index].deinit(self.allocator);
-            self.rows[dr.row_index] = owned;
+            switch (s.header.kind) {
+                .row => {
+                    const dr = try screen_stream.decodeRow(self.allocator, s.body);
+                    defer dr.deinit(self.allocator);
+                    if (dr.row_index >= self.rows_count) continue; // 범위 밖 row_index 무시.
+                    if (!screen_stream.rowWidthMatches(dr, self.cols)) return error.MalformedRow; // §12 계약 검증(reject-and-request-fresh).
+                    // ownRuns를 **먼저** — 실패해도 기존 슬롯이 불변이라, 중복 row_index + OOM에서 해제된 포인터 재해제(double free)를 막는다.
+                    const owned = try ownRuns(self.allocator, dr.runs);
+                    self.rows[dr.row_index].deinit(self.allocator);
+                    self.rows[dr.row_index] = owned;
+                },
+                .image_blob => try self.handleImageBlob(s.header, s.body), // 청크 재조립 → image_store.
+                .image_placement => {
+                    const p = try screen_stream.decodeImagePlacement(s.body);
+                    self.placement_list.append(self.allocator, p) catch return error.OutOfMemory;
+                },
+                else => {}, // 미래 record는 건너뛴다.
+            }
         }
     }
 
@@ -295,4 +407,88 @@ test "screen assembler: delta with a mismatched base_generation is a gap" {
     defer allocator.free(rec);
     try screen_stream.appendRecord(&delta, allocator, rec);
     try testing.expectError(error.GenerationGap, asm_.applyDelta(delta.items));
+}
+
+/// 테스트 helper: meta + image_blob(단일 청크) + image_placement를 하나의 snapshot 스트림으로 만든다(caller free).
+fn buildImageSnapshot(allocator: std.mem.Allocator, image_id: u32, gen: u64, w: u32, h: u32, bpp: u8, pixels: []const u8, col: u16) ![]u8 {
+    var stream: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer stream.deinit(allocator);
+    const meta_rec = try screen_stream.encodeScreenMeta(allocator, .{ .kind = .screen_meta, .generation = 1 }, .{ .cols = 4, .rows = 1 });
+    defer allocator.free(meta_rec);
+    try screen_stream.appendRecord(&stream, allocator, meta_rec);
+    const blob_rec = try screen_stream.encodeImageBlob(allocator, .{ .kind = .image_blob, .generation = 1 }, .{ .image_id = image_id, .generation = gen, .width = w, .height = h, .bpp = bpp, .pixels = pixels });
+    defer allocator.free(blob_rec);
+    try screen_stream.appendRecord(&stream, allocator, blob_rec);
+    const pl_rec = try screen_stream.encodeImagePlacement(allocator, .{ .kind = .image_placement, .generation = 1 }, .{ .image_id = image_id, .placement_id = 0, .row = 0, .col = col, .columns = w, .rows = h });
+    defer allocator.free(pl_rec);
+    try screen_stream.appendRecord(&stream, allocator, pl_rec);
+    return stream.toOwnedSlice(allocator);
+}
+
+test "screen assembler: applySnapshot stores single-chunk image + placement" {
+    const allocator = testing.allocator;
+    const px = [_]u8{ 1, 2, 3, 4, 5, 6, 7, 8 }; // 2x1 RGBA
+    const snap = try buildImageSnapshot(allocator, 9, 4, 2, 1, 4, &px, 1);
+    defer allocator.free(snap);
+
+    var asm_ = ScreenAssembler.init(allocator);
+    defer asm_.deinit();
+    try asm_.applySnapshot(snap);
+
+    try testing.expect(asm_.imageById(9) != null);
+    const img = asm_.imageById(9).?;
+    try testing.expectEqual(@as(u32, 2), img.width);
+    try testing.expectEqual(@as(u8, 4), img.bpp);
+    try testing.expectEqual(@as(u64, 4), img.generation); // host storage generation(렌더러 캐시 키).
+    try testing.expectEqualSlices(u8, &px, img.pixels);
+
+    const pls = asm_.imagePlacements();
+    try testing.expectEqual(@as(usize, 1), pls.len);
+    try testing.expectEqual(@as(u32, 9), pls[0].image_id);
+    try testing.expectEqual(@as(u16, 1), pls[0].col);
+}
+
+test "screen assembler: multi-chunk image_blob reassembles into one image" {
+    const allocator = testing.allocator;
+    var stream: std.ArrayListUnmanaged(u8) = .empty;
+    defer stream.deinit(allocator);
+    const meta_rec = try screen_stream.encodeScreenMeta(allocator, .{ .kind = .screen_meta, .generation = 1 }, .{ .cols = 2, .rows = 1 });
+    defer allocator.free(meta_rec);
+    try screen_stream.appendRecord(&stream, allocator, meta_rec);
+    // 6바이트 이미지를 3청크로 나눠 보낸다 — chunk_index 0..2, count 3.
+    const chunks = [_][]const u8{ &[_]u8{ 0xA, 0xB }, &[_]u8{ 0xC, 0xD }, &[_]u8{ 0xE, 0xF } };
+    for (chunks, 0..) |ch, i| {
+        const rec = try screen_stream.encodeImageBlob(allocator, .{ .kind = .image_blob, .generation = 1, .chunk_index = @intCast(i), .chunk_count = 3 }, .{ .image_id = 7, .generation = 2, .width = 3, .height = 1, .bpp = 2, .pixels = ch });
+        defer allocator.free(rec);
+        try screen_stream.appendRecord(&stream, allocator, rec);
+    }
+
+    var asm_ = ScreenAssembler.init(allocator);
+    defer asm_.deinit();
+    try asm_.applySnapshot(stream.items);
+
+    try testing.expect(asm_.imageById(7) != null);
+    try testing.expectEqualSlices(u8, &[_]u8{ 0xA, 0xB, 0xC, 0xD, 0xE, 0xF }, asm_.imageById(7).?.pixels);
+}
+
+test "screen assembler: applySnapshot resets prior images and placements" {
+    const allocator = testing.allocator;
+    const px = [_]u8{ 1, 2, 3, 4 };
+    const snap1 = try buildImageSnapshot(allocator, 9, 1, 1, 1, 4, &px, 0);
+    defer allocator.free(snap1);
+
+    var asm_ = ScreenAssembler.init(allocator);
+    defer asm_.deinit();
+    try asm_.applySnapshot(snap1);
+    try testing.expect(asm_.imageById(9) != null);
+    try testing.expectEqual(@as(usize, 1), asm_.imagePlacements().len);
+
+    // 이미지 없는 snapshot을 다시 적용하면 이전 이미지/placement가 비워진다(누수 없이).
+    var runs0 = [_]Run{.{ .grapheme = " ", .width = 1, .count = 4 }};
+    var rows = [_]screen_stream.Row{.{ .row_index = 0, .runs = &runs0 }};
+    const snap2 = try buildSnapshot(allocator, 2, .{ .cols = 4, .rows = 1 }, &rows);
+    defer allocator.free(snap2);
+    try asm_.applySnapshot(snap2);
+    try testing.expect(asm_.imageById(9) == null);
+    try testing.expectEqual(@as(usize, 0), asm_.imagePlacements().len);
 }

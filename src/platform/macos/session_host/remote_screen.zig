@@ -27,11 +27,18 @@ pub const CellGrid = struct {
     size: terminal.Size,
     cursor: terminal.Cursor,
     cursor_shape: terminal.CursorShape,
+    // kitty 이미지(#1 I4). placements=이 격자가 소유(값 복사), images=이 격자가 배열은 소유하되 각 view의 `pixels`는
+    // **조립기 픽셀을 빌린다**(zero-copy — 매 프레임 MB 복사 회피). 격자는 apply마다 재구축되고 render는 mutex 아래
+    // 읽으므로(RemoteScreen), 빌린 픽셀은 격자 수명 동안 유효하다(조립기가 mutex 밖에서 안 바뀜).
+    placements: []terminal.KittyPlacement = &.{},
+    images: []terminal.KittyImageView = &.{},
 
     pub fn deinit(self: *CellGrid) void {
         self.allocator.free(self.cells);
         for (self.graphemes.items) |g| self.allocator.free(g);
         self.graphemes.deinit(self.allocator);
+        if (self.placements.len != 0) self.allocator.free(self.placements);
+        if (self.images.len != 0) self.allocator.free(self.images); // 배열만 — 픽셀은 조립기 소유.
         self.* = undefined;
     }
 
@@ -45,7 +52,10 @@ pub const CellGrid = struct {
             .cursor_blink = true, // wire는 blink를 따로 싣지 않는다(ScreenMeta.cursor=visible+shape). 정적 렌더라 무해.
             .cells = self.cells,
             .graphemes = self.graphemes.items,
-            // prompt_marks/placements/images/dirty: 원격 wire엔 아직 없다(후속) — 기본값(빈/null).
+            // 이미지(#1 I4): placement + view(픽셀은 조립기 빌림)를 노출한다 — 렌더러 buildGpuImages가 image_id/generation으로
+            // GPU 텍스처를 캐시해 in-process와 동일하게 그린다. prompt_marks/dirty는 아직 원격 wire에 없다(후속) — 기본값.
+            .placements = self.placements,
+            .images = self.images,
         };
     }
 };
@@ -102,6 +112,54 @@ pub fn build(allocator: std.mem.Allocator, asm_: *const screen_assembler.ScreenA
         }
     }
 
+    // 이미지(#1 I4): placement를 terminal 타입으로 1:1 복사하고, 참조된 image_id마다 저장 이미지를 KittyImageView로 빌린다
+    // (픽셀 zero-copy — 조립기 소유). 렌더러(buildGpuImages)가 이 둘로 in-process와 동일하게 그린다.
+    const src_placements = asm_.imagePlacements();
+    const placements: []terminal.KittyPlacement = if (src_placements.len == 0) &.{} else pl: {
+        const arr = try allocator.alloc(terminal.KittyPlacement, src_placements.len);
+        for (src_placements, 0..) |p, i| arr[i] = .{
+            .image_id = p.image_id,
+            .placement_id = p.placement_id,
+            .row = p.row,
+            .col = p.col,
+            .cell_x_offset = p.cell_x_offset,
+            .cell_y_offset = p.cell_y_offset,
+            .src_x = p.src_x,
+            .src_y = p.src_y,
+            .src_width = p.src_width,
+            .src_height = p.src_height,
+            .columns = p.columns,
+            .rows = p.rows,
+            .z = p.z,
+        };
+        break :pl arr;
+    };
+    errdefer if (placements.len != 0) allocator.free(placements);
+
+    var images: std.ArrayListUnmanaged(terminal.KittyImageView) = .empty;
+    errdefer images.deinit(allocator);
+    for (src_placements) |p| {
+        var seen = false; // placement가 참조하는 image_id 중복 제거(같은 이미지의 여러 placement).
+        for (images.items) |iv| {
+            if (iv.image_id == p.image_id) {
+                seen = true;
+                break;
+            }
+        }
+        if (seen) continue;
+        if (asm_.imageById(p.image_id)) |img| {
+            images.append(allocator, .{
+                .image_id = p.image_id,
+                .width = img.width,
+                .height = img.height,
+                .bpp = img.bpp,
+                .generation = img.generation,
+                .pixels = img.pixels, // 조립기 픽셀 빌림(zero-copy).
+            }) catch return error.OutOfMemory;
+        }
+    }
+    const images_slice = images.toOwnedSlice(allocator) catch return error.OutOfMemory;
+
     return .{
         .allocator = allocator,
         .cells = cells,
@@ -109,6 +167,8 @@ pub fn build(allocator: std.mem.Allocator, asm_: *const screen_assembler.ScreenA
         .size = .{ .cols = cols, .rows = rows },
         .cursor = .{ .col = asm_.cursor.col, .row = asm_.cursor.row, .visible = asm_.cursor.visible },
         .cursor_shape = if (asm_.cursor.shape <= 2) @enumFromInt(asm_.cursor.shape) else .block, // 0=block/1=underline/2=bar.
+        .placements = placements,
+        .images = images_slice,
     };
 }
 
@@ -364,4 +424,44 @@ test "remote screen: a Surface backed by RemoteScreen renders the assembled remo
     const row1_c0 = r2.cells[10].codepoint; // row1 col0.
     surface.unlockCore(io);
     try testing.expectEqual(@as(u21, 's'), row1_c0);
+}
+
+test "remote screen: build exposes kitty images + placements from the assembler (I4)" {
+    const allocator = testing.allocator;
+    // 이미지가 실린 snapshot 스트림: meta + image_blob(2x1 RGBA) + image_placement(row 1, col 2, z 3).
+    var stream: std.ArrayListUnmanaged(u8) = .empty;
+    defer stream.deinit(allocator);
+    const meta_rec = try screen_stream.encodeScreenMeta(allocator, .{ .kind = .screen_meta, .generation = 1 }, .{ .cols = 4, .rows = 2 });
+    defer allocator.free(meta_rec);
+    try screen_stream.appendRecord(&stream, allocator, meta_rec);
+    const px = [_]u8{ 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88 };
+    const blob_rec = try screen_stream.encodeImageBlob(allocator, .{ .kind = .image_blob, .generation = 1 }, .{ .image_id = 5, .generation = 9, .width = 2, .height = 1, .bpp = 4, .pixels = &px });
+    defer allocator.free(blob_rec);
+    try screen_stream.appendRecord(&stream, allocator, blob_rec);
+    const pl_rec = try screen_stream.encodeImagePlacement(allocator, .{ .kind = .image_placement, .generation = 1 }, .{ .image_id = 5, .placement_id = 0, .row = 1, .col = 2, .columns = 2, .rows = 1, .z = 3 });
+    defer allocator.free(pl_rec);
+    try screen_stream.appendRecord(&stream, allocator, pl_rec);
+
+    var asm_ = screen_assembler.ScreenAssembler.init(allocator);
+    defer asm_.deinit();
+    try asm_.applySnapshot(stream.items);
+
+    // build가 조립기의 이미지/placement를 renderSnapshot에 노출한다(픽셀은 조립기 빌림 — zero-copy).
+    var grid = try build(allocator, &asm_);
+    defer grid.deinit();
+    const snap = grid.renderSnapshot();
+
+    try testing.expectEqual(@as(usize, 1), snap.placements.len);
+    try testing.expectEqual(@as(u32, 5), snap.placements[0].image_id);
+    try testing.expectEqual(@as(u16, 2), snap.placements[0].col);
+    try testing.expectEqual(@as(i32, 1), snap.placements[0].row);
+    try testing.expectEqual(@as(i32, 3), snap.placements[0].z);
+    try testing.expectEqual(@as(u32, 2), snap.placements[0].columns);
+
+    try testing.expectEqual(@as(usize, 1), snap.images.len);
+    try testing.expectEqual(@as(u32, 5), snap.images[0].image_id);
+    try testing.expectEqual(@as(u32, 2), snap.images[0].width);
+    try testing.expectEqual(@as(u8, 4), snap.images[0].bpp);
+    try testing.expectEqual(@as(u64, 9), snap.images[0].generation); // 렌더러 GPU 캐시 키.
+    try testing.expectEqualSlices(u8, &px, snap.images[0].pixels);
 }

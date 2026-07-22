@@ -245,7 +245,18 @@ pub const ScreenAssembler = struct {
                     if (md.base_generation != self.generation) return error.GenerationGap;
                     self.modes = md.modes;
                 },
-                else => {}, // scroll_rect/clear_rect/image_* — 현재 producer 미방출, 조립기는 무시(후속 확장).
+                // 이미지 delta(#1 I4b). blob은 additive(재조립→store, 기존 이미지 안 지움). image_place는 full-set 교체라
+                // clear 센티넬(image_id=0)에 placement_list를 비우고 이후를 append한다(§appendImagePlaceDelta).
+                .image_blob => try self.handleImageBlob(s.header, s.body),
+                .image_place => {
+                    const p = try screen_stream.decodeImagePlacement(s.body);
+                    if (p.image_id == 0) {
+                        self.placement_list.clearRetainingCapacity(); // clear 센티넬.
+                    } else {
+                        self.placement_list.append(self.allocator, p) catch return error.OutOfMemory;
+                    }
+                },
+                else => {}, // scroll_rect/clear_rect — 현재 producer 미방출, 조립기는 무시(후속 확장).
             }
         }
     }
@@ -491,4 +502,46 @@ test "screen assembler: applySnapshot resets prior images and placements" {
     try asm_.applySnapshot(snap2);
     try testing.expect(asm_.imageById(9) == null);
     try testing.expectEqual(@as(usize, 0), asm_.imagePlacements().len);
+}
+
+test "screen assembler: applyDelta applies image_blob + image_place(clear sentinel replaces placements)" {
+    const allocator = testing.allocator;
+    // base: image 9가 표시된 화면(placement 1개).
+    const base_px = [_]u8{ 1, 2, 3, 4 };
+    const snap = try buildImageSnapshot(allocator, 9, 1, 1, 1, 4, &base_px, 0);
+    defer allocator.free(snap);
+    var asm_ = ScreenAssembler.init(allocator);
+    defer asm_.deinit();
+    try asm_.applySnapshot(snap);
+    try testing.expectEqual(@as(usize, 1), asm_.imagePlacements().len); // image 9 placement.
+
+    // delta: image_blob(id 4) + clear 센티넬 + image_place(id 4). → image 9 placement 치워지고 image 4로 교체.
+    var delta: std.ArrayListUnmanaged(u8) = .empty;
+    defer delta.deinit(allocator);
+    const px = [_]u8{ 9, 8, 7, 6 };
+    {
+        const rec = try screen_stream.encodeImageBlob(allocator, .{ .kind = .image_blob, .generation = 1 }, .{ .image_id = 4, .generation = 2, .width = 1, .height = 1, .bpp = 4, .pixels = &px });
+        defer allocator.free(rec);
+        try screen_stream.appendRecord(&delta, allocator, rec);
+    }
+    {
+        const clear = try screen_stream.encodeImagePlacement(allocator, .{ .kind = .image_place, .generation = 1 }, .{ .image_id = 0, .row = 0, .col = 0 });
+        defer allocator.free(clear);
+        try screen_stream.appendRecord(&delta, allocator, clear);
+    }
+    {
+        const pl = try screen_stream.encodeImagePlacement(allocator, .{ .kind = .image_place, .generation = 1 }, .{ .image_id = 4, .row = 0, .col = 1 });
+        defer allocator.free(pl);
+        try screen_stream.appendRecord(&delta, allocator, pl);
+    }
+    try asm_.applyDelta(delta.items);
+
+    // image 4 blob 저장(additive), image 9 blob은 그대로(placement만 치워짐).
+    try testing.expect(asm_.imageById(4) != null);
+    try testing.expectEqualSlices(u8, &px, asm_.imageById(4).?.pixels);
+    try testing.expect(asm_.imageById(9) != null); // blob은 안 지운다.
+    // placement는 clear+set으로 image 4 하나만(image 9 placement는 센티넬로 치워짐).
+    try testing.expectEqual(@as(usize, 1), asm_.imagePlacements().len);
+    try testing.expectEqual(@as(u32, 4), asm_.imagePlacements()[0].image_id);
+    try testing.expectEqual(@as(u16, 1), asm_.imagePlacements()[0].col);
 }

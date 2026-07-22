@@ -36,7 +36,7 @@ pub const CellGrid = struct {
     prompt_marks: []terminal.RowPrompt = &.{},
 
     pub fn deinit(self: *CellGrid) void {
-        self.allocator.free(self.cells);
+        if (self.cells.len != 0) self.allocator.free(self.cells); // len 가드 — emptyGrid(cells=&.{})도 안전히 deinit(리뷰 #2).
         for (self.graphemes.items) |g| self.allocator.free(g);
         self.graphemes.deinit(self.allocator);
         if (self.placements.len != 0) self.allocator.free(self.placements);
@@ -56,10 +56,14 @@ pub const CellGrid = struct {
             .cells = self.cells,
             .graphemes = self.graphemes.items,
             // 이미지(#1 I4): placement + view(픽셀은 조립기 빌림)를 노출한다 — 렌더러 buildGpuImages가 image_id/generation으로
-            // GPU 텍스처를 캐시해 in-process와 동일하게 그린다. dirty는 아직 원격 wire에 없다(후속) — 기본값.
+            // GPU 텍스처를 캐시해 in-process와 동일하게 그린다.
             .placements = self.placements,
             .images = self.images,
             .prompt_marks = self.prompt_marks, // OSC 133 거터(✓/✗)·prompt 네비 입력.
+            // **dirty는 반드시 세운다**(리뷰 #1): draw 경로(draw_list.zig)가 셀·커서·거터 방출 전체를 `if (snapshot.dirty)`로
+            // 게이트하므로 null이면 host-backed 패널이 통째로 blank로 그려진다. 원격은 apply마다 격자를 전부 다시 뜨므로(부분
+            // dirty 추적 없음) 매 프레임 전체 화면을 dirty로 노출한다(in-process가 macOS live 경로에서 fullDirty를 유지하는 것과 동형).
+            .dirty = if (self.size.rows == 0) null else .{ .start_row = 0, .end_row = self.size.rows - 1 },
         };
     }
 };
@@ -140,29 +144,22 @@ pub fn build(allocator: std.mem.Allocator, asm_: *const screen_assembler.ScreenA
     };
     errdefer if (placements.len != 0) allocator.free(placements);
 
+    // 저장된 **모든** 이미지를 노출한다(in-process buildImageViews와 동일 — placement 미참조도 포함, 리뷰 #10). 맵 키가
+    // unique라 dedup 불요(placement별 O(n²) 스캔 제거, 리뷰 #13). 픽셀은 조립기 소유를 빌린다(zero-copy).
     var images: std.ArrayListUnmanaged(terminal.KittyImageView) = .empty;
     errdefer images.deinit(allocator);
-    for (src_placements) |p| {
-        var seen = false; // placement가 참조하는 image_id 중복 제거(같은 이미지의 여러 placement).
-        for (images.items) |iv| {
-            if (iv.image_id == p.image_id) {
-                seen = true;
-                break;
-            }
-        }
-        if (seen) continue;
-        if (asm_.imageById(p.image_id)) |img| {
-            images.append(allocator, .{
-                .image_id = p.image_id,
-                .width = img.width,
-                .height = img.height,
-                .bpp = img.bpp,
-                .generation = img.generation,
-                .pixels = img.pixels, // 조립기 픽셀 빌림(zero-copy).
-            }) catch return error.OutOfMemory;
-        }
+    var img_it = asm_.imageStoreIterator();
+    while (img_it.next()) |entry| {
+        const img = entry.value_ptr;
+        images.append(allocator, .{
+            .image_id = entry.key_ptr.*,
+            .width = img.width,
+            .height = img.height,
+            .bpp = img.bpp,
+            .generation = img.generation,
+            .pixels = img.pixels,
+        }) catch return error.OutOfMemory;
     }
-    const images_slice = images.toOwnedSlice(allocator) catch return error.OutOfMemory;
 
     // prompt_marks: 조립기의 wire(RowPromptWire)를 core terminal.RowPrompt로 1:1 환산(kind u8→SemanticPrompt, 손상 방어로 clamp).
     const src_pm = asm_.promptMarks();
@@ -175,6 +172,10 @@ pub fn build(allocator: std.mem.Allocator, asm_: *const screen_assembler.ScreenA
         break :pm arr;
     };
     errdefer if (prompt_marks.len != 0) allocator.free(prompt_marks);
+
+    // images.toOwnedSlice를 **마지막 fallible 연산**으로 둔다 — 이후 return은 실패하지 않으므로, prompt_marks alloc(위)이
+    // 실패해도 images ArrayList의 errdefer가 그대로 덮어 누수가 없다(리뷰 #9: toOwnedSlice 뒤 prompt OOM 시 images_slice 누수 해소).
+    const images_slice = images.toOwnedSlice(allocator) catch return error.OutOfMemory;
 
     return .{
         .allocator = allocator,
@@ -275,6 +276,7 @@ pub const RemoteScreen = struct {
     pub fn applySnapshot(self: *RemoteScreen, bytes: []const u8, io: std.Io) (screen_assembler.ApplyError || error{OutOfMemory})!void {
         self.mutex.lockUncancelable(io);
         defer self.mutex.unlock(io);
+        errdefer self.rebuildOrEmpty(); // 리뷰 #2: apply가 이미지 free 후 에러나면 옛 grid가 freed 픽셀을 빌려 UAF — 실패해도 grid를 현재 조립기로 재구축.
         try self.assembler.applySnapshot(bytes);
         try self.rebuildGrid();
     }
@@ -283,6 +285,7 @@ pub const RemoteScreen = struct {
     pub fn applyDelta(self: *RemoteScreen, bytes: []const u8, io: std.Io) (screen_assembler.ApplyError || error{OutOfMemory})!void {
         self.mutex.lockUncancelable(io);
         defer self.mutex.unlock(io);
+        errdefer self.rebuildOrEmpty(); // 리뷰 #2: 위와 동형(delta가 putImage로 옛 픽셀 free 후 손상 record면 dangling).
         try self.assembler.applyDelta(bytes);
         try self.rebuildGrid();
     }
@@ -291,6 +294,15 @@ pub const RemoteScreen = struct {
         const new_grid = try build(self.allocator, &self.assembler);
         self.grid.deinit();
         self.grid = new_grid;
+    }
+
+    /// apply 실패 경로용(리뷰 #2): grid를 현재 조립기 상태로 다시 뜬다. 재구축까지 OOM이면 **빈 grid**로 대체해 dangling
+    /// 픽셀을 확실히 끊는다(옛 grid는 deinit으로 회수 — 픽셀은 조립기 소유라 grid deinit이 안 만짐). 절대 dangling을 안 남긴다.
+    fn rebuildOrEmpty(self: *RemoteScreen) void {
+        self.rebuildGrid() catch {
+            self.grid.deinit();
+            self.grid = .{ .allocator = self.allocator, .cells = &.{}, .graphemes = .empty, .size = .{ .cols = 0, .rows = 0 }, .cursor = .{}, .cursor_shape = .block };
+        };
     }
 
     fn srcRenderSnapshot(ctx: *anyopaque) terminal.RenderSnapshot {
@@ -485,14 +497,14 @@ test "remote screen: build exposes kitty images + placements from the assembler 
 
 /// **원격 파이프라인 parity 인프라(#1 이후 드리프트 방어).** in-process `renderSnapshot`과 원격 파이프라인
 /// (`projectSnapshot`→`ScreenAssembler`→`build`)의 결과가 **렌더 관점에서 동등**한지 단언한다. 원격이 싣기로 한 축
-/// (size·cursor·cursor_shape·cells[style·색 intent·grapheme 해석]·placements·images)을 비교하고, 의도적 드롭
-/// (cursor_blink 하드코딩·prompt_marks·last_command_exit·dirty)은 제외한다. **comptime로 `RenderSnapshot`의 모든 필드가
-/// "비교" 또는 "드롭"으로 분류됐는지 강제**한다 — 새 필드가 추가되면 여기서 **컴파일 에러**가 나 원격 경로 배선(투영/조립/
-/// 노출)을 잊지 않게 한다. 색·이미지가 조용히 유실됐던 재발을 막는 안전망이다.
+/// (size·cursor·cursor_shape·cells[style·색 intent·grapheme 해석]·graphemes·placements·images·prompt_marks·**dirty**[전체화면
+/// 불변식])을 비교하고, 의도적 드롭(cursor_blink 하드코딩·last_command_exit)은 제외한다. **comptime로 `RenderSnapshot`의 모든
+/// 필드가 "비교" 또는 "드롭"으로 분류됐는지 강제**한다 — 새 필드가 추가되면 여기서 **컴파일 에러**가 나 원격 경로 배선(투영/
+/// 조립/노출)을 잊지 않게 한다. 색·이미지·dirty가 조용히 유실됐던(리뷰 #1 blank 렌더) 재발을 막는 안전망이다.
 fn expectSnapshotParity(local: terminal.RenderSnapshot, remote: terminal.RenderSnapshot) !void {
     // ── comptime 필드 커버리지: RenderSnapshot 새 필드는 반드시 아래 둘 중 하나로 분류돼야 한다 ──
-    const compared = [_][]const u8{ "size", "cursor", "cursor_shape", "cells", "graphemes", "placements", "images", "prompt_marks" };
-    const dropped = [_][]const u8{ "cursor_blink", "last_command_exit", "dirty" };
+    const compared = [_][]const u8{ "size", "cursor", "cursor_shape", "cells", "graphemes", "placements", "images", "prompt_marks", "dirty" };
+    const dropped = [_][]const u8{ "cursor_blink", "last_command_exit" };
     comptime {
         for (@typeInfo(terminal.RenderSnapshot).@"struct".fields) |f| {
             var classified = false;
@@ -564,6 +576,11 @@ fn expectSnapshotParity(local: terminal.RenderSnapshot, remote: terminal.RenderS
         try testing.expectEqual(lm.kind, rm.kind);
         try testing.expectEqual(lm.exit, rm.exit);
     }
+    // dirty(리뷰 #1): 원격은 반드시 non-null·전체 화면이어야 draw 경로가 셀/커서/거터를 방출한다(null이면 blank 렌더).
+    // local과의 값 비교보다 이 **불변식**을 못박아, 누가 remote.dirty를 null로 되돌리면 여기서 실패하게 한다.
+    try testing.expect(remote.dirty != null);
+    try testing.expectEqual(@as(u16, 0), remote.dirty.?.start_row);
+    if (remote.size.rows > 0) try testing.expectEqual(remote.size.rows - 1, remote.dirty.?.end_row);
 }
 
 test "remote screen: full RenderSnapshot parity with in-process (styles, colors, wide, grapheme, cursor shape, image)" {

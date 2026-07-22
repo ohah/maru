@@ -21,8 +21,11 @@ pub const magic = [4]u8{ 'M', 'R', 'S', 'H' };
 /// 고정 header 크기(바이트). partial read가 이 경계로 header/payload를 가른다.
 pub const header_size = 32;
 
-/// v1 protocol major. hello에서 client/host가 겹치는 major를 못 찾으면 `incompatible_version`.
-pub const version_major: u16 = 1;
+/// protocol major. hello에서 client/host가 겹치는 major를 못 찾으면 `incompatible_version`. **v2**(리뷰 #3): 원격 화면 wire가
+/// 비호환 변경됐다(Run 색이 resolved RGB→태그드 Color intent, ImageBlob/ImagePlacement 레이아웃 재정의). keep-alive는 host가
+/// GUI 재실행(=흔히 바이너리 업그레이드)을 넘어 사는 게 목적이라, 구/신 빌드가 붙으면 색/이미지가 조용히 깨진다 — major를
+/// 올려 hello에서 **깨끗이 거부**(신 GUI가 구 host에 못 붙고 in-process 폴백/새 host)하게 한다. codec_version(screen_stream)도 같이 올림.
+pub const version_major: u16 = 2;
 
 /// payload cap(§10). control은 strict UTF-8 JSON, binary는 그대로. 이 상한들은 kind별로 framing이 적용한다.
 /// 한 viewport snapshot(16 MiB)은 여러 `snapshot_chunk`(각 1 MiB)로 나뉘므로 **단일 frame** payload 상한은 binary 1 MiB다.

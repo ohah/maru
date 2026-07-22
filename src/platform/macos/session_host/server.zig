@@ -932,7 +932,7 @@ test "server: hello with overlapping version acks host_id and moves to ready" {
     var registry = reg.TerminalRuntimeRegistry.init(testing.allocator);
     defer registry.deinit();
     var conn = Connection.init(testing.allocator, 0x1234567890ABCDEF, &registry);
-    const r = try feedJson(&conn, .hello, 7, "{\"protocol_min\":1,\"protocol_max\":1,\"client_kind\":\"gui\"}");
+    const r = try feedJson(&conn, .hello, 7, "{\"protocol_min\":2,\"protocol_max\":2,\"client_kind\":\"gui\"}");
     defer if (r.frame) |f| f.deinit(testing.allocator);
     try testing.expectEqualStrings("reply", r.action);
     try testing.expectEqual(protocol.Kind.hello_ack, r.frame.?.header.kind);
@@ -947,7 +947,7 @@ test "server: hello with no overlapping version returns incompatible_version and
     var registry = reg.TerminalRuntimeRegistry.init(testing.allocator);
     defer registry.deinit();
     var conn = Connection.init(testing.allocator, 1, &registry);
-    const r = try feedJson(&conn, .hello, 1, "{\"protocol_min\":2,\"protocol_max\":3,\"client_kind\":\"cli\"}");
+    const r = try feedJson(&conn, .hello, 1, "{\"protocol_min\":3,\"protocol_max\":3,\"client_kind\":\"cli\"}"); // host major(2) 밖 → 거부(리뷰 #3로 host=2).
     defer if (r.frame) |f| f.deinit(testing.allocator);
     try testing.expectEqualStrings("reply_and_close", r.action);
     try testing.expect(std.mem.indexOf(u8, r.frame.?.payload, "incompatible_version") != null);
@@ -963,7 +963,7 @@ test "server: host.info and runtime.list/get dispatch registry state after hello
 
     // hello 먼저.
     {
-        const r = try feedJson(&conn, .hello, 1, "{\"protocol_min\":1,\"protocol_max\":1}");
+        const r = try feedJson(&conn, .hello, 1, "{\"protocol_min\":2,\"protocol_max\":2}");
         defer if (r.frame) |f| f.deinit(testing.allocator);
     }
     // host.info → runtime_count 2.
@@ -1004,7 +1004,7 @@ test "server: oversize result replies payload_too_large instead of dropping the 
     }
     var conn = Connection.init(allocator, 0xF00D, &registry);
     {
-        const h = try feedJson(&conn, .hello, 1, "{\"protocol_min\":1,\"protocol_max\":1}");
+        const h = try feedJson(&conn, .hello, 1, "{\"protocol_min\":2,\"protocol_max\":2}");
         if (h.frame) |f| f.deinit(allocator);
     }
     // cap 초과 응답은 connection을 끊지 않고 payload_too_large typed error로 돌아오며 상관 request_id를 유지한다.
@@ -1022,7 +1022,7 @@ test "server: unknown method returns invalid_request; a request before hello clo
     defer registry.deinit();
     var conn = Connection.init(testing.allocator, 1, &registry);
     {
-        const h = try feedJson(&conn, .hello, 1, "{\"protocol_min\":1,\"protocol_max\":1}");
+        const h = try feedJson(&conn, .hello, 1, "{\"protocol_min\":2,\"protocol_max\":2}");
         if (h.frame) |f| f.deinit(testing.allocator);
     }
     const r = try feedJson(&conn, .request, 2, "{\"method\":\"no.such.method\"}");
@@ -1035,7 +1035,7 @@ test "server: ping echoes as pong after hello" {
     defer registry.deinit();
     var conn = Connection.init(testing.allocator, 1, &registry);
     {
-        const h = try feedJson(&conn, .hello, 1, "{\"protocol_min\":1,\"protocol_max\":1}");
+        const h = try feedJson(&conn, .hello, 1, "{\"protocol_min\":2,\"protocol_max\":2}");
         if (h.frame) |f| f.deinit(testing.allocator);
     }
     const r = try feedJson(&conn, .ping, 9, "nonce-42");
@@ -1185,7 +1185,7 @@ test "server: runtime.spawn/terminate dispatch through RuntimeOps; read-only hos
     var conn = Connection.init(allocator, 1, &registry);
     conn.runtime_ops = fake.ops();
     {
-        const h = try feedJson(&conn, .hello, 1, "{\"protocol_min\":1,\"protocol_max\":1}");
+        const h = try feedJson(&conn, .hello, 1, "{\"protocol_min\":2,\"protocol_max\":2}");
         if (h.frame) |f| f.deinit(allocator);
     }
     {
@@ -1205,7 +1205,7 @@ test "server: runtime.spawn/terminate dispatch through RuntimeOps; read-only hos
     // read-only host(runtime_ops=null): spawn은 unauthorized다(§10, §11 — attach 역할에 spawn을 암묵 부여하지 않는다).
     var conn2 = Connection.init(allocator, 1, &registry);
     {
-        const h = try feedJson(&conn2, .hello, 1, "{\"protocol_min\":1,\"protocol_max\":1}");
+        const h = try feedJson(&conn2, .hello, 1, "{\"protocol_min\":2,\"protocol_max\":2}");
         if (h.frame) |f| f.deinit(allocator);
     }
     const r = try feedJson(&conn2, .request, 2, "{\"method\":\"runtime.spawn\",\"params\":{\"argv\":[\"/bin/sh\"],\"cols\":80,\"rows\":24}}");
@@ -1224,7 +1224,7 @@ test "server: attach grants capabilities; controller input/resize dispatch throu
     defer conn.deinit(); // attach subscription을 registry에서 뗀다(deinit는 registry.deinit보다 먼저 — defer LIFO).
     conn.runtime_ops = fake.ops();
     {
-        const h = try feedJson(&conn, .hello, 1, "{\"protocol_min\":1,\"protocol_max\":1}");
+        const h = try feedJson(&conn, .hello, 1, "{\"protocol_min\":2,\"protocol_max\":2}");
         if (h.frame) |f| f.deinit(allocator);
     }
 
@@ -1290,7 +1290,7 @@ test "server: observer attach is denied input and resize" {
     defer conn.deinit();
     conn.runtime_ops = fake.ops();
     {
-        const h = try feedJson(&conn, .hello, 1, "{\"protocol_min\":1,\"protocol_max\":1}");
+        const h = try feedJson(&conn, .hello, 1, "{\"protocol_min\":2,\"protocol_max\":2}");
         if (h.frame) |f| f.deinit(allocator);
     }
     // observer attach → observe만.
@@ -1326,7 +1326,7 @@ test "server: attach streams the runtime snapshot as snapshot_chunk frames after
     defer conn.deinit();
     conn.runtime_ops = fake.ops();
     {
-        const h = try feedJson(&conn, .hello, 1, "{\"protocol_min\":1,\"protocol_max\":1}");
+        const h = try feedJson(&conn, .hello, 1, "{\"protocol_min\":2,\"protocol_max\":2}");
         if (h.frame) |f| f.deinit(allocator);
     }
     // attach → 응답 frame + snapshot_chunk(end_stream) frame이 순서대로 온다(§10).
@@ -1354,7 +1354,7 @@ test "server: read-only host attach replies without a snapshot stream" {
     var conn = Connection.init(allocator, 1, &registry); // runtime_ops = null (read-only host).
     defer conn.deinit();
     {
-        const h = try feedJson(&conn, .hello, 1, "{\"protocol_min\":1,\"protocol_max\":1}");
+        const h = try feedJson(&conn, .hello, 1, "{\"protocol_min\":2,\"protocol_max\":2}");
         if (h.frame) |f| f.deinit(allocator);
     }
     // 실 runtime이 없으면 attach는 capability만 세우고 응답만 보낸다(.frames가 아니라 .reply — snapshot stream 없음).
@@ -1375,7 +1375,7 @@ test "server: collectDeltas pushes delta_chunk for attached streams and advances
     defer conn.deinit();
     conn.runtime_ops = fake.ops();
     {
-        const h = try feedJson(&conn, .hello, 1, "{\"protocol_min\":1,\"protocol_max\":1}");
+        const h = try feedJson(&conn, .hello, 1, "{\"protocol_min\":2,\"protocol_max\":2}");
         if (h.frame) |f| f.deinit(allocator);
     }
     // attach → base가 fake snapshot("SNAPSHOT-BYTES")로 세팅된다.
@@ -1429,7 +1429,7 @@ test "server: runtime.resync makes collectDeltas push a fresh snapshot_chunk, no
     defer conn.deinit();
     conn.runtime_ops = fake.ops();
     {
-        const h = try feedJson(&conn, .hello, 1, "{\"protocol_min\":1,\"protocol_max\":1}");
+        const h = try feedJson(&conn, .hello, 1, "{\"protocol_min\":2,\"protocol_max\":2}");
         if (h.frame) |f| f.deinit(allocator);
     }
     // attach(controller) → base = fake snapshot("SNAPSHOT-BYTES"), stream_id 1.
@@ -1509,7 +1509,7 @@ test "server: runtime.core_command routes scroll op/arg to RuntimeOps (§6a 원�
     defer conn.deinit();
     conn.runtime_ops = fake.ops();
     {
-        const h = try feedJson(&conn, .hello, 1, "{\"protocol_min\":1,\"protocol_max\":1}");
+        const h = try feedJson(&conn, .hello, 1, "{\"protocol_min\":2,\"protocol_max\":2}");
         if (h.frame) |f| f.deinit(allocator);
     }
     {
@@ -1555,7 +1555,7 @@ test "server: runtime.selected_text routes span to RuntimeOps and returns text (
     defer conn.deinit();
     conn.runtime_ops = fake.ops();
     {
-        const h = try feedJson(&conn, .hello, 1, "{\"protocol_min\":1,\"protocol_max\":1}");
+        const h = try feedJson(&conn, .hello, 1, "{\"protocol_min\":2,\"protocol_max\":2}");
         if (h.frame) |f| f.deinit(allocator);
     }
     {
@@ -1597,7 +1597,7 @@ test "server: runtime.select_op routes word/line op to RuntimeOps and returns sp
     defer conn.deinit();
     conn.runtime_ops = fake.ops();
     {
-        const h = try feedJson(&conn, .hello, 1, "{\"protocol_min\":1,\"protocol_max\":1}");
+        const h = try feedJson(&conn, .hello, 1, "{\"protocol_min\":2,\"protocol_max\":2}");
         if (h.frame) |f| f.deinit(allocator);
     }
     {
@@ -1637,7 +1637,7 @@ test "server: runtime.find routes query(hex) to RuntimeOps and returns {count,sp
     defer conn.deinit();
     conn.runtime_ops = fake.ops();
     {
-        const h = try feedJson(&conn, .hello, 1, "{\"protocol_min\":1,\"protocol_max\":1}");
+        const h = try feedJson(&conn, .hello, 1, "{\"protocol_min\":2,\"protocol_max\":2}");
         if (h.frame) |f| f.deinit(allocator);
     }
     {

@@ -18,8 +18,10 @@
 
 const std = @import("std");
 
-/// codec 버전. decode가 다른 값을 보면 `BadCodecVersion`(상위가 fresh snapshot 재요청).
-pub const codec_version: u16 = 1;
+/// codec 버전. decode가 다른 값을 보면 `BadCodecVersion`(상위가 fresh snapshot 재요청). **v2**(리뷰 #3): Run 색(resolved RGB→
+/// 태그드 Color intent)·ImageBlob/ImagePlacement 레이아웃이 비호환 변경돼, 구 codec 레코드를 신 client가 조용히 오해석하지
+/// 않게 올린다(protocol.version_major도 함께 v2 — 그쪽은 hello 거부, 이쪽은 레코드 거부로 이중 방어).
+pub const codec_version: u16 = 2;
 
 /// record header 크기(바이트). body는 이 뒤에 이어진다.
 pub const record_header_size = 28;
@@ -717,7 +719,7 @@ test "screen-stream: record header round-trips with 28-byte big-endian layout" {
     const h = RecordHeader{ .kind = .row, .generation = 0x1122334455667788, .sequence = 5, .chunk_index = 2, .chunk_count = 9 };
     const bytes = h.encode();
     try testing.expectEqual(@as(usize, 28), bytes.len);
-    try testing.expectEqual(@as(u16, 1), std.mem.readInt(u16, bytes[0..2], .big)); // codec_version
+    try testing.expectEqual(codec_version, std.mem.readInt(u16, bytes[0..2], .big)); // codec_version(리뷰 #3로 v2)
     try testing.expectEqual(@as(u16, 2), std.mem.readInt(u16, bytes[2..4], .big)); // row=2
     const back = try RecordHeader.decode(&bytes);
     try testing.expectEqual(h.kind, back.kind);
@@ -729,7 +731,7 @@ test "screen-stream: record header round-trips with 28-byte big-endian layout" {
 
 test "screen-stream: header rejects a foreign codec version" {
     var bytes = (RecordHeader{ .kind = .screen_meta }).encode();
-    std.mem.writeInt(u16, bytes[0..2], 2, .big);
+    std.mem.writeInt(u16, bytes[0..2], 99, .big); // 현재 codec_version(2)과 다른 이물질 값(리뷰 #3로 2가 유효해짐).
     try testing.expectError(error.BadCodecVersion, RecordHeader.decode(&bytes));
 }
 

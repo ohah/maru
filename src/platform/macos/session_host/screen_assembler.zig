@@ -15,6 +15,9 @@ const screen_stream = @import("screen_stream.zig");
 
 const Run = screen_stream.Run;
 
+/// 다중 청크 이미지 재조립 총량 절대 상한(리뷰 #8). 선언 w*h*bpp가 이보다 크거나 오버플로면 이 값으로 클램프한다.
+const max_reassembled_image: usize = 512 * 1024 * 1024; // 512 MiB
+
 pub const ApplyError = screen_stream.DecodeError || error{
     /// delta의 `base_generation`이 현재 화면 generation과 다르다 — gap이라 fresh snapshot을 재요청해야 한다(§9).
     GenerationGap,
@@ -121,8 +124,21 @@ pub const ScreenAssembler = struct {
         gop.value_ptr.* = .{ .generation = gen, .width = w, .height = h, .bpp = bpp, .pixels = owned_pixels };
     }
 
+    /// image_store에서 이미지를 제거하고 픽셀을 free한다(리뷰 #12 — host가 evict/delete한 이미지를 client도 회수). 없으면 no-op.
+    fn removeImage(self: *ScreenAssembler, id: u32) void {
+        if (self.image_store.fetchRemove(id)) |kv| self.allocator.free(kv.value.pixels);
+    }
+
+    /// 다중 청크 재조립 pending 버퍼 상한(리뷰 #8, DoS 방어): 선언된 w*h*bpp(오버플로/과대 시 절대 상한)를 넘으면 폐기한다.
+    /// per-record 1 MiB cap은 청크 하나만 막고 재조립 총량은 안 막으므로, 손상/악성 delta가 큰 chunk_count로 GB를 누적하는 걸 차단.
+    fn reassembleCap(width: u32, height: u32, bpp: u8) usize {
+        const wh = std.math.mul(u64, width, height) catch return max_reassembled_image;
+        const total = std.math.mul(u64, wh, bpp) catch return max_reassembled_image;
+        return @intCast(@min(total, @as(u64, max_reassembled_image)));
+    }
+
     /// image_blob record 하나를 재조립한다. 단일 청크(count<=1)면 바로 저장, 다중 청크면 chunk_index 순서대로 누적하고
-    /// 마지막에 커밋한다. 순서/카운트가 어긋나면 그 이미지 pending을 폐기(조용히 — 손상 방어, 다음 fresh snapshot이 복구).
+    /// 마지막에 커밋한다. 순서/카운트가 어긋나거나 상한(§reassembleCap)을 넘으면 그 이미지 pending을 폐기(손상 방어, 다음 fresh snapshot 복구).
     fn handleImageBlob(self: *ScreenAssembler, header: screen_stream.RecordHeader, body: []const u8) ApplyError!void {
         const blob = try screen_stream.decodeImageBlob(body);
         if (header.chunk_count <= 1) {
@@ -130,12 +146,19 @@ pub const ScreenAssembler = struct {
             return self.putImage(blob.image_id, blob.generation, blob.width, blob.height, blob.bpp, owned);
         }
         if (header.chunk_index == 0) {
-            if (self.pending_images.getPtr(blob.image_id)) |old| old.buf.deinit(self.allocator); // 재시작 — 이전 미완 폐기.
+            if (self.pending_images.getPtr(blob.image_id)) |old| {
+                old.buf.deinit(self.allocator); // 재시작 — 이전 미완 폐기.
+                old.buf = .empty; // 리뷰 #4: free 후 빈 상태로 — 아래 appendSlice/put이 OOM으로 실패해도 map에 freed buf가 남아 double-free 되지 않게.
+            }
             var pend = PendingImage{ .generation = blob.generation, .width = blob.width, .height = blob.height, .bpp = blob.bpp, .next_index = 0, .count = header.chunk_count };
             pend.buf.appendSlice(self.allocator, blob.pixels) catch {
                 pend.buf.deinit(self.allocator);
                 return error.OutOfMemory;
             };
+            if (pend.buf.items.len > reassembleCap(blob.width, blob.height, blob.bpp)) { // 리뷰 #8: 상한 초과면 재조립 폐기.
+                pend.buf.deinit(self.allocator);
+                return;
+            }
             pend.next_index = 1;
             self.pending_images.put(self.allocator, blob.image_id, pend) catch {
                 pend.buf.deinit(self.allocator);
@@ -149,6 +172,11 @@ pub const ScreenAssembler = struct {
                 return;
             }
             p.buf.appendSlice(self.allocator, blob.pixels) catch return error.OutOfMemory;
+            if (p.buf.items.len > reassembleCap(blob.width, blob.height, blob.bpp)) { // 리뷰 #8: 상한 초과면 폐기.
+                p.buf.deinit(self.allocator);
+                _ = self.pending_images.remove(blob.image_id);
+                return;
+            }
             p.next_index += 1;
         }
         // 마지막 청크면 커밋(소유권을 image_store로 이전).
@@ -168,6 +196,12 @@ pub const ScreenAssembler = struct {
     /// image_id로 저장된 이미지를 찾는다(없으면 null — placement가 아직 안 온 blob을 가리키는 경우).
     pub fn imageById(self: *const ScreenAssembler, id: u32) ?StoredImage {
         return self.image_store.get(id);
+    }
+
+    /// 저장된 **모든** 이미지 순회자(remote_screen이 in-process `buildImageViews`처럼 placement 미참조 이미지까지 전량
+    /// 노출하려고 쓴다 — 리뷰 #10 divergence 해소). 맵 키가 unique라 별도 dedup 불요.
+    pub fn imageStoreIterator(self: *const ScreenAssembler) std.AutoHashMapUnmanaged(u32, StoredImage).Iterator {
+        return self.image_store.iterator();
     }
 
     /// 현재 행별 prompt 마크(dense; 마크 없으면 empty). remote_screen이 terminal.RowPrompt로 환산해 노출.
@@ -264,10 +298,16 @@ pub const ScreenAssembler = struct {
                     if (md.base_generation != self.generation) return error.GenerationGap;
                     self.modes = md.modes;
                 },
-                // 이미지 delta(#1 I4b). blob은 additive(재조립→store, 기존 이미지 안 지움). image_place는 full-set 교체라
-                // clear 센티넬(image_id=0)에 placement_list를 비우고 이후를 append한다(§appendImagePlaceDelta).
-                .image_blob => try self.handleImageBlob(s.header, s.body),
+                // 이미지/prompt delta(#1 I4b). 이 record들은 body에 base_generation이 없어 **header.generation**으로 base를 대조한다
+                // (리뷰 #5 — set_runs/cursor/modes와 동형; producer가 header.generation=base로 방출하므로 어긋나면 stale delta다).
+                // blob은 additive(재조립→store), image_place는 full-set 교체(센티넬 clear+append), image_remove는 host storage에서
+                // 사라진 이미지 회수(리뷰 #12), prompt_marks는 full-replace.
+                .image_blob => {
+                    if (s.header.generation != self.generation) return error.GenerationGap;
+                    try self.handleImageBlob(s.header, s.body);
+                },
                 .image_place => {
+                    if (s.header.generation != self.generation) return error.GenerationGap;
                     const p = try screen_stream.decodeImagePlacement(s.body);
                     if (p.image_id == 0) {
                         self.placement_list.clearRetainingCapacity(); // clear 센티넬.
@@ -275,9 +315,29 @@ pub const ScreenAssembler = struct {
                         self.placement_list.append(self.allocator, p) catch return error.OutOfMemory;
                     }
                 },
-                .prompt_marks => self.setPromptMarks(try screen_stream.decodePromptMarks(self.allocator, s.body)), // full-replace.
+                .image_remove => {
+                    if (s.header.generation != self.generation) return error.GenerationGap;
+                    const rm = try screen_stream.decodeImageRemove(s.body);
+                    self.removeImage(@intCast(rm.blob_id)); // 리뷰 #12: host가 evict/delete한 이미지를 client도 회수(무한증가 방지).
+                },
+                .prompt_marks => {
+                    if (s.header.generation != self.generation) return error.GenerationGap;
+                    self.setPromptMarks(try screen_stream.decodePromptMarks(self.allocator, s.body));
+                },
                 else => {}, // scroll_rect/clear_rect — 현재 producer 미방출, 조립기는 무시(후속 확장).
             }
+        }
+        // 리뷰 #7: delta 적용 후 placement가 참조하는 이미지가 모두 있어야 한다. 없으면 그 이미지의 blob 배치가 유실됐거나
+        // (host는 blob을 placement보다 먼저 보냄) 불일치 상태다 — MalformedRow로 알려 caller가 fresh snapshot을 재요청하게 한다
+        // (base는 현재 이미지 전량을 담으므로 복원됨). 이 덕에 dedup으로 재전송 안 되던 blob 유실이 영구 blank로 남지 않는다.
+        try self.checkPlacementsResolved();
+    }
+
+    /// 모든 placement가 참조하는 이미지가 image_store에 있는지 검사한다(리뷰 #7). 없으면 배송 손실/불일치 → `MalformedRow`로
+    /// resync를 유도한다. host가 blob을 placement보다 먼저 보내므로 정상 apply 후엔 항상 통과한다(단일 apply 내 blob 완결).
+    fn checkPlacementsResolved(self: *const ScreenAssembler) ApplyError!void {
+        for (self.placement_list.items) |p| {
+            if (self.image_store.get(p.image_id) == null) return error.MalformedRow;
         }
     }
 
@@ -604,4 +664,59 @@ test "screen assembler: prompt_marks record sets per-row marks; snapshot without
     try asm_.applyDelta(delta.items);
     try testing.expectEqual(@as(usize, 1), asm_.promptMarks().len);
     try testing.expectEqual(@as(u8, 1), asm_.promptMarks()[0].kind);
+}
+
+test "screen assembler: image/prompt deltas enforce generation gap and missing-image resync (review #5/#7)" {
+    const allocator = testing.allocator;
+    const px = [_]u8{ 1, 2, 3, 4 };
+    const snap = try buildImageSnapshot(allocator, 9, 1, 1, 1, 4, &px, 0); // gen 1, image 9 placed.
+    defer allocator.free(snap);
+    var asm_ = ScreenAssembler.init(allocator);
+    defer asm_.deinit();
+    try asm_.applySnapshot(snap);
+
+    // #5: stale generation(2 != 1)인 image_blob delta는 GenerationGap.
+    {
+        var d: std.ArrayListUnmanaged(u8) = .empty;
+        defer d.deinit(allocator);
+        const rec = try screen_stream.encodeImageBlob(allocator, .{ .kind = .image_blob, .generation = 2 }, .{ .image_id = 4, .generation = 1, .width = 1, .height = 1, .bpp = 4, .pixels = &px });
+        defer allocator.free(rec);
+        try screen_stream.appendRecord(&d, allocator, rec);
+        try testing.expectError(error.GenerationGap, asm_.applyDelta(d.items));
+    }
+
+    // #7: 이미지 없이 placement만 오면(blob 유실) MalformedRow로 resync 유도. image 7을 place하되 blob은 안 보낸다.
+    {
+        var d: std.ArrayListUnmanaged(u8) = .empty;
+        defer d.deinit(allocator);
+        const pl = try screen_stream.encodeImagePlacement(allocator, .{ .kind = .image_place, .generation = 1 }, .{ .image_id = 7, .row = 0, .col = 0 });
+        defer allocator.free(pl);
+        try screen_stream.appendRecord(&d, allocator, pl);
+        try testing.expectError(error.MalformedRow, asm_.applyDelta(d.items));
+    }
+}
+
+test "screen assembler: image_remove delta evicts the image (review #12)" {
+    const allocator = testing.allocator;
+    const px = [_]u8{ 1, 2, 3, 4 };
+    const snap = try buildImageSnapshot(allocator, 9, 1, 1, 1, 4, &px, 0); // image 9, placed.
+    defer allocator.free(snap);
+    var asm_ = ScreenAssembler.init(allocator);
+    defer asm_.deinit();
+    try asm_.applySnapshot(snap);
+    try testing.expect(asm_.imageById(9) != null);
+
+    // clear placements(센티넬) + image_remove(9) → 이미지 회수(placement 없어 #7 검사도 통과).
+    var d: std.ArrayListUnmanaged(u8) = .empty;
+    defer d.deinit(allocator);
+    const clear = try screen_stream.encodeImagePlacement(allocator, .{ .kind = .image_place, .generation = 1 }, .{ .image_id = 0, .row = 0, .col = 0 });
+    defer allocator.free(clear);
+    try screen_stream.appendRecord(&d, allocator, clear);
+    const rm = try screen_stream.encodeImageRemove(allocator, .{ .kind = .image_remove, .generation = 1 }, .{ .base_generation = 1, .blob_id = 9 });
+    defer allocator.free(rm);
+    try screen_stream.appendRecord(&d, allocator, rm);
+    try asm_.applyDelta(d.items);
+
+    try testing.expect(asm_.imageById(9) == null); // 회수됨(무한증가 방지).
+    try testing.expectEqual(@as(usize, 0), asm_.imagePlacements().len);
 }

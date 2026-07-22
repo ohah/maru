@@ -333,7 +333,7 @@ test "client: hello/request JSON build and host_id parse are server-symmetric (p
     const allocator = testing.allocator;
     const hello = try buildHello(allocator, "gui");
     defer allocator.free(hello);
-    try testing.expect(std.mem.indexOf(u8, hello, "\"protocol_min\":1") != null);
+    try testing.expect(std.mem.indexOf(u8, hello, "\"protocol_min\":2") != null); // 리뷰 #3: version_major v2.
     try testing.expect(std.mem.indexOf(u8, hello, "\"client_kind\":\"gui\"") != null);
 
     const req = try buildRequest(allocator, "runtime.get", "{\"runtime_id\":\"aa\"}");

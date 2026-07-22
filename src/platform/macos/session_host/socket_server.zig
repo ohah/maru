@@ -293,7 +293,7 @@ fn clientRoundtrip(socket_path: [:0]const u8, out_ok: *bool) void {
 
     const a = testing.allocator;
     // hello frame.
-    const hello = framing.encodeFrame(a, .{ .kind = .hello, .request_id = 1 }, "{\"protocol_min\":1,\"protocol_max\":1,\"client_kind\":\"cli\"}") catch return;
+    const hello = framing.encodeFrame(a, .{ .kind = .hello, .request_id = 1 }, "{\"protocol_min\":2,\"protocol_max\":2,\"client_kind\":\"cli\"}") catch return; // 리뷰 #3: version_major v2.
     defer a.free(hello);
     writeAll(fd, hello) catch return;
 

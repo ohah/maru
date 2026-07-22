@@ -206,7 +206,11 @@ pub const RemoteRuntime = struct {
     /// 원격 검색(§6c): 검색어로 host가 **콘텐츠·스크롤백을 아는 자기 core**에서 `findMatches`(로컬과 같은 함수)로 매치를 찾게
     /// 하고, 보이는 매치의 뷰포트 span을 `out_spans`에 채운다(검색 의미론 host 단일 출처). 전체 매치 수를 돌려준다(뷰포트 밖 포함).
     /// `out_spans`는 먼저 비운다. 검색어는 임의 텍스트라 hex로 실어 escape를 피한다(상한 256 char).
-    pub fn find(self: *RemoteRuntime, query: []const u8, out_spans: *std.ArrayList(terminal.SelectionSpan)) client_mod.ClientError!usize {
+    /// §6c 검색 결과. `count`=전체 매치 수, `cur`=현재 매치(cur_index)의 뷰포트 span(안 보이면 null). 보이는 **비현재** 매치는
+    /// `out_spans`에 채운다(하이라이트용).
+    pub const FindResult = struct { count: usize, cur: ?terminal.SelectionSpan };
+
+    pub fn find(self: *RemoteRuntime, query: []const u8, cur_index: u32, scroll: bool, out_spans: *std.ArrayList(terminal.SelectionSpan)) client_mod.ClientError!FindResult {
         out_spans.clearRetainingCapacity();
         var hexbuf: [512]u8 = undefined;
         const qn = @min(query.len, hexbuf.len / 2);
@@ -216,12 +220,13 @@ pub const RemoteRuntime = struct {
             hexbuf[i * 2 + 1] = hex_chars[b & 0xf];
         }
         var buf: [640]u8 = undefined;
-        const params = std.fmt.bufPrint(&buf, "{{\"stream_id\":{d},\"q\":\"{s}\"}}", .{ self.stream_id, hexbuf[0 .. qn * 2] }) catch return error.OutOfMemory;
+        const params = std.fmt.bufPrint(&buf, "{{\"stream_id\":{d},\"q\":\"{s}\",\"cur\":{d},\"scroll\":{}}}", .{ self.stream_id, hexbuf[0 .. qn * 2], cur_index, scroll }) catch return error.OutOfMemory;
         const resp = try self.client.call("runtime.find", params);
         defer self.allocator.free(resp);
         const count = client_mod.extractU64Field(resp, "\"count\":") orelse 0;
+        const cur = parseFirstSpan(resp, "\"cur\":[");
         parseSpansInto(resp, out_spans, self.allocator);
-        return @intCast(count);
+        return .{ .count = @intCast(count), .cur = cur };
     }
 
     /// 단어/줄 선택(§6b-2): host가 콘텐츠를 아는 자기 core로 경계를 계산하게 하고(`selectWordAt`/`selectLineAt`) 결과 뷰포트
@@ -275,6 +280,28 @@ pub const RemoteRuntime = struct {
             return null;
         }
         return .{ .title = title, .body = body };
+    }
+
+    /// `key` 뒤 `[...]` 배열의 **첫 4정수**를 `SelectionSpan`으로 파싱한다(§6c-2 현재 매치 `"cur":[sr,sc,er,ec]`). 4개 미만
+    /// (빈 배열=현재 매치 안 보임)이면 null. std.json 안 씀(f128 회피).
+    fn parseFirstSpan(resp: []const u8, key: []const u8) ?terminal.SelectionSpan {
+        const start = std.mem.indexOf(u8, resp, key) orelse return null;
+        var i = start + key.len;
+        var nums: [4]u16 = undefined;
+        var ni: usize = 0;
+        while (i < resp.len and resp[i] != ']' and ni < 4) {
+            if (resp[i] < '0' or resp[i] > '9') {
+                i += 1;
+                continue;
+            }
+            var j = i;
+            while (j < resp.len and resp[j] >= '0' and resp[j] <= '9') j += 1;
+            nums[ni] = std.fmt.parseInt(u16, resp[i..j], 10) catch return null;
+            i = j;
+            ni += 1;
+        }
+        if (ni < 4) return null; // 빈/불완전 = 현재 매치 뷰포트 밖.
+        return .{ .start = .{ .row = nums[0], .col = nums[1] }, .end = .{ .row = nums[2], .col = nums[3] }, .block = false };
     }
 
     /// `{...,"spans":[sr,sc,er,ec, sr,sc,er,ec, ...]}`의 flat 정수 배열을 4개씩 `SelectionSpan`으로 파싱해 `out`에 append한다
@@ -1032,16 +1059,30 @@ test "remote runtime: find matches on the host and returns viewport spans (§6c)
     }
     try testing.expect(ready);
 
-    // "xyz" 검색 → host findMatches가 2개(에코 줄 + cat 줄) 찾고, 둘 다 보이므로 뷰포트 span 2개.
+    // "xyz" 검색(현재 매치=index 0) → host가 2개(에코 줄=row0 + cat 줄=row1) 찾고, cur=현재(row0)·spans=비현재(row1).
     var spans: std.ArrayList(terminal.SelectionSpan) = .empty;
     defer spans.deinit(allocator);
-    const count = try rr.find("xyz", &spans);
-    try testing.expectEqual(@as(usize, 2), count); // 전체 매치 수(에코+cat 두 줄)
-    try testing.expectEqual(@as(usize, 2), spans.items.len); // 보이는 매치 뷰포트 span
-    try testing.expectEqual(@as(u16, 0), spans.items[0].start.row); // 첫 매치는 row0(에코)
+    const r0 = try rr.find("xyz", 0, false, &spans);
+    try testing.expectEqual(@as(usize, 2), r0.count); // 전체 매치 수
+    try testing.expect(r0.cur != null); // 현재 매치(index0) 뷰포트 span
+    try testing.expectEqual(@as(u16, 0), r0.cur.?.start.row); // 현재 매치는 row0
+    try testing.expectEqual(@as(usize, 1), spans.items.len); // 비현재 보이는 매치 = row1 1개
+    try testing.expectEqual(@as(u16, 1), spans.items[0].start.row);
+
+    // §6c-2 네비: 현재 매치를 index 1로 → cur=row1, 비현재=row0. (host가 cur_index로 현재 매치를 가른다)
+    const r1 = try rr.find("xyz", 1, false, &spans);
+    try testing.expectEqual(@as(usize, 2), r1.count);
+    try testing.expect(r1.cur != null);
+    try testing.expectEqual(@as(u16, 1), r1.cur.?.start.row); // 현재 매치가 row1로 바뀜
+    try testing.expectEqual(@as(u16, 0), spans.items[0].start.row); // 비현재 = row0
+
+    // scroll=true(⌘G 네비)도 크래시 없이 현재 매치를 준다(내용이 다 보여 scrollToAbs는 사실상 무이동).
+    const rs = try rr.find("xyz", 0, true, &spans);
+    try testing.expectEqual(@as(usize, 2), rs.count);
 
     // 없는 검색어 → 0.
-    const zero = try rr.find("zzz", &spans);
-    try testing.expectEqual(@as(usize, 0), zero);
+    const zero = try rr.find("zzz", 0, false, &spans);
+    try testing.expectEqual(@as(usize, 0), zero.count);
+    try testing.expect(zero.cur == null);
     try testing.expectEqual(@as(usize, 0), spans.items.len);
 }

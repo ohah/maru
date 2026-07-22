@@ -948,7 +948,9 @@ pub export fn maru_macos_app_session_file_panel_entry(
     // `?lang=`과 file_panel_shell_kind의 `?kind=svg` 힌트가 맡는다(§2.2·§2.3). Swift의 filePanelKind==1 신뢰 분기를 안 건드린다.
     return switch (info.kind) {
         .markdown, .text, .svg => 1,
-        .html => 2,
+        // html·image·pdf는 격리 loadFileURL(2). Swift가 filePanelPath를 loadFileURL(_:allowingReadAccessTo:)로
+        // 로드하고 WebKit이 HTML/이미지/PDF를 네이티브 렌더한다(§2.2). 신뢰 shell URL·bridge를 쓰지 않는다.
+        .html, .image, .pdf => 2,
     };
 }
 

@@ -1104,8 +1104,11 @@ test "supportedFile mirrors openKindForPath (md/html/text), not a hardcoded md/h
     try std.testing.expect(Tree.supportedFile("/repo/pkg.json"));
     try std.testing.expect(Tree.supportedFile("/repo/main.py"));
     try std.testing.expect(Tree.supportedFile("/repo/style.css"));
+    try std.testing.expect(Tree.supportedFile("/repo/photo.png")); // FP14: image kind로 지원.
+    try std.testing.expect(Tree.supportedFile("/repo/doc.pdf")); // FP15: pdf kind로 지원.
+    // 아직 kind가 없는 바이너리는 트리에서도 안 열린다(외부 앱).
     try std.testing.expect(!Tree.supportedFile("/repo/archive.zip"));
-    try std.testing.expect(!Tree.supportedFile("/repo/photo.png"));
+    try std.testing.expect(!Tree.supportedFile("/repo/clip.mp4"));
 }
 
 test "file tree uses Zed-style exclusions while retaining useful dot directories" {

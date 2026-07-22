@@ -161,9 +161,22 @@ pub const RemoteTermBackend = struct {
         var summary: DrainSummary = .{};
         while (true) {
             const applied = rr.pumpDelta() catch |err| {
-                // @errorName은 정적 문자열이라 DrainSummary.ended가 소비될 때까지 산다(runtime_pump.Termination 계약).
-                if (summary.ended == null) summary.ended = .{ .read_error = @errorName(err) };
-                break;
+                switch (err) {
+                    // 복구 가능 desync(§9 — 조립기가 "reject-and-request-fresh"로 표시): host에 fresh snapshot을 재요청한다.
+                    // 다음 tick에 snapshot_chunk가 와 applySnapshot이 generation을 리셋해 복구한다. read_error로 종료하지 **않는다**
+                    // (예전엔 여기서 read_error로 뭉개 터미널이 영구 멈췄다 — code-review #7). resync 실패(연결 죽음)는 무시하되,
+                    // 다음 pumpDelta가 그 연결 오류를 read_error로 잡아 세션을 정상 종료시킨다.
+                    error.GenerationGap, error.MalformedRow => {
+                        rr.requestResync() catch {};
+                        break;
+                    },
+                    // 그 외(연결 끊김·codec DecodeError 등)는 세션 종료로 본다(로컬 read_error 계약과 동형). @errorName은 정적
+                    // 문자열이라 DrainSummary.ended가 소비될 때까지 산다(runtime_pump.Termination 계약).
+                    else => {
+                        if (summary.ended == null) summary.ended = .{ .read_error = @errorName(err) };
+                        break;
+                    },
+                }
             };
             if (!applied) break; // idle — 더 없음.
             summary.output_events += 1;

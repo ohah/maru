@@ -119,6 +119,7 @@ pub const RemoteRuntime = struct {
 
     /// runtime을 종료하고(host `runtime.terminate`) client-side 자원을 회수한다. 멱등 시도(종료 실패는 무시).
     pub fn deinit(self: *RemoteRuntime) void {
+        self.client.dropBufferedStream(self.stream_id); // 이 stream 앞으로 남은 demux 배치 회수(더는 pump 안 함 — §멀티 runtime).
         self.terminateBestEffort();
         self.surface.deinit();
         self.remote_screen.deinit();
@@ -129,6 +130,7 @@ pub const RemoteRuntime = struct {
     /// Term을 이걸로 정리하면 runtime이 host에 남아(연결 EOF를 host가 detach로 처리해 유지, §6 app-quit=detach) GUI 재실행 시
     /// `attachExisting`으로 재접속한다. `deinit`과 대칭이되 terminate만 뺀다.
     pub fn detachClientSide(self: *RemoteRuntime) void {
+        self.client.dropBufferedStream(self.stream_id); // 이 stream 앞으로 남은 demux 배치 회수(더는 pump 안 함 — §멀티 runtime).
         self.surface.deinit();
         self.remote_screen.deinit();
         self.* = undefined;
@@ -153,14 +155,14 @@ pub const RemoteRuntime = struct {
         self.allocator.free(resp);
     }
 
-    /// 다음 화면 stream 배치 하나를 소비해 원격 화면에 반영한다(§9/§10). **논블로킹** — 배치가 없으면(idle) `false`를, 하나
-    /// 소비했으면 `true`를 돌려준다(caller가 배치가 있는 동안 반복해 다 비운다 — `RemoteTermBackend`의 drain이 이걸로
-    /// `RuntimeEventPump.drainAvailable`과 같은 의미를 만든다). host가 grid/alt 변화 시 delta 대신 fresh snapshot을 push하므로
-    /// 둘 다 처리한다(is_snapshot이면 화면 리셋, 아니면 증분). 다른 runtime의 배치는 화면엔 반영 안 하되 소비는 됐으니 `true`.
+    /// 내 stream(§멀티 runtime demux)의 다음 화면 배치 하나를 소비해 원격 화면에 반영한다(§9/§10). **논블로킹** — 내 배치가
+    /// 없으면(idle) `false`를, 하나 소비했으면 `true`를 돌려준다(caller가 있는 동안 반복해 다 비운다 — `RemoteTermBackend`의
+    /// drain이 이걸로 `RuntimeEventPump.drainAvailable`과 같은 의미를 만든다). client가 `stream_id`로 demux하므로 여기 도달한
+    /// 배치는 **항상 내 것**이다(예전엔 남의 배치를 free해 유실 — code-review #1; 이제 client가 남의 것은 버퍼해 그 runtime pump로
+    /// 보낸다). host가 grid/alt 변화 시 delta 대신 fresh snapshot을 push하므로 둘 다 처리한다(is_snapshot이면 리셋, 아니면 증분).
     pub fn pumpDelta(self: *RemoteRuntime) (client_mod.ClientError || screen_assembler.ApplyError)!bool {
-        const batch = (try self.client.readStreamBatch(self.allocator)) orelse return false; // idle.
+        const batch = (try self.client.readStreamBatch(self.allocator, self.stream_id)) orelse return false; // idle — 내 배치 없음.
         defer self.allocator.free(batch.bytes);
-        if (batch.stream_id != self.stream_id) return true; // 다른 runtime(멀티) — 소비만, 화면 미반영(라우팅은 e3 프레임 루프).
         if (batch.is_snapshot) {
             try self.remote_screen.applySnapshot(batch.bytes, self.io); // §9 fresh snapshot(grid/alt 변화) → 화면 리셋.
         } else {
@@ -286,6 +288,81 @@ test "remote runtime: spawns over the wire, renders host screen into a Surface, 
         if (c0 == 'h') found = true else _ = usleep(20 * 1000);
     }
     try testing.expect(found); // 원격 runtime의 화면 변화가 client Surface에 반영됐다.
+}
+
+// code-review #1 회귀 — 두 원격 runtime이 **connection 하나**를 공유할 때, 예전엔 한 runtime의 pump가 소켓에서 다른
+// runtime의 배치를 읽어 free해(discard) 두 번째 화면이 영구 유실됐다. client의 stream_id demux가 남의 배치를 버퍼해 그
+// runtime pump로 보내므로 **둘 다** 자기 echo를 화면에 반영해야 한다. 실 fork host + 실 socket이라 macOS opt-in.
+test "remote runtime: two runtimes sharing one connection both receive their own screen updates (demux)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    const io = testing.io;
+
+    var dir_buf: [256]u8 = undefined;
+    const dir_path = std.fmt.bufPrintZ(&dir_buf, "/tmp/maru-sh-rr-mux-{d}", .{c.getpid()}) catch return error.SkipZigTest;
+    var sp_buf: [320]u8 = undefined;
+    const socket_path = std.fmt.bufPrintZ(&sp_buf, "{s}/control.sock", .{dir_path}) catch return error.SkipZigTest;
+
+    const child = c.fork();
+    if (child < 0) return error.SkipZigTest;
+    if (child == 0) {
+        _ = c.setsid();
+        daemon.runSessionHost(std.heap.page_allocator, io, dir_path, socket_path) catch {};
+        std.c._exit(0);
+    }
+    defer {
+        _ = c.kill(child, posix.SIG.TERM);
+        var status: c_int = undefined;
+        _ = c.waitpid(child, &status, 0);
+        _ = c.unlink(socket_path.ptr);
+        _ = c.rmdir(dir_path.ptr);
+    }
+
+    var client: client_mod.Client = blk: {
+        var attempts: usize = 0;
+        while (attempts < 150) : (attempts += 1) {
+            if (client_mod.Client.connect(allocator, socket_path, "gui")) |cl| break :blk cl else |_| _ = usleep(20 * 1000);
+        }
+        try testing.expect(false);
+        return;
+    };
+    defer client.deinit();
+
+    // 한 client에 두 원격 runtime을 띄운다(둘 다 /bin/cat). 서로 다른 host runtime → 서로 다른 stream_id로 attach된다.
+    var rr1: RemoteRuntime = undefined;
+    try rr1.spawn(&client, allocator, io, 1, &.{"/bin/cat"}, .{ .cols = 40, .rows = 10 });
+    defer rr1.deinit();
+    var rr2: RemoteRuntime = undefined;
+    try rr2.spawn(&client, allocator, io, 2, &.{"/bin/cat"}, .{ .cols = 40, .rows = 10 });
+    defer rr2.deinit();
+    try testing.expect(rr1.stream_id != rr2.stream_id); // 공유 connection이지만 stream이 갈린다(demux 대상).
+
+    const s1 = rr1.surfacePtr();
+    const s2 = rr2.surfacePtr();
+
+    // 각 runtime에 **다른** 입력을 보낸다 → host가 각자 echo → 각 stream에 delta가 온다. 두 pump를 매 tick 함께 돌려
+    // (frame loop처럼) 둘 다 자기 echo('h'/'w')를 반영하는지 본다. demux 없으면 먼저 도는 pump가 남의 배치를 삼켜 하나는
+    // 영영 못 받는다.
+    try rr1.sendInput("hello\n");
+    try rr2.sendInput("world\n");
+    var f1 = false;
+    var f2 = false;
+    var attempts: usize = 0;
+    while (attempts < 200 and !(f1 and f2)) : (attempts += 1) {
+        _ = rr1.pumpDelta() catch break;
+        _ = rr2.pumpDelta() catch break;
+        s1.lockCore(io);
+        const a = s1.renderSnapshot().cells[0].codepoint;
+        s1.unlockCore(io);
+        s2.lockCore(io);
+        const b = s2.renderSnapshot().cells[0].codepoint;
+        s2.unlockCore(io);
+        if (a == 'h') f1 = true;
+        if (b == 'w') f2 = true;
+        if (!(f1 and f2)) _ = usleep(20 * 1000);
+    }
+    try testing.expect(f1); // rr1 화면이 자기 echo를 받았다.
+    try testing.expect(f2); // rr2도 — 남의 pump에 배치를 뺏기지 않았다(demux).
 }
 
 test "remote runtime: attachExisting reconnects to a pre-existing host runtime and renders its screen" {

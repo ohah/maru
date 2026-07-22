@@ -1496,15 +1496,33 @@ export function bootRenderer(document: Document, targetWindow: Window): void {
         atomicRenderConsumed = true;
         const capability = atomicCapability;
         const renderPort = port;
-        root.innerHTML = portEvent.data.payload;
-        const assets = new Map(
-          portEvent.data.assets.map((asset) => [asset.opaqueId, asset.dataUrl]),
-        );
-        for (const image of root.querySelectorAll<HTMLImageElement>("img[data-maru-asset-id]")) {
-          const opaqueId = Number(image.dataset.maruAssetId);
-          const dataUrl = assets.get(opaqueId);
-          if (dataUrl !== undefined) image.src = dataUrl;
-          delete image.dataset.maruAssetId;
+        const payload = portEvent.data.payload;
+        // Mermaid는 색을 SVG 내부 `<style>`로 칠한 `<svg>`를 반환한다. render origin strict CSP(style-src에
+        // unsafe-inline 없음)가 innerHTML로 들어온 그 `<style>`를 막아 노드가 SVG 기본 검정으로 떨어진다. 그래서
+        // FP13 svg처럼 격리 `<img>` data URL로 표시한다 — 이미지 문서는 자기 `<style>`를 적용하고(부모 CSP 무관)
+        // 스크립트/외부요청을 원천 차단한다(헬퍼가 이미 strict 렌더·sanitize). 나머지 atomic role(코드펜스=`<pre>`·
+        // 이미지=`<img>`·KaTeX=HTML)은 CSP·클래스로 스타일되므로 기존 innerHTML 경로를 유지한다.
+        const trimmedPayload = payload.trimStart();
+        if (
+          trimmedPayload.startsWith("<svg") ||
+          /^<\?xml[^>]*>\s*<svg\b/i.test(trimmedPayload)
+        ) {
+          root.replaceChildren();
+          const svgImage = document.createElement("img");
+          svgImage.src = `data:image/svg+xml;base64,${bytesToBase64(new TextEncoder().encode(payload), targetWindow)}`;
+          svgImage.className = "maru-atomic-svg";
+          root.appendChild(svgImage);
+        } else {
+          root.innerHTML = payload;
+          const assets = new Map(
+            portEvent.data.assets.map((asset) => [asset.opaqueId, asset.dataUrl]),
+          );
+          for (const image of root.querySelectorAll<HTMLImageElement>("img[data-maru-asset-id]")) {
+            const opaqueId = Number(image.dataset.maruAssetId);
+            const dataUrl = assets.get(opaqueId);
+            if (dataUrl !== undefined) image.src = dataUrl;
+            delete image.dataset.maruAssetId;
+          }
         }
         const images = [...root.querySelectorAll<HTMLImageElement>("img")];
         if (!(await waitForAtomicImages(images))) return;

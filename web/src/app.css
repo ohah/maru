@@ -76,6 +76,14 @@ body {
   color: color-mix(in srgb, CanvasText 65%, Canvas);
 }
 
+/* 라이브 프리뷰 atomic mermaid 다이어그램(격리 <img> data URL). 위젯 폭에 맞춰 비율 유지 축소한다. render iframe이
+   높이를 측정하므로 height:auto로 자연 높이를 유지한다(내부 <style>는 이미지 문서 안에서 적용). */
+.maru-atomic-svg {
+  display: block;
+  max-width: 100%;
+  height: auto;
+}
+
 body {
   overflow-wrap: anywhere;
 }

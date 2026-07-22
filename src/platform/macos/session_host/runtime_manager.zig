@@ -254,7 +254,7 @@ pub const RuntimeManager = struct {
     /// 함수)로 매치를 찾고, 보이는 매치를 `matchViewportSpan`으로 클립해 `{count, spans:[sr,sc,er,ec,...]}`로 준다(선택과 같이
     /// 검색 의미론 host 단일 출처). count=전체 매치 수, spans=현재 뷰포트에 보이는 매치의 flat 좌표. core lock 아래(findMatches가
     /// 스크롤백 rewrap으로 core mutate).
-    fn findOp(ctx: *anyopaque, runtime_id: u128, query_hex: []const u8, allocator: std.mem.Allocator) anyerror![]u8 {
+    fn findOp(ctx: *anyopaque, runtime_id: u128, query_hex: []const u8, cur_index: u32, scroll: bool, allocator: std.mem.Allocator) anyerror![]u8 {
         const self: *RuntimeManager = @ptrCast(@alignCast(ctx));
         const handle = self.handleFor(runtime_id) orelse return error.RuntimeNotFound;
         const surface = self.backend_impl.surfaceFor(handle) orelse return error.RuntimeNotFound;
@@ -266,13 +266,27 @@ pub const RuntimeManager = struct {
         var matches: std.ArrayList(terminal.Match) = .empty;
         defer matches.deinit(allocator);
         surface.core.findMatches(allocator, query, &matches) catch {}; // 실패 시 빈 매치(best-effort).
+        // §6c-2 네비: scroll이면 현재 매치(cur_index)의 abs 위치로 host 화면을 이동한다 — client가 그 매치를 보게(view_offset
+        // 변화 → 다음 delta로 스크롤 화면 투영). 그 뒤 클립하므로 현재 매치가 보이게 된다.
+        if (scroll and cur_index < matches.items.len) {
+            surface.core.scrollToAbs(matches.items[cur_index].start.row);
+        }
 
         var out: std.ArrayList(u8) = .empty;
         errdefer out.deinit(allocator);
         var buf: [96]u8 = undefined;
-        try out.appendSlice(allocator, try std.fmt.bufPrint(&buf, "{{\"count\":{d},\"spans\":[", .{matches.items.len}));
+        // cur=현재 매치의 뷰포트 span(보이면 4정수, 안 보이면 빈 배열).
+        try out.appendSlice(allocator, try std.fmt.bufPrint(&buf, "{{\"count\":{d},\"cur\":[", .{matches.items.len}));
+        if (cur_index < matches.items.len) {
+            if (surface.core.matchViewportSpan(matches.items[cur_index])) |cs| {
+                try out.appendSlice(allocator, try std.fmt.bufPrint(&buf, "{d},{d},{d},{d}", .{ cs.start.row, cs.start.col, cs.end.row, cs.end.col }));
+            }
+        }
+        // spans=보이는 **비현재** 매치.
+        try out.appendSlice(allocator, "],\"spans\":[");
         var first = true;
-        for (matches.items) |m| {
+        for (matches.items, 0..) |m, mi| {
+            if (mi == cur_index) continue; // 현재는 cur에 담았다.
             const span = surface.core.matchViewportSpan(m) orelse continue; // 뷰포트 밖 매치는 렌더 안 함.
             if (!first) try out.append(allocator, ',');
             first = false;

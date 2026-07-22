@@ -1932,6 +1932,10 @@ pub const AppSession = struct {
     // remote_find_dirty는 검색어 변화(recomputeFind) 트리거. in-process는 이 둘을 안 쓴다(find_matches/find_view_spans 그대로).
     remote_find_spans: std.ArrayList(terminal.SelectionSpan) = .empty,
     remote_find_dirty: bool = false,
+    // §6c-2 host-backed 검색 네비: 현재 매치(chrome_host.find.current)의 뷰포트 span 캐시(host가 계산·반환). scroll_pending은
+    // ⌘G 네비 시 다음 refreshRemoteFind가 host를 현재 매치로 스크롤하게 하는 one-shot 플래그.
+    remote_find_current: ?terminal.SelectionSpan = null,
+    remote_find_scroll_pending: bool = false,
     // I/O–렌더 스레딩 분리(docs/io-render-threading.md): 렌더 CellColors.palette가 코어의
     // palette_override 포인터를 직접 들면, PR3에서 리더 스레드의 OSC 4 변경과 data race가 난다.
     // 그래서 매 tick paletteOverride()를 이 소유 버퍼로 복사하고 CellColors.palette가 여기를
@@ -16130,12 +16134,17 @@ pub const AppSession = struct {
     fn refreshRemoteFind(self: *AppSession, surface: *maru.session.Surface) void {
         if (is_macos) {
             if (app_remote_backend) |*rb| {
-                if (rb.findFor(surface.id, self.chrome_host.find.input.query.items, &self.remote_find_spans)) |count| {
-                    self.chrome_host.find.setMatchCount(count);
+                // §6c-2: 현재 매치 인덱스와 scroll_pending(⌘G 네비면 host가 그 매치로 스크롤)을 함께 보내고, 현재 매치 span을 캐시.
+                const do_scroll = self.remote_find_scroll_pending;
+                self.remote_find_scroll_pending = false;
+                if (rb.findFor(surface.id, self.chrome_host.find.input.query.items, @intCast(self.chrome_host.find.current), do_scroll, &self.remote_find_spans)) |res| {
+                    self.chrome_host.find.setMatchCount(res.count);
+                    self.remote_find_current = res.cur;
                     return;
                 }
             }
             self.remote_find_spans.clearRetainingCapacity();
+            self.remote_find_current = null;
             self.chrome_host.find.setMatchCount(0);
         }
     }
@@ -16143,6 +16152,13 @@ pub const AppSession = struct {
     /// 현재(네비게이션) 매치를 뷰포트로 스크롤한다 — 없으면 무동작. 검색·네비게이션 후 호출(scrollToAbs가
     /// 매치를 세로 중앙쯤에 둬 Find 오버레이(활성 pane 상단 한 줄)에 안 가린다). 현재 인덱스는 chrome_host.find.current.
     fn scrollToCurrentMatch(self: *AppSession) void {
+        // §6c-2 host-backed: 스크롤백 매치로의 스크롤은 host가 소유한 view를 움직여야 한다(placeholder는 미렌더). 다음 tick의
+        // refreshRemoteFind가 scroll=true로 host를 현재 매치로 스크롤하도록 표시만 한다(one-shot). in-process면 기존 경로.
+        if (is_macos and self.activeSurface().remote != null) {
+            self.remote_find_scroll_pending = true;
+            self.remote_find_dirty = true;
+            return;
+        }
         find_ops.scrollToCurrentMatch(self); // 본문 분리: app_session/find.zig(E1)
     }
 
@@ -22305,9 +22321,11 @@ pub const AppSession = struct {
                             self.refreshRemoteFind(fa_surface);
                             self.remote_find_dirty = false;
                         }
+                        find_current_span = self.remote_find_current; // §6c-2 현재 매치 강조색(host가 계산해 반환).
                         if (self.chrome_host.find.open) self.find_view_spans.appendSlice(self.allocator, self.remote_find_spans.items) catch {};
                     } else {
                         self.remote_find_spans.clearRetainingCapacity();
+                        self.remote_find_current = null;
                     }
                 } else {
                     fa_surface.lockCore(self.io);

@@ -17,6 +17,16 @@ const client_mod = @import("client.zig");
 const remote_screen = @import("remote_screen.zig");
 const screen_assembler = @import("screen_assembler.zig");
 
+/// host에서 가져온 대기 OSC 9/777 데스크톱 알림 한 건(§6.32). title/body는 owned(caller가 deinit).
+pub const Notification = struct {
+    title: []u8,
+    body: []u8,
+    pub fn deinit(self: Notification, allocator: std.mem.Allocator) void {
+        allocator.free(self.title);
+        allocator.free(self.body);
+    }
+};
+
 /// 한 원격 runtime. self-referential(`surface.remote`가 `&self.remote_screen`을 가리킴)이라 **in-place `spawn`**을 쓴다
 /// (caller가 `var rr: RemoteRuntime = undefined; try rr.spawn(...)`). spawn 후 이 값을 이동하면 안 된다.
 pub const RemoteRuntime = struct {
@@ -163,6 +173,23 @@ pub const RemoteRuntime = struct {
     /// 부른다(계약: routing 끊고 프로세스 kill). 멱등(host가 없는 id 무시). client 객체는 이후 `remove`→`deinit`에서 회수한다.
     pub fn terminate(self: *RemoteRuntime) void {
         self.terminateBestEffort();
+    }
+
+    /// host에 대기 중인 OSC 9/777 데스크톱 알림을 뺀다(§6.32 — host가 core와 함께 알림을 소유·전달). 없으면 null. host-backed
+    /// 터미널의 알림은 host의 `TerminalCore`가 파싱하므로 client가 이걸로 가져와 GUI 알림 funnel에 넣는다(surfacing은 후속).
+    /// 반환 title/body는 caller 소유(Notification.deinit로 회수).
+    pub fn takeNotification(self: *RemoteRuntime) client_mod.ClientError!?Notification {
+        var buf: [96]u8 = undefined;
+        const params = std.fmt.bufPrint(&buf, "{{\"runtime_id\":\"{s}\"}}", .{self.runtime_id_hex}) catch return error.OutOfMemory;
+        const resp = try self.client.call("runtime.notification", params);
+        defer self.allocator.free(resp);
+        const parsed = std.json.parseFromSlice(struct { title: []const u8, body: []const u8 }, self.allocator, resp, .{}) catch return error.ProtocolError;
+        defer parsed.deinit();
+        if (parsed.value.title.len == 0 and parsed.value.body.len == 0) return null; // 대기 알림 없음.
+        const title = self.allocator.dupe(u8, parsed.value.title) catch return error.OutOfMemory;
+        errdefer self.allocator.free(title);
+        const body = self.allocator.dupe(u8, parsed.value.body) catch return error.OutOfMemory;
+        return .{ .title = title, .body = body };
     }
 
     fn terminateBestEffort(self: *RemoteRuntime) void {
@@ -334,4 +361,67 @@ test "remote runtime: attachExisting reconnects to a pre-existing host runtime a
     var bogus: RemoteRuntime = undefined;
     const bogus_id: [32]u8 = "deadbeefdeadbeefdeadbeefdeadbeef".*;
     try testing.expectError(error.AttachFailed, bogus.attachExisting(&client, allocator, io, 2, bogus_id, .{ .cols = 40, .rows = 10 }));
+}
+
+test "remote runtime: takeNotification pulls a host-side OSC 9/777 desktop notification (§6.32)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    const io = testing.io;
+
+    var dir_buf: [256]u8 = undefined;
+    const dir_path = std.fmt.bufPrintZ(&dir_buf, "/tmp/maru-sh-rr-notif-{d}", .{c.getpid()}) catch return error.SkipZigTest;
+    var sp_buf: [320]u8 = undefined;
+    const socket_path = std.fmt.bufPrintZ(&sp_buf, "{s}/control.sock", .{dir_path}) catch return error.SkipZigTest;
+
+    const child = c.fork();
+    if (child < 0) return error.SkipZigTest;
+    if (child == 0) {
+        _ = c.setsid();
+        daemon.runSessionHost(std.heap.page_allocator, io, dir_path, socket_path) catch {};
+        std.c._exit(0);
+    }
+    defer {
+        _ = c.kill(child, posix.SIG.TERM);
+        var status: c_int = undefined;
+        _ = c.waitpid(child, &status, 0);
+        _ = c.unlink(socket_path.ptr);
+        _ = c.rmdir(dir_path.ptr);
+    }
+
+    var client: client_mod.Client = blk: {
+        var attempts: usize = 0;
+        while (attempts < 150) : (attempts += 1) {
+            if (client_mod.Client.connect(allocator, socket_path, "gui")) |cl| break :blk cl else |_| _ = usleep(20 * 1000);
+        }
+        try testing.expect(false);
+        return;
+    };
+    defer client.deinit();
+
+    var rr: RemoteRuntime = undefined;
+    try rr.spawn(&client, allocator, io, 1, &.{"/bin/cat"}, .{ .cols = 40, .rows = 10 });
+    defer rr.deinit();
+
+    // 처음엔 대기 알림 없음(fresh cat).
+    if (try rr.takeNotification()) |n| {
+        n.deinit(allocator);
+        try testing.expect(false);
+    }
+
+    // OSC 777 알림 시퀀스를 입력 → cat이 raw로 echo → host core가 파싱 → notification pending. 폴링으로 뺀다(host tick·echo 대기).
+    try rr.sendInput("\x1b]777;notify;Deploy;done in 3s\x1b\\\n");
+    var got: ?Notification = null;
+    var attempts: usize = 0;
+    while (attempts < 100 and got == null) : (attempts += 1) {
+        got = try rr.takeNotification();
+        if (got == null) _ = usleep(20 * 1000);
+    }
+    const n = got orelse {
+        try testing.expect(false);
+        return;
+    };
+    defer n.deinit(allocator);
+    // host의 TerminalCore가 파싱한 OSC 777 title/body가 client로 전달됐다(host-backed 터미널의 알림이 유실 안 됨).
+    try testing.expectEqualStrings("Deploy", n.title);
+    try testing.expectEqualStrings("done in 3s", n.body);
 }

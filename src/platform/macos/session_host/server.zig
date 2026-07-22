@@ -48,6 +48,10 @@ pub const RuntimeOps = struct {
     /// `base`(client가 마지막으로 받은 full snapshot 바이트) 대비 현재 화면 변화를 계산한다(§9 delta). host가 core lock
     /// 아래 diff하고 `StreamUpdate`를 돌려준다 — `send`(delta 또는 fresh snapshot)와 다음 diff의 base가 될 현재 snapshot.
     delta: *const fn (ctx: *anyopaque, runtime_id: u128, base: []const u8, allocator: std.mem.Allocator) anyerror!StreamUpdate,
+    /// runtime의 대기 중인 OSC 9/777 데스크톱 알림(host의 `TerminalCore`가 파싱)을 빼서 JSON `{title, body}`로 준다(§6.32
+    /// GUI가 종료된 동안의 알림 — host가 core와 함께 알림을 소유). host가 core lock 아래 읽고 clearNotification한다(off-thread
+    /// 동기화, snapshot과 동형). 없으면 `{title:"",body:""}`. caller 소유 바이트.
+    notification: *const fn (ctx: *anyopaque, runtime_id: u128, allocator: std.mem.Allocator) anyerror![]u8,
 };
 
 /// `RuntimeOps.delta` 결과. `send`/`new_base`는 caller 소유이고 **항상 별개 버퍼**다(둘 다 free해도 안전). `send.len==0`이면
@@ -228,8 +232,25 @@ pub const Connection = struct {
             return self.dispatchDetach(frame.header.request_id, params);
         } else if (std.mem.eql(u8, method, "runtime.resize")) {
             return self.dispatchResize(frame.header.request_id, params);
+        } else if (std.mem.eql(u8, method, "runtime.notification")) {
+            return self.dispatchNotification(frame.header.request_id, params);
         }
         return self.replyError(frame.header.request_id, .invalid_request);
+    }
+
+    /// `runtime.notification`(§6.32): runtime의 대기 중인 OSC 9/777 알림을 빼서 `{title, body}`로 응답한다. read-only host면
+    /// unauthorized. 없으면 `{title:"",body:""}`(client가 빈 값을 "없음"으로 해석). runtime 없으면 runtime_not_found.
+    fn dispatchNotification(self: *Connection, request_id: u64, params: ?std.json.ObjectMap) HandleError!Action {
+        const ops = self.runtime_ops orelse return self.replyError(request_id, .unauthorized);
+        const p = params orelse return self.replyError(request_id, .invalid_request);
+        const id_hex = strField(p, "runtime_id") orelse return self.replyError(request_id, .invalid_request);
+        const id = parseHex128(id_hex) orelse return self.replyError(request_id, .invalid_request);
+        const body = ops.notification(ops.ctx, id, self.allocator) catch |err| switch (err) {
+            error.RuntimeNotFound => return self.replyError(request_id, .runtime_not_found),
+            else => return self.replyError(request_id, .internal),
+        };
+        defer self.allocator.free(body);
+        return self.replyResult(request_id, body);
     }
 
     /// `runtime.spawn`: read-only host면 unauthorized. argv/cwd/cols/rows를 파싱해 `RuntimeOps`로 실 PTY를 띄우고
@@ -934,8 +955,14 @@ const FakeRuntimeOps = struct {
         const new_base = try allocator.dupe(u8, "NEW-BASE");
         return .{ .send = send, .is_snapshot = false, .new_base = new_base };
     }
+    /// 대기 알림 없음(빈 title/body)을 돌려준다 — 기본 fake. server dispatch 배선만 검증(실 core 파싱은 runtime_manager smoke).
+    fn notificationFn(ctx: *anyopaque, runtime_id: u128, allocator: std.mem.Allocator) anyerror![]u8 {
+        _ = ctx;
+        _ = runtime_id;
+        return allocator.dupe(u8, "{\"title\":\"\",\"body\":\"\"}");
+    }
     fn ops(self: *FakeRuntimeOps) RuntimeOps {
-        return .{ .ctx = self, .spawn = spawnFn, .terminate = terminateFn, .write_input = writeInputFn, .resize = resizeFn, .snapshot = snapshotFn, .delta = deltaFn };
+        return .{ .ctx = self, .spawn = spawnFn, .terminate = terminateFn, .write_input = writeInputFn, .resize = resizeFn, .snapshot = snapshotFn, .delta = deltaFn, .notification = notificationFn };
     }
 };
 

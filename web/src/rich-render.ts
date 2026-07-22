@@ -38,18 +38,40 @@ function hasUnsafeSvgUrl(value: string): boolean {
   return !/^url\(\s*(["']?)#[A-Za-z0-9_.:-]+\1\s*\)$/i.test(normalized);
 }
 
+// `<style>`/style 속성 내용이 외부 리소스를 참조하는지(=exfil 벡터). @import 또는 로컬 fragment(`url(#id)`)가 아닌
+// url()이 있으면 unsafe다. Mermaid 테마는 fill/stroke 색과 로컬 marker `url(#arrowhead)`만 쓰므로 정상 스타일은
+// 통과한다. sanitize된 SVG는 항상 격리 `<img>` data URL로만 표시돼(스크립트·외부요청 차단) 이 검사는 심층 방어다.
+function styleContentIsUnsafe(text: string): boolean {
+  const normalized = normalizeCssEscapes(text);
+  if (normalized === null) return true;
+  if (/@import/i.test(normalized)) return true;
+  const urlPattern = /url\s*\(\s*(['"]?)([^)]*?)\1\s*\)/gi;
+  let match: RegExpExecArray | null;
+  while ((match = urlPattern.exec(normalized)) !== null) {
+    if (!match[2].trim().startsWith("#")) return true;
+  }
+  return false;
+}
+
 export function sanitizeMermaidSvg(svg: string, targetWindow: Window): string {
   const purifier = createDOMPurify(targetWindow);
   purifier.addHook("uponSanitizeAttribute", (_node, data) => {
     if (hasUnsafeSvgUrl(data.attrValue)) data.keepAttr = false;
   });
+  // Mermaid는 노드 색을 SVG 내부 `<style>`로 칠하므로 이를 유지해야 테마가 보인다(격리 img라 안전 — 사용자 결정
+  // 2026-07-22). 단 @import·외부 url()을 담은 `<style>`은 통째로 제거해 exfil을 이중 차단한다.
+  purifier.addHook("uponSanitizeElement", (node, data) => {
+    if (data.tagName === "style" && styleContentIsUnsafe(node.textContent ?? ""))
+      node.parentNode?.removeChild(node);
+  });
   return purifier.sanitize(svg, {
     USE_PROFILES: { svg: true, svgFilters: true },
     // strict Mermaid mode disables click links, so these URL-bearing elements have
     // no allowed use. Removing the element and href forms also blocks SVG image,
-    // external <use>, filter image, and anchor navigation after render.
-    FORBID_TAGS: ["script", "foreignObject", "style", "image", "use", "feImage", "a"],
-    FORBID_ATTR: ["style", "href", "xlink:href", "xlinkHref", "src"],
+    // external <use>, filter image, and anchor navigation after render. `<style>`/style은
+    // 테마 색을 위해 유지하되 위 hook이 외부 참조를 막는다(격리 img 표시가 1차 경계).
+    FORBID_TAGS: ["script", "foreignObject", "image", "use", "feImage", "a"],
+    FORBID_ATTR: ["href", "xlink:href", "xlinkHref", "src"],
     ALLOW_UNKNOWN_PROTOCOLS: false,
   });
 }

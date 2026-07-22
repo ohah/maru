@@ -1727,6 +1727,10 @@ var app_quitting: bool = false;
 // app_quitting과 함께 켜진다 → deinit이 host-backed Term을 detach(생존)가 아니라 **terminate**(runtime 종료)한다. keep-alive
 // 기본 quit은 detach(생존), 이 alternate만 명시적으로 다 끝낸다. app_quitting과 짝으로 리셋한다.
 var app_quit_end_all: bool = false;
+// P4 §6 L291: keep-alive인데 host 연결/spawn이 실패하면 **조용히 in-process로 폴백하지 않고** 사용자에게 알린다("유지된다"
+// 오인 방지). 첫 창의 ensureRemoteBackend가 실패하면 켠다 → 이후 창은 재시도(각 3s backoff) 없이 바로 in-process + 같은
+// notice(host가 정말 죽었으면 창마다 재시도 낭비 방지). 프로세스 전역 상태라 module-var.
+var host_connect_failed: bool = false;
 
 /// FP10c1 C ABI가 앱 전역 Mermaid 정책 인스턴스를 찾는 유일한 접근점. 새 handle을 만들지 않아 모든 창과
 /// Swift adapter가 `AppRuntime.mermaid_queue` 하나를 공유한다.
@@ -1851,6 +1855,9 @@ pub const AppSession = struct {
     // createTerm이 읽어 spawn 대신 attach로 같은 host runtime에 재접속한다(읽고 즉시 클리어 — 다음 createTerm으로 안 샌다).
     // ""=재접속 없음(일반 spawn). new_tab_zdotdir처럼 create 호출로 흐르는 transient 입력이다.
     restore_runtime_id: []const u8 = "",
+    // P4 §6 L291: keep-alive인데 host 연결 실패로 in-process 폴백했을 때 첫 tick에 사용자에게 notice로 알린다("유지 안 됨").
+    // ensureRemoteBackend가 실패하면 켜고, showPendingHostConnectNotice가 한 번 표시하고 끈다.
+    host_connect_notice_pending: bool = false,
     // surface teardown의 단일 chokepoint(destroyTerm + deinit direct pass)가 알리는 선택적 관찰 훅. cross-window move는
     // destroy가 아니라 소유 이전이므로 호출하지 않는다. app_host_abi가 browser grant/wait 수명에 연결한다.
     surface_closed_context: ?*anyopaque = null,
@@ -5400,17 +5407,47 @@ pub const AppSession = struct {
         // 원격 host는 macOS 전용 — Linux ABI 컴파일에선 아래 블록이 comptime 가지치기돼 no-op이다.
         if (is_macos) {
             if (app_remote_backend != null) return; // 이미 앱 전역으로 세워짐 — 재사용(창마다 새 연결 금지).
+            // §6 L291: 이미 실패로 판명됐으면 재시도(각 3s backoff) 없이 바로 notice + in-process 폴백.
+            if (host_connect_failed) {
+                self.host_connect_notice_pending = true;
+                return;
+            }
             const alloc = std.heap.smp_allocator; // 앱 전역 자원(routing/live_registry와 같은 allocator).
             var arena = std.heap.ArenaAllocator.init(alloc);
             defer arena.deinit();
             const a = arena.allocator();
-            const exe_path = self.siblingMaruPath(a) orelse return;
-            const base = sessionCacheBase(a) orelse return;
-            const client = session_host.host_connect.connectOrLaunch(alloc, exe_path, base, .{}) orelse return;
+            const exe_path = self.siblingMaruPath(a) orelse {
+                self.markHostConnectFailed();
+                return;
+            };
+            const base = sessionCacheBase(a) orelse {
+                self.markHostConnectFailed();
+                return;
+            };
+            // §6 L291: host 연결/spawn 실패 시 조용히 in-process로 폴백하지 않고 사용자에게 알린다("유지된다" 오인 방지).
+            const client = session_host.host_connect.connectOrLaunch(alloc, exe_path, base, .{}) orelse {
+                self.markHostConnectFailed();
+                return;
+            };
             app_remote_client = client;
             // 앱 전역 backend는 &app_remote_client.?(모듈-var 안정 주소)와 앱 전역 라우팅 표를 든다.
             app_remote_backend = session_host.remote_term_backend.RemoteTermBackend.init(alloc, self.io, &app_remote_client.?, self.runtime);
         }
+    }
+
+    /// keep-alive host 연결 실패를 기록한다(§6 L291) — 프로세스 전역 flag(이후 창은 재시도 없이 폴백)와 이 창의 notice
+    /// pending을 함께 세운다. createTerm은 backendForNew가 null이라 in-process로 열되, 첫 tick의 notice가 "유지 안 됨"을 알린다.
+    fn markHostConnectFailed(self: *AppSession) void {
+        host_connect_failed = true;
+        self.host_connect_notice_pending = true;
+    }
+
+    /// keep-alive host 연결이 실패해 in-process로 폴백했으면(§6 L291) notice를 한 번 띄운다 — 첫 tick에서 호출한다(init 중엔
+    /// chrome이 아직 안 서 있을 수 있어 미룬다). 사용자가 이번 세션 터미널이 유지되지 않음을 명확히 알게 한다.
+    fn showPendingHostConnectNotice(self: *AppSession) void {
+        if (!self.host_connect_notice_pending) return;
+        self.host_connect_notice_pending = false;
+        self.showNotice("영속 세션 host에 연결하지 못했습니다. 이번 세션의 터미널은 유지되지 않습니다(종료 시 함께 종료).");
     }
 
     /// GUI 바이너리의 형제 `maru` CLI 경로(§10 launcher가 `maru __session-host`로 exec). selfExePath는 앱 바이너리라
@@ -21903,6 +21940,7 @@ pub const AppSession = struct {
             self.update_started = true;
             self.startUpdateCheck();
         }
+        self.showPendingHostConnectNotice(); // §6 L291: keep-alive host 연결 실패 시 첫 tick에 notice(플래그로 self-gate).
         self.applyDragAutoscroll(); // 드래그가 grid 밖에 머무는 동안 frame-loop tick마다 한 줄씩 스크롤+확장
         self.flushPendingPaste(); // 큰 붙여넣기의 잔여를 자식이 읽는 속도에 맞춰 흘려보낸다
         self.drainUploadResults(); // 완료된 드롭 업로드의 원격 경로를 paste 큐로(백그라운드 스레드 → 메인)
@@ -35059,6 +35097,33 @@ test "P4 Quit-End-All: alternate가 host-backed runtime을 terminate한다(재�
     } else {
         return error.SkipZigTest;
     }
+}
+
+// P4 §6 L291 — keep-alive인데 host 연결이 실패하면 **조용히 in-process로 폴백하지 않고** 사용자에게 notice로 알린다("유지된다"
+// 오인 방지). ensureRemoteBackend가 실패 시 세우는 host_connect_notice_pending을 흉내 내고, tick이 부르는
+// showPendingHostConnectNotice가 notice를 한 번 띄우고 끄는지 고정한다. host 없이 순수 세션 상태만 검증(실 PTY/CoreText라
+// macOS 게이트, 단 session_host.* 심볼은 안 써서 runtime skip으로 충분).
+test "P4 keep-alive host 실패: notice pending이 사용자 notice로 표시되고 클리어된다(§6 L291)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest; // AppSession.init = 실 PTY/CoreText
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    // ensureRemoteBackend가 host 연결 실패로 세우는 상태를 흉내 낸다.
+    session.host_connect_notice_pending = true;
+    try std.testing.expect(!session.chrome_host.notice.open); // 아직 안 뜸
+
+    session.showPendingHostConnectNotice(); // tick이 부르는 것과 동일.
+    try std.testing.expect(session.chrome_host.notice.open); // 사용자에게 "유지 안 됨" notice가 떴다(조용한 폴백 아님).
+    try std.testing.expect(!session.host_connect_notice_pending); // 한 번 표시 후 클리어(매 tick 반복 안 함).
 }
 
 // M3a 핵심 불변식(주소 안정성) — surface·런타임 소유를 registry 번들로 옮겨도 reader thread가 잡는 두 embedded

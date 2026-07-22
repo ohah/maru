@@ -5381,7 +5381,10 @@ pub const AppSession = struct {
     /// in-process. createTerm이 이걸로 backend를 고르고, 그 backend가 준 surface의 `remote` 유무가 이후 `backendFor`의 판정
     /// 근거가 된다. `remote_backend`가 null(기본)이면 항상 in-process라 현행과 동일하다.
     fn backendForNew(self: *AppSession) app.TermRuntimeBackend {
-        if (is_macos) {
+        // host_connect_failed면 원격을 안 고른다 — 초기 연결 실패(그땐 backend가 null이라 무해)뿐 아니라, **런타임 중 host가
+        // 죽은 뒤**(createTerm이 연결사로 감지해 세움, #3)에도 새 Term은 in-process로 연다. 기존 host-backed Term의 close/remove
+        // 라우팅은 `backendFor`(게이트 없음)가 여전히 공유 backend로 보낸다(client-side 회수는 host 없어도 됨).
+        if (is_macos and !host_connect_failed) {
             if (app_remote_backend) |*rb| return rb.backend();
         }
         return self.termBackend();
@@ -5496,7 +5499,7 @@ pub const AppSession = struct {
         // 직접 안 든다. handle 값은 surface_id(=pty_id)와 같지만 backend에 되돌려 주는 불투명 handle로만 다룬다. reader가
         // 잡는 `&live_pty.reader`·`&surface.core`는 backend 내부에서 registry heap 슬롯이 고정한다(heap-pin 유지 — Term-inline
         // 시절과 같은 메커니즘). generation=0으로 시작. id는 앱 전역 유일이라 중복 등록 없음.
-        const be = self.backendForNew(); // P3-e3: keep-alive+연결 성공 시 원격 backend, 아니면 in-process(기본).
+        var be = self.backendForNew(); // P3-e3: keep-alive+연결 성공 시 원격 backend, 아니면 in-process(기본). #3 폴백 시 아래서 갱신.
         // P3-e3-5 재접속: restore가 restore_runtime_id를 세웠고(host-backed였던 Term) 원격 backend가 있으면, spawn 대신 저장된
         // runtime_id에 attach해 같은 host runtime(화면·PID·scrollback)을 잇는다(§7). host가 그 runtime을 잃었으면(재시작 등)
         // attachTerm이 실패→아래 fresh spawn으로 폴백한다. 읽고 즉시 클리어(다음 createTerm으로 안 샘).
@@ -5514,7 +5517,19 @@ pub const AppSession = struct {
                     } else |_| {} // 재접속 실패 → fresh spawn 폴백.
                 }
             }
-            break :surface try be.spawn(.{ .handle = id, .request = req, .size = size, .queue_capacity = queue_capacity });
+            break :surface be.spawn(.{ .handle = id, .request = req, .size = size, .queue_capacity = queue_capacity }) catch |err| {
+                // #3: keep-alive 원격 backend인데 host 연결이 죽었으면(ConnectionClosed/WriteFailed) createTerm이 실패해 새
+                // 터미널을 못 여는 대신 **in-process로 폴백**한다 — 사용자가 앱 재시작 없이 계속 쓰게. host_connect_failed를 세워
+                // 이후 backendForNew도 죽은 원격을 안 타고, 다음 tick notice가 "유지 안 됨"을 알린다. 원격이 아니거나(로컬 spawn
+                // 실패는 그대로) 연결사 외 에러(OOM 등 — in-process도 실패할 것)는 폴백 없이 전파한다. 기존 host-backed Term은
+                // 각자 pump가 read_error로 관측한다(별도). remote spawn 실패는 backend 내부에서 정리돼 handle을 재사용해도 안전.
+                const remote_dead = is_macos and !reconnected and app_remote_backend != null and !host_connect_failed and
+                    (err == error.ConnectionClosed or err == error.WriteFailed);
+                if (!remote_dead) return err;
+                self.markHostConnectFailed();
+                be = self.termBackend(); // errdefer·이후 단계가 in-process backend를 쓰도록 갱신.
+                break :surface try be.spawn(.{ .handle = id, .request = req, .size = size, .queue_capacity = queue_capacity });
+            };
         };
         // spawn 성공 후 이후 단계(config·attach·pump) 실패 시 번들 슬롯을 회수한다(backend.remove = 번들 deinit = live_pty
         // reader join + surface.deinit + 슬롯 해제). spawn 자체 실패는 backend 내부 2-pass 정리(removeUninitialized)가
@@ -34830,6 +34845,107 @@ test "P3-e3 통합: keep-alive AppSession가 새 Term을 host-backed backend로 
         session.destroyTerm(term); // 원격 term 회수(backendFor→remote: remove + SurfaceRuntime detach + rr free).
         // 블록 끝 defer(LIFO): s2.deinit → destroy(s2) → reset(공유 backend/client) → session.deinit → destroy(session) → host
         // kill. in-process 첫 탭들 + 공유 backend를 누수·크래시 없이 회수(testing.allocator 누수, deinit 크래시 검출).
+    } else {
+        return error.SkipZigTest;
+    }
+}
+
+// R3 #3(code-review) — keep-alive로 host-backed 터미널을 쓰다 **host 프로세스가 죽으면**, 예전엔 backendForNew가 죽은 원격
+// backend를 계속 골라 createTerm의 be.spawn이 ConnectionClosed로 전파돼 **새 터미널을 못 열었다**(앱 재시작 전까지). 이제
+// createTerm이 연결사를 감지해 in-process로 폴백하고 host_connect_failed를 세워 이후 createTerm도 로컬로 뜬다. 실 fork host를
+// 죽여 왕복 검증한다(macOS 게이트).
+test "R3 #3: host가 죽으면 createTerm이 in-process로 폴백한다(새 터미널을 못 여는 대신)" {
+    if (is_macos) {
+        const allocator = std.testing.allocator;
+        const io = std.Io.Threaded.global_single_threaded.io();
+
+        var base_buf: [96]u8 = undefined;
+        const base = std.fmt.bufPrintZ(&base_buf, "/tmp/maru-r3-hd-{d}", .{std.c.getpid()}) catch return error.SkipZigTest;
+        _ = std.c.mkdir(base.ptr, 0o700);
+        var dir_buf: [160]u8 = undefined;
+        const dir = session_host.discovery.sessionHostDirPath(&dir_buf, base) catch return error.SkipZigTest;
+        var sock_buf: [224]u8 = undefined;
+        const socket = session_host.discovery.socketPathIn(&sock_buf, dir) catch return error.SkipZigTest;
+
+        const child = std.c.fork();
+        if (child < 0) return error.SkipZigTest;
+        if (child == 0) {
+            _ = std.c.setsid();
+            session_host.daemon.runSessionHost(std.heap.page_allocator, io, dir, socket) catch {};
+            std.c._exit(0);
+        }
+        var host_reaped = false; // 본문에서 host를 죽이므로 defer가 중복 reap 안 하게.
+        defer {
+            if (!host_reaped) {
+                _ = std.c.kill(child, std.posix.SIG.KILL);
+                var status: c_int = undefined;
+                _ = std.c.waitpid(child, &status, 0);
+            }
+            _ = std.c.unlink(socket.ptr);
+            var lpb: [224]u8 = undefined;
+            if (session_host.discovery.lockPathIn(&lpb, dir)) |p| _ = std.c.unlink(p.ptr) else |_| {}
+            _ = std.c.rmdir(dir.ptr);
+            _ = std.c.rmdir(base.ptr);
+        }
+
+        var up = false;
+        var w: usize = 0;
+        while (w < 250) : (w += 1) {
+            if (session_host.client.Client.connect(allocator, socket, "gui")) |cl| {
+                var p = cl;
+                p.deinit();
+                up = true;
+                break;
+            } else |_| _ = usleep(20 * 1000);
+        }
+        try std.testing.expect(up);
+
+        const session = try allocator.create(AppSession);
+        defer allocator.destroy(session);
+        try session.init(io, allocator, .{ .abi_version = abi_version, .cols = 40, .rows = 10, .queue_capacity = 16, .command_kind = @intFromEnum(CommandKind.controlled_smoke) });
+        defer session.deinit();
+
+        const client = session_host.host_connect.connectOrLaunch(allocator, "/unused", base, .{ .connect_attempts = 30, .connect_delay_ms = 10 }) orelse {
+            try std.testing.expect(false);
+            return;
+        };
+        app_remote_client = client;
+        app_remote_backend = session_host.remote_term_backend.RemoteTermBackend.init(allocator, io, &app_remote_client.?, session.runtime);
+        defer {
+            host_connect_failed = false; // 모듈-var 테스트 격리(내 fix가 death 시 세운다).
+            if (app_remote_backend) |*rb| {
+                rb.deinit();
+                app_remote_backend = null;
+            }
+            if (app_remote_client) |*cl| {
+                cl.deinit();
+                app_remote_client = null;
+            }
+        }
+
+        // host 살아 있을 때: createTerm은 host-backed.
+        const t_live = try session.createTerm(.{ .command = "/bin/cat" }, .{ .cols = 40, .rows = 10 }, 16, "cat", "/bin/cat");
+        try std.testing.expect(t_live.surface.remote != null);
+        try std.testing.expect(!host_connect_failed);
+
+        // **host를 죽인다**(SIGKILL + reap → 소켓이 확실히 닫힘). 이제 원격 spawn RPC는 ConnectionClosed/WriteFailed.
+        _ = std.c.kill(child, std.posix.SIG.KILL);
+        var st: c_int = undefined;
+        _ = std.c.waitpid(child, &st, 0);
+        host_reaped = true;
+
+        // host 죽은 뒤 createTerm: **실패 대신 in-process 폴백**. surface.remote == null + host_connect_failed 세워짐.
+        const t_fb = try session.createTerm(.{ .command = "/bin/cat" }, .{ .cols = 40, .rows = 10 }, 16, "cat", "/bin/cat");
+        try std.testing.expect(t_fb.surface.remote == null); // in-process로 떴다(폴백).
+        try std.testing.expect(host_connect_failed); // 이후 createTerm도 원격 안 탐.
+
+        // 세 번째도 바로 in-process(backendForNew가 host_connect_failed로 원격을 건너뜀 — 죽은 RPC 재시도 없음).
+        const t3 = try session.createTerm(.{ .command = "/bin/cat" }, .{ .cols = 40, .rows = 10 }, 16, "cat", "/bin/cat");
+        try std.testing.expect(t3.surface.remote == null);
+
+        session.destroyTerm(t3);
+        session.destroyTerm(t_fb);
+        session.destroyTerm(t_live); // 원격(죽은 host) — remove의 terminate RPC는 조용히 실패, client-side만 회수.
     } else {
         return error.SkipZigTest;
     }

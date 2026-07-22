@@ -321,6 +321,68 @@ pre {
   background: color-mix(in srgb, CanvasText 8%, Canvas);
 }
 
+/* 프리뷰 코드펜스 문법 하이라이트. rehype-prism-plus가 `.token.*` 스팬을 만들지만 색 규칙이 없어 plain으로 보였다.
+   소스 편집기(source-language.ts)와 같은 `--maru-syntax-*`(터미널 테마 파생, §2.3)에 매핑해 프리뷰·편집기 색을
+   일치시킨다. 값 없는 토큰은 CanvasText 기본색으로 떨어진다. */
+.token.keyword,
+.token.control,
+.token.atrule,
+.token.rule,
+.token.important,
+.token.selector {
+  color: var(--maru-syntax-keyword);
+}
+.token.string,
+.token.attr-value,
+.token.char,
+.token.regex,
+.token.url {
+  color: var(--maru-syntax-string);
+}
+.token.number,
+.token.boolean,
+.token.constant,
+.token.symbol {
+  color: var(--maru-syntax-number);
+}
+.token.comment,
+.token.prolog,
+.token.doctype,
+.token.cdata,
+.token.shebang {
+  color: var(--maru-syntax-comment);
+  font-style: italic;
+}
+.token.property,
+.token.attr-name,
+.token.variable,
+.token.parameter {
+  color: var(--maru-syntax-property);
+}
+.token.class-name,
+.token.builtin,
+.token.namespace,
+.token.type {
+  color: var(--maru-syntax-type);
+}
+.token.function,
+.token.function-name,
+.token.method {
+  color: var(--maru-syntax-function);
+}
+.token.operator,
+.token.punctuation,
+.token.entity {
+  color: var(--maru-syntax-punctuation);
+}
+.token.tag,
+.token.keyword.module {
+  color: var(--maru-syntax-tag);
+}
+.token.deleted {
+  color: var(--maru-syntax-invalid);
+}
+
 table {
   border-collapse: collapse;
 }

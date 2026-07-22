@@ -60,6 +60,10 @@ pub const RuntimeOps = struct {
     /// 함수, soft-wrap 이음·스크롤백 충실)으로 텍스트를 뽑아 JSON `{text}`로 준다. host가 콘텐츠를 소유하므로(client는 렌더만)
     /// 선택 의미론이 한 곳(host core)에 산다. codec 순수성 위해 span은 primitive(SelectSpan), runtime_manager가 core 연산으로 매핑.
     selected_text: *const fn (ctx: *anyopaque, runtime_id: u128, span: SelectSpan, allocator: std.mem.Allocator) anyerror![]u8,
+    /// §6b-2 단어/줄 선택: client가 (op, row, col)을 보내면 host가 **콘텐츠를 아는 자기 core**로 경계를 계산해
+    /// (`selectWordAt`/`selectLineAt`) 그 뷰포트 선택 span을 JSON으로 돌려준다(client는 그 span을 placeholder에 적용해
+    /// 하이라이트). 빈 placeholder는 단어/줄 경계를 모르므로 host가 계산 = 선택 의미론 host 단일 출처. codec 순수라 op는 문자열.
+    select_op: *const fn (ctx: *anyopaque, runtime_id: u128, op: []const u8, row: u16, col: u16, allocator: std.mem.Allocator) anyerror![]u8,
 };
 
 /// §6b 원격 선택 복사용 뷰포트 선택 span(primitive — codec 순수 유지). client가 보고 있는 화면(host의 뷰포트) 기준
@@ -250,6 +254,8 @@ pub const Connection = struct {
             return self.dispatchCoreCommand(frame.header.request_id, params);
         } else if (std.mem.eql(u8, method, "runtime.selected_text")) {
             return self.dispatchSelectedText(frame.header.request_id, params);
+        } else if (std.mem.eql(u8, method, "runtime.select_op")) {
+            return self.dispatchSelectOp(frame.header.request_id, params);
         } else if (std.mem.eql(u8, method, "runtime.resize")) {
             return self.dispatchResize(frame.header.request_id, params);
         } else if (std.mem.eql(u8, method, "runtime.notification")) {
@@ -464,6 +470,24 @@ pub const Connection = struct {
             ops.selected_text(ops.ctx, runtime_id, span, self.allocator) catch return self.replyError(request_id, .internal)
         else
             (self.allocator.dupe(u8, "{\"text\":\"\"}") catch return error.OutOfMemory);
+        defer self.allocator.free(body);
+        return self.replyResult(request_id, body);
+    }
+
+    /// `runtime.select_op`(§6b-2 단어/줄 선택): client가 보낸 (op, row, col)로 host가 콘텐츠 인지 경계를 계산해
+    /// (`selectWordAt`/`selectLineAt`) 결과 뷰포트 선택 span을 응답한다(client가 그 span을 placeholder에 적용해 하이라이트).
+    /// 모르는 stream_id는 invalid_request. read-only host는 `{sel:false}`. span은 primitive라 escape 불필요(정수/bool).
+    fn dispatchSelectOp(self: *Connection, request_id: u64, params: ?std.json.ObjectMap) HandleError!Action {
+        const p = params orelse return self.replyError(request_id, .invalid_request);
+        const stream = intFieldU64(p, "stream_id") orelse return self.replyError(request_id, .invalid_request);
+        const op = strField(p, "op") orelse return self.replyError(request_id, .invalid_request);
+        const row = intField(p, "row") orelse 0;
+        const col = intField(p, "col") orelse 0;
+        const runtime_id = (self.attachments.get(stream) orelse return self.replyError(request_id, .invalid_request)).runtime_id;
+        const body = if (self.runtime_ops) |ops|
+            ops.select_op(ops.ctx, runtime_id, op, row, col, self.allocator) catch return self.replyError(request_id, .internal)
+        else
+            (self.allocator.dupe(u8, "{\"sel\":false}") catch return error.OutOfMemory);
         defer self.allocator.free(body);
         return self.replyResult(request_id, body);
     }
@@ -1024,6 +1048,10 @@ const FakeRuntimeOps = struct {
     core_command_runtime: u128 = 0,
     last_select_span: SelectSpan = .{ .sr = 0, .sc = 0, .er = 0, .ec = 0, .block = false },
     selected_text_runtime: u128 = 0,
+    last_select_op: [16]u8 = undefined,
+    last_select_op_len: usize = 0,
+    last_select_op_row: u16 = 0,
+    last_select_op_col: u16 = 0,
 
     fn spawnFn(ctx: *anyopaque, params: RuntimeSpawnParams) anyerror!u128 {
         const self: *FakeRuntimeOps = @ptrCast(@alignCast(ctx));
@@ -1091,8 +1119,19 @@ const FakeRuntimeOps = struct {
         self.selected_text_runtime = runtime_id;
         return allocator.dupe(u8, "{\"text\":\"PICKED\"}");
     }
+    /// 받은 (op,row,col)을 기록하고 고정 span을 준다 — server 라우팅·파싱 검증(실 경계 계산은 runtime_manager smoke).
+    fn selectOpFn(ctx: *anyopaque, runtime_id: u128, op: []const u8, row: u16, col: u16, allocator: std.mem.Allocator) anyerror![]u8 {
+        const self: *FakeRuntimeOps = @ptrCast(@alignCast(ctx));
+        _ = runtime_id;
+        const n = @min(op.len, self.last_select_op.len);
+        @memcpy(self.last_select_op[0..n], op[0..n]);
+        self.last_select_op_len = n;
+        self.last_select_op_row = row;
+        self.last_select_op_col = col;
+        return allocator.dupe(u8, "{\"sel\":true,\"sr\":0,\"sc\":1,\"er\":0,\"ec\":3,\"block\":false}");
+    }
     fn ops(self: *FakeRuntimeOps) RuntimeOps {
-        return .{ .ctx = self, .spawn = spawnFn, .terminate = terminateFn, .write_input = writeInputFn, .resize = resizeFn, .snapshot = snapshotFn, .delta = deltaFn, .notification = notificationFn, .core_command = coreCommandFn, .selected_text = selectedTextFn };
+        return .{ .ctx = self, .spawn = spawnFn, .terminate = terminateFn, .write_input = writeInputFn, .resize = resizeFn, .snapshot = snapshotFn, .delta = deltaFn, .notification = notificationFn, .core_command = coreCommandFn, .selected_text = selectedTextFn, .select_op = selectOpFn };
     }
 };
 
@@ -1502,6 +1541,46 @@ test "server: runtime.selected_text routes span to RuntimeOps and returns text (
     // 모르는 stream_id → invalid_request.
     {
         const r = try feedJson(&conn, .request, 4, "{\"method\":\"runtime.selected_text\",\"params\":{\"stream_id\":99,\"sr\":0,\"sc\":0,\"er\":0,\"ec\":0,\"block\":false}}");
+        defer if (r.frame) |f| f.deinit(allocator);
+        try testing.expect(std.mem.indexOf(u8, r.frame.?.payload, "invalid_request") != null);
+    }
+}
+
+test "server: runtime.select_op routes word/line op to RuntimeOps and returns span (§6b-2)" {
+    const allocator = testing.allocator;
+    var registry = reg.TerminalRuntimeRegistry.init(allocator);
+    defer registry.deinit();
+    _ = try registry.register(0xAA, 80, 24);
+
+    var fake: FakeRuntimeOps = .{};
+    var conn = Connection.init(allocator, 1, &registry);
+    defer conn.deinit();
+    conn.runtime_ops = fake.ops();
+    {
+        const h = try feedJson(&conn, .hello, 1, "{\"protocol_min\":1,\"protocol_max\":1}");
+        if (h.frame) |f| f.deinit(allocator);
+    }
+    {
+        const frames = try feedExpectFrames(&conn, .request, 2, "{\"method\":\"runtime.attach\",\"params\":{\"runtime_id\":\"aa\",\"mode\":\"controller\"}}");
+        defer {
+            for (frames) |f| f.deinit(allocator);
+            allocator.free(frames);
+        }
+    }
+    // word(row1,col2) → RuntimeOps.select_op으로 라우팅 + fake span을 응답에 담는다.
+    {
+        const r = try feedJson(&conn, .request, 3, "{\"method\":\"runtime.select_op\",\"params\":{\"stream_id\":1,\"op\":\"word\",\"row\":1,\"col\":2}}");
+        defer if (r.frame) |f| f.deinit(allocator);
+        try testing.expect(std.mem.indexOf(u8, r.frame.?.payload, "\"sel\":true") != null);
+        try testing.expect(std.mem.indexOf(u8, r.frame.?.payload, "\"ec\":3") != null);
+    }
+    try testing.expectEqualStrings("word", fake.last_select_op[0..fake.last_select_op_len]);
+    try testing.expectEqual(@as(u16, 1), fake.last_select_op_row);
+    try testing.expectEqual(@as(u16, 2), fake.last_select_op_col);
+
+    // 모르는 stream_id → invalid_request.
+    {
+        const r = try feedJson(&conn, .request, 4, "{\"method\":\"runtime.select_op\",\"params\":{\"stream_id\":99,\"op\":\"line\",\"row\":0,\"col\":0}}");
         defer if (r.frame) |f| f.deinit(allocator);
         try testing.expect(std.mem.indexOf(u8, r.frame.?.payload, "invalid_request") != null);
     }

@@ -96,7 +96,10 @@ pub const RemoteTermBackend = struct {
         const rr = try self.allocator.create(RemoteRuntime);
         errdefer self.allocator.destroy(rr);
         try rr.attachExisting(self.client, self.allocator, self.io, handle, runtime_id_hex, size);
-        errdefer rr.deinit();
+        // 재접속은 **기존** host runtime이라 이후 단계(map put)가 실패해도 terminate 금지(§7 attach는 terminate 안 함) —
+        // client-side(surface/screen)만 회수한다. spawn 경로는 방금 우리가 띄운 runtime이라 deinit(terminate)이 맞지만
+        // attach는 남의 runtime이므로 detachClientSide로 되돌려야 재접속 실패가 세션을 죽이지 않는다.
+        errdefer rr.detachClientSide();
         try self.runtimes.put(self.allocator, handle, rr);
         return &rr.surface;
     }

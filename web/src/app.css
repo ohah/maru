@@ -3,12 +3,77 @@
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   background: Canvas;
   color: CanvasText;
+
+  /* text kind(§2.2) 소스 하이라이트 팔레트 — 색은 theme 책임(§1). source-language.ts의 HighlightStyle이
+     이 토큰만 참조한다. 시스템 색만으로는 다중 hue를 못 만들어 라이트 기본값을 두고 dark를 아래에서 override한다. */
+  --maru-syntax-keyword: #9333ea;
+  --maru-syntax-string: #15803d;
+  --maru-syntax-number: #b45309;
+  --maru-syntax-comment: color-mix(in srgb, CanvasText 45%, Canvas);
+  --maru-syntax-property: #0369a1;
+  --maru-syntax-type: #0e7490;
+  --maru-syntax-function: #2563eb;
+  --maru-syntax-punctuation: color-mix(in srgb, CanvasText 68%, Canvas);
+  --maru-syntax-tag: #be123c;
+  --maru-syntax-attribute: #9333ea;
+  --maru-syntax-invalid: #dc2626;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --maru-syntax-keyword: #c792ea;
+    --maru-syntax-string: #7ee787;
+    --maru-syntax-number: #f0b072;
+    --maru-syntax-comment: color-mix(in srgb, CanvasText 52%, Canvas);
+    --maru-syntax-property: #79c0ff;
+    --maru-syntax-type: #56d4dd;
+    --maru-syntax-function: #82aaff;
+    --maru-syntax-punctuation: color-mix(in srgb, CanvasText 72%, Canvas);
+    --maru-syntax-tag: #ff7b72;
+    --maru-syntax-attribute: #d2a8ff;
+    --maru-syntax-invalid: #ffa198;
+  }
 }
 
 html,
 body {
   min-height: 100%;
   margin: 0;
+}
+
+/* FP13 svg 프리뷰(render iframe): sanitize된 SVG를 뷰포트에 맞춰 가운데 정렬. 배경은 투명 격자로 투명 SVG를 구분한다. */
+#app:has(.maru-svg-preview) {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+  box-sizing: border-box;
+  padding: 16px;
+  background-color: Canvas;
+  background-image:
+    linear-gradient(45deg, color-mix(in srgb, CanvasText 8%, Canvas) 25%, transparent 25%),
+    linear-gradient(-45deg, color-mix(in srgb, CanvasText 8%, Canvas) 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, color-mix(in srgb, CanvasText 8%, Canvas) 75%),
+    linear-gradient(-45deg, transparent 75%, color-mix(in srgb, CanvasText 8%, Canvas) 75%);
+  background-size: 20px 20px;
+  background-position:
+    0 0,
+    0 10px,
+    10px -10px,
+    -10px 0;
+}
+.maru-svg-preview {
+  max-width: 100%;
+  max-height: calc(100vh - 32px);
+  object-fit: contain;
+}
+.maru-svg-error {
+  font:
+    13px -apple-system,
+    BlinkMacSystemFont,
+    "Segoe UI",
+    sans-serif;
+  color: color-mix(in srgb, CanvasText 65%, Canvas);
 }
 
 body {
@@ -31,12 +96,27 @@ body {
   display: none;
 }
 
+/* 첫 렌더 완료(shell이 `data-content-ready`를 세움) 전까지 읽기 모드 iframe을 투명하게 둔다. render.html이
+   로드되며 잠깐 보이는 blank Canvas와 markdown 내용의 팝인을 감추고 완성된 문서만 페이드인한다. 한 번 준비되면
+   유지되므로 모드 왕복(읽기↔라이브)이나 재렌더에서 다시 깜빡이지 않는다. */
 #renderer {
   display: block;
   width: 100%;
   height: 100%;
   border: 0;
   background: Canvas;
+  opacity: 0;
+  transition: opacity 160ms ease-out;
+}
+
+#renderer[data-content-ready="true"] {
+  opacity: 1;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  #renderer {
+    transition: none;
+  }
 }
 
 /* mode 전환 시 shell이 frame.hidden=true로 iframe을 숨긴다. 위 `#renderer{display:block}`(id 선택자)이 UA의
@@ -176,12 +256,28 @@ body[data-file-mode="source-edit"] #editor .cm-gutters {
   overflow: hidden;
 }
 
+/* 렌더 완료(`data-atomic-rendered`) 전까지 iframe을 투명하게 두고 완료 시 페이드인한다. 이렇게 하면 iframe이
+   render.html을 로드하며 잠깐 보이는 blank/기본 배경과, 렌더 순간의 높이 점프·내용 팝인이 시야에 드러나지 않고
+   완성된 블록만 부드럽게 나타난다(사용자 플리커 제거 요청, 2026-07-22). 실패한 위젯은 removeFailed로 원문 fallback
+   되므로 투명 상태로 남지 않는다. `prefers-reduced-motion`에서는 즉시 표시한다. */
 .maru-live-atomic-frame {
   display: block;
   width: 100%;
   height: 4rem;
   border: 0;
-  background: Canvas;
+  background: transparent;
+  opacity: 0;
+  transition: opacity 160ms ease-out;
+}
+
+.maru-live-atomic-frame[data-atomic-rendered="true"] {
+  opacity: 1;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .maru-live-atomic-frame {
+    transition: none;
+  }
 }
 
 #app {

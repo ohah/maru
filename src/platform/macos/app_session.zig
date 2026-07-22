@@ -9589,7 +9589,7 @@ pub const AppSession = struct {
     }
 
     fn markFilePanelDirtySyncPending(self: *AppSession, entry: *dock_panel.Entry) void {
-        if (entry.kind != .markdown or !entry.mode.isEditable() or entry.surface_id == 0) return;
+        if (!entry.kind.usesEditorBridge() or !entry.mode.isEditable() or entry.surface_id == 0) return;
         entry.dirty_sync_pending = true;
         self.queueFilePanelDirtySyncAction(entry.surface_id, 0);
     }
@@ -9597,7 +9597,7 @@ pub const AppSession = struct {
     fn markFilePanelCloseDirtySyncPending(self: *AppSession, entry: *dock_panel.Entry, request_id: u64) void {
         // source→read 전환 뒤에도 CM6 buffer와 dirty 상태는 surface에 남는다. 닫기 transaction은 mode와 무관하게
         // 최신 snapshot을 요구해야 read-mode dirty 탭이 즉시 닫히지 않는다.
-        if (entry.kind != .markdown or entry.surface_id == 0) return;
+        if (!entry.kind.usesEditorBridge() or entry.surface_id == 0) return;
         entry.dirty_sync_pending = true;
         self.queueFilePanelDirtySyncAction(entry.surface_id, request_id);
     }
@@ -9879,7 +9879,7 @@ pub const AppSession = struct {
     pub fn completeFileConflictReload(self: *AppSession, surface_id: u64, success: bool) FilePanelWriteError!void {
         if (!self.dock_initialized) return error.SurfaceNotFound;
         const entry = self.dock.entryForSurfaceId(surface_id) orelse return error.SurfaceNotFound;
-        if (entry.kind != .markdown) return error.WrongKind;
+        if (!entry.kind.usesEditorBridge()) return error.WrongKind;
         if (!entry.conflict_reload_pending) {
             if (!success) self.latchExternalFileChange(entry); // clean auto-reload가 편집 중단/실패를 보고한 보수적 latch.
             return;
@@ -10161,6 +10161,18 @@ pub const AppSession = struct {
         }
     }
 
+    /// openKindForPath 결과를 도크 EntryKind로 옮기는 단일 지점. 새 kind(svg·image·media·pdf, FP13~)는 여기서
+    /// 한 번만 매핑을 넓힌다(docs/file-panel.md §2.2). 이름이 1:1이라도 두 enum(bridge OpenKind·dock EntryKind)의
+    /// 레이어 경계를 유지한다.
+    fn entryKindForOpenKind(open_kind: file_panel_bridge.OpenKind) dock_panel.EntryKind {
+        return switch (open_kind) {
+            .markdown => .markdown,
+            .html => .html,
+            .text => .text,
+            .svg => .svg,
+        };
+    }
+
     fn openCreatedFilePanel(self: *AppSession, path: []const u8, root: []const u8) void {
         const open_kind = file_panel_bridge.openKindForPath(path) orelse return;
         var candidate = self.file_tree.clone() catch return;
@@ -10170,10 +10182,7 @@ pub const AppSession = struct {
         var candidate_rows: std.ArrayList(file_tree.Row) = .empty;
         defer candidate_rows.deinit(self.allocator);
         self.prepareFileTreeRowStaging(&candidate_rows, 1) catch return;
-        const kind: dock_panel.EntryKind = switch (open_kind) {
-            .markdown => .markdown,
-            .html => .html,
-        };
+        const kind = entryKindForOpenKind(open_kind);
         const opened = self.dock.open(self.dock.focusedGroup(), path, kind) catch return;
         self.buildPreparedFileTreeRows(&candidate, &candidate_rows);
         self.commitFileTreeCandidate(&candidate, &candidate_rows);
@@ -10202,10 +10211,10 @@ pub const AppSession = struct {
             for (group.entries.items) |entry| {
                 const replacement = (try file_tree_mutation.remapPath(self.allocator, entry.path, old_path, new_path)) orelse continue;
                 const expected = try self.allocator.dupe(u8, entry.path);
-                const new_kind: ?dock_panel.EntryKind = if (file_panel_bridge.openKindForPath(replacement)) |kind| switch (kind) {
-                    .markdown => .markdown,
-                    .html => .html,
-                } else null;
+                const new_kind: ?dock_panel.EntryKind = if (file_panel_bridge.openKindForPath(replacement)) |k|
+                    entryKindForOpenKind(k)
+                else
+                    null;
                 plan.dock_items[plan.dock_len] = .{
                     .entry_id = entry.id,
                     .expected = expected,
@@ -11728,10 +11737,7 @@ pub const AppSession = struct {
             defer candidate_rows.deinit(self.allocator);
             self.prepareFileTreeRowStaging(&candidate_rows, 1) catch return .failed;
             const group = self.dock.focusedGroup();
-            const kind: dock_panel.EntryKind = switch (open_kind) {
-                .markdown => .markdown,
-                .html => .html,
-            };
+            const kind = entryKindForOpenKind(open_kind);
             const opened = self.dock.open(group, path, kind) catch return .failed;
             self.pinInitialFilePanelIdentity(opened, initial_identity);
             self.buildPreparedFileTreeRows(&candidate, &candidate_rows);
@@ -11739,10 +11745,7 @@ pub const AppSession = struct {
             return self.finishOpenFilePanel(opened);
         }
         const group = self.dock.focusedGroup();
-        const kind: dock_panel.EntryKind = switch (open_kind) {
-            .markdown => .markdown,
-            .html => .html,
-        };
+        const kind = entryKindForOpenKind(open_kind);
         const opened = self.dock.open(group, path, kind) catch return .failed;
         self.pinInitialFilePanelIdentity(opened, initial_identity);
         return self.finishOpenFilePanel(opened);
@@ -11754,7 +11757,7 @@ pub const AppSession = struct {
         identity: ?file_tree.Identity,
     ) void {
         _ = self;
-        if (!opened.created or opened.group.entries.items[opened.index].kind != .markdown) return;
+        if (!opened.created or !opened.group.entries.items[opened.index].kind.usesEditorBridge()) return;
         const expected = identity orelse return;
         const entry = &opened.group.entries.items[opened.index];
         entry.initial_file_identity_device = expected.device;
@@ -11880,6 +11883,18 @@ pub const AppSession = struct {
         if (!self.dock_initialized) return null;
         const entry = self.dock.entryForSurfaceId(surface_id) orelse return null;
         return .{ .path = entry.path, .kind = entry.kind };
+    }
+
+    /// 소스 편집기가 있는 kind surface의 CM6 하이라이트 언어(§2.2·§2.3). text는 경로에서 파생, svg 소스는 항상 xml.
+    /// markdown/html은 null이라 Swift가 기존 markdown shell URL을 그대로 쓴다. 언어는 핀 경로(SSOT)에서 매번 파생한다.
+    pub fn filePanelLanguage(self: *AppSession, surface_id: u64) ?file_panel_bridge.TextLanguage {
+        if (!self.dock_initialized) return null;
+        const entry = self.dock.entryForSurfaceId(surface_id) orelse return null;
+        return switch (entry.kind) {
+            .text => file_panel_bridge.textLanguageForPath(entry.path),
+            .svg => .xml,
+            .markdown, .html => null,
+        };
     }
 
     /// Mermaid bridge admission의 native document gate. 렌더 결과의 revision/generation current 판정은
@@ -12238,9 +12253,9 @@ pub const AppSession = struct {
             self.showNotice("파일 변경이 끝난 뒤 탭을 닫을 수 있습니다.");
             return;
         }
-        // HTML과 안정된 native-clean Markdown read entry만 즉시 닫는다. source editor를 떠나도 CM6 buffer는 살아
-        // 있으므로 dirty/pending/conflict Markdown은 mode와 무관하게 revision-pinned coordinator를 거친다.
-        if (entry.kind == .markdown and filePanelEntryNeedsDirtyProtection(entry.*)) {
+        // HTML과 안정된 native-clean Markdown/text read entry만 즉시 닫는다. source editor를 떠나도 CM6 buffer는
+        // 살아 있으므로 dirty/pending/conflict인 편집 브리지 kind는 mode와 무관하게 revision-pinned coordinator를 거친다.
+        if (entry.kind.usesEditorBridge() and filePanelEntryNeedsDirtyProtection(entry.*)) {
             if (self.file_panel_close_request_id >= max_file_panel_close_request_id) {
                 self.showNotice("파일 닫기 요청 번호를 더 발급할 수 없어 탭을 닫지 않았습니다.");
                 return;
@@ -12337,10 +12352,7 @@ pub const AppSession = struct {
                 self.allocator.free(removed.path);
                 continue;
             };
-            const expected_kind: dock_panel.EntryKind = switch (open_kind) {
-                .markdown => .markdown,
-                .html => .html,
-            };
+            const expected_kind = entryKindForOpenKind(open_kind);
             const valid = std.fs.path.isAbsolute(entry.path) and
                 std.unicode.utf8ValidateSlice(entry.path) and
                 expected_kind == entry.kind and
@@ -12466,7 +12478,7 @@ pub const AppSession = struct {
     pub fn readFilePanel(self: *AppSession, gpa: std.mem.Allocator, surface_id: u64, editor_epoch: u64) FilePanelReadError![]u8 {
         if (!self.dock_initialized) return error.SurfaceNotFound;
         const entry = self.dock.entryForSurfaceId(surface_id) orelse return error.SurfaceNotFound;
-        if (entry.kind != .markdown) return error.WrongKind;
+        if (!entry.kind.usesEditorBridge()) return error.WrongKind;
         if (!entry.editor_document_active or entry.editor_epoch != editor_epoch) return error.StaleDocument;
         if (entry.editor_recovery_required) return error.RecoveryRequired;
         if (entry.mutation_pending_id != 0) return error.MutationPending;
@@ -12524,7 +12536,7 @@ pub const AppSession = struct {
     pub fn beginFilePanelDocument(self: *AppSession, surface_id: u64, document_id: u64) FilePanelWriteError!u64 {
         if (!self.dock_initialized) return error.SurfaceNotFound;
         const entry = self.dock.entryForSurfaceId(surface_id) orelse return error.SurfaceNotFound;
-        if (entry.kind != .markdown) return error.WrongKind;
+        if (!entry.kind.usesEditorBridge()) return error.WrongKind;
         if (document_id == 0) return error.StaleDocument;
 
         // stale/멱등 begin은 close transaction을 포함한 어떤 상태도 바꾸지 않는다. 동일 active document의
@@ -12573,7 +12585,7 @@ pub const AppSession = struct {
     pub fn filePanelDocumentTerminated(self: *AppSession, surface_id: u64) u32 {
         if (!self.dock_initialized) return 0;
         const entry = self.dock.entryForSurfaceId(surface_id) orelse return 0;
-        if (entry.kind != .markdown) return 0;
+        if (!entry.kind.usesEditorBridge()) return 0;
         // LRU/rename이 새 surface id를 발급한 뒤 첫 begin 전이면 Entry에 남은 active flag는 이전 surface 문서다.
         // 새 WebView의 조기 종료를 그 문서 손실로 오인하지 않고 safe reload만 허용한다.
         if (entry.editor_surface_id != surface_id) return 1;
@@ -12601,7 +12613,7 @@ pub const AppSession = struct {
         success: bool,
     ) FilePanelWriteError!void {
         const entry = self.dock.entryForSurfaceId(surface_id) orelse return error.SurfaceNotFound;
-        if (entry.kind != .markdown) return error.WrongKind;
+        if (!entry.kind.usesEditorBridge()) return error.WrongKind;
         if (!entry.editor_document_active or entry.editor_epoch != editor_epoch) return error.StaleDocument;
         if (entry.editor_recovery_required) return error.RecoveryRequired;
         return self.completeFileConflictReload(surface_id, success);
@@ -12796,7 +12808,7 @@ pub const AppSession = struct {
     pub fn writeFilePanel(self: *AppSession, surface_id: u64, editor_epoch: u64, content: []const u8) FilePanelWriteError!void {
         if (!self.dock_initialized) return error.SurfaceNotFound;
         const entry = self.dock.entryForSurfaceId(surface_id) orelse return error.SurfaceNotFound;
-        if (entry.kind != .markdown) return error.WrongKind;
+        if (!entry.kind.usesEditorBridge()) return error.WrongKind;
         if (!entry.editor_document_active or entry.editor_epoch != editor_epoch) return error.StaleDocument;
         if (entry.editor_recovery_required) return error.RecoveryRequired;
         if (entry.mutation_pending_id != 0) return error.MutationPending;
@@ -12829,7 +12841,7 @@ pub const AppSession = struct {
     pub fn reportFilePanelDirty(self: *AppSession, surface_id: u64, report: maru.session.control_bridge.DirtyReport) FilePanelWriteError!void {
         if (!self.dock_initialized) return error.SurfaceNotFound;
         const entry = self.dock.entryForSurfaceId(surface_id) orelse return error.SurfaceNotFound;
-        if (entry.kind != .markdown) return error.WrongKind;
+        if (!entry.kind.usesEditorBridge()) return error.WrongKind;
         // 기존 headless policy fixtures만 zero/zero sentinel을 쓴다. 제품 빌드에는 이 seam 자체가 없고 JSON bridge도
         // non-positive epoch을 거부한다.
         const test_unbound = builtin.is_test and report.editor_epoch == 0 and entry.editor_epoch == 0 and !entry.editor_document_active;
@@ -13172,7 +13184,9 @@ pub const AppSession = struct {
                     try out.append(self.allocator, .{
                         .surface_id = entry.surface_id,
                         .panel_kind = switch (entry.kind) {
-                            .markdown => .markdown,
+                            // text·svg는 markdown과 같은 신뢰 config(maru-app:// 스킴·bridge). shell URL의 `?lang=`·
+                            // `?kind=svg`가 편집기/프리뷰 모드를 고른다(§2.2·§2.3). html만 비신뢰 browser config다.
+                            .markdown, .text, .svg => .markdown,
                             .html => .browser,
                         },
                         .seam_edges = seam_edges,
@@ -16942,7 +16956,7 @@ pub const AppSession = struct {
     fn webContextIsEditable(self: *AppSession, surface_id: u64) bool {
         return if (self.dock_initialized)
             if (self.dock.entryForSurfaceId(surface_id)) |entry|
-                entry.kind == .markdown and entry.mode.isEditable()
+                entry.kind.usesEditorBridge() and entry.mode.isEditable()
             else
                 false
         else
@@ -17962,13 +17976,13 @@ pub const AppSession = struct {
                                 }
                             };
                             if (dock_layout.headerModeAt(g, self.cell_width_px, entry.kind, entry.dirty, entry.external_change, x_px, y_px)) |requested_mode| {
-                                if (entry.kind == .markdown) {
-                                    if (entry.mode != requested_mode) {
-                                        self.markFilePanelDirtySyncPending(entry);
-                                        entry.mode = requested_mode;
-                                        self.file_panel_mode_pending = entry.surface_id;
-                                        self.metal_dirty = true;
-                                    }
+                                // headerModeAt는 modesForKind(kind)의 모드만 돌려주고 modesForKind ⊆ allowedFor(kind)라
+                                // requested_mode는 이미 kind에 허용된 모드다(§2.3). markdown·svg 모두 여기서 처리된다.
+                                if (entry.mode != requested_mode) {
+                                    self.markFilePanelDirtySyncPending(entry);
+                                    entry.mode = requested_mode;
+                                    self.file_panel_mode_pending = entry.surface_id;
+                                    self.metal_dirty = true;
                                 }
                             }
                         }
@@ -41125,17 +41139,22 @@ test "FP5 file panel routing: picker one-shot, md/html open, duplicate activatio
     try std.testing.expectEqualStrings(html_path, group.entries.items[1].path);
     try std.testing.expectEqual(@as(?usize, 1), group.active);
     try std.testing.expectEqual(group, session.dock.focusedGroup());
-    try std.testing.expectError(error.InvalidLink, session.openFilePanelLink(md_surface_id, "three.txt", false));
+    // text kind(§2.2): 로컬 텍스트 링크도 markdown과 같은 정책으로 source group 도크 탭에 연다.
+    try session.openFilePanelLink(md_surface_id, "three.txt", false);
+    try std.testing.expectEqual(@as(usize, 3), group.entries.items.len);
+    try std.testing.expectEqualStrings(text_path, group.entries.items[2].path);
+    try std.testing.expectEqual(dock_panel.EntryKind.text, group.entries.items[2].kind);
+    try std.testing.expectEqual(@as(?usize, 2), group.active);
 
     try std.testing.expectEqual(AppSession.FilePanelOpenPathResult.opened, session.openFilePanelPath(html_path));
-    try std.testing.expectEqual(@as(usize, 2), group.entries.items.len);
+    try std.testing.expectEqual(@as(usize, 3), group.entries.items.len);
     const html_surface_id = group.entries.items[1].surface_id;
     try std.testing.expectEqual(dock_panel.EntryKind.html, session.filePanelEntryInfo(html_surface_id).?.kind);
     try std.testing.expectEqual(@as(?usize, 1), group.active);
     try std.testing.expectError(error.WrongKind, session.openFilePanelLink(html_surface_id, "one.md", false));
     try std.testing.expectError(error.SurfaceNotFound, session.openFilePanelLink(999_999, "one.md", false));
     try std.testing.expectError(error.OpenFailed, session.openFilePanelLink(md_surface_id, "missing.md", false));
-    try std.testing.expectEqual(@as(usize, 2), group.entries.items.len);
+    try std.testing.expectEqual(@as(usize, 3), group.entries.items.len);
 
     var external_buf: [std.fs.max_path_bytes]u8 = undefined;
     const first_editor_epoch = try session.beginFilePanelDocument(md_surface_id, 1001);
@@ -41165,9 +41184,11 @@ test "FP5 file panel routing: picker one-shot, md/html open, duplicate activatio
     try std.testing.expectError(error.InvalidLink, session.openFilePanelLink(md_surface_id, "javascript:alert(1)", false));
 
     try std.testing.expectEqual(AppSession.FilePanelOpenPathResult.opened, session.openFilePanelPath(md_path));
-    try std.testing.expectEqual(@as(usize, 2), group.entries.items.len);
+    try std.testing.expectEqual(@as(usize, 3), group.entries.items.len);
     try std.testing.expectEqual(@as(?usize, 0), group.active);
-    try std.testing.expectEqual(AppSession.FilePanelOpenPathResult.unsupported, session.openFilePanelPath(text_path));
+    // three.txt는 이제 text kind(§2.2)이고 이미 열려 있어 새 탭 없이 기존 탭을 활성화한다(duplicate).
+    try std.testing.expectEqual(AppSession.FilePanelOpenPathResult.opened, session.openFilePanelPath(text_path));
+    try std.testing.expectEqual(@as(usize, 3), group.entries.items.len);
     try std.testing.expectEqual(AppSession.FilePanelOpenPathResult.failed, session.openFilePanelPath(dir_path));
     try std.testing.expectEqual(AppSession.FilePanelOpenPathResult.failed, session.openFilePanelPath("relative.md"));
     try std.testing.expect(session.filePanelEntryInfo(999_999) == null);
@@ -41789,7 +41810,9 @@ test "file tree rename changes supported panel kind and removes unsupported pane
     defer allocator.free(markdown);
     const html = try std.fs.path.join(allocator, &.{ root, "kind.html" });
     defer allocator.free(html);
-    const unsupported = try std.fs.path.join(allocator, &.{ root, "kind.txt" });
+    const text = try std.fs.path.join(allocator, &.{ root, "kind.txt" });
+    defer allocator.free(text);
+    const unsupported = try std.fs.path.join(allocator, &.{ root, "kind.bin" });
     defer allocator.free(unsupported);
 
     const session = try initSmokeSessionSized(allocator);
@@ -41812,11 +41835,25 @@ test "file tree rename changes supported panel kind and removes unsupported pane
     try std.testing.expect(html_entry.surface_id != 0 and html_entry.surface_id != old_surface);
     try std.testing.expect(session.dock.pathLocation(markdown) == null);
 
-    try session.prepareFileTreeRenameRemap(2, html, unsupported);
+    // html→.txt는 지원 kind 전이(§2.2·§7): 패널을 닫지 않고 text kind·source_edit·새 surface로 변환한다.
+    try session.prepareFileTreeRenameRemap(2, html, text);
     try std.testing.expect(session.reserveFileTreeMutation(2, html));
-    try std.testing.expect(session.applyFileTreeRename(2, unsupported));
+    try std.testing.expect(session.applyFileTreeRename(2, text));
     session.clearFileTreeMutationReservation(2);
+    session.assignOneVisibleDockSurfaceId();
+    const text_location = session.dock.pathLocation(text).?;
+    const text_entry = text_location.group.entries.items[text_location.index];
+    try std.testing.expectEqual(dock_panel.EntryKind.text, text_entry.kind);
+    try std.testing.expectEqual(dock_panel.Mode.source_edit, text_entry.mode);
     try std.testing.expect(session.dock.pathLocation(html) == null);
+    try std.testing.expect(session.dock.entryCountTotal() == 1);
+
+    // text→.bin은 비지원 확장자라 clean file-panel entry를 닫는다.
+    try session.prepareFileTreeRenameRemap(3, text, unsupported);
+    try std.testing.expect(session.reserveFileTreeMutation(3, text));
+    try std.testing.expect(session.applyFileTreeRename(3, unsupported));
+    session.clearFileTreeMutationReservation(3);
+    try std.testing.expect(session.dock.pathLocation(text) == null);
     try std.testing.expect(session.dock.pathLocation(unsupported) == null);
     try std.testing.expectEqual(@as(usize, 0), session.dock.entryCountTotal());
     try std.testing.expect(switch (session.focus_owner) {

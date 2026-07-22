@@ -15,11 +15,28 @@ pub const max_entries: usize = 256;
 pub const max_groups: usize = 64;
 
 /// 콘텐츠 종류는 WebKit 구성 선택에 쓰이는 L2 정책 값이다. 브라우저 탭을 도크로 보내는 후속 확장은 이 닫힌 목록에
-/// 새 값을 더하되, 트리·탭 소유 모델은 그대로 재사용한다(docs/file-panel.md §1).
-pub const EntryKind = enum { markdown, html };
+/// 새 값을 더하되, 트리·탭 소유 모델은 그대로 재사용한다(docs/file-panel.md §1·§2.2). `text`는 markdown과 같은
+/// 신뢰 shell·`maru.file.read/write` 브리지를 쓰지만 라이브 프리뷰·mode 선택기·링크가 없는 소스 전용 편집기다(FP12).
+pub const EntryKind = enum {
+    markdown,
+    html,
+    text,
+    svg,
+
+    /// 신뢰 shell에서 CM6를 마운트하고 `maru.file.read/write` 브리지로 편집하는 kind인지. read/write·dirty·저장·
+    /// document epoch·외부변경·초기 hydration identity 보호 게이트가 이 술어를 공유한다(§2.2·§3). markdown 라이브
+    /// 프리뷰·링크·readAsset·mermaid 전용 경로는 별도로 `== .markdown`을 유지한다. svg는 소스 편집(xml)이 이 브리지를
+    /// 쓰고 읽기 모드는 격리 render origin의 sanitize 프리뷰다(§2.2·FP13).
+    pub fn usesEditorBridge(self: EntryKind) bool {
+        return switch (self) {
+            .markdown, .text, .svg => true,
+            .html => false,
+        };
+    }
+};
 
 /// 파일 도크 표시 모드. enum ordinal은 C ABI raw 값, workspaceName/parseWorkspaceName은 workspace 문자열 wire의
-/// 정책 SSOT다. 헤더의 시각 순서는 `dock_layout.header_mode_order`가 별도로 고정한다. HTML은 read만 허용하고
+/// 정책 SSOT다. 헤더의 시각 순서·kind별 선택지는 `dock_layout.modesForKind`가 별도로 고정한다. HTML은 read만 허용하고
 /// Markdown의 두 편집 모드는 같은 dirty/save 수명 계약을 소비한다.
 pub const Mode = enum(u32) {
     read = 0,
@@ -32,6 +49,8 @@ pub const Mode = enum(u32) {
         return switch (kind) {
             .markdown => .live_preview,
             .html => .read,
+            .text => .source_edit,
+            .svg => .read, // 이미지 미리보기가 먼저(VSCode SVG 프리뷰 관례).
         };
     }
 
@@ -39,6 +58,8 @@ pub const Mode = enum(u32) {
         return switch (kind) {
             .markdown => true,
             .html => self == .read,
+            .text => self == .source_edit,
+            .svg => self == .read or self == .source_edit, // 라이브 없음.
         };
     }
 
@@ -897,6 +918,28 @@ pub fn freePersistedState(allocator: std.mem.Allocator, state: *PersistedState) 
     if (state.groups.len > 0) allocator.free(state.groups);
     if (state.tree.len > 0) allocator.free(state.tree);
     state.* = .{};
+}
+
+test "EntryKind/Mode policy: markdown, html, text (FP12 §2.2)" {
+    // 신뢰 편집 브리지 kind: markdown+text만. html은 격리 read-only.
+    try std.testing.expect(EntryKind.markdown.usesEditorBridge());
+    try std.testing.expect(EntryKind.text.usesEditorBridge());
+    try std.testing.expect(!EntryKind.html.usesEditorBridge());
+
+    // 기본 모드: markdown=라이브, html=읽기, text=소스.
+    try std.testing.expectEqual(Mode.live_preview, Mode.defaultFor(.markdown));
+    try std.testing.expectEqual(Mode.read, Mode.defaultFor(.html));
+    try std.testing.expectEqual(Mode.source_edit, Mode.defaultFor(.text));
+
+    // 허용 모드: markdown=전부, html=read만, text=source_edit만.
+    try std.testing.expect(Mode.read.allowedFor(.markdown) and Mode.source_edit.allowedFor(.markdown) and Mode.live_preview.allowedFor(.markdown));
+    try std.testing.expect(Mode.read.allowedFor(.html) and !Mode.source_edit.allowedFor(.html) and !Mode.live_preview.allowedFor(.html));
+    try std.testing.expect(Mode.source_edit.allowedFor(.text) and !Mode.read.allowedFor(.text) and !Mode.live_preview.allowedFor(.text));
+
+    // 새 entry의 기본 모드는 항상 자기 kind에서 허용된다(복원 검증 불변식과 일치).
+    inline for (.{ EntryKind.markdown, EntryKind.html, EntryKind.text }) |kind| {
+        try std.testing.expect(Mode.defaultFor(kind).allowedFor(kind));
+    }
 }
 
 test "entry id allocator: monotonic nonzero and exhaustion fails closed" {

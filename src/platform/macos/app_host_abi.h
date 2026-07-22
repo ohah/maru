@@ -802,12 +802,35 @@ int32_t maru_macos_app_session_provide_file_tree_root_pick(MaruAppHostSession *s
 /* 절대경로를 현재 창 도크에 연다. 반환 0=지원하지 않는 확장자(외부 열기 유지), 1=열림/기존 탭 활성화,
    2=지원 확장자지만 경로·파일·용량/할당 실패. 종류·regular-file·중복 정책은 Zig 단일 출처. v121. */
 uint32_t maru_macos_app_session_open_file_panel_path(MaruAppHostSession *session, const uint8_t *bytes, size_t len);
-/* surface가 도크 entry면 path와 kind를 반환한다(0=도크 아님, 1=markdown, 2=html). path는 Zig 소유이며 호출 중
-   복사해서 쓴다. Swift create 전이가 HTML loadFileURL 핀 경로를 얻는 용도. v121. */
+/* surface가 도크 entry면 path와 kind를 반환한다(0=도크 아님, 1=markdown/text=신뢰 config, 2=html). path는 Zig
+   소유이며 호출 중 복사해서 쓴다. Swift create 전이가 HTML loadFileURL 핀 경로를 얻는 용도. v121.
+   text와 markdown은 같은 신뢰 config(1)를 쓰고, 소스 전용 CM6 선택은 file_panel_language의 lang 토큰이 맡는다. */
 uint32_t maru_macos_app_session_file_panel_entry(
     MaruAppHostSession *session,
     uint64_t surface_id,
     const uint8_t **out_path,
+    size_t *out_len
+);
+/* text kind surface의 CM6 하이라이트 언어 wire 이름(예: "json", "python")을 반환한다. 1=text(out에 토큰),
+   0=markdown/html이거나 도크 아님(out 비움 → shell URL에 lang 힌트를 붙이지 않는다). 토큰은 static borrow. */
+uint32_t maru_macos_app_session_file_panel_language(
+    MaruAppHostSession *session,
+    uint64_t surface_id,
+    const uint8_t **out_ptr,
+    size_t *out_len
+);
+/* 현재 터미널 색상 테마에서 파생한 syntax 하이라이트 색을 `--maru-syntax-*` CSS 변수로 설정하는 JS 스니펫을
+   out에 쓴다(§2.3). 신뢰 shell webview 로드 후·테마 변경 시 evaluateJavaScript로 실행한다. 반환=바이트 수(0=실패). */
+size_t maru_macos_app_session_syntax_style_js(
+    MaruAppHostSession *session,
+    uint8_t *out,
+    size_t out_cap
+);
+/* svg surface면 "svg"를 out에 쓰고 1 반환(Swift가 shell URL에 ?kind=svg 추가 → read 프리뷰+xml 소스). 그 외 0. */
+uint32_t maru_macos_app_session_file_panel_shell_kind(
+    MaruAppHostSession *session,
+    uint64_t surface_id,
+    const uint8_t **out_ptr,
     size_t *out_len
 );
 /* 도크 entry의 mode(0=read, 1=source-edit, 2=live-preview). 도크가 아니면 -1. v132. */

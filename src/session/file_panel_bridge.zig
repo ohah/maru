@@ -9,15 +9,145 @@ const std = @import("std");
 /// Markdown 본문과 상대 asset에 공통으로 적용하는 단일 파일 읽기 상한. base64 응답은 이보다 커질 수 있다.
 pub const max_file_bytes: usize = 8 * 1024 * 1024;
 
-/// 사용자가 도크로 열 수 있는 v1 파일 종류. 확장자 분류를 Zig 한 곳에 두어 터미널 링크와 NSOpenPanel이
-/// 서로 다른 파일 집합을 열지 않게 한다.
-pub const OpenKind = enum { markdown, html };
+/// 사용자가 도크로 열 수 있는 파일 종류. 확장자 분류를 Zig 한 곳에 두어 터미널 링크·NSOpenPanel·트리·CLI가
+/// 서로 다른 파일 집합을 열지 않게 한다(docs/file-panel.md §2.2·§6). **정책(FP12, 사용자 결정 2026-07-22)**:
+/// VSCode처럼 `.md`/`.html`과 알려진 바이너리를 뺀 **나머지는 전부 `text`로 연다**. 알려진 확장자는 문법
+/// 하이라이트, 그 외 text는 plain 편집이다. image·media·pdf는 FP14~FP15에서 바이너리 집합의 일부를 자기 kind로 뺀다.
+pub const OpenKind = enum { markdown, html, text, svg };
+
+/// `text` kind의 CM6 하이라이트 언어. `wireName`은 shell URL `?lang=` 힌트와 web `source-language.ts` 언어 선택의
+/// wire 값(§2.2). 색은 theme 책임이고 여기서는 문법 선택만 정한다. `plain`은 문법 없이 편집만(색은 CanvasText).
+/// 전용 lang 패키지(json~yaml)와 `@codemirror/legacy-modes`(toml~dart)를 web이 이 enum으로 고른다.
+pub const TextLanguage = enum {
+    plain,
+    // 전용 @codemirror/lang-* 패키지
+    json,
+    javascript,
+    typescript,
+    python,
+    css,
+    xml,
+    yaml,
+    // @codemirror/legacy-modes StreamLanguage
+    toml,
+    ini,
+    shell,
+    sql,
+    rust,
+    go,
+    c,
+    cpp,
+    java,
+    csharp,
+    kotlin,
+    swift,
+    ruby,
+    lua,
+    dockerfile,
+    perl,
+    r,
+    powershell,
+    groovy,
+    scala,
+    haskell,
+    clojure,
+    dart,
+
+    pub fn wireName(self: TextLanguage) []const u8 {
+        return @tagName(self);
+    }
+};
+
+/// `text` kind 파일의 CM6 language를 한 곳에서 정한다. 항상 값을 돌려주며 알 수 없으면 `plain`이다(text는 catch-all).
+/// basename(Dockerfile·.zshrc 등)을 먼저 보고 그다음 확장자를 본다. `.md`/`.html`은 각자 kind가 소유하므로 여기
+/// 오지 않는다.
+pub fn textLanguageForPath(path: []const u8) TextLanguage {
+    const eq = std.ascii.eqlIgnoreCase;
+    const base = std.fs.path.basename(path);
+    if (eq(base, "Dockerfile") or eq(base, "Containerfile")) return .dockerfile;
+    if (eq(base, ".bashrc") or eq(base, ".zshrc") or eq(base, ".bash_profile") or eq(base, ".profile") or eq(base, ".zprofile") or eq(base, ".bash_aliases") or eq(base, ".zshenv")) return .shell;
+    if (eq(base, ".gitconfig") or eq(base, ".npmrc") or eq(base, ".editorconfig") or eq(base, ".curlrc") or eq(base, ".wgetrc")) return .ini;
+
+    const ext = std.fs.path.extension(path);
+    // 전용 lang 패키지가 있는 확장자.
+    if (eq(ext, ".json") or eq(ext, ".jsonc") or eq(ext, ".json5") or eq(ext, ".geojson") or eq(ext, ".webmanifest") or eq(ext, ".ipynb")) return .json;
+    if (eq(ext, ".js") or eq(ext, ".mjs") or eq(ext, ".cjs") or eq(ext, ".jsx")) return .javascript;
+    if (eq(ext, ".ts") or eq(ext, ".mts") or eq(ext, ".cts") or eq(ext, ".tsx")) return .typescript;
+    if (eq(ext, ".py") or eq(ext, ".pyi") or eq(ext, ".pyw")) return .python;
+    if (eq(ext, ".css") or eq(ext, ".scss") or eq(ext, ".sass") or eq(ext, ".less")) return .css;
+    if (eq(ext, ".xml") or eq(ext, ".svg") or eq(ext, ".xsd") or eq(ext, ".xsl") or eq(ext, ".xslt") or eq(ext, ".plist") or eq(ext, ".storyboard") or eq(ext, ".xib") or eq(ext, ".rss") or eq(ext, ".wsdl")) return .xml;
+    if (eq(ext, ".yaml") or eq(ext, ".yml")) return .yaml;
+    // legacy-modes StreamLanguage가 있는 확장자.
+    if (eq(ext, ".toml")) return .toml;
+    if (eq(ext, ".ini") or eq(ext, ".cfg") or eq(ext, ".conf") or eq(ext, ".config") or eq(ext, ".properties") or eq(ext, ".editorconfig")) return .ini;
+    if (eq(ext, ".sh") or eq(ext, ".bash") or eq(ext, ".zsh") or eq(ext, ".ksh") or eq(ext, ".fish")) return .shell;
+    if (eq(ext, ".sql")) return .sql;
+    if (eq(ext, ".rs")) return .rust;
+    if (eq(ext, ".go")) return .go;
+    if (eq(ext, ".c") or eq(ext, ".h")) return .c;
+    if (eq(ext, ".cpp") or eq(ext, ".cc") or eq(ext, ".cxx") or eq(ext, ".hpp") or eq(ext, ".hxx") or eq(ext, ".hh") or eq(ext, ".ino") or eq(ext, ".m") or eq(ext, ".mm")) return .cpp;
+    if (eq(ext, ".java")) return .java;
+    if (eq(ext, ".cs")) return .csharp;
+    if (eq(ext, ".kt") or eq(ext, ".kts")) return .kotlin;
+    if (eq(ext, ".swift")) return .swift;
+    if (eq(ext, ".rb") or eq(ext, ".gemspec") or eq(ext, ".rake") or eq(ext, ".podspec")) return .ruby;
+    if (eq(ext, ".lua")) return .lua;
+    if (eq(ext, ".pl") or eq(ext, ".pm")) return .perl;
+    if (eq(ext, ".r")) return .r;
+    if (eq(ext, ".ps1") or eq(ext, ".psm1") or eq(ext, ".psd1")) return .powershell;
+    if (eq(ext, ".groovy") or eq(ext, ".gradle")) return .groovy;
+    if (eq(ext, ".scala") or eq(ext, ".sc")) return .scala;
+    if (eq(ext, ".hs")) return .haskell;
+    if (eq(ext, ".clj") or eq(ext, ".cljs") or eq(ext, ".cljc") or eq(ext, ".edn")) return .clojure;
+    if (eq(ext, ".dart")) return .dart;
+    return .plain;
+}
+
+/// 텍스트로 열지 않는(→ null=외부 앱, 또는 FP14~ image/media/pdf kind로 이동할) 알려진 바이너리 확장자. text는
+/// UTF-8 8 MiB read라 여기 안 걸린 미지의 바이너리가 새어도 read가 UTF-8 검증에서 실패해 안전하게 닫힌다.
+fn isBinaryExtension(ext: []const u8) bool {
+    const eq = std.ascii.eqlIgnoreCase;
+    const bin = [_][]const u8{
+        // 이미지(FP14 image kind 예정)
+        ".png",  ".jpg",  ".jpeg",   ".gif",     ".bmp",   ".ico",   ".webp",  ".tif",     ".tiff",
+        ".heic", ".heif", ".avif",   ".icns",
+        // 비디오(FP15 media kind 예정) — `.ts`는 TypeScript라 제외
+           ".mp4",   ".mov",   ".m4v",   ".webm",    ".mkv",
+        ".avi",  ".wmv",  ".flv",    ".mpg",     ".mpeg",  ".3gp",   ".3g2",   ".ogv",     ".m2ts",
+        ".mts",
+        // 오디오(FP15)
+         ".mp3",  ".wav",    ".aac",     ".flac",  ".ogg",   ".oga",   ".m4a",     ".opus",
+        ".wma",  ".aiff", ".aif",    ".mid",     ".midi",
+        // 문서(pdf=FP15)
+         ".pdf",   ".doc",   ".docx",    ".xls",
+        ".xlsx", ".ppt",  ".pptx",   ".odt",     ".ods",   ".odp",   ".pages", ".numbers", ".key",
+        ".epub", ".mobi",
+        // 아카이브
+        ".zip",    ".tar",     ".gz",    ".tgz",   ".bz2",   ".tbz",     ".xz",
+        ".7z",   ".rar",  ".lz",     ".lzma",    ".zst",   ".dmg",   ".pkg",   ".deb",     ".rpm",
+        ".iso",  ".cab",  ".jar",    ".war",     ".ear",   ".whl",   ".gem",   ".nupkg",
+        // 실행/컴파일 산출물
+          ".exe",
+        ".dll",  ".so",   ".dylib",  ".o",       ".a",     ".lib",   ".class", ".wasm",    ".bin",
+        ".dat",  ".db",   ".sqlite", ".sqlite3", ".pyc",   ".pyo",   ".pyd",   ".node",    ".out",
+        ".obj",  ".img",  ".rom",
+        // 폰트
+           ".woff",    ".woff2", ".ttf",   ".otf",   ".eot",     ".ttc",
+        // 디자인/3D
+        ".psd",  ".ai",   ".sketch", ".fig",     ".xd",    ".blend", ".fbx",   ".glb",     ".gltf",
+        ".stl",  ".3ds",  ".dae",
+    };
+    for (bin) |candidate| if (eq(ext, candidate)) return true;
+    return false;
+}
 
 pub fn openKindForPath(path: []const u8) ?OpenKind {
     const ext = std.fs.path.extension(path);
     if (std.ascii.eqlIgnoreCase(ext, ".md")) return .markdown;
     if (std.ascii.eqlIgnoreCase(ext, ".html")) return .html;
-    return null;
+    if (std.ascii.eqlIgnoreCase(ext, ".svg")) return .svg; // FP13: read 프리뷰 + xml 소스 편집.
+    if (isBinaryExtension(ext)) return null; // 외부 앱(또는 FP14~ image/media/pdf kind).
+    return .text; // VSCode식: 나머지는 전부 텍스트로 연다.
 }
 
 fn hasUriScheme(path: []const u8) bool {
@@ -210,12 +340,48 @@ test "mimeForPath: known image extensions and inert fallback" {
     try testing.expectEqualStrings("application/octet-stream", mimeForPath("a.html"));
 }
 
-test "openKindForPath: md and html only, case-insensitive" {
+test "openKindForPath: md, html, binary-blocked, everything-else-is-text (VSCode 정책)" {
     try testing.expectEqual(OpenKind.markdown, openKindForPath("/tmp/readme.MD").?);
     try testing.expectEqual(OpenKind.html, openKindForPath("/tmp/page.HTML").?);
-    try testing.expect(openKindForPath("/tmp/page.htm") == null);
-    try testing.expect(openKindForPath("/tmp/readme.md.txt") == null);
-    try testing.expect(openKindForPath("/tmp/.md") == null);
+    // 알려진 바이너리는 텍스트로 열지 않는다(→ 외부 앱, FP14~ image/media/pdf kind).
+    try testing.expect(openKindForPath("/tmp/archive.zip") == null);
+    try testing.expect(openKindForPath("/tmp/photo.png") == null);
+    try testing.expect(openKindForPath("/tmp/clip.MP4") == null);
+    try testing.expect(openKindForPath("/tmp/doc.pdf") == null);
+    // 나머지는 전부 text — 알려진 확장자, 미지의 확장자, 확장자 없는 파일 모두.
+    try testing.expectEqual(OpenKind.text, openKindForPath("/tmp/config.JSON").?);
+    try testing.expectEqual(OpenKind.text, openKindForPath("/tmp/main.py").?);
+    try testing.expectEqual(OpenKind.text, openKindForPath("/tmp/Config.toml").?);
+    try testing.expectEqual(OpenKind.text, openKindForPath("/repo/.gitignore").?);
+    try testing.expectEqual(OpenKind.text, openKindForPath("/repo/Dockerfile").?);
+    try testing.expectEqual(OpenKind.text, openKindForPath("/tmp/weird.unknownext").?);
+    try testing.expectEqual(OpenKind.text, openKindForPath("/tmp/README").?);
+    // `.ts`는 TypeScript(text)이지 MPEG transport stream(바이너리)이 아니다.
+    try testing.expectEqual(OpenKind.text, openKindForPath("/tmp/app.ts").?);
+}
+
+test "textLanguageForPath: known extensions map to language, unknown falls to plain" {
+    try testing.expectEqual(TextLanguage.plain, textLanguageForPath("/tmp/notes.TXT"));
+    try testing.expectEqual(TextLanguage.plain, textLanguageForPath("/tmp/weird.unknownext"));
+    try testing.expectEqual(TextLanguage.json, textLanguageForPath("/tmp/pkg.json"));
+    try testing.expectEqual(TextLanguage.javascript, textLanguageForPath("/tmp/a.jsx"));
+    try testing.expectEqual(TextLanguage.typescript, textLanguageForPath("/tmp/a.tsx"));
+    try testing.expectEqual(TextLanguage.python, textLanguageForPath("/tmp/a.py"));
+    try testing.expectEqual(TextLanguage.css, textLanguageForPath("/tmp/a.scss"));
+    try testing.expectEqual(TextLanguage.xml, textLanguageForPath("/tmp/a.svg"));
+    try testing.expectEqual(TextLanguage.yaml, textLanguageForPath("/tmp/a.yml"));
+    try testing.expectEqual(TextLanguage.toml, textLanguageForPath("/tmp/Cargo.toml"));
+    try testing.expectEqual(TextLanguage.rust, textLanguageForPath("/tmp/main.rs"));
+    try testing.expectEqual(TextLanguage.go, textLanguageForPath("/tmp/main.go"));
+    try testing.expectEqual(TextLanguage.cpp, textLanguageForPath("/tmp/a.cpp"));
+    try testing.expectEqual(TextLanguage.c, textLanguageForPath("/tmp/a.c"));
+    try testing.expectEqual(TextLanguage.shell, textLanguageForPath("/tmp/run.sh"));
+    // basename 우선(확장자 없음): Dockerfile·.zshrc.
+    try testing.expectEqual(TextLanguage.dockerfile, textLanguageForPath("/repo/Dockerfile"));
+    try testing.expectEqual(TextLanguage.shell, textLanguageForPath("/home/user/.zshrc"));
+    try testing.expectEqual(TextLanguage.ini, textLanguageForPath("/home/user/.gitconfig"));
+    try testing.expectEqualStrings("json", TextLanguage.json.wireName());
+    try testing.expectEqualStrings("cpp", TextLanguage.cpp.wireName());
 }
 
 test "resolveMarkdownFileLink: resolves relative and absolute supported links with URI suffixes" {
@@ -234,6 +400,15 @@ test "resolveMarkdownFileLink: resolves relative and absolute supported links wi
     );
     defer testing.allocator.free(absolute);
     try testing.expectEqualStrings("/tmp/page.HTML", absolute);
+
+    // text kind(§2.2) 로컬 링크도 도크로 열 수 있는 유효 대상이다.
+    const text_link = try resolveMarkdownFileLink(
+        testing.allocator,
+        "/workspace/docs/current.md",
+        "../data/config.json",
+    );
+    defer testing.allocator.free(text_link);
+    try testing.expectEqualStrings("/workspace/data/config.json", text_link);
 }
 
 test "resolveMarkdownFileLink: rejects non-file, malformed, and unsupported targets" {
@@ -243,7 +418,8 @@ test "resolveMarkdownFileLink: rejects non-file, malformed, and unsupported targ
         "https://example.com/next.md",
         "https%3A//example.com/next.md",
         "//example.com/next.md",
-        "next.txt",
+        // `.txt`는 이제 text kind라 유효 링크다(§2.2). 미지원 확장자로 커버리지 유지.
+        "next.zip",
         "next%2.md",
         "next\\file.md",
         "next\x00file.md",

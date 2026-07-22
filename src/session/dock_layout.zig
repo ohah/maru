@@ -89,8 +89,6 @@ pub const header_control_cols: u32 = 18;
 
 pub const HeaderCellLayout = struct {
     control_start: u16,
-    mode_read_end: u16,
-    mode_live_end: u16,
     mode_end: u16,
     dirty_col: ?u16,
     conflict_col: ?u16,
@@ -101,36 +99,52 @@ pub const HeaderModeDescriptor = struct {
     label: []const u8,
 };
 
-/// ABI ordinal과 독립인 헤더 시각 순서와 label의 단일 출처.
+/// ABI ordinal과 독립인 헤더 시각 순서와 label의 단일 출처. markdown은 `읽기|라이브|소스`, svg는 `읽기|소스`다(FP13).
+/// kind가 늘어나면 여기 모드 리스트만 더한다 — layout/render/hit-test는 `modesForKind`를 순회한다.
 pub const header_modes = [_]HeaderModeDescriptor{
     .{ .mode = .read, .label = "읽기" },
     .{ .mode = .live_preview, .label = "라이브" },
     .{ .mode = .source_edit, .label = "소스" },
 };
-pub const header_mode_order = blk: {
-    var order: [header_modes.len]dock_panel.Mode = undefined;
-    for (header_modes, 0..) |descriptor, i| order[i] = descriptor.mode;
-    break :blk order;
+const svg_header_modes = [_]HeaderModeDescriptor{
+    .{ .mode = .read, .label = "읽기" },
+    .{ .mode = .source_edit, .label = "소스" },
 };
 
-pub fn modeSlot(mode: dock_panel.Mode) ?usize {
-    inline for (header_modes, 0..) |descriptor, slot| if (descriptor.mode == mode) return slot;
+/// 이 kind가 헤더에 노출하는 mode 선택지(순서=시각 순서). 빈 슬라이스면 mode 선택기가 없다(html·text).
+pub fn modesForKind(kind: dock_panel.EntryKind) []const HeaderModeDescriptor {
+    return switch (kind) {
+        .markdown => &header_modes,
+        .svg => &svg_header_modes,
+        .html, .text => &.{},
+    };
+}
+
+fn modeSlotForKind(kind: dock_panel.EntryKind, mode: dock_panel.Mode) ?usize {
+    for (modesForKind(kind), 0..) |descriptor, slot| if (descriptor.mode == mode) return slot;
     return null;
 }
 
 pub const HeaderModeCellRange = struct { start: u16, end: u16 };
 
-pub fn headerModeCellRange(layout: HeaderCellLayout, mode: dock_panel.Mode) ?HeaderModeCellRange {
-    return switch (modeSlot(mode) orelse return null) {
-        0 => .{ .start = layout.control_start, .end = layout.mode_read_end },
-        1 => .{ .start = layout.mode_read_end, .end = layout.mode_live_end },
-        2 => .{ .start = layout.mode_live_end, .end = layout.mode_end },
-        else => null,
-    };
+/// mode selector 폭을 kind의 mode 개수로 균등 분할한 한 슬롯의 cell 범위. markdown=1/3씩, svg=1/2씩. 마지막 슬롯은
+/// 반올림 잔여를 흡수해 정확히 `mode_end`에서 끝난다.
+pub fn headerModeCellRange(layout: HeaderCellLayout, kind: dock_panel.EntryKind, mode: dock_panel.Mode) ?HeaderModeCellRange {
+    const modes = modesForKind(kind);
+    if (modes.len == 0) return null;
+    const idx = modeSlotForKind(kind, mode) orelse return null;
+    const width: u16 = layout.mode_end - layout.control_start;
+    const count: u16 = @intCast(modes.len);
+    const start = layout.control_start + @as(u16, @intCast((@as(u32, width) * idx) / count));
+    const end = if (idx + 1 == modes.len)
+        layout.mode_end
+    else
+        layout.control_start + @as(u16, @intCast((@as(u32, width) * (idx + 1)) / count));
+    return .{ .start = start, .end = end };
 }
 
 /// Header render/background/hit-test가 공유하는 cell 권위. 각 status는 glyph 1칸+간격 1칸을 우측에서
-/// 예약하며 mode rect는 status 시작 전까지만 끝난다.
+/// 예약하며 mode rect는 status 시작 전까지만 끝난다. mode 슬롯 분할은 `headerModeCellRange`가 kind별로 한다.
 pub fn headerCellLayout(cols: u16, dirty: bool, external_change: bool) ?HeaderCellLayout {
     if (cols < 6) return null;
     const control_cols: u16 = @intCast(@min(header_control_cols, cols));
@@ -142,9 +156,6 @@ pub fn headerCellLayout(cols: u16, dirty: bool, external_change: bool) ?HeaderCe
     const show_dirty = dirty and available >= 6 + (status_count + 1) * 2;
     if (show_dirty) status_count += 1;
     const mode_end = cols - status_count * 2;
-    const mode_width = mode_end - control_start;
-    const mode_read_end = control_start + mode_width / 3;
-    const mode_live_end = control_start + (mode_width * 2) / 3;
     var cursor = mode_end;
     var dirty_col: ?u16 = null;
     var conflict_col: ?u16 = null;
@@ -155,8 +166,6 @@ pub fn headerCellLayout(cols: u16, dirty: bool, external_change: bool) ?HeaderCe
     if (show_dirty) dirty_col = cursor;
     return .{
         .control_start = control_start,
-        .mode_read_end = mode_read_end,
-        .mode_live_end = mode_live_end,
         .mode_end = mode_end,
         .dirty_col = dirty_col,
         .conflict_col = conflict_col,
@@ -170,14 +179,14 @@ pub fn headerControlRect(g: Geometry, cell_width_px: u32) ?Rect {
     return .{ .x = g.header.x + g.header.w - width, .y = g.header.y, .w = width, .h = g.header.h };
 }
 
-/// Markdown 헤더의 `읽기 | 라이브 | 소스` 세 선택지. 전체 control을 토글 버튼 하나로 취급하지 않고
-/// 보이는 세 구간과 클릭되는 세 구간이 같은 rect를 공유한다.
+/// 헤더 mode 선택지 한 칸의 rect(markdown `읽기|라이브|소스`·svg `읽기|소스`). 전체 control을 토글 버튼 하나로
+/// 취급하지 않고 보이는 구간과 클릭되는 구간이 같은 rect를 공유한다. 모드 선택기가 없는 kind(html·text)는 null.
 pub fn headerModeRect(g: Geometry, cell_width_px: u32, kind: dock_panel.EntryKind, mode: dock_panel.Mode, dirty: bool, external_change: bool) ?Rect {
-    if (kind != .markdown) return null;
+    if (modesForKind(kind).len == 0) return null;
     const control = headerControlRect(g, cell_width_px) orelse return null;
     const cols: u16 = @intCast(g.header.w / cell_width_px);
     const layout = headerCellLayout(cols, dirty, external_change) orelse return null;
-    const range = headerModeCellRange(layout, mode) orelse return null;
+    const range = headerModeCellRange(layout, kind, mode) orelse return null;
     const start_col = range.start;
     const end_col = range.end;
     if (end_col <= start_col) return null;
@@ -185,7 +194,7 @@ pub fn headerModeRect(g: Geometry, cell_width_px: u32, kind: dock_panel.EntryKin
 }
 
 pub fn headerModeAt(g: Geometry, cell_width_px: u32, kind: dock_panel.EntryKind, dirty: bool, external_change: bool, x_px: f64, y_px: f64) ?dock_panel.Mode {
-    inline for (header_modes) |descriptor| {
+    for (modesForKind(kind)) |descriptor| {
         if (headerModeRect(g, cell_width_px, kind, descriptor.mode, dirty, external_change)) |r| if (layout_math.pointInRect(x_px, y_px, r)) return descriptor.mode;
     }
     return null;
@@ -574,12 +583,14 @@ test "dock header control rect is right-aligned and bounded on narrow docks" {
     try std.testing.expectEqual(@as(?dock_panel.Mode, null), headerModeAt(g, 10, .html, false, false, @floatFromInt(edit.x + 1), @floatFromInt(edit.y + 1)));
 
     inline for (.{ false, true }) |dirty| inline for (.{ false, true }) |external| {
-        const cells = headerCellLayout(@intCast(g.header.w / 10), dirty, external).?;
+        const read_mode = headerModeRect(g, 10, .markdown, .read, dirty, external).?;
         const live_mode = headerModeRect(g, 10, .markdown, .live_preview, dirty, external).?;
         const source = headerModeRect(g, 10, .markdown, .source_edit, dirty, external).?;
-        try std.testing.expectEqual(g.header.x + @as(u32, cells.mode_read_end) * 10, live_mode.x);
-        try std.testing.expectEqual(g.header.x + @as(u32, cells.mode_live_end) * 10, source.x);
-        try std.testing.expectEqual(g.header.x + @as(u32, cells.mode_end) * 10, source.x + source.w);
+        const cells = headerCellLayout(@intCast(g.header.w / 10), dirty, external).?;
+        try std.testing.expectEqual(g.header.x + @as(u32, cells.control_start) * 10, read_mode.x); // 첫 슬롯=control_start
+        try std.testing.expectEqual(read_mode.x + read_mode.w, live_mode.x); // 인접
+        try std.testing.expectEqual(live_mode.x + live_mode.w, source.x);
+        try std.testing.expectEqual(g.header.x + @as(u32, cells.mode_end) * 10, source.x + source.w); // 마지막=mode_end
         if (dirty) {
             const status = headerDirtyRect(g, 10, external).?;
             try std.testing.expect(headerModeAt(g, 10, .markdown, dirty, external, @floatFromInt(status.x + 1), @floatFromInt(status.y + 1)) == null);
@@ -591,10 +602,8 @@ test "dock header control rect is right-aligned and bounded on narrow docks" {
     };
 }
 
-test "dock header keeps three two-cell mode targets before status indicators" {
+test "dock header mode slots split per kind (markdown thirds, svg halves) before status" {
     const bare = headerCellLayout(6, true, true).?;
-    try std.testing.expectEqual(@as(u16, 2), bare.mode_read_end);
-    try std.testing.expectEqual(@as(u16, 4), bare.mode_live_end);
     try std.testing.expectEqual(@as(u16, 6), bare.mode_end);
     try std.testing.expectEqual(@as(?u16, null), bare.conflict_col);
     try std.testing.expectEqual(@as(?u16, null), bare.dirty_col);
@@ -605,12 +614,27 @@ test "dock header keeps three two-cell mode targets before status indicators" {
     const both = headerCellLayout(10, true, true).?;
     try std.testing.expectEqual(@as(?u16, 6), both.conflict_col);
     try std.testing.expectEqual(@as(?u16, 8), both.dirty_col);
-    inline for (header_modes, 0..) |descriptor, slot| {
-        try std.testing.expectEqual(@as(?usize, slot), modeSlot(descriptor.mode));
-        const range = headerModeCellRange(bare, descriptor.mode).?;
-        try std.testing.expectEqual(@as(u16, 2), range.end - range.start);
-        try std.testing.expect(descriptor.label.len > 0);
+
+    // markdown: 3개 슬롯이 control_start..mode_end를 연속으로 덮는다.
+    var md_prev: ?u16 = null;
+    for (modesForKind(.markdown)) |d| {
+        const range = headerModeCellRange(both, .markdown, d.mode).?;
+        if (md_prev) |p| try std.testing.expectEqual(p, range.start);
+        md_prev = range.end;
+        try std.testing.expect(d.label.len > 0);
     }
+    try std.testing.expectEqual(@as(?u16, both.mode_end), md_prev);
+    // svg: 2개 슬롯(읽기·소스), 라이브 없음.
+    try std.testing.expectEqual(@as(usize, 2), modesForKind(.svg).len);
+    try std.testing.expect(headerModeCellRange(both, .svg, .live_preview) == null);
+    const svg_read = headerModeCellRange(both, .svg, .read).?;
+    const svg_source = headerModeCellRange(both, .svg, .source_edit).?;
+    try std.testing.expectEqual(both.control_start, svg_read.start);
+    try std.testing.expectEqual(svg_read.end, svg_source.start);
+    try std.testing.expectEqual(both.mode_end, svg_source.end);
+    // html·text는 mode 선택기가 없다.
+    try std.testing.expectEqual(@as(usize, 0), modesForKind(.html).len);
+    try std.testing.expectEqual(@as(usize, 0), modesForKind(.text).len);
 }
 
 test "dock group geometry gives every split leaf its own tab header and content" {

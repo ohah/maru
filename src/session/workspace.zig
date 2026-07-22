@@ -650,6 +650,10 @@ fn parseDockEntry(encoded: []const u8) DockEntryParseError!dock_panel.PersistedE
         .markdown
     else if (std.mem.eql(u8, kind_raw, "html"))
         .html
+    else if (std.mem.eql(u8, kind_raw, "text"))
+        .text
+    else if (std.mem.eql(u8, kind_raw, "svg"))
+        .svg
     else
         return error.UnsupportedDockValue;
     const mode = dock_panel.Mode.parseWorkspaceName(mode_raw) orelse return error.UnsupportedDockValue;

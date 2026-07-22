@@ -3,6 +3,7 @@
 //! 디스크를 읽지 않고 `rows`만 소비한다(docs/file-panel.md §7).
 
 const std = @import("std");
+const file_panel_bridge = @import("file_panel_bridge.zig");
 
 pub const max_roots: usize = 256; // DockPanel metadata 상한과 동일 — 열린 파일마다 서로 다른 root여도 bounded.
 pub const max_recent: usize = 32;
@@ -956,8 +957,9 @@ pub const Tree = struct {
     }
 
     pub fn supportedFile(path: []const u8) bool {
-        const ext = std.fs.path.extension(path);
-        return std.ascii.eqlIgnoreCase(ext, ".md") or std.ascii.eqlIgnoreCase(ext, ".html");
+        // 도크로 열 수 있는 kind인지의 단일 출처는 openKindForPath다(§2.2). 여기서 확장자를 따로 나열하면
+        // FP12 text/code처럼 트리 클릭만 안 열리는 드리프트가 난다.
+        return file_panel_bridge.openKindForPath(path) != null;
     }
 
     fn findNode(self: *Tree, path: []const u8) ?*Node {
@@ -1093,6 +1095,17 @@ fn naturalLess(a: []const u8, b: []const u8) bool {
     }
     if (a.len != b.len) return a.len < b.len;
     return std.mem.order(u8, a, b) == .lt;
+}
+
+test "supportedFile mirrors openKindForPath (md/html/text), not a hardcoded md/html list" {
+    // FP12 회귀 가드: 트리 클릭 열기 게이트가 확장자를 따로 나열하면 text/code가 트리에서만 안 열린다.
+    try std.testing.expect(Tree.supportedFile("/repo/readme.MD"));
+    try std.testing.expect(Tree.supportedFile("/repo/page.html"));
+    try std.testing.expect(Tree.supportedFile("/repo/pkg.json"));
+    try std.testing.expect(Tree.supportedFile("/repo/main.py"));
+    try std.testing.expect(Tree.supportedFile("/repo/style.css"));
+    try std.testing.expect(!Tree.supportedFile("/repo/archive.zip"));
+    try std.testing.expect(!Tree.supportedFile("/repo/photo.png"));
 }
 
 test "file tree uses Zed-style exclusions while retaining useful dot directories" {

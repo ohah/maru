@@ -1,7 +1,8 @@
 import { normalizeAssetReference } from "./asset-path";
 import { renderMarkdown } from "./markdown";
 import { sanitizeMermaidSvg } from "./rich-render";
-import { createMarkdownEditor } from "./editor";
+import { createMarkdownEditor, createSourceEditor } from "./editor";
+import { sourceLanguageExtensions } from "./source-language";
 import {
   type BeginDocumentRequest,
   encodeFileBridgeRequest,
@@ -646,6 +647,20 @@ export function assetDataUrl(
   }
 }
 
+// FP13: svg 파일 프리뷰. 원문 SVG를 sanitize(script/event/외부 URL 제거)한 뒤 `data:` URL로 만든다. `<img>`로
+// 표시하므로 sanitize를 뚫어도 이미지 컨텍스트라 스크립트가 실행되지 않는다(격리 render origin, capability 0).
+export function svgToDataUrl(source: string, targetWindow: Window): string | null {
+  const trimmed = source.trimStart();
+  if (!(trimmed.startsWith("<svg") || /^<\?xml[^>]*>\s*<svg\b/i.test(trimmed))) return null;
+  try {
+    const sanitized = sanitizeMermaidSvg(source, targetWindow);
+    const encoded = bytesToBase64(new TextEncoder().encode(sanitized), targetWindow);
+    return `data:image/svg+xml;base64,${encoded}`;
+  } catch {
+    return null;
+  }
+}
+
 export function assetMimeMatchesMagic(mime: string, bytes: Uint8Array): boolean {
   const starts = (...prefix: number[]) =>
     bytes.length >= prefix.length && prefix.every((value, index) => bytes[index] === value);
@@ -686,6 +701,15 @@ export function bootShell(document: Document, targetWindow: Window): void {
   const status = document.querySelector<HTMLElement>("#viewer-status");
   if (frame === null || editorHost === null) return;
 
+  // text/svg kind(docs/file-panel.md §2.2·§2.3): shell URL `?lang=`은 소스 편집기 문법, `?kind=svg`는 svg의
+  // read(격리 sanitize 프리뷰)+source(xml 편집) 두 모드를 켠다. 둘 다 markdown projection/worker/mermaid 없이
+  // read/write·dirty·⌘S·외부변경 배관만 markdown과 공유하고 livePreviewReady(markdown+live 전용)는 호출하지 않는다.
+  const shellParams = new URL(targetWindow.location.href).searchParams;
+  const sourceLanguageWire = shellParams.get("lang");
+  const isSvg = shellParams.get("kind") === "svg";
+  // text = read 모드 없는 소스 전용. svg는 read 프리뷰가 있어 source-only가 아니다.
+  const isSourceOnly = sourceLanguageWire !== null && !isSvg;
+
   let editor: EditorView | null = null;
   let livePreviewController: EditableProjectionController | null = null;
   let atomicProjectionController: AtomicProjectionController | null = null;
@@ -697,7 +721,9 @@ export function bootShell(document: Document, targetWindow: Window): void {
   let dirty = false;
   let editorEpoch: number | null = null;
   const revisions = new EditorRevisionClock();
-  let mode: FilePanelMode = "read";
+  // text는 source_edit 단일 모드다(allowedFor). 처음부터 source-edit로 시작해 read용 render iframe이 잠깐도
+  // 뜨지 않게 한다.
+  let mode: FilePanelMode = isSourceOnly ? "source-edit" : "read";
   let rendererReady = false;
   // didFinish의 native dirty-sync가 shell beginDocument+initial read보다 먼저 올 수 있다. 모든 mutation은 이
   // hydration barrier 뒤에서 기다리고, start 자체는 queue 밖에서 barrier를 해소해 순환 대기를 만들지 않는다.
@@ -950,6 +976,29 @@ export function bootShell(document: Document, targetWindow: Window): void {
   const ensureEditor = (): EditorView => {
     if (editor !== null) return editor;
     if (editorEpoch === null) throw new Error("editor document epoch is unavailable");
+    if (isSourceOnly || isSvg) {
+      // text 소스 전용·svg 소스 모드 공용 경로. livePreview/atomic controller를 만들지 않고 onChange는 dirty
+      // 추적만 하며 markdown용 `?.` controller 호출은 null이라 no-op이다. svg는 read 모드에서 프리뷰를 갱신한다.
+      editor = createSourceEditor(
+        editorHost,
+        savedContent,
+        sourceLanguageExtensions(sourceLanguageWire),
+        (update) => {
+          if (applyingDiskContent) {
+            pendingDiskUpdate = update;
+            return;
+          }
+          if (update.docChanged) {
+            revisions.documentChanged();
+            reportDirty(savedDocument === null || !update.state.doc.eq(savedDocument));
+          }
+        },
+        () => void save(),
+      );
+      savedDocument = editor.state.doc;
+      if (closeLockRequestId !== null) editor.contentDOM.contentEditable = "false";
+      return editor;
+    }
     editor = createMarkdownEditor(
       editorHost,
       savedContent,
@@ -1050,6 +1099,19 @@ export function bootShell(document: Document, targetWindow: Window): void {
     return editor;
   };
 
+  // 읽기 모드 프리뷰를 render iframe에 보낸다. svg=sanitize 프리뷰(`renderSvg`), markdown=`render`. text는 프리뷰가
+  // 없어 no-op이다. 현재 편집 중 내용(editor)이 있으면 그걸, 없으면 마지막 로드/저장 snapshot을 쓴다.
+  const postPreview = () => {
+    if (!rendererReady || isSourceOnly) return;
+    const content = editor?.state.doc.toString() ?? savedContent;
+    frame.contentWindow?.postMessage(
+      isSvg
+        ? { channel: viewerChannel, type: "renderSvg", svg: content }
+        : { channel: viewerChannel, type: "render", markdown: content },
+      "*",
+    );
+  };
+
   const applyMode = (next: FilePanelMode) => {
     mode = next;
     if (mode !== "live-preview") livePreviewIntentCoordinator?.clearPending();
@@ -1073,15 +1135,7 @@ export function bootShell(document: Document, targetWindow: Window): void {
       if (editor !== null) reportDirty(currentDocumentIsDirty(), true);
       frame.hidden = false;
       editorHost.hidden = true;
-      if (rendererReady)
-        frame.contentWindow?.postMessage(
-          {
-            channel: viewerChannel,
-            type: "render",
-            markdown: editor?.state.doc.toString() ?? savedContent,
-          },
-          "*",
-        );
+      postPreview();
     }
     document.body.dataset.fileMode = mode;
   };
@@ -1089,6 +1143,16 @@ export function bootShell(document: Document, targetWindow: Window): void {
   targetWindow.addEventListener("maru:file-mode", (event) => {
     const detail = (event as CustomEvent<unknown>).detail;
     if (!isRecord(detail)) return;
+    // text는 source_edit 단일 모드라 read/live 신호는 무시한다(native도 보내지 않지만 방어적으로 고정).
+    if (isSourceOnly) {
+      if (detail.mode === "source-edit") applyMode("source-edit");
+      return;
+    }
+    // svg는 read|source 두 모드만(라이브 없음).
+    if (isSvg) {
+      if (detail.mode === "read" || detail.mode === "source-edit") applyMode(detail.mode);
+      return;
+    }
     if (detail.mode === "read" || detail.mode === "source-edit" || detail.mode === "live-preview")
       applyMode(detail.mode);
   });
@@ -1147,11 +1211,8 @@ export function bootShell(document: Document, targetWindow: Window): void {
     }
     dirty = false;
     if (syncNative) await syncDirty(false);
-    if (rendererReady)
-      frame.contentWindow?.postMessage(
-        { channel: viewerChannel, type: "render", markdown: result.content },
-        "*",
-      );
+    // svg=sanitize 프리뷰, markdown=render. text(source-only)는 프리뷰가 없어 postPreview가 no-op이다.
+    postPreview();
     if (isEditableFileMode(mode)) applyMode(mode);
   };
 
@@ -1208,7 +1269,9 @@ export function bootShell(document: Document, targetWindow: Window): void {
       editorEpoch = documentResult.editor_epoch as number;
       if (status !== null) status.dataset.editorEpoch = String(editorEpoch);
       await loadFromDisk(false);
-      await requestFileBridge(document, "livePreviewReady", { editor_epoch: editorEpoch });
+      // livePreviewReady는 markdown+live 전용 native gate라 text·svg에서 호출하면 StaleDocument로 실패한다(§2.2).
+      if (!isSourceOnly && !isSvg)
+        await requestFileBridge(document, "livePreviewReady", { editor_epoch: editorEpoch });
     })();
     try {
       await operation;
@@ -1243,18 +1306,13 @@ export function bootShell(document: Document, targetWindow: Window): void {
         status.dataset.rendererHandlerType = event.data.handlerType;
         status.dataset.rendererParentAccessible = String(event.data.parentAccessible);
       }
-      if (contentLoaded)
-        frame.contentWindow?.postMessage(
-          {
-            channel: viewerChannel,
-            type: "render",
-            markdown: editor?.state.doc.toString() ?? savedContent,
-          },
-          "*",
-        );
+      if (contentLoaded) postPreview();
       return;
     }
     if (isRendererReport(event.data)) {
+      // 첫 렌더 완료에서 읽기 iframe을 페이드인한다(app.css `#renderer[data-content-ready]`). 한 번 세우면
+      // 유지돼 모드 왕복·재렌더에서 다시 깜빡이지 않는다.
+      frame.dataset.contentReady = "true";
       if (status !== null) {
         status.dataset.viewerReady = "true";
         status.dataset.viewerText = event.data.text;
@@ -1501,6 +1559,44 @@ export function bootRenderer(document: Document, targetWindow: Window): void {
         pending.delete(event.data.requestId);
         resolve(event.data);
       }
+      return;
+    }
+    if (event.data.type === "renderSvg" && typeof event.data.svg === "string") {
+      // FP13 svg 프리뷰: 원문 SVG를 sanitize→data URL→<img>로 격리 표시한다(§2.2).
+      ++generation;
+      for (const resolve of pending.values())
+        resolve({
+          channel: viewerChannel,
+          type: "asset-result",
+          requestId: "stale",
+          error: "stale",
+        });
+      pending.clear();
+      const dataUrl = svgToDataUrl(event.data.svg, targetWindow);
+      root.replaceChildren();
+      if (dataUrl === null) {
+        const notice = document.createElement("p");
+        notice.textContent = "이 SVG를 표시할 수 없습니다.";
+        notice.className = "maru-svg-error";
+        root.appendChild(notice);
+      } else {
+        const img = document.createElement("img");
+        img.src = dataUrl;
+        img.alt = "SVG 미리보기";
+        img.className = "maru-svg-preview";
+        root.appendChild(img);
+      }
+      targetWindow.parent.postMessage(
+        {
+          channel: viewerChannel,
+          type: "rendered",
+          text: "svg",
+          imageCount: dataUrl === null ? 0 : 1,
+          loadedImageCount: dataUrl === null ? 0 : 1,
+          ...rendererCapabilityTypes(targetWindow),
+        },
+        "*",
+      );
       return;
     }
     if (event.data.type !== "render" || typeof event.data.markdown !== "string") return;

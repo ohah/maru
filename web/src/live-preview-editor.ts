@@ -130,6 +130,11 @@ export function atomicRangeRetained(
   );
 }
 
+// atomic 위젯이 생성(toDOM)~렌더 완료(atomic-rendered)까지 허용하는 시한. 초과 시 onFailure→removeFailed로
+// 파기하고 다음 projection에서 재요청한다. 재사용 수정(isReusable) 덕에 위젯은 이 시한 동안 re-submit에도
+// 파기되지 않고 살아남아 부팅하므로, 값은 "느린 커스텀 스킴 IO에서 render.html+bundle.js 콜드 로드"를 덮으면 된다.
+const atomicRenderDeadlineMs = 2_000;
+
 let nextWidgetId = 0;
 let nextWidgetGeneration = 0;
 let nextRendererInstance = Math.max(1, Date.now() % 1_000_000_000);
@@ -175,6 +180,7 @@ class AtomicWidget extends WidgetType {
   private revoked = false;
   private ready = false;
   private rendered = false;
+  private failed = false;
   private hostWindow: Window | null = null;
   private initListener: ((event: MessageEvent<unknown>) => void) | null = null;
 
@@ -195,6 +201,13 @@ class AtomicWidget extends WidgetType {
 
   isRendered(): boolean {
     return this.rendered && !this.revoked;
+  }
+
+  // 재사용 가능: 렌더 완료됐거나, 아직 in-flight(부팅 대기)이며 실패·revoke되지 않은 위젯. 렌더 전 위젯을 같은
+  // range·documentRevision의 re-submit에서 파기 대신 그대로 이어 붙여, iframe이 부팅까지 살아남게 한다. 이게
+  // 없으면 gen이 오를 때마다 iframe이 재생성돼 커스텀 스킴/느린 IO 환경에서 부팅 전에 매번 파기된다(무한 루프).
+  isReusable(): boolean {
+    return !this.revoked && !this.failed;
   }
 
   toDOM(view: EditorView): HTMLElement {
@@ -280,7 +293,10 @@ class AtomicWidget extends WidgetType {
     hostWindow?.addEventListener("message", this.initListener);
     iframe.src = "maru-app://render/render.html?atomic=1";
     container.append(iframe);
-    this.deadline = setTimeout(() => this.onFailure(this.capability), 2_000);
+    this.deadline = setTimeout(() => {
+      this.failed = true;
+      this.onFailure(this.capability);
+    }, atomicRenderDeadlineMs);
     return container;
   }
 
@@ -520,7 +536,7 @@ export class AtomicProjectionController {
       };
       const candidate = available.find(
         (record) =>
-          record.widget.isRendered() &&
+          record.widget.isReusable() &&
           !reused.includes(record) &&
           atomicRecordCanBeReused(record.capability, record.request, candidateRequest),
       );

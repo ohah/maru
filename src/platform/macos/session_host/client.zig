@@ -51,6 +51,12 @@ pub const Client = struct {
     // 응답을 기다리는 `call` 중에 host가 비동기로 push한 stream frame(delta_chunk/snapshot_chunk)을 여기 버퍼한다 — 드롭하면
     // 화면 갱신이 유실되므로(§9 delta는 증분이라 하나만 놓쳐도 desync), 다음 `readStreamBatch`가 소켓보다 먼저 이걸 비운다.
     pending_stream: std.ArrayListUnmanaged(framing.Frame) = .empty,
+    // 멀티 runtime demux(§9): 여러 원격 runtime이 이 connection **하나**를 공유하므로, `readStreamBatch(want)`가 소켓에서 읽은
+    // 완성 배치가 **다른** stream의 것이면 버리지 않고 여기 도착 순서대로 쌓아, 그 stream의 runtime pump가 나중에 소비한다(예전엔
+    // pumpDelta가 남의 배치를 free해 두 번째 이후 터미널 화면이 영구 유실됐다 — code-review #1). host는 배치를 stream별로 연속
+    // write하므로(프레임 인터리브 없음) 각 원소는 완결된 한 배치다. 모든 원격 runtime이 **단일 app-전역 backend**를 공유해 한
+    // allocator로 이 배치들을 만들고/소비/해제하므로(불변식) 버퍼-소비 간 allocator가 일치한다. deinit이 잔여를 회수한다.
+    pending_batches: std.ArrayListUnmanaged(StreamBatch) = .empty,
 
     /// host socket에 connect하고 hello를 왕복한다. 성공하면 `host_id`가 채워진 Client다. host가 없으면 ConnectFailed
     /// (discovery가 이 신호로 spawn/host_unavailable을 가른다, P3-d2b). version 불일치는 IncompatibleVersion.
@@ -92,6 +98,8 @@ pub const Client = struct {
         _ = c.close(self.fd);
         for (self.pending_stream.items) |f| f.deinit(self.allocator); // 미소비 버퍼 stream frame 회수.
         self.pending_stream.deinit(self.allocator);
+        for (self.pending_batches.items) |b| self.allocator.free(b.bytes); // 미소비 demux 배치 회수(§9 멀티 runtime).
+        self.pending_batches.deinit(self.allocator);
         self.parser.deinit();
         self.* = undefined;
     }
@@ -141,12 +149,33 @@ pub const Client = struct {
         return out.toOwnedSlice(self.allocator) catch return error.OutOfMemory;
     }
 
-    /// 다음 **화면 stream 배치**(host가 push한 delta_chunk 또는 snapshot_chunk stream)를 `end_stream`까지 읽어 하나의
-    /// `StreamBatch`로 돌려준다(caller가 `bytes` free). **논블로킹**: 배치가 아직 없으면(idle) `null`을 준다 — 그래서 frame-loop가
-    /// 매 프레임 불러도 화면 변화가 없으면 조용히 넘어가고, recv timeout을 세션 종료로 오인하지 않는다(§9). delta든 snapshot이든
-    /// 둘 다 받는다 — host는 grid/alt 변화 시 delta 대신 fresh snapshot을 push하므로(SnapshotRequired), 소비자는 `is_snapshot`을
-    /// 보고 applySnapshot(리셋)/applyDelta(증분)를 가른다. `call`이 버퍼해 둔 stream frame을 소켓보다 먼저 소비한다.
-    pub fn readStreamBatch(self: *Client, allocator: std.mem.Allocator) ClientError!?StreamBatch {
+    /// `want_stream_id`의 다음 **화면 stream 배치**를 논블로킹으로 돌려준다(caller가 `bytes` free). 여러 원격 runtime이 이
+    /// connection 하나를 공유하므로 소켓엔 여러 stream의 배치가 섞여 온다 — 이 함수가 **stream_id로 demux**한다: 버퍼(§멀티
+    /// runtime `pending_batches`)에 내 배치가 있으면 그걸 먼저(도착 순서), 없으면 소켓에서 완성 배치를 읽되 **다른 stream의
+    /// 것이면 버리지 않고 버퍼에 넣고 계속** 읽어 내 배치를 찾는다. 소켓이 idle이면(내 배치 없음) `null`(그 사이 읽힌 남의 배치는
+    /// 버퍼에 남아 그 runtime의 pump가 소비). 예전엔 pumpDelta가 남의 배치를 free해 두 번째 이후 터미널 화면이 영구 유실됐다
+    /// (code-review #1). delta/snapshot 둘 다 받아 `is_snapshot`으로 리셋/증분을 가른다. `call`이 버퍼한 frame을 소켓보다 먼저 쓴다.
+    pub fn readStreamBatch(self: *Client, allocator: std.mem.Allocator, want_stream_id: u64) ClientError!?StreamBatch {
+        // 1) 이 stream 앞으로 이미 버퍼된 배치(다른 runtime의 pump가 소켓을 비우며 넣어 둔 것)를 도착 순서대로 먼저 준다.
+        for (self.pending_batches.items, 0..) |b, i| {
+            if (b.stream_id == want_stream_id) return self.pending_batches.orderedRemove(i);
+        }
+        // 2) 소켓에서 완성 배치를 읽는다. 내 것이면 반환, 남의 것이면 버퍼하고 계속(내 것/idle까지).
+        while (true) {
+            const batch = (try self.readOneBatch(allocator)) orelse return null; // idle — 내 배치 없음.
+            if (batch.stream_id == want_stream_id) return batch;
+            // 남의 stream 배치 — 그 runtime pump가 소비하도록 버퍼. append 실패 시 이 배치 bytes를 회수(누수 방지).
+            self.pending_batches.append(self.allocator, batch) catch {
+                allocator.free(batch.bytes);
+                return error.OutOfMemory;
+            };
+        }
+    }
+
+    /// 소켓/`pending_stream`에서 완성 stream 배치 하나를 `end_stream`까지 읽어 돌려준다(stream_id 무관). **논블로킹**: 배치가
+    /// 아직 없으면 `null`(recv timeout을 세션 종료로 오인 안 함, §9). host는 grid/alt 변화 시 delta 대신 fresh snapshot을 push한다
+    /// (SnapshotRequired). demux는 상위 `readStreamBatch`가 한다 — 여기선 순수하게 "다음 배치 하나".
+    fn readOneBatch(self: *Client, allocator: std.mem.Allocator) ClientError!?StreamBatch {
         var out: std.ArrayListUnmanaged(u8) = .empty;
         errdefer out.deinit(allocator);
         var stream_id: u64 = 0;
@@ -170,6 +199,18 @@ pub const Client = struct {
             if (protocol.Flags.hasEndStream(frame.header.flags)) {
                 return .{ .is_snapshot = is_snapshot, .stream_id = stream_id, .bytes = out.toOwnedSlice(allocator) catch return error.OutOfMemory };
             }
+        }
+    }
+
+    /// `stream_id` 앞으로 버퍼된 demux 배치를 모두 버린다(runtime이 detach/remove될 때 그 runtime의 pump가 다신 안 도므로
+    /// 잔여 배치가 영구히 쌓이지 않게 — RemoteRuntime.deinit/detachClientSide가 부른다). 없으면 no-op.
+    pub fn dropBufferedStream(self: *Client, stream_id: u64) void {
+        var i: usize = 0;
+        while (i < self.pending_batches.items.len) {
+            if (self.pending_batches.items[i].stream_id == stream_id) {
+                const b = self.pending_batches.orderedRemove(i);
+                self.allocator.free(b.bytes);
+            } else i += 1;
         }
     }
 
@@ -594,7 +635,7 @@ test "client: receives a delta_chunk stream reflecting input echoed onto the scr
     var found = false;
     var attempts: usize = 0;
     while (attempts < 100 and !found) : (attempts += 1) {
-        const batch = (client.readStreamBatch(allocator) catch break) orelse {
+        const batch = (client.readStreamBatch(allocator, stream_id) catch break) orelse {
             _ = usleepMs(20);
             continue;
         };

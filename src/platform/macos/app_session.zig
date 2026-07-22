@@ -32,6 +32,7 @@ const wheelDeltaToLines = input_math.wheelDeltaToLines;
 const pageScrollDelta = input_math.pageScrollDelta;
 // IME 순수 판정도 session core로 추출(src/session/ime.zig). bare 호출(imeEnd) 유지용 alias.
 const imeDecide = maru.session.ime.decide;
+const session_host = @import("session_host.zig"); // P3-e3: 영속 세션 host(keep-alive면 원격 backend로 배선)
 const coretext_bridge = @import("coretext_smoke_bridge.zig");
 const coretext_frame_builder = @import("coretext_frame_builder.zig");
 const file_tree_backend = @import("file_tree_backend.zig");
@@ -1817,6 +1818,12 @@ pub const AppSession = struct {
     // 창마다 backend를 만들어도 handle로 같은 슬롯을 조회한다(cross-window 이동 무관). AppSession이 heap-pin
     // (allocator.create)이라 `&self.term_backend`가 안정적이라 vtable ctx로 안전하다. undefined 기본값 — init 전 접근 금지.
     term_backend: app.InProcessTermBackend = undefined,
+    // P3-e3 영속 세션 host. `session.keep-alive-after-quit`이 켜지고 host 연결에 성공하면 채워진다(둘 다 null이면 현행
+    // in-process — 무회귀). `remote_backend`는 self-referential(`&session_client.?`+`self.runtime`을 든다)이라 AppSession이
+    // heap-pin이어야 한다(원래 그렇다). createTerm은 `backendForNew()`로 backend를 고르고, 이후 Term별 호출은 `backendFor(term)`
+    // (surface.remote로 판정)로 라우팅한다. deinit이 Term 정리 뒤 둘을 회수한다(client는 backend가 쓰므로 backend 먼저).
+    session_client: ?session_host.client.Client = null,
+    remote_backend: ?session_host.remote_term_backend.RemoteTermBackend = null,
     // surface teardown의 단일 chokepoint(destroyTerm + deinit direct pass)가 알리는 선택적 관찰 훅. cross-window move는
     // destroy가 아니라 소유 이전이므로 호출하지 않는다. app_host_abi가 browser grant/wait 수명에 연결한다.
     surface_closed_context: ?*anyopaque = null,
@@ -2743,6 +2750,12 @@ pub const AppSession = struct {
         // io/allocator/registry/runtime이 모두 채워진 뒤라야 backend가 유효한 참조를 든다(이 지점 이후 createTerm이
         // termBackend()로 spawn한다). backend는 참조만 드는 stateless 값이라 별도 teardown이 없다(deinit 불요).
         self.term_backend = app.InProcessTermBackend.init(self.allocator, self.io, self.live_registry, self.runtime);
+
+        // P3-e3: `session.keep-alive-after-quit`이 켜졌으면 영속 세션 host에 connect-or-launch해 원격 backend를 세운다.
+        // 실패(연결 거부·spawn 실패)면 조용히 in-process로 폴백한다 — host 문제가 GUI를 막지 않는다. ⚠️최초 cold launch에서
+        // host를 새로 띄우면 backoff로 최대 수 초 블로킹될 수 있다(opt-in 실험적; async/lazy 연결은 후속). 기본값(false)이면
+        // 이 블록을 건너뛰어 현행 경로와 byte-identical이다.
+        if (self.loaded_config.config.session.keep_alive_after_quit) self.setupRemoteBackend();
 
         // MARU_TRACE=<파일경로>: 라이브 trace 레코딩을 켠다. 파일을 열어(truncate) self 소유 file writer를 세우고,
         // 레코더가 이벤트마다 그 writer에 쓰고 flush한다(증분 append → 크래시 복원). 파일 생성 실패면 조용히 건너뛴다
@@ -5330,6 +5343,59 @@ pub const AppSession = struct {
         return self.term_backend.backend();
     }
 
+    /// **새 Term을 어느 backend로 spawn할지**(P3-e3). 원격 backend가 세워져 있으면(keep-alive+연결 성공) 그것, 아니면
+    /// in-process. createTerm이 이걸로 backend를 고르고, 그 backend가 준 surface의 `remote` 유무가 이후 `backendFor`의 판정
+    /// 근거가 된다. `remote_backend`가 null(기본)이면 항상 in-process라 현행과 동일하다.
+    fn backendForNew(self: *AppSession) app.TermRuntimeBackend {
+        if (self.remote_backend) |*rb| return rb.backend();
+        return self.termBackend();
+    }
+
+    /// **기존 Term의 backend**(P3-e3). 원격-backed surface(`surface.remote != null`)면 원격 backend, 아니면 in-process로
+    /// 라우팅한다 — close/remove/pump/foreground가 그 Term을 만든 backend로 가게 한다. `remote_backend`가 null이면 원격
+    /// surface가 있을 수 없어 항상 in-process다(현행과 byte-identical). 원격 판정 SSOT는 `surface.remote`(e3-3).
+    fn backendFor(self: *AppSession, term: *Term) app.TermRuntimeBackend {
+        if (term.surface.remote != null) {
+            if (self.remote_backend) |*rb| return rb.backend();
+        }
+        return self.termBackend();
+    }
+
+    /// 영속 세션 host에 connect-or-launch해 원격 backend를 세운다(§10). best-effort — 실패면 `session_client`/`remote_backend`를
+    /// null로 두어 in-process로 폴백한다. exe=형제 `maru` CLI(launcher가 exec), base=`${XDG_CACHE_HOME:-$HOME/.cache}/maru`
+    /// (discovery가 그 아래 `session-host/`를 씀 — 다른 maru 캐시와 같은 규칙). 경로 문자열은 transient(arena) — connectOrLaunch가
+    /// 동기적으로 복사한다. 반환 Client는 self.allocator 소유(persistent).
+    fn setupRemoteBackend(self: *AppSession) void {
+        var arena = std.heap.ArenaAllocator.init(self.allocator);
+        defer arena.deinit();
+        const a = arena.allocator();
+        const exe_path = self.siblingMaruPath(a) orelse return;
+        const base = sessionCacheBase(a) orelse return;
+        const client = session_host.host_connect.connectOrLaunch(self.allocator, exe_path, base, .{}) orelse return;
+        self.session_client = client;
+        // remote_backend는 &session_client.?(heap-pin AppSession 안 안정 주소)와 앱 전역 라우팅 표를 든다.
+        self.remote_backend = session_host.remote_term_backend.RemoteTermBackend.init(self.allocator, self.io, &self.session_client.?, self.runtime);
+    }
+
+    /// GUI 바이너리의 형제 `maru` CLI 경로(§10 launcher가 `maru __session-host`로 exec). selfExePath는 앱 바이너리라
+    /// dirname의 형제 `maru`를 쓴다(installCli와 같은 규칙). 못 찾으면 null.
+    fn siblingMaruPath(self: *AppSession, a: std.mem.Allocator) ?[:0]const u8 {
+        const exe = std.process.executablePathAlloc(self.io, a) catch return null;
+        const dir = std.fs.path.dirname(exe) orelse return null;
+        return std.fmt.allocPrintSentinel(a, "{s}/maru", .{dir}, 0) catch null;
+    }
+
+    /// 세션 host 캐시 base = `${XDG_CACHE_HOME:-$HOME/.cache}/maru`(terminfo_cache 등 다른 maru 캐시와 같은 규칙 —
+    /// discovery가 그 아래 `session-host/`를 붙인다). $HOME 부재면 null(폴백). 반환은 arena 소유.
+    fn sessionCacheBase(a: std.mem.Allocator) ?[]const u8 {
+        if (std.c.getenv("XDG_CACHE_HOME")) |x| {
+            const xs = std.mem.span(x);
+            if (xs.len > 0) return std.fmt.allocPrint(a, "{s}/maru", .{xs}) catch null;
+        }
+        const home = std.c.getenv("HOME") orelse return null;
+        return std.fmt.allocPrint(a, "{s}/.cache/maru", .{std.mem.span(home)}) catch null;
+    }
+
     /// 한 Term(터미널)을 만든다 — backend가 registry `LiveSurface` 번들 슬롯 소유 + live PTY spawn + surface init을
     /// 한 단위로 하고(P2 seam), GUI에는 복구 가능한 `*Surface`와 opaque handle만 준다. M3a: `surface`·`live_pty` 소유가
     /// 둘 다 앱 전역 `live_registry` 번들 슬롯에 있어(안정 heap 슬롯) reader가 잡는 `&live_pty.reader`·`&surface.core`를
@@ -5357,7 +5423,7 @@ pub const AppSession = struct {
         // 직접 안 든다. handle 값은 surface_id(=pty_id)와 같지만 backend에 되돌려 주는 불투명 handle로만 다룬다. reader가
         // 잡는 `&live_pty.reader`·`&surface.core`는 backend 내부에서 registry heap 슬롯이 고정한다(heap-pin 유지 — Term-inline
         // 시절과 같은 메커니즘). generation=0으로 시작. id는 앱 전역 유일이라 중복 등록 없음.
-        const be = self.termBackend();
+        const be = self.backendForNew(); // P3-e3: keep-alive+연결 성공 시 원격 backend, 아니면 in-process(기본).
         const surface = try be.spawn(.{ .handle = id, .request = req, .size = size, .queue_capacity = queue_capacity });
         // spawn 성공 후 이후 단계(config·attach·pump) 실패 시 번들 슬롯을 회수한다(backend.remove = 번들 deinit = live_pty
         // reader join + surface.deinit + 슬롯 해제). spawn 자체 실패는 backend 내부 2-pass 정리(removeUninitialized)가
@@ -5448,8 +5514,8 @@ pub const AppSession = struct {
             // 직접 만지지 않는다. closeAndDetach가 reader를 먼저 join하므로(멱등) reader가 잡던 `&surface.core`가 번들
             // deinit의 surface.deinit 순간까지 살아 있다. handle(= surface_id)은 remove 실행 전에 읽었다(remove가 슬롯을
             // 해제하므로 이후 term.surface/handle deref 금지).
-            if (self.runtime_initialized) self.termBackend().closeAndDetach(term.rt.handle);
-            self.termBackend().remove(term.rt.handle);
+            if (self.runtime_initialized) self.backendFor(term).closeAndDetach(term.rt.handle);
+            self.backendFor(term).remove(term.rt.handle);
             term.rt.live_initialized = false;
         }
         // git 브랜치 캐시·auto_title(Term-owned)만 여기서 해제 — custom_name·surface는 번들 deinit이 소유한다(M3a §8A.1).
@@ -21488,12 +21554,12 @@ pub const AppSession = struct {
             for (tab.panes.items) |pane| {
                 for (pane.terms.items) |term| {
                     if (!term.rt.live_initialized or term.rt.terminated) continue; // 종료(미reap) Term은 건너뜀(dispatchBell과 동형)
-                    const pgid = if (observer_probe) (self.termBackend().foregroundProcessGroup(term.rt.handle) orelse 0) else term.rt.agent_observer_pgid;
+                    const pgid = if (observer_probe) (self.backendFor(term).foregroundProcessGroup(term.rt.handle) orelse 0) else term.rt.agent_observer_pgid;
                     const pgid_changed = observer_probe and pgid != term.rt.agent_observer_pgid;
                     if (observer_probe) term.rt.agent_observer_pgid = pgid;
                     if (periodic_kind_probe or pgid_changed) {
                         const prev = term.agent_kind;
-                        const process_count = self.termBackend().foregroundProcessNames(term.rt.handle, &processes);
+                        const process_count = self.backendFor(term).foregroundProcessNames(term.rt.handle, &processes);
                         term.agent_kind = classifyAgentProcesses(processes[0..process_count]);
                         if (diag_gate.maruDebugEnabled()) std.log.scoped(.agentdiag).info("kind={s} pgid_changed={} live={} term=0x{x}", .{ @tagName(term.agent_kind), pgid_changed, term.rt.live_initialized, @intFromPtr(term) });
                         if (term.agent_kind != prev) {
@@ -21791,7 +21857,7 @@ pub const AppSession = struct {
                     if (ds.ended) |ended| {
                         if (terminationClosesWorkspace(ended)) {
                             if (!term.rt.terminated) {
-                                self.termBackend().finishAfterTermination(term.rt.handle);
+                                self.backendFor(term).finishAfterTermination(term.rt.handle);
                                 term.rt.terminated = true;
                                 // 이 Term의 uptime(spawn→exit, ms) — 비정상 시작 사망 grace 판정(holdOnStartupExit)이 쓴다.
                                 // spawned_at_ns=0(미스탬프)이면 판정 생략(직전 값 유지 — 보수적).
@@ -22943,9 +23009,9 @@ pub const AppSession = struct {
             for (tab.panes.items) |pane| {
                 for (pane.terms.items) |term| {
                     if (term.rt.live_initialized and self.runtime_initialized) {
-                        self.termBackend().closeAndDetach(term.rt.handle);
+                        self.backendFor(term).closeAndDetach(term.rt.handle);
                     } else if (term.rt.live_initialized) {
-                        self.termBackend().close(term.rt.handle);
+                        self.backendFor(term).close(term.rt.handle);
                     }
                 }
             }
@@ -26130,7 +26196,7 @@ pub const AppSession = struct {
             for (tab.panes.items) |pane| {
                 for (pane.terms.items) |term| {
                     if (term.rt.live_initialized and self.runtime_initialized) {
-                        self.termBackend().closeAndDetach(term.rt.handle);
+                        self.backendFor(term).closeAndDetach(term.rt.handle);
                     }
                 }
             }
@@ -26180,6 +26246,18 @@ pub const AppSession = struct {
         self.tabs.deinit(self.allocator);
         self.surface_ptrs.deinit(self.allocator);
         self.surface_initialized = false;
+        // P3-e3: 원격 backend/연결 회수. Term 정리(pass 1/2) 뒤라 backendFor(term) 참조가 끝났고, 앱 전역 surface_runtime은
+        // 살아 있어 원격 link detach가 안전하다. backend가 client로 host runtime을 terminate하므로 backend를 먼저, client를
+        // 나중에 회수한다(둘 다 null=현행 경로엔 무동작). ⚠️여기서 원격 runtime도 terminate된다 — "GUI 종료해도 생존"은
+        // e3-6에서 이 회수를 detach-only로 바꾼다(지금은 GUI 수명 동안만 host-backed).
+        if (self.remote_backend) |*rb| {
+            rb.deinit();
+            self.remote_backend = null;
+        }
+        if (self.session_client) |*cl| {
+            cl.deinit();
+            self.session_client = null;
+        }
         // appearance가 family를 빌리므로 surface 정리 뒤에 해제. 가드로 init 초반 실패 시 undefined
         // arena를 free하지 않게(다른 자원과 같은 패턴).
         if (self.config_loaded) {

@@ -76,6 +76,8 @@ pub const ScreenAssembler = struct {
     image_store: std.AutoHashMapUnmanaged(u32, StoredImage) = .{},
     placement_list: std.ArrayListUnmanaged(screen_stream.ImagePlacement) = .empty,
     pending_images: std.AutoHashMapUnmanaged(u32, PendingImage) = .{},
+    // 행별 OSC 133 prompt 마크(dense, positional; 마크 없으면 empty). remote_screen이 terminal.RowPrompt로 환산.
+    prompt_marks: []screen_stream.RowPromptWire = &.{},
 
     pub fn init(allocator: std.mem.Allocator) ScreenAssembler {
         return .{ .allocator = allocator };
@@ -87,6 +89,7 @@ pub const ScreenAssembler = struct {
         self.image_store.deinit(self.allocator);
         self.placement_list.deinit(self.allocator);
         self.pending_images.deinit(self.allocator);
+        if (self.prompt_marks.len != 0) self.allocator.free(self.prompt_marks);
         self.* = undefined;
     }
 
@@ -167,6 +170,17 @@ pub const ScreenAssembler = struct {
         return self.image_store.get(id);
     }
 
+    /// 현재 행별 prompt 마크(dense; 마크 없으면 empty). remote_screen이 terminal.RowPrompt로 환산해 노출.
+    pub fn promptMarks(self: *const ScreenAssembler) []const screen_stream.RowPromptWire {
+        return self.prompt_marks;
+    }
+
+    /// prompt_marks record 전체를 교체한다(full-replace — 소유권 이전). 옛 배열 free.
+    fn setPromptMarks(self: *ScreenAssembler, pm: screen_stream.PromptMarks) void {
+        if (self.prompt_marks.len != 0) self.allocator.free(self.prompt_marks);
+        self.prompt_marks = pm.rows;
+    }
+
     /// 이 행의 runs(렌더 입력). 범위를 벗어나면 빈 슬라이스.
     pub fn rowRuns(self: *const ScreenAssembler, row: u16) []const Run {
         if (row >= self.rows_count) return &.{};
@@ -184,6 +198,10 @@ pub const ScreenAssembler = struct {
 
         self.clearRows();
         self.clearImages(); // snapshot은 이미지도 리셋 — host가 full snapshot에 현재 이미지/placement를 전량 재송한다.
+        if (self.prompt_marks.len != 0) { // prompt 마크도 리셋(record 없으면 = 마크 없음).
+            self.allocator.free(self.prompt_marks);
+            self.prompt_marks = &.{};
+        }
         const new_rows = self.allocator.alloc(OwnedRow, meta.rows) catch return error.OutOfMemory;
         for (new_rows) |*row| row.* = .{}; // 빈 행으로 초기화(누락 row record 대비).
         self.rows = new_rows;
@@ -212,6 +230,7 @@ pub const ScreenAssembler = struct {
                     const p = try screen_stream.decodeImagePlacement(s.body);
                     self.placement_list.append(self.allocator, p) catch return error.OutOfMemory;
                 },
+                .prompt_marks => self.setPromptMarks(try screen_stream.decodePromptMarks(self.allocator, s.body)),
                 else => {}, // 미래 record는 건너뛴다.
             }
         }
@@ -256,6 +275,7 @@ pub const ScreenAssembler = struct {
                         self.placement_list.append(self.allocator, p) catch return error.OutOfMemory;
                     }
                 },
+                .prompt_marks => self.setPromptMarks(try screen_stream.decodePromptMarks(self.allocator, s.body)), // full-replace.
                 else => {}, // scroll_rect/clear_rect — 현재 producer 미방출, 조립기는 무시(후속 확장).
             }
         }
@@ -544,4 +564,44 @@ test "screen assembler: applyDelta applies image_blob + image_place(clear sentin
     try testing.expectEqual(@as(usize, 1), asm_.imagePlacements().len);
     try testing.expectEqual(@as(u32, 4), asm_.imagePlacements()[0].image_id);
     try testing.expectEqual(@as(u16, 1), asm_.imagePlacements()[0].col);
+}
+
+test "screen assembler: prompt_marks record sets per-row marks; snapshot without it resets" {
+    const allocator = testing.allocator;
+    var stream: std.ArrayListUnmanaged(u8) = .empty;
+    defer stream.deinit(allocator);
+    const meta_rec = try screen_stream.encodeScreenMeta(allocator, .{ .kind = .screen_meta, .generation = 1 }, .{ .cols = 2, .rows = 3 });
+    defer allocator.free(meta_rec);
+    try screen_stream.appendRecord(&stream, allocator, meta_rec);
+    var pm_rows = [_]screen_stream.RowPromptWire{ .{}, .{ .kind = 3, .exit = 5 }, .{} }; // row1 = command, exit 5.
+    const pm_rec = try screen_stream.encodePromptMarks(allocator, .{ .kind = .prompt_marks, .generation = 1 }, .{ .rows = &pm_rows });
+    defer allocator.free(pm_rec);
+    try screen_stream.appendRecord(&stream, allocator, pm_rec);
+
+    var asm_ = ScreenAssembler.init(allocator);
+    defer asm_.deinit();
+    try asm_.applySnapshot(stream.items);
+    try testing.expectEqual(@as(usize, 3), asm_.promptMarks().len);
+    try testing.expectEqual(@as(u8, 3), asm_.promptMarks()[1].kind);
+    try testing.expectEqual(@as(?i16, 5), asm_.promptMarks()[1].exit);
+    try testing.expectEqual(@as(u8, 0), asm_.promptMarks()[0].kind);
+
+    // prompt_marks 없는 snapshot 다시 적용 → 리셋(empty, 누수 없이).
+    var runs0 = [_]Run{.{ .grapheme = " ", .width = 1, .count = 2 }};
+    var rows = [_]screen_stream.Row{.{ .row_index = 0, .runs = &runs0 }};
+    const snap2 = try buildSnapshot(allocator, 2, .{ .cols = 2, .rows = 1 }, &rows);
+    defer allocator.free(snap2);
+    try asm_.applySnapshot(snap2);
+    try testing.expectEqual(@as(usize, 0), asm_.promptMarks().len);
+
+    // delta로 prompt_marks 교체.
+    var delta: std.ArrayListUnmanaged(u8) = .empty;
+    defer delta.deinit(allocator);
+    var d_rows = [_]screen_stream.RowPromptWire{.{ .kind = 1, .exit = null }}; // prompt.
+    const d_rec = try screen_stream.encodePromptMarks(allocator, .{ .kind = .prompt_marks, .generation = 2 }, .{ .rows = &d_rows });
+    defer allocator.free(d_rec);
+    try screen_stream.appendRecord(&delta, allocator, d_rec);
+    try asm_.applyDelta(delta.items);
+    try testing.expectEqual(@as(usize, 1), asm_.promptMarks().len);
+    try testing.expectEqual(@as(u8, 1), asm_.promptMarks()[0].kind);
 }

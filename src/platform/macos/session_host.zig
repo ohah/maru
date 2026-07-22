@@ -44,6 +44,12 @@ pub const screen_assembler = @import("session_host/screen_assembler.zig");
 pub const registry = @import("session_host/registry.zig");
 pub const server = @import("session_host/server.zig");
 pub const discovery = @import("session_host/discovery.zig");
+// host_connect(client의 connect-or-launch 오케스트레이션 — discovery 결정을 실 connect/flock/spawnDetached로 수행)는 실
+// syscall을 써서 macOS 전용이다(순수 결정은 discovery.zig가 이미 테스트). AppSession이 keep-alive일 때 이걸 부른다(e3-4).
+pub const host_connect = if (builtin.os.tag == .macos)
+    @import("session_host/host_connect.zig")
+else
+    struct {};
 // socket_server는 macOS 전용 unix socket syscall(c.fstatat/mkdir/getpeereid, SO_NOSIGPIPE)을 써서 macOS에서만 컴파일한다
 // (§10 macOS endpoint). Linux에선 그 syscall 시그니처가 없어 참조만으로 컴파일이 깨지므로 barrel에서 조건부로 제외한다.
 // codec/state machine(protocol/framing/screen_stream/registry/server)은 OS 중립이라 그대로 두어 non-macOS에서도 회귀를 잡는다.

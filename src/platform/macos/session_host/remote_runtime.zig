@@ -187,6 +187,16 @@ pub const RemoteRuntime = struct {
         self.allocator.free(resp);
     }
 
+    /// 스크롤 core command를 host로 보낸다(§6a 원격 스크롤백). `op`=scroll 계열 태그(코드 내부 고정 리터럴 — JSON escape 불요),
+    /// `arg`=정수 인자(delta/절대행/offset). host가 자기 `TerminalCore`에 적용해 view_offset을 바꾸면 다음 snapshot/delta
+    /// (renderSnapshot=뷰포트)가 그 스크롤 화면을 투영하고, 이 RemoteRuntime의 Surface(RemoteScreen)가 렌더한다. 응답 무시.
+    pub fn sendCoreCommand(self: *RemoteRuntime, op: []const u8, arg: i64) client_mod.ClientError!void {
+        var buf: [96]u8 = undefined;
+        const params = std.fmt.bufPrint(&buf, "{{\"stream_id\":{d},\"op\":\"{s}\",\"arg\":{d}}}", .{ self.stream_id, op, arg }) catch return error.OutOfMemory;
+        const resp = try self.client.call("runtime.core_command", params);
+        self.allocator.free(resp);
+    }
+
     /// host에 대기 중인 OSC 9/777 데스크톱 알림을 뺀다(§6.32 — host가 core와 함께 알림을 소유·전달). 없으면 null. host-backed
     /// 터미널의 알림은 host의 `TerminalCore`가 파싱하므로 client가 이걸로 가져와 GUI 알림 funnel에 넣는다(app_session이 surfacing).
     /// 반환 title/body는 caller 소유(Notification.deinit로 회수). 둘 다 빈 값이면(host 대기 없음) null.
@@ -660,4 +670,79 @@ test "remote runtime: requestResync makes the host push a fresh snapshot (desync
         } else _ = usleep(20 * 1000);
     }
     try testing.expect(saw_snapshot); // resync 요청이 host의 fresh snapshot push를 유발했다(generation 리셋 = 복구 경로).
+}
+
+// code-review #6a end-to-end — 원격 스크롤백. 스크롤 core command를 host로 라우팅하면 host가 자기 core view_offset을 바꾸고,
+// projectSnapshot/computeDelta가 renderSnapshot(뷰포트)을 써서 그 스크롤백 윈도를 client에 투영한다. TOPMARKER를 화면 밖
+// (스크롤백)으로 민 뒤 위로 스크롤 → client 화면 최상단에 TOPMARKER가 나타나는지 실 fork host로 고정. macOS opt-in.
+test "remote runtime: scroll core command routes to host so client sees scrolled-back content (§6a)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    const io = testing.io;
+
+    var dir_buf: [256]u8 = undefined;
+    const dir_path = std.fmt.bufPrintZ(&dir_buf, "/tmp/maru-sh-rr-scr-{d}", .{c.getpid()}) catch return error.SkipZigTest;
+    var sp_buf: [320]u8 = undefined;
+    const socket_path = std.fmt.bufPrintZ(&sp_buf, "{s}/control.sock", .{dir_path}) catch return error.SkipZigTest;
+
+    const child = c.fork();
+    if (child < 0) return error.SkipZigTest;
+    if (child == 0) {
+        _ = c.setsid();
+        daemon.runSessionHost(std.heap.page_allocator, io, dir_path, socket_path) catch {};
+        std.c._exit(0);
+    }
+    defer {
+        _ = c.kill(child, posix.SIG.TERM);
+        var status: c_int = undefined;
+        _ = c.waitpid(child, &status, 0);
+        _ = c.unlink(socket_path.ptr);
+        _ = c.rmdir(dir_path.ptr);
+    }
+
+    var client: client_mod.Client = blk: {
+        var attempts: usize = 0;
+        while (attempts < 150) : (attempts += 1) {
+            if (client_mod.Client.connect(allocator, socket_path, "gui")) |cl| break :blk cl else |_| _ = usleep(20 * 1000);
+        }
+        try testing.expect(false);
+        return;
+    };
+    defer client.deinit();
+
+    var rr: RemoteRuntime = undefined;
+    try rr.spawn(&client, allocator, io, 1, &.{"/bin/cat"}, .{ .cols = 40, .rows = 8 });
+    defer rr.deinit();
+    const surface = rr.surfacePtr();
+
+    // TOPMARKER 한 줄 + 8행을 넘기는 filler → TOPMARKER는 스크롤백으로 밀려 화면 밖(host 기본 scrollback 1000행).
+    try rr.sendInput("TOPMARKER\n");
+    var k: usize = 0;
+    while (k < 20) : (k += 1) try rr.sendInput("filler\n");
+
+    // host echo가 화면에 반영될 때까지 pump — 바닥엔 filler(row0 시작이 'f', TOPMARKER는 안 보임).
+    var settled = false;
+    var attempts: usize = 0;
+    while (attempts < 200 and !settled) : (attempts += 1) {
+        _ = rr.pumpDelta() catch break;
+        surface.lockCore(io);
+        const c0 = surface.renderSnapshot().cells[0].codepoint;
+        surface.unlockCore(io);
+        if (c0 == 'f') settled = true else _ = usleep(20 * 1000);
+    }
+    try testing.expect(settled); // 바닥 화면은 filler(TOPMARKER는 스크롤백)
+
+    // **위로 스크롤**(host core view_offset 이동 → renderSnapshot 뷰포트가 스크롤백 윈도로) → 최상단에 TOPMARKER.
+    try rr.sendCoreCommand("scroll", 100); // 위로 100(스크롤백 top으로 cap)
+
+    var saw_marker = false;
+    attempts = 0;
+    while (attempts < 200 and !saw_marker) : (attempts += 1) {
+        _ = rr.pumpDelta() catch break;
+        surface.lockCore(io);
+        const c0 = surface.renderSnapshot().cells[0].codepoint;
+        surface.unlockCore(io);
+        if (c0 == 'T') saw_marker = true else _ = usleep(20 * 1000);
+    }
+    try testing.expect(saw_marker); // 스크롤 명령이 host를 거쳐 client 화면을 스크롤백(TOPMARKER)으로 이동시켰다(#6a).
 }

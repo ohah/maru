@@ -52,8 +52,11 @@ pub const ProjectOptions = struct {
 
 /// 현재 화면을 length-prefixed 레코드 스트림(screen_meta + row*)으로 투영한다(caller 소유 바이트). client는 이 바이트를
 /// `screen_stream.RecordStream`으로 순회해 화면을 조립한다. **동시 core 쓰기가 있으면 caller가 core lock을 잡고 부른다.**
-pub fn projectSnapshot(allocator: std.mem.Allocator, core: *const terminal.TerminalCore, opts: ProjectOptions) screen_stream.DecodeError![]u8 {
-    const snap = core.snapshot();
+/// `renderSnapshot`(뷰포트 인지 — view_offset>0이면 스크롤백 윈도 합성)을 쓴다 = in-process 렌더와 같은 화면(#6a 원격
+/// 스크롤백: host가 스크롤 명령을 자기 core에 적용하면 그 뷰포트가 client에 투영된다). core를 mutate(viewport 합성 lazy
+/// 할당)하므로 `*`(non-const) — caller가 core lock 아래 부른다(단일 mutator).
+pub fn projectSnapshot(allocator: std.mem.Allocator, core: *terminal.TerminalCore, opts: ProjectOptions) screen_stream.DecodeError![]u8 {
+    const snap = core.renderSnapshot();
     const palette = core.paletteOverride();
 
     var stream: std.ArrayListUnmanaged(u8) = .empty;
@@ -223,7 +226,9 @@ pub const DeltaResult = struct {
 /// `modes`)와 `snapshot`(현재 full snapshot)을 **한 번의 row build로** 함께 만든다(caller 소유, length-prefixed). 안 바뀌면
 /// delta는 빈 스트림. grid 크기/alt-screen이 바뀌면 `error.SnapshotRequired`(delta 불가 — caller가 fresh snapshot 전송).
 /// **동시 core 쓰기가 있으면 caller가 core lock을 잡고 부른다**(`projectSnapshot`과 동일). base_generation은 `opts.generation`.
-pub fn computeDelta(allocator: std.mem.Allocator, prev_bytes: []const u8, core: *const terminal.TerminalCore, opts: ProjectOptions) DeltaError!DeltaResult {
+/// `projectSnapshot`과 같이 `renderSnapshot`(뷰포트 인지)을 써서 스크롤(view_offset 변화)이 delta에 반영된다(#6a). core를
+/// mutate하므로 `*`(non-const).
+pub fn computeDelta(allocator: std.mem.Allocator, prev_bytes: []const u8, core: *terminal.TerminalCore, opts: ProjectOptions) DeltaError!DeltaResult {
     // 이전 snapshot을 decode한다: screen_meta + rows.
     var rs = screen_stream.RecordStream{ .bytes = prev_bytes };
     const first = (try rs.next()) orelse return error.SnapshotRequired; // 빈 prev면 delta base가 없다.
@@ -249,8 +254,8 @@ pub fn computeDelta(allocator: std.mem.Allocator, prev_bytes: []const u8, core: 
         }
     }
 
-    // 현재 화면을 읽는다. grid/alt-screen이 바뀌면 delta로는 못 잇는다 → fresh snapshot 필요.
-    const snap = core.snapshot();
+    // 현재 화면을 읽는다(뷰포트 인지 — 스크롤 반영, #6a). grid/alt-screen이 바뀌면 delta로는 못 잇는다 → fresh snapshot 필요.
+    const snap = core.renderSnapshot();
     const palette = core.paletteOverride();
     const cur_active: u8 = if (core.alt_active) 1 else 0;
     const cur_modes = composeModes(core);

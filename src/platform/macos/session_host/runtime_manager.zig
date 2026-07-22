@@ -27,6 +27,7 @@ const server = @import("server.zig");
 const reg = @import("registry.zig");
 const screen_snapshot = @import("screen_snapshot.zig");
 const screen_stream = @import("screen_stream.zig");
+const core_command = maru.session.core_command; // §6a 원격 스크롤 명령을 host core에 적용
 
 const InProcessTermBackend = maru.app.InProcessTermBackend;
 const LiveRegistry = maru.app.in_process_term_backend.LiveRegistry;
@@ -77,7 +78,7 @@ pub const RuntimeManager = struct {
 
     /// server.zig가 dispatch에 넘길 중립 vtable. `ctx`는 이 매니저다.
     pub fn runtimeOps(self: *RuntimeManager) server.RuntimeOps {
-        return .{ .ctx = self, .spawn = spawnOp, .terminate = terminateOp, .write_input = writeInputOp, .resize = resizeOp, .snapshot = snapshotOp, .delta = deltaOp, .notification = notificationOp };
+        return .{ .ctx = self, .spawn = spawnOp, .terminate = terminateOp, .write_input = writeInputOp, .resize = resizeOp, .snapshot = snapshotOp, .delta = deltaOp, .notification = notificationOp, .core_command = coreCommandOp };
     }
 
     fn spawnOp(ctx: *anyopaque, params: server.RuntimeSpawnParams) anyerror!u128 {
@@ -160,6 +161,30 @@ pub const RuntimeManager = struct {
             js.write(.{ .title = "", .body = "" }) catch return error.OutOfMemory;
         }
         return allocator.dupe(u8, out.written()) catch return error.OutOfMemory;
+    }
+
+    /// 원격 client가 보낸 **스크롤 core command**를 host의 TerminalCore에 적용한다(§6a 원격 스크롤백). host가 core를 소유하고
+    /// view_offset을 바꾸면 다음 projectSnapshot/computeDelta(renderSnapshot=뷰포트 인지)가 그 스크롤 화면을 client에 투영한다.
+    /// `op`는 scroll 계열 태그, `arg`는 정수 인자(delta/절대행/offset). core를 쓰므로 **core lock 아래** 적용한다(reader와 단일
+    /// mutator 동기화 — snapshot과 동일). 선택(select_*)·config는 후속(#6b) — 알 수 없는 op은 조용히 무시한다.
+    fn coreCommandOp(ctx: *anyopaque, runtime_id: u128, op: []const u8, arg: i64) anyerror!void {
+        const self: *RuntimeManager = @ptrCast(@alignCast(ctx));
+        const handle = self.handleFor(runtime_id) orelse return error.RuntimeNotFound;
+        const surface = self.backend_impl.surfaceFor(handle) orelse return error.RuntimeNotFound;
+        const nonneg: usize = @intCast(@max(arg, 0)); // 절대행/offset은 음수 불가(악성/버그 client 방어 — @intCast 패닉 회피).
+        const cmd: core_command.CoreCommand = if (std.mem.eql(u8, op, "scroll"))
+            .{ .scroll = @intCast(arg) }
+        else if (std.mem.eql(u8, op, "scroll_to_bottom"))
+            .scroll_to_bottom
+        else if (std.mem.eql(u8, op, "scroll_to_abs"))
+            .{ .scroll_to_abs = nonneg }
+        else if (std.mem.eql(u8, op, "scroll_to_offset"))
+            .{ .scroll_to_offset = nonneg }
+        else
+            return; // 미지원 op(선택/config #6b) — 무시.
+        surface.lockCore(self.io);
+        defer surface.unlockCore(self.io);
+        core_command.apply(&surface.core, cmd);
     }
 
     /// runtime_id → in-process handle. registry entry의 opaque 슬롯에서 되읽는다(spawn이 심어 둔 값). 없으면 null.

@@ -205,6 +205,13 @@ surface ... runtime-handle="<32 lowercase host-id>:<32 lowercase runtime-id>"
 
 - 한 `Maru.app` process의 모든 `AppSession`/Window는 앱 전역 session-host connection 하나를 multiplex해 공유한다. 창마다
   daemon이나 socket을 만들지 않는다.
+- **구현 상태(P3-e3-4d) ✅**: 위 "앱 전역 connection 하나 공유"는 구현됐다 — 원격 backend/연결이 `AppSession`(창) 필드가
+  아니라 **모듈-전역**(app process당 하나, `app_runtime` 옆)이라 창을 여러 개 열어도 연결·backend를 공유한다(첫 창이 세우고
+  이후 창은 재사용; 창 close는 그 창의 원격 Term만 회수하고 공유 backend는 안 닫는다 — `routing`/`live_registry`와 동일).
+  창별로 연결하던 초기 배선은 두 번째 창이 handshake 타임아웃→in-process 폴백하는 버그였다(전역화로 해소). **단 현재 daemon은
+  serial serve**(한 connection을 그 client 수명 내내 처리)라, 아래 "두 GUI **process** 동시 실행"은 아직 미지원이다 — 두 번째
+  app process는 handshake 타임아웃 후 조용히 in-process로 폴백한다(아래 writer lease·read-only attach는 concurrent multi-client
+  daemon이 붙는 후속에서). 그래서 keep-alive opt-in 단계의 **지원 구성은 단일 app instance**(창/Workspace는 몇 개든 무방)다.
 - Window를 닫거나 Workspace/Term을 다른 Window로 옮기는 것은 먼저 하나의 layout transaction으로 source/target을 검증한
   뒤 manifest 위치만 바꾼다. 성공한 이동은 `workspace-binding-id`, `runtime-handle`, child pid, scrollback을 바꾸지 않는다.
 - app-wide Quit은 모든 Window의 GUI subscription을 끊는 detach다. 비마지막 Window/Workspace/Term의 명시적 close는 기존

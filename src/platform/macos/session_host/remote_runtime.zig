@@ -178,20 +178,75 @@ pub const RemoteRuntime = struct {
     }
 
     /// host에 대기 중인 OSC 9/777 데스크톱 알림을 뺀다(§6.32 — host가 core와 함께 알림을 소유·전달). 없으면 null. host-backed
-    /// 터미널의 알림은 host의 `TerminalCore`가 파싱하므로 client가 이걸로 가져와 GUI 알림 funnel에 넣는다(surfacing은 후속).
-    /// 반환 title/body는 caller 소유(Notification.deinit로 회수).
+    /// 터미널의 알림은 host의 `TerminalCore`가 파싱하므로 client가 이걸로 가져와 GUI 알림 funnel에 넣는다(app_session이 surfacing).
+    /// 반환 title/body는 caller 소유(Notification.deinit로 회수). 둘 다 빈 값이면(host 대기 없음) null.
     pub fn takeNotification(self: *RemoteRuntime) client_mod.ClientError!?Notification {
         var buf: [96]u8 = undefined;
         const params = std.fmt.bufPrint(&buf, "{{\"runtime_id\":\"{s}\"}}", .{self.runtime_id_hex}) catch return error.OutOfMemory;
         const resp = try self.client.call("runtime.notification", params);
         defer self.allocator.free(resp);
-        const parsed = std.json.parseFromSlice(struct { title: []const u8, body: []const u8 }, self.allocator, resp, .{}) catch return error.ProtocolError;
-        defer parsed.deinit();
-        if (parsed.value.title.len == 0 and parsed.value.body.len == 0) return null; // 대기 알림 없음.
-        const title = self.allocator.dupe(u8, parsed.value.title) catch return error.OutOfMemory;
+        // std.json.parseFromSlice 대신 **수동 디코드** — parseFromSlice가 숫자 파서(f128 소프트플로트 ___divtf3/___fixtfti
+        // 등)를 링크로 끌어와, 이 경로가 live가 되면 ReleaseSafe 제품 빌드(macos-live-preview-perf)가 undefined symbol로
+        // 깨진다(code-review 후속). client는 이미 extractU64Field 등 수동 파싱 관례라 여기서도 그 관례를 따른다.
+        const title = (decodeJsonStringField(self.allocator, resp, "title") catch return error.OutOfMemory) orelse return null;
         errdefer self.allocator.free(title);
-        const body = self.allocator.dupe(u8, parsed.value.body) catch return error.OutOfMemory;
+        const body = (decodeJsonStringField(self.allocator, resp, "body") catch return error.OutOfMemory) orelse {
+            self.allocator.free(title);
+            return null;
+        };
+        errdefer self.allocator.free(body);
+        if (title.len == 0 and body.len == 0) { // host에 대기 알림 없음(빈 {title,body}).
+            self.allocator.free(title);
+            self.allocator.free(body);
+            return null;
+        }
         return .{ .title = title, .body = body };
+    }
+
+    /// `{"key":"<json-string>", ...}`에서 `key`의 문자열 값을 디코드해 owned 바이트로 돌려준다(키 없으면 null). host는
+    /// `std.json.Stringify`로 escape하므로 그 역(표준 JSON string escape)만 처리한다: `\" \\ \/ \n \r \t \b \f \u00XX`.
+    /// Stringify 기본은 non-ASCII를 raw로 두므로 `\uXXXX`는 제어문자(≤0x1F)뿐이라 surrogate pair는 없다. **std.json.parseFromSlice를
+    /// 안 쓴다** — 그 숫자 파서가 f128 소프트플로트를 링크로 끌어와 ReleaseSafe 제품 빌드를 깬다(takeNotification 참고).
+    fn decodeJsonStringField(allocator: std.mem.Allocator, json: []const u8, key: []const u8) error{OutOfMemory}!?[]u8 {
+        var pat_buf: [64]u8 = undefined;
+        const pat = std.fmt.bufPrint(&pat_buf, "\"{s}\"", .{key}) catch return null;
+        const k = std.mem.indexOf(u8, json, pat) orelse return null;
+        var i = k + pat.len;
+        while (i < json.len and (json[i] == ' ' or json[i] == ':')) i += 1; // `:` + 공백 스킵
+        if (i >= json.len or json[i] != '"') return null;
+        i += 1; // 여는 따옴표 뒤
+        var out: std.ArrayListUnmanaged(u8) = .empty;
+        errdefer out.deinit(allocator);
+        while (i < json.len) : (i += 1) {
+            const ch = json[i];
+            if (ch == '"') return try out.toOwnedSlice(allocator); // 닫는 따옴표 = 끝
+            if (ch != '\\') {
+                try out.append(allocator, ch);
+                continue;
+            }
+            i += 1; // escape 문자
+            if (i >= json.len) break;
+            switch (json[i]) {
+                '"' => try out.append(allocator, '"'),
+                '\\' => try out.append(allocator, '\\'),
+                '/' => try out.append(allocator, '/'),
+                'n' => try out.append(allocator, '\n'),
+                'r' => try out.append(allocator, '\r'),
+                't' => try out.append(allocator, '\t'),
+                'b' => try out.append(allocator, 0x08),
+                'f' => try out.append(allocator, 0x0c),
+                'u' => {
+                    if (i + 4 >= json.len) break;
+                    const cp = std.fmt.parseInt(u21, json[i + 1 .. i + 5], 16) catch break;
+                    var u8buf: [4]u8 = undefined;
+                    const n = std.unicode.utf8Encode(cp, &u8buf) catch break;
+                    try out.appendSlice(allocator, u8buf[0..n]);
+                    i += 4; // 4 hex 소비(루프 증가가 'u'를 넘긴다)
+                },
+                else => |e| try out.append(allocator, e), // 알 수 없는 escape는 그대로(best-effort)
+            }
+        }
+        return try out.toOwnedSlice(allocator); // 닫는 따옴표 못 만남(손상) — 여기까지 best-effort
     }
 
     fn terminateBestEffort(self: *RemoteRuntime) void {
@@ -501,4 +556,41 @@ test "remote runtime: takeNotification pulls a host-side OSC 9/777 desktop notif
     // host의 TerminalCore가 파싱한 OSC 777 title/body가 client로 전달됐다(host-backed 터미널의 알림이 유실 안 됨).
     try testing.expectEqualStrings("Deploy", n.title);
     try testing.expectEqualStrings("done in 3s", n.body);
+}
+
+// takeNotification의 수동 JSON 문자열 디코더(std.json.parseFromSlice의 f128 링크 회피). host의 std.json.Stringify escape를
+// 되돈다 — 순수 함수라 fork host 없이 escape 처리를 고정한다(제어문자 \u00XX·\" \\ \n \t \uXXXX·키 부재·빈 값·둘째 필드).
+test "remote runtime: decodeJsonStringField unescapes JSON string fields (parseFromSlice 대체)" {
+    const allocator = testing.allocator;
+    const decode = RemoteRuntime.decodeJsonStringField;
+
+    // 단순 값 + 둘째 필드.
+    const j1 = "{\"title\":\"Build\",\"body\":\"ok\"}";
+    const t1 = (try decode(allocator, j1, "title")).?;
+    defer allocator.free(t1);
+    try testing.expectEqualStrings("Build", t1);
+    const b1 = (try decode(allocator, j1, "body")).?;
+    defer allocator.free(b1);
+    try testing.expectEqualStrings("ok", b1);
+
+    // escape: quote/backslash/newline/tab + 제어문자 u0007.
+    const j2 = "{\"title\":\"a\\\"b\\\\c\\nd\\te\\u0007f\"}";
+    const t2 = (try decode(allocator, j2, "title")).?;
+    defer allocator.free(t2);
+    try testing.expectEqualStrings("a\"b\\c\nd\te\x07f", t2);
+
+    // 키 부재 → null.
+    try testing.expect((try decode(allocator, j1, "nope")) == null);
+
+    // 빈 값 → 빈 슬라이스(대기 알림 없음 판정용).
+    const j3 = "{\"title\":\"\",\"body\":\"\"}";
+    const t3 = (try decode(allocator, j3, "title")).?;
+    defer allocator.free(t3);
+    try testing.expectEqual(@as(usize, 0), t3.len);
+
+    // 비-ASCII(UTF-8 passthrough — Stringify 기본은 raw).
+    const j4 = "{\"body\":\"빌드 완료\"}";
+    const b4 = (try decode(allocator, j4, "body")).?;
+    defer allocator.free(b4);
+    try testing.expectEqualStrings("빌드 완료", b4);
 }

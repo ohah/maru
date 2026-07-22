@@ -187,6 +187,22 @@ pub const RemoteRuntime = struct {
         self.allocator.free(resp);
     }
 
+    /// host에 뷰포트 선택 span을 보내 host의 `extractSelection`(로컬과 같은 함수)으로 뽑은 텍스트를 받는다(§6b 원격 선택 복사).
+    /// **선택 의미론은 host core 단일 출처** — client는 렌더용 span만 보내고 콘텐츠 추출(soft-wrap 이음·블록·스크롤백)은 host가
+    /// 한다. 반환 텍스트는 caller 소유(빈 선택/오류면 null). `block`은 std.fmt가 true/false로 찍어 유효 JSON.
+    pub fn selectedText(self: *RemoteRuntime, span: terminal.SelectionSpan) client_mod.ClientError!?[]u8 {
+        var buf: [160]u8 = undefined;
+        const params = std.fmt.bufPrint(&buf, "{{\"stream_id\":{d},\"sr\":{d},\"sc\":{d},\"er\":{d},\"ec\":{d},\"block\":{}}}", .{ self.stream_id, span.start.row, span.start.col, span.end.row, span.end.col, span.block }) catch return error.OutOfMemory;
+        const resp = try self.client.call("runtime.selected_text", params);
+        defer self.allocator.free(resp);
+        const text = (decodeJsonStringField(self.allocator, resp, "text") catch return error.OutOfMemory) orelse return null;
+        if (text.len == 0) {
+            self.allocator.free(text);
+            return null;
+        }
+        return text;
+    }
+
     /// 스크롤 core command를 host로 보낸다(§6a 원격 스크롤백). `op`=scroll 계열 태그(코드 내부 고정 리터럴 — JSON escape 불요),
     /// `arg`=정수 인자(delta/절대행/offset). host가 자기 `TerminalCore`에 적용해 view_offset을 바꾸면 다음 snapshot/delta
     /// (renderSnapshot=뷰포트)가 그 스크롤 화면을 투영하고, 이 RemoteRuntime의 Surface(RemoteScreen)가 렌더한다. 응답 무시.
@@ -745,4 +761,70 @@ test "remote runtime: scroll core command routes to host so client sees scrolled
         if (c0 == 'T') saw_marker = true else _ = usleep(20 * 1000);
     }
     try testing.expect(saw_marker); // 스크롤 명령이 host를 거쳐 client 화면을 스크롤백(TOPMARKER)으로 이동시켰다(#6a).
+}
+
+// code-review #6b end-to-end — 원격 선택 복사. client가 뷰포트 선택 span을 host로 보내면, host가 자기 core에 적용해
+// **로컬과 같은 `extractSelection`**(선택 의미론 단일 출처)으로 텍스트를 뽑아 돌려주는지 실 fork host로 고정한다. 하이라이트는
+// placeholder core(app_session)가 즉시 그리고, 이 복사만 host가 해석한다("client 렌더/host 해석"). macOS opt-in.
+test "remote runtime: selectedText extracts the selection text on the host (§6b, extractSelection 재사용)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    const io = testing.io;
+
+    var dir_buf: [256]u8 = undefined;
+    const dir_path = std.fmt.bufPrintZ(&dir_buf, "/tmp/maru-sh-rr-sel-{d}", .{c.getpid()}) catch return error.SkipZigTest;
+    var sp_buf: [320]u8 = undefined;
+    const socket_path = std.fmt.bufPrintZ(&sp_buf, "{s}/control.sock", .{dir_path}) catch return error.SkipZigTest;
+
+    const child = c.fork();
+    if (child < 0) return error.SkipZigTest;
+    if (child == 0) {
+        _ = c.setsid();
+        daemon.runSessionHost(std.heap.page_allocator, io, dir_path, socket_path) catch {};
+        std.c._exit(0);
+    }
+    defer {
+        _ = c.kill(child, posix.SIG.TERM);
+        var status: c_int = undefined;
+        _ = c.waitpid(child, &status, 0);
+        _ = c.unlink(socket_path.ptr);
+        _ = c.rmdir(dir_path.ptr);
+    }
+
+    var client: client_mod.Client = blk: {
+        var attempts: usize = 0;
+        while (attempts < 150) : (attempts += 1) {
+            if (client_mod.Client.connect(allocator, socket_path, "gui")) |cl| break :blk cl else |_| _ = usleep(20 * 1000);
+        }
+        try testing.expect(false);
+        return;
+    };
+    defer client.deinit();
+
+    var rr: RemoteRuntime = undefined;
+    try rr.spawn(&client, allocator, io, 1, &.{"/bin/cat"}, .{ .cols = 40, .rows = 8 });
+    defer rr.deinit();
+    const surface = rr.surfacePtr();
+
+    // "HELLO"를 입력 → cat echo → host core row0 = "HELLO". RemoteScreen에 반영될 때까지 pump(= host가 처리 완료).
+    try rr.sendInput("HELLO\n");
+    var ready = false;
+    var attempts: usize = 0;
+    while (attempts < 200 and !ready) : (attempts += 1) {
+        _ = rr.pumpDelta() catch break;
+        surface.lockCore(io);
+        const c0 = surface.renderSnapshot().cells[0].codepoint;
+        surface.unlockCore(io);
+        if (c0 == 'H') ready = true else _ = usleep(20 * 1000);
+    }
+    try testing.expect(ready);
+
+    // 뷰포트 선택 span (0,0)~(0,4) = row0의 "HELLO"를 host에 보내 host가 extractSelection으로 뽑는다.
+    const span: terminal.SelectionSpan = .{ .start = .{ .row = 0, .col = 0 }, .end = .{ .row = 0, .col = 4 }, .block = false };
+    const text = (try rr.selectedText(span)) orelse {
+        try testing.expect(false);
+        return;
+    };
+    defer allocator.free(text);
+    try testing.expectEqualStrings("HELLO", text); // host가 자기 core에서 선택 텍스트를 뽑아 client로 전달했다(선택 의미론=host).
 }

@@ -307,7 +307,21 @@ pub const RemoteTermBackend = struct {
             // 콘텐츠 인지 경계(word/line)는 빈 placeholder에선 부정확하므로 후속(#6b-2, host 계산). scroll_and_extend(autoscroll
             // 드래그)도 후속. select_all은 placeholder 뷰포트 전체 선택 → 보이는 화면 복사(host가 스크롤백까지는 후속).
             .select_start, .select_extend, .select_extend_or_collapse, .select_all => core_command.apply(&rr.surface.core, cmd),
-            else => {}, // word/line/scroll_and_extend/config/IME는 후속 — 무시.
+            // §6b-2 단어/줄 선택: 콘텐츠 인지 경계는 빈 placeholder가 모르므로 **host가 계산해 span을 돌려준다**(selectContentAware).
+            // 그 span을 placeholder에 적용해 하이라이트(렌더가 selectionViewportSpan을 읽음). 복사는 #6b-1이 그 span으로 host 추출.
+            .select_word => |s| {
+                if (rr.selectContentAware("word", s.row, s.col) catch null) |span| {
+                    rr.surface.core.selectionStart(span.start.row, span.start.col);
+                    rr.surface.core.selectionExtend(span.end.row, span.end.col);
+                }
+            },
+            .select_line => |row| {
+                if (rr.selectContentAware("line", row, 0) catch null) |span| {
+                    rr.surface.core.selectionStart(span.start.row, span.start.col);
+                    rr.surface.core.selectionExtend(span.end.row, span.end.col);
+                }
+            },
+            else => {}, // scroll_and_extend(autoscroll)/config/IME는 후속 — 무시.
         }
     }
 

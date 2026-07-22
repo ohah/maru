@@ -78,7 +78,7 @@ pub const RuntimeManager = struct {
 
     /// server.zig가 dispatch에 넘길 중립 vtable. `ctx`는 이 매니저다.
     pub fn runtimeOps(self: *RuntimeManager) server.RuntimeOps {
-        return .{ .ctx = self, .spawn = spawnOp, .terminate = terminateOp, .write_input = writeInputOp, .resize = resizeOp, .snapshot = snapshotOp, .delta = deltaOp, .notification = notificationOp, .core_command = coreCommandOp, .selected_text = selectedTextOp };
+        return .{ .ctx = self, .spawn = spawnOp, .terminate = terminateOp, .write_input = writeInputOp, .resize = resizeOp, .snapshot = snapshotOp, .delta = deltaOp, .notification = notificationOp, .core_command = coreCommandOp, .selected_text = selectedTextOp, .select_op = selectOpOp };
     }
 
     fn spawnOp(ctx: *anyopaque, params: server.RuntimeSpawnParams) anyerror!u128 {
@@ -210,6 +210,31 @@ pub const RuntimeManager = struct {
         var js: std.json.Stringify = .{ .writer = &out.writer, .options = .{} };
         js.write(.{ .text = text }) catch return error.OutOfMemory;
         return allocator.dupe(u8, out.written()) catch return error.OutOfMemory;
+    }
+
+    /// 단어/줄 선택(§6b-2): host가 **콘텐츠를 아는 자기 core**로 경계를 계산해(`selectWordAt`/`selectLineAt`) 결과 뷰포트 선택
+    /// span을 JSON으로 준다. 빈 client placeholder는 경계를 모르므로 host가 계산(선택 의미론 host 단일 출처). span만 계산해
+    /// 돌려주고 host core 선택은 원복(transient — client가 그 span을 placeholder에 적용해 하이라이트, 복사는 #6b-1 selected_text).
+    /// 구분자(word-separators) forwarding은 후속 — 기본 "" (공백 경계, config 기본값과 일치). 미지원 op·빈 선택은 `{sel:false}`.
+    fn selectOpOp(ctx: *anyopaque, runtime_id: u128, op: []const u8, row: u16, col: u16, allocator: std.mem.Allocator) anyerror![]u8 {
+        const self: *RuntimeManager = @ptrCast(@alignCast(ctx));
+        const handle = self.handleFor(runtime_id) orelse return error.RuntimeNotFound;
+        const surface = self.backend_impl.surfaceFor(handle) orelse return error.RuntimeNotFound;
+        surface.lockCore(self.io);
+        defer surface.unlockCore(self.io);
+        if (std.mem.eql(u8, op, "word")) {
+            surface.core.selectWordAt(row, col, ""); // 기본 공백 경계(구분자 forwarding 후속).
+        } else if (std.mem.eql(u8, op, "line")) {
+            surface.core.selectLineAt(row);
+        } else {
+            return allocator.dupe(u8, "{\"sel\":false}") catch return error.OutOfMemory;
+        }
+        const maybe = surface.core.selectionViewportSpan();
+        surface.core.selectionClear(); // transient 원복.
+        if (maybe) |sp| {
+            return std.fmt.allocPrint(allocator, "{{\"sel\":true,\"sr\":{d},\"sc\":{d},\"er\":{d},\"ec\":{d},\"block\":{}}}", .{ sp.start.row, sp.start.col, sp.end.row, sp.end.col, sp.block }) catch return error.OutOfMemory;
+        }
+        return allocator.dupe(u8, "{\"sel\":false}") catch return error.OutOfMemory;
     }
 
     /// runtime_id → in-process handle. registry entry의 opaque 슬롯에서 되읽는다(spawn이 심어 둔 값). 없으면 null.

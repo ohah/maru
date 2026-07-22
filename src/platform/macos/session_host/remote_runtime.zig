@@ -203,6 +203,23 @@ pub const RemoteRuntime = struct {
         return text;
     }
 
+    /// 단어/줄 선택(§6b-2): host가 콘텐츠를 아는 자기 core로 경계를 계산하게 하고(`selectWordAt`/`selectLineAt`) 결과 뷰포트
+    /// 선택 span을 받는다(빈 placeholder는 경계를 모른다 = 선택 의미론 host 단일 출처). caller는 이 span을 placeholder에 적용해
+    /// 하이라이트한다(복사는 #6b-1 selectedText가 그 span으로 host 추출). `op`는 고정 리터럴("word"/"line"). 선택 없으면 null.
+    pub fn selectContentAware(self: *RemoteRuntime, op: []const u8, row: u16, col: u16) client_mod.ClientError!?terminal.SelectionSpan {
+        var buf: [96]u8 = undefined;
+        const params = std.fmt.bufPrint(&buf, "{{\"stream_id\":{d},\"op\":\"{s}\",\"row\":{d},\"col\":{d}}}", .{ self.stream_id, op, row, col }) catch return error.OutOfMemory;
+        const resp = try self.client.call("runtime.select_op", params);
+        defer self.allocator.free(resp);
+        if (std.mem.indexOf(u8, resp, "\"sel\":true") == null) return null; // 빈 선택(공백 셀 등).
+        const sr = client_mod.extractU64Field(resp, "\"sr\":") orelse return null;
+        const sc = client_mod.extractU64Field(resp, "\"sc\":") orelse return null;
+        const er = client_mod.extractU64Field(resp, "\"er\":") orelse return null;
+        const ec = client_mod.extractU64Field(resp, "\"ec\":") orelse return null;
+        const block = std.mem.indexOf(u8, resp, "\"block\":true") != null;
+        return .{ .start = .{ .row = @intCast(sr), .col = @intCast(sc) }, .end = .{ .row = @intCast(er), .col = @intCast(ec) }, .block = block };
+    }
+
     /// 스크롤 core command를 host로 보낸다(§6a 원격 스크롤백). `op`=scroll 계열 태그(코드 내부 고정 리터럴 — JSON escape 불요),
     /// `arg`=정수 인자(delta/절대행/offset). host가 자기 `TerminalCore`에 적용해 view_offset을 바꾸면 다음 snapshot/delta
     /// (renderSnapshot=뷰포트)가 그 스크롤 화면을 투영하고, 이 RemoteRuntime의 Surface(RemoteScreen)가 렌더한다. 응답 무시.
@@ -827,4 +844,86 @@ test "remote runtime: selectedText extracts the selection text on the host (§6b
     };
     defer allocator.free(text);
     try testing.expectEqualStrings("HELLO", text); // host가 자기 core에서 선택 텍스트를 뽑아 client로 전달했다(선택 의미론=host).
+}
+
+// code-review #6b-2 end-to-end — 단어/줄 선택. 빈 client placeholder는 단어/줄 경계를 모르므로 host가 콘텐츠로 계산해
+// span을 돌려준다(selectContentAware → runtime.select_op). 그 span으로 selectedText를 부르면(=client가 placeholder에 적용 후
+// #6b-1 복사와 같은 경로) 그 단어/줄 텍스트가 나온다. 실 fork host로 왕복 고정. macOS opt-in.
+test "remote runtime: selectContentAware computes word/line boundaries on the host (§6b-2)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    const io = testing.io;
+
+    var dir_buf: [256]u8 = undefined;
+    const dir_path = std.fmt.bufPrintZ(&dir_buf, "/tmp/maru-sh-rr-wl-{d}", .{c.getpid()}) catch return error.SkipZigTest;
+    var sp_buf: [320]u8 = undefined;
+    const socket_path = std.fmt.bufPrintZ(&sp_buf, "{s}/control.sock", .{dir_path}) catch return error.SkipZigTest;
+
+    const child = c.fork();
+    if (child < 0) return error.SkipZigTest;
+    if (child == 0) {
+        _ = c.setsid();
+        daemon.runSessionHost(std.heap.page_allocator, io, dir_path, socket_path) catch {};
+        std.c._exit(0);
+    }
+    defer {
+        _ = c.kill(child, posix.SIG.TERM);
+        var status: c_int = undefined;
+        _ = c.waitpid(child, &status, 0);
+        _ = c.unlink(socket_path.ptr);
+        _ = c.rmdir(dir_path.ptr);
+    }
+
+    var client: client_mod.Client = blk: {
+        var attempts: usize = 0;
+        while (attempts < 150) : (attempts += 1) {
+            if (client_mod.Client.connect(allocator, socket_path, "gui")) |cl| break :blk cl else |_| _ = usleep(20 * 1000);
+        }
+        try testing.expect(false);
+        return;
+    };
+    defer client.deinit();
+
+    var rr: RemoteRuntime = undefined;
+    try rr.spawn(&client, allocator, io, 1, &.{"/bin/cat"}, .{ .cols = 40, .rows = 8 });
+    defer rr.deinit();
+    const surface = rr.surfacePtr();
+
+    // "foo bar"를 입력 → cat echo → host core row0. RemoteScreen 반영까지 pump.
+    try rr.sendInput("foo bar\n");
+    var ready = false;
+    var attempts: usize = 0;
+    while (attempts < 200 and !ready) : (attempts += 1) {
+        _ = rr.pumpDelta() catch break;
+        surface.lockCore(io);
+        const c0 = surface.renderSnapshot().cells[0].codepoint;
+        surface.unlockCore(io);
+        if (c0 == 'f') ready = true else _ = usleep(20 * 1000);
+    }
+    try testing.expect(ready);
+
+    // (0,0)의 **단어** = "foo"를 host가 경계 계산 → span. 그 span으로 텍스트를 뽑으면 "foo".
+    const word_span = (try rr.selectContentAware("word", 0, 0)) orelse {
+        try testing.expect(false);
+        return;
+    };
+    try testing.expectEqual(@as(u16, 0), word_span.start.col); // "foo" 시작
+    const word = (try rr.selectedText(word_span)) orelse {
+        try testing.expect(false);
+        return;
+    };
+    defer allocator.free(word);
+    try testing.expectEqualStrings("foo", word); // host가 공백 경계로 단어를 잡았다(빈 placeholder는 못 함).
+
+    // **줄** 선택 = row0 전체 "foo bar".
+    const line_span = (try rr.selectContentAware("line", 0, 0)) orelse {
+        try testing.expect(false);
+        return;
+    };
+    const line = (try rr.selectedText(line_span)) orelse {
+        try testing.expect(false);
+        return;
+    };
+    defer allocator.free(line);
+    try testing.expectEqualStrings("foo bar", line); // 줄 전체(host 계산).
 }

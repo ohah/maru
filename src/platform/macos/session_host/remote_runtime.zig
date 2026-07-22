@@ -177,6 +177,16 @@ pub const RemoteRuntime = struct {
         self.terminateBestEffort();
     }
 
+    /// host에 fresh snapshot 재요청(§9 desync 복구) — 조립기가 `GenerationGap`/`MalformedRow`로 뒤처졌을 때 `pumpDelta` 실패
+    /// 경로가 부른다. host가 다음 delta tick에 현재 full snapshot을 snapshot_chunk로 push하고, 그걸 `pumpDelta`의 applySnapshot이
+    /// 받아 generation을 리셋해 복구한다(delta는 base_generation이 현재라 stale client를 못 고쳐 snapshot이 유일한 복구). 응답 무시.
+    pub fn requestResync(self: *RemoteRuntime) client_mod.ClientError!void {
+        var buf: [64]u8 = undefined;
+        const params = std.fmt.bufPrint(&buf, "{{\"stream_id\":{d}}}", .{self.stream_id}) catch return error.OutOfMemory;
+        const resp = try self.client.call("runtime.resync", params);
+        self.allocator.free(resp);
+    }
+
     /// host에 대기 중인 OSC 9/777 데스크톱 알림을 뺀다(§6.32 — host가 core와 함께 알림을 소유·전달). 없으면 null. host-backed
     /// 터미널의 알림은 host의 `TerminalCore`가 파싱하므로 client가 이걸로 가져와 GUI 알림 funnel에 넣는다(app_session이 surfacing).
     /// 반환 title/body는 caller 소유(Notification.deinit로 회수). 둘 다 빈 값이면(host 대기 없음) null.
@@ -593,4 +603,61 @@ test "remote runtime: decodeJsonStringField unescapes JSON string fields (parseF
     const b4 = (try decode(allocator, j4, "body")).?;
     defer allocator.free(b4);
     try testing.expectEqualStrings("빌드 완료", b4);
+}
+
+// code-review #7 end-to-end — requestResync(§9 desync 복구)가 host에 fresh snapshot을 재요청하면, host가 delta가 아니라
+// **snapshot_chunk**(is_snapshot)를 push하는지 실 fork host로 고정한다. drainRemote가 GenerationGap/MalformedRow에서 이걸
+// 불러 조립기 generation을 리셋해 "영구 멈춤" 대신 복구한다. macOS opt-in(실 forkpty·socket).
+test "remote runtime: requestResync makes the host push a fresh snapshot (desync 복구)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    const io = testing.io;
+
+    var dir_buf: [256]u8 = undefined;
+    const dir_path = std.fmt.bufPrintZ(&dir_buf, "/tmp/maru-sh-rr-rsy-{d}", .{c.getpid()}) catch return error.SkipZigTest;
+    var sp_buf: [320]u8 = undefined;
+    const socket_path = std.fmt.bufPrintZ(&sp_buf, "{s}/control.sock", .{dir_path}) catch return error.SkipZigTest;
+
+    const child = c.fork();
+    if (child < 0) return error.SkipZigTest;
+    if (child == 0) {
+        _ = c.setsid();
+        daemon.runSessionHost(std.heap.page_allocator, io, dir_path, socket_path) catch {};
+        std.c._exit(0);
+    }
+    defer {
+        _ = c.kill(child, posix.SIG.TERM);
+        var status: c_int = undefined;
+        _ = c.waitpid(child, &status, 0);
+        _ = c.unlink(socket_path.ptr);
+        _ = c.rmdir(dir_path.ptr);
+    }
+
+    var client: client_mod.Client = blk: {
+        var attempts: usize = 0;
+        while (attempts < 150) : (attempts += 1) {
+            if (client_mod.Client.connect(allocator, socket_path, "gui")) |cl| break :blk cl else |_| _ = usleep(20 * 1000);
+        }
+        try testing.expect(false);
+        return;
+    };
+    defer client.deinit();
+
+    var rr: RemoteRuntime = undefined;
+    try rr.spawn(&client, allocator, io, 1, &.{"/bin/cat"}, .{ .cols = 40, .rows = 10 });
+    defer rr.deinit();
+
+    // attach가 첫 snapshot을 이미 소비했다 — 이제 fresh snapshot을 **재요청**한다.
+    try rr.requestResync();
+
+    // host가 다음 delta tick에 snapshot_chunk를 push한다(delta 아님). 그 배치가 is_snapshot인지 확인한다(input 없어 delta는 안 옴).
+    var saw_snapshot = false;
+    var attempts: usize = 0;
+    while (attempts < 150 and !saw_snapshot) : (attempts += 1) {
+        if (try rr.client.readStreamBatch(allocator, rr.stream_id)) |batch| {
+            defer allocator.free(batch.bytes);
+            if (batch.is_snapshot) saw_snapshot = true;
+        } else _ = usleep(20 * 1000);
+    }
+    try testing.expect(saw_snapshot); // resync 요청이 host의 fresh snapshot push를 유발했다(generation 리셋 = 복구 경로).
 }

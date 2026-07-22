@@ -98,7 +98,9 @@ pub const Connection = struct {
 
     /// 한 stream 구독의 상태. `base`는 이 stream에 마지막으로 보낸 full snapshot 바이트(다음 delta diff의 기준). attach
     /// 직후 첫 snapshot으로 채워지고, delta push마다 갱신된다. null이면 아직 base가 없다(read-only host 또는 snapshot 실패).
-    pub const Subscription = struct { runtime_id: u128, base: ?[]u8 = null };
+    /// `resync_pending`=client가 `runtime.resync`로 fresh snapshot 재요청(§9 desync 복구) — 다음 `collectDeltas`가 delta 대신
+    /// 현재 full snapshot을 snapshot_chunk로 push하고 base를 그걸로 교체한다. client의 조립기 generation gap을 리셋한다.
+    pub const Subscription = struct { runtime_id: u128, base: ?[]u8 = null, resync_pending: bool = false };
 
     pub const State = enum { pre_hello, ready, closed };
 
@@ -230,6 +232,8 @@ pub const Connection = struct {
             return self.dispatchAttach(frame.header.request_id, params);
         } else if (std.mem.eql(u8, method, "runtime.detach")) {
             return self.dispatchDetach(frame.header.request_id, params);
+        } else if (std.mem.eql(u8, method, "runtime.resync")) {
+            return self.dispatchResync(frame.header.request_id, params);
         } else if (std.mem.eql(u8, method, "runtime.resize")) {
             return self.dispatchResize(frame.header.request_id, params);
         } else if (std.mem.eql(u8, method, "runtime.notification")) {
@@ -395,6 +399,19 @@ pub const Connection = struct {
         return self.replyResult(request_id, body);
     }
 
+    /// `runtime.resync`(§9 desync 복구): 이 stream 구독에 fresh snapshot 재요청을 표시한다 — 다음 `collectDeltas`가 delta 대신
+    /// 현재 full snapshot을 push해 client 조립기의 generation gap을 리셋한다. delta는 base_generation이 현재라 stale client를
+    /// 못 고치므로(applyDelta가 또 GenerationGap) snapshot이 유일한 복구다. 모르는 stream_id는 invalid_request. runtime 유지.
+    fn dispatchResync(self: *Connection, request_id: u64, params: ?std.json.ObjectMap) HandleError!Action {
+        const p = params orelse return self.replyError(request_id, .invalid_request);
+        const stream = intFieldU64(p, "stream_id") orelse return self.replyError(request_id, .invalid_request);
+        const sub = self.attachments.getPtr(stream) orelse return self.replyError(request_id, .invalid_request);
+        sub.resync_pending = true;
+        const body = try self.stringify(.{ .result = .{ .resync = true } });
+        defer self.allocator.free(body);
+        return self.replyResult(request_id, body);
+    }
+
     /// `runtime.resize`: controller가 canonical PTY size를 바꾼다(§9). registry가 controller/sequence를 검증하고, 실제
     /// 크기가 바뀔 때만 runtime_ops(실 `TerminalCore`+`TIOCSWINSZ`)에 적용한 뒤 applied size/generation을 응답한다.
     /// observer의 resize는 unauthorized, stale sequence는 `{stale:true}`. 모든 subscription으로의 `runtime.resized`
@@ -464,6 +481,25 @@ pub const Connection = struct {
         while (it.next()) |entry| {
             const stream = entry.key_ptr.*;
             const sub = entry.value_ptr;
+            // §9 desync 복구: resync 요청된 stream은 delta 대신 **fresh snapshot**을 push하고 base를 교체한다(client generation
+            // gap 리셋). base-null skip보다 먼저 처리한다(base 없어도 snapshot은 보낼 수 있다). snapshot 실패는 이 tick만 건너뛰되
+            // pending은 유지(다음 tick 재시도). send(snapshot_chunk)와 base는 별개 버퍼여야 하므로 base용으로 복사한다.
+            if (sub.resync_pending) {
+                const snap = ops.snapshot(ops.ctx, sub.runtime_id, self.allocator) catch continue; // 실패 → pending 유지, 다음 tick.
+                const base_copy = self.allocator.dupe(u8, snap) catch {
+                    self.allocator.free(snap);
+                    continue;
+                };
+                sub.resync_pending = false;
+                if (sub.base) |b| self.allocator.free(b);
+                sub.base = base_copy;
+                self.appendChunks(&list, .snapshot_chunk, stream, snap) catch {
+                    self.allocator.free(snap);
+                    return error.OutOfMemory;
+                };
+                self.allocator.free(snap);
+                continue;
+            }
             const base = sub.base orelse continue; // base가 없으면(read-only/실패) 이 stream은 아직 delta 대상이 아니다.
             const update = ops.delta(ops.ctx, sub.runtime_id, base, self.allocator) catch continue; // diff 실패는 이 tick만 건너뛴다.
             // base를 현재 snapshot으로 교체한다(다음 diff 기준). send는 별개 버퍼다.
@@ -1207,4 +1243,84 @@ test "server: collectDeltas pushes delta_chunk for attached streams and advances
     var ro = Connection.init(allocator, 1, &registry);
     defer ro.deinit();
     try testing.expectEqual(@as(?[][]u8, null), try ro.collectDeltas());
+}
+
+test "server: runtime.resync makes collectDeltas push a fresh snapshot_chunk, not a delta (§9 desync 복구)" {
+    const allocator = testing.allocator;
+    var registry = reg.TerminalRuntimeRegistry.init(allocator);
+    defer registry.deinit();
+    _ = try registry.register(0xAA, 80, 24);
+
+    var fake: FakeRuntimeOps = .{};
+    var conn = Connection.init(allocator, 1, &registry);
+    defer conn.deinit();
+    conn.runtime_ops = fake.ops();
+    {
+        const h = try feedJson(&conn, .hello, 1, "{\"protocol_min\":1,\"protocol_max\":1}");
+        if (h.frame) |f| f.deinit(allocator);
+    }
+    // attach(controller) → base = fake snapshot("SNAPSHOT-BYTES"), stream_id 1.
+    {
+        const frames = try feedExpectFrames(&conn, .request, 2, "{\"method\":\"runtime.attach\",\"params\":{\"runtime_id\":\"aa\",\"mode\":\"controller\"}}");
+        defer {
+            for (frames) |f| f.deinit(allocator);
+            allocator.free(frames);
+        }
+    }
+    // resync 요청 → {resync:true} 응답 + resync_pending 세팅.
+    {
+        const r = try feedJson(&conn, .request, 3, "{\"method\":\"runtime.resync\",\"params\":{\"stream_id\":1}}");
+        defer if (r.frame) |f| f.deinit(allocator);
+        try testing.expectEqual(protocol.Kind.response, r.frame.?.header.kind);
+        try testing.expect(std.mem.indexOf(u8, r.frame.?.payload, "\"resync\":true") != null);
+    }
+    try testing.expect(conn.attachments.get(1).?.resync_pending);
+
+    // collectDeltas → delta가 **아니라** snapshot_chunk를 push한다(fresh snapshot으로 client generation 리셋). 이게 없으면
+    // desync한 client가 계속 GenerationGap이라 영구 멈춘다(code-review #7).
+    const maybe = try conn.collectDeltas();
+    try testing.expect(maybe != null);
+    const frames = maybe.?;
+    defer {
+        for (frames) |f| allocator.free(f);
+        allocator.free(frames);
+    }
+    try testing.expectEqual(@as(usize, 1), frames.len);
+    {
+        var rp = framing.FrameParser.init(allocator);
+        defer rp.deinit();
+        try rp.push(frames[0]);
+        const f = (try rp.next()).?;
+        defer f.deinit(allocator);
+        try testing.expectEqual(protocol.Kind.snapshot_chunk, f.header.kind); // delta_chunk 아님!
+        try testing.expect(protocol.Flags.hasEndStream(f.header.flags));
+        try testing.expectEqual(@as(u64, 1), f.header.stream_id);
+        try testing.expectEqualStrings("SNAPSHOT-BYTES", f.payload); // fake snapshot 그대로
+    }
+    try testing.expect(!conn.attachments.get(1).?.resync_pending); // 한 번 소비(다음 tick부턴 다시 delta).
+    try testing.expectEqualStrings("SNAPSHOT-BYTES", conn.attachments.get(1).?.base.?); // base = 그 snapshot(다음 diff 기준).
+
+    // 다음 collectDeltas는 다시 delta(resync 소비됨).
+    {
+        const m2 = try conn.collectDeltas();
+        try testing.expect(m2 != null);
+        const f2 = m2.?;
+        defer {
+            for (f2) |f| allocator.free(f);
+            allocator.free(f2);
+        }
+        var rp = framing.FrameParser.init(allocator);
+        defer rp.deinit();
+        try rp.push(f2[0]);
+        const f = (try rp.next()).?;
+        defer f.deinit(allocator);
+        try testing.expectEqual(protocol.Kind.delta_chunk, f.header.kind); // resync 소비 → 일반 delta 복귀
+    }
+
+    // 모르는 stream_id resync → invalid_request(runtime 유지).
+    {
+        const r = try feedJson(&conn, .request, 4, "{\"method\":\"runtime.resync\",\"params\":{\"stream_id\":99}}");
+        defer if (r.frame) |f| f.deinit(allocator);
+        try testing.expect(std.mem.indexOf(u8, r.frame.?.payload, "invalid_request") != null);
+    }
 }

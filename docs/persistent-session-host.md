@@ -4,9 +4,12 @@
 다른 터미널의 `maru attach` 클라이언트가 재접속하는 기능의 단일 출처다. 탭/split UI, workspace restore,
 control-plane, PTY 종료 정책과 책임이 겹치지 않도록 소유권·ID·종료 의미·복구·검증 단계를 정한다.
 
-> **상태: 설계만 확정, 구현 전.** 현재 제품은 `Maru.app` 종료 시 `applicationWillTerminate`가 workspace를 저장한 뒤
-> 모든 `AppSession`과 live PTY를 닫는다. 아래 `maru-sessiond`, `runtime_handle`, `maru attach`는 아직 존재하지 않는다.
-> 구현 PR은 이 문서의 단계와 종료 gate를 따라야 하며, 단계가 끝나기 전 제품 동작을 구현 완료로 설명하지 않는다.
+> **상태: keep-alive opt-in 구현됨(P3-e3 + P4 종료 gate 완료), 기본값 `false`.** `session.keep-alive-after-quit=true`면
+> 새 terminal이 host(`maru-sessiond` = `maru __session-host`)-backed로 떠 GUI 종료·강제종료에도 살아남고 재실행 시
+> 재접속한다 — 호스트 프로세스, `runtime_handle`(=`RuntimeHandle`/`runtime_id`), GUI 재접속(`attachExisting`)은 **존재한다**
+> (§멀티윈도우 "구현 상태 ✅" 노트·종료 매트릭스 참조). 기본값은 아직 `false`(opt-in)다: 외부 `maru attach` CLI 클라이언트,
+> 다중 app **process**(현재 daemon serial), 원격 스크롤백/선택, 자동 desync 리싱크, GUI 부재 시 OS 배너 등은 **후속**이며,
+> 이 문서는 그 목표 상태를 함께 기술한다 — **구현 완료 여부는 각 절의 "구현 상태" 표식으로 구분한다**(표식 없는 서술은 목표 설계).
 
 ## 1. 결론
 

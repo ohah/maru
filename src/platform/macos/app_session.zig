@@ -5454,7 +5454,7 @@ pub const AppSession = struct {
     }
 
     /// GUI 바이너리의 형제 `maru` CLI 경로(§10 launcher가 `maru __session-host`로 exec). selfExePath는 앱 바이너리라
-    /// dirname의 형제 `maru`를 쓴다(installCli와 같은 규칙). 못 찾으면 null.
+    /// dirname의 형제 `maru`를 쓴다. 못 찾으면 null. **형제 maru 경로 도출의 단일 출처** — `installCli`도 이걸 쓴다(code-review #15).
     fn siblingMaruPath(self: *AppSession, a: std.mem.Allocator) ?[:0]const u8 {
         const exe = std.process.executablePathAlloc(self.io, a) catch return null;
         const dir = std.fs.path.dirname(exe) orelse return null;
@@ -13595,16 +13595,12 @@ pub const AppSession = struct {
         var arena = std.heap.ArenaAllocator.init(self.allocator);
         defer arena.deinit();
         const a = arena.allocator();
-        const exe = std.process.executablePathAlloc(self.io, a) catch {
-            self.showNotice("CLI 설치 실패: 앱 실행 경로를 찾지 못했습니다");
+        // GUI 바이너리의 형제 `maru`(CLI) — selfExePath는 앱 바이너리라 그대로 link하면 `maru`가 GUI를 띄운다. 경로 도출은
+        // siblingMaruPath 단일 출처(§10 launcher exec와 같은 규칙 — 중복 유지 금지, code-review #15).
+        const cli = self.siblingMaruPath(a) orelse {
+            self.showNotice("CLI 설치 실패: maru CLI 경로를 찾지 못했습니다");
             return;
         };
-        const dir = std.fs.path.dirname(exe) orelse {
-            self.showNotice("CLI 설치 실패: 실행 경로 디렉터리가 없습니다");
-            return;
-        };
-        // GUI 바이너리의 형제 `maru`(CLI) — selfExePath는 앱 바이너리라 그대로 link하면 `maru`가 GUI를 띄운다.
-        const cli = std.fmt.allocPrintSentinel(a, "{s}/maru", .{dir}, 0) catch return;
         if (std.c.access(cli.ptr, 0) != 0) { // F_OK=0(존재 확인). 형제 maru 부재면 명확히 실패(symlink는 dangling을 막음).
             self.showNotice("CLI 설치 실패: maru CLI 바이너리를 찾지 못했습니다");
             return;

@@ -1710,6 +1710,15 @@ fn activeIndexAfterRemoval(active: usize, removed_index: usize, new_len: usize) 
 // 전부 메인 이벤트다). 리더는 interactive 모드서 core에 직접 write(setProcessing)라 `routing`을 안 건드린다(§8A.2 독립).
 var app_runtime: app.AppRuntime = .{};
 
+// P3-e3-4d 영속 세션 host 연결 — **앱 프로세스 전역**(창별이 아니라). 한 앱에 창을 여러 개 열어도 host 연결은 **하나**를
+// 공유한다(daemon은 serial serve라 연결이 앱당 하나여야 함 — 창마다 연결하면 두 번째 창이 handshake 타임아웃→in-process
+// 폴백했다). `app_runtime.routing`/`live_registry`가 앱 전역인 것과 같은 소유 seam이고, allocator도 같은 `smp_allocator`다
+// (테스트 leak 검출 밖 — 프로세스 수명 자원). 첫 창이 `ensureRemoteBackend`로 세우고, 이후 창은 non-null이면 재사용한다.
+// 창이 닫혀도 이 둘은 안 닫는다(routing과 동일) — 창의 원격 Term은 그 창 deinit이 backend.remove로 회수한다. macOS 전용
+// 타입이라 non-macOS면 void(barrel struct {} 제외 — [[macos-only-code-linux-crosscompile-check]]).
+var app_remote_client: ?RemoteSessionClient = null;
+var app_remote_backend: ?RemoteSessionBackend = null;
+
 /// FP10c1 C ABI가 앱 전역 Mermaid 정책 인스턴스를 찾는 유일한 접근점. 새 handle을 만들지 않아 모든 창과
 /// Swift adapter가 `AppRuntime.mermaid_queue` 하나를 공유한다.
 pub fn mermaidCoordinator() *maru.session.mermaid_coordinator.MermaidCoordinatorState {
@@ -1825,12 +1834,10 @@ pub const AppSession = struct {
     // 창마다 backend를 만들어도 handle로 같은 슬롯을 조회한다(cross-window 이동 무관). AppSession이 heap-pin
     // (allocator.create)이라 `&self.term_backend`가 안정적이라 vtable ctx로 안전하다. undefined 기본값 — init 전 접근 금지.
     term_backend: app.InProcessTermBackend = undefined,
-    // P3-e3 영속 세션 host. `session.keep-alive-after-quit`이 켜지고 host 연결에 성공하면 채워진다(둘 다 null이면 현행
-    // in-process — 무회귀). `remote_backend`는 self-referential(`&session_client.?`+`self.runtime`을 든다)이라 AppSession이
-    // heap-pin이어야 한다(원래 그렇다). createTerm은 `backendForNew()`로 backend를 고르고, 이후 Term별 호출은 `backendFor(term)`
-    // (surface.remote로 판정)로 라우팅한다. deinit이 Term 정리 뒤 둘을 회수한다(client는 backend가 쓰므로 backend 먼저).
-    session_client: ?RemoteSessionClient = null,
-    remote_backend: ?RemoteSessionBackend = null,
+    // P3-e3 영속 세션 host backend는 **창별이 아니라 앱 전역**이다 — 모듈-var `app_remote_backend`/`app_remote_client`(위
+    // app_runtime 옆). keep-alive면 `ensureRemoteBackend`가 세우고(첫 창), createTerm은 `backendForNew()`로, 기존 Term은
+    // `backendFor(term)`(surface.remote 판정)로 라우팅한다. 창 deinit은 이 창의 원격 Term만 회수하고 공유 backend/연결은
+    // 안 닫는다(routing과 동일 — 앱 프로세스 수명).
     // surface teardown의 단일 chokepoint(destroyTerm + deinit direct pass)가 알리는 선택적 관찰 훅. cross-window move는
     // destroy가 아니라 소유 이전이므로 호출하지 않는다. app_host_abi가 browser grant/wait 수명에 연결한다.
     surface_closed_context: ?*anyopaque = null,
@@ -2762,7 +2769,7 @@ pub const AppSession = struct {
         // 실패(연결 거부·spawn 실패)면 조용히 in-process로 폴백한다 — host 문제가 GUI를 막지 않는다. ⚠️최초 cold launch에서
         // host를 새로 띄우면 backoff로 최대 수 초 블로킹될 수 있다(opt-in 실험적; async/lazy 연결은 후속). 기본값(false)이면
         // 이 블록을 건너뛰어 현행 경로와 byte-identical이다.
-        if (self.loaded_config.config.session.keep_alive_after_quit) self.setupRemoteBackend();
+        if (self.loaded_config.config.session.keep_alive_after_quit) self.ensureRemoteBackend();
 
         // MARU_TRACE=<파일경로>: 라이브 trace 레코딩을 켠다. 파일을 열어(truncate) self 소유 file writer를 세우고,
         // 레코더가 이벤트마다 그 writer에 쓰고 flush한다(증분 append → 크래시 복원). 파일 생성 실패면 조용히 건너뛴다
@@ -5355,7 +5362,7 @@ pub const AppSession = struct {
     /// 근거가 된다. `remote_backend`가 null(기본)이면 항상 in-process라 현행과 동일하다.
     fn backendForNew(self: *AppSession) app.TermRuntimeBackend {
         if (is_macos) {
-            if (self.remote_backend) |*rb| return rb.backend();
+            if (app_remote_backend) |*rb| return rb.backend();
         }
         return self.termBackend();
     }
@@ -5366,28 +5373,30 @@ pub const AppSession = struct {
     fn backendFor(self: *AppSession, term: *Term) app.TermRuntimeBackend {
         if (is_macos) {
             if (term.surface.remote != null) {
-                if (self.remote_backend) |*rb| return rb.backend();
+                if (app_remote_backend) |*rb| return rb.backend();
             }
         }
         return self.termBackend();
     }
 
-    /// 영속 세션 host에 connect-or-launch해 원격 backend를 세운다(§10). best-effort — 실패면 `session_client`/`remote_backend`를
-    /// null로 두어 in-process로 폴백한다. exe=형제 `maru` CLI(launcher가 exec), base=`${XDG_CACHE_HOME:-$HOME/.cache}/maru`
-    /// (discovery가 그 아래 `session-host/`를 씀 — 다른 maru 캐시와 같은 규칙). 경로 문자열은 transient(arena) — connectOrLaunch가
-    /// 동기적으로 복사한다. 반환 Client는 self.allocator 소유(persistent).
-    fn setupRemoteBackend(self: *AppSession) void {
+    /// **앱 전역** 원격 backend를 보장한다(§10). 이미 세워져 있으면(다른 창이) 재사용하고, 아니면 connect-or-launch로
+    /// 세운다. best-effort — 실패면 모듈-var가 null로 남아 in-process로 폴백한다. exe=형제 `maru` CLI(launcher가 exec),
+    /// base=`${XDG_CACHE_HOME:-$HOME/.cache}/maru`(discovery가 그 아래 `session-host/`를 씀). **allocator=`smp_allocator`**
+    /// (앱 전역 자원 — routing/live_registry와 동일, 프로세스 수명이라 창 allocator를 안 씀). 경로 문자열은 transient(arena).
+    fn ensureRemoteBackend(self: *AppSession) void {
         // 원격 host는 macOS 전용 — Linux ABI 컴파일에선 아래 블록이 comptime 가지치기돼 no-op이다.
         if (is_macos) {
-            var arena = std.heap.ArenaAllocator.init(self.allocator);
+            if (app_remote_backend != null) return; // 이미 앱 전역으로 세워짐 — 재사용(창마다 새 연결 금지).
+            const alloc = std.heap.smp_allocator; // 앱 전역 자원(routing/live_registry와 같은 allocator).
+            var arena = std.heap.ArenaAllocator.init(alloc);
             defer arena.deinit();
             const a = arena.allocator();
             const exe_path = self.siblingMaruPath(a) orelse return;
             const base = sessionCacheBase(a) orelse return;
-            const client = session_host.host_connect.connectOrLaunch(self.allocator, exe_path, base, .{}) orelse return;
-            self.session_client = client;
-            // remote_backend는 &session_client.?(heap-pin AppSession 안 안정 주소)와 앱 전역 라우팅 표를 든다.
-            self.remote_backend = session_host.remote_term_backend.RemoteTermBackend.init(self.allocator, self.io, &self.session_client.?, self.runtime);
+            const client = session_host.host_connect.connectOrLaunch(alloc, exe_path, base, .{}) orelse return;
+            app_remote_client = client;
+            // 앱 전역 backend는 &app_remote_client.?(모듈-var 안정 주소)와 앱 전역 라우팅 표를 든다.
+            app_remote_backend = session_host.remote_term_backend.RemoteTermBackend.init(alloc, self.io, &app_remote_client.?, self.runtime);
         }
     }
 
@@ -26239,9 +26248,15 @@ pub const AppSession = struct {
                     if (term.git_branch) |b| self.allocator.free(b);
                     if (term.git_branch_cwd) |c| self.allocator.free(c);
                     term.auto_title.deinit(self.allocator);
-                    // 4e-1: web Term은 live_initialized=false지만 registry 슬롯(web arm sentinel)을 소유하므로 remove 대상이다.
-                    // remove가 union arm 태그로 분기(terminal=reader join·web=경량)해 해당 슬롯 소유를 teardown한다.
-                    if (term.rt.live_initialized or term.kind == .web) {
+                    // P3-e3-4d: 원격 Term은 live_registry가 아니라 **앱 전역 backend**가 소유하므로 backendFor(term).remove로
+                    // 회수한다(SurfaceRuntime detach + rr surface/screen deinit + 공유 backend map에서 제거). 창 close가 이 창의
+                    // 원격 Term만 뺀다(공유 backend 자체는 안 닫음). in-process/web Term은 기존대로 live_registry.remove.
+                    if (is_macos and term.surface.remote != null) {
+                        self.backendFor(term).remove(term.rt.handle);
+                        term.rt.live_initialized = false;
+                    } else if (term.rt.live_initialized or term.kind == .web) {
+                        // 4e-1: web Term은 live_initialized=false지만 registry 슬롯(web arm sentinel)을 소유하므로 remove 대상이다.
+                        // remove가 union arm 태그로 분기(terminal=reader join·web=경량)해 해당 슬롯 소유를 teardown한다.
                         self.live_registry.remove(term.surface.id) catch {}; // 번들/sentinel deinit(custom_name + surface.deinit + 슬롯)
                         term.rt.live_initialized = false;
                     }
@@ -26260,20 +26275,9 @@ pub const AppSession = struct {
         self.tabs.deinit(self.allocator);
         self.surface_ptrs.deinit(self.allocator);
         self.surface_initialized = false;
-        // P3-e3: 원격 backend/연결 회수. Term 정리(pass 1/2) 뒤라 backendFor(term) 참조가 끝났고, 앱 전역 surface_runtime은
-        // 살아 있어 원격 link detach가 안전하다. backend가 client로 host runtime을 terminate하므로 backend를 먼저, client를
-        // 나중에 회수한다(둘 다 null=현행 경로엔 무동작). ⚠️여기서 원격 runtime도 terminate된다 — "GUI 종료해도 생존"은
-        // e3-6에서 이 회수를 detach-only로 바꾼다(지금은 GUI 수명 동안만 host-backed).
-        if (is_macos) {
-            if (self.remote_backend) |*rb| {
-                rb.deinit();
-                self.remote_backend = null;
-            }
-            if (self.session_client) |*cl| {
-                cl.deinit();
-                self.session_client = null;
-            }
-        }
+        // P3-e3-4d: 원격 backend/연결은 **앱 전역**(app_remote_backend/client)이라 창 close가 안 닫는다 — routing/live_registry와
+        // 동일(다른 창이 같은 backend를 쓴다). 이 창의 원격 Term은 위 pass 2가 이미 backendFor(term).remove로 공유 backend에서
+        // 회수했다. 공유 backend/연결은 앱 프로세스 종료 시 OS가 회수한다(smp_allocator — leak 검출 밖). (테스트는 명시 reset.)
         // appearance가 family를 빌리므로 surface 정리 뒤에 해제. 가드로 init 초반 실패 시 undefined
         // arena를 free하지 않게(다른 자원과 같은 패턴).
         if (self.config_loaded) {
@@ -34632,13 +34636,24 @@ test "P3-e3 통합: keep-alive AppSession가 새 Term을 host-backed backend로 
         try session.init(io, allocator, .{ .abi_version = abi_version, .cols = 40, .rows = 10, .queue_capacity = 16, .command_kind = @intFromEnum(CommandKind.controlled_smoke) });
         defer session.deinit();
 
-        // 격리된 host로 원격 backend를 세운다(setupRemoteBackend와 같은 배선이되 base를 명시해 XDG env 의존 없이).
+        // 격리된 host로 **앱 전역** 원격 backend를 세운다(ensureRemoteBackend와 같은 배선이되 base를 명시해 XDG env 의존 없이).
+        // testing.allocator로 세워 leak 검출을 받고, 아래에서 명시 reset한다(앱 전역이라 창 deinit이 안 닫으므로).
         const client = session_host.host_connect.connectOrLaunch(allocator, "/unused-maru-helper", base, .{ .connect_attempts = 30, .connect_delay_ms = 10 }) orelse {
             try std.testing.expect(false);
             return;
         };
-        session.session_client = client;
-        session.remote_backend = session_host.remote_term_backend.RemoteTermBackend.init(allocator, io, &session.session_client.?, session.runtime);
+        app_remote_client = client;
+        app_remote_backend = session_host.remote_term_backend.RemoteTermBackend.init(allocator, io, &app_remote_client.?, session.runtime);
+        defer { // 앱 전역이라 창 deinit이 안 닫는다 — 테스트 격리를 위해 명시 reset(runtimes는 destroyTerm이 이미 비운다).
+            if (app_remote_backend) |*rb| {
+                rb.deinit();
+                app_remote_backend = null;
+            }
+            if (app_remote_client) |*cl| {
+                cl.deinit();
+                app_remote_client = null;
+            }
+        }
 
         // 첫 탭 term은 in-process다(원격 backend 세팅 전에 spawn됨 → surface.remote == null).
         const first = session.tabs.items[0].panes.items[0].terms.items[0];
@@ -34662,9 +34677,25 @@ test "P3-e3 통합: keep-alive AppSession가 새 Term을 host-backed backend로 
         }
         try std.testing.expect(found); // 원격 Term 입력이 host를 거쳐 Surface에 반영됐다(end-to-end).
 
-        session.destroyTerm(term); // 원격 term 회수(backendFor→remote: closeAndDetach+remove+SurfaceRuntime detach).
-        // 여기서 defer가 session.deinit()(in-process 첫 탭 + remote_backend 빈 runtimes + client 회수) → destroy → host kill을
-        // 순서대로 돌린다. testing.allocator가 누수를, deinit이 크래시를 잡는다(통합 teardown 검증).
+        // 멀티 윈도우(전역화 핵심): 두 번째 AppSession(창)이 `ensureRemoteBackend`로 **이미 세워진 앱 전역 backend를 재사용**
+        // 한다(새 연결 안 만듦 — early-return). 그 창의 createTerm도 같은 공유 backend로 가, 두 창의 원격 Term이 **한 backend·
+        // 한 연결**을 공유한다. 이게 "단일 앱 + 여러 창/workspace가 serial daemon과 충돌 없이 동작"을 참으로 만든다.
+        const s2 = try allocator.create(AppSession);
+        defer allocator.destroy(s2);
+        try s2.init(io, allocator, .{ .abi_version = abi_version, .cols = 40, .rows = 10, .queue_capacity = 16, .command_kind = @intFromEnum(CommandKind.controlled_smoke) });
+        defer s2.deinit();
+        // s2.init의 첫 탭도 이미 세워진 앱 전역 backend를 써서 **자동으로 원격**이 된다(한 창의 모든 터미널이 공유 backend로
+        // 감 — 전역화의 결과). 그래서 이 시점 공유 backend엔 원격 Term 3개(s1의 term1 + s2 첫 탭 + s2의 term2)가 **한 연결**을
+        // 공유한다. s2 첫 탭(원격, s2 tabs 안)은 s2.deinit이 pass2 backendFor(term).remove로 회수한다(deinit 원격-term 경로 검증).
+        s2.ensureRemoteBackend(); // 재사용(app_remote_backend != null → early-return, 새 connectOrLaunch 없음).
+        const term2 = try s2.createTerm(.{ .command = "/bin/cat" }, .{ .cols = 40, .rows = 10 }, 16, "cat", "/bin/cat");
+        try std.testing.expect(term2.surface.remote != null); // 두 번째 창의 Term도 host-backed.
+        try std.testing.expectEqual(@as(usize, 3), app_remote_backend.?.runtimes.count()); // 두 창의 원격 Term이 한 공유 backend에.
+
+        s2.destroyTerm(term2);
+        session.destroyTerm(term); // 원격 term 회수(backendFor→remote: remove + SurfaceRuntime detach + rr free).
+        // 블록 끝 defer(LIFO): s2.deinit → destroy(s2) → reset(공유 backend/client) → session.deinit → destroy(session) → host
+        // kill. in-process 첫 탭들 + 공유 backend를 누수·크래시 없이 회수(testing.allocator 누수, deinit 크래시 검출).
     } else {
         return error.SkipZigTest;
     }

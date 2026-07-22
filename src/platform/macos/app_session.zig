@@ -2553,6 +2553,9 @@ pub const AppSession = struct {
     // pendingNotification()이 돌려준 OSC 9/777 알림 title/body의 소유 버퍼(다음 pendingNotification/destroy까지 유효).
     notification_title_out: []u8 = &.{},
     notification_body_out: []u8 = &.{},
+    // host-backed Term 알림 round-robin 커서(P4 §6.32) — host 알림은 RPC로 pull하므로 tick당 원격 Term 하나만 폴링해
+    // 폴링 비용을 bound한다(in-process는 코어 락 read라 매 tick 전부 훑음). 원격 Term 개수로 wrap.
+    remote_notif_cursor: usize = 0,
     // 인앱 알림 센터 히스토리(owned). pendingNotification()이 드레인하는 알림을 여기에도 보관해 종 아이콘으로 다시
     // 열람한다(2단계). 최신이 뒤(append). notification_unread는 안 읽은 개수 캐시 — push/read/cap-drop 3곳에서만
     // 증감(직접 조작 금지). 매번 순회하지 않게 캐시해 배지 렌더를 싸게 한다.
@@ -20122,10 +20125,14 @@ pub const AppSession = struct {
             for (tab.panes.items) |pane| {
                 for (pane.terms.items) |term| {
                     if (!term.rt.live_initialized or term.rt.terminated) continue; // 종료(미reap) Term은 건너뜀(dispatchBell과 동형)
+                    // host-backed Term은 코어가 placeholder라 알림이 host에 있다 — 값싼 코어 drain에서 건너뛰고 아래 RPC pull로.
+                    if (is_macos and term.surface.remote != null) continue;
                     if (self.drainOscNotificationFrom(tab, term, focused_term)) |n| return n;
                 }
             }
         }
+        // host-backed Term의 알림은 RPC로 pull한다(§6.32 GUI surfacing) — tick당 원격 Term 하나 round-robin.
+        if (is_macos) return self.pollRemoteNotification(focused_term);
         return null;
     }
 
@@ -20147,6 +20154,19 @@ pub const AppSession = struct {
             term.surface.core.clearNotification();
             return null;
         }
+        // pending.title/body는 코어 메모리라 락 아래에서만 유효 — emitNotification이 dupe해 owned로 복사하므로 여기서
+        // (락 든 채) 부른 뒤 clear한다. emitNotification은 코어를 안 만져(dupe + 히스토리 ring) 데드락이 없다.
+        const n = self.emitNotification(tab, term, focused_term, pending.title, pending.body);
+        term.surface.core.clearNotification();
+        return n;
+    }
+
+    /// OSC 9/777 알림 한 건을 인앱 히스토리에 넣고 Swift가 띄울 `PendingNotification`으로 만든다 — **in-process 코어 drain과
+    /// host-backed 원격 pull의 공통 tail**(§6.32 GUI surfacing). `title`/`body`는 borrowed(dupe해 notification_*_out 소유로 복사)
+    /// 라 caller가 소스를 clear/deinit해도 안전하다. 제목에 위치(탭 › 팬)를 접두하고, 발신 Term이 지금 보고 있는 Term이면
+    /// foreground_banner=false(전면 노이즈 억제, 목록만)로 둔다. 포맷/dupe 실패(OOM)면 null(best-effort). `notifications.osc`
+    /// 게이트와 소스 소비는 caller가 한다. 위치 라벨은 메인 스레드 상태(auto_title/custom_name/surface.title)만 읽는다.
+    fn emitNotification(self: *AppSession, tab: *Tab, term: *Term, focused_term: ?*Term, title: []const u8, body: []const u8) ?PendingNotification {
         if (self.notification_title_out.len > 0) {
             self.allocator.free(self.notification_title_out);
             self.notification_title_out = &.{};
@@ -20155,32 +20175,59 @@ pub const AppSession = struct {
             self.allocator.free(self.notification_body_out);
             self.notification_body_out = &.{};
         }
-        // 제목에 **위치(탭 › 팬)**를 접두해 어느 터미널에서 온 알림인지 보인다. OSC가 준 title이
-        // 있으면 `위치 · title`, OSC 9처럼 title이 없으면 위치만. body는 앱 메시지 그대로. 포맷/dupe 실패면 그 알림은
-        // 버린다(best-effort, 코어 pending은 비운다). 위치 라벨은 lockCore 밖 메인 스레드 상태(auto_title/custom_name/
-        // surface.title)만 읽어 코어 락과 무관하다(pending.title/body만 코어 메모리 — 락 아래에서 소비).
         var loc_buf: [notification_location_buf_len]u8 = undefined;
         const location = notificationLocation(&loc_buf, tab, term);
-        self.notification_title_out = (if (pending.title.len > 0)
-            std.fmt.allocPrint(self.allocator, "{s} · {s}", .{ location, pending.title })
+        self.notification_title_out = (if (title.len > 0)
+            std.fmt.allocPrint(self.allocator, "{s} · {s}", .{ location, title })
         else
-            self.allocator.dupe(u8, location)) catch {
-            term.surface.core.clearNotification();
-            return null;
-        };
-        self.notification_body_out = self.allocator.dupe(u8, pending.body) catch {
+            self.allocator.dupe(u8, location)) catch return null;
+        self.notification_body_out = self.allocator.dupe(u8, body) catch {
             self.allocator.free(self.notification_title_out);
             self.notification_title_out = &.{};
-            term.surface.core.clearNotification();
             return null;
         };
-        term.surface.core.clearNotification();
         const osc_surface_id = term.surface.id;
-        // 발신 Term이 지금 보고 있는 그 Term이면 전면 배너 억제(목록만), 그 외(background pane/가로탭/비활성 탭)면 배너.
         const fg_banner = !(focused_term != null and term == focused_term.?);
-        // 코어 락을 든 채지만 pushNotificationHistory는 코어를 안 만져(히스토리 ring + alloc) 데드락이 없다.
         _ = self.pushNotificationHistory(self.notification_title_out, self.notification_body_out, osc_surface_id);
         return .{ .title = self.notification_title_out, .body = self.notification_body_out, .surface_id = osc_surface_id, .foreground_banner = fg_banner };
+    }
+
+    /// host-backed Term의 OSC 9/777 알림을 host에서 pull해 GUI 알림 경로에 잇는다(§6.32 — #1523 host→client 전달의 GUI
+    /// surfacing). host core가 알림을 파싱하므로 client placeholder 코어엔 없어 RPC(`runtime.notification`)로 뺀다. RPC 비용을
+    /// bound하려고 **tick당 원격 Term 하나만 round-robin**으로 폴링한다(cursor로 순회 — N tick 안에 전부 훑음, 알림은 host
+    /// 단일 슬롯이라 term당 최대 1건). notifications.osc off면 이미 host에서 소비됐으니 그냥 drop. best-effort.
+    fn pollRemoteNotification(self: *AppSession, focused_term: ?*Term) ?PendingNotification {
+        if (is_macos) {
+            if (app_remote_backend == null) return null;
+            // 원격 Term을 순서대로 세어 cursor 위치의 하나를 고른다(중첩 tabs/panes/terms를 flat index로).
+            var count: usize = 0;
+            var target_tab: ?*Tab = null;
+            var target_term: ?*Term = null;
+            for (self.tabs.items) |tab| {
+                for (tab.panes.items) |pane| {
+                    for (pane.terms.items) |term| {
+                        if (!term.rt.live_initialized or term.rt.terminated or term.surface.remote == null) continue;
+                        if (count == self.remote_notif_cursor) {
+                            target_tab = tab;
+                            target_term = term;
+                        }
+                        count += 1;
+                    }
+                }
+            }
+            if (count == 0) {
+                self.remote_notif_cursor = 0;
+                return null;
+            }
+            self.remote_notif_cursor = (self.remote_notif_cursor + 1) % count;
+            const term = target_term orelse return null; // cursor가 count 넘음(원격 Term 감소) — 다음 tick에 보정됨.
+            const tab = target_tab.?;
+            const notif = app_remote_backend.?.takeNotificationFor(term.rt.handle) orelse return null;
+            defer notif.deinit(app_remote_backend.?.allocator); // takeNotificationFor가 backend allocator로 dupe.
+            if (!self.loaded_config.config.notifications.osc) return null; // 게이트 — host에서 이미 소비됨(drop).
+            return self.emitNotification(tab, term, focused_term, notif.title, notif.body);
+        }
+        return null;
     }
 
     /// 인앱 알림 센터 히스토리에 한 건 보관한다(title/body dupe — pendingNotification이 드레인하는 owned 버퍼와
@@ -35371,6 +35418,111 @@ test "P4 keep-alive host 실패: notice pending이 사용자 notice로 표시되
     session.showPendingHostConnectNotice(); // tick이 부르는 것과 동일.
     try std.testing.expect(session.chrome_host.notice.open); // 사용자에게 "유지 안 됨" notice가 떴다(조용한 폴백 아님).
     try std.testing.expect(!session.host_connect_notice_pending); // 한 번 표시 후 클리어(매 tick 반복 안 함).
+}
+
+// P4 §6.32 GUI surfacing(code-review #10) — host-backed 터미널의 OSC 9/777 알림은 **host core**가 파싱하므로 client
+// placeholder 코어엔 없다(#1523이 host→client 전달 RPC를 놓았다). 이 테스트는 pendingNotification이 그 host 알림을
+// takeNotificationFor로 pull해 in-process와 **같은 GUI 알림 경로**(위치 접두·인앱 히스토리·PendingNotification)에 태우는지
+// 고정한다 — takeNotification이 죽은 코드가 아니게 된다. 실 fork host에 /bin/cat 원격 Term을 탭에 넣고 OSC 777을 echo시킨다.
+test "P4 §6.32: host-backed Term의 OSC 9/777 알림이 GUI 알림 경로로 surfacing된다(#10)" {
+    if (is_macos) {
+        const allocator = std.testing.allocator;
+        const io = std.Io.Threaded.global_single_threaded.io();
+
+        var base_buf: [96]u8 = undefined;
+        const base = std.fmt.bufPrintZ(&base_buf, "/tmp/maru-p4-osc-{d}", .{std.c.getpid()}) catch return error.SkipZigTest;
+        _ = std.c.mkdir(base.ptr, 0o700);
+        var dir_buf: [160]u8 = undefined;
+        const dir = session_host.discovery.sessionHostDirPath(&dir_buf, base) catch return error.SkipZigTest;
+        var sock_buf: [224]u8 = undefined;
+        const socket = session_host.discovery.socketPathIn(&sock_buf, dir) catch return error.SkipZigTest;
+
+        const child = std.c.fork();
+        if (child < 0) return error.SkipZigTest;
+        if (child == 0) {
+            _ = std.c.setsid();
+            session_host.daemon.runSessionHost(std.heap.page_allocator, io, dir, socket) catch {};
+            std.c._exit(0);
+        }
+        defer {
+            _ = std.c.kill(child, std.posix.SIG.TERM);
+            var status: c_int = undefined;
+            _ = std.c.waitpid(child, &status, 0);
+            _ = std.c.unlink(socket.ptr);
+            var lpb: [224]u8 = undefined;
+            if (session_host.discovery.lockPathIn(&lpb, dir)) |p| _ = std.c.unlink(p.ptr) else |_| {}
+            _ = std.c.rmdir(dir.ptr);
+            _ = std.c.rmdir(base.ptr);
+        }
+
+        var up = false;
+        var w: usize = 0;
+        while (w < 250) : (w += 1) {
+            if (session_host.client.Client.connect(allocator, socket, "gui")) |cl| {
+                var p = cl;
+                p.deinit();
+                up = true;
+                break;
+            } else |_| _ = usleep(20 * 1000);
+        }
+        try std.testing.expect(up);
+
+        const session = try allocator.create(AppSession);
+        defer allocator.destroy(session);
+        try session.init(io, allocator, .{ .abi_version = abi_version, .cols = 40, .rows = 10, .queue_capacity = 16, .command_kind = @intFromEnum(CommandKind.controlled_smoke) });
+        defer session.deinit();
+
+        // backend를 init **뒤**에 세워 첫 탭은 in-process로 두고(원격 Term은 아래 cat 하나만 — round-robin 단순화), cat을 host-backed로.
+        const client = session_host.host_connect.connectOrLaunch(allocator, "/unused", base, .{ .connect_attempts = 30, .connect_delay_ms = 10 }) orelse {
+            try std.testing.expect(false);
+            return;
+        };
+        app_remote_client = client;
+        app_remote_backend = session_host.remote_term_backend.RemoteTermBackend.init(allocator, io, &app_remote_client.?, session.runtime);
+        defer {
+            host_connect_failed = false;
+            if (app_remote_backend) |*rb| {
+                rb.deinit();
+                app_remote_backend = null;
+            }
+            if (app_remote_client) |*cl| {
+                cl.deinit();
+                app_remote_client = null;
+            }
+        }
+
+        const cat = try session.createTerm(.{ .command = "/bin/cat" }, .{ .cols = 40, .rows = 10 }, 16, "cat", "/bin/cat");
+        try std.testing.expect(cat.surface.remote != null); // host-backed
+        // pendingNotification이 훑도록 첫 탭 첫 pane에 임시 삽입(cleanup에서 pop 후 destroyTerm).
+        try session.tabs.items[0].panes.items[0].terms.append(allocator, cat);
+
+        // OSC 777을 cat에 입력 → host PTY가 cat으로, cat이 raw echo → **host core**가 파싱 → host 알림 pending.
+        try session.runtime.writeInput(cat.surface.id, .{ .bytes = "\x1b]777;notify;BuildDone;ok\x1b\\\n" });
+
+        // pendingNotification이 host에서 pull해 GUI 경로로 surfacing한다(host tick·echo 대기 폴링).
+        var got: ?AppSession.PendingNotification = null;
+        var attempts: usize = 0;
+        while (attempts < 150 and got == null) : (attempts += 1) {
+            got = session.pendingNotification();
+            if (got == null) _ = usleep(20 * 1000);
+        }
+        const n = got orelse {
+            _ = session.tabs.items[0].panes.items[0].terms.pop();
+            session.destroyTerm(cat);
+            try std.testing.expect(false);
+            return;
+        };
+        try std.testing.expectEqualStrings("ok", n.body); // body는 그대로
+        try std.testing.expect(std.mem.indexOf(u8, n.title, "BuildDone") != null); // 위치 접두 + OSC title
+        try std.testing.expectEqual(cat.surface.id, n.surface_id); // 클릭 점프용 발신 surface
+        // 인앱 히스토리에도 보관됐다(in-process와 같은 경로).
+        try std.testing.expect(session.notification_history.items.len >= 1);
+
+        _ = session.tabs.items[0].panes.items[0].terms.pop(); // destroyTerm 전 탭에서 뗀다(dangling 방지).
+        session.destroyTerm(cat);
+    } else {
+        return error.SkipZigTest;
+    }
 }
 
 // M3a 핵심 불변식(주소 안정성) — surface·런타임 소유를 registry 번들로 옮겨도 reader thread가 잡는 두 embedded

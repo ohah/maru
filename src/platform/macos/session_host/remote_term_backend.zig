@@ -111,6 +111,14 @@ pub const RemoteTermBackend = struct {
         return rr.runtimeIdHex();
     }
 
+    /// host-backed Term(handle)의 대기 OSC 9/777 데스크톱 알림을 host에서 pull한다(§6.32 GUI surfacing). 없거나 연결 오류면
+    /// null(**best-effort** — 알림은 부가 기능이라 오류를 세션에 전파하지 않는다). 반환 `Notification.title/body`는 이 backend의
+    /// allocator 소유(caller가 `deinit`). host core가 파싱한 알림(placeholder client core엔 없음)을 app_session 알림 경로에 잇는다.
+    pub fn takeNotificationFor(self: *RemoteTermBackend, handle: RuntimeHandle) ?remote_runtime.Notification {
+        const rr = self.runtimes.get(handle) orelse return null;
+        return rr.takeNotification() catch return null;
+    }
+
     fn spawn(ctx: *anyopaque, params: SpawnParams) anyerror!*Surface {
         const self: *RemoteTermBackend = @ptrCast(@alignCast(ctx));
         // argv = [command] ++ args (host의 spawnRuntime이 argv[0]=command, argv[1..]=args로 되돌린다). rr.spawn이 동기적으로

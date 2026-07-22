@@ -5502,12 +5502,16 @@ pub const AppSession = struct {
         // attachTerm이 실패→아래 fresh spawn으로 폴백한다. 읽고 즉시 클리어(다음 createTerm으로 안 샘).
         const reconnect_id = self.restore_runtime_id;
         self.restore_runtime_id = "";
+        var reconnected = false; // attach(재접속) 경로면 true — errdefer가 terminate 대신 detach로 되돌린다(아래).
         const surface = surface: {
             if (is_macos and reconnect_id.len == 32) {
                 if (app_remote_backend) |*rb| {
                     var rid: [32]u8 = undefined;
                     @memcpy(&rid, reconnect_id[0..32]);
-                    if (rb.attachTerm(id, rid, size)) |s| break :surface s else |_| {} // 재접속 실패 → fresh spawn 폴백.
+                    if (rb.attachTerm(id, rid, size)) |s| {
+                        reconnected = true;
+                        break :surface s;
+                    } else |_| {} // 재접속 실패 → fresh spawn 폴백.
                 }
             }
             break :surface try be.spawn(.{ .handle = id, .request = req, .size = size, .queue_capacity = queue_capacity });
@@ -5515,7 +5519,14 @@ pub const AppSession = struct {
         // spawn 성공 후 이후 단계(config·attach·pump) 실패 시 번들 슬롯을 회수한다(backend.remove = 번들 deinit = live_pty
         // reader join + surface.deinit + 슬롯 해제). spawn 자체 실패는 backend 내부 2-pass 정리(removeUninitialized)가
         // 처리하므로 이 errdefer는 spawn 성공 후에만 등록돼 이후 단계 실패만 잡는다.
-        errdefer be.remove(id);
+        // 단 **재접속(attach)** 성공 경로는 우리가 띄운 게 아니라 기존 host runtime이므로 remove(=terminate)를 쓰면 안 된다 —
+        // 이후 단계 실패 시 detachTerm(client-side만 회수, terminate 없음)으로 되돌려 재접속했던 runtime을 살려 둔다(§7,
+        // deinit pass2와 같은 detach 규율). spawn 경로만 remove(terminate)로 우리가 만든 runtime을 회수한다.
+        errdefer if (is_macos and reconnected) {
+            if (app_remote_backend) |*rb| rb.detachTerm(id);
+        } else {
+            be.remove(id);
+        };
         term.surface = surface; // backend가 init한 번들 슬롯 surface를 참조(소유는 registry)
         term.rt.handle = id; // opaque runtime handle(= surface_id, in-process) — 이후 backend 호출의 라우팅 키
         term.rt.live_initialized = true;
@@ -23124,6 +23135,11 @@ pub const AppSession = struct {
         for (self.tabs.items) |tab| {
             for (tab.panes.items) |pane| {
                 for (pane.terms.items) |term| {
+                    // P3-e3-6: 앱 quit(detach) + host-backed면 terminate 경로(closeAndDetach·close 둘 다 rr.terminate)를
+                    // 통째로 건너뛴다 — deinit pass1(§6)과 **동일** 게이트. close는 창 teardown 진입점(windowWillClose)이라
+                    // deinit보다 먼저 도므로, 여기서도 막지 않으면 runtime을 죽여 "GUI 종료 후 생존" 계약이 깨진다(회수는
+                    // deinit pass2 detachTerm이 client-side만). P4 "종료 및 세션 끝내기"(app_quit_end_all)면 막지 않고 종료한다.
+                    if (is_macos and app_quitting and !app_quit_end_all and term.surface.remote != null) continue;
                     if (term.rt.live_initialized and self.runtime_initialized) {
                         self.backendFor(term).closeAndDetach(term.rt.handle);
                     } else if (term.rt.live_initialized) {
@@ -35002,6 +35018,111 @@ test "P3-e3-6 app-quit: host-backed Term을 detach해 host runtime이 생존하�
         var rr: session_host.remote_runtime.RemoteRuntime = undefined;
         try rr.attachExisting(&client2, allocator, io, 1, rid, .{ .cols = 40, .rows = 10 }); // 생존한 runtime에 재접속 성공!
         rr.deinit(); // 검증 끝 — 이제 terminate로 정리.
+    } else {
+        return error.SkipZigTest;
+    }
+}
+
+// R1 회귀(code-review #2) — 앱 quit(detach) 시 **창 teardown 진입점 `close()`가 deinit보다 먼저** 돈다. e3-6 스모크는 quit을
+// deinit 직접 호출로만 모델링해 close() 경로를 안 탔고, close()엔 detach 게이트가 없어 host-backed runtime을 terminate했다
+// (생존 계약 조용히 실패). 이 스모크는 quit 중 close()→deinit 순서를 그대로 태워 runtime이 그래도 생존·재접속되는지 고정한다.
+test "R1: app-quit 중 close()가 먼저 돌아도 host-backed runtime이 생존한다(재접속 성공)" {
+    if (is_macos) {
+        const allocator = std.testing.allocator;
+        const io = std.Io.Threaded.global_single_threaded.io();
+
+        var base_buf: [96]u8 = undefined;
+        const base = std.fmt.bufPrintZ(&base_buf, "/tmp/maru-r1-cl-{d}", .{std.c.getpid()}) catch return error.SkipZigTest;
+        _ = std.c.mkdir(base.ptr, 0o700);
+        var dir_buf: [160]u8 = undefined;
+        const dir = session_host.discovery.sessionHostDirPath(&dir_buf, base) catch return error.SkipZigTest;
+        var sock_buf: [224]u8 = undefined;
+        const socket = session_host.discovery.socketPathIn(&sock_buf, dir) catch return error.SkipZigTest;
+
+        const child = std.c.fork();
+        if (child < 0) return error.SkipZigTest;
+        if (child == 0) {
+            _ = std.c.setsid();
+            session_host.daemon.runSessionHost(std.heap.page_allocator, io, dir, socket) catch {};
+            std.c._exit(0);
+        }
+        defer {
+            _ = std.c.kill(child, std.posix.SIG.TERM);
+            var status: c_int = undefined;
+            _ = std.c.waitpid(child, &status, 0);
+            _ = std.c.unlink(socket.ptr);
+            var lpb: [224]u8 = undefined;
+            if (session_host.discovery.lockPathIn(&lpb, dir)) |p| _ = std.c.unlink(p.ptr) else |_| {}
+            _ = std.c.rmdir(dir.ptr);
+            _ = std.c.rmdir(base.ptr);
+        }
+
+        var up = false;
+        var w: usize = 0;
+        while (w < 250) : (w += 1) {
+            if (session_host.client.Client.connect(allocator, socket, "gui")) |cl| {
+                var p = cl;
+                p.deinit();
+                up = true;
+                break;
+            } else |_| _ = usleep(20 * 1000);
+        }
+        try std.testing.expect(up);
+
+        const client = session_host.host_connect.connectOrLaunch(allocator, "/unused", base, .{ .connect_attempts = 30, .connect_delay_ms = 10 }) orelse {
+            try std.testing.expect(false);
+            return;
+        };
+        app_remote_client = client;
+        app_remote_backend = session_host.remote_term_backend.RemoteTermBackend.init(allocator, io, &app_remote_client.?, &app_runtime.routing);
+        defer {
+            app_quitting = false;
+            app_quit_end_all = false;
+            if (app_remote_backend) |*rb| {
+                rb.deinit();
+                app_remote_backend = null;
+            }
+            if (app_remote_client) |*cl| {
+                cl.deinit();
+                app_remote_client = null;
+            }
+        }
+
+        const session = try allocator.create(AppSession);
+        defer allocator.destroy(session);
+        try session.init(io, allocator, .{ .abi_version = abi_version, .cols = 40, .rows = 10, .queue_capacity = 16, .command_kind = @intFromEnum(CommandKind.controlled_smoke) });
+        const first = session.tabs.items[0].panes.items[0].terms.items[0];
+        try std.testing.expect(first.surface.remote != null);
+        const rid = app_remote_backend.?.runtimeIdFor(first.rt.handle) orelse {
+            try std.testing.expect(false);
+            return;
+        };
+
+        // **앱 quit** 순서를 실제대로: 먼저 창 teardown(close), 그다음 struct deinit. close()에 게이트가 없으면 여기서 이미
+        // terminate돼 아래 재접속이 AttachFailed로 깨진다.
+        app_quitting = true;
+        _ = session.close();
+        session.deinit();
+
+        // 연결을 닫아 프로세스 종료 흉내 → host는 runtime 유지(§9).
+        if (app_remote_backend) |*rb| {
+            rb.deinit();
+            app_remote_backend = null;
+        }
+        if (app_remote_client) |*cl| {
+            cl.deinit();
+            app_remote_client = null;
+        }
+
+        // 재실행 흉내: 새 연결로 그 runtime_id에 재접속 → 성공하면 close()가 terminate 안 했다는 증명.
+        var client2 = session_host.client.Client.connect(allocator, socket, "gui") catch {
+            try std.testing.expect(false);
+            return;
+        };
+        defer client2.deinit();
+        var rr: session_host.remote_runtime.RemoteRuntime = undefined;
+        try rr.attachExisting(&client2, allocator, io, 1, rid, .{ .cols = 40, .rows = 10 }); // close()를 태워도 생존!
+        rr.deinit();
     } else {
         return error.SkipZigTest;
     }

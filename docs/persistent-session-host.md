@@ -7,9 +7,13 @@ control-plane, PTY 종료 정책과 책임이 겹치지 않도록 소유권·ID�
 > **상태: keep-alive opt-in 구현됨(P3-e3 + P4 종료 gate 완료), 기본값 `false`.** `session.keep-alive-after-quit=true`면
 > 새 terminal이 host(`maru-sessiond` = `maru __session-host`)-backed로 떠 GUI 종료·강제종료에도 살아남고 재실행 시
 > 재접속한다 — 호스트 프로세스, `runtime_handle`(=`RuntimeHandle`/`runtime_id`), GUI 재접속(`attachExisting`)은 **존재한다**
-> (§멀티윈도우 "구현 상태 ✅" 노트·종료 매트릭스 참조). 기본값은 아직 `false`(opt-in)다: 외부 `maru attach` CLI 클라이언트,
-> 다중 app **process**(현재 daemon serial), 원격 스크롤백/선택, 자동 desync 리싱크, GUI 부재 시 OS 배너 등은 **후속**이며,
-> 이 문서는 그 목표 상태를 함께 기술한다 — **구현 완료 여부는 각 절의 "구현 상태" 표식으로 구분한다**(표식 없는 서술은 목표 설계).
+> (§멀티윈도우 "구현 상태 ✅" 노트·종료 매트릭스 참조). **원격 스크롤백·선택·복사·검색, 자동 desync 리싱크, 그리고 원격 렌더
+> 패리티(색 theme-aware·kitty 이미지·OSC 133 prompt 마크)도 구현됐다** — 원격 파이프라인이 in-process와 렌더 관점에서 동등하며,
+> 새 화면 필드가 원격 경로를 빠뜨리면 comptime parity 가드가 컴파일 에러로 잡는다(`remote_screen.zig` `expectSnapshotParity`).
+> `keep-alive-after-quit` 토글은 **설정 GUI(workspace 섹션)에도 노출**된다. 기본값은 아직 `false`(opt-in)다: 외부 `maru attach`
+> CLI 클라이언트, 다중 app **process**(현재 daemon serial), GUI 부재 시 OS 배너, **host-backed echo 지연 제거(이벤트 기반
+> push — §perf, 백로그)**, **기본값 `true` 전환** 등은 **후속/백로그**다. 이 문서는 그 목표 상태를 함께 기술한다 — **구현 완료
+> 여부는 각 절의 "구현 상태" 표식으로 구분한다**(표식 없는 서술은 목표 설계).
 
 ## 1. 결론
 
@@ -287,10 +291,11 @@ session.keep-alive-after-quit = true
 | `true` (**기능 완성 뒤 기본값**) | 새 Workspace/Term/split/quick terminal 모두 `maru-sessiond`에 생성 | GUI만 detach, runtime 유지 |
 | `false` | 현재처럼 GUI process 안에 생성 | 현재 manifest에 bind된 terminal runtime을 확인 후 terminate |
 
-- 이 키는 아직 parser/schema/세팅 GUI에 없다. P4 구현 PR이 config schema·`configuration.md`·GUI row·CLI help를 함께
-  추가하고, P4 종료 gate 전에는 기본값을 바꾸지 않는다.
+- 이 키는 config schema·`configuration.md`에 있고, **설정 GUI(workspace 섹션 토글)에도 노출된다**(과거 실험적이라 숨겼던 것을
+  원격 렌더 패리티 완성 후 해제). CLI help는 후속. **기본값은 여전히 `false`** — 전환은 남은 선결(echo 지연 이벤트-push 등) 뒤 별개 결정이다.
 - backend 선택은 **새로 만드는 runtime에만** 적용한다. 살아 있는 runtime을 process 사이에서 migrate하거나 설정 토글
-  즉시 terminate하지는 않지만, 바뀐 quit 의미는 다음 app-wide `Quit Maru`부터 적용한다.
+  즉시 terminate하지는 않는다 — GUI 토글은 backend 셋업이 app init에서 일어나므로 **재실행 시** 적용되고, 바뀐 quit 의미는
+  다음 app-wide `Quit Maru`부터 적용한다.
 - `true`인데 host launch/handshake가 실패하면 조용히 in-process terminal을 열어 “유지된다”고 오인시키지 않는다.
   오류를 표시하고 사용자가 명시적으로 이번 한 번만 ephemeral terminal을 열 수 있게 한다.
 - persistent와 in-process runtime이 과도기 한 workspace에 함께 있어도 각 Term의 typed backend binding으로 구분한다.
@@ -610,10 +615,12 @@ chunk_index:u32 | chunk_count:u32 | record_bytes...
 - snapshot record는 `screen_meta(cols,rows,active_screen,cursor,modes)`, `row(row_index,run*)`,
   `image_placement(image_id,placement_id,row,col,cell_x/y_offset,src_x/y/w/h,columns,rows,z)`(kitty display 충실),
   `image_blob(image_id,generation,width,height,bpp,pixels)`(디코드된 raw 픽셀 — client 디코더 불필요, >1 MiB는 header
-  chunk_index/count로 청크)다. row run은 grapheme UTF-8, cell width/count와 태그드 Color intent(default/indexed/rgb)·style
-  flags를 명시하고 Zig/Swift padding이나 pointer를 포함하지 않는다.
-- delta record는 `set_runs`, `clear_rect`, `scroll_rect`, `cursor`, `modes`, `image_place/remove`의 bounded operation list다.
-  metadata title/cwd/process/agent/notification은 screen delta에 섞지 않고 JSON `event` kind로 보낸다.
+  chunk_index/count로 청크), `prompt_marks(row_count, (kind:u8, has_exit, exit:i16)*)`(행별 OSC 133 semantic prompt —
+  거터 ✓/✗·prompt 네비 근거; dense positional full-replace라 snapshot·delta 공용, 마크 없으면 방출 생략)다. row run은
+  grapheme UTF-8, cell width/count와 태그드 Color intent(default/indexed/rgb)·style flags를 명시하고 Zig/Swift padding이나
+  pointer를 포함하지 않는다.
+- delta record는 `set_runs`, `clear_rect`, `scroll_rect`, `cursor`, `modes`, `image_place/remove`, `prompt_marks`(full-replace)의
+  bounded operation list다. metadata title/cwd/process/agent/notification은 screen delta에 섞지 않고 JSON `event` kind로 보낸다.
 - snapshot은 하나의 generation과 `sequence=0`, delta는 `base_generation`을 record body에 추가하고 sequence를 1씩 올린다.
   chunk index는 0부터 연속이고 마지막 MRSH frame의 `end_stream`과 declared count가 함께 맞아야 publish한다.
 - scrollback page는 같은 row record를 쓰되 scrollback generation과 half-open line range를 meta에 둔다. eviction 뒤 generation이
@@ -625,9 +632,9 @@ chunk_index:u32 | chunk_count:u32 | record_bytes...
 각 record struct 주석이 미러다):
 
 - record header는 **28바이트**다: `codec_version:u16=1 | record_kind:u16 | generation:u64 | sequence:u64 | chunk_index:u32 | chunk_count:u32`.
-- `record_kind`는 snapshot 대역 1~9(`screen_meta=1`, `row=2`, `image_placement=3`, `image_blob=4`)와 delta 대역 10~19
-  (`set_runs=10`, `clear_rect=11`, `scroll_rect=12`, `cursor=13`, `modes=14`, `image_place=15`, `image_remove=16`)로 나눈 open
-  enum이다(미래 record는 새 값 — decoder가 optional이면 skip, required면 reject).
+- `record_kind`는 snapshot 대역 1~9(`screen_meta=1`, `row=2`, `image_placement=3`, `image_blob=4`, `prompt_marks=5`)와 delta
+  대역 10~19(`set_runs=10`, `clear_rect=11`, `scroll_rect=12`, `cursor=13`, `modes=14`, `image_place=15`, `image_remove=16`)로
+  나눈 open enum이다(`prompt_marks`는 full-replace라 두 대역에서 공용; 미래 record는 새 값 — decoder가 optional이면 skip, required면 reject).
 - `run`은 `grapheme(u32 len + UTF-8) | width:u8 | count:u32 | fg:u32 | bg:u32 | underline_color:u32 | style_flags:u32`다. 색
   (fg/bg/underline_color)은 resolved RGB가 아니라 **태그드 Color intent**다(상위 바이트=태그 default/indexed/rgb, 하위 24비트=
   payload — `ColorTag`가 SSOT). host는 색을 굽지 않고 의도를 실어 **client가 자기 theme로 in-process와 동일하게 해석**한다(config
@@ -752,8 +759,8 @@ GUI가 `*LivePtySession`을 안 드는 컴파일 타임 red test, boundary check
   거부·unknown required 닫기·unknown optional skip)를 추가했다. 순수 OS-중립 codec(platform import 0)이라 non-macOS에서
   wire 회귀를 고정한다(`test-session-host`).
 - **P3-b(screen-stream codec) ✅**: `session_host/screen_stream.zig`에 §12 `maru.screen-stream.v1` codec을 구현했다 —
-  28-byte record header, snapshot record(screen_meta·row/run·image_placement·image_blob), delta record(set_runs·clear_rect·
-  scroll_rect·cursor·modes·image_place·image_remove) encode/decode와 `rowWidthMatches`(폭·continuation 검증)·UTF-8/truncation/
+  28-byte record header, snapshot record(screen_meta·row/run·image_placement·image_blob·prompt_marks), delta record(set_runs·
+  clear_rect·scroll_rect·cursor·modes·image_place·image_remove·prompt_marks) encode/decode와 `rowWidthMatches`(폭·continuation 검증)·UTF-8/truncation/
   cap 거부. 순수 codec이라 non-macOS에서 wire 회귀를 고정한다(`test-session-host`).
 - **P3-c(runtime registry) ✅**: `session_host/registry.zig`에 `TerminalRuntimeRegistry`와 controller/observer capability
   state machine(§9)을 구현했다 — runtime_id(u128) 소유표, attach(observer/controller/takeover)·detach·resize를 결정한다.

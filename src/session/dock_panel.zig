@@ -50,7 +50,8 @@ pub const Mode = enum(u32) {
     /// 덮어쓰므로 이 기본값과 독립이고, HTML은 실행 가능한 문서라 계속 read-only로 시작한다.
     pub fn defaultFor(kind: EntryKind) Mode {
         return switch (kind) {
-            .markdown => .live_preview,
+            // 라이브 프리뷰는 백로그(2026-07-22)라 markdown도 읽기로 시작한다. 라이브 재도입 시 .live_preview로 되돌린다.
+            .markdown => .read,
             .html, .image, .pdf => .read, // 격리 loadFileURL read 전용.
             .text => .source_edit,
             .svg => .read, // 이미지 미리보기가 먼저(VSCode SVG 프리뷰 관례).
@@ -59,7 +60,8 @@ pub const Mode = enum(u32) {
 
     pub fn allowedFor(self: Mode, kind: EntryKind) bool {
         return switch (kind) {
-            .markdown => true,
+            // markdown은 읽기|소스만(라이브 백로그). 저장된 live-preview entry는 복원 시 parseDockEntry가 defaultFor로 clamp한다.
+            .markdown => self == .read or self == .source_edit,
             .html, .image, .pdf => self == .read, // read 뷰 전용(편집·모드 없음).
             .text => self == .source_edit,
             .svg => self == .read or self == .source_edit, // 라이브 없음.
@@ -929,15 +931,15 @@ test "EntryKind/Mode policy: markdown, html, text (FP12 §2.2)" {
     try std.testing.expect(EntryKind.text.usesEditorBridge());
     try std.testing.expect(!EntryKind.html.usesEditorBridge());
 
-    // 기본 모드: markdown=라이브, html=읽기, text=소스.
-    try std.testing.expectEqual(Mode.live_preview, Mode.defaultFor(.markdown));
+    // 기본 모드: markdown=읽기(라이브 백로그), html=읽기, text=소스.
+    try std.testing.expectEqual(Mode.read, Mode.defaultFor(.markdown));
     try std.testing.expectEqual(Mode.read, Mode.defaultFor(.html));
     try std.testing.expectEqual(Mode.source_edit, Mode.defaultFor(.text));
     try std.testing.expectEqual(Mode.read, Mode.defaultFor(.image)); // FP14: read 뷰 전용.
     try std.testing.expectEqual(Mode.read, Mode.defaultFor(.pdf)); // FP15: read 뷰 전용.
 
-    // 허용 모드: markdown=전부, html=read만, text=source_edit만, image/pdf=read만(격리 loadFileURL).
-    try std.testing.expect(Mode.read.allowedFor(.markdown) and Mode.source_edit.allowedFor(.markdown) and Mode.live_preview.allowedFor(.markdown));
+    // 허용 모드: markdown=읽기|소스(라이브 백로그), html=read만, text=source_edit만, image/pdf=read만(격리 loadFileURL).
+    try std.testing.expect(Mode.read.allowedFor(.markdown) and Mode.source_edit.allowedFor(.markdown) and !Mode.live_preview.allowedFor(.markdown));
     try std.testing.expect(Mode.read.allowedFor(.html) and !Mode.source_edit.allowedFor(.html) and !Mode.live_preview.allowedFor(.html));
     try std.testing.expect(Mode.source_edit.allowedFor(.text) and !Mode.read.allowedFor(.text) and !Mode.live_preview.allowedFor(.text));
     inline for (.{ EntryKind.image, EntryKind.pdf }) |kind| {
@@ -1182,7 +1184,7 @@ test "dock panel: single group owns entries and reopening a path activates inste
     try std.testing.expectEqual(@as(usize, 0), (try panel.open(group, "/tmp/a.md", .markdown)).index);
     try std.testing.expectEqual(@as(?usize, 0), group.active);
     try std.testing.expectEqual(@as(usize, 2), group.entries.items.len);
-    try std.testing.expectEqual(Mode.live_preview, group.entries.items[0].mode);
+    try std.testing.expectEqual(Mode.read, group.entries.items[0].mode); // markdown=읽기(라이브 백로그)
     try std.testing.expectEqual(Mode.read, group.entries.items[1].mode);
 
     group.entries.items[0].mode = .source_edit;
@@ -1192,7 +1194,7 @@ test "dock panel: single group owns entries and reopening a path activates inste
 }
 
 test "dock panel mode defaults are kind-owned while restore preserves an explicit mode" {
-    try std.testing.expectEqual(Mode.live_preview, Mode.defaultFor(.markdown));
+    try std.testing.expectEqual(Mode.read, Mode.defaultFor(.markdown)); // 라이브 백로그
     try std.testing.expectEqual(Mode.read, Mode.defaultFor(.html));
 
     var entry_ids: EntryIdAllocator = .{};
@@ -1555,7 +1557,7 @@ test "dock mode policy keeps HTML read-only and both Markdown editors dirty-capa
     try std.testing.expectEqual(@as(u32, 1), @intFromEnum(Mode.source_edit));
     try std.testing.expectEqual(@as(u32, 2), @intFromEnum(Mode.live_preview));
     try std.testing.expect(Mode.read.allowedFor(.markdown));
-    try std.testing.expect(Mode.live_preview.allowedFor(.markdown));
+    try std.testing.expect(!Mode.live_preview.allowedFor(.markdown)); // 라이브 백로그
     try std.testing.expect(Mode.source_edit.allowedFor(.markdown));
     try std.testing.expect(Mode.read.allowedFor(.html));
     try std.testing.expect(!Mode.live_preview.allowedFor(.html));

@@ -660,7 +660,10 @@ fn parseDockEntry(encoded: []const u8) DockEntryParseError!dock_panel.PersistedE
         .pdf
     else
         return error.UnsupportedDockValue;
-    const mode = dock_panel.Mode.parseWorkspaceName(mode_raw) orelse return error.UnsupportedDockValue;
+    const parsed_mode = dock_panel.Mode.parseWorkspaceName(mode_raw) orelse return error.UnsupportedDockValue;
+    // kind에서 더 이상 허용하지 않는 모드(예: 라이브 프리뷰 백로그화 뒤 저장된 markdown live-preview)는 defaultFor로
+    // clamp해 복원을 거부하지 않고 조용히 마이그레이션한다(§2.2). 파싱 자체는 성공하므로 포맷 하위호환은 유지된다.
+    const mode = if (parsed_mode.allowedFor(kind)) parsed_mode else dock_panel.Mode.defaultFor(kind);
     const active = if (std.mem.eql(u8, active_raw, "0"))
         false
     else if (std.mem.eql(u8, active_raw, "1"))
@@ -1900,7 +1903,7 @@ test "workspace Explorer v137: streaming decoded cap and allocation failure degr
 
 test "workspace dock FP1: flat 반복 키가 path kind mode active를 왕복하고 트리 dirty는 쓰지 않는다" {
     const dock_entries = [_]dock_panel.PersistedEntry{
-        .{ .path = "/Users/me/a:b \"한글\".md", .kind = .markdown, .mode = .live_preview, .active = true },
+        .{ .path = "/Users/me/a:b \"한글\".md", .kind = .markdown, .mode = .source_edit, .active = true },
         .{ .path = "/Users/me/line\nname.html", .kind = .html, .mode = .read, .active = false },
     };
     const windows = [_]Window{.{
@@ -1927,7 +1930,7 @@ test "workspace dock FP1: flat 반복 키가 path kind mode active를 왕복하�
     try std.testing.expectEqual(@as(usize, 2), dock.entries.len);
     try std.testing.expectEqualStrings(dock_entries[0].path, dock.entries[0].path);
     try std.testing.expectEqual(dock_panel.EntryKind.markdown, dock.entries[0].kind);
-    try std.testing.expectEqual(dock_panel.Mode.live_preview, dock.entries[0].mode);
+    try std.testing.expectEqual(dock_panel.Mode.source_edit, dock.entries[0].mode);
     try std.testing.expect(dock.entries[0].active);
     try std.testing.expectEqualStrings(dock_entries[1].path, dock.entries[1].path);
     try std.testing.expect(!dock.entries[1].active);

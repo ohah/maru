@@ -1089,6 +1089,20 @@ test "parse: window.blur — 반경 파싱, 미설정 시 0(끔)" {
     try std.testing.expectEqual(@as(u32, 0), q.config.window_blur);
 }
 
+test "parse: session.keep-alive-after-quit — 영속 세션 opt-in, 미설정 시 false(현행 in-process)" {
+    // P3-e3: 영속 터미널 세션 게이트. true면 새 터미널을 host(maru-sessiond)에 생성한다(§10). 기본 false(현행 동작 유지).
+    var p = try parse(std.testing.allocator,
+        \\session.keep-alive-after-quit = true
+    );
+    defer p.deinit();
+    try std.testing.expect(p.config.session.keep_alive_after_quit);
+
+    // 미설정이면 기본 false(현행 in-process — GUI 종료 시 터미널도 종료).
+    var q = try parse(std.testing.allocator, "font.size = 14");
+    defer q.deinit();
+    try std.testing.expect(!q.config.session.keep_alive_after_quit);
+}
+
 test "theme.preset 영속: 한 줄이 16색 팔레트까지 복원 + 개별 override 제거로 충돌 없음 (팔레트 영속 리뷰)" {
     const a = std.testing.allocator;
     // 옛 스타일 파일: 개별 4색 + 팔레트 override 하나(이전 프리셋이 4색만 써둔 잔재 모사).

@@ -132,8 +132,9 @@ export function atomicRangeRetained(
 
 // atomic 위젯이 생성(toDOM)~렌더 완료(atomic-rendered)까지 허용하는 시한. 초과 시 onFailure→removeFailed로
 // 파기하고 다음 projection에서 재요청한다. 재사용 수정(isReusable) 덕에 위젯은 이 시한 동안 re-submit에도
-// 파기되지 않고 살아남아 부팅하므로, 값은 "느린 커스텀 스킴 IO에서 render.html+bundle.js 콜드 로드"를 덮으면 된다.
-const atomicRenderDeadlineMs = 2_000;
+// 파기되지 않고 살아남아 부팅한다. bundle.js가 이제 Cache-Control로 캐시돼(scheme handler) 첫 위젯만 콜드
+// 로드가 느리고 이후는 캐시 히트지만, 코드펜스가 많은 큰 문서에서 첫 로드가 여러 위젯과 겹칠 때 여유를 둔다.
+const atomicRenderDeadlineMs = 4_000;
 
 let nextWidgetId = 0;
 let nextWidgetGeneration = 0;

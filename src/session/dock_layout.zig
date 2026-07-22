@@ -99,24 +99,18 @@ pub const HeaderModeDescriptor = struct {
     label: []const u8,
 };
 
-/// ABI ordinal과 독립인 헤더 시각 순서와 label의 단일 출처. markdown은 `읽기|라이브|소스`, svg는 `읽기|소스`다(FP13).
-/// kind가 늘어나면 여기 모드 리스트만 더한다 — layout/render/hit-test는 `modesForKind`를 순회한다.
+/// ABI ordinal과 독립인 헤더 시각 순서와 label의 단일 출처. **라이브 프리뷰는 백로그(2026-07-22 사용자 결정)**라
+/// markdown·svg 모두 `읽기|소스`만 노출한다. 라이브 재도입 시 여기 `.live_preview`("라이브")를 다시 넣고 markdown을
+/// 별도 리스트로 분기한다. kind가 늘어나면 여기 모드 리스트만 더한다 — layout/render/hit-test는 `modesForKind`를 순회한다.
 pub const header_modes = [_]HeaderModeDescriptor{
-    .{ .mode = .read, .label = "읽기" },
-    .{ .mode = .live_preview, .label = "라이브" },
-    .{ .mode = .source_edit, .label = "소스" },
-};
-const svg_header_modes = [_]HeaderModeDescriptor{
     .{ .mode = .read, .label = "읽기" },
     .{ .mode = .source_edit, .label = "소스" },
 };
 
-/// 이 kind가 헤더에 노출하는 mode 선택지(순서=시각 순서). 빈 슬라이스면 mode 선택기가 없다(html·text).
+/// 이 kind가 헤더에 노출하는 mode 선택지(순서=시각 순서). 빈 슬라이스면 mode 선택기가 없다(html·text·image·pdf).
 pub fn modesForKind(kind: dock_panel.EntryKind) []const HeaderModeDescriptor {
     return switch (kind) {
-        .markdown => &header_modes,
-        .svg => &svg_header_modes,
-        // html·text·image·pdf는 헤더 mode 선택기가 없다(단일 모드).
+        .markdown, .svg => &header_modes,
         .html, .text, .image, .pdf => &.{},
     };
 }
@@ -572,25 +566,23 @@ test "dock header control rect is right-aligned and bounded on narrow docks" {
     try std.testing.expectEqual(g.header.x + g.header.w - 20, conflict.x);
     try std.testing.expectEqual(@as(u32, 10), conflict.w);
     try std.testing.expect(conflict.x >= control.x);
+    // markdown 헤더는 읽기|소스 2모드다(라이브 백로그).
     const read = headerModeRect(g, 10, .markdown, .read, false, false).?;
-    const live = headerModeRect(g, 10, .markdown, .live_preview, false, false).?;
     const edit = headerModeRect(g, 10, .markdown, .source_edit, false, false).?;
+    try std.testing.expectEqual(@as(?Rect, null), headerModeRect(g, 10, .markdown, .live_preview, false, false)); // 라이브 없음
     try std.testing.expectEqual(control.x, read.x);
-    try std.testing.expectEqual(read.x + read.w, live.x);
-    try std.testing.expectEqual(live.x + live.w, edit.x);
+    try std.testing.expectEqual(read.x + read.w, edit.x);
     try std.testing.expectEqual(control.x + control.w, edit.x + edit.w);
-    try std.testing.expectEqual(@as(?dock_panel.Mode, .live_preview), headerModeAt(g, 10, .markdown, false, false, @floatFromInt(live.x + 1), @floatFromInt(live.y + 1)));
+    try std.testing.expectEqual(@as(?dock_panel.Mode, .read), headerModeAt(g, 10, .markdown, false, false, @floatFromInt(read.x + 1), @floatFromInt(read.y + 1)));
     try std.testing.expectEqual(@as(?dock_panel.Mode, .source_edit), headerModeAt(g, 10, .markdown, false, false, @floatFromInt(edit.x + 1), @floatFromInt(edit.y + 1)));
     try std.testing.expectEqual(@as(?dock_panel.Mode, null), headerModeAt(g, 10, .html, false, false, @floatFromInt(edit.x + 1), @floatFromInt(edit.y + 1)));
 
     inline for (.{ false, true }) |dirty| inline for (.{ false, true }) |external| {
         const read_mode = headerModeRect(g, 10, .markdown, .read, dirty, external).?;
-        const live_mode = headerModeRect(g, 10, .markdown, .live_preview, dirty, external).?;
         const source = headerModeRect(g, 10, .markdown, .source_edit, dirty, external).?;
         const cells = headerCellLayout(@intCast(g.header.w / 10), dirty, external).?;
         try std.testing.expectEqual(g.header.x + @as(u32, cells.control_start) * 10, read_mode.x); // 첫 슬롯=control_start
-        try std.testing.expectEqual(read_mode.x + read_mode.w, live_mode.x); // 인접
-        try std.testing.expectEqual(live_mode.x + live_mode.w, source.x);
+        try std.testing.expectEqual(read_mode.x + read_mode.w, source.x); // 인접
         try std.testing.expectEqual(g.header.x + @as(u32, cells.mode_end) * 10, source.x + source.w); // 마지막=mode_end
         if (dirty) {
             const status = headerDirtyRect(g, 10, external).?;

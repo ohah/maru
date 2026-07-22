@@ -41658,7 +41658,7 @@ test "file tree keyboard focus preserves identity navigates scrolls and restores
 
     // 왕복 action은 dock surface에서 workspace로 돌아간다.
     try std.testing.expect(!session.anyOverlayOpen());
-    session.dock.entryForSurfaceId(sid).?.mode = .live_preview;
+    session.dock.entryForSurfaceId(sid).?.mode = .source_edit; // 라이브 백로그 → 편집은 소스 모드
     try std.testing.expectEqual(config_mod.keybinding.WebKeyRoute.web_editor, session.webKeyRoute(sid, .{ .key = .{ .char = 's' }, .modifiers = .{ .command = true } }));
     try std.testing.expectEqual(config_mod.keybinding.WebKeyRoute.app_action, session.webKeyRoute(sid, .{ .key = .{ .char = 'e' }, .modifiers = .{ .command = true, .shift = true } }));
     _ = try session.handleKeyEvent(.{ .key = .{ .char = 'e' }, .modifiers = .{ .command = true, .shift = true } });
@@ -51761,6 +51761,10 @@ test "FP6 file panel write atomically replaces only the pinned markdown and pres
     group.entries.items[1].surface_id = 902;
     _ = try session.dock.open(group, link_path, .markdown);
     group.entries.items[2].surface_id = 903;
+    // 라이브 백로그: product 기본은 읽기지만, markdown 편집·write·mermaid 게이트는 아직 코드에 있는 dormant live
+    // 경로로 검증한다(entry.mode 직접 세팅은 allowedFor를 우회 — 런타임 재검증은 복원 clamp뿐).
+    group.entries.items[0].mode = .live_preview;
+    group.entries.items[2].mode = .live_preview;
 
     const doc_epoch = try session.beginFilePanelDocument(901, 1);
     try std.testing.expect(session.filePanelMermaidDocumentActive(901, doc_epoch));
@@ -51838,7 +51842,7 @@ test "file panel document epoch rejects stale reload reports and latches dirty c
         .revision = 11,
     }));
     try session.reportFilePanelDirty(sid, .{ .dirty = true, .editor_epoch = second, .revision = 1 });
-    group.entries.items[0].mode = .live_preview;
+    group.entries.items[0].mode = .source_edit; // 라이브 백로그 → 편집은 소스 모드
     try std.testing.expect(group.entries.items[0].dirty);
 
     const third = try session.beginFilePanelDocument(sid, 3);
@@ -51863,6 +51867,7 @@ test "file panel first document pending is not recovery and begin is document-id
     _ = try session.dock.open(group, "/tmp/first-document.md", .markdown);
     session.assignDockSurfaceIds(&session.dock);
     const entry = &group.entries.items[0];
+    entry.mode = .source_edit; // 라이브 백로그: markdown 편집 경로는 소스 모드
     const sid = entry.surface_id;
 
     entry.dirty_sync_pending = true; // renderer/hydration 전의 정상 tab-leave intent
@@ -51887,6 +51892,7 @@ test "file panel editor epoch exhaustion fails closed before accepting a documen
     _ = try session.dock.open(group, "/tmp/exhausted-editor-epoch.md", .markdown);
     session.assignDockSurfaceIds(&session.dock);
     const entry = &group.entries.items[0];
+    entry.mode = .source_edit; // 라이브 백로그: markdown 편집/close 확인 경로는 소스 모드
     entry.editor_surface_id = entry.surface_id;
     entry.editor_epoch = maru.session.control_bridge.max_js_safe_integer;
     entry.disk_content_hash = 123;
@@ -51916,6 +51922,7 @@ test "file panel document begin changes pending close only for an accepted repla
     _ = try session.dock.open(group, "/tmp/begin-close-identity.md", .markdown);
     session.assignDockSurfaceIds(&session.dock);
     const entry = &group.entries.items[0];
+    entry.mode = .source_edit; // 라이브 백로그: markdown 편집/close 경로는 소스 모드
     const sid = entry.surface_id;
     const epoch = try session.beginFilePanelDocument(sid, 2);
 
@@ -51953,6 +51960,7 @@ test "file panel termination invalidates current document and latches unacked ed
     _ = try session.dock.open(group, "/tmp/terminated-document.md", .markdown);
     session.assignDockSurfaceIds(&session.dock);
     const entry = &group.entries.items[0];
+    entry.mode = .source_edit; // 라이브 백로그: markdown 편집 경로는 소스 모드
     const sid = entry.surface_id;
     const first = try session.beginFilePanelDocument(sid, 1);
 
@@ -52192,7 +52200,7 @@ test "FP6 file panel header toggles markdown mode and drains one action" {
     session.assignDockSurfaceIds(&session.dock);
     const entry = &group.entries.items[0];
     const surface_id = entry.surface_id;
-    try std.testing.expectEqual(dock_panel.Mode.live_preview, entry.mode);
+    try std.testing.expectEqual(dock_panel.Mode.read, entry.mode);
 
     const control = dock_layout.headerModeRect(session.dockGeometry(), session.cell_width_px, .markdown, .source_edit, false, false).?;
     session.mouse(
@@ -52591,26 +52599,30 @@ test "FP6 file panel live view LRU protects dirty entries and recreates with a f
 
     try std.testing.expectEqual(AppSession.FilePanelOpenPathResult.opened, session.openFilePanelPath(a));
     const group = session.dock.singleGroup().?;
+    group.entries.items[group.findPath(a).?].mode = .source_edit; // 라이브 백로그: 편집/dirty·snapshot 경로는 소스 모드
     const a_sid = group.entries.items[group.findPath(a).?].surface_id;
     try session.setFilePanelDirty(a_sid, true);
     try std.testing.expectEqual(AppSession.FilePanelOpenPathResult.opened, session.openFilePanelPath(b));
+    group.entries.items[group.findPath(b).?].mode = .source_edit;
     const b_sid = group.entries.items[group.findPath(b).?].surface_id;
     try std.testing.expectEqual(AppSession.FilePanelOpenPathResult.opened, session.openFilePanelPath(c));
-    // Markdown now starts in live mode. Leaving clean B therefore requests an exact editor snapshot before
-    // eviction; acknowledge that snapshot, then the existing non-dirty LRU policy may retire B.
+    // 편집(소스) 모드라 clean B를 떠날 때 eviction 전에 exact editor snapshot을 요청한다. 그 snapshot을 ack한 뒤
+    // 기존 non-dirty LRU 정책이 B를 회수할 수 있다.
     try std.testing.expectEqual(b_sid, session.takeFilePanelDirtySyncAction().?);
     try session.setFilePanelDirty(b_sid, false);
     session.enforceFilePanelLiveViewLimit();
     try std.testing.expectEqual(a_sid, group.entries.items[group.findPath(a).?].surface_id); // dirty 보호
     try std.testing.expectEqual(@as(u64, 0), group.entries.items[group.findPath(b).?].surface_id); // non-dirty LRU
+    group.entries.items[group.findPath(c).?].mode = .source_edit; // 편집 경로(snapshot-on-leave)
     const c_sid = group.entries.items[group.findPath(c).?].surface_id;
     try std.testing.expect(c_sid != 0);
 
     try std.testing.expectEqual(AppSession.FilePanelOpenPathResult.opened, session.openFilePanelPath(b));
+    group.entries.items[group.findPath(b).?].mode = .source_edit; // 재생성 B도 편집 모드
     const recreated = group.entries.items[group.findPath(b).?].surface_id;
     try std.testing.expect(recreated != 0 and recreated != b_sid); // 앱 전역 id 비재사용
     try std.testing.expectEqual(a_sid, group.entries.items[group.findPath(a).?].surface_id); // 재선택 뒤에도 dirty 보호
-    // B를 다시 열며 떠난 C도 live snapshot을 요구한다. 실제 adapter처럼 ack하고 LRU를 다시 적용한다.
+    // B를 다시 열며 떠난 C도 편집 모드라 snapshot을 요구한다. 실제 adapter처럼 ack하고 LRU를 다시 적용한다.
     try std.testing.expectEqual(c_sid, session.takeFilePanelDirtySyncAction().?);
     try session.setFilePanelDirty(c_sid, false);
     session.enforceFilePanelLiveViewLimit();

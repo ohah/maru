@@ -91,6 +91,7 @@ pub fn projectSnapshot(allocator: std.mem.Allocator, core: *terminal.TerminalCor
     // (렌더러가 image_id/generation으로 GPU 텍스처 캐시). delta에서의 이미지 dedup/방출은 후속(I4) — 지금은 full snapshot만 싣는다.
     for (snap.images) |img| try appendImageBlobRecords(allocator, &stream, opts.generation, img);
     for (snap.placements) |p| try appendImagePlacementRecord(allocator, &stream, opts.generation, p);
+    try appendPromptMarks(allocator, &stream, opts.generation, snap, true); // OSC 133 prompt 마크(있을 때만).
     return stream.toOwnedSlice(allocator) catch return error.OutOfMemory;
 }
 
@@ -177,6 +178,50 @@ fn appendImagePlacementRecord(allocator: std.mem.Allocator, stream: *std.ArrayLi
     });
     defer allocator.free(rec);
     try screen_stream.appendRecord(stream, allocator, rec);
+}
+
+/// 행별 OSC 133 semantic prompt(분류+종료코드)를 prompt_marks record로 방출한다(#1 이후 prompt_marks 패리티). `skip_if_none`이면
+/// 마크가 전혀 없을 때(전 행 unknown+exit null) 생략한다 — snapshot은 common case 무비용, delta는 clear 전달 위해 skip_if_none=false.
+/// dense(행당 1개, positional)라 full-replace다. renderSnapshot이 뷰포트 상대 prompt_marks(길이=rows)를 이미 줬다.
+fn appendPromptMarks(allocator: std.mem.Allocator, stream: *std.ArrayListUnmanaged(u8), generation: u64, snap: terminal.RenderSnapshot, skip_if_none: bool) screen_stream.DecodeError!void {
+    if (snap.prompt_marks.len == 0) return; // core는 항상 length-rows지만 방어.
+    if (skip_if_none) {
+        var any = false;
+        for (snap.prompt_marks) |m| {
+            if (m.kind != .unknown or m.exit != null) {
+                any = true;
+                break;
+            }
+        }
+        if (!any) return;
+    }
+    const rows = allocator.alloc(screen_stream.RowPromptWire, snap.prompt_marks.len) catch return error.OutOfMemory;
+    defer allocator.free(rows);
+    for (snap.prompt_marks, 0..) |m, i| rows[i] = .{ .kind = @intFromEnum(m.kind), .exit = m.exit };
+    const rec = try screen_stream.encodePromptMarks(allocator, .{ .kind = .prompt_marks, .generation = generation }, .{ .rows = rows });
+    defer allocator.free(rec);
+    try screen_stream.appendRecord(stream, allocator, rec);
+}
+
+/// 이전 prompt_marks(wire)와 현재(core)가 다른가 — 둘 다 마크 없음이면 같음. delta 방출 여부 판정.
+fn promptMarksChanged(prev: ?screen_stream.PromptMarks, cur: []const terminal.RowPrompt) bool {
+    const prev_rows: []const screen_stream.RowPromptWire = if (prev) |p| p.rows else &.{};
+    var cur_any = false;
+    for (cur) |m| if (m.kind != .unknown or m.exit != null) {
+        cur_any = true;
+        break;
+    };
+    var prev_any = false;
+    for (prev_rows) |m| if (m.kind != 0 or m.exit != null) {
+        prev_any = true;
+        break;
+    };
+    if (!cur_any and !prev_any) return false; // 둘 다 마크 없음.
+    if (cur.len != prev_rows.len) return true;
+    for (cur, prev_rows) |c, p| {
+        if (@intFromEnum(c.kind) != p.kind or c.exit != p.exit) return true;
+    }
+    return false;
 }
 
 /// core의 개별 mode 필드를 §9 mode bitmask로 조립한다.
@@ -339,6 +384,8 @@ pub fn computeDelta(allocator: std.mem.Allocator, prev_bytes: []const u8, core: 
     defer prev_placements.deinit(allocator);
     var prev_image_gens: std.AutoHashMapUnmanaged(u32, u64) = .{};
     defer prev_image_gens.deinit(allocator);
+    var prev_pm: ?screen_stream.PromptMarks = null;
+    defer if (prev_pm) |p| p.deinit(allocator);
     while (try rs.next()) |rec| {
         const s = try screen_stream.RecordStream.split(rec);
         switch (s.header.kind) {
@@ -355,6 +402,10 @@ pub fn computeDelta(allocator: std.mem.Allocator, prev_bytes: []const u8, core: 
             .image_blob => {
                 const blob = try screen_stream.decodeImageBlob(s.body);
                 prev_image_gens.put(allocator, blob.image_id, blob.generation) catch return error.OutOfMemory;
+            },
+            .prompt_marks => {
+                if (prev_pm) |p| p.deinit(allocator); // 중복 방어.
+                prev_pm = try screen_stream.decodePromptMarks(allocator, s.body);
             },
             else => {},
         }
@@ -415,6 +466,11 @@ pub fn computeDelta(allocator: std.mem.Allocator, prev_bytes: []const u8, core: 
     }
     if (placementsChanged(prev_placements.items, snap.placements)) {
         try appendImagePlaceDelta(allocator, &delta, opts.generation, snap.placements);
+    }
+    // prompt_marks: snapshot(base)엔 있을 때만, delta엔 바뀌었을 때만(clear 전달 위해 skip_if_none=false로 full-replace).
+    try appendPromptMarks(allocator, &snapshot, opts.generation, snap, true);
+    if (promptMarksChanged(prev_pm, snap.prompt_marks)) {
+        try appendPromptMarks(allocator, &delta, opts.generation, snap, false);
     }
 
     // 커서/모드 변화 → delta.
@@ -837,4 +893,24 @@ test "screen snapshot: computeDelta emits image_blob + image_place when an image
         if (s.header.kind == .image_blob) blob_again = true;
     }
     try testing.expect(!blob_again); // 변화 없으니 blob 재송 안 함.
+}
+
+test "screen snapshot: computeDelta emits prompt_marks when an OSC 133 mark appears" {
+    const allocator = testing.allocator;
+    var core = try terminal.TerminalCore.init(allocator, .{ .cols = 10, .rows = 3 });
+    defer core.deinit();
+    const base = try projectSnapshot(allocator, &core, .{ .generation = 1 }); // 마크 없음.
+    defer allocator.free(base);
+
+    try core.write("\x1b]133;A\x1b\\$ "); // OSC 133 A: prompt 마크 생성.
+    const result = try computeDelta(allocator, base, &core, .{ .generation = 1 });
+    defer result.deinit(allocator);
+
+    var found = false;
+    var rs = screen_stream.RecordStream{ .bytes = result.delta };
+    while (try rs.next()) |rec| {
+        const s = try screen_stream.RecordStream.split(rec);
+        if (s.header.kind == .prompt_marks) found = true;
+    }
+    try testing.expect(found); // 마크가 생겼으니 delta에 prompt_marks record가 실린다.
 }

@@ -32,6 +32,8 @@ pub const CellGrid = struct {
     // 읽으므로(RemoteScreen), 빌린 픽셀은 격자 수명 동안 유효하다(조립기가 mutex 밖에서 안 바뀜).
     placements: []terminal.KittyPlacement = &.{},
     images: []terminal.KittyImageView = &.{},
+    // 행별 OSC 133 prompt 마크(dense; 마크 없으면 empty). 이 격자가 소유(조립기 wire → terminal 타입 값 복사).
+    prompt_marks: []terminal.RowPrompt = &.{},
 
     pub fn deinit(self: *CellGrid) void {
         self.allocator.free(self.cells);
@@ -39,6 +41,7 @@ pub const CellGrid = struct {
         self.graphemes.deinit(self.allocator);
         if (self.placements.len != 0) self.allocator.free(self.placements);
         if (self.images.len != 0) self.allocator.free(self.images); // 배열만 — 픽셀은 조립기 소유.
+        if (self.prompt_marks.len != 0) self.allocator.free(self.prompt_marks);
         self.* = undefined;
     }
 
@@ -53,9 +56,10 @@ pub const CellGrid = struct {
             .cells = self.cells,
             .graphemes = self.graphemes.items,
             // 이미지(#1 I4): placement + view(픽셀은 조립기 빌림)를 노출한다 — 렌더러 buildGpuImages가 image_id/generation으로
-            // GPU 텍스처를 캐시해 in-process와 동일하게 그린다. prompt_marks/dirty는 아직 원격 wire에 없다(후속) — 기본값.
+            // GPU 텍스처를 캐시해 in-process와 동일하게 그린다. dirty는 아직 원격 wire에 없다(후속) — 기본값.
             .placements = self.placements,
             .images = self.images,
+            .prompt_marks = self.prompt_marks, // OSC 133 거터(✓/✗)·prompt 네비 입력.
         };
     }
 };
@@ -160,6 +164,18 @@ pub fn build(allocator: std.mem.Allocator, asm_: *const screen_assembler.ScreenA
     }
     const images_slice = images.toOwnedSlice(allocator) catch return error.OutOfMemory;
 
+    // prompt_marks: 조립기의 wire(RowPromptWire)를 core terminal.RowPrompt로 1:1 환산(kind u8→SemanticPrompt, 손상 방어로 clamp).
+    const src_pm = asm_.promptMarks();
+    const prompt_marks: []terminal.RowPrompt = if (src_pm.len == 0) &.{} else pm: {
+        const arr = try allocator.alloc(terminal.RowPrompt, src_pm.len);
+        for (src_pm, 0..) |w, i| arr[i] = .{
+            .kind = if (w.kind <= 3) @enumFromInt(w.kind) else .unknown,
+            .exit = w.exit,
+        };
+        break :pm arr;
+    };
+    errdefer if (prompt_marks.len != 0) allocator.free(prompt_marks);
+
     return .{
         .allocator = allocator,
         .cells = cells,
@@ -169,6 +185,7 @@ pub fn build(allocator: std.mem.Allocator, asm_: *const screen_assembler.ScreenA
         .cursor_shape = if (asm_.cursor.shape <= 2) @enumFromInt(asm_.cursor.shape) else .block, // 0=block/1=underline/2=bar.
         .placements = placements,
         .images = images_slice,
+        .prompt_marks = prompt_marks,
     };
 }
 
@@ -474,8 +491,8 @@ test "remote screen: build exposes kitty images + placements from the assembler 
 /// 노출)을 잊지 않게 한다. 색·이미지가 조용히 유실됐던 재발을 막는 안전망이다.
 fn expectSnapshotParity(local: terminal.RenderSnapshot, remote: terminal.RenderSnapshot) !void {
     // ── comptime 필드 커버리지: RenderSnapshot 새 필드는 반드시 아래 둘 중 하나로 분류돼야 한다 ──
-    const compared = [_][]const u8{ "size", "cursor", "cursor_shape", "cells", "graphemes", "placements", "images" };
-    const dropped = [_][]const u8{ "cursor_blink", "prompt_marks", "last_command_exit", "dirty" };
+    const compared = [_][]const u8{ "size", "cursor", "cursor_shape", "cells", "graphemes", "placements", "images", "prompt_marks" };
+    const dropped = [_][]const u8{ "cursor_blink", "last_command_exit", "dirty" };
     comptime {
         for (@typeInfo(terminal.RenderSnapshot).@"struct".fields) |f| {
             var classified = false;
@@ -539,6 +556,14 @@ fn expectSnapshotParity(local: terminal.RenderSnapshot, remote: terminal.RenderS
         }
         try testing.expect(have);
     }
+    // prompt_marks(OSC 133): local은 항상 length-rows(core), remote는 마크 없으면 empty이므로 행별 의미로 대조(범위 밖=default).
+    var pr: u16 = 0;
+    while (pr < local.size.rows) : (pr += 1) {
+        const lm: terminal.RowPrompt = if (pr < local.prompt_marks.len) local.prompt_marks[pr] else .{};
+        const rm: terminal.RowPrompt = if (pr < remote.prompt_marks.len) remote.prompt_marks[pr] else .{};
+        try testing.expectEqual(lm.kind, rm.kind);
+        try testing.expectEqual(lm.exit, rm.exit);
+    }
 }
 
 test "remote screen: full RenderSnapshot parity with in-process (styles, colors, wide, grapheme, cursor shape, image)" {
@@ -555,6 +580,7 @@ test "remote screen: full RenderSnapshot parity with in-process (styles, colors,
     try core.write("한"); // wide CJK(width 2 + continuation)
     try core.write("e\u{0301}"); // grapheme cluster(e + combining acute)
     try core.write("\x1b[4 q"); // DECSCUSR: underline 커서 모양
+    try core.write("\r\n\x1b]133;A\x1b\\$ x"); // OSC 133 A: 다음 행을 prompt로 마킹 — prompt_marks 축을 실제로 태운다.
 
     // kitty 이미지 transmit+display(2x2 RGBA, i=1).
     var raw = [_]u8{ 0x10, 0x20, 0x30, 0x40, 0x50, 0x60, 0x70, 0x80, 0x90, 0xA0, 0xB0, 0xC0, 0xD0, 0xE0, 0xF0, 0x11 };
@@ -574,5 +600,11 @@ test "remote screen: full RenderSnapshot parity with in-process (styles, colors,
 
     // in-process 기준 화면(뷰포트 인지 — projectSnapshot과 같은 소스)과 렌더 관점 동등성 단언.
     const local = core.renderSnapshot();
+    // fixture가 실제로 prompt 마크를 만들었는지(=prompt_marks 경로를 태우는지) 보장 — 안 그러면 all-default parity로 헛통과.
+    var has_mark = false;
+    for (local.prompt_marks) |m| if (m.kind != .unknown) {
+        has_mark = true;
+    };
+    try testing.expect(has_mark);
     try expectSnapshotParity(local, grid.renderSnapshot());
 }

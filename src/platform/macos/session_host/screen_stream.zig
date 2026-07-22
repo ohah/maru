@@ -33,6 +33,7 @@ pub const RecordKind = enum(u16) {
     row = 2,
     image_placement = 3,
     image_blob = 4,
+    prompt_marks = 5, // OSC 133 행별 semantic prompt(분류+종료코드). full-replace라 snapshot·delta 공용.
     // delta records (증분 변경)
     set_runs = 10,
     clear_rect = 11,
@@ -45,7 +46,7 @@ pub const RecordKind = enum(u16) {
 
     pub fn isKnown(self: RecordKind) bool {
         return switch (self) {
-            .screen_meta, .row, .image_placement, .image_blob, .set_runs, .clear_rect, .scroll_rect, .cursor, .modes, .image_place, .image_remove => true,
+            .screen_meta, .row, .image_placement, .image_blob, .prompt_marks, .set_runs, .clear_rect, .scroll_rect, .cursor, .modes, .image_place, .image_remove => true,
             _ => false,
         };
     }
@@ -168,6 +169,23 @@ pub const ImageBlob = struct {
     height: u32,
     bpp: u8,
     pixels: []const u8,
+};
+
+/// 한 행의 OSC 133 semantic prompt(분류 + 그 프롬프트의 명령 종료코드). `terminal.RowPrompt`의 wire 대응이다 — 순수 codec은
+/// terminal을 모르므로 `kind`를 u8(SemanticPrompt @intFromEnum)로, `exit`를 `?i16`로 든다. client(remote_screen)가 core 타입으로 환산.
+pub const RowPromptWire = struct {
+    kind: u8 = 0, // 0=unknown
+    exit: ?i16 = null,
+};
+
+/// 화면 전체의 행별 prompt 마크(dense — 행당 하나, positional). full-replace라 record 하나가 현재 전체를 싣는다(마크가 전혀
+/// 없으면 producer가 방출을 생략해 common case 무비용). wire: row_count:u16 | (kind:u8 | has_exit:u8 | exit:u16(bitcast i16))*.
+pub const PromptMarks = struct {
+    rows: []RowPromptWire,
+
+    pub fn deinit(self: PromptMarks, allocator: std.mem.Allocator) void {
+        allocator.free(self.rows);
+    }
 };
 
 /// 28-byte record header. body는 record_kind에 따라 이 뒤에 이어진다.
@@ -533,6 +551,33 @@ pub fn decodeImageBlob(body: []const u8) DecodeError!ImageBlob {
     };
 }
 
+pub fn encodePromptMarks(allocator: std.mem.Allocator, header: RecordHeader, pm: PromptMarks) DecodeError![]u8 {
+    var body: std.ArrayListUnmanaged(u8) = .empty;
+    defer body.deinit(allocator);
+    const w = BodyWriter{ .buf = &body, .allocator = allocator };
+    try w.u16v(@intCast(pm.rows.len));
+    for (pm.rows) |r| {
+        try w.u8v(r.kind);
+        try w.u8v(if (r.exit != null) 1 else 0);
+        try w.u16v(@bitCast(r.exit orelse 0)); // i16→u16 bitcast(has_exit=0이면 값 무의미).
+    }
+    return finishRecord(allocator, .{ .kind = .prompt_marks, .generation = header.generation, .sequence = header.sequence, .chunk_index = header.chunk_index, .chunk_count = header.chunk_count }, body.items);
+}
+
+pub fn decodePromptMarks(allocator: std.mem.Allocator, body: []const u8) DecodeError!PromptMarks {
+    var r = BodyReader{ .bytes = body };
+    const count = try r.u16v();
+    const rows = allocator.alloc(RowPromptWire, count) catch return error.OutOfMemory;
+    errdefer allocator.free(rows);
+    for (rows) |*row| {
+        const kind = try r.u8v();
+        const has_exit = try r.u8v();
+        const exit_raw: i16 = @bitCast(try r.u16v());
+        row.* = .{ .kind = kind, .exit = if (has_exit != 0) exit_raw else null };
+    }
+    return .{ .rows = rows };
+}
+
 // ── delta record encode/decode ───────────────────────────────────────────────
 
 /// set_runs: 한 행의 특정 컬럼부터 run들을 덮어쓴다. wire: base_generation:u64 | row_index:u16 | start_col:u16 | run_count:u32 | run*.
@@ -845,6 +890,25 @@ test "screen-stream: image_blob round-trips decoded pixels + chunk header, rejec
         .bpp = 4,
         .pixels = big,
     }));
+}
+
+test "screen-stream: prompt_marks round-trips dense per-row semantic + exit code" {
+    const allocator = testing.allocator;
+    var rows = [_]RowPromptWire{
+        .{ .kind = 1, .exit = null }, // prompt(A~B)
+        .{ .kind = 3, .exit = -2 }, // command, 종료코드 -2(음수도 왕복)
+        .{ .kind = 0, .exit = null }, // unknown
+    };
+    const rec = try encodePromptMarks(allocator, .{ .kind = .prompt_marks, .generation = 4 }, .{ .rows = &rows });
+    defer allocator.free(rec);
+    const pm = try decodePromptMarks(allocator, rec[record_header_size..]);
+    defer pm.deinit(allocator);
+    try testing.expectEqual(@as(usize, 3), pm.rows.len);
+    try testing.expectEqual(@as(u8, 1), pm.rows[0].kind);
+    try testing.expectEqual(@as(?i16, null), pm.rows[0].exit);
+    try testing.expectEqual(@as(u8, 3), pm.rows[1].kind);
+    try testing.expectEqual(@as(?i16, -2), pm.rows[1].exit);
+    try testing.expectEqual(@as(?i16, null), pm.rows[2].exit);
 }
 
 test "screen-stream: run count cap rejects a corrupt declared count before allocating" {

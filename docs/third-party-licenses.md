@@ -48,6 +48,8 @@ FP4부터 `web/dist/bundle.js`가 앱 `Resources/web/`에 포함된다. 직접 �
 
 FP12(text kind 소스 편집기, docs/file-panel.md §2.2)는 CodeMirror 6 언어 패키지를 추가한다: `@codemirror/lang-json@6.0.2`, `@codemirror/lang-python@6.2.1`, `@codemirror/lang-xml@6.1.0`, `@codemirror/lang-yaml@6.1.3`(신규)와 이미 transitive로 있던 `@codemirror/lang-javascript@6.2.5`·`@codemirror/lang-css@6.3.1`(직접 선언). 후속(VSCode식 확장·들여쓰기)으로 `@codemirror/legacy-modes@6.5.3`(toml·shell·rust·go·c/c++ 등 StreamLanguage)와 `@codemirror/autocomplete@6.20.3`(closeBrackets)을 더한다. 모두 MIT이며 각 Lezer 문법(`@lezer/json`·`@lezer/python`·`@lezer/xml`·`@lezer/yaml` 등)도 MIT다. `web:licenses` 감사가 전체 lock 그래프 SPDX를 allowlist로 검증하고 exact 버전은 위 SSOT를 따른다.
 
+FP14(image 뷰어, docs/file-panel.md §2.2)는 이미지 팬/줌용 `panzoom@9.4.4`(anvaka, MIT)를 직접 런타임 의존성으로 추가한다. transitive로 `amator`·`ngraph.events`·`wheel`·`bezier-easing`(모두 MIT)을 끌어온다. render iframe `<img>`의 CSSOM transform만 조작하는 순수 라이브러리라 eval·외부 요청·`<style>` 주입이 없어 strict render CSP와 정합한다. exact 버전은 `web/package.json`·`bun.lock`이 SSOT이고 `web:licenses`가 전문·SPDX를 검증한다.
+
 - walker는 root `dependencies`에서 시작해 production dependency/optionalDependency만 Node resolution 규칙으로 추적하고 devDependencies(`@zntc/core`, Oxc, Bun types, jsdom)는 제외한다.
 - 새 runtime package의 manifest·license 판정·전문이 없으면 build가 실패한다. npm workspace 배포본에 전문이 없는 `rehype-katex@7.0.1`·`remark-math@6.0.0`은 해당 remark-math 릴리스의 MIT 전문을 `web/licenses/remark-math-MIT.txt`에 고정한 exact-version fallback만 사용한다.
 - `web:licenses`는 설치된 전체 lock graph의 SPDX allowlist를 별도로 감사하고 GPL/LGPL/AGPL 계열을 허용하지 않는다. runtime notice test는 production 포함/dev 제외와 전문 누락 fail-closed를 고정한다.

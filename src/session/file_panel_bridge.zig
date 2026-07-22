@@ -307,7 +307,9 @@ pub fn normalizeAssetPath(raw: []const u8, out: []u8) PathError![]const u8 {
     return out[0..written];
 }
 
-/// data URL을 만들 때 쓰는 보수적 MIME. 알 수 없는 확장자는 실행되지 않는 octet-stream으로 내린다.
+/// data URL을 만들 때 쓰는 보수적 MIME. 알 수 없는 확장자는 실행되지 않는 octet-stream으로 내린다. FP14
+/// readSelfImage가 image kind 전 확장자(imageExtension)를 커버해야 `<img>`가 렌더하므로 bmp/ico/tiff/heic/heif도 매핑한다
+/// (WebKit `<img>`는 이들을 지원). octet-stream이면 `<img>`가 그림을 못 그린다.
 pub fn mimeForPath(path: []const u8) []const u8 {
     const ext = std.fs.path.extension(path);
     if (std.ascii.eqlIgnoreCase(ext, ".png")) return "image/png";
@@ -316,6 +318,11 @@ pub fn mimeForPath(path: []const u8) []const u8 {
     if (std.ascii.eqlIgnoreCase(ext, ".webp")) return "image/webp";
     if (std.ascii.eqlIgnoreCase(ext, ".avif")) return "image/avif";
     if (std.ascii.eqlIgnoreCase(ext, ".svg")) return "image/svg+xml";
+    if (std.ascii.eqlIgnoreCase(ext, ".bmp")) return "image/bmp";
+    if (std.ascii.eqlIgnoreCase(ext, ".ico")) return "image/x-icon";
+    if (std.ascii.eqlIgnoreCase(ext, ".tif") or std.ascii.eqlIgnoreCase(ext, ".tiff")) return "image/tiff";
+    if (std.ascii.eqlIgnoreCase(ext, ".heic")) return "image/heic";
+    if (std.ascii.eqlIgnoreCase(ext, ".heif")) return "image/heif";
     return "application/octet-stream";
 }
 
@@ -348,7 +355,27 @@ test "mimeForPath: known image extensions and inert fallback" {
     try testing.expectEqualStrings("image/png", mimeForPath("a.PNG"));
     try testing.expectEqualStrings("image/jpeg", mimeForPath("a.jpeg"));
     try testing.expectEqualStrings("image/svg+xml", mimeForPath("a.svg"));
+    try testing.expectEqualStrings("image/bmp", mimeForPath("a.BMP"));
+    try testing.expectEqualStrings("image/x-icon", mimeForPath("a.ico"));
+    try testing.expectEqualStrings("image/tiff", mimeForPath("a.tiff"));
+    try testing.expectEqualStrings("image/tiff", mimeForPath("a.TIF"));
+    try testing.expectEqualStrings("image/heic", mimeForPath("a.heic"));
+    try testing.expectEqualStrings("image/heif", mimeForPath("a.heif"));
     try testing.expectEqualStrings("application/octet-stream", mimeForPath("a.html"));
+}
+
+test "mimeForPath: every image kind extension resolves to a renderable image mime (FP14)" {
+    // FP14 readSelfImage가 image kind 파일을 `<img>` 데이터 URL로 표시하므로, imageExtension이 참인 확장자는
+    // 반드시 octet-stream이 아닌 image/* mime을 가져야 한다(octet-stream이면 `<img>`가 그림을 못 그린다).
+    const exts = [_][]const u8{ ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".ico", ".webp", ".avif", ".heic", ".heif", ".tif", ".tiff" };
+    for (exts) |ext| {
+        try testing.expect(imageExtension(ext));
+        var buf: [16]u8 = undefined;
+        const path = try std.fmt.bufPrint(&buf, "a{s}", .{ext});
+        const mime = mimeForPath(path);
+        try testing.expect(std.mem.startsWith(u8, mime, "image/"));
+        try testing.expect(!std.mem.eql(u8, mime, "application/octet-stream"));
+    }
 }
 
 test "openKindForPath: md, html, binary-blocked, everything-else-is-text (VSCode 정책)" {

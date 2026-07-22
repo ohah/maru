@@ -16,6 +16,9 @@ pub const Leaf = struct {
     content: Rect,
     entry_count: usize,
     tab_width_px: u32,
+    /// 탭 바 가로 스크롤 오프셋(px). 탭은 고정폭이라 넘치면 scroll_px만큼 좌측으로 밀린다. boundary/marker가
+    /// 화면 좌표를 절대 컬럼으로 환산할 때 더한다(스크롤 0이면 기존과 동일).
+    scroll_px: u32 = 0,
 };
 
 pub const Target = struct {
@@ -53,11 +56,12 @@ pub const Session = struct {
 };
 
 /// 보이는 탭들의 source-remove 전 boundary(0...N). 탭 가운데를 기준으로 앞/뒤에 삽입하며 탭이 없는
-/// 그룹이나 탭 뒤 빈 바는 마지막 boundary를 반환한다.
+/// 그룹이나 탭 뒤 빈 바는 마지막 boundary를 반환한다. 스크롤된 바에서는 화면 좌표에 scroll_px를 더해
+/// 절대 컬럼으로 환산한다(좌측으로 스크롤아웃된 탭도 boundary에 반영).
 pub fn tabBoundary(leaf: Leaf, x: f64) usize {
     if (leaf.entry_count == 0 or leaf.tab_width_px == 0) return 0;
-    if (x <= @as(f64, @floatFromInt(leaf.tab_bar.x))) return 0;
-    const local = x - @as(f64, @floatFromInt(leaf.tab_bar.x));
+    const screen_local = @max(x - @as(f64, @floatFromInt(leaf.tab_bar.x)), 0);
+    const local = screen_local + @as(f64, @floatFromInt(leaf.scroll_px)); // 화면 → 절대 컬럼
     const width: f64 = @floatFromInt(leaf.tab_width_px);
     const raw: usize = @intFromFloat(@min(local / width, @as(f64, @floatFromInt(leaf.entry_count))));
     if (raw >= leaf.entry_count) return leaf.entry_count;
@@ -106,7 +110,13 @@ pub fn targetAtCounted(leaves: []const Leaf, x: f64, y: f64, counters: ?*ScanCou
         if (counters) |stats| stats.leaf_visits += 1;
         if (pointInRect(x, y, leaf.tab_bar)) {
             const boundary = tabBoundary(leaf, x);
-            const marker_x = leaf.tab_bar.x + @as(u32, @intCast(@min(boundary, leaf.entry_count))) * leaf.tab_width_px;
+            // 절대 marker(boundary*width) - scroll_px = 화면 marker. 스크롤아웃돼 음수면 바 좌단, 넘치면 우단으로 clamp.
+            const abs_marker = @as(u32, @intCast(@min(boundary, leaf.entry_count))) * leaf.tab_width_px;
+            const marker_x = std.math.clamp(
+                leaf.tab_bar.x + abs_marker -| leaf.scroll_px,
+                leaf.tab_bar.x,
+                leaf.tab_bar.x + leaf.tab_bar.w,
+            );
             return .{
                 .group_id = leaf.group_id,
                 .drop = .{ .tab_bar = boundary },
@@ -179,6 +189,21 @@ test "dock drag: threshold and tab boundaries are deterministic" {
     const s = Session{ .entry_id = 1, .source_group_id = 7, .down_x = 10, .down_y = 10, .pointer_x = 10, .pointer_y = 10, .snapshot_id = 1, .layout_generation = 1, .geometry_fingerprint = 0 };
     try std.testing.expect(!s.movedPastThreshold(13, 12));
     try std.testing.expect(s.movedPastThreshold(14, 10));
+}
+
+test "dock drag: scrolled tab bar maps screen x to absolute boundary and places marker on-screen" {
+    // 탭 5개 × 100px = 500px가 300px 바를 넘침. scroll_px=150(1.5탭)만큼 좌측으로 밀린 상태.
+    const leaf = Leaf{ .group_id = 3, .rect = .{ .x = 100, .y = 0, .w = 300, .h = 300 }, .tab_bar = .{ .x = 100, .y = 0, .w = 300, .h = 20 }, .content = .{ .x = 100, .y = 40, .w = 300, .h = 260 }, .entry_count = 5, .tab_width_px = 100, .scroll_px = 150 };
+    // 화면 좌단(x=100) → 절대 local 150 → 탭1 중점 → boundary 2(스크롤 없으면 0이었을 것).
+    try std.testing.expectEqual(@as(usize, 2), tabBoundary(leaf, 100));
+    // 화면 x=250 → 절대 local 300 → 탭3 시작 경계 → boundary 3.
+    const t = targetAt(&.{leaf}, 250, 10).?;
+    try std.testing.expectEqual(dock_panel.DockDropTarget{ .tab_bar = 3 }, t.drop);
+    // 절대 marker(boundary 3 → 300px) - scroll 150 = 화면 250px(바 안). preview_rect.x = 250 -| 1.
+    try std.testing.expectEqual(@as(u32, 249), t.preview_rect.x);
+    // scroll_px=0(기존 경로)은 절대=화면이라 회귀 없음: 좌단이 boundary 0.
+    const unscrolled = Leaf{ .group_id = 3, .rect = leaf.rect, .tab_bar = leaf.tab_bar, .content = leaf.content, .entry_count = 5, .tab_width_px = 100 };
+    try std.testing.expectEqual(@as(usize, 0), tabBoundary(unscrolled, 100));
 }
 
 test "dock drag: X zones, corners, center tie, and cross-domain null" {

@@ -1016,6 +1016,7 @@ final class MaruBridgeHandler: NSObject, WKScriptMessageHandlerWithReply {
           beginDocument: function (documentId) { return window.maru.request("maru.file.beginDocument", { document_id: documentId }); },
           read: function (editorEpoch) { return window.maru.request("maru.file.read", { editor_epoch: editorEpoch }); },
           readAsset: function (path) { return window.maru.request("maru.file.readAsset", { path: path }); },
+          readSelfImage: function () { return window.maru.request("maru.file.readSelfImage"); },
           write: function (editorEpoch, content) { return window.maru.request("maru.file.write", { editor_epoch: editorEpoch, content: content }); },
           setDirty: function (dirty, editorEpoch, revision, requestId) {
             return window.maru.request("maru.file.setDirty", { dirty: dirty, editor_epoch: editorEpoch, revision: revision, request_id: requestId });
@@ -1106,6 +1107,8 @@ final class MaruBridgeHandler: NSObject, WKScriptMessageHandlerWithReply {
           } else if (request.method === "livePreviewReady" &&
                      Number.isSafeInteger(request.editor_epoch) && request.editor_epoch > 0) {
             promise = window.maru.file.livePreviewReady(request.editor_epoch);
+          } else if (request.method === "readSelfImage") {
+            promise = window.maru.file.readSelfImage();
           } else {
             node.textContent = JSON.stringify({ error: "invalid request" });
             finish(node);
@@ -2712,7 +2715,7 @@ final class MaruWebPanelView: NSView {
     // FP12: text kind면 CM6 소스 문법 wire 토큰("json"·"python"…), svg면 "xml", markdown/html은 nil. 신뢰 shell URL에
     // `?lang=`으로 실려 web bootShell이 소스 편집기 문법을 고르게 한다(§2.2). 토큰은 Zig enum @tagName이라 [a-z] ASCII다.
     let filePanelLanguage: String?
-    // FP13: svg면 "svg"(shell URL `?kind=svg` → read 프리뷰+xml 소스 두 모드), 그 외 nil(§2.3).
+    // svg면 "svg"(FP13 read 프리뷰+xml 소스), image면 "image"(FP14 panzoom 프리뷰), 그 외 nil. shell URL `?kind=`로 실림(§2.3).
     let filePanelShellKind: String?
     let pinnedFileHTMLURL: URL?
     private(set) var fileHTMLReadAccessURL: URL?
@@ -2932,9 +2935,9 @@ final class MaruWebPanelView: NSView {
         webView.loadFileURL(url, allowingReadAccessTo: access)
     }
 
-    // 신뢰 shell(markdown·text·svg) 문서 URL. `&lang=`은 소스 편집기 문법, `&kind=svg`는 svg의 read 프리뷰+소스 두
-    // 모드를 고르게 한다(§2.2·§2.3). 토큰은 Zig enum @tagName([a-z] ASCII)라 query 인코딩이 불필요하고, `document`
-    // 파서(trustedDocumentId)는 name 필터라 무영향.
+    // 신뢰 shell(markdown·text·svg·image) 문서 URL. `&lang=`은 소스 편집기 문법, `&kind=svg|image`는 svg read
+    // 프리뷰+소스 / image panzoom 프리뷰를 고르게 한다(§2.2·§2.3). 토큰은 Zig enum @tagName([a-z] ASCII)라 query
+    // 인코딩이 불필요하고, `document` 파서(trustedDocumentId)는 name 필터라 무영향.
     private static func trustedShellURL(document: UInt64, language: String?, shellKind: String?) -> URL? {
         var query = "document=\(document)"
         if let language { query += "&lang=\(language)" }

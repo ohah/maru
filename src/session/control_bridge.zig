@@ -24,6 +24,9 @@ pub const hello_method = "hello";
 pub const file_read_method = "maru.file.read";
 pub const file_begin_document_method = "maru.file.beginDocument";
 pub const file_read_asset_method = "maru.file.readAsset";
+/// FP14: 이미지 패널이 **자기 자신의 파일**을 base64로 읽는다(경로 인자 없음 — capability는 자기 파일 1개로 최소).
+/// raster 이미지는 바이너리라 텍스트 `read`(UTF-8 검증)로 못 읽어 별도 메서드가 필요하다. mime는 native가 결정.
+pub const file_read_self_image_method = "maru.file.readSelfImage";
 pub const file_write_method = "maru.file.write";
 pub const file_set_dirty_method = "maru.file.setDirty";
 pub const file_resolve_external_change_method = "maru.file.resolveExternalChange";
@@ -41,6 +44,13 @@ pub const DirtyReport = struct {
     request_id: u64 = 0,
 };
 
+/// FP14 readSelfImage 결과. `mime`은 native가 파일 경로에서 파생한 정적 문자열(caller가 소유·해제 안 함),
+/// `bytes`는 `gpa` 소유라 dispatch가 base64 인코딩 후 해제한다.
+pub const SelfImage = struct {
+    mime: []const u8,
+    bytes: []u8,
+};
+
 pub const MermaidRenderRequest = struct {
     renderer: mermaid_protocol.RendererCapability,
     fence_id: u64,
@@ -55,6 +65,7 @@ pub const FileAccess = struct {
     begin_document_fn: *const fn (context: *anyopaque, document_id: u64) anyerror!u64,
     read_fn: *const fn (context: *anyopaque, gpa: std.mem.Allocator, editor_epoch: u64) anyerror![]u8,
     read_asset_fn: *const fn (context: *anyopaque, gpa: std.mem.Allocator, normalized_path: []const u8) anyerror![]u8,
+    read_self_image_fn: *const fn (context: *anyopaque, gpa: std.mem.Allocator) anyerror!SelfImage,
     write_fn: *const fn (context: *anyopaque, editor_epoch: u64, content: []const u8) anyerror!void,
     set_dirty_fn: *const fn (context: *anyopaque, report: DirtyReport) anyerror!void,
     resolve_external_change_fn: *const fn (context: *anyopaque, editor_epoch: u64, success: bool) anyerror!void,
@@ -73,6 +84,10 @@ pub const FileAccess = struct {
 
     fn readAsset(self: FileAccess, gpa: std.mem.Allocator, normalized_path: []const u8) anyerror![]u8 {
         return self.read_asset_fn(self.context, gpa, normalized_path);
+    }
+
+    fn readSelfImage(self: FileAccess, gpa: std.mem.Allocator) anyerror!SelfImage {
+        return self.read_self_image_fn(self.context, gpa);
     }
 
     fn write(self: FileAccess, editor_epoch: u64, content: []const u8) anyerror!void {
@@ -181,6 +196,12 @@ pub fn dispatchBridgeWithFileAccess(
         const bytes = access.readAsset(gpa, normalized) catch return errorResponse(gpa, req.id, .internal_error);
         defer gpa.free(bytes);
         return serializeFileAssetResult(gpa, req.id, file_policy.mimeForPath(normalized), bytes);
+    }
+    if (std.mem.eql(u8, req.method, file_read_self_image_method)) {
+        // 경로 인자 없음 — native가 패널 자기 파일을 읽고 mime를 정한다(readAsset과 같은 base64 result 직렬화 재사용).
+        const image = access.readSelfImage(gpa) catch return errorResponse(gpa, req.id, .internal_error);
+        defer gpa.free(image.bytes);
+        return serializeFileAssetResult(gpa, req.id, image.mime, image.bytes);
     }
     if (std.mem.eql(u8, req.method, file_write_method)) {
         const write = writeParam(req.params) catch return errorResponse(gpa, req.id, .invalid_params);
@@ -493,6 +514,7 @@ const FakeFileAccess = struct {
     read_epoch: u64 = 0,
     read_calls: usize = 0,
     asset_calls: usize = 0,
+    self_image_calls: usize = 0,
     last_asset_path: [128]u8 = undefined,
     last_asset_path_len: usize = 0,
     fail: bool = false,
@@ -538,6 +560,13 @@ const FakeFileAccess = struct {
         @memcpy(self.last_asset_path[0..path.len], path);
         self.last_asset_path_len = path.len;
         return gpa.dupe(u8, &.{ 0x89, 0x50, 0x4e, 0x47 });
+    }
+
+    fn readSelfImage(context: *anyopaque, gpa: std.mem.Allocator) anyerror!SelfImage {
+        const self: *FakeFileAccess = @ptrCast(@alignCast(context));
+        self.self_image_calls += 1;
+        if (self.fail) return error.ReadFailed;
+        return .{ .mime = "image/png", .bytes = try gpa.dupe(u8, &.{ 0x89, 0x50, 0x4e, 0x47 }) };
     }
 
     fn write(context: *anyopaque, _: u64, content: []const u8) anyerror!void {
@@ -600,6 +629,7 @@ const FakeFileAccess = struct {
             .begin_document_fn = beginDocument,
             .read_fn = read,
             .read_asset_fn = readAsset,
+            .read_self_image_fn = readSelfImage,
             .write_fn = write,
             .set_dirty_fn = setDirty,
             .resolve_external_change_fn = resolveExternalChange,
@@ -660,6 +690,31 @@ test "dispatchBridge: file.readAsset normalizes path and base64 encodes bytes" {
     try testing.expectEqualStrings("image/png", result.get("mime").?.string);
     try testing.expectEqualStrings("iVBORw==", result.get("data_base64").?.string);
     try testing.expectEqualStrings("images/diagram.PNG", fake.last_asset_path[0..fake.last_asset_path_len]);
+}
+
+test "dispatchBridge: file.readSelfImage base64 encodes provider bytes with native mime" {
+    var fake: FakeFileAccess = .{};
+    // 경로 인자 없음 — provider가 패널 자기 파일을 읽고 mime를 정한다(readAsset과 같은 base64 result).
+    const req = "{\"jsonrpc\":\"2.0\",\"id\":11,\"method\":\"maru.file.readSelfImage\"}";
+    const resp = try dispatchBridgeWithFileAccess(testing.allocator, req, "0.1.0", fake.access());
+    defer testing.allocator.free(resp);
+    var p = try parseValue(testing.allocator, resp);
+    defer p.deinit();
+    const result = p.value.object.get("result").?.object;
+    try testing.expectEqualStrings("image/png", result.get("mime").?.string);
+    try testing.expectEqualStrings("iVBORw==", result.get("data_base64").?.string);
+    try testing.expectEqual(@as(usize, 1), fake.self_image_calls);
+}
+
+test "dispatchBridge: file.readSelfImage maps provider failure to uniform internal_error" {
+    var fake: FakeFileAccess = .{ .fail = true };
+    const req = "{\"jsonrpc\":\"2.0\",\"id\":12,\"method\":\"maru.file.readSelfImage\"}";
+    const resp = try dispatchBridgeWithFileAccess(testing.allocator, req, "0.1.0", fake.access());
+    defer testing.allocator.free(resp);
+    var p = try parseValue(testing.allocator, resp);
+    defer p.deinit();
+    try testing.expectEqual(@as(i64, -32603), p.value.object.get("error").?.object.get("code").?.integer);
+    try testing.expectEqual(@as(usize, 1), fake.self_image_calls);
 }
 
 test "dispatchBridge: file.readAsset rejects malformed and traversal params before provider" {

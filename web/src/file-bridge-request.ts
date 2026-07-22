@@ -34,6 +34,7 @@ export type FileBridgeRequest =
   | ({ method: "read" } & ReadRequest)
   | ({ method: "beginDocument" } & BeginDocumentRequest)
   | { method: "readAsset"; path: string }
+  | { method: "readSelfImage" }
   | ({ method: "write" } & WriteRequest)
   | ({ method: "setDirty" } & DirtyReport)
   | ({ method: "resolveExternalChange" } & ResolveExternalChangeRequest)
@@ -52,6 +53,8 @@ export function encodeFileBridgeRequest(request: FileBridgeRequest): Record<stri
       return { method: request.method, document_id: request.document_id };
     case "readAsset":
       return { method: request.method, path: request.path };
+    case "readSelfImage":
+      return { method: request.method };
     case "write":
       return {
         method: request.method,

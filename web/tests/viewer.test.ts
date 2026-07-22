@@ -249,6 +249,44 @@ describe("file viewer bridge boundary", () => {
     dom.window.close();
   });
 
+  test("a rejecting livePreviewReady after a successful read keeps the rendered content and shows no read error", async () => {
+    // 회귀: 예전엔 read(loadFromDisk) 성공 뒤 livePreviewReady가 StaleDocument 등으로 실패하면 그 rejection이
+    // 하나의 catch로 흘러 "파일을 읽을 수 없습니다"를 띄워 이미 렌더된 내용과 겹쳤다. 이제 read 성공과 live-gate
+    // 실패를 분리해, gate가 실패해도 read 에러를 표시하지 않는다(내용 유지).
+    const dom = new JSDOM(
+      '<!doctype html><p id="viewer-status"></p><iframe id="renderer"></iframe><main id="editor"></main>',
+      { url: "maru-app://app/index.html?document=1" },
+    );
+    const document = dom.window.document;
+    let livePreviewReadyRejected = false;
+    document.addEventListener("maru:file-request", () => {
+      const node = document.querySelector<HTMLElement>('[data-maru-file-request="pending"]');
+      if (node === null) return;
+      const request = JSON.parse(node.textContent ?? "null") as { method?: string };
+      const settle = (payload: Record<string, unknown>) => {
+        node.textContent = JSON.stringify({ jsonrpc: "2.0", id: 1, ...payload });
+        node.dataset.maruFileRequest = "done";
+        document.dispatchEvent(new dom.window.Event("maru:file-response"));
+      };
+      if (request.method === "beginDocument") return settle({ result: { editor_epoch: 7 } });
+      if (request.method === "read") return settle({ result: { content: "# 렌더된 문서" } });
+      if (request.method === "livePreviewReady") {
+        livePreviewReadyRejected = true;
+        return settle({ error: "StaleDocument" }); // gate 일시 실패(reject) — read는 이미 성공
+      }
+      settle({ result: { ok: true } });
+    });
+
+    bootShell(document, dom.window as unknown as Window);
+    for (let turn = 0; turn < 24; turn += 1) await Promise.resolve();
+
+    const status = document.querySelector<HTMLElement>("#viewer-status");
+    expect(livePreviewReadyRejected).toBe(true); // gate가 실제로 호출·실패했다
+    expect(status?.dataset.fileRead).toBe("true"); // read는 성공으로 기록
+    expect(status?.textContent).toBe(""); // read 에러 텍스트를 렌더 내용 위에 덮지 않는다
+    dom.window.close();
+  });
+
   test("write, dirty, link, and external reload ack mailbox requests expose only their exact parameters", async () => {
     const dom = new JSDOM("<!doctype html><html><body></body></html>");
     const document = dom.window.document;
@@ -877,6 +915,79 @@ describe("bridge-free renderer", () => {
     expect(sanitized).toContain("safe");
     expect(sanitized).not.toContain("onload");
     expect(assetDataUrl("text/html", encoded, targetWindow)).toBeNull();
+  });
+
+  test("renderImage displays the data URL as a panzoom <img> and reports a broken image on load error", async () => {
+    const dom = new JSDOM('<!doctype html><main id="app"></main>', {
+      url: "maru-app://render/render.html",
+    });
+    const messages: unknown[] = [];
+    dom.window.postMessage = ((message: unknown) =>
+      messages.push(message)) as typeof dom.window.postMessage;
+    bootRenderer(dom.window.document, dom.window as unknown as Window);
+    const src = "data:image/png;base64,iVBORw0KGgo=";
+    dom.window.dispatchEvent(
+      new dom.window.MessageEvent("message", {
+        source: dom.window.parent,
+        data: { channel: viewerChannel, type: "renderImage", src },
+      }),
+    );
+
+    const img = dom.window.document.querySelector<HTMLImageElement>("img.maru-image-preview");
+    expect(img).not.toBeNull();
+    expect(img?.getAttribute("src")).toBe(src); // 신뢰 shell이 만든 raster 데이터 URL을 그대로 표시
+    expect(img?.draggable).toBe(false);
+
+    // JSDOM은 이미지를 디코드하지 않으므로 load는 안 뜬다(panzoom은 실브라우저 전용). error 경로만 여기서 검증:
+    // 깨진 이미지면 안내 문구로 교체하고 rendered(loadedImageCount:0)를 부모에 보고해 shell이 멈추지 않는다.
+    img?.dispatchEvent(new dom.window.Event("error"));
+    for (let turn = 0; turn < 4; turn += 1) await Promise.resolve();
+    expect(dom.window.document.querySelector("img.maru-image-preview")).toBeNull();
+    expect(dom.window.document.querySelector(".maru-svg-error")?.textContent).toBe(
+      "이 이미지를 표시할 수 없습니다.",
+    );
+    expect(messages).toContainEqual(
+      expect.objectContaining({
+        type: "rendered",
+        text: "image",
+        imageCount: 1,
+        loadedImageCount: 0,
+      }),
+    );
+    dom.window.close();
+  });
+
+  test("renderImage drops a stale overlapping render so its late event never clobbers the current image", async () => {
+    // 회귀(generation guard): 정상 open은 renderImage를 2회 보낸다(rendererReady 핸들러 + applyMode "read"). 앞선
+    // 렌더의 `<img>`는 다음 렌더의 root.replaceChildren로 detach되는데, 그 detach된 img의 늦은 load/error가 최신
+    // 렌더를 건드리면 안 된다(예전엔 detached 노드에 panzoom을 붙여 예외, 또는 error가 현재 이미지를 덮었다).
+    const dom = new JSDOM('<!doctype html><main id="app"></main>', {
+      url: "maru-app://render/render.html",
+    });
+    const messages: unknown[] = [];
+    dom.window.postMessage = ((message: unknown) =>
+      messages.push(message)) as typeof dom.window.postMessage;
+    bootRenderer(dom.window.document, dom.window as unknown as Window);
+    const send = (src: string) =>
+      dom.window.dispatchEvent(
+        new dom.window.MessageEvent("message", {
+          source: dom.window.parent,
+          data: { channel: viewerChannel, type: "renderImage", src },
+        }),
+      );
+    send("data:image/png;base64,QQAA"); // 1차 렌더
+    const stale = dom.window.document.querySelector<HTMLImageElement>("img.maru-image-preview");
+    expect(stale).not.toBeNull();
+    send("data:image/png;base64,QkJB"); // 겹친 2차 렌더 — 1차 img를 detach
+    expect(stale?.isConnected).toBe(false);
+
+    // stale img의 늦은 error는 최신(2차) img를 error 안내로 덮으면 안 되고, 예외도 없어야 한다.
+    expect(() => stale?.dispatchEvent(new dom.window.Event("error"))).not.toThrow();
+    for (let turn = 0; turn < 4; turn += 1) await Promise.resolve();
+    const current = dom.window.document.querySelector<HTMLImageElement>("img.maru-image-preview");
+    expect(current?.getAttribute("src")).toBe("data:image/png;base64,QkJB"); // 2차 img 생존
+    expect(dom.window.document.querySelector(".maru-svg-error")).toBeNull(); // stale error 안내 없음
+    dom.window.close();
   });
 
   test("routes activated markdown file links to the trusted shell instead of navigating the renderer", () => {

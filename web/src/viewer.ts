@@ -1503,10 +1503,7 @@ export function bootRenderer(document: Document, targetWindow: Window): void {
         // 스크립트/외부요청을 원천 차단한다(헬퍼가 이미 strict 렌더·sanitize). 나머지 atomic role(코드펜스=`<pre>`·
         // 이미지=`<img>`·KaTeX=HTML)은 CSP·클래스로 스타일되므로 기존 innerHTML 경로를 유지한다.
         const trimmedPayload = payload.trimStart();
-        if (
-          trimmedPayload.startsWith("<svg") ||
-          /^<\?xml[^>]*>\s*<svg\b/i.test(trimmedPayload)
-        ) {
+        if (trimmedPayload.startsWith("<svg") || /^<\?xml[^>]*>\s*<svg\b/i.test(trimmedPayload)) {
           root.replaceChildren();
           const svgImage = document.createElement("img");
           svgImage.src = `data:image/svg+xml;base64,${bytesToBase64(new TextEncoder().encode(payload), targetWindow)}`;

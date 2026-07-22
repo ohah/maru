@@ -118,6 +118,46 @@ fn appendImageBlobRecords(allocator: std.mem.Allocator, stream: *std.ArrayListUn
     }
 }
 
+/// delta용 placement 방출: full-set 교체라 **clear 센티넬(image_place, image_id=0)** 뒤에 현재 placement 전체를 image_place로
+/// 싣는다. client(applyDelta)는 센티넬에 placement_list를 비우고 이후 image_place를 append한다 — 집합이 비게 바뀐 경우도
+/// 센티넬만으로 표현된다. snapshot-band `image_placement`(kind 3)와 달리 delta-band `image_place`(kind 15)를 쓴다.
+fn appendImagePlaceDelta(allocator: std.mem.Allocator, stream: *std.ArrayListUnmanaged(u8), generation: u64, placements: []const terminal.KittyPlacement) screen_stream.DecodeError!void {
+    const clear = try screen_stream.encodeImagePlacement(allocator, .{ .kind = .image_place, .generation = generation }, .{ .image_id = 0, .row = 0, .col = 0 });
+    defer allocator.free(clear);
+    try screen_stream.appendRecord(stream, allocator, clear);
+    for (placements) |p| {
+        const rec = try screen_stream.encodeImagePlacement(allocator, .{ .kind = .image_place, .generation = generation }, .{
+            .image_id = p.image_id,
+            .placement_id = p.placement_id,
+            .row = p.row,
+            .col = p.col,
+            .cell_x_offset = p.cell_x_offset,
+            .cell_y_offset = p.cell_y_offset,
+            .src_x = p.src_x,
+            .src_y = p.src_y,
+            .src_width = p.src_width,
+            .src_height = p.src_height,
+            .columns = p.columns,
+            .rows = p.rows,
+            .z = p.z,
+        });
+        defer allocator.free(rec);
+        try screen_stream.appendRecord(stream, allocator, rec);
+    }
+}
+
+/// 이전 placement 집합(wire)과 현재(core)가 다른가 — 순서·개수·모든 필드 비교. 다르면 delta에 clear+set를 낸다.
+fn placementsChanged(prev: []const screen_stream.ImagePlacement, cur: []const terminal.KittyPlacement) bool {
+    if (prev.len != cur.len) return true;
+    for (prev, cur) |a, b| {
+        if (a.image_id != b.image_id or a.placement_id != b.placement_id or a.row != b.row or a.col != b.col or
+            a.cell_x_offset != b.cell_x_offset or a.cell_y_offset != b.cell_y_offset or
+            a.src_x != b.src_x or a.src_y != b.src_y or a.src_width != b.src_width or a.src_height != b.src_height or
+            a.columns != b.columns or a.rows != b.rows or a.z != b.z) return true;
+    }
+    return false;
+}
+
 /// core의 뷰포트 상대 kitty placement를 image_placement 레코드로 방출한다(필드 1:1 — crop/offset/columns/rows 보존).
 fn appendImagePlacementRecord(allocator: std.mem.Allocator, stream: *std.ArrayListUnmanaged(u8), generation: u64, p: terminal.KittyPlacement) screen_stream.DecodeError!void {
     const rec = try screen_stream.encodeImagePlacement(allocator, .{ .kind = .image_placement, .generation = generation }, .{
@@ -294,15 +334,29 @@ pub fn computeDelta(allocator: std.mem.Allocator, prev_bytes: []const u8, core: 
         for (prev_rows) |maybe| if (maybe) |r| allocator.free(r);
         allocator.free(prev_rows);
     }
+    // 이미지 delta 계산용 prev 상태(#1 I4b): 이전 snapshot의 placement 집합과 image_id→generation(client가 이미 가진 것).
+    var prev_placements: std.ArrayListUnmanaged(screen_stream.ImagePlacement) = .empty;
+    defer prev_placements.deinit(allocator);
+    var prev_image_gens: std.AutoHashMapUnmanaged(u32, u64) = .{};
+    defer prev_image_gens.deinit(allocator);
     while (try rs.next()) |rec| {
         const s = try screen_stream.RecordStream.split(rec);
-        if (s.header.kind != .row) continue; // 현재 투영은 row만 내지만, 미래 image record 등은 delta 비교에서 건너뛴다.
-        const dr = try screen_stream.decodeRow(allocator, s.body);
-        if (dr.row_index < prev_meta.rows) {
-            if (prev_rows[dr.row_index]) |old| allocator.free(old); // 중복 row_index 방어.
-            prev_rows[dr.row_index] = dr.runs;
-        } else {
-            dr.deinit(allocator);
+        switch (s.header.kind) {
+            .row => {
+                const dr = try screen_stream.decodeRow(allocator, s.body);
+                if (dr.row_index < prev_meta.rows) {
+                    if (prev_rows[dr.row_index]) |old| allocator.free(old); // 중복 row_index 방어.
+                    prev_rows[dr.row_index] = dr.runs;
+                } else {
+                    dr.deinit(allocator);
+                }
+            },
+            .image_placement => prev_placements.append(allocator, try screen_stream.decodeImagePlacement(s.body)) catch return error.OutOfMemory,
+            .image_blob => {
+                const blob = try screen_stream.decodeImageBlob(s.body);
+                prev_image_gens.put(allocator, blob.image_id, blob.generation) catch return error.OutOfMemory;
+            },
+            else => {},
         }
     }
 
@@ -349,6 +403,18 @@ pub fn computeDelta(allocator: std.mem.Allocator, prev_bytes: []const u8, core: 
             defer allocator.free(rec);
             try screen_stream.appendRecord(&delta, allocator, rec);
         }
+    }
+
+    // 이미지: snapshot(base)엔 현재 전체를 싣고(projectSnapshot과 동형 — 재접속/resync가 이 base로 이미지 복원), delta엔
+    // client가 없는 것만 싣는다(#1 I4b). blob은 prev generation과 다른 이미지만, placement는 집합이 바뀌었을 때 clear+set.
+    for (snap.images) |img| try appendImageBlobRecords(allocator, &snapshot, opts.generation, img);
+    for (snap.placements) |p| try appendImagePlacementRecord(allocator, &snapshot, opts.generation, p);
+    for (snap.images) |img| {
+        const have = if (prev_image_gens.get(img.image_id)) |g| g == img.generation else false;
+        if (!have) try appendImageBlobRecords(allocator, &delta, opts.generation, img); // client가 없는/바뀐 이미지만.
+    }
+    if (placementsChanged(prev_placements.items, snap.placements)) {
+        try appendImagePlaceDelta(allocator, &delta, opts.generation, snap.placements);
     }
 
     // 커서/모드 변화 → delta.
@@ -715,4 +781,60 @@ test "screen snapshot: projection and assembler are inverses on a real screen (s
     defer allocator.free(re2);
     try testing.expectEqualSlices(u8, p2, re2); // delta 적용 후 조립기 == 새 화면 projection.
     try testing.expectEqualSlices(u8, p2, result.snapshot); // computeDelta의 snapshot == 별도 projection(#6: 한 번 build 재사용).
+}
+
+test "screen snapshot: computeDelta emits image_blob + image_place when an image is transmitted (I4b)" {
+    const allocator = testing.allocator;
+    var core = try terminal.TerminalCore.init(allocator, .{ .cols = 10, .rows = 5 });
+    defer core.deinit();
+
+    // base(이미지 없음).
+    const base = try projectSnapshot(allocator, &core, .{ .generation = 1 });
+    defer allocator.free(base);
+
+    // 2x2 이미지 transmit+display(i=3).
+    var raw = [_]u8{0} ** 16;
+    raw[0] = 0x7A;
+    var b64: [32]u8 = undefined;
+    const b64s = std.base64.standard.Encoder.encode(&b64, &raw);
+    var seq: [96]u8 = undefined;
+    try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=T,f=32,s=2,v=2,i=3;{s}\x1b\\", .{b64s}));
+
+    const result = try computeDelta(allocator, base, &core, .{ .generation = 1 });
+    defer result.deinit(allocator);
+
+    // delta: image_blob(id 3) + image_place clear 센티넬(id 0) + image_place(id 3).
+    var found_blob = false;
+    var found_clear = false;
+    var found_place = false;
+    var rs = screen_stream.RecordStream{ .bytes = result.delta };
+    while (try rs.next()) |rec| {
+        const s = try screen_stream.RecordStream.split(rec);
+        switch (s.header.kind) {
+            .image_blob => {
+                if ((try screen_stream.decodeImageBlob(s.body)).image_id == 3) found_blob = true;
+            },
+            .image_place => {
+                const p = try screen_stream.decodeImagePlacement(s.body);
+                if (p.image_id == 0) found_clear = true else if (p.image_id == 3) found_place = true;
+            },
+            else => {},
+        }
+    }
+    try testing.expect(found_blob);
+    try testing.expect(found_clear);
+    try testing.expect(found_place);
+
+    // 같은 이미지가 그대로면(재계산) blob은 이미 client가 가졌으니 delta에 다시 안 실린다(dedup).
+    const base2 = try projectSnapshot(allocator, &core, .{ .generation = 1 });
+    defer allocator.free(base2);
+    const result2 = try computeDelta(allocator, base2, &core, .{ .generation = 1 });
+    defer result2.deinit(allocator);
+    var blob_again = false;
+    var rs2 = screen_stream.RecordStream{ .bytes = result2.delta };
+    while (try rs2.next()) |rec| {
+        const s = try screen_stream.RecordStream.split(rec);
+        if (s.header.kind == .image_blob) blob_again = true;
+    }
+    try testing.expect(!blob_again); // 변화 없으니 blob 재송 안 함.
 }

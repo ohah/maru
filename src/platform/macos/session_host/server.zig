@@ -64,6 +64,10 @@ pub const RuntimeOps = struct {
     /// (`selectWordAt`/`selectLineAt`) 그 뷰포트 선택 span을 JSON으로 돌려준다(client는 그 span을 placeholder에 적용해
     /// 하이라이트). 빈 placeholder는 단어/줄 경계를 모르므로 host가 계산 = 선택 의미론 host 단일 출처. codec 순수라 op는 문자열.
     select_op: *const fn (ctx: *anyopaque, runtime_id: u128, op: []const u8, row: u16, col: u16, allocator: std.mem.Allocator) anyerror![]u8,
+    /// §6c 원격 검색: client가 보낸 검색어(hex — 임의 텍스트라 escape 회피)로 host가 **콘텐츠·스크롤백을 아는 자기 core**에서
+    /// `findMatches`(로컬과 같은 함수)로 매치를 찾고, 보이는 매치를 `matchViewportSpan`으로 클립해 JSON `{count, spans:[...]}`로
+    /// 준다(count=전체 매치 수, spans=현재 뷰포트에 보이는 매치의 flat 좌표 배열). client가 그 span을 하이라이트한다.
+    find: *const fn (ctx: *anyopaque, runtime_id: u128, query_hex: []const u8, allocator: std.mem.Allocator) anyerror![]u8,
 };
 
 /// §6b 원격 선택 복사용 뷰포트 선택 span(primitive — codec 순수 유지). client가 보고 있는 화면(host의 뷰포트) 기준
@@ -256,6 +260,8 @@ pub const Connection = struct {
             return self.dispatchSelectedText(frame.header.request_id, params);
         } else if (std.mem.eql(u8, method, "runtime.select_op")) {
             return self.dispatchSelectOp(frame.header.request_id, params);
+        } else if (std.mem.eql(u8, method, "runtime.find")) {
+            return self.dispatchFind(frame.header.request_id, params);
         } else if (std.mem.eql(u8, method, "runtime.resize")) {
             return self.dispatchResize(frame.header.request_id, params);
         } else if (std.mem.eql(u8, method, "runtime.notification")) {
@@ -488,6 +494,22 @@ pub const Connection = struct {
             ops.select_op(ops.ctx, runtime_id, op, row, col, self.allocator) catch return self.replyError(request_id, .internal)
         else
             (self.allocator.dupe(u8, "{\"sel\":false}") catch return error.OutOfMemory);
+        defer self.allocator.free(body);
+        return self.replyResult(request_id, body);
+    }
+
+    /// `runtime.find`(§6c 원격 검색): client가 보낸 검색어(hex)로 host가 콘텐츠·스크롤백에서 매치를 찾아(`findMatches`) 보이는
+    /// 매치의 뷰포트 span 배열 + 전체 매치 수를 `{count, spans:[...]}`로 응답한다. 모르는 stream_id는 invalid_request. read-only
+    /// host는 `{count:0,spans:[]}`. span은 primitive(정수)라 escape 불필요, 검색어만 hex(임의 텍스트).
+    fn dispatchFind(self: *Connection, request_id: u64, params: ?std.json.ObjectMap) HandleError!Action {
+        const p = params orelse return self.replyError(request_id, .invalid_request);
+        const stream = intFieldU64(p, "stream_id") orelse return self.replyError(request_id, .invalid_request);
+        const query_hex = strField(p, "q") orelse "";
+        const runtime_id = (self.attachments.get(stream) orelse return self.replyError(request_id, .invalid_request)).runtime_id;
+        const body = if (self.runtime_ops) |ops|
+            ops.find(ops.ctx, runtime_id, query_hex, self.allocator) catch return self.replyError(request_id, .internal)
+        else
+            (self.allocator.dupe(u8, "{\"count\":0,\"spans\":[]}") catch return error.OutOfMemory);
         defer self.allocator.free(body);
         return self.replyResult(request_id, body);
     }
@@ -1052,6 +1074,8 @@ const FakeRuntimeOps = struct {
     last_select_op_len: usize = 0,
     last_select_op_row: u16 = 0,
     last_select_op_col: u16 = 0,
+    last_find_query_hex: [64]u8 = undefined,
+    last_find_query_hex_len: usize = 0,
 
     fn spawnFn(ctx: *anyopaque, params: RuntimeSpawnParams) anyerror!u128 {
         const self: *FakeRuntimeOps = @ptrCast(@alignCast(ctx));
@@ -1130,8 +1154,17 @@ const FakeRuntimeOps = struct {
         self.last_select_op_col = col;
         return allocator.dupe(u8, "{\"sel\":true,\"sr\":0,\"sc\":1,\"er\":0,\"ec\":3,\"block\":false}");
     }
+    /// 받은 검색어(hex)를 기록하고 고정 결과(1 매치, 뷰포트 span 1개)를 준다 — server 라우팅·파싱 검증(실 findMatches는 smoke).
+    fn findFn(ctx: *anyopaque, runtime_id: u128, query_hex: []const u8, allocator: std.mem.Allocator) anyerror![]u8 {
+        const self: *FakeRuntimeOps = @ptrCast(@alignCast(ctx));
+        _ = runtime_id;
+        const n = @min(query_hex.len, self.last_find_query_hex.len);
+        @memcpy(self.last_find_query_hex[0..n], query_hex[0..n]);
+        self.last_find_query_hex_len = n;
+        return allocator.dupe(u8, "{\"count\":2,\"spans\":[1,2,1,5]}");
+    }
     fn ops(self: *FakeRuntimeOps) RuntimeOps {
-        return .{ .ctx = self, .spawn = spawnFn, .terminate = terminateFn, .write_input = writeInputFn, .resize = resizeFn, .snapshot = snapshotFn, .delta = deltaFn, .notification = notificationFn, .core_command = coreCommandFn, .selected_text = selectedTextFn, .select_op = selectOpFn };
+        return .{ .ctx = self, .spawn = spawnFn, .terminate = terminateFn, .write_input = writeInputFn, .resize = resizeFn, .snapshot = snapshotFn, .delta = deltaFn, .notification = notificationFn, .core_command = coreCommandFn, .selected_text = selectedTextFn, .select_op = selectOpFn, .find = findFn };
     }
 };
 
@@ -1581,6 +1614,44 @@ test "server: runtime.select_op routes word/line op to RuntimeOps and returns sp
     // 모르는 stream_id → invalid_request.
     {
         const r = try feedJson(&conn, .request, 4, "{\"method\":\"runtime.select_op\",\"params\":{\"stream_id\":99,\"op\":\"line\",\"row\":0,\"col\":0}}");
+        defer if (r.frame) |f| f.deinit(allocator);
+        try testing.expect(std.mem.indexOf(u8, r.frame.?.payload, "invalid_request") != null);
+    }
+}
+
+test "server: runtime.find routes query(hex) to RuntimeOps and returns {count,spans} (§6c)" {
+    const allocator = testing.allocator;
+    var registry = reg.TerminalRuntimeRegistry.init(allocator);
+    defer registry.deinit();
+    _ = try registry.register(0xAA, 80, 24);
+
+    var fake: FakeRuntimeOps = .{};
+    var conn = Connection.init(allocator, 1, &registry);
+    defer conn.deinit();
+    conn.runtime_ops = fake.ops();
+    {
+        const h = try feedJson(&conn, .hello, 1, "{\"protocol_min\":1,\"protocol_max\":1}");
+        if (h.frame) |f| f.deinit(allocator);
+    }
+    {
+        const frames = try feedExpectFrames(&conn, .request, 2, "{\"method\":\"runtime.attach\",\"params\":{\"runtime_id\":\"aa\",\"mode\":\"controller\"}}");
+        defer {
+            for (frames) |f| f.deinit(allocator);
+            allocator.free(frames);
+        }
+    }
+    // 검색어 "hi" = hex "6869" → RuntimeOps.find로 라우팅 + fake {count,spans}를 응답에 담는다.
+    {
+        const r = try feedJson(&conn, .request, 3, "{\"method\":\"runtime.find\",\"params\":{\"stream_id\":1,\"q\":\"6869\"}}");
+        defer if (r.frame) |f| f.deinit(allocator);
+        try testing.expect(std.mem.indexOf(u8, r.frame.?.payload, "\"count\":2") != null);
+        try testing.expect(std.mem.indexOf(u8, r.frame.?.payload, "\"spans\":[1,2,1,5]") != null);
+    }
+    try testing.expectEqualStrings("6869", fake.last_find_query_hex[0..fake.last_find_query_hex_len]);
+
+    // 모르는 stream_id → invalid_request.
+    {
+        const r = try feedJson(&conn, .request, 4, "{\"method\":\"runtime.find\",\"params\":{\"stream_id\":99,\"q\":\"6869\"}}");
         defer if (r.frame) |f| f.deinit(allocator);
         try testing.expect(std.mem.indexOf(u8, r.frame.?.payload, "invalid_request") != null);
     }

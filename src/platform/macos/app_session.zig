@@ -1927,6 +1927,11 @@ pub const AppSession = struct {
     // tick마다 활성 surface의 매치를 뷰포트 span으로 클립해 담는 재사용 버퍼(cell_colors.search_matches로 넘긴다).
     // 매 frame 새로 채우되 capacity는 재사용한다 — 스크롤·출력에 따라 뷰 안 매치가 바뀌므로 캐시하지 않는다.
     find_view_spans: std.ArrayList(terminal.SelectionSpan) = .empty,
+    // §6c host-backed 검색 캐시: host-backed Term은 검색을 host가(콘텐츠 소유) 하므로 매 tick RPC를 피하려고 output/query 변화
+    // 시에만 host에 재검색(refreshRemoteFind)해 뷰포트 매치 span을 여기 캐시하고, tick은 이걸 find_view_spans에 복사만 한다.
+    // remote_find_dirty는 검색어 변화(recomputeFind) 트리거. in-process는 이 둘을 안 쓴다(find_matches/find_view_spans 그대로).
+    remote_find_spans: std.ArrayList(terminal.SelectionSpan) = .empty,
+    remote_find_dirty: bool = false,
     // I/O–렌더 스레딩 분리(docs/io-render-threading.md): 렌더 CellColors.palette가 코어의
     // palette_override 포인터를 직접 들면, PR3에서 리더 스레드의 OSC 4 변경과 data race가 난다.
     // 그래서 매 tick paletteOverride()를 이 소유 버퍼로 복사하고 CellColors.palette가 여기를
@@ -16116,7 +16121,23 @@ pub const AppSession = struct {
     /// 스크롤한다(증분 검색 — 타이핑·Backspace마다). 검색어가 비면 매치 0. OOM이면 매치를 비워 안전하게 둔다.
     /// chrome_host.find.match_count를 동기화해(setMatchCount) 컴포넌트의 카운터·next/prev wrap이 맞게 한다.
     fn recomputeFind(self: *AppSession) void {
-        find_ops.recomputeFind(self); // 본문 분리: app_session/find.zig(E1)
+        find_ops.recomputeFind(self); // 본문 분리: app_session/find.zig(E1) — in-process 활성 surface 재검색.
+        self.remote_find_dirty = true; // §6c host-backed면 다음 tick이 host에 재검색(placeholder는 못 함). in-process는 무해.
+    }
+
+    /// §6c host-backed 검색: 검색어를 host로 보내 host가 `findMatches`(로컬과 같은 함수)로 매치를 찾고 보이는 뷰포트 span을
+    /// remote_find_spans에 채운다(검색 의미론 host 단일 출처). 매치 수를 컴포넌트에 동기화. host query라 core lock 밖에서 부른다.
+    fn refreshRemoteFind(self: *AppSession, surface: *maru.session.Surface) void {
+        if (is_macos) {
+            if (app_remote_backend) |*rb| {
+                if (rb.findFor(surface.id, self.chrome_host.find.input.query.items, &self.remote_find_spans)) |count| {
+                    self.chrome_host.find.setMatchCount(count);
+                    return;
+                }
+            }
+            self.remote_find_spans.clearRetainingCapacity();
+            self.chrome_host.find.setMatchCount(0);
+        }
     }
 
     /// 현재(네비게이션) 매치를 뷰포트로 스크롤한다 — 없으면 무동작. 검색·네비게이션 후 호출(scrollToAbs가
@@ -22275,26 +22296,41 @@ pub const AppSession = struct {
             // [4e-2, §6] 활성 Term이 web이면 스크롤백 Find 재검색·뷰포트 클립을 건너뛴다(sentinel엔 스크롤백/매치 없음) —
             // find_view_spans/current_span은 위에서 비운 상태 유지. terminal이면 activeSurface()라 byte-identical.
             if (self.activeTerminalSurface()) |fa_surface| {
-                fa_surface.lockCore(self.io);
-                defer fa_surface.unlockCore(self.io);
-                if (find_active and drain_summary.output_events > 0) {
-                    const now_alt = fa_surface.core.alt_active;
-                    fa_surface.core.findMatches(self.allocator, self.chrome_host.find.input.query.items, &self.find_matches) catch self.find_matches.clearRetainingCapacity();
-                    self.chrome_host.find.setMatchCount(self.find_matches.items.len); // 매치 수 동기화 + current clamp(스크롤은 안 함)
-                    // primary<->alt 화면 전환이면 매치 셋의 좌표 도메인이 통째로 바뀌어 이전 current가 무의미하다
-                    // (setMatchCount는 clamp만). 첫 매치로 리셋한다 — 같은 화면 내 출력(스크롤백 eviction)이면 유지.
-                    if (now_alt != self.find_was_alt) self.chrome_host.find.current = 0;
-                    self.find_was_alt = now_alt;
-                }
-                // 활성 surface 매치를 뷰포트 span으로 클립(Find 활성일 때만). 현재 매치는 별도 강조색(current_match),
-                // 나머지는 find_view_spans. 닫힌 채 ⌘G 네비(find_nav,!open)면 현재 매치만.
-                if (find_active) {
-                    for (self.find_matches.items, 0..) |m, mi| {
-                        const span = fa_surface.core.matchViewportSpan(m) orelse continue;
-                        if (mi == self.chrome_host.find.current) {
-                            find_current_span = span;
-                        } else if (self.chrome_host.find.open) {
-                            self.find_view_spans.append(self.allocator, span) catch {};
+                if (is_macos and fa_surface.remote != null) {
+                    // §6c host-backed: 검색은 host가(콘텐츠·스크롤백 소유 — placeholder는 빈 셀이라 못 함). output(스크롤도
+                    // delta라 포함)/query 변화 시만 host에 재검색(refreshRemoteFind)해 뷰포트 매치 span을 remote_find_spans에
+                    // 캐시하고, tick은 그 캐시를 find_view_spans에 복사만 한다(매 tick RPC 회피). 현재 매치 강조색·네비는 #6c-2.
+                    if (find_active) {
+                        if (self.remote_find_dirty or drain_summary.output_events > 0) {
+                            self.refreshRemoteFind(fa_surface);
+                            self.remote_find_dirty = false;
+                        }
+                        if (self.chrome_host.find.open) self.find_view_spans.appendSlice(self.allocator, self.remote_find_spans.items) catch {};
+                    } else {
+                        self.remote_find_spans.clearRetainingCapacity();
+                    }
+                } else {
+                    fa_surface.lockCore(self.io);
+                    defer fa_surface.unlockCore(self.io);
+                    if (find_active and drain_summary.output_events > 0) {
+                        const now_alt = fa_surface.core.alt_active;
+                        fa_surface.core.findMatches(self.allocator, self.chrome_host.find.input.query.items, &self.find_matches) catch self.find_matches.clearRetainingCapacity();
+                        self.chrome_host.find.setMatchCount(self.find_matches.items.len); // 매치 수 동기화 + current clamp(스크롤은 안 함)
+                        // primary<->alt 화면 전환이면 매치 셋의 좌표 도메인이 통째로 바뀌어 이전 current가 무의미하다
+                        // (setMatchCount는 clamp만). 첫 매치로 리셋한다 — 같은 화면 내 출력(스크롤백 eviction)이면 유지.
+                        if (now_alt != self.find_was_alt) self.chrome_host.find.current = 0;
+                        self.find_was_alt = now_alt;
+                    }
+                    // 활성 surface 매치를 뷰포트 span으로 클립(Find 활성일 때만). 현재 매치는 별도 강조색(current_match),
+                    // 나머지는 find_view_spans. 닫힌 채 ⌘G 네비(find_nav,!open)면 현재 매치만.
+                    if (find_active) {
+                        for (self.find_matches.items, 0..) |m, mi| {
+                            const span = fa_surface.core.matchViewportSpan(m) orelse continue;
+                            if (mi == self.chrome_host.find.current) {
+                                find_current_span = span;
+                            } else if (self.chrome_host.find.open) {
+                                self.find_view_spans.append(self.allocator, span) catch {};
+                            }
                         }
                     }
                 }
@@ -26402,6 +26438,7 @@ pub const AppSession = struct {
         self.sidebar_preview_rows.deinit(self.allocator); // SG8c 드래그 프리뷰 투영(고스트 포함) heap 해제
         self.find_matches.deinit(self.allocator);
         self.find_view_spans.deinit(self.allocator);
+        self.remote_find_spans.deinit(self.allocator); // §6c host-backed 검색 캐시
         if (self.workspace_buffer) |b| self.allocator.free(b);
         if (self.sidebar_config_buffer) |b| self.allocator.free(b);
         inline for (pending_writeback_lists) |n| @field(self, n).deinit(self.allocator); // config write-back pending registry(단일 출처)

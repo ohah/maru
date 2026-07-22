@@ -85,7 +85,58 @@ pub fn projectSnapshot(allocator: std.mem.Allocator, core: *terminal.TerminalCor
     while (row < snap.size.rows) : (row += 1) {
         try appendRowRecord(allocator, snap, palette, opts, row, &stream);
     }
+
+    // 이미지 방출(#1 원격 이미지 전송, I2): blob(디코드 픽셀, ≤max_image_blob 청크) + placement(뷰포트 상대). renderSnapshot이
+    // 이미 buildImageViews 픽셀과 뷰포트 상대 placement를 줬다 — client는 이 두 record로 이미지를 in-process와 동일하게 렌더한다
+    // (렌더러가 image_id/generation으로 GPU 텍스처 캐시). delta에서의 이미지 dedup/방출은 후속(I4) — 지금은 full snapshot만 싣는다.
+    for (snap.images) |img| try appendImageBlobRecords(allocator, &stream, opts.generation, img);
+    for (snap.placements) |p| try appendImagePlacementRecord(allocator, &stream, opts.generation, p);
     return stream.toOwnedSlice(allocator) catch return error.OutOfMemory;
+}
+
+/// 한 이미지의 디코드 픽셀을 per-record cap(≤max_image_blob) 청크로 나눠 image_blob 레코드로 방출한다. 빈 픽셀도 메타
+/// 전달용 1개는 낸다. 메타(image_id/generation/w/h/bpp)는 자기서술 위해 매 청크 반복한다(재조립은 소비자 몫, §ImageBlob).
+fn appendImageBlobRecords(allocator: std.mem.Allocator, stream: *std.ArrayListUnmanaged(u8), generation: u64, img: terminal.KittyImageView) screen_stream.DecodeError!void {
+    const cap = screen_stream.max_image_blob;
+    const total = img.pixels.len;
+    const chunk_count: u32 = if (total == 0) 1 else @intCast((total + cap - 1) / cap);
+    var idx: u32 = 0;
+    var off: usize = 0;
+    while (idx < chunk_count) : (idx += 1) {
+        const end = @min(off + cap, total);
+        const rec = try screen_stream.encodeImageBlob(allocator, .{ .kind = .image_blob, .generation = generation, .chunk_index = idx, .chunk_count = chunk_count }, .{
+            .image_id = img.image_id,
+            .generation = img.generation,
+            .width = img.width,
+            .height = img.height,
+            .bpp = img.bpp,
+            .pixels = img.pixels[off..end],
+        });
+        defer allocator.free(rec);
+        try screen_stream.appendRecord(stream, allocator, rec);
+        off = end;
+    }
+}
+
+/// core의 뷰포트 상대 kitty placement를 image_placement 레코드로 방출한다(필드 1:1 — crop/offset/columns/rows 보존).
+fn appendImagePlacementRecord(allocator: std.mem.Allocator, stream: *std.ArrayListUnmanaged(u8), generation: u64, p: terminal.KittyPlacement) screen_stream.DecodeError!void {
+    const rec = try screen_stream.encodeImagePlacement(allocator, .{ .kind = .image_placement, .generation = generation }, .{
+        .image_id = p.image_id,
+        .placement_id = p.placement_id,
+        .row = p.row,
+        .col = p.col,
+        .cell_x_offset = p.cell_x_offset,
+        .cell_y_offset = p.cell_y_offset,
+        .src_x = p.src_x,
+        .src_y = p.src_y,
+        .src_width = p.src_width,
+        .src_height = p.src_height,
+        .columns = p.columns,
+        .rows = p.rows,
+        .z = p.z,
+    });
+    defer allocator.free(rec);
+    try screen_stream.appendRecord(stream, allocator, rec);
 }
 
 /// core의 개별 mode 필드를 §9 mode bitmask로 조립한다.
@@ -485,6 +536,53 @@ test "screen snapshot: wide CJK cell projects width=2 and skips the continuation
     try testing.expectEqual(@as(u8, 2), row.runs[0].width); // wide는 width=2, continuation은 run으로 안 나온다.
     try testing.expectEqualStrings("A", row.runs[1].grapheme);
     try testing.expectEqual(@as(u8, 1), row.runs[1].width);
+}
+
+test "screen snapshot: kitty image projects image_blob(디코드 픽셀) + image_placement" {
+    const allocator = testing.allocator;
+    var core = try terminal.TerminalCore.init(allocator, .{ .cols = 10, .rows = 5 });
+    defer core.deinit();
+
+    // 2x2 RGBA 이미지 transmit+display(a=T, i=7) — renderSnapshot에 image(id 7, 16B) + placement 하나가 생긴다.
+    var raw = [_]u8{0} ** 16; // 2*2*4
+    raw[0] = 0xAB;
+    raw[15] = 0xCD;
+    var b64: [32]u8 = undefined;
+    const b64s = std.base64.standard.Encoder.encode(&b64, &raw);
+    var seq: [96]u8 = undefined;
+    try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=T,f=32,s=2,v=2,i=7;{s}\x1b\\", .{b64s}));
+
+    const bytes = try projectSnapshot(allocator, &core, .{ .generation = 3 });
+    defer allocator.free(bytes);
+
+    // 스트림을 훑어 image_blob(디코드 픽셀 왕복)과 image_placement가 실렸는지 본다.
+    var found_blob = false;
+    var found_placement = false;
+    var rs = screen_stream.RecordStream{ .bytes = bytes };
+    while (try rs.next()) |rec| {
+        const s = try screen_stream.RecordStream.split(rec);
+        switch (s.header.kind) {
+            .image_blob => {
+                const blob = try screen_stream.decodeImageBlob(s.body);
+                try testing.expectEqual(@as(u32, 7), blob.image_id);
+                try testing.expectEqual(@as(u32, 2), blob.width);
+                try testing.expectEqual(@as(u32, 2), blob.height);
+                try testing.expectEqual(@as(u8, 4), blob.bpp);
+                try testing.expectEqual(@as(usize, 16), blob.pixels.len);
+                try testing.expectEqual(@as(u8, 0xAB), blob.pixels[0]);
+                try testing.expectEqual(@as(u8, 0xCD), blob.pixels[15]);
+                found_blob = true;
+            },
+            .image_placement => {
+                const p = try screen_stream.decodeImagePlacement(s.body);
+                try testing.expectEqual(@as(u32, 7), p.image_id);
+                found_placement = true;
+            },
+            else => {},
+        }
+    }
+    try testing.expect(found_blob);
+    try testing.expect(found_placement);
 }
 
 test "screen snapshot: style flags and alt-screen/modes are captured" {

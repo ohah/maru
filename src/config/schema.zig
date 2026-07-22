@@ -1018,10 +1018,16 @@ test "schema appendBoolFields/setBool: bool 필드만 열거하고 키로 설정
     }
     try std.testing.expect(saw_cursor_blink and saw_text_blink);
 
-    // code-review #8: hidden 필드(session.keep-alive-after-quit)는 설정 GUI 행 목록에 **안** 나온다(config 파일로만 편집).
-    // section=null만으론 "기타" 그룹에 노출되므로 Meta.hidden=true로 append*Fields가 건너뛴다. 파일 저장/파싱(loader
-    // round-trip 테스트)은 그대로라 config로는 켤 수 있다.
-    for (list.items) |f| try std.testing.expect(!std.mem.eql(u8, f.key, "session.keep-alive-after-quit"));
+    // session.keep-alive-after-quit는 설정 GUI(workspace 섹션 토글)에 **노출된다** — 사용자가 GUI로 영속 세션을 켜고 끌 수 있다
+    // (과거 code-review #8의 Meta.hidden 해제 — 원격 패리티가 붙어 실사용 가능). 행 목록에 나오고 라벨(doc)이 있어야 한다.
+    var saw_keep_alive = false;
+    for (list.items) |f| {
+        if (std.mem.eql(u8, f.key, "session.keep-alive-after-quit")) {
+            saw_keep_alive = true;
+            try std.testing.expect(f.doc.len > 0); // GUI 라벨
+        }
+    }
+    try std.testing.expect(saw_keep_alive);
 
     // setBool: 키로 flip.
     try std.testing.expect(setBool(&cfg, "cursor.blink", false));

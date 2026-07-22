@@ -626,10 +626,13 @@ chunk_index:u32 | chunk_count:u32 | record_bytes...
 - `record_kind`는 snapshot 대역 1~9(`screen_meta=1`, `row=2`, `image_placement=3`, `image_blob=4`)와 delta 대역 10~19
   (`set_runs=10`, `clear_rect=11`, `scroll_rect=12`, `cursor=13`, `modes=14`, `image_place=15`, `image_remove=16`)로 나눈 open
   enum이다(미래 record는 새 값 — decoder가 optional이면 skip, required면 reject).
-- `run`은 `grapheme(u32 len + UTF-8) | width:u8 | count:u32 | fg:u32 | bg:u32 | underline_color:u32 | style_flags:u32`다. 색은
-  resolved RGB(0xRRGGBB), `count`는 이 run이 채우는 **grid cell 수**(wide면 width=2). `style_flags`는 resolved bitmask
-  (bold/dim/italic/underline{,_double,_curly}/blink/inverse/invisible/strikethrough/overline). row 폭 검증은 `Σ(width*count)==cols`
-  (`rowWidthMatches`)로 wide-cell continuation 불일치를 잡는다.
+- `run`은 `grapheme(u32 len + UTF-8) | width:u8 | count:u32 | fg:u32 | bg:u32 | underline_color:u32 | style_flags:u32`다. 색
+  (fg/bg/underline_color)은 resolved RGB가 아니라 **태그드 Color intent**다(상위 바이트=태그 default/indexed/rgb, 하위 24비트=
+  payload — `ColorTag`가 SSOT). host는 색을 굽지 않고 의도를 실어 **client가 자기 theme로 in-process와 동일하게 해석**한다(config
+  16색 base·bold-is-bright·min-contrast·default fg/bg). 예외: OSC4(`paletteOverride`)된 indexed는 override가 host per-terminal
+  상태라 host가 그 rgb로 구워 실어(rgb 태그) 원색을 보존한다. `count`는 이 run이 채우는 **grid cell 수**(wide면 width=2).
+  `style_flags`는 resolved bitmask(bold/dim/italic/underline{,_double,_curly}/blink/inverse/invisible/strikethrough/overline). row
+  폭 검증은 `Σ(width*count)==cols`(`rowWidthMatches`)로 wide-cell continuation 불일치를 잡는다.
 - delta record는 body 첫 필드로 `base_generation:u64`를 둔다. `str/blob`은 `length:u32 + bytes`이고 grapheme/mime는 UTF-8을
   검증하되 image blob 바이트는 검증하지 않는다. 손상 방어 cap은 문자열 64 KiB·row당 run 65536이다.
 

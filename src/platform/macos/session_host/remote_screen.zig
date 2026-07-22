@@ -5,8 +5,9 @@
 //!
 //! 레이어: `terminal.Cell/Style/Color`를 만들어야 해서 `@import("maru")`가 필요하다(macOS 전용, barrel 조건부 —
 //! screen_snapshot과 같은 부류). 조립기(순수)는 wire-native run 형태로 화면을 들고, 이 파일이 렌더 시점에 그것을 cell
-//! 격자로 편다. run은 host가 이미 해석한 상태(resolved RGB·StyleFlags)라 여기선 색을 다시 풀지 않고 그대로 rgb cell로 옮긴다
-//! (§8 "새 parser 금지"). 완전한 theme-aware 재해석은 screen_snapshot의 config-light 기준선과 대칭으로 후속이다.
+//! 격자로 편다. run 색은 host가 굽지 않은 **태그드 Color intent**(§screen_stream.ColorTag·StyleFlags)라, 여기선 그 intent를
+//! 풀어(unpackColorIntent) cell Color에 그대로 실어 렌더가 자기 theme로 해석하게 한다(config 16색·bold-is-bright·min-contrast·
+//! default 색 — in-process와 동일). 여기서 색을 다시 "파싱"하는 게 아니라 wire intent→core Color 1:1 매핑이다(§8 "새 parser 금지").
 
 const std = @import("std");
 const maru = @import("maru");
@@ -49,8 +50,9 @@ pub const CellGrid = struct {
     }
 };
 
-/// 조립기 상태를 소유 cell 격자로 편다(caller가 `CellGrid.deinit`). run(resolved RGB·StyleFlags)을 cell(rgb Color·Style
-/// bool·codepoint/grapheme_id)로 옮긴다. wide run(width>=2)은 lead cell(width=2) + continuation cell(width=0)로 편다.
+/// 조립기 상태를 소유 cell 격자로 편다(caller가 `CellGrid.deinit`). run(태그드 Color intent·StyleFlags)을 cell(Color intent·
+/// Style bool·codepoint/grapheme_id)로 옮긴다 — 색은 host가 굽지 않은 의도라 client 렌더가 자기 theme로 푼다(theme-aware).
+/// wide run(width>=2)은 lead cell(width=2) + continuation cell(width=0)로 편다.
 pub fn build(allocator: std.mem.Allocator, asm_: *const screen_assembler.ScreenAssembler) error{OutOfMemory}!CellGrid {
     const cols = asm_.cols;
     const rows = asm_.rows_count;
@@ -126,15 +128,26 @@ fn unpackRgb(v: u32) terminal.Rgb {
     return .{ .r = @intCast((v >> 16) & 0xFF), .g = @intCast((v >> 8) & 0xFF), .b = @intCast(v & 0xFF) };
 }
 
-/// run의 resolved RGB·StyleFlags를 cell `Style`로 옮긴다. 색은 이미 풀린 값이라 `.rgb`로 싣고, flag는 bool로 편다
-/// (inverse→reverse, invisible→conceal). curly underline은 wire flag엔 있지만 core Style엔 없어 생략한다.
+/// Run wire의 태그드 u32 Color intent를 core `Color`로 푼다(§screen_stream.ColorTag). host가 구운 RGB가 아니라 의도라,
+/// client 렌더가 이 intent를 자기 theme로 해석한다(config 16색 base·bold-is-bright·min-contrast·default 색 — in-process 동일).
+fn unpackColorIntent(v: u32) terminal.Color {
+    const Tag = screen_stream.ColorTag;
+    return switch (v >> Tag.shift) {
+        Tag.default => .default,
+        Tag.indexed => .{ .indexed = @intCast(v & Tag.index_mask) },
+        else => .{ .rgb = unpackRgb(v & Tag.rgb_mask) }, // Tag.rgb — unpackRgb가 채널별 &0xFF로 태그 바이트를 이미 버린다.
+    };
+}
+
+/// run의 태그드 Color intent·StyleFlags를 cell `Style`로 옮긴다. 색은 intent 그대로 실어 렌더가 theme로 풀고, flag는 bool로
+/// 편다(inverse→reverse, invisible→conceal). curly underline은 wire flag엔 있지만 core Style엔 없어 생략한다.
 fn runStyle(run: Run) terminal.Style {
     const SF = screen_stream.StyleFlags;
     const f = run.style_flags;
     return .{
-        .foreground = .{ .rgb = unpackRgb(run.fg) },
-        .background = .{ .rgb = unpackRgb(run.bg) },
-        .underline_color = .{ .rgb = unpackRgb(run.underline_color) },
+        .foreground = unpackColorIntent(run.fg),
+        .background = unpackColorIntent(run.bg),
+        .underline_color = unpackColorIntent(run.underline_color),
         .bold = f & SF.bold != 0,
         .dim = f & SF.dim != 0,
         .italic = f & SF.italic != 0,
@@ -231,11 +244,14 @@ const screen_snapshot = @import("screen_snapshot.zig");
 test "remote screen: build converts runs to cells (text, wide cell, rgb color, style, cluster)" {
     const allocator = testing.allocator;
     const SF = screen_stream.StyleFlags;
-    // row 0: bold 빨강 "h", wide "한"(2셀), 결합 문자 "e\u{0301}"(cluster), 공백. Σ(width*count)=1+2+1+1=5=cols.
+    const Tag = screen_stream.ColorTag;
+    // row 0: bold rgb빨강 "h", wide "한"(2셀, indexed 2), 결합 문자 "e\u{0301}"(cluster, default fg), 공백.
+    // 색은 태그드 Color intent다 — build가 이 intent를 풀어 셀 Color에 그대로 실어야 렌더가 theme로 해석한다.
+    // Σ(width*count)=1+2+1+1=5=cols.
     var runs0 = [_]Run{
-        .{ .grapheme = "h", .width = 1, .count = 1, .fg = 0xFF0000, .style_flags = SF.bold },
-        .{ .grapheme = "한", .width = 2, .count = 1, .fg = 0x00FF00 },
-        .{ .grapheme = "e\u{0301}", .width = 1, .count = 1 },
+        .{ .grapheme = "h", .width = 1, .count = 1, .fg = (Tag.rgb << Tag.shift) | 0xFF0000, .style_flags = SF.bold },
+        .{ .grapheme = "한", .width = 2, .count = 1, .fg = (Tag.indexed << Tag.shift) | 2 },
+        .{ .grapheme = "e\u{0301}", .width = 1, .count = 1 }, // fg 미지정 = 0 = default intent.
         .{ .grapheme = " ", .width = 1, .count = 1 },
     };
     const row0: screen_stream.Row = .{ .row_index = 0, .runs = &runs0 };
@@ -260,16 +276,18 @@ test "remote screen: build converts runs to cells (text, wide cell, rgb color, s
 
     try testing.expectEqual(@as(u16, 5), snap.size.cols);
     try testing.expectEqual(@as(u16, 4), snap.cursor.col);
-    // cell 0: "h", width 1, bold, fg rgb(0xFF0000).
+    // cell 0: "h", width 1, bold, fg = rgb intent(0xFF0000) → `.rgb` Color 그대로.
     try testing.expectEqual(@as(u21, 'h'), snap.cells[0].codepoint);
     try testing.expectEqual(@as(u2, 1), snap.cells[0].width);
     try testing.expect(snap.cells[0].style.bold);
     try testing.expectEqual(terminal.Color{ .rgb = .{ .r = 0xFF, .g = 0, .b = 0 } }, snap.cells[0].style.foreground);
-    // cell 1: "한"(U+D55C), width 2; cell 2: continuation.
+    // cell 1: "한"(U+D55C), width 2, fg = indexed intent(2) → `.indexed` 유지(렌더가 config 16색으로 푼다); cell 2: continuation.
     try testing.expectEqual(@as(u21, 0xD55C), snap.cells[1].codepoint);
     try testing.expectEqual(@as(u2, 2), snap.cells[1].width);
+    try testing.expectEqual(terminal.Color{ .indexed = 2 }, snap.cells[1].style.foreground);
     try testing.expect(snap.cells[2].continuation);
-    // cell 3: "e" + 결합 acute(U+0301) → codepoint 'e' + grapheme_id로 cluster 본체 참조.
+    // cell 3: "e" + 결합 acute(U+0301) → codepoint 'e' + grapheme_id로 cluster 본체 참조. fg = default intent(0) → `.default`.
+    try testing.expectEqual(terminal.Color.default, snap.cells[3].style.foreground);
     try testing.expectEqual(@as(u21, 'e'), snap.cells[3].codepoint);
     try testing.expect(snap.cells[3].grapheme_id != 0);
     try testing.expectEqual(@as(u21, 0x0301), snap.graphemes[snap.cells[3].grapheme_id - 1][0]);

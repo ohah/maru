@@ -642,8 +642,9 @@ chunk_index:u32 | chunk_count:u32 | record_bytes...
   상태라 host가 그 rgb로 구워 실어(rgb 태그) 원색을 보존한다. `count`는 이 run이 채우는 **grid cell 수**(wide면 width=2).
   `style_flags`는 resolved bitmask(bold/dim/italic/underline{,_double,_curly}/blink/inverse/invisible/strikethrough/overline). row
   폭 검증은 `Σ(width*count)==cols`(`rowWidthMatches`)로 wide-cell continuation 불일치를 잡는다.
-- delta record는 body 첫 필드로 `base_generation:u64`를 둔다. `str/blob`은 `length:u32 + bytes`이고 grapheme/mime는 UTF-8을
-  검증하되 image blob 바이트는 검증하지 않는다. 손상 방어 cap은 문자열 64 KiB·row당 run 65536이다.
+- set_runs/cursor/modes 등 delta record는 body 첫 필드로 `base_generation:u64`를 둔다(image/prompt delta는 body에 없어 record
+  header의 `generation`으로 base를 대조한다). grapheme(str)은 UTF-8을 검증하고, image blob 픽셀 바이트는 검증하지 않는다(ImageBlob은
+  `image_id/generation/width/height/bpp/pixels`로 mime 필드가 없다). 손상 방어 cap은 문자열 64 KiB·row당 run 65536·image blob 청크당 1 MiB·재조립 총량 512 MiB다.
 
 client overflow·generation mismatch는 full snapshot 재동기화하며 renderer/ANSI adapter는 완전 검증된 snapshot만 원자 publish한다.
 

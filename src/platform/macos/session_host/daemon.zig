@@ -133,7 +133,7 @@ test "daemon: forked host survives parent-independent (setsid) and answers hello
     defer _ = c.close(fd);
 
     // hello → hello_ack.
-    const hello = try framing.encodeFrame(allocator, .{ .kind = .hello, .request_id = 1 }, "{\"protocol_min\":1,\"protocol_max\":1,\"client_kind\":\"cli\"}");
+    const hello = try framing.encodeFrame(allocator, .{ .kind = .hello, .request_id = 1 }, "{\"protocol_min\":2,\"protocol_max\":2,\"client_kind\":\"cli\"}");
     defer allocator.free(hello);
     try socket_server.writeAll(fd, hello);
 

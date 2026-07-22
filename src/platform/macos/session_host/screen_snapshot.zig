@@ -119,6 +119,23 @@ fn appendImageBlobRecords(allocator: std.mem.Allocator, stream: *std.ArrayListUn
     }
 }
 
+/// computeDelta의 **base(new_base)** 전용 이미지 메타 방출(리뷰 #11): base는 host-side에서 다음 diff의 prev로만 쓰이고(computeDelta가
+/// image_id/generation만 읽어 dedup) client로 가지 않으며, resync는 projectSnapshot으로 core에서 재투영한다. 그러므로 base엔
+/// **픽셀을 싣지 않는다**(pixel_len=0) — 매 ~20ms tick마다 수 MiB 픽셀을 재인코딩하던 낭비를 없앤다. 픽셀 전달은 delta(변경분)와
+/// projectSnapshot(attach/resync)이 맡는다.
+fn appendImageBaseMeta(allocator: std.mem.Allocator, stream: *std.ArrayListUnmanaged(u8), generation: u64, img: terminal.KittyImageView) screen_stream.DecodeError!void {
+    const rec = try screen_stream.encodeImageBlob(allocator, .{ .kind = .image_blob, .generation = generation }, .{
+        .image_id = img.image_id,
+        .generation = img.generation,
+        .width = img.width,
+        .height = img.height,
+        .bpp = img.bpp,
+        .pixels = &.{}, // base는 dedup 메타만 — 픽셀은 delta/resync가 나른다.
+    });
+    defer allocator.free(rec);
+    try screen_stream.appendRecord(stream, allocator, rec);
+}
+
 /// delta용 placement 방출: full-set 교체라 **clear 센티넬(image_place, image_id=0)** 뒤에 현재 placement 전체를 image_place로
 /// 싣는다. client(applyDelta)는 센티넬에 placement_list를 비우고 이후 image_place를 append한다 — 집합이 비게 바뀐 경우도
 /// 센티넬만으로 표현된다. snapshot-band `image_placement`(kind 3)와 달리 delta-band `image_place`(kind 15)를 쓴다.
@@ -405,6 +422,7 @@ pub fn computeDelta(allocator: std.mem.Allocator, prev_bytes: []const u8, core: 
             },
             .prompt_marks => {
                 if (prev_pm) |p| p.deinit(allocator); // 중복 방어.
+                prev_pm = null; // 리뷰 #6: free 후 null — 아래 decode가 실패하면 함수 defer가 이미-해제된 PM을 다시 free하지 않게.
                 prev_pm = try screen_stream.decodePromptMarks(allocator, s.body);
             },
             else => {},
@@ -458,11 +476,27 @@ pub fn computeDelta(allocator: std.mem.Allocator, prev_bytes: []const u8, core: 
 
     // 이미지: snapshot(base)엔 현재 전체를 싣고(projectSnapshot과 동형 — 재접속/resync가 이 base로 이미지 복원), delta엔
     // client가 없는 것만 싣는다(#1 I4b). blob은 prev generation과 다른 이미지만, placement는 집합이 바뀌었을 때 clear+set.
-    for (snap.images) |img| try appendImageBlobRecords(allocator, &snapshot, opts.generation, img);
+    for (snap.images) |img| try appendImageBaseMeta(allocator, &snapshot, opts.generation, img); // 리뷰 #11: base엔 픽셀 없이 메타만.
     for (snap.placements) |p| try appendImagePlacementRecord(allocator, &snapshot, opts.generation, p);
     for (snap.images) |img| {
         const have = if (prev_image_gens.get(img.image_id)) |g| g == img.generation else false;
         if (!have) try appendImageBlobRecords(allocator, &delta, opts.generation, img); // client가 없는/바뀐 이미지만.
+    }
+    // 리뷰 #12: prev에 있었으나 현재 없는 이미지 = host storage에서 evict/delete됨 → image_remove로 client도 회수(무한증가 방지).
+    {
+        var it = prev_image_gens.keyIterator();
+        while (it.next()) |prev_id| {
+            var present = false;
+            for (snap.images) |img| if (img.image_id == prev_id.*) {
+                present = true;
+                break;
+            };
+            if (!present) {
+                const rec = try screen_stream.encodeImageRemove(allocator, .{ .kind = .image_remove, .generation = opts.generation }, .{ .base_generation = opts.generation, .blob_id = prev_id.* });
+                defer allocator.free(rec);
+                try screen_stream.appendRecord(&delta, allocator, rec);
+            }
+        }
     }
     if (placementsChanged(prev_placements.items, snap.placements)) {
         try appendImagePlaceDelta(allocator, &delta, opts.generation, snap.placements);

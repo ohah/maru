@@ -77,7 +77,7 @@ pub const RuntimeManager = struct {
 
     /// server.zig가 dispatch에 넘길 중립 vtable. `ctx`는 이 매니저다.
     pub fn runtimeOps(self: *RuntimeManager) server.RuntimeOps {
-        return .{ .ctx = self, .spawn = spawnOp, .terminate = terminateOp, .write_input = writeInputOp, .resize = resizeOp, .snapshot = snapshotOp, .delta = deltaOp };
+        return .{ .ctx = self, .spawn = spawnOp, .terminate = terminateOp, .write_input = writeInputOp, .resize = resizeOp, .snapshot = snapshotOp, .delta = deltaOp, .notification = notificationOp };
     }
 
     fn spawnOp(ctx: *anyopaque, params: server.RuntimeSpawnParams) anyerror!u128 {
@@ -139,6 +139,27 @@ pub const RuntimeManager = struct {
             else => return e,
         };
         return .{ .send = result.delta, .is_snapshot = false, .new_base = result.snapshot };
+    }
+
+    /// runtime의 대기 중인 OSC 9/777 데스크톱 알림을 빼서 JSON `{title, body}`로 준다(§6.32). host의 `TerminalCore`가
+    /// 파싱해 둔 title/body를 **core lock 아래** 읽고 clearNotification한다(reader 스레드가 core를 쓰므로, snapshot과 동일한
+    /// off-thread 동기화). 없으면 `{title:"",body:""}`. title/body는 임의 바이트라 실 JSON encoder로 escape한다.
+    fn notificationOp(ctx: *anyopaque, runtime_id: u128, allocator: std.mem.Allocator) anyerror![]u8 {
+        const self: *RuntimeManager = @ptrCast(@alignCast(ctx));
+        const handle = self.handleFor(runtime_id) orelse return error.RuntimeNotFound;
+        const surface = self.backend_impl.surfaceFor(handle) orelse return error.RuntimeNotFound;
+        surface.lockCore(self.io);
+        defer surface.unlockCore(self.io);
+        var out: std.Io.Writer.Allocating = .init(allocator);
+        defer out.deinit();
+        var js: std.json.Stringify = .{ .writer = &out.writer, .options = .{} };
+        if (surface.core.pendingNotification()) |n| {
+            js.write(.{ .title = n.title, .body = n.body }) catch return error.OutOfMemory;
+            surface.core.clearNotification(); // drain — 다음 조회는 없음.
+        } else {
+            js.write(.{ .title = "", .body = "" }) catch return error.OutOfMemory;
+        }
+        return allocator.dupe(u8, out.written()) catch return error.OutOfMemory;
     }
 
     /// runtime_id → in-process handle. registry entry의 opaque 슬롯에서 되읽는다(spawn이 심어 둔 값). 없으면 null.

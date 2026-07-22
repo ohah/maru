@@ -733,9 +733,10 @@ pub const SessionConfig = struct {
     keep_alive_after_quit: bool = false,
 
     pub const schema = .{ // 키: session.keep-alive-after-quit (namespace=Config 필드명 session)
-        // hidden — 실험적 opt-in(원격 스크롤백/선택 등 미완성 경로)이라 설정 UI에 노출하지 않고 **config 파일로만** 켠다.
-        // section=null만으론 "기타" 그룹에 노출되므로(code-review #8) hidden으로 명시해 append*Fields가 건너뛰게 한다.
-        .keep_alive_after_quit = Meta{ .hidden = true, .doc = "GUI 종료 후에도 터미널을 host(maru-sessiond)에서 유지·재접속(실험적 opt-in)" },
+        // 설정 GUI(workspace 섹션)에 토글로 노출한다 — 사용자가 GUI로 켜고 끌 수 있다(기본값 전환 대비 "끄는 수단"이자 opt-in
+        // 진입점). 원격 색·이미지·prompt_marks 패리티가 붙어 실사용 가능해져 더는 숨기지 않는다(과거 code-review #8의 hidden 해제).
+        // ⚠️적용 시점: **재실행 시**(backend 셋업이 app init에서 일어나므로) — 실행 중 토글은 기존 in-process 터미널을 소급 변경하지 않는다.
+        .keep_alive_after_quit = Meta{ .section = .workspace, .widget = .toggle, .doc = "GUI 종료·크래시 후에도 터미널 세션을 유지하고 재실행 시 재접속(실험적, tmux식)" },
     };
 };
 

@@ -28,6 +28,7 @@ const reg = @import("registry.zig");
 const screen_snapshot = @import("screen_snapshot.zig");
 const screen_stream = @import("screen_stream.zig");
 const core_command = maru.session.core_command; // §6a 원격 스크롤 명령을 host core에 적용
+const terminal = maru.terminal; // §6c 원격 검색(Match) 등
 
 const InProcessTermBackend = maru.app.InProcessTermBackend;
 const LiveRegistry = maru.app.in_process_term_backend.LiveRegistry;
@@ -40,6 +41,18 @@ const default_queue_capacity: usize = 16;
 
 // macOS libc CSPRNG(std.posix 미노출 — 이 파일은 macOS 전용). runtime_id 발급용.
 extern "c" fn arc4random_buf(buf: [*]u8, nbytes: usize) void;
+
+/// hex 문자열을 바이트로 디코드해 `out`에 채우고 채운 길이를 돌려준다(§6c 검색어 — 임의 텍스트라 hex로 실어 escape 회피).
+/// 홀수/잘못된 hex나 `out` 초과는 거기서 멈춘다(best-effort — 검색어는 부가 기능).
+fn hexDecodeInto(hex: []const u8, out: []u8) usize {
+    var n: usize = 0;
+    var i: usize = 0;
+    while (i + 2 <= hex.len and n < out.len) : (i += 2) {
+        out[n] = std.fmt.parseInt(u8, hex[i .. i + 2], 16) catch break;
+        n += 1;
+    }
+    return n;
+}
 
 /// host가 소유하는 실 terminal runtime 표. `RuntimeOps`를 통해 server.zig가 이걸 구동한다. self-referential이라
 /// **in-place `init`**을 쓴다(caller가 `var m: RuntimeManager = undefined; m.init(...)`) — backend가 아래 두 registry의
@@ -78,7 +91,7 @@ pub const RuntimeManager = struct {
 
     /// server.zig가 dispatch에 넘길 중립 vtable. `ctx`는 이 매니저다.
     pub fn runtimeOps(self: *RuntimeManager) server.RuntimeOps {
-        return .{ .ctx = self, .spawn = spawnOp, .terminate = terminateOp, .write_input = writeInputOp, .resize = resizeOp, .snapshot = snapshotOp, .delta = deltaOp, .notification = notificationOp, .core_command = coreCommandOp, .selected_text = selectedTextOp, .select_op = selectOpOp };
+        return .{ .ctx = self, .spawn = spawnOp, .terminate = terminateOp, .write_input = writeInputOp, .resize = resizeOp, .snapshot = snapshotOp, .delta = deltaOp, .notification = notificationOp, .core_command = coreCommandOp, .selected_text = selectedTextOp, .select_op = selectOpOp, .find = findOp };
     }
 
     fn spawnOp(ctx: *anyopaque, params: server.RuntimeSpawnParams) anyerror!u128 {
@@ -235,6 +248,38 @@ pub const RuntimeManager = struct {
             return std.fmt.allocPrint(allocator, "{{\"sel\":true,\"sr\":{d},\"sc\":{d},\"er\":{d},\"ec\":{d},\"block\":{}}}", .{ sp.start.row, sp.start.col, sp.end.row, sp.end.col, sp.block }) catch return error.OutOfMemory;
         }
         return allocator.dupe(u8, "{\"sel\":false}") catch return error.OutOfMemory;
+    }
+
+    /// 원격 검색(§6c): client가 보낸 검색어(hex)로 host가 **콘텐츠·스크롤백을 아는 자기 core**에서 `findMatches`(로컬과 같은
+    /// 함수)로 매치를 찾고, 보이는 매치를 `matchViewportSpan`으로 클립해 `{count, spans:[sr,sc,er,ec,...]}`로 준다(선택과 같이
+    /// 검색 의미론 host 단일 출처). count=전체 매치 수, spans=현재 뷰포트에 보이는 매치의 flat 좌표. core lock 아래(findMatches가
+    /// 스크롤백 rewrap으로 core mutate).
+    fn findOp(ctx: *anyopaque, runtime_id: u128, query_hex: []const u8, allocator: std.mem.Allocator) anyerror![]u8 {
+        const self: *RuntimeManager = @ptrCast(@alignCast(ctx));
+        const handle = self.handleFor(runtime_id) orelse return error.RuntimeNotFound;
+        const surface = self.backend_impl.surfaceFor(handle) orelse return error.RuntimeNotFound;
+        var qbuf: [512]u8 = undefined;
+        const query = qbuf[0..hexDecodeInto(query_hex, &qbuf)];
+
+        surface.lockCore(self.io);
+        defer surface.unlockCore(self.io);
+        var matches: std.ArrayList(terminal.Match) = .empty;
+        defer matches.deinit(allocator);
+        surface.core.findMatches(allocator, query, &matches) catch {}; // 실패 시 빈 매치(best-effort).
+
+        var out: std.ArrayList(u8) = .empty;
+        errdefer out.deinit(allocator);
+        var buf: [96]u8 = undefined;
+        try out.appendSlice(allocator, try std.fmt.bufPrint(&buf, "{{\"count\":{d},\"spans\":[", .{matches.items.len}));
+        var first = true;
+        for (matches.items) |m| {
+            const span = surface.core.matchViewportSpan(m) orelse continue; // 뷰포트 밖 매치는 렌더 안 함.
+            if (!first) try out.append(allocator, ',');
+            first = false;
+            try out.appendSlice(allocator, try std.fmt.bufPrint(&buf, "{d},{d},{d},{d}", .{ span.start.row, span.start.col, span.end.row, span.end.col }));
+        }
+        try out.appendSlice(allocator, "]}");
+        return out.toOwnedSlice(allocator);
     }
 
     /// runtime_id → in-process handle. registry entry의 opaque 슬롯에서 되읽는다(spawn이 심어 둔 값). 없으면 null.

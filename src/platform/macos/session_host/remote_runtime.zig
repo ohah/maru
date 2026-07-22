@@ -203,6 +203,27 @@ pub const RemoteRuntime = struct {
         return text;
     }
 
+    /// 원격 검색(§6c): 검색어로 host가 **콘텐츠·스크롤백을 아는 자기 core**에서 `findMatches`(로컬과 같은 함수)로 매치를 찾게
+    /// 하고, 보이는 매치의 뷰포트 span을 `out_spans`에 채운다(검색 의미론 host 단일 출처). 전체 매치 수를 돌려준다(뷰포트 밖 포함).
+    /// `out_spans`는 먼저 비운다. 검색어는 임의 텍스트라 hex로 실어 escape를 피한다(상한 256 char).
+    pub fn find(self: *RemoteRuntime, query: []const u8, out_spans: *std.ArrayList(terminal.SelectionSpan)) client_mod.ClientError!usize {
+        out_spans.clearRetainingCapacity();
+        var hexbuf: [512]u8 = undefined;
+        const qn = @min(query.len, hexbuf.len / 2);
+        const hex_chars = "0123456789abcdef";
+        for (query[0..qn], 0..) |b, i| {
+            hexbuf[i * 2] = hex_chars[b >> 4];
+            hexbuf[i * 2 + 1] = hex_chars[b & 0xf];
+        }
+        var buf: [640]u8 = undefined;
+        const params = std.fmt.bufPrint(&buf, "{{\"stream_id\":{d},\"q\":\"{s}\"}}", .{ self.stream_id, hexbuf[0 .. qn * 2] }) catch return error.OutOfMemory;
+        const resp = try self.client.call("runtime.find", params);
+        defer self.allocator.free(resp);
+        const count = client_mod.extractU64Field(resp, "\"count\":") orelse 0;
+        parseSpansInto(resp, out_spans, self.allocator);
+        return @intCast(count);
+    }
+
     /// 단어/줄 선택(§6b-2): host가 콘텐츠를 아는 자기 core로 경계를 계산하게 하고(`selectWordAt`/`selectLineAt`) 결과 뷰포트
     /// 선택 span을 받는다(빈 placeholder는 경계를 모른다 = 선택 의미론 host 단일 출처). caller는 이 span을 placeholder에 적용해
     /// 하이라이트한다(복사는 #6b-1 selectedText가 그 span으로 host 추출). `op`는 고정 리터럴("word"/"line"). 선택 없으면 null.
@@ -254,6 +275,32 @@ pub const RemoteRuntime = struct {
             return null;
         }
         return .{ .title = title, .body = body };
+    }
+
+    /// `{...,"spans":[sr,sc,er,ec, sr,sc,er,ec, ...]}`의 flat 정수 배열을 4개씩 `SelectionSpan`으로 파싱해 `out`에 append한다
+    /// (§6c 검색 매치 뷰포트 span). std.json.parseFromSlice 대신 수동 스캔(f128 회피, decodeJsonStringField와 같은 이유).
+    /// 잘못된 형식/append 실패는 best-effort로 멈춘다(검색은 부가 기능).
+    fn parseSpansInto(resp: []const u8, out: *std.ArrayList(terminal.SelectionSpan), allocator: std.mem.Allocator) void {
+        const key = "\"spans\":[";
+        const start = std.mem.indexOf(u8, resp, key) orelse return;
+        var i = start + key.len;
+        var nums: [4]u16 = undefined;
+        var ni: usize = 0;
+        while (i < resp.len and resp[i] != ']') {
+            if (resp[i] < '0' or resp[i] > '9') { // 구분자(`,` 공백) 스킵.
+                i += 1;
+                continue;
+            }
+            var j = i;
+            while (j < resp.len and resp[j] >= '0' and resp[j] <= '9') j += 1;
+            nums[ni] = std.fmt.parseInt(u16, resp[i..j], 10) catch break;
+            i = j;
+            ni += 1;
+            if (ni == 4) {
+                out.append(allocator, .{ .start = .{ .row = nums[0], .col = nums[1] }, .end = .{ .row = nums[2], .col = nums[3] }, .block = false }) catch return;
+                ni = 0;
+            }
+        }
     }
 
     /// `{"key":"<json-string>", ...}`에서 `key`의 문자열 값을 디코드해 owned 바이트로 돌려준다(키 없으면 null). host는
@@ -926,4 +973,75 @@ test "remote runtime: selectContentAware computes word/line boundaries on the ho
     };
     defer allocator.free(line);
     try testing.expectEqualStrings("foo bar", line); // 줄 전체(host 계산).
+}
+
+// code-review #6c end-to-end — 원격 검색. 빈 client placeholder는 검색을 못 하므로 host가 자기 core(콘텐츠·스크롤백)에서
+// findMatches로 매치를 찾아 보이는 뷰포트 span을 돌려주는지 실 fork host로 고정한다(검색 의미론 host 단일 출처). macOS opt-in.
+test "remote runtime: find matches on the host and returns viewport spans (§6c)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    const io = testing.io;
+
+    var dir_buf: [256]u8 = undefined;
+    const dir_path = std.fmt.bufPrintZ(&dir_buf, "/tmp/maru-sh-rr-find-{d}", .{c.getpid()}) catch return error.SkipZigTest;
+    var sp_buf: [320]u8 = undefined;
+    const socket_path = std.fmt.bufPrintZ(&sp_buf, "{s}/control.sock", .{dir_path}) catch return error.SkipZigTest;
+
+    const child = c.fork();
+    if (child < 0) return error.SkipZigTest;
+    if (child == 0) {
+        _ = c.setsid();
+        daemon.runSessionHost(std.heap.page_allocator, io, dir_path, socket_path) catch {};
+        std.c._exit(0);
+    }
+    defer {
+        _ = c.kill(child, posix.SIG.TERM);
+        var status: c_int = undefined;
+        _ = c.waitpid(child, &status, 0);
+        _ = c.unlink(socket_path.ptr);
+        _ = c.rmdir(dir_path.ptr);
+    }
+
+    var client: client_mod.Client = blk: {
+        var attempts: usize = 0;
+        while (attempts < 150) : (attempts += 1) {
+            if (client_mod.Client.connect(allocator, socket_path, "gui")) |cl| break :blk cl else |_| _ = usleep(20 * 1000);
+        }
+        try testing.expect(false);
+        return;
+    };
+    defer client.deinit();
+
+    var rr: RemoteRuntime = undefined;
+    try rr.spawn(&client, allocator, io, 1, &.{"/bin/cat"}, .{ .cols = 40, .rows = 8 });
+    defer rr.deinit();
+    const surface = rr.surfacePtr();
+
+    // "xyz"를 입력. PTY는 **라인 에코 + cat 출력**으로 같은 줄을 2번 낸다(row0=에코, row1=cat) → "xyz" 매치 2개.
+    // 결정적이려면 두 줄이 다 올 때까지(row1[0]=='x') 기다린다.
+    try rr.sendInput("xyz\n");
+    var ready = false;
+    var attempts: usize = 0;
+    while (attempts < 200 and !ready) : (attempts += 1) {
+        _ = rr.pumpDelta() catch break;
+        surface.lockCore(io);
+        const snap = surface.renderSnapshot();
+        const row1_c0 = snap.cells[snap.size.cols].codepoint; // row1 col0
+        surface.unlockCore(io);
+        if (row1_c0 == 'x') ready = true else _ = usleep(20 * 1000);
+    }
+    try testing.expect(ready);
+
+    // "xyz" 검색 → host findMatches가 2개(에코 줄 + cat 줄) 찾고, 둘 다 보이므로 뷰포트 span 2개.
+    var spans: std.ArrayList(terminal.SelectionSpan) = .empty;
+    defer spans.deinit(allocator);
+    const count = try rr.find("xyz", &spans);
+    try testing.expectEqual(@as(usize, 2), count); // 전체 매치 수(에코+cat 두 줄)
+    try testing.expectEqual(@as(usize, 2), spans.items.len); // 보이는 매치 뷰포트 span
+    try testing.expectEqual(@as(u16, 0), spans.items[0].start.row); // 첫 매치는 row0(에코)
+
+    // 없는 검색어 → 0.
+    const zero = try rr.find("zzz", &spans);
+    try testing.expectEqual(@as(usize, 0), zero);
+    try testing.expectEqual(@as(usize, 0), spans.items.len);
 }

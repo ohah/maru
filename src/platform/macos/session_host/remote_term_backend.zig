@@ -128,6 +128,13 @@ pub const RemoteTermBackend = struct {
         return (rr.selectedText(span) catch return null) orelse null;
     }
 
+    /// host-backed Term(handle)에서 검색어 매치를 host가 찾게 하고(§6c — `findMatches` 재사용) 보이는 매치 뷰포트 span을
+    /// `out_spans`에 채운다. 전체 매치 수를 돌려준다. 없거나 오류면 null(best-effort). 검색 의미론은 host core 단일 출처.
+    pub fn findFor(self: *RemoteTermBackend, handle: RuntimeHandle, query: []const u8, out_spans: *std.ArrayList(maru.terminal.SelectionSpan)) ?usize {
+        const rr = self.runtimes.get(handle) orelse return null;
+        return rr.find(query, out_spans) catch null;
+    }
+
     fn spawn(ctx: *anyopaque, params: SpawnParams) anyerror!*Surface {
         const self: *RemoteTermBackend = @ptrCast(@alignCast(ctx));
         // argv = [command] ++ args (host의 spawnRuntime이 argv[0]=command, argv[1..]=args로 되돌린다). rr.spawn이 동기적으로

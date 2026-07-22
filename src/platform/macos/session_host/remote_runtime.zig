@@ -115,6 +115,15 @@ pub const RemoteRuntime = struct {
         self.* = undefined;
     }
 
+    /// client-side 자원만 회수한다(surface/screen) — **host runtime은 안 죽인다**(terminate 안 보냄). 앱 quit 시 host-backed
+    /// Term을 이걸로 정리하면 runtime이 host에 남아(연결 EOF를 host가 detach로 처리해 유지, §6 app-quit=detach) GUI 재실행 시
+    /// `attachExisting`으로 재접속한다. `deinit`과 대칭이되 terminate만 뺀다.
+    pub fn detachClientSide(self: *RemoteRuntime) void {
+        self.surface.deinit();
+        self.remote_screen.deinit();
+        self.* = undefined;
+    }
+
     /// 렌더/입력 라우팅에 쓸 Surface(GUI가 in-process처럼 다룬다).
     pub fn surfacePtr(self: *RemoteRuntime) *Surface {
         return &self.surface;

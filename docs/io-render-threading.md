@@ -226,7 +226,8 @@ mutate를 비동기 위임하면 적용이 다음 reader 턴으로 밀려 **한 
   키를 ignored/lost 처리하지 않고 `기존 input → scroll_to_bottom → 새 input` wire 순서를 보존한다. FIFO admission 뒤
   encode OOM은 retryable queue 상태이고, pending+new가 64 KiB를 넘는 admission은 효과 0으로 fail-closed한다.
   이후 blocking mouse/core/resize RPC는 ordered FIFO를 먼저 flush해 key를 추월하지 않는다. capability 없는 구 host에는 blocking fallback하지
-  않고 preedit/candidate를 fail-closed한다.
+  않는다. 구 wire의 visible cursor가 해당 snapshot의 live bottom을 증명할 때만 preedit/candidate를 표시하고, hidden이면
+  scrollback과 DECTCEM-hidden live 화면이 모호하므로 fail-closed한다. 이 증거는 snapshot별이며 latch하지 않는다.
 - connection frame의 partial write 뒤 hard error는 같은 fd에서 재시도하지 않고 connection 전체를 fail-close한다.
   detach/terminate cleanup frame을 지속적인 OOM으로 만들 수 없을 때도 socket EOF를 fallback으로 사용해 host lease를 남기지 않는다.
 - **스크롤·마우스 선택은 즉시성이 중요** → 한 프레임 지연이 체감될 수 있다.
@@ -400,8 +401,9 @@ sync(2026) 게이트는 폴링 렌더 루프의 미묘한 부분이라(hold가 �
 - **C(`dispatchBell`)**: `takeBell()`을 **무락**으로 읽고 clear(단일 writer=리더의 benign racy bool). lock 지점 아님 — 통합 시 그 재트리거-방지 clear 시맨틱만 보존.
 - **`imeCursorRect`(tick 밖, IME 온디맨드)**: 과거에는 `core.screen.cursor`를 무락으로 직접 읽어 torn read 가능성이
   있었지만 Phase 4에서 수정했다. 현재는 pin된 terminal `Surface`의 canonical base cursor를 `lockCore` 아래 읽는다.
-  scrolled snapshot은 `visible=false`여도 live row/col을 보존하며, capability 없는 구 MRSH v2 host는 정확한 anchor를
-  제공한다고 가정하지 않고 neutral origin으로 fail-closed한다.
+  scrolled snapshot은 `visible=false`여도 live row/col을 보존한다. capability 없는 구 MRSH v2 host는 visible cursor가
+  해당 snapshot의 live bottom을 증명할 때만 그 anchor를 사용하며, hidden/ambiguous snapshot은 neutral origin으로
+  fail-closed한다. visible 증거는 snapshot마다 다시 계산하고 상태에 latch하지 않는다.
 - **기존 스냅샷 메커니즘**: `TerminalCore.renderSnapshot()`(`core.zig:1375`)은 `cells`/`graphemes`/`prompt_marks`/`images`를 **zero-copy alias**로 반환(바닥) 또는 소유 `viewport_cells`에 합성(스크롤) → **반드시 lock 아래에서 `buildDrawListWithUnfocused`(`draw_list.zig:93`)로 즉시 owned DrawList 딥카피**. 통합 후에도 이 규율 유지. 단일 통합 스냅샷은 **없다** — A·D·F·J가 DrawList 밖에서 별도 lock으로 읽는 게 통합 대상.
 
 ### 12.3 목표
@@ -441,7 +443,7 @@ if (will_project) { active.lockCore(io); defer unlock; renderPrepWrites(); dl = 
 
 **(2) title-generation(A 제거)** — `TerminalCore`에 `title_generation: std.atomic.Value(u32) = .init(0)`. **리더**가 `windowTitle()` 결과(제목 또는 cwd)를 바꿀 때 `bumpTitleGeneration()`(= `fetchAdd(1, .monotonic)`)한다: `setWindowTitle`(OSC 0/2)·`dispatchCwd`(OSC 7)·`fullReset`(RIS)에서. **단 값이 실제로 바뀔 때만** bump한다 — 각 setter가 옛 값과 비교해 동일하면 생략(셸 통합이 매 프롬프트 같은 OSC 7/2를 재emit해도 헛 sync 방지, code-review [0]). ordering은 `.monotonic`으로 충분: 메인은 이 카운터를 **변경 감지**로만 쓰고 title/cwd 버퍼는 `core_mutex` 아래에서만 읽어 버퍼 가시성은 mutex가 보장한다(acquire/release는 load-bearing 아님, code-review [7]). `syncAutoTitles`는 term별 `last_title_gen`과 **lock 없이 load** 비교 → **다를 때만** lock+`windowTitle` 복사; **복사 성공 시에만** `last_title_gen`을 갱신(OOM이면 세대를 안 올려 다음 tick 재시도 — 라벨 영구 stuck 방지, code-review [1]). 대부분 tick: N load(수 ns)만, lock 0회.
 
-**(3) imeCursorRect 정정** — `imeCursorRect`는 오버레이 caret이 없을 때 terminal transaction이 pin한 `Surface`를 `lockCore` 아래 조회하고, 그 surface의 **base render snapshot이 가진 canonical cursor**를 읽는다. 로컬은 `TerminalCore` snapshot, host-backed는 `RemoteScreen` snapshot이 같은 `Surface.baseCursorLocked` 계약을 탄다. 합성 뒤 이동한 overlay cursor나 무락 `core.screen.cursor`를 후보 anchor로 쓰지 않는다. 이 질의는 조합 중에만 불리는 event-driven 경로라 per-tick 비용이 아니며, target이 사라졌거나 구 live MRSH v2 host가 `screen_viewport_scrolled_v1`을 제공하지 않아 cursor 의미를 신뢰할 수 없으면 nullable 조회가 실패해 neutral pane origin으로 fail-closed한다. 오버레이 caret 경로는 terminal snapshot에 접근하지 않는다.
+**(3) imeCursorRect 정정** — `imeCursorRect`는 오버레이 caret이 없을 때 terminal transaction이 pin한 `Surface`를 `lockCore` 아래 조회하고, 그 surface의 **base render snapshot이 가진 canonical cursor**를 읽는다. 로컬은 `TerminalCore` snapshot, host-backed는 `RemoteScreen` snapshot이 같은 `Surface.baseCursorLocked` 계약을 탄다. 합성 뒤 이동한 overlay cursor나 무락 `core.screen.cursor`를 후보 anchor로 쓰지 않는다. 이 질의는 조합 중에만 불리는 event-driven 경로라 per-tick 비용이 아니다. target이 사라지면 nullable 조회가 실패한다. 구 live MRSH v2 host가 `screen_viewport_scrolled_v1`을 제공하지 않을 때는 visible cursor가 그 snapshot의 live bottom을 증명하면 anchor를 허용하고, hidden/ambiguous snapshot만 neutral pane origin으로 fail-closed한다. 오버레이 caret 경로는 terminal snapshot에 접근하지 않는다.
 
 **(4) render-prep write(E·I)는 DrawList lock에 유지** — `setCellMetrics`·`setDefaultColors`(I)·`findMatches`(E)는 이 frame 렌더를 위해 **즉시** 코어를 바꿔야 해 명령 위임(§9.2, 다음 reader 턴 지연)으로 못 옮긴다. 이미 build lock 스코프에 있으므로 그대로 두되, "read 스냅샷으로 못 접는 render-prep write"로 **명시**한다 — 이게 §3의 "완전 무락 불가" 잔재의 정체다(팬아웃은 tick당 1 write-lock으로 수렴).
 

@@ -57,9 +57,9 @@ pub const Overlay = struct {
     /// canonical 화면을 그대로 반환하고 상태는 유지해 다음 frame에서 다시 시도한다.
     pub fn compose(self: *Overlay, base: types.RenderSnapshot) types.RenderSnapshot {
         const preedit_bytes = self.text orelse return base;
-        // 스크롤백 뷰포트의 cursor는 live 입력 위치가 아니다. 구 host라 이 의미론 자체를
-        // 모르는 경우도 포함해 canonical 화면을 유지한다. AppSession은 known+scrolled일 때만
-        // scroll-to-bottom을 요청하고, unknown이면 host 재시작 전까지 fail-closed한다.
+        // 스크롤백 뷰포트의 cursor는 live 입력 위치가 아니다. upstream screen source가 live를
+        // 안전하게 증명하지 못한 unknown도 canonical 화면을 유지한다. AppSession은
+        // known+scrolled일 때만 scroll-to-bottom을 요청한다.
         if (!base.viewport_scrolled_known or base.viewport_scrolled) return base;
         const cols = base.size.cols;
         const rows = base.size.rows;

@@ -619,14 +619,17 @@ request_id:u64 | stream_id:u64 | payload_len:u32
 - `screen_viewport_scrolled_v1`은 같은 MRSH v2 안에서 screen mode bit의 의미를 확장하는 hello capability다. 이 capability를
   host가 응답했을 때만 client는 `viewport_scrolled`와 scrolled snapshot의 canonical live cursor anchor를 신뢰한다. 앱 업데이트
   전에 이미 살아 있던 구 v2 host는 capability가 없으므로 bit 부재를 `false`로 해석하면 안 된다. 새 client는 그 연결에서
-  marked-text 합성을 생략하고 후보창을 neutral pane origin에 두는 fail-closed 경로를 쓴다. runtime/확정 입력은 유지하되 정확한
-  preedit 표시와 후보 위치만 지원하지 않는다.
+  legacy degraded mode를 쓴다. 구 wire의 `cursor.visible=true`는 그 snapshot이 live bottom이라는 단방향 증거이므로 그때만
+  client-local marked-text 합성과 후보 anchor를 허용한다. hidden cursor는 scrollback과 DECTCEM-hidden live 화면을 구분할 수
+  없어 marked text를 숨기고 후보창을 neutral pane origin에 둔다. 이 visible 증거는 snapshot별 파생값이며 상태에 latch하지 않는다.
+  따라서 앱 업데이트가 기존 runtime/host 종료를 요구하지 않으면서도 안전하게 증명되는 live 화면에서는 preedit을 복구한다.
 - `async_scroll_to_bottom_v1`은 kind 12의 응답 없는 stream command capability다. client는 이 이름이 hello_ack에
   있을 때만 scrolled IME의 live-bottom intent를 admission한다. runtime은 일반 key를 64 KiB direct-input FIFO에
   먼저 소유하고 현재 FIFO 길이를 scroll barrier offset으로 고정한다. shared connection의 기존 frame이 막혀 있어도
   64 KiB cap 안의 후속 input을 버리거나 AppKit callback을 block하지 않으며, frame-loop가
   `barrier 앞 input → scroll_to_bottom → barrier 뒤 input` 순서로 재시도한다. capability 없는 구 v2 host에는 동기
-  `runtime.core_command` RPC로 fallback하지 않고 preedit/candidate 표시만 fail-closed한다.
+  `runtime.core_command` RPC로 fallback하지 않는다. 이미 visible인 live snapshot은 위 legacy degraded mode로 표시하고,
+  hidden/ambiguous snapshot은 계속 fail-closed한다.
   FIFO admission 뒤 frame encode OOM은 성공한 ownership으로 보고 재시도한다. pending+new가 64 KiB를 넘으면
   그 admission 전체를 효과 0으로 거부한다. 이후 blocking mouse/core/resize RPC는 FIFO와 barrier를 먼저 flush한다.
 
@@ -926,7 +929,9 @@ P3-e도 슬라이스로 나눈다(제품 통합이라 크다).
   - **P3-e4c-2(IME marked text parity) ✅**: marked text는 host core command나 protocol state가 아니라 각 GUI
     `Surface`의 client-local `PreeditOverlay`가 소유한다. 로컬/host-backed base snapshot에 공통 합성기를 적용하고,
     host snapshot/delta의 canonical grid는 바꾸지 않는다. 최신 delta마다 다시 합성하며 clear하면 최신 base가 즉시
-    드러난다. 조합 폭은 base `RenderSnapshot.ambiguous_wide`가 단일 출처이며 host snapshot의 mode bit로 원격까지 전달한다.
+    드러난다. 조합 폭은 base `RenderSnapshot.ambiguous_wide`가 단일 출처이며 현재 host snapshot의 mode bit로 원격까지
+    전달한다. 해당 bit가 없던 구 host의 legacy degraded mode는 한글/CJK의 고정 wide 폭은 표시하지만,
+    ambiguous-width 설정 parity는 보장하지 않는다.
     `screen_viewport_scrolled_v1`을 협상한 현재 host의 scrolled snapshot은 `cursor.visible=false`지만 canonical live
     `row/col`을 보존하고, additive `viewport_scrolled` bit는 client가 과거 화면에 조합문자를 합성하지 않고 먼저
     `scroll_to_bottom`을 요청하게 한다. 현재 host는 `async_scroll_to_bottom_v1`의 응답 없는 stream frame을 사용한다.
@@ -936,8 +941,9 @@ P3-e도 슬라이스로 나눈다(제품 통합이라 크다).
     새 admission만 효과 0으로 fail-closed한다. blocking mouse/core/resize RPC는 FIFO와 barrier를 먼저 flush해
     이미 수락한 key를 추월하지 않는다. AppKit
     callback은 `client.call`/response를 기다리지 않는다. 후보창은 합성 cursor가 아니라 이 base cursor를 사용한다.
-    capability 없는 구 v2 host에서는 동기 RPC로 fallback하지 않고 bit 부재를 live bottom으로 간주하지 않으며
-    preedit/candidate를 fail-closed한다. 터미널 조합이 시작되면
+    capability 없는 구 v2 host에서는 동기 RPC로 fallback하지 않는다. 대신 visible cursor가 해당 snapshot의 live bottom을
+    증명할 때만 preedit/candidate를 허용하고, hidden이면 scrollback과 DECTCEM-hidden live를 구분할 수 없어 fail-closed한다.
+    이 판정은 snapshot마다 다시 계산해 visible→hidden 전환을 latch하지 않는다. 터미널 조합이 시작되면
     surface id를 pin하고, 포커스·pane/Term/tab 전환과 활성 workspace의 창 간 이동/병합은 구조 소유권을 바꾸기 전에 해당
     surface로 확정한다. 이때 아직 flush되지 않은 surface별 ordered input queue도 destination session으로 옮긴다. 닫힌 대상은
     transaction 동안 tombstone으로 유지해 새 active로 재지정하지 않는다. cross-window workspace move는 active source와

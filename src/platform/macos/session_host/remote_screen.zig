@@ -372,7 +372,13 @@ pub const RemoteScreen = struct {
     fn srcRenderSnapshot(ctx: *anyopaque) terminal.RenderSnapshot {
         const self: *RemoteScreen = @ptrCast(@alignCast(ctx));
         var snapshot = self.grid.renderSnapshot();
-        snapshot.viewport_scrolled_known = self.viewport_scrolled_known;
+        // Legacy MRSH v2 host에는 viewport mode bit이 없지만, 그 wire는 live bottom에서만
+        // visible cursor를 보내고 scrollback에서는 cursor를 숨긴다. 따라서 visible=true인
+        // 이 snapshot 하나에 한해 live bottom임을 안전하게 증명할 수 있다. 이 증거를
+        // RemoteScreen 상태에 latch하면 다음 hidden/scrolled snapshot을 live로 오인하므로,
+        // 파생 snapshot에만 적용한다. hidden은 DECTCEM-hidden live와 scrollback을 구분할 수
+        // 없어 계속 unknown/fail-closed다.
+        snapshot.viewport_scrolled_known = self.viewport_scrolled_known or snapshot.cursor.visible;
         return snapshot;
     }
     fn srcLock(ctx: *anyopaque, io: std.Io) void {
@@ -631,7 +637,7 @@ test "remote screen: preedit does not render at hidden origin while host viewpor
     surface.unlockCore(io);
 }
 
-test "remote screen: old host without viewport capability suppresses cursor-anchored preedit" {
+test "remote screen: old host visible cursor proves live viewport for client-local preedit" {
     const allocator = testing.allocator;
     const io = testing.io;
     const Surface = maru.session.Surface;
@@ -655,11 +661,88 @@ test "remote screen: old host without viewport capability suppresses cursor-anch
     defer surface.unlockCore(io);
     try testing.expect(surface.setPreeditLocked("한"));
     const rendered = surface.renderSnapshot();
-    try testing.expect(!rendered.viewport_scrolled_known);
+    try testing.expect(rendered.viewport_scrolled_known);
+    try testing.expect(!rendered.viewport_scrolled);
     try testing.expectEqual(@as(u21, 'b'), rendered.cells[0].codepoint);
+    try testing.expectEqual(@as(u21, 0xD55C), rendered.cells[4].codepoint);
+    const base_cursor = surface.baseCursorLocked().?;
+    try testing.expectEqual(@as(u16, 0), base_cursor.row);
+    try testing.expectEqual(@as(u16, 4), base_cursor.col);
+    try testing.expect(surface.baseViewportScrolledLocked() == false);
+}
+
+test "remote screen: old host hidden cursor remains ambiguous and live evidence is not latched" {
+    const allocator = testing.allocator;
+    const io = testing.io;
+    const Surface = maru.session.Surface;
+
+    var core = try terminal.TerminalCore.init(allocator, .{ .cols = 8, .rows = 2 });
+    defer core.deinit();
+    try core.write("base");
+    const records = try screen_snapshot.projectSnapshot(allocator, &core, .{ .generation = 1 });
+    defer allocator.free(records);
+
+    var rs = try RemoteScreen.init(allocator);
+    defer rs.deinit();
+    try rs.applySnapshot(records, io);
+    rs.viewport_scrolled_known = false;
+
+    // Legacy wire에서 visible cursor는 그 snapshot이 live bottom이라는 증거지만, 이 판정은
+    // 상태에 latch하면 안 된다. 다음 snapshot이 hidden이면 scrollback과 DECTCEM-hidden live
+    // 화면을 구분할 수 없으므로 다시 unknown으로 내려가야 한다.
+    const source = rs.screenSource();
+    try testing.expect(source.vtable.render_snapshot(source.ctx).viewport_scrolled_known);
+    rs.grid.cursor.row = 0;
+    rs.grid.cursor.col = 0;
+    rs.grid.cursor.visible = false;
+
+    var surface = try Surface.init(allocator, 4, .{ .cols = 8, .rows = 2 });
+    defer surface.deinit();
+    surface.remote = rs.screenSource();
+
+    surface.lockCore(io);
+    defer surface.unlockCore(io);
+    try testing.expect(surface.setPreeditLocked("한"));
+    const rendered = surface.renderSnapshot();
+    try testing.expect(!rendered.viewport_scrolled_known);
     try testing.expectEqualSlices(terminal.Cell, rs.grid.cells, rendered.cells);
     try testing.expect(surface.baseCursorLocked() == null);
     try testing.expect(surface.baseViewportScrolledLocked() == null);
+}
+
+test "remote screen: current host capability keeps hidden live cursor authoritative" {
+    const allocator = testing.allocator;
+    const io = testing.io;
+    const Surface = maru.session.Surface;
+
+    var core = try terminal.TerminalCore.init(allocator, .{ .cols = 8, .rows = 2 });
+    defer core.deinit();
+    try core.write("base");
+    const records = try screen_snapshot.projectSnapshot(allocator, &core, .{ .generation = 1 });
+    defer allocator.free(records);
+
+    var rs = try RemoteScreen.init(allocator);
+    defer rs.deinit();
+    try rs.applySnapshot(records, io);
+    try testing.expect(rs.viewport_scrolled_known);
+    rs.grid.cursor.visible = false; // DECTCEM hidden at live bottom, not scrollback.
+
+    var surface = try Surface.init(allocator, 5, .{ .cols = 8, .rows = 2 });
+    defer surface.deinit();
+    surface.remote = rs.screenSource();
+
+    surface.lockCore(io);
+    defer surface.unlockCore(io);
+    try testing.expect(surface.setPreeditLocked("한"));
+    const rendered = surface.renderSnapshot();
+    try testing.expect(rendered.viewport_scrolled_known);
+    try testing.expect(!rendered.viewport_scrolled);
+    try testing.expectEqual(@as(u21, 0xD55C), rendered.cells[4].codepoint);
+    const base_cursor = surface.baseCursorLocked().?;
+    try testing.expectEqual(@as(u16, 0), base_cursor.row);
+    try testing.expectEqual(@as(u16, 4), base_cursor.col);
+    try testing.expect(!base_cursor.visible);
+    try testing.expect(surface.baseViewportScrolledLocked() == false);
 }
 
 test "remote screen: build exposes kitty images + placements from the assembler (I4)" {

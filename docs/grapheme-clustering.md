@@ -170,7 +170,7 @@ cluster 분절은 코어 print 경로 `writeCodepoint`(`screen.zig`) **단일 �
 
 단일 진입점을 거치지 않는 두 곳만 명시적으로 챙긴다:
 
-- **IME preedit(조합 중 표시) — codepoint 단위(의도된 한계)**: `screen.zig`의 `snapshotWithPreedit`/`drawPreeditCells`는 셀 저장이 아니라 스냅샷 시점에 `preedit_bytes`를 codepoint 단위 폭으로 임시 렌더하는 별도 경로다(확정 전이라 셀에 안 들어감). **여기엔 cluster 인지를 적용하지 않는다.** 근거(검증): macOS 한글 IME는 조합 중에도 **완성형 음절**(NFC, 예 `한`=U+D55C)을 marked text로 보내고 — preedit 경로(`setMarkedText`→`imeMarked`→`core.setPreedit`)엔 정규화가 없어 그대로 저장된다 — 완성형은 단일 코드포인트라 그대로 한 셀(폭 2)로 정상 렌더된다(기존 IME 테스트도 전부 완성형 전제). NFD 자모/폭0 combining을 marked text로 보내는 IME(드묾)에서만 조합 중 자모가 분리되거나 악센트가 잠깐 안 보이는데, 이는 **확정 직후 PTY 경로(`writeCodepoint`)가 cluster로 정상 묶으므로** 조합 중 한정 표시 한계다. 추측만으로 cluster 로직을 preedit에 복제하지 않는다(`architecture.md` "성급한 최적화 금지"). 실사용 근거(그런 IME가 실제로 쓰임)가 생기면 그때 검토한다.
+- **IME preedit(조합 중 표시) — codepoint 단위(의도된 한계)**: `Surface.renderSnapshot`의 `PreeditOverlay`는 셀 저장이 아니라 base snapshot 위 scratch에 `preedit_bytes`를 codepoint 단위 폭으로 임시 렌더한다(확정 전이라 core/host grid에 안 들어감). 폭 정책은 overlay의 별도 config가 아니라 **base `RenderSnapshot.ambiguous_wide`가 단일 출처**이고, host-backed 화면은 같은 값을 screen mode bit로 전달한다. **여기엔 cluster 인지를 적용하지 않는다.** 근거(검증): macOS 한글 IME는 조합 중에도 **완성형 음절**(NFC, 예 `한`=U+D55C)을 marked text로 보내고, `setMarkedText`→`imeMarked`→`Surface.preedit` 경로는 그대로 저장한다. 완성형은 단일 코드포인트라 한 셀(폭 2)로 정상 렌더된다. NFD 자모/폭0 combining을 marked text로 보내는 IME에서만 조합 중 표시 한계가 있으며, 확정 직후 PTY 출력은 `writeCodepoint` cluster 경로를 탄다.
 - **클립보드 복사·재출력(`appendRowUtf8`)**: 저장된 다중 코드포인트를 손실 없이 UTF-8로 뽑아야 한다(무손실 — §3.2 잘림 금지와 직결). HG2a 직렬화 확장에 포함한다.
 
 ## 5. 분해 (HG1~HG4)

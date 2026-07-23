@@ -326,7 +326,7 @@ fn measureRenderBuildScrolled(allocator: std.mem.Allocator, io: std.Io) !Budget 
 
 fn measureCoreCommandQueue(allocator: std.mem.Allocator, io: std.Io) !Budget {
     // Phase 3(docs/io-render-threading.md §9.7): 메인이 코어 mutate를 명령으로 위임하고 reader가 빼는
-    // CoreCommandQueue의 1건 라운드트립 비용을 잰다 — enqueue(락+dupe+append)→pop(락+head 전진)→freeCommand.
+    // CoreCommandQueue의 1건 라운드트립 비용을 잰다 — enqueue(락+append)→pop(락+head 전진).
     // 위임 적용 지연의 바닥이며, 이게 UI 이벤트 빈도에서 작아야 (a) 단일책임 모델이 latency를 안 만든다.
     // scroll(payload 없음)으로 큐 기계 비용 자체를 잰다. MARU_DEBUG 미설정이라 타임스탬프 클럭 읽기는 없다.
     var queue = try maru.app.CoreCommandQueue.init(io, allocator, 64);
@@ -336,8 +336,7 @@ fn measureCoreCommandQueue(allocator: std.mem.Allocator, io: std.Io) !Budget {
     const start = now(io);
     for (0..iterations) |i| {
         try queue.enqueueBlocking(.{ .scroll = @intCast(i) });
-        const entry = queue.pop() orelse return error.PerfResultQueueEmpty;
-        maru.app.CoreCommandQueue.freeCommand(allocator, entry.cmd);
+        _ = queue.pop() orelse return error.PerfResultQueueEmpty;
     }
     const elapsed = now(io) - start;
 

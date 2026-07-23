@@ -50,6 +50,12 @@ pub const Client = struct {
     allocator: std.mem.Allocator,
     fd: c.fd_t,
     host_id: u128,
+    /// hello_ack에서 host가 `screen_viewport_scrolled_v1` mode bit을 신뢰할 수 있다고 광고했는가. 구 host ACK에는
+    /// capability가 없으므로 false로 남겨 remote preedit가 숨은 live cursor에 그려지지 않게 한다.
+    screen_viewport_scrolled_v1: bool = false,
+    /// host가 응답 없는 `scroll_to_bottom` stream frame을 지원하는가. false인 구 host에서는
+    /// AppKit callback이 동기 RPC로 fallback하지 않고 scrolled preedit를 fail-closed한다.
+    async_scroll_to_bottom_v1: bool = false,
     parser: framing.FrameParser,
     // async full-state를 하나라도 수용하지 못하면 server subscription base는 이미 전진했을 수 있다. 그 뒤 같은 socket을
     // 계속 쓰면 어떤 shared stream이 누락됐는지 복구할 수 없으므로 connection 전체를 poison/close한다.
@@ -68,6 +74,15 @@ pub const Client = struct {
     // write하므로(프레임 인터리브 없음) 각 원소는 완결된 한 배치다. 모든 원격 runtime이 **단일 app-전역 backend**를 공유해 한
     // allocator로 이 배치들을 만들고/소비/해제하므로(불변식) 버퍼-소비 간 allocator가 일치한다. deinit이 잔여를 회수한다.
     pending_batches: std.ArrayListUnmanaged(StreamBatch) = .empty,
+    // UI의 non-blocking input/viewport-command 경로가 socket backpressure를 만났을 때 소유하는 **단 하나의 완성 wire
+    // frame**. offset은 이미 kernel이 수락한 prefix 뒤를 가리킨다. frame을 이 슬롯에 넣는 순간 payload/command는 caller
+    // 관점에서 accepted이므로 재전송하지 않는다. 한 슬롯 + RemoteRuntime의 stream별 sticky intent로 메모리가 고정 상한이다.
+    pending_outbound: ?PendingOutbound = null,
+
+    const PendingOutbound = struct {
+        frame: []u8,
+        offset: usize = 0,
+    };
 
     /// host socket에 connect하고 hello를 왕복한다. 성공하면 `host_id`가 채워진 Client다. host가 없으면 ConnectFailed
     /// (discovery가 이 신호로 spawn/host_unavailable을 가른다, P3-d2b). version 불일치는 IncompatibleVersion.
@@ -102,11 +117,14 @@ pub const Client = struct {
         if (ack.header.kind != .hello_ack) return error.HandshakeFailed;
         if (std.mem.indexOf(u8, ack.payload, "incompatible_version") != null) return error.IncompatibleVersion;
         self.host_id = parseHostId(ack.payload) orelse return error.HandshakeFailed;
+        self.screen_viewport_scrolled_v1 = payloadHasCapability(ack.payload, "screen_viewport_scrolled_v1");
+        self.async_scroll_to_bottom_v1 = payloadHasCapability(ack.payload, "async_scroll_to_bottom_v1");
         return self;
     }
 
     pub fn deinit(self: *Client) void {
         if (self.fd >= 0) _ = c.close(self.fd);
+        self.clearPendingOutbound();
         for (self.pending_stream.items) |f| f.deinit(self.allocator); // 미소비 버퍼 stream frame 회수.
         self.pending_stream.deinit(self.allocator);
         for (self.pending_events.items) |f| f.deinit(self.allocator);
@@ -121,13 +139,20 @@ pub const Client = struct {
     /// payload는 host의 response JSON(owned — caller가 free). typed error 판정은 caller가 payload에서 한다(§10 error 매핑).
     pub fn call(self: *Client, method: []const u8, params_json: ?[]const u8) ClientError![]u8 {
         try self.ensureUsable();
+        // non-blocking input이 backpressure로 일부만 전송됐어도 뒤 request가 wire에서 추월하면 안 된다.
+        try self.flushPendingOutboundBlocking();
         const req = buildRequest(self.allocator, method, params_json) catch return error.OutOfMemory;
         defer self.allocator.free(req);
         const request_id = self.next_request_id;
         self.next_request_id += 1;
         const frame_bytes = framing.encodeFrame(self.allocator, .{ .kind = .request, .request_id = request_id }, req) catch return error.OutOfMemory;
         defer self.allocator.free(frame_bytes);
-        socket_server.writeAll(self.fd, frame_bytes) catch return error.WriteFailed;
+        socket_server.writeAll(self.fd, frame_bytes) catch {
+            // request prefix가 이미 kernel에 들어갔을 수 있다. 이 connection은 frame 경계를 다시 찾을 수 없으므로
+            // 이후 RPC를 허용하지 않고 EOF로 모든 host-side attachment를 정리한다.
+            self.invalidateConnection();
+            return error.WriteFailed;
+        };
 
         // 응답을 기다리는 동안 host가 비동기로 push하는 stream frame(delta_chunk/snapshot_chunk)은 **버퍼에 쌓는다** — 드롭하면
         // 그 사이 화면 갱신이 유실된다(§9 delta는 증분이라 한 배치만 놓쳐도 desync). 다음 `readStreamBatch`가 이 버퍼부터 소비한다.
@@ -346,6 +371,9 @@ pub const Client = struct {
     /// 유효하고, host는 비controller/미attach stream의 input을 조용히 버린다. attach 응답의 stream_id를 그대로 쓴다.
     pub fn sendInput(self: *Client, stream_id: u64, bytes: []const u8) ClientError!void {
         try self.ensureUsable();
+        // 앞 tick의 non-blocking frame부터 끝낸 뒤 새 blocking input을 쓴다. 같은 stream뿐 아니라 connection을 공유하는
+        // 여러 runtime 사이에서도 실제 socket write 순서를 보존한다.
+        try self.flushPendingOutboundBlocking();
         // input frame의 wire cap은 1 MiB다. paste가 이를 넘는 것은 정상 입력이므로 encode 실패/드롭하지 않고 순서대로
         // 여러 frame으로 나눈다. 빈 입력은 전송할 것이 없다.
         var offset: usize = 0;
@@ -355,11 +383,157 @@ pub const Client = struct {
                 return error.OutOfMemory;
             socket_server.writeAll(self.fd, frame_bytes) catch {
                 self.allocator.free(frame_bytes);
+                // frame prefix가 이미 kernel에 들어갔을 수 있어 같은 connection에서 재시도하면 framing/입력이 중복된다.
+                self.invalidateConnection();
                 return error.WriteFailed;
             };
             self.allocator.free(frame_bytes);
             offset = end;
         }
+    }
+
+    /// terminal input을 UI thread에서 **실제로 논블로킹** 전송한다. 반환값은 socket에 즉시 쓴 바이트가 아니라 이 connection이
+    /// 소유권을 인수한 payload 바이트 수다. 기존 pending frame이 아직 막혀 있으면 0, 새 frame을 pending 슬롯에 넣었으면
+    /// DONTWAIT flush가 0/partial/full 어느 경우든 그 payload 길이를 반환한다 — caller가 동일 입력을 재전송하지 않게 한다.
+    pub fn sendInputNonBlocking(self: *Client, stream_id: u64, bytes: []const u8) ClientError!usize {
+        try self.ensureUsable();
+
+        // 기존 frame을 먼저 밀어 FIFO를 지킨다. 여전히 막혔으면 새 payload는 caller가 계속 소유한다.
+        if (!(try self.pumpPendingOutput())) return 0;
+        if (bytes.len == 0) return 0;
+
+        const accepted = inputChunkEnd(0, bytes.len);
+        const frame = framing.encodeFrame(
+            self.allocator,
+            .{ .kind = .input_bytes, .stream_id = stream_id },
+            bytes[0..accepted],
+        ) catch return error.OutOfMemory;
+        std.debug.assert(self.pending_outbound == null);
+        self.pending_outbound = .{ .frame = frame };
+
+        // EAGAIN/partial write여도 frame 소유권은 이미 client로 넘어왔다. hard error만 connection을 fail-closed한다.
+        _ = try self.pumpPendingOutput();
+        return accepted;
+    }
+
+    /// AppKit callback에서 host viewport를 live bottom으로 되돌리는 fire-and-forget frame을 bounded
+    /// outbound 슬롯에 admission한다. true면 frame 소유권을 인수했고, false면 기존 frame이 backpressure로
+    /// 남아 caller가 stream-local sticky intent를 유지해야 한다. 구 host에는 절대 동기 RPC fallback하지 않는다.
+    pub fn sendScrollToBottomNonBlocking(self: *Client, stream_id: u64) ClientError!bool {
+        try self.ensureUsable();
+        if (!self.async_scroll_to_bottom_v1) return false;
+        if (!(try self.pumpPendingOutput())) return false;
+        const frame = framing.encodeFrame(
+            self.allocator,
+            .{ .kind = .scroll_to_bottom, .stream_id = stream_id },
+            "",
+        ) catch return error.OutOfMemory;
+        std.debug.assert(self.pending_outbound == null);
+        self.pending_outbound = .{ .frame = frame };
+        _ = try self.pumpPendingOutput();
+        return true;
+    }
+
+    /// 이미 RemoteRuntime의 ordered input FIFO가 소유한 scroll barrier를 후속 blocking RPC보다 먼저 보낸다.
+    /// `call`과 마찬가지로 기존 nonblocking frame을 먼저 끝내므로 connection wire 순서는 보존된다.
+    pub fn sendScrollToBottom(self: *Client, stream_id: u64) ClientError!void {
+        try self.ensureUsable();
+        if (!self.async_scroll_to_bottom_v1) return;
+        try self.flushPendingOutboundBlocking();
+        const frame = framing.encodeFrame(
+            self.allocator,
+            .{ .kind = .scroll_to_bottom, .stream_id = stream_id },
+            "",
+        ) catch return error.OutOfMemory;
+        defer self.allocator.free(frame);
+        socket_server.writeAll(self.fd, frame) catch {
+            self.invalidateConnection();
+            return error.WriteFailed;
+        };
+    }
+
+    /// pending outbound frame의 남은 wire bytes를 blocking으로 전량 보낸다. 부분 write마다 offset을 진전시켜 오류 뒤 같은 prefix를
+    /// 다시 보낼 가능성을 없앤다. hard error면 이 socket은 framing 경계를 복구할 수 없으므로 connection을 닫는다.
+    fn flushPendingOutboundBlocking(self: *Client) ClientError!void {
+        while (self.pending_outbound) |*pending| {
+            const remaining = pending.frame[pending.offset..];
+            const rc = c.write(self.fd, remaining.ptr, remaining.len);
+            if (rc < 0) {
+                if (posix.errno(rc) == .INTR) continue;
+                self.invalidateConnection();
+                return error.WriteFailed;
+            }
+            if (rc == 0) {
+                self.invalidateConnection();
+                return error.WriteFailed;
+            }
+            pending.offset += @intCast(rc);
+            if (pending.offset == pending.frame.len) self.clearPendingOutbound();
+        }
+    }
+
+    /// MSG_DONTWAIT로 pending frame을 가능한 만큼 민다. true면 슬롯이 비었고 새 payload를 받을 수 있다. EAGAIN은 정상
+    /// backpressure라 false이며, 다른 오류는 partial frame 뒤 framing 복구가 불가능하므로 connection을 닫는다. Darwin은
+    /// MSG_DONTWAIT만으로 blocking socket의 send가 멈추는 동작이 보장되지 않아 helper가 호출 구간에 O_NONBLOCK도 함께 건다.
+    pub fn pumpPendingOutput(self: *Client) ClientError!bool {
+        try self.ensureUsable();
+        while (self.pending_outbound) |*pending| {
+            const remaining = pending.frame[pending.offset..];
+            switch (try self.sendDontWait(remaining)) {
+                .would_block => return false,
+                .written => |written| {
+                    pending.offset += written;
+                    if (pending.offset == pending.frame.len) self.clearPendingOutbound();
+                },
+            }
+        }
+        return true;
+    }
+
+    const NonblockingSend = union(enum) {
+        written: usize,
+        would_block,
+    };
+
+    /// macOS에서 실 non-blocking을 보장하기 위해 send 구간에만 descriptor O_NONBLOCK을 켰다가 원 flags로 되돌린다.
+    /// Client outbound/read는 GUI frame thread에서 직렬 호출한다는 현재 계약에 기대며, flags 복원 실패 시 이후 blocking
+    /// call의 의미가 바뀌므로 같은 connection을 계속 쓰지 않고 fail-closed한다.
+    fn sendDontWait(self: *Client, bytes: []const u8) ClientError!NonblockingSend {
+        const flags = c.fcntl(self.fd, c.F.GETFL, @as(c_int, 0));
+        if (flags < 0) {
+            self.invalidateConnection();
+            return error.WriteFailed;
+        }
+        const nonblock_flag: c_int = @bitCast(posix.O{ .NONBLOCK = true });
+        const changed = flags & nonblock_flag == 0;
+        if (changed and c.fcntl(self.fd, c.F.SETFL, flags | nonblock_flag) < 0) {
+            self.invalidateConnection();
+            return error.WriteFailed;
+        }
+
+        var rc: isize = undefined;
+        var send_errno: ?posix.E = null;
+        while (true) {
+            rc = c.send(self.fd, bytes.ptr, bytes.len, posix.MSG.DONTWAIT);
+            if (rc >= 0) break;
+            send_errno = posix.errno(rc);
+            if (send_errno.? == .INTR) continue;
+            break;
+        }
+
+        if (changed and c.fcntl(self.fd, c.F.SETFL, flags) < 0) {
+            self.invalidateConnection();
+            return error.WriteFailed;
+        }
+        if (rc > 0) return .{ .written = @intCast(rc) };
+        if (rc < 0 and send_errno.? == .AGAIN) return .would_block;
+        self.invalidateConnection();
+        return error.WriteFailed;
+    }
+
+    fn clearPendingOutbound(self: *Client) void {
+        if (self.pending_outbound) |pending| self.allocator.free(pending.frame);
+        self.pending_outbound = null;
     }
 
     /// 다음 완성 frame을 읽는다(partial read 재조립). EOF/timeout는 ConnectionClosed, codec 위반은 ProtocolError.
@@ -394,12 +568,21 @@ pub const Client = struct {
     }
 
     fn invalidateConnection(self: *Client) void {
+        // pending frame은 connection 소유 메모리다. 이미 unusable이어도 deinit 전 명시 invalidate가 재진입할 수 있으므로
+        // 항상 회수 helper를 거친다.
+        self.clearPendingOutbound();
         if (self.unusable) return;
         self.unusable = true;
         if (self.fd >= 0) {
             _ = c.close(self.fd);
             self.fd = -1;
         }
+    }
+
+    /// lifecycle cleanup frame조차 할당할 수 없는 경우 host가 EOF로 attachment를 정리하도록 shared connection을
+    /// 명시적으로 닫는 fail-closed fallback.
+    pub fn failClosed(self: *Client) void {
+        self.invalidateConnection();
     }
 };
 
@@ -413,6 +596,303 @@ test "client input chunking preserves exact-cap and cap-plus-one paste bytes" {
     try std.testing.expectEqual(protocol.max_binary_chunk, inputChunkEnd(0, protocol.max_binary_chunk + 1));
     try std.testing.expectEqual(protocol.max_binary_chunk + 1, inputChunkEnd(protocol.max_binary_chunk, protocol.max_binary_chunk + 1));
     try std.testing.expectEqual(@as(usize, 0), inputChunkEnd(0, 0));
+}
+
+test "client nonblocking input accepts one bounded frame without duplicating it before blocking input" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    var fds: [2]c.fd_t = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds));
+    socket_server.setNoSigPipe(fds[0]);
+    defer _ = c.close(fds[1]);
+
+    var client = Client{
+        .allocator = allocator,
+        .fd = fds[0],
+        .host_id = 1,
+        .parser = framing.FrameParser.init(allocator),
+    };
+    defer client.deinit();
+    setReadTimeoutMs(fds[1], 1000);
+
+    const filler_len = try fillSendBufferNonBlocking(fds[0]);
+    try std.testing.expect(filler_len > 0);
+
+    const first = "first-pending";
+    const second = "second-blocking";
+    // kernel send buffer가 이미 찼어도 frame 소유권을 넘긴 payload는 전량 accepted다.
+    try std.testing.expectEqual(first.len, try client.sendInputNonBlocking(7, first));
+    try std.testing.expect(client.pending_outbound != null);
+    // pending이 여전히 막힌 동안 새 payload는 수락하지 않아 caller가 그대로 보존한다.
+    try std.testing.expectEqual(@as(usize, 0), try client.sendInputNonBlocking(7, second));
+
+    try drainExactFd(fds[1], filler_len);
+    // blocking input은 앞의 pending frame을 먼저 끝내고 자기 frame을 이어 쓴다.
+    try client.sendInput(7, second);
+
+    const first_frame = try framing.encodeFrame(allocator, .{ .kind = .input_bytes, .stream_id = 7 }, first);
+    defer allocator.free(first_frame);
+    const second_frame = try framing.encodeFrame(allocator, .{ .kind = .input_bytes, .stream_id = 7 }, second);
+    defer allocator.free(second_frame);
+    const received = try allocator.alloc(u8, first_frame.len + second_frame.len);
+    defer allocator.free(received);
+    try readExactFd(fds[1], received);
+    try std.testing.expectEqualSlices(u8, first_frame, received[0..first_frame.len]);
+    try std.testing.expectEqualSlices(u8, second_frame, received[first_frame.len..]);
+    try std.testing.expect(client.pending_outbound == null);
+}
+
+test "client nonblocking scroll barrier stays between prior and subsequent input under backpressure" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    var fds: [2]c.fd_t = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds));
+    socket_server.setNoSigPipe(fds[0]);
+    defer _ = c.close(fds[1]);
+
+    var client = Client{
+        .allocator = allocator,
+        .fd = fds[0],
+        .host_id = 1,
+        .async_scroll_to_bottom_v1 = true,
+        .parser = framing.FrameParser.init(allocator),
+    };
+    defer client.deinit();
+    setReadTimeoutMs(fds[1], 1000);
+
+    const filler_len = try fillSendBufferNonBlocking(fds[0]);
+    const first = "before-scroll";
+    const second = "after-scroll";
+    try std.testing.expectEqual(first.len, try client.sendInputNonBlocking(7, first));
+    try std.testing.expect(!(try client.sendScrollToBottomNonBlocking(7))); // 기존 frame 뒤 sticky intent 유지.
+    try std.testing.expectEqual(@as(usize, 0), try client.sendInputNonBlocking(7, second));
+
+    try drainExactFd(fds[1], filler_len);
+    try std.testing.expect(try client.pumpPendingOutput());
+    try std.testing.expect(try client.sendScrollToBottomNonBlocking(7));
+    // scroll frame이 partial이면 새 input은 0으로 남고, 완전 전송됐으면 바로 뒤에 admission된다.
+    var accepted = try client.sendInputNonBlocking(7, second);
+    while (accepted == 0) {
+        _ = try client.pumpPendingOutput();
+        accepted = try client.sendInputNonBlocking(7, second);
+    }
+    try std.testing.expectEqual(second.len, accepted);
+    while (!(try client.pumpPendingOutput())) {}
+
+    const first_frame = try framing.encodeFrame(allocator, .{ .kind = .input_bytes, .stream_id = 7 }, first);
+    defer allocator.free(first_frame);
+    const scroll_frame = try framing.encodeFrame(allocator, .{ .kind = .scroll_to_bottom, .stream_id = 7 }, "");
+    defer allocator.free(scroll_frame);
+    const second_frame = try framing.encodeFrame(allocator, .{ .kind = .input_bytes, .stream_id = 7 }, second);
+    defer allocator.free(second_frame);
+    const received = try allocator.alloc(u8, first_frame.len + scroll_frame.len + second_frame.len);
+    defer allocator.free(received);
+    try readExactFd(fds[1], received);
+    var offset: usize = 0;
+    try std.testing.expectEqualSlices(u8, first_frame, received[offset..][0..first_frame.len]);
+    offset += first_frame.len;
+    try std.testing.expectEqualSlices(u8, scroll_frame, received[offset..][0..scroll_frame.len]);
+    offset += scroll_frame.len;
+    try std.testing.expectEqualSlices(u8, second_frame, received[offset..][0..second_frame.len]);
+}
+
+test "client does not send async scroll frame without negotiated capability" {
+    const allocator = std.testing.allocator;
+    var client = Client{
+        .allocator = allocator,
+        .fd = -1,
+        .host_id = 1,
+        .parser = framing.FrameParser.init(allocator),
+    };
+    defer client.deinit();
+    try std.testing.expect(!(try client.sendScrollToBottomNonBlocking(7)));
+    try std.testing.expect(client.pending_outbound == null);
+}
+
+test "client pending outbound pump finishes the last accepted frame without another input or RPC" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    var fds: [2]c.fd_t = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds));
+    socket_server.setNoSigPipe(fds[0]);
+    defer _ = c.close(fds[1]);
+
+    var client = Client{
+        .allocator = allocator,
+        .fd = fds[0],
+        .host_id = 1,
+        .parser = framing.FrameParser.init(allocator),
+    };
+    defer client.deinit();
+    setReadTimeoutMs(fds[1], 1000);
+
+    const filler_len = try fillSendBufferNonBlocking(fds[0]);
+    const input = "last-input";
+    try std.testing.expectEqual(input.len, try client.sendInputNonBlocking(3, input));
+    try std.testing.expect(client.pending_outbound != null);
+    try drainExactFd(fds[1], filler_len);
+
+    // 새 입력/RPC 없이 frame-loop pump만 와도 마지막 pending frame이 전진·완료돼야 한다.
+    try std.testing.expect(try client.pumpPendingOutput());
+    try std.testing.expect(client.pending_outbound == null);
+    const expected = try framing.encodeFrame(allocator, .{ .kind = .input_bytes, .stream_id = 3 }, input);
+    defer allocator.free(expected);
+    const received = try allocator.alloc(u8, expected.len);
+    defer allocator.free(received);
+    try readExactFd(fds[1], received);
+    try std.testing.expectEqualSlices(u8, expected, received);
+}
+
+test "client call flushes accepted nonblocking input before its request frame" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    var fds: [2]c.fd_t = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds));
+    socket_server.setNoSigPipe(fds[0]);
+    defer _ = c.close(fds[1]);
+
+    var client = Client{
+        .allocator = allocator,
+        .fd = fds[0],
+        .host_id = 1,
+        .parser = framing.FrameParser.init(allocator),
+    };
+    defer client.deinit();
+    setReadTimeoutMs(fds[0], 1000);
+    setReadTimeoutMs(fds[1], 1000);
+
+    const filler_len = try fillSendBufferNonBlocking(fds[0]);
+    const input = "pending-before-rpc";
+    try std.testing.expectEqual(input.len, try client.sendInputNonBlocking(9, input));
+    try drainExactFd(fds[1], filler_len);
+
+    const input_frame = try framing.encodeFrame(allocator, .{ .kind = .input_bytes, .stream_id = 9 }, input);
+    defer allocator.free(input_frame);
+    const request_payload = try buildRequest(allocator, "host.info", null);
+    defer allocator.free(request_payload);
+    const request_frame = try framing.encodeFrame(allocator, .{ .kind = .request, .request_id = 1 }, request_payload);
+    defer allocator.free(request_frame);
+    const expected = try allocator.alloc(u8, input_frame.len + request_frame.len);
+    defer allocator.free(expected);
+    @memcpy(expected[0..input_frame.len], input_frame);
+    @memcpy(expected[input_frame.len..], request_frame);
+
+    const response_frame = try framing.encodeFrame(
+        allocator,
+        .{ .kind = .response, .request_id = 1 },
+        "{\"result\":{\"ok\":true}}",
+    );
+    defer allocator.free(response_frame);
+    var peer_ok = false;
+    const peer = try std.Thread.spawn(.{}, callOrderingPeer, .{ fds[1], expected, response_frame, &peer_ok });
+    const response = client.call("host.info", null) catch |err| {
+        peer.join();
+        return err;
+    };
+    defer allocator.free(response);
+    peer.join();
+    try std.testing.expectEqualStrings("{\"result\":{\"ok\":true}}", response);
+    try std.testing.expect(peer_ok);
+}
+
+test "client request write failure invalidates the connection before another call" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    var fds: [2]c.fd_t = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds));
+    socket_server.setNoSigPipe(fds[0]);
+    _ = c.close(fds[1]);
+
+    var client = Client{
+        .allocator = allocator,
+        .fd = fds[0],
+        .host_id = 1,
+        .parser = framing.FrameParser.init(allocator),
+    };
+    defer client.deinit();
+    try std.testing.expectError(error.WriteFailed, client.call("host.info", null));
+    try std.testing.expect(client.unusable);
+    try std.testing.expectEqual(@as(c.fd_t, -1), client.fd);
+    try std.testing.expect(client.pending_outbound == null);
+    try std.testing.expectError(error.ConnectionClosed, client.call("host.info", null));
+}
+
+test "client invalidation releases an owned pending outbound frame" {
+    const allocator = std.testing.allocator;
+    var client = Client{
+        .allocator = allocator,
+        .fd = -1,
+        .host_id = 1,
+        .parser = framing.FrameParser.init(allocator),
+        .pending_outbound = .{ .frame = try allocator.dupe(u8, "owned-frame") },
+    };
+    defer client.deinit();
+    client.invalidateConnection();
+    try std.testing.expect(client.pending_outbound == null);
+    try std.testing.expect(client.unusable);
+}
+
+/// test socket의 send buffer를 DONTWAIT로 실제 EAGAIN까지 채운다. filler 길이를 돌려줘 peer가 이후 정확히 걷어내고,
+/// 그 뒤에 오는 MRSH frame 순서를 byte-for-byte 검증할 수 있게 한다.
+fn fillSendBufferNonBlocking(fd: c.fd_t) !usize {
+    var requested: c_int = 4096;
+    _ = c.setsockopt(fd, posix.SOL.SOCKET, posix.SO.SNDBUF, &requested, @sizeOf(c_int));
+    const flags = c.fcntl(fd, c.F.GETFL, @as(c_int, 0));
+    if (flags < 0) return error.TestUnexpectedResult;
+    const nonblock_flag: c_int = @bitCast(posix.O{ .NONBLOCK = true });
+    if (c.fcntl(fd, c.F.SETFL, flags | nonblock_flag) < 0) return error.TestUnexpectedResult;
+    defer _ = c.fcntl(fd, c.F.SETFL, flags);
+    var filler: [4096]u8 = @splat(0xA5);
+    var total: usize = 0;
+    while (true) {
+        const rc = c.send(fd, &filler, filler.len, posix.MSG.DONTWAIT);
+        if (rc > 0) {
+            total += @intCast(rc);
+            if (total > 64 * 1024 * 1024) return error.TestUnexpectedResult;
+            continue;
+        }
+        if (rc == 0) return error.TestUnexpectedResult;
+        switch (posix.errno(rc)) {
+            .INTR => continue,
+            .AGAIN => return total,
+            else => return error.TestUnexpectedResult,
+        }
+    }
+}
+
+fn drainExactFd(fd: c.fd_t, count: usize) !void {
+    var remaining = count;
+    var buf: [4096]u8 = undefined;
+    while (remaining > 0) {
+        const rc = c.read(fd, &buf, @min(buf.len, remaining));
+        if (rc > 0) {
+            remaining -= @intCast(rc);
+            continue;
+        }
+        if (rc < 0 and posix.errno(rc) == .INTR) continue;
+        return error.TestUnexpectedResult;
+    }
+}
+
+fn readExactFd(fd: c.fd_t, out: []u8) !void {
+    var offset: usize = 0;
+    while (offset < out.len) {
+        const rc = c.read(fd, out.ptr + offset, out.len - offset);
+        if (rc > 0) {
+            offset += @intCast(rc);
+            continue;
+        }
+        if (rc < 0 and posix.errno(rc) == .INTR) continue;
+        return error.TestUnexpectedResult;
+    }
+}
+
+fn callOrderingPeer(fd: c.fd_t, expected: []const u8, response: []const u8, ok: *bool) void {
+    const received = std.heap.page_allocator.alloc(u8, expected.len) catch return;
+    defer std.heap.page_allocator.free(received);
+    readExactFd(fd, received) catch return;
+    ok.* = std.mem.eql(u8, expected, received);
+    socket_server.writeAll(fd, response) catch return;
 }
 
 test "client stream path rejects a frame with the wrong MRSH header major" {
@@ -551,7 +1031,7 @@ fn setReadTimeoutMs(fd: c.fd_t, ms: u32) void {
 fn buildHello(allocator: std.mem.Allocator, client_kind: []const u8) error{OutOfMemory}![]u8 {
     return std.fmt.allocPrint(
         allocator,
-        "{{\"protocol_min\":{d},\"protocol_max\":{d},\"client_kind\":\"{s}\",\"capabilities\":[\"runtime_metadata_v1\"]}}",
+        "{{\"protocol_min\":{d},\"protocol_max\":{d},\"client_kind\":\"{s}\",\"capabilities\":[\"runtime_metadata_v1\",\"screen_viewport_scrolled_v1\",\"async_scroll_to_bottom_v1\"]}}",
         .{ protocol.version_major, protocol.version_major, client_kind },
     );
 }
@@ -590,6 +1070,29 @@ fn parseHostId(payload: []const u8) ?u128 {
     return v;
 }
 
+/// hello/hello_ack의 capability 문자열 배열을 관대하게 읽는다. 구 peer의 필드 부재·손상·타입 불일치는 미지원(false)이며
+/// handshake 자체는 기존대로 host_id/version만으로 성립한다.
+fn payloadHasCapability(payload: []const u8, wanted: []const u8) bool {
+    var parsed = std.json.parseFromSlice(std.json.Value, std.heap.page_allocator, payload, .{}) catch return false;
+    defer parsed.deinit();
+    const obj = switch (parsed.value) {
+        .object => |o| o,
+        else => return false,
+    };
+    const capabilities = switch (obj.get("capabilities") orelse return false) {
+        .array => |a| a.items,
+        else => return false,
+    };
+    for (capabilities) |value| {
+        const capability = switch (value) {
+            .string => |s| s,
+            else => continue,
+        };
+        if (std.mem.eql(u8, capability, wanted)) return true;
+    }
+    return false;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // 테스트 (순수 JSON은 always, 실 roundtrip은 fork된 host와 macOS opt-in)
 //
@@ -608,6 +1111,8 @@ test "client: hello/request JSON build and host_id parse are server-symmetric (p
     try testing.expect(std.mem.indexOf(u8, hello, "\"protocol_min\":2") != null); // 리뷰 #3: version_major v2.
     try testing.expect(std.mem.indexOf(u8, hello, "\"client_kind\":\"gui\"") != null);
     try testing.expect(std.mem.indexOf(u8, hello, "\"runtime_metadata_v1\"") != null);
+    try testing.expect(std.mem.indexOf(u8, hello, "\"screen_viewport_scrolled_v1\"") != null);
+    try testing.expect(std.mem.indexOf(u8, hello, "\"async_scroll_to_bottom_v1\"") != null);
 
     const req = try buildRequest(allocator, "runtime.get", "{\"runtime_id\":\"aa\"}");
     defer allocator.free(req);
@@ -621,6 +1126,24 @@ test "client: hello/request JSON build and host_id parse are server-symmetric (p
     try testing.expectEqual(@as(?u128, 0x1234), parseHostId("{\"host_id\":\"1234\"}"));
     try testing.expectEqual(@as(?u128, null), parseHostId("{\"no_host\":true}"));
     try testing.expectEqual(@as(?u128, null), parseHostId("not json"));
+    try testing.expect(payloadHasCapability(
+        "{\"host_id\":\"1234\",\"capabilities\":[\"screen_viewport_scrolled_v1\"]}",
+        "screen_viewport_scrolled_v1",
+    ));
+    // 구 hello_ack에는 capabilities 자체가 없다. handshake 호환성을 유지하되 새 mode bit 신뢰 여부는 false다.
+    var legacy_client = Client{
+        .allocator = allocator,
+        .fd = -1,
+        .host_id = 0x1234,
+        .parser = framing.FrameParser.init(allocator),
+    };
+    defer legacy_client.deinit();
+    try testing.expect(!legacy_client.screen_viewport_scrolled_v1);
+    legacy_client.screen_viewport_scrolled_v1 = payloadHasCapability(
+        "{\"host_id\":\"1234\"}",
+        "screen_viewport_scrolled_v1",
+    );
+    try testing.expect(!legacy_client.screen_viewport_scrolled_v1);
 }
 
 test "client: connects to a forked host, agrees on host_id, and calls host.info" {
@@ -663,6 +1186,8 @@ test "client: connects to a forked host, agrees on host_id, and calls host.info"
     defer client.deinit();
 
     try testing.expect(client.host_id != 0); // hello_ack에서 host_id를 받았다.
+    try testing.expect(client.screen_viewport_scrolled_v1);
+    try testing.expect(client.async_scroll_to_bottom_v1);
     const resp = try client.call("host.info", null);
     defer allocator.free(resp);
     try testing.expect(std.mem.indexOf(u8, resp, "runtime_count") != null);

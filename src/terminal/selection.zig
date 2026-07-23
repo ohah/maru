@@ -5,10 +5,10 @@
 //! 읽어 좌표·텍스트를 산출하는" 상위 레이어다 — 의존 방향은 `selection → screen → types` 단방향(screen이
 //! selection을 import하면 레이어 역전이라 금지). 각 함수는 `*TerminalCore`를 받는 free 함수다(필드 직접 접근 —
 //! Zig는 필드 privacy가 없다; osc/parser/screen와 동형). 외부가 점-호출하는 pub API(selectionStart·selectWordAt·
-//! findMatches·extractSelection·setPreedit 등)는 core.zig에 얇은 facade 메서드로 남고 본문만 여기 있다.
+//! findMatches·extractSelection 등)는 core.zig에 얇은 facade 메서드로 남고 본문만 여기 있다.
 //!
 //! 좌표계: 절대 행(abs) = 스크롤백 시작 기준 0..(sb.count+rows). `screen.absRow`/`absRowWrapped`(분할 S1)로 읽고,
-//! `absRowFromViewport`로 뷰포트 행을 abs로 바꾼다. 선택 상태(selection_anchor/head/block)·preedit·link_store는
+//! `absRowFromViewport`로 뷰포트 행을 abs로 바꾼다. 선택 상태(selection_anchor/head/block)·link_store는
 //! core 필드(방향 A — 필드는 평평하게 core 잔류). `invalidateSelection`/`shiftCoordsForEviction`는 screen/kitty가
 //! 부르는 다리라 core 잔류(seam), 여기엔 그 선택 부분(`shiftSelectionForEviction`)만 둔다.
 //!
@@ -664,9 +664,9 @@ pub fn wordIsUrl(self: *const TerminalCore, viewport_row: u16, col: u16, scopes:
     return true;
 }
 
-// ── 검색(Find) + 추출(복사) + IME preedit ─────────────────────────────────────────────────────────
+// ── 검색(Find) + 추출(복사) ───────────────────────────────────────────────────────────────────────
 // findMatches는 스크롤백 Find의 단일 출처(코어 상태), extractSelection/Block은 클립보드 복사 텍스트를 만든다.
-// 전부 core.zig facade로 점-호출되고, setPreedit는 IME 조합 텍스트(렌더 합성 전용 — 셀 그리드 불변).
+// 전부 core.zig facade로 점-호출된다.
 
 /// 스크롤백 + 화면에서 needle을 찾아 절대 좌표 매치를 out에 채운다(out은 호출자 소유). 논리 줄(soft-wrap 이음)
 /// 단위로 스캔해 wrap 경계를 넘는 매치도 잡고, 같은 줄 안에선 비겹침(매치 뒤로 needle 길이만큼 건너뜀). needle이
@@ -735,18 +735,6 @@ pub fn findMatches(self: *TerminalCore, allocator: std.mem.Allocator, needle_utf
 /// 검색 매치(절대 좌표)를 현재 뷰포트 좌표로 클립한다(화면 밖이면 null) — 선택 하이라이트와 같은 규칙 공유.
 pub fn matchViewportSpan(self: *const TerminalCore, m: types.Match) ?types.SelectionSpan {
     return clipAbsSpanToViewport(self, m.start, m.end, false);
-}
-
-/// IME 조합 중 텍스트를 설정한다(빈 입력 = 조합 종료/취소). 렌더 합성 전용 상태라 셀 그리드·커서는 변하지
-/// 않는다(표시는 renderSnapshot). preedit는 core 소유 필드(방향 A) — selection.zig가 alloc/free만 한다.
-pub fn setPreedit(self: *TerminalCore, bytes: []const u8) !void {
-    self.owner_dbg.assertOwnedBySelf(); // reader 노출 시 core_mutex 보유 강제(디버그 전용 §6-5)
-    if (self.preedit) |old| {
-        self.allocator.free(old);
-        self.preedit = null;
-    }
-    if (bytes.len > 0) self.preedit = try self.allocator.dupe(u8, bytes);
-    self.dirty = core.fullDirty(self.size);
 }
 
 /// 현재 뷰포트에 보이는 선택 범위(렌더용). 화면 밖이면 null. 블록 모드면 col을 행과 무관하게 min/max로

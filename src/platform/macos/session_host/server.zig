@@ -283,6 +283,7 @@ pub const Connection = struct {
             },
             .request => return self.dispatchRequest(frame),
             .input_bytes => return self.routeInput(frame),
+            .scroll_to_bottom => return self.routeScrollToBottom(frame),
             .hello => {
                 // hello는 connection당 한 번. 두 번째 hello는 protocol 위반.
                 self.state = .closed;
@@ -802,6 +803,19 @@ pub const Connection = struct {
         return .none;
     }
 
+    /// `scroll_to_bottom`: controller 전용 fire-and-forget viewport command. AppKit IME callback에서
+    /// request/response 왕복을 기다리지 않도록 payload 없는 stream frame으로 받는다. 같은 connection의
+    /// 다음 `input_bytes`보다 먼저 dispatch되므로 scroll barrier의 wire 순서를 보존한다.
+    fn routeScrollToBottom(self: *Connection, frame: framing.Frame) HandleError!Action {
+        if (frame.payload.len != 0) return .none;
+        const stream = frame.header.stream_id;
+        const runtime_id = (self.attachments.get(stream) orelse return .none).runtime_id;
+        if (!reg.Capability.has(self.registry.capabilitiesOf(runtime_id, stream), reg.Capability.input)) return .none;
+        const ops = self.runtime_ops orelse return .none;
+        ops.core_command(ops.ctx, runtime_id, "scroll_to_bottom", 0) catch {};
+        return .none;
+    }
+
     /// attach된 각 stream의 화면 변화를 모아 push할 frame들을 만든다(§9·§10 delta stream). stream별 `base`(마지막 full
     /// snapshot) 대비 `RuntimeOps.delta`로 diff해, 변화가 있으면 `delta_chunk`(또는 geometry 변화면 fresh `snapshot_chunk`)
     /// frame으로 싣고 base를 갱신한다. 보낼 게 없으면 null. caller(socket serve loop)가 poll tick마다 불러 그 프레임을
@@ -904,7 +918,7 @@ pub const Connection = struct {
         return self.stringify(.{
             .version = self.selected_version,
             .host_id = host_hex,
-            .capabilities = [_][]const u8{ "host.info", "runtime.list", "runtime.get", "runtime_metadata_v1" },
+            .capabilities = [_][]const u8{ "host.info", "runtime.list", "runtime.get", "runtime_metadata_v1", "screen_viewport_scrolled_v1", "async_scroll_to_bottom_v1" },
         });
     }
 
@@ -1291,6 +1305,8 @@ test "server: hello with overlapping version acks host_id and moves to ready" {
     try testing.expectEqual(ClientKind.gui, conn.client_kind);
     // host_id hex가 응답에 담긴다.
     try testing.expect(std.mem.indexOf(u8, r.frame.?.payload, "1234567890abcdef") != null);
+    try testing.expect(std.mem.indexOf(u8, r.frame.?.payload, "\"screen_viewport_scrolled_v1\"") != null);
+    try testing.expect(std.mem.indexOf(u8, r.frame.?.payload, "\"async_scroll_to_bottom_v1\"") != null);
 }
 
 test "server: wrong header major closes before hello negotiation" {
@@ -1716,6 +1732,15 @@ test "server: attach grants capabilities; controller input/resize dispatch throu
     try testing.expectEqualStrings("echo hi\n", fake.last_input[0..fake.last_input_len]);
     try testing.expectEqual(@as(u128, 0xAA), fake.input_runtime);
 
+    // 응답 없는 scroll barrier는 controller stream에서만 host core에 적용된다.
+    {
+        const r = try feedStream(&conn, .scroll_to_bottom, 1, "");
+        try testing.expectEqualStrings("none", r.action);
+    }
+    try testing.expectEqualStrings("scroll_to_bottom", fake.last_core_op[0..fake.last_core_op_len]);
+    try testing.expectEqual(@as(i64, 0), fake.last_core_arg);
+    try testing.expectEqual(@as(u128, 0xAA), fake.core_command_runtime);
+
     // resize(controller, seq 1) → registry 적용 + runtime_ops.resize 위임 + applied 응답(changed=true).
     {
         const r = try feedJson(&conn, .request, 3, "{\"method\":\"runtime.resize\",\"params\":{\"stream_id\":1,\"cols\":100,\"rows\":40,\"client_sequence\":1}}");
@@ -1777,6 +1802,12 @@ test "server: observer attach is denied input and resize" {
         try testing.expectEqualStrings("none", r.action);
     }
     try testing.expectEqual(@as(usize, 0), fake.last_input_len);
+    fake.last_core_op_len = 0;
+    {
+        const r = try feedStream(&conn, .scroll_to_bottom, 1, "");
+        try testing.expectEqualStrings("none", r.action);
+    }
+    try testing.expectEqual(@as(usize, 0), fake.last_core_op_len); // observer는 shared viewport를 흔들 수 없다.
     // observer resize는 unauthorized(controller 아님).
     {
         const r = try feedJson(&conn, .request, 3, "{\"method\":\"runtime.resize\",\"params\":{\"stream_id\":1,\"cols\":90,\"rows\":30,\"client_sequence\":1}}");

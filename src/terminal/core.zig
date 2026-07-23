@@ -8,7 +8,7 @@ const recent_text_blank_scan_rows: usize = 256;
 const osc = @import("osc.zig"); // OSC host-reply 핸들러(색·팔레트·클립보드·hyperlink·semantic) — 목적별 분리(구조와 파일 분리)
 const parser = @import("parser.zig"); // VT 파서(write feed + escape/CSI/OSC/DCS/APC dispatch + UTF-8) — 목적별 분리
 const screen = @import("screen.zig"); // 화면 storage + 활성 화면 연산(grid·cursor·scroll·print·resize·snapshot) — 목적별 분리
-const selection = @import("selection.zig"); // 선택/검색/URL/preedit(화면을 읽는 상위 레이어) — 목적별 분리
+const selection = @import("selection.zig"); // 선택/검색/URL(화면을 읽는 상위 레이어) — 목적별 분리
 const kitty = @import("kitty.zig"); // kitty graphics 본체(transmit·display·delete·view) — 목적별 분리
 const input_report = @import("input_report.zig"); // 입력/이벤트 → host 바이트 인코딩(키·paste·focus·mouse) — 목적별 분리
 // kitty graphics 저장 struct는 kitty.zig 소유(self-contained — Scrollback 선례). core는 별칭으로 필드 타입을 둔다.
@@ -298,9 +298,6 @@ pub const TerminalCore = struct {
     // cells:[]Cell+memcpy 위에서 위험해 도입하지 않는다.
     grapheme_store: std.ArrayListUnmanaged([]u21) = .empty,
     grapheme_ids: std.HashMapUnmanaged([]const u21, u32, GraphemeKeyContext, std.hash_map.default_max_load_percentage) = .empty,
-    // IME 조합 중(preedit) 텍스트(UTF-8, core 소유). 셀 그리드를 더럽히지 않고 renderSnapshot
-    // 합성 단계에서만 커서 위치에 반전 스타일로 표시된다 — 조합이 끝나면(확정/취소) 비워진다.
-    preedit: ?[]u8 = null,
     // OSC 내용 축적 버퍼(동적 — apc_buffer와 동형). 고정 2048이던 시절 OSC 52 클립보드 쓰기가 한 문단
     // (base64 ~2KB)만 돼도 통째로 버려져 ssh+tmux/nvim 원격 복사가 조용히 실패했다 — 상한을 OSC 52 디코드
     // 상한이 통과 가능한 parser.max_osc_bytes로 올린다. 초과/OOM이면 osc_overflow로 dispatch에서 폐기하고
@@ -589,7 +586,6 @@ pub const TerminalCore = struct {
     }
 
     pub fn deinit(self: *TerminalCore) void {
-        if (self.preedit) |p| self.allocator.free(p);
         if (self.cwd) |c| self.allocator.free(c);
         if (self.ssh_remote_dest) |d| self.allocator.free(d);
         if (self.title) |t| self.allocator.free(t);
@@ -1094,11 +1090,6 @@ pub const TerminalCore = struct {
     pub fn matchViewportSpan(self: *const TerminalCore, m: types.Match) ?types.SelectionSpan {
         return selection.matchViewportSpan(self, m);
     }
-    /// IME preedit 텍스트 설정(빈 입력 = 종료). 본문: selection.setPreedit.
-    pub fn setPreedit(self: *TerminalCore, bytes: []const u8) !void {
-        return selection.setPreedit(self, bytes);
-    }
-
     /// 선택 해제. 본문: selection.selectionClear. screen.clearScrollback·invalidateSelection seam이 self로 호출.
     pub fn selectionClear(self: *TerminalCore) void {
         selection.selectionClear(self);
@@ -1464,7 +1455,8 @@ pub const TerminalCore = struct {
         return screen.snapshot(self);
     }
 
-    /// 뷰포트 합성 snapshot(스크롤 시 [스크롤백 ++ 활성] 윈도, IME preedit 삽입). 본문은 screen.zig 소유, facade 메서드.
+    /// 뷰포트 합성 snapshot(스크롤 시 [스크롤백 ++ 활성] 윈도). IME preedit은 Surface projection이
+    /// 이 base 위에 합성한다. 본문은 screen.zig 소유, facade 메서드.
     pub fn renderSnapshot(self: *TerminalCore) types.RenderSnapshot {
         return screen.renderSnapshot(self);
     }
@@ -2997,6 +2989,8 @@ test "renderSnapshot shows active at bottom and composes the viewport (cursor hi
     try std.testing.expectEqual(@as(u21, 'a'), scrolled.cells[0].codepoint);
     try std.testing.expectEqual(@as(u21, 'b'), scrolled.cells[core.index(1, 0)].codepoint);
     try std.testing.expect(!scrolled.cursor.visible);
+    try std.testing.expectEqual(at_bottom.cursor.row, scrolled.cursor.row);
+    try std.testing.expectEqual(at_bottom.cursor.col, scrolled.cursor.col);
 }
 
 test "wrapped flag: autowrap sets it, rewriting the row clears it" {
@@ -5996,10 +5990,12 @@ test "heuristic link detection keeps a complete link when the ellipsis is outsid
 test "preedit composition shows the in-progress hangul at the cursor without touching the grid" {
     var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 8, .rows = 2 });
     defer core.deinit();
+    var overlay = @import("preedit.zig").Overlay.init(std.testing.allocator);
+    defer overlay.deinit();
     try core.write("$ ");
 
-    try core.setPreedit("안"); // 조합 중(wide)
-    const snap = core.renderSnapshot();
+    try overlay.replace("안"); // 조합 중(wide)
+    const snap = overlay.compose(core.renderSnapshot());
     // 커서 위치(0,2)에 '안'이 반전으로 합성되고, 커서는 그 뒤(0,4)로 보인다.
     try std.testing.expectEqual(@as(u21, 0xC548), snap.cells[2].codepoint);
     try std.testing.expect(snap.cells[2].style.reverse);
@@ -6010,13 +6006,13 @@ test "preedit composition shows the in-progress hangul at the cursor without tou
     try std.testing.expectEqual(@as(u21, ' '), core.screen.cells[2].codepoint);
 
     // 조합 갱신('않' 등 다른 글자로 교체)도 같은 자리에.
-    try core.setPreedit("않");
-    const snap2 = core.renderSnapshot();
+    try overlay.replace("않");
+    const snap2 = overlay.compose(core.renderSnapshot());
     try std.testing.expectEqual(@as(u21, 0xC54A), snap2.cells[2].codepoint);
 
     // 조합 종료 — 합성이 사라지고 일반 snapshot으로 돌아간다.
-    try core.setPreedit("");
-    const snap3 = core.renderSnapshot();
+    try overlay.replace("");
+    const snap3 = overlay.compose(core.renderSnapshot());
     try std.testing.expectEqual(@as(u21, ' '), snap3.cells[2].codepoint);
     try std.testing.expectEqual(@as(u16, 2), snap3.cursor.col);
 }
@@ -6024,9 +6020,11 @@ test "preedit composition shows the in-progress hangul at the cursor without tou
 test "preedit clips at the row end instead of wrapping" {
     var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 2 });
     defer core.deinit();
+    var overlay = @import("preedit.zig").Overlay.init(std.testing.allocator);
+    defer overlay.deinit();
     try core.write("abc"); // 커서 (0,3) — 한 칸 남음
-    try core.setPreedit("한"); // wide(2칸)는 안 들어간다 — 잘림
-    const snap = core.renderSnapshot();
+    try overlay.replace("한"); // wide(2칸)는 안 들어간다 — 잘림
+    const snap = overlay.compose(core.renderSnapshot());
     try std.testing.expectEqual(@as(u21, 'c'), snap.cells[2].codepoint);
     try std.testing.expect(!snap.cursor.visible);
 }
@@ -6034,12 +6032,14 @@ test "preedit clips at the row end instead of wrapping" {
 test "preedit inserts mid-line, pushing the next glyphs right (가나다 + 나앞 조합 → 가[라]나다)" {
     var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 12, .rows = 2 });
     defer core.deinit();
+    var overlay = @import("preedit.zig").Overlay.init(std.testing.allocator);
+    defer overlay.deinit();
     try core.write("\xea\xb0\x80\xeb\x82\x98\xeb\x8b\xa4"); // "가나다": 가=0,나=2,다=4 (각 wide)
     try core.write("\x1b[4D"); // 커서를 '나' base(col2)로 — 왼쪽 4칸 이동(글자는 그대로)
     try std.testing.expectEqual(@as(u16, 2), core.screen.cursor.col);
 
-    try core.setPreedit("\xeb\x9d\xbc"); // "라"(wide) 조합 중
-    const snap = core.renderSnapshot();
+    try overlay.replace("\xeb\x9d\xbc"); // "라"(wide) 조합 중
+    const snap = overlay.compose(core.renderSnapshot());
     // 삽입형: '라'가 커서 자리(col2)에 들어가고 '나'(col2)·'다'(col4)는 조합 폭(2)만큼 오른쪽으로
     // 밀린다("가[라]나다"). 뒤 텍스트는 일반 intensity(dim 아님)라 고스트가 아니어서 밀린다.
     try std.testing.expectEqual(@as(u21, 0xAC00), snap.cells[0].codepoint); // 가(그대로)
@@ -6058,16 +6058,18 @@ test "preedit inserts mid-line, pushing the next glyphs right (가나다 + 나�
 }
 
 test "preedit ambiguous-width=wide: circled number drawn 2 cells (width consistent with cursor advance)" {
-    // 코드리뷰 결함 회귀: drawPreeditCells가 cellWidthAmbiguous(2칸)가 아니라 cellWidth(1칸)로 그리면,
+    // 코드리뷰 결함 회귀: 공통 preedit 합성기가 cellWidthAmbiguous(2칸)가 아니라 cellWidth(1칸)로 그리면,
     // wide 모드에서 동그란 번호의 continuation이 안 그려지고 커서가 1칸 모자랐다. 폭 출처를 일치시킴.
     var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 8, .rows = 1 });
     defer core.deinit();
-    core.ambiguous_wide = true;
+    var overlay = @import("preedit.zig").Overlay.init(std.testing.allocator);
+    defer overlay.deinit();
+    core.ambiguous_wide = true; // canonical base snapshot의 폭 정책을 overlay가 그대로 소비한다.
     try core.write("ab"); // 커서 col 2
     try core.write("\x1b[2D"); // 커서를 col 0으로(뒤 글자 위에서 조합)
     try std.testing.expectEqual(@as(u16, 0), core.screen.cursor.col);
-    try core.setPreedit("③"); // U+2462 — wide면 2칸
-    const snap = core.renderSnapshot();
+    try overlay.replace("③"); // U+2462 — wide면 2칸
+    const snap = overlay.compose(core.renderSnapshot());
     try std.testing.expectEqual(@as(u21, 0x2462), snap.cells[0].codepoint); // ③(조합)
     try std.testing.expectEqual(@as(u2, 2), snap.cells[0].width); // ambiguous-aware → 2칸
     try std.testing.expect(snap.cells[1].continuation); // continuation(잔상 'b'가 아님)
@@ -6082,13 +6084,15 @@ test "preedit overlays a trailing DIM autosuggest ghost (딱 고스트만 가림
     // 삽입형으로 밀면 잔상이 남으므로(앱 미전송이라 안 지워짐) dim 후행 run은 오버레이로 덮는다.
     var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 12, .rows = 2 });
     defer core.deinit();
+    var overlay = @import("preedit.zig").Overlay.init(std.testing.allocator);
+    defer overlay.deinit();
     try core.write("\x1b[2m\xec\x9d\x91\x1b[0m"); // faint(SGR 2)로 그린 고스트 "응"(wide, col0-1)
     try std.testing.expect(core.screen.cells[0].style.dim); // 고스트 base는 dim
     try core.write("\x1b[2D"); // 커서를 col0(고스트 위)으로
     try std.testing.expectEqual(@as(u16, 0), core.screen.cursor.col);
 
-    try core.setPreedit("\xeb\x9d\xbc"); // "라"(wide) 조합 중
-    const snap = core.renderSnapshot();
+    try overlay.replace("\xeb\x9d\xbc"); // "라"(wide) 조합 중
+    const snap = overlay.compose(core.renderSnapshot());
     // '라'가 '응'을 덮는다(안 밀림) — dim 고스트라 예외.
     try std.testing.expectEqual(@as(u21, 0xB77C), snap.cells[0].codepoint); // 라(덮음)
     try std.testing.expect(snap.cells[0].style.reverse);
@@ -6104,13 +6108,15 @@ test "preedit inserts before NON-dim trailing text (일반 텍스트는 고스�
     // 텍스트로 보고 삽입형으로 민다. dim 한 플래그가 오버레이(고스트) vs 삽입(실 텍스트)을 가른다.
     var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 12, .rows = 2 });
     defer core.deinit();
+    var overlay = @import("preedit.zig").Overlay.init(std.testing.allocator);
+    defer overlay.deinit();
     try core.write("\xec\x9d\x91"); // 일반 intensity 텍스트 "응"(wide, col0-1) — dim 아님
     try std.testing.expect(!core.screen.cells[0].style.dim);
     try core.write("\x1b[2D"); // 커서를 col0으로
     try std.testing.expectEqual(@as(u16, 0), core.screen.cursor.col);
 
-    try core.setPreedit("\xeb\x9d\xbc"); // "라"(wide) 조합 중
-    const snap = core.renderSnapshot();
+    try overlay.replace("\xeb\x9d\xbc"); // "라"(wide) 조합 중
+    const snap = overlay.compose(core.renderSnapshot());
     // '라'가 col0에 삽입되고 '응'은 col2로 밀린다(안 가려짐).
     try std.testing.expectEqual(@as(u21, 0xB77C), snap.cells[0].codepoint); // 라(조합)
     try std.testing.expect(snap.cells[1].continuation);
@@ -6124,12 +6130,14 @@ test "preedit overlay clears the orphan continuation when a narrow glyph covers 
     // dim 고스트라 오버레이 경로 — 짝 잃은 continuation을 비워 렌더가 base 없는 반쪽을 안 그리게 한다.
     var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 8, .rows = 1 });
     defer core.deinit();
+    var overlay = @import("preedit.zig").Overlay.init(std.testing.allocator);
+    defer overlay.deinit();
     try core.write("\x1b[2m\xec\x9d\x91\x1b[0m"); // faint 고스트 "응"(wide, col0 base + col1 continuation)
     try core.write("\x1b[2D"); // 커서를 col0으로
     try std.testing.expectEqual(@as(u16, 0), core.screen.cursor.col);
 
-    try core.setPreedit("a"); // 폭1 조합 글자
-    const snap = core.renderSnapshot();
+    try overlay.replace("a"); // 폭1 조합 글자
+    const snap = overlay.compose(core.renderSnapshot());
     try std.testing.expectEqual(@as(u21, 'a'), snap.cells[0].codepoint); // 'a'(조합, 폭1)
     try std.testing.expectEqual(@as(u2, 1), snap.cells[0].width);
     try std.testing.expect(!snap.cells[1].continuation); // 짝 잃은 continuation 정리됨(잔상 없음)
@@ -6144,12 +6152,14 @@ test "preedit clears the truncated wide base when the cursor sits on a continuat
     // 후행이 continuation 한 칸뿐이라 고스트 판정에 안 걸리고 삽입 경로를 타지만 정리는 동일하게 필요.
     var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 8, .rows = 1 });
     defer core.deinit();
+    var overlay = @import("preedit.zig").Overlay.init(std.testing.allocator);
+    defer overlay.deinit();
     try core.write("\xec\x9d\x91"); // "응"(wide, col0 base + col1 continuation)
     try core.write("\x1b[2G"); // CHA col2(1-based) = col1(continuation 칸)
     try std.testing.expectEqual(@as(u16, 1), core.screen.cursor.col);
 
-    try core.setPreedit("\xeb\x9d\xbc"); // "라"(wide) 조합 중
-    const snap = core.renderSnapshot();
+    try overlay.replace("\xeb\x9d\xbc"); // "라"(wide) 조합 중
+    const snap = overlay.compose(core.renderSnapshot());
     try std.testing.expectEqual(@as(u21, ' '), snap.cells[0].codepoint); // 잘린 '응' base 정리됨
     try std.testing.expectEqual(@as(u21, 0xB77C), snap.cells[1].codepoint); // 라(조합, col1)
     try std.testing.expectEqual(@as(u2, 2), snap.cells[1].width);

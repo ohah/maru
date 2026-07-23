@@ -49,12 +49,15 @@ pub const Kind = enum(u16) {
     stream_ack = 9,
     ping = 10,
     pong = 11,
+    /// controller가 host viewport를 live bottom으로 되돌리는 응답 없는 stream command.
+    /// AppKit IME callback이 request/response RPC를 기다리지 않도록 별도 kind로 둔다.
+    scroll_to_bottom = 12,
     _,
 
     /// v1이 아는 kind인가. open enum이라 unknown 값(미래 wire)은 false다 — 상위가 optional flag로 skip 여부를 정한다.
     pub fn isKnown(self: Kind) bool {
         return switch (self) {
-            .hello, .hello_ack, .request, .response, .event, .snapshot_chunk, .delta_chunk, .input_bytes, .stream_ack, .ping, .pong => true,
+            .hello, .hello_ack, .request, .response, .event, .snapshot_chunk, .delta_chunk, .input_bytes, .stream_ack, .ping, .pong, .scroll_to_bottom => true,
             _ => false,
         };
     }
@@ -173,7 +176,7 @@ pub const Header = struct {
 pub fn maxPayloadForKind(kind: Kind) usize {
     return switch (kind) {
         .snapshot_chunk, .delta_chunk, .input_bytes => max_binary_chunk,
-        .hello, .hello_ack, .request, .response, .event, .stream_ack, .ping, .pong => max_control_json,
+        .hello, .hello_ack, .request, .response, .event, .stream_ack, .ping, .pong, .scroll_to_bottom => max_control_json,
         _ => max_binary_chunk,
     };
 }

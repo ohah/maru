@@ -23,9 +23,22 @@ control-plane, PTY 종료 정책과 책임이 겹치지 않도록 소유권·ID�
 > 7/2/5379 왕복·revision/coalescing·소유권 테스트는 존재하지만 detach 중 변경→재접속, controlled Claude/Codex
 > foreground, 다중 runtime event 격리, 실제 upload branch 제품 E2E가 남아 있어 runtime metadata parity 전체를
 > 완료로 선언하지 않는다. `expectSnapshotParity`는 여전히 renderer DTO만 보호하며 metadata는 별도 gate다.
+> IME marked text 표시는 별도 client-local 계약으로 구현됐다. 각 GUI `Surface`가 host snapshot 위에 같은
+> `PreeditOverlay`를 합성하고, MRSH/runtime/workspace에는 저장하지 않는다. 그래서 다중 클라이언트가 같은
+> runtime을 보더라도 조합 중 문자열은 입력한 attachment에만 보이며 detach/reconnect에는 남지 않는다.
+> 확정 UTF-8과 그 확정 뒤 replay할 Enter/화살표만 pin된 runtime의 surface별 ordered input stream으로 보낸다.
+> 창 간 workspace 이동 때 source/destination terminal admission과 미전송 queue 이전 용량을 all-or-none
+> 선예약한 뒤 조합을 확정하고 queue를 destination session으로 함께 옮긴다. 원격 nonblocking 경로는 AppKit
+> callback에서 일반 key를 runtime별 64 KiB direct-input FIFO에 복사하고, bounded preframed
+> `input_bytes` 또는 `scroll_to_bottom` frame의 소유권을 connection writer에 넘기며, 전송 구간에
+> `O_NONBLOCK`을 적용한 `MSG_DONTWAIT` write만 시도한다.
+> EAGAIN/partial 뒤 남은 wire bytes는 frame-loop pump가 같은 frame offset부터 이어 보낸다. scroll
+> barrier offset이 `기존 input → scroll_to_bottom → 새 input`의 순서를 보존한다. scrolled
+> `imeBegin`은 응답 없는 async scroll frame만 admission하며 동기 RPC로 fallback하지 않는다.
+> 이는 일반 key/paste/focus input-mode parity 전체가 완료됐다는 뜻은 아니다.
 > `keep-alive-after-quit` 토글은 **설정 GUI(workspace 섹션)에도 노출**된다. 기본값은 아직 `false`(opt-in)다:
 > quick persistence(현재 quick은 명시적으로 in-process), incremental checkpoint, ended placeholder, 외부 `maru attach` CLI, 다중 app **process**(현재 daemon
-> serial), 실제 bounded nonblocking socket writer, GUI 부재 시 OS 배너, **host-backed echo 지연 제거(이벤트 기반
+> serial), 일반 input/scroll 이외 **전체 control·delta 경로의** async socket event-loop 통합, GUI 부재 시 OS 배너, **host-backed echo 지연 제거(이벤트 기반
 > push — §perf, 백로그)**, **기본값 `true` 전환** 등은 **후속/백로그**다. 이 문서는 그 목표 상태를 함께 기술한다 — **구현 완료
 > 여부는 각 절의 "구현 상태" 표식으로 구분한다**(표식 없는 서술은 목표 설계).
 
@@ -587,6 +600,7 @@ request_id:u64 | stream_id:u64 | payload_len:u32
 | `input_bytes` | 8 | controller가 보낸 raw input bytes |
 | `stream_ack` | 9 | JSON highest applied sequence/credit or fresh-snapshot request |
 | `ping` / `pong` | 10 / 11 | empty or diagnostic nonce |
+| `scroll_to_bottom` | 12 | controller가 보낸 payload 없는 fire-and-forget live-viewport command |
 
 - `request_id=0`은 unsolicited event/stream, nonzero는 connection 안에서 재사용하지 않고 response와 1:1 대응한다.
 - `stream_id=0`은 비-stream RPC, attach 성공 뒤 server가 발급한 nonzero ID는 해당 runtime subscription에만 쓴다.
@@ -597,14 +611,32 @@ request_id:u64 | stream_id:u64 | payload_len:u32
   버리고 `snapshot.invalidated`를 보내며 PTY reader와 다른 client는 계속 진행한다.
 - header/payload partial read/write는 정상 입력이다. bad magic, length overflow, cap 초과, truncated EOF, invalid UTF-8 control,
   JSON duplicate required field는 typed protocol error가 가능하면 응답한 뒤 connection을 닫는다. runtime을 terminate하지 않는다.
+- outbound frame의 partial write 뒤 hard error는 frame 경계를 복구할 수 없으므로 client가 shared connection을 즉시
+  fail-close한다. lifecycle detach/terminate request를 지속적인 allocator OOM으로 만들 수 없을 때도 socket을 닫아
+  host의 EOF cleanup이 attachment/controller lease를 회수한다.
 - 모든 frame header의 `major`는 현재 선택된 MRSH major와 같아야 한다. hello payload만 v2인데 header가 다른 혼합 frame은
   server/client 양쪽에서 protocol error로 connection을 닫고 runtime은 유지한다.
+- `screen_viewport_scrolled_v1`은 같은 MRSH v2 안에서 screen mode bit의 의미를 확장하는 hello capability다. 이 capability를
+  host가 응답했을 때만 client는 `viewport_scrolled`와 scrolled snapshot의 canonical live cursor anchor를 신뢰한다. 앱 업데이트
+  전에 이미 살아 있던 구 v2 host는 capability가 없으므로 bit 부재를 `false`로 해석하면 안 된다. 새 client는 그 연결에서
+  marked-text 합성을 생략하고 후보창을 neutral pane origin에 두는 fail-closed 경로를 쓴다. runtime/확정 입력은 유지하되 정확한
+  preedit 표시와 후보 위치만 지원하지 않는다.
+- `async_scroll_to_bottom_v1`은 kind 12의 응답 없는 stream command capability다. client는 이 이름이 hello_ack에
+  있을 때만 scrolled IME의 live-bottom intent를 admission한다. runtime은 일반 key를 64 KiB direct-input FIFO에
+  먼저 소유하고 현재 FIFO 길이를 scroll barrier offset으로 고정한다. shared connection의 기존 frame이 막혀 있어도
+  64 KiB cap 안의 후속 input을 버리거나 AppKit callback을 block하지 않으며, frame-loop가
+  `barrier 앞 input → scroll_to_bottom → barrier 뒤 input` 순서로 재시도한다. capability 없는 구 v2 host에는 동기
+  `runtime.core_command` RPC로 fallback하지 않고 preedit/candidate 표시만 fail-closed한다.
+  FIFO admission 뒤 frame encode OOM은 성공한 ownership으로 보고 재시도한다. pending+new가 64 KiB를 넘으면
+  그 admission 전체를 효과 0으로 거부한다. 이후 blocking mouse/core/resize RPC는 FIFO와 barrier를 먼저 flush한다.
 
 ### hello, command, stream 순서
 
 connection의 첫 frame은 반드시 `hello`다. 현재 client는 `{protocol_min:2, protocol_max:2, client_kind:"gui|cli",
-capabilities:[...]}`를 보내고 host는 선택 version, `host_id`, 지원 capability를 응답한다. 겹치는 major가 없으면 attach 요청을 받기
-전에 `incompatible_version`으로 끝낸다. GUI는 manifest handle의 `host_id`와 hello의 값이 다르면 stale로 처리한다.
+capabilities:["runtime_metadata_v1","screen_viewport_scrolled_v1","async_scroll_to_bottom_v1",...]}`를 보내고 host는 선택 version, `host_id`, 자신이 실제로
+지원하는 capability를 응답한다. client는 hello_ack에도 이름이 있는 capability만 활성화하며, major가 같다는 사실만으로 새 screen 의미론을 가정하지 않는다.
+겹치는 major가 없으면 attach 요청을 받기 전에 `incompatible_version`으로 끝낸다. GUI는 manifest handle의 `host_id`와 hello의
+값이 다르면 stale로 처리한다.
 
 | 내부 command | 주요 입력 | 결과/효과 |
 | --- | --- | --- |
@@ -891,6 +923,35 @@ P3-e도 슬라이스로 나눈다(제품 통합이라 크다).
     Claude/Codex observer, SSH drop/paste upload와 alt-screen PageUp/wheel 특례가 공용 runtime observation만 읽도록
     옮긴다. 이 범위의 metadata에는 placeholder `surface.core` 직접 읽기를 금지한다. 일반 key/paste/mouse/focus의
     DECKPAM·bracketed-paste·mouse/focus/kitty input mode와 remote core-command parity는 아직 이 완료 범위가 아니다.
+  - **P3-e4c-2(IME marked text parity) ✅**: marked text는 host core command나 protocol state가 아니라 각 GUI
+    `Surface`의 client-local `PreeditOverlay`가 소유한다. 로컬/host-backed base snapshot에 공통 합성기를 적용하고,
+    host snapshot/delta의 canonical grid는 바꾸지 않는다. 최신 delta마다 다시 합성하며 clear하면 최신 base가 즉시
+    드러난다. 조합 폭은 base `RenderSnapshot.ambiguous_wide`가 단일 출처이며 host snapshot의 mode bit로 원격까지 전달한다.
+    `screen_viewport_scrolled_v1`을 협상한 현재 host의 scrolled snapshot은 `cursor.visible=false`지만 canonical live
+    `row/col`을 보존하고, additive `viewport_scrolled` bit는 client가 과거 화면에 조합문자를 합성하지 않고 먼저
+    `scroll_to_bottom`을 요청하게 한다. 현재 host는 `async_scroll_to_bottom_v1`의 응답 없는 stream frame을 사용한다.
+    client runtime은 일반 key를 64 KiB direct-input FIFO에 먼저 복사하고 scroll barrier offset으로
+    `기존 input → scroll_to_bottom → 새 input` 순서를 보존한 뒤 connection의 bounded outbound 슬롯에 nonblocking
+    admission한다. FIFO가 소유한 뒤의 frame encode OOM은 tick 재시도 상태이며, pending+new가 64 KiB를 넘는
+    새 admission만 효과 0으로 fail-closed한다. blocking mouse/core/resize RPC는 FIFO와 barrier를 먼저 flush해
+    이미 수락한 key를 추월하지 않는다. AppKit
+    callback은 `client.call`/response를 기다리지 않는다. 후보창은 합성 cursor가 아니라 이 base cursor를 사용한다.
+    capability 없는 구 v2 host에서는 동기 RPC로 fallback하지 않고 bit 부재를 live bottom으로 간주하지 않으며
+    preedit/candidate를 fail-closed한다. 터미널 조합이 시작되면
+    surface id를 pin하고, 포커스·pane/Term/tab 전환과 활성 workspace의 창 간 이동/병합은 구조 소유권을 바꾸기 전에 해당
+    surface로 확정한다. 이때 아직 flush되지 않은 surface별 ordered input queue도 destination session으로 옮긴다. 닫힌 대상은
+    transaction 동안 tombstone으로 유지해 새 active로 재지정하지 않는다. cross-window workspace move는 active source와
+    destination의 terminal admission과 이동될 queue의 destination buffer/map 용량을 모두 선예약한 뒤 commit한다.
+    어느 admission/transfer OOM에서도 조합 확정이나 detach/model surgery를 시작하지 않고 양쪽
+    overlay·pin·queue와 layout을 보존한다. same-window는 active owner가 바뀔 때만 commit하고, merge는 최종
+    destination active owner를 보존하므로 source만 gate한다. source/destination OOM·성공, same-window active/background,
+    merge destination 보존을 controlled 통합 테스트한다. observer/reconnect/다른 창에는 preedit이 전파되지 않는다.
+    확정 UTF-8과 replay key는 한 번의 capacity reservation 뒤 같은 surface FIFO 끝에 함께 append해 확정→replay 순서를
+    보존한다. 원격 nonblocking submit은 bounded
+    preframed frame의 소유권을 넘긴 뒤 전송 구간에 `O_NONBLOCK`을 적용한 `MSG_DONTWAIT` write만 시도하며, EAGAIN/partial remainder는 frame-loop pump가
+    동일 offset부터 이어 보낸다. queue 준비/OOM 실패는 partial·replay-only 전송 없이
+    0회로 fail-closed한다. exactly-once는 예약 성공 뒤 application admission/submit 범위이며, PTY 소비나 원격 hard error 뒤
+    durable delivery를 확인하는 ACK 계약은 아니다.
   - **P3-e4c-1(마우스 리포팅 parity) ✅**: **방식 B(호스트-authoritative)** — 마우스 트래킹 앱(vim/tmux/htop/less-mouse)에서
     휠·클릭·드래그·우클릭이 host로 라우팅된다. ⑴ 관측에 `mouse_tracking`(optional, 구버전 host 호환) 추가 — client가 "앱이
     마우스 소유(리포트) vs 클라 소유(스크롤백/선택)"를 판단하는 게이트 1비트(`AppSession.remoteMouseTracking`). ⑵ `report_mouse`
@@ -905,8 +966,19 @@ P3-e도 슬라이스로 나눈다(제품 통합이라 크다).
     기존 AppSession cwd/title/at-prompt/workspace/control 소비 회귀는 자동 검증한다. 남은 gate는 controlled foreground
     process fixture, multi-runtime event 격리,
     response 대기 중 event, detach/reconnect 최신 metadata, cwd→Git·agent·SSH 제품 소비 경로를
-    실제 제품 경계에서 무인 테스트하는 것이다. 일반 key/paste/mouse/focus가 host input mode와 core command를 소비하는
-    backend-neutral 경로도 별도 남은 gate다. cwd/SSH destination/raw process argv는 trace와 실패 artifact에 남기지 않는다.
+    실제 제품 경계에서 무인 테스트하는 것이다. IME marked text의 client-local 공통 snapshot 합성, remote delta 재합성,
+    scrollback 합성 억제와 canonical cursor/mode 투영, clear 후 canonical base 복원, base ambiguous-width 소비,
+    OOM fail-closed, 중복 포커스 상실, 대상 소멸 tombstone, ordered commit→replay, 활성 workspace 창 간 queue 이전과
+    source/destination admission과 queue-transfer preflight의 2-phase abort-before-commit/detach 원자성,
+    runtime-owned direct-key FIFO의 socket backpressure 보존과 async scroll barrier wire ordering은
+    단위 또는 controlled host-backed 테스트로 검증한다. capability 없는 **실제 구 binary** host 재접속, pane/Term/tab 및
+    모든 비-terminal input owner 전환의 개별 제품 E2E, 실제 AppKit run-loop의 stalled-socket deadline 계측, 실제 macOS 입력기의 후보창·자모별
+    픽셀 갱신은 아직 수동/후속 gate다. socketpair backpressure는 AppKit 경계의 일반 key가 64 KiB FIFO에
+    소유된 뒤 막힌 connection/encode OOM에서도 유실되지 않는지, exact-cap/cap+1 의미론,
+    `기존 input → scroll → 새 input → mouse RPC` 순서, request write hard-error connection invalidation,
+    lifecycle request의 fail-always allocator OOM→EOF cleanup fallback을 자동 검증한다.
+    일반 key/paste/mouse/focus가 host input mode와
+    core command를 소비하는 backend-neutral 경로는 여전히 별도 남은 gate다. cwd/SSH destination/raw process argv는 trace와 실패 artifact에 남기지 않는다.
     현재 SSH drop/paste barrier는 GUI main thread에서 local host RPC를 기다리며 transport timeout 상한은 5초다. 정상 local
     socket에서는 즉시 끝나지만, stalled host에서도 UI를 멈추지 않는 async user-action state machine은 기본값 전환 전 성능 gate다.
 

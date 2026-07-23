@@ -154,7 +154,7 @@ test "overlay_input windowStart: prev=0 재파생(palette·settings) + prev 유�
 }
 
 /// 검색어(query) + IME 조합(preedit) 입력 모델. **커밋과 조합은 독립** — `appendChar`는 preedit를 건드리지 않고,
-/// preedit는 `setPreedit`가 단일 관리한다(터미널 core와 같은 모델). 이주 전 두 컴포넌트가 `appendChar`에서 preedit를
+/// preedit는 `setPreedit`가 단일 관리한다(터미널 Surface overlay와 같은 commit/preedit 분리 모델). 이주 전 두 컴포넌트가 `appendChar`에서 preedit를
 /// 비우다가 IME 멀티-문자 흐름(커밋 N + 조합 N+1)에서 다음 조합을 지워 "조합 안 보임" 버그를 냈다 — 그 모델을 여기
 /// 단일 출처로 못 박는다. query·preedit는 ArrayList라 소유자(컴포넌트 State)가 deinit한다.
 pub const OverlayInput = struct {

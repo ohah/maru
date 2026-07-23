@@ -4791,6 +4791,13 @@ pub const AppSession = struct {
         // FocusOwner는 재시작/창 전환 뒤 복원할 구조 intent라 비-key 창에도 남는다. 실제 키를 받을 수 없는 창에서
         // border까지 남기면 거짓 cue가 되므로 window focus를 별도 상태로 복제하지 않고 기존 단일 bool로 fail-close한다.
         if (!self.window_focused) return;
+        // 키를 잡는 오버레이 모달이 열리면 그 뒤 콘텐츠 포커스 테두리를 숨긴다 — 모달이 포커스를 선점하므로 **커서
+        // unfocus와 같은 단일 판정**(anyOverlayOpen)을 공유해 두 시각 cue(커서·테두리)가 어긋나지 않게 한다. 아래
+        // branch의 inputFocus()는 텍스트/IME 소유자만 모델링해(confirm/notice/settings/rename/search/find/palette/addr)
+        // context_menu·notifications는 안 담으므로, 그 둘이 열렸을 때 branch가 inputFocus()==.terminal(또는 .file_tree/
+        // .dock_group)로 오판해 테두리를 **모달 위로** 그리던 버그(알림 패널 위로 뜨는 포커스 보더라인)를 여기서 닫는다.
+        // 이미 inputFocus로 걸러지던 모달은 무변경(조기 반환만 앞당김) — notice도 커서와 같게 여기서 억제된다.
+        if (self.anyOverlayOpen()) return;
         const rect: maru.session.SplitRect = switch (self.focus_owner) {
             .workspace => if (self.inputFocus() == .terminal) active_workspace_body orelse return else return,
             .dock_surface => |surface_id| blk: {
@@ -44791,6 +44798,65 @@ test "FP9 workspace focus border uses pane body and fails closed for non-key or 
     for (session.gpu_quads.items) |quad| unknown_leaf_border_quads += @intFromBool(quad.layer == 1);
     try std.testing.expectEqual(@as(usize, 0), unknown_leaf_border_quads);
     try std.testing.expectEqual(@as(usize, 0), session.drag_overlay_cells_scratch.items.len);
+}
+
+test "focus border suppressed while notification panel or context menu is open" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    session.window_padding_px = .{ .left = 10, .right = 20, .top = 4, .bottom = 8 };
+    _ = try session.resize(1400, 900, 1000);
+    session.window_focused = true;
+    session.focus_owner = .workspace;
+
+    var leaves: std.ArrayList(PaneTree.LeafRect) = .empty;
+    defer leaves.deinit(allocator);
+    try session.activeTabLeafRects(allocator, session.termRect(), &leaves);
+    var active_geometry: ?AppSession.PaneGeometry = null;
+    for (leaves.items) |leaf| {
+        if (leaf.leaf == session.activePane()) active_geometry = session.paneGeometry(leaf.rect);
+    }
+    const geometry = active_geometry orelse return error.MissingActivePaneGeometry;
+
+    const countLayerOne = struct {
+        fn f(s: *AppSession) usize {
+            var n: usize = 0;
+            for (s.gpu_quads.items) |quad| n += @intFromBool(quad.layer == 1);
+            return n;
+        }
+    }.f;
+
+    // 기준선: 오버레이 없음 → inputFocus()==.terminal라 4개 테두리 quad.
+    session.dropQuadsByLayer(1);
+    session.drag_overlay_cells_scratch.clearRetainingCapacity();
+    session.appendFocusOwnerBorder(&session.drag_overlay_cells_scratch, geometry.body);
+    try std.testing.expectEqual(@as(usize, 4), countLayerOne(session));
+
+    // 알림 패널 열림 → 테두리 0개 + overlay presence sentinel도 안 남긴다(모달 위로 뜨던 보더라인 제거). context_menu·
+    // notifications는 InputFocus enum 밖이라 inputFocus()만으론 못 걸렀던 gap — anyOverlayOpen 가드가 닫는다.
+    session.chrome_host.notifications.open = true;
+    session.dropQuadsByLayer(1);
+    session.drag_overlay_cells_scratch.clearRetainingCapacity();
+    session.appendFocusOwnerBorder(&session.drag_overlay_cells_scratch, geometry.body);
+    try std.testing.expectEqual(@as(usize, 0), countLayerOne(session));
+    try std.testing.expectEqual(@as(usize, 0), session.drag_overlay_cells_scratch.items.len);
+    session.chrome_host.notifications.open = false;
+
+    // context_menu도 같은 gap이라 함께 억제된다(커서 unfocus와 동일 판정).
+    session.chrome_host.context_menu.open = true;
+    session.dropQuadsByLayer(1);
+    session.drag_overlay_cells_scratch.clearRetainingCapacity();
+    session.appendFocusOwnerBorder(&session.drag_overlay_cells_scratch, geometry.body);
+    try std.testing.expectEqual(@as(usize, 0), countLayerOne(session));
+    session.chrome_host.context_menu.open = false;
+
+    // 오버레이 닫으면 다시 4개(회귀 방지 — 가드가 영구 억제가 아님).
+    session.dropQuadsByLayer(1);
+    session.drag_overlay_cells_scratch.clearRetainingCapacity();
+    session.appendFocusOwnerBorder(&session.drag_overlay_cells_scratch, geometry.body);
+    try std.testing.expectEqual(@as(usize, 4), countLayerOne(session));
 }
 
 test "FP9 production frame follows active pane body across horizontal and vertical split" {

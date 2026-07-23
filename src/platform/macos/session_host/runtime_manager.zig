@@ -179,6 +179,7 @@ pub const RuntimeManager = struct {
             .app_cursor_keys = core.application_cursor_keys,
             .alternate_scroll = core.alternate_scroll,
             .mouse_tracking = core.mouse_tracking != .none,
+            .bracketed_paste = core.bracketed_paste,
             .observer_generation = core.observerGeneration(),
             .title_generation = core.title_generation.load(.monotonic),
             .cols = core.size.cols,

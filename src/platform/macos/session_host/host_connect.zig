@@ -21,8 +21,11 @@ extern "c" fn usleep(usec: c_uint) c_int;
 extern "c" fn arc4random_buf(buf: [*]u8, nbytes: usize) void;
 
 pub const Options = struct {
-    /// spawn 뒤(또는 lock loser로서) host가 뜰 때까지 재connect 시도 횟수 × 간격. 기본 150×20ms=3s(cold launch 여유).
-    connect_attempts: usize = 150,
+    /// spawn 뒤(또는 lock loser로서) host가 뜰 때까지 재connect 시도 횟수 × 간격. 이 상한은 **성공 경로엔 영향이 없다** —
+    /// connect가 성공하면 즉시 반환하므로 실제 대기 = host가 socket을 bind할 때까지(실측: cold ~470ms[4.5MB 바이너리 cold
+    /// page-cache execve+load], warm ~15ms). 상한은 오직 **host가 끝내 안 뜰 때(spawn 실패)** 폴백까지의 시간이다. 기존
+    /// 150×20ms=3s는 실패 시 3초 프리즈였다 → 75×20ms=1.5s로 줄여 실패 폴백을 절반으로(cold ~470ms를 3배 여유로 덮음).
+    connect_attempts: usize = 75,
     connect_delay_ms: u32 = 20,
 };
 

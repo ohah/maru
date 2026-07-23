@@ -899,6 +899,99 @@ describe("bridge-free renderer", () => {
     expect((dom.window as unknown as { maru?: unknown }).maru).toBeUndefined();
   });
 
+  test("⌘+/− page zoom applies to markdown reads only, clamps, and clears for svg/1×", () => {
+    const dom = new JSDOM('<!doctype html><main id="app"></main>', {
+      url: "maru-app://render/render.html",
+    });
+    const root = dom.window.document.documentElement;
+    bootRenderer(dom.window.document, dom.window as unknown as Window);
+    const post = (data: unknown) =>
+      dom.window.dispatchEvent(
+        new dom.window.MessageEvent("message", { source: dom.window.parent, data }),
+      );
+
+    // 콘텐츠 전이라 값만 저장 — 아직 마크다운이 아니므로 documentElement zoom은 미적용(§2.3 previewIsMarkdown 게이트).
+    post({ channel: viewerChannel, type: "setZoom", zoom: 2 });
+    expect(root.style.getPropertyValue("zoom")).toBe("");
+
+    // 마크다운 read 프리뷰: 현재 배율을 페이지 줌으로 적용한다.
+    post({ channel: viewerChannel, type: "render", markdown: "# Doc" });
+    expect(root.style.getPropertyValue("zoom")).toBe("2");
+
+    // 마크다운 상태에서 배율 변경은 즉시 반영. 상한 [0.1,10] 클램프도 확인.
+    post({ channel: viewerChannel, type: "setZoom", zoom: 50 });
+    expect(root.style.getPropertyValue("zoom")).toBe("10");
+
+    // 1배(⌘0)는 기본 렌더 — zoom 속성을 제거한다.
+    post({ channel: viewerChannel, type: "setZoom", zoom: 1 });
+    expect(root.style.getPropertyValue("zoom")).toBe("");
+
+    // svg 프리뷰는 자체 fit이 크기를 소유 → 페이지 줌 해제(마크다운에서 배율 3으로 켜둔 뒤 전환해도 비워진다).
+    post({ channel: viewerChannel, type: "setZoom", zoom: 3 });
+    post({ channel: viewerChannel, type: "render", markdown: "# Doc" });
+    expect(root.style.getPropertyValue("zoom")).toBe("3");
+    post({
+      channel: viewerChannel,
+      type: "renderSvg",
+      svg: "<svg xmlns='http://www.w3.org/2000/svg'></svg>",
+    });
+    expect(root.style.getPropertyValue("zoom")).toBe("");
+
+    // 하한 [0.1] 클램프: 마크다운 상태에서 극소 배율이 들어와도 0.1로 흡수한다.
+    post({ channel: viewerChannel, type: "render", markdown: "# Doc" });
+    post({ channel: viewerChannel, type: "setZoom", zoom: 0.01 });
+    expect(root.style.getPropertyValue("zoom")).toBe("0.1");
+
+    // image 프리뷰도 panzoom이 크기를 소유 → 페이지 줌 해제(svg와 별도 분기라 따로 검증).
+    post({ channel: viewerChannel, type: "setZoom", zoom: 4 });
+    post({ channel: viewerChannel, type: "render", markdown: "# Doc" });
+    expect(root.style.getPropertyValue("zoom")).toBe("4");
+    post({
+      channel: viewerChannel,
+      type: "renderImage",
+      src: "data:image/png;base64,iVBORw0KGgo=",
+    });
+    expect(root.style.getPropertyValue("zoom")).toBe("");
+
+    dom.window.close();
+  });
+
+  test("trusted shell forwards ⌘+/− zoom to the render iframe, clamped, ignoring non-finite", () => {
+    const dom = new JSDOM(
+      '<!doctype html><p id="viewer-status"></p><iframe id="renderer"></iframe><main id="editor"></main>',
+      { url: "maru-app://app/index.html?document=1" },
+    );
+    // read/write 브리지는 이 테스트와 무관 — 줌 포워딩만 검증하므로 문서 요청은 처리하지 않는다(begin이 pending에 머물러도 무해).
+    bootShell(dom.window.document, dom.window as unknown as Window);
+    const frame = dom.window.document.querySelector<HTMLIFrameElement>("#renderer");
+    const target = frame?.contentWindow;
+    expect(target).not.toBeNull();
+    const posted: unknown[] = [];
+    if (target) {
+      target.postMessage = ((message: unknown) =>
+        posted.push(message)) as typeof target.postMessage;
+    }
+    const dispatchZoom = (zoom: number) =>
+      dom.window.dispatchEvent(new dom.window.CustomEvent("maru:file-zoom", { detail: { zoom } }));
+
+    dispatchZoom(2); // 정상
+    dispatchZoom(50); // 상한 → 10
+    dispatchZoom(0.01); // 하한 → 0.1
+    dispatchZoom(Number.NaN); // 비유한 → 무시(전송 안 함, previewZoom 미변경)
+    dispatchZoom(Number.POSITIVE_INFINITY); // 비유한 → 무시
+
+    const zooms = posted
+      .filter(
+        (m): m is { type?: unknown; zoom?: unknown } =>
+          typeof m === "object" && m !== null && (m as { type?: unknown }).type === "setZoom",
+      )
+      .map((m) => m.zoom);
+    // shell-side 클램프 [0.1,10]와 Number.isFinite 가드를 검증한다(비유한은 setZoom을 아예 안 보낸다).
+    expect(zooms).toEqual([2, 10, 0.1]);
+
+    dom.window.close();
+  });
+
   test("allows raster data URLs and sanitizes SVG before creating a data URL", () => {
     const dom = new JSDOM("");
     const targetWindow = dom.window as unknown as Window;

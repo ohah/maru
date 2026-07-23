@@ -1015,7 +1015,8 @@ pub export fn maru_macos_app_session_syntax_style_js(
     const op = out_ptr orelse return 0;
     const app = app_session.appearance;
     const colors = maru.session.syntax_theme.fromTheme(app.theme);
-    // 폰트 크기는 ⌘+/− 런타임 값(pt, f32)을 반올림·클램프해 넘긴다 — 편집기도 같은 크기로 실시간 반영된다.
+    // 폰트 크기는 ⌘+/− 런타임 값(pt, f32)을 반올림·클램프해 넘긴다 — 편집기가 같은 pt로 스케일된다. ⌘+/− 시
+    // 재주입 트리거는 file_panel_zoom_dirty drain(§2.3, drainFilePanelZoom)이라 실시간 반영된다(테마 변경 경로도 공유).
     const font_size_pt: u16 = @intFromFloat(@round(std.math.clamp(app.font.size, 1, 512)));
     const js = maru.session.syntax_theme.writeCssVarsJs(
         colors,
@@ -3026,6 +3027,22 @@ pub export fn maru_macos_app_session_take_global_hotkeys_dirty(session: ?*AppSes
 pub export fn maru_macos_app_session_take_command_catalog_dirty(session: ?*AppSession) u32 {
     const app_session = session orelse return 0;
     return if (app_session.takeCommandCatalogDirty()) 1 else 0;
+}
+
+// 폰트 크기(⌘+/−·config)가 바뀌어 열린 파일 패널 webview의 크기 재적용이 필요하면 1(플래그 비움), 없으면 0.
+// Swift가 tick마다 호출해 1이면 편집기 폰트 pt를 재주입하고 프리뷰 iframe·HTML/PDF에 현재 줌 배율을 적용한다(§2.3).
+// take_command_catalog_dirty와 같은 1회성 신호. session null=0. (v140)
+pub export fn maru_macos_app_session_take_file_panel_zoom_dirty(session: ?*AppSession) u32 {
+    const app_session = session orelse return 0;
+    return if (app_session.takeFilePanelZoomDirty()) 1 else 0;
+}
+
+// 파일 패널 webview 줌 배율을 milli(1000=1.0)로 반환한다 — 현재 폰트 크기 / base_font_size(⌘0 기준). 프리뷰
+// iframe CSS `zoom`·HTML/PDF `pageZoom`이 이 값을 쓴다. base 비정상이면 1000(=1.0), 극단 배율은 [100,10000]으로
+// 클램프된다(filePanelZoomMilli). 신규 파일 패널은 로드 didFinish에서 이 값을 읽어 즉시 현재 줌으로 착지한다. session null=1000. (v140)
+pub export fn maru_macos_app_session_file_panel_zoom_milli(session: ?*AppSession) u32 {
+    const app_session = session orelse return 1000;
+    return app_session.filePanelZoomMilli();
 }
 
 fn keyEventFromAbi(event: KeyEvent) !terminal.KeyEvent {

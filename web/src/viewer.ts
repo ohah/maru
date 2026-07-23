@@ -1262,6 +1262,24 @@ export function bootShell(document: Document, targetWindow: Window): void {
     else atomicProjectionController?.disable();
     if (status !== null) status.dataset.liveAtomicAdmitted = String(detail.active);
   });
+  // §2.3: ⌘+/− 폰트 줌을 읽기 프리뷰에도 반영한다(사용자 결정 2026-07-23). native가 `maru:file-zoom`으로 현재
+  // 배율(현재 폰트/base)을 주면 render iframe에 `setZoom`으로 전달해 iframe이 `documentElement.zoom`으로 페이지
+  // 줌한다(cross-origin이라 shell이 iframe DOM을 직접 못 건드림). iframe이 아직 준비 전이면 최신 배율을 캐시해
+  // renderer-ready에서 다시 보낸다. 편집기(#editor)는 native가 `--maru-editor-font-size`(pt)로 직접 스케일한다.
+  let previewZoom = 1;
+  const sendPreviewZoom = () => {
+    frame.contentWindow?.postMessage(
+      { channel: viewerChannel, type: "setZoom", zoom: previewZoom },
+      "*",
+    );
+  };
+  targetWindow.addEventListener("maru:file-zoom", (event) => {
+    const detail = (event as CustomEvent<unknown>).detail;
+    if (!isRecord(detail) || typeof detail.zoom !== "number" || !Number.isFinite(detail.zoom))
+      return;
+    previewZoom = Math.min(10, Math.max(0.1, detail.zoom));
+    sendPreviewZoom();
+  });
   const loadFromDisk = async (
     syncNative: boolean,
     abortIfDirty = false,
@@ -1445,6 +1463,7 @@ export function bootShell(document: Document, targetWindow: Window): void {
         status.dataset.rendererHandlerType = event.data.handlerType;
         status.dataset.rendererParentAccessible = String(event.data.parentAccessible);
       }
+      sendPreviewZoom(); // 새로/재로드된 iframe이 현재 ⌘+/− 배율로 착지하게 최신 값을 다시 보낸다(§2.3).
       if (contentLoaded) postPreview();
       return;
     }
@@ -1578,6 +1597,20 @@ export function bootRenderer(document: Document, targetWindow: Window): void {
   let atomicPort: MessagePort | null = null;
   let atomicCapability: RendererCapability | null = null;
   let atomicRenderConsumed = false;
+
+  // §2.3: ⌘+/− 페이지 줌. shell이 `setZoom`으로 현재 배율(현재 폰트/base)을 준다. 마크다운 읽기 프리뷰에만
+  // `documentElement.zoom`으로 적용한다 — svg/image 프리뷰는 자체 fit/panzoom이 크기를 소유하므로 제외하고,
+  // 그 모드에서는 zoom을 비워 이중 스케일을 막는다(previewIsMarkdown 게이트). 배율 1은 빈 문자열로 두어 기본 렌더.
+  let previewZoom = 1;
+  let previewIsMarkdown = false;
+  const applyPreviewZoom = () => {
+    // setProperty/removeProperty로 다룬다(CSS `zoom`은 CSSStyleDeclaration 타입에 없을 수 있어 직접 대입 회피).
+    if (previewIsMarkdown && previewZoom !== 1) {
+      document.documentElement.style.setProperty("zoom", String(previewZoom));
+    } else {
+      document.documentElement.style.removeProperty("zoom");
+    }
+  };
 
   const revokeAtomic = () => {
     atomicPort?.close();
@@ -1763,6 +1796,14 @@ export function bootRenderer(document: Document, targetWindow: Window): void {
     }
     if (document.body.dataset.rendererMode === "atomic") return;
     if (event.data.channel !== viewerChannel) return;
+    if (event.data.type === "setZoom" && typeof event.data.zoom === "number") {
+      // ⌘+/− 배율 갱신(§2.3). 메인 읽기 iframe은 atomic 모드가 아니라 여기 도달한다. 마크다운 프리뷰면 즉시
+      // 반영하고, svg/image면 값만 저장했다가 다음 마크다운 render에서 적용한다(applyPreviewZoom이 게이트).
+      const zoom = event.data.zoom;
+      if (Number.isFinite(zoom)) previewZoom = Math.min(10, Math.max(0.1, zoom));
+      applyPreviewZoom();
+      return;
+    }
     if (event.data.type === "ping") {
       const ready: RendererReady = {
         channel: viewerChannel,
@@ -1790,6 +1831,8 @@ export function bootRenderer(document: Document, targetWindow: Window): void {
     }
     if (event.data.type === "renderSvg" && typeof event.data.svg === "string") {
       // FP13 svg 프리뷰: 원문 SVG를 sanitize→data URL→<img>로 격리 표시한다(§2.2).
+      previewIsMarkdown = false;
+      applyPreviewZoom(); // svg는 자체 fit(max-height:100vh)이 크기를 소유 — 페이지 줌 해제(§2.3).
       ++generation;
       for (const resolve of pending.values())
         resolve({
@@ -1832,6 +1875,8 @@ export function bootRenderer(document: Document, targetWindow: Window): void {
       // (svg는 renderSvg 경로). #app이 체커 배경 뷰포트(overflow hidden)라 이미지가 그 안에서만 움직인다.
       // generation을 캡처해, 겹친 재렌더(정상 open은 rendererReady·applyMode가 각각 renderImage를 보내 2회)에서
       // 앞선 렌더의 늦은 load/error가 detach된 `<img>`에 panzoom을 붙이거나 최신 DOM을 덮는 것을 막는다(render 핸들러 동형).
+      previewIsMarkdown = false;
+      applyPreviewZoom(); // image는 panzoom이 줌을 소유 — 페이지 줌 해제(이중 스케일 방지, §2.3).
       const currentGeneration = ++generation;
       for (const resolve of pending.values())
         resolve({
@@ -1910,6 +1955,8 @@ export function bootRenderer(document: Document, targetWindow: Window): void {
       });
     mermaidPending.clear();
     root.innerHTML = renderMarkdown(event.data.markdown);
+    previewIsMarkdown = true;
+    applyPreviewZoom(); // ⌘+/− 페이지 줌은 마크다운 읽기 프리뷰에만 적용(§2.3).
     // 읽기 프리뷰 mermaid: prism이 남긴 `code.language-mermaid` 코드 블록을 shell(→헬퍼)로 렌더한 SVG `<img>`로
     // 교체한다. 헬퍼가 요구하는 완전한 ```mermaid 펜스로 재구성해 보내고, 실패/스테일이면 원래 코드 블록을 남긴다.
     for (const codeEl of Array.from(

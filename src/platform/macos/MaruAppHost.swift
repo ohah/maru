@@ -2975,6 +2975,26 @@ final class MaruWebPanelView: NSView {
         webView.evaluateJavaScript(js, in: nil, in: .page) { _ in }
     }
 
+    // §2.3: ⌘+/− 폰트 줌을 파일 패널 콘텐츠에도 적용한다(사용자 결정 2026-07-23). 배율은 Zig가 현재 폰트/base로
+    // 계산한 milli(1000=1.0). **kind별로 자연스러운 수단**: 신뢰 shell(1)은 편집기가 이미 `--maru-editor-font-size`
+    // (pt, applySyntaxThemeStyle)로 스케일되므로, 여기선 읽기 프리뷰 iframe만 `maru:file-zoom` 이벤트로 페이지 줌한다
+    // (shell이 받아 render iframe에 `documentElement.zoom`을 전달 — cross-origin이라 직접 못 건드림). HTML/PDF
+    // browser(2)는 콘텐츠 전체가 한 문서라 WKWebView `pageZoom`으로 브라우저식 페이지 줌한다.
+    func applyFilePanelZoom(_ zoomMilli: UInt32) {
+        let zoom = Double(zoomMilli) / 1000.0
+        if filePanelKind == 2 {
+            webView.pageZoom = CGFloat(zoom)
+            return
+        }
+        guard filePanelKind == 1 else { return }
+        // zoom은 Zig가 [0.1,10]으로 클램프한 값이라 안전한 숫자 리터럴이다(주입 위험 0).
+        webView.evaluateJavaScript(
+            "window.dispatchEvent(new CustomEvent('maru:file-zoom',{detail:{zoom:\(zoom)}}))",
+            in: nil,
+            in: .page
+        ) { _ in }
+    }
+
     func applyFilePanelMode(_ rawMode: Int32) {
         guard filePanelKind == 1 else { return }
         guard Self.isKnownFilePanelMode(rawMode) else { return }
@@ -3533,6 +3553,11 @@ extension MaruWebPanelView: WKNavigationDelegate {
     // (리뷰12 [3] — bridgeWorld nil-ness가 아니라): 신뢰(0)=브리지 격리 probe, 비신뢰(1)=5d BrowserControl fixture.
     // asset root 부재로 신뢰 패널에 bridgeWorld가 없어도 5d fixture로 오구동하지 않는다. 정상 런은 안 돈다(isSmokeMode 게이트).
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        // §2.3: 새로 로드된 파일 패널을 현재 ⌘+/− 줌 배율로 즉시 착지시킨다(줌 상태에서 새 파일을 열어도 바로 반영).
+        // kind 1=프리뷰 iframe 이벤트/편집기 pt, kind 2=HTML/PDF pageZoom. 이후 배율 변화는 drainFilePanelZoom이 밀어준다.
+        if filePanelKind != 0, let session = controller?.bridgeSession(for: surfaceId) {
+            applyFilePanelZoom(maru_macos_app_session_file_panel_zoom_milli(session))
+        }
         if filePanelKind == 1 {
             livePreviewPageReady = true
             applySyntaxThemeStyle()
@@ -4777,6 +4802,25 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         if let quick = quick {
             for panel in quick.webPanels.values where panel.filePanelKind == 1 {
                 panel.applySyntaxThemeStyle()
+            }
+        }
+    }
+
+    // §2.3: 폰트 크기(⌘+/−·config)가 바뀌면 열린 모든 파일 패널(신뢰 shell·HTML/PDF browser)에 현재 줌 배율을
+    // 적용한다. 편집기 폰트 pt는 refreshFilePanelSyntaxTheme가 재주입하므로 여기선 프리뷰 페이지 줌만 다룬다.
+    // 배율은 활성 세션의 Zig 계산값(현재 폰트/base) — 창별로 폰트가 갈릴 수 있어 각 창의 세션에서 읽는다.
+    func refreshFilePanelZoom() {
+        for surface in windows {
+            guard let session = surface.appSession else { continue }
+            let zoom = maru_macos_app_session_file_panel_zoom_milli(session)
+            for panel in surface.webPanels.values where panel.filePanelKind != 0 {
+                panel.applyFilePanelZoom(zoom)
+            }
+        }
+        if let quick = quick, let session = quick.appSession {
+            let zoom = maru_macos_app_session_file_panel_zoom_milli(session)
+            for panel in quick.webPanels.values where panel.filePanelKind != 0 {
+                panel.applyFilePanelZoom(zoom)
             }
         }
     }
@@ -6638,6 +6682,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             drainSidebarConfig() // view options(⚙) 토글이 바뀌었으면 config 파일에 반영(persist).
             drainGlobalHotkeys() // 글로벌 핫키가 라이브로 바뀌었으면(녹음/해제·reload·reset) OS에 재등록(unregister 후 register).
             drainMenuDirty() // 커맨드 카탈로그가 재빌드됐으면(rebind/unbind·reload·reset 확정) 메뉴바 keyEquivalent 다시 빌드.
+            drainFilePanelZoom() // 폰트 크기(⌘+/−·config)가 바뀌었으면 열린 파일 패널 콘텐츠(편집기·프리뷰·HTML/PDF)를 같은 배율로 재적용(§2.3).
             drainQuitDecision(summary) // Cmd+Q 종료 확인 모달이 확정/취소됐으면 NSApp.reply로 종료를 진행/취소한다.
         }
         return status
@@ -7925,6 +7970,17 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         guard let session = appSession, !smokeMode else { return }
         if maru_macos_app_session_take_command_catalog_dirty(session) != 0 {
             buildMainMenu()
+        }
+    }
+
+    // 폰트 크기(⌘+/−·config)가 바뀌면(Zig applyMetricsPipeline이 file_panel_zoom_dirty를 세움) tick마다 drain해
+    // 1이면 열린 파일 패널 webview 크기를 재적용한다 — 편집기 폰트 pt 재주입(refreshFilePanelSyntaxTheme) + 프리뷰
+    // iframe·HTML/PDF 페이지 줌(refreshFilePanelZoom). take_command_catalog_dirty(drainMenuDirty)와 같은 1회성 신호(§2.3).
+    private func drainFilePanelZoom() {
+        guard let session = appSession else { return }
+        if maru_macos_app_session_take_file_panel_zoom_dirty(session) != 0 {
+            refreshFilePanelSyntaxTheme()
+            refreshFilePanelZoom()
         }
     }
 

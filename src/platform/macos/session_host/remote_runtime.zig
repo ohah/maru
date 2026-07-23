@@ -259,6 +259,8 @@ pub const RemoteRuntime = struct {
         const alt_active = jsonBool(metadata.get("alt_active") orelse return false) orelse return false;
         const app_cursor_keys = jsonBool(metadata.get("app_cursor_keys") orelse return false) orelse return false;
         const alternate_scroll = jsonBool(metadata.get("alternate_scroll") orelse return false) orelse return false;
+        // mouse_tracking은 optional(구버전 host 호환) — 없으면 false. host-backed 마우스 리포트 게이트(휠 리포트 vs 스크롤백)용.
+        const mouse_tracking = if (metadata.get("mouse_tracking")) |v| (jsonBool(v) orelse return false) else false;
         const observer_generation = jsonU64(metadata.get("observer_generation") orelse return false) orelse return false;
         const title_generation_u64 = jsonU64(metadata.get("title_generation") orelse return false) orelse return false;
         if (title_generation_u64 > std.math.maxInt(u32)) return false;
@@ -310,6 +312,7 @@ pub const RemoteRuntime = struct {
             .alt_active = alt_active,
             .app_cursor_keys = app_cursor_keys,
             .alternate_scroll = alternate_scroll,
+            .mouse_tracking = mouse_tracking,
             .foreground_available = foreground_available,
             .foreground_pgid = foreground_pgid,
             .foreground_processes = processes[0..process_count],
@@ -437,6 +440,19 @@ pub const RemoteRuntime = struct {
         var buf: [96]u8 = undefined;
         const params = std.fmt.bufPrint(&buf, "{{\"stream_id\":{d},\"op\":\"{s}\",\"arg\":{d}}}", .{ self.stream_id, op, arg }) catch return error.OutOfMemory;
         const resp = try self.client.call("runtime.core_command", params);
+        self.allocator.free(resp);
+    }
+
+    /// host-backed 마우스 리포트(§ 입력 패리티): 마우스 이벤트를 host로 보내 host core가 자기 mouse_tracking/format으로
+    /// SGR 리포트를 인코딩·PTY 주입하게 한다. 인코딩 모드가 host에만 있어 client는 raw 이벤트만 전달한다(방식 B).
+    pub fn sendMouseReport(self: *RemoteRuntime, m: maru.session.core_command.MouseReport) client_mod.ClientError!void {
+        var buf: [192]u8 = undefined;
+        const params = std.fmt.bufPrint(
+            &buf,
+            "{{\"stream_id\":{d},\"button\":{d},\"col\":{d},\"row\":{d},\"x_px\":{d},\"y_px\":{d},\"pressed\":{},\"motion\":{},\"mods\":{d}}}",
+            .{ self.stream_id, m.button, m.col, m.row, m.x_px, m.y_px, m.pressed, m.motion, m.mods },
+        ) catch return error.OutOfMemory;
+        const resp = try self.client.call("runtime.report_mouse", params);
         self.allocator.free(resp);
     }
 
@@ -666,7 +682,7 @@ test "remote runtime: metadata parser applies only newer coherent full-state rev
 
     const rev2 =
         \\{"event":"runtime.metadata","metadata_revision":2,"metadata":{"cwd":"/repo","window_title":"work","ssh_remote_dest":"host",
-        \\"semantic_state":3,"alt_active":true,"app_cursor_keys":true,"alternate_scroll":true,"observer_generation":9,"title_generation":4,"cols":120,"rows":40,
+        \\"semantic_state":3,"alt_active":true,"app_cursor_keys":true,"alternate_scroll":true,"mouse_tracking":true,"observer_generation":9,"title_generation":4,"cols":120,"rows":40,
         \\"foreground_available":true,"foreground_pgid":55,"processes":[{"pid":55,"name":"claude"}]}}
     ;
     try std.testing.expect(try rr.applyObservationJson(rev2));
@@ -676,6 +692,7 @@ test "remote runtime: metadata parser applies only newer coherent full-state rev
     try std.testing.expectEqualStrings("host", rr.observation.ssh_remote_dest.items);
     try std.testing.expectEqual(terminal.SemanticPrompt.command, rr.observation.semantic_state);
     try std.testing.expect(rr.observation.alt_active);
+    try std.testing.expect(rr.observation.mouse_tracking); // host-backed 마우스 리포트 게이트용(§입력 패리티)
     try std.testing.expectEqual(@as(?i32, 55), rr.observation.foreground_pgid);
     try std.testing.expectEqual(@as(u16, 120), rr.observation.size.cols);
     try std.testing.expectEqualStrings("claude", rr.observation.foreground_processes.items[0].slice());
@@ -694,6 +711,26 @@ test "remote runtime: metadata parser applies only newer coherent full-state rev
     ));
     try std.testing.expectEqual(@as(u64, 2), rr.observation.revision);
     try std.testing.expectEqualStrings("/repo", rr.observation.cwd.items);
+}
+
+test "remote runtime: mouse_tracking is optional — 구버전 host metadata(필드 없음)는 적용되고 false로 폴백한다" {
+    const allocator = std.testing.allocator;
+    var rr: RemoteRuntime = undefined;
+    rr.allocator = allocator;
+    rr.observation = .{};
+    defer rr.observation.deinit(allocator);
+
+    // mouse_tracking 필드가 없는(구버전 host) metadata — 통째로 거부되지 않고 적용되며, 나머지 관측은 살고
+    // mouse_tracking만 false로 폴백한다(호환 계약, observation_wire.fieldIsBoolOrAbsent). host-backed 마우스 리포트는
+    // 그 host에선 pre-fix 동작(스크롤백 폴백)을 유지한다.
+    const legacy =
+        \\{"event":"runtime.metadata","metadata_revision":1,"metadata":{"cwd":"/legacy","window_title":"w","ssh_remote_dest":null,
+        \\"semantic_state":0,"alt_active":false,"app_cursor_keys":false,"alternate_scroll":true,"observer_generation":1,"title_generation":1,"cols":80,"rows":24,
+        \\"foreground_available":false,"foreground_pgid":null,"processes":[]}}
+    ;
+    try std.testing.expect(try rr.applyObservationJson(legacy));
+    try std.testing.expectEqualStrings("/legacy", rr.observation.cwd.items);
+    try std.testing.expect(!rr.observation.mouse_tracking); // 필드 없음 → false 폴백
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

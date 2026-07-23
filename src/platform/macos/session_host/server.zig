@@ -55,6 +55,7 @@ pub const RuntimeObservation = struct {
     alt_active: bool,
     app_cursor_keys: bool,
     alternate_scroll: bool,
+    mouse_tracking: bool,
     observer_generation: u64,
     title_generation: u32,
     cols: u16,
@@ -116,6 +117,24 @@ pub const RuntimeOps = struct {
     /// host 실제 core/PTY의 cwd/title/semantic/OSC5379/foreground를 한 번에 owned copy한다. screen snapshot과 분리된
     /// attach/event full-state이며 public runtime.list/get에는 노출하지 않는다.
     observation: *const fn (ctx: *anyopaque, runtime_id: u128, allocator: std.mem.Allocator) anyerror!RuntimeObservation,
+    /// host-backed 마우스 리포팅(§ 입력 패리티): client가 마우스 이벤트를 보내면 host가 **자기 core의 mouse_tracking/
+    /// mouse_format**으로 SGR/x10 리포트를 인코딩해 PTY로 흘린다(로컬 reader가 report_mouse core command를 적용 후
+    /// pendingResponse를 흘리는 것과 동형 — 인코딩 모드가 host에만 있으므로 host가 인코딩·주입한다). codec 순수라
+    /// primitive `MouseReport`만 넘기고 runtime_manager가 CoreCommand로 매핑·적용·flush한다.
+    report_mouse: *const fn (ctx: *anyopaque, runtime_id: u128, report: MouseReport) anyerror!void,
+};
+
+/// host-backed 마우스 리포트 wire payload(primitive — codec 순수). `core_command.MouseReport`의 미러다(codec은
+/// session/core_command을 안 import하려고 필드만 복제 — runtime_manager가 CoreCommand로 매핑).
+pub const MouseReport = struct {
+    button: u8,
+    col: u16,
+    row: u16,
+    x_px: u16,
+    y_px: u16,
+    pressed: bool,
+    motion: bool,
+    mods: u8,
 };
 
 /// §6b 원격 선택 복사용 뷰포트 선택 span(primitive — codec 순수 유지). client가 보고 있는 화면(host의 뷰포트) 기준
@@ -324,6 +343,8 @@ pub const Connection = struct {
             return self.dispatchObservation(frame.header.request_id, params);
         } else if (std.mem.eql(u8, method, "runtime.core_command")) {
             return self.dispatchCoreCommand(frame.header.request_id, params);
+        } else if (std.mem.eql(u8, method, "runtime.report_mouse")) {
+            return self.dispatchReportMouse(frame.header.request_id, params);
         } else if (std.mem.eql(u8, method, "runtime.selected_text")) {
             return self.dispatchSelectedText(frame.header.request_id, params);
         } else if (std.mem.eql(u8, method, "runtime.select_op")) {
@@ -638,6 +659,31 @@ pub const Connection = struct {
         const runtime_id = (self.attachments.get(stream) orelse return self.replyError(request_id, .invalid_request)).runtime_id;
         if (self.runtime_ops) |ops| {
             ops.core_command(ops.ctx, runtime_id, op, arg) catch return self.replyError(request_id, .internal);
+        }
+        const body = try self.stringify(.{ .result = .{ .applied = true } });
+        defer self.allocator.free(body);
+        return self.replyResult(request_id, body);
+    }
+
+    /// `runtime.report_mouse`(§ 입력 패리티): client가 보낸 마우스 이벤트를 host core에 report_mouse로 적용하면 host가
+    /// **자기 mouse_tracking/format**으로 SGR/x10 리포트를 인코딩해 PTY로 흘린다(인코딩 모드가 host에만 있어 host가
+    /// 인코딩·주입). 모르는 stream_id는 invalid_request. 좌표/버튼은 wire 범위로 clamp(악성/버그 client 방어).
+    fn dispatchReportMouse(self: *Connection, request_id: u64, params: ?std.json.ObjectMap) HandleError!Action {
+        const p = params orelse return self.replyError(request_id, .invalid_request);
+        const stream = intFieldU64(p, "stream_id") orelse return self.replyError(request_id, .invalid_request);
+        const runtime_id = (self.attachments.get(stream) orelse return self.replyError(request_id, .invalid_request)).runtime_id;
+        const report = MouseReport{
+            .button = @intCast(@min(intFieldU64(p, "button") orelse 0, std.math.maxInt(u8))),
+            .col = @intCast(@min(intFieldU64(p, "col") orelse 0, std.math.maxInt(u16))),
+            .row = @intCast(@min(intFieldU64(p, "row") orelse 0, std.math.maxInt(u16))),
+            .x_px = @intCast(@min(intFieldU64(p, "x_px") orelse 0, std.math.maxInt(u16))),
+            .y_px = @intCast(@min(intFieldU64(p, "y_px") orelse 0, std.math.maxInt(u16))),
+            .pressed = boolField(p, "pressed"),
+            .motion = boolField(p, "motion"),
+            .mods = @intCast(@min(intFieldU64(p, "mods") orelse 0, std.math.maxInt(u8))),
+        };
+        if (self.runtime_ops) |ops| {
+            ops.report_mouse(ops.ctx, runtime_id, report) catch return self.replyError(request_id, .internal);
         }
         const body = try self.stringify(.{ .result = .{ .applied = true } });
         defer self.allocator.free(body);
@@ -1402,6 +1448,7 @@ const FakeRuntimeOps = struct {
     last_core_op_len: usize = 0,
     last_core_arg: i64 = 0,
     core_command_runtime: u128 = 0,
+    last_mouse_report: ?MouseReport = null,
     last_select_span: SelectSpan = .{ .sr = 0, .sc = 0, .er = 0, .ec = 0, .block = false },
     selected_text_runtime: u128 = 0,
     last_select_op: [16]u8 = undefined,
@@ -1490,6 +1537,11 @@ const FakeRuntimeOps = struct {
         self.last_core_arg = arg;
         self.core_command_runtime = runtime_id;
     }
+    fn reportMouseFn(ctx: *anyopaque, runtime_id: u128, report: MouseReport) anyerror!void {
+        const self: *FakeRuntimeOps = @ptrCast(@alignCast(ctx));
+        self.last_mouse_report = report;
+        self.core_command_runtime = runtime_id;
+    }
     /// 받은 선택 span(+runtime)을 기록하고 고정 텍스트를 준다 — server 라우팅·파싱 검증(실 extractSelection은 runtime_manager smoke).
     fn selectedTextFn(ctx: *anyopaque, runtime_id: u128, span: SelectSpan, allocator: std.mem.Allocator) anyerror![]u8 {
         const self: *FakeRuntimeOps = @ptrCast(@alignCast(ctx));
@@ -1538,6 +1590,7 @@ const FakeRuntimeOps = struct {
             .alt_active = false,
             .app_cursor_keys = false,
             .alternate_scroll = true,
+            .mouse_tracking = false,
             .observer_generation = 7,
             .title_generation = 3,
             .cols = 80,
@@ -1548,7 +1601,7 @@ const FakeRuntimeOps = struct {
         };
     }
     fn ops(self: *FakeRuntimeOps) RuntimeOps {
-        return .{ .ctx = self, .spawn = spawnFn, .terminate = terminateFn, .write_input = writeInputFn, .resize = resizeFn, .snapshot = snapshotFn, .delta = deltaFn, .notification = notificationFn, .core_command = coreCommandFn, .selected_text = selectedTextFn, .select_op = selectOpFn, .find = findFn, .observation = observationFn };
+        return .{ .ctx = self, .spawn = spawnFn, .terminate = terminateFn, .write_input = writeInputFn, .resize = resizeFn, .snapshot = snapshotFn, .delta = deltaFn, .notification = notificationFn, .core_command = coreCommandFn, .selected_text = selectedTextFn, .select_op = selectOpFn, .find = findFn, .observation = observationFn, .report_mouse = reportMouseFn };
     }
 };
 
@@ -2087,6 +2140,49 @@ test "server: runtime.core_command routes scroll op/arg to RuntimeOps (§6a 원�
     // 모르는 stream_id → invalid_request(라우팅 안 함).
     {
         const r = try feedJson(&conn, .request, 5, "{\"method\":\"runtime.core_command\",\"params\":{\"stream_id\":99,\"op\":\"scroll\",\"arg\":1}}");
+        defer if (r.frame) |f| f.deinit(allocator);
+        try testing.expect(std.mem.indexOf(u8, r.frame.?.payload, "invalid_request") != null);
+    }
+}
+
+test "server: runtime.report_mouse routes the mouse event to RuntimeOps (§host-backed 마우스 리포팅)" {
+    const allocator = testing.allocator;
+    var registry = reg.TerminalRuntimeRegistry.init(allocator);
+    defer registry.deinit();
+    _ = try registry.register(0xBB, 80, 24);
+
+    var fake: FakeRuntimeOps = .{};
+    var conn = Connection.init(allocator, 1, &registry);
+    defer conn.deinit();
+    conn.runtime_ops = fake.ops();
+    {
+        const h = try feedJson(&conn, .hello, 1, "{\"protocol_min\":2,\"protocol_max\":2}");
+        if (h.frame) |f| f.deinit(allocator);
+    }
+    {
+        const frames = try feedExpectFrames(&conn, .request, 2, "{\"method\":\"runtime.attach\",\"params\":{\"runtime_id\":\"bb\",\"mode\":\"controller\"}}");
+        defer {
+            for (frames) |f| f.deinit(allocator);
+            allocator.free(frames);
+        }
+    }
+    // 휠-up 리포트(button 64)를 그대로 host로 라우팅한다 — host가 자기 mouse_tracking/format으로 인코딩·PTY 주입.
+    {
+        const r = try feedJson(&conn, .request, 3, "{\"method\":\"runtime.report_mouse\",\"params\":{\"stream_id\":1,\"button\":64,\"col\":10,\"row\":5,\"x_px\":80,\"y_px\":40,\"pressed\":true,\"motion\":false,\"mods\":0}}");
+        defer if (r.frame) |f| f.deinit(allocator);
+        try testing.expect(std.mem.indexOf(u8, r.frame.?.payload, "\"applied\":true") != null);
+    }
+    try testing.expect(fake.last_mouse_report != null);
+    const m = fake.last_mouse_report.?;
+    try testing.expectEqual(@as(u8, 64), m.button);
+    try testing.expectEqual(@as(u16, 10), m.col);
+    try testing.expectEqual(@as(u16, 5), m.row);
+    try testing.expect(m.pressed and !m.motion);
+    try testing.expectEqual(@as(u128, 0xBB), fake.core_command_runtime);
+
+    // 모르는 stream_id → invalid_request(라우팅 안 함).
+    {
+        const r = try feedJson(&conn, .request, 4, "{\"method\":\"runtime.report_mouse\",\"params\":{\"stream_id\":99,\"button\":0,\"col\":0,\"row\":0,\"x_px\":0,\"y_px\":0,\"pressed\":true,\"motion\":false,\"mods\":0}}");
         defer if (r.frame) |f| f.deinit(allocator);
         try testing.expect(std.mem.indexOf(u8, r.frame.?.payload, "invalid_request") != null);
     }

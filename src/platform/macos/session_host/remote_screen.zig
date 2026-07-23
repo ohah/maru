@@ -625,3 +625,31 @@ test "remote screen: full RenderSnapshot parity with in-process (styles, colors,
     try testing.expect(has_mark);
     try expectSnapshotParity(local, grid.renderSnapshot());
 }
+
+test "remote screen: host-backed snapshot renders drawable cells via the real draw path (review #1)" {
+    const allocator = testing.allocator;
+    var core = try terminal.TerminalCore.init(allocator, .{ .cols = 6, .rows = 2 });
+    defer core.deinit();
+    try core.write("hi");
+
+    // 원격 파이프라인으로 격자 구성(host 투영 → 조립 → 격자).
+    const p = try screen_snapshot.projectSnapshot(allocator, &core, .{ .generation = 1 });
+    defer allocator.free(p);
+    var asm_ = screen_assembler.ScreenAssembler.init(allocator);
+    defer asm_.deinit();
+    try asm_.applySnapshot(p);
+    var grid = try build(allocator, &asm_);
+    defer grid.deinit();
+
+    // **실제 draw 경로**에 원격 renderSnapshot을 태운다 — CellGrid가 dirty=null을 냈다면(리뷰 #1) buildDrawList가 빈 DrawList를
+    // 내 host-backed 패널이 blank로 그려진다. 여기서 cells 방출 + 내용('h')이 실림을 단언해, parity가 DTO만 검증하던 갭을
+    // **실 렌더 게이트(draw_list.zig의 if(snapshot.dirty))**까지 확장한다(이 테스트가 #1 재발을 컴파일/CI로 잡는다).
+    var dl = try maru.renderer.buildDrawList(allocator, grid.renderSnapshot());
+    defer dl.deinit(allocator);
+    try testing.expect(dl.cells.len > 0); // blank 아님(dirty가 전체화면으로 세워져 셀이 방출됨).
+    var found_h = false;
+    for (dl.cells) |c| {
+        if (c.codepoint == 'h') found_h = true;
+    }
+    try testing.expect(found_h); // 원격 격자 내용이 실제 draw cell로 렌더된다.
+}

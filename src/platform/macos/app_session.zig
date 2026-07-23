@@ -21414,7 +21414,7 @@ pub const AppSession = struct {
                 const observed_size = if (term.rt.observation.size.cols > 0 and term.rt.observation.size.rows > 0)
                     term.rt.observation.size
                 else
-                    term.surface.core.size; // 구 host metadata 미지원 fallback(초기 layout size; 문자열/semantic 출처로는 안 씀)
+                    term.surface.core.size; // metadata unavailable fallback; SurfaceRuntime이 현재 layout grid로 동기화
                 // P3-e3-5: host-backed Term은 host_id + runtime_id를 함께 저장한다. runtime_id 단독으로 저장하면 host가
                 // 바뀐 뒤 같은 숫자 namespace를 잘못 attach할 수 있으므로 live capture는 둘 중 하나만 만들지 않는다.
                 var runtime_host_id: []const u8 = "";

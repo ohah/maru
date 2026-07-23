@@ -3,6 +3,22 @@ import Foundation
 import WebKit
 import Darwin
 
+/// v3 프레임의 터미널 팔레트(MaruMermaidPalette)를 helper JS `__maruRenderMermaid(source, palette)`가 받는
+/// `#rrggbb` hex dict로 바꾼다. 키는 mermaid-helper.ts가 mermaid themeVariables로 매핑한다.
+private func paletteHexDict(_ p: MaruMermaidPalette) -> [String: String] {
+    func hex(_ c: MaruMermaidRgb) -> String { String(format: "#%02x%02x%02x", c.r, c.g, c.b) }
+    return [
+        "background": hex(p.background),
+        "primary": hex(p.primary),
+        "primaryBorder": hex(p.primary_border),
+        "primaryText": hex(p.primary_text),
+        "line": hex(p.line),
+        "text": hex(p.text),
+        "secondary": hex(p.secondary),
+        "tertiary": hex(p.tertiary),
+    ]
+}
+
 /// FP10c2 helper. bridge/message handler 없는 별도 WKWebView에서 strict Mermaid를 실행하고
 /// sanitized SVG만 bounded protocol result로 반환한다.
 @main
@@ -117,7 +133,7 @@ struct MaruMermaidRenderer {
                     }
                     guard let page = rendererPage() else { Darwin.exit(12) }
                     let capability = frame.capability
-                    page.render(source: source) { outcome in
+                    page.render(source: source, palette: paletteHexDict(frame.palette)) { outcome in
                         switch outcome {
                         case let .success(rendered):
                             guard rendered.externalRequests.total == 0,

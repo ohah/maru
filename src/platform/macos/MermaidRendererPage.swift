@@ -63,7 +63,7 @@ final class MermaidRendererPage: NSObject, WKNavigationDelegate {
     private let runtimeScript: String
     private let webView: WKWebView
     private var ready = false
-    private var pending: [(String, (Result<MermaidRenderedPayload, Error>) -> Void)] = []
+    private var pending: [(String, [String: String], (Result<MermaidRenderedPayload, Error>) -> Void)] = []
     private var readyCallbacks: [() -> Void] = []
 
     init?(script: String) {
@@ -90,12 +90,13 @@ final class MermaidRendererPage: NSObject, WKNavigationDelegate {
         )
     }
 
-    func render(source: String, completion: @escaping (Result<MermaidRenderedPayload, Error>) -> Void) {
+    // palette: 터미널 파생 mermaid 색(#rrggbb hex dict). helper JS가 themeVariables로 적용한다(v3).
+    func render(source: String, palette: [String: String], completion: @escaping (Result<MermaidRenderedPayload, Error>) -> Void) {
         guard ready else {
-            pending.append((source, completion))
+            pending.append((source, palette, completion))
             return
         }
-        evaluate(source: source, completion: completion)
+        evaluate(source: source, palette: palette, completion: completion)
     }
 
     func probeExternalRequests(completion: @escaping (MermaidExternalRequestAttempts?) -> Void) {
@@ -165,7 +166,7 @@ final class MermaidRendererPage: NSObject, WKNavigationDelegate {
             self.ready = true
             let queued = self.pending
             self.pending.removeAll(keepingCapacity: true)
-            for (source, completion) in queued { self.evaluate(source: source, completion: completion) }
+            for (source, palette, completion) in queued { self.evaluate(source: source, palette: palette, completion: completion) }
             let callbacks = self.readyCallbacks
             self.readyCallbacks.removeAll(keepingCapacity: true)
             for callback in callbacks { callback() }
@@ -186,11 +187,12 @@ final class MermaidRendererPage: NSObject, WKNavigationDelegate {
         decisionHandler(.allow)
     }
 
-    private func evaluate(source: String, completion: @escaping (Result<MermaidRenderedPayload, Error>) -> Void) {
+    private func evaluate(source: String, palette: [String: String], completion: @escaping (Result<MermaidRenderedPayload, Error>) -> Void) {
         let navigationAttemptsBefore = externalNavigationAttempts
+        // 터미널 파생 팔레트를 helper JS에 함께 넘긴다(v3). helper가 themeVariables로 매핑한다.
         webView.callAsyncJavaScript(
-            "return await window.__maruRenderMermaid(source)",
-            arguments: ["source": source],
+            "return await window.__maruRenderMermaid(source, palette)",
+            arguments: ["source": source, "palette": palette],
             in: nil,
             in: .page
         ) { result in

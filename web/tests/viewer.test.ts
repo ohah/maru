@@ -957,6 +957,93 @@ describe("bridge-free renderer", () => {
     dom.window.close();
   });
 
+  test("read preview requests a mermaid render per fence and replaces the code block with the SVG image", async () => {
+    // 읽기 프리뷰가 mermaid 펜스를 native 헬퍼(shell 경유)로 렌더한 SVG `<img>`로 교체하는지 검증(라이브 숨김 동안
+    // 읽기에서도 다이어그램). 헬퍼가 요구하는 완전한 ```mermaid 펜스로 재구성해 요청하고, 결과 SVG를 img로 붙인다.
+    const dom = new JSDOM('<!doctype html><main id="app"></main>', {
+      url: "maru-app://render/render.html",
+    });
+    const messages: Record<string, unknown>[] = [];
+    dom.window.postMessage = ((message: Record<string, unknown>) =>
+      messages.push(message)) as typeof dom.window.postMessage;
+    bootRenderer(dom.window.document, dom.window as unknown as Window);
+    dom.window.dispatchEvent(
+      new dom.window.MessageEvent("message", {
+        source: dom.window.parent,
+        data: {
+          channel: viewerChannel,
+          type: "render",
+          markdown: "```mermaid\nflowchart TD\n  A --> B\n```",
+        },
+      }),
+    );
+
+    // 코드 블록이 먼저 렌더되고, mermaid-request가 완전한 펜스로 나간다.
+    const codeEl = dom.window.document.querySelector<HTMLElement>("code.language-mermaid");
+    expect(codeEl).not.toBeNull();
+    const request = messages.find((m) => m.type === "mermaid-request");
+    expect(request).toBeDefined();
+    // 완전한 ```mermaid 펜스로 재구성해 보낸다(prism이 코드 블록에 넣는 후행 공백은 mermaidFenceBody가 무시).
+    const requestSource = request?.source as string;
+    expect(requestSource.startsWith("```mermaid\n")).toBe(true);
+    expect(requestSource.trimEnd().endsWith("```")).toBe(true);
+    expect(requestSource).toContain("flowchart TD");
+    expect(requestSource).toContain("A --> B");
+    const requestId = request?.requestId as string;
+
+    // shell이 sanitized SVG를 돌려주면 코드 블록(pre)이 diagram img로 교체된다.
+    dom.window.dispatchEvent(
+      new dom.window.MessageEvent("message", {
+        source: dom.window.parent,
+        data: {
+          channel: viewerChannel,
+          type: "mermaid-result",
+          requestId,
+          svg: '<svg xmlns="http://www.w3.org/2000/svg"><rect width="10" height="10"/></svg>',
+        },
+      }),
+    );
+    for (let turn = 0; turn < 4; turn += 1) await Promise.resolve();
+    expect(dom.window.document.querySelector("code.language-mermaid")).toBeNull(); // 코드 블록 사라짐
+    const img = dom.window.document.querySelector<HTMLImageElement>("img.maru-mermaid-diagram");
+    expect(img).not.toBeNull();
+    expect(img?.getAttribute("src")).toStartWith("data:image/svg+xml;base64,");
+    dom.window.close();
+  });
+
+  test("read preview keeps the mermaid code block when the render fails", async () => {
+    const dom = new JSDOM('<!doctype html><main id="app"></main>', {
+      url: "maru-app://render/render.html",
+    });
+    const messages: Record<string, unknown>[] = [];
+    dom.window.postMessage = ((message: Record<string, unknown>) =>
+      messages.push(message)) as typeof dom.window.postMessage;
+    bootRenderer(dom.window.document, dom.window as unknown as Window);
+    dom.window.dispatchEvent(
+      new dom.window.MessageEvent("message", {
+        source: dom.window.parent,
+        data: { channel: viewerChannel, type: "render", markdown: "```mermaid\nbad\n```" },
+      }),
+    );
+    const requestId = messages.find((m) => m.type === "mermaid-request")?.requestId as string;
+    dom.window.dispatchEvent(
+      new dom.window.MessageEvent("message", {
+        source: dom.window.parent,
+        data: {
+          channel: viewerChannel,
+          type: "mermaid-result",
+          requestId,
+          error: "mermaid unavailable",
+        },
+      }),
+    );
+    for (let turn = 0; turn < 4; turn += 1) await Promise.resolve();
+    // 실패면 코드 블록을 그대로 남긴다(fallback), img는 안 붙는다.
+    expect(dom.window.document.querySelector("code.language-mermaid")).not.toBeNull();
+    expect(dom.window.document.querySelector("img.maru-mermaid-diagram")).toBeNull();
+    dom.window.close();
+  });
+
   test("renderImage drops a stale overlapping render so its late event never clobbers the current image", async () => {
     // 회귀(generation guard): 정상 open은 renderImage를 2회 보낸다(rendererReady 핸들러 + applyMode "read"). 앞선
     // 렌더의 `<img>`는 다음 렌더의 root.replaceChildren로 detach되는데, 그 detach된 img의 늦은 load/error가 최신

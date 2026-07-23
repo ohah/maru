@@ -1006,8 +1006,17 @@ pub export fn maru_macos_app_session_syntax_style_js(
 ) usize {
     const app_session = session orelse return 0;
     const op = out_ptr orelse return 0;
-    const colors = maru.session.syntax_theme.fromTheme(app_session.appearance.theme);
-    const js = maru.session.syntax_theme.writeCssVarsJs(colors, op[0..out_cap]) orelse return 0;
+    const app = app_session.appearance;
+    const colors = maru.session.syntax_theme.fromTheme(app.theme);
+    // 폰트 크기는 ⌘+/− 런타임 값(pt, f32)을 반올림·클램프해 넘긴다 — 편집기도 같은 크기로 실시간 반영된다.
+    const font_size_pt: u16 = @intFromFloat(@round(std.math.clamp(app.font.size, 1, 512)));
+    const js = maru.session.syntax_theme.writeCssVarsJs(
+        colors,
+        app.theme.selection,
+        app.font.family,
+        font_size_pt,
+        op[0..out_cap],
+    ) orelse return 0;
     return js.len;
 }
 
@@ -2103,7 +2112,11 @@ const FileBridgeContext = struct {
 
     fn write(raw: *anyopaque, editor_epoch: u64, content: []const u8) anyerror!void {
         const self: *FileBridgeContext = @ptrCast(@alignCast(raw));
-        return self.session.writeFilePanel(self.surface_id, editor_epoch, content);
+        self.session.writeFilePanel(self.surface_id, editor_epoch, content) catch |err| {
+            // 저장 실패를 chrome native notice로 알린다(웹뷰 sticky 텍스트 대신). 에러는 그대로 web에 돌려준다.
+            self.session.noticeFilePanelWriteFailure(self.surface_id, err);
+            return err;
+        };
     }
 
     fn setDirty(raw: *anyopaque, report: maru.session.control_bridge.DirtyReport) anyerror!void {
@@ -2133,6 +2146,8 @@ const FileBridgeContext = struct {
             .renderer = request.renderer,
             .fence_id = request.fence_id,
             .source = request.source,
+            // 이 세션의 터미널 테마에서 파생한 팔레트를 job에 실어 helper가 mermaid 색을 맞춘다(per-render).
+            .palette = maru.session.mermaid_theme.fromTheme(self.session.appearance.theme),
         }, request.source_hash);
     }
 
@@ -2271,6 +2286,7 @@ pub const MermaidDecodedFrameAbi = extern struct {
     capability: MermaidJobCapabilityAbi,
     body_ptr: ?[*]const u8,
     body_len: usize,
+    palette: mermaid_protocol.Palette, // v3 request 전용(다른 tag는 zeroed) — helper가 mermaid themeVariables 구성
 };
 
 pub const MermaidCoordinatorActionAbi = extern struct {
@@ -2374,15 +2390,18 @@ pub export fn maru_mermaid_protocol_encode_request(
     capability: ?*const MermaidJobCapabilityAbi,
     source: ?[*]const u8,
     source_len: usize,
+    palette: ?*const mermaid_protocol.Palette,
     out: ?[*]u8,
     out_cap: usize,
 ) i64 {
     const cap = capability orelse return -1;
+    const pal = palette orelse return -1;
     if (source_len > 0 and source == null) return -1;
     const dest = out orelse return -1;
     const len = mermaid_protocol.encode(.{ .request = .{
         .capability = capabilityFromAbi(cap.*),
         .source = if (source) |ptr| ptr[0..source_len] else &.{},
+        .palette = pal.*,
     } }, dest[0..out_cap]) catch |err| return encodeErrorCode(err);
     return @intCast(len);
 }
@@ -2583,6 +2602,7 @@ fn decodedFrameAbi(message: mermaid_protocol.Message) MermaidDecodedFrameAbi {
             out.helper_instance = request.capability.helper_instance;
             out.body_ptr = request.source.ptr;
             out.body_len = request.source.len;
+            out.palette = request.palette;
         },
         .result => |result| {
             out.status = @intFromEnum(result.status);

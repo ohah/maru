@@ -2966,7 +2966,7 @@ final class MaruWebPanelView: NSView {
     // 신뢰 shell(text/markdown)에만 적용하고, CSS 변수라 이미 마운트된 CM6 span도 즉시 재도색된다(app.css 폴백 위에 override).
     func applySyntaxThemeStyle() {
         guard filePanelKind == 1, let session = controller?.bridgeSession(for: surfaceId) else { return }
-        var buf = [UInt8](repeating: 0, count: 1024)
+        var buf = [UInt8](repeating: 0, count: 2048)
         let n = buf.withUnsafeMutableBufferPointer { p -> Int in
             maru_macos_app_session_syntax_style_js(session, p.baseAddress, p.count)
         }
@@ -8087,8 +8087,26 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         guard let key = sender.representedObject as? String, let session = appSession else { return }
         // Select All(⌘A)은 keyEquivalent가 first responder와 무관하게 발화하므로, 웹 패널 포커스면 터미널 전체 선택
         // 대신 WebKit selectAll:을 responder chain으로 넘긴다([web-panel.md] §4.2). 다른 카탈로그 액션은 불변.
-        if key == "select_all", firstResponderWebPanel() != nil {
-            NSApp.sendAction(#selector(NSText.selectAll(_:)), to: nil, from: self)
+        if key == "select_all", let panel = firstResponderWebPanel() {
+            // 파일 패널 편집기(CM6, filePanelKind==1)는 문서를 가상화해(보이는 줄만 DOM) native selectAll:이
+            // 긴 문서에서 일부만 고른다. 메뉴 Edit>Select All 클릭 경로는 DOM keydown을 안 거치므로, CM6 문서
+            // 전체 선택 명령을 직접 실행하고 편집기가 없으면(읽기 프리뷰) native selectAll:로 폴백한다. (키보드
+            // ⌘A는 web_editor route로 CM6가 capture 단계에서 직접 처리한다 — viewer.ts.) 브라우저/기타 패널은
+            // 종전대로 native selectAll:.
+            if panel.filePanelKind == 1 {
+                panel.webView.callAsyncJavaScript(
+                    "return window.__maruSelectAll?.() === true",
+                    arguments: [:],
+                    in: nil,
+                    in: .page
+                ) { [weak self] result in
+                    if case .success(let value) = result, value as? Bool == true { return }
+                    guard let self else { return }
+                    NSApp.sendAction(#selector(NSText.selectAll(_:)), to: nil, from: self)
+                }
+            } else {
+                NSApp.sendAction(#selector(NSText.selectAll(_:)), to: nil, from: self)
+            }
             return
         }
         // 메뉴 액션은 keyDown을 안 거친다 — next/previous_tab은 keyEquivalent가 달려 키 단축키로 와도

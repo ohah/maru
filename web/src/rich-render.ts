@@ -41,16 +41,39 @@ function hasUnsafeSvgUrl(value: string): boolean {
 // `<style>`/style 속성 내용이 외부 리소스를 참조하는지(=exfil 벡터). @import 또는 로컬 fragment(`url(#id)`)가 아닌
 // url()이 있으면 unsafe다. Mermaid 테마는 fill/stroke 색과 로컬 marker `url(#arrowhead)`만 쓰므로 정상 스타일은
 // 통과한다. sanitize된 SVG는 항상 격리 `<img>` data URL로만 표시돼(스크립트·외부요청 차단) 이 검사는 심층 방어다.
+function isCssWhitespace(ch: string): boolean {
+  return ch === " " || ch === "\t" || ch === "\n" || ch === "\r" || ch === "\f";
+}
+
 function styleContentIsUnsafe(text: string): boolean {
   const normalized = normalizeCssEscapes(text);
   if (normalized === null) return true;
   if (/@import/i.test(normalized)) return true;
-  const urlPattern = /url\s*\(\s*(['"]?)([^)]*?)\1\s*\)/gi;
-  let match: RegExpExecArray | null;
-  while ((match = urlPattern.exec(normalized)) !== null) {
-    if (!match[2].trim().startsWith("#")) return true;
+  // url() 인자를 선형(indexOf) 스캔으로 검사한다. 이전 정규식 /url\s*\(\s*(['"]?)([^)]*?)\1\s*\)/gi 는
+  // 선택적 인용부 backreference(\1)와 lazy([^)]*?) 조합이라 mermaid 테마 CSS의 긴 url() 값에서 catastrophic
+  // backtracking으로 sanitize가 동기 hang했다(JIT 없는 macOS 26에서 하드행, JIT 있는 CI에서 near-timeout 플래키
+  // — 2026-07-23 진단). 의미는 동일하게 유지: url() 인자가 로컬 fragment(`#id`)가 아니면 fail-closed.
+  const lower = normalized.toLowerCase();
+  let searchFrom = 0;
+  for (;;) {
+    const found = lower.indexOf("url", searchFrom);
+    if (found === -1) return false;
+    let cursor = found + 3;
+    while (cursor < normalized.length && isCssWhitespace(normalized[cursor] ?? "")) cursor += 1;
+    if (normalized[cursor] !== "(") {
+      searchFrom = found + 3;
+      continue;
+    }
+    const close = normalized.indexOf(")", cursor + 1);
+    if (close === -1) return true; // 닫히지 않은 url( → fail-closed
+    let argument = normalized.slice(cursor + 1, close).trim();
+    const quote = argument[0];
+    if ((quote === '"' || quote === "'") && argument.at(-1) === quote) {
+      argument = argument.slice(1, -1).trim();
+    }
+    if (!argument.startsWith("#")) return true;
+    searchFrom = close + 1;
   }
-  return false;
 }
 
 export function sanitizeMermaidSvg(svg: string, targetWindow: Window): string {

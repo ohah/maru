@@ -126,6 +126,15 @@ body {
   height: auto;
 }
 
+/* 읽기 프리뷰 mermaid 다이어그램(native 헬퍼가 터미널 팔레트로 렌더한 SVG를 격리 <img> data URL로 표시). 코드
+   블록을 대체하며 폭에 맞춰 비율 유지 축소, 가운데 정렬한다. SVG 자체가 팔레트 배경을 담는다. */
+.maru-mermaid-diagram {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  margin: 1rem auto;
+}
+
 body {
   overflow-wrap: anywhere;
 }
@@ -207,9 +216,29 @@ body {
 
 #editor .cm-content {
   padding: 1rem 1.25rem 4rem;
-  font-family: ui-monospace, "SFMono-Regular", Menlo, Monaco, Consolas, monospace;
+  /* 본문 폰트를 터미널과 동일한 패밀리·크기로 맞춘다(native가 `--maru-editor-font-*`로 주입, 번들 폰트는
+     ATSApplicationFontsPath로 WKWebView에도 등록됨; 테마/⌘+/− 변경 시 실시간 갱신). 변수가 없으면 기본
+     monospace·13px로 폴백한다. */
+  font-family: var(
+    --maru-editor-font-family,
+    ui-monospace,
+    "SFMono-Regular",
+    Menlo,
+    Monaco,
+    Consolas,
+    monospace
+  );
+  font-size: var(--maru-editor-font-size, 13px);
   line-height: 1.55;
   caret-color: CanvasText;
+}
+
+/* drawSelection은 native ::selection 대신 자체 레이어(.cm-selectionBackground)를 그린다. 블록 선택 색을
+   터미널 테마의 selection 색(native가 `--maru-editor-selection`으로 주입, 테마 변경 시 실시간 갱신)에 맞춰
+   터미널과 동일하게 보이게 한다. 변수가 없으면(주입 전) 시스템 accent 반투명으로 폴백한다. #editor id 특이도로
+   CM6 기본 규칙(포커스 유무 모두)을 덮는다. */
+#editor .cm-selectionBackground {
+  background: var(--maru-editor-selection, color-mix(in srgb, AccentColor 35%, transparent));
 }
 
 #editor .cm-gutters {
@@ -371,14 +400,22 @@ pre {
 .token.atrule,
 .token.rule,
 .token.important,
-.token.selector {
+.token.selector,
+.token.macro,
+.token.macro-name,
+.token.directive,
+.token.directive-hash,
+.token.lifetime-annotation,
+.token.lifetime {
   color: var(--maru-syntax-keyword);
 }
 .token.string,
 .token.attr-value,
 .token.char,
+.token.char-class,
 .token.regex,
-.token.url {
+.token.url,
+.token.inserted {
   color: var(--maru-syntax-string);
 }
 .token.number,
@@ -398,14 +435,22 @@ pre {
 .token.property,
 .token.attr-name,
 .token.variable,
-.token.parameter {
+.token.parameter,
+.token.label {
   color: var(--maru-syntax-property);
 }
 .token.class-name,
 .token.builtin,
+.token.builtin-type,
 .token.namespace,
-.token.type {
+.token.type,
+.token.generic {
   color: var(--maru-syntax-type);
+}
+.token.attribute,
+.token.annotation,
+.token.decorator {
+  color: var(--maru-syntax-attribute);
 }
 .token.function,
 .token.function-name,

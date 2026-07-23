@@ -11943,8 +11943,11 @@ pub const AppSession = struct {
     ) bool {
         if (!self.dock_initialized or editor_epoch == 0) return false;
         const entry = self.dock.entryForSurfaceId(surface_id) orelse return false;
+        // read·live 둘 다 mermaid를 렌더한다(라이브 프리뷰가 UI에서 숨겨진 동안 읽기 프리뷰가 다이어그램을
+        // 그리도록, 사용자 요청 2026-07-23). source 모드는 편집이라 렌더 대상이 아니다. 다른 조건(문서 active·
+        // epoch 일치·recovery 아님·mutation 없음)은 read 모드도 beginDocument로 충족한다.
         return entry.kind == .markdown and
-            entry.mode == .live_preview and
+            (entry.mode == .live_preview or entry.mode == .read) and
             entry.editor_document_active and
             entry.editor_epoch == editor_epoch and
             !entry.editor_recovery_required and
@@ -12867,6 +12870,20 @@ pub const AppSession = struct {
         entry.disk_content_hash_valid = true;
         entry.self_write_verifications = 0;
         self.metal_dirty = true;
+    }
+
+    /// bridge write 실패를 사용자에게 알린다. ⌘S 등 일반 저장 실패는 chrome native notice로 띄운다(웹뷰 안에
+    /// sticky 텍스트를 박던 방식은 한 번 뜨면 안 사라져 자연스럽지 않았다 — 사용자 요청 2026-07-23). close-save
+    /// 실패는 completeFilePanelSaveClose가 "…탭을 닫지 않았습니다" notice를 이미 띄우므로 중복을 피해 억제한다.
+    pub fn noticeFilePanelWriteFailure(self: *AppSession, surface_id: u64, err: FilePanelWriteError) void {
+        if (self.pending_file_panel_close) |pending| {
+            if (pending.surface_id == surface_id and pending.phase == .saving) return;
+        }
+        self.showNotice(switch (err) {
+            error.ExternalConflict => "파일이 외부에서 바뀌어 저장할 수 없습니다. 파일을 다시 불러온 뒤 저장하세요.",
+            error.TooLarge => "파일이 너무 커서 저장할 수 없습니다.",
+            else => "파일을 저장할 수 없습니다.",
+        });
     }
 
     /// CM6 문서 변경 상태를 도크 모델에 미러한다. Markdown surface만 허용하고 값이 바뀔 때만 redraw한다.
@@ -37262,6 +37279,43 @@ test "OSC 52 상한 초과 거부: surfaceClipboardWriteRejected가 notice로 �
     session.surfaceClipboardWriteRejected();
     try std.testing.expect(session.chrome_host.notice.open);
     try std.testing.expect(!session.activeSurface().core.clipboard_write_rejected);
+}
+
+test "파일 저장 실패는 native notice로 표면화하고 close-save 중엔 억제한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    // ⌘S 등 일반 저장 실패는 웹뷰 sticky 텍스트 대신 chrome native notice로 뜬다(무음 실패도, 안 사라지는 텍스트도 아님).
+    try std.testing.expect(!session.chrome_host.notice.open);
+    session.noticeFilePanelWriteFailure(901, error.ExternalConflict);
+    try std.testing.expect(session.chrome_host.notice.open);
+    session.chrome_host.notice.dismiss();
+
+    // close-save(phase=.saving)가 진행 중이면 억제한다 — completeFilePanelSaveClose가 "…탭을 닫지 않았습니다"
+    // notice를 이미 띄우므로 중복을 피한다. early-return이라 showNotice/cancelPendingClose를 타지 않으므로 스택
+    // expected_path를 써도 안전하고, teardown 전에 null로 되돌린다.
+    var fake_path = [_]u8{'x'};
+    session.pending_file_panel_close = .{
+        .surface_id = 901,
+        .surface_generation = 0,
+        .request_id = 1,
+        .expected_path = fake_path[0..],
+        .state_generation = 0,
+        .phase = .saving,
+    };
+    session.noticeFilePanelWriteFailure(901, error.ExternalConflict);
+    try std.testing.expect(!session.chrome_host.notice.open); // 억제됨
+    session.pending_file_panel_close = null;
 }
 
 test "OSC 52 read(F2-6): 정책 게이트(deny=무응답·allow=true) + base64 응답 포맷" {

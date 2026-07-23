@@ -6,7 +6,26 @@
 const std = @import("std");
 
 pub const magic = "MRU1".*;
-pub const version: u16 = 2;
+// v3: Request에 터미널 팔레트(Palette) 추가 — helper가 mermaid themeVariables를 터미널 색과 맞춘다. helper는 앱
+// 번들에 함께 서명돼 항상 같은 버전이라 하위호환이 필요 없다(버전 불일치는 decode에서 UnsupportedVersion).
+pub const version: u16 = 3;
+
+/// 프로토콜 자기완결 RGB(color.Rgb와 구조 동일하나 프로토콜이 color/appearance에 의존하지 않게 별도 정의).
+pub const Rgb = extern struct { r: u8, g: u8, b: u8 };
+
+/// mermaid themeVariables에 매핑할 터미널 파생 팔레트(mermaid_theme.fromTheme가 만든다). 각 색은 3바이트라
+/// 전체 24바이트 고정. helper가 이 값으로 mermaid.initialize({theme:"base", themeVariables:{...}})를 구성한다.
+pub const Palette = extern struct {
+    background: Rgb, // 다이어그램 배경 = 터미널 배경
+    primary: Rgb, // 노드 채움 = 배경에서 살짝 밝게
+    primary_border: Rgb, // 노드 테두리 = accent
+    primary_text: Rgb, // 노드 텍스트 = 전경(대비 보정)
+    line: Rgb, // 엣지/화살표 = 전경 muted
+    text: Rgb, // 라벨/엣지 텍스트 = 전경
+    secondary: Rgb, // 서브그래프/클러스터 채움
+    tertiary: Rgb, // 3차 채움
+};
+pub const palette_wire_bytes: usize = 24;
 pub const max_source_bytes: usize = 32 * 1024;
 pub const max_svg_bytes: usize = 512 * 1024;
 pub const max_request_frame_bytes: usize = 40 * 1024;
@@ -54,6 +73,7 @@ pub const Hello = struct {
 pub const Request = struct {
     capability: JobCapability,
     source: []const u8,
+    palette: Palette,
 };
 
 pub const Result = struct {
@@ -104,6 +124,7 @@ pub fn encode(message: Message, out: []u8) Error!usize {
             try writeCapability(&cursor, value.capability);
             try cursor.writeU32(@intCast(value.source.len));
             try cursor.writeBytes(value.source);
+            try writePalette(&cursor, value.palette); // 팔레트는 source_hash 밖(렌더 config라 content 아님)
         },
         .result => |value| {
             if (value.status == .render_error and value.body.len != 0) return error.InvalidRenderErrorBody;
@@ -151,7 +172,8 @@ pub fn decodeExact(frame: []const u8) Error!Message {
             const source = try cursor.readBytes(source_len);
             if (!std.unicode.utf8ValidateSlice(source)) return error.InvalidUtf8;
             if (!std.mem.eql(u8, &capability.source_hash, &sourceHash(source))) return error.InvalidLength;
-            break :blk .{ .request = .{ .capability = capability, .source = source } };
+            const palette = try readPalette(&cursor);
+            break :blk .{ .request = .{ .capability = capability, .source = source, .palette = palette } };
         },
         .result => blk: {
             const capability = try readCapability(&cursor);
@@ -242,6 +264,18 @@ fn writeCapability(cursor: *Cursor, value: JobCapability) Error!void {
     try cursor.writeU64(value.renderer.renderer_instance);
     try cursor.writeU64(value.fence_id);
     try cursor.writeBytes(&value.source_hash);
+}
+
+fn writePalette(cursor: *Cursor, palette: Palette) Error!void {
+    // extern struct라 RGB 순서가 필드 선언 순서로 고정 — 8색 × 3바이트 = 24바이트 그대로 쓴다.
+    try cursor.writeBytes(std.mem.asBytes(&palette));
+}
+
+fn readPalette(cursor: *ReadCursor) Error!Palette {
+    const bytes = try cursor.readBytes(palette_wire_bytes);
+    var palette: Palette = undefined;
+    @memcpy(std.mem.asBytes(&palette), bytes);
+    return palette;
 }
 
 fn readCapability(cursor: *ReadCursor) Error!JobCapability {
@@ -361,11 +395,25 @@ fn testCapability() JobCapability {
     };
 }
 
+fn testPalette() Palette {
+    // 채널별로 구분되는 값이라 wire 순서·round-trip이 뒤섞이면 테스트가 잡는다.
+    return .{
+        .background = .{ .r = 0x10, .g = 0x11, .b = 0x12 },
+        .primary = .{ .r = 0x20, .g = 0x21, .b = 0x22 },
+        .primary_border = .{ .r = 0x30, .g = 0x31, .b = 0x32 },
+        .primary_text = .{ .r = 0x40, .g = 0x41, .b = 0x42 },
+        .line = .{ .r = 0x50, .g = 0x51, .b = 0x52 },
+        .text = .{ .r = 0x60, .g = 0x61, .b = 0x62 },
+        .secondary = .{ .r = 0x70, .g = 0x71, .b = 0x72 },
+        .tertiary = .{ .r = 0x80, .g = 0x81, .b = 0x82 },
+    };
+}
+
 test "hello byte golden is big endian and round trips" {
     var encoded: [64]u8 = undefined;
     const len = try encode(.{ .hello = .{ .helper_instance = 0x0102030405060708, .nonce = 0x1112131415161718 } }, &encoded);
     try std.testing.expectEqualSlices(u8, &.{
-        0,  0,  0,  23, 'M', 'R', 'U', '1', 0,  2,  0,
+        0,  0,  0,  23, 'M', 'R', 'U', '1', 0,  3,  0, // v3
         1,  2,  3,  4,  5,   6,   7,   8,   17, 18, 19,
         20, 21, 22, 23, 24,
     }, encoded[0..len]);
@@ -374,17 +422,18 @@ test "hello byte golden is big endian and round trips" {
     try std.testing.expectEqual(@as(u64, 0x1112131415161718), decoded.hello.nonce);
 }
 
-test "v2 request byte golden puts editor epoch directly after job id" {
+test "v3 request byte golden puts editor epoch directly after job id" {
     var encoded: [max_request_frame_bytes]u8 = undefined;
     var capability = testCapability();
     capability.source_hash = sourceHash("x");
-    const len = try encode(.{ .request = .{ .capability = capability, .source = "x" } }, &encoded);
+    const len = try encode(.{ .request = .{ .capability = capability, .source = "x", .palette = testPalette() } }, &encoded);
     const identity_start = prefix_len + common_len;
     try std.testing.expectEqual(@as(u64, 1), std.mem.readInt(u64, encoded[identity_start..][0..8], .big));
     try std.testing.expectEqual(@as(u64, 2), std.mem.readInt(u64, encoded[identity_start + 8 ..][0..8], .big));
     try std.testing.expectEqual(@as(u64, 3), std.mem.readInt(u64, encoded[identity_start + 16 ..][0..8], .big));
     try std.testing.expectEqual(@as(u64, 4), std.mem.readInt(u64, encoded[identity_start + 24 ..][0..8], .big));
-    try std.testing.expectEqual(@as(usize, prefix_len + common_len + identity_len + 4 + 1), len);
+    // v3: source(1B "x" + 4B len) 뒤에 팔레트 24B가 붙는다.
+    try std.testing.expectEqual(@as(usize, prefix_len + common_len + identity_len + 4 + 1 + palette_wire_bytes), len);
 }
 
 test "request and result round trip exact identity and UTF-8" {
@@ -392,10 +441,11 @@ test "request and result round trip exact identity and UTF-8" {
     const source = "graph TD\n  A --> B\n한글";
     var capability = testCapability();
     capability.source_hash = sourceHash(source);
-    const request_len = try encode(.{ .request = .{ .capability = capability, .source = source } }, &encoded);
+    const request_len = try encode(.{ .request = .{ .capability = capability, .source = source, .palette = testPalette() } }, &encoded);
     const request = (try decodeExact(encoded[0..request_len])).request;
     try std.testing.expectEqualDeep(capability, request.capability);
     try std.testing.expectEqualStrings(source, request.source);
+    try std.testing.expectEqual(testPalette(), request.palette); // 팔레트도 온전히 왕복
 
     var result_buf: [max_result_frame_bytes]u8 = undefined;
     const svg = "<svg xmlns=\"http://www.w3.org/2000/svg\"></svg>";
@@ -465,7 +515,7 @@ test "v1 and v2 frames reject each other without an adapter" {
     var v2: [max_request_frame_bytes]u8 = undefined;
     var capability = testCapability();
     capability.source_hash = sourceHash("graph TD");
-    const len = try encode(.{ .request = .{ .capability = capability, .source = "graph TD" } }, &v2);
+    const len = try encode(.{ .request = .{ .capability = capability, .source = "graph TD", .palette = testPalette() } }, &v2);
     var v1 = v2;
     v1[prefix_len + magic.len] = 0;
     v1[prefix_len + magic.len + 1] = 1;
@@ -482,7 +532,7 @@ test "request source hash mismatch and result unknown status fail closed" {
     var request_buf: [max_request_frame_bytes]u8 = undefined;
     var capability = testCapability();
     capability.source_hash = sourceHash("source");
-    const request_len = try encode(.{ .request = .{ .capability = capability, .source = "source" } }, &request_buf);
+    const request_len = try encode(.{ .request = .{ .capability = capability, .source = "source", .palette = testPalette() } }, &request_buf);
     request_buf[11 + identity_len - 1] ^= 1;
     try std.testing.expectError(error.InvalidLength, decodeExact(request_buf[0..request_len]));
 
@@ -497,7 +547,7 @@ test "source and SVG caps reject cap plus one before encoding" {
     var result_buf: [max_result_frame_bytes]u8 = undefined;
     const source = [_]u8{'a'} ** (max_source_bytes + 1);
     const svg = [_]u8{'a'} ** (max_svg_bytes + 1);
-    try std.testing.expectError(error.SourceTooLarge, encode(.{ .request = .{ .capability = testCapability(), .source = &source } }, &request_buf));
+    try std.testing.expectError(error.SourceTooLarge, encode(.{ .request = .{ .capability = testCapability(), .source = &source, .palette = testPalette() } }, &request_buf));
     try std.testing.expectError(error.SvgTooLarge, encode(.{ .result = .{ .capability = testCapability(), .status = .ok, .body = &svg } }, &result_buf));
     try std.testing.expectError(error.InvalidRenderErrorBody, encode(.{ .result = .{ .capability = testCapability(), .status = .render_error, .body = "x" } }, &result_buf));
 }

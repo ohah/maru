@@ -68,10 +68,23 @@ pub fn fromTheme(theme: appearance.ResolvedTheme) SyntaxColors {
     };
 }
 
-/// `--maru-syntax-*`를 현재 테마 색으로 설정하는 JS 스니펫을 out에 쓴다(§2.3). 신뢰 shell이 로드된 뒤와 테마
-/// 변경 시 native가 evaluateJavaScript로 실행한다. 값은 #RRGGBB(검증된 채널)라 주입 위험이 없다. 버퍼가 모자라면
-/// null. CSS 변수 이름은 `source-language.ts`/`app.css`와 정확히 일치해야 한다.
-pub fn writeCssVarsJs(colors: SyntaxColors, out: []u8) ?[]const u8 {
+/// 폰트 패밀리가 CSS/JS 문자열에 안전하게 넣을 수 있는 문자만 쓰는지(주입 방어). 번들·시스템 폰트명은
+/// 영문자·숫자·공백·하이픈뿐이라 이걸로 충분하고, 그 외 문자가 있으면 var를 안 내보내 app.css 폴백을 쓴다.
+fn isSafeFontFamily(family: []const u8) bool {
+    if (family.len == 0 or family.len > 64) return false;
+    for (family) |c| {
+        const ok = (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') or
+            (c >= '0' and c <= '9') or c == ' ' or c == '-';
+        if (!ok) return false;
+    }
+    return true;
+}
+
+/// 편집기 테마 CSS 변수(`--maru-syntax-*`, `--maru-editor-selection`, `--maru-editor-font-*`)를 현재 터미널
+/// 테마·폰트로 설정하는 JS 스니펫을 out에 쓴다(§2.3). 신뢰 shell이 로드된 뒤와 **테마/폰트 변경 시**마다 native가
+/// evaluateJavaScript로 실행하므로 실시간 반영된다. 색은 #RRGGBB(검증 채널), 폰트명은 safe-charset만 통과시켜
+/// 주입 위험이 없다. 버퍼가 모자라면 null. CSS 변수 이름은 `source-language.ts`/`app.css`와 정확히 일치해야 한다.
+pub fn writeCssVarsJs(colors: SyntaxColors, selection: color.Rgb, font_family: []const u8, font_size_pt: u16, out: []u8) ?[]const u8 {
     const entries = [_]struct { name: []const u8, rgb: color.Rgb }{
         .{ .name = "keyword", .rgb = colors.keyword },
         .{ .name = "string", .rgb = colors.string },
@@ -95,6 +108,33 @@ pub fn writeCssVarsJs(colors: SyntaxColors, out: []u8) ?[]const u8 {
             out[w..],
             "s.setProperty('--maru-syntax-{s}','#{x:0>2}{x:0>2}{x:0>2}');",
             .{ e.name, e.rgb.r, e.rgb.g, e.rgb.b },
+        ) catch return null;
+        w += chunk.len;
+    }
+    // 편집기 선택 색 = 터미널 테마 selection(터미널과 동일한 블록 선택 색). drawSelection 레이어가 이걸 쓴다.
+    {
+        const chunk = std.fmt.bufPrint(
+            out[w..],
+            "s.setProperty('--maru-editor-selection','#{x:0>2}{x:0>2}{x:0>2}');",
+            .{ selection.r, selection.g, selection.b },
+        ) catch return null;
+        w += chunk.len;
+    }
+    // 편집기 본문 폰트 = 터미널과 동일한 패밀리·크기(번들 폰트는 ATSApplicationFontsPath로 WKWebView에도 등록됨).
+    // pt는 터미널 CoreText와 같은 물리 크기라 그대로 CSS pt로 쓴다. 폰트명이 unsafe면 family var는 생략(폴백).
+    if (isSafeFontFamily(font_family)) {
+        const chunk = std.fmt.bufPrint(
+            out[w..],
+            "s.setProperty('--maru-editor-font-family','\"{s}\", ui-monospace, monospace');",
+            .{font_family},
+        ) catch return null;
+        w += chunk.len;
+    }
+    {
+        const chunk = std.fmt.bufPrint(
+            out[w..],
+            "s.setProperty('--maru-editor-font-size','{d}pt');",
+            .{font_size_pt},
         ) catch return null;
         w += chunk.len;
     }
@@ -145,18 +185,28 @@ test "writeCssVarsJs emits all vars as hex and fails closed on small buffer" {
     theme.foreground = .{ .r = 0xe8, .g = 0xe8, .b = 0xe8 };
     theme.background = .{ .r = 0x10, .g = 0x10, .b = 0x10 };
     theme.palette = .{null} ** 16;
+    theme.selection = .{ .r = 0x33, .g = 0x44, .b = 0x55 };
     const c = fromTheme(theme);
     var buf: [1024]u8 = undefined;
-    const js = writeCssVarsJs(c, &buf).?;
+    const js = writeCssVarsJs(c, theme.selection, "JetBrains Mono", 14, &buf).?;
     try testing.expect(std.mem.startsWith(u8, js, "(function(s){"));
     try testing.expect(std.mem.endsWith(u8, js, "})(document.documentElement.style)"));
     try testing.expect(std.mem.indexOf(u8, js, "--maru-syntax-keyword") != null);
     try testing.expect(std.mem.indexOf(u8, js, "--maru-syntax-invalid") != null);
-    // 11개 변수 전부.
+    // 편집기 선택 색·폰트도 함께 주입된다(터미널 테마·폰트 일치).
+    try testing.expect(std.mem.indexOf(u8, js, "--maru-editor-selection','#334455'") != null);
+    try testing.expect(std.mem.indexOf(u8, js, "--maru-editor-font-family','\"JetBrains Mono\", ui-monospace, monospace'") != null);
+    try testing.expect(std.mem.indexOf(u8, js, "--maru-editor-font-size','14pt'") != null);
+    // 11 syntax + selection + font-family + font-size = 14개 setProperty.
     var count: usize = 0;
     var it = std.mem.splitSequence(u8, js, "setProperty");
     while (it.next()) |_| count += 1;
-    try testing.expectEqual(@as(usize, 12), count); // 11 setProperty + 1 앞부분
+    try testing.expectEqual(@as(usize, 15), count); // 14 setProperty + 1 앞부분
     var small: [16]u8 = undefined;
-    try testing.expect(writeCssVarsJs(c, &small) == null);
+    try testing.expect(writeCssVarsJs(c, theme.selection, "JetBrains Mono", 14, &small) == null);
+    // unsafe 폰트명은 font-family var를 생략(app.css 폴백) — 나머지는 정상 주입.
+    var buf2: [1024]u8 = undefined;
+    const js2 = writeCssVarsJs(c, theme.selection, "Evil'; drop", 14, &buf2).?;
+    try testing.expect(std.mem.indexOf(u8, js2, "--maru-editor-font-family") == null);
+    try testing.expect(std.mem.indexOf(u8, js2, "--maru-editor-font-size','14pt'") != null);
 }

@@ -90,9 +90,10 @@ pub const InProcessTermBackend = struct {
 
     fn spawn(ctx: *anyopaque, params: SpawnParams) anyerror!*surface_mod.Surface {
         const self: *InProcessTermBackend = @ptrCast(@alignCast(ctx));
-        // control-plane self selector(MARU_PANE_ID)는 handle과 같은 값이어야 한다 — caller가 안 채웠어도 여기서 고정한다.
+        // control-plane self selector(MARU_PANE_ID)는 caller가 명시한 GUI surface id를 보존하고, 일반 in-process caller가
+        // 비워 둔 경우에만 이 backend의 handle을 기본값으로 쓴다.
         var req = params.request;
-        req.pane_id = params.handle;
+        if (req.pane_id == null) req.pane_id = params.handle;
 
         // 슬롯을 앱 전역 registry에 잡고 terminal arm을 확정한다(undefined 슬롯에 arm 태그를 먼저 심어야 아래
         // &slot.terminal.X가 활성 arm을 가리킨다 — createTerm과 동일 계약).

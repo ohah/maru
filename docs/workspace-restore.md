@@ -8,11 +8,11 @@ workspace restore는 "실행 중이던 shell process를 그대로 냉동했다�
 
 운영체제의 process, PTY file descriptor, foreground job은 앱을 끄면 사라진다. 이것을 그대로 저장할 수 없다.
 
-> 이 설명은 **현재 구현의 선언적 restore**에 대한 것이다. 향후
-> [영속 터미널 세션 호스트](persistent-session-host.md)가 구현되면 `Maru.app` GUI가 PTY를 저장하는 것이 아니라,
-> 별도 `maru-sessiond` 프로세스가 live PTY·child·`TerminalCore`를 계속 소유하고 새 GUI가 `runtime_handle`로 attach한다.
-> 이 연속성은 host와 runtime이 살아 있을 때만 성립한다. host/runtime 종료 뒤 provider resume/fork나 동일 세션 복구는
-> 제공하지 않으며, 이 문서로 새 shell을 여는 동작도 기존 실행 세션의 연속으로 설명하지 않는다.
+> 이 설명은 선언적 restore의 기본 계약이다. 현재 opt-in
+> [영속 터미널 세션 호스트](persistent-session-host.md)는 별도 `maru-sessiond`가 live PTY·child·`TerminalCore`를
+> 계속 소유하고 새 GUI가 `runtime-handle`로 attach하는 경로까지 구현했다. 이때도 GUI가 process를 직렬화하는 것은 아니며
+> 연속성은 host와 runtime이 살아 있을 때만 성립한다. host/runtime 종료 뒤 provider resume/fork나 동일 세션 복구는
+> 제공하지 않으며, 새 shell을 여는 동작을 기존 실행 세션의 연속으로 설명하지 않는다.
 
 Maru가 저장하는 것은 다시 시작하기 위한 **설명서**다.
 
@@ -35,23 +35,40 @@ Maru가 저장하는 것은 다시 시작하기 위한 **설명서**다.
 
 **web Term(4e)은 저장하지 않는다.** `workspace.Surface`에 kind 필드가 없어 web 패널을 표현할 수 없고(포맷에 kind 추가는 Phase 5), sentinel core를 일반 surface로 직렬화하면 복원 시 셸로 오spawn되므로 `captureWorkspaceTab`이 web Term을 **스킵**한다. 한 pane이 web Term만 가진 경우(모든 terminal Term을 닫음) surfaces가 비면 복원이 `error.EmptyPane`으로 전체를 중단하므로, 그 pane엔 **기본 셸 placeholder 하나**를 넣어 기본 로그인 셸로 복원한다(브라우저 콘텐츠·URL은 어차피 미영속). web 콘텐츠 영속은 Phase 5(콘텐츠·브리지)와 함께 포맷에 kind를 더해 다룬다. **구현 완료(2026-07-20, ABI v137)**: Explorer UX 보강은 기존 window line에 열린 빈 도크용 `dock-presented=1`과 explicit root의 단일 length-framed `dock-tree-roots` field를 추가했다. root field가 없으면 inferred이고 `0:` payload는 explicit-empty다. 유효한 `0:`만으로는 도크 표시를 파생하지 않지만, 손상된 root field는 explicit-empty로 강등하면서 field 존재가 나타낸 표시 의도를 보존하며 terminal과 dock entry를 폐기하지 않는다. 복원은 root를 canonical/no-follow identity로 검증하고 missing/invalid root만 버린 뒤 rows와 safety watcher를 함께 stage하며, root validation이 pending이면 restore를 거부한다. 전체 apply의 fail-index OOM 검증은 기존 tab/dock/root/rows/watch를 원자적으로 보존한다(상세 단일 출처=[file-panel.md](file-panel.md) §5·§7). Markdown entry mode와 dirty content 미영속 계약은 그대로다.
 
-## 영속 session host와의 관계 (계획, 미구현)
+## 영속 session host와의 관계 (부분 구현)
 
 workspace restore와 persistent-session attach는 서로 대체하지 않는다.
 
 | 상태 | 시작 동작 |
 | --- | --- |
-| 같은 `host_id/runtime_id`가 살아 있음 | 새 shell을 spawn하지 않고 기존 runtime attach |
-| manifest에는 있으나 runtime이 없음 | 종료 placeholder. 자동 command·provider resume/fork 없음 |
+| 같은 `host_id/runtime_id`가 살아 있음 | 새 shell을 spawn하지 않고 기존 runtime attach (**구현**) |
+| manifest에는 있으나 runtime이 없음 | 자동 fresh spawn 금지. 현재는 해당 window apply를 실패시키며, 종료 placeholder는 후속 |
 | host가 없음·종료됨·재부팅됨 | 기존 handle은 ended. 새 shell을 열 수는 있지만 동일 session continuation 아님 |
-| host에만 runtime이 남음 | 삭제하지 않고 `Recovered Sessions`에서 복구 |
+| host에만 runtime이 남음 | 삭제하지 않음. `Recovered Sessions` 노출은 P4 계획 |
 
-현재 `maru.workspace.v1`에는 `runtime_handle`/`workspace_binding_id`와 quick layout이 없다. 아래 binding scalar와 마지막
-`quick-window` tail wire는 설계가 확정됐지만 아직 코드에는 구현되지 않았다. 또한 정상 종료 한 번에만 저장하는 현재 방식은
-GUI crash 직전 layout을 잃을 수 있으므로, 영속 session 기본 전환 전에 구조 mutation을 atomic incremental checkpoint로
-저장해야 한다. 세부 소유권·ID·접속 실패 행렬은 persistent-session 문서를 따른다.
+현재 `maru.workspace.v1`의 terminal `runtime-handle`은 구현됐다. writer는
+`<host-id>:<runtime-id>`를 함께 쓰고 reader는 길이·lowercase hex·구분자를 fail-closed 검증한다. 옛
+`runtime-id` 단독 파일은 한 번의 attach migration을 위해 읽지만 새 live capture는 bare ID를 만들지 않는다.
+반면 `workspace-binding-id`, quick layout, 전역 binding 중복 검증, ended placeholder, incremental checkpoint는 아직
+구현되지 않았다. 정상 종료 한 번에만 저장하는 현재 방식이라 GUI crash 직전 layout은 잃을 수 있으므로 이 항목들은
+영속 session 기본 전환 전 gate다. 세부 소유권·ID·접속 실패 행렬은 persistent-session 문서를 따른다.
 
-## 영속 session binding wire (계획, 미구현)
+현재 정상 종료 checkpoint는 **모든 일반 Window 직렬화 성공 또는 write 0회**다. Window 하나라도 session handle이 없거나
+직렬화에 실패하면 성공한 일부 Window만으로 기존 `workspace.v1`을 덮지 않고 마지막 완전본을 보존한다. restore도 Window
+모델 publish 전에 surface들을 stage하며, 기존 persistent runtime attach 뒤 후속 surface가 실패하면 앞 runtime은
+terminate하지 않고 controller subscription만 detach해 rollback한다. saved Window 하나라도 apply하지 못하면 그 추가 창은
+default shell로 위장하지 않고 teardown하며, 이번 실행은 `restore incomplete`로 남아 다음 Quit의 자동 checkpoint를 막아
+마지막 완전 파일을 보존한다. quick은 아직 checkpoint 대상이 아니며 host orphan을
+막기 위해 in-process backend로만 생성되어 앱 Quit 때 종료한다.
+
+시작 host는 workspace 텍스트를 **AppSession 생성 전** Zig parser로 preflight한다(ABI v142,
+`workspace_window_count(session=NULL)`). 복원할 Window가 하나 이상이면 각 AppSession을
+`defer_initial_surface=1`로 만들어 기본 tab/PTY/renderer/frame loop를 만들지 않고, 저장 모델의 모든 Term을 stage한 뒤
+첫 publish에서만 surface와 frame loop를 연다. 따라서 정상적인 persistent attach 복원은 임시 default shell이나
+throwaway host runtime을 하나도 spawn하지 않는다. primary Window 적용 실패 때만 빈 deferred session을 폐기하고 명시적인
+새 default-shell session으로 fallback하며, 이 실행은 위 `restore incomplete` 보호를 그대로 적용한다.
+
+## 영속 session binding wire (runtime-handle 구현, 나머지 계획)
 
 새 DB나 창별 파일을 만들지 않고 기존 `~/Library/Application Support/maru/workspace.v1` 하나가 Window/Workspace 배치의
 단일 출처다. 현재 직렬화 모델에서 `Window`=OS 창, `Tab`=Workspace, `Pane`=split leaf, `Surface`=terminal Term이므로
@@ -73,26 +90,27 @@ surface custom-name="" title="scratch" cwd="/repo" command="/bin/zsh" cols=100 r
 
 | 필드 | 위치 | 형식·수명 | 키가 없을 때 |
 | --- | --- | --- | --- |
-| `workspace-binding-id` | `tab` line | Workspace 생성 때 발급한 opaque 128-bit random ID의 lowercase 32 hex. cross-window 이동 중 유지 | 옛/ephemeral Workspace. restore가 새 ID를 발급하되 동일 live workspace라고 주장하지 않음 |
-| `runtime-handle` | terminal `surface` line | `<host-id>:<runtime-id>`, 양쪽 모두 lowercase 32 hex. 한 quoted scalar로 all-or-none | 선언적 surface. 설정에 맞는 새 runtime 생성 후보이며 기존 process continuation 아님 |
-| `quick-window` | 모든 normal `window` 뒤의 optional tail | 0개 또는 1개. `tabs`/`active-tab` 뒤에 일반 tab/tree/pane/surface subtree 재사용 | quick을 아직 만들지 않았거나 옛 파일. 첫 toggle이 새 persistent quick runtime 생성 |
+| `workspace-binding-id` (계획) | `tab` line | Workspace 생성 때 발급한 opaque 128-bit random ID의 lowercase 32 hex. cross-window 이동 중 유지 | 옛/ephemeral Workspace. restore가 새 ID를 발급하되 동일 live workspace라고 주장하지 않음 |
+| `runtime-handle` (**구현**) | terminal `surface` line | `<host-id>:<runtime-id>`, 양쪽 모두 lowercase 32 hex. 한 quoted scalar로 all-or-none | 선언적 surface. 설정에 맞는 새 runtime 생성 후보이며 기존 process continuation 아님 |
+| `quick-window` (계획) | 모든 normal `window` 뒤의 optional tail | 0개 또는 1개. `tabs`/`active-tab` 뒤에 일반 tab/tree/pane/surface subtree 재사용 | quick을 아직 만들지 않았거나 옛 파일. 첫 toggle이 새 persistent quick runtime 생성 |
 
 규칙:
 
-- 두 binding 필드는 기존 `LineFields`의 순서 무관 optional scalar다. 옛 reader는 미지 키로 skip하고 새 reader는 부재를 legacy/default로
-  읽으므로 header는 `maru.workspace.v1`을 유지한다.
+- binding 필드는 기존 `LineFields`의 순서 무관 optional scalar다. 옛 reader는 미지 키로 skip하고 새 reader는 부재를
+  legacy/default로 읽으므로 header는 `maru.workspace.v1`을 유지한다. 현재 구현된 `runtime-handle` reader는 옛
+  `runtime-id` 단독 키도 엄격한 32 lowercase hex일 때만 migration 입력으로 허용하며 두 키가 함께 있으면 거부한다.
 - `quick-window`는 기존 normal `window` loop가 끝난 뒤에만 오는 self-delimiting tail이다. 옛 reader는 첫 미지 trailing line에서
   정상 종료해 전체 quick subtree를 무시하므로 이를 일반 Window로 잘못 열지 않는다. 새 reader는 최대 1개만 인식하고 subtree를
   끝까지 검증한다. 이 증명이 깨지는 위치/형식으로 옮기면 v1 변경으로 허용하지 않는다.
 - 키가 있는데 quoted 형식, 길이, lowercase hex, `:` 구분이 깨졌으면 `BadLine`이며 기존 "존재하는 optional 손상은 숨기지
   않는다" 규칙대로 checkpoint 전체를 거부한다. `runtime-handle`을 두 키로 나눠 partial state를 만들지 않는다.
 - writer는 ID를 의미 있는 숫자나 path로 인코딩하지 않고, 같은 값의 재사용·자동 재발급으로 손상을 숨기지 않는다.
-- publish 전 전체 모델을 검증한다. `workspace-binding-id`는 manifest 전체에서 유일해야 하고, 하나의 `runtime-handle`은
+- **계획:** publish 전 전체 모델을 검증한다. `workspace-binding-id`는 manifest 전체에서 유일해야 하고, 하나의 `runtime-handle`은
   canonical owner terminal surface 하나에만 나타나야 한다. v1 manifest에는 같은 handle의 read-only mirror도 저장하지 않는다.
   중복이면 현재 live 모델과 마지막 완전 파일을 보존하고 새 checkpoint를 쓰지 않는다.
-- reader도 어떤 runtime attach/spawn이나 Window publish보다 먼저 전역 중복을 검사한다. 검증 실패 때 일부 창만 attach하는
+- **계획:** reader도 어떤 runtime attach/spawn이나 Window publish보다 먼저 전역 중복을 검사한다. 검증 실패 때 일부 창만 attach하는
   side effect를 만들지 않는다.
-- 올바른 handle인데 현재 host/runtime 목록에 없으면 파일 손상이 아니라 ended 상태다. 해당 surface만 종료 placeholder로 두고
+- **계획:** 올바른 handle인데 현재 host/runtime 목록에 없으면 파일 손상이 아니라 ended 상태다. 해당 surface만 종료 placeholder로 두고
   나머지는 attach한다. host에는 있지만 manifest에 없는 runtime은 `Recovered Sessions`에 둔다.
 - runtime이 살아 있는 attach는 saved `cwd`/`command`로 새 shell을 spawn하지 않는다. `cwd`/`title`은 초기 표시 fallback이고
   host snapshot/metadata가 도착하면 live 값을 따른다.
@@ -100,6 +118,10 @@ surface custom-name="" title="scratch" cwd="/repo" command="/bin/zsh" cols=100 r
   얻지 못한다.
 
 ### 멀티윈도우 저장·이동·동시 쓰기
+
+> **P4 목표 계약:** 현재 구현은 정상 종료 시 모든 일반 Window를 한 번에 checkpoint하고, 실패 시 마지막 완전본을
+> 보존한다. 아래 writer lease, dirty debounce incremental checkpoint, workspace binding/move transaction, 외부 observer
+> 연동은 아직 구현되지 않았다.
 
 - 기존 한 header 아래 `window` block N개가 모든 OS Window를 저장한다. 각 Window가 같은 host connection을 공유하지만 layout은
   계속 자기 `tab`/`pane`/`surface` block에 인라인으로 저장한다.
@@ -119,6 +141,8 @@ surface custom-name="" title="scratch" cwd="/repo" command="/bin/zsh" cols=100 r
   중 하나만 남겨야 하며, 창별로 따로 publish하지 않는다.
 
 ### quick terminal 저장·재연결
+
+> **P4 계획:** 이 절은 아직 구현되지 않았다. 현재 quick은 workspace 파일에 쓰지 않고 persistent backend도 사용하지 않는다.
 
 - quick은 app-global singleton `AppSession`이며 normal Window count, active-window, frame, dock/explorer에 포함하지 않는다.
   `quick-window`는 Workspace/Pane/terminal Term layout과 binding만 저장한다. panel position/size/screen/chrome/minimal-tabs는

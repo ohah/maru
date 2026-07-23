@@ -11,8 +11,7 @@
 //! `runtime.resize` RPC, close/remove→host terminate + client-side 회수. handle(u64)↔`RemoteRuntime`를 map으로 잇는다.
 //!
 //! ⚠️미완(후속): (1) core command(scrollback/clear 등)는 host core를 만져야 하나 wire RPC가 없어 no-op(e3-3),
-//! (2) foreground process group/names query wire 없음→null/0(agent observer 원격 미지원), (3) spawn이 argv/size만
-//! 보내고 cwd/login/env는 아직 안 실음(RemoteRuntime.spawn 한계 — app_session 배선 전 확장 필요). macOS 전용
+//! (2) foreground process group/names query wire 없음→null/0(agent observer 원격 미지원). macOS 전용
 //! (client·Surface·app 계약).
 
 const std = @import("std");
@@ -35,6 +34,7 @@ const RuntimeEventPump = runtime_pump.RuntimeEventPump;
 const DrainSummary = runtime_pump.DrainSummary;
 const CoreCommand = maru.session.core_command.CoreCommand;
 const ForegroundProcessName = maru.pty.types.ForegroundProcessName;
+const nonblocking_input_chunk: usize = 16 * 1024;
 const RemoteRuntime = remote_runtime.RemoteRuntime;
 
 /// 한 host connection 위의 원격 term backend. `client`는 borrowed(수명은 caller — app_session이 discovery/connect로 만든
@@ -90,9 +90,10 @@ pub const RemoteTermBackend = struct {
     }
 
     /// **이미 host에 있는 runtime에 재접속**해 원격-backed Surface를 만든다(§7 GUI 재접속, e3-5). spawn과 달리 새 runtime을
-    /// 안 띄우고 저장된 `runtime_id_hex`에 붙는다. runtime이 없으면(host 재시작 등) attachExisting이 error를 내고 caller
-    /// (app_session restore)가 fresh spawn으로 폴백한다. **vtable 밖 — host 전용**이라 app_session이 restore 경로에서 직접
-    /// 부른다. spawn과 동일하게 반환 뒤 `attach`(vtable)로 원격 PtyIo를 라우팅 표에 등록해야 입력이 흐른다.
+    /// 안 띄우고 저장된 `runtime_id_hex`에 붙는다. runtime이 없으면(host 재시작 등) attachExisting이 error를 내고
+    /// app_session restore는 동일 세션인 척 fresh spawn하지 않고 fail-closed한다. **vtable 밖 — host 전용**이라
+    /// app_session이 restore 경로에서 직접 부른다. spawn과 동일하게 반환 뒤 `attach`(vtable)로 원격 PtyIo를
+    /// 라우팅 표에 등록해야 입력이 흐른다.
     pub fn attachTerm(self: *RemoteTermBackend, handle: RuntimeHandle, runtime_id_hex: [32]u8, size: maru.terminal.Size) anyerror!*Surface {
         const rr = try self.allocator.create(RemoteRuntime);
         errdefer self.allocator.destroy(rr);
@@ -137,16 +138,10 @@ pub const RemoteTermBackend = struct {
 
     fn spawn(ctx: *anyopaque, params: SpawnParams) anyerror!*Surface {
         const self: *RemoteTermBackend = @ptrCast(@alignCast(ctx));
-        // argv = [command] ++ args (host의 spawnRuntime이 argv[0]=command, argv[1..]=args로 되돌린다). rr.spawn이 동기적으로
-        // JSON escape 복사하므로 이 임시 슬라이스는 spawn 뒤 해제해도 안전하다.
-        const argv = try self.allocator.alloc([]const u8, 1 + params.request.args.len);
-        defer self.allocator.free(argv);
-        argv[0] = params.request.command;
-        for (params.request.args, 0..) |a, i| argv[i + 1] = a;
-
         const rr = try self.allocator.create(RemoteRuntime);
         errdefer self.allocator.destroy(rr);
-        try rr.spawn(self.client, self.allocator, self.io, params.handle, argv, params.size);
+        const request = persistentSpawnRequest(params.request);
+        try rr.spawn(self.client, self.allocator, self.io, params.handle, request, params.size);
         errdefer rr.deinit(); // spawn 성공 후 map 삽입이 실패하면 방금 띄운 host runtime을 회수한다(orphan 방지).
         try self.runtimes.put(self.allocator, params.handle, rr);
         return &rr.surface;
@@ -209,8 +204,7 @@ pub const RemoteTermBackend = struct {
     fn writeInputNonBlocking(ctx: *anyopaque, handle: RuntimeHandle, bytes: []const u8) anyerror!usize {
         const self: *RemoteTermBackend = @ptrCast(@alignCast(ctx));
         const rr = self.runtimes.get(handle) orelse return error.UnknownSurface;
-        try rr.sendInput(bytes); // socket write는 blocking writeAll이라 전량 전송으로 본다(paste도 host가 흡수).
-        return bytes.len;
+        return writeInputChunk(rr, bytes);
     }
 
     fn enqueueCoreCommand(ctx: *anyopaque, handle: RuntimeHandle, cmd: CoreCommand, io: std.Io) anyerror!void {
@@ -339,8 +333,7 @@ pub const RemoteTermBackend = struct {
 
     fn ioWriteInputNonBlocking(ctx: *anyopaque, bytes: []const u8) anyerror!usize {
         const rr: *RemoteRuntime = @ptrCast(@alignCast(ctx));
-        try rr.sendInput(bytes); // socket blocking writeAll — 전량 전송으로 본다(host가 흡수).
-        return bytes.len;
+        return writeInputChunk(rr, bytes);
     }
 
     fn ioResize(ctx: *anyopaque, size: maru.terminal.Size) anyerror!void {
@@ -348,6 +341,39 @@ pub const RemoteTermBackend = struct {
         return rr.resize(size.cols, size.rows);
     }
 };
+
+fn persistentSpawnRequest(request_in: maru.pty.SpawnRequest) maru.pty.SpawnRequest {
+    var request = request_in;
+    // MARU_PANE_ID는 GUI process-local surface id라 재실행 후 같은 persistent child 안에서 stale selector가 된다.
+    // runtime↔새 surface rebinding 프로토콜 전에는 주입하지 않아 잘못된 다른 pane을 self로 선택하는 것보다 fail-closed한다.
+    request.pane_id = null;
+    return request;
+}
+
+test "persistent spawn omits process-local MARU_PANE_ID without mutating local fallback request" {
+    const local: maru.pty.SpawnRequest = .{ .command = "/bin/zsh", .pane_id = 42 };
+    const persistent = persistentSpawnRequest(local);
+    try std.testing.expectEqual(@as(?u64, 42), local.pane_id);
+    try std.testing.expectEqual(@as(?u64, null), persistent.pane_id);
+}
+
+/// vtable 직접 호출과 SurfaceRuntime의 PtyIo 호출이 공유하는 paste 정책점. socket 자체는 아직 blocking이지만 한 UI
+/// tick의 전송량을 고정 상한으로 제한하고, caller는 반환 길이 뒤의 나머지를 다음 tick에 이어 보낸다.
+fn writeInputChunk(rr: *RemoteRuntime, bytes: []const u8) anyerror!usize {
+    const chunk = bytes[0..boundedInputLen(bytes.len)];
+    try rr.sendInput(chunk);
+    return chunk.len;
+}
+
+fn boundedInputLen(len: usize) usize {
+    return @min(len, nonblocking_input_chunk);
+}
+
+test "remote nonblocking input policy consumes at most one bounded chunk per tick" {
+    try std.testing.expectEqual(@as(usize, 0), boundedInputLen(0));
+    try std.testing.expectEqual(nonblocking_input_chunk, boundedInputLen(nonblocking_input_chunk));
+    try std.testing.expectEqual(nonblocking_input_chunk, boundedInputLen(nonblocking_input_chunk + 1));
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // process smoke (실 macOS: fork된 host에 TermRuntimeBackend **계약으로** 원격 runtime을 몬다)

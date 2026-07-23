@@ -8,7 +8,7 @@
 /* 이 header는 실제 앱 동작을 구현하지 않고 Swift/Zig 사이의 약속만 고정한다.
    Swift가 AppKit object나 Swift struct layout을 바로 넘기면 Zig 쪽에서 안전하게
    해석할 수 없으므로, 제품 host가 시작되기 전에 fixed-width C record만 허용한다. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 139u
+#define MARU_MACOS_APP_HOST_ABI_VERSION 142u
 #define MARU_FILE_PANEL_MODE_READ 0u
 #define MARU_FILE_PANEL_MODE_SOURCE_EDIT 1u
 #define MARU_FILE_PANEL_MODE_LIVE_PREVIEW 2u
@@ -172,6 +172,7 @@ typedef struct MaruAppHostResizeEvent {
 typedef enum MaruAppHostCommandKind {
     MaruAppHostCommandControlledSmoke = 0,
     MaruAppHostCommandInteractiveShell = 1,
+    MaruAppHostCommandQuickInteractiveShell = 2,
 } MaruAppHostCommandKind;
 
 typedef struct MaruAppHostSession MaruAppHostSession;
@@ -196,6 +197,9 @@ typedef struct MaruAppHostSessionConfig {
     uint32_t width_px;
     uint32_t height_px;
     uint32_t scale_milli;
+    /* 저장 workspace를 즉시 적용할 세션이면 첫 default tab/PTY spawn을 보류한다. apply 성공이 첫 surface/frame loop를
+       완성한다. 일반 새 Window/quick/smoke는 0. v142. */
+    uint32_t defer_initial_surface;
 } MaruAppHostSessionConfig;
 
 typedef struct MaruAppHostFrameSummary {
@@ -490,6 +494,11 @@ int32_t maru_macos_app_session_request_window_close(
    명령 유무와 무관하게 항상 "maru를 종료할까요?" 확인 모달을 띄운다. Swift는 이 호출 뒤 .terminateLater를 돌려주고,
    모달 확정/취소가 다음 tick FrameSummary.quit_decision(1=accepted·2=cancelled)에 실리면 NSApp.reply로 진행/취소한다. */
 void maru_macos_app_session_request_app_quit(
+    MaruAppHostSession *session
+);
+/* host의 종료 승인 직전 protected-file 재검사에서 Quit을 취소할 때 이미 수락한 앱 전역 lifecycle latch를 되돌린다.
+   앱이 계속 실행된 뒤 명시 close/다음 Quit이 stale detach/end-all 의미를 쓰지 않게 한다. v141. */
+void maru_macos_app_session_cancel_app_quit(
     MaruAppHostSession *session
 );
 /* 현재 세션에 종료 전에 해소해야 할 dirty/pending/source-edit 파일 도크 entry가 있으면 1, 아니면 0.
@@ -992,7 +1001,8 @@ int32_t maru_macos_app_session_serialize_sidebar_config(
 
 /* 저장된 workspace 텍스트(헤더 + N개 창; UTF-8)의 창 개수를 센다(Swift가 창마다 NSWindow 생성). 헤더·포맷
    검증도 겸한다: parse 실패(헤더 불일치·손상)면 -1(Swift가 복원 건너뜀), 0이면 빈 workspace. 포맷 파싱은 Zig
-   단일 권위 — Swift는 'window ' 경계를 직접 나누지 않는다. */
+   단일 권위 — Swift는 'window ' 경계를 직접 나누지 않는다. session=NULL도 허용하며 이 경우 첫 PTY를 만들기 전
+   launch preflight로 쓴다(v142). */
 int64_t maru_macos_app_session_workspace_window_count(
     MaruAppHostSession *session,
     const uint8_t *text_ptr,
@@ -1001,7 +1011,8 @@ int64_t maru_macos_app_session_workspace_window_count(
 
 /* 시작 시 저장된 workspace 텍스트(헤더 + N개 창; UTF-8)에서 window_index번째 창을 parse해 이 세션에 복원
    적용한다. Swift는 전체 텍스트와 인덱스만 넘긴다(창 경계 분할은 Zig가 소유 — 파싱 권위 단일화). 0=ok,
-   parse 실패·인덱스 범위 밖=invalid_config, apply 실패=create_failed. best-effort라 실패해도 기본 단일 탭. */
+   parse 실패·인덱스 범위 밖=invalid_config, apply 실패=create_failed. 일반 live 세션은 실패 시 기존 모델을
+   보존하고 v142 deferred restore 세션은 빈 상태를 보존한다. host가 fallback/teardown을 결정한다. */
 int32_t maru_macos_app_session_apply_workspace_window(
     MaruAppHostSession *session,
     const uint8_t *text_ptr,

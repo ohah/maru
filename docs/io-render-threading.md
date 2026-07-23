@@ -80,7 +80,7 @@
 2. **회귀(통합) — 폭주 중 응답 지연 상한** ✅(구현됨): 통제 child가 대량 출력 폭주 + OSC 11 질의 → 실제 PTY 통과 → 응답이 **관대한 상한 안에** 도착하는지 assert. 원결함(4.2초)을 정조준. 구현: `tests/integration/pty/macos.zig`의 "answers OSC 11 within a bound under output flood"(opt-in `test-pty`) — child가 `seq 1 20000`(~106KB) 폭주 뒤 OSC 11 질의를 보내고 raw 모드 한 번의 read로 **VTIME=2초 상한** 안에 응답을 받으면 그 바이트를 hex로 에코, 테스트는 core에서 `1b5d31313b726762`(=`\x1b]11;rgb`) 확인. 상한은 codex 데드라인(~50–100ms)보다 훨씬 관대해 머신 편차 flaky를 피하며 "초 단위 지연"만 잡는다(VTIME 타임아웃이 상한을 child에 인코딩 — 별도 벽시계 측정 불필요).
 3. **동시성 스트레스** ✅(구현됨): I/O write ↔ 렌더 snapshot 동시 hammer(N회 반복), 손상/크래시 0. 가능하면 ThreadSanitizer 빌드로. 구현: `tests/integration/pty/macos.zig`의 "reader write and render snapshot hammer concurrently"(opt-in `test-pty`) — reader-processing가 ~288KB 폭주를 `core_mutex` 아래 적용하는 동안 메인이 같은 락으로 `renderSnapshot`+`buildDrawList`를 30000회 hammer, 매 회 grid 치수 일관성 assert + buildDrawList 성공/OOM-only + 최종 core 유효.
 4. **lifecycle/close race** ✅(구현됨): 폭주 중 close → UAF/좀비 0, `core.deinit`이 reader join 후([PTY 운영 모델] §session close 테스트 확장). 구현: `tests/integration/pty/macos.zig`의 "close during flood reaps reader-processing child without UAF or zombie"(opt-in `test-pty`) — `yes` 폭주 + 작은 큐로 reader가 backpressure 대기 중 `stopAndJoin`(queue.close→session.close[SIGKILL]→join) 뒤 `surface.deinit`(core.deinit) 순서로 UAF 없음, `waitpid` ECHILD로 좀비 0 확인.
-5. **lock 계약** ✅(구현됨): `CoreOwner`(`src/terminal/core_owner.zig`, 디버그 전용·release `@sizeOf` 0)가 두 위반을 panic으로 노출한다. **(1) 재진입**: `core_mutex`를 쥔 채 같은 락을 재취득하면 lock **전에** 감지한다(비재진입 `std.Io.Mutex`는 lock 안에서 영영 멈춰 사후 판정 불가). 모든 취득을 owner-추적 래퍼(`Surface.lockCore`/`unlockCore`, reader는 `core.owner_dbg.lock`/`unlock`)로 단일화하고, `check-boundaries`가 직접 `core_mutex.lockUncancelable`/`.unlock` 호출을 빌드에서 차단한다(`tests/boundary/imports.zig`). **(2) 락 미보유**: reader가 부착(`setProcessing`→`arm`)된 코어를 락 없이 mutate(`write`/`setPreedit`/`scrollViewport`/`scrollToBottom`)하면 panic — `arm` 전 단일 스레드(독립 코어·헤드리스 단위 테스트)는 면제해 거짓 panic 0. IME 조합 중 포커스 상실 hang(#700)이 이 재진입 클래스이며, 이제 재발 시 hang이 아니라 panic으로 즉시 잡힌다. 검증: `mise run check` + `test-pty` 15/15(armed 경로 거짓 panic 0).
+5. **lock 계약** ✅(구현됨): `CoreOwner`(`src/terminal/core_owner.zig`, 디버그 전용·release `@sizeOf` 0)가 두 위반을 panic으로 노출한다. **(1) 재진입**: `core_mutex`를 쥔 채 같은 락을 재취득하면 lock **전에** 감지한다(비재진입 `std.Io.Mutex`는 lock 안에서 영영 멈춰 사후 판정 불가). 모든 취득을 owner-추적 래퍼(`Surface.lockCore`/`unlockCore`, reader는 `core.owner_dbg.lock`/`unlock`)로 단일화하고, `check-boundaries`가 직접 `core_mutex.lockUncancelable`/`.unlock` 호출을 빌드에서 차단한다(`tests/boundary/imports.zig`). **(2) 락 미보유**: reader가 부착(`setProcessing`→`arm`)된 코어를 락 없이 mutate(`write`/`scrollViewport`/`scrollToBottom`)하면 panic — `arm` 전 단일 스레드(독립 코어·헤드리스 단위 테스트)는 면제해 거짓 panic 0. 과거 IME 조합 중 포커스 상실 hang(#700)이 이 재진입 클래스였고, marked text는 이후 `Surface.preedit`로 옮겨졌다. 검증: `mise run check` + `test-pty` armed 경로.
 6. **기존 단일 스레드 코어 단위 테스트 유지**: headless 경로는 **동기 drain 옵션**을 남겨 코어 파싱/상태 로직을 단일 스레드로 계속 검증(결정성 보존 — [PTY 운영 모델] §왜 reader thread).
 7. **회귀(단위) — frame 조립 io 소스** ✅(추가됨): `pump.queue.io`에 `undefined`(쓰면 크래시)를 심고 `FrameLoop.io`엔 valid io를 줘서, frame builder(`buildFrameAfterDrain`→`core_mutex.lockUncancelable(io)`)가 valid io로 락에 성공하는지로 "frame 조립이 `pump.queue.io`를 안 읽는다"를 **타이밍 비의존**으로 잡는다(`frame_loop.zig` — "frame builder locks via FrameLoop.io"). 버그 코드면 lock(undefined)에서 크래시(`far=0xaa…`)해 테스트가 죽는다. §3 `io` 배선 항목의 실측 크래시를 직접 봉인. **이 결함이 `mise run check`(smoke의 pump는 queue.io가 valid)를 통과한 교훈**: smoke는 실제 앱의 "재바인딩 안 한 pump" 위상을 재현 못 하므로, 위상 차이를 노린 단위 테스트로 보완한다.
 
@@ -173,7 +173,7 @@ Phase 2 누적 변경에 다각도 리뷰를 돌려 두 결함을 tip에서 수�
 
 ## 9. Phase 3 — 메인발 코어 mutate를 I/O 스레드로 위임 ((a) 단일책임 확정 — P3-1~P3-4 구현 완료 + `/code-review max` 통과, 확정 결함 0)
 
-Phase 1(읽기·코어 처리·응답)·Phase 2(PTY 쓰기)는 I/O 스레드로 옮겼지만, **메인 스레드가 아직 비-PTY 코어 mutate(IME `setPreedit`, 스크롤, 선택, 리포팅)를 `core_mutex` 아래 직접 수행**한다. 이 잔재가 재진입 데드락의 토양이다(#700). §6-5의 `CoreOwner` 안전망이 그 클래스를 panic으로 봉인했지만(1단계), 근본 해소는 **메인이 코어를 직접 안 만지는 것** — **I/O 스레드를 코어의 유일한 mutator로 두는 단일책임 모델**이며, §3의 "I/O 스레드가 코어를 소유한다, 렌더는 락 아래 스냅샷만 읽는다"를 **글자 그대로 실현**한다(2단계).
+Phase 1(읽기·코어 처리·응답)·Phase 2(PTY 쓰기)를 I/O 스레드로 옮긴 뒤, 당시 남아 있던 비-PTY core mutate(IME `setPreedit`, 스크롤, 선택, 리포팅)도 단계적으로 위임했다. 이후 marked text는 core mutate 자체가 아닌 `Surface.preedit` projection으로 재설계했다. 현재 원칙은 **I/O 스레드를 core의 유일한 mutator로 두고 렌더는 락 아래 snapshot만 읽는 것**이며, client-local overlay 갱신은 같은 Surface 락 아래 base snapshot과 직렬화한다.
 
 **베이스/정정**([[document-basis-and-decision]]): 이 모델을 앞서 "Ghostty termio 단일 소유 수렴"이라 적었으나 **소스 확인 결과 틀렸다**. Ghostty의 단일 소유는 **PTY fd·이벤트 루프**에 대한 것이고, UI 발 mutation(스크롤·선택·IME preedit)은 **UI 스레드에서 공유 `renderer_state.mutex` 아래 직접** 수행한다(`Surface.zig`의 `scrollCallback`·`cursorPosCallback`·`preeditCallback` — 즉 §9.4의 (b)). 따라서 (a)는 "Ghostty 수렴"이 아니라 **maru 독립의 더 엄격한 단일책임 선택**이다([[prefer-policy-over-codebase-mimicry]] — 레퍼런스 답습이 아니라 정책/설계 의도 우선). Ghostty가 (b)인 건 "scroll/선택 latency가 비용"이라는 **데이터**일 뿐 따라야 할 명령이 아니다. 그 유일한 비용은 §9.7대로 **측정**으로 관리한다.
 
@@ -181,7 +181,7 @@ Phase 1(읽기·코어 처리·응답)·Phase 2(PTY 쓰기)는 I/O 스레드로 
 
 런타임 조사 결과(`src/platform/macos/app_session.zig` 등):
 
-- **위임 대상(mutate)**: `setPreedit`(IME), `scrollViewport`/`scrollToBottom`(PageUp·휠·드래그 autoscroll·타이핑 후 바닥 스냅), `selection*`(마우스 선택), `reportMouse`/`reportFocus`(리포팅 — PTY 응답 생성), `setConfigPalette`/`max_scrollback`/`setCellMetrics`(config reload·폰트 변경).
+- **위임 대상(mutate)**: `scrollViewport`/`scrollToBottom`(PageUp·휠·드래그 autoscroll·타이핑 후 바닥 스냅), `selection*`(마우스 선택), `reportMouse`/`reportFocus`(리포팅 — PTY 응답 생성), `setConfigPalette`/`max_scrollback`/`setCellMetrics`(config reload·폰트 변경). IME marked text는 이후 영속 host 배선에서 `TerminalCore` mutate가 아닌 client-local `Surface.preedit` projection으로 옮겨져 이 큐의 대상이 아니다. 확정 바이트만 PTY 입력 경로를 탄다.
   - **구현 중 발견한 세분(P3-3)**: `reportFocus`는 P3-3(드묾, latency 무관). **`reportMouse`는 P3-4로 이동** — 마우스마다 PTY 응답을 만드는 빈번한 경로라 위임 지연이 §1 원결함(질의-응답 지연)과 **같은 latency 클래스**다. 그래서 §9.4 측정 대상(scroll·선택과 함께)으로 둔다. config(palette/scrollback/font-metrics)는 P3-3(infrequent).
   - **위임 안 하는 mutate 예외(직접 유지)**: ① **`createTerm` 초기화**의 `setConfigPalette`/`max_scrollback`은 surface가 아직 runtime/reader에 **attach 전**이라 단일 스레드 — 위임 경로(링크)가 없고 경합도 없어 직접. ② **per-tick 렌더 경로**의 `setCellMetrics`/`setDefaultColors`(buildFrame이 `renderSnapshot` 직전 매 tick 적용)는 **렌더 read 준비**라 즉시 동기 필요 — `renderSnapshot`(아래)과 같은 부류로 메인 동기 유지. 폰트 변경 핸들러의 `setCellMetrics`는 위임하되 이 per-tick 안전망이 지연을 덮는다.
 - **메인 락-아래 유지(동기 읽기 — 위임 불가)**: `renderSnapshot`(매 frame-loop tick, DrawList 복사), `imeCursorRect`(IME 후보창 위치 — **즉시 동기 반환** 필수), `alt_active`(PageUp 분기 판정), `cursor_blink`/`viewportHasBlink`/`scrollbackLen`/`viewOffset`(틱 상태). 이들은 즉시 값이 필요해 명령 큐로 못 옮긴다 → `core_mutex`는 사라지지 않고 **렌더 읽기 ↔ reader/위임 write**를 계속 보호한다("완전 무락"은 이 렌더 구조상 불가).
@@ -193,7 +193,6 @@ Phase 1(읽기·코어 처리·응답)·Phase 2(PTY 쓰기)는 I/O 스레드로 
 
 ```text
 Command = union(enum) {
-    set_preedit: []const u8,
     scroll: isize,           // scrollViewport
     scroll_to_bottom,
     select: SelectionOp,
@@ -202,7 +201,7 @@ Command = union(enum) {
 };
 ```
 
-메인은 명령을 enqueue(+wake self-pipe), reader가 `runProcessing` write 단계에서 drain해 `owner_dbg.lock` 아래 코어에 적용한다(출력 `core.write`와 같은 락·같은 스레드라 일관). bounded FIFO·backpressure·close 계약은 `PtyWriteQueue`와 대칭.
+메인은 명령을 enqueue(+wake self-pipe), reader가 `runProcessing` write 단계에서 drain해 `owner_dbg.lock` 아래 코어에 적용한다(출력 `core.write`와 같은 락·같은 스레드라 일관). 현재 명령은 모두 inline POD이며 bounded FIFO·backpressure·close 계약은 `PtyWriteQueue`와 대칭이다.
 
 ### 9.3 무엇이 데드락을 없애나
 
@@ -212,7 +211,24 @@ Command = union(enum) {
 
 mutate를 비동기 위임하면 적용이 다음 reader 턴으로 밀려 **한 프레임(~16–33ms) 지연**될 수 있다(단, enqueue 즉시 self-pipe wake라 실제론 보통 sub-frame이고, 최악은 출력 폭주로 reader가 바쁜 동안).
 
-- IME 확정·리포팅·config는 지연 비민감 → 위임 안전.
+- IME marked text 표시는 `Surface.preedit`이라 즉시 client-local projection한다. 확정 바이트와 같은 keyDown에서 replay할
+  Enter/화살표는 순서에 민감하므로 한 번의 capacity reservation 뒤 surface별 ordered input queue 끝에
+  **확정→replay**로 함께 append한다. 로컬은 기존
+  nonblocking PTY queue가 소비하고, host-backed 경로는 AppKit callback에서 bounded preframed `input_bytes` 한 frame을
+  소유한 뒤 전송 구간에 `O_NONBLOCK`을 적용한 `MSG_DONTWAIT` write만 시도한다. EAGAIN/partial remainder는
+  frame-loop pump가 같은 offset부터 이어 보낸다.
+  queue 준비/OOM이면 partial 또는 replay-only 전송 없이 0회로
+  fail-closed한다. exactly-once는 예약 성공 뒤 application admission/submit 범위이며 PTY 소비·원격 durable delivery ACK는 아니다.
+- host-backed scrolled `imeBegin`의 live-bottom 복귀도 AppKit callback에서 동기 RPC를 하지 않는다.
+  `async_scroll_to_bottom_v1` fire-and-forget frame을 같은 bounded outbound 슬롯에 admission하고, stream-local sticky
+  intent를 다음 tick/input에서 재시도한다. `RemoteRuntime`의 64 KiB direct-key FIFO가 callback에서 넘어온 키를
+  소유하고 intent 시점의 FIFO offset을 barrier로 잡으므로, cap 안에서는 outbound slot이나 frame encode OOM에도
+  키를 ignored/lost 처리하지 않고 `기존 input → scroll_to_bottom → 새 input` wire 순서를 보존한다. FIFO admission 뒤
+  encode OOM은 retryable queue 상태이고, pending+new가 64 KiB를 넘는 admission은 효과 0으로 fail-closed한다.
+  이후 blocking mouse/core/resize RPC는 ordered FIFO를 먼저 flush해 key를 추월하지 않는다. capability 없는 구 host에는 blocking fallback하지
+  않고 preedit/candidate를 fail-closed한다.
+- connection frame의 partial write 뒤 hard error는 같은 fd에서 재시도하지 않고 connection 전체를 fail-close한다.
+  detach/terminate cleanup frame을 지속적인 OOM으로 만들 수 없을 때도 socket EOF를 fallback으로 사용해 host lease를 남기지 않는다.
 - **스크롤·마우스 선택은 즉시성이 중요** → 한 프레임 지연이 체감될 수 있다.
 
 옵션: **(a)** 전부 비동기 위임(단일 소유 — I/O 스레드가 코어의 유일한 mutator, §3 글자 그대로) / **(b)** scroll·선택은 메인 동기 유지하고 IME·리포팅·config만 위임(= Ghostty 모델).
@@ -230,11 +246,11 @@ mutate를 비동기 위임하면 적용이 다음 reader 턴으로 밀려 **한 
 
 - **P3-0 — 이 설계 + (a) 확정 + §9.7 측정/디버그** ✅(이 PR).
 - **P3-1 — CoreCommandQueue 프리미티브** ✅(`e77a82c`): `src/session/core_command.zig`(L2 세션 코어 — 3차 추출로 app→session 이동, `src/app`은 `../session/core_command.zig`로 import) + 단위 테스트 + `coreq.*` 디버그 스코프 + `core_command_queue` perf 벤치. P3-1에선 미배선 프리미티브로 추가(`PtyWriteQueue` 선례) — P3-2부터 `enqueueCoreCommand`로 배선된다.
-- **P3-2 — IME `setPreedit` 위임** ✅(`85658ce`): 비민감 첫 사례 — `commitComposition`/`imeMarked`를 명령으로. 재진입 토양 1순위 제거.
+- **P3-2 — IME `setPreedit` 위임** ✅(`85658ce`, 역사적 단계): 당시 `commitComposition`/`imeMarked`를 명령으로 옮겼다. 영속 host 도입 뒤 marked text는 attachment-local `Surface.preedit`로 재설계되어 현재 `CoreCommand`에는 이 변형이 없다.
 - **P3-3 — `reportFocus`·config 위임** ✅(`8e9581a`): `reportFocus`(드묾)·`setConfigPalette`/`max_scrollback`(reload 루프)·`setCellMetrics`(폰트 변경)를 `enqueueCoreCommand`로 위임. 응답 생성 명령은 reader가 PTY로 흘리고 non-interactive 폴백도 같게 흘린다. `report_mouse`/config 명령 변형 + `apply` 추가. createTerm 초기화·per-tick 렌더 metric은 §9.1대로 직접 유지. `reportMouse`는 P3-4(측정)로 이동.
 - **P3-4 — scroll·선택·`reportMouse` 위임(full (a))** ✅(`e147604`): read-modify-decide를 명령으로 원자화(`select_extend_or_collapse`·`scroll_and_extend`·`scroll_to_offset`)해 메인 코어 mutate 0 달성(§9.4 구현 결과). 모든 mouse 선택/scroll/reportMouse 사이트(클릭·드래그·휠·PageUp·find·스크롤바·hover)를 `enqueueCoreCommand`로. 예외(per-tick 렌더·createTerm init)는 §9.1 직접 유지. 검증: `core_command.apply` 단위(선택/scroll 변형)·macos-app-build·런타임 GUI는 수동.
 - 각 단계 §6 테스트(reader-processing·hammer·close-race) 확장 + §9.7 관측 훅 동반, `assertOwnedBySelf`가 위임 경로의 락 계약을 강제.
-- **마지막 — `/code-review max`** ✅: P3 위임 코드(`e77a82c^..e147604`의 P3 파일 9개)에 10개 finder 앵글 + 11 verifier + sweep. **확정 correctness 결함 0건** — 추정 동시성 버그는 전부 설계로 반박: ① 명령큐 wake는 self-pipe(파이프 바이트 잔존)라 missed-wakeup 면역, ② `freeCommand` 더블프리 불가(`pop`이 락 안에서 `head` 전진 → close의 `items[head..]`에서 제외 + reader join 선행), ③ `CoreCommandQueue` io는 `PtyWriteQueue`와 동일 valid 주입(§3 undefined-io 재발 아님), ④ `scroll_to_offset`은 signed isize 도메인 + `scrollViewport` clamp(언더플로/방향오류 없음), ⑤ `alt_active`는 `scrollViewport`가 apply 시점 재확인(read-then-enqueue 무해), ⑥ 선택은 per-surface 단일 FIFO + 단일 reader 순차 적용, `select_extend_or_collapse`는 락 아래 원자(anchor 불일치 불가), ⑦ `apply`/`dupeCommand`/`freeCommand` switch는 `else` 없는 exhaustive라 owned-payload variant 누락이 **컴파일 에러**(유일 힙 소유 `set_preedit`만 dupe/free, `set_config_palette`는 `[16]?Rgb` 값배열). **백로그(비차단, 우선순위순)**: (1) `PtyEventQueue`/`PtyWriteQueue`/`CoreCommandQueue` 셋의 공유 bounded-FIFO 로직을 제네릭 `BoundedQueue(T)`(comptime dupe/free 훅)로 수렴 — 동시성 결함 수정의 N중 반복을 없앰. **이식 착수 또는 같은 큐 결함 재발 시 발화**([[portability-is-roadmap-goal]]), 그 전엔 투기적 추상화 안 함(§9.2 패턴 재사용은 의도). (2) `dupe`/`free`를 `CoreCommand` 메서드로 `apply` 옆에 co-locate(컴파일러가 이미 누락을 막으므로 nicety — 그 파일 만질 때 곁들임). div-by-zero(`per_batch=batch.len/bytes.len`)는 `encodeKey`가 항상 비공백이라 **도달 불가**, 가드는 헛방어라 추가 안 함([[no-defensive-code-without-consult]]). main 자동 머지 안 함.
+- **마지막 — `/code-review max`** ✅: P3 위임 코드(`e77a82c^..e147604`의 P3 파일 9개)에 10개 finder 앵글 + 11 verifier + sweep. 당시 명령큐 wake·FIFO·scroll clamp·선택 원자성 계약을 확인했다. 이후 marked text가 `Surface.preedit`로 이동하면서 `CoreCommand`는 모두 inline POD가 됐고, heap payload dupe/free 계약은 제거됐다. bounded queue 제네릭화는 같은 큐 결함이 반복되거나 이식 작업이 시작될 때 검토한다.
 
 ### 9.6 리스크
 
@@ -382,7 +398,10 @@ sync(2026) 게이트는 폴링 렌더 루프의 미묘한 부분이라(hold가 �
 | **J** | sticky command 배너 | `stickyCommand()`·`scrollbackRow()` | 활성 | 조건부 | read |
 
 - **C(`dispatchBell`)**: `takeBell()`을 **무락**으로 읽고 clear(단일 writer=리더의 benign racy bool). lock 지점 아님 — 통합 시 그 재트리거-방지 clear 시맨틱만 보존.
-- **`imeCursorRect`(tick 밖, IME 온디맨드)**: `core.screen.cursor`를 **무락**으로 직접 읽는다(`:7928`). ⚠️ **§9.1이 "락-아래 유지"로 적었으나 코드는 무락 — 리더 write와 torn read 잠재 race**. Phase 4가 함께 정정한다(§12.4).
+- **`imeCursorRect`(tick 밖, IME 온디맨드)**: 과거에는 `core.screen.cursor`를 무락으로 직접 읽어 torn read 가능성이
+  있었지만 Phase 4에서 수정했다. 현재는 pin된 terminal `Surface`의 canonical base cursor를 `lockCore` 아래 읽는다.
+  scrolled snapshot은 `visible=false`여도 live row/col을 보존하며, capability 없는 구 MRSH v2 host는 정확한 anchor를
+  제공한다고 가정하지 않고 neutral origin으로 fail-closed한다.
 - **기존 스냅샷 메커니즘**: `TerminalCore.renderSnapshot()`(`core.zig:1375`)은 `cells`/`graphemes`/`prompt_marks`/`images`를 **zero-copy alias**로 반환(바닥) 또는 소유 `viewport_cells`에 합성(스크롤) → **반드시 lock 아래에서 `buildDrawListWithUnfocused`(`draw_list.zig:93`)로 즉시 owned DrawList 딥카피**. 통합 후에도 이 규율 유지. 단일 통합 스냅샷은 **없다** — A·D·F·J가 DrawList 밖에서 별도 lock으로 읽는 게 통합 대상.
 
 ### 12.3 목표
@@ -422,7 +441,7 @@ if (will_project) { active.lockCore(io); defer unlock; renderPrepWrites(); dl = 
 
 **(2) title-generation(A 제거)** — `TerminalCore`에 `title_generation: std.atomic.Value(u32) = .init(0)`. **리더**가 `windowTitle()` 결과(제목 또는 cwd)를 바꿀 때 `bumpTitleGeneration()`(= `fetchAdd(1, .monotonic)`)한다: `setWindowTitle`(OSC 0/2)·`dispatchCwd`(OSC 7)·`fullReset`(RIS)에서. **단 값이 실제로 바뀔 때만** bump한다 — 각 setter가 옛 값과 비교해 동일하면 생략(셸 통합이 매 프롬프트 같은 OSC 7/2를 재emit해도 헛 sync 방지, code-review [0]). ordering은 `.monotonic`으로 충분: 메인은 이 카운터를 **변경 감지**로만 쓰고 title/cwd 버퍼는 `core_mutex` 아래에서만 읽어 버퍼 가시성은 mutex가 보장한다(acquire/release는 load-bearing 아님, code-review [7]). `syncAutoTitles`는 term별 `last_title_gen`과 **lock 없이 load** 비교 → **다를 때만** lock+`windowTitle` 복사; **복사 성공 시에만** `last_title_gen`을 갱신(OOM이면 세대를 안 올려 다음 tick 재시도 — 라벨 영구 stuck 방지, code-review [1]). 대부분 tick: N load(수 ns)만, lock 0회.
 
-**(3) imeCursorRect 정정** — `imeCursorRect`는 오버레이 caret이 없을 때 터미널 커서 위치를 **활성 surface 코어에서 `lockCore` 아래 live로 읽는다**(무락 직접 `core.screen.cursor` 읽기의 torn read 잠재 race 정정). imeCursorRect는 IME 후보창 질의 시(조합 중)에만 불리는 event-driven 경로라 **per-tick 아님** → 여기 lock은 경합/비용 무관하고, origin(`active_pane_rect`, 동기 갱신)과 커서를 **같은 활성 surface**에서 함께 잡아 팬 전환 시점 차가 없다. (스냅샷 커서 캐시는 active_pane_rect가 동기인데 캐시가 per-tick이라 전환 한 프레임 오위치를 냈다 — 그래서 스냅샷 대신 직접 lock으로, code-review [2]. 오버레이 caret 경로는 코어 미접근이라 불변.)
+**(3) imeCursorRect 정정** — `imeCursorRect`는 오버레이 caret이 없을 때 terminal transaction이 pin한 `Surface`를 `lockCore` 아래 조회하고, 그 surface의 **base render snapshot이 가진 canonical cursor**를 읽는다. 로컬은 `TerminalCore` snapshot, host-backed는 `RemoteScreen` snapshot이 같은 `Surface.baseCursorLocked` 계약을 탄다. 합성 뒤 이동한 overlay cursor나 무락 `core.screen.cursor`를 후보 anchor로 쓰지 않는다. 이 질의는 조합 중에만 불리는 event-driven 경로라 per-tick 비용이 아니며, target이 사라졌거나 구 live MRSH v2 host가 `screen_viewport_scrolled_v1`을 제공하지 않아 cursor 의미를 신뢰할 수 없으면 nullable 조회가 실패해 neutral pane origin으로 fail-closed한다. 오버레이 caret 경로는 terminal snapshot에 접근하지 않는다.
 
 **(4) render-prep write(E·I)는 DrawList lock에 유지** — `setCellMetrics`·`setDefaultColors`(I)·`findMatches`(E)는 이 frame 렌더를 위해 **즉시** 코어를 바꿔야 해 명령 위임(§9.2, 다음 reader 턴 지연)으로 못 옮긴다. 이미 build lock 스코프에 있으므로 그대로 두되, "read 스냅샷으로 못 접는 render-prep write"로 **명시**한다 — 이게 §3의 "완전 무락 불가" 잔재의 정체다(팬아웃은 tick당 1 write-lock으로 수렴).
 

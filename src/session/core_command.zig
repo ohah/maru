@@ -4,7 +4,7 @@ const terminal = @import("../terminal.zig");
 /// 메인발 비-PTY 코어 mutate를 I/O 스레드(reader)로 위임하는 명령(docs/io-render-threading.md §9 Phase 3,
 /// (a) 단일책임). runtime·pty_reader·live_pty가 공유하므로 순환 import를 피해 **중립 위치**에 둔다(terminal만
 /// 의존). 큐는 `pty_reader.CoreCommandQueue`, 적용은 `apply`(여기) — reader drain과 non-interactive 직접 폴백이
-/// 같은 적용 로직을 공유한다. 명령 집합은 §9.2를 따라 단계 확장(P3-2 IME·P3-4 scroll·선택; 리포팅·config 후속).
+/// 같은 적용 로직을 공유한다. 명령 집합은 §9.2를 따라 단계 확장(P3-4 scroll·선택; 리포팅·config 후속).
 /// reportMouse 인자 묶음(P3-3 위임). 코어가 적용 시 mouse_tracking을 다시 가드(.none이면 no-op)하므로,
 /// enqueue~apply 사이 트래킹이 꺼져도 안전(메인의 트래킹 읽기는 락 아래 별도).
 pub const MouseReport = struct {
@@ -36,8 +36,6 @@ pub const SelectWord = struct {
 pub const ScrollExtend = struct { delta: isize, row: u16, col: u16 };
 
 pub const CoreCommand = union(enum) {
-    set_preedit: []const u8, // owned(큐 소유) — IME 조합 텍스트. 적용/드롭/close 시 해제.
-    clear_preedit, // IME 조합 해제(빈 preedit)
     scroll: isize, // scrollViewport(delta_up)
     scroll_to_bottom,
     // 리포팅(코어 response 생성 — reader가 적용 후 pendingResponse를 PTY로 흘린다):
@@ -68,8 +66,6 @@ pub const CoreCommand = union(enum) {
 /// 응답을 만드는 명령(리포팅 — P3-3)은 적용 후 호출자가 `core.pendingResponse`를 PTY로 흘린다.
 pub fn apply(core: *terminal.TerminalCore, cmd: CoreCommand) void {
     switch (cmd) {
-        .set_preedit => |bytes| core.setPreedit(bytes) catch {}, // OOM이면 조합 표시 스킵(best-effort)
-        .clear_preedit => core.setPreedit("") catch {}, // 빈 bytes = 해제
         .scroll => |delta| core.scrollViewport(delta),
         .scroll_to_bottom => core.scrollToBottom(),
         .report_mouse => |m| core.reportMouse(m.button, m.col, m.row, m.x_px, m.y_px, m.pressed, m.motion, m.mods),
@@ -114,12 +110,6 @@ pub fn apply(core: *terminal.TerminalCore, cmd: CoreCommand) void {
 test "core_command.apply: 각 명령이 코어를 올바르게 mutate (위임 적용 로직)" {
     var core = try terminal.TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 4 });
     defer core.deinit();
-
-    // set_preedit → 조합 텍스트 설정, clear_preedit → 해제(빈 preedit)
-    apply(&core, .{ .set_preedit = "한" });
-    try std.testing.expect(core.preedit != null);
-    apply(&core, .clear_preedit);
-    try std.testing.expect(core.preedit == null);
 
     // scroll → 과거로 스크롤(view_offset>0), scroll_to_bottom → 바닥 복귀(view_offset==0)
     var i: usize = 0;

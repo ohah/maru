@@ -312,9 +312,9 @@ pub const RemoteTermBackend = struct {
     // ── 원격 PtyIo(SurfaceRuntime link의 input/resize sink) ─────────────────────────
     //
     // in-process는 link의 PtyIo가 live_pty write_queue를 가리키지만, 원격은 여기 세 함수가 그 자리를 채워 sendInput/
-    // resize RPC로 보낸다. ctx=*RemoteRuntime. `enqueue_command`는 null로 둔다 — 원격 core command wire RPC가 없어
-    // SurfaceRuntime이 placeholder core에 직접 적용으로 폴백한다(후속 e3; placeholder는 렌더 안 되므로 무해하나 config
-    // 명령이 host core엔 도달 안 함). `write_input_nb`는 채운다(paste 논블로킹 계약 — socket write는 전량 전송으로 본다).
+    // resize RPC로 보낸다. ctx=*RemoteRuntime. `enqueue_command`는 `ioEnqueueCommand`로 연결해 스크롤·선택·
+    // 마우스의 구현된 subset을 host/placeholder에 명시적으로 라우팅한다. 그 밖의 config/focus는 아직 drop한다.
+    // `write_input_nb`는 채운다(paste 논블로킹 계약 — socket write는 전량 전송으로 본다).
 
     fn remotePtyIo(rr: *RemoteRuntime) PtyIo {
         return .{
@@ -327,14 +327,17 @@ pub const RemoteTermBackend = struct {
     }
 
     /// §6a 원격 스크롤백: SurfaceRuntime.enqueueCoreCommand가 host-backed Term에 부르는 hook. **스크롤 계열만** host로
-    /// 라우팅한다(host가 자기 core view_offset을 바꿔 스크롤백 화면을 투영→RemoteScreen이 렌더). 선택(select_*)·config·IME는
-    /// placeholder core에 적용해도 렌더 안 되므로 **drop**(후속 #6b/config). arg는 signed(scroll delta 음수).
+    /// 라우팅한다(host가 자기 core view_offset을 바꿔 스크롤백 화면을 투영→RemoteScreen이 렌더). 선택(select_*)·config는
+    /// 아래 명시된 범위만 처리한다. IME marked text는 CoreCommand가 아니라 Surface의 client-local overlay라 이 경로에
+    /// 들어오지 않으며, 확정 바이트만 write_input 경로를 탄다. arg는 signed(scroll delta 음수).
     fn ioEnqueueCommand(ctx: *anyopaque, cmd: core_command.CoreCommand) anyerror!void {
         const rr: *RemoteRuntime = @ptrCast(@alignCast(ctx));
         const max_i64: usize = @intCast(std.math.maxInt(i64)); // usize→i64 방어(스크롤백 abs가 i64 초과=비현실적, 패닉 회피).
         switch (cmd) {
             .scroll => |d| try rr.sendCoreCommand("scroll", @intCast(d)),
-            .scroll_to_bottom => try rr.sendCoreCommand("scroll_to_bottom", 0),
+            // IME/key callback에서 호출될 수 있으므로 request/response RPC를 기다리지 않는다. stream-local
+            // sticky intent + Client bounded outbound frame이 다음 input보다 앞선 wire 순서를 보존한다.
+            .scroll_to_bottom => try rr.requestScrollToBottom(),
             .scroll_to_abs => |a| try rr.sendCoreCommand("scroll_to_abs", @intCast(@min(a, max_i64))),
             .scroll_to_offset => |o| try rr.sendCoreCommand("scroll_to_offset", @intCast(@min(o, max_i64))),
             // §6b-1 드래그 선택: 하이라이트 span은 client 좌표라 **placeholder core에 적용해 즉시** 반영한다(렌더가 이미
@@ -361,7 +364,7 @@ pub const RemoteTermBackend = struct {
             // (인코딩 모드가 host에만 있음) raw 이벤트를 host로 보낸다(방식 B). placeholder core에 적용하면 응답이
             // client PTY로 안 가고(빈 placeholder) 인코딩 모드도 없어 무효다.
             .report_mouse => |m| try rr.sendMouseReport(m),
-            else => {}, // scroll_and_extend(autoscroll)/focus/config/IME는 후속 — 무시.
+            else => {}, // scroll_and_extend(autoscroll)/focus/config는 후속 — 무시.
         }
     }
 
@@ -396,12 +399,12 @@ test "persistent spawn omits process-local MARU_PANE_ID without mutating local f
     try std.testing.expectEqual(@as(?u64, null), persistent.pane_id);
 }
 
-/// vtable 직접 호출과 SurfaceRuntime의 PtyIo 호출이 공유하는 paste 정책점. socket 자체는 아직 blocking이지만 한 UI
-/// tick의 전송량을 고정 상한으로 제한하고, caller는 반환 길이 뒤의 나머지를 다음 tick에 이어 보낸다.
+/// vtable 직접 호출과 SurfaceRuntime의 PtyIo 호출이 공유하는 paste 정책점. Client의 연결별 pending frame + DONTWAIT
+/// flush를 쓰되, 한 UI tick이 새로 맡길 payload도 고정 상한으로 제한한다. 반환 길이 뒤의 나머지만 caller가 다음 tick에
+/// 이어 보내며, pending에 수락된 prefix는 partial socket write여도 다시 보내지 않는다.
 fn writeInputChunk(rr: *RemoteRuntime, bytes: []const u8) anyerror!usize {
     const chunk = bytes[0..boundedInputLen(bytes.len)];
-    try rr.sendInput(chunk);
-    return chunk.len;
+    return rr.sendInputNonBlocking(chunk);
 }
 
 fn boundedInputLen(len: usize) usize {

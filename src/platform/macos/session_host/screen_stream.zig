@@ -71,6 +71,22 @@ pub const StyleFlags = struct {
     pub const known_mask: u32 = (1 << 11) - 1;
 };
 
+/// `ScreenMeta.modes`/`ModesDelta.modes` 비트 배치. host projector와 client renderer가 함께 쓰는
+/// wire SSOT이며 새 비트는 구 client가 무시할 수 있게 additive로만 확장한다.
+pub const ModeBit = struct {
+    pub const app_cursor_keys: u32 = 1 << 0;
+    pub const app_keypad: u32 = 1 << 1;
+    pub const bracketed_paste: u32 = 1 << 2;
+    pub const alternate_scroll: u32 = 1 << 3;
+    pub const focus_events: u32 = 1 << 4;
+    pub const origin_mode: u32 = 1 << 5;
+    pub const mouse_tracking: u32 = 1 << 6;
+    pub const sync_output: u32 = 1 << 7;
+    pub const grapheme_cluster: u32 = 1 << 8;
+    pub const viewport_scrolled: u32 = 1 << 9;
+    pub const ambiguous_wide: u32 = 1 << 10;
+};
+
 /// 커서 상태. `shape`는 0=block,1=underline,2=bar(§ terminal DECSCUSR 관례) — 상위가 매핑한다.
 pub const Cursor = struct {
     col: u16 = 0,

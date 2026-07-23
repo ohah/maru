@@ -279,6 +279,16 @@ pub const PlacementGeometry = struct {
 pub const RenderSnapshot = struct {
     size: Size,
     cursor: Cursor = .{},
+    // true면 현재 cells는 live bottom이 아니라 스크롤백 뷰포트다. IME preedit처럼 live cursor에
+    // 앵커되는 client-local projection은 이 상태에서 합성하지 않고 먼저 scroll-to-bottom을 요청한다.
+    viewport_scrolled: bool = false,
+    // false면 연결된 구 host가 viewport_scrolled 의미론을 협상하지 않은 상태다. 이때 false 값을
+    // "live bottom"으로 해석하면 구 host의 hidden (0,0) cursor에 client-local overlay를 잘못 그릴 수
+    // 있으므로, cursor에 앵커되는 projection은 fail-closed해야 한다.
+    viewport_scrolled_known: bool = true,
+    // base grid가 사용한 EAW ambiguous-width 정책. client-local projection도 이 값을 소비해
+    // host/local canonical grid와 조합문자의 셀 폭이 갈리지 않게 한다.
+    ambiguous_wide: bool = false,
     // DECSCUSR가 정한 커서 모양/깜빡임. 렌더러가 block(반전)/underline(하단 바)/bar(좌측 바)로
     // 투영한다. blink는 추적만 하고 깜빡임 타이머는 아직 렌더하지 않는다.
     cursor_shape: CursorShape = .block,

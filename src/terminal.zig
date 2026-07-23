@@ -2,6 +2,7 @@ pub const core = @import("terminal/core.zig");
 pub const input = @import("terminal/input.zig");
 pub const types = @import("terminal/types.zig");
 pub const png = @import("terminal/png.zig"); // PNG 디코드(kitty f=100·window.background-image F2-1)
+pub const preedit = @import("terminal/preedit.zig"); // local/host-backed 공통 client-local IME marked-text 합성
 pub const selection = @import("terminal/selection.zig"); // 링크 자동 감지 분류(LinkScopes/LinkKind — docs/link-detection.md)
 
 /// OSC 52 클립보드 쓰기 디코드 상한(바이트). platform이 거부 notice 문구에 쓴다(단일 출처 — osc.zig).
@@ -36,6 +37,7 @@ pub const RenderSnapshot = types.RenderSnapshot;
 pub const KittyPlacement = types.KittyPlacement;
 pub const KittyImageView = types.KittyImageView;
 pub const PlacementGeometry = types.PlacementGeometry;
+pub const PreeditOverlay = preedit.Overlay;
 pub const RowCodepoints = types.RowCodepoints;
 pub const SemanticPrompt = types.SemanticPrompt;
 pub const RowPrompt = types.RowPrompt;

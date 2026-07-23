@@ -30,17 +30,7 @@ const Run = screen_stream.Run;
 
 /// `ScreenMeta.modes` 비트 배치(§9 mode bitmask). core에 단일 u32 mode가 없어 개별 필드를 여기서 조립한다. 값은 wire
 /// 약속이라 고정 — client가 같은 비트로 해석한다(예: app_cursor_keys면 화살표를 SS3로 인코딩).
-pub const ModeBit = struct {
-    pub const app_cursor_keys: u32 = 1 << 0; // DECCKM
-    pub const app_keypad: u32 = 1 << 1; // DECKPAM
-    pub const bracketed_paste: u32 = 1 << 2; // DECSET 2004
-    pub const alternate_scroll: u32 = 1 << 3; // DECSET 1007
-    pub const focus_events: u32 = 1 << 4; // DECSET 1004
-    pub const origin_mode: u32 = 1 << 5; // DECOM
-    pub const mouse_tracking: u32 = 1 << 6; // mouse_tracking != .none
-    pub const sync_output: u32 = 1 << 7; // DECSET 2026
-    pub const grapheme_cluster: u32 = 1 << 8; // DECSET 2027
-};
+pub const ModeBit = screen_stream.ModeBit;
 
 /// 투영 정책. `generation`은 이 snapshot의 base generation(client가 이후 delta의 base로 대조 — 보통 runtime의 resize
 /// generation 등 host가 정한 단조 값). `default_fg`/`default_bg`는 이제 **미사용**이다 — host가 색을 굽지 않고 `.default`
@@ -253,6 +243,8 @@ pub fn composeModes(core: *const terminal.TerminalCore) u32 {
     if (core.mouse_tracking != .none) m |= ModeBit.mouse_tracking;
     if (core.sync_output) m |= ModeBit.sync_output;
     if (core.grapheme_cluster_mode) m |= ModeBit.grapheme_cluster;
+    if (core.viewOffset() != 0) m |= ModeBit.viewport_scrolled;
+    if (core.ambiguous_wide) m |= ModeBit.ambiguous_wide;
     return m;
 }
 

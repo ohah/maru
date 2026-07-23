@@ -52,6 +52,9 @@ pub const Surface = struct {
     command: ?[]const u8 = null,
     process_state: ProcessState = .starting,
     core: terminal.TerminalCore,
+    // IME marked text는 PTY/host screen 상태가 아니라 이 GUI attachment의 일시 화면 상태다.
+    // Surface가 소유해 local/remote 모두 renderSnapshot 한 경로에서 같은 합성기를 쓴다.
+    preedit: terminal.PreeditOverlay,
     // 코어 접근을 보호하는 락. 현재는 메인 스레드만 코어를 만져 무경합이지만, I/O–렌더 스레딩
     // 분리(docs/io-render-threading.md)에서 PTY 처리(core.write+응답)가 I/O 스레드로 이동하면
     // 렌더 스레드의 snapshot 읽기와 경합한다. 그 계약을 지금 형식화한다. **attach 이후 Surface를
@@ -66,10 +69,12 @@ pub const Surface = struct {
         return .{
             .id = id,
             .core = try terminal.TerminalCore.init(allocator, size),
+            .preedit = terminal.PreeditOverlay.init(allocator),
         };
     }
 
     pub fn deinit(self: *Surface) void {
+        self.preedit.deinit();
         self.core.deinit();
     }
 
@@ -99,8 +104,69 @@ pub const Surface = struct {
     /// 반환 snapshot은 화면 소스 메모리를 alias하므로 caller가 `lockCore`/`unlockCore` 안에서 읽고 복사해야 한다(현행
     /// 계약 그대로, docs/io-render-threading.md — snapshot 슬라이스는 lock 밖으로 새면 안 됨).
     pub fn renderSnapshot(self: *Surface) terminal.RenderSnapshot {
-        if (self.remote) |r| return r.vtable.render_snapshot(r.ctx); // 원격 backing이면 조립된 화면(cells)을 준다.
-        return self.core.renderSnapshot();
+        const base = if (self.remote) |r|
+            r.vtable.render_snapshot(r.ctx)
+        else
+            self.core.renderSnapshot();
+        return self.preedit.compose(base);
+    }
+
+    /// caller가 `lockCore`를 보유한 상태에서만 부른다. 빈 bytes는 clear다. OOM이면 이전
+    /// marked text를 그대로 두면 focus-loss에서 stale 문자열을 커밋하므로 fail-closed로 비우고 false다.
+    /// clear 시 local base도 한 frame 다시 투영되게 dirty를 세운다(remote base는 현재 매 frame full dirty).
+    pub fn setPreeditLocked(self: *Surface, bytes: []const u8) bool {
+        const was_active = self.preedit.active();
+        self.preedit.replace(bytes) catch {
+            self.preedit.replace("") catch unreachable;
+            if (was_active and self.remote == null)
+                self.core.dirty = terminal.core.fullDirty(self.core.size);
+            return false;
+        };
+        if ((was_active and bytes.len == 0) and self.remote == null)
+            self.core.dirty = terminal.core.fullDirty(self.core.size);
+        return true;
+    }
+
+    pub fn preeditActiveLocked(self: *const Surface) bool {
+        return self.preedit.active();
+    }
+
+    /// caller가 lockCore를 보유한 동안만 유효한 borrowed marked text. focus-loss commit은
+    /// 먼저 ordered input queue의 용량을 확보한 뒤에만 take해, enqueue OOM에서 overlay를
+    /// 잃지 않고 다음 callback/tick에 재시도할 수 있게 한다.
+    pub fn preeditBytesLocked(self: *const Surface) []const u8 {
+        return self.preedit.textBytes();
+    }
+
+    /// focus-loss 확정용 allocation-free take. 반환값이 allocator까지 소유해 Surface 수명과 분리된다.
+    /// caller는 lock을 푼 뒤 PTY로 전송하고 `Owned.deinit`으로 해제해야 한다.
+    pub fn takePreeditLocked(self: *Surface) ?terminal.preedit.Owned {
+        const owned = self.preedit.take();
+        if (owned != null and self.remote == null)
+            self.core.dirty = terminal.core.fullDirty(self.core.size);
+        return owned;
+    }
+
+    /// 후보창은 합성 뒤 숨겨진/end cursor가 아니라 canonical base cursor(start anchor)를 쓴다.
+    /// caller가 lockCore를 보유해야 snapshot alias 수명이 안전하다.
+    pub fn baseCursorLocked(self: *Surface) ?terminal.Cursor {
+        if (self.remote) |r| {
+            const snapshot = r.vtable.render_snapshot(r.ctx);
+            if (!snapshot.viewport_scrolled_known) return null;
+            return snapshot.cursor;
+        }
+        return self.core.renderSnapshot().cursor;
+    }
+
+    /// live bottom이 아닌 스크롤백 viewport인지 local/remote base snapshot에서 같은 의미로 읽는다.
+    /// caller가 lockCore를 보유해야 한다.
+    pub fn baseViewportScrolledLocked(self: *Surface) ?bool {
+        if (self.remote) |r| {
+            const snapshot = r.vtable.render_snapshot(r.ctx);
+            if (!snapshot.viewport_scrolled_known) return null;
+            return snapshot.viewport_scrolled;
+        }
+        return self.core.viewOffset() != 0;
     }
 
     pub fn restorableMetadata(self: *const Surface) RestorableSurfaceMetadata {
@@ -134,4 +200,16 @@ test "surface metadata excludes live process handles and environment by default"
     try std.testing.expectEqual(terminal.Size{ .cols = 100, .rows = 30 }, metadata.size);
     try std.testing.expectEqual(ProcessState.running, metadata.process_state);
     try std.testing.expectEqual(@as(usize, 0), metadata.env.len);
+}
+
+test "surface preedit update fails closed on OOM so stale marked text cannot be committed" {
+    var surface = try Surface.init(std.testing.allocator, 8, .{ .cols = 8, .rows = 2 });
+    defer surface.deinit();
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 1 });
+    surface.preedit.allocator = failing.allocator();
+
+    try std.testing.expect(surface.setPreeditLocked("가")); // first allocation succeeds
+    try std.testing.expect(!surface.setPreeditLocked("나")); // replacement allocation fails
+    try std.testing.expect(!surface.preeditActiveLocked()); // old "가" was discarded, never committed
+    try std.testing.expect(surface.takePreeditLocked() == null);
 }

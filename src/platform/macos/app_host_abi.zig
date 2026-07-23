@@ -614,7 +614,7 @@ pub export fn maru_macos_app_session_dispatch_web_app_action(session: ?*AppSessi
 }
 
 // 진행 중 IME 조합을 확정(커밋)한다. Swift가 IME를 우회하는 특수키/단축키 직전에 호출해
-// marked text와 core preedit가 어긋나지 않게 한다(조합 없으면 무동작).
+// marked text와 Surface preedit가 어긋나지 않게 한다(조합 없으면 무동작).
 pub export fn maru_macos_app_session_commit_composition(session: ?*AppSession) c_int {
     const app_session = session orelse return @intFromEnum(Status.null_out);
     app_session.commitComposition();

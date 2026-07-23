@@ -170,7 +170,7 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
     }
 
     // 조합 중(marked) 텍스트 — NSTextInputClient 프로토콜 응답(hasMarkedText/markedRange)용.
-    // 표시·판정 상태의 단일 출처는 Zig(core.preedit + IME 트랜잭션)다.
+    // 표시·판정 상태의 단일 출처는 Zig(Surface.preedit + IME 트랜잭션)다.
     private var markedTextBuffer: String = ""
 
     // IME 콜백 진단 트레이스(MARU_IME_DEBUG=1). 입력기가 실제로 보내는 콜백 순서/인자를
@@ -208,7 +208,7 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
     // marked 세션이 살아 다음 입력이 'ㅈ'부터 이어진다(누수의 실제 출처가 AppKit 세션이라 Zig만으론 못 막는다).
     func commitMarkedTextIfComposing() {
         guard hasMarkedText() else { return }
-        controller?.imeCommit()            // core preedit 커밋(조합 글자 PTY로)
+        controller?.imeCommit()            // Surface preedit 커밋(조합 글자 PTY로)
         inputContext?.discardMarkedText()  // AppKit 입력기의 marked 상태 정리(콜백 없이)
         markedTextBuffer = ""               // hasMarkedText() = false 로 동기화
     }
@@ -8664,7 +8664,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         _ = maru_macos_app_session_set_focus(session, focused ? 1 : 0)
     }
 
-    // 진행 중 IME 조합을 확정한다(IME 우회 특수키/단축키 직전). core preedit를 커밋·비운다.
+    // 진행 중 IME 조합을 확정한다(IME 우회 특수키/단축키 직전). Surface preedit를 커밋·비운다.
     func imeCommit() {
         guard let session = appSession else { return }
         _ = maru_macos_app_session_commit_composition(session)

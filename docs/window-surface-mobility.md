@@ -222,6 +222,12 @@ cross-window 이동 후 목적지 창의 메인 스레드가 옮겨온 surface�
 
 cross-window move는 AppRuntime가 **한 메인-스레드 트랜잭션**으로 원자 수행한다(§6):
 
+0. **입력 owner 2-phase preflight**: workspace move는 최종 active owner가 바뀌는 source/destination의 terminal
+   preedit을 각 원 surface ordered queue에 확정할 capacity와 moved queue remainder를 destination allocator로 옮길
+   buffer/map capacity부터 모두 예약한다. 어느 admission/transfer preflight라도 실패하면 어느
+   overlay·pin·queue·dock/layout도 바꾸지 않고 종료한다. 두 예약이 모두 성공한 뒤에만 양쪽 commit/take와 tree
+   surgery를 진행한다. same-window는 active owner가 실제로 바뀔 때만, window merge는 source owner만 바뀌므로 source만
+   이 gate를 거친다.
 1. **라이브 트리 수술**: 소스 `AppSession` 트리(`SplitTree(*Pane)`·`tabs`)에서 대상(surface/pane/workspace 서브트리)을 떼어 목적지 트리에 붙이고, 양쪽 `surface_ptrs`/`app_window.tabs`/focus/empty-source 정리를 한다. registry·라우팅은 안 건드린다(surface_id 불변).
 2. **그룹 정규화**(workspace 이동일 때 — 8A.4).
 3. **control-plane 구독 scope 재평가**(같은 트랜잭션): `metadata:window` 구독은 **창에 바인딩**(개별 surface가 아니라)이므로 **유지**하고, 옮겨진 surface에 대해 소스-창 구독자에게 `session.movedOut`, 목적지-창 구독자에게 `session.movedIn`(= membership-changed notification)을 방출한다. **`closed`/`removed`가 아니다**(surface는 살아 있음). `metadata:self` 구독은 surface_id가 불변이라 영향 없고 응답 메타의 `{window_id, window_token, window_kind}`만 갱신된다. lazy 재평가면 옛-창 구독자가 떠난 surface 이벤트를 계속 받거나 새 창 surface를 엿보므로, 이 재평가를 **트랜잭션 경계 안에서 동기** 수행한다.
@@ -305,6 +311,10 @@ M3 완료 후 **M4~M6은 §8 그대로**(same-window drag 재연결·cross-windo
 - control-plane: 이동 후 `sessions.list`, `metadata:self`, `metadata:window`, 알림 클릭 라우팅, capability revoke/re-eval.
 - workspace restore: multi-window graph round-trip, 하위 포맷 조용한 fallback.
 - macOS integration: 새 window 생성, cross-window drop target, source window auto-close, focus/firstResponder.
+- IME 구조 원자성: cross-window move의 source/destination admission 성공 시 각 원 surface FIFO로 정확히 한 번
+  확정되고, 각 side reservation 및 moved-queue transfer preflight OOM에서는 양쪽 overlay·pin·queue·tab/layout이
+  detach 전에 그대로인지. same-window
+  active/background와 merge의 destination owner 보존도 분리해 검증한다.
 - web panel: WKWebView reparent, bridge trust 유지, untrusted browser panel에 `window.maru` 미주입, IME/focus 복귀.
 
 성능 gate:

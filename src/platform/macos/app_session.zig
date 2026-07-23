@@ -2695,6 +2695,14 @@ pub const AppSession = struct {
     // 실제 발생했던 클래스). 판정 로직이 Zig에 있어 전부 unit으로 고정된다.
     ime_active: bool = false,
     ime_inserted: std.ArrayList(u8) = .empty,
+    // 터미널 marked text가 시작된 surface. 조합 중 pane/tab이 바뀌어도 preedit clear와
+    // 확정 바이트를 새 active가 아니라 원래 surface로 보내기 위한 client-local pin이다.
+    ime_terminal_target_id: ?u64 = null,
+    // keyDown 트랜잭션을 시작할 때 pin된 terminal surface가 이미 사라졌는지. target id 자체는
+    // transaction 끝까지 tombstone으로 유지하되, 이 플래그가 켜진 transaction의 insert/replay/key
+    // encode는 전부 버린다. 그렇지 않으면 imeBegin의 missing-target 조기 반환 뒤 다음 물리 키가 새
+    // active terminal로 새는 cross-transaction retarget이 생긴다.
+    ime_terminal_target_tombstoned: bool = false,
     ime_had_marked: bool = false,
     ime_marked_changed: bool = false,
     // 이번 키 트랜잭션에서 입력기가 deleteBackward 편집 명령을 보냈는지. 한글 마지막 자모
@@ -4461,6 +4469,7 @@ pub const AppSession = struct {
     fn focusPane(self: *AppSession, pane_index: usize) void {
         const tab = self.activeTab();
         if (pane_index >= tab.panes.items.len or tab.active_pane == pane_index) return;
+        self.commitComposition(); // input owner를 바꾸기 전에 원 surface의 marked text를 확정한다.
         self.invalidatePositionalPendingClose(); // 닫기 모달 보류 중 pane 이동 → 보류 무효화(stale 대상 close 방지)
         tab.active_pane = pane_index;
         self.surface_ptrs.items[self.app_window.active_tab] = tab.activeTerm().surface;
@@ -4509,6 +4518,7 @@ pub const AppSession = struct {
     fn focusTerm(self: *AppSession, term_index: usize) void {
         const pane = self.activePane();
         if (term_index >= pane.terms.items.len or pane.active_term == term_index) return;
+        self.commitComposition(); // 새 Term으로 확정 바이트/preedit이 넘어가지 않게 target pin을 먼저 비운다.
         self.invalidatePositionalPendingClose(); // 닫기 모달 보류 중 Term 이동 → 보류 무효화(stale 대상 close 방지)
         pane.active_term = term_index;
         self.surface_ptrs.items[self.app_window.active_tab] = pane.activeTerm().surface;
@@ -4650,6 +4660,8 @@ pub const AppSession = struct {
             self.allocator.destroy(new_pane);
             return;
         }
+        // replace 성공 뒤는 infallible다. 새 split을 활성화하기 전에 원 surface의 marked text를 확정한다.
+        self.commitComposition();
         // 3) 이제 infallible: src에서 Term을 빼 새 pane으로(capacity 확보됨). Term은 heap-pin이라 surface/reader 안 움직임.
         const term = src.terms.orderedRemove(src_idx);
         new_pane.terms.appendAssumeCapacity(term);
@@ -4956,6 +4968,9 @@ pub const AppSession = struct {
             src.terms.insert(self.allocator, @min(src_idx, src.terms.items.len), term) catch {}; // 원복
             return;
         };
+        // insert 성공 뒤부터 구조 전이는 infallible다. dst로 input owner를 옮기기 전에 현재 조합을
+        // pin된 원 surface로 확정한다(드래그 중 활성 pane이 바뀌어도 새 Term으로 새지 않게).
+        self.commitComposition();
         // src에서 임의 위치(src_idx)를 뺐으니 활성 인덱스를 시프트 보정한다(단일 출처) — 비면(아래 collapse) 0 무의미.
         src.active_term = if (src.terms.items.len == 0) 0 else activeIndexAfterRemoval(src.active_term, src_idx, src.terms.items.len);
         dst.active_term = idx; // 옮긴 Term을 dst의 활성으로
@@ -5044,6 +5059,9 @@ pub const AppSession = struct {
             self.allocator.destroy(tab);
             return;
         };
+        // 모든 실패 가능한 예약이 끝났다. pane을 새 workspace의 input owner로 만들기 전에 원 surface의
+        // client-local preedit을 확정해, Surface 포인터와 함께 다른 attachment로 이동하지 않게 한다.
+        self.commitComposition();
         // 2) infallible: src에서 pane을 떼고(형제로 collapse) src 대표 surface를 새 활성 Term으로 재바인딩.
         _ = self.detachPaneFromTab(src_tab, pane); // len>1 확인했으므로 true
         self.hovered_tab = null; // 트리/탭 변경 — stale 호버 정리
@@ -5102,6 +5120,8 @@ pub const AppSession = struct {
             self.allocator.destroy(split);
             return;
         }
+        // 이후 수술은 infallible다. target workspace로 포커스를 옮기기 전에 조합을 원 surface에 확정한다.
+        self.commitComposition();
         // 3) infallible: src에서 떼고 두 탭 대표 surface 재바인딩 + target.panes에 pane 추가. 마지막 pane이면
         // 빈 workspace를 남기지 않고 Tab shell만 제거한다(Pane/Term/surface/PTY는 target이 그대로 승계).
         const source_workspace_removed = src_tab.panes.items.len == 1;
@@ -5876,6 +5896,9 @@ pub const AppSession = struct {
         try self.tabs.ensureUnusedCapacity(self.allocator, 1);
         try self.surface_ptrs.ensureUnusedCapacity(self.allocator, 1);
         const insert_at = self.firstGroupStartInRegion(self.countPinnedTabs(), self.tabs.items.len) orelse self.tabs.items.len;
+        // 여기부터는 infallible이고 active_tab이 새 surface로 바뀐다. 생성 실패 때 기존 조합을 불필요하게
+        // 확정하지 않으면서도, 성공 시에는 입력 owner가 바뀌기 전에 원 surface의 marked text를 커밋한다.
+        self.commitComposition();
         self.tabs.insertAssumeCapacity(insert_at, tab);
         self.surface_ptrs.insertAssumeCapacity(insert_at, pane.activeTerm().surface); // 탭 대표 = 활성 panel의 활성 Term surface
         // surface_ptrs가 realloc됐을 수 있으니 app_window.tabs를 새 items로 재바인딩(stale 슬라이스 방지).
@@ -5894,6 +5917,8 @@ pub const AppSession = struct {
     /// active_tab을 따라가므로 이것만으로 라우팅이 바뀐다.
     pub fn switchTab(self: *AppSession, index: usize) bool {
         const prev_tab = self.app_window.active_tab;
+        if (index >= self.app_window.tabs.len) return false;
+        if (index != prev_tab) self.commitComposition();
         if (!self.app_window.selectTab(index)) return false;
         // 실제 탭이 바뀔 때만 보류 닫기 무효화 — selectTab은 index<len이면 같은 탭 재선택에도 true를 돌려주므로
         // (window.zig), 알림 클릭이 이미 활성인 탭의 Term을 activateSurfaceById→switchTab(same)로 지날 때 유효한
@@ -6599,7 +6624,7 @@ pub const AppSession = struct {
     /// 포인터를 비운다 — closeTab의 destroyTabStandalone(+destroyPane→invalidateForFreedPane·destroyTerm)가 하던 stale
     /// 정리를 **해제 없이** 미러한다(탭은 파괴가 아니라 dst로 이동하므로 메모리는 살아 있으나, src UI가 계속 참조하면 다른
     /// 창 소유 탭을 조작하는 stale 포인터가 된다 — context_menu_target/rename/divider_drag/hover·drag; code-review [2]).
-    fn clearStaleUiTargetsForMovedTab(self: *AppSession, tab: *Tab) void {
+    fn clearStaleUiTargetsForMovedTab(self: *AppSession, tab: *Tab, clear_pending_pastes: bool) void {
         // 워크스페이스/그룹 rename·context_menu (destroyTabStandalone 상단 미러 — 둘 다 *Tab을 든다).
         if (self.renamingWorkspace(tab) or self.renamingGroup(tab)) {
             self.rename = null;
@@ -6632,9 +6657,11 @@ pub const AppSession = struct {
                 // 이 창의 tick이 계속 그 surface의 PTY로 잔여를 쓴다(runtime은 앱-전역이라 write가 성공한다).
                 // 그 사이 새 창에서 같은 pane에 붙여넣으면 두 창의 바이트가 한 PTY에서 뒤섞여 bracketed paste
                 // 괄호(ESC[200~ … ESC[201~)가 쪼개진다 — 셸이 이어붙은 명령을 실행할 수 있다(code-review).
-                if (self.pending_pastes.fetchRemove(term.surface.id)) |kv| {
-                    var q = kv.value;
-                    q.buf.deinit(self.allocator);
+                if (clear_pending_pastes) {
+                    if (self.pending_pastes.fetchRemove(term.surface.id)) |kv| {
+                        var q = kv.value;
+                        q.buf.deinit(self.allocator);
+                    }
                 }
             }
         }
@@ -6647,7 +6674,7 @@ pub const AppSession = struct {
 
     /// `defer_rebuild`=true면 src 사이드바 재빌드를 caller가 배치(mergeSessionInto 끝 1회, code-review [4]) — merge의
     /// 중간 detach마다 양-창 사이드바를 재빌드하던 O(K²)를 피한다. 단일 이동(moveWorkspaceToSession)은 false=즉시 재빌드.
-    fn detachTabForMove(self: *AppSession, index: usize, defer_rebuild: bool) ?*Tab {
+    fn detachTabForMove(self: *AppSession, index: usize, defer_rebuild: bool, clear_pending_pastes: bool) ?*Tab {
         if (index >= self.tabs.items.len) return null;
         self.cancelPointerGesture();
         // closeTab tail과 동일한 src-측 그룹 위생: 마커 승계 + top_level 경계 재확립. 범위(M3d-2a-i)가 비-그룹이라 이동
@@ -6658,7 +6685,7 @@ pub const AppSession = struct {
         _ = self.surface_ptrs.orderedRemove(index);
         self.app_window.tabs = self.surface_ptrs.items; // 길이 변경 — 새 items로 재바인딩(stale 슬라이스 방지)
         // 옮긴 탭을 가리키던 src UI-target 포인터를 비운다(destroyTabStandalone은 생략하지만 그 stale 정리는 필요, [2]).
-        self.clearStaleUiTargetsForMovedTab(tab);
+        self.clearStaleUiTargetsForMovedTab(tab, clear_pending_pastes);
         // destroyTabStandalone 생략(dst 승계). Pane/split·Term·surface는 안 건드린다.
         if (self.tabs.items.len == 0) {
             // 빈 source(§1.6): active-의존 refresh를 건너뛴다(0탭 UB 회피). ended_seen은 caller가 세운다(위 doc).
@@ -7104,6 +7131,108 @@ pub const AppSession = struct {
         return self.enclosingGroupMarkerIndex(idx) == null;
     }
 
+    /// Cross-window model surgery가 source의 moved Term queue를 지우기 전에 destination allocator로
+    /// 미전송 remainder를 완성해 두는 two-phase transfer. 준비 단계는 source/destination map을 전혀
+    /// 바꾸지 않으므로 어느 allocation이 실패해도 양쪽 queue가 원상 유지된다. `commit`은 미리 확보한
+    /// map capacity와 완성된 buffers만 swap하므로 infallible이고, destination queue offset은 항상 0이다.
+    const PreparedPendingPasteTransfer = struct {
+        const Entry = struct {
+            surface_id: u64,
+            queue: PasteQueue,
+        };
+
+        allocator: std.mem.Allocator,
+        entries: std.ArrayList(Entry) = .empty,
+
+        fn deinit(self: *PreparedPendingPasteTransfer) void {
+            for (self.entries.items) |*entry| entry.queue.buf.deinit(self.allocator);
+            self.entries.deinit(self.allocator);
+        }
+
+        /// reservation 뒤 source composition이 무할당 commit된 다음 호출한다. prepare 단계가
+        /// destination/source current remainder와 예약된 preedit 길이만큼 capacity를 이미 확보했으므로
+        /// 여기서는 allocation 없이 실제 최신 remainder를 복사한다.
+        fn capture(self: *PreparedPendingPasteTransfer, src: *AppSession, dst: *AppSession) void {
+            for (self.entries.items) |*entry| {
+                if (dst.pending_pastes.get(entry.surface_id)) |destination| {
+                    if (destination.offset < destination.buf.items.len) {
+                        entry.queue.buf.appendSliceAssumeCapacity(destination.buf.items[destination.offset..]);
+                    }
+                }
+                if (src.pending_pastes.get(entry.surface_id)) |source| {
+                    if (source.offset < source.buf.items.len) {
+                        entry.queue.buf.appendSliceAssumeCapacity(source.buf.items[source.offset..]);
+                    }
+                }
+            }
+        }
+
+        fn commit(self: *PreparedPendingPasteTransfer, dst: *AppSession) void {
+            for (self.entries.items) |*entry| {
+                if (dst.pending_pastes.fetchRemove(entry.surface_id)) |kv| {
+                    var old = kv.value;
+                    old.buf.deinit(dst.allocator);
+                }
+                dst.pending_pastes.putAssumeCapacity(entry.surface_id, entry.queue);
+                entry.queue = .{}; // destination map으로 buffer ownership 이전
+            }
+            self.entries.clearRetainingCapacity();
+        }
+    };
+
+    fn preparePendingPasteTransfer(
+        src: *AppSession,
+        dst: *AppSession,
+        tabs: []const *Tab,
+        extra_surface_id: ?u64,
+        extra_bytes: usize,
+    ) !PreparedPendingPasteTransfer {
+        var prepared: PreparedPendingPasteTransfer = .{ .allocator = dst.allocator };
+        errdefer prepared.deinit();
+        if (src == dst) return prepared;
+
+        for (tabs) |tab| {
+            for (tab.panes.items) |pane| {
+                for (pane.terms.items) |term| {
+                    const source_len = if (src.pending_pastes.get(term.surface.id)) |source|
+                        if (source.offset < source.buf.items.len) source.buf.items.len - source.offset else 0
+                    else
+                        0;
+                    const reserved_extra = if (extra_surface_id == term.surface.id) extra_bytes else 0;
+                    if (source_len == 0 and reserved_extra == 0) continue;
+
+                    var entry: PreparedPendingPasteTransfer.Entry = .{
+                        .surface_id = term.surface.id,
+                        .queue = .{},
+                    };
+                    var appended = false;
+                    defer if (!appended) entry.queue.buf.deinit(dst.allocator);
+
+                    const destination_len = if (dst.pending_pastes.get(term.surface.id)) |destination|
+                        if (destination.offset < destination.buf.items.len) destination.buf.items.len - destination.offset else 0
+                    else
+                        0;
+                    const total = std.math.add(
+                        usize,
+                        std.math.add(usize, destination_len, source_len) catch return error.OutOfMemory,
+                        reserved_extra,
+                    ) catch return error.OutOfMemory;
+                    try entry.queue.buf.ensureTotalCapacity(dst.allocator, total);
+                    try prepared.entries.append(dst.allocator, entry);
+                    appended = true;
+                }
+            }
+        }
+
+        // commit은 fetchRemove + putAssumeCapacity만 수행한다. 기존 key 수까지 보수적으로
+        // 예약해 clobber/new-key 어느 경우에도 모델 수술 이후 allocation failure가 없게 한다.
+        try dst.pending_pastes.ensureUnusedCapacity(
+            dst.allocator,
+            std.math.cast(u32, prepared.entries.items.len) orelse return error.OutOfMemory,
+        );
+        return prepared;
+    }
+
     /// 라이브 cross-window workspace 이동(M3d-2a-i) — src의 `idx` 워크스페이스를 detach(무-destroy)해 dst에 adopt(무-재시작).
     /// outcome을 라이브 수술 결과에서 **직접** 채운다(§1.3): cross_window=src!=dst · source_window_closed=cross-window로 src가
     /// 빈 경우 · moved_surfaces=이동 서브트리의 surface_id(out_ids backing) · revoke_caps=cross_window && trust boundary 교차.
@@ -7124,7 +7253,35 @@ pub const AppSession = struct {
         // 단독 원자성)하지만, 이 pre-reserve가 두-세션 트랜잭션의 source 불변을 보장한다(예약됨 → adoptTab 내부 예약은 no-op).
         try dst.tabs.ensureUnusedCapacity(dst.allocator, 1);
         try dst.surface_ptrs.ensureUnusedCapacity(dst.allocator, 1);
-        const tab = src.detachTabForMove(idx, false).?; // 위에서 idx 검증 → non-null. 단일 이동이라 즉시 사이드바 재빌드.
+        // 활성 input owner가 바뀌는 세션의 client-local preedit을 구조 수술 전에 원 surface로 확정한다.
+        // cross-window는 active source가 떠날 수 있고 adoptTab이 destination의 active tab을 바꾸므로, 필요한
+        // 양쪽 terminal queue capacity를 모두 먼저 예약한다. 둘째 예약 OOM 뒤 첫 owner만 확정되는 partial
+        // commit을 막고, 어느 실패에서도 detach 전 양쪽 overlay/pin/queue의 논리 상태를 보존한다.
+        const src_owner_changes = if (cross_window) idx == src.app_window.active_tab else idx != src.app_window.active_tab;
+        const dst_owner_changes = cross_window;
+        var src_composition: ?StructuralCompositionReservation = null;
+        errdefer if (src_composition) |*reservation| reservation.rollback();
+        var dst_composition: ?StructuralCompositionReservation = null;
+        errdefer if (dst_composition) |*reservation| reservation.rollback();
+        if (src_owner_changes) src_composition = try src.reserveCompositionForStructuralMove();
+        if (dst_owner_changes) dst_composition = try dst.reserveCompositionForStructuralMove();
+        // source composition을 commit하면 moved queue remainder가 늘 수 있다. 그 최댓값까지 destination
+        // buffer를 먼저 확보해, 이 시점 이후에는 composition/queue/tree가 모두 infallible하게 전이된다.
+        const source_extra_id = if (src_composition) |reservation| reservation.target_id else null;
+        const source_extra_len = if (src_composition) |reservation| reservation.preedit_len else 0;
+        var pending_transfer = try preparePendingPasteTransfer(
+            src,
+            dst,
+            src.tabs.items[idx .. idx + 1],
+            if (cross_window) source_extra_id else null,
+            if (cross_window) source_extra_len else 0,
+        );
+        defer pending_transfer.deinit();
+        if (src_composition) |*reservation| reservation.commit(!cross_window);
+        if (dst_composition) |*reservation| reservation.commit(true);
+        pending_transfer.capture(src, dst);
+        pending_transfer.commit(dst);
+        const tab = src.detachTabForMove(idx, false, cross_window).?; // 위에서 idx 검증 → non-null. 단일 이동이라 즉시 사이드바 재빌드.
         try dst.adoptTab(tab, false); // capacity 예약됨 → 무실패. insert+정규화+resize+trace 재지정.
         const source_closed = cross_window and src.tabs.items.len == 0; // §1.6: cross-window로 src가 비었나
         if (source_closed) src.ended_seen = true; // 빈 source 종료 latch(직접 — activeSurface 안 만짐, 실제 close는 M3d-2b)
@@ -7168,19 +7325,36 @@ pub const AppSession = struct {
         for (src.tabs.items) |tab| moved_n = appendTabSurfaceIds(tab, out_ids, moved_n);
         moved_n = src.appendDockSurfaceIds(out_ids, moved_n);
         const moved = out_ids[0..moved_n];
+        // terminal admission과 moved queue transfer에 필요한 모든 allocation을 dock/model mutation 전에
+        // 끝낸다. source preedit 길이까지 destination buffer에 예약하므로 commit 뒤 capture/swap은 infallible다.
+        var src_composition = try src.reserveCompositionForStructuralMove();
+        errdefer src_composition.rollback();
+        var pending_transfer = try preparePendingPasteTransfer(
+            src,
+            dst,
+            src.tabs.items,
+            src_composition.target_id,
+            src_composition.preedit_len,
+        );
+        defer pending_transfer.deinit();
         try mergeDockInto(src, dst);
+        src_composition.commit(false);
+        pending_transfer.capture(src, dst);
         // mergeDockInto가 destination clean duplicate token을 dirty replacement EntryId로 remap할 수 있으므로
         // 모델 merge가 끝난 뒤 surviving token을 캡처한다.
         const pending_dock_focus = src.pending_dock_focus orelse dst.pending_dock_focus;
         src.advanceDockAsyncEpoch();
         dst.advanceDockAsyncEpoch();
         if (pending_dock_focus) |pending| dst.requeuePendingDockFocus(pending);
+        // mergeDockInto 뒤 workspace 수술은 capacity와 pending input의 destination-owned copy가
+        // 이미 확보돼 무실패다. source cleanup 직전에 queue ownership을 infallible swap한다.
+        pending_transfer.commit(dst);
         // [3] merge는 dst가 **보던** 워크스페이스를 유지한다(L2 WindowGraph.mergeWindow — target의 active_workspace 보존).
         // adoptTab이 매 이동마다 active_tab=insert_at로 덮으므로, 병합 전 dst 활성 *Tab을 포인터로 캡처해 병합 뒤 그 탭의
         // (insert로 밀린) 새 인덱스로 복원한다. dst가 비어 있으면(비정상) 복원 대상 없음 → 마지막 adopt 활성이 남는다.
         const keep_active: ?*Tab = if (dst.app_window.active_tab < dst.tabs.items.len) dst.tabs.items[dst.app_window.active_tab] else null;
         while (src.tabs.items.len > 0) {
-            const tab = src.detachTabForMove(0, true).?; // len>0 → non-null. defer_rebuild: 사이드바는 아래 1회로([4]).
+            const tab = src.detachTabForMove(0, true, true).?; // len>0 → non-null. defer_rebuild: 사이드바는 아래 1회로([4]).
             try dst.adoptTab(tab, true); // 전체 capacity 예약됨 → 내부 ensure는 no-op이고 이후 모델 수술은 무실패.
         }
         src.ended_seen = true; // §1.6 merge는 src를 항상 비우고 닫는다(실제 close는 M3d-2b)
@@ -16920,6 +17094,8 @@ pub const AppSession = struct {
         for (self.tabs.items) |tab| {
             for (tab.panes.items) |pane| {
                 for (pane.terms.items) |term| {
+                    term.surface.lockCore(self.io);
+                    term.surface.unlockCore(self.io);
                     self.runtime.enqueueCoreCommand(term.surface.id, .{ .set_ambiguous_wide = wide }, self.io) catch {};
                 }
             }
@@ -17159,9 +17335,9 @@ pub const AppSession = struct {
             const scrolled = blk: {
                 surface.lockCore(self.io);
                 defer surface.unlockCore(self.io);
-                break :blk surface.core.viewOffset() != 0;
+                break :blk surface.baseViewportScrolledLocked();
             };
-            if (scrolled) {
+            if (scrolled == true) {
                 self.runtime.enqueueCoreCommand(surface.id, .scroll_to_bottom, self.io) catch {};
                 self.metal_dirty = true;
             }
@@ -18839,7 +19015,7 @@ pub const AppSession = struct {
         const sidebar_search = self.sidebar_search_active and !self.sidebar_collapsed and
             self.cell_width_px > 0 and self.sidebar_width_px / self.cell_width_px >= 10;
         // IME 조합 중에는 커서를 **고정**한다(깜빡이면 커서가 덮은 조합 글자가 깜빡 사라짐). 터미널은 cursor_blinks가
-        // core.preedit로 이미 막지만, 오버레이/rename/검색은 imeComposingActive로 막아야 한다(단일 출처).
+        // Surface preedit로 이미 막지만, 오버레이/rename/검색도 imeComposingActive 단일 출처로 함께 막는다.
         // 스피너는 이 조건에서 제외한다(advanceAgentSpinner가 별도로 진행) — 커서/텍스트/rename/검색 caret blink만 본다.
         if ((!cursor_blinks and !overlay_open and !text_blinks and !rename_active and !sidebar_search) or self.imeComposingActive()) {
             self.resetCursorBlink(); // 깜빡일 게 없거나 조합 중 — 보이는 위상 고정
@@ -18953,6 +19129,26 @@ pub const AppSession = struct {
     /// 활성 입력 대상의 IME 조합(marked) 텍스트를 교체한다(빈 bytes=해제). inputFocus 단일 출처로 분기 — exhaustive
     /// switch라 입력 대상 추가 시 컴파일러가 누락을 막는다.
     fn imeSetPreedit(self: *AppSession, bytes: []const u8) void {
+        // 이미 terminal composition이 시작됐으면 current UI focus보다 pin이 우선한다. palette/settings 등
+        // 다른 owner가 먼저 열려도 AppKit의 후속 clear/commit이 새 owner로 새지 않게 원 Surface에서 끝낸다.
+        if (self.ime_terminal_target_id != null or self.inputFocus() == .terminal) {
+            if (bytes.len > 0 and self.ime_terminal_target_id == null) {
+                const active = self.app_window.active() orelse return;
+                self.ime_terminal_target_id = active.id;
+            }
+            const target_id = self.ime_terminal_target_id orelse return;
+            const surface = self.imeTerminalSurfaceById(target_id) orelse {
+                // 진행 중 target 소멸은 transaction 끝까지 tombstone으로 유지한다. 다음 non-empty
+                // callback이 새 active surface를 다시 pin하면 오삽입되므로 여기서 null로 바꾸지 않는다.
+                if (bytes.len == 0 and !self.ime_active) self.ime_terminal_target_id = null;
+                return;
+            };
+            surface.lockCore(self.io);
+            _ = surface.setPreeditLocked(bytes);
+            surface.unlockCore(self.io);
+            if (bytes.len == 0 and !self.ime_active) self.ime_terminal_target_id = null;
+            return;
+        }
         switch (self.inputFocus()) {
             .confirm, .notice, .file_tree, .dock_group => {}, // 구조 input owner는 조합을 표시하지 않는다.
             .settings => self.chrome_host.settings.setSearchPreedit(bytes), // 세팅 검색줄 조합(고정 버퍼 — OverlayInput과 별개)
@@ -18968,20 +19164,19 @@ pub const AppSession = struct {
                     self.addr_field.setPreedit(self.allocator, composed) catch {};
                 } else |_| self.addr_field.setPreedit(self.allocator, bytes) catch {};
             },
-            .terminal => {
-                // Phase 3 위임(docs/io-render-threading.md §9 P3-2): setPreedit는 코어 mutate라 메인이 직접 하지
-                // 않고 reader로 위임한다 — IME 조합 확정 중 포커스 상실 재진입 데드락(#700)을 구조적으로 없앤다.
-                // 빈 bytes=조합 해제(clear_preedit). interactive면 명령 큐로 enqueue+wake, non-interactive(테스트/
-                // smoke, reader 없음)면 runtime이 호출 스레드에서 직접 적용 폴백한다(enqueueCoreCommand 내부 분기).
-                const cmd: app.CoreCommand = if (bytes.len > 0) .{ .set_preedit = bytes } else .clear_preedit;
-                self.runtime.enqueueCoreCommand(self.activeSurface().id, cmd, self.io) catch {};
-            },
+            .terminal => unreachable, // 위 terminal/pin 우선 경로가 소비한다.
         }
     }
 
-    /// 활성 입력 대상이 조합 중(preedit 있음)인가 — imeBegin/imeEnd가 조합 판정에 쓴다. 예전엔 core.preedit만 봐서
+    /// 활성 입력 대상이 조합 중(preedit 있음)인가 — imeBegin/imeEnd가 조합 판정에 쓴다. 예전엔 terminal preedit만 봐서
     /// find/palette 조합을 놓쳤다(단일-출처 위반 → 조합 보호·표시 버그). inputFocus로 통일.
-    fn imeComposingActive(self: *const AppSession) bool {
+    fn imeComposingActive(self: *AppSession) bool {
+        if (self.ime_terminal_target_id) |target_id| {
+            const surface = self.imeTerminalSurfaceById(target_id) orelse return false;
+            surface.lockCore(self.io);
+            defer surface.unlockCore(self.io);
+            return surface.preeditActiveLocked();
+        }
         return switch (self.inputFocus()) {
             .confirm, .notice, .file_tree, .dock_group => false, // 구조 input owner는 조합 상태가 없다.
             .settings => self.chrome_host.settings.searchPreedit().len > 0,
@@ -18990,7 +19185,12 @@ pub const AppSession = struct {
             .find => self.chrome_host.find.input.preedit.items.len > 0,
             .palette => self.chrome_host.palette.input.preedit.items.len > 0,
             .addr_edit => self.addr_field.preedit.items.len > 0, // 주소창 조합 중이면 true
-            .terminal => self.activeSurfaceConst().core.preedit != null,
+            .terminal => blk: {
+                const surface = self.app_window.active() orelse break :blk false;
+                surface.lockCore(self.io);
+                defer surface.unlockCore(self.io);
+                break :blk surface.preeditActiveLocked();
+            },
         };
     }
 
@@ -18998,29 +19198,45 @@ pub const AppSession = struct {
     /// 텍스트/조합 변화를 모으기 시작한다.
     pub fn imeBegin(self: *AppSession) void {
         if (!self.surface_initialized) return;
-        // 조합도 타이핑이다 — 과거를 보는 중이면 바닥으로 스냅해 preedit이 보이게 한다
-        // (handleKeyEvent의 "입력하면 live 복귀"와 같은 동작; 조합 키는 그 경로를 안 타므로 여기서).
-        // **터미널 입력일 때만** — find/palette에서 조합하면 뒤 터미널 스크롤백을 건드리면 안 된다(조합은
-        // 오버레이 입력칸으로 가지 터미널로 안 간다; inputFocus 단일 출처로 판정).
-        if (self.inputFocus() == .terminal) {
-            // viewOffset 읽기는 메인 락-아래(§9.1), scrollToBottom mutate는 reader로 위임(full (a), §9 P3-4).
-            const surface = self.activeSurface();
-            const scrolled = blk: {
-                surface.lockCore(self.io);
-                defer surface.unlockCore(self.io);
-                break :blk surface.core.viewOffset() != 0;
-            };
-            if (scrolled) {
-                self.runtime.enqueueCoreCommand(surface.id, .scroll_to_bottom, self.io) catch {};
-                self.metal_dirty = true;
-            }
-        }
+        // missing pin에서도 transaction은 반드시 열린 뒤 imeEnd에서 닫혀야 한다. 예전 조기 반환은
+        // ime_active=false를 남겨 imeMarked 변화가 기록되지 않았고, imeEnd가 다음 active terminal로
+        // 물리 키를 encode/replay했다.
         self.ime_active = true;
         self.ime_inserted.clearRetainingCapacity();
         self.ime_marked_changed = false;
         self.ime_did_delete = false;
         self.ime_insert_failed = false;
-        self.ime_had_marked = self.imeComposingActive(); // 단일 출처(터미널/find/palette) — core.preedit만 보던 누락 수정
+        self.ime_terminal_target_tombstoned = false;
+        // 조합도 타이핑이다 — 과거를 보는 중이면 바닥으로 스냅해 preedit이 보이게 한다
+        // (handleKeyEvent의 "입력하면 live 복귀"와 같은 동작; 조합 키는 그 경로를 안 타므로 여기서).
+        // **터미널 입력일 때만** — find/palette에서 조합하면 뒤 터미널 스크롤백을 건드리면 안 된다(조합은
+        // 오버레이 입력칸으로 가지 터미널로 안 간다; inputFocus 단일 출처로 판정).
+        if (self.ime_terminal_target_id != null or self.inputFocus() == .terminal) {
+            // viewOffset 읽기는 메인 락-아래(§9.1), scrollToBottom mutate는 reader로 위임(full (a), §9 P3-4).
+            const surface = if (self.ime_terminal_target_id) |target_id|
+                self.imeTerminalSurfaceById(target_id) orelse {
+                    self.ime_terminal_target_tombstoned = true;
+                    self.ime_had_marked = false;
+                    return;
+                }
+            else
+                self.app_window.active() orelse {
+                    self.ime_terminal_target_tombstoned = true;
+                    self.ime_had_marked = false;
+                    return;
+                };
+            const scrolled = blk: {
+                surface.lockCore(self.io);
+                defer surface.unlockCore(self.io);
+                break :blk surface.baseViewportScrolledLocked();
+            };
+            if (scrolled == true) {
+                self.runtime.enqueueCoreCommand(surface.id, .scroll_to_bottom, self.io) catch {};
+                self.metal_dirty = true;
+            }
+            if (self.ime_terminal_target_id == null) self.ime_terminal_target_id = surface.id;
+        }
+        self.ime_had_marked = self.imeComposingActive(); // 단일 출처(터미널/find/palette)
     }
 
     /// 입력기가 확정한 텍스트(insertText). 즉시 보내지 않고 누적한다 — 전송 여부·시점은
@@ -19070,6 +19286,14 @@ pub const AppSession = struct {
     /// 막는다(라이브 회귀 클래스).
     pub fn imeEnd(self: *AppSession, event: ?terminal.KeyEvent) void {
         if (!self.surface_initialized) return;
+        // target이 imeBegin 뒤 사라진 경우도 같은 transaction에서 tombstone으로 승격한다. pin id가
+        // 존재한다는 이유만으로 routeCommittedText는 새 active로 fallback하지 않지만, encode_key/replay는
+        // handleKeyEvent를 직접 타므로 이 명시 상태가 없으면 새 terminal로 샌다.
+        if (self.ime_terminal_target_id) |target_id| {
+            if (self.imeTerminalSurfaceById(target_id) == null) {
+                self.ime_terminal_target_tombstoned = true;
+            }
+        }
         const composing = self.imeComposingActive() or self.ime_had_marked; // 단일 출처(find/palette도) — core만 보던 누락 수정
         defer {
             self.ime_active = false;
@@ -19077,7 +19301,19 @@ pub const AppSession = struct {
             self.ime_marked_changed = false;
             self.ime_did_delete = false;
             self.ime_insert_failed = false;
+            self.ime_terminal_target_tombstoned = false;
+            if (self.ime_terminal_target_id) |target_id| {
+                const still_composing = if (self.imeTerminalSurfaceById(target_id)) |surface| active: {
+                    surface.lockCore(self.io);
+                    defer surface.unlockCore(self.io);
+                    break :active surface.preeditActiveLocked();
+                } else false;
+                if (!still_composing) self.ime_terminal_target_id = null;
+            }
         }
+        // 사라진 pinned target의 AppKit transaction은 소비하되 어떤 payload/key도 현재 active로
+        // 재지정하지 않는다. defer가 tombstone pin과 transaction state를 함께 정리한다.
+        if (self.ime_terminal_target_tombstoned) return;
         // OOM으로 누적이 잘렸으면 통째로 버린다 — 반쪽 문자열을 PTY에 보내지 않는다(#14).
         if (self.ime_insert_failed) return;
         switch (imeDecide(composing, self.ime_inserted.items, self.ime_marked_changed, self.ime_did_delete)) {
@@ -19087,7 +19323,24 @@ pub const AppSession = struct {
                 // commitComposition과 같은 backpressure 데드락이 된다(#10이 그쪽만 되돌렸다). 터미널이면
                 // non-blocking, find/palette 입력칸이면 기존 키 경로(routeCommittedText 참조). 아래 replay(화살표·Enter)는
                 // 인코딩이 필요해 그대로 키 경로(handleKeyEvent)를 쓴다 — 버퍼 포화 시 순서/blocking 한계는 그 블록 주석 참조.
-                self.routeCommittedText(text);
+                const terminal_target: ?u64 =
+                    if (self.ime_terminal_target_id) |target_id|
+                        target_id
+                    else if (self.inputFocus() == .terminal)
+                        (if (self.app_window.active()) |surface| surface.id else null)
+                    else
+                        null;
+                const replay_event: ?terminal.KeyEvent = if (event) |ev|
+                    if (shouldReplayAfterCommit(ev, self.ime_enter_newline)) ev else null
+                else
+                    null;
+                const admitted = if (terminal_target) |target_id|
+                    if (replay_event) |ev|
+                        self.routeTerminalCommittedWithReplay(target_id, text, ev)
+                    else
+                        self.routeCommittedTextAccepted(text)
+                else
+                    self.routeCommittedTextAccepted(text);
                 // 한글 후보를 화살표로 확정하는 경우(insertText('안') + 화살표): 텍스트만 보내고
                 // 화살표를 버리면 커서가 안 움직인다. 확정 후 그 화살표를 다시 보낸다(Ghostty
                 // shouldReplayCommittedPreeditKey와 같은 의미론 — 위/오른/아래는 항상, 왼쪽은
@@ -19095,15 +19348,14 @@ pub const AppSession = struct {
                 // Enter는 config(input.ime-enter=newline, 기본)면 함께 replay해 조합 확정과 개행을 한 번에
                 // 처리한다(브라우저 동작). replay되는 Enter는 handleKeyEvent를 거쳐 일반 Enter=`\r`,
                 // Shift+Enter=Meta 변형(`\x1b\r`)으로 인코딩된다(shift→meta 변환·kitty 인코딩·find_nav 등 부작용 유지).
-                // **알려진 한계(드묾)**: 확정 텍스트는 non-blocking pending_paste FIFO(#10 데드락 회피)지만 이 replay는
-                // blocking writeInput(키 경로)이라 '다른 스트림'이다. PTY 쓰기 버퍼가 포화면(자식이 stdin을 안 읽는 중)
-                // 확정 문자는 FIFO에 남고 '\r'가 fd에 먼저 써져 글자가 다음 줄로 밀릴 수 있고, 동기 콜백에서 blocking
-                // write가 잠깐 막힐 수도 있다. 대화형 셸은 키 입력을 즉시 읽어 버퍼가 차는 일이 거의 없어 실사용 트리거는
-                // 희박하다. 근본 해결은 키 경로도 pending_paste FIFO로 통합(키·paste·IME가 한 순서 스트림)하는 구조
-                // 변경이라, IME 트랜잭션(부작용)을 안 깨게 별도 작업으로 둔다([document-basis-and-decision]).
-                if (event) |ev| if (shouldReplayAfterCommit(ev, self.ime_enter_newline)) {
-                    _ = self.handleKeyEvent(ev) catch {};
-                };
+                // 터미널 replay도 확정 텍스트와 **같은 surface FIFO** 뒤에 append한다. socket/PTY가
+                // 막혀도 Enter/화살표가 텍스트를 추월하지 않고 AppKit callback도 block하지 않는다.
+                // 텍스트 admission이 OOM이면 replay만 보내는 반쪽 transaction도 만들지 않는다.
+                if (admitted and terminal_target == null) {
+                    if (replay_event) |ev| {
+                        _ = self.handleKeyEvent(ev) catch {};
+                    }
+                }
             },
             .ignore => {}, // 조합 조작 키(자모 삭제) 또는 조합 중 단일 C0 — 입력기 소유
             .encode_key => if (event) |ev| {
@@ -19127,7 +19379,7 @@ pub const AppSession = struct {
 
     /// IME 후보창 배치용 커서 셀 사각형(backing px, 좌상단 원점 — 마우스 좌표와 같은 규약).
     /// 입력기가 firstRect로 물어보면 Swift가 이 값을 화면 좌표로 바꿔 후보창을 커서 위치에
-    /// 띄운다. 조합 중에는 커서가 preedit 시작(core.screen.cursor)에 있어 후보창이 조합 글자 옆에 뜬다.
+    /// 띄운다. 조합 중에는 canonical base snapshot의 cursor가 preedit 시작 anchor라 후보창이 그 위치에 뜬다.
     /// 반환: row*cell_h, col*cell_w, cell_w, cell_h.
     // self는 *AppSession(비-const) — rename caret 위치(renameCaretRect)가 leaf-rects 레이아웃을 펴는 *AppSession
     // 헬퍼를 거치기 때문(읽기 전용 계산이지만 activeTabLeafRects 체인이 비-const). ABI·테스트 호출자는 모두 mutable.
@@ -19138,7 +19390,8 @@ pub const AppSession = struct {
         // 활성 입력 대상(inputFocus 단일 출처)의 입력 caret 옆에 후보창을 띄운다 — caretRect가 위치 단일 출처.
         // null(패널 밖)이거나 터미널이면 아래 터미널 커서로 폴백.
         const props = self.buildChromeProps();
-        const overlay_caret: ?chrome.draw.Rect = switch (self.inputFocus()) {
+        const focus: InputFocus = if (self.ime_terminal_target_id != null) .terminal else self.inputFocus();
+        const overlay_caret: ?chrome.draw.Rect = switch (focus) {
             .confirm, .notice, .file_tree, .dock_group => null, // 조합을 안 받으므로 후보창 위치 무의미.
             // rename 인라인 편집기의 caret(사이드바 슬롯/탭/라벨)에 후보창을 띄운다 — renameCaretRect가 대상별 위치를
             // 잡는다(사이드바 y는 slot 기준 근사). null이면 아래 터미널 커서로 폴백.
@@ -19168,10 +19421,27 @@ pub const AppSession = struct {
         // 경합/비용 무관하고, **같은 활성 surface**에서 origin(active_pane_rect)과 커서를 함께 잡아 팬 전환 시점 차도 없다
         // (스냅샷 캐시는 active_pane_rect가 동기 갱신인데 캐시는 per-tick이라 전환 한 프레임 오위치를 냈다 — code-review [2]).
         const cursor = blk: {
-            const s = self.activeSurface();
+            const s = if (self.ime_terminal_target_id) |target_id| self.imeTerminalSurfaceById(target_id) orelse {
+                // 사라진 pin을 새 active cursor로 위장하지 않는다. 후보창은 neutral pane origin에 둔다.
+                return .{
+                    .x = @floatFromInt(self.active_pane_rect.x),
+                    .y = @floatFromInt(self.active_pane_rect.y),
+                    .w = cw,
+                    .h = ch,
+                };
+            } else self.activeSurface();
             s.lockCore(self.io);
             defer s.unlockCore(self.io);
-            break :blk s.core.screen.cursor;
+            break :blk s.baseCursorLocked() orelse {
+                // capability를 협상하지 않은 구 live host의 cursor는 viewport 의미를 판정할 수
+                // 없다. hidden origin을 실제 anchor로 위장하지 않고 pane origin으로 fail-closed한다.
+                return .{
+                    .x = @floatFromInt(self.active_pane_rect.x),
+                    .y = @floatFromInt(self.active_pane_rect.y),
+                    .w = cw,
+                    .h = ch,
+                };
+            };
         };
         const cur_row = cursor.row;
         const cur_col = cursor.col;
@@ -19191,6 +19461,12 @@ pub const AppSession = struct {
     /// 않게 한다. 활성 입력 대상(inputFocus 단일 출처)으로 분기 — 터미널은 PTY로, find/palette는 검색어/명령어로 확정.
     pub fn commitComposition(self: *AppSession) void {
         if (!self.surface_initialized) return;
+        // terminal 조합이 이미 pin됐으면 현재 열린 palette/settings/file tree보다 먼저 끝낸다. UI focus가
+        // 바뀐 뒤 들어온 windowLostKey/imeCommit도 원 terminal target에만 적용돼야 한다.
+        if (self.ime_terminal_target_id != null) {
+            _ = self.commitTerminalComposition();
+            return;
+        }
         switch (self.inputFocus()) {
             .confirm, .notice, .file_tree, .dock_group => {}, // 구조 input owner는 확정할 조합이 없다.
             .settings => if (self.chrome_host.settings.commitSearchPreedit()) {
@@ -19208,37 +19484,7 @@ pub const AppSession = struct {
                 self.metal_dirty = true; // 조합 글자를 편집 텍스트로 확정(포커스 상실 등 엣지 — find/palette와 동형)
             },
             .terminal => {
-                // preedit 읽기 + setPreedit("") 변경은 코어 mutate — 락 아래(docs/io-render-threading.md PR3,
-                // 리더 경합 방지). 단 확정 텍스트 전송(sendTextAsKeys)은 락을 푼 뒤에 한다:
-                // sendTextAsKeys→handleKeyEvent가 같은 core_mutex를 재취득하므로 락 보유 중 호출하면
-                // self-deadlock이다(std.Io.Mutex는 비재진입). 과거 PTY 직접 쓰기(sendCommittedText)는 락
-                // 안에서 안전했지만 sendTextAsKeys 공유(#2, bd5fd14)로 그 가정이 깨졌다 — 한글 조합 중
-                // 창 포커스 상실 시 메인 스레드가 ulock_wait에 박혀 hang으로 드러난 회귀.
-                // 빈 세션(merge로 워크스페이스가 전부 다른 창으로 빠져나간 원본 등)은 활성 surface가 없다 — 확정할 터미널
-                // 조합이 없으므로 스킵한다. `activeSurface()`는 non-null을 assert(unwrapNull 패닉)하므로 여기선 optional로
-                // 받는다: merge → `makeKeyAndOrderFront(dst)` → 원본 창 resignKey → windowLostKey → commitComposition이
-                // 비워진 원본 세션을 만지던 크래시(코드리뷰 후속 손 테스트 발견) 방어.
-                const s = self.app_window.active() orelse return;
-                const core = &s.core;
-                var committed: ?[]u8 = null;
-                {
-                    s.lockCore(self.io);
-                    defer s.unlockCore(self.io);
-                    if (core.preedit) |pending| {
-                        // setPreedit가 버퍼를 해제하므로 먼저 사본을 뜬다. dupe 실패(OOM)면 비우지 않고
-                        // 그대로 둔다(반쪽 커밋 방지 — 기존 동작 보존).
-                        committed = self.allocator.dupe(u8, pending) catch return;
-                        core.setPreedit("") catch {};
-                        self.metal_dirty = true;
-                    }
-                }
-                // 락 밖 + non-blocking 전송(sendCommittedText) — windowLostKey(AppKit 동기 콜백)에서
-                // 호출돼도 메인 run loop(tick)를 막지 않아 #10 write_queue backpressure 데드락을 피한다
-                // (과거 sendTextAsKeys→handleKeyEvent의 enqueueBlocking이 tick을 멈춰 hang했다).
-                if (committed) |copy| {
-                    defer self.allocator.free(copy);
-                    self.sendCommittedText(copy);
-                }
+                _ = self.commitTerminalComposition();
             },
             .find => if (self.chrome_host.find.input.commitPreedit(self.allocator)) {
                 self.recomputeFind(); // 검색어가 바뀜
@@ -19249,6 +19495,108 @@ pub const AppSession = struct {
                 self.metal_dirty = true;
             },
         }
+    }
+
+    /// 구조 이동 전 terminal composition queue admission의 2-phase ticket. `reserve`는 map/buffer
+    /// capacity만 확보하고 preedit·pin·queue length·counter를 바꾸지 않는다. 필요한 source/destination
+    /// ticket을 모두 확보한 뒤 `commit`하면 기존 commit 경로가 무할당으로 append/take할 수 있다.
+    const StructuralCompositionReservation = struct {
+        session: *AppSession,
+        terminal: bool = false,
+        target_id: ?u64 = null,
+        preedit_len: usize = 0,
+        created_queue: ?u64 = null,
+        committed: bool = false,
+
+        fn rollback(self: *StructuralCompositionReservation) void {
+            if (self.committed) return;
+            if (self.created_queue) |target_id| {
+                if (self.session.pending_pastes.getPtr(target_id)) |queue| {
+                    std.debug.assert(queue.buf.items.len == 0);
+                    std.debug.assert(queue.offset == 0);
+                    queue.buf.deinit(self.session.allocator);
+                }
+                _ = self.session.pending_pastes.remove(target_id);
+                self.created_queue = null;
+            }
+        }
+
+        fn commit(self: *StructuralCompositionReservation, flush_terminal: bool) void {
+            if (self.committed) return;
+            if (self.terminal) {
+                // reserve 뒤 같은 GUI transaction에서 실행되므로 preedit target/bytes는 변하지 않는다.
+                // queueInputBytes가 여기서 실패하면 2-phase 불변식 위반이다.
+                const admitted = self.session.commitTerminalCompositionWithFlush(flush_terminal);
+                std.debug.assert(admitted);
+            } else {
+                self.session.commitComposition();
+            }
+            self.committed = true;
+        }
+    };
+
+    fn reserveCompositionForStructuralMove(self: *AppSession) !StructuralCompositionReservation {
+        var reservation: StructuralCompositionReservation = .{ .session = self };
+        errdefer reservation.rollback();
+        if (!self.surface_initialized) return reservation;
+        if (self.ime_terminal_target_id == null and self.inputFocus() != .terminal) return reservation;
+        reservation.terminal = true;
+
+        const target_id = self.ime_terminal_target_id orelse
+            if (self.app_window.active()) |active| active.id else return reservation;
+        const surface = self.imeTerminalSurfaceById(target_id) orelse return reservation;
+        surface.lockCore(self.io);
+        defer surface.unlockCore(self.io);
+        const bytes = surface.preeditBytesLocked();
+        if (bytes.len == 0) return reservation;
+        reservation.target_id = target_id;
+        reservation.preedit_len = bytes.len;
+
+        const gop = self.pending_pastes.getOrPut(self.allocator, target_id) catch return error.OutOfMemory;
+        if (!gop.found_existing) {
+            gop.value_ptr.* = .{};
+            reservation.created_queue = target_id;
+        }
+        gop.value_ptr.buf.ensureUnusedCapacity(self.allocator, bytes.len) catch return error.OutOfMemory;
+        return reservation;
+    }
+
+    fn commitTerminalComposition(self: *AppSession) bool {
+        return self.commitTerminalCompositionWithFlush(true);
+    }
+
+    fn commitTerminalCompositionWithFlush(self: *AppSession, flush: bool) bool {
+        // Surface overlay를 먼저 지우지 않는다. 같은 lock 구간에서 ordered input queue가 marked
+        // text를 소유한 뒤에만 take한다. queue allocation OOM이면 overlay+pin을 그대로 유지해 다음
+        // focus callback에서 재시도하며, 중복 callback은 성공한 첫 take 뒤 null을 보므로 재전송하지 않는다.
+        const target_id = self.ime_terminal_target_id orelse
+            if (self.app_window.active()) |active| active.id else return true;
+        const s = self.imeTerminalSurfaceById(target_id) orelse {
+            self.ime_terminal_target_id = null;
+            return true;
+        };
+        var committed: ?terminal.preedit.Owned = null;
+        {
+            s.lockCore(self.io);
+            defer s.unlockCore(self.io);
+            const bytes = s.preeditBytesLocked();
+            if (bytes.len == 0) {
+                self.ime_terminal_target_id = null;
+                return true;
+            }
+            if (!self.queueInputBytes(target_id, bytes, true)) return false;
+            committed = s.takePreeditLocked();
+            std.debug.assert(committed != null);
+            self.metal_dirty = true;
+        }
+        self.ime_terminal_target_id = null;
+        if (committed) |copy| {
+            defer copy.deinit();
+            self.total_terminal_input_events += 1;
+            self.total_terminal_input_bytes += copy.bytes.len;
+            if (flush) self.flushPendingPaste();
+        }
+        return true;
     }
 
     /// 포커스 변화. 잃으면 조합 중 텍스트를 버리지 않고 확정(커밋)한다 — 버리면 글자가
@@ -19267,12 +19615,14 @@ pub const AppSession = struct {
         self.commitComposition();
     }
 
-    /// **IME 확정 텍스트 전용** — 코드포인트 단위로 기존 key event 경로(handleKeyEvent)에 태운다. 인코딩 단일 출처
-    /// (encodeKey)·입력 회계(terminal_input)·IME preedit 정리 등 부작용을 유지한다(IME 트랜잭션이 이것에 의존). 개행은
-    /// .enter(\r)로 정규화. bracketed paste 없음. 드래그앤드롭은 paste 경로(pasteText→encodePaste)로 별도다 — TUI([Image]) 인식을 위해 DECSET 2004가 켜졌을 때 bracketed paste로 감싸야 하므로.
+    /// 비터미널 입력 owner(addr/find/palette 등)에 확정 텍스트를 코드포인트 key event로 전달한다.
+    /// terminal IME 확정은 이 함수를 쓰지 않고 surface별 ordered queue에 UTF-8을 직접 admission한다.
+    /// 여기서는 개행을 `.enter`(\r)로 정규화한다. bracketed paste 없음. 드래그앤드롭은
+    /// paste 경로(pasteText→encodePaste)로 별도다 — TUI([Image]) 인식을 위해 DECSET 2004가
+    /// 켜졌을 때 bracketed paste로 감싸야 하므로.
     /// **불변식: 호출 시 surface.core_mutex를 보유하면 안 된다** — handleKeyEvent가 인코딩 중 core_mutex를 재취득하는데
-    /// std.Io.Mutex는 비재진입이라 같은 스레드가 이미 보유 중이면 자기 데드락(ulock_wait)이다. imeEnd의 .terminal 확정
-    /// 경로는 preedit를 락 아래 복사한 뒤 락을 풀고 이 함수를 호출한다(아래 imeEnd 참조). 신규 호출처도 이 규율을 지킬 것.
+    /// std.Io.Mutex는 비재진입이라 같은 스레드가 이미 보유 중이면 자기 데드락(ulock_wait)이다.
+    /// 신규 비터미널 호출처도 이 규율을 지킬 것.
     pub fn sendTextAsKeys(self: *AppSession, bytes: []const u8) void {
         const view = std.unicode.Utf8View.init(bytes) catch return;
         var it = view.iterator();
@@ -19294,13 +19644,24 @@ pub const AppSession = struct {
     /// 없이 바이트로 보내되 개행만 \r로 정규화한다(sendTextAsKeys와 동일 규약; bracketed 감싸기는
     /// paste 전용이라 IME 확정엔 안 쓴다). 큐는 **surface별**이라 paste와 같은 큐를 공유해 그 surface 안에서 전송
     /// 순서를 지킨다(다른 surface의 잔여와는 애초에 안 섞인다 — 옛 단일 FIFO는 서로 막고 섞였다).
-    fn sendCommittedText(self: *AppSession, bytes: []const u8) void {
-        if (!self.surface_initialized or bytes.len == 0) return;
-        // 대상=지금 활성 surface(입력 중인 곳), \n→\r. 담기 실패(OOM)면 회계도 안 올린다(안 보낸 걸 보냈다고 세지 않게).
-        if (!self.enqueueInputBytes(self.activeSurface().id, bytes, true)) return;
+    fn sendCommittedText(self: *AppSession, bytes: []const u8) bool {
+        if (!self.surface_initialized or bytes.len == 0) return true;
+        // imeBegin/첫 marked update가 고정한 대상이 있으면 그 surface로 보낸다. AppKit 콜백 사이에
+        // 활성 pane/tab이 바뀌어도 확정 바이트가 새 터미널로 새지 않는다.
+        const target_id = self.ime_terminal_target_id orelse self.activeSurface().id;
+        return self.sendCommittedTextTo(target_id, bytes);
+    }
+
+    /// IME transaction이 pin한 surface로 보내는 대상 명시형. target이 닫혔거나 다른 창으로
+    /// 이동했으면 새 active로 fallback하지 않고 폐기해 오삽입을 막는다.
+    fn sendCommittedTextTo(self: *AppSession, target_id: u64, bytes: []const u8) bool {
+        if (!self.surface_initialized or bytes.len == 0) return true;
+        if (self.imeTerminalSurfaceById(target_id) == null) return false;
+        if (!self.enqueueInputBytes(target_id, bytes, true)) return false;
         // handleKeyEvent를 우회하므로 terminal input 회계를 여기서 직접 한다(\n→\r는 1:1이라 byte 수 동일).
         self.total_terminal_input_events += 1;
         self.total_terminal_input_bytes += bytes.len;
+        return true;
     }
 
     /// IME 확정 텍스트를 현재 입력 대상(inputFocus 단일 출처)으로 라우팅한다. 터미널이면 non-blocking PTY
@@ -19310,8 +19671,15 @@ pub const AppSession = struct {
     /// 한다(이 분기를 빼면 find 조합 확정이 PTY로 새 입력칸이 빈다 — 회귀 테스트가 고정). 터미널 타이핑은
     /// "검색 종료(find_nav)"도 함께 처리한다(handleKeyEvent 3478과 동일 의미).
     fn routeCommittedText(self: *AppSession, bytes: []const u8) void {
-        const focus = self.inputFocus();
-        if (focus == .file_tree) return; // tree focus에서 평문/IME가 뒤 PTY로 새지 않는다.
+        _ = self.routeCommittedTextAccepted(bytes);
+    }
+
+    /// routeCommittedText와 같은 부작용을 수행하되, 터미널 ordered queue가 bytes를 실제로
+    /// 수락했는지를 돌려준다. imeEnd는 false일 때 replay key까지 억제해 반쪽 transaction을 막는다.
+    fn routeCommittedTextAccepted(self: *AppSession, bytes: []const u8) bool {
+        // 진행 중 terminal transaction의 insertText는 UI focus가 먼저 바뀌었어도 pin된 원 target으로 간다.
+        const focus: InputFocus = if (self.ime_terminal_target_id != null) .terminal else self.inputFocus();
+        if (focus == .file_tree) return true; // tree focus에서 평문/IME가 뒤 PTY로 새지 않는다.
         if (focus == .terminal) {
             if (self.find_nav) self.find_nav = false;
             // 타이핑(글자 입력) 중 마우스 숨김(config). IME 확정 텍스트가 터미널로 갈 때 = 실제 글자 타이핑(ASCII·한글·
@@ -19319,7 +19687,7 @@ pub const AppSession = struct {
             // palette 입력칸(else 분기)은 chrome 타이핑이라 안 숨긴다. Swift가 takeMouseHide로 drain → setHiddenUntilMouseMoves.
             // 베이스: Ghostty mouse-hide-while-typing(press+utf8.len>0) — utf8 텍스트 produce가 곧 IME 확정이다(F1-6).
             if (self.loaded_config.config.input.mouse_hide_while_typing and bytes.len > 0) self.mouse_hide_pending = true;
-            self.sendCommittedText(bytes);
+            return self.sendCommittedText(bytes);
         } else if (focus == .addr_edit) {
             // 주소창 확정 텍스트는 **NFC 조합** 후 키 경로로(codepoint당 셀이라 NFD 자모 미조합 — imeSetPreedit과 동일 사유).
             // find/palette/rename/sidebar_search는 shaping/클러스터라 이 분기 밖(무해하나 불필요).
@@ -19330,6 +19698,59 @@ pub const AppSession = struct {
         } else {
             self.sendTextAsKeys(bytes);
         }
+        return true;
+    }
+
+    /// 터미널 IME 확정 문자열과 replay key를 먼저 모두 준비한 뒤 한 번의 capacity reservation으로
+    /// pending FIFO에 원자적으로 append한다. 둘 중 하나만 admission되는 partial transaction은 없다.
+    fn routeTerminalCommittedWithReplay(self: *AppSession, target_id: u64, text: []const u8, event: terminal.KeyEvent) bool {
+        if (self.find_nav) self.find_nav = false;
+        if (self.loaded_config.config.input.mouse_hide_while_typing and text.len > 0) self.mouse_hide_pending = true;
+        var buffer: [terminal.input.encoded_key_buffer_len]u8 = undefined;
+        const replay = self.encodeImeReplayKeyTo(target_id, event, &buffer) orelse return false;
+        if (!self.queueInputPair(target_id, text, true, replay)) return false;
+        self.total_terminal_input_events += 2;
+        self.total_terminal_input_bytes += text.len + replay.len;
+        self.flushPendingPaste();
+        return true;
+    }
+
+    /// IME 확정과 함께 replay할 Enter/화살표를 target surface의 현재 입력 모드로 인코딩한다.
+    /// 반환 slice는 caller가 준 stack buffer를 빌리므로 즉시 ordered queue에 복사해야 한다.
+    fn encodeImeReplayKeyTo(
+        self: *AppSession,
+        target_id: u64,
+        event: terminal.KeyEvent,
+        buffer: *[terminal.input.encoded_key_buffer_len]u8,
+    ) ?[]const u8 {
+        const surface = self.imeTerminalSurfaceById(target_id) orelse return null;
+        var key_event = event;
+        if (self.shift_enter_meta and key_event.key == .enter and key_event.modifiers.shift and
+            !key_event.modifiers.control and !key_event.modifiers.option and !key_event.modifiers.command)
+        {
+            key_event.modifiers = .{ .option = true };
+        }
+
+        var options: terminal.input.EncodeOptions = .{};
+        if (surface.remote != null) {
+            // RemoteRuntime observation이 현재 wire로 노출하는 입력 모드는 DECCKM뿐이다. 나머지는
+            // 기존 remote key path와 같은 placeholder 기본값을 쓰며, protocol 확장은 별도 범위다.
+            if (self.findTermWhere(target_id, struct {
+                fn pred(id: u64, term: *Term) bool {
+                    return term.kind == .terminal and term.surface.id == id;
+                }
+            }.pred)) |loc| {
+                const term = loc.pane.terms.items[loc.term_index];
+                if (term.rt.observation.availability != .unavailable)
+                    options.application_cursor_keys = term.rt.observation.app_cursor_keys;
+            }
+        } else {
+            surface.lockCore(self.io);
+            options = surface.core.encodeOptions();
+            surface.unlockCore(self.io);
+        }
+        options.option_as_meta = self.option_as_meta;
+        return terminal.input.encodeKey(key_event, buffer, options) catch null;
     }
 
     /// 셸 메타문자 — 셸이 공백/특수문자에서 단어를 쪼개거나 글롭·치환으로 해석하지 않게 앞에
@@ -19445,8 +19866,15 @@ pub const AppSession = struct {
         self.submitPaste(payload, false, target_id); // 최초 시도 — 아직 사용자 미확인(paste protection 게이트를 탄다)
     }
 
-    /// paste 대상 surface(터미널 Term만). id가 없거나 그 Term이 web이면 null — 붙일 PTY가 없다는 뜻이라
-    /// 호출자는 no-op해야 한다. 대상 지정 paste(submitPaste)의 유일한 조회 경로다.
+    /// IME transaction이 pin한 terminal surface를 찾는다. id가 없거나 그 Term이 web이면 null이며
+    /// 호출자는 새 active surface로 fallback하지 않는다.
+    fn imeTerminalSurfaceById(self: *AppSession, id: u64) ?*maru.session.Surface {
+        // 정상 입력 중인 target은 대부분 app_window.active와 같다. 이 fast path는 전체 Term 순회를
+        // 피하고, 최소 fixture가 app_window만 세운 기존 IME 계약 테스트도 같은 제품 경로를 탄다.
+        if (self.app_window.active()) |active| if (active.id == id) return active;
+        return self.terminalSurfaceById(id);
+    }
+
     fn terminalSurfaceById(self: *AppSession, id: u64) ?*maru.session.Surface {
         const loc = self.findTermWhere(id, struct {
             fn pred(want: u64, term: *Term) bool {
@@ -20017,6 +20445,36 @@ pub const AppSession = struct {
         return true;
     }
 
+    /// first+second를 한 capacity reservation 뒤에 append한다. first는 IME 확정 문자열이라 선택적으로
+    /// LF→CR 정규화하고, second는 이미 인코딩된 replay bytes다. OOM이면 기존 queue를 전혀 바꾸지 않는다.
+    fn queueInputPair(
+        self: *AppSession,
+        target_id: u64,
+        first: []const u8,
+        normalize_first_newlines: bool,
+        second: []const u8,
+    ) bool {
+        const gop = self.pending_pastes.getOrPut(self.allocator, target_id) catch return false;
+        if (!gop.found_existing) gop.value_ptr.* = .{};
+        const additional = std.math.add(usize, first.len, second.len) catch {
+            if (!gop.found_existing) _ = self.pending_pastes.remove(target_id);
+            return false;
+        };
+        gop.value_ptr.buf.ensureUnusedCapacity(self.allocator, additional) catch {
+            if (!gop.found_existing) _ = self.pending_pastes.remove(target_id);
+            return false;
+        };
+        const start = gop.value_ptr.buf.items.len;
+        gop.value_ptr.buf.appendSliceAssumeCapacity(first);
+        if (normalize_first_newlines) {
+            for (gop.value_ptr.buf.items[start..][0..first.len]) |*b| {
+                if (b.* == '\n') b.* = '\r';
+            }
+        }
+        gop.value_ptr.buf.appendSliceAssumeCapacity(second);
+        return true;
+    }
+
     /// 큐에 넣고 즉시 흘려보낸다(non-blocking). enqueue 시점에 대상이 확정되므로, 뒤에 탭/pane이 바뀌어도
     /// 이 바이트는 원래 surface로 간다. 담기 실패(OOM)면 false — 호출자가 회계를 건너뛸 수 있다.
     fn enqueueInputBytes(self: *AppSession, target_id: u64, bytes: []const u8, normalize_newlines: bool) bool {
@@ -20056,15 +20514,19 @@ pub const AppSession = struct {
             const target_id = entry.key_ptr.*;
             const q = entry.value_ptr;
             if (q.offset >= q.buf.items.len) continue; // 이미 빈 큐(엔트리만 남음)
-            var dead = false;
             // tick당 surface별 한 번만 시도한다. 원격 backend의 16 KiB 상한을 여기서 while로 반복하면
             // 같은 tick에 큰 paste 전체를 동기 RPC로 밀어 UI를 다시 막으므로, 잔여는 다음 tick으로 넘긴다.
-            const written = self.runtime.writeInputNonBlocking(target_id, q.buf.items[q.offset..]) catch blk: {
-                dead = true; // 세션 종료 등 — 잔여는 버린다(다시 쓸 수 없는 대상)
-                break :blk 0;
+            const written = self.runtime.writeInputNonBlocking(target_id, q.buf.items[q.offset..]) catch |err| switch (err) {
+                // 대상 수명이 끝났으면 재시도할 곳이 없으므로 잔여를 회수한다. transient OOM/WriteFailed는
+                // queue ownership을 보존해 다음 tick에 재시도한다.
+                error.ProcessExited, error.UnknownSurface => {
+                    self.resetPasteQueue(q);
+                    continue;
+                },
+                else => continue,
             };
             q.offset += written;
-            if (dead or q.offset >= q.buf.items.len) self.resetPasteQueue(q);
+            if (q.offset >= q.buf.items.len) self.resetPasteQueue(q);
         }
     }
 
@@ -22439,7 +22901,7 @@ pub const AppSession = struct {
             .esu = core.sync_esu_count,
             .cursor_blink = core.cursor_blink,
             .cursor_visible = core.cursor_visible,
-            .preedit_present = core.preedit != null,
+            .preedit_present = s.preeditActiveLocked(),
             .viewport_has_blink = need_blink_scan and core.viewportHasBlink(),
         };
     }
@@ -36439,8 +36901,8 @@ test "follow-system 중 preset-dark 변경은 라이브 재적용 + user_custom 
 
 test "commitComposition is a safe no-op when there is no active preedit" {
     // 조합이 없으면(preedit==null) 아무것도 안 보내고 무해해야 한다 — IME 우회 특수키(PageUp)마다
-    // 호출되므로 일반 타이핑 경로를 망가뜨리면 안 된다. commit 경로(preedit 있을 때)는 frame_loop가
-    // 필요해 헤드리스로 못 돌리고 GUI 수동 검증으로 본다(PR 본문).
+    // 호출되므로 일반 타이핑 경로를 망가뜨리면 안 된다. 실제 preedit commit 경로는 아래의
+    // initialized AppSession 테스트가 non-blocking/exactly-once 불변식으로 고정한다.
     var session: AppSession = undefined;
     session.allocator = std.testing.allocator;
     session.addr_edit = null; // 7e-2: inputFocus가 addr_edit을 읽음([[devsession-undefined-test-field-trap]])
@@ -36454,9 +36916,10 @@ test "commitComposition is a safe no-op when there is no active preedit" {
     var st_ptrs = [_]*maru.session.Surface{&tab_surface};
     session.app_window = .{ .tabs = &st_ptrs };
     session.metal_dirty = false;
-    try std.testing.expect(tab_surface.core.preedit == null);
+    session.ime_terminal_target_id = null;
+    try std.testing.expect(!tab_surface.preedit.active());
     session.commitComposition(); // 무동작이어야(no preedit)
-    try std.testing.expect(tab_surface.core.preedit == null);
+    try std.testing.expect(!tab_surface.preedit.active());
     try std.testing.expect(!session.metal_dirty); // 보낼 게 없으니 다시 그릴 것도 없다
 }
 
@@ -37058,12 +37521,16 @@ test "cursor blink: 틱마다 토글·steady/조합 고정·활동 리셋·오�
 
     // IME 조합 중(preedit) + 오버레이 닫힘: 깜빡이지 않고 고정 — 조합 글자 옆에서 안 반짝.
     try tab_surface.core.write("\x1b[1 q"); // 다시 blink 커서로
-    try tab_surface.core.setPreedit("\xec\x95\x88");
+    tab_surface.lockCore(session.io);
+    try std.testing.expect(tab_surface.setPreeditLocked("\xec\x95\x88"));
+    tab_surface.unlockCore(session.io);
     session.blink_visible = true;
     i = 0;
     while (i < session.blinkIntervalTicks() * 3) : (i += 1) session.updateCursorBlink(session.readActiveSnapshot(false));
     try std.testing.expect(session.blink_visible);
-    try tab_surface.core.setPreedit("");
+    tab_surface.lockCore(session.io);
+    try std.testing.expect(tab_surface.setPreeditLocked(""));
+    tab_surface.unlockCore(session.io);
 }
 
 test "cursorFadeMilliForPhase: 반주기 끝에서 대칭 램프(사라짐 1000→0·나타남 0→1000)·hold·페이드끔·clamp" {
@@ -38935,7 +39402,7 @@ test "command palette(chrome): 토글 열림 → 타이핑 필터 → IME 조합
     // 레거시 팝업은 IME 조합 배선이 없어 한글 조합이 숨은 터미널로 샜다.
     session.imeMarked("\xea\xb0\x80"); // 조합 중 "가"
     try std.testing.expectEqualStrings("\xea\xb0\x80", session.chrome_host.palette.input.preedit.items);
-    try std.testing.expect(session.activeSurface().core.preedit == null); // 터미널 core로 안 샌다
+    try std.testing.expect(!session.activeSurface().preedit.active()); // 터미널 Surface overlay로 안 샌다
     session.imeMarked(""); // 조합 해제(확정 직전)
 
     // "new t" 타이핑(chrome 라우팅 → palette.handle → query_changed → recomputePalette) → "New Terminal"만 남는다.
@@ -39225,6 +39692,7 @@ test "오버레이 배타 + IME 단일 출처: showNotice가 find/palette를 닫
     session.palette_filtered = .empty; // togglePalette→recomputePalette가 채운다
     session.pending_confirm = .none; // showNotice→cancelPendingClose가 읽음([[devsession-undefined-test-field-trap]])
     session.metal_dirty = false;
+    session.ime_terminal_target_id = null; // IME 라우팅이 pin 유무를 먼저 읽음([[devsession-undefined-test-field-trap]])
     defer {
         session.chrome_host.deinit(std.testing.allocator);
         session.find_matches.deinit(std.testing.allocator);
@@ -39274,6 +39742,7 @@ test "IME 라우팅: 세팅 모달 열림이면 inputFocus=.settings이라 조�
     session.find_matches = .empty;
     session.palette_filtered = .empty;
     session.metal_dirty = false;
+    session.ime_terminal_target_id = null; // IME 라우팅이 pin 유무를 먼저 읽음([[devsession-undefined-test-field-trap]])
     defer {
         session.chrome_host.deinit(std.testing.allocator);
         session.find_matches.deinit(std.testing.allocator);
@@ -39317,6 +39786,8 @@ test "imeBegin: 터미널 포커스만 바닥으로 스냅 — find 조합은 �
     session.focus_owner = .workspace; // inputFocus가 file-tree owner를 읽음([[devsession-undefined-test-field-trap]])
     session.tabs = .empty; // [4e-2] scrollPage 게이트 activeTermIsTerminal이 tabs를 읽음 — 빈 트리=terminal 취급(byte-identical)
     session.ime_inserted = .empty; // imeBegin이 clearRetainingCapacity 호출
+    session.ime_terminal_target_id = null; // imeBegin이 pin 유무를 먼저 읽음([[devsession-undefined-test-field-trap]])
+    session.ime_terminal_target_tombstoned = false;
     defer session.chrome_host.deinit(std.testing.allocator);
     defer session.ime_inserted.deinit(std.testing.allocator);
 
@@ -39328,6 +39799,7 @@ test "imeBegin: 터미널 포커스만 바닥으로 스냅 — find 조합은 �
     // (a) 터미널 포커스: imeBegin이 바닥으로 스냅한다(조합도 타이핑 — preedit이 보이게)
     session.imeBegin();
     try std.testing.expectEqual(@as(usize, 0), tab_surface.core.view_offset);
+    session.imeEnd(null); // 실제 keyDown처럼 트랜잭션을 닫아 terminal pin을 해제한다.
 
     // 다시 위로 스크롤
     session.scrollPage(1);
@@ -51324,7 +51796,8 @@ test "sendTextAsKeys normalizes newlines to CR and imeBegin snaps to bottom" {
         .command_kind = @intFromEnum(CommandKind.controlled_smoke),
     });
     defer session.deinit();
-    const core = &session.activeSurface().core;
+    const surface = session.activeSurface();
+    const core = &surface.core;
 
     // 스크롤백을 만들고 과거를 본 뒤 imeBegin → 바닥으로 스냅(조합이 보이게).
     try core.write("a\r\nb\r\nc\r\nd\r\ne\r\nf");
@@ -51344,7 +51817,7 @@ test "sendTextAsKeys normalizes newlines to CR and imeBegin snaps to bottom" {
 }
 
 test "commitComposition during terminal preedit does not deadlock (회귀: bd5fd14)" {
-    // 한글 조합 중(core.preedit 존재) 창 키포커스를 잃으면 setFocused(false)→commitComposition이
+    // 한글 조합 중(Surface preedit 존재) 창 키포커스를 잃으면 setFocused(false)→commitComposition이
     // 조합을 확정 전송한다. 과거엔 core_mutex를 쥔 채 sendTextAsKeys→handleKeyEvent가 같은 락을
     // 재취득해 메인 스레드가 ulock_wait에 박혀 hang했다(std.Io.Mutex는 비재진입 → self-deadlock;
     // sendCommittedText→sendTextAsKeys 통일 #2/bd5fd14로 "락 보유 중 호출 안전" 가정이 깨진 회귀).
@@ -51363,17 +51836,120 @@ test "commitComposition during terminal preedit does not deadlock (회귀: bd5fd
         .command_kind = @intFromEnum(CommandKind.controlled_smoke),
     });
     defer session.deinit();
-    const core = &session.activeSurface().core;
+    const surface = session.activeSurface();
 
-    // 터미널 조합 중 상태를 만든다(inputFocus 기본 .terminal → core.preedit 세팅).
+    // 터미널 조합 중 상태를 만든다(inputFocus 기본 .terminal → Surface overlay 세팅).
     session.imeMarked("한");
-    try std.testing.expect(core.preedit != null);
+    try std.testing.expect(surface.preedit.active());
 
     const before = session.total_terminal_input_bytes;
     session.setFocused(false); // 창 키포커스 상실 → commitComposition(.terminal)
 
-    try std.testing.expect(core.preedit == null); // 조합이 확정되며 비워짐(다시 안 남음)
-    try std.testing.expect(session.total_terminal_input_bytes > before); // "한"이 PTY로 확정 전송됨
+    try std.testing.expect(!surface.preedit.active()); // 조합이 확정되며 비워짐(다시 안 남음)
+    try std.testing.expectEqual(before + "한".len, session.total_terminal_input_bytes);
+    const after_first_commit = session.total_terminal_input_bytes;
+    session.setFocused(false); // AppKit이 중복 resign 콜백을 줘도 이미 take됐으므로 재전송하지 않는다.
+    try std.testing.expectEqual(after_first_commit, session.total_terminal_input_bytes);
+}
+
+test "terminal IME pin tombstones a reaped target and never retargets the same transaction" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.newTab(); // 두 번째 탭이 active
+
+    const vanished_id = session.activeSurface().id;
+    session.imeBegin();
+    session.imeMarked("한");
+    try std.testing.expectEqual(@as(?u64, vanished_id), session.ime_terminal_target_id);
+    session.closeTab(session.app_window.active_tab); // pin target destroy, 첫 탭이 새 active
+    const survivor = session.activeSurface();
+    try std.testing.expect(survivor.id != vanished_id);
+
+    session.imeMarked("나"); // missing pin을 null로 바꿔 survivor에 재지정하면 안 된다.
+    try std.testing.expectEqual(@as(?u64, vanished_id), session.ime_terminal_target_id);
+    try std.testing.expect(!survivor.preedit.active());
+    const bytes_before = session.total_terminal_input_bytes;
+    session.imeInsert("나");
+    session.imeEnd(null);
+    try std.testing.expectEqual(bytes_before, session.total_terminal_input_bytes);
+    try std.testing.expect(session.ime_terminal_target_id == null);
+}
+
+test "terminal IME pin tombstone survives across key transactions and suppresses next physical key" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.newTab(); // 두 번째 탭이 active
+
+    const vanished_id = session.activeSurface().id;
+    session.imeBegin();
+    session.imeMarked("한");
+    session.imeEnd(null); // preedit은 계속 active라 terminal pin도 다음 keyDown까지 유지
+    try std.testing.expectEqual(@as(?u64, vanished_id), session.ime_terminal_target_id);
+
+    session.closeTab(session.app_window.active_tab); // key transaction 사이에 pinned target reap
+    const survivor = session.activeSurface();
+    try std.testing.expect(survivor.id != vanished_id);
+    const bytes_before = session.total_terminal_input_bytes;
+    const keys_before = session.total_key_events;
+
+    // 입력기가 callback을 하나도 만들지 않은 평범한 물리 키. 과거 imeBegin은 missing pin에서
+    // ime_active를 세우기 전에 return했고 imeEnd(.encode_key)가 이 키를 survivor로 보냈다.
+    session.imeBegin();
+    try std.testing.expect(session.ime_active);
+    try std.testing.expect(session.ime_terminal_target_tombstoned);
+    session.imeEnd(.{ .key = .{ .char = 'x' }, .modifiers = .{} });
+
+    try std.testing.expectEqual(bytes_before, session.total_terminal_input_bytes);
+    try std.testing.expectEqual(keys_before, session.total_key_events);
+    try std.testing.expect(!survivor.preedit.active());
+    try std.testing.expect(!session.ime_active);
+    try std.testing.expect(!session.ime_terminal_target_tombstoned);
+    try std.testing.expect(session.ime_terminal_target_id == null);
+}
+
+test "terminal IME pin wins over a newly opened palette during commit" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    const surface = session.activeSurface();
+
+    session.imeMarked("한");
+    try std.testing.expect(surface.preedit.active());
+    session.chrome_host.palette.open = true; // UI owner가 먼저 바뀐 뒤 늦은 imeCommit/windowLostKey
+    const before = session.total_terminal_input_bytes;
+    session.commitComposition();
+    try std.testing.expect(!surface.preedit.active());
+    try std.testing.expectEqual(before + "한".len, session.total_terminal_input_bytes);
+    try std.testing.expectEqual(@as(usize, 0), session.chrome_host.palette.input.query.items.len);
 }
 
 test "commitComposition sends committed text via non-blocking path, not blocking key path (#10)" {
@@ -51397,17 +51973,17 @@ test "commitComposition sends committed text via non-blocking path, not blocking
         .command_kind = @intFromEnum(CommandKind.controlled_smoke),
     });
     defer session.deinit();
-    const core = &session.activeSurface().core;
+    const surface = session.activeSurface();
 
     session.imeMarked("한");
-    try std.testing.expect(core.preedit != null);
+    try std.testing.expect(surface.preedit.active());
 
     const keys_before = session.total_key_events;
     const bytes_before = session.total_terminal_input_bytes;
     session.setFocused(false); // windowLostKey → commitComposition(.terminal)
 
-    try std.testing.expect(core.preedit == null); // 확정됨
-    try std.testing.expect(session.total_terminal_input_bytes > bytes_before); // PTY로 전송됨
+    try std.testing.expect(!surface.preedit.active()); // 확정됨
+    try std.testing.expectEqual(bytes_before + "한".len, session.total_terminal_input_bytes);
     // 핵심 불변식: blocking key 경로(handleKeyEvent)를 경유하지 않는다(non-blocking pending 전송).
     // 수정 전이면 sendTextAsKeys→handleKeyEvent로 total_key_events가 늘어 이 단언이 깨진다(#10 가드).
     try std.testing.expectEqual(keys_before, session.total_key_events);
@@ -51448,6 +52024,102 @@ test "imeEnd commit + transaction-less imeInsert send via non-blocking path (#10
     session.imeInsert("을");
     try std.testing.expect(session.total_terminal_input_bytes > bytes2);
     try std.testing.expectEqual(keys2, session.total_key_events);
+}
+
+test "imeEnd commit and Enter replay remain ordered in one surface FIFO under backpressure" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    const surface = session.activeSurface();
+    // 자식이 한 번에 소비할 수 없는 선행 입력을 넣어 실제 nonblocking flush 뒤에도 FIFO tail이
+    // 남게 한다. 개행이 없어 controlled child는 read에서 살아 있고, suffix로 transaction 순서를 본다.
+    var blocked_prefix: [64 * 1024]u8 = undefined;
+    @memset(&blocked_prefix, 'x');
+    try std.testing.expect(session.queueInputBytes(surface.id, &blocked_prefix, false));
+    const keys_before = session.total_key_events;
+    session.imeBegin();
+    session.imeMarked("한");
+    session.imeInsert("한");
+    session.imeEnd(.{ .key = .enter, .modifiers = .{} });
+
+    const queued = session.pending_pastes.get(surface.id).?;
+    try std.testing.expect(queued.offset < queued.buf.items.len);
+    try std.testing.expect(std.mem.endsWith(u8, queued.buf.items, "한\r"));
+    try std.testing.expectEqual(keys_before, session.total_key_events); // blocking handleKeyEvent를 우회한다.
+}
+
+test "IME commit and replay pair admission is atomic on queue allocation failure" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    const target_id = session.activeSurface().id;
+    try std.testing.expect(session.queueInputBytes(target_id, "prefix", false));
+    const before = session.pending_pastes.get(target_id).?.buf.items.len;
+    var large: [512]u8 = undefined;
+    @memset(&large, 'x');
+
+    var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    session.allocator = failing.allocator();
+    const admitted = session.queueInputPair(target_id, &large, true, "\r");
+    session.allocator = allocator;
+
+    try std.testing.expect(!admitted);
+    const queue = session.pending_pastes.get(target_id).?;
+    try std.testing.expectEqual(before, queue.buf.items.len);
+    try std.testing.expectEqualStrings("prefix", queue.buf.items);
+}
+
+test "focus-loss commit preserves preedit and pin when ordered queue admission is OOM" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    const surface = session.activeSurface();
+    session.imeMarked("한");
+    const target_id = session.ime_terminal_target_id.?;
+    try std.testing.expect(surface.preedit.active());
+
+    var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    session.allocator = failing.allocator();
+    session.commitComposition();
+    session.allocator = allocator; // session teardown과 성공 재시도는 원 allocator로 복구.
+
+    try std.testing.expect(surface.preedit.active());
+    try std.testing.expectEqual(@as(?u64, target_id), session.ime_terminal_target_id);
+    try std.testing.expect(session.pending_pastes.get(target_id) == null);
+
+    session.commitComposition();
+    try std.testing.expect(!surface.preedit.active());
+    try std.testing.expect(session.ime_terminal_target_id == null);
 }
 
 test "surface별 paste 큐: 대상은 enqueue 시점에 고정되고 큐끼리 섞이지 않는다(탭 전환 오라우팅 방지)" {
@@ -51713,6 +52385,7 @@ test "imeCursorRect returns the cursor cell rect in backing px for IME candidate
     session.pending_dock_focus = null;
     session.tabs = .empty; // [4e-2] imeCursorRect 게이트 activeTermIsTerminal이 tabs를 읽음 — 빈 트리=terminal 취급(byte-identical)
     session.appearance = config_mod.resolveAppearance(.{}) catch unreachable;
+    session.ime_terminal_target_id = null; // imeCursorRect가 pin 유무를 먼저 읽음([[devsession-undefined-test-field-trap]])
 
     const core = &tab_surface.core;
     // [P4-3] imeCursorRect는 활성 surface 커서를 lockCore 아래 live로 읽는다(무락 torn read race 정정) — core write가
@@ -51845,6 +52518,12 @@ test "M3d-2a-i moveWorkspaceToSession: cross-window 무재시작(동일 *LiveSur
     moved_surface.core.write("MOVE_MARK_42\r\n") catch {};
     moved_surface.unlockCore(src.io);
 
+    // 창 간 reparent 직전 조합은 source attachment에서 원 runtime으로 확정하고, client-local
+    // overlay 자체는 destination 창으로 운반하지 않는다.
+    src.imeMarked("한");
+    try std.testing.expect(moved_surface.preedit.active());
+    const input_bytes_before_move = src.total_terminal_input_bytes;
+
     var buf: [8]u64 = undefined;
     const outcome = try src.moveWorkspaceToSession(dst, 1, &buf);
 
@@ -51871,6 +52550,15 @@ test "M3d-2a-i moveWorkspaceToSession: cross-window 무재시작(동일 *LiveSur
     try std.testing.expectEqual(moved_handle, adopted_term.rt.handle); // P2: 창을 옮겨도 handle 불변(무재시작)
     try std.testing.expectEqual(moved_surface, adopted_term.surface);
     try std.testing.expectEqual(entries_before, dst.live_registry.entries.items.len);
+    try std.testing.expect(!adopted_term.surface.preedit.active()); // destination attachment에 marked text가 나타나지 않음
+    try std.testing.expect(src.ime_terminal_target_id == null);
+    try std.testing.expectEqual(input_bytes_before_move + "한".len, src.total_terminal_input_bytes);
+    const src_bytes_after_move = src.total_terminal_input_bytes;
+    const dst_bytes_after_move = dst.total_terminal_input_bytes;
+    src.setFocused(false);
+    dst.setFocused(false);
+    try std.testing.expectEqual(src_bytes_after_move, src.total_terminal_input_bytes);
+    try std.testing.expectEqual(dst_bytes_after_move, dst.total_terminal_input_bytes);
     // dst 대표 surface_ptr가 옮겨온 워크스페이스의 활성 surface(정합).
     try std.testing.expectEqual(moved_surface, dst.surface_ptrs.items[1]);
 
@@ -51878,6 +52566,266 @@ test "M3d-2a-i moveWorkspaceToSession: cross-window 무재시작(동일 *LiveSur
     const dump = try slot_after.terminal.surface.core.dumpUtf8(allocator);
     defer allocator.free(dump);
     try std.testing.expect(std.mem.indexOf(u8, dump, "MOVE_MARK_42") != null);
+}
+
+test "moveWorkspaceToSession aborts before detach when active preedit queue admission is OOM" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const src = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(src);
+    defer src.deinit();
+    const dst = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(dst);
+    defer dst.deinit();
+
+    try addMoveTestWorkspace(src, "preedit-oom");
+    const moved = src.tabs.items[1].activeTerm().surface;
+    const destination = dst.activeSurface();
+    try std.testing.expectEqual(@as(usize, 1), src.app_window.active_tab);
+    src.imeMarked("한");
+    dst.imeMarked("둘");
+    try std.testing.expect(moved.preedit.active());
+    try std.testing.expect(destination.preedit.active());
+    try src.pending_pastes.put(src.allocator, moved.id, .{}); // map allocation은 미리 끝내고 queue buffer OOM만 주입.
+
+    const src_tabs_before = src.tabs.items.len;
+    const dst_tabs_before = dst.tabs.items.len;
+    const src_input_before = src.total_terminal_input_bytes;
+    const dst_input_before = dst.total_terminal_input_bytes;
+    var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    src.allocator = failing.allocator();
+    var moved_buf: [8]u64 = undefined;
+    const result = src.moveWorkspaceToSession(dst, 1, &moved_buf);
+    src.allocator = allocator;
+
+    try std.testing.expectError(error.OutOfMemory, result);
+    try std.testing.expectEqual(src_tabs_before, src.tabs.items.len);
+    try std.testing.expectEqual(dst_tabs_before, dst.tabs.items.len);
+    try std.testing.expectEqual(moved, src.tabs.items[1].activeTerm().surface);
+    try std.testing.expect(moved.preedit.active());
+    try std.testing.expect(destination.preedit.active());
+    try std.testing.expectEqual(@as(?u64, moved.id), src.ime_terminal_target_id);
+    try std.testing.expectEqual(@as(?u64, destination.id), dst.ime_terminal_target_id);
+    try std.testing.expectEqual(src_input_before, src.total_terminal_input_bytes);
+    try std.testing.expectEqual(dst_input_before, dst.total_terminal_input_bytes);
+}
+
+test "moveWorkspaceToSession destination preedit OOM preserves both owners and retry admits each once" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const src = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(src);
+    defer src.deinit();
+    const dst = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(dst);
+    defer dst.deinit();
+
+    try addMoveTestWorkspace(src, "destination-preedit-oom");
+    const moved = src.tabs.items[1].activeTerm().surface;
+    const destination = dst.activeSurface();
+    src.imeMarked("한");
+    dst.imeMarked("둘");
+    try std.testing.expect(moved.preedit.active());
+    try std.testing.expect(destination.preedit.active());
+
+    // 구조 배열/map allocation은 미리 끝내고 destination queue buffer admission만 실패시킨다.
+    try dst.tabs.ensureUnusedCapacity(dst.allocator, 1);
+    try dst.surface_ptrs.ensureUnusedCapacity(dst.allocator, 1);
+    try dst.pending_pastes.put(dst.allocator, destination.id, .{});
+    const src_tabs_before = src.tabs.items.len;
+    const dst_tabs_before = dst.tabs.items.len;
+    const src_active_before = src.tabs.items[src.app_window.active_tab];
+    const dst_active_before = dst.tabs.items[dst.app_window.active_tab];
+    const src_input_before = src.total_terminal_input_bytes;
+    const dst_input_before = dst.total_terminal_input_bytes;
+
+    var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    dst.allocator = failing.allocator();
+    var moved_buf: [8]u64 = undefined;
+    const failed = src.moveWorkspaceToSession(dst, 1, &moved_buf);
+    dst.allocator = allocator;
+
+    try std.testing.expectError(error.OutOfMemory, failed);
+    try std.testing.expectEqual(src_tabs_before, src.tabs.items.len);
+    try std.testing.expectEqual(dst_tabs_before, dst.tabs.items.len);
+    try std.testing.expectEqual(src_active_before, src.tabs.items[src.app_window.active_tab]);
+    try std.testing.expectEqual(dst_active_before, dst.tabs.items[dst.app_window.active_tab]);
+    try std.testing.expect(moved.preedit.active());
+    try std.testing.expect(destination.preedit.active());
+    try std.testing.expectEqual(@as(?u64, moved.id), src.ime_terminal_target_id);
+    try std.testing.expectEqual(@as(?u64, destination.id), dst.ime_terminal_target_id);
+    try std.testing.expectEqual(src_input_before, src.total_terminal_input_bytes);
+    try std.testing.expectEqual(dst_input_before, dst.total_terminal_input_bytes);
+    try std.testing.expect(src.pending_pastes.get(moved.id) == null); // source preflight의 새 empty entry도 rollback.
+    try std.testing.expectEqual(@as(usize, 0), dst.pending_pastes.get(destination.id).?.buf.items.len);
+
+    _ = try src.moveWorkspaceToSession(dst, 1, &moved_buf);
+    try std.testing.expect(!moved.preedit.active());
+    try std.testing.expect(!destination.preedit.active());
+    try std.testing.expect(src.ime_terminal_target_id == null);
+    try std.testing.expect(dst.ime_terminal_target_id == null);
+    try std.testing.expectEqual(src_input_before + "한".len, src.total_terminal_input_bytes);
+    try std.testing.expectEqual(dst_input_before + "둘".len, dst.total_terminal_input_bytes);
+}
+
+test "moveWorkspaceToSession transfer preflight OOM occurs before either composition commit" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const src = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(src);
+    defer src.deinit();
+    const dst = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(dst);
+    defer dst.deinit();
+
+    try addMoveTestWorkspace(src, "transfer-preflight-oom");
+    const moved = src.tabs.items[1].activeTerm().surface;
+    const destination = dst.activeSurface();
+    src.imeMarked("한");
+    dst.imeMarked("둘");
+
+    // 양 composition reservation 자체는 무할당으로 통과하게 미리 queue/capacity를 만든다.
+    try src.pending_pastes.put(src.allocator, moved.id, .{});
+    try src.pending_pastes.getPtr(moved.id).?.buf.ensureUnusedCapacity(src.allocator, "한".len);
+    try dst.pending_pastes.put(dst.allocator, destination.id, .{});
+    try dst.pending_pastes.getPtr(destination.id).?.buf.ensureUnusedCapacity(dst.allocator, "둘".len);
+    try dst.tabs.ensureUnusedCapacity(dst.allocator, 1);
+    try dst.surface_ptrs.ensureUnusedCapacity(dst.allocator, 1);
+
+    const src_tab_count = src.tabs.items.len;
+    const dst_tab_count = dst.tabs.items.len;
+    const src_active = src.tabs.items[src.app_window.active_tab];
+    const dst_active = dst.tabs.items[dst.app_window.active_tab];
+    const src_input_before = src.total_terminal_input_bytes;
+    const dst_input_before = dst.total_terminal_input_bytes;
+    var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    dst.allocator = failing.allocator();
+    var moved_buf: [8]u64 = undefined;
+    const result = src.moveWorkspaceToSession(dst, 1, &moved_buf);
+    dst.allocator = allocator;
+
+    try std.testing.expectError(error.OutOfMemory, result);
+    try std.testing.expectEqual(src_tab_count, src.tabs.items.len);
+    try std.testing.expectEqual(dst_tab_count, dst.tabs.items.len);
+    try std.testing.expectEqual(src_active, src.tabs.items[src.app_window.active_tab]);
+    try std.testing.expectEqual(dst_active, dst.tabs.items[dst.app_window.active_tab]);
+    try std.testing.expect(moved.preedit.active());
+    try std.testing.expect(destination.preedit.active());
+    try std.testing.expectEqual(@as(?u64, moved.id), src.ime_terminal_target_id);
+    try std.testing.expectEqual(@as(?u64, destination.id), dst.ime_terminal_target_id);
+    try std.testing.expectEqual(src_input_before, src.total_terminal_input_bytes);
+    try std.testing.expectEqual(dst_input_before, dst.total_terminal_input_bytes);
+    try std.testing.expectEqual(@as(usize, 0), src.pending_pastes.get(moved.id).?.buf.items.len);
+    try std.testing.expectEqual(@as(usize, 0), dst.pending_pastes.get(destination.id).?.buf.items.len);
+}
+
+test "moveWorkspaceToSession same-session commits only when active owner changes" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+
+    try addMoveTestWorkspace(session, "same-session-background");
+    session.app_window.active_tab = 0;
+    session.recomputeActivePaneRect();
+    const old_active = session.activeSurface();
+    const moved = session.tabs.items[1].activeTerm().surface;
+    session.imeMarked("전");
+    const before = session.total_terminal_input_bytes;
+    var moved_buf: [8]u64 = undefined;
+    _ = try session.moveWorkspaceToSession(session, 1, &moved_buf);
+    try std.testing.expect(!old_active.preedit.active());
+    try std.testing.expectEqual(moved, session.activeSurface());
+    try std.testing.expectEqual(before + "전".len, session.total_terminal_input_bytes);
+
+    session.imeMarked("유");
+    const active_before = session.activeSurface();
+    const bytes_before_active_move = session.total_terminal_input_bytes;
+    _ = try session.moveWorkspaceToSession(session, session.app_window.active_tab, &moved_buf);
+    try std.testing.expectEqual(active_before, session.activeSurface());
+    try std.testing.expect(active_before.preedit.active());
+    try std.testing.expectEqual(@as(?u64, active_before.id), session.ime_terminal_target_id);
+    try std.testing.expectEqual(bytes_before_active_move, session.total_terminal_input_bytes);
+}
+
+test "mergeSessionInto commits source preedit and preserves destination active owner preedit" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const src = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(src);
+    defer src.deinit();
+    const dst = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(dst);
+    defer dst.deinit();
+
+    const source = src.activeSurface();
+    const destination = dst.activeSurface();
+    const destination_tab = dst.tabs.items[dst.app_window.active_tab];
+    src.imeMarked("원");
+    dst.imeMarked("대");
+    const src_before = src.total_terminal_input_bytes;
+    const dst_before = dst.total_terminal_input_bytes;
+    var moved_buf: [8]u64 = undefined;
+    _ = try src.mergeSessionInto(dst, &moved_buf);
+
+    try std.testing.expect(!source.preedit.active());
+    try std.testing.expectEqual(src_before + "원".len, src.total_terminal_input_bytes);
+    try std.testing.expectEqual(destination_tab, dst.tabs.items[dst.app_window.active_tab]);
+    try std.testing.expect(destination.preedit.active());
+    try std.testing.expectEqual(@as(?u64, destination.id), dst.ime_terminal_target_id);
+    try std.testing.expectEqual(dst_before, dst.total_terminal_input_bytes);
+
+    dst.commitComposition();
+    try std.testing.expect(!destination.preedit.active());
+    try std.testing.expectEqual(dst_before + "대".len, dst.total_terminal_input_bytes);
+}
+
+test "moveWorkspaceToSession transfers exact pending input remainder with destination offset zero" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const src = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(src);
+    defer src.deinit();
+    const dst = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(dst);
+    defer dst.deinit();
+
+    try addMoveTestWorkspace(src, "pending-input");
+    const moved_id = src.tabs.items[1].activeTerm().surface.id;
+    try std.testing.expect(src.queueInputBytes(moved_id, "sent:EXACT-REMAINDER", false));
+    src.pending_pastes.getPtr(moved_id).?.offset = "sent:".len;
+
+    var moved_buf: [8]u64 = undefined;
+    _ = try src.moveWorkspaceToSession(dst, 1, &moved_buf);
+
+    try std.testing.expect(src.pending_pastes.get(moved_id) == null);
+    const transferred = dst.pending_pastes.get(moved_id).?;
+    try std.testing.expectEqual(@as(usize, 0), transferred.offset);
+    try std.testing.expectEqualStrings("EXACT-REMAINDER", transferred.buf.items);
+}
+
+test "mergeSessionInto transfers exact pending input remainder with destination offset zero" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const src = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(src);
+    defer src.deinit();
+    const dst = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(dst);
+    defer dst.deinit();
+
+    const moved_id = src.activeSurface().id;
+    try std.testing.expect(src.queueInputBytes(moved_id, "written|MERGE-REMAINDER", false));
+    src.pending_pastes.getPtr(moved_id).?.offset = "written|".len;
+
+    var moved_buf: [8]u64 = undefined;
+    _ = try src.mergeSessionInto(dst, &moved_buf);
+
+    try std.testing.expect(src.pending_pastes.get(moved_id) == null);
+    const transferred = dst.pending_pastes.get(moved_id).?;
+    try std.testing.expectEqual(@as(usize, 0), transferred.offset);
+    try std.testing.expectEqualStrings("MERGE-REMAINDER", transferred.buf.items);
 }
 
 // 4e-5(크래시 안전 + 신호 정합): web Term이 든 워크스페이스를 다른 창으로 옮겨도(moveWorkspaceToSession =

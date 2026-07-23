@@ -27,6 +27,8 @@ pub const CellGrid = struct {
     size: terminal.Size,
     cursor: terminal.Cursor,
     cursor_shape: terminal.CursorShape,
+    viewport_scrolled: bool = false,
+    ambiguous_wide: bool = false,
     // kitty 이미지(#1 I4). placements=이 격자가 소유(값 복사), images=이 격자가 배열은 소유하되 각 view의 `pixels`는
     // **조립기 픽셀을 빌린다**(zero-copy — 매 프레임 MB 복사 회피). 격자는 apply마다 재구축되고 render는 mutex 아래
     // 읽으므로(RemoteScreen), 빌린 픽셀은 격자 수명 동안 유효하다(조립기가 mutex 밖에서 안 바뀜).
@@ -51,6 +53,8 @@ pub const CellGrid = struct {
         return .{
             .size = self.size,
             .cursor = self.cursor,
+            .viewport_scrolled = self.viewport_scrolled,
+            .ambiguous_wide = self.ambiguous_wide,
             .cursor_shape = self.cursor_shape,
             .cursor_blink = true, // wire는 blink를 따로 싣지 않는다(ScreenMeta.cursor=visible+shape). 정적 렌더라 무해.
             .cells = self.cells,
@@ -184,6 +188,8 @@ pub fn build(allocator: std.mem.Allocator, asm_: *const screen_assembler.ScreenA
         .size = .{ .cols = cols, .rows = rows },
         .cursor = .{ .col = asm_.cursor.col, .row = asm_.cursor.row, .visible = asm_.cursor.visible },
         .cursor_shape = if (asm_.cursor.shape <= 2) @enumFromInt(asm_.cursor.shape) else .block, // 0=block/1=underline/2=bar.
+        .viewport_scrolled = (asm_.modes & screen_stream.ModeBit.viewport_scrolled) != 0,
+        .ambiguous_wide = (asm_.modes & screen_stream.ModeBit.ambiguous_wide) != 0,
         .placements = placements,
         .images = images_slice,
         .prompt_marks = prompt_marks,
@@ -250,6 +256,9 @@ pub const RemoteScreen = struct {
     allocator: std.mem.Allocator,
     assembler: screen_assembler.ScreenAssembler,
     grid: CellGrid, // 현재 조립 상태를 편 cell 격자(apply마다 재구축, render가 읽음).
+    // hello_ack capability가 없는 구 live host는 mode bit 0을 "live bottom"으로 신뢰할 수 없다.
+    // attach를 소유한 RemoteRuntime이 협상 결과를 주입한다. 직접/현재 프로토콜 테스트는 true가 기본이다.
+    viewport_scrolled_known: bool = true,
     mutex: std.Io.Mutex = .init,
 
     const source_vtable = ScreenSource.VTable{ .render_snapshot = srcRenderSnapshot, .lock = srcLock, .unlock = srcUnlock };
@@ -362,7 +371,9 @@ pub const RemoteScreen = struct {
 
     fn srcRenderSnapshot(ctx: *anyopaque) terminal.RenderSnapshot {
         const self: *RemoteScreen = @ptrCast(@alignCast(ctx));
-        return self.grid.renderSnapshot();
+        var snapshot = self.grid.renderSnapshot();
+        snapshot.viewport_scrolled_known = self.viewport_scrolled_known;
+        return snapshot;
     }
     fn srcLock(ctx: *anyopaque, io: std.Io) void {
         const self: *RemoteScreen = @ptrCast(@alignCast(ctx));
@@ -520,6 +531,137 @@ test "remote screen: a Surface backed by RemoteScreen renders the assembled remo
     try testing.expectEqual(@as(u21, 's'), row1_c0);
 }
 
+test "remote screen: client-local preedit follows host width policy and latest grid without mutating it" {
+    const allocator = testing.allocator;
+    const io = testing.io;
+    const Surface = maru.session.Surface;
+
+    var core = try terminal.TerminalCore.init(allocator, .{ .cols = 8, .rows = 2 });
+    defer core.deinit();
+    core.ambiguous_wide = true;
+    try core.write("ab");
+    const initial = try screen_snapshot.projectSnapshot(allocator, &core, .{ .generation = 1 });
+    defer allocator.free(initial);
+
+    var rs = try RemoteScreen.init(allocator);
+    defer rs.deinit();
+    try rs.applySnapshot(initial, io);
+
+    var surface = try Surface.init(allocator, 1, .{ .cols = 8, .rows = 2 });
+    defer surface.deinit();
+    surface.remote = rs.screenSource();
+
+    surface.lockCore(io);
+    try testing.expect(surface.setPreeditLocked("③")); // EAW ambiguous: host policy=true일 때만 2셀
+    const composed = surface.renderSnapshot();
+    try testing.expect(composed.ambiguous_wide);
+    try testing.expectEqual(@as(u21, 0x2462), composed.cells[2].codepoint);
+    try testing.expectEqual(@as(u2, 2), composed.cells[2].width);
+    try testing.expect(composed.cells[3].continuation);
+    try testing.expect(composed.cells[2].style.reverse);
+    try testing.expect(!composed.cursor.visible);
+    try testing.expectEqual(@as(u21, ' '), rs.grid.cells[2].codepoint);
+    surface.unlockCore(io);
+
+    // preedit 활성 중에도 host delta가 canonical grid를 갱신한다. 다음 render는 저장해 둔 옛
+    // 화면이 아니라 최신 base cursor 위에 같은 client-local overlay를 다시 합성해야 한다.
+    try core.write("\r\nxy");
+    const delta = try screen_snapshot.computeDelta(allocator, initial, &core, .{ .generation = 1 });
+    defer delta.deinit(allocator);
+    try rs.applyDelta(delta.delta, io);
+
+    surface.lockCore(io);
+    const recomposed = surface.renderSnapshot();
+    try testing.expectEqual(@as(u21, 0x2462), recomposed.cells[10].codepoint); // row1 col2
+    try testing.expect(recomposed.cells[11].continuation);
+    try testing.expectEqual(@as(u21, ' '), rs.grid.cells[10].codepoint); // canonical host grid remains unchanged
+    try testing.expect(surface.setPreeditLocked(""));
+    const cleared = surface.renderSnapshot();
+    try testing.expectEqual(@as(u21, ' '), cleared.cells[10].codepoint);
+    try testing.expect(cleared.cursor.visible);
+    surface.unlockCore(io);
+}
+
+test "remote screen: preedit does not render at hidden origin while host viewport is scrolled" {
+    const allocator = testing.allocator;
+    const io = testing.io;
+    const Surface = maru.session.Surface;
+
+    var core = try terminal.TerminalCore.init(allocator, .{ .cols = 8, .rows = 2 });
+    defer core.deinit();
+    try core.write("one\r\ntwo\r\nthree");
+    const live_cursor = core.snapshot().cursor;
+    core.scrollViewport(1);
+    try testing.expect(core.viewOffset() > 0);
+    const scrolled_records = try screen_snapshot.projectSnapshot(allocator, &core, .{ .generation = 1 });
+    defer allocator.free(scrolled_records);
+
+    var rs = try RemoteScreen.init(allocator);
+    defer rs.deinit();
+    try rs.applySnapshot(scrolled_records, io);
+    var surface = try Surface.init(allocator, 2, .{ .cols = 8, .rows = 2 });
+    defer surface.deinit();
+    surface.remote = rs.screenSource();
+
+    surface.lockCore(io);
+    try testing.expect(surface.baseViewportScrolledLocked() == true);
+    try testing.expect(surface.setPreeditLocked("한"));
+    const hidden = surface.renderSnapshot();
+    try testing.expect(hidden.viewport_scrolled);
+    try testing.expectEqual(rs.grid.cells[0].codepoint, hidden.cells[0].codepoint);
+    try testing.expect(hidden.cursor.visible == rs.grid.cursor.visible);
+    try testing.expect(!hidden.cursor.visible);
+    try testing.expectEqual(live_cursor.row, surface.baseCursorLocked().?.row);
+    try testing.expectEqual(live_cursor.col, surface.baseCursorLocked().?.col);
+    surface.unlockCore(io);
+
+    // AppSession.imeBegin은 이 flag를 보고 host scroll_to_bottom을 요청한다. 그 결과 delta가
+    // 도착하면 같은 overlay가 live base cursor에 처음 나타난다.
+    core.scrollToBottom();
+    const live_delta = try screen_snapshot.computeDelta(allocator, scrolled_records, &core, .{ .generation = 1 });
+    defer live_delta.deinit(allocator);
+    try rs.applyDelta(live_delta.delta, io);
+
+    surface.lockCore(io);
+    const base_cursor = surface.baseCursorLocked().?;
+    const live = surface.renderSnapshot();
+    try testing.expect(!live.viewport_scrolled);
+    const cursor_index = @as(usize, base_cursor.row) * live.size.cols + base_cursor.col;
+    try testing.expectEqual(@as(u21, 0xD55C), live.cells[cursor_index].codepoint);
+    surface.unlockCore(io);
+}
+
+test "remote screen: old host without viewport capability suppresses cursor-anchored preedit" {
+    const allocator = testing.allocator;
+    const io = testing.io;
+    const Surface = maru.session.Surface;
+
+    var core = try terminal.TerminalCore.init(allocator, .{ .cols = 8, .rows = 2 });
+    defer core.deinit();
+    try core.write("base");
+    const records = try screen_snapshot.projectSnapshot(allocator, &core, .{ .generation = 1 });
+    defer allocator.free(records);
+
+    var rs = try RemoteScreen.init(allocator);
+    defer rs.deinit();
+    try rs.applySnapshot(records, io);
+    rs.viewport_scrolled_known = false;
+
+    var surface = try Surface.init(allocator, 3, .{ .cols = 8, .rows = 2 });
+    defer surface.deinit();
+    surface.remote = rs.screenSource();
+
+    surface.lockCore(io);
+    defer surface.unlockCore(io);
+    try testing.expect(surface.setPreeditLocked("한"));
+    const rendered = surface.renderSnapshot();
+    try testing.expect(!rendered.viewport_scrolled_known);
+    try testing.expectEqual(@as(u21, 'b'), rendered.cells[0].codepoint);
+    try testing.expectEqualSlices(terminal.Cell, rs.grid.cells, rendered.cells);
+    try testing.expect(surface.baseCursorLocked() == null);
+    try testing.expect(surface.baseViewportScrolledLocked() == null);
+}
+
 test "remote screen: build exposes kitty images + placements from the assembler (I4)" {
     const allocator = testing.allocator;
     // 이미지가 실린 snapshot 스트림: meta + image_blob(2x1 RGBA) + image_placement(row 1, col 2, z 3).
@@ -568,7 +710,7 @@ test "remote screen: build exposes kitty images + placements from the assembler 
 /// 조립/노출)을 잊지 않게 한다. 색·이미지·dirty가 조용히 유실됐던(리뷰 #1 blank 렌더) 재발을 막는 안전망이다.
 fn expectSnapshotParity(local: terminal.RenderSnapshot, remote: terminal.RenderSnapshot) !void {
     // ── comptime 필드 커버리지: RenderSnapshot 새 필드는 반드시 아래 둘 중 하나로 분류돼야 한다 ──
-    const compared = [_][]const u8{ "size", "cursor", "cursor_shape", "cells", "graphemes", "placements", "images", "prompt_marks", "dirty" };
+    const compared = [_][]const u8{ "size", "cursor", "cursor_shape", "viewport_scrolled", "viewport_scrolled_known", "ambiguous_wide", "cells", "graphemes", "placements", "images", "prompt_marks", "dirty" };
     const dropped = [_][]const u8{ "cursor_blink", "last_command_exit" };
     comptime {
         for (@typeInfo(terminal.RenderSnapshot).@"struct".fields) |f| {
@@ -591,6 +733,9 @@ fn expectSnapshotParity(local: terminal.RenderSnapshot, remote: terminal.RenderS
     try testing.expectEqual(local.cursor.row, remote.cursor.row);
     try testing.expectEqual(local.cursor.visible, remote.cursor.visible);
     try testing.expectEqual(local.cursor_shape, remote.cursor_shape);
+    try testing.expectEqual(local.viewport_scrolled, remote.viewport_scrolled);
+    try testing.expectEqual(local.viewport_scrolled_known, remote.viewport_scrolled_known);
+    try testing.expectEqual(local.ambiguous_wide, remote.ambiguous_wide);
     // cells: codepoint(0→space 정규화)·width·continuation·style(색 Color intent 포함 전 필드)·grapheme cluster(store id 번호는
     // 다를 수 있어 해석된 본체로 대조).
     try testing.expectEqual(local.cells.len, remote.cells.len);
@@ -652,6 +797,7 @@ test "remote screen: full RenderSnapshot parity with in-process (styles, colors,
     const allocator = testing.allocator;
     var core = try terminal.TerminalCore.init(allocator, .{ .cols = 20, .rows = 4 });
     defer core.deinit();
+    core.ambiguous_wide = true; // renderer policy bit도 host→client parity 대상으로 태운다.
 
     // 다양한 스타일·색축을 한 화면에 태운다 — 하나라도 원격 경로에서 유실되면 parity가 깨진다.
     try core.write("\x1b[1;31mB\x1b[0m"); // bold + indexed(ANSI 1 red)

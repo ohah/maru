@@ -13,9 +13,11 @@ const std = @import("std");
 const maru = @import("maru");
 const terminal = maru.terminal;
 const Surface = maru.session.Surface;
+const term_backend = maru.app.term_runtime_backend;
 const client_mod = @import("client.zig");
 const remote_screen = @import("remote_screen.zig");
 const screen_assembler = @import("screen_assembler.zig");
+const observation_wire = @import("observation_wire.zig");
 
 /// host에서 가져온 대기 OSC 9/777 데스크톱 알림 한 건(§6.32). title/body는 owned(caller가 deinit).
 pub const Notification = struct {
@@ -36,6 +38,7 @@ pub const RemoteRuntime = struct {
     runtime_id_hex: [32]u8, // host 발급 runtime_id(hex) — terminate에 되먹인다.
     stream_id: u64, // attach가 발급한 stream — input/resize/delta 라우팅.
     resize_seq: u64, // 단조 증가 client_sequence — registry가 이하 sequence를 stale로 거부하므로 매 resize마다 올린다.
+    observation: term_backend.RuntimeObservation, // host attach/event에서 받은 화면 외 full-state owned cache.
     remote_screen: remote_screen.RemoteScreen, // 조립기+cell 격자(surface의 화면 소스).
     surface: Surface, // 원격-backed(surface.remote = remote_screen.screenSource()). GUI가 이걸 렌더.
 
@@ -54,6 +57,8 @@ pub const RemoteRuntime = struct {
         self.allocator = allocator;
         self.io = io;
         self.resize_seq = 0;
+        self.observation = .{};
+        errdefer self.observation.deinit(allocator);
 
         // 1. runtime.spawn_full — host가 확장 spawn 계약으로 실 PTY를 띄우고 runtime_id를 준다.
         const spawn_params = buildSpawnParams(allocator, request, size) catch return error.OutOfMemory;
@@ -90,6 +95,8 @@ pub const RemoteRuntime = struct {
         self.allocator = allocator;
         self.io = io;
         self.resize_seq = 0;
+        self.observation = .{};
+        errdefer self.observation.deinit(allocator);
         self.runtime_id_hex = runtime_id_hex;
         // terminate errdefer 없음(pre-existing runtime을 attach 실패로 죽이지 않는다).
         try self.attachAndAssemble(surface_id, size);
@@ -104,6 +111,9 @@ pub const RemoteRuntime = struct {
         const attach_resp = try self.client.call("runtime.attach", attach_params);
         defer self.allocator.free(attach_resp);
         self.stream_id = client_mod.extractU64Field(attach_resp, "\"stream_id\":") orelse return error.AttachFailed;
+        // 새 host는 attach response에 current full metadata를 싣는다. 구 host/누락은 attach 자체를 깨지 않고 unavailable로
+        // 남겨 GUI가 empty와 혼동하지 않게 한다.
+        _ = self.applyObservationJson(attach_resp) catch {};
         // attach RPC가 controller lease를 잡은 뒤 snapshot/화면 조립이 실패하면 caller에는 아직 완성된
         // RemoteRuntime이 없어 detachClientSide를 부를 수 없다. 이 구간에서 반드시 lease와 demux 큐를 되돌린다.
         errdefer {
@@ -135,6 +145,7 @@ pub const RemoteRuntime = struct {
         self.terminateBestEffort();
         self.surface.deinit();
         self.remote_screen.deinit();
+        self.observation.deinit(self.allocator);
         self.* = undefined;
     }
 
@@ -148,6 +159,7 @@ pub const RemoteRuntime = struct {
         self.client.dropBufferedStream(self.stream_id); // 이 stream 앞으로 남은 demux 배치 회수(더는 pump 안 함 — §멀티 runtime).
         self.surface.deinit();
         self.remote_screen.deinit();
+        self.observation.deinit(self.allocator);
         self.* = undefined;
     }
 
@@ -168,22 +180,162 @@ pub const RemoteRuntime = struct {
         const params = std.fmt.bufPrint(&buf, "{{\"stream_id\":{d},\"cols\":{d},\"rows\":{d},\"client_sequence\":{d}}}", .{ self.stream_id, cols, rows, self.resize_seq }) catch return error.OutOfMemory;
         const resp = try self.client.call("runtime.resize", params);
         self.allocator.free(resp);
+        self.observation.size = .{ .cols = cols, .rows = rows };
     }
 
     /// 내 stream(§멀티 runtime demux)의 다음 화면 배치 하나를 소비해 원격 화면에 반영한다(§9/§10). **논블로킹** — 내 배치가
-    /// 없으면(idle) `false`를, 하나 소비했으면 `true`를 돌려준다(caller가 있는 동안 반복해 다 비운다 — `RemoteTermBackend`의
+    /// 없으면 `idle`, metadata만 적용했으면 `metadata`, 화면 batch를 적용했으면 `screen`을 돌려준다. caller는 있는 동안
+    /// 반복해 다 비우되 metadata를 PTY output activity로 세지 않는다(`RemoteTermBackend`의
     /// drain이 이걸로 `RuntimeEventPump.drainAvailable`과 같은 의미를 만든다). client가 `stream_id`로 demux하므로 여기 도달한
     /// 배치는 **항상 내 것**이다(예전엔 남의 배치를 free해 유실 — code-review #1; 이제 client가 남의 것은 버퍼해 그 runtime pump로
     /// 보낸다). host가 grid/alt 변화 시 delta 대신 fresh snapshot을 push하므로 둘 다 처리한다(is_snapshot이면 리셋, 아니면 증분).
-    pub fn pumpDelta(self: *RemoteRuntime) (client_mod.ClientError || screen_assembler.ApplyError)!bool {
-        const batch = (try self.client.readStreamBatch(self.allocator, self.stream_id)) orelse return false; // idle — 내 배치 없음.
+    pub const PumpResult = enum { idle, metadata, screen };
+
+    pub fn pumpDelta(self: *RemoteRuntime) (client_mod.ClientError || screen_assembler.ApplyError)!PumpResult {
+        var changed = try self.drainObservationEvents();
+        const maybe_batch = try self.client.readStreamBatch(self.allocator, self.stream_id);
+        if (maybe_batch == null) {
+            // readStreamBatch가 socket에서 event만 읽어 pending queue에 넣고 screen batch 없이 돌아올 수 있다.
+            changed = (try self.drainObservationEvents()) or changed;
+            return if (changed) .metadata else .idle;
+        }
+        const batch = maybe_batch.?;
         defer self.allocator.free(batch.bytes);
         if (batch.is_snapshot) {
             try self.remote_screen.applySnapshot(batch.bytes, self.io); // §9 fresh snapshot(grid/alt 변화) → 화면 리셋.
         } else {
             try self.remote_screen.applyDelta(batch.bytes, self.io);
         }
+        _ = try self.drainObservationEvents();
+        return .screen;
+    }
+
+    fn drainObservationEvents(self: *RemoteRuntime) error{OutOfMemory}!bool {
+        var changed = false;
+        while (self.client.takeEventForStream(self.stream_id)) |frame| {
+            defer frame.deinit(self.allocator);
+            changed = (try self.applyObservationJson(frame.payload)) or changed;
+        }
+        return changed;
+    }
+
+    /// attach response(`result.metadata`)와 후속 event(`metadata`)가 공유하는 parser. event는 full-state이므로 현재보다 큰
+    /// revision만 owned cache로 원자 교체한다. duplicate/stale revision은 무시하고, 손상 JSON은 기존 cache를 보존한다.
+    fn applyObservationJson(self: *RemoteRuntime, payload: []const u8) error{OutOfMemory}!bool {
+        const wire_revision = (try observation_wire.payloadRevision(self.allocator, payload)) orelse return false;
+        var parsed = std.json.parseFromSlice(std.json.Value, self.allocator, payload, .{}) catch return false;
+        defer parsed.deinit();
+        const root = switch (parsed.value) {
+            .object => |o| o,
+            else => return false,
+        };
+        if (root.get("result") == null) {
+            const event = jsonString(root.get("event") orelse return false) orelse return false;
+            if (!std.mem.eql(u8, event, "runtime.metadata")) return false;
+        }
+        const container = if (root.get("result")) |result| switch (result) {
+            .object => |o| o,
+            else => root,
+        } else root;
+        const revision = jsonU64(container.get("metadata_revision") orelse return false) orelse return false;
+        if (revision != wire_revision) return false;
+        if (revision == 0 or revision <= self.observation.revision) return false;
+        const metadata = switch (container.get("metadata") orelse return false) {
+            .object => |o| o,
+            else => return false,
+        };
+        const cwd = jsonString(metadata.get("cwd") orelse return false) orelse return false;
+        const title = jsonString(metadata.get("window_title") orelse return false) orelse return false;
+        const ssh_dest: ?[]const u8 = if (metadata.get("ssh_remote_dest")) |v| switch (v) {
+            .null => null,
+            .string => |s| s,
+            else => return false,
+        } else null;
+        const semantic_raw = jsonU64(metadata.get("semantic_state") orelse return false) orelse return false;
+        const semantic: terminal.SemanticPrompt = if (semantic_raw <= @intFromEnum(terminal.SemanticPrompt.command))
+            @enumFromInt(@as(u8, @intCast(semantic_raw)))
+        else
+            .unknown;
+        const alt_active = jsonBool(metadata.get("alt_active") orelse return false) orelse return false;
+        const app_cursor_keys = jsonBool(metadata.get("app_cursor_keys") orelse return false) orelse return false;
+        const alternate_scroll = jsonBool(metadata.get("alternate_scroll") orelse return false) orelse return false;
+        const observer_generation = jsonU64(metadata.get("observer_generation") orelse return false) orelse return false;
+        const title_generation_u64 = jsonU64(metadata.get("title_generation") orelse return false) orelse return false;
+        if (title_generation_u64 > std.math.maxInt(u32)) return false;
+        const cols_u64 = jsonU64(metadata.get("cols") orelse return false) orelse return false;
+        const rows_u64 = jsonU64(metadata.get("rows") orelse return false) orelse return false;
+        if (cols_u64 > std.math.maxInt(u16) or rows_u64 > std.math.maxInt(u16)) return false;
+        const foreground_available = jsonBool(metadata.get("foreground_available") orelse return false) orelse return false;
+        const foreground_pgid: ?i32 = if (metadata.get("foreground_pgid")) |v| switch (v) {
+            .null => null,
+            .integer => |n| if (n >= std.math.minInt(i32) and n <= std.math.maxInt(i32)) @intCast(n) else return false,
+            else => return false,
+        } else null;
+
+        var processes: [64]maru.pty.types.ForegroundProcessName = undefined;
+        var process_count: usize = 0;
+        if (metadata.get("processes")) |pv| switch (pv) {
+            .array => |arr| {
+                for (arr.items) |item| {
+                    if (process_count >= processes.len) break;
+                    const obj = switch (item) {
+                        .object => |o| o,
+                        else => return false,
+                    };
+                    const pid_raw = switch (obj.get("pid") orelse return false) {
+                        .integer => |n| n,
+                        else => return false,
+                    };
+                    if (pid_raw < std.math.minInt(i32) or pid_raw > std.math.maxInt(i32)) return false;
+                    const name = jsonString(obj.get("name") orelse return false) orelse return false;
+                    const len = @min(name.len, processes[process_count].bytes.len);
+                    processes[process_count] = .{ .pid = @intCast(pid_raw), .len = @intCast(len), .bytes = undefined };
+                    @memcpy(processes[process_count].bytes[0..len], name[0..len]);
+                    process_count += 1;
+                }
+            },
+            else => return false,
+        };
+
+        try self.observation.replace(self.allocator, .{
+            .availability = .current,
+            .revision = revision,
+            .observer_generation = observer_generation,
+            .title_generation = @intCast(title_generation_u64),
+            .size = .{ .cols = @intCast(cols_u64), .rows = @intCast(rows_u64) },
+            .cwd = cwd,
+            .window_title = title,
+            .ssh_remote_dest = ssh_dest,
+            .semantic_state = semantic,
+            .alt_active = alt_active,
+            .app_cursor_keys = app_cursor_keys,
+            .alternate_scroll = alternate_scroll,
+            .foreground_available = foreground_available,
+            .foreground_pgid = foreground_pgid,
+            .foreground_processes = processes[0..process_count],
+        });
         return true;
+    }
+
+    fn jsonU64(value: std.json.Value) ?u64 {
+        return switch (value) {
+            .integer => |n| if (n >= 0) @intCast(n) else null,
+            else => null,
+        };
+    }
+
+    fn jsonString(value: std.json.Value) ?[]const u8 {
+        return switch (value) {
+            .string => |s| s,
+            else => null,
+        };
+    }
+
+    fn jsonBool(value: std.json.Value) ?bool {
+        return switch (value) {
+            .bool => |b| b,
+            else => null,
+        };
     }
 
     /// host runtime을 종료한다(client-side 자원은 남긴다 — 회수는 `deinit`). `TermRuntimeBackend.close_and_detach`/`close`가
@@ -200,6 +352,23 @@ pub const RemoteRuntime = struct {
         const params = std.fmt.bufPrint(&buf, "{{\"stream_id\":{d}}}", .{self.stream_id}) catch return error.OutOfMemory;
         const resp = try self.client.call("runtime.resync", params);
         self.allocator.free(resp);
+    }
+
+    /// periodic event보다 강한 metadata barrier. SSH upload처럼 stale destination으로 실행하면 안 되는 user action이
+    /// 직전에 호출한다. host가 subscription revision/base와 같은 원자 상태에서 응답하므로 성공 뒤 observation은 host가
+    /// 응답을 만든 시점의 full-state다.
+    pub fn refreshObservation(self: *RemoteRuntime) client_mod.ClientError!void {
+        var buf: [64]u8 = undefined;
+        const params = std.fmt.bufPrint(&buf, "{{\"stream_id\":{d}}}", .{self.stream_id}) catch return error.OutOfMemory;
+        const before = self.observation.revision;
+        const resp = try self.client.call("runtime.observation", params);
+        defer self.allocator.free(resp);
+        const revision = client_mod.extractU64Field(resp, "\"metadata_revision\":") orelse return error.ProtocolError;
+        if (revision < before) return error.ProtocolError;
+        const changed = try self.applyObservationJson(resp);
+        if (revision > before and !changed) return error.ProtocolError;
+        if (self.observation.availability != .current or self.observation.revision != revision)
+            return error.ProtocolError;
     }
 
     /// host에 뷰포트 선택 span을 보내 host의 `extractSelection`(로컬과 같은 함수)으로 뽑은 텍스트를 받는다(§6b 원격 선택 복사).
@@ -488,6 +657,45 @@ test "remote runtime: spawn wire preserves extended SpawnRequest fields" {
     try std.testing.expect(std.mem.indexOf(u8, json, "\"rows\":43") != null);
 }
 
+test "remote runtime: metadata parser applies only newer coherent full-state revisions" {
+    const allocator = std.testing.allocator;
+    var rr: RemoteRuntime = undefined;
+    rr.allocator = allocator;
+    rr.observation = .{};
+    defer rr.observation.deinit(allocator);
+
+    const rev2 =
+        \\{"event":"runtime.metadata","metadata_revision":2,"metadata":{"cwd":"/repo","window_title":"work","ssh_remote_dest":"host",
+        \\"semantic_state":3,"alt_active":true,"app_cursor_keys":true,"alternate_scroll":true,"observer_generation":9,"title_generation":4,"cols":120,"rows":40,
+        \\"foreground_available":true,"foreground_pgid":55,"processes":[{"pid":55,"name":"claude"}]}}
+    ;
+    try std.testing.expect(try rr.applyObservationJson(rev2));
+    try std.testing.expectEqual(term_backend.ObservationAvailability.current, rr.observation.availability);
+    try std.testing.expectEqual(@as(u64, 2), rr.observation.revision);
+    try std.testing.expectEqualStrings("/repo", rr.observation.cwd.items);
+    try std.testing.expectEqualStrings("host", rr.observation.ssh_remote_dest.items);
+    try std.testing.expectEqual(terminal.SemanticPrompt.command, rr.observation.semantic_state);
+    try std.testing.expect(rr.observation.alt_active);
+    try std.testing.expectEqual(@as(?i32, 55), rr.observation.foreground_pgid);
+    try std.testing.expectEqual(@as(u16, 120), rr.observation.size.cols);
+    try std.testing.expectEqualStrings("claude", rr.observation.foreground_processes.items[0].slice());
+
+    const stale =
+        \\{"event":"runtime.metadata","metadata_revision":1,"metadata":{"cwd":"/stale","window_title":"old","ssh_remote_dest":null,
+        \\"semantic_state":0,"alt_active":false,"app_cursor_keys":false,"alternate_scroll":true,"observer_generation":1,"title_generation":1,"cols":80,"rows":24,
+        \\"foreground_available":false,"foreground_pgid":null,"processes":[]}}
+    ;
+    try std.testing.expect(!try rr.applyObservationJson(stale));
+    try std.testing.expectEqualStrings("/repo", rr.observation.cwd.items);
+
+    // malformed newer event is atomic: revision과 일부 문자열 어느 것도 바뀌지 않는다.
+    try std.testing.expect(!try rr.applyObservationJson(
+        "{\"metadata_revision\":3,\"metadata\":{\"cwd\":\"/partial\"}}",
+    ));
+    try std.testing.expectEqual(@as(u64, 2), rr.observation.revision);
+    try std.testing.expectEqualStrings("/repo", rr.observation.cwd.items);
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // process smoke (실 macOS: fork된 host에 client-side 원격 runtime을 띄우고 화면을 몬다)
 //
@@ -539,9 +747,16 @@ test "remote runtime: spawns over the wire, renders host screen into a Surface, 
     };
     defer client.deinit();
 
-    // client-side 원격 runtime: /bin/cat을 띄우고 원격-backed Surface를 세운다.
+    // client-side 원격 runtime: 화면 밖 metadata OSC를 먼저 emit한 뒤 cat으로 전환한다. 실제 독립 host reader가
+    // cwd/title/SSH destination을 소유 core에 파싱하고 event wire로 client cache까지 보내는 제품 경로를 함께 고정한다.
     var rr: RemoteRuntime = undefined;
-    try rr.spawn(&client, allocator, io, 1, .{ .command = "/bin/cat" }, .{ .cols = 40, .rows = 10 });
+    try rr.spawn(&client, allocator, io, 1, .{
+        .command = "/bin/sh",
+        .args = &.{
+            "-c",
+            "printf '\\033]7;file://localhost/tmp/remote-meta\\007\\033]2;remote-title\\007\\033]5379;ssh;user@workbox\\007'; exec /bin/cat",
+        },
+    }, .{ .cols = 40, .rows = 10 });
     defer rr.deinit();
 
     // Surface가 원격 화면을 렌더한다(초기 cat 화면 = 빈 40x10).
@@ -550,6 +765,18 @@ test "remote runtime: spawns over the wire, renders host screen into a Surface, 
     const cols0 = surface.renderSnapshot().size.cols;
     surface.unlockCore(io);
     try testing.expectEqual(@as(u16, 40), cols0);
+
+    var metadata_found = false;
+    var metadata_attempts: usize = 0;
+    while (metadata_attempts < 100 and !metadata_found) : (metadata_attempts += 1) {
+        _ = rr.pumpDelta() catch break;
+        metadata_found = std.mem.eql(u8, rr.observation.cwd.items, "/tmp/remote-meta");
+        if (!metadata_found) _ = usleep(20 * 1000);
+    }
+    try testing.expect(metadata_found);
+    try testing.expectEqualStrings("remote-title", rr.observation.window_title.items);
+    try testing.expect(rr.observation.ssh_remote_dest_present);
+    try testing.expectEqualStrings("user@workbox", rr.observation.ssh_remote_dest.items);
 
     // 입력을 보내면 host가 echo → 화면 row0이 바뀌고 delta가 온다. pumpDelta는 논블로킹이라 delta가 도착할 때까지 폴링한다
     // (host delta tick ~20ms). Surface에 "h"가 반영되는지 본다.

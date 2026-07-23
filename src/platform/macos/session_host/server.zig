@@ -39,6 +39,40 @@ pub const RuntimeSpawnParams = struct {
     rows: u16,
 };
 
+/// attach된 observe-capability client에만 보내는 화면 외 runtime full-state. public `runtime.list/get` redacted metadata와
+/// 섞지 않는다. 모든 slice는 caller 소유이며 `deinit`으로 회수한다. full-state라 중간 event가 coalesce되어 revision이
+/// 건너뛰어도 최신 한 건만 적용하면 복구된다.
+pub const RuntimeObservation = struct {
+    pub const Process = struct {
+        pid: i32,
+        name: []u8,
+    };
+
+    cwd: []u8,
+    window_title: []u8,
+    ssh_remote_dest: ?[]u8,
+    semantic_state: u8,
+    alt_active: bool,
+    app_cursor_keys: bool,
+    alternate_scroll: bool,
+    observer_generation: u64,
+    title_generation: u32,
+    cols: u16,
+    rows: u16,
+    foreground_available: bool,
+    foreground_pgid: ?i32,
+    processes: []Process,
+
+    pub fn deinit(self: *RuntimeObservation, allocator: std.mem.Allocator) void {
+        allocator.free(self.cwd);
+        allocator.free(self.window_title);
+        if (self.ssh_remote_dest) |dest| allocator.free(dest);
+        for (self.processes) |p| allocator.free(p.name);
+        allocator.free(self.processes);
+        self.* = undefined;
+    }
+};
+
 /// host의 실 runtime 소유(spawn/terminate)를 dispatch가 위임하는 vtable(`runtime.PtyIo` 선례, layering-and-portability.md
 /// §3.1). server.zig는 이 계약만 알아 codec 순수성을 지키고, host 측 `runtime_manager`(app `InProcessTermBackend` 재사용)가
 /// 이를 구현한다. read-only host(테스트·조회 전용)는 null이라 spawn/terminate 요청이 unauthorized로 떨어진다.
@@ -79,6 +113,9 @@ pub const RuntimeOps = struct {
     /// 준다. count=전체 매치 수, spans=보이는 **비현재** 매치의 flat 좌표, cur=현재 매치(index `cur_index`)의 뷰포트 span(안 보이면 `[]`).
     /// §6c-2 네비: `scroll`이면 host가 현재 매치의 abs 위치로 `scrollToAbs`해 화면을 이동한다(client가 그 매치를 보게).
     find: *const fn (ctx: *anyopaque, runtime_id: u128, query_hex: []const u8, cur_index: u32, scroll: bool, allocator: std.mem.Allocator) anyerror![]u8,
+    /// host 실제 core/PTY의 cwd/title/semantic/OSC5379/foreground를 한 번에 owned copy한다. screen snapshot과 분리된
+    /// attach/event full-state이며 public runtime.list/get에는 노출하지 않는다.
+    observation: *const fn (ctx: *anyopaque, runtime_id: u128, allocator: std.mem.Allocator) anyerror!RuntimeObservation,
 };
 
 /// §6b 원격 선택 복사용 뷰포트 선택 span(primitive — codec 순수 유지). client가 보고 있는 화면(host의 뷰포트) 기준
@@ -120,6 +157,9 @@ pub const Connection = struct {
     state: State = .pre_hello,
     selected_version: u16 = 0,
     client_kind: ClientKind = .unknown,
+    /// MRSH v2에 후속 비동기 event를 무조건 밀면 같은 major의 구 client가 protocol error로 종료한다. hello에서
+    /// 명시적으로 협상한 client에게만 runtime metadata attach/event/RPC를 노출한다.
+    runtime_metadata_v1: bool = false,
     /// 이 connection이 연 stream 구독 표(§9 attach subscription). key=`stream_id`, value=`Subscription`(runtime_id +
     /// 마지막 full snapshot base). input_bytes/resize/detach가 stream_id로 runtime을 찾고, delta push는 base 대비 diff한다.
     /// connection 종료 시 모두 detach하고 base를 해제한다. host가 stream_id를 발급한다(현재 per-connection 단조 — serial serve
@@ -131,7 +171,14 @@ pub const Connection = struct {
     /// 직후 첫 snapshot으로 채워지고, delta push마다 갱신된다. null이면 아직 base가 없다(read-only host 또는 snapshot 실패).
     /// `resync_pending`=client가 `runtime.resync`로 fresh snapshot 재요청(§9 desync 복구) — 다음 `collectDeltas`가 delta 대신
     /// 현재 full snapshot을 snapshot_chunk로 push하고 base를 그걸로 교체한다. client의 조립기 generation gap을 리셋한다.
-    pub const Subscription = struct { runtime_id: u128, base: ?[]u8 = null, resync_pending: bool = false };
+    pub const Subscription = struct {
+        runtime_id: u128,
+        base: ?[]u8 = null,
+        resync_pending: bool = false,
+        observation_base: ?[]u8 = null,
+        observation_revision: u64 = 0,
+        observation_ticks: u8 = 0,
+    };
 
     pub const State = enum { pre_hello, ready, closed };
 
@@ -146,6 +193,7 @@ pub const Connection = struct {
         while (it.next()) |e| {
             _ = self.registry.detach(e.value_ptr.runtime_id, e.key_ptr.*) catch {};
             if (e.value_ptr.base) |b| self.allocator.free(b);
+            if (e.value_ptr.observation_base) |b| self.allocator.free(b);
         }
         self.attachments.deinit(self.allocator);
         self.* = undefined;
@@ -188,6 +236,7 @@ pub const Connection = struct {
         const pmin = intField(obj, "protocol_min") orelse 0;
         const pmax = intField(obj, "protocol_max") orelse 0;
         self.client_kind = parseClientKind(strField(obj, "client_kind"));
+        self.runtime_metadata_v1 = stringArrayContains(obj, "capabilities", "runtime_metadata_v1");
 
         // 겹치는 major가 없으면 incompatible_version으로 끝낸다(§10). 이때는 응답을 준 뒤 닫는다.
         if (!(pmin <= protocol.version_major and protocol.version_major <= pmax)) {
@@ -271,6 +320,8 @@ pub const Connection = struct {
             return self.dispatchDetach(frame.header.request_id, params);
         } else if (std.mem.eql(u8, method, "runtime.resync")) {
             return self.dispatchResync(frame.header.request_id, params);
+        } else if (std.mem.eql(u8, method, "runtime.observation")) {
+            return self.dispatchObservation(frame.header.request_id, params);
         } else if (std.mem.eql(u8, method, "runtime.core_command")) {
             return self.dispatchCoreCommand(frame.header.request_id, params);
         } else if (std.mem.eql(u8, method, "runtime.selected_text")) {
@@ -285,6 +336,46 @@ pub const Connection = struct {
             return self.dispatchNotification(frame.header.request_id, params);
         }
         return self.replyError(frame.header.request_id, .invalid_request);
+    }
+
+    /// user action 직전 metadata barrier. 주기 event cache가 `.current`여도 마지막 100ms 안의 OSC 5379 전환은 아직
+    /// 도착하지 않았을 수 있으므로, 파일/이미지 SSH 라우팅은 이 RPC 응답 뒤에만 결정한다. 같은 subscription base/revision을
+    /// 갱신해 다음 periodic event와 단조 순서를 공유한다.
+    fn dispatchObservation(self: *Connection, request_id: u64, params: ?std.json.ObjectMap) HandleError!Action {
+        if (!self.runtime_metadata_v1) return self.replyError(request_id, .invalid_request);
+        const ops = self.runtime_ops orelse return self.replyError(request_id, .unauthorized);
+        const p = params orelse return self.replyError(request_id, .invalid_request);
+        const stream = intFieldU64(p, "stream_id") orelse return self.replyError(request_id, .invalid_request);
+        const sub = self.attachments.getPtr(stream) orelse return self.replyError(request_id, .runtime_not_found);
+        if (!reg.Capability.has(self.registry.capabilitiesOf(sub.runtime_id, stream), reg.Capability.observe))
+            return self.replyError(request_id, .unauthorized);
+
+        var observation = ops.observation(ops.ctx, sub.runtime_id, self.allocator) catch |err| switch (err) {
+            error.RuntimeNotFound => return self.replyError(request_id, .runtime_not_found),
+            else => return self.replyError(request_id, .internal),
+        };
+        defer observation.deinit(self.allocator);
+        const canonical = self.stringify(observation) catch return error.OutOfMemory;
+        var canonical_owned = true;
+        defer if (canonical_owned) self.allocator.free(canonical);
+        const changed = if (sub.observation_base) |old| !std.mem.eql(u8, old, canonical) else true;
+        const revision = if (changed) sub.observation_revision +% 1 else sub.observation_revision;
+        const body = try self.stringify(.{ .result = .{
+            .metadata_revision = revision,
+            .metadata = observation,
+        } });
+        defer self.allocator.free(body);
+        const action = try self.replyResult(request_id, body);
+
+        // response frame까지 소유한 뒤에만 server base를 전진시킨다. 이 전 OOM이면 다음 periodic event가 같은 변화를
+        // 다시 보낼 수 있어 client cache가 영구 누락되지 않는다.
+        if (changed) {
+            if (sub.observation_base) |old| self.allocator.free(old);
+            sub.observation_base = canonical;
+            sub.observation_revision = revision;
+            canonical_owned = false;
+        }
+        return action;
     }
 
     /// `runtime.notification`(§6.32): runtime의 대기 중인 OSC 9/777 알림을 빼서 `{title, body}`로 응답한다. read-only host면
@@ -425,6 +516,29 @@ pub const Connection = struct {
         };
         self.next_stream_id += 1;
 
+        // attach 응답에 **현재 full metadata**를 함께 싣는다. response 뒤 snapshot만 온다는 기존 client 순서를 깨지 않으면서,
+        // 재접속 GUI가 새 OSC를 기다리지 않고 cwd/title/SSH/agent 정보를 첫 frame 전에 복구한다. observation 실패는 화면
+        // attach를 깨지 않고 null(unavailable)로 둔다. public runtime.list/get redaction과는 별도 observe-capability 경로다.
+        var initial_observation: ?RuntimeObservation = null;
+        defer if (initial_observation) |*obs| obs.deinit(self.allocator);
+        if (self.runtime_metadata_v1) if (self.runtime_ops) |ops| {
+            initial_observation = ops.observation(ops.ctx, id.?, self.allocator) catch null;
+            if (initial_observation) |obs| {
+                const canonical = self.stringify(obs) catch null;
+                if (canonical) |bytes| {
+                    if (self.attachments.getPtr(stream)) |sub| {
+                        sub.observation_base = bytes;
+                        sub.observation_revision = 1;
+                    } else self.allocator.free(bytes);
+                } else {
+                    // response revision과 subscription base를 원자적으로 세운다. canonical을 소유하지 못했는데 rev1
+                    // metadata를 보내면 다음 성공 event도 rev1이라 client가 duplicate로 버린다.
+                    initial_observation.?.deinit(self.allocator);
+                    initial_observation = null;
+                }
+            }
+        };
+        const metadata_revision: u64 = if (self.attachments.get(stream)) |sub| sub.observation_revision else 0;
         const body = try self.stringify(.{ .result = .{
             .stream_id = stream,
             .granted = .{
@@ -433,6 +547,8 @@ pub const Connection = struct {
                 .resize = reg.Capability.has(outcome.granted, reg.Capability.resize),
             },
             .controller_busy = outcome.controller_busy,
+            .metadata_revision = metadata_revision,
+            .metadata = initial_observation,
         } });
         defer self.allocator.free(body);
         const reply_frame = self.encode(.response, request_id, 0, body) catch |e| switch (e) {
@@ -490,6 +606,7 @@ pub const Connection = struct {
         const sub = self.attachments.get(stream) orelse return self.replyError(request_id, .invalid_request);
         _ = self.registry.detach(sub.runtime_id, stream) catch {};
         if (sub.base) |b| self.allocator.free(b); // 이 stream의 delta base 해제.
+        if (sub.observation_base) |b| self.allocator.free(b);
         _ = self.attachments.remove(stream);
         const body = try self.stringify(.{ .result = .{ .detached = true } });
         defer self.allocator.free(body);
@@ -654,6 +771,43 @@ pub const Connection = struct {
         while (it.next()) |entry| {
             const stream = entry.key_ptr.*;
             const sub = entry.value_ptr;
+            // 화면과 별개인 runtime metadata full-state를 약 100ms(serve tick 20ms × 5)마다 관측한다. foreground process는
+            // terminal output 없이도 바뀌므로 screen delta 유무로 게이트하면 Claude/Codex 전환을 놓친다. 동일 canonical
+            // state는 전송하지 않고, 변화한 최신 full-state만 event 한 건으로 보낸다. client도 stream별 latest로 coalesce한다.
+            sub.observation_ticks +%= 1;
+            if (self.runtime_metadata_v1 and sub.observation_ticks >= 5) {
+                sub.observation_ticks = 0;
+                if (ops.observation(ops.ctx, sub.runtime_id, self.allocator) catch null) |obs_value| {
+                    var obs = obs_value;
+                    defer obs.deinit(self.allocator);
+                    const canonical = self.stringify(obs) catch null;
+                    if (canonical) |current| {
+                        const changed = if (sub.observation_base) |old| !std.mem.eql(u8, old, current) else true;
+                        if (changed) {
+                            const next_revision = sub.observation_revision +% 1;
+                            const event_body = self.stringify(.{
+                                .event = "runtime.metadata",
+                                .metadata_revision = next_revision,
+                                .metadata = obs,
+                            }) catch null;
+                            if (event_body) |json| {
+                                defer self.allocator.free(json);
+                                const frame = self.encodeWithFlags(.event, 0, stream, 0, json) catch null;
+                                if (frame) |owned_frame| {
+                                    list.append(self.allocator, owned_frame) catch {
+                                        self.allocator.free(owned_frame);
+                                        self.allocator.free(current);
+                                        return error.OutOfMemory;
+                                    };
+                                    if (sub.observation_base) |old| self.allocator.free(old);
+                                    sub.observation_base = current;
+                                    sub.observation_revision = next_revision;
+                                } else self.allocator.free(current);
+                            } else self.allocator.free(current);
+                        } else self.allocator.free(current);
+                    }
+                }
+            }
             // §9 desync 복구: resync 요청된 stream은 delta 대신 **fresh snapshot**을 push하고 base를 교체한다(client generation
             // gap 리셋). base-null skip보다 먼저 처리한다(base 없어도 snapshot은 보낼 수 있다). snapshot 실패는 이 tick만 건너뛰되
             // pending은 유지(다음 tick 재시도). send(snapshot_chunk)와 base는 별개 버퍼여야 하므로 base용으로 복사한다.
@@ -704,7 +858,7 @@ pub const Connection = struct {
         return self.stringify(.{
             .version = self.selected_version,
             .host_id = host_hex,
-            .capabilities = [_][]const u8{ "host.info", "runtime.list", "runtime.get" },
+            .capabilities = [_][]const u8{ "host.info", "runtime.list", "runtime.get", "runtime_metadata_v1" },
         });
     }
 
@@ -864,6 +1018,18 @@ fn strField(obj: std.json.ObjectMap, key: []const u8) ?[]const u8 {
         .string => |s| s,
         else => null,
     };
+}
+
+fn stringArrayContains(obj: std.json.ObjectMap, key: []const u8, needle: []const u8) bool {
+    const array = switch (obj.get(key) orelse return false) {
+        .array => |items| items,
+        else => return false,
+    };
+    for (array.items) |value| switch (value) {
+        .string => |s| if (std.mem.eql(u8, s, needle)) return true,
+        else => {},
+    };
+    return false;
 }
 
 const SpawnFieldError = error{InvalidSpawnField};
@@ -1156,7 +1322,7 @@ test "server: oversize result replies payload_too_large instead of dropping the 
     }
     var conn = Connection.init(allocator, 0xF00D, &registry);
     {
-        const h = try feedJson(&conn, .hello, 1, "{\"protocol_min\":2,\"protocol_max\":2}");
+        const h = try feedJson(&conn, .hello, 1, "{\"protocol_min\":2,\"protocol_max\":2,\"capabilities\":[\"runtime_metadata_v1\"]}");
         if (h.frame) |f| f.deinit(allocator);
     }
     // cap 초과 응답은 connection을 끊지 않고 payload_too_large typed error로 돌아오며 상관 request_id를 유지한다.
@@ -1174,7 +1340,7 @@ test "server: unknown method returns invalid_request; a request before hello clo
     defer registry.deinit();
     var conn = Connection.init(testing.allocator, 1, &registry);
     {
-        const h = try feedJson(&conn, .hello, 1, "{\"protocol_min\":2,\"protocol_max\":2}");
+        const h = try feedJson(&conn, .hello, 1, "{\"protocol_min\":2,\"protocol_max\":2,\"capabilities\":[\"runtime_metadata_v1\"]}");
         if (h.frame) |f| f.deinit(testing.allocator);
     }
     const r = try feedJson(&conn, .request, 2, "{\"method\":\"no.such.method\"}");
@@ -1246,6 +1412,7 @@ const FakeRuntimeOps = struct {
     last_find_query_hex_len: usize = 0,
     last_find_cur: u32 = 0,
     last_find_scroll: bool = false,
+    observation_version: u8 = 0,
 
     fn spawnFn(ctx: *anyopaque, params: RuntimeSpawnParams) anyerror!u128 {
         const self: *FakeRuntimeOps = @ptrCast(@alignCast(ctx));
@@ -1352,8 +1519,36 @@ const FakeRuntimeOps = struct {
         self.last_find_scroll = scroll;
         return allocator.dupe(u8, "{\"count\":2,\"cur\":[0,0,0,2],\"spans\":[1,2,1,5]}");
     }
+    fn observationFn(ctx: *anyopaque, runtime_id: u128, allocator: std.mem.Allocator) anyerror!RuntimeObservation {
+        const self: *FakeRuntimeOps = @ptrCast(@alignCast(ctx));
+        _ = runtime_id;
+        const cwd = try allocator.dupe(u8, if (self.observation_version == 0) "/tmp/project" else "/tmp/project-next");
+        errdefer allocator.free(cwd);
+        const title = try allocator.dupe(u8, "project");
+        errdefer allocator.free(title);
+        const dest = try allocator.dupe(u8, "workbox");
+        errdefer allocator.free(dest);
+        const processes = try allocator.alloc(RuntimeObservation.Process, 0);
+        errdefer allocator.free(processes);
+        return .{
+            .cwd = cwd,
+            .window_title = title,
+            .ssh_remote_dest = dest,
+            .semantic_state = 2,
+            .alt_active = false,
+            .app_cursor_keys = false,
+            .alternate_scroll = true,
+            .observer_generation = 7,
+            .title_generation = 3,
+            .cols = 80,
+            .rows = 24,
+            .foreground_available = true,
+            .foreground_pgid = 42,
+            .processes = processes,
+        };
+    }
     fn ops(self: *FakeRuntimeOps) RuntimeOps {
-        return .{ .ctx = self, .spawn = spawnFn, .terminate = terminateFn, .write_input = writeInputFn, .resize = resizeFn, .snapshot = snapshotFn, .delta = deltaFn, .notification = notificationFn, .core_command = coreCommandFn, .selected_text = selectedTextFn, .select_op = selectOpFn, .find = findFn };
+        return .{ .ctx = self, .spawn = spawnFn, .terminate = terminateFn, .write_input = writeInputFn, .resize = resizeFn, .snapshot = snapshotFn, .delta = deltaFn, .notification = notificationFn, .core_command = coreCommandFn, .selected_text = selectedTextFn, .select_op = selectOpFn, .find = findFn, .observation = observationFn };
     }
 };
 
@@ -1549,7 +1744,7 @@ test "server: attach streams the runtime snapshot as snapshot_chunk frames after
     defer conn.deinit();
     conn.runtime_ops = fake.ops();
     {
-        const h = try feedJson(&conn, .hello, 1, "{\"protocol_min\":2,\"protocol_max\":2}");
+        const h = try feedJson(&conn, .hello, 1, "{\"protocol_min\":2,\"protocol_max\":2,\"capabilities\":[\"runtime_metadata_v1\"]}");
         if (h.frame) |f| f.deinit(allocator);
     }
     // attach → 응답 frame + snapshot_chunk(end_stream) frame이 순서대로 온다(§10).
@@ -1562,11 +1757,141 @@ test "server: attach streams the runtime snapshot as snapshot_chunk frames after
     // frames[0] = attach 응답(stream_id 포함).
     try testing.expectEqual(protocol.Kind.response, frames[0].header.kind);
     try testing.expect(std.mem.indexOf(u8, frames[0].payload, "stream_id") != null);
+    try testing.expect(std.mem.indexOf(u8, frames[0].payload, "\"metadata_revision\":1") != null);
+    try testing.expect(std.mem.indexOf(u8, frames[0].payload, "\"cwd\":\"/tmp/project\"") != null);
+    try testing.expect(std.mem.indexOf(u8, frames[0].payload, "\"ssh_remote_dest\":\"workbox\"") != null);
     // frames[1] = snapshot_chunk(end_stream), attach가 발급한 stream_id(1), payload는 host가 투영한 snapshot 바이트.
     try testing.expectEqual(protocol.Kind.snapshot_chunk, frames[1].header.kind);
     try testing.expect(protocol.Flags.hasEndStream(frames[1].header.flags));
     try testing.expectEqual(@as(u64, 1), frames[1].header.stream_id);
     try testing.expectEqualStrings("SNAPSHOT-BYTES", frames[1].payload);
+}
+
+test "server: runtime metadata changes emit one full-state event and unchanged polls stay silent" {
+    const allocator = testing.allocator;
+    var registry = reg.TerminalRuntimeRegistry.init(allocator);
+    defer registry.deinit();
+    _ = try registry.register(0xAA, 80, 24);
+
+    var fake: FakeRuntimeOps = .{};
+    var conn = Connection.init(allocator, 1, &registry);
+    defer conn.deinit();
+    conn.runtime_ops = fake.ops();
+    {
+        const h = try feedJson(&conn, .hello, 1, "{\"protocol_min\":2,\"protocol_max\":2,\"capabilities\":[\"runtime_metadata_v1\"]}");
+        if (h.frame) |f| f.deinit(allocator);
+    }
+    {
+        const frames = try feedExpectFrames(&conn, .request, 2, "{\"method\":\"runtime.attach\",\"params\":{\"runtime_id\":\"aa\",\"mode\":\"observer\"}}");
+        defer {
+            for (frames) |f| f.deinit(allocator);
+            allocator.free(frames);
+        }
+    }
+
+    // cadence 전 네 tick은 metadata event가 없다(screen fake delta만 한 프레임).
+    for (0..4) |_| {
+        const frames = (try conn.collectDeltas()).?;
+        defer {
+            for (frames) |wire| allocator.free(wire);
+            allocator.free(frames);
+        }
+        try testing.expectEqual(@as(usize, 1), frames.len);
+    }
+
+    fake.observation_version = 1;
+    const changed = (try conn.collectDeltas()).?;
+    defer {
+        for (changed) |wire| allocator.free(wire);
+        allocator.free(changed);
+    }
+    try testing.expectEqual(@as(usize, 2), changed.len); // metadata event + screen delta
+    var parser = framing.FrameParser.init(allocator);
+    defer parser.deinit();
+    try parser.push(changed[0]);
+    const event = (try parser.next()).?;
+    defer event.deinit(allocator);
+    try testing.expectEqual(protocol.Kind.event, event.header.kind);
+    try testing.expectEqual(@as(u64, 1), event.header.stream_id);
+    try testing.expect(std.mem.indexOf(u8, event.payload, "\"event\":\"runtime.metadata\"") != null);
+    try testing.expect(std.mem.indexOf(u8, event.payload, "\"metadata_revision\":2") != null);
+    try testing.expect(std.mem.indexOf(u8, event.payload, "\"cwd\":\"/tmp/project-next\"") != null);
+
+    // 같은 full-state로 다음 cadence까지 가도 event를 반복하지 않는다.
+    for (0..5) |_| {
+        const frames = (try conn.collectDeltas()).?;
+        defer {
+            for (frames) |wire| allocator.free(wire);
+            allocator.free(frames);
+        }
+        try testing.expectEqual(@as(usize, 1), frames.len);
+    }
+}
+
+test "server: runtime metadata requires hello capability and fresh observation shares the event revision base" {
+    const allocator = testing.allocator;
+    var registry = reg.TerminalRuntimeRegistry.init(allocator);
+    defer registry.deinit();
+    _ = try registry.register(0xAA, 80, 24);
+
+    // 같은 MRSH v2의 구 client는 capability가 없으므로 알 수 없는 async event를 받지 않는다.
+    var legacy_fake: FakeRuntimeOps = .{};
+    var legacy = Connection.init(allocator, 1, &registry);
+    defer legacy.deinit();
+    legacy.runtime_ops = legacy_fake.ops();
+    {
+        const h = try feedJson(&legacy, .hello, 1, "{\"protocol_min\":2,\"protocol_max\":2}");
+        if (h.frame) |f| f.deinit(allocator);
+    }
+    {
+        const frames = try feedExpectFrames(&legacy, .request, 2, "{\"method\":\"runtime.attach\",\"params\":{\"runtime_id\":\"aa\",\"mode\":\"observer\"}}");
+        defer {
+            for (frames) |f| f.deinit(allocator);
+            allocator.free(frames);
+        }
+        try testing.expect(std.mem.indexOf(u8, frames[0].payload, "\"metadata_revision\":0") != null);
+    }
+    legacy_fake.observation_version = 1;
+    for (0..5) |_| {
+        const frames = (try legacy.collectDeltas()).?;
+        defer {
+            for (frames) |wire| allocator.free(wire);
+            allocator.free(frames);
+        }
+        try testing.expectEqual(@as(usize, 1), frames.len); // screen delta only, no unnegotiated event.
+    }
+
+    // 새 client의 on-demand barrier는 periodic event와 같은 base/revision을 전진시킨다.
+    _ = try registry.register(0xBB, 80, 24);
+    var fresh_fake: FakeRuntimeOps = .{};
+    var fresh = Connection.init(allocator, 2, &registry);
+    defer fresh.deinit();
+    fresh.runtime_ops = fresh_fake.ops();
+    {
+        const h = try feedJson(&fresh, .hello, 1, "{\"protocol_min\":2,\"protocol_max\":2,\"capabilities\":[\"runtime_metadata_v1\"]}");
+        if (h.frame) |f| f.deinit(allocator);
+    }
+    {
+        const frames = try feedExpectFrames(&fresh, .request, 2, "{\"method\":\"runtime.attach\",\"params\":{\"runtime_id\":\"bb\",\"mode\":\"observer\"}}");
+        defer {
+            for (frames) |f| f.deinit(allocator);
+            allocator.free(frames);
+        }
+    }
+    fresh_fake.observation_version = 1;
+    const barrier = try feedJson(&fresh, .request, 3, "{\"method\":\"runtime.observation\",\"params\":{\"stream_id\":1}}");
+    defer if (barrier.frame) |f| f.deinit(allocator);
+    try testing.expect(std.mem.indexOf(u8, barrier.frame.?.payload, "\"metadata_revision\":2") != null);
+    try testing.expect(std.mem.indexOf(u8, barrier.frame.?.payload, "\"cwd\":\"/tmp/project-next\"") != null);
+    try testing.expectEqual(@as(u64, 2), fresh.attachments.get(1).?.observation_revision);
+    for (0..5) |_| {
+        const frames = (try fresh.collectDeltas()).?;
+        defer {
+            for (frames) |wire| allocator.free(wire);
+            allocator.free(frames);
+        }
+        try testing.expectEqual(@as(usize, 1), frames.len); // barrier state와 같아 metadata event 중복 없음.
+    }
 }
 
 test "server: read-only host attach replies without a snapshot stream" {

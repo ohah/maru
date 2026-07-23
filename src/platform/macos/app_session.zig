@@ -655,7 +655,7 @@ fn readGitBranch(io: std.Io, allocator: std.mem.Allocator, cwd: []const u8) ?[]c
 /// 이 함수는 경로만 파생해, copy-path·click-to-open 등 다른 소비자가 PUA 글리프 없는 깨끗한 경로를 쓸 수 있다.
 /// 파생값(영속 안 함) — 매 프레임 빌드라 owned 슬라이스를 호출부가 바로 해제한다.
 fn sidebarCwdPath(allocator: std.mem.Allocator, term: *Term) ![]const u8 {
-    const cwd = term.surface.core.currentCwd();
+    const cwd = if (term.rt.observation.availability != .unavailable) term.rt.observation.cwd.items else "";
     if (cwd.len == 0) return allocator.dupe(u8, "");
     const home: []const u8 = if (std.c.getenv("HOME")) |h| std.mem.span(h) else "";
     // $HOME 정확 경계(home 자체 또는 home/ 하위)일 때만 "~"로 — "/Users/xyz"가 "/Users/x"로 잘못 잡히지 않게.
@@ -1092,6 +1092,9 @@ const TermRuntime = struct {
     spawned_at_ns: i128 = 0,
     // 100ms probe에서 foreground pgid 변화만 싸게 감지해 kind를 즉시 재분류한다. 0=null/미관측.
     agent_observer_pgid: i32 = 0,
+    // 화면 외 runtime 관측의 caller-owned cache. in-process core와 host-backed event를 같은 SSOT로 노출해 AppSession이
+    // 원격 placeholder `surface.core`를 cwd/title/semantic/SSH/agent 출처로 오인하지 않게 한다.
+    observation: app.RuntimeObservation = .{},
 };
 
 // 이 테스트가 증명하는 것(그리고 터미널에서 왜 중요한가): persistent-session P2 seam의 완료 조건은 "GUI layout이
@@ -5480,6 +5483,24 @@ pub const AppSession = struct {
         return self.termBackend();
     }
 
+    /// 화면 외 runtime metadata cache를 갱신한다. host-backed Term은 placeholder core를 절대 읽지 않고 remote event
+    /// cache만 복사한다. in-process Term은 core가 곧 runtime SSOT이므로 title_generation(OSC 0/2/7/RIS)을 cheap gate로
+    /// 삼아 sidebar/frame hot path의 불필요한 lock+allocation을 피한다. `force`는 workspace/control snapshot처럼
+    /// semantic_state까지 즉시 coherent해야 하는 저빈도 경로용이다.
+    fn refreshTermObservation(self: *AppSession, term: *Term, include_foreground: bool, force: bool) void {
+        if (term.kind != .terminal or !term.rt.live_initialized or term.rt.terminated) return;
+        if (!force) {
+            if (term.surface.remote != null) return; // remote pump/poll이 event cache를 갱신한다.
+            const generation = term.surface.core.title_generation.load(.monotonic);
+            if (term.rt.observation.availability == .current and
+                term.rt.observation.title_generation == generation) return;
+        }
+        self.backendFor(term).readObservation(term.rt.handle, self.allocator, &term.rt.observation, include_foreground) catch {
+            if (term.rt.observation.availability == .current)
+                term.rt.observation.availability = .stale;
+        };
+    }
+
     /// **앱 전역** 원격 backend를 보장한다(§10). 이미 세워져 있으면(다른 창이) 재사용하고, 아니면 connect-or-launch로
     /// 세운다. best-effort — 실패면 모듈-var가 null로 남아 in-process로 폴백한다. exe=형제 `maru` CLI(launcher가 exec),
     /// base=`${XDG_CACHE_HOME:-$HOME/.cache}/maru`(discovery가 그 아래 `session-host/`를 씀). **allocator=`smp_allocator`**
@@ -5676,6 +5697,9 @@ pub const AppSession = struct {
         // pump를 **앱 전역 라우팅**에 바인딩(M3b) — 창을 옮겨도(M3d) surface_id 키드 라우팅이 그대로 유효하다(§8A.2).
         // backend가 handle의 live PTY 이벤트 큐로 pump를 만든다(계약이 LivePtySession.pump로 위임).
         term.rt.pump = try be.pump(id);
+        // 첫 sidebar/title/SSH/agent frame 전에 initial observation을 확보한다. 새 host는 attach response에 full metadata를
+        // 싣고, in-process는 실제 core/PTY를 lock-copy한다. 구 host는 unavailable로 남아 empty와 구분된다.
+        be.readObservation(id, self.allocator, &term.rt.observation, true) catch {};
         return term;
     }
 
@@ -5728,6 +5752,7 @@ pub const AppSession = struct {
         if (term.git_branch) |b| self.allocator.free(b);
         if (term.git_branch_cwd) |c| self.allocator.free(c);
         term.auto_title.deinit(self.allocator);
+        term.rt.observation.deinit(self.allocator);
         self.allocator.destroy(term);
     }
 
@@ -6041,9 +6066,21 @@ pub const AppSession = struct {
     fn termHasRunningJob(term: *Term, io: std.Io) bool {
         if (!term.rt.live_initialized) return false;
         if (term.surface.process_state == .exited) return false;
-        term.surface.lockCore(io);
-        defer term.surface.unlockCore(io);
-        return !term.surface.core.cursorIsAtPrompt();
+        // in-process core가 실제 runtime SSOT다. 테스트의 직접 fixture mutate뿐 아니라 닫기 직전 최신 OSC 133 상태를
+        // 별도 cache cadence 없이 즉시 본다.
+        if (term.surface.remote == null) {
+            term.surface.lockCore(io);
+            defer term.surface.unlockCore(io);
+            return !term.surface.core.cursorIsAtPrompt();
+        }
+        if (term.rt.observation.availability != .unavailable) {
+            return term.rt.observation.alt_active or switch (term.rt.observation.semantic_state) {
+                .prompt, .input => false,
+                .command, .unknown => true,
+            };
+        }
+        // 구 remote host/metadata 미확정은 "idle"로 위장하지 않고 확인을 요구한다.
+        return true;
     }
 
     fn paneHasRunningJob(pane: *Pane, io: std.Io) bool {
@@ -8815,12 +8852,12 @@ pub const AppSession = struct {
     }
 
     fn focusedTermCwd(self: *AppSession, buf: []u8) ?[]const u8 {
-        const surface = (self.cwdSourceTerm() orelse return null).surface;
-        surface.lockCore(self.io);
-        defer surface.unlockCore(self.io);
-        const cwd = usableRestoreCwd(surface.core.currentCwd()) orelse return null;
+        const term = self.cwdSourceTerm() orelse return null;
+        self.refreshTermObservation(term, false, false);
+        if (term.rt.observation.availability == .unavailable) return null;
+        const cwd = usableRestoreCwd(term.rt.observation.cwd.items) orelse return null;
         if (cwd.len > buf.len) return null; // 방어(usableRestoreCwd가 이미 max_path_bytes 미만 보장)
-        @memcpy(buf[0..cwd.len], cwd); // 락 아래 복사 — 반환 슬라이스를 core.cwd 수명에서 분리
+        @memcpy(buf[0..cwd.len], cwd); // runtime observation owned cache → spawn용 caller buffer
         return buf[0..cwd.len];
     }
 
@@ -15740,7 +15777,7 @@ pub const AppSession = struct {
         const term = tab.activePane().activeTerm();
         const name = workspaceLabel(tab);
         const branch = self.termGitBranch(term) orelse "";
-        const folder = term.surface.core.currentCwd();
+        const folder = if (term.rt.observation.availability != .unavailable) term.rt.observation.cwd.items else "";
         return std.ascii.indexOfIgnoreCase(name, query) != null or
             std.ascii.indexOfIgnoreCase(branch, query) != null or
             std.ascii.indexOfIgnoreCase(folder, query) != null;
@@ -17059,9 +17096,14 @@ pub const AppSession = struct {
         // 인코딩한다(아래 frame_loop 경로). 스크롤 키라 '타이핑하면 바닥으로' 로직보다 먼저 처리해
         // 매 PageUp마다 뷰가 바닥으로 튀지 않게 한다.
         if (self.surface_initialized) {
-            const page_alt_active = blk: {
-                // alt_active는 리더가 락 아래 토글 — 같은 락으로 읽는다(docs/io-render-threading.md PR3).
-                const s = self.activeSurface();
+            const active_term = self.activePane().activeTerm();
+            const page_alt_active = if (active_term.surface.remote != null)
+                (if (active_term.rt.observation.availability == .unavailable)
+                    true // host mode 미확정이면 Page 키를 scrollback으로 삼키지 않고 PTY 경로로 보낸다.
+                else
+                    active_term.rt.observation.alt_active)
+            else blk: {
+                const s = active_term.surface;
                 s.lockCore(self.io);
                 defer s.unlockCore(self.io);
                 break :blk s.core.alt_active;
@@ -17579,12 +17621,29 @@ pub const AppSession = struct {
     fn scrollSurfaceLines(self: *AppSession, surface: *maru.session.Surface, lines: i32) void {
         if (lines == 0) return;
         const core = &surface.core;
-        // alt+alternate_scroll 판정 + (alt면) encodeKey는 코어 read라 메인 락-아래(읽기는 위임 안 함, §9.1).
-        // non-alt의 scrollViewport(코어 mutate)는 full (a)(docs/io-render-threading.md §9 P3-4)로 reader에 위임한다.
         var is_alt = false;
         var key_buffer: [terminal.input.encoded_key_buffer_len]u8 = undefined;
         var alt_len: usize = 0;
-        {
+        if (surface.remote != null) {
+            const loc = self.findTermWhere(surface.id, struct {
+                fn pred(id: u64, term: *Term) bool {
+                    return term.kind == .terminal and term.surface.id == id;
+                }
+            }.pred) orelse return;
+            const term = loc.pane.terms.items[loc.term_index];
+            if (term.rt.observation.availability == .unavailable) return;
+            const observation = &term.rt.observation;
+            if (observation.alt_active and observation.alternate_scroll) {
+                is_alt = true;
+                const bytes = if (lines > 0)
+                    (if (observation.app_cursor_keys) "\x1bOA" else "\x1b[A")
+                else
+                    (if (observation.app_cursor_keys) "\x1bOB" else "\x1b[B");
+                @memcpy(key_buffer[0..bytes.len], bytes);
+                alt_len = bytes.len;
+            }
+        } else {
+            // local alt+alternate_scroll 판정 + key encoding은 실제 core lock 아래.
             surface.lockCore(self.io);
             defer surface.unlockCore(self.io);
             if (core.alt_active and core.alternate_scroll) {
@@ -19573,12 +19632,33 @@ pub const AppSession = struct {
     pub fn handleDroppedFiles(self: *AppSession, paths_nul: []const u8) void {
         if (!self.surface_initialized or paths_nul.len == 0) return;
         if (self.structuralPasteBlocked()) return;
+        const active_term = self.activePane().activeTerm();
+        if (active_term.kind == .terminal) {
+            self.backendFor(active_term).refreshObservation(
+                active_term.rt.handle,
+                self.allocator,
+                &active_term.rt.observation,
+                false,
+            ) catch {
+                // periodic cache의 current는 backend 최신 상태라는 뜻이 아니다. user action 직전 barrier가 실패하면
+                // 예전/빈 OSC 5379 destination으로 업로드하거나 로컬 경로를 원격 셸에 붙이지 않는다.
+                if (active_term.rt.observation.availability == .current)
+                    active_term.rt.observation.availability = .stale;
+                self.showNotice("세션 정보를 동기화하지 못했습니다. 파일 전송을 다시 시도해주세요.");
+                return;
+            };
+        }
         // **대상 surface를 지금 고정한다** — 드롭 지점의 pane(routeDropAtPoint가 이미 활성으로 만들었다).
         // 원격 업로드는 백그라운드 스레드라 **완료까지 비동기 구간**이 있고, 그 사이 사용자가 pane을 옮기면
         // 옛 코드는 완료 시점의 activeSurface에 경로를 붙였다(드롭한 pane이 아니라). id를 업로드 job에 실어
         // 결과가 원래 pane으로 돌아오게 한다.
         const target_id = self.activeSurface().id;
+        const known_remote_ssh = active_term.kind == .terminal and active_term.rt.observation.ssh_remote_dest_present;
         const rup = self.remoteUploadContext() orelse {
+            if (known_remote_ssh) {
+                self.showNotice("원격 파일 전송을 준비하지 못했습니다. 로컬 경로를 붙여넣지 않았습니다.");
+                return;
+            }
             self.pasteTextTo(target_id, paths_nul, true); // 로컬 세션(또는 dest/ctl 못 구함): 기존 경로 paste
             return;
         };
@@ -19591,8 +19671,8 @@ pub const AppSession = struct {
             self.startUpload(rup.ctl, rup.dest, path, target_id) catch continue; // 읽기/크기/spawn 실패는 그 파일만 스킵
             started += 1;
         }
-        // 한 파일도 못 올렸으면 사용자가 빈손이 되지 않게 로컬 경로라도 paste(graceful).
-        if (started == 0) self.pasteTextTo(target_id, paths_nul, true);
+        // SSH 원격으로 확정된 뒤 업로드가 실패하면 로컬 경로를 원격 shell에 붙이지 않는다.
+        if (started == 0) self.showNotice("원격 파일 전송을 시작하지 못했습니다. 파일 크기와 접근 권한을 확인해주세요.");
     }
 
     /// 클립보드 이미지(Cmd+V)를 처리한다. maru ssh 원격 세션이면 control socket으로 업로드하고 완료 시
@@ -19604,26 +19684,60 @@ pub const AppSession = struct {
         if (!self.surface_initialized or bytes.len == 0) return false;
         // true=consumed. 구조 owner에서는 no-op도 consumed로 돌려 Swift의 text fallback이 PTY로 새지 않게 한다.
         if (self.structuralPasteBlocked()) return true;
-        if (bytes.len > maru.cli.ssh.max_upload_bytes) return false; // 16MB 초과 — 로컬 처리로 폴백
-        const rup = self.remoteUploadContext() orelse return false; // 로컬 세션 — Swift가 기존 처리
+        const active_term = self.activePane().activeTerm();
+        if (active_term.kind == .terminal) {
+            self.backendFor(active_term).refreshObservation(
+                active_term.rt.handle,
+                self.allocator,
+                &active_term.rt.observation,
+                false,
+            ) catch {
+                if (active_term.rt.observation.availability == .current)
+                    active_term.rt.observation.availability = .stale;
+                self.showNotice("세션 정보를 동기화하지 못했습니다. 이미지 전송을 다시 시도해주세요.");
+                return true; // stale route에서는 Swift의 local temp-path fallback을 반드시 소비
+            };
+        }
+        const known_remote_ssh = active_term.kind == .terminal and active_term.rt.observation.ssh_remote_dest_present;
+        if (bytes.len > maru.cli.ssh.max_upload_bytes) {
+            if (known_remote_ssh) {
+                self.showNotice("원격 이미지 전송 한도는 16MB입니다. 로컬 붙여넣기로 전환하지 않았습니다.");
+                return true;
+            }
+            return false;
+        }
+        const rup = self.remoteUploadContext() orelse {
+            if (known_remote_ssh) {
+                self.showNotice("원격 이미지 전송을 준비하지 못했습니다. 로컬 붙여넣기로 전환하지 않았습니다.");
+                return true;
+            }
+            return false; // current + dest 없음 = 로컬 세션 — Swift가 기존 처리
+        };
         defer rup.deinit(self.allocator);
 
         // 클립보드 이미지엔 파일명이 없으므로 카운터로 고유 이름을 만든다(시간 API는 코어 결정성 위해 회피).
         self.upload_counter += 1;
-        const name = std.fmt.allocPrint(self.allocator, "pasted-{d}-{d}.png", .{ std.c.getpid(), self.upload_counter }) catch return false;
+        const name = std.fmt.allocPrint(self.allocator, "pasted-{d}-{d}.png", .{ std.c.getpid(), self.upload_counter }) catch {
+            self.showNotice("원격 이미지 전송을 준비할 메모리가 부족합니다. 로컬 붙여넣기로 전환하지 않았습니다.");
+            return true;
+        };
         const bytes_owned = self.allocator.dupe(u8, bytes) catch {
             self.allocator.free(name);
-            return false;
+            self.showNotice("원격 이미지 전송을 준비할 메모리가 부족합니다. 로컬 붙여넣기로 전환하지 않았습니다.");
+            return true;
         };
         // name/bytes 소유를 startUploadBytes로 넘긴다(성공/실패 무관 그쪽이 책임). 대상 surface는 지금 고정한다
         // (업로드 완료까지 비동기 구간 — 그 사이 pane이 바뀌어도 원래 pane에 붙는다).
-        self.startUploadBytes(rup.ctl, rup.dest, name, bytes_owned, self.activeSurface().id) catch return false;
+        self.startUploadBytes(rup.ctl, rup.dest, name, bytes_owned, self.activeSurface().id) catch {
+            self.showNotice("원격 이미지 전송을 시작하지 못했습니다. 로컬 붙여넣기로 전환하지 않았습니다.");
+            return true;
+        };
         return true;
     }
 
     /// maru ssh 원격 세션의 업로드 컨텍스트(목적지 + control socket 경로). 드롭(handleDroppedFiles)과
-    /// paste(handleDroppedImage) 핸들러가 공유한다 — 둘 다 "activeSurface의 sshRemoteDest를 core_mutex(lockCore)
-    /// 하에 복사 + HOME으로 controlSocketPath 계산"이 똑같이 필요해서 한 곳으로 모은다. 로컬 세션(sshRemoteDest
+    /// paste(handleDroppedImage) 핸들러가 공유한다 — 둘 다 runtime observation의 sshRemoteDest를 owned copy하고
+    /// HOME으로 controlSocketPath를 계산한다. 로컬 세션(sshRemoteDest
     /// 없음)·HOME 없음/빈 문자열·경로 계산 실패면 null(호출자가 각자 폴백). dest/ctl은 owned라 호출자가 deinit으로
     /// 해제한다(startUpload/startUploadBytes는 빌려 dupe한다).
     const RemoteUpload = struct {
@@ -19636,13 +19750,12 @@ pub const AppSession = struct {
     };
 
     fn remoteUploadContext(self: *AppSession) ?RemoteUpload {
-        const surface = self.activeSurface();
-        surface.lockCore(self.io);
-        const dest: ?[]u8 = if (surface.core.sshRemoteDest()) |d|
-            (self.allocator.dupe(u8, d) catch null)
+        const term = self.activePane().activeTerm();
+        if (term.kind != .terminal or term.rt.observation.availability != .current) return null;
+        const dest: ?[]u8 = if (term.rt.observation.ssh_remote_dest_present)
+            (self.allocator.dupe(u8, term.rt.observation.ssh_remote_dest.items) catch null)
         else
             null;
-        surface.unlockCore(self.io);
         const remote_dest = dest orelse return null; // 로컬 세션(또는 dupe OOM)
 
         // getenv는 HOME=""(빈 문자열)도 non-null로 주므로 빈 값을 가드한다(코드베이스 컨벤션) — 빈 HOME이면
@@ -20669,25 +20782,27 @@ pub const AppSession = struct {
         return self.theme_preset_persist != null; // 리스트가 아닌 optional이라 registry 밖 — 따로 본다
     }
 
-    /// OSC 7로 셸이 보고한 현재 cwd(percent-decode된 경로). 한 번도 안 받았으면 빈 슬라이스.
-    /// 반환은 core 소유로 다음 OSC 7/RIS/destroy까지 유효하다(별도 복사 없음 — native 최소).
-    /// Swift가 창 제목에 쓴다.
+    /// backend runtime observation으로 동기화한 현재 cwd(OSC 7, percent-decode된 경로). 한 번도 못 받았으면 빈
+    /// 슬라이스. 반환은 Term의 owned observation cache 소유로 다음 동기화/destroy까지 유효하다. Swift가 창 제목에 쓴다.
     pub fn currentCwd(self: *AppSession) []const u8 {
         if (!self.surface_initialized) return &.{};
-        return self.activeSurface().core.currentCwd();
+        const term = self.activePane().activeTerm();
+        self.refreshTermObservation(term, false, false);
+        if (term.kind != .terminal or term.rt.observation.availability == .unavailable) return &.{};
+        return term.rt.observation.cwd.items;
     }
 
     /// term의 git 브랜치(owned 캐시). 그 surface의 cwd(OSC 7)가 바뀌었을 때만 .git/HEAD를 walk-up해 재계산한다
     /// (사이드바는 매 프레임 빌드되므로 fs 읽기를 cwd 변경으로 게이트). 없으면 null. 반환은 term 소유(다음 cwd 변경/
     /// teardown까지 유효). 파생값이라 영속 안 함 — restore가 cwd에서 재도출.
     fn termGitBranch(self: *AppSession, term: *Term) ?[]const u8 {
-        return self.termGitBranchForCwd(term, term.surface.core.currentCwd());
+        self.refreshTermObservation(term, false, false);
+        const cwd = if (term.rt.observation.availability != .unavailable) term.rt.observation.cwd.items else "";
+        return self.termGitBranchForCwd(term, cwd);
     }
 
-    /// termGitBranch의 코어 무참조 변형 — 이미 확보한 `cwd`로 git 브랜치 캐시를 계산한다. 컨트롤 플레인 collector
-    /// (§5)가 cwd를 core_mutex 아래에서 복사해 두고, git .git/HEAD 읽기(blocking fs)는 락 밖에서 하도록 코어 read를
-    /// cwd 인자로 분리한다(sidebar 경로는 termGitBranch가 core.currentCwd()를 넘겨 기존 동작 그대로). 캐시 키·재계산
-    /// 로직은 단일 출처(재구현 금지).
+    /// 이미 확보한 runtime observation `cwd`로 git 브랜치 캐시를 계산한다. blocking .git/HEAD 읽기와 runtime 관측을
+    /// 분리하며, sidebar와 control-plane이 이 단일 파생 경로를 공유한다. 캐시 키·재계산 로직은 단일 출처(재구현 금지).
     fn termGitBranchForCwd(self: *AppSession, term: *Term, cwd: []const u8) ?[]const u8 {
         if (cwd.len == 0) return null;
         if (term.git_branch_cwd) |c| {
@@ -20771,13 +20886,14 @@ pub const AppSession = struct {
                         });
                         continue; // terminal 경로(core lock·cwd·git·at_prompt) 건너뜀
                     }
-                    // ── 코어 read는 surface core_mutex 아래에서 **복사만**(§5, 리더 스레드 evict/free 경합 방지) ──
-                    term.surface.lockCore(self.io);
-                    const sem = term.surface.core.semantic_state;
-                    const alt = term.surface.core.alt_active;
-                    const cwd_live = term.surface.core.currentCwd(); // core 소유(다음 OSC 7까지 유효) → 락 아래 복사
+                    self.refreshTermObservation(term, false, true);
+                    // runtime observation은 in-process core/host event 어느 쪽이든 caller-owned cache다. unavailable은
+                    // cwd 없음/idle로 위장하지 않고 null/unknown으로 보낸다.
+                    const observation_available = term.rt.observation.availability != .unavailable;
+                    const sem = if (observation_available) term.rt.observation.semantic_state else terminal.SemanticPrompt.unknown;
+                    const alt = if (observation_available) term.rt.observation.alt_active else false;
+                    const cwd_live = if (observation_available) term.rt.observation.cwd.items else "";
                     const cwd_copy: ?[]const u8 = if (cwd_live.len == 0) null else try arena.dupe(u8, cwd_live);
-                    term.surface.unlockCore(self.io);
 
                     // ── 나머지(§5 락 밖): at_prompt 매핑·agent·git .git/HEAD fs 읽기·title·DTO 조립 ──
                     const at_prompt = atPromptWire(sem, alt); // 3상(§3, unknown 보존)
@@ -20872,7 +20988,10 @@ pub const AppSession = struct {
         // 4e: 활성 Term이 web이면 sentinel core엔 OSC 제목이 없어 빈값이 나온다 — kind 파생 라벨("Browser"/
         // "Markdown", custom_name 우선)을 창 제목으로 쓴다(termLabel 단일 해석). terminal 경로는 그대로.
         if (!self.activeTermIsTerminal()) return termLabel(self.activePane().activeTerm());
-        return self.activeSurface().core.windowTitle();
+        const term = self.activePane().activeTerm();
+        self.refreshTermObservation(term, false, false);
+        if (term.rt.observation.availability == .unavailable) return &.{};
+        return term.rt.observation.window_title.items;
     }
 
     /// 전역(OS) 단축키 기술자 목록(global_hotkeys)을 loaded_config.global_bindings에서 다시 빌드한다. init이 한 번 부르고,
@@ -21261,8 +21380,8 @@ pub const AppSession = struct {
     }
 
     /// 이 창(AppSession)의 라이브 상태를 workspace restore 모델(maru.session.workspace.Window)로 캡처한다(R3). 탭→pane
-    /// split 트리→Term→surface를 걸어 선언적 상태만 모은다 — live PTY/process/grid는 안 담는다. cwd/title은 OSC
-    /// 권위 소스(core.currentCwd/windowTitle), command는 spawn argv[0](surface.command). split 트리는 *Pane leaf를
+    /// split 트리→Term→surface를 걸어 선언적 상태만 모은다 — live PTY/process/grid는 안 담는다. cwd/title은 host 또는
+    /// in-process backend의 runtime observation, command는 spawn argv[0](surface.command). split 트리는 *Pane leaf를
     /// pane 인덱스로 환원해 preorder TreeNode로 평탄화(직렬화 모델과 같은 형태). 멀티 창 전체 모델은 호출자(R5)가
     /// 각 세션의 Window를 모아 만든다. 모든 슬라이스·문자열은 `arena`가 소유한다(호출자가 deinit).
     /// is_active = 이 창이 저장 시점 key(활성) 창인가(Swift `window.isKeyWindow`). 재시작 복원 loop가 이 마커로
@@ -21284,7 +21403,6 @@ pub const AppSession = struct {
     }
 
     fn captureWorkspaceTab(self: *AppSession, arena: std.mem.Allocator, tab: *Tab) !maru.session.workspace.Tab {
-        _ = self;
         var panes: std.ArrayList(maru.session.workspace.Pane) = .empty;
         for (tab.panes.items) |pane| {
             var surfaces: std.ArrayList(maru.session.workspace.Surface) = .empty;
@@ -21292,7 +21410,11 @@ pub const AppSession = struct {
                 // 4e web Term은 sentinel core라 일반 surface로 직렬화하면 복원 시 셸로 오spawn된다 — capture서 스킵한다
                 // (workspace.Surface에 kind 필드가 없어 web 콘텐츠를 영속할 수 없다; Phase 5서 포맷에 kind 추가 전까지).
                 if (term.kind == .web) continue;
-                const core = &term.surface.core;
+                self.refreshTermObservation(term, false, true);
+                const observed_size = if (term.rt.observation.size.cols > 0 and term.rt.observation.size.rows > 0)
+                    term.rt.observation.size
+                else
+                    term.surface.core.size; // 구 host metadata 미지원 fallback(초기 layout size; 문자열/semantic 출처로는 안 씀)
                 // P3-e3-5: host-backed Term은 host_id + runtime_id를 함께 저장한다. runtime_id 단독으로 저장하면 host가
                 // 바뀐 뒤 같은 숫자 namespace를 잘못 attach할 수 있으므로 live capture는 둘 중 하나만 만들지 않는다.
                 var runtime_host_id: []const u8 = "";
@@ -21307,13 +21429,13 @@ pub const AppSession = struct {
                 try surfaces.append(arena, .{
                     // custom_name = 사용자 rename(owned, 없으면 ""), title = 자동 제목(OSC). 둘은 별도 필드로 저장한다.
                     .custom_name = try arena.dupe(u8, term.surface.custom_name orelse ""),
-                    .title = try arena.dupe(u8, core.windowTitle()),
-                    .cwd = try arena.dupe(u8, core.currentCwd()),
+                    .title = try arena.dupe(u8, if (term.rt.observation.availability != .unavailable) term.rt.observation.window_title.items else ""),
+                    .cwd = try arena.dupe(u8, if (term.rt.observation.availability != .unavailable) term.rt.observation.cwd.items else ""),
                     .command = try arena.dupe(u8, term.surface.command orelse ""),
                     .runtime_host_id = runtime_host_id,
                     .runtime_id = runtime_id,
-                    .cols = core.size.cols,
-                    .rows = core.size.rows,
+                    .cols = observed_size.cols,
+                    .rows = observed_size.rows,
                 });
             }
             // web-only pane(모든 Term이 web): surfaces가 비면 buildWorkspacePane이 error.EmptyPane로 **전체 복원을
@@ -21939,8 +22061,8 @@ pub const AppSession = struct {
                 core.size.cols, core.size.rows, core.screen.cursor.row, core.screen.cursor.col,
             });
         }
-        // OSC 7로 셸이 보고한 cwd(셸 통합이 emit하면 채워진다). 창 제목이 읽는 값을 데이터로 확인.
-        const cwd = core.currentCwd();
+        // 창 제목/사이드바와 같은 runtime observation cwd를 찍는다(host-backed placeholder core 오진 방지).
+        const cwd = self.activePane().activeTerm().rt.observation.cwd.items;
         if (cwd.len > 0) screen_diag.info("cwd={s}", .{cwd});
         var text: [240]u8 = undefined;
         var bg: [240]u8 = undefined;
@@ -21981,6 +22103,7 @@ pub const AppSession = struct {
     fn drainShellEventsForFrame(self: *AppSession) void {
         if (!self.surface_initialized) return;
         if (!self.activeTermIsTerminal()) return; // [4e-2, §6] 활성 web Term은 sentinel(셸 이벤트 없음) — skip
+        if (self.activePane().activeTerm().surface.remote != null) return; // host shell-event transport는 아직 없음; placeholder 진단 금지
         const core = &self.activeSurface().core;
         if (core.shellEvents().len == 0 and !core.shellEventsOverflowed()) return;
         if (diag_gate.maruDebugEnabled()) {
@@ -22013,19 +22136,29 @@ pub const AppSession = struct {
         if (!self.surface_initialized) return;
         // 모든 pane × 모든 Term을 보되 syscall은 ≈0.5s로 throttle한다. 화면에 카드/탭바가 실제로 보이는 탭만
         // 상태 변화 시 dirty해, background observer가 불필요한 프레임을 만들지 않는다.
-        var processes: [64]maru.pty.types.ForegroundProcessName = undefined;
         for (self.tabs.items, 0..) |tab, ti| {
             const displayed = self.agentDisplayVisible(ti); // 스피너/플래그/아이콘 재렌더 게이트(카드 or 활성 탭 탭바) — 탭 내 모든 Term 공유
             for (tab.panes.items) |pane| {
                 for (pane.terms.items) |term| {
                     if (!term.rt.live_initialized or term.rt.terminated) continue; // 종료(미reap) Term은 건너뜀(dispatchBell과 동형)
-                    const pgid = if (observer_probe) (self.backendFor(term).foregroundProcessGroup(term.rt.handle) orelse 0) else term.rt.agent_observer_pgid;
+                    const be = self.backendFor(term);
+                    be.readObservation(term.rt.handle, self.allocator, &term.rt.observation, periodic_kind_probe) catch {
+                        // 마지막 coherent snapshot은 유지하되 current로 가장하지 않는다. remote reconnect 동안 kind/state를
+                        // none/idle로 덮지 않는 것이 알림 누락보다 안전하다.
+                        if (term.rt.observation.availability == .current)
+                            term.rt.observation.availability = .stale;
+                    };
+                    const observation_current = term.rt.observation.availability == .current;
+                    const foreground_available = observation_current and term.rt.observation.foreground_available;
+                    const pgid = if (observer_probe and foreground_available)
+                        (term.rt.observation.foreground_pgid orelse 0)
+                    else
+                        term.rt.agent_observer_pgid;
                     const pgid_changed = observer_probe and pgid != term.rt.agent_observer_pgid;
-                    if (observer_probe) term.rt.agent_observer_pgid = pgid;
-                    if (periodic_kind_probe or pgid_changed) {
+                    if (observer_probe and foreground_available) term.rt.agent_observer_pgid = pgid;
+                    if ((periodic_kind_probe or pgid_changed) and foreground_available) {
                         const prev = term.agent_kind;
-                        const process_count = self.backendFor(term).foregroundProcessNames(term.rt.handle, &processes);
-                        term.agent_kind = classifyAgentProcesses(processes[0..process_count]);
+                        term.agent_kind = classifyAgentProcesses(term.rt.observation.foreground_processes.items);
                         if (diag_gate.maruDebugEnabled()) std.log.scoped(.agentdiag).info("kind={s} pgid_changed={} live={} term=0x{x}", .{ @tagName(term.agent_kind), pgid_changed, term.rt.live_initialized, @intFromPtr(term) });
                         if (term.agent_kind != prev) {
                             if (displayed) self.metal_dirty = true; // 보이는 Term의 에이전트 변화만 재렌더
@@ -22037,7 +22170,8 @@ pub const AppSession = struct {
                             term.agent_last_output_ms = 0;
                         }
                     }
-                    if (observer_probe and term.agent_kind != .none) self.pollAgentState(term, displayed);
+                    if (observer_probe and observation_current and term.agent_kind != .none)
+                        self.pollAgentState(term, displayed);
                 }
             }
         }
@@ -22051,32 +22185,25 @@ pub const AppSession = struct {
             .claude => .claude,
             .codex => .codex,
         };
-        var title_buf: [256]u8 = undefined;
-        var progress_buf: [64]u8 = undefined;
-        const generation = term.surface.core.observerGeneration();
+        const observation = &term.rt.observation;
+        if (observation.availability != .current) return;
+        const generation = observation.observer_generation;
         const now_ms = self.awakeMs();
         const activity_age_ms = now_ms -| term.agent_last_output_ms;
         const output_active = term.agent_last_output_ms != 0 and activity_age_ms <= agent_activity_window_ms;
         if (generation == term.agent_screen_generation and term.agent_state == .idle and !output_active and
             !term.agent_stabilizer.needsExpiryProbe()) return;
-        term.surface.lockCore(self.io);
-        const core = &term.surface.core;
-        const screen = core.dumpRecentTextUtf8(self.allocator, 12, 16 * 1024) catch null;
-        const title_len = @min(core.windowTitle().len, title_buf.len);
-        @memcpy(title_buf[0..title_len], core.windowTitle()[0..title_len]);
-        const progress_len = @min(core.agentProgress().len, progress_buf.len);
-        @memcpy(progress_buf[0..progress_len], core.agentProgress()[0..progress_len]);
-        core.clearAgentProgress();
-        term.surface.unlockCore(self.io);
+        const screen = self.backendFor(term).dumpRecentText(term.rt.handle, self.allocator, 12, 16 * 1024) catch null;
         defer if (screen) |owned| self.allocator.free(owned);
 
         term.agent_screen_generation = generation;
         const detection = maru.session.agent_observer.detect(agent, .{
             .screen = screen orelse "",
-            .osc_title = title_buf[0..title_len],
-            .osc_progress = progress_buf[0..progress_len],
+            .osc_title = observation.window_title.items,
+            .osc_progress = observation.agent_progress.items,
             .output_active = output_active,
         });
+        observation.clearAgentProgress();
         const previous = term.agent_state;
         const current = term.agent_stabilizer.observe(detection, now_ms);
         term.agent_state = current;
@@ -22089,25 +22216,36 @@ pub const AppSession = struct {
         }
     }
 
-    /// 모든 Term의 자동 제목 캐시(auto_title)를 core_mutex 하에 갱신한다 — termLabel(렌더 스레드)이 reader 스레드의
-    /// core.title/cwd free(OSC 0/2/7)와 경합하지 않게 owned 복사본을 만든다(io-render-threading PR3). 매 tick 호출.
+    /// 모든 Term의 자동 제목 캐시(auto_title)를 runtime observation에서 갱신한다. observation은 backend가 소유권을
+    /// 분리해 복사하므로 in-process reader와 host event 어느 쪽에서도 문자열 교체와 경합하지 않는다. 매 tick 호출.
     /// 라이브 windowTitle(OSC 제목 > cwd basename)이 비면 캐시를 비워 termLabel이 정적 surface.title로 폴백한다.
     /// OOM이면 append만 무시(라벨이 잠깐 비어 surface.title 폴백 — 안전). live_pty 미초기화 Term은 건너뛴다.
     ///
-    /// **P4-1(§12)**: 매 tick 전-Term lock(가장 넓은 팬아웃)을 없앤다 — 리더가 title/cwd 바꿀 때만 올리는
-    /// `core.title_generation`을 **lock 없이** 읽어(atomic acquire-load), 직전 반영값(`term.last_title_gen`)과 **다를 때만**
-    /// lock+복사한다. 제목은 드물게 바뀌므로 대부분 tick은 N atomic load(수 ns)만·lock 0회. lock 아래에서 generation을 다시
-    /// 읽어(리더는 같은 lock 아래 bump하므로 hold 중 안정) 방금 복사한 제목의 정확한 세대를 last_title_gen에 기록한다.
+    /// generation이 같으면 복사를 생략한다. 구 fixture처럼 observation이 아직 unavailable인 in-process Term만 실제
+    /// core를 잠가 읽는 호환 fallback을 유지하며, host-backed unavailable/stale은 placeholder core를 절대 읽지 않는다.
     fn syncAutoTitles(self: *AppSession) void {
         for (self.tabs.items) |tab| {
             for (tab.panes.items) |pane| {
                 for (pane.terms.items) |term| {
                     if (!term.rt.live_initialized) continue;
-                    const gen = term.surface.core.title_generation.load(.monotonic);
+                    if (term.surface.remote == null) {
+                        const gen = term.surface.core.title_generation.load(.monotonic);
+                        if (gen == term.last_title_gen) continue;
+                        term.surface.lockCore(self.io);
+                        defer term.surface.unlockCore(self.io);
+                        const live = term.surface.core.windowTitle();
+                        term.auto_title.clearRetainingCapacity();
+                        const copied = if (live.len > 0) blk: {
+                            term.auto_title.appendSlice(self.allocator, live) catch break :blk false;
+                            break :blk true;
+                        } else true;
+                        if (copied) term.last_title_gen = term.surface.core.title_generation.load(.monotonic);
+                        continue;
+                    }
+                    if (term.rt.observation.availability == .unavailable) continue;
+                    const gen = term.rt.observation.title_generation;
                     if (gen == term.last_title_gen) continue; // 제목/cwd 미변경 — lock·복사 skip
-                    term.surface.lockCore(self.io);
-                    defer term.surface.unlockCore(self.io);
-                    const live = term.surface.core.windowTitle();
+                    const live = term.rt.observation.window_title.items;
                     term.auto_title.clearRetainingCapacity();
                     // 복사 성공(빈 제목=성공적 폴백 포함)일 때만 last_title_gen을 올린다 — OOM으로 append가 실패하면
                     // 세대를 안 올려 **다음 tick 재시도**한다(예전 매-tick 복사의 self-heal 보존; code-review [1]). 안 그러면
@@ -22116,8 +22254,7 @@ pub const AppSession = struct {
                         term.auto_title.appendSlice(self.allocator, live) catch break :blk false;
                         break :blk true;
                     } else true;
-                    // lock hold 중엔 리더가 못 bump(같은 lock 대기) → 이 값이 방금 복사한 제목의 세대. 다음 tick 비교 기준.
-                    if (copied) term.last_title_gen = term.surface.core.title_generation.load(.monotonic);
+                    if (copied) term.last_title_gen = gen;
                 }
             }
         }
@@ -26719,6 +26856,7 @@ pub const AppSession = struct {
                     if (term.git_branch) |b| self.allocator.free(b);
                     if (term.git_branch_cwd) |c| self.allocator.free(c);
                     term.auto_title.deinit(self.allocator);
+                    term.rt.observation.deinit(self.allocator);
                     // P3-e3-4d: 원격 Term은 live_registry가 아니라 **앱 전역 backend**가 소유하므로 여기서 회수한다(SurfaceRuntime
                     // detach + rr deinit + 공유 backend map에서 제거). 창 close가 이 창의 원격 Term만 뺀다(공유 backend 자체는 안
                     // 닫음). in-process/web Term은 기존대로 live_registry.remove.

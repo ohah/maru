@@ -55,6 +55,9 @@ pub const InProcessTermBackend = struct {
         .remove = remove,
         .foreground_process_group = foregroundProcessGroup,
         .foreground_process_names = foregroundProcessNames,
+        .read_observation = readObservation,
+        .refresh_observation = readObservation,
+        .dump_recent_text = dumpRecentText,
     };
 
     pub fn init(
@@ -186,6 +189,72 @@ pub const InProcessTermBackend = struct {
         const self: *InProcessTermBackend = @ptrCast(@alignCast(ctx));
         const t = self.terminalSlot(handle) orelse return 0;
         return t.live_pty.session.foregroundProcessNames(out);
+    }
+
+    fn readObservation(ctx: *anyopaque, handle: RuntimeHandle, allocator: std.mem.Allocator, out: *term_backend.RuntimeObservation, include_foreground: bool) anyerror!void {
+        const self: *InProcessTermBackend = @ptrCast(@alignCast(ctx));
+        const t = self.terminalSlot(handle) orelse return error.UnknownSurface;
+
+        // process 열거는 core lock과 무관하고 syscall을 포함하므로 lock 밖에서 먼저 끝낸다. include=false면 caller cache의
+        // coherent foreground 값을 그대로 보존한다.
+        var process_buf: [64]pty.types.ForegroundProcessName = undefined;
+        const process_count = if (include_foreground) t.live_pty.session.foregroundProcessNames(&process_buf) else 0;
+        const foreground_pgid = if (include_foreground) t.live_pty.session.foregroundProcessGroup() else out.foreground_pgid;
+        const foreground_processes = if (include_foreground) process_buf[0..process_count] else out.foreground_processes.items;
+
+        t.surface.lockCore(self.io);
+        defer t.surface.unlockCore(self.io);
+        const core = &t.surface.core;
+        const progress = core.agentProgress();
+        if (!include_foreground and progress.len == 0 and out.availability == .current) {
+            const core_dest = core.sshRemoteDest();
+            const same_dest = out.ssh_remote_dest_present == (core_dest != null) and
+                (core_dest == null or std.mem.eql(u8, out.ssh_remote_dest.items, core_dest.?));
+            if (same_dest and
+                std.mem.eql(u8, out.cwd.items, core.currentCwd()) and
+                std.mem.eql(u8, out.window_title.items, core.windowTitle()) and
+                out.size.cols == core.size.cols and out.size.rows == core.size.rows and
+                out.semantic_state == core.semantic_state and
+                out.alt_active == core.alt_active and
+                out.app_cursor_keys == core.application_cursor_keys and
+                out.alternate_scroll == core.alternate_scroll)
+            {
+                // PTY output은 observer generation만 자주 바꾼다. metadata가 동일하면 문자열/process owned cache를
+                // 매 100ms 재할당하지 않고 scalar generation만 전진시킨다.
+                out.revision = core.observerGeneration();
+                out.observer_generation = core.observerGeneration();
+                out.title_generation = core.title_generation.load(.monotonic);
+                return;
+            }
+        }
+        try out.replace(allocator, .{
+            .availability = .current,
+            .revision = core.observerGeneration(),
+            .observer_generation = core.observerGeneration(),
+            .title_generation = core.title_generation.load(.monotonic),
+            .size = core.size,
+            .cwd = core.currentCwd(),
+            .window_title = core.windowTitle(),
+            .ssh_remote_dest = core.sshRemoteDest(),
+            .semantic_state = core.semantic_state,
+            .alt_active = core.alt_active,
+            .app_cursor_keys = core.application_cursor_keys,
+            .alternate_scroll = core.alternate_scroll,
+            .foreground_available = if (include_foreground) true else out.foreground_available,
+            .foreground_pgid = foreground_pgid,
+            .foreground_processes = foreground_processes,
+            .agent_progress = progress,
+        });
+        // owned cache로 복사 성공한 뒤에만 1회성 progress를 소비한다. OOM이면 core 값을 남겨 다음 poll에서 재시도한다.
+        if (progress.len != 0) core.clearAgentProgress();
+    }
+
+    fn dumpRecentText(ctx: *anyopaque, handle: RuntimeHandle, allocator: std.mem.Allocator, max_rows: usize, max_bytes: usize) anyerror![]u8 {
+        const self: *InProcessTermBackend = @ptrCast(@alignCast(ctx));
+        const t = self.terminalSlot(handle) orelse return error.UnknownSurface;
+        t.surface.lockCore(self.io);
+        defer t.surface.unlockCore(self.io);
+        return t.surface.core.dumpRecentTextUtf8(allocator, max_rows, max_bytes);
     }
 };
 

@@ -105,9 +105,11 @@ flowchart TD
 1. **control socket을 세션 내내 유지하고 경로를 안정화한다.**
    - 현재: 첫 설치 접속에만 `mktemp -u` 랜덤 `$ctl`. 캐시 hit 경로엔 없음.
    - 변경: 캐시 hit 경로에서도 `-o ControlMaster=auto -o ControlPath=<경로>`로 master를 유지하고, 경로는 **목적지 해시 기반 결정론적 경로**로 만들어 Maru가 계산으로 안다(§6 결정 — `maru ssh`와 Maru가 같은 dest 해시로 동일 경로 도출).
-2. **로컬 Maru가 "이 세션이 maru ssh 원격 세션"임을 안다. ✅ 2단계 구현**
-   - `maru ssh`가 `OSC 5379 ; ssh ; <dest>`로 목적지를 통지하고(`wrapper_script`의 `notify`, `$TMUX`면 DCS passthrough), Maru가 `dispatchOscMaru`로 받아 `ssh_remote_dest`에 저장한다(`sshRemoteDest()` getter). dest로 `controlSocketPath`를 계산하므로 control socket 경로를 따로 알릴 필요가 없다. control socket이 살아있는 maru exec 경로(캐시 hit·부트스트랩 성공)에서만 통지한다.
-3. **드롭/paste 핸들러가 분기한다. ✅ 3·4단계 구현**
+2. **로컬 Maru가 "이 세션이 maru ssh 원격 세션"임을 안다. ✅ in-process + host-backed transport 구현**
+   - `maru ssh`가 `OSC 5379 ; ssh ; <dest>`로 목적지를 통지하고(`wrapper_script`의 `notify`, `$TMUX`면 DCS passthrough), Maru가 `dispatchOscMaru`로 받아 `ssh_remote_dest`에 저장한다(`sshRemoteDest()` getter). foreground ssh가 정상 종료하거나 HUP/INT/TERM으로 끊기면 one-shot trap cleanup이 원래 exit/signal code를 보존한 채 `OSC 5379 ; ssh-end`를 정확히 한 번 보내 destination을 지운다. dest로 `controlSocketPath`를 계산하므로 control socket 경로를 따로 알릴 필요가 없다. control socket이 살아있는 maru 경로(캐시 hit·부트스트랩 성공)에서만 통지한다.
+   - in-process Term은 실제 core에서 observation을 복사하고, persistent host-backed Term은 host core가 파싱한 값을
+     attach initial metadata와 revisioned event로 GUI owned observation에 전달한다. GUI placeholder core는 읽지 않는다.
+3. **드롭/paste 핸들러가 분기한다. ✅ host-backed metadata 배선, 실제 upload 제품 E2E는 남음**
    - **드롭(3단계)**: Swift `handleDrop`이 fileURL 드롭이면 경로(NUL 구분)를 ABI `maru_macos_app_session_drop_files`(v68)로 넘긴다(웹 URL·텍스트는 기존 paste_text). Zig `handleDroppedFiles`가 각 파일을 메인 스레드에서 읽는다(16MB 상한).
    - **pane 라우팅(공통)**: Swift `handleDrop`이 내용 삽입 **직전에** 드롭 지점(backing px)을 ABI `maru_macos_app_session_route_drop`(v115)로 넘겨 **떨어뜨린 pane(+Term)을 활성으로** 만든다 → 뒤이은 삽입(드래그 경로는 `paste_text` 또는 `drop_files`)이 기존 경로 그대로 거기에 들어간다(예전엔 좌표를 버려 **어디에 떨어뜨려도 활성 pane**에만 삽입됐다). pane rect는 탭 바를 포함하고, **Term 탭 위 드롭이면 그 Term**까지 활성으로 만든다(탭 바는 Term 단위라 pane까지만 라우팅하면 엉뚱한 Term에 들어간다). 드롭 처리 전체는 **그 뷰의 창** surface로 스코프한다(`withSurface(surfaceForView(view))`) — 안 그러면 forwarder가 key 창을 가리켜 백그라운드 창의 드롭이 다른 창에 붙는다. 삽입할 내용이 없으면 포커스도 안 옮긴다.
      반환은 **3-상태**이고 호스트가 반드시 구분한다 — 거부를 "해당 없음"으로 접으면 호스트가 그냥 활성 pane에 삽입해 막으려던 오삽입이 그대로 일어난다:
@@ -119,7 +121,7 @@ flowchart TD
 
    - **비동기 구간까지 대상 고정**: 원격 세션의 파일 드롭은 백그라운드 업로드가 끝난 **뒤** 경로를 paste하므로, 드롭과 붙는 시점 사이에 비동기 구간이 있다. **드롭 시점의 surface id를 업로드 job에 실어**(`UploadJob.target_id` → `UploadResult.target_id`) 완료 시 `pasteTextTo(target_id, …)`로 되돌린다 — 그 사이 사용자가 pane/탭을 옮겨도 경로는 **드롭한 pane**에 붙는다. **대상이 사라졌으면**(그 Term이 닫혔거나 워크스페이스가 다른 창으로 이동) **다른 pane에 붙이지 않고 notice 토스트로 경로를 알린다**: 사용자가 드롭하지도 않은 pane의 명령줄 한복판에 경로가 꽂히는 것이 이 라우팅이 없애려는 오삽입 그 자체고, 그렇다고 조용히 버리면 파일은 원격에 올라갔는데 참조할 방법이 없기 때문이다. 붙여넣기 확인 모달도 같은 규율이다(모달을 띄운 시점의 대상을 `pending_paste_confirm_target`에 고정 — 확인하는 동안 pane을 옮겨도 payload는 원래 pane으로). 이를 위해 미전송 paste 잔여 큐는 **surface별**(`pending_pastes`)이다: 단일 FIFO였을 땐 잔여가 다 빠지기 전까지 대상이 옛 surface에 고정돼, 다른 surface로 갈 바이트가 그 FIFO에 붙으면 엉뚱한 pane으로 갔다.
    - **paste(4단계)**: Swift `pastePasteboardText`(Cmd+V)가 클립보드 이미지(png/tiff/jpeg → `clipboardImagePng`가 PNG로 정규화)면 바이트를 ABI `maru_macos_app_session_drop_image`(v69)로 넘긴다. Zig `handleDroppedImage`가 `pasted-<pid>-N.png` 이름(pid로 세션 간 충돌 방지)으로 같은 업로드 경로를 탄다(원격이면 처리=true, 로컬이면 false→Swift가 기존 paste).
-   - **공통 업로드**: 로컬 세션이면 경로 셸 이스케이프 paste(드롭)/불개입(paste), maru ssh 원격이면 **백그라운드 스레드**(`startUploadBytes`→`uploadWorker`→`ssh_upload.uploadBytes`)가 control socket에 업로드하고 완료 시 메인 tick(`drainUploadResults`)이 원격 절대경로를 paste한다(드롭은 한 파일도 못 올리면 로컬 경로 폴백). 실행은 **posix fork+pipe**로 ssh 자식 프로세스(0.16 `std.process.Child`가 io 기반이라 백그라운드 스레드에 부적합 — `pty/macos.zig` 패턴). 원격 수신 셸 구절은 `cli/ssh.zig` `uploadShellCommand`(mkdir + cat(stdin→파일) + 절대경로 stdout echo).
+   - **공통 업로드**: 로컬 세션이면 경로 셸 이스케이프 paste(드롭)/불개입(paste), maru ssh 원격이면 **백그라운드 스레드**(`startUploadBytes`→`uploadWorker`→`ssh_upload.uploadBytes`)가 control socket에 업로드하고 완료 시 메인 tick(`drainUploadResults`)이 원격 절대경로를 paste한다. 원격으로 확정된 뒤 context 생성, 크기/OOM, worker 시작 중 하나라도 실패하면 notice만 내고 **로컬 경로/Swift temp PNG fallback을 소비**한다. 실행은 **posix fork+pipe**로 ssh 자식 프로세스(0.16 `std.process.Child`가 io 기반이라 백그라운드 스레드에 부적합 — `pty/macos.zig` 패턴). 원격 수신 셸 구절은 `cli/ssh.zig` `uploadShellCommand`(mkdir + cat(stdin→파일) + 절대경로 stdout echo).
 
 ### 4.2 원격 의존성
 
@@ -129,7 +131,7 @@ flowchart TD
 ### 4.3 경계 (어느 계층이 무엇을)
 
 - **Swift(`MaruAppHost.swift`)**: 드롭 파일 경로(`drop_files`) 또는 클립보드 이미지 바이트(`drop_image`)를 ABI로 넘긴다. 네이티브 I/O(NSPasteboard)만.
-- **Zig(`app_session.zig`)**: 세션이 maru ssh 원격인지 판정(`sshRemoteDest`+`lockCore`), 파일 읽기(메인, io), 백그라운드 스레드 관리(`startUploadBytes`/`uploadWorker`/`drainUploadResults`), paste 트리거. 결정 로직은 전부 Zig(테스트 가능, `macos-app-host-boundary.md` 정책).
+- **Zig(`app_session.zig`)**: 세션이 maru ssh 원격인지 runtime observation의 `ssh_remote_dest`로 판정, 파일 읽기(메인, io), 백그라운드 스레드 관리(`startUploadBytes`/`uploadWorker`/`drainUploadResults`), paste 트리거. host-backed Term은 user action 직전 `runtime.observation {stream_id}` barrier로 host full-state와 subscription revision/base를 동기화한다. 실패·unsupported·malformed면 로컬 경로 paste로 오판하지 않고 notice와 함께 fail-closed한다. 결정 로직은 전부 Zig(테스트 가능, `macos-app-host-boundary.md` 정책).
 - **순수 로직(`cli/ssh.zig`)**: `controlSocketPath`·`sanitizeDropFilename`·`uploadShellCommand`·`max_upload_bytes` + control socket 경로 안정화/세션 유지(`wrapper_script`).
 - **업로드 실행(`ssh_upload.zig`)**: posix fork+pipe로 ssh 자식 프로세스(io 무관 → 백그라운드 스레드 안전).
 
@@ -147,7 +149,11 @@ flowchart TD
 - **접속 방식 = `maru ssh` 전용.** 이미지/파일 드롭 전송은 `maru ssh`로 접속한 세션에서만 동작한다. control socket이 그 경로에서만 확보되고, 구현이 단순하며, tmux 유무와 무관하기 때문이다. 맨 `ssh`(사용자가 직접 친) 지원은 **비범위** — Maru가 개입할 지점이 없어 control socket을 심을 수 없고, 지원하려면 tmux control mode 통합 등 별도 큰 트랙이 필요하므로 [후속](#8-후속비범위)으로 둔다. 사용자는 접속을 `maru ssh <dest>`로 통일한다(`maru ssh`는 ssh 인자를 그대로 넘기므로 `~/.ssh/config` 호스트 별칭도 동일하게 쓴다).
 - **control socket 경로 규약 = 목적지 기반 결정론적 해시.** `maru ssh`와 로컬 Maru가 같은 규약으로 목적지(dest) 문자열을 해시해 **동일 경로**를 도출한다(`~/.cache/maru/ctl-<dest Wyhash 64bit hex>` — `cli/ssh.zig` `controlSocketPath`). Maru가 경로를 OSC 통지 없이 **계산으로** 알 수 있고, 같은 host 재접속이 같은 master를 공유한다. unix socket 경로 길이 제한(macOS `sun_path` 104바이트, NUL 포함)은 해시를 잘라 맞추는 방식이 아니라 초과 시 `error.ControlPathTooLong` 반환으로 처리한다 — 호출 측이 그때 control socket 없이 폴백한다(홈 경로가 극단적으로 길 때만 발생).
 - **트리거 = 드롭 + paste(클립보드 이미지).** 파일/이미지 드래그앤드롭(3단계)과 Cmd+V 클립보드 이미지(4단계)를 업로드한다.
-- **원격 인식 토대 = `maru ssh` 전용 OSC 통지 (OSC 5379).** `maru ssh`가 `exec` 직전에 `OSC 5379 ; ssh ; <dest> BEL`을 emit하고(`cli/ssh.zig` `wrapper_script`의 `notify` — control socket이 살아있는 maru exec 경로에서만), **`$TMUX`가 있으면 DCS tmux passthrough로 감싸** tmux 안에서도 로컬 Maru까지 도달하게 한다. Maru(`terminal/core.zig` `dispatchOscMaru`)는 이를 받아 `ssh_remote_dest`에 dest를 저장하고(`sshRemoteDest()` getter), dest로 control socket 경로 해시를 계산한다. **5379**는 표준/벤더(iTerm 1337 등) 충돌을 피한 사설 번호이고, payload는 `<서브커맨드>;<인자>` 형식(현재 `ssh;<dest>`)이라 확장 가능하다. 모르는 터미널은 무시하므로 안전하다. RIS에선 유지한다(ssh 연결은 터미널 리셋과 무관, maru ssh가 재보고하지 않음). OSC 7 host 보관은 원격 cwd 표시용 보조로만 남긴다.
+- **원격 인식 토대 = `maru ssh` 전용 OSC 통지 (OSC 5379).** `maru ssh`가 접속 직전에 `OSC 5379 ; ssh ; <dest> BEL`을 emit하고(`cli/ssh.zig` `wrapper_script`의 `notify` — control socket이 살아있는 maru 경로에서만), foreground ssh 종료 뒤 `OSC 5379 ; ssh-end BEL`로 clear한다. 두 신호 모두 **`$TMUX`가 있으면 DCS tmux passthrough로 감싸** tmux 안에서도 로컬 Maru까지 도달하게 한다. Maru(`terminal/osc.zig` `dispatchMaru`)는 이를 받아 `ssh_remote_dest`를 설정/해제하고(`sshRemoteDest()` getter), dest로 control socket 경로 해시를 계산한다. **5379**는 표준/벤더(iTerm 1337 등) 충돌을 피한 사설 번호이고, payload는 `<서브커맨드>;<인자>` 형식(`ssh;<dest>`, `ssh-end`)이라 확장 가능하다. 모르는 터미널은 무시하므로 안전하다. RIS에선 유지한다(ssh 연결은 터미널 리셋과 무관). OSC 7 host 보관은 원격 cwd 표시용 보조로만 남긴다.
+  host-backed Term에서는 P3-e4 metadata snapshot/event가 이 값을 GUI로 전달하고, drop/paste 직전
+  `runtime.observation` barrier가 100ms periodic event보다 최신인 host 상태를 확인한다. 지원 여부가 불명하거나 barrier가
+  실패한 상태를 로컬 세션으로 오판해 로컬 경로를 원격 셸에 붙이지 않도록 fail-closed한다. 현재 barrier는 main thread의
+  local socket RPC라 stalled host에서 최대 5초 recv timeout까지 UI를 막을 수 있으며 async 전환은 기본값 전환 전 gate다.
 
 ### 보안 기본값 (사용자 결정 2026-06-21)
 
@@ -157,6 +163,11 @@ flowchart TD
 ## 7. 검증·관측
 
 - **통합 테스트**: `ssh localhost`로 업로드→원격 파일 존재→경로 paste 왕복을 검증한다(`terminal-strategy.md` #13 연장). control socket 유무·캐시 hit/miss 분기를 단위로 고정.
+- **persistent host parity gate(P3-e4, 부분 완료)**: 실제 독립 host PTY의 OSC 5379가 후속 event로 GUI observation까지
+  도착하고, capability-negotiated event와 user-action barrier revision, stale/unsupported/업로드 준비 실패 시
+  드롭·이미지 로컬 fallback을 막는 분기는 구현됐다. 아직 재접속 시 원격의
+  재보고 없이 기존 destination 복원, 두 Term destination/control socket 격리, 실제 host-backed file drop·clipboard
+  image upload branch E2E를 자동 검증해야 전체 gate가 끝난다.
 - **순수 로직 단위**: 세션이 maru ssh 원격인지 판정, 업로드 명령 조립, 원격 경로 생성은 I/O 없는 순수 Zig로 TDD(`ssh.zig`의 기존 셸-구절 단위 테스트와 같은 결).
 - **관측 가능성**: 업로드 시작/성공/실패를 공통 도메인 이벤트로 남겨 로그·trace·E2E가 같은 데이터를 본다(`project-rules.md` §관측 가능성). 자동 검증이 불가능한 부분(실제 GUI 드롭)은 완료 전 수동 검증 방법과 함께 보고.
 

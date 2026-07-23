@@ -16,6 +16,7 @@ const protocol = @import("protocol.zig");
 const framing = @import("framing.zig");
 const socket_server = @import("socket_server.zig");
 const screen_stream = @import("screen_stream.zig");
+const observation_wire = @import("observation_wire.zig");
 
 pub const ClientError = error{
     ConnectFailed,
@@ -28,6 +29,9 @@ pub const ClientError = error{
     WriteFailed,
     /// EOF/read 오류로 응답을 못 받았다(host 종료·crash).
     ConnectionClosed,
+    /// async event queue의 count/byte cap을 넘었다. latest full-state를 조용히 버리면 host base가 이미 전진해 영구 stale이
+    /// 되므로 connection/runtime을 fail-closed하고 재attach initial metadata로 복구한다.
+    EventQueueFull,
     OutOfMemory,
 };
 
@@ -47,10 +51,17 @@ pub const Client = struct {
     fd: c.fd_t,
     host_id: u128,
     parser: framing.FrameParser,
+    // async full-state를 하나라도 수용하지 못하면 server subscription base는 이미 전진했을 수 있다. 그 뒤 같은 socket을
+    // 계속 쓰면 어떤 shared stream이 누락됐는지 복구할 수 없으므로 connection 전체를 poison/close한다.
+    unusable: bool = false,
     next_request_id: u64 = 1,
     // 응답을 기다리는 `call` 중에 host가 비동기로 push한 stream frame(delta_chunk/snapshot_chunk)을 여기 버퍼한다 — 드롭하면
     // 화면 갱신이 유실되므로(§9 delta는 증분이라 하나만 놓쳐도 desync), 다음 `readStreamBatch`가 소켓보다 먼저 이걸 비운다.
     pending_stream: std.ArrayListUnmanaged(framing.Frame) = .empty,
+    // screen batch와 별개인 full-state runtime metadata event. response/snapshot을 기다리는 중에도 올 수 있으므로 버리지
+    // 않고 stream별 최신 한 건으로 coalesce한다. full-state라 중간 revision을 건너뛰어도 최신 event만 적용하면 된다.
+    pending_events: std.ArrayListUnmanaged(framing.Frame) = .empty,
+    pending_event_bytes: usize = 0,
     // 멀티 runtime demux(§9): 여러 원격 runtime이 이 connection **하나**를 공유하므로, `readStreamBatch(want)`가 소켓에서 읽은
     // 완성 배치가 **다른** stream의 것이면 버리지 않고 여기 도착 순서대로 쌓아, 그 stream의 runtime pump가 나중에 소비한다(예전엔
     // pumpDelta가 남의 배치를 free해 두 번째 이후 터미널 화면이 영구 유실됐다 — code-review #1). host는 배치를 stream별로 연속
@@ -95,9 +106,11 @@ pub const Client = struct {
     }
 
     pub fn deinit(self: *Client) void {
-        _ = c.close(self.fd);
+        if (self.fd >= 0) _ = c.close(self.fd);
         for (self.pending_stream.items) |f| f.deinit(self.allocator); // 미소비 버퍼 stream frame 회수.
         self.pending_stream.deinit(self.allocator);
+        for (self.pending_events.items) |f| f.deinit(self.allocator);
+        self.pending_events.deinit(self.allocator);
         for (self.pending_batches.items) |b| self.allocator.free(b.bytes); // 미소비 demux 배치 회수(§9 멀티 runtime).
         self.pending_batches.deinit(self.allocator);
         self.parser.deinit();
@@ -107,6 +120,7 @@ pub const Client = struct {
     /// read-only command를 왕복한다. `params_json`은 JSON object 문자열(예: `{"runtime_id":"aa"}`) 또는 null. 반환
     /// payload는 host의 response JSON(owned — caller가 free). typed error 판정은 caller가 payload에서 한다(§10 error 매핑).
     pub fn call(self: *Client, method: []const u8, params_json: ?[]const u8) ClientError![]u8 {
+        try self.ensureUsable();
         const req = buildRequest(self.allocator, method, params_json) catch return error.OutOfMemory;
         defer self.allocator.free(req);
         const request_id = self.next_request_id;
@@ -126,6 +140,10 @@ pub const Client = struct {
                 };
                 continue;
             }
+            if (resp.header.kind == .event) {
+                try self.bufferEvent(resp);
+                continue;
+            }
             defer resp.deinit(self.allocator);
             // kind와 request_id를 함께 확인한다 — out-of-order frame을 이 call의 응답으로 오귀속하지 않는다.
             if (resp.header.kind != .response or resp.header.request_id != request_id) return error.ProtocolError;
@@ -137,10 +155,15 @@ pub const Client = struct {
     /// 순서: response → snapshot_chunk*). 반환 바이트는 caller 소유(screen_stream.RecordStream으로 순회). **attach 응답을
     /// 받은 뒤 다음 request 전에 반드시 이걸로 stream을 비운다** — 안 그러면 leftover chunk가 다음 응답으로 오독된다.
     pub fn readSnapshot(self: *Client, stream_id: u64) ClientError![]u8 {
+        try self.ensureUsable();
         var out: std.ArrayListUnmanaged(u8) = .empty;
         errdefer out.deinit(self.allocator);
         while (true) {
             const frame = try self.readFrame();
+            if (frame.header.kind == .event) {
+                try self.bufferEvent(frame);
+                continue;
+            }
             defer frame.deinit(self.allocator);
             if (frame.header.kind != .snapshot_chunk or frame.header.stream_id != stream_id) return error.ProtocolError;
             out.appendSlice(self.allocator, frame.payload) catch return error.OutOfMemory;
@@ -156,6 +179,7 @@ pub const Client = struct {
     /// 버퍼에 남아 그 runtime의 pump가 소비). 예전엔 pumpDelta가 남의 배치를 free해 두 번째 이후 터미널 화면이 영구 유실됐다
     /// (code-review #1). delta/snapshot 둘 다 받아 `is_snapshot`으로 리셋/증분을 가른다. `call`이 버퍼한 frame을 소켓보다 먼저 쓴다.
     pub fn readStreamBatch(self: *Client, allocator: std.mem.Allocator, want_stream_id: u64) ClientError!?StreamBatch {
+        try self.ensureUsable();
         // 1) 이 stream 앞으로 이미 버퍼된 배치(다른 runtime의 pump가 소켓을 비우며 넣어 둔 것)를 도착 순서대로 먼저 준다.
         for (self.pending_batches.items, 0..) |b, i| {
             if (b.stream_id == want_stream_id) return self.pending_batches.orderedRemove(i);
@@ -188,6 +212,12 @@ pub const Client = struct {
                 out.deinit(allocator);
                 return null;
             };
+            if (frame.header.kind == .event) {
+                // host는 한 screen chunk batch 안에 event를 interleave하지 않지만 방어적으로 started 여부와 무관하게
+                // full-state event를 보존하고 다음 async frame을 계속 찾는다.
+                try self.bufferEvent(frame);
+                continue;
+            }
             defer frame.deinit(self.allocator);
             if (frame.header.kind != .snapshot_chunk and frame.header.kind != .delta_chunk) return error.ProtocolError;
             if (!started) {
@@ -212,12 +242,89 @@ pub const Client = struct {
                 self.allocator.free(b.bytes);
             } else i += 1;
         }
+        i = 0;
+        while (i < self.pending_events.items.len) {
+            if (self.pending_events.items[i].header.stream_id == stream_id) {
+                const frame = self.pending_events.orderedRemove(i);
+                self.pending_event_bytes -= frame.payload.len;
+                frame.deinit(self.allocator);
+            } else i += 1;
+        }
+    }
+
+    /// stream의 최신 full-state metadata event를 소유권째 꺼낸다. 없으면 null. caller는 payload 적용 뒤 frame.deinit.
+    pub fn takeEventForStream(self: *Client, stream_id: u64) ?framing.Frame {
+        // poison 전에 쌓인 event도 어느 stream의 누락보다 최신인지 증명할 수 없다. 일부 runtime만 한 번 더 전진시키지 않고
+        // 모든 shared runtime이 다음 pump에서 같은 ConnectionClosed를 보게 한다.
+        if (self.unusable) return null;
+        for (self.pending_events.items, 0..) |frame, i| {
+            if (frame.header.stream_id == stream_id) {
+                const owned = self.pending_events.orderedRemove(i);
+                self.pending_event_bytes -= owned.payload.len;
+                return owned;
+            }
+        }
+        return null;
+    }
+
+    /// event는 runtime별 full-state라 같은 stream의 이전 pending을 최신으로 교체한다. 악성/버그 host가 임의 stream id를
+    /// 쏟아 count/byte cap을 넘기면 oldest를 버리지 않고 shared connection 전체를 poison해 모든 runtime을 fail-closed한다.
+    fn bufferEvent(self: *Client, frame: framing.Frame) ClientError!void {
+        const metadata_revision = observation_wire.eventRevision(self.allocator, frame.payload) catch {
+            frame.deinit(self.allocator);
+            return error.OutOfMemory;
+        };
+        if (std.mem.indexOf(u8, frame.payload, "\"event\":\"runtime.metadata\"") != null and metadata_revision == null) {
+            // 손상된 full-state가 정상 최신 event를 coalesce로 밀어내면 host는 이미 base를 전진시켜 영구 누락될 수 있다.
+            // 큐에 넣기 전에 최소 wire schema를 검증해 손상 event는 기존 cache를 건드리지 않고 버린다.
+            frame.deinit(self.allocator);
+            return;
+        }
+        for (self.pending_events.items, 0..) |old, i| {
+            const old_revision = observation_wire.eventRevision(self.allocator, old.payload) catch {
+                frame.deinit(self.allocator);
+                return error.OutOfMemory;
+            };
+            if (metadata_revision != null and old_revision != null and old.header.stream_id == frame.header.stream_id) {
+                if (metadata_revision.? <= old_revision.?) {
+                    frame.deinit(self.allocator);
+                    return;
+                }
+                const replaced = self.pending_events.items[i];
+                const next_bytes = self.pending_event_bytes - replaced.payload.len +| frame.payload.len;
+                if (next_bytes > protocol.max_client_queue) {
+                    frame.deinit(self.allocator);
+                    self.invalidateConnection();
+                    return error.EventQueueFull;
+                }
+                self.pending_events.items[i] = frame;
+                self.pending_event_bytes = next_bytes;
+                replaced.deinit(self.allocator);
+                return;
+            }
+        }
+        if (self.pending_events.items.len >= 256 or
+            self.pending_event_bytes +| frame.payload.len > protocol.max_client_queue)
+        {
+            // Eviction 금지: server는 event를 만들 때 이미 subscription base/revision을 전진시켰다. 해당 stream의 최신
+            // full-state를 조용히 버리면 같은 상태를 다시 보내지 않는다. 어느 shared stream이 누락됐든 connection 전체를
+            // 닫아 모든 runtime이 fail-closed하고, 다음 attach의 initial metadata에서만 복구한다.
+            frame.deinit(self.allocator);
+            self.invalidateConnection();
+            return error.EventQueueFull;
+        }
+        self.pending_events.append(self.allocator, frame) catch {
+            frame.deinit(self.allocator);
+            return error.OutOfMemory;
+        };
+        self.pending_event_bytes += frame.payload.len;
     }
 
     /// stream 배치를 잇는 다음 stream frame을 준다. 우선순위: `call`이 버퍼한 frame → parser에 남은 완성 frame → 소켓 read.
     /// `started`=false(배치 첫 frame)면 소켓을 `pollReadable`로 논블로킹 확인해 데이터가 없으면 `null`(idle). `started`=true면
     /// 배치의 나머지 frame이 곧 오므로(host가 한 번에 write) blocking read를 허용하되, EOF만 ConnectionClosed로 올린다.
     fn nextStreamFrame(self: *Client, started: bool) ClientError!?framing.Frame {
+        try self.ensureUsable();
         if (self.pending_stream.items.len > 0)
             return try self.requireCurrentMajor(self.pending_stream.orderedRemove(0));
         var buf: [4096]u8 = undefined;
@@ -238,6 +345,7 @@ pub const Client = struct {
     /// terminal input bytes를 attach된 `stream_id`로 보낸다(§9 `input_bytes` — 응답 없는 fire-and-forget). controller만
     /// 유효하고, host는 비controller/미attach stream의 input을 조용히 버린다. attach 응답의 stream_id를 그대로 쓴다.
     pub fn sendInput(self: *Client, stream_id: u64, bytes: []const u8) ClientError!void {
+        try self.ensureUsable();
         // input frame의 wire cap은 1 MiB다. paste가 이를 넘는 것은 정상 입력이므로 encode 실패/드롭하지 않고 순서대로
         // 여러 frame으로 나눈다. 빈 입력은 전송할 것이 없다.
         var offset: usize = 0;
@@ -256,6 +364,7 @@ pub const Client = struct {
 
     /// 다음 완성 frame을 읽는다(partial read 재조립). EOF/timeout는 ConnectionClosed, codec 위반은 ProtocolError.
     fn readFrame(self: *Client) ClientError!framing.Frame {
+        try self.ensureUsable();
         var buf: [4096]u8 = undefined;
         while (true) {
             if (self.parser.next() catch return error.ProtocolError) |frame|
@@ -278,6 +387,19 @@ pub const Client = struct {
             return error.ProtocolError;
         }
         return frame;
+    }
+
+    fn ensureUsable(self: *const Client) ClientError!void {
+        if (self.unusable) return error.ConnectionClosed;
+    }
+
+    fn invalidateConnection(self: *Client) void {
+        if (self.unusable) return;
+        self.unusable = true;
+        if (self.fd >= 0) {
+            _ = c.close(self.fd);
+            self.fd = -1;
+        }
     }
 };
 
@@ -303,6 +425,7 @@ test "client stream path rejects a frame with the wrong MRSH header major" {
     };
     defer client.parser.deinit();
     defer client.pending_stream.deinit(allocator);
+    defer client.pending_events.deinit(allocator);
     defer client.pending_batches.deinit(allocator);
 
     const wire = try framing.encodeFrame(allocator, .{
@@ -313,6 +436,93 @@ test "client stream path rejects a frame with the wrong MRSH header major" {
     defer allocator.free(wire);
     try client.parser.push(wire);
     try std.testing.expectError(error.ProtocolError, client.nextStreamFrame(true));
+}
+
+test "client metadata events coalesce by stream and preserve other streams" {
+    const allocator = std.testing.allocator;
+    var client = Client{
+        .allocator = allocator,
+        .fd = -1,
+        .host_id = 0,
+        .parser = framing.FrameParser.init(allocator),
+    };
+    defer client.parser.deinit();
+    defer client.pending_stream.deinit(allocator);
+    defer {
+        for (client.pending_events.items) |frame| frame.deinit(allocator);
+        client.pending_events.deinit(allocator);
+    }
+    defer client.pending_batches.deinit(allocator);
+
+    const rev1 =
+        \\{"event":"runtime.metadata","metadata_revision":1,"metadata":{"cwd":"/one","window_title":"one","ssh_remote_dest":null,
+        \\"semantic_state":0,"alt_active":false,"app_cursor_keys":false,"alternate_scroll":true,"observer_generation":1,
+        \\"title_generation":1,"cols":80,"rows":24,"foreground_available":false,"foreground_pgid":null,"processes":[]}}
+    ;
+    const rev2 =
+        \\{"event":"runtime.metadata","metadata_revision":2,"metadata":{"cwd":"/two","window_title":"two","ssh_remote_dest":null,
+        \\"semantic_state":0,"alt_active":false,"app_cursor_keys":false,"alternate_scroll":true,"observer_generation":2,
+        \\"title_generation":2,"cols":80,"rows":24,"foreground_available":false,"foreground_pgid":null,"processes":[]}}
+    ;
+    try client.bufferEvent(.{ .header = .{ .kind = .event, .stream_id = 7 }, .payload = try allocator.dupe(u8, rev1) });
+    try client.bufferEvent(.{ .header = .{ .kind = .event, .stream_id = 8 }, .payload = try allocator.dupe(u8, "other") });
+    try client.bufferEvent(.{ .header = .{ .kind = .event, .stream_id = 7 }, .payload = try allocator.dupe(u8, rev2) });
+    // stale 또는 consumer가 거부할 bounds 위반 newer event가 정상 pending full-state를 밀어내면 안 된다.
+    try client.bufferEvent(.{ .header = .{ .kind = .event, .stream_id = 7 }, .payload = try allocator.dupe(u8, rev1) });
+    const malformed_newer =
+        \\{"event":"runtime.metadata","metadata_revision":3,"metadata":{"cwd":"/bad","window_title":"bad","ssh_remote_dest":null,
+        \\"semantic_state":0,"alt_active":false,"app_cursor_keys":false,"alternate_scroll":true,"observer_generation":3,
+        \\"title_generation":3,"cols":-1,"rows":24,"foreground_available":false,"foreground_pgid":null,"processes":[]}}
+    ;
+    try client.bufferEvent(.{ .header = .{ .kind = .event, .stream_id = 7 }, .payload = try allocator.dupe(u8, malformed_newer) });
+    try std.testing.expectEqual(@as(usize, 2), client.pending_events.items.len);
+    try std.testing.expect(client.pending_event_bytes > 0);
+
+    const latest = client.takeEventForStream(7) orelse return error.TestUnexpectedResult;
+    defer latest.deinit(allocator);
+    try std.testing.expectEqualStrings(rev2, latest.payload);
+    const other = client.takeEventForStream(8) orelse return error.TestUnexpectedResult;
+    defer other.deinit(allocator);
+    try std.testing.expectEqualStrings("other", other.payload);
+    try std.testing.expectEqual(@as(usize, 0), client.pending_event_bytes);
+}
+
+test "client event queue overflow poisons every runtime sharing the connection" {
+    const allocator = std.testing.allocator;
+    var client = Client{
+        .allocator = allocator,
+        .fd = -1,
+        .host_id = 0,
+        .parser = framing.FrameParser.init(allocator),
+    };
+    defer client.parser.deinit();
+    defer client.pending_stream.deinit(allocator);
+    defer {
+        for (client.pending_events.items) |frame| frame.deinit(allocator);
+        client.pending_events.deinit(allocator);
+    }
+    defer client.pending_batches.deinit(allocator);
+
+    for (0..256) |i| {
+        try client.bufferEvent(.{
+            .header = .{ .kind = .event, .stream_id = @intCast(i + 1) },
+            .payload = try allocator.dupe(u8, "{\"event\":\"other\"}"),
+        });
+    }
+    const first_payload = client.pending_events.items[0].payload;
+    try std.testing.expectError(error.EventQueueFull, client.bufferEvent(.{
+        .header = .{ .kind = .event, .stream_id = 999 },
+        .payload = try allocator.dupe(u8, "{\"event\":\"overflow\"}"),
+    }));
+    try std.testing.expectEqual(@as(usize, 256), client.pending_events.items.len);
+    try std.testing.expectEqualStrings("{\"event\":\"other\"}", first_payload);
+    // Overflow frame은 stream 999였지만 어느 subscription base가 전진했는지 client가 증명할 수 없다. 기존 stream 1의
+    // pending event도 적용하지 않고, stream 1/2 양쪽 pump와 input/RPC가 모두 동일 connection failure를 보게 한다.
+    try std.testing.expect(client.takeEventForStream(1) == null);
+    try std.testing.expectError(error.ConnectionClosed, client.readStreamBatch(allocator, 1));
+    try std.testing.expectError(error.ConnectionClosed, client.readStreamBatch(allocator, 2));
+    try std.testing.expectError(error.ConnectionClosed, client.sendInput(1, "x"));
+    try std.testing.expectError(error.ConnectionClosed, client.call("host.info", null));
 }
 
 /// 소켓에 읽을 데이터가 즉시 있는지 논블로킹 확인한다(timeout 0). `readStreamBatch`가 배치 첫 frame에서 idle이면 곧장
@@ -339,7 +549,11 @@ fn setReadTimeoutMs(fd: c.fd_t, ms: u32) void {
 // — 여기서 hand-interpolation하지 않는다.
 
 fn buildHello(allocator: std.mem.Allocator, client_kind: []const u8) error{OutOfMemory}![]u8 {
-    return std.fmt.allocPrint(allocator, "{{\"protocol_min\":{d},\"protocol_max\":{d},\"client_kind\":\"{s}\"}}", .{ protocol.version_major, protocol.version_major, client_kind });
+    return std.fmt.allocPrint(
+        allocator,
+        "{{\"protocol_min\":{d},\"protocol_max\":{d},\"client_kind\":\"{s}\",\"capabilities\":[\"runtime_metadata_v1\"]}}",
+        .{ protocol.version_major, protocol.version_major, client_kind },
+    );
 }
 
 fn buildRequest(allocator: std.mem.Allocator, method: []const u8, params_json: ?[]const u8) error{OutOfMemory}![]u8 {
@@ -393,6 +607,7 @@ test "client: hello/request JSON build and host_id parse are server-symmetric (p
     defer allocator.free(hello);
     try testing.expect(std.mem.indexOf(u8, hello, "\"protocol_min\":2") != null); // 리뷰 #3: version_major v2.
     try testing.expect(std.mem.indexOf(u8, hello, "\"client_kind\":\"gui\"") != null);
+    try testing.expect(std.mem.indexOf(u8, hello, "\"runtime_metadata_v1\"") != null);
 
     const req = try buildRequest(allocator, "runtime.get", "{\"runtime_id\":\"aa\"}");
     defer allocator.free(req);

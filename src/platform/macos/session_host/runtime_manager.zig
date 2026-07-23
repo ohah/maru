@@ -34,10 +34,19 @@ const InProcessTermBackend = maru.app.InProcessTermBackend;
 const LiveRegistry = maru.app.in_process_term_backend.LiveRegistry;
 const SurfaceRuntime = maru.app.SurfaceRuntime;
 const RuntimeHandle = maru.app.TermRuntimeHandle;
+const ForegroundProcessName = maru.pty.types.ForegroundProcessName;
 
 // host runtime의 PTY→core 이벤트 큐 용량. 제품 경로(app_session.default_queue_capacity)와 같은 16으로 맞춰
 // 재접속한 GUI가 in-process와 같은 backpressure를 보게 한다(e2d stream이 이 큐를 소비).
 const default_queue_capacity: usize = 16;
+const foreground_refresh_ns: i128 = 500 * std.time.ns_per_ms;
+
+const ForegroundCache = struct {
+    names: [64]ForegroundProcessName = undefined,
+    count: usize = 0,
+    pgid: ?i32 = null,
+    refreshed_at_ns: i128 = 0,
+};
 
 // macOS libc CSPRNG(std.posix 미노출 — 이 파일은 macOS 전용). runtime_id 발급용.
 extern "c" fn arc4random_buf(buf: [*]u8, nbytes: usize) void;
@@ -68,6 +77,9 @@ pub const RuntimeManager = struct {
     host_registry: *reg.TerminalRuntimeRegistry,
     /// 다음 in-process handle. 1부터 발급한다 — 0은 opaque 슬롯의 null과 겹치므로 handle로 쓰지 않는다.
     next_handle: RuntimeHandle = 1,
+    /// observation은 client/창/stream마다 100ms cadence로 호출될 수 있지만 OS process 열거는 runtime당 최대 2Hz다.
+    /// cwd/title/OSC 상태는 계속 100ms full-state로 읽고, 비싼 foreground syscall 결과만 공유 cache한다.
+    foreground_cache: std.AutoHashMapUnmanaged(RuntimeHandle, ForegroundCache) = .empty,
 
     /// self-referential 필드를 안정 주소로 세운다. caller가 준 `*RuntimeManager` 슬롯을 채운다(반환 이동 없음).
     pub fn init(self: *RuntimeManager, allocator: std.mem.Allocator, io: std.Io, host_registry: *reg.TerminalRuntimeRegistry) void {
@@ -78,12 +90,14 @@ pub const RuntimeManager = struct {
         self.backend_impl = InProcessTermBackend.init(allocator, io, &self.live_registry, &self.surface_runtime);
         self.host_registry = host_registry;
         self.next_handle = 1;
+        self.foreground_cache = .empty;
     }
 
     /// 소유 registry를 해제한다. **호출 전 모든 runtime이 terminate돼 있어야** 한다(reader join·슬롯 회수가 terminate에서
     /// 일어난다) — 남은 runtime이 있으면 reader 스레드가 join되지 않은 채 슬롯이 사라진다. graceful 종료 경로(§6)가 붙기
     /// 전까지 host는 SIGTERM으로 내려가 OS가 자식·스레드를 회수하므로 이 deinit은 clean-return 경로용이다.
     pub fn deinit(self: *RuntimeManager) void {
+        self.foreground_cache.deinit(self.allocator);
         self.surface_runtime.deinit();
         self.live_registry.deinit();
         self.* = undefined;
@@ -91,7 +105,7 @@ pub const RuntimeManager = struct {
 
     /// server.zig가 dispatch에 넘길 중립 vtable. `ctx`는 이 매니저다.
     pub fn runtimeOps(self: *RuntimeManager) server.RuntimeOps {
-        return .{ .ctx = self, .spawn = spawnOp, .terminate = terminateOp, .write_input = writeInputOp, .resize = resizeOp, .snapshot = snapshotOp, .delta = deltaOp, .notification = notificationOp, .core_command = coreCommandOp, .selected_text = selectedTextOp, .select_op = selectOpOp, .find = findOp };
+        return .{ .ctx = self, .spawn = spawnOp, .terminate = terminateOp, .write_input = writeInputOp, .resize = resizeOp, .snapshot = snapshotOp, .delta = deltaOp, .notification = notificationOp, .core_command = coreCommandOp, .selected_text = selectedTextOp, .select_op = selectOpOp, .find = findOp, .observation = observationOp };
     }
 
     fn spawnOp(ctx: *anyopaque, params: server.RuntimeSpawnParams) anyerror!u128 {
@@ -114,6 +128,65 @@ pub const RuntimeManager = struct {
         const self: *RuntimeManager = @ptrCast(@alignCast(ctx));
         const handle = self.handleFor(runtime_id) orelse return error.RuntimeNotFound;
         return self.backend_impl.backend().resize(handle, .{ .cols = cols, .rows = rows }, self.io);
+    }
+
+    /// host 실제 core/PTY에서 화면 외 runtime 관측을 한 번에 owned copy한다. foreground syscall은 runtime별 500ms
+    /// cache로 core lock 밖에서 수행하고, cwd/title/semantic/input modes/OSC5379는 reader와 같은 core lock 아래에서 복사한다.
+    /// 1회성 agent progress는 multi-subscriber wire에서 제외한다.
+    fn observationOp(ctx: *anyopaque, runtime_id: u128, allocator: std.mem.Allocator) anyerror!server.RuntimeObservation {
+        const self: *RuntimeManager = @ptrCast(@alignCast(ctx));
+        const handle = self.handleFor(runtime_id) orelse return error.RuntimeNotFound;
+        const surface = self.backend_impl.surfaceFor(handle) orelse return error.RuntimeNotFound;
+        const be = self.backend_impl.backend();
+
+        const cache_gop = try self.foreground_cache.getOrPut(self.allocator, handle);
+        if (!cache_gop.found_existing) cache_gop.value_ptr.* = .{};
+        const foreground = cache_gop.value_ptr;
+        const now_ns = std.Io.Clock.awake.now(self.io).nanoseconds;
+        if (foreground.refreshed_at_ns == 0 or now_ns - foreground.refreshed_at_ns >= foreground_refresh_ns) {
+            foreground.count = be.foregroundProcessNames(handle, &foreground.names);
+            foreground.pgid = be.foregroundProcessGroup(handle);
+            foreground.refreshed_at_ns = now_ns;
+        }
+        const process_count = foreground.count;
+        const foreground_pgid = foreground.pgid;
+        const processes = try allocator.alloc(server.RuntimeObservation.Process, process_count);
+        var process_names_initialized: usize = 0;
+        errdefer {
+            for (processes[0..process_names_initialized]) |p| allocator.free(p.name);
+            allocator.free(processes);
+        }
+        for (foreground.names[0..process_count], 0..) |p, i| {
+            processes[i] = .{ .pid = p.pid, .name = try allocator.dupe(u8, p.slice()) };
+            process_names_initialized += 1;
+        }
+
+        surface.lockCore(self.io);
+        defer surface.unlockCore(self.io);
+        const core = &surface.core;
+        const cwd = try allocator.dupe(u8, core.currentCwd());
+        errdefer allocator.free(cwd);
+        const title = try allocator.dupe(u8, core.windowTitle());
+        errdefer allocator.free(title);
+        const ssh_dest: ?[]u8 = if (core.sshRemoteDest()) |dest| try allocator.dupe(u8, dest) else null;
+        errdefer if (ssh_dest) |dest| allocator.free(dest);
+        const result = server.RuntimeObservation{
+            .cwd = cwd,
+            .window_title = title,
+            .ssh_remote_dest = ssh_dest,
+            .semantic_state = @intFromEnum(core.semantic_state),
+            .alt_active = core.alt_active,
+            .app_cursor_keys = core.application_cursor_keys,
+            .alternate_scroll = core.alternate_scroll,
+            .observer_generation = core.observerGeneration(),
+            .title_generation = core.title_generation.load(.monotonic),
+            .cols = core.size.cols,
+            .rows = core.size.rows,
+            .foreground_available = true,
+            .foreground_pgid = foreground_pgid,
+            .processes = processes,
+        };
+        return result;
     }
 
     /// runtime의 현재 화면을 screen_stream 레코드 스트림으로 투영한다(§12, P3-e2d). reader 스레드가 core를 쓰므로
@@ -366,6 +439,7 @@ pub const RuntimeManager = struct {
         const be = self.backend_impl.backend();
         be.closeAndDetach(handle); // PTY/자식/reader 종료 + routing detach(멱등).
         be.remove(handle); // reader join → surface/live_pty 번들 deinit → 슬롯 회수.
+        _ = self.foreground_cache.remove(handle);
         self.host_registry.unregister(runtime_id);
     }
 };
@@ -473,6 +547,41 @@ test "runtime manager: snapshot projects the runtime's live screen through Runti
     try std.testing.expectError(error.RuntimeNotFound, ops.snapshot(ops.ctx, 0xDEADBEEF, allocator));
 
     ops.terminate(ops.ctx, rid);
+}
+
+test "runtime manager: observation exports host-owned cwd title ssh and semantic metadata" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    var host_registry = reg.TerminalRuntimeRegistry.init(allocator);
+    defer host_registry.deinit();
+    var mgr: RuntimeManager = undefined;
+    mgr.init(allocator, std.testing.io, &host_registry);
+    defer mgr.deinit();
+
+    const ops = mgr.runtimeOps();
+    const rid = try ops.spawn(ops.ctx, .{ .argv = &.{"/bin/cat"}, .cwd = null, .cols = 24, .rows = 6 });
+    defer ops.terminate(ops.ctx, rid);
+    const handle = mgr.handleFor(rid) orelse return error.TestUnexpectedResult;
+    const surface = mgr.backend_impl.surfaceFor(handle) orelse return error.TestUnexpectedResult;
+    surface.lockCore(std.testing.io);
+    surface.core.write(
+        "\x1b]7;file://localhost/tmp/metadata-repo\x07" ++
+            "\x1b]2;metadata-title\x07" ++
+            "\x1b]5379;ssh;user@workbox\x07" ++
+            "\x1b]133;C\x07",
+    ) catch |err| {
+        surface.unlockCore(std.testing.io);
+        return err;
+    };
+    surface.unlockCore(std.testing.io);
+
+    var observation = try ops.observation(ops.ctx, rid, allocator);
+    defer observation.deinit(allocator);
+    try std.testing.expectEqualStrings("/tmp/metadata-repo", observation.cwd);
+    try std.testing.expectEqualStrings("metadata-title", observation.window_title);
+    try std.testing.expectEqualStrings("user@workbox", observation.ssh_remote_dest.?);
+    try std.testing.expectEqual(@as(u8, @intFromEnum(terminal.SemanticPrompt.command)), observation.semantic_state);
+    try std.testing.expect(observation.foreground_available);
 }
 
 test "runtime manager: empty argv is rejected before allocating a handle" {

@@ -37,6 +37,7 @@ import {
   type LivePreviewIntentQueueMetrics,
 } from "./live-preview-interaction";
 import type { LivePreviewIntent } from "./live-preview-intent";
+import { sha256Hex } from "./sha256";
 
 export const viewerChannel = "maru.file.viewer.v1";
 export const maxAssetRequests = 64;
@@ -83,6 +84,15 @@ type AssetResult = {
   requestId: string;
   mime?: string;
   dataBase64?: string;
+  error?: string;
+};
+
+// 읽기 프리뷰 mermaid: render iframe이 펜스별로 요청하면 shell이 native 헬퍼로 렌더한 sanitized SVG를 돌려준다.
+type MermaidReadResult = {
+  channel: typeof viewerChannel;
+  type: "mermaid-result";
+  requestId: string;
+  svg?: string;
   error?: string;
 };
 
@@ -567,6 +577,24 @@ export function requestFileBridge(
   });
 }
 
+// rehype-prism-plus가 코드 각 줄을 span으로 쪼개므로 `code.language-mermaid`의 textContent는 줄 사이 개행을 잃는다
+// ("flowchart TB"+"A --> B" → "flowchart TBA --> B" → mermaid 파싱 에러). markdown.ts의 rehypeSourcePositions가
+// <pre>/<code>에 붙인 원본 오프셋(data-maru-source-start/end="line:column:offset")으로 원본 마크다운에서 펜스를 그대로
+// 잘라 개행을 보존한다. 오프셋이 없거나 범위가 이상하면 null → 호출부가 textContent로 폴백한다.
+function sliceMermaidFence(element: HTMLElement, markdown: string): string | null {
+  const start = decodeSourceOffset(element.dataset.maruSourceStart);
+  const end = decodeSourceOffset(element.dataset.maruSourceEnd);
+  if (start === null || end === null || end <= start || end > markdown.length) return null;
+  const sliced = markdown.slice(start, end);
+  return sliced.length > 0 ? sliced : null;
+}
+
+function decodeSourceOffset(encoded: string | undefined): number | null {
+  if (encoded === undefined) return null;
+  const offset = Number(encoded.split(":")[2]);
+  return Number.isInteger(offset) && offset >= 0 ? offset : null;
+}
+
 /// Product Mermaid adapter. The native exact terminal and the action-relative Swift fallback are the
 /// only timeout authorities, so this mailbox deliberately has no independent Web timer.
 export async function renderMermaidFromBridge(
@@ -753,6 +781,11 @@ export function bootShell(document: Document, targetWindow: Window): void {
   let pendingDiskUpdate: ViewUpdate | null = null;
   let assetBase64Bytes = 0;
   let assetRequests = 0;
+  // 읽기 프리뷰 mermaid: render iframe이 펜스별로 SVG를 요청하면 여기서 native 헬퍼로 렌더한다(라이브가 숨겨진
+  // 동안 읽기에서도 다이어그램을 그림, 팔레트 적용). 순차 queue라 헬퍼 1개를 순서대로 태운다. widget_id는 펜스마다
+  // 달라야 coordinator가 dedup 안 한다(단조 증가).
+  let readMermaidQueue = Promise.resolve();
+  let readMermaidWidget = 0;
   let liveIntentCm6Transactions = 0;
   let liveIntentExternalActions = 0;
   let liveIntentDualEffects = 0;
@@ -874,7 +907,9 @@ export function bootShell(document: Document, targetWindow: Window): void {
       if (status !== null) status.textContent = "";
       return true;
     } catch {
-      if (status !== null) status.textContent = "파일을 저장할 수 없습니다.";
+      // 저장 실패 안내는 native가 chrome 모달(showNotice)로 띄운다. 웹뷰 안 sticky 텍스트는 한 번 뜨면 안 사라져
+      // (성공해야만 지워짐) 자연스럽지 않았다 — 여기서는 남은 텍스트만 지우고 native 알림에 맡긴다.
+      if (status !== null) status.textContent = "";
       return false;
     }
   };
@@ -885,9 +920,42 @@ export function bootShell(document: Document, targetWindow: Window): void {
       requestId: number,
     ) => Promise<{ success: boolean; revision: number; dirty: boolean }>;
     __maruUnlockFileClose?: (requestId: number) => Promise<boolean>;
+    __maruSelectAll?: () => boolean;
   };
   closeApi.__maruSyncDirty = syncDirtyNow;
   closeApi.__maruSyncDirtyForClose = syncDirtyForClose;
+  // 메뉴 Edit>Select All(클릭)은 native selectAll:을 responder chain으로 보내는데, 그건 WKWebView의 렌더된(가상화)
+  // DOM만 고른다. CM6 문서 전체를 선택하는 명령을 노출해 native가 이걸 우선 호출한다(키보드 ⌘A는 아래 capture
+  // 리스너가 직접 처리). 편집기가 없으면(읽기 프리뷰) false를 돌려 native selectAll:로 폴백.
+  const selectWholeDocument = (): boolean => {
+    if (editor === null) return false;
+    editor.dispatch({ selection: { anchor: 0, head: editor.state.doc.length } });
+    editor.focus();
+    return true;
+  };
+  closeApi.__maruSelectAll = selectWholeDocument;
+  // 키보드 ⌘A: web_editor route라 keyDown이 WKWebView에 도달하지만, WKWebView 기본 selectAll:이 렌더된 DOM만
+  // 고른다. capture 단계에서 먼저 잡아 CM6 문서 전체를 동기적으로 선택하고 기본 동작을 막는다(비동기 왕복 없이
+  // 즉시 반영). 편집기 포커스일 때만 개입한다.
+  document.addEventListener(
+    "keydown",
+    (event) => {
+      if (
+        (event.metaKey || event.ctrlKey) &&
+        !event.shiftKey &&
+        !event.altKey &&
+        (event.key === "a" || event.key === "A") &&
+        editor !== null &&
+        editor.hasFocus
+      ) {
+        if (selectWholeDocument()) {
+          event.preventDefault();
+          event.stopPropagation();
+        }
+      }
+    },
+    true,
+  );
   closeApi.__maruSaveForClose = async (requestId: number) => {
     if (!Number.isSafeInteger(requestId) || closeLockRequestId !== requestId) {
       return { success: false, revision: revisions.documentRevision, dirty: true };
@@ -1406,6 +1474,54 @@ export function bootShell(document: Document, targetWindow: Window): void {
       });
       return;
     }
+    if (
+      isRecord(event.data) &&
+      event.data.channel === viewerChannel &&
+      event.data.type === "mermaid-request" &&
+      typeof event.data.requestId === "string" &&
+      typeof event.data.source === "string"
+    ) {
+      const requestId = event.data.requestId;
+      const source = event.data.source;
+      readMermaidQueue = readMermaidQueue.then(async () => {
+        const response: Record<string, unknown> = {
+          channel: viewerChannel,
+          type: "mermaid-result",
+          requestId,
+        };
+        try {
+          // 읽기 프리뷰는 markdown 전용이라 editorEpoch가 있다(image는 beginDocument 안 해 null → 요청도 안 옴).
+          if (editorEpoch === null) throw new Error("no document");
+          readMermaidWidget += 1;
+          // 읽기 프리뷰용 합성 capability(라이브 projection 없음). validRenderer가 요구하는 필드는 전부 non-zero,
+          // widget_id는 펜스마다 달라 dedup을 피한다. source_hash는 헬퍼가 받는 그대로의 fence를 해시한다.
+          const capability = {
+            editorEpoch,
+            documentRevision: 0,
+            projectionGeneration: 1,
+            widgetId: readMermaidWidget,
+            widgetGeneration: 1,
+            rendererInstance: 1,
+          };
+          const svg = await renderMermaidFromBridge(
+            document,
+            status,
+            capability,
+            readMermaidWidget,
+            sha256Hex(source),
+            source,
+          );
+          if (typeof svg !== "string")
+            throw new Error(`no-svg(state=${status?.dataset.liveMermaidRequest ?? "?"})`);
+          response.svg = svg;
+        } catch (error) {
+          response.error =
+            error instanceof Error ? error.message : `unavailable(ep=${String(editorEpoch)})`;
+        }
+        frame.contentWindow?.postMessage(response, "*");
+      });
+      return;
+    }
     if (!isAssetRequest(event.data)) return;
     const request = event.data;
     assetQueue = assetQueue.then(async () => {
@@ -1455,6 +1571,8 @@ export function bootRenderer(document: Document, targetWindow: Window): void {
   let generation = 0;
   let requestSequence = 0;
   const pending = new Map<string, (value: AssetResult) => void>();
+  // 읽기 프리뷰 mermaid 요청의 대기 resolver(asset과 분리 — 결과 타입이 다름).
+  const mermaidPending = new Map<string, (value: MermaidReadResult) => void>();
   // FP14: 현재 이미지 프리뷰의 panzoom 인스턴스. 재렌더/모드 전환마다 dispose해 리스너·transform 누수를 막는다.
   let imagePanzoom: PanZoom | null = null;
   let atomicPort: MessagePort | null = null;
@@ -1540,6 +1658,19 @@ export function bootRenderer(document: Document, targetWindow: Window): void {
       pending.set(requestId, resolve);
       targetWindow.parent.postMessage(
         { channel: viewerChannel, type: "asset-request", requestId, path },
+        "*",
+      );
+    });
+  };
+
+  // 읽기 프리뷰의 mermaid 펜스를 shell(→native 헬퍼)에 렌더 요청한다. source는 헬퍼의 mermaidFenceBody가 요구하는
+  // 완전한 ```mermaid 펜스다.
+  const requestMermaid = (source: string): Promise<MermaidReadResult> => {
+    const requestId = `${generation}:mermaid:${++requestSequence}`;
+    return new Promise((resolve) => {
+      mermaidPending.set(requestId, resolve);
+      targetWindow.parent.postMessage(
+        { channel: viewerChannel, type: "mermaid-request", requestId, source },
         "*",
       );
     });
@@ -1646,6 +1777,14 @@ export function bootRenderer(document: Document, targetWindow: Window): void {
       if (resolve !== undefined) {
         pending.delete(event.data.requestId);
         resolve(event.data);
+      }
+      return;
+    }
+    if (event.data.type === "mermaid-result" && typeof event.data.requestId === "string") {
+      const resolve = mermaidPending.get(event.data.requestId);
+      if (resolve !== undefined) {
+        mermaidPending.delete(event.data.requestId);
+        resolve(event.data as MermaidReadResult);
       }
       return;
     }
@@ -1762,7 +1901,40 @@ export function bootRenderer(document: Document, targetWindow: Window): void {
       resolve({ channel: viewerChannel, type: "asset-result", requestId: "stale", error: "stale" });
     }
     pending.clear();
+    for (const resolve of mermaidPending.values())
+      resolve({
+        channel: viewerChannel,
+        type: "mermaid-result",
+        requestId: "stale",
+        error: "stale",
+      });
+    mermaidPending.clear();
     root.innerHTML = renderMarkdown(event.data.markdown);
+    // 읽기 프리뷰 mermaid: prism이 남긴 `code.language-mermaid` 코드 블록을 shell(→헬퍼)로 렌더한 SVG `<img>`로
+    // 교체한다. 헬퍼가 요구하는 완전한 ```mermaid 펜스로 재구성해 보내고, 실패/스테일이면 원래 코드 블록을 남긴다.
+    for (const codeEl of Array.from(
+      root.querySelectorAll<HTMLElement>("code.language-mermaid"),
+    ).slice(0, maxAssetRequests)) {
+      const pre = codeEl.closest("pre");
+      if (pre === null) continue;
+      // 원본 오프셋 슬라이스로 개행을 보존한 완전한 펜스를 만든다(prism의 줄-span 구조 무관). 오프셋이 없으면
+      // 옛 textContent 재구성으로 폴백한다(개행 손실 가능하나 최소 동작 보장).
+      const fence =
+        sliceMermaidFence(pre, event.data.markdown) ??
+        sliceMermaidFence(codeEl, event.data.markdown) ??
+        `\`\`\`mermaid\n${codeEl.textContent ?? ""}\n\`\`\``;
+      void requestMermaid(fence).then((result) => {
+        if (currentGeneration !== generation || pre.parentNode === null) return;
+        if (typeof result.svg !== "string") {
+          return; // 렌더 실패/스테일이면 원래 코드 블록을 그대로 남긴다(fallback)
+        }
+        const img = document.createElement("img");
+        img.src = `data:image/svg+xml;base64,${bytesToBase64(new TextEncoder().encode(result.svg), targetWindow)}`;
+        img.className = "maru-mermaid-diagram";
+        img.alt = "mermaid 다이어그램";
+        pre.replaceWith(img);
+      });
+    }
     const images = Array.from(
       root.querySelectorAll<HTMLImageElement>("img[data-maru-asset-path]"),
     ).slice(0, maxAssetRequests);

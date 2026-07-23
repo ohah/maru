@@ -47,6 +47,9 @@ pub const JobRequest = struct {
     renderer: RendererCapability,
     fence_id: u64,
     source: []const u8,
+    /// 이 렌더의 터미널 파생 mermaid 팔레트(mermaid_theme.fromTheme). 세션(창)마다 테마가 다를 수 있어
+    /// 앱-전역 coordinator에는 job마다 실어 보낸다. source_hash와 무관(content 아님).
+    palette: protocol.Palette = std.mem.zeroes(protocol.Palette),
 };
 
 pub const StartJob = struct {
@@ -124,6 +127,7 @@ const JobSlot = struct {
     source_hash: [32]u8 = [_]u8{0} ** 32,
     source_len: usize = 0,
     revoked: bool = false,
+    palette: protocol.Palette = std.mem.zeroes(protocol.Palette),
     source: [protocol.max_source_bytes]u8 = undefined,
 
     fn capability(self: *const JobSlot, helper_instance: u64) JobCapability {
@@ -280,6 +284,7 @@ pub const MermaidCoordinatorState = struct {
         slot.fence_id = request.fence_id;
         slot.source_hash = actual_source_hash;
         slot.source_len = request.source.len;
+        slot.palette = request.palette;
         @memcpy(slot.source[0..request.source.len], request.source);
         self.admission_copies +%= 1;
         self.pending_source_bytes = projected_bytes;
@@ -317,6 +322,7 @@ pub const MermaidCoordinatorState = struct {
         self.action_frame_len = protocol.encode(.{ .request = .{
             .capability = capability,
             .source = slot.source[0..slot.source_len],
+            .palette = slot.palette,
         } }, &self.action_frame) catch unreachable;
         self.action_lease_helper = capability.helper_instance;
         self.action_lease_job = capability.job_id;

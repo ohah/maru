@@ -3,7 +3,7 @@ import { defaultKeymap, history, historyKeymap, indentWithTab } from "@codemirro
 import { markdown, markdownLanguage } from "@codemirror/lang-markdown";
 import { bracketMatching, indentOnInput, indentUnit } from "@codemirror/language";
 import { EditorState, type Extension } from "@codemirror/state";
-import { EditorView, keymap, lineNumbers, type ViewUpdate } from "@codemirror/view";
+import { drawSelection, EditorView, keymap, lineNumbers, type ViewUpdate } from "@codemirror/view";
 import { editableProjectionExtension } from "./editable-projection-view";
 import { livePreviewEditorExtension } from "./live-preview-editor";
 import { maruMathMarkdownExtension } from "./markdown-language";
@@ -20,9 +20,14 @@ export function createMarkdownEditor(
       doc: content,
       extensions: [
         EditorState.allowMultipleSelections.of(true),
+        // CM6는 문서를 가상화(보이는 줄만 DOM)하므로 브라우저 native 선택에 의존하면 긴 문서의 전체 선택이
+        // 렌더된 줄만 덮여 화면·복사·삭제가 일부만 된다. drawSelection이 CM6 자체 선택 레이어를 그려 전체 모델
+        // 선택을 일관되게 시각화·처리한다(⌘A 전체 선택이 실제로 전부 지워지도록).
+        drawSelection(),
         lineNumbers(),
         history(),
         markdown({ base: markdownLanguage, extensions: maruMathMarkdownExtension }),
+        indentUnit.of("  "),
         editableProjectionExtension,
         livePreviewEditorExtension,
         EditorView.lineWrapping,
@@ -35,6 +40,9 @@ export function createMarkdownEditor(
               return true;
             },
           },
+          // Tab/Shift-Tab = 들여쓰기/내어쓰기. live-preview 테이블 안에서는 projection의 keyPressed가
+          // stopImmediatePropagation으로 먼저 셀 이동을 처리하므로, 이 바인딩은 소스 편집(폴백)에만 적용된다.
+          indentWithTab,
           ...defaultKeymap,
           ...historyKeymap,
         ]),
@@ -60,6 +68,10 @@ export function createSourceEditor(
       doc: content,
       extensions: [
         EditorState.allowMultipleSelections.of(true),
+        // CM6는 문서를 가상화(보이는 줄만 DOM)하므로 브라우저 native 선택에 의존하면 긴 문서의 전체 선택이
+        // 렌더된 줄만 덮여 화면·복사·삭제가 일부만 된다. drawSelection이 CM6 자체 선택 레이어를 그려 전체 모델
+        // 선택을 일관되게 시각화·처리한다(⌘A 전체 선택이 실제로 전부 지워지도록).
+        drawSelection(),
         lineNumbers(),
         history(),
         // 코드 편집 필수: Enter 자동 들여쓰기(언어 indent service)·`}` 등 입력 시 재들여쓰기·괄호 매칭·자동 닫기.

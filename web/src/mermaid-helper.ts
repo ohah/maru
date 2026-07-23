@@ -15,6 +15,7 @@ declare global {
     __maruExternalRequestSnapshot?: () => MermaidExternalRequestAttempts;
     __maruRenderMermaid?: (
       source: string,
+      palette?: unknown,
     ) => Promise<{ svg: string; externalRequests: MermaidExternalRequestAttempts }>;
     mermaid: Mermaid;
   }
@@ -22,6 +23,59 @@ declare global {
 
 window.mermaid.initialize(mermaidConfig);
 let nextRenderId = 0;
+
+// native가 넘긴 터미널 팔레트(#rrggbb hex dict)를 mermaid themeVariables로 매핑한다(v3). 값은 native가
+// u8 RGB에서 만든 hex라 항상 유효하지만, themeVariables가 SVG `<style>`로 들어가므로 방어적으로 #rrggbb만
+// 통과시키고(CSS 주입 차단) 아니면 안전한 기본값으로 떨어진다. 최종 SVG는 sanitizeMermaidSvg가 다시 검사한다.
+function safeHex(value: unknown, fallback: string): string {
+  return typeof value === "string" && /^#[0-9a-fA-F]{6}$/.test(value) ? value : fallback;
+}
+
+function hexLuminance(hex: string): number {
+  const r = Number.parseInt(hex.slice(1, 3), 16) / 255;
+  const g = Number.parseInt(hex.slice(3, 5), 16) / 255;
+  const b = Number.parseInt(hex.slice(5, 7), 16) / 255;
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+}
+
+function mermaidThemeVariables(palette: unknown): Record<string, unknown> {
+  const p = (typeof palette === "object" && palette !== null ? palette : {}) as Record<
+    string,
+    unknown
+  >;
+  const background = safeHex(p.background, "#101010");
+  const primary = safeHex(p.primary, "#282828");
+  const primaryBorder = safeHex(p.primaryBorder, "#dda15e");
+  const primaryText = safeHex(p.primaryText, "#e8e8e8");
+  const line = safeHex(p.line, "#888888");
+  const text = safeHex(p.text, "#e8e8e8");
+  const secondary = safeHex(p.secondary, primary);
+  const tertiary = safeHex(p.tertiary, primary);
+  return {
+    darkMode: hexLuminance(background) < 0.5,
+    background,
+    primaryColor: primary,
+    primaryBorderColor: primaryBorder,
+    primaryTextColor: primaryText,
+    lineColor: line,
+    textColor: text,
+    secondaryColor: secondary,
+    tertiaryColor: tertiary,
+    secondaryBorderColor: primaryBorder,
+    tertiaryBorderColor: primaryBorder,
+    secondaryTextColor: text,
+    tertiaryTextColor: text,
+    noteBkgColor: secondary,
+    noteTextColor: text,
+    noteBorderColor: primaryBorder,
+    mainBkg: primary,
+    nodeBorder: primaryBorder,
+    clusterBkg: secondary,
+    clusterBorder: primaryBorder,
+    titleColor: text,
+    edgeLabelBackground: background,
+  };
+}
 
 function externalRequestDelta(
   before: MermaidExternalRequestAttempts,
@@ -41,6 +95,7 @@ function externalRequestDelta(
 
 window.__maruRenderMermaid = async (
   source: string,
+  palette?: unknown,
 ): Promise<{ svg: string; externalRequests: MermaidExternalRequestAttempts }> => {
   if (typeof window.__maruExternalRequestSnapshot !== "function") {
     throw new Error("external request guard unavailable");
@@ -51,11 +106,13 @@ window.__maruRenderMermaid = async (
   nextRenderId += 1;
   if (!Number.isSafeInteger(nextRenderId)) throw new Error("Mermaid render id exhausted");
   const id = `maru-mermaid-${nextRenderId}`;
-  // 렌더 직전 현재 appearance로 테마를 정한다(헬퍼는 별도 프로세스라 터미널 팔레트를 직접 모른다 — 시스템
-  // light/dark만 관측 가능. 터미널이 시스템을 따르면 일치한다. 정확한 터미널 팔레트 매칭은 프로토콜로 색을 넘기는
-  // 후속). Mermaid `<style>`가 sanitize에서 유지되므로 이 theme가 실제로 적용된다.
-  const prefersDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
-  window.mermaid.initialize({ ...mermaidConfig, theme: prefersDark ? "dark" : "default" });
+  // native가 넘긴 터미널 파생 팔레트를 themeVariables로 적용한다(v3). theme:"base"라야 themeVariables가 온전히
+  // 먹는다. 팔레트가 없으면(구프레임 등) mermaidThemeVariables 내부 폴백으로 안전한 기본값을 쓴다.
+  window.mermaid.initialize({
+    ...mermaidConfig,
+    theme: "base",
+    themeVariables: mermaidThemeVariables(palette),
+  });
   const rendered = await window.mermaid.render(id, body);
   const sanitized = sanitizeMermaidSvg(rendered.svg, window);
   if (!/^<svg(?:\s|>)/i.test(sanitized.trim())) throw new Error("invalid Mermaid SVG");

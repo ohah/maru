@@ -1367,6 +1367,24 @@ typedef struct MaruMermaidJobCapability {
     uint8_t source_hash[32];
 } MaruMermaidJobCapability;
 
+typedef struct MaruMermaidRgb {
+    uint8_t r;
+    uint8_t g;
+    uint8_t b;
+} MaruMermaidRgb;
+
+// v3: 터미널 파생 mermaid 팔레트(mermaid_protocol.Palette 미러). helper가 themeVariables 구성에 쓴다.
+typedef struct MaruMermaidPalette {
+    MaruMermaidRgb background;
+    MaruMermaidRgb primary;
+    MaruMermaidRgb primary_border;
+    MaruMermaidRgb primary_text;
+    MaruMermaidRgb line;
+    MaruMermaidRgb text;
+    MaruMermaidRgb secondary;
+    MaruMermaidRgb tertiary;
+} MaruMermaidPalette;
+
 typedef struct MaruMermaidDecodedFrame {
     uint32_t tag;
     uint32_t status;
@@ -1375,6 +1393,7 @@ typedef struct MaruMermaidDecodedFrame {
     MaruMermaidJobCapability capability;
     const uint8_t *body_ptr;
     size_t body_len;
+    MaruMermaidPalette palette;
 } MaruMermaidDecodedFrame;
 
 typedef struct MaruMermaidCoordinatorAction {
@@ -1428,7 +1447,7 @@ uint32_t maru_mermaid_protocol_matches_hello_ack(const MaruMermaidDecodedFrame *
 
 /* 반환: 쓴 길이, -1=invalid, -2=output too small. */
 int64_t maru_mermaid_protocol_encode_hello(uint32_t ack, uint64_t helper_instance, uint64_t nonce, uint8_t *out, size_t out_cap);
-int64_t maru_mermaid_protocol_encode_request(const MaruMermaidJobCapability *capability, const uint8_t *source, size_t source_len, uint8_t *out, size_t out_cap);
+int64_t maru_mermaid_protocol_encode_request(const MaruMermaidJobCapability *capability, const uint8_t *source, size_t source_len, const MaruMermaidPalette *palette, uint8_t *out, size_t out_cap);
 int64_t maru_mermaid_protocol_encode_result(const MaruMermaidJobCapability *capability, uint32_t status, const uint8_t *body, size_t body_len, uint8_t *out, size_t out_cap);
 
 /* 앱 전역 AppRuntime.mermaid_queue에 job을 제출한다. 0=accepted, 음수=closed validation/cap 거부. */

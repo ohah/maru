@@ -54,6 +54,7 @@ pub const syntax_theme = @import("session/syntax_theme.zig"); // FP12b: 터미�
 pub const live_preview_budget = @import("session/live_preview_budget.zig"); // FP10b: 앱 전역 worker admission과 64/16 MiB 상한
 pub const mermaid_protocol = @import("session/mermaid_protocol.zig"); // FP10c1: parent/helper가 공유하는 bounded wire codec SSOT
 pub const mermaid_coordinator = @import("session/mermaid_coordinator.zig"); // FP10c1: 앱 전역 queue/capability/deadline/failure 정책 SSOT
+pub const mermaid_theme = @import("session/mermaid_theme.zig"); // 터미널 색상 테마 → mermaid 팔레트 파생(순수, per-render)
 pub const file_tree = @import("session/file_tree.zig"); // FP7: OS-중립 파일 트리 snapshot·접힘·멀티루트·최근 파일 모델
 pub const file_tree_navigation = @import("session/file_tree_navigation.zig"); // 파일 트리 transient selection·키보드 탐색·scroll 순수 정책
 pub const file_tree_mutation = @import("session/file_tree_mutation.zig"); // 파일 트리 변경 이름·root·dirty 보호·path remap 순수 정책

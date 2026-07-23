@@ -1,6 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const maru = @import("maru");
+const session_host_entrypoint = @import("platform/macos/session_host/entrypoint.zig");
 
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
@@ -110,7 +111,7 @@ fn dispatch(
 
     // hidden: `maru __session-host <socket>` — 영속 세션 host 프로세스 본체(§10, P3-d2c/d). 앱이 detached spawn한
     // 자식이 이 인자로 재실행돼 host 모드로 진입한다(사용자가 직접 칠 명령이 아니라 usage에 안 넣는다). macOS 전용.
-    if (std.mem.eql(u8, command, "__session-host")) {
+    if (std.mem.eql(u8, command, session_host_entrypoint.subcommand)) {
         try runSessionHostDaemon(io, allocator, &args, stderr);
         return;
     }
@@ -258,11 +259,11 @@ fn runSessionHostDaemon(io: std.Io, allocator: std.mem.Allocator, args: anytype,
     if (builtin.os.tag == .macos) {
         const session_host = @import("platform/macos/session_host.zig");
         const socket_path = args.next() orelse {
-            try stderr.print("usage: maru __session-host <socket-path>\n", .{});
+            try stderr.print("usage: maru {s} <socket-path>\n", .{session_host_entrypoint.subcommand});
             return error.UnknownCommand;
         };
         const dir = std.fs.path.dirname(socket_path) orelse {
-            try stderr.print("maru __session-host: invalid socket path\n", .{});
+            try stderr.print("maru {s}: invalid socket path\n", .{session_host_entrypoint.subcommand});
             return error.UnknownCommand;
         };
         const dir_z = try allocator.dupeZ(u8, dir);
@@ -270,11 +271,11 @@ fn runSessionHostDaemon(io: std.Io, allocator: std.mem.Allocator, args: anytype,
         const socket_z = try allocator.dupeZ(u8, socket_path);
         defer allocator.free(socket_z);
         session_host.daemon.runSessionHost(allocator, io, dir_z, socket_z) catch |err| {
-            try stderr.print("maru __session-host failed: {s}\n", .{@errorName(err)});
+            try stderr.print("maru {s} failed: {s}\n", .{ session_host_entrypoint.subcommand, @errorName(err) });
             return error.UnknownCommand;
         };
     } else {
-        try stderr.print("maru __session-host is macOS-only\n", .{});
+        try stderr.print("maru {s} is macOS-only\n", .{session_host_entrypoint.subcommand});
         return error.UnknownCommand;
     }
 }

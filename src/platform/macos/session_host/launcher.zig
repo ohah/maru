@@ -7,13 +7,14 @@
 //! host 생존"을 배포에서 성립시키는 수명 배선이다.
 //!
 //! macOS 전용(실 fork/exec/setsid). 순수 부분(argv 조립)은 non-macOS에서도 TDD하고, 실 spawn 메커니즘은 관찰 가능한
-//! 자식(marker 파일)으로 process smoke한다. 실제 `maru` 바이너리를 host로 띄우는 end-to-end는 CLI 배선(아래 argv)이
-//! 붙은 뒤 앱 통합/OS E2E에서 검증한다.
+//! 자식(marker 파일)으로 process smoke한다. 실제 `maru` 바이너리를 host로 띄우는 제품 argv/CLI 진입은
+//! `host_connect.zig`의 product-path process smoke가 검증한다.
 
 const std = @import("std");
 const builtin = @import("builtin");
 const c = std.c;
 const posix = std.posix;
+const entrypoint = @import("entrypoint.zig");
 
 // execv는 std.c 미노출이라 직접 extern(현재 environ 상속). launcher는 macOS 전용이라 링크 대상이 libc다.
 extern "c" fn execv(path: [*:0]const u8, argv: [*:null]const ?[*:0]const u8) c_int;
@@ -21,7 +22,7 @@ extern "c" fn execv(path: [*:0]const u8, argv: [*:null]const ?[*:0]const u8) c_i
 extern "c" fn getdtablesize() c_int;
 
 /// `maru <exe>`를 session host로 전환하는 hidden 서브커맨드 이름. main.zig dispatch와 이 launcher가 공유하는 단일 출처다.
-pub const subcommand = "__session-host";
+pub const subcommand = entrypoint.subcommand;
 
 pub const SpawnError = error{ ForkFailed, OutOfMemory };
 
@@ -35,10 +36,20 @@ pub fn sessionHostArgv(allocator: std.mem.Allocator, exe_path: []const u8, socke
     return argv;
 }
 
+/// 제품 session host 전용 launch API. caller가 raw `spawnDetached` args를 직접 조립하지 않게 하여 hidden subcommand
+/// 누락(`maru <socket>`으로 잘못 실행)을 구조적으로 막는다.
+pub fn spawnSessionHostDetached(
+    allocator: std.mem.Allocator,
+    exe_path: [:0]const u8,
+    socket_path: [:0]const u8,
+) SpawnError!void {
+    try spawnDetached(allocator, exe_path, &.{ subcommand, socket_path });
+}
+
 /// `exe_path`를 `args`(NUL 종단 슬라이스들)로 **detached** 실행한다: double-fork로 손자를 부모와 독립시키고, setsid로
 /// 새 세션 리더가 되게 하며, std fd를 `/dev/null`로 돌려 부모 터미널에 묶이지 않게 한다. 부모는 중간 자식만 waitpid로
 /// reap하고 즉시 반환한다(손자는 orphan → init reap). exec 실패는 손자에서 `_exit(127)`로 끝난다.
-pub fn spawnDetached(allocator: std.mem.Allocator, exe_path: [:0]const u8, args: []const [:0]const u8) SpawnError!void {
+fn spawnDetached(allocator: std.mem.Allocator, exe_path: [:0]const u8, args: []const [:0]const u8) SpawnError!void {
     if (builtin.os.tag != .macos) return error.ForkFailed;
 
     // exec argv: [exe_path, args..., null]. child가 exec 전에 쓰므로 부모 메모리라도 fork로 복제돼 안전하다.

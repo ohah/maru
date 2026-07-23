@@ -31,10 +31,16 @@
 //!     - e2e-2b ✅: `Surface.renderSnapshot()` 렌더 seam 도입(로컬 core 위임). GUI 렌더 read를 `surface.core.renderSnapshot()`→`surface.renderSnapshot()`로 이관 — 원격 backing이 갈릴 단일 접근점.
 //!     - e2e-2c-1 ✅: `Surface`에 화면 소스 추상(`ScreenSource` vtable) + `RemoteScreen`(조립기+CellGrid+mutex) source. Surface.remote 설정 시 renderSnapshot/lockCore가 원격 조립 화면으로 갈린다.
 //!     - e2e-2c-2 ✅: `remote_runtime`(client 쪽 원격 runtime — host runtime_manager의 상대). spawn(runtime.spawn+attach+snapshot)→원격-backed Surface, sendInput/resize→client RPC, pumpDelta→delta 소비, terminate. **`TermRuntimeBackend` vtable 어댑터+frame-loop pump 배선은 e3**(pump=RuntimeEventPump가 frame-loop와 얽힘).
-//!   - P3-e3: `app_session` 배선(discovery→launch→attach) + `TermRuntimeBackend` vtable 어댑터(remote_runtime 래핑, pump 재해석) + GUI 종료→재실행 재접속(manifest runtime_handle). ← 다음
+//!   - P3-e3 ✅ core: `app_session` 배선(discovery→launch→attach) + 원격 `TermRuntimeBackend` + 앱 전역 backend/connection +
+//!     GUI 종료→재실행 재접속(`runtime_handle`). 남은 P4/P5 범위는 docs/persistent-session-host.md의 구현 상태를 따른다.
 
 const builtin = @import("builtin");
 
+/// `build.zig`의 전용 session-host test artifact만 product CLI exec smoke를 필수로 실행한다. 이 barrel의 테스트가
+/// 일반 `maru` 통합 test artifact를 통해 중복 수집될 때는 product 경로 env가 없으므로 해당 smoke만 skip한다.
+pub const require_product_launch_smoke = true;
+
+pub const entrypoint = @import("session_host/entrypoint.zig");
 pub const protocol = @import("session_host/protocol.zig");
 pub const framing = @import("session_host/framing.zig");
 pub const screen_stream = @import("session_host/screen_stream.zig");

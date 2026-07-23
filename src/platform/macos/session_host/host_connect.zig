@@ -18,6 +18,7 @@ extern "c" fn flock(fd: c_int, operation: c_int) c_int;
 const LOCK_EX: c_int = 2;
 const LOCK_NB: c_int = 4;
 extern "c" fn usleep(usec: c_uint) c_int;
+extern "c" fn arc4random_buf(buf: [*]u8, nbytes: usize) void;
 
 pub const Options = struct {
     /// spawn 뒤(또는 lock loser로서) host가 뜰 때까지 재connect 시도 횟수 × 간격. 기본 150×20ms=3s(cold launch 여유).
@@ -68,7 +69,7 @@ pub fn connectOrLaunch(
         .spawn_host => {
             if (second.client) |*cl| cl.deinit(); // 방어(연결됐으면 use_connection이었어야).
             // detached helper 띄우기: `maru __session-host <socket>`(daemon이 socket dirname으로 dir 도출).
-            launcher.spawnDetached(allocator, exe_path, &[_][:0]const u8{socket}) catch return null;
+            launcher.spawnSessionHostDetached(allocator, exe_path, socket) catch return null;
             return connectWithBackoff(allocator, socket, opts); // 뜰 때까지 재시도.
         },
         .wait_and_connect => {
@@ -128,9 +129,9 @@ fn openLock(dir: [:0]const u8) ?c.fd_t {
 // process smoke (실 macOS: fork host에 connect-first로 붙고, host 없을 땐 폴백)
 //
 // 이 테스트가 증명하는 것(그리고 왜 e3에서 중요한가): keep-alive GUI가 시작할 때 "있으면 붙고 없으면 하나 띄운다"는
-// 발견 실행층이 실제 socket/flock/connect로 도는지 고정한다. use_connection(이미 뜬 host에 붙음)과 폴백(host도 없고
-// spawn도 실패 → null로 in-process 유지)을 검증한다. 실 maru 바이너리를 helper로 exec하는 spawn_host end-to-end는
-// OS E2E(§14) 몫이라(테스트 바이너리엔 maru exe 경로가 없다) 여기선 다루지 않는다. 실 syscall이라 macOS opt-in.
+// 발견 실행층이 실제 socket/flock/connect로 도는지 고정한다. use_connection(이미 뜬 host에 붙음), 제품 `maru`
+// 바이너리의 spawn_host argv/hidden-command 진입, 폴백(host도 없고 spawn도 실패 → null로 in-process 유지)을 검증한다.
+// 실 syscall이라 macOS opt-in.
 // ─────────────────────────────────────────────────────────────────────────────
 
 const testing = std.testing;
@@ -212,4 +213,60 @@ test "host_connect: falls back to null when no host exists and spawn cannot bind
     // host 없음 + helper exe가 bind 못 함(/nonexistent → exec 실패 _exit 127) → 짧은 backoff 뒤 null(in-process 폴백).
     const result = connectOrLaunch(allocator, "/nonexistent-maru-helper", base, .{ .connect_attempts = 3, .connect_delay_ms = 10 });
     try testing.expect(result == null);
+}
+
+test "host_connect: launches the product maru session host and completes host.info" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    if (!@hasDecl(@import("root"), "require_product_launch_smoke")) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    const product_exe_raw = std.c.getenv("MARU_SESSION_HOST_PRODUCT_EXE") orelse {
+        try testing.expect(false); // macOS 공식 build wiring이 product artifact 주입을 잃으면 skip이 아니라 실패한다.
+        return;
+    };
+    const product_exe: [:0]const u8 = std.mem.span(product_exe_raw);
+
+    // PID만 쓰면 강제 종료 뒤 PID 재사용 시 stale host에 connect-first로 붙어 새 product exec를 건너뛸 수 있다.
+    // CSPRNG nonce + 배타적 mkdir로 매 실행의 launch 경로가 비어 있음을 보장한다.
+    var nonce: u64 = undefined;
+    arc4random_buf(std.mem.asBytes(&nonce).ptr, @sizeOf(u64));
+    var base_buf: [160]u8 = undefined;
+    const base = std.fmt.bufPrintZ(&base_buf, "/tmp/maru-sh-product-{d}-{x}", .{ c.getpid(), nonce }) catch return error.SkipZigTest;
+    try testing.expectEqual(@as(c_int, 0), c.mkdir(base.ptr, 0o700));
+
+    var dir_buf: [256]u8 = undefined;
+    const dir = discovery.sessionHostDirPath(&dir_buf, base) catch return error.SkipZigTest;
+    var sock_buf: [320]u8 = undefined;
+    const socket = discovery.socketPathIn(&sock_buf, dir) catch return error.SkipZigTest;
+    try testing.expect(c.access(socket.ptr, 0) != 0);
+
+    defer {
+        _ = c.unlink(socket.ptr);
+        var lock_buf: [320]u8 = undefined;
+        if (discovery.lockPathIn(&lock_buf, dir)) |lock| _ = c.unlink(lock.ptr) else |_| {}
+        _ = c.rmdir(dir.ptr);
+        _ = c.rmdir(base.ptr);
+    }
+
+    {
+        var client = connectOrLaunch(allocator, product_exe, base, .{}) orelse {
+            try testing.expect(false);
+            return;
+        };
+        defer client.deinit();
+        const response = try client.call("host.info", null);
+        defer allocator.free(response);
+        try testing.expect(std.mem.indexOf(u8, response, "\"runtime_count\":0") != null);
+    }
+
+    // oneshot host가 client EOF를 받고 정상 deinit하여 socket을 지웠는지까지 확인한다.
+    var stopped = false;
+    var attempts: usize = 0;
+    while (attempts < 100) : (attempts += 1) {
+        if (c.access(socket.ptr, 0) != 0) {
+            stopped = true;
+            break;
+        }
+        _ = usleep(20 * 1000);
+    }
+    try testing.expect(stopped);
 }

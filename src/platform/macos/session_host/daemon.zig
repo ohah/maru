@@ -5,13 +5,12 @@
 //! accept loop로 client 연결을 받아 `Connection` dispatch(P3-d1)로 hello/command에 응답한다. 부모(GUI)가 종료해도 이
 //! 프로세스는 자기 세션(`setsid`)에서 독립적으로 살아 남는다 — 그것이 "GUI를 죽여도 host 생존"의 실체다.
 //!
-//! macOS 전용(실 socket/fork syscall). registry는 비어 시작한다 — runtime.spawn(실 PTY 소유)은 P3-e 이후라 d2c host는
-//! hello·host.info·runtime.list(빈 목록)에 응답하는 살아 있는 빈 host다. 그래도 "부모와 독립된 프로세스가 socket을
-//! 소유하고 재접속에 응답한다"는 P3의 핵심 계약을 이 슬라이스가 처음으로 실증한다.
+//! macOS 전용(실 socket/fork syscall). 현재 host는 `RuntimeManager`를 함께 소유하고 `runtime.spawn`/attach/input/resize/
+//! terminate와 화면 stream을 처리한다. 초기 P3-d2c process smoke는 빈 registry에서 hello·host.info 왕복으로
+//! "부모와 독립된 프로세스가 socket을 소유하고 재접속에 응답한다"는 핵심 수명 계약을 먼저 실증했다.
 //!
-//! 종료: 이 loop는 `SIGTERM`(launcher/사용자가 host를 내릴 때)의 **기본 동작(프로세스 종료)** 으로 끝난다 — 우아한
-//! deinit(socket unlink)까지 하는 signal handler 배선은 host 수명·idle grace 정책(§6)이 붙는 후속(P3-d2d launcher)에서
-//! 다룬다. d2c는 "떠서 응답하고 kill로 내려간다"까지다. 남은 socket 파일은 다음 bind가 unlink한다(P3-d2a bind 계약).
+//! 종료: 제품 loop는 `SIGTERM`의 기본 동작으로 끝나며 남은 socket 파일은 다음 bind가 안전하게 회수한다(P3-d2a 계약).
+//! product-path process smoke만 `/tmp/maru-sh-product-*` socket과 test env가 함께 있을 때 첫 연결 뒤 정상 deinit한다.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -46,6 +45,16 @@ pub fn runSessionHost(
     dir_path: [:0]const u8,
     socket_path: [:0]const u8,
 ) RunError!void {
+    // 제품 launcher argv를 실제 `maru` 바이너리까지 관통하는 process smoke가 detached orphan을 남기지 않도록,
+    // 테스트가 명시한 경우 첫 client 연결을 처리한 뒤 정상 종료한다. 일반 제품 환경에는 이 변수가 없어 기존의 영속
+    // accept loop를 그대로 돈다. 환경은 시작 시 한 번만 읽어 parent가 spawn 직후 unset해도 child의 동작이 안정적이다.
+    const test_oneshot = if (std.c.getenv("MARU_SESSION_HOST_TEST_ONESHOT")) |value|
+        std.mem.eql(u8, std.mem.span(value), "maru-test-only-v1") and
+            std.mem.startsWith(u8, socket_path, "/tmp/maru-sh-product-")
+    else
+        false;
+    var test_idle_ticks: usize = 0;
+
     var registry = reg.TerminalRuntimeRegistry.init(allocator);
     defer registry.deinit();
 
@@ -60,8 +69,17 @@ pub fn runSessionHost(
 
     while (true) {
         switch (server.pollReady(poll_timeout_ms)) {
-            .ready => server.serveOnce() catch {}, // 개별 연결 오류(write 실패 등)는 host를 죽이지 않는다.
-            .timeout => {}, // 재-poll(향후 idle grace 종료 판정 자리).
+            .ready => {
+                server.serveOnce() catch {}; // 개별 연결 오류(write 실패 등)는 host를 죽이지 않는다.
+                if (test_oneshot) break;
+            },
+            .timeout => {
+                // test runner가 client 연결 전에 중단돼도 detached orphan을 남기지 않는다(25×200ms=5s).
+                if (test_oneshot) {
+                    test_idle_ticks += 1;
+                    if (test_idle_ticks >= 25) break;
+                }
+            },
             .broken => break, // listen fd 회복 불가 — 루프 종료.
         }
     }

@@ -75,6 +75,9 @@ pub const SpawnRequest = struct {
     // self-insert → Cmd+←/→가 줄 시작/끝으로 안 감).
     login: bool = false,
     env: []const []const u8 = &.{},
+    // env가 비었을 때 상속할 부모 환경 snapshot. null이면 현재 프로세스 environ(일반 in-process spawn), non-null이면
+    // 그 snapshot을 부모로 삼는다(session host가 GUI 재실행 시점 환경을 보존하는 transport seam).
+    parent_env: ?[]const []const u8 = null,
     // 사용자 config `env.<KEY> = value`로 주입할 환경변수(각 "KEY=VALUE"). 부모 상속 env(또는 명시 env)와
     // maru override(TERM 등) **위에** upsert한다 — 같은 KEY가 있으면 덮어쓰고, 없으면 추가한다("부모 + 사용자"
     // 정책). env(전체 명시)와 달리 부모 상속을 끊지 않는다. 비어 있으면(기본) 무동작. EnvStorage.init이 적용.

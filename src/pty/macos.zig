@@ -232,7 +232,7 @@ pub const PtySession = struct {
         var argv_storage = try ArgvStorage.init(allocator, eff_command, eff_args);
         defer argv_storage.deinit();
 
-        var env_storage = try EnvStorage.init(allocator, request.env, request.env_overrides, request.term, request.zdotdir, request.ssh_integration_bin, request.pane_id);
+        var env_storage = try EnvStorage.initWithParentSnapshot(allocator, request.env, request.parent_env, request.env_overrides, request.term, request.zdotdir, request.ssh_integration_bin, request.pane_id);
         defer env_storage.deinit();
 
         var window_size = winsizeFromTerminalSize(request.size);
@@ -837,6 +837,10 @@ const EnvStorage = struct {
     }
 
     fn init(allocator: std.mem.Allocator, env: []const []const u8, env_overrides: []const []const u8, term: []const u8, zdotdir: ?[]const u8, ssh_integration_bin: ?[]const u8, pane_id: ?u64) !EnvStorage {
+        return initWithParentSnapshot(allocator, env, null, env_overrides, term, zdotdir, ssh_integration_bin, pane_id);
+    }
+
+    fn initWithParentSnapshot(allocator: std.mem.Allocator, env: []const []const u8, parent_env: ?[]const []const u8, env_overrides: []const []const u8, term: []const u8, zdotdir: ?[]const u8, ssh_integration_bin: ?[]const u8, pane_id: ?u64) !EnvStorage {
         var entries: std.ArrayList([:0]u8) = .empty;
         errdefer {
             for (entries.items) |owned| allocator.free(owned);
@@ -848,10 +852,12 @@ const EnvStorage = struct {
             // (예: 멀티플렉서 TERM, 또는 Maru 동작과 안 맞는 terminfo) zsh의 SIGWINCH redraw가 wrap 행 수를 잘못
             // 계산해(상대 커서 이동 \e[A 횟수가 어긋남) 프롬프트가 중복된다. 기본 xterm-256color는 Maru의 xterm식
             // (auto-wrap + deferred wrap) 동작과 맞는다. 단 사용자 config(`term =`)로 바꿀 수 있다.
-            try appendParentEnv(allocator, &entries, term, zdotdir, ssh_integration_bin, pane_id);
+            try appendParentEnv(allocator, &entries, parent_env, term, zdotdir, ssh_integration_bin);
         } else {
-            // 명시 env(테스트 등): 부모 상속·maru override 없이 그대로 쓴다(term 인자 무시 — 기존 동작 보존).
+            // 명시 env(테스트 등): 부모 상속·일반 maru override 없이 그대로 쓰되 process-local selector는 예약 키라
+            // 제거한다. non-null pane_id면 공통 tail에서 현재 값만 다시 넣는다.
             for (env) |entry| {
+                if (isPaneSelectorEntry(entry)) continue;
                 try appendOwnedEnv(allocator, &entries, try allocator.dupeZ(u8, entry));
             }
         }
@@ -859,6 +865,7 @@ const EnvStorage = struct {
         // 사용자 config `env.<KEY>`를 부모/명시 env + 일반 maru override(TERM 등) 위에 적용한다. 단 아래 내부
         // selector는 Term identity의 단일 출처라 사용자 값보다 마지막에 다시 upsert한다.
         for (env_overrides) |ov| {
+            if (isPaneSelectorEntry(ov)) continue;
             try upsertEnv(allocator, &entries, ov);
         }
 
@@ -910,14 +917,22 @@ const EnvStorage = struct {
     // 기존 ZDOTDIR은 MARU_ZDOTDIR_PREV로 보존해 통합 .zshenv가 복원한다. ssh_integration_bin이 있으면(opt-in)
     // MARU_BIN/MARU_SSH_INTEGRATION을 주입해 통합 .zshenv가 ssh를 maru ssh로 라우팅하게 한다. entries 소유권·
     // errdefer는 호출자(init)가 가진다(materialize에서 굳힌다).
-    fn appendParentEnv(allocator: std.mem.Allocator, entries: *std.ArrayList([:0]u8), term: []const u8, zdotdir: ?[]const u8, ssh_integration_bin: ?[]const u8, pane_id: ?u64) !void {
+    fn appendParentEnv(allocator: std.mem.Allocator, entries: *std.ArrayList([:0]u8), parent_env: ?[]const []const u8, term: []const u8, zdotdir: ?[]const u8, ssh_integration_bin: ?[]const u8) !void {
         // 부모의 모든 env entry를 복사한다. 단 TERM/COLORTERM(+통합 시 ZDOTDIR/MARU_ZDOTDIR_PREV)은
         // 건너뛰고 아래에서 우리 값으로 넣는다(중복 키는 첫 항목이 이기므로 부모 것을 빼야 한다).
         var old_zdotdir: ?[]const u8 = null; // environ 슬라이스(프로세스 수명 동안 유효) — 루프 후 사용
-        const environ = std.c.environ;
-        var index: usize = 0;
-        while (environ[index]) |entry| : (index += 1) {
-            const slice = std.mem.span(entry);
+        var inherited: std.ArrayListUnmanaged([]const u8) = .empty;
+        defer inherited.deinit(allocator);
+        if (parent_env) |snapshot| {
+            try inherited.appendSlice(allocator, snapshot);
+        } else {
+            const environ = std.c.environ;
+            var index: usize = 0;
+            while (environ[index]) |entry| : (index += 1) {
+                try inherited.append(allocator, std.mem.span(entry));
+            }
+        }
+        for (inherited.items) |slice| {
             if (std.mem.startsWith(u8, slice, "TERM=") or std.mem.startsWith(u8, slice, "COLORTERM=")) continue;
             // 부모(런처/상위 터미널)의 TERMINFO도 떨군다 — 아래에서 maru 캐시를 가리키거나, 폴백이면 안 준다.
             // 부모 TERMINFO를 그대로 두면 xterm-maru를 엉뚱한 DB에서 찾아 못 찾을 수 있다.
@@ -940,9 +955,10 @@ const EnvStorage = struct {
             // ssh 라우팅을 주입할 거면 부모가 남긴 동명 키를 떨군다(중복 키는 첫 항목이 이기므로).
             if (ssh_integration_bin != null and
                 (std.mem.startsWith(u8, slice, "MARU_BIN=") or std.mem.startsWith(u8, slice, "MARU_SSH_INTEGRATION="))) continue;
-            // 팬 id를 주입할 거면 부모가 남긴 MARU_PANE_ID를 떨군다 — maru를 maru 팬 안에서 띄운 경우 바깥 팬의 id를
-            // 상속하면 안 되므로(중복 키는 첫 항목이 이김). 이게 #1131 env-상속 오염을 원천 차단하는 지점이다.
-            if (pane_id != null and std.mem.startsWith(u8, slice, "MARU_PANE_ID=")) continue;
+            // 부모가 남긴 MARU_PANE_ID는 항상 떨군다. non-null이면 tail에서 현재 GUI surface id를 새로 넣고,
+            // persistent child처럼 null이면 selector 자체가 없어야 한다. maru를 maru 팬 안에서 띄웠을 때 바깥
+            // 팬 id를 상속하면 다른 surface를 self로 오인한다. 이게 #1131 env-상속 오염을 원천 차단하는 지점이다.
+            if (isPaneSelectorEntry(slice)) continue;
             // append 인자 안에서 dupe하면 OOM 시 새므로(errdefer는 entries.items만 해제) appendOwnedEnv로 묶는다.
             try appendOwnedEnv(allocator, entries, try allocator.dupeZ(u8, slice));
         }
@@ -977,6 +993,10 @@ const EnvStorage = struct {
         }
         // MARU_PANE_ID는 init tail에서 사용자 env override 뒤 최종 upsert한다. 여기서는 부모의 stale 값을
         // 위에서 제거만 해 내부 selector가 정확히 한 번 들어가게 한다.
+    }
+
+    fn isPaneSelectorEntry(entry: []const u8) bool {
+        return std.mem.startsWith(u8, entry, "MARU_PANE_ID=");
     }
 
     // 두 init 경로 모두 owned envp를 만든다(빈 env면 부모 복사 + TERM 덮어쓰기, 명시 env면 그대로).
@@ -1407,6 +1427,54 @@ fn envValueCount(storage: *const EnvStorage, key_prefix: []const u8) struct { co
         }
     }
     return .{ .count = count, .last = last };
+}
+
+test "EnvStorage parent snapshot preserves caller environment while applying Maru overrides" {
+    var storage = try EnvStorage.initWithParentSnapshot(
+        std.testing.allocator,
+        &.{},
+        &.{ "MARU_TEST_GUI_ENV=fresh", "MARU_PANE_ID=7", "TERM=stale", "FORCE_COLOR=1" },
+        &.{},
+        "xterm-256color",
+        null,
+        null,
+        null,
+    );
+    defer storage.deinit();
+    try std.testing.expectEqualStrings("fresh", envValueCount(&storage, "MARU_TEST_GUI_ENV=").last.?);
+    try std.testing.expectEqualStrings("xterm-256color", envValueCount(&storage, "TERM=").last.?);
+    try std.testing.expectEqual(@as(usize, 0), envValueCount(&storage, "FORCE_COLOR=").count);
+    try std.testing.expectEqual(@as(usize, 0), envValueCount(&storage, "MARU_PANE_ID=").count);
+}
+
+test "EnvStorage treats MARU_PANE_ID as reserved in explicit env and overrides" {
+    var omitted = try EnvStorage.initWithParentSnapshot(
+        std.testing.allocator,
+        &.{ "KEEP=1", "MARU_PANE_ID=7" },
+        null,
+        &.{"MARU_PANE_ID=8"},
+        "ignored",
+        null,
+        null,
+        null,
+    );
+    defer omitted.deinit();
+    try std.testing.expectEqualStrings("1", envValueCount(&omitted, "KEEP=").last.?);
+    try std.testing.expectEqual(@as(usize, 0), envValueCount(&omitted, "MARU_PANE_ID=").count);
+
+    var injected = try EnvStorage.initWithParentSnapshot(
+        std.testing.allocator,
+        &.{"MARU_PANE_ID=7"},
+        null,
+        &.{"MARU_PANE_ID=8"},
+        "ignored",
+        null,
+        null,
+        42,
+    );
+    defer injected.deinit();
+    try std.testing.expectEqual(@as(usize, 1), envValueCount(&injected, "MARU_PANE_ID=").count);
+    try std.testing.expectEqualStrings("42", envValueCount(&injected, "MARU_PANE_ID=").last.?);
 }
 
 test "EnvStorage env_overrides: 새 KEY는 추가, 기존 KEY(maru TERM)는 덮어쓴다 (부모 상속 위 upsert)" {

@@ -8,7 +8,7 @@ tmux(`list-panes`/`send-keys`/`capture-pane`)·cmux가 푸는 문제를 다루�
 
 > **process 경계 구분:** 현재 control-plane server는 `Maru.app` 수명에 묶여 있고 `surface_id + generation`으로 GUI
 > surface를 제어한다. 향후 `maru-sessiond`의 `runtime_id`, screen attach stream, process lifetime RPC는 별도
-> `maru.session-host.v1` namespace/transport 설계다. 기존 `session.*` method의 의미나 ID를 조용히 바꾸지 않는다.
+> 별도 MRSH session-host transport(현재 major v2) 설계다. 기존 `session.*` method의 의미나 ID를 조용히 바꾸지 않는다.
 
 ## 1. 확정 결정
 

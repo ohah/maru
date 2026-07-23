@@ -278,6 +278,12 @@ pub export fn maru_macos_app_session_request_app_quit(session: ?*AppSession) voi
     app_session.requestAppQuit();
 }
 
+/// host의 late protected-file preflight가 이미 수락한 Quit을 취소할 때 app-global lifecycle latch를 되돌린다.
+pub export fn maru_macos_app_session_cancel_app_quit(session: ?*AppSession) void {
+    const app_session = session orelse return;
+    app_session.cancelAcceptedAppQuit();
+}
+
 /// Cmd+Q가 모든 창을 함께 종료하기 전 각 세션의 dirty/pending/source-edit 파일 도크 상태를 검사하는 read-only
 /// getter. Swift는 종료 요청 시점과 사용자가 일반 종료 confirm을 확정한 시점에 모두 순회해, 그 사이 다른 창에서
 /// 편집이 시작된 경우도 fail-closed한다.
@@ -480,8 +486,9 @@ pub export fn maru_macos_app_session_drop_image(
     return if (app_session.handleDroppedImage(ptr[0..len])) 1 else 0;
 }
 
-// chrome Notice 모달(손상 알림 등)을 연다. Swift가 워크스페이스 복원 손상(workspace_window_count<0)을 감지하면
-// UTF-8 메시지로 부른다. 세션이 복사 소유하므로 호출 뒤 버퍼는 free해도 된다. len==0이면 무동작. (v40)
+// chrome Notice 모달(부분 복원 실패 등)을 연다. workspace 전체 parse 실패(count<0)는 Swift가 의도적으로 조용히
+// 기본 창으로 시작하고, 적용 실패처럼 사용자 조치가 가능한 경우에 UTF-8 메시지로 부른다. 세션이 복사 소유하므로
+// 호출 뒤 버퍼는 free해도 된다. len==0이면 무동작. (v40)
 pub export fn maru_macos_app_session_show_notice(
     session: ?*AppSession,
     bytes: ?[*]const u8,
@@ -1425,7 +1432,8 @@ pub export fn maru_macos_app_session_serialize_sidebar_config(
 // 시작 시 저장된 workspace 텍스트(헤더 + N개 창 블록)에서 window_index번째 창을 parse해 이 세션에 복원 적용한다
 // (R4b). **포맷 파싱은 전부 Zig가 소유한다** — Swift는 전체 텍스트와 인덱스만 넘기고 'window ' 경계를 직접 안
 // 나눈다(파싱 권위가 Zig·Swift로 갈려 silent divergence 나는 걸 막음). parse 실패=invalid_config, 인덱스 범위
-// 밖=invalid_config, apply 실패=create_failed, ok=적용됨. best-effort라 실패해도 그 창은 기본 단일 탭으로 남는다.
+// 밖=invalid_config, apply 실패=create_failed, ok=적용됨. 일반 live 세션은 실패 시 기존 모델을 보존하고, v142 시작
+// restore용 deferred 세션은 빈 상태를 보존한다. Swift가 primary fallback 또는 additional Window teardown을 결정한다.
 pub export fn maru_macos_app_session_apply_workspace_window(
     session: ?*AppSession,
     text_ptr: ?[*]const u8,
@@ -1449,9 +1457,10 @@ pub export fn maru_macos_app_session_workspace_window_count(
     text_ptr: ?[*]const u8,
     text_len: usize,
 ) i64 {
-    const app_session = session orelse return -1;
     const tp = text_ptr orelse return -1;
-    var parsed = maru.session.workspace.parse(app_session.allocator, tp[0..text_len]) catch return -1;
+    // launch preflight는 throwaway shell 없는 deferred session을 만들지 결정해야 하므로 session 생성 **전**에도 호출한다.
+    const parse_allocator = if (session) |app_session| app_session.allocator else std.heap.smp_allocator;
+    var parsed = maru.session.workspace.parse(parse_allocator, tp[0..text_len]) catch return -1;
     defer parsed.deinit();
     return @intCast(parsed.workspace.windows.len);
 }
@@ -5161,7 +5170,7 @@ test "macOS app host event DTOs are explicit fixed-width C ABI records" {
     try std.testing.expectEqual(@as(usize, 24), @sizeOf(ResizeEvent));
     try std.testing.expectEqual(@as(usize, 4), @alignOf(KeyEvent));
     try std.testing.expectEqual(@as(usize, 4), @alignOf(ResizeEvent));
-    try std.testing.expectEqual(@as(usize, 40), @sizeOf(AppSessionConfig)); // 10 u32(abi/cols/rows/queue/cmd/chrome_minimal/minimal_tabs + width_px/height_px/scale_milli)
+    try std.testing.expectEqual(@as(usize, 44), @sizeOf(AppSessionConfig)); // 11 u32(abi/cols/rows/queue/cmd/chrome_minimal/minimal_tabs/defer_initial_surface + width_px/height_px/scale_milli)
     try std.testing.expectEqual(@as(usize, 176), @sizeOf(AppFrameSummary)); // quit_decision(u32,v90)+web_surfaces_present(u32,v102)가 168→176 정렬 패딩을 채워 176 불변
     try std.testing.expectEqual(@as(usize, 8), @alignOf(AppFrameSummary));
     try std.testing.expectEqual(@as(u32, @intFromEnum(session_mod.FileTreeRootOperation.none)), @as(u32, c.MARU_FILE_TREE_ROOT_PICK_NONE));
@@ -5241,9 +5250,13 @@ test "workspace restore ABI preserves multi-window count active and apply" {
     var session0: ?*AppSession = null;
     try std.testing.expectEqual(@as(c_int, @intFromEnum(Status.ok)), maru_macos_app_session_create(&config, &session0));
     defer maru_macos_app_session_destroy(session0);
+    var deferred_config = config;
+    deferred_config.defer_initial_surface = 1;
     var session1: ?*AppSession = null;
-    try std.testing.expectEqual(@as(c_int, @intFromEnum(Status.ok)), maru_macos_app_session_create(&config, &session1));
+    try std.testing.expectEqual(@as(c_int, @intFromEnum(Status.ok)), maru_macos_app_session_create(&deferred_config, &session1));
     defer maru_macos_app_session_destroy(session1);
+    try std.testing.expectEqual(@as(usize, 0), session1.?.tabs.items.len); // restore 전 throwaway tab/PTY 0.
+    try std.testing.expect(!session1.?.surface_initialized);
 
     const text =
         "maru.workspace.v1\n" ++
@@ -5263,6 +5276,7 @@ test "workspace restore ABI preserves multi-window count active and apply" {
         "surface custom-name=\"three\" title=\"\" cwd=\"/tmp\" command=\"\" cols=50 rows=15\n";
 
     try std.testing.expectEqual(@as(i64, 2), maru_macos_app_session_workspace_window_count(session0, text.ptr, text.len));
+    try std.testing.expectEqual(@as(i64, 2), maru_macos_app_session_workspace_window_count(null, text.ptr, text.len));
     try std.testing.expectEqual(@as(i64, 1), maru_macos_app_session_workspace_active_window(session0, text.ptr, text.len));
     try std.testing.expectEqual(@as(c_int, @intFromEnum(Status.ok)), maru_macos_app_session_apply_workspace_window(session0, text.ptr, text.len, 0));
     try std.testing.expectEqual(@as(c_int, @intFromEnum(Status.ok)), maru_macos_app_session_apply_workspace_window(session1, text.ptr, text.len, 1));
@@ -5273,6 +5287,7 @@ test "workspace restore ABI preserves multi-window count active and apply" {
     try std.testing.expectEqual(@as(usize, 1), session1.?.tabs.items.len);
     try std.testing.expectEqual(@as(usize, 1), session1.?.tabs.items[0].panes.items.len);
     try std.testing.expectEqualStrings("second", session1.?.tabs.items[0].custom_name.?);
+    try std.testing.expect(session1.?.surface_initialized);
 }
 
 test "Metal key-down ABI repairs stale dock focus before routing Cmd+W" {

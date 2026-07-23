@@ -723,20 +723,21 @@ pub const KeyHintConfig = struct {
     };
 };
 
-/// 영속 터미널 세션(GUI 종료 후 유지) 설정. 단일 host(`maru-sessiond`)가 PTY/자식/화면을 소유해 GUI 종료·크래시에도
-/// 살아남게 한다(§10, docs/persistent-session-host.md). loader가 `session.*` 키로 파싱한다(스키마-주도).
+/// 영속 터미널 세션(정상 GUI Quit 후 유지) 설정. 단일 host(`maru-sessiond`)가 PTY/자식/화면을 소유한다
+/// (§10, docs/persistent-session-host.md). loader가 `session.*` 키로 파싱한다(스키마-주도).
 pub const SessionConfig = struct {
     /// GUI를 종료해도 터미널 runtime(PTY·자식·화면)을 별도 host에서 유지할지. **기본 false**(현행 — 터미널이 GUI 프로세스
-    /// 소유라 종료 시 함께 죽음). true면 새 Workspace/Term/split/quick terminal을 host(`maru-sessiond`)에 생성해 GUI 종료·
-    /// 크래시에도 살아남고 재실행 시 재접속한다(§10). **P4 종료 gate 완성 전엔 기본값을 바꾸지 않는다**(opt-in — 아직 미완성
-    /// 경로라 실험적). host 연결에 실패하면 조용히 in-process로 폴백한다(host 문제가 GUI를 막지 않는다).
+    /// 소유라 종료 시 함께 죽음). true면 새 일반 Window의 Workspace/Term/split을 host(`maru-sessiond`)에 생성해 정상
+    /// GUI Quit 뒤 재접속한다(§10). quick은 manifest가 없어 현재 in-process다. **P4 종료 gate 완성 전엔 기본값을
+    /// 바꾸지 않는다**(quick manifest·incremental checkpoint 등이 아직 미완성). host 연결에 실패하면 notice 뒤
+    /// in-process로 폴백한다(host 문제가 GUI를 막지 않는다).
     keep_alive_after_quit: bool = false,
 
     pub const schema = .{ // 키: session.keep-alive-after-quit (namespace=Config 필드명 session)
         // 설정 GUI(workspace 섹션)에 토글로 노출한다 — 사용자가 GUI로 켜고 끌 수 있다(기본값 전환 대비 "끄는 수단"이자 opt-in
         // 진입점). 원격 색·이미지·prompt_marks 패리티가 붙어 실사용 가능해져 더는 숨기지 않는다(과거 code-review #8의 hidden 해제).
-        // ⚠️적용 시점: **재실행 시**(backend 셋업이 app init에서 일어나므로) — 실행 중 토글은 기존 in-process 터미널을 소급 변경하지 않는다.
-        .keep_alive_after_quit = Meta{ .section = .workspace, .widget = .toggle, .doc = "GUI 종료·크래시 후에도 터미널 세션을 유지하고 재실행 시 재접속(실험적, tmux식)" },
+        // ⚠️적용 시점: 토글 뒤 새로 만드는 일반 Term부터. 실행 중 기존 Term은 process 사이를 소급 이동하지 않는다.
+        .keep_alive_after_quit = Meta{ .section = .workspace, .widget = .toggle, .doc = "정상 GUI 종료 후에도 터미널 세션을 유지하고 재실행 시 재접속(실험적, tmux식)" },
     };
 };
 

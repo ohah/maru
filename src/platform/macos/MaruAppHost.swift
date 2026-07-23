@@ -4137,6 +4137,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     // 컬렉션에서 view/key 창으로 고른다. quick terminal이 별도(특수) surface다. 아래 계산 프로퍼티들은
     // 기존 세션별 메서드가 코드 변경 없이 "활성 surface"의 상태를 읽고 쓰게 하는 forwarder다(상태만 분리).
     private var windows: [TerminalSurface] = []
+    // restore 중 어느 saved Window라도 apply하지 못했으면 이번 실행의 default/fallback 창으로 마지막 완전
+    // checkpoint를 덮지 않는다. 사용자가 새로 저장할 명시 UX가 생기기 전에는 데이터 보존을 우선한다.
+    private var workspaceRestoreIncomplete = false
     // FP10b: Zig LivePreviewBudget 결과의 native mirror. 정책은 Zig가 focused→existing-visible→new-visible 순으로
     // 최대 8개를 고르고, Swift는 바뀐 surface에 lifecycle event만 보낸다.
     private var livePreviewCandidates: [MaruAppHostLivePreviewCandidate] = []
@@ -4458,7 +4461,19 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         // app session의 첫 tick(startAppSession 안)이 바로 그릴 수 있도록 renderer를 먼저 만든다.
         setupMetalRenderer()
 
-        if !startAppSession(smokeMode: smokeMode) {
+        // workspace가 parse 가능한 실제 창을 하나 이상 가지면 첫 AppSession을 deferred surface 모드로 만든다.
+        // Zig parser를 session=NULL preflight로 호출해 Swift가 wire를 따로 해석하지 않으면서 throwaway 셸 spawn을 막는다.
+        let restoreDisabled = ProcessInfo.processInfo.environment["MARU_NO_WORKSPACE_RESTORE"] != nil
+        let preparedWorkspace = (smokeMode || restoreDisabled) ? nil : loadWorkspaceText()
+        let preparedWorkspaceWindowCount = preparedWorkspace.map { text -> Int64 in
+            let bytes = Array(text.utf8)
+            return bytes.withUnsafeBufferPointer { buf in
+                maru_macos_app_session_workspace_window_count(nil, buf.baseAddress, buf.count)
+            }
+        }
+        let deferInitialSurface = (preparedWorkspaceWindowCount ?? 0) > 0
+
+        if !startAppSession(smokeMode: smokeMode, deferInitialSurface: deferInitialSurface) {
             writeSummary(visibleUI: true, abiReady: true, smokeDurationMs: smokeDuration)
             NSApp.terminate(nil)
             return
@@ -4466,7 +4481,16 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
 
         // 저장된 workspace를 복원한다(R4b) — 첫 블록을 primary에 적용하고 나머지 블록마다 새 창. 저장 없음·복원
         // off·smoke·빈 블록이면 무동작(방금 만든 기본 단일 창 유지). startAppSession이 세션을 세운 '뒤'에.
-        restoreWorkspace()
+        if !restoreWorkspace(
+            preparedWorkspace,
+            preparedWindowCount: preparedWorkspaceWindowCount,
+            deferredInitialSurface: deferInitialSurface
+        ) {
+            exitCode = 1
+            writeSummary(visibleUI: true, abiReady: true, smokeDurationMs: smokeDuration)
+            NSApp.terminate(nil)
+            return
+        }
 
         // 표준 메뉴바를 세운다(커맨드 카탈로그에서 액션 항목·단축키를 읽어). smoke에서도 빌드해 구성 경로를
         // CI가 구동한다(메뉴는 OS-global 부수효과가 없어 hotkey 등록과 달리 게이트 불요).
@@ -5512,7 +5536,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
 
     /// 활성 surface(forwarder 대상)에 app session을 만들어 붙인다 — 앱-전역 tick은 안 부른다(호출자가 정한다:
     /// launch는 startAppSession이 tickAppSession을, New Window 팩토리는 그 창만 renderTick). 일반 창은 full chrome.
-    private func createSessionForActiveSurface(smokeMode: Bool) -> Bool {
+    private func createSessionForActiveSurface(smokeMode: Bool, deferInitialSurface: Bool = false) -> Bool {
         // 셸 PTY를 처음부터 실제 창 크기로 띄우도록 backing px+scale을 넘긴다(80×24 기본 spawn→resize 핸드셰이크
         // 제거 → zsh 첫 프롬프트 PROMPT_EOL_MARK % 잔상 방지). 창이 아직 레이아웃 전이면 (0,0,0)이라 Zig가 cols/rows로
         // 폴백한다(smoke는 자체 scripted resize라 0으로 두고 80×24 유지). cols/rows는 0 폴백 시 winsize·grid 단일 출처.
@@ -5531,7 +5555,8 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             minimal_tabs: 0, // full이라 무시됨(탭은 항상 동작)
             width_px: m.widthPx,
             height_px: m.heightPx,
-            scale_milli: m.scaleMilli
+            scale_milli: m.scaleMilli,
+            defer_initial_surface: deferInitialSurface ? 1 : 0
         )
         var session: OpaquePointer?
         let status = maru_macos_app_session_create(&config, &session)
@@ -5544,12 +5569,13 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         return true
     }
 
-    private func startAppSession(smokeMode: Bool) -> Bool {
-        guard createSessionForActiveSurface(smokeMode: smokeMode) else {
+    private func startAppSession(smokeMode: Bool, deferInitialSurface: Bool = false) -> Bool {
+        guard createSessionForActiveSurface(smokeMode: smokeMode, deferInitialSurface: deferInitialSurface) else {
             exitCode = 1 // launch 경로의 세션 생성 실패는 비정상 종료(New Window 팩토리 실패는 exitCode를 더럽히지 않음)
             return false
         }
-        tickAppSession()
+        // deferred session은 applyWorkspaceWindow가 첫 surface/frame loop를 완성하기 전이라 tick하지 않는다.
+        if !deferInitialSurface { tickAppSession() }
         return true
     }
 
@@ -5592,9 +5618,11 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             window.makeKeyAndOrderFront(nil)
             focusTerminalView(window)
             setupMetalRenderer()
-            guard createSessionForActiveSurface(smokeMode: false) else { return }
+            guard createSessionForActiveSurface(smokeMode: false, deferInitialSurface: ws != nil) else { return }
             if let ws {
-                applyWorkspaceWindow(ws.text, ws.index) // 복원: 기본 탭을 이 창의 탭/split/Term으로 교체
+                // 복원 적용 실패인데 default 셸 창을 성공으로 등록하면 persistent runtime 단절을 숨기고 다음 Quit에서
+                // 원래 checkpoint까지 덮는다. 실패 창은 즉시 teardown하고 caller가 incomplete로 기록한다.
+                guard applyWorkspaceWindow(ws.text, ws.index) else { return }
                 // M3f: 저장된 창 위치·크기·모니터로 복원(없으면 위 cascade 유지). resize 전에 setFrame해 아래 resize가
                 // 복원된 크기를 세션에 전달하게 한다.
                 applyRestoredWindowFrame(window, text: ws.text, index: ws.index)
@@ -5619,8 +5647,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     }
 
     /// 활성 surface(forwarder 대상)의 세션에 workspace **전체 텍스트**의 window_index번째 창을 적용한다 — 헤더
-    /// 포함 전체를 그대로 ABI에 넘긴다(창 경계 분할은 Zig가 소유). best-effort라 실패해도 세션은 기본 단일 탭을
-    /// 유지하지만, **적용 성공 여부를 반환**해 호출자가 사용자에게 알릴 수 있게 한다(파싱은 됐어도 spawn 실패 등).
+    /// 포함 전체를 그대로 ABI에 넘긴다(창 경계 분할은 Zig가 소유). 일반 live session은 실패해도 기존 모델을 보존하고,
+    /// 시작 restore용 deferred session은 빈 상태로 남는다. **적용 성공 여부를 반환**해 호출자가 teardown/fallback과
+    /// checkpoint 보존을 결정하게 한다(파싱은 됐어도 attach/spawn 실패 등).
     @discardableResult
     private func applyWorkspaceWindow(_ text: String, _ index: Int) -> Bool {
         guard let session = appSession else { return false }
@@ -5691,14 +5720,21 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     /// 가능하나, 시작 1회·작은 파일·창 몇 개뿐이라 hot path가 아니고 fold는 3개 ABI 함수 시그니처 변경(cross-boundary
     /// churn)이라 도입하지 않는다(6차 리뷰 [5] cleanup — 문서 follow-up). 필요해지면 apply_workspace_window가 그 창
     /// frame(out)+is_active(flag)를 함께 반환하게 확장한다.
-    private func restoreWorkspace() {
-        guard !smokeMode else { return }
+    private func restoreWorkspace(
+        _ preparedText: String? = nil,
+        preparedWindowCount: Int64? = nil,
+        deferredInitialSurface: Bool = false
+    ) -> Bool {
+        guard !smokeMode else { return true }
         // 끄기(임시): config 토글은 후속. 기본은 ON. 이 플래그는 saveWorkspace도 막는다 — 복원을 끈 사용자의 저장
         // 파일을 종료 시 덮어쓰지 않게(persistence 자체 off).
-        guard ProcessInfo.processInfo.environment["MARU_NO_WORKSPACE_RESTORE"] == nil else { return }
-        guard let session = primary?.appSession, let text = loadWorkspaceText() else { return }
+        guard ProcessInfo.processInfo.environment["MARU_NO_WORKSPACE_RESTORE"] == nil else { return true }
+        guard let session = primary?.appSession, let text = preparedText ?? loadWorkspaceText() else { return true }
         let bytes = Array(text.utf8)
-        let count = bytes.withUnsafeBufferPointer { buf in
+        // launch preflight 결과를 그대로 재사용한다. 같은 immutable text를 deferred session 생성 뒤 다시 parse하면
+        // 두 번째 allocator 실패에서 기본 surface도 없는 빈 session을 남길 수 있다. 직접 호출한 경로만 session
+        // allocator로 count를 계산한다.
+        let count = preparedWindowCount ?? bytes.withUnsafeBufferPointer { buf in
             maru_macos_app_session_workspace_window_count(session, buf.baseAddress, buf.count)
         }
         if count < 0 {
@@ -5707,9 +5743,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             // 저장 파일이 이 경로로 떨어지는데, 이를 '손상' 모달로 알리면 업데이트 후 첫 실행마다 키를 막는 중앙
             // 팝업이 떠 UX가 나쁘다(복원 불가는 사용자 잘못이 아니다). 저장본은 종료 시 saveWorkspace가 새 포맷으로
             // 덮어쓸 때까지 보존된다(self-heal). 빈 workspace(count==0)와 동일하게 조용히 기본 창으로 시작한다.
-            return
+            return true
         }
-        guard count > 0 else { return } // 0=빈 workspace → 기본 단일 창(알림 없음)
+        guard count > 0 else { return true } // 0=빈 workspace → 기본 단일 창(알림 없음)
         // primary(창 0) 적용 성공 여부를 잡는다 — count>0이라 헤더는 파싱됐어도 창 블록이 spawn 실패 등으로 적용
         // 안 될 수 있다(손상 count<0과 다른 실패 모드). 실패하면 아래에서 Notice로 알린다(예전엔 상태값을 버려 무알림).
         // 블록 인덱스 → 생성된 창 매핑. `active-window`(활성 창 마커)는 workspace 텍스트의 **블록 인덱스**라, 라이브
@@ -5720,13 +5756,33 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         if let primary { windowByBlock[0] = primary }
         var primaryApplied = false
         withSurface(primary) { primaryApplied = applyWorkspaceWindow(text, 0) }
+        if !primaryApplied {
+            workspaceRestoreIncomplete = true
+            // deferred primary에는 fallback surface도 없다. 실패한 staged attach를 Zig가 rollback한 뒤 이 빈 세션을
+            // 폐기하고 명시적인 default-shell 세션을 새로 만들어 사용자에게 usable 창을 남긴다.
+            if deferredInitialSurface {
+                var fallbackCreated = false
+                withSurface(primary) {
+                    if let failed = appSession {
+                        maru_macos_app_session_destroy(failed)
+                        appSession = nil
+                    }
+                    fallbackCreated = createSessionForActiveSurface(smokeMode: false)
+                }
+                // 복원도 실패했고 기본 shell 세션 생성도 실패했으면 빈 placeholder 창을 정상 launch로 남기지 않는다.
+                // applicationDidFinishLaunching이 일반 startAppSession 실패와 같은 fatal startup 처리를 한다.
+                if !fallbackCreated { return false }
+            }
+        }
         for i in 1..<Int(count) {
             if let created = createTerminalWindow(applyingWorkspace: (text, i)) {
                 windowByBlock[i] = created
+            } else {
+                workspaceRestoreIncomplete = true
             }
         }
-        if !primaryApplied {
-            showNotice("저장된 작업 공간을 일부만 복원했습니다 — 기본 창으로 시작합니다.")
+        if workspaceRestoreIncomplete {
+            showNotice("저장된 작업 공간을 일부만 복원했습니다 — 이전 체크포인트를 보존하며 이번 실행의 변경은 자동 저장하지 않습니다.")
         }
         // 복원으로 grid·레이아웃이 바뀌었으니 primary를 창에 다시 맞추고 즉시 repaint한다 — 추가 창은
         // createTerminalWindow가 renderTick하지만 primary는 안 그래서, 기본 레이아웃이 한 프레임 깜빡이는 걸 막는다.
@@ -5743,12 +5799,17 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         // windowByBlock으로 그 블록에 해당하는 실제 창을 골라 key로 올린다(라이브 windows 배열에 직접 인덱싱하지
         // 않는다 — 위 매핑 주석의 도메인 발산 방지). createTerminalWindow가 각자 makeKeyAndOrderFront하므로 복원 loop
         // **뒤**(마지막)에 호출해야 활성 창이 최종 key가 된다. 그 블록 창이 spawn 실패로 없으면 건너뛴다(best-effort).
-        let activeIndex = bytes.withUnsafeBufferPointer { buf in
-            maru_macos_app_session_workspace_active_window(session, buf.baseAddress, buf.count)
-        }
+        // primary apply 실패 시 위에서 deferred session을 폐기하고 fallback session으로 교체할 수 있다. launch 초기에
+        // 잡아 둔 `session` 포인터를 재사용하면 use-after-free이므로 현재 primary handle을 다시 읽는다.
+        let activeIndex = primary?.appSession.map { currentSession in
+            bytes.withUnsafeBufferPointer { buf in
+                maru_macos_app_session_workspace_active_window(currentSession, buf.baseAddress, buf.count)
+            }
+        } ?? -1
         if activeIndex >= 0, let keyWindowSurface = windowByBlock[Int(activeIndex)] {
             keyWindowSurface.window?.makeKeyAndOrderFront(nil)
         }
+        return true
     }
 
     /// chrome Notice 모달(손상 알림 등)을 primary 세션에 띄운다. 메시지는 UTF-8로 Zig에 넘긴다(세션이 복사 소유라
@@ -6596,6 +6657,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             // 다시 검사한다. 발견하면 일반 quit 결정을 폐기하고 해당 창에 notice를 띄운 뒤 fail-closed한다.
             if let protected = protectedFilePanelSurface(), let session = protected.appSession {
                 protected.window?.makeKeyAndOrderFront(nil)
+                // accepted Quit이 이미 Zig의 app-global detach/end-all latch를 세웠다. 앱을 계속 실행하기 전에 반드시
+                // 되돌린 뒤 새 confirm을 열어 다음 close/Quit이 stale 정책을 쓰지 않게 한다.
+                maru_macos_app_session_cancel_app_quit(session)
                 maru_macos_app_session_request_app_quit(session)
                 if quitConfirmPending {
                     quitConfirmPending = false
@@ -8870,14 +8934,17 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             cols: 80,
             rows: 24,
             queue_capacity: 16,
-            command_kind: UInt32(MaruAppHostCommandInteractiveShell.rawValue),
+            // quick은 full chrome도 가능하므로 chrome_minimal이 아닌 command kind로 lifecycle identity를 넘긴다.
+            // workspace manifest가 quick을 저장하기 전에는 Zig가 local backend를 골라 Quit orphan을 막는다.
+            command_kind: UInt32(MaruAppHostCommandQuickInteractiveShell.rawValue),
             chrome_minimal: chromeMinimal,
             minimal_tabs: minimalTabs,
             // quick 패널은 크기·배치가 특수(슬라이드 패널)라 0으로 두고 생성 직후 resize에 맡긴다(80×24→실제). 메인 창
             // 첫 프롬프트 % 잔상이 보고된 케이스라 거기만 spawn-크기를 채운다(quick은 회귀 없이 기존 동작 유지).
             width_px: 0,
             height_px: 0,
-            scale_milli: 0
+            scale_milli: 0,
+            defer_initial_surface: 0
         )
         var session: OpaquePointer?
         guard maru_macos_app_session_create(&config, &session) == Self.statusOK, let created = session else {
@@ -9086,12 +9153,15 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
 
     private func saveWorkspace() {
         guard !smokeMode, !windows.isEmpty else { return }
+        guard !workspaceRestoreIncomplete else { return }
         // 복원을 끈 사용자(MARU_NO_WORKSPACE_RESTORE)는 저장도 막는다 — 안 그러면 복원 안 한 기본 단일 창이 종료 시
         // 저장 파일을 덮어써 사용자가 보존하려던 멀티 창 레이아웃이 사라진다(데이터 손실). 플래그=persistence 자체 off.
         guard ProcessInfo.processInfo.environment["MARU_NO_WORKSPACE_RESTORE"] == nil else { return }
         var blocks = ""
         for surface in windows {
-            guard let session = surface.appSession else { continue }
+            // workspace.v1은 모든 normal Window가 한 atomic snapshot이다. 한 창이라도 캡처할 수 없으면 성공한 창만으로
+            // 기존 완전본을 덮어쓰지 않는다(다음 실행에서 실패 창이 영구 삭제되는 partial checkpoint 방지).
+            guard let session = surface.appSession else { return }
             // 저장 시점 key(활성) 창을 active-window=1 마커로 기록한다 — 재시작 복원이 그 창을 다시 focus(M3e).
             // 최대 하나의 창만 isKeyWindow라 마커도 최대 하나. 옵션-키라 비활성 창은 키가 생략된다(옛 파일 flat 동일).
             let isActive: UInt32 = (surface.window?.isKeyWindow == true) ? 1 : 0
@@ -9120,7 +9190,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             var ptr: UnsafePointer<UInt8>? = nil
             var len: size_t = 0
             guard maru_macos_app_session_serialize_workspace(session, &ptr, &len, isActive, hasFrame, fx, fy, fw, fh) == Self.statusOK,
-                  let bytes = ptr, len > 0 else { continue } // 캡처 실패한 창은 건너뜀
+                  let bytes = ptr, len > 0 else { return } // 하나라도 실패하면 이전 전체 checkpoint 보존
             blocks += String(decoding: UnsafeBufferPointer(start: bytes, count: len), as: UTF8.self)
         }
         guard !blocks.isEmpty, let url = workspaceFileURL else { return }

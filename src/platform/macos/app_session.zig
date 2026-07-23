@@ -179,7 +179,13 @@ fn navButtonAt(x_px: f64, band_x: u32, cw: u32) ?NavButton {
 // 별도 물리 CAMetalLayer로 분리, 두 drawable을 한 command buffer에 present + 단일 commit으로 전이 원자성). host↔renderer
 // draw 계약 변경이라 버전을 올린다. **MetalFrame/세션 struct·export 시그니처는 불변**(overlay_layer는 Zig가 아니라
 // Swift가 소유한 CAMetalLayer라 struct offset·layout test는 그대로 green). 렌더러 분할·컨테이너 재편은 Swift/ObjC 레이어.
-pub const abi_version: u32 = 139;
+pub const abi_version: u32 = 142;
+// 142: workspace restore session이 초기 throwaway PTY/shell 없이 모델을 먼저 적용하도록 defer_initial_surface를 추가한다.
+// SessionConfig tail만 확장되고 기존 필드 offset은 불변이다.
+// 141: Swift의 quit late-preflight가 종료를 취소할 때 app-global lifecycle snapshot을 되돌리는 cancel ABI를 추가한다.
+// fixed-width struct layout은 불변이고 export만 하나 추가된다.
+// 140: quick session을 command kind로 명시해 full chrome quick도 persistent backend에서 제외하고, workspace manifest가
+// 없는 상태에서 Quit orphan이 생기지 않게 한다. SessionConfig layout은 불변이고 enum value만 추가된다.
 // 139: Mermaid cold helper 5초/warm helper 2초 response deadline과 action-relative Swift fallback grace
 // 250ms를 C/Zig 공용 상수로 노출한다. fixed-width struct layout과 export 시그니처는 불변이다.
 // 137: Explorer presented state + directory picker replace/add root one-shots. fixed-width struct layout 불변.
@@ -963,6 +969,8 @@ pub const EventKind = enum(u32) {
 pub const CommandKind = enum(u32) {
     controlled_smoke = 0,
     interactive_shell = 1,
+    // quick은 같은 대화형 셸을 쓰지만 workspace manifest에 아직 저장하지 않으므로 lifecycle을 구분한다.
+    quick_interactive_shell = 2,
 };
 
 pub const SessionConfig = extern struct {
@@ -983,6 +991,9 @@ pub const SessionConfig = extern struct {
     width_px: u32 = 0,
     height_px: u32 = 0,
     scale_milli: u32 = 0,
+    // 저장 workspace를 즉시 적용할 세션이면 첫 default tab/PTY를 만들지 않는다. applyWorkspaceWindow 성공이 첫 surface와
+    // frame loop를 원자적으로 완성한다. 일반 새 Window/quick/smoke는 0.
+    defer_initial_surface: u32 = 0,
 };
 
 pub const FrameSummary = extern struct {
@@ -1032,12 +1043,14 @@ const NormalizedConfig = struct {
     size: terminal.Size,
     queue_capacity: usize,
     command_kind: CommandKind,
+    is_quick: bool,
     chrome_minimal: bool,
     minimal_tabs: bool,
     // 첫 spawn 크기 결정용 창 backing 픽셀 + scale(0이면 size로 폴백). init이 cell 메트릭으로 grid 계산.
     width_px: u32,
     height_px: u32,
     scale_milli: u32,
+    defer_initial_surface: bool = false,
 };
 
 /// 한 터미널의 런타임 단위: surface(그리드/스크롤백, 참조) + 그 surface에 붙은 live PTY 셸(참조) + 그 PTY를 drain하는
@@ -1067,6 +1080,10 @@ const TermRuntime = struct {
     handle: app.TermRuntimeHandle = 0,
     pump: app.RuntimeEventPump = undefined,
     live_initialized: bool = false,
+    // workspace restore staging에서 **기존** host runtime에 attach한 Term. publish 전 rollback은 이 runtime을 종료하면
+    // 안 되므로 destroyTerm이 detach-only로 회수한다. applyWorkspaceWindow가 commit point를 넘으면 false로 바꿔 이후
+    // 사용자 명시 close는 정상 terminate 의미를 가진다.
+    restored_existing: bool = false,
     // 이 Term의 PTY가 종료(exit/read_error) 관측 후 finishAfterTermination까지 끝났는가. tick drain이 Term별로
     // 한 번만 finish하도록, 세션 종료(모든 Term terminated) 판정에 쓴다.
     terminated: bool = false,
@@ -1723,10 +1740,31 @@ var app_remote_backend: ?RemoteSessionBackend = null;
 // (§6 app-wide Quit=detach). 윈도우/탭 **명시 close**(destroyTerm/close)는 이 플래그와 무관하게 terminate(destructive)한다.
 // 프로세스 전역 이벤트라 module-var(모든 창의 deinit이 본다). 실 앱은 곧 프로세스 종료라 리셋 불요(테스트만 명시 리셋).
 var app_quitting: bool = false;
+// 설정 GUI는 창별 AppSession에 있지만 이 값은 앱 전체 정책이다. 한 창에서 true→false로 바꾼 뒤 다른 창이 stale
+// config를 들고 있어도 새 Term backend와 Quit teardown이 갈리지 않도록 process-global SSOT로 유지한다.
+var app_keep_alive_after_quit: bool = false;
+// 첫 AppSession이 디스크 config를 앱 전역 정책으로 채운 뒤에는 새 Window/quick의 stale config snapshot이 이 값을
+// 덮지 않는다. 이후 변경 주체는 settings toggle/reload/reset뿐이다.
+var app_keep_alive_policy_initialized: bool = false;
+// Zig test runner 안에서 full AppSession fixture가 모두 내려가면 다음 test의 첫 세션이 새 앱 launch처럼 config를
+// 다시 채택하게 한다. 같은 test의 두 번째 Window는 production resolver를 그대로 탄다.
+var test_live_app_sessions: usize = 0;
+// Quit 확인을 수락한 순간의 전역 정책 snapshot. 이후 여러 NSWindow/quick teardown이 같은 값을 본다.
+var app_quit_keep_alive: bool = false;
 // P4 "Quit and End All Sessions"(§6 종료 매트릭스 row 3). 종료 확인의 **alternate 버튼**("종료 및 세션 끝내기")을 누르면
 // app_quitting과 함께 켜진다 → deinit이 host-backed Term을 detach(생존)가 아니라 **terminate**(runtime 종료)한다. keep-alive
 // 기본 quit은 detach(생존), 이 alternate만 명시적으로 다 끝낸다. app_quitting과 짝으로 리셋한다.
 var app_quit_end_all: bool = false;
+
+fn setAppKeepAlivePolicy(value: bool) void {
+    app_keep_alive_after_quit = value;
+    app_keep_alive_policy_initialized = true;
+}
+
+fn keepAlivePolicyForNewSession(config_value: bool) bool {
+    if (!app_keep_alive_policy_initialized) setAppKeepAlivePolicy(config_value);
+    return app_keep_alive_after_quit;
+}
 // P4 §6 L291: keep-alive인데 host 연결/spawn이 실패하면 **조용히 in-process로 폴백하지 않고** 사용자에게 알린다("유지된다"
 // 오인 방지). 첫 창의 ensureRemoteBackend가 실패하면 켠다 → 이후 창은 재시도(각 3s backoff) 없이 바로 in-process + 같은
 // notice(host가 정말 죽었으면 창마다 재시도 낭비 방지). 프로세스 전역 상태라 module-var.
@@ -1851,9 +1889,10 @@ pub const AppSession = struct {
     // app_runtime 옆). keep-alive면 `ensureRemoteBackend`가 세우고(첫 창), createTerm은 `backendForNew()`로, 기존 Term은
     // `backendFor(term)`(surface.remote 판정)로 라우팅한다. 창 deinit은 이 창의 원격 Term만 회수하고 공유 backend/연결은
     // 안 닫는다(routing과 동일 — 앱 프로세스 수명).
-    // P3-e3-5 workspace 재접속 임시 채널: restore가 이 값(host runtime_id hex)을 세우고 곧바로 createTerm/createPane을 부르면,
-    // createTerm이 읽어 spawn 대신 attach로 같은 host runtime에 재접속한다(읽고 즉시 클리어 — 다음 createTerm으로 안 샌다).
-    // ""=재접속 없음(일반 spawn). new_tab_zdotdir처럼 create 호출로 흐르는 transient 입력이다.
+    // P3-e3-5 workspace 재접속 임시 채널: restore가 host_id + runtime_id 쌍을 세우고 곧바로 createTerm/createPane을
+    // 부르면 createTerm이 둘을 읽어 같은 host namespace의 runtime에 attach한다. runtime_id만 있으면 legacy workspace
+    // migration이다. 둘 다 읽고 즉시 클리어해 다음 create로 새지 않는다.
+    restore_runtime_host_id: []const u8 = "",
     restore_runtime_id: []const u8 = "",
     // P4 §6 L291: keep-alive인데 host 연결 실패로 in-process 폴백했을 때 첫 tick에 사용자에게 notice로 알린다("유지 안 됨").
     // ensureRemoteBackend가 실패하면 켜고, showPendingHostConnectNotice가 한 번 표시하고 끈다.
@@ -1891,6 +1930,7 @@ pub const AppSession = struct {
     // loaded_config가 실제로 초기화됐는지. init 초반(live/surface 생성)이 실패하면 deinit이 아직
     // undefined인 arena를 free하지 않도록, 다른 자원과 같은 *_initialized 가드 패턴을 쓴다.
     config_loaded: bool = false,
+    test_policy_registered: bool = false,
     // Swift host의 단일 frame-loop NSTimer가 실제로 쓰는 전역 cadence(Hz). `render.frame-rate`는 config 희망값이지만,
     // tickTimer는 앱당 하나라 모든 창/quick 세션이 같은 cadence로 tick된다. Zig의 blink/fade/poll/sync timeout 환산도
     // 이 host cadence를 공통 출처로 써야 비활성 세션이 active 세션 rate에 끌려 과속/저속으로 흐르지 않는다.
@@ -2064,6 +2104,8 @@ pub const AppSession = struct {
     // false라 드래그 리사이즈 자체가 시작 못 한다(setSidebarWidthPx 별도 게이트 불요). normalizeConfig가
     // SessionConfig.chrome_minimal에서 채운다. 메인 창은 false(full chrome).
     chrome_minimal: bool = false,
+    // quick은 full chrome 설정도 가능하므로 chrome_minimal로 판별하지 않는다. command_kind가 주는 명시 identity다.
+    is_quick: bool = false,
     // minimal 세션에서 탭(워크스페이스·Term) 생성을 허용하는가. false(기본)면 chrome_minimal일 때 dispatchAppAction이
     // new_tab/new_term을 무동작으로 막는다(사이드바·탭 바가 없어 안 보이는 탭 생성 차단). true면 허용(파워유저).
     // chrome_minimal=false면 tabsBlocked()가 항상 false라 full 모드 탭은 이 값과 무관하게 동작한다.
@@ -2711,6 +2753,7 @@ pub const AppSession = struct {
             // 사이드바 폭을 게이트하기 전에 세워야 하므로 reset 시점에 박는다.
             .chrome_minimal = config.chrome_minimal,
             .minimal_tabs = config.minimal_tabs,
+            .is_quick = config.is_quick,
         };
         // fixed dirty-sync queue의 storage는 미초기화가 의도지만 길이는 모든 init 경로에서 반드시 0이어야 한다.
         self.file_panel_dirty_sync_actions_len = 0;
@@ -2744,6 +2787,17 @@ pub const AppSession = struct {
         else
             try config_mod.loadConfigDefault(io, allocator);
         self.config_loaded = true;
+        if (builtin.is_test and test_live_app_sessions == 0) {
+            // 이전 test의 process-global 값만 리셋한다. 같은 test에서 이미 열린 Window가 있으면 아래 production
+            // resolver를 그대로 타므로 Window A toggle → Window B 첫 Term remote 배선을 실제 통합 검증할 수 있다.
+            app_keep_alive_policy_initialized = false;
+        }
+        self.loaded_config.config.session.keep_alive_after_quit =
+            keepAlivePolicyForNewSession(self.loaded_config.config.session.keep_alive_after_quit);
+        if (builtin.is_test) {
+            test_live_app_sessions += 1;
+            self.test_policy_registered = true;
+        }
         self.frame_loop_rate_hz = self.configuredFrameRateHz();
         self.page_keys_scroll = self.loaded_config.config.input.page_keys == .scroll;
         self.audible_bell = self.loaded_config.config.bell.audible;
@@ -2768,7 +2822,7 @@ pub const AppSession = struct {
         // 셸 통합: 대화형 셸이 zsh면 macOS 편집키(Cmd+←/→ 등) 바인딩을 주입한다(사용자 .zshrc의
         // keymap 조건과 무관하게 동작하게). ZDOTDIR로 통합 .zshenv를 가리킨다. 실패 시 null(통합
         // 없이 정상 동작). dir 슬라이스는 spawn(EnvStorage가 dupe)까지만 필요하므로 init 끝에 해제.
-        const integ_dir: ?[]const u8 = if (config.command_kind == .interactive_shell and
+        const integ_dir: ?[]const u8 = if ((config.command_kind == .interactive_shell or config.command_kind == .quick_interactive_shell) and
             shell_integration.detect(maru.pty.resolveInteractiveShell()) == .zsh)
             shell_integration.setupZsh(io, allocator)
         else
@@ -2798,10 +2852,10 @@ pub const AppSession = struct {
         self.term_backend = app.InProcessTermBackend.init(self.allocator, self.io, self.live_registry, self.runtime);
 
         // P3-e3: `session.keep-alive-after-quit`이 켜졌으면 영속 세션 host에 connect-or-launch해 원격 backend를 세운다.
-        // 실패(연결 거부·spawn 실패)면 조용히 in-process로 폴백한다 — host 문제가 GUI를 막지 않는다. ⚠️최초 cold launch에서
+        // 실패(연결 거부·spawn 실패)면 notice를 예약하고 in-process로 폴백한다 — host 문제가 GUI를 막지 않는다. ⚠️최초 cold launch에서
         // host를 새로 띄우면 backoff로 최대 수 초 블로킹될 수 있다(opt-in 실험적; async/lazy 연결은 후속). 기본값(false)이면
         // 이 블록을 건너뛰어 현행 경로와 byte-identical이다.
-        if (self.loaded_config.config.session.keep_alive_after_quit) self.ensureRemoteBackend();
+        if (app_keep_alive_after_quit and !self.is_quick) self.ensureRemoteBackend();
 
         // MARU_TRACE=<파일경로>: 라이브 trace 레코딩을 켠다. 파일을 열어(truncate) self 소유 file writer를 세우고,
         // 레코더가 이벤트마다 그 writer에 쓰고 flush한다(증분 append → 크래시 복원). 파일 생성 실패면 조용히 건너뛴다
@@ -2864,40 +2918,43 @@ pub const AppSession = struct {
             });
         }
 
-        // 첫 탭을 만든다 — Tab + 첫 panel(셸 PTY spawn + surface + runtime attach + pump) + tabs/surface_ptrs
-        // append + app_window 갱신을 createTab이 한 묶음으로 한다(create/switch 후속도 같은 경로를 쓴다).
-        // Swift는 opaque handle만 보유하고 AppSession은 heap에 고정된다(P2 seam: Term은 opaque handle로 runtime을
-        // 다루고, LivePtySession reader가 잡는 `&live_pty.reader`는 backend 내부에서 registry heap 슬롯이 고정한다 —
-        // Pane도 heap-pin이라 createPane이 allocator.create로 띄운다).
-        var first_req = spawnRequest(spawn_config, self.loaded_config.config.term, self.loaded_config.config.shell, self.loaded_config.config.env, integ_dir, self.new_tab_ssh_bin);
         // launch cwd가 `/`인지 한 번 캐시(.app 더블클릭 home 승격용 — workspaceRootCwd가 매번 getcwd하지 않게).
         self.launch_cwd_is_root = detectLaunchCwdIsRoot(io);
-        // 시작 창은 config workspace.root에서 연다(빈 값이면 상속 cwd — maru를 띄운 디렉터리, `/`면 home). 첫 창은
-        // 상속할 직전 surface가 없으므로 inherit=false(=root 직행 — newSurfaceCwd가 focusedTermCwd를 안 거친다).
-        var root_buf: [std.fs.max_path_bytes]u8 = undefined;
-        self.applySpawnCwd(&first_req, &root_buf, false);
-        _ = try self.createTab(
-            first_req,
-            spawn_config.size,
-            config.queue_capacity,
-            "Maru shell",
-            commandName(config.command_kind),
-        );
-        self.surface_initialized = true;
-
-        self.renderer_state = renderer.RendererState.init(allocator, .{});
-        self.renderer_initialized = true;
-        // FrameLoop.init이 pump 포인터를 요구해 첫 Term의 pump를 넘기지만, AppSession은 tick에서 모든 Term을
-        // 직접 drain하고 `tickAfterDrainWithFrameBuilder`(이미 drain된 summary를 받아 frame만 조립 — frame_loop.pump
-        // 무시)만 쓴다. 즉 frame_loop.pump는 이 경로에서 절대 읽히지 않으므로 포커스/닫기마다 재바인딩하지 않는다
-        // (읽히지 않는 필드를 유지하는 방어 코드 불필요). frame_loop.tick/tickWithFrameBuilder로 바꾸려면 그때 pump를 살려야 한다.
-        // io는 frame 조립 경로의 코어 락에 쓰인다 — frame_loop.pump는 위 주석대로 안 읽히므로 그 queue.io에 기대지
-        // 않고(undefined일 수 있다) AppSession이 가진 valid한 io를 직접 넘긴다(docs/io-render-threading.md PR3).
-        self.frame_loop = app.AppFrameLoop.init(allocator, &self.app_window, self.runtime, &self.activePane().activeTerm().rt.pump, &self.renderer_state, io);
-        // 활성 panel rect를 초기화한다 — refreshCellMetrics가 사이드바 폭을 채운 '뒤'라야 단일 panel 기준
-        // (x = 사이드바 폭, y = 0)이 맞다(createTab 시점엔 사이드바 폭이 아직 0이라 여기서 다시 잡는다).
-        self.recomputeActivePaneRect();
+        if (!config.defer_initial_surface) {
+            // 일반 새 Window/quick/smoke는 첫 탭을 즉시 만든다. workspace restore 전용 세션은 saved 모델을
+            // apply하기 전 default shell을 띄우지 않아 relaunch side effect와 throwaway host runtime을 0으로 만든다.
+            var first_req = spawnRequest(spawn_config, self.loaded_config.config.term, self.loaded_config.config.shell, self.loaded_config.config.env, integ_dir, self.new_tab_ssh_bin);
+            var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+            self.applySpawnCwd(&first_req, &root_buf, false);
+            _ = try self.createTab(
+                first_req,
+                spawn_config.size,
+                config.queue_capacity,
+                "Maru shell",
+                commandName(config.command_kind),
+            );
+            self.finishInitialSurface();
+        }
         self.writeSummaryFromState();
+    }
+
+    /// 첫 live tab이 준비된 뒤에만 renderer/frame loop를 세운다. 일반 init과 deferred workspace apply가 공유해
+    /// "세션 생성 → throwaway shell → restore" 경로를 만들지 않는다.
+    fn finishInitialSurface(self: *AppSession) void {
+        if (self.surface_initialized) return;
+        std.debug.assert(self.tabs.items.len > 0);
+        self.surface_initialized = true;
+        self.renderer_state = renderer.RendererState.init(self.allocator, .{});
+        self.renderer_initialized = true;
+        self.frame_loop = app.AppFrameLoop.init(
+            self.allocator,
+            &self.app_window,
+            self.runtime,
+            &self.activePane().activeTerm().rt.pump,
+            &self.renderer_state,
+            self.io,
+        );
+        self.recomputeActivePaneRect();
     }
 
     /// 현재 활성 탭(`*Tab`). live_pty/pump 등 탭 내부에 접근할 때 쓴다. `app_window.active_tab`을
@@ -5399,6 +5456,9 @@ pub const AppSession = struct {
     /// in-process. createTerm이 이걸로 backend를 고르고, 그 backend가 준 surface의 `remote` 유무가 이후 `backendFor`의 판정
     /// 근거가 된다. `remote_backend`가 null(기본)이면 항상 in-process라 현행과 동일하다.
     fn backendForNew(self: *AppSession) app.TermRuntimeBackend {
+        // keep-alive를 끈 즉시 이후 Term은 local이어야 한다. quick은 아직 workspace manifest에 handle을 저장하지 않으므로
+        // remote로 만들면 정상 Quit detach 뒤 재접속할 경로가 없는 orphan이 된다.
+        if (!app_keep_alive_after_quit or self.is_quick) return self.termBackend();
         // host_connect_failed면 원격을 안 고른다 — 초기 연결 실패(그땐 backend가 null이라 무해)뿐 아니라, **런타임 중 host가
         // 죽은 뒤**(createTerm이 연결사로 감지해 세움, #3)에도 새 Term은 in-process로 연다. 기존 host-backed Term의 close/remove
         // 라우팅은 `backendFor`(게이트 없음)가 여전히 공유 backend로 보낸다(client-side 회수는 host 없어도 됨).
@@ -5518,22 +5578,31 @@ pub const AppSession = struct {
         // 잡는 `&live_pty.reader`·`&surface.core`는 backend 내부에서 registry heap 슬롯이 고정한다(heap-pin 유지 — Term-inline
         // 시절과 같은 메커니즘). generation=0으로 시작. id는 앱 전역 유일이라 중복 등록 없음.
         var be = self.backendForNew(); // P3-e3: keep-alive+연결 성공 시 원격 backend, 아니면 in-process(기본). #3 폴백 시 아래서 갱신.
-        // P3-e3-5 재접속: restore가 restore_runtime_id를 세웠고(host-backed였던 Term) 원격 backend가 있으면, spawn 대신 저장된
-        // runtime_id에 attach해 같은 host runtime(화면·PID·scrollback)을 잇는다(§7). host가 그 runtime을 잃었으면(재시작 등)
-        // attachTerm이 실패→아래 fresh spawn으로 폴백한다. 읽고 즉시 클리어(다음 createTerm으로 안 샘).
+        // P3-e3-5 재접속: persistent identity가 있으면 host namespace를 먼저 대조한 뒤 attach한다. keep-alive가 켜진
+        // 복원에서 host/runtime이 없거나 달라졌는데 fresh spawn으로 폴백하면 "이어진 세션"처럼 보이는 데이터 손실이므로
+        // loud-fail한다. keep-alive를 끈 복원은 identity를 명시적으로 무시하고 일반 in-process spawn으로 전환한다.
+        const reconnect_host_id = self.restore_runtime_host_id;
         const reconnect_id = self.restore_runtime_id;
+        self.restore_runtime_host_id = "";
         self.restore_runtime_id = "";
         var reconnected = false; // attach(재접속) 경로면 true — errdefer가 terminate 대신 detach로 되돌린다(아래).
         const surface = surface: {
-            if (is_macos and reconnect_id.len == 32) {
-                if (app_remote_backend) |*rb| {
-                    var rid: [32]u8 = undefined;
-                    @memcpy(&rid, reconnect_id[0..32]);
-                    if (rb.attachTerm(id, rid, size)) |s| {
-                        reconnected = true;
-                        break :surface s;
-                    } else |_| {} // 재접속 실패 → fresh spawn 폴백.
+            if (is_macos and app_keep_alive_after_quit and reconnect_id.len > 0) {
+                if (reconnect_id.len != 32) return error.InvalidPersistentRuntimeIdentity;
+                const client = app_remote_client orelse return error.PersistentRuntimeUnavailable;
+                if (reconnect_host_id.len > 0) {
+                    var host_hex_buf: [32]u8 = undefined;
+                    const current_host = std.fmt.bufPrint(&host_hex_buf, "{x:0>32}", .{client.host_id}) catch
+                        return error.InvalidPersistentRuntimeIdentity;
+                    if (!std.mem.eql(u8, reconnect_host_id, current_host))
+                        return error.PersistentRuntimeUnavailable;
                 }
+                const rb = if (app_remote_backend) |*remote| remote else return error.PersistentRuntimeUnavailable;
+                var rid: [32]u8 = undefined;
+                @memcpy(&rid, reconnect_id[0..32]);
+                const attached = rb.attachTerm(id, rid, size) catch return error.PersistentRuntimeUnavailable;
+                reconnected = true;
+                break :surface attached;
             }
             break :surface be.spawn(.{ .handle = id, .request = req, .size = size, .queue_capacity = queue_capacity }) catch |err| {
                 // #3: keep-alive 원격 backend인데 host 연결이 죽었으면(ConnectionClosed/WriteFailed) createTerm이 실패해 새
@@ -5542,7 +5611,7 @@ pub const AppSession = struct {
                 // 실패는 그대로) 연결사 외 에러(OOM 등 — in-process도 실패할 것)는 폴백 없이 전파한다. 기존 host-backed Term은
                 // 각자 pump가 read_error로 관측한다(별도). remote spawn 실패는 backend 내부에서 정리돼 handle을 재사용해도 안전.
                 const remote_dead = is_macos and !reconnected and app_remote_backend != null and !host_connect_failed and
-                    (err == error.ConnectionClosed or err == error.WriteFailed);
+                    (err == error.ConnectionClosed or err == error.WriteFailed or err == error.UnsupportedSpawnContract);
                 if (!remote_dead) return err;
                 self.markHostConnectFailed();
                 be = self.termBackend(); // errdefer·이후 단계가 in-process backend를 쓰도록 갱신.
@@ -5563,6 +5632,7 @@ pub const AppSession = struct {
         term.surface = surface; // backend가 init한 번들 슬롯 surface를 참조(소유는 registry)
         term.rt.handle = id; // opaque runtime handle(= surface_id, in-process) — 이후 backend 호출의 라우팅 키
         term.rt.live_initialized = true;
+        term.rt.restored_existing = reconnected;
         term.rt.spawned_at_ns = std.Io.Clock.awake.now(self.io).nanoseconds; // uptime(비정상 시작 사망 grace) 기준 시각
         // 비정상 시작 사망으로 held된 창에 새 셸이 뜨면 held를 풀어(re-arm), 이 새 세션이 정상 종료할 때 세션 종료
         // latch가 다시 판정하게 한다(held→⌘T 새 셸→쓰다 exit→정상 앱 종료). 모든 surface spawn의 단일 chokepoint.
@@ -5645,8 +5715,13 @@ pub const AppSession = struct {
             // 직접 만지지 않는다. closeAndDetach가 reader를 먼저 join하므로(멱등) reader가 잡던 `&surface.core`가 번들
             // deinit의 surface.deinit 순간까지 살아 있다. handle(= surface_id)은 remove 실행 전에 읽었다(remove가 슬롯을
             // 해제하므로 이후 term.surface/handle deref 금지).
-            if (self.runtime_initialized) self.backendFor(term).closeAndDetach(term.rt.handle);
-            self.backendFor(term).remove(term.rt.handle);
+            if (is_macos and term.rt.restored_existing and term.surface.remote != null) {
+                // restore staging rollback: 기존 runtime의 subscription/client state만 회수한다. terminate는 절대 보내지 않는다.
+                if (app_remote_backend) |*rb| rb.detachTerm(term.rt.handle);
+            } else {
+                if (self.runtime_initialized) self.backendFor(term).closeAndDetach(term.rt.handle);
+                self.backendFor(term).remove(term.rt.handle);
+            }
             term.rt.live_initialized = false;
         }
         // git 브랜치 캐시·auto_title(Term-owned)만 여기서 해제 — custom_name·surface는 번들 deinit이 소유한다(M3a §8A.1).
@@ -6241,12 +6316,21 @@ pub const AppSession = struct {
         // P4 §6 row 3: host-backed runtime(keep-alive)이 살아 있으면 "종료 및 세션 끝내기" alternate를 함께 띄운다 — 기본
         // "종료"는 detach(runtime 생존, e3-6), alternate는 terminate(다 끝냄). host-backed가 없으면(in-process뿐) alternate가
         // 무의미하니 기존 2버튼(종료/취소)을 쓴다.
-        if (is_macos and app_remote_backend != null and app_remote_backend.?.runtimes.count() > 0) {
+        if (is_macos and app_keep_alive_after_quit and app_remote_backend != null and app_remote_backend.?.runtimes.count() > 0) {
             self.showConfirmChoices(.quit, "maru를 종료할까요? 열린 터미널은 백그라운드에서 유지됩니다.", .{ .primary = "종료", .alternate = "종료 및 세션 끝내기", .cancel = "취소" });
         } else {
             self.showConfirmButtons(.quit, "maru를 종료할까요?", .{ .confirm = "종료", .cancel = "취소" });
         }
         self.quit_decision = .none;
+    }
+
+    /// host의 종료 승인 직전 재검사에서 보호 파일이 발견되어 이미 수락한 Quit을 취소할 때 호출한다. 앱은 계속
+    /// 실행되므로 다음 명시 close/Quit이 이전 detach/end-all snapshot을 재사용하지 않게 process-global latch를 되돌린다.
+    pub fn cancelAcceptedAppQuit(self: *AppSession) void {
+        _ = self;
+        app_quitting = false;
+        app_quit_keep_alive = false;
+        app_quit_end_all = false;
     }
 
     /// 오버레이 모달 메시지를 세션 소유 버퍼로 UTF-8 코드포인트 경계에서 잘라 복사하고 그 슬라이스를 돌려준다 —
@@ -13827,6 +13911,9 @@ pub const AppSession = struct {
 
     /// 현재 선택 섹션(settings.section)으로 필터한 필드(bool→num→enum→text). arena 소유. 핸들러가 selected를 이 순서로 매핑.
     fn currentSectionFields(self: *AppSession, arena: std.mem.Allocator) !SettingsSectionFields {
+        // 다른 Window에서 바꾼 앱 전역 policy를 이 창의 설정 스냅샷에도 반영한다. 이 동기화 뒤 field 생성과
+        // toggle의 `new_value` 계산이 같은 SSOT를 보므로 stale 창이 값을 되돌리지 않는다.
+        self.loaded_config.config.session.keep_alive_after_quit = app_keep_alive_after_quit;
         const sections = try self.buildSectionList(arena);
         const sel_sec: ?config_mod.Section = if (sections.len > 0)
             sections[@min(self.chrome_host.settings.section, sections.len - 1)].section
@@ -14298,6 +14385,10 @@ pub const AppSession = struct {
                     self.refreshSettingsFieldCount();
                 } else {
                     self.reapplyLoadedConfig();
+                }
+                if (std.mem.eql(u8, f.key, "session.keep-alive-after-quit")) {
+                    setAppKeepAlivePolicy(new_value);
+                    if (new_value and !self.is_quick) self.ensureRemoteBackend();
                 }
                 if (new_value and isDesktopNotificationSettingKey(f.key)) {
                     self.notification_authorization_pending = true;
@@ -16106,6 +16197,7 @@ pub const AppSession = struct {
                     .grant => |async_id| self.grant_confirm_decision = .{ .async_id = async_id, .approved = true },
                     .quit => {
                         self.quit_decision = .accepted;
+                        app_quit_keep_alive = app_keep_alive_after_quit;
                         app_quitting = true; // P3-e3-6: 앱 종료 확정 → 각 창 deinit이 host-backed Term을 terminate 대신 detach(runtime 생존).
                     },
                     .file_conflict_reload => |surface_id| self.beginFileConflictReload(surface_id),
@@ -16121,6 +16213,7 @@ pub const AppSession = struct {
                 if (owner == .quit) {
                     // P4 "종료 및 세션 끝내기"(§6 row 3): 기본 "종료"(detach·생존)와 달리 host-backed runtime도 다 terminate한다.
                     self.quit_decision = .accepted;
+                    app_quit_keep_alive = false;
                     app_quitting = true;
                     app_quit_end_all = true;
                 } else if (owner == .file_panel_close) {
@@ -16428,6 +16521,7 @@ pub const AppSession = struct {
         self.applyAppearancePreservingZoom(new_appearance);
         self.loaded_config.deinit(); // 이제 옛 loaded_config(arena)를 버려도 안전
         self.loaded_config = new_parsed;
+        setAppKeepAlivePolicy(self.loaded_config.config.session.keep_alive_after_quit);
         // 옛 arena를 버렸으니 follow-system 복귀 스냅샷(옛 arena slice)도 비운다(dangling 방지). 아래 applyFollowSystemTheme가
         // 새 파일 테마로 다시 스냅샷·적용한다(F2-9). null 대입은 옛 slice를 deref하지 않아 free 후라도 안전.
         self.theme_pre_follow = null;
@@ -16477,6 +16571,7 @@ pub const AppSession = struct {
     /// 상태로 덮어쓴다**(삭제가 아니라 — 파일·경로 보존, 사용자가 기본 상태를 보고 편집 가능; 사용자 요청).
     pub fn resetAllSettings(self: *AppSession) void {
         self.loaded_config.config = config_mod.Config{}; // 내장 기본값(정적 — 옛 arena 문자열은 미참조로 남았다 다음 reload/deinit에 해제)
+        setAppKeepAlivePolicy(self.loaded_config.config.session.keep_alive_after_quit);
         // keybind도 config다 — "모든 설정 초기화"는 인앱/파일 keybind 바인딩(keybindings·unbinds·terminal_bindings·
         // global_bindings)도 즉시 기본값(빈 슬라이스=빌트인만)으로 되돌린다. 옛 슬라이스는 arena 소유라 미참조로 남았다
         // 다음 reload/deinit에 해제(config.* 정적 교체와 같은 수명 규칙 — 여기서 free 금지). 이렇게 비워야 keyBindingResolver
@@ -19791,14 +19886,13 @@ pub const AppSession = struct {
             const q = entry.value_ptr;
             if (q.offset >= q.buf.items.len) continue; // 이미 빈 큐(엔트리만 남음)
             var dead = false;
-            while (q.offset < q.buf.items.len) {
-                const written = self.runtime.writeInputNonBlocking(target_id, q.buf.items[q.offset..]) catch {
-                    dead = true; // 세션 종료 등 — 잔여는 버린다(다시 쓸 수 없는 대상)
-                    break;
-                };
-                if (written == 0) break; // PTY 버퍼가 찼다 — 다음 tick에 이어서
-                q.offset += written;
-            }
+            // tick당 surface별 한 번만 시도한다. 원격 backend의 16 KiB 상한을 여기서 while로 반복하면
+            // 같은 tick에 큰 paste 전체를 동기 RPC로 밀어 UI를 다시 막으므로, 잔여는 다음 tick으로 넘긴다.
+            const written = self.runtime.writeInputNonBlocking(target_id, q.buf.items[q.offset..]) catch blk: {
+                dead = true; // 세션 종료 등 — 잔여는 버린다(다시 쓸 수 없는 대상)
+                break :blk 0;
+            };
+            q.offset += written;
             if (dead or q.offset >= q.buf.items.len) self.resetPasteQueue(q);
         }
     }
@@ -21199,12 +21293,16 @@ pub const AppSession = struct {
                 // (workspace.Surface에 kind 필드가 없어 web 콘텐츠를 영속할 수 없다; Phase 5서 포맷에 kind 추가 전까지).
                 if (term.kind == .web) continue;
                 const core = &term.surface.core;
-                // P3-e3-5: host-backed Term이면 runtime_id(hex)를 저장한다 — 재실행 시 attach로 재접속(§7). in-process면 "".
+                // P3-e3-5: host-backed Term은 host_id + runtime_id를 함께 저장한다. runtime_id 단독으로 저장하면 host가
+                // 바뀐 뒤 같은 숫자 namespace를 잘못 attach할 수 있으므로 live capture는 둘 중 하나만 만들지 않는다.
+                var runtime_host_id: []const u8 = "";
                 var runtime_id: []const u8 = "";
                 if (is_macos and term.surface.remote != null) {
-                    if (app_remote_backend) |*rb| {
-                        if (rb.runtimeIdFor(term.rt.handle)) |rid| runtime_id = try arena.dupe(u8, &rid);
-                    }
+                    const rb = if (app_remote_backend) |*remote| remote else return error.PersistentRuntimeUnavailable;
+                    const rid = rb.runtimeIdFor(term.rt.handle) orelse return error.PersistentRuntimeUnavailable;
+                    const client = app_remote_client orelse return error.PersistentRuntimeUnavailable;
+                    runtime_host_id = try std.fmt.allocPrint(arena, "{x:0>32}", .{client.host_id});
+                    runtime_id = try arena.dupe(u8, &rid);
                 }
                 try surfaces.append(arena, .{
                     // custom_name = 사용자 rename(owned, 없으면 ""), title = 자동 제목(OSC). 둘은 별도 필드로 저장한다.
@@ -21212,6 +21310,7 @@ pub const AppSession = struct {
                     .title = try arena.dupe(u8, core.windowTitle()),
                     .cwd = try arena.dupe(u8, core.currentCwd()),
                     .command = try arena.dupe(u8, term.surface.command orelse ""),
+                    .runtime_host_id = runtime_host_id,
                     .runtime_id = runtime_id,
                     .cols = core.size.cols,
                     .rows = core.size.rows,
@@ -21396,13 +21495,17 @@ pub const AppSession = struct {
         return text;
     }
 
-    /// 저장된 workspace 모델(한 창)을 이 세션에 적용해 탭/pane split 트리/Term을 재생성한다(R4 복원). init이 만든
-    /// 기본 탭을 모델대로 교체한다 — 각 Term은 저장된 cwd에서 새 셸을 spawn한다(셸 상태가 아니라 cwd·레이아웃 복원).
+    /// 저장된 workspace 모델(한 창)을 이 세션에 적용해 탭/pane split 트리/Term을 재생성한다(R4 복원). 일반 live
+    /// 세션은 init이 만든 모델을 교체하고, 시작 restore용 deferred 세션은 빈 모델에 첫 publish한다. runtime-handle이
+    /// 살아 있으면 기존 host runtime에 attach하고, handle이 없는 선언적 surface만 저장 cwd에서 새 셸을 spawn한다.
     /// title/command는 정적 기본(셸이 OSC 0/2로 곧 재설정)·size는 모델값(이후 resize가 창에 맞게 보정). 새 탭들을
-    /// 먼저 다 빌드한 뒤 기존 탭을 teardown하고 swap한다 — 빌드 실패면 새 것만 정리하고 기존 세션을 보존한다.
-    /// 빈 모델이면 무동작(기본 유지). 빈 cwd면 기본 cwd로 spawn(저장 안 됐거나 셸 통합 없음).
+    /// 먼저 다 빌드한 뒤 기존 탭을 teardown하고 swap한다 — 빌드 실패면 새 것만 정리하고 기존 live 모델 또는 deferred
+    /// 빈 상태를 보존한다. 빈 모델은 live 세션에선 무동작, deferred 세션에선 오류다. 빈 cwd spawn은 기본 cwd를 쓴다.
     pub fn applyWorkspaceWindow(self: *AppSession, win: maru.session.workspace.Window) !void {
-        if (win.tabs.len == 0) return;
+        if (win.tabs.len == 0) {
+            if (!self.surface_initialized) return error.EmptyWorkspace;
+            return;
+        }
         // 공개 ABI가 시작 복원 외의 라이브 세션에도 호출될 수 있으므로, old dock을 교체하기 전에 보호 중인
         // CM6/close/reload/mutation 상태를 fail-close한다. 새 모델 준비 뒤 검사하면 외부 작업과의 사이에 폐기
         // window가 생기므로 admission의 첫 read-only gate로 둔다.
@@ -21475,6 +21578,14 @@ pub const AppSession = struct {
         try self.tabs.ensureTotalCapacity(self.allocator, new_tabs.items.len);
         try self.surface_ptrs.ensureTotalCapacity(self.allocator, new_tabs.items.len);
 
+        // 여기까지 왔으면 뒤의 publish는 무실패다. staging provenance를 지워 이후 사용자 close가 기존 runtime을 정상
+        // terminate하게 한다. 이 지우기 전의 모든 errdefer는 attach-only runtime을 detach로 rollback한다.
+        for (new_tabs.items) |tab| {
+            for (tab.panes.items) |pane| {
+                for (pane.terms.items) |term| term.rt.restored_existing = false;
+            }
+        }
+
         // 3) 기존 탭 teardown(closeTab의 teardown과 같은 순서 — 마지막-탭 latch는 안 탄다) 후 새 탭 설치.
         for (self.tabs.items) |tab| self.destroyTabStandalone(tab);
         self.tabs.clearRetainingCapacity();
@@ -21485,6 +21596,9 @@ pub const AppSession = struct {
         }
         self.app_window.tabs = self.surface_ptrs.items;
         self.app_window.active_tab = @min(win.active_tab, self.tabs.items.len - 1);
+        // deferred restore 세션은 이 publish 지점까지 PTY/surface/frame loop가 0개였다. 저장 모델의 Term들이 모두
+        // stage된 뒤에만 첫 surface를 활성화하므로 성공 복원은 throwaway fresh shell을 만들지 않는다.
+        self.finishInitialSurface();
         self.resetFilePanelTransientStateForDockReplacement();
         if (self.dock_initialized) self.dock.deinit();
         self.dock = new_dock;
@@ -21657,8 +21771,9 @@ pub const AppSession = struct {
     /// (존재하는 디렉터리) cwd면 그걸 쓴다 — 마지막 create 호출만 두 함수가 다르다. 모델의 command(argv[0])·title은
     /// v1 복원에선 쓰지 않는다(기본 셸·"Maru"로 spawn; 정확한 argv·제목 복원은 후속) — 저장은 향후 복원용으로만.
     fn restoreSpawn(self: *AppSession, sm: maru.session.workspace.Surface) struct { req: maru.pty.SpawnRequest, size: terminal.Size } {
-        // P3-e3-5: 이 surface가 host-backed였으면(runtime_id 저장) 곧 부를 createTerm이 spawn 대신 attach로 재접속한다.
-        // ""면 일반 spawn. sm.runtime_id는 parse arena 소유라 createTerm이 동기적으로 읽는(memcpy) 동안 유효하다.
+        // P3-e3-5: host-backed surface의 identity 쌍을 곧 부를 createTerm에 동기 전달한다. 두 slice는 parse arena
+        // 소유지만 createTerm이 즉시 비교/memcpy하고 비우므로 수명은 충분하다. host 없는 runtime_id는 legacy migration.
+        self.restore_runtime_host_id = sm.runtime_host_id;
         self.restore_runtime_id = sm.runtime_id;
         var cfg = self.new_tab_config;
         const size = restoreSurfaceSize(sm);
@@ -21677,6 +21792,7 @@ pub const AppSession = struct {
 
     fn createPaneFromSurface(self: *AppSession, sm: maru.session.workspace.Surface) !*Pane {
         const rs = self.restoreSpawn(sm);
+        errdefer self.clearRestoreRuntimeIdentity();
         const cfg = self.new_tab_config;
         const pane = try self.createPane(rs.req, rs.size, cfg.queue_capacity, "Maru", commandName(cfg.command_kind));
         errdefer self.destroyPane(pane);
@@ -21687,11 +21803,17 @@ pub const AppSession = struct {
 
     fn createTermFromSurface(self: *AppSession, sm: maru.session.workspace.Surface) !*Term {
         const rs = self.restoreSpawn(sm);
+        errdefer self.clearRestoreRuntimeIdentity();
         const cfg = self.new_tab_config;
         const term = try self.createTerm(rs.req, rs.size, cfg.queue_capacity, "Maru", commandName(cfg.command_kind));
         errdefer self.destroyTerm(term);
         term.surface.custom_name = try self.dupeCustomName(sm.custom_name);
         return term;
+    }
+
+    fn clearRestoreRuntimeIdentity(self: *AppSession) void {
+        self.restore_runtime_host_id = "";
+        self.restore_runtime_id = "";
     }
 
     /// quick terminal 표시 옵션(config에서 파싱). Swift가 auto_hide/screen/chrome·재생성 판정에 쓴다. 이 세션의
@@ -23374,7 +23496,7 @@ pub const AppSession = struct {
                     // 통째로 건너뛴다 — deinit pass1(§6)과 **동일** 게이트. close는 창 teardown 진입점(windowWillClose)이라
                     // deinit보다 먼저 도므로, 여기서도 막지 않으면 runtime을 죽여 "GUI 종료 후 생존" 계약이 깨진다(회수는
                     // deinit pass2 detachTerm이 client-side만). P4 "종료 및 세션 끝내기"(app_quit_end_all)면 막지 않고 종료한다.
-                    if (is_macos and app_quitting and !app_quit_end_all and term.surface.remote != null) continue;
+                    if (self.shouldDetachRemoteOnAppQuit(term)) continue;
                     if (term.rt.live_initialized and self.runtime_initialized) {
                         self.backendFor(term).closeAndDetach(term.rt.handle);
                     } else if (term.rt.live_initialized) {
@@ -26567,7 +26689,7 @@ pub const AppSession = struct {
                         // P3-e3-6: 앱 quit(detach) + host-backed면 terminate(closeAndDetach)를 건너뛴다 — runtime을 host에
                         // 남겨야 재실행 시 재접속한다(detach는 아래 pass 2 detachTerm이 client-side만 회수). 단 P4 "종료 및 세션
                         // 끝내기"(app_quit_end_all)면 skip 안 하고 종료한다. 그 외(in-process·명시 창 close)도 기존대로 closeAndDetach.
-                        if (is_macos and app_quitting and !app_quit_end_all and term.surface.remote != null) continue;
+                        if (self.shouldDetachRemoteOnAppQuit(term)) continue;
                         self.backendFor(term).closeAndDetach(term.rt.handle);
                     }
                 }
@@ -26604,7 +26726,7 @@ pub const AppSession = struct {
                         // P3-e3-6: 앱 quit(detach)이면 detachTerm(terminate 없이 회수 → host runtime 생존, 재접속 대상). P4 "종료
                         // 및 세션 끝내기"(app_quit_end_all) 또는 명시 창 close(app_quitting=false)면 remove(terminate + 회수,
                         // destructive). 공유 backend는 어느 쪽도 안 닫는다.
-                        if (app_quitting and !app_quit_end_all) {
+                        if (self.shouldDetachRemoteOnAppQuit(term)) {
                             if (app_remote_backend) |*rb| rb.detachTerm(term.rt.handle);
                         } else {
                             self.backendFor(term).remove(term.rt.handle);
@@ -26650,7 +26772,28 @@ pub const AppSession = struct {
             self.allocator.free(b);
             self.new_tab_ssh_bin = null;
         }
+        if (builtin.is_test and self.test_policy_registered) {
+            std.debug.assert(test_live_app_sessions > 0);
+            test_live_app_sessions -= 1;
+            self.test_policy_registered = false;
+            if (test_live_app_sessions == 0) {
+                app_keep_alive_after_quit = false;
+                app_keep_alive_policy_initialized = false;
+            }
+        }
         self.* = undefined;
+    }
+
+    /// 앱 quit에서 remote runtime을 host에 남길지 정하는 단일 정책점. 단순히 remote surface라는 이유만으로 detach하면
+    /// 사용자가 keep-alive를 끈 뒤에도 다음 quit에서 orphan runtime이 남으므로, Quit 확정 순간의 앱 전역 설정 snapshot을
+    /// 모든 창이 함께 읽는다. quick은 workspace manifest가 없어 항상 terminate한다.
+    fn shouldDetachRemoteOnAppQuit(self: *const AppSession, term: *const Term) bool {
+        return is_macos and
+            app_quitting and
+            !app_quit_end_all and
+            app_quit_keep_alive and
+            !self.is_quick and
+            term.surface.remote != null;
     }
 
     fn writeSummaryFromTick(self: *AppSession, tick_result: app.AppFrameLoopTick) void {
@@ -26716,11 +26859,13 @@ pub fn normalizeConfig(config: SessionConfig) !NormalizedConfig {
         .size = terminal.clampGridSize(.{ .cols = @intCast(config.cols), .rows = @intCast(config.rows) }),
         .queue_capacity = if (config.queue_capacity == 0) default_queue_capacity else config.queue_capacity,
         .command_kind = command_kind,
+        .is_quick = command_kind == .quick_interactive_shell,
         .chrome_minimal = config.chrome_minimal != 0,
         .minimal_tabs = config.minimal_tabs != 0,
         .width_px = config.width_px,
         .height_px = config.height_px,
         .scale_milli = config.scale_milli,
+        .defer_initial_surface = config.defer_initial_surface != 0,
     };
 }
 
@@ -26825,7 +26970,7 @@ fn spawnRequest(config: NormalizedConfig, term: []const u8, shell: config_mod.Sh
             },
             .size = config.size,
         },
-        .interactive_shell => .{
+        .interactive_shell, .quick_interactive_shell => .{
             // 사용자 config shell.command가 실행 가능한 파일이면 그 셸을, 아니면(빈 값·`~`·없는 경로·실행 불가)
             // resolveInteractiveShell 폴백. resolveConfiguredShell이 판정 — 잘못된 셸 *경로*가 첫 창을 exec 실패로
             // 즉시 종료시켜 앱이 시작하자마자 꺼지던 것을 막는다(실행 불가 경로 한정 방어 — 상세·범위는 그 함수 주석).
@@ -26854,7 +26999,7 @@ fn spawnRequest(config: NormalizedConfig, term: []const u8, shell: config_mod.Sh
 fn commandName(kind: CommandKind) []const u8 {
     return switch (kind) {
         .controlled_smoke => "/bin/sh -c maru-app-smoke",
-        .interactive_shell => maru.pty.resolveInteractiveShell(),
+        .interactive_shell, .quick_interactive_shell => maru.pty.resolveInteractiveShell(),
     };
 }
 
@@ -27092,6 +27237,7 @@ test "macOS app session config defaults queue capacity without changing command 
     try std.testing.expectEqual(terminal.Size{ .cols = 80, .rows = 24 }, normalized.size);
     try std.testing.expectEqual(@as(usize, default_queue_capacity), normalized.queue_capacity);
     try std.testing.expectEqual(CommandKind.interactive_shell, normalized.command_kind);
+    try std.testing.expect(!normalized.is_quick);
     try std.testing.expectEqual(false, normalized.chrome_minimal); // 기본 full(0)
     try std.testing.expectEqual(false, normalized.minimal_tabs); // 기본 스크래치(0)
 }
@@ -27107,6 +27253,14 @@ test "macOS app session normalizeConfig carries chrome_minimal and minimal_tabs 
     });
     try std.testing.expectEqual(false, full.chrome_minimal);
     try std.testing.expectEqual(false, full.minimal_tabs);
+    const quick = try normalizeConfig(.{
+        .abi_version = abi_version,
+        .cols = 80,
+        .rows = 24,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.quick_interactive_shell),
+    });
+    try std.testing.expect(quick.is_quick);
 
     const minimal = try normalizeConfig(.{
         .abi_version = abi_version,
@@ -34936,6 +35090,15 @@ test "M3b: 앱-전역 SurfaceRuntime — 두 창이 한 라우팅 표 공유 + �
     try s2.runtime.writeInput(sid2, .{ .bytes = "" }); // s2는 생존 — 공유 표가 s1 close에 파괴되지 않았다
 }
 
+fn appendTrackedRemoteTermForTest(session: *AppSession) !*Term {
+    app_keep_alive_after_quit = true;
+    session.loaded_config.config.session.keep_alive_after_quit = true;
+    const term = try session.createTerm(.{ .command = "/bin/cat" }, .{ .cols = 40, .rows = 10 }, 16, "cat", "/bin/cat");
+    errdefer session.destroyTerm(term);
+    try session.tabs.items[0].panes.items[0].terms.append(session.allocator, term);
+    return term;
+}
+
 // P3-e3 통합 스모크 — keep-alive AppSession가 새 Term을 **host-backed backend**로 실제 spawn하고, 입력이 host를 거쳐
 // 화면에 반영되며, teardown이 in-process/원격 Term과 원격 backend/연결을 누수·크래시 없이 회수하는지 고정한다. 이 경로
 // (createTerm→backendForNew→원격 spawn, backendFor(term) 라우팅, deinit 원격 회수)는 부품 스모크(remote_term_backend·
@@ -35014,6 +35177,7 @@ test "P3-e3 통합: keep-alive AppSession가 새 Term을 host-backed backend로 
         // 첫 탭 term은 in-process다(원격 backend 세팅 전에 spawn됨 → surface.remote == null).
         const first = session.tabs.items[0].panes.items[0].terms.items[0];
         try std.testing.expect(first.surface.remote == null);
+        app_keep_alive_after_quit = true;
 
         // createTerm으로 /bin/cat을 띄운다 — backendForNew가 이제 원격 backend를 고른다. 반환 Term은 tab에 안 들어가므로
         // 아래 destroyTerm으로 회수한다(원격 라우팅 backendFor(term)을 탄다).
@@ -35040,18 +35204,18 @@ test "P3-e3 통합: keep-alive AppSession가 새 Term을 host-backed backend로 
         defer allocator.destroy(s2);
         try s2.init(io, allocator, .{ .abi_version = abi_version, .cols = 40, .rows = 10, .queue_capacity = 16, .command_kind = @intFromEnum(CommandKind.controlled_smoke) });
         defer s2.deinit();
-        // s2.init의 첫 탭도 이미 세워진 앱 전역 backend를 써서 **자동으로 원격**이 된다(한 창의 모든 터미널이 공유 backend로
-        // 감 — 전역화의 결과). 그래서 이 시점 공유 backend엔 원격 Term 3개(s1의 term1 + s2 첫 탭 + s2의 term2)가 **한 연결**을
-        // 공유한다. s2 첫 탭(원격, s2 tabs 안)은 s2.deinit이 pass2 backendFor(term).remove로 회수한다(deinit 원격-term 경로 검증).
-        s2.ensureRemoteBackend(); // 재사용(app_remote_backend != null → early-return, 새 connectOrLaunch 없음).
+        // production과 같은 resolver를 타므로 Window A에서 이미 켠 앱 전역 policy가 B의 stale 빈 test config보다
+        // 우선한다. 따라서 B의 **첫 Term부터** 같은 공유 connection/backend의 remote여야 한다.
+        try std.testing.expect(s2.activePane().activeTerm().surface.remote != null);
+        try std.testing.expectEqual(@as(usize, 2), app_remote_backend.?.runtimes.count());
         const term2 = try s2.createTerm(.{ .command = "/bin/cat" }, .{ .cols = 40, .rows = 10 }, 16, "cat", "/bin/cat");
         try std.testing.expect(term2.surface.remote != null); // 두 번째 창의 Term도 host-backed.
-        try std.testing.expectEqual(@as(usize, 3), app_remote_backend.?.runtimes.count()); // 두 창의 원격 Term이 한 공유 backend에.
+        try std.testing.expectEqual(@as(usize, 3), app_remote_backend.?.runtimes.count()); // B 첫 Term과 추가 Term까지 한 backend.
 
         s2.destroyTerm(term2);
         session.destroyTerm(term); // 원격 term 회수(backendFor→remote: remove + SurfaceRuntime detach + rr free).
         // 블록 끝 defer(LIFO): s2.deinit → destroy(s2) → reset(공유 backend/client) → session.deinit → destroy(session) → host
-        // kill. in-process 첫 탭들 + 공유 backend를 누수·크래시 없이 회수(testing.allocator 누수, deinit 크래시 검출).
+        // kill. 첫 창 local + 둘째 창 remote 첫 탭과 공유 backend를 누수·크래시 없이 회수한다.
     } else {
         return error.SkipZigTest;
     }
@@ -35111,6 +35275,8 @@ test "R3 #3: host가 죽으면 createTerm이 in-process로 폴백한다(새 터�
         defer allocator.destroy(session);
         try session.init(io, allocator, .{ .abi_version = abi_version, .cols = 40, .rows = 10, .queue_capacity = 16, .command_kind = @intFromEnum(CommandKind.controlled_smoke) });
         defer session.deinit();
+        session.loaded_config.config.session.keep_alive_after_quit = true;
+        app_keep_alive_after_quit = true;
 
         const client = session_host.host_connect.connectOrLaunch(allocator, "/unused", base, .{ .connect_attempts = 30, .connect_delay_ms = 10 }) orelse {
             try std.testing.expect(false);
@@ -35209,6 +35375,8 @@ test "P3-e3-5 재접속: restore_runtime_id로 createTerm이 기존 host runtime
         defer allocator.destroy(session);
         try session.init(io, allocator, .{ .abi_version = abi_version, .cols = 40, .rows = 10, .queue_capacity = 16, .command_kind = @intFromEnum(CommandKind.controlled_smoke) });
         defer session.deinit();
+        session.loaded_config.config.session.keep_alive_after_quit = true;
+        app_keep_alive_after_quit = true;
 
         const client = session_host.host_connect.connectOrLaunch(allocator, "/unused", base, .{ .connect_attempts = 30, .connect_delay_ms = 10 }) orelse {
             try std.testing.expect(false);
@@ -35235,7 +35403,19 @@ test "P3-e3-5 재접속: restore_runtime_id로 createTerm이 기존 host runtime
             return;
         };
 
-        // restore가 restore_runtime_id를 세우고 createTerm을 부른다 → spawn 대신 그 runtime에 **attach**(재접속).
+        var current_host_buf: [32]u8 = undefined;
+        const current_host = std.fmt.bufPrint(&current_host_buf, "{x:0>32}", .{app_remote_client.?.host_id}) catch unreachable;
+
+        // 다른 host namespace의 handle은 같은 runtime_id가 우연히 있어도 fresh spawn으로 위장하지 않고 실패한다.
+        session.restore_runtime_host_id = "00000000000000000000000000000000";
+        session.restore_runtime_id = &prev_rid;
+        try std.testing.expectError(
+            error.PersistentRuntimeUnavailable,
+            session.createTerm(.{ .command = "/bin/cat" }, .{ .cols = 40, .rows = 10 }, 16, "cat", "/bin/cat"),
+        );
+
+        // restore가 identity 쌍을 세우고 createTerm을 부른다 → spawn 대신 그 runtime에 **attach**(재접속).
+        session.restore_runtime_host_id = current_host;
         session.restore_runtime_id = &prev_rid;
         const term = try session.createTerm(.{ .command = "/bin/cat" }, .{ .cols = 40, .rows = 10 }, 16, "cat", "/bin/cat");
         try std.testing.expect(term.surface.remote != null); // host-backed
@@ -35245,10 +35425,16 @@ test "P3-e3-5 재접속: restore_runtime_id로 createTerm이 기존 host runtime
             return;
         };
         try std.testing.expectEqual(prev_rid, attached_rid);
-        // restore_runtime_id는 읽고 즉시 클리어됐다(다음 createTerm은 일반 spawn).
+        // restore identity는 읽고 즉시 클리어됐다(다음 createTerm은 일반 spawn).
+        try std.testing.expectEqualStrings("", session.restore_runtime_host_id);
         try std.testing.expectEqualStrings("", session.restore_runtime_id);
 
-        session.destroyTerm(term); // 재접속 term 회수(remove + 그 runtime terminate).
+        // workspace staging rollback을 흉내 낸다. 아직 commit 전(restored_existing=true) destroy는 기존 runtime을
+        // terminate하지 않고 detach만 해야 한다. 같은 runtime에 다시 붙으면 실제 host 생존이 증명된다.
+        session.destroyTerm(term);
+        var rollback_probe: session_host.remote_runtime.RemoteRuntime = undefined;
+        try rollback_probe.attachExisting(&app_remote_client.?, allocator, io, 99, prev_rid, .{ .cols = 40, .rows = 10 });
+        rollback_probe.deinit(); // 검증 끝 — 이제 terminate로 host runtime 정리.
     } else {
         return error.SkipZigTest;
     }
@@ -35310,6 +35496,7 @@ test "P3-e3-6 app-quit: host-backed Term을 detach해 host runtime이 생존하�
         app_remote_backend = session_host.remote_term_backend.RemoteTermBackend.init(allocator, io, &app_remote_client.?, &app_runtime.routing);
         defer { // 테스트 격리: 앱 전역 상태 리셋(명시 close 뒤엔 null이라 skip).
             app_quitting = false;
+            app_quit_keep_alive = false;
             app_quit_end_all = false;
             if (app_remote_backend) |*rb| {
                 rb.deinit();
@@ -35324,7 +35511,7 @@ test "P3-e3-6 app-quit: host-backed Term을 detach해 host runtime이 생존하�
         const session = try allocator.create(AppSession);
         defer allocator.destroy(session);
         try session.init(io, allocator, .{ .abi_version = abi_version, .cols = 40, .rows = 10, .queue_capacity = 16, .command_kind = @intFromEnum(CommandKind.controlled_smoke) });
-        const first = session.tabs.items[0].panes.items[0].terms.items[0];
+        const first = try appendTrackedRemoteTermForTest(session);
         try std.testing.expect(first.surface.remote != null); // 첫 탭이 host-backed(backend가 init 전에 세워짐)
         const rid = app_remote_backend.?.runtimeIdFor(first.rt.handle) orelse {
             try std.testing.expect(false);
@@ -35332,6 +35519,7 @@ test "P3-e3-6 app-quit: host-backed Term을 detach해 host runtime이 생존하�
         };
 
         // **앱 quit**: deinit이 host-backed Term을 terminate 대신 detach한다(runtime 생존).
+        app_quit_keep_alive = true;
         app_quitting = true;
         session.deinit();
 
@@ -35414,6 +35602,7 @@ test "R1: app-quit 중 close()가 먼저 돌아도 host-backed runtime이 생존
         app_remote_backend = session_host.remote_term_backend.RemoteTermBackend.init(allocator, io, &app_remote_client.?, &app_runtime.routing);
         defer {
             app_quitting = false;
+            app_quit_keep_alive = false;
             app_quit_end_all = false;
             if (app_remote_backend) |*rb| {
                 rb.deinit();
@@ -35428,7 +35617,7 @@ test "R1: app-quit 중 close()가 먼저 돌아도 host-backed runtime이 생존
         const session = try allocator.create(AppSession);
         defer allocator.destroy(session);
         try session.init(io, allocator, .{ .abi_version = abi_version, .cols = 40, .rows = 10, .queue_capacity = 16, .command_kind = @intFromEnum(CommandKind.controlled_smoke) });
-        const first = session.tabs.items[0].panes.items[0].terms.items[0];
+        const first = try appendTrackedRemoteTermForTest(session);
         try std.testing.expect(first.surface.remote != null);
         const rid = app_remote_backend.?.runtimeIdFor(first.rt.handle) orelse {
             try std.testing.expect(false);
@@ -35437,6 +35626,7 @@ test "R1: app-quit 중 close()가 먼저 돌아도 host-backed runtime이 생존
 
         // **앱 quit** 순서를 실제대로: 먼저 창 teardown(close), 그다음 struct deinit. close()에 게이트가 없으면 여기서 이미
         // terminate돼 아래 재접속이 AttachFailed로 깨진다.
+        app_quit_keep_alive = true;
         app_quitting = true;
         _ = session.close();
         session.deinit();
@@ -35463,6 +35653,77 @@ test "R1: app-quit 중 close()가 먼저 돌아도 host-backed runtime이 생존
     } else {
         return error.SkipZigTest;
     }
+}
+
+test "persistent session quit policy: setting off terminates instead of detaching remote runtime" {
+    if (!is_macos) return error.SkipZigTest;
+
+    const previous_quitting = app_quitting;
+    const previous_keep_alive = app_quit_keep_alive;
+    const previous_end_all = app_quit_end_all;
+    defer {
+        app_quitting = previous_quitting;
+        app_quit_keep_alive = previous_keep_alive;
+        app_quit_end_all = previous_end_all;
+    }
+
+    var session: AppSession = undefined;
+    var surface: maru.session.Surface = undefined;
+    surface.remote = .{ .ctx = @ptrFromInt(1), .vtable = @ptrFromInt(@alignOf(maru.session.surface.ScreenSource.VTable)) };
+    var term: Term = .{};
+    term.surface = &surface;
+
+    app_quitting = true;
+    app_quit_end_all = false;
+    app_quit_keep_alive = true;
+    try std.testing.expect(session.shouldDetachRemoteOnAppQuit(&term));
+
+    app_quit_keep_alive = false;
+    try std.testing.expect(!session.shouldDetachRemoteOnAppQuit(&term));
+
+    app_quit_keep_alive = true;
+    app_quit_end_all = true;
+    try std.testing.expect(!session.shouldDetachRemoteOnAppQuit(&term));
+
+    app_quit_end_all = false;
+    session.is_quick = true;
+    try std.testing.expect(!session.shouldDetachRemoteOnAppQuit(&term));
+}
+
+test "persistent session policy: a stale second-window config cannot overwrite the app-wide toggle" {
+    const previous_value = app_keep_alive_after_quit;
+    const previous_initialized = app_keep_alive_policy_initialized;
+    defer {
+        app_keep_alive_after_quit = previous_value;
+        app_keep_alive_policy_initialized = previous_initialized;
+    }
+
+    app_keep_alive_after_quit = false;
+    app_keep_alive_policy_initialized = false;
+    try std.testing.expect(!keepAlivePolicyForNewSession(false)); // 첫 Window가 디스크 config를 초기화한다.
+
+    setAppKeepAlivePolicy(true); // Window A에서 토글했지만 아직 파일 write-back 전.
+    try std.testing.expect(keepAlivePolicyForNewSession(false)); // stale false를 읽은 Window B가 전역 값을 되돌리지 못한다.
+}
+
+test "persistent session quit policy: cancelled late preflight clears accepted lifecycle latches" {
+    const previous_quitting = app_quitting;
+    const previous_keep_alive = app_quit_keep_alive;
+    const previous_end_all = app_quit_end_all;
+    defer {
+        app_quitting = previous_quitting;
+        app_quit_keep_alive = previous_keep_alive;
+        app_quit_end_all = previous_end_all;
+    }
+
+    var session: AppSession = undefined;
+    app_quitting = true;
+    app_quit_keep_alive = true;
+    app_quit_end_all = true;
+    session.cancelAcceptedAppQuit();
+    try std.testing.expect(!app_quitting);
+    try std.testing.expect(!app_quit_keep_alive);
+    try std.testing.expect(!app_quit_end_all);
 }
 
 // P4 "Quit and End All Sessions"(§6 종료 매트릭스 row 3) 통합 스모크 — 종료 확인의 **alternate**("종료 및 세션 끝내기")를
@@ -35533,7 +35794,7 @@ test "P4 Quit-End-All: alternate가 host-backed runtime을 terminate한다(재�
         const session = try allocator.create(AppSession);
         defer allocator.destroy(session);
         try session.init(io, allocator, .{ .abi_version = abi_version, .cols = 40, .rows = 10, .queue_capacity = 16, .command_kind = @intFromEnum(CommandKind.controlled_smoke) });
-        const first = session.tabs.items[0].panes.items[0].terms.items[0];
+        const first = try appendTrackedRemoteTermForTest(session);
         try std.testing.expect(first.surface.remote != null);
         const rid = app_remote_backend.?.runtimeIdFor(first.rt.handle) orelse {
             try std.testing.expect(false);
@@ -35645,6 +35906,7 @@ test "P4 §6.32: host-backed Term의 OSC 9/777 알림이 GUI 알림 경로로 su
         app_remote_backend = session_host.remote_term_backend.RemoteTermBackend.init(allocator, io, &app_remote_client.?, session.runtime);
         defer {
             host_connect_failed = false;
+            app_keep_alive_after_quit = false;
             if (app_remote_backend) |*rb| {
                 rb.deinit();
                 app_remote_backend = null;
@@ -35655,6 +35917,7 @@ test "P4 §6.32: host-backed Term의 OSC 9/777 알림이 GUI 알림 경로로 su
             }
         }
 
+        app_keep_alive_after_quit = true;
         const cat = try session.createTerm(.{ .command = "/bin/cat" }, .{ .cols = 40, .rows = 10 }, 16, "cat", "/bin/cat");
         try std.testing.expect(cat.surface.remote != null); // host-backed
         // pendingNotification이 훑도록 첫 탭 첫 pane에 임시 삽입(cleanup에서 pop 후 destroyTerm).
@@ -42741,6 +43004,7 @@ test "spawnRequest: interactive_shell이 잘못된 shell.command를 기본 셸�
         .size = terminal.Size.default,
         .queue_capacity = 16,
         .command_kind = .interactive_shell,
+        .is_quick = false,
         .chrome_minimal = false,
         .minimal_tabs = false,
         .width_px = 0,

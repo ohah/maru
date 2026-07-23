@@ -218,10 +218,12 @@ pub const Client = struct {
     /// `started`=false(배치 첫 frame)면 소켓을 `pollReadable`로 논블로킹 확인해 데이터가 없으면 `null`(idle). `started`=true면
     /// 배치의 나머지 frame이 곧 오므로(host가 한 번에 write) blocking read를 허용하되, EOF만 ConnectionClosed로 올린다.
     fn nextStreamFrame(self: *Client, started: bool) ClientError!?framing.Frame {
-        if (self.pending_stream.items.len > 0) return self.pending_stream.orderedRemove(0);
+        if (self.pending_stream.items.len > 0)
+            return try self.requireCurrentMajor(self.pending_stream.orderedRemove(0));
         var buf: [4096]u8 = undefined;
         while (true) {
-            if (self.parser.next() catch return error.ProtocolError) |frame| return frame;
+            if (self.parser.next() catch return error.ProtocolError) |frame|
+                return try self.requireCurrentMajor(frame);
             if (!started and !pollReadable(self.fd)) return null; // 배치 시작 전 + 데이터 없음 → idle.
             const n = c.read(self.fd, &buf, buf.len);
             if (n < 0) {
@@ -236,16 +238,28 @@ pub const Client = struct {
     /// terminal input bytes를 attach된 `stream_id`로 보낸다(§9 `input_bytes` — 응답 없는 fire-and-forget). controller만
     /// 유효하고, host는 비controller/미attach stream의 input을 조용히 버린다. attach 응답의 stream_id를 그대로 쓴다.
     pub fn sendInput(self: *Client, stream_id: u64, bytes: []const u8) ClientError!void {
-        const frame_bytes = framing.encodeFrame(self.allocator, .{ .kind = .input_bytes, .stream_id = stream_id }, bytes) catch return error.OutOfMemory;
-        defer self.allocator.free(frame_bytes);
-        socket_server.writeAll(self.fd, frame_bytes) catch return error.WriteFailed;
+        // input frame의 wire cap은 1 MiB다. paste가 이를 넘는 것은 정상 입력이므로 encode 실패/드롭하지 않고 순서대로
+        // 여러 frame으로 나눈다. 빈 입력은 전송할 것이 없다.
+        var offset: usize = 0;
+        while (offset < bytes.len) {
+            const end = inputChunkEnd(offset, bytes.len);
+            const frame_bytes = framing.encodeFrame(self.allocator, .{ .kind = .input_bytes, .stream_id = stream_id }, bytes[offset..end]) catch
+                return error.OutOfMemory;
+            socket_server.writeAll(self.fd, frame_bytes) catch {
+                self.allocator.free(frame_bytes);
+                return error.WriteFailed;
+            };
+            self.allocator.free(frame_bytes);
+            offset = end;
+        }
     }
 
     /// 다음 완성 frame을 읽는다(partial read 재조립). EOF/timeout는 ConnectionClosed, codec 위반은 ProtocolError.
     fn readFrame(self: *Client) ClientError!framing.Frame {
         var buf: [4096]u8 = undefined;
         while (true) {
-            if (self.parser.next() catch return error.ProtocolError) |frame| return frame;
+            if (self.parser.next() catch return error.ProtocolError) |frame|
+                return try self.requireCurrentMajor(frame);
             const n = c.read(self.fd, &buf, buf.len);
             if (n < 0) {
                 if (posix.errno(n) == .INTR) continue; // 시그널 인터럽트는 재시도(timeout/EAGAIN·기타 오류는 종료로).
@@ -255,7 +269,51 @@ pub const Client = struct {
             self.parser.push(buf[0..@intCast(n)]) catch return error.OutOfMemory;
         }
     }
+
+    /// parser·call 중 임시 stream queue 어느 경로에서 꺼낸 frame이든 같은 major gate를 거친다. 잘못된 major의
+    /// payload는 caller에게 넘기지 않고 여기서 회수한다.
+    fn requireCurrentMajor(self: *Client, frame: framing.Frame) ClientError!framing.Frame {
+        if (frame.header.major != protocol.version_major) {
+            frame.deinit(self.allocator);
+            return error.ProtocolError;
+        }
+        return frame;
+    }
 };
+
+fn inputChunkEnd(offset: usize, total: usize) usize {
+    std.debug.assert(offset <= total);
+    return @min(offset +| protocol.max_binary_chunk, total);
+}
+
+test "client input chunking preserves exact-cap and cap-plus-one paste bytes" {
+    try std.testing.expectEqual(protocol.max_binary_chunk, inputChunkEnd(0, protocol.max_binary_chunk));
+    try std.testing.expectEqual(protocol.max_binary_chunk, inputChunkEnd(0, protocol.max_binary_chunk + 1));
+    try std.testing.expectEqual(protocol.max_binary_chunk + 1, inputChunkEnd(protocol.max_binary_chunk, protocol.max_binary_chunk + 1));
+    try std.testing.expectEqual(@as(usize, 0), inputChunkEnd(0, 0));
+}
+
+test "client stream path rejects a frame with the wrong MRSH header major" {
+    const allocator = std.testing.allocator;
+    var client = Client{
+        .allocator = allocator,
+        .fd = -1,
+        .host_id = 0,
+        .parser = framing.FrameParser.init(allocator),
+    };
+    defer client.parser.deinit();
+    defer client.pending_stream.deinit(allocator);
+    defer client.pending_batches.deinit(allocator);
+
+    const wire = try framing.encodeFrame(allocator, .{
+        .kind = .delta_chunk,
+        .major = protocol.version_major - 1,
+        .stream_id = 7,
+    }, "delta");
+    defer allocator.free(wire);
+    try client.parser.push(wire);
+    try std.testing.expectError(error.ProtocolError, client.nextStreamFrame(true));
+}
 
 /// 소켓에 읽을 데이터가 즉시 있는지 논블로킹 확인한다(timeout 0). `readStreamBatch`가 배치 첫 frame에서 idle이면 곧장
 /// 빠져나오게 한다(blocking read로 recv timeout까지 매달리지 않음 — socket_server serveConnection의 poll gate와 대칭).

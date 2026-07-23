@@ -47,7 +47,7 @@ pub const RemoteRuntime = struct {
         allocator: std.mem.Allocator,
         io: std.Io,
         surface_id: u64,
-        argv: []const []const u8,
+        request: maru.pty.SpawnRequest,
         size: terminal.Size,
     ) anyerror!void {
         self.client = client;
@@ -55,12 +55,17 @@ pub const RemoteRuntime = struct {
         self.io = io;
         self.resize_seq = 0;
 
-        // 1. runtime.spawn — host가 실 PTY를 띄우고 runtime_id를 준다.
-        const spawn_params = buildSpawnParams(allocator, argv, size) catch return error.OutOfMemory;
+        // 1. runtime.spawn_full — host가 확장 spawn 계약으로 실 PTY를 띄우고 runtime_id를 준다.
+        const spawn_params = buildSpawnParams(allocator, request, size) catch return error.OutOfMemory;
         defer allocator.free(spawn_params);
-        const spawn_resp = try client.call("runtime.spawn", spawn_params);
+        // 기존 v2 host가 새 필드를 unknown JSON으로 무시해 다른 셸을 띄우지 않도록 새 method 이름을 쓴다. 구 host는
+        // invalid_request로 거부하고 기존 runtime attach는 계속 v2로 가능하다.
+        const spawn_resp = try client.call("runtime.spawn_full", spawn_params);
         defer allocator.free(spawn_resp);
-        self.runtime_id_hex = client_mod.extractRuntimeId(spawn_resp) orelse return error.SpawnFailed;
+        self.runtime_id_hex = client_mod.extractRuntimeId(spawn_resp) orelse {
+            if (std.mem.indexOf(u8, spawn_resp, "invalid_request") != null) return error.UnsupportedSpawnContract;
+            return error.SpawnFailed;
+        };
         // 이 지점부터 실패하면 방금 띄운 host runtime을 회수한다(orphan 방지) — spawn한 건 우리 소유다.
         errdefer self.terminateBestEffort();
 
@@ -69,7 +74,7 @@ pub const RemoteRuntime = struct {
 
     /// **이미 host에 있는 runtime에 재접속**한다(spawn 없이) — GUI를 재실행하면 workspace가 저장한 `runtime_id_hex`로 같은
     /// host runtime에 붙어 화면·PID·scrollback을 잇는다(§7). runtime이 없으면(host 재시작·runtime 종료 등) attach가
-    /// `error.AttachFailed`(host RuntimeNotFound → 응답에 stream_id 없음)를 내고, caller가 fresh `spawn`으로 폴백한다.
+    /// `error.AttachFailed`(host RuntimeNotFound → 응답에 stream_id 없음)를 내고, restore caller는 fail-closed한다.
     /// **`spawn`과 달리 실패해도 runtime을 terminate하지 않는다** — 우리가 띄운 게 아니라 pre-existing이므로(남의 runtime을
     /// attach 실패로 죽이면 안 됨). 성공 뒤 이 RemoteRuntime은 spawn한 것과 동일하게 다룬다(input/resize/pump/terminate).
     pub fn attachExisting(
@@ -99,6 +104,13 @@ pub const RemoteRuntime = struct {
         const attach_resp = try self.client.call("runtime.attach", attach_params);
         defer self.allocator.free(attach_resp);
         self.stream_id = client_mod.extractU64Field(attach_resp, "\"stream_id\":") orelse return error.AttachFailed;
+        // attach RPC가 controller lease를 잡은 뒤 snapshot/화면 조립이 실패하면 caller에는 아직 완성된
+        // RemoteRuntime이 없어 detachClientSide를 부를 수 없다. 이 구간에서 반드시 lease와 demux 큐를 되돌린다.
+        errdefer {
+            self.detachBestEffort();
+            self.client.dropBufferedStream(self.stream_id);
+            self.stream_id = 0;
+        }
 
         // 3. 첫 snapshot을 읽어 원격 화면을 조립한다.
         const snap = try self.client.readSnapshot(self.stream_id);
@@ -130,6 +142,9 @@ pub const RemoteRuntime = struct {
     /// Term을 이걸로 정리하면 runtime이 host에 남아(연결 EOF를 host가 detach로 처리해 유지, §6 app-quit=detach) GUI 재실행 시
     /// `attachExisting`으로 재접속한다. `deinit`과 대칭이되 terminate만 뺀다.
     pub fn detachClientSide(self: *RemoteRuntime) void {
+        // shared connection은 앱 종료 전까지 EOF가 오지 않을 수 있다. RPC detach 없이 로컬 객체만 버리면 host의 controller
+        // lease가 남아 같은 connection의 재attach가 controller_busy가 되므로 subscription을 먼저 명시 해제한다.
+        self.detachBestEffort();
         self.client.dropBufferedStream(self.stream_id); // 이 stream 앞으로 남은 demux 배치 회수(더는 pump 안 함 — §멀티 runtime).
         self.surface.deinit();
         self.remote_screen.deinit();
@@ -382,16 +397,95 @@ pub const RemoteRuntime = struct {
         const resp = self.client.call("runtime.terminate", params) catch return;
         self.allocator.free(resp);
     }
+
+    fn detachBestEffort(self: *RemoteRuntime) void {
+        if (self.stream_id == 0) return;
+        var buf: [64]u8 = undefined;
+        const params = std.fmt.bufPrint(&buf, "{{\"stream_id\":{d}}}", .{self.stream_id}) catch return;
+        const resp = self.client.call("runtime.detach", params) catch return;
+        self.allocator.free(resp);
+    }
 };
 
 /// `{argv:[...], cols, rows}` spawn params를 JSON으로 만든다(caller free). argv는 임의 바이트라 실 JSON encoder로 escape한다
 /// (client hand-built JSON의 신뢰 계약 밖 — client.zig 주석대로 임의 argv는 stringify로).
-fn buildSpawnParams(allocator: std.mem.Allocator, argv: []const []const u8, size: terminal.Size) error{OutOfMemory}![]u8 {
+fn buildSpawnParams(allocator: std.mem.Allocator, request: maru.pty.SpawnRequest, size: terminal.Size) error{OutOfMemory}![]u8 {
+    const argv = allocator.alloc([]const u8, 1 + request.args.len) catch return error.OutOfMemory;
+    defer allocator.free(argv);
+    argv[0] = request.command;
+    for (request.args, 0..) |arg, i| argv[i + 1] = arg;
+    var pane_id_buf: [16]u8 = undefined;
+    const pane_id: ?[]const u8 = if (request.pane_id) |id|
+        std.fmt.bufPrint(&pane_id_buf, "{x:0>16}", .{id}) catch return error.OutOfMemory
+    else
+        null;
+    var inherited: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer inherited.deinit(allocator);
+    if (request.env.len == 0 and request.parent_env == null) {
+        const environ = std.c.environ;
+        var index: usize = 0;
+        while (environ[index]) |entry| : (index += 1) {
+            inherited.append(allocator, std.mem.span(entry)) catch return error.OutOfMemory;
+        }
+    }
+    // env=[]의 "호출자 부모 상속" 의미를 오래 살아 있는 daemon 환경으로 바꾸지 않는다. GUI가 본 raw parent
+    // snapshot을 별도 필드로 보내고, host의 단일 EnvStorage가 TERM/ZDOTDIR/config override를 그대로 적용한다.
+    const parent_env: []const []const u8 = if (request.env.len != 0)
+        &.{}
+    else if (request.parent_env) |snapshot|
+        snapshot
+    else
+        inherited.items;
     var out: std.Io.Writer.Allocating = .init(allocator);
     defer out.deinit();
     var js: std.json.Stringify = .{ .writer = &out.writer, .options = .{} };
-    js.write(.{ .argv = argv, .cols = size.cols, .rows = size.rows }) catch return error.OutOfMemory;
+    js.write(.{
+        .argv = argv,
+        .cwd = request.cwd,
+        .login = request.login,
+        .env = request.env,
+        .parent_env = parent_env,
+        .env_overrides = request.env_overrides,
+        .term = request.term,
+        .zdotdir = request.zdotdir,
+        .ssh_integration_bin = request.ssh_integration_bin,
+        .pane_id = pane_id,
+        .cols = size.cols,
+        .rows = size.rows,
+    }) catch return error.OutOfMemory;
     return allocator.dupe(u8, out.written()) catch return error.OutOfMemory;
+}
+
+test "remote runtime: spawn wire preserves extended SpawnRequest fields" {
+    const allocator = std.testing.allocator;
+    const request: maru.pty.SpawnRequest = .{
+        .command = "/bin/zsh",
+        .args = &.{ "-l", "-c", "pwd" },
+        .cwd = "/tmp/maru cwd",
+        .login = true,
+        .env = &.{ "BASE=one", "UNICODE=한글" },
+        .parent_env = &.{"SHOULD=NOT_BE_SENT"},
+        .env_overrides = &.{ "BASE=two", "MARU_FLAG=yes" },
+        .term = "xterm-maru",
+        .zdotdir = "/tmp/maru-zdotdir",
+        .ssh_integration_bin = "/Applications/Maru.app/Contents/MacOS/maru",
+        .pane_id = 0x1234,
+    };
+    const json = try buildSpawnParams(allocator, request, .{ .cols = 132, .rows = 43 });
+    defer allocator.free(json);
+
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"argv\":[\"/bin/zsh\",\"-l\",\"-c\",\"pwd\"]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"cwd\":\"/tmp/maru cwd\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"login\":true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"env\":[\"BASE=one\",\"UNICODE=한글\"]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"parent_env\":[]") != null); // explicit env가 우선한다.
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"env_overrides\":[\"BASE=two\",\"MARU_FLAG=yes\"]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"term\":\"xterm-maru\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"zdotdir\":\"/tmp/maru-zdotdir\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"ssh_integration_bin\":\"/Applications/Maru.app/Contents/MacOS/maru\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"pane_id\":\"0000000000001234\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"cols\":132") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"rows\":43") != null);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -447,7 +541,7 @@ test "remote runtime: spawns over the wire, renders host screen into a Surface, 
 
     // client-side 원격 runtime: /bin/cat을 띄우고 원격-backed Surface를 세운다.
     var rr: RemoteRuntime = undefined;
-    try rr.spawn(&client, allocator, io, 1, &.{"/bin/cat"}, .{ .cols = 40, .rows = 10 });
+    try rr.spawn(&client, allocator, io, 1, .{ .command = "/bin/cat" }, .{ .cols = 40, .rows = 10 });
     defer rr.deinit();
 
     // Surface가 원격 화면을 렌더한다(초기 cat 화면 = 빈 40x10).
@@ -512,10 +606,10 @@ test "remote runtime: two runtimes sharing one connection both receive their own
 
     // 한 client에 두 원격 runtime을 띄운다(둘 다 /bin/cat). 서로 다른 host runtime → 서로 다른 stream_id로 attach된다.
     var rr1: RemoteRuntime = undefined;
-    try rr1.spawn(&client, allocator, io, 1, &.{"/bin/cat"}, .{ .cols = 40, .rows = 10 });
+    try rr1.spawn(&client, allocator, io, 1, .{ .command = "/bin/cat" }, .{ .cols = 40, .rows = 10 });
     defer rr1.deinit();
     var rr2: RemoteRuntime = undefined;
-    try rr2.spawn(&client, allocator, io, 2, &.{"/bin/cat"}, .{ .cols = 40, .rows = 10 });
+    try rr2.spawn(&client, allocator, io, 2, .{ .command = "/bin/cat" }, .{ .cols = 40, .rows = 10 });
     defer rr2.deinit();
     try testing.expect(rr1.stream_id != rr2.stream_id); // 공유 connection이지만 stream이 갈린다(demux 대상).
 
@@ -615,8 +709,8 @@ test "remote runtime: attachExisting reconnects to a pre-existing host runtime a
     }
     try testing.expect(found);
 
-    // 없는 runtime_id에 attachExisting → error.AttachFailed(host RuntimeNotFound). app_session restore가 이 신호로 fresh
-    // spawn 폴백한다. 실패해도 남의 runtime을 안 죽인다(terminate errdefer 없음).
+    // 없는 runtime_id에 attachExisting → error.AttachFailed(host RuntimeNotFound). app_session restore는 이 신호를
+    // 동일 세션 단절로 보고 fail-closed한다. 실패해도 남의 runtime을 안 죽인다(terminate errdefer 없음).
     var bogus: RemoteRuntime = undefined;
     const bogus_id: [32]u8 = "deadbeefdeadbeefdeadbeefdeadbeef".*;
     try testing.expectError(error.AttachFailed, bogus.attachExisting(&client, allocator, io, 2, bogus_id, .{ .cols = 40, .rows = 10 }));
@@ -658,7 +752,7 @@ test "remote runtime: takeNotification pulls a host-side OSC 9/777 desktop notif
     defer client.deinit();
 
     var rr: RemoteRuntime = undefined;
-    try rr.spawn(&client, allocator, io, 1, &.{"/bin/cat"}, .{ .cols = 40, .rows = 10 });
+    try rr.spawn(&client, allocator, io, 1, .{ .command = "/bin/cat" }, .{ .cols = 40, .rows = 10 });
     defer rr.deinit();
 
     // 처음엔 대기 알림 없음(fresh cat).
@@ -761,7 +855,7 @@ test "remote runtime: requestResync makes the host push a fresh snapshot (desync
     defer client.deinit();
 
     var rr: RemoteRuntime = undefined;
-    try rr.spawn(&client, allocator, io, 1, &.{"/bin/cat"}, .{ .cols = 40, .rows = 10 });
+    try rr.spawn(&client, allocator, io, 1, .{ .command = "/bin/cat" }, .{ .cols = 40, .rows = 10 });
     defer rr.deinit();
 
     // attach가 첫 snapshot을 이미 소비했다 — 이제 fresh snapshot을 **재요청**한다.
@@ -818,7 +912,7 @@ test "remote runtime: scroll core command routes to host so client sees scrolled
     defer client.deinit();
 
     var rr: RemoteRuntime = undefined;
-    try rr.spawn(&client, allocator, io, 1, &.{"/bin/cat"}, .{ .cols = 40, .rows = 8 });
+    try rr.spawn(&client, allocator, io, 1, .{ .command = "/bin/cat" }, .{ .cols = 40, .rows = 8 });
     defer rr.deinit();
     const surface = rr.surfacePtr();
 
@@ -893,7 +987,7 @@ test "remote runtime: selectedText extracts the selection text on the host (§6b
     defer client.deinit();
 
     var rr: RemoteRuntime = undefined;
-    try rr.spawn(&client, allocator, io, 1, &.{"/bin/cat"}, .{ .cols = 40, .rows = 8 });
+    try rr.spawn(&client, allocator, io, 1, .{ .command = "/bin/cat" }, .{ .cols = 40, .rows = 8 });
     defer rr.deinit();
     const surface = rr.surfacePtr();
 
@@ -959,7 +1053,7 @@ test "remote runtime: selectContentAware computes word/line boundaries on the ho
     defer client.deinit();
 
     var rr: RemoteRuntime = undefined;
-    try rr.spawn(&client, allocator, io, 1, &.{"/bin/cat"}, .{ .cols = 40, .rows = 8 });
+    try rr.spawn(&client, allocator, io, 1, .{ .command = "/bin/cat" }, .{ .cols = 40, .rows = 8 });
     defer rr.deinit();
     const surface = rr.surfacePtr();
 
@@ -1040,7 +1134,7 @@ test "remote runtime: find matches on the host and returns viewport spans (§6c)
     defer client.deinit();
 
     var rr: RemoteRuntime = undefined;
-    try rr.spawn(&client, allocator, io, 1, &.{"/bin/cat"}, .{ .cols = 40, .rows = 8 });
+    try rr.spawn(&client, allocator, io, 1, .{ .command = "/bin/cat" }, .{ .cols = 40, .rows = 8 });
     defer rr.deinit();
     const surface = rr.surfacePtr();
 

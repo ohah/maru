@@ -6,9 +6,9 @@
 //! detached-helper launch와 `maru-sessiond` entrypoint는 P3-d2다. 이렇게 나눠야 hello/command 계약을 실 socket 없이
 //! non-macOS에서 TDD하고, control-plane(`maru.control.v1`)과 wire·ID를 섞지 않는다(§10).
 //!
-//! v1 규칙:
+//! 현재 major 규칙:
 //!   - connection의 첫 frame은 반드시 `hello`다. 아니면 protocol error로 connection을 닫는다(runtime은 유지).
-//!   - client `{protocol_min, protocol_max}`가 host major(1)를 포함하지 않으면 attach 전에 `incompatible_version`으로 끝낸다.
+//!   - header major는 현재 MRSH major와 같아야 하며, client `{protocol_min, protocol_max}`도 그 major를 포함해야 한다.
 //!   - d1이 dispatch하는 command는 **read-only**다: `host.info`, `runtime.list`, `runtime.get`. host를 auto-start하지
 //!     않는 조회 명령이라 실 runtime 소유·spawn/attach(P3-d2 이후)와 무관하게 registry 상태만 읽는다.
 
@@ -25,6 +25,16 @@ pub const RuntimeSpawnParams = struct {
     /// `[command, args...]` — argv[0]은 실행 파일 경로. server는 JSON string 배열만 파싱하고 프로세스는 host가 띄운다.
     argv: []const []const u8,
     cwd: ?[]const u8 = null,
+    login: bool = false,
+    env: []const []const u8 = &.{},
+    // null은 legacy `runtime.spawn`의 "host process environ 상속" 의미다. `runtime.spawn_full`은 GUI가 캡처한
+    // snapshot을 non-null로 보내 daemon 생성 시점 환경으로 바뀌지 않게 한다.
+    parent_env: ?[]const []const u8 = null,
+    env_overrides: []const []const u8 = &.{},
+    term: []const u8 = "xterm-256color",
+    zdotdir: ?[]const u8 = null,
+    ssh_integration_bin: ?[]const u8 = null,
+    pane_id: ?u64 = null,
     cols: u16,
     rows: u16,
 };
@@ -144,6 +154,10 @@ pub const Connection = struct {
     /// MRSH frame 하나를 처리한다. connection state에 따라 hello 협상 또는 command dispatch를 하고, 응답 frame을
     /// 만들어 `Action`으로 돌려준다. 응답이 없거나 protocol을 어긴 경우 `.close`다(runtime은 유지).
     pub fn handleFrame(self: *Connection, frame: framing.Frame) HandleError!Action {
+        if (frame.header.major != protocol.version_major) {
+            self.state = .closed;
+            return .close;
+        }
         return switch (self.state) {
             .pre_hello => self.handleHello(frame),
             .ready => self.handleReady(frame),
@@ -246,7 +260,9 @@ pub const Connection = struct {
             defer self.allocator.free(body);
             return self.replyResult(frame.header.request_id, body);
         } else if (std.mem.eql(u8, method, "runtime.spawn")) {
-            return self.dispatchSpawn(frame.header.request_id, params);
+            return self.dispatchSpawn(frame.header.request_id, params, false);
+        } else if (std.mem.eql(u8, method, "runtime.spawn_full")) {
+            return self.dispatchSpawn(frame.header.request_id, params, true);
         } else if (std.mem.eql(u8, method, "runtime.terminate")) {
             return self.dispatchTerminate(frame.header.request_id, params);
         } else if (std.mem.eql(u8, method, "runtime.attach")) {
@@ -288,7 +304,7 @@ pub const Connection = struct {
 
     /// `runtime.spawn`: read-only host면 unauthorized. argv/cwd/cols/rows를 파싱해 `RuntimeOps`로 실 PTY를 띄우고
     /// `runtime_id`(hex)를 응답한다. argv는 비어 있으면 invalid_request, spawn 실패는 internal.
-    fn dispatchSpawn(self: *Connection, request_id: u64, params: ?std.json.ObjectMap) HandleError!Action {
+    fn dispatchSpawn(self: *Connection, request_id: u64, params: ?std.json.ObjectMap, full_contract: bool) HandleError!Action {
         const ops = self.runtime_ops orelse return self.replyError(request_id, .unauthorized);
         const p = params orelse return self.replyError(request_id, .invalid_request);
         const argv_val = switch (p.get("argv") orelse std.json.Value.null) {
@@ -298,20 +314,72 @@ pub const Connection = struct {
         var arena = std.heap.ArenaAllocator.init(self.allocator);
         defer arena.deinit();
         const a = arena.allocator();
-        var argv: std.ArrayListUnmanaged([]const u8) = .empty;
-        for (argv_val.items) |item| {
-            const s = switch (item) {
-                .string => |str| str,
-                else => return self.replyError(request_id, .invalid_request),
-            };
-            argv.append(a, s) catch return error.OutOfMemory;
-        }
-        if (argv.items.len == 0) return self.replyError(request_id, .invalid_request);
+        const argv = stringArrayFromValue(a, argv_val) catch |err| switch (err) {
+            error.InvalidStringArray => return self.replyError(request_id, .invalid_request),
+            error.OutOfMemory => return error.OutOfMemory,
+        };
+        if (argv.len == 0) return self.replyError(request_id, .invalid_request);
+        const env = stringArrayField(a, p, "env", !full_contract) catch |err| switch (err) {
+            error.InvalidStringArray => return self.replyError(request_id, .invalid_request),
+            error.OutOfMemory => return error.OutOfMemory,
+        };
+        const parent_env: ?[]const []const u8 = if (p.get("parent_env") != null)
+            stringArrayField(a, p, "parent_env", false) catch |err| switch (err) {
+                error.InvalidStringArray => return self.replyError(request_id, .invalid_request),
+                error.OutOfMemory => return error.OutOfMemory,
+            }
+        else if (full_contract)
+            &.{}
+        else
+            null;
+        const env_overrides = stringArrayField(a, p, "env_overrides", !full_contract) catch |err| switch (err) {
+            error.InvalidStringArray => return self.replyError(request_id, .invalid_request),
+            error.OutOfMemory => return error.OutOfMemory,
+        };
+        const pane_id = paneIdField(p) catch return self.replyError(request_id, .invalid_request);
+        // runtime.spawn은 구 v2 client와 호환되는 최소 계약이다. runtime.spawn_full은 새 GUI가 사용하는 확장
+        // 계약이므로, 필드가 존재하면서 타입/범위가 틀리면 기본값으로 조용히 바꾸지 않고 fail-closed한다.
+        const cwd = if (full_contract)
+            spawnOptionalStringField(p, "cwd") catch return self.replyError(request_id, .invalid_request)
+        else
+            strField(p, "cwd");
+        const login = if (full_contract)
+            spawnBoolField(p, "login", false) catch return self.replyError(request_id, .invalid_request)
+        else
+            boolField(p, "login");
+        const term = if (full_contract)
+            spawnStringField(p, "term", "xterm-256color") catch return self.replyError(request_id, .invalid_request)
+        else
+            (strField(p, "term") orelse "xterm-256color");
+        const zdotdir = if (full_contract)
+            spawnOptionalStringField(p, "zdotdir") catch return self.replyError(request_id, .invalid_request)
+        else
+            strField(p, "zdotdir");
+        const ssh_integration_bin = if (full_contract)
+            spawnOptionalStringField(p, "ssh_integration_bin") catch return self.replyError(request_id, .invalid_request)
+        else
+            strField(p, "ssh_integration_bin");
+        const cols = if (full_contract)
+            spawnSizeField(p, "cols", 80) catch return self.replyError(request_id, .invalid_request)
+        else
+            (intField(p, "cols") orelse 80);
+        const rows = if (full_contract)
+            spawnSizeField(p, "rows", 24) catch return self.replyError(request_id, .invalid_request)
+        else
+            (intField(p, "rows") orelse 24);
         const runtime_id = ops.spawn(ops.ctx, .{
-            .argv = argv.items,
-            .cwd = strField(p, "cwd"),
-            .cols = intField(p, "cols") orelse 80,
-            .rows = intField(p, "rows") orelse 24,
+            .argv = argv,
+            .cwd = cwd,
+            .login = login,
+            .env = env,
+            .parent_env = parent_env,
+            .env_overrides = env_overrides,
+            .term = term,
+            .zdotdir = zdotdir,
+            .ssh_integration_bin = ssh_integration_bin,
+            .pane_id = pane_id,
+            .cols = cols,
+            .rows = rows,
         }) catch return self.replyError(request_id, .internal);
 
         const id_hex = try self.hex128(runtime_id);
@@ -798,6 +866,76 @@ fn strField(obj: std.json.ObjectMap, key: []const u8) ?[]const u8 {
     };
 }
 
+const SpawnFieldError = error{InvalidSpawnField};
+
+fn spawnOptionalStringField(obj: std.json.ObjectMap, key: []const u8) SpawnFieldError!?[]const u8 {
+    const value = obj.get(key) orelse return null;
+    return switch (value) {
+        .null => null,
+        .string => |s| s,
+        else => error.InvalidSpawnField,
+    };
+}
+
+fn spawnStringField(obj: std.json.ObjectMap, key: []const u8, default: []const u8) SpawnFieldError![]const u8 {
+    const value = obj.get(key) orelse return default;
+    return switch (value) {
+        .string => |s| s,
+        else => error.InvalidSpawnField,
+    };
+}
+
+fn spawnBoolField(obj: std.json.ObjectMap, key: []const u8, default: bool) SpawnFieldError!bool {
+    const value = obj.get(key) orelse return default;
+    return switch (value) {
+        .bool => |b| b,
+        else => error.InvalidSpawnField,
+    };
+}
+
+fn spawnSizeField(obj: std.json.ObjectMap, key: []const u8, default: u16) SpawnFieldError!u16 {
+    const value = obj.get(key) orelse return default;
+    return switch (value) {
+        .integer => |n| if (n > 0 and n <= std.math.maxInt(u16)) @intCast(n) else error.InvalidSpawnField,
+        else => error.InvalidSpawnField,
+    };
+}
+
+fn paneIdField(obj: std.json.ObjectMap) error{InvalidPaneId}!?u64 {
+    const value = obj.get("pane_id") orelse return null;
+    if (value == .null) return null;
+    const text = switch (value) {
+        .string => |s| s,
+        else => return error.InvalidPaneId,
+    };
+    if (text.len != 16) return error.InvalidPaneId;
+    const parsed = parseHex128(text) orelse return error.InvalidPaneId;
+    if (parsed > std.math.maxInt(u64)) return error.InvalidPaneId;
+    return @intCast(parsed);
+}
+
+const StringArrayError = error{ InvalidStringArray, OutOfMemory };
+
+fn stringArrayFromValue(allocator: std.mem.Allocator, value: std.json.Array) StringArrayError![]const []const u8 {
+    const strings = allocator.alloc([]const u8, value.items.len) catch return error.OutOfMemory;
+    for (value.items, 0..) |item, i| {
+        strings[i] = switch (item) {
+            .string => |s| s,
+            else => return error.InvalidStringArray,
+        };
+    }
+    return strings;
+}
+
+fn stringArrayField(allocator: std.mem.Allocator, obj: std.json.ObjectMap, key: []const u8, allow_null: bool) StringArrayError![]const []const u8 {
+    const value = obj.get(key) orelse return &.{};
+    return switch (value) {
+        .array => |items| stringArrayFromValue(allocator, items),
+        .null => if (allow_null) &.{} else error.InvalidStringArray,
+        else => error.InvalidStringArray,
+    };
+}
+
 fn parseClientKind(s: ?[]const u8) ClientKind {
     const v = s orelse return .unknown;
     if (std.mem.eql(u8, v, "gui")) return .gui;
@@ -943,11 +1081,25 @@ test "server: hello with overlapping version acks host_id and moves to ready" {
     try testing.expect(std.mem.indexOf(u8, r.frame.?.payload, "1234567890abcdef") != null);
 }
 
+test "server: wrong header major closes before hello negotiation" {
+    var registry = reg.TerminalRuntimeRegistry.init(testing.allocator);
+    defer registry.deinit();
+    var conn = Connection.init(testing.allocator, 1, &registry);
+    const frame = framing.Frame{
+        .header = .{ .major = protocol.version_major - 1, .kind = .hello, .request_id = 1 },
+        .payload = try testing.allocator.dupe(u8, "{\"protocol_min\":2,\"protocol_max\":2}"),
+    };
+    defer frame.deinit(testing.allocator);
+    const action = try conn.handleFrame(frame);
+    try testing.expect(action == .close);
+    try testing.expectEqual(Connection.State.closed, conn.state);
+}
+
 test "server: hello with no overlapping version returns incompatible_version and closes" {
     var registry = reg.TerminalRuntimeRegistry.init(testing.allocator);
     defer registry.deinit();
     var conn = Connection.init(testing.allocator, 1, &registry);
-    const r = try feedJson(&conn, .hello, 1, "{\"protocol_min\":3,\"protocol_max\":3,\"client_kind\":\"cli\"}"); // host major(2) 밖 → 거부(리뷰 #3로 host=2).
+    const r = try feedJson(&conn, .hello, 1, "{\"protocol_min\":4,\"protocol_max\":4,\"client_kind\":\"cli\"}"); // host major(2) 밖 → 거부.
     defer if (r.frame) |f| f.deinit(testing.allocator);
     try testing.expectEqualStrings("reply_and_close", r.action);
     try testing.expect(std.mem.indexOf(u8, r.frame.?.payload, "incompatible_version") != null);
@@ -1054,9 +1206,22 @@ test "server: hex128 parse rejects malformed runtime ids" {
 /// dispatch가 실 runtime 소유를 위임하는 계약(RuntimeOps)을 검증하는 fake. spawn/terminate에 더해 write_input/resize도
 /// 기록해 input capability 라우팅과 resize 적용이 controller에게만 위임되는지 본다.
 const FakeRuntimeOps = struct {
+    spawn_count: usize = 0,
     spawn_argv0: [64]u8 = undefined,
     spawn_argv0_len: usize = 0,
     spawn_cols: u16 = 0,
+    spawn_cwd: [64]u8 = undefined,
+    spawn_cwd_len: usize = 0,
+    spawn_login: bool = false,
+    spawn_env_count: usize = 0,
+    spawn_parent_env_count: usize = 0,
+    spawn_parent_env_present: bool = false,
+    spawn_env_override_count: usize = 0,
+    spawn_term: [32]u8 = undefined,
+    spawn_term_len: usize = 0,
+    spawn_zdotdir_seen: bool = false,
+    spawn_ssh_bin_seen: bool = false,
+    spawn_pane_id: ?u64 = null,
     terminated_id: u128 = 0,
     next_id: u128 = 0xCAFE,
     last_input: [64]u8 = undefined,
@@ -1084,11 +1249,28 @@ const FakeRuntimeOps = struct {
 
     fn spawnFn(ctx: *anyopaque, params: RuntimeSpawnParams) anyerror!u128 {
         const self: *FakeRuntimeOps = @ptrCast(@alignCast(ctx));
+        self.spawn_count += 1;
         const a0 = params.argv[0];
         const n = @min(a0.len, self.spawn_argv0.len);
         @memcpy(self.spawn_argv0[0..n], a0[0..n]);
         self.spawn_argv0_len = n;
         self.spawn_cols = params.cols;
+        if (params.cwd) |cwd| {
+            const cwd_len = @min(cwd.len, self.spawn_cwd.len);
+            @memcpy(self.spawn_cwd[0..cwd_len], cwd[0..cwd_len]);
+            self.spawn_cwd_len = cwd_len;
+        }
+        self.spawn_login = params.login;
+        self.spawn_env_count = params.env.len;
+        self.spawn_parent_env_present = params.parent_env != null;
+        self.spawn_parent_env_count = if (params.parent_env) |snapshot| snapshot.len else 0;
+        self.spawn_env_override_count = params.env_overrides.len;
+        const term_len = @min(params.term.len, self.spawn_term.len);
+        @memcpy(self.spawn_term[0..term_len], params.term[0..term_len]);
+        self.spawn_term_len = term_len;
+        self.spawn_zdotdir_seen = params.zdotdir != null;
+        self.spawn_ssh_bin_seen = params.ssh_integration_bin != null;
+        self.spawn_pane_id = params.pane_id;
         return self.next_id;
     }
     fn terminateFn(ctx: *anyopaque, id: u128) void {
@@ -1189,12 +1371,53 @@ test "server: runtime.spawn/terminate dispatch through RuntimeOps; read-only hos
         if (h.frame) |f| f.deinit(allocator);
     }
     {
-        const r = try feedJson(&conn, .request, 2, "{\"method\":\"runtime.spawn\",\"params\":{\"argv\":[\"/bin/sh\",\"-c\",\"cat\"],\"cols\":100,\"rows\":40}}");
+        const r = try feedJson(&conn, .request, 2, "{\"method\":\"runtime.spawn_full\",\"params\":{\"argv\":[\"/bin/sh\",\"-c\",\"cat\"],\"cwd\":\"/tmp/full-contract\",\"login\":true," ++
+            "\"env\":[\"A=1\"],\"parent_env\":[],\"env_overrides\":[\"B=2\"],\"term\":\"xterm-maru\",\"zdotdir\":\"/tmp/zdot\"," ++
+            "\"ssh_integration_bin\":\"/Applications/Maru.app/Contents/MacOS/maru\",\"pane_id\":\"ffffffffffffffff\",\"cols\":100,\"rows\":40}}");
         defer if (r.frame) |f| f.deinit(allocator);
         try testing.expect(std.mem.indexOf(u8, r.frame.?.payload, "cafe") != null); // runtime_id hex(0xCAFE)
     }
     try testing.expectEqualStrings("/bin/sh", fake.spawn_argv0[0..fake.spawn_argv0_len]);
     try testing.expectEqual(@as(u16, 100), fake.spawn_cols);
+    try testing.expectEqualStrings("/tmp/full-contract", fake.spawn_cwd[0..fake.spawn_cwd_len]);
+    try testing.expect(fake.spawn_login);
+    try testing.expectEqual(@as(usize, 1), fake.spawn_env_count);
+    try testing.expect(fake.spawn_parent_env_present);
+    try testing.expectEqual(@as(usize, 0), fake.spawn_parent_env_count);
+    try testing.expectEqual(@as(usize, 1), fake.spawn_env_override_count);
+    try testing.expectEqualStrings("xterm-maru", fake.spawn_term[0..fake.spawn_term_len]);
+    try testing.expect(fake.spawn_zdotdir_seen);
+    try testing.expect(fake.spawn_ssh_bin_seen);
+    try testing.expectEqual(@as(?u64, std.math.maxInt(u64)), fake.spawn_pane_id);
+    {
+        const r = try feedJson(&conn, .request, 21, "{\"method\":\"runtime.spawn\",\"params\":{\"argv\":[\"/bin/sh\"],\"cols\":80,\"rows\":24}}");
+        defer if (r.frame) |f| f.deinit(allocator);
+        try testing.expect(std.mem.indexOf(u8, r.frame.?.payload, "cafe") != null);
+        try testing.expect(!fake.spawn_parent_env_present); // legacy 요청의 env=[]는 host process environ 상속 의미를 보존한다.
+    }
+    {
+        const r = try feedJson(&conn, .request, 22, "{\"method\":\"runtime.spawn_full\",\"params\":{\"argv\":[\"/bin/sh\"],\"pane_id\":\"not-a-pane-id!!!\"}}");
+        defer if (r.frame) |f| f.deinit(allocator);
+        try testing.expect(std.mem.indexOf(u8, r.frame.?.payload, "invalid_request") != null);
+    }
+    const count_after_valid = fake.spawn_count;
+    inline for (.{
+        "{\"method\":\"runtime.spawn_full\",\"params\":{\"argv\":[\"/bin/sh\"],\"cwd\":7}}",
+        "{\"method\":\"runtime.spawn_full\",\"params\":{\"argv\":[\"/bin/sh\"],\"login\":\"yes\"}}",
+        "{\"method\":\"runtime.spawn_full\",\"params\":{\"argv\":[\"/bin/sh\"],\"term\":null}}",
+        "{\"method\":\"runtime.spawn_full\",\"params\":{\"argv\":[\"/bin/sh\"],\"zdotdir\":false}}",
+        "{\"method\":\"runtime.spawn_full\",\"params\":{\"argv\":[\"/bin/sh\"],\"ssh_integration_bin\":[]}}",
+        "{\"method\":\"runtime.spawn_full\",\"params\":{\"argv\":[\"/bin/sh\"],\"env\":null}}",
+        "{\"method\":\"runtime.spawn_full\",\"params\":{\"argv\":[\"/bin/sh\"],\"parent_env\":null}}",
+        "{\"method\":\"runtime.spawn_full\",\"params\":{\"argv\":[\"/bin/sh\"],\"env_overrides\":null}}",
+        "{\"method\":\"runtime.spawn_full\",\"params\":{\"argv\":[\"/bin/sh\"],\"cols\":0}}",
+        "{\"method\":\"runtime.spawn_full\",\"params\":{\"argv\":[\"/bin/sh\"],\"rows\":70000}}",
+    }, 0..) |payload, i| {
+        const r = try feedJson(&conn, .request, 30 + i, payload);
+        defer if (r.frame) |f| f.deinit(allocator);
+        try testing.expect(std.mem.indexOf(u8, r.frame.?.payload, "invalid_request") != null);
+    }
+    try testing.expectEqual(count_after_valid, fake.spawn_count); // malformed 요청은 PTY spawn에 도달하지 않는다.
     {
         const r = try feedJson(&conn, .request, 3, "{\"method\":\"runtime.terminate\",\"params\":{\"runtime_id\":\"cafe\"}}");
         defer if (r.frame) |f| f.deinit(allocator);

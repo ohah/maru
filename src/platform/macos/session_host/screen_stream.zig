@@ -20,7 +20,7 @@ const std = @import("std");
 
 /// codec 버전. decode가 다른 값을 보면 `BadCodecVersion`(상위가 fresh snapshot 재요청). **v2**(리뷰 #3): Run 색(resolved RGB→
 /// 태그드 Color intent)·ImageBlob/ImagePlacement 레이아웃이 비호환 변경돼, 구 codec 레코드를 신 client가 조용히 오해석하지
-/// 않게 올린다(protocol.version_major도 함께 v2 — 그쪽은 hello 거부, 이쪽은 레코드 거부로 이중 방어).
+/// 않게 올렸다. protocol.version_major와 화면 codec은 둘 다 v2이며, full spawn은 새 command 이름으로 capability를 가른다.
 pub const codec_version: u16 = 2;
 
 /// record header 크기(바이트). body는 이 뒤에 이어진다.

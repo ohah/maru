@@ -66,9 +66,10 @@ pub const Surface = struct {
     command: []const u8 = "",
     cols: u16 = 0,
     rows: u16 = 0,
-    // 영속 세션 host runtime_id(hex, P3-e3-5). host-backed Term만 채워지고(keep-alive), in-process면 ""다. GUI 재실행 시
-    // 이 값이 있으면 spawn 대신 같은 host runtime에 attach해 화면·PID·scrollback을 잇는다(§7). host가 그 runtime을 잃었으면
-    // (재시작·종료) attach 실패→fresh spawn 폴백. 추가 스칼라 필드(v1 additive — 옛 reader는 무시, 옛 파일엔 없어 "" 기본).
+    // 영속 세션 identity(P3-e3-5). host-backed Term은 `runtime_host_id:runtime_id` 쌍을 채우고 in-process면 둘 다 ""다.
+    // runtime_id만 있는 상태는 옛 `runtime-id` 파일을 읽은 migration sentinel이다. 새로 캡처한 세션은 반드시 둘을 함께
+    // 저장하며, host namespace가 다른 runtime을 같은 세션으로 오인하지 않게 attach 전에 host_id를 대조한다.
+    runtime_host_id: []const u8 = "",
     runtime_id: []const u8 = "",
 };
 
@@ -395,12 +396,23 @@ fn writeSurface(w: *std.Io.Writer, s: Surface) !void {
     try w.writeAll("\" command=\"");
     try writeEscaped(w, s.command);
     try w.writeAll("\"");
-    // runtime-id는 host-backed Term만 있어 값이 있을 때만 쓴다(in-process surface 라인을 빈 필드로 부풀리지 않게 — 대다수
-    // 경로가 in-process다). reader는 없으면 "" 기본이라 round-trip에 영향 없다.
-    if (s.runtime_id.len > 0) {
-        try w.writeAll(" runtime-id=\"");
-        try writeEscaped(w, s.runtime_id);
-        try w.writeAll("\"");
+    // 새 persistent identity는 host namespace와 runtime namespace를 한 필드로 묶는다. host 없는 runtime_id는 옛 파일을
+    // 아직 attach하지 못한 migration 상태라 bare key를 한 번 더 보존한다. 새 live capture는 이 상태를 만들지 않는다.
+    if (s.runtime_host_id.len > 0 or s.runtime_id.len > 0) {
+        if (!validPersistentId(s.runtime_id)) return error.InvalidRuntimeIdentity;
+        if (s.runtime_host_id.len > 0) {
+            if (!validPersistentId(s.runtime_host_id)) return error.InvalidRuntimeIdentity;
+            try w.writeAll(" runtime-handle=\"");
+            try w.writeAll(s.runtime_host_id);
+            try w.writeByte(':');
+            try w.writeAll(s.runtime_id);
+            try w.writeAll("\"");
+        } else {
+            // legacy migration only: preserving an existing bare id is safer than dropping the user's reconnect target.
+            try w.writeAll(" runtime-id=\"");
+            try w.writeAll(s.runtime_id);
+            try w.writeAll("\"");
+        }
     }
     try w.print(" cols={d} rows={d}\n", .{ s.cols, s.rows });
 }
@@ -808,7 +820,21 @@ fn parseSurface(a: std.mem.Allocator, lines: *LineIter) ParseError!Surface {
     const title = try f.getQuoted(a, "title", "");
     const cwd = try f.getQuoted(a, "cwd", "");
     const command = try f.getQuoted(a, "command", "");
-    const runtime_id = try f.getQuoted(a, "runtime-id", ""); // P3-e3-5: 있으면 재접속(attach), 없으면 fresh spawn.
+    const legacy_runtime = f.find("runtime-id");
+    const runtime_handle = f.find("runtime-handle");
+    if (legacy_runtime != null and runtime_handle != null) return error.BadLine;
+    var runtime_host_id: []const u8 = "";
+    var runtime_id: []const u8 = "";
+    if (runtime_handle != null) {
+        const handle = try f.getQuoted(a, "runtime-handle", "");
+        if (handle.len != 65 or handle[32] != ':' or
+            !validPersistentId(handle[0..32]) or !validPersistentId(handle[33..65])) return error.BadLine;
+        runtime_host_id = handle[0..32];
+        runtime_id = handle[33..65];
+    } else if (legacy_runtime != null) {
+        runtime_id = try f.getQuoted(a, "runtime-id", "");
+        if (!validPersistentId(runtime_id)) return error.BadLine;
+    }
     const cols = try f.getUint("cols", u16, 80);
     const rows = try f.getUint("rows", u16, 24);
     return .{
@@ -816,10 +842,17 @@ fn parseSurface(a: std.mem.Allocator, lines: *LineIter) ParseError!Surface {
         .title = title,
         .cwd = cwd,
         .command = command,
+        .runtime_host_id = runtime_host_id,
         .runtime_id = runtime_id,
         .cols = cols,
         .rows = rows,
     };
+}
+
+fn validPersistentId(id: []const u8) bool {
+    if (id.len != 32) return false;
+    for (id) |c| if (!std.ascii.isDigit(c) and !(c >= 'a' and c <= 'f')) return false;
+    return true;
 }
 
 /// 텍스트를 개행 단위 라인으로 나눈다(마지막 개행 뒤 빈 줄은 내지 않는다). peek은 소비 없이 다음 라인을 본다.
@@ -1092,12 +1125,13 @@ test "workspace round-trip: serialize → parse → 다시 serialize 동일(중�
     try std.testing.expectEqualStrings(text1, text2); // writer↔reader 고정점
 }
 
-test "workspace round-trip: surface runtime-id 보존(host-backed는 값, in-process는 키 생략)" {
-    // P3-e3-5: host-backed Term은 runtime_id(hex)를 저장해 재실행 시 attach로 재접속한다(§7). in-process는 ""라 writer가
-    // 키를 생략한다(in-process surface 라인을 빈 필드로 부풀리지 않는 round-trip 고정점 — 옛 리더는 미지 키 없이 그대로 읽음).
+test "workspace round-trip: surface runtime-handle은 host와 runtime identity를 함께 보존한다" {
+    // host-backed Term은 host_id + runtime_id를 한 handle로 저장한다. runtime_id 단독으로는 host 재시작 뒤 다른
+    // namespace를 같은 세션으로 오인할 수 있으므로 새 writer는 절대 bare runtime-id를 만들지 않는다.
+    const hid = "fedcba9876543210fedcba9876543210";
     const rid = "0123456789abcdef0123456789abcdef";
     const surfs = [_]Surface{
-        .{ .command = "/bin/zsh", .runtime_id = rid, .cols = 40, .rows = 24 }, // host-backed
+        .{ .command = "/bin/zsh", .runtime_host_id = hid, .runtime_id = rid, .cols = 40, .rows = 24 }, // host-backed
         .{ .command = "/bin/zsh", .cols = 40, .rows = 24 }, // in-process(runtime_id="")
     };
     const panes = [_]Pane{.{ .surfaces = &surfs }};
@@ -1107,18 +1141,58 @@ test "workspace round-trip: surface runtime-id 보존(host-backed는 값, in-pro
 
     const text1 = try serialize(std.testing.allocator, .{ .windows = &windows });
     defer std.testing.allocator.free(text1);
-    // host-backed 라인엔 runtime-id 키가 있고, in-process 라인엔 없다(생략 고정점).
-    try std.testing.expect(std.mem.indexOf(u8, text1, "runtime-id=\"0123456789abcdef0123456789abcdef\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text1, "runtime-handle=\"fedcba9876543210fedcba9876543210:0123456789abcdef0123456789abcdef\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text1, " runtime-id=") == null);
 
     var parsed = try parse(std.testing.allocator, text1);
     defer parsed.deinit();
     const rs = parsed.workspace.windows[0].tabs[0].panes[0].surfaces;
-    try std.testing.expectEqualStrings(rid, rs[0].runtime_id); // host-backed 보존
+    try std.testing.expectEqualStrings(hid, rs[0].runtime_host_id);
+    try std.testing.expectEqualStrings(rid, rs[0].runtime_id);
+    try std.testing.expectEqualStrings("", rs[1].runtime_host_id);
     try std.testing.expectEqualStrings("", rs[1].runtime_id); // in-process는 "" (키 생략 → 기본)
 
     const text2 = try serialize(std.testing.allocator, parsed.workspace);
     defer std.testing.allocator.free(text2);
     try std.testing.expectEqualStrings(text1, text2); // 고정점
+}
+
+test "workspace parse: legacy bare runtime-id는 읽되 다음 저장에서 handle로 위조하지 않는다" {
+    const text =
+        \\maru.workspace.v1
+        \\window active-tab=0 tabs=1 dock-side=right dock-tree-size=256
+        \\tab active-pane=0 tree-nodes=1 panes=1 custom-name="" pinned=0 background-color=0 accent-color=0
+        \\tree-node leaf pane=0
+        \\pane surfaces=1 active-term=0 custom-name=""
+        \\surface custom-name="" title="" cwd="" command="/bin/zsh" runtime-id="0123456789abcdef0123456789abcdef" cols=80 rows=24
+        \\
+    ;
+    var parsed = try parse(std.testing.allocator, text);
+    defer parsed.deinit();
+    const surface = parsed.workspace.windows[0].tabs[0].panes[0].surfaces[0];
+    try std.testing.expectEqualStrings("", surface.runtime_host_id);
+    try std.testing.expectEqualStrings("0123456789abcdef0123456789abcdef", surface.runtime_id);
+}
+
+test "workspace parse: ambiguous or malformed persistent runtime identity fails closed" {
+    const prefix =
+        \\maru.workspace.v1
+        \\window active-tab=0 tabs=1 dock-side=right dock-tree-size=256
+        \\tab active-pane=0 tree-nodes=1 panes=1 custom-name="" pinned=0 background-color=0 accent-color=0
+        \\tree-node leaf pane=0
+        \\pane surfaces=1 active-term=0 custom-name=""
+    ;
+    const suffix = "\n";
+    const invalid = [_][]const u8{
+        "surface custom-name=\"\" title=\"\" cwd=\"\" command=\"\" runtime-handle=\"fedcba9876543210fedcba9876543210:0123456789abcdef0123456789abcdeF\" cols=80 rows=24",
+        "surface custom-name=\"\" title=\"\" cwd=\"\" command=\"\" runtime-handle=\"fedcba9876543210fedcba9876543210-0123456789abcdef0123456789abcdef\" cols=80 rows=24",
+        "surface custom-name=\"\" title=\"\" cwd=\"\" command=\"\" runtime-handle=\"fedcba9876543210fedcba9876543210:0123456789abcdef0123456789abcdef\" runtime-id=\"0123456789abcdef0123456789abcdef\" cols=80 rows=24",
+    };
+    for (invalid) |surface_line| {
+        const text = try std.mem.concat(std.testing.allocator, u8, &.{ prefix, "\n", surface_line, suffix });
+        defer std.testing.allocator.free(text);
+        try std.testing.expectError(error.BadLine, parse(std.testing.allocator, text));
+    }
 }
 
 test "workspace round-trip: tab pinned·background_color·accent_color 보존" {

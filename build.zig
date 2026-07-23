@@ -1407,7 +1407,13 @@ pub fn build(b: *std.Build) void {
             .imports = &.{.{ .name = "maru", .module = maru_mod }},
         }),
     });
-    const run_session_host_tests = b.addRunArtifact(session_host_tests);
+    // `/usr/bin/env`가 build cache의 실제 `maru` artifact 경로를 test process에만 주입하고 test binary를 exec한다.
+    // install step을 거치지 않으므로 `zig build test* --prefix ...`가 사용자 설치 경로를 쓰거나 덮어쓰지 않는다.
+    const run_session_host_tests = b.addSystemCommand(&.{"/usr/bin/env"});
+    run_session_host_tests.addPrefixedArtifactArg("MARU_SESSION_HOST_PRODUCT_EXE=", exe);
+    run_session_host_tests.addArg("MARU_SESSION_HOST_TEST_ONESHOT=maru-test-only-v1");
+    run_session_host_tests.addArtifactArg(session_host_tests);
+    run_session_host_tests.enableTestRunnerMode();
     run_session_host_tests.setCwd(b.path("."));
     test_step.dependOn(&run_session_host_tests.step);
 

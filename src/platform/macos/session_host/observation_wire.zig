@@ -53,6 +53,9 @@ fn revision(allocator: std.mem.Allocator, payload: []const u8, allow_response: b
         !fieldIs(metadata, "alt_active", .bool) or
         !fieldIs(metadata, "app_cursor_keys", .bool) or
         !fieldIs(metadata, "alternate_scroll", .bool) or
+        // mouse_tracking은 **optional**(호환): 이 필드 없이 보내는 구버전 host의 metadata를 통째로 거부하면 cwd·
+        // alt_active 등 나머지 관측까지 잃으므로, 없으면 통과시키고 consumer가 false로 폴백한다(타입이 있으면 bool 검증).
+        !fieldIsBoolOrAbsent(metadata, "mouse_tracking") or
         !fieldIsNonNegative(metadata, "observer_generation") or
         !fieldFitsUnsigned(metadata, "title_generation", std.math.maxInt(u32)) or
         !fieldFitsUnsigned(metadata, "cols", std.math.maxInt(u16)) or
@@ -81,6 +84,13 @@ fn fieldIs(obj: std.json.ObjectMap, key: []const u8, comptime kind: JsonKind) bo
     return switch (kind) {
         .string => value == .string,
         .bool => value == .bool,
+    };
+}
+
+fn fieldIsBoolOrAbsent(obj: std.json.ObjectMap, key: []const u8) bool {
+    return switch (obj.get(key) orelse return true) {
+        .bool => true,
+        else => false,
     };
 }
 

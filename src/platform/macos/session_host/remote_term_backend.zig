@@ -357,7 +357,11 @@ pub const RemoteTermBackend = struct {
                     rr.surface.core.selectionExtend(span.end.row, span.end.col);
                 }
             },
-            else => {}, // scroll_and_extend(autoscroll)/config/IME는 후속 — 무시.
+            // §입력 패리티: 마우스 리포트는 host core가 자기 mouse_tracking/format으로 인코딩·PTY 주입해야 하므로
+            // (인코딩 모드가 host에만 있음) raw 이벤트를 host로 보낸다(방식 B). placeholder core에 적용하면 응답이
+            // client PTY로 안 가고(빈 placeholder) 인코딩 모드도 없어 무효다.
+            .report_mouse => |m| try rr.sendMouseReport(m),
+            else => {}, // scroll_and_extend(autoscroll)/focus/config/IME는 후속 — 무시.
         }
     }
 

@@ -17467,7 +17467,11 @@ pub const AppSession = struct {
         // mouse_tracking 읽기는 메인 락-아래(읽기 위임 안 함, §9.1). reportMouse(코어 mutate+응답)는 full (a)
         // (docs/io-render-threading.md §9 P3-4)로 reader에 위임 — 휠 lines만큼 반복 enqueue, reader가 각 적용 후
         // pendingResponse를 PTY로 흘린다.
-        const tracking = blk: {
+        // host-backed(원격)면 placeholder core엔 mouse_tracking이 없으므로(진짜 코어는 host) 관측에서 온 실제
+        // 모드로 게이트하고, 아래 enqueueCoreCommand(report_mouse)가 host로 라우팅돼 host가 인코딩·PTY 주입한다(§입력 패리티).
+        const tracking = if (target.remote != null)
+            self.remoteMouseTracking(target.id)
+        else blk: {
             target.lockCore(self.io);
             defer target.unlockCore(self.io);
             break :blk target.core.mouse_tracking != .none;
@@ -17639,6 +17643,19 @@ pub const AppSession = struct {
             }
             return;
         }
+    }
+
+    /// host-backed 터미널의 마우스 트래킹 여부를 관측(RuntimeObservation.mouse_tracking)에서 읽는다 — placeholder
+    /// core는 항상 .none이라 오판하기 때문(§입력 패리티). 관측 미가용/term 없음이면 false(트래킹 아님=스크롤백 경로).
+    /// 휠·클릭·드래그·hover 마우스 게이트가 host-backed 분기에서 공유한다.
+    fn remoteMouseTracking(self: *AppSession, surface_id: u64) bool {
+        const loc = self.findTermWhere(surface_id, struct {
+            fn pred(id: u64, term: *Term) bool {
+                return term.kind == .terminal and term.surface.id == id;
+            }
+        }.pred) orelse return false;
+        const obs = &loc.pane.terms.items[loc.term_index].rt.observation;
+        return obs.availability != .unavailable and obs.mouse_tracking;
     }
 
     /// 줄 수만큼 스크롤한다. alt screen + alternate scroll(DECSET 1007)이면 화살표 키로 변환해
@@ -17953,6 +17970,8 @@ pub const AppSession = struct {
             // (paste|menu|reporting)을 적용한다(F2-5). 트래킹 읽기는 락 아래(리더 core.write와 경합 방지, §9.1).
             const tracking = blk: {
                 const s = self.activeSurface();
+                // host-backed면 placeholder 대신 관측의 mouse_tracking으로 게이트한다(§입력 패리티).
+                if (s.remote != null) break :blk self.remoteMouseTracking(s.id);
                 s.lockCore(self.io);
                 defer s.unlockCore(self.io);
                 break :blk s.core.mouse_tracking != .none;
@@ -18587,9 +18606,14 @@ pub const AppSession = struct {
         // docs/io-render-threading.md PR3). reporting 모드면 진행 중 셀렉션 autoscroll도 멈춘다. writeInput은 락 밖.
         // mouse_tracking 읽기는 메인 락-아래(읽기는 위임 안 함 — §9.1). reportMouse(코어 mutate + PTY 응답)는
         // full (a)(P3-4)로 reader에 위임 — reader가 적용 후 pendingResponse를 PTY로 흘린다(메인 직접 mutate 0).
-        click_surface.lockCore(self.io);
-        const do_report = core.mouse_tracking != .none and (mods & 4) == 0 and (mods & 8) == 0;
-        click_surface.unlockCore(self.io);
+        // host-backed면 placeholder 대신 관측의 mouse_tracking으로 게이트한다(§입력 패리티) — report_mouse는 host로 라우팅.
+        const do_report = ((mods & 4) == 0 and (mods & 8) == 0) and if (click_surface.remote != null)
+            self.remoteMouseTracking(click_surface.id)
+        else blk: {
+            click_surface.lockCore(self.io);
+            defer click_surface.unlockCore(self.io);
+            break :blk core.mouse_tracking != .none;
+        };
         if (do_report) {
             self.drag_autoscroll = 0;
             self.mouse_drag_selecting = false;

@@ -891,6 +891,14 @@ P3-e도 슬라이스로 나눈다(제품 통합이라 크다).
     Claude/Codex observer, SSH drop/paste upload와 alt-screen PageUp/wheel 특례가 공용 runtime observation만 읽도록
     옮긴다. 이 범위의 metadata에는 placeholder `surface.core` 직접 읽기를 금지한다. 일반 key/paste/mouse/focus의
     DECKPAM·bracketed-paste·mouse/focus/kitty input mode와 remote core-command parity는 아직 이 완료 범위가 아니다.
+  - **P3-e4c-1(마우스 리포팅 parity) ✅**: **방식 B(호스트-authoritative)** — 마우스 트래킹 앱(vim/tmux/htop/less-mouse)에서
+    휠·클릭·드래그·우클릭이 host로 라우팅된다. ⑴ 관측에 `mouse_tracking`(optional, 구버전 host 호환) 추가 — client가 "앱이
+    마우스 소유(리포트) vs 클라 소유(스크롤백/선택)"를 판단하는 게이트 1비트(`AppSession.remoteMouseTracking`). ⑵ `report_mouse`
+    RPC(`server.MouseReport` primitive) 신설 — client는 **raw 이벤트만** 보내고 host core가 자기 `mouse_tracking`/`mouse_format`으로
+    SGR/x10을 인코딩(인코딩 모드가 host에만 있어 client가 몰라도 됨). ⑶ host `reportMouseOp`은 로컬과 **동형**으로 report_mouse를
+    host의 **reader에 `enqueueCoreCommand`**한다 — reader가 적용 후 `pendingResponse`를 PTY로 흘려, 모든 PTY 입력 쓰기를 reader
+    단일 스레드로 모아 dispatch↔reader PTY-write race를 없앤다(scroll은 응답 없어 direct apply). **고빈도 1003 hover motion은
+    latency 우려로 후속**(휠/클릭/드래그가 사용자 보고 케이스를 덮음). bracketed-paste·DECCKM·focus·링크·cwd write는 별도 후속 slice.
   - **P3-e4d(parity gate) 🟨**: 실제 독립 host PTY의 OSC 7/2/5379→client observation, host core의
     OSC 7/2/133/5379 export, owned-copy/OOM-safe replace, attach initial metadata, changed-only event,
     malformed/stale revision과 stream별 coalescing, capability 없는 v2 client event 억제, observation barrier revision,

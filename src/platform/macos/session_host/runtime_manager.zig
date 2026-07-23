@@ -105,7 +105,7 @@ pub const RuntimeManager = struct {
 
     /// server.zig가 dispatch에 넘길 중립 vtable. `ctx`는 이 매니저다.
     pub fn runtimeOps(self: *RuntimeManager) server.RuntimeOps {
-        return .{ .ctx = self, .spawn = spawnOp, .terminate = terminateOp, .write_input = writeInputOp, .resize = resizeOp, .snapshot = snapshotOp, .delta = deltaOp, .notification = notificationOp, .core_command = coreCommandOp, .selected_text = selectedTextOp, .select_op = selectOpOp, .find = findOp, .observation = observationOp };
+        return .{ .ctx = self, .spawn = spawnOp, .terminate = terminateOp, .write_input = writeInputOp, .resize = resizeOp, .snapshot = snapshotOp, .delta = deltaOp, .notification = notificationOp, .core_command = coreCommandOp, .selected_text = selectedTextOp, .select_op = selectOpOp, .find = findOp, .observation = observationOp, .report_mouse = reportMouseOp };
     }
 
     fn spawnOp(ctx: *anyopaque, params: server.RuntimeSpawnParams) anyerror!u128 {
@@ -178,6 +178,7 @@ pub const RuntimeManager = struct {
             .alt_active = core.alt_active,
             .app_cursor_keys = core.application_cursor_keys,
             .alternate_scroll = core.alternate_scroll,
+            .mouse_tracking = core.mouse_tracking != .none,
             .observer_generation = core.observerGeneration(),
             .title_generation = core.title_generation.load(.monotonic),
             .cols = core.size.cols,
@@ -271,6 +272,26 @@ pub const RuntimeManager = struct {
         surface.lockCore(self.io);
         defer surface.unlockCore(self.io);
         core_command.apply(&surface.core, cmd);
+    }
+
+    /// host-backed 마우스 리포트(§ 입력 패리티): client 마우스 이벤트를 host의 **reader에 report_mouse core command로
+    /// enqueue**한다 — reader가 적용하면 core가 자기 mouse_tracking/format으로 SGR/x10 응답을 만들고, reader가 그
+    /// pendingResponse를 PTY로 흘린다(로컬 휠·클릭 경로와 **동형**: enqueueCoreCommand→reader 적용+flush). dispatch
+    /// 스레드가 직접 apply+writeInput하면 reader의 response PTY-write와 같은 자식-stdin fd에 동시 쓰기(race)가 되므로,
+    /// 모든 PTY 입력 쓰기를 reader 단일 스레드로 모은다(§io-render-threading). scroll(응답 없음)은 direct apply로 충분.
+    fn reportMouseOp(ctx: *anyopaque, runtime_id: u128, report: server.MouseReport) anyerror!void {
+        const self: *RuntimeManager = @ptrCast(@alignCast(ctx));
+        const handle = self.handleFor(runtime_id) orelse return error.RuntimeNotFound;
+        return self.backend_impl.backend().enqueueCoreCommand(handle, .{ .report_mouse = .{
+            .button = report.button,
+            .col = report.col,
+            .row = report.row,
+            .x_px = report.x_px,
+            .y_px = report.y_px,
+            .pressed = report.pressed,
+            .motion = report.motion,
+            .mods = report.mods,
+        } }, self.io);
     }
 
     /// 원격 client가 보낸 뷰포트 선택 span을 host core에 적용해 텍스트를 뽑는다(§6b 원격 선택 복사). **로컬과 같은

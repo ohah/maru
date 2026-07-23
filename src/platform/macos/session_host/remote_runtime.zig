@@ -144,7 +144,8 @@ pub const RemoteRuntime = struct {
         self.remote_screen = try remote_screen.RemoteScreen.init(self.allocator);
         errdefer self.remote_screen.deinit();
         // mode bit 자체는 v2에도 우연히 존재할 수 있으므로 hello_ack에서 명시 협상한 host일 때만 "0 = live bottom"을
-        // 신뢰한다. 구 host는 false로 남아 preedit/candidate anchor를 host 재시작 전까지 fail-closed한다.
+        // 신뢰한다. 구 host는 capability=false로 두고, RemoteScreen이 snapshot별 visible cursor 증거만으로
+        // legacy live preedit/candidate를 허용한다. hidden/ambiguous snapshot은 계속 fail-closed다.
         self.remote_screen.viewport_scrolled_known = self.client.screen_viewport_scrolled_v1;
         try self.remote_screen.applySnapshot(snap, self.io);
 

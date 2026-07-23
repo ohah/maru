@@ -179,7 +179,9 @@ fn navButtonAt(x_px: f64, band_x: u32, cw: u32) ?NavButton {
 // 별도 물리 CAMetalLayer로 분리, 두 drawable을 한 command buffer에 present + 단일 commit으로 전이 원자성). host↔renderer
 // draw 계약 변경이라 버전을 올린다. **MetalFrame/세션 struct·export 시그니처는 불변**(overlay_layer는 Zig가 아니라
 // Swift가 소유한 CAMetalLayer라 struct offset·layout test는 그대로 green). 렌더러 분할·컨테이너 재편은 Swift/ObjC 레이어.
-pub const abi_version: u32 = 142;
+pub const abi_version: u32 = 143;
+// 143: 파일 패널 ⌘+/− 폰트 줌 — take_file_panel_zoom_dirty·file_panel_zoom_milli export를 추가한다.
+// fixed-width struct layout은 불변이고 export만 둘 추가된다.
 // 142: workspace restore session이 초기 throwaway PTY/shell 없이 모델을 먼저 적용하도록 defer_initial_surface를 추가한다.
 // SessionConfig tail만 확장되고 기존 필드 offset은 불변이다.
 // 141: Swift의 quit late-preflight가 종료를 취소할 때 app-global lifecycle snapshot을 되돌리는 cancel ABI를 추가한다.
@@ -1921,6 +1923,10 @@ pub const AppSession = struct {
     // config가 정한 기본 폰트 크기(pt). ⌘0(reset_font_size)이 여기로 되돌린다 — appearance.font.size는
     // 런타임에 바뀌므로 원래 값을 따로 보관한다. init에서 resolve된 appearance.font.size로 채운다.
     base_font_size: f32 = 0,
+    // 폰트 크기(⌘+/−·config)가 바뀌면 세우는 1회성 신호. Swift tick이 take_file_panel_zoom_dirty로 drain해
+    // 열린 파일 패널 webview 크기를 재적용한다(편집기 폰트 pt 재주입 + 프리뷰/HTML·PDF 페이지 줌). take_bell·
+    // command_catalog_dirty와 같은 drain 패턴 — 파일 패널이 없어도 무해(drain만 하고 무동작). 단일 출처=docs/file-panel.md §2.3.
+    file_panel_zoom_dirty: bool = false,
     // serializeWorkspaceWindow가 돌려주는 workspace 텍스트의 소유 버퍼(다음 호출/deinit까지 유효 — cwd ABI와 같은
     // 소유 규칙). Swift가 멀티 창 저장에서 세션마다 한 번 읽는다.
     workspace_buffer: ?[]u8 = null,
@@ -16531,6 +16537,27 @@ pub const AppSession = struct {
             self.last_resize_size = grid;
         }
         self.metal_dirty = true;
+        // 폰트 크기가 바뀌었으니 열린 파일 패널 webview도 같은 크기로 따라오게 signal(§2.3). setFontSize(⌘+/−)·
+        // applyAppearance(config)가 공유하는 초크포인트라 여기 한 곳에서 세운다. Swift가 tick마다 drain한다.
+        self.file_panel_zoom_dirty = true;
+    }
+
+    /// 파일 패널 webview 줌 배율을 milli(1000=1.0)로 반환한다 — 프리뷰 iframe `zoom`·HTML/PDF `pageZoom`이 쓴다.
+    /// 배율 = 현재 폰트 크기 / base_font_size(⌘0 기준 config 크기)이므로, 기본/⌘0에서 정확히 1.0이고 ⌘+/− 만큼만
+    /// 프리뷰가 확대/축소된다(사용자 결정 2026-07-23 "cmd +/− 로 조절할 때 같이"). base가 비정상(≤0)이면 1.0으로
+    /// 폴백하고, 폰트 [6,72]/base [6,72] 조합의 극단 배율을 [0.1,10]으로 클램프해 webview 오작동을 막는다.
+    pub fn filePanelZoomMilli(self: *const AppSession) u32 {
+        const base = self.base_font_size;
+        if (!(base > 0) or !(self.appearance.font.size > 0)) return 1000;
+        const ratio = std.math.clamp(self.appearance.font.size / base, 0.1, 10.0);
+        return @intFromFloat(@round(ratio * 1000.0));
+    }
+
+    /// take_bell 패턴의 1회성 drain: 세워져 있으면 true를 돌려주고 지운다(Swift tick이 매번 호출).
+    pub fn takeFilePanelZoomDirty(self: *AppSession) bool {
+        const was = self.file_panel_zoom_dirty;
+        self.file_panel_zoom_dirty = false;
+        return was;
     }
 
     /// "Reload Config" 메뉴 — config 파일을 재로드해 재시작 없이 반영한다. 파싱은 forgiving(알 수 없는 key/잘못된
@@ -39598,6 +39625,13 @@ test "runtime font size: ⌘+/−/0 cell 메트릭·grid 재계산 + 하한·상
     const cw0 = session.cell_width_px;
     const cols0 = session.activeSurface().core.snapshot().size.cols;
 
+    // 폰트 변경 전 baseline: init·resize는 이 플래그를 세우지 않는다(applyMetricsPipeline만 세우고 resize는 그걸
+    // 안 탄다) → 이미 false여야 아래 폰트 변경이 세우는 신호를 격리 관측할 수 있다. 이 단언이 깨지면 폰트-무관 경로가
+    // dirty를 세운 것.
+    try std.testing.expect(!session.file_panel_zoom_dirty);
+    // 기본(⌘0 기준)에서 파일 패널 줌 배율은 정확히 1.0(=1000milli)이라 프리뷰가 평소 크기를 유지한다(§2.3).
+    try std.testing.expectEqual(@as(u32, 1000), session.filePanelZoomMilli());
+
     // ⌘+ : 폰트 +보폭(고정 1pt, font_size_step 상수) → cell 픽셀이 커지고(메트릭) grid는 줄거나 같다(같은 backing px).
     session.dispatchAppAction(.increase_font_size);
     try std.testing.expectEqual(base + font_size_step, session.appearance.font.size);
@@ -39605,10 +39639,19 @@ test "runtime font size: ⌘+/−/0 cell 메트릭·grid 재계산 + 하한·상
     const cols1 = session.activeSurface().core.snapshot().size.cols;
     try std.testing.expect(cols1 <= cols0);
 
-    // ⌘0 : config 기본값 복원 → 폰트·cell 픽셀 원래대로(refreshCellMetrics 재계산은 결정적).
+    // 폰트가 바뀌면 파일 패널 줌 dirty가 서고(Swift tick이 drain해 webview 재적용), 배율은 (base+1)/base로 1.0 초과다.
+    try std.testing.expect(session.file_panel_zoom_dirty);
+    try std.testing.expect(session.takeFilePanelZoomDirty()); // 1회성: 읽으면 비워진다
+    try std.testing.expect(!session.file_panel_zoom_dirty);
+    try std.testing.expect(session.filePanelZoomMilli() > 1000);
+    const expected_milli: u32 = @intFromFloat(@round((base + font_size_step) / base * 1000.0));
+    try std.testing.expectEqual(expected_milli, session.filePanelZoomMilli());
+
+    // ⌘0 : config 기본값 복원 → 폰트·cell 픽셀 원래대로(refreshCellMetrics 재계산은 결정적) + 배율도 1.0 복귀.
     session.dispatchAppAction(.reset_font_size);
     try std.testing.expectEqual(base, session.appearance.font.size);
     try std.testing.expectEqual(cw0, session.cell_width_px);
+    try std.testing.expectEqual(@as(u32, 1000), session.filePanelZoomMilli());
 
     // set_font_size:N — 절대 지정(config 바인딩). 그 크기로 바로 설정, [6,72]로 클램프.
     session.dispatchAppAction(.{ .set_font_size = 24 });

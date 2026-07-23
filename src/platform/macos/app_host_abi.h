@@ -8,7 +8,7 @@
 /* 이 header는 실제 앱 동작을 구현하지 않고 Swift/Zig 사이의 약속만 고정한다.
    Swift가 AppKit object나 Swift struct layout을 바로 넘기면 Zig 쪽에서 안전하게
    해석할 수 없으므로, 제품 host가 시작되기 전에 fixed-width C record만 허용한다. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 142u
+#define MARU_MACOS_APP_HOST_ABI_VERSION 143u
 #define MARU_FILE_PANEL_MODE_READ 0u
 #define MARU_FILE_PANEL_MODE_SOURCE_EDIT 1u
 #define MARU_FILE_PANEL_MODE_LIVE_PREVIEW 2u
@@ -1053,6 +1053,15 @@ uint32_t maru_macos_app_session_take_global_hotkeys_dirty(MaruAppHostSession *se
    필요하면 1(플래그 비움), 없으면 0. Swift가 tick마다 호출해 1이면 buildMainMenu로 NSMenu keyEquivalent를 새
    카탈로그로 다시 깐다(reset은 확인 모달-확정 후 tick에서 갱신 — 동기 호출 아님). take_*_dirty류 1회성. session null=0. v85. */
 uint32_t maru_macos_app_session_take_command_catalog_dirty(MaruAppHostSession *session);
+
+/* 폰트 크기(⌘+/−·config)가 바뀌어 열린 파일 패널 webview의 크기 재적용이 필요하면 1(플래그 비움), 없으면 0.
+   Swift가 tick마다 호출해 1이면 편집기 폰트 pt를 재주입하고 프리뷰 iframe·HTML/PDF에 현재 줌 배율을 적용한다.
+   take_command_catalog_dirty와 같은 1회성 신호. session null=0. v140. */
+uint32_t maru_macos_app_session_take_file_panel_zoom_dirty(MaruAppHostSession *session);
+
+/* 파일 패널 webview 줌 배율을 milli(1000=1.0)로 반환한다 — 현재 폰트 크기 / base_font_size(⌘0 기준). 프리뷰
+   iframe CSS zoom·HTML/PDF pageZoom이 이 값을 쓴다. base 비정상이면 1000, 극단 배율은 [100,10000] 클램프. session null=1000. v140. */
+uint32_t maru_macos_app_session_file_panel_zoom_milli(MaruAppHostSession *session);
 
 /* quick terminal(전역 토글 오버레이 패널) 표시 옵션. 세션의 현재 config를 읽는 라이브 스냅샷(세션-불변 아님 —
    Swift가 매 토글마다 다시 읽어 설정 변경 반영). Swift가 auto_hide·화면 모드·chrome 재생성 판정에 쓴다. 패널

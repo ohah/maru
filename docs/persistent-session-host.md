@@ -965,7 +965,12 @@ P3-e도 슬라이스로 나눈다(제품 통합이라 크다).
     SGR/x10을 인코딩(인코딩 모드가 host에만 있어 client가 몰라도 됨). ⑶ host `reportMouseOp`은 로컬과 **동형**으로 report_mouse를
     host의 **reader에 `enqueueCoreCommand`**한다 — reader가 적용 후 `pendingResponse`를 PTY로 흘려, 모든 PTY 입력 쓰기를 reader
     단일 스레드로 모아 dispatch↔reader PTY-write race를 없앤다(scroll은 응답 없어 direct apply). **고빈도 1003 hover motion은
-    latency 우려로 후속**(휠/클릭/드래그가 사용자 보고 케이스를 덮음). bracketed-paste·DECCKM·focus·링크·cwd write는 별도 후속 slice.
+    latency 우려로 후속**(휠/클릭/드래그가 사용자 보고 케이스를 덮음).
+  - **P3-e4c-2(붙여넣기 bracketed parity) ✅**: 관측에 `bracketed_paste`(optional) 추가 — host-backed `submitPaste`가 placeholder
+    대신 관측의 bracketed로 DECSET 2004 판정·인코딩(`pasteNeedsConfirmationWith` 순수 변형)해, Claude Code 등이 붙여넣은 파일
+    경로를 `[Image]`로 인식하고 멀티라인이 실행되지 않는다. **bracketed는 mouse_tracking과 같은 "클라가 자기 UI 판단(paste-protection
+    모달)에 필요한 게이트 모드"라 관측 스트리밍이 방식 B와 정합**(순수 host-wrap은 새 입력 RPC를 더해도 protection이 여전히
+    client-side라 같은 모드를 wire에 두게 되어 실익 없음). cwd(read·write)는 이미 완료. DECCKM·focus·링크는 별도 후속 slice.
   - **P3-e4d(parity gate) 🟨**: 실제 독립 host PTY의 OSC 7/2/5379→client observation, host core의
     OSC 7/2/133/5379 export, owned-copy/OOM-safe replace, attach initial metadata, changed-only event,
     malformed/stale revision과 stream별 coalescing, capability 없는 v2 client event 억제, observation barrier revision,

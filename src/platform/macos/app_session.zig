@@ -19970,17 +19970,39 @@ pub const AppSession = struct {
         // 예전엔 activeSurface를 그때그때 다시 읽어, 확인 모달을 거친 재진입(confirmPendingPaste)에서 그 사이
         // 바뀐 활성 pane에 payload가 주입되거나 web sentinel의 core를 만져 조용히 사라졌다(code-review).
         const surface = self.terminalSurfaceById(target_id) orelse return;
-        // **코어 접근은 lockCore 하에서** — 대상이 활성 pane이 아닐 수 있고(대상 고정), 그 pane의 PTY reader
-        // 스레드가 같은 코어를 쓴다. 판정(pasteNeedsConfirmation)과 인코딩(encodePaste)을 한 번에 잠금 안에서
-        // 끝내고, 모달 열기·큐 적재는 잠금 밖에서 한다(모달/할당을 잠금 안에서 하지 않는다 — 경합 시간 최소).
-        surface.lockCore(self.io);
-        const needs_confirm = !allow_unsafe and surface.core.pasteNeedsConfirmation(
-            payload,
-            self.loaded_config.config.input.paste_protection,
-            self.loaded_config.config.input.bracketed_paste_is_safe,
-        );
-        const bracketed = surface.core.bracketedPasteEnabled(); // 인코딩에 필요한 유일한 코어 상태 — bool만 복사
-        surface.unlockCore(self.io);
+        var needs_confirm: bool = undefined;
+        var bracketed: bool = undefined;
+        if (surface.remote != null) {
+            // host-backed(영속 세션): placeholder core에는 bracketed-paste 모드가 없다(진짜 코어는 host 프로세스라
+            // DECSET 2004는 host core만 안다). 관측(RuntimeObservation.bracketed_paste)에서 온 실제 모드로 판정·인코딩해야
+            // Claude Code 등이 붙여넣은 파일 경로를 [Image]로 인식한다(§입력 패리티). bracketed는 paste-protection 게이트에도
+            // 필요한 클라 판단 모드라 관측으로 스트리밍한다(mouse_tracking과 같은 게이트-모드). 관측은 client cache라 core lock 불요.
+            const loc = self.findTermWhere(surface.id, struct {
+                fn pred(id: u64, term: *Term) bool {
+                    return term.kind == .terminal and term.surface.id == id;
+                }
+            }.pred) orelse return;
+            const obs = &loc.pane.terms.items[loc.term_index].rt.observation;
+            bracketed = obs.availability != .unavailable and obs.bracketed_paste;
+            needs_confirm = !allow_unsafe and maru.terminal.pasteNeedsConfirmationWith(
+                bracketed,
+                payload,
+                self.loaded_config.config.input.paste_protection,
+                self.loaded_config.config.input.bracketed_paste_is_safe,
+            );
+        } else {
+            // **로컬 코어 접근은 lockCore 하에서** — 대상이 활성 pane이 아닐 수 있고(대상 고정), 그 pane의 PTY reader
+            // 스레드가 같은 코어를 쓴다. 판정(pasteNeedsConfirmation)과 인코딩에 필요한 bracketed를 한 번에 잠금 안에서
+            // 끝내고, 모달 열기·큐 적재는 잠금 밖에서 한다(모달/할당을 잠금 안에서 하지 않는다 — 경합 시간 최소).
+            surface.lockCore(self.io);
+            needs_confirm = !allow_unsafe and surface.core.pasteNeedsConfirmation(
+                payload,
+                self.loaded_config.config.input.paste_protection,
+                self.loaded_config.config.input.bracketed_paste_is_safe,
+            );
+            bracketed = surface.core.bracketedPasteEnabled(); // 인코딩에 필요한 유일한 코어 상태 — bool만 복사
+            surface.unlockCore(self.io);
+        }
         // **인코딩은 락 밖에서**: 멀티MB payload의 할당·복사를 코어 뮤텍스 안에서 하면 그동안 그 pane의 PTY
         // reader 스레드가 막힌다(code-review). 순수 변형(encodePasteWith)이 bool 하나만 받는다.
         const encoded_opt: ?[]u8 = if (needs_confirm) null else (maru.terminal.encodePasteWith(bracketed, self.allocator, payload) catch null);

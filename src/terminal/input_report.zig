@@ -65,8 +65,15 @@ pub fn pasteHasUnsafeBytes(data: []const u8) bool {
 ///   - 비-bracketed면 pasteHasUnsafeBytes로 판정.
 /// 베이스: Ghostty `clipboard-paste-protection` / `clipboard-paste-bracketed-safe`.
 pub fn pasteNeedsConfirmation(self: *const TerminalCore, data: []const u8, protection_enabled: bool, bracketed_safe: bool) bool {
+    return pasteNeedsConfirmationWith(self.bracketed_paste, data, protection_enabled, bracketed_safe);
+}
+
+/// pasteNeedsConfirmation의 순수 변형 — bracketed 모드를 명시 인자로 받는다(encodePasteWith와 대칭). host-backed
+/// 원격 터미널은 placeholder core에 bracketed 상태가 없으므로(진짜 코어는 host 프로세스), 관측(RuntimeObservation)에서
+/// 온 bracketed로 판정한다. 로컬(in-process) 경로는 위 래퍼가 self.bracketed_paste로 그대로 부른다.
+pub fn pasteNeedsConfirmationWith(bracketed: bool, data: []const u8, protection_enabled: bool, bracketed_safe: bool) bool {
     if (!protection_enabled) return false;
-    if (self.bracketed_paste) {
+    if (bracketed) {
         if (std.mem.indexOf(u8, data, "\x1b[201~") != null) return true; // bracketed여도 조기 종료 마커는 불신
         if (bracketed_safe) return false; // 괄호가 감싸 안전 → 확인 생략
     }

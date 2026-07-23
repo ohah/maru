@@ -11,6 +11,7 @@ pub const clipboard_max_bytes = @import("terminal/osc.zig").max_clipboard_bytes;
 /// 인코딩(할당 + payload 복사)은 락 밖에서 하도록 노출한다 — 멀티MB paste를 코어 뮤텍스 안에서 인코딩하면
 /// 그 pane의 PTY reader가 그동안 막힌다(app_session.submitPaste 주석). 코어 상태를 안 만지므로 파사드 안전.
 pub const encodePasteWith = @import("terminal/input_report.zig").encodePasteWith;
+pub const pasteNeedsConfirmationWith = @import("terminal/input_report.zig").pasteNeedsConfirmationWith;
 // Unicode 셀 폭(EAW)은 순수·레이어 무관이라 top-level 중립 유틸(src/width.zig)로 옮겼다 — terminal·platform·
 // chrome이 모두 쓴다(색=color.zig와 같은 선례). 여기선 호환 re-export만 한다(terminal.width/cellWidth 그대로).
 pub const width = @import("width.zig");

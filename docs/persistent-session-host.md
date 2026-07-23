@@ -15,6 +15,14 @@ control-plane, PTY 종료 정책과 책임이 겹치지 않도록 소유권·ID�
 > 재접속 뒤 stale해질 수 있어 persistent child에는 아직 주입하지 않는다. workspace restore는 host/runtime 쌍이
 > 다르거나 runtime이 없을 때 새 shell로 위장하지 않고 실패한다. 복원 시작은 ABI v142 deferred AppSession을 사용해
 > 저장 모델 publish 전 기본 tab/PTY를 만들지 않으므로, 성공 재접속 경로의 fresh/throwaway shell spawn 수는 0이다.
+> host의 실제 `TerminalCore`가 소유하는 cwd/title/live semantic state, grid size와 alt-scroll 관련 mode, foreground process 관측,
+> OSC 5379 `ssh_remote_dest`는 이제 attach 초기 metadata + revisioned full-state event로 GUI의 owned runtime
+> observation에 전달된다. sidebar cwd/git, auto title, cwd 상속/workspace capture/control collector, at-prompt/close,
+> Claude/Codex 감지, SSH drop/paste가 이 observation을 소비하며 host-backed placeholder `Surface.core`는 metadata
+> 출처로 쓰지 않는다. **P3-e4a~c는 구현됐고 P3-e4d parity gate는 부분 완료**다. 실제 host PTY OSC
+> 7/2/5379 왕복·revision/coalescing·소유권 테스트는 존재하지만 detach 중 변경→재접속, controlled Claude/Codex
+> foreground, 다중 runtime event 격리, 실제 upload branch 제품 E2E가 남아 있어 runtime metadata parity 전체를
+> 완료로 선언하지 않는다. `expectSnapshotParity`는 여전히 renderer DTO만 보호하며 metadata는 별도 gate다.
 > `keep-alive-after-quit` 토글은 **설정 GUI(workspace 섹션)에도 노출**된다. 기본값은 아직 `false`(opt-in)다:
 > quick persistence(현재 quick은 명시적으로 in-process), incremental checkpoint, ended placeholder, 외부 `maru attach` CLI, 다중 app **process**(현재 daemon
 > serial), 실제 bounded nonblocking socket writer, GUI 부재 시 OS 배너, **host-backed echo 지연 제거(이벤트 기반
@@ -124,6 +132,10 @@ flowchart TD
 - detach 중 output 처리, runtime 종료 상태, client별 bounded subscription.
 - OSC 9/777 notification event와 GUI가 없는 동안의 bounded pending history.
 - agent process 관측처럼 PTY/process에 직접 묶인 파생 상태. UI 표현 정책은 GUI에 남긴다.
+
+host-backed runtime에서는 이 host `TerminalCore`가 cwd/title/semantic/OSC 5379 상태의 단일 출처다. GUI의
+`Surface.core`는 화면 렌더에도 쓰지 않는 placeholder이므로 runtime metadata의 출처로 읽으면 안 된다. Git branch는 wire에
+중복 저장하지 않고, GUI가 host에서 받은 cwd를 기존 `.git/HEAD` 캐시 로직에 넣어 파생한다.
 
 ### session host가 소유하지 않는 것
 
@@ -600,7 +612,8 @@ capabilities:[...]}`를 보내고 host는 선택 version, `host_id`, 지원 capa
 | `runtime.list` / `runtime.get` | filter 또는 `runtime_id` | 권한 범위 안 redacted metadata |
 | `runtime.spawn` | argv, cols/rows와 legacy optional 값 | 구 MRSH v2 client용 최소 spawn. 기존 runtime attach 호환을 위해 유지 |
 | `runtime.spawn_full` | argv/cwd/login/env/GUI parent-env snapshot/env-overrides/TERM/ZDOTDIR/SSH integration/cols/rows | 새 GUI의 fail-closed spawn. 필드가 존재하면서 타입·범위가 틀리면 PTY를 만들지 않고 `invalid_request` |
-| `runtime.attach` | `runtime_id`, observer/controller/takeover, cols/rows | attach metadata, `stream_id`, granted capabilities, snapshot generation 또는 `controller_busy` |
+| `runtime.attach` | `runtime_id`, observer/controller/takeover, cols/rows | `runtime_metadata_v1` 협상 client에는 initial full metadata+revision, 공통으로 `stream_id`, granted capabilities, snapshot generation 또는 `controller_busy` |
+| `runtime.observation` | `stream_id` | `runtime_metadata_v1` observe subscription 전용 user-action barrier. 현재 host full-state와 subscription metadata revision/base를 원자적으로 전진시켜 응답 |
 | `runtime.detach` | `stream_id` | 해당 subscription/controller release, runtime 유지 |
 | `runtime.resize` | `stream_id`, cols/rows, `client_sequence` | controller만 PTY와 `TerminalCore`에 적용하고 applied size/`resize_generation` 응답; 변경은 `runtime.resized` broadcast |
 | `runtime.snapshot` | `stream_id`, expected generation | fresh snapshot chunk stream |
@@ -652,7 +665,12 @@ chunk_index:u32 | chunk_count:u32 | record_bytes...
   grapheme UTF-8, cell width/count와 태그드 Color intent(default/indexed/rgb)·style flags를 명시하고 Zig/Swift padding이나
   pointer를 포함하지 않는다.
 - delta record는 `set_runs`, `clear_rect`, `scroll_rect`, `cursor`, `modes`, `image_place/remove`, `prompt_marks`(full-replace)의
-  bounded operation list다. metadata title/cwd/process/agent/notification은 screen delta에 섞지 않고 JSON `event` kind로 보낸다.
+  bounded operation list다. metadata title/cwd/process/agent/notification은 screen delta에 섞지 않는다. 일반 runtime
+  metadata는 hello의 `runtime_metadata_v1` capability를 명시한 client에만 attach response initial full-state와 JSON
+  `runtime.metadata` event full-state로 전송한다. 같은 MRSH v2 구 client에는 알 수 없는 async event를 push하지 않는다.
+  client는 response/snapshot/delta 대기 중에도 shared wire validator를 통과한 event만 stream별 단조 revision 최신 한 건으로
+  coalesce해 demux한다. count 256/총 8 MiB cap 초과는 full-state를 조용히 evict하지 않고 connection/runtime을
+  fail-closed해 재attach initial metadata로 복구한다. OSC notification pull은 기존 별도 RPC 경로를 유지한다.
 - snapshot은 하나의 generation과 `sequence=0`, delta는 `base_generation`을 record body에 추가하고 sequence를 1씩 올린다.
   chunk index는 0부터 연속이고 마지막 MRSH frame의 `end_stream`과 declared count가 함께 맞아야 publish한다.
 - scrollback page는 같은 row record를 쓰되 scrollback generation과 half-open line range를 meta에 둔다. eviction 뒤 generation이
@@ -850,14 +868,44 @@ P3-e도 슬라이스로 나눈다(제품 통합이라 크다).
   - **P3-e2c(attach + input/resize) ✅**: `runtime.attach` subscription과 controller input/resize를 실 runtime에 연결.
   - **P3-e2d(snapshot/delta stream demux) ✅**: §12 screen-stream codec을 실 `TerminalCore` 화면에 연결(attach 첫 snapshot + delta).
   - **P3-e2e(host-backed `TermRuntimeBackend`) ✅**: client 위에 §13 P2 `TermRuntimeBackend` 계약의 원격 vtable 구현(in-process
-    adapter의 형제). GUI는 같은 계약 뒤에서 runtime이 원격 host에 있는지 모른다.
+    adapter의 형제). GUI의 spawn/attach/input/resize/lifecycle과 `RenderSnapshot` 렌더 경로는 같은 계약 뒤에서 runtime이
+    원격 host에 있는지 모른다. chrome/runtime metadata도 P3-e4 observation 계약 뒤로 이동했다.
 - **P3-e3(app 배선 + GUI 재접속) ✅ core**: `app_session`이 `keep-alive` 경로에서 discovery(P3-d2b)→launch(P3-d2d)→attach를
   실행해 host-backed backend를 쓰고, 정상 GUI Quit→재실행 시 manifest의 `runtime-handle`로 재접속한다. 실제 host process
   smoke는 자동화됐다. ABI v142의 restore-aware deferred AppSession은 저장 모델을 적용하기 전 기본 tab/PTY를 만들지 않아
   성공 attach 경로에서 throwaway runtime을 0개로 유지한다. signed `.app` 전체 종료·재실행 artifact와 crash 직전
   incremental checkpoint는 P4 gate다.
 
-종료 gate: 무인 실제 별도 process smoke, detach 중 output, reconnect first snapshot, input/resize roundtrip, bounded shutdown.
+- **P3-e4(runtime metadata parity) 🟨 부분 구현**: screen과 분리된 backend-neutral observation snapshot을 단일 출처로 둔다.
+  - **P3-e4a(model/wire) ✅**: attach 응답의 초기 full metadata와 이후 `event` full-state update에 subscription별 단조 revision을
+    둔다. 최소 필드는 cwd, window title, semantic state, grid size, alternate-screen/DECCKM/alternate-scroll mode
+    (현재 PageUp/wheel 특례 소비),
+    OSC 5379 `ssh_remote_dest`, foreground process group/name이다. Git branch는 전송하지 않고 cwd에서 GUI가 파생한다.
+    1회성 `agent_progress`는 다중 subscriber가 서로 소비하는 wire event로 만들지 않고 in-process core 관측에만 남긴다.
+  - **P3-e4b(host/client source) ✅**: host의 실제 core/PTY를 lock-copy해 metadata를 만들고, client는 event를
+    response/snapshot/delta와 함께 demux해 runtime별 owned cache에 적용한다. event는 latest-full-state coalescing으로
+    count/byte bounded하며 reconnect attach는 새 OSC를 기다리지 않고 현재 host metadata를 받는다. user-action 직전
+    `runtime.observation`은 periodic event의 `current`가 곧 latest라는 오해를 피하는 barrier이고, 같은 subscription
+    revision/base를 사용한다. 구 host의 unsupported와 supported-but-empty를 구분한다.
+  - **P3-e4c(AppSession consumers) ✅**: sidebar/search/git, auto title·cwd 상속, at-prompt/close/control collector,
+    Claude/Codex observer, SSH drop/paste upload와 alt-screen PageUp/wheel 특례가 공용 runtime observation만 읽도록
+    옮긴다. 이 범위의 metadata에는 placeholder `surface.core` 직접 읽기를 금지한다. 일반 key/paste/mouse/focus의
+    DECKPAM·bracketed-paste·mouse/focus/kitty input mode와 remote core-command parity는 아직 이 완료 범위가 아니다.
+  - **P3-e4d(parity gate) 🟨**: 실제 독립 host PTY의 OSC 7/2/5379→client observation, host core의
+    OSC 7/2/133/5379 export, owned-copy/OOM-safe replace, attach initial metadata, changed-only event,
+    malformed/stale revision과 stream별 coalescing, capability 없는 v2 client event 억제, observation barrier revision,
+    기존 AppSession cwd/title/at-prompt/workspace/control 소비 회귀는 자동 검증한다. 남은 gate는 controlled foreground
+    process fixture, multi-runtime event 격리,
+    response 대기 중 event, detach/reconnect 최신 metadata, cwd→Git·agent·SSH 제품 소비 경로를
+    실제 제품 경계에서 무인 테스트하는 것이다. 일반 key/paste/mouse/focus가 host input mode와 core command를 소비하는
+    backend-neutral 경로도 별도 남은 gate다. cwd/SSH destination/raw process argv는 trace와 실패 artifact에 남기지 않는다.
+    현재 SSH drop/paste barrier는 GUI main thread에서 local host RPC를 기다리며 transport timeout 상한은 5초다. 정상 local
+    socket에서는 즉시 끝나지만, stalled host에서도 UI를 멈추지 않는 async user-action state machine은 기본값 전환 전 성능 gate다.
+
+P3 core의 현재 종료 gate는 무인 실제 별도 process smoke, detach 중 output, reconnect first snapshot,
+input/resize roundtrip, bounded shutdown이다. **runtime metadata parity 완료**는 실제 host PTY가 OSC 7/0·2/133/5379와
+controlled Claude/Codex foreground fixture를 낸 뒤 GUI observation까지 왕복하고, detach 중 바뀐 최신 metadata가 reconnect
+첫 attach에 복원되며, sidebar cwd·임시 Git branch·agent 표시·SSH upload 분기를 자동 검증해야 선언한다.
 
 ### P4 — 다중 Window/Workspace·기본 설정·background 알림
 
@@ -867,6 +915,12 @@ P3-e도 슬라이스로 나눈다(제품 통합이라 크다).
 - 이미 추가된 `session.keep-alive-after-quit` config/schema/세팅 GUI의 남은 gate를 닫고 기본값을 `true`로 전환한다.
 - 이미 구현된 app quit detach/terminate 분기를 signed-app E2E로 검증하고 explicit Term/Workspace close와 dirty file gate를 보존한다.
 - GUI가 없는 동안 OSC 9/777 OS 배너·pending history·배너 클릭 cold-launch attach를 구현한다.
+- shared Client의 다른 stream 화면 `pending_batches`에도 per-stream/전체 byte cap을 두고 overflow stream만 fresh snapshot
+  resync한다. 현재 metadata event queue만 256건/8 MiB로 bounded라 hidden/minimized window pump가 멈춘 상태의 화면 batch는
+  아직 무한 증가할 수 있다. visible window가 계속 socket을 읽고 hidden window가 소비하지 않는 E2E를 추가한다.
+- 현재 metadata는 attached subscription마다 100ms에 full observation allocation/canonical stringify를 수행한다
+  (foreground OS process 열거만 runtime별 500ms cache). 100-runtime idle CPU/allocation artifact를 측정하고, change token 또는
+  runtime-shared full-state cache로 unchanged poll allocation을 없앤 뒤 기본값을 전환한다.
 
 종료 gate: 무인 2 windows + 3 workspaces + hidden quick의 background output GUI restart E2E, 마지막 완전 checkpoint,
 stale/missing/orphan matrix, 실제 signed `.app`을 종료한 뒤 OSC 배너→클릭→정확한 runtime attach. 이 gate 전에는 config
@@ -914,7 +968,8 @@ fake notification sink는 payload·routing·bounded history TDD에 사용하지�
 
 - client process 종료 전후 child pid/process group/runtime_id 불변.
 - detach 중 1 MiB 이상 output 후 재접속 화면·scrollback 정합.
-- idle runtime은 timeout polling 없이 PTY/IPC event를 기다림.
+- idle PTY/screen은 timeout polling 없이 기다리고, 현재 100ms metadata poll의 CPU/allocation은 별도 100-runtime budget을 통과한
+  change-driven/shared-cache 경로로 교체.
 - slow observer queue overflow 뒤 controller/PTY 진행 무정지.
 - 100 runtime의 attach/list/snapshot 메모리 상한과 첫 visible runtime latency artifact.
 - runtime 0/client 0 host bounded 종료와 stale socket 회수.

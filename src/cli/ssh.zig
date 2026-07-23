@@ -19,6 +19,9 @@
 //! command 안전 처리(bootstrapEligible)는 했다.
 
 const std = @import("std");
+const builtin = @import("builtin");
+
+extern "c" fn execv(path: [*:0]const u8, argv: [*:null]const ?[*:0]const u8) c_int;
 
 /// 원격에서 도는 terminfo 부트스트랩. `ssh`에 작은따옴표로 그대로 넘긴다(내부에 작은따옴표 없음).
 /// 요구사항에서 직접 유도한 세 단계다: (1) `xterm-maru`가 이미 해석되면 더 할 일 없음(즉시 성공),
@@ -62,15 +65,24 @@ const ssh_value_opts = "bcDEeFIiJLlmOopQRSWw";
 /// `$XDG_CACHE_HOME` 우선, 없으면 `~/.cache`. 비우려면 이 파일을 지운다(아래 docs). 셸이 읽고 쓴다.
 const cache_path = "${XDG_CACHE_HOME:-$HOME/.cache}/maru/ssh-terminfo-hosts";
 
+/// notify 이후 foreground ssh가 정상 종료하거나 HUP/INT/TERM으로 끊겨도 `ssh-end`를 정확히 한 번 보내는 shell lifecycle.
+/// signal trap과 EXIT trap이 경합하지 않도록 cleanup이 먼저 모든 trap을 해제한다. 정상 ssh exit code와 관례적 signal code를
+/// 보존한다. 함수는 wrapper의 `notify`/`clear_notify` 정의 뒤에 붙는다.
+const notify_lifecycle =
+    "remote_active=0; " ++
+    "cleanup_notify() { rc=\"$1\"; trap - EXIT HUP INT TERM; if [ \"$remote_active\" = 1 ]; then remote_active=0; clear_notify; fi; exit \"$rc\"; }; " ++
+    "begin_notify() { remote_active=1; trap 'cleanup_notify $?' EXIT; trap 'cleanup_notify 129' HUP; trap 'cleanup_notify 130' INT; trap 'cleanup_notify 143' TERM; notify; }; ";
+
 /// 전체 래퍼 스크립트(`/bin/sh -c <script> sh <elig> <dest> <ctl> <ssh args...>`로 실행). `$1`=bootstrap
 /// 적격 플래그("1"/"0"), `$2`=목적지(캐시 키), `$3`=control socket 경로(빈 문자열이면 미사용), 나머지
 /// `"$@"`=ssh 인자. `$ctl`이 있으면 디렉터리를 만들고(`mkdir -p`) ssh `ControlPath`로 쓴다 — 드롭 파일
 /// 업로드가 이 socket으로 가는 사이드채널(docs/ssh-integration.md §4)의 토대다.
 ///
-/// 또한 control socket이 살아있는 maru exec 경로(캐시 hit·부트스트랩 성공) 직전에 `notify`가 OSC 5379
+/// 또한 control socket이 살아있는 maru 경로(캐시 hit·부트스트랩 성공) 직전에 `notify`가 OSC 5379
 /// `ssh;<dest>`를 emit해(tmux 안이면 `$TMUX` 감지 후 DCS passthrough로 감쌈) Maru에 "이 세션은 maru ssh
 /// 원격, 목적지=dest"임을 알린다 — Maru가 dest로 control socket 경로를 계산해 드롭 업로드 대상으로 쓴다
-/// (docs/ssh-integration.md §4, 2단계). ctl 없는 폴백 경로는 socket이 없어 통지하지 않는다.
+/// (docs/ssh-integration.md §4, 2단계). ssh가 끝나면 `clear_notify`가 `ssh-end`를 emit하고 원래 exit code를
+/// 보존해 로컬 shell의 drop이 끝난 원격 destination을 재사용하지 않게 한다. ctl 없는 폴백 경로는 socket이 없어 통지하지 않는다.
 ///
 /// **캐시 hit**(이 목적지에 이미 설치 기록 있음): bootstrap을 통째로 건너뛰되, `$ctl`이 있으면
 /// `ControlMaster=auto`로 **control socket을 유지하며** `TERM=xterm-maru`로 exec한다(이전엔 캐시 hit
@@ -93,13 +105,15 @@ pub const wrapper_script =
     // passthrough(ESC P tmux; <inner의 ESC를 doubled> ESC \\)로 감싸 tmux를 통과시킨다. raw inner는
     // ESC ] 5379 ; ssh ; <dest> BEL. dest는 printf '%s'라 format 해석 없이 그대로 들어간다.
     "notify() { if [ -n \"$TMUX\" ]; then printf '\\033Ptmux;\\033\\033]5379;ssh;%s\\007\\033\\\\' \"$dest\"; else printf '\\033]5379;ssh;%s\\007' \"$dest\"; fi; }; " ++
+    "clear_notify() { if [ -n \"$TMUX\" ]; then printf '\\033Ptmux;\\033\\033]5379;ssh-end\\007\\033\\\\'; else printf '\\033]5379;ssh-end\\007'; fi; }; " ++
+    notify_lifecycle ++
     "if [ -n \"$dest\" ] && grep -qxF \"$dest\" \"$cache\" 2>/dev/null; then " ++
-    "if [ -n \"$ctl\" ]; then notify; exec env TERM=xterm-maru ssh -o ControlMaster=auto -o ControlPath=\"$ctl\" \"$@\"; fi; " ++
+    "if [ -n \"$ctl\" ]; then begin_notify; env TERM=xterm-maru ssh -o ControlMaster=auto -o ControlPath=\"$ctl\" \"$@\"; exit $?; fi; " ++
     "exec env TERM=xterm-maru ssh \"$@\"; fi; " ++
     "if [ \"$elig\" = 1 ] && [ -n \"$ctl\" ]; then " ++
     "if " ++ emit_terminfo ++ " | ssh -o ControlMaster=auto -o ControlPath=\"$ctl\" -o ControlPersist=10 \"$@\" '" ++ remote_install ++ "' >/dev/null 2>&1; then " ++
     "[ -n \"$dest\" ] && { mkdir -p \"${cache%/*}\" 2>/dev/null; printf '%s\\n' \"$dest\" >> \"$cache\" 2>/dev/null; }; " ++
-    "notify; exec env TERM=xterm-maru ssh -o ControlPath=\"$ctl\" \"$@\"; " ++
+    "begin_notify; env TERM=xterm-maru ssh -o ControlPath=\"$ctl\" \"$@\"; exit $?; " ++
     "else exec env TERM=xterm-256color ssh -o ControlPath=\"$ctl\" \"$@\"; fi; " ++
     "fi; " ++
     "exec env TERM=xterm-256color ssh \"$@\"";
@@ -296,14 +310,14 @@ test "wrapper 스크립트: 결정론적 ctl·캐시 hit 유지·ControlMaster·
     // 부트스트랩=master, 세션=슬레이브(같은 $ctl 재사용 → 인증 1회).
     try std.testing.expect(std.mem.indexOf(u8, s, "ssh -o ControlMaster=auto -o ControlPath=\"$ctl\" -o ControlPersist=10 \"$@\"") != null); // 부트스트랩=master
     try std.testing.expect(std.mem.indexOf(u8, s, "tic -x -o \"$HOME/.terminfo\" -") != null); // 원격 설치
-    try std.testing.expect(std.mem.indexOf(u8, s, "exec env TERM=xterm-maru ssh -o ControlPath=\"$ctl\"") != null); // 설치 성공 시 maru + master 재사용
+    try std.testing.expect(std.mem.indexOf(u8, s, "begin_notify; env TERM=xterm-maru ssh -o ControlPath=\"$ctl\" \"$@\"; exit $?") != null); // 설치 성공 시 master 재사용 + trap 종료 clear
     try std.testing.expect(std.mem.indexOf(u8, s, "exec env TERM=xterm-256color ssh \"$@\"") != null); // 부적격/실패/ctl 없음 폴백
     try std.testing.expect(std.mem.indexOf(u8, s, "[ \"$elig\" = 1 ] && [ -n \"$ctl\" ]") != null); // 적격 게이트(부트스트랩은 ctl이 있어야)
     // 캐시: hit이면 bootstrap 건너뛰되 ctl 있으면 control socket을 유지하며 maru로 exec, 설치 성공 시 목적지 기록.
     try std.testing.expect(std.mem.indexOf(u8, s, "grep -qxF \"$dest\" \"$cache\"") != null); // 캐시 read
     try std.testing.expect(std.mem.indexOf(u8, s, "ssh-terminfo-hosts") != null); // 캐시 파일
     try std.testing.expect(std.mem.indexOf(u8, s, ">> \"$cache\"") != null); // 캐시 write
-    try std.testing.expect(std.mem.indexOf(u8, s, "exec env TERM=xterm-maru ssh -o ControlMaster=auto -o ControlPath=\"$ctl\" \"$@\"") != null); // 캐시 hit + ctl → control socket 유지
+    try std.testing.expect(std.mem.indexOf(u8, s, "begin_notify; env TERM=xterm-maru ssh -o ControlMaster=auto -o ControlPath=\"$ctl\" \"$@\"; exit $?") != null); // 캐시 hit + ctl → socket 유지, trap 종료 clear
     // embed 회귀 가드: 로컬 infocmp 의존 없이(printf로 embed 소스 emit) 자기완결적이다.
     try std.testing.expect(std.mem.indexOf(u8, s, "printf '%s' '") != null); // embed 소스 emit
     try std.testing.expect(std.mem.indexOf(u8, s, "Sync=") != null); // embed된 terminfo가 스크립트에 들어있다
@@ -312,10 +326,77 @@ test "wrapper 스크립트: 결정론적 ctl·캐시 hit 유지·ControlMaster·
     // 2단계: maru exec 직전 OSC 5379로 원격 세션을 Maru에 통지(tmux면 DCS passthrough).
     try std.testing.expect(std.mem.indexOf(u8, s, "notify() {") != null); // 통지 함수 정의
     try std.testing.expect(std.mem.indexOf(u8, s, "]5379;ssh;%s") != null); // OSC 5379 payload(ssh;<dest>)
+    try std.testing.expect(std.mem.indexOf(u8, s, "clear_notify() {") != null);
+    try std.testing.expect(std.mem.indexOf(u8, s, "]5379;ssh-end") != null); // ssh 종료 뒤 local shell로 복귀
     try std.testing.expect(std.mem.indexOf(u8, s, "Ptmux;") != null); // tmux passthrough 래핑
-    try std.testing.expect(std.mem.indexOf(u8, s, "notify; exec env TERM=xterm-maru") != null); // maru exec 직전 통지(폴백 경로엔 없음)
+    try std.testing.expect(std.mem.indexOf(u8, s, "begin_notify; env TERM=xterm-maru") != null); // maru ssh 직전 통지(폴백 경로엔 없음)
     // 회귀 가드: SetEnv(OpenSSH 7.8+ 전용) 미사용.
     try std.testing.expect(std.mem.indexOf(u8, s, "SetEnv") == null);
+}
+
+fn expectNotifyLifecycle(body: []const u8, signal: ?std.c.SIG, expected_exit: u32) !void {
+    const allocator = std.testing.allocator;
+    const script = try std.fmt.allocPrint(
+        allocator,
+        "notify() {{ printf 'notify\\n'; }}; clear_notify() {{ printf 'clear\\n'; }}; {s}{s}",
+        .{ notify_lifecycle, body },
+    );
+    defer allocator.free(script);
+    const script_z = try allocator.dupeZ(u8, script);
+    defer allocator.free(script_z);
+    var pipe_fds: [2]c_int = undefined;
+    if (std.c.pipe(&pipe_fds) != 0) return error.SkipZigTest;
+    const child = std.c.fork();
+    if (child < 0) {
+        _ = std.c.close(pipe_fds[0]);
+        _ = std.c.close(pipe_fds[1]);
+        return error.SkipZigTest;
+    }
+    if (child == 0) {
+        _ = std.c.close(pipe_fds[0]);
+        _ = std.c.dup2(pipe_fds[1], 1);
+        _ = std.c.close(pipe_fds[1]);
+        const sh: [:0]const u8 = "/bin/sh";
+        const arg0: [:0]const u8 = "sh";
+        const arg1: [:0]const u8 = "-c";
+        var argv = [_:null]?[*:0]const u8{ arg0.ptr, arg1.ptr, script_z.ptr, null };
+        _ = execv(sh.ptr, &argv);
+        std.c._exit(127);
+    }
+    _ = std.c.close(pipe_fds[1]);
+    defer _ = std.c.close(pipe_fds[0]);
+
+    var output: [64]u8 = undefined;
+    const first = std.c.read(pipe_fds[0], &output, output.len);
+    if (first <= 0) {
+        _ = std.c.kill(child, std.posix.SIG.KILL);
+        var failed_status: c_int = 0;
+        _ = std.c.waitpid(child, &failed_status, 0);
+        return error.TestUnexpectedResult;
+    }
+    var used: usize = @intCast(first);
+    try std.testing.expect(std.mem.indexOf(u8, output[0..used], "notify\n") != null);
+    if (signal) |sig| try std.testing.expectEqual(@as(c_int, 0), std.c.kill(child, sig));
+
+    var status: c_int = 0;
+    try std.testing.expectEqual(child, std.c.waitpid(child, &status, 0));
+    while (used < output.len) {
+        const n = std.c.read(pipe_fds[0], output[used..].ptr, output.len - used);
+        if (n <= 0) break;
+        used += @intCast(n);
+    }
+    try std.testing.expectEqualStrings("notify\nclear\n", output[0..used]);
+    const unsigned_status: u32 = @bitCast(status);
+    try std.testing.expect(std.c.W.IFEXITED(unsigned_status));
+    try std.testing.expectEqual(expected_exit, std.c.W.EXITSTATUS(unsigned_status));
+}
+
+test "notify lifecycle: normal exit and HUP INT TERM emit ssh-end exactly once with preserved status" {
+    if (builtin.os.tag != .macos and builtin.os.tag != .linux) return error.SkipZigTest;
+    try expectNotifyLifecycle("begin_notify; exit 17", null, 17);
+    try expectNotifyLifecycle("begin_notify; while :; do :; done", std.posix.SIG.HUP, 129);
+    try expectNotifyLifecycle("begin_notify; while :; do :; done", std.posix.SIG.INT, 130);
+    try expectNotifyLifecycle("begin_notify; while :; do :; done", std.posix.SIG.TERM, 143);
 }
 
 test "embed: 바이너리에 terminfo 소스가 들어있고 emit 구절이 그걸 흘린다" {

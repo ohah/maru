@@ -290,6 +290,61 @@ pub const RemoteScreen = struct {
         try self.rebuildGrid();
     }
 
+    /// agent observer용 최근 화면 UTF-8. host raw PTY를 다시 보내지 않고 이미 조립된 row run을 같은 mutex 아래 읽는다.
+    /// local `TerminalCore.dumpRecentTextUtf8`와 같이 마지막 256 blank row를 역스캔해 마지막 text anchor에서 max_rows를
+    /// 선택하고, 행 전체 공백과 UTF-8 grapheme 경계를 보존한다.
+    pub fn dumpRecentTextUtf8(self: *RemoteScreen, allocator: std.mem.Allocator, io: std.Io, max_rows: usize, max_bytes: usize) error{OutOfMemory}![]u8 {
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+        var out: std.ArrayListUnmanaged(u8) = .empty;
+        errdefer out.deinit(allocator);
+        if (max_rows == 0 or max_bytes == 0 or self.assembler.rows_count == 0)
+            return out.toOwnedSlice(allocator) catch return error.OutOfMemory;
+        const rows: usize = self.assembler.rows_count;
+        var last_row_exclusive = rows;
+        const scan_floor = rows - @min(rows, 256);
+        var found_text = false;
+        while (last_row_exclusive > scan_floor) {
+            const runs = self.assembler.rowRuns(@intCast(last_row_exclusive - 1));
+            for (runs) |run| {
+                for (run.grapheme) |byte| {
+                    if (byte != ' ') {
+                        found_text = true;
+                        break;
+                    }
+                }
+                if (found_text) break;
+            }
+            if (found_text) break;
+            last_row_exclusive -= 1;
+        }
+        if (!found_text) last_row_exclusive = rows;
+        const worst_row_bytes = @as(usize, self.assembler.cols) *| 4 +| 1;
+        const byte_bounded_rows = @max(1, max_bytes / @max(1, worst_row_bytes));
+        const selected_rows = @min(last_row_exclusive, @min(max_rows, byte_bounded_rows));
+        const start = last_row_exclusive - selected_rows;
+        var row = start;
+        var capped = false;
+        while (row < last_row_exclusive and !capped) : (row += 1) {
+            if (row != start) {
+                if (out.items.len == max_bytes) break;
+                out.append(allocator, '\n') catch return error.OutOfMemory;
+            }
+            for (self.assembler.rowRuns(@intCast(row))) |run| {
+                var rep: u32 = 0;
+                while (rep < run.count) : (rep += 1) {
+                    if (run.grapheme.len > max_bytes -| out.items.len) {
+                        capped = true;
+                        break;
+                    }
+                    out.appendSlice(allocator, run.grapheme) catch return error.OutOfMemory;
+                }
+                if (capped) break;
+            }
+        }
+        return out.toOwnedSlice(allocator) catch return error.OutOfMemory;
+    }
+
     fn rebuildGrid(self: *RemoteScreen) error{OutOfMemory}!void {
         const new_grid = try build(self.allocator, &self.assembler);
         self.grid.deinit();
@@ -428,6 +483,11 @@ test "remote screen: a Surface backed by RemoteScreen renders the assembled remo
     var rs = try RemoteScreen.init(allocator);
     defer rs.deinit();
     try rs.applySnapshot(snap, io);
+    const recent_first = try rs.dumpRecentTextUtf8(allocator, io, 2, 128);
+    defer allocator.free(recent_first);
+    const local_recent_first = try core.dumpRecentTextUtf8(allocator, 2, 128);
+    defer allocator.free(local_recent_first);
+    try testing.expectEqualStrings(local_recent_first, recent_first);
 
     // Surface에 원격 소스를 주입한다. 로컬 core는 빈 화면 — renderSnapshot이 로컬이 아니라 조립된 원격을 줘야 한다.
     var surface = try Surface.init(allocator, 1, .{ .cols = 10, .rows = 2 });
@@ -447,6 +507,11 @@ test "remote screen: a Surface backed by RemoteScreen renders the assembled remo
     const d = try screen_snapshot.computeDelta(allocator, snap, &core, .{ .generation = 1 });
     defer d.deinit(allocator);
     try rs.applyDelta(d.delta, io);
+    const recent_second = try rs.dumpRecentTextUtf8(allocator, io, 1, 128);
+    defer allocator.free(recent_second);
+    const local_recent_second = try core.dumpRecentTextUtf8(allocator, 1, 128);
+    defer allocator.free(local_recent_second);
+    try testing.expectEqualStrings(local_recent_second, recent_second);
 
     surface.lockCore(io);
     const r2 = surface.renderSnapshot();

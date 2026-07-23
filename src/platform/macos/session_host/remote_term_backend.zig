@@ -10,9 +10,9 @@
 //! `RuntimeEventPump.initRemote`(delta stream을 `DrainSummary`로 소비, e3-1), write_input→`sendInput`, resize→
 //! `runtime.resize` RPC, close/remove→host terminate + client-side 회수. handle(u64)↔`RemoteRuntime`를 map으로 잇는다.
 //!
-//! ⚠️미완(후속): (1) core command(scrollback/clear 등)는 host core를 만져야 하나 wire RPC가 없어 no-op(e3-3),
-//! (2) foreground process group/names query wire 없음→null/0(agent observer 원격 미지원). macOS 전용
-//! (client·Surface·app 계약).
+//! metadata observation(cwd/title/SSH/foreground process/mode/size)은 host full-state event+fresh barrier로 읽고, 원격
+//! scroll command는 `runtime.core_command` RPC로 host core에 보낸다. 일반 key/paste/mouse/focus input-mode와 direct
+//! `TermRuntimeBackend.enqueueCoreCommand` parity는 아직 후속 gate다. macOS 전용(client·Surface·app 계약).
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -65,6 +65,9 @@ pub const RemoteTermBackend = struct {
         .remove = remove,
         .foreground_process_group = foregroundProcessGroup,
         .foreground_process_names = foregroundProcessNames,
+        .read_observation = readObservation,
+        .refresh_observation = refreshObservation,
+        .dump_recent_text = dumpRecentText,
     };
 
     pub fn init(allocator: std.mem.Allocator, io: std.Io, client: *client_mod.Client, surface_runtime: *SurfaceRuntime) RemoteTermBackend {
@@ -171,7 +174,7 @@ pub const RemoteTermBackend = struct {
         const rr: *RemoteRuntime = @ptrCast(@alignCast(ctx));
         var summary: DrainSummary = .{};
         while (true) {
-            const applied = rr.pumpDelta() catch |err| {
+            const result = rr.pumpDelta() catch |err| {
                 switch (err) {
                     // 복구 가능 desync(§9 — 조립기가 "reject-and-request-fresh"로 표시): host에 fresh snapshot을 재요청한다.
                     // 다음 tick에 snapshot_chunk가 와 applySnapshot이 generation을 리셋해 복구한다. read_error로 종료하지 **않는다**
@@ -189,8 +192,11 @@ pub const RemoteTermBackend = struct {
                     },
                 }
             };
-            if (!applied) break; // idle — 더 없음.
-            summary.output_events += 1;
+            switch (result) {
+                .idle => break,
+                .metadata => continue,
+                .screen => summary.output_events += 1,
+            }
         }
         return summary;
     }
@@ -262,16 +268,45 @@ pub const RemoteTermBackend = struct {
     }
 
     fn foregroundProcessGroup(ctx: *anyopaque, handle: RuntimeHandle) ?i32 {
-        _ = ctx;
-        _ = handle;
-        return null; // 원격 foreground pgid query wire 없음(후속) — agent observer는 원격에서 미지원.
+        const self: *RemoteTermBackend = @ptrCast(@alignCast(ctx));
+        const rr = self.runtimes.get(handle) orelse return null;
+        if (rr.observation.availability != .current or !rr.observation.foreground_available) return null;
+        return rr.observation.foreground_pgid;
     }
 
     fn foregroundProcessNames(ctx: *anyopaque, handle: RuntimeHandle, out: []ForegroundProcessName) usize {
-        _ = ctx;
-        _ = handle;
-        _ = out;
-        return 0;
+        const self: *RemoteTermBackend = @ptrCast(@alignCast(ctx));
+        const rr = self.runtimes.get(handle) orelse return 0;
+        if (rr.observation.availability != .current or !rr.observation.foreground_available) return 0;
+        const count = @min(out.len, rr.observation.foreground_processes.items.len);
+        @memcpy(out[0..count], rr.observation.foreground_processes.items[0..count]);
+        return count;
+    }
+
+    fn readObservation(ctx: *anyopaque, handle: RuntimeHandle, allocator: std.mem.Allocator, out: *term_backend.RuntimeObservation, include_foreground: bool) anyerror!void {
+        const self: *RemoteTermBackend = @ptrCast(@alignCast(ctx));
+        _ = include_foreground; // host event가 bounded cadence로 foreground까지 coherent하게 갱신한다.
+        const rr = self.runtimes.get(handle) orelse return error.UnknownSurface;
+        if (out.availability == rr.observation.availability and
+            out.revision == rr.observation.revision and
+            out.size.cols == rr.observation.size.cols and
+            out.size.rows == rr.observation.size.rows)
+            return;
+        try out.replace(allocator, rr.observation.view());
+    }
+
+    fn refreshObservation(ctx: *anyopaque, handle: RuntimeHandle, allocator: std.mem.Allocator, out: *term_backend.RuntimeObservation, include_foreground: bool) anyerror!void {
+        const self: *RemoteTermBackend = @ptrCast(@alignCast(ctx));
+        _ = include_foreground;
+        const rr = self.runtimes.get(handle) orelse return error.UnknownSurface;
+        try rr.refreshObservation();
+        try out.replace(allocator, rr.observation.view());
+    }
+
+    fn dumpRecentText(ctx: *anyopaque, handle: RuntimeHandle, allocator: std.mem.Allocator, max_rows: usize, max_bytes: usize) anyerror![]u8 {
+        const self: *RemoteTermBackend = @ptrCast(@alignCast(ctx));
+        const rr = self.runtimes.get(handle) orelse return error.UnknownSurface;
+        return rr.remote_screen.dumpRecentTextUtf8(allocator, self.io, max_rows, max_bytes);
     }
 
     // ── 원격 PtyIo(SurfaceRuntime link의 input/resize sink) ─────────────────────────

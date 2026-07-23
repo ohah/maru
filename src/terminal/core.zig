@@ -1633,6 +1633,10 @@ test "OSC 5379 ssh: maru ssh 원격 dest를 저장하고 잘못된 payload는 �
     try std.testing.expectEqualStrings("user@host", core.sshRemoteDest().?);
     try core.write("\x1b]5379;ssh;admin@box\x07"); // 새 dest로 갱신
     try std.testing.expectEqualStrings("admin@box", core.sshRemoteDest().?);
+    try core.write("\x1b]5379;ssh-end\x07"); // foreground ssh 종료 → 로컬 shell 복귀
+    try std.testing.expect(core.sshRemoteDest() == null);
+    try core.write("\x1b]5379;ssh-end\x07"); // 중복 clear 멱등
+    try std.testing.expect(core.sshRemoteDest() == null);
 }
 
 test "terminal core writes process-like text into cells" {

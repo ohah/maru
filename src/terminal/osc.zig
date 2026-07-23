@@ -218,13 +218,17 @@ pub fn dispatchCwd(self: *TerminalCore, body: []const u8) void {
 }
 
 /// OSC 5379: maru 전용 통지(사설 OSC 번호 — 표준/벤더 충돌을 피하려 골랐다). payload는
-/// `<서브커맨드>;<인자...>`. 현재 서브커맨드는 `ssh;<dest>` 하나로, maru ssh 래퍼가 exec 직전 emit해
-/// "이 세션은 maru ssh 원격 세션, 목적지=dest"임을 Maru에 알린다(docs/ssh-integration.md §4). Maru는
-/// dest로 cli.ssh.controlSocketPath를 계산해 드롭 파일을 그 control socket으로 업로드한다(3단계).
+/// `<서브커맨드>;<인자...>`. `ssh;<dest>`는 maru ssh 진입, `ssh-end`는 그 foreground ssh가 끝나 로컬 shell로
+/// 돌아온 경계다. Maru는 dest로 cli.ssh.controlSocketPath를 계산해 드롭 파일을 그 control socket으로 업로드한다.
 /// 알 수 없는 서브커맨드나 빈 dest는 무시하고(기존 상태 유지), OOM이면 갱신하지 않는다.
 pub fn dispatchMaru(self: *TerminalCore, body: []const u8) void {
     var it = std.mem.splitScalar(u8, body, ';');
     const sub = it.next() orelse return;
+    if (std.mem.eql(u8, sub, "ssh-end")) {
+        if (self.ssh_remote_dest) |old| self.allocator.free(old);
+        self.ssh_remote_dest = null;
+        return;
+    }
     if (!std.mem.eql(u8, sub, "ssh")) return; // 알 수 없는 서브커맨드는 무시(소비만)
     const dest = it.rest(); // 첫 필드(sub) 뒤 나머지 전체 = dest(목적지 문자열)
     if (dest.len == 0) return; // 빈 dest는 무시(기존 dest 유지)

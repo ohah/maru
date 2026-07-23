@@ -37,6 +37,123 @@ const core_command = @import("../session/core_command.zig");
 /// (docs/persistent-session-host.md §4 `runtime_id`).
 pub const RuntimeHandle = u64;
 
+/// 화면(`RenderSnapshot`)과 별개인 runtime 관측의 가용성. host-backed client가 구 host에 붙었거나 아직 initial
+/// metadata를 못 받은 상태를 "cwd 없음/foreground 없음"으로 오인하지 않도록 empty 값과 unavailable을 구분한다.
+pub const ObservationAvailability = enum {
+    unavailable,
+    current,
+    stale,
+};
+
+/// backend가 caller-owned cache로 복사할 한 시점의 화면 외 runtime 관측. 모든 slice는 호출 동안만 유효한 view이고,
+/// `RuntimeObservation.replace`가 owned copy로 바꾼다. 따라서 reader가 다음 OSC 7/0/5379에서 core 버퍼를 교체하거나
+/// remote event cache가 갱신돼도 AppSession이 borrowed slice를 계속 들지 않는다.
+pub const RuntimeObservationView = struct {
+    availability: ObservationAvailability = .unavailable,
+    revision: u64 = 0,
+    observer_generation: u64 = 0,
+    title_generation: u32 = 0,
+    size: terminal.Size = .{ .cols = 0, .rows = 0 },
+    cwd: []const u8 = "",
+    window_title: []const u8 = "",
+    ssh_remote_dest: ?[]const u8 = null,
+    semantic_state: terminal.SemanticPrompt = .unknown,
+    alt_active: bool = false,
+    app_cursor_keys: bool = false,
+    alternate_scroll: bool = true,
+    foreground_available: bool = false,
+    foreground_pgid: ?i32 = null,
+    foreground_processes: []const pty.types.ForegroundProcessName = &.{},
+    /// 1회성 agent progress. source가 비어 있으면 caller cache의 아직 미소비 progress를 보존한다.
+    agent_progress: []const u8 = "",
+};
+
+/// AppSession/RemoteRuntime이 소유하는 coherent runtime 관측 cache. 문자열과 process 배열은 모두 owned라 backend/core
+/// 수명과 분리된다. stable metadata와 1회성 progress를 한 구조에 두되, 빈 progress update는 미소비 값을 지우지 않는다.
+pub const RuntimeObservation = struct {
+    availability: ObservationAvailability = .unavailable,
+    revision: u64 = 0,
+    observer_generation: u64 = 0,
+    title_generation: u32 = 0,
+    size: terminal.Size = .{ .cols = 0, .rows = 0 },
+    cwd: std.ArrayListUnmanaged(u8) = .empty,
+    window_title: std.ArrayListUnmanaged(u8) = .empty,
+    ssh_remote_dest: std.ArrayListUnmanaged(u8) = .empty,
+    ssh_remote_dest_present: bool = false,
+    semantic_state: terminal.SemanticPrompt = .unknown,
+    alt_active: bool = false,
+    app_cursor_keys: bool = false,
+    alternate_scroll: bool = true,
+    foreground_available: bool = false,
+    foreground_pgid: ?i32 = null,
+    foreground_processes: std.ArrayListUnmanaged(pty.types.ForegroundProcessName) = .empty,
+    agent_progress: std.ArrayListUnmanaged(u8) = .empty,
+
+    pub fn deinit(self: *RuntimeObservation, allocator: std.mem.Allocator) void {
+        self.cwd.deinit(allocator);
+        self.window_title.deinit(allocator);
+        self.ssh_remote_dest.deinit(allocator);
+        self.foreground_processes.deinit(allocator);
+        self.agent_progress.deinit(allocator);
+        self.* = .{};
+    }
+
+    /// view 전체를 원자적으로 owned copy한 뒤 교체한다. 중간 OOM이면 기존 cache를 보존한다. source의 progress가 비면
+    /// caller가 아직 소비하지 않은 progress를 다음 poll까지 유지한다(매 metadata poll이 1회성 progress를 지우지 않게).
+    pub fn replace(self: *RuntimeObservation, allocator: std.mem.Allocator, snapshot: RuntimeObservationView) !void {
+        var next: RuntimeObservation = .{
+            .availability = snapshot.availability,
+            .revision = snapshot.revision,
+            .observer_generation = snapshot.observer_generation,
+            .title_generation = snapshot.title_generation,
+            .size = snapshot.size,
+            .ssh_remote_dest_present = snapshot.ssh_remote_dest != null,
+            .semantic_state = snapshot.semantic_state,
+            .alt_active = snapshot.alt_active,
+            .app_cursor_keys = snapshot.app_cursor_keys,
+            .alternate_scroll = snapshot.alternate_scroll,
+            .foreground_available = snapshot.foreground_available,
+            .foreground_pgid = snapshot.foreground_pgid,
+        };
+        errdefer next.deinit(allocator);
+        try next.cwd.appendSlice(allocator, snapshot.cwd);
+        try next.window_title.appendSlice(allocator, snapshot.window_title);
+        if (snapshot.ssh_remote_dest) |dest| try next.ssh_remote_dest.appendSlice(allocator, dest);
+        try next.foreground_processes.appendSlice(allocator, snapshot.foreground_processes);
+        if (snapshot.agent_progress.len != 0)
+            try next.agent_progress.appendSlice(allocator, snapshot.agent_progress)
+        else
+            try next.agent_progress.appendSlice(allocator, self.agent_progress.items);
+        self.deinit(allocator);
+        self.* = next;
+    }
+
+    pub fn view(self: *const RuntimeObservation) RuntimeObservationView {
+        return .{
+            .availability = self.availability,
+            .revision = self.revision,
+            .observer_generation = self.observer_generation,
+            .title_generation = self.title_generation,
+            .size = self.size,
+            .cwd = self.cwd.items,
+            .window_title = self.window_title.items,
+            .ssh_remote_dest = if (self.ssh_remote_dest_present) self.ssh_remote_dest.items else null,
+            .semantic_state = self.semantic_state,
+            .alt_active = self.alt_active,
+            .app_cursor_keys = self.app_cursor_keys,
+            .alternate_scroll = self.alternate_scroll,
+            .foreground_available = self.foreground_available,
+            .foreground_pgid = self.foreground_pgid,
+            .foreground_processes = self.foreground_processes.items,
+            .agent_progress = self.agent_progress.items,
+        };
+    }
+
+    pub fn clearAgentProgress(self: *RuntimeObservation) void {
+        self.agent_progress.clearRetainingCapacity();
+    }
+};
+
 /// 새 terminal runtime을 만들 때 필요한 입력. `handle`은 caller(GUI)가 앱 전역 allocator에서 발급해 넘긴다 —
 /// backend가 발급하지 않는 이유는 in-process에서 handle이 곧 surface_id이고, surface_id 발급은 GUI layout(창 트리
 /// 정책)의 책임이기 때문이다(P3 host backend는 host가 발급한 runtime_id를 이 자리에 다시 매핑한다).
@@ -97,6 +214,18 @@ pub const VTable = struct {
 
     /// 포그라운드 프로세스 이름들을 `out`에 채우고 채운 개수를 돌려준다(agent kind 분류용). 고정 버퍼라 alloc 없음.
     foreground_process_names: *const fn (ctx: *anyopaque, handle: RuntimeHandle, out: []pty.types.ForegroundProcessName) usize,
+
+    /// cwd/title/semantic/SSH destination/foreground를 한 시점에 caller-owned cache로 복사한다. `include_foreground=false`면
+    /// 구현은 비싼 OS process 열거를 생략할 수 있다. unavailable은 empty와 구분해 `out.availability`에 기록한다.
+    read_observation: *const fn (ctx: *anyopaque, handle: RuntimeHandle, allocator: std.mem.Allocator, out: *RuntimeObservation, include_foreground: bool) anyerror!void,
+
+    /// 보안·라우팅 결정을 내리기 직전에 backend SSOT와 동기화하는 barrier. in-process는 즉시 core를 읽고, remote는
+    /// host RPC가 observation base/revision을 전진시킨 응답을 받은 뒤 caller-owned cache를 교체한다.
+    refresh_observation: *const fn (ctx: *anyopaque, handle: RuntimeHandle, allocator: std.mem.Allocator, out: *RuntimeObservation, include_foreground: bool) anyerror!void,
+
+    /// agent observer가 쓰는 bounded 최근 화면 텍스트. in-process는 host/core를 lock-copy하고 remote는 이미 조립된
+    /// RemoteScreen을 읽는다. 반환은 caller 소유이며 raw PTY bytes를 wire에 새로 싣지 않는다.
+    dump_recent_text: *const fn (ctx: *anyopaque, handle: RuntimeHandle, allocator: std.mem.Allocator, max_rows: usize, max_bytes: usize) anyerror![]u8,
 };
 
 /// GUI layout이 terminal runtime을 다루는 유일한 표면. `ctx`+`vtable`로 in-process/원격 host 구현을 같은 계약
@@ -155,6 +284,18 @@ pub const TermRuntimeBackend = struct {
 
     pub fn foregroundProcessNames(self: TermRuntimeBackend, handle: RuntimeHandle, out: []pty.types.ForegroundProcessName) usize {
         return self.vtable.foreground_process_names(self.ctx, handle, out);
+    }
+
+    pub fn readObservation(self: TermRuntimeBackend, handle: RuntimeHandle, allocator: std.mem.Allocator, out: *RuntimeObservation, include_foreground: bool) anyerror!void {
+        return self.vtable.read_observation(self.ctx, handle, allocator, out, include_foreground);
+    }
+
+    pub fn refreshObservation(self: TermRuntimeBackend, handle: RuntimeHandle, allocator: std.mem.Allocator, out: *RuntimeObservation, include_foreground: bool) anyerror!void {
+        return self.vtable.refresh_observation(self.ctx, handle, allocator, out, include_foreground);
+    }
+
+    pub fn dumpRecentText(self: TermRuntimeBackend, handle: RuntimeHandle, allocator: std.mem.Allocator, max_rows: usize, max_bytes: usize) anyerror![]u8 {
+        return self.vtable.dump_recent_text(self.ctx, handle, allocator, max_rows, max_bytes);
     }
 };
 
@@ -219,6 +360,9 @@ const FakeTermBackend = struct {
         .remove = remove,
         .foreground_process_group = foregroundProcessGroup,
         .foreground_process_names = foregroundProcessNames,
+        .read_observation = readObservation,
+        .refresh_observation = readObservation,
+        .dump_recent_text = dumpRecentText,
     };
 
     fn init(allocator: std.mem.Allocator) FakeTermBackend {
@@ -340,6 +484,36 @@ const FakeTermBackend = struct {
         out[0] = .{ .pid = 1, .len = 0 };
         return 1;
     }
+
+    fn readObservation(ctx: *anyopaque, handle: RuntimeHandle, allocator: std.mem.Allocator, out: *RuntimeObservation, include_foreground: bool) anyerror!void {
+        const self: *FakeTermBackend = @ptrCast(@alignCast(ctx));
+        const rt = self.find(handle) orelse return error.UnknownSurface;
+        var names: [1]pty.types.ForegroundProcessName = undefined;
+        const count = if (include_foreground) foregroundProcessNames(ctx, handle, &names) else 0;
+        try out.replace(allocator, .{
+            .availability = .current,
+            .revision = rt.surface.core.observerGeneration(),
+            .observer_generation = rt.surface.core.observerGeneration(),
+            .title_generation = rt.surface.core.title_generation.load(.monotonic),
+            .size = rt.surface.core.size,
+            .cwd = rt.surface.core.currentCwd(),
+            .window_title = rt.surface.core.windowTitle(),
+            .ssh_remote_dest = rt.surface.core.sshRemoteDest(),
+            .semantic_state = rt.surface.core.semantic_state,
+            .alt_active = rt.surface.core.alt_active,
+            .app_cursor_keys = rt.surface.core.application_cursor_keys,
+            .alternate_scroll = rt.surface.core.alternate_scroll,
+            .foreground_available = include_foreground,
+            .foreground_pgid = if (include_foreground) 4242 else out.foreground_pgid,
+            .foreground_processes = if (include_foreground) names[0..count] else out.foreground_processes.items,
+        });
+    }
+
+    fn dumpRecentText(ctx: *anyopaque, handle: RuntimeHandle, allocator: std.mem.Allocator, max_rows: usize, max_bytes: usize) anyerror![]u8 {
+        const self: *FakeTermBackend = @ptrCast(@alignCast(ctx));
+        const rt = self.find(handle) orelse return error.UnknownSurface;
+        return rt.surface.core.dumpRecentTextUtf8(allocator, max_rows, max_bytes);
+    }
 };
 
 test "term runtime backend: fake drives spawn/attach/input/resize through the contract only" {
@@ -414,4 +588,102 @@ test "term runtime backend: unknown handle attach is rejected, not routed to ano
     });
     // 존재하지 않는 handle을 attach하면 다른 runtime에 잘못 붙지 않고 거부된다.
     try std.testing.expectError(error.UnknownSurface, be.attach(2, false));
+}
+
+test "runtime observation: replacement owns strings and preserves unconsumed progress" {
+    const allocator = std.testing.allocator;
+    var observation: RuntimeObservation = .{};
+    defer observation.deinit(allocator);
+
+    var cwd = [_]u8{ '/', 'o', 'l', 'd' };
+    var process = pty.types.ForegroundProcessName{ .pid = 77, .len = 6 };
+    @memcpy(process.bytes[0..6], "claude");
+    try observation.replace(allocator, .{
+        .availability = .current,
+        .revision = 1,
+        .cwd = &cwd,
+        .window_title = "first",
+        .ssh_remote_dest = "box",
+        .foreground_available = true,
+        .foreground_pgid = 77,
+        .foreground_processes = &.{process},
+        .agent_progress = "waiting",
+    });
+    cwd[1] = 'X'; // source 수명이 끝나거나 바뀌어도 cache는 독립 owned copy다.
+    try std.testing.expectEqualStrings("/old", observation.cwd.items);
+    try std.testing.expectEqualStrings("claude", observation.foreground_processes.items[0].slice());
+
+    // stable metadata poll의 빈 progress는 아직 observer가 소비하지 않은 1회성 값을 지우지 않는다.
+    try observation.replace(allocator, .{
+        .availability = .current,
+        .revision = 2,
+        .cwd = "/new",
+        .window_title = "second",
+    });
+    try std.testing.expectEqualStrings("/new", observation.cwd.items);
+    try std.testing.expectEqualStrings("waiting", observation.agent_progress.items);
+    observation.clearAgentProgress();
+    try std.testing.expectEqual(@as(usize, 0), observation.agent_progress.items.len);
+}
+
+test "runtime observation: every replacement allocation failure preserves the previous coherent snapshot" {
+    const allocator = std.testing.allocator;
+    var process = pty.types.ForegroundProcessName{ .pid = 99, .len = 5 };
+    @memcpy(process.bytes[0..5], "codex");
+    const next: RuntimeObservationView = .{
+        .availability = .current,
+        .revision = 2,
+        .observer_generation = 22,
+        .title_generation = 3,
+        .size = .{ .cols = 120, .rows = 40 },
+        .cwd = "/next",
+        .window_title = "next title",
+        .ssh_remote_dest = "next-box",
+        .semantic_state = .command,
+        .foreground_available = true,
+        .foreground_pgid = 99,
+        .foreground_processes = &.{process},
+        .agent_progress = "running",
+    };
+
+    // 먼저 실제 allocation 수를 센 뒤 모든 fail index를 순회한다. 성공 경로 임시 cache는 같은 wrapper allocator로 해제한다.
+    var counting = std.testing.FailingAllocator.init(allocator, .{});
+    var counted: RuntimeObservation = .{};
+    try counted.replace(counting.allocator(), next);
+    const allocation_count = counting.alloc_index;
+    counted.deinit(counting.allocator());
+    try std.testing.expect(allocation_count > 0);
+
+    for (0..allocation_count) |fail_index| {
+        var observation: RuntimeObservation = .{};
+        defer observation.deinit(allocator);
+        try observation.replace(allocator, .{
+            .availability = .current,
+            .revision = 1,
+            .observer_generation = 11,
+            .title_generation = 1,
+            .size = .{ .cols = 80, .rows = 24 },
+            .cwd = "/old",
+            .window_title = "old title",
+            .ssh_remote_dest = "old-box",
+            .semantic_state = .prompt,
+            .foreground_available = true,
+            .foreground_pgid = 77,
+            .foreground_processes = &.{process},
+            .agent_progress = "waiting",
+        });
+
+        var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = fail_index });
+        try std.testing.expectError(error.OutOfMemory, observation.replace(failing.allocator(), next));
+        try std.testing.expect(failing.has_induced_failure);
+        try std.testing.expectEqual(@as(u64, 1), observation.revision);
+        try std.testing.expectEqual(@as(u64, 11), observation.observer_generation);
+        try std.testing.expectEqualStrings("/old", observation.cwd.items);
+        try std.testing.expectEqualStrings("old title", observation.window_title.items);
+        try std.testing.expect(observation.ssh_remote_dest_present);
+        try std.testing.expectEqualStrings("old-box", observation.ssh_remote_dest.items);
+        try std.testing.expectEqual(@as(?i32, 77), observation.foreground_pgid);
+        try std.testing.expectEqualStrings("codex", observation.foreground_processes.items[0].slice());
+        try std.testing.expectEqualStrings("waiting", observation.agent_progress.items);
+    }
 }

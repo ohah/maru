@@ -638,33 +638,32 @@ pub const RemoteRuntime = struct {
     }
 
     fn decodeSelectedTextResponse(self: *RemoteRuntime, resp: []const u8) client_mod.ClientError!?[]u8 {
-        const field = decodeSingleStringObject(self.allocator, resp) catch |err| {
+        const obj = decodeStrictObject(self.allocator, resp) catch |err| {
             if (err == error.OutOfMemory) return error.OutOfMemory;
             self.client.failClosed();
             return error.ProtocolError;
         };
-        defer self.allocator.free(field.key);
-        if (std.mem.eql(u8, field.key, "error")) {
-            defer self.allocator.free(field.value);
-            if (protocol.ErrorCode.fromWireName(field.value) == null) {
+        defer obj.deinit();
+        // error envelope는 알려진 코드일 때만 "선택 없음"으로 접는다(모르는 코드 = schema 드리프트).
+        if (obj.string("error")) |code| {
+            if (obj.fields.len != 1 or protocol.ErrorCode.fromWireName(code) == null) {
                 self.client.failClosed();
                 return error.ProtocolError;
             }
             return null;
         }
-        if (!std.mem.eql(u8, field.key, "text")) {
-            self.allocator.free(field.value);
-            // capability를 광고한 host가 success schema를 지키지 않으면 같은 connection의 나머지 RPC도 신뢰할 수 없다.
-            // 구 host 호환은 capability=false에서만 허용하고, 거짓 광고/드리프트는 빈 복사로 숨기지 않는다.
+        // capability를 광고한 host가 success schema를 지키지 않으면 같은 connection의 나머지 RPC도 신뢰할 수 없다.
+        // 구 host 호환은 capability=false에서만 허용하고, 거짓 광고/드리프트는 빈 복사로 숨기지 않는다.
+        const text = obj.string("text") orelse {
+            self.client.failClosed();
+            return error.ProtocolError;
+        };
+        if (obj.fields.len != 1) { // 선언한 키(text) 하나만 허용.
             self.client.failClosed();
             return error.ProtocolError;
         }
-        const text = field.value;
-        if (text.len == 0) {
-            self.allocator.free(text);
-            return null;
-        }
-        return text;
+        if (text.len == 0) return null;
+        return self.allocator.dupe(u8, text) catch return error.OutOfMemory;
     }
 
     /// 원격 Cmd+클릭 링크 열기: host가 **콘텐츠·cwd·파일시스템을 아는 자기 core**로 `extractUrlAt`(추출 + resolve + 존재
@@ -683,25 +682,41 @@ pub const RemoteRuntime = struct {
         return self.decodeLinkAtResponse(resp);
     }
 
-    /// `runtime.link_at` 응답 `{"text":"...","kind":N}`을 푼다. **selected_text의 단일-필드 디코더를 재사용하면 안 된다** —
-    /// 그건 필드가 정확히 하나인 객체만 받아들여(`decodeSingleStringObject`) kind가 붙은 이 응답을 InvalidJson으로 보고
-    /// 연결을 fail-close시킨다(클릭 한 번에 host 연결이 끊기는 실제 버그였다). text는 임의 바이트라 strict 문자열
-    /// 디코더로 escape를 풀고, kind는 정수 필드로 따로 읽는다. `{"error":...}`나 빈 text는 "링크 없음"(null)이다.
+    /// `runtime.link_at` 응답 `{"text":"...","kind":N}`을 푼다 — `decodeSelectedTextResponse`와 **같은 strict 디코더**를 쓰고
+    /// 선언 키 집합만 다르다. 예전엔 응답 스키마마다 파서를 골라 썼고, 필드가 정확히 하나인 객체만 받는 파서에 이
+    /// 두-필드 응답을 통과시키려다 정상 응답이 InvalidJson으로 떨어져 연결이 fail-close됐다(밑줄은 뜨는데 Cmd+클릭만
+    /// 안 열리던 버그). `{"error":...}`나 빈 text는 "링크 없음"(null)이다.
     fn decodeLinkAtResponse(self: *RemoteRuntime, resp: []const u8) client_mod.ClientError!?RemoteLink {
-        // host가 error 코드를 돌려주면 링크가 없는 것으로 본다(일반 클릭으로 흐른다 — 선택 복사와 같은 정책).
-        if (std.mem.indexOf(u8, resp, "\"error\"") != null) return null;
-        // 다중 필드 객체에서 키로 뽑는 기존 헬퍼를 쓴다(escape 처리 공유). text는 임의 바이트라 반드시 unescape가 필요하다.
-        const text = (decodeJsonStringField(self.allocator, resp, "text") catch return error.OutOfMemory) orelse {
-            // capability를 광고한 host가 success schema를 안 지키면 같은 connection의 나머지 RPC도 신뢰할 수 없다.
+        const obj = decodeStrictObject(self.allocator, resp) catch |err| {
+            if (err == error.OutOfMemory) return error.OutOfMemory;
             self.client.failClosed();
             return error.ProtocolError;
         };
-        if (text.len == 0) {
-            self.allocator.free(text);
-            return null; // 링크가 없거나 미존재 경로 — host가 빈 text로 알린다.
+        defer obj.deinit();
+        if (obj.string("error")) |code| {
+            if (obj.fields.len != 1 or protocol.ErrorCode.fromWireName(code) == null) {
+                self.client.failClosed();
+                return error.ProtocolError;
+            }
+            return null; // 알려진 error = 링크 없음(일반 클릭으로 흐른다 — 선택 복사와 같은 정책).
         }
-        const kind_raw = client_mod.extractU64Field(resp, "\"kind\":") orelse 0;
-        return .{ .text = text, .kind = if (kind_raw == 1) .file_path else .url };
+        const text = obj.string("text") orelse {
+            self.client.failClosed();
+            return error.ProtocolError;
+        };
+        const kind_raw = obj.number("kind") orelse {
+            self.client.failClosed();
+            return error.ProtocolError;
+        };
+        if (obj.hasUnknownKey(&.{ "text", "kind" })) { // 선언 밖 키 = schema 드리프트.
+            self.client.failClosed();
+            return error.ProtocolError;
+        }
+        if (text.len == 0) return null; // 링크가 없거나 미존재 경로 — host가 빈 text로 알린다.
+        return .{
+            .text = self.allocator.dupe(u8, text) catch return error.OutOfMemory,
+            .kind = if (kind_raw == 1) .file_path else .url,
+        };
     }
 
     /// 구 host 호환 경로. RemoteScreen이 조립한 현재 viewport에서만 추출한다. 구 screen wire에는 soft-wrap bit가 없어
@@ -787,19 +802,27 @@ pub const RemoteRuntime = struct {
         defer self.allocator.free(resp);
         // std.json.parseFromSlice 대신 **수동 디코드** — parseFromSlice가 숫자 파서(f128 소프트플로트 ___divtf3/___fixtfti
         // 등)를 링크로 끌어와, 이 경로가 live가 되면 ReleaseSafe 제품 빌드(macos-live-preview-perf)가 undefined symbol로
-        // 깨진다(code-review 후속). client는 이미 extractU64Field 등 수동 파싱 관례라 여기서도 그 관례를 따른다.
-        const title = (decodeJsonStringField(self.allocator, resp, "title") catch return error.OutOfMemory) orelse return null;
-        errdefer self.allocator.free(title);
-        const body = (decodeJsonStringField(self.allocator, resp, "body") catch return error.OutOfMemory) orelse {
-            self.allocator.free(title);
-            return null;
+        // 깨진다(code-review 후속). 파싱은 selected_text/link_at과 **같은 strict 디코더**를 쓴다 — 응답 schema 위반을
+        // RPC마다 다르게 다루지 않는다는 §"같은 major" 불변식을 알림 경로도 함께 지킨다.
+        const obj = decodeStrictObject(self.allocator, resp) catch |err| {
+            if (err == error.OutOfMemory) return error.OutOfMemory;
+            self.client.failClosed();
+            return error.ProtocolError;
         };
-        errdefer self.allocator.free(body);
-        if (title.len == 0 and body.len == 0) { // host에 대기 알림 없음(빈 {title,body}).
-            self.allocator.free(title);
-            self.allocator.free(body);
+        defer obj.deinit();
+        if (obj.string("error")) |code| {
+            if (obj.fields.len != 1 or protocol.ErrorCode.fromWireName(code) == null) {
+                self.client.failClosed();
+                return error.ProtocolError;
+            }
             return null;
         }
+        const title_src = obj.string("title") orelse return null; // 대기 알림 없음(host가 필드를 안 실었다).
+        const body_src = obj.string("body") orelse return null;
+        if (title_src.len == 0 and body_src.len == 0) return null; // host에 대기 알림 없음(빈 {title,body}).
+        const title = self.allocator.dupe(u8, title_src) catch return error.OutOfMemory;
+        errdefer self.allocator.free(title);
+        const body = self.allocator.dupe(u8, body_src) catch return error.OutOfMemory;
         return .{ .title = title, .body = body };
     }
 
@@ -826,7 +849,7 @@ pub const RemoteRuntime = struct {
     }
 
     /// `{...,"spans":[sr,sc,er,ec, sr,sc,er,ec, ...]}`의 flat 정수 배열을 4개씩 `SelectionSpan`으로 파싱해 `out`에 append한다
-    /// (§6c 검색 매치 뷰포트 span). std.json.parseFromSlice 대신 수동 스캔(f128 회피, decodeJsonStringField와 같은 이유).
+    /// (§6c 검색 매치 뷰포트 span). std.json.parseFromSlice 대신 수동 스캔(f128 회피, decodeStrictObject와 같은 이유).
     /// 잘못된 형식/append 실패는 best-effort로 멈춘다(검색은 부가 기능).
     fn parseSpansInto(resp: []const u8, out: *std.ArrayList(terminal.SelectionSpan), allocator: std.mem.Allocator) void {
         const key = "\"spans\":[";
@@ -851,87 +874,138 @@ pub const RemoteRuntime = struct {
         }
     }
 
-    /// `{"key":"<json-string>", ...}`에서 `key`의 문자열 값을 디코드해 owned 바이트로 돌려준다(키 없으면 null). host는
-    /// `std.json.Stringify`로 escape하므로 그 역(표준 JSON string escape)만 처리한다: `\" \\ \/ \n \r \t \b \f \u00XX`.
-    /// Stringify 기본은 non-ASCII를 raw로 두므로 `\uXXXX`는 제어문자(≤0x1F)뿐이라 surrogate pair는 없다. **std.json.parseFromSlice를
-    /// 안 쓴다** — 그 숫자 파서가 f128 소프트플로트를 링크로 끌어와 ReleaseSafe 제품 빌드를 깬다(takeNotification 참고).
-    fn decodeJsonStringField(allocator: std.mem.Allocator, json: []const u8, key: []const u8) error{OutOfMemory}!?[]u8 {
-        var pat_buf: [64]u8 = undefined;
-        const pat = std.fmt.bufPrint(&pat_buf, "\"{s}\"", .{key}) catch return null;
-        const k = std.mem.indexOf(u8, json, pat) orelse return null;
-        var i = k + pat.len;
-        while (i < json.len and (json[i] == ' ' or json[i] == ':')) i += 1; // `:` + 공백 스킵
-        if (i >= json.len or json[i] != '"') return null;
-        i += 1; // 여는 따옴표 뒤
-        var out: std.ArrayListUnmanaged(u8) = .empty;
-        errdefer out.deinit(allocator);
-        while (i < json.len) : (i += 1) {
-            const ch = json[i];
-            if (ch == '"') return try out.toOwnedSlice(allocator); // 닫는 따옴표 = 끝
-            if (ch != '\\') {
-                try out.append(allocator, ch);
-                continue;
+    /// strict RPC 응답 객체 하나. 값은 string(escape 해제)과 정수만 담는다 — 현재 응답 schema가 그 둘만 쓴다.
+    /// 배열 값을 쓰는 응답(`runtime.find`의 span 목록)은 아직 전용 스캐너를 쓴다(§한계 — 확장하려면 여기 Value에 더한다).
+    const StrictObject = struct {
+        fields: []Field,
+        allocator: std.mem.Allocator,
+
+        const Value = union(enum) { string: []u8, number: u64 };
+        const Field = struct { key: []u8, value: Value };
+
+        fn deinit(self: StrictObject) void {
+            for (self.fields) |f| {
+                self.allocator.free(f.key);
+                switch (f.value) {
+                    .string => |v| self.allocator.free(v),
+                    .number => {},
+                }
             }
-            i += 1; // escape 문자
-            if (i >= json.len) break;
-            switch (json[i]) {
-                '"' => try out.append(allocator, '"'),
-                '\\' => try out.append(allocator, '\\'),
-                '/' => try out.append(allocator, '/'),
-                'n' => try out.append(allocator, '\n'),
-                'r' => try out.append(allocator, '\r'),
-                't' => try out.append(allocator, '\t'),
-                'b' => try out.append(allocator, 0x08),
-                'f' => try out.append(allocator, 0x0c),
-                'u' => {
-                    if (i + 4 >= json.len) break;
-                    const cp = std.fmt.parseInt(u21, json[i + 1 .. i + 5], 16) catch break;
-                    var u8buf: [4]u8 = undefined;
-                    const n = std.unicode.utf8Encode(cp, &u8buf) catch break;
-                    try out.appendSlice(allocator, u8buf[0..n]);
-                    i += 4; // 4 hex 소비(루프 증가가 'u'를 넘긴다)
-                },
-                else => |e| try out.append(allocator, e), // 알 수 없는 escape는 그대로(best-effort)
-            }
+            self.allocator.free(self.fields);
         }
-        return try out.toOwnedSlice(allocator); // 닫는 따옴표 못 만남(손상) — 여기까지 best-effort
-    }
 
-    const SingleStringField = struct {
-        key: []u8,
-        value: []u8,
+        /// 키의 문자열 값(없거나 정수면 null). 소유권은 객체에 남는다 — caller가 쓰려면 dupe한다.
+        fn string(self: StrictObject, key: []const u8) ?[]const u8 {
+            for (self.fields) |f| {
+                if (std.mem.eql(u8, f.key, key)) return switch (f.value) {
+                    .string => |v| v,
+                    .number => null,
+                };
+            }
+            return null;
+        }
 
-        fn deinit(self: SingleStringField, allocator: std.mem.Allocator) void {
-            allocator.free(self.key);
-            allocator.free(self.value);
+        /// 키의 정수 값(없거나 문자열이면 null).
+        fn number(self: StrictObject, key: []const u8) ?u64 {
+            for (self.fields) |f| {
+                if (std.mem.eql(u8, f.key, key)) return switch (f.value) {
+                    .number => |v| v,
+                    .string => null,
+                };
+            }
+            return null;
+        }
+
+        /// 응답에 **선언하지 않은 키**가 섞였는가 — schema 드리프트 판정(호출자가 fail-close 근거로 쓴다).
+        fn hasUnknownKey(self: StrictObject, allowed: []const []const u8) bool {
+            outer: for (self.fields) |f| {
+                for (allowed) |a| {
+                    if (std.mem.eql(u8, f.key, a)) continue :outer;
+                }
+                return true;
+            }
+            return false;
         }
     };
 
-    /// server의 단일-field success/error envelope(`{"text":"..."}` / `{"error":"..."}`) 전용 strict parser.
-    /// 선택 복사는 clipboard에 쓰이므로 notification용 best-effort field scanner를 재사용하지 않는다.
-    fn decodeSingleStringObject(
-        allocator: std.mem.Allocator,
-        json: []const u8,
-    ) error{ OutOfMemory, InvalidJson }!SingleStringField {
+    /// MRSH RPC 응답 객체의 **strict** 디코더 — 응답 문자열 파싱의 단일 출처다.
+    ///
+    /// 왜 strict인가: [영속 세션 호스트](../../../../docs/persistent-session-host.md) §"같은 major"는 "capability를 광고한
+    /// host의 응답 schema가 어긋나면 구 host로 추측해 downgrade하지 않고 connection을 fail-close한다"를 불변식으로 둔다.
+    /// 관대한 키 검색(부분 스캔)은 스키마 위반을 조용히 넘겨 이 불변식을 RPC마다 다르게 만들므로 응답 파싱에는 쓰지 않는다
+    /// (선택 복사만 strict이고 나머지는 관대하던 옛 혼재가 실제로 `link_at` 응답을 오파싱하는 버그를 낳았다).
+    /// 객체를 **끝까지 소비**하고(trailing garbage 거부), 중복 키·미종료 문자열·숫자 아닌 토큰을 모두 InvalidJson으로 본다.
+    fn decodeStrictObject(allocator: std.mem.Allocator, json: []const u8) error{ OutOfMemory, InvalidJson }!StrictObject {
+        var fields: std.ArrayListUnmanaged(StrictObject.Field) = .empty;
+        errdefer {
+            for (fields.items) |f| {
+                allocator.free(f.key);
+                switch (f.value) {
+                    .string => |v| allocator.free(v),
+                    .number => {},
+                }
+            }
+            fields.deinit(allocator);
+        }
         var i: usize = 0;
         skipJsonWhitespace(json, &i);
         if (i >= json.len or json[i] != '{') return error.InvalidJson;
         i += 1;
         skipJsonWhitespace(json, &i);
-        const key = try decodeStrictJsonStringAt(allocator, json, &i);
-        errdefer allocator.free(key);
+        if (i < json.len and json[i] == '}') { // 빈 객체 `{}`도 유효한 응답이다(호출자가 의미를 정한다).
+            i += 1;
+            skipJsonWhitespace(json, &i);
+            if (i != json.len) return error.InvalidJson;
+            return .{ .fields = fields.toOwnedSlice(allocator) catch return error.OutOfMemory, .allocator = allocator };
+        }
+        while (true) {
+            skipJsonWhitespace(json, &i);
+            const key = try decodeStrictJsonStringAt(allocator, json, &i);
+            var key_owned = true;
+            errdefer if (key_owned) allocator.free(key);
+            for (fields.items) |f| {
+                if (std.mem.eql(u8, f.key, key)) return error.InvalidJson; // 중복 키 = 손상.
+            }
+            skipJsonWhitespace(json, &i);
+            if (i >= json.len or json[i] != ':') return error.InvalidJson;
+            i += 1;
+            skipJsonWhitespace(json, &i);
+            if (i >= json.len) return error.InvalidJson;
+            const value: StrictObject.Value = if (json[i] == '"')
+                .{ .string = try decodeStrictJsonStringAt(allocator, json, &i) }
+            else
+                .{ .number = try decodeStrictJsonNumberAt(json, &i) };
+            fields.append(allocator, .{ .key = key, .value = value }) catch {
+                switch (value) {
+                    .string => |v| allocator.free(v),
+                    .number => {},
+                }
+                return error.OutOfMemory;
+            };
+            key_owned = false; // 목록이 소유 — 위 errdefer가 이중 free하지 않게.
+            skipJsonWhitespace(json, &i);
+            if (i >= json.len) return error.InvalidJson;
+            if (json[i] == ',') {
+                i += 1;
+                continue;
+            }
+            if (json[i] == '}') {
+                i += 1;
+                break;
+            }
+            return error.InvalidJson;
+        }
         skipJsonWhitespace(json, &i);
-        if (i >= json.len or json[i] != ':') return error.InvalidJson;
-        i += 1;
-        skipJsonWhitespace(json, &i);
-        const value = try decodeStrictJsonStringAt(allocator, json, &i);
-        errdefer allocator.free(value);
-        skipJsonWhitespace(json, &i);
-        if (i >= json.len or json[i] != '}') return error.InvalidJson;
-        i += 1;
-        skipJsonWhitespace(json, &i);
-        if (i != json.len) return error.InvalidJson;
-        return .{ .key = key, .value = value };
+        if (i != json.len) return error.InvalidJson; // trailing garbage = 손상.
+        return .{ .fields = fields.toOwnedSlice(allocator) catch return error.OutOfMemory, .allocator = allocator };
+    }
+
+    /// 응답 정수 필드(비음수). 소수점·지수·부호는 응답 schema에 없으므로 손상으로 본다(strict).
+    fn decodeStrictJsonNumberAt(json: []const u8, i: *usize) error{InvalidJson}!u64 {
+        const start = i.*;
+        while (i.* < json.len and std.ascii.isDigit(json[i.*])) i.* += 1;
+        if (i.* == start) return error.InvalidJson;
+        return std.fmt.parseInt(u64, json[start..i.*], 10) catch error.InvalidJson;
     }
 
     fn skipJsonWhitespace(json: []const u8, i: *usize) void {
@@ -1085,30 +1159,31 @@ test "remote runtime: advertised selected-text capability with a missing respons
     try std.testing.expectError(error.ConnectionClosed, client.call("host.info", null));
 }
 
-test "remote runtime: selected-text response envelope is strict while typed host errors remain valid" {
+test "remote runtime: 응답 객체 디코더는 strict다(escape·미종료·trailing·중복 키 거부)" {
     const allocator = std.testing.allocator;
-    const text = try RemoteRuntime.decodeSingleStringObject(allocator, "{\"text\":\"e\\u000a\"}");
-    defer text.deinit(allocator);
-    try std.testing.expectEqualStrings("text", text.key);
-    try std.testing.expectEqualStrings("e\n", text.value);
-
-    const typed_error = try RemoteRuntime.decodeSingleStringObject(allocator, "{\"error\":\"invalid_request\"}");
-    defer typed_error.deinit(allocator);
-    try std.testing.expectEqualStrings("error", typed_error.key);
-    try std.testing.expect(protocol.ErrorCode.fromWireName(typed_error.value) != null);
-
-    try std.testing.expectError(
-        error.InvalidJson,
-        RemoteRuntime.decodeSingleStringObject(allocator, "{\"text\":\"unterminated}"),
-    );
-    try std.testing.expectError(
-        error.InvalidJson,
-        RemoteRuntime.decodeSingleStringObject(allocator, "{\"text\":\"bad\\q\"}"),
-    );
-    try std.testing.expectError(
-        error.InvalidJson,
-        RemoteRuntime.decodeSingleStringObject(allocator, "{\"text\":\"ok\",\"extra\":\"no\"}"),
-    );
+    // 문자열 escape 해제 + 정수 필드가 한 객체에서 함께 파싱된다(selected_text와 link_at이 같은 파서를 쓴다).
+    {
+        const obj = try RemoteRuntime.decodeStrictObject(allocator, "{\"text\":\"e\\u000a\",\"kind\":1}");
+        defer obj.deinit();
+        try std.testing.expectEqualStrings("e\n", obj.string("text").?);
+        try std.testing.expectEqual(@as(u64, 1), obj.number("kind").?);
+        try std.testing.expect(obj.string("kind") == null); // 타입이 다르면 null(문자열로 읽히지 않는다)
+        try std.testing.expect(!obj.hasUnknownKey(&.{ "text", "kind" }));
+        try std.testing.expect(obj.hasUnknownKey(&.{"text"})); // 선언 밖 키 탐지
+    }
+    // typed error envelope는 그대로 유효하다(호출자가 알려진 코드인지 확인해 접는다).
+    {
+        const obj = try RemoteRuntime.decodeStrictObject(allocator, "{\"error\":\"invalid_request\"}");
+        defer obj.deinit();
+        try std.testing.expect(protocol.ErrorCode.fromWireName(obj.string("error").?) != null);
+    }
+    // 손상은 전부 InvalidJson — 호출자가 fail-close 한다(문서 §"같은 major": schema 어긋나면 downgrade 추측 금지).
+    try std.testing.expectError(error.InvalidJson, RemoteRuntime.decodeStrictObject(allocator, "{\"text\":\"unterminated}"));
+    try std.testing.expectError(error.InvalidJson, RemoteRuntime.decodeStrictObject(allocator, "{\"text\":\"bad\\q\"}"));
+    try std.testing.expectError(error.InvalidJson, RemoteRuntime.decodeStrictObject(allocator, "{\"text\":\"ok\"} trailing"));
+    try std.testing.expectError(error.InvalidJson, RemoteRuntime.decodeStrictObject(allocator, "{\"text\":\"a\",\"text\":\"b\"}"));
+    try std.testing.expectError(error.InvalidJson, RemoteRuntime.decodeStrictObject(allocator, "{\"kind\":-1}")); // 음수는 응답 schema에 없다
+    try std.testing.expectError(error.InvalidJson, RemoteRuntime.decodeStrictObject(allocator, "{\"a\":{\"b\":1}}")); // 중첩은 미지원(§한계)
 }
 
 /// `{argv:[...], cols, rows}` spawn params를 JSON으로 만든다(caller free). argv는 임의 바이트라 실 JSON encoder로 escape한다
@@ -2172,7 +2247,17 @@ test "remote runtime: takeNotification pulls a host-side OSC 9/777 desktop notif
 // 뜨는데 Cmd+클릭만 안 열리던 실제 버그다. 두 필드 파싱·escape·빈 text(링크 없음)·error를 여기서 고정한다.
 test "remote runtime: decodeLinkAtResponse는 text와 kind 두 필드를 함께 푼다" {
     const allocator = testing.allocator;
+    // schema 위반 경로가 connection을 fail-close 하므로 실 client를 붙인다(undefined client면 그 경로에서 크래시).
+    var client = client_mod.Client{
+        .allocator = allocator,
+        .fd = -1,
+        .host_id = 1,
+        .runtime_link_at_v1 = true,
+        .parser = framing.FrameParser.init(allocator),
+    };
+    defer client.deinit();
     var rt: RemoteRuntime = undefined;
+    rt.client = &client;
     rt.allocator = allocator;
 
     // url(kind 0) — 두 필드가 함께 와도 파싱된다(이전 디코더는 여기서 실패했다).
@@ -2200,55 +2285,12 @@ test "remote runtime: decodeLinkAtResponse는 text와 kind 두 필드를 함께 
     // host error 응답도 링크 없음으로 본다(연결을 죽이지 않는다).
     try testing.expect((try rt.decodeLinkAtResponse("{\"error\":\"invalid_request\"}")) == null);
 
-    // 회귀의 근본 계약: selected_text 디코더는 **필드가 정확히 하나인** 객체만 받는다. link_at 응답을 여기에
-    // 통과시키려던 것이 버그였으므로, 그 제약을 여기서 못박아 누가 다시 재사용하면 이 단언이 깨지게 한다.
-    try testing.expectError(error.InvalidJson, RemoteRuntime.decodeSingleStringObject(allocator, "{\"text\":\"x\",\"kind\":0}"));
-    {
-        const single = try RemoteRuntime.decodeSingleStringObject(allocator, "{\"text\":\"x\"}");
-        defer allocator.free(single.key);
-        defer allocator.free(single.value);
-        try testing.expectEqualStrings("text", single.key); // 단일 필드는 그대로 동작(selected_text 경로 불변).
-    }
+    // 회귀의 근본 계약: 선언 밖 필드가 섞이면 fail-close 한다(스키마 드리프트를 조용히 넘기지 않는다).
+    try testing.expectError(error.ProtocolError, rt.decodeLinkAtResponse("{\"text\":\"x\",\"kind\":0,\"extra\":\"no\"}"));
+    // kind가 빠진 응답도 success schema 위반이다 — 옛 단일-필드 디코더 재사용이 낳은 버그의 반대편 계약.
+    try testing.expectError(error.ProtocolError, rt.decodeLinkAtResponse("{\"text\":\"x\"}"));
 }
 
-test "remote runtime: decodeJsonStringField unescapes JSON string fields (parseFromSlice 대체)" {
-    const allocator = testing.allocator;
-    const decode = RemoteRuntime.decodeJsonStringField;
-
-    // 단순 값 + 둘째 필드.
-    const j1 = "{\"title\":\"Build\",\"body\":\"ok\"}";
-    const t1 = (try decode(allocator, j1, "title")).?;
-    defer allocator.free(t1);
-    try testing.expectEqualStrings("Build", t1);
-    const b1 = (try decode(allocator, j1, "body")).?;
-    defer allocator.free(b1);
-    try testing.expectEqualStrings("ok", b1);
-
-    // escape: quote/backslash/newline/tab + 제어문자 u0007.
-    const j2 = "{\"title\":\"a\\\"b\\\\c\\nd\\te\\u0007f\"}";
-    const t2 = (try decode(allocator, j2, "title")).?;
-    defer allocator.free(t2);
-    try testing.expectEqualStrings("a\"b\\c\nd\te\x07f", t2);
-
-    // 키 부재 → null.
-    try testing.expect((try decode(allocator, j1, "nope")) == null);
-
-    // 빈 값 → 빈 슬라이스(대기 알림 없음 판정용).
-    const j3 = "{\"title\":\"\",\"body\":\"\"}";
-    const t3 = (try decode(allocator, j3, "title")).?;
-    defer allocator.free(t3);
-    try testing.expectEqual(@as(usize, 0), t3.len);
-
-    // 비-ASCII(UTF-8 passthrough — Stringify 기본은 raw).
-    const j4 = "{\"body\":\"빌드 완료\"}";
-    const b4 = (try decode(allocator, j4, "body")).?;
-    defer allocator.free(b4);
-    try testing.expectEqualStrings("빌드 완료", b4);
-}
-
-// code-review #7 end-to-end — requestResync(§9 desync 복구)가 host에 fresh snapshot을 재요청하면, host가 delta가 아니라
-// **snapshot_chunk**(is_snapshot)를 push하는지 실 fork host로 고정한다. drainRemote가 GenerationGap/MalformedRow에서 이걸
-// 불러 조립기 generation을 리셋해 "영구 멈춤" 대신 복구한다. macOS opt-in(실 forkpty·socket).
 test "remote runtime: requestResync makes the host push a fresh snapshot (desync 복구)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = testing.allocator;

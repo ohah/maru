@@ -50,7 +50,7 @@ const Context = struct {
     old_path: []const u8,
     result_path: []const u8,
     scenario: []const u8,
-    owner_path: []const u8,
+    owner_dir: []const u8,
 };
 
 fn rollback(ctx: Context) noreturn {
@@ -58,7 +58,7 @@ fn rollback(ctx: Context) noreturn {
     if (c.lseek(backup_state_slot, 0, c.SEEK.SET) < 0) c._exit(121);
     const old_z = ctx.allocator.dupeZ(u8, ctx.old_path) catch c._exit(122);
     const result_z = ctx.allocator.dupeZ(u8, ctx.result_path) catch c._exit(122);
-    const owner_z = ctx.allocator.dupeZ(u8, ctx.owner_path) catch c._exit(122);
+    const owner_z = std.fmt.allocPrintSentinel(ctx.allocator, "{s}", .{ctx.owner_dir}, 0) catch c._exit(122);
     const rollback_arg: [*:0]const u8 = "--rollback-target";
     const argv = [_:null]?[*:0]const u8{ old_z.ptr, rollback_arg, result_z.ptr, owner_z.ptr };
     _ = execv(old_z.ptr, &argv);
@@ -89,7 +89,7 @@ fn restore(ctx: Context) !void {
     if (std.mem.eql(u8, ctx.scenario, "target-rollback")) return error.InjectedPreCommitFailure;
     var owner = try session_host.owner_lease.OwnerLease.adoptInherited(owner_slot);
     defer owner.deinit();
-    const owner_z = try allocator.dupeZ(u8, ctx.owner_path);
+    const owner_z = try std.fmt.allocPrintSentinel(allocator, "{s}/owner.lock", .{ctx.owner_dir}, 0);
     defer allocator.free(owner_z);
     try std.testing.expectError(error.AlreadyOwned, session_host.owner_lease.OwnerLease.acquire(owner_z));
     var session = prepared.commit();
@@ -122,10 +122,31 @@ fn restore(ctx: Context) !void {
     if (std.mem.indexOf(u8, dump, "MIGRATED:hello") == null or runtime.core.parser != .ground)
         return error.ParserContinuationFailed;
 
+    const self_path = try std.fmt.allocPrintSentinel(allocator, "{s}/self-current", .{ctx.owner_dir}, 0);
+    defer allocator.free(self_path);
+    const target_path = try std.fmt.allocPrintSentinel(allocator, "{s}/target-current", .{ctx.owner_dir}, 0);
+    defer allocator.free(target_path);
+    const previous_path = try std.fmt.allocPrintSentinel(allocator, "{s}/self-previous", .{ctx.owner_dir}, 0);
+    defer allocator.free(previous_path);
+    const owner_dir_z = try std.fmt.allocPrintSentinel(allocator, "{s}", .{ctx.owner_dir}, 0);
+    defer allocator.free(owner_dir_z);
+    const inject_promotion = std.mem.eql(u8, ctx.scenario, "target-promotion-fail");
+    const promotion = session_host.staged_image.promote(
+        owner_dir_z,
+        target_path,
+        self_path,
+        previous_path,
+        inject_promotion,
+    );
+    var capability: []const u8 = "enabled";
+    if (promotion) |_| {} else |err| {
+        if (err != error.InjectedPromotionFailure) return err;
+        capability = "withdrawn";
+    }
     const result = try std.fmt.allocPrint(
         allocator,
-        "host_pid={d}\nchild_pid={d}\nhost_id={x}\nruntime_id={x}\nowner_lease=ok\nparser=ground\nexit=23\ninput_output=ok\n",
-        .{ c.getpid(), runtime.child_pid, host.host_id, runtime.runtime_id },
+        "host_pid={d}\nchild_pid={d}\nhost_id={x}\nruntime_id={x}\nowner_lease=ok\nparser=ground\nexit=23\ninput_output=ok\nupgrade_capability={s}\n",
+        .{ c.getpid(), runtime.child_pid, host.host_id, runtime.runtime_id, capability },
     );
     defer allocator.free(result);
     try writeResult(ctx.result_path, result, allocator);
@@ -141,7 +162,7 @@ pub fn main(init: std.process.Init) !void {
         .old_path = args.next() orelse return error.MissingArgument,
         .result_path = args.next() orelse return error.MissingArgument,
         .scenario = args.next() orelse return error.MissingArgument,
-        .owner_path = args.next() orelse return error.MissingArgument,
+        .owner_dir = args.next() orelse return error.MissingArgument,
     };
     restore(ctx) catch rollback(ctx);
 }

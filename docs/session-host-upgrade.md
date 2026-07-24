@@ -382,9 +382,10 @@ absolute identity만** 기록하고 target의 page layout을 새로 만든다. s
   allowlist, exec 실패 slot rollback, child를 signal/reap하지 않는 `PreparedAdoption`, commit 전 PTY를 전혀 만지지
   않는 reader start gate를 구현했다. 별도 old/new process fixture에서 same-PID exec, 독립 primary/backup handoff,
   실제 target decode/adopt 실패의 공통 rollback handler, PTY dev/inode/rdev 교체 거부, host/child/runtime identity,
-  post-upgrade I/O와 exit exact-once, lifetime owner lease를 검증한다. 다만 old fixture가 현재 native 모듈과 함께
-  재컴파일되므로 frozen N-1 증거는 아니며, staged self-image/target preflight·2회 연속 image rotation·promotion 실패
-  capability 철회·제품 daemon graph commit은 남아 있다.
+  post-upgrade I/O와 exit exact-once, lifetime owner lease를 검증한다. target/self-image는 no-follow·same-UID
+  검증 뒤 owner-only directory에 copy/hash/sync/atomic rename하며, 성공 target의 rollback image 승격과 promotion
+  실패 시 capability 철회도 fixture로 고정했다. 다만 old fixture가 현재 native 모듈과 함께 재컴파일되므로 frozen N-1
+  증거는 아니며, 독립 target preflight process·2회 연속 image rotation·제품 daemon graph commit은 남아 있다.
 
 ### U4 — 다중 runtime과 N-1 adapter
 
@@ -393,8 +394,8 @@ absolute identity만** 기록하고 target의 page layout을 새로 만든다. s
 - 한 runtime decode가 실패하면 어떤 runtime도 commit하지 않는다는 것을 검증한다.
 - **구현 중:** connect errno와 handshake/protocol 실패를 typed outcome으로 분리해 endpoint 부재만 launch하고,
   permission/version/malformed peer는 spawn으로 우회하지 않는다. host ID별 heap-pinned client pool과 runtime→host
-  소속 seam을 추가했다. 제품 AppSession의 singleton client 교체, versioned discovery, frozen N-1 wire package/adapter,
-  current+old 동시 workspace restore E2E는 아직 남아 있다.
+  소속 seam을 추가했고 제품 AppSession의 new spawn과 workspace capture/restore가 그 pool을 통하도록 바꿨다.
+  versioned discovery, frozen N-1 wire package/adapter, current+old 동시 workspace restore E2E는 아직 남아 있다.
 
 ### U5 — 제품 활성화
 

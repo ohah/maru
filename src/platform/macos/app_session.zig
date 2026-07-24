@@ -39,6 +39,7 @@ const session_host = @import("session_host.zig"); // P3-e3: 영속 세션 host(k
 const is_macos = builtin.os.tag == .macos;
 const RemoteSessionClient = if (is_macos) session_host.client.Client else void;
 const RemoteSessionBackend = if (is_macos) session_host.remote_term_backend.RemoteTermBackend else void;
+const RemoteHostPool = if (is_macos) session_host.host_pool.HostPool(RemoteSessionClient) else void;
 extern "c" fn usleep(usec: c_uint) c_int; // P3-e3 통합 스모크(fork host 대기·pump 폴링)용. libc라 cross-platform 선언.
 const coretext_bridge = @import("coretext_smoke_bridge.zig");
 const coretext_frame_builder = @import("coretext_frame_builder.zig");
@@ -1739,6 +1740,7 @@ var app_runtime: app.AppRuntime = .{};
 // 창이 닫혀도 이 둘은 안 닫는다(routing과 동일) — 창의 원격 Term은 그 창 deinit이 backend.remove로 회수한다. macOS 전용
 // 타입이라 non-macOS면 void(barrel struct {} 제외 — [[macos-only-code-linux-crosscompile-check]]).
 var app_remote_client: ?RemoteSessionClient = null;
+var app_remote_host_pool: ?RemoteHostPool = null;
 var app_remote_backend: ?RemoteSessionBackend = null;
 // P3-e3-6 앱 종료 플래그. Cmd+Q/메뉴/마지막 창 닫기의 종료 확인이 **수락**되면(quit_decision=.accepted) 켜진다. 이후 각 창의
 // deinit이 이걸 보고 host-backed Term을 terminate 대신 **detach**한다 — 앱이 죽어도 host runtime이 살아 재실행 시 재접속한다
@@ -5573,8 +5575,30 @@ pub const AppSession = struct {
                 },
             };
             app_remote_client = client;
-            // 앱 전역 backend는 &app_remote_client.?(모듈-var 안정 주소)와 앱 전역 라우팅 표를 든다.
-            app_remote_backend = session_host.remote_term_backend.RemoteTermBackend.init(alloc, self.io, &app_remote_client.?, self.runtime);
+            app_remote_host_pool = RemoteHostPool.init(alloc);
+            app_remote_host_pool.?.addBorrowed(app_remote_client.?.host_id, &app_remote_client.?) catch {
+                app_remote_client.?.deinit();
+                app_remote_client = null;
+                app_remote_host_pool.?.deinit();
+                app_remote_host_pool = null;
+                self.markHostConnectFailedReason(.out_of_memory);
+                return;
+            };
+            app_remote_host_pool.?.setSpawnHost(app_remote_client.?.host_id) catch unreachable;
+            // backend 하나가 host pool을 통해 old/current runtime을 host_id별로 라우팅한다.
+            app_remote_backend = session_host.remote_term_backend.RemoteTermBackend.initWithPool(
+                alloc,
+                self.io,
+                &app_remote_host_pool.?,
+                self.runtime,
+            ) catch {
+                app_remote_host_pool.?.deinit();
+                app_remote_host_pool = null;
+                app_remote_client.?.deinit();
+                app_remote_client = null;
+                self.markHostConnectFailedReason(.out_of_memory);
+                return;
+            };
         }
     }
 
@@ -5676,17 +5700,21 @@ pub const AppSession = struct {
             if (is_macos and app_keep_alive_after_quit and reconnect_id.len > 0) {
                 if (reconnect_id.len != 32) return error.InvalidPersistentRuntimeIdentity;
                 const client = app_remote_client orelse return error.PersistentRuntimeUnavailable;
+                var reconnect_host = client.host_id;
                 if (reconnect_host_id.len > 0) {
-                    var host_hex_buf: [32]u8 = undefined;
-                    const current_host = std.fmt.bufPrint(&host_hex_buf, "{x:0>32}", .{client.host_id}) catch
+                    if (reconnect_host_id.len != 32) return error.InvalidPersistentRuntimeIdentity;
+                    reconnect_host = std.fmt.parseInt(u128, reconnect_host_id, 16) catch
                         return error.InvalidPersistentRuntimeIdentity;
-                    if (!std.mem.eql(u8, reconnect_host_id, current_host))
-                        return error.PersistentRuntimeUnavailable;
                 }
                 const rb = if (app_remote_backend) |*remote| remote else return error.PersistentRuntimeUnavailable;
                 var rid: [32]u8 = undefined;
                 @memcpy(&rid, reconnect_id[0..32]);
-                const attached = rb.attachTerm(id, rid, size) catch return error.PersistentRuntimeUnavailable;
+                const attached = if (app_remote_host_pool != null)
+                    rb.attachTermOnHost(reconnect_host, id, rid, size) catch return error.PersistentRuntimeUnavailable
+                else blk: {
+                    if (reconnect_host != client.host_id) return error.PersistentRuntimeUnavailable;
+                    break :blk rb.attachTerm(id, rid, size) catch return error.PersistentRuntimeUnavailable;
+                };
                 reconnected = true;
                 break :surface attached;
             }
@@ -22046,8 +22074,8 @@ pub const AppSession = struct {
                 if (is_macos and term.surface.remote != null) {
                     const rb = if (app_remote_backend) |*remote| remote else return error.PersistentRuntimeUnavailable;
                     const rid = rb.runtimeIdFor(term.rt.handle) orelse return error.PersistentRuntimeUnavailable;
-                    const client = app_remote_client orelse return error.PersistentRuntimeUnavailable;
-                    runtime_host_id = try std.fmt.allocPrint(arena, "{x:0>32}", .{client.host_id});
+                    const runtime_host = rb.runtimeHostId(term.rt.handle) orelse return error.PersistentRuntimeUnavailable;
+                    runtime_host_id = try std.fmt.allocPrint(arena, "{x:0>32}", .{runtime_host});
                     runtime_id = try arena.dupe(u8, &rid);
                 }
                 try surfaces.append(arena, .{

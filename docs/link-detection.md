@@ -144,10 +144,42 @@
   줄번호로 오인해 스트립되므로 그 파일을 못 연다. editor 관례(`file:line:col`)를 우선한 트레이드오프 — `:digits`
   파일명은 드물어 실용 영향은 낮다.
 
+## 원격(host-backed) 세션
+
+[영속 세션 호스트](persistent-session-host.md)에 붙은 Term(`surface.remote != null`)은 화면을 host가 소유한다. client의
+로컬 `TerminalCore`는 **미사용 placeholder**라(§`src/session/surface.zig` `Surface.remote` 주석) 위 감지 함수들을 그 core에
+그대로 걸면 항상 빈 화면을 읽어 **밑줄도 커서도 클릭도 전부 동작하지 않는다**. 그래서 원격 경로는 host가 해석한다 —
+"client 렌더 / host 해석" 불변식(선택 복사 `copyText`·Find가 이미 따르는 규율)을 링크에도 그대로 적용한다.
+
+| 단계 | 로컬(in-process) | 원격(host-backed) |
+|---|---|---|
+| hover 밑줄·커서 | client core를 직접 분류(`urlAnchorAt`) | host가 계산한 span을 **화면 스냅샷에 동봉**(`link_spans` record)해 client가 조회만 |
+| 클릭 열기 | client core에서 추출+resolve+stat(`extractUrlAt`) | `runtime.link_at` RPC — **host가** 추출+resolve+stat |
+
+- **왜 hover는 RPC가 아니라 스냅샷 동봉인가**: hover는 매 mouse-move(60~120Hz)라 왕복을 넣으면 커서 지연이 그대로 보인다.
+  화면이 바뀔 때만 갱신되는 span 목록을 실어 보내면 client 조회는 순수 로컬 검색이라 왕복이 0이다. `prompt_marks`(행별 OSC 133)가
+  같은 이유로 쓰는 dense full-replace 패턴을 그대로 따른다.
+- **왜 클릭은 RPC인가**: 열 대상 텍스트는 soft-wrap 이음·스크롤백 충실이 필요하고, `file_path`의 resolve(cwd)와 존재 검증(stat)은
+  **콘텐츠와 cwd를 가진 host의 파일시스템**에서 해야 맞다. client가 자기 FS로 stat하면 원격 host의 경로를 잘못 판정한다.
+  `runtime.selected_text`(선택 복사)와 같은 형태다.
+- **scope 정책은 client가 정한다**: `input.link-detection`은 client config이고 host는 이를 모른다. host는 **최대 집합(`full`)으로
+  계산**해 span마다 매치된 scope 비트를 함께 싣고, client가 자기 config로 거른다. host에 config를 미러링하는 대신 이 분리를 택한
+  이유는 (1) config 변경 때마다 host 상태를 동기화할 필요가 없고, (2) 여러 client가 서로 다른 `link-detection`으로 같은 host에
+  붙어도 각자의 정책이 적용되기 때문이다(§[다중 client](persistent-session-host.md#9-다중-client와-resize)).
+- **hover/click 불일치는 원격에서도 같다**: host의 span 계산은 stat을 하지 않고(hover), `runtime.link_at`만 resolve+stat을 한다
+  (click). 즉 아래 §hover와 click의 의도적 불일치가 로컬·원격에서 동일하게 성립한다.
+- **capability와 구 host 호환**: `runtime_link_at_v1`을 광고하지 않는 구 host에는 클릭 RPC를 보내지 않고, `link_spans`를 보내지
+  않는 구 host에서는 자동 감지가 비활성이다(OSC 8 명시 링크는 셀의 link id로 스냅샷에 이미 실려 영향 없음). 감지가 조용히 빈
+  결과를 내는 것이 잘못된 경로를 여는 것보다 안전하다.
+
 ## 코드 위치
 
-- 순수 분류: `src/terminal/selection.zig` — `linkSpanInWord`(구 `urlSpanInWord`), `LinkKind`/`LinkScopes`/`LinkSpan`.
+- 순수 분류: `src/terminal/selection.zig` — `linkSpanInWord`(구 `urlSpanInWord`), `LinkKind`/`LinkScopes`/`LinkSpan`,
+  뷰포트 전체 수집 `collectViewportLinks`(원격 host가 방출할 span 목록을 만드는 단일 출처 — 로컬 조회와 같은 분류기를 쓴다).
 - resolve+stat·facade: `src/terminal/core.zig` — `extractUrlAt`, `resolveClickedPath`, `currentCwd`(OSC 7).
+- 원격(host-backed): wire record `src/platform/macos/session_host/screen_stream.zig`(`link_spans`), host 방출
+  `screen_snapshot.zig`, client 조립 `screen_assembler.zig`·`remote_screen.zig`, 클릭 RPC `remote_runtime.zig`
+  (`runtime.link_at`)·`server.zig`. 설계 근거는 위 §원격(host-backed) 세션.
 - 플랫폼: `src/platform/macos/app_session.zig`(`urlAt`·scopes 빌드·kind·`openFilePanelPath`), `app_host_abi.{zig,h}`(`url_at` out_kind·파일 패널 ABI),
   `MaruAppHost.swift`(`handleUrlClick` — `.md`/`.html`은 도크, 그 외는 `URL(fileURLWithPath:)`/`URL(string:)`). ABI 경계는
   [macOS 앱 호스트 경계](macos-app-host-boundary.md).

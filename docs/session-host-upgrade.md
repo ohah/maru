@@ -6,7 +6,7 @@
 [Workspace Restore](workspace-restore.md), 화면 전송 codec은 `maru.screen-stream` 계약을 따른다.
 
 > **상태: U0 완료, U1 codec·U2 quiesce 핵심과 U3/U4 fixture·adapter 기반, U5 target/attempt
-> authority·durable handoff store·비활성 old-side coordinator component를 구현했다. U1~U4의 §11 전체 종료 gate와 U5 제품 daemon
+> authority·durable handoff store·비활성 old-side coordinator·실 staged-target preflight component를 구현했다. U1~U4의 §11 전체 종료 gate와 U5 제품 daemon
 > coordinator·signed update gate는 아직 열려 있고 제품 업그레이드는 비활성이다.**
 > 현재 살아 있는 host가 `host_exec_upgrade_v1`을 광고하지 않으면 새 앱은 그 host를 실행 중 교체할 수 없다.
 > 이 경우 지원하는 N-1 MRSH adapter로 attach해 기존 runtime을 그대로 쓰거나, attachment가 모두 끝난 뒤 구 host를
@@ -464,10 +464,19 @@ absolute identity만** 기록하고 target의 page layout을 새로 만든다. s
   host/epoch/lifecycle CAS로 `draining`을 durable publish한다. 이 fail-stop publish도 확정할 수 없으면 coordinator는
   `invariant_violation`을 반환해 향후 daemon 제품 배선이 즉시 process exit/manifest withdraw하도록 강제한다.
   이는 아직 실제 exec/restore 증거로 보지는 않는다.
+- `upgrade_bootstrap`은 별도 실행된 staged target에서 fd 3 외 descriptor를 거부하고, primary handoff와 embedded
+  attempt record를 같은 decoder로 전량 읽어 host/epoch/sorted runtime 집합과 현재 executable pathname의 recorded
+  inode/dev/size/SHA-256을 교차검증한다. `ProductPreflight`는 child stdio를 `/dev/null`로 고정하고 primary만 fd
+  3에 전달하며, 같은
+  absolute deadline 안에서 exit를 reap하거나 timeout이면 kill+reap한다. 실제 build된 `maru
+  __session-host --upgrade-preflight 3` 성공과 같은 inode의 corrupt handoff 거부를 process test로 검증한다. 실제
+  target/rollback restore consumer가 아직 없으므로 이 모듈은 destructive `execv` callback 자체를 노출하지 않는다.
+  restore parser/bootstrap과 executor를 같은 활성화 gate에서 추가하기 전에는 daemon이 조합할 수 없다.
 - **아직 미구현인 제품 경계:** daemon controller 설치와 completed marker 소비, quiesce 전 handoff-size/disk/I/O
   budget admission, prepare→quiesce→store→FD slot→exec→restore→manifest promotion의 제품 배선,
-  실제 `execv` executor와 별도 staged-target reader preflight, target/rollback entrypoint의 prepared runtime graph와
-  기존 restoring manifest adopt, signed frozen N-1 app artifact, 실제 update/soak, product capability 광고다.
+  실제 target executor, target/rollback entrypoint의 prepared runtime graph와 rollback self-image 회전,
+  기존 restoring manifest adopt,
+  signed frozen N-1 app artifact, 실제 update/soak, product capability 광고다.
   이 경계가 닫히기 전에는 U5 완료나 사용자-visible migration을 주장하지 않는다.
 
 U0~U4가 끝나기 전에는 “구 host session이 새 host로 migration된다”고 제품/PR에 쓰지 않는다.

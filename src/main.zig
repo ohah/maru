@@ -258,10 +258,26 @@ fn runAppPtySmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Writ
 fn runSessionHostDaemon(io: std.Io, allocator: std.mem.Allocator, args: anytype, stderr: *std.Io.Writer) !void {
     if (builtin.os.tag == .macos) {
         const session_host = @import("platform/macos/session_host.zig");
-        const session_dir = args.next() orelse {
+        const first = args.next() orelse {
             try stderr.print("usage: maru {s} <session-dir> <socket-path> <host-id>\n", .{session_host_entrypoint.subcommand});
             return error.UnknownCommand;
         };
+        if (std.mem.eql(u8, first, session_host_entrypoint.upgrade_preflight_flag)) {
+            const fd_raw = args.next() orelse return error.UnknownCommand;
+            if (args.next() != null or !std.mem.eql(u8, fd_raw, session_host_entrypoint.preflight_fd_arg))
+                return error.UnknownCommand;
+            const executable_raw = try std.process.executablePathAlloc(io, allocator);
+            defer allocator.free(executable_raw);
+            const executable = try allocator.dupeZ(u8, executable_raw);
+            defer allocator.free(executable);
+            session_host.upgrade_bootstrap.runPreflight(
+                allocator,
+                session_host_entrypoint.preflight_fd,
+                executable,
+            ) catch return error.UnknownCommand;
+            return;
+        }
+        const session_dir = first;
         const socket_path = args.next() orelse {
             try stderr.print("usage: maru {s} <session-dir> <socket-path> <host-id>\n", .{session_host_entrypoint.subcommand});
             return error.UnknownCommand;

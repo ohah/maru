@@ -5,6 +5,8 @@ const c = std.c;
 const posix = std.posix;
 extern "c" fn renamex_np(from: [*:0]const u8, to: [*:0]const u8, flags: c_uint) c_int;
 const rename_swap: c_uint = 0x00000002;
+const rename_excl: c_uint = 0x00000004;
+pub const max_staged_image_bytes: u64 = 512 * 1024 * 1024;
 
 pub const Error = error{
     InvalidDirectory,
@@ -16,6 +18,7 @@ pub const Error = error{
     SyncFailed,
     RenameFailed,
     HashMismatch,
+    StorageUnavailable,
     InjectedPromotionFailure,
     OutOfMemory,
 };
@@ -33,7 +36,7 @@ pub const StagedImage = struct {
     identity: Identity,
 
     pub fn deinit(self: *StagedImage) void {
-        _ = c.unlink(self.path.ptr);
+        removeOwnedExact(self.path, self.identity.dev, self.identity.ino);
         self.allocator.free(self.path);
         self.* = undefined;
     }
@@ -51,13 +54,36 @@ pub fn stage(
     owner_dir: [:0]const u8,
     final_name: []const u8,
 ) Error!StagedImage {
+    return stageImpl(allocator, source_path, owner_dir, final_name, false, max_staged_image_bytes);
+}
+
+/// Upgrade attempt leaf는 idempotency key의 disk identity이므로 기존 leaf를 덮어쓰지 않는다. Rollback image
+/// rotation처럼 의도적으로 교체하는 `stage`와 API를 분리해 호출자가 overwrite 의미를 추측하지 않게 한다.
+pub fn stageExclusive(
+    allocator: std.mem.Allocator,
+    source_path: [:0]const u8,
+    owner_dir: [:0]const u8,
+    final_name: []const u8,
+) Error!StagedImage {
+    return stageImpl(allocator, source_path, owner_dir, final_name, true, max_staged_image_bytes);
+}
+
+fn stageImpl(
+    allocator: std.mem.Allocator,
+    source_path: [:0]const u8,
+    owner_dir: [:0]const u8,
+    final_name: []const u8,
+    exclusive: bool,
+    max_bytes: u64,
+) Error!StagedImage {
     try validateLeaf(final_name);
     const dir_fd = try openOwnerDir(owner_dir);
     defer _ = c.close(dir_fd);
     const source_fd = c.open(source_path.ptr, .{ .ACCMODE = .RDONLY, .CLOEXEC = true, .NOFOLLOW = true }, @as(c.mode_t, 0));
-    if (source_fd < 0) return error.OpenFailed;
+    if (source_fd < 0) return error.InvalidSource;
     defer _ = c.close(source_fd);
-    try validateRegular(source_fd);
+    const source_size = try validateRegular(source_fd);
+    if (source_size > max_bytes) return error.InvalidSource;
 
     const final_path = std.fmt.allocPrintSentinel(allocator, "{s}/{s}", .{ owner_dir, final_name }, 0) catch return error.OutOfMemory;
     errdefer allocator.free(final_path);
@@ -69,13 +95,17 @@ pub fn stage(
     ) catch return error.OutOfMemory;
     defer allocator.free(tmp_path);
     _ = c.unlink(tmp_path.ptr);
+    var exclusive_object: ?ObjectIdentity = null;
+    errdefer {
+        if (exclusive_object) |object| removeOwnedExact(final_path, object.dev, object.ino);
+    }
 
     const out_fd = c.open(
         tmp_path.ptr,
         .{ .ACCMODE = .WRONLY, .CREAT = true, .EXCL = true, .CLOEXEC = true, .NOFOLLOW = true },
         @as(c.mode_t, 0o700),
     );
-    if (out_fd < 0) return error.OpenFailed;
+    if (out_fd < 0) return error.StorageUnavailable;
     var out_open = true;
     defer {
         if (out_open) _ = c.close(out_fd);
@@ -89,24 +119,32 @@ pub fn stage(
         const read_count = c.read(source_fd, &buffer, buffer.len);
         if (read_count < 0) {
             if (posix.errno(read_count) == .INTR) continue;
-            return error.ReadFailed;
+            return error.InvalidSource;
         }
         if (read_count == 0) break;
         const chunk = buffer[0..@intCast(read_count)];
         hasher.update(chunk);
         total = std.math.add(u64, total, chunk.len) catch return error.InvalidSource;
-        try writeAll(out_fd, chunk);
+        if (total > max_bytes) return error.InvalidSource;
+        writeAll(out_fd, chunk) catch return error.StorageUnavailable;
     }
-    if (c.fsync(out_fd) != 0) return error.SyncFailed;
+    if (c.fsync(out_fd) != 0) return error.StorageUnavailable;
+    const staged_object = try objectForFd(out_fd);
     _ = c.close(out_fd);
     out_open = false;
-    if (c.rename(tmp_path.ptr, final_path.ptr) != 0) return error.RenameFailed;
-    if (c.fsync(dir_fd) != 0) return error.SyncFailed;
+    if ((if (exclusive)
+        renamex_np(tmp_path.ptr, final_path.ptr, rename_excl)
+    else
+        c.rename(tmp_path.ptr, final_path.ptr)) != 0)
+        return error.StorageUnavailable;
+    if (exclusive) exclusive_object = staged_object;
+    if (c.fsync(dir_fd) != 0) return error.StorageUnavailable;
 
     var digest: [32]u8 = undefined;
     hasher.final(&digest);
-    const identity = try inspect(final_path);
-    if (identity.size != total or !std.mem.eql(u8, &identity.sha256, &digest)) return error.HashMismatch;
+    const identity = inspect(final_path) catch return error.StorageUnavailable;
+    if (identity.size != total or !std.mem.eql(u8, &identity.sha256, &digest)) return error.StorageUnavailable;
+    exclusive_object = null;
     return .{ .allocator = allocator, .path = final_path, .identity = identity };
 }
 
@@ -114,15 +152,22 @@ pub fn inspect(path: [:0]const u8) Error!Identity {
     const fd = c.open(path.ptr, .{ .ACCMODE = .RDONLY, .CLOEXEC = true, .NOFOLLOW = true }, @as(c.mode_t, 0));
     if (fd < 0) return error.OpenFailed;
     defer _ = c.close(fd);
+    return inspectFd(fd);
+}
+
+/// 이미 open된 executable inode를 pathname 재해석 없이 검증한다. `pread`라 caller의 fd offset을 바꾸지 않으며,
+/// target executor가 보유한 pinned fd와 같은 object를 hash할 수 있다.
+pub fn inspectFd(fd: c.fd_t) Error!Identity {
     var stat: posix.Stat = undefined;
     if (c.fstat(fd, &stat) != 0 or !posix.S.ISREG(stat.mode) or stat.uid != c.getuid() or
-        stat.mode & 0o022 != 0 or stat.size < 0)
+        stat.mode & 0o022 != 0 or stat.mode & 0o111 == 0 or stat.size < 0 or
+        @as(u64, @intCast(stat.size)) > max_staged_image_bytes)
         return error.InvalidSource;
     var hasher = std.crypto.hash.sha2.Sha256.init(.{});
     var total: u64 = 0;
     var buffer: [64 * 1024]u8 = undefined;
     while (true) {
-        const read_count = c.read(fd, &buffer, buffer.len);
+        const read_count = c.pread(fd, &buffer, buffer.len, @intCast(total));
         if (read_count < 0) {
             if (posix.errno(read_count) == .INTR) continue;
             return error.ReadFailed;
@@ -131,6 +176,7 @@ pub fn inspect(path: [:0]const u8) Error!Identity {
         const chunk = buffer[0..@intCast(read_count)];
         hasher.update(chunk);
         total = std.math.add(u64, total, chunk.len) catch return error.InvalidSource;
+        if (total > max_staged_image_bytes) return error.InvalidSource;
     }
     if (total != @as(u64, @intCast(stat.size))) return error.InvalidSource;
     var digest: [32]u8 = undefined;
@@ -209,11 +255,49 @@ fn openOwnerDir(path: [:0]const u8) Error!c.fd_t {
     return fd;
 }
 
-fn validateRegular(fd: c.fd_t) Error!void {
+fn validateRegular(fd: c.fd_t) Error!u64 {
     var stat: posix.Stat = undefined;
     if (c.fstat(fd, &stat) != 0 or !posix.S.ISREG(stat.mode) or stat.uid != c.getuid() or
-        stat.mode & 0o022 != 0 or stat.size < 0)
+        stat.mode & 0o022 != 0 or stat.mode & 0o111 == 0 or stat.size < 0)
         return error.InvalidSource;
+    return @intCast(stat.size);
+}
+
+const ObjectIdentity = struct {
+    dev: i64,
+    ino: u64,
+};
+
+fn inspectObject(path: [:0]const u8) Error!ObjectIdentity {
+    const fd = c.open(path.ptr, .{ .ACCMODE = .RDONLY, .CLOEXEC = true, .NOFOLLOW = true }, @as(c.mode_t, 0));
+    if (fd < 0) return error.OpenFailed;
+    defer _ = c.close(fd);
+    return objectForFd(fd);
+}
+
+fn objectForFd(fd: c.fd_t) Error!ObjectIdentity {
+    var stat: posix.Stat = undefined;
+    if (c.fstat(fd, &stat) != 0 or !posix.S.ISREG(stat.mode) or stat.uid != c.getuid())
+        return error.InvalidSource;
+    return .{ .dev = stat.dev, .ino = @intCast(stat.ino) };
+}
+
+/// Path를 먼저 exclusive tomb으로 옮기고 tomb inode를 대조한다. inspect(path)→unlink(path)처럼 두 syscall 사이
+/// replacement generation을 지우지 않으며, content/mode가 손상돼도 우리가 만든 dev/ino면 회수한다.
+fn removeOwnedExact(path: [:0]const u8, expected_dev: i64, expected_ino: u64) void {
+    var tomb_buf: [2048]u8 = undefined;
+    const tomb = std.fmt.bufPrintZ(&tomb_buf, "{s}.delete-{d}", .{ path, c.getpid() }) catch return;
+    _ = c.unlink(tomb.ptr);
+    if (renamex_np(path.ptr, tomb.ptr, rename_excl) != 0) return;
+    const actual = inspectObject(tomb) catch {
+        _ = renamex_np(tomb.ptr, path.ptr, rename_excl);
+        return;
+    };
+    if (actual.dev != expected_dev or actual.ino != expected_ino) {
+        _ = renamex_np(tomb.ptr, path.ptr, rename_excl);
+        return;
+    }
+    _ = c.unlink(tomb.ptr);
 }
 
 fn writeAll(fd: c.fd_t, bytes: []const u8) Error!void {
@@ -297,6 +381,55 @@ test "staged image rejects symlink sources and unsafe owner directories" {
     }
     try writeFixture(source, "safe");
     if (c.symlink(source.ptr, link.ptr) != 0) return error.SkipZigTest;
-    try std.testing.expectError(error.OpenFailed, stage(std.testing.allocator, link, dir, "target"));
+    try std.testing.expectError(error.InvalidSource, stage(std.testing.allocator, link, dir, "target"));
     try std.testing.expectError(error.InvalidName, stage(std.testing.allocator, source, dir, "../escape"));
+}
+
+test "staged image enforces cap and cap plus one during copy" {
+    var dir_buf: [192]u8 = undefined;
+    const dir = std.fmt.bufPrintZ(&dir_buf, "/tmp/maru-stage-cap-{d}", .{c.getpid()}) catch return error.SkipZigTest;
+    _ = c.mkdir(dir.ptr, 0o700);
+    defer _ = c.rmdir(dir.ptr);
+    var source_buf: [224]u8 = undefined;
+    const source = try std.fmt.bufPrintZ(&source_buf, "{s}/source", .{dir});
+    defer _ = c.unlink(source.ptr);
+
+    try writeFixture(source, "12345678");
+    var exact = try stageImpl(std.testing.allocator, source, dir, "exact", true, 8);
+    exact.deinit();
+    try writeFixture(source, "123456789");
+    try std.testing.expectError(
+        error.InvalidSource,
+        stageImpl(std.testing.allocator, source, dir, "too-large", true, 8),
+    );
+}
+
+test "staged image cleanup removes corrupted owned inode but preserves replacement generation" {
+    var dir_buf: [192]u8 = undefined;
+    const dir = std.fmt.bufPrintZ(&dir_buf, "/tmp/maru-stage-cleanup-{d}", .{c.getpid()}) catch return error.SkipZigTest;
+    _ = c.mkdir(dir.ptr, 0o700);
+    defer _ = c.rmdir(dir.ptr);
+    var source_buf: [224]u8 = undefined;
+    const source = try std.fmt.bufPrintZ(&source_buf, "{s}/source", .{dir});
+    defer _ = c.unlink(source.ptr);
+    try writeFixture(source, "owned-image");
+
+    var corrupted = try stageExclusive(std.testing.allocator, source, dir, "corrupted");
+    const corrupted_path = try std.testing.allocator.dupeZ(u8, corrupted.path);
+    defer std.testing.allocator.free(corrupted_path);
+    try std.testing.expect(c.chmod(corrupted.path.ptr, 0o600) == 0);
+    corrupted.deinit();
+    try std.testing.expect(c.access(corrupted_path.ptr, c.F_OK) != 0);
+
+    var replaced = try stageExclusive(std.testing.allocator, source, dir, "replaced");
+    const replaced_path = try std.testing.allocator.dupeZ(u8, replaced.path);
+    defer std.testing.allocator.free(replaced_path);
+    var original_buf: [256]u8 = undefined;
+    const original = try std.fmt.bufPrintZ(&original_buf, "{s}.original", .{replaced_path});
+    defer _ = c.unlink(original.ptr);
+    defer _ = c.unlink(replaced_path.ptr);
+    try std.testing.expect(c.rename(replaced.path.ptr, original.ptr) == 0);
+    try writeFixture(replaced_path, "replacement");
+    replaced.deinit();
+    try std.testing.expect(c.access(replaced_path.ptr, c.F_OK) == 0);
 }

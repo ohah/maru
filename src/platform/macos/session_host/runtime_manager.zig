@@ -986,17 +986,24 @@ test "runtime manager: child exit while quiesced aborts without consuming status
     defer mgr.deinit();
 
     const ops = mgr.runtimeOps();
-    _ = try ops.spawn(ops.ctx, .{
-        .argv = &.{ "/bin/sh", "-c", "sleep 0.05; exit 19" },
+    const rid = try ops.spawn(ops.ctx, .{
+        .argv = &.{"/bin/cat"},
         .cwd = null,
         .cols = 20,
         .rows = 4,
     });
+    const handle = mgr.handleFor(rid) orelse return error.TestUnexpectedResult;
+    const terminal_slot = mgr.backend_impl.terminalForHostLifecycle(handle) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(usize, 1), try mgr.requestUpgradeQuiesce());
     var attempts: usize = 0;
     while (attempts < 1000 and !mgr.upgradeQuiesceReached()) : (attempts += 1) _ = usleep(1000);
     try std.testing.expect(mgr.upgradeQuiesceReached());
-    _ = usleep(100 * 1000);
+    // Reader가 safe-point에 도달한 뒤에만 child exit를 유발해 scheduler 속도와 무관하게 "quiesce 중 exit"를 만든다.
+    try std.testing.expect(std.c.kill(terminal_slot.live_pty.session.childPid(), std.posix.SIG.TERM) == 0);
+    attempts = 0;
+    while (attempts < 2000 and !(try terminal_slot.live_pty.session.childExitedWithoutReap())) : (attempts += 1)
+        _ = usleep(1000);
+    try std.testing.expect(try terminal_slot.live_pty.session.childExitedWithoutReap());
     try std.testing.expectError(error.RuntimeNotLive, mgr.joinAndValidateUpgradeQuiesce());
 
     // waitid(WNOWAIT)는 status를 소비하지 않았다. Reader를 재개하면 EOF/exit를 owner queue로 넘기고,

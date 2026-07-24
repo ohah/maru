@@ -389,8 +389,9 @@ absolute identity만** 기록하고 target의 page layout을 새로 만든다. s
   실패 시 capability 철회도 fixture로 고정했다. old가 기록한 staged target dev/inode/size/SHA-256을 new가 promotion
   전에 다시 대조하며 path replacement failure injection도 둔다. N-1→N commit 뒤 N image로 rollback self-image를
   회전하고, 같은 PTY로 N→N+1 controlled pre-commit 실패를 일으켜 N image로 rollback하는 2회 연속 process E2E도
-  검증한다. 다만 old fixture가 현재 native 모듈과 함께 재컴파일되므로 frozen N-1 증거는 아니며, 제품 daemon graph
-  commit은 남아 있다.
+  검증한다. 두 번째 attempt의 target preflight/`exec` syscall 실패는 이미 committed N owner가 inherited slot을 닫고
+  같은 PTY에서 계속 serve하는 것도 별도로 검증한다. 다만 old fixture가 현재 native 모듈과 함께 재컴파일되므로
+  frozen N-1 증거는 아니며, 제품 daemon graph commit은 남아 있다.
 
 ### U4 — 다중 runtime과 N-1 adapter
 
@@ -400,9 +401,12 @@ absolute identity만** 기록하고 target의 page layout을 새로 만든다. s
 - **구현 중:** connect errno와 handshake/protocol 실패를 typed outcome으로 분리해 endpoint 부재만 launch하고,
   permission/version/malformed peer는 spawn으로 우회하지 않는다. host ID별 heap-pinned client pool이 제품 client를
   직접 소유하고 runtime+host lease를 단일 entry로 묶으며, 제품 AppSession의 new spawn과 workspace capture/restore가
-  그 pool을 통하도록 바꿨다. 실제 current daemon 두 개에서 host A/B spawn·exact host ID capture, active A 제거 거부,
-  A runtime 종료·host retirement 뒤 B runtime 입력/화면 지속을 process E2E로 검증한다. versioned discovery,
-  frozen N-1 wire package/adapter, current+old 동시 workspace restore E2E는 아직 남아 있다.
+  그 pool을 통하도록 바꿨다. backend process E2E는 실제 current daemon 두 개에서 host A/B spawn과
+  `runtimeHostId` seam을 검증하고, A를 non-terminating detach한 뒤 spawn host가 B인 상태에서도 saved runtime을
+  exact A로 reattach하는지, A runtime을 명시 종료하고 A client/pool entry를 제거한 뒤에도 B runtime 입력/화면이
+  지속되는지 단언한다. pool refcount는 live `RemoteRuntime.client` 메모리 borrow만 보호하며 daemon retirement의
+  SSOT가 아니다. old host 종료 가능 여부는 후속 authoritative daemon runtime inventory가 판정한다. versioned discovery,
+  frozen N-1 wire package/adapter, current+old 동시 AppSession/workspace restore E2E는 아직 남아 있다.
 
 ### U5 — 제품 활성화
 

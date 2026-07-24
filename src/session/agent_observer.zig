@@ -77,7 +77,10 @@ const claude_rules = [_]Rule{
     .{ .id = "progress_idle", .state = .idle, .priority = 870, .region = .progress, .all = &.{"4;0"}, .visible_idle = true },
     .{ .id = "progress_running", .state = .running, .priority = 895, .region = .progress, .any = &.{ "4;1", "4;2", "4;3", "4;4" }, .visible_running = true },
     .{ .id = "working_title", .state = .running, .priority = 800, .region = .title, .any = &braille_frames, .visible_running = true },
-    .{ .id = "working_footer", .state = .running, .priority = 890, .region = .screen, .any = &.{ "esc to interrupt", "esc to stop" }, .max_lines_from_bottom = 4, .visible_running = true },
+    // 실행 chrome(`esc to interrupt`)은 프롬프트 박스 아래 footer에서만 유효하다. footer region은 프롬프트/박스
+    // 아래 마지막 수평선 이후로 격리하므로, 박스 위 출력이나 scrollback에 남은 과거 `esc to interrupt`를 현재
+    // running 근거로 오인하지 않는다. 박스 없는 실행 화면은 footer가 whole tail로 폴백해 기존 동작을 유지한다.
+    .{ .id = "working_footer", .state = .running, .priority = 890, .region = .footer, .any = &.{ "esc to interrupt", "esc to stop" }, .visible_running = true },
 };
 
 const codex_rules = [_]Rule{
@@ -593,4 +596,22 @@ test "skip_state_update 규칙은 매치해도 상태를 바꾸지 않고 직전
     var s: Stabilizer = .{ .current = .running };
     try std.testing.expectEqual(State.running, s.observe(d, 10)); // 보류: running 유지
     try std.testing.expectEqual(State.running, s.observe(d, 20));
+}
+
+// ── claude working_footer의 footer region 이관 동작 ──────────────────────────
+
+test "claude working footer가 박스 없는 스트리밍 실행에서 whole tail 폴백으로 running을 유지한다" {
+    // 실제 claude 실행 화면은 박스 없이 하단에 esc 스피너만 있다. footer가 whole tail로 폴백해 running.
+    try std.testing.expectEqual(State.running, detect(.claude, .{ .screen = "● Reading files\n  Searching the codebase\nWorking… esc to interrupt" }).state);
+}
+
+test "claude working footer가 수평 구분선 아래 esc를 footer로 격리해 running으로 본다" {
+    const d = detect(.claude, .{ .screen = "prior output\n──────────\n✻ Working… (esc to interrupt)" });
+    try std.testing.expectEqual(State.running, d.state);
+    try std.testing.expect(d.visible_running);
+}
+
+test "claude working footer가 프롬프트 아래 footer가 비면 과거 esc를 running으로 보지 않는다" {
+    // 박스 위/scrollback의 과거 esc는 현재 프롬프트 아래 footer에 없다 → idle.
+    try std.testing.expectEqual(State.idle, detect(.claude, .{ .screen = "esc to interrupt earlier\nanswer text\n❯ " }).state);
 }

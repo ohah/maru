@@ -140,53 +140,16 @@ fn appendRowUtf8(out: *std.ArrayList(u8), allocator: std.mem.Allocator, row_cell
 // (wordBoundsAt) + 아래 순수 Zig 문자열 분류로 재구현한다. 공백 든 경로는 토큰 모델상 1차 미지원이고, bare
 // 경로 오탐은 클릭 시 core.zig의 존재(stat) 게이트가 거른다(hover 밑줄은 stat 없이 휴리스틱만).
 
-/// 링크 종류 — platform(Swift)이 여는 방식을 가른다: url=URL(string:), file_path=URL(fileURLWithPath:).
-pub const LinkKind = enum { url, file_path };
-
-/// 어떤 종류를 자동 감지할지(각 비트 독립). app_session이 config `input.link-detection`에서 채워 매 호출
-/// 넘긴다 — 코어는 토글 상태를 안 든다(word_separators 주입과 동형, reload-safe). OSC 8 명시 링크는 이 토글과
-/// 무관하게 항상 우선이다(호출자가 cellLinkAt로 먼저 처리).
-pub const LinkScopes = struct {
-    web: bool = false, // http:// https://
-    extra_schemes: bool = false, // file:// mailto: ssh:// ftp:// git:// tel: news: magnet:
-    absolute_path: bool = false, // /Users/x/a.zig
-    home_path: bool = false, // ~/.config
-    dot_relative: bool = false, // ./src ../lib
-    bare_relative: bool = false, // src/foo.zig (슬래시+점)
-};
-
-/// config 프리셋(osc8-only / web / full)과 1:1. osc8-only는 자동 감지를 끈다(OSC 8만).
-pub const link_scopes_none: LinkScopes = .{};
-pub const link_scopes_web: LinkScopes = .{ .web = true };
-pub const link_scopes_full: LinkScopes = .{ .web = true, .extra_schemes = true, .absolute_path = true, .home_path = true, .dot_relative = true, .bare_relative = true };
-
-/// 링크를 만들어낸 감지 종류. `LinkScopes`의 각 비트와 1:1이고 `osc8`(명시 하이퍼링크)만 추가다 — OSC 8은 scope
-/// 토글과 무관하게 항상 링크이므로 별도 값을 둔다. 원격(host-backed) 경로에서 host가 **client config를 모른 채
-/// 최대 집합으로 계산**하고 span마다 이 값을 실어 보내면, client가 자기 `input.link-detection`으로 거를 수 있다
-/// (docs/link-detection.md §원격(host-backed) 세션 — "host 해석 / client 정책" 분리). 로컬 경로는 이 값을 쓰지 않는다.
-/// wire 인코딩은 이 enum의 `@intFromEnum`을 **비트 위치**로 쓴다(docs/persistent-session-host.md §12 `link_spans`).
-pub const LinkScope = enum(u8) {
-    web = 0,
-    extra_schemes = 1,
-    absolute_path = 2,
-    home_path = 3,
-    dot_relative = 4,
-    bare_relative = 5,
-    osc8 = 6,
-
-    /// 이 종류가 주어진 scope 토글로 켜져 있는가. `osc8`은 토글과 무관하게 항상 참이다(OSC 8 우선 규칙).
-    pub fn enabledIn(self: LinkScope, scopes: LinkScopes) bool {
-        return switch (self) {
-            .web => scopes.web,
-            .extra_schemes => scopes.extra_schemes,
-            .absolute_path => scopes.absolute_path,
-            .home_path => scopes.home_path,
-            .dot_relative => scopes.dot_relative,
-            .bare_relative => scopes.bare_relative,
-            .osc8 => true,
-        };
-    }
-};
+// 링크 도메인 타입(LinkKind/LinkScopes/LinkScope/ViewportLink)은 types.zig가 소유한다 — RenderSnapshot이
+// ViewportLink를 실어야 하는데(원격 host가 해석한 링크) types→selection import는 순환이기 때문이다. 여기선
+// 기존 호출자(selection.LinkKind 등)를 위해 재노출만 한다.
+pub const LinkKind = types.LinkKind;
+pub const LinkScopes = types.LinkScopes;
+pub const LinkScope = types.LinkScope;
+pub const ViewportLink = types.ViewportLink;
+pub const link_scopes_none = types.link_scopes_none;
+pub const link_scopes_web = types.link_scopes_web;
+pub const link_scopes_full = types.link_scopes_full;
 
 /// 토큰(공백 없는 글자열) 안 첫 링크의 [start, end) 바이트 범위 + 종류 + 그 매치를 만든 감지 종류.
 pub const LinkSpan = struct { start: usize, end: usize, kind: LinkKind, scope: LinkScope };
@@ -611,10 +574,6 @@ pub fn urlSpanAtAbs(self: *const TerminalCore, anchor: types.SelectionPoint) ?ty
     const bounds = wordBoundsAt(self, vp_row, anchor.col) orelse return null;
     return clipAbsSpanToViewport(self, bounds.start, bounds.end, false);
 }
-
-/// 뷰포트에서 보이는 링크 하나 — 밑줄 범위(뷰포트 상대) + 종류 + 그 매치를 만든 감지 종류.
-/// `collectViewportLinks`가 채우고, 원격 경로에서 host가 wire로 실어 client의 hover 판정 입력이 된다.
-pub const ViewportLink = struct { span: types.SelectionSpan, kind: LinkKind, scope: LinkScope };
 
 /// 추출한 링크: raw 텍스트(호출자 free) + 종류. file_path는 raw 경로 텍스트(`:line:col` 포함 가능)이고
 /// resolve/존재검증은 core.zig facade(extractUrlAt)가 한다. url은 OSC 8 URI나 스킴 URL을 그대로 담는다.

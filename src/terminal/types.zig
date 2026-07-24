@@ -295,6 +295,58 @@ pub const PlacementGeometry = struct {
     }
 };
 
+/// 링크 종류 — platform(Swift)이 여는 방식을 가른다: url=URL(string:), file_path=URL(fileURLWithPath:).
+pub const LinkKind = enum { url, file_path };
+
+/// 어떤 종류를 자동 감지할지(각 비트 독립). app_session이 config `input.link-detection`에서 채워 매 호출
+/// 넘긴다 — 코어는 토글 상태를 안 든다(word_separators 주입과 동형, reload-safe). OSC 8 명시 링크는 이 토글과
+/// 무관하게 항상 우선이다(호출자가 cellLinkAt로 먼저 처리).
+pub const LinkScopes = struct {
+    web: bool = false, // http:// https://
+    extra_schemes: bool = false, // file:// mailto: ssh:// ftp:// git:// tel: news: magnet:
+    absolute_path: bool = false, // /Users/x/a.zig
+    home_path: bool = false, // ~/.config
+    dot_relative: bool = false, // ./src ../lib
+    bare_relative: bool = false, // src/foo.zig (슬래시+점)
+};
+
+/// config 프리셋(osc8-only / web / full)과 1:1. osc8-only는 자동 감지를 끈다(OSC 8만).
+pub const link_scopes_none: LinkScopes = .{};
+pub const link_scopes_web: LinkScopes = .{ .web = true };
+pub const link_scopes_full: LinkScopes = .{ .web = true, .extra_schemes = true, .absolute_path = true, .home_path = true, .dot_relative = true, .bare_relative = true };
+
+/// 링크를 만들어낸 감지 종류. `LinkScopes`의 각 비트와 1:1이고 `osc8`(명시 하이퍼링크)만 추가다 — OSC 8은 scope
+/// 토글과 무관하게 항상 링크이므로 별도 값을 둔다. 원격(host-backed) 경로에서 host가 **client config를 모른 채
+/// 최대 집합으로 계산**하고 span마다 이 값을 실어 보내면, client가 자기 `input.link-detection`으로 거를 수 있다
+/// (docs/link-detection.md §원격(host-backed) 세션 — "host 해석 / client 정책" 분리). 로컬 경로는 이 값을 쓰지 않는다.
+/// wire 인코딩은 이 enum의 `@intFromEnum`을 **비트 위치**로 쓴다(docs/persistent-session-host.md §12 `link_spans`).
+pub const LinkScope = enum(u8) {
+    web = 0,
+    extra_schemes = 1,
+    absolute_path = 2,
+    home_path = 3,
+    dot_relative = 4,
+    bare_relative = 5,
+    osc8 = 6,
+
+    /// 이 종류가 주어진 scope 토글로 켜져 있는가. `osc8`은 토글과 무관하게 항상 참이다(OSC 8 우선 규칙).
+    pub fn enabledIn(self: LinkScope, scopes: LinkScopes) bool {
+        return switch (self) {
+            .web => scopes.web,
+            .extra_schemes => scopes.extra_schemes,
+            .absolute_path => scopes.absolute_path,
+            .home_path => scopes.home_path,
+            .dot_relative => scopes.dot_relative,
+            .bare_relative => scopes.bare_relative,
+            .osc8 => true,
+        };
+    }
+};
+
+/// 뷰포트에서 보이는 링크 하나 — 밑줄 범위(뷰포트 상대) + 종류 + 그 매치를 만든 감지 종류.
+/// `collectViewportLinks`가 채우고, 원격 경로에서 host가 wire로 실어 client의 hover 판정 입력이 된다.
+pub const ViewportLink = struct { span: SelectionSpan, kind: LinkKind, scope: LinkScope };
+
 pub const RenderSnapshot = struct {
     size: Size,
     cursor: Cursor = .{},
@@ -322,6 +374,11 @@ pub const RenderSnapshot = struct {
     // 뷰포트에서도 보이는 행에 맞춰 합성된다. 마킹이 없으면 전부 {.unknown, null}이라 렌더러는
     // 무시해도 된다. 거터(✓/✗)는 prompt 시작 행의 exit로 색을 정한다.
     prompt_marks: []const RowPrompt = &.{},
+    // 뷰포트에서 보이는 링크(자동 감지 + OSC 8) — **원격(host-backed) 화면 소스에서만 채워진다**. 로컬 in-process
+    // 화면은 client가 자기 core를 직접 분류하므로(hover 시점 계산) 항상 빈 슬라이스이고, 이 필드를 읽지 않는다.
+    // 원격은 client core가 빈 placeholder라 스스로 감지할 수 없어, host가 해석한 결과를 이 중립 DTO에 실어 보낸다
+    // (docs/link-detection.md §원격(host-backed) 세션). 소스 메모리를 alias하므로 lock 안에서 읽고 복사해야 한다.
+    links: []const ViewportLink = &.{},
     // 가장 최근에 끝난 명령의 종료코드(OSC 133 ; D ; <code>). 없으면 null. shell이 음수(-1 등)를
     // 보낼 수 있어 i32. **주의: 거터는 이 값이 아니라 `prompt_marks[행].exit`(행별)로 그린다** —
     // 이건 MARU_DEBUG 덤프 헤더용 편의 값이라 거터/UI를 여기에 연결하지 말 것.

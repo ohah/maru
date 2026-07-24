@@ -27,6 +27,10 @@ pub const SelectionSpan = types.SelectionSpan;
 // 링크 자동 감지(URL·파일 경로) 타입 — platform(app_session)이 config 범위를 scopes로 빌드해 core로 넘긴다.
 pub const LinkKind = selection.LinkKind;
 pub const LinkScopes = selection.LinkScopes;
+// 원격(host-backed) 세션에서 host가 계산해 client에 실어 보내는 뷰포트 링크 — scope는 client가 자기 config로
+// 거르는 근거다(docs/link-detection.md §원격(host-backed) 세션).
+pub const LinkScope = selection.LinkScope;
+pub const ViewportLink = selection.ViewportLink;
 pub const ExtractedLink = selection.ExtractedLink;
 pub const link_scopes_none = selection.link_scopes_none;
 pub const link_scopes_web = selection.link_scopes_web;

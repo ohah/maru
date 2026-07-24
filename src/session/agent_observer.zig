@@ -89,6 +89,8 @@ const claude_rules = [_]Rule{
     // 가드가 현재 프롬프트를 잔상으로 오인하므로(실측), prompt_anchor가 프롬프트 라인 자체를 앵커로 쓴다.
     .{ .id = "live_prompt", .state = .idle, .priority = 900, .region = .prompt_anchor, .line_prefixes = &.{"❯"}, .visible_idle = true },
     .{ .id = "idle_title", .state = .idle, .priority = 880, .region = .title, .any = &.{"✳"}, .visible_idle = true },
+    // OSC 9;4(ConEmu progress)는 실측에서 두 provider 모두 emit하지 않았다 — 현재 발화하지 않는 규칙이다.
+    // 표준 기반 데이터라 존치하되 근거 있는 값으로 오해하지 않도록 남긴다(docs/agent-session.md «실측 신호 기록»).
     .{ .id = "progress_idle", .state = .idle, .priority = 870, .region = .progress, .all = &.{"4;0"}, .visible_idle = true },
     .{ .id = "progress_running", .state = .running, .priority = 895, .region = .progress, .any = &.{ "4;1", "4;2", "4;3", "4;4" }, .visible_running = true },
     // 작업 중에도 composer가 열려 있어 live_prompt와 동시에 매치되므로 idle보다 우선한다(실측).
@@ -103,6 +105,8 @@ const codex_rules = [_]Rule{
     // Codex는 turn 실행 중에도 아래 composer를 열어 steering 입력을 받는다. 따라서 prompt가 더 아래에 있어도
     // `esc to interrupt`가 현재 tail에 함께 보이면 idle 근거가 아니다(실제 0.144.5 UI).
     .{ .id = "live_prompt", .state = .idle, .priority = 900, .region = .screen, .line_prefixes = &.{ "›", "❯" }, .none = &.{ "allow command?", "esc to interrupt" }, .max_lines_from_bottom = 4, .visible_idle = true },
+    // OSC 9;4(ConEmu progress)는 실측에서 두 provider 모두 emit하지 않았다 — 현재 발화하지 않는 규칙이다.
+    // 표준 기반 데이터라 존치하되 근거 있는 값으로 오해하지 않도록 남긴다(docs/agent-session.md «실측 신호 기록»).
     .{ .id = "progress_idle", .state = .idle, .priority = 870, .region = .progress, .all = &.{"4;0"}, .visible_idle = true },
     .{ .id = "progress_running", .state = .running, .priority = 895, .region = .progress, .any = &.{ "4;1", "4;2", "4;3", "4;4" }, .visible_running = true },
     .{ .id = "working_title", .state = .running, .priority = 950, .region = .title, .leading_codepoint_ranges = &.{braille_block}, .visible_running = true },

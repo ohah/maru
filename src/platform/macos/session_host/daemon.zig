@@ -27,6 +27,13 @@ const screen_stream = @import("screen_stream.zig");
 const short_endpoint = @import("short_endpoint.zig");
 const protocol = @import("protocol.zig");
 const host_authority = @import("host_authority.zig");
+const staged_image = @import("staged_image.zig");
+const rollback_image = @import("rollback_image.zig");
+const upgrade_target = @import("upgrade_target.zig");
+const code_signature = @import("code_signature.zig");
+const upgrade_owner = @import("upgrade_owner.zig");
+const upgrade_executor = @import("upgrade_executor.zig");
+const upgrade_loop = @import("upgrade_loop.zig");
 
 pub const RunError = socket_server.BindError || error{ OutOfMemory, OwnerLeaseFailed, ManifestFailed };
 
@@ -132,6 +139,64 @@ fn runSessionHostImpl(
     defer allocator.free(executable_path);
     const build_id = host_manifest.buildIdForExecutable(allocator, executable_path) catch return error.ManifestFailed;
     defer allocator.free(build_id);
+    var host_dir_buf: [768]u8 = undefined;
+    const host_dir = if (exact_host_id) |exact|
+        host_manifest.hostDirPathIn(&host_dir_buf, dir_path, exact) catch
+            return error.ManifestFailed
+    else
+        dir_path;
+    var rollback_authority: ?rollback_image.Authority = null;
+    defer if (rollback_authority) |*rollback| rollback.deinit();
+    var signature_authorizer = code_signature.Authorizer{
+        .io = io,
+        .current_executable = executable_path,
+    };
+    var target_stager = upgrade_target.Stager{
+        .owner_dir = host_dir,
+        .authorizer = signature_authorizer.ops(),
+    };
+    var upgrade_attempt_owner: ?upgrade_owner.UpgradeOwner = null;
+    defer if (upgrade_attempt_owner) |*owner| owner.deinit();
+    var product_executor: upgrade_executor.ProductExecutor = .{
+        .allocator = allocator,
+    };
+    if (exact_host_id != null) {
+        if (staged_image.inspect(executable_path)) |running_identity| {
+            if (rollback_image.Authority.prepare(
+                allocator,
+                executable_path,
+                running_identity,
+                host_dir,
+            )) |prepared_rollback| {
+                rollback_authority = prepared_rollback;
+                // The app/updater pathname can be replaced while this daemon
+                // lives. The canonical self-image is owner-only and promotion
+                // rotates its contents while keeping this path stable.
+                signature_authorizer.current_executable =
+                    rollback_authority.?.image.path;
+                upgrade_attempt_owner = upgrade_owner.UpgradeOwner.init(
+                    allocator,
+                    target_stager.ops(),
+                    .{
+                        .ctx = &registry,
+                        .is_busy = struct {
+                            fn busy(ctx: *anyopaque) bool {
+                                const runtime_registry: *reg.TerminalRuntimeRegistry =
+                                    @ptrCast(@alignCast(ctx));
+                                return runtime_registry.attachmentCount() != 0;
+                            }
+                        }.busy,
+                    },
+                );
+            } else |_| {
+                // Keep-alive is the primary service. If live-upgrade staging
+                // cannot be prepared, serve normally without advertising it.
+            }
+        } else |_| {
+            // buildIdForExecutable already validated launch identity, but an
+            // exact reinspection race only disables upgrade capability.
+        }
+    }
     var published_manifest: ?host_manifest.Published = null;
     if (exact_host_id != null) {
         published_manifest = host_manifest.publish(allocator, dir_path, .{
@@ -158,6 +223,10 @@ fn runSessionHostImpl(
     else
         null;
     defer if (authority) |*owner| owner.deinit();
+    if (authority) |*owner| {
+        if (upgrade_attempt_owner) |*upgrade_owner_value|
+            owner.installUpgradeController(upgrade_owner_value.ops());
+    }
     server.runtime_ops = manager.runtimeOps(); // 이제 이 host는 read-only가 아니라 runtime.spawn/terminate를 처리한다.
     var admission_gate = upgrade.AdmissionGate.init(io);
     server.admission_gate = &admission_gate;
@@ -173,7 +242,25 @@ fn runSessionHostImpl(
         server.tickOwner();
         switch (server.pollReady(poll_timeout_ms)) {
             .ready => {
-                server.serveOnce() catch {}; // 개별 연결 오류(write 실패 등)는 host를 죽이지 않는다.
+                if (upgrade_loop.serveOne(&server) == .fail_stop)
+                    return error.ManifestFailed;
+                if (upgrade_attempt_owner != null and
+                    rollback_authority != null and
+                    upgrade_loop.processCompleted(&server, .{
+                        .allocator = allocator,
+                        .io = io,
+                        .owner = &upgrade_attempt_owner.?,
+                        .manager = &manager,
+                        .gate = &admission_gate,
+                        .lifetime_owner = &lifetime_owner,
+                        .rollback_authority = &rollback_authority.?,
+                        .authority = authority.?.upgradeAuthority(),
+                        .executor = product_executor.ops(),
+                        .owner_dir = host_dir,
+                        .session_dir = dir_path,
+                        .socket_path = socket_path,
+                    }) == .fail_stop)
+                    return error.ManifestFailed;
                 if (test_oneshot) break;
             },
             .timeout => {

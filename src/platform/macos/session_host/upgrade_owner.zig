@@ -140,6 +140,7 @@ pub const UpgradeOwner = struct {
     allocator: std.mem.Allocator,
     target_stager: TargetStager,
     busy_probe: ?BusyProbe = null,
+    accepting_new_attempts: bool = true,
     attempt: ?Attempt = null,
     completed: [max_completed]Completed = undefined,
     completed_count: usize = 0,
@@ -180,6 +181,13 @@ pub const UpgradeOwner = struct {
         };
     }
 
+    /// Promotion failure 뒤 이미 연결된 client가 복사해 둔 Ops도 새 prepare를
+    /// 시작하지 못하게 owner 자체에 영구 latch를 건다. 완료 attempt의
+    /// status/idempotent replay는 아래 stagePending 앞부분에서 계속 허용한다.
+    pub fn disableNewAttempts(self: *UpgradeOwner) void {
+        self.accepting_new_attempts = false;
+    }
+
     /// 같은 ID와 동일 immutable target은 write-failure retry를 위해 idempotent하게 accepted한다. 다른 ID나 같은
     /// ID의 다른 target은 기존 attempt 실행 권위를 바꾸지 않고 conflict다.
     pub fn stagePending(self: *UpgradeOwner, candidate: wire.PrepareRequest) wire.PrepareDecision {
@@ -197,6 +205,7 @@ pub const UpgradeOwner = struct {
             else
                 .conflict;
         }
+        if (!self.accepting_new_attempts) return .unsupported;
         if (self.completed_count == max_completed) return .resource_exhausted;
         if (self.busy_probe) |probe| {
             if (probe.is_busy(probe.ctx)) return .busy;
@@ -812,6 +821,45 @@ test "upgrade owner stages atomically and enforces exact idempotency" {
     try std.testing.expectEqual(wire.PrepareDecision.conflict, owner.stagePending(testRequest(1, "/target-b")));
     try std.testing.expectEqual(wire.PrepareDecision.conflict, owner.stagePending(testRequest(2, "/target-a")));
     try std.testing.expectEqual(wire.AttemptStatus.pending, owner.status(1).?.status);
+}
+
+test "upgrade owner disables new attempts through already-copied ops" {
+    var owner = UpgradeOwner.init(std.testing.allocator, TestStager.ops(), null);
+    defer owner.deinit();
+    const connected_ops = owner.ops();
+    const completed_request = testRequest(2, "/completed");
+    try std.testing.expectEqual(
+        wire.PrepareDecision.accepted,
+        owner.stagePending(completed_request),
+    );
+    try std.testing.expectEqual(wire.ArmDecision.armed, owner.armAccepted(2));
+    _ = owner.beginExecution(2).?;
+    try std.testing.expect(owner.finish(
+        2,
+        .{ .status = .resumed, .reason = .exec_failed },
+    ));
+    owner.disableNewAttempts();
+    const replay = connected_ops.stage_pending(
+        connected_ops.ctx,
+        completed_request,
+    );
+    try std.testing.expect(replay == .completed);
+    try std.testing.expectEqual(
+        wire.AttemptStatus.resumed,
+        replay.completed.status,
+    );
+    try std.testing.expectEqual(
+        wire.AttemptStatus.resumed,
+        connected_ops.status(connected_ops.ctx, 2).?.status,
+    );
+    try std.testing.expectEqual(
+        wire.PrepareDecision.unsupported,
+        connected_ops.stage_pending(
+            connected_ops.ctx,
+            testRequest(3, "/target"),
+        ),
+    );
+    try std.testing.expect(owner.status(3) == null);
 }
 
 test "upgrade owner requires reply arm before exactly one execution" {

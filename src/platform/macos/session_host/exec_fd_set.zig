@@ -92,6 +92,50 @@ pub const PreparedSlots = struct {
     }
 };
 
+/// Restore image가 working CLOEXEC descriptors를 모두 만든 뒤 inherited
+/// rollback authority를 durable commit 시점까지 보존하고, 그 직후 한 번에
+/// 닫았음을 증명하는 token.
+pub const InheritedCloseToken = struct {
+    slots: [max_slots]c.fd_t = undefined,
+    len: usize = 0,
+    consumed: bool = false,
+
+    pub fn prepareExact(requested: []const c.fd_t) Error!InheritedCloseToken {
+        if (requested.len > max_slots) return error.TooManyOpenFds;
+        var prepared: PreparedSlots = .{};
+        for (requested, 0..) |slot, index| {
+            if (slot < 3 or !isOpen(slot)) return error.SourceClosed;
+            if (try closeOnExec(slot)) return error.SourceNotCloexec;
+            for (requested[0..index]) |prior|
+                if (prior == slot) return error.DuplicateSlot;
+            prepared.slots[index] = slot;
+        }
+        prepared.len = requested.len;
+        try prepared.assertExactNonCloexec(&.{});
+        var result: InheritedCloseToken = .{ .len = requested.len };
+        @memcpy(result.slots[0..requested.len], requested);
+        return result;
+    }
+
+    /// POSIX close 뒤 fd number는 오류 반환과 무관하게 재사용될 수 있으므로
+    /// retry하지 않는다. 이후 process의 non-CLOEXEC set이 비었는지를 별도
+    /// 전량 scan해 reader release gate로 쓴다.
+    pub fn closeAndVerify(self: *InheritedCloseToken) Error!void {
+        if (self.consumed) return;
+        self.consumed = true;
+        for (self.slots[0..self.len]) |slot| {
+            _ = c.close(slot);
+            // Restore bootstrap is still single-threaded and readers remain
+            // behind their start gate, so no legitimate opener can reuse an
+            // inherited slot during this exact closure pass.
+            if (isOpen(slot)) return error.UnexpectedInheritedFd;
+        }
+        var remaining: [max_slots]c.fd_t = undefined;
+        if (try collectNonCloexec(&remaining) != 0)
+            return error.UnexpectedInheritedFd;
+    }
+};
+
 /// Handoff capture 전에 전체 inherited slot을 CLOEXEC placeholder로 점유해, 이후 store/preflight가 여는 fd와
 /// logical slot이 충돌하지 않게 한다. replace는 예약된 exact slot만 실제 resource로 바꾸며 rollback은 placeholder와
 /// 교체된 slot 모두를 닫는다.
@@ -270,6 +314,29 @@ test "exec fd set rejects occupied and duplicate reserved slots without changing
     const slot = freeSlot(200) orelse return error.SkipZigTest;
     try prepared.prepare(pipe_fds[0], slot);
     try std.testing.expectError(error.DuplicateSlot, prepared.prepare(pipe_fds[1], slot));
+}
+
+test "restore inherited close token consumes the exact non-cloexec set" {
+    var pipe_fds: [2]c.fd_t = undefined;
+    if (c.pipe(&pipe_fds) != 0) return error.SkipZigTest;
+    defer {
+        _ = c.close(pipe_fds[0]);
+        _ = c.close(pipe_fds[1]);
+    }
+    try setCloseOnExec(pipe_fds[0], true);
+    var runner_fds: [max_slots]c.fd_t = undefined;
+    const runner_fd_count = try collectNonCloexec(&runner_fds);
+    for (runner_fds[0..runner_fd_count]) |fd| try setCloseOnExec(fd, true);
+    defer for (runner_fds[0..runner_fd_count]) |fd|
+        setCloseOnExec(fd, false) catch {};
+    const slot = freeSlot(240) orelse return error.SkipZigTest;
+    var prepared: PreparedSlots = .{};
+    defer prepared.rollback();
+    try prepared.prepare(pipe_fds[0], slot);
+    var close_token = try InheritedCloseToken.prepareExact(&.{slot});
+    try close_token.closeAndVerify();
+    try std.testing.expect(!isOpen(slot));
+    try close_token.closeAndVerify();
 }
 
 test "exec fd set capacity includes maximum runtime graph and fixed upgrade roles" {

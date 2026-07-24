@@ -21,6 +21,8 @@ const upgrade_limits = @import("upgrade_limits.zig");
 const upgrade_owner = @import("upgrade_owner.zig");
 extern "c" fn getdtablesize() c_int;
 extern "c" fn execv(path: [*:0]const u8, argv: [*:null]const ?[*:0]const u8) c_int;
+extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
+extern "c" fn unsetenv(name: [*:0]const u8) c_int;
 
 pub const Error = error{
     InvalidFd,
@@ -198,6 +200,23 @@ pub const RestoreValidated = struct {
             self.state.attempt.deadline_expires_at_ns,
         ) catch return error.InvalidState;
     }
+
+    pub fn prepareInheritedClose(
+        self: *const RestoreValidated,
+    ) Error!exec_fd_set.InheritedCloseToken {
+        var slots: [exec_fd_set.max_slots]c.fd_t = undefined;
+        var count: usize = 0;
+        for (self.state.host.runtimes) |runtime| {
+            slots[count] = runtime.fd_slot;
+            count += 1;
+        }
+        slots[count] = self.inherited.primary;
+        slots[count + 1] = self.inherited.backup;
+        slots[count + 2] = self.inherited.owner;
+        return exec_fd_set.InheritedCloseToken.prepareExact(
+            slots[0 .. count + 3],
+        ) catch return error.InvalidFd;
+    }
 };
 
 /// Product preflight entrypoint. Exec가 CLOEXEC descriptor를 이미 제거한 뒤라 `handoff_fd` 외 fd 3+가 있으면
@@ -250,8 +269,8 @@ fn decodeValidated(
 /// Target/rollback restore가 destructive state를 만들기 전의 typed authority gate. Target은 primary/backup의
 /// exact bytes를 요구하고, rollback은 손상될 수 있는 primary의 provenance만 확인한 뒤 독립 backup을 읽는다.
 /// 두 role 모두 PTY/owner identity와 CLI path/ID를 검증하며, process executable handle의 exact object identity를
-/// staged target 또는 attempt에 고정된 self-image에 결합한다. Product main은 validation-only로 호출하지만 실제
-/// prepared graph/executor가 없으므로 test 전용 gate 외에는 성공 종료하지 않는다.
+/// staged target 또는 attempt에 고정된 self-image에 결합한다. 제품 main은 이 token을 실제 restore activation으로
+/// 넘기고, 별도 compile-time test artifact만 validation-only에서 성공 종료한다.
 pub fn readRestoreInvocation(
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -259,6 +278,17 @@ pub fn readRestoreInvocation(
 ) Error!RestoreValidated {
     return readRestoreInvocationForExecutable(
         allocator,
+        invocation,
+        try inspectRunningExecutable(io),
+    );
+}
+
+pub fn validateArmedCurrentExecutable(
+    armed: *RestoreArmed,
+    io: std.Io,
+    invocation: entrypoint.RestoreInvocation,
+) Error!RestoreValidated {
+    return armed.validateRoleExecutable(
         invocation,
         try inspectRunningExecutable(io),
     );
@@ -360,7 +390,8 @@ fn validateImageExecutable(
 /// `executablePathAlloc` 문자열은 macOS에서 `/tmp`와 `/private/tmp`처럼 같은 vnode를 다른 철자로
 /// 돌려줄 수 있어 raw pathname equality를 권위로 쓰지 않는다. 다만 Zig의 macOS `openExecutable`도
 /// `_NSGetExecutablePath` 결과를 다시 여는 구현이므로 여기서 증명하는 것은 reopened pathname object
-/// identity까지다. 실제 loaded image pin은 future executor가 verified fd를 상속해야 닫힌다.
+/// identity까지다. macOS 공개 API에 fd-based exec가 없으므로 kernel-loaded image pin은 제품 목표에서
+/// 제외하고, 이 pathname identity를 same-release signer와 same-UID owner boundary와 함께 최종 계약으로 쓴다.
 fn inspectRunningExecutable(io: std.Io) Error!staged_image.Identity {
     const executable = std.process.openExecutable(io, .{}) catch
         return error.InvalidExecutable;
@@ -676,9 +707,9 @@ test "target and rollback bootstrap validate exact zero-runtime inherited proces
     try runRestoreGateChild(target_invocation, target_path, false);
     try runRestoreGateChild(rollback_invocation, rollback_authority.image.path, true);
 
-    // 제품 `maru`는 같은 identity-valid restore를 끝까지 검증해도 compile-time gate가
-    // false라 반드시 non-zero여야 한다. Test artifact만 성공한다는 build isolation 회귀를
-    // 실제 product process로 고정한다.
+    // 제품 `maru`도 같은 identity-valid restore를 validation-only로 끝내지
+    // 않고 full zero-runtime activation을 수행한다. oneshot 환경에서 closed
+    // admission→ready commit→FD cleanup→serve loop까지 성공 종료한다.
     corrupt_slot.rollback();
     _ = c.close(layout.backupSlot());
     const product_raw = c.getenv("MARU_SESSION_HOST_PRODUCT_EXE") orelse return error.SkipZigTest;
@@ -768,7 +799,93 @@ test "target and rollback bootstrap validate exact zero-runtime inherited proces
     try product_slots.prepare(product_pair.backup_fd, layout.backupSlot());
     var product_invocation = target_invocation;
     product_invocation.attempt_id = 1;
-    try runRestoreGateChild(product_invocation, product_target.path, false);
+    const restoring_descriptor: host_manifest.Descriptor = .{
+        .host_id = host_id,
+        .build_id = build_id,
+        .protocol_major = @import("protocol.zig").version_major,
+        .screen_codec_version = @import("screen_stream.zig").codec_version,
+        .upgrade_epoch = 4,
+        .lifecycle = .restoring,
+        .endpoint = socket_path,
+    };
+    var restoring_manifest = try host_manifest.publish(
+        std.testing.allocator,
+        session_dir,
+        restoring_descriptor,
+    );
+    defer restoring_manifest.deinit();
+    var activation_marker_buf: [192]u8 = undefined;
+    const activation_marker = try std.fmt.bufPrintZ(
+        &activation_marker_buf,
+        "/tmp/maru-restore-activation-{d}",
+        .{c.getpid()},
+    );
+    _ = c.unlink(activation_marker.ptr);
+    defer _ = c.unlink(activation_marker.ptr);
+    if (setenv(
+        "MARU_SESSION_HOST_ACTIVATION_MARKER",
+        activation_marker.ptr,
+        1,
+    ) != 0) return error.TestUnexpectedResult;
+    defer _ = unsetenv("MARU_SESSION_HOST_ACTIVATION_MARKER");
+
+    // Owner lease 채택 뒤 manifest lifecycle mismatch를 주입한다. Target
+    // precommit unwind가 owner pathname을 지우면 뒤이은 canonical rollback
+    // fixture의 owner fd/path 교차검증이 실패하므로 child 성공이 cleanup
+    // authority를 durable ready commit 전에는 갖지 않음을 증명한다.
+    var ready_before_target = restoring_descriptor;
+    ready_before_target.lifecycle = .ready;
+    try restoring_manifest.republish(ready_before_target);
+    try runRestoreGateChild(product_invocation, product_target.path, true);
+    const precommit_marker = c.open(
+        activation_marker.ptr,
+        .{ .ACCMODE = .RDONLY, .CLOEXEC = true, .NOFOLLOW = true },
+        @as(c.mode_t, 0),
+    );
+    if (precommit_marker >= 0) {
+        _ = c.close(precommit_marker);
+        return error.TestUnexpectedResult;
+    }
+    try restoring_manifest.republish(restoring_descriptor);
+
+    // Target primary가 손상돼도 backup/owner authority를 먼저 arm한 같은
+    // product process가 canonical rollback image를 one-shot exec한다.
+    // rollback fixture는 validation-only라 disk authority를 소비하지 않고
+    // 성공 종료해, 이어지는 정상 target activation도 같은 fixture에서
+    // 검증할 수 있다.
+    product_slots.rollback();
+    const corrupt_product_primary = try openTruncatedUnlinkedCopy(
+        host_dir,
+        product_handoff,
+    );
+    defer _ = c.close(corrupt_product_primary);
+    try product_slots.prepare(
+        corrupt_product_primary,
+        layout.primarySlot(),
+    );
+    try product_slots.prepare(product_pair.backup_fd, layout.backupSlot());
+    try runRestoreGateChild(product_invocation, product_target.path, true);
+    const absent_marker = c.open(
+        activation_marker.ptr,
+        .{ .ACCMODE = .RDONLY, .CLOEXEC = true, .NOFOLLOW = true },
+        @as(c.mode_t, 0),
+    );
+    if (absent_marker >= 0) {
+        _ = c.close(absent_marker);
+        return error.TestUnexpectedResult;
+    }
+
+    product_slots.rollback();
+    try product_slots.prepare(product_pair.primary_fd, layout.primarySlot());
+    try product_slots.prepare(product_pair.backup_fd, layout.backupSlot());
+    try runRestoreGateChild(product_invocation, product_target.path, true);
+    const ready_marker = c.open(
+        activation_marker.ptr,
+        .{ .ACCMODE = .RDONLY, .CLOEXEC = true, .NOFOLLOW = true },
+        @as(c.mode_t, 0),
+    );
+    if (ready_marker < 0) return error.TestUnexpectedResult;
+    _ = c.close(ready_marker);
 }
 
 fn openTruncatedUnlinkedCopy(owner_dir: [:0]const u8, bytes: []const u8) !c.fd_t {

@@ -288,8 +288,22 @@ fn runSessionHostDaemon(io: std.Io, allocator: std.mem.Allocator, args: anytype,
                 return;
             },
             .restore => |restore| {
-                // 현재는 destructive executor가 노출되지 않은 validation-only entrypoint다. Prepared runtime graph와
-                // authority commit을 같은 activation gate에서 연결하기 전에는 inherited PTY를 adopt하거나 닫지 않는다.
+                if (!session_host_build_options.allow_validation_only_restore) {
+                    session_host.restore_activation.run(
+                        allocator,
+                        io,
+                        restore,
+                    ) catch |err| {
+                        try stderr.print(
+                            "maru session host restore activation failed: {s}\n",
+                            .{@errorName(err)},
+                        );
+                        return error.UnknownCommand;
+                    };
+                    return;
+                }
+                // Dedicated fixture는 destructive activation 대신 bootstrap
+                // compatibility만 확인한다.
                 var validated = session_host.upgrade_bootstrap.readRestoreInvocation(
                     allocator,
                     io,
@@ -302,13 +316,6 @@ fn runSessionHostDaemon(io: std.Io, allocator: std.mem.Allocator, args: anytype,
                     return error.UnknownCommand;
                 };
                 validated.deinit();
-                if (!session_host_build_options.allow_validation_only_restore) {
-                    // Prepared runtime graph와 authority commit이 아직 배선되지 않은 제품 build에서
-                    // validation 성공을 restore 성공으로 오인하지 않는다. 이 분기는 capability/executor가
-                    // 꺼져 있어 제품에서 도달하면 안 되며, 도달 자체를 명시적 실패로 관측한다.
-                    try stderr.writeAll("maru session host restore executor is not available\n");
-                    return error.UnknownCommand;
-                }
                 return;
             },
             .daemon => |daemon| {

@@ -5,6 +5,7 @@ const maru = @import("maru");
 const session_host = @import("session_host");
 const c = std.c;
 extern "c" fn execv(path: [*:0]const u8, argv: [*:null]const ?[*:0]const u8) c_int;
+extern "c" fn usleep(usec: c_uint) c_int;
 
 const pty_slot: c.fd_t = 40;
 const primary_state_slot: c.fd_t = 41;
@@ -45,9 +46,7 @@ fn readState(allocator: std.mem.Allocator, fd: c.fd_t) ![]u8 {
     return bytes;
 }
 
-fn validateState(allocator: std.mem.Allocator, fd: c.fd_t) !void {
-    const bytes = try readState(allocator, fd);
-    defer allocator.free(bytes);
+fn validateStateBytes(allocator: std.mem.Allocator, bytes: []const u8) !void {
     var host = try session_host.handoff_codec.decodeHost(allocator, bytes);
     defer host.deinit();
     if (host.host_id != host_id_sentinel or host.runtimes.len != 1 or
@@ -69,9 +68,24 @@ fn redirectStdioToDevNull() !void {
     }
 }
 
-fn runTargetPreflight(target_path: [:0]const u8, primary_fd: c.fd_t, scenario: [:0]const u8) !bool {
+const PreflightOutcome = enum { passed, rejected, cleanup_failed };
+
+fn killAndReap(pid: c.pid_t) bool {
+    _ = c.kill(pid, .KILL);
+    var status: c_int = undefined;
+    var attempts: usize = 0;
+    while (attempts < 1000) : (attempts += 1) {
+        const waited = c.waitpid(pid, &status, c.W.NOHANG);
+        if (waited == pid) return true;
+        if (waited < 0 and std.posix.errno(waited) != .INTR) return false;
+        _ = usleep(1000);
+    }
+    return false;
+}
+
+fn runTargetPreflight(target_path: [:0]const u8, primary_fd: c.fd_t, scenario: [:0]const u8) PreflightOutcome {
     const pid = c.fork();
-    if (pid < 0) return error.ForkFailed;
+    if (pid < 0) return .cleanup_failed;
     if (pid == 0) {
         redirectStdioToDevNull() catch c._exit(125);
         var slots: session_host.exec_fd_set.PreparedSlots = .{};
@@ -83,13 +97,15 @@ fn runTargetPreflight(target_path: [:0]const u8, primary_fd: c.fd_t, scenario: [
         c._exit(125);
     }
     var status: c_int = undefined;
-    while (true) {
-        const waited = c.waitpid(pid, &status, 0);
-        if (waited == pid) break;
-        if (waited < 0 and std.posix.errno(waited) == .INTR) continue;
-        return error.WaitFailed;
+    var attempts: usize = 0;
+    while (attempts < 5000) : (attempts += 1) {
+        const waited = c.waitpid(pid, &status, c.W.NOHANG);
+        if (waited == pid) return if (status == 0) .passed else .rejected;
+        if (waited < 0 and std.posix.errno(waited) != .INTR)
+            return if (killAndReap(pid)) .cleanup_failed else .cleanup_failed;
+        _ = usleep(1000);
     }
-    return status == 0;
+    return if (killAndReap(pid)) .rejected else .cleanup_failed;
 }
 
 fn writeResult(path: []const u8, text: []const u8, allocator: std.mem.Allocator) !void {
@@ -175,12 +191,31 @@ pub fn main(init: std.process.Init) !void {
     if (std.mem.eql(u8, new_path, "--rollback-target")) {
         const rollback_result = args.next() orelse return error.MissingArgument;
         const rollback_owner_dir = args.next() orelse return error.MissingArgument;
+        const rollback_dev = try std.fmt.parseInt(i64, args.next() orelse return error.MissingArgument, 10);
+        const rollback_ino = try std.fmt.parseInt(u64, args.next() orelse return error.MissingArgument, 10);
+        const rollback_size = try std.fmt.parseInt(u64, args.next() orelse return error.MissingArgument, 10);
+        const rollback_sha_hex = args.next() orelse return error.MissingArgument;
+        if (rollback_sha_hex.len != 64 or args.next() != null) return error.InvalidIdentity;
+        var rollback_sha256: [32]u8 = undefined;
+        const decoded = try std.fmt.hexToBytes(&rollback_sha256, rollback_sha_hex);
+        if (decoded.len != rollback_sha256.len) return error.InvalidIdentity;
+        const rollback_identity: session_host.staged_image.Identity = .{
+            .dev = rollback_dev,
+            .ino = rollback_ino,
+            .size = rollback_size,
+            .sha256 = rollback_sha256,
+        };
+        if (!session_host.staged_image.identityEqual(
+            rollback_identity,
+            try session_host.staged_image.inspect(executable_path),
+        )) return error.StagedIdentityChanged;
         return rollbackTarget(allocator, rollback_result, rollback_owner_dir);
     }
     const state_path = args.next() orelse return error.MissingArgument;
     const result_path = args.next() orelse return error.MissingArgument;
     const scenario = args.next() orelse "success";
     const owner_dir = args.next() orelse return error.MissingArgument;
+    const next_path = args.next() orelse return error.MissingArgument;
     const owner_dir_z = try allocator.dupeZ(u8, owner_dir);
     defer allocator.free(owner_dir_z);
     var self_image = try session_host.staged_image.stage(allocator, executable_path, owner_dir_z, "self-current");
@@ -244,6 +279,26 @@ pub fn main(init: std.process.Init) !void {
         if (c.fsync(write_fd) != 0) return error.SyncFailed;
         _ = c.close(write_fd);
     }
+    if (std.mem.eql(u8, scenario, "backup-divergent")) {
+        var divergent_runtime = runtime;
+        divergent_runtime[0].resize_generation += 1;
+        const divergent_bytes = try session_host.handoff_codec.encodeHost(allocator, .{
+            .host_id = host_id_sentinel,
+            .upgrade_epoch = 1,
+            .next_handle = 8,
+            .runtimes = &divergent_runtime,
+        });
+        defer allocator.free(divergent_bytes);
+        const divergent_fd = c.open(
+            backup_z.ptr,
+            .{ .ACCMODE = .WRONLY, .TRUNC = true, .CLOEXEC = true },
+            @as(c.mode_t, 0),
+        );
+        if (divergent_fd < 0) return error.OpenFailed;
+        defer _ = c.close(divergent_fd);
+        try writeAll(divergent_fd, divergent_bytes);
+        if (c.fsync(divergent_fd) != 0) return error.SyncFailed;
+    }
     if (std.mem.eql(u8, scenario, "target-decode-fail") or std.mem.eql(u8, scenario, "backup-decode-fail")) {
         const corrupt_path = if (std.mem.eql(u8, scenario, "target-decode-fail")) state_z else backup_z;
         const corrupt_fd = c.open(corrupt_path.ptr, .{ .ACCMODE = .WRONLY, .CLOEXEC = true }, @as(c.mode_t, 0));
@@ -263,7 +318,21 @@ pub fn main(init: std.process.Init) !void {
     try setCloseOnExec(backup_read_fd);
     const scenario_z = try allocator.dupeZ(u8, scenario);
     defer allocator.free(scenario_z);
-    validateState(allocator, primary_read_fd) catch {
+    const next_path_z = try allocator.dupeZ(u8, next_path);
+    defer allocator.free(next_path_z);
+    const primary_readback = try readState(allocator, primary_read_fd);
+    defer allocator.free(primary_readback);
+    const backup_readback = try readState(allocator, backup_read_fd);
+    defer allocator.free(backup_readback);
+    if (!std.mem.eql(u8, primary_readback, backup_readback)) {
+        try finishRuntime(allocator, &session, &core, "preflight\n", "MIGRATED:preflight");
+        return writeResult(
+            result_path,
+            "old_preflight_failed_resumed=ok\nowner_lease=ok\nparser=ground\nexit=23\n",
+            allocator,
+        );
+    }
+    validateStateBytes(allocator, primary_readback) catch {
         try finishRuntime(allocator, &session, &core, "preflight\n", "MIGRATED:preflight");
         return writeResult(
             result_path,
@@ -271,15 +340,7 @@ pub fn main(init: std.process.Init) !void {
             allocator,
         );
     };
-    validateState(allocator, backup_read_fd) catch {
-        try finishRuntime(allocator, &session, &core, "preflight\n", "MIGRATED:preflight");
-        return writeResult(
-            result_path,
-            "old_preflight_failed_resumed=ok\nowner_lease=ok\nparser=ground\nexit=23\n",
-            allocator,
-        );
-    };
-    if (!try runTargetPreflight(target_image.path, primary_read_fd, scenario_z)) {
+    if (runTargetPreflight(target_image.path, primary_read_fd, scenario_z) != .passed) {
         try finishRuntime(allocator, &session, &core, "preflight\n", "MIGRATED:preflight");
         return writeResult(
             result_path,
@@ -324,6 +385,15 @@ pub fn main(init: std.process.Init) !void {
     const target_sha_hex = std.fmt.bytesToHex(target_image.identity.sha256, .lower);
     const target_sha_z = try allocator.dupeZ(u8, &target_sha_hex);
     defer allocator.free(target_sha_z);
+    const rollback_dev_z = try std.fmt.allocPrintSentinel(allocator, "{d}", .{self_image.identity.dev}, 0);
+    defer allocator.free(rollback_dev_z);
+    const rollback_ino_z = try std.fmt.allocPrintSentinel(allocator, "{d}", .{self_image.identity.ino}, 0);
+    defer allocator.free(rollback_ino_z);
+    const rollback_size_z = try std.fmt.allocPrintSentinel(allocator, "{d}", .{self_image.identity.size}, 0);
+    defer allocator.free(rollback_size_z);
+    const rollback_sha_hex = std.fmt.bytesToHex(self_image.identity.sha256, .lower);
+    const rollback_sha_z = try allocator.dupeZ(u8, &rollback_sha_hex);
+    defer allocator.free(rollback_sha_z);
     const argv = [_:null]?[*:0]const u8{
         target_image.path.ptr,
         self_image.path.ptr,
@@ -334,6 +404,11 @@ pub fn main(init: std.process.Init) !void {
         target_ino_z.ptr,
         target_size_z.ptr,
         target_sha_z.ptr,
+        rollback_dev_z.ptr,
+        rollback_ino_z.ptr,
+        rollback_size_z.ptr,
+        rollback_sha_z.ptr,
+        next_path_z.ptr,
     };
     var replacement_image: ?session_host.staged_image.StagedImage = null;
     defer {

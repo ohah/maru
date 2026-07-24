@@ -5,7 +5,8 @@
 [영속 터미널 세션 호스트](persistent-session-host.md), workspace의 `runtime-handle` 저장은
 [Workspace Restore](workspace-restore.md), 화면 전송 codec은 `maru.screen-stream` 계약을 따른다.
 
-> **상태: U0~U2 구현·자동 검증 완료, U3 same-PID exec·rollback 기반 구현 중. 제품 업그레이드는 아직 비활성이다.**
+> **상태: U0 완료, U1 codec·U2 quiesce 핵심 구현과 U3 same-PID exec·rollback 검증 행렬 구현 중.
+> U1/U2의 §11 전체 종료 gate는 아직 열려 있고 제품 업그레이드는 비활성이다.**
 > 현재 살아 있는 host가 `host_exec_upgrade_v1`을 광고하지 않으면 새 앱은 그 host를 실행 중 교체할 수 없다.
 > 이 경우 지원하는 N-1 MRSH adapter로 attach해 기존 runtime을 그대로 쓰거나, attachment가 모두 끝난 뒤 구 host를
 > 계속 drain한다. **attachment가 0이어도 runtime이 하나라도 살아 있으면 구 host를 종료하지 않으며, runtime count가
@@ -386,8 +387,10 @@ absolute identity만** 기록하고 target의 page layout을 새로 만든다. s
   post-upgrade I/O와 exit exact-once, lifetime owner lease를 검증한다. target/self-image는 no-follow·same-UID
   검증 뒤 owner-only directory에 copy/hash/sync/atomic rename하며, 성공 target의 rollback image 승격과 promotion
   실패 시 capability 철회도 fixture로 고정했다. old가 기록한 staged target dev/inode/size/SHA-256을 new가 promotion
-  전에 다시 대조하며 path replacement failure injection도 둔다. 다만 old fixture가 현재 native 모듈과 함께
-  재컴파일되므로 frozen N-1 증거는 아니며, 2회 연속 image rotation·제품 daemon graph commit은 남아 있다.
+  전에 다시 대조하며 path replacement failure injection도 둔다. N-1→N commit 뒤 N image로 rollback self-image를
+  회전하고, 같은 PTY로 N→N+1 controlled pre-commit 실패를 일으켜 N image로 rollback하는 2회 연속 process E2E도
+  검증한다. 다만 old fixture가 현재 native 모듈과 함께 재컴파일되므로 frozen N-1 증거는 아니며, 제품 daemon graph
+  commit은 남아 있다.
 
 ### U4 — 다중 runtime과 N-1 adapter
 

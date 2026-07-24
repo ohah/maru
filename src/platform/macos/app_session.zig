@@ -55267,3 +55267,48 @@ test "packLinkScopes: config 프리셋을 wire 비트로 굽는다(LinkScope 값
     try std.testing.expectEqual(@as(u8, 1) << @intCast(@intFromEnum(terminal.LinkScope.home_path)), AppSession.packLinkScopes(.{ .home_path = true }));
     try std.testing.expectEqual(@as(u8, 1) << @intCast(@intFromEnum(terminal.LinkScope.bare_relative)), AppSession.packLinkScopes(.{ .bare_relative = true }));
 }
+
+// 로컬(in-process) Cmd+hover 회귀 가드. host-backed 분기를 넣으면서 hoverCursor가 두 갈래가 됐으므로, 원격을
+// 고치다 로컬을 깨뜨리지 않았는지 함께 고정한다. 로컬은 client core가 실제 화면을 가지므로 예전처럼 core를 직접
+// 분류하고(절대 좌표 anchor), 원격 목록(RenderSnapshot.links)은 쓰지 않는다.
+test "로컬 hover: client core를 직접 분류해 밑줄과 링크 커서가 뜬다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 6,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    session.window_padding_px = .{};
+    _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
+
+    const surface = session.activeSurface();
+    try std.testing.expect(surface.remote == null); // 이 세션은 in-process다(원격 분기가 아님).
+    {
+        surface.lockCore(session.io);
+        defer surface.unlockCore(session.io);
+        try surface.core.write("\x1b[2J\x1b[Hgo https://example.com/page now");
+    }
+
+    const rect = session.active_pane_rect;
+    const cw: f64 = @floatFromInt(session.cell_width_px);
+    const ch: f64 = @floatFromInt(session.cell_height_px);
+    const on_url = @as(f64, @floatFromInt(rect.x)) + 10.5 * cw;
+    const row0 = @as(f64, @floatFromInt(rect.y)) + 0.5 * ch;
+
+    try std.testing.expectEqual(CursorKind.link, session.hoverCursor(on_url, row0, 32));
+    const span = session.hoverLinkSpan() orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u16, 3), span.start.col); // "go " 다음 토큰 전체가 밑줄
+    try std.testing.expectEqual(@as(u16, 26), span.end.col);
+
+    // 링크 밖·수식키 없음은 밑줄 없음(로컬 게이트도 그대로).
+    try std.testing.expectEqual(CursorKind.text, session.hoverCursor(@as(f64, @floatFromInt(rect.x)) + 1.5 * cw, row0, 32));
+    try std.testing.expect(session.hoverLinkSpan() == null);
+    try std.testing.expectEqual(CursorKind.text, session.hoverCursor(on_url, row0, 0));
+    try std.testing.expect(session.hoverLinkSpan() == null);
+}

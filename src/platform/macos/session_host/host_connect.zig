@@ -26,6 +26,22 @@ pub const Options = struct {
     connect_delay_ms: u32 = 20,
 };
 
+pub const FailureReason = enum {
+    invalid_endpoint,
+    endpoint_denied,
+    incompatible_version,
+    handshake_failed,
+    protocol_error,
+    launch_failed,
+    startup_timeout,
+    out_of_memory,
+};
+
+pub const Outcome = union(enum) {
+    connected: client_mod.Client,
+    failed: FailureReason,
+};
+
 /// host에 연결하거나(있으면) detached helper를 띄워 연결한다(§10 connect-first→start-lock→spawn). 반환 `Client`는
 /// **caller 소유**(deinit 책임). `null`이면 host를 못 얻었다(권한 거부·spawn 실패·denied 등) — caller는 in-process로
 /// 폴백한다. `exe_path`=현재 maru 실행 파일(helper로 exec), `base_cache_dir`=user cache dir(그 아래 `session-host/`).
@@ -35,80 +51,104 @@ pub fn connectOrLaunch(
     base_cache_dir: []const u8,
     opts: Options,
 ) ?client_mod.Client {
-    if (builtin.os.tag != .macos) return null;
+    return switch (connectOrLaunchDetailed(allocator, exe_path, base_cache_dir, opts)) {
+        .connected => |client| client,
+        .failed => null,
+    };
+}
+
+pub fn connectOrLaunchDetailed(
+    allocator: std.mem.Allocator,
+    exe_path: [:0]const u8,
+    base_cache_dir: []const u8,
+    opts: Options,
+) Outcome {
+    if (builtin.os.tag != .macos) return .{ .failed = .invalid_endpoint };
 
     var dir_buf: [512]u8 = undefined;
-    const dir = discovery.sessionHostDirPath(&dir_buf, base_cache_dir) catch return null;
+    const dir = discovery.sessionHostDirPath(&dir_buf, base_cache_dir) catch return .{ .failed = .invalid_endpoint };
     var sock_buf: [640]u8 = undefined;
-    const socket = discovery.socketPathIn(&sock_buf, dir) catch return null;
+    const socket = discovery.socketPathIn(&sock_buf, dir) catch return .{ .failed = .invalid_endpoint };
 
     // 1. connect-first(§10): 있으면 바로 쓴다.
-    var first = tryConnect(allocator, socket);
-    switch (discovery.afterConnect(.spawn_ready, first.probe)) {
-        .use_connection => return first.client,
-        .need_start_lock => {}, // 아래 start-lock 경로.
-        // host_unavailable(spawn_ready라 안 옴)·fail_denied·기타 → in-process 폴백.
-        else => {
-            if (first.client) |*cl| cl.deinit();
-            return null;
-        },
+    switch (tryConnect(allocator, socket)) {
+        .connected => |client| return .{ .connected = client },
+        .absent => {},
+        .transient => return connectWithBackoffDetailed(allocator, socket, opts),
+        .failed => |reason| return .{ .failed = reason },
     }
 
     // 2. need_start_lock: lock 파일을 열고 nonblocking flock으로 "내가 시작 책임인가"를 가른다. lock은 fd close로 해제되며,
     // spawn+재connect가 끝날 때까지(defer) 잡고 있어 동시 시작자들이 하나의 host로 수렴하게 한다(daemon은 socket bind가
     // liveness라 lock을 안 쓴다 — 순수 시작 직렬화용).
     ensureDir(dir);
-    const lock_fd = openLock(dir) orelse return null; // lock 못 열면(권한 등) 폴백.
+    const lock_fd = openLock(dir) orelse return .{ .failed = .endpoint_denied };
     defer _ = c.close(lock_fd);
     const lock_probe: discovery.LockProbe = if (flock(lock_fd, LOCK_EX | LOCK_NB) == 0) .acquired else .contended;
 
     // 3. lock 취득/경합 뒤 다시 connect(§10 "lock 직전 race"): 그 사이 다른 프로세스가 bind했을 수 있다.
-    var second = tryConnect(allocator, socket);
-    switch (discovery.afterStartLock(lock_probe, second.probe)) {
-        .use_connection => return second.client, // 방금 다른 winner가 띄운 host.
-        .spawn_host => {
-            if (second.client) |*cl| cl.deinit(); // 방어(연결됐으면 use_connection이었어야).
-            // detached helper 띄우기: `maru __session-host <socket>`(daemon이 socket dirname으로 dir 도출).
-            launcher.spawnSessionHostDetached(allocator, exe_path, socket) catch return null;
-            return connectWithBackoff(allocator, socket, opts); // 뜰 때까지 재시도.
-        },
-        .wait_and_connect => {
-            if (second.client) |*cl| cl.deinit();
-            return connectWithBackoff(allocator, socket, opts); // loser는 winner의 host를 기다린다.
-        },
-        // fail_denied 등 → 폴백.
-        else => {
-            if (second.client) |*cl| cl.deinit();
-            return null;
-        },
+    switch (tryConnect(allocator, socket)) {
+        .connected => |client| return .{ .connected = client },
+        .transient => return connectWithBackoffDetailed(allocator, socket, opts),
+        .failed => |reason| return .{ .failed = reason },
+        .absent => {},
     }
+    if (lock_probe == .contended) return connectWithBackoffDetailed(allocator, socket, opts);
+
+    // detached helper 띄우기: `maru __session-host <socket>`(daemon이 socket dirname으로 dir 도출).
+    launcher.spawnSessionHostDetached(allocator, exe_path, socket) catch return .{ .failed = .launch_failed };
+    return connectWithBackoffDetailed(allocator, socket, opts);
 }
 
-const ConnectResult = struct { probe: discovery.ConnectProbe, client: ?client_mod.Client };
+const TryConnectResult = union(enum) {
+    connected: client_mod.Client,
+    absent,
+    transient,
+    failed: FailureReason,
+};
 
-/// 한 번 connect를 시도해 probe와(성공 시) Client를 함께 준다. `ConnectFailed`=host 없음(absent, spawn 가능), 그 외
-/// 오류=denied(host가 있으나 못 씀 — spawn-storm 방지로 폴백). 성공하면 client를 담아 돌려준다(caller가 소유/deinit).
-fn tryConnect(allocator: std.mem.Allocator, socket: [:0]const u8) ConnectResult {
-    if (client_mod.Client.connect(allocator, socket, "gui")) |cl| {
-        return .{ .probe = .connected, .client = cl };
+fn connectFailure(err: client_mod.ClientError) TryConnectResult {
+    return switch (err) {
+        error.EndpointAbsent => .absent,
+        error.EndpointTransient => .transient,
+        error.EndpointDenied => .{ .failed = .endpoint_denied },
+        error.IncompatibleVersion => .{ .failed = .incompatible_version },
+        error.HandshakeFailed, error.ConnectionClosed, error.WriteFailed => .{ .failed = .handshake_failed },
+        error.ProtocolError, error.EventQueueFull => .{ .failed = .protocol_error },
+        error.OutOfMemory => .{ .failed = .out_of_memory },
+    };
+}
+
+test "host_connect preserves endpoint and handshake failure classes" {
+    try testing.expect(connectFailure(error.EndpointAbsent) == .absent);
+    try testing.expect(connectFailure(error.EndpointTransient) == .transient);
+    try testing.expectEqual(FailureReason.endpoint_denied, connectFailure(error.EndpointDenied).failed);
+    try testing.expectEqual(FailureReason.incompatible_version, connectFailure(error.IncompatibleVersion).failed);
+    try testing.expectEqual(FailureReason.handshake_failed, connectFailure(error.ConnectionClosed).failed);
+    try testing.expectEqual(FailureReason.protocol_error, connectFailure(error.ProtocolError).failed);
+    try testing.expectEqual(FailureReason.out_of_memory, connectFailure(error.OutOfMemory).failed);
+}
+
+/// 한 번 connect를 시도하되 endpoint 부재/권한/일시 오류와 wire 실패를 잃지 않는다.
+fn tryConnect(allocator: std.mem.Allocator, socket: [:0]const u8) TryConnectResult {
+    if (client_mod.Client.connect(allocator, socket, "gui")) |client| {
+        return .{ .connected = client };
     } else |err| {
-        return .{
-            .probe = switch (err) {
-                error.ConnectFailed => .absent,
-                else => .denied, // IncompatibleVersion·HandshakeFailed 등: host는 있으나 못 씀 → 새로 안 띄운다.
-            },
-            .client = null,
-        };
+        return connectFailure(err);
     }
 }
 
-fn connectWithBackoff(allocator: std.mem.Allocator, socket: [:0]const u8, opts: Options) ?client_mod.Client {
+fn connectWithBackoffDetailed(allocator: std.mem.Allocator, socket: [:0]const u8, opts: Options) Outcome {
     var attempts: usize = 0;
     while (attempts < opts.connect_attempts) : (attempts += 1) {
-        if (client_mod.Client.connect(allocator, socket, "gui")) |cl| return cl else |_| {}
+        switch (tryConnect(allocator, socket)) {
+            .connected => |client| return .{ .connected = client },
+            .absent, .transient => {},
+            .failed => |reason| return .{ .failed = reason },
+        }
         _ = usleep(opts.connect_delay_ms * 1000);
     }
-    return null;
+    return .{ .failed = .startup_timeout };
 }
 
 /// session-host 디렉터리를 0700으로 만든다(best-effort — EEXIST 무해). lock 파일 생성에 필요하다. 소유/perm의 진짜

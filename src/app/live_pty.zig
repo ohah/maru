@@ -9,6 +9,8 @@ const pty_reader = @import("pty_reader.zig");
 const core_command = @import("../session/core_command.zig");
 const control_surface = @import("../session/control_surface.zig"); // SurfaceKind(terminal|web) — union 태그(web-panel.md §6 4e)
 
+extern "c" fn usleep(usec: c_uint) c_int;
+
 /// 입력 방향 write 큐 버퍼링 상한(바이트). 키 입력은 작아 paste 뒤에 막히지 않을 만큼 넉넉하게 두고, 큰
 /// paste는 per-tick enqueueSome으로 흘려보낸다(상한 초과분은 다음 tick). 사전 할당 없이 필요 시 이만큼까지 grow.
 const pty_write_queue_capacity: usize = 1 << 18; // 256 KiB
@@ -76,6 +78,7 @@ pub const LivePtySession = struct {
     pty_id: runtime_mod.PtyId,
     link: ?runtime_mod.RuntimeLink = null,
     reader_finished: bool = false,
+    reader_failed: bool = false,
 
     pub fn init(
         self: *LivePtySession,
@@ -181,6 +184,7 @@ pub const LivePtySession = struct {
 
     pub fn deinit(self: *LivePtySession) void {
         self.close();
+        self.reader.deinit();
         self.command_queue.deinit();
         self.allocator.destroy(self.command_queue);
         self.write_queue.deinit();
@@ -267,6 +271,52 @@ pub const LivePtySession = struct {
         self.command_queue.close(); // 위임 명령 큐도 닫아 메인 enqueue 대기를 QueueClosed로 푼다(미적용 명령 폐기)
     }
 
+    /// reader I/O 오류는 child 종료 증거가 아니다. host owner drain은 thread handle만 회수하고 PTY/child를
+    /// 살려 unusable runtime으로 남긴다. 사용자가 명시적으로 close할 때 아래 close의 reader_finished 분기가
+    /// session.close를 호출해 그때 child를 정리한다.
+    pub fn finishAfterReadError(self: *LivePtySession) void {
+        if (!self.reader_finished) {
+            self.reader.join();
+            self.reader_finished = true;
+            self.reader_failed = true;
+        }
+    }
+
+    /// Host upgrade가 child/fd/queue를 건드리지 않고 reader safe-point를 요청한다.
+    pub fn requestUpgradePause(self: *LivePtySession) !void {
+        if (self.reader_finished) return error.ReaderFinished;
+        try self.reader.requestPause();
+    }
+
+    pub fn upgradePauseReached(self: *const LivePtySession) bool {
+        return !self.reader_finished and self.reader.pauseReached();
+    }
+
+    /// reader가 safe-point를 publish한 뒤 thread handle만 회수한다. PTY와 queue는 열린 채다.
+    pub fn joinUpgradePause(self: *LivePtySession) bool {
+        if (self.reader_finished or !self.reader.pauseReached()) return false;
+        self.reader.join();
+        return self.reader.pausedStateIsSafe();
+    }
+
+    /// U2 실패 rollback. 이미 join된 paused reader만 같은 owner graph 위에서 다시 시작한다.
+    pub fn resumeAfterUpgradePause(self: *LivePtySession) !void {
+        if (self.reader_finished) return error.ReaderFinished;
+        try self.reader.resumeAfterPause();
+    }
+
+    pub fn cancelUpgradePause(self: *LivePtySession) void {
+        if (!self.reader_finished) self.reader.cancelPause();
+    }
+
+    pub fn upgradeEligible(self: *LivePtySession) bool {
+        return !self.reader_finished and self.session.upgradeEligible() and self.queue.emptyAndOpen();
+    }
+
+    pub fn upgradePausedAndSafe(self: *LivePtySession) bool {
+        return !self.reader_finished and self.reader.pausedStateIsSafe() and self.queue.emptyAndOpen();
+    }
+
     pub fn detachSurface(self: *LivePtySession, runtime: *runtime_mod.SurfaceRuntime) void {
         // Pane close는 surface routing부터 끊어야 한다. 그래야 닫힌 pane으로 늦게 도착한
         // output이나 input이 살아 있는 surface에 섞이지 않고 UnknownPty/UnknownSurface로
@@ -298,6 +348,8 @@ pub const LivePtySession = struct {
             self.reader_finished = true;
         } else {
             self.queue.close();
+            // read_error로 thread만 먼저 join한 runtime도 최종 close에서는 child를 종료/reap해야 한다.
+            if (self.reader_failed) self.session.close();
         }
     }
 };
@@ -445,6 +497,80 @@ test "processing reader replaces a full render signal with exit and closes outbo
 
     try std.testing.expectError(error.QueueClosed, live.write_queue.enqueueBlocking("late"));
     try std.testing.expectError(error.QueueClosed, live.command_queue.enqueueBlocking(.scroll_to_bottom));
+}
+
+test "processing reader pauses without closing child or queues and resumes at the next unread PTY byte" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+
+    const allocator = std.testing.allocator;
+    var runtime = runtime_mod.SurfaceRuntime.init(allocator);
+    defer runtime.deinit();
+    var surface = try surface_mod.Surface.init(allocator, 77, .{ .cols = 30, .rows = 3 });
+    defer surface.deinit();
+    var live: LivePtySession = undefined;
+    try live.init(std.testing.io, allocator, 77, .{
+        .command = "/bin/sh",
+        .args = &.{ "-c", "printf before; IFS= read -r line; printf 'after:%s' \"$line\"; sleep 5" },
+        .size = .{ .cols = 30, .rows = 3 },
+    }, 8);
+    defer live.deinit();
+    _ = try live.attachSurface(&runtime, &surface, true);
+    const child_pid = live.session.child_pid;
+
+    var pump = live.pump(&runtime);
+    var saw_before = false;
+    for (0..5000) |_| {
+        _ = try pump.drainAvailable();
+        surface.lockCore(std.testing.io);
+        const dump = try surface.core.dumpUtf8(allocator);
+        surface.unlockCore(std.testing.io);
+        defer allocator.free(dump);
+        if (std.mem.indexOf(u8, dump, "before") != null) {
+            saw_before = true;
+            break;
+        }
+        _ = usleep(1000);
+    }
+    try std.testing.expect(saw_before);
+    _ = try pump.drainAvailable(); // safe-point eligibility: coalesced render signal도 owner가 비운다.
+
+    try live.reader.requestPause();
+    for (0..5000) |_| {
+        if (live.reader.pauseReached()) break;
+        _ = usleep(1000);
+    }
+    try std.testing.expect(live.reader.pauseReached());
+    live.reader.join();
+    try std.testing.expect(live.reader.pausedStateIsSafe());
+    try std.testing.expectEqual(child_pid, live.session.child_pid);
+    try std.testing.expect(!live.write_queue.closed);
+    try std.testing.expect(!live.command_queue.closed);
+
+    // Paused reader가 없는 동안 child가 만든 output은 core가 아니라 kernel PTY buffer에 남아야 한다.
+    try live.session.writeInput("go\n");
+    _ = usleep(20_000);
+    surface.lockCore(std.testing.io);
+    const paused_dump = try surface.core.dumpUtf8(allocator);
+    surface.unlockCore(std.testing.io);
+    defer allocator.free(paused_dump);
+    try std.testing.expect(std.mem.indexOf(u8, paused_dump, "after:go") == null);
+
+    try live.reader.resumeAfterPause();
+    var saw_after = false;
+    for (0..5000) |_| {
+        _ = try pump.drainAvailable();
+        surface.lockCore(std.testing.io);
+        const dump = try surface.core.dumpUtf8(allocator);
+        surface.unlockCore(std.testing.io);
+        defer allocator.free(dump);
+        if (std.mem.indexOf(u8, dump, "after:go") != null) {
+            saw_after = true;
+            break;
+        }
+        _ = usleep(1000);
+    }
+    try std.testing.expect(saw_after);
+    try std.testing.expectEqual(child_pid, live.session.child_pid);
 }
 
 const FakePty = struct {

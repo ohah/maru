@@ -3,6 +3,7 @@ const pty = @import("../pty.zig");
 const runtime_mod = @import("runtime.zig");
 const terminal = @import("../terminal.zig");
 const core_command = @import("../session/core_command.zig");
+extern "c" fn usleep(usec: c_uint) c_int;
 
 /// reader-로컬 응답 outbound 버퍼(runProcessing의 out_buf)의 상한. 자식이 stdin을 안 비우면서(POLLOUT 미발화) 응답
 /// 유발 출력(CPR·DA·OSC 10/11 등)을 쏟으면 out_buf가 무한 증가하던 경로(버그헌트 감사서 확정)를 막는다 — pending(미전송
@@ -115,6 +116,14 @@ pub const PtyEventQueue = struct {
         // "reader가 이미 queue를 닫음"을 구분할 수 없다. 이 관찰 API를 통해
         // 조기 close는 timeout이 아니라 lifecycle 실패로 보고하게 한다.
         return self.closed and self.len == 0;
+    }
+
+    /// Host exec-upgrade safe-point용. Coalesced output 신호까지 owner drain이 소비됐고 queue가 계속
+    /// 살아 있는지를 한 critical section에서 확인한다.
+    pub fn emptyAndOpen(self: *PtyEventQueue) bool {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        return !self.closed and self.len == 0;
     }
 
     pub fn close(self: *PtyEventQueue) void {
@@ -335,6 +344,14 @@ pub const PtyWriteQueue = struct {
         defer self.mutex.unlock(self.io);
         return self.consumed_total;
     }
+
+    /// Host exec-upgrade safe-point가 input byte frontier를 한 락 아래에서 검사한다. pending 0만 따로 본 뒤
+    /// counter를 다시 읽으면 enqueue/consume 사이 상태를 섞을 수 있으므로 동일 critical section에서 확인한다.
+    pub fn drainedAtFence(self: *PtyWriteQueue) bool {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        return !self.closed and self.pendingAssumeLocked() == 0 and self.enqueued_total == self.consumed_total;
+    }
 };
 
 /// 메인발 비-PTY 코어 mutate(스크롤·선택·리포팅·config)를 I/O 스레드(reader)로 위임하는 명령
@@ -456,6 +473,13 @@ pub const CoreCommandQueue = struct {
         return self.pendingAssumeLocked() > 0;
     }
 
+    /// Host exec-upgrade safe-point용. command queue를 닫지 않고 현재 fence가 전부 적용됐는지 확인한다.
+    pub fn emptyAndOpen(self: *CoreCommandQueue) bool {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        return !self.closed and self.pendingAssumeLocked() == 0;
+    }
+
     /// reader가 명령 적용 직후 호출 — MARU_DEBUG일 때만 enqueue→apply 지연(µs)을 `coreq.apply`로 찍는다(§9.7
     /// 위임 latency 관측). `Entry.enqueued_ns`는 enqueue 시점(debug일 때만 기록). 비-debug면 분기 하나로 즉시 반환.
     pub fn logApply(self: *CoreCommandQueue, entry: Entry) void {
@@ -490,6 +514,20 @@ pub const PtyReader = struct {
     // processing이 켜지면(setProcessing이 release-store) run()이 코어를 직접 처리한다. release-acquire로
     // core/core_mutex/io/write_queue/command_queue 주입이 reader 스레드에 보인다(설정→store, 읽기 전 load).
     processing: std.atomic.Value(bool) = .init(false),
+    // Host exec-upgrade 비파괴 pause. request는 self-pipe wake로 poll을 깨우고, reader가 마지막 local chunk와
+    // outbound fence를 모두 처리한 loop 상단에서 reached를 publish한 뒤 thread만 반환한다. queue/session/child는
+    // 닫지 않으므로 owner가 encode 실패 시 같은 reader를 다시 start할 수 있다.
+    pause_requested: std.atomic.Value(bool) = .init(false),
+    pause_reached: std.atomic.Value(bool) = .init(false),
+    // Query response buffer를 stack-local로 두면 coordinator가 safe-point empty를 증명할 수 없다. reader 소유
+    // transfer state로 승격해 pause join 뒤 allocation-free로 검사하고 resume 시 capacity를 재사용한다.
+    transfer_out: std.ArrayList(u8) = .empty,
+    transfer_out_head: usize = 0,
+    // Target restore pre-commit start gate(U3). Thread 생성 성공은 먼저 증명하되 release 전에는 PTY/session/queue/core를
+    // 한 번도 역참조하지 않는다. abort는 rollback cleanup이 child lifecycle을 건드리지 않고 thread만 join하게 한다.
+    start_released: std.atomic.Value(bool) = .init(true),
+    start_aborted: std.atomic.Value(bool) = .init(false),
+    start_gate_reached: std.atomic.Value(bool) = .init(false),
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -536,6 +574,39 @@ pub const PtyReader = struct {
         self.thread = try std.Thread.spawn(.{}, run, .{self});
     }
 
+    pub fn startPrepared(self: *PtyReader) !void {
+        std.debug.assert(self.thread == null);
+        self.start_gate_reached.store(false, .release);
+        self.start_aborted.store(false, .release);
+        self.start_released.store(false, .release);
+        self.thread = try std.Thread.spawn(.{}, run, .{self});
+    }
+
+    pub fn preparedStartReached(self: *const PtyReader) bool {
+        return self.start_gate_reached.load(.acquire);
+    }
+
+    pub fn releasePreparedStart(self: *PtyReader) void {
+        std.debug.assert(self.thread != null);
+        self.start_released.store(true, .release);
+    }
+
+    pub fn discardPreparedStart(self: *PtyReader) void {
+        if (self.thread == null) return;
+        std.debug.assert(!self.start_released.load(.acquire));
+        self.start_aborted.store(true, .release);
+        self.join();
+        self.start_released.store(true, .release);
+        self.start_aborted.store(false, .release);
+        self.start_gate_reached.store(false, .release);
+    }
+
+    pub fn deinit(self: *PtyReader) void {
+        std.debug.assert(self.thread == null);
+        self.transfer_out.deinit(self.allocator);
+        self.transfer_out_head = 0;
+    }
+
     pub fn join(self: *PtyReader) void {
         if (self.thread) |thread| {
             thread.join();
@@ -552,7 +623,58 @@ pub const PtyReader = struct {
         self.join();
     }
 
+    pub const PauseError = error{NotProcessing};
+
+    /// 비파괴 pause 요청. 완료 여부는 `pauseReached`로 관찰하고, true가 된 뒤에만 `join`한다. deadline 전에
+    /// 도달하지 못하면 `cancelPause`로 reader를 계속 실행시킨다.
+    pub fn requestPause(self: *PtyReader) PauseError!void {
+        if (!self.processing.load(.acquire)) return error.NotProcessing;
+        self.pause_reached.store(false, .release);
+        self.pause_requested.store(true, .release);
+        self.session.signalWrite();
+    }
+
+    pub fn pauseReached(self: *const PtyReader) bool {
+        return self.pause_reached.load(.acquire);
+    }
+
+    pub fn cancelPause(self: *PtyReader) void {
+        if (!self.pause_reached.load(.acquire)) self.pause_requested.store(false, .release);
+        self.session.signalWrite();
+    }
+
+    /// reached thread를 join한 뒤 같은 queue/session/core에 reader를 다시 붙인다. paused thread는 terminal defer를
+    /// 타지 않아 queue가 open이고 child/fd도 그대로다.
+    pub fn resumeAfterPause(self: *PtyReader) !void {
+        std.debug.assert(self.thread == null);
+        std.debug.assert(self.pause_reached.load(.acquire));
+        self.pause_requested.store(false, .release);
+        self.pause_reached.store(false, .release);
+        try self.start();
+    }
+
+    /// join된 pause frontier의 외부 검증. reader-owned response, admitted input fence, command queue, core response가
+    /// 모두 비어야 handoff encode가 가능하다.
+    pub fn pausedStateIsSafe(self: *PtyReader) bool {
+        if (self.thread != null or !self.pause_reached.load(.acquire)) return false;
+        if (self.transfer_out_head != 0 or self.transfer_out.items.len != 0) return false;
+        if (self.write_queue) |wq| if (!wq.drainedAtFence()) return false;
+        if (self.command_queue) |cq| if (!cq.emptyAndOpen()) return false;
+        const core = self.core orelse return false;
+        const mutex = self.core_mutex orelse return false;
+        core.owner_dbg.lock(mutex, self.io);
+        defer core.owner_dbg.unlock(mutex, self.io);
+        return core.pendingResponse().len == 0;
+    }
+
     pub fn run(self: *PtyReader) void {
+        if (!self.start_released.load(.acquire)) {
+            self.start_gate_reached.store(true, .release);
+            while (!self.start_released.load(.acquire)) {
+                if (self.start_aborted.load(.acquire)) return;
+                _ = usleep(1000);
+            }
+        }
         // processing은 start() 전에 setProcessing이 release-store하므로(불변식: 스레드가 읽기 전 설정)
         // run 진입 시 한 번만 acquire-load하면 충분하다 — 시작 후 뒤집히지 않는다.
         if (self.processing.load(.acquire)) {
@@ -603,13 +725,15 @@ pub const PtyReader = struct {
         const core = self.core.?;
         const mutex = self.core_mutex.?;
         // EOF/read/write 오류로 reader가 스스로 끝나는 경로도 outbound 생산자를 반드시 깨운다. owner가 나중에
-        // finishAfterTermination/close에서 다시 닫아도 close는 멱등이다.
-        defer if (self.write_queue) |wq| wq.close();
-        defer if (self.command_queue) |cq| cq.close();
-        // 응답 outbound 버퍼: out_buf[out_head..]가 아직 못 쓴 응답. 다 비우면 compact.
-        var out_buf: std.ArrayList(u8) = .empty;
-        defer out_buf.deinit(self.allocator);
-        var out_head: usize = 0;
+        // finishAfterTermination/close에서 다시 닫아도 close는 멱등이다. 단 safe pause return은 queue를 닫으면
+        // resume가 불가능하므로 terminal 종료와 분리한다.
+        var paused = false;
+        defer if (!paused) {
+            if (self.write_queue) |wq| wq.close();
+            if (self.command_queue) |cq| cq.close();
+        };
+        const out_buf = &self.transfer_out;
+        const out_head = &self.transfer_out_head;
         var readbuf: [4096]u8 = undefined;
         var writebuf: [512]u8 = undefined; // write_queue drain 청크(writeInputNonBlocking이 ≤512B 쓰므로)
         while (true) {
@@ -623,7 +747,7 @@ pub const PtyReader = struct {
                     core_command.apply(core, entry.cmd);
                     const reply = core.pendingResponse();
                     if (reply.len > 0) {
-                        appendResponseBounded(self.allocator, &out_buf, out_head, reply);
+                        appendResponseBounded(self.allocator, out_buf, out_head.*, reply);
                         core.clearResponse(); // 드롭(상한 초과)해도 코어 측 응답 버퍼는 항상 비운다
                     }
                     core.owner_dbg.unlock(mutex, self.io);
@@ -637,7 +761,24 @@ pub const PtyReader = struct {
                     else => return,
                 };
             }
-            const reply_pending = out_head < out_buf.items.len;
+            // Pause 요청은 continuous-readable PTY보다 우선한다. 이미 읽은 chunk는 위 read 단계에서 즉시 core에
+            // 적용되고, admitted outbound가 모두 실제 PTY에 써진 frontier에서만 ACK한다. 이후 output은 kernel
+            // PTY buffer에 남아 target/resumed reader가 다음 byte부터 읽는다.
+            if (self.pause_requested.load(.acquire) and
+                out_head.* == 0 and out_buf.items.len == 0 and
+                (self.write_queue == null or self.write_queue.?.drainedAtFence()) and
+                (self.command_queue == null or self.command_queue.?.emptyAndOpen()))
+            {
+                core.owner_dbg.lock(mutex, self.io);
+                const response_empty = core.pendingResponse().len == 0;
+                core.owner_dbg.unlock(mutex, self.io);
+                if (response_empty) {
+                    paused = true;
+                    self.pause_reached.store(true, .release);
+                    return;
+                }
+            }
+            const reply_pending = out_head.* < out_buf.items.len;
             const main_pending = if (self.write_queue) |wq| wq.hasPending() else false;
             const ready = self.session.waitIo(reply_pending or main_pending) catch |err| {
                 if (err != error.SessionClosed and err != error.NoMoreEvents) {
@@ -651,23 +792,23 @@ pub const PtyReader = struct {
                 // EAGAIN(버퍼 참)은 writeInputNonBlocking이 0으로 돌려준다(에러 아님 — 다음 poll에 이어 씀).
                 // catch로 잡히는 건 치명적 write 실패(EIO 등)/SessionClosed뿐 — `catch 0`로 삼키면 head가 안 늘어
                 // POLLOUT 스핀(라이브락)·입력 조용한 손실이 되므로, 에러면 reader를 종료한다(read 에러 경로와 동일).
-                if (out_head < out_buf.items.len) {
-                    const written = self.session.writeInputNonBlocking(out_buf.items[out_head..]) catch |err| {
+                if (out_head.* < out_buf.items.len) {
+                    const written = self.session.writeInputNonBlocking(out_buf.items[out_head.*..]) catch |err| {
                         if (err != error.SessionClosed) self.pushProcessingTerminationForIoError(@errorName(err));
                         return;
                     };
-                    out_head += written;
-                    if (out_head >= out_buf.items.len) {
+                    out_head.* += written;
+                    if (out_head.* >= out_buf.items.len) {
                         out_buf.clearRetainingCapacity();
-                        out_head = 0;
-                    } else if (out_head >= response_buffer_capacity) {
+                        out_head.* = 0;
+                    } else if (out_head.* >= response_buffer_capacity) {
                         // 부분 drain이 오래 이어지면 out_head(소비된 prefix)만 커지며 items.len이 무한 증가할 수 있다 —
                         // prefix가 상한만큼 쌓이면 잔여(out_buf[out_head..])를 앞으로 당겨 점유를 bound한다(아래 append 게이트가
                         // pending을, 여기가 prefix를 막아 합쳐서 ~2×response_buffer_capacity 이내). dest<src라 copyForwards가 안전.
-                        const remaining = out_buf.items.len - out_head;
-                        std.mem.copyForwards(u8, out_buf.items[0..remaining], out_buf.items[out_head..]);
+                        const remaining = out_buf.items.len - out_head.*;
+                        std.mem.copyForwards(u8, out_buf.items[0..remaining], out_buf.items[out_head.*..]);
                         out_buf.items.len = remaining;
-                        out_head = 0;
+                        out_head.* = 0;
                     }
                 } else if (self.write_queue) |wq| {
                     const consumed = wq.consumedTotal();
@@ -700,7 +841,7 @@ pub const PtyReader = struct {
                         core.write(readbuf[0..n]) catch {}; // best-effort(파서 OOM 등은 그 청크 드롭)
                         const reply = core.pendingResponse();
                         if (reply.len > 0) {
-                            appendResponseBounded(self.allocator, &out_buf, out_head, reply);
+                            appendResponseBounded(self.allocator, out_buf, out_head.*, reply);
                             core.clearResponse();
                         }
                         core.owner_dbg.unlock(mutex, self.io);
@@ -806,6 +947,20 @@ test "setProcessing wires core/lock and enables reader core-processing (PR3)" {
     try std.testing.expect(reader.processing.load(.acquire)); // 켜짐 — run()이 직접 처리
     try std.testing.expectEqual(@as(?*terminal.TerminalCore, &core), reader.core);
     try std.testing.expectEqual(@as(?*std.Io.Mutex, &mutex), reader.core_mutex);
+}
+
+test "prepared reader start can be created and discarded before touching PTY dependencies" {
+    const allocator = std.testing.allocator;
+    var session: pty.PtySession = undefined;
+    var queue: PtyEventQueue = undefined;
+    var reader = PtyReader.init(allocator, 77, &session, &queue);
+    defer reader.deinit();
+    try reader.startPrepared();
+    var attempts: usize = 0;
+    while (attempts < 1000 and !reader.preparedStartReached()) : (attempts += 1) _ = usleep(1000);
+    try std.testing.expect(reader.preparedStartReached());
+    reader.discardPreparedStart();
+    try std.testing.expect(reader.thread == null);
 }
 
 test "pty event queue preserves event order and output ownership" {

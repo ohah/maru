@@ -19,6 +19,7 @@ const posix = std.posix;
 const socket_server = @import("socket_server.zig");
 const reg = @import("registry.zig");
 const runtime_manager = @import("runtime_manager.zig");
+const upgrade = @import("upgrade_coordinator.zig");
 
 pub const RunError = socket_server.BindError || error{OutOfMemory};
 
@@ -66,8 +67,18 @@ pub fn runSessionHost(
     var server = try socket_server.SocketServer.bind(allocator, dir_path, socket_path, newHostId(), &registry);
     defer server.deinit();
     server.runtime_ops = manager.runtimeOps(); // 이제 이 host는 read-only가 아니라 runtime.spawn/terminate를 처리한다.
+    var admission_gate = upgrade.AdmissionGate.init(io);
+    server.admission_gate = &admission_gate;
+    server.owner_tick_ctx = &manager;
+    server.owner_tick = struct {
+        fn tick(ctx: *anyopaque) void {
+            const owner: *runtime_manager.RuntimeManager = @ptrCast(@alignCast(ctx));
+            _ = owner.drainOwnedEvents();
+        }
+    }.tick;
 
     while (true) {
+        server.tickOwner();
         switch (server.pollReady(poll_timeout_ms)) {
             .ready => {
                 server.serveOnce() catch {}; // 개별 연결 오류(write 실패 등)는 host를 죽이지 않는다.

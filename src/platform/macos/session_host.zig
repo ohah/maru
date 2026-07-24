@@ -91,6 +91,23 @@ pub const handoff_inventory = if (builtin.os.tag == .macos)
     @import("session_host/handoff_inventory.zig")
 else
     struct {};
+// handoff_codec(U1)는 native owner inventory와 독립된 stable v1 tag/envelope로 logical TerminalCore candidate를
+// encode/decode한다. 실제 live graph capture는 U2 safe-point가 생긴 뒤 runtime_manager가 별도 project 단계로 연결한다.
+pub const handoff_codec = if (builtin.os.tag == .macos)
+    @import("session_host/handoff_codec.zig")
+else
+    struct {};
+// upgrade_coordinator(U2)는 queue lifecycle과 분리된 process-local admission barrier다. OS syscall이 없어
+// non-macOS test에서도 gate 상태 머신을 검증한다.
+pub const upgrade_coordinator = @import("session_host/upgrade_coordinator.zig");
+pub const exec_fd_set = if (builtin.os.tag == .macos)
+    @import("session_host/exec_fd_set.zig")
+else
+    struct {};
+pub const upgrade_attempt = if (builtin.os.tag == .macos)
+    @import("session_host/upgrade_attempt.zig")
+else
+    struct {};
 // screen_snapshot(실 TerminalCore 화면 → screen_stream 레코드 투영)도 `@import("maru")`로 terminal을 읽어 macOS 전용이다.
 // 투영 자체는 순수 로직이지만 terminal 타입 의존이라 barrel에서 조건부로 둔다(screen_stream codec은 그대로 순수 유지).
 pub const screen_snapshot = if (builtin.os.tag == .macos)

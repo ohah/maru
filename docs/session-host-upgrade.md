@@ -5,7 +5,7 @@
 [영속 터미널 세션 호스트](persistent-session-host.md), workspace의 `runtime-handle` 저장은
 [Workspace Restore](workspace-restore.md), 화면 전송 codec은 `maru.screen-stream` 계약을 따른다.
 
-> **상태: U0 설계·소유 필드 inventory gate 구현 중. 제품 업그레이드는 아직 비활성이다.**
+> **상태: U0~U2 구현·자동 검증 완료, U3 same-PID exec 기반 구현 중. 제품 업그레이드는 아직 비활성이다.**
 > 현재 살아 있는 host가 `host_exec_upgrade_v1`을 광고하지 않으면 새 앱은 그 host를 실행 중 교체할 수 없다.
 > 이 경우 지원하는 N-1 MRSH adapter로 attach해 기존 runtime을 그대로 쓰거나, attachment가 모두 끝난 뒤 구 host를
 > 계속 drain한다. **attachment가 0이어도 runtime이 하나라도 살아 있으면 구 host를 종료하지 않으며, runtime count가
@@ -260,6 +260,12 @@ cap과 cap+1, `count × element_size` overflow, section 합계 overflow, allocat
   아니라 모두 false여야 하는 eligibility/lifecycle guard다.
 - runtime handle 재매핑에 필요한 runtime order와 next-handle lower bound.
 
+host 쪽 `Surface.title/cwd/command/custom_name`은 handoff 권위가 아니다. 현재 host surface의 해당 값은
+`Surface.init` 기본 placeholder이고 실제 자동 제목·cwd·SSH 목적지는 `TerminalCore`, 사용자 이름·spawn command는
+workspace/app 계층이 권위다. 따라서 handoff는 `Surface.id`와 `TerminalCore`만 기록하고 surface metadata는 publish 때
+기본값으로 재구성한다. `process_state`는 저장값이 아니라 quiesce eligibility에서 `.running`임을 검사한 뒤 `.running`으로
+재구성한다.
+
 ### 새 process에서 재구성하는 상태
 
 - allocator, mutex, condition variable, thread, self-pipe, hash-map bucket allocation.
@@ -272,6 +278,10 @@ cap과 cap+1, `count × element_size` overflow, section 합계 overflow, allocat
 - reader stack/local buffer에 남은 처리 전 PTY bytes.
 - PTY로 쓰지 못한 response/input/core command.
 - 실행 중 callback 또는 registry mutation.
+
+wire DTO/tag/version은 이 native owner-field inventory와 독립된 명시적 계약이다. inventory field 이름·배치에서 tag를
+자동 생성하지 않는다. 그래야 native field rename/reorganization이 N-1 wire 호환성을 조용히 깨지 않고, schema 변경은
+명시적 converter와 version bump를 요구한다.
 
 derived map은 store에서 재구성하되 duplicate/cell reference를 검증한다. `TerminalCore`, `Screen`, `Scrollback`,
 `PtySession`, reader/queue, `LivePtySession`, Surface/runtime link/owner registry, `RuntimeManager`, host registry/socket에
@@ -296,7 +306,10 @@ absolute identity만** 기록하고 target의 page layout을 새로 만든다. s
   CLOEXEC 원본은 이 시점에 존재할 수 있다). target entrypoint 직후에는 **열린 fd 3 이상 집합**이 allowlist와
   정확히 같은지 별도로 검증한다. listener는 restore 때 같은 endpoint에 다시 bind한다.
   detached host의 fd 0/1/2는 기존 `/dev/null` stdio로 유지하며 inherited-resource allowlist 비교에서 제외한다.
-- inherited master fd마다 character device, open flags, nonblocking, unique slot, expected process group을 검증한다.
+- inherited master fd마다 `fstat` device/inode/rdev, character device, `O_RDWR|O_NONBLOCK`, winsize, unique slot을
+  검증한다. `tcgetpgrp(master)`는 shell job control에 따라 pause 중에도 바뀌므로 durable identity나 strict equality
+  gate로 쓰지 않는다. Child session/group 검증이 필요하면 `getsid(child_pid)`/`getpgid(child_pid)`를 별도 의미로
+  사용하며, pre-commit 생존 probe는 `waitpid`로 exit status를 소비하지 않는다.
 - 새 process는 새 wake pipe를 만들고 **paused reader thread 전부**를 준비한다. 모든 runtime
   decode/validation/allocation, listener 준비, paused-thread 생성이 끝나기 전에는 master fd를 read/write/resize하지 않는다.
 - inherited allowlist slot은 target→staged-old rollback exec가 가능하도록 `committed` 직전까지 `CLOEXEC`를 다시
@@ -311,6 +324,8 @@ absolute identity만** 기록하고 target의 page layout을 새로 만든다. s
   read/write/resize, child reap, 외부 accept 중 하나라도 일어난 뒤에는 rollback하지 않는다.
 - `dup`/fd flag 설정 또는 `exec` syscall 자체가 실패해 old image가 재개될 때도 discovery manifest를 old
   protocol/build/upgrade epoch와 `ready` lifecycle로 atomic republish한 뒤 admission을 연다.
+- target validation 실패 뒤 staged-old rollback `exec` syscall 자체도 실패하면 재귀 재시도하지 않고
+  `rollback_exec_failed` fail-stop으로 끝낸다. 이 이중 실행 실패는 runtime 보존 보장 범위 밖이며 구조화 artifact만 남긴다.
 - `waitpid`는 같은 PID host가 계속 소유한다. 별도 process가 같은 child를 reap하지 않는다.
 
 ## 10. 멀티윈도우·Quick Terminal·SSH
@@ -339,6 +354,9 @@ absolute identity만** 기록하고 target의 page layout을 새로 만든다. s
 - bounded envelope/section/TLV codec과 current state DTO를 구현한다.
 - 모든 logical state의 round-trip, malformed/duplicate/unknown-required/cap/checksum/OOM을 자동 검증한다.
 - partial UTF-8와 각 parser state fixture를 별도 포함한다.
+- **구현됨:** stable explicit tag의 `maru.host-handoff.v1`, host/runtime DTO, host-wide atomic decode,
+  runtime identity/child/geometry/fd slot과 complete `TerminalCore` round-trip을 `test-session-host`가 검증한다.
+  fail-every-allocation은 부분 candidate를 publish하거나 누수하지 않는다.
 
 ### U2 — quiesce/resume
 
@@ -348,6 +366,9 @@ absolute identity만** 기록하고 target의 page layout을 새로 만든다. s
   소비하고 같은 dead runtime 때문에 upgrade retry가 영구 abort하지 않는지 검증한다.
 - quiesce 성공·deadline·queue full·continuous output·response pending 실패 주입에서 byte 순서와 재개를 검증한다.
 - 아직 `exec`하지 않고 같은 process에서 quiesce→encode→resume한다.
+- **구현됨:** socket frame admission gate, attachment/lifecycle 재검사, reader-owned response state,
+  비파괴 pause/join/resume, GUI attachment 0의 owner event drain, 5초 hard-deadline coordinator를 연결했다.
+  실제 PTY에서 같은 child PID/master fd 유지, continuous output, deadline rollback과 encode→resume를 검증한다.
 
 ### U3 — test-only 단일 runtime exec
 
@@ -357,6 +378,9 @@ absolute identity만** 기록하고 target의 page layout을 새로 만든다. s
   또는 rollback exec로 돌아가는지 검증한다. loader/entrypoint 이전 crash는 host crash 비목표로 별도 표시한다.
 - N-1→N 성공 뒤 rollback self-image가 N으로 회전하고, 이어진 N→N+1 controlled 실패가 N image로 rollback되는
   2회 연속 upgrade E2E를 포함한다. promotion 실패는 capability 철회와 runtime 무변경을 단언한다.
+- **구현 중:** listener/accepted socket CLOEXEC, exec 직전 reserved PTY slot만 non-CLOEXEC로 만드는 exact allowlist,
+  exec 실패 slot rollback, child를 signal/reap하지 않는 `PreparedAdoption`, commit 전 PTY를 전혀 만지지 않는 reader
+  start gate까지 구현됐다. 실제 frozen-old→new exec/rollback E2E와 owner lease/staged image가 남아 있다.
 
 ### U4 — 다중 runtime과 N-1 adapter
 

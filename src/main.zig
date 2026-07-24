@@ -2,6 +2,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const maru = @import("maru");
 const session_host_entrypoint = @import("platform/macos/session_host/entrypoint.zig");
+const session_host_build_options = @import("session_host_build_options");
 
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
@@ -261,28 +262,55 @@ fn runSessionHostDaemon(io: std.Io, allocator: std.mem.Allocator, args: anytype,
         var raw_args: [session_host_entrypoint.max_invocation_args][]const u8 = undefined;
         var raw_count: usize = 0;
         while (args.next()) |arg| {
-            if (raw_count == raw_args.len) return error.UnknownCommand;
+            if (raw_count == raw_args.len) {
+                try stderr.writeAll("invalid maru session host invocation: too many arguments\n");
+                return error.UnknownCommand;
+            }
             raw_args[raw_count] = arg;
             raw_count += 1;
         }
         const invocation = session_host_entrypoint.parse(raw_args[0..raw_count]) catch {
-            try stderr.print("usage: maru {s} <session-dir> <socket-path> <host-id>\n", .{session_host_entrypoint.subcommand});
+            // daemon/preflight/restore는 서로 다른 strict grammar다. 한 role의 usage를 다른
+            // role parse 실패에 출력하지 않고 hidden command 전체의 bounded 오류로 접는다.
+            try stderr.writeAll("invalid maru session host invocation\n");
             return error.UnknownCommand;
         };
         switch (invocation) {
             .preflight => {
-                const executable_raw = try std.process.executablePathAlloc(io, allocator);
-                defer allocator.free(executable_raw);
-                const executable = try allocator.dupeZ(u8, executable_raw);
-                defer allocator.free(executable);
                 session_host.upgrade_bootstrap.runPreflight(
                     allocator,
+                    io,
                     session_host_entrypoint.preflight_fd,
-                    executable,
-                ) catch return error.UnknownCommand;
+                ) catch |err| {
+                    try stderr.print("maru session host preflight failed: {s}\n", .{@errorName(err)});
+                    return error.UnknownCommand;
+                };
                 return;
             },
-            .restore => return error.UnknownCommand, // typed consumer exists; product restore graph is not active yet.
+            .restore => |restore| {
+                // 현재는 destructive executor가 노출되지 않은 validation-only entrypoint다. Prepared runtime graph와
+                // authority commit을 같은 activation gate에서 연결하기 전에는 inherited PTY를 adopt하거나 닫지 않는다.
+                var validated = session_host.upgrade_bootstrap.readRestoreInvocation(
+                    allocator,
+                    io,
+                    restore,
+                ) catch |err| {
+                    // hidden restore 진입도 실패 이유를 보존해야 upgrade coordinator가 "새 image가
+                    // 그냥 종료됐다"와 authority/provenance 거부를 구분할 수 있다. 경로·ID·handoff
+                    // 내용은 출력하지 않고 bounded error name만 남긴다.
+                    try stderr.print("maru session host restore validation failed: {s}\n", .{@errorName(err)});
+                    return error.UnknownCommand;
+                };
+                validated.deinit();
+                if (!session_host_build_options.allow_validation_only_restore) {
+                    // Prepared runtime graph와 authority commit이 아직 배선되지 않은 제품 build에서
+                    // validation 성공을 restore 성공으로 오인하지 않는다. 이 분기는 capability/executor가
+                    // 꺼져 있어 제품에서 도달하면 안 되며, 도달 자체를 명시적 실패로 관측한다.
+                    try stderr.writeAll("maru session host restore executor is not available\n");
+                    return error.UnknownCommand;
+                }
+                return;
+            },
             .daemon => |daemon| {
                 const dir_z = try allocator.dupeZ(u8, daemon.session_dir);
                 defer allocator.free(dir_z);

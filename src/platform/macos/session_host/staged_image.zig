@@ -47,6 +47,7 @@ pub const PromotionFailpoint = enum {
     none,
     before_swap,
     mutate_staged_after_inspect,
+    after_swap,
 };
 
 pub fn stage(
@@ -228,6 +229,7 @@ pub fn promote(
         if (renamex_np(staged_path.ptr, current_path.ptr, rename_swap) != 0) return error.RenameFailed;
         return error.HashMismatch;
     }
+    if (failpoint == .after_swap) return error.InjectedPromotionFailure;
     if (c.fsync(dir_fd) != 0) return error.SyncFailed;
     if (c.unlink(staged_path.ptr) != 0) return error.RenameFailed;
     if (c.fsync(dir_fd) != 0) return error.SyncFailed;

@@ -5,8 +5,8 @@
 [영속 터미널 세션 호스트](persistent-session-host.md), workspace의 `runtime-handle` 저장은
 [Workspace Restore](workspace-restore.md), 화면 전송 codec은 `maru.screen-stream` 계약을 따른다.
 
-> **상태: U0 완료, U1 codec·U2 quiesce 핵심과 U3/U4 fixture·adapter 기반, U5 target/attempt
-> authority·durable handoff store·비활성 old-side coordinator·실 staged-target preflight component를 구현했다. U1~U4의 §11 전체 종료 gate와 U5 제품 daemon
+> **상태: U0 완료, U1 codec·U2 quiesce 핵심과 U3/U4 fixture·adapter 기반, U5 target/attempt/rollback-image
+> authority·durable handoff store·비활성 old-side coordinator·실 staged-target preflight/restore bootstrap component를 구현했다. U1~U4의 §11 전체 종료 gate와 U5 제품 daemon
 > coordinator·signed update gate는 아직 열려 있고 제품 업그레이드는 비활성이다.**
 > 현재 살아 있는 host가 `host_exec_upgrade_v1`을 광고하지 않으면 새 앱은 그 host를 실행 중 교체할 수 없다.
 > 이 경우 지원하는 N-1 MRSH adapter로 attach해 기존 runtime을 그대로 쓰거나, attachment가 모두 끝난 뒤 구 host를
@@ -71,6 +71,11 @@
    - 새 binary는 current와 N-1 handoff schema reader 및 명시적 up-converter를 제공한다.
    - 모르는 required field, 중복 field, cap 초과, checksum 불일치는 restore 전에 fail-close한다.
 
+`upgrade_attempt_record` schema v1은 capability를 제품에서 한 번도 광고하지 않은 개발 중 component format이며
+호환 release baseline이 아니다. Rollback image authority를 포함한 schema v2를 **최초 제품 baseline**으로 고정하고,
+향후 capability를 실제 배포한 뒤의 v3부터는 위 N-1 reader/up-converter 규칙을 적용한다. v1 record는 rollback
+executable을 안전하게 복원할 정보가 없으므로 추측 변환하지 않고 거부한다.
+
 MRSH major를 올리는 PR은 다음을 모두 만족해야 한다.
 
 - 직전 release major adapter가 실제 frozen-old-binary fixture와 통신한다.
@@ -121,7 +126,8 @@ recorded hash/dev/inode 불일치로 commit하지 않고 rollback한다. 이를 
 - workspace manifest는 `host_id:runtime_id` binding만 가진다. handoff bytes나 PTY fd 번호를 저장하지 않는다.
 - handoff는 session-host owner-only runtime directory 아래 attempt별 임시 파일에 쓴다. `0600`, regular file,
   same-UID, no-follow를 검증하고 write→sync→atomic rename 뒤에만 committed로 본다.
-- staged rollback executable은 **upgrade 요청 때가 아니라 upgrade-capable host 시작 시점**에 owner-only host
+- staged rollback executable은 **upgrade 요청 때가 아니라 upgrade-capable host 시작 시점**에 launcher가 pin한
+  running-image identity와 pathname 내용을 대조한 뒤 owner-only host
   directory에 고정하고 hash/build identity를 기록한다. 앱 updater가 bundle의 원 executable을 이미 교체한 뒤에는
   실행 중 memory image만으로 동일한 구 binary를 안전하게 복원할 수 없기 때문이다. 이 self-image staging에
   실패한 host는 `host_exec_upgrade_v1`을 광고하지 않는다.
@@ -448,7 +454,7 @@ absolute identity만** 기록하고 target의 page layout을 새로 만든다. s
 - signed app update 전후 E2E와 soak가 통과한 뒤에만 자동 upgrade를 기본 활성화한다.
 - **구현된 component seam:** attempt-key exclusive target staging, strict same-release codesign authorizer,
   accepted/armed/running/terminal idempotency owner, exec를 넘는 checksummed attempt record, host/epoch/next-handle/live
-  runtime/target identity 교차검증, descriptor-relative primary/backup commit, 64 MiB operational cap, exact disk
+  runtime/target/rollback-image identity 교차검증, descriptor-relative primary/backup commit, 64 MiB operational cap, exact disk
   preallocation, attempt 전체가 공유하는 absolute monotonic deadline, 동일 paused graph에서 outer handoff와 sorted
   attempt runtime set을 만드는 capture, 256 PTY+primary+backup+owner 259개 FD slot 선예약, unlink-before-exec FD pair와
   target/rollback restore role token을 자동 검증한다. 비활성 old-side coordinator는 real PTY 한 개에서 fake
@@ -465,8 +471,11 @@ absolute identity만** 기록하고 target의 page layout을 새로 만든다. s
   `invariant_violation`을 반환해 향후 daemon 제품 배선이 즉시 process exit/manifest withdraw하도록 강제한다.
   이는 아직 실제 exec/restore 증거로 보지는 않는다.
 - `upgrade_bootstrap`은 별도 실행된 staged target에서 fd 3 외 descriptor를 거부하고, primary handoff와 embedded
-  attempt record를 같은 decoder로 전량 읽어 host/epoch/sorted runtime 집합과 현재 executable pathname의 recorded
-  inode/dev/size/SHA-256을 교차검증한다. `ProductPreflight`는 child stdio를 `/dev/null`로 고정하고 primary만 fd
+  attempt record를 같은 decoder로 전량 읽어 host/epoch/sorted runtime 집합과 `std.process.openExecutable`이 연
+  현재 process executable pathname object의 recorded inode/dev/size/SHA-256을 교차검증한다. Zig 0.16의 macOS
+  구현은 `_NSGetExecutablePath` 결과를 다시 open하므로 이는 kernel-loaded image pin 증거가 아니다. 경로 문자열은 macOS의
+  `/tmp`→`/private/tmp` 해소처럼 같은 vnode를 다른 철자로 표현할 수 있으므로 image 권위로 사용하지 않는다.
+  `ProductPreflight`는 child stdio를 `/dev/null`로 고정하고 primary만 fd
   3에 전달하며, 같은
   absolute deadline 안에서 exit를 reap하거나 timeout이면 kill+reap한다. 실제 build된 `maru
   __session-host --upgrade-preflight 3` 성공과 같은 inode의 corrupt handoff 거부를 process test로 검증한다. 실제
@@ -475,16 +484,35 @@ absolute identity만** 기록하고 target의 page layout을 새로 만든다. s
 - `entrypoint.Invocation`은 정상 daemon, preflight, restore target/rollback argv를 strict tagged union으로 파싱한다.
   absolute session/socket path, 32자리 lowercase host/attempt ID, bounded first slot과 trailing-argv 0을 한곳에서
   검증한다. 공용 `upgrade_fd_layout.Layout`이 producer/parser/bootstrap의 inclusive u16 slot 경계를 소유한다.
-  `upgrade_bootstrap.readTargetRestoreInvocation`은 서로 다른 inode인 primary/backup의 exact bytes와 read-only
-  unlinked provenance, embedded token, host/attempt/runtime slot 집합을 교차검증한다. PTY는 실제
+  `upgrade_bootstrap.readRestoreInvocation`은 서로 다른 inode인 primary/backup의 read-only unlinked provenance,
+  embedded token, host/attempt/runtime slot 집합을 교차검증한다. Target은 두 copy의 exact bytes를 요구하고
+  primary를 decode한다. Rollback은 primary가 손상돼도 독립된 backup을 authority로 decode한다. PTY는 실제
   `PreparedAdoption`과 같은 non-CLOEXEC·`O_RDWR|O_NONBLOCK`·winsize·child-liveness·서로 다른 master identity
   검증을 사용하고, owner fd는 session 경로의 exact inode/mode와 exclusive flock을 재확립한다. host-keyed socket
-  경로와 target executable identity까지 맞아야 exact inherited open-fd 집합을 borrowed view로 반환한다. rollback
-  self-image identity가 authority에 추가되기 전에는 rollback role을 성공시키지 않는다. main의 restore arm도 아직
-  즉시 거부하며 runtime graph를 만들지 않는다.
+  경로까지 맞아야 exact inherited open-fd 집합을 borrowed view로 반환한다. Attempt record v2는 서로 다른 staged
+  target과 canonical `<session>/hosts/<host>/rollback-current`의 path/dev/inode/size/SHA를 함께 고정한다.
+  Bootstrap은 `std.process.openExecutable`로 다시 연 **현재 process executable pathname object** identity를
+  target/rollback role identity에 결합한다. Product main과 같은 source/dispatch에 validation-only test 옵션만
+  compile-time으로 켠 별도 artifact와 그 독립 rollback copy를 각각 `exec`해 zero-runtime target/rollback validation-only
+  entrypoint 성공, rollback role의 target-image 오용 거부, primary-corrupt/backup-valid rollback 성공을 process
+  test로 검증한다. 이때 primary를 zero-byte로 truncate해도 rollback은 그 fd의 owner-only/unlinked provenance만
+  확인하고 backup을 독립 decode한다. `rollback_image.Authority`는 caller가 준 pinned running identity와 source를 대조한 뒤 owner-only
+  current leaf에 copy/hash/sync한다. Promotion은 `promoted`, `unchanged_failure`, swap은 됐지만 capability 철회가
+  필요한 `promoted_needs_poison`, `indeterminate`를 구분하고 post-swap failure에서 disk identity를 reconcile한다.
+  swap 뒤 실패로 old executable이 target leaf에 남으면 `Authority`가 exact dev/inode cleanup handle을 인수해
+  deinit 때 replacement를 건드리지 않고 residue만 회수한다. Main의 restore arm은 이 validation까지만 수행하되
+  `allow_validation_only_restore=true`로 별도 빌드한 `maru-session-host-restore-test` process gate에서만 성공
+  종료한다. 제품 `maru`는 같은 compile-time 옵션이 항상 false라 환경변수로 우회할 수 없고, prepared graph/executor가
+  없는 동안 validation을 “restore 성공”으로 보고하지 않는다. Identity-valid target/handoff를 제품 artifact로
+  실제 exec해 non-zero인 것도 process test로 고정한다. 이 진입은 capability와 executor가 꺼진 현재 제품에서는
+  도달 불가이며, 잘못 도달하면 세션 보존을 주장하지 않는다.
 - **아직 미구현인 제품 경계:** daemon controller 설치와 completed marker 소비, quiesce 전 handoff-size/disk/I/O
   budget admission, prepare→quiesce→store→FD slot→exec→restore→manifest promotion의 제품 배선,
-  실제 target executor, target/rollback entrypoint의 prepared runtime graph와 rollback self-image 권위·회전,
+  실제 target executor와 verified target `exec_fd`를 reserved inherited slot로 넘겨 bootstrap이 다시 검증하는
+  kernel-loaded-image pin 권위, target/rollback entrypoint의
+  prepared runtime graph, launcher running-image pin과 daemon
+  startup self-image 준비,
+  target commit 뒤 rotation 제품 배선,
   기존 restoring manifest adopt,
   signed frozen N-1 app artifact, 실제 update/soak, product capability 광고다.
   이 경계가 닫히기 전에는 U5 완료나 사용자-visible migration을 주장하지 않는다.

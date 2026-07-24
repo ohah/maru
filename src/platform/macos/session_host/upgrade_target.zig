@@ -434,7 +434,20 @@ test "real target restore reopens a CLOEXEC pin and terminal finish closes it ex
     try std.testing.expectEqual(wire.PrepareDecision.accepted, old.stagePending(request));
     try std.testing.expectEqual(wire.ArmDecision.armed, old.armAccepted(request.attempt_id));
     const execution = old.beginExecution(request.attempt_id).?;
-    const record_bytes = try old.encodeRunningRecord(std.testing.allocator, execution, 0xAA, 2, &.{});
+    const record_bytes = try old.encodeRunningRecord(
+        std.testing.allocator,
+        execution,
+        0xAA,
+        2,
+        .{
+            .path = source,
+            .sha256 = identity.sha256,
+            .dev = identity.dev,
+            .ino = identity.ino,
+            .size = identity.size,
+        },
+        &.{},
+    );
     defer std.testing.allocator.free(record_bytes);
     var state = try attempt_record.decode(std.testing.allocator, record_bytes);
     defer state.deinit();

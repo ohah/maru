@@ -1737,7 +1737,8 @@ var app_runtime: app.AppRuntime = .{};
 // 공유한다(daemon은 serial serve라 연결이 앱당 하나여야 함 — 창마다 연결하면 두 번째 창이 handshake 타임아웃→in-process
 // 폴백했다). `app_runtime.routing`/`live_registry`가 앱 전역인 것과 같은 소유 seam이고, allocator도 같은 `smp_allocator`다
 // (테스트 leak 검출 밖 — 프로세스 수명 자원). 첫 창이 `ensureRemoteBackend`로 세우고, 이후 창은 non-null이면 재사용한다.
-// 창이 닫혀도 이 둘은 안 닫는다(routing과 동일) — 창의 원격 Term은 그 창 deinit이 backend.remove로 회수한다. macOS 전용
+// 창이 닫혀도 이 연결들은 안 닫는다(routing과 동일) — 창의 원격 Term은 그 창 deinit이 backend.remove로 회수한다. 제품
+// pool 경로에서는 client를 pool이 heap-pin/소유하며 `app_remote_client`는 legacy 단일-host 테스트 전용이다. macOS 전용
 // 타입이라 non-macOS면 void(barrel struct {} 제외 — [[macos-only-code-linux-crosscompile-check]]).
 var app_remote_client: ?RemoteSessionClient = null;
 var app_remote_host_pool: ?RemoteHostPool = null;
@@ -5574,17 +5575,24 @@ pub const AppSession = struct {
                     return;
                 },
             };
-            app_remote_client = client;
+            const host_id = client.host_id;
+            const owned_client = alloc.create(RemoteSessionClient) catch {
+                var failed_client = client;
+                failed_client.deinit();
+                self.markHostConnectFailedReason(.out_of_memory);
+                return;
+            };
+            owned_client.* = client;
             app_remote_host_pool = RemoteHostPool.init(alloc);
-            app_remote_host_pool.?.addBorrowed(app_remote_client.?.host_id, &app_remote_client.?) catch {
-                app_remote_client.?.deinit();
-                app_remote_client = null;
+            app_remote_host_pool.?.addOwned(host_id, owned_client) catch {
+                owned_client.deinit();
+                alloc.destroy(owned_client);
                 app_remote_host_pool.?.deinit();
                 app_remote_host_pool = null;
                 self.markHostConnectFailedReason(.out_of_memory);
                 return;
             };
-            app_remote_host_pool.?.setSpawnHost(app_remote_client.?.host_id) catch unreachable;
+            app_remote_host_pool.?.setSpawnHost(host_id) catch unreachable;
             // backend 하나가 host pool을 통해 old/current runtime을 host_id별로 라우팅한다.
             app_remote_backend = session_host.remote_term_backend.RemoteTermBackend.initWithPool(
                 alloc,
@@ -5594,8 +5602,6 @@ pub const AppSession = struct {
             ) catch {
                 app_remote_host_pool.?.deinit();
                 app_remote_host_pool = null;
-                app_remote_client.?.deinit();
-                app_remote_client = null;
                 self.markHostConnectFailedReason(.out_of_memory);
                 return;
             };
@@ -5699,20 +5705,24 @@ pub const AppSession = struct {
         const surface = surface: {
             if (is_macos and app_keep_alive_after_quit and reconnect_id.len > 0) {
                 if (reconnect_id.len != 32) return error.InvalidPersistentRuntimeIdentity;
-                const client = app_remote_client orelse return error.PersistentRuntimeUnavailable;
-                var reconnect_host = client.host_id;
+                const rb = if (app_remote_backend) |*remote| remote else return error.PersistentRuntimeUnavailable;
+                const pooled = app_remote_host_pool != null;
+                const legacy_client = if (!pooled) app_remote_client else null;
+                var reconnect_host = if (app_remote_host_pool) |*pool|
+                    pool.spawnHostId() orelse return error.PersistentRuntimeUnavailable
+                else
+                    (legacy_client orelse return error.PersistentRuntimeUnavailable).host_id;
                 if (reconnect_host_id.len > 0) {
                     if (reconnect_host_id.len != 32) return error.InvalidPersistentRuntimeIdentity;
                     reconnect_host = std.fmt.parseInt(u128, reconnect_host_id, 16) catch
                         return error.InvalidPersistentRuntimeIdentity;
                 }
-                const rb = if (app_remote_backend) |*remote| remote else return error.PersistentRuntimeUnavailable;
                 var rid: [32]u8 = undefined;
                 @memcpy(&rid, reconnect_id[0..32]);
-                const attached = if (app_remote_host_pool != null)
+                const attached = if (pooled)
                     rb.attachTermOnHost(reconnect_host, id, rid, size) catch return error.PersistentRuntimeUnavailable
                 else blk: {
-                    if (reconnect_host != client.host_id) return error.PersistentRuntimeUnavailable;
+                    if (reconnect_host != legacy_client.?.host_id) return error.PersistentRuntimeUnavailable;
                     break :blk rb.attachTerm(id, rid, size) catch return error.PersistentRuntimeUnavailable;
                 };
                 reconnected = true;

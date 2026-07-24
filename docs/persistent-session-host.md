@@ -106,7 +106,9 @@ prefix key, status line, copy mode, 설정 언어, command language, tmux wire �
 - v1에서 전체 Maru workspace를 텍스트 TUI로 완전히 재현하는 것.
 - WKWebView process, browser JS heap, file panel의 미저장 editor buffer를 session host에 넣는 것.
 - 원격 TCP/HTTP 포트를 열거나 계정·클라우드 relay를 추가하는 것.
-- session host 무중단 binary upgrade와 실행 중 PTY의 다른 host 프로세스로의 live handoff.
+- capability 없는 legacy host의 사후 live migration과 서로 다른 PID 사이 child-parent 관계 이전. 향후
+  upgrade-capable host의 attachment 0 동일 PID `exec` 교체는
+  [Session host 실행 중 업그레이드](session-host-upgrade.md)가 별도 단계·rollback·검증 계약을 소유한다.
 
 ## 3. 현재 구현과 새 경계
 
@@ -622,8 +624,9 @@ request_id:u64 | stream_id:u64 | payload_len:u32
 - 현재 client는 hello의 `protocol_min`과 `protocol_max`를 둘 다 자기 `version_major`로 보내고, server는 hello를 읽기
   전에 frame header major의 정확한 일치를 요구한다. 따라서 min/max 필드는 wire에 있어도 **현재 구현은 cross-major
   범위 협상을 하지 않는다**. 같은 major 안의 additive 기능은 아래 capability로 구 host와 공존시키고, header/screen
-  codec처럼 호환 불가능한 변경은 major를 올린다. major가 달라지면 구 runtime은 종료되지는 않지만 새 GUI가 attach할 수
-  없으며, host binary live handoff는 §2 비목표다.
+  codec처럼 호환 불가능한 변경은 major를 올린다. major가 달라지면 current codec만 가진 GUI는 attach할 수 없다.
+  목표 상태에서는 N-1 adapter가 구 major로 연결하며, `host_exec_upgrade_v1`을 가진 attachment 0 host만
+  [실행 중 업그레이드 계약](session-host-upgrade.md)에 따라 같은 PID `exec`로 교체한다.
 - `screen_viewport_scrolled_v1`은 같은 MRSH v2 안에서 screen mode bit의 의미를 확장하는 hello capability다. 이 capability를
   host가 응답했을 때만 client는 `viewport_scrolled`와 scrolled snapshot의 canonical live cursor anchor를 신뢰한다. 앱 업데이트
   전에 이미 살아 있던 구 v2 host는 capability가 없으므로 bit 부재를 `false`로 해석하면 안 된다. 새 client는 그 연결에서
@@ -666,6 +669,8 @@ request_id:u64 | stream_id:u64 | payload_len:u32
 connection의 첫 frame은 반드시 `hello`다. 현재 client는 `{protocol_min:2, protocol_max:2, client_kind:"gui|cli",
 capabilities:["runtime_metadata_v1","screen_viewport_scrolled_v1","async_scroll_to_bottom_v1","runtime_selected_text_v1",...]}`를 보내고 host는 선택 version, `host_id`, 자신이 실제로
 지원하는 capability를 응답한다. client는 hello_ack에도 이름이 있는 capability만 활성화하며, major가 같다는 사실만으로 새 screen 의미론을 가정하지 않는다.
+목표 상태의 `host_exec_upgrade_v1`은 current/N-1 adapter가 `host.upgrade.prepare/status`를 쓸 수 있다는 별도
+capability이며, U5 전에는 광고하지 않는다.
 현재 서로 다른 header major끼리는 hello payload 협상 전에 server가 응답 없이 연결을 닫으므로 client에는 보통
 `ConnectionClosed`→host `.denied`로 보인다. `incompatible_version` 응답은 header major는 현재 값인데 hello의
 `protocol_min..protocol_max`가 현재 major를 포함하지 않는 경우에만 도달한다. GUI는 manifest handle의 `host_id`와
@@ -679,15 +684,18 @@ hello의 값이 다르면 stale로 처리한다.
 1. **같은 major:** wire의 기존 필드·method 의미를 깨지 않고 additive capability로만 확장한다. 새 GUI는 hello_ack에 없는
    기능을 보내지 않으며, 명시된 degraded adapter가 있으면 이미 받은 screen/metadata projection만 사용한다. capability를
    광고한 host의 응답 schema가 어긋나면 구 host로 추측해 downgrade하지 않고 connection을 fail-close한다.
-2. **지원하는 이전 major(N-1):** 새 앱은 current와 직전 major codec/adapter를 함께 제공한다. 기존 runtime은 구 host에
-   그대로 남고 새 GUI가 그 adapter로 attach한다. 새 Term은 current host에 생성한다. 즉 실행 중 PTY를 옮기는
-   migration이 아니라 **old host drain + side-by-side host**다.
+2. **지원하는 이전 major(N-1):** 새 앱은 current와 직전 major codec/adapter를 함께 제공한다. capability 없는 기존
+   runtime은 구 host에 그대로 남고 새 GUI가 그 adapter로 attach하며 새 Term은 current host에 생성한다
+   (`old host drain + side-by-side host`). upgrade-capable host이고 attachment가 0이면 adapter가
+   `host.upgrade.prepare`를 요청해 [같은 PID exec migration](session-host-upgrade.md)을 시도한다. busy·preflight
+   실패·schema 미지원이면 강행하지 않고 side-by-side drain으로 돌아간다.
 3. **지원 범위 밖:** 구 host/runtime을 kill하거나 fresh shell로 위장하지 않는다. exact `host_id:runtime_id`가 어느 protocol
    때문에 attach 불가능한지 사용자 notice와 진단 로그에 남긴다.
 
 이를 위해 고정 `<base>/session-host/control.sock` 하나를 host별 discovery entry와 짧은 endpoint namespace로 바꾼다.
 `<base>/session-host/hosts/<host_id>/host.v1.json` entry는 `host_id`, protocol major, **절대 socket path**, build identity,
-lifecycle 상태를 가지며 workspace manifest는 계속 `host_id:runtime_id`만 참조한다. manifest/lock은 긴 cache 경로에 있어도
+monotonic `upgrade_epoch`, lifecycle(`ready/restoring/draining`) 상태를 가지며 workspace manifest는 계속
+`host_id:runtime_id`만 참조한다. manifest/lock은 긴 cache 경로에 있어도
 되지만 Unix socket은 macOS `sockaddr_un.sun_path`의 NUL 포함 104-byte 상한을 구조적으로 만족해야 한다. endpoint는
 `/tmp/maru-<uid>/sh/<32-hex-host_id>.sock`으로 고정하고, per-UID directory를 mode `0700`으로 생성하기 전에 `lstat`으로
 symlink가 아니며 현재 UID 소유인지 검증한다. socket도 현재처럼 peer UID와 mode `0600`을 검증한다. 임의
@@ -724,12 +732,15 @@ adapter를 추가할 수 있으며, 앱의 나머지 계층과 host process를 �
 실제 해당 major host binary의 attach/input/resize/snapshot/copy 테스트를 통과해야 current app 호환으로 선언한다.
 
 workspace/config/host-registry 같은 disk schema는 versioned reader→current in-memory model→current writer로 one-way
-migration할 수 있다. 반면 실행 중 PTY의 fd·child ownership·parser/scrollback을 다른 process로 넘기는 live handoff는
-이 정책의 요구사항이 아니며 §2의 비목표로 유지한다.
+migration할 수 있다. 실행 중 PTY를 **다른 PID**로 넘기는 방식은 child 회수권을 옮기지 못하므로 비목표다. 동일 PID
+`exec` 교체는 fd만 보존하는 것이 아니라 parser/scrollback/queue를 포함한 별도 handoff state와 rollback gate를
+요구하며, 상세 범위와 완료 조건은 [Session host 실행 중 업그레이드](session-host-upgrade.md)가 소유한다.
 
 | 내부 command | 주요 입력 | 결과/효과 |
 | --- | --- | --- |
 | `host.info` | 없음 | host/runtime/client/capability summary |
+| `host.upgrade.prepare` | `attempt_id`, target path/build/hash, handoff reader range | `host_exec_upgrade_v1` 전용. exact request/reply·target staging·idempotency·`reply_and_close` 뒤 daemon pending attempt·attachment 0·rollback 계약은 [실행 중 업그레이드](session-host-upgrade.md)가 소유 |
+| `host.upgrade.status` | `attempt_id` | `pending/resumed/rolled_back/committed/failed_nonretryable` typed 상태. 성공은 EOF가 아니라 재접속 `host.info`의 same host ID·target build/protocol·upgrade epoch·runtime ID 집합으로 판정 |
 | `runtime.list` / `runtime.get` | filter 또는 `runtime_id` | 권한 범위 안 redacted metadata |
 | `runtime.spawn` | argv, cols/rows와 legacy optional 값 | 구 MRSH v2 client용 최소 spawn. 기존 runtime attach 호환을 위해 유지 |
 | `runtime.spawn_full` | argv/cwd/login/env/GUI parent-env snapshot/env-overrides/TERM/ZDOTDIR/SSH integration/cols/rows/`runtime_config` | 새 GUI의 fail-closed spawn. capability가 확인된 host만 `runtime_config`를 reader 시작 전에 적용해 첫 output부터 같은 scrollback·폭·theme·cell metric을 쓴다. 필드가 존재하면서 타입·범위가 틀리면 PTY를 만들지 않고 `invalid_request`; capability 없는 구 host에는 요청 자체를 보내지 않고 앱이 in-process로 fallback |
@@ -750,7 +761,8 @@ generation/sequence가 끊기면 화면을 추측해 이어 붙이지 않고 `st
 client crash, timeout은 모든 stream을 detach하지만 runtime/child에는 종료 신호를 보내지 않는다.
 
 공통 error code는 `host_unavailable`, `invalid_request`, `incompatible_version`, `unauthorized`, `runtime_not_found`, `stale_host`,
-`controller_busy`, `invalid_generation`, `payload_too_large`, `queue_invalidated`, `host_shutting_down`, `internal`이다.
+`controller_busy`, `invalid_generation`, `payload_too_large`, `queue_invalidated`, `host_shutting_down`, `upgrade_busy`,
+`upgrade_incompatible`, `attempt_conflict`, `upgrade_failed_retryable`, `upgrade_failed_nonretryable`, `internal`이다.
 CLI exit code와 사용자 문구는 이 typed error를 한 곳에서 매핑하고 server의 임의 문자열을 그대로 출력하지 않는다.
 
 ## 11. 보안과 개인정보

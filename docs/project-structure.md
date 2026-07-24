@@ -72,7 +72,11 @@ src/
                         띄움, argv 순수 조립·marker process smoke, macOS 전용 — **구현됨, P3-d2d**. `maru __session-host` CLI는
                         src/main.zig hidden 서브커맨드),
                         client.zig(GUI/CLI 측 host connect·hello·host_id 확정·read-only command 왕복 — server dispatch의 대칭,
-                        순수 JSON helper·fork host roundtrip smoke, macOS 전용 — **구현됨, P3-e1**);
+                        순수 JSON helper·fork host roundtrip smoke, macOS 전용 — **구현됨, P3-e1**),
+                        handoff_inventory.zig(session host 동일 PID exec upgrade U0 — terminal core/scrollback page,
+                        PTY/reader/queue, Surface/owner registry/runtime link, RuntimeManager/host registry/socket owner field를
+                        serialized/reconstructed/inherited_resource/must_be_empty로 compile-time 전수 분류; 실제 codec/exec는
+                        후속 — **구현됨, U0**);
                         P3-e2/e3 core 구현: runtime_manager·remote_runtime·remote_term_backend가 spawn/attach/input/resize/terminate,
                         snapshot/delta demux와 app_session discovery→launch→attach·workspace runtime-handle 재접속을 맡는다.
                         incremental checkpoint·quick persistence·외부 attach·완전한 nonblocking writer는 P4/P5 후속. control-plane/browser

@@ -111,6 +111,7 @@ else
 // non-macOS test에서도 gate 상태 머신을 검증한다.
 pub const upgrade_coordinator = @import("session_host/upgrade_coordinator.zig");
 pub const upgrade_wire = @import("session_host/upgrade_wire.zig");
+pub const upgrade_owner = @import("session_host/upgrade_owner.zig");
 pub const exec_fd_set = if (builtin.os.tag == .macos)
     @import("session_host/exec_fd_set.zig")
 else

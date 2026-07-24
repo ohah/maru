@@ -171,6 +171,19 @@ pub const TerminalRuntimeRegistry = struct {
         return self.entries.count();
     }
 
+    /// Upgrade eligibility는 connection 수가 아니라 실제 runtime subscriptions가 0인지 판정한다. Controller와 observer를
+    /// 같은 attachment 단위로 세어 여러 Window/CLI/SSH attach 중 하나라도 남으면 migration을 미룬다.
+    pub fn attachmentCount(self: *const TerminalRuntimeRegistry) usize {
+        var total: usize = 0;
+        var it = self.entries.valueIterator();
+        while (it.next()) |entry_ptr| {
+            const entry = entry_ptr.*;
+            if (entry.controller != null) total += 1;
+            total += entry.observers.items.len;
+        }
+        return total;
+    }
+
     /// 한 subscription을 runtime에 붙인다(§8·§9). 모드별로 controller/observer capability를 결정한다.
     pub fn attach(self: *TerminalRuntimeRegistry, id: RuntimeId, stream: StreamId, mode: AttachMode) RegistryError!AttachOutcome {
         const entry = self.entries.get(id) orelse return error.RuntimeNotFound;

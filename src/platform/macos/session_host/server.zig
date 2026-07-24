@@ -170,8 +170,16 @@ pub const StreamUpdate = struct {
 /// `handleFrame`이 caller(socket write loop)에게 지시하는 것. `reply`/`reply_and_close`의 바이트는 **caller 소유**다
 /// (socket에 write한 뒤 free). `close`는 응답 없이 connection을 닫으라는 뜻이다(runtime에는 손대지 않는다).
 pub const Action = union(enum) {
+    pub const UpgradeAccepted = struct {
+        bytes: []u8,
+        attempt_id: u128,
+    };
+
     reply: []u8,
     reply_and_close: []u8,
+    /// Socket adapter가 bytes 전량 write에 성공한 뒤 completed marker를 publish하고, fd close/active count 감소가 끝난
+    /// 후에만 daemon outer loop가 attempt를 take한다.
+    upgrade_accepted: UpgradeAccepted,
     close,
     /// 응답 없이 connection을 유지한다(input_bytes 같은 fire-and-forget stream frame 처리 후). caller는 아무것도 write하지 않는다.
     none,
@@ -396,16 +404,47 @@ pub const Connection = struct {
         const request = upgrade_wire.parsePrepare(params orelse
             return self.replyError(request_id, .invalid_request)) orelse
             return self.replyError(request_id, .invalid_request);
-        return switch (ops.prepare(ops.ctx, request)) {
+        return switch (ops.stage_pending(ops.ctx, request)) {
             .accepted => blk: {
-                const body = try self.stringify(.{ .result = .{ .state = "accepted" } });
+                var action_ready = false;
+                defer if (!action_ready) ops.cancel_unaccepted(ops.ctx, request.attempt_id);
+                var attempt_buf: [32]u8 = undefined;
+                const attempt = std.fmt.bufPrint(&attempt_buf, "{x:0>32}", .{request.attempt_id}) catch
+                    return error.OutOfMemory;
+                const body = try self.stringify(.{ .result = .{
+                    .attempt_id = attempt,
+                    .state = "accepted",
+                } });
                 defer self.allocator.free(body);
-                break :blk self.replyResultAndClose(request_id, body);
+                const wire = self.encode(.response, request_id, 0, body) catch |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    error.PayloadTooLarge => return self.replyError(request_id, .payload_too_large),
+                };
+                self.state = .closed;
+                action_ready = true;
+                break :blk .{ .upgrade_accepted = .{
+                    .bytes = wire,
+                    .attempt_id = request.attempt_id,
+                } };
+            },
+            .completed => |report| blk: {
+                var attempt_buf: [32]u8 = undefined;
+                const attempt = std.fmt.bufPrint(&attempt_buf, "{x:0>32}", .{request.attempt_id}) catch
+                    return error.OutOfMemory;
+                const body = try self.stringify(.{ .result = .{
+                    .attempt_id = attempt,
+                    .state = @tagName(report.status),
+                    .reason = @tagName(report.reason),
+                    .replayed = true,
+                } });
+                defer self.allocator.free(body);
+                break :blk self.replyResult(request_id, body);
             },
             .busy => self.replyError(request_id, .upgrade_busy),
             .conflict => self.replyError(request_id, .attempt_conflict),
             .unsupported => self.replyError(request_id, .upgrade_unsupported),
             .invalid_target => self.replyError(request_id, .invalid_target),
+            .resource_exhausted => self.replyError(request_id, .resource_exhausted),
         };
     }
 
@@ -418,9 +457,12 @@ pub const Connection = struct {
         const attempt_id = upgrade_wire.parseStatus(params orelse
             return self.replyError(request_id, .invalid_request)) orelse
             return self.replyError(request_id, .invalid_request);
-        const status = ops.status(ops.ctx, attempt_id) orelse
+        const report = ops.status(ops.ctx, attempt_id) orelse
             return self.replyError(request_id, .invalid_request);
-        const body = try self.stringify(.{ .result = .{ .state = @tagName(status) } });
+        const body = try self.stringify(.{ .result = .{
+            .state = @tagName(report.status),
+            .reason = @tagName(report.reason),
+        } });
         defer self.allocator.free(body);
         return self.replyResult(request_id, body);
     }
@@ -1148,15 +1190,6 @@ pub const Connection = struct {
         return .{ .reply = wire };
     }
 
-    fn replyResultAndClose(self: *Connection, request_id: u64, json: []const u8) HandleError!Action {
-        const wire = self.encode(.response, request_id, 0, json) catch |e| switch (e) {
-            error.OutOfMemory => return error.OutOfMemory,
-            error.PayloadTooLarge => return self.replyError(request_id, .payload_too_large),
-        };
-        self.state = .closed;
-        return .{ .reply_and_close = wire };
-    }
-
     fn stringify(self: *Connection, value: anytype) HandleError![]u8 {
         var out: std.Io.Writer.Allocating = .init(self.allocator);
         defer out.deinit();
@@ -1378,6 +1411,14 @@ fn runWire(conn: *Connection, wire: []const u8) !FedResult {
             const out = (try rp.next()).?; // caller가 out.deinit
             return .{ .action = if (action == .reply) "reply" else "reply_and_close", .frame = out };
         },
+        .upgrade_accepted => |accepted| {
+            defer allocator.free(accepted.bytes);
+            var rp = framing.FrameParser.init(allocator);
+            defer rp.deinit();
+            try rp.push(accepted.bytes);
+            const out = (try rp.next()).?;
+            return .{ .action = "upgrade_accepted", .frame = out };
+        },
         .frames => |list| {
             // 첫 frame(응답)만 파싱해 돌려주고 나머지(snapshot_chunk)는 이 helper에선 버린다. 전 frame 검사는 feedExpectFrames.
             defer {
@@ -1475,7 +1516,7 @@ test "server: upgrade prepare publishes pending then replies-and-closes before d
         accepted: bool = false,
         attempt_id: u128 = 0,
 
-        fn prepare(ctx: *anyopaque, request: upgrade_wire.PrepareRequest) upgrade_wire.PrepareDecision {
+        fn stagePending(ctx: *anyopaque, request: upgrade_wire.PrepareRequest) upgrade_wire.PrepareDecision {
             const self: *@This() = @ptrCast(@alignCast(ctx));
             if (self.accepted and self.attempt_id != request.attempt_id) return .conflict;
             self.accepted = true;
@@ -1483,11 +1524,20 @@ test "server: upgrade prepare publishes pending then replies-and-closes before d
             return .accepted;
         }
 
-        fn status(ctx: *anyopaque, attempt_id: u128) ?upgrade_wire.AttemptStatus {
+        fn status(ctx: *anyopaque, attempt_id: u128) ?upgrade_wire.AttemptReport {
             const self: *@This() = @ptrCast(@alignCast(ctx));
             if (!self.accepted or self.attempt_id != attempt_id) return null;
-            return .pending;
+            return .{ .status = .pending };
         }
+
+        fn armAccepted(ctx: *anyopaque, attempt_id: u128) upgrade_wire.ArmDecision {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            if (!self.accepted) return .not_pending;
+            if (self.attempt_id != attempt_id) return .conflict;
+            return .armed;
+        }
+
+        fn cancelUnaccepted(_: *anyopaque, _: u128) void {}
     };
 
     var registry = reg.TerminalRuntimeRegistry.init(testing.allocator);
@@ -1497,7 +1547,13 @@ test "server: upgrade prepare publishes pending then replies-and-closes before d
     conn.state = .ready;
     conn.selected_version = protocol.version_major;
     conn.host_status = .{ .manifest_capable = true, .upgrade_capable = true };
-    conn.upgrade_ops = .{ .ctx = &owner, .prepare = FakeOwner.prepare, .status = FakeOwner.status };
+    conn.upgrade_ops = .{
+        .ctx = &owner,
+        .stage_pending = FakeOwner.stagePending,
+        .cancel_unaccepted = FakeOwner.cancelUnaccepted,
+        .arm_accepted = FakeOwner.armAccepted,
+        .status = FakeOwner.status,
+    };
     const request =
         \\{"method":"host.upgrade.prepare","params":{"attempt_id":"0000000000000000000000000000aabb","target_path":"/Applications/Maru.app/Contents/MacOS/maru","target_build_id":"sha256:build","target_sha256":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","handoff_reader_min":1,"handoff_reader_max":1}}
     ;
@@ -1505,8 +1561,9 @@ test "server: upgrade prepare publishes pending then replies-and-closes before d
     defer if (result.frame) |frame| frame.deinit(testing.allocator);
     try testing.expect(owner.accepted);
     try testing.expectEqual(@as(u128, 0xAABB), owner.attempt_id);
-    try testing.expectEqualStrings("reply_and_close", result.action);
+    try testing.expectEqualStrings("upgrade_accepted", result.action);
     try testing.expect(std.mem.indexOf(u8, result.frame.?.payload, "\"state\":\"accepted\"") != null);
+    try testing.expect(std.mem.indexOf(u8, result.frame.?.payload, "\"attempt_id\":\"0000000000000000000000000000aabb\"") != null);
     try testing.expectEqual(Connection.State.closed, conn.state);
 }
 

@@ -17,14 +17,6 @@ pub const PrepareRequest = struct {
     handoff_reader_max: u16,
 };
 
-pub const PrepareDecision = enum {
-    accepted,
-    busy,
-    conflict,
-    unsupported,
-    invalid_target,
-};
-
 pub const AttemptStatus = enum {
     pending,
     resumed,
@@ -33,11 +25,63 @@ pub const AttemptStatus = enum {
     failed_nonretryable,
 };
 
+pub const AttemptReason = enum {
+    none,
+    exec_failed,
+    restore_failed,
+    rollback_exec_failed,
+    promotion_failed,
+    target_invalid,
+    state_too_large,
+    deadline_exceeded,
+    authority_poisoned,
+};
+
+pub const AttemptReport = struct {
+    status: AttemptStatus,
+    reason: AttemptReason = .none,
+};
+
+pub const PrepareDecision = union(enum) {
+    accepted,
+    completed: AttemptReport,
+    busy,
+    conflict,
+    unsupported,
+    invalid_target,
+    resource_exhausted,
+};
+
+pub const ArmDecision = enum {
+    armed,
+    not_pending,
+    conflict,
+};
+
 pub const Ops = struct {
     ctx: *anyopaque,
-    prepare: *const fn (ctx: *anyopaque, request: PrepareRequest) PrepareDecision,
-    status: *const fn (ctx: *anyopaque, attempt_id: u128) ?AttemptStatus,
+    /// Admission lease 안에서는 target 검증/복사와 pending metadata 게시까지만 한다. Quiesce는 accepted reply가 전량
+    /// write되고 connection lease가 해제된 뒤 daemon outer loop가 시작해야 한다.
+    stage_pending: *const fn (ctx: *anyopaque, request: PrepareRequest) PrepareDecision,
+    /// accepted response가 완성되기 전 write 실패 시 `.staged` reservation을 회수한다.
+    cancel_unaccepted: *const fn (ctx: *anyopaque, attempt_id: u128) void,
+    /// accepted response 전량 write 뒤 exact pending attempt만 실행 가능 상태로 바꾼다. Quiesce/exec는 하지 않는다.
+    arm_accepted: *const fn (ctx: *anyopaque, attempt_id: u128) ArmDecision,
+    status: *const fn (ctx: *anyopaque, attempt_id: u128) ?AttemptReport,
 };
+
+pub fn validReport(report: AttemptReport) bool {
+    return switch (report.status) {
+        .pending => report.reason == .none,
+        .committed => report.reason == .none or report.reason == .promotion_failed,
+        .resumed => switch (report.reason) {
+            .exec_failed, .target_invalid, .state_too_large, .deadline_exceeded => true,
+            else => false,
+        },
+        .rolled_back => report.reason == .restore_failed or report.reason == .target_invalid,
+        .failed_nonretryable => report.reason == .rollback_exec_failed or report.reason == .authority_poisoned,
+    };
+}
 
 pub fn parsePrepare(params: std.json.ObjectMap) ?PrepareRequest {
     if (params.count() != 6) return null;

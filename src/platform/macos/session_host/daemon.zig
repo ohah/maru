@@ -104,7 +104,11 @@ fn runSessionHostImpl(
     else
         discovery.ownerLockPathIn(&owner_path_buf, dir_path) catch return error.OwnerLeaseFailed;
     var lifetime_owner = owner_lease.OwnerLease.acquire(owner_path) catch return error.OwnerLeaseFailed;
-    defer lifetime_owner.deinit();
+    defer {
+        if (exact_host_id != null) _ = lifetime_owner.unlinkOwnedWhileLocked(owner_path) catch {};
+        lifetime_owner.deinit();
+        if (exact_host_id) |host_id| host_manifest.removeEmptyHostDirectories(dir_path, host_id);
+    }
 
     var registry = reg.TerminalRuntimeRegistry.init(allocator);
     defer registry.deinit();
@@ -142,7 +146,7 @@ fn runSessionHostImpl(
     }
     defer if (published_manifest) |*published| published.deinit();
     var authority: ?host_authority.HostAuthority = if (published_manifest) |*published|
-        host_authority.HostAuthority.init(published, &server, .{
+        host_authority.HostAuthority.init(allocator, published, &server, .{
             .host_id = host_id,
             .build_id = build_id,
             .protocol_major = protocol.version_major,
@@ -150,10 +154,10 @@ fn runSessionHostImpl(
             .upgrade_epoch = 0,
             .lifecycle = .ready,
             .endpoint = socket_path,
-        })
+        }) catch return error.ManifestFailed
     else
         null;
-    _ = &authority;
+    defer if (authority) |*owner| owner.deinit();
     server.runtime_ops = manager.runtimeOps(); // 이제 이 host는 read-only가 아니라 runtime.spawn/terminate를 처리한다.
     var admission_gate = upgrade.AdmissionGate.init(io);
     server.admission_gate = &admission_gate;

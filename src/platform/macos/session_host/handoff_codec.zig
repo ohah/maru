@@ -37,7 +37,9 @@ const flag_optional: u16 = 1;
 const section_terminal_core: u32 = 1;
 const section_host_meta: u32 = 2;
 const section_runtime: u32 = 3;
+const section_attempt_record: u32 = 4;
 pub const max_runtime_count: usize = 256;
+pub const max_attempt_record_bytes: usize = 64 * 1024;
 
 pub const Error = std.mem.Allocator.Error || error{
     BadMagic,
@@ -824,6 +826,9 @@ pub const HostView = struct {
     upgrade_epoch: u64,
     next_handle: u64,
     runtimes: []const RuntimeView,
+    /// Daemon attempt registry의 versioned opaque record. Outer optional section이라 frozen old reader는 안전하게
+    /// 건너뛰고, current target/rollback entrypoint는 자체 codec으로 필수 검증한다.
+    attempt_record: ?[]const u8 = null,
 };
 
 pub const RuntimeState = struct {
@@ -851,10 +856,12 @@ pub const HostState = struct {
     upgrade_epoch: u64,
     next_handle: u64,
     runtimes: []RuntimeState,
+    attempt_record: ?[]u8,
 
     pub fn deinit(self: *HostState) void {
         for (self.runtimes) |*runtime| runtime.deinit();
         self.allocator.free(self.runtimes);
+        if (self.attempt_record) |record| self.allocator.free(record);
         self.* = undefined;
     }
 };
@@ -886,6 +893,13 @@ pub fn encodeHost(allocator: std.mem.Allocator, host: HostView) Error![]u8 {
     try encodeTaggedValue(&writer, 4, u16, &runtime_count);
     try writer.endTlv(host_start);
 
+    if (host.attempt_record) |record| {
+        if (record.len == 0 or record.len > max_attempt_record_bytes) return error.LimitExceeded;
+        const attempt_start = try writer.beginTlv(section_attempt_record, flag_optional);
+        try writer.append(record);
+        try writer.endTlv(attempt_start);
+    }
+
     for (host.runtimes) |runtime| {
         if (runtime.child_pid <= 0 or runtime.cols < 2 or runtime.rows < 1 or
             runtime.fd_slot < 3 or runtime.core.response.items.len != 0) return error.InvalidValue;
@@ -906,7 +920,7 @@ pub fn encodeHost(allocator: std.mem.Allocator, host: HostView) Error![]u8 {
         try writer.endTlv(runtime_start);
         if (writer.bytes.items.len - runtime_start > max_runtime_section_bytes) return error.LimitExceeded;
     }
-    return finishEnvelope(&writer, @intCast(host.runtimes.len + 1));
+    return finishEnvelope(&writer, @intCast(host.runtimes.len + 1 + @intFromBool(host.attempt_record != null)));
 }
 
 fn readTagged(comptime T: type, field: *Reader, allocator: std.mem.Allocator) Error!T {
@@ -1000,6 +1014,8 @@ pub fn decodeHost(allocator: std.mem.Allocator, bytes: []const u8) Error!HostSta
     var next_handle: u64 = 0;
     var declared_count: u16 = 0;
     var saw_meta = false;
+    var attempt_record: ?[]u8 = null;
+    errdefer if (attempt_record) |record| allocator.free(record);
     var payload = Reader{ .bytes = envelope.payload };
     for (0..envelope.section_count) |_| {
         const tag = try payload.integer(u32);
@@ -1022,6 +1038,12 @@ pub fn decodeHost(allocator: std.mem.Allocator, bytes: []const u8) Error!HostSta
                     return err;
                 };
             },
+            section_attempt_record => {
+                if (flags & flag_optional == 0 or attempt_record != null or section.bytes.len == 0 or
+                    section.bytes.len > max_attempt_record_bytes) return error.InvalidValue;
+                attempt_record = allocator.dupe(u8, section.bytes) catch return error.OutOfMemory;
+                section.pos = section.bytes.len;
+            },
             else => if (flags & flag_optional == 0) return error.UnknownRequiredField,
         }
     }
@@ -1039,6 +1061,7 @@ pub fn decodeHost(allocator: std.mem.Allocator, bytes: []const u8) Error!HostSta
         .upgrade_epoch = epoch,
         .next_handle = next_handle,
         .runtimes = try runtimes.toOwnedSlice(allocator),
+        .attempt_record = attempt_record,
     };
 }
 
@@ -1273,7 +1296,13 @@ test "handoff v1 host DTO atomically round-trips multiple runtime identities and
         .{ .runtime_id = 0xAA, .surface_id = 7, .child_pid = 101, .cols = 8, .rows = 2, .resize_generation = 3, .fd_slot = 40, .pty_dev = 1, .pty_ino = 2, .pty_rdev = 3, .core = &first },
         .{ .runtime_id = 0xBB, .surface_id = 8, .child_pid = 102, .cols = 10, .rows = 3, .resize_generation = 4, .fd_slot = 41, .pty_dev = 4, .pty_ino = 5, .pty_rdev = 6, .core = &second },
     };
-    const encoded = try encodeHost(allocator, .{ .host_id = 0xCAFE, .upgrade_epoch = 9, .next_handle = 12, .runtimes = &views });
+    const encoded = try encodeHost(allocator, .{
+        .host_id = 0xCAFE,
+        .upgrade_epoch = 9,
+        .next_handle = 12,
+        .runtimes = &views,
+        .attempt_record = "attempt-v1",
+    });
     defer allocator.free(encoded);
     var decoded = try decodeHost(allocator, encoded);
     defer decoded.deinit();
@@ -1285,6 +1314,7 @@ test "handoff v1 host DTO atomically round-trips multiple runtime identities and
     try std.testing.expectEqual(@as(u128, 0xAA), decoded.runtimes[0].runtime_id);
     try std.testing.expectEqual(@as(u16, 41), decoded.runtimes[1].fd_slot);
     try std.testing.expectEqual(second.parser, decoded.runtimes[1].core.parser);
+    try std.testing.expectEqualStrings("attempt-v1", decoded.attempt_record.?);
 }
 
 test "handoff v1 host DTO rejects duplicate inherited slots without publishing any runtime" {

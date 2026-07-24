@@ -1449,8 +1449,22 @@ pub fn build(b: *std.Build) void {
                 },
             }),
         });
+        const session_host_upgrade_next = b.addExecutable(.{
+            .name = "maru-session-host-upgrade-next-v3",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/fixtures/session_host_upgrade_next_v3.zig"),
+                .target = target,
+                .optimize = optimize,
+                .link_libc = true,
+                .imports = &.{
+                    .{ .name = "maru", .module = maru_mod },
+                    .{ .name = "session_host", .module = session_host_fixture_mod },
+                },
+            }),
+        });
         run_session_host_tests.addPrefixedArtifactArg("MARU_SESSION_HOST_UPGRADE_OLD_EXE=", session_host_upgrade_old);
         run_session_host_tests.addPrefixedArtifactArg("MARU_SESSION_HOST_UPGRADE_NEW_EXE=", session_host_upgrade_new);
+        run_session_host_tests.addPrefixedArtifactArg("MARU_SESSION_HOST_UPGRADE_NEXT_EXE=", session_host_upgrade_next);
     }
     run_session_host_tests.addArg("MARU_SESSION_HOST_TEST_ONESHOT=maru-test-only-v1");
     run_session_host_tests.addArtifactArg(session_host_tests);

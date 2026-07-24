@@ -42,8 +42,10 @@ fn runScenario(scenario: [:0]const u8, expected: []const u8) !ScenarioResult {
     if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
     const old_raw = c.getenv("MARU_SESSION_HOST_UPGRADE_OLD_EXE") orelse return error.SkipZigTest;
     const new_raw = c.getenv("MARU_SESSION_HOST_UPGRADE_NEW_EXE") orelse return error.SkipZigTest;
+    const next_raw = c.getenv("MARU_SESSION_HOST_UPGRADE_NEXT_EXE") orelse return error.SkipZigTest;
     const old_path = std.mem.span(old_raw);
     const new_path = std.mem.span(new_raw);
+    const next_path = std.mem.span(next_raw);
     var state_buf: [256]u8 = undefined;
     const state_path = std.fmt.bufPrintZ(&state_buf, "/tmp/maru-upgrade-state-{d}-{s}", .{ c.getpid(), scenario }) catch return error.SkipZigTest;
     var backup_buf: [280]u8 = undefined;
@@ -74,7 +76,16 @@ fn runScenario(scenario: [:0]const u8, expected: []const u8) !ScenarioResult {
     if (pid == 0) {
         const old_z = std.testing.allocator.dupeZ(u8, old_path) catch c._exit(126);
         const new_z = std.testing.allocator.dupeZ(u8, new_path) catch c._exit(126);
-        const argv = [_:null]?[*:0]const u8{ old_z.ptr, new_z.ptr, state_path.ptr, result_path.ptr, scenario.ptr, owner_dir.ptr };
+        const next_z = std.testing.allocator.dupeZ(u8, next_path) catch c._exit(126);
+        const argv = [_:null]?[*:0]const u8{
+            old_z.ptr,
+            new_z.ptr,
+            state_path.ptr,
+            result_path.ptr,
+            scenario.ptr,
+            owner_dir.ptr,
+            next_z.ptr,
+        };
         // Zig test runner의 protocol/cache fd를 fixture host에 물려주지 않는다. U3 old image는 실제 detached host처럼
         // stdio 외 상속 fd 0에서 시작해야 exact non-CLOEXEC allowlist가 의미가 있다.
         var fd: c_int = 3;
@@ -139,8 +150,24 @@ test "U3 corrupt backup is rejected by old readback before exec and original own
     try std.testing.expectEqualStrings("23", try field(result.bytes, "exit"));
 }
 
+test "U3 valid but divergent backup is rejected before exec and original owner resumes" {
+    const result = try runScenario("backup-divergent", "old_preflight_failed_resumed=ok");
+    defer result.deinit();
+    try std.testing.expectEqualStrings("ok", try field(result.bytes, "owner_lease"));
+    try std.testing.expectEqualStrings("ground", try field(result.bytes, "parser"));
+    try std.testing.expectEqualStrings("23", try field(result.bytes, "exit"));
+}
+
 test "U3 incompatible target preflight exits before exec and original owner resumes" {
     const result = try runScenario("target-preflight-fail", "target_preflight_failed_resumed=ok");
+    defer result.deinit();
+    try std.testing.expectEqualStrings("ok", try field(result.bytes, "owner_lease"));
+    try std.testing.expectEqualStrings("ground", try field(result.bytes, "parser"));
+    try std.testing.expectEqualStrings("23", try field(result.bytes, "exit"));
+}
+
+test "U3 hung target preflight is killed and reaped at deadline before original owner resumes" {
+    const result = try runScenario("target-preflight-hang", "target_preflight_failed_resumed=ok");
     defer result.deinit();
     try std.testing.expectEqualStrings("ok", try field(result.bytes, "owner_lease"));
     try std.testing.expectEqualStrings("ground", try field(result.bytes, "parser"));
@@ -158,6 +185,17 @@ test "U3 target path replacement after old validation is rejected by recorded id
     const result = try runScenario("target-identity-swap", "rollback=ok");
     defer result.deinit();
     try std.testing.expectEqualStrings("ok", try field(result.bytes, "owner_lease"));
+    try std.testing.expectEqualStrings("ground", try field(result.bytes, "parser"));
+    try std.testing.expectEqualStrings("23", try field(result.bytes, "exit"));
+}
+
+test "U3 consecutive N-1 to N success and N to N+1 failure rolls back to N with live PTY" {
+    const result = try runScenario("two-upgrade", "second_upgrade=rolled_back");
+    defer result.deinit();
+    try std.testing.expectEqual(result.host_pid, try std.fmt.parseInt(c.pid_t, try field(result.bytes, "host_pid"), 10));
+    try std.testing.expectEqualStrings("committed", try field(result.bytes, "first_upgrade"));
+    try std.testing.expectEqualStrings("rolled_back", try field(result.bytes, "second_upgrade"));
+    try std.testing.expectEqualStrings("v2", try field(result.bytes, "rollback_image"));
     try std.testing.expectEqualStrings("ground", try field(result.bytes, "parser"));
     try std.testing.expectEqualStrings("23", try field(result.bytes, "exit"));
 }

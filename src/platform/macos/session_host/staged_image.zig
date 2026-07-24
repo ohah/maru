@@ -3,6 +3,8 @@
 const std = @import("std");
 const c = std.c;
 const posix = std.posix;
+extern "c" fn renamex_np(from: [*:0]const u8, to: [*:0]const u8, flags: c_uint) c_int;
+const rename_swap: c_uint = 0x00000002;
 
 pub const Error = error{
     InvalidDirectory,
@@ -35,6 +37,12 @@ pub const StagedImage = struct {
         self.allocator.free(self.path);
         self.* = undefined;
     }
+};
+
+pub const PromotionFailpoint = enum {
+    none,
+    before_swap,
+    mutate_staged_after_inspect,
 };
 
 pub fn stage(
@@ -142,16 +150,39 @@ pub fn promote(
     expected: Identity,
     current_path: [:0]const u8,
     previous_path: [:0]const u8,
-    inject_before_rename: bool,
+    failpoint: PromotionFailpoint,
 ) Error!void {
     const dir_fd = try openOwnerDir(owner_dir);
     defer _ = c.close(dir_fd);
     const actual = try inspect(staged_path);
     if (!identityEqual(expected, actual)) return error.HashMismatch;
-    if (inject_before_rename) return error.InjectedPromotionFailure;
+    const displaced_identity = try inspect(current_path);
+    if (failpoint == .before_swap) return error.InjectedPromotionFailure;
+    if (failpoint == .mutate_staged_after_inspect) {
+        const fd = c.open(staged_path.ptr, .{ .ACCMODE = .WRONLY, .TRUNC = true, .CLOEXEC = true }, @as(c.mode_t, 0));
+        if (fd < 0) return error.OpenFailed;
+        defer _ = c.close(fd);
+        try writeAll(fd, "mutated-after-inspect");
+        if (c.fsync(fd) != 0) return error.SyncFailed;
+    }
 
-    // destination replace가 한 번의 atomic rename이므로 current path는 old/new 중 하나로 항상 존재한다.
-    if (c.rename(staged_path.ptr, current_path.ptr) != 0) return error.RenameFailed;
+    // staged와 current 이름을 원자적으로 교환한 뒤 양쪽 inode/hash를 재검증한다. inspect 뒤 staged leaf가
+    // 교체됐다면 current에 올라간 객체가 expected와 다르므로 즉시 swap-back하고 capability를 철회한다.
+    if (renamex_np(staged_path.ptr, current_path.ptr, rename_swap) != 0) return error.RenameFailed;
+    const promoted_identity = inspect(current_path) catch {
+        _ = renamex_np(staged_path.ptr, current_path.ptr, rename_swap);
+        return error.HashMismatch;
+    };
+    const old_current_identity = inspect(staged_path) catch {
+        _ = renamex_np(staged_path.ptr, current_path.ptr, rename_swap);
+        return error.HashMismatch;
+    };
+    if (!identityEqual(expected, promoted_identity) or !identityEqual(displaced_identity, old_current_identity)) {
+        if (renamex_np(staged_path.ptr, current_path.ptr, rename_swap) != 0) return error.RenameFailed;
+        return error.HashMismatch;
+    }
+    if (c.fsync(dir_fd) != 0) return error.SyncFailed;
+    if (c.unlink(staged_path.ptr) != 0) return error.RenameFailed;
     if (c.fsync(dir_fd) != 0) return error.SyncFailed;
     _ = c.unlink(previous_path.ptr); // 과거 구현 residue만 정리하며 rollback 권위로 쓰지 않는다.
     if (c.fsync(dir_fd) != 0) return error.SyncFailed;
@@ -222,19 +253,31 @@ test "staged image copies hashes and atomically rotates two consecutive versions
         _ = c.unlink(previous.ptr);
     }
 
+    try writeFixture(source, "version-old");
+    var seed = try stage(std.testing.allocator, source, dir, "self-current");
+    defer seed.deinit();
     try writeFixture(source, "version-n");
     var first = try stage(std.testing.allocator, source, dir, "target-n");
     defer first.deinit();
-    try promote(dir, first.path, first.identity, current, previous, false);
+    try promote(dir, first.path, first.identity, current, previous, .none);
     try std.testing.expectEqual(@as(u64, 9), (try inspect(current)).size);
 
     try writeFixture(source, "version-n-plus-one");
     var second = try stage(std.testing.allocator, source, dir, "target-n-plus-one");
     defer second.deinit();
-    try std.testing.expectError(error.InjectedPromotionFailure, promote(dir, second.path, second.identity, current, previous, true));
+    try std.testing.expectError(error.InjectedPromotionFailure, promote(dir, second.path, second.identity, current, previous, .before_swap));
     const before = try inspect(current);
     try std.testing.expect(std.mem.eql(u8, &before.sha256, &first.identity.sha256));
-    try promote(dir, second.path, second.identity, current, previous, false);
+    try std.testing.expectError(
+        error.HashMismatch,
+        promote(dir, second.path, second.identity, current, previous, .mutate_staged_after_inspect),
+    );
+    const after_race = try inspect(current);
+    try std.testing.expect(std.mem.eql(u8, &after_race.sha256, &first.identity.sha256));
+    second.deinit();
+    try writeFixture(source, "version-n-plus-one");
+    second = try stage(std.testing.allocator, source, dir, "target-n-plus-one");
+    try promote(dir, second.path, second.identity, current, previous, .none);
     const after = try inspect(current);
     try std.testing.expect(std.mem.eql(u8, &after.sha256, &second.identity.sha256));
 }

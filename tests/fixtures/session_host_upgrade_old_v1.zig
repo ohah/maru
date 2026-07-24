@@ -83,11 +83,11 @@ fn finishRuntime(
         return error.ParserContinuationFailed;
 }
 
-fn rollbackTarget(allocator: std.mem.Allocator, result_path: []const u8, owner_path: []const u8) !void {
+fn rollbackTarget(allocator: std.mem.Allocator, result_path: []const u8, owner_dir: []const u8) !void {
     try session_host.exec_fd_set.assertExactOpen(&.{ pty_slot, primary_state_slot, backup_state_slot, owner_slot });
     var owner = try session_host.owner_lease.OwnerLease.adoptInherited(owner_slot);
     defer owner.deinit();
-    const owner_z = try allocator.dupeZ(u8, owner_path);
+    const owner_z = try std.fmt.allocPrintSentinel(allocator, "{s}/owner.lock", .{owner_dir}, 0);
     defer allocator.free(owner_z);
     try std.testing.expectError(error.AlreadyOwned, session_host.owner_lease.OwnerLease.acquire(owner_z));
     const bytes = try readState(allocator, backup_state_slot);
@@ -127,14 +127,20 @@ pub fn main(init: std.process.Init) !void {
     const new_path = args.next() orelse return error.MissingArgument;
     if (std.mem.eql(u8, new_path, "--rollback-target")) {
         const rollback_result = args.next() orelse return error.MissingArgument;
-        const rollback_owner = args.next() orelse return error.MissingArgument;
-        return rollbackTarget(allocator, rollback_result, rollback_owner);
+        const rollback_owner_dir = args.next() orelse return error.MissingArgument;
+        return rollbackTarget(allocator, rollback_result, rollback_owner_dir);
     }
     const state_path = args.next() orelse return error.MissingArgument;
     const result_path = args.next() orelse return error.MissingArgument;
     const scenario = args.next() orelse "success";
-    const owner_path = args.next() orelse return error.MissingArgument;
-    const owner_z = try allocator.dupeZ(u8, owner_path);
+    const owner_dir = args.next() orelse return error.MissingArgument;
+    const owner_dir_z = try allocator.dupeZ(u8, owner_dir);
+    defer allocator.free(owner_dir_z);
+    var self_image = try session_host.staged_image.stage(allocator, executable_path, owner_dir_z, "self-current");
+    defer self_image.deinit();
+    var target_image = try session_host.staged_image.stage(allocator, new_path, owner_dir_z, "target-current");
+    defer target_image.deinit();
+    const owner_z = try std.fmt.allocPrintSentinel(allocator, "{s}/owner.lock", .{owner_dir}, 0);
     defer allocator.free(owner_z);
     var owner = try session_host.owner_lease.OwnerLease.acquire(owner_z);
     defer owner.deinit();
@@ -217,12 +223,8 @@ pub fn main(init: std.process.Init) !void {
     try slots.prepare(owner.descriptor(), owner_slot);
     try slots.assertExactNonCloexec(&.{});
 
-    const new_z = try allocator.dupeZ(u8, new_path);
-    defer allocator.free(new_z);
     const result_z = try allocator.dupeZ(u8, result_path);
     defer allocator.free(result_z);
-    const self_z = try allocator.dupeZ(u8, executable_path);
-    defer allocator.free(self_z);
     const scenario_z = try allocator.dupeZ(u8, scenario);
     defer allocator.free(scenario_z);
     if (std.mem.eql(u8, scenario, "old-exec-fail")) {
@@ -238,7 +240,7 @@ pub fn main(init: std.process.Init) !void {
         try finishRuntime(allocator, &session, &core, "old-resume\n", "MIGRATED:old-resume");
         return writeResult(result_path, "old_exec_failed_resumed=ok\nowner_lease=ok\nparser=ground\nexit=23\n", allocator);
     }
-    const argv = [_:null]?[*:0]const u8{ new_z.ptr, self_z.ptr, result_z.ptr, scenario_z.ptr, owner_z.ptr };
-    _ = execv(new_z.ptr, &argv);
+    const argv = [_:null]?[*:0]const u8{ target_image.path.ptr, self_image.path.ptr, result_z.ptr, scenario_z.ptr, owner_dir_z.ptr };
+    _ = execv(target_image.path.ptr, &argv);
     return error.ExecFailed;
 }

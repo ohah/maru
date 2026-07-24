@@ -51,16 +51,22 @@ fn runScenario(scenario: [:0]const u8, expected: []const u8) !ScenarioResult {
     var result_buf: [256]u8 = undefined;
     const result_path = std.fmt.bufPrintZ(&result_buf, "/tmp/maru-upgrade-result-{d}-{s}", .{ c.getpid(), scenario }) catch return error.SkipZigTest;
     var owner_buf: [256]u8 = undefined;
-    const owner_path = std.fmt.bufPrintZ(&owner_buf, "/tmp/maru-upgrade-owner-{d}-{s}", .{ c.getpid(), scenario }) catch return error.SkipZigTest;
+    const owner_dir = std.fmt.bufPrintZ(&owner_buf, "/tmp/maru-upgrade-owner-{d}-{s}", .{ c.getpid(), scenario }) catch return error.SkipZigTest;
     _ = c.unlink(state_path.ptr);
     _ = c.unlink(backup_path.ptr);
     _ = c.unlink(result_path.ptr);
-    _ = c.unlink(owner_path.ptr);
+    _ = c.mkdir(owner_dir.ptr, 0o700);
     defer {
         _ = c.unlink(state_path.ptr);
         _ = c.unlink(backup_path.ptr);
         _ = c.unlink(result_path.ptr);
-        _ = c.unlink(owner_path.ptr);
+        var artifact_buf: [320]u8 = undefined;
+        for ([_][]const u8{ "owner.lock", "self-current", "self-previous", "target-current" }) |name| {
+            if (std.fmt.bufPrintZ(&artifact_buf, "{s}/{s}", .{ owner_dir, name })) |path| {
+                _ = c.unlink(path.ptr);
+            } else |_| {}
+        }
+        _ = c.rmdir(owner_dir.ptr);
     }
 
     const pid = c.fork();
@@ -68,7 +74,7 @@ fn runScenario(scenario: [:0]const u8, expected: []const u8) !ScenarioResult {
     if (pid == 0) {
         const old_z = std.testing.allocator.dupeZ(u8, old_path) catch c._exit(126);
         const new_z = std.testing.allocator.dupeZ(u8, new_path) catch c._exit(126);
-        const argv = [_:null]?[*:0]const u8{ old_z.ptr, new_z.ptr, state_path.ptr, result_path.ptr, scenario.ptr, owner_path.ptr };
+        const argv = [_:null]?[*:0]const u8{ old_z.ptr, new_z.ptr, state_path.ptr, result_path.ptr, scenario.ptr, owner_dir.ptr };
         // Zig test runner의 protocol/cache fd를 fixture host에 물려주지 않는다. U3 old image는 실제 detached host처럼
         // stdio 외 상속 fd 0에서 시작해야 exact non-CLOEXEC allowlist가 의미가 있다.
         var fd: c_int = 3;
@@ -95,6 +101,7 @@ test "U3 frozen old fixture execs new image with same host/child/runtime and exa
     try std.testing.expectEqualStrings("ground", try field(result.bytes, "parser"));
     try std.testing.expectEqualStrings("23", try field(result.bytes, "exit"));
     try std.testing.expectEqualStrings("ok", try field(result.bytes, "owner_lease"));
+    try std.testing.expectEqualStrings("enabled", try field(result.bytes, "upgrade_capability"));
 }
 
 test "U3 old exec syscall failure closes inherited slots and resumes original owner" {
@@ -128,4 +135,12 @@ test "U3 target adoption failpoint is caught by common rollback handler without 
     defer result.deinit();
     try std.testing.expectEqualStrings("ground", try field(result.bytes, "parser"));
     try std.testing.expectEqualStrings("23", try field(result.bytes, "exit"));
+}
+
+test "U3 rollback self-image promotion failure keeps runtime committed and withdraws upgrade capability" {
+    const result = try runScenario("target-promotion-fail", "input_output=ok");
+    defer result.deinit();
+    try std.testing.expectEqualStrings("withdrawn", try field(result.bytes, "upgrade_capability"));
+    try std.testing.expectEqualStrings("23", try field(result.bytes, "exit"));
+    try std.testing.expectEqualStrings("ok", try field(result.bytes, "owner_lease"));
 }

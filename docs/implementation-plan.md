@@ -809,6 +809,8 @@ TDD 방식:
   4. **chrome 고급화** — 확정된 atlas 소유권 위에서 점진(C1 rounded-rect부터).
   5. **영속 session host / 10단계 Plugin** — 독립 / 먼 미래. session host는 tmux-CC layout driver가 아니라
      Maru runtime backend이며 [영속 터미널 세션 호스트](persistent-session-host.md)의 제품 완료 범위 P1~P5를 따른다.
+     앱 업데이트 사이 실행 중 runtime 보존은 [Session host 실행 중 업그레이드](session-host-upgrade.md)의 U0~U5를
+     따른다. 현재는 U0 owner-field inventory compile gate까지만 구현하며 제품 upgrade command/capability는 비활성이다.
      P6 전체 workspace TUI/외부 tmux import adapter와 Plugin은 각각 실제 수요·착수 전 별도 논의.
 - **검토했으나 미채택한 대안**(UI 완성도 먼저, 구조 리스크 뒤로): chrome 고급화를 New Window보다 앞에 두는 안. atlas 소유권 캡슐화 + restore 스키마 window-aware면 재작업은 낮으나, 큰 구조 변경을 미루는 대신 나중에 공유 검토할 atlas가 2개가 되는 트레이드오프 — 사용자가 "토대 먼저"를 택해 미채택.
 

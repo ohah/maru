@@ -16,18 +16,61 @@ pub const HostAuthority = struct {
     server: *socket_server.SocketServer,
     descriptor: host_manifest.Descriptor,
 
-    pub fn init(
+    pub const PreparedInit = struct {
         allocator: std.mem.Allocator,
-        published: *host_manifest.Published,
+        server: *socket_server.SocketServer,
+        descriptor: ?host_manifest.Descriptor,
+
+        pub fn commit(
+            self: *PreparedInit,
+            published: *host_manifest.Published,
+        ) HostAuthority {
+            const descriptor = self.descriptor orelse unreachable;
+            self.descriptor = null;
+            var result = HostAuthority{
+                .allocator = self.allocator,
+                .published = published,
+                .server = self.server,
+                .descriptor = descriptor,
+            };
+            result.publishWireStatus(false);
+            return result;
+        }
+
+        pub fn activateRestoring(
+            self: *PreparedInit,
+            adoption: *host_manifest.PreparedAdoption,
+        ) Error!HostAuthority {
+            const owned = self.descriptor orelse return error.InvalidTransition;
+            const actual = try adoption.descriptor();
+            if (!sameDescriptor(owned, actual)) return error.InvalidTransition;
+            // 모든 검사와 allocation은 위에서 끝났다. 아래 state 전환 뒤에는
+            // syscall/allocation/error가 없다.
+            const publication = try adoption.activatePublication();
+            return self.commit(publication);
+        }
+
+        pub fn discard(self: *PreparedInit) void {
+            const descriptor = self.descriptor orelse return;
+            self.descriptor = null;
+            self.allocator.free(descriptor.build_id);
+            self.allocator.free(descriptor.endpoint);
+        }
+    };
+
+    /// Manifest adoption을 irreversible하게 commit하기 전에 authority가
+    /// 필요로 하는 모든 allocation을 끝낸다. `PreparedInit.commit`은
+    /// final stable Published 주소를 받는 no-allocation 전환이다.
+    pub fn prepareInit(
+        allocator: std.mem.Allocator,
         server: *socket_server.SocketServer,
         descriptor: host_manifest.Descriptor,
-    ) Error!HostAuthority {
+    ) Error!PreparedInit {
         const build_id = allocator.dupe(u8, descriptor.build_id) catch return error.OutOfMemory;
         errdefer allocator.free(build_id);
         const endpoint = allocator.dupe(u8, descriptor.endpoint) catch return error.OutOfMemory;
-        var result = HostAuthority{
+        return .{
             .allocator = allocator,
-            .published = published,
             .server = server,
             .descriptor = .{
                 .host_id = descriptor.host_id,
@@ -39,8 +82,16 @@ pub const HostAuthority = struct {
                 .endpoint = endpoint,
             },
         };
-        result.publishWireStatus(false);
-        return result;
+    }
+
+    pub fn init(
+        allocator: std.mem.Allocator,
+        published: *host_manifest.Published,
+        server: *socket_server.SocketServer,
+        descriptor: host_manifest.Descriptor,
+    ) Error!HostAuthority {
+        var prepared = try prepareInit(allocator, server, descriptor);
+        return prepared.commit(published);
     }
 
     pub fn deinit(self: *HostAuthority) void {
@@ -183,6 +234,16 @@ pub const HostAuthority = struct {
         return .applied;
     }
 };
+
+fn sameDescriptor(a: host_manifest.Descriptor, b: host_manifest.Descriptor) bool {
+    return a.host_id == b.host_id and
+        a.protocol_major == b.protocol_major and
+        a.screen_codec_version == b.screen_codec_version and
+        a.upgrade_epoch == b.upgrade_epoch and
+        a.lifecycle == b.lifecycle and
+        std.mem.eql(u8, a.build_id, b.build_id) and
+        std.mem.eql(u8, a.endpoint, b.endpoint);
+}
 
 fn sameSnapshot(
     actual: upgrade_product.AuthoritySnapshot,
@@ -334,6 +395,90 @@ test "host authority adapter CASes restoring and rollback through one disk and w
     try std.testing.expectEqual(host_manifest.Lifecycle.draining, server.host_status.lifecycle);
     try std.testing.expect(!server.host_status.upgrade_capable);
     try std.testing.expect(server.upgrade_ops == null);
+}
+
+test "prepared host authority activates a stable restoring manifest after all allocation" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    var dir_buf: [192]u8 = undefined;
+    const dir = std.fmt.bufPrintZ(
+        &dir_buf,
+        "/tmp/maru-host-authority-adopt-{d}",
+        .{std.c.getpid()},
+    ) catch return error.SkipZigTest;
+    _ = std.c.mkdir(dir.ptr, 0o700);
+    defer _ = std.c.rmdir(dir.ptr);
+    const host_id: u128 = 0xAD09;
+    defer host_manifest.removeEmptyHostDirectories(dir, host_id);
+    var endpoint_buf: [128]u8 = undefined;
+    const endpoint = try @import("short_endpoint.zig").currentSocketPathIn(&endpoint_buf, host_id);
+    const descriptor: host_manifest.Descriptor = .{
+        .host_id = host_id,
+        .build_id = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        .protocol_major = protocol.version_major,
+        .screen_codec_version = screen_stream.codec_version,
+        .upgrade_epoch = 7,
+        .lifecycle = .restoring,
+        .endpoint = endpoint,
+    };
+    var publication = try host_manifest.publish(allocator, dir, descriptor);
+    var publication_active = true;
+    defer if (publication_active) publication.deinit();
+
+    // Authority allocation이 실패해도 prepared manifest cleanup은 disk의
+    // restoring generation을 withdraw하지 않는다.
+    var failed_adoption = try host_manifest.prepareAdoptRestoring(
+        allocator,
+        dir,
+        host_id,
+        descriptor.upgrade_epoch,
+        endpoint,
+    );
+    var registry = @import("registry.zig").TerminalRuntimeRegistry.init(allocator);
+    defer registry.deinit();
+    var server: socket_server.SocketServer = .{
+        .listen_fd = -1,
+        .server_uid = std.c.getuid(),
+        .socket_path = try allocator.dupeZ(u8, endpoint),
+        .allocator = allocator,
+        .host_id = host_id,
+        .registry = &registry,
+    };
+    defer allocator.free(server.socket_path);
+    var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    try std.testing.expectError(
+        error.OutOfMemory,
+        HostAuthority.prepareInit(failing.allocator(), &server, descriptor),
+    );
+    failed_adoption.deinit();
+    var still_restoring = try host_manifest.load(allocator, dir, host_id);
+    still_restoring.deinit();
+
+    var adoption = try host_manifest.prepareAdoptRestoring(
+        allocator,
+        dir,
+        host_id,
+        descriptor.upgrade_epoch,
+        endpoint,
+    );
+    defer adoption.deinit();
+    var prepared = try HostAuthority.prepareInit(allocator, &server, descriptor);
+    defer prepared.discard();
+    try adoption.revalidate(dir);
+    // Same-PID exec 뒤 old process-local publication storage는 사라진다.
+    publication.deinitMemory();
+    publication_active = false;
+    var authority = try prepared.activateRestoring(&adoption);
+    defer authority.deinit();
+    try authority.commitTarget(
+        descriptor.build_id,
+        protocol.version_major,
+        screen_stream.codec_version,
+    );
+    var ready = try host_manifest.load(allocator, dir, host_id);
+    defer ready.deinit();
+    try std.testing.expectEqual(host_manifest.Lifecycle.ready, ready.lifecycle);
+    try std.testing.expectEqual(@as(u64, 8), ready.upgrade_epoch);
 }
 
 comptime {

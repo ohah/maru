@@ -12,6 +12,7 @@ pub const Authority = struct {
     image: staged_image.StagedImage,
     displaced: ?staged_image.StagedImage = null,
     valid: bool = true,
+    cleanup_active: bool = true,
 
     pub fn prepare(
         allocator: std.mem.Allocator,
@@ -35,10 +36,51 @@ pub const Authority = struct {
         return .{ .image = image };
     }
 
+    /// Restore image가 attempt record의 canonical `rollback-current`를
+    /// 재복사하지 않고 exact generation으로 채택한다.
+    pub fn adoptCanonical(
+        allocator: std.mem.Allocator,
+        session_dir: []const u8,
+        host_id: u128,
+        image_record: attempt_record.ImageView,
+    ) staged_image.Error!Authority {
+        if (!validateCanonicalRecord(image_record, session_dir, host_id))
+            return error.HashMismatch;
+        const path = std.fmt.allocPrintSentinel(
+            allocator,
+            "{s}",
+            .{image_record.path},
+            0,
+        ) catch return error.OutOfMemory;
+        return .{ .image = .{
+            .allocator = allocator,
+            .path = path,
+            .identity = .{
+                .dev = image_record.dev,
+                .ino = image_record.ino,
+                .size = image_record.size,
+                .sha256 = image_record.sha256,
+            },
+        }, .cleanup_active = false };
+    }
+
     pub fn deinit(self: *Authority) void {
         if (self.displaced) |*image| image.deinit();
-        self.image.deinit();
+        if (self.cleanup_active) {
+            self.image.deinit();
+        } else {
+            self.image.allocator.free(self.image.path);
+            self.image = undefined;
+        }
         self.* = undefined;
+    }
+
+    /// Durable target/rollback ready commit 뒤에만 canonical leaf의 exact
+    /// lifetime cleanup authority를 활성화한다.
+    pub fn activateCleanup(self: *Authority) bool {
+        if (!self.valid or self.cleanup_active) return false;
+        self.cleanup_active = true;
+        return true;
     }
 
     /// Borrowed view: path backing은 `Authority.deinit` 전까지만 유효하다. Promote 뒤에도 path
@@ -75,7 +117,8 @@ pub const Authority = struct {
         target_identity: staged_image.Identity,
         failpoint: staged_image.PromotionFailpoint,
     ) PromotionOutcome {
-        if (!self.valid or self.displaced != null) return .indeterminate;
+        if (!self.valid or !self.cleanup_active or self.displaced != null)
+            return .indeterminate;
         const previous_identity = self.image.identity;
         // Swap 뒤 실패해도 target leaf로 밀려난 old current의 cleanup owner를 잃지 않도록
         // destructive rename 전에 독립 path ownership을 확보한다.

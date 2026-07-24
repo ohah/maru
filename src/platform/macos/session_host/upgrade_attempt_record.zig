@@ -9,7 +9,9 @@ const limits = @import("upgrade_limits.zig");
 const handoff = @import("handoff_codec.zig");
 const upgrade_wire = wire;
 
-pub const schema_v2: u16 = 2;
+/// v3 adds the absolute monotonic deadline. U5 capability was still disabled,
+/// so no product host ever advertised the former v2 draft as attachable.
+pub const schema_v3: u16 = 3;
 pub const max_bytes = limits.max_attempt_record_bytes;
 pub const max_runtime_count = limits.max_runtime_count;
 pub const max_completed_count = limits.max_running_record_completed;
@@ -56,6 +58,8 @@ pub const View = struct {
     expected_epoch_after: u64,
     /// Immutable handoff가 허용하는 rollback 횟수. target/backup이 같은 bytes를 읽으므로 소비 횟수가 아니다.
     rollback_budget: u8,
+    /// Same-PID exec 전후 모든 단계가 공유하는 awake-clock absolute expiry.
+    deadline_expires_at_ns: i128,
     request_path: []const u8,
     staged_path: []const u8,
     build_id: []const u8,
@@ -87,6 +91,7 @@ pub const State = struct {
     epoch_before: u64,
     expected_epoch_after: u64,
     rollback_budget: u8,
+    deadline_expires_at_ns: i128,
     request_path: []u8,
     staged_path: []u8,
     build_id: []u8,
@@ -206,6 +211,7 @@ pub fn encode(allocator: std.mem.Allocator, view: View) Error![]u8 {
     try writer.integer(u8, view.rollback_budget);
     try writer.integer(u8, 0);
     try writer.integer(u16, 0);
+    try writer.integer(i128, view.deadline_expires_at_ns);
     try writer.integer(i64, view.dev);
     try writer.integer(u64, view.ino);
     try writer.integer(u64, view.size);
@@ -235,7 +241,7 @@ pub fn encode(allocator: std.mem.Allocator, view: View) Error![]u8 {
     }
     const payload = writer.bytes.items[header_len..];
     @memcpy(writer.bytes.items[0..8], &magic);
-    std.mem.writeInt(u16, writer.bytes.items[8..10], schema_v2, .big);
+    std.mem.writeInt(u16, writer.bytes.items[8..10], schema_v3, .big);
     std.mem.writeInt(u16, writer.bytes.items[10..12], 0, .big);
     std.mem.writeInt(u32, writer.bytes.items[12..16], @intCast(payload.len), .big);
     var digest: [32]u8 = undefined;
@@ -248,7 +254,7 @@ pub fn decode(allocator: std.mem.Allocator, bytes: []const u8) Error!State {
     if (bytes.len > max_bytes) return error.LimitExceeded;
     if (bytes.len < header_len) return error.Truncated;
     if (!std.mem.eql(u8, bytes[0..8], &magic)) return error.BadMagic;
-    if (std.mem.readInt(u16, bytes[8..10], .big) != schema_v2) return error.UnsupportedSchema;
+    if (std.mem.readInt(u16, bytes[8..10], .big) != schema_v3) return error.UnsupportedSchema;
     if (std.mem.readInt(u16, bytes[10..12], .big) != 0) return error.InvalidValue;
     const payload_len = std.mem.readInt(u32, bytes[12..16], .big);
     const expected_len = std.math.add(usize, header_len, payload_len) catch return error.IntegerOverflow;
@@ -265,6 +271,7 @@ pub fn decode(allocator: std.mem.Allocator, bytes: []const u8) Error!State {
     const rollback_budget = try reader.integer(u8);
     if (try reader.integer(u8) != 0) return error.InvalidValue;
     if (try reader.integer(u16) != 0) return error.InvalidValue;
+    const deadline_expires_at_ns = try reader.integer(i128);
     const dev = try reader.integer(i64);
     const ino = try reader.integer(u64);
     const size = try reader.integer(u64);
@@ -329,6 +336,7 @@ pub fn decode(allocator: std.mem.Allocator, bytes: []const u8) Error!State {
         .epoch_before = epoch_before,
         .expected_epoch_after = expected_epoch_after,
         .rollback_budget = rollback_budget,
+        .deadline_expires_at_ns = deadline_expires_at_ns,
         .request_path = request_path,
         .staged_path = staged_path,
         .build_id = build_id,
@@ -352,7 +360,7 @@ pub fn decode(allocator: std.mem.Allocator, bytes: []const u8) Error!State {
 }
 
 fn validateView(view: View) Error!void {
-    if (view.host_id == 0 or view.rollback_budget != 1 or
+    if (view.host_id == 0 or view.rollback_budget != 1 or view.deadline_expires_at_ns <= 0 or
         view.reader_min == 0 or view.reader_min > view.reader_max or view.runtime_ids.len > max_runtime_count or
         view.completed.len > max_completed_count or view.size == 0 or view.size > limits.max_staged_image_bytes or
         view.rollback_image.size == 0 or view.rollback_image.size > limits.max_staged_image_bytes or
@@ -406,6 +414,7 @@ pub fn validateDecoded(state: State) Error!void {
         .epoch_before = state.epoch_before,
         .expected_epoch_after = state.expected_epoch_after,
         .rollback_budget = state.rollback_budget,
+        .deadline_expires_at_ns = state.deadline_expires_at_ns,
         .request_path = state.request_path,
         .staged_path = state.staged_path,
         .build_id = state.build_id,
@@ -457,6 +466,7 @@ test "upgrade attempt record round-trips running authority runtime set and compl
         .epoch_before = 7,
         .expected_epoch_after = 8,
         .rollback_budget = 1,
+        .deadline_expires_at_ns = std.math.maxInt(i128),
         .request_path = "/Applications/Maru.app/Contents/MacOS/maru",
         .staged_path = "/tmp/maru/attempt/target",
         .build_id = "sha256:2222222222222222222222222222222222222222222222222222222222222222",
@@ -471,10 +481,14 @@ test "upgrade attempt record round-trips running authority runtime set and compl
         .completed = &completed,
     });
     defer std.testing.allocator.free(encoded);
-    try std.testing.expectEqual(schema_v2, std.mem.readInt(u16, encoded[8..10], .big));
+    try std.testing.expectEqual(schema_v3, std.mem.readInt(u16, encoded[8..10], .big));
     var decoded = try decode(std.testing.allocator, encoded);
     defer decoded.deinit();
     try std.testing.expectEqual(@as(u128, 0x20), decoded.attempt_id);
+    try std.testing.expectEqual(
+        std.math.maxInt(i128),
+        decoded.deadline_expires_at_ns,
+    );
     try std.testing.expectEqualSlices(u128, &.{ 2, 9 }, decoded.runtime_ids);
     try std.testing.expectEqual(wire.AttemptStatus.resumed, decoded.completed[0].report.status);
     try std.testing.expectEqualStrings("/tmp/maru/attempt/target", decoded.staged_path);
@@ -544,6 +558,7 @@ test "upgrade attempt record rejects checksum ordering and cap violations" {
         .epoch_before = 0,
         .expected_epoch_after = 1,
         .rollback_budget = 1,
+        .deadline_expires_at_ns = std.math.maxInt(i128),
         .request_path = "/a",
         .staged_path = "/b",
         .build_id = "sha256:0101010101010101010101010101010101010101010101010101010101010101",
@@ -566,12 +581,15 @@ test "upgrade attempt record rejects checksum ordering and cap violations" {
     defer std.testing.allocator.free(old_schema);
     std.mem.writeInt(u16, old_schema[8..10], 1, .big);
     try std.testing.expectError(error.UnsupportedSchema, decode(std.testing.allocator, old_schema));
+    std.mem.writeInt(u16, old_schema[8..10], 2, .big);
+    try std.testing.expectError(error.UnsupportedSchema, decode(std.testing.allocator, old_schema));
     try std.testing.expectError(error.InvalidValue, encode(std.testing.allocator, .{
         .host_id = 0xAA,
         .attempt_id = 1,
         .epoch_before = 0,
         .expected_epoch_after = 1,
         .rollback_budget = 1,
+        .deadline_expires_at_ns = std.math.maxInt(i128),
         .request_path = "/a",
         .staged_path = "/b",
         .build_id = "sha256:0101010101010101010101010101010101010101010101010101010101010101",
@@ -607,6 +625,7 @@ test "running attempt record permits opaque zero id and reserves one terminal hi
         .epoch_before = 0,
         .expected_epoch_after = 1,
         .rollback_budget = 1,
+        .deadline_expires_at_ns = std.math.maxInt(i128),
         .request_path = "/a",
         .staged_path = "/b",
         .build_id = "sha256:0202020202020202020202020202020202020202020202020202020202020202",

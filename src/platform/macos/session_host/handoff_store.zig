@@ -443,6 +443,7 @@ fn testAttemptRecord(allocator: std.mem.Allocator, host_id: u128, attempt_id: u1
         .epoch_before = 3,
         .expected_epoch_after = 4,
         .rollback_budget = 1,
+        .deadline_expires_at_ns = std.math.maxInt(i128),
         .request_path = "/Applications/Maru",
         .staged_path = "/tmp/maru/target",
         .build_id = "sha256:0101010101010101010101010101010101010101010101010101010101010101",

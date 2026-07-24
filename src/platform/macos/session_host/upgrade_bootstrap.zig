@@ -11,10 +11,12 @@ const entrypoint = @import("entrypoint.zig");
 const exec_fd_set = @import("exec_fd_set.zig");
 const handoff_codec = @import("handoff_codec.zig");
 const host_manifest = @import("host_manifest.zig");
+const owner_lease = @import("owner_lease.zig");
 const rollback_image = @import("rollback_image.zig");
 const short_endpoint = @import("short_endpoint.zig");
 const staged_image = @import("staged_image.zig");
 const upgrade_attempt_record = @import("upgrade_attempt_record.zig");
+const upgrade_deadline = @import("upgrade_deadline.zig");
 const upgrade_limits = @import("upgrade_limits.zig");
 const upgrade_owner = @import("upgrade_owner.zig");
 extern "c" fn getdtablesize() c_int;
@@ -28,6 +30,8 @@ pub const Error = error{
     InvalidRollbackImage,
     ReadFailed,
     OutOfMemory,
+    InvalidTransition,
+    ExecFailed,
 };
 
 pub const Validated = struct {
@@ -49,15 +53,150 @@ pub const BorrowedInheritedSet = struct {
     owner: c.fd_t,
 };
 
+pub const RestoreArmed = struct {
+    state: Validated,
+    token: upgrade_owner.RestoreToken,
+    inherited: BorrowedInheritedSet,
+    role: entrypoint.RestoreRole,
+
+    pub fn deadline(
+        self: *const RestoreArmed,
+        io: std.Io,
+    ) Error!upgrade_deadline.Deadline {
+        return upgrade_deadline.Deadline.fromAbsolute(
+            io,
+            self.state.attempt.deadline_expires_at_ns,
+        ) catch return error.InvalidState;
+    }
+
+    /// Decoded heap state만 해제하며 `inherited`와 runtime `fd_slot`은 caller 소유로 남긴다.
+    pub fn deinit(self: *RestoreArmed) void {
+        self.state.deinit();
+        self.* = undefined;
+    }
+
+    /// Rollback backup/owner/PTY allowlist가 먼저 무결하게 arm된 뒤 target
+    /// primary와 현재 executable을 role별로 검증한다. Target 검증 실패여도
+    /// 이 object는 살아 있어 caller가 one-shot rollback exec를 준비할 수 있다.
+    pub fn validateRoleExecutable(
+        self: *RestoreArmed,
+        invocation: entrypoint.RestoreInvocation,
+        executable_identity: staged_image.Identity,
+    ) Error!RestoreValidated {
+        if (invocation.role != self.role or
+            invocation.host_id != self.state.host.host_id or
+            invocation.attempt_id != self.state.attempt.attempt_id)
+            return error.InvalidState;
+        switch (self.role) {
+            .target => {
+                const primary_bytes = try readBounded(self.state.host.allocator, self.inherited.primary);
+                defer self.state.host.allocator.free(primary_bytes);
+                const backup_bytes = try readBounded(self.state.host.allocator, self.inherited.backup);
+                defer self.state.host.allocator.free(backup_bytes);
+                if (!std.mem.eql(u8, primary_bytes, backup_bytes))
+                    return error.InvalidState;
+                try validateExecutable(self.state.attempt, executable_identity);
+            },
+            .rollback => try validateImageExecutable(
+                self.state.attempt.rollbackImage(),
+                executable_identity,
+            ),
+        }
+        const result: RestoreValidated = .{
+            .state = self.state,
+            .token = self.token,
+            .inherited = self.inherited,
+            .role = self.role,
+        };
+        self.* = undefined;
+        return result;
+    }
+};
+
+/// Target precommit failure만 canonical rollback image로 정확히 한 번
+/// exec할 수 있는 preallocated token. `execv`가 반환해도 consumed 상태라
+/// error handler가 재귀 rollback을 시도할 수 없다.
+pub const PreparedRollbackExec = struct {
+    allocator: std.mem.Allocator,
+    executable: [:0]u8,
+    args: [entrypoint.max_invocation_args][:0]u8,
+    consumed: bool = false,
+
+    pub fn prepare(
+        allocator: std.mem.Allocator,
+        armed: *const RestoreArmed,
+        invocation: entrypoint.RestoreInvocation,
+    ) Error!PreparedRollbackExec {
+        if (armed.role != .target or invocation.role != .target)
+            return error.InvalidTransition;
+        var rollback = invocation;
+        rollback.role = .rollback;
+        var buffers: entrypoint.RestoreArgBuffers = .{};
+        const raw = entrypoint.formatRestoreArgs(rollback, &buffers) catch
+            return error.InvalidState;
+        const executable = allocator.dupeZ(
+            u8,
+            armed.state.attempt.rollback_path,
+        ) catch return error.OutOfMemory;
+        errdefer allocator.free(executable);
+        var args: [entrypoint.max_invocation_args][:0]u8 = undefined;
+        var built: usize = 0;
+        errdefer for (args[0..built]) |arg| allocator.free(arg);
+        for (raw, 0..) |arg, index| {
+            args[index] = allocator.dupeZ(u8, arg) catch
+                return error.OutOfMemory;
+            built += 1;
+        }
+        return .{
+            .allocator = allocator,
+            .executable = executable,
+            .args = args,
+        };
+    }
+
+    pub fn deinit(self: *PreparedRollbackExec) void {
+        for (self.args) |arg| self.allocator.free(arg);
+        self.allocator.free(self.executable);
+        self.* = undefined;
+    }
+
+    pub fn consume(self: *PreparedRollbackExec) bool {
+        if (self.consumed) return false;
+        self.consumed = true;
+        return true;
+    }
+
+    pub fn execute(self: *PreparedRollbackExec) Error!noreturn {
+        if (!self.consume()) return error.InvalidTransition;
+        var argv: [entrypoint.max_invocation_args + 3:null]?[*:0]const u8 = undefined;
+        argv[0] = self.executable.ptr;
+        argv[1] = entrypoint.subcommand;
+        for (self.args, 0..) |arg, index| argv[index + 2] = arg.ptr;
+        argv[entrypoint.max_invocation_args + 2] = null;
+        _ = execv(self.executable.ptr, &argv);
+        return error.ExecFailed;
+    }
+};
+
 pub const RestoreValidated = struct {
     state: Validated,
     token: upgrade_owner.RestoreToken,
     inherited: BorrowedInheritedSet,
+    role: entrypoint.RestoreRole,
 
-    /// Decoded heap state만 해제하며 `inherited`와 runtime `fd_slot`은 caller 소유로 남긴다.
     pub fn deinit(self: *RestoreValidated) void {
         self.state.deinit();
         self.* = undefined;
+    }
+
+    pub fn deadline(
+        self: *const RestoreValidated,
+        io: std.Io,
+    ) Error!upgrade_deadline.Deadline {
+        return upgrade_deadline.Deadline.fromAbsolute(
+            io,
+            self.state.attempt.deadline_expires_at_ns,
+        ) catch return error.InvalidState;
     }
 };
 
@@ -130,6 +269,18 @@ fn readRestoreInvocationForExecutable(
     invocation: entrypoint.RestoreInvocation,
     executable_identity: staged_image.Identity,
 ) Error!RestoreValidated {
+    var armed = try armRestoreInvocation(allocator, invocation);
+    errdefer armed.deinit();
+    return armed.validateRoleExecutable(invocation, executable_identity);
+}
+
+/// Target primary보다 먼저 backup 기반 rollback authority를 arm한다.
+/// 이 함수 성공 뒤의 target-only 검증 실패는 caller가 staged-old rollback
+/// exec로 전환할 수 있지만, backup/owner/PTY/allowlist 실패는 fail-stop이다.
+pub fn armRestoreInvocation(
+    allocator: std.mem.Allocator,
+    invocation: entrypoint.RestoreInvocation,
+) Error!RestoreArmed {
     if (!invocation.layout.valid())
         return error.InvalidState;
     short_endpoint.validateCurrentSocketPath(invocation.socket_path, invocation.host_id) catch
@@ -140,24 +291,10 @@ fn readRestoreInvocationForExecutable(
 
     if (sameObject(primary, backup))
         return error.InvalidFd;
-    const selected_bytes = switch (invocation.role) {
-        .target => target: {
-            const primary_bytes = try readBounded(allocator, primary);
-            errdefer allocator.free(primary_bytes);
-            const backup_bytes = try readBounded(allocator, backup);
-            defer allocator.free(backup_bytes);
-            if (!std.mem.eql(u8, primary_bytes, backup_bytes))
-                return error.InvalidState;
-            break :target primary_bytes;
-        },
-        .rollback => rollback: {
-            // Rollback의 복구 권위는 backup이다. Primary는 exact inherited allowlist에 속한
-            // owner-only unlinked regular fd라는 provenance만 확인하고, 손상·truncate된
-            // 내용이나 크기를 읽지 않는다.
-            try validateIgnoredHandoffFd(primary);
-            break :rollback try readBounded(allocator, backup);
-        },
-    };
+    // Primary는 target 검증 실패 원인일 수 있으므로 여기서는 role과 무관하게
+    // provenance만 확인한다. 복구 권위인 backup을 먼저 decode한다.
+    try validateIgnoredHandoffFd(primary);
+    const selected_bytes = try readBounded(allocator, backup);
     defer allocator.free(selected_bytes);
     var state = try decodeValidated(allocator, selected_bytes);
     errdefer state.deinit();
@@ -195,10 +332,6 @@ fn readRestoreInvocationForExecutable(
     allowed[count + 1] = backup;
     allowed[count + 2] = owner;
     exec_fd_set.assertExactOpen(allowed[0 .. count + 3]) catch return error.InvalidFd;
-    switch (invocation.role) {
-        .target => try validateExecutable(state.attempt, executable_identity),
-        .rollback => try validateImageExecutable(state.attempt.rollbackImage(), executable_identity),
-    }
     return .{
         .state = state,
         .token = token,
@@ -207,6 +340,7 @@ fn readRestoreInvocationForExecutable(
             .backup = backup,
             .owner = owner,
         },
+        .role = invocation.role,
     };
 }
 
@@ -252,18 +386,7 @@ fn validateOwnerFd(session_dir: []const u8, host_id: u128, fd: c.fd_t) Error!voi
     var owner_path_buf: [832]u8 = undefined;
     const owner_path = host_manifest.ownerLockPathIn(&owner_path_buf, session_dir, host_id) catch
         return error.InvalidState;
-    var path_stat: posix.Stat = undefined;
-    var fd_stat: posix.Stat = undefined;
-    const raw_flags = c.fcntl(fd, c.F.GETFL, @as(c_int, 0));
-    if (raw_flags < 0 or
-        c.fstatat(posix.AT.FDCWD, owner_path.ptr, &path_stat, posix.AT.SYMLINK_NOFOLLOW) != 0 or
-        c.fstat(fd, &fd_stat) != 0)
-        return error.InvalidFd;
-    const open_flags: c.O = @bitCast(@as(u32, @intCast(raw_flags)));
-    if (open_flags.ACCMODE != .RDWR or !posix.S.ISREG(fd_stat.mode) or fd_stat.uid != c.getuid() or
-        (fd_stat.mode & 0o777) != 0o600 or path_stat.dev != fd_stat.dev or path_stat.ino != fd_stat.ino)
-        return error.InvalidFd;
-    if (c.flock(fd, c.LOCK.EX | c.LOCK.NB) != 0)
+    owner_lease.OwnerLease.validateInheritedExact(fd, owner_path) catch
         return error.InvalidFd;
 }
 
@@ -406,6 +529,14 @@ test "target and rollback bootstrap validate exact zero-runtime inherited proces
         host_dir,
     );
     defer rollback_authority.deinit();
+    var adopted_rollback = try rollback_image.Authority.adoptCanonical(
+        std.testing.allocator,
+        session_dir,
+        host_id,
+        rollback_authority.record(),
+    );
+    adopted_rollback.deinit();
+    try std.testing.expect(rollback_authority.revalidate());
     var target_image = try staged_image.stageExclusive(
         std.testing.allocator,
         restore_executable,
@@ -422,6 +553,7 @@ test "target and rollback bootstrap validate exact zero-runtime inherited proces
         .epoch_before = 4,
         .expected_epoch_after = 5,
         .rollback_budget = 1,
+        .deadline_expires_at_ns = std.math.maxInt(i128),
         .request_path = restore_executable,
         .staged_path = target_path,
         .build_id = build_id,
@@ -494,16 +626,53 @@ test "target and rollback bootstrap validate exact zero-runtime inherited proces
         .attempt_id = attempt_id,
         .layout = layout,
     };
+    const rollback_token_state = try readValidated(
+        std.testing.allocator,
+        pair.backup_fd,
+    );
+    var rollback_armed = RestoreArmed{
+        .state = rollback_token_state,
+        .token = upgrade_owner.validateRestoreEntry(
+            rollback_token_state.attempt,
+            .target,
+            attempt_id,
+            .primary,
+        ) orelse return error.TestUnexpectedResult,
+        .inherited = .{
+            .primary = layout.primarySlot(),
+            .backup = layout.backupSlot(),
+            .owner = layout.ownerSlot(),
+        },
+        .role = .target,
+    };
+    defer rollback_armed.deinit();
+    _ = try rollback_armed.deadline(std.testing.io);
+    var rollback_exec = try PreparedRollbackExec.prepare(
+        std.testing.allocator,
+        &rollback_armed,
+        target_invocation,
+    );
+    defer rollback_exec.deinit();
+    try std.testing.expect(rollback_exec.consume());
+    try std.testing.expect(!rollback_exec.consume());
     try runRestoreGateChild(target_invocation, target_path, true);
     try runRestoreGateChild(rollback_invocation, rollback_authority.image.path, true);
     try runRestoreGateChild(rollback_invocation, target_path, false);
 
     _ = c.close(layout.primarySlot());
     const corrupt_primary = try openTruncatedUnlinkedCopy(host_dir, handoff);
-    defer _ = c.close(corrupt_primary);
+    var corrupt_primary_open = true;
+    defer {
+        if (corrupt_primary_open) _ = c.close(corrupt_primary);
+    }
     var corrupt_slot: exec_fd_set.PreparedSlots = .{};
     defer corrupt_slot.rollback();
     try corrupt_slot.prepare(corrupt_primary, layout.primarySlot());
+    _ = c.close(corrupt_primary);
+    corrupt_primary_open = false;
+    // 실제 restore child는 inherited allowlist만 남긴 process에서 공용
+    // rollback-arm 단계를 먼저 통과한다. 깨진 primary 때문에 target role
+    // validation은 실패해도 같은 backup/owner arm으로 rollback은 성공한다.
     try runRestoreGateChild(target_invocation, target_path, false);
     try runRestoreGateChild(rollback_invocation, rollback_authority.image.path, true);
 
@@ -546,6 +715,7 @@ test "target and rollback bootstrap validate exact zero-runtime inherited proces
         .epoch_before = 4,
         .expected_epoch_after = 5,
         .rollback_budget = 1,
+        .deadline_expires_at_ns = std.math.maxInt(i128),
         .request_path = product,
         .staged_path = product_target.path,
         .build_id = product_build_id,

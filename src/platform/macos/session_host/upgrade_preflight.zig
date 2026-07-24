@@ -138,6 +138,7 @@ test "product preflight execs the staged maru reader with only primary handoff f
         .epoch_before = 4,
         .expected_epoch_after = 5,
         .rollback_budget = 1,
+        .deadline_expires_at_ns = std.math.maxInt(i128),
         .request_path = product,
         .staged_path = product,
         .build_id = build_id,

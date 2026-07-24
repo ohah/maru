@@ -59,6 +59,8 @@ pub const SocketServer = struct {
     listen_fd: c.fd_t,
     server_uid: posix.uid_t,
     socket_path: [:0]u8,
+    socket_dev: posix.dev_t = 0,
+    socket_ino: posix.ino_t = 0,
     allocator: std.mem.Allocator,
     host_id: u128,
     registry: *reg.TerminalRuntimeRegistry,
@@ -125,6 +127,8 @@ pub const SocketServer = struct {
             .listen_fd = lfd,
             .server_uid = server_uid,
             .socket_path = owned_path,
+            .socket_dev = st.dev,
+            .socket_ino = st.ino,
             .allocator = allocator,
             .host_id = host_id,
             .registry = registry,
@@ -140,6 +144,21 @@ pub const SocketServer = struct {
 
     pub fn socketPathZ(self: *const SocketServer) [:0]const u8 {
         return self.socket_path;
+    }
+
+    /// Restore activation의 마지막 fallible frontier에서 bound pathname이
+    /// 이 listener generation 그대로인지 확인한다.
+    pub fn revalidateBoundIdentity(self: *const SocketServer) bool {
+        var st: posix.Stat = undefined;
+        return c.fstatat(
+            posix.AT.FDCWD,
+            self.socket_path.ptr,
+            &st,
+            posix.AT.SYMLINK_NOFOLLOW,
+        ) == 0 and
+            posix.S.ISSOCK(st.mode) and st.uid == self.server_uid and
+            (st.mode & 0o777) == 0o600 and
+            st.dev == self.socket_dev and st.ino == self.socket_ino;
     }
 
     /// 한 연결을 blocking accept한다. peer uid가 서버와 다르면 연결을 닫고 `null`(§11). 성공하면 그 연결의 fd.
@@ -615,6 +634,7 @@ test "socket server: real unix socket connect → hello → host.info roundtrip 
     }
     const listener_flags = c.fcntl(srv.listen_fd, c.F.GETFD, @as(c_int, 0));
     try testing.expect(listener_flags >= 0 and listener_flags & c.FD_CLOEXEC != 0);
+    try testing.expect(srv.revalidateBoundIdentity());
 
     // socket이 0600 socket인지(§11).
     var st: posix.Stat = undefined;

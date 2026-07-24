@@ -34,6 +34,18 @@ pub const Deadline = struct {
         return .{ .clock = .{ .injected = source }, .expires_at_ns = expires_at_ns };
     }
 
+    /// Same-PID exec handoff record에 저장한 absolute monotonic expiry를 새
+    /// image의 같은 awake clock에 다시 연결한다. 각 단계가 새 5초 budget을
+    /// 시작하지 않게 하는 제품 restore 전용 constructor다.
+    pub fn fromAbsolute(io: std.Io, expires_at_ns: i128) Error!Deadline {
+        if (expires_at_ns <= 0) return error.InvalidBudget;
+        return .{ .clock = .{ .io = io }, .expires_at_ns = expires_at_ns };
+    }
+
+    pub fn expiresAtNs(self: Deadline) i128 {
+        return self.expires_at_ns;
+    }
+
     pub fn testingNever() Deadline {
         if (!@import("builtin").is_test) @compileError("non-expiring upgrade deadline is test-only");
         return fromInjected(.{
@@ -83,4 +95,9 @@ test "upgrade deadline uses one absolute expiry across copied consumers" {
     fake.now = 150;
     try std.testing.expect(deadline.expired());
     try std.testing.expect(copied.expired());
+}
+
+test "upgrade deadline restores the exact absolute expiry" {
+    const deadline = try Deadline.fromAbsolute(std.testing.io, 123);
+    try std.testing.expectEqual(@as(i128, 123), deadline.expiresAtNs());
 }

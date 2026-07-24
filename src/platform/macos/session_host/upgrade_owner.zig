@@ -282,7 +282,7 @@ pub const UpgradeOwner = struct {
 
     /// Exec를 넘어 active authority와 host-lifetime completed idempotency ledger를 함께 보존한다. runtime_ids는
     /// caller가 stable sort한 exact graph set이어야 한다. rollback budget은 동일한 primary/backup record에 불변으로 남는다.
-    pub fn encodeRunningRecord(
+    pub fn encodeRunningRecordTesting(
         self: *const UpgradeOwner,
         allocator: std.mem.Allocator,
         execution: Execution,
@@ -290,6 +290,29 @@ pub const UpgradeOwner = struct {
         epoch_before: u64,
         rollback_image: attempt_record.ImageView,
         runtime_ids: []const u128,
+    ) attempt_record.Error![]u8 {
+        if (!@import("builtin").is_test)
+            @compileError("deadline-free running record encoding is test-only");
+        return self.encodeRunningRecordWithDeadline(
+            allocator,
+            execution,
+            host_id,
+            epoch_before,
+            rollback_image,
+            runtime_ids,
+            std.math.maxInt(i128),
+        );
+    }
+
+    pub fn encodeRunningRecordWithDeadline(
+        self: *const UpgradeOwner,
+        allocator: std.mem.Allocator,
+        execution: Execution,
+        host_id: u128,
+        epoch_before: u64,
+        rollback_image: attempt_record.ImageView,
+        runtime_ids: []const u128,
+        deadline_expires_at_ns: i128,
     ) attempt_record.Error![]u8 {
         const active = if (self.attempt) |value| value else return error.InvalidValue;
         if (active.id != execution.attempt_id or active.phase != .running) return error.InvalidValue;
@@ -312,6 +335,7 @@ pub const UpgradeOwner = struct {
             .epoch_before = epoch_before,
             .expected_epoch_after = expected_epoch,
             .rollback_budget = 1,
+            .deadline_expires_at_ns = deadline_expires_at_ns,
             .request_path = active.request_path,
             .staged_path = active.target.artifact.path,
             .build_id = active.target.build_id,
@@ -431,13 +455,30 @@ pub const UpgradeOwner = struct {
     pub const PreparedFinish = struct {
         owner: *UpgradeOwner,
         attempt_id: u128,
-        report: wire.AttemptReport,
+        fixed_report: ?wire.AttemptReport,
         active: bool = true,
 
         pub fn commit(self: *PreparedFinish) void {
-            if (!self.active) return;
+            const report = self.fixed_report orelse return;
+            _ = self.commitReport(report);
+        }
+
+        /// Target migration은 durable ready commit 뒤 rollback image promotion
+        /// 결과가 정해지므로 reservation 시점이 아니라 마지막에
+        /// `.committed/{none,promotion_failed}`를 선택한다.
+        pub fn commitReport(
+            self: *PreparedFinish,
+            report: wire.AttemptReport,
+        ) bool {
+            if (!self.active) return false;
+            if (self.fixed_report) |fixed|
+                if (fixed.status != report.status or fixed.reason != report.reason)
+                    return false;
+            if (!self.owner.finishAllowedFinishing(self.attempt_id, report))
+                return false;
             self.active = false;
-            self.owner.commitFinishExact(self.attempt_id, self.report);
+            self.owner.commitFinishExact(self.attempt_id, report);
+            return true;
         }
     };
 
@@ -452,7 +493,23 @@ pub const UpgradeOwner = struct {
         return .{
             .owner = self,
             .attempt_id = attempt_id,
-            .report = report,
+            .fixed_report = report,
+        };
+    }
+
+    pub fn prepareTargetFinishLate(
+        self: *UpgradeOwner,
+        attempt_id: u128,
+    ) ?PreparedFinish {
+        const attempt = if (self.attempt) |*value| value else return null;
+        if (attempt.id != attempt_id or attempt.phase != .running or
+            attempt.restored_role != .target or self.completed_count >= max_completed)
+            return null;
+        attempt.phase = .finishing;
+        return .{
+            .owner = self,
+            .attempt_id = attempt_id,
+            .fixed_report = null,
         };
     }
 
@@ -473,17 +530,19 @@ pub const UpgradeOwner = struct {
     ) bool {
         const attempt = self.attempt orelse return false;
         if (attempt.id != attempt_id or attempt.phase != .running) return false;
-        if (!wire.validReport(report) or report.status == .pending) return false;
-        if (attempt.restored_role == null and
-            report.status != .resumed and
-            !(report.status == .failed_nonretryable and
-                (report.reason == .authority_poisoned or report.reason == .runtime_resume_failed)))
-            return false;
-        if (attempt.restored_role == .rollback and report.status != .rolled_back) return false;
-        if (attempt.restored_role == .target and
-            report.status != .committed and report.status != .failed_nonretryable)
-            return false;
-        return self.completed_count < max_completed;
+        return reportAllowedForRole(attempt.restored_role, report) and
+            self.completed_count < max_completed;
+    }
+
+    fn finishAllowedFinishing(
+        self: *const UpgradeOwner,
+        attempt_id: u128,
+        report: wire.AttemptReport,
+    ) bool {
+        const attempt = self.attempt orelse return false;
+        return attempt.id == attempt_id and attempt.phase == .finishing and
+            reportAllowedForRole(attempt.restored_role, report) and
+            self.completed_count < max_completed;
     }
 
     fn commitFinishExact(
@@ -493,7 +552,7 @@ pub const UpgradeOwner = struct {
     ) void {
         const attempt = if (self.attempt) |*value| value else return;
         if (attempt.id != attempt_id or attempt.phase != .finishing or
-            !wire.validReport(report) or report.status == .pending or
+            !reportAllowedForRole(attempt.restored_role, report) or
             self.completed_count == max_completed)
             return;
         const build_id = attempt.target.build_id;
@@ -544,6 +603,23 @@ pub const UpgradeOwner = struct {
         return self.status(attempt_id);
     }
 };
+
+fn reportAllowedForRole(
+    role: ?RestoreRole,
+    report: wire.AttemptReport,
+) bool {
+    if (!wire.validReport(report) or report.status == .pending) return false;
+    if (role == null)
+        return report.status == .resumed or
+            (report.status == .failed_nonretryable and
+                (report.reason == .authority_poisoned or
+                    report.reason == .runtime_resume_failed));
+    return switch (role.?) {
+        .target => report.status == .committed or
+            report.status == .failed_nonretryable,
+        .rollback => report.status == .rolled_back,
+    };
+}
 
 fn sameRequest(attempt: Attempt, candidate: wire.PrepareRequest) bool {
     return attempt.id == candidate.attempt_id and
@@ -878,7 +954,7 @@ test "upgrade owner record survives exec and restores active plus completed idem
     try std.testing.expectEqual(wire.PrepareDecision.accepted, old.stagePending(testRequest(31, "/active")));
     try std.testing.expectEqual(wire.ArmDecision.armed, old.armAccepted(31));
     const execution = old.beginExecution(31).?;
-    const bytes = try old.encodeRunningRecord(
+    const bytes = try old.encodeRunningRecordTesting(
         std.testing.allocator,
         execution,
         0xAA,
@@ -910,10 +986,23 @@ test "upgrade owner record survives exec and restores active plus completed idem
     try std.testing.expectEqual(wire.AttemptStatus.resumed, restored.status(30).?.status);
     try std.testing.expectEqual(wire.AttemptStatus.pending, restored.status(31).?.status);
     try std.testing.expectEqual(wire.PrepareDecision.conflict, restored.stagePending(testRequest(32, "/blocked")));
-    try std.testing.expect(restored.finish(31, .{ .status = .committed }));
+    var late_finish = restored.prepareTargetFinishLate(31) orelse
+        return error.TestUnexpectedNull;
+    try std.testing.expect(!late_finish.commitReport(.{
+        .status = .rolled_back,
+        .reason = .restore_failed,
+    }));
+    try std.testing.expect(late_finish.commitReport(.{
+        .status = .committed,
+        .reason = .promotion_failed,
+    }));
     const replay = restored.stagePending(testRequest(31, "/active"));
     try std.testing.expect(replay == .completed);
     try std.testing.expectEqual(wire.AttemptStatus.committed, replay.completed.status);
+    try std.testing.expectEqual(
+        wire.AttemptReason.promotion_failed,
+        replay.completed.reason,
+    );
 }
 
 test "upgrade owner restore allocation failures publish nothing and release owned target" {
@@ -926,7 +1015,7 @@ test "upgrade owner restore allocation failures publish nothing and release owne
     try std.testing.expectEqual(wire.PrepareDecision.accepted, old.stagePending(testRequest(41, "/active")));
     try std.testing.expectEqual(wire.ArmDecision.armed, old.armAccepted(41));
     const execution = old.beginExecution(41).?;
-    const bytes = try old.encodeRunningRecord(
+    const bytes = try old.encodeRunningRecordTesting(
         std.testing.allocator,
         execution,
         0xAA,
@@ -962,7 +1051,7 @@ test "upgrade owner rollback restore does not require the failed target artifact
     try std.testing.expectEqual(wire.PrepareDecision.accepted, old.stagePending(testRequest(45, "/gone-target")));
     try std.testing.expectEqual(wire.ArmDecision.armed, old.armAccepted(45));
     const execution = old.beginExecution(45).?;
-    const bytes = try old.encodeRunningRecord(
+    const bytes = try old.encodeRunningRecordTesting(
         std.testing.allocator,
         execution,
         0xAA,
@@ -1004,7 +1093,7 @@ test "upgrade owner immutable handoff allows one target to rollback transition o
     try std.testing.expectEqual(wire.PrepareDecision.accepted, old.stagePending(testRequest(50, "/active")));
     try std.testing.expectEqual(wire.ArmDecision.armed, old.armAccepted(50));
     const execution = old.beginExecution(50).?;
-    const bytes = try old.encodeRunningRecord(
+    const bytes = try old.encodeRunningRecordTesting(
         std.testing.allocator,
         execution,
         0xAA,

@@ -18,6 +18,13 @@ pub const AdmissionGate = struct {
         return .{ .io = io };
     }
 
+    /// Restore image는 bind/listen pathname이 보이기 전부터 admission을
+    /// 닫아 둔다. Durable authority와 reader ownership commit 뒤에만
+    /// `reopen`하여 cached client가 backlog에서 먼저 dispatch되는 틈을 막는다.
+    pub fn initClosed(io: std.Io) AdmissionGate {
+        return .{ .io = io, .open = false };
+    }
+
     pub const Lease = struct {
         gate: *AdmissionGate,
         released: bool = false,
@@ -129,4 +136,13 @@ test "upgrade admission close can be canceled while an admitted operation is sti
     try std.testing.expectEqual(@as(usize, 1), reopened.in_flight);
     lease.release();
     try std.testing.expectEqual(@as(usize, 0), gate.snapshot().in_flight);
+}
+
+test "restore admission starts closed and opens only through explicit commit" {
+    var gate = AdmissionGate.initClosed(std.testing.io);
+    try std.testing.expect(gate.tryEnter() == null);
+    try std.testing.expect(gate.closedAndDrained());
+    gate.reopen();
+    var lease = gate.tryEnter() orelse return error.TestUnexpectedResult;
+    lease.release();
 }

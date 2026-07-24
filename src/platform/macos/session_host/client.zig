@@ -56,6 +56,9 @@ pub const Client = struct {
     /// host가 응답 없는 `scroll_to_bottom` stream frame을 지원하는가. false인 구 host에서는
     /// AppKit callback이 동기 RPC로 fallback하지 않고 scrolled preedit를 fail-closed한다.
     async_scroll_to_bottom_v1: bool = false,
+    /// host가 scroll 외 focus/config/prompt를 포함한 bounded `runtime.core_command` v1 집합을 지원하는가.
+    /// false인 구 host에는 기존 scroll만 보내고 새 명령은 degraded no-op으로 남긴다.
+    runtime_core_command_v1: bool = false,
     parser: framing.FrameParser,
     // async full-state를 하나라도 수용하지 못하면 server subscription base는 이미 전진했을 수 있다. 그 뒤 같은 socket을
     // 계속 쓰면 어떤 shared stream이 누락됐는지 복구할 수 없으므로 connection 전체를 poison/close한다.
@@ -119,6 +122,7 @@ pub const Client = struct {
         self.host_id = parseHostId(ack.payload) orelse return error.HandshakeFailed;
         self.screen_viewport_scrolled_v1 = payloadHasCapability(ack.payload, "screen_viewport_scrolled_v1");
         self.async_scroll_to_bottom_v1 = payloadHasCapability(ack.payload, "async_scroll_to_bottom_v1");
+        self.runtime_core_command_v1 = payloadHasCapability(ack.payload, "runtime_core_command_v1");
         return self;
     }
 
@@ -161,6 +165,8 @@ pub const Client = struct {
             if (resp.header.kind == .delta_chunk or resp.header.kind == .snapshot_chunk) {
                 self.pending_stream.append(self.allocator, resp) catch {
                     resp.deinit(self.allocator);
+                    // frame은 socket에서 이미 소비됐다. 저장하지 못하면 다음 stream delta의 base가 끊기므로 fail-closed.
+                    self.invalidateConnection();
                     return error.OutOfMemory;
                 };
                 continue;
@@ -171,7 +177,10 @@ pub const Client = struct {
             }
             defer resp.deinit(self.allocator);
             // kind와 request_id를 함께 확인한다 — out-of-order frame을 이 call의 응답으로 오귀속하지 않는다.
-            if (resp.header.kind != .response or resp.header.request_id != request_id) return error.ProtocolError;
+            if (resp.header.kind != .response or resp.header.request_id != request_id) {
+                self.invalidateConnection();
+                return error.ProtocolError;
+            }
             return self.allocator.dupe(u8, resp.payload) catch return error.OutOfMemory;
         }
     }
@@ -190,8 +199,14 @@ pub const Client = struct {
                 continue;
             }
             defer frame.deinit(self.allocator);
-            if (frame.header.kind != .snapshot_chunk or frame.header.stream_id != stream_id) return error.ProtocolError;
-            out.appendSlice(self.allocator, frame.payload) catch return error.OutOfMemory;
+            if (frame.header.kind != .snapshot_chunk or frame.header.stream_id != stream_id) {
+                self.invalidateConnection();
+                return error.ProtocolError;
+            }
+            out.appendSlice(self.allocator, frame.payload) catch {
+                self.invalidateConnection();
+                return error.OutOfMemory;
+            };
             if (protocol.Flags.hasEndStream(frame.header.flags)) break;
         }
         return out.toOwnedSlice(self.allocator) catch return error.OutOfMemory;
@@ -434,6 +449,23 @@ pub const Client = struct {
         return true;
     }
 
+    /// host core command JSON을 응답 없는 stream frame으로 admission한다. true면 Client가 frame 소유권을
+    /// 인수했고, false면 기존 outbound frame의 backpressure 때문에 caller가 bounded sticky queue에서 재시도해야 한다.
+    pub fn sendCoreCommandNonBlocking(self: *Client, stream_id: u64, payload: []const u8) ClientError!bool {
+        try self.ensureUsable();
+        if (!self.runtime_core_command_v1) return false;
+        if (!(try self.pumpPendingOutput())) return false;
+        const frame = framing.encodeFrame(
+            self.allocator,
+            .{ .kind = .core_command, .stream_id = stream_id },
+            payload,
+        ) catch return error.OutOfMemory;
+        std.debug.assert(self.pending_outbound == null);
+        self.pending_outbound = .{ .frame = frame };
+        _ = try self.pumpPendingOutput();
+        return true;
+    }
+
     /// 이미 RemoteRuntime의 ordered input FIFO가 소유한 scroll barrier를 후속 blocking RPC보다 먼저 보낸다.
     /// `call`과 마찬가지로 기존 nonblocking frame을 먼저 끝내므로 connection wire 순서는 보존된다.
     pub fn sendScrollToBottom(self: *Client, stream_id: u64) ClientError!void {
@@ -444,6 +476,24 @@ pub const Client = struct {
             self.allocator,
             .{ .kind = .scroll_to_bottom, .stream_id = stream_id },
             "",
+        ) catch return error.OutOfMemory;
+        defer self.allocator.free(frame);
+        socket_server.writeAll(self.fd, frame) catch {
+            self.invalidateConnection();
+            return error.WriteFailed;
+        };
+    }
+
+    /// RemoteRuntime의 ordered queue를 뒤따르는 blocking RPC 직전에 남은 core frame을 전량 보낸다. 응답은 없지만
+    /// 기존 pending frame을 먼저 끝내므로 connection wire FIFO를 보존한다.
+    pub fn sendCoreCommand(self: *Client, stream_id: u64, payload: []const u8) ClientError!void {
+        try self.ensureUsable();
+        if (!self.runtime_core_command_v1) return;
+        try self.flushPendingOutboundBlocking();
+        const frame = framing.encodeFrame(
+            self.allocator,
+            .{ .kind = .core_command, .stream_id = stream_id },
+            payload,
         ) catch return error.OutOfMemory;
         defer self.allocator.free(frame);
         socket_server.writeAll(self.fd, frame) catch {
@@ -541,15 +591,29 @@ pub const Client = struct {
         try self.ensureUsable();
         var buf: [4096]u8 = undefined;
         while (true) {
-            if (self.parser.next() catch return error.ProtocolError) |frame|
-                return try self.requireCurrentMajor(frame);
+            if (self.parser.next() catch {
+                self.invalidateConnection();
+                return error.ProtocolError;
+            }) |frame|
+                return self.requireCurrentMajor(frame) catch |err| {
+                    self.invalidateConnection();
+                    return err;
+                };
             const n = c.read(self.fd, &buf, buf.len);
             if (n < 0) {
                 if (posix.errno(n) == .INTR) continue; // 시그널 인터럽트는 재시도(timeout/EAGAIN·기타 오류는 종료로).
+                self.invalidateConnection();
                 return error.ConnectionClosed;
             }
-            if (n == 0) return error.ConnectionClosed; // EOF.
-            self.parser.push(buf[0..@intCast(n)]) catch return error.OutOfMemory;
+            if (n == 0) {
+                self.invalidateConnection();
+                return error.ConnectionClosed; // EOF.
+            }
+            self.parser.push(buf[0..@intCast(n)]) catch {
+                // 이미 socket에서 소비한 바이트를 parser에 보존하지 못했다. 다음 frame 경계를 복구할 수 없다.
+                self.invalidateConnection();
+                return error.OutOfMemory;
+            };
         }
     }
 
@@ -817,6 +881,29 @@ test "client request write failure invalidates the connection before another cal
     try std.testing.expectError(error.ConnectionClosed, client.call("host.info", null));
 }
 
+test "client response timeout invalidates the connection before another request id can desync" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    var fds: [2]c.fd_t = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds));
+    socket_server.setNoSigPipe(fds[0]);
+    defer _ = c.close(fds[1]); // peer는 연결만 유지하고 응답하지 않는다.
+    setReadTimeoutMs(fds[0], 20);
+
+    var client = Client{
+        .allocator = allocator,
+        .fd = fds[0],
+        .host_id = 1,
+        .parser = framing.FrameParser.init(allocator),
+    };
+    defer client.deinit();
+    try std.testing.expectError(error.ConnectionClosed, client.call("host.info", null));
+    try std.testing.expect(client.unusable);
+    try std.testing.expectEqual(@as(c.fd_t, -1), client.fd);
+    // 늦은 response가 다음 request에 오귀속될 수 없도록 같은 socket은 재사용하지 않는다.
+    try std.testing.expectError(error.ConnectionClosed, client.call("host.info", null));
+}
+
 test "client invalidation releases an owned pending outbound frame" {
     const allocator = std.testing.allocator;
     var client = Client{
@@ -1031,7 +1118,7 @@ fn setReadTimeoutMs(fd: c.fd_t, ms: u32) void {
 fn buildHello(allocator: std.mem.Allocator, client_kind: []const u8) error{OutOfMemory}![]u8 {
     return std.fmt.allocPrint(
         allocator,
-        "{{\"protocol_min\":{d},\"protocol_max\":{d},\"client_kind\":\"{s}\",\"capabilities\":[\"runtime_metadata_v1\",\"screen_viewport_scrolled_v1\",\"async_scroll_to_bottom_v1\"]}}",
+        "{{\"protocol_min\":{d},\"protocol_max\":{d},\"client_kind\":\"{s}\",\"capabilities\":[\"runtime_metadata_v1\",\"screen_viewport_scrolled_v1\",\"async_scroll_to_bottom_v1\",\"runtime_core_command_v1\"]}}",
         .{ protocol.version_major, protocol.version_major, client_kind },
     );
 }
@@ -1113,6 +1200,7 @@ test "client: hello/request JSON build and host_id parse are server-symmetric (p
     try testing.expect(std.mem.indexOf(u8, hello, "\"runtime_metadata_v1\"") != null);
     try testing.expect(std.mem.indexOf(u8, hello, "\"screen_viewport_scrolled_v1\"") != null);
     try testing.expect(std.mem.indexOf(u8, hello, "\"async_scroll_to_bottom_v1\"") != null);
+    try testing.expect(std.mem.indexOf(u8, hello, "\"runtime_core_command_v1\"") != null);
 
     const req = try buildRequest(allocator, "runtime.get", "{\"runtime_id\":\"aa\"}");
     defer allocator.free(req);
@@ -1188,6 +1276,7 @@ test "client: connects to a forked host, agrees on host_id, and calls host.info"
     try testing.expect(client.host_id != 0); // hello_ack에서 host_id를 받았다.
     try testing.expect(client.screen_viewport_scrolled_v1);
     try testing.expect(client.async_scroll_to_bottom_v1);
+    try testing.expect(client.runtime_core_command_v1);
     const resp = try client.call("host.info", null);
     defer allocator.free(resp);
     try testing.expect(std.mem.indexOf(u8, resp, "runtime_count") != null);

@@ -120,8 +120,10 @@ pub const InProcessTermBackend = struct {
         slot.terminal.surface = try surface_mod.Surface.init(self.allocator, params.handle, params.size);
         surface_initialized = true;
 
-        // config 설정(스크롤백 arena/palette/ambiguous·emoji width 등)은 caller(GUI)가 이 포인터로 적용한다 —
-        // config는 GUI layout 소유라 backend가 알 필요가 없다(seam: backend는 프로세스 수명, GUI는 표시 정책).
+        // reader가 시작되기 전의 원자적 bootstrap snapshot만 backend 계약으로 받는다. caller가 spawn 뒤 필드를 하나씩
+        // 바꾸는 동안 child 첫 출력이 기본값으로 parse되는 race를 막고, 원격 host와 같은 first-output 의미론을 지킨다.
+        // scrollback arena처럼 wire snapshot에 없는 client 메모리 정책은 계속 caller가 attach 전에 적용한다.
+        if (params.initial_config) |config| core_command.apply(&slot.terminal.surface.core, .{ .set_runtime_config = config });
         return &slot.terminal.surface;
     }
 

@@ -5640,6 +5640,23 @@ pub const AppSession = struct {
         self.restore_runtime_host_id = "";
         self.restore_runtime_id = "";
         var reconnected = false; // attach(재접속) 경로면 true — errdefer가 terminate 대신 detach로 되돌린다(아래).
+        // 새 host runtime은 reader를 시작하기 전에 이 snapshot을 적용해야 한다. spawn 뒤 별도 RPC만 쓰면 child가
+        // 즉시 낸 첫 출력이 기본 폭/scrollback/theme으로 parse되는 race가 생긴다. in-process도 같은 값으로 시작하고,
+        // 재접속은 아래 attach 뒤 명령으로 현재 GUI config를 다시 맞춘다.
+        const runtime_config: maru.session.core_command.RuntimeConfig = .{
+            .max_scrollback = self.loaded_config.config.scrollback.lines,
+            .ambiguous_wide = self.loaded_config.config.ambiguous_width == .wide,
+            .emoji_wide = self.loaded_config.config.emoji_width == .wide,
+            .palette = self.appearance.theme.palette,
+            .default_colors = .{
+                .foreground = self.appearance.theme.foreground,
+                .background = self.appearance.theme.background,
+            },
+            .cell_metrics = if (self.cell_width_px > 0 and self.cell_height_px > 0) .{
+                .width = self.cell_width_px,
+                .height = self.cell_height_px,
+            } else null,
+        };
         const surface = surface: {
             if (is_macos and app_keep_alive_after_quit and reconnect_id.len > 0) {
                 if (reconnect_id.len != 32) return error.InvalidPersistentRuntimeIdentity;
@@ -5658,7 +5675,13 @@ pub const AppSession = struct {
                 reconnected = true;
                 break :surface attached;
             }
-            break :surface be.spawn(.{ .handle = id, .request = req, .size = size, .queue_capacity = queue_capacity }) catch |err| {
+            break :surface be.spawn(.{
+                .handle = id,
+                .request = req,
+                .size = size,
+                .queue_capacity = queue_capacity,
+                .initial_config = runtime_config,
+            }) catch |err| {
                 // #3: keep-alive 원격 backend인데 host 연결이 죽었으면(ConnectionClosed/WriteFailed) createTerm이 실패해 새
                 // 터미널을 못 여는 대신 **in-process로 폴백**한다 — 사용자가 앱 재시작 없이 계속 쓰게. host_connect_failed를 세워
                 // 이후 backendForNew도 죽은 원격을 안 타고, 다음 tick notice가 "유지 안 됨"을 알린다. 원격이 아니거나(로컬 spawn
@@ -5669,7 +5692,13 @@ pub const AppSession = struct {
                 if (!remote_dead) return err;
                 self.markHostConnectFailed();
                 be = self.termBackend(); // errdefer·이후 단계가 in-process backend를 쓰도록 갱신.
-                break :surface try be.spawn(.{ .handle = id, .request = req, .size = size, .queue_capacity = queue_capacity });
+                break :surface try be.spawn(.{
+                    .handle = id,
+                    .request = req,
+                    .size = size,
+                    .queue_capacity = queue_capacity,
+                    .initial_config = runtime_config,
+                });
             };
         };
         // spawn 성공 후 이후 단계(config·attach·pump) 실패 시 번들 슬롯을 회수한다(backend.remove = 번들 deinit = live_pty
@@ -5723,6 +5752,10 @@ pub const AppSession = struct {
         // interactive 셸(login 래핑)만 리더 코어-처리를 켠다 — 렌더 tick에 안 묶여 OSC 응답이 즉시 나간다
         // (docs/io-render-threading.md PR3). controlled_smoke(login=false, 테스트)는 큐-드레인 유지.
         _ = try be.attach(id, request.login); // interactive(login)만 process_in_reader — 계약이 attachSurface로 위임
+        // attach 뒤의 backend가 실제 core 소유자다. 신규 spawn은 initial_config를 reader 시작 전에 이미 적용했지만,
+        // 이 재적용은 기존 runtime 재접속과 향후 attach 경로가 현재 GUI config로 수렴하게 한다. attach 전
+        // `term.surface.core`는 원격 client placeholder라 직접 대입만으로 host parser/grid/OSC query는 바뀌지 않는다.
+        try be.enqueueCoreCommand(id, .{ .set_runtime_config = runtime_config }, self.io);
         // MARU_TRACE: 이 창의 trace 레코더를 방금 attach한 링크에 per-link로 붙인다(모든 surface spawn 단일 chokepoint —
         // 첫탭·⌘T·split·restore 다 여기). 앱-전역 runtime이라 창끼리 안 섞이도록 싱글톤이 아니라 링크별로 건다(리뷰 [0]).
         // recorder는 self 소유(안정 주소)라 링크가 든 포인터가 세션 내내 유효하다. 붙는 순간 초기 grid baseline resize 기록.
@@ -16646,9 +16679,18 @@ pub const AppSession = struct {
         // 먼저, 변경 직후 첫 PTY 출력에서 정확하도록). surface 생성 전(init 순서)이면 surface_initialized로 가드.
         if (self.surface_initialized) {
             // Phase 3 위임(docs/io-render-threading.md §9 P3-3): 폰트/DPI 변경 시 셀 메트릭을 reader로 위임한다(메인
-            // 직접 mutate 없음). 한 reader-턴 지연이 있어도 per-tick 렌더 경로(buildFrame의 setCellMetrics 안전망 —
-            // 렌더 준비라 §9 예외로 메인 동기 유지)가 재적용하므로 무해.
-            self.runtime.enqueueCoreCommand(self.activeSurface().id, .{ .set_cell_metrics = .{ .width = self.cell_width_px, .height = self.cell_height_px } }, self.io) catch {};
+            // 직접 mutate 없음). 모든 Term에 보내 inactive host runtime도 다음 kitty 출력 전에 새 metric을 보게 한다.
+            for (self.tabs.items) |tab| {
+                for (tab.panes.items) |pane| {
+                    for (pane.terms.items) |term| {
+                        if (term.kind != .terminal) continue;
+                        self.runtime.enqueueCoreCommand(term.surface.id, .{ .set_cell_metrics = .{
+                            .width = self.cell_width_px,
+                            .height = self.cell_height_px,
+                        } }, self.io) catch {};
+                    }
+                }
+            }
         }
     }
 
@@ -17059,6 +17101,10 @@ pub const AppSession = struct {
     /// 호출자(applyAppearance→applyMetricsPipeline)가 이미 세운다.
     fn reapplyConfigPalette(self: *AppSession) void {
         const palette = self.appearance.theme.palette;
+        const default_colors: maru.session.core_command.DefaultColors = .{
+            .foreground = self.appearance.theme.foreground,
+            .background = self.appearance.theme.background,
+        };
         for (self.tabs.items) |tab| {
             for (tab.panes.items) |pane| {
                 for (pane.terms.items) |term| {
@@ -17066,6 +17112,9 @@ pub const AppSession = struct {
                     // reader로 위임한다(interactive면 큐, 아니면 enqueueCoreCommand 내부 직접 폴백). reload는 attach 후라
                     // 링크 존재(없으면 UnknownSurface로 스킵 — best-effort).
                     self.runtime.enqueueCoreCommand(term.surface.id, .{ .set_config_palette = palette }, self.io) catch {};
+                    // OSC 10/11 query의 default fg/bg도 renderer theme와 같은 값을 보게 한다. buildFrame의 direct
+                    // setDefaultColors는 local render 안전망이고 remote placeholder에는 host 효과가 없으므로 이 경계가 필요하다.
+                    self.runtime.enqueueCoreCommand(term.surface.id, .{ .set_default_colors = default_colors }, self.io) catch {};
                 }
             }
         }
@@ -35846,6 +35895,7 @@ test "P3-e3 통합: keep-alive AppSession가 새 Term을 host-backed backend로 
         app_remote_client = client;
         app_remote_backend = session_host.remote_term_backend.RemoteTermBackend.init(allocator, io, &app_remote_client.?, session.runtime);
         defer { // 앱 전역이라 창 deinit이 안 닫는다 — 테스트 격리를 위해 명시 reset(runtimes는 destroyTerm이 이미 비운다).
+            host_connect_failed = false;
             if (app_remote_backend) |*rb| {
                 rb.deinit();
                 app_remote_backend = null;
@@ -35860,6 +35910,7 @@ test "P3-e3 통합: keep-alive AppSession가 새 Term을 host-backed backend로 
         const first = session.tabs.items[0].panes.items[0].terms.items[0];
         try std.testing.expect(first.surface.remote == null);
         app_keep_alive_after_quit = true;
+        session.loaded_config.config.ambiguous_width = .wide; // 기본값 반대로 두어 host bootstrap 누락의 가짜 green을 막는다.
 
         // createTerm으로 /bin/cat을 띄운다 — backendForNew가 이제 원격 backend를 고른다. 반환 Term은 tab에 안 들어가므로
         // 아래 destroyTerm으로 회수한다(원격 라우팅 backendFor(term)을 탄다).
@@ -35878,6 +35929,10 @@ test "P3-e3 통합: keep-alive AppSession가 새 Term을 host-backed backend로 
             if (c0 == 'h') found = true else _ = usleep(20 * 1000);
         }
         try std.testing.expect(found); // 원격 Term 입력이 host를 거쳐 Surface에 반영됐다(end-to-end).
+        term.surface.lockCore(io);
+        const remote_ambiguous_wide = term.surface.renderSnapshot().ambiguous_wide;
+        term.surface.unlockCore(io);
+        try std.testing.expect(remote_ambiguous_wide); // createTerm attach 뒤 config snapshot이 host core에 적용돼 다시 투영됐다.
 
         // 멀티 윈도우(전역화 핵심): 두 번째 AppSession(창)이 `ensureRemoteBackend`로 **이미 세워진 앱 전역 backend를 재사용**
         // 한다(새 연결 안 만듦 — early-return). 그 창의 createTerm도 같은 공유 backend로 가, 두 창의 원격 Term이 **한 backend·
@@ -35896,6 +35951,22 @@ test "P3-e3 통합: keep-alive AppSession가 새 Term을 host-backed backend로 
 
         s2.destroyTerm(term2);
         session.destroyTerm(term); // 원격 term 회수(backendFor→remote: remove + SurfaceRuntime detach + rr free).
+
+        // 앱 업데이트 전에 떠 있던 구 v2 host는 runtime.spawn_full 이름을 알더라도 새 runtime_config를 조용히
+        // 무시할 수 있다. capability 부재를 재현해 RemoteRuntime의 UnsupportedSpawnContract가 AppSession에서
+        // 실제 in-process fallback으로 이어지고 잘못된 host runtime을 만들지 않는지 고정한다.
+        app_remote_client.?.runtime_core_command_v1 = false;
+        const legacy_fallback = try session.createTerm(
+            .{ .command = "/bin/cat" },
+            .{ .cols = 40, .rows = 10 },
+            16,
+            "cat",
+            "/bin/cat",
+        );
+        try std.testing.expect(legacy_fallback.surface.remote == null);
+        try std.testing.expect(host_connect_failed);
+        session.destroyTerm(legacy_fallback);
+
         // 블록 끝 defer(LIFO): s2.deinit → destroy(s2) → reset(공유 backend/client) → session.deinit → destroy(session) → host
         // kill. 첫 창 local + 둘째 창 remote 첫 탭과 공유 backend를 누수·크래시 없이 회수한다.
     } else {

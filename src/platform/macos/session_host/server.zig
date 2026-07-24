@@ -16,6 +16,7 @@ const std = @import("std");
 const protocol = @import("protocol.zig");
 const framing = @import("framing.zig");
 const reg = @import("registry.zig");
+const core_command_wire = @import("core_command_wire.zig");
 
 /// hello가 밝히는 client 종류. GUI window인지 CLI(`maru attach`)인지 — 권한/표시에 쓴다(§9).
 pub const ClientKind = enum { gui, cli, unknown };
@@ -37,6 +38,7 @@ pub const RuntimeSpawnParams = struct {
     pane_id: ?u64 = null,
     cols: u16,
     rows: u16,
+    initial_config: ?core_command_wire.Command.RuntimeConfig = null,
 };
 
 /// attach된 observe-capability client에만 보내는 화면 외 runtime full-state. public `runtime.list/get` redacted metadata와
@@ -98,10 +100,9 @@ pub const RuntimeOps = struct {
     /// GUI가 종료된 동안의 알림 — host가 core와 함께 알림을 소유). host가 core lock 아래 읽고 clearNotification한다(off-thread
     /// 동기화, snapshot과 동형). 없으면 `{title:"",body:""}`. caller 소유 바이트.
     notification: *const fn (ctx: *anyopaque, runtime_id: u128, allocator: std.mem.Allocator) anyerror![]u8,
-    /// §6a 원격 스크롤백: 스크롤 core command를 host `TerminalCore`에 적용한다(op=scroll 계열 태그, arg=정수 인자). host가
-    /// view_offset을 바꾸면 다음 snapshot/delta(renderSnapshot=뷰포트)가 그 스크롤 화면을 투영한다. codec 순수성 유지를 위해
-    /// server는 primitive(op 문자열·arg)만 넘기고, runtime_manager가 CoreCommand로 매핑해 적용한다(선택/config는 후속 #6b).
-    core_command: *const fn (ctx: *anyopaque, runtime_id: u128, op: []const u8, arg: i64) anyerror!void,
+    /// host-authoritative core command. JSON은 server에서 strict bounded DTO로 검증하고, runtime_manager가 내부
+    /// `session.CoreCommand`로 명시 변환해 reader queue에 넣는다.
+    core_command: *const fn (ctx: *anyopaque, runtime_id: u128, command: core_command_wire.Command) anyerror!void,
     /// §6b 원격 선택 복사: client가 보낸 뷰포트 선택 span을 host `TerminalCore`에 적용해 `extractSelection`(로컬과 같은
     /// 함수, soft-wrap 이음·스크롤백 충실)으로 텍스트를 뽑아 JSON `{text}`로 준다. host가 콘텐츠를 소유하므로(client는 렌더만)
     /// 선택 의미론이 한 곳(host core)에 산다. codec 순수성 위해 span은 primitive(SelectSpan), runtime_manager가 core 연산으로 매핑.
@@ -285,6 +286,7 @@ pub const Connection = struct {
             .request => return self.dispatchRequest(frame),
             .input_bytes => return self.routeInput(frame),
             .scroll_to_bottom => return self.routeScrollToBottom(frame),
+            .core_command => return self.routeCoreCommandFrame(frame),
             .hello => {
                 // hello는 connection당 한 번. 두 번째 hello는 protocol 위반.
                 self.state = .closed;
@@ -481,6 +483,15 @@ pub const Connection = struct {
             spawnSizeField(p, "rows", 24) catch return self.replyError(request_id, .invalid_request)
         else
             (intField(p, "rows") orelse 24);
+        const initial_config: ?core_command_wire.Command.RuntimeConfig = if (p.get("runtime_config")) |value|
+            switch (value) {
+                .null => null,
+                .object => |object| core_command_wire.decodeRuntimeConfig(object) orelse
+                    return self.replyError(request_id, .invalid_request),
+                else => return self.replyError(request_id, .invalid_request),
+            }
+        else
+            null;
         const runtime_id = ops.spawn(ops.ctx, .{
             .argv = argv,
             .cwd = cwd,
@@ -494,6 +505,7 @@ pub const Connection = struct {
             .pane_id = pane_id,
             .cols = cols,
             .rows = rows,
+            .initial_config = initial_config,
         }) catch return self.replyError(request_id, .internal);
 
         const id_hex = try self.hex128(runtime_id);
@@ -649,18 +661,17 @@ pub const Connection = struct {
         return self.replyResult(request_id, body);
     }
 
-    /// `runtime.core_command`(§6a 원격 스크롤백): 스크롤 core command를 이 stream의 runtime에 라우팅한다. host가 core view_offset을
-    /// 바꾸면 다음 snapshot/delta가 그 스크롤 화면을 투영한다. 모르는 stream_id는 invalid_request. read-only host면 응답만(no-op).
-    /// ⚠️capability 게이팅(controller만 스크롤) 없음 — 현 단일-GUI 설계는 runtime당 controller 하나뿐이라 무해하나, observer(P5)
-    /// 도입 시 controller-gate 후속(observer가 공유 view를 흔들지 않게). arg는 signed(scroll delta 음수).
+    /// `runtime.core_command`: strict bounded wire command를 이 stream의 host core reader queue로 라우팅한다.
+    /// observer가 focus/config/viewport를 바꾸지 못하도록 controller input capability를 같은 경계에서 검사한다.
     fn dispatchCoreCommand(self: *Connection, request_id: u64, params: ?std.json.ObjectMap) HandleError!Action {
         const p = params orelse return self.replyError(request_id, .invalid_request);
         const stream = intFieldU64(p, "stream_id") orelse return self.replyError(request_id, .invalid_request);
-        const op = strField(p, "op") orelse return self.replyError(request_id, .invalid_request);
-        const arg = intFieldI64(p, "arg") orelse 0;
         const runtime_id = (self.attachments.get(stream) orelse return self.replyError(request_id, .invalid_request)).runtime_id;
+        if (!reg.Capability.has(self.registry.capabilitiesOf(runtime_id, stream), reg.Capability.input))
+            return self.replyError(request_id, .unauthorized);
+        const command = core_command_wire.decodeParams(p) orelse return self.replyError(request_id, .invalid_request);
         if (self.runtime_ops) |ops| {
-            ops.core_command(ops.ctx, runtime_id, op, arg) catch return self.replyError(request_id, .internal);
+            ops.core_command(ops.ctx, runtime_id, command) catch return self.replyError(request_id, .internal);
         }
         const body = try self.stringify(.{ .result = .{ .applied = true } });
         defer self.allocator.free(body);
@@ -800,7 +811,12 @@ pub const Connection = struct {
         const runtime_id = (self.attachments.get(stream) orelse return .none).runtime_id;
         if (!reg.Capability.has(self.registry.capabilitiesOf(runtime_id, stream), reg.Capability.input)) return .none;
         const ops = self.runtime_ops orelse return .none;
-        ops.write_input(ops.ctx, runtime_id, frame.payload) catch {};
+        ops.write_input(ops.ctx, runtime_id, frame.payload) catch {
+            // controller bytes는 ACK 없는 ownership transfer다. host queue admission 실패 뒤 연결을 usable로
+            // 두면 client는 성공으로 간주한 입력을 영구 유실하므로 EOF detach/reconnect 경계로 fail-close한다.
+            self.state = .closed;
+            return .close;
+        };
         return .none;
     }
 
@@ -813,7 +829,48 @@ pub const Connection = struct {
         const runtime_id = (self.attachments.get(stream) orelse return .none).runtime_id;
         if (!reg.Capability.has(self.registry.capabilitiesOf(runtime_id, stream), reg.Capability.input)) return .none;
         const ops = self.runtime_ops orelse return .none;
-        ops.core_command(ops.ctx, runtime_id, "scroll_to_bottom", 0) catch {};
+        ops.core_command(ops.ctx, runtime_id, .scroll_to_bottom) catch {
+            self.state = .closed;
+            return .close;
+        };
+        return .none;
+    }
+
+    /// `core_command`: controller 전용 fire-and-forget host-core command. payload의 stream_id도 header와 같아야
+    /// 하므로 JSON을 다른 stream header에 재사용할 수 없다. malformed command는 응답할 request_id가 없고 framing
+    /// 의미가 불명확하므로 fail-closed하며, detach 직후의 미attach/권한 없는 stream은 input과 같이 benign drop한다.
+    fn routeCoreCommandFrame(self: *Connection, frame: framing.Frame) HandleError!Action {
+        const stream = frame.header.stream_id;
+        const runtime_id = (self.attachments.get(stream) orelse return .none).runtime_id;
+        if (!reg.Capability.has(self.registry.capabilitiesOf(runtime_id, stream), reg.Capability.input)) return .none;
+        const ops = self.runtime_ops orelse return .none;
+
+        var parsed = std.json.parseFromSlice(std.json.Value, self.allocator, frame.payload, .{}) catch {
+            self.state = .closed;
+            return .close;
+        };
+        defer parsed.deinit();
+        const params = switch (parsed.value) {
+            .object => |object| object,
+            else => {
+                self.state = .closed;
+                return .close;
+            },
+        };
+        if (intFieldU64(params, "stream_id") != stream) {
+            self.state = .closed;
+            return .close;
+        }
+        const command = core_command_wire.decodeParams(params) orelse {
+            self.state = .closed;
+            return .close;
+        };
+        ops.core_command(ops.ctx, runtime_id, command) catch {
+            // 응답 없는 frame의 host queue admission(OOM/QueueClosed)이 실패하면 command를 재전송할 ACK가 없다.
+            // 성공처럼 connection을 유지해 최종 focus/config를 조용히 잃지 말고 connection 전체를 fail-close한다.
+            self.state = .closed;
+            return .close;
+        };
         return .none;
     }
 
@@ -919,7 +976,7 @@ pub const Connection = struct {
         return self.stringify(.{
             .version = self.selected_version,
             .host_id = host_hex,
-            .capabilities = [_][]const u8{ "host.info", "runtime.list", "runtime.get", "runtime_metadata_v1", "screen_viewport_scrolled_v1", "async_scroll_to_bottom_v1" },
+            .capabilities = [_][]const u8{ "host.info", "runtime.list", "runtime.get", "runtime_metadata_v1", "screen_viewport_scrolled_v1", "async_scroll_to_bottom_v1", "runtime_core_command_v1" },
         });
     }
 
@@ -1308,6 +1365,7 @@ test "server: hello with overlapping version acks host_id and moves to ready" {
     try testing.expect(std.mem.indexOf(u8, r.frame.?.payload, "1234567890abcdef") != null);
     try testing.expect(std.mem.indexOf(u8, r.frame.?.payload, "\"screen_viewport_scrolled_v1\"") != null);
     try testing.expect(std.mem.indexOf(u8, r.frame.?.payload, "\"async_scroll_to_bottom_v1\"") != null);
+    try testing.expect(std.mem.indexOf(u8, r.frame.?.payload, "\"runtime_core_command_v1\"") != null);
 }
 
 test "server: wrong header major closes before hello negotiation" {
@@ -1451,6 +1509,7 @@ const FakeRuntimeOps = struct {
     spawn_zdotdir_seen: bool = false,
     spawn_ssh_bin_seen: bool = false,
     spawn_pane_id: ?u64 = null,
+    spawn_initial_config: ?core_command_wire.Command.RuntimeConfig = null,
     terminated_id: u128 = 0,
     next_id: u128 = 0xCAFE,
     last_input: [64]u8 = undefined,
@@ -1461,10 +1520,9 @@ const FakeRuntimeOps = struct {
     resized_runtime: u128 = 0,
     delta_base_seen: [64]u8 = undefined,
     delta_base_seen_len: usize = 0,
-    last_core_op: [32]u8 = undefined,
-    last_core_op_len: usize = 0,
-    last_core_arg: i64 = 0,
+    last_core_command: ?core_command_wire.Command = null,
     core_command_runtime: u128 = 0,
+    core_command_failure: bool = false,
     last_mouse_report: ?MouseReport = null,
     last_select_span: SelectSpan = .{ .sr = 0, .sc = 0, .er = 0, .ec = 0, .block = false },
     selected_text_runtime: u128 = 0,
@@ -1502,6 +1560,7 @@ const FakeRuntimeOps = struct {
         self.spawn_zdotdir_seen = params.zdotdir != null;
         self.spawn_ssh_bin_seen = params.ssh_integration_bin != null;
         self.spawn_pane_id = params.pane_id;
+        self.spawn_initial_config = params.initial_config;
         return self.next_id;
     }
     fn terminateFn(ctx: *anyopaque, id: u128) void {
@@ -1545,13 +1604,11 @@ const FakeRuntimeOps = struct {
         _ = runtime_id;
         return allocator.dupe(u8, "{\"title\":\"\",\"body\":\"\"}");
     }
-    /// 받은 scroll core command(op·arg·runtime)를 기록한다 — server 라우팅 검증(실 core mutate는 runtime_manager smoke).
-    fn coreCommandFn(ctx: *anyopaque, runtime_id: u128, op: []const u8, arg: i64) anyerror!void {
+    /// 검증을 마친 bounded core command와 runtime을 기록한다 — 실 core 적용은 runtime_manager smoke가 맡는다.
+    fn coreCommandFn(ctx: *anyopaque, runtime_id: u128, command: core_command_wire.Command) anyerror!void {
         const self: *FakeRuntimeOps = @ptrCast(@alignCast(ctx));
-        const n = @min(op.len, self.last_core_op.len);
-        @memcpy(self.last_core_op[0..n], op[0..n]);
-        self.last_core_op_len = n;
-        self.last_core_arg = arg;
+        if (self.core_command_failure) return error.InjectedCoreCommandFailure;
+        self.last_core_command = command;
         self.core_command_runtime = runtime_id;
     }
     fn reportMouseFn(ctx: *anyopaque, runtime_id: u128, report: MouseReport) anyerror!void {
@@ -1639,7 +1696,10 @@ test "server: runtime.spawn/terminate dispatch through RuntimeOps; read-only hos
     {
         const r = try feedJson(&conn, .request, 2, "{\"method\":\"runtime.spawn_full\",\"params\":{\"argv\":[\"/bin/sh\",\"-c\",\"cat\"],\"cwd\":\"/tmp/full-contract\",\"login\":true," ++
             "\"env\":[\"A=1\"],\"parent_env\":[],\"env_overrides\":[\"B=2\"],\"term\":\"xterm-maru\",\"zdotdir\":\"/tmp/zdot\"," ++
-            "\"ssh_integration_bin\":\"/Applications/Maru.app/Contents/MacOS/maru\",\"pane_id\":\"ffffffffffffffff\",\"cols\":100,\"rows\":40}}");
+            "\"ssh_integration_bin\":\"/Applications/Maru.app/Contents/MacOS/maru\",\"pane_id\":\"ffffffffffffffff\",\"cols\":100,\"rows\":40," ++
+            "\"runtime_config\":{\"lines\":4321,\"ambiguous_wide\":true,\"emoji_wide\":false," ++
+            "\"palette\":[1,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null]," ++
+            "\"foreground\":1122867,\"background\":4478310,\"cell_width\":9,\"cell_height\":18}}}");
         defer if (r.frame) |f| f.deinit(allocator);
         try testing.expect(std.mem.indexOf(u8, r.frame.?.payload, "cafe") != null); // runtime_id hex(0xCAFE)
     }
@@ -1655,6 +1715,10 @@ test "server: runtime.spawn/terminate dispatch through RuntimeOps; read-only hos
     try testing.expect(fake.spawn_zdotdir_seen);
     try testing.expect(fake.spawn_ssh_bin_seen);
     try testing.expectEqual(@as(?u64, std.math.maxInt(u64)), fake.spawn_pane_id);
+    try testing.expectEqual(@as(u32, 4321), fake.spawn_initial_config.?.max_scrollback);
+    try testing.expect(fake.spawn_initial_config.?.ambiguous_wide);
+    try testing.expectEqual(@as(?u32, 1), fake.spawn_initial_config.?.palette[0]);
+    try testing.expectEqual(@as(u32, 9), fake.spawn_initial_config.?.cell_metrics.?.width);
     {
         const r = try feedJson(&conn, .request, 21, "{\"method\":\"runtime.spawn\",\"params\":{\"argv\":[\"/bin/sh\"],\"cols\":80,\"rows\":24}}");
         defer if (r.frame) |f| f.deinit(allocator);
@@ -1707,6 +1771,7 @@ test "server: attach grants capabilities; controller input/resize dispatch throu
     var registry = reg.TerminalRuntimeRegistry.init(allocator);
     defer registry.deinit();
     _ = try registry.register(0xAA, 80, 24);
+    _ = try registry.register(0xBB, 80, 24);
 
     var fake: FakeRuntimeOps = .{};
     var conn = Connection.init(allocator, 1, &registry);
@@ -1739,8 +1804,7 @@ test "server: attach grants capabilities; controller input/resize dispatch throu
         const r = try feedStream(&conn, .scroll_to_bottom, 1, "");
         try testing.expectEqualStrings("none", r.action);
     }
-    try testing.expectEqualStrings("scroll_to_bottom", fake.last_core_op[0..fake.last_core_op_len]);
-    try testing.expectEqual(@as(i64, 0), fake.last_core_arg);
+    try testing.expectEqualDeep(core_command_wire.Command.scroll_to_bottom, fake.last_core_command.?);
     try testing.expectEqual(@as(u128, 0xAA), fake.core_command_runtime);
 
     // resize(controller, seq 1) → registry 적용 + runtime_ops.resize 위임 + applied 응답(changed=true).
@@ -1804,12 +1868,12 @@ test "server: observer attach is denied input and resize" {
         try testing.expectEqualStrings("none", r.action);
     }
     try testing.expectEqual(@as(usize, 0), fake.last_input_len);
-    fake.last_core_op_len = 0;
+    fake.last_core_command = null;
     {
         const r = try feedStream(&conn, .scroll_to_bottom, 1, "");
         try testing.expectEqualStrings("none", r.action);
     }
-    try testing.expectEqual(@as(usize, 0), fake.last_core_op_len); // observer는 shared viewport를 흔들 수 없다.
+    try testing.expectEqual(@as(?core_command_wire.Command, null), fake.last_core_command); // observer는 shared viewport를 흔들 수 없다.
     // observer resize는 unauthorized(controller 아님).
     {
         const r = try feedJson(&conn, .request, 3, "{\"method\":\"runtime.resize\",\"params\":{\"stream_id\":1,\"cols\":90,\"rows\":30,\"client_sequence\":1}}");
@@ -2132,11 +2196,12 @@ test "server: runtime.resync makes collectDeltas push a fresh snapshot_chunk, no
     }
 }
 
-test "server: runtime.core_command routes scroll op/arg to RuntimeOps (§6a 원격 스크롤백)" {
+test "server: runtime.core_command validates and routes bounded commands to controller RuntimeOps" {
     const allocator = testing.allocator;
     var registry = reg.TerminalRuntimeRegistry.init(allocator);
     defer registry.deinit();
     _ = try registry.register(0xAA, 80, 24);
+    _ = try registry.register(0xBB, 80, 24);
 
     var fake: FakeRuntimeOps = .{};
     var conn = Connection.init(allocator, 1, &registry);
@@ -2159,8 +2224,7 @@ test "server: runtime.core_command routes scroll op/arg to RuntimeOps (§6a 원�
         defer if (r.frame) |f| f.deinit(allocator);
         try testing.expect(std.mem.indexOf(u8, r.frame.?.payload, "\"applied\":true") != null);
     }
-    try testing.expectEqualStrings("scroll", fake.last_core_op[0..fake.last_core_op_len]);
-    try testing.expectEqual(@as(i64, 5), fake.last_core_arg);
+    try testing.expectEqualDeep(core_command_wire.Command{ .scroll = 5 }, fake.last_core_command.?);
     try testing.expectEqual(@as(u128, 0xAA), fake.core_command_runtime);
 
     // 음수 delta(scroll down)도 그대로 전달된다(signed arg).
@@ -2168,14 +2232,69 @@ test "server: runtime.core_command routes scroll op/arg to RuntimeOps (§6a 원�
         const r = try feedJson(&conn, .request, 4, "{\"method\":\"runtime.core_command\",\"params\":{\"stream_id\":1,\"op\":\"scroll\",\"arg\":-3}}");
         defer if (r.frame) |f| f.deinit(allocator);
     }
-    try testing.expectEqual(@as(i64, -3), fake.last_core_arg);
+    try testing.expectEqualDeep(core_command_wire.Command{ .scroll = -3 }, fake.last_core_command.?);
 
-    // 모르는 stream_id → invalid_request(라우팅 안 함).
+    // focus/config처럼 구 handler가 조용히 버리던 명령도 같은 typed seam으로 들어간다.
     {
-        const r = try feedJson(&conn, .request, 5, "{\"method\":\"runtime.core_command\",\"params\":{\"stream_id\":99,\"op\":\"scroll\",\"arg\":1}}");
+        const r = try feedJson(&conn, .request, 5, "{\"method\":\"runtime.core_command\",\"params\":{\"stream_id\":1,\"op\":\"report_focus\",\"gained\":true}}");
+        defer if (r.frame) |f| f.deinit(allocator);
+    }
+    try testing.expectEqualDeep(core_command_wire.Command{ .report_focus = true }, fake.last_core_command.?);
+
+    // malformed palette는 부분 적용 없이 invalid_request.
+    {
+        const r = try feedJson(&conn, .request, 6, "{\"method\":\"runtime.core_command\",\"params\":{\"stream_id\":1,\"op\":\"set_config_palette\",\"palette\":[1]}}");
         defer if (r.frame) |f| f.deinit(allocator);
         try testing.expect(std.mem.indexOf(u8, r.frame.?.payload, "invalid_request") != null);
     }
+
+    // 모르는 stream_id → invalid_request(라우팅 안 함).
+    {
+        const r = try feedJson(&conn, .request, 7, "{\"method\":\"runtime.core_command\",\"params\":{\"stream_id\":99,\"op\":\"scroll\",\"arg\":1}}");
+        defer if (r.frame) |f| f.deinit(allocator);
+        try testing.expect(std.mem.indexOf(u8, r.frame.?.payload, "invalid_request") != null);
+    }
+
+    // 현재 GUI hot path는 응답 없는 core_command stream frame을 쓴다. header/payload stream이 같은 controller면
+    // RPC reply 없이 같은 typed seam으로 라우팅된다.
+    {
+        const r = try feedStream(&conn, .core_command, 1, "{\"stream_id\":1,\"op\":\"report_focus\",\"gained\":false}");
+        defer if (r.frame) |f| f.deinit(allocator);
+        try testing.expectEqualStrings("none", r.action);
+    }
+    try testing.expectEqualDeep(core_command_wire.Command{ .report_focus = false }, fake.last_core_command.?);
+
+    // fire-and-forget frame을 host reader queue에 admission하지 못하면 성공처럼 유지하지 않고 connection을 닫는다.
+    // ACK가 없어 client가 이 command만 안전하게 재전송할 수 없기 때문이다.
+    fake.core_command_failure = true;
+    {
+        const r = try feedStream(&conn, .core_command, 1, "{\"stream_id\":1,\"op\":\"report_focus\",\"gained\":true}");
+        defer if (r.frame) |f| f.deinit(allocator);
+        try testing.expectEqualStrings("close", r.action);
+    }
+    fake.core_command_failure = false;
+
+    // observer attachment는 같은 runtime을 보더라도 focus/config/viewport를 바꿀 input capability가 없다.
+    var observer = Connection.init(allocator, 2, &registry);
+    defer observer.deinit();
+    observer.runtime_ops = fake.ops();
+    {
+        const h = try feedJson(&observer, .hello, 8, "{\"protocol_min\":2,\"protocol_max\":2}");
+        if (h.frame) |f| f.deinit(allocator);
+    }
+    {
+        const frames = try feedExpectFrames(&observer, .request, 9, "{\"method\":\"runtime.attach\",\"params\":{\"runtime_id\":\"bb\",\"mode\":\"observer\"}}");
+        defer {
+            for (frames) |f| f.deinit(allocator);
+            allocator.free(frames);
+        }
+    }
+    {
+        const r = try feedJson(&observer, .request, 10, "{\"method\":\"runtime.core_command\",\"params\":{\"stream_id\":1,\"op\":\"report_focus\",\"gained\":false}}");
+        defer if (r.frame) |f| f.deinit(allocator);
+        try testing.expect(std.mem.indexOf(u8, r.frame.?.payload, "unauthorized") != null);
+    }
+    try testing.expectEqualDeep(core_command_wire.Command{ .report_focus = false }, fake.last_core_command.?);
 }
 
 test "server: runtime.report_mouse routes the mouse event to RuntimeOps (§host-backed 마우스 리포팅)" {

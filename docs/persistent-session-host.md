@@ -7,7 +7,7 @@ control-plane, PTY 종료 정책과 책임이 겹치지 않도록 소유권·ID�
 > **상태: keep-alive opt-in의 P3 core 구현, P4/P5 미완료, 기본값 `false`.** `session.keep-alive-after-quit=true`면
 > 새 terminal이 host(`maru-sessiond` = `maru __session-host`)-backed로 떠 **정상 GUI Quit 뒤** 살아남고 재실행 시
 > 재접속한다 — 호스트 프로세스, `runtime-handle`(=`host_id:runtime_id`), GUI 재접속(`attachExisting`)은 **존재한다**
-> (§멀티윈도우 "구현 상태 ✅" 노트·종료 매트릭스 참조). **원격 스크롤백·선택·복사·검색, 자동 desync 리싱크, 그리고 원격 렌더
+> (§멀티윈도우 "구현 상태 ✅" 노트·종료 매트릭스 참조). **원격 스크롤백·기본 드래그 선택·복사·검색, 자동 desync 리싱크, 그리고 원격 렌더
 > 패리티(색 theme-aware·kitty 이미지·OSC 133 prompt 마크)도 구현됐다** — 원격 파이프라인이 in-process와 렌더 관점에서 동등하며,
 > 새 화면 필드가 원격 경로를 빠뜨리면 comptime parity 가드가 컴파일 에러로 잡는다(`remote_screen.zig` `expectSnapshotParity`).
 > 원격 spawn은 MRSH v2의 strict method `runtime.spawn_full`로 argv/cwd/login/GUI 시점 부모 환경
@@ -29,16 +29,18 @@ control-plane, PTY 종료 정책과 책임이 겹치지 않도록 소유권·ID�
 > 확정 UTF-8과 그 확정 뒤 replay할 Enter/화살표만 pin된 runtime의 surface별 ordered input stream으로 보낸다.
 > 창 간 workspace 이동 때 source/destination terminal admission과 미전송 queue 이전 용량을 all-or-none
 > 선예약한 뒤 조합을 확정하고 queue를 destination session으로 함께 옮긴다. 원격 nonblocking 경로는 AppKit
-> callback에서 일반 key를 runtime별 64 KiB direct-input FIFO에 복사하고, bounded preframed
-> `input_bytes` 또는 `scroll_to_bottom` frame의 소유권을 connection writer에 넘기며, 전송 구간에
+> callback에서 일반 key를 runtime별 64 KiB direct-input FIFO에 복사하고, 최대 64개의 bounded control FIFO가
+> scroll/focus/config/prompt 명령의 input byte barrier를 함께 보관한다. `input_bytes`, `scroll_to_bottom`,
+> `core_command` frame의 소유권을 connection writer에 넘기며, 전송 구간에
 > `O_NONBLOCK`을 적용한 `MSG_DONTWAIT` write만 시도한다.
-> EAGAIN/partial 뒤 남은 wire bytes는 frame-loop pump가 같은 frame offset부터 이어 보낸다. scroll
-> barrier offset이 `기존 input → scroll_to_bottom → 새 input`의 순서를 보존한다. scrolled
+> EAGAIN/partial 뒤 남은 wire bytes는 frame-loop pump가 같은 frame offset부터 이어 보낸다. control
+> barrier가 `기존 input → core command → 새 input`의 순서를 보존한다. scrolled
 > `imeBegin`은 응답 없는 async scroll frame만 admission하며 동기 RPC로 fallback하지 않는다.
-> 이는 일반 key/paste/focus input-mode parity 전체가 완료됐다는 뜻은 아니다.
+> focus report와 설정·prompt core command는 host reader까지 전달되지만, 일반 key의 DECCKM/DECKPAM/kitty keyboard
+> 인코딩과 선택 autoscroll 등 input-mode/command parity 전체가 완료됐다는 뜻은 아니다.
 > `keep-alive-after-quit` 토글은 **설정 GUI(workspace 섹션)에도 노출**된다. 기본값은 아직 `false`(opt-in)다:
 > quick persistence(현재 quick은 명시적으로 in-process), incremental checkpoint, ended placeholder, 외부 `maru attach` CLI, 다중 app **process**(현재 daemon
-> serial), 일반 input/scroll 이외 **전체 control·delta 경로의** async socket event-loop 통합, GUI 부재 시 OS 배너, **host-backed echo 지연 제거(이벤트 기반
+> serial), mouse/resize/observation RPC와 delta push의 완전한 async bounded socket event-loop 통합, GUI 부재 시 OS 배너, **host-backed echo 지연 제거(이벤트 기반
 > push — §perf, 백로그)**, **기본값 `true` 전환** 등은 **후속/백로그**다. 이 문서는 그 목표 상태를 함께 기술한다 — **구현 완료
 > 여부는 각 절의 "구현 상태" 표식으로 구분한다**(표식 없는 서술은 목표 설계).
 
@@ -601,6 +603,7 @@ request_id:u64 | stream_id:u64 | payload_len:u32
 | `stream_ack` | 9 | JSON highest applied sequence/credit or fresh-snapshot request |
 | `ping` / `pong` | 10 / 11 | empty or diagnostic nonce |
 | `scroll_to_bottom` | 12 | controller가 보낸 payload 없는 fire-and-forget live-viewport command |
+| `core_command` | 13 | controller가 보낸 strict bounded JSON host-core command. 응답 없는 stream frame |
 
 - `request_id=0`은 unsolicited event/stream, nonzero는 connection 안에서 재사용하지 않고 response와 1:1 대응한다.
 - `stream_id=0`은 비-stream RPC, attach 성공 뒤 server가 발급한 nonzero ID는 해당 runtime subscription에만 쓴다.
@@ -631,7 +634,21 @@ request_id:u64 | stream_id:u64 | payload_len:u32
   `runtime.core_command` RPC로 fallback하지 않는다. 이미 visible인 live snapshot은 위 legacy degraded mode로 표시하고,
   hidden/ambiguous snapshot은 계속 fail-closed한다.
   FIFO admission 뒤 frame encode OOM은 성공한 ownership으로 보고 재시도한다. pending+new가 64 KiB를 넘으면
-  그 admission 전체를 효과 0으로 거부한다. 이후 blocking mouse/core/resize RPC는 FIFO와 barrier를 먼저 flush한다.
+  그 admission 전체를 효과 0으로 거부한다.
+- `runtime_core_command_v1`은 kind 13의 응답 없는 stream command도 함께 협상한다. scroll/focus/cell metric/default
+  color/ANSI 16색 palette/scrollback/ambiguous·emoji width/prompt jump를 최대 64개 control FIFO에 보관하고, 각
+  명령 시점의 direct-input byte offset을 barrier로 잡는다. 따라서 socket backpressure 중에도
+  `입력 prefix → core_command → 입력 suffix` wire 순서를 보존하며 AppKit main thread에서 response를 기다리지 않는다.
+  host reader 안에서도 `PtyWriteQueue.enqueued_total/consumed_total` fence가 같은 순서를 유지해 focus `CSI I/O` 응답이
+  prefix 뒤·suffix 앞에 기록된다. wire decoder는 scroll delta ±100000, scrollback 0~100000, cell metric 1~65535,
+  palette 정확히 16개와 RGB `0x000000~0xFFFFFF`을 강제한다. control FIFO가 64개를 넘거나 그 queue allocation이
+  실패하면 최종 focus/config를 조용히 버리지 않고 shared connection을 fail-close한다. 각 remote runtime pump는
+  transport 실패를 자기 surface의 one-shot `exited` 상태로 올려 매 frame 오류 반복과 이후 입력을 차단한다. host reader
+  queue가 이미 소유권을 넘겨받은 fire-and-forget input/control을 admission하지 못한 경우도 connection을 닫고 runtime은
+  유지한다. capability 없는 구 host에 이미 붙어
+  있는 runtime은 legacy scroll 4종만 기존 RPC로 보내고 나머지는 degraded no-op이다. 반면 새 config-bearing spawn은
+  구 host가 `runtime_config`를 조용히 무시할 수 있으므로 PTY 생성 전에 `UnsupportedSpawnContract`로 거부하고 앱이
+  명시적인 in-process fallback을 택한다. 이후 blocking mouse/resize/observation RPC는 input/control FIFO를 먼저 flush한다.
 
 ### hello, command, stream 순서
 
@@ -646,7 +663,7 @@ capabilities:["runtime_metadata_v1","screen_viewport_scrolled_v1","async_scroll_
 | `host.info` | 없음 | host/runtime/client/capability summary |
 | `runtime.list` / `runtime.get` | filter 또는 `runtime_id` | 권한 범위 안 redacted metadata |
 | `runtime.spawn` | argv, cols/rows와 legacy optional 값 | 구 MRSH v2 client용 최소 spawn. 기존 runtime attach 호환을 위해 유지 |
-| `runtime.spawn_full` | argv/cwd/login/env/GUI parent-env snapshot/env-overrides/TERM/ZDOTDIR/SSH integration/cols/rows | 새 GUI의 fail-closed spawn. 필드가 존재하면서 타입·범위가 틀리면 PTY를 만들지 않고 `invalid_request` |
+| `runtime.spawn_full` | argv/cwd/login/env/GUI parent-env snapshot/env-overrides/TERM/ZDOTDIR/SSH integration/cols/rows/`runtime_config` | 새 GUI의 fail-closed spawn. capability가 확인된 host만 `runtime_config`를 reader 시작 전에 적용해 첫 output부터 같은 scrollback·폭·theme·cell metric을 쓴다. 필드가 존재하면서 타입·범위가 틀리면 PTY를 만들지 않고 `invalid_request`; capability 없는 구 host에는 요청 자체를 보내지 않고 앱이 in-process로 fallback |
 | `runtime.attach` | `runtime_id`, observer/controller/takeover, cols/rows | `runtime_metadata_v1` 협상 client에는 initial full metadata+revision, 공통으로 `stream_id`, granted capabilities, snapshot generation 또는 `controller_busy` |
 | `runtime.observation` | `stream_id` | `runtime_metadata_v1` observe subscription 전용 user-action barrier. 현재 host full-state와 subscription metadata revision/base를 원자적으로 전진시켜 응답 |
 | `runtime.detach` | `stream_id` | 해당 subscription/controller release, runtime 유지 |
@@ -924,8 +941,8 @@ P3-e도 슬라이스로 나눈다(제품 통합이라 크다).
     revision/base를 사용한다. 구 host의 unsupported와 supported-but-empty를 구분한다.
   - **P3-e4c(AppSession consumers) ✅**: sidebar/search/git, auto title·cwd 상속, at-prompt/close/control collector,
     Claude/Codex observer, SSH drop/paste upload와 alt-screen PageUp/wheel 특례가 공용 runtime observation만 읽도록
-    옮긴다. 이 범위의 metadata에는 placeholder `surface.core` 직접 읽기를 금지한다. 일반 key/paste/mouse/focus의
-    DECKPAM·bracketed-paste·mouse/focus/kitty input mode와 remote core-command parity는 아직 이 완료 범위가 아니다.
+    옮긴다. 이 범위의 metadata에는 placeholder `surface.core` 직접 읽기를 금지한다. 일반 key의 DECCKM/DECKPAM/kitty
+    keyboard 인코딩과 선택 autoscroll·전체 선택은 아직 이 완료 범위가 아니다.
   - **P3-e4c-2(IME marked text parity) ✅**: marked text는 host core command나 protocol state가 아니라 각 GUI
     `Surface`의 client-local `PreeditOverlay`가 소유한다. 로컬/host-backed base snapshot에 공통 합성기를 적용하고,
     host snapshot/delta의 canonical grid는 바꾸지 않는다. 최신 delta마다 다시 합성하며 clear하면 최신 base가 즉시
@@ -938,7 +955,7 @@ P3-e도 슬라이스로 나눈다(제품 통합이라 크다).
     client runtime은 일반 key를 64 KiB direct-input FIFO에 먼저 복사하고 scroll barrier offset으로
     `기존 input → scroll_to_bottom → 새 input` 순서를 보존한 뒤 connection의 bounded outbound 슬롯에 nonblocking
     admission한다. FIFO가 소유한 뒤의 frame encode OOM은 tick 재시도 상태이며, pending+new가 64 KiB를 넘는
-    새 admission만 효과 0으로 fail-closed한다. blocking mouse/core/resize RPC는 FIFO와 barrier를 먼저 flush해
+    새 admission만 효과 0으로 fail-closed한다. blocking mouse/resize/observation RPC는 input/control FIFO를 먼저 flush해
     이미 수락한 key를 추월하지 않는다. AppKit
     callback은 `client.call`/response를 기다리지 않는다. 후보창은 합성 cursor가 아니라 이 base cursor를 사용한다.
     capability 없는 구 v2 host에서는 동기 RPC로 fallback하지 않는다. 대신 visible cursor가 해당 snapshot의 live bottom을
@@ -964,13 +981,31 @@ P3-e도 슬라이스로 나눈다(제품 통합이라 크다).
     RPC(`server.MouseReport` primitive) 신설 — client는 **raw 이벤트만** 보내고 host core가 자기 `mouse_tracking`/`mouse_format`으로
     SGR/x10을 인코딩(인코딩 모드가 host에만 있어 client가 몰라도 됨). ⑶ host `reportMouseOp`은 로컬과 **동형**으로 report_mouse를
     host의 **reader에 `enqueueCoreCommand`**한다 — reader가 적용 후 `pendingResponse`를 PTY로 흘려, 모든 PTY 입력 쓰기를 reader
-    단일 스레드로 모아 dispatch↔reader PTY-write race를 없앤다(scroll은 응답 없어 direct apply). **고빈도 1003 hover motion은
+    단일 스레드로 모아 dispatch↔reader PTY-write race를 없앤다. **고빈도 1003 hover motion은
     latency 우려로 후속**(휠/클릭/드래그가 사용자 보고 케이스를 덮음).
   - **P3-e4c-2(붙여넣기 bracketed parity) ✅**: 관측에 `bracketed_paste`(optional) 추가 — host-backed `submitPaste`가 placeholder
     대신 관측의 bracketed로 DECSET 2004 판정·인코딩(`pasteNeedsConfirmationWith` 순수 변형)해, Claude Code 등이 붙여넣은 파일
     경로를 `[Image]`로 인식하고 멀티라인이 실행되지 않는다. **bracketed는 mouse_tracking과 같은 "클라가 자기 UI 판단(paste-protection
     모달)에 필요한 게이트 모드"라 관측 스트리밍이 방식 B와 정합**(순수 host-wrap은 새 입력 RPC를 더해도 protection이 여전히
-    client-side라 같은 모드를 wire에 두게 되어 실익 없음). cwd(read·write)는 이미 완료. DECCKM·focus·링크는 별도 후속 slice.
+    client-side라 같은 모드를 wire에 두게 되어 실익 없음). cwd(read·write)는 이미 완료. 일반 key의 DECCKM 실제 인코딩과
+    DECKPAM·kitty keyboard는 별도 후속 slice다.
+  - **P3-e4c-3(focus/config/prompt core-command parity) ✅**: hello capability `runtime_core_command_v1`과
+    strict bounded `core_command_wire`가 scroll 4종, focus report, cell metric/default color/ANSI 16색 palette,
+    scrollback/ambiguous·emoji width 설정과 prompt jump를 전달한다. server는 controller의 input capability를 다시 확인하고
+    unknown op, 잘못된 색 범위, 16개가 아닌 palette, scroll delta ±100000·scrollback 100000·cell metric 65535
+    범위를 벗어난 값을 거부한다. 일반 명령은 kind 13의 응답 없는 `core_command` frame으로 보내며 client의 최대 64개
+    control FIFO가 명령 시점의 input byte barrier를 함께 보존한다. socket backpressure 중에도 main thread는 response를
+    기다리지 않고 frame-loop가 `input prefix → command → input suffix`를 이어 보낸다. host
+    `runtime_manager`는 dispatch thread에서 core를 직접 바꾸지 않고 내부 `CoreCommand`로 명시 변환해 reader queue에 넣는다.
+    reader는 input queue 누적 byte fence에 도달한 명령만 적용하므로 DECSET 1004의 `CSI I/O`와 OSC query 응답도 prefix 뒤,
+    suffix 앞에서 같은 단일 PTY writer가 기록한다. EOF/read/write 오류로 reader가 끝나면 input/command queue를 닫아
+    blocked producer를 `QueueClosed`로 깨운다. 신규 spawn은 `runtime.spawn_full.runtime_config`의 scrollback/폭/palette/
+    default color/cell metric snapshot을 **reader 시작 전에** 적용해 빠른 첫 output도 기본값으로 parse/evict하지 않는다.
+    기존 runtime 재접속은 attach 뒤 같은 snapshot을 다시 보내 현재 GUI config로 수렴시키며, theme/font reload도 모든 terminal
+    runtime에 같은 command를 재전달한다. response timeout이나 잘못된 request id를 본 client는 늦은 response가 다음 RPC와
+    섞이지 않도록 socket을 즉시 폐기한다. capability 없는 구 host에는 기존
+    scroll 4종만 보내고 새 command는 unknown RPC를 시험하지 않는 degraded no-op이다. 선택 highlight는 attachment-local,
+    선택 콘텐츠 계산은 기존 host RPC라는 소유권을 유지하며 `scroll_and_extend`·viewport 전체 선택 parity는 후속이다.
   - **P3-e4d(parity gate) 🟨**: 실제 독립 host PTY의 OSC 7/2/5379→client observation, host core의
     OSC 7/2/133/5379 export, owned-copy/OOM-safe replace, attach initial metadata, changed-only event,
     malformed/stale revision과 stream별 coalescing, capability 없는 v2 client event 억제, observation barrier revision,
@@ -988,8 +1023,10 @@ P3-e도 슬라이스로 나눈다(제품 통합이라 크다).
     소유된 뒤 막힌 connection/encode OOM에서도 유실되지 않는지, exact-cap/cap+1 의미론,
     `기존 input → scroll → 새 input → mouse RPC` 순서, request write hard-error connection invalidation,
     lifecycle request의 fail-always allocator OOM→EOF cleanup fallback을 자동 검증한다.
-    일반 key/paste/mouse/focus가 host input mode와
-    core command를 소비하는 backend-neutral 경로는 여전히 별도 남은 gate다. cwd/SSH destination/raw process argv는 trace와 실패 artifact에 남기지 않는다.
+    focus/config/prompt의 backend-neutral core-command 경로는 bounded codec·controller auth·실 host reader core 적용과
+    focus `CSI I` PTY write까지 자동 검증한다. 남은 input parity gate는 일반 key의 DECCKM/DECKPAM/kitty 인코딩,
+    Reset Terminal/Clear Screen의 host 소유 core 적용, 고빈도 1003 hover, selection autoscroll·전체 선택·사용자 word
+    separator다. cwd/SSH destination/raw process argv는 trace와 실패 artifact에 남기지 않는다.
     현재 SSH drop/paste barrier는 GUI main thread에서 local host RPC를 기다리며 transport timeout 상한은 5초다. 정상 local
     socket에서는 즉시 끝나지만, stalled host에서도 UI를 멈추지 않는 async user-action state machine은 기본값 전환 전 성능 gate다.
 

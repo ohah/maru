@@ -18,6 +18,7 @@ const client_mod = @import("client.zig");
 const remote_screen = @import("remote_screen.zig");
 const screen_assembler = @import("screen_assembler.zig");
 const observation_wire = @import("observation_wire.zig");
+const core_command_wire = @import("core_command_wire.zig");
 
 /// host에서 가져온 대기 OSC 9/777 데스크톱 알림 한 건(§6.32). title/body는 owned(caller가 deinit).
 pub const Notification = struct {
@@ -38,14 +39,14 @@ pub const RemoteRuntime = struct {
     runtime_id_hex: [32]u8, // host 발급 runtime_id(hex) — terminate에 되먹인다.
     stream_id: u64, // attach가 발급한 stream — input/resize/delta 라우팅.
     resize_seq: u64, // 단조 증가 client_sequence — registry가 이하 sequence를 stale로 거부하므로 매 resize마다 올린다.
-    // IME/key callback이 요청한 live-bottom barrier가 shared Client outbound 슬롯에 아직 admission되지 않았는가.
-    // stream-local sticky라 다른 runtime의 pending frame에 막혀도 유실/coalesce되지 않고 다음 tick/input에서 재시도한다.
-    scroll_to_bottom_pending: bool,
-    // blocking `SurfaceRuntime.writeInput` 호출자의 key bytes를 socket backpressure 뒤에도 소유하는 bounded FIFO.
-    // scroll_barrier_offset은 그 intent보다 먼저 도착한 byte prefix의 끝이며, pump가 prefix→scroll→suffix 순서를 지킨다.
+    // blocking `SurfaceRuntime.writeInput`의 key bytes와 그 사이 core command를 한 시간축으로 보존한다.
+    // control.barrier는 그 명령보다 먼저 host에 도착해야 하는 direct_input byte prefix 끝이다.
     direct_input: std.ArrayListUnmanaged(u8),
     direct_input_offset: usize,
-    scroll_barrier_offset: ?usize,
+    pending_controls: std.ArrayListUnmanaged(PendingControl),
+    // shared transport hard failure를 이 runtime surface에 한 번만 투영한다. connection 하나를 여러 runtime이
+    // 공유하므로 각 runtime pump가 자기 surface를 exited로 latch하되 매 frame 같은 read_error를 재방출하지 않는다.
+    transport_failed: bool,
     observation: term_backend.RuntimeObservation, // host attach/event에서 받은 화면 외 full-state owned cache.
     remote_screen: remote_screen.RemoteScreen, // 조립기+cell 격자(surface의 화면 소스).
     surface: Surface, // 원격-backed(surface.remote = remote_screen.screenSource()). GUI가 이걸 렌더.
@@ -61,19 +62,36 @@ pub const RemoteRuntime = struct {
         request: maru.pty.SpawnRequest,
         size: terminal.Size,
     ) anyerror!void {
+        return self.spawnWithConfig(client, allocator, io, surface_id, request, size, null);
+    }
+
+    pub fn spawnWithConfig(
+        self: *RemoteRuntime,
+        client: *client_mod.Client,
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        surface_id: u64,
+        request: maru.pty.SpawnRequest,
+        size: terminal.Size,
+        initial_config: ?maru.session.core_command.RuntimeConfig,
+    ) anyerror!void {
+        // origin/main의 구 v2 daemon도 runtime.spawn_full 이름은 알지만 unknown `runtime_config` 필드를 무시한다.
+        // 새 config codec과 함께 도입된 capability가 없으면 잘못된 기본값으로 spawn 성공을 가장하지 않고,
+        // AppSession이 명시적인 in-process fallback 경로를 선택하게 한다.
+        if (initial_config != null and !client.runtime_core_command_v1) return error.UnsupportedSpawnContract;
         self.client = client;
         self.allocator = allocator;
         self.io = io;
         self.resize_seq = 0;
-        self.scroll_to_bottom_pending = false;
         self.direct_input = .empty;
         self.direct_input_offset = 0;
-        self.scroll_barrier_offset = null;
+        self.pending_controls = .empty;
+        self.transport_failed = false;
         self.observation = .{};
         errdefer self.observation.deinit(allocator);
 
         // 1. runtime.spawn_full — host가 확장 spawn 계약으로 실 PTY를 띄우고 runtime_id를 준다.
-        const spawn_params = buildSpawnParams(allocator, request, size) catch return error.OutOfMemory;
+        const spawn_params = buildSpawnParams(allocator, request, size, initial_config) catch return error.OutOfMemory;
         defer allocator.free(spawn_params);
         // 기존 v2 host가 새 필드를 unknown JSON으로 무시해 다른 셸을 띄우지 않도록 새 method 이름을 쓴다. 구 host는
         // invalid_request로 거부하고 기존 runtime attach는 계속 v2로 가능하다.
@@ -107,10 +125,10 @@ pub const RemoteRuntime = struct {
         self.allocator = allocator;
         self.io = io;
         self.resize_seq = 0;
-        self.scroll_to_bottom_pending = false;
         self.direct_input = .empty;
         self.direct_input_offset = 0;
-        self.scroll_barrier_offset = null;
+        self.pending_controls = .empty;
+        self.transport_failed = false;
         self.observation = .{};
         errdefer self.observation.deinit(allocator);
         self.runtime_id_hex = runtime_id_hex;
@@ -167,6 +185,7 @@ pub const RemoteRuntime = struct {
         self.remote_screen.deinit();
         self.observation.deinit(self.allocator);
         self.direct_input.deinit(self.allocator);
+        self.pending_controls.deinit(self.allocator);
         self.* = undefined;
     }
 
@@ -182,6 +201,7 @@ pub const RemoteRuntime = struct {
         self.remote_screen.deinit();
         self.observation.deinit(self.allocator);
         self.direct_input.deinit(self.allocator);
+        self.pending_controls.deinit(self.allocator);
         self.* = undefined;
     }
 
@@ -210,50 +230,97 @@ pub const RemoteRuntime = struct {
     }
 
     /// AppKit callback-safe live-bottom 요청. socket read/blocking write를 하지 않고 stream-local intent만
-    /// 세운 뒤 connection의 bounded outbound 슬롯에 DONTWAIT admission을 한 번 시도한다. 이미 pending이면
+    /// bounded control FIFO에 넣은 뒤 DONTWAIT admission을 한 번 시도한다. 같은 byte barrier의 연속 scroll은
     /// coalesce하고, 슬롯이 다른 frame으로 막혔으면 tick/input 경로가 다시 시도한다.
     pub fn requestScrollToBottom(self: *RemoteRuntime) client_mod.ClientError!void {
         if (!self.client.async_scroll_to_bottom_v1) return;
-        if (self.scroll_barrier_offset == null) {
-            self.scroll_to_bottom_pending = true;
-            self.scroll_barrier_offset = self.direct_input.items.len;
+        const barrier = self.direct_input.items.len;
+        if (self.pending_controls.items.len > 0) {
+            const last = self.pending_controls.items[self.pending_controls.items.len - 1];
+            if (last.barrier == barrier and last.op == .scroll_to_bottom) {
+                _ = try self.pumpQueuedInput();
+                return;
+            }
         }
+        if (self.pending_controls.items.len >= max_pending_controls) return self.failControlAdmission();
+        self.pending_controls.append(self.allocator, .{ .barrier = barrier, .op = .scroll_to_bottom }) catch
+            return self.failControlAdmission();
+        _ = try self.pumpQueuedInput();
+    }
+
+    /// focus/config/prompt 등 host-authoritative 명령을 input과 같은 stream-local 시간축에 넣는다. queue가 인수한 뒤
+    /// socket backpressure가 생겨도 다음 frame tick이 재시도하며, bounded cap을 넘으면 명시적으로 실패한다.
+    pub fn queueCoreCommand(self: *RemoteRuntime, command: core_command_wire.Command) client_mod.ClientError!void {
+        if (!self.client.runtime_core_command_v1) {
+            if (command.isLegacyScroll()) return self.sendCoreCommandBlocking(command);
+            return;
+        }
+        if (self.pending_controls.items.len >= max_pending_controls) return self.failControlAdmission();
+        self.pending_controls.append(self.allocator, .{
+            .barrier = self.direct_input.items.len,
+            .op = .{ .core_command = command },
+        }) catch return self.failControlAdmission();
         _ = try self.pumpQueuedInput();
     }
 
     const max_direct_input_bytes: usize = 64 * 1024;
+    const max_pending_controls: usize = 64;
 
-    fn admitPendingScrollToBottom(self: *RemoteRuntime) client_mod.ClientError!bool {
-        if (!self.scroll_to_bottom_pending) return true;
-        const admitted = self.client.sendScrollToBottomNonBlocking(self.stream_id) catch |err| switch (err) {
-            error.OutOfMemory => return false,
-            else => return err,
+    fn failControlAdmission(self: *RemoteRuntime) client_mod.ClientError!void {
+        // cap 초과뿐 아니라 queue allocation OOM도 caller가 UI best-effort로 삼키면 최종 focus/config 상태가
+        // 조용히 유실된다. 이 stream만 복구할 ACK가 없으므로 shared connection을 poison해 다음 pump가
+        // 명시적 disconnect와 surface exit latch를 관측하게 한다.
+        self.client.failClosed();
+        return error.ConnectionClosed;
+    }
+
+    const PendingControl = struct {
+        barrier: usize,
+        op: union(enum) {
+            scroll_to_bottom,
+            core_command: core_command_wire.Command,
+        },
+    };
+
+    fn admitControl(self: *RemoteRuntime, control: PendingControl) client_mod.ClientError!bool {
+        return switch (control.op) {
+            .scroll_to_bottom => self.client.sendScrollToBottomNonBlocking(self.stream_id) catch |err| switch (err) {
+                error.OutOfMemory => false,
+                else => return err,
+            },
+            .core_command => |command| blk: {
+                const params = core_command_wire.encodeParams(self.allocator, self.stream_id, command) catch break :blk false;
+                defer self.allocator.free(params);
+                break :blk self.client.sendCoreCommandNonBlocking(self.stream_id, params) catch |err| switch (err) {
+                    error.OutOfMemory => false,
+                    else => return err,
+                };
+            },
         };
-        if (!admitted) return false;
-        self.scroll_to_bottom_pending = false;
-        return true;
     }
 
     fn compactDirectInput(self: *RemoteRuntime) void {
         if (self.direct_input_offset == 0) return;
-        // barrier가 남아 있으면 offset은 그 이전 prefix를 가리킨다. 남은 suffix를 앞으로 당기고
-        // barrier도 같은 양만큼 보정해 temporal 위치를 보존한다.
+        // 모든 control barrier는 아직 소비하지 않은 byte suffix 안에 있다. suffix를 앞으로 당길 때 같은 양만큼
+        // 보정해 input→control→input 시간 위치를 보존한다.
         const consumed = self.direct_input_offset;
         const remaining = self.direct_input.items[consumed..];
         std.mem.copyForwards(u8, self.direct_input.items[0..remaining.len], remaining);
         self.direct_input.items.len = remaining.len;
-        if (self.scroll_barrier_offset) |barrier| {
-            std.debug.assert(barrier >= consumed);
-            self.scroll_barrier_offset = barrier - consumed;
+        for (self.pending_controls.items) |*control| {
+            std.debug.assert(control.barrier >= consumed);
+            control.barrier -= consumed;
         }
         self.direct_input_offset = 0;
     }
 
-    /// 직접 key FIFO와 scroll intent를 단일 시간 순서로 Client outbound에 넘긴다.
+    /// 직접 key FIFO와 control FIFO를 단일 시간 순서로 Client outbound에 넘긴다.
     /// 반환 false는 socket backpressure로 아직 queue/barrier가 남았다는 뜻이며 데이터 소유권은 유지된다.
     fn pumpQueuedInput(self: *RemoteRuntime) client_mod.ClientError!bool {
         while (true) {
-            if (self.scroll_barrier_offset) |barrier| {
+            if (self.pending_controls.items.len > 0) {
+                const control = self.pending_controls.items[0];
+                const barrier = control.barrier;
                 if (self.direct_input_offset < barrier) {
                     const accepted = self.client.sendInputNonBlocking(
                         self.stream_id,
@@ -266,8 +333,8 @@ pub const RemoteRuntime = struct {
                     self.direct_input_offset += accepted;
                     continue;
                 }
-                if (!(try self.admitPendingScrollToBottom())) return false;
-                self.scroll_barrier_offset = null;
+                if (!(try self.admitControl(control))) return false;
+                _ = self.pending_controls.orderedRemove(0);
                 continue;
             }
             if (self.direct_input_offset < self.direct_input.items.len) {
@@ -288,12 +355,14 @@ pub const RemoteRuntime = struct {
         }
     }
 
-    /// 이 runtime이 이미 소유한 key/scroll barrier를 blocking RPC보다 먼저 전송한다. RemoteRuntime의 FIFO와
+    /// 이 runtime이 이미 소유한 key/control barrier를 blocking RPC보다 먼저 전송한다. RemoteRuntime의 FIFO와
     /// Client의 connection-level pending frame이라는 두 ownership 층 사이에서 mouse/core/resize RPC가 key를
     /// 추월하지 않게 하는 단일 경계다. 각 blocking RPC는 원래도 Client.call에서 pending socket write를 기다린다.
     fn flushQueuedInputBlocking(self: *RemoteRuntime) client_mod.ClientError!void {
         while (true) {
-            if (self.scroll_barrier_offset) |barrier| {
+            if (self.pending_controls.items.len > 0) {
+                const control = self.pending_controls.items[0];
+                const barrier = control.barrier;
                 if (self.direct_input_offset < barrier) {
                     try self.client.sendInput(
                         self.stream_id,
@@ -302,11 +371,16 @@ pub const RemoteRuntime = struct {
                     self.direct_input_offset = barrier;
                     continue;
                 }
-                if (self.scroll_to_bottom_pending) {
-                    try self.client.sendScrollToBottom(self.stream_id);
-                    self.scroll_to_bottom_pending = false;
+                switch (control.op) {
+                    .scroll_to_bottom => try self.client.sendScrollToBottom(self.stream_id),
+                    .core_command => |command| {
+                        const params = core_command_wire.encodeParams(self.allocator, self.stream_id, command) catch
+                            return error.OutOfMemory;
+                        defer self.allocator.free(params);
+                        try self.client.sendCoreCommand(self.stream_id, params);
+                    },
                 }
-                self.scroll_barrier_offset = null;
+                _ = self.pending_controls.orderedRemove(0);
                 continue;
             }
             if (self.direct_input_offset < self.direct_input.items.len) {
@@ -595,12 +669,12 @@ pub const RemoteRuntime = struct {
         return .{ .start = .{ .row = @intCast(sr), .col = @intCast(sc) }, .end = .{ .row = @intCast(er), .col = @intCast(ec) }, .block = block };
     }
 
-    /// 스크롤 core command를 host로 보낸다(§6a 원격 스크롤백). `op`=scroll 계열 태그(코드 내부 고정 리터럴 — JSON escape 불요),
-    /// `arg`=정수 인자(delta/절대행/offset). host가 자기 `TerminalCore`에 적용해 view_offset을 바꾸면 다음 snapshot/delta
-    /// (renderSnapshot=뷰포트)가 그 스크롤 화면을 투영하고, 이 RemoteRuntime의 Surface(RemoteScreen)가 렌더한다. 응답 무시.
-    pub fn sendCoreCommand(self: *RemoteRuntime, op: []const u8, arg: i64) client_mod.ClientError!void {
-        var buf: [96]u8 = undefined;
-        const params = std.fmt.bufPrint(&buf, "{{\"stream_id\":{d},\"op\":\"{s}\",\"arg\":{d}}}", .{ self.stream_id, op, arg }) catch return error.OutOfMemory;
+    /// host-authoritative core command를 strict bounded codec으로 보낸다. 구 host는 scroll 4종만 이해하므로 capability가
+    /// 없는 연결에는 그 legacy subset만 보내고 focus/config/prompt는 unknown RPC를 시험하지 않고 degraded no-op으로 둔다.
+    pub fn sendCoreCommandBlocking(self: *RemoteRuntime, command: core_command_wire.Command) client_mod.ClientError!void {
+        if (!shouldSendCoreCommand(self.client.runtime_core_command_v1, command)) return;
+        const params = core_command_wire.encodeParams(self.allocator, self.stream_id, command) catch return error.OutOfMemory;
+        defer self.allocator.free(params);
         const resp = try self.callOrdered("runtime.core_command", params);
         self.allocator.free(resp);
     }
@@ -767,9 +841,56 @@ pub const RemoteRuntime = struct {
     }
 };
 
+fn shouldSendCoreCommand(runtime_core_command_v1: bool, command: core_command_wire.Command) bool {
+    return runtime_core_command_v1 or command.isLegacyScroll();
+}
+
+test "remote runtime: extended core commands require capability while legacy scroll remains compatible" {
+    try std.testing.expect(shouldSendCoreCommand(false, .{ .scroll = 1 }));
+    try std.testing.expect(!shouldSendCoreCommand(false, .{ .report_focus = true }));
+    try std.testing.expect(!shouldSendCoreCommand(false, .{ .set_max_scrollback = 1000 }));
+    try std.testing.expect(shouldSendCoreCommand(true, .{ .report_focus = false }));
+}
+
+test "remote runtime: new spawn config fails closed against a legacy daemon that would ignore the field" {
+    var client = client_mod.Client{
+        .allocator = std.testing.allocator,
+        .fd = -1,
+        .host_id = 1,
+        .runtime_core_command_v1 = false,
+        .parser = framing.FrameParser.init(std.testing.allocator),
+    };
+    defer client.deinit();
+    var rr: RemoteRuntime = undefined;
+    try std.testing.expectError(error.UnsupportedSpawnContract, rr.spawnWithConfig(
+        &client,
+        std.testing.allocator,
+        std.testing.io,
+        1,
+        .{ .command = "/bin/cat" },
+        .{ .cols = 80, .rows = 24 },
+        .{
+            .max_scrollback = 1000,
+            .ambiguous_wide = false,
+            .emoji_wide = true,
+            .palette = .{null} ** 16,
+            .default_colors = .{
+                .foreground = .{ .r = 0xD0, .g = 0xD0, .b = 0xD0 },
+                .background = .{ .r = 0x10, .g = 0x10, .b = 0x10 },
+            },
+            .cell_metrics = null,
+        },
+    ));
+}
+
 /// `{argv:[...], cols, rows}` spawn params를 JSON으로 만든다(caller free). argv는 임의 바이트라 실 JSON encoder로 escape한다
 /// (client hand-built JSON의 신뢰 계약 밖 — client.zig 주석대로 임의 argv는 stringify로).
-fn buildSpawnParams(allocator: std.mem.Allocator, request: maru.pty.SpawnRequest, size: terminal.Size) error{OutOfMemory}![]u8 {
+fn buildSpawnParams(
+    allocator: std.mem.Allocator,
+    request: maru.pty.SpawnRequest,
+    size: terminal.Size,
+    initial_config: ?maru.session.core_command.RuntimeConfig,
+) error{OutOfMemory}![]u8 {
     const argv = allocator.alloc([]const u8, 1 + request.args.len) catch return error.OutOfMemory;
     defer allocator.free(argv);
     argv[0] = request.command;
@@ -812,8 +933,44 @@ fn buildSpawnParams(allocator: std.mem.Allocator, request: maru.pty.SpawnRequest
         .pane_id = pane_id,
         .cols = size.cols,
         .rows = size.rows,
+        .runtime_config = if (initial_config) |config| coreConfigToSpawnWire(config) else null,
     }) catch return error.OutOfMemory;
     return allocator.dupe(u8, out.written()) catch return error.OutOfMemory;
+}
+
+const RuntimeConfigSpawnWire = struct {
+    lines: u64,
+    ambiguous_wide: bool,
+    emoji_wide: bool,
+    palette: core_command_wire.Command.Palette,
+    foreground: u32,
+    background: u32,
+    cell_width: u32,
+    cell_height: u32,
+};
+
+fn coreConfigToSpawnWire(config: maru.session.core_command.RuntimeConfig) RuntimeConfigSpawnWire {
+    var palette: core_command_wire.Command.Palette = .{null} ** 16;
+    for (config.palette, 0..) |maybe_rgb, index| {
+        palette[index] = if (maybe_rgb) |rgb|
+            (@as(u32, rgb.r) << 16) | (@as(u32, rgb.g) << 8) | rgb.b
+        else
+            null;
+    }
+    return .{
+        .lines = @intCast(config.max_scrollback),
+        .ambiguous_wide = config.ambiguous_wide,
+        .emoji_wide = config.emoji_wide,
+        .palette = palette,
+        .foreground = (@as(u32, config.default_colors.foreground.r) << 16) |
+            (@as(u32, config.default_colors.foreground.g) << 8) |
+            config.default_colors.foreground.b,
+        .background = (@as(u32, config.default_colors.background.r) << 16) |
+            (@as(u32, config.default_colors.background.g) << 8) |
+            config.default_colors.background.b,
+        .cell_width = if (config.cell_metrics) |metrics| metrics.width else 0,
+        .cell_height = if (config.cell_metrics) |metrics| metrics.height else 0,
+    };
 }
 
 test "remote runtime: spawn wire preserves extended SpawnRequest fields" {
@@ -831,7 +988,19 @@ test "remote runtime: spawn wire preserves extended SpawnRequest fields" {
         .ssh_integration_bin = "/Applications/Maru.app/Contents/MacOS/maru",
         .pane_id = 0x1234,
     };
-    const json = try buildSpawnParams(allocator, request, .{ .cols = 132, .rows = 43 });
+    var palette: [16]?terminal.Rgb = .{null} ** 16;
+    palette[0] = .{ .r = 0x11, .g = 0x22, .b = 0x33 };
+    const json = try buildSpawnParams(allocator, request, .{ .cols = 132, .rows = 43 }, .{
+        .max_scrollback = 4321,
+        .ambiguous_wide = true,
+        .emoji_wide = false,
+        .palette = palette,
+        .default_colors = .{
+            .foreground = .{ .r = 0xAA, .g = 0xBB, .b = 0xCC },
+            .background = .{ .r = 0x01, .g = 0x02, .b = 0x03 },
+        },
+        .cell_metrics = .{ .width = 9, .height = 18 },
+    });
     defer allocator.free(json);
 
     try std.testing.expect(std.mem.indexOf(u8, json, "\"argv\":[\"/bin/zsh\",\"-l\",\"-c\",\"pwd\"]") != null);
@@ -846,6 +1015,10 @@ test "remote runtime: spawn wire preserves extended SpawnRequest fields" {
     try std.testing.expect(std.mem.indexOf(u8, json, "\"pane_id\":\"0000000000001234\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"cols\":132") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"rows\":43") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"runtime_config\":{\"lines\":4321") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"foreground\":11189196") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"cell_width\":9,\"cell_height\":18") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"max_scrollback\"") == null); // host decoder와 다른 내부 필드명 누출 금지.
 }
 
 test "remote runtime: metadata parser applies only newer coherent full-state revisions" {
@@ -991,11 +1164,11 @@ test "remote runtime retains direct key behind async scroll barrier under socket
     rr.client = &client;
     rr.allocator = allocator;
     rr.stream_id = 9;
-    rr.scroll_to_bottom_pending = false;
     rr.direct_input = .empty;
     rr.direct_input_offset = 0;
-    rr.scroll_barrier_offset = null;
+    rr.pending_controls = .empty;
     defer rr.direct_input.deinit(allocator);
+    defer rr.pending_controls.deinit(allocator);
 
     const filler_len = try fillRemoteTestSendBuffer(fds[0]);
     try testing.expect(filler_len > 0);
@@ -1006,7 +1179,7 @@ test "remote runtime retains direct key behind async scroll barrier under socket
     try rr.requestScrollToBottom();
     try rr.sendInput("B");
     try testing.expectEqualStrings("B", rr.direct_input.items[rr.direct_input_offset..]);
-    try testing.expect(rr.scroll_to_bottom_pending);
+    try testing.expectEqual(@as(usize, 1), rr.pending_controls.items.len);
 
     const filler = try allocator.alloc(u8, filler_len);
     defer allocator.free(filler);
@@ -1030,8 +1203,131 @@ test "remote runtime retains direct key behind async scroll barrier under socket
     offset += scroll_frame.len;
     try testing.expectEqualSlices(u8, b_frame, received[offset..][0..b_frame.len]);
     try testing.expectEqual(@as(usize, 0), rr.direct_input.items.len);
-    try testing.expect(!rr.scroll_to_bottom_pending);
-    try testing.expect(rr.scroll_barrier_offset == null);
+    try testing.expectEqual(@as(usize, 0), rr.pending_controls.items.len);
+}
+
+test "remote runtime preserves input core-command input order under socket backpressure" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fds: [2]c.fd_t = undefined;
+    try testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds));
+    socket_server.setNoSigPipe(fds[0]);
+    defer _ = c.close(fds[1]);
+
+    var client = client_mod.Client{
+        .allocator = allocator,
+        .fd = fds[0],
+        .host_id = 1,
+        .runtime_core_command_v1 = true,
+        .parser = framing.FrameParser.init(allocator),
+    };
+    defer client.deinit();
+    var rr: RemoteRuntime = undefined;
+    rr.client = &client;
+    rr.allocator = allocator;
+    rr.stream_id = 10;
+    rr.direct_input = .empty;
+    rr.direct_input_offset = 0;
+    rr.pending_controls = .empty;
+    defer rr.direct_input.deinit(allocator);
+    defer rr.pending_controls.deinit(allocator);
+
+    const filler_len = try fillRemoteTestSendBuffer(fds[0]);
+    try testing.expectEqual(@as(usize, 1), try client.sendInputNonBlocking(10, "A"));
+    try rr.queueCoreCommand(.{ .report_focus = true });
+    try rr.sendInput("B");
+    try testing.expectEqual(@as(usize, 1), rr.pending_controls.items.len);
+
+    const filler = try allocator.alloc(u8, filler_len);
+    defer allocator.free(filler);
+    try readRemoteTestExact(fds[1], filler);
+    while (!(try rr.pumpQueuedInput())) {}
+    while (!(try client.pumpPendingOutput())) {}
+
+    const a_frame = try framing.encodeFrame(allocator, .{ .kind = .input_bytes, .stream_id = 10 }, "A");
+    defer allocator.free(a_frame);
+    const params = try core_command_wire.encodeParams(allocator, 10, .{ .report_focus = true });
+    defer allocator.free(params);
+    const command_frame = try framing.encodeFrame(allocator, .{ .kind = .core_command, .stream_id = 10 }, params);
+    defer allocator.free(command_frame);
+    const b_frame = try framing.encodeFrame(allocator, .{ .kind = .input_bytes, .stream_id = 10 }, "B");
+    defer allocator.free(b_frame);
+    const received = try allocator.alloc(u8, a_frame.len + command_frame.len + b_frame.len);
+    defer allocator.free(received);
+    try readRemoteTestExact(fds[1], received);
+    var offset: usize = 0;
+    try testing.expectEqualSlices(u8, a_frame, received[offset..][0..a_frame.len]);
+    offset += a_frame.len;
+    try testing.expectEqualSlices(u8, command_frame, received[offset..][0..command_frame.len]);
+    offset += command_frame.len;
+    try testing.expectEqualSlices(u8, b_frame, received[offset..][0..b_frame.len]);
+    try testing.expectEqual(@as(usize, 0), rr.pending_controls.items.len);
+}
+
+test "remote runtime control cap overflow fail-closes instead of silently losing final state" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fds: [2]c.fd_t = undefined;
+    try testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds));
+    defer _ = c.close(fds[1]);
+    var client = client_mod.Client{
+        .allocator = allocator,
+        .fd = fds[0],
+        .host_id = 1,
+        .runtime_core_command_v1 = true,
+        .parser = framing.FrameParser.init(allocator),
+    };
+    defer client.deinit();
+    var rr: RemoteRuntime = undefined;
+    rr.client = &client;
+    rr.allocator = allocator;
+    rr.stream_id = 10;
+    rr.direct_input = .empty;
+    rr.direct_input_offset = 0;
+    rr.pending_controls = .empty;
+    defer rr.direct_input.deinit(allocator);
+    defer rr.pending_controls.deinit(allocator);
+    for (0..RemoteRuntime.max_pending_controls) |_| {
+        try rr.pending_controls.append(allocator, .{
+            .barrier = 0,
+            .op = .{ .core_command = .{ .report_focus = true } },
+        });
+    }
+    try testing.expectError(error.ConnectionClosed, rr.queueCoreCommand(.{ .report_focus = false }));
+    try testing.expect(client.unusable);
+    var byte: [1]u8 = undefined;
+    try testing.expectEqual(@as(isize, 0), c.read(fds[1], &byte, byte.len));
+}
+
+test "remote runtime control allocation failure also fail-closes instead of silently losing final state" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fds: [2]c.fd_t = undefined;
+    try testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds));
+    defer _ = c.close(fds[1]);
+    var client = client_mod.Client{
+        .allocator = allocator,
+        .fd = fds[0],
+        .host_id = 1,
+        .runtime_core_command_v1 = true,
+        .parser = framing.FrameParser.init(allocator),
+    };
+    defer client.deinit();
+    var failing = testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    var rr: RemoteRuntime = undefined;
+    rr.client = &client;
+    rr.allocator = failing.allocator();
+    rr.stream_id = 10;
+    rr.direct_input = .empty;
+    rr.direct_input_offset = 0;
+    rr.pending_controls = .empty;
+    rr.transport_failed = false;
+    defer rr.pending_controls.deinit(rr.allocator);
+
+    try testing.expectError(error.ConnectionClosed, rr.queueCoreCommand(.{ .report_focus = false }));
+    try testing.expect(client.unusable);
+    var byte: [1]u8 = undefined;
+    try testing.expectEqual(@as(isize, 0), c.read(fds[1], &byte, byte.len));
 }
 
 test "remote runtime owns exact-cap key after client encode OOM and rejects cap plus one" {
@@ -1054,11 +1350,11 @@ test "remote runtime owns exact-cap key after client encode OOM and rejects cap 
     rr.client = &client;
     rr.allocator = allocator;
     rr.stream_id = 11;
-    rr.scroll_to_bottom_pending = false;
     rr.direct_input = .empty;
     rr.direct_input_offset = 0;
-    rr.scroll_barrier_offset = null;
+    rr.pending_controls = .empty;
     defer rr.direct_input.deinit(allocator);
+    defer rr.pending_controls.deinit(allocator);
     try rr.direct_input.ensureTotalCapacity(allocator, RemoteRuntime.max_direct_input_bytes);
 
     const exact = try allocator.alloc(u8, RemoteRuntime.max_direct_input_bytes);
@@ -1092,13 +1388,15 @@ test "remote runtime compaction rebases a pending scroll barrier" {
     var rr: RemoteRuntime = undefined;
     rr.direct_input = .empty;
     defer rr.direct_input.deinit(allocator);
+    rr.pending_controls = .empty;
+    defer rr.pending_controls.deinit(allocator);
     try rr.direct_input.appendSlice(allocator, "ABC");
     rr.direct_input_offset = 1;
-    rr.scroll_barrier_offset = 2;
+    try rr.pending_controls.append(allocator, .{ .barrier = 2, .op = .scroll_to_bottom });
     rr.compactDirectInput();
     try testing.expectEqualStrings("BC", rr.direct_input.items);
     try testing.expectEqual(@as(usize, 0), rr.direct_input_offset);
-    try testing.expectEqual(@as(?usize, 1), rr.scroll_barrier_offset);
+    try testing.expectEqual(@as(usize, 1), rr.pending_controls.items[0].barrier);
 }
 
 test "remote runtime flushes key and scroll barrier before mouse RPC" {
@@ -1121,11 +1419,11 @@ test "remote runtime flushes key and scroll barrier before mouse RPC" {
     rr.client = &client;
     rr.allocator = allocator;
     rr.stream_id = 13;
-    rr.scroll_to_bottom_pending = false;
     rr.direct_input = .empty;
     rr.direct_input_offset = 0;
-    rr.scroll_barrier_offset = null;
+    rr.pending_controls = .empty;
     defer rr.direct_input.deinit(allocator);
+    defer rr.pending_controls.deinit(allocator);
 
     const filler_len = try fillRemoteTestSendBuffer(fds[0]);
     try testing.expectEqual(@as(usize, 1), try client.sendInputNonBlocking(13, "A"));
@@ -1188,8 +1486,7 @@ test "remote runtime flushes key and scroll barrier before mouse RPC" {
     peer.join();
     try testing.expect(peer_ok);
     try testing.expectEqual(@as(usize, 0), rr.direct_input.items.len);
-    try testing.expect(!rr.scroll_to_bottom_pending);
-    try testing.expect(rr.scroll_barrier_offset == null);
+    try testing.expectEqual(@as(usize, 0), rr.pending_controls.items.len);
 }
 
 test "remote runtime lifecycle cleanup fail-closes the connection on persistent allocator OOM" {
@@ -1212,11 +1509,11 @@ test "remote runtime lifecycle cleanup fail-closes the connection on persistent 
     rr.client = &client;
     rr.allocator = allocator;
     rr.stream_id = 17;
-    rr.scroll_to_bottom_pending = false;
     rr.direct_input = .empty;
     rr.direct_input_offset = 0;
-    rr.scroll_barrier_offset = null;
+    rr.pending_controls = .empty;
     defer rr.direct_input.deinit(allocator);
+    defer rr.pending_controls.deinit(allocator);
 
     // FailingAllocator는 fail_index에서 계속 실패한다. detach request를 만들 수 없어도 shared socket을 닫아
     // host EOF cleanup이 controller lease를 회수해야 한다.
@@ -1680,7 +1977,7 @@ test "remote runtime: scroll core command routes to host so client sees scrolled
     try testing.expect(settled); // 바닥 화면은 filler(TOPMARKER는 스크롤백)
 
     // **위로 스크롤**(host core view_offset 이동 → renderSnapshot 뷰포트가 스크롤백 윈도로) → 최상단에 TOPMARKER.
-    try rr.sendCoreCommand("scroll", 100); // 위로 100(스크롤백 top으로 cap)
+    try rr.queueCoreCommand(.{ .scroll = 100 }); // 위로 100(스크롤백 top으로 cap)
 
     var saw_marker = false;
     attempts = 0;

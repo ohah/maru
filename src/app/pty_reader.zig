@@ -149,6 +149,35 @@ pub const PtyEventQueue = struct {
         self.pushAssumeLocked(event);
     }
 
+    /// processing reader의 종료 이벤트 전용 비차단 push. processing 경로의 `.output`은 데이터가 아니라
+    /// "코어가 바뀌었음"을 알리는 빈 coalescing 신호이므로, 큐가 그 신호 하나로 가득 찼다면 가장 오래된
+    /// 신호를 종료 이벤트로 교체한다. EOF에서 `pushBlocking`하면 이 큐를 비우는 메인 스레드가 멈춘 동안
+    /// reader도 큐 close defer에 도달하지 못하므로, 세션 종료가 영구 대기할 수 있다.
+    ///
+    /// 실제 PTY bytes를 소유하는 non-processing 경로에는 사용하지 않는다. 빈 신호가 아닌 이벤트로 큐가
+    /// 가득 찼다면 보존을 위해 `QueueFull`을 반환한다.
+    pub fn pushTerminalReplacingOutputSignal(self: *PtyEventQueue, event: QueuedPtyEvent) QueueError!void {
+        switch (event) {
+            .exited, .read_error => {},
+            .output => return error.QueueFull,
+        }
+
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+
+        if (self.closed) return error.QueueClosed;
+        if (self.len == self.items.len) {
+            switch (self.items[self.head]) {
+                .output => |output| {
+                    if (output.bytes.len != 0) return error.QueueFull;
+                    _ = self.popAssumeLocked();
+                },
+                .exited, .read_error => return error.QueueFull,
+            }
+        }
+        self.pushAssumeLocked(event);
+    }
+
     pub fn tryPop(self: *PtyEventQueue) ?QueuedPtyEvent {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
@@ -199,6 +228,9 @@ pub const PtyWriteQueue = struct {
     head: usize = 0,
     cap: usize, // 버퍼링 상한(바이트) — backpressure 기준
     closed: bool = false,
+    // 명령 큐 fence의 단일 시간축. enqueue 성공 바이트와 reader가 실제 PTY write한 바이트를 각각 단조 누적한다.
+    enqueued_total: u64 = 0,
+    consumed_total: u64 = 0,
 
     pub fn init(io: std.Io, allocator: std.mem.Allocator, capacity_bytes: usize) QueueError!PtyWriteQueue {
         if (capacity_bytes == 0) return error.ZeroCapacity;
@@ -234,6 +266,7 @@ pub const PtyWriteQueue = struct {
         }
         if (self.closed) return error.QueueClosed;
         try self.bytes.appendSlice(self.allocator, data);
+        self.enqueued_total += @intCast(data.len);
     }
 
     /// 메인(non-blocking): 상한을 넘지 않는 선에서 `data`의 앞부분만 넣고 넣은 길이를 반환한다(0=지금은
@@ -248,6 +281,7 @@ pub const PtyWriteQueue = struct {
         const n = @min(room, data.len);
         if (n == 0) return 0;
         try self.bytes.appendSlice(self.allocator, data[0..n]);
+        self.enqueued_total += @intCast(n);
         return n;
     }
 
@@ -261,9 +295,15 @@ pub const PtyWriteQueue = struct {
     /// write한 뒤 실제 쓴 길이로 `consume`을 부른다(부분 write면 잔량은 다음 루프). 슬라이스가 아니라 복사를 돌려줘
     /// 락 밖 write 중 enqueue가 버퍼를 realloc해도 안전하다.
     pub fn drainChunk(self: *PtyWriteQueue, out: []u8) usize {
+        return self.drainChunkLimit(out, out.len);
+    }
+
+    /// 다음 command fence를 넘지 않도록 최대 `limit`까지만 복사한다. reader가 prior input을 정확히 fence까지
+    /// 쓴 뒤 command를 적용하고, 그 command 응답을 suffix input보다 먼저 PTY에 쓰게 한다.
+    pub fn drainChunkLimit(self: *PtyWriteQueue, out: []u8, limit: usize) usize {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
-        const n = @min(self.pendingAssumeLocked(), out.len);
+        const n = @min(self.pendingAssumeLocked(), @min(out.len, limit));
         @memcpy(out[0..n], self.bytes.items[self.head .. self.head + n]);
         return n;
     }
@@ -276,11 +316,24 @@ pub const PtyWriteQueue = struct {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
         self.head += n;
+        self.consumed_total += @intCast(n);
         if (self.head >= self.bytes.items.len) {
             self.bytes.clearRetainingCapacity();
             self.head = 0;
         }
         self.not_full.broadcast(self.io);
+    }
+
+    pub fn enqueuedTotal(self: *PtyWriteQueue) u64 {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        return self.enqueued_total;
+    }
+
+    pub fn consumedTotal(self: *PtyWriteQueue) u64 {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        return self.consumed_total;
     }
 };
 
@@ -312,6 +365,7 @@ pub const CoreCommandQueue = struct {
     /// 적용 지연을 산출한다(P3-2~). `enqueued_ns`는 `std.Io.Clock.awake` 나노초.
     pub const Entry = struct {
         cmd: CoreCommand,
+        input_fence: u64 = 0,
         enqueued_ns: i96 = 0,
     };
 
@@ -349,6 +403,11 @@ pub const CoreCommandQueue = struct {
     /// backpressure로 대기한다(UI mutate는 버리면 안 됨). 닫혔으면 QueueClosed. 호출
     /// 후 호출자가 wake로 reader poll을 깨운다(P3-2). 입력 손실 금지라 가득 차도 드롭하지 않고 대기한다(출력 backpressure 대칭).
     pub fn enqueueBlocking(self: *CoreCommandQueue, cmd: CoreCommand) QueueError!void {
+        return self.enqueueAfterInput(cmd, 0);
+    }
+
+    /// `input_fence` 이전에 enqueue된 PTY input byte가 실제로 모두 write된 뒤에만 적용할 명령을 넣는다.
+    pub fn enqueueAfterInput(self: *CoreCommandQueue, cmd: CoreCommand, input_fence: u64) QueueError!void {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
         while (!self.closed and self.pendingAssumeLocked() >= self.cap) {
@@ -356,7 +415,7 @@ pub const CoreCommandQueue = struct {
         }
         if (self.closed) return error.QueueClosed;
         const ts: i96 = if (self.debug) std.Io.Clock.awake.now(self.io).nanoseconds else 0;
-        try self.items.append(self.allocator, .{ .cmd = cmd, .enqueued_ns = ts });
+        try self.items.append(self.allocator, .{ .cmd = cmd, .input_fence = input_fence, .enqueued_ns = ts });
         if (self.debug) coreq.info("enqueue {s} (depth={d})", .{ @tagName(cmd), self.pendingAssumeLocked() });
     }
 
@@ -364,9 +423,15 @@ pub const CoreCommandQueue = struct {
     /// pop↔적용 사이 메인 enqueue가 tail에
     /// append해도 안전하다. 다 비면 버퍼를 비워 head=0으로 되돌린다(재사용).
     pub fn pop(self: *CoreCommandQueue) ?Entry {
+        return self.popReady(std.math.maxInt(u64));
+    }
+
+    /// reader가 실제로 PTY에 쓴 input 누적량이 다음 명령 fence에 도달했을 때만 pop한다.
+    pub fn popReady(self: *CoreCommandQueue, consumed_input: u64) ?Entry {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
         if (self.pendingAssumeLocked() == 0) return null;
+        if (self.items.items[self.head].input_fence > consumed_input) return null;
         const entry = self.items.items[self.head];
         self.head += 1;
         if (self.head >= self.items.items.len) {
@@ -376,6 +441,13 @@ pub const CoreCommandQueue = struct {
         self.not_full.broadcast(self.io);
         if (self.debug) coreq.info("pop {s} (depth={d})", .{ @tagName(entry.cmd), self.pendingAssumeLocked() });
         return entry;
+    }
+
+    pub fn nextFence(self: *CoreCommandQueue) ?u64 {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        if (self.pendingAssumeLocked() == 0) return null;
+        return self.items.items[self.head].input_fence;
     }
 
     pub fn hasPending(self: *CoreCommandQueue) bool {
@@ -530,6 +602,10 @@ pub const PtyReader = struct {
     fn runProcessing(self: *PtyReader) void {
         const core = self.core.?;
         const mutex = self.core_mutex.?;
+        // EOF/read/write 오류로 reader가 스스로 끝나는 경로도 outbound 생산자를 반드시 깨운다. owner가 나중에
+        // finishAfterTermination/close에서 다시 닫아도 close는 멱등이다.
+        defer if (self.write_queue) |wq| wq.close();
+        defer if (self.command_queue) |cq| cq.close();
         // 응답 outbound 버퍼: out_buf[out_head..]가 아직 못 쓴 응답. 다 비우면 compact.
         var out_buf: std.ArrayList(u8) = .empty;
         defer out_buf.deinit(self.allocator);
@@ -537,55 +613,12 @@ pub const PtyReader = struct {
         var readbuf: [4096]u8 = undefined;
         var writebuf: [512]u8 = undefined; // write_queue drain 청크(writeInputNonBlocking이 ≤512B 쓰므로)
         while (true) {
-            const reply_pending = out_head < out_buf.items.len;
-            const main_pending = if (self.write_queue) |wq| wq.hasPending() else false;
-            const ready = self.session.waitIo(reply_pending or main_pending) catch |err| {
-                if (err != error.SessionClosed and err != error.NoMoreEvents) {
-                    self.pushTerminationForIoError(@errorName(err));
-                }
-                return;
-            };
-            // write 단계(비차단, read 무정지): 응답을 먼저 비운다(query 응답 지연 최소화), 응답이 다 나가면
-            // 메인 입력을 한 청크 drain한다. 한 iteration에 한 소스/한 청크 — 다음 poll에서 이어 비운다.
-            if (ready.writable) {
-                // EAGAIN(버퍼 참)은 writeInputNonBlocking이 0으로 돌려준다(에러 아님 — 다음 poll에 이어 씀).
-                // catch로 잡히는 건 치명적 write 실패(EIO 등)/SessionClosed뿐 — `catch 0`로 삼키면 head가 안 늘어
-                // POLLOUT 스핀(라이브락)·입력 조용한 손실이 되므로, 에러면 reader를 종료한다(read 에러 경로와 동일).
-                if (out_head < out_buf.items.len) {
-                    const written = self.session.writeInputNonBlocking(out_buf.items[out_head..]) catch |err| {
-                        if (err != error.SessionClosed) self.pushTerminationForIoError(@errorName(err));
-                        return;
-                    };
-                    out_head += written;
-                    if (out_head >= out_buf.items.len) {
-                        out_buf.clearRetainingCapacity();
-                        out_head = 0;
-                    } else if (out_head >= response_buffer_capacity) {
-                        // 부분 drain이 오래 이어지면 out_head(소비된 prefix)만 커지며 items.len이 무한 증가할 수 있다 —
-                        // prefix가 상한만큼 쌓이면 잔여(out_buf[out_head..])를 앞으로 당겨 점유를 bound한다(아래 append 게이트가
-                        // pending을, 여기가 prefix를 막아 합쳐서 ~2×response_buffer_capacity 이내). dest<src라 copyForwards가 안전.
-                        const remaining = out_buf.items.len - out_head;
-                        std.mem.copyForwards(u8, out_buf.items[0..remaining], out_buf.items[out_head..]);
-                        out_buf.items.len = remaining;
-                        out_head = 0;
-                    }
-                } else if (self.write_queue) |wq| {
-                    const n = wq.drainChunk(&writebuf);
-                    if (n > 0) {
-                        const written = self.session.writeInputNonBlocking(writebuf[0..n]) catch |err| {
-                            if (err != error.SessionClosed) self.pushTerminationForIoError(@errorName(err));
-                            return;
-                        };
-                        wq.consume(written); // 실제 쓴 만큼만 head 전진(부분 write 잔량은 다음 poll)
-                    }
-                }
-            }
-            // 명령 단계(docs/io-render-threading.md §9 P3-2): 메인이 위임한 코어 mutate(IME 등)를 락 아래 적용한다.
-            // PTY I/O와 무관(POLLOUT 불요) — 메인 enqueue 시 signalWrite로 깨어 여기서 비운다. 출력 core.write와
-            // 같은 락·같은 스레드라 단일 mutator가 보존된다(§9.3). 응답 생성 명령(리포팅 — P3-3)은 outbound로 적재한다.
+            // 명령 단계(docs/io-render-threading.md §9 P3-2): prior input fence에 도달한 명령만 적용한다.
+            // 이 단계를 poll/write보다 먼저 두면 focus/config가 만든 응답은 같은 fence 뒤 suffix input보다 먼저 나간다.
             if (self.command_queue) |cq| {
+                const consumed_input = if (self.write_queue) |wq| wq.consumedTotal() else std.math.maxInt(u64);
                 var applied = false;
-                while (cq.pop()) |entry| {
+                while (cq.popReady(consumed_input)) |entry| {
                     core.owner_dbg.lock(mutex, self.io);
                     core_command.apply(core, entry.cmd);
                     const reply = core.pendingResponse();
@@ -604,10 +637,61 @@ pub const PtyReader = struct {
                     else => return,
                 };
             }
+            const reply_pending = out_head < out_buf.items.len;
+            const main_pending = if (self.write_queue) |wq| wq.hasPending() else false;
+            const ready = self.session.waitIo(reply_pending or main_pending) catch |err| {
+                if (err != error.SessionClosed and err != error.NoMoreEvents) {
+                    self.pushProcessingTerminationForIoError(@errorName(err));
+                }
+                return;
+            };
+            // write 단계(비차단, read 무정지): 응답을 먼저 비운다(query 응답 지연 최소화), 응답이 다 나가면
+            // 메인 입력을 한 청크 drain한다. 한 iteration에 한 소스/한 청크 — 다음 poll에서 이어 비운다.
+            if (ready.writable) {
+                // EAGAIN(버퍼 참)은 writeInputNonBlocking이 0으로 돌려준다(에러 아님 — 다음 poll에 이어 씀).
+                // catch로 잡히는 건 치명적 write 실패(EIO 등)/SessionClosed뿐 — `catch 0`로 삼키면 head가 안 늘어
+                // POLLOUT 스핀(라이브락)·입력 조용한 손실이 되므로, 에러면 reader를 종료한다(read 에러 경로와 동일).
+                if (out_head < out_buf.items.len) {
+                    const written = self.session.writeInputNonBlocking(out_buf.items[out_head..]) catch |err| {
+                        if (err != error.SessionClosed) self.pushProcessingTerminationForIoError(@errorName(err));
+                        return;
+                    };
+                    out_head += written;
+                    if (out_head >= out_buf.items.len) {
+                        out_buf.clearRetainingCapacity();
+                        out_head = 0;
+                    } else if (out_head >= response_buffer_capacity) {
+                        // 부분 drain이 오래 이어지면 out_head(소비된 prefix)만 커지며 items.len이 무한 증가할 수 있다 —
+                        // prefix가 상한만큼 쌓이면 잔여(out_buf[out_head..])를 앞으로 당겨 점유를 bound한다(아래 append 게이트가
+                        // pending을, 여기가 prefix를 막아 합쳐서 ~2×response_buffer_capacity 이내). dest<src라 copyForwards가 안전.
+                        const remaining = out_buf.items.len - out_head;
+                        std.mem.copyForwards(u8, out_buf.items[0..remaining], out_buf.items[out_head..]);
+                        out_buf.items.len = remaining;
+                        out_head = 0;
+                    }
+                } else if (self.write_queue) |wq| {
+                    const consumed = wq.consumedTotal();
+                    const fence_limit: usize = if (self.command_queue) |cq|
+                        if (cq.nextFence()) |fence|
+                            @intCast(@min(fence -| consumed, @as(u64, writebuf.len)))
+                        else
+                            writebuf.len
+                    else
+                        writebuf.len;
+                    const n = wq.drainChunkLimit(&writebuf, fence_limit);
+                    if (n > 0) {
+                        const written = self.session.writeInputNonBlocking(writebuf[0..n]) catch |err| {
+                            if (err != error.SessionClosed) self.pushProcessingTerminationForIoError(@errorName(err));
+                            return;
+                        };
+                        wq.consume(written); // 실제 쓴 만큼만 head 전진(부분 write 잔량은 다음 poll)
+                    }
+                }
+            }
             // read 단계: 출력을 코어에 적용하고 응답을 outbound 버퍼에 적재한다.
             if (ready.readable) {
                 switch (self.session.readChunk(&readbuf) catch |err| {
-                    if (err != error.SessionClosed) self.pushTerminationForIoError(@errorName(err));
+                    if (err != error.SessionClosed) self.pushProcessingTerminationForIoError(@errorName(err));
                     return;
                 }) {
                     .again => {}, // readable/read race — 다음 poll에서 재시도
@@ -635,11 +719,11 @@ pub const PtyReader = struct {
                     },
                     .eof => {
                         const status = self.session.reapAfterEof() catch |err| {
-                            if (err != error.SessionClosed) self.pushTerminationForIoError(@errorName(err));
+                            if (err != error.SessionClosed) self.pushProcessingTerminationForIoError(@errorName(err));
                             return;
                         };
                         if (status) |s| {
-                            self.queue.pushBlocking(.{ .exited = .{
+                            self.queue.pushTerminalReplacingOutputSignal(.{ .exited = .{
                                 .pty_id = self.pty_id,
                                 .status = s,
                             } }) catch return;
@@ -674,6 +758,24 @@ pub const PtyReader = struct {
             } }) catch {};
         } else {
             self.pushReadError(message);
+        }
+    }
+
+    /// processing reader는 큐에 실제 output bytes를 싣지 않고 빈 렌더 신호만 싣는다. 오류 종료도 blocking
+    /// push를 쓰면 포화된 신호 큐에서 reader가 멈춰 outbound queue close defer에 도달하지 못하므로, 빈
+    /// 신호를 검증된 terminal event로 교체하는 전용 경로를 사용한다.
+    fn pushProcessingTerminationForIoError(self: *PtyReader, message: []const u8) void {
+        const reaped = self.session.reapIfExited() catch null;
+        if (reaped) |status| {
+            self.queue.pushTerminalReplacingOutputSignal(.{ .exited = .{
+                .pty_id = self.pty_id,
+                .status = status,
+            } }) catch {};
+        } else {
+            self.queue.pushTerminalReplacingOutputSignal(.{ .read_error = .{
+                .pty_id = self.pty_id,
+                .message = message,
+            } }) catch {};
         }
     }
 };
@@ -747,6 +849,25 @@ test "pty event queue is bounded and reports full without allocating more" {
     const popped = queue.popBlocking().?;
     defer popped.deinit(allocator);
     try std.testing.expectEqual(@as(usize, 0), queue.count());
+}
+
+test "processing terminal event replaces a full coalesced output signal" {
+    var queue = try PtyEventQueue.init(std.testing.io, std.testing.allocator, 1);
+    defer queue.deinit();
+
+    try queue.tryPush(.{ .output = .{ .pty_id = 7, .bytes = &.{} } });
+    try queue.pushTerminalReplacingOutputSignal(.{
+        .exited = .{ .pty_id = 7, .status = .{ .exited = 23 } },
+    });
+
+    const event = queue.popBlocking().?;
+    switch (event) {
+        .exited => |exited| {
+            try std.testing.expectEqual(@as(runtime_mod.PtyId, 7), exited.pty_id);
+            try std.testing.expectEqual(@as(u8, 23), exited.status.exited);
+        },
+        else => return error.TestUnexpectedResult,
+    }
 }
 
 test "pty event queue close stops new pushes and wakes empty consumers" {
@@ -904,6 +1025,33 @@ test "CoreCommandQueue: enqueue→pop preserves FIFO for inline commands" {
 
     try std.testing.expect(q.pop() == null);
     try std.testing.expect(!q.hasPending());
+}
+
+test "PTY input fence preserves prior input then core command then suffix input" {
+    // host-backed focus report는 입력과 별도 큐를 쓰지만 PTY에서 관측되는 순서는 하나여야 한다. 누적 byte fence가
+    // 512B 청크 경계와 무관하게 prefix까지만 drain하고, command 적용 뒤 suffix를 허용하는지 고정한다.
+    var writes = try PtyWriteQueue.init(std.testing.io, std.testing.allocator, 32);
+    defer writes.deinit();
+    var commands = try CoreCommandQueue.init(std.testing.io, std.testing.allocator, 4);
+    defer commands.deinit();
+
+    try writes.enqueueBlocking("ABCD");
+    const fence = writes.enqueuedTotal();
+    try commands.enqueueAfterInput(.{ .report_focus = true }, fence);
+    try writes.enqueueBlocking("EF");
+
+    try std.testing.expect(commands.popReady(writes.consumedTotal()) == null);
+    var buf: [16]u8 = undefined;
+    const prefix_limit: usize = @intCast(commands.nextFence().? - writes.consumedTotal());
+    const prefix_len = writes.drainChunkLimit(&buf, prefix_limit);
+    try std.testing.expectEqualStrings("ABCD", buf[0..prefix_len]);
+    writes.consume(prefix_len);
+
+    const command = commands.popReady(writes.consumedTotal()).?;
+    try std.testing.expect(command.cmd == .report_focus);
+    try std.testing.expect(command.cmd.report_focus);
+    const suffix_len = writes.drainChunk(&buf);
+    try std.testing.expectEqualStrings("EF", buf[0..suffix_len]);
 }
 
 test "CoreCommandQueue: zero capacity 거부 / close 후 enqueue는 QueueClosed" {

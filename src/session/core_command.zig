@@ -4,7 +4,7 @@ const terminal = @import("../terminal.zig");
 /// 메인발 비-PTY 코어 mutate를 I/O 스레드(reader)로 위임하는 명령(docs/io-render-threading.md §9 Phase 3,
 /// (a) 단일책임). runtime·pty_reader·live_pty가 공유하므로 순환 import를 피해 **중립 위치**에 둔다(terminal만
 /// 의존). 큐는 `pty_reader.CoreCommandQueue`, 적용은 `apply`(여기) — reader drain과 non-interactive 직접 폴백이
-/// 같은 적용 로직을 공유한다. 명령 집합은 §9.2를 따라 단계 확장(P3-4 scroll·선택; 리포팅·config 후속).
+/// 같은 적용 로직을 공유한다. 명령 집합은 §9.2를 따라 scroll·선택·리포팅·config까지 단계 확장됐다.
 /// reportMouse 인자 묶음(P3-3 위임). 코어가 적용 시 mouse_tracking을 다시 가드(.none이면 no-op)하므로,
 /// enqueue~apply 사이 트래킹이 꺼져도 안전(메인의 트래킹 읽기는 락 아래 별도).
 pub const MouseReport = struct {
@@ -19,6 +19,15 @@ pub const MouseReport = struct {
 };
 
 pub const CellMetrics = struct { width: u32, height: u32 };
+pub const DefaultColors = struct { foreground: terminal.Rgb, background: terminal.Rgb };
+pub const RuntimeConfig = struct {
+    max_scrollback: usize,
+    ambiguous_wide: bool,
+    emoji_wide: bool,
+    palette: [16]?terminal.Rgb,
+    default_colors: DefaultColors,
+    cell_metrics: ?CellMetrics,
+};
 
 /// 마우스 선택 위치(셀). full (a)(P3-4)에서 선택 코어 mutate는 명령으로 위임하고, read-modify-decide(아래
 /// `select_extend_or_collapse`·`scroll_and_extend`)는 reader가 락 아래 **원자 실행**한다 — 메인은 코어를 안 만진다.
@@ -43,10 +52,12 @@ pub const CoreCommand = union(enum) {
     report_focus: bool, // reportFocus(gained) — P3-3(드묾, latency 무관)
     // P3-3 config(폰트·테마·스크롤백 reload — 값 명령, response 없음):
     set_cell_metrics: CellMetrics,
+    set_default_colors: DefaultColors,
     set_config_palette: [16]?terminal.Rgb,
     set_max_scrollback: usize,
     set_ambiguous_wide: bool, // text.ambiguous-width reload — 라이브 코어의 EAW Ambiguous 폭(이후 putCell부터 반영)
     set_emoji_wide: bool, // text.emoji-width reload — 라이브 코어의 이모지(VS16/키캡) 폭 승격(이후 putCell부터 반영)
+    set_runtime_config: RuntimeConfig, // attach/reconnect bootstrap — 한 queue slot에서 host 권위 config를 함께 적용
     // P3-4 scroll·선택 위임(full (a) — read-modify-decide는 reader가 원자 실행, 메인 코어 mutate 0):
     scroll_to_abs: usize, // scrollToAbs(절대 행) — find 점프
     scroll_to_offset: usize, // 절대 view_offset로 — reader가 **fresh offset에서 delta 계산**(스크롤바 드래그: 메인이
@@ -71,10 +82,19 @@ pub fn apply(core: *terminal.TerminalCore, cmd: CoreCommand) void {
         .report_mouse => |m| core.reportMouse(m.button, m.col, m.row, m.x_px, m.y_px, m.pressed, m.motion, m.mods),
         .report_focus => |gained| core.reportFocus(gained),
         .set_cell_metrics => |cm| core.setCellMetrics(cm.width, cm.height),
+        .set_default_colors => |colors| core.setDefaultColors(colors.foreground, colors.background),
         .set_config_palette => |palette| core.setConfigPalette(palette),
         .set_max_scrollback => |lines| core.setMaxScrollback(lines),
         .set_ambiguous_wide => |v| core.ambiguous_wide = v,
         .set_emoji_wide => |v| core.emoji_wide = v,
+        .set_runtime_config => |config| {
+            core.setMaxScrollback(config.max_scrollback);
+            core.ambiguous_wide = config.ambiguous_wide;
+            core.emoji_wide = config.emoji_wide;
+            core.setConfigPalette(config.palette);
+            core.setDefaultColors(config.default_colors.foreground, config.default_colors.background);
+            if (config.cell_metrics) |metrics| core.setCellMetrics(metrics.width, metrics.height);
+        },
         .scroll_to_abs => |abs| core.scrollToAbs(abs),
         .scroll_to_offset => |target| {
             // 적용 시점의 fresh view_offset에서 delta를 구해 절대 위치로 — 연속 스크롤바 드래그가 double-count로 어긋나지 않게.
@@ -138,6 +158,10 @@ test "core_command.apply: 각 명령이 코어를 올바르게 mutate (위임 �
     apply(&core, .{ .set_emoji_wide = true });
     try std.testing.expect(core.emoji_wide);
     apply(&core, .{ .set_cell_metrics = .{ .width = 8, .height = 16 } });
+    apply(&core, .{ .set_default_colors = .{
+        .foreground = .{ .r = 0x11, .g = 0x22, .b = 0x33 },
+        .background = .{ .r = 0x44, .g = 0x55, .b = 0x66 },
+    } });
     var palette: [16]?terminal.Rgb = .{null} ** 16;
     palette[1] = .{ .r = 10, .g = 20, .b = 30 };
     apply(&core, .{ .set_config_palette = palette });

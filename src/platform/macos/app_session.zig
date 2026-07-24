@@ -2650,6 +2650,11 @@ pub const AppSession = struct {
     // Cmd+hover 중인 URL 시작 셀의 절대 좌표(밑줄 렌더용). 뷰포트가 아니라 절대 좌표라 스크롤/출력
     // 으로 내용이 움직여도 따라간다(매 frame hoverLinkSpan이 현재 뷰포트로 클립).
     hover_url_anchor: ?terminal.SelectionPoint = null,
+    // 원격(host-backed) surface의 Cmd+hover 위치(**뷰포트 상대 셀**). 원격은 client core가 빈 placeholder라 절대
+    // 좌표 anchor를 만들 수 없고, host가 실어 준 뷰포트 상대 span 목록(RenderSnapshot.links)에서 매 frame 다시
+    // 조회한다 — 화면이 스크롤·갱신되면 host가 보낸 새 목록으로 자연히 갱신된다(로컬의 "anchor로 재계산"과 동형).
+    // docs/link-detection.md §원격(host-backed) 세션.
+    hover_remote_cell: ?terminal.SelectionPoint = null,
     // 현재 선택이 down(1) 드래그로 시작했는지. 더블/트리플클릭(4/5) 선택은 직후의 up(3)이
     // "이동 없는 클릭 -> 해제" 판정을 타면 안 되므로 이 플래그로 구분한다.
     mouse_drag_selecting: bool = false,
@@ -20977,41 +20982,76 @@ pub const AppSession = struct {
             };
         }
         // 터미널 영역: (config 수식키)+hover URL이면 link(pointingHand), 아니면 text(iBeam).
-        var next: ?terminal.SelectionPoint = null;
+        var next: ?terminal.SelectionPoint = null; // 로컬: 링크 시작 셀의 **절대** 좌표
+        var next_remote: ?terminal.SelectionPoint = null; // 원격: hover 중인 **뷰포트** 셀
         if (self.urlModifierHeld(mods)) {
             if (self.pxToCell(x_px, y_px)) |cell| {
                 const s = self.activeSurface();
-                // URL이면 그 시작 셀의 절대 좌표를 저장한다(뷰포트 좌표가 아님) — 스크롤/출력으로
-                // 내용이 움직여도 밑줄이 내용을 따라가고, 좁아진 폭에서도 매 frame 뷰포트로 다시
-                // 클립(아래 hoverLinkSpan)되므로 stale·OOB가 안 생긴다. 분류(wordIsUrl)가 스크롤백을 읽으므로
-                // 락 아래에서 한다 — urlAt 클릭 경로와 대칭(reader의 evict/realloc race 방지). hover는 매
-                // mouse-move라 클릭보다 빈번해 노출이 더 크다(focusedTermCwd/copyText와 같은 규율).
+                // 분류(로컬 wordIsUrl / 원격 링크 목록 조회)가 화면·스크롤백을 읽으므로 락 아래에서 한다 —
+                // urlAt 클릭 경로와 대칭(reader의 evict/realloc race 방지). hover는 매 mouse-move라 클릭보다
+                // 빈번해 노출이 더 크다(focusedTermCwd/copyText와 같은 규율). 원격이면 lockCore가 화면 소스의
+                // 락을 잡는다(Surface.lockCore가 갈라 준다).
                 s.lockCore(self.io);
-                const anchor = s.core.urlAnchorAt(cell.row, cell.col, self.linkScopesFromConfig());
-                s.unlockCore(self.io);
-                if (anchor) |a| next = a;
+                defer s.unlockCore(self.io);
+                if (s.remote != null) {
+                    // host-backed: client core는 빈 placeholder라 스스로 분류할 수 없다. host가 실어 준 목록에
+                    // 이 셀을 덮는 링크가 있으면 hover로 친다(docs/link-detection.md §원격(host-backed) 세션).
+                    if (self.remoteLinkSpanAt(s, cell.row, cell.col) != null) next_remote = .{ .row = cell.row, .col = cell.col };
+                } else {
+                    // 로컬: URL이면 그 시작 셀의 절대 좌표를 저장한다(뷰포트 좌표가 아님) — 스크롤/출력으로
+                    // 내용이 움직여도 밑줄이 내용을 따라가고, 좁아진 폭에서도 매 frame 뷰포트로 다시
+                    // 클립(아래 hoverLinkSpan)되므로 stale·OOB가 안 생긴다.
+                    if (s.core.urlAnchorAt(cell.row, cell.col, self.linkScopesFromConfig())) |a| next = a;
+                }
             }
         }
-        const changed = !pointEql(self.hover_url_anchor, next);
+        const changed = !pointEql(self.hover_url_anchor, next) or !pointEql(self.hover_remote_cell, next_remote);
         self.hover_url_anchor = next;
+        self.hover_remote_cell = next_remote;
         if (changed) self.metal_dirty = true; // 밑줄이 생기거나 사라지면 다시 그린다
-        return if (next != null) .link else .text;
+        return if (next != null or next_remote != null) .link else .text;
+    }
+
+    /// 원격(host-backed) 화면에서 뷰포트 셀 (row,col)을 덮는 링크의 밑줄 범위(없으면 null).
+    /// host가 최대 집합으로 계산해 보낸 목록을 client의 `input.link-detection`으로 거른다 — "host 해석 / client 정책"
+    /// 분리(docs/link-detection.md §원격(host-backed) 세션). OSC 8(scope=osc8)은 프리셋과 무관하게 항상 통과한다.
+    /// **호출자가 `lockCore`를 보유해야 한다** — 반환 span은 값 복사지만 순회하는 `links` 슬라이스가 화면 소스를 alias한다.
+    fn remoteLinkSpanAt(self: *const AppSession, surface: *maru.session.Surface, row: usize, col: u16) ?terminal.SelectionSpan {
+        const scopes = self.linkScopesFromConfig();
+        for (surface.renderSnapshot().links) |link| {
+            if (!link.scope.enabledIn(scopes)) continue;
+            const s = link.span.start;
+            const e = link.span.end;
+            if (row < s.row or row > e.row) continue;
+            if (row == s.row and col < s.col) continue;
+            if (row == e.row and col > e.col) continue;
+            return link.span;
+        }
+        return null;
     }
 
     /// 떠 있던 Cmd+hover URL 밑줄 anchor를 해제하고 변경 시 redraw 표시. hoverCursor의 여러 분기(사이드바/탭
     /// 바/divider)가 터미널 URL이 아닌 영역으로 갈 때 공유한다.
     fn clearHoverUrlAnchor(self: *AppSession) void {
-        if (self.hover_url_anchor != null) {
+        if (self.hover_url_anchor != null or self.hover_remote_cell != null) {
             self.hover_url_anchor = null;
+            self.hover_remote_cell = null;
             self.metal_dirty = true;
         }
     }
 
-    /// hover URL의 현재 뷰포트 밑줄 범위. 매 frame 절대 좌표 anchor에서 다시 계산해 클립하므로
-    /// 스크롤·출력·resize 후에도 항상 현재 폭/위치에 맞는다(stale 좌표 OOB 차단).
+    /// hover URL의 현재 뷰포트 밑줄 범위. 매 frame 다시 계산하므로 스크롤·출력·resize 후에도 항상 현재
+    /// 폭/위치에 맞는다(stale 좌표 OOB 차단). 로컬은 절대 좌표 anchor에서 클립하고, 원격은 host가 실어 준
+    /// 목록에서 hover 셀을 덮는 span을 다시 찾는다(둘 다 "저장한 위치 + 최신 화면"으로 재계산 — 같은 규율).
+    /// 호출자가 활성 surface의 `lockCore`를 보유한 상태로 부른다(tick의 cell_colors 빌드 — 재진입 금지).
     pub fn hoverLinkSpan(self: *AppSession) ?terminal.SelectionSpan {
+        const s = self.activeSurface();
+        if (s.remote != null) {
+            const cell = self.hover_remote_cell orelse return null;
+            return self.remoteLinkSpanAt(s, cell.row, cell.col);
+        }
         const anchor = self.hover_url_anchor orelse return null;
-        return self.activeSurface().core.urlSpanAtAbs(anchor);
+        return s.core.urlSpanAtAbs(anchor);
     }
 
     fn pointEql(a: ?terminal.SelectionPoint, b: ?terminal.SelectionPoint) bool {
@@ -55051,4 +55091,135 @@ test "FP9 merge remaps destination focus one-shots when dirty source replaces cl
     try std.testing.expectEqual(dock_panel.Mode.source_edit, mode_only.mode);
     try std.testing.expect(!dst.completePendingDockFocus(source_surface));
     try std.testing.expect(dst.focus_owner == .dock_surface and dst.focus_owner.dock_surface == newer_surface);
+}
+
+// host-backed(원격) Term의 Cmd+hover 회귀 가드. 이전에는 hoverCursor가 `activeSurface().core`를 직접 분류했는데,
+// 원격 surface의 그 core는 **빈 placeholder**라(화면은 host가 소유) 어떤 링크도 잡히지 않았다 — 밑줄도 링크 커서도
+// 무동작. 이제 host가 해석해 실어 준 RenderSnapshot.links를 조회한다(docs/link-detection.md §원격(host-backed) 세션).
+// 이 테스트는 그 조회 경로와 client 정책 필터(`input.link-detection`)를 함께 고정한다.
+const FakeLinkScreen = struct {
+    snap: terminal.RenderSnapshot,
+
+    fn render(ctx: *anyopaque) terminal.RenderSnapshot {
+        const self: *FakeLinkScreen = @ptrCast(@alignCast(ctx));
+        return self.snap;
+    }
+    // 이 fake는 host 연결 없이 화면 소스 계약만 흉내 낸다 — 단일 스레드 테스트라 락은 no-op으로 충분하다.
+    fn lockNoop(_: *anyopaque, _: std.Io) void {}
+    fn unlockNoop(_: *anyopaque, _: std.Io) void {}
+
+    const vtable: maru.session.surface.ScreenSource.VTable = .{
+        .render_snapshot = render,
+        .lock = lockNoop,
+        .unlock = unlockNoop,
+    };
+};
+
+test "host-backed hover: host가 실어 준 링크로 밑줄과 링크 커서가 산다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 6,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    session.window_padding_px = .{};
+    _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
+
+    // host가 해석한 링크 3종(자동 감지 web / 자동 감지 경로 / OSC 8 명시). client core는 비어 있는 상태 그대로다.
+    var links = [_]terminal.ViewportLink{
+        .{ .span = .{ .start = .{ .row = 0, .col = 5 }, .end = .{ .row = 0, .col = 28 }, .block = false }, .kind = .url, .scope = .web },
+        .{ .span = .{ .start = .{ .row = 1, .col = 0 }, .end = .{ .row = 1, .col = 9 }, .block = false }, .kind = .file_path, .scope = .bare_relative },
+        .{ .span = .{ .start = .{ .row = 2, .col = 0 }, .end = .{ .row = 2, .col = 3 }, .block = false }, .kind = .url, .scope = .osc8 },
+    };
+    var fake = FakeLinkScreen{ .snap = .{ .size = .{ .cols = 40, .rows = 6 }, .links = &links } };
+    const surface = session.activeSurface();
+    surface.remote = .{ .ctx = &fake, .vtable = &FakeLinkScreen.vtable };
+    defer surface.remote = null; // Surface.deinit은 remote를 안 건드린다(소유는 주입한 쪽).
+
+    const rect = session.active_pane_rect;
+    const cw: f64 = @floatFromInt(session.cell_width_px);
+    const ch: f64 = @floatFromInt(session.cell_height_px);
+    const pxOf = struct {
+        fn run(base: anytype, size: f64, index: f64) f64 {
+            return @as(f64, @floatFromInt(base)) + (index + 0.5) * size;
+        }
+    }.run;
+
+    // 링크 위 + 수식키(Cmd=32) → pointingHand + 밑줄 span. 이게 회귀 전에는 전부 null이었다.
+    const on_url_x = pxOf(rect.x, cw, 10);
+    const row0_y = pxOf(rect.y, ch, 0);
+    try std.testing.expectEqual(CursorKind.link, session.hoverCursor(on_url_x, row0_y, 32));
+    const span = session.hoverLinkSpan() orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u16, 5), span.start.col);
+    try std.testing.expectEqual(@as(u16, 28), span.end.col);
+
+    // 같은 행이라도 span 밖(col 2)이면 링크가 아니다 — 범위 판정이 실제로 걸리는지.
+    try std.testing.expectEqual(CursorKind.text, session.hoverCursor(pxOf(rect.x, cw, 2), row0_y, 32));
+    try std.testing.expect(session.hoverLinkSpan() == null);
+
+    // 수식키가 없으면 밑줄을 띄우지 않는다(로컬과 같은 게이트 — urlModifierHeld 단일 판정).
+    try std.testing.expectEqual(CursorKind.text, session.hoverCursor(on_url_x, row0_y, 0));
+    try std.testing.expect(session.hoverLinkSpan() == null);
+}
+
+// host는 client config를 모르므로 **최대 집합**으로 계산해 보내고, 무엇을 그릴지는 client가 정한다. 이 필터가
+// 없으면 `input.link-detection = web`인 사용자에게 파일 경로 밑줄이 뜬다(로컬과 동작이 갈림).
+test "host-backed hover: client가 link-detection 프리셋으로 host 목록을 거른다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 6,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    session.window_padding_px = .{};
+    _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
+
+    var links = [_]terminal.ViewportLink{
+        .{ .span = .{ .start = .{ .row = 0, .col = 0 }, .end = .{ .row = 0, .col = 9 }, .block = false }, .kind = .url, .scope = .web },
+        .{ .span = .{ .start = .{ .row = 1, .col = 0 }, .end = .{ .row = 1, .col = 9 }, .block = false }, .kind = .file_path, .scope = .bare_relative },
+        .{ .span = .{ .start = .{ .row = 2, .col = 0 }, .end = .{ .row = 2, .col = 3 }, .block = false }, .kind = .url, .scope = .osc8 },
+    };
+    var fake = FakeLinkScreen{ .snap = .{ .size = .{ .cols = 40, .rows = 6 }, .links = &links } };
+    const surface = session.activeSurface();
+    surface.remote = .{ .ctx = &fake, .vtable = &FakeLinkScreen.vtable };
+    defer surface.remote = null;
+
+    const rect = session.active_pane_rect;
+    const cw: f64 = @floatFromInt(session.cell_width_px);
+    const ch: f64 = @floatFromInt(session.cell_height_px);
+    const x = @as(f64, @floatFromInt(rect.x)) + 1.5 * cw;
+    const rowY = struct {
+        fn run(base: anytype, size: f64, index: f64) f64 {
+            return @as(f64, @floatFromInt(base)) + (index + 0.5) * size;
+        }
+    }.run;
+
+    // full(기본): 셋 다 링크로 본다.
+    try std.testing.expectEqual(CursorKind.link, session.hoverCursor(x, rowY(rect.y, ch, 0), 32));
+    try std.testing.expectEqual(CursorKind.link, session.hoverCursor(x, rowY(rect.y, ch, 1), 32));
+    try std.testing.expectEqual(CursorKind.link, session.hoverCursor(x, rowY(rect.y, ch, 2), 32));
+
+    // web: http(s)만. 파일 경로는 빠지고, OSC 8 명시 링크는 프리셋과 무관하게 남는다.
+    session.loaded_config.config.input.link_detection = .web;
+    try std.testing.expectEqual(CursorKind.link, session.hoverCursor(x, rowY(rect.y, ch, 0), 32));
+    try std.testing.expectEqual(CursorKind.text, session.hoverCursor(x, rowY(rect.y, ch, 1), 32));
+    try std.testing.expectEqual(CursorKind.link, session.hoverCursor(x, rowY(rect.y, ch, 2), 32));
+
+    // osc8-only: 자동 감지는 전부 꺼지고 명시 링크만 남는다.
+    session.loaded_config.config.input.link_detection = .osc8_only;
+    try std.testing.expectEqual(CursorKind.text, session.hoverCursor(x, rowY(rect.y, ch, 0), 32));
+    try std.testing.expectEqual(CursorKind.text, session.hoverCursor(x, rowY(rect.y, ch, 1), 32));
+    try std.testing.expectEqual(CursorKind.link, session.hoverCursor(x, rowY(rect.y, ch, 2), 32));
 }

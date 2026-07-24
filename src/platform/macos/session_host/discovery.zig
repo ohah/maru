@@ -80,6 +80,11 @@ pub fn lockPathIn(buf: []u8, dir: []const u8) error{NoSpaceLeft}![:0]u8 {
     return std.fmt.bufPrintZ(buf, "{s}/control.lock", .{trimTrailingSlash(dir)});
 }
 
+/// host process lifetime 전체와 same-PID exec를 관통하는 배타적 owner lease.
+pub fn ownerLockPathIn(buf: []u8, dir: []const u8) error{NoSpaceLeft}![:0]u8 {
+    return std.fmt.bufPrintZ(buf, "{s}/owner.lock", .{trimTrailingSlash(dir)});
+}
+
 fn trimTrailingSlash(base: []const u8) []const u8 {
     if (base.len > 1 and base[base.len - 1] == '/') return base[0 .. base.len - 1];
     return base;
@@ -136,6 +141,8 @@ test "discovery: paths are under session-host dir and separate from control-plan
     try testing.expectEqualStrings("/tmp/cache/session-host/control.sock", try socketPathIn(&sp_buf, dir));
     var lp_buf: [256]u8 = undefined;
     try testing.expectEqualStrings("/tmp/cache/session-host/control.lock", try lockPathIn(&lp_buf, dir));
+    var op_buf: [256]u8 = undefined;
+    try testing.expectEqualStrings("/tmp/cache/session-host/owner.lock", try ownerLockPathIn(&op_buf, dir));
     // trailing slash 정규화.
     var d2: [256]u8 = undefined;
     try testing.expectEqualStrings("/tmp/session-host", try sessionHostDirPath(&d2, "/tmp/"));

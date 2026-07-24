@@ -5,7 +5,7 @@
 [영속 터미널 세션 호스트](persistent-session-host.md), workspace의 `runtime-handle` 저장은
 [Workspace Restore](workspace-restore.md), 화면 전송 codec은 `maru.screen-stream` 계약을 따른다.
 
-> **상태: U0~U2 구현·자동 검증 완료, U3 same-PID exec 기반 구현 중. 제품 업그레이드는 아직 비활성이다.**
+> **상태: U0~U2 구현·자동 검증 완료, U3 same-PID exec·rollback 기반 구현 중. 제품 업그레이드는 아직 비활성이다.**
 > 현재 살아 있는 host가 `host_exec_upgrade_v1`을 광고하지 않으면 새 앱은 그 host를 실행 중 교체할 수 없다.
 > 이 경우 지원하는 N-1 MRSH adapter로 attach해 기존 runtime을 그대로 쓰거나, attachment가 모두 끝난 뒤 구 host를
 > 계속 drain한다. **attachment가 0이어도 runtime이 하나라도 살아 있으면 구 host를 종료하지 않으며, runtime count가
@@ -378,9 +378,13 @@ absolute identity만** 기록하고 target의 page layout을 새로 만든다. s
   또는 rollback exec로 돌아가는지 검증한다. loader/entrypoint 이전 crash는 host crash 비목표로 별도 표시한다.
 - N-1→N 성공 뒤 rollback self-image가 N으로 회전하고, 이어진 N→N+1 controlled 실패가 N image로 rollback되는
   2회 연속 upgrade E2E를 포함한다. promotion 실패는 capability 철회와 runtime 무변경을 단언한다.
-- **구현 중:** listener/accepted socket CLOEXEC, exec 직전 reserved PTY slot만 non-CLOEXEC로 만드는 exact allowlist,
-  exec 실패 slot rollback, child를 signal/reap하지 않는 `PreparedAdoption`, commit 전 PTY를 전혀 만지지 않는 reader
-  start gate까지 구현됐다. 실제 frozen-old→new exec/rollback E2E와 owner lease/staged image가 남아 있다.
+- **구현 중:** listener/accepted socket CLOEXEC, exec 직전 reserved PTY/state/owner slot만 non-CLOEXEC로 만드는 exact
+  allowlist, exec 실패 slot rollback, child를 signal/reap하지 않는 `PreparedAdoption`, commit 전 PTY를 전혀 만지지
+  않는 reader start gate를 구현했다. 별도 old/new process fixture에서 same-PID exec, 독립 primary/backup handoff,
+  실제 target decode/adopt 실패의 공통 rollback handler, PTY dev/inode/rdev 교체 거부, host/child/runtime identity,
+  post-upgrade I/O와 exit exact-once, lifetime owner lease를 검증한다. 다만 old fixture가 현재 native 모듈과 함께
+  재컴파일되므로 frozen N-1 증거는 아니며, staged self-image/target preflight·2회 연속 image rotation·promotion 실패
+  capability 철회·제품 daemon graph commit은 남아 있다.
 
 ### U4 — 다중 runtime과 N-1 adapter
 

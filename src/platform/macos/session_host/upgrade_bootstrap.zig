@@ -528,6 +528,18 @@ test "target and rollback bootstrap validate exact zero-runtime inherited proces
         "product-target",
     );
     defer product_target.deinit();
+    try std.testing.expect(!std.mem.eql(
+        u8,
+        &product_target.identity.sha256,
+        &target_identity.sha256,
+    ));
+    const product_digest_hex = std.fmt.bytesToHex(product_target.identity.sha256, .lower);
+    const product_build_id = try std.fmt.allocPrint(
+        std.testing.allocator,
+        "sha256:{s}",
+        .{&product_digest_hex},
+    );
+    defer std.testing.allocator.free(product_build_id);
     const product_record = try upgrade_attempt_record.encode(std.testing.allocator, .{
         .host_id = host_id,
         .attempt_id = 1,
@@ -536,7 +548,7 @@ test "target and rollback bootstrap validate exact zero-runtime inherited proces
         .rollback_budget = 1,
         .request_path = product,
         .staged_path = product_target.path,
-        .build_id = build_id,
+        .build_id = product_build_id,
         .sha256 = product_target.identity.sha256,
         .dev = product_target.identity.dev,
         .ino = product_target.identity.ino,
@@ -567,7 +579,7 @@ test "target and rollback bootstrap validate exact zero-runtime inherited proces
             .runtime_ids = &.{},
             .request_path = product,
             .staged_path = product_target.path,
-            .build_id = build_id,
+            .build_id = product_build_id,
             .sha256 = product_target.identity.sha256,
             .dev = product_target.identity.dev,
             .ino = product_target.identity.ino,

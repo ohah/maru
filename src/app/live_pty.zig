@@ -305,8 +305,22 @@ pub const LivePtySession = struct {
         try self.reader.resumeAfterPause();
     }
 
-    pub fn cancelUpgradePause(self: *LivePtySession) void {
-        if (!self.reader_finished) self.reader.cancelPause();
+    pub fn prepareResumeAfterUpgradePause(self: *LivePtySession) !void {
+        if (self.reader_finished) return error.ReaderFinished;
+        try self.reader.prepareResumeAfterPause();
+    }
+
+    pub fn releasePreparedUpgradeResume(self: *LivePtySession) void {
+        self.reader.releasePreparedResume();
+    }
+
+    pub fn discardPreparedUpgradeResume(self: *LivePtySession) void {
+        self.reader.discardPreparedResume();
+    }
+
+    pub fn cancelUpgradePause(self: *LivePtySession) bool {
+        if (self.reader_finished) return false;
+        return self.reader.cancelPause();
     }
 
     pub fn upgradeEligible(self: *LivePtySession) bool {

@@ -11,6 +11,7 @@ const posix = std.posix;
 const handoff = @import("handoff_codec.zig");
 const attempt_record = @import("upgrade_attempt_record.zig");
 const limits = @import("upgrade_limits.zig");
+const upgrade_deadline = @import("upgrade_deadline.zig");
 extern "c" fn renameatx_np(
     from_dir_fd: c_int,
     from: [*:0]const u8,
@@ -66,26 +67,14 @@ pub const Pair = struct {
     }
 };
 
-pub const Deadline = struct {
-    ctx: *anyopaque,
-    expired: *const fn (ctx: *anyopaque) bool,
-};
-
 pub const CommitBudget = struct {
     max_bytes: usize = limits.max_handoff_commit_bytes,
-    deadline: Deadline,
+    deadline: upgrade_deadline.Deadline,
 
     pub fn testing() CommitBudget {
         if (!builtin.is_test) @compileError("unbounded handoff budget is test-only");
         return .{
-            .deadline = .{
-                .ctx = @ptrFromInt(1),
-                .expired = struct {
-                    fn never(_: *anyopaque) bool {
-                        return false;
-                    }
-                }.never,
-            },
+            .deadline = .testingNever(),
         };
     }
 };
@@ -438,7 +427,7 @@ fn readbackEqual(fd: c.fd_t, expected: []const u8, budget: CommitBudget) Error!v
 }
 
 fn checkDeadline(budget: CommitBudget) Error!void {
-    if (budget.deadline.expired(budget.deadline.ctx)) return error.DeadlineExceeded;
+    if (budget.deadline.expired()) return error.DeadlineExceeded;
 }
 
 fn testAttemptRecord(allocator: std.mem.Allocator, host_id: u128, attempt_id: u128) ![]u8 {
@@ -642,11 +631,15 @@ test "handoff store rejects malformed or divergent state and removes attempt res
     const Expirer = struct {
         remaining: usize,
 
-        fn expired(ctx: *anyopaque) bool {
+        fn now(ctx: *anyopaque) i128 {
             const self: *@This() = @ptrCast(@alignCast(ctx));
-            if (self.remaining == 0) return true;
+            if (self.remaining == 0) return 1;
             self.remaining -= 1;
-            return false;
+            return 0;
+        }
+
+        fn deadline(self: *@This()) upgrade_deadline.Deadline {
+            return .fromInjected(.{ .ctx = self, .now_ns = now }, 1);
         }
     };
     var expirer: Expirer = .{ .remaining = 3 };
@@ -657,7 +650,7 @@ test "handoff store rejects malformed or divergent state and removes attempt res
             dir,
             testExpected(0xBB, 2, 5),
             bytes,
-            .{ .deadline = .{ .ctx = &expirer, .expired = Expirer.expired } },
+            .{ .deadline = expirer.deadline() },
         ),
     );
     var final_expirer: Expirer = .{ .remaining = 17 };
@@ -668,7 +661,7 @@ test "handoff store rejects malformed or divergent state and removes attempt res
             dir,
             testExpected(0xBB, 2, 5),
             bytes,
-            .{ .deadline = .{ .ctx = &final_expirer, .expired = Expirer.expired } },
+            .{ .deadline = final_expirer.deadline() },
         ),
     );
     var attempt_buf: [256]u8 = undefined;

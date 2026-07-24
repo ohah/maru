@@ -130,7 +130,8 @@ FP11d 표 gate는 네 가지 outer-pipe 형태, data row가 있거나 없는 pla
 ### Session host 실행 중 업그레이드 gate
 
 [Session host 실행 중 업그레이드](session-host-upgrade.md)는 현재 U0 gate를 통과했고 U1 codec·U2 quiesce의 핵심,
-U3 exec/rollback fixture, U4 typed-connect/host-pool 기반과 U5 target/attempt authority·durable store component를
+U3 exec/rollback fixture, U4 typed-connect/host-pool 기반과 U5 target/attempt authority·durable store·비활성
+old-side coordinator component를
 구현했지만 제품 daemon coordinator와 signed update gate는 없어 기능으로 활성화되지 않았다. 단계별
 증거 수준을 섞지 않는다.
 
@@ -141,7 +142,7 @@ U3 exec/rollback fixture, U4 typed-connect/host-pool 기반과 U5 target/attempt
 | U2 quiesce | admission close, input/core-command/response fence flush, reader iteration barrier, cooperative deadline budget·continuous output 뒤 원상 재개 | 같은 process quiesce/resume만으로 binary 교체를 증명하지 않는다. blocking syscall 중 실제 pause wall time의 절대 상한은 주장하지 않는다 |
 | U3 exec | frozen old test binary→new test binary, host/child PID·host/runtime ID 불변, post-upgrade input/output, exit status exact-once, 전 pre-commit failpoint rollback | unit fake process나 current binary 양면 실행만으로 N-1 호환을 증명하지 않는다 |
 | U4 adapter | current GUI→frozen N-1 MRSH adapter→upgrade→current attach, multi-runtime all-or-none, busy attachment side-by-side fallback | fixture-only adapter를 실제 구 binary 호환으로 부르지 않는다 |
-| U5 제품 | component: same-release codesign target, checksummed attempt ledger, 64 MiB two-copy preallocation/cooperative deadline/unlink-before-exec, exact host/live-graph/target binding. 제품 종료 gate: signed old app host runtime 생성→GUI Quit→new signed app 재실행→자동 upgrade→원 runtime attach와 soak artifact | component/unit green, blocking syscall wall-time 상한, fixture rollback, 사람 눈으로 화면이 비슷한지만 확인하는 테스트, 새 shell spawn |
+| U5 제품 | component: same-release codesign target, checksummed attempt ledger, 64 MiB two-copy preallocation, shared absolute cooperative deadline, one-graph capture, 259-slot reservation, unexpected inherited-fd 거부, inactive old-side callback/exec-return rollback, typed HostAuthority CAS와 bounded rollback attempt, prepared reader resume 뒤 authority-ready/release ordering, typed `runtime_resume_failed`, rollback 뒤 실제 PTY output→screen snapshot 재개, exact host/live-graph/target binding. 제품 종료 gate: signed old app host runtime 생성→GUI Quit→new signed app 재실행→자동 upgrade→원 runtime attach와 soak artifact | capability가 꺼진 callback seam과 1-runtime rollback, reader spawn failure injection·multi-runtime partial-frontier 자동 증거가 없는 상태, quiesce 전 handoff-size/disk/I/O budget admission이 없는 상태, shared-deadline/slot primitive green, blocking syscall wall-time 상한, fixture rollback, 사람 눈으로 화면이 비슷한지만 확인하는 테스트, 새 shell spawn |
 
 모든 단계에서 host crash/SIGKILL 뒤 복구는 비목표지만, upgrade가 시작되기 전·quiesce 중·`exec` syscall 실패·새
 binary pre-commit restore 실패는 자동 failure injection으로 구 host 재개 또는 staged rollback을 증명해야 한다.

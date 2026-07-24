@@ -67,6 +67,11 @@ pub const PreparedSlots = struct {
     }
 
     pub fn assertExactNonCloexec(self: *const PreparedSlots, baseline_allowed: []const c.fd_t) Error!void {
+        for (self.slots[0..self.len], 0..) |slot, index| {
+            if (!isOpen(slot)) return error.SourceClosed;
+            if (try closeOnExec(slot)) return error.SourceNotCloexec;
+            for (self.slots[0..index]) |prior| if (prior == slot) return error.DuplicateSlot;
+        }
         const max_fd = getdtablesize();
         var fd: c.fd_t = 3;
         while (fd < max_fd) : (fd += 1) {
@@ -86,6 +91,91 @@ pub const PreparedSlots = struct {
         }
     }
 };
+
+/// Handoff capture 전에 전체 inherited slot을 CLOEXEC placeholder로 점유해, 이후 store/preflight가 여는 fd와
+/// logical slot이 충돌하지 않게 한다. replace는 예약된 exact slot만 실제 resource로 바꾸며 rollback은 placeholder와
+/// 교체된 slot 모두를 닫는다.
+pub const SlotReservation = struct {
+    slots: [max_slots]c.fd_t = undefined,
+    replaced: [max_slots]bool = .{false} ** max_slots,
+    len: usize = 0,
+    sentinel_fd: c.fd_t = -1,
+
+    pub fn reserve(self: *SlotReservation, requested: []const c.fd_t) Error!void {
+        if (self.len != 0 or self.sentinel_fd >= 0) return error.SlotOccupied;
+        if (requested.len > max_slots) return error.TooManyOpenFds;
+        var highest_slot: c.fd_t = 3;
+        for (requested, 0..) |slot, index| {
+            if (slot < 3) return error.InvalidSlot;
+            for (requested[0..index]) |prior| if (prior == slot) return error.DuplicateSlot;
+            if (isOpen(slot)) return error.SlotOccupied;
+            highest_slot = @max(highest_slot, slot);
+        }
+        var pipe_fds: [2]c.fd_t = undefined;
+        if (c.pipe(&pipe_fds) != 0) return error.DupFailed;
+        self.sentinel_fd = c.fcntl(pipe_fds[0], c.F.DUPFD_CLOEXEC, highest_slot + 1);
+        _ = c.close(pipe_fds[0]);
+        _ = c.close(pipe_fds[1]);
+        if (self.sentinel_fd < 0) return error.DupFailed;
+        errdefer self.rollback();
+        for (requested) |slot| {
+            if (c.dup2(self.sentinel_fd, slot) < 0) return error.DupFailed;
+            self.slots[self.len] = slot;
+            self.len += 1;
+            try setCloseOnExec(slot, true);
+        }
+    }
+
+    pub fn replace(self: *SlotReservation, source: c.fd_t, slot: c.fd_t) Error!void {
+        const index = self.indexOf(slot) orelse return error.InvalidSlot;
+        if (source == slot) return error.InvalidSlot;
+        if (self.replaced[index]) return error.DuplicateSlot;
+        if (!isOpen(source)) return error.SourceClosed;
+        if (!try closeOnExec(source)) return error.SourceNotCloexec;
+        if (!sameFile(self.sentinel_fd, slot) or !try closeOnExec(slot)) return error.SlotOccupied;
+        if (c.dup2(source, slot) < 0) return error.DupFailed;
+        errdefer _ = c.close(slot);
+        try setCloseOnExec(slot, false);
+        self.replaced[index] = true;
+    }
+
+    pub fn allReplaced(self: *const SlotReservation) bool {
+        for (self.replaced[0..self.len]) |replaced| if (!replaced) return false;
+        return true;
+    }
+
+    pub fn assertExactNonCloexec(
+        self: *const SlotReservation,
+        baseline_allowed: []const c.fd_t,
+    ) Error!void {
+        var prepared: PreparedSlots = .{};
+        for (self.slots[0..self.len], self.replaced[0..self.len]) |slot, replaced| {
+            if (!replaced) continue;
+            prepared.slots[prepared.len] = slot;
+            prepared.len += 1;
+        }
+        return prepared.assertExactNonCloexec(baseline_allowed);
+    }
+
+    pub fn rollback(self: *SlotReservation) void {
+        for (self.slots[0..self.len]) |slot| _ = c.close(slot);
+        if (self.sentinel_fd >= 0) _ = c.close(self.sentinel_fd);
+        self.* = .{};
+    }
+
+    fn indexOf(self: *const SlotReservation, slot: c.fd_t) ?usize {
+        for (self.slots[0..self.len], 0..) |candidate, index|
+            if (candidate == slot) return index;
+        return null;
+    }
+};
+
+fn sameFile(a: c.fd_t, b: c.fd_t) bool {
+    var a_stat: posix.Stat = undefined;
+    var b_stat: posix.Stat = undefined;
+    return c.fstat(a, &a_stat) == 0 and c.fstat(b, &b_stat) == 0 and
+        a_stat.dev == b_stat.dev and a_stat.ino == b_stat.ino;
+}
 
 pub fn collectNonCloexec(out: []c.fd_t) Error!usize {
     var count: usize = 0;
@@ -125,6 +215,18 @@ pub fn assertExactOpen(allowed: []const c.fd_t) Error!void {
 fn freeSlot(start: c.fd_t) ?c.fd_t {
     var fd = start;
     while (fd < getdtablesize()) : (fd += 1) if (!isOpen(fd)) return fd;
+    return null;
+}
+
+fn freeRange(start: c.fd_t, count: usize) ?c.fd_t {
+    const max_fd = getdtablesize();
+    var first = start;
+    while (@as(i64, first) + @as(i64, @intCast(count)) <= max_fd) : (first += 1) {
+        var offset: usize = 0;
+        while (offset < count and !isOpen(first + @as(c.fd_t, @intCast(offset)))) : (offset += 1) {}
+        if (offset == count) return first;
+        first += @intCast(offset);
+    }
     return null;
 }
 
@@ -188,4 +290,63 @@ test "exec fd set capacity includes maximum runtime graph and fixed upgrade role
     try std.testing.expectError(error.TooManyOpenFds, prepared.prepare(pipe_fds[0], slot + 1));
     _ = c.close(slot);
     prepared.len = 0;
+}
+
+test "slot reservation pins the full namespace before exact replacement and rolls back all slots" {
+    var sources: [2][2]c.fd_t = undefined;
+    for (&sources) |*pair| {
+        if (c.pipe(pair) != 0) return error.SkipZigTest;
+        try setCloseOnExec(pair[0], true);
+        try setCloseOnExec(pair[1], true);
+    }
+    defer for (&sources) |*pair| {
+        _ = c.close(pair[0]);
+        _ = c.close(pair[1]);
+    };
+    const first = freeSlot(300) orelse return error.SkipZigTest;
+    const second = freeSlot(first + 1) orelse return error.SkipZigTest;
+    const requested = [_]c.fd_t{ first, second };
+    var reservation: SlotReservation = .{};
+    defer reservation.rollback();
+    try reservation.reserve(&requested);
+    try std.testing.expect(try closeOnExec(first));
+    try std.testing.expect(try closeOnExec(second));
+    try std.testing.expectError(error.SlotOccupied, reservation.reserve(&requested));
+    try reservation.replace(sources[0][0], first);
+    try std.testing.expect(!try closeOnExec(first));
+    try std.testing.expect(try closeOnExec(second));
+    try std.testing.expectError(error.DuplicateSlot, reservation.replace(sources[1][0], first));
+    try reservation.replace(sources[1][0], second);
+    try std.testing.expect(reservation.allReplaced());
+    _ = c.close(second);
+    try std.testing.expectError(error.SourceClosed, reservation.assertExactNonCloexec(&.{}));
+
+    reservation.rollback();
+    try std.testing.expect(!isOpen(first));
+    try std.testing.expect(!isOpen(second));
+    try std.testing.expect(isOpen(sources[0][0]));
+    try std.testing.expect(isOpen(sources[1][0]));
+}
+
+test "slot reservation handles the product maximum of 256 PTYs plus state and owner roles" {
+    var source_pipe: [2]c.fd_t = undefined;
+    if (c.pipe(&source_pipe) != 0) return error.SkipZigTest;
+    defer {
+        _ = c.close(source_pipe[0]);
+        _ = c.close(source_pipe[1]);
+    }
+    try setCloseOnExec(source_pipe[0], true);
+    try setCloseOnExec(source_pipe[1], true);
+    const first = freeRange(300, max_slots) orelse return error.SkipZigTest;
+    var requested: [max_slots]c.fd_t = undefined;
+    for (&requested, 0..) |*slot, index| slot.* = first + @as(c.fd_t, @intCast(index));
+    var baseline: [64]c.fd_t = undefined;
+    const baseline_len = try collectNonCloexec(&baseline);
+    var reservation: SlotReservation = .{};
+    defer reservation.rollback();
+    try reservation.reserve(&requested);
+    for (requested) |slot| try reservation.replace(source_pipe[0], slot);
+    try std.testing.expectEqual(max_slots, reservation.len);
+    try std.testing.expect(reservation.allReplaced());
+    try reservation.assertExactNonCloexec(baseline[0..baseline_len]);
 }

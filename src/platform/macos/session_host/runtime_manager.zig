@@ -37,6 +37,7 @@ const InProcessTermBackend = maru.app.InProcessTermBackend;
 const LiveRegistry = maru.app.in_process_term_backend.LiveRegistry;
 const SurfaceRuntime = maru.app.SurfaceRuntime;
 const RuntimeHandle = maru.app.TermRuntimeHandle;
+const LivePtySession = maru.app.LivePtySession;
 const ForegroundProcessName = maru.pty.types.ForegroundProcessName;
 
 // host runtime의 PTY→core 이벤트 큐 용량. 제품 경로(app_session.default_queue_capacity)와 같은 16으로 맞춰
@@ -126,6 +127,7 @@ pub const RuntimeManager = struct {
         RuntimeMissing,
         RuntimeNotLive,
         PauseFailed,
+        ResumeFailed,
         UnsafeFrontier,
     };
 
@@ -150,6 +152,61 @@ pub const RuntimeManager = struct {
             self.allocator.free(self.resources);
             self.allocator.free(self.bytes);
             self.* = undefined;
+        }
+    };
+
+    /// 한 번 열거한 paused graph의 logical views와 실제 PTY fd mapping. Attempt record의 sorted runtime set과
+    /// outer handoff를 이 candidate 하나에서 만들어 두 결과가 서로 다른 registry snapshot을 보지 않게 한다.
+    pub const QuiescedCapture = struct {
+        allocator: std.mem.Allocator,
+        host_id: u128,
+        upgrade_epoch: u64,
+        next_handle: u64,
+        resources: []UpgradeResource,
+        views: []handoff_codec.RuntimeView,
+
+        pub fn deinit(self: *QuiescedCapture) void {
+            self.allocator.free(self.views);
+            self.allocator.free(self.resources);
+            self.* = undefined;
+        }
+
+        pub fn sortedRuntimeIds(
+            self: *const QuiescedCapture,
+            out: *[upgrade_limits.max_runtime_count]u128,
+        ) []const u128 {
+            std.debug.assert(self.resources.len <= out.len);
+            for (self.resources, 0..) |resource, index| out[index] = resource.runtime_id;
+            std.mem.sort(u128, out[0..self.resources.len], {}, std.sort.asc(u128));
+            return out[0..self.resources.len];
+        }
+
+        pub fn encode(self: *const QuiescedCapture, attempt_record: ?[]const u8) handoff_codec.Error![]u8 {
+            if (self.resources.len != self.views.len) return error.InvalidValue;
+            for (self.resources, self.views) |resource, view| {
+                if (resource.runtime_id != view.runtime_id or
+                    resource.inherited_slot != view.fd_slot)
+                    return error.InvalidValue;
+            }
+            return handoff_codec.encodeHost(self.allocator, .{
+                .host_id = self.host_id,
+                .upgrade_epoch = self.upgrade_epoch,
+                .next_handle = self.next_handle,
+                .runtimes = self.views,
+                .attempt_record = attempt_record,
+            });
+        }
+
+        pub fn intoPlan(
+            self: *QuiescedCapture,
+            attempt_record: ?[]const u8,
+        ) handoff_codec.Error!EncodedUpgradePlan {
+            const bytes = try self.encode(attempt_record);
+            const allocator = self.allocator;
+            const resources = self.resources;
+            allocator.free(self.views);
+            self.* = undefined;
+            return .{ .allocator = allocator, .bytes = bytes, .resources = resources };
         }
     };
 
@@ -208,8 +265,7 @@ pub const RuntimeManager = struct {
         _ = self.drainOwnedEvents();
         if (self.host_registry.count() > upgrade_limits.max_runtime_count) return error.TooManyRuntimes;
 
-        const Item = struct { entry: *reg.RuntimeEntry, terminal_slot: *maru.app.live_pty.LiveSurface.Terminal };
-        var items: [upgrade_limits.max_runtime_count]Item = undefined;
+        var items: [upgrade_limits.max_runtime_count]UpgradeItem = undefined;
         var count: usize = 0;
         var it = self.host_registry.entries.valueIterator();
         while (it.next()) |entry_ptr| {
@@ -219,14 +275,16 @@ pub const RuntimeManager = struct {
             const handle: RuntimeHandle = @intFromPtr(slot);
             const terminal_slot = self.backend_impl.terminalForHostLifecycle(handle) orelse return error.RuntimeMissing;
             if (!terminal_slot.live_pty.upgradeEligible()) return error.RuntimeNotLive;
-            items[count] = .{ .entry = entry, .terminal_slot = terminal_slot };
+            items[count] = .{ .handle = handle, .entry = entry, .terminal_slot = terminal_slot };
             count += 1;
         }
 
         var requested: usize = 0;
-        errdefer for (items[0..requested]) |item| item.terminal_slot.live_pty.cancelUpgradePause();
         for (items[0..count]) |item| {
-            item.terminal_slot.live_pty.requestUpgradePause() catch return error.PauseFailed;
+            item.terminal_slot.live_pty.requestUpgradePause() catch {
+                self.resumeUpgradeItems(items[0..requested]) catch return error.ResumeFailed;
+                return error.PauseFailed;
+            };
             requested += 1;
         }
         return count;
@@ -248,15 +306,27 @@ pub const RuntimeManager = struct {
     /// false면 caller가 `resumeUpgradeQuiesce`로 원상복구한다.
     pub fn joinAndValidateUpgradeQuiesce(self: *RuntimeManager) QuiesceError!void {
         if (!self.upgradeQuiesceReached()) return error.PauseFailed;
+        var lives: [upgrade_limits.max_runtime_count]*LivePtySession = undefined;
+        var live_count: usize = 0;
         var it = self.host_registry.entries.valueIterator();
         while (it.next()) |entry_ptr| {
             const entry = entry_ptr.*;
             if (entry.controller != null or entry.observers.items.len != 0) return error.Attached;
             const slot = entry.runtime orelse return error.RuntimeMissing;
             const terminal_slot = self.backend_impl.terminalForHostLifecycle(@intFromPtr(slot)) orelse return error.RuntimeMissing;
-            if (!terminal_slot.live_pty.joinUpgradePause()) return error.UnsafeFrontier;
-            if (!terminal_slot.live_pty.session.upgradeEligible()) return error.RuntimeNotLive;
-            if (terminal_slot.live_pty.session.childExitedWithoutReap() catch return error.UnsafeFrontier)
+            lives[live_count] = &terminal_slot.live_pty;
+            live_count += 1;
+        }
+        // Validation 중간 return으로 뒤 reader가 reached-but-unjoined에 남지 않도록 join은 전량 먼저 수행한다.
+        var all_safe = true;
+        for (lives[0..live_count]) |live|
+            if (!live.joinUpgradePause()) {
+                all_safe = false;
+            };
+        if (!all_safe) return error.UnsafeFrontier;
+        for (lives[0..live_count]) |live| {
+            if (!live.session.upgradeEligible()) return error.RuntimeNotLive;
+            if (live.session.childExitedWithoutReap() catch return error.UnsafeFrontier)
                 return error.RuntimeNotLive;
         }
         // Reader가 마지막 core write 뒤 coalesced output 신호를 enqueue했을 수 있다. 모든 thread가 join된 뒤 owner가
@@ -271,18 +341,95 @@ pub const RuntimeManager = struct {
         }
     }
 
-    /// U2 rollback/resume. reached 전 reader는 request만 취소하고, join된 reader는 같은 graph에 새 thread를 시작한다.
-    pub fn resumeUpgradeQuiesce(self: *RuntimeManager) void {
+    pub const ResumeError = error{ResumeFailed};
+
+    pub const PreparedResume = struct {
+        lives: [upgrade_limits.max_runtime_count]*LivePtySession = undefined,
+        count: usize = 0,
+        active: bool = true,
+
+        pub fn release(self: *PreparedResume) void {
+            std.debug.assert(self.active);
+            for (self.lives[0..self.count]) |live| live.releasePreparedUpgradeResume();
+            self.active = false;
+        }
+
+        pub fn discard(self: *PreparedResume) void {
+            if (!self.active) return;
+            for (self.lives[0..self.count]) |live| live.discardPreparedUpgradeResume();
+            self.active = false;
+        }
+    };
+
+    /// Fully quiesced product rollback용 2-phase resume. Thread 생성만 전량 성공시키고 실제 PTY 접근 release는 caller가
+    /// authority를 ready로 durable commit한 뒤 수행한다.
+    pub fn prepareUpgradeResume(self: *RuntimeManager) ResumeError!PreparedResume {
+        var prepared: PreparedResume = .{};
+        errdefer prepared.discard();
         var it = self.host_registry.entries.valueIterator();
         while (it.next()) |entry_ptr| {
-            const slot = entry_ptr.*.runtime orelse continue;
-            const terminal_slot = self.backend_impl.terminalForHostLifecycle(@intFromPtr(slot)) orelse continue;
+            const slot = entry_ptr.*.runtime orelse return error.ResumeFailed;
+            const terminal_slot = self.backend_impl.terminalForHostLifecycle(@intFromPtr(slot)) orelse
+                return error.ResumeFailed;
+            if (!terminal_slot.live_pty.upgradePausedAndSafe()) return error.ResumeFailed;
+            terminal_slot.live_pty.prepareResumeAfterUpgradePause() catch return error.ResumeFailed;
+            prepared.lives[prepared.count] = &terminal_slot.live_pty;
+            prepared.count += 1;
+        }
+        return prepared;
+    }
+
+    /// U2 rollback/resume. Join된 reader는 전부 prepared-start gate에 먼저 세우고, 모든 thread 생성이 성공한 뒤에만
+    /// 한꺼번에 release한다. 중간 spawn 실패면 준비된 thread를 전부 폐기하고 admission caller가 fail-stop할 수 있게
+    /// error를 돌려준다. 일부 reader만 재개된 상태로 gate를 열지 않는다.
+    pub fn resumeUpgradeQuiesce(self: *RuntimeManager) ResumeError!void {
+        var items: [upgrade_limits.max_runtime_count]UpgradeItem = undefined;
+        const count = self.collectLiveUpgradeItems(&items) catch return error.ResumeFailed;
+        return self.resumeUpgradeItems(items[0..count]);
+    }
+
+    fn resumeUpgradeItems(self: *RuntimeManager, items: []const UpgradeItem) ResumeError!void {
+        _ = self;
+        var prepared: [upgrade_limits.max_runtime_count]*LivePtySession = undefined;
+        var prepared_count: usize = 0;
+        errdefer for (prepared[0..prepared_count]) |live| live.discardPreparedUpgradeResume();
+        for (items) |item| {
+            const terminal_slot = item.terminal_slot;
+            if (!terminal_slot.live_pty.upgradePausedAndSafe()) {
+                if (terminal_slot.live_pty.upgradePauseReached()) {
+                    if (!terminal_slot.live_pty.joinUpgradePause()) return error.ResumeFailed;
+                } else if (!terminal_slot.live_pty.cancelUpgradePause()) {
+                    // cancel CAS보다 reader ACK 또는 terminal publish가 먼저였다. reached면 join 뒤 아래
+                    // prepared-resume으로 합류하고, terminal이면 join 검증이 실패해 fail-stop으로 올린다.
+                    if (!terminal_slot.live_pty.joinUpgradePause()) return error.ResumeFailed;
+                }
+            }
             if (terminal_slot.live_pty.upgradePausedAndSafe()) {
-                terminal_slot.live_pty.resumeAfterUpgradePause() catch {};
-            } else {
-                terminal_slot.live_pty.cancelUpgradePause();
+                terminal_slot.live_pty.prepareResumeAfterUpgradePause() catch return error.ResumeFailed;
+                prepared[prepared_count] = &terminal_slot.live_pty;
+                prepared_count += 1;
             }
         }
+        for (prepared[0..prepared_count]) |live| live.releasePreparedUpgradeResume();
+    }
+
+    fn collectLiveUpgradeItems(
+        self: *RuntimeManager,
+        out: *[upgrade_limits.max_runtime_count]UpgradeItem,
+    ) ResumeError!usize {
+        if (self.host_registry.count() > out.len) return error.ResumeFailed;
+        var count: usize = 0;
+        var it = self.host_registry.entries.valueIterator();
+        while (it.next()) |entry_ptr| {
+            const entry = entry_ptr.*;
+            const slot = entry.runtime orelse return error.ResumeFailed;
+            const handle: RuntimeHandle = @intFromPtr(slot);
+            const terminal_slot = self.backend_impl.terminalForHostLifecycle(handle) orelse
+                return error.ResumeFailed;
+            out[count] = .{ .handle = handle, .entry = entry, .terminal_slot = terminal_slot };
+            count += 1;
+        }
+        return count;
     }
 
     /// U1/U2 bridge: 모든 reader가 join된 safe frontier에서 host/runtime logical DTO를 원자적으로 encode한다.
@@ -320,6 +467,23 @@ pub const RuntimeManager = struct {
         first_fd_slot: u16,
         attempt_record: ?[]const u8,
     ) (QuiesceError || handoff_codec.Error)!EncodedUpgradePlan {
+        var capture = try self.prepareQuiescedCapture(
+            allocator,
+            host_id,
+            upgrade_epoch,
+            first_fd_slot,
+        );
+        errdefer capture.deinit();
+        return capture.intoPlan(attempt_record);
+    }
+
+    pub fn prepareQuiescedCapture(
+        self: *RuntimeManager,
+        allocator: std.mem.Allocator,
+        host_id: u128,
+        upgrade_epoch: u64,
+        first_fd_slot: u16,
+    ) (QuiesceError || handoff_codec.Error)!QuiescedCapture {
         if (!self.upgradeQuiesceReached() or self.host_registry.count() > handoff_codec.max_runtime_count)
             return error.UnsafeFrontier;
         var items: [handoff_codec.max_runtime_count]UpgradeItem = undefined;
@@ -333,7 +497,8 @@ pub const RuntimeManager = struct {
 
         const resources = allocator.alloc(UpgradeResource, count) catch return error.OutOfMemory;
         errdefer allocator.free(resources);
-        var views: [handoff_codec.max_runtime_count]handoff_codec.RuntimeView = undefined;
+        const views = allocator.alloc(handoff_codec.RuntimeView, count) catch return error.OutOfMemory;
+        errdefer allocator.free(views);
         var locked: usize = 0;
         defer for (items[0..locked]) |item| item.terminal_slot.surface.unlockCore(self.io);
         for (items[0..count], 0..) |item, index| {
@@ -363,14 +528,49 @@ pub const RuntimeManager = struct {
                 .core = &item.terminal_slot.surface.core,
             };
         }
-        const bytes = try handoff_codec.encodeHost(allocator, .{
+        return .{
+            .allocator = allocator,
             .host_id = host_id,
             .upgrade_epoch = upgrade_epoch,
             .next_handle = self.next_handle,
-            .runtimes = views[0..count],
-            .attempt_record = attempt_record,
-        });
-        return .{ .allocator = allocator, .bytes = bytes, .resources = resources };
+            .resources = resources,
+            .views = views,
+        };
+    }
+
+    /// Store/preflight 동안 paused child/fd/graph가 바뀌지 않았는지 destructive exec 직전에 같은 capture로 다시
+    /// 검증한다. waitpid status는 소비하지 않으며 한 runtime이라도 달라지면 전체 attempt가 old graph로 복귀한다.
+    pub fn revalidateQuiescedCapture(
+        self: *RuntimeManager,
+        capture: *const QuiescedCapture,
+    ) QuiesceError!void {
+        if (capture.next_handle != self.next_handle or
+            capture.resources.len != capture.views.len or
+            capture.resources.len != self.host_registry.count())
+            return error.UnsafeFrontier;
+        for (capture.resources, capture.views) |resource, view| {
+            if (resource.runtime_id != view.runtime_id or resource.inherited_slot != view.fd_slot)
+                return error.UnsafeFrontier;
+            const entry = self.host_registry.get(resource.runtime_id) orelse return error.RuntimeMissing;
+            const slot = entry.runtime orelse return error.RuntimeMissing;
+            const handle: RuntimeHandle = @intFromPtr(slot);
+            if (view.surface_id != handle or entry.cols != view.cols or entry.rows != view.rows or
+                entry.resize_generation != view.resize_generation)
+                return error.UnsafeFrontier;
+            const terminal_slot = self.backend_impl.terminalForHostLifecycle(handle) orelse
+                return error.RuntimeMissing;
+            const session = terminal_slot.live_pty.session;
+            if (!terminal_slot.live_pty.upgradePausedAndSafe() or
+                session.inheritedMasterFd() != resource.source_fd or
+                session.childPid() != view.child_pid or
+                session.childExitedWithoutReap() catch return error.UnsafeFrontier)
+                return error.RuntimeNotLive;
+            const size = session.canonicalSize();
+            const identity = session.masterIdentity() catch return error.UnsafeFrontier;
+            if (size.cols != view.cols or size.rows != view.rows or
+                identity.dev != view.pty_dev or identity.ino != view.pty_ino or identity.rdev != view.pty_rdev)
+                return error.UnsafeFrontier;
+        }
     }
 
     fn collectQuiescedItems(
@@ -805,6 +1005,29 @@ fn paletteFromWire(wire_palette: core_command_wire.Command.Palette) [16]?termina
     return palette;
 }
 
+test "quiesced capture derives one sorted runtime authority set and rejects divergent outer views" {
+    const allocator = std.testing.allocator;
+    const resources = try allocator.alloc(RuntimeManager.UpgradeResource, 3);
+    @memcpy(resources, &[_]RuntimeManager.UpgradeResource{
+        .{ .runtime_id = 9, .source_fd = 30, .inherited_slot = 40 },
+        .{ .runtime_id = 2, .source_fd = 31, .inherited_slot = 41 },
+        .{ .runtime_id = 5, .source_fd = 32, .inherited_slot = 42 },
+    });
+    const views = try allocator.alloc(handoff_codec.RuntimeView, 0);
+    var capture: RuntimeManager.QuiescedCapture = .{
+        .allocator = allocator,
+        .host_id = 1,
+        .upgrade_epoch = 2,
+        .next_handle = 4,
+        .resources = resources,
+        .views = views,
+    };
+    defer capture.deinit();
+    var ids: [upgrade_limits.max_runtime_count]u128 = undefined;
+    try std.testing.expectEqualSlices(u128, &.{ 2, 5, 9 }, capture.sortedRuntimeIds(&ids));
+    try std.testing.expectError(error.InvalidValue, capture.encode(null));
+}
+
 test "runtime manager maps every bounded wire command without silent variants" {
     var wire_palette: core_command_wire.Command.Palette = .{null} ** 16;
     wire_palette[3] = 0x12_34_56;
@@ -926,10 +1149,37 @@ test "runtime manager: U2 quiesce encodes and resumes the same live PTY without 
     var decoded = try handoff_codec.decodeHost(allocator, encoded);
     decoded.deinit();
 
-    mgr.resumeUpgradeQuiesce();
+    try mgr.resumeUpgradeQuiesce();
     try std.testing.expectEqual(child_before, terminal_slot.live_pty.session.childPid());
     try std.testing.expectEqual(fd_before, terminal_slot.live_pty.session.inheritedMasterFd().?);
     try ops.write_input(ops.ctx, rid, "after\n");
+}
+
+test "runtime manager: resume joins every reached reader before reopening a two-runtime frontier" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    var host_registry = reg.TerminalRuntimeRegistry.init(allocator);
+    defer host_registry.deinit();
+    var mgr: RuntimeManager = undefined;
+    mgr.init(allocator, std.testing.io, &host_registry);
+    defer mgr.deinit();
+
+    const ops = mgr.runtimeOps();
+    const first = try ops.spawn(ops.ctx, .{ .argv = &.{"/bin/cat"}, .cwd = null, .cols = 24, .rows = 6 });
+    defer ops.terminate(ops.ctx, first);
+    const second = try ops.spawn(ops.ctx, .{ .argv = &.{"/bin/cat"}, .cwd = null, .cols = 24, .rows = 6 });
+    defer ops.terminate(ops.ctx, second);
+
+    try std.testing.expectEqual(@as(usize, 2), try mgr.requestUpgradeQuiesce());
+    var attempts: usize = 0;
+    while (attempts < 1000 and !mgr.upgradeQuiesceReached()) : (attempts += 1) _ = usleep(1000);
+    try std.testing.expect(mgr.upgradeQuiesceReached());
+    // joinAndValidate를 일부러 호출하지 않는다. resume이 reached-but-unjoined thread를 cancel 성공으로 오인하면
+    // pause flag와 종료된 thread가 남으므로 이 두 runtime은 다시 usable frontier가 되지 못한다.
+    try mgr.resumeUpgradeQuiesce();
+    try std.testing.expect(!mgr.upgradeQuiesceReached());
+    try ops.write_input(ops.ctx, first, "first-alive\n");
+    try ops.write_input(ops.ctx, second, "second-alive\n");
 }
 
 test "runtime manager: U2 quiesce refuses attached runtimes without pausing their reader" {
@@ -973,7 +1223,7 @@ test "runtime manager: U2 pause reaches a safe frontier under continuous PTY out
     while (attempts < 5000 and !mgr.upgradeQuiesceReached()) : (attempts += 1) _ = usleep(1000);
     try std.testing.expect(mgr.upgradeQuiesceReached());
     try mgr.joinAndValidateUpgradeQuiesce();
-    mgr.resumeUpgradeQuiesce();
+    try mgr.resumeUpgradeQuiesce();
     try ops.write_input(ops.ctx, rid, "ignored-but-admitted");
 }
 
@@ -1009,7 +1259,7 @@ test "runtime manager: child exit while quiesced aborts without consuming status
 
     // waitid(WNOWAIT)는 status를 소비하지 않았다. Reader를 재개하면 EOF/exit를 owner queue로 넘기고,
     // owner drain이 한 번만 runtime을 제거한다.
-    mgr.resumeUpgradeQuiesce();
+    try mgr.resumeUpgradeQuiesce();
     var total_exited: usize = 0;
     attempts = 0;
     while (attempts < 500 and host_registry.count() != 0) : (attempts += 1) {
@@ -1027,7 +1277,7 @@ test "runtime manager: child exit while quiesced aborts without consuming status
     while (attempts < 1000 and !mgr.upgradeQuiesceReached()) : (attempts += 1) _ = usleep(1000);
     try std.testing.expect(mgr.upgradeQuiesceReached());
     try mgr.joinAndValidateUpgradeQuiesce();
-    mgr.resumeUpgradeQuiesce();
+    try mgr.resumeUpgradeQuiesce();
 }
 
 test "runtime manager: owner drain consumes a quiesced read error exactly once and blocks upgrade" {

@@ -170,11 +170,11 @@ pub fn promote(
     // 교체됐다면 current에 올라간 객체가 expected와 다르므로 즉시 swap-back하고 capability를 철회한다.
     if (renamex_np(staged_path.ptr, current_path.ptr, rename_swap) != 0) return error.RenameFailed;
     const promoted_identity = inspect(current_path) catch {
-        _ = renamex_np(staged_path.ptr, current_path.ptr, rename_swap);
+        if (renamex_np(staged_path.ptr, current_path.ptr, rename_swap) != 0) return error.RenameFailed;
         return error.HashMismatch;
     };
     const old_current_identity = inspect(staged_path) catch {
-        _ = renamex_np(staged_path.ptr, current_path.ptr, rename_swap);
+        if (renamex_np(staged_path.ptr, current_path.ptr, rename_swap) != 0) return error.RenameFailed;
         return error.HashMismatch;
     };
     if (!identityEqual(expected, promoted_identity) or !identityEqual(displaced_identity, old_current_identity)) {

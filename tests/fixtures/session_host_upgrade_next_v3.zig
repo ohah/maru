@@ -58,6 +58,43 @@ const Context = struct {
     rollback_identity: session_host.staged_image.Identity,
 };
 
+fn parseIdentity(args: anytype) !session_host.staged_image.Identity {
+    const dev = try std.fmt.parseInt(i64, args.next() orelse return error.MissingArgument, 10);
+    const ino = try std.fmt.parseInt(u64, args.next() orelse return error.MissingArgument, 10);
+    const size = try std.fmt.parseInt(u64, args.next() orelse return error.MissingArgument, 10);
+    const sha_hex = args.next() orelse return error.MissingArgument;
+    if (sha_hex.len != 64) return error.InvalidIdentity;
+    var sha256: [32]u8 = undefined;
+    const decoded = try std.fmt.hexToBytes(&sha256, sha_hex);
+    if (decoded.len != sha256.len) return error.InvalidIdentity;
+    return .{ .dev = dev, .ino = ino, .size = size, .sha256 = sha256 };
+}
+
+fn parseContext(
+    allocator: std.mem.Allocator,
+    rollback_path: []const u8,
+    args: anytype,
+) !struct { ctx: Context, scenario: []const u8 } {
+    const result_path = args.next() orelse return error.MissingArgument;
+    const scenario = args.next() orelse return error.MissingArgument;
+    if (!std.mem.eql(u8, scenario, "two-upgrade")) return error.InvalidScenario;
+    const owner_dir = args.next() orelse return error.MissingArgument;
+    const target_identity = try parseIdentity(args);
+    const rollback_identity = try parseIdentity(args);
+    if (args.next() != null) return error.UnexpectedArgument;
+    return .{
+        .ctx = .{
+            .allocator = allocator,
+            .rollback_path = rollback_path,
+            .result_path = result_path,
+            .owner_dir = owner_dir,
+            .target_identity = target_identity,
+            .rollback_identity = rollback_identity,
+        },
+        .scenario = scenario,
+    };
+}
+
 fn rollback(ctx: Context) noreturn {
     if (c.lseek(backup_state_slot, 0, c.SEEK.SET) < 0) c._exit(131);
     const rollback_z = ctx.allocator.dupeZ(u8, ctx.rollback_path) catch c._exit(132);
@@ -117,45 +154,11 @@ pub fn main(init: std.process.Init) !void {
     defer args.deinit();
     _ = args.next();
     const mode_or_rollback_path = args.next() orelse return error.MissingArgument;
-    if (std.mem.eql(u8, mode_or_rollback_path, "--upgrade-preflight"))
-        return preflight(allocator, args.next() orelse return error.MissingArgument);
-    const result_path = args.next() orelse return error.MissingArgument;
-    const scenario = args.next() orelse return error.MissingArgument;
-    if (!std.mem.eql(u8, scenario, "two-upgrade")) return error.InvalidScenario;
-    const owner_dir = args.next() orelse return error.MissingArgument;
-    const target_dev = try std.fmt.parseInt(i64, args.next() orelse return error.MissingArgument, 10);
-    const target_ino = try std.fmt.parseInt(u64, args.next() orelse return error.MissingArgument, 10);
-    const target_size = try std.fmt.parseInt(u64, args.next() orelse return error.MissingArgument, 10);
-    const sha_hex = args.next() orelse return error.MissingArgument;
-    if (sha_hex.len != 64) return error.InvalidIdentity;
-    var target_sha256: [32]u8 = undefined;
-    const decoded = try std.fmt.hexToBytes(&target_sha256, sha_hex);
-    if (decoded.len != target_sha256.len) return error.InvalidIdentity;
-    const rollback_dev = try std.fmt.parseInt(i64, args.next() orelse return error.MissingArgument, 10);
-    const rollback_ino = try std.fmt.parseInt(u64, args.next() orelse return error.MissingArgument, 10);
-    const rollback_size = try std.fmt.parseInt(u64, args.next() orelse return error.MissingArgument, 10);
-    const rollback_sha_hex = args.next() orelse return error.MissingArgument;
-    if (rollback_sha_hex.len != 64) return error.InvalidIdentity;
-    var rollback_sha256: [32]u8 = undefined;
-    const rollback_decoded = try std.fmt.hexToBytes(&rollback_sha256, rollback_sha_hex);
-    if (rollback_decoded.len != rollback_sha256.len or args.next() != null) return error.InvalidIdentity;
-    const ctx: Context = .{
-        .allocator = allocator,
-        .rollback_path = mode_or_rollback_path,
-        .result_path = result_path,
-        .owner_dir = owner_dir,
-        .target_identity = .{
-            .dev = target_dev,
-            .ino = target_ino,
-            .size = target_size,
-            .sha256 = target_sha256,
-        },
-        .rollback_identity = .{
-            .dev = rollback_dev,
-            .ino = rollback_ino,
-            .size = rollback_size,
-            .sha256 = rollback_sha256,
-        },
-    };
-    restore(ctx) catch rollback(ctx);
+    if (std.mem.eql(u8, mode_or_rollback_path, "--upgrade-preflight")) {
+        const preflight_rollback_path = args.next() orelse return error.MissingArgument;
+        const parsed = try parseContext(allocator, preflight_rollback_path, &args);
+        return preflight(allocator, parsed.scenario);
+    }
+    const parsed = try parseContext(allocator, mode_or_rollback_path, &args);
+    restore(parsed.ctx) catch rollback(parsed.ctx);
 }

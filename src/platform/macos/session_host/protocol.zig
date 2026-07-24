@@ -52,12 +52,15 @@ pub const Kind = enum(u16) {
     /// controller가 host viewport를 live bottom으로 되돌리는 응답 없는 stream command.
     /// AppKit IME callback이 request/response RPC를 기다리지 않도록 별도 kind로 둔다.
     scroll_to_bottom = 12,
+    /// controller의 bounded host-core 명령. focus/config/prompt hot path가 response RPC를 기다리지 않되,
+    /// 같은 connection의 input frame과 wire 순서를 공유하도록 fire-and-forget stream frame으로 둔다.
+    core_command = 13,
     _,
 
     /// v1이 아는 kind인가. open enum이라 unknown 값(미래 wire)은 false다 — 상위가 optional flag로 skip 여부를 정한다.
     pub fn isKnown(self: Kind) bool {
         return switch (self) {
-            .hello, .hello_ack, .request, .response, .event, .snapshot_chunk, .delta_chunk, .input_bytes, .stream_ack, .ping, .pong, .scroll_to_bottom => true,
+            .hello, .hello_ack, .request, .response, .event, .snapshot_chunk, .delta_chunk, .input_bytes, .stream_ack, .ping, .pong, .scroll_to_bottom, .core_command => true,
             _ => false,
         };
     }
@@ -65,7 +68,7 @@ pub const Kind = enum(u16) {
     /// 이 kind payload가 control JSON인지(strict UTF-8 검증 대상). binary(chunk/input)는 false.
     pub fn isControlJson(self: Kind) bool {
         return switch (self) {
-            .hello, .hello_ack, .request, .response, .event, .stream_ack => true,
+            .hello, .hello_ack, .request, .response, .event, .stream_ack, .core_command => true,
             else => false,
         };
     }
@@ -176,7 +179,7 @@ pub const Header = struct {
 pub fn maxPayloadForKind(kind: Kind) usize {
     return switch (kind) {
         .snapshot_chunk, .delta_chunk, .input_bytes => max_binary_chunk,
-        .hello, .hello_ack, .request, .response, .event, .stream_ack, .ping, .pong, .scroll_to_bottom => max_control_json,
+        .hello, .hello_ack, .request, .response, .event, .stream_ack, .ping, .pong, .scroll_to_bottom, .core_command => max_control_json,
         _ => max_binary_chunk,
     };
 }
@@ -242,11 +245,14 @@ test "MRSH known kinds classify control-json vs binary payloads" {
     try std.testing.expect(Kind.hello.isControlJson());
     try std.testing.expect(Kind.request.isControlJson());
     try std.testing.expect(Kind.stream_ack.isControlJson());
+    try std.testing.expect(Kind.core_command.isKnown());
+    try std.testing.expect(Kind.core_command.isControlJson());
     try std.testing.expect(!Kind.snapshot_chunk.isControlJson());
     try std.testing.expect(!Kind.input_bytes.isControlJson());
     try std.testing.expect(!Kind.ping.isControlJson()); // ping은 empty/nonce라 JSON 검증 대상 아님
     // payload 상한: control 256 KiB, binary 1 MiB.
     try std.testing.expectEqual(max_control_json, maxPayloadForKind(.response));
+    try std.testing.expectEqual(max_control_json, maxPayloadForKind(.core_command));
     try std.testing.expectEqual(max_binary_chunk, maxPayloadForKind(.snapshot_chunk));
     try std.testing.expectEqual(max_binary_chunk, maxPayloadForKind(.input_bytes));
 }

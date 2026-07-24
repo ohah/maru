@@ -173,6 +173,9 @@ pub const SpawnParams = struct {
     size: terminal.Size,
     /// PTY→core 출력 이벤트 큐 용량(bounded).
     queue_capacity: usize,
+    /// reader가 첫 child output을 parse하기 전에 적용할 runtime config. local GUI와 remote spawn wire가 같은 값
+    /// snapshot을 사용하며, null은 기존 caller의 기본 설정 의미다.
+    initial_config: ?core_command.RuntimeConfig = null,
 };
 
 /// backend 구현이 채워 넣는 함수 표. 모든 함수의 첫 인자는 `ctx`(구현 인스턴스)다. 에러는 `anyerror`로 둔다 —

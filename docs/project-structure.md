@@ -54,6 +54,8 @@ src/
                         framing.zig(partial I/O incremental parser·kind별 cap·unknown optional skip — **구현됨, P3-a**),
                         screen_stream.zig(`maru.screen-stream.v1` 28-byte record header + snapshot/delta record codec·resolved run·
                         row 폭 검증·UTF-8/cap 거부 — **구현됨, P3-b**),
+                        core_command_wire.zig(host-authoritative focus/config/prompt command의 strict bounded JSON DTO·codec,
+                        legacy scroll capability 분기 — **구현됨, P3-e4c-3**),
                         registry.zig(`TerminalRuntimeRegistry` + controller/observer capability state machine — runtime_id 소유표·
                         attach/detach/takeover·resize sequence/generation·client 0 크기 유지, 실 runtime handle은 opaque 슬롯 —
                         **구현됨, P3-c**),

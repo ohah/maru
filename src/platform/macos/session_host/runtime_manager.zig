@@ -25,6 +25,7 @@ const builtin = @import("builtin");
 const maru = @import("maru");
 const server = @import("server.zig");
 const reg = @import("registry.zig");
+const core_command_wire = @import("core_command_wire.zig");
 const screen_snapshot = @import("screen_snapshot.zig");
 const screen_stream = @import("screen_stream.zig");
 const core_command = maru.session.core_command; // §6a 원격 스크롤 명령을 host core에 적용
@@ -50,6 +51,7 @@ const ForegroundCache = struct {
 
 // macOS libc CSPRNG(std.posix 미노출 — 이 파일은 macOS 전용). runtime_id 발급용.
 extern "c" fn arc4random_buf(buf: [*]u8, nbytes: usize) void;
+extern "c" fn usleep(usec: c_uint) c_int;
 
 /// hex 문자열을 바이트로 디코드해 `out`에 채우고 채운 길이를 돌려준다(§6c 검색어 — 임의 텍스트라 hex로 실어 escape 회피).
 /// 홀수/잘못된 hex나 `out` 초과는 거기서 멈춘다(best-effort — 검색어는 부가 기능).
@@ -251,35 +253,21 @@ pub const RuntimeManager = struct {
         return allocator.dupe(u8, out.written()) catch return error.OutOfMemory;
     }
 
-    /// 원격 client가 보낸 **스크롤 core command**를 host의 TerminalCore에 적용한다(§6a 원격 스크롤백). host가 core를 소유하고
-    /// view_offset을 바꾸면 다음 projectSnapshot/computeDelta(renderSnapshot=뷰포트 인지)가 그 스크롤 화면을 client에 투영한다.
-    /// `op`는 scroll 계열 태그, `arg`는 정수 인자(delta/절대행/offset). core를 쓰므로 **core lock 아래** 적용한다(reader와 단일
-    /// mutator 동기화 — snapshot과 동일). 선택(select_*)·config는 후속(#6b) — 알 수 없는 op은 조용히 무시한다.
-    fn coreCommandOp(ctx: *anyopaque, runtime_id: u128, op: []const u8, arg: i64) anyerror!void {
+    /// 검증된 wire command를 내부 `CoreCommand`로 명시 변환해 host reader queue에 넣는다. focus가 만드는
+    /// `pendingResponse`와 config/viewport mutation을 dispatch thread가 직접 적용하지 않아, 로컬과 동일하게 reader가
+    /// core의 유일한 mutator이자 PTY response writer로 남는다.
+    fn coreCommandOp(ctx: *anyopaque, runtime_id: u128, wire_command: core_command_wire.Command) anyerror!void {
         const self: *RuntimeManager = @ptrCast(@alignCast(ctx));
         const handle = self.handleFor(runtime_id) orelse return error.RuntimeNotFound;
-        const surface = self.backend_impl.surfaceFor(handle) orelse return error.RuntimeNotFound;
-        const nonneg: usize = @intCast(@max(arg, 0)); // 절대행/offset은 음수 불가(악성/버그 client 방어 — @intCast 패닉 회피).
-        const cmd: core_command.CoreCommand = if (std.mem.eql(u8, op, "scroll"))
-            .{ .scroll = @intCast(arg) }
-        else if (std.mem.eql(u8, op, "scroll_to_bottom"))
-            .scroll_to_bottom
-        else if (std.mem.eql(u8, op, "scroll_to_abs"))
-            .{ .scroll_to_abs = nonneg }
-        else if (std.mem.eql(u8, op, "scroll_to_offset"))
-            .{ .scroll_to_offset = nonneg }
-        else
-            return; // 미지원 op(선택/config #6b) — 무시.
-        surface.lockCore(self.io);
-        defer surface.unlockCore(self.io);
-        core_command.apply(&surface.core, cmd);
+        const command = try coreCommandFromWire(wire_command);
+        return self.backend_impl.backend().enqueueCoreCommand(handle, command, self.io);
     }
 
     /// host-backed 마우스 리포트(§ 입력 패리티): client 마우스 이벤트를 host의 **reader에 report_mouse core command로
     /// enqueue**한다 — reader가 적용하면 core가 자기 mouse_tracking/format으로 SGR/x10 응답을 만들고, reader가 그
     /// pendingResponse를 PTY로 흘린다(로컬 휠·클릭 경로와 **동형**: enqueueCoreCommand→reader 적용+flush). dispatch
     /// 스레드가 직접 apply+writeInput하면 reader의 response PTY-write와 같은 자식-stdin fd에 동시 쓰기(race)가 되므로,
-    /// 모든 PTY 입력 쓰기를 reader 단일 스레드로 모은다(§io-render-threading). scroll(응답 없음)은 direct apply로 충분.
+    /// 모든 PTY 입력 쓰기를 reader 단일 스레드로 모은다(§io-render-threading).
     fn reportMouseOp(ctx: *anyopaque, runtime_id: u128, report: server.MouseReport) anyerror!void {
         const self: *RuntimeManager = @ptrCast(@alignCast(ctx));
         const handle = self.handleFor(runtime_id) orelse return error.RuntimeNotFound;
@@ -407,6 +395,10 @@ pub const RuntimeManager = struct {
         const be = self.backend_impl.backend();
         const size = maru.terminal.Size{ .cols = params.cols, .rows = params.rows };
         const args: []const []const u8 = if (params.argv.len > 1) params.argv[1..] else &.{};
+        const initial_config: ?core_command.RuntimeConfig = if (params.initial_config) |config| blk: {
+            const command = try coreCommandFromWire(.{ .set_runtime_config = config });
+            break :blk command.set_runtime_config;
+        } else null;
 
         _ = try be.spawn(.{
             .handle = handle,
@@ -426,13 +418,16 @@ pub const RuntimeManager = struct {
             },
             .size = size,
             .queue_capacity = default_queue_capacity,
+            // backend seam이 pre-reader bootstrap의 단일 소유자다. 새 backend도 이 필드를 무시하면 first-output
+            // parity 계약을 만족하지 못하며, RuntimeManager가 surface 구현을 알아 직접 mutate하지 않는다.
+            .initial_config = initial_config,
         });
         // 여기부터 실패하면 방금 만든 runtime을 회수한다(closeAndDetach로 PTY/자식/reader 종료 → remove로 reader join+슬롯 해제).
         errdefer {
             be.closeAndDetach(handle);
             be.remove(handle);
         }
-        _ = try be.attach(handle, true); // reader 시작. host runtime은 output을 core에 직접 반영한다(stream은 e2d).
+        _ = try be.attach(handle, true); // backend가 initial_config를 적용한 뒤 reader 시작 — 첫 output부터 host 설정 사용.
 
         // 무작위 runtime_id를 발급해 host registry에 등록한다. 충돌은 사실상 불가능하지만 방어적으로 재시도한다.
         var attempts: usize = 0;
@@ -465,6 +460,81 @@ pub const RuntimeManager = struct {
         self.host_registry.unregister(runtime_id);
     }
 };
+
+fn coreCommandFromWire(command: core_command_wire.Command) error{InvalidCommand}!core_command.CoreCommand {
+    return switch (command) {
+        .scroll => |delta| .{ .scroll = std.math.cast(isize, delta) orelse return error.InvalidCommand },
+        .scroll_to_bottom => .scroll_to_bottom,
+        .scroll_to_abs => |row| .{ .scroll_to_abs = std.math.cast(usize, row) orelse return error.InvalidCommand },
+        .scroll_to_offset => |offset| .{ .scroll_to_offset = std.math.cast(usize, offset) orelse return error.InvalidCommand },
+        .report_focus => |gained| .{ .report_focus = gained },
+        .set_cell_metrics => |metrics| .{ .set_cell_metrics = .{ .width = metrics.width, .height = metrics.height } },
+        .set_default_colors => |colors| .{ .set_default_colors = .{
+            .foreground = rgbFromWire(colors.foreground),
+            .background = rgbFromWire(colors.background),
+        } },
+        .set_config_palette => |wire_palette| blk: {
+            var palette: [16]?terminal.Rgb = .{null} ** 16;
+            for (wire_palette, 0..) |maybe_rgb, index| {
+                palette[index] = if (maybe_rgb) |rgb| rgbFromWire(rgb) else null;
+            }
+            break :blk .{ .set_config_palette = palette };
+        },
+        .set_max_scrollback => |lines| .{ .set_max_scrollback = std.math.cast(usize, lines) orelse return error.InvalidCommand },
+        .set_ambiguous_wide => |wide| .{ .set_ambiguous_wide = wide },
+        .set_emoji_wide => |wide| .{ .set_emoji_wide = wide },
+        .set_runtime_config => |config| .{ .set_runtime_config = .{
+            .max_scrollback = std.math.cast(usize, config.max_scrollback) orelse return error.InvalidCommand,
+            .ambiguous_wide = config.ambiguous_wide,
+            .emoji_wide = config.emoji_wide,
+            .palette = paletteFromWire(config.palette),
+            .default_colors = .{
+                .foreground = rgbFromWire(config.default_colors.foreground),
+                .background = rgbFromWire(config.default_colors.background),
+            },
+            .cell_metrics = if (config.cell_metrics) |metrics| .{
+                .width = metrics.width,
+                .height = metrics.height,
+            } else null,
+        } },
+        .jump_to_prompt => |direction| .{ .jump_to_prompt = direction },
+    };
+}
+
+fn rgbFromWire(rgb: u32) terminal.Rgb {
+    return .{
+        .r = @truncate(rgb >> 16),
+        .g = @truncate(rgb >> 8),
+        .b = @truncate(rgb),
+    };
+}
+
+fn paletteFromWire(wire_palette: core_command_wire.Command.Palette) [16]?terminal.Rgb {
+    var palette: [16]?terminal.Rgb = .{null} ** 16;
+    for (wire_palette, 0..) |maybe_rgb, index| {
+        palette[index] = if (maybe_rgb) |rgb| rgbFromWire(rgb) else null;
+    }
+    return palette;
+}
+
+test "runtime manager maps every bounded wire command without silent variants" {
+    var wire_palette: core_command_wire.Command.Palette = .{null} ** 16;
+    wire_palette[3] = 0x12_34_56;
+    const mapped = try coreCommandFromWire(.{ .set_config_palette = wire_palette });
+    try std.testing.expect(mapped == .set_config_palette);
+    try std.testing.expectEqual(terminal.Rgb{ .r = 0x12, .g = 0x34, .b = 0x56 }, mapped.set_config_palette[3].?);
+
+    const focus = try coreCommandFromWire(.{ .report_focus = true });
+    try std.testing.expect(focus == .report_focus);
+    try std.testing.expect(focus.report_focus);
+
+    const defaults = try coreCommandFromWire(.{ .set_default_colors = .{
+        .foreground = 0xAA_BB_CC,
+        .background = 0x01_02_03,
+    } });
+    try std.testing.expectEqual(terminal.Rgb{ .r = 0xAA, .g = 0xBB, .b = 0xCC }, defaults.set_default_colors.foreground);
+    try std.testing.expectEqual(terminal.Rgb{ .r = 0x01, .g = 0x02, .b = 0x03 }, defaults.set_default_colors.background);
+}
 
 /// 128-bit runtime_id를 발급한다(§4 opaque random). macOS `arc4random_buf`는 실패하지 않는 CSPRNG다(daemon.newHostId 대칭).
 fn newRuntimeId() u128 {
@@ -515,6 +585,56 @@ test "runtime manager: spawns a real PTY runtime through RuntimeOps and terminat
     ops.terminate(ops.ctx, rid);
 }
 
+test "runtime manager: initial config is applied before fast first output reaches the host core" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    var host_registry = reg.TerminalRuntimeRegistry.init(allocator);
+    defer host_registry.deinit();
+    var mgr: RuntimeManager = undefined;
+    mgr.init(allocator, std.testing.io, &host_registry);
+    defer mgr.deinit();
+
+    var palette: core_command_wire.Command.Palette = .{null} ** 16;
+    palette[1] = 0x11_22_33;
+    const ops = mgr.runtimeOps();
+    const script = "i=0; while [ $i -lt 1100 ]; do echo x; i=$((i+1)); done; sleep 2";
+    const rid = try ops.spawn(ops.ctx, .{
+        .argv = &.{ "/bin/sh", "-c", script },
+        .cwd = null,
+        .cols = 20,
+        .rows = 5,
+        .initial_config = .{
+            .max_scrollback = 1200,
+            .ambiguous_wide = true,
+            .emoji_wide = false,
+            .palette = palette,
+            .default_colors = .{ .foreground = 0xAA_BB_CC, .background = 0x01_02_03 },
+            .cell_metrics = .{ .width = 9, .height = 18 },
+        },
+    });
+    defer ops.terminate(ops.ctx, rid);
+    const handle = mgr.handleFor(rid) orelse return error.TestUnexpectedResult;
+    const surface = mgr.backend_impl.surfaceFor(handle) orelse return error.TestUnexpectedResult;
+
+    // spawn이 돌아온 시점에는 reader가 시작됐지만 config는 그보다 먼저 적용돼 있어야 한다.
+    surface.lockCore(std.testing.io);
+    try std.testing.expectEqual(@as(usize, 1200), surface.core.maxScrollback());
+    try std.testing.expect(surface.core.ambiguous_wide);
+    try std.testing.expectEqual(@as(u8, 0x22), surface.core.config_palette[1].?.g);
+    surface.unlockCore(std.testing.io);
+
+    // 기본 cap(1000)보다 많은 첫 burst를 보존한다. config가 attach 뒤 RPC였다면 앞부분이 기본 cap에서 먼저 evict될 수 있다.
+    var retained = false;
+    var attempts: usize = 0;
+    while (attempts < 300 and !retained) : (attempts += 1) {
+        surface.lockCore(std.testing.io);
+        retained = surface.core.scrollbackLen() > 1000;
+        surface.unlockCore(std.testing.io);
+        if (!retained) _ = usleep(10 * 1000);
+    }
+    try std.testing.expect(retained);
+}
+
 test "runtime manager: writeInput and resize reach a real runtime through RuntimeOps" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
@@ -540,6 +660,118 @@ test "runtime manager: writeInput and resize reach a real runtime through Runtim
 
     ops.terminate(ops.ctx, rid);
     try std.testing.expectEqual(@as(usize, 0), host_registry.count());
+}
+
+test "runtime manager: bounded core config commands reach the real host reader core" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+
+    var host_registry = reg.TerminalRuntimeRegistry.init(allocator);
+    defer host_registry.deinit();
+    var mgr: RuntimeManager = undefined;
+    mgr.init(allocator, std.testing.io, &host_registry);
+    defer mgr.deinit();
+
+    const ops = mgr.runtimeOps();
+    const rid = try ops.spawn(ops.ctx, .{ .argv = &.{"/bin/cat"}, .cwd = null, .cols = 40, .rows = 10 });
+    defer ops.terminate(ops.ctx, rid);
+    const handle = mgr.handleFor(rid) orelse return error.TestUnexpectedResult;
+    const surface = mgr.backend_impl.surfaceFor(handle) orelse return error.TestUnexpectedResult;
+
+    var wire_palette: core_command_wire.Command.Palette = .{null} ** 16;
+    wire_palette[2] = 0x12_34_56;
+    try ops.core_command(ops.ctx, rid, .{ .set_runtime_config = .{
+        .max_scrollback = 321,
+        .ambiguous_wide = true,
+        .emoji_wide = false,
+        .palette = wire_palette,
+        .default_colors = .{
+            .foreground = 0xAA_BB_CC,
+            .background = 0x01_02_03,
+        },
+        .cell_metrics = .{ .width = 9, .height = 18 },
+    } });
+
+    // RuntimeOps 응답은 command admission을 뜻한다. 실제 reader 적용도 bounded하게 기다려 host core 상태로 증명한다.
+    var applied = false;
+    var attempts: usize = 0;
+    while (attempts < 100 and !applied) : (attempts += 1) {
+        surface.lockCore(std.testing.io);
+        applied = surface.core.maxScrollback() == 321 and
+            surface.core.ambiguous_wide and
+            !surface.core.emoji_wide and
+            surface.core.cell_width_px == 9 and
+            surface.core.cell_height_px == 18 and
+            surface.core.default_fg_rgb.r == 0xAA and
+            surface.core.default_bg_rgb.b == 0x03 and
+            surface.core.config_palette[2] != null and
+            surface.core.config_palette[2].?.g == 0x34;
+        surface.unlockCore(std.testing.io);
+        if (!applied) _ = usleep(10 * 1000);
+    }
+    try std.testing.expect(applied);
+}
+
+test "runtime manager: focus report is written back to the real PTY by the host reader" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var cwd_buf: [4096]u8 = undefined;
+    _ = std.c.getcwd(&cwd_buf, cwd_buf.len);
+    const proc_cwd = std.mem.sliceTo(&cwd_buf, 0);
+    const result_path = try std.fs.path.join(allocator, &.{ proc_cwd, ".zig-cache/tmp", &tmp.sub_path, "focus.hex" });
+    defer allocator.free(result_path);
+    const script = try std.fmt.allocPrint(
+        allocator,
+        "stty raw -echo; printf '\\033[?1004h'; dd bs=1 count=5 2>/dev/null | od -An -tx1 | tr -d ' \\n' > '{s}'",
+        .{result_path},
+    );
+    defer allocator.free(script);
+
+    var host_registry = reg.TerminalRuntimeRegistry.init(allocator);
+    defer host_registry.deinit();
+    var mgr: RuntimeManager = undefined;
+    mgr.init(allocator, std.testing.io, &host_registry);
+    defer mgr.deinit();
+
+    const ops = mgr.runtimeOps();
+    const rid = try ops.spawn(ops.ctx, .{ .argv = &.{ "/bin/sh", "-c", script }, .cwd = null, .cols = 40, .rows = 10 });
+    defer ops.terminate(ops.ctx, rid);
+    const handle = mgr.handleFor(rid) orelse return error.TestUnexpectedResult;
+    const surface = mgr.backend_impl.surfaceFor(handle) orelse return error.TestUnexpectedResult;
+
+    // 자식이 DECSET 1004를 출력해 host core가 focus report를 요청할 때까지 기다린다.
+    var focus_enabled = false;
+    var attempts: usize = 0;
+    while (attempts < 200 and !focus_enabled) : (attempts += 1) {
+        surface.lockCore(std.testing.io);
+        focus_enabled = surface.core.focus_events;
+        surface.unlockCore(std.testing.io);
+        if (!focus_enabled) _ = usleep(10 * 1000);
+    }
+    try std.testing.expect(focus_enabled);
+
+    // 별도 input/command queue가 실제 PTY에서도 호출 순서를 보존해야 한다. reader는 A를 fence까지 쓴 뒤
+    // focus command가 만든 CSI I를 우선 쓰고, 그 뒤 suffix B를 쓴다.
+    try ops.write_input(ops.ctx, rid, "A");
+    try ops.core_command(ops.ctx, rid, .{ .report_focus = true });
+    try ops.write_input(ops.ctx, rid, "B");
+
+    // reader가 `A`, `CSI I`, `B` 다섯 바이트를 정확한 순서로 PTY에 쓰면 자식이 별도 파일에 hex로 남긴다.
+    // 단순 core mutation이나 command/input 순서가 뒤집힌 구현으로는 이 값이 생기지 않는다.
+    var saw_ordered_bytes = false;
+    attempts = 0;
+    while (attempts < 200 and !saw_ordered_bytes) : (attempts += 1) {
+        const result = tmp.dir.readFileAlloc(std.testing.io, "focus.hex", allocator, .limited(4096)) catch null;
+        if (result) |bytes| {
+            saw_ordered_bytes = std.mem.indexOf(u8, bytes, "411b5b4942") != null;
+            allocator.free(bytes);
+        }
+        if (!saw_ordered_bytes) _ = usleep(10 * 1000);
+    }
+    try std.testing.expect(saw_ordered_bytes);
 }
 
 test "runtime manager: snapshot projects the runtime's live screen through RuntimeOps" {

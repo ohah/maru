@@ -23,6 +23,11 @@ const pty_command_queue_capacity: usize = 1024;
 /// 단일 writer 라우팅(docs/io-render-threading.md §8 P2-3b): 메인 입력을 직접 세션에 쓰지 않고 write 큐에
 /// enqueue + I/O 스레드 wake. PtyIo.ctx가 이 구조를 가리킨다(LivePtySession이 핀 고정해 주소 안정). resize는
 /// 바이트 스트림이 아니라 ioctl이라 큐를 안 거치고 세션에 바로 전달한다(write(2) 바이트와 독립이라 안전).
+///
+/// producer 불변식: `writeInput`/`enqueueCommand` 호출은 AppSession 메인 실행 흐름 또는 host connection
+/// dispatcher 한 곳에서 직렬화된다. `enqueuedTotal()` 스냅샷과 command enqueue는 이 불변식 아래 하나의 논리
+/// 연산이다. 향후 여러 producer가 같은 runtime을 직접 호출하게 되면 두 큐를 공유 sequence lock으로 묶거나
+/// 하나의 tagged queue로 합치기 전에는 이 타입을 그대로 공유하면 안 된다.
 const WriteQueueIo = struct {
     write_queue: *pty_reader.PtyWriteQueue,
     command_queue: *pty_reader.CoreCommandQueue,
@@ -39,7 +44,9 @@ const WriteQueueIo = struct {
     /// pop해 락 아래 적용한다. PtyIo.enqueue_command가 이 함수를 가리킨다(interactive 백엔드만).
     fn enqueueCommand(ctx: *anyopaque, cmd: core_command.CoreCommand) !void {
         const self: *WriteQueueIo = @ptrCast(@alignCast(ctx));
-        try self.command_queue.enqueueBlocking(cmd);
+        // 같은 producer가 앞서 enqueue한 input의 누적 끝을 fence로 함께 기록한다. reader는 그 prefix를 실제 PTY에
+        // 쓴 뒤에만 명령을 적용하므로 `input A → focus reply → input B`가 별도 두 큐에서도 뒤집히지 않는다.
+        try self.command_queue.enqueueAfterInput(cmd, self.write_queue.enqueuedTotal());
         self.session.signalWrite();
     }
 
@@ -404,6 +411,40 @@ test "live pty session owns controlled command until normal termination" {
     live.finishAfterTermination();
     try std.testing.expect(saw_output);
     try std.testing.expect(live.reader_finished);
+}
+
+test "processing reader replaces a full render signal with exit and closes outbound queues" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+
+    const allocator = std.testing.allocator;
+    var live: LivePtySession = undefined;
+    try live.init(std.testing.io, allocator, 11, .{
+        .command = "/bin/sh",
+        .args = &.{ "-c", "printf x" },
+        .size = .{ .cols = 20, .rows = 3 },
+    }, 1); // 첫 output 신호 하나만으로 event queue를 포화시킨다.
+    defer live.deinit();
+
+    var core = try terminal.TerminalCore.init(allocator, .{ .cols = 20, .rows = 3 });
+    defer core.deinit();
+    var core_mutex: std.Io.Mutex = .init;
+    live.reader.setWriteQueue(live.write_queue);
+    live.reader.setCommandQueue(live.command_queue);
+    live.reader.setProcessing(&core, &core_mutex, std.testing.io);
+    try live.reader.start();
+
+    // consumer가 렌더 신호를 비우지 않은 채 child가 EOF를 낸다. old blocking push는 여기서 join을 영구
+    // 대기시켰다. processing 전용 terminal replacement는 빈 신호를 exit로 바꾸고 close defer까지 도달한다.
+    live.reader.join();
+    live.reader_finished = true;
+    const event = live.eventQueue().popBlocking() orelse return error.LivePtyQueueClosedTooEarly;
+    switch (event) {
+        .exited => {},
+        else => return error.TestUnexpectedResult,
+    }
+
+    try std.testing.expectError(error.QueueClosed, live.write_queue.enqueueBlocking("late"));
+    try std.testing.expectError(error.QueueClosed, live.command_queue.enqueueBlocking(.scroll_to_bottom));
 }
 
 const FakePty = struct {

@@ -43,6 +43,7 @@ pub const require_product_launch_smoke = true;
 pub const entrypoint = @import("session_host/entrypoint.zig");
 pub const protocol = @import("session_host/protocol.zig");
 pub const framing = @import("session_host/framing.zig");
+pub const core_command_wire = @import("session_host/core_command_wire.zig");
 pub const screen_stream = @import("session_host/screen_stream.zig");
 // screen_assembler(records → client 화면 모델, screen_snapshot 투영의 역)는 screen_stream codec만 써서 순수 계층으로
 // 둔다(platform-import-0, non-macOS에서도 테스트). 실 렌더/backend 배선은 macOS 전용 후속(e2e-2)에서 이 조립기를 쓴다.

@@ -10,15 +10,17 @@
 //! `RuntimeEventPump.initRemote`(delta stream을 `DrainSummary`로 소비, e3-1), write_input→`sendInput`, resize→
 //! `runtime.resize` RPC, close/remove→host terminate + client-side 회수. handle(u64)↔`RemoteRuntime`를 map으로 잇는다.
 //!
-//! metadata observation(cwd/title/SSH/foreground process/mode/size)은 host full-state event+fresh barrier로 읽고, 원격
-//! scroll command는 `runtime.core_command` RPC로 host core에 보낸다. 일반 key/paste/mouse/focus input-mode와 direct
-//! `TermRuntimeBackend.enqueueCoreCommand` parity는 아직 후속 gate다. macOS 전용(client·Surface·app 계약).
+//! metadata observation(cwd/title/SSH/foreground process/mode/size)은 host full-state event+fresh barrier로 읽는다.
+//! focus/config/prompt command는 `runtime_core_command_v1`로 host reader에 보내며, 일반 key의
+//! DECCKM/DECKPAM/kitty mode와 selection autoscroll/전체 선택 parity는 후속 gate다. macOS 전용(client·Surface·app 계약).
 
 const std = @import("std");
 const builtin = @import("builtin");
 const maru = @import("maru");
 const client_mod = @import("client.zig");
+const framing = @import("framing.zig");
 const remote_runtime = @import("remote_runtime.zig");
+const core_command_wire = @import("core_command_wire.zig");
 const core_command = maru.session.core_command; // §6a 원격 스크롤 명령 라우팅
 
 const Surface = maru.session.Surface;
@@ -144,7 +146,7 @@ pub const RemoteTermBackend = struct {
         const rr = try self.allocator.create(RemoteRuntime);
         errdefer self.allocator.destroy(rr);
         const request = persistentSpawnRequest(params.request);
-        try rr.spawn(self.client, self.allocator, self.io, params.handle, request, params.size);
+        try rr.spawnWithConfig(self.client, self.allocator, self.io, params.handle, request, params.size, params.initial_config);
         errdefer rr.deinit(); // spawn 성공 후 map 삽입이 실패하면 방금 띄운 host runtime을 회수한다(orphan 방지).
         try self.runtimes.put(self.allocator, params.handle, rr);
         return &rr.surface;
@@ -173,6 +175,7 @@ pub const RemoteTermBackend = struct {
     fn drainRemote(ctx: *anyopaque) DrainSummary {
         const rr: *RemoteRuntime = @ptrCast(@alignCast(ctx));
         var summary: DrainSummary = .{};
+        if (rr.transport_failed) return summary;
         while (true) {
             const result = rr.pumpDelta() catch |err| {
                 switch (err) {
@@ -187,7 +190,12 @@ pub const RemoteTermBackend = struct {
                     // 그 외(연결 끊김·codec DecodeError 등)는 세션 종료로 본다(로컬 read_error 계약과 동형). @errorName은 정적
                     // 문자열이라 DrainSummary.ended가 소비될 때까지 산다(runtime_pump.Termination 계약).
                     else => {
-                        if (summary.ended == null) summary.ended = .{ .read_error = @errorName(err) };
+                        // remote pump는 local RuntimeEventPump.applyQueuedEvent를 거치지 않으므로 여기서 surface를 직접
+                        // latch해야 SurfaceRuntime 입력 gate가 죽은 PtyIo로 재전송하지 않는다. runtime별 one-shot으로
+                        // 올려 shared connection 실패가 매 frame 같은 read_error를 재발행하는 것도 막는다.
+                        rr.transport_failed = true;
+                        rr.surface.process_state = .exited;
+                        summary.ended = .{ .read_error = @errorName(err) };
                         break;
                     },
                 }
@@ -199,6 +207,39 @@ pub const RemoteTermBackend = struct {
             }
         }
         return summary;
+    }
+
+    test "remote transport failure latches surface exited exactly once" {
+        const allocator = std.testing.allocator;
+        var client = client_mod.Client{
+            .allocator = allocator,
+            .fd = -1,
+            .host_id = 1,
+            .unusable = true,
+            .parser = framing.FrameParser.init(allocator),
+        };
+        defer client.deinit();
+
+        var rr: RemoteRuntime = undefined;
+        rr.client = &client;
+        rr.allocator = allocator;
+        rr.stream_id = 7;
+        rr.direct_input = .empty;
+        defer rr.direct_input.deinit(allocator);
+        rr.direct_input_offset = 0;
+        rr.pending_controls = .empty;
+        defer rr.pending_controls.deinit(allocator);
+        rr.transport_failed = false;
+        rr.surface = try Surface.init(allocator, 77, .{ .cols = 20, .rows = 3 });
+        defer rr.surface.deinit();
+        rr.surface.process_state = .running;
+
+        const first = drainRemote(&rr);
+        try std.testing.expect(first.ended != null);
+        try std.testing.expect(rr.surface.process_state == .exited);
+        const second = drainRemote(&rr);
+        try std.testing.expect(second.ended == null);
+        try std.testing.expectEqual(@as(usize, 0), second.output_events);
     }
 
     fn writeInput(ctx: *anyopaque, handle: RuntimeHandle, bytes: []const u8) anyerror!void {
@@ -214,13 +255,10 @@ pub const RemoteTermBackend = struct {
     }
 
     fn enqueueCoreCommand(ctx: *anyopaque, handle: RuntimeHandle, cmd: CoreCommand, io: std.Io) anyerror!void {
-        _ = ctx;
-        _ = handle;
-        _ = cmd;
+        const self: *RemoteTermBackend = @ptrCast(@alignCast(ctx));
         _ = io;
-        // 원격은 host가 core를 소유한다 — core command(scrollback/clear 등)를 host로 보내는 wire RPC는 후속(e3-3).
-        // 지금은 no-op(계약 표면만 채운다). app_session은 아직 이 경로를 계약이 아니라 self.runtime으로 직접 부르므로
-        // (e3 탐색이 확인한 우회) 현재 배선에선 원격 Term에 core command가 도달하지도 않는다.
+        const rr = self.runtimes.get(handle) orelse return error.UnknownSurface;
+        return routeCoreCommand(rr, cmd);
     }
 
     fn resize(ctx: *anyopaque, handle: RuntimeHandle, size: maru.terminal.Size, io: std.Io) anyerror!void {
@@ -322,24 +360,56 @@ pub const RemoteTermBackend = struct {
             .write_input = ioWriteInput,
             .resize_fn = ioResize,
             .write_input_nb = ioWriteInputNonBlocking,
-            .enqueue_command = ioEnqueueCommand, // §6a: 스크롤 core command를 host로 라우팅(원격 스크롤백).
+            .enqueue_command = ioEnqueueCommand, // host-authoritative command는 exhaustive router로 전달.
         };
     }
 
-    /// §6a 원격 스크롤백: SurfaceRuntime.enqueueCoreCommand가 host-backed Term에 부르는 hook. **스크롤 계열만** host로
-    /// 라우팅한다(host가 자기 core view_offset을 바꿔 스크롤백 화면을 투영→RemoteScreen이 렌더). 선택(select_*)·config는
-    /// 아래 명시된 범위만 처리한다. IME marked text는 CoreCommand가 아니라 Surface의 client-local overlay라 이 경로에
-    /// 들어오지 않으며, 확정 바이트만 write_input 경로를 탄다. arg는 signed(scroll delta 음수).
+    /// SurfaceRuntime이 host-backed Term에 보내는 명령의 공용 진입점. host 소유 명령은 wire로, attachment-local 선택
+    /// 하이라이트는 placeholder로 분류한다. IME marked text는 CoreCommand가 아니라 Surface의 client-local overlay라 이
+    /// 경로에 들어오지 않으며, 확정 바이트만 write_input 경로를 탄다.
     fn ioEnqueueCommand(ctx: *anyopaque, cmd: core_command.CoreCommand) anyerror!void {
         const rr: *RemoteRuntime = @ptrCast(@alignCast(ctx));
-        const max_i64: usize = @intCast(std.math.maxInt(i64)); // usize→i64 방어(스크롤백 abs가 i64 초과=비현실적, 패닉 회피).
+        return routeCoreCommand(rr, cmd);
+    }
+
+    /// local/remote backend의 공용 `CoreCommand` 계약을 원격 소유권에 따라 완전 분류한다. `else`를 두지 않아
+    /// 새 variant가 추가되면 조용히 유실되지 않고 이 switch가 컴파일 오류로 routing 결정을 요구한다.
+    fn routeCoreCommand(rr: *RemoteRuntime, cmd: core_command.CoreCommand) anyerror!void {
         switch (cmd) {
-            .scroll => |d| try rr.sendCoreCommand("scroll", @intCast(d)),
+            .scroll => |delta| try rr.queueCoreCommand(.{ .scroll = std.math.cast(i64, delta) orelse return error.InvalidCommand }),
             // IME/key callback에서 호출될 수 있으므로 request/response RPC를 기다리지 않는다. stream-local
             // sticky intent + Client bounded outbound frame이 다음 input보다 앞선 wire 순서를 보존한다.
             .scroll_to_bottom => try rr.requestScrollToBottom(),
-            .scroll_to_abs => |a| try rr.sendCoreCommand("scroll_to_abs", @intCast(@min(a, max_i64))),
-            .scroll_to_offset => |o| try rr.sendCoreCommand("scroll_to_offset", @intCast(@min(o, max_i64))),
+            .scroll_to_abs => |row| try rr.queueCoreCommand(.{ .scroll_to_abs = @intCast(row) }),
+            .scroll_to_offset => |offset| try rr.queueCoreCommand(.{ .scroll_to_offset = @intCast(offset) }),
+            .report_focus => |gained| try rr.queueCoreCommand(.{ .report_focus = gained }),
+            .set_cell_metrics => |metrics| try rr.queueCoreCommand(.{ .set_cell_metrics = .{
+                .width = metrics.width,
+                .height = metrics.height,
+            } }),
+            .set_default_colors => |colors| try rr.queueCoreCommand(.{ .set_default_colors = .{
+                .foreground = rgbToWire(colors.foreground),
+                .background = rgbToWire(colors.background),
+            } }),
+            .set_config_palette => |palette| try rr.queueCoreCommand(.{ .set_config_palette = paletteToWire(palette) }),
+            .set_max_scrollback => |lines| try rr.queueCoreCommand(.{ .set_max_scrollback = @intCast(lines) }),
+            .set_ambiguous_wide => |wide| try rr.queueCoreCommand(.{ .set_ambiguous_wide = wide }),
+            .set_emoji_wide => |wide| try rr.queueCoreCommand(.{ .set_emoji_wide = wide }),
+            .set_runtime_config => |config| try rr.queueCoreCommand(.{ .set_runtime_config = .{
+                .max_scrollback = @intCast(config.max_scrollback),
+                .ambiguous_wide = config.ambiguous_wide,
+                .emoji_wide = config.emoji_wide,
+                .palette = paletteToWire(config.palette),
+                .default_colors = .{
+                    .foreground = rgbToWire(config.default_colors.foreground),
+                    .background = rgbToWire(config.default_colors.background),
+                },
+                .cell_metrics = if (config.cell_metrics) |metrics| .{
+                    .width = metrics.width,
+                    .height = metrics.height,
+                } else null,
+            } }),
+            .jump_to_prompt => |direction| try rr.queueCoreCommand(.{ .jump_to_prompt = direction }),
             // §6b-1 드래그 선택: 하이라이트 span은 client 좌표라 **placeholder core에 적용해 즉시** 반영한다(렌더가 이미
             // surface.core.selectionViewportSpan을 읽음 — 새 렌더 배선/span-push 불요, 왕복 지연 없음). 복사(콘텐츠 연산)는
             // app_session.copyText가 이 span을 host로 보내 host의 extractSelection으로 한다(선택 의미론=host 단일 출처).
@@ -360,12 +430,26 @@ pub const RemoteTermBackend = struct {
                     rr.surface.core.selectionExtend(span.end.row, span.end.col);
                 }
             },
+            // host scroll과 client-local highlight를 한 transaction으로 묶는 wire가 아직 없어 별도 selection parity slice가
+            // 소유한다. 명시 분기로 남겨 새 command 누락과 구분한다.
+            .scroll_and_extend => {},
             // §입력 패리티: 마우스 리포트는 host core가 자기 mouse_tracking/format으로 인코딩·PTY 주입해야 하므로
             // (인코딩 모드가 host에만 있음) raw 이벤트를 host로 보낸다(방식 B). placeholder core에 적용하면 응답이
             // client PTY로 안 가고(빈 placeholder) 인코딩 모드도 없어 무효다.
             .report_mouse => |m| try rr.sendMouseReport(m),
-            else => {}, // scroll_and_extend(autoscroll)/focus/config는 후속 — 무시.
         }
+    }
+
+    fn rgbToWire(rgb: maru.terminal.Rgb) u32 {
+        return (@as(u32, rgb.r) << 16) | (@as(u32, rgb.g) << 8) | rgb.b;
+    }
+
+    fn paletteToWire(palette: [16]?maru.terminal.Rgb) core_command_wire.Command.Palette {
+        var wire_palette: core_command_wire.Command.Palette = .{null} ** 16;
+        for (palette, 0..) |maybe_rgb, index| {
+            wire_palette[index] = if (maybe_rgb) |rgb| rgbToWire(rgb) else null;
+        }
+        return wire_palette;
     }
 
     fn ioWriteInput(ctx: *anyopaque, bytes: []const u8) anyerror!void {

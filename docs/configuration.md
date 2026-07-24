@@ -4,9 +4,15 @@ Maru는 시작 시 사용자 설정 파일을 읽어 폰트·색·커서를 적�
 검증 동작을 정한다. 설정은 **선언적**이고 **forgiving**하다 — 설정 파일이 없거나 일부 줄이 틀려도
 터미널은 정상 동작한다.
 
-> 이 문서는 config 토대의 appearance(폰트/테마/커서) + 키바인딩 파싱을 다룬다. 동작 토글
-> (이모지 grapheme 기본값 등)·파일 변경 자동 감지 reload·설정 UI는 후속 단계다(아래 "범위와
-> 후속" 참조). 메뉴의 수동 Reload Config·Reset to Defaults는 구현됨.
+> 이 문서는 config 토대의 appearance(폰트/테마/커서) + 키바인딩 파싱을 다룬다. 메뉴의 수동 Reload Config·
+> Reset to Defaults는 구현됐고, schema 기반 설정 UI는 진행 중이다([세팅 페이지 전략](settings-page.md)).
+> 파일 변경 자동 감지 reload와 남은 bespoke 위젯은 후속 단계다(아래 "범위와 후속" 참조).
+> 수동 reload의 scrollback·ambiguous/emoji width·ANSI palette·default color·cell metric snapshot은 열린
+> in-process terminal과 `runtime_core_command_v1`을 협상한 현재 host-backed terminal에 적용된다. capability
+> 없는 구 host의 기존 runtime은 legacy scroll 외 config command가 degraded no-op이다. 새 host-backed terminal은 같은 snapshot을
+> `runtime.spawn_full`에 실어 reader 시작 전에 적용하므로 첫 output도 기본값으로 먼저 parse되지 않는다.
+> 이 계약의 capability가 없는 이미 실행 중인 구 session host는 새 필드를 조용히 무시할 수 있으므로 config-bearing
+> spawn을 거부하고 in-process terminal로 명시적으로 fallback한다. 잘못된 기본값으로 host runtime을 만들지 않는다.
 
 ## 위치
 

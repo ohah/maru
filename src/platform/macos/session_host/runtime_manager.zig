@@ -308,6 +308,17 @@ pub const RuntimeManager = struct {
         upgrade_epoch: u64,
         first_fd_slot: u16,
     ) (QuiesceError || handoff_codec.Error)!EncodedUpgradePlan {
+        return self.encodeQuiescedPlanWithAttempt(allocator, host_id, upgrade_epoch, first_fd_slot, null);
+    }
+
+    pub fn encodeQuiescedPlanWithAttempt(
+        self: *RuntimeManager,
+        allocator: std.mem.Allocator,
+        host_id: u128,
+        upgrade_epoch: u64,
+        first_fd_slot: u16,
+        attempt_record: ?[]const u8,
+    ) (QuiesceError || handoff_codec.Error)!EncodedUpgradePlan {
         if (!self.upgradeQuiesceReached() or self.host_registry.count() > handoff_codec.max_runtime_count)
             return error.UnsafeFrontier;
         var items: [handoff_codec.max_runtime_count]UpgradeItem = undefined;
@@ -356,6 +367,7 @@ pub const RuntimeManager = struct {
             .upgrade_epoch = upgrade_epoch,
             .next_handle = self.next_handle,
             .runtimes = views[0..count],
+            .attempt_record = attempt_record,
         });
         return .{ .allocator = allocator, .bytes = bytes, .resources = resources };
     }

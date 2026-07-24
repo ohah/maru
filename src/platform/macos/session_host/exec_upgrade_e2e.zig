@@ -200,6 +200,26 @@ test "U3 consecutive N-1 to N success and N to N+1 failure rolls back to N with 
     try std.testing.expectEqualStrings("23", try field(result.bytes, "exit"));
 }
 
+test "U3 second target preflight failure resumes committed N owner without host exit" {
+    const result = try runScenario("second-preflight-fail", "second_precommit_failed_resumed=ok");
+    defer result.deinit();
+    try std.testing.expectEqual(result.host_pid, try std.fmt.parseInt(c.pid_t, try field(result.bytes, "host_pid"), 10));
+    try std.testing.expectEqualStrings("committed", try field(result.bytes, "first_upgrade"));
+    try std.testing.expectEqualStrings("resumed", try field(result.bytes, "second_upgrade"));
+    try std.testing.expectEqualStrings("ground", try field(result.bytes, "parser"));
+    try std.testing.expectEqualStrings("23", try field(result.bytes, "exit"));
+}
+
+test "U3 second exec syscall failure closes slots and resumes committed N owner" {
+    const result = try runScenario("second-exec-fail", "second_precommit_failed_resumed=ok");
+    defer result.deinit();
+    try std.testing.expectEqual(result.host_pid, try std.fmt.parseInt(c.pid_t, try field(result.bytes, "host_pid"), 10));
+    try std.testing.expectEqualStrings("committed", try field(result.bytes, "first_upgrade"));
+    try std.testing.expectEqualStrings("resumed", try field(result.bytes, "second_upgrade"));
+    try std.testing.expectEqualStrings("ground", try field(result.bytes, "parser"));
+    try std.testing.expectEqualStrings("23", try field(result.bytes, "exit"));
+}
+
 test "U3 rollback self-image promotion failure keeps runtime committed and withdraws upgrade capability" {
     const result = try runScenario("target-promotion-fail", "input_output=ok");
     defer result.deinit();

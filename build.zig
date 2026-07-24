@@ -65,6 +65,8 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("tests/support/artifacts.zig"),
         .target = target,
     });
+    const session_host_product_options = b.addOptions();
+    session_host_product_options.addOption(bool, "allow_validation_only_restore", false);
 
     const exe = b.addExecutable(.{
         .name = "maru",
@@ -74,6 +76,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "maru", .module = maru_mod },
+                .{ .name = "session_host_build_options", .module = session_host_product_options.createModule() },
             },
         }),
     });
@@ -1414,6 +1417,23 @@ pub fn build(b: *std.Build) void {
     // U3 same-PID exec E2E는 macOS PTY/프로세스 API를 직접 검증한다. non-macOS session_host barrel은
     // 이 모듈을 import하지 않으므로 helper artifact도 build graph에 넣지 않아 macOS 전용 API를 컴파일하지 않는다.
     if (target.result.os.tag == .macos) {
+        // 제품 main과 같은 dispatch/bootstrap을 실제 exec하되, runtime graph가 없는 validation-only
+        // 성공은 이 별도 test artifact에만 compile-time으로 허용한다. Ambient env로 제품 binary를
+        // 성공시킬 수 없게 제품 `maru` 옵션은 위에서 항상 false다.
+        const restore_test_options = b.addOptions();
+        restore_test_options.addOption(bool, "allow_validation_only_restore", true);
+        const session_host_restore_test = b.addExecutable(.{
+            .name = "maru-session-host-restore-test",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/main.zig"),
+                .target = target,
+                .optimize = optimize,
+                .imports = &.{
+                    .{ .name = "maru", .module = maru_mod },
+                    .{ .name = "session_host_build_options", .module = restore_test_options.createModule() },
+                },
+            }),
+        });
         // 서로 다른 root source의 old/new helper artifact를 실제 exec한다. 테스트 binary를 두 번 같은
         // source로 빌드해 "교체"처럼 보이게 하지 않는다.
         const session_host_fixture_mod = b.createModule(.{
@@ -1465,6 +1485,7 @@ pub fn build(b: *std.Build) void {
         run_session_host_tests.addPrefixedArtifactArg("MARU_SESSION_HOST_UPGRADE_OLD_EXE=", session_host_upgrade_old);
         run_session_host_tests.addPrefixedArtifactArg("MARU_SESSION_HOST_UPGRADE_NEW_EXE=", session_host_upgrade_new);
         run_session_host_tests.addPrefixedArtifactArg("MARU_SESSION_HOST_UPGRADE_NEXT_EXE=", session_host_upgrade_next);
+        run_session_host_tests.addPrefixedArtifactArg("MARU_SESSION_HOST_RESTORE_TEST_EXE=", session_host_restore_test);
     }
     run_session_host_tests.addArg("MARU_SESSION_HOST_TEST_ONESHOT=maru-test-only-v1");
     run_session_host_tests.addArtifactArg(session_host_tests);

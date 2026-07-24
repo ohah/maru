@@ -145,6 +145,13 @@ test "product preflight execs the staged maru reader with only primary handoff f
         .dev = identity.dev,
         .ino = identity.ino,
         .size = identity.size,
+        .rollback_image = .{
+            .path = "/tmp/maru/preflight-rollback-current",
+            .sha256 = identity.sha256,
+            .dev = identity.dev,
+            .ino = identity.ino + 1,
+            .size = identity.size,
+        },
         .reader_min = @import("handoff_codec.zig").reader_min,
         .reader_max = @import("handoff_codec.zig").reader_max,
         .runtime_ids = &.{},

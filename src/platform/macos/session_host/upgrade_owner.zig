@@ -288,6 +288,7 @@ pub const UpgradeOwner = struct {
         execution: Execution,
         host_id: u128,
         epoch_before: u64,
+        rollback_image: attempt_record.ImageView,
         runtime_ids: []const u128,
     ) attempt_record.Error![]u8 {
         const active = if (self.attempt) |value| value else return error.InvalidValue;
@@ -318,6 +319,7 @@ pub const UpgradeOwner = struct {
             .dev = active.target.artifact.dev,
             .ino = active.target.artifact.ino,
             .size = active.target.artifact.size,
+            .rollback_image = rollback_image,
             .reader_min = active.target.reader_min,
             .reader_max = active.target.reader_max,
             .runtime_ids = runtime_ids,
@@ -529,6 +531,16 @@ fn testRestoreToken(state: attempt_record.State, role: RestoreRole) RestoreToken
         unreachable;
 }
 
+fn testRollbackImage() attempt_record.ImageView {
+    return .{
+        .path = "/tmp/maru/rollback-current",
+        .sha256 = [_]u8{0xCD} ** 32,
+        .dev = 10,
+        .ino = 11,
+        .size = 12,
+    };
+}
+
 const TestStager = struct {
     fn ops() TargetStager {
         return .{
@@ -737,6 +749,7 @@ test "upgrade owner record survives exec and restores active plus completed idem
         execution,
         0xAA,
         9,
+        testRollbackImage(),
         &.{ 0xA, 0xB },
     );
     defer std.testing.allocator.free(bytes);
@@ -779,7 +792,14 @@ test "upgrade owner restore allocation failures publish nothing and release owne
     try std.testing.expectEqual(wire.PrepareDecision.accepted, old.stagePending(testRequest(41, "/active")));
     try std.testing.expectEqual(wire.ArmDecision.armed, old.armAccepted(41));
     const execution = old.beginExecution(41).?;
-    const bytes = try old.encodeRunningRecord(std.testing.allocator, execution, 0xAA, 12, &.{0xCC});
+    const bytes = try old.encodeRunningRecord(
+        std.testing.allocator,
+        execution,
+        0xAA,
+        12,
+        testRollbackImage(),
+        &.{0xCC},
+    );
     defer std.testing.allocator.free(bytes);
     var state = try attempt_record.decode(std.testing.allocator, bytes);
     defer state.deinit();
@@ -808,7 +828,14 @@ test "upgrade owner immutable handoff allows one target to rollback transition o
     try std.testing.expectEqual(wire.PrepareDecision.accepted, old.stagePending(testRequest(50, "/active")));
     try std.testing.expectEqual(wire.ArmDecision.armed, old.armAccepted(50));
     const execution = old.beginExecution(50).?;
-    const bytes = try old.encodeRunningRecord(std.testing.allocator, execution, 0xAA, 20, &.{});
+    const bytes = try old.encodeRunningRecord(
+        std.testing.allocator,
+        execution,
+        0xAA,
+        20,
+        testRollbackImage(),
+        &.{},
+    );
     defer std.testing.allocator.free(bytes);
     var state = try attempt_record.decode(std.testing.allocator, bytes);
     defer state.deinit();

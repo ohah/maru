@@ -141,6 +141,10 @@ pub const staged_image = if (builtin.os.tag == .macos)
     @import("session_host/staged_image.zig")
 else
     struct {};
+pub const rollback_image = if (builtin.os.tag == .macos)
+    @import("session_host/rollback_image.zig")
+else
+    struct {};
 pub const upgrade_target = if (builtin.os.tag == .macos)
     @import("session_host/upgrade_target.zig")
 else

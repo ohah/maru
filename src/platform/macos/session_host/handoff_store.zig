@@ -93,6 +93,7 @@ pub const ExpectedAuthority = struct {
     dev: i64,
     ino: u64,
     size: u64,
+    rollback_image: attempt_record.ImageView,
     reader_min: u16,
     reader_max: u16,
 };
@@ -327,6 +328,11 @@ fn validateHandoff(allocator: std.mem.Allocator, expected: ExpectedAuthority, by
         !std.mem.eql(u8, nested.build_id, expected.build_id) or
         !std.mem.eql(u8, &nested.sha256, &expected.sha256) or
         nested.dev != expected.dev or nested.ino != expected.ino or nested.size != expected.size or
+        !std.mem.eql(u8, nested.rollback_path, expected.rollback_image.path) or
+        !std.mem.eql(u8, &nested.rollback_sha256, &expected.rollback_image.sha256) or
+        nested.rollback_dev != expected.rollback_image.dev or
+        nested.rollback_ino != expected.rollback_image.ino or
+        nested.rollback_size != expected.rollback_image.size or
         nested.reader_min != expected.reader_min or nested.reader_max != expected.reader_max)
         return error.InvalidState;
     var runtime_ids: [attempt_record.max_runtime_count]u128 = undefined;
@@ -444,6 +450,13 @@ fn testAttemptRecord(allocator: std.mem.Allocator, host_id: u128, attempt_id: u1
         .dev = 1,
         .ino = 2,
         .size = 3,
+        .rollback_image = .{
+            .path = "/tmp/maru/rollback-current",
+            .sha256 = [_]u8{2} ** 32,
+            .dev = 4,
+            .ino = 5,
+            .size = 6,
+        },
         .reader_min = 1,
         .reader_max = 1,
         .runtime_ids = &.{},
@@ -465,6 +478,13 @@ fn testExpected(host_id: u128, attempt_id: u128, next_handle: u64) ExpectedAutho
         .dev = 1,
         .ino = 2,
         .size = 3,
+        .rollback_image = .{
+            .path = "/tmp/maru/rollback-current",
+            .sha256 = [_]u8{2} ** 32,
+            .dev = 4,
+            .ino = 5,
+            .size = 6,
+        },
         .reader_min = 1,
         .reader_max = 1,
     };

@@ -54,6 +54,40 @@ pub const Invocation = union(enum) {
 
 pub const ParseError = error{InvalidInvocation};
 
+pub const RestoreArgBuffers = struct {
+    host_id: [32]u8 = undefined,
+    attempt_id: [32]u8 = undefined,
+    first_runtime_slot: [5]u8 = undefined,
+};
+
+/// Destructive executor가 raw argv 의미를 재구현하지 않도록 typed invocation을 parser의 exact 7개 grammar로 만든다.
+pub fn formatRestoreArgs(
+    invocation: RestoreInvocation,
+    buffers: *RestoreArgBuffers,
+) ParseError![max_invocation_args][]const u8 {
+    if (!invocation.layout.valid() or invocation.host_id == 0) return error.InvalidInvocation;
+    _ = try absolutePath(invocation.session_dir);
+    _ = try absolutePath(invocation.socket_path);
+    const host_id = std.fmt.bufPrint(&buffers.host_id, "{x:0>32}", .{invocation.host_id}) catch
+        return error.InvalidInvocation;
+    const attempt_id = std.fmt.bufPrint(&buffers.attempt_id, "{x:0>32}", .{invocation.attempt_id}) catch
+        return error.InvalidInvocation;
+    const first = std.fmt.bufPrint(
+        &buffers.first_runtime_slot,
+        "{d}",
+        .{invocation.layout.first_runtime_slot},
+    ) catch return error.InvalidInvocation;
+    return .{
+        upgrade_restore_flag,
+        if (invocation.role == .target) target_role else rollback_role,
+        invocation.session_dir,
+        invocation.socket_path,
+        host_id,
+        attempt_id,
+        first,
+    };
+}
+
 /// `maru __session-host` 뒤 argv를 전량 받은 strict parser. 남는 인자, uppercase/짧은 ID, 상대 경로,
 /// overflow slot은 모두 거부해 main·executor·restore bootstrap이 같은 의미를 소비하게 한다.
 pub fn parse(args: []const []const u8) ParseError!Invocation {
@@ -133,6 +167,12 @@ test "session host entrypoint strictly parses daemon preflight and restore roles
         "40",
     });
     try std.testing.expectEqual(@as(u128, 0), zero_attempt.restore.attempt_id);
+    var buffers: RestoreArgBuffers = .{};
+    const formatted = try formatRestoreArgs(zero_attempt.restore, &buffers);
+    const reparsed = try parse(&formatted);
+    try std.testing.expectEqual(RestoreRole.target, reparsed.restore.role);
+    try std.testing.expectEqual(@as(u128, 0), reparsed.restore.attempt_id);
+    try std.testing.expectEqual(zero_attempt.restore.layout.first_runtime_slot, reparsed.restore.layout.first_runtime_slot);
 }
 
 test "session host entrypoint rejects drifted roles ids paths slots and trailing argv" {

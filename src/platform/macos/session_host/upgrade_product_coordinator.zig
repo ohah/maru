@@ -6,10 +6,12 @@
 
 const std = @import("std");
 const c = std.c;
+const entrypoint = @import("entrypoint.zig");
 const exec_fd_set = @import("exec_fd_set.zig");
 const handoff_store = @import("handoff_store.zig");
 const host_manifest = @import("host_manifest.zig");
 const owner_lease = @import("owner_lease.zig");
+const rollback_image = @import("rollback_image.zig");
 const runtime_manager = @import("runtime_manager.zig");
 const upgrade_attempt = @import("upgrade_attempt.zig");
 const upgrade_deadline = @import("upgrade_deadline.zig");
@@ -56,11 +58,8 @@ pub const ExecError = error{ExecFailed};
 
 pub const ExecuteRequest = struct {
     target_path: [:0]const u8,
-    attempt_arg: [:0]const u8,
+    restore: entrypoint.RestoreInvocation,
     runtime_slots: []const runtime_manager.RuntimeManager.UpgradeResource,
-    primary_slot: c.fd_t,
-    backup_slot: c.fd_t,
-    owner_slot: c.fd_t,
 };
 
 pub const Layout = upgrade_fd_layout.Layout;
@@ -89,9 +88,12 @@ pub const Context = struct {
     manager: *runtime_manager.RuntimeManager,
     gate: *@import("upgrade_coordinator.zig").AdmissionGate,
     lifetime_owner: *owner_lease.OwnerLease,
+    rollback_image: *rollback_image.Authority,
     authority: Authority,
     executor: Executor,
     owner_dir: [:0]const u8,
+    session_dir: []const u8,
+    socket_path: []const u8,
     layout: Layout,
 };
 
@@ -121,6 +123,8 @@ fn processArmedWithDeadline(
         const report = ctx.owner.status(attempt_id) orelse return .not_armed;
         return if (report.status == .pending) .not_armed else .{ .terminal = report };
     };
+    if (!ctx.rollback_image.revalidate())
+        return finish(ctx.owner, attempt_id, .{ .status = .resumed, .reason = .handoff_failed });
     if (deadline.expired())
         return finish(ctx.owner, attempt_id, .{ .status = .resumed, .reason = .deadline_exceeded });
 
@@ -160,6 +164,7 @@ fn processArmedWithDeadline(
         execution,
         authority.host_id,
         authority.upgrade_epoch,
+        ctx.rollback_image.record(),
         runtime_ids,
     ) catch return resumeAndFinish(ctx, &frozen, attempt_id, .{
         .status = .resumed,
@@ -194,6 +199,7 @@ fn processArmedWithDeadline(
             .dev = execution.target.artifact.dev,
             .ino = execution.target.artifact.ino,
             .size = execution.target.artifact.size,
+            .rollback_image = ctx.rollback_image.record(),
             .reader_min = execution.target.reader_min,
             .reader_max = execution.target.reader_max,
         },
@@ -217,6 +223,11 @@ fn processArmedWithDeadline(
         return resumeAndFinish(ctx, &frozen, attempt_id, .{
             .status = .resumed,
             .reason = .target_invalid,
+        }, deadline);
+    if (!ctx.rollback_image.revalidate())
+        return resumeAndFinish(ctx, &frozen, attempt_id, .{
+            .status = .resumed,
+            .reason = .handoff_failed,
         }, deadline);
     ctx.manager.revalidateQuiescedCapture(&capture) catch
         return resumeAndFinish(ctx, &frozen, attempt_id, .{
@@ -248,17 +259,20 @@ fn processArmedWithDeadline(
     // 다시 대조하고 달라졌으면 restoring authority를 rollback한 뒤 old graph만 재개한다.
     ctx.manager.revalidateQuiescedCapture(&capture) catch
         return rollbackAuthority(ctx, &frozen, authority, attempt_id, .runtime_changed, deadline);
-
-    var attempt_buf: [33]u8 = undefined;
-    const attempt_arg = std.fmt.bufPrintZ(&attempt_buf, "{x:0>32}", .{attempt_id}) catch
+    if (!ctx.rollback_image.revalidate())
         return rollbackAuthority(ctx, &frozen, authority, attempt_id, .handoff_failed, deadline);
+
     ctx.executor.execute(ctx.executor.ctx, .{
         .target_path = execution.target.artifact.path,
-        .attempt_arg = attempt_arg,
+        .restore = .{
+            .role = .target,
+            .session_dir = ctx.session_dir,
+            .socket_path = ctx.socket_path,
+            .host_id = authority.host_id,
+            .attempt_id = attempt_id,
+            .layout = ctx.layout,
+        },
         .runtime_slots = capture.resources,
-        .primary_slot = ctx.layout.primarySlot(),
-        .backup_slot = ctx.layout.backupSlot(),
-        .owner_slot = ctx.layout.ownerSlot(),
     }) catch {};
     return rollbackAuthority(ctx, &frozen, authority, attempt_id, .exec_failed, deadline);
 }
@@ -638,14 +652,24 @@ const TestStager = struct {
 test "product coordinator uses one graph capture then rolls back exact slots and authority on exec return" {
     if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
+    const product_raw = c.getenv("MARU_SESSION_HOST_PRODUCT_EXE") orelse return error.SkipZigTest;
+    const product_raw_path = try std.Io.Dir.cwd().realPathFileAlloc(
+        std.testing.io,
+        std.mem.span(product_raw),
+        allocator,
+    );
+    defer allocator.free(product_raw_path);
+    const product = try allocator.dupeZ(u8, product_raw_path);
+    defer allocator.free(product);
+    const product_identity = try @import("staged_image.zig").inspect(product);
     var dir_buf: [192]u8 = undefined;
     const owner_dir = std.fmt.bufPrintZ(
         &dir_buf,
-        "/tmp/maru-product-coordinator-{d}",
-        .{c.getpid()},
+        "/tmp/maru-product-coordinator-{d}-{d}",
+        .{ c.getpid(), std.Io.Clock.awake.now(std.testing.io).nanoseconds },
     ) catch return error.SkipZigTest;
     _ = c.rmdir(owner_dir.ptr);
-    if (c.mkdir(owner_dir.ptr, 0o700) != 0) return error.SkipZigTest;
+    if (c.mkdir(owner_dir.ptr, 0o700) != 0) return error.TestUnexpectedResult;
     var owner_path_buf: [224]u8 = undefined;
     const owner_path = try std.fmt.bufPrintZ(&owner_path_buf, "{s}/owner.lock", .{owner_dir});
     var lifetime_owner = owner_lease.OwnerLease.acquire(owner_path) catch return error.SkipZigTest;
@@ -654,6 +678,13 @@ test "product coordinator uses one graph capture then rolls back exact slots and
         lifetime_owner.deinit();
         _ = c.rmdir(owner_dir.ptr);
     }
+    var rollback_authority = rollback_image.Authority.prepare(
+        allocator,
+        product,
+        product_identity,
+        owner_dir,
+    ) catch return error.SkipZigTest;
+    defer rollback_authority.deinit();
 
     const reg = @import("registry.zig");
     var registry = reg.TerminalRuntimeRegistry.init(allocator);
@@ -742,7 +773,13 @@ test "product coordinator uses one graph capture then rolls back exact slots and
             self.execute_count += 1;
             if (request_value.runtime_slots.len != 1 or
                 request_value.runtime_slots[0].runtime_id == 0 or
-                request_value.attempt_arg.len != 32)
+                request_value.restore.role != .target or
+                request_value.restore.attempt_id != 0xA1)
+                return error.ExecFailed;
+            var buffers: entrypoint.RestoreArgBuffers = .{};
+            const args = entrypoint.formatRestoreArgs(request_value.restore, &buffers) catch
+                return error.ExecFailed;
+            if ((entrypoint.parse(&args) catch return error.ExecFailed) != .restore)
                 return error.ExecFailed;
             // Test executor intentionally returns: coordinator must treat this exactly like execv failure.
         }
@@ -772,6 +809,7 @@ test "product coordinator uses one graph capture then rolls back exact slots and
         .manager = &manager,
         .gate = &gate,
         .lifetime_owner = &lifetime_owner,
+        .rollback_image = &rollback_authority,
         .authority = .{
             .ctx = &fake_authority,
             .snapshot = FakeAuthority.snapshot,
@@ -785,6 +823,8 @@ test "product coordinator uses one graph capture then rolls back exact slots and
             .execute = FakeExecutor.execute,
         },
         .owner_dir = owner_dir,
+        .session_dir = owner_dir,
+        .socket_path = "/tmp/maru-0/sh/000000000000000000000000000000b2.sock",
         .layout = layout,
     }, attempt_id);
     const report = switch (outcome) {

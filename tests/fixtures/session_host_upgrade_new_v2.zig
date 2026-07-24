@@ -112,7 +112,7 @@ fn killAndReap(pid: c.pid_t) bool {
     return false;
 }
 
-fn runTargetPreflight(target_path: [:0]const u8, primary_fd: c.fd_t) PreflightOutcome {
+fn runTargetPreflight(target_path: [:0]const u8, primary_fd: c.fd_t, scenario: [:0]const u8) PreflightOutcome {
     const pid = c.fork();
     if (pid < 0) return .cleanup_failed;
     if (pid == 0) {
@@ -121,7 +121,7 @@ fn runTargetPreflight(target_path: [:0]const u8, primary_fd: c.fd_t) PreflightOu
         slots.prepare(primary_fd, primary_state_slot) catch c._exit(135);
         slots.assertExactNonCloexec(&.{primary_state_slot}) catch c._exit(135);
         const preflight_arg: [*:0]const u8 = "--upgrade-preflight";
-        const argv = [_:null]?[*:0]const u8{ target_path.ptr, preflight_arg };
+        const argv = [_:null]?[*:0]const u8{ target_path.ptr, preflight_arg, scenario.ptr };
         _ = execv(target_path.ptr, &argv);
         c._exit(135);
     }
@@ -176,6 +176,28 @@ fn finishRuntime(
     defer allocator.free(dump);
     if (std.mem.indexOf(u8, dump, "MIGRATED:v2") == null or core.parser != .ground)
         return error.ParserContinuationFailed;
+}
+
+fn isSecondAttemptScenario(scenario: []const u8) bool {
+    return std.mem.eql(u8, scenario, "two-upgrade") or
+        std.mem.eql(u8, scenario, "second-preflight-fail") or
+        std.mem.eql(u8, scenario, "second-exec-fail");
+}
+
+fn resumeAfterSecondAttemptFailure(
+    ctx: Context,
+    session: *maru.pty.PtySession,
+    runtime: *session_host.handoff_codec.RuntimeState,
+    host: *session_host.handoff_codec.HostState,
+) !void {
+    try finishRuntime(ctx.allocator, session, &runtime.core);
+    const result = try std.fmt.allocPrint(
+        ctx.allocator,
+        "host_pid={d}\nchild_pid={d}\nhost_id={x}\nruntime_id={x}\nfirst_upgrade=committed\nsecond_upgrade=resumed\nsecond_precommit_failed_resumed=ok\nowner_lease=ok\nparser=ground\nexit=23\n",
+        .{ c.getpid(), runtime.child_pid, host.host_id, runtime.runtime_id },
+    );
+    defer ctx.allocator.free(result);
+    try writeResult(ctx.result_path, result, ctx.allocator);
 }
 
 fn rollbackTargetV2(allocator: std.mem.Allocator, result_path: []const u8, owner_dir: []const u8) !void {
@@ -293,8 +315,11 @@ fn restore(ctx: Context) !void {
     _ = c.close(backup_state_slot);
     _ = c.close(owner_slot);
     if (!session.upgradeEligible()) c._exit(124);
-    if (std.mem.eql(u8, ctx.scenario, "two-upgrade")) {
-        upgradeAgain(ctx, &session, &owner, runtime, &host, staged_target_identity) catch c._exit(124);
+    if (isSecondAttemptScenario(ctx.scenario)) {
+        upgradeAgain(ctx, &session, &owner, runtime, &host, staged_target_identity) catch {
+            resumeAfterSecondAttemptFailure(ctx, &session, runtime, &host) catch c._exit(124);
+            c._exit(0);
+        };
     } else {
         serveCommitted(ctx, &session, runtime, &host, staged_target_identity) catch c._exit(124);
     }
@@ -373,7 +398,9 @@ fn upgradeAgain(
     defer allocator.free(backup_readback);
     if (!std.mem.eql(u8, primary_readback, backup_readback)) return error.StateMismatch;
     try validateSecondState(allocator, primary_readback);
-    if (runTargetPreflight(next_image.path, primary_fd) != .passed) return error.TargetPreflightFailed;
+    const scenario_z = try allocator.dupeZ(u8, ctx.scenario);
+    defer allocator.free(scenario_z);
+    if (runTargetPreflight(next_image.path, primary_fd, scenario_z) != .passed) return error.TargetPreflightFailed;
     if (c.unlink(primary_path.ptr) != 0 or c.unlink(backup_path.ptr) != 0) return error.UnlinkFailed;
 
     var slots: session_host.exec_fd_set.PreparedSlots = .{};
@@ -386,8 +413,6 @@ fn upgradeAgain(
 
     const result_z = try allocator.dupeZ(u8, ctx.result_path);
     defer allocator.free(result_z);
-    const scenario_z = try allocator.dupeZ(u8, ctx.scenario);
-    defer allocator.free(scenario_z);
     const target_dev_z = try std.fmt.allocPrintSentinel(allocator, "{d}", .{next_image.identity.dev}, 0);
     defer allocator.free(target_dev_z);
     const target_ino_z = try std.fmt.allocPrintSentinel(allocator, "{d}", .{next_image.identity.ino}, 0);
@@ -421,7 +446,12 @@ fn upgradeAgain(
         rollback_size_z.ptr,
         rollback_sha_z.ptr,
     };
-    _ = execv(next_image.path.ptr, &argv);
+    if (std.mem.eql(u8, ctx.scenario, "second-exec-fail")) {
+        const missing: [*:0]const u8 = "/definitely/missing/maru-upgrade-next";
+        _ = execv(missing, &argv);
+    } else {
+        _ = execv(next_image.path.ptr, &argv);
+    }
     return error.ExecFailed;
 }
 

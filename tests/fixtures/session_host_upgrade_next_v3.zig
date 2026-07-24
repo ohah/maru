@@ -40,11 +40,13 @@ fn validateHost(allocator: std.mem.Allocator, bytes: []const u8) !void {
         return error.IdentityMismatch;
 }
 
-fn preflight(allocator: std.mem.Allocator) !void {
+fn preflight(allocator: std.mem.Allocator, scenario: []const u8) !void {
     try session_host.exec_fd_set.assertExactOpen(&.{primary_state_slot});
     const bytes = try readState(allocator, primary_state_slot);
     defer allocator.free(bytes);
     try validateHost(allocator, bytes);
+    if (std.mem.eql(u8, scenario, "second-preflight-fail"))
+        return error.InjectedPreflightFailure;
 }
 
 const Context = struct {
@@ -116,7 +118,7 @@ pub fn main(init: std.process.Init) !void {
     _ = args.next();
     const mode_or_rollback_path = args.next() orelse return error.MissingArgument;
     if (std.mem.eql(u8, mode_or_rollback_path, "--upgrade-preflight"))
-        return preflight(allocator);
+        return preflight(allocator, args.next() orelse return error.MissingArgument);
     const result_path = args.next() orelse return error.MissingArgument;
     const scenario = args.next() orelse return error.MissingArgument;
     if (!std.mem.eql(u8, scenario, "two-upgrade")) return error.InvalidScenario;

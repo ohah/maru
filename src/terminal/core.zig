@@ -5415,6 +5415,82 @@ test "linkSpanInWord classifies extra schemes and file paths, with scope gating"
     try std.testing.expect(selection.linkSpanInWord("../", full).?.kind == .file_path);
 }
 
+// 원격(host-backed) 세션은 client의 core가 빈 placeholder라 링크 감지가 host 쪽에서 일어나야 한다
+// (docs/link-detection.md §원격(host-backed) 세션). host가 방출할 span 목록을 만드는 collectViewportLinks가
+// (1) 로컬 hover와 같은 분류기를 쓰고, (2) 밑줄 범위를 토큰 전체로 잡고, (3) span마다 client가 자기 config로
+// 거를 수 있는 scope 태그를 실어 주는지 고정한다. 이게 어긋나면 원격에서 밑줄이 안 뜨거나(회귀 재발) 엉뚱한
+// 범위에 밑줄이 그어진다.
+test "collectViewportLinks: 화면 링크를 종류·scope 태그와 함께 모은다" {
+    const allocator = std.testing.allocator;
+    var core = try TerminalCore.init(allocator, .{ .cols = 40, .rows = 6 });
+    defer core.deinit();
+    var out: std.ArrayList(selection.ViewportLink) = .empty;
+    defer out.deinit(allocator);
+
+    try core.write("go https://example.com/page now\r\n"); // web 스킴
+    try core.write("see src/main.zig here\r\n"); // bare-relative 경로
+    try core.write("cfg ~/.config/maru/config\r\n"); // home 경로
+    try core.write("plain words only\r\n"); // 링크 없음
+    try selection.collectViewportLinks(&core, allocator, selection.link_scopes_full, &out);
+
+    try std.testing.expectEqual(@as(usize, 3), out.items.len);
+    // 밑줄 범위는 토큰 전체(로컬 urlSpanAtAbs와 같은 규칙) — "https://example.com/page"는 row0 col3..col26.
+    try std.testing.expectEqual(@as(u16, 0), out.items[0].span.start.row);
+    try std.testing.expectEqual(@as(u16, 3), out.items[0].span.start.col);
+    try std.testing.expectEqual(@as(u16, 26), out.items[0].span.end.col);
+    try std.testing.expectEqual(selection.LinkKind.url, out.items[0].kind);
+    try std.testing.expectEqual(selection.LinkScope.web, out.items[0].scope);
+    try std.testing.expectEqual(selection.LinkKind.file_path, out.items[1].kind);
+    try std.testing.expectEqual(selection.LinkScope.bare_relative, out.items[1].scope);
+    try std.testing.expectEqual(selection.LinkScope.home_path, out.items[2].scope);
+
+    // client 정책 필터: host는 최대 집합으로 계산하고, client가 자기 프리셋으로 거른다. web 프리셋이면 경로는 빠진다.
+    var visible: usize = 0;
+    for (out.items) |l| {
+        if (l.scope.enabledIn(selection.link_scopes_web)) visible += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 1), visible);
+}
+
+// OSC 8 명시 링크는 screen wire의 run에 셀 link id가 없어 원격 client에 전달되지 않는다. 그래서 host가 자동 감지와
+// **같은 목록**에 실어 보내야 원격에서도 명시 링크의 밑줄/열기가 산다(scope=osc8은 config 프리셋과 무관하게 표시).
+test "collectViewportLinks: OSC 8 명시 링크를 osc8 scope로 함께 싣는다" {
+    const allocator = std.testing.allocator;
+    var core = try TerminalCore.init(allocator, .{ .cols = 40, .rows = 4 });
+    defer core.deinit();
+    var out: std.ArrayList(selection.ViewportLink) = .empty;
+    defer out.deinit(allocator);
+
+    // 보이는 텍스트("docs")는 링크처럼 생기지 않았지만 OSC 8 URI가 붙어 있다 — 자동 감지로는 절대 안 잡힌다.
+    try core.write("\x1b]8;;https://example.com/deep\x1b\\docs\x1b]8;;\x1b\\ tail");
+    try selection.collectViewportLinks(&core, allocator, selection.link_scopes_full, &out);
+
+    try std.testing.expectEqual(@as(usize, 1), out.items.len);
+    try std.testing.expectEqual(selection.LinkScope.osc8, out.items[0].scope);
+    try std.testing.expectEqual(selection.LinkKind.url, out.items[0].kind);
+    try std.testing.expectEqual(@as(u16, 0), out.items[0].span.start.col);
+    try std.testing.expectEqual(@as(u16, 3), out.items[0].span.end.col); // "docs" 4칸
+    // osc8은 어떤 프리셋에서도 표시된다(로컬에서 OSC 8이 scope 토글과 무관한 것과 동일).
+    try std.testing.expect(out.items[0].scope.enabledIn(selection.link_scopes_none));
+}
+
+// soft-wrap으로 다음 행까지 이어진 링크는 두 행에 걸치지만 **하나의 링크**다. 행 단위로 스캔하면서 이어진 run을
+// 다시 분류해 중복 방출하면 client가 같은 밑줄을 두 번 그리고, 뒤 조각이 잘린 토큰으로 오분류될 수 있다.
+test "collectViewportLinks: soft-wrap된 링크를 중복 없이 한 번만 방출한다" {
+    const allocator = std.testing.allocator;
+    var core = try TerminalCore.init(allocator, .{ .cols = 20, .rows = 6 });
+    defer core.deinit();
+    var out: std.ArrayList(selection.ViewportLink) = .empty;
+    defer out.deinit(allocator);
+
+    try core.write("https://example.com/a/very/long/path"); // 20칸 폭이라 여러 행으로 wrap
+    try selection.collectViewportLinks(&core, allocator, selection.link_scopes_full, &out);
+
+    try std.testing.expectEqual(@as(usize, 1), out.items.len);
+    try std.testing.expectEqual(selection.LinkKind.url, out.items[0].kind);
+    try std.testing.expect(out.items[0].span.end.row > out.items[0].span.start.row); // 실제로 wrap을 태웠다
+}
+
 test "extractUrlAt resolves and existence-gates file paths (absolute + OSC 7 cwd-relative)" {
     // file_path 링크는 실제로 존재할 때만 절대 경로로 열린다(오탐·미존재 차단). 절대 경로는 cwd 없이,
     // bare/상대 경로는 OSC 7 cwd 기준으로 resolve. tmpDir에 실파일을 만들어 검증한다.

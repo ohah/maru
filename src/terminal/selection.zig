@@ -73,7 +73,7 @@ fn cellLinkAt(self: *const TerminalCore, abs: usize, col: u16) u32 {
 /// 같은 OSC 8 링크 id가 이어지는 셀 run의 절대 좌표 경계. 링크 텍스트 안의 공백도 포함하고
 /// (보이는 텍스트 전체에 밑줄), soft-wrap 경계 너머로도 이어진다. 행이 바뀌는 hard 줄도 같은
 /// id면 잇는다 — 한 링크가 여러 줄에 걸쳐 출력된 경우(개행 포함 echo) 모두 한 링크다.
-fn linkBoundsAt(self: *const TerminalCore, abs: usize, col: u16, id: u32) struct { start: types.SelectionPoint, end: types.SelectionPoint } {
+fn linkBoundsAt(self: *const TerminalCore, abs: usize, col: u16, id: u32) WordBounds {
     var start_row = abs;
     var start_col: u16 = col;
     outer_left: while (true) {
@@ -160,8 +160,36 @@ pub const link_scopes_none: LinkScopes = .{};
 pub const link_scopes_web: LinkScopes = .{ .web = true };
 pub const link_scopes_full: LinkScopes = .{ .web = true, .extra_schemes = true, .absolute_path = true, .home_path = true, .dot_relative = true, .bare_relative = true };
 
-/// 토큰(공백 없는 글자열) 안 첫 링크의 [start, end) 바이트 범위 + 종류.
-pub const LinkSpan = struct { start: usize, end: usize, kind: LinkKind };
+/// 링크를 만들어낸 감지 종류. `LinkScopes`의 각 비트와 1:1이고 `osc8`(명시 하이퍼링크)만 추가다 — OSC 8은 scope
+/// 토글과 무관하게 항상 링크이므로 별도 값을 둔다. 원격(host-backed) 경로에서 host가 **client config를 모른 채
+/// 최대 집합으로 계산**하고 span마다 이 값을 실어 보내면, client가 자기 `input.link-detection`으로 거를 수 있다
+/// (docs/link-detection.md §원격(host-backed) 세션 — "host 해석 / client 정책" 분리). 로컬 경로는 이 값을 쓰지 않는다.
+/// wire 인코딩은 이 enum의 `@intFromEnum`을 **비트 위치**로 쓴다(docs/persistent-session-host.md §12 `link_spans`).
+pub const LinkScope = enum(u8) {
+    web = 0,
+    extra_schemes = 1,
+    absolute_path = 2,
+    home_path = 3,
+    dot_relative = 4,
+    bare_relative = 5,
+    osc8 = 6,
+
+    /// 이 종류가 주어진 scope 토글로 켜져 있는가. `osc8`은 토글과 무관하게 항상 참이다(OSC 8 우선 규칙).
+    pub fn enabledIn(self: LinkScope, scopes: LinkScopes) bool {
+        return switch (self) {
+            .web => scopes.web,
+            .extra_schemes => scopes.extra_schemes,
+            .absolute_path => scopes.absolute_path,
+            .home_path => scopes.home_path,
+            .dot_relative => scopes.dot_relative,
+            .bare_relative => scopes.bare_relative,
+            .osc8 => true,
+        };
+    }
+};
+
+/// 토큰(공백 없는 글자열) 안 첫 링크의 [start, end) 바이트 범위 + 종류 + 그 매치를 만든 감지 종류.
+pub const LinkSpan = struct { start: usize, end: usize, kind: LinkKind, scope: LinkScope };
 
 /// web 외 추가 스킴(`://` 또는 `:` 형). 가장 이른 위치가 우선이라 목록 순서는 무관하다.
 const extra_scheme_list = [_][]const u8{ "file://", "ssh://", "ftp://", "git://", "mailto:", "tel:", "news:", "magnet:" };
@@ -184,26 +212,28 @@ fn spanIsTruncated(word: []const u8, start: usize, end: usize) bool {
 pub fn linkSpanInWord(word: []const u8, scopes: LinkScopes) ?LinkSpan {
     if (schemeUrlSpan(word, scopes)) |s| {
         if (spanIsTruncated(word, s.start, s.end)) return null;
-        return .{ .start = s.start, .end = s.end, .kind = .url };
+        return .{ .start = s.start, .end = s.end, .kind = .url, .scope = s.scope };
     }
     if (filePathSpan(word, scopes)) |s| {
         if (spanIsTruncated(word, s.start, s.end)) return null;
-        return .{ .start = s.start, .end = s.end, .kind = .file_path };
+        return .{ .start = s.start, .end = s.end, .kind = .file_path, .scope = s.scope };
     }
     return null;
 }
 
 /// 토큰 안 가장 이른 스킴부터 끝까지를 URL로 본다("dot.http://x"도 스킴부터). 끝의 문장 부호는 다듬되 균형
 /// 잡힌 닫는 ')'는 URL 일부로 보존한다(Wikipedia ".../Foo_(bar)"). 스킴만 있고 본문이 없으면 null.
-fn schemeUrlSpan(word: []const u8, scopes: LinkScopes) ?struct { start: usize, end: usize } {
+fn schemeUrlSpan(word: []const u8, scopes: LinkScopes) ?struct { start: usize, end: usize, scope: LinkScope } {
     var best: ?usize = null;
     var best_len: usize = 0;
+    var best_scope: LinkScope = .web;
     if (scopes.web) {
         for ([_][]const u8{ "https://", "http://" }) |s| {
             if (std.mem.indexOf(u8, word, s)) |i| {
                 if (best == null or i < best.?) {
                     best = i;
                     best_len = s.len;
+                    best_scope = .web;
                     if (i == 0) break; // 토큰 시작 매치 — 더 이른 건 불가, 남은 스캔 생략
                 }
             }
@@ -216,6 +246,7 @@ fn schemeUrlSpan(word: []const u8, scopes: LinkScopes) ?struct { start: usize, e
                 if (best == null or i < best.?) {
                     best = i;
                     best_len = s.len;
+                    best_scope = .extra_schemes;
                     if (i == 0) break;
                 }
             }
@@ -224,7 +255,7 @@ fn schemeUrlSpan(word: []const u8, scopes: LinkScopes) ?struct { start: usize, e
     const start = best orelse return null;
     const end = trimUrlTail(word, start);
     if (end <= start + best_len) return null; // 스킴만 있고 본문 없음
-    return .{ .start = start, .end = end };
+    return .{ .start = start, .end = end, .scope = best_scope };
 }
 
 /// URL 끝의 마무리 문장 부호를 다듬는다(균형 잡힌 닫는 ')'·']'는 보존). 반환은 [start, end)의 end.
@@ -255,17 +286,25 @@ fn trimUrlTail(word: []const u8, start: usize) usize {
 
 /// 토큰 시작이 파일 경로(절대/홈/dot-relative/bare-relative, 각 scope)면 그 범위. 경로는 URL과 달리 토큰
 /// 시작에서만 본다. 끝은 trimPathTail로 다듬되 `:line[:col]` 접미는 보존한다.
-fn filePathSpan(word: []const u8, scopes: LinkScopes) ?struct { start: usize, end: usize } {
+fn filePathSpan(word: []const u8, scopes: LinkScopes) ?struct { start: usize, end: usize, scope: LinkScope } {
     if (word.len == 0) return null;
-    const is_path =
-        (scopes.absolute_path and word[0] == '/' and !std.mem.startsWith(u8, word, "//")) or
-        (scopes.home_path and std.mem.startsWith(u8, word, "~/")) or
-        (scopes.dot_relative and (std.mem.startsWith(u8, word, "./") or std.mem.startsWith(u8, word, "../"))) or
-        (scopes.bare_relative and looksLikeBareRelative(word));
-    if (!is_path) return null;
+    // 어느 종류로 매치됐는지도 함께 돌려준다(원격 span 태그용). 판정 순서는 §감지 종류 표의 우선순위와 같다 —
+    // `./x.zig`처럼 dot_relative와 bare_relative가 둘 다 참인 토큰은 더 구체적인 dot_relative로 태그한다.
+    // 어느 하나라도 켜져 있으면 매치라는 기존 or 의미론은 그대로다(scope는 태그일 뿐 게이트가 아니다).
+    const scope: LinkScope =
+        if (scopes.absolute_path and word[0] == '/' and !std.mem.startsWith(u8, word, "//"))
+            .absolute_path
+        else if (scopes.home_path and std.mem.startsWith(u8, word, "~/"))
+            .home_path
+        else if (scopes.dot_relative and (std.mem.startsWith(u8, word, "./") or std.mem.startsWith(u8, word, "../")))
+            .dot_relative
+        else if (scopes.bare_relative and looksLikeBareRelative(word))
+            .bare_relative
+        else
+            return null;
     const end = trimPathTail(word);
     if (end == 0) return null;
-    return .{ .start = 0, .end = end };
+    return .{ .start = 0, .end = end, .scope = scope };
 }
 
 /// dot-prefix 없는 상대 경로(src/foo.zig)인지 — 오탐 억제: 슬래시 필수 + (콤마 전) 점 필수 + 첫 글자가 글자/
@@ -573,6 +612,10 @@ pub fn urlSpanAtAbs(self: *const TerminalCore, anchor: types.SelectionPoint) ?ty
     return clipAbsSpanToViewport(self, bounds.start, bounds.end, false);
 }
 
+/// 뷰포트에서 보이는 링크 하나 — 밑줄 범위(뷰포트 상대) + 종류 + 그 매치를 만든 감지 종류.
+/// `collectViewportLinks`가 채우고, 원격 경로에서 host가 wire로 실어 client의 hover 판정 입력이 된다.
+pub const ViewportLink = struct { span: types.SelectionSpan, kind: LinkKind, scope: LinkScope };
+
 /// 추출한 링크: raw 텍스트(호출자 free) + 종류. file_path는 raw 경로 텍스트(`:line:col` 포함 가능)이고
 /// resolve/존재검증은 core.zig facade(extractUrlAt)가 한다. url은 OSC 8 URI나 스킴 URL을 그대로 담는다.
 pub const ExtractedLink = struct { text: []u8, kind: LinkKind };
@@ -614,8 +657,17 @@ pub fn extractUrlAt(self: *const TerminalCore, allocator: std.mem.Allocator, vie
 /// alloc 없이 같은 분류만 한다(존재검증 stat은 안 함 — 클릭에서만). app 호출은 없어 core facade가 없지만,
 /// core.zig 테스트가 `selection.wordIsUrl(&core, ...)`로 cross-file 호출하므로 pub(linkSpanInWord와 같은 이유).
 pub fn wordIsUrl(self: *const TerminalCore, viewport_row: u16, col: u16, scopes: LinkScopes) bool {
-    if (cellLinkAt(self, screen.absRowFromViewport(self, viewport_row), col) != 0) return true;
-    const bounds = wordBoundsAt(self, viewport_row, col) orelse return false;
+    return wordLinkAt(self, viewport_row, col, scopes) != null;
+}
+
+/// `wordIsUrl`의 본체 — 판정 결과(종류 + 매치를 만든 감지 종류)까지 돌려준다. hover는 bool만 쓰지만(위 래퍼),
+/// 원격 host가 방출할 span 목록(`collectViewportLinks`)은 kind/scope가 필요하다. **분류기를 하나로 유지**해
+/// 로컬 hover와 원격 span이 같은 규칙을 쓰게 한다(둘이 갈리면 "밑줄 보이는 곳 ≠ 열리는 곳"이 된다).
+const WordLink = struct { kind: LinkKind, scope: LinkScope };
+
+fn wordLinkAt(self: *const TerminalCore, viewport_row: u16, col: u16, scopes: LinkScopes) ?WordLink {
+    if (cellLinkAt(self, screen.absRowFromViewport(self, viewport_row), col) != 0) return .{ .kind = .url, .scope = .osc8 };
+    const bounds = wordBoundsAt(self, viewport_row, col) orelse return null;
     // URL은 보통 한 단어라 짧은 스택 버퍼로 분류한다(스킴/경로 prefix는 토큰 앞이라 버퍼 안에 들어온다).
     var buf: [2048]u8 = undefined;
     var len: usize = 0;
@@ -656,12 +708,73 @@ pub fn wordIsUrl(self: *const TerminalCore, viewport_row: u16, col: u16, scopes:
             len += n;
         }
     }
-    if (linkSpanInWord(buf[0..len], scopes) == null) return false;
+    const matched = linkSpanInWord(buf[0..len], scopes) orelse return null;
     // 2048B를 넘긴 토큰 뒷부분에 U+2026이 있으면 click 경로(extractUrlAt)는 전체 토큰을 보고 잘린 링크로
     // 거부한다(span이 토큰 끝까지 이어지므로 그 U+2026은 span 안). hover도 같게 거부해 "밑줄은 떠도 클릭하면
     // 안 열리는" 불일치를 막는다. 공백 없는 2048B 초과 토큰은 사실상 URL뿐이라 이 보수적 판정이 안전하다.
-    if (overflow_ellipsis) return false;
-    return true;
+    if (overflow_ellipsis) return null;
+    return .{ .kind = matched.kind, .scope = matched.scope };
+}
+
+/// 현재 뷰포트에서 보이는 링크를 모두 모은다(원격 host가 `link_spans` record로 방출할 목록의 단일 출처).
+/// 각 항목의 span은 **뷰포트 상대 좌표**로 클립돼 있고(로컬 밑줄과 같은 `clipAbsSpanToViewport`), 밑줄 범위는
+/// 토큰/링크 run 전체다(로컬 `urlSpanAtAbs`와 같은 규칙 — 종류와 무관).
+///
+/// OSC 8 명시 링크와 자동 감지를 **한 목록에** 담는다: screen wire의 run에는 셀 OSC 8 link id가 없어 원격 client는
+/// 명시 링크도 볼 수 없기 때문이다(docs/link-detection.md §원격(host-backed) 세션). 호출자(host)는 `scopes`에
+/// 최대 집합(`link_scopes_full`)을 넘기고, 켤지 말지는 span의 `scope`를 보고 client가 정한다.
+///
+/// 스캔은 토큰 단위로 건너뛰고(같은 토큰을 다시 분류하지 않음), soft-wrap으로 다음 행까지 이어진 링크는 이미
+/// 처리한 끝 좌표를 기억해 중복 방출하지 않는다.
+pub fn collectViewportLinks(
+    self: *const TerminalCore,
+    allocator: std.mem.Allocator,
+    scopes: LinkScopes,
+    out: *std.ArrayList(ViewportLink),
+) !void {
+    out.clearRetainingCapacity();
+    var consumed: ?types.SelectionPoint = null; // 직전에 방출/판정한 run의 마지막 절대 좌표(중복 스캔 차단)
+    var row: u16 = 0;
+    while (row < self.size.rows) : (row += 1) {
+        const abs = screen.absRowFromViewport(self, row);
+        const row_cells = screen.absRow(self, abs) orelse continue;
+        var col: u16 = 0;
+        while (col < row_cells.len) {
+            // 이전 행에서 이어진 run이 이 행까지 덮으면 그 끝 다음 칸부터 본다.
+            if (consumed) |c| {
+                if (abs < c.row or (abs == c.row and col <= c.col)) {
+                    if (abs < c.row) break; // 이 행 전체가 이미 처리된 run 안
+                    col = c.col + 1;
+                    continue;
+                }
+            }
+            if (isBoundarySpace(row_cells[col])) {
+                col += 1;
+                continue;
+            }
+            const link_id = row_cells[col].link;
+            const bounds: WordBounds = if (link_id != 0)
+                linkBoundsAt(self, abs, col, link_id)
+            else
+                wordBoundsAt(self, row, col) orelse {
+                    col += 1;
+                    continue;
+                };
+            consumed = bounds.end;
+            const classified: ?WordLink = if (link_id != 0)
+                .{ .kind = .url, .scope = .osc8 }
+            else
+                wordLinkAt(self, row, col, scopes);
+            if (classified) |cl| {
+                if (clipAbsSpanToViewport(self, bounds.start, bounds.end, false)) |span| {
+                    try out.append(allocator, .{ .span = span, .kind = cl.kind, .scope = cl.scope });
+                }
+            }
+            // 같은 행 안이면 run 끝 다음 칸, 다음 행으로 이어졌으면 이 행은 여기서 끝(위 consumed 가드가 이어받는다).
+            if (bounds.end.row != abs) break;
+            col = bounds.end.col + 1;
+        }
+    }
 }
 
 // ── 검색(Find) + 추출(복사) ───────────────────────────────────────────────────────────────────────

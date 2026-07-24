@@ -1432,6 +1432,12 @@ pub fn build(b: *std.Build) void {
     // install step을 거치지 않으므로 `zig build test* --prefix ...`가 사용자 설치 경로를 쓰거나 덮어쓰지 않는다.
     const run_session_host_tests = b.addSystemCommand(&.{"/usr/bin/env"});
     run_session_host_tests.addPrefixedArtifactArg("MARU_SESSION_HOST_PRODUCT_EXE=", exe);
+    // 같은 session_host 모듈은 전체 maru test에도 중복 수집된다. 전용 step만
+    // product launch smoke를 필수화하도록 root-module introspection 대신
+    // 명시적인 test-only marker를 전달한다.
+    run_session_host_tests.addArg(
+        "MARU_SESSION_HOST_REQUIRE_PRODUCT_LAUNCH_SMOKE=maru-test-only-v1",
+    );
     // U3 same-PID exec E2E는 macOS PTY/프로세스 API를 직접 검증한다. non-macOS session_host barrel은
     // 이 모듈을 import하지 않으므로 helper artifact도 build graph에 넣지 않아 macOS 전용 API를 컴파일하지 않는다.
     if (target.result.os.tag == .macos) {
@@ -1504,6 +1510,52 @@ pub fn build(b: *std.Build) void {
         run_session_host_tests.addPrefixedArtifactArg("MARU_SESSION_HOST_UPGRADE_NEW_EXE=", session_host_upgrade_new);
         run_session_host_tests.addPrefixedArtifactArg("MARU_SESSION_HOST_UPGRADE_NEXT_EXE=", session_host_upgrade_next);
         run_session_host_tests.addPrefixedArtifactArg("MARU_SESSION_HOST_RESTORE_TEST_EXE=", session_host_restore_test);
+
+        // 릴리스 signer 경계까지 포함한 제품 N-1→current 검증은 서명 아티팩트가 있어야 하므로
+        // 기본 CI에서 실행하지 않는다. 대신 driver 자체는 기본 session-host test에서 컴파일·순수
+        // helper test까지 실행해 opt-in 경로가 소스 드리프트로 썩지 않게 한다.
+        const signed_upgrade_e2e_mod = b.createModule(.{
+            .root_source_file = b.path("tests/session_host_signed_upgrade_e2e.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{
+                .{ .name = "session_host", .module = session_host_fixture_mod },
+            },
+        });
+        const signed_upgrade_e2e_tests = b.addTest(.{
+            .root_module = signed_upgrade_e2e_mod,
+        });
+        const run_signed_upgrade_e2e_tests = b.addRunArtifact(signed_upgrade_e2e_tests);
+        run_signed_upgrade_e2e_tests.setCwd(b.path("."));
+        run_session_host_tests.step.dependOn(&run_signed_upgrade_e2e_tests.step);
+
+        const signed_upgrade_e2e = b.addExecutable(.{
+            .name = "maru-session-host-signed-upgrade-e2e",
+            .root_module = signed_upgrade_e2e_mod,
+        });
+        run_session_host_tests.step.dependOn(&signed_upgrade_e2e.step);
+        const run_signed_upgrade_e2e = b.addRunArtifact(signed_upgrade_e2e);
+        run_signed_upgrade_e2e.setCwd(b.path("."));
+        run_signed_upgrade_e2e.has_side_effects = true;
+        run_signed_upgrade_e2e.addArgs(&.{
+            b.option(
+                []const u8,
+                "session-host-signed-n1-exe",
+                "Absolute path to a caller-attested signed N-1 maru executable",
+            ) orelse "",
+            b.option(
+                []const u8,
+                "session-host-signed-current-exe",
+                "Absolute path to a signed current maru executable",
+            ) orelse "",
+            "zig-out/session-host-signed-upgrade/summary.json",
+        });
+        const signed_upgrade_e2e_step = b.step(
+            "test-session-host-signed-upgrade",
+            "Run signed N-1 to current live PTY session-host upgrade E2E (macOS)",
+        );
+        signed_upgrade_e2e_step.dependOn(&run_signed_upgrade_e2e.step);
     }
     run_session_host_tests.addArg("MARU_SESSION_HOST_TEST_ONESHOT=maru-test-only-v1");
     run_session_host_tests.addArtifactArg(session_host_tests);

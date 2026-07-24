@@ -81,7 +81,9 @@ src/
                         snapshot/delta demux와 app_session discovery→launch→attach·workspace runtime-handle 재접속을 맡는다.
                         incremental checkpoint·quick persistence·외부 attach·완전한 nonblocking writer는 P4/P5 후속. control-plane/browser
                         server와 ID·wire를 공유하지 않으며, macOS launch/peer-cred/socket adapter만 platform 경계에 두고
-                        codec/state machine은 OS 중립(platform import 0)으로 둔다. 테스트는 `zig build test-session-host`(기본 `test`에도 편입)
+                        codec/state machine은 OS 중립(platform import 0)으로 둔다. 테스트는 `zig build test-session-host`(기본 `test`에도 편입).
+                        `tests/session_host_signed_upgrade_e2e.zig`는 caller-attested signed frozen N-1/current 제품 executable을 입력받아
+                        non-empty PTY의 same-PID exec 성공 경로를 검증하는 macOS opt-in release gate다.
     windows/
     linux/
   workspace/            project workspace, layout restore, recent workspaces

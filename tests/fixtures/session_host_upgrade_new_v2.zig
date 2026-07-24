@@ -13,6 +13,7 @@ const owner_slot: c.fd_t = 43;
 const host_id_sentinel: u128 = 0x102030405060708090A0B0C0D0E0F001;
 
 fn readState(allocator: std.mem.Allocator, fd: c.fd_t) ![]u8 {
+    if (c.lseek(fd, 0, c.SEEK.SET) < 0) return error.ReadFailed;
     var stat: std.posix.Stat = undefined;
     if (c.fstat(fd, &stat) != 0 or stat.size < 0) return error.InvalidState;
     const len = std.math.cast(usize, stat.size) orelse return error.InvalidState;
@@ -29,6 +30,20 @@ fn readState(allocator: std.mem.Allocator, fd: c.fd_t) ![]u8 {
         offset += @intCast(rc);
     }
     return bytes;
+}
+
+fn preflight(allocator: std.mem.Allocator, scenario: []const u8) !void {
+    try session_host.exec_fd_set.assertExactOpen(&.{primary_state_slot});
+    const bytes = try readState(allocator, primary_state_slot);
+    defer allocator.free(bytes);
+    var host = try session_host.handoff_codec.decodeHost(allocator, bytes);
+    defer host.deinit();
+    if (host.host_id != host_id_sentinel or host.runtimes.len != 1 or
+        host.runtimes[0].runtime_id != 0xAABBCCDD or host.runtimes[0].surface_id != 7 or
+        host.runtimes[0].fd_slot != pty_slot)
+        return error.IdentityMismatch;
+    if (std.mem.eql(u8, scenario, "target-preflight-fail"))
+        return error.InjectedPreflightFailure;
 }
 
 fn writeResult(path: []const u8, text: []const u8, allocator: std.mem.Allocator) !void {
@@ -51,6 +66,7 @@ const Context = struct {
     result_path: []const u8,
     scenario: []const u8,
     owner_dir: []const u8,
+    target_identity: session_host.staged_image.Identity,
 };
 
 fn rollback(ctx: Context) noreturn {
@@ -81,6 +97,8 @@ fn restore(ctx: Context) !void {
     const staged_target_path = try std.fmt.allocPrintSentinel(allocator, "{s}/target-current", .{ctx.owner_dir}, 0);
     defer allocator.free(staged_target_path);
     const staged_target_identity = try session_host.staged_image.inspect(staged_target_path);
+    if (!session_host.staged_image.identityEqual(ctx.target_identity, staged_target_identity))
+        return error.StagedIdentityChanged;
     if (std.mem.eql(u8, ctx.scenario, "target-adopt-fail")) return error.InjectedAdoptionFailure;
     var prepared = try maru.pty.PtySession.PreparedAdoption.prepareExact(
         pty_slot,
@@ -174,12 +192,29 @@ pub fn main(init: std.process.Init) !void {
     var args = try init.minimal.args.iterateAllocator(allocator);
     defer args.deinit();
     _ = args.next();
+    const mode_or_old_path = args.next() orelse return error.MissingArgument;
+    if (std.mem.eql(u8, mode_or_old_path, "--upgrade-preflight"))
+        return preflight(allocator, args.next() orelse return error.MissingArgument);
+    const result_path = args.next() orelse return error.MissingArgument;
+    const scenario = args.next() orelse return error.MissingArgument;
+    const owner_dir = args.next() orelse return error.MissingArgument;
+    const target_dev = try std.fmt.parseInt(i64, args.next() orelse return error.MissingArgument, 10);
+    const target_ino = try std.fmt.parseInt(u64, args.next() orelse return error.MissingArgument, 10);
+    const target_size = try std.fmt.parseInt(u64, args.next() orelse return error.MissingArgument, 10);
+    var target_sha256: [32]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&target_sha256, args.next() orelse return error.MissingArgument);
     const ctx: Context = .{
         .allocator = allocator,
-        .old_path = args.next() orelse return error.MissingArgument,
-        .result_path = args.next() orelse return error.MissingArgument,
-        .scenario = args.next() orelse return error.MissingArgument,
-        .owner_dir = args.next() orelse return error.MissingArgument,
+        .old_path = mode_or_old_path,
+        .result_path = result_path,
+        .scenario = scenario,
+        .owner_dir = owner_dir,
+        .target_identity = .{
+            .dev = target_dev,
+            .ino = target_ino,
+            .size = target_size,
+            .sha256 = target_sha256,
+        },
     };
     restore(ctx) catch rollback(ctx);
 }

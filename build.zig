@@ -1411,8 +1411,8 @@ pub fn build(b: *std.Build) void {
     // install step을 거치지 않으므로 `zig build test* --prefix ...`가 사용자 설치 경로를 쓰거나 덮어쓰지 않는다.
     const run_session_host_tests = b.addSystemCommand(&.{"/usr/bin/env"});
     run_session_host_tests.addPrefixedArtifactArg("MARU_SESSION_HOST_PRODUCT_EXE=", exe);
-    // U3 same-PID exec E2E는 macOS PTY/프로세스 API를 직접 검증한다. non-macOS에서는 테스트가
-    // runtime skip하므로 helper artifact도 build graph에 넣지 않아 macOS 전용 API를 컴파일하지 않는다.
+    // U3 same-PID exec E2E는 macOS PTY/프로세스 API를 직접 검증한다. non-macOS session_host barrel은
+    // 이 모듈을 import하지 않으므로 helper artifact도 build graph에 넣지 않아 macOS 전용 API를 컴파일하지 않는다.
     if (target.result.os.tag == .macos) {
         // 서로 다른 root source의 old/new helper artifact를 실제 exec한다. 테스트 binary를 두 번 같은
         // source로 빌드해 "교체"처럼 보이게 하지 않는다.

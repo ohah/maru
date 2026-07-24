@@ -45,6 +45,53 @@ fn readState(allocator: std.mem.Allocator, fd: c.fd_t) ![]u8 {
     return bytes;
 }
 
+fn validateState(allocator: std.mem.Allocator, fd: c.fd_t) !void {
+    const bytes = try readState(allocator, fd);
+    defer allocator.free(bytes);
+    var host = try session_host.handoff_codec.decodeHost(allocator, bytes);
+    defer host.deinit();
+    if (host.host_id != host_id_sentinel or host.runtimes.len != 1 or
+        host.runtimes[0].runtime_id != 0xAABBCCDD or host.runtimes[0].surface_id != 7 or
+        host.runtimes[0].fd_slot != pty_slot)
+        return error.IdentityMismatch;
+}
+
+fn redirectStdioToDevNull() !void {
+    const null_path: [*:0]const u8 = "/dev/null";
+    const null_fd = c.open(null_path, .{ .ACCMODE = .RDWR, .CLOEXEC = true }, @as(c.mode_t, 0));
+    if (null_fd < 0) return error.OpenFailed;
+    defer {
+        if (null_fd > 2) _ = c.close(null_fd);
+    }
+    var stdio_fd: c.fd_t = 0;
+    while (stdio_fd <= 2) : (stdio_fd += 1) {
+        if (c.dup2(null_fd, stdio_fd) < 0) return error.DupFailed;
+    }
+}
+
+fn runTargetPreflight(target_path: [:0]const u8, primary_fd: c.fd_t, scenario: [:0]const u8) !bool {
+    const pid = c.fork();
+    if (pid < 0) return error.ForkFailed;
+    if (pid == 0) {
+        redirectStdioToDevNull() catch c._exit(125);
+        var slots: session_host.exec_fd_set.PreparedSlots = .{};
+        slots.prepare(primary_fd, primary_state_slot) catch c._exit(125);
+        slots.assertExactNonCloexec(&.{primary_state_slot}) catch c._exit(125);
+        const preflight_arg: [*:0]const u8 = "--upgrade-preflight";
+        const argv = [_:null]?[*:0]const u8{ target_path.ptr, preflight_arg, scenario.ptr };
+        _ = execv(target_path.ptr, &argv);
+        c._exit(125);
+    }
+    var status: c_int = undefined;
+    while (true) {
+        const waited = c.waitpid(pid, &status, 0);
+        if (waited == pid) break;
+        if (waited < 0 and std.posix.errno(waited) == .INTR) continue;
+        return error.WaitFailed;
+    }
+    return status == 0;
+}
+
 fn writeResult(path: []const u8, text: []const u8, allocator: std.mem.Allocator) !void {
     const path_z = try allocator.dupeZ(u8, path);
     defer allocator.free(path_z);
@@ -197,8 +244,9 @@ pub fn main(init: std.process.Init) !void {
         if (c.fsync(write_fd) != 0) return error.SyncFailed;
         _ = c.close(write_fd);
     }
-    if (std.mem.eql(u8, scenario, "target-decode-fail")) {
-        const corrupt_fd = c.open(state_z.ptr, .{ .ACCMODE = .WRONLY, .CLOEXEC = true }, @as(c.mode_t, 0));
+    if (std.mem.eql(u8, scenario, "target-decode-fail") or std.mem.eql(u8, scenario, "backup-decode-fail")) {
+        const corrupt_path = if (std.mem.eql(u8, scenario, "target-decode-fail")) state_z else backup_z;
+        const corrupt_fd = c.open(corrupt_path.ptr, .{ .ACCMODE = .WRONLY, .CLOEXEC = true }, @as(c.mode_t, 0));
         if (corrupt_fd < 0) return error.OpenFailed;
         defer _ = c.close(corrupt_fd);
         const corrupt = [_]u8{0};
@@ -213,6 +261,32 @@ pub fn main(init: std.process.Init) !void {
     defer _ = c.close(backup_read_fd);
     try setCloseOnExec(primary_read_fd);
     try setCloseOnExec(backup_read_fd);
+    const scenario_z = try allocator.dupeZ(u8, scenario);
+    defer allocator.free(scenario_z);
+    validateState(allocator, primary_read_fd) catch {
+        try finishRuntime(allocator, &session, &core, "preflight\n", "MIGRATED:preflight");
+        return writeResult(
+            result_path,
+            "old_preflight_failed_resumed=ok\nowner_lease=ok\nparser=ground\nexit=23\n",
+            allocator,
+        );
+    };
+    validateState(allocator, backup_read_fd) catch {
+        try finishRuntime(allocator, &session, &core, "preflight\n", "MIGRATED:preflight");
+        return writeResult(
+            result_path,
+            "old_preflight_failed_resumed=ok\nowner_lease=ok\nparser=ground\nexit=23\n",
+            allocator,
+        );
+    };
+    if (!try runTargetPreflight(target_image.path, primary_read_fd, scenario_z)) {
+        try finishRuntime(allocator, &session, &core, "preflight\n", "MIGRATED:preflight");
+        return writeResult(
+            result_path,
+            "target_preflight_failed_resumed=ok\nowner_lease=ok\nparser=ground\nexit=23\n",
+            allocator,
+        );
+    }
     if (c.unlink(state_z.ptr) != 0 or c.unlink(backup_z.ptr) != 0) return error.UnlinkFailed;
 
     var slots: session_host.exec_fd_set.PreparedSlots = .{};
@@ -225,8 +299,6 @@ pub fn main(init: std.process.Init) !void {
 
     const result_z = try allocator.dupeZ(u8, result_path);
     defer allocator.free(result_z);
-    const scenario_z = try allocator.dupeZ(u8, scenario);
-    defer allocator.free(scenario_z);
     if (std.mem.eql(u8, scenario, "old-exec-fail")) {
         const missing: [*:0]const u8 = "/definitely/missing/maru-upgrade-target";
         const bad_argv = [_:null]?[*:0]const u8{missing};
@@ -243,7 +315,38 @@ pub fn main(init: std.process.Init) !void {
     if (!session_host.staged_image.identityEqual(target_image.identity, try session_host.staged_image.inspect(target_image.path)) or
         !session_host.staged_image.identityEqual(self_image.identity, try session_host.staged_image.inspect(self_image.path)))
         return error.StagedIdentityChanged;
-    const argv = [_:null]?[*:0]const u8{ target_image.path.ptr, self_image.path.ptr, result_z.ptr, scenario_z.ptr, owner_dir_z.ptr };
+    const target_dev_z = try std.fmt.allocPrintSentinel(allocator, "{d}", .{target_image.identity.dev}, 0);
+    defer allocator.free(target_dev_z);
+    const target_ino_z = try std.fmt.allocPrintSentinel(allocator, "{d}", .{target_image.identity.ino}, 0);
+    defer allocator.free(target_ino_z);
+    const target_size_z = try std.fmt.allocPrintSentinel(allocator, "{d}", .{target_image.identity.size}, 0);
+    defer allocator.free(target_size_z);
+    const target_sha_hex = std.fmt.bytesToHex(target_image.identity.sha256, .lower);
+    const target_sha_z = try allocator.dupeZ(u8, &target_sha_hex);
+    defer allocator.free(target_sha_z);
+    const argv = [_:null]?[*:0]const u8{
+        target_image.path.ptr,
+        self_image.path.ptr,
+        result_z.ptr,
+        scenario_z.ptr,
+        owner_dir_z.ptr,
+        target_dev_z.ptr,
+        target_ino_z.ptr,
+        target_size_z.ptr,
+        target_sha_z.ptr,
+    };
+    var replacement_image: ?session_host.staged_image.StagedImage = null;
+    defer {
+        if (replacement_image) |*replacement| replacement.deinit();
+    }
+    if (std.mem.eql(u8, scenario, "target-identity-swap")) {
+        replacement_image = try session_host.staged_image.stage(
+            allocator,
+            new_path,
+            owner_dir_z,
+            "target-current",
+        );
+    }
     _ = execv(target_image.path.ptr, &argv);
     return error.ExecFailed;
 }

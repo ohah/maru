@@ -123,16 +123,41 @@ test "U3 controlled target pre-commit failure execs frozen old rollback image wi
     try std.testing.expectEqualStrings("ok", try field(result.bytes, "owner_lease"));
 }
 
-test "U3 target checksum decode failure is caught by common rollback handler using independent backup" {
-    const result = try runScenario("target-decode-fail", "rollback=ok");
+test "U3 corrupt primary is rejected by old readback before exec and original owner resumes" {
+    const result = try runScenario("target-decode-fail", "old_preflight_failed_resumed=ok");
     defer result.deinit();
     try std.testing.expectEqualStrings("ok", try field(result.bytes, "owner_lease"));
+    try std.testing.expectEqualStrings("ground", try field(result.bytes, "parser"));
+    try std.testing.expectEqualStrings("23", try field(result.bytes, "exit"));
+}
+
+test "U3 corrupt backup is rejected by old readback before exec and original owner resumes" {
+    const result = try runScenario("backup-decode-fail", "old_preflight_failed_resumed=ok");
+    defer result.deinit();
+    try std.testing.expectEqualStrings("ok", try field(result.bytes, "owner_lease"));
+    try std.testing.expectEqualStrings("ground", try field(result.bytes, "parser"));
+    try std.testing.expectEqualStrings("23", try field(result.bytes, "exit"));
+}
+
+test "U3 incompatible target preflight exits before exec and original owner resumes" {
+    const result = try runScenario("target-preflight-fail", "target_preflight_failed_resumed=ok");
+    defer result.deinit();
+    try std.testing.expectEqualStrings("ok", try field(result.bytes, "owner_lease"));
+    try std.testing.expectEqualStrings("ground", try field(result.bytes, "parser"));
     try std.testing.expectEqualStrings("23", try field(result.bytes, "exit"));
 }
 
 test "U3 target adoption failpoint is caught by common rollback handler without touching child" {
     const result = try runScenario("target-adopt-fail", "rollback=ok");
     defer result.deinit();
+    try std.testing.expectEqualStrings("ground", try field(result.bytes, "parser"));
+    try std.testing.expectEqualStrings("23", try field(result.bytes, "exit"));
+}
+
+test "U3 target path replacement after old validation is rejected by recorded identity" {
+    const result = try runScenario("target-identity-swap", "rollback=ok");
+    defer result.deinit();
+    try std.testing.expectEqualStrings("ok", try field(result.bytes, "owner_lease"));
     try std.testing.expectEqualStrings("ground", try field(result.bytes, "parser"));
     try std.testing.expectEqualStrings("23", try field(result.bytes, "exit"));
 }

@@ -965,6 +965,11 @@ pub const TerminalCore = struct {
     pub fn urlSpanAtAbs(self: *const TerminalCore, anchor: types.SelectionPoint) ?types.SelectionSpan {
         return selection.urlSpanAtAbs(self, anchor);
     }
+    /// 현재 뷰포트에 보이는 링크 전체(자동 감지 + OSC 8). 본문: selection.collectViewportLinks. 원격(host-backed)
+    /// 세션에서 host가 client에 실어 보낼 목록을 만드는 데 쓴다(docs/link-detection.md §원격(host-backed) 세션).
+    pub fn collectViewportLinks(self: *const TerminalCore, allocator: std.mem.Allocator, scopes: selection.LinkScopes, out: *std.ArrayList(selection.ViewportLink)) !void {
+        return selection.collectViewportLinks(self, allocator, scopes, out);
+    }
     /// Cmd+클릭 위치의 링크 추출 + file_path면 cwd/$HOME resolve·존재검증(호출자가 .text를 free). url(스킴·OSC 8)은
     /// 그대로, file_path는 존재하는 절대 경로(없으면 전체 null=일반 클릭). 분류는 selection, resolve는 resolveClickedPath.
     pub fn extractUrlAt(self: *const TerminalCore, allocator: std.mem.Allocator, viewport_row: u16, col: u16, scopes: selection.LinkScopes) !?selection.ExtractedLink {

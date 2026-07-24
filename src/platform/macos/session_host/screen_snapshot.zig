@@ -82,6 +82,11 @@ pub fn projectSnapshot(allocator: std.mem.Allocator, core: *terminal.TerminalCor
     for (snap.images) |img| try appendImageBlobRecords(allocator, &stream, opts.generation, img);
     for (snap.placements) |p| try appendImagePlacementRecord(allocator, &stream, opts.generation, p);
     try appendPromptMarks(allocator, &stream, opts.generation, snap, true); // OSC 133 prompt 마크(있을 때만).
+    // 뷰포트 링크(있을 때만) — client가 Cmd+hover 밑줄을 그릴 유일한 근거다(client core는 빈 placeholder).
+    var links: std.ArrayList(terminal.ViewportLink) = .empty;
+    defer links.deinit(allocator);
+    core.collectViewportLinks(allocator, terminal.link_scopes_full, &links) catch return error.OutOfMemory;
+    try appendLinkSpans(allocator, &stream, opts.generation, links.items, true);
     return stream.toOwnedSlice(allocator) catch return error.OutOfMemory;
 }
 
@@ -208,6 +213,46 @@ fn appendPromptMarks(allocator: std.mem.Allocator, stream: *std.ArrayListUnmanag
     const rec = try screen_stream.encodePromptMarks(allocator, .{ .kind = .prompt_marks, .generation = generation }, .{ .rows = rows });
     defer allocator.free(rec);
     try screen_stream.appendRecord(stream, allocator, rec);
+}
+
+/// 현재 뷰포트 링크(자동 감지 + OSC 8)를 link_spans record로 방출한다. host가 콘텐츠를 소유하므로 링크 **해석**도
+/// host가 한다 — client의 core는 빈 placeholder라 스스로 감지할 수 없다(docs/link-detection.md §원격(host-backed) 세션).
+/// client config(`input.link-detection`)를 host는 모르므로 **최대 집합으로 계산**하고 span마다 scope를 실어, 무엇을 그릴지는
+/// client가 정하게 한다. `skip_if_none`이면 링크가 하나도 없을 때 생략한다(snapshot은 common case 무비용, delta는 "이제
+/// 링크 없음"을 전달해야 하므로 false). prompt_marks와 같은 full-replace 규율.
+fn appendLinkSpans(
+    allocator: std.mem.Allocator,
+    stream: *std.ArrayListUnmanaged(u8),
+    generation: u64,
+    links: []const terminal.ViewportLink,
+    skip_if_none: bool,
+) screen_stream.DecodeError!void {
+    if (skip_if_none and links.len == 0) return;
+    const spans = allocator.alloc(screen_stream.LinkSpanWire, links.len) catch return error.OutOfMemory;
+    defer allocator.free(spans);
+    for (links, 0..) |l, i| spans[i] = .{
+        .start_row = l.span.start.row,
+        .start_col = l.span.start.col,
+        .end_row = l.span.end.row,
+        .end_col = l.span.end.col,
+        .kind = @intFromEnum(l.kind),
+        .scope = @intFromEnum(l.scope),
+    };
+    const rec = try screen_stream.encodeLinkSpans(allocator, .{ .kind = .link_spans, .generation = generation }, .{ .spans = spans });
+    defer allocator.free(rec);
+    try screen_stream.appendRecord(stream, allocator, rec);
+}
+
+/// 이전 link_spans(wire)와 현재(core 계산)가 다른가 — 둘 다 링크 없음이면 같음. delta 방출 여부 판정.
+fn linkSpansChanged(prev: ?screen_stream.LinkSpans, cur: []const terminal.ViewportLink) bool {
+    const prev_spans: []const screen_stream.LinkSpanWire = if (prev) |p| p.spans else &.{};
+    if (prev_spans.len != cur.len) return true;
+    for (cur, prev_spans) |c, p| {
+        if (c.span.start.row != p.start_row or c.span.start.col != p.start_col or
+            c.span.end.row != p.end_row or c.span.end.col != p.end_col or
+            @intFromEnum(c.kind) != p.kind or @intFromEnum(c.scope) != p.scope) return true;
+    }
+    return false;
 }
 
 /// 이전 prompt_marks(wire)와 현재(core)가 다른가 — 둘 다 마크 없음이면 같음. delta 방출 여부 판정.
@@ -395,6 +440,8 @@ pub fn computeDelta(allocator: std.mem.Allocator, prev_bytes: []const u8, core: 
     defer prev_image_gens.deinit(allocator);
     var prev_pm: ?screen_stream.PromptMarks = null;
     defer if (prev_pm) |p| p.deinit(allocator);
+    var prev_ls: ?screen_stream.LinkSpans = null;
+    defer if (prev_ls) |p| p.deinit(allocator);
     while (try rs.next()) |rec| {
         const s = try screen_stream.RecordStream.split(rec);
         switch (s.header.kind) {
@@ -416,6 +463,11 @@ pub fn computeDelta(allocator: std.mem.Allocator, prev_bytes: []const u8, core: 
                 if (prev_pm) |p| p.deinit(allocator); // 중복 방어.
                 prev_pm = null; // 리뷰 #6: free 후 null — 아래 decode가 실패하면 함수 defer가 이미-해제된 PM을 다시 free하지 않게.
                 prev_pm = try screen_stream.decodePromptMarks(allocator, s.body);
+            },
+            .link_spans => {
+                if (prev_ls) |p| p.deinit(allocator); // 중복 방어(prompt_marks와 같은 규율).
+                prev_ls = null; // free 후 null — decode 실패 시 함수 defer가 이미-해제된 목록을 다시 free하지 않게.
+                prev_ls = try screen_stream.decodeLinkSpans(allocator, s.body);
             },
             else => {},
         }
@@ -497,6 +549,15 @@ pub fn computeDelta(allocator: std.mem.Allocator, prev_bytes: []const u8, core: 
     try appendPromptMarks(allocator, &snapshot, opts.generation, snap, true);
     if (promptMarksChanged(prev_pm, snap.prompt_marks)) {
         try appendPromptMarks(allocator, &delta, opts.generation, snap, false);
+    }
+    // link_spans: prompt_marks와 같은 규율(base엔 있을 때만, delta엔 바뀌었을 때만 full-replace). 링크가 사라진
+    // 전이(있음→없음)도 delta로 보내야 client의 stale 밑줄이 남지 않으므로 skip_if_none=false다.
+    var links: std.ArrayList(terminal.ViewportLink) = .empty;
+    defer links.deinit(allocator);
+    core.collectViewportLinks(allocator, terminal.link_scopes_full, &links) catch return error.OutOfMemory;
+    try appendLinkSpans(allocator, &snapshot, opts.generation, links.items, true);
+    if (linkSpansChanged(prev_ls, links.items)) {
+        try appendLinkSpans(allocator, &delta, opts.generation, links.items, false);
     }
 
     // 커서/모드 변화 → delta.
@@ -939,4 +1000,83 @@ test "screen snapshot: computeDelta emits prompt_marks when an OSC 133 mark appe
         if (s.header.kind == .prompt_marks) found = true;
     }
     try testing.expect(found); // 마크가 생겼으니 delta에 prompt_marks record가 실린다.
+}
+
+// host가 링크를 해석해 싣지 않으면 원격 client는 Cmd+hover 밑줄을 그릴 근거가 전혀 없다(client core는 빈
+// placeholder). snapshot이 화면 링크를 좌표·종류·scope와 함께 싣는지, 링크가 없으면 record를 생략하는지 고정한다.
+test "screen snapshot: projects viewport links with kind and scope" {
+    const allocator = testing.allocator;
+    var core = try terminal.TerminalCore.init(allocator, .{ .cols = 40, .rows = 3 });
+    defer core.deinit();
+
+    // 링크가 없으면 record 자체를 내지 않는다(common case 무비용 — prompt_marks와 같은 규율).
+    {
+        const bare = try projectSnapshot(allocator, &core, .{ .generation = 1 });
+        defer allocator.free(bare);
+        try testing.expect(!try hasRecordKind(bare, .link_spans));
+    }
+
+    try core.write("go https://example.com/page now");
+    const snapshot = try projectSnapshot(allocator, &core, .{ .generation = 2 });
+    defer allocator.free(snapshot);
+
+    var seen: ?screen_stream.LinkSpans = null;
+    defer if (seen) |s| s.deinit(allocator);
+    var rs = screen_stream.RecordStream{ .bytes = snapshot };
+    while (try rs.next()) |rec| {
+        const s = try screen_stream.RecordStream.split(rec);
+        if (s.header.kind == .link_spans) seen = try screen_stream.decodeLinkSpans(allocator, s.body);
+    }
+    const ls = seen orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(@as(usize, 1), ls.spans.len);
+    try testing.expectEqual(@as(u16, 0), ls.spans[0].start_row);
+    try testing.expectEqual(@as(u16, 3), ls.spans[0].start_col); // "go " 다음부터 밑줄
+    try testing.expectEqual(@as(u16, 26), ls.spans[0].end_col);
+    try testing.expectEqual(@as(u8, 0), ls.spans[0].kind); // url
+    try testing.expectEqual(@as(u8, 0), ls.spans[0].scope); // web
+}
+
+// 링크가 생기거나 사라지면 client의 밑줄이 따라가야 한다. 생겼을 때 delta가 나가는지, **사라졌을 때도**
+// 빈 full-replace가 나가는지 고정한다 — 후자가 없으면 client에 stale 밑줄이 남는다.
+test "screen snapshot: computeDelta emits link_spans when links appear and when they disappear" {
+    const allocator = testing.allocator;
+    var core = try terminal.TerminalCore.init(allocator, .{ .cols = 40, .rows = 3 });
+    defer core.deinit();
+    const base = try projectSnapshot(allocator, &core, .{ .generation = 1 }); // 링크 없음.
+    defer allocator.free(base);
+
+    try core.write("see https://example.com/a here");
+    const appeared = try computeDelta(allocator, base, &core, .{ .generation = 1 });
+    defer appeared.deinit(allocator);
+    try testing.expect(try hasRecordKind(appeared.delta, .link_spans));
+
+    // 변화가 없으면 delta에 다시 싣지 않는다(무의미한 재전송 방지).
+    const same = try computeDelta(allocator, appeared.snapshot, &core, .{ .generation = 1 });
+    defer same.deinit(allocator);
+    try testing.expect(!try hasRecordKind(same.delta, .link_spans));
+
+    // 화면을 지우면 링크가 사라진다 → 빈 목록 full-replace가 delta로 나가야 client가 밑줄을 거둔다.
+    try core.write("\x1b[2J\x1b[H");
+    const gone = try computeDelta(allocator, appeared.snapshot, &core, .{ .generation = 1 });
+    defer gone.deinit(allocator);
+    var cleared = false;
+    var rs = screen_stream.RecordStream{ .bytes = gone.delta };
+    while (try rs.next()) |rec| {
+        const s = try screen_stream.RecordStream.split(rec);
+        if (s.header.kind != .link_spans) continue;
+        const ls = try screen_stream.decodeLinkSpans(allocator, s.body);
+        defer ls.deinit(allocator);
+        cleared = ls.spans.len == 0;
+    }
+    try testing.expect(cleared);
+}
+
+/// 레코드 스트림에 특정 kind가 있는지 — 링크 테스트들이 공유하는 작은 헬퍼.
+fn hasRecordKind(bytes: []const u8, kind: screen_stream.RecordKind) !bool {
+    var rs = screen_stream.RecordStream{ .bytes = bytes };
+    while (try rs.next()) |rec| {
+        const s = try screen_stream.RecordStream.split(rec);
+        if (s.header.kind == kind) return true;
+    }
+    return false;
 }

@@ -164,15 +164,15 @@ fn matchPosition(rule: Rule, input: Input, lines: *const LineScan) ?usize {
         .title => haystack = input.osc_title,
         .progress => haystack = input.osc_progress,
         else => {
-            const slice = regionSliceScanned(input.screen, lines, rule.region);
+            const slice = regionSliceScanned(lines, rule.region);
             haystack = slice.text;
             base = slice.offset;
         },
     }
     if (rule.gate) |g| {
-        if (!gateMatches(g, haystack)) return null;
-        // 게이트는 개별 match 위치 대신 region 끝을 tiebreak 위치로 쓴다(더 아래 region일수록 최신).
-        return base + haystack.len;
+        // 평면 조건과 같은 의미의 위치(근거가 실제로 보이는 자리)를 쓴다. region 끝을 쓰면 게이트 규칙이
+        // 위치 tiebreak에서 항상 이겨 "더 아래가 최신"이라는 의미가 깨진다.
+        return base + (gateMatchPosition(g, haystack) orelse return null);
     }
     var latest: usize = 0;
     for (rule.all) |needle| {
@@ -200,24 +200,59 @@ fn matchPosition(rule: Rule, input: Input, lines: *const LineScan) ?usize {
     return base + latest;
 }
 
-fn gateMatches(gate: Gate, text: []const u8) bool {
-    for (gate.contains) |needle| if (!containsIgnoreCase(text, needle)) return false;
+/// 게이트가 매치하면 **근거의 위치**(region 안 byte offset)를 돌려준다. 여러 근거가 맞으면 가장 아래(가장 최신
+/// chrome) 위치를 쓴다 — 평면 조건의 위치 의미와 같게 맞춰, 게이트 규칙도 같은 tiebreak 규칙을 따르게 한다.
+/// 양성 근거가 하나도 없는 게이트는 매치로 치지 않는다(빌드 검증 `validateGate`가 1차 방어, 이건 2차).
+fn gateMatchPosition(gate: Gate, text: []const u8) ?usize {
+    var latest: usize = 0;
+    var positive = false;
+    for (gate.contains) |needle| {
+        latest = @max(latest, lastIndexOfIgnoreCase(text, needle) orelse return null);
+        positive = true;
+    }
     for (gate.line_prefix) |prefix| {
         const single = [_][]const u8{prefix};
-        if (lastLinePrefixPosition(text, &single) == null) return false;
+        latest = @max(latest, lastLinePrefixPosition(text, &single) orelse return null);
+        positive = true;
     }
-    if (gate.leading_codepoint_ranges.len > 0 and lastLeadingCodepointPosition(text, gate.leading_codepoint_ranges) == null) return false;
-    for (gate.all) |sub| if (!gateMatches(sub, text)) return false;
+    if (gate.leading_codepoint_ranges.len > 0) {
+        latest = @max(latest, lastLeadingCodepointPosition(text, gate.leading_codepoint_ranges) orelse return null);
+        positive = true;
+    }
+    for (gate.all) |sub| {
+        latest = @max(latest, gateMatchPosition(sub, text) orelse return null);
+        positive = true;
+    }
     if (gate.any.len > 0) {
-        var ok = false;
-        for (gate.any) |sub| if (gateMatches(sub, text)) {
-            ok = true;
-            break;
+        var best: ?usize = null;
+        for (gate.any) |sub| if (gateMatchPosition(sub, text)) |pos| {
+            best = @max(best orelse 0, pos);
         };
-        if (!ok) return false;
+        latest = @max(latest, best orelse return null);
+        positive = true;
     }
-    for (gate.not) |sub| if (gateMatches(sub, text)) return false;
-    return true;
+    for (gate.not) |sub| if (gateMatchPosition(sub, text) != null) return null;
+    if (!positive) return null;
+    return latest;
+}
+
+/// 양성 매처가 없는 게이트는 모든 텍스트에 매치되어 규칙이 조용히 전역 발화한다. 데이터 실수를 런타임이 아니라
+/// **빌드에서** 잡는다. `not` 안의 게이트도 같은 이유로 양성 매처가 있어야 한다(비면 항상 매치되어 규칙이 죽는다).
+fn gateHasPositiveMatcher(gate: Gate) bool {
+    return gate.contains.len > 0 or gate.line_prefix.len > 0 or
+        gate.leading_codepoint_ranges.len > 0 or gate.all.len > 0 or gate.any.len > 0;
+}
+
+fn validateGate(comptime gate: Gate, comptime rule_id: []const u8) void {
+    if (!gateHasPositiveMatcher(gate)) @compileError("agent_observer rule '" ++ rule_id ++ "': 게이트에 양성 매처가 없습니다");
+    for (gate.all) |sub| validateGate(sub, rule_id);
+    for (gate.any) |sub| validateGate(sub, rule_id);
+    for (gate.not) |sub| validateGate(sub, rule_id);
+}
+
+comptime {
+    for (claude_rules) |rule| if (rule.gate) |g| validateGate(g, rule.id);
+    for (codex_rules) |rule| if (rule.gate) |g| validateGate(g, rule.id);
 }
 
 fn containsIgnoreCase(haystack: []const u8, needle: []const u8) bool {
@@ -414,8 +449,10 @@ fn lineStartAfter(lines: *const LineScan, idx: usize) usize {
     return if (idx + 1 < lines.count) lines.starts[idx + 1] else lines.text.len;
 }
 
-/// 미리 스캔한 라인 정보로 region 슬라이스를 얻는다(detect 당 1회 스캔 공유).
-fn regionSliceScanned(screen: []const u8, lines: *const LineScan, region: Region) ScreenSlice {
+/// 미리 스캔한 라인 정보로 region 슬라이스를 얻는다(detect 당 1회 스캔 공유). 대상 텍스트는 `lines.text`가
+/// 단일 출처다 — 별도 화면 인자를 받으면 스캔과 어긋난 버퍼가 넘어올 수 있어 받지 않는다.
+fn regionSliceScanned(lines: *const LineScan, region: Region) ScreenSlice {
+    const screen = lines.text;
     switch (region) {
         .screen => return .{ .text = screen, .offset = 0 },
         .title, .progress => return .{ .text = "", .offset = 0 },
@@ -458,7 +495,7 @@ fn regionSliceScanned(screen: []const u8, lines: *const LineScan, region: Region
 /// 단발 편의 래퍼(테스트·외부 호출용). 프로덕션 detect 경로는 공유 스캔을 쓰는 regionSliceScanned를 쓴다.
 fn regionSlice(screen: []const u8, region: Region) ScreenSlice {
     const lines = scanLines(screen);
-    return regionSliceScanned(screen, &lines, region);
+    return regionSliceScanned(&lines, region);
 }
 
 pub const Stabilizer = struct {
@@ -653,6 +690,40 @@ test "skip_state_update 규칙은 매치해도 상태를 바꾸지 않고 직전
     var s: Stabilizer = .{ .current = .running };
     try std.testing.expectEqual(State.running, s.observe(d, 10)); // 보류: running 유지
     try std.testing.expectEqual(State.running, s.observe(d, 20));
+}
+
+// ── 게이트 경화 회귀 ────────────────────────────────────────────────────────
+
+test "양성 매처 없는 게이트는 매치로 치지 않는다" {
+    // 빈 게이트가 참이면 규칙이 모든 화면에서 조용히 발화한다. 빌드 검증(validateGate)이 1차 방어이고,
+    // 런타임에서도 매치로 치지 않는지 여기서 못박는다.
+    try std.testing.expect(gateMatchPosition(.{}, "아무 화면") == null);
+    try std.testing.expect(gateMatchPosition(.{}, "") == null);
+    try std.testing.expect(gateMatchPosition(.{ .any = &.{.{}} }, "무엇이든") == null);
+    try std.testing.expect(!gateHasPositiveMatcher(.{}));
+    try std.testing.expect(gateHasPositiveMatcher(.{ .contains = &.{"x"} }));
+}
+
+test "게이트 매치 위치는 region 끝이 아니라 근거가 보이는 자리다" {
+    const screen = "esc to interrupt\nanswer\nready";
+    // 가장 위 줄의 근거를 잡으면 위치도 그 자리여야 한다(region 끝이면 screen.len이 되어 항상 최댓값).
+    const pos = gateMatchPosition(.{ .contains = &.{"esc to interrupt"} }, screen).?;
+    try std.testing.expectEqual(@as(usize, 0), pos);
+    try std.testing.expect(pos < screen.len);
+    // 여러 근거면 더 아래(최신) 자리를 쓴다.
+    const lower = gateMatchPosition(.{ .contains = &.{ "esc to interrupt", "ready" } }, screen).?;
+    try std.testing.expectEqual(std.mem.indexOf(u8, screen, "ready").?, lower);
+}
+
+test "게이트 규칙이 위치 tiebreak에서 아래쪽 화면 규칙에 지고 이긴다" {
+    // 게이트 근거가 위, 평면 근거가 아래 → 아래(평면)가 이긴다.
+    const rules = [_]Rule{
+        .{ .id = "gated_top", .state = .running, .priority = 100, .region = .screen, .gate = .{ .contains = &.{"esc to interrupt"} }, .visible_running = true },
+        .{ .id = "flat_bottom", .state = .idle, .priority = 100, .region = .screen, .any = &.{"ready now"}, .visible_idle = true },
+    };
+    try std.testing.expectEqual(State.idle, detectWithRules(&rules, .{ .screen = "esc to interrupt\nanswer\nready now" }).state);
+    // 반대로 게이트 근거가 아래면 게이트가 이긴다.
+    try std.testing.expectEqual(State.running, detectWithRules(&rules, .{ .screen = "ready now\nanswer\nesc to interrupt" }).state);
 }
 
 // ── 실 화면 캡처 기반 fixture (claude 2.1.218, tmux 140×45) ──────────────────

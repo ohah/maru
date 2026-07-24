@@ -34,14 +34,24 @@ pub fn HostPool(comptime Adapter: type) type {
 
         /// 성공하면 `adapter`의 소유권을 pool이 가져간다. 실패하면 caller가 계속 소유한다.
         pub fn addOwned(self: *Self, host_id: u128, adapter: *Adapter) !void {
-            if (host_id == 0 or self.entries.contains(host_id)) return error.DuplicateHost;
+            try validateInsert(self, host_id, adapter);
             try self.entries.put(self.allocator, host_id, .{ .adapter = adapter, .owned = true });
         }
 
         /// Adapter lifetime을 caller가 pool보다 길게 보장할 때만 사용한다.
         pub fn addBorrowed(self: *Self, host_id: u128, adapter: *Adapter) !void {
-            if (host_id == 0 or self.entries.contains(host_id)) return error.DuplicateHost;
+            try validateInsert(self, host_id, adapter);
             try self.entries.put(self.allocator, host_id, .{ .adapter = adapter, .owned = false });
+        }
+
+        fn validateInsert(self: *Self, host_id: u128, adapter: *Adapter) !void {
+            if (host_id == 0 or self.entries.contains(host_id)) return error.DuplicateHost;
+            // 실제 session Client/HostAdapter는 handshake에서 확정한 host_id를 1급 필드로 가진다. 외부 descriptor
+            // key와 adapter identity가 다르면 pool에 잠시라도 잘못된 routing entry를 publish하지 않는다.
+            if (comptime @hasField(Adapter, "host_id")) {
+                if (@as(u128, @intCast(@field(adapter.*, "host_id"))) != host_id)
+                    return error.HostIdentityMismatch;
+            }
         }
 
         pub fn get(self: *Self, host_id: u128) ?*Adapter {
@@ -163,4 +173,22 @@ test "host pool never deinitializes a borrowed adapter" {
         pool.deinit();
     }
     try std.testing.expectEqual(@as(usize, 0), deinit_count);
+}
+
+test "host pool rejects a descriptor key that differs from adapter handshake host id" {
+    const FakeAdapter = struct {
+        host_id: u128,
+        deinit_count: *usize,
+        fn deinit(self: *@This()) void {
+            self.deinit_count.* += 1;
+        }
+    };
+    const Pool = HostPool(FakeAdapter);
+    var deinit_count: usize = 0;
+    var adapter: FakeAdapter = .{ .host_id = 0xAA, .deinit_count = &deinit_count };
+    var pool = Pool.init(std.testing.allocator);
+    defer pool.deinit();
+    try std.testing.expectError(error.HostIdentityMismatch, pool.addBorrowed(0xBB, &adapter));
+    try std.testing.expect(pool.get(0xBB) == null);
+    try pool.addBorrowed(0xAA, &adapter);
 }

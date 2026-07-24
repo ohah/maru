@@ -41,21 +41,25 @@ const nonblocking_input_chunk: usize = 16 * 1024;
 const RemoteRuntime = remote_runtime.RemoteRuntime;
 const ClientPool = host_pool_mod.HostPool(client_mod.Client);
 
-/// 한 host connection 위의 원격 term backend. `client`는 borrowed(수명은 caller — app_session이 discovery/connect로 만든
-/// connection). `runtimes`가 handle(=surface_id)↔`RemoteRuntime`를 잇는다. **`RemoteRuntime`은 self-referential**(surface.
-/// remote가 자기 조립기를 가리킴)이라 heap에 개별 할당해 안정 주소를 준다(map value = `*RemoteRuntime`).
+/// 한 host connection 위의 원격 term backend. legacy 단일-host 모드의 `client`는 borrowed이고 pool 모드는
+/// `host_pool`만 권위로 사용한다. **`RemoteRuntime`은 self-referential**(surface.remote가 자기 조립기를 가리킴)이라
+/// heap에 개별 할당해 안정 주소를 주며, map value가 runtime과 host lease identity를 한 단위로 소유한다.
 pub const RemoteTermBackend = struct {
+    const RuntimeEntry = struct {
+        runtime: *RemoteRuntime,
+        host_id: u128,
+    };
+
     allocator: std.mem.Allocator,
     io: std.Io,
-    client: *client_mod.Client,
+    client: ?*client_mod.Client,
     host_pool: ?*ClientPool = null,
     // 앱의 in-process 라우팅 표(borrowed — 소유는 AppRuntime). attach가 원격 Term을 여기에 **원격 PtyIo**로 등록해,
     // GUI 입력 hot path(self.runtime.writeInput/resize/enqueueCoreCommand, surface.id 라우팅)가 in-process와 똑같이
     // 원격 Term에 도달하게 한다 — sink만 write_queue→client.sendInput/resize RPC로 갈린다(app_session hot path 무변경).
     // in-process Term은 write_queue PtyIo로 등록되는 것과 대칭. `remove`가 뗀다.
     surface_runtime: *SurfaceRuntime,
-    runtimes: std.AutoHashMapUnmanaged(RuntimeHandle, *RemoteRuntime) = .empty,
-    runtime_hosts: std.AutoHashMapUnmanaged(RuntimeHandle, u128) = .empty,
+    runtimes: std.AutoHashMapUnmanaged(RuntimeHandle, RuntimeEntry) = .empty,
 
     const vtable = term_backend.VTable{
         .spawn = spawn,
@@ -81,11 +85,11 @@ pub const RemoteTermBackend = struct {
     }
 
     pub fn initWithPool(allocator: std.mem.Allocator, io: std.Io, pool: *ClientPool, surface_runtime: *SurfaceRuntime) !RemoteTermBackend {
-        const spawn_client = pool.spawnHost() orelse return error.SpawnHostUnavailable;
+        _ = pool.spawnHost() orelse return error.SpawnHostUnavailable;
         return .{
             .allocator = allocator,
             .io = io,
-            .client = spawn_client,
+            .client = null,
             .host_pool = pool,
             .surface_runtime = surface_runtime,
         };
@@ -96,14 +100,12 @@ pub const RemoteTermBackend = struct {
     pub fn deinit(self: *RemoteTermBackend) void {
         var it = self.runtimes.iterator();
         while (it.next()) |kv| {
-            const host_id = self.runtime_hosts.get(kv.key_ptr.*);
             self.surface_runtime.detachSurface(kv.key_ptr.*); // link(원격 PtyIo)를 먼저 뗀다 — rr.surface가 곧 무효.
-            kv.value_ptr.*.deinit();
-            self.allocator.destroy(kv.value_ptr.*);
-            if (host_id) |id| if (self.host_pool) |pool| pool.release(id);
+            kv.value_ptr.runtime.deinit();
+            self.allocator.destroy(kv.value_ptr.runtime);
+            if (self.host_pool) |pool| pool.release(kv.value_ptr.host_id);
         }
         self.runtimes.deinit(self.allocator);
-        self.runtime_hosts.deinit(self.allocator);
         self.* = undefined;
     }
 
@@ -121,7 +123,7 @@ pub const RemoteTermBackend = struct {
         const host_id = if (self.host_pool) |pool|
             pool.spawnHostId() orelse return error.SpawnHostUnavailable
         else
-            self.client.host_id;
+            (self.client orelse return error.HostNotFound).host_id;
         return self.attachTermOnHost(host_id, handle, runtime_id_hex, size);
     }
 
@@ -140,8 +142,8 @@ pub const RemoteTermBackend = struct {
             retained = true;
             if (client.host_id != host_id) return error.HostIdentityMismatch;
             break :blk client;
-        } else if (self.client.host_id == host_id)
-            self.client
+        } else if ((self.client orelse return error.HostNotFound).host_id == host_id)
+            self.client.?
         else
             return error.HostNotFound;
         const rr = try self.allocator.create(RemoteRuntime);
@@ -151,50 +153,49 @@ pub const RemoteTermBackend = struct {
         // client-side(surface/screen)만 회수한다. spawn 경로는 방금 우리가 띄운 runtime이라 deinit(terminate)이 맞지만
         // attach는 남의 runtime이므로 detachClientSide로 되돌려야 재접속 실패가 세션을 죽이지 않는다.
         errdefer rr.detachClientSide();
-        try self.runtimes.put(self.allocator, handle, rr);
-        errdefer _ = self.runtimes.remove(handle);
-        try self.runtime_hosts.put(self.allocator, handle, host_id);
+        try self.runtimes.put(self.allocator, handle, .{ .runtime = rr, .host_id = host_id });
         return &rr.surface;
     }
 
     /// handle의 host runtime_id(hex)를 돌려준다 — workspace capture가 저장해 재실행 시 `attachTerm`으로 재접속한다(§7, e3-5).
     /// 없으면(원격 아님·미등록) null.
     pub fn runtimeIdFor(self: *RemoteTermBackend, handle: RuntimeHandle) ?[32]u8 {
-        const rr = self.runtimes.get(handle) orelse return null;
-        return rr.runtimeIdHex();
+        const entry = self.runtimes.get(handle) orelse return null;
+        return entry.runtime.runtimeIdHex();
     }
 
     pub fn runtimeHostId(self: *RemoteTermBackend, handle: RuntimeHandle) ?u128 {
-        return self.runtime_hosts.get(handle);
+        const entry = self.runtimes.get(handle) orelse return null;
+        return entry.host_id;
     }
 
     /// host-backed Term(handle)의 대기 OSC 9/777 데스크톱 알림을 host에서 pull한다(§6.32 GUI surfacing). 없거나 연결 오류면
     /// null(**best-effort** — 알림은 부가 기능이라 오류를 세션에 전파하지 않는다). 반환 `Notification.title/body`는 이 backend의
     /// allocator 소유(caller가 `deinit`). host core가 파싱한 알림(placeholder client core엔 없음)을 app_session 알림 경로에 잇는다.
     pub fn takeNotificationFor(self: *RemoteTermBackend, handle: RuntimeHandle) ?remote_runtime.Notification {
-        const rr = self.runtimes.get(handle) orelse return null;
-        return rr.takeNotification() catch return null;
+        const entry = self.runtimes.get(handle) orelse return null;
+        return entry.runtime.takeNotification() catch return null;
     }
 
     /// host-backed Term(handle)의 현재 뷰포트 선택 텍스트를 host에서 뽑는다(§6b — host의 `extractSelection` 재사용). 없거나
     /// 연결 오류면 null(best-effort — 복사는 부가라 세션에 전파 않음). caller가 free. 선택 span은 placeholder core가 렌더용으로
     /// 든 것을 app_session이 넘긴다(하이라이트=client 좌표, 복사 콘텐츠=host 해석).
     pub fn selectedTextFor(self: *RemoteTermBackend, handle: RuntimeHandle, span: maru.terminal.SelectionSpan) ?[]u8 {
-        const rr = self.runtimes.get(handle) orelse return null;
-        return (rr.selectedText(span) catch return null) orelse null;
+        const entry = self.runtimes.get(handle) orelse return null;
+        return (entry.runtime.selectedText(span) catch return null) orelse null;
     }
 
     /// host-backed Term(handle)에서 검색어 매치를 host가 찾게 하고(§6c — `findMatches` 재사용) 보이는 매치 뷰포트 span을
     /// `out_spans`에 채운다. 전체 매치 수를 돌려준다. 없거나 오류면 null(best-effort). 검색 의미론은 host core 단일 출처.
     pub fn findFor(self: *RemoteTermBackend, handle: RuntimeHandle, query: []const u8, cur_index: u32, scroll: bool, out_spans: *std.ArrayList(maru.terminal.SelectionSpan)) ?remote_runtime.RemoteRuntime.FindResult {
-        const rr = self.runtimes.get(handle) orelse return null;
-        return rr.find(query, cur_index, scroll, out_spans) catch null;
+        const entry = self.runtimes.get(handle) orelse return null;
+        return entry.runtime.find(query, cur_index, scroll, out_spans) catch null;
     }
 
     fn spawn(ctx: *anyopaque, params: SpawnParams) anyerror!*Surface {
         const self: *RemoteTermBackend = @ptrCast(@alignCast(ctx));
         if (self.runtimes.contains(params.handle)) return error.RuntimeAlreadyRegistered;
-        var selected_host_id: u128 = self.client.host_id;
+        var selected_host_id: u128 = 0;
         var retained = false;
         errdefer if (retained) self.host_pool.?.release(selected_host_id);
         const selected_client = if (self.host_pool) |pool| blk: {
@@ -203,22 +204,24 @@ pub const RemoteTermBackend = struct {
             retained = true;
             if (client.host_id != selected_host_id) return error.HostIdentityMismatch;
             break :blk client;
-        } else self.client;
+        } else blk: {
+            const client = self.client orelse return error.HostNotFound;
+            selected_host_id = client.host_id;
+            break :blk client;
+        };
         const rr = try self.allocator.create(RemoteRuntime);
         errdefer self.allocator.destroy(rr);
         const request = persistentSpawnRequest(params.request);
         try rr.spawnWithConfig(selected_client, self.allocator, self.io, params.handle, request, params.size, params.initial_config);
         errdefer rr.deinit(); // spawn 성공 후 map 삽입이 실패하면 방금 띄운 host runtime을 회수한다(orphan 방지).
-        try self.runtimes.put(self.allocator, params.handle, rr);
-        errdefer _ = self.runtimes.remove(params.handle);
-        try self.runtime_hosts.put(self.allocator, params.handle, selected_host_id);
+        try self.runtimes.put(self.allocator, params.handle, .{ .runtime = rr, .host_id = selected_host_id });
         return &rr.surface;
     }
 
     fn attach(ctx: *anyopaque, handle: RuntimeHandle, process_in_reader: bool) anyerror!RuntimeLink {
         const self: *RemoteTermBackend = @ptrCast(@alignCast(ctx));
         _ = process_in_reader; // 원격은 spawn이 이미 host에 controller attach했다(output은 host가 처리, 로컬 reader 없음).
-        const rr = self.runtimes.get(handle) orelse return error.UnknownSurface;
+        const rr = (self.runtimes.get(handle) orelse return error.UnknownSurface).runtime;
         // 원격 Term을 앱 라우팅 표에 **원격 PtyIo**로 등록한다(in-process가 write_queue PtyIo로 등록되는 것과 대칭).
         // 이후 self.runtime.writeInput/resize/enqueueCoreCommand(handle)가 이 PtyIo로 갈려 sendInput/resize RPC로 간다 —
         // GUI 입력 hot path는 로컬/원격을 모른다. handle=surface_id=pty_id라 라우팅 키 변환이 없다.
@@ -227,7 +230,7 @@ pub const RemoteTermBackend = struct {
 
     fn pump(ctx: *anyopaque, handle: RuntimeHandle) anyerror!RuntimeEventPump {
         const self: *RemoteTermBackend = @ptrCast(@alignCast(ctx));
-        const rr = self.runtimes.get(handle) orelse return error.UnknownSurface;
+        const rr = (self.runtimes.get(handle) orelse return error.UnknownSurface).runtime;
         // 원격 pump: frame loop의 drainAvailable이 delta stream을 소비하도록 vtable을 심는다(e3-1). ctx=이 RemoteRuntime.
         return RuntimeEventPump.initRemote(self.allocator, .{ .ctx = rr, .drain = drainRemote });
     }
@@ -307,38 +310,38 @@ pub const RemoteTermBackend = struct {
 
     fn writeInput(ctx: *anyopaque, handle: RuntimeHandle, bytes: []const u8) anyerror!void {
         const self: *RemoteTermBackend = @ptrCast(@alignCast(ctx));
-        const rr = self.runtimes.get(handle) orelse return error.UnknownSurface;
+        const rr = (self.runtimes.get(handle) orelse return error.UnknownSurface).runtime;
         return rr.sendInput(bytes);
     }
 
     fn writeInputNonBlocking(ctx: *anyopaque, handle: RuntimeHandle, bytes: []const u8) anyerror!usize {
         const self: *RemoteTermBackend = @ptrCast(@alignCast(ctx));
-        const rr = self.runtimes.get(handle) orelse return error.UnknownSurface;
+        const rr = (self.runtimes.get(handle) orelse return error.UnknownSurface).runtime;
         return writeInputChunk(rr, bytes);
     }
 
     fn enqueueCoreCommand(ctx: *anyopaque, handle: RuntimeHandle, cmd: CoreCommand, io: std.Io) anyerror!void {
         const self: *RemoteTermBackend = @ptrCast(@alignCast(ctx));
         _ = io;
-        const rr = self.runtimes.get(handle) orelse return error.UnknownSurface;
+        const rr = (self.runtimes.get(handle) orelse return error.UnknownSurface).runtime;
         return routeCoreCommand(rr, cmd);
     }
 
     fn resize(ctx: *anyopaque, handle: RuntimeHandle, size: maru.terminal.Size, io: std.Io) anyerror!void {
         const self: *RemoteTermBackend = @ptrCast(@alignCast(ctx));
         _ = io;
-        const rr = self.runtimes.get(handle) orelse return error.UnknownSurface;
+        const rr = (self.runtimes.get(handle) orelse return error.UnknownSurface).runtime;
         return rr.resize(size.cols, size.rows);
     }
 
     fn closeAndDetach(ctx: *anyopaque, handle: RuntimeHandle) void {
         const self: *RemoteTermBackend = @ptrCast(@alignCast(ctx));
-        if (self.runtimes.get(handle)) |rr| rr.terminate(); // host runtime kill(멱등). client 객체는 remove가 회수.
+        if (self.runtimes.get(handle)) |entry| entry.runtime.terminate(); // host runtime kill(멱등). client 객체는 remove가 회수.
     }
 
     fn close(ctx: *anyopaque, handle: RuntimeHandle) void {
         const self: *RemoteTermBackend = @ptrCast(@alignCast(ctx));
-        if (self.runtimes.get(handle)) |rr| rr.terminate();
+        if (self.runtimes.get(handle)) |entry| entry.runtime.terminate();
     }
 
     fn finishAfterTermination(ctx: *anyopaque, handle: RuntimeHandle) void {
@@ -350,11 +353,10 @@ pub const RemoteTermBackend = struct {
     fn remove(ctx: *anyopaque, handle: RuntimeHandle) void {
         const self: *RemoteTermBackend = @ptrCast(@alignCast(ctx));
         if (self.runtimes.fetchRemove(handle)) |kv| {
-            const host_id = self.runtime_hosts.fetchRemove(handle);
             self.surface_runtime.detachSurface(handle); // 라우팅 link(원격 PtyIo)를 먼저 뗀다 — rr.surface가 곧 무효.
-            kv.value.deinit(); // host terminate(멱등) + surface/remote_screen 회수. 이후 handle과 surface 포인터는 무효.
-            self.allocator.destroy(kv.value);
-            if (host_id) |entry| if (self.host_pool) |pool| pool.release(entry.value);
+            kv.value.runtime.deinit(); // host terminate(멱등) + surface/remote_screen 회수. 이후 handle과 surface 포인터는 무효.
+            self.allocator.destroy(kv.value.runtime);
+            if (self.host_pool) |pool| pool.release(kv.value.host_id);
         }
     }
 
@@ -364,24 +366,23 @@ pub const RemoteTermBackend = struct {
     /// **vtable 밖** — app_session deinit이 app_quitting일 때 직접 부른다.
     pub fn detachTerm(self: *RemoteTermBackend, handle: RuntimeHandle) void {
         if (self.runtimes.fetchRemove(handle)) |kv| {
-            const host_id = self.runtime_hosts.fetchRemove(handle);
             self.surface_runtime.detachSurface(handle);
-            kv.value.detachClientSide(); // surface/remote_screen만 회수 — terminate 안 함(runtime 생존).
-            self.allocator.destroy(kv.value);
-            if (host_id) |entry| if (self.host_pool) |pool| pool.release(entry.value);
+            kv.value.runtime.detachClientSide(); // surface/remote_screen만 회수 — terminate 안 함(runtime 생존).
+            self.allocator.destroy(kv.value.runtime);
+            if (self.host_pool) |pool| pool.release(kv.value.host_id);
         }
     }
 
     fn foregroundProcessGroup(ctx: *anyopaque, handle: RuntimeHandle) ?i32 {
         const self: *RemoteTermBackend = @ptrCast(@alignCast(ctx));
-        const rr = self.runtimes.get(handle) orelse return null;
+        const rr = (self.runtimes.get(handle) orelse return null).runtime;
         if (rr.observation.availability != .current or !rr.observation.foreground_available) return null;
         return rr.observation.foreground_pgid;
     }
 
     fn foregroundProcessNames(ctx: *anyopaque, handle: RuntimeHandle, out: []ForegroundProcessName) usize {
         const self: *RemoteTermBackend = @ptrCast(@alignCast(ctx));
-        const rr = self.runtimes.get(handle) orelse return 0;
+        const rr = (self.runtimes.get(handle) orelse return 0).runtime;
         if (rr.observation.availability != .current or !rr.observation.foreground_available) return 0;
         const count = @min(out.len, rr.observation.foreground_processes.items.len);
         @memcpy(out[0..count], rr.observation.foreground_processes.items[0..count]);
@@ -391,7 +392,7 @@ pub const RemoteTermBackend = struct {
     fn readObservation(ctx: *anyopaque, handle: RuntimeHandle, allocator: std.mem.Allocator, out: *term_backend.RuntimeObservation, include_foreground: bool) anyerror!void {
         const self: *RemoteTermBackend = @ptrCast(@alignCast(ctx));
         _ = include_foreground; // host event가 bounded cadence로 foreground까지 coherent하게 갱신한다.
-        const rr = self.runtimes.get(handle) orelse return error.UnknownSurface;
+        const rr = (self.runtimes.get(handle) orelse return error.UnknownSurface).runtime;
         if (out.availability == rr.observation.availability and
             out.revision == rr.observation.revision and
             out.size.cols == rr.observation.size.cols and
@@ -403,14 +404,14 @@ pub const RemoteTermBackend = struct {
     fn refreshObservation(ctx: *anyopaque, handle: RuntimeHandle, allocator: std.mem.Allocator, out: *term_backend.RuntimeObservation, include_foreground: bool) anyerror!void {
         const self: *RemoteTermBackend = @ptrCast(@alignCast(ctx));
         _ = include_foreground;
-        const rr = self.runtimes.get(handle) orelse return error.UnknownSurface;
+        const rr = (self.runtimes.get(handle) orelse return error.UnknownSurface).runtime;
         try rr.refreshObservation();
         try out.replace(allocator, rr.observation.view());
     }
 
     fn dumpRecentText(ctx: *anyopaque, handle: RuntimeHandle, allocator: std.mem.Allocator, max_rows: usize, max_bytes: usize) anyerror![]u8 {
         const self: *RemoteTermBackend = @ptrCast(@alignCast(ctx));
-        const rr = self.runtimes.get(handle) orelse return error.UnknownSurface;
+        const rr = (self.runtimes.get(handle) orelse return error.UnknownSurface).runtime;
         return rr.remote_screen.dumpRecentTextUtf8(allocator, self.io, max_rows, max_bytes);
     }
 
@@ -584,6 +585,16 @@ const daemon = @import("daemon.zig");
 
 extern "c" fn usleep(usec: c_uint) c_int;
 
+fn addOwnedClient(pool: *ClientPool, allocator: std.mem.Allocator, client_value: client_mod.Client) !u128 {
+    const client = try allocator.create(client_mod.Client);
+    errdefer allocator.destroy(client);
+    client.* = client_value;
+    errdefer client.deinit();
+    const host_id = client.host_id;
+    try pool.addOwned(host_id, client);
+    return host_id;
+}
+
 test "remote term backend: drives a real host runtime through the TermRuntimeBackend contract" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = testing.allocator;
@@ -609,7 +620,7 @@ test "remote term backend: drives a real host runtime through the TermRuntimeBac
         _ = c.rmdir(dir_path.ptr);
     }
 
-    var client: client_mod.Client = blk: {
+    const client_value: client_mod.Client = blk: {
         var attempts: usize = 0;
         while (attempts < 150) : (attempts += 1) {
             if (client_mod.Client.connect(allocator, socket_path, "gui")) |cl| break :blk cl else |_| _ = usleep(20 * 1000);
@@ -617,13 +628,16 @@ test "remote term backend: drives a real host runtime through the TermRuntimeBac
         try testing.expect(false);
         return;
     };
-    defer client.deinit();
+    var pool = ClientPool.init(allocator);
+    defer pool.deinit();
+    const host_id = try addOwnedClient(&pool, allocator, client_value);
+    try pool.setSpawnHost(host_id);
 
     // 앱 라우팅 표(GUI 입력 hot path가 쓰는 그 표). backend가 원격 Term을 여기 등록한다.
     var surface_runtime = maru.app.SurfaceRuntime.init(allocator);
     defer surface_runtime.deinit();
 
-    var be_impl = RemoteTermBackend.init(allocator, io, &client, &surface_runtime);
+    var be_impl = try RemoteTermBackend.initWithPool(allocator, io, &pool, &surface_runtime);
     defer be_impl.deinit();
     const be = be_impl.backend();
 
@@ -635,6 +649,19 @@ test "remote term backend: drives a real host runtime through the TermRuntimeBac
         .size = size,
         .queue_capacity = 16,
     });
+    try testing.expectError(error.RuntimeAlreadyRegistered, be.spawn(.{
+        .handle = 1,
+        .request = .{ .command = "/bin/cat", .size = size },
+        .size = size,
+        .queue_capacity = 16,
+    }));
+    const existing_runtime_id = be_impl.runtimeIdFor(1).?;
+    try testing.expectError(
+        error.RuntimeAlreadyRegistered,
+        be_impl.attachTermOnHost(host_id, 1, existing_runtime_id, size),
+    );
+    try testing.expectEqual(@as(usize, 1), be_impl.runtimes.count());
+    try testing.expectError(error.HostInUse, pool.remove(host_id));
 
     // Surface가 원격 화면을 렌더한다(초기 cat 화면 = 빈 40x10).
     surface.lockCore(io);
@@ -670,6 +697,152 @@ test "remote term backend: drives a real host runtime through the TermRuntimeBac
     be.closeAndDetach(1);
     be.remove(1); // client-side 회수(map 제거 + SurfaceRuntime detach + host terminate 멱등).
     try testing.expectEqual(@as(usize, 0), be_impl.runtimes.count());
+    try testing.expect(try pool.remove(host_id));
+    try testing.expectError(error.SpawnHostUnavailable, be.spawn(.{
+        .handle = 2,
+        .request = .{ .command = "/bin/cat", .size = size },
+        .size = size,
+        .queue_capacity = 16,
+    }));
     // remove가 라우팅 표에서도 뗐다 — 이제 hot path 입력은 UnknownSurface(dangling link 없음).
     try testing.expectError(error.UnknownSurface, surface_runtime.writeInput(1, .{ .bytes = "x" }));
+}
+
+test "remote term backend: two daemon pool routes exact hosts and retiring A preserves B" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    const io = testing.io;
+
+    var dir_a_buf: [256]u8 = undefined;
+    const dir_a = std.fmt.bufPrintZ(&dir_a_buf, "/tmp/maru-sh-pool-a-{d}", .{c.getpid()}) catch return error.SkipZigTest;
+    var socket_a_buf: [320]u8 = undefined;
+    const socket_a = std.fmt.bufPrintZ(&socket_a_buf, "{s}/control.sock", .{dir_a}) catch return error.SkipZigTest;
+    var dir_b_buf: [256]u8 = undefined;
+    const dir_b = std.fmt.bufPrintZ(&dir_b_buf, "/tmp/maru-sh-pool-b-{d}", .{c.getpid()}) catch return error.SkipZigTest;
+    var socket_b_buf: [320]u8 = undefined;
+    const socket_b = std.fmt.bufPrintZ(&socket_b_buf, "{s}/control.sock", .{dir_b}) catch return error.SkipZigTest;
+
+    const child_a = c.fork();
+    if (child_a < 0) return error.SkipZigTest;
+    if (child_a == 0) {
+        _ = c.setsid();
+        daemon.runSessionHost(std.heap.page_allocator, io, dir_a, socket_a) catch {};
+        c._exit(0);
+    }
+    const child_b = c.fork();
+    if (child_b < 0) {
+        _ = c.kill(child_a, posix.SIG.TERM);
+        var status: c_int = undefined;
+        _ = c.waitpid(child_a, &status, 0);
+        return error.SkipZigTest;
+    }
+    if (child_b == 0) {
+        _ = c.setsid();
+        daemon.runSessionHost(std.heap.page_allocator, io, dir_b, socket_b) catch {};
+        c._exit(0);
+    }
+    defer {
+        _ = c.kill(child_a, posix.SIG.TERM);
+        _ = c.kill(child_b, posix.SIG.TERM);
+        var status: c_int = undefined;
+        _ = c.waitpid(child_a, &status, 0);
+        _ = c.waitpid(child_b, &status, 0);
+        _ = c.unlink(socket_a.ptr);
+        _ = c.unlink(socket_b.ptr);
+        _ = c.rmdir(dir_a.ptr);
+        _ = c.rmdir(dir_b.ptr);
+    }
+
+    const connect_a: client_mod.Client = blk: {
+        var attempts: usize = 0;
+        while (attempts < 150) : (attempts += 1) {
+            if (client_mod.Client.connect(allocator, socket_a, "gui")) |client| break :blk client else |_| _ = usleep(20 * 1000);
+        }
+        return error.TestUnexpectedResult;
+    };
+    const connect_b: client_mod.Client = blk: {
+        var attempts: usize = 0;
+        while (attempts < 150) : (attempts += 1) {
+            if (client_mod.Client.connect(allocator, socket_b, "gui")) |client| break :blk client else |_| _ = usleep(20 * 1000);
+        }
+        var failed_a = connect_a;
+        failed_a.deinit();
+        return error.TestUnexpectedResult;
+    };
+    const host_a = connect_a.host_id;
+    const host_b = connect_b.host_id;
+    try testing.expect(host_a != host_b);
+
+    var pool = ClientPool.init(allocator);
+    defer pool.deinit();
+    try testing.expectEqual(host_a, try addOwnedClient(&pool, allocator, connect_a));
+    try testing.expectEqual(host_b, try addOwnedClient(&pool, allocator, connect_b));
+    try pool.setSpawnHost(host_a);
+
+    var surface_runtime = maru.app.SurfaceRuntime.init(allocator);
+    defer surface_runtime.deinit();
+    var be_impl = try RemoteTermBackend.initWithPool(allocator, io, &pool, &surface_runtime);
+    defer be_impl.deinit();
+    const be = be_impl.backend();
+    const size: maru.terminal.Size = .{ .cols = 40, .rows = 10 };
+
+    _ = try be.spawn(.{
+        .handle = 11,
+        .request = .{ .command = "/bin/cat", .size = size },
+        .size = size,
+        .queue_capacity = 16,
+    });
+    _ = try be.attach(11, true);
+    try pool.setSpawnHost(host_b);
+    const surface_b = try be.spawn(.{
+        .handle = 22,
+        .request = .{ .command = "/bin/cat", .size = size },
+        .size = size,
+        .queue_capacity = 16,
+    });
+    _ = try be.attach(22, true);
+    try testing.expectEqual(host_a, be_impl.runtimeHostId(11).?);
+    try testing.expectEqual(host_b, be_impl.runtimeHostId(22).?);
+    try testing.expectError(error.HostInUse, pool.remove(host_a));
+
+    var pump_b = try be.pump(22);
+    try surface_runtime.writeInput(22, .{ .bytes = "before\n" });
+    var saw_before = false;
+    var attempts: usize = 0;
+    while (attempts < 100 and !saw_before) : (attempts += 1) {
+        _ = try pump_b.drainAvailable();
+        surface_b.lockCore(io);
+        const cells = surface_b.renderSnapshot().cells;
+        for (cells) |cell| if (cell.codepoint == 'b') {
+            saw_before = true;
+            break;
+        };
+        surface_b.unlockCore(io);
+        if (!saw_before) _ = usleep(20 * 1000);
+    }
+    try testing.expect(saw_before);
+
+    be.closeAndDetach(11);
+    be.remove(11);
+    try testing.expect(try pool.remove(host_a));
+    try testing.expectEqual(host_b, be_impl.runtimeHostId(22).?);
+    try surface_runtime.writeInput(22, .{ .bytes = "after\n" });
+    var saw_after = false;
+    attempts = 0;
+    while (attempts < 100 and !saw_after) : (attempts += 1) {
+        _ = try pump_b.drainAvailable();
+        surface_b.lockCore(io);
+        const cells = surface_b.renderSnapshot().cells;
+        for (cells) |cell| if (cell.codepoint == 'a') {
+            saw_after = true;
+            break;
+        };
+        surface_b.unlockCore(io);
+        if (!saw_after) _ = usleep(20 * 1000);
+    }
+    try testing.expect(saw_after);
+
+    be.closeAndDetach(22);
+    be.remove(22);
+    try testing.expect(try pool.remove(host_b));
 }

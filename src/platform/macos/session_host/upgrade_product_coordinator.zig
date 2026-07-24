@@ -60,6 +60,7 @@ pub const ExecuteRequest = struct {
     target_path: [:0]const u8,
     restore: entrypoint.RestoreInvocation,
     runtime_slots: []const runtime_manager.RuntimeManager.UpgradeResource,
+    deadline: upgrade_deadline.Deadline,
 };
 
 pub const Layout = upgrade_fd_layout.Layout;
@@ -274,6 +275,7 @@ fn processArmedWithDeadline(
             .layout = ctx.layout,
         },
         .runtime_slots = capture.resources,
+        .deadline = deadline,
     }) catch {};
     return rollbackAuthority(ctx, &frozen, authority, attempt_id, .exec_failed, deadline);
 }

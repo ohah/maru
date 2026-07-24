@@ -168,10 +168,30 @@ pub const PreparedAdoption = struct {
         self.state = .validated;
     }
 
-    /// HostAuthority의 prepared allocation이 끝난 뒤 final stable address에서
-    /// 호출한다. 활성화 뒤 publication은 이 struct 안에서 다시 이동하지 않는다.
-    pub fn activatePublication(self: *PreparedAdoption) Error!*Published {
-        if (self.state != .validated) return error.InvalidManifest;
+    /// Restore activation의 단일 durable frontier. 기존 exact `restoring`
+    /// generation을 마지막으로 재검증한 token만 ready descriptor로
+    /// republish하고, 성공한 경우에만 destructive lifetime owner가 된다.
+    pub fn commitReadyPublication(
+        self: *PreparedAdoption,
+        ready_descriptor: Descriptor,
+    ) Error!*Published {
+        if (self.state != .validated or ready_descriptor.lifecycle != .ready or
+            ready_descriptor.host_id != self.manifest.host_id or
+            !std.mem.eql(u8, ready_descriptor.endpoint, self.manifest.endpoint))
+            return error.InvalidManifest;
+        const epoch_ok = ready_descriptor.upgrade_epoch == self.manifest.upgrade_epoch or
+            (self.manifest.upgrade_epoch != std.math.maxInt(u64) and
+                ready_descriptor.upgrade_epoch == self.manifest.upgrade_epoch + 1);
+        if (!epoch_ok) return error.InvalidManifest;
+        // Same-epoch publication is rollback recovery, not a new generation.
+        // It must preserve the exact executable/wire identity recorded by the
+        // restoring manifest; only a target commit may advance that identity.
+        if (ready_descriptor.upgrade_epoch == self.manifest.upgrade_epoch and
+            (!std.mem.eql(u8, ready_descriptor.build_id, self.manifest.build_id) or
+                ready_descriptor.protocol_major != self.manifest.protocol_major or
+                ready_descriptor.screen_codec_version != self.manifest.screen_codec_version))
+            return error.InvalidManifest;
+        try self.publication.republish(ready_descriptor);
         self.state = .active;
         return &self.publication;
     }
@@ -196,6 +216,23 @@ pub const PreparedAdoption = struct {
             .dead => return,
         }
         self.state = .dead;
+    }
+};
+
+/// `HostAuthority`가 embedded `Published` 주소를 장기간 borrow하므로 restore
+/// adoption은 heap에 pin한다. Wrapper 이동은 pointee 주소를 바꾸지 않는다.
+pub const PinnedAdoption = struct {
+    allocator: std.mem.Allocator,
+    value: *PreparedAdoption,
+
+    pub fn get(self: *PinnedAdoption) *PreparedAdoption {
+        return self.value;
+    }
+
+    pub fn deinit(self: *PinnedAdoption) void {
+        self.value.deinit();
+        self.allocator.destroy(self.value);
+        self.* = undefined;
     }
 };
 
@@ -315,6 +352,26 @@ pub fn prepareAdoptRestoring(
         },
         .manifest = loaded.manifest,
     };
+}
+
+pub fn prepareAdoptRestoringPinned(
+    allocator: std.mem.Allocator,
+    session_dir: [:0]const u8,
+    host_id: u128,
+    expected_epoch: u64,
+    expected_endpoint: []const u8,
+) Error!PinnedAdoption {
+    const value = allocator.create(PreparedAdoption) catch
+        return error.OutOfMemory;
+    errdefer allocator.destroy(value);
+    value.* = try prepareAdoptRestoring(
+        allocator,
+        session_dir,
+        host_id,
+        expected_epoch,
+        expected_endpoint,
+    );
+    return .{ .allocator = allocator, .value = value };
 }
 
 pub fn load(
@@ -826,21 +883,36 @@ test "host manifest restoring adoption discard preserves disk and commit transfe
     var still_present = try load(std.testing.allocator, dir, host_id);
     still_present.deinit();
 
-    var prepared = try prepareAdoptRestoring(
+    var prepared = try prepareAdoptRestoringPinned(
         std.testing.allocator,
         dir,
         host_id,
         descriptor.upgrade_epoch,
         endpoint,
     );
-    try prepared.revalidate(dir);
+    try prepared.get().revalidate(dir);
     // Same-PID exec loses the old Published value without withdrawing disk.
     // Mirror that ownership move explicitly in the process-local test.
     published.deinitMemory();
-    _ = try prepared.activatePublication();
     defer prepared.deinit();
-    try std.testing.expectEqual(Lifecycle.restoring, prepared.manifest.lifecycle);
-    try std.testing.expectError(error.InvalidManifest, prepared.activatePublication());
+    var ready_descriptor = descriptor;
+    ready_descriptor.lifecycle = .ready;
+    var invalid_rollback = ready_descriptor;
+    invalid_rollback.protocol_major += 1;
+    try std.testing.expectError(
+        error.InvalidManifest,
+        prepared.get().commitReadyPublication(invalid_rollback),
+    );
+    ready_descriptor.upgrade_epoch += 1;
+    _ = try prepared.get().commitReadyPublication(ready_descriptor);
+    var ready = try load(std.testing.allocator, dir, host_id);
+    defer ready.deinit();
+    try std.testing.expectEqual(Lifecycle.ready, ready.lifecycle);
+    try std.testing.expectEqual(@as(u64, 5), ready.upgrade_epoch);
+    try std.testing.expectError(
+        error.InvalidManifest,
+        prepared.get().commitReadyPublication(ready_descriptor),
+    );
 }
 
 test "host manifest initial publish is exclusive and old owner cleanup cannot unlink a replacement generation" {

@@ -169,6 +169,18 @@ pub const upgrade_bootstrap = if (builtin.os.tag == .macos)
     @import("session_host/upgrade_bootstrap.zig")
 else
     struct {};
+pub const restore_activation = if (builtin.os.tag == .macos)
+    @import("session_host/restore_activation.zig")
+else
+    struct {};
+pub const upgrade_executor = if (builtin.os.tag == .macos)
+    @import("session_host/upgrade_executor.zig")
+else
+    struct {};
+pub const upgrade_loop = if (builtin.os.tag == .macos)
+    @import("session_host/upgrade_loop.zig")
+else
+    struct {};
 pub const upgrade_preflight = if (builtin.os.tag == .macos)
     @import("session_host/upgrade_preflight.zig")
 else

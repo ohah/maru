@@ -671,7 +671,8 @@ connection의 첫 frame은 반드시 `hello`다. 현재 client는 `{protocol_min
 capabilities:["runtime_metadata_v1","screen_viewport_scrolled_v1","async_scroll_to_bottom_v1","runtime_selected_text_v1",...]}`를 보내고 host는 선택 version, `host_id`, 자신이 실제로
 지원하는 capability를 응답한다. client는 hello_ack에도 이름이 있는 capability만 활성화하며, major가 같다는 사실만으로 새 screen 의미론을 가정하지 않는다.
 목표 상태의 `host_exec_upgrade_v1`은 current/N-1 adapter가 `host.upgrade.prepare/status`를 쓸 수 있다는 별도
-capability이며, U5 전에는 광고하지 않는다.
+capability다. 제품 daemon은 controller·rollback self-image·target stager 준비가 모두 성공한 경우에만 이를 광고한다.
+frozen signed N-1 update와 soak 종료 gate 전에는 이 capability의 자동 migration을 기본 동작으로 주장하지 않는다.
 현재 서로 다른 header major끼리는 hello payload 협상 전에 server가 응답 없이 연결을 닫으므로 client에는 보통
 `ConnectionClosed`→host `.denied`로 보인다. `incompatible_version` 응답은 header major는 현재 값인데 hello의
 `protocol_min..protocol_max`가 현재 major를 포함하지 않는 경우에만 도달한다. GUI는 manifest handle의 `host_id`와

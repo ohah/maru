@@ -37,16 +37,16 @@ pub const HostAuthority = struct {
             return result;
         }
 
-        pub fn activateRestoring(
+        /// Heap-pinned adoption을 `restoring → ready`로 durable commit한
+        /// 뒤에만 pointer borrow를 활성화한다. republish 실패 시 authority와
+        /// wire status는 아직 바뀌지 않는다.
+        pub fn activateReady(
             self: *PreparedInit,
-            adoption: *host_manifest.PreparedAdoption,
+            adoption: *host_manifest.PinnedAdoption,
         ) Error!HostAuthority {
-            const owned = self.descriptor orelse return error.InvalidTransition;
-            const actual = try adoption.descriptor();
-            if (!sameDescriptor(owned, actual)) return error.InvalidTransition;
-            // 모든 검사와 allocation은 위에서 끝났다. 아래 state 전환 뒤에는
-            // syscall/allocation/error가 없다.
-            const publication = try adoption.activatePublication();
+            const owned = self.descriptor orelse
+                return error.InvalidTransition;
+            const publication = try adoption.get().commitReadyPublication(owned);
             return self.commit(publication);
         }
 
@@ -107,6 +107,17 @@ pub const HostAuthority = struct {
     pub fn installUpgradeController(self: *HostAuthority, ops: ?upgrade_wire.Ops) void {
         self.server.upgrade_ops = ops;
         self.publishWireStatus(ops != null);
+    }
+
+    /// Promotion failure 뒤 새 prepare는 닫되, 이미 실행한 attempt의 terminal
+    /// status는 initiating adapter가 계속 읽을 수 있게 ledger ops만 남긴다.
+    /// Server dispatch가 `upgrade_capable=false`에서 prepare를 거부한다.
+    pub fn installUpgradeStatusOnly(
+        self: *HostAuthority,
+        ops: upgrade_wire.Ops,
+    ) void {
+        self.server.upgrade_ops = ops;
+        self.publishWireStatus(false);
     }
 
     /// Old-image coordinator가 disk manifest와 wire status를 별도 권위로 읽지 않도록 이 authority 자체를 typed CAS
@@ -234,16 +245,6 @@ pub const HostAuthority = struct {
         return .applied;
     }
 };
-
-fn sameDescriptor(a: host_manifest.Descriptor, b: host_manifest.Descriptor) bool {
-    return a.host_id == b.host_id and
-        a.protocol_major == b.protocol_major and
-        a.screen_codec_version == b.screen_codec_version and
-        a.upgrade_epoch == b.upgrade_epoch and
-        a.lifecycle == b.lifecycle and
-        std.mem.eql(u8, a.build_id, b.build_id) and
-        std.mem.eql(u8, a.endpoint, b.endpoint);
-}
 
 fn sameSnapshot(
     actual: upgrade_product.AuthoritySnapshot,
@@ -395,6 +396,15 @@ test "host authority adapter CASes restoring and rollback through one disk and w
     try std.testing.expectEqual(host_manifest.Lifecycle.draining, server.host_status.lifecycle);
     try std.testing.expect(!server.host_status.upgrade_capable);
     try std.testing.expect(server.upgrade_ops == null);
+    authority.installUpgradeStatusOnly(.{
+        .ctx = @ptrFromInt(1),
+        .stage_pending = FakeUpgrade.stage,
+        .cancel_unaccepted = FakeUpgrade.cancel,
+        .arm_accepted = FakeUpgrade.arm,
+        .status = FakeUpgrade.status,
+    });
+    try std.testing.expect(!server.host_status.upgrade_capable);
+    try std.testing.expect(server.upgrade_ops != null);
 }
 
 test "prepared host authority activates a stable restoring manifest after all allocation" {
@@ -454,7 +464,7 @@ test "prepared host authority activates a stable restoring manifest after all al
     var still_restoring = try host_manifest.load(allocator, dir, host_id);
     still_restoring.deinit();
 
-    var adoption = try host_manifest.prepareAdoptRestoring(
+    var adoption = try host_manifest.prepareAdoptRestoringPinned(
         allocator,
         dir,
         host_id,
@@ -462,19 +472,21 @@ test "prepared host authority activates a stable restoring manifest after all al
         endpoint,
     );
     defer adoption.deinit();
-    var prepared = try HostAuthority.prepareInit(allocator, &server, descriptor);
+    var ready_descriptor = descriptor;
+    ready_descriptor.upgrade_epoch += 1;
+    ready_descriptor.lifecycle = .ready;
+    var prepared = try HostAuthority.prepareInit(
+        allocator,
+        &server,
+        ready_descriptor,
+    );
     defer prepared.discard();
-    try adoption.revalidate(dir);
+    try adoption.get().revalidate(dir);
     // Same-PID exec 뒤 old process-local publication storage는 사라진다.
     publication.deinitMemory();
     publication_active = false;
-    var authority = try prepared.activateRestoring(&adoption);
+    var authority = try prepared.activateReady(&adoption);
     defer authority.deinit();
-    try authority.commitTarget(
-        descriptor.build_id,
-        protocol.version_major,
-        screen_stream.codec_version,
-    );
     var ready = try host_manifest.load(allocator, dir, host_id);
     defer ready.deinit();
     try std.testing.expectEqual(host_manifest.Lifecycle.ready, ready.lifecycle);

@@ -88,6 +88,53 @@ running 문구가 영구 고착되지는 않는다.
 v1 provider allowlist는 현재 UI·브랜드가 있는 claude/codex다. manifest 구조는 provider 추가를 허용하지만 새 종류는
 아이콘·상태 fixture·수동 검증을 갖춘 별도 PR로 추가한다.
 
+## 실측 신호 기록
+
+규칙과 우선순위의 근거를 추측이 아니라 실제 캡처로 고정한다. 캡처 절차는 터미널 세션에서 에이전트를 띄운 뒤
+렌더 화면(`capture-pane`)·OSC 타이틀(`display-message -p '#{pane_title}'`)·PTY 원시 바이트(`script`)를 각각 기록해
+대조하는 것이다. 아래는 그 관측이며 **특정 버전·설정의 결과**다(«한계» 참조).
+
+**claude (2.1.218 관측)**
+
+- 타이틀: idle `✳ <요약>`, running 브라유 스피너(관측 프레임 U+2810·U+2802) + `<요약>`.
+- 화면: 수평선 사이에 bare `❯` 입력 줄이 있고 그 아래에 사용자 statusLine이 온다(설정에 따라 여러 줄). **작업 중에도
+  입력 줄이 그대로 보이며**, 실행 표시는 입력 줄 **위**에 `<기호> <단어>… (Ns …)` 형태로 나타난다. `esc to interrupt`
+  문구는 관측되지 않았다.
+- 폴더 신뢰 확인 화면: `❯ 1. Yes…` 선택지와 `Enter to confirm · Esc to cancel`.
+
+**codex (0.145.0 관측)**
+
+- 타이틀: idle은 마커 없는 사용자명, running은 브라유 스피너 + 사용자명, blocked는 `[ ! ] Action Required | <이름>`.
+- 화면: composer `› …`가 **idle·running 모두** 표시된다. 실행 표시는 `• Working (Ns • esc to interrupt)`,
+  중단은 `■ Conversation interrupted - …`, 승인 화면은 `Press enter to confirm or esc to cancel`.
+
+**공통**
+
+- **OSC `9;4`(progress)는 두 provider 모두 emit하지 않았다.** 따라서 `progress_*` 규칙은 현재 두 provider에서 발화하지
+  않는다. 표준(ConEmu) 기반 데이터라 존치하되 근거 없는 값으로 오해하지 않도록 여기 기록한다.
+- 두 provider 모두 **작업 완료·입력 대기를 자체 데스크톱 알림(OSC 9 본문)으로 보낸다.** 예: claude의
+  `Claude is waiting for your input`. Maru는 이를 가공 없이 인앱 알림 센터와 OS 배너로 전달한다(제목이 비면 팬 라벨로 채운다).
+  즉 **알림 자체는 이미 동작하며**, observer 주도 알림의 목적은 아래 절에 다시 적는다.
+
+## 규칙 우선순위의 근거
+
+승자 판정은 세 단계다.
+
+1. `visible_blocker`가 다르면 **blocker가 이긴다** — 사용자 조치를 요구하는 화면이 running/idle 신호에 가려지면 안 된다.
+   실측 뒷받침: codex 승인 화면은 `› 1. Yes…` 줄이 있어 입력 프롬프트 규칙과 동시에 매치되지만, blocker 우선 규칙 덕에
+   blocked로 정확히 판정된다.
+2. 둘 다 화면 유래 region이고 위치가 다르면 **더 아래(더 최신 chrome)** 가 이긴다 — 터미널 출력은 아래로 흐른다.
+3. 그 외에는 숫자 priority.
+
+숫자 값은 실측 근거가 있는 것과 관례를 물려받은 것을 구분해 둔다.
+
+- **작업 타이틀 > 입력 프롬프트(실측 기반).** 두 provider 모두 작업 중에도 입력 줄이 보여 idle 규칙과 동시 매치된다.
+  타이틀 스피너는 작업 중에만 존재하고 중단·완료 즉시 사라져 **판별력이 있는** 반면, 입력 줄은 두 상태에 공통이라
+  판별력이 없다. 따라서 충돌하면 스피너가 이긴다.
+- **`progress_*`** 는 현재 두 provider가 emit하지 않아 발화하지 않는다. 상대 순서는 검증 대상이 아니다.
+- **나머지 관계**(예: idle 타이틀 vs 실행 footer)는 관례를 물려받았고 실측으로 검증되지 않았다. 충돌이 드물어 현재
+  영향은 작지만 근거 없는 값임을 숨기지 않는다.
+
 ## 사이드바와 알림
 
 카드 상태줄은 다음처럼 표시한다.
@@ -103,7 +150,8 @@ v1 provider allowlist는 현재 UI·브랜드가 있는 claude/codex다. manifes
 
 완료·attention 알림 정책은 아래 «관측 주도 완료·attention 알림»이 단일 출처다. 요지: `→blocked`는 attention 알림을 내고,
 `running|blocked → idle`은 **백그라운드 pane**에서 interrupt 화면이 아니고 확인 지연 뒤에도 idle이 유지될 때만 완료 알림을
-낸다. 활성·포커스 pane(사용자가 보는 중 — ESC 중단 복귀 포함)은 억제한다. OSC 9/777 알림은 별개로 유지한다.
+낸다. 활성·포커스 pane(사용자가 보는 중 — ESC 중단 복귀 포함)은 억제한다. provider가 스스로 보내는 OSC 9/777 알림은
+**현재 실제로 동작하는 별도 경로**이며(«실측 신호 기록»), 두 경로가 함께 켜졌을 때의 중복 방지도 위 절이 단일 출처다.
 
 ## 컨트롤 플레인 계약
 
@@ -149,10 +197,20 @@ visible blocker는 향후 attention refresh가 필요할 때만 별도 이벤트
 
 ## 관측 주도 완료·attention 알림
 
-> 이 절은 «사이드바와 알림»의 "완료 알림 미제공" 문장을 갱신한다. 이전엔 `running → idle`이 ESC 중단 복귀와 구분되지
-> 않아 완료 알림을 내지 않았다. 이제 구조적 `footer` region이 실행 chrome을 격리하고, interrupt 화면을 명시 판정하며,
-> **보고 있지 않은 pane만** 알리는 억제와 확인 지연을 둬 오탐 없이 관측 주도 알림을 제공한다. OSC 9/777 pass-through와는
-> 별개의, observer가 스스로 내는 알림이다.
+> **전제를 실측으로 바로잡는다.** 이 절의 이전 서술은 "완료 알림이 없으니 observer가 새로 만든다"였으나, «실측 신호
+> 기록»대로 **두 provider 모두 자체 데스크톱 알림을 OSC로 보내고 Maru가 이미 전달하고 있다.** 따라서 observer 주도 알림은
+> 없던 기능을 만드는 것이 아니라 다음 네 가지를 개선하는 것이다.
+>
+> 1. **의미 구분** — provider 알림은 턴 종료와 권한 요구를 같은 "입력 대기"류 문구로 뭉쳐 보낸다. observer는 이미
+>    `idle`과 `blocked`를 구분하므로 완료와 입력 대기를 **다른 알림으로** 낼 수 있다.
+> 2. **억제 정책** — 보고 있는 pane에는 울리지 않는다. provider 알림에는 이 판단 근거가 없다.
+> 3. **중단 구분** — ESC 중단 뒤 돌아온 프롬프트를 완료로 치지 않는다.
+> 4. **도달 범위** — OSC가 그대로 전달되지 않는 경로(멀티플렉서를 거친 원격 세션 등)에서는 provider 알림이 Maru까지 오지
+>    않을 수 있다. 화면 관측 기반이면 그 경로에서도 동작한다. 단 이 경로의 실제 도달 여부는 아직 측정하지 않았다(«한계»).
+>
+> **중복 방지가 설계 항목이다.** provider 알림과 observer 알림이 함께 켜지면 같은 사건에 두 번 울린다. 기본은 기존
+> `notifications.osc`로 provider pass-through를 끄고 observer 알림만 쓰는 것이며, 두 경로를 함께 켜는 경우의 억제 규칙은
+> 구현 PR에서 fixture와 함께 확정한다.
 
 **attention 알림 — `→ blocked` 전이.** 현재 화면이 권한 확인·선택·질문을 명시할 때만 blocked이므로 ESC 모호성이 없다.
 활성·포커스 pane은 배너를 억제한다(사용자가 이미 그 화면을 보는 중).
@@ -240,6 +298,11 @@ P1 이후 Maru는 provider config나 mapping 파일을 읽거나 신뢰하거나
 provider가 UI 문구·OSC를 바꾸면 manifest fixture 갱신이 필요하다. 텍스트 기반 판정은 false positive/negative가 가능하므로
 모호할 때는 `unknown`으로 실패한다. terminal observer 하나로 provider 내부 완료 의미, 마지막 답변, 정확한 session id를
 동시에 얻을 수 없다는 제한을 제품 계약으로 숨기지 않는다.
+
+«실측 신호 기록»은 claude 2.1.218·codex 0.145.0을 특정 설정에서 관측한 결과다. provider가 UI 문구·스피너 프레임·상태줄
+구성을 바꾸면 규칙과 기록을 함께 갱신해야 한다. 아직 측정하지 않은 것도 명시해 둔다 — **멀티플렉서를 거친 원격 세션에서
+provider의 OSC 알림이 Maru까지 도달하는지**는 확인하지 않았다. observer 주도 알림의 "도달 범위" 이점은 그 측정 뒤에야
+확정된다.
 
 kind 판정은 foreground 프로세스가 단일 출처이므로, 원격 process tree가 로컬에서 안 보이는 환경(멀티플렉서를 거친 원격
 세션 등)에서는 kind가 `none/unknown`으로 남아 관측 주도 판정·알림이 동작하지 않는다. 화면만으로 kind를 승격하는 폴백은

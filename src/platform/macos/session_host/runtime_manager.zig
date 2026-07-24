@@ -29,6 +29,7 @@ const core_command_wire = @import("core_command_wire.zig");
 const screen_snapshot = @import("screen_snapshot.zig");
 const screen_stream = @import("screen_stream.zig");
 const handoff_codec = @import("handoff_codec.zig");
+const upgrade_limits = @import("upgrade_limits.zig");
 const core_command = maru.session.core_command; // §6a 원격 스크롤 명령을 host core에 적용
 const terminal = maru.terminal; // §6c 원격 검색(Match) 등
 
@@ -160,7 +161,7 @@ pub const RuntimeManager = struct {
     /// 제거한다. 한 tick에 256개를 넘으면 다음 tick이 나머지를 처리한다(U1/U2 upgrade runtime cap과 동일).
     pub fn drainOwnedEvents(self: *RuntimeManager) OwnerDrainSummary {
         const Item = struct { runtime_id: u128, handle: RuntimeHandle };
-        var items: [256]Item = undefined;
+        var items: [upgrade_limits.max_runtime_count]Item = undefined;
         var item_count: usize = 0;
         var it = self.host_registry.entries.iterator();
         while (it.next()) |entry| {
@@ -170,7 +171,7 @@ pub const RuntimeManager = struct {
             item_count += 1;
         }
 
-        var remove_ids: [256]u128 = undefined;
+        var remove_ids: [upgrade_limits.max_runtime_count]u128 = undefined;
         var remove_count: usize = 0;
         var result: OwnerDrainSummary = .{};
         for (items[0..item_count]) |item| {
@@ -205,10 +206,10 @@ pub const RuntimeManager = struct {
     /// 하나라도 실패하면 이미 요청한 reader의 request flag를 취소해 serving 상태를 보존한다.
     pub fn requestUpgradeQuiesce(self: *RuntimeManager) QuiesceError!usize {
         _ = self.drainOwnedEvents();
-        if (self.host_registry.count() > 256) return error.TooManyRuntimes;
+        if (self.host_registry.count() > upgrade_limits.max_runtime_count) return error.TooManyRuntimes;
 
         const Item = struct { entry: *reg.RuntimeEntry, terminal_slot: *maru.app.live_pty.LiveSurface.Terminal };
-        var items: [256]Item = undefined;
+        var items: [upgrade_limits.max_runtime_count]Item = undefined;
         var count: usize = 0;
         var it = self.host_registry.entries.valueIterator();
         while (it.next()) |entry_ptr| {

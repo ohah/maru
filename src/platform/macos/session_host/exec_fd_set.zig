@@ -6,6 +6,7 @@
 const std = @import("std");
 const c = std.c;
 const posix = std.posix;
+const limits = @import("upgrade_limits.zig");
 
 extern "c" fn getdtablesize() c_int;
 
@@ -21,7 +22,8 @@ pub const Error = error{
     TooManyOpenFds,
 };
 
-pub const max_slots: usize = 256;
+/// 256 PTY masters + primary/backup handoff + lifetime owner lease.
+pub const max_slots: usize = limits.max_runtime_count + 3;
 
 pub fn isOpen(fd: c.fd_t) bool {
     const rc = c.fcntl(fd, c.F.GETFD, @as(c_int, 0));
@@ -166,4 +168,24 @@ test "exec fd set rejects occupied and duplicate reserved slots without changing
     const slot = freeSlot(200) orelse return error.SkipZigTest;
     try prepared.prepare(pipe_fds[0], slot);
     try std.testing.expectError(error.DuplicateSlot, prepared.prepare(pipe_fds[1], slot));
+}
+
+test "exec fd set capacity includes maximum runtime graph and fixed upgrade roles" {
+    try std.testing.expectEqual(limits.max_runtime_count + 3, max_slots);
+    var pipe_fds: [2]c.fd_t = undefined;
+    if (c.pipe(&pipe_fds) != 0) return error.SkipZigTest;
+    defer {
+        _ = c.close(pipe_fds[0]);
+        _ = c.close(pipe_fds[1]);
+    }
+    try setCloseOnExec(pipe_fds[0], true);
+    var prepared: PreparedSlots = .{};
+    @memset(&prepared.slots, -1);
+    prepared.len = max_slots - 1;
+    const slot = freeSlot(300) orelse return error.SkipZigTest;
+    try prepared.prepare(pipe_fds[0], slot);
+    try std.testing.expectEqual(max_slots, prepared.len);
+    try std.testing.expectError(error.TooManyOpenFds, prepared.prepare(pipe_fds[0], slot + 1));
+    _ = c.close(slot);
+    prepared.len = 0;
 }

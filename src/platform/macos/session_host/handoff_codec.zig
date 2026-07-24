@@ -7,6 +7,7 @@
 const std = @import("std");
 const maru = @import("maru");
 const inventory = @import("handoff_inventory.zig");
+const upgrade_limits = @import("upgrade_limits.zig");
 
 const TerminalCore = maru.terminal.TerminalCore;
 const Screen = @FieldType(TerminalCore, "screen");
@@ -38,8 +39,9 @@ const section_terminal_core: u32 = 1;
 const section_host_meta: u32 = 2;
 const section_runtime: u32 = 3;
 const section_attempt_record: u32 = 4;
-pub const max_runtime_count: usize = 256;
-pub const max_attempt_record_bytes: usize = 64 * 1024;
+pub const max_runtime_count = upgrade_limits.max_runtime_count;
+pub const max_attempt_record_bytes = upgrade_limits.max_attempt_record_bytes;
+const max_section_count: usize = max_runtime_count + 2;
 
 pub const Error = std.mem.Allocator.Error || error{
     BadMagic,
@@ -1003,7 +1005,7 @@ fn decodeRuntime(allocator: std.mem.Allocator, section: *Reader) Error!RuntimeSt
 /// 모든 runtime candidate를 먼저 완성·교차검증한 뒤 HostState를 반환한다. 한 runtime 손상도 부분 publish하지 않는다.
 pub fn decodeHost(allocator: std.mem.Allocator, bytes: []const u8) Error!HostState {
     const envelope = try readEnvelope(bytes, max_total_bytes - envelope_header_len);
-    if (envelope.section_count == 0 or envelope.section_count > max_runtime_count + 1) return error.LimitExceeded;
+    if (envelope.section_count == 0 or envelope.section_count > max_section_count) return error.LimitExceeded;
     var runtimes = std.ArrayList(RuntimeState).empty;
     errdefer {
         for (runtimes.items) |*runtime| runtime.deinit();
@@ -1240,7 +1242,9 @@ test "handoff v1 host envelope enforces exact declared section and runtime count
     defer allocator.free(declared);
     std.mem.writeInt(u16, declared[14..16], max_runtime_count + 1, .big);
     try std.testing.expectError(error.Truncated, decodeHost(allocator, declared));
-    std.mem.writeInt(u16, declared[14..16], max_runtime_count + 2, .big);
+    std.mem.writeInt(u16, declared[14..16], max_section_count, .big);
+    try std.testing.expectError(error.Truncated, decodeHost(allocator, declared));
+    std.mem.writeInt(u16, declared[14..16], max_section_count + 1, .big);
     try std.testing.expectError(error.LimitExceeded, decodeHost(allocator, declared));
 
     var too_many: [max_runtime_count + 1]RuntimeView = undefined;
@@ -1250,6 +1254,35 @@ test "handoff v1 host envelope enforces exact declared section and runtime count
         .next_handle = 1,
         .runtimes = &too_many,
     }));
+
+    var core = try TerminalCore.init(allocator, .{ .cols = 2, .rows = 1 });
+    defer core.deinit();
+    var maximum: [max_runtime_count]RuntimeView = undefined;
+    for (&maximum, 0..) |*runtime, index| runtime.* = .{
+        .runtime_id = index + 1,
+        .surface_id = index + 1,
+        .child_pid = 1,
+        .cols = 2,
+        .rows = 1,
+        .resize_generation = 0,
+        .fd_slot = @intCast(index + 40),
+        .pty_dev = 1,
+        .pty_ino = @intCast(index + 1),
+        .pty_rdev = 2,
+        .core = &core,
+    };
+    const maximum_encoded = try encodeHost(allocator, .{
+        .host_id = 1,
+        .upgrade_epoch = 0,
+        .next_handle = max_runtime_count + 1,
+        .runtimes = &maximum,
+        .attempt_record = "opaque-attempt",
+    });
+    defer allocator.free(maximum_encoded);
+    var maximum_decoded = try decodeHost(allocator, maximum_encoded);
+    defer maximum_decoded.deinit();
+    try std.testing.expectEqual(max_runtime_count, maximum_decoded.runtimes.len);
+    try std.testing.expectEqualStrings("opaque-attempt", maximum_decoded.attempt_record.?);
 }
 
 test "handoff v1 allocation failure never publishes a partial candidate" {

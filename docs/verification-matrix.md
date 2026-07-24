@@ -129,24 +129,25 @@ FP11d 표 gate는 네 가지 outer-pipe 형태, data row가 있거나 없는 pla
 
 ### Session host 실행 중 업그레이드 gate
 
-[Session host 실행 중 업그레이드](session-host-upgrade.md)는 현재 U0 gate를 통과했고 U1 codec·U2 quiesce의 핵심
-구현과 U3 exec/rollback 및 U4 typed-connect/host-pool 기반 구현 중이며,
-제품 기능으로 활성화되지 않았다. 단계별
+[Session host 실행 중 업그레이드](session-host-upgrade.md)는 현재 U0 gate를 통과했고 U1 codec·U2 quiesce의 핵심,
+U3 exec/rollback fixture, U4 typed-connect/host-pool 기반과 U5 target/attempt authority·durable store component를
+구현했지만 제품 daemon coordinator와 signed update gate는 없어 기능으로 활성화되지 않았다. 단계별
 증거 수준을 섞지 않는다.
 
 | 단계 | 자동 gate | 완료로 보지 않는 것 |
 | --- | --- | --- |
 | U0 inventory | terminal core/scrollback·PTY/reader/queue·Surface/runtime registry/link·RuntimeManager·SocketServer owner field가 `serialized`·`reconstructed`·`inherited_resource`·`must_be_empty` 중 정확히 하나이며 새/중복/없는 필드는 compile fail | field 이름 분류만으로 실제 state round-trip을 증명하지 않는다 |
 | U1 codec | bounded envelope/TLV round-trip, partial UTF-8/CSI/OSC/DCS/APC, duplicate/unknown-required/cap/checksum/OOM | 실제 PTY fd나 child가 유지됐다고 보지 않는다 |
-| U2 quiesce | admission close, input/core-command/response fence flush, reader iteration barrier, timeout·continuous output 뒤 원상 재개 | 같은 process quiesce/resume만으로 binary 교체를 증명하지 않는다 |
+| U2 quiesce | admission close, input/core-command/response fence flush, reader iteration barrier, cooperative deadline budget·continuous output 뒤 원상 재개 | 같은 process quiesce/resume만으로 binary 교체를 증명하지 않는다. blocking syscall 중 실제 pause wall time의 절대 상한은 주장하지 않는다 |
 | U3 exec | frozen old test binary→new test binary, host/child PID·host/runtime ID 불변, post-upgrade input/output, exit status exact-once, 전 pre-commit failpoint rollback | unit fake process나 current binary 양면 실행만으로 N-1 호환을 증명하지 않는다 |
 | U4 adapter | current GUI→frozen N-1 MRSH adapter→upgrade→current attach, multi-runtime all-or-none, busy attachment side-by-side fallback | fixture-only adapter를 실제 구 binary 호환으로 부르지 않는다 |
-| U5 제품 | signed old app host runtime 생성→GUI Quit→new signed app 재실행→자동 upgrade→원 runtime attach와 soak artifact | 사람 눈으로 화면이 비슷한지만 확인하는 테스트, 새 shell spawn |
+| U5 제품 | component: same-release codesign target, checksummed attempt ledger, 64 MiB two-copy preallocation/cooperative deadline/unlink-before-exec, exact host/live-graph/target binding. 제품 종료 gate: signed old app host runtime 생성→GUI Quit→new signed app 재실행→자동 upgrade→원 runtime attach와 soak artifact | component/unit green, blocking syscall wall-time 상한, fixture rollback, 사람 눈으로 화면이 비슷한지만 확인하는 테스트, 새 shell spawn |
 
 모든 단계에서 host crash/SIGKILL 뒤 복구는 비목표지만, upgrade가 시작되기 전·quiesce 중·`exec` syscall 실패·새
 binary pre-commit restore 실패는 자동 failure injection으로 구 host 재개 또는 staged rollback을 증명해야 한다.
 단, rollback handler 이전 loader/entrypoint crash와 primary+backup handoff 동시 손상은 host crash 비목표다. 최종 자동 gate에는
-old-reader primary/backup read-back, staged target preflight reader, target path swap, numeric cap과 cap+1/checked overflow,
+old-reader primary/backup read-back, staged target preflight reader, target path swap, 8 GiB codec/64 MiB live-store numeric
+cap과 cap+1/checked overflow,
 secret-bearing handoff unlink-before-exec, pre-exec non-CLOEXEC fd 3+와 target-entry open fd 3+의 exact
 allowlist(`primary+backup state`, owner lease, PTY masters), listen/client/wake/trace fd 상속 0, commit에서
 state slot close와 master/owner CLOEXEC 복구, `host.v1.json` protocol/build/epoch/lifecycle의

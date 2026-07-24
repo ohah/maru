@@ -202,7 +202,7 @@ fn rollbackTarget(allocator: std.mem.Allocator, result_path: []const u8, owner_d
         .{ .dev = runtime.pty_dev, .ino = runtime.pty_ino, .rdev = runtime.pty_rdev },
     );
     defer prepared.discard();
-    var session = prepared.commit();
+    var session = try prepared.commit();
     defer session.deinit();
     _ = c.close(pty_slot);
     _ = c.close(primary_state_slot);

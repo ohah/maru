@@ -352,8 +352,13 @@ pub const PtySession = struct {
 
         /// 이 호출부터 반환된 PtySession이 child/waitpid lifecycle owner다. Caller는 전체 host commit이 확정된
         /// 뒤 inherited slot을 닫고 reader start gate를 release해야 한다.
-        pub fn commit(self: *PreparedAdoption) PtySession {
+        pub fn commit(self: *PreparedAdoption) !PtySession {
             std.debug.assert(!self.committed);
+            // prepare와 host-global all-or-none commit 사이에는 다른 runtime 준비, owner lease 검증, allocation이
+            // 들어간다. 그 사이 child가 끝나면 kill(pid, 0)는 zombie에도 성공하므로 commit 직전 WNOWAIT probe가
+            // 마지막 권위다. status를 소비하지 않아 old/rollback owner가 exact-once로 reap할 수 있다.
+            if (probeChildExitedWithoutReap(self.child_pid) catch return error.InvalidInheritedPty)
+                return error.InvalidInheritedPty;
             self.committed = true;
             const result = PtySession{
                 .master_fd = std.atomic.Value(std.posix.fd_t).init(self.working_fd),
@@ -1468,6 +1473,38 @@ test "prepared inherited PTY adoption rejects a zombie without consuming its exi
         ),
     );
     try std.testing.expectEqual(types.ExitStatus{ .exited = 7 }, (try session.reapIfExited()).?);
+}
+
+test "prepared inherited PTY adoption rechecks child liveness at commit without consuming status" {
+    var session = try PtySession.spawn(std.testing.allocator, .{
+        .command = "/bin/sh",
+        .args = &.{ "-c", "sleep 0.05; exit 9" },
+        .size = .{ .cols = 40, .rows = 10 },
+    });
+    defer session.deinit();
+
+    const source = session.inheritedMasterFd() orelse return error.TestUnexpectedResult;
+    var slot: c_int = 203;
+    while (slot < 1000 and std.c.fcntl(slot, std.c.F.GETFD, @as(c_int, 0)) >= 0) : (slot += 1) {}
+    if (slot >= 1000 or std.c.dup2(source, slot) < 0) return error.SkipZigTest;
+    defer _ = std.c.close(slot);
+    const slot_flags = std.c.fcntl(slot, std.c.F.GETFD, @as(c_int, 0));
+    try std.testing.expect(std.c.fcntl(slot, std.c.F.SETFD, slot_flags & ~@as(c_int, std.c.FD_CLOEXEC)) == 0);
+
+    var prepared = try PtySession.PreparedAdoption.prepareExact(
+        slot,
+        session.childPid(),
+        session.canonicalSize(),
+        try session.masterIdentity(),
+    );
+    defer prepared.discard();
+
+    var attempts: usize = 0;
+    while (attempts < 2000 and !(try session.childExitedWithoutReap())) : (attempts += 1)
+        sleepMillis(1);
+    try std.testing.expect(try session.childExitedWithoutReap());
+    try std.testing.expectError(error.InvalidInheritedPty, prepared.commit());
+    try std.testing.expectEqual(types.ExitStatus{ .exited = 9 }, (try session.reapIfExited()).?);
 }
 
 test "decodeExitStatus reports normal exit code" {

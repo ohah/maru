@@ -38,8 +38,9 @@ const session_host = @import("session_host.zig"); // P3-e3: 영속 세션 host(k
 // non-macOS에선 void로 두고 모든 원격 경로를 `if (is_macos)` 블록(comptime 가지치기)에 둔다([[macos-only-code-linux-crosscompile-check]]).
 const is_macos = builtin.os.tag == .macos;
 const RemoteSessionClient = if (is_macos) session_host.client.Client else void;
+const RemoteSessionAdapter = if (is_macos) session_host.host_adapter.HostAdapter else void;
 const RemoteSessionBackend = if (is_macos) session_host.remote_term_backend.RemoteTermBackend else void;
-const RemoteHostPool = if (is_macos) session_host.host_pool.HostPool(RemoteSessionClient) else void;
+const RemoteHostPool = if (is_macos) session_host.host_pool.HostPool(RemoteSessionAdapter) else void;
 extern "c" fn usleep(usec: c_uint) c_int; // P3-e3 통합 스모크(fork host 대기·pump 폴링)용. libc라 cross-platform 선언.
 const coretext_bridge = @import("coretext_smoke_bridge.zig");
 const coretext_frame_builder = @import("coretext_frame_builder.zig");
@@ -5576,17 +5577,23 @@ pub const AppSession = struct {
                 },
             };
             const host_id = client.host_id;
-            const owned_client = alloc.create(RemoteSessionClient) catch {
+            const owned_adapter = alloc.create(RemoteSessionAdapter) catch {
                 var failed_client = client;
                 failed_client.deinit();
                 self.markHostConnectFailedReason(.out_of_memory);
                 return;
             };
-            owned_client.* = client;
+            owned_adapter.* = RemoteSessionAdapter.init(client) catch {
+                var failed_client = client;
+                failed_client.deinit();
+                alloc.destroy(owned_adapter);
+                self.markHostConnectFailedReason(.incompatible_version);
+                return;
+            };
             app_remote_host_pool = RemoteHostPool.init(alloc);
-            app_remote_host_pool.?.addOwned(host_id, owned_client) catch {
-                owned_client.deinit();
-                alloc.destroy(owned_client);
+            app_remote_host_pool.?.addOwned(host_id, owned_adapter) catch {
+                owned_adapter.deinit();
+                alloc.destroy(owned_adapter);
                 app_remote_host_pool.?.deinit();
                 app_remote_host_pool = null;
                 self.markHostConnectFailedReason(.out_of_memory);
@@ -5606,6 +5613,50 @@ pub const AppSession = struct {
                 return;
             };
         }
+    }
+
+    /// workspace가 가리키는 host가 current spawn host와 다르면 지원하는 N-1 endpoint를 조회해 pool에 추가한다.
+    /// 조회는 host를 새로 띄우지 않고 hello의 exact host_id가 저장 binding과 일치할 때만 publish한다.
+    fn ensureRestoreHostAdapter(self: *AppSession, wanted_host_id: u128) bool {
+        if (!is_macos) return false;
+        const pool = if (app_remote_host_pool) |*value| value else return false;
+        if (pool.get(wanted_host_id) != null) return true;
+        if (session_host.protocol.version_major < 2) return false;
+
+        const alloc = std.heap.smp_allocator;
+        var arena = std.heap.ArenaAllocator.init(alloc);
+        defer arena.deinit();
+        const base = sessionCacheBase(arena.allocator()) orelse return false;
+        const connected = switch (session_host.host_connect.connectExistingMajor(
+            alloc,
+            base,
+            session_host.protocol.version_major - 1,
+        )) {
+            .connected => |client| client,
+            .failed => return false,
+        };
+        if (connected.host_id != wanted_host_id) {
+            var mismatch = connected;
+            mismatch.deinit();
+            return false;
+        }
+        const adapter = alloc.create(RemoteSessionAdapter) catch {
+            var failed = connected;
+            failed.deinit();
+            return false;
+        };
+        adapter.* = RemoteSessionAdapter.init(connected) catch {
+            var failed = connected;
+            failed.deinit();
+            alloc.destroy(adapter);
+            return false;
+        };
+        pool.addOwned(wanted_host_id, adapter) catch {
+            adapter.deinit();
+            alloc.destroy(adapter);
+            return false;
+        };
+        return true;
     }
 
     /// keep-alive host 연결 실패를 기록한다(§6 L291) — 프로세스 전역 flag(이후 창은 재시도 없이 폴백)와 이 창의 notice
@@ -5717,6 +5768,8 @@ pub const AppSession = struct {
                     reconnect_host = std.fmt.parseInt(u128, reconnect_host_id, 16) catch
                         return error.InvalidPersistentRuntimeIdentity;
                 }
+                if (pooled and !self.ensureRestoreHostAdapter(reconnect_host))
+                    return error.PersistentRuntimeUnavailable;
                 var rid: [32]u8 = undefined;
                 @memcpy(&rid, reconnect_id[0..32]);
                 const attached = if (pooled)

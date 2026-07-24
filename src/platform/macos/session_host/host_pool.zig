@@ -49,9 +49,11 @@ pub fn HostPool(comptime Adapter: type) type {
             if (host_id == 0 or self.entries.contains(host_id)) return error.DuplicateHost;
             // 실제 session Client/HostAdapter는 handshake에서 확정한 host_id를 1급 필드로 가진다. 외부 descriptor
             // key와 adapter identity가 다르면 pool에 잠시라도 잘못된 routing entry를 publish하지 않는다.
-            if (comptime @hasField(Adapter, "host_id")) {
-                if (@as(u128, @intCast(@field(adapter.*, "host_id"))) != host_id)
+            if (comptime @hasDecl(Adapter, "hostId")) {
+                if (adapter.hostId() != host_id)
                     return error.HostIdentityMismatch;
+            } else if (comptime @hasField(Adapter, "host_id")) {
+                @compileError("session host pool adapters with identity must expose hostId(); raw host_id fields are not a stable adapter contract");
             }
         }
 
@@ -181,6 +183,9 @@ test "host pool rejects a descriptor key that differs from adapter handshake hos
     const FakeAdapter = struct {
         host_id: u128,
         deinit_count: *usize,
+        fn hostId(self: *const @This()) u128 {
+            return self.host_id;
+        }
         fn deinit(self: *@This()) void {
             self.deinit_count.* += 1;
         }

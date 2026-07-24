@@ -81,6 +81,9 @@ pub const Client = struct {
     allocator: std.mem.Allocator,
     fd: c.fd_t,
     host_id: u128,
+    /// 이 connection이 협상한 MRSH header major. current GUI는 current와 frozen N-1 adapter를 별도
+    /// connection으로 유지하므로 모든 outbound/inbound frame이 이 값을 사용한다.
+    wire_major: u16 = protocol.version_major,
     /// hello_ack에서 host가 `screen_viewport_scrolled_v1` mode bit을 신뢰할 수 있다고 광고했는가. 구 host ACK에는
     /// capability가 없으므로 false로 남겨 remote preedit가 숨은 live cursor에 그려지지 않게 한다.
     screen_viewport_scrolled_v1: bool = false,
@@ -124,6 +127,20 @@ pub const Client = struct {
     /// host socket에 connect하고 hello를 왕복한다. 성공하면 `host_id`가 채워진 Client다. host가 없으면 EndpointAbsent
     /// (discovery가 이 신호로 spawn/host_unavailable을 가른다, P3-d2b). version 불일치는 IncompatibleVersion.
     pub fn connect(allocator: std.mem.Allocator, socket_path: [:0]const u8, client_kind: []const u8) ClientError!Client {
+        return connectMajor(allocator, socket_path, client_kind, protocol.version_major);
+    }
+
+    /// Frozen N-1 adapter 전용 연결점. 범위 협상처럼 보이게 여러 major를 한 connection에 광고하지 않고,
+    /// 선택한 wire major의 header와 hello 범위를 정확히 하나로 고정한다.
+    pub fn connectMajor(
+        allocator: std.mem.Allocator,
+        socket_path: [:0]const u8,
+        client_kind: []const u8,
+        wire_major: u16,
+    ) ClientError!Client {
+        if (wire_major == 0 or wire_major > protocol.version_major or
+            protocol.version_major - wire_major > 1)
+            return error.IncompatibleVersion;
         // over-long path는 sun_path(104B)를 넘겨 slice-bounds panic이 되므로 syscall 전에 거부한다(bind의 socketPathFits 대칭).
         if (!socket_server.socketPathFits(socket_path.len)) return error.EndpointDenied;
         const fd = c.socket(posix.AF.UNIX, posix.SOCK.STREAM, 0);
@@ -139,13 +156,23 @@ pub const Client = struct {
         const connect_rc = c.connect(fd, @ptrCast(&addr), @sizeOf(posix.sockaddr.un));
         if (connect_rc != 0) return endpointError(posix.errno(connect_rc));
 
-        var self = Client{ .allocator = allocator, .fd = fd, .host_id = 0, .parser = framing.FrameParser.init(allocator) };
+        var self = Client{
+            .allocator = allocator,
+            .fd = fd,
+            .host_id = 0,
+            .wire_major = wire_major,
+            .parser = framing.FrameParser.init(allocator),
+        };
         errdefer self.parser.deinit();
 
         // hello 전송.
-        const hello = buildHello(allocator, client_kind) catch return error.OutOfMemory;
+        const hello = buildHelloMajor(allocator, client_kind, wire_major) catch return error.OutOfMemory;
         defer allocator.free(hello);
-        const hello_frame = framing.encodeFrame(allocator, .{ .kind = .hello, .request_id = 0 }, hello) catch return error.OutOfMemory;
+        const hello_frame = framing.encodeFrame(
+            allocator,
+            .{ .kind = .hello, .request_id = 0, .major = wire_major },
+            hello,
+        ) catch return error.OutOfMemory;
         defer allocator.free(hello_frame);
         socket_server.writeAll(fd, hello_frame) catch return error.WriteFailed;
 
@@ -185,7 +212,11 @@ pub const Client = struct {
         defer self.allocator.free(req);
         const request_id = self.next_request_id;
         self.next_request_id += 1;
-        const frame_bytes = framing.encodeFrame(self.allocator, .{ .kind = .request, .request_id = request_id }, req) catch return error.OutOfMemory;
+        const frame_bytes = framing.encodeFrame(
+            self.allocator,
+            .{ .kind = .request, .request_id = request_id, .major = self.wire_major },
+            req,
+        ) catch return error.OutOfMemory;
         defer self.allocator.free(frame_bytes);
         socket_server.writeAll(self.fd, frame_bytes) catch {
             // request prefix가 이미 kernel에 들어갔을 수 있다. 이 connection은 frame 경계를 다시 찾을 수 없으므로
@@ -402,11 +433,11 @@ pub const Client = struct {
     fn nextStreamFrame(self: *Client, started: bool) ClientError!?framing.Frame {
         try self.ensureUsable();
         if (self.pending_stream.items.len > 0)
-            return try self.requireCurrentMajor(self.pending_stream.orderedRemove(0));
+            return try self.requireWireMajor(self.pending_stream.orderedRemove(0));
         var buf: [4096]u8 = undefined;
         while (true) {
             if (self.parser.next() catch return error.ProtocolError) |frame|
-                return try self.requireCurrentMajor(frame);
+                return try self.requireWireMajor(frame);
             if (!started and !pollReadable(self.fd)) return null; // 배치 시작 전 + 데이터 없음 → idle.
             const n = c.read(self.fd, &buf, buf.len);
             if (n < 0) {
@@ -430,7 +461,11 @@ pub const Client = struct {
         var offset: usize = 0;
         while (offset < bytes.len) {
             const end = inputChunkEnd(offset, bytes.len);
-            const frame_bytes = framing.encodeFrame(self.allocator, .{ .kind = .input_bytes, .stream_id = stream_id }, bytes[offset..end]) catch
+            const frame_bytes = framing.encodeFrame(self.allocator, .{
+                .kind = .input_bytes,
+                .stream_id = stream_id,
+                .major = self.wire_major,
+            }, bytes[offset..end]) catch
                 return error.OutOfMemory;
             socket_server.writeAll(self.fd, frame_bytes) catch {
                 self.allocator.free(frame_bytes);
@@ -456,7 +491,7 @@ pub const Client = struct {
         const accepted = inputChunkEnd(0, bytes.len);
         const frame = framing.encodeFrame(
             self.allocator,
-            .{ .kind = .input_bytes, .stream_id = stream_id },
+            .{ .kind = .input_bytes, .stream_id = stream_id, .major = self.wire_major },
             bytes[0..accepted],
         ) catch return error.OutOfMemory;
         std.debug.assert(self.pending_outbound == null);
@@ -476,7 +511,7 @@ pub const Client = struct {
         if (!(try self.pumpPendingOutput())) return false;
         const frame = framing.encodeFrame(
             self.allocator,
-            .{ .kind = .scroll_to_bottom, .stream_id = stream_id },
+            .{ .kind = .scroll_to_bottom, .stream_id = stream_id, .major = self.wire_major },
             "",
         ) catch return error.OutOfMemory;
         std.debug.assert(self.pending_outbound == null);
@@ -493,7 +528,7 @@ pub const Client = struct {
         if (!(try self.pumpPendingOutput())) return false;
         const frame = framing.encodeFrame(
             self.allocator,
-            .{ .kind = .core_command, .stream_id = stream_id },
+            .{ .kind = .core_command, .stream_id = stream_id, .major = self.wire_major },
             payload,
         ) catch return error.OutOfMemory;
         std.debug.assert(self.pending_outbound == null);
@@ -510,7 +545,7 @@ pub const Client = struct {
         try self.flushPendingOutboundBlocking();
         const frame = framing.encodeFrame(
             self.allocator,
-            .{ .kind = .scroll_to_bottom, .stream_id = stream_id },
+            .{ .kind = .scroll_to_bottom, .stream_id = stream_id, .major = self.wire_major },
             "",
         ) catch return error.OutOfMemory;
         defer self.allocator.free(frame);
@@ -528,7 +563,7 @@ pub const Client = struct {
         try self.flushPendingOutboundBlocking();
         const frame = framing.encodeFrame(
             self.allocator,
-            .{ .kind = .core_command, .stream_id = stream_id },
+            .{ .kind = .core_command, .stream_id = stream_id, .major = self.wire_major },
             payload,
         ) catch return error.OutOfMemory;
         defer self.allocator.free(frame);
@@ -631,7 +666,7 @@ pub const Client = struct {
                 self.invalidateConnection();
                 return error.ProtocolError;
             }) |frame|
-                return self.requireCurrentMajor(frame) catch |err| {
+                return self.requireWireMajor(frame) catch |err| {
                     self.invalidateConnection();
                     return err;
                 };
@@ -655,8 +690,8 @@ pub const Client = struct {
 
     /// parser·call 중 임시 stream queue 어느 경로에서 꺼낸 frame이든 같은 major gate를 거친다. 잘못된 major의
     /// payload는 caller에게 넘기지 않고 여기서 회수한다.
-    fn requireCurrentMajor(self: *Client, frame: framing.Frame) ClientError!framing.Frame {
-        if (frame.header.major != protocol.version_major) {
+    fn requireWireMajor(self: *Client, frame: framing.Frame) ClientError!framing.Frame {
+        if (frame.header.major != self.wire_major) {
             frame.deinit(self.allocator);
             return error.ProtocolError;
         }
@@ -696,6 +731,37 @@ test "client input chunking preserves exact-cap and cap-plus-one paste bytes" {
     try std.testing.expectEqual(protocol.max_binary_chunk, inputChunkEnd(0, protocol.max_binary_chunk + 1));
     try std.testing.expectEqual(protocol.max_binary_chunk + 1, inputChunkEnd(protocol.max_binary_chunk, protocol.max_binary_chunk + 1));
     try std.testing.expectEqual(@as(usize, 0), inputChunkEnd(0, 0));
+}
+
+test "client N-1 wire selection fixes hello range and every outbound header to that major" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const previous_major = protocol.version_major - 1;
+    const hello = try buildHelloMajor(allocator, "gui", previous_major);
+    defer allocator.free(hello);
+    try std.testing.expect(std.mem.indexOf(u8, hello, "\"protocol_min\":1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, hello, "\"protocol_max\":1") != null);
+
+    var fds: [2]c.fd_t = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds));
+    defer _ = c.close(fds[1]);
+    var client: Client = .{
+        .allocator = allocator,
+        .fd = fds[0],
+        .host_id = 1,
+        .wire_major = previous_major,
+        .parser = framing.FrameParser.init(allocator),
+    };
+    defer client.deinit();
+    try client.sendInput(7, "legacy");
+    var header_bytes: [protocol.header_size]u8 = undefined;
+    try readExactFd(fds[1], &header_bytes);
+    const header = try protocol.Header.decode(&header_bytes);
+    try std.testing.expectEqual(previous_major, header.major);
+    try std.testing.expectEqual(protocol.Kind.input_bytes, header.kind);
+    var payload: [6]u8 = undefined;
+    try readExactFd(fds[1], &payload);
+    try std.testing.expectEqualStrings("legacy", &payload);
 }
 
 test "client nonblocking input accepts one bounded frame without duplicating it before blocking input" {
@@ -1152,10 +1218,18 @@ fn setReadTimeoutMs(fd: c.fd_t, ms: u32) void {
 // — 여기서 hand-interpolation하지 않는다.
 
 fn buildHello(allocator: std.mem.Allocator, client_kind: []const u8) error{OutOfMemory}![]u8 {
+    return buildHelloMajor(allocator, client_kind, protocol.version_major);
+}
+
+fn buildHelloMajor(
+    allocator: std.mem.Allocator,
+    client_kind: []const u8,
+    wire_major: u16,
+) error{OutOfMemory}![]u8 {
     return std.fmt.allocPrint(
         allocator,
         "{{\"protocol_min\":{d},\"protocol_max\":{d},\"client_kind\":\"{s}\",\"capabilities\":[\"runtime_metadata_v1\",\"screen_viewport_scrolled_v1\",\"async_scroll_to_bottom_v1\",\"runtime_core_command_v1\",\"runtime_selected_text_v1\"]}}",
-        .{ protocol.version_major, protocol.version_major, client_kind },
+        .{ wire_major, wire_major, client_kind },
     );
 }
 

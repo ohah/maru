@@ -1288,6 +1288,116 @@ const builtin = @import("builtin");
 const c = std.c;
 const posix = std.posix;
 const framing = @import("framing.zig");
+const screen_stream = @import("screen_stream.zig");
+
+fn readPeerFrame(fd: c.fd_t, allocator: std.mem.Allocator) !struct { header: protocol.Header, payload: []u8 } {
+    var header_bytes: [protocol.header_size]u8 = undefined;
+    var offset: usize = 0;
+    while (offset < header_bytes.len) {
+        const rc = c.read(fd, header_bytes[offset..].ptr, header_bytes.len - offset);
+        if (rc > 0) {
+            offset += @intCast(rc);
+            continue;
+        }
+        if (rc < 0 and posix.errno(rc) == .INTR) continue;
+        return error.ConnectionClosed;
+    }
+    const header = try protocol.Header.decode(&header_bytes);
+    const payload = try allocator.alloc(u8, header.payload_len);
+    errdefer allocator.free(payload);
+    offset = 0;
+    while (offset < payload.len) {
+        const rc = c.read(fd, payload[offset..].ptr, payload.len - offset);
+        if (rc > 0) {
+            offset += @intCast(rc);
+            continue;
+        }
+        if (rc < 0 and posix.errno(rc) == .INTR) continue;
+        return error.ConnectionClosed;
+    }
+    return .{ .header = header, .payload = payload };
+}
+
+const PreviousAttachPeer = struct {
+    fn run(fd: c.fd_t, snapshot: []const u8, ok: *bool) void {
+        defer _ = c.close(fd);
+        const allocator = std.heap.page_allocator;
+        const attach = readPeerFrame(fd, allocator) catch return;
+        defer allocator.free(attach.payload);
+        if (attach.header.major != 1 or attach.header.kind != .request or
+            std.mem.indexOf(u8, attach.payload, "\"method\":\"runtime.attach\"") == null) return;
+        const response = framing.encodeFrame(
+            allocator,
+            .{ .kind = .response, .major = 1, .request_id = attach.header.request_id },
+            "{\"stream_id\":9}",
+        ) catch return;
+        defer allocator.free(response);
+        @import("socket_server.zig").writeAll(fd, response) catch return;
+        const snapshot_frame = framing.encodeFrame(
+            allocator,
+            .{ .kind = .snapshot_chunk, .major = 1, .stream_id = 9, .flags = protocol.Flags.end_stream },
+            snapshot,
+        ) catch return;
+        defer allocator.free(snapshot_frame);
+        @import("socket_server.zig").writeAll(fd, snapshot_frame) catch return;
+
+        const detach = readPeerFrame(fd, allocator) catch return;
+        defer allocator.free(detach.payload);
+        if (detach.header.major != 1 or std.mem.indexOf(u8, detach.payload, "\"method\":\"runtime.detach\"") == null)
+            return;
+        const detached = framing.encodeFrame(
+            allocator,
+            .{ .kind = .response, .major = 1, .request_id = detach.header.request_id },
+            "{\"ok\":true}",
+        ) catch return;
+        defer allocator.free(detached);
+        @import("socket_server.zig").writeAll(fd, detached) catch return;
+        ok.* = true;
+    }
+};
+
+test "remote runtime attaches through N-1 MRSH and normalizes frozen v1 screen records" {
+    const allocator = std.testing.allocator;
+    var stream: std.ArrayListUnmanaged(u8) = .empty;
+    defer stream.deinit(allocator);
+    const meta = try screen_stream.encodeScreenMeta(
+        allocator,
+        .{ .kind = .screen_meta, .generation = 1, .version = 1 },
+        .{ .cols = 4, .rows = 1, .cursor = .{ .col = 3, .row = 0 } },
+    );
+    defer allocator.free(meta);
+    try screen_stream.appendRecord(&stream, allocator, meta);
+    var runs = [_]screen_stream.Run{.{ .grapheme = "o", .width = 1, .count = 4 }};
+    const row = try screen_stream.encodeRow(
+        allocator,
+        .{ .kind = .row, .generation = 1, .version = 1 },
+        .{ .row_index = 0, .runs = &runs },
+    );
+    defer allocator.free(row);
+    try screen_stream.appendRecord(&stream, allocator, row);
+
+    var fds: [2]c.fd_t = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds));
+    var peer_ok = false;
+    var peer = try std.Thread.spawn(.{}, PreviousAttachPeer.run, .{ fds[1], stream.items, &peer_ok });
+    var client: client_mod.Client = .{
+        .allocator = allocator,
+        .fd = fds[0],
+        .host_id = 0xAA,
+        .wire_major = 1,
+        .parser = framing.FrameParser.init(allocator),
+    };
+    defer client.deinit();
+    var rr: RemoteRuntime = undefined;
+    const runtime_id: [32]u8 = "00112233445566778899aabbccddeeff".*;
+    try rr.attachExisting(&client, allocator, std.testing.io, 77, runtime_id, .{ .cols = 4, .rows = 1 });
+    const snapshot = rr.surface.renderSnapshot();
+    try std.testing.expectEqual(@as(u16, 4), snapshot.size.cols);
+    try std.testing.expectEqual(@as(u21, 'o'), snapshot.cells[0].codepoint);
+    rr.detachClientSide();
+    peer.join();
+    try std.testing.expect(peer_ok);
+}
 const socket_server = @import("socket_server.zig");
 
 fn fillRemoteTestSendBuffer(fd: c.fd_t) !usize {

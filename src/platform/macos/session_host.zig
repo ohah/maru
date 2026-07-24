@@ -117,6 +117,10 @@ pub const owner_lease = if (builtin.os.tag == .macos)
 else
     struct {};
 pub const host_pool = @import("session_host/host_pool.zig");
+pub const host_adapter = if (builtin.os.tag == .macos)
+    @import("session_host/host_adapter.zig")
+else
+    struct {};
 pub const staged_image = if (builtin.os.tag == .macos)
     @import("session_host/staged_image.zig")
 else

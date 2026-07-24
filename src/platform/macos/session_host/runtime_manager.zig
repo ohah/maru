@@ -231,7 +231,8 @@ pub const RuntimeManager = struct {
             const terminal_slot = self.backend_impl.terminalForHostLifecycle(@intFromPtr(slot)) orelse return error.RuntimeMissing;
             if (!terminal_slot.live_pty.joinUpgradePause()) return error.UnsafeFrontier;
             if (!terminal_slot.live_pty.session.upgradeEligible()) return error.RuntimeNotLive;
-            if (terminal_slot.live_pty.session.childExitedWithoutReap()) return error.RuntimeNotLive;
+            if (terminal_slot.live_pty.session.childExitedWithoutReap() catch return error.UnsafeFrontier)
+                return error.RuntimeNotLive;
         }
         // Reader가 마지막 core write 뒤 coalesced output 신호를 enqueue했을 수 있다. 모든 thread가 join된 뒤 owner가
         // 이를 한 번 더 drain한다. Exit/read_error가 관측되면 status를 버리지 않고 정상 lifecycle로 넘기고 upgrade는 abort.
@@ -286,6 +287,8 @@ pub const RuntimeManager = struct {
             const terminal_slot = self.backend_impl.terminalForHostLifecycle(handle) orelse return error.RuntimeMissing;
             if (!terminal_slot.live_pty.upgradePausedAndSafe() or !terminal_slot.live_pty.session.upgradeEligible())
                 return error.UnsafeFrontier;
+            if (terminal_slot.live_pty.session.childExitedWithoutReap() catch return error.UnsafeFrontier)
+                return error.RuntimeNotLive;
             items[count] = .{ .handle = handle, .entry = entry, .terminal_slot = terminal_slot };
             count += 1;
         }
@@ -955,6 +958,36 @@ test "runtime manager: child exit while quiesced aborts without consuming status
     try std.testing.expect(mgr.upgradeQuiesceReached());
     try mgr.joinAndValidateUpgradeQuiesce();
     mgr.resumeUpgradeQuiesce();
+}
+
+test "runtime manager: owner drain consumes a quiesced read error exactly once and blocks upgrade" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    var host_registry = reg.TerminalRuntimeRegistry.init(allocator);
+    defer host_registry.deinit();
+    var mgr: RuntimeManager = undefined;
+    mgr.init(allocator, std.testing.io, &host_registry);
+    defer mgr.deinit();
+
+    const ops = mgr.runtimeOps();
+    const rid = try ops.spawn(ops.ctx, .{ .argv = &.{"/bin/cat"}, .cwd = null, .cols = 20, .rows = 4 });
+    defer ops.terminate(ops.ctx, rid);
+    const handle = mgr.handleFor(rid) orelse return error.TestUnexpectedResult;
+    const terminal_slot = mgr.backend_impl.terminalForHostLifecycle(handle) orelse return error.TestUnexpectedResult;
+
+    try std.testing.expectEqual(@as(usize, 1), try mgr.requestUpgradeQuiesce());
+    var attempts: usize = 0;
+    while (attempts < 1000 and !mgr.upgradeQuiesceReached()) : (attempts += 1) _ = usleep(1000);
+    try std.testing.expect(mgr.upgradeQuiesceReached());
+    try terminal_slot.live_pty.eventQueue().tryPush(.{ .read_error = .{
+        .pty_id = handle,
+        .message = "injected-quiesced-read-error",
+    } });
+    try std.testing.expectError(error.RuntimeNotLive, mgr.joinAndValidateUpgradeQuiesce());
+    const second = mgr.drainOwnedEvents();
+    try std.testing.expectEqual(@as(usize, 0), second.read_errors);
+    try std.testing.expectEqual(@as(usize, 1), host_registry.count());
+    try std.testing.expectError(error.RuntimeNotLive, mgr.requestUpgradeQuiesce());
 }
 
 test "runtime manager: initial config is applied before fast first output reaches the host core" {

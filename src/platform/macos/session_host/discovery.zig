@@ -12,6 +12,7 @@
 //!   - lock을 얻은 뒤에도 다시 connect해 본다 — lock 잡기 직전에 다른 프로세스가 bind했을 수 있어, 그러면 spawn하지 않고 그 host를 쓴다.
 
 const std = @import("std");
+const protocol = @import("protocol.zig");
 
 /// 호출자가 host에 무엇을 하려는가. `query_only`는 auto-start 금지, `spawn_ready`만 on-demand launch를 허용한다(§10).
 pub const Intent = enum { query_only, spawn_ready };
@@ -70,19 +71,29 @@ pub fn sessionHostDirPath(buf: []u8, base: []const u8) error{NoSpaceLeft}![:0]u8
     return std.fmt.bufPrintZ(buf, "{s}/session-host", .{trimTrailingSlash(base)});
 }
 
-/// 제어 socket 경로 `<dir>/control.sock`. session-host는 user login당 host 하나라 인스턴스 키 없이 고정 이름을 쓴다(§10).
+/// current-major 제어 socket. 서로 다른 major host가 drain되는 동안 나란히 살아야 하므로 major가 endpoint identity다.
 pub fn socketPathIn(buf: []u8, dir: []const u8) error{NoSpaceLeft}![:0]u8 {
+    return socketPathForMajorIn(buf, dir, protocol.version_major);
+}
+
+pub fn socketPathForMajorIn(buf: []u8, dir: []const u8, major: u16) error{NoSpaceLeft}![:0]u8 {
+    return std.fmt.bufPrintZ(buf, "{s}/control-v{d}.sock", .{ trimTrailingSlash(dir), major });
+}
+
+/// versioned discovery 도입 전 host가 쓰던 endpoint. N-1/current adapter가 기존 runtime을 찾을 때만 probe하며
+/// 새 host는 이 이름으로 bind하지 않는다.
+pub fn legacySocketPathIn(buf: []u8, dir: []const u8) error{NoSpaceLeft}![:0]u8 {
     return std.fmt.bufPrintZ(buf, "{s}/control.sock", .{trimTrailingSlash(dir)});
 }
 
 /// 라이브니스/start lock 경로 `<dir>/control.lock`(socket과 별도 regular 파일 — flock 대상, §10).
 pub fn lockPathIn(buf: []u8, dir: []const u8) error{NoSpaceLeft}![:0]u8 {
-    return std.fmt.bufPrintZ(buf, "{s}/control.lock", .{trimTrailingSlash(dir)});
+    return std.fmt.bufPrintZ(buf, "{s}/control-v{d}.lock", .{ trimTrailingSlash(dir), protocol.version_major });
 }
 
 /// host process lifetime 전체와 same-PID exec를 관통하는 배타적 owner lease.
 pub fn ownerLockPathIn(buf: []u8, dir: []const u8) error{NoSpaceLeft}![:0]u8 {
-    return std.fmt.bufPrintZ(buf, "{s}/owner.lock", .{trimTrailingSlash(dir)});
+    return std.fmt.bufPrintZ(buf, "{s}/owner-v{d}.lock", .{ trimTrailingSlash(dir), protocol.version_major });
 }
 
 fn trimTrailingSlash(base: []const u8) []const u8 {
@@ -138,11 +149,15 @@ test "discovery: paths are under session-host dir and separate from control-plan
     const dir = try sessionHostDirPath(&dir_buf, "/tmp/cache");
     try testing.expectEqualStrings("/tmp/cache/session-host", dir);
     var sp_buf: [256]u8 = undefined;
-    try testing.expectEqualStrings("/tmp/cache/session-host/control.sock", try socketPathIn(&sp_buf, dir));
+    try testing.expectEqualStrings("/tmp/cache/session-host/control-v2.sock", try socketPathIn(&sp_buf, dir));
+    var legacy_buf: [256]u8 = undefined;
+    try testing.expectEqualStrings("/tmp/cache/session-host/control.sock", try legacySocketPathIn(&legacy_buf, dir));
+    var v1_buf: [256]u8 = undefined;
+    try testing.expectEqualStrings("/tmp/cache/session-host/control-v1.sock", try socketPathForMajorIn(&v1_buf, dir, 1));
     var lp_buf: [256]u8 = undefined;
-    try testing.expectEqualStrings("/tmp/cache/session-host/control.lock", try lockPathIn(&lp_buf, dir));
+    try testing.expectEqualStrings("/tmp/cache/session-host/control-v2.lock", try lockPathIn(&lp_buf, dir));
     var op_buf: [256]u8 = undefined;
-    try testing.expectEqualStrings("/tmp/cache/session-host/owner.lock", try ownerLockPathIn(&op_buf, dir));
+    try testing.expectEqualStrings("/tmp/cache/session-host/owner-v2.lock", try ownerLockPathIn(&op_buf, dir));
     // trailing slash 정규화.
     var d2: [256]u8 = undefined;
     try testing.expectEqualStrings("/tmp/session-host", try sessionHostDirPath(&d2, "/tmp/"));

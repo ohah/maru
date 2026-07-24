@@ -245,9 +245,15 @@ visible blocker는 향후 attention refresh가 필요할 때만 별도 이벤트
 
 **config**(단일 출처는 [config 스키마](config-schema.md), 동작 정의는 이 문서 — 키는 알림 PR에서 스키마·사용자 문서에 동기):
 
-- `notifications.agent-complete` (`true|false`, 기본 `true`) — 백그라운드 완료 알림 on/off.
-- `notifications.agent-attention` (`true|false`, 기본 `true`) — `→blocked` attention 알림 on/off.
-- `notifications.agent-complete-delay-ms` (정수, 기본 = evidence grace) — 완료 확인 지연.
+> **아직 구현되지 않았다.** 아래 세 키는 §[화면 region·알림 구현 분해](#화면-region알림-구현-분해)의 **4단계(알림 PR)**
+> 에서 배선할 **계획**이다. 지금 config 파일에 적으면 loader가 `알 수 없는 key — 무시` 진단을 내고 값은 반영되지 않는다
+> (앱 로그에 `config line N: 알 수 없는 key — 무시`로 보인다). 특히 `notifications.agent-complete`는 **예전에 존재했다가
+> 제거된 이름**이라(`refactor(session): provider 세션 연속성 잔여를 제거합니다`) 로더가 "제거된 호환 설정"으로 함께
+> 취급한다 — 4단계에서 다시 도입할 때 그 제거 목록에서 빼야 한다.
+
+- `notifications.agent-complete` (`true|false`, 기본 `true`) — 백그라운드 완료 알림 on/off. **(미구현 — 4단계)**
+- `notifications.agent-attention` (`true|false`, 기본 `true`) — `→blocked` attention 알림 on/off. **(미구현 — 4단계)**
+- `notifications.agent-complete-delay-ms` (정수, 기본 = evidence grace) — 완료 확인 지연. **(미구현 — 4단계)**
 
 ## 화면 region·알림 구현 분해
 
@@ -257,6 +263,8 @@ visible blocker는 향후 attention refresh가 필요할 때만 별도 이벤트
 3. **규칙 이관 PR**: claude/codex 규칙을 구조적 region(마커 앵커·`footer`·`box_body`)으로 재작성한다. 기존 observer
    fixture가 그대로 green이고, 다중 테두리·박스 없음·steering composer 엣지 fixture를 추가한다.
 4. **알림 PR**: 전이 분류기(억제·interrupt 제외·확인 지연)·config·전달 배선. 헤드리스 분류기 단위 + 전이 통합 테스트.
+   config 3키는 아직 로더에 없으므로(위 §config 경고) 이 단계에서 `loader.zig`의 "제거된 호환 설정" 목록에서
+   `notifications.agent-complete`를 빼고 스키마·`docs/configuration.md`에 함께 등재한다.
 
 원격 process tree가 안 보이는 환경(멀티플렉서·SSH 원격)의 화면 시그니처 기반 kind 폴백은 **이 이니셔티브 범위 밖의 별도
 트랙**이다(정책 전환·오탐 트레이드오프 필요). 아래 «한계» 참조.

@@ -45,8 +45,10 @@ Term별 observer는 다음 입력을 함께 사용한다.
    멈췄다는 사실만으로 `idle`로 내리지 않는다. 느린 API·긴 도구 실행은 조용할 수 있기 때문이다.
 
 screen/OSC/provider 패턴은 코드에 하드코딩된 거대한 switch 대신 작은 manifest 데이터로 둔다. manifest는
-`agent`, `state`, `all/any/none` 문자열 조건, 화면 하단 거리, `visible_idle`, `visible_blocker`, `visible_running` 메타만 표현한다.
-정규식·임의 코드 실행·외부 다운로드는 v1에 넣지 않는다. 빌드에 포함된 manifest만 사용하며 fixture가 근거다.
+`agent`, `state`, 화면 region(아래 «화면 region 모델과 규칙 게이트» 참조), 불리언 게이트(`all`/`any`/`not`·`contains`/`line_prefix`),
+`skip_state_update`, `visible_idle`, `visible_blocker`, `visible_running` 메타를 표현한다. 정규식·임의 코드 실행·외부 다운로드는
+넣지 않는다 — 선형 정규식 엔진이 없어 손수 짠 패턴은 catastrophic backtracking 위험이 있고, 원격 규칙은 서명 없는 신뢰가
+되기 때문이다. 빌드에 포함된 manifest만 사용하며 fixture가 근거다.
 
 ## 상태 모델과 우선순위
 
@@ -99,9 +101,9 @@ v1 provider allowlist는 현재 UI·브랜드가 있는 claude/codex다. manifes
 사용자 조치가 필요한 Term을 작업 중 Term보다 먼저 보여 주기 위함이다. 같은 우선순위가 여러 개면 기존 순회 순서를
 유지하고, 색은 그 상태를 제공한 Term의 kind를 쓴다.
 
-완료 알림은 `running → idle`만으로 보내지 않는다. 새 `idle`은 완료뿐 아니라 ESC 중단 뒤 prompt 복귀도 포함하므로
-그 전이를 완료로 해석하면 가짜 알림이 된다. 구조화된 완료 신호가 없는 v1에서는 agent 완료 알림을 제공하지 않는다.
-OSC 9/777 알림은 별개로 유지한다.
+완료·attention 알림 정책은 아래 «관측 주도 완료·attention 알림»이 단일 출처다. 요지: `→blocked`는 attention 알림을 내고,
+`running|blocked → idle`은 **백그라운드 pane**에서 interrupt 화면이 아니고 확인 지연 뒤에도 idle이 유지될 때만 완료 알림을
+낸다. 활성·포커스 pane(사용자가 보는 중 — ESC 중단 복귀 포함)은 억제한다. OSC 9/777 알림은 별개로 유지한다.
 
 ## 컨트롤 플레인 계약
 
@@ -112,6 +114,78 @@ OSC 9/777 알림은 별개로 유지한다.
 
 상태 변경 이벤트는 observer가 안정화된 상태를 publish할 때만 발생한다. PTY byte마다 이벤트를 내지 않으며, 같은 상태의
 visible blocker는 향후 attention refresh가 필요할 때만 별도 이벤트 정책을 논의한다.
+
+## 화면 region 모델과 규칙 게이트
+
+> 베이스와 결정을 명시한다. 현재 규칙은 하단 N행 평면 tail에 `all/any/none` 평면 조건과 `max_lines_from_bottom` 거리
+> 게이트를 걸고, 같은 화면의 idle/running 충돌은 **더 아래(더 최신 chrome)** 위치가 이기는 tiebreak로 푼다. 거리 게이트는
+> 입력 박스가 상단·하단 테두리에 더해 별도 footer 구분선을 함께 그리거나(다중 수평선), 실행 중에도 아래 composer가 열릴
+> 때 오판할 수 있다. 그래서 거리 휴리스틱을 **구조적 region**으로 보강하고 평면 조건을 **중첩 게이트**로 확장한다. 강점인
+> 위치 tiebreak와 `line_prefix`는 유지한다. 정규식·외부 다운로드는 계속 배제한다(사유는 manifest 절).
+
+**화면 region.** 화면 tail을 평면 하단 N행 대신 순수 문자열 슬라이싱으로 구조 region으로 나눈다(할당·정규식 없음).
+
+- `whole_tail` — 기존 bounded 하단 tail(폴백 기준).
+- `prompt_anchor` — 마지막 프롬프트 마커 라인. 마커는 `❯`/`›`이며, 앞의 박스 세로선 `│`와 공백을 벗긴 뒤 판정한다.
+- `box_body` — 프롬프트 박스 상단 테두리와 그 아래 첫 수평선 사이(사용자가 입력 중인 본문).
+- `output` — 프롬프트 마커/박스 위, 첫 수평선 이전(에이전트 출력 영역).
+- `footer` — 프롬프트 마커/박스 아래, 마지막 수평선 이후(`esc to interrupt` 등 실행 chrome).
+- `title` / `progress` — 기존 OSC title·progress.
+
+앵커 순서는 **프롬프트 마커 우선**, 없으면 수평선 기반, 둘 다 없으면 `whole_tail`로 폴백한다 — 박스를 그리지 않는 화면
+(스트리밍 실행·평문 프롬프트·시작 화면)에서도 안전 바닥을 보장하고, 현행 대비 회귀가 없게 한다. 수평선은 `─ ━ ═`와 코너·
+정션 문자를 인정해 둥근·이중 테두리 박스도 잡으며, 순수 rule 라인이거나 rule 문자 3개 이상일 때 rule로 본다.
+
+**규칙 게이트.** 규칙은 불리언 게이트다. leaf는 `contains`(대소문자 무시)와 `line_prefix`이고, `all`(AND)·`any`(OR)·`not`(NAND)로
+재귀 결합한다. comptime 데이터라 힙이 없고, 규칙 수·중첩 깊이·매처 길이에 상한을 둬 데이터 위생을 강제한다. 기존 평면
+`all/any/none`은 이 게이트의 단층 특수형이다.
+
+**`skip_state_update`.** 매치돼도 상태를 바꾸지 않고 직전 상태를 유지하는 규칙. 전이·로딩 중간 화면이 순간적으로 다른
+상태로 오판되는 것을 막는다. `state=unknown`·`visible_*` 없음일 때만 허용한다.
+
+**해석.** region별로 게이트를 평가한 뒤 `visible_blocker` 최우선, 그다음 screen region은 위치(더 아래=최신) tiebreak,
+마지막으로 priority로 승자를 고른다(기존 판정 순서 유지). 상태 모델(`unknown|running|blocked|idle`)과 안정화(700ms grace)는
+불변이다.
+
+## 관측 주도 완료·attention 알림
+
+> 이 절은 «사이드바와 알림»의 "완료 알림 미제공" 문장을 갱신한다. 이전엔 `running → idle`이 ESC 중단 복귀와 구분되지
+> 않아 완료 알림을 내지 않았다. 이제 구조적 `footer` region이 실행 chrome을 격리하고, interrupt 화면을 명시 판정하며,
+> **보고 있지 않은 pane만** 알리는 억제와 확인 지연을 둬 오탐 없이 관측 주도 알림을 제공한다. OSC 9/777 pass-through와는
+> 별개의, observer가 스스로 내는 알림이다.
+
+**attention 알림 — `→ blocked` 전이.** 현재 화면이 권한 확인·선택·질문을 명시할 때만 blocked이므로 ESC 모호성이 없다.
+활성·포커스 pane은 배너를 억제한다(사용자가 이미 그 화면을 보는 중).
+
+**완료 알림 — `running | blocked → idle` 전이.** 다음을 **모두** 만족할 때만 낸다.
+
+1. 대상 pane이 **활성·창 포커스가 아님**(백그라운드). 활성·포커스면 사용자가 보는 중이라 억제한다 — 사용자가 ESC로
+   중단한 직후의 idle 복귀도 이 조건으로 함께 걸러진다.
+2. idle 근거가 **interrupt 화면이 아님**. interrupt 판정 rule id로 온 idle은 완료로 치지 않는다.
+3. **확인 지연** 뒤에도 상태가 여전히 `idle`이고 agent kind가 그대로임. 안정화의 evidence grace를 재사용해 순간적인 화면
+   재그리기 튐을 거른다.
+
+`idle`은 여전히 "입력 가능한 화면"을 뜻하고 **완료는 전이에서 파생**한다. 새 wire 상태(`done`)를 만들지 않으므로 컨트롤
+플레인 계약(`running|blocked|idle|unknown`)은 불변이다. 전달은 기존 인앱 알림 센터·데스크톱 알림 경로를 재사용하고, 제목은
+위치 라벨(탭 › 팬)과 상태를 조립한다. 워크스페이스 카드 대표 상태(`blocked > running > idle > unknown`)도 불변이다.
+
+**config**(단일 출처는 [config 스키마](config-schema.md), 동작 정의는 이 문서 — 키는 알림 PR에서 스키마·사용자 문서에 동기):
+
+- `notifications.agent-complete` (`true|false`, 기본 `true`) — 백그라운드 완료 알림 on/off.
+- `notifications.agent-attention` (`true|false`, 기본 `true`) — `→blocked` attention 알림 on/off.
+- `notifications.agent-complete-delay-ms` (정수, 기본 = evidence grace) — 완료 확인 지연.
+
+## 화면 region·알림 구현 분해
+
+1. **문서 PR**: 이 절(«화면 region 모델»·«관측 주도 완료·attention 알림»)과 config 스키마·control-plane 문서를 먼저 맞춘다.
+2. **region·게이트 엔진 PR**: OS-중립 순수 코어에 region 슬라이서·게이트 평가·`skip_state_update`를 추가하고 헤드리스
+   red→green fixture로 못박는다. 기존 `detect()` 호환을 유지한다.
+3. **규칙 이관 PR**: claude/codex 규칙을 구조적 region(마커 앵커·`footer`·`box_body`)으로 재작성한다. 기존 observer
+   fixture가 그대로 green이고, 다중 테두리·박스 없음·steering composer 엣지 fixture를 추가한다.
+4. **알림 PR**: 전이 분류기(억제·interrupt 제외·확인 지연)·config·전달 배선. 헤드리스 분류기 단위 + 전이 통합 테스트.
+
+원격 process tree가 안 보이는 환경(멀티플렉서·SSH 원격)의 화면 시그니처 기반 kind 폴백은 **이 이니셔티브 범위 밖의 별도
+트랙**이다(정책 전환·오탐 트레이드오프 필요). 아래 «한계» 참조.
 
 ## 과거 source build 훅 수동 정리
 
@@ -152,6 +226,11 @@ P1 이후 Maru는 provider config나 mapping 파일을 읽거나 신뢰하거나
 - 전이 테스트: output activity→running, visible idle 즉시 전환, evidence loss 700ms grace 뒤 unknown, process exit/kind change reset.
 - ESC 회귀: running 화면에서 ESC 뒤 idle fixture가 오면 다음 publish가 running이 아니며 완료 알림도 생성하지 않음.
 - 다중 Term: background blocked가 workspace 대표가 되고, running Term의 탭 플래그와 dirty gate가 정확히 갱신됨.
+- region 슬라이서: prompt 마커 앵커가 다중 수평선(box 상·하단 + footer 구분선)에서 footer/output을 정확히 분리, 둥근·이중
+  테두리 인식, box 없는 화면(스트리밍·평문 프롬프트)에서 `whole_tail` 폴백.
+- 게이트: `all`/`any`/`not` 중첩 평가, `skip_state_update`가 매치 시 직전 상태 보존.
+- 알림 전이: `→blocked`=attention, 백그라운드 `running|blocked→idle`=완료, 활성·포커스 pane과 interrupt 화면은 억제,
+  확인 지연 중 상태가 바뀌면 완료 취소.
 - migration: `AppSession.init` 전후 provider config/mapping bytes와 디렉터리 manifest 불변, cleanup 파일·호출·전용 env filter 부재.
 - workspace: 옛 provider scalar parse 성공+무시, 새 저장에 필드 없음, 멀티윈도우 cwd/layout/active round-trip 불변.
 - 수동 E2E: 실제 claude/codex에서 prompt, 작업, 권한 질문, ESC 중단, pane/Term 전환을 반복해 카드와 control 상태 확인.
@@ -161,3 +240,10 @@ P1 이후 Maru는 provider config나 mapping 파일을 읽거나 신뢰하거나
 provider가 UI 문구·OSC를 바꾸면 manifest fixture 갱신이 필요하다. 텍스트 기반 판정은 false positive/negative가 가능하므로
 모호할 때는 `unknown`으로 실패한다. terminal observer 하나로 provider 내부 완료 의미, 마지막 답변, 정확한 session id를
 동시에 얻을 수 없다는 제한을 제품 계약으로 숨기지 않는다.
+
+kind 판정은 foreground 프로세스가 단일 출처이므로, 원격 process tree가 로컬에서 안 보이는 환경(멀티플렉서를 거친 원격
+세션 등)에서는 kind가 `none/unknown`으로 남아 관측 주도 판정·알림이 동작하지 않는다. 화면만으로 kind를 승격하는 폴백은
+이 이니셔티브 범위 밖의 **별도 트랙**이다(정책 전환·오탐 트레이드오프 필요). region 슬라이싱은 박스를 그리지 않는 화면에서
+`prompt_anchor`/`whole_tail`로 폴백하고, resize 뒤 남는 trailing blank padding은 tail 위치 계산에서 계속 제외한다. 완료·attention
+알림은 새 코드 경로이므로 헤드리스 fixture로 red→green TDD하고, 실제 claude/codex에서 백그라운드 완료·활성 억제·ESC 중단·
+권한 질문 전이를 수동 E2E로 확인한다.

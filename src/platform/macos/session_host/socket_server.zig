@@ -20,6 +20,7 @@ const protocol = @import("protocol.zig");
 const framing = @import("framing.zig");
 const reg = @import("registry.zig");
 const server_mod = @import("server.zig");
+const upgrade = @import("upgrade_coordinator.zig");
 
 /// peer 프로세스의 effective uid/gid(§11 LOCAL_PEERCRED(macOS·xucred)/SO_PEERCRED(Linux)를 libc가 래핑). std.c
 /// 미노출이라 직접 extern. session-host는 uid만 쓴다(same-UID 게이트).
@@ -64,6 +65,12 @@ pub const SocketServer = struct {
     /// host가 실 runtime 소유(spawn/terminate)를 위임하는 vtable(§4). null이면 read-only host(조회만) — daemon이
     /// bind 후 `runtime_manager.runtimeOps()`로 채운다. connection마다 이 값을 그대로 넘겨 spawn/terminate를 라우팅한다.
     runtime_ops: ?server_mod.RuntimeOps = null,
+    /// U2 host-global admission barrier. 각 complete frame dispatch가 lease 하나를 잡는다.
+    admission_gate: ?*upgrade.AdmissionGate = null,
+    /// GUI가 연결되지 않았거나 한 connection이 오래 살아 있어도 PTY exit/read-error lifecycle을 전진시키는 owner tick.
+    owner_tick_ctx: ?*anyopaque = null,
+    owner_tick: ?*const fn (ctx: *anyopaque) void = null,
+    active_connections: usize = 0,
 
     pub const backlog: c_uint = 16;
 
@@ -96,6 +103,7 @@ pub const SocketServer = struct {
         const lfd = c.socket(posix.AF.UNIX, posix.SOCK.STREAM, 0);
         if (lfd < 0) return error.SocketCreateFailed;
         errdefer _ = c.close(lfd);
+        setCloseOnExec(lfd) catch return error.SocketCreateFailed;
         var addr = posix.sockaddr.un{ .family = posix.AF.UNIX, .path = undefined };
         @memset(&addr.path, 0);
         @memcpy(addr.path[0..owned_path.len], owned_path);
@@ -145,6 +153,10 @@ pub const SocketServer = struct {
         };
         // 닫힌 소켓으로의 write가 SIGPIPE로 프로세스를 죽이지 않게(EPIPE로).
         setNoSigPipe(cfd);
+        setCloseOnExec(cfd) catch {
+            _ = c.close(cfd);
+            return null;
+        };
         var euid: posix.uid_t = undefined;
         var egid: posix.gid_t = undefined;
         if (getpeereid(cfd, &euid, &egid) != 0 or !peerUidAllowed(self.server_uid, euid)) {
@@ -164,6 +176,8 @@ pub const SocketServer = struct {
     /// 화면 변화를 push한다. codec/protocol 위반(BadMagic·cap·unknown required)은 연결만 닫고 runtime은 유지한다(§10). fd는 여기서 닫는다.
     pub fn serveConnection(self: *SocketServer, cfd: c.fd_t) ServeError!void {
         defer _ = c.close(cfd);
+        self.active_connections += 1;
+        defer self.active_connections -= 1;
         var parser = framing.FrameParser.init(self.allocator);
         defer parser.deinit();
         var conn = server_mod.Connection.init(self.allocator, self.host_id, self.registry);
@@ -191,6 +205,8 @@ pub const SocketServer = struct {
                         const maybe = parser.next() catch return; // codec 위반 → 연결만 닫는다.
                         const frame = maybe orelse break; // 더 조립할 frame 없음.
                         defer frame.deinit(self.allocator);
+                        var lease = if (self.admission_gate) |gate| gate.tryEnter() orelse return else null;
+                        defer if (lease) |*held| held.release();
                         const action = try conn.handleFrame(frame);
                         switch (action) {
                             .reply => |bytes| {
@@ -216,6 +232,7 @@ pub const SocketServer = struct {
                     }
                 }
             }
+            if (self.owner_tick) |tick| tick(self.owner_tick_ctx.?);
             // 매 tick(timeout 또는 read 후): attach된 stream의 화면 변화를 delta_chunk로 push한다(read-only host는 null).
             if (try conn.collectDeltas()) |list| {
                 defer {
@@ -225,6 +242,10 @@ pub const SocketServer = struct {
                 for (list) |f| try writeAll(cfd, f);
             }
         }
+    }
+
+    pub fn tickOwner(self: *SocketServer) void {
+        if (self.owner_tick) |tick| tick(self.owner_tick_ctx.?);
     }
 
     /// accept + serve를 한 번 묶는다(accept-loop 스레드가 pollReady 뒤 호출). peer 거부/EOF는 조용히 반환한다.
@@ -254,6 +275,13 @@ pub fn setNoSigPipe(fd: c.fd_t) void {
         const one: c_int = 1;
         _ = c.setsockopt(fd, posix.SOL.SOCKET, posix.SO.NOSIGPIPE, @ptrCast(&one), @sizeOf(c_int));
     }
+}
+
+/// Host exec에서 listener/client가 우발적으로 target image에 상속되지 않게 모든 socket은 생성 즉시 CLOEXEC다.
+pub fn setCloseOnExec(fd: c.fd_t) !void {
+    const flags = c.fcntl(fd, c.F.GETFD, @as(c_int, 0));
+    if (flags < 0) return error.FcntlFailed;
+    if (c.fcntl(fd, c.F.SETFD, flags | c.FD_CLOEXEC) < 0) return error.FcntlFailed;
 }
 
 /// 짧은 write를 이어 붙여 전량 전송(부분 write는 정상). EINTR 재시도, EPIPE/오류는 `WriteFailed`.
@@ -357,6 +385,8 @@ test "socket server: real unix socket connect → hello → host.info roundtrip 
         srv.deinit();
         _ = c.rmdir(dir_path.ptr);
     }
+    const listener_flags = c.fcntl(srv.listen_fd, c.F.GETFD, @as(c_int, 0));
+    try testing.expect(listener_flags >= 0 and listener_flags & c.FD_CLOEXEC != 0);
 
     // socket이 0600 socket인지(§11).
     var st: posix.Stat = undefined;
@@ -369,6 +399,33 @@ test "socket server: real unix socket connect → hello → host.info roundtrip 
     try srv.serveOnce();
     th.join();
     try testing.expect(ok);
+}
+
+test "socket server: accepted client fd is CLOEXEC before protocol dispatch" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var dir_buf: [256]u8 = undefined;
+    const dir_path = std.fmt.bufPrintZ(&dir_buf, "/tmp/maru-sh-cloexec-{d}", .{c.getpid()}) catch return error.SkipZigTest;
+    var sp_buf: [320]u8 = undefined;
+    const socket_path = std.fmt.bufPrintZ(&sp_buf, "{s}/control.sock", .{dir_path}) catch return error.SkipZigTest;
+    var registry = reg.TerminalRuntimeRegistry.init(allocator);
+    defer registry.deinit();
+    var srv = try SocketServer.bind(allocator, dir_path, socket_path, 1, &registry);
+    defer {
+        srv.deinit();
+        _ = c.rmdir(dir_path.ptr);
+    }
+    const client_fd = c.socket(posix.AF.UNIX, posix.SOCK.STREAM, 0);
+    if (client_fd < 0) return error.SkipZigTest;
+    defer _ = c.close(client_fd);
+    var addr = posix.sockaddr.un{ .family = posix.AF.UNIX, .path = undefined };
+    @memset(&addr.path, 0);
+    @memcpy(addr.path[0..socket_path.len], socket_path);
+    try testing.expect(c.connect(client_fd, @ptrCast(&addr), @sizeOf(posix.sockaddr.un)) == 0);
+    const accepted = srv.acceptOne() orelse return error.TestUnexpectedResult;
+    defer _ = c.close(accepted);
+    const flags = c.fcntl(accepted, c.F.GETFD, @as(c_int, 0));
+    try testing.expect(flags >= 0 and flags & c.FD_CLOEXEC != 0);
 }
 
 test "socket server: bind rejects an over-long socket path before any syscall" {

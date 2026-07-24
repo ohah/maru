@@ -205,6 +205,108 @@ pub const PtySession = struct {
     wake_read_fd: std.posix.fd_t,
     wake_write_fd: std.atomic.Value(std.posix.fd_t),
 
+    /// Live host exec-upgrade eligibility. 이 값들은 serialization 대상이 아니라 quiesce barrier가 모두 false/open임을
+    /// 증명하는 lifecycle guard다.
+    pub fn upgradeEligible(self: *const PtySession) bool {
+        return self.master_fd.load(.acquire) >= 0 and
+            !self.exited.load(.acquire) and
+            !self.closing.load(.acquire) and
+            !self.reaping.load(.acquire);
+    }
+
+    pub fn inheritedMasterFd(self: *const PtySession) ?std.posix.fd_t {
+        const fd = self.master_fd.load(.acquire);
+        return if (fd >= 0) fd else null;
+    }
+
+    pub fn childPid(self: *const PtySession) std.c.pid_t {
+        return self.child_pid;
+    }
+
+    pub fn canonicalSize(self: *const PtySession) terminal.Size {
+        return self.size;
+    }
+
+    /// Target image의 pre-commit PTY adoption. 이 타입은 child lifecycle을 소유하지 않으므로 `discard`가
+    /// signal/waitpid를 절대 호출하지 않는다. inherited slot은 rollback exec를 위해 caller가 계속 소유한다.
+    pub const PreparedAdoption = struct {
+        inherited_slot: std.posix.fd_t,
+        working_fd: std.posix.fd_t,
+        child_pid: std.c.pid_t,
+        size: terminal.Size,
+        wake_read_fd: std.posix.fd_t,
+        wake_write_fd: std.posix.fd_t,
+        committed: bool = false,
+
+        pub fn prepare(inherited_slot: std.posix.fd_t, child_pid: std.c.pid_t, size: terminal.Size) !PreparedAdoption {
+            if (inherited_slot < 3 or child_pid <= 0 or size.cols < 2 or size.rows < 1) return error.InvalidInheritedPty;
+            const fd_flags = std.c.fcntl(inherited_slot, std.c.F.GETFD, @as(c_int, 0));
+            if (fd_flags < 0 or fd_flags & std.c.FD_CLOEXEC != 0) return error.InvalidInheritedPty;
+            var stat: std.posix.Stat = undefined;
+            if (std.c.fstat(inherited_slot, &stat) != 0 or !std.posix.S.ISCHR(stat.mode)) return error.InvalidInheritedPty;
+            const raw_flags = std.c.fcntl(inherited_slot, std.c.F.GETFL, @as(c_int, 0));
+            if (raw_flags < 0) return error.InvalidInheritedPty;
+            const open_flags: std.c.O = @bitCast(@as(u32, @intCast(raw_flags)));
+            if (!open_flags.NONBLOCK or open_flags.ACCMODE != .RDWR) return error.InvalidInheritedPty;
+            var window_size: std.c.winsize = undefined;
+            if (std.c.ioctl(inherited_slot, std.c.T.IOCGWINSZ, &window_size) < 0 or
+                window_size.col != size.cols or window_size.row != size.rows) return error.InvalidInheritedPty;
+            // kill(pid, 0)는 생존/권한 probe일 뿐 waitpid가 아니어서 exit status를 소비하지 않는다.
+            const probe_signal: std.c.SIG = @enumFromInt(0);
+            const probe_rc = std.c.kill(child_pid, probe_signal);
+            if (probe_rc != 0 and std.posix.errno(probe_rc) != .PERM) return error.InvalidInheritedPty;
+
+            const working_fd = std.c.fcntl(inherited_slot, std.c.F.DUPFD_CLOEXEC, @as(c_int, 3));
+            if (working_fd < 0) return error.FcntlFailed;
+            errdefer closeFd(working_fd);
+            var wake_fds: [2]std.c.fd_t = undefined;
+            if (std.c.pipe(&wake_fds) != 0) return error.PipeFailed;
+            errdefer {
+                closeFd(wake_fds[0]);
+                closeFd(wake_fds[1]);
+            }
+            try setCloseOnExec(wake_fds[0]);
+            try setCloseOnExec(wake_fds[1]);
+            try setNonBlocking(wake_fds[0]);
+            return .{
+                .inherited_slot = inherited_slot,
+                .working_fd = working_fd,
+                .child_pid = child_pid,
+                .size = size,
+                .wake_read_fd = wake_fds[0],
+                .wake_write_fd = wake_fds[1],
+            };
+        }
+
+        pub fn discard(self: *PreparedAdoption) void {
+            if (self.committed) return;
+            if (self.working_fd >= 0) closeFd(self.working_fd);
+            if (self.wake_read_fd >= 0) closeFd(self.wake_read_fd);
+            if (self.wake_write_fd >= 0) closeFd(self.wake_write_fd);
+            self.working_fd = -1;
+            self.wake_read_fd = -1;
+            self.wake_write_fd = -1;
+        }
+
+        /// 이 호출부터 반환된 PtySession이 child/waitpid lifecycle owner다. Caller는 전체 host commit이 확정된
+        /// 뒤 inherited slot을 닫고 reader start gate를 release해야 한다.
+        pub fn commit(self: *PreparedAdoption) PtySession {
+            std.debug.assert(!self.committed);
+            self.committed = true;
+            const result = PtySession{
+                .master_fd = std.atomic.Value(std.posix.fd_t).init(self.working_fd),
+                .child_pid = self.child_pid,
+                .size = self.size,
+                .wake_read_fd = self.wake_read_fd,
+                .wake_write_fd = std.atomic.Value(std.posix.fd_t).init(self.wake_write_fd),
+            };
+            self.working_fd = -1;
+            self.wake_read_fd = -1;
+            self.wake_write_fd = -1;
+            return result;
+        }
+    };
+
     pub fn spawn(allocator: std.mem.Allocator, request: types.SpawnRequest) !PtySession {
         try validateRequest(request);
 
@@ -1216,6 +1318,29 @@ fn winsizeFromTerminalSize(size: terminal.Size) std.posix.winsize {
         .xpixel = 0,
         .ypixel = 0,
     };
+}
+
+test "prepared inherited PTY adoption discard never signals or reaps the live child" {
+    var session = try PtySession.spawn(std.testing.allocator, .{
+        .command = "/bin/sleep",
+        .args = &.{"5"},
+        .size = .{ .cols = 40, .rows = 10 },
+    });
+    defer session.deinit();
+    const source = session.inheritedMasterFd() orelse return error.TestUnexpectedResult;
+    var slot: c_int = 200;
+    while (slot < 1000 and std.c.fcntl(slot, std.c.F.GETFD, @as(c_int, 0)) >= 0) : (slot += 1) {}
+    if (slot >= 1000 or std.c.dup2(source, slot) < 0) return error.SkipZigTest;
+    defer _ = std.c.close(slot);
+    const slot_flags = std.c.fcntl(slot, std.c.F.GETFD, @as(c_int, 0));
+    try std.testing.expect(slot_flags >= 0);
+    try std.testing.expect(std.c.fcntl(slot, std.c.F.SETFD, slot_flags & ~@as(c_int, std.c.FD_CLOEXEC)) == 0);
+
+    var prepared = try PtySession.PreparedAdoption.prepare(slot, session.childPid(), session.canonicalSize());
+    prepared.discard();
+    const probe_signal: std.c.SIG = @enumFromInt(0);
+    try std.testing.expect(std.c.kill(session.childPid(), probe_signal) == 0);
+    try session.writeInput("still-owned");
 }
 
 test "decodeExitStatus reports normal exit code" {

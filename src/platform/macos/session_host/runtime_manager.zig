@@ -28,6 +28,7 @@ const reg = @import("registry.zig");
 const core_command_wire = @import("core_command_wire.zig");
 const screen_snapshot = @import("screen_snapshot.zig");
 const screen_stream = @import("screen_stream.zig");
+const handoff_codec = @import("handoff_codec.zig");
 const core_command = maru.session.core_command; // §6a 원격 스크롤 명령을 host core에 적용
 const terminal = maru.terminal; // §6c 원격 검색(Match) 등
 
@@ -108,6 +109,218 @@ pub const RuntimeManager = struct {
     /// server.zig가 dispatch에 넘길 중립 vtable. `ctx`는 이 매니저다.
     pub fn runtimeOps(self: *RuntimeManager) server.RuntimeOps {
         return .{ .ctx = self, .spawn = spawnOp, .terminate = terminateOp, .write_input = writeInputOp, .resize = resizeOp, .snapshot = snapshotOp, .delta = deltaOp, .notification = notificationOp, .core_command = coreCommandOp, .selected_text = selectedTextOp, .select_op = selectOpOp, .find = findOp, .observation = observationOp, .report_mouse = reportMouseOp };
+    }
+
+    pub const OwnerDrainSummary = struct {
+        visited: usize = 0,
+        output_events: usize = 0,
+        exited: usize = 0,
+        read_errors: usize = 0,
+        failures: usize = 0,
+    };
+
+    pub const QuiesceError = error{
+        TooManyRuntimes,
+        Attached,
+        RuntimeMissing,
+        RuntimeNotLive,
+        PauseFailed,
+        UnsafeFrontier,
+    };
+
+    /// GUI attachment가 0이어도 host가 reader event queue의 수명 owner다. daemon tick이 이 함수를 호출해
+    /// coalesced output 신호를 비우고, 검증된 `.exited`만 exact-once reap/remove한다. `.read_error`는 child
+    /// 종료 증거가 아니므로 reader thread만 join하고 runtime/child를 보존한다.
+    ///
+    /// HashMap iterator 중 unregister하지 않도록 먼저 bounded ID/handle snapshot을 만들고 두 번째 단계에서
+    /// 제거한다. 한 tick에 256개를 넘으면 다음 tick이 나머지를 처리한다(U1/U2 upgrade runtime cap과 동일).
+    pub fn drainOwnedEvents(self: *RuntimeManager) OwnerDrainSummary {
+        const Item = struct { runtime_id: u128, handle: RuntimeHandle };
+        var items: [256]Item = undefined;
+        var item_count: usize = 0;
+        var it = self.host_registry.entries.iterator();
+        while (it.next()) |entry| {
+            if (item_count == items.len) break;
+            const slot = entry.value_ptr.*.runtime orelse continue;
+            items[item_count] = .{ .runtime_id = entry.key_ptr.*, .handle = @intFromPtr(slot) };
+            item_count += 1;
+        }
+
+        var remove_ids: [256]u128 = undefined;
+        var remove_count: usize = 0;
+        var result: OwnerDrainSummary = .{};
+        for (items[0..item_count]) |item| {
+            const terminal_slot = self.backend_impl.terminalForHostLifecycle(item.handle) orelse {
+                result.failures += 1;
+                continue;
+            };
+            result.visited += 1;
+            var pump = terminal_slot.live_pty.pump(&self.surface_runtime);
+            const drained = pump.drainAvailable() catch {
+                result.failures += 1;
+                continue;
+            };
+            result.output_events += drained.output_events;
+            if (drained.ended) |ended| switch (ended) {
+                .exited => {
+                    result.exited += 1;
+                    remove_ids[remove_count] = item.runtime_id;
+                    remove_count += 1;
+                },
+                .read_error => {
+                    result.read_errors += 1;
+                    terminal_slot.live_pty.finishAfterReadError();
+                },
+            };
+        }
+        for (remove_ids[0..remove_count]) |runtime_id| self.terminateRuntime(runtime_id);
+        return result;
+    }
+
+    /// U2 phase 1: owner event를 먼저 drain한 뒤 attachment/lifecycle을 재검사하고 모든 reader에 pause를 요청한다.
+    /// 하나라도 실패하면 이미 요청한 reader의 request flag를 취소해 serving 상태를 보존한다.
+    pub fn requestUpgradeQuiesce(self: *RuntimeManager) QuiesceError!usize {
+        _ = self.drainOwnedEvents();
+        if (self.host_registry.count() > 256) return error.TooManyRuntimes;
+
+        const Item = struct { entry: *reg.RuntimeEntry, terminal_slot: *maru.app.live_pty.LiveSurface.Terminal };
+        var items: [256]Item = undefined;
+        var count: usize = 0;
+        var it = self.host_registry.entries.valueIterator();
+        while (it.next()) |entry_ptr| {
+            const entry = entry_ptr.*;
+            if (entry.controller != null or entry.observers.items.len != 0) return error.Attached;
+            const slot = entry.runtime orelse return error.RuntimeMissing;
+            const handle: RuntimeHandle = @intFromPtr(slot);
+            const terminal_slot = self.backend_impl.terminalForHostLifecycle(handle) orelse return error.RuntimeMissing;
+            if (!terminal_slot.live_pty.upgradeEligible()) return error.RuntimeNotLive;
+            items[count] = .{ .entry = entry, .terminal_slot = terminal_slot };
+            count += 1;
+        }
+
+        var requested: usize = 0;
+        errdefer for (items[0..requested]) |item| item.terminal_slot.live_pty.cancelUpgradePause();
+        for (items[0..count]) |item| {
+            item.terminal_slot.live_pty.requestUpgradePause() catch return error.PauseFailed;
+            requested += 1;
+        }
+        return count;
+    }
+
+    /// U2 phase 2: 모든 reader가 safe-point를 publish했는지 관찰한다. 일부만 도달했을 때 join하지 않아
+    /// deadline rollback이 모든 reader를 signal-only cancel할 수 있게 한다.
+    pub fn upgradeQuiesceReached(self: *RuntimeManager) bool {
+        var it = self.host_registry.entries.valueIterator();
+        while (it.next()) |entry_ptr| {
+            const slot = entry_ptr.*.runtime orelse return false;
+            const terminal_slot = self.backend_impl.terminalForHostLifecycle(@intFromPtr(slot)) orelse return false;
+            if (!terminal_slot.live_pty.upgradePauseReached()) return false;
+        }
+        return true;
+    }
+
+    /// U2 phase 3: 모든 reader가 reached인 것이 확인된 뒤 thread를 join하고 queue/lifecycle frontier를 전량 검증한다.
+    /// false면 caller가 `resumeUpgradeQuiesce`로 원상복구한다.
+    pub fn joinAndValidateUpgradeQuiesce(self: *RuntimeManager) QuiesceError!void {
+        if (!self.upgradeQuiesceReached()) return error.PauseFailed;
+        var it = self.host_registry.entries.valueIterator();
+        while (it.next()) |entry_ptr| {
+            const entry = entry_ptr.*;
+            if (entry.controller != null or entry.observers.items.len != 0) return error.Attached;
+            const slot = entry.runtime orelse return error.RuntimeMissing;
+            const terminal_slot = self.backend_impl.terminalForHostLifecycle(@intFromPtr(slot)) orelse return error.RuntimeMissing;
+            if (!terminal_slot.live_pty.joinUpgradePause()) return error.UnsafeFrontier;
+            if (!terminal_slot.live_pty.session.upgradeEligible()) return error.RuntimeNotLive;
+        }
+        // Reader가 마지막 core write 뒤 coalesced output 신호를 enqueue했을 수 있다. 모든 thread가 join된 뒤 owner가
+        // 이를 한 번 더 drain한다. Exit/read_error가 관측되면 status를 버리지 않고 정상 lifecycle로 넘기고 upgrade는 abort.
+        const drained = self.drainOwnedEvents();
+        if (drained.exited != 0 or drained.read_errors != 0 or drained.failures != 0) return error.RuntimeNotLive;
+        var verify = self.host_registry.entries.valueIterator();
+        while (verify.next()) |entry_ptr| {
+            const slot = entry_ptr.*.runtime orelse return error.RuntimeMissing;
+            const terminal_slot = self.backend_impl.terminalForHostLifecycle(@intFromPtr(slot)) orelse return error.RuntimeMissing;
+            if (!terminal_slot.live_pty.upgradePausedAndSafe()) return error.UnsafeFrontier;
+        }
+    }
+
+    /// U2 rollback/resume. reached 전 reader는 request만 취소하고, join된 reader는 같은 graph에 새 thread를 시작한다.
+    pub fn resumeUpgradeQuiesce(self: *RuntimeManager) void {
+        var it = self.host_registry.entries.valueIterator();
+        while (it.next()) |entry_ptr| {
+            const slot = entry_ptr.*.runtime orelse continue;
+            const terminal_slot = self.backend_impl.terminalForHostLifecycle(@intFromPtr(slot)) orelse continue;
+            if (terminal_slot.live_pty.upgradePausedAndSafe()) {
+                terminal_slot.live_pty.resumeAfterUpgradePause() catch {};
+            } else {
+                terminal_slot.live_pty.cancelUpgradePause();
+            }
+        }
+    }
+
+    /// U1/U2 bridge: 모든 reader가 join된 safe frontier에서 host/runtime logical DTO를 원자적으로 encode한다.
+    /// HashMap 순서는 wire 순서가 아니므로 stable in-process handle 순으로 정렬한다. fd slot은 caller가 예약한
+    /// 연속 범위의 logical 번호만 기록하며 여기서는 실제 dup/CLOEXEC를 건드리지 않는다(U3 소유).
+    pub fn encodeQuiescedHost(
+        self: *RuntimeManager,
+        allocator: std.mem.Allocator,
+        host_id: u128,
+        upgrade_epoch: u64,
+        first_fd_slot: u16,
+    ) (QuiesceError || handoff_codec.Error)![]u8 {
+        if (!self.upgradeQuiesceReached() or self.host_registry.count() > handoff_codec.max_runtime_count)
+            return error.UnsafeFrontier;
+        const Item = struct {
+            handle: RuntimeHandle,
+            entry: *reg.RuntimeEntry,
+            terminal_slot: *maru.app.live_pty.LiveSurface.Terminal,
+        };
+        var items: [handoff_codec.max_runtime_count]Item = undefined;
+        var count: usize = 0;
+        var it = self.host_registry.entries.valueIterator();
+        while (it.next()) |entry_ptr| {
+            const entry = entry_ptr.*;
+            const slot = entry.runtime orelse return error.RuntimeMissing;
+            const handle: RuntimeHandle = @intFromPtr(slot);
+            const terminal_slot = self.backend_impl.terminalForHostLifecycle(handle) orelse return error.RuntimeMissing;
+            if (!terminal_slot.live_pty.upgradePausedAndSafe() or !terminal_slot.live_pty.session.upgradeEligible())
+                return error.UnsafeFrontier;
+            items[count] = .{ .handle = handle, .entry = entry, .terminal_slot = terminal_slot };
+            count += 1;
+        }
+        std.mem.sort(Item, items[0..count], {}, struct {
+            fn lessThan(_: void, a: Item, b: Item) bool {
+                return a.handle < b.handle;
+            }
+        }.lessThan);
+        if (@as(usize, first_fd_slot) + count > std.math.maxInt(u16)) return error.LimitExceeded;
+
+        var views: [handoff_codec.max_runtime_count]handoff_codec.RuntimeView = undefined;
+        var locked: usize = 0;
+        defer for (items[0..locked]) |item| item.terminal_slot.surface.unlockCore(self.io);
+        for (items[0..count], 0..) |item, index| {
+            item.terminal_slot.surface.lockCore(self.io);
+            locked += 1;
+            const session = item.terminal_slot.live_pty.session;
+            const size = session.canonicalSize();
+            if (size.cols != item.entry.cols or size.rows != item.entry.rows) return error.UnsafeFrontier;
+            views[index] = .{
+                .runtime_id = item.entry.id,
+                .surface_id = item.handle,
+                .child_pid = session.childPid(),
+                .cols = item.entry.cols,
+                .rows = item.entry.rows,
+                .resize_generation = item.entry.resize_generation,
+                .fd_slot = first_fd_slot + @as(u16, @intCast(index)),
+                .core = &item.terminal_slot.surface.core,
+            };
+        }
+        return handoff_codec.encodeHost(allocator, .{
+            .host_id = host_id,
+            .upgrade_epoch = upgrade_epoch,
+            .next_handle = self.next_handle,
+            .runtimes = views[0..count],
+        });
     }
 
     fn spawnOp(ctx: *anyopaque, params: server.RuntimeSpawnParams) anyerror!u128 {
@@ -587,6 +800,110 @@ test "runtime manager: spawns a real PTY runtime through RuntimeOps and terminat
     try std.testing.expectEqual(@as(usize, 0), host_registry.count());
     // 두 번째 terminate는 no-op(없는 id 무시) — 멱등.
     ops.terminate(ops.ctx, rid);
+}
+
+test "runtime manager: owner drain reaps an exited runtime with zero GUI attachments exactly once" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    var host_registry = reg.TerminalRuntimeRegistry.init(allocator);
+    defer host_registry.deinit();
+    var mgr: RuntimeManager = undefined;
+    mgr.init(allocator, std.testing.io, &host_registry);
+    defer mgr.deinit();
+
+    const ops = mgr.runtimeOps();
+    _ = try ops.spawn(ops.ctx, .{ .argv = &.{ "/bin/sh", "-c", "exit 7" }, .cwd = null, .cols = 20, .rows = 4 });
+    var total_exited: usize = 0;
+    var attempts: usize = 0;
+    while (attempts < 300 and host_registry.count() != 0) : (attempts += 1) {
+        const drained = mgr.drainOwnedEvents();
+        total_exited += drained.exited;
+        if (host_registry.count() != 0) _ = usleep(10 * 1000);
+    }
+    try std.testing.expectEqual(@as(usize, 0), host_registry.count());
+    try std.testing.expectEqual(@as(usize, 1), total_exited);
+    const after = mgr.drainOwnedEvents();
+    try std.testing.expectEqual(@as(usize, 0), after.exited);
+}
+
+test "runtime manager: U2 quiesce encodes and resumes the same live PTY without attachments" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    var host_registry = reg.TerminalRuntimeRegistry.init(allocator);
+    defer host_registry.deinit();
+    var mgr: RuntimeManager = undefined;
+    mgr.init(allocator, std.testing.io, &host_registry);
+    defer mgr.deinit();
+
+    const ops = mgr.runtimeOps();
+    const rid = try ops.spawn(ops.ctx, .{ .argv = &.{"/bin/cat"}, .cwd = null, .cols = 24, .rows = 6 });
+    defer ops.terminate(ops.ctx, rid);
+    const handle = mgr.handleFor(rid) orelse return error.TestUnexpectedResult;
+    const terminal_slot = mgr.backend_impl.terminalForHostLifecycle(handle) orelse return error.TestUnexpectedResult;
+    const child_before = terminal_slot.live_pty.session.childPid();
+    const fd_before = terminal_slot.live_pty.session.inheritedMasterFd() orelse return error.TestUnexpectedResult;
+
+    try ops.write_input(ops.ctx, rid, "before\n");
+    try std.testing.expectEqual(@as(usize, 1), try mgr.requestUpgradeQuiesce());
+    var attempts: usize = 0;
+    while (attempts < 500 and !mgr.upgradeQuiesceReached()) : (attempts += 1) _ = usleep(1000);
+    try std.testing.expect(mgr.upgradeQuiesceReached());
+    try mgr.joinAndValidateUpgradeQuiesce();
+
+    const encoded = try mgr.encodeQuiescedHost(allocator, 0xCAFE, 3, 40);
+    defer allocator.free(encoded);
+    var decoded = try handoff_codec.decodeHost(allocator, encoded);
+    decoded.deinit();
+
+    mgr.resumeUpgradeQuiesce();
+    try std.testing.expectEqual(child_before, terminal_slot.live_pty.session.childPid());
+    try std.testing.expectEqual(fd_before, terminal_slot.live_pty.session.inheritedMasterFd().?);
+    try ops.write_input(ops.ctx, rid, "after\n");
+}
+
+test "runtime manager: U2 quiesce refuses attached runtimes without pausing their reader" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    var host_registry = reg.TerminalRuntimeRegistry.init(allocator);
+    defer host_registry.deinit();
+    var mgr: RuntimeManager = undefined;
+    mgr.init(allocator, std.testing.io, &host_registry);
+    defer mgr.deinit();
+
+    const ops = mgr.runtimeOps();
+    const rid = try ops.spawn(ops.ctx, .{ .argv = &.{"/bin/cat"}, .cwd = null, .cols = 24, .rows = 6 });
+    defer ops.terminate(ops.ctx, rid);
+    _ = try host_registry.attach(rid, 99, .observer);
+    try std.testing.expectError(error.Attached, mgr.requestUpgradeQuiesce());
+    _ = try host_registry.detach(rid, 99);
+
+    try ops.write_input(ops.ctx, rid, "still-live\n");
+}
+
+test "runtime manager: U2 pause reaches a safe frontier under continuous PTY output and resumes" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    var host_registry = reg.TerminalRuntimeRegistry.init(allocator);
+    defer host_registry.deinit();
+    var mgr: RuntimeManager = undefined;
+    mgr.init(allocator, std.testing.io, &host_registry);
+    defer mgr.deinit();
+    const ops = mgr.runtimeOps();
+    const rid = try ops.spawn(ops.ctx, .{
+        .argv = &.{ "/bin/sh", "-c", "while :; do printf x; done" },
+        .cwd = null,
+        .cols = 20,
+        .rows = 4,
+    });
+    defer ops.terminate(ops.ctx, rid);
+
+    try std.testing.expectEqual(@as(usize, 1), try mgr.requestUpgradeQuiesce());
+    var attempts: usize = 0;
+    while (attempts < 5000 and !mgr.upgradeQuiesceReached()) : (attempts += 1) _ = usleep(1000);
+    try std.testing.expect(mgr.upgradeQuiesceReached());
+    try mgr.joinAndValidateUpgradeQuiesce();
+    mgr.resumeUpgradeQuiesce();
+    try ops.write_input(ops.ctx, rid, "ignored-but-admitted");
 }
 
 test "runtime manager: initial config is applied before fast first output reaches the host core" {

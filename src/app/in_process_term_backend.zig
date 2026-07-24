@@ -91,6 +91,12 @@ pub const InProcessTermBackend = struct {
         return &t.surface;
     }
 
+    /// session host owner-drain/quiesce 전용 수명 seam. 공용 `TermRuntimeBackend` vtable에 host-only 정책을
+    /// 새기지 않고, host의 `RuntimeManager`만 pinned terminal bundle을 열거해 queue/reader lifecycle을 전진한다.
+    pub fn terminalForHostLifecycle(self: *InProcessTermBackend, handle: RuntimeHandle) ?*live_pty.LiveSurface.Terminal {
+        return self.terminalSlot(handle);
+    }
+
     fn spawn(ctx: *anyopaque, params: SpawnParams) anyerror!*surface_mod.Surface {
         const self: *InProcessTermBackend = @ptrCast(@alignCast(ctx));
         // control-plane self selector(MARU_PANE_ID)는 caller가 명시한 GUI surface id를 보존하고, 일반 in-process caller가

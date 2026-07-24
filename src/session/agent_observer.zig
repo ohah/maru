@@ -41,6 +41,8 @@ fn isScreenRegion(region: Region) bool {
 const Gate = struct {
     contains: []const []const u8 = &.{},
     line_prefix: []const []const u8 = &.{},
+    /// 앞 공백을 벗긴 첫 코드포인트가 이 범위 중 하나(OR)에 드는 라인이 있는지.
+    leading_codepoint_ranges: []const CodepointRange = &.{},
     all: []const Gate = &.{},
     any: []const Gate = &.{},
     not: []const Gate = &.{},
@@ -56,6 +58,9 @@ const Rule = struct {
     any: []const []const u8 = &.{},
     none: []const []const u8 = &.{},
     line_prefixes: []const []const u8 = &.{},
+    /// 앞 공백을 벗긴 첫 코드포인트가 이 범위 중 하나(OR)에 드는 라인이 있는지. 스피너처럼 프레임 집합이
+    /// 버전마다 달라지는 신호를 개별 문자 열거 없이 블록 범위로 판정한다(정규식 엔진 불필요).
+    leading_codepoint_ranges: []const CodepointRange = &.{},
     /// 설정되면 평면 all/any/none 대신 이 게이트로 판정한다(중첩 조건용).
     gate: ?Gate = null,
     /// 화면 규칙은 scrollback 성격의 오래된 문구가 아니라 현재 composer/footer 가까이에서만 유효하다.
@@ -67,16 +72,27 @@ const Rule = struct {
     visible_running: bool = false,
 };
 
-const braille_frames = [_][]const u8{ "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏" };
+/// 코드포인트 범위 조건. 정규식 엔진 없이 UTF-8 첫 코드포인트를 정수 비교만으로 판정한다.
+const CodepointRange = struct { lo: u21, hi: u21 };
+
+/// 브라유 점자 블록 전체. 에이전트 작업 스피너는 이 블록의 임의 프레임을 쓰고 버전마다 프레임 집합이 달라지므로
+/// (실측: claude 2.1.218 OSC 타이틀은 U+2810·U+2802를 쓰는데, 과거 열거하던 10프레임과 교집합이 0이었다)
+/// 개별 프레임을 열거하지 않고 블록 범위로 판정해 프레임 변경에 견디게 한다.
+const braille_block = CodepointRange{ .lo = 0x2800, .hi = 0x28FF };
 
 const claude_rules = [_]Rule{
     .{ .id = "permission_prompt", .state = .blocked, .priority = 1000, .region = .screen, .all = &.{"do you want to proceed?"}, .any = &.{ "esc to cancel", "yes", "tab to amend" }, .max_lines_from_bottom = 6, .visible_blocker = true },
     .{ .id = "selection_prompt", .state = .blocked, .priority = 990, .region = .screen, .all = &.{ "enter to select", "esc to cancel" }, .max_lines_from_bottom = 6, .visible_blocker = true },
-    .{ .id = "live_prompt", .state = .idle, .priority = 900, .region = .screen, .line_prefixes = &.{"❯"}, .none = &.{ "enter to select", "esc to cancel" }, .max_lines_from_bottom = 4, .visible_idle = true },
+    // 폴더 신뢰 확인 등 확정형 선택 화면(실측: `❯ 1. Yes…` + `Enter to confirm · Esc to cancel`).
+    .{ .id = "confirm_prompt", .state = .blocked, .priority = 985, .region = .screen, .all = &.{ "enter to confirm", "esc to cancel" }, .max_lines_from_bottom = 6, .visible_blocker = true },
+    // 입력 줄은 하단 거리가 아니라 구조로 집는다. 사용자 statusLine 커스텀이 상태줄을 여러 줄로 만들면 거리
+    // 가드가 현재 프롬프트를 잔상으로 오인하므로(실측), prompt_anchor가 프롬프트 라인 자체를 앵커로 쓴다.
+    .{ .id = "live_prompt", .state = .idle, .priority = 900, .region = .prompt_anchor, .line_prefixes = &.{"❯"}, .visible_idle = true },
     .{ .id = "idle_title", .state = .idle, .priority = 880, .region = .title, .any = &.{"✳"}, .visible_idle = true },
     .{ .id = "progress_idle", .state = .idle, .priority = 870, .region = .progress, .all = &.{"4;0"}, .visible_idle = true },
     .{ .id = "progress_running", .state = .running, .priority = 895, .region = .progress, .any = &.{ "4;1", "4;2", "4;3", "4;4" }, .visible_running = true },
-    .{ .id = "working_title", .state = .running, .priority = 800, .region = .title, .any = &braille_frames, .visible_running = true },
+    // 작업 중에도 composer가 열려 있어 live_prompt와 동시에 매치되므로 idle보다 우선한다(실측).
+    .{ .id = "working_title", .state = .running, .priority = 950, .region = .title, .leading_codepoint_ranges = &.{braille_block}, .visible_running = true },
     .{ .id = "working_footer", .state = .running, .priority = 890, .region = .screen, .any = &.{ "esc to interrupt", "esc to stop" }, .max_lines_from_bottom = 4, .visible_running = true },
 };
 
@@ -89,7 +105,7 @@ const codex_rules = [_]Rule{
     .{ .id = "live_prompt", .state = .idle, .priority = 900, .region = .screen, .line_prefixes = &.{ "›", "❯" }, .none = &.{ "allow command?", "esc to interrupt" }, .max_lines_from_bottom = 4, .visible_idle = true },
     .{ .id = "progress_idle", .state = .idle, .priority = 870, .region = .progress, .all = &.{"4;0"}, .visible_idle = true },
     .{ .id = "progress_running", .state = .running, .priority = 895, .region = .progress, .any = &.{ "4;1", "4;2", "4;3", "4;4" }, .visible_running = true },
-    .{ .id = "working_title", .state = .running, .priority = 800, .region = .title, .any = &braille_frames, .visible_running = true },
+    .{ .id = "working_title", .state = .running, .priority = 950, .region = .title, .leading_codepoint_ranges = &.{braille_block}, .visible_running = true },
     .{ .id = "working_footer", .state = .running, .priority = 890, .region = .screen, .all = &.{ "working", "esc to interrupt" }, .max_lines_from_bottom = 4, .visible_running = true },
 };
 
@@ -168,7 +184,8 @@ fn matchPosition(rule: Rule, input: Input, lines: *const LineScan) ?usize {
     }
     for (rule.none) |needle| if (containsIgnoreCase(haystack, needle)) return null;
     if (rule.line_prefixes.len > 0) latest = @max(latest, lastLinePrefixPosition(haystack, rule.line_prefixes) orelse return null);
-    if (rule.all.len == 0 and rule.any.len == 0 and rule.line_prefixes.len == 0) return null;
+    if (rule.leading_codepoint_ranges.len > 0) latest = @max(latest, lastLeadingCodepointPosition(haystack, rule.leading_codepoint_ranges) orelse return null);
+    if (rule.all.len == 0 and rule.any.len == 0 and rule.line_prefixes.len == 0 and rule.leading_codepoint_ranges.len == 0) return null;
     if (rule.max_lines_from_bottom) |max_lines| {
         var lines_after: usize = 0;
         for (haystack[latest..]) |byte| if (byte == '\n') {
@@ -185,6 +202,7 @@ fn gateMatches(gate: Gate, text: []const u8) bool {
         const single = [_][]const u8{prefix};
         if (lastLinePrefixPosition(text, &single) == null) return false;
     }
+    if (gate.leading_codepoint_ranges.len > 0 and lastLeadingCodepointPosition(text, gate.leading_codepoint_ranges) == null) return false;
     for (gate.all) |sub| if (!gateMatches(sub, text)) return false;
     if (gate.any.len > 0) {
         var ok = false;
@@ -209,6 +227,34 @@ fn lastIndexOfIgnoreCase(haystack: []const u8, needle: []const u8) ?usize {
         const relative = std.ascii.indexOfIgnoreCase(haystack[offset..], needle) orelse break;
         latest = offset + relative;
         offset += relative + @max(needle.len, 1);
+    }
+    return latest;
+}
+
+fn firstCodepoint(text: []const u8) ?u21 {
+    var view = std.unicode.Utf8View.init(text) catch return null;
+    var it = view.iterator();
+    return it.nextCodepoint();
+}
+
+/// 앞 공백을 벗긴 첫 코드포인트가 주어진 범위 중 하나에 드는 라인 가운데 가장 아래 위치. 범위끼리는 OR이며
+/// 정규식 엔진 없이 정수 비교만 한다.
+fn lastLeadingCodepointPosition(text: []const u8, ranges: []const CodepointRange) ?usize {
+    var position: usize = 0;
+    var latest: ?usize = null;
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    while (lines.next()) |line_raw| {
+        const line = std.mem.trimStart(u8, line_raw, " \t\r");
+        const indent = line_raw.len - line.len;
+        if (firstCodepoint(line)) |cp| {
+            for (ranges) |range| {
+                if (cp >= range.lo and cp <= range.hi) {
+                    latest = position + indent;
+                    break;
+                }
+            }
+        }
+        position += line_raw.len + 1;
     }
     return latest;
 }
@@ -305,11 +351,21 @@ fn lineText(lines: *const LineScan, idx: usize) []const u8 {
     return lines.text[lines.starts[idx]..lines.ends[idx]];
 }
 
+/// 현재 입력 프롬프트 라인. 마지막 프롬프트라도 그 아래에 실제 출력이 남아 있으면 scrollback 잔상이므로
+/// 현재 프롬프트가 아니다. "현재"의 구조적 정의: 프롬프트와 그 아래 첫 수평선 사이가 비어 있거나(박스 안 입력줄),
+/// 수평선이 없으면 프롬프트 아래가 모두 공백일 것. 하단 거리(행 수) 대신 구조로 판정하므로 상태줄이 몇 줄이든
+/// 영향받지 않고, 선택지 목록(`❯ 1. Yes` 아래 다른 항목이 이어짐)도 현재 입력 프롬프트로 오인하지 않는다.
 fn lastPromptLineIndex(lines: *const LineScan) ?usize {
     var i: usize = lines.count;
     while (i > 0) {
         i -= 1;
-        if (isPromptLine(lineText(lines, i))) return i;
+        if (!isPromptLine(lineText(lines, i))) continue;
+        const limit = firstRuleBelow(lines, i) orelse lines.count;
+        var j = i + 1;
+        while (j < limit) : (j += 1) {
+            if (std.mem.trim(u8, lineText(lines, j), " \t\r").len != 0) return null;
+        }
+        return i;
     }
     return null;
 }
@@ -593,4 +649,64 @@ test "skip_state_update 규칙은 매치해도 상태를 바꾸지 않고 직전
     var s: Stabilizer = .{ .current = .running };
     try std.testing.expectEqual(State.running, s.observe(d, 10)); // 보류: running 유지
     try std.testing.expectEqual(State.running, s.observe(d, 20));
+}
+
+// ── 실 화면 캡처 기반 fixture (claude 2.1.218, tmux 140×45) ──────────────────
+// 캡처로 확인한 사실: OSC 타이틀이 주 신호(작업=브라유 스피너, 대기=✳), 입력 줄은 수평선 사이 bare `❯`,
+// 그 아래 사용자 statusLine이 여러 줄, 작업 중에도 composer가 열려 있고 `esc to interrupt` 문구는 없다.
+
+test "claude 실측: 브라유 스피너 타이틀은 프레임이 달라도 running으로 잡힌다" {
+    // 실제 관측 프레임 U+2810 / U+2802 — 과거 열거하던 10프레임에는 없던 값이다.
+    try std.testing.expectEqual(State.running, detect(.claude, .{ .osc_title = "⠐ 터미널에 대한 haiku 작성" }).state);
+    try std.testing.expectEqual(State.running, detect(.claude, .{ .osc_title = "⠂ 터미널에 대한 haiku 작성" }).state);
+    // 과거 프레임도 같은 블록이라 그대로 커버(회귀 없음).
+    try std.testing.expectEqual(State.running, detect(.claude, .{ .osc_title = "⠋ Working" }).state);
+    try std.testing.expectEqual(State.running, detect(.codex, .{ .osc_title = "⠐ Working" }).state);
+}
+
+test "claude 실측: 대기 타이틀 ✳는 idle이고 스피너 범위에 걸리지 않는다" {
+    const d = detect(.claude, .{ .osc_title = "✳ 터미널에 대한 haiku 작성" });
+    try std.testing.expectEqual(State.idle, d.state);
+    try std.testing.expect(d.visible_idle);
+}
+
+test "claude 실측: 커스텀 statusLine이 여러 줄이어도 입력 줄을 idle로 잡는다" {
+    // 하단 거리 가드였다면 상태줄 4줄에 밀려 잔상으로 오인됐을 화면.
+    const screen =
+        "● Done. Updated 3 files.\n" ++
+        "────────────────────────\n" ++
+        "❯ \n" ++
+        "────────────────────────\n" ++
+        "  yoonhb\n" ++
+        "  ctx 3% │ 5h 8% (00:20) │ 7d 49% (07/28 12:00)\n" ++
+        "  Opus 4.8 (1M context) │ █ xhigh\n" ++
+        "  ⏸ manual mode on · ← 1 agent";
+    const d = detect(.claude, .{ .screen = screen });
+    try std.testing.expectEqual(State.idle, d.state);
+    try std.testing.expect(d.visible_idle);
+}
+
+test "claude 실측: 작업 중에는 composer가 열려 있어도 스피너 타이틀이 idle을 이긴다" {
+    const screen =
+        "✳ Flibbertigibbeting… (2s · thinking with xhigh effort)\n" ++
+        "────────────────────────\n" ++
+        "❯ \n" ++
+        "────────────────────────\n" ++
+        "  yoonhb\n" ++
+        "  Opus 4.8 (1M context) │ █ xhigh";
+    const d = detect(.claude, .{ .screen = screen, .osc_title = "⠂ 터미널에 대한 haiku 작성" });
+    try std.testing.expectEqual(State.running, d.state);
+    try std.testing.expect(d.visible_running);
+}
+
+test "claude 실측: 폴더 신뢰 확인 화면은 blocked이고 선택지를 입력 프롬프트로 오인하지 않는다" {
+    const screen =
+        "Quick safety check: Is this a project you created or one you trust?\n" ++
+        "❯ 1. Yes, I trust this folder\n" ++
+        "  2. No, exit\n" ++
+        "\n" ++
+        "Enter to confirm · Esc to cancel";
+    const d = detect(.claude, .{ .screen = screen });
+    try std.testing.expectEqual(State.blocked, d.state);
+    try std.testing.expect(d.visible_blocker);
 }

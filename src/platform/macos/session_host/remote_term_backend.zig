@@ -100,13 +100,22 @@ pub const RemoteTermBackend = struct {
     pub fn deinit(self: *RemoteTermBackend) void {
         var it = self.runtimes.iterator();
         while (it.next()) |kv| {
-            self.surface_runtime.detachSurface(kv.key_ptr.*); // link(원격 PtyIo)를 먼저 뗀다 — rr.surface가 곧 무효.
-            kv.value_ptr.runtime.deinit();
-            self.allocator.destroy(kv.value_ptr.runtime);
-            if (self.host_pool) |pool| pool.release(kv.value_ptr.host_id);
+            self.destroyRuntimeEntry(kv.key_ptr.*, kv.value_ptr.*, .terminate);
         }
         self.runtimes.deinit(self.allocator);
         self.* = undefined;
+    }
+
+    const DestroyMode = enum { terminate, detach };
+
+    fn destroyRuntimeEntry(self: *RemoteTermBackend, handle: RuntimeHandle, entry: RuntimeEntry, mode: DestroyMode) void {
+        self.surface_runtime.detachSurface(handle);
+        switch (mode) {
+            .terminate => entry.runtime.deinit(),
+            .detach => entry.runtime.detachClientSide(),
+        }
+        self.allocator.destroy(entry.runtime);
+        if (self.host_pool) |pool| pool.release(entry.host_id);
     }
 
     /// GUI가 쓰는 계약 값(in-process와 동일 표면). ctx는 heap-pin된 backend를 가리켜야 한다(caller가 안정 주소 보장).
@@ -353,10 +362,7 @@ pub const RemoteTermBackend = struct {
     fn remove(ctx: *anyopaque, handle: RuntimeHandle) void {
         const self: *RemoteTermBackend = @ptrCast(@alignCast(ctx));
         if (self.runtimes.fetchRemove(handle)) |kv| {
-            self.surface_runtime.detachSurface(handle); // 라우팅 link(원격 PtyIo)를 먼저 뗀다 — rr.surface가 곧 무효.
-            kv.value.runtime.deinit(); // host terminate(멱등) + surface/remote_screen 회수. 이후 handle과 surface 포인터는 무효.
-            self.allocator.destroy(kv.value.runtime);
-            if (self.host_pool) |pool| pool.release(kv.value.host_id);
+            self.destroyRuntimeEntry(handle, kv.value, .terminate);
         }
     }
 
@@ -366,10 +372,7 @@ pub const RemoteTermBackend = struct {
     /// **vtable 밖** — app_session deinit이 app_quitting일 때 직접 부른다.
     pub fn detachTerm(self: *RemoteTermBackend, handle: RuntimeHandle) void {
         if (self.runtimes.fetchRemove(handle)) |kv| {
-            self.surface_runtime.detachSurface(handle);
-            kv.value.runtime.detachClientSide(); // surface/remote_screen만 회수 — terminate 안 함(runtime 생존).
-            self.allocator.destroy(kv.value.runtime);
-            if (self.host_pool) |pool| pool.release(kv.value.host_id);
+            self.destroyRuntimeEntry(handle, kv.value, .detach);
         }
     }
 
@@ -804,6 +807,7 @@ test "remote term backend: two daemon pool routes exact hosts and retiring A pre
     try testing.expectEqual(host_a, be_impl.runtimeHostId(11).?);
     try testing.expectEqual(host_b, be_impl.runtimeHostId(22).?);
     try testing.expectError(error.HostInUse, pool.remove(host_a));
+    const runtime_a_id = be_impl.runtimeIdFor(11).?;
 
     var pump_b = try be.pump(22);
     try surface_runtime.writeInput(22, .{ .bytes = "before\n" });
@@ -822,8 +826,14 @@ test "remote term backend: two daemon pool routes exact hosts and retiring A pre
     }
     try testing.expect(saw_before);
 
-    be.closeAndDetach(11);
-    be.remove(11);
+    // A runtime은 종료하지 않고 GUI만 detach한 뒤, spawn host가 B인 동안에도 saved host A로 exact reattach한다.
+    // Adapter pool removal은 daemon retirement가 아니며, host 종료 가능 여부는 후속 authoritative inventory가 판정한다.
+    be_impl.detachTerm(11);
+    _ = try be_impl.attachTermOnHost(host_a, 33, runtime_a_id, size);
+    _ = try be.attach(33, true);
+    try testing.expectEqual(host_a, be_impl.runtimeHostId(33).?);
+    be.closeAndDetach(33);
+    be.remove(33);
     try testing.expect(try pool.remove(host_a));
     try testing.expectEqual(host_b, be_impl.runtimeHostId(22).?);
     try surface_runtime.writeInput(22, .{ .bytes = "after\n" });

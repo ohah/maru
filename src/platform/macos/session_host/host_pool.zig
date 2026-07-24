@@ -23,7 +23,8 @@ pub fn HostPool(comptime Adapter: type) type {
         pub fn deinit(self: *Self) void {
             var values = self.entries.valueIterator();
             while (values.next()) |entry| {
-                std.debug.assert(entry.runtime_refs == 0);
+                if (entry.runtime_refs != 0)
+                    @panic("session host pool deinit while runtime leases are active");
                 if (!entry.owned) continue;
                 entry.adapter.deinit();
                 self.allocator.destroy(entry.adapter);
@@ -80,7 +81,8 @@ pub fn HostPool(comptime Adapter: type) type {
 
         pub fn release(self: *Self, host_id: u128) void {
             const entry = self.entries.getPtr(host_id) orelse unreachable;
-            std.debug.assert(entry.runtime_refs > 0);
+            if (entry.runtime_refs == 0)
+                @panic("session host runtime lease released more than once");
             entry.runtime_refs -= 1;
         }
 

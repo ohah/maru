@@ -680,8 +680,27 @@ pub const RemoteRuntime = struct {
         const params = std.fmt.bufPrint(&buf, "{{\"stream_id\":{d},\"row\":{d},\"col\":{d},\"scopes\":{d}}}", .{ self.stream_id, row, col, scopes }) catch return error.OutOfMemory;
         const resp = try self.callOrdered("runtime.link_at", params);
         defer self.allocator.free(resp);
+        return self.decodeLinkAtResponse(resp);
+    }
+
+    /// `runtime.link_at` 응답 `{"text":"...","kind":N}`을 푼다. **selected_text의 단일-필드 디코더를 재사용하면 안 된다** —
+    /// 그건 필드가 정확히 하나인 객체만 받아들여(`decodeSingleStringObject`) kind가 붙은 이 응답을 InvalidJson으로 보고
+    /// 연결을 fail-close시킨다(클릭 한 번에 host 연결이 끊기는 실제 버그였다). text는 임의 바이트라 strict 문자열
+    /// 디코더로 escape를 풀고, kind는 정수 필드로 따로 읽는다. `{"error":...}`나 빈 text는 "링크 없음"(null)이다.
+    fn decodeLinkAtResponse(self: *RemoteRuntime, resp: []const u8) client_mod.ClientError!?RemoteLink {
+        // host가 error 코드를 돌려주면 링크가 없는 것으로 본다(일반 클릭으로 흐른다 — 선택 복사와 같은 정책).
+        if (std.mem.indexOf(u8, resp, "\"error\"") != null) return null;
+        // 다중 필드 객체에서 키로 뽑는 기존 헬퍼를 쓴다(escape 처리 공유). text는 임의 바이트라 반드시 unescape가 필요하다.
+        const text = (decodeJsonStringField(self.allocator, resp, "text") catch return error.OutOfMemory) orelse {
+            // capability를 광고한 host가 success schema를 안 지키면 같은 connection의 나머지 RPC도 신뢰할 수 없다.
+            self.client.failClosed();
+            return error.ProtocolError;
+        };
+        if (text.len == 0) {
+            self.allocator.free(text);
+            return null; // 링크가 없거나 미존재 경로 — host가 빈 text로 알린다.
+        }
         const kind_raw = client_mod.extractU64Field(resp, "\"kind\":") orelse 0;
-        const text = (try self.decodeSelectedTextResponse(resp)) orelse return null; // {text} schema 공용(빈 text=링크 없음).
         return .{ .text = text, .kind = if (kind_raw == 1) .file_path else .url };
     }
 
@@ -2148,6 +2167,50 @@ test "remote runtime: takeNotification pulls a host-side OSC 9/777 desktop notif
 
 // takeNotification의 수동 JSON 문자열 디코더(std.json.parseFromSlice의 f128 링크 회피). host의 std.json.Stringify escape를
 // 되돈다 — 순수 함수라 fork host 없이 escape 처리를 고정한다(제어문자 \u00XX·\" \\ \n \t \uXXXX·키 부재·빈 값·둘째 필드).
+// runtime.link_at 응답은 {text, kind} **두 필드**다. 처음엔 selected_text의 단일-필드 디코더를 재사용했는데,
+// 그건 필드가 정확히 하나인 객체만 받아들여 정상 응답을 InvalidJson으로 보고 연결을 fail-close시켰다 — 밑줄은
+// 뜨는데 Cmd+클릭만 안 열리던 실제 버그다. 두 필드 파싱·escape·빈 text(링크 없음)·error를 여기서 고정한다.
+test "remote runtime: decodeLinkAtResponse는 text와 kind 두 필드를 함께 푼다" {
+    const allocator = testing.allocator;
+    var rt: RemoteRuntime = undefined;
+    rt.allocator = allocator;
+
+    // url(kind 0) — 두 필드가 함께 와도 파싱된다(이전 디코더는 여기서 실패했다).
+    {
+        const link = (try rt.decodeLinkAtResponse("{\"text\":\"https://example.com/x\",\"kind\":0}")).?;
+        defer allocator.free(link.text);
+        try testing.expectEqualStrings("https://example.com/x", link.text);
+        try testing.expectEqual(terminal.LinkKind.url, link.kind);
+    }
+    // file_path(kind 1) — Swift가 URL(fileURLWithPath:)로 여는 분기라 종류가 유실되면 안 된다.
+    {
+        const link = (try rt.decodeLinkAtResponse("{\"text\":\"/tmp/a b.md\",\"kind\":1}")).?;
+        defer allocator.free(link.text);
+        try testing.expectEqualStrings("/tmp/a b.md", link.text);
+        try testing.expectEqual(terminal.LinkKind.file_path, link.kind);
+    }
+    // escape된 텍스트(따옴표·백슬래시)도 원문으로 복원된다.
+    {
+        const link = (try rt.decodeLinkAtResponse("{\"text\":\"/tmp/a\\\"b\",\"kind\":1}")).?;
+        defer allocator.free(link.text);
+        try testing.expectEqualStrings("/tmp/a\"b", link.text);
+    }
+    // 빈 text = 링크 없음(미존재 경로 포함) → null, client는 일반 클릭으로 흘린다.
+    try testing.expect((try rt.decodeLinkAtResponse("{\"text\":\"\",\"kind\":0}")) == null);
+    // host error 응답도 링크 없음으로 본다(연결을 죽이지 않는다).
+    try testing.expect((try rt.decodeLinkAtResponse("{\"error\":\"invalid_request\"}")) == null);
+
+    // 회귀의 근본 계약: selected_text 디코더는 **필드가 정확히 하나인** 객체만 받는다. link_at 응답을 여기에
+    // 통과시키려던 것이 버그였으므로, 그 제약을 여기서 못박아 누가 다시 재사용하면 이 단언이 깨지게 한다.
+    try testing.expectError(error.InvalidJson, RemoteRuntime.decodeSingleStringObject(allocator, "{\"text\":\"x\",\"kind\":0}"));
+    {
+        const single = try RemoteRuntime.decodeSingleStringObject(allocator, "{\"text\":\"x\"}");
+        defer allocator.free(single.key);
+        defer allocator.free(single.value);
+        try testing.expectEqualStrings("text", single.key); // 단일 필드는 그대로 동작(selected_text 경로 불변).
+    }
+}
+
 test "remote runtime: decodeJsonStringField unescapes JSON string fields (parseFromSlice 대체)" {
     const allocator = testing.allocator;
     const decode = RemoteRuntime.decodeJsonStringField;

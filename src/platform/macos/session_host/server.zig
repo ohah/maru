@@ -139,6 +139,11 @@ pub const RuntimeOps = struct {
     /// pendingResponse를 흘리는 것과 동형 — 인코딩 모드가 host에만 있으므로 host가 인코딩·주입한다). codec 순수라
     /// primitive `MouseReport`만 넘기고 runtime_manager가 CoreCommand로 매핑·적용·flush한다.
     report_mouse: *const fn (ctx: *anyopaque, runtime_id: u128, report: MouseReport) anyerror!void,
+    /// 원격 Cmd+클릭 링크 열기(§링크 감지): client가 (row, col)을 보내면 host가 **콘텐츠·cwd·파일시스템을 아는 자기
+    /// core**로 `extractUrlAt`(추출 + cwd resolve + 존재 stat)을 수행해 열 대상을 돌려준다. hover 밑줄은 screen stream의
+    /// `link_spans`로 오지만, 여는 대상은 스크롤백 soft-wrap 이음과 host FS 검증이 필요해 RPC다.
+    /// docs/link-detection.md §원격(host-backed) 세션.
+    link_at: *const fn (ctx: *anyopaque, runtime_id: u128, row: u16, col: u16, scopes: u8, allocator: std.mem.Allocator) anyerror![]u8,
 };
 
 /// host-backed 마우스 리포트 wire payload(primitive — codec 순수). `core_command.MouseReport`의 미러다(codec은
@@ -382,6 +387,8 @@ pub const Connection = struct {
             return self.dispatchReportMouse(frame.header.request_id, params);
         } else if (std.mem.eql(u8, method, "runtime.selected_text")) {
             return self.dispatchSelectedText(frame.header.request_id, params);
+        } else if (std.mem.eql(u8, method, "runtime.link_at")) {
+            return self.dispatchLinkAt(frame.header.request_id, params);
         } else if (std.mem.eql(u8, method, "runtime.select_op")) {
             return self.dispatchSelectOp(frame.header.request_id, params);
         } else if (std.mem.eql(u8, method, "runtime.find")) {
@@ -829,6 +836,26 @@ pub const Connection = struct {
         return self.replyResult(request_id, body);
     }
 
+    /// `runtime.link_at`(원격 Cmd+클릭 링크 열기): client가 보낸 뷰포트 (row,col)에서 host가 `extractUrlAt`으로 링크를
+    /// 추출하고 file_path면 자기 cwd/$HOME으로 resolve + 존재 stat까지 해 `{text,kind}`로 응답한다. client가 자기 FS로
+    /// stat하면 host 쪽 경로를 잘못 판정하므로 검증은 host가 한다. `scopes`는 client의 `input.link-detection` 비트
+    /// (host는 정책을 모르므로 client가 보낸 대로 적용 — hover 필터와 같은 값이라 "밑줄=열림"이 유지된다).
+    /// 모르는 stream_id는 invalid_request. read-only host면 빈 text. 추출 텍스트는 임의 바이트라 실 JSON encoder로 escape.
+    fn dispatchLinkAt(self: *Connection, request_id: u64, params: ?std.json.ObjectMap) HandleError!Action {
+        const p = params orelse return self.replyError(request_id, .invalid_request);
+        const stream = intFieldU64(p, "stream_id") orelse return self.replyError(request_id, .invalid_request);
+        const runtime_id = (self.attachments.get(stream) orelse return self.replyError(request_id, .invalid_request)).runtime_id;
+        const row = intField(p, "row") orelse 0;
+        const col = intField(p, "col") orelse 0;
+        const scopes: u8 = @truncate(intFieldU64(p, "scopes") orelse 0);
+        const body = if (self.runtime_ops) |ops|
+            ops.link_at(ops.ctx, runtime_id, row, col, scopes, self.allocator) catch return self.replyError(request_id, .internal)
+        else
+            (self.allocator.dupe(u8, "{\"text\":\"\"}") catch return error.OutOfMemory);
+        defer self.allocator.free(body);
+        return self.replyResult(request_id, body);
+    }
+
     /// `runtime.select_op`(§6b-2 단어/줄 선택): client가 보낸 (op, row, col)로 host가 콘텐츠 인지 경계를 계산해
     /// (`selectWordAt`/`selectLineAt`) 결과 뷰포트 선택 span을 응답한다(client가 그 span을 placeholder에 적용해 하이라이트).
     /// 모르는 stream_id는 invalid_request. read-only host는 `{sel:false}`. span은 primitive라 escape 불필요(정수/bool).
@@ -1081,7 +1108,7 @@ pub const Connection = struct {
             return self.stringify(.{
                 .version = self.selected_version,
                 .host_id = host_hex,
-                .capabilities = [_][]const u8{ "host.info", "runtime.list", "runtime.get", "runtime_metadata_v1", "screen_stream_v2_current_body", "screen_viewport_scrolled_v1", "async_scroll_to_bottom_v1", "runtime_core_command_v1", "runtime_selected_text_v1" },
+                .capabilities = [_][]const u8{ "host.info", "runtime.list", "runtime.get", "runtime_metadata_v1", "screen_stream_v2_current_body", "screen_viewport_scrolled_v1", "async_scroll_to_bottom_v1", "runtime_core_command_v1", "runtime_selected_text_v1", "runtime_link_at_v1" },
             });
         }
         if (self.host_status.upgrade_capable) {
@@ -1093,7 +1120,7 @@ pub const Connection = struct {
                 .screen_codec_version = self.host_status.screen_codec_version,
                 .upgrade_epoch = self.host_status.upgrade_epoch,
                 .lifecycle = @tagName(self.host_status.lifecycle),
-                .capabilities = [_][]const u8{ "host.info", "runtime.list", "runtime.get", "host_manifest_v1", "host_exec_upgrade_v1", "runtime_metadata_v1", "screen_stream_v2_current_body", "screen_viewport_scrolled_v1", "async_scroll_to_bottom_v1", "runtime_core_command_v1", "runtime_selected_text_v1" },
+                .capabilities = [_][]const u8{ "host.info", "runtime.list", "runtime.get", "host_manifest_v1", "host_exec_upgrade_v1", "runtime_metadata_v1", "screen_stream_v2_current_body", "screen_viewport_scrolled_v1", "async_scroll_to_bottom_v1", "runtime_core_command_v1", "runtime_selected_text_v1", "runtime_link_at_v1" },
             });
         }
         return self.stringify(.{
@@ -1104,7 +1131,7 @@ pub const Connection = struct {
             .screen_codec_version = self.host_status.screen_codec_version,
             .upgrade_epoch = self.host_status.upgrade_epoch,
             .lifecycle = @tagName(self.host_status.lifecycle),
-            .capabilities = [_][]const u8{ "host.info", "runtime.list", "runtime.get", "host_manifest_v1", "runtime_metadata_v1", "screen_stream_v2_current_body", "screen_viewport_scrolled_v1", "async_scroll_to_bottom_v1", "runtime_core_command_v1", "runtime_selected_text_v1" },
+            .capabilities = [_][]const u8{ "host.info", "runtime.list", "runtime.get", "host_manifest_v1", "runtime_metadata_v1", "screen_stream_v2_current_body", "screen_viewport_scrolled_v1", "async_scroll_to_bottom_v1", "runtime_core_command_v1", "runtime_selected_text_v1", "runtime_link_at_v1" },
         });
     }
 
@@ -1725,6 +1752,10 @@ const FakeRuntimeOps = struct {
     last_mouse_report: ?MouseReport = null,
     last_select_span: SelectSpan = .{ .sr = 0, .sc = 0, .er = 0, .ec = 0, .block = false },
     selected_text_runtime: u128 = 0,
+    link_at_runtime: u128 = 0,
+    last_link_row: u16 = 0,
+    last_link_col: u16 = 0,
+    last_link_scopes: u8 = 0,
     last_select_op: [16]u8 = undefined,
     last_select_op_len: usize = 0,
     last_select_op_row: u16 = 0,
@@ -1822,6 +1853,15 @@ const FakeRuntimeOps = struct {
         self.selected_text_runtime = runtime_id;
         return allocator.dupe(u8, "{\"text\":\"PICKED\"}");
     }
+    /// 받은 (row,col,scopes)를 기록하고 고정 링크를 준다 — server 라우팅·파싱 검증(실 추출은 runtime_manager가 담당).
+    fn linkAtFn(ctx: *anyopaque, runtime_id: u128, row: u16, col: u16, scopes: u8, allocator: std.mem.Allocator) anyerror![]u8 {
+        const self: *FakeRuntimeOps = @ptrCast(@alignCast(ctx));
+        self.link_at_runtime = runtime_id;
+        self.last_link_row = row;
+        self.last_link_col = col;
+        self.last_link_scopes = scopes;
+        return allocator.dupe(u8, "{\"text\":\"https://example.com/x\",\"kind\":0}");
+    }
     /// 받은 (op,row,col)을 기록하고 고정 span을 준다 — server 라우팅·파싱 검증(실 경계 계산은 runtime_manager smoke).
     fn selectOpFn(ctx: *anyopaque, runtime_id: u128, op: []const u8, row: u16, col: u16, allocator: std.mem.Allocator) anyerror![]u8 {
         const self: *FakeRuntimeOps = @ptrCast(@alignCast(ctx));
@@ -1877,7 +1917,7 @@ const FakeRuntimeOps = struct {
         };
     }
     fn ops(self: *FakeRuntimeOps) RuntimeOps {
-        return .{ .ctx = self, .spawn = spawnFn, .terminate = terminateFn, .write_input = writeInputFn, .resize = resizeFn, .snapshot = snapshotFn, .delta = deltaFn, .notification = notificationFn, .core_command = coreCommandFn, .selected_text = selectedTextFn, .select_op = selectOpFn, .find = findFn, .observation = observationFn, .report_mouse = reportMouseFn };
+        return .{ .ctx = self, .spawn = spawnFn, .terminate = terminateFn, .write_input = writeInputFn, .resize = resizeFn, .snapshot = snapshotFn, .delta = deltaFn, .notification = notificationFn, .core_command = coreCommandFn, .selected_text = selectedTextFn, .select_op = selectOpFn, .find = findFn, .observation = observationFn, .report_mouse = reportMouseFn, .link_at = linkAtFn };
     }
 };
 
@@ -2539,6 +2579,41 @@ test "server: runtime.report_mouse routes the mouse event to RuntimeOps (§host-
         defer if (r.frame) |f| f.deinit(allocator);
         try testing.expect(std.mem.indexOf(u8, r.frame.?.payload, "invalid_request") != null);
     }
+}
+
+// 원격 Cmd+클릭 링크 열기는 host가 판정한다(client core는 빈 placeholder이고, file_path 존재 검증은 host FS에서
+// 해야 정확하다). server가 (row,col,scopes)를 RuntimeOps로 그대로 라우팅하고 host 응답을 돌려주는지 고정한다 —
+// scopes가 유실되면 client의 link-detection 설정이 무시돼 "밑줄은 뜨는데 안 열리는"(또는 그 반대) 불일치가 난다.
+test "server: runtime.link_at routes cell and scopes to RuntimeOps and returns the host link" {
+    const allocator = testing.allocator;
+    var registry = reg.TerminalRuntimeRegistry.init(allocator);
+    defer registry.deinit();
+    _ = try registry.register(0xAA, 80, 24);
+
+    var fake: FakeRuntimeOps = .{};
+    var conn = Connection.init(allocator, 1, &registry);
+    defer conn.deinit();
+    conn.runtime_ops = fake.ops();
+    {
+        const h = try feedJson(&conn, .hello, 1, "{\"protocol_min\":2,\"protocol_max\":2}");
+        if (h.frame) |f| f.deinit(allocator);
+    }
+    {
+        const frames = try feedExpectFrames(&conn, .request, 2, "{\"method\":\"runtime.attach\",\"params\":{\"runtime_id\":\"aa\",\"mode\":\"controller\"}}");
+        defer {
+            for (frames) |f| f.deinit(allocator);
+            allocator.free(frames);
+        }
+    }
+    {
+        const r = try feedJson(&conn, .request, 3, "{\"method\":\"runtime.link_at\",\"params\":{\"stream_id\":1,\"row\":7,\"col\":11,\"scopes\":63}}");
+        defer if (r.frame) |f| f.deinit(allocator);
+        try testing.expect(std.mem.indexOf(u8, r.frame.?.payload, "https://example.com/x") != null);
+    }
+    try testing.expectEqual(@as(u16, 7), fake.last_link_row);
+    try testing.expectEqual(@as(u16, 11), fake.last_link_col);
+    try testing.expectEqual(@as(u8, 63), fake.last_link_scopes); // link_scopes_full
+    try testing.expectEqual(@as(u128, 0xAA), fake.link_at_runtime);
 }
 
 test "server: runtime.selected_text routes span to RuntimeOps and returns text (§6b 원격 선택 복사)" {

@@ -33,9 +33,12 @@ pub const AttemptReason = enum {
     rollback_exec_failed,
     promotion_failed,
     target_invalid,
+    runtime_changed,
+    handoff_failed,
     state_too_large,
     deadline_exceeded,
     authority_poisoned,
+    runtime_resume_failed,
 };
 
 pub const AttemptReport = struct {
@@ -76,11 +79,13 @@ pub fn validReport(report: AttemptReport) bool {
         .pending => report.reason == .none,
         .committed => report.reason == .none or report.reason == .promotion_failed,
         .resumed => switch (report.reason) {
-            .exec_failed, .target_invalid, .state_too_large, .deadline_exceeded => true,
+            .exec_failed, .target_invalid, .runtime_changed, .handoff_failed, .state_too_large, .deadline_exceeded => true,
             else => false,
         },
         .rolled_back => report.reason == .restore_failed or report.reason == .target_invalid,
-        .failed_nonretryable => report.reason == .rollback_exec_failed or report.reason == .authority_poisoned,
+        .failed_nonretryable => report.reason == .rollback_exec_failed or
+            report.reason == .authority_poisoned or
+            report.reason == .runtime_resume_failed,
     };
 }
 

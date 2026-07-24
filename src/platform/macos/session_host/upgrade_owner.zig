@@ -73,6 +73,7 @@ pub const TargetStager = struct {
 
 pub const Execution = struct {
     attempt_id: u128,
+    request_path: []const u8,
     /// `finish` 전까지만 유효한 borrowed slice와 borrowed `exec_fd`를 포함한다. Caller는 fd를 닫거나 flags/offset을
     /// 바꾸지 않으며, 실제 exec 직전에 `revalidateExecution`을 다시 통과해야 한다. `finish`가 exact-once로 회수한다.
     target: VerifiedTarget,
@@ -261,6 +262,7 @@ pub const UpgradeOwner = struct {
         attempt.phase = .running;
         return .{
             .attempt_id = attempt.id,
+            .request_path = attempt.request_path,
             .target = attempt.target,
         };
     }
@@ -275,7 +277,11 @@ pub const UpgradeOwner = struct {
     pub fn runningExecution(self: *const UpgradeOwner, attempt_id: u128) ?Execution {
         const attempt = self.attempt orelse return null;
         if (attempt.id != attempt_id or attempt.phase != .running) return null;
-        return .{ .attempt_id = attempt.id, .target = attempt.target };
+        return .{
+            .attempt_id = attempt.id,
+            .request_path = attempt.request_path,
+            .target = attempt.target,
+        };
     }
 
     /// Exec를 넘어 active authority와 host-lifetime completed idempotency ledger를 함께 보존한다. runtime_ids는
@@ -423,7 +429,11 @@ pub const UpgradeOwner = struct {
         const attempt = if (self.attempt) |*value| value else return false;
         if (attempt.id != attempt_id or attempt.phase != .running) return false;
         if (!wire.validReport(report) or report.status == .pending) return false;
-        if (attempt.restored_role == null and report.status != .resumed) return false;
+        if (attempt.restored_role == null and
+            report.status != .resumed and
+            !(report.status == .failed_nonretryable and
+                (report.reason == .authority_poisoned or report.reason == .runtime_resume_failed)))
+            return false;
         if (attempt.restored_role == .rollback and report.status != .rolled_back) return false;
         if (attempt.restored_role == .target and
             report.status != .committed and report.status != .failed_nonretryable)
@@ -694,6 +704,32 @@ test "upgrade owner revalidates the exact staged target before execution" {
     const report = owner.status(21).?;
     try std.testing.expectEqual(wire.AttemptStatus.resumed, report.status);
     try std.testing.expectEqual(wire.AttemptReason.target_invalid, report.reason);
+}
+
+test "pre-exec owner accepts only explicit authority or runtime fail-stop terminals" {
+    var owner = UpgradeOwner.init(std.testing.allocator, TestStager.ops(), null);
+    defer owner.deinit();
+    try std.testing.expectEqual(wire.PrepareDecision.accepted, owner.stagePending(testRequest(22, "/target")));
+    try std.testing.expectEqual(wire.ArmDecision.armed, owner.armAccepted(22));
+    _ = owner.beginExecution(22).?;
+    try std.testing.expect(!owner.finish(22, .{
+        .status = .failed_nonretryable,
+        .reason = .rollback_exec_failed,
+    }));
+    try std.testing.expect(owner.finish(22, .{
+        .status = .failed_nonretryable,
+        .reason = .authority_poisoned,
+    }));
+
+    var resume_owner = UpgradeOwner.init(std.testing.allocator, TestStager.ops(), null);
+    defer resume_owner.deinit();
+    try std.testing.expectEqual(wire.PrepareDecision.accepted, resume_owner.stagePending(testRequest(23, "/target")));
+    try std.testing.expectEqual(wire.ArmDecision.armed, resume_owner.armAccepted(23));
+    _ = resume_owner.beginExecution(23).?;
+    try std.testing.expect(resume_owner.finish(23, .{
+        .status = .failed_nonretryable,
+        .reason = .runtime_resume_failed,
+    }));
 }
 
 test "upgrade owner record survives exec and restores active plus completed idempotency authority" {

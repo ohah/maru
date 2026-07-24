@@ -72,6 +72,16 @@ pub const AdmissionGate = struct {
         self.open = true;
     }
 
+    /// close 뒤 기존 in-flight가 drain되기 전에 deadline/error가 난 admission-only rollback. 이미 들어온 작업은
+    /// 그대로 끝나게 두고 새 admission을 다시 허용한다. Reader quiesce가 완성된 뒤의 rollback은 strict `reopen`을 쓴다.
+    pub fn cancelClose(self: *AdmissionGate) void {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        std.debug.assert(!self.open);
+        self.epoch +%= 1;
+        self.open = true;
+    }
+
     pub const Snapshot = struct {
         open: bool,
         in_flight: usize,
@@ -107,4 +117,16 @@ test "upgrade admission gate rejects work after close and reopens only after dra
     try std.testing.expectEqual(@as(u64, 1), snap.epoch);
     var after = gate.tryEnter() orelse return error.TestUnexpectedResult;
     after.release();
+}
+
+test "upgrade admission close can be canceled while an admitted operation is still finishing" {
+    var gate = AdmissionGate.init(std.testing.io);
+    var lease = gate.tryEnter() orelse return error.TestUnexpectedResult;
+    try std.testing.expect(gate.close());
+    gate.cancelClose();
+    const reopened = gate.snapshot();
+    try std.testing.expect(reopened.open);
+    try std.testing.expectEqual(@as(usize, 1), reopened.in_flight);
+    lease.release();
+    try std.testing.expectEqual(@as(usize, 0), gate.snapshot().in_flight);
 }

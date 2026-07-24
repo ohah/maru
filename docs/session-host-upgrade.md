@@ -6,7 +6,7 @@
 [Workspace Restore](workspace-restore.md), 화면 전송 codec은 `maru.screen-stream` 계약을 따른다.
 
 > **상태: U0 완료, U1 codec·U2 quiesce 핵심과 U3/U4 fixture·adapter 기반, U5 target/attempt
-> authority·durable handoff store component를 구현했다. U1~U4의 §11 전체 종료 gate와 U5 제품 daemon
+> authority·durable handoff store·비활성 old-side coordinator component를 구현했다. U1~U4의 §11 전체 종료 gate와 U5 제품 daemon
 > coordinator·signed update gate는 아직 열려 있고 제품 업그레이드는 비활성이다.**
 > 현재 살아 있는 host가 `host_exec_upgrade_v1`을 광고하지 않으면 새 앱은 그 host를 실행 중 교체할 수 없다.
 > 이 경우 지원하는 N-1 MRSH adapter로 attach해 기존 runtime을 그대로 쓰거나, attachment가 모두 끝난 뒤 구 host를
@@ -112,7 +112,8 @@ recorded hash/dev/inode 불일치로 commit하지 않고 rollback한다. 이를 
 `host.upgrade.status {attempt_id}`는 `pending | resumed | rolled_back | committed | failed_nonretryable`와 typed reason을
 돌려준다. client의 성공 판정은 EOF가 아니라 재접속한 `host.info`의 **같은 `host_id`**, target build/protocol,
 증가한 `upgrade_epoch`, exact runtime ID 집합이다. `resumed`/`rolled_back`은 원 target으로 자동 재시도하지 않으며
-명시적 새 attempt ID가 필요하다.
+명시적 새 attempt ID가 필요하다. accepted 뒤 attachment/runtime graph가 바뀌어 quiesce를 취소한 경우는
+`resumed/runtime_changed`로 기록하며 deadline 실패로 위장하지 않는다.
 
 ## 4. 권위와 저장 위치
 
@@ -158,12 +159,14 @@ fd 번호는 durable identity가 아니다. handoff manifest의 runtime record�
 
 ```text
 serving
-  -> preflight
+  -> target_staging_preflight
   -> admission_closed
   -> quiescing
   -> handoff_committed
+  -> handoff_reader_preflight
+  -> restoring_manifest_published
+  -> fd_slots_prepared
   -> exec_pending
-  -> restoring
   -> restore_validated
   -> restore_prepared
   -> committed
@@ -174,7 +177,8 @@ serving
 
 | 실패 지점 | 결과 |
 | --- | --- |
-| preflight | 아무 상태도 바꾸지 않고 구 host가 계속 serve |
+| target staging preflight | 아무 상태도 바꾸지 않고 구 host가 계속 serve |
+| handoff reader preflight | 이미 unlink된 primary/backup의 열린 fd를 닫고 old reader/admission을 재개하며 exec하지 않음 |
 | admission close 전 | 구 host가 계속 serve |
 | quiesce/flush deadline | reader·admission을 재개하고 임시 파일 제거 |
 | handoff write/sync/rename | CLOEXEC를 건드리지 않고 구 host 재개 |
@@ -445,9 +449,25 @@ absolute identity만** 기록하고 target의 page layout을 새로 만든다. s
 - **구현된 component seam:** attempt-key exclusive target staging, strict same-release codesign authorizer,
   accepted/armed/running/terminal idempotency owner, exec를 넘는 checksummed attempt record, host/epoch/next-handle/live
   runtime/target identity 교차검증, descriptor-relative primary/backup commit, 64 MiB operational cap, exact disk
-  preallocation, mandatory deadline, unlink-before-exec FD pair와 target/rollback restore role token을 자동 검증한다.
-- **아직 미구현인 제품 경계:** daemon의 prepare→quiesce→store→FD slot→exec→restore→manifest promotion coordinator,
-  별도 staged-target reader preflight, signed frozen N-1 app artifact, 실제 update/soak, product capability 광고다.
+  preallocation, attempt 전체가 공유하는 absolute monotonic deadline, 동일 paused graph에서 outer handoff와 sorted
+  attempt runtime set을 만드는 capture, 256 PTY+primary+backup+owner 259개 FD slot 선예약, unlink-before-exec FD pair와
+  target/rollback restore role token을 자동 검증한다. 비활성 old-side coordinator는 real PTY 한 개에서 fake
+  preflight/authority/executor callback을 단계 순서대로 조합한다. exec-return 실패의 `unchanged_retryable`
+  authority rollback은 최초 호출을 포함해 최대 3회 시도하고, 첫 호출 뒤 재시도는 남은 absolute deadline 안에서 최대
+  2회만 수행한다. 성공하면 모든 259개 slot을 닫고 admission과 기존 reader를 재개해
+  같은 PTY의 후속 입력이 실제 screen snapshot에 나타나는 데까지 검증한다. 임의 preexisting non-CLOEXEC fd는 exec 전에
+  거부한다. 실제 `HostAuthority` adapter는 expected host/epoch/lifecycle CAS로 disk manifest와 wire status를 함께
+  `ready↔restoring` 전이한다. Manifest/slot 작업 뒤 pathname exec 직전에도 같은 paused child/fd graph를 재검증한다.
+  rollback reader thread는 전부 생성 성공시킨 뒤 authority를 `ready`로 CAS하고, 그 다음 release flag를 전량 게시한
+  뒤에만 admission을 연다. 하나라도 thread를 준비하지 못하면 `runtime_resume_failed`로 기록하고 authority/gate를
+  열지 않는다. `begin_restoring` 전 resume 실패는 기존 `ready` discovery를 그대로 두지 않고 expected
+  host/epoch/lifecycle CAS로 `draining`을 durable publish한다. 이 fail-stop publish도 확정할 수 없으면 coordinator는
+  `invariant_violation`을 반환해 향후 daemon 제품 배선이 즉시 process exit/manifest withdraw하도록 강제한다.
+  이는 아직 실제 exec/restore 증거로 보지는 않는다.
+- **아직 미구현인 제품 경계:** daemon controller 설치와 completed marker 소비, quiesce 전 handoff-size/disk/I/O
+  budget admission, prepare→quiesce→store→FD slot→exec→restore→manifest promotion의 제품 배선,
+  실제 `execv` executor와 별도 staged-target reader preflight, target/rollback entrypoint의 prepared runtime graph와
+  기존 restoring manifest adopt, signed frozen N-1 app artifact, 실제 update/soak, product capability 광고다.
   이 경계가 닫히기 전에는 U5 완료나 사용자-visible migration을 주장하지 않는다.
 
 U0~U4가 끝나기 전에는 “구 host session이 새 host로 migration된다”고 제품/PR에 쓰지 않는다.

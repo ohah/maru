@@ -5626,19 +5626,14 @@ pub const AppSession = struct {
         var arena = std.heap.ArenaAllocator.init(alloc);
         defer arena.deinit();
         const base = sessionCacheBase(arena.allocator()) orelse return false;
-        const connected = switch (session_host.host_connect.connectExistingMajor(
+        const connected = switch (session_host.host_connect.connectExistingHost(
             alloc,
             base,
-            session_host.protocol.version_major - 1,
+            wanted_host_id,
         )) {
             .connected => |client| client,
             .failed => return false,
         };
-        if (connected.host_id != wanted_host_id) {
-            var mismatch = connected;
-            mismatch.deinit();
-            return false;
-        }
         const adapter = alloc.create(RemoteSessionAdapter) catch {
             var failed = connected;
             failed.deinit();
@@ -5658,8 +5653,8 @@ pub const AppSession = struct {
             };
         } else {
             // current host launch/connect가 실패해도 건강한 N-1 runtime restore는 독립적으로 열려야 한다.
-            // 이 pool의 spawn host는 타입 불변식을 위한 값일 뿐이며 host_connect_failed가 새 Term spawn을 local로
-            // 고정하므로, old host에는 restore attach만 보낸다.
+            // attach-only backend가 spawn host 부재를 직접 표현하므로 전역 flag에 기대 구 host를 spawn owner로
+            // 위장하지 않는다. 새 Term은 host_connect_failed 때문에 local이고, 직접 remote spawn도 fail-close한다.
             app_remote_host_pool = RemoteHostPool.init(alloc);
             app_remote_host_pool.?.addOwned(wanted_host_id, adapter) catch {
                 adapter.deinit();
@@ -5668,17 +5663,12 @@ pub const AppSession = struct {
                 app_remote_host_pool = null;
                 return false;
             };
-            app_remote_host_pool.?.setSpawnHost(wanted_host_id) catch unreachable;
-            app_remote_backend = session_host.remote_term_backend.RemoteTermBackend.initWithPool(
+            app_remote_backend = session_host.remote_term_backend.RemoteTermBackend.initAttachOnlyWithPool(
                 alloc,
                 self.io,
                 &app_remote_host_pool.?,
                 self.runtime,
-            ) catch {
-                app_remote_host_pool.?.deinit();
-                app_remote_host_pool = null;
-                return false;
-            };
+            );
         }
         return true;
     }

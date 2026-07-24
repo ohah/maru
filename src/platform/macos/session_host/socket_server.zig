@@ -62,9 +62,11 @@ pub const SocketServer = struct {
     allocator: std.mem.Allocator,
     host_id: u128,
     registry: *reg.TerminalRuntimeRegistry,
+    host_status: server_mod.HostStatus = .{},
     /// host가 실 runtime 소유(spawn/terminate)를 위임하는 vtable(§4). null이면 read-only host(조회만) — daemon이
     /// bind 후 `runtime_manager.runtimeOps()`로 채운다. connection마다 이 값을 그대로 넘겨 spawn/terminate를 라우팅한다.
     runtime_ops: ?server_mod.RuntimeOps = null,
+    upgrade_ops: ?@import("upgrade_wire.zig").Ops = null,
     /// U2 host-global admission barrier. 각 complete frame dispatch가 lease 하나를 잡는다.
     admission_gate: ?*upgrade.AdmissionGate = null,
     /// GUI가 연결되지 않았거나 한 connection이 오래 살아 있어도 PTY exit/read-error lifecycle을 전진시키는 owner tick.
@@ -183,6 +185,8 @@ pub const SocketServer = struct {
         var conn = server_mod.Connection.init(self.allocator, self.host_id, self.registry);
         defer conn.deinit(); // 연결 종료 시 이 connection의 attach subscription을 모두 detach한다(runtime은 유지, §9).
         conn.runtime_ops = self.runtime_ops; // host면 spawn/terminate/input/resize/delta 위임, read-only면 null(unauthorized).
+        conn.upgrade_ops = self.upgrade_ops;
+        conn.host_status = self.host_status;
 
         var buf: [4096]u8 = undefined;
         while (true) {

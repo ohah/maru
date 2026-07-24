@@ -17,6 +17,19 @@ const protocol = @import("protocol.zig");
 const framing = @import("framing.zig");
 const reg = @import("registry.zig");
 const core_command_wire = @import("core_command_wire.zig");
+const screen_stream = @import("screen_stream.zig");
+const host_identity = @import("host_identity.zig");
+const upgrade_wire = @import("upgrade_wire.zig");
+
+pub const HostStatus = struct {
+    manifest_capable: bool = false,
+    upgrade_capable: bool = false,
+    build_id: []const u8 = "unknown",
+    protocol_major: u16 = protocol.version_major,
+    screen_codec_version: u16 = screen_stream.codec_version,
+    upgrade_epoch: u64 = 0,
+    lifecycle: host_identity.Lifecycle = .ready,
+};
 
 /// hello가 밝히는 client 종류. GUI window인지 CLI(`maru attach`)인지 — 권한/표시에 쓴다(§9).
 pub const ClientKind = enum { gui, cli, unknown };
@@ -175,8 +188,12 @@ pub const Connection = struct {
     allocator: std.mem.Allocator,
     host_id: u128,
     registry: *reg.TerminalRuntimeRegistry,
+    host_status: HostStatus = .{},
     /// 실 runtime 소유 위임(host만 설정). null이면 read-only host라 spawn/terminate/input/resize가 unauthorized다.
     runtime_ops: ?RuntimeOps = null,
+    /// `prepare`는 pending attempt 게시까지만 하고 즉시 반환해야 한다. Quiesce/exec는 reply-and-close와 gate lease
+    /// release 뒤 daemon outer loop가 실행한다.
+    upgrade_ops: ?upgrade_wire.Ops = null,
     state: State = .pre_hello,
     selected_version: u16 = 0,
     client_kind: ClientKind = .unknown,
@@ -321,6 +338,10 @@ pub const Connection = struct {
             const body = try self.hostInfoJson();
             defer self.allocator.free(body);
             return self.replyResult(frame.header.request_id, body);
+        } else if (std.mem.eql(u8, method, "host.upgrade.prepare")) {
+            return self.dispatchUpgradePrepare(frame.header.request_id, params);
+        } else if (std.mem.eql(u8, method, "host.upgrade.status")) {
+            return self.dispatchUpgradeStatus(frame.header.request_id, params);
         } else if (std.mem.eql(u8, method, "runtime.list")) {
             const body = try self.runtimeListJson();
             defer self.allocator.free(body);
@@ -363,6 +384,45 @@ pub const Connection = struct {
             return self.dispatchNotification(frame.header.request_id, params);
         }
         return self.replyError(frame.header.request_id, .invalid_request);
+    }
+
+    fn dispatchUpgradePrepare(
+        self: *Connection,
+        request_id: u64,
+        params: ?std.json.ObjectMap,
+    ) HandleError!Action {
+        if (!self.host_status.upgrade_capable) return self.replyError(request_id, .upgrade_unsupported);
+        const ops = self.upgrade_ops orelse return self.replyError(request_id, .upgrade_unsupported);
+        const request = upgrade_wire.parsePrepare(params orelse
+            return self.replyError(request_id, .invalid_request)) orelse
+            return self.replyError(request_id, .invalid_request);
+        return switch (ops.prepare(ops.ctx, request)) {
+            .accepted => blk: {
+                const body = try self.stringify(.{ .result = .{ .state = "accepted" } });
+                defer self.allocator.free(body);
+                break :blk self.replyResultAndClose(request_id, body);
+            },
+            .busy => self.replyError(request_id, .upgrade_busy),
+            .conflict => self.replyError(request_id, .attempt_conflict),
+            .unsupported => self.replyError(request_id, .upgrade_unsupported),
+            .invalid_target => self.replyError(request_id, .invalid_target),
+        };
+    }
+
+    fn dispatchUpgradeStatus(
+        self: *Connection,
+        request_id: u64,
+        params: ?std.json.ObjectMap,
+    ) HandleError!Action {
+        const ops = self.upgrade_ops orelse return self.replyError(request_id, .upgrade_unsupported);
+        const attempt_id = upgrade_wire.parseStatus(params orelse
+            return self.replyError(request_id, .invalid_request)) orelse
+            return self.replyError(request_id, .invalid_request);
+        const status = ops.status(ops.ctx, attempt_id) orelse
+            return self.replyError(request_id, .invalid_request);
+        const body = try self.stringify(.{ .result = .{ .state = @tagName(status) } });
+        defer self.allocator.free(body);
+        return self.replyResult(request_id, body);
     }
 
     /// user action 직전 metadata barrier. 주기 event cache가 `.current`여도 마지막 100ms 안의 OSC 5379 전환은 아직
@@ -975,19 +1035,49 @@ pub const Connection = struct {
     fn helloAckJson(self: *Connection) HandleError![]u8 {
         const host_hex = try self.hostHex();
         defer self.allocator.free(host_hex);
+        if (!self.host_status.manifest_capable) {
+            return self.stringify(.{
+                .version = self.selected_version,
+                .host_id = host_hex,
+                .capabilities = [_][]const u8{ "host.info", "runtime.list", "runtime.get", "runtime_metadata_v1", "screen_stream_v2_current_body", "screen_viewport_scrolled_v1", "async_scroll_to_bottom_v1", "runtime_core_command_v1", "runtime_selected_text_v1" },
+            });
+        }
+        if (self.host_status.upgrade_capable) {
+            return self.stringify(.{
+                .version = self.selected_version,
+                .host_id = host_hex,
+                .build_id = self.host_status.build_id,
+                .protocol_major = self.host_status.protocol_major,
+                .screen_codec_version = self.host_status.screen_codec_version,
+                .upgrade_epoch = self.host_status.upgrade_epoch,
+                .lifecycle = @tagName(self.host_status.lifecycle),
+                .capabilities = [_][]const u8{ "host.info", "runtime.list", "runtime.get", "host_manifest_v1", "host_exec_upgrade_v1", "runtime_metadata_v1", "screen_stream_v2_current_body", "screen_viewport_scrolled_v1", "async_scroll_to_bottom_v1", "runtime_core_command_v1", "runtime_selected_text_v1" },
+            });
+        }
         return self.stringify(.{
             .version = self.selected_version,
             .host_id = host_hex,
-            .capabilities = [_][]const u8{ "host.info", "runtime.list", "runtime.get", "runtime_metadata_v1", "screen_stream_v2_current_body", "screen_viewport_scrolled_v1", "async_scroll_to_bottom_v1", "runtime_core_command_v1", "runtime_selected_text_v1" },
+            .build_id = self.host_status.build_id,
+            .protocol_major = self.host_status.protocol_major,
+            .screen_codec_version = self.host_status.screen_codec_version,
+            .upgrade_epoch = self.host_status.upgrade_epoch,
+            .lifecycle = @tagName(self.host_status.lifecycle),
+            .capabilities = [_][]const u8{ "host.info", "runtime.list", "runtime.get", "host_manifest_v1", "runtime_metadata_v1", "screen_stream_v2_current_body", "screen_viewport_scrolled_v1", "async_scroll_to_bottom_v1", "runtime_core_command_v1", "runtime_selected_text_v1" },
         });
     }
 
     fn hostInfoJson(self: *Connection) HandleError![]u8 {
         const host_hex = try self.hostHex();
         defer self.allocator.free(host_hex);
-        return self.stringify(.{
-            .result = .{ .host_id = host_hex, .runtime_count = self.registry.count() },
-        });
+        return self.stringify(.{ .result = .{
+            .host_id = host_hex,
+            .build_id = self.host_status.build_id,
+            .protocol_major = self.host_status.protocol_major,
+            .screen_codec_version = self.host_status.screen_codec_version,
+            .upgrade_epoch = self.host_status.upgrade_epoch,
+            .lifecycle = @tagName(self.host_status.lifecycle),
+            .runtime_count = self.registry.count(),
+        } });
     }
 
     fn runtimeMetaJson(self: *Connection, entry: *reg.RuntimeEntry) HandleError![]u8 {
@@ -1056,6 +1146,15 @@ pub const Connection = struct {
             error.PayloadTooLarge => return self.replyError(request_id, .payload_too_large),
         };
         return .{ .reply = wire };
+    }
+
+    fn replyResultAndClose(self: *Connection, request_id: u64, json: []const u8) HandleError!Action {
+        const wire = self.encode(.response, request_id, 0, json) catch |e| switch (e) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.PayloadTooLarge => return self.replyError(request_id, .payload_too_large),
+        };
+        self.state = .closed;
+        return .{ .reply_and_close = wire };
     }
 
     fn stringify(self: *Connection, value: anytype) HandleError![]u8 {
@@ -1369,6 +1468,46 @@ test "server: hello with overlapping version acks host_id and moves to ready" {
     try testing.expect(std.mem.indexOf(u8, r.frame.?.payload, "\"async_scroll_to_bottom_v1\"") != null);
     try testing.expect(std.mem.indexOf(u8, r.frame.?.payload, "\"runtime_core_command_v1\"") != null);
     try testing.expect(std.mem.indexOf(u8, r.frame.?.payload, "\"runtime_selected_text_v1\"") != null);
+}
+
+test "server: upgrade prepare publishes pending then replies-and-closes before daemon work" {
+    const FakeOwner = struct {
+        accepted: bool = false,
+        attempt_id: u128 = 0,
+
+        fn prepare(ctx: *anyopaque, request: upgrade_wire.PrepareRequest) upgrade_wire.PrepareDecision {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            if (self.accepted and self.attempt_id != request.attempt_id) return .conflict;
+            self.accepted = true;
+            self.attempt_id = request.attempt_id;
+            return .accepted;
+        }
+
+        fn status(ctx: *anyopaque, attempt_id: u128) ?upgrade_wire.AttemptStatus {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            if (!self.accepted or self.attempt_id != attempt_id) return null;
+            return .pending;
+        }
+    };
+
+    var registry = reg.TerminalRuntimeRegistry.init(testing.allocator);
+    defer registry.deinit();
+    var owner: FakeOwner = .{};
+    var conn = Connection.init(testing.allocator, 0x1234, &registry);
+    conn.state = .ready;
+    conn.selected_version = protocol.version_major;
+    conn.host_status = .{ .manifest_capable = true, .upgrade_capable = true };
+    conn.upgrade_ops = .{ .ctx = &owner, .prepare = FakeOwner.prepare, .status = FakeOwner.status };
+    const request =
+        \\{"method":"host.upgrade.prepare","params":{"attempt_id":"0000000000000000000000000000aabb","target_path":"/Applications/Maru.app/Contents/MacOS/maru","target_build_id":"sha256:build","target_sha256":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","handoff_reader_min":1,"handoff_reader_max":1}}
+    ;
+    const result = try feedJson(&conn, .request, 9, request);
+    defer if (result.frame) |frame| frame.deinit(testing.allocator);
+    try testing.expect(owner.accepted);
+    try testing.expectEqual(@as(u128, 0xAABB), owner.attempt_id);
+    try testing.expectEqualStrings("reply_and_close", result.action);
+    try testing.expect(std.mem.indexOf(u8, result.frame.?.payload, "\"state\":\"accepted\"") != null);
+    try testing.expectEqual(Connection.State.closed, conn.state);
 }
 
 test "server: wrong header major closes before hello negotiation" {

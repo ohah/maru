@@ -106,6 +106,10 @@ pub const ErrorCode = enum {
     payload_too_large,
     queue_invalidated,
     host_shutting_down,
+    upgrade_busy,
+    attempt_conflict,
+    upgrade_unsupported,
+    invalid_target,
     internal,
 
     pub fn wireName(self: ErrorCode) []const u8 {
@@ -121,6 +125,10 @@ pub const ErrorCode = enum {
             .payload_too_large => "payload_too_large",
             .queue_invalidated => "queue_invalidated",
             .host_shutting_down => "host_shutting_down",
+            .upgrade_busy => "upgrade_busy",
+            .attempt_conflict => "attempt_conflict",
+            .upgrade_unsupported => "upgrade_unsupported",
+            .invalid_target => "invalid_target",
             .internal => "internal",
         };
     }

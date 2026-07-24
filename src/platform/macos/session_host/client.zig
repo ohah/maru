@@ -13,10 +13,12 @@ const builtin = @import("builtin");
 const c = std.c;
 const posix = std.posix;
 const protocol = @import("protocol.zig");
+const compatibility = @import("compatibility.zig");
 const framing = @import("framing.zig");
 const socket_server = @import("socket_server.zig");
 const screen_stream = @import("screen_stream.zig");
 const observation_wire = @import("observation_wire.zig");
+const upgrade_wire = @import("upgrade_wire.zig");
 
 pub const ClientError = error{
     EndpointAbsent,
@@ -81,6 +83,14 @@ pub const Client = struct {
     allocator: std.mem.Allocator,
     fd: c.fd_t,
     host_id: u128,
+    /// Exact host manifest ABA 검증용 hello identity. 과거 manifest 없는 peer는 null/0/empty일 수 있다.
+    build_id: ?[]u8 = null,
+    upgrade_epoch: u64 = 0,
+    lifecycle: []u8 = &.{},
+    /// host-id manifest를 publish하는 peer인지. 이 capability가 있으면 hello identity 필드는 전부 필수이며 legacy
+    /// endpoint 추측 경로에서 받아들이지 않는다.
+    host_manifest_v1: bool = false,
+    host_exec_upgrade_v1: bool = false,
     /// 이 connection이 협상한 MRSH header major. current GUI는 current와 frozen N-1 adapter를 별도
     /// connection으로 유지하므로 모든 outbound/inbound frame이 이 값을 사용한다.
     wire_major: u16 = protocol.version_major,
@@ -141,9 +151,7 @@ pub const Client = struct {
         client_kind: []const u8,
         wire_major: u16,
     ) ClientError!Client {
-        if (wire_major == 0 or wire_major > protocol.version_major or
-            protocol.version_major - wire_major > 1)
-            return error.IncompatibleVersion;
+        const profile = compatibility.profileForMajor(wire_major) orelse return error.IncompatibleVersion;
         // over-long path는 sun_path(104B)를 넘겨 slice-bounds panic이 되므로 syscall 전에 거부한다(bind의 socketPathFits 대칭).
         if (!socket_server.socketPathFits(socket_path.len)) return error.EndpointDenied;
         const fd = c.socket(posix.AF.UNIX, posix.SOCK.STREAM, 0);
@@ -188,14 +196,30 @@ pub const Client = struct {
         // 과거 개발 중 같은 MRSH v1 아래 screen body 의미가 여러 번 바뀌었다. build identity가 없는 untagged v1을
         // current body로 추측하면 structurally-valid silent misrender가 가능하므로, frozen release가 명시한
         // capability가 있는 직전 major만 연다. current major는 major bump 자체가 screen v2 경계다.
-        if (wire_major < protocol.version_major and
-            !payloadHasCapability(ack.payload, previousScreenCapability(wire_major)))
+        if (profile.required_fingerprint) |fingerprint| if (!payloadHasCapability(ack.payload, fingerprint))
             return error.IncompatibleVersion;
         self.host_id = parseHostId(ack.payload) orelse return error.HandshakeFailed;
-        self.screen_codec_version = if (wire_major == protocol.version_major)
-            @import("screen_stream.zig").codec_version
-        else
-            @import("screen_stream.zig").codec_version - 1;
+        const build_id = try parseStringFieldAlloc(self.allocator, ack.payload, "build_id");
+        errdefer if (build_id) |owned| self.allocator.free(owned);
+        const lifecycle = try parseStringFieldAlloc(self.allocator, ack.payload, "lifecycle");
+        errdefer if (lifecycle) |owned| self.allocator.free(owned);
+        const upgrade_epoch = parseUnsignedField(ack.payload, "upgrade_epoch");
+        const peer_screen_codec = parseUnsignedField(ack.payload, "screen_codec_version");
+        const manifest_capable = payloadHasCapability(ack.payload, "host_manifest_v1");
+        if (manifest_capable and
+            (build_id == null or lifecycle == null or upgrade_epoch == null or peer_screen_codec == null))
+            return error.HandshakeFailed;
+        if (peer_screen_codec) |codec| {
+            if (codec > std.math.maxInt(u16)) return error.HandshakeFailed;
+            self.screen_codec_version = @intCast(codec);
+        } else {
+            self.screen_codec_version = profile.screen_codec_version;
+        }
+        self.build_id = build_id;
+        self.upgrade_epoch = upgrade_epoch orelse 0;
+        self.lifecycle = lifecycle orelse &.{};
+        self.host_manifest_v1 = manifest_capable;
+        self.host_exec_upgrade_v1 = payloadHasCapability(ack.payload, "host_exec_upgrade_v1");
         self.screen_viewport_scrolled_v1 = payloadHasCapability(ack.payload, "screen_viewport_scrolled_v1");
         self.async_scroll_to_bottom_v1 = payloadHasCapability(ack.payload, "async_scroll_to_bottom_v1");
         self.runtime_core_command_v1 = payloadHasCapability(ack.payload, "runtime_core_command_v1");
@@ -205,6 +229,8 @@ pub const Client = struct {
 
     pub fn deinit(self: *Client) void {
         if (self.fd >= 0) _ = c.close(self.fd);
+        if (self.build_id) |build_id| self.allocator.free(build_id);
+        if (self.lifecycle.len != 0) self.allocator.free(self.lifecycle);
         self.clearPendingOutbound();
         for (self.pending_stream.items) |f| f.deinit(self.allocator); // 미소비 버퍼 stream frame 회수.
         self.pending_stream.deinit(self.allocator);
@@ -264,6 +290,41 @@ pub const Client = struct {
             }
             return self.allocator.dupe(u8, resp.payload) catch return error.OutOfMemory;
         }
+    }
+
+    pub fn prepareUpgrade(self: *Client, request: upgrade_wire.PrepareRequest) ClientError!bool {
+        if (!self.host_exec_upgrade_v1) return error.IncompatibleVersion;
+        var out: std.Io.Writer.Allocating = .init(self.allocator);
+        defer out.deinit();
+        var js: std.json.Stringify = .{ .writer = &out.writer, .options = .{} };
+        var attempt_buf: [32]u8 = undefined;
+        const attempt = std.fmt.bufPrint(&attempt_buf, "{x:0>32}", .{request.attempt_id}) catch
+            return error.ProtocolError;
+        const sha = std.fmt.bytesToHex(request.target_sha256, .lower);
+        js.write(.{
+            .attempt_id = attempt,
+            .target_path = request.target_path,
+            .target_build_id = request.target_build_id,
+            .target_sha256 = &sha,
+            .handoff_reader_min = request.handoff_reader_min,
+            .handoff_reader_max = request.handoff_reader_max,
+        }) catch return error.OutOfMemory;
+        const response = try self.call("host.upgrade.prepare", out.written());
+        defer self.allocator.free(response);
+        return responseState(response, "accepted");
+    }
+
+    pub fn upgradeStatus(self: *Client, attempt_id: u128) ClientError!?upgrade_wire.AttemptStatus {
+        var attempt_buf: [32]u8 = undefined;
+        const attempt = std.fmt.bufPrint(&attempt_buf, "{x:0>32}", .{attempt_id}) catch
+            return error.ProtocolError;
+        var out: std.Io.Writer.Allocating = .init(self.allocator);
+        defer out.deinit();
+        var js: std.json.Stringify = .{ .writer = &out.writer, .options = .{} };
+        js.write(.{ .attempt_id = attempt }) catch return error.OutOfMemory;
+        const response = try self.call("host.upgrade.status", out.written());
+        defer self.allocator.free(response);
+        return parseAttemptStatus(response);
     }
 
     /// attach 직후 host가 보내는 `snapshot_chunk` stream을 `end_stream`까지 읽어 record 바이트를 이어 돌려준다(§10 attach
@@ -1295,12 +1356,71 @@ fn parseSelectedVersion(payload: []const u8) ?u16 {
     return std.math.cast(u16, raw);
 }
 
-fn previousScreenCapability(major: u16) []const u8 {
-    return switch (major) {
-        1 => "screen_stream_v1_current_body",
-        2 => "screen_stream_v2_current_body",
-        else => "unsupported_screen_stream",
+fn parseUnsignedField(payload: []const u8, name: []const u8) ?u64 {
+    var parsed = std.json.parseFromSlice(std.json.Value, std.heap.page_allocator, payload, .{}) catch return null;
+    defer parsed.deinit();
+    const obj = switch (parsed.value) {
+        .object => |o| o,
+        else => return null,
     };
+    const raw = switch (obj.get(name) orelse return null) {
+        .integer => |value| value,
+        else => return null,
+    };
+    return std.math.cast(u64, raw);
+}
+
+fn parseStringFieldAlloc(
+    allocator: std.mem.Allocator,
+    payload: []const u8,
+    name: []const u8,
+) error{OutOfMemory}!?[]u8 {
+    var parsed = std.json.parseFromSlice(std.json.Value, std.heap.page_allocator, payload, .{}) catch return null;
+    defer parsed.deinit();
+    const obj = switch (parsed.value) {
+        .object => |o| o,
+        else => return null,
+    };
+    return switch (obj.get(name) orelse return null) {
+        .string => |value| allocator.dupe(u8, value) catch return error.OutOfMemory,
+        else => null,
+    };
+}
+
+fn responseState(payload: []const u8, expected: []const u8) bool {
+    var parsed = std.json.parseFromSlice(std.json.Value, std.heap.page_allocator, payload, .{}) catch return false;
+    defer parsed.deinit();
+    const root = switch (parsed.value) {
+        .object => |value| value,
+        else => return false,
+    };
+    const result = switch (root.get("result") orelse return false) {
+        .object => |value| value,
+        else => return false,
+    };
+    const state = switch (result.get("state") orelse return false) {
+        .string => |value| value,
+        else => return false,
+    };
+    return std.mem.eql(u8, state, expected);
+}
+
+fn parseAttemptStatus(payload: []const u8) ?upgrade_wire.AttemptStatus {
+    var parsed = std.json.parseFromSlice(std.json.Value, std.heap.page_allocator, payload, .{}) catch return null;
+    defer parsed.deinit();
+    const root = switch (parsed.value) {
+        .object => |value| value,
+        else => return null,
+    };
+    const result = switch (root.get("result") orelse return null) {
+        .object => |value| value,
+        else => return null,
+    };
+    const state = switch (result.get("state") orelse return null) {
+        .string => |value| value,
+        else => return null,
+    };
+    return std.meta.stringToEnum(upgrade_wire.AttemptStatus, state);
 }
 
 /// hello/hello_ack의 capability 문자열 배열을 관대하게 읽는다. 구 peer의 필드 부재·손상·타입 불일치는 미지원(false)이며

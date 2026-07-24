@@ -8,6 +8,7 @@ const std = @import("std");
 const client_mod = @import("client.zig");
 const protocol = @import("protocol.zig");
 const screen_stream = @import("screen_stream.zig");
+const compatibility = @import("compatibility.zig");
 
 pub const Kind = enum {
     current,
@@ -19,14 +20,12 @@ pub const HostAdapter = struct {
     kind: Kind,
 
     pub fn init(client: client_mod.Client) !HostAdapter {
-        const kind: Kind = if (client.wire_major == protocol.version_major)
-            .current
-        else if (client.wire_major + 1 == protocol.version_major)
-            .previous
-        else
-            return error.UnsupportedProtocol;
-        const expected_screen: u16 = if (kind == .current) screen_stream.codec_version else screen_stream.codec_version - 1;
-        if (client.screen_codec_version != expected_screen) return error.UnsupportedProtocol;
+        const profile = compatibility.profileForMajor(client.wire_major) orelse return error.UnsupportedProtocol;
+        const kind: Kind = switch (profile.kind) {
+            .current => .current,
+            .previous => .previous,
+        };
+        if (client.screen_codec_version != profile.screen_codec_version) return error.UnsupportedProtocol;
         return .{ .client = client, .kind = kind };
     }
 

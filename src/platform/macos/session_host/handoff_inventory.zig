@@ -523,12 +523,14 @@ pub const socket_server_groups = [_]Group{
             "allocator",
             "registry",
             "runtime_ops",
+            "upgrade_ops",
+            "host_status",
             "admission_gate",
             "owner_tick_ctx",
             "owner_tick",
             "active_connections",
         },
-        .why = "the listener, process-local callbacks, gate pointer, and connection count are rebuilt only after the complete runtime graph is prepared",
+        .why = "the listener, target build status, process-local callbacks, gate pointer, and connection count are rebuilt only after the complete runtime graph is prepared",
     },
 };
 

@@ -26,13 +26,22 @@ pub const subcommand = entrypoint.subcommand;
 
 pub const SpawnError = error{ ForkFailed, OutOfMemory };
 
-/// host helper의 argv를 조립한다(순수) — `[exe_path, "__session-host", socket_path]`. exec에 넘길 NUL 종단 포인터
+/// host helper의 argv를 조립한다(순수) —
+/// `[exe_path, "__session-host", session_dir, socket_path, 32-hex-host_id]`. exec에 넘길 NUL 종단 포인터
 /// 배열은 실 spawn 경로가 만들고, 이 함수는 사람이 읽고 테스트하기 쉬운 슬라이스 목록만 돌려준다(caller가 free).
-pub fn sessionHostArgv(allocator: std.mem.Allocator, exe_path: []const u8, socket_path: []const u8) error{OutOfMemory}![]const []const u8 {
-    const argv = try allocator.alloc([]const u8, 3);
+pub fn sessionHostArgv(
+    allocator: std.mem.Allocator,
+    exe_path: []const u8,
+    session_dir: []const u8,
+    socket_path: []const u8,
+    host_id_hex: []const u8,
+) error{OutOfMemory}![]const []const u8 {
+    const argv = try allocator.alloc([]const u8, 5);
     argv[0] = exe_path;
     argv[1] = subcommand;
-    argv[2] = socket_path;
+    argv[2] = session_dir;
+    argv[3] = socket_path;
+    argv[4] = host_id_hex;
     return argv;
 }
 
@@ -41,9 +50,14 @@ pub fn sessionHostArgv(allocator: std.mem.Allocator, exe_path: []const u8, socke
 pub fn spawnSessionHostDetached(
     allocator: std.mem.Allocator,
     exe_path: [:0]const u8,
+    session_dir: [:0]const u8,
     socket_path: [:0]const u8,
+    host_id: u128,
 ) SpawnError!void {
-    try spawnDetached(allocator, exe_path, &.{ subcommand, socket_path });
+    const host_hex = std.fmt.allocPrintSentinel(allocator, "{x:0>32}", .{host_id}, 0) catch
+        return error.OutOfMemory;
+    defer allocator.free(host_hex);
+    try spawnDetached(allocator, exe_path, &.{ subcommand, session_dir, socket_path, host_hex });
 }
 
 /// `exe_path`를 `args`(NUL 종단 슬라이스들)로 **detached** 실행한다: double-fork로 손자를 부모와 독립시키고, setsid로
@@ -115,14 +129,22 @@ fn redirectStdioToDevNull() void {
 
 const testing = std.testing;
 
-test "launcher: sessionHostArgv builds [exe, __session-host, socket] (pure)" {
+test "launcher: sessionHostArgv includes exact session dir, socket, and host identity" {
     const allocator = testing.allocator;
-    const argv = try sessionHostArgv(allocator, "/usr/local/bin/maru", "/tmp/session-host/control.sock");
+    const argv = try sessionHostArgv(
+        allocator,
+        "/usr/local/bin/maru",
+        "/tmp/cache/session-host",
+        "/tmp/maru-501/sh/0000000000000000000000000000aabb.sock",
+        "0000000000000000000000000000aabb",
+    );
     defer allocator.free(argv);
-    try testing.expectEqual(@as(usize, 3), argv.len);
+    try testing.expectEqual(@as(usize, 5), argv.len);
     try testing.expectEqualStrings("/usr/local/bin/maru", argv[0]);
     try testing.expectEqualStrings("__session-host", argv[1]);
-    try testing.expectEqualStrings("/tmp/session-host/control.sock", argv[2]);
+    try testing.expectEqualStrings("/tmp/cache/session-host", argv[2]);
+    try testing.expectEqualStrings("/tmp/maru-501/sh/0000000000000000000000000000aabb.sock", argv[3]);
+    try testing.expectEqualStrings("0000000000000000000000000000aabb", argv[4]);
 }
 
 test "launcher: spawnDetached runs a detached child without blocking the parent (marker)" {

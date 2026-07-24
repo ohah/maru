@@ -1396,6 +1396,24 @@ pub fn build(b: *std.Build) void {
     const boundary_step = b.step("check-boundaries", "Check facade import boundaries");
     boundary_step.dependOn(&run_boundary_tests.step);
 
+    // config 문서 → 실제 키 드리프트 가드. schema.zig의 doc-drift 가드가 "스키마 키가 표에 있는가"(정방향)를 막는 반면,
+    // 이쪽은 "문서가 광고하는 키가 실재하는가"(역방향)를 막는다 — 문서만 보고 config에 적었는데 조용히 무시되던
+    // 드리프트를 CI가 잡는다. docs/*.md를 런타임에 훑어야 해서(@embedFile은 디렉터리 순회 불가) 별도 테스트 바이너리로
+    // 두고 cwd를 리포지토리 루트로 고정한다(boundary 테스트와 같은 구조). 단일 출처: docs/config-schema.md §7.
+    const config_docs_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/config_docs/keys.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "maru", .module = maru_mod }},
+        }),
+    });
+    const run_config_docs_tests = b.addRunArtifact(config_docs_tests);
+    run_config_docs_tests.setCwd(b.path("."));
+
+    const config_docs_step = b.step("check-config-docs", "Check config docs against the real schema keys");
+    config_docs_step.dependOn(&run_config_docs_tests.step);
+
     // session-host MRSH codec/framing 단위 테스트(P3). codec(protocol/framing/screen_stream/registry/server)은 std만
     // 쓰는 순수 계층이지만, macOS 전용 `runtime_manager`(P3-e2b)가 `@import("maru")`로 app InProcessTermBackend를
     // 재사용하므로 `maru` 모듈을 import로 준다(non-macOS 크로스컴파일에선 barrel이 runtime_manager를 제외해 maru가

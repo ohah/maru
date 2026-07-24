@@ -194,9 +194,13 @@ run = "zig build check-boundaries"
 description = "Regenerate explorer icon coverage in memory and fail on SVG/hash/C/Zig registry drift"
 run = "python3 tools/svg_to_coverage.py --check"
 
+[tasks.check-config-docs]
+description = "Check config docs against the real loader keys"
+run = "zig build check-config-docs"
+
 [tasks.check]
-description = "Check format, tests, boundaries, and build"
-depends = ["fmt-check", "test", "e2e", "oracle", "stress", "check-boundaries", "build"]
+description = "Check format, tests, boundaries, config docs, and build"
+depends = ["fmt-check", "test", "e2e", "oracle", "stress", "check-boundaries", "check-config-docs", "build"]
 
 [tasks."web:build"]
 description = "Build the file-panel web bundle and verify its SRI"

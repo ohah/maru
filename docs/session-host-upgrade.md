@@ -356,8 +356,10 @@ absolute identity만** 기록하고 target의 page layout을 새로 만든다. s
 - 모든 logical state의 round-trip, malformed/duplicate/unknown-required/cap/checksum/OOM을 자동 검증한다.
 - partial UTF-8와 각 parser state fixture를 별도 포함한다.
 - **구현됨:** stable explicit tag의 `maru.host-handoff.v1`, host/runtime DTO, host-wide atomic decode,
-  runtime identity/child/geometry/fd slot과 complete `TerminalCore` round-trip을 `test-session-host`가 검증한다.
-  fail-every-allocation은 부분 candidate를 publish하거나 누수하지 않는다.
+  runtime identity/child/geometry/fd slot, compile-time serialized-field coverage, 대표적인 non-default
+  `TerminalCore` parser continuation round-trip을 `test-session-host`가 검증한다. fail-every-allocation은 부분
+  candidate를 publish하거나 누수하지 않는다. 모든 logical state를 non-default로 채운 exhaustive equality fixture는
+  아직 남아 있으므로 U1 종료 gate는 열려 있다.
 
 ### U2 — quiesce/resume
 
@@ -400,13 +402,18 @@ absolute identity만** 기록하고 target의 page layout을 새로 만든다. s
 - 한 runtime decode가 실패하면 어떤 runtime도 commit하지 않는다는 것을 검증한다.
 - **구현 중:** connect errno와 handshake/protocol 실패를 typed outcome으로 분리해 endpoint 부재만 launch하고,
   permission/version/malformed peer는 spawn으로 우회하지 않는다. host ID별 heap-pinned client pool이 제품 client를
-  직접 소유하고 runtime+host lease를 단일 entry로 묶으며, 제품 AppSession의 new spawn과 workspace capture/restore가
-  그 pool을 통하도록 바꿨다. backend process E2E는 실제 current daemon 두 개에서 host A/B spawn과
-  `runtimeHostId` seam을 검증하고, A를 non-terminating detach한 뒤 spawn host가 B인 상태에서도 saved runtime을
-  exact A로 reattach하는지, A runtime을 명시 종료하고 A client/pool entry를 제거한 뒤에도 B runtime 입력/화면이
-  지속되는지 단언한다. pool refcount는 live `RemoteRuntime.client` 메모리 borrow만 보호하며 daemon retirement의
-  SSOT가 아니다. old host 종료 가능 여부는 후속 authoritative daemon runtime inventory가 판정한다. versioned discovery,
-  frozen N-1 wire package/adapter, current+old 동시 AppSession/workspace restore E2E는 아직 남아 있다.
+  `HostAdapter`를 통해 소유하고 runtime+host lease를 단일 entry로 묶으며, 제품 AppSession의 new spawn과 workspace
+  capture/restore가 그 pool을 통하도록 바꿨다. `Client`는 선택한 current/N-1 major를 hello 범위와 모든 frame header에
+  고정한다. frozen 직전 경계(`66a78614^`)의 `maru.screen-stream` v1은 body layout이 current v2와 같고 record
+  version만 다르므로, reader가 v1 header를 명시적으로 받아 current DTO로 정규화한다. MRSH v1 socketpair peer의
+  `runtime.attach` 응답과 v1 snapshot record를 current `RemoteRuntime`까지 실제로 적용하는 테스트도 둔다. 이
+  converter는 그 정확한 frozen 경계만 지원하며 더 오래된 pre-layout v1을 일반 호환 대상으로 주장하지 않는다.
+  backend process E2E는 실제 current daemon 두 개에서 host A/B spawn과 `runtimeHostId` seam을 검증하고, A를
+  non-terminating detach한 뒤 spawn host가 B인 상태에서도 saved runtime을 exact A로 reattach하는지, A runtime을
+  명시 종료하고 A client/pool entry를 제거한 뒤에도 B runtime 입력/화면이 지속되는지 단언한다. pool refcount는 live
+  `RemoteRuntime.client` 메모리 borrow만 보호하며 daemon retirement의 SSOT가 아니다. old host 종료 가능 여부는 후속
+  authoritative daemon runtime inventory가 판정한다. 실제 frozen old binary package와 current+old 동시
+  AppSession/workspace restore E2E, 제품 daemon graph commit은 아직 남아 있다.
 
 ### U5 — 제품 활성화
 

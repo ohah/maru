@@ -103,7 +103,7 @@ fn runScenario(scenario: [:0]const u8, expected: []const u8) !ScenarioResult {
     return .{ .bytes = owned, .host_pid = pid };
 }
 
-test "U3 frozen old fixture execs new image with same host/child/runtime and exact-once exit" {
+test "U3 distinct old-source fixture execs new image with same host/child/runtime and exact-once exit" {
     const result = try runScenario("success", "input_output=ok");
     defer result.deinit();
     try std.testing.expectEqual(result.host_pid, try std.fmt.parseInt(c.pid_t, try field(result.bytes, "host_pid"), 10));
@@ -123,7 +123,7 @@ test "U3 old exec syscall failure closes inherited slots and resumes original ow
     try std.testing.expectEqualStrings("ok", try field(result.bytes, "owner_lease"));
 }
 
-test "U3 controlled target pre-commit failure execs frozen old rollback image without losing PTY" {
+test "U3 controlled target pre-commit failure execs staged old rollback image without losing PTY" {
     const result = try runScenario("target-rollback", "rollback=ok");
     defer result.deinit();
     try std.testing.expectEqual(result.host_pid, try std.fmt.parseInt(c.pid_t, try field(result.bytes, "host_pid"), 10));

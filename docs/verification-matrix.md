@@ -145,7 +145,7 @@ FP11d 표 gate는 네 가지 outer-pipe 형태, data row가 있거나 없는 pla
 
 모든 단계에서 host crash/SIGKILL 뒤 복구는 비목표지만, upgrade가 시작되기 전·quiesce 중·`exec` syscall 실패·새
 binary pre-commit restore 실패는 자동 failure injection으로 구 host 재개 또는 staged rollback을 증명해야 한다.
-단, rollback handler 이전 loader/entrypoint crash와 primary+backup handoff 동시 손상은 host crash 비목표다. 자동 gate는
+단, rollback handler 이전 loader/entrypoint crash와 primary+backup handoff 동시 손상은 host crash 비목표다. 최종 자동 gate에는
 old-reader primary/backup read-back, staged target preflight reader, target path swap, numeric cap과 cap+1/checked overflow,
 secret-bearing handoff unlink-before-exec, pre-exec non-CLOEXEC fd 3+와 target-entry open fd 3+의 exact
 allowlist(`primary+backup state`, owner lease, PTY masters), listen/client/wake/trace fd 상속 0, commit에서

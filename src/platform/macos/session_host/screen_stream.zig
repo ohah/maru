@@ -22,6 +22,11 @@ const std = @import("std");
 /// 태그드 Color intent)·ImageBlob/ImagePlacement 레이아웃이 비호환 변경돼, 구 codec 레코드를 신 client가 조용히 오해석하지
 /// 않게 올렸다. protocol.version_major와 화면 codec은 둘 다 v2이며, full spawn은 새 command 이름으로 capability를 가른다.
 pub const codec_version: u16 = 2;
+/// Frozen MRSH v1 boundary (`66a78614^`) already used the current record body layout; the major bump changed the
+/// explicit record version from 1→2. Therefore v1 can be normalized by accepting only this exact header-version
+/// difference. Older, pre-layout v1 artifacts are not in the supported N-1 release set.
+pub const reader_min: u16 = 1;
+pub const reader_max: u16 = codec_version;
 
 /// record header 크기(바이트). body는 이 뒤에 이어진다.
 pub const record_header_size = 28;
@@ -228,7 +233,7 @@ pub const RecordHeader = struct {
 
     pub fn decode(bytes: *const [record_header_size]u8) DecodeError!RecordHeader {
         const version = std.mem.readInt(u16, bytes[0..2], .big);
-        if (version != codec_version) return error.BadCodecVersion;
+        if (version < reader_min or version > reader_max) return error.BadCodecVersion;
         return .{
             .version = version,
             .kind = @enumFromInt(std.mem.readInt(u16, bytes[2..4], .big)),
@@ -241,7 +246,7 @@ pub const RecordHeader = struct {
 };
 
 pub const DecodeError = error{
-    /// codec_version이 1이 아니다 — 상위가 fresh snapshot을 재요청한다.
+    /// 지원 reader 범위 밖 codec이다 — 상위가 fresh snapshot을 재요청한다.
     BadCodecVersion,
     /// body가 선언된 필드보다 짧다(truncated). 손상/부분 chunk.
     Truncated,
@@ -749,6 +754,27 @@ test "screen-stream: header rejects a foreign codec version" {
     var bytes = (RecordHeader{ .kind = .screen_meta }).encode();
     std.mem.writeInt(u16, bytes[0..2], 99, .big); // 현재 codec_version(2)과 다른 이물질 값(리뷰 #3로 2가 유효해짐).
     try testing.expectError(error.BadCodecVersion, RecordHeader.decode(&bytes));
+}
+
+test "screen-stream: frozen N-1 header normalizes the same record body into current DTO" {
+    const allocator = testing.allocator;
+    const expected = ScreenMeta{
+        .cols = 80,
+        .rows = 24,
+        .active_screen = 1,
+        .cursor = .{ .col = 7, .row = 3, .visible = true, .shape = 2 },
+        .modes = 0x55,
+    };
+    const record = try encodeScreenMeta(allocator, .{ .kind = .screen_meta, .generation = 9 }, expected);
+    defer allocator.free(record);
+    std.mem.writeInt(u16, record[0..2], reader_min, .big);
+    const header = try RecordHeader.decode(record[0..record_header_size]);
+    try testing.expectEqual(reader_min, header.version);
+    const decoded = try decodeScreenMeta(record[record_header_size..]);
+    try testing.expectEqual(expected.cols, decoded.cols);
+    try testing.expectEqual(expected.rows, decoded.rows);
+    try testing.expectEqual(expected.cursor, decoded.cursor);
+    try testing.expectEqual(expected.modes, decoded.modes);
 }
 
 test "screen-stream: record kind is an open enum for future records" {

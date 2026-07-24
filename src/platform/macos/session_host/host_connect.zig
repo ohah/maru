@@ -12,6 +12,10 @@ const posix = std.posix;
 const discovery = @import("discovery.zig");
 const launcher = @import("launcher.zig");
 const client_mod = @import("client.zig");
+const framing = @import("framing.zig");
+const protocol = @import("protocol.zig");
+const registry_mod = @import("registry.zig");
+const socket_server = @import("socket_server.zig");
 
 // flock(2)은 std.c 미노출(macOS 전용). start lock 직렬화용. LOCK_EX=2·LOCK_NB=4(sys/file.h).
 extern "c" fn flock(fd: c_int, operation: c_int) c_int;
@@ -69,6 +73,8 @@ pub fn connectOrLaunchDetailed(
     const dir = discovery.sessionHostDirPath(&dir_buf, base_cache_dir) catch return .{ .failed = .invalid_endpoint };
     var sock_buf: [640]u8 = undefined;
     const socket = discovery.socketPathIn(&sock_buf, dir) catch return .{ .failed = .invalid_endpoint };
+    var legacy_sock_buf: [640]u8 = undefined;
+    const legacy_socket = discovery.legacySocketPathIn(&legacy_sock_buf, dir) catch return .{ .failed = .invalid_endpoint };
 
     // 1. connect-first(§10): 있으면 바로 쓴다.
     switch (tryConnect(allocator, socket)) {
@@ -76,6 +82,19 @@ pub fn connectOrLaunchDetailed(
         .absent => {},
         .transient => return connectWithBackoffDetailed(allocator, socket, opts),
         .failed => |reason| return .{ .failed = reason },
+    }
+
+    // versioned endpoint 전환 이전의 current-major host는 그대로 재사용한다. legacy endpoint의 다른 major는
+    // current header handshake를 닫으므로 새 versioned host를 side-by-side로 시작하고, saved runtime restore가
+    // 별도 N-1 adapter로 legacy endpoint를 찾는다.
+    switch (tryConnect(allocator, legacy_socket)) {
+        .connected => |client| return .{ .connected = client },
+        .absent => {},
+        .transient => return connectWithBackoffDetailed(allocator, legacy_socket, opts),
+        .failed => |reason| switch (reason) {
+            .incompatible_version, .handshake_failed, .protocol_error => {},
+            else => return .{ .failed = reason },
+        },
     }
 
     // 2. need_start_lock: lock 파일을 열고 nonblocking flock으로 "내가 시작 책임인가"를 가른다. lock은 fd close로 해제되며,
@@ -98,6 +117,34 @@ pub fn connectOrLaunchDetailed(
     // detached helper 띄우기: `maru __session-host <socket>`(daemon이 socket dirname으로 dir 도출).
     launcher.spawnSessionHostDetached(allocator, exe_path, socket) catch return .{ .failed = .launch_failed };
     return connectWithBackoffDetailed(allocator, socket, opts);
+}
+
+/// 이미 존재하는 특정 major host만 찾는다. 조회/restore 경로라 spawn하지 않으며 versioned endpoint를 먼저,
+/// 전환 이전 legacy endpoint를 다음으로 probe한다.
+pub fn connectExistingMajor(
+    allocator: std.mem.Allocator,
+    base_cache_dir: []const u8,
+    major: u16,
+) Outcome {
+    if (builtin.os.tag != .macos) return .{ .failed = .invalid_endpoint };
+    var dir_buf: [512]u8 = undefined;
+    const dir = discovery.sessionHostDirPath(&dir_buf, base_cache_dir) catch return .{ .failed = .invalid_endpoint };
+    var versioned_buf: [640]u8 = undefined;
+    const versioned = discovery.socketPathForMajorIn(&versioned_buf, dir, major) catch
+        return .{ .failed = .invalid_endpoint };
+    switch (tryConnectMajor(allocator, versioned, major)) {
+        .connected => |client| return .{ .connected = client },
+        .absent => {},
+        .transient => return .{ .failed = .startup_timeout },
+        .failed => |reason| return .{ .failed = reason },
+    }
+    var legacy_buf: [640]u8 = undefined;
+    const legacy = discovery.legacySocketPathIn(&legacy_buf, dir) catch return .{ .failed = .invalid_endpoint };
+    return switch (tryConnectMajor(allocator, legacy, major)) {
+        .connected => |client| .{ .connected = client },
+        .absent, .transient => .{ .failed = .startup_timeout },
+        .failed => |reason| .{ .failed = reason },
+    };
 }
 
 const TryConnectResult = union(enum) {
@@ -129,9 +176,88 @@ test "host_connect preserves endpoint and handshake failure classes" {
     try testing.expectEqual(FailureReason.out_of_memory, connectFailure(error.OutOfMemory).failed);
 }
 
+fn readExact(fd: c.fd_t, bytes: []u8) bool {
+    var offset: usize = 0;
+    while (offset < bytes.len) {
+        const rc = c.read(fd, bytes.ptr + offset, bytes.len - offset);
+        if (rc > 0) {
+            offset += @intCast(rc);
+            continue;
+        }
+        if (rc < 0 and posix.errno(rc) == .INTR) continue;
+        return false;
+    }
+    return true;
+}
+
+const FrozenV1Peer = struct {
+    fn serve(server: *socket_server.SocketServer, ok: *bool) void {
+        const fd = server.acceptOne() orelse return;
+        defer _ = c.close(fd);
+        var header_bytes: [protocol.header_size]u8 = undefined;
+        if (!readExact(fd, &header_bytes)) return;
+        const header = protocol.Header.decode(&header_bytes) catch return;
+        if (header.major != 1 or header.kind != .hello) return;
+        const payload = std.heap.page_allocator.alloc(u8, header.payload_len) catch return;
+        defer std.heap.page_allocator.free(payload);
+        if (!readExact(fd, payload)) return;
+        if (std.mem.indexOf(u8, payload, "\"protocol_min\":1") == null or
+            std.mem.indexOf(u8, payload, "\"protocol_max\":1") == null) return;
+        const response = framing.encodeFrame(
+            std.heap.page_allocator,
+            .{ .kind = .hello_ack, .major = 1 },
+            "{\"protocol\":1,\"host_id\":\"000000000000000000000000000000aa\",\"capabilities\":[]}",
+        ) catch return;
+        defer std.heap.page_allocator.free(response);
+        socket_server.writeAll(fd, response) catch return;
+        ok.* = true;
+    }
+};
+
+test "host_connect finds an existing frozen N-1 major without spawning and preserves adapter major" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var base_buf: [128]u8 = undefined;
+    const base = std.fmt.bufPrintZ(&base_buf, "/tmp/maru-sh-v1-{d}", .{c.getpid()}) catch
+        return error.SkipZigTest;
+    _ = c.mkdir(base.ptr, 0o700);
+    var dir_buf: [256]u8 = undefined;
+    const dir = discovery.sessionHostDirPath(&dir_buf, base) catch return error.SkipZigTest;
+    var socket_buf: [320]u8 = undefined;
+    const socket = discovery.socketPathForMajorIn(&socket_buf, dir, 1) catch return error.SkipZigTest;
+    var registry = registry_mod.TerminalRuntimeRegistry.init(allocator);
+    defer registry.deinit();
+    var server = try socket_server.SocketServer.bind(allocator, dir, socket, 0xAA, &registry);
+    defer {
+        server.deinit();
+        _ = c.rmdir(dir.ptr);
+        _ = c.rmdir(base.ptr);
+    }
+    var served = false;
+    var thread = try std.Thread.spawn(.{}, FrozenV1Peer.serve, .{ &server, &served });
+    const outcome = connectExistingMajor(allocator, base, 1);
+    var client = switch (outcome) {
+        .connected => |value| value,
+        .failed => return error.TestUnexpectedResult,
+    };
+    thread.join();
+    defer client.deinit();
+    try testing.expect(served);
+    try testing.expectEqual(@as(u16, 1), client.wire_major);
+    try testing.expectEqual(@as(u128, 0xAA), client.host_id);
+}
+
 /// 한 번 connect를 시도하되 endpoint 부재/권한/일시 오류와 wire 실패를 잃지 않는다.
 fn tryConnect(allocator: std.mem.Allocator, socket: [:0]const u8) TryConnectResult {
     if (client_mod.Client.connect(allocator, socket, "gui")) |client| {
+        return .{ .connected = client };
+    } else |err| {
+        return connectFailure(err);
+    }
+}
+
+fn tryConnectMajor(allocator: std.mem.Allocator, socket: [:0]const u8, major: u16) TryConnectResult {
+    if (client_mod.Client.connectMajor(allocator, socket, "gui", major)) |client| {
         return .{ .connected = client };
     } else |err| {
         return connectFailure(err);

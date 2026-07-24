@@ -23,6 +23,21 @@ const waitid_nohang: c_int = 0x00000001;
 const waitid_exited: c_int = 0x00000004;
 const waitid_nowait: c_int = 0x00000020;
 
+fn probeChildExitedWithoutReap(pid: std.c.pid_t) error{ChildProbeFailed}!bool {
+    while (true) {
+        var info = std.mem.zeroes(std.c.siginfo_t);
+        const rc = waitid(
+            waitid_pid,
+            @intCast(pid),
+            &info,
+            waitid_nohang | waitid_exited | waitid_nowait,
+        );
+        if (rc == 0) return info.pid == pid;
+        if (std.posix.errno(rc) == .INTR) continue;
+        return error.ChildProbeFailed;
+    }
+}
+
 // 포그라운드 프로세스 감지(foregroundProcessNames) — tcgetpgrp: 터미널 포그라운드 pgid,
 // proc_listpgrppids: 그 그룹의 실제 구성원, proc_name: 각 pid의 프로세스 이름. 모두 macOS 공개 libSystem/libproc API다.
 // login(1) wrapper가 group leader로 남는 제품 spawn 경로에서는 leader 하나만 보면 실제 agent child를 놓치므로 그룹을 열거한다.
@@ -221,15 +236,8 @@ pub const PtySession = struct {
 
     /// Reader가 pause된 동안 child가 exit해도 status를 소비하지 않고 감지한다. `WNOWAIT`가 owner drain의
     /// exact-once wait/reap 권위를 보존하므로 upgrade abort 뒤 같은 reader가 EOF를 관측해 정상 종료시킬 수 있다.
-    pub fn childExitedWithoutReap(self: *const PtySession) bool {
-        var info = std.mem.zeroes(std.c.siginfo_t);
-        if (waitid(
-            waitid_pid,
-            @intCast(self.child_pid),
-            &info,
-            waitid_nohang | waitid_exited | waitid_nowait,
-        ) != 0) return false;
-        return info.pid == self.child_pid;
+    pub fn childExitedWithoutReap(self: *const PtySession) error{ChildProbeFailed}!bool {
+        return probeChildExitedWithoutReap(self.child_pid);
     }
 
     pub fn inheritedMasterFd(self: *const PtySession) ?std.posix.fd_t {

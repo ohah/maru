@@ -22,6 +22,7 @@ const framing = @import("framing.zig");
 const remote_runtime = @import("remote_runtime.zig");
 const core_command_wire = @import("core_command_wire.zig");
 const host_pool_mod = @import("host_pool.zig");
+const host_adapter_mod = @import("host_adapter.zig");
 const core_command = maru.session.core_command; // §6a 원격 스크롤 명령 라우팅
 
 const Surface = maru.session.Surface;
@@ -39,7 +40,8 @@ const CoreCommand = maru.session.core_command.CoreCommand;
 const ForegroundProcessName = maru.pty.types.ForegroundProcessName;
 const nonblocking_input_chunk: usize = 16 * 1024;
 const RemoteRuntime = remote_runtime.RemoteRuntime;
-const ClientPool = host_pool_mod.HostPool(client_mod.Client);
+const HostAdapter = host_adapter_mod.HostAdapter;
+const AdapterPool = host_pool_mod.HostPool(HostAdapter);
 
 /// 한 host connection 위의 원격 term backend. legacy 단일-host 모드의 `client`는 borrowed이고 pool 모드는
 /// `host_pool`만 권위로 사용한다. **`RemoteRuntime`은 self-referential**(surface.remote가 자기 조립기를 가리킴)이라
@@ -53,7 +55,7 @@ pub const RemoteTermBackend = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
     client: ?*client_mod.Client,
-    host_pool: ?*ClientPool = null,
+    host_pool: ?*AdapterPool = null,
     // 앱의 in-process 라우팅 표(borrowed — 소유는 AppRuntime). attach가 원격 Term을 여기에 **원격 PtyIo**로 등록해,
     // GUI 입력 hot path(self.runtime.writeInput/resize/enqueueCoreCommand, surface.id 라우팅)가 in-process와 똑같이
     // 원격 Term에 도달하게 한다 — sink만 write_queue→client.sendInput/resize RPC로 갈린다(app_session hot path 무변경).
@@ -84,7 +86,7 @@ pub const RemoteTermBackend = struct {
         return .{ .allocator = allocator, .io = io, .client = client, .surface_runtime = surface_runtime };
     }
 
-    pub fn initWithPool(allocator: std.mem.Allocator, io: std.Io, pool: *ClientPool, surface_runtime: *SurfaceRuntime) !RemoteTermBackend {
+    pub fn initWithPool(allocator: std.mem.Allocator, io: std.Io, pool: *AdapterPool, surface_runtime: *SurfaceRuntime) !RemoteTermBackend {
         _ = pool.spawnHost() orelse return error.SpawnHostUnavailable;
         return .{
             .allocator = allocator,
@@ -147,10 +149,10 @@ pub const RemoteTermBackend = struct {
         var retained = false;
         errdefer if (retained) self.host_pool.?.release(host_id);
         const selected_client = if (self.host_pool) |pool| blk: {
-            const client = try pool.retain(host_id);
+            const adapter = try pool.retain(host_id);
             retained = true;
-            if (client.host_id != host_id) return error.HostIdentityMismatch;
-            break :blk client;
+            if (adapter.hostId() != host_id) return error.HostIdentityMismatch;
+            break :blk adapter.logicalClient();
         } else if ((self.client orelse return error.HostNotFound).host_id == host_id)
             self.client.?
         else
@@ -209,10 +211,10 @@ pub const RemoteTermBackend = struct {
         errdefer if (retained) self.host_pool.?.release(selected_host_id);
         const selected_client = if (self.host_pool) |pool| blk: {
             selected_host_id = pool.spawnHostId() orelse return error.SpawnHostUnavailable;
-            const client = try pool.retain(selected_host_id);
+            const adapter = try pool.retain(selected_host_id);
             retained = true;
-            if (client.host_id != selected_host_id) return error.HostIdentityMismatch;
-            break :blk client;
+            if (adapter.hostId() != selected_host_id) return error.HostIdentityMismatch;
+            break :blk adapter.logicalClient();
         } else blk: {
             const client = self.client orelse return error.HostNotFound;
             selected_host_id = client.host_id;
@@ -588,13 +590,13 @@ const daemon = @import("daemon.zig");
 
 extern "c" fn usleep(usec: c_uint) c_int;
 
-fn addOwnedClient(pool: *ClientPool, allocator: std.mem.Allocator, client_value: client_mod.Client) !u128 {
-    const client = try allocator.create(client_mod.Client);
-    errdefer allocator.destroy(client);
-    client.* = client_value;
-    errdefer client.deinit();
-    const host_id = client.host_id;
-    try pool.addOwned(host_id, client);
+fn addOwnedClient(pool: *AdapterPool, allocator: std.mem.Allocator, client_value: client_mod.Client) !u128 {
+    const adapter = try allocator.create(HostAdapter);
+    errdefer allocator.destroy(adapter);
+    adapter.* = try HostAdapter.init(client_value);
+    errdefer adapter.deinit();
+    const host_id = adapter.hostId();
+    try pool.addOwned(host_id, adapter);
     return host_id;
 }
 
@@ -631,7 +633,7 @@ test "remote term backend: drives a real host runtime through the TermRuntimeBac
         try testing.expect(false);
         return;
     };
-    var pool = ClientPool.init(allocator);
+    var pool = AdapterPool.init(allocator);
     defer pool.deinit();
     const host_id = try addOwnedClient(&pool, allocator, client_value);
     try pool.setSpawnHost(host_id);
@@ -776,7 +778,7 @@ test "remote term backend: two daemon pool routes exact hosts and retiring A pre
     const host_b = connect_b.host_id;
     try testing.expect(host_a != host_b);
 
-    var pool = ClientPool.init(allocator);
+    var pool = AdapterPool.init(allocator);
     defer pool.deinit();
     try testing.expectEqual(host_a, try addOwnedClient(&pool, allocator, connect_a));
     try testing.expectEqual(host_b, try addOwnedClient(&pool, allocator, connect_b));

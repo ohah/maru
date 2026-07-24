@@ -470,11 +470,21 @@ absolute identity만** 기록하고 target의 page layout을 새로 만든다. s
   3에 전달하며, 같은
   absolute deadline 안에서 exit를 reap하거나 timeout이면 kill+reap한다. 실제 build된 `maru
   __session-host --upgrade-preflight 3` 성공과 같은 inode의 corrupt handoff 거부를 process test로 검증한다. 실제
-  target/rollback restore consumer가 아직 없으므로 이 모듈은 destructive `execv` callback 자체를 노출하지 않는다.
-  restore parser/bootstrap과 executor를 같은 활성화 gate에서 추가하기 전에는 daemon이 조합할 수 없다.
+  target/rollback runtime restore consumer가 아직 없으므로 이 모듈은 destructive `execv` callback 자체를 노출하지
+  않는다. prepared runtime graph와 executor를 같은 활성화 gate에서 추가하기 전에는 daemon이 조합할 수 없다.
+- `entrypoint.Invocation`은 정상 daemon, preflight, restore target/rollback argv를 strict tagged union으로 파싱한다.
+  absolute session/socket path, 32자리 lowercase host/attempt ID, bounded first slot과 trailing-argv 0을 한곳에서
+  검증한다. 공용 `upgrade_fd_layout.Layout`이 producer/parser/bootstrap의 inclusive u16 slot 경계를 소유한다.
+  `upgrade_bootstrap.readTargetRestoreInvocation`은 서로 다른 inode인 primary/backup의 exact bytes와 read-only
+  unlinked provenance, embedded token, host/attempt/runtime slot 집합을 교차검증한다. PTY는 실제
+  `PreparedAdoption`과 같은 non-CLOEXEC·`O_RDWR|O_NONBLOCK`·winsize·child-liveness·서로 다른 master identity
+  검증을 사용하고, owner fd는 session 경로의 exact inode/mode와 exclusive flock을 재확립한다. host-keyed socket
+  경로와 target executable identity까지 맞아야 exact inherited open-fd 집합을 borrowed view로 반환한다. rollback
+  self-image identity가 authority에 추가되기 전에는 rollback role을 성공시키지 않는다. main의 restore arm도 아직
+  즉시 거부하며 runtime graph를 만들지 않는다.
 - **아직 미구현인 제품 경계:** daemon controller 설치와 completed marker 소비, quiesce 전 handoff-size/disk/I/O
   budget admission, prepare→quiesce→store→FD slot→exec→restore→manifest promotion의 제품 배선,
-  실제 target executor, target/rollback entrypoint의 prepared runtime graph와 rollback self-image 회전,
+  실제 target executor, target/rollback entrypoint의 prepared runtime graph와 rollback self-image 권위·회전,
   기존 restoring manifest adopt,
   signed frozen N-1 app artifact, 실제 update/soak, product capability 광고다.
   이 경계가 닫히기 전에는 U5 완료나 사용자-visible migration을 주장하지 않는다.

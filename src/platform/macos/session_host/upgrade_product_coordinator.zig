@@ -13,6 +13,7 @@ const owner_lease = @import("owner_lease.zig");
 const runtime_manager = @import("runtime_manager.zig");
 const upgrade_attempt = @import("upgrade_attempt.zig");
 const upgrade_deadline = @import("upgrade_deadline.zig");
+const upgrade_fd_layout = @import("upgrade_fd_layout.zig");
 const upgrade_limits = @import("upgrade_limits.zig");
 const upgrade_owner = @import("upgrade_owner.zig");
 const upgrade_wire = @import("upgrade_wire.zig");
@@ -62,47 +63,24 @@ pub const ExecuteRequest = struct {
     owner_slot: c.fd_t,
 };
 
-pub const Layout = struct {
-    first_runtime_slot: c.fd_t,
+pub const Layout = upgrade_fd_layout.Layout;
 
-    /// 현재 source/host fd 위에서 259개 연속 free namespace를 찾는다. 실제 reserve가 다시 전량 검사하므로 이
-    /// snapshot 뒤 다른 thread가 fd를 열어도 잘못된 slot을 덮지 않고 attempt가 fail-closed한다.
-    pub fn findAvailable(start: c.fd_t) ?Layout {
-        var first = @max(start, 3);
-        const max_fd = getdtablesize();
-        while (@as(i64, first) + exec_fd_set.max_slots <= max_fd) : (first += 1) {
-            var offset: usize = 0;
-            while (offset < exec_fd_set.max_slots and
-                !exec_fd_set.isOpen(first + @as(c.fd_t, @intCast(offset)))) : (offset += 1)
-            {}
-            if (offset == exec_fd_set.max_slots) return .{ .first_runtime_slot = first };
-            first += @intCast(offset);
-        }
-        return null;
+/// 현재 source/host fd 위에서 259개 연속 free namespace를 찾는다. 실제 reserve가 다시 전량 검사하므로 이
+/// snapshot 뒤 다른 thread가 fd를 열어도 잘못된 slot을 덮지 않고 attempt가 fail-closed한다.
+pub fn findAvailableLayout(start: c.fd_t) ?Layout {
+    var first = @max(start, 3);
+    const max_fd = getdtablesize();
+    while (@as(i64, first) + exec_fd_set.max_slots <= max_fd) : (first += 1) {
+        var offset: usize = 0;
+        while (offset < exec_fd_set.max_slots and
+            !exec_fd_set.isOpen(first + @as(c.fd_t, @intCast(offset)))) : (offset += 1)
+        {}
+        if (offset == exec_fd_set.max_slots)
+            return Layout.init(first) catch return null;
+        first += @intCast(offset);
     }
-
-    pub fn primarySlot(self: Layout) c.fd_t {
-        return self.first_runtime_slot + @as(c.fd_t, @intCast(upgrade_limits.max_runtime_count));
-    }
-
-    pub fn backupSlot(self: Layout) c.fd_t {
-        return self.primarySlot() + 1;
-    }
-
-    pub fn ownerSlot(self: Layout) c.fd_t {
-        return self.backupSlot() + 1;
-    }
-
-    fn requested(self: Layout) ?[exec_fd_set.max_slots]c.fd_t {
-        if (self.first_runtime_slot < 3 or
-            @as(i64, self.first_runtime_slot) + exec_fd_set.max_slots > std.math.maxInt(u16))
-            return null;
-        var result: [exec_fd_set.max_slots]c.fd_t = undefined;
-        for (&result, 0..) |*slot, index|
-            slot.* = self.first_runtime_slot + @as(c.fd_t, @intCast(index));
-        return result;
-    }
-};
+    return null;
+}
 
 pub const Context = struct {
     allocator: std.mem.Allocator,
@@ -488,7 +466,7 @@ fn snapshotContainsText(
 }
 
 test "product coordinator layout reserves 256 runtime and three fixed roles without overlap" {
-    const layout: Layout = .{ .first_runtime_slot = 40 };
+    const layout = try Layout.init(40);
     const requested = layout.requested().?;
     try std.testing.expectEqual(@as(c.fd_t, 40), requested[0]);
     try std.testing.expectEqual(@as(c.fd_t, 295), requested[upgrade_limits.max_runtime_count - 1]);
@@ -785,7 +763,7 @@ test "product coordinator uses one graph capture then rolls back exact slots and
         const flags = c.fcntl(fd, c.F.GETFD, @as(c_int, 0));
         if (flags >= 0) _ = c.fcntl(fd, c.F.SETFD, flags & ~@as(c_int, c.FD_CLOEXEC));
     };
-    const layout = Layout.findAvailable(40) orelse return error.SkipZigTest;
+    const layout = findAvailableLayout(40) orelse return error.SkipZigTest;
     const requested_slots = layout.requested().?;
     const outcome = processArmed(.{
         .allocator = allocator,

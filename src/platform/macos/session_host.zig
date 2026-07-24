@@ -155,6 +155,7 @@ else
     struct {};
 pub const upgrade_attempt_record = @import("session_host/upgrade_attempt_record.zig");
 pub const upgrade_deadline = @import("session_host/upgrade_deadline.zig");
+pub const upgrade_fd_layout = @import("session_host/upgrade_fd_layout.zig");
 pub const upgrade_limits = @import("session_host/upgrade_limits.zig");
 pub const upgrade_product_coordinator = if (builtin.os.tag == .macos)
     @import("session_host/upgrade_product_coordinator.zig")

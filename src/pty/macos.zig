@@ -291,6 +291,38 @@ pub const PtySession = struct {
             size: terminal.Size,
             expected_identity: ?MasterIdentity,
         ) !PreparedAdoption {
+            try validateInheritedMaster(inherited_slot, child_pid, size, expected_identity);
+
+            const working_fd = std.c.fcntl(inherited_slot, std.c.F.DUPFD_CLOEXEC, @as(c_int, 3));
+            if (working_fd < 0) return error.FcntlFailed;
+            errdefer closeFd(working_fd);
+            var wake_fds: [2]std.c.fd_t = undefined;
+            if (std.c.pipe(&wake_fds) != 0) return error.PipeFailed;
+            errdefer {
+                closeFd(wake_fds[0]);
+                closeFd(wake_fds[1]);
+            }
+            try setCloseOnExec(wake_fds[0]);
+            try setCloseOnExec(wake_fds[1]);
+            try setNonBlocking(wake_fds[0]);
+            return .{
+                .inherited_slot = inherited_slot,
+                .working_fd = working_fd,
+                .child_pid = child_pid,
+                .size = size,
+                .wake_read_fd = wake_fds[0],
+                .wake_write_fd = wake_fds[1],
+            };
+        }
+
+        /// Allocation/dup 없이 inherited master의 pre-commit identity와 child liveness를 검증한다.
+        /// Bootstrap과 PreparedAdoption이 같은 경계를 소비해 두 검증 수준이 달라지지 않게 한다.
+        pub fn validateInheritedMaster(
+            inherited_slot: std.posix.fd_t,
+            child_pid: std.c.pid_t,
+            size: terminal.Size,
+            expected_identity: ?MasterIdentity,
+        ) !void {
             if (inherited_slot < 3 or child_pid <= 0 or size.cols < 2 or size.rows < 1) return error.InvalidInheritedPty;
             const fd_flags = std.c.fcntl(inherited_slot, std.c.F.GETFD, @as(c_int, 0));
             if (fd_flags < 0 or fd_flags & std.c.FD_CLOEXEC != 0) return error.InvalidInheritedPty;
@@ -317,27 +349,6 @@ pub const PtySession = struct {
             // rollback image 중 실제 owner가 exact-once로 reap한다.
             if (probeChildExitedWithoutReap(child_pid) catch return error.InvalidInheritedPty)
                 return error.InvalidInheritedPty;
-
-            const working_fd = std.c.fcntl(inherited_slot, std.c.F.DUPFD_CLOEXEC, @as(c_int, 3));
-            if (working_fd < 0) return error.FcntlFailed;
-            errdefer closeFd(working_fd);
-            var wake_fds: [2]std.c.fd_t = undefined;
-            if (std.c.pipe(&wake_fds) != 0) return error.PipeFailed;
-            errdefer {
-                closeFd(wake_fds[0]);
-                closeFd(wake_fds[1]);
-            }
-            try setCloseOnExec(wake_fds[0]);
-            try setCloseOnExec(wake_fds[1]);
-            try setNonBlocking(wake_fds[0]);
-            return .{
-                .inherited_slot = inherited_slot,
-                .working_fd = working_fd,
-                .child_pid = child_pid,
-                .size = size,
-                .wake_read_fd = wake_fds[0],
-                .wake_write_fd = wake_fds[1],
-            };
         }
 
         pub fn discard(self: *PreparedAdoption) void {

@@ -447,8 +447,8 @@ test "real target restore reopens a CLOEXEC pin and terminal finish closes it ex
         .runtime_ids = &.{},
         .token = upgrade_owner.validateRestoreEntry(
             state,
-            "target",
-            "00000000000000000000000000000041",
+            .target,
+            0x41,
             .primary,
         ).?,
     });

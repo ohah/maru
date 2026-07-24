@@ -51,7 +51,7 @@ pub const BindError = error{
     ListenFailed,
 };
 
-pub const ServeError = error{ WriteFailed, OutOfMemory };
+pub const ServeError = error{ WriteFailed, OutOfMemory, UpgradeInvariantFailed };
 
 /// bind된 listen socket과 그 수명. `serveOnce`가 한 연결을 accept해 EOF/close까지 처리한다. accept-loop 스레드
 /// (P3-d2b)가 `pollReady`로 gate한 뒤 반복 호출한다.
@@ -73,6 +73,8 @@ pub const SocketServer = struct {
     owner_tick_ctx: ?*anyopaque = null,
     owner_tick: ?*const fn (ctx: *anyopaque) void = null,
     active_connections: usize = 0,
+    /// write 성공 이후에만 set된다. `serveConnection`의 defer가 fd/active count를 정리한 뒤 daemon이 take한다.
+    completed_upgrade_attempt: ?u128 = null,
 
     pub const backlog: c_uint = 16;
 
@@ -222,6 +224,21 @@ pub const SocketServer = struct {
                                 try writeAll(cfd, bytes);
                                 return;
                             },
+                            .upgrade_accepted => |accepted| {
+                                defer self.allocator.free(accepted.bytes);
+                                const ops = self.upgrade_ops orelse return error.UpgradeInvariantFailed;
+                                writeAll(cfd, accepted.bytes) catch |err| {
+                                    ops.cancel_unaccepted(ops.ctx, accepted.attempt_id);
+                                    return err;
+                                };
+                                if (ops.arm_accepted(ops.ctx, accepted.attempt_id) != .armed)
+                                    return error.UpgradeInvariantFailed;
+                                if (self.completed_upgrade_attempt) |current| {
+                                    if (current != accepted.attempt_id) return error.UpgradeInvariantFailed;
+                                }
+                                self.completed_upgrade_attempt = accepted.attempt_id;
+                                return;
+                            },
                             .close => return,
                             .none => {}, // fire-and-forget stream frame(input_bytes) 처리 후.
                             .frames => |list| {
@@ -246,6 +263,13 @@ pub const SocketServer = struct {
                 for (list) |f| try writeAll(cfd, f);
             }
         }
+    }
+
+    pub fn takeCompletedUpgradeAttempt(self: *SocketServer) ?u128 {
+        std.debug.assert(self.active_connections == 0);
+        const attempt = self.completed_upgrade_attempt;
+        self.completed_upgrade_attempt = null;
+        return attempt;
     }
 
     pub fn tickOwner(self: *SocketServer) void {
@@ -367,6 +391,206 @@ fn readOneFrameContains(fd: c.fd_t, parser: *framing.FrameParser, a: std.mem.All
         if (n <= 0) return false;
         parser.push(buf[0..@intCast(n)]) catch return false;
     }
+}
+
+const UpgradeSocketOwner = struct {
+    staged_attempt: ?u128 = null,
+    armed_attempt: ?u128 = null,
+    arm_count: usize = 0,
+    server: *SocketServer,
+    gate: *upgrade.AdmissionGate,
+    stage_active_connections: usize = 0,
+    stage_in_flight: usize = 0,
+    stage_reached: ?*std.atomic.Value(bool) = null,
+    release_stage: ?*std.atomic.Value(bool) = null,
+
+    fn stagePending(ctx: *anyopaque, request: @import("upgrade_wire.zig").PrepareRequest) @import("upgrade_wire.zig").PrepareDecision {
+        const self: *@This() = @ptrCast(@alignCast(ctx));
+        if (self.staged_attempt) |current| {
+            return if (current == request.attempt_id) .accepted else .conflict;
+        }
+        self.stage_active_connections = self.server.active_connections;
+        self.stage_in_flight = self.gate.snapshot().in_flight;
+        self.staged_attempt = request.attempt_id;
+        if (self.stage_reached) |reached| {
+            reached.store(true, .release);
+            const release = self.release_stage.?;
+            while (!release.load(.acquire)) _ = usleep(1000);
+        }
+        return .accepted;
+    }
+
+    fn armAccepted(ctx: *anyopaque, attempt_id: u128) @import("upgrade_wire.zig").ArmDecision {
+        const self: *@This() = @ptrCast(@alignCast(ctx));
+        if (self.staged_attempt == null) return .not_pending;
+        if (self.staged_attempt.? != attempt_id) return .conflict;
+        if (self.armed_attempt == null) {
+            self.armed_attempt = attempt_id;
+            self.arm_count += 1;
+        } else if (self.armed_attempt.? != attempt_id) {
+            return .conflict;
+        }
+        return .armed;
+    }
+
+    fn cancelUnaccepted(ctx: *anyopaque, attempt_id: u128) void {
+        const self: *@This() = @ptrCast(@alignCast(ctx));
+        if (self.staged_attempt == attempt_id and self.armed_attempt == null)
+            self.staged_attempt = null;
+    }
+
+    fn status(ctx: *anyopaque, attempt_id: u128) ?@import("upgrade_wire.zig").AttemptReport {
+        const self: *@This() = @ptrCast(@alignCast(ctx));
+        if (self.staged_attempt != attempt_id) return null;
+        return .{ .status = .pending };
+    }
+
+    fn ops(self: *@This()) @import("upgrade_wire.zig").Ops {
+        return .{
+            .ctx = self,
+            .stage_pending = stagePending,
+            .cancel_unaccepted = cancelUnaccepted,
+            .arm_accepted = armAccepted,
+            .status = status,
+        };
+    }
+};
+
+const UpgradeServeThread = struct {
+    server: *SocketServer,
+    fd: c.fd_t,
+    failure: ?ServeError = null,
+
+    fn run(self: *@This()) void {
+        self.server.serveConnection(self.fd) catch |err| {
+            self.failure = err;
+        };
+    }
+};
+
+fn sendHelloAndReadAck(fd: c.fd_t, parser: *framing.FrameParser) !void {
+    const hello = try framing.encodeFrame(
+        testing.allocator,
+        .{ .kind = .hello, .request_id = 1 },
+        "{\"protocol_min\":2,\"protocol_max\":2,\"client_kind\":\"gui\"}",
+    );
+    defer testing.allocator.free(hello);
+    try writeAll(fd, hello);
+    try testing.expect(readOneFrame(fd, parser, testing.allocator, .hello_ack));
+}
+
+fn sendUpgradePrepare(fd: c.fd_t, attempt_id: u128) !void {
+    var attempt_buf: [32]u8 = undefined;
+    const attempt = try std.fmt.bufPrint(&attempt_buf, "{x:0>32}", .{attempt_id});
+    const payload = try std.fmt.allocPrint(
+        testing.allocator,
+        "{{\"method\":\"host.upgrade.prepare\",\"params\":{{\"attempt_id\":\"{s}\",\"target_path\":\"/Applications/Maru.app/Contents/MacOS/maru\",\"target_build_id\":\"sha256:build\",\"target_sha256\":\"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\",\"handoff_reader_min\":1,\"handoff_reader_max\":1}}}}",
+        .{attempt},
+    );
+    defer testing.allocator.free(payload);
+    const request = try framing.encodeFrame(testing.allocator, .{ .kind = .request, .request_id = 2 }, payload);
+    defer testing.allocator.free(request);
+    try writeAll(fd, request);
+}
+
+test "socket server: accepted upgrade arms exact attempt only after full reply and connection drain" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fds: [2]c.fd_t = undefined;
+    try testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds));
+    defer _ = c.close(fds[1]);
+
+    var registry = reg.TerminalRuntimeRegistry.init(testing.allocator);
+    defer registry.deinit();
+    var server: SocketServer = .{
+        .listen_fd = -1,
+        .server_uid = c.getuid(),
+        .socket_path = try testing.allocator.dupeZ(u8, "/tmp/unused-upgrade-success.sock"),
+        .allocator = testing.allocator,
+        .host_id = 0xAABB,
+        .registry = &registry,
+        .host_status = .{ .manifest_capable = true, .upgrade_capable = true },
+    };
+    defer testing.allocator.free(server.socket_path);
+    var gate = upgrade.AdmissionGate.init(testing.io);
+    server.admission_gate = &gate;
+    var owner: UpgradeSocketOwner = .{ .server = &server, .gate = &gate };
+    server.upgrade_ops = owner.ops();
+
+    var serve: UpgradeServeThread = .{ .server = &server, .fd = fds[0] };
+    const thread = try std.Thread.spawn(.{}, UpgradeServeThread.run, .{&serve});
+    var parser = framing.FrameParser.init(testing.allocator);
+    defer parser.deinit();
+    try sendHelloAndReadAck(fds[1], &parser);
+    const attempt_id: u128 = 0xAABB;
+    try sendUpgradePrepare(fds[1], attempt_id);
+    try testing.expect(readOneFrameContains(
+        fds[1],
+        &parser,
+        testing.allocator,
+        .response,
+        "\"attempt_id\":\"0000000000000000000000000000aabb\"",
+    ));
+    var byte: [1]u8 = undefined;
+    try testing.expectEqual(@as(isize, 0), c.read(fds[1], &byte, byte.len));
+    thread.join();
+
+    try testing.expect(serve.failure == null);
+    try testing.expectEqual(@as(usize, 1), owner.stage_active_connections);
+    try testing.expectEqual(@as(usize, 1), owner.stage_in_flight);
+    try testing.expectEqual(@as(usize, 0), server.active_connections);
+    try testing.expectEqual(@as(usize, 1), owner.arm_count);
+    try testing.expectEqual(attempt_id, server.takeCompletedUpgradeAttempt().?);
+    try testing.expect(server.takeCompletedUpgradeAttempt() == null);
+}
+
+test "socket server: failed accepted reply leaves staged attempt unarmed and unexecutable" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fds: [2]c.fd_t = undefined;
+    try testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds));
+
+    var registry = reg.TerminalRuntimeRegistry.init(testing.allocator);
+    defer registry.deinit();
+    var server: SocketServer = .{
+        .listen_fd = -1,
+        .server_uid = c.getuid(),
+        .socket_path = try testing.allocator.dupeZ(u8, "/tmp/unused-upgrade-failure.sock"),
+        .allocator = testing.allocator,
+        .host_id = 0xAABB,
+        .registry = &registry,
+        .host_status = .{ .manifest_capable = true, .upgrade_capable = true },
+    };
+    defer testing.allocator.free(server.socket_path);
+    var gate = upgrade.AdmissionGate.init(testing.io);
+    server.admission_gate = &gate;
+    var stage_reached: std.atomic.Value(bool) = .init(false);
+    var release_stage: std.atomic.Value(bool) = .init(false);
+    var owner: UpgradeSocketOwner = .{
+        .server = &server,
+        .gate = &gate,
+        .stage_reached = &stage_reached,
+        .release_stage = &release_stage,
+    };
+    server.upgrade_ops = owner.ops();
+
+    var serve: UpgradeServeThread = .{ .server = &server, .fd = fds[0] };
+    const thread = try std.Thread.spawn(.{}, UpgradeServeThread.run, .{&serve});
+    var parser = framing.FrameParser.init(testing.allocator);
+    defer parser.deinit();
+    try sendHelloAndReadAck(fds[1], &parser);
+    const attempt_id: u128 = 0xCCDD;
+    try sendUpgradePrepare(fds[1], attempt_id);
+    while (!stage_reached.load(.acquire)) _ = usleep(1000);
+    _ = c.shutdown(fds[1], c.SHUT.RDWR);
+    _ = c.close(fds[1]);
+    release_stage.store(true, .release);
+    thread.join();
+
+    try testing.expectEqual(error.WriteFailed, serve.failure.?);
+    try testing.expect(owner.staged_attempt == null);
+    try testing.expect(owner.armed_attempt == null);
+    try testing.expectEqual(@as(usize, 0), owner.arm_count);
+    try testing.expectEqual(@as(usize, 0), server.active_connections);
+    try testing.expect(server.takeCompletedUpgradeAttempt() == null);
 }
 
 test "socket server: real unix socket connect → hello → host.info roundtrip with peer-cred and 0600" {

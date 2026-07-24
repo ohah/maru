@@ -15,6 +15,7 @@ pub const Error = runtime_manager.RuntimeManager.QuiesceError ||
 pub const Quiesced = struct {
     allocator: std.mem.Allocator,
     bytes: []u8,
+    resources: []runtime_manager.RuntimeManager.UpgradeResource,
     manager: *runtime_manager.RuntimeManager,
     gate: *upgrade_coordinator.AdmissionGate,
     active: bool = true,
@@ -23,16 +24,17 @@ pub const Quiesced = struct {
     pub fn rollbackToServing(self: *Quiesced) void {
         if (!self.active) return;
         self.allocator.free(self.bytes);
+        self.allocator.free(self.resources);
         self.manager.resumeUpgradeQuiesce();
         self.gate.reopen();
         self.active = false;
     }
 
     /// U3가 bytes와 paused runtime ownership을 넘겨받는다. 이후 이 guard는 rollback하지 않는다.
-    pub fn takeBytes(self: *Quiesced) []u8 {
+    pub fn takePlan(self: *Quiesced) runtime_manager.RuntimeManager.EncodedUpgradePlan {
         std.debug.assert(self.active);
         self.active = false;
-        return self.bytes;
+        return .{ .allocator = self.allocator, .bytes = self.bytes, .resources = self.resources };
     }
 };
 
@@ -68,15 +70,21 @@ pub fn begin(
     }
     try manager.joinAndValidateUpgradeQuiesce();
     if (std.Io.Clock.awake.now(io).nanoseconds - start >= budget_ns) return error.DeadlineExceeded;
-    const bytes = try manager.encodeQuiescedHost(allocator, host_id, upgrade_epoch, first_fd_slot);
+    var plan = try manager.encodeQuiescedPlan(allocator, host_id, upgrade_epoch, first_fd_slot);
     if (std.Io.Clock.awake.now(io).nanoseconds - start >= budget_ns) {
-        allocator.free(bytes);
+        plan.deinit();
         return error.DeadlineExceeded;
     }
 
     pause_requested = false;
     gate_closed = false;
-    return .{ .allocator = allocator, .bytes = bytes, .manager = manager, .gate = gate };
+    return .{
+        .allocator = allocator,
+        .bytes = plan.bytes,
+        .resources = plan.resources,
+        .manager = manager,
+        .gate = gate,
+    };
 }
 
 test "U2 coordinator deadline rollback reopens admission and keeps runtime usable" {

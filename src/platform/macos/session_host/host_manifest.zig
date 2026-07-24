@@ -5,6 +5,7 @@
 //! reader는 모든 부모 디렉터리와 leaf를 no-follow/same-UID로 확인한 뒤 bounded JSON을 파싱한다.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const c = std.c;
 const posix = std.posix;
 const staged_image = @import("staged_image.zig");
@@ -14,6 +15,9 @@ const short_endpoint = @import("short_endpoint.zig");
 extern "c" fn renamex_np(from: [*:0]const u8, to: [*:0]const u8, flags: c_uint) c_int;
 const RENAME_SWAP: c_uint = 0x00000002;
 const RENAME_EXCL: c_uint = 0x00000004;
+var temp_sequence: std.atomic.Value(u64) = .init(1);
+const TestFailpoint = enum { none, before_commit_sync, rollback_sync, post_commit_cleanup };
+var test_failpoint: TestFailpoint = .none;
 
 pub const schema_version: u16 = 1;
 pub const max_manifest_bytes: usize = 16 * 1024;
@@ -70,6 +74,8 @@ pub const Error = error{
     WriteFailed,
     SyncFailed,
     RenameFailed,
+    /// Disk authority가 old/new 중 어느 세대인지 안전하게 증명할 수 없다. Caller는 wire를 계속 서비스하지 말고 fail-stop한다.
+    AuthorityPoisoned,
     OutOfMemory,
 };
 
@@ -84,24 +90,33 @@ pub const Published = struct {
     host_dir: [:0]u8,
     manifest_path: [:0]u8,
     identity: FileIdentity,
+    poisoned: bool = false,
+
+    pub const WithdrawOutcome = enum { removed, replaced, absent };
 
     pub fn deinit(self: *Published) void {
-        if (fileIdentity(self.manifest_path)) |current| {
-            if (sameIdentity(current, self.identity)) _ = c.unlink(self.manifest_path.ptr);
-        } else |_| {}
-        if (openOwnerDir(self.host_dir)) |fd| {
-            _ = c.fsync(fd);
-            _ = c.close(fd);
-        } else |_| {}
-        _ = c.rmdir(self.host_dir.ptr);
+        _ = self.withdraw() catch {};
+        self.deinitMemory();
+    }
+
+    /// 경로가 다른 세대로 교체됐으면 그 세대를 삭제하지 않는다. rename-to-tomb 뒤 inode를 확인하므로
+    /// precheck→unlink 사이의 내부 ABA에도 unknown generation을 unlink하지 않는다.
+    pub fn withdraw(self: *Published) Error!WithdrawOutcome {
+        if (self.poisoned) return error.AuthorityPoisoned;
+        const dir_fd = try openOwnerDir(self.host_dir);
+        defer _ = c.close(dir_fd);
+        return withdrawExact(self.allocator, dir_fd, self.manifest_path, self.identity);
+    }
+
+    pub fn deinitMemory(self: *Published) void {
         self.allocator.free(self.manifest_path);
         self.allocator.free(self.host_dir);
-        _ = c.rmdir(self.hosts_root.ptr);
         self.allocator.free(self.hosts_root);
         self.* = undefined;
     }
 
     pub fn republish(self: *Published, descriptor: Descriptor) Error!void {
+        if (self.poisoned) return error.AuthorityPoisoned;
         if (descriptor.host_id == 0) return error.InvalidManifest;
         var expected_dir_buf: [768]u8 = undefined;
         const parent = std.fs.path.dirname(self.host_dir) orelse return error.InvalidDirectory;
@@ -110,9 +125,10 @@ pub const Published = struct {
             return error.InvalidDirectory;
         if (!std.mem.eql(u8, expected, self.host_dir)) return error.InvalidManifest;
         try validateDescriptor(descriptor, session_dir);
-        const current = try fileIdentity(self.manifest_path);
-        if (!sameIdentity(current, self.identity)) return error.InvalidManifest;
-        self.identity = try writeAtomic(self.allocator, self.host_dir, self.manifest_path, descriptor, true);
+        self.identity = writeAtomic(self.allocator, self.host_dir, self.manifest_path, descriptor, self.identity) catch |err| {
+            if (err == error.AuthorityPoisoned) self.poisoned = true;
+            return err;
+        };
     }
 };
 
@@ -144,6 +160,17 @@ pub fn prepareHostDirectory(session_dir: [:0]const u8, host_id: u128) Error!void
     try ensureOwnerDir(host_dir);
 }
 
+/// Manifest와 owner.lock이 철거되고 socket server가 닫힌 뒤 daemon이 빈 host registry directory를 회수한다.
+/// ENOTEMPTY는 다른 generation/residue가 있다는 뜻이므로 삭제를 강행하지 않는다.
+pub fn removeEmptyHostDirectories(session_dir: [:0]const u8, host_id: u128) void {
+    var host_buf: [768]u8 = undefined;
+    const host_dir = hostDirPathIn(&host_buf, session_dir, host_id) catch return;
+    _ = c.rmdir(host_dir.ptr);
+    var hosts_buf: [640]u8 = undefined;
+    const hosts_root = hostsRootPathIn(&hosts_buf, session_dir) catch return;
+    _ = c.rmdir(hosts_root.ptr);
+}
+
 /// 현재 실행 image의 SHA-256을 manifest build identity로 쓴다. Protocol major만으로 같은 major의 서로 다른
 /// body 의미를 추측하지 않기 위한 exact fingerprint이며, updater의 마케팅 버전과는 별개다.
 pub fn buildIdForExecutable(allocator: std.mem.Allocator, executable_path: [:0]const u8) Error![]u8 {
@@ -169,17 +196,13 @@ pub fn publish(
     const manifest_path = manifestPathIn(&manifest_buf, session_dir, descriptor.host_id) catch
         return error.InvalidDirectory;
 
-    const identity = try writeAtomic(allocator, host_dir, manifest_path, descriptor, false);
-    errdefer {
-        _ = c.unlink(manifest_path.ptr);
-        _ = c.rmdir(host_dir.ptr);
-        _ = c.rmdir(hosts_root.ptr);
-    }
     const owned_hosts_root = allocator.dupeZ(u8, hosts_root) catch return error.OutOfMemory;
     errdefer allocator.free(owned_hosts_root);
     const owned_host_dir = allocator.dupeZ(u8, host_dir) catch return error.OutOfMemory;
     errdefer allocator.free(owned_host_dir);
     const owned_manifest = allocator.dupeZ(u8, manifest_path) catch return error.OutOfMemory;
+    errdefer allocator.free(owned_manifest);
+    const identity = try writeAtomic(allocator, host_dir, manifest_path, descriptor, null);
     return .{
         .allocator = allocator,
         .hosts_root = owned_hosts_root,
@@ -310,19 +333,21 @@ fn writeAtomic(
     host_dir: [:0]const u8,
     manifest_path: [:0]const u8,
     descriptor: Descriptor,
-    replace: bool,
+    expected_old: ?Published.FileIdentity,
 ) Error!Published.FileIdentity {
     try validateOwnerDir(host_dir);
+    const dir_fd = try openOwnerDir(host_dir);
+    defer _ = c.close(dir_fd);
     const bytes = try encode(allocator, descriptor);
     defer allocator.free(bytes);
+    const nonce = temp_sequence.fetchAdd(1, .monotonic);
     const tmp_path = std.fmt.allocPrintSentinel(
         allocator,
-        "{s}/.host.v1.json.tmp-{d}",
-        .{ host_dir, c.getpid() },
+        "{s}/.host.v1.json.tmp-{d}-{x}",
+        .{ host_dir, c.getpid(), nonce },
         0,
     ) catch return error.OutOfMemory;
     defer allocator.free(tmp_path);
-    _ = c.unlink(tmp_path.ptr);
     const fd = c.open(
         tmp_path.ptr,
         .{ .ACCMODE = .WRONLY, .CREAT = true, .EXCL = true, .CLOEXEC = true, .NOFOLLOW = true },
@@ -333,40 +358,72 @@ fn writeAtomic(
     defer {
         if (open) _ = c.close(fd);
     }
-    errdefer _ = c.unlink(tmp_path.ptr);
     try writeAll(fd, bytes);
     if (c.fsync(fd) != 0) return error.SyncFailed;
+    const new_identity = try fileIdentityFd(fd);
+    var tmp_holds_new = true;
+    defer if (tmp_holds_new) unlinkIfIdentity(tmp_path, new_identity);
     _ = c.close(fd);
     open = false;
     if (renamex_np(
         tmp_path.ptr,
         manifest_path.ptr,
-        if (replace) RENAME_SWAP else RENAME_EXCL,
+        if (expected_old != null) RENAME_SWAP else RENAME_EXCL,
     ) != 0) return error.RenameFailed;
-    const dir_fd = try openOwnerDir(host_dir);
-    defer _ = c.close(dir_fd);
-    if (c.fsync(dir_fd) != 0) {
-        if (replace) {
-            // SWAP 뒤 tmp가 old manifest를 보유한다. Commit fsync가 실패하면 다시 swap해 old authority를 복원한다.
-            _ = renamex_np(tmp_path.ptr, manifest_path.ptr, RENAME_SWAP);
-        } else {
-            _ = c.unlink(manifest_path.ptr);
+    tmp_holds_new = false;
+
+    if (expected_old) |old_identity| {
+        const displaced = fileIdentity(tmp_path) catch {
+            try rollbackSwapTracked(dir_fd, tmp_path, manifest_path, new_identity, &tmp_holds_new);
+            return error.InvalidManifest;
+        };
+        const installed = fileIdentity(manifest_path) catch {
+            try rollbackSwapTracked(dir_fd, tmp_path, manifest_path, new_identity, &tmp_holds_new);
+            return error.AuthorityPoisoned;
+        };
+        if (!sameIdentity(displaced, old_identity) or !sameIdentity(installed, new_identity)) {
+            try rollbackSwapTracked(dir_fd, tmp_path, manifest_path, new_identity, &tmp_holds_new);
+            return error.InvalidManifest;
         }
-        _ = c.fsync(dir_fd);
+    } else {
+        const installed = fileIdentity(manifest_path) catch return error.AuthorityPoisoned;
+        if (!sameIdentity(installed, new_identity)) return error.AuthorityPoisoned;
+    }
+
+    if ((builtin.is_test and (test_failpoint == .before_commit_sync or test_failpoint == .rollback_sync)) or
+        c.fsync(dir_fd) != 0)
+    {
+        if (expected_old != null) {
+            try rollbackSwapTracked(dir_fd, tmp_path, manifest_path, new_identity, &tmp_holds_new);
+        } else {
+            if (renamex_np(manifest_path.ptr, tmp_path.ptr, RENAME_EXCL) != 0)
+                return error.AuthorityPoisoned;
+            tmp_holds_new = true;
+            if (c.fsync(dir_fd) != 0) return error.AuthorityPoisoned;
+        }
         return error.SyncFailed;
     }
-    if (replace) {
-        // 첫 directory fsync가 new manifest 이름을 durable하게 만들었다. tmp에 남은 old generation은 이제 회수 가능하다.
-        _ = c.unlink(tmp_path.ptr);
+
+    if (expected_old) |old_identity| {
+        // 여기부터 new generation은 durable commit됐다. old temp 회수 실패는 authority 실패가 아니라 bounded residue다.
+        if (builtin.is_test and test_failpoint == .post_commit_cleanup) {
+            unlinkIfIdentity(tmp_path, old_identity);
+            return new_identity;
+        }
+        unlinkIfIdentity(tmp_path, old_identity);
         _ = c.fsync(dir_fd);
     }
-    return fileIdentity(manifest_path);
+    return new_identity;
 }
 
 fn fileIdentity(path: [:0]const u8) Error!Published.FileIdentity {
     const fd = c.open(path.ptr, .{ .ACCMODE = .RDONLY, .CLOEXEC = true, .NOFOLLOW = true }, @as(c.mode_t, 0));
     if (fd < 0) return error.OpenFailed;
     defer _ = c.close(fd);
+    return fileIdentityFd(fd);
+}
+
+fn fileIdentityFd(fd: c.fd_t) Error!Published.FileIdentity {
     var stat: posix.Stat = undefined;
     if (c.fstat(fd, &stat) != 0 or !posix.S.ISREG(stat.mode) or stat.uid != c.getuid() or
         (stat.mode & 0o777) != 0o600)
@@ -376,6 +433,68 @@ fn fileIdentity(path: [:0]const u8) Error!Published.FileIdentity {
 
 fn sameIdentity(a: Published.FileIdentity, b: Published.FileIdentity) bool {
     return a.dev == b.dev and a.ino == b.ino;
+}
+
+fn rollbackSwapOrPoison(
+    dir_fd: c.fd_t,
+    tmp_path: [:0]const u8,
+    manifest_path: [:0]const u8,
+) Error!void {
+    if (renamex_np(tmp_path.ptr, manifest_path.ptr, RENAME_SWAP) != 0) return error.AuthorityPoisoned;
+    if (builtin.is_test and test_failpoint == .rollback_sync) return error.AuthorityPoisoned;
+    if (c.fsync(dir_fd) != 0) return error.AuthorityPoisoned;
+}
+
+fn rollbackSwapTracked(
+    dir_fd: c.fd_t,
+    tmp_path: [:0]const u8,
+    manifest_path: [:0]const u8,
+    new_identity: Published.FileIdentity,
+    tmp_holds_new: *bool,
+) Error!void {
+    rollbackSwapOrPoison(dir_fd, tmp_path, manifest_path) catch |err| {
+        if (fileIdentity(tmp_path)) |identity| {
+            tmp_holds_new.* = sameIdentity(identity, new_identity);
+        } else |_| {}
+        return err;
+    };
+    tmp_holds_new.* = true;
+}
+
+fn unlinkIfIdentity(path: [:0]const u8, identity: Published.FileIdentity) void {
+    const current = fileIdentity(path) catch return;
+    if (sameIdentity(current, identity)) _ = c.unlink(path.ptr);
+}
+
+fn withdrawExact(
+    allocator: std.mem.Allocator,
+    dir_fd: c.fd_t,
+    path: [:0]const u8,
+    expected: Published.FileIdentity,
+) Error!Published.WithdrawOutcome {
+    const current = fileIdentity(path) catch |err| return switch (err) {
+        error.OpenFailed => .absent,
+        else => err,
+    };
+    if (!sameIdentity(current, expected)) return .replaced;
+
+    const tomb = std.fmt.allocPrintSentinel(
+        allocator,
+        "{s}.withdraw-{d}-{x}",
+        .{ path, c.getpid(), temp_sequence.fetchAdd(1, .monotonic) },
+        0,
+    ) catch return error.OutOfMemory;
+    defer allocator.free(tomb);
+    if (renamex_np(path.ptr, tomb.ptr, RENAME_EXCL) != 0) return error.RenameFailed;
+    const moved = fileIdentity(tomb) catch return error.AuthorityPoisoned;
+    if (!sameIdentity(moved, expected)) {
+        if (renamex_np(tomb.ptr, path.ptr, RENAME_EXCL) != 0) return error.AuthorityPoisoned;
+        if (c.fsync(dir_fd) != 0) return error.AuthorityPoisoned;
+        return .replaced;
+    }
+    if (c.unlink(tomb.ptr) != 0) return error.AuthorityPoisoned;
+    if (c.fsync(dir_fd) != 0) return error.AuthorityPoisoned;
+    return .removed;
 }
 
 fn ensureOwnerDir(path: [:0]const u8) Error!void {
@@ -566,4 +685,52 @@ test "host manifest initial publish is exclusive and old owner cleanup cannot un
     var loaded = try load(std.testing.allocator, dir, host_id);
     defer loaded.deinit();
     try std.testing.expectEqual(@as(u64, 2), loaded.upgrade_epoch);
+}
+
+test "host manifest transaction rolls back precommit failure and poisons indeterminate rollback" {
+    var dir_buf: [192]u8 = undefined;
+    const dir = std.fmt.bufPrintZ(&dir_buf, "/private/tmp/maru-host-manifest-txn-{d}", .{c.getpid()}) catch
+        return error.SkipZigTest;
+    _ = c.mkdir(dir.ptr, 0o700);
+    defer _ = c.rmdir(dir.ptr);
+    const host_id: u128 = 0xD00D;
+    var endpoint_buf: [128]u8 = undefined;
+    const endpoint = try short_endpoint.currentSocketPathIn(&endpoint_buf, host_id);
+    var descriptor: Descriptor = .{
+        .host_id = host_id,
+        .build_id = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        .protocol_major = 2,
+        .screen_codec_version = 2,
+        .upgrade_epoch = 1,
+        .lifecycle = .ready,
+        .endpoint = endpoint,
+    };
+    var published = try publish(std.testing.allocator, dir, descriptor);
+    defer {
+        test_failpoint = .none;
+        published.poisoned = false;
+        published.deinit();
+    }
+
+    descriptor.upgrade_epoch = 2;
+    test_failpoint = .before_commit_sync;
+    try std.testing.expectError(error.SyncFailed, published.republish(descriptor));
+    test_failpoint = .none;
+    var rolled_back = try load(std.testing.allocator, dir, host_id);
+    defer rolled_back.deinit();
+    try std.testing.expectEqual(@as(u64, 1), rolled_back.upgrade_epoch);
+
+    test_failpoint = .post_commit_cleanup;
+    try published.republish(descriptor);
+    test_failpoint = .none;
+    var committed = try load(std.testing.allocator, dir, host_id);
+    defer committed.deinit();
+    try std.testing.expectEqual(@as(u64, 2), committed.upgrade_epoch);
+
+    descriptor.upgrade_epoch = 3;
+    test_failpoint = .rollback_sync;
+    try std.testing.expectError(error.AuthorityPoisoned, published.republish(descriptor));
+    try std.testing.expect(published.poisoned);
+    test_failpoint = .none;
+    try std.testing.expectError(error.AuthorityPoisoned, published.republish(descriptor));
 }

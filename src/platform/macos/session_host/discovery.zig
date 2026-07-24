@@ -88,7 +88,7 @@ pub fn legacySocketPathIn(buf: []u8, dir: []const u8) error{NoSpaceLeft}![:0]u8 
 
 /// 라이브니스/start lock 경로 `<dir>/control.lock`(socket과 별도 regular 파일 — flock 대상, §10).
 pub fn lockPathIn(buf: []u8, dir: []const u8) error{NoSpaceLeft}![:0]u8 {
-    return std.fmt.bufPrintZ(buf, "{s}/control-v{d}.lock", .{ trimTrailingSlash(dir), protocol.version_major });
+    return std.fmt.bufPrintZ(buf, "{s}/launch-v{d}.lock", .{ trimTrailingSlash(dir), protocol.version_major });
 }
 
 /// host process lifetime 전체와 same-PID exec를 관통하는 배타적 owner lease.
@@ -155,7 +155,7 @@ test "discovery: paths are under session-host dir and separate from control-plan
     var v1_buf: [256]u8 = undefined;
     try testing.expectEqualStrings("/tmp/cache/session-host/control-v1.sock", try socketPathForMajorIn(&v1_buf, dir, 1));
     var lp_buf: [256]u8 = undefined;
-    try testing.expectEqualStrings("/tmp/cache/session-host/control-v2.lock", try lockPathIn(&lp_buf, dir));
+    try testing.expectEqualStrings("/tmp/cache/session-host/launch-v2.lock", try lockPathIn(&lp_buf, dir));
     var op_buf: [256]u8 = undefined;
     try testing.expectEqualStrings("/tmp/cache/session-host/owner-v2.lock", try ownerLockPathIn(&op_buf, dir));
     // trailing slash 정규화.

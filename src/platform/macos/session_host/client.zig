@@ -292,7 +292,14 @@ pub const Client = struct {
         }
     }
 
-    pub fn prepareUpgrade(self: *Client, request: upgrade_wire.PrepareRequest) ClientError!bool {
+    pub const PrepareUpgradeOutcome = union(enum) {
+        /// Host가 accepted response를 전량 보낸 뒤 이 connection을 닫는다. 이후 status/attach는 새 connection이어야 한다.
+        accepted_reconnect_required,
+        completed: upgrade_wire.AttemptReport,
+        rejected,
+    };
+
+    pub fn prepareUpgrade(self: *Client, request: upgrade_wire.PrepareRequest) ClientError!PrepareUpgradeOutcome {
         if (!self.host_exec_upgrade_v1) return error.IncompatibleVersion;
         var out: std.Io.Writer.Allocating = .init(self.allocator);
         defer out.deinit();
@@ -311,10 +318,21 @@ pub const Client = struct {
         }) catch return error.OutOfMemory;
         const response = try self.call("host.upgrade.prepare", out.written());
         defer self.allocator.free(response);
-        return responseState(response, "accepted");
+        return switch (parsePrepareUpgradeResponse(response, request.attempt_id)) {
+            .accepted => {
+                self.invalidateConnection();
+                return .accepted_reconnect_required;
+            },
+            .completed => |report| .{ .completed = report },
+            .rejected => .rejected,
+            .malformed => {
+                self.invalidateConnection();
+                return error.ProtocolError;
+            },
+        };
     }
 
-    pub fn upgradeStatus(self: *Client, attempt_id: u128) ClientError!?upgrade_wire.AttemptStatus {
+    pub fn upgradeStatus(self: *Client, attempt_id: u128) ClientError!?upgrade_wire.AttemptReport {
         var attempt_buf: [32]u8 = undefined;
         const attempt = std.fmt.bufPrint(&attempt_buf, "{x:0>32}", .{attempt_id}) catch
             return error.ProtocolError;
@@ -324,7 +342,10 @@ pub const Client = struct {
         js.write(.{ .attempt_id = attempt }) catch return error.OutOfMemory;
         const response = try self.call("host.upgrade.status", out.written());
         defer self.allocator.free(response);
-        return parseAttemptStatus(response);
+        if (parseAttemptStatus(response)) |report| return report;
+        if (responseHasTypedError(response)) return null;
+        self.invalidateConnection();
+        return error.ProtocolError;
     }
 
     /// attach 직후 host가 보내는 `snapshot_chunk` stream을 `end_stream`까지 읽어 record 바이트를 이어 돌려준다(§10 attach
@@ -1405,7 +1426,55 @@ fn responseState(payload: []const u8, expected: []const u8) bool {
     return std.mem.eql(u8, state, expected);
 }
 
-fn parseAttemptStatus(payload: []const u8) ?upgrade_wire.AttemptStatus {
+const PrepareResponse = union(enum) {
+    accepted,
+    completed: upgrade_wire.AttemptReport,
+    rejected,
+    malformed,
+};
+
+fn parsePrepareUpgradeResponse(payload: []const u8, expected_attempt_id: u128) PrepareResponse {
+    var parsed = std.json.parseFromSlice(std.json.Value, std.heap.page_allocator, payload, .{}) catch return .malformed;
+    defer parsed.deinit();
+    const root = switch (parsed.value) {
+        .object => |value| value,
+        else => return .malformed,
+    };
+    if (root.get("error") != null) return if (responseObjectHasTypedError(root)) .rejected else .malformed;
+    const result = switch (root.get("result") orelse return .malformed) {
+        .object => |value| value,
+        else => return .malformed,
+    };
+    const state = switch (result.get("state") orelse return .malformed) {
+        .string => |value| value,
+        else => return .malformed,
+    };
+    const attempt_raw = switch (result.get("attempt_id") orelse return .malformed) {
+        .string => |value| value,
+        else => return .malformed,
+    };
+    if (attempt_raw.len != 32) return .malformed;
+    const actual = std.fmt.parseInt(u128, attempt_raw, 16) catch return .malformed;
+    if (actual != expected_attempt_id) return .malformed;
+    if (std.mem.eql(u8, state, "accepted")) return .accepted;
+    const reason_raw = switch (result.get("reason") orelse return .malformed) {
+        .string => |value| value,
+        else => return .malformed,
+    };
+    const replayed = switch (result.get("replayed") orelse return .malformed) {
+        .bool => |value| value,
+        else => return .malformed,
+    };
+    if (!replayed) return .malformed;
+    const report: upgrade_wire.AttemptReport = .{
+        .status = std.meta.stringToEnum(upgrade_wire.AttemptStatus, state) orelse return .malformed,
+        .reason = std.meta.stringToEnum(upgrade_wire.AttemptReason, reason_raw) orelse return .malformed,
+    };
+    if (!upgrade_wire.validReport(report) or report.status == .pending) return .malformed;
+    return .{ .completed = report };
+}
+
+fn parseAttemptStatus(payload: []const u8) ?upgrade_wire.AttemptReport {
     var parsed = std.json.parseFromSlice(std.json.Value, std.heap.page_allocator, payload, .{}) catch return null;
     defer parsed.deinit();
     const root = switch (parsed.value) {
@@ -1416,11 +1485,37 @@ fn parseAttemptStatus(payload: []const u8) ?upgrade_wire.AttemptStatus {
         .object => |value| value,
         else => return null,
     };
-    const state = switch (result.get("state") orelse return null) {
+    const state_raw = switch (result.get("state") orelse return null) {
         .string => |value| value,
         else => return null,
     };
-    return std.meta.stringToEnum(upgrade_wire.AttemptStatus, state);
+    const reason_raw = switch (result.get("reason") orelse return null) {
+        .string => |value| value,
+        else => return null,
+    };
+    const report: upgrade_wire.AttemptReport = .{
+        .status = std.meta.stringToEnum(upgrade_wire.AttemptStatus, state_raw) orelse return null,
+        .reason = std.meta.stringToEnum(upgrade_wire.AttemptReason, reason_raw) orelse return null,
+    };
+    return if (upgrade_wire.validReport(report)) report else null;
+}
+
+fn responseHasTypedError(payload: []const u8) bool {
+    var parsed = std.json.parseFromSlice(std.json.Value, std.heap.page_allocator, payload, .{}) catch return false;
+    defer parsed.deinit();
+    const root = switch (parsed.value) {
+        .object => |value| value,
+        else => return false,
+    };
+    return responseObjectHasTypedError(root);
+}
+
+fn responseObjectHasTypedError(root: std.json.ObjectMap) bool {
+    const code = switch (root.get("error") orelse return false) {
+        .string => |value| value,
+        else => return false,
+    };
+    return protocol.ErrorCode.fromWireName(code) != null;
 }
 
 /// hello/hello_ack의 capability 문자열 배열을 관대하게 읽는다. 구 peer의 필드 부재·손상·타입 불일치는 미지원(false)이며

@@ -122,7 +122,12 @@ pub fn connectOrLaunchDetailed(
         .failed => |reason| return .{ .failed = reason },
         .absent => {},
     }
-    if (lock_probe == .contended) return connectWithBackoffDetailed(allocator, socket, opts);
+    if (lock_probe == .contended) {
+        if (connectManifestRegistryWithBackoff(allocator, exe_path, base_cache_dir, dir, opts)) |outcome|
+            return outcome;
+        // 이전 winner가 publish 전에 실패했으면 loser가 영구 fallback하지 않고 lock을 한 번 재획득해 launch owner가 된다.
+        if (flock(lock_fd, LOCK_EX | LOCK_NB) != 0) return .{ .failed = .startup_timeout };
+    }
 
     // Lock 취득 뒤 registry도 다시 읽는다. 다른 process가 manifest를 publish한 직후 fixed endpoint가 비어 있는
     // host-specific 모델에서도 중복 spawn을 막는다.
@@ -201,6 +206,22 @@ fn connectNewHostWithBackoff(
         _ = usleep(opts.connect_delay_ms * 1000);
     }
     return .{ .failed = .startup_timeout };
+}
+
+fn connectManifestRegistryWithBackoff(
+    allocator: std.mem.Allocator,
+    exe_path: [:0]const u8,
+    base_cache_dir: []const u8,
+    session_dir: [:0]const u8,
+    opts: Options,
+) ?Outcome {
+    var attempts: usize = 0;
+    while (attempts < opts.connect_attempts) : (attempts += 1) {
+        if (findCurrentManifestHost(allocator, exe_path, base_cache_dir, session_dir)) |outcome|
+            return outcome;
+        _ = usleep(opts.connect_delay_ms * 1000);
+    }
+    return null;
 }
 
 /// 이미 존재하는 특정 major host만 찾는다. 조회/restore 경로라 spawn하지 않으며 versioned endpoint를 먼저,
@@ -692,11 +713,26 @@ test "host_connect: launches the product maru session host and completes host.in
         try testing.expect(std.mem.indexOf(u8, response, "\"runtime_count\":0") != null);
     }
 
-    // oneshot host가 client EOF를 받고 정상 deinit하여 socket을 지웠는지까지 확인한다.
+    var owner_buf: [832]u8 = undefined;
+    const owner_path = try host_manifest.ownerLockPathIn(&owner_buf, dir, launched_host_id);
+    var manifest_buf: [832]u8 = undefined;
+    const manifest_path = try host_manifest.manifestPathIn(&manifest_buf, dir, launched_host_id);
+    var host_dir_buf: [768]u8 = undefined;
+    const host_dir = try host_manifest.hostDirPathIn(&host_dir_buf, dir, launched_host_id);
+    var hosts_buf: [640]u8 = undefined;
+    const hosts_root = try host_manifest.hostsRootPathIn(&hosts_buf, dir);
+
+    // oneshot host의 정상 종료가 endpoint뿐 아니라 manifest→owner lock→빈 registry directory 순으로 전부 회수하는지
+    // 확인한다. 테스트가 직접 지우면 제품의 누적 회귀를 숨기므로 부재만 관찰한다.
     var stopped = false;
     var attempts: usize = 0;
     while (attempts < 100) : (attempts += 1) {
-        if (c.access(@ptrCast(&launched_socket_buf), 0) != 0) {
+        if (c.access(@ptrCast(&launched_socket_buf), 0) != 0 and
+            c.access(manifest_path.ptr, 0) != 0 and
+            c.access(owner_path.ptr, 0) != 0 and
+            c.access(host_dir.ptr, 0) != 0 and
+            c.access(hosts_root.ptr, 0) != 0)
+        {
             stopped = true;
             break;
         }
@@ -704,12 +740,6 @@ test "host_connect: launches the product maru session host and completes host.in
     }
     try testing.expect(stopped);
 
-    var owner_buf: [832]u8 = undefined;
-    if (host_manifest.ownerLockPathIn(&owner_buf, dir, launched_host_id)) |path| _ = c.unlink(path.ptr) else |_| {}
-    var host_dir_buf: [768]u8 = undefined;
-    if (host_manifest.hostDirPathIn(&host_dir_buf, dir, launched_host_id)) |path| _ = c.rmdir(path.ptr) else |_| {}
-    var hosts_buf: [640]u8 = undefined;
-    if (host_manifest.hostsRootPathIn(&hosts_buf, dir)) |path| _ = c.rmdir(path.ptr) else |_| {}
     var lock_buf: [320]u8 = undefined;
     if (discovery.lockPathIn(&lock_buf, dir)) |lock| _ = c.unlink(lock.ptr) else |_| {}
     _ = c.rmdir(dir.ptr);

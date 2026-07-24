@@ -110,6 +110,7 @@ pub const ErrorCode = enum {
     attempt_conflict,
     upgrade_unsupported,
     invalid_target,
+    resource_exhausted,
     internal,
 
     pub fn wireName(self: ErrorCode) []const u8 {
@@ -129,6 +130,7 @@ pub const ErrorCode = enum {
             .attempt_conflict => "attempt_conflict",
             .upgrade_unsupported => "upgrade_unsupported",
             .invalid_target => "invalid_target",
+            .resource_exhausted => "resource_exhausted",
             .internal => "internal",
         };
     }

@@ -128,6 +128,30 @@ pub const RuntimeManager = struct {
         UnsafeFrontier,
     };
 
+    const UpgradeItem = struct {
+        handle: RuntimeHandle,
+        entry: *reg.RuntimeEntry,
+        terminal_slot: *maru.app.live_pty.LiveSurface.Terminal,
+    };
+
+    pub const UpgradeResource = struct {
+        runtime_id: u128,
+        source_fd: std.c.fd_t,
+        inherited_slot: u16,
+    };
+
+    pub const EncodedUpgradePlan = struct {
+        allocator: std.mem.Allocator,
+        bytes: []u8,
+        resources: []UpgradeResource,
+
+        pub fn deinit(self: *EncodedUpgradePlan) void {
+            self.allocator.free(self.resources);
+            self.allocator.free(self.bytes);
+            self.* = undefined;
+        }
+    };
+
     /// GUI attachment가 0이어도 host가 reader event queue의 수명 owner다. daemon tick이 이 함수를 호출해
     /// coalesced output 신호를 비우고, 검증된 `.exited`만 exact-once reap/remove한다. `.read_error`는 child
     /// 종료 증거가 아니므로 reader thread만 join하고 runtime/child를 보존한다.
@@ -270,14 +294,76 @@ pub const RuntimeManager = struct {
         upgrade_epoch: u64,
         first_fd_slot: u16,
     ) (QuiesceError || handoff_codec.Error)![]u8 {
+        const plan = try self.encodeQuiescedPlan(allocator, host_id, upgrade_epoch, first_fd_slot);
+        allocator.free(plan.resources);
+        return plan.bytes;
+    }
+
+    /// Handoff bytes와 그 bytes의 stable fd_slot 순서에 대응하는 실제 master fd를 한 owner로 만든다. Exec 준비가
+    /// registry를 다시 열거해 다른 순서를 추론하지 않게 하는 SSOT다.
+    pub fn encodeQuiescedPlan(
+        self: *RuntimeManager,
+        allocator: std.mem.Allocator,
+        host_id: u128,
+        upgrade_epoch: u64,
+        first_fd_slot: u16,
+    ) (QuiesceError || handoff_codec.Error)!EncodedUpgradePlan {
         if (!self.upgradeQuiesceReached() or self.host_registry.count() > handoff_codec.max_runtime_count)
             return error.UnsafeFrontier;
-        const Item = struct {
-            handle: RuntimeHandle,
-            entry: *reg.RuntimeEntry,
-            terminal_slot: *maru.app.live_pty.LiveSurface.Terminal,
-        };
-        var items: [handoff_codec.max_runtime_count]Item = undefined;
+        var items: [handoff_codec.max_runtime_count]UpgradeItem = undefined;
+        const count = try self.collectQuiescedItems(&items);
+        std.mem.sort(UpgradeItem, items[0..count], {}, struct {
+            fn lessThan(_: void, a: UpgradeItem, b: UpgradeItem) bool {
+                return a.handle < b.handle;
+            }
+        }.lessThan);
+        if (@as(usize, first_fd_slot) + count > std.math.maxInt(u16)) return error.LimitExceeded;
+
+        const resources = allocator.alloc(UpgradeResource, count) catch return error.OutOfMemory;
+        errdefer allocator.free(resources);
+        var views: [handoff_codec.max_runtime_count]handoff_codec.RuntimeView = undefined;
+        var locked: usize = 0;
+        defer for (items[0..locked]) |item| item.terminal_slot.surface.unlockCore(self.io);
+        for (items[0..count], 0..) |item, index| {
+            item.terminal_slot.surface.lockCore(self.io);
+            locked += 1;
+            const session = item.terminal_slot.live_pty.session;
+            const size = session.canonicalSize();
+            const identity = session.masterIdentity() catch return error.UnsafeFrontier;
+            if (size.cols != item.entry.cols or size.rows != item.entry.rows) return error.UnsafeFrontier;
+            const inherited_slot = first_fd_slot + @as(u16, @intCast(index));
+            resources[index] = .{
+                .runtime_id = item.entry.id,
+                .source_fd = session.inheritedMasterFd() orelse return error.UnsafeFrontier,
+                .inherited_slot = inherited_slot,
+            };
+            views[index] = .{
+                .runtime_id = item.entry.id,
+                .surface_id = item.handle,
+                .child_pid = session.childPid(),
+                .cols = item.entry.cols,
+                .rows = item.entry.rows,
+                .resize_generation = item.entry.resize_generation,
+                .fd_slot = inherited_slot,
+                .pty_dev = identity.dev,
+                .pty_ino = identity.ino,
+                .pty_rdev = identity.rdev,
+                .core = &item.terminal_slot.surface.core,
+            };
+        }
+        const bytes = try handoff_codec.encodeHost(allocator, .{
+            .host_id = host_id,
+            .upgrade_epoch = upgrade_epoch,
+            .next_handle = self.next_handle,
+            .runtimes = views[0..count],
+        });
+        return .{ .allocator = allocator, .bytes = bytes, .resources = resources };
+    }
+
+    fn collectQuiescedItems(
+        self: *RuntimeManager,
+        out: *[handoff_codec.max_runtime_count]UpgradeItem,
+    ) QuiesceError!usize {
         var count: usize = 0;
         var it = self.host_registry.entries.valueIterator();
         while (it.next()) |entry_ptr| {
@@ -289,46 +375,10 @@ pub const RuntimeManager = struct {
                 return error.UnsafeFrontier;
             if (terminal_slot.live_pty.session.childExitedWithoutReap() catch return error.UnsafeFrontier)
                 return error.RuntimeNotLive;
-            items[count] = .{ .handle = handle, .entry = entry, .terminal_slot = terminal_slot };
+            out[count] = .{ .handle = handle, .entry = entry, .terminal_slot = terminal_slot };
             count += 1;
         }
-        std.mem.sort(Item, items[0..count], {}, struct {
-            fn lessThan(_: void, a: Item, b: Item) bool {
-                return a.handle < b.handle;
-            }
-        }.lessThan);
-        if (@as(usize, first_fd_slot) + count > std.math.maxInt(u16)) return error.LimitExceeded;
-
-        var views: [handoff_codec.max_runtime_count]handoff_codec.RuntimeView = undefined;
-        var locked: usize = 0;
-        defer for (items[0..locked]) |item| item.terminal_slot.surface.unlockCore(self.io);
-        for (items[0..count], 0..) |item, index| {
-            item.terminal_slot.surface.lockCore(self.io);
-            locked += 1;
-            const session = item.terminal_slot.live_pty.session;
-            const size = session.canonicalSize();
-            const identity = session.masterIdentity() catch return error.UnsafeFrontier;
-            if (size.cols != item.entry.cols or size.rows != item.entry.rows) return error.UnsafeFrontier;
-            views[index] = .{
-                .runtime_id = item.entry.id,
-                .surface_id = item.handle,
-                .child_pid = session.childPid(),
-                .cols = item.entry.cols,
-                .rows = item.entry.rows,
-                .resize_generation = item.entry.resize_generation,
-                .fd_slot = first_fd_slot + @as(u16, @intCast(index)),
-                .pty_dev = identity.dev,
-                .pty_ino = identity.ino,
-                .pty_rdev = identity.rdev,
-                .core = &item.terminal_slot.surface.core,
-            };
-        }
-        return handoff_codec.encodeHost(allocator, .{
-            .host_id = host_id,
-            .upgrade_epoch = upgrade_epoch,
-            .next_handle = self.next_handle,
-            .runtimes = views[0..count],
-        });
+        return count;
     }
 
     fn spawnOp(ctx: *anyopaque, params: server.RuntimeSpawnParams) anyerror!u128 {

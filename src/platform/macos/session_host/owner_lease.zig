@@ -10,10 +10,19 @@ pub const Error = error{
     AlreadyOwned,
     LockFailed,
     FcntlFailed,
+    CleanupFailed,
 };
 
 pub const OwnerLease = struct {
+    const Identity = struct {
+        dev: posix.dev_t,
+        ino: posix.ino_t,
+    };
+
+    pub const UnlinkOutcome = enum { removed, replaced, absent };
+
     fd: c.fd_t,
+    identity: Identity,
 
     pub fn acquire(path: [:0]const u8) Error!OwnerLease {
         const fd = c.open(path.ptr, .{ .ACCMODE = .RDWR, .CREAT = true, .CLOEXEC = true, .NOFOLLOW = true }, @as(c.mode_t, 0o600));
@@ -23,7 +32,10 @@ pub const OwnerLease = struct {
         const rc = c.flock(fd, c.LOCK.EX | c.LOCK.NB);
         // Darwin에서 EWOULDBLOCK은 EAGAIN과 같은 errno이며 Zig는 AGAIN으로 노출한다.
         if (rc != 0) return if (posix.errno(rc) == .AGAIN) error.AlreadyOwned else error.LockFailed;
-        return .{ .fd = fd };
+        const identity = try identityForFd(fd);
+        const path_identity = identityForPath(path) catch return error.InvalidOwnerFile;
+        if (!sameIdentity(identity, path_identity)) return error.InvalidOwnerFile;
+        return .{ .fd = fd, .identity = identity };
     }
 
     /// Target image가 inherited non-CLOEXEC owner slot을 CLOEXEC working descriptor로 바꿔 lifetime lock을 이어받는다.
@@ -31,7 +43,7 @@ pub const OwnerLease = struct {
         try validate(slot);
         const duped = c.fcntl(slot, c.F.DUPFD_CLOEXEC, @as(c_int, 3));
         if (duped < 0) return error.FcntlFailed;
-        return .{ .fd = duped };
+        return .{ .fd = duped, .identity = try identityForFd(duped) };
     }
 
     pub fn deinit(self: *OwnerLease) void {
@@ -43,12 +55,55 @@ pub const OwnerLease = struct {
         return self.fd;
     }
 
+    /// Lifetime lock을 잡은 동안에만 호출한다. 경로가 다른 inode로 교체됐으면 replacement를 지우지 않는다.
+    /// same-UID 악성 프로세스가 마지막 identity check와 unlink 사이를 바꾸는 공격은 제품 위협 경계 밖이다.
+    pub fn unlinkOwnedWhileLocked(self: *const OwnerLease, path: [:0]const u8) Error!UnlinkOutcome {
+        const current = identityForPath(path) catch |err| return switch (err) {
+            error.OpenFailed => .absent,
+            else => err,
+        };
+        if (!sameIdentity(current, self.identity)) return .replaced;
+        const unlink_rc = c.unlink(path.ptr);
+        if (unlink_rc != 0) {
+            if (posix.errno(unlink_rc) == .NOENT) return .absent;
+            return error.CleanupFailed;
+        }
+        const parent = std.fs.path.dirname(path) orelse return error.CleanupFailed;
+        var parent_buf: [1024]u8 = undefined;
+        const parent_z = std.fmt.bufPrintZ(&parent_buf, "{s}", .{parent}) catch return error.CleanupFailed;
+        const dir_fd = c.open(parent_z.ptr, .{ .ACCMODE = .RDONLY, .CLOEXEC = true, .DIRECTORY = true, .NOFOLLOW = true }, @as(c.mode_t, 0));
+        if (dir_fd < 0) return error.CleanupFailed;
+        defer _ = c.close(dir_fd);
+        if (c.fsync(dir_fd) != 0) return error.CleanupFailed;
+        return .removed;
+    }
+
     fn validate(fd: c.fd_t) Error!void {
         const flags = c.fcntl(fd, c.F.GETFD, @as(c_int, 0));
         if (flags < 0) return error.InvalidOwnerFile;
         var stat: posix.Stat = undefined;
         if (c.fstat(fd, &stat) != 0 or !posix.S.ISREG(stat.mode) or stat.uid != c.getuid() or
             stat.mode & 0o077 != 0) return error.InvalidOwnerFile;
+    }
+
+    fn identityForFd(fd: c.fd_t) Error!Identity {
+        var stat: posix.Stat = undefined;
+        if (c.fstat(fd, &stat) != 0 or !posix.S.ISREG(stat.mode) or stat.uid != c.getuid() or
+            stat.mode & 0o077 != 0) return error.InvalidOwnerFile;
+        return .{ .dev = stat.dev, .ino = stat.ino };
+    }
+
+    fn identityForPath(path: [:0]const u8) Error!Identity {
+        var stat: posix.Stat = undefined;
+        if (c.fstatat(posix.AT.FDCWD, path.ptr, &stat, posix.AT.SYMLINK_NOFOLLOW) != 0)
+            return error.OpenFailed;
+        if (!posix.S.ISREG(stat.mode) or stat.uid != c.getuid() or stat.mode & 0o077 != 0)
+            return error.InvalidOwnerFile;
+        return .{ .dev = stat.dev, .ino = stat.ino };
+    }
+
+    fn sameIdentity(a: Identity, b: Identity) bool {
+        return a.dev == b.dev and a.ino == b.ino;
     }
 };
 
@@ -75,4 +130,22 @@ test "owner lease remains exclusive through inherited-slot adoption" {
     adopted.deinit();
     var replacement = try OwnerLease.acquire(path);
     replacement.deinit();
+}
+
+test "owner lease cleanup preserves a replacement inode" {
+    var path_buf: [256]u8 = undefined;
+    const path = std.fmt.bufPrintZ(&path_buf, "/private/tmp/maru-owner-replaced-{d}", .{c.getpid()}) catch
+        return error.SkipZigTest;
+    _ = c.unlink(path.ptr);
+    defer _ = c.unlink(path.ptr);
+
+    var old = try OwnerLease.acquire(path);
+    defer old.deinit();
+    try std.testing.expectEqual(@as(c_int, 0), c.unlink(path.ptr));
+    var replacement = try OwnerLease.acquire(path);
+    defer replacement.deinit();
+
+    try std.testing.expectEqual(OwnerLease.UnlinkOutcome.replaced, try old.unlinkOwnedWhileLocked(path));
+    try std.testing.expectError(error.AlreadyOwned, OwnerLease.acquire(path));
+    try std.testing.expectEqual(OwnerLease.UnlinkOutcome.removed, try replacement.unlinkOwnedWhileLocked(path));
 }

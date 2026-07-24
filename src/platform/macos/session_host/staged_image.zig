@@ -3,10 +3,11 @@
 const std = @import("std");
 const c = std.c;
 const posix = std.posix;
+const limits = @import("upgrade_limits.zig");
 extern "c" fn renamex_np(from: [*:0]const u8, to: [*:0]const u8, flags: c_uint) c_int;
 const rename_swap: c_uint = 0x00000002;
 const rename_excl: c_uint = 0x00000004;
-pub const max_staged_image_bytes: u64 = 512 * 1024 * 1024;
+pub const max_staged_image_bytes = limits.max_staged_image_bytes;
 
 pub const Error = error{
     InvalidDirectory,

@@ -5,6 +5,8 @@
 
 const std = @import("std");
 const wire = @import("upgrade_wire.zig");
+const attempt_record = @import("upgrade_attempt_record.zig");
+const limits = @import("upgrade_limits.zig");
 
 pub const BusyProbe = struct {
     ctx: *anyopaque,
@@ -13,8 +15,8 @@ pub const BusyProbe = struct {
 
 pub const StagedArtifact = struct {
     path: [:0]u8,
-    /// Path replacement과 무관하게 staged executable inode를 pin한다. 제품 executor는 path 기반 exec가 아니라
-    /// 이 fd 기반 실행 경계를 사용해야 한다.
+    /// 검증과 exact cleanup 동안 staged executable inode를 pin한다. macOS 공개 API에는 fd-based exec가 없으므로
+    /// 실제 실행 권위가 아니라 마지막 path 재검증과 cleanup generation 대조용이다.
     exec_fd: i32,
     sha256: [32]u8,
     dev: i64,
@@ -25,6 +27,17 @@ pub const StagedArtifact = struct {
 pub const VerifiedTarget = struct {
     artifact: StagedArtifact,
     build_id: []u8,
+    reader_min: u16,
+    reader_max: u16,
+};
+
+pub const RecordedTarget = struct {
+    staged_path: []const u8,
+    build_id: []const u8,
+    sha256: [32]u8,
+    dev: i64,
+    ino: u64,
+    size: u64,
     reader_min: u16,
     reader_max: u16,
 };
@@ -43,6 +56,12 @@ pub const TargetStager = struct {
         allocator: std.mem.Allocator,
         request: wire.PrepareRequest,
     ) StageDecision,
+    /// Exec 뒤 staged target path를 다시 열어 기록된 inode/hash에 결합한 새 CLOEXEC pin을 만든다.
+    restore: *const fn (
+        ctx: *anyopaque,
+        allocator: std.mem.Allocator,
+        recorded: RecordedTarget,
+    ) StageDecision,
     release_artifact: *const fn (
         ctx: *anyopaque,
         allocator: std.mem.Allocator,
@@ -54,12 +73,49 @@ pub const TargetStager = struct {
 
 pub const Execution = struct {
     attempt_id: u128,
-    /// `finish` 전까지만 유효한 borrowed slice를 포함한다. Executor는 실제 exec 직전에
-    /// `revalidateExecution`을 다시 통과해야 한다.
+    /// `finish` 전까지만 유효한 borrowed slice와 borrowed `exec_fd`를 포함한다. Caller는 fd를 닫거나 flags/offset을
+    /// 바꾸지 않으며, 실제 exec 직전에 `revalidateExecution`을 다시 통과해야 한다. `finish`가 exact-once로 회수한다.
     target: VerifiedTarget,
 };
 
 const Phase = enum { staged, armed, running, terminal };
+pub const RestoreRole = enum { target, rollback };
+pub const HandoffCopy = enum { primary, backup };
+pub const RestoreToken = struct {
+    host_id: u128,
+    attempt_id: u128,
+    copy: HandoffCopy,
+    role: RestoreRole,
+};
+
+/// Exec bootstrap이 argv role, exact attempt ID, inherited handoff copy role을 함께 검증한 뒤에만 발급한다.
+pub fn validateRestoreEntry(
+    state: attempt_record.State,
+    role_arg: []const u8,
+    attempt_arg: []const u8,
+    copy: HandoffCopy,
+) ?RestoreToken {
+    if (state.rollback_budget != 1 or attempt_arg.len != 32) return null;
+    for (attempt_arg) |byte|
+        if (!std.ascii.isDigit(byte) and !(byte >= 'a' and byte <= 'f')) return null;
+    const attempt_id = std.fmt.parseInt(u128, attempt_arg, 16) catch return null;
+    if (attempt_id != state.attempt_id) return null;
+    if (std.mem.eql(u8, role_arg, "target") and copy == .primary)
+        return .{
+            .host_id = state.host_id,
+            .attempt_id = state.attempt_id,
+            .copy = copy,
+            .role = .target,
+        };
+    if (std.mem.eql(u8, role_arg, "rollback") and copy == .backup)
+        return .{
+            .host_id = state.host_id,
+            .attempt_id = state.attempt_id,
+            .copy = copy,
+            .role = .rollback,
+        };
+    return null;
+}
 
 const Attempt = struct {
     id: u128,
@@ -67,12 +123,13 @@ const Attempt = struct {
     target: VerifiedTarget,
     phase: Phase = .staged,
     report: wire.AttemptReport = .{ .status = .pending },
+    restored_role: ?RestoreRole = null,
 };
 
 pub const UpgradeOwner = struct {
     /// Host lifetime idempotency를 위해 완료 ID를 eviction하지 않는다. 상한에 닿으면 새 실행을 거부해 과거 ID가 다시
     /// 실행되는 것보다 fail-closed한다.
-    const max_completed = 256;
+    const max_completed = limits.max_completed_history;
     const Completed = struct {
         id: u128,
         request_path: []u8,
@@ -215,6 +272,149 @@ pub const UpgradeOwner = struct {
         return self.target_stager.verify(self.target_stager.ctx, attempt.target);
     }
 
+    pub fn runningExecution(self: *const UpgradeOwner, attempt_id: u128) ?Execution {
+        const attempt = self.attempt orelse return null;
+        if (attempt.id != attempt_id or attempt.phase != .running) return null;
+        return .{ .attempt_id = attempt.id, .target = attempt.target };
+    }
+
+    /// Exec를 넘어 active authority와 host-lifetime completed idempotency ledger를 함께 보존한다. runtime_ids는
+    /// caller가 stable sort한 exact graph set이어야 한다. rollback budget은 동일한 primary/backup record에 불변으로 남는다.
+    pub fn encodeRunningRecord(
+        self: *const UpgradeOwner,
+        allocator: std.mem.Allocator,
+        execution: Execution,
+        host_id: u128,
+        epoch_before: u64,
+        runtime_ids: []const u128,
+    ) attempt_record.Error![]u8 {
+        const active = if (self.attempt) |value| value else return error.InvalidValue;
+        if (active.id != execution.attempt_id or active.phase != .running) return error.InvalidValue;
+        var completed_views: [max_completed]attempt_record.CompletedView = undefined;
+        for (self.completed[0..self.completed_count], 0..) |entry, index| {
+            completed_views[index] = .{
+                .attempt_id = entry.id,
+                .request_path = entry.request_path,
+                .build_id = entry.build_id,
+                .sha256 = entry.sha256,
+                .reader_min = entry.reader_min,
+                .reader_max = entry.reader_max,
+                .report = entry.report,
+            };
+        }
+        const expected_epoch = std.math.add(u64, epoch_before, 1) catch return error.InvalidValue;
+        return attempt_record.encode(allocator, .{
+            .host_id = host_id,
+            .attempt_id = active.id,
+            .epoch_before = epoch_before,
+            .expected_epoch_after = expected_epoch,
+            .rollback_budget = 1,
+            .request_path = active.request_path,
+            .staged_path = active.target.artifact.path,
+            .build_id = active.target.build_id,
+            .sha256 = active.target.artifact.sha256,
+            .dev = active.target.artifact.dev,
+            .ino = active.target.artifact.ino,
+            .size = active.target.artifact.size,
+            .reader_min = active.target.reader_min,
+            .reader_max = active.target.reader_max,
+            .runtime_ids = runtime_ids,
+            .completed = completed_views[0..self.completed_count],
+        });
+    }
+
+    pub const RestoreError = error{ NotEmpty, InvalidState, OutOfMemory };
+    pub const RestoreContext = struct {
+        host_id: u128,
+        host_epoch: u64,
+        runtime_ids: []const u128,
+        token: RestoreToken,
+    };
+
+    /// Target/rollback entry가 handoff decode와 inherited target fd 검증을 마친 뒤 owner authority를 원자적으로
+    /// 재구성한다. target pin은 상속하지 않고 기록된 staged path를 다시 열어 검증한다.
+    pub fn restoreRunningRecord(
+        self: *UpgradeOwner,
+        state: attempt_record.State,
+        expected: RestoreContext,
+    ) RestoreError!void {
+        if (self.attempt != null or self.completed_count != 0) return error.NotEmpty;
+        attempt_record.validateDecoded(state) catch return error.InvalidState;
+        if (state.host_id != expected.host_id or
+            expected.token.host_id != state.host_id or
+            expected.token.attempt_id != state.attempt_id or
+            (expected.token.role == .target and expected.token.copy != .primary) or
+            (expected.token.role == .rollback and expected.token.copy != .backup) or
+            state.epoch_before != expected.host_epoch or
+            !std.mem.eql(u128, state.runtime_ids, expected.runtime_ids) or
+            state.rollback_budget != 1)
+            return error.InvalidState;
+        const target = switch (self.target_stager.restore(self.target_stager.ctx, self.allocator, .{
+            .staged_path = state.staged_path,
+            .build_id = state.build_id,
+            .sha256 = state.sha256,
+            .dev = state.dev,
+            .ino = state.ino,
+            .size = state.size,
+            .reader_min = state.reader_min,
+            .reader_max = state.reader_max,
+        })) {
+            .verified => |value| value,
+            .resource_exhausted => return error.OutOfMemory,
+            else => return error.InvalidState,
+        };
+        var target_owned = true;
+        errdefer if (target_owned) {
+            self.allocator.free(target.build_id);
+            var artifact = target.artifact;
+            self.target_stager.release_artifact(self.target_stager.ctx, self.allocator, &artifact);
+        };
+        if (!targetMatchesRecord(target, state) or
+            !self.target_stager.verify(self.target_stager.ctx, target))
+            return error.InvalidState;
+        const request_path = self.allocator.dupe(u8, state.request_path) catch return error.OutOfMemory;
+        errdefer self.allocator.free(request_path);
+
+        var restored: [max_completed]Completed = undefined;
+        var restored_count: usize = 0;
+        errdefer for (restored[0..restored_count]) |entry| {
+            self.allocator.free(entry.request_path);
+            self.allocator.free(entry.build_id);
+        };
+        for (state.completed) |entry| {
+            const completed_path = self.allocator.dupe(u8, entry.request_path) catch return error.OutOfMemory;
+            errdefer self.allocator.free(completed_path);
+            const completed_build = self.allocator.dupe(u8, entry.build_id) catch return error.OutOfMemory;
+            restored[restored_count] = .{
+                .id = entry.attempt_id,
+                .request_path = completed_path,
+                .build_id = completed_build,
+                .sha256 = entry.sha256,
+                .reader_min = entry.reader_min,
+                .reader_max = entry.reader_max,
+                .report = entry.report,
+            };
+            restored_count += 1;
+        }
+        self.attempt = .{
+            .id = state.attempt_id,
+            .request_path = request_path,
+            .target = target,
+            .phase = .running,
+            .restored_role = expected.token.role,
+        };
+        target_owned = false;
+        @memcpy(self.completed[0..restored_count], restored[0..restored_count]);
+        self.completed_count = restored_count;
+    }
+
+    /// Immutable handoff의 rollback budget은 target entry에서만 소비할 수 있다. rollback entry가 다시 실패하면
+    /// 재귀 exec하지 않고 non-retryable로 끝낸다.
+    pub fn rollbackAllowed(self: *const UpgradeOwner) bool {
+        const attempt = self.attempt orelse return false;
+        return attempt.restored_role != .rollback;
+    }
+
     pub fn finish(
         self: *UpgradeOwner,
         attempt_id: u128,
@@ -223,6 +423,11 @@ pub const UpgradeOwner = struct {
         const attempt = if (self.attempt) |*value| value else return false;
         if (attempt.id != attempt_id or attempt.phase != .running) return false;
         if (!wire.validReport(report) or report.status == .pending) return false;
+        if (attempt.restored_role == null and report.status != .resumed) return false;
+        if (attempt.restored_role == .rollback and report.status != .rolled_back) return false;
+        if (attempt.restored_role == .target and
+            report.status != .committed and report.status != .failed_nonretryable)
+            return false;
         std.debug.assert(self.completed_count < max_completed);
         const build_id = attempt.target.build_id;
         const sha256 = attempt.target.artifact.sha256;
@@ -291,15 +496,37 @@ fn completedMatches(completed: UpgradeOwner.Completed, candidate: wire.PrepareRe
         completed.reader_max == candidate.handoff_reader_max;
 }
 
+fn targetMatchesRecord(target: VerifiedTarget, state: attempt_record.State) bool {
+    return std.mem.eql(u8, target.artifact.path, state.staged_path) and
+        std.mem.eql(u8, target.build_id, state.build_id) and
+        std.mem.eql(u8, &target.artifact.sha256, &state.sha256) and
+        target.artifact.dev == state.dev and
+        target.artifact.ino == state.ino and
+        target.artifact.size == state.size and
+        target.reader_min == state.reader_min and
+        target.reader_max == state.reader_max;
+}
+
 fn testRequest(id: u128, path: []const u8) wire.PrepareRequest {
     return .{
         .attempt_id = id,
         .target_path = path,
-        .target_build_id = "sha256:build",
+        .target_build_id = "sha256:abababababababababababababababababababababababababababababababab",
         .target_sha256 = [_]u8{0xAB} ** 32,
         .handoff_reader_min = 1,
         .handoff_reader_max = 1,
     };
+}
+
+fn testRestoreToken(state: attempt_record.State, role: RestoreRole) RestoreToken {
+    var attempt_buf: [32]u8 = undefined;
+    const attempt = std.fmt.bufPrint(&attempt_buf, "{x:0>32}", .{state.attempt_id}) catch unreachable;
+    return validateRestoreEntry(
+        state,
+        @tagName(role),
+        attempt,
+        if (role == .target) .primary else .backup,
+    ) orelse unreachable;
 }
 
 const TestStager = struct {
@@ -307,6 +534,7 @@ const TestStager = struct {
         return .{
             .ctx = @ptrFromInt(1),
             .stage = stage,
+            .restore = restore,
             .release_artifact = releaseArtifact,
             .verify = verify,
         };
@@ -339,6 +567,31 @@ const TestStager = struct {
             .build_id = build_id,
             .reader_min = request.handoff_reader_min,
             .reader_max = request.handoff_reader_max,
+        } };
+    }
+
+    fn restore(
+        _: *anyopaque,
+        allocator: std.mem.Allocator,
+        recorded: RecordedTarget,
+    ) StageDecision {
+        const path = allocator.dupeZ(u8, recorded.staged_path) catch return .resource_exhausted;
+        const build_id = allocator.dupe(u8, recorded.build_id) catch {
+            allocator.free(path);
+            return .resource_exhausted;
+        };
+        return .{ .verified = .{
+            .artifact = .{
+                .path = path,
+                .exec_fd = -1,
+                .sha256 = recorded.sha256,
+                .dev = recorded.dev,
+                .ino = recorded.ino,
+                .size = recorded.size,
+            },
+            .build_id = build_id,
+            .reader_min = recorded.reader_min,
+            .reader_max = recorded.reader_max,
         } };
     }
 
@@ -389,13 +642,13 @@ test "upgrade owner requires reply arm before exactly one execution" {
     const execution = owner.beginExecution(7).?;
     try std.testing.expectEqual(@as(u128, 7), execution.attempt_id);
     try std.testing.expect(owner.beginExecution(7) == null);
-    try std.testing.expect(owner.finish(7, .{ .status = .rolled_back, .reason = .restore_failed }));
+    try std.testing.expect(owner.finish(7, .{ .status = .resumed, .reason = .exec_failed }));
     const report = owner.status(7).?;
-    try std.testing.expectEqual(wire.AttemptStatus.rolled_back, report.status);
-    try std.testing.expectEqual(wire.AttemptReason.restore_failed, report.reason);
+    try std.testing.expectEqual(wire.AttemptStatus.resumed, report.status);
+    try std.testing.expectEqual(wire.AttemptReason.exec_failed, report.reason);
     const replay = owner.stagePending(testRequest(7, "/target"));
     try std.testing.expect(replay == .completed);
-    try std.testing.expectEqual(wire.AttemptStatus.rolled_back, replay.completed.status);
+    try std.testing.expectEqual(wire.AttemptStatus.resumed, replay.completed.status);
     try std.testing.expectEqual(wire.PrepareDecision.conflict, owner.stagePending(testRequest(7, "/other")));
     try std.testing.expectEqual(wire.PrepareDecision.accepted, owner.stagePending(testRequest(8, "/next")));
 }
@@ -428,7 +681,8 @@ test "upgrade owner cancels undelivered staged attempt and rejects invalid statu
     try std.testing.expectEqual(wire.ArmDecision.armed, owner.armAccepted(12));
     _ = owner.beginExecution(12).?;
     try std.testing.expect(!owner.finish(12, .{ .status = .committed, .reason = .restore_failed }));
-    try std.testing.expect(owner.finish(12, .{ .status = .committed }));
+    try std.testing.expect(!owner.finish(12, .{ .status = .committed }));
+    try std.testing.expect(owner.finish(12, .{ .status = .resumed, .reason = .exec_failed }));
 }
 
 test "upgrade owner revalidates the exact staged target before execution" {
@@ -440,4 +694,146 @@ test "upgrade owner revalidates the exact staged target before execution" {
     const report = owner.status(21).?;
     try std.testing.expectEqual(wire.AttemptStatus.resumed, report.status);
     try std.testing.expectEqual(wire.AttemptReason.target_invalid, report.reason);
+}
+
+test "upgrade owner record survives exec and restores active plus completed idempotency authority" {
+    var old = UpgradeOwner.init(std.testing.allocator, TestStager.ops(), null);
+    defer old.deinit();
+    try std.testing.expectEqual(wire.PrepareDecision.accepted, old.stagePending(testRequest(30, "/old")));
+    try std.testing.expectEqual(wire.ArmDecision.armed, old.armAccepted(30));
+    _ = old.beginExecution(30).?;
+    try std.testing.expect(old.finish(30, .{ .status = .resumed, .reason = .exec_failed }));
+    try std.testing.expectEqual(wire.PrepareDecision.accepted, old.stagePending(testRequest(31, "/active")));
+    try std.testing.expectEqual(wire.ArmDecision.armed, old.armAccepted(31));
+    const execution = old.beginExecution(31).?;
+    const bytes = try old.encodeRunningRecord(
+        std.testing.allocator,
+        execution,
+        0xAA,
+        9,
+        &.{ 0xA, 0xB },
+    );
+    defer std.testing.allocator.free(bytes);
+    var state = try attempt_record.decode(std.testing.allocator, bytes);
+    defer state.deinit();
+
+    var restored = UpgradeOwner.init(std.testing.allocator, TestStager.ops(), null);
+    defer restored.deinit();
+    var rejected = UpgradeOwner.init(std.testing.allocator, TestStager.ops(), null);
+    defer rejected.deinit();
+    try std.testing.expectError(error.InvalidState, rejected.restoreRunningRecord(state, .{
+        .host_id = 0xAA,
+        .host_epoch = 8,
+        .runtime_ids = &.{ 0xA, 0xB },
+        .token = testRestoreToken(state, .target),
+    }));
+    try restored.restoreRunningRecord(state, .{
+        .host_id = 0xAA,
+        .host_epoch = 9,
+        .runtime_ids = &.{ 0xA, 0xB },
+        .token = testRestoreToken(state, .target),
+    });
+    try std.testing.expect(restored.rollbackAllowed());
+    try std.testing.expectEqual(wire.AttemptStatus.resumed, restored.status(30).?.status);
+    try std.testing.expectEqual(wire.AttemptStatus.pending, restored.status(31).?.status);
+    try std.testing.expectEqual(wire.PrepareDecision.conflict, restored.stagePending(testRequest(32, "/blocked")));
+    try std.testing.expect(restored.finish(31, .{ .status = .committed }));
+    const replay = restored.stagePending(testRequest(31, "/active"));
+    try std.testing.expect(replay == .completed);
+    try std.testing.expectEqual(wire.AttemptStatus.committed, replay.completed.status);
+}
+
+test "upgrade owner restore allocation failures publish nothing and release owned target" {
+    var old = UpgradeOwner.init(std.testing.allocator, TestStager.ops(), null);
+    defer old.deinit();
+    try std.testing.expectEqual(wire.PrepareDecision.accepted, old.stagePending(testRequest(40, "/old")));
+    try std.testing.expectEqual(wire.ArmDecision.armed, old.armAccepted(40));
+    _ = old.beginExecution(40).?;
+    try std.testing.expect(old.finish(40, .{ .status = .resumed, .reason = .exec_failed }));
+    try std.testing.expectEqual(wire.PrepareDecision.accepted, old.stagePending(testRequest(41, "/active")));
+    try std.testing.expectEqual(wire.ArmDecision.armed, old.armAccepted(41));
+    const execution = old.beginExecution(41).?;
+    const bytes = try old.encodeRunningRecord(std.testing.allocator, execution, 0xAA, 12, &.{0xCC});
+    defer std.testing.allocator.free(bytes);
+    var state = try attempt_record.decode(std.testing.allocator, bytes);
+    defer state.deinit();
+
+    for (0..5) |fail_index| {
+        var failing = std.testing.FailingAllocator.init(
+            std.testing.allocator,
+            .{ .fail_index = fail_index },
+        );
+        var restored = UpgradeOwner.init(failing.allocator(), TestStager.ops(), null);
+        defer restored.deinit();
+        try std.testing.expectError(error.OutOfMemory, restored.restoreRunningRecord(state, .{
+            .host_id = 0xAA,
+            .host_epoch = 12,
+            .runtime_ids = &.{0xCC},
+            .token = testRestoreToken(state, .target),
+        }));
+        try std.testing.expect(restored.attempt == null);
+        try std.testing.expectEqual(@as(usize, 0), restored.completed_count);
+    }
+}
+
+test "upgrade owner immutable handoff allows one target to rollback transition only" {
+    var old = UpgradeOwner.init(std.testing.allocator, TestStager.ops(), null);
+    defer old.deinit();
+    try std.testing.expectEqual(wire.PrepareDecision.accepted, old.stagePending(testRequest(50, "/active")));
+    try std.testing.expectEqual(wire.ArmDecision.armed, old.armAccepted(50));
+    const execution = old.beginExecution(50).?;
+    const bytes = try old.encodeRunningRecord(std.testing.allocator, execution, 0xAA, 20, &.{});
+    defer std.testing.allocator.free(bytes);
+    var state = try attempt_record.decode(std.testing.allocator, bytes);
+    defer state.deinit();
+
+    var target = UpgradeOwner.init(std.testing.allocator, TestStager.ops(), null);
+    defer target.deinit();
+    try std.testing.expect(validateRestoreEntry(
+        state,
+        "target",
+        "00000000000000000000000000000032",
+        .backup,
+    ) == null);
+    try std.testing.expect(validateRestoreEntry(
+        state,
+        "rollback",
+        "00000000000000000000000000000032",
+        .primary,
+    ) == null);
+    const replayed_token = testRestoreToken(state, .target);
+    state.attempt_id = 51;
+    var replay_rejected = UpgradeOwner.init(std.testing.allocator, TestStager.ops(), null);
+    defer replay_rejected.deinit();
+    try std.testing.expectError(error.InvalidState, replay_rejected.restoreRunningRecord(state, .{
+        .host_id = 0xAA,
+        .host_epoch = 20,
+        .runtime_ids = &.{},
+        .token = replayed_token,
+    }));
+    state.attempt_id = 50;
+    try target.restoreRunningRecord(state, .{
+        .host_id = 0xAA,
+        .host_epoch = 20,
+        .runtime_ids = &.{},
+        .token = testRestoreToken(state, .target),
+    });
+    try std.testing.expect(target.rollbackAllowed());
+    try std.testing.expect(!target.finish(50, .{ .status = .rolled_back, .reason = .restore_failed }));
+
+    var rollback = UpgradeOwner.init(std.testing.allocator, TestStager.ops(), null);
+    defer rollback.deinit();
+    try rollback.restoreRunningRecord(state, .{
+        .host_id = 0xAA,
+        .host_epoch = 20,
+        .runtime_ids = &.{},
+        .token = testRestoreToken(state, .rollback),
+    });
+    try std.testing.expect(!rollback.rollbackAllowed());
+    try std.testing.expect(!rollback.finish(50, .{ .status = .committed }));
+    try std.testing.expect(rollback.finish(50, .{ .status = .rolled_back, .reason = .restore_failed }));
+    try std.testing.expectEqual(wire.PrepareDecision.accepted, rollback.stagePending(testRequest(51, "/next")));
+    try std.testing.expectEqual(wire.ArmDecision.armed, rollback.armAccepted(51));
+    _ = rollback.beginExecution(51).?;
+    try std.testing.expect(rollback.rollbackAllowed());
 }

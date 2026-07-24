@@ -5,8 +5,9 @@
 [영속 터미널 세션 호스트](persistent-session-host.md), workspace의 `runtime-handle` 저장은
 [Workspace Restore](workspace-restore.md), 화면 전송 codec은 `maru.screen-stream` 계약을 따른다.
 
-> **상태: U0 완료, U1 codec·U2 quiesce 핵심 구현과 U3 same-PID exec·rollback 검증 행렬 구현 중.
-> U1/U2의 §11 전체 종료 gate는 아직 열려 있고 제품 업그레이드는 비활성이다.**
+> **상태: U0 완료, U1 codec·U2 quiesce 핵심과 U3/U4 fixture·adapter 기반, U5 target/attempt
+> authority·durable handoff store component를 구현했다. U1~U4의 §11 전체 종료 gate와 U5 제품 daemon
+> coordinator·signed update gate는 아직 열려 있고 제품 업그레이드는 비활성이다.**
 > 현재 살아 있는 host가 `host_exec_upgrade_v1`을 광고하지 않으면 새 앱은 그 host를 실행 중 교체할 수 없다.
 > 이 경우 지원하는 N-1 MRSH adapter로 attach해 기존 runtime을 그대로 쓰거나, attachment가 모두 끝난 뒤 구 host를
 > 계속 drain한다. **attachment가 0이어도 runtime이 하나라도 살아 있으면 구 host를 종료하지 않으며, runtime count가
@@ -95,10 +96,13 @@ host.upgrade.prepare {
 `attempt_id`는 client가 생성하는 opaque 128-bit idempotency key이며 순서 의미가 없다. host의 성공한 교체 횟수는
 별도 monotonic `upgrade_epoch`가 소유한다.
 
-host는 target path를 검증만 하고 나중에 다시 열지 않는다. no-follow로 연 fd의 type/UID를 확인하고 owner-only attempt
-directory에 `O_EXCL`로 복사·sync·rename·directory sync한 **staged target inode**의 hash/build identity를 검증한 뒤
-그 image만 실행한다. exec 직전 staged inode/path identity를 다시 확인하며 validation→exec 사이 target swap
-failure injection을 둔다.
+host는 **요청 source path**를 처음 staging 뒤 다시 실행 권위로 사용하지 않는다. no-follow로 연 fd의 type/UID를
+확인하고 owner-only attempt directory에 `O_EXCL`로 복사·sync·rename·directory sync한 **staged target inode**의
+hash/build identity를 검증한다. staged image는 현재 release executable과 모두 strict codesign 검증을 통과하고
+Apple certificate/team을 포함한 designated requirement가 exact match해야 한다. exec 직전 staged inode/path
+identity를 다시 확인한다. macOS 공개 API에는 `fexecve`/`execveat`가 없으므로 실제 `exec`는 staged pathname을
+사용한다. 따라서 같은 UID의 다른 process는 v1 local trust boundary 안에 두며, path 교체가 주입되면 target entry가
+recorded hash/dev/inode 불일치로 commit하지 않고 rollback한다. 이를 “FD가 실행 image 자체를 고정한다”고 표현하지 않는다.
 
 성공 응답은 `{attempt_id,state:"accepted"}`이고 반드시 `reply_and_close`로 client에 전량 쓴 뒤 request fd를 닫는다.
 실제 quiesce/exec는 connection handler가 아니라 daemon-owned pending attempt가 fd close를 관측한 뒤 시작한다.
@@ -131,6 +135,16 @@ failure injection을 둔다.
   staged-old rollback은 backup fd를 읽는다. crash면 kernel close가 secret-bearing inode 둘을 회수한다. argv/env에는
   fd slot과 attempt ID만 싣고 terminal bytes/cwd는 싣지 않는다. disk preflight는 logical handoff cap의 2배와
   staged binaries를 포함한다.
+- attempt record는 `host_id`, opaque `attempt_id`, writer/next epoch, exact sorted runtime ID 집합, staged target
+  path/build/hash/dev/inode/size/reader 범위, completed idempotency ledger와 immutable `rollback_budget=1`을 가진다.
+  primary/backup은 같은 bytes이며 소비 횟수를 서로 다르게 저장하지 않는다. target entry는 exact attempt argv와
+  primary role, rollback entry는 같은 attempt argv와 backup role을 함께 검증해 restore token을 발급한다. rollback
+  token으로 복원한 attempt는 다시 rollback할 수 없고 `rolled_back` 외 terminal report를 기록할 수 없다. 이 token의
+  실제 FD provenance는 제품 bootstrap이 inherited allowlist의 고정 slot→copy mapping을 검증한 같은 함수 안에서
+  decode·발급·restore를 이어야 닫히며, 그 배선 전에는 component-only gate다.
+- target/rollback entry는 inherited target fd를 받지 않는다. exact inherited allowlist를 검증한 뒤 owner-only
+  staged pathname을 `O_RDONLY|O_CLOEXEC|O_NOFOLLOW`로 다시 열고 record의 dev/inode/size/hash와 대조해 cleanup pin을
+  재구축한다. 이 pin은 exec allowlist 바깥이며 이후 pathname 교체를 commit 전에 다시 거부하는 용도다.
 - 성공 commit 뒤 staged target을 **새 current rollback self-image로 atomic promote**하고 directory sync한다.
   그 성공 뒤에만 이전 self-image를 삭제한다. promotion 실패면 새 host는 계속 serve하지만
   `host_exec_upgrade_v1` 광고를 즉시 내리고 다음 live upgrade를 금지한다. rollback self-image는 host lifetime
@@ -216,9 +230,13 @@ in-flight 상태를 명시적 owned transfer state로 옮긴 뒤 다음 barrier�
 7. core lock을 얻어 logical state를 encode한다.
 8. PTY kernel buffer에 아직 읽지 않은 output은 그대로 둔다.
 
-admission close부터 old-reader read-back, 두 handoff sync, target preflight, exec 직전까지의 **전체 pause hard
-deadline은 5,000ms**다. 어느 하위 단계든 남은 예산 안에 끝나지 않으면 exec하지 않고 reader/admission을 재개한다.
-이 예산을 넘는 큰 runtime state는 8 GiB hard cap 안이더라도 live upgrade 대상이 아니며 side-by-side drain을 쓴다.
+admission close부터 old-reader read-back, 두 handoff sync, target preflight, exec 직전까지의 **전체 pause
+cooperative deadline budget은 5,000ms**다. 어느 하위 단계든 남은 예산 안에 끝나지 않으면 exec하지 않고
+reader/admission을 재개한다.
+handoff store API는 absolute deadline을 필수로 받고 decode 전후, 두 copy의 preallocation/write/fsync/read-back,
+최종 directory sync 뒤까지 expiry를 검사한다. 다만 blocking `F_PREALLOCATE`/`fsync` syscall 자체를 선점하지는
+못하므로 제품 coordinator는 quiesce 전에 I/O budget을 보수적으로 admission해야 한다. 이 예산을 넘는 큰 runtime
+state는 8 GiB codec hard cap 안이더라도 live upgrade 대상이 아니며 side-by-side drain을 쓴다.
 
 이 순서에서 upgrade snapshot 시점은 “모든 admitted outbound가 PTY에 적용됐고, 마지막 read chunk가 core에 적용된 직후”다.
 새 binary는 같은 fd에서 다음 unread byte부터 시작한다. 화면 generation은 보존하고 restore 뒤 첫 client에는 full snapshot을
@@ -235,6 +253,7 @@ runtime을 adopt하지 않고 전체 attempt를 `state_too_large`로 취소해 s
 | --- | ---: |
 | runtime count | 256 |
 | total handoff bytes | 8 GiB |
+| live durable two-copy commit | 64 MiB |
 | runtime section | 1 GiB |
 | 단일 TLV/blob | 512 MiB |
 | grid `cols × rows` / decoded cell count | 16,777,216 |
@@ -248,6 +267,8 @@ runtime을 adopt하지 않고 전체 attempt를 `state_too_large`로 취소해 s
 | kitty placement count | core의 1,024 |
 
 codec은 envelope/section/TLV declared length뿐 아니라 decoded entry count와 aggregate bytes도 독립적으로 검사한다.
+8 GiB는 malformed input을 막는 codec 방어 cap이다. 실제 live upgrade store는 64 MiB를 무조건 적용하고 primary와
+backup 각각 `F_PREALLOCATE(F_ALLOCATEALL)`로 exact space를 확보한다. 64 MiB를 넘으면 side-by-side drain을 쓴다.
 cap과 cap+1, `count × element_size` overflow, section 합계 overflow, allocation OOM-before-mutation을 fixture로 고정한다.
 
 ### 반드시 직렬화하는 상태
@@ -370,7 +391,7 @@ absolute identity만** 기록하고 target의 page layout을 새로 만든다. s
 - quiesce 성공·deadline·queue full·continuous output·response pending 실패 주입에서 byte 순서와 재개를 검증한다.
 - 아직 `exec`하지 않고 같은 process에서 quiesce→encode→resume한다.
 - **구현됨:** socket frame admission gate, attachment/lifecycle 재검사, reader-owned response state,
-  비파괴 pause/join/resume, GUI attachment 0의 owner event drain, 5초 hard-deadline coordinator를 연결했다.
+  비파괴 pause/join/resume, GUI attachment 0의 owner event drain, 5초 cooperative-deadline coordinator를 연결했다.
   실제 PTY에서 같은 child PID/master fd 유지, continuous output, deadline rollback과 encode→resume를 검증한다.
 
 ### U3 — test-only 단일 runtime exec
@@ -421,6 +442,13 @@ absolute identity만** 기록하고 target의 page layout을 새로 만든다. s
 - `host_exec_upgrade_v1`과 `host.upgrade.prepare`를 광고한다.
 - 앱 재실행 connect 경로가 upgrade 가능/호환 attach/upgrade busy/legacy 불가를 구분해 notice와 구조화 로그를 남긴다.
 - signed app update 전후 E2E와 soak가 통과한 뒤에만 자동 upgrade를 기본 활성화한다.
+- **구현된 component seam:** attempt-key exclusive target staging, strict same-release codesign authorizer,
+  accepted/armed/running/terminal idempotency owner, exec를 넘는 checksummed attempt record, host/epoch/next-handle/live
+  runtime/target identity 교차검증, descriptor-relative primary/backup commit, 64 MiB operational cap, exact disk
+  preallocation, mandatory deadline, unlink-before-exec FD pair와 target/rollback restore role token을 자동 검증한다.
+- **아직 미구현인 제품 경계:** daemon의 prepare→quiesce→store→FD slot→exec→restore→manifest promotion coordinator,
+  별도 staged-target reader preflight, signed frozen N-1 app artifact, 실제 update/soak, product capability 광고다.
+  이 경계가 닫히기 전에는 U5 완료나 사용자-visible migration을 주장하지 않는다.
 
 U0~U4가 끝나기 전에는 “구 host session이 새 host로 migration된다”고 제품/PR에 쓰지 않는다.
 

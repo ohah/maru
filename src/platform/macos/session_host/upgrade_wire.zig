@@ -4,9 +4,10 @@
 //! 필요한 문자열을 복사해야 한다. 실제 quiesce/exec는 reply-and-close 뒤 daemon loop가 pending attempt를 take한 후다.
 
 const std = @import("std");
+const limits = @import("upgrade_limits.zig");
 
-pub const max_target_path_bytes: usize = 1024;
-pub const max_build_id_bytes: usize = 128;
+pub const max_target_path_bytes = limits.max_target_path_bytes;
+pub const max_build_id_bytes = limits.max_build_id_bytes;
 
 pub const PrepareRequest = struct {
     attempt_id: u128,

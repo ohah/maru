@@ -6,7 +6,7 @@ const upgrade_coordinator = @import("upgrade_coordinator.zig");
 
 extern "c" fn usleep(usec: c_uint) c_int;
 
-pub const hard_deadline_ms: u64 = 5_000;
+pub const deadline_budget_ms: u64 = 5_000;
 
 pub const Error = runtime_manager.RuntimeManager.QuiesceError ||
     @import("handoff_codec.zig").Error ||
@@ -152,7 +152,7 @@ test "U2 coordinator returns a validated host artifact and explicit resume resto
     defer ops.terminate(ops.ctx, rid);
     var gate = upgrade_coordinator.AdmissionGate.init(std.testing.io);
 
-    var quiesced = try begin(std.testing.allocator, std.testing.io, &manager, &gate, 0xAA, 7, 40, hard_deadline_ms);
+    var quiesced = try begin(std.testing.allocator, std.testing.io, &manager, &gate, 0xAA, 7, 40, deadline_budget_ms);
     var decoded = try codec.decodeHost(std.testing.allocator, quiesced.bytes);
     defer decoded.deinit();
     try std.testing.expectEqual(@as(u128, 0xAA), decoded.host_id);

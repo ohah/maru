@@ -141,56 +141,61 @@ const LoadedExact = struct {
 /// 채택하기 전의 rollback-safe token. `discard`는 메모리만 해제하고 disk
 /// manifest를 유지해 rollback image가 같은 authority를 이어받을 수 있다.
 pub const PreparedAdoption = struct {
-    const Payload = struct {
-        publication: Published,
-        manifest: Manifest,
-    };
+    pub const State = enum { prepared, validated, active, dead };
 
-    payload: ?Payload,
+    publication: Published,
+    manifest: Manifest,
+    state: State = .prepared,
 
-    pub const Adopted = struct {
-        publication: Published,
-        manifest: Manifest,
-
-        pub fn deinit(self: *Adopted) void {
-            self.publication.deinit();
-            self.manifest.deinit();
-            self.* = undefined;
-        }
-    };
-
-    pub fn descriptor(self: *const PreparedAdoption) Descriptor {
-        return self.payload.?.manifest.descriptor();
+    pub fn descriptor(self: *const PreparedAdoption) Error!Descriptor {
+        if (self.state != .prepared and self.state != .validated)
+            return error.InvalidManifest;
+        return self.manifest.descriptor();
     }
 
-    pub fn revalidate(self: *const PreparedAdoption, session_dir: [:0]const u8) Error!void {
-        const payload = self.payload orelse return error.InvalidManifest;
+    pub fn revalidate(self: *PreparedAdoption, session_dir: [:0]const u8) Error!void {
+        if (self.state != .prepared) return error.InvalidManifest;
         var actual = try loadExact(
-            payload.manifest.allocator,
+            self.manifest.allocator,
             session_dir,
-            payload.manifest.host_id,
+            self.manifest.host_id,
         );
         defer actual.manifest.deinit();
-        if (actual.identity.dev != payload.publication.identity.dev or
-            actual.identity.ino != payload.publication.identity.ino or
-            !sameDescriptor(actual.manifest.descriptor(), payload.manifest.descriptor()))
+        if (actual.identity.dev != self.publication.identity.dev or
+            actual.identity.ino != self.publication.identity.ino or
+            !sameDescriptor(actual.manifest.descriptor(), self.manifest.descriptor()))
             return error.InvalidManifest;
+        self.state = .validated;
     }
 
-    pub fn commit(self: *PreparedAdoption) Error!Adopted {
-        const payload = self.payload orelse return error.InvalidManifest;
-        self.payload = null;
-        return .{
-            .publication = payload.publication,
-            .manifest = payload.manifest,
-        };
+    /// HostAuthority의 prepared allocation이 끝난 뒤 final stable address에서
+    /// 호출한다. 활성화 뒤 publication은 이 struct 안에서 다시 이동하지 않는다.
+    pub fn activatePublication(self: *PreparedAdoption) Error!*Published {
+        if (self.state != .validated) return error.InvalidManifest;
+        self.state = .active;
+        return &self.publication;
     }
 
     pub fn discard(self: *PreparedAdoption) void {
-        var payload = self.payload orelse return;
-        self.payload = null;
-        payload.publication.deinitMemory();
-        payload.manifest.deinit();
+        if (self.state != .prepared and self.state != .validated) return;
+        self.publication.deinitMemory();
+        self.manifest.deinit();
+        self.state = .dead;
+    }
+
+    pub fn deinit(self: *PreparedAdoption) void {
+        switch (self.state) {
+            .prepared, .validated => {
+                self.publication.deinitMemory();
+                self.manifest.deinit();
+            },
+            .active => {
+                self.publication.deinit();
+                self.manifest.deinit();
+            },
+            .dead => return,
+        }
+        self.state = .dead;
     }
 };
 
@@ -301,16 +306,14 @@ pub fn prepareAdoptRestoring(
     errdefer allocator.free(owned_host_dir);
     const owned_manifest = allocator.dupeZ(u8, manifest_path) catch return error.OutOfMemory;
     return .{
-        .payload = .{
-            .publication = .{
-                .allocator = allocator,
-                .hosts_root = owned_hosts_root,
-                .host_dir = owned_host_dir,
-                .manifest_path = owned_manifest,
-                .identity = loaded.identity,
-            },
-            .manifest = loaded.manifest,
+        .publication = .{
+            .allocator = allocator,
+            .hosts_root = owned_hosts_root,
+            .host_dir = owned_host_dir,
+            .manifest_path = owned_manifest,
+            .identity = loaded.identity,
         },
+        .manifest = loaded.manifest,
     };
 }
 
@@ -834,10 +837,10 @@ test "host manifest restoring adoption discard preserves disk and commit transfe
     // Same-PID exec loses the old Published value without withdrawing disk.
     // Mirror that ownership move explicitly in the process-local test.
     published.deinitMemory();
-    var adopted = try prepared.commit();
-    defer adopted.deinit();
-    try std.testing.expectEqual(Lifecycle.restoring, adopted.manifest.lifecycle);
-    try std.testing.expectError(error.InvalidManifest, prepared.commit());
+    _ = try prepared.activatePublication();
+    defer prepared.deinit();
+    try std.testing.expectEqual(Lifecycle.restoring, prepared.manifest.lifecycle);
+    try std.testing.expectError(error.InvalidManifest, prepared.activatePublication());
 }
 
 test "host manifest initial publish is exclusive and old owner cleanup cannot unlink a replacement generation" {

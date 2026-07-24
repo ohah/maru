@@ -529,6 +529,8 @@ pub const socket_server_groups = [_]Group{
             "listen_fd",
             "server_uid",
             "socket_path",
+            "socket_dev",
+            "socket_ino",
             "allocator",
             "registry",
             "runtime_ops",

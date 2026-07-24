@@ -46,6 +46,40 @@ pub const OwnerLease = struct {
         return .{ .fd = duped, .identity = try identityForFd(duped) };
     }
 
+    pub fn validateInheritedExact(
+        slot: c.fd_t,
+        path: [:0]const u8,
+    ) Error!void {
+        try validate(slot);
+        const raw_flags = c.fcntl(slot, c.F.GETFL, @as(c_int, 0));
+        if (raw_flags < 0) return error.InvalidOwnerFile;
+        const open_flags: c.O = @bitCast(@as(u32, @intCast(raw_flags)));
+        if (open_flags.ACCMODE != .RDWR) return error.InvalidOwnerFile;
+        const slot_identity = try identityForFd(slot);
+        const path_identity = identityForPath(path) catch
+            return error.InvalidOwnerFile;
+        if (!sameIdentity(slot_identity, path_identity))
+            return error.InvalidOwnerFile;
+        if (c.flock(slot, c.LOCK.EX | c.LOCK.NB) != 0)
+            return error.AlreadyOwned;
+    }
+
+    pub fn adoptInheritedExact(
+        slot: c.fd_t,
+        path: [:0]const u8,
+    ) Error!OwnerLease {
+        try validateInheritedExact(slot, path);
+        const duped = c.fcntl(slot, c.F.DUPFD_CLOEXEC, @as(c_int, 3));
+        if (duped < 0) return error.FcntlFailed;
+        errdefer _ = c.close(duped);
+        const result = OwnerLease{
+            .fd = duped,
+            .identity = try identityForFd(duped),
+        };
+        try result.revalidatePath(path);
+        return result;
+    }
+
     pub fn deinit(self: *OwnerLease) void {
         if (self.fd >= 0) _ = c.close(self.fd);
         self.fd = -1;
@@ -53,6 +87,18 @@ pub const OwnerLease = struct {
 
     pub fn descriptor(self: *const OwnerLease) c.fd_t {
         return self.fd;
+    }
+
+    /// Durable manifest commit 직전 owner pathname이 inherited lock과 같은
+    /// exact object인지 다시 확인한다. replacement/삭제는 rollback 가능한
+    /// precommit 오류로 처리한다.
+    pub fn revalidatePath(self: *const OwnerLease, path: [:0]const u8) Error!void {
+        try validate(self.fd);
+        const fd_identity = try identityForFd(self.fd);
+        const path_identity = identityForPath(path) catch return error.InvalidOwnerFile;
+        if (!sameIdentity(fd_identity, self.identity) or
+            !sameIdentity(path_identity, self.identity))
+            return error.InvalidOwnerFile;
     }
 
     /// Lifetime lock을 잡은 동안에만 호출한다. 경로가 다른 inode로 교체됐으면 replacement를 지우지 않는다.
@@ -83,13 +129,13 @@ pub const OwnerLease = struct {
         if (flags < 0) return error.InvalidOwnerFile;
         var stat: posix.Stat = undefined;
         if (c.fstat(fd, &stat) != 0 or !posix.S.ISREG(stat.mode) or stat.uid != c.getuid() or
-            stat.mode & 0o077 != 0) return error.InvalidOwnerFile;
+            stat.mode & 0o777 != 0o600) return error.InvalidOwnerFile;
     }
 
     fn identityForFd(fd: c.fd_t) Error!Identity {
         var stat: posix.Stat = undefined;
         if (c.fstat(fd, &stat) != 0 or !posix.S.ISREG(stat.mode) or stat.uid != c.getuid() or
-            stat.mode & 0o077 != 0) return error.InvalidOwnerFile;
+            stat.mode & 0o777 != 0o600) return error.InvalidOwnerFile;
         return .{ .dev = stat.dev, .ino = stat.ino };
     }
 
@@ -97,7 +143,8 @@ pub const OwnerLease = struct {
         var stat: posix.Stat = undefined;
         if (c.fstatat(posix.AT.FDCWD, path.ptr, &stat, posix.AT.SYMLINK_NOFOLLOW) != 0)
             return error.OpenFailed;
-        if (!posix.S.ISREG(stat.mode) or stat.uid != c.getuid() or stat.mode & 0o077 != 0)
+        if (!posix.S.ISREG(stat.mode) or stat.uid != c.getuid() or
+            stat.mode & 0o777 != 0o600)
             return error.InvalidOwnerFile;
         return .{ .dev = stat.dev, .ino = stat.ino };
     }
@@ -126,6 +173,7 @@ test "owner lease remains exclusive through inherited-slot adoption" {
     _ = c.close(slot);
     slots.len = 0;
     original.deinit();
+    try adopted.revalidatePath(path);
     try std.testing.expectError(error.AlreadyOwned, OwnerLease.acquire(path));
     adopted.deinit();
     var replacement = try OwnerLease.acquire(path);

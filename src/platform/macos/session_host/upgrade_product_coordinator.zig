@@ -159,13 +159,14 @@ fn processArmedWithDeadline(
     var runtime_id_buf: [upgrade_limits.max_runtime_count]u128 = undefined;
     const runtime_ids = capture.sortedRuntimeIds(&runtime_id_buf);
     const next_handle = capture.next_handle;
-    const record = ctx.owner.encodeRunningRecord(
+    const record = ctx.owner.encodeRunningRecordWithDeadline(
         ctx.allocator,
         execution,
         authority.host_id,
         authority.upgrade_epoch,
         ctx.rollback_image.record(),
         runtime_ids,
+        deadline.expiresAtNs(),
     ) catch return resumeAndFinish(ctx, &frozen, attempt_id, .{
         .status = .resumed,
         .reason = .handoff_failed,

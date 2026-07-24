@@ -264,7 +264,11 @@ pub const RemoteScreen = struct {
     const source_vtable = ScreenSource.VTable{ .render_snapshot = srcRenderSnapshot, .lock = srcLock, .unlock = srcUnlock };
 
     pub fn init(allocator: std.mem.Allocator) error{OutOfMemory}!RemoteScreen {
-        var assembler = screen_assembler.ScreenAssembler.init(allocator);
+        return initForCodec(allocator, screen_stream.codec_version);
+    }
+
+    pub fn initForCodec(allocator: std.mem.Allocator, expected_codec_version: u16) error{OutOfMemory}!RemoteScreen {
+        var assembler = screen_assembler.ScreenAssembler.initForCodec(allocator, expected_codec_version);
         errdefer assembler.deinit();
         const grid = try build(allocator, &assembler); // 빈 조립기 → 0x0 격자.
         return .{ .allocator = allocator, .assembler = assembler, .grid = grid };

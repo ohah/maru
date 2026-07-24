@@ -564,8 +564,9 @@ test "processing reader pauses without closing child or queues and resumes at th
         surface.lockCore(std.testing.io);
         const dump = try surface.core.dumpUtf8(allocator);
         surface.unlockCore(std.testing.io);
-        defer allocator.free(dump);
-        if (std.mem.indexOf(u8, dump, "after:go") != null) {
+        const contains_after = std.mem.indexOf(u8, dump, "after:go") != null;
+        allocator.free(dump);
+        if (contains_after) {
             saw_after = true;
             break;
         }
@@ -588,7 +589,7 @@ test "upgrade pause drains query response, input fence, and core command in exac
         .command = "/bin/sh",
         .args = &.{
             "-c",
-            "stty raw -echo; printf '\\033[6n'; IFS= read -r line; printf '%s' \"$line\" | od -An -tx1; sleep 5",
+            "stty raw -echo; printf '\\033[?1004h\\033[6n'; IFS= read -r line; printf '%s' \"$line\" | od -An -tx1 | tr -d ' \\n'; printf '\\r\\n'; sleep 5",
         },
         .size = .{ .cols = 40, .rows = 4 },
     }, 1);
@@ -598,11 +599,17 @@ test "upgrade pause drains query response, input fence, and core command in exac
 
     // CPR 응답이 먼저 나가고, producer가 넣은 prefix, 그 input fence 뒤 focus response, suffix가 이어져야 한다.
     // capacity=1 render queue는 첫 output signal로 포화되지만 coalescing 신호라 reader/pause를 막지 않는다.
+    // attach 직후 producer와 reader를 경주시켜서는 "query가 먼저 admission됐다"는 전제가 없다. 초기 output
+    // signal이 queue를 채울 때까지 기다리면 query parse+response flush iteration이 끝났고, 아래 세 producer
+    // 항목은 그 뒤의 정확한 FIFO가 된다.
+    var attempts: usize = 0;
+    while (attempts < 5000 and live.queue.count() == 0) : (attempts += 1) _ = usleep(1000);
+    try std.testing.expectEqual(@as(usize, 1), live.queue.count());
     try io.writeInput("ABC");
     try io.enqueue_command.?(io.ctx, .{ .report_focus = true });
     try io.writeInput("DEF\n");
     try live.requestUpgradePause();
-    var attempts: usize = 0;
+    attempts = 0;
     while (attempts < 5000 and !live.upgradePauseReached()) : (attempts += 1) _ = usleep(1000);
     try std.testing.expect(live.upgradePauseReached());
     try std.testing.expect(live.joinUpgradePause());
@@ -623,12 +630,12 @@ test "upgrade pause drains query response, input fence, and core command in exac
         surface.lockCore(std.testing.io);
         const dump = try surface.core.dumpUtf8(allocator);
         surface.unlockCore(std.testing.io);
-        defer allocator.free(dump);
         ordered = std.mem.indexOf(
             u8,
             dump,
-            "1b 5b 31 3b 31 52 41 42 43 1b 5b 49 44 45 46",
+            "1b5b313b31524142431b5b49444546",
         ) != null;
+        allocator.free(dump);
         if (!ordered) _ = usleep(1000);
     }
     try std.testing.expect(ordered);

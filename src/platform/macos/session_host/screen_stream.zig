@@ -1,4 +1,4 @@
-//! `maru.screen-stream.v1` — session-host의 화면 snapshot/delta record codec(§12).
+//! `maru.screen-stream` — session-host의 화면 snapshot/delta record codec(§12).
 //!
 //! `snapshot_chunk`/`delta_chunk`(MRSH kind 6/7)의 payload는 native struct memory dump가 **아니라** 이 파일의
 //! versioned record codec이다. renderer의 `RenderSnapshot`이나 debug용 `maru.snapshot.v3`을 그대로 IPC ABI로 쓰지
@@ -11,7 +11,8 @@
 //! 미러다. 순수 OS-중립 codec(platform import 0)이라 non-macOS에서 wire 회귀를 고정한다.
 //!
 //! record 하나 = **28-byte record header + record body**:
-//!   codec_version:u16=1 | record_kind:u16 | generation:u64 | sequence:u64 | chunk_index:u32 | chunk_count:u32
+//!   codec_version:u16=2(current; capability-tagged frozen N-1은 1) | record_kind:u16 |
+//!   generation:u64 | sequence:u64 | chunk_index:u32 | chunk_count:u32
 //!   = 2 + 2 + 8 + 8 + 4 + 4 = 28.
 //! snapshot record는 `sequence=0`과 한 generation, delta record는 body에 `base_generation`을 더하고 sequence를 1씩
 //! 올린다(§12). chunk_index는 0부터 연속이고 마지막 chunk의 count가 맞아야 상위가 publish한다.
@@ -243,6 +244,12 @@ pub const RecordHeader = struct {
             .chunk_count = std.mem.readInt(u32, bytes[24..28], .big),
         };
     }
+
+    pub fn decodeExact(bytes: *const [record_header_size]u8, expected_version: u16) DecodeError!RecordHeader {
+        const decoded = try decode(bytes);
+        if (decoded.version != expected_version) return error.BadCodecVersion;
+        return decoded;
+    }
 };
 
 pub const DecodeError = error{
@@ -305,6 +312,12 @@ pub const RecordStream = struct {
     pub fn split(record: []const u8) DecodeError!struct { header: RecordHeader, body: []const u8 } {
         if (record.len < record_header_size) return error.Truncated;
         const header = try RecordHeader.decode(record[0..record_header_size]);
+        return .{ .header = header, .body = record[record_header_size..] };
+    }
+
+    pub fn splitExact(record: []const u8, expected_version: u16) DecodeError!struct { header: RecordHeader, body: []const u8 } {
+        if (record.len < record_header_size) return error.Truncated;
+        const header = try RecordHeader.decodeExact(record[0..record_header_size], expected_version);
         return .{ .header = header, .body = record[record_header_size..] };
     }
 };
@@ -458,7 +471,7 @@ pub fn encodeScreenMeta(allocator: std.mem.Allocator, header: RecordHeader, meta
     try w.u8v(meta.active_screen);
     try w.cursor(meta.cursor);
     try w.u32v(meta.modes);
-    return finishRecord(allocator, .{ .kind = .screen_meta, .generation = header.generation, .sequence = header.sequence, .chunk_index = header.chunk_index, .chunk_count = header.chunk_count }, body.items);
+    return finishRecord(allocator, .{ .kind = .screen_meta, .generation = header.generation, .version = header.version, .sequence = header.sequence, .chunk_index = header.chunk_index, .chunk_count = header.chunk_count }, body.items);
 }
 
 pub fn decodeScreenMeta(body: []const u8) DecodeError!ScreenMeta {
@@ -480,7 +493,7 @@ pub fn encodeRow(allocator: std.mem.Allocator, header: RecordHeader, row: Row) D
     try w.u16v(row.row_index);
     try w.u32v(@intCast(row.runs.len));
     for (row.runs) |rn| try w.run(rn);
-    return finishRecord(allocator, .{ .kind = .row, .generation = header.generation, .sequence = header.sequence, .chunk_index = header.chunk_index, .chunk_count = header.chunk_count }, body.items);
+    return finishRecord(allocator, .{ .kind = .row, .generation = header.generation, .version = header.version, .sequence = header.sequence, .chunk_index = header.chunk_index, .chunk_count = header.chunk_count }, body.items);
 }
 
 /// row body를 decode한다. `runs`는 allocator 소유(caller가 `Row.deinit`). run 수 cap과 UTF-8을 검증한다.
@@ -524,7 +537,7 @@ pub fn encodeImagePlacement(allocator: std.mem.Allocator, header: RecordHeader, 
     try w.u32v(p.columns);
     try w.u32v(p.rows);
     try w.i32v(p.z);
-    return finishRecord(allocator, .{ .kind = header.kind, .generation = header.generation, .sequence = header.sequence, .chunk_index = header.chunk_index, .chunk_count = header.chunk_count }, body.items);
+    return finishRecord(allocator, .{ .kind = header.kind, .generation = header.generation, .version = header.version, .sequence = header.sequence, .chunk_index = header.chunk_index, .chunk_count = header.chunk_count }, body.items);
 }
 
 pub fn decodeImagePlacement(body: []const u8) DecodeError!ImagePlacement {
@@ -559,7 +572,7 @@ pub fn encodeImageBlob(allocator: std.mem.Allocator, header: RecordHeader, blob:
     if (blob.pixels.len > max_image_blob) return error.LengthOverflow; // 청크당 cap(1 MiB) — 초과 이미지는 caller가 청크한다
     try w.u32v(@intCast(blob.pixels.len));
     body.appendSlice(allocator, blob.pixels) catch return error.OutOfMemory;
-    return finishRecord(allocator, .{ .kind = .image_blob, .generation = header.generation, .sequence = header.sequence, .chunk_index = header.chunk_index, .chunk_count = header.chunk_count }, body.items);
+    return finishRecord(allocator, .{ .kind = .image_blob, .generation = header.generation, .version = header.version, .sequence = header.sequence, .chunk_index = header.chunk_index, .chunk_count = header.chunk_count }, body.items);
 }
 
 pub fn decodeImageBlob(body: []const u8) DecodeError!ImageBlob {
@@ -584,7 +597,7 @@ pub fn encodePromptMarks(allocator: std.mem.Allocator, header: RecordHeader, pm:
         try w.u8v(if (r.exit != null) 1 else 0);
         try w.u16v(@bitCast(r.exit orelse 0)); // i16→u16 bitcast(has_exit=0이면 값 무의미).
     }
-    return finishRecord(allocator, .{ .kind = .prompt_marks, .generation = header.generation, .sequence = header.sequence, .chunk_index = header.chunk_index, .chunk_count = header.chunk_count }, body.items);
+    return finishRecord(allocator, .{ .kind = .prompt_marks, .generation = header.generation, .version = header.version, .sequence = header.sequence, .chunk_index = header.chunk_index, .chunk_count = header.chunk_count }, body.items);
 }
 
 pub fn decodePromptMarks(allocator: std.mem.Allocator, body: []const u8) DecodeError!PromptMarks {
@@ -625,7 +638,7 @@ pub fn encodeSetRuns(allocator: std.mem.Allocator, header: RecordHeader, op: Set
     try w.u16v(op.start_col);
     try w.u32v(@intCast(op.runs.len));
     for (op.runs) |rn| try w.run(rn);
-    return finishRecord(allocator, .{ .kind = .set_runs, .generation = header.generation, .sequence = header.sequence, .chunk_index = header.chunk_index, .chunk_count = header.chunk_count }, body.items);
+    return finishRecord(allocator, .{ .kind = .set_runs, .generation = header.generation, .version = header.version, .sequence = header.sequence, .chunk_index = header.chunk_index, .chunk_count = header.chunk_count }, body.items);
 }
 
 pub fn decodeSetRuns(allocator: std.mem.Allocator, body: []const u8) DecodeError!SetRuns {
@@ -653,7 +666,7 @@ pub fn encodeScrollRect(allocator: std.mem.Allocator, header: RecordHeader, op: 
     try w.u64v(op.base_generation);
     try w.rect(op.rect);
     try w.i32v(op.dy);
-    return finishRecord(allocator, .{ .kind = .scroll_rect, .generation = header.generation, .sequence = header.sequence, .chunk_index = header.chunk_index, .chunk_count = header.chunk_count }, body.items);
+    return finishRecord(allocator, .{ .kind = .scroll_rect, .generation = header.generation, .version = header.version, .sequence = header.sequence, .chunk_index = header.chunk_index, .chunk_count = header.chunk_count }, body.items);
 }
 
 pub fn decodeScrollRect(body: []const u8) DecodeError!ScrollRect {
@@ -667,7 +680,7 @@ pub fn encodeClearRect(allocator: std.mem.Allocator, header: RecordHeader, op: C
     const w = BodyWriter{ .buf = &body, .allocator = allocator };
     try w.u64v(op.base_generation);
     try w.rect(op.rect);
-    return finishRecord(allocator, .{ .kind = .clear_rect, .generation = header.generation, .sequence = header.sequence, .chunk_index = header.chunk_index, .chunk_count = header.chunk_count }, body.items);
+    return finishRecord(allocator, .{ .kind = .clear_rect, .generation = header.generation, .version = header.version, .sequence = header.sequence, .chunk_index = header.chunk_index, .chunk_count = header.chunk_count }, body.items);
 }
 
 pub fn decodeClearRect(body: []const u8) DecodeError!ClearRect {
@@ -686,7 +699,7 @@ pub fn encodeCursor(allocator: std.mem.Allocator, header: RecordHeader, op: Curs
     const w = BodyWriter{ .buf = &body, .allocator = allocator };
     try w.u64v(op.base_generation);
     try w.cursor(op.cursor);
-    return finishRecord(allocator, .{ .kind = .cursor, .generation = header.generation, .sequence = header.sequence, .chunk_index = header.chunk_index, .chunk_count = header.chunk_count }, body.items);
+    return finishRecord(allocator, .{ .kind = .cursor, .generation = header.generation, .version = header.version, .sequence = header.sequence, .chunk_index = header.chunk_index, .chunk_count = header.chunk_count }, body.items);
 }
 
 pub fn decodeCursor(body: []const u8) DecodeError!CursorDelta {
@@ -700,7 +713,7 @@ pub fn encodeModes(allocator: std.mem.Allocator, header: RecordHeader, op: Modes
     const w = BodyWriter{ .buf = &body, .allocator = allocator };
     try w.u64v(op.base_generation);
     try w.u32v(op.modes);
-    return finishRecord(allocator, .{ .kind = .modes, .generation = header.generation, .sequence = header.sequence, .chunk_index = header.chunk_index, .chunk_count = header.chunk_count }, body.items);
+    return finishRecord(allocator, .{ .kind = .modes, .generation = header.generation, .version = header.version, .sequence = header.sequence, .chunk_index = header.chunk_index, .chunk_count = header.chunk_count }, body.items);
 }
 
 pub fn decodeModes(body: []const u8) DecodeError!ModesDelta {
@@ -717,7 +730,7 @@ pub fn encodeImageRemove(allocator: std.mem.Allocator, header: RecordHeader, op:
     const w = BodyWriter{ .buf = &body, .allocator = allocator };
     try w.u64v(op.base_generation);
     try w.u64v(op.blob_id);
-    return finishRecord(allocator, .{ .kind = .image_remove, .generation = header.generation, .sequence = header.sequence, .chunk_index = header.chunk_index, .chunk_count = header.chunk_count }, body.items);
+    return finishRecord(allocator, .{ .kind = .image_remove, .generation = header.generation, .version = header.version, .sequence = header.sequence, .chunk_index = header.chunk_index, .chunk_count = header.chunk_count }, body.items);
 }
 
 pub fn decodeImageRemove(body: []const u8) DecodeError!ImageRemove {

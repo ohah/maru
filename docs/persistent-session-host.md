@@ -685,8 +685,10 @@ hello의 값이 다르면 stale로 처리한다.
 1. **같은 major:** wire의 기존 필드·method 의미를 깨지 않고 additive capability로만 확장한다. 새 GUI는 hello_ack에 없는
    기능을 보내지 않으며, 명시된 degraded adapter가 있으면 이미 받은 screen/metadata projection만 사용한다. capability를
    광고한 host의 응답 schema가 어긋나면 구 host로 추측해 downgrade하지 않고 connection을 fail-close한다.
-2. **지원하는 이전 major(N-1):** 새 앱은 current와 직전 major codec/adapter를 함께 제공한다. capability 없는 기존
-   runtime은 구 host에 그대로 남고 새 GUI가 그 adapter로 attach하며 새 Term은 current host에 생성한다
+2. **지원하는 이전 major(N-1):** 새 앱은 current와 직전 major codec/adapter를 함께 제공한다. 직전 release는
+   해당 screen body fingerprint capability(현재 N-1은 `screen_stream_v1_current_body`)를 hello에서 광고해야 하며,
+   capability 없는 같은-major 개발 빌드를 body-compatible이라고 추측하지 않는다. 지원되는 기존 runtime은 구 host에
+   그대로 남고 새 GUI가 그 adapter로 attach하며 새 Term은 current host에 생성한다
    (`old host drain + side-by-side host`). upgrade-capable host이고 attachment가 0이면 adapter가
    `host.upgrade.prepare`를 요청해 [같은 PID exec migration](session-host-upgrade.md)을 시도한다. busy·preflight
    실패·schema 미지원이면 강행하지 않고 side-by-side drain으로 돌아간다.
@@ -783,10 +785,10 @@ CLI exit code와 사용자 문구는 이 typed error를 한 곳에서 매핑하�
 
 현재 `RenderSnapshot`은 renderer용 in-process view이고 `maru.snapshot.v3`은 debug/replay용 부분 직렬화다. 둘 중 하나를
 그대로 IPC 안정 ABI라고 선언하지 않는다. `snapshot_chunk`/`delta_chunk` payload는 native struct memory dump가 아니라 다음
-`maru.screen-stream.v1` record codec을 쓴다.
+current는 `maru.screen-stream.v2`, capability-tagged frozen N-1은 `maru.screen-stream.v1` record codec을 쓴다.
 
 ```text
-codec_version:u16=1 | record_kind:u16 | generation:u64 | sequence:u64 |
+codec_version:u16=2(current; supported N-1=1) | record_kind:u16 | generation:u64 | sequence:u64 |
 chunk_index:u32 | chunk_count:u32 | record_bytes...
 ```
 
@@ -815,7 +817,9 @@ chunk_index:u32 | chunk_count:u32 | record_bytes...
 구현이 확정한 바이트 레이아웃(§12 필드 목록을 바이트로 확정 — **단일 출처는 `src/platform/macos/session_host/screen_stream.zig`**,
 각 record struct 주석이 미러다):
 
-- record header는 **28바이트**다: `codec_version:u16=1 | record_kind:u16 | generation:u64 | sequence:u64 | chunk_index:u32 | chunk_count:u32`.
+- record header는 **28바이트**다: `codec_version:u16=2`(current, capability-tagged N-1은 exact 1) |
+  `record_kind:u16 | generation:u64 | sequence:u64 | chunk_index:u32 | chunk_count:u32`. MRSH adapter가 선택한
+  exact version과 다른 record는 전역 reader 범위로 우회하지 않고 reject한다.
 - `record_kind`는 snapshot 대역 1~9(`screen_meta=1`, `row=2`, `image_placement=3`, `image_blob=4`, `prompt_marks=5`)와 delta
   대역 10~19(`set_runs=10`, `clear_rect=11`, `scroll_rect=12`, `cursor=13`, `modes=14`, `image_place=15`, `image_remove=16`)로
   나눈 open enum이다(`prompt_marks`는 full-replace라 두 대역에서 공용; 미래 record는 새 값 — decoder가 optional이면 skip, required면 reject).
@@ -943,7 +947,8 @@ GUI가 `*LivePtySession`을 안 드는 컴파일 타임 red test, boundary check
   kind별 payload cap)와 `session_host/framing.zig`(partial I/O incremental `FrameParser`·`encodeFrame`·cap을 payload 적재 전
   거부·unknown required 닫기·unknown optional skip)를 추가했다. 순수 OS-중립 codec(platform import 0)이라 non-macOS에서
   wire 회귀를 고정한다(`test-session-host`).
-- **P3-b(screen-stream codec) ✅**: `session_host/screen_stream.zig`에 §12 `maru.screen-stream.v1` codec을 구현했다 —
+- **P3-b(screen-stream codec) ✅**: `session_host/screen_stream.zig`에 §12 current `maru.screen-stream.v2`와
+  capability-tagged frozen N-1 v1 reader를 구현했다 —
   28-byte record header, snapshot record(screen_meta·row/run·image_placement·image_blob·prompt_marks), delta record(set_runs·
   clear_rect·scroll_rect·cursor·modes·image_place·image_remove·prompt_marks) encode/decode와 `rowWidthMatches`(폭·continuation 검증)·UTF-8/truncation/
   cap 거부. 순수 codec이라 non-macOS에서 wire 회귀를 고정한다(`test-session-host`).

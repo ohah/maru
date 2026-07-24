@@ -1,12 +1,13 @@
 //! Current/N-1 MRSH connection의 typed ownership boundary.
 //!
-//! Adapter가 wire major를 1급 값으로 소유하고 HostPool/GUI에는 current DTO만 노출한다. 현재 screen-stream v1→v2
-//! MRSH v1의 frozen release boundary는 current record body와 같고 screen header version만 1이므로
-//! `screen_stream` reader 범위가 이를 명시적으로 normalize한다. 그보다 오래된 v1 artifact는 지원하지 않는다.
+//! Adapter가 wire major와 exact screen codec을 1급 값으로 소유하고 HostPool/GUI에는 current DTO만 노출한다.
+//! capability-tagged MRSH v1 frozen release는 current record body와 같고 screen header version만 1이므로 명시적으로
+//! normalize한다. capability 없는 과거 v1 artifact나 MRSH/screen version 교차는 지원하지 않는다.
 
 const std = @import("std");
 const client_mod = @import("client.zig");
 const protocol = @import("protocol.zig");
+const screen_stream = @import("screen_stream.zig");
 
 pub const Kind = enum {
     current,
@@ -24,6 +25,8 @@ pub const HostAdapter = struct {
             .previous
         else
             return error.UnsupportedProtocol;
+        const expected_screen: u16 = if (kind == .current) screen_stream.codec_version else screen_stream.codec_version - 1;
+        if (client.screen_codec_version != expected_screen) return error.UnsupportedProtocol;
         return .{ .client = client, .kind = kind };
     }
 
@@ -71,6 +74,7 @@ test "host adapter classifies current and N-1 without exposing N-1 as a current 
         .fd = -1,
         .host_id = 0xBB,
         .wire_major = protocol.version_major - 1,
+        .screen_codec_version = screen_stream.codec_version - 1,
         .parser = @import("framing.zig").FrameParser.init(allocator),
     };
     var previous = try HostAdapter.init(previous_client);

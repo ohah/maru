@@ -685,13 +685,20 @@ hello의 값이 다르면 stale로 처리한다.
 3. **지원 범위 밖:** 구 host/runtime을 kill하거나 fresh shell로 위장하지 않는다. exact `host_id:runtime_id`가 어느 protocol
    때문에 attach 불가능한지 사용자 notice와 진단 로그에 남긴다.
 
-이를 위해 고정 `<base>/session-host/control.sock` 하나를 host별 endpoint directory로 바꾼다.
-`<base>/session-host/hosts/<host_id>/host.v1.json` entry는 `host_id`, protocol major, 상대 `control.sock`, build identity,
-lifecycle 상태를 가지며 workspace manifest는 계속 `host_id:runtime_id`만 참조한다. 각 host는 자기 directory의
-`owner.lock`을 lifetime 동안 exclusive `flock`하고, socket bind가 끝난 뒤 manifest를 temp-write→`fsync`→rename으로
-publish한다. discovery는 lock이 live이고 manifest/socket/hello `host_id`가 모두 맞는 entry만 사용한다. 같은 major의
-동시 spawn은 `<base>/session-host/launch-v<major>.lock`을 잡고 registry를 다시 확인한 뒤 하나만 실행해 spawn storm을
-막는다. 별도 central registry daemon이나 mutable JSON 한 파일은 두지 않는다.
+이를 위해 고정 `<base>/session-host/control.sock` 하나를 host별 discovery entry와 짧은 endpoint namespace로 바꾼다.
+`<base>/session-host/hosts/<host_id>/host.v1.json` entry는 `host_id`, protocol major, **절대 socket path**, build identity,
+lifecycle 상태를 가지며 workspace manifest는 계속 `host_id:runtime_id`만 참조한다. manifest/lock은 긴 cache 경로에 있어도
+되지만 Unix socket은 macOS `sockaddr_un.sun_path`의 NUL 포함 104-byte 상한을 구조적으로 만족해야 한다. endpoint는
+`/tmp/maru-<uid>/sh/<32-hex-host_id>.sock`으로 고정하고, per-UID directory를 mode `0700`으로 생성하기 전에 `lstat`으로
+symlink가 아니며 현재 UID 소유인지 검증한다. socket도 현재처럼 peer UID와 mode `0600`을 검증한다. 임의
+`XDG_CACHE_HOME`을 socket prefix로 사용하지 않는다. host/runtime은 재부팅 보존 비목표라 `/tmp` 정리는 수명 계약과
+충돌하지 않는다.
+
+각 host는 자기 cache directory의 `owner.lock`을 lifetime 동안 exclusive `flock`하고, 짧은 socket bind가 끝난 뒤
+manifest를 temp-write→`fsync`→rename으로 publish한다. discovery는 lock이 live이고 manifest의 endpoint가 위 trusted
+prefix/길이 조건을 만족하며 socket/hello `host_id`가 모두 맞는 entry만 사용한다. 같은 major의 동시 spawn은
+`<base>/session-host/launch-v<major>.lock`을 잡고 registry를 다시 확인한 뒤 하나만 실행해 spawn storm을 막는다.
+별도 central registry daemon이나 mutable JSON 한 파일은 두지 않는다.
 
 runtime/PTY/screen의 SSOT는 각 host의 `TerminalRuntimeRegistry`이고, disk entry는 **발견·라우팅 정보만** 소유한다.
 새 앱은 workspace handle의 exact host entry로 구 세션에 붙고, 지원 major 중 current host를 기본으로 골라 새 세션을

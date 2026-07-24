@@ -15,6 +15,7 @@ const terminal = maru.terminal;
 const Surface = maru.session.Surface;
 const term_backend = maru.app.term_runtime_backend;
 const client_mod = @import("client.zig");
+const protocol = @import("protocol.zig");
 const remote_screen = @import("remote_screen.zig");
 const screen_assembler = @import("screen_assembler.zig");
 const observation_wire = @import("observation_wire.zig");
@@ -612,18 +613,52 @@ pub const RemoteRuntime = struct {
 
     /// host에 뷰포트 선택 span을 보내 host의 `extractSelection`(로컬과 같은 함수)으로 뽑은 텍스트를 받는다(§6b 원격 선택 복사).
     /// **선택 의미론은 host core 단일 출처** — client는 렌더용 span만 보내고 콘텐츠 추출(soft-wrap 이음·블록·스크롤백)은 host가
-    /// 한다. 반환 텍스트는 caller 소유(빈 선택/오류면 null). `block`은 std.fmt가 true/false로 찍어 유효 JSON.
+    /// 한다. 단 앱보다 먼저 떠 계속 살아 있는 구 host는 이 RPC를 모르므로 capability가 없을 때만 현재 client 화면 projection의
+    /// 보이는 선택을 추출한다. 반환 텍스트는 caller 소유(빈 선택/오류면 null). `block`은 std.fmt가 true/false로 찍어 유효 JSON.
     pub fn selectedText(self: *RemoteRuntime, span: terminal.SelectionSpan) client_mod.ClientError!?[]u8 {
+        if (!self.client.runtime_selected_text_v1) return self.selectedTextFromProjection(span);
         var buf: [160]u8 = undefined;
         const params = std.fmt.bufPrint(&buf, "{{\"stream_id\":{d},\"sr\":{d},\"sc\":{d},\"er\":{d},\"ec\":{d},\"block\":{}}}", .{ self.stream_id, span.start.row, span.start.col, span.end.row, span.end.col, span.block }) catch return error.OutOfMemory;
         const resp = try self.callOrdered("runtime.selected_text", params);
         defer self.allocator.free(resp);
-        const text = (decodeJsonStringField(self.allocator, resp, "text") catch return error.OutOfMemory) orelse return null;
+        return self.decodeSelectedTextResponse(resp);
+    }
+
+    fn decodeSelectedTextResponse(self: *RemoteRuntime, resp: []const u8) client_mod.ClientError!?[]u8 {
+        const field = decodeSingleStringObject(self.allocator, resp) catch |err| {
+            if (err == error.OutOfMemory) return error.OutOfMemory;
+            self.client.failClosed();
+            return error.ProtocolError;
+        };
+        defer self.allocator.free(field.key);
+        if (std.mem.eql(u8, field.key, "error")) {
+            defer self.allocator.free(field.value);
+            if (protocol.ErrorCode.fromWireName(field.value) == null) {
+                self.client.failClosed();
+                return error.ProtocolError;
+            }
+            return null;
+        }
+        if (!std.mem.eql(u8, field.key, "text")) {
+            self.allocator.free(field.value);
+            // capability를 광고한 host가 success schema를 지키지 않으면 같은 connection의 나머지 RPC도 신뢰할 수 없다.
+            // 구 host 호환은 capability=false에서만 허용하고, 거짓 광고/드리프트는 빈 복사로 숨기지 않는다.
+            self.client.failClosed();
+            return error.ProtocolError;
+        }
+        const text = field.value;
         if (text.len == 0) {
             self.allocator.free(text);
             return null;
         }
         return text;
+    }
+
+    /// 구 host 호환 경로. RemoteScreen이 조립한 현재 viewport에서만 추출한다. 구 screen wire에는 soft-wrap bit가 없어
+    /// multi-row 선형 선택은 보이는 행 사이에 개행을 보존하는 degraded 정책이며, capability가 있는 최신 host에서는 반드시
+    /// 위 RPC를 써 host SSOT를 유지한다.
+    fn selectedTextFromProjection(self: *RemoteRuntime, span: terminal.SelectionSpan) client_mod.ClientError!?[]u8 {
+        return self.remote_screen.extractVisibleSelection(self.allocator, self.io, span);
     }
 
     /// 원격 검색(§6c): 검색어로 host가 **콘텐츠·스크롤백을 아는 자기 core**에서 `findMatches`(로컬과 같은 함수)로 매치를 찾게
@@ -812,6 +847,102 @@ pub const RemoteRuntime = struct {
         return try out.toOwnedSlice(allocator); // 닫는 따옴표 못 만남(손상) — 여기까지 best-effort
     }
 
+    const SingleStringField = struct {
+        key: []u8,
+        value: []u8,
+
+        fn deinit(self: SingleStringField, allocator: std.mem.Allocator) void {
+            allocator.free(self.key);
+            allocator.free(self.value);
+        }
+    };
+
+    /// server의 단일-field success/error envelope(`{"text":"..."}` / `{"error":"..."}`) 전용 strict parser.
+    /// 선택 복사는 clipboard에 쓰이므로 notification용 best-effort field scanner를 재사용하지 않는다.
+    fn decodeSingleStringObject(
+        allocator: std.mem.Allocator,
+        json: []const u8,
+    ) error{ OutOfMemory, InvalidJson }!SingleStringField {
+        var i: usize = 0;
+        skipJsonWhitespace(json, &i);
+        if (i >= json.len or json[i] != '{') return error.InvalidJson;
+        i += 1;
+        skipJsonWhitespace(json, &i);
+        const key = try decodeStrictJsonStringAt(allocator, json, &i);
+        errdefer allocator.free(key);
+        skipJsonWhitespace(json, &i);
+        if (i >= json.len or json[i] != ':') return error.InvalidJson;
+        i += 1;
+        skipJsonWhitespace(json, &i);
+        const value = try decodeStrictJsonStringAt(allocator, json, &i);
+        errdefer allocator.free(value);
+        skipJsonWhitespace(json, &i);
+        if (i >= json.len or json[i] != '}') return error.InvalidJson;
+        i += 1;
+        skipJsonWhitespace(json, &i);
+        if (i != json.len) return error.InvalidJson;
+        return .{ .key = key, .value = value };
+    }
+
+    fn skipJsonWhitespace(json: []const u8, i: *usize) void {
+        while (i.* < json.len and switch (json[i.*]) {
+            ' ', '\t', '\r', '\n' => true,
+            else => false,
+        }) i.* += 1;
+    }
+
+    fn decodeStrictJsonStringAt(
+        allocator: std.mem.Allocator,
+        json: []const u8,
+        i: *usize,
+    ) error{ OutOfMemory, InvalidJson }![]u8 {
+        if (i.* >= json.len or json[i.*] != '"') return error.InvalidJson;
+        i.* += 1;
+        var out: std.ArrayListUnmanaged(u8) = .empty;
+        errdefer out.deinit(allocator);
+        while (i.* < json.len) {
+            const ch = json[i.*];
+            i.* += 1;
+            if (ch == '"') {
+                const owned = out.toOwnedSlice(allocator) catch return error.OutOfMemory;
+                if (!std.unicode.utf8ValidateSlice(owned)) {
+                    allocator.free(owned);
+                    return error.InvalidJson;
+                }
+                return owned;
+            }
+            if (ch < 0x20) return error.InvalidJson;
+            if (ch != '\\') {
+                out.append(allocator, ch) catch return error.OutOfMemory;
+                continue;
+            }
+            if (i.* >= json.len) return error.InvalidJson;
+            const escaped = json[i.*];
+            i.* += 1;
+            switch (escaped) {
+                '"' => out.append(allocator, '"') catch return error.OutOfMemory,
+                '\\' => out.append(allocator, '\\') catch return error.OutOfMemory,
+                '/' => out.append(allocator, '/') catch return error.OutOfMemory,
+                'n' => out.append(allocator, '\n') catch return error.OutOfMemory,
+                'r' => out.append(allocator, '\r') catch return error.OutOfMemory,
+                't' => out.append(allocator, '\t') catch return error.OutOfMemory,
+                'b' => out.append(allocator, 0x08) catch return error.OutOfMemory,
+                'f' => out.append(allocator, 0x0c) catch return error.OutOfMemory,
+                'u' => {
+                    if (i.* + 4 > json.len) return error.InvalidJson;
+                    const cp = std.fmt.parseInt(u21, json[i.* .. i.* + 4], 16) catch return error.InvalidJson;
+                    if (cp >= 0xD800 and cp <= 0xDFFF) return error.InvalidJson;
+                    var buf: [4]u8 = undefined;
+                    const n = std.unicode.utf8Encode(cp, &buf) catch return error.InvalidJson;
+                    out.appendSlice(allocator, buf[0..n]) catch return error.OutOfMemory;
+                    i.* += 4;
+                },
+                else => return error.InvalidJson,
+            }
+        }
+        return error.InvalidJson;
+    }
+
     fn terminateBestEffort(self: *RemoteRuntime) void {
         var buf: [64]u8 = undefined;
         const params = std.fmt.bufPrint(&buf, "{{\"runtime_id\":\"{s}\"}}", .{self.runtime_id_hex}) catch return;
@@ -881,6 +1012,53 @@ test "remote runtime: new spawn config fails closed against a legacy daemon that
             .cell_metrics = null,
         },
     ));
+}
+
+test "remote runtime: advertised selected-text capability with a missing response field fails the connection closed" {
+    const allocator = std.testing.allocator;
+    var client = client_mod.Client{
+        .allocator = allocator,
+        .fd = -1,
+        .host_id = 1,
+        .runtime_selected_text_v1 = true,
+        .parser = framing.FrameParser.init(allocator),
+    };
+    defer client.deinit();
+    var rr: RemoteRuntime = undefined;
+    rr.client = &client;
+    rr.allocator = allocator;
+
+    try std.testing.expectError(
+        error.ProtocolError,
+        rr.decodeSelectedTextResponse("{\"error\":{\"code\":\"invalid_request\"}}"),
+    );
+    try std.testing.expectError(error.ConnectionClosed, client.call("host.info", null));
+}
+
+test "remote runtime: selected-text response envelope is strict while typed host errors remain valid" {
+    const allocator = std.testing.allocator;
+    const text = try RemoteRuntime.decodeSingleStringObject(allocator, "{\"text\":\"e\\u000a\"}");
+    defer text.deinit(allocator);
+    try std.testing.expectEqualStrings("text", text.key);
+    try std.testing.expectEqualStrings("e\n", text.value);
+
+    const typed_error = try RemoteRuntime.decodeSingleStringObject(allocator, "{\"error\":\"invalid_request\"}");
+    defer typed_error.deinit(allocator);
+    try std.testing.expectEqualStrings("error", typed_error.key);
+    try std.testing.expect(protocol.ErrorCode.fromWireName(typed_error.value) != null);
+
+    try std.testing.expectError(
+        error.InvalidJson,
+        RemoteRuntime.decodeSingleStringObject(allocator, "{\"text\":\"unterminated}"),
+    );
+    try std.testing.expectError(
+        error.InvalidJson,
+        RemoteRuntime.decodeSingleStringObject(allocator, "{\"text\":\"bad\\q\"}"),
+    );
+    try std.testing.expectError(
+        error.InvalidJson,
+        RemoteRuntime.decodeSingleStringObject(allocator, "{\"text\":\"ok\",\"extra\":\"no\"}"),
+    );
 }
 
 /// `{argv:[...], cols, rows}` spawn params를 JSON으로 만든다(caller free). argv는 임의 바이트라 실 JSON encoder로 escape한다
@@ -2055,6 +2233,17 @@ test "remote runtime: selectedText extracts the selection text on the host (§6b
     };
     defer allocator.free(text);
     try testing.expectEqualStrings("HELLO", text); // host가 자기 core에서 선택 텍스트를 뽑아 client로 전달했다(선택 의미론=host).
+
+    // 앱보다 먼저 떠 있던 같은-major 구 host를 협상 결과로 재현한다. 실제 host snapshot으로 조립한 RemoteScreen만
+    // 남아 있고 placeholder core는 비어 있으므로, 이 assertion은 fallback이 렌더 projection을 읽는지 제품과 같은
+    // 조건으로 검증한다(옛 잘못된 테스트처럼 placeholder에 문자열을 직접 쓰지 않는다).
+    client.runtime_selected_text_v1 = false;
+    const legacy_text = (try rr.selectedText(span)) orelse {
+        try testing.expect(false);
+        return;
+    };
+    defer allocator.free(legacy_text);
+    try testing.expectEqualStrings("HELLO", legacy_text);
 }
 
 // code-review #6b-2 end-to-end — 단어/줄 선택. 빈 client placeholder는 단어/줄 경계를 모르므로 host가 콘텐츠로 계산해

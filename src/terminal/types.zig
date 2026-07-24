@@ -1,3 +1,4 @@
+const std = @import("std");
 const color = @import("../color.zig");
 
 pub const Size = struct {
@@ -69,6 +70,24 @@ pub const Cell = struct {
     // 셀은 id만 든다 — 링크가 걸린 긴 출력에서도 셀 메모리가 URI 길이에 비례하지 않는다.
     link: u32 = 0,
 };
+
+/// 텍스트 추출/reflow가 뒤 padding을 자를 때 쓰는 blank-cell 단일 출처. 배경색·continuation·grapheme가 있으면
+/// 화면상 의미가 있으므로 단순 U+0020이어도 보존한다.
+pub fn isTextTrimBlank(cell: Cell) bool {
+    return cell.codepoint == ' ' and
+        !cell.continuation and
+        cell.grapheme_id == 0 and
+        std.meta.activeTag(cell.style.background) == .default;
+}
+
+/// 행의 텍스트 의미를 보존하면서 뒤 기본 blank padding만 제외한 길이.
+pub fn textTrimmedLen(cells: []const Cell) usize {
+    var len = cells.len;
+    while (len > 0) : (len -= 1) {
+        if (!isTextTrimBlank(cells[len - 1])) break;
+    }
+    return len;
+}
 
 /// OSC 133 semantic prompt — 셸이 알려주는 한 행의 의미 분류. 터미널은 raw 바이트만 봐선
 /// 프롬프트/입력/출력을 구분 못 하므로, 셸 통합이 `OSC 133 ; A|B|C|D`로 경계를 마킹한다.

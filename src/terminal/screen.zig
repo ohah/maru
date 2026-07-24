@@ -718,11 +718,7 @@ fn countRewrapRows(self: *const TerminalCore, first: usize, last: usize, new_col
 /// 행 슬라이스의 내용 길이(뒤 빈칸 trim). 활성 화면의 trimmedRowLen과 같은 기준을 스크롤백
 /// 행(저장 폭이 현재와 다를 수 있음)에 적용한다. selection(core 잔류)도 호출하므로 pub.
 pub fn trimmedLen(row: []const types.Cell) usize {
-    var len: usize = row.len;
-    while (len > 0) : (len -= 1) {
-        if (!isBlankCell(row[len - 1])) break;
-    }
-    return len;
+    return types.textTrimmedLen(row);
 }
 
 /// 행을 스크롤백에 보관한다(§11 A1 page 저장에 위임). OOM 등으로 실제 보관에 실패하면 false — 호출자
@@ -1642,10 +1638,7 @@ fn trimmedRowLen(self: *const TerminalCore, row: u16) u16 {
 /// 기본 배경의 빈 공백 셀인지(reflow trim 기준). continuation/grapheme cluster/배경색이 있으면 내용이다.
 /// core의 selection(wordBounds)도 cross-file 호출 — pub.
 pub fn isBlankCell(cell: types.Cell) bool {
-    return cell.codepoint == ' ' and
-        !cell.continuation and
-        cell.grapheme_id == 0 and
-        std.meta.activeTag(cell.style.background) == .default;
+    return types.isTextTrimBlank(cell);
 }
 
 /// reflow가 누적한 출력 행(row-major, cols개)이 통째로 빈 행인지.

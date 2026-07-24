@@ -35945,6 +35945,29 @@ test "P3-e3 통합: keep-alive AppSession가 새 Term을 host-backed backend로 
         // 우선한다. 따라서 B의 **첫 Term부터** 같은 공유 connection/backend의 remote여야 한다.
         try std.testing.expect(s2.activePane().activeTerm().surface.remote != null);
         try std.testing.expectEqual(@as(usize, 2), app_remote_backend.?.runtimes.count());
+
+        // 제품 복사 경로 회귀: 두 번째 창의 활성 host-backed Term에서 보이는 "Maru"를 선택한 뒤 AppSession.copyText를
+        // 호출한다. RemoteRuntime.selectedText 부품 테스트만으로는 활성 Term/surface id/앱 전역 backend 라우팅이 어긋나
+        // 실제 Cmd+C가 빈 문자열이 되는 회귀를 잡지 못하므로, 실제 AppSession 경계까지 고정한다.
+        const s2_active = s2.activePane().activeTerm();
+        var s2_ready = false;
+        var s2_it: usize = 0;
+        while (s2_it < 100 and !s2_ready) : (s2_it += 1) {
+            _ = s2_active.rt.pump.drainAvailable() catch break;
+            s2_active.surface.lockCore(io);
+            const c0 = s2_active.surface.renderSnapshot().cells[0].codepoint;
+            s2_active.surface.unlockCore(io);
+            if (c0 == 'M') s2_ready = true else _ = usleep(20 * 1000);
+        }
+        try std.testing.expect(s2_ready);
+        try s2.runtime.enqueueCoreCommand(s2_active.surface.id, .{ .select_start = .{ .row = 0, .col = 0, .block = false } }, io);
+        try s2.runtime.enqueueCoreCommand(s2_active.surface.id, .{ .select_extend = .{ .row = 0, .col = 3 } }, io);
+        // 앱보다 먼저 떠 있던 같은-major host의 hello_ack에는 selected-text capability가 없다. 실제 AppSession
+        // 경계에서도 remote projection fallback을 타게 해, placeholder core를 잘못 읽는 회귀를 막는다.
+        app_remote_client.?.runtime_selected_text_v1 = false;
+        try std.testing.expectEqualStrings("Maru", s2.copyText());
+        app_remote_client.?.runtime_selected_text_v1 = true;
+
         const term2 = try s2.createTerm(.{ .command = "/bin/cat" }, .{ .cols = 40, .rows = 10 }, 16, "cat", "/bin/cat");
         try std.testing.expect(term2.surface.remote != null); // 두 번째 창의 Term도 host-backed.
         try std.testing.expectEqual(@as(usize, 3), app_remote_backend.?.runtimes.count()); // B 첫 Term과 추가 Term까지 한 backend.

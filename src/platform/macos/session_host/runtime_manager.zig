@@ -179,6 +179,10 @@ pub const RuntimeManager = struct {
             .semantic_state = @intFromEnum(core.semantic_state),
             .alt_active = core.alt_active,
             .app_cursor_keys = core.application_cursor_keys,
+            // §입력 패리티: host-backed 일반 key 인코딩(DECKPAM numpad·kitty keyboard)이 placeholder core 기본값이 아니라
+            // host의 실제 모드를 쓰도록 관측으로 나른다(DECCKM app_cursor_keys 형제). kitty_flags는 스택 최상단 u5.
+            .app_keypad = core.application_keypad,
+            .kitty_flags = core.kitty_flags.current().int(),
             .alternate_scroll = core.alternate_scroll,
             .mouse_tracking = core.mouse_tracking != .none,
             .bracketed_paste = core.bracketed_paste,

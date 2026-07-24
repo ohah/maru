@@ -106,15 +106,18 @@ pub fn handleKeyEvent(
     resolver: config_mod.KeyBindingResolver,
     event: terminal.KeyEvent,
     option_as_meta: bool,
+    encode_options_override: ?terminal.input.EncodeOptions,
 ) !KeyHandlingResult {
     // Platform code gives us a normalized key event, but it must not decide
     // whether that key is an app action or terminal bytes. Keeping that choice
     // here gives AppKit, future Windows, and tests one shared policy.
     var buffer: [terminal.input.encoded_key_buffer_len]u8 = undefined;
-    // 인코딩 모드(DECCKM 등)는 active surface의 프로그램이 정한다 — vim이 ?1h를 보냈으면 화살표가
-    // SS3로 가야 하므로 매 키마다 core의 현재 모드를 읽어 인코더에 넘긴다.
-    var encode_options: terminal.input.EncodeOptions =
-        if (app_window.active()) |active| active.core.encodeOptions() else .{};
+    // 인코딩 모드(DECCKM 등)는 active surface의 프로그램이 정한다 — vim이 ?1h를 보냈으면 화살표가 SS3로 가야
+    // 하므로 매 키마다 core의 현재 모드를 읽어 인코더에 넘긴다. 단 host-backed는 active.core가 빈 placeholder라
+    // 그 모드를 모른다(§입력 패리티) — 호출자(app_session)가 runtime observation에서 만든 override를 넘기고, 로컬은
+    // null이라 아래처럼 실제 core 모드를 읽는다.
+    var encode_options: terminal.input.EncodeOptions = encode_options_override orelse
+        (if (app_window.active()) |active| active.core.encodeOptions() else .{});
     // option_as_meta는 core 모드가 아니라 config(input.option-as-meta)다 — 호출자(app)가 넘겨 인코더에 합친다.
     encode_options.option_as_meta = option_as_meta;
     const resolved = try resolver.resolve(event, &buffer, encode_options);
@@ -662,7 +665,7 @@ test "app host resolves terminal key events before writing to active PTY" {
     const result = try handleKeyEvent(&app_window, &runtime, resolver, .{
         .key = .{ .char = 'b' },
         .modifiers = .{ .command = true },
-    }, true);
+    }, true, null);
 
     try std.testing.expectEqual(@as(usize, 1), result.terminal_input.bytes_len);
     try std.testing.expectEqualStrings("\x02", memory_pty.writes.items);
@@ -685,12 +688,12 @@ test "app host threads option_as_meta into encoding: true=ESC-prefix, false=plai
     try resolver.validate();
 
     // option_as_meta=true(기본): Option+b → ESC-prefix meta "\x1bb".
-    _ = try handleKeyEvent(&app_window, &runtime, resolver, .{ .key = .{ .char = 'b' }, .modifiers = .{ .option = true } }, true);
+    _ = try handleKeyEvent(&app_window, &runtime, resolver, .{ .key = .{ .char = 'b' }, .modifiers = .{ .option = true } }, true, null);
     try std.testing.expectEqualStrings("\x1bb", memory_pty.writes.items);
 
     // option_as_meta=false: ESC 없이 평문 "b"(macOS에선 Option-단독이 입력기 조합으로 빠지지만, 우회로 여기 와도 ESC 없음).
     memory_pty.writes.clearRetainingCapacity();
-    _ = try handleKeyEvent(&app_window, &runtime, resolver, .{ .key = .{ .char = 'b' }, .modifiers = .{ .option = true } }, false);
+    _ = try handleKeyEvent(&app_window, &runtime, resolver, .{ .key = .{ .char = 'b' }, .modifiers = .{ .option = true } }, false, null);
     try std.testing.expectEqualStrings("b", memory_pty.writes.items);
 }
 
@@ -710,14 +713,45 @@ test "app host encodes arrows per the active surface's DECCKM mode" {
     const resolver: config_mod.KeyBindingResolver = .{};
 
     // normal mode: CSI 화살표
-    _ = try handleKeyEvent(&app_window, &runtime, resolver, .{ .key = .arrow_up }, true);
+    _ = try handleKeyEvent(&app_window, &runtime, resolver, .{ .key = .arrow_up }, true, null);
     try std.testing.expectEqualStrings("\x1b[A", memory_pty.writes.items);
 
     // 프로그램(vim)이 DECCKM을 켜면 같은 키가 SS3로 인코딩돼야 한다.
     try surfaces[0].core.write("\x1b[?1h");
     memory_pty.writes.clearRetainingCapacity();
-    _ = try handleKeyEvent(&app_window, &runtime, resolver, .{ .key = .arrow_up }, true);
+    _ = try handleKeyEvent(&app_window, &runtime, resolver, .{ .key = .arrow_up }, true, null);
     try std.testing.expectEqualStrings("\x1bOA", memory_pty.writes.items);
+}
+
+// §입력 패리티 host-backed 재현: host-backed 터미널은 active.core가 **빈 placeholder**라 그 encodeOptions()를 읽으면
+// host의 실제 DECCKM/DECKPAM/kitty를 모른다(항상 기본값). 예전 경로는 그래서 host가 ?1h/kitty를 켜도 화살표를 CSI legacy로
+// 보냈다. app_session은 이제 runtime observation에서 만든 encode_options_override를 넘긴다 — 이 스모크는 override가
+// **placeholder core를 이겨** host 모드대로 인코딩됨을 고정한다(placeholder는 그대로 기본값임도 확인 = 출처가 override).
+test "app host: encode_options_override가 placeholder core를 이긴다(host-backed DECCKM/kitty parity)" {
+    const allocator = std.testing.allocator;
+    var memory_pty = MemoryPty.init(allocator);
+    defer memory_pty.deinit();
+    var surfaces = [_]surface_mod.Surface{try surface_mod.Surface.init(allocator, 1, .{ .cols = 10, .rows = 2 })};
+    defer surfaces[0].deinit();
+    var tab_ptrs = [_]*surface_mod.Surface{&surfaces[0]};
+    var app_window: window_mod.AppWindow = .{ .tabs = &tab_ptrs };
+
+    var runtime = runtime_mod.SurfaceRuntime.init(allocator);
+    defer runtime.deinit();
+    _ = try runtime.attach(&surfaces[0], 10, memory_pty.io());
+
+    const resolver: config_mod.KeyBindingResolver = .{};
+
+    // active.core(placeholder)는 DECCKM off(기본)지만, host가 DECCKM을 켰다는 관측 override면 화살표가 SS3여야 한다.
+    _ = try handleKeyEvent(&app_window, &runtime, resolver, .{ .key = .arrow_up }, true, .{ .application_cursor_keys = true });
+    try std.testing.expectEqualStrings("\x1bOA", memory_pty.writes.items); // override 승 — placeholder였다면 "\x1b[A"
+    try std.testing.expect(!surfaces[0].core.application_cursor_keys); // placeholder core는 손대지 않음 = 출처는 override
+
+    // kitty keyboard flag override면 escape 같은 키가 legacy(\x1b) 대신 CSI u(kitty progressive enhancement)로 분기한다.
+    // encodeKey가 kitty_flags != 0일 때 encodeKitty로 가는지 = override가 kitty_flags도 실어 나름을 고정.
+    memory_pty.writes.clearRetainingCapacity();
+    _ = try handleKeyEvent(&app_window, &runtime, resolver, .{ .key = .escape }, true, .{ .kitty_flags = 1 });
+    try std.testing.expectEqualStrings("\x1b[27u", memory_pty.writes.items); // kitty CSI u — legacy였다면 "\x1b"
 }
 
 test "app host does not leak app actions or ignored Cmd keys to PTY" {
@@ -741,14 +775,14 @@ test "app host does not leak app actions or ignored Cmd keys to PTY" {
     const app_result = try handleKeyEvent(&app_window, &runtime, resolver, .{
         .key = .{ .char = 't' },
         .modifiers = .{ .command = true },
-    }, true);
+    }, true, null);
     try std.testing.expectEqual(config_mod.Action.new_tab, app_result.app_action);
     try std.testing.expectEqual(@as(usize, 0), memory_pty.writes.items.len);
 
     const ignored = try handleKeyEvent(&app_window, &runtime, resolver, .{
         .key = .{ .char = 's' },
         .modifiers = .{ .command = true },
-    }, true);
+    }, true, null);
     try std.testing.expectEqual(KeyHandlingResult.ignored, ignored);
     try std.testing.expectEqual(@as(usize, 0), memory_pty.writes.items.len);
 }

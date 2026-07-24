@@ -287,6 +287,7 @@ fn buildLivePtyFixture(
             resolver,
             native_key_event,
             true, // option_as_meta: 이 smoke는 현행 동작(항상 meta) 고정 — config 분기는 app_session 경로가 본다(F2-2)
+            null, // encode_options_override: 로컬 smoke라 active core 모드를 읽는다(host-backed 아님)
         );
         scripted_key_event_result = keyHandlingResultName(key_result);
         switch (key_result) {

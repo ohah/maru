@@ -17408,7 +17408,7 @@ pub const AppSession = struct {
         // 사용자 config의 keybind를 적용한다 — resolver가 사용자 바인딩(앱 액션 + terminal 매크로)을 먼저 보고
         // 없으면 빌트인(`default_*_bindings`)으로 폴백한다(override/추가/`=unbind`로 기본 끄기/`text:`·`esc:`·`ctrl:`
         // 매크로로 셸 바이트 묶기 가능). 빈 config(테스트·파일 없음)면 사용자 바인딩이 비어 곧장 빌트인으로 떨어진다.
-        const result = self.frame_loop.handleKeyEvent(self.loaded_config.keyBindingResolver(), key_event, self.option_as_meta) catch {
+        const result = self.frame_loop.handleKeyEvent(self.loaded_config.keyBindingResolver(), key_event, self.option_as_meta, self.hostBackedEncodeOptions()) catch {
             // 활성 surface가 죽은 PTY면(held 창) 터미널 입력 write가 ProcessExited/WriteFailed로 실패한다. 이건
             // 치명적 fault가 아니라 닫힌 pane의 late input이므로 ignored로 회계만 한다(ended_seen 경로와 같은 규율).
             // 앱 단축키(⌘T·⌘, 등)는 host가 `.app_action`으로 resolve해 **write 없이** 처리하므로 이 catch에 안 걸린다
@@ -17868,6 +17868,22 @@ pub const AppSession = struct {
             }
             return;
         }
+    }
+
+    /// host-backed 활성 터미널의 일반 key 인코딩 모드(DECCKM·DECKPAM·kitty keyboard)를 runtime observation에서 만든다.
+    /// placeholder core는 host의 실제 입력 모드를 모르므로(§입력 패리티 — placeholder 직접 읽기 금지) 관측이 단일 출처다.
+    /// 로컬·비-터미널·관측 미가용이면 null → host.handleKeyEvent가 active surface의 실제 core 모드를 읽는다. option_as_meta는
+    /// core 모드가 아니라 config라 호출자(frame_loop)가 뒤에 합친다. cwd·마우스·bracketed 관측 형제(remoteMouseTracking).
+    fn hostBackedEncodeOptions(self: *AppSession) ?terminal.input.EncodeOptions {
+        const active_term = self.activePane().activeTerm();
+        if (active_term.kind != .terminal or active_term.surface.remote == null) return null;
+        const obs = &active_term.rt.observation;
+        if (obs.availability == .unavailable) return null;
+        return .{
+            .application_cursor_keys = obs.app_cursor_keys,
+            .application_keypad = obs.app_keypad,
+            .kitty_flags = obs.kitty_flags,
+        };
     }
 
     /// host-backed 터미널의 마우스 트래킹 여부를 관측(RuntimeObservation.mouse_tracking)에서 읽는다 — placeholder

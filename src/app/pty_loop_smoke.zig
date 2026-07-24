@@ -291,7 +291,7 @@ fn sendScriptedInputIfConfigured(
     // 목적은 app frame loop가 이미 가진 keybinding resolver 경계로 terminal bytes를
     // 쓰는지 고정하는 것이다. 실제 AppKit keyDown payload는 visible Metal smoke가 맡는다.
     const key_event = try keyEventFromChord(chord);
-    const key_result = try frame_loop.handleKeyEvent(resolver, key_event, true);
+    const key_result = try frame_loop.handleKeyEvent(resolver, key_event, true, null);
     return switch (key_result) {
         .terminal_input => |terminal_input| .{
             .sent = true,

@@ -664,11 +664,16 @@ request_id:u64 | stream_id:u64 | payload_len:u32
   client viewport projection에서 **현재 보이는 선택만** 추출한다. 단일 행·block·wide/grapheme은 projection에서 정확히
   복원하지만, 구 screen wire에는 행별 soft-wrap bit가 없으므로 multi-row 선형 선택은 보이는 화면 행 사이에 개행을
   넣는다. 이는 구 host 전용 degraded 호환이며 host scrollback 전체를 client 의미론 출처로 복제하지 않는다.
+- `runtime_link_at_v1`은 host가 `runtime.link_at`으로 자기 `TerminalCore.extractUrlAt`(추출 + cwd resolve + 존재 stat)을
+  실행할 수 있음을 뜻한다. 링크를 **여는** 판정은 콘텐츠와 cwd, 그리고 파일이 실제로 있는 파일시스템을 가진 host가 SSOT다 —
+  client가 자기 FS로 stat하면 host 쪽 경로를 잘못 판정한다. hover 밑줄은 이 RPC를 쓰지 않고 screen stream의 `link_spans`
+  record로 받는다(매 mouse-move RPC 회피). capability 없는 구 host에는 이 RPC를 보내지 않고 자동 감지가 비활성이며,
+  OSC 8 명시 링크는 셀 link id로 이미 스냅샷에 실려 영향받지 않는다. 단일 출처는 [링크 감지](link-detection.md#원격host-backed-세션).
 
 ### hello, command, stream 순서
 
 connection의 첫 frame은 반드시 `hello`다. 현재 client는 `{protocol_min:2, protocol_max:2, client_kind:"gui|cli",
-capabilities:["runtime_metadata_v1","screen_viewport_scrolled_v1","async_scroll_to_bottom_v1","runtime_selected_text_v1",...]}`를 보내고 host는 선택 version, `host_id`, 자신이 실제로
+capabilities:["runtime_metadata_v1","screen_viewport_scrolled_v1","async_scroll_to_bottom_v1","runtime_selected_text_v1","runtime_link_at_v1",...]}`를 보내고 host는 선택 version, `host_id`, 자신이 실제로
 지원하는 capability를 응답한다. client는 hello_ack에도 이름이 있는 capability만 활성화하며, major가 같다는 사실만으로 새 screen 의미론을 가정하지 않는다.
 목표 상태의 `host_exec_upgrade_v1`은 current/N-1 adapter가 `host.upgrade.prepare/status`를 쓸 수 있다는 별도
 capability다. 제품 daemon은 controller·rollback self-image·target stager 준비가 모두 성공한 경우에만 이를 광고한다.
@@ -798,7 +803,9 @@ chunk_index:u32 | chunk_count:u32 | record_bytes...
   `image_placement(image_id,placement_id,row,col,cell_x/y_offset,src_x/y/w/h,columns,rows,z)`(kitty display 충실),
   `image_blob(image_id,generation,width,height,bpp,pixels)`(디코드된 raw 픽셀 — client 디코더 불필요, >1 MiB는 header
   chunk_index/count로 청크), `prompt_marks(row_count, (kind:u8, has_exit, exit:i16)*)`(행별 OSC 133 semantic prompt —
-  거터 ✓/✗·prompt 네비 근거; dense positional full-replace라 snapshot·delta 공용, 마크 없으면 방출 생략)다. row run은
+  거터 ✓/✗·prompt 네비 근거; dense positional full-replace라 snapshot·delta 공용, 마크 없으면 방출 생략),
+  `link_spans(span_count, (start_row:u16, start_col:u16, end_row:u16, end_col:u16, kind:u8, scope:u8)*)`(뷰포트 자동 감지
+  링크 — Cmd+hover 밑줄·링크 커서 근거; full-replace라 snapshot·delta 공용, 링크 없으면 방출 생략)다. row run은
   grapheme UTF-8, cell width/count와 태그드 Color intent(default/indexed/rgb)·style flags를 명시하고 Zig/Swift padding이나
   pointer를 포함하지 않는다.
 - delta record는 `set_runs`, `clear_rect`, `scroll_rect`, `cursor`, `modes`, `image_place/remove`, `prompt_marks`(full-replace)의
@@ -821,9 +828,16 @@ chunk_index:u32 | chunk_count:u32 | record_bytes...
 - record header는 **28바이트**다: `codec_version:u16=2`(current, capability-tagged N-1은 exact 1) |
   `record_kind:u16 | generation:u64 | sequence:u64 | chunk_index:u32 | chunk_count:u32`. MRSH adapter가 선택한
   exact version과 다른 record는 전역 reader 범위로 우회하지 않고 reject한다.
-- `record_kind`는 snapshot 대역 1~9(`screen_meta=1`, `row=2`, `image_placement=3`, `image_blob=4`, `prompt_marks=5`)와 delta
+- `record_kind`는 snapshot 대역 1~9(`screen_meta=1`, `row=2`, `image_placement=3`, `image_blob=4`, `prompt_marks=5`,
+  `link_spans=6`)와 delta
   대역 10~19(`set_runs=10`, `clear_rect=11`, `scroll_rect=12`, `cursor=13`, `modes=14`, `image_place=15`, `image_remove=16`)로
-  나눈 open enum이다(`prompt_marks`는 full-replace라 두 대역에서 공용; 미래 record는 새 값 — decoder가 optional이면 skip, required면 reject).
+  나눈 open enum이다(`prompt_marks`·`link_spans`는 full-replace라 두 대역에서 공용; 미래 record는 새 값 — decoder가 optional이면 skip, required면 reject).
+- `link_spans`의 좌표는 **뷰포트 상대 행**(0..rows-1)이다 — 스크롤은 host가 소유하고 화면이 바뀌면 다음 snapshot/delta가
+  full-replace하므로, client가 절대 행을 재계산할 필요가 없다. `kind`는 `LinkKind`(0=url, 1=file_path), `scope`는 그 span이
+  매치된 감지 종류 비트(`LinkScopes`의 web/extra_schemes/absolute_path/home_path/dot_relative/bare_relative)다. host는 client
+  config를 모르므로 **항상 최대 집합으로 계산**하고, client가 자기 `input.link-detection`으로 `scope`를 걸러 밑줄을 그린다
+  (host 해석 / client 정책 분리 — [링크 감지](link-detection.md#원격host-backed-세션)). host는 이 계산에서 stat을 하지 않는다
+  (hover는 후보, 열기는 `runtime.link_at`이 검증 — 로컬 경로와 같은 의도적 불일치).
 - `run`은 `grapheme(u32 len + UTF-8) | width:u8 | count:u32 | fg:u32 | bg:u32 | underline_color:u32 | style_flags:u32`다. 색
   (fg/bg/underline_color)은 resolved RGB가 아니라 **태그드 Color intent**다(상위 바이트=태그 default/indexed/rgb, 하위 24비트=
   payload — `ColorTag`가 SSOT). host는 색을 굽지 않고 의도를 실어 **client가 자기 theme로 in-process와 동일하게 해석**한다(config
@@ -1107,6 +1121,14 @@ P3-e도 슬라이스로 나눈다(제품 통합이라 크다).
     `observation_wire.fieldIsBoolOrAbsent`·`fieldFitsUnsignedOrAbsent`). 검증: override가 placeholder core를 이겨 host의
     DECCKM(화살표 SS3 `\x1bOA`)·kitty(escape `CSI 27u`)로 인코딩됨(host unit), 관측 wire round-trip으로 `app_keypad`·`kitty_flags`
     적용과 구 host 필드 부재 시 폴백을 고정한다. 관측이 backend-neutral 단일 출처라 placeholder `surface.core` 직접 읽기 금지 계약도 지킨다.
+  - **P3-e4c-5(링크 감지 parity) 🟨**: host-backed Term의 Cmd+hover 밑줄·링크 커서·Cmd+클릭 열기가 **placeholder core가
+    아니라 host 해석**을 쓴다. 이전에는 `hoverCursor`/`hoverLinkSpan`/`urlAt`이 `activeSurface().core`(host-backed면 빈
+    placeholder)를 직접 읽어 host에 붙은 세션에서 **밑줄·커서·열기가 모두 무동작**이었다(선택 복사·Find는 이미 host-backed
+    분기가 있었으나 링크만 이관에서 누락). hover는 screen stream의 `link_spans` record(뷰포트 상대·full-replace, host가
+    최대 scope로 계산)로 받아 client가 자기 `input.link-detection`으로 걸러 그리고, 열기는 `runtime_link_at_v1` capability의
+    `runtime.link_at` RPC로 host가 `extractUrlAt`(추출 + cwd resolve + 존재 stat)을 수행한다. 매 mouse-move RPC를 피하려고
+    hover만 스냅샷 동봉으로 가르는 것이 이 슬라이스의 설계 결정이다. 로컬(in-process) 경로는 불변이다. 단일 출처는
+    [링크 감지](link-detection.md#원격host-backed-세션).
   - **P3-e4d(parity gate) 🟨**: 실제 독립 host PTY의 OSC 7/2/5379→client observation, host core의
     OSC 7/2/133/5379 export, owned-copy/OOM-safe replace, attach initial metadata, changed-only event,
     malformed/stale revision과 stream별 coalescing, capability 없는 v2 client event 억제, observation barrier revision,

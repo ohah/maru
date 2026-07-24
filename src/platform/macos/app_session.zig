@@ -5802,6 +5802,11 @@ pub const AppSession = struct {
                         return error.PersistentRuntimeUnavailable;
                 }
                 const rb = if (app_remote_backend) |*remote| remote else return error.PersistentRuntimeUnavailable;
+                // `backendForNew()`는 이 함수 초입에서 평가된다. current host bootstrap이 실패한 뒤
+                // `ensureRestoreHostAdapter()`가 N-1 pool/backend를 방금 만든 경우에는 그 값이 아직 local backend다.
+                // 기존 runtime attach 뒤의 attach/config/pump/observation도 반드시 같은 remote backend를 써야 하므로
+                // restored runtime의 실제 owner로 다시 고정한다.
+                be = rb.backend();
                 const pooled = app_remote_host_pool != null;
                 const legacy_client = if (!pooled) app_remote_client else null;
                 if (pooled and app_remote_host_pool.?.get(reconnect_host) == null)
@@ -36349,9 +36354,14 @@ test "P3-e3-5 재접속: restore_runtime_id로 createTerm이 기존 host runtime
         );
 
         // restore가 identity 쌍을 세우고 createTerm을 부른다 → spawn 대신 그 runtime에 **attach**(재접속).
+        // current host 연결 실패 상태에서는 createTerm 초입의 backendForNew가 local을 고른다. 복원 중 발견한 remote
+        // owner로 후속 attach/config/pump가 다시 결합돼야 하며, stale local backend면 UnknownSurface로 rollback된다.
+        host_connect_failed = true;
+        defer host_connect_failed = false;
         session.restore_runtime_host_id = current_host;
         session.restore_runtime_id = &prev_rid;
         const term = try session.createTerm(.{ .command = "/bin/cat" }, .{ .cols = 40, .rows = 10 }, 16, "cat", "/bin/cat");
+        host_connect_failed = false;
         try std.testing.expect(term.surface.remote != null); // host-backed
         // **재접속 확인**: 새 Term이 저장된 runtime_id에 붙었다(fresh spawn이면 다른 id였을 것).
         const attached_rid = app_remote_backend.?.runtimeIdFor(term.rt.handle) orelse {

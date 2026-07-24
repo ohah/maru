@@ -84,6 +84,9 @@ pub const Client = struct {
     /// 이 connection이 협상한 MRSH header major. current GUI는 current와 frozen N-1 adapter를 별도
     /// connection으로 유지하므로 모든 outbound/inbound frame이 이 값을 사용한다.
     wire_major: u16 = protocol.version_major,
+    /// 이 MRSH adapter가 받아야 하는 exact screen record version. current major는 current codec,
+    /// capability-tagged N-1 adapter는 직전 codec만 받는다. 두 버전을 전역 reader 범위로 섞지 않는다.
+    screen_codec_version: u16 = @import("screen_stream.zig").codec_version,
     /// hello_ack에서 host가 `screen_viewport_scrolled_v1` mode bit을 신뢰할 수 있다고 광고했는가. 구 host ACK에는
     /// capability가 없으므로 false로 남겨 remote preedit가 숨은 live cursor에 그려지지 않게 한다.
     screen_viewport_scrolled_v1: bool = false,
@@ -181,7 +184,18 @@ pub const Client = struct {
         defer ack.deinit(allocator);
         if (ack.header.kind != .hello_ack) return error.HandshakeFailed;
         if (std.mem.indexOf(u8, ack.payload, "incompatible_version") != null) return error.IncompatibleVersion;
+        if (parseSelectedVersion(ack.payload) != wire_major) return error.HandshakeFailed;
+        // 과거 개발 중 같은 MRSH v1 아래 screen body 의미가 여러 번 바뀌었다. build identity가 없는 untagged v1을
+        // current body로 추측하면 structurally-valid silent misrender가 가능하므로, frozen release가 명시한
+        // capability가 있는 직전 major만 연다. current major는 major bump 자체가 screen v2 경계다.
+        if (wire_major < protocol.version_major and
+            !payloadHasCapability(ack.payload, previousScreenCapability(wire_major)))
+            return error.IncompatibleVersion;
         self.host_id = parseHostId(ack.payload) orelse return error.HandshakeFailed;
+        self.screen_codec_version = if (wire_major == protocol.version_major)
+            @import("screen_stream.zig").codec_version
+        else
+            @import("screen_stream.zig").codec_version - 1;
         self.screen_viewport_scrolled_v1 = payloadHasCapability(ack.payload, "screen_viewport_scrolled_v1");
         self.async_scroll_to_bottom_v1 = payloadHasCapability(ack.payload, "async_scroll_to_bottom_v1");
         self.runtime_core_command_v1 = payloadHasCapability(ack.payload, "runtime_core_command_v1");
@@ -1267,6 +1281,28 @@ fn parseHostId(payload: []const u8) ?u128 {
     return v;
 }
 
+fn parseSelectedVersion(payload: []const u8) ?u16 {
+    var parsed = std.json.parseFromSlice(std.json.Value, std.heap.page_allocator, payload, .{}) catch return null;
+    defer parsed.deinit();
+    const obj = switch (parsed.value) {
+        .object => |o| o,
+        else => return null,
+    };
+    const raw = switch (obj.get("version") orelse return null) {
+        .integer => |v| v,
+        else => return null,
+    };
+    return std.math.cast(u16, raw);
+}
+
+fn previousScreenCapability(major: u16) []const u8 {
+    return switch (major) {
+        1 => "screen_stream_v1_current_body",
+        2 => "screen_stream_v2_current_body",
+        else => "unsupported_screen_stream",
+    };
+}
+
 /// hello/hello_ack의 capability 문자열 배열을 관대하게 읽는다. 구 peer의 필드 부재·손상·타입 불일치는 미지원(false)이며
 /// handshake 자체는 기존대로 host_id/version만으로 성립한다.
 fn payloadHasCapability(payload: []const u8, wanted: []const u8) bool {
@@ -1323,6 +1359,8 @@ test "client: hello/request JSON build and host_id parse are server-symmetric (p
     try testing.expectEqualStrings("{\"method\":\"host.info\"}", req2);
 
     try testing.expectEqual(@as(?u128, 0x1234), parseHostId("{\"host_id\":\"1234\"}"));
+    try testing.expectEqual(@as(?u16, 1), parseSelectedVersion("{\"version\":1}"));
+    try testing.expectEqual(@as(?u16, null), parseSelectedVersion("{\"protocol\":1}"));
     try testing.expectEqual(@as(?u128, null), parseHostId("{\"no_host\":true}"));
     try testing.expectEqual(@as(?u128, null), parseHostId("not json"));
     try testing.expect(payloadHasCapability(

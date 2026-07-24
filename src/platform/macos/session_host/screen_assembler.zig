@@ -67,6 +67,7 @@ const PendingImage = struct {
 /// 리셋하고 delta로 증분 갱신한다. 소유는 caller(init/deinit).
 pub const ScreenAssembler = struct {
     allocator: std.mem.Allocator,
+    expected_codec_version: u16 = screen_stream.codec_version,
     cols: u16 = 0,
     rows_count: u16 = 0,
     active_screen: u8 = 0,
@@ -84,6 +85,10 @@ pub const ScreenAssembler = struct {
 
     pub fn init(allocator: std.mem.Allocator) ScreenAssembler {
         return .{ .allocator = allocator };
+    }
+
+    pub fn initForCodec(allocator: std.mem.Allocator, expected_codec_version: u16) ScreenAssembler {
+        return .{ .allocator = allocator, .expected_codec_version = expected_codec_version };
     }
 
     pub fn deinit(self: *ScreenAssembler) void {
@@ -226,7 +231,7 @@ pub const ScreenAssembler = struct {
     pub fn applySnapshot(self: *ScreenAssembler, bytes: []const u8) ApplyError!void {
         var rs = screen_stream.RecordStream{ .bytes = bytes };
         const first = (try rs.next()) orelse return error.Truncated;
-        const fs = try screen_stream.RecordStream.split(first);
+        const fs = try screen_stream.RecordStream.splitExact(first, self.expected_codec_version);
         if (fs.header.kind != .screen_meta) return error.Truncated; // snapshot의 첫 record는 반드시 screen_meta.
         const meta = try screen_stream.decodeScreenMeta(fs.body);
 
@@ -247,7 +252,7 @@ pub const ScreenAssembler = struct {
         self.generation = fs.header.generation;
 
         while (try rs.next()) |rec| {
-            const s = try screen_stream.RecordStream.split(rec);
+            const s = try screen_stream.RecordStream.splitExact(rec, self.expected_codec_version);
             switch (s.header.kind) {
                 .row => {
                     const dr = try screen_stream.decodeRow(self.allocator, s.body);
@@ -275,7 +280,7 @@ pub const ScreenAssembler = struct {
     pub fn applyDelta(self: *ScreenAssembler, bytes: []const u8) ApplyError!void {
         var rs = screen_stream.RecordStream{ .bytes = bytes };
         while (try rs.next()) |rec| {
-            const s = try screen_stream.RecordStream.split(rec);
+            const s = try screen_stream.RecordStream.splitExact(rec, self.expected_codec_version);
             switch (s.header.kind) {
                 .set_runs => {
                     const sr = try screen_stream.decodeSetRuns(self.allocator, s.body);
@@ -427,6 +432,25 @@ test "screen assembler: applySnapshot reconstructs size, cursor, and row runs" {
     try testing.expectEqualStrings("h", r[0].grapheme);
     try testing.expectEqual(@as(u32, 0xFF0000), r[0].fg);
     try testing.expectEqual(@as(u32, 3), r[1].count);
+}
+
+test "screen assembler binds exact record version to the selected MRSH adapter" {
+    const allocator = testing.allocator;
+    const current = try buildSnapshot(allocator, 1, .{ .cols = 2, .rows = 1 }, &.{});
+    defer allocator.free(current);
+
+    var previous = try allocator.dupe(u8, current);
+    defer allocator.free(previous);
+    std.mem.writeInt(u16, previous[4..6], 1, .big); // length prefix 뒤 첫 record header version.
+
+    var current_assembler = ScreenAssembler.initForCodec(allocator, screen_stream.codec_version);
+    defer current_assembler.deinit();
+    try testing.expectError(error.BadCodecVersion, current_assembler.applySnapshot(previous));
+
+    var previous_assembler = ScreenAssembler.initForCodec(allocator, 1);
+    defer previous_assembler.deinit();
+    try testing.expectError(error.BadCodecVersion, previous_assembler.applySnapshot(current));
+    try previous_assembler.applySnapshot(previous);
 }
 
 test "screen assembler: applyDelta set_runs/cursor/modes updates the model; toSnapshot round-trips" {

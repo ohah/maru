@@ -332,7 +332,8 @@ fn encodeLength(writer: *Writer, len: usize, elem_size: usize) Error!void {
 }
 
 fn encodeScrollback(writer: *Writer, sb: *const Scrollback) Error!void {
-    if (sb.count > max_scrollback_rows or sb.count > sb.cap) return error.LimitExceeded;
+    if (sb.cap > max_scrollback_rows or sb.count > max_scrollback_rows or sb.count > sb.cap)
+        return error.LimitExceeded;
     if (sb.pushed_abs != std.math.add(usize, sb.evicted_abs, sb.count) catch return error.IntegerOverflow)
         return error.InvalidValue;
     try writer.integer(usize, sb.cap);
@@ -360,7 +361,8 @@ fn decodeScrollback(reader: *Reader, allocator: std.mem.Allocator) Error!Scrollb
         else => return error.InvalidValue,
     };
     const count = try reader.integer(usize);
-    if (count > max_scrollback_rows or count > cap) return error.LimitExceeded;
+    if (cap > max_scrollback_rows or count > max_scrollback_rows or count > cap)
+        return error.LimitExceeded;
     if (pushed_abs != std.math.add(usize, evicted_abs, count) catch return error.IntegerOverflow)
         return error.InvalidValue;
 
@@ -1181,6 +1183,24 @@ test "handoff v1 rejects every truncated prefix, trailing bytes, cap plus one, a
     var writer: Writer = .{ .allocator = allocator };
     defer writer.deinit();
     try std.testing.expectError(error.IntegerOverflow, encodeLength(&writer, std.math.maxInt(usize), 2));
+}
+
+test "handoff v1 rejects scrollback configured cap plus one before allocation" {
+    const allocator = std.testing.allocator;
+    var core = try TerminalCore.init(allocator, .{ .cols = 8, .rows = 2 });
+    defer core.deinit();
+    core.screen.sb.cap = max_scrollback_rows + 1;
+    try std.testing.expectError(error.LimitExceeded, encodeCore(allocator, &core));
+
+    var writer: Writer = .{ .allocator = allocator };
+    defer writer.deinit();
+    try writer.integer(usize, max_scrollback_rows + 1);
+    try writer.integer(usize, 0);
+    try writer.integer(usize, 0);
+    try writer.byte(0);
+    try writer.integer(usize, 0);
+    var reader: Reader = .{ .bytes = writer.bytes.items };
+    try std.testing.expectError(error.LimitExceeded, decodeScrollback(&reader, allocator));
 }
 
 test "handoff v1 host envelope enforces exact declared section and runtime count boundaries" {

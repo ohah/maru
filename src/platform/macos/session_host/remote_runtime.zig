@@ -160,7 +160,10 @@ pub const RemoteRuntime = struct {
         // 3. 첫 snapshot을 읽어 원격 화면을 조립한다.
         const snap = try self.client.readSnapshot(self.stream_id);
         defer self.allocator.free(snap);
-        self.remote_screen = try remote_screen.RemoteScreen.init(self.allocator);
+        self.remote_screen = try remote_screen.RemoteScreen.initForCodec(
+            self.allocator,
+            self.client.screen_codec_version,
+        );
         errdefer self.remote_screen.deinit();
         // mode bit 자체는 v2에도 우연히 존재할 수 있으므로 hello_ack에서 명시 협상한 host일 때만 "0 = live bottom"을
         // 신뢰한다. 구 host는 capability=false로 두고, RemoteScreen이 snapshot별 visible cursor 증거만으로
@@ -1385,6 +1388,7 @@ test "remote runtime attaches through N-1 MRSH and normalizes frozen v1 screen r
         .fd = fds[0],
         .host_id = 0xAA,
         .wire_major = 1,
+        .screen_codec_version = 1,
         .parser = framing.FrameParser.init(allocator),
     };
     defer client.deinit();

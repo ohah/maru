@@ -135,14 +135,21 @@ pub fn connectExistingMajor(
     switch (tryConnectMajor(allocator, versioned, major)) {
         .connected => |client| return .{ .connected = client },
         .absent => {},
-        .transient => return .{ .failed = .startup_timeout },
+        .transient => return connectMajorWithBackoffDetailed(allocator, versioned, major, .{
+            .connect_attempts = 10,
+            .connect_delay_ms = 20,
+        }),
         .failed => |reason| return .{ .failed = reason },
     }
     var legacy_buf: [640]u8 = undefined;
     const legacy = discovery.legacySocketPathIn(&legacy_buf, dir) catch return .{ .failed = .invalid_endpoint };
     return switch (tryConnectMajor(allocator, legacy, major)) {
         .connected => |client| .{ .connected = client },
-        .absent, .transient => .{ .failed = .startup_timeout },
+        .absent => .{ .failed = .startup_timeout },
+        .transient => connectMajorWithBackoffDetailed(allocator, legacy, major, .{
+            .connect_attempts = 10,
+            .connect_delay_ms = 20,
+        }),
         .failed => |reason| .{ .failed = reason },
     };
 }
@@ -206,7 +213,7 @@ const FrozenV1Peer = struct {
         const response = framing.encodeFrame(
             std.heap.page_allocator,
             .{ .kind = .hello_ack, .major = 1 },
-            "{\"protocol\":1,\"host_id\":\"000000000000000000000000000000aa\",\"capabilities\":[]}",
+            "{\"version\":1,\"host_id\":\"000000000000000000000000000000aa\",\"capabilities\":[\"screen_stream_v1_current_body\"]}",
         ) catch return;
         defer std.heap.page_allocator.free(response);
         socket_server.writeAll(fd, response) catch return;
@@ -268,6 +275,24 @@ fn connectWithBackoffDetailed(allocator: std.mem.Allocator, socket: [:0]const u8
     var attempts: usize = 0;
     while (attempts < opts.connect_attempts) : (attempts += 1) {
         switch (tryConnect(allocator, socket)) {
+            .connected => |client| return .{ .connected = client },
+            .absent, .transient => {},
+            .failed => |reason| return .{ .failed = reason },
+        }
+        _ = usleep(opts.connect_delay_ms * 1000);
+    }
+    return .{ .failed = .startup_timeout };
+}
+
+fn connectMajorWithBackoffDetailed(
+    allocator: std.mem.Allocator,
+    socket: [:0]const u8,
+    major: u16,
+    opts: Options,
+) Outcome {
+    var attempts: usize = 0;
+    while (attempts < opts.connect_attempts) : (attempts += 1) {
+        switch (tryConnectMajor(allocator, socket, major)) {
             .connected => |client| return .{ .connected = client },
             .absent, .transient => {},
             .failed => |reason| return .{ .failed = reason },

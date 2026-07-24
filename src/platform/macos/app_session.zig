@@ -5619,8 +5619,7 @@ pub const AppSession = struct {
     /// 조회는 host를 새로 띄우지 않고 hello의 exact host_id가 저장 binding과 일치할 때만 publish한다.
     fn ensureRestoreHostAdapter(self: *AppSession, wanted_host_id: u128) bool {
         if (!is_macos) return false;
-        const pool = if (app_remote_host_pool) |*value| value else return false;
-        if (pool.get(wanted_host_id) != null) return true;
+        if (app_remote_host_pool) |*pool| if (pool.get(wanted_host_id) != null) return true;
         if (session_host.protocol.version_major < 2) return false;
 
         const alloc = std.heap.smp_allocator;
@@ -5651,11 +5650,36 @@ pub const AppSession = struct {
             alloc.destroy(adapter);
             return false;
         };
-        pool.addOwned(wanted_host_id, adapter) catch {
-            adapter.deinit();
-            alloc.destroy(adapter);
-            return false;
-        };
+        if (app_remote_host_pool) |*pool| {
+            pool.addOwned(wanted_host_id, adapter) catch {
+                adapter.deinit();
+                alloc.destroy(adapter);
+                return false;
+            };
+        } else {
+            // current host launch/connect가 실패해도 건강한 N-1 runtime restore는 독립적으로 열려야 한다.
+            // 이 pool의 spawn host는 타입 불변식을 위한 값일 뿐이며 host_connect_failed가 새 Term spawn을 local로
+            // 고정하므로, old host에는 restore attach만 보낸다.
+            app_remote_host_pool = RemoteHostPool.init(alloc);
+            app_remote_host_pool.?.addOwned(wanted_host_id, adapter) catch {
+                adapter.deinit();
+                alloc.destroy(adapter);
+                app_remote_host_pool.?.deinit();
+                app_remote_host_pool = null;
+                return false;
+            };
+            app_remote_host_pool.?.setSpawnHost(wanted_host_id) catch unreachable;
+            app_remote_backend = session_host.remote_term_backend.RemoteTermBackend.initWithPool(
+                alloc,
+                self.io,
+                &app_remote_host_pool.?,
+                self.runtime,
+            ) catch {
+                app_remote_host_pool.?.deinit();
+                app_remote_host_pool = null;
+                return false;
+            };
+        }
         return true;
     }
 
@@ -5756,19 +5780,31 @@ pub const AppSession = struct {
         const surface = surface: {
             if (is_macos and app_keep_alive_after_quit and reconnect_id.len > 0) {
                 if (reconnect_id.len != 32) return error.InvalidPersistentRuntimeIdentity;
-                const rb = if (app_remote_backend) |*remote| remote else return error.PersistentRuntimeUnavailable;
-                const pooled = app_remote_host_pool != null;
-                const legacy_client = if (!pooled) app_remote_client else null;
-                var reconnect_host = if (app_remote_host_pool) |*pool|
-                    pool.spawnHostId() orelse return error.PersistentRuntimeUnavailable
-                else
-                    (legacy_client orelse return error.PersistentRuntimeUnavailable).host_id;
+                var reconnect_host: u128 = 0;
                 if (reconnect_host_id.len > 0) {
                     if (reconnect_host_id.len != 32) return error.InvalidPersistentRuntimeIdentity;
                     reconnect_host = std.fmt.parseInt(u128, reconnect_host_id, 16) catch
                         return error.InvalidPersistentRuntimeIdentity;
+                } else if (app_remote_host_pool) |*pool| {
+                    reconnect_host = pool.spawnHostId() orelse return error.PersistentRuntimeUnavailable;
+                } else if (app_remote_client) |legacy| {
+                    reconnect_host = legacy.host_id;
+                } else {
+                    return error.PersistentRuntimeUnavailable;
                 }
-                if (pooled and !self.ensureRestoreHostAdapter(reconnect_host))
+
+                // Exact saved host를 먼저 복구한다. current host bootstrap 실패로 pool/backend가 없어도 이 함수가
+                // N-1 query-only 연결에서 둘을 만들 수 있어, 새 host 가용성과 기존 세션 복원이 독립적이다.
+                const legacy_matches = app_remote_host_pool == null and
+                    app_remote_client != null and app_remote_client.?.host_id == reconnect_host;
+                if (!legacy_matches and (app_remote_host_pool != null or reconnect_host_id.len > 0)) {
+                    if (!self.ensureRestoreHostAdapter(reconnect_host))
+                        return error.PersistentRuntimeUnavailable;
+                }
+                const rb = if (app_remote_backend) |*remote| remote else return error.PersistentRuntimeUnavailable;
+                const pooled = app_remote_host_pool != null;
+                const legacy_client = if (!pooled) app_remote_client else null;
+                if (pooled and app_remote_host_pool.?.get(reconnect_host) == null)
                     return error.PersistentRuntimeUnavailable;
                 var rid: [32]u8 = undefined;
                 @memcpy(&rid, reconnect_id[0..32]);

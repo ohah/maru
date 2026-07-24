@@ -17858,9 +17858,11 @@ pub const AppSession = struct {
                 }
             }.pred) orelse return;
             const term = loc.pane.terms.items[loc.term_index];
-            if (term.rt.observation.availability == .unavailable) return;
+            // 관측이 아직 안 왔으면(재접속 직후 metadata 도착 전 ~0.5s window 등) **alt-screen 판정만 스킵**하고 평범한
+            // 스크롤백(host view_offset — 관측이 필요 없음)은 그대로 진행한다. 예전엔 여기서 hard return이라 관측 미가용
+            // 창에서 **양쪽 경로 다 죽어** 스크롤이 완전히 안 됐다(host-alive robustness — 재접속 직후 스크롤 즉시 동작).
             const observation = &term.rt.observation;
-            if (observation.alt_active and observation.alternate_scroll) {
+            if (observation.availability != .unavailable and observation.alt_active and observation.alternate_scroll) {
                 is_alt = true;
                 const bytes = if (lines > 0)
                     (if (observation.app_cursor_keys) "\x1bOA" else "\x1b[A")
@@ -36308,6 +36310,94 @@ test "R1: app-quit 중 close()가 먼저 돌아도 host-backed runtime이 생존
         var rr: session_host.remote_runtime.RemoteRuntime = undefined;
         try rr.attachExisting(&client2, allocator, io, 1, rid, .{ .cols = 40, .rows = 10 }); // close()를 태워도 생존!
         rr.deinit();
+    } else {
+        return error.SkipZigTest;
+    }
+}
+
+// ① 재접속 직후 스크롤 회귀(host-alive robustness) — host-backed 터미널은 재접속 직후 첫 `runtime.observation` metadata가
+// 도착하기 전 ~0.5s 동안 `observation.availability == .unavailable`이다. 예전 scrollSurfaceLines는 이 창에서 hard-return이라
+// **평범한 스크롤백(host view_offset — 관측이 필요 없음)까지 죽어** 재접속 직후 스크롤이 완전히 먹통이었다. 이 스모크는
+// 관측 미가용 상태에서도 스크롤이 core `.scroll`을 enqueue(→ metal_dirty)하는지 고정한다 — alt-screen 판정만 스킵하고
+// scrollback은 진행하는 게 계약이다. 실 fork host + 실 AppSession(host-backed createTerm)이라 macOS 게이트.
+test "① host-backed 스크롤은 observation 미가용(재접속 직후)에도 scrollback을 enqueue한다" {
+    if (is_macos) {
+        const allocator = std.testing.allocator;
+        const io = std.Io.Threaded.global_single_threaded.io();
+
+        var base_buf: [96]u8 = undefined;
+        const base = std.fmt.bufPrintZ(&base_buf, "/tmp/maru-scr-{d}", .{std.c.getpid()}) catch return error.SkipZigTest;
+        _ = std.c.mkdir(base.ptr, 0o700);
+        var dir_buf: [160]u8 = undefined;
+        const dir = session_host.discovery.sessionHostDirPath(&dir_buf, base) catch return error.SkipZigTest;
+        var sock_buf: [224]u8 = undefined;
+        const socket = session_host.discovery.socketPathIn(&sock_buf, dir) catch return error.SkipZigTest;
+
+        const child = std.c.fork();
+        if (child < 0) return error.SkipZigTest;
+        if (child == 0) {
+            _ = std.c.setsid();
+            session_host.daemon.runSessionHost(std.heap.page_allocator, io, dir, socket) catch {};
+            std.c._exit(0);
+        }
+        defer {
+            _ = std.c.kill(child, std.posix.SIG.TERM);
+            var status: c_int = undefined;
+            _ = std.c.waitpid(child, &status, 0);
+            _ = std.c.unlink(socket.ptr);
+            var lpb: [224]u8 = undefined;
+            if (session_host.discovery.lockPathIn(&lpb, dir)) |p| _ = std.c.unlink(p.ptr) else |_| {}
+            _ = std.c.rmdir(dir.ptr);
+            _ = std.c.rmdir(base.ptr);
+        }
+
+        var up = false;
+        var w: usize = 0;
+        while (w < 250) : (w += 1) {
+            if (session_host.client.Client.connect(allocator, socket, "gui")) |cl| {
+                var p = cl;
+                p.deinit();
+                up = true;
+                break;
+            } else |_| _ = usleep(20 * 1000);
+        }
+        try std.testing.expect(up);
+
+        const client = session_host.host_connect.connectOrLaunch(allocator, "/unused", base, .{ .connect_attempts = 30, .connect_delay_ms = 10 }) orelse {
+            try std.testing.expect(false);
+            return;
+        };
+        app_remote_client = client;
+        app_remote_backend = session_host.remote_term_backend.RemoteTermBackend.init(allocator, io, &app_remote_client.?, &app_runtime.routing);
+        const previous_keep_alive = app_keep_alive_after_quit;
+        defer {
+            app_keep_alive_after_quit = previous_keep_alive;
+            if (app_remote_backend) |*rb| {
+                rb.deinit();
+                app_remote_backend = null;
+            }
+            if (app_remote_client) |*cl| {
+                cl.deinit();
+                app_remote_client = null;
+            }
+        }
+
+        const session = try allocator.create(AppSession);
+        defer allocator.destroy(session);
+        try session.init(io, allocator, .{ .abi_version = abi_version, .cols = 40, .rows = 10, .queue_capacity = 16, .command_kind = @intFromEnum(CommandKind.controlled_smoke) });
+        defer session.deinit();
+
+        const term = try appendTrackedRemoteTermForTest(session);
+        try std.testing.expect(term.surface.remote != null); // host-backed
+
+        // **재접속 직후 창 재현**: 첫 metadata 도착 전이라 관측 미가용. (createTerm의 attach barrier가 채웠을 수 있어 명시 강제.)
+        term.rt.observation.availability = .unavailable;
+
+        // scrollback은 관측이 필요 없다 → 미가용이어도 core `.scroll`을 enqueue하고 metal_dirty를 세워야 한다.
+        // pre-fix는 여기서 hard-return이라 metal_dirty가 false로 남아 red. post-fix는 alt 판정만 스킵하고 fall-through해 green.
+        session.metal_dirty = false;
+        session.scrollSurfaceLines(term.surface, 3);
+        try std.testing.expect(session.metal_dirty);
     } else {
         return error.SkipZigTest;
     }

@@ -231,6 +231,7 @@ pub const RuntimeManager = struct {
             const terminal_slot = self.backend_impl.terminalForHostLifecycle(@intFromPtr(slot)) orelse return error.RuntimeMissing;
             if (!terminal_slot.live_pty.joinUpgradePause()) return error.UnsafeFrontier;
             if (!terminal_slot.live_pty.session.upgradeEligible()) return error.RuntimeNotLive;
+            if (terminal_slot.live_pty.session.childExitedWithoutReap()) return error.RuntimeNotLive;
         }
         // Reader가 마지막 core write 뒤 coalesced output 신호를 enqueue했을 수 있다. 모든 thread가 join된 뒤 owner가
         // 이를 한 번 더 drain한다. Exit/read_error가 관측되면 status를 버리지 않고 정상 lifecycle로 넘기고 upgrade는 abort.
@@ -908,6 +909,52 @@ test "runtime manager: U2 pause reaches a safe frontier under continuous PTY out
     try mgr.joinAndValidateUpgradeQuiesce();
     mgr.resumeUpgradeQuiesce();
     try ops.write_input(ops.ctx, rid, "ignored-but-admitted");
+}
+
+test "runtime manager: child exit while quiesced aborts without consuming status and retry can proceed" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    var host_registry = reg.TerminalRuntimeRegistry.init(allocator);
+    defer host_registry.deinit();
+    var mgr: RuntimeManager = undefined;
+    mgr.init(allocator, std.testing.io, &host_registry);
+    defer mgr.deinit();
+
+    const ops = mgr.runtimeOps();
+    _ = try ops.spawn(ops.ctx, .{
+        .argv = &.{ "/bin/sh", "-c", "sleep 0.05; exit 19" },
+        .cwd = null,
+        .cols = 20,
+        .rows = 4,
+    });
+    try std.testing.expectEqual(@as(usize, 1), try mgr.requestUpgradeQuiesce());
+    var attempts: usize = 0;
+    while (attempts < 1000 and !mgr.upgradeQuiesceReached()) : (attempts += 1) _ = usleep(1000);
+    try std.testing.expect(mgr.upgradeQuiesceReached());
+    _ = usleep(100 * 1000);
+    try std.testing.expectError(error.RuntimeNotLive, mgr.joinAndValidateUpgradeQuiesce());
+
+    // waitid(WNOWAIT)는 status를 소비하지 않았다. Reader를 재개하면 EOF/exit를 owner queue로 넘기고,
+    // owner drain이 한 번만 runtime을 제거한다.
+    mgr.resumeUpgradeQuiesce();
+    var total_exited: usize = 0;
+    attempts = 0;
+    while (attempts < 500 and host_registry.count() != 0) : (attempts += 1) {
+        total_exited += mgr.drainOwnedEvents().exited;
+        if (host_registry.count() != 0) _ = usleep(1000);
+    }
+    try std.testing.expectEqual(@as(usize, 0), host_registry.count());
+    try std.testing.expectEqual(@as(usize, 1), total_exited);
+    try std.testing.expectEqual(@as(usize, 0), mgr.drainOwnedEvents().exited);
+
+    const replacement = try ops.spawn(ops.ctx, .{ .argv = &.{"/bin/cat"}, .cwd = null, .cols = 20, .rows = 4 });
+    defer ops.terminate(ops.ctx, replacement);
+    try std.testing.expectEqual(@as(usize, 1), try mgr.requestUpgradeQuiesce());
+    attempts = 0;
+    while (attempts < 1000 and !mgr.upgradeQuiesceReached()) : (attempts += 1) _ = usleep(1000);
+    try std.testing.expect(mgr.upgradeQuiesceReached());
+    try mgr.joinAndValidateUpgradeQuiesce();
+    mgr.resumeUpgradeQuiesce();
 }
 
 test "runtime manager: initial config is applied before fast first output reaches the host core" {

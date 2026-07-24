@@ -69,6 +69,21 @@ fn redirectStdioToDevNull() !void {
 }
 
 const PreflightOutcome = enum { passed, rejected, cleanup_failed };
+const TargetLaunch = struct {
+    old_path: [:0]const u8,
+    result_path: [:0]const u8,
+    scenario: [:0]const u8,
+    owner_dir: [:0]const u8,
+    target_dev: [:0]const u8,
+    target_ino: [:0]const u8,
+    target_size: [:0]const u8,
+    target_sha: [:0]const u8,
+    rollback_dev: [:0]const u8,
+    rollback_ino: [:0]const u8,
+    rollback_size: [:0]const u8,
+    rollback_sha: [:0]const u8,
+    next_path: [:0]const u8,
+};
 
 fn killAndReap(pid: c.pid_t) bool {
     _ = c.kill(pid, .KILL);
@@ -83,7 +98,12 @@ fn killAndReap(pid: c.pid_t) bool {
     return false;
 }
 
-fn runTargetPreflight(target_path: [:0]const u8, primary_fd: c.fd_t, scenario: [:0]const u8) PreflightOutcome {
+fn runTargetPreflight(
+    io: std.Io,
+    target_path: [:0]const u8,
+    primary_fd: c.fd_t,
+    launch: TargetLaunch,
+) PreflightOutcome {
     const pid = c.fork();
     if (pid < 0) return .cleanup_failed;
     if (pid == 0) {
@@ -92,13 +112,29 @@ fn runTargetPreflight(target_path: [:0]const u8, primary_fd: c.fd_t, scenario: [
         slots.prepare(primary_fd, primary_state_slot) catch c._exit(125);
         slots.assertExactNonCloexec(&.{primary_state_slot}) catch c._exit(125);
         const preflight_arg: [*:0]const u8 = "--upgrade-preflight";
-        const argv = [_:null]?[*:0]const u8{ target_path.ptr, preflight_arg, scenario.ptr };
+        const argv = [_:null]?[*:0]const u8{
+            target_path.ptr,
+            preflight_arg,
+            launch.old_path.ptr,
+            launch.result_path.ptr,
+            launch.scenario.ptr,
+            launch.owner_dir.ptr,
+            launch.target_dev.ptr,
+            launch.target_ino.ptr,
+            launch.target_size.ptr,
+            launch.target_sha.ptr,
+            launch.rollback_dev.ptr,
+            launch.rollback_ino.ptr,
+            launch.rollback_size.ptr,
+            launch.rollback_sha.ptr,
+            launch.next_path.ptr,
+        };
         _ = execv(target_path.ptr, &argv);
         c._exit(125);
     }
     var status: c_int = undefined;
-    var attempts: usize = 0;
-    while (attempts < 5000) : (attempts += 1) {
+    const deadline = std.Io.Clock.awake.now(io).nanoseconds + 5 * std.time.ns_per_s;
+    while (std.Io.Clock.awake.now(io).nanoseconds < deadline) {
         const waited = c.waitpid(pid, &status, c.W.NOHANG);
         if (waited == pid) return if (status == 0) .passed else .rejected;
         if (waited < 0 and std.posix.errno(waited) != .INTR)
@@ -320,6 +356,41 @@ pub fn main(init: std.process.Init) !void {
     defer allocator.free(scenario_z);
     const next_path_z = try allocator.dupeZ(u8, next_path);
     defer allocator.free(next_path_z);
+    const result_z = try allocator.dupeZ(u8, result_path);
+    defer allocator.free(result_z);
+    const target_dev_z = try std.fmt.allocPrintSentinel(allocator, "{d}", .{target_image.identity.dev}, 0);
+    defer allocator.free(target_dev_z);
+    const target_ino_z = try std.fmt.allocPrintSentinel(allocator, "{d}", .{target_image.identity.ino}, 0);
+    defer allocator.free(target_ino_z);
+    const target_size_z = try std.fmt.allocPrintSentinel(allocator, "{d}", .{target_image.identity.size}, 0);
+    defer allocator.free(target_size_z);
+    const target_sha_hex = std.fmt.bytesToHex(target_image.identity.sha256, .lower);
+    const target_sha_z = try allocator.dupeZ(u8, &target_sha_hex);
+    defer allocator.free(target_sha_z);
+    const rollback_dev_z = try std.fmt.allocPrintSentinel(allocator, "{d}", .{self_image.identity.dev}, 0);
+    defer allocator.free(rollback_dev_z);
+    const rollback_ino_z = try std.fmt.allocPrintSentinel(allocator, "{d}", .{self_image.identity.ino}, 0);
+    defer allocator.free(rollback_ino_z);
+    const rollback_size_z = try std.fmt.allocPrintSentinel(allocator, "{d}", .{self_image.identity.size}, 0);
+    defer allocator.free(rollback_size_z);
+    const rollback_sha_hex = std.fmt.bytesToHex(self_image.identity.sha256, .lower);
+    const rollback_sha_z = try allocator.dupeZ(u8, &rollback_sha_hex);
+    defer allocator.free(rollback_sha_z);
+    const target_launch: TargetLaunch = .{
+        .old_path = self_image.path,
+        .result_path = result_z,
+        .scenario = scenario_z,
+        .owner_dir = owner_dir_z,
+        .target_dev = target_dev_z,
+        .target_ino = target_ino_z,
+        .target_size = target_size_z,
+        .target_sha = target_sha_z,
+        .rollback_dev = rollback_dev_z,
+        .rollback_ino = rollback_ino_z,
+        .rollback_size = rollback_size_z,
+        .rollback_sha = rollback_sha_z,
+        .next_path = next_path_z,
+    };
     const primary_readback = try readState(allocator, primary_read_fd);
     defer allocator.free(primary_readback);
     const backup_readback = try readState(allocator, backup_read_fd);
@@ -340,7 +411,7 @@ pub fn main(init: std.process.Init) !void {
             allocator,
         );
     };
-    if (runTargetPreflight(target_image.path, primary_read_fd, scenario_z) != .passed) {
+    if (runTargetPreflight(init.io, target_image.path, primary_read_fd, target_launch) != .passed) {
         try finishRuntime(allocator, &session, &core, "preflight\n", "MIGRATED:preflight");
         return writeResult(
             result_path,
@@ -358,8 +429,6 @@ pub fn main(init: std.process.Init) !void {
     try slots.prepare(owner.descriptor(), owner_slot);
     try slots.assertExactNonCloexec(&.{});
 
-    const result_z = try allocator.dupeZ(u8, result_path);
-    defer allocator.free(result_z);
     if (std.mem.eql(u8, scenario, "old-exec-fail")) {
         const missing: [*:0]const u8 = "/definitely/missing/maru-upgrade-target";
         const bad_argv = [_:null]?[*:0]const u8{missing};
@@ -376,24 +445,6 @@ pub fn main(init: std.process.Init) !void {
     if (!session_host.staged_image.identityEqual(target_image.identity, try session_host.staged_image.inspect(target_image.path)) or
         !session_host.staged_image.identityEqual(self_image.identity, try session_host.staged_image.inspect(self_image.path)))
         return error.StagedIdentityChanged;
-    const target_dev_z = try std.fmt.allocPrintSentinel(allocator, "{d}", .{target_image.identity.dev}, 0);
-    defer allocator.free(target_dev_z);
-    const target_ino_z = try std.fmt.allocPrintSentinel(allocator, "{d}", .{target_image.identity.ino}, 0);
-    defer allocator.free(target_ino_z);
-    const target_size_z = try std.fmt.allocPrintSentinel(allocator, "{d}", .{target_image.identity.size}, 0);
-    defer allocator.free(target_size_z);
-    const target_sha_hex = std.fmt.bytesToHex(target_image.identity.sha256, .lower);
-    const target_sha_z = try allocator.dupeZ(u8, &target_sha_hex);
-    defer allocator.free(target_sha_z);
-    const rollback_dev_z = try std.fmt.allocPrintSentinel(allocator, "{d}", .{self_image.identity.dev}, 0);
-    defer allocator.free(rollback_dev_z);
-    const rollback_ino_z = try std.fmt.allocPrintSentinel(allocator, "{d}", .{self_image.identity.ino}, 0);
-    defer allocator.free(rollback_ino_z);
-    const rollback_size_z = try std.fmt.allocPrintSentinel(allocator, "{d}", .{self_image.identity.size}, 0);
-    defer allocator.free(rollback_size_z);
-    const rollback_sha_hex = std.fmt.bytesToHex(self_image.identity.sha256, .lower);
-    const rollback_sha_z = try allocator.dupeZ(u8, &rollback_sha_hex);
-    defer allocator.free(rollback_sha_z);
     const argv = [_:null]?[*:0]const u8{
         target_image.path.ptr,
         self_image.path.ptr,

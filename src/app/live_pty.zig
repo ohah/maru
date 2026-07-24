@@ -575,6 +575,65 @@ test "processing reader pauses without closing child or queues and resumes at th
     try std.testing.expectEqual(child_pid, live.session.child_pid);
 }
 
+test "upgrade pause drains query response, input fence, and core command in exact byte order with a full render queue" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+
+    const allocator = std.testing.allocator;
+    var runtime = runtime_mod.SurfaceRuntime.init(allocator);
+    defer runtime.deinit();
+    var surface = try surface_mod.Surface.init(allocator, 78, .{ .cols = 40, .rows = 4 });
+    defer surface.deinit();
+    var live: LivePtySession = undefined;
+    try live.init(std.testing.io, allocator, 78, .{
+        .command = "/bin/sh",
+        .args = &.{
+            "-c",
+            "stty raw -echo; printf '\\033[6n'; IFS= read -r line; printf '%s' \"$line\" | od -An -tx1; sleep 5",
+        },
+        .size = .{ .cols = 40, .rows = 4 },
+    }, 1);
+    defer live.deinit();
+    _ = try live.attachSurface(&runtime, &surface, true);
+    const io = live.ptyIo(true);
+
+    // CPR 응답이 먼저 나가고, producer가 넣은 prefix, 그 input fence 뒤 focus response, suffix가 이어져야 한다.
+    // capacity=1 render queue는 첫 output signal로 포화되지만 coalescing 신호라 reader/pause를 막지 않는다.
+    try io.writeInput("ABC");
+    try io.enqueue_command.?(io.ctx, .{ .report_focus = true });
+    try io.writeInput("DEF\n");
+    try live.requestUpgradePause();
+    var attempts: usize = 0;
+    while (attempts < 5000 and !live.upgradePauseReached()) : (attempts += 1) _ = usleep(1000);
+    try std.testing.expect(live.upgradePauseReached());
+    try std.testing.expect(live.joinUpgradePause());
+    try std.testing.expectEqual(@as(usize, 1), live.queue.count());
+    const signal = live.queue.tryPop() orelse return error.TestUnexpectedResult;
+    switch (signal) {
+        .output => {},
+        else => return error.TestUnexpectedResult,
+    }
+    try std.testing.expect(live.upgradePausedAndSafe());
+
+    try live.resumeAfterUpgradePause();
+    var pump = live.pump(&runtime);
+    var ordered = false;
+    attempts = 0;
+    while (attempts < 5000 and !ordered) : (attempts += 1) {
+        _ = try pump.drainAvailable();
+        surface.lockCore(std.testing.io);
+        const dump = try surface.core.dumpUtf8(allocator);
+        surface.unlockCore(std.testing.io);
+        defer allocator.free(dump);
+        ordered = std.mem.indexOf(
+            u8,
+            dump,
+            "1b 5b 31 3b 31 52 41 42 43 1b 5b 49 44 45 46",
+        ) != null;
+        if (!ordered) _ = usleep(1000);
+    }
+    try std.testing.expect(ordered);
+}
+
 const FakePty = struct {
     fn io(self: *FakePty) runtime_mod.PtyIo {
         return .{

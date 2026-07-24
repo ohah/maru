@@ -1142,6 +1142,73 @@ test "handoff v1 rejects duplicate required sections and declared caps before al
     try std.testing.expectError(error.LimitExceeded, decodeCore(allocator, oversized));
 }
 
+test "handoff v1 rejects every truncated prefix, trailing bytes, cap plus one, and checked overflow" {
+    const allocator = std.testing.allocator;
+    var core = try TerminalCore.init(allocator, .{ .cols = 8, .rows = 2 });
+    defer core.deinit();
+    try core.write("boundary");
+    const encoded = try encodeCore(allocator, &core);
+    defer allocator.free(encoded);
+
+    for (0..encoded.len) |prefix_len|
+        try std.testing.expectError(error.Truncated, decodeCore(allocator, encoded[0..prefix_len]));
+
+    const trailing = try allocator.alloc(u8, encoded.len + 1);
+    defer allocator.free(trailing);
+    @memcpy(trailing[0..encoded.len], encoded);
+    trailing[encoded.len] = 0;
+    try std.testing.expectError(error.TrailingBytes, decodeCore(allocator, trailing));
+
+    const payload_cap = try allocator.dupe(u8, encoded);
+    defer allocator.free(payload_cap);
+    std.mem.writeInt(u64, payload_cap[16..24], max_runtime_section_bytes, .big);
+    try std.testing.expectError(error.Truncated, decodeCore(allocator, payload_cap));
+    std.mem.writeInt(u64, payload_cap[16..24], max_runtime_section_bytes + 1, .big);
+    try std.testing.expectError(error.LimitExceeded, decodeCore(allocator, payload_cap));
+
+    const field_cap = try allocator.dupe(u8, encoded);
+    defer allocator.free(field_cap);
+    std.mem.writeInt(u64, field_cap[envelope_header_len + 8 .. envelope_header_len + 16], max_single_blob_bytes, .big);
+    refreshEnvelope(field_cap, 1);
+    try std.testing.expectError(error.Truncated, decodeCore(allocator, field_cap));
+    std.mem.writeInt(u64, field_cap[envelope_header_len + 8 .. envelope_header_len + 16], max_single_blob_bytes + 1, .big);
+    refreshEnvelope(field_cap, 1);
+    try std.testing.expectError(error.LimitExceeded, decodeCore(allocator, field_cap));
+
+    var reader: Reader = .{ .bytes = "" };
+    reader.pos = std.math.maxInt(usize);
+    try std.testing.expectError(error.IntegerOverflow, reader.take(1));
+    var writer: Writer = .{ .allocator = allocator };
+    defer writer.deinit();
+    try std.testing.expectError(error.IntegerOverflow, encodeLength(&writer, std.math.maxInt(usize), 2));
+}
+
+test "handoff v1 host envelope enforces exact declared section and runtime count boundaries" {
+    const allocator = std.testing.allocator;
+    const encoded = try encodeHost(allocator, .{
+        .host_id = 1,
+        .upgrade_epoch = 0,
+        .next_handle = 1,
+        .runtimes = &.{},
+    });
+    defer allocator.free(encoded);
+
+    const declared = try allocator.dupe(u8, encoded);
+    defer allocator.free(declared);
+    std.mem.writeInt(u16, declared[14..16], max_runtime_count + 1, .big);
+    try std.testing.expectError(error.Truncated, decodeHost(allocator, declared));
+    std.mem.writeInt(u16, declared[14..16], max_runtime_count + 2, .big);
+    try std.testing.expectError(error.LimitExceeded, decodeHost(allocator, declared));
+
+    var too_many: [max_runtime_count + 1]RuntimeView = undefined;
+    try std.testing.expectError(error.LimitExceeded, encodeHost(allocator, .{
+        .host_id = 1,
+        .upgrade_epoch = 0,
+        .next_handle = 1,
+        .runtimes = &too_many,
+    }));
+}
+
 test "handoff v1 allocation failure never publishes a partial candidate" {
     const allocator = std.testing.allocator;
     var core = try TerminalCore.init(allocator, .{ .cols = 8, .rows = 2 });

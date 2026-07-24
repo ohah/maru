@@ -98,6 +98,20 @@ fn redirectStdioToDevNull() !void {
 }
 
 const PreflightOutcome = enum { passed, rejected, cleanup_failed };
+const TargetLaunch = struct {
+    rollback_path: [:0]const u8,
+    result_path: [:0]const u8,
+    scenario: [:0]const u8,
+    owner_dir: [:0]const u8,
+    target_dev: [:0]const u8,
+    target_ino: [:0]const u8,
+    target_size: [:0]const u8,
+    target_sha: [:0]const u8,
+    rollback_dev: [:0]const u8,
+    rollback_ino: [:0]const u8,
+    rollback_size: [:0]const u8,
+    rollback_sha: [:0]const u8,
+};
 
 fn killAndReap(pid: c.pid_t) bool {
     _ = c.kill(pid, .KILL);
@@ -112,7 +126,12 @@ fn killAndReap(pid: c.pid_t) bool {
     return false;
 }
 
-fn runTargetPreflight(target_path: [:0]const u8, primary_fd: c.fd_t, scenario: [:0]const u8) PreflightOutcome {
+fn runTargetPreflight(
+    io: std.Io,
+    target_path: [:0]const u8,
+    primary_fd: c.fd_t,
+    launch: TargetLaunch,
+) PreflightOutcome {
     const pid = c.fork();
     if (pid < 0) return .cleanup_failed;
     if (pid == 0) {
@@ -121,13 +140,28 @@ fn runTargetPreflight(target_path: [:0]const u8, primary_fd: c.fd_t, scenario: [
         slots.prepare(primary_fd, primary_state_slot) catch c._exit(135);
         slots.assertExactNonCloexec(&.{primary_state_slot}) catch c._exit(135);
         const preflight_arg: [*:0]const u8 = "--upgrade-preflight";
-        const argv = [_:null]?[*:0]const u8{ target_path.ptr, preflight_arg, scenario.ptr };
+        const argv = [_:null]?[*:0]const u8{
+            target_path.ptr,
+            preflight_arg,
+            launch.rollback_path.ptr,
+            launch.result_path.ptr,
+            launch.scenario.ptr,
+            launch.owner_dir.ptr,
+            launch.target_dev.ptr,
+            launch.target_ino.ptr,
+            launch.target_size.ptr,
+            launch.target_sha.ptr,
+            launch.rollback_dev.ptr,
+            launch.rollback_ino.ptr,
+            launch.rollback_size.ptr,
+            launch.rollback_sha.ptr,
+        };
         _ = execv(target_path.ptr, &argv);
         c._exit(135);
     }
     var status: c_int = undefined;
-    var attempts: usize = 0;
-    while (attempts < 5000) : (attempts += 1) {
+    const deadline = std.Io.Clock.awake.now(io).nanoseconds + 5 * std.time.ns_per_s;
+    while (std.Io.Clock.awake.now(io).nanoseconds < deadline) {
         const waited = c.waitpid(pid, &status, c.W.NOHANG);
         if (waited == pid) return if (status == 0) .passed else .rejected;
         if (waited < 0 and std.posix.errno(waited) != .INTR)
@@ -239,6 +273,7 @@ fn rollbackTargetV2(allocator: std.mem.Allocator, result_path: []const u8, owner
 
 const Context = struct {
     allocator: std.mem.Allocator,
+    io: std.Io,
     old_path: []const u8,
     result_path: []const u8,
     scenario: []const u8,
@@ -400,17 +435,6 @@ fn upgradeAgain(
     try validateSecondState(allocator, primary_readback);
     const scenario_z = try allocator.dupeZ(u8, ctx.scenario);
     defer allocator.free(scenario_z);
-    if (runTargetPreflight(next_image.path, primary_fd, scenario_z) != .passed) return error.TargetPreflightFailed;
-    if (c.unlink(primary_path.ptr) != 0 or c.unlink(backup_path.ptr) != 0) return error.UnlinkFailed;
-
-    var slots: session_host.exec_fd_set.PreparedSlots = .{};
-    defer slots.rollback();
-    try slots.prepare(session.inheritedMasterFd().?, pty_slot);
-    try slots.prepare(primary_fd, primary_state_slot);
-    try slots.prepare(backup_fd, backup_state_slot);
-    try slots.prepare(owner.descriptor(), owner_slot);
-    try slots.assertExactNonCloexec(&.{});
-
     const result_z = try allocator.dupeZ(u8, ctx.result_path);
     defer allocator.free(result_z);
     const target_dev_z = try std.fmt.allocPrintSentinel(allocator, "{d}", .{next_image.identity.dev}, 0);
@@ -431,6 +455,31 @@ fn upgradeAgain(
     const rollback_sha_hex = std.fmt.bytesToHex(staged_target_identity.sha256, .lower);
     const rollback_sha_z = try allocator.dupeZ(u8, &rollback_sha_hex);
     defer allocator.free(rollback_sha_z);
+    const target_launch: TargetLaunch = .{
+        .rollback_path = self_path,
+        .result_path = result_z,
+        .scenario = scenario_z,
+        .owner_dir = owner_dir_z,
+        .target_dev = target_dev_z,
+        .target_ino = target_ino_z,
+        .target_size = target_size_z,
+        .target_sha = target_sha_z,
+        .rollback_dev = rollback_dev_z,
+        .rollback_ino = rollback_ino_z,
+        .rollback_size = rollback_size_z,
+        .rollback_sha = rollback_sha_z,
+    };
+    if (runTargetPreflight(ctx.io, next_image.path, primary_fd, target_launch) != .passed) return error.TargetPreflightFailed;
+    if (c.unlink(primary_path.ptr) != 0 or c.unlink(backup_path.ptr) != 0) return error.UnlinkFailed;
+
+    var slots: session_host.exec_fd_set.PreparedSlots = .{};
+    defer slots.rollback();
+    try slots.prepare(session.inheritedMasterFd().?, pty_slot);
+    try slots.prepare(primary_fd, primary_state_slot);
+    try slots.prepare(backup_fd, backup_state_slot);
+    try slots.prepare(owner.descriptor(), owner_slot);
+    try slots.assertExactNonCloexec(&.{});
+
     const argv = [_:null]?[*:0]const u8{
         next_image.path.ptr,
         self_path.ptr,
@@ -518,14 +567,55 @@ fn serveCommitted(
     try writeResult(ctx.result_path, result, allocator);
 }
 
+fn parseIdentity(args: anytype) !session_host.staged_image.Identity {
+    const dev = try std.fmt.parseInt(i64, args.next() orelse return error.MissingArgument, 10);
+    const ino = try std.fmt.parseInt(u64, args.next() orelse return error.MissingArgument, 10);
+    const size = try std.fmt.parseInt(u64, args.next() orelse return error.MissingArgument, 10);
+    const sha_hex = args.next() orelse return error.MissingArgument;
+    if (sha_hex.len != 64) return error.InvalidIdentity;
+    var sha256: [32]u8 = undefined;
+    const decoded = try std.fmt.hexToBytes(&sha256, sha_hex);
+    if (decoded.len != sha256.len) return error.InvalidIdentity;
+    return .{ .dev = dev, .ino = ino, .size = size, .sha256 = sha256 };
+}
+
+fn parseContext(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    old_path: []const u8,
+    args: anytype,
+) !Context {
+    const result_path = args.next() orelse return error.MissingArgument;
+    const scenario = args.next() orelse return error.MissingArgument;
+    const owner_dir = args.next() orelse return error.MissingArgument;
+    const target_identity = try parseIdentity(args);
+    const rollback_identity = try parseIdentity(args);
+    const next_path = args.next() orelse return error.MissingArgument;
+    if (args.next() != null) return error.UnexpectedArgument;
+    return .{
+        .allocator = allocator,
+        .io = io,
+        .old_path = old_path,
+        .result_path = result_path,
+        .scenario = scenario,
+        .owner_dir = owner_dir,
+        .target_identity = target_identity,
+        .rollback_identity = rollback_identity,
+        .next_path = next_path,
+    };
+}
+
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
     var args = try init.minimal.args.iterateAllocator(allocator);
     defer args.deinit();
     const executable_path = args.next() orelse return error.MissingArgument;
     const mode_or_old_path = args.next() orelse return error.MissingArgument;
-    if (std.mem.eql(u8, mode_or_old_path, "--upgrade-preflight"))
-        return preflight(allocator, args.next() orelse return error.MissingArgument);
+    if (std.mem.eql(u8, mode_or_old_path, "--upgrade-preflight")) {
+        const preflight_old_path = args.next() orelse return error.MissingArgument;
+        const preflight_ctx = try parseContext(allocator, init.io, preflight_old_path, &args);
+        return preflight(allocator, preflight_ctx.scenario);
+    }
     if (std.mem.eql(u8, mode_or_old_path, "--rollback-target-v2")) {
         const result_path = args.next() orelse return error.MissingArgument;
         const owner_dir = args.next() orelse return error.MissingArgument;
@@ -543,46 +633,6 @@ pub fn main(init: std.process.Init) !void {
         )) return error.StagedIdentityChanged;
         return rollbackTargetV2(allocator, result_path, owner_dir);
     }
-    const result_path = args.next() orelse return error.MissingArgument;
-    const scenario = args.next() orelse return error.MissingArgument;
-    const owner_dir = args.next() orelse return error.MissingArgument;
-    const target_dev = try std.fmt.parseInt(i64, args.next() orelse return error.MissingArgument, 10);
-    const target_ino = try std.fmt.parseInt(u64, args.next() orelse return error.MissingArgument, 10);
-    const target_size = try std.fmt.parseInt(u64, args.next() orelse return error.MissingArgument, 10);
-    const sha_hex = args.next() orelse return error.MissingArgument;
-    if (sha_hex.len != 64) return error.InvalidIdentity;
-    var target_sha256: [32]u8 = undefined;
-    const decoded = try std.fmt.hexToBytes(&target_sha256, sha_hex);
-    if (decoded.len != target_sha256.len) return error.InvalidIdentity;
-    const rollback_dev = try std.fmt.parseInt(i64, args.next() orelse return error.MissingArgument, 10);
-    const rollback_ino = try std.fmt.parseInt(u64, args.next() orelse return error.MissingArgument, 10);
-    const rollback_size = try std.fmt.parseInt(u64, args.next() orelse return error.MissingArgument, 10);
-    const rollback_sha_hex = args.next() orelse return error.MissingArgument;
-    if (rollback_sha_hex.len != 64) return error.InvalidIdentity;
-    var rollback_sha256: [32]u8 = undefined;
-    const rollback_decoded = try std.fmt.hexToBytes(&rollback_sha256, rollback_sha_hex);
-    if (rollback_decoded.len != rollback_sha256.len) return error.InvalidIdentity;
-    const next_path = args.next() orelse return error.MissingArgument;
-    if (args.next() != null) return error.UnexpectedArgument;
-    const ctx: Context = .{
-        .allocator = allocator,
-        .old_path = mode_or_old_path,
-        .result_path = result_path,
-        .scenario = scenario,
-        .owner_dir = owner_dir,
-        .target_identity = .{
-            .dev = target_dev,
-            .ino = target_ino,
-            .size = target_size,
-            .sha256 = target_sha256,
-        },
-        .rollback_identity = .{
-            .dev = rollback_dev,
-            .ino = rollback_ino,
-            .size = rollback_size,
-            .sha256 = rollback_sha256,
-        },
-        .next_path = next_path,
-    };
+    const ctx = try parseContext(allocator, init.io, mode_or_old_path, &args);
     restore(ctx) catch rollback(ctx);
 }

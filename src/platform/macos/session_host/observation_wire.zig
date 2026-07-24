@@ -58,6 +58,9 @@ fn revision(allocator: std.mem.Allocator, payload: []const u8, allow_response: b
         !fieldIsBoolOrAbsent(metadata, "mouse_tracking") or
         // bracketed_paste도 optional(구버전 host 호환) — host-backed 붙여넣기 bracketed 판정·인코딩 게이트 모드.
         !fieldIsBoolOrAbsent(metadata, "bracketed_paste") or
+        // app_keypad·kitty_flags도 optional(구버전 host 호환) — host-backed 일반 key의 DECKPAM·kitty 인코딩 모드.
+        !fieldIsBoolOrAbsent(metadata, "app_keypad") or
+        !fieldFitsUnsignedOrAbsent(metadata, "kitty_flags", std.math.maxInt(u5)) or
         !fieldIsNonNegative(metadata, "observer_generation") or
         !fieldFitsUnsigned(metadata, "title_generation", std.math.maxInt(u32)) or
         !fieldFitsUnsigned(metadata, "cols", std.math.maxInt(u16)) or
@@ -112,6 +115,14 @@ fn fieldIsNonNegative(obj: std.json.ObjectMap, key: []const u8) bool {
 
 fn fieldFitsUnsigned(obj: std.json.ObjectMap, key: []const u8, max: u64) bool {
     return switch (obj.get(key) orelse return false) {
+        .integer => |n| n >= 0 and @as(u64, @intCast(n)) <= max,
+        else => false,
+    };
+}
+
+/// optional 정수 필드(구버전 host 호환) — 없으면 통과, 있으면 [0, max] 검증. kitty_flags(u5)처럼 구 host가 안 보내는 필드용.
+fn fieldFitsUnsignedOrAbsent(obj: std.json.ObjectMap, key: []const u8, max: u64) bool {
+    return switch (obj.get(key) orelse return true) {
         .integer => |n| n >= 0 and @as(u64, @intCast(n)) <= max,
         else => false,
     };

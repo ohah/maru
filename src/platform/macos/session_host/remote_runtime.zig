@@ -497,6 +497,14 @@ pub const RemoteRuntime = struct {
         const mouse_tracking = if (metadata.get("mouse_tracking")) |v| (jsonBool(v) orelse return false) else false;
         // bracketed_paste도 optional(구버전 host 호환) — 없으면 false. host-backed 붙여넣기 게이트/인코딩용.
         const bracketed_paste = if (metadata.get("bracketed_paste")) |v| (jsonBool(v) orelse return false) else false;
+        // app_keypad·kitty_flags도 optional(구버전 host 호환) — host-backed 일반 key의 DECKPAM(numpad)·kitty keyboard
+        // 인코딩 parity용. 없으면 기본값(numeric·legacy)이라 구 host 재접속에도 안전하다.
+        const app_keypad = if (metadata.get("app_keypad")) |v| (jsonBool(v) orelse return false) else false;
+        const kitty_flags: u5 = if (metadata.get("kitty_flags")) |v| blk: {
+            const n = jsonU64(v) orelse return false;
+            if (n > std.math.maxInt(u5)) return false; // kitty flag 스택 최상단은 5비트 — 범위 밖은 malformed.
+            break :blk @intCast(n);
+        } else 0;
         const observer_generation = jsonU64(metadata.get("observer_generation") orelse return false) orelse return false;
         const title_generation_u64 = jsonU64(metadata.get("title_generation") orelse return false) orelse return false;
         if (title_generation_u64 > std.math.maxInt(u32)) return false;
@@ -547,6 +555,8 @@ pub const RemoteRuntime = struct {
             .semantic_state = semantic,
             .alt_active = alt_active,
             .app_cursor_keys = app_cursor_keys,
+            .app_keypad = app_keypad,
+            .kitty_flags = kitty_flags,
             .alternate_scroll = alternate_scroll,
             .mouse_tracking = mouse_tracking,
             .bracketed_paste = bracketed_paste,
@@ -1208,7 +1218,7 @@ test "remote runtime: metadata parser applies only newer coherent full-state rev
 
     const rev2 =
         \\{"event":"runtime.metadata","metadata_revision":2,"metadata":{"cwd":"/repo","window_title":"work","ssh_remote_dest":"host",
-        \\"semantic_state":3,"alt_active":true,"app_cursor_keys":true,"alternate_scroll":true,"mouse_tracking":true,"bracketed_paste":true,"observer_generation":9,"title_generation":4,"cols":120,"rows":40,
+        \\"semantic_state":3,"alt_active":true,"app_cursor_keys":true,"alternate_scroll":true,"mouse_tracking":true,"bracketed_paste":true,"app_keypad":true,"kitty_flags":5,"observer_generation":9,"title_generation":4,"cols":120,"rows":40,
         \\"foreground_available":true,"foreground_pgid":55,"processes":[{"pid":55,"name":"claude"}]}}
     ;
     try std.testing.expect(try rr.applyObservationJson(rev2));
@@ -1220,6 +1230,8 @@ test "remote runtime: metadata parser applies only newer coherent full-state rev
     try std.testing.expect(rr.observation.alt_active);
     try std.testing.expect(rr.observation.mouse_tracking); // host-backed 마우스 리포트 게이트용(§입력 패리티)
     try std.testing.expect(rr.observation.bracketed_paste); // host-backed 붙여넣기 bracketed 게이트/인코딩용(§입력 패리티)
+    try std.testing.expect(rr.observation.app_keypad); // host-backed 일반 key DECKPAM(numpad) 인코딩 모드(§입력 패리티)
+    try std.testing.expectEqual(@as(u5, 5), rr.observation.kitty_flags); // host-backed 일반 key kitty keyboard flag(§입력 패리티)
     try std.testing.expectEqual(@as(?i32, 55), rr.observation.foreground_pgid);
     try std.testing.expectEqual(@as(u16, 120), rr.observation.size.cols);
     try std.testing.expectEqualStrings("claude", rr.observation.foreground_processes.items[0].slice());
@@ -1259,6 +1271,8 @@ test "remote runtime: mouse_tracking is optional — 구버전 host metadata(필
     try std.testing.expectEqualStrings("/legacy", rr.observation.cwd.items);
     try std.testing.expect(!rr.observation.mouse_tracking); // 필드 없음 → false 폴백
     try std.testing.expect(!rr.observation.bracketed_paste); // bracketed_paste도 optional — 필드 없음 → false 폴백
+    try std.testing.expect(!rr.observation.app_keypad); // app_keypad도 optional — 필드 없음 → false(numeric) 폴백
+    try std.testing.expectEqual(@as(u5, 0), rr.observation.kitty_flags); // kitty_flags도 optional — 필드 없음 → 0(legacy) 폴백
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

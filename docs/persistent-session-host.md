@@ -36,8 +36,9 @@ control-plane, PTY 종료 정책과 책임이 겹치지 않도록 소유권·ID�
 > EAGAIN/partial 뒤 남은 wire bytes는 frame-loop pump가 같은 frame offset부터 이어 보낸다. control
 > barrier가 `기존 input → core command → 새 input`의 순서를 보존한다. scrolled
 > `imeBegin`은 응답 없는 async scroll frame만 admission하며 동기 RPC로 fallback하지 않는다.
-> focus report와 설정·prompt core command는 host reader까지 전달되지만, 일반 key의 DECCKM/DECKPAM/kitty keyboard
-> 인코딩과 선택 autoscroll 등 input-mode/command parity 전체가 완료됐다는 뜻은 아니다.
+> focus report와 설정·prompt core command는 host reader까지 전달되고, 일반 key의 DECCKM/DECKPAM/kitty keyboard 인코딩은
+> runtime observation override로 host 모드대로 인코딩된다(P3-e4c-4). 단 선택 autoscroll·Reset/Clear 등 input-mode/command
+> parity 전체가 완료됐다는 뜻은 아니다.
 > `keep-alive-after-quit` 토글은 **설정 GUI(workspace 섹션)에도 노출**된다. 기본값은 아직 `false`(opt-in)다:
 > quick persistence(현재 quick은 명시적으로 in-process), incremental checkpoint, ended placeholder, 외부 `maru attach` CLI, 다중 app **process**(현재 daemon
 > serial), mouse/resize/observation RPC와 delta push의 완전한 async bounded socket event-loop 통합, GUI 부재 시 OS 배너, **host-backed echo 지연 제거(이벤트 기반
@@ -1011,7 +1012,7 @@ P3-e도 슬라이스로 나눈다(제품 통합이라 크다).
   - **P3-e4c(AppSession consumers) ✅**: sidebar/search/git, auto title·cwd 상속, at-prompt/close/control collector,
     Claude/Codex observer, SSH drop/paste upload와 alt-screen PageUp/wheel 특례가 공용 runtime observation만 읽도록
     옮긴다. 이 범위의 metadata에는 placeholder `surface.core` 직접 읽기를 금지한다. 일반 key의 DECCKM/DECKPAM/kitty
-    keyboard 인코딩과 선택 autoscroll·전체 선택은 아직 이 완료 범위가 아니다.
+    keyboard 인코딩은 P3-e4c-4에서 완료했고(관측 override), 선택 autoscroll·전체 선택은 아직 이 완료 범위가 아니다.
   - **P3-e4c-2(IME marked text parity) ✅**: marked text는 host core command나 protocol state가 아니라 각 GUI
     `Surface`의 client-local `PreeditOverlay`가 소유한다. 로컬/host-backed base snapshot에 공통 합성기를 적용하고,
     host snapshot/delta의 canonical grid는 바꾸지 않는다. 최신 delta마다 다시 합성하며 clear하면 최신 base가 즉시
@@ -1057,7 +1058,7 @@ P3-e도 슬라이스로 나눈다(제품 통합이라 크다).
     경로를 `[Image]`로 인식하고 멀티라인이 실행되지 않는다. **bracketed는 mouse_tracking과 같은 "클라가 자기 UI 판단(paste-protection
     모달)에 필요한 게이트 모드"라 관측 스트리밍이 방식 B와 정합**(순수 host-wrap은 새 입력 RPC를 더해도 protection이 여전히
     client-side라 같은 모드를 wire에 두게 되어 실익 없음). cwd(read·write)는 이미 완료. 일반 key의 DECCKM 실제 인코딩과
-    DECKPAM·kitty keyboard는 별도 후속 slice다.
+    DECKPAM·kitty keyboard는 P3-e4c-4에서 완료(관측에 app_keypad·kitty_flags 추가).
   - **P3-e4c-3(focus/config/prompt core-command parity) ✅**: hello capability `runtime_core_command_v1`과
     strict bounded `core_command_wire`가 scroll 4종, focus report, cell metric/default color/ANSI 16색 palette,
     scrollback/ambiguous·emoji width 설정과 prompt jump를 전달한다. server는 controller의 input capability를 다시 확인하고
@@ -1077,6 +1078,17 @@ P3-e도 슬라이스로 나눈다(제품 통합이라 크다).
     최신 host의 선택 콘텐츠는 `runtime_selected_text_v1` host RPC가 SSOT이며, capability 없는 같은-major 구 host만 현재
     viewport projection에서 단일 행·block을 정확히, multi-row 선형은 화면 행마다 개행하는 degraded 복사를 한다.
     `scroll_and_extend`·viewport 전체 선택 parity는 후속이다.
+  - **P3-e4c-4(일반 key 입력모드 parity) ✅**: host-backed 일반 key 인코딩이 **placeholder core가 아니라 runtime observation**의
+    입력 모드를 쓴다. 관측에 `app_keypad`(DECKPAM)·`kitty_flags`(u5 — kitty keyboard 스택 최상단)를 optional로 추가했고
+    (DECCKM `app_cursor_keys`는 이미 있었다), host의 `observationOp`가 `core.application_keypad`·`core.kitty_flags.current().int()`를
+    lock-copy로 export한다. `AppSession.hostBackedEncodeOptions`가 활성 host-backed 터미널의 관측에서 `EncodeOptions`를 만들어
+    `frame_loop.handleKeyEvent`의 `encode_options_override`로 넘기고, `host.handleKeyEvent`는 override가 있으면 active
+    core(host-backed는 빈 placeholder라 host 모드를 모른다) 대신 그걸 인코더에 넘긴다. 로컬은 override=null이라 예전처럼 active
+    core의 실제 모드를 읽는다. 예전 경로는 placeholder만 읽어 host가 DECCKM/DECKPAM/kitty를 켜도 legacy 인코딩을 보냈다. 관측에
+    필드가 없는 구 host는 기본값(numeric·legacy)으로 폴백한다(mouse_tracking·bracketed_paste와 같은 optional 호환 계약,
+    `observation_wire.fieldIsBoolOrAbsent`·`fieldFitsUnsignedOrAbsent`). 검증: override가 placeholder core를 이겨 host의
+    DECCKM(화살표 SS3 `\x1bOA`)·kitty(escape `CSI 27u`)로 인코딩됨(host unit), 관측 wire round-trip으로 `app_keypad`·`kitty_flags`
+    적용과 구 host 필드 부재 시 폴백을 고정한다. 관측이 backend-neutral 단일 출처라 placeholder `surface.core` 직접 읽기 금지 계약도 지킨다.
   - **P3-e4d(parity gate) 🟨**: 실제 독립 host PTY의 OSC 7/2/5379→client observation, host core의
     OSC 7/2/133/5379 export, owned-copy/OOM-safe replace, attach initial metadata, changed-only event,
     malformed/stale revision과 stream별 coalescing, capability 없는 v2 client event 억제, observation barrier revision,
@@ -1095,9 +1107,9 @@ P3-e도 슬라이스로 나눈다(제품 통합이라 크다).
     `기존 input → scroll → 새 input → mouse RPC` 순서, request write hard-error connection invalidation,
     lifecycle request의 fail-always allocator OOM→EOF cleanup fallback을 자동 검증한다.
     focus/config/prompt의 backend-neutral core-command 경로는 bounded codec·controller auth·실 host reader core 적용과
-    focus `CSI I` PTY write까지 자동 검증한다. 남은 input parity gate는 일반 key의 DECCKM/DECKPAM/kitty 인코딩,
-    Reset Terminal/Clear Screen의 host 소유 core 적용, 고빈도 1003 hover, selection autoscroll·전체 선택·사용자 word
-    separator다. cwd/SSH destination/raw process argv는 trace와 실패 artifact에 남기지 않는다.
+    focus `CSI I` PTY write까지 자동 검증한다. 일반 key의 DECCKM/DECKPAM/kitty 인코딩 parity는 P3-e4c-4에서 완료했다. 남은
+    input parity gate는 Reset Terminal/Clear Screen의 host 소유 core 적용, 고빈도 1003 hover, selection autoscroll·전체
+    선택·사용자 word separator다. cwd/SSH destination/raw process argv는 trace와 실패 artifact에 남기지 않는다.
     현재 SSH drop/paste barrier는 GUI main thread에서 local host RPC를 기다리며 transport timeout 상한은 5초다. 정상 local
     socket에서는 즉시 끝나지만, stalled host에서도 UI를 멈추지 않는 async user-action state machine은 기본값 전환 전 성능 gate다.
 

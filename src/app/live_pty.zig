@@ -88,6 +88,36 @@ pub const LivePtySession = struct {
         request: pty.SpawnRequest,
         queue_capacity: usize,
     ) !void {
+        const session = try pty.PtySession.spawn(allocator, request);
+        return self.initWithSession(io, allocator, pty_id, session, queue_capacity);
+    }
+
+    /// Exec-restore용 초기화. `PreparedAdoption.materialize`가 만든 session은
+    /// child lifecycle을 아직 소유하지 않으므로, 이후 queue allocation이나
+    /// reader 준비가 실패해 normal `deinit`을 타도 child를 signal/reap하지 않는다.
+    pub fn initPreparedAdoption(
+        self: *LivePtySession,
+        io: std.Io,
+        allocator: std.mem.Allocator,
+        pty_id: runtime_mod.PtyId,
+        adoption: *pty.PtySession.PreparedAdoption,
+        queue_capacity: usize,
+    ) !void {
+        const session = adoption.materialize();
+        return self.initWithSession(io, allocator, pty_id, session, queue_capacity);
+    }
+
+    fn initWithSession(
+        self: *LivePtySession,
+        io: std.Io,
+        allocator: std.mem.Allocator,
+        pty_id: runtime_mod.PtyId,
+        session_value: pty.PtySession,
+        queue_capacity: usize,
+    ) !void {
+        var owned_session = session_value;
+        var session_transferred = false;
+        defer if (!session_transferred) owned_session.deinit();
         // 이 타입은 live process, fd, reader thread, queue를 한 단위로 소유한다.
         // 호출자가 각각의 deinit/close 순서를 기억하게 두면 실제 tab close와 smoke cleanup이
         // 서로 다른 수명 규칙을 갖게 되므로, app layer에는 이 owner만 노출한다.
@@ -115,7 +145,8 @@ pub const LivePtySession = struct {
         self.session = try allocator.create(pty.PtySession);
         var session_allocated = true;
         errdefer if (session_allocated) allocator.destroy(self.session);
-        self.session.* = try pty.PtySession.spawn(allocator, request);
+        self.session.* = owned_session;
+        session_transferred = true;
         var session_initialized = true;
         errdefer if (session_initialized) self.session.deinit();
 
@@ -206,6 +237,38 @@ pub const LivePtySession = struct {
         surface: *surface_mod.Surface,
         process_in_reader: bool,
     ) (runtime_mod.RuntimeError || std.Thread.SpawnError)!runtime_mod.RuntimeLink {
+        const link = try self.attachSurfaceConfigured(runtime, surface, process_in_reader);
+        self.reader.start() catch |err| {
+            runtime.detachSurface(link.surface_id);
+            self.link = null;
+            return err;
+        };
+        return link;
+    }
+
+    /// Restore graph가 reader thread 생성 가능성을 authority commit 전에
+    /// 증명하는 경로. Thread는 start gate에서 대기하므로 release 전에는
+    /// session/queue/core를 한 번도 역참조하지 않는다.
+    pub fn attachSurfacePrepared(
+        self: *LivePtySession,
+        runtime: *runtime_mod.SurfaceRuntime,
+        surface: *surface_mod.Surface,
+    ) (runtime_mod.RuntimeError || std.Thread.SpawnError)!runtime_mod.RuntimeLink {
+        const link = try self.attachSurfaceConfigured(runtime, surface, true);
+        self.reader.startPrepared() catch |err| {
+            runtime.detachSurface(link.surface_id);
+            self.link = null;
+            return err;
+        };
+        return link;
+    }
+
+    fn attachSurfaceConfigured(
+        self: *LivePtySession,
+        runtime: *runtime_mod.SurfaceRuntime,
+        surface: *surface_mod.Surface,
+        process_in_reader: bool,
+    ) runtime_mod.RuntimeError!runtime_mod.RuntimeLink {
         // attach link도 live PTY owner가 기록한다. closeAndDetach가 이 link를 이용해
         // runtime routing을 먼저 끊으므로, 어느 PTY가 어느 surface와 연결됐는지는
         // 이 owner가 알아야 한다.
@@ -220,12 +283,38 @@ pub const LivePtySession = struct {
             self.reader.setCommandQueue(self.command_queue);
             self.reader.setProcessing(&surface.core, &surface.core_mutex, self.io);
         }
-        self.reader.start() catch |err| {
-            runtime.detachSurface(link.surface_id);
-            self.link = null;
-            return err;
-        };
         return link;
+    }
+
+    pub fn preparedStartReached(self: *const LivePtySession) bool {
+        return self.reader.preparedStartReached();
+    }
+
+    /// Host-global graph가 전량 호출한 뒤에만 ownership commit 가능하다.
+    pub fn revalidatePreparedOwnership(self: *const LivePtySession) !void {
+        if (!self.reader.preparedStartReached()) return error.ReaderNotPrepared;
+        try self.session.revalidatePreparedOwnership();
+    }
+
+    /// 전량 revalidate 뒤의 실패 불가능한 child lifecycle owner 승격.
+    pub fn commitPreparedOwnership(self: *LivePtySession) void {
+        self.session.commitPreparedOwnership();
+    }
+
+    pub fn releasePreparedStart(self: *LivePtySession) void {
+        self.reader.releasePreparedStart();
+    }
+
+    /// Authority commit 전 restore 실패 전용 teardown. Gate를 abort/join한
+    /// 뒤 routing과 process-local storage만 해제한다. Session의
+    /// `owns_child_lifecycle=false`가 child signal/waitpid를 차단한다.
+    pub fn discardPreparedAdoption(
+        self: *LivePtySession,
+        runtime: *runtime_mod.SurfaceRuntime,
+    ) void {
+        self.reader.discardPreparedStart();
+        self.detachSurface(runtime);
+        self.deinit();
     }
 
     /// interactive(process_in_reader=true)면 메인 입력을 write_queue로 보내는 PtyIo(단일 writer, P2-3b).

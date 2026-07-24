@@ -882,7 +882,18 @@ fn encodeTaggedBytes(writer: *Writer, tag: u32, bytes: []const u8) Error!void {
 
 /// Host 전체 logical DTO. Runtime section은 반복 가능하지만 각 runtime 내부 field tag는 exactly-once다.
 pub fn encodeHost(allocator: std.mem.Allocator, host: HostView) Error![]u8 {
-    if (host.runtimes.len > max_runtime_count or host.next_handle == 0) return error.LimitExceeded;
+    if (host.runtimes.len > max_runtime_count or
+        host.next_handle == 0 or
+        host.next_handle == std.math.maxInt(u64))
+        return error.LimitExceeded;
+    for (host.runtimes) |runtime| {
+        // RuntimeManager reserves handle 0 as the opaque-pointer null value,
+        // and its next cursor must be strictly above every restored handle.
+        // Rejecting this in the codec keeps a valid handoff from restoring
+        // successfully only to collide on the first later runtime.spawn.
+        if (runtime.surface_id == 0 or runtime.surface_id >= host.next_handle)
+            return error.InvalidValue;
+    }
     var writer: Writer = .{ .allocator = allocator };
     errdefer writer.deinit();
     try writer.append(&([_]u8{0} ** envelope_header_len));
@@ -1050,8 +1061,12 @@ pub fn decodeHost(allocator: std.mem.Allocator, bytes: []const u8) Error!HostSta
         }
     }
     try payload.finish();
-    if (!saw_meta or declared_count != runtimes.items.len or next_handle == 0) return error.MissingRequiredField;
+    if (!saw_meta or declared_count != runtimes.items.len or next_handle == 0)
+        return error.MissingRequiredField;
+    if (next_handle == std.math.maxInt(u64)) return error.LimitExceeded;
     for (runtimes.items, 0..) |runtime, index| {
+        if (runtime.surface_id == 0 or runtime.surface_id >= next_handle)
+            return error.InvalidValue;
         for (runtimes.items[0..index]) |prior| {
             if (prior.runtime_id == runtime.runtime_id or prior.surface_id == runtime.surface_id or prior.fd_slot == runtime.fd_slot)
                 return error.DuplicateField;
@@ -1363,6 +1378,45 @@ test "handoff v1 host DTO rejects duplicate inherited slots without publishing a
     const encoded = try encodeHost(allocator, .{ .host_id = 1, .upgrade_epoch = 0, .next_handle = 3, .runtimes = &views });
     defer allocator.free(encoded);
     try std.testing.expectError(error.DuplicateField, decodeHost(allocator, encoded));
+}
+
+test "handoff v1 host DTO rejects zero and non-advancing restored handles" {
+    const allocator = std.testing.allocator;
+    var core = try TerminalCore.init(allocator, .{ .cols = 8, .rows = 2 });
+    defer core.deinit();
+    const base = RuntimeView{
+        .runtime_id = 1,
+        .surface_id = 0,
+        .child_pid = 101,
+        .cols = 8,
+        .rows = 2,
+        .resize_generation = 0,
+        .fd_slot = 40,
+        .pty_dev = 1,
+        .pty_ino = 2,
+        .pty_rdev = 3,
+        .core = &core,
+    };
+    try std.testing.expectError(error.InvalidValue, encodeHost(allocator, .{
+        .host_id = 1,
+        .upgrade_epoch = 0,
+        .next_handle = 1,
+        .runtimes = &.{base},
+    }));
+    var colliding = base;
+    colliding.surface_id = 7;
+    try std.testing.expectError(error.InvalidValue, encodeHost(allocator, .{
+        .host_id = 1,
+        .upgrade_epoch = 0,
+        .next_handle = 7,
+        .runtimes = &.{colliding},
+    }));
+    try std.testing.expectError(error.LimitExceeded, encodeHost(allocator, .{
+        .host_id = 1,
+        .upgrade_epoch = 0,
+        .next_handle = std.math.maxInt(u64),
+        .runtimes = &.{},
+    }));
 }
 
 test "handoff v1 host DTO allocation failure never publishes a partial runtime set" {

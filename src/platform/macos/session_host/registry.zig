@@ -147,10 +147,41 @@ pub const TerminalRuntimeRegistry = struct {
     /// runtime을 등록한다(server가 실 spawn 후). 초기 크기는 clamp된다. 같은 id가 이미 있으면 DuplicateRuntime.
     /// 반환된 포인터는 안정 heap 슬롯이라 server가 `runtime`에 실 handle을 실을 수 있다.
     pub fn register(self: *TerminalRuntimeRegistry, id: RuntimeId, cols: u16, rows: u16) RegistryError!*RuntimeEntry {
+        return self.registerExact(id, cols, rows, 0, null);
+    }
+
+    /// Exec-restore graph가 decoded resize generation과 opaque live handle을
+    /// 한 번에 publish한다. 연결-local controller/observer/sequence는
+    /// RuntimeEntry 기본값으로 재구성되어 부분 entry가 관찰되지 않는다.
+    pub fn registerRestored(
+        self: *TerminalRuntimeRegistry,
+        id: RuntimeId,
+        cols: u16,
+        rows: u16,
+        resize_generation: u64,
+        runtime: *anyopaque,
+    ) RegistryError!*RuntimeEntry {
+        return self.registerExact(id, cols, rows, resize_generation, runtime);
+    }
+
+    fn registerExact(
+        self: *TerminalRuntimeRegistry,
+        id: RuntimeId,
+        cols: u16,
+        rows: u16,
+        resize_generation: u64,
+        runtime: ?*anyopaque,
+    ) RegistryError!*RuntimeEntry {
         if (self.entries.contains(id)) return error.DuplicateRuntime;
         const entry = self.allocator.create(RuntimeEntry) catch return error.OutOfMemory;
         errdefer self.allocator.destroy(entry);
-        entry.* = .{ .id = id, .cols = clampCols(cols), .rows = clampRows(rows) };
+        entry.* = .{
+            .id = id,
+            .cols = clampCols(cols),
+            .rows = clampRows(rows),
+            .resize_generation = resize_generation,
+            .runtime = runtime,
+        };
         self.entries.put(self.allocator, id, entry) catch return error.OutOfMemory;
         return entry;
     }
@@ -453,4 +484,15 @@ test "registry: server can stash an opaque runtime handle on the entry" {
     const e = try reg.register(1, 80, 24);
     e.runtime = &fake_runtime; // server가 실 LivePtySession/TerminalCore handle을 여기 싣는다(state machine 미해석).
     try testing.expectEqual(@as(*anyopaque, @ptrCast(&fake_runtime)), reg.get(1).?.runtime.?);
+}
+
+test "registry: restored registration publishes generation and handle atomically" {
+    var registry = TerminalRuntimeRegistry.init(testing.allocator);
+    defer registry.deinit();
+    var fake_runtime: u32 = 9;
+    const entry = try registry.registerRestored(0xAA, 120, 40, 77, &fake_runtime);
+    try testing.expectEqual(@as(u64, 77), entry.resize_generation);
+    try testing.expectEqual(@as(?StreamId, null), entry.controller);
+    try testing.expectEqual(@as(usize, 0), entry.observers.items.len);
+    try testing.expectEqual(@as(*anyopaque, @ptrCast(&fake_runtime)), entry.runtime.?);
 }

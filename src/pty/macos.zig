@@ -215,6 +215,11 @@ pub const PtySession = struct {
     master_fd: std.atomic.Value(std.posix.fd_t),
     child_pid: std.c.pid_t,
     size: terminal.Size,
+    // Normal spawn은 true다. Exec-restore는 working fd/wake pipe를 먼저
+    // materialize하되 전체 host graph가 durable commit되기 전까지 false로
+    // 둔다. false인 session의 close/deinit은 descriptor만 회수하고 child에
+    // signal/waitpid를 절대 하지 않는다.
+    owns_child_lifecycle: std.atomic.Value(bool) = std.atomic.Value(bool).init(true),
     exited: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     closing: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     reaping: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
@@ -229,6 +234,7 @@ pub const PtySession = struct {
     /// 증명하는 lifecycle guard다.
     pub fn upgradeEligible(self: *const PtySession) bool {
         return self.master_fd.load(.acquire) >= 0 and
+            self.owns_child_lifecycle.load(.acquire) and
             !self.exited.load(.acquire) and
             !self.closing.load(.acquire) and
             !self.reaping.load(.acquire);
@@ -361,20 +367,31 @@ pub const PtySession = struct {
             self.wake_write_fd = -1;
         }
 
-        /// 이 호출부터 반환된 PtySession이 child/waitpid lifecycle owner다. Caller는 전체 host commit이 확정된
-        /// 뒤 inherited slot을 닫고 reader start gate를 release해야 한다.
-        pub fn commit(self: *PreparedAdoption) !PtySession {
+        /// Host-global ownership transfer 직전의 마지막 fallible child probe.
+        /// 다중 runtime caller는 **전량** revalidate한 뒤에만 각 항목의
+        /// `materialize`를 수행한다. 이후 graph가 materialized session들을
+        /// 다시 전량 검증하고 `commitPreparedOwnership`을 호출해야 앞
+        /// runtime만 새 owner가 되는 partial commit을 피할 수 있다.
+        pub fn revalidate(self: *const PreparedAdoption) !void {
             std.debug.assert(!self.committed);
             // prepare와 host-global all-or-none commit 사이에는 다른 runtime 준비, owner lease 검증, allocation이
             // 들어간다. 그 사이 child가 끝나면 kill(pid, 0)는 zombie에도 성공하므로 commit 직전 WNOWAIT probe가
             // 마지막 권위다. status를 소비하지 않아 old/rollback owner가 exact-once로 reap할 수 있다.
             if (probeChildExitedWithoutReap(self.child_pid) catch return error.InvalidInheritedPty)
                 return error.InvalidInheritedPty;
+        }
+
+        /// Working descriptor와 wake pipe를 PtySession 주소에 옮기지만 child
+        /// lifecycle owner로는 아직 승격하지 않는다. 이 상태의 normal deinit은
+        /// child를 건드리지 않으므로 이후 runtime 준비 실패가 rollback-safe하다.
+        pub fn materialize(self: *PreparedAdoption) PtySession {
+            std.debug.assert(!self.committed);
             self.committed = true;
             const result = PtySession{
                 .master_fd = std.atomic.Value(std.posix.fd_t).init(self.working_fd),
                 .child_pid = self.child_pid,
                 .size = self.size,
+                .owns_child_lifecycle = .init(false),
                 .wake_read_fd = self.wake_read_fd,
                 .wake_write_fd = std.atomic.Value(std.posix.fd_t).init(self.wake_write_fd),
             };
@@ -384,6 +401,25 @@ pub const PtySession = struct {
             return result;
         }
     };
+
+    /// Materialized restore session의 마지막 fallible child probe. Host-global
+    /// graph는 전량 성공을 확인한 뒤에만 `commitPreparedOwnership`을 호출한다.
+    pub fn revalidatePreparedOwnership(self: *const PtySession) !void {
+        if (self.owns_child_lifecycle.load(.acquire) or
+            self.master_fd.load(.acquire) < 0 or
+            self.closing.load(.acquire) or
+            self.exited.load(.acquire) or
+            self.reaping.load(.acquire))
+            return error.InvalidInheritedPty;
+        if (probeChildExitedWithoutReap(self.child_pid) catch return error.InvalidInheritedPty)
+            return error.InvalidInheritedPty;
+    }
+
+    /// 전량 revalidate 이후의 allocation/syscall-free owner transfer.
+    pub fn commitPreparedOwnership(self: *PtySession) void {
+        std.debug.assert(!self.owns_child_lifecycle.load(.acquire));
+        self.owns_child_lifecycle.store(true, .release);
+    }
 
     pub fn spawn(allocator: std.mem.Allocator, request: types.SpawnRequest) !PtySession {
         try validateRequest(request);
@@ -473,7 +509,9 @@ pub const PtySession = struct {
         // closing을 올린 뒤 self-pipe로 reader의 blocking poll을 즉시 깨운다.
         self.signalWake();
 
-        if (!self.exited.load(.acquire) and !self.reaping.swap(true, .acq_rel)) {
+        if (self.owns_child_lifecycle.load(.acquire) and
+            !self.exited.load(.acquire) and !self.reaping.swap(true, .acq_rel))
+        {
             shutdownChild(self.child_pid);
             self.exited.store(true, .release);
         }
@@ -1514,7 +1552,7 @@ test "prepared inherited PTY adoption rechecks child liveness at commit without 
     while (attempts < 2000 and !(try session.childExitedWithoutReap())) : (attempts += 1)
         sleepMillis(1);
     try std.testing.expect(try session.childExitedWithoutReap());
-    try std.testing.expectError(error.InvalidInheritedPty, prepared.commit());
+    try std.testing.expectError(error.InvalidInheritedPty, prepared.revalidate());
     try std.testing.expectEqual(types.ExitStatus{ .exited = 9 }, (try session.reapIfExited()).?);
 }
 

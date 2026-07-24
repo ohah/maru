@@ -132,6 +132,68 @@ pub const Published = struct {
     }
 };
 
+const LoadedExact = struct {
+    manifest: Manifest,
+    identity: Published.FileIdentity,
+};
+
+/// Existing `restoring` manifest를 pathname 재생성 없이 exact generation으로
+/// 채택하기 전의 rollback-safe token. `discard`는 메모리만 해제하고 disk
+/// manifest를 유지해 rollback image가 같은 authority를 이어받을 수 있다.
+pub const PreparedAdoption = struct {
+    const Payload = struct {
+        publication: Published,
+        manifest: Manifest,
+    };
+
+    payload: ?Payload,
+
+    pub const Adopted = struct {
+        publication: Published,
+        manifest: Manifest,
+
+        pub fn deinit(self: *Adopted) void {
+            self.publication.deinit();
+            self.manifest.deinit();
+            self.* = undefined;
+        }
+    };
+
+    pub fn descriptor(self: *const PreparedAdoption) Descriptor {
+        return self.payload.?.manifest.descriptor();
+    }
+
+    pub fn revalidate(self: *const PreparedAdoption, session_dir: [:0]const u8) Error!void {
+        const payload = self.payload orelse return error.InvalidManifest;
+        var actual = try loadExact(
+            payload.manifest.allocator,
+            session_dir,
+            payload.manifest.host_id,
+        );
+        defer actual.manifest.deinit();
+        if (actual.identity.dev != payload.publication.identity.dev or
+            actual.identity.ino != payload.publication.identity.ino or
+            !sameDescriptor(actual.manifest.descriptor(), payload.manifest.descriptor()))
+            return error.InvalidManifest;
+    }
+
+    pub fn commit(self: *PreparedAdoption) Error!Adopted {
+        const payload = self.payload orelse return error.InvalidManifest;
+        self.payload = null;
+        return .{
+            .publication = payload.publication,
+            .manifest = payload.manifest,
+        };
+    }
+
+    pub fn discard(self: *PreparedAdoption) void {
+        var payload = self.payload orelse return;
+        self.payload = null;
+        payload.publication.deinitMemory();
+        payload.manifest.deinit();
+    }
+};
+
 pub fn hostsRootPathIn(buf: []u8, session_dir: []const u8) error{NoSpaceLeft}![:0]u8 {
     return std.fmt.bufPrintZ(buf, "{s}/hosts", .{trimTrailingSlash(session_dir)});
 }
@@ -212,11 +274,59 @@ pub fn publish(
     };
 }
 
+pub fn prepareAdoptRestoring(
+    allocator: std.mem.Allocator,
+    session_dir: [:0]const u8,
+    host_id: u128,
+    upgrade_epoch: u64,
+    endpoint: []const u8,
+) Error!PreparedAdoption {
+    var loaded = try loadExact(allocator, session_dir, host_id);
+    errdefer loaded.manifest.deinit();
+    if (loaded.manifest.lifecycle != .restoring or
+        loaded.manifest.upgrade_epoch != upgrade_epoch or
+        !std.mem.eql(u8, loaded.manifest.endpoint, endpoint))
+        return error.InvalidManifest;
+
+    var hosts_buf: [640]u8 = undefined;
+    const hosts_root = hostsRootPathIn(&hosts_buf, session_dir) catch return error.InvalidDirectory;
+    var host_buf: [768]u8 = undefined;
+    const host_dir = hostDirPathIn(&host_buf, session_dir, host_id) catch return error.InvalidDirectory;
+    var manifest_buf: [832]u8 = undefined;
+    const manifest_path = manifestPathIn(&manifest_buf, session_dir, host_id) catch
+        return error.InvalidDirectory;
+    const owned_hosts_root = allocator.dupeZ(u8, hosts_root) catch return error.OutOfMemory;
+    errdefer allocator.free(owned_hosts_root);
+    const owned_host_dir = allocator.dupeZ(u8, host_dir) catch return error.OutOfMemory;
+    errdefer allocator.free(owned_host_dir);
+    const owned_manifest = allocator.dupeZ(u8, manifest_path) catch return error.OutOfMemory;
+    return .{
+        .payload = .{
+            .publication = .{
+                .allocator = allocator,
+                .hosts_root = owned_hosts_root,
+                .host_dir = owned_host_dir,
+                .manifest_path = owned_manifest,
+                .identity = loaded.identity,
+            },
+            .manifest = loaded.manifest,
+        },
+    };
+}
+
 pub fn load(
     allocator: std.mem.Allocator,
     session_dir: [:0]const u8,
     host_id: u128,
 ) Error!Manifest {
+    return (try loadExact(allocator, session_dir, host_id)).manifest;
+}
+
+fn loadExact(
+    allocator: std.mem.Allocator,
+    session_dir: [:0]const u8,
+    host_id: u128,
+) Error!LoadedExact {
     if (host_id == 0) return error.InvalidManifest;
     try validateOwnerDir(session_dir);
     var hosts_buf: [640]u8 = undefined;
@@ -255,7 +365,10 @@ pub fn load(
     errdefer manifest.deinit();
     if (manifest.host_id != host_id) return error.InvalidManifest;
     try validateDescriptor(manifest.descriptor(), session_dir);
-    return manifest;
+    return .{
+        .manifest = manifest,
+        .identity = .{ .dev = stat.dev, .ino = stat.ino },
+    };
 }
 
 pub fn encode(allocator: std.mem.Allocator, descriptor: Descriptor) Error![]u8 {
@@ -538,6 +651,16 @@ fn validateDescriptorShape(descriptor: Descriptor) Error!void {
         return error.InvalidManifest;
 }
 
+fn sameDescriptor(a: Descriptor, b: Descriptor) bool {
+    return a.host_id == b.host_id and
+        a.protocol_major == b.protocol_major and
+        a.screen_codec_version == b.screen_codec_version and
+        a.upgrade_epoch == b.upgrade_epoch and
+        a.lifecycle == b.lifecycle and
+        std.mem.eql(u8, a.build_id, b.build_id) and
+        std.mem.eql(u8, a.endpoint, b.endpoint);
+}
+
 fn writeAll(fd: c.fd_t, bytes: []const u8) Error!void {
     var offset: usize = 0;
     while (offset < bytes.len) {
@@ -650,6 +773,71 @@ test "host manifest publish-load is atomic owner-only and exact-host keyed" {
     defer updated.deinit();
     try std.testing.expectEqual(@as(u64, 2), updated.upgrade_epoch);
     try std.testing.expectEqual(Lifecycle.restoring, updated.lifecycle);
+}
+
+test "host manifest restoring adoption discard preserves disk and commit transfers exact cleanup authority" {
+    var dir_buf: [192]u8 = undefined;
+    const dir = std.fmt.bufPrintZ(
+        &dir_buf,
+        "/tmp/maru-host-manifest-adopt-{d}",
+        .{c.getpid()},
+    ) catch return error.SkipZigTest;
+    _ = c.mkdir(dir.ptr, 0o700);
+    defer _ = c.rmdir(dir.ptr);
+    const host_id: u128 = 0xAD07;
+    var endpoint_buf: [128]u8 = undefined;
+    const endpoint = try short_endpoint.currentSocketPathIn(&endpoint_buf, host_id);
+    const descriptor: Descriptor = .{
+        .host_id = host_id,
+        .build_id = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        .protocol_major = 2,
+        .screen_codec_version = 2,
+        .upgrade_epoch = 4,
+        .lifecycle = .restoring,
+        .endpoint = endpoint,
+    };
+    var published = try publish(std.testing.allocator, dir, descriptor);
+
+    var replaced = try prepareAdoptRestoring(
+        std.testing.allocator,
+        dir,
+        host_id,
+        descriptor.upgrade_epoch,
+        endpoint,
+    );
+    // Descriptor bytes가 같아도 atomic republish가 만든 새 inode는 다른
+    // authority generation이다. Prepared token이 이를 채택하면 old cleanup
+    // handle과 새 manifest가 섞이므로 exact identity로 거부한다.
+    try published.republish(descriptor);
+    try std.testing.expectError(error.InvalidManifest, replaced.revalidate(dir));
+    replaced.discard();
+
+    var discarded = try prepareAdoptRestoring(
+        std.testing.allocator,
+        dir,
+        host_id,
+        descriptor.upgrade_epoch,
+        endpoint,
+    );
+    discarded.discard();
+    var still_present = try load(std.testing.allocator, dir, host_id);
+    still_present.deinit();
+
+    var prepared = try prepareAdoptRestoring(
+        std.testing.allocator,
+        dir,
+        host_id,
+        descriptor.upgrade_epoch,
+        endpoint,
+    );
+    try prepared.revalidate(dir);
+    // Same-PID exec loses the old Published value without withdrawing disk.
+    // Mirror that ownership move explicitly in the process-local test.
+    published.deinitMemory();
+    var adopted = try prepared.commit();
+    defer adopted.deinit();
+    try std.testing.expectEqual(Lifecycle.restoring, adopted.manifest.lifecycle);
+    try std.testing.expectError(error.InvalidManifest, prepared.commit());
 }
 
 test "host manifest initial publish is exclusive and old owner cleanup cannot unlink a replacement generation" {

@@ -255,7 +255,9 @@ fn rollbackTargetV2(allocator: std.mem.Allocator, result_path: []const u8, owner
         .{ .dev = runtime.pty_dev, .ino = runtime.pty_ino, .rdev = runtime.pty_rdev },
     );
     defer prepared.discard();
-    var session = try prepared.commit();
+    try prepared.revalidate();
+    var session = prepared.materialize();
+    session.commitPreparedOwnership();
     defer session.deinit();
     _ = c.close(pty_slot);
     _ = c.close(primary_state_slot);
@@ -343,7 +345,9 @@ fn restore(ctx: Context) !void {
     const owner_z = try std.fmt.allocPrintSentinel(allocator, "{s}/owner.lock", .{ctx.owner_dir}, 0);
     defer allocator.free(owner_z);
     try std.testing.expectError(error.AlreadyOwned, session_host.owner_lease.OwnerLease.acquire(owner_z));
-    var session = try prepared.commit();
+    try prepared.revalidate();
+    var session = prepared.materialize();
+    session.commitPreparedOwnership();
     defer session.deinit();
     _ = c.close(pty_slot);
     _ = c.close(primary_state_slot);

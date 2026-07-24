@@ -223,6 +223,24 @@ pub const SurfaceRuntime = struct {
         }
     }
 
+    /// Exec-restore의 irreversible commit 직전 exact routing graph 검증용.
+    /// 개수만 같아도 surface/PTY가 서로 바뀐 stale link일 수 있으므로 최종
+    /// owner pointer와 PTY adapter context까지 한 번에 대조한다.
+    pub fn linkMatches(
+        self: *const SurfaceRuntime,
+        surface_id: SurfaceId,
+        surface: *const surface_mod.Surface,
+        pty_id: PtyId,
+        pty_io_ctx: *const anyopaque,
+    ) bool {
+        const index = self.findBySurface(surface_id) orelse return false;
+        const link = self.links.items[index];
+        return link.surface_id == surface_id and
+            link.surface == surface and
+            link.pty_id == pty_id and
+            link.pty_io.ctx == pty_io_ctx;
+    }
+
     pub fn writeInput(self: *SurfaceRuntime, surface_id: SurfaceId, input: TerminalInput) RuntimeError!void {
         const link = self.linkBySurface(surface_id) orelse return error.UnknownSurface;
         if (link.surface.process_state == .exited) return error.ProcessExited;

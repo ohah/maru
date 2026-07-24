@@ -9,8 +9,15 @@
 //! quiesce가 exec 전에 증명해야 하는 전제다. 단일 출처: docs/session-host-upgrade.md §8·§11.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const maru = @import("maru");
-const RuntimeManager = @import("runtime_manager.zig").RuntimeManager;
+// Darwin syscall owner types는 non-macOS compile에서 import 자체를 하지
+// 않는다. 개별 field validate만 조건부로 두면 import 분석 중 fstatat 등
+// Darwin API에서 먼저 깨져 portability CI가 inventory를 수집하지 못한다.
+const RuntimeManager = if (builtin.os.tag == .macos)
+    @import("runtime_manager.zig").RuntimeManager
+else
+    void;
 
 pub const Disposition = enum {
     /// Logical value/content is part of the versioned handoff state.
@@ -88,7 +95,10 @@ const PtyWriteQueue = maru.app.PtyWriteQueue;
 const CoreCommandQueue = maru.app.CoreCommandQueue;
 const TerminalRuntimeRegistry = @import("registry.zig").TerminalRuntimeRegistry;
 const RuntimeEntry = @import("registry.zig").RuntimeEntry;
-const SocketServer = @import("socket_server.zig").SocketServer;
+const SocketServer = if (builtin.os.tag == .macos)
+    @import("socket_server.zig").SocketServer
+else
+    void;
 const Surface = maru.session.Surface;
 const LiveSurfaceTerminal = maru.app.LiveSurface.Terminal;
 const LiveRegistry = maru.app.in_process_term_backend.LiveRegistry;
@@ -390,8 +400,8 @@ pub const pty_session_groups = [_]Group{
     },
     .{
         .disposition = .reconstructed,
-        .fields = &.{ "wake_read_fd", "wake_write_fd" },
-        .why = "wake pipes are CLOEXEC process-local synchronization and must be recreated",
+        .fields = &.{ "wake_read_fd", "wake_write_fd", "owns_child_lifecycle" },
+        .why = "wake pipes are recreated and target sessions remain non-owning until the host-global graph commits",
     },
     .{
         .disposition = .must_be_empty,
@@ -675,7 +685,12 @@ pub fn dispositionOf(comptime T: type, comptime field_name: []const u8) ?Disposi
     if (T == KittyGraphicsCommand) return dispositionIn(&kitty_graphics_command_groups, field_name);
     if (T == Style) return dispositionIn(&style_groups, field_name);
     if (T == Cell) return dispositionIn(&cell_groups, field_name);
-    if (T == PtySession) return dispositionIn(&pty_session_groups, field_name);
+    // `maru.pty.PtySession` is the real macOS owner only on macOS. Linux CI
+    // intentionally sees the portability stub, whose fields are not an exec
+    // handoff contract and therefore must not be classified as if it were the
+    // Darwin implementation.
+    if (builtin.os.tag == .macos and T == PtySession)
+        return dispositionIn(&pty_session_groups, field_name);
     if (T == PtyReader) return dispositionIn(&pty_reader_groups, field_name);
     if (T == PtyEventQueue) return dispositionIn(&pty_event_queue_groups, field_name);
     if (T == PtyWriteQueue) return dispositionIn(&pty_write_queue_groups, field_name);
@@ -683,8 +698,10 @@ pub fn dispositionOf(comptime T: type, comptime field_name: []const u8) ?Disposi
     if (T == LivePtySession) return dispositionIn(&live_pty_session_groups, field_name);
     if (T == RuntimeEntry) return dispositionIn(&runtime_entry_groups, field_name);
     if (T == TerminalRuntimeRegistry) return dispositionIn(&terminal_runtime_registry_groups, field_name);
-    if (T == RuntimeManager) return dispositionIn(&runtime_manager_groups, field_name);
-    if (T == SocketServer) return dispositionIn(&socket_server_groups, field_name);
+    if (builtin.os.tag == .macos and T == RuntimeManager)
+        return dispositionIn(&runtime_manager_groups, field_name);
+    if (builtin.os.tag == .macos and T == SocketServer)
+        return dispositionIn(&socket_server_groups, field_name);
     if (T == Surface) return dispositionIn(&surface_groups, field_name);
     if (T == LiveSurfaceTerminal) return dispositionIn(&live_surface_terminal_groups, field_name);
     if (T == LiveRegistryEntry) return dispositionIn(&live_registry_entry_groups, field_name);
@@ -708,7 +725,12 @@ comptime {
     validate(KittyGraphicsCommand, "KittyGraphicsCommand", &kitty_graphics_command_groups);
     validate(Style, "Style", &style_groups);
     validate(Cell, "Cell", &cell_groups);
-    validate(PtySession, "PtySession", &pty_session_groups);
+    // The inventory describes the concrete Darwin PTY owner. On non-macOS
+    // targets `PtySession` is an API-compatible unsupported stub, so applying
+    // Darwin field names to it would turn the portability facade itself into a
+    // false compile failure.
+    if (builtin.os.tag == .macos)
+        validate(PtySession, "PtySession", &pty_session_groups);
     validate(PtyReader, "PtyReader", &pty_reader_groups);
     validate(PtyEventQueue, "PtyEventQueue", &pty_event_queue_groups);
     validate(PtyWriteQueue, "PtyWriteQueue", &pty_write_queue_groups);
@@ -716,8 +738,10 @@ comptime {
     validate(LivePtySession, "LivePtySession", &live_pty_session_groups);
     validate(RuntimeEntry, "RuntimeEntry", &runtime_entry_groups);
     validate(TerminalRuntimeRegistry, "TerminalRuntimeRegistry", &terminal_runtime_registry_groups);
-    validate(RuntimeManager, "RuntimeManager", &runtime_manager_groups);
-    validate(SocketServer, "SocketServer", &socket_server_groups);
+    if (builtin.os.tag == .macos) {
+        validate(RuntimeManager, "RuntimeManager", &runtime_manager_groups);
+        validate(SocketServer, "SocketServer", &socket_server_groups);
+    }
     validate(Surface, "Surface", &surface_groups);
     validate(LiveSurfaceTerminal, "LiveSurface.Terminal", &live_surface_terminal_groups);
     validate(LiveRegistryEntry, "LiveRegistry.Entry", &live_registry_entry_groups);

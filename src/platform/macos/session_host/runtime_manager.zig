@@ -362,6 +362,252 @@ pub const RuntimeManager = struct {
         }
     };
 
+    const RestoredGraphItem = struct {
+        runtime_id: u128,
+        handle: RuntimeHandle,
+        terminal: *maru.app.live_pty.LiveSurface.Terminal,
+        expected_master: maru.pty.PtySession.MasterIdentity,
+        expected_size: maru.terminal.Size,
+        expected_resize_generation: u64,
+    };
+
+    const RestoreGraphPhase = enum {
+        prepared,
+        validated,
+        ownership_committed,
+        readers_released,
+    };
+
+    /// Target/rollback restore의 host-global all-or-none graph guard.
+    ///
+    /// 각 LivePtySession은 heap-pinned final registry slot에서 조립되지만
+    /// child lifecycle owner는 아직 아니다. Reader thread도 start gate에서
+    /// 대기한다. `discard`는 working fd/thread/allocation만 회수하고 inherited
+    /// slots 및 child에는 손대지 않으므로 rollback exec가 가능하다.
+    pub const PreparedRestoredGraph = struct {
+        manager: *RuntimeManager,
+        items: [upgrade_limits.max_runtime_count]RestoredGraphItem = undefined,
+        count: usize = 0,
+        expected_next_handle: RuntimeHandle,
+        phase: RestoreGraphPhase = .prepared,
+
+        pub fn allReadersPrepared(self: *const PreparedRestoredGraph) bool {
+            for (self.items[0..self.count]) |item|
+                if (!item.terminal.live_pty.preparedStartReached()) return false;
+            return true;
+        }
+
+        /// Authority commit 직전의 마지막 fallible frontier. 모든 runtime을
+        /// 먼저 검증하고 이 함수 안에서는 ownership을 하나도 바꾸지 않는다.
+        pub fn revalidateAll(self: *PreparedRestoredGraph) !ValidatedRestoredGraph {
+            if (self.phase != .prepared or
+                self.manager.next_handle != self.expected_next_handle or
+                self.manager.live_registry.count() != self.count or
+                self.manager.host_registry.count() != self.count or
+                self.manager.surface_runtime.links.items.len != self.count)
+                return error.RestoreGraphChanged;
+            for (self.items[0..self.count]) |item| {
+                const entry = self.manager.host_registry.get(item.runtime_id) orelse
+                    return error.RestoreGraphChanged;
+                if (entry.runtime == null or @intFromPtr(entry.runtime.?) != item.handle or
+                    entry.cols != item.expected_size.cols or
+                    entry.rows != item.expected_size.rows or
+                    entry.resize_generation != item.expected_resize_generation)
+                    return error.RestoreGraphChanged;
+                const terminal_slot = self.manager.backend_impl.terminalForHostLifecycle(item.handle) orelse
+                    return error.RestoreGraphChanged;
+                if (terminal_slot != item.terminal or terminal_slot.surface.id != item.handle or
+                    terminal_slot.live_pty.pty_id != item.handle or
+                    terminal_slot.surface.core.size.cols != item.expected_size.cols or
+                    terminal_slot.surface.core.size.rows != item.expected_size.rows)
+                    return error.RestoreGraphChanged;
+                const link = terminal_slot.live_pty.link orelse
+                    return error.RestoreGraphChanged;
+                const pty_io = terminal_slot.live_pty.ptyIo(true);
+                if (link.surface_id != item.handle or link.pty_id != item.handle or
+                    !self.manager.surface_runtime.linkMatches(
+                        item.handle,
+                        &terminal_slot.surface,
+                        item.handle,
+                        pty_io.ctx,
+                    ))
+                    return error.RestoreGraphChanged;
+                const actual_master = terminal_slot.live_pty.session.masterIdentity() catch
+                    return error.RestoreGraphChanged;
+                if (actual_master.dev != item.expected_master.dev or
+                    actual_master.ino != item.expected_master.ino or
+                    actual_master.rdev != item.expected_master.rdev)
+                    return error.RestoreGraphChanged;
+                const actual_size = terminal_slot.live_pty.session.currentSize() catch
+                    return error.RestoreGraphChanged;
+                if (actual_size.cols != item.expected_size.cols or
+                    actual_size.rows != item.expected_size.rows)
+                    return error.RestoreGraphChanged;
+                terminal_slot.live_pty.revalidatePreparedOwnership() catch
+                    return error.RestoreGraphChanged;
+            }
+            self.phase = .validated;
+            return .{ .graph = self };
+        }
+
+        pub fn discard(self: *PreparedRestoredGraph) void {
+            // Irreversible ownership commit 뒤 stale errdefer/defer가 남아 있어도
+            // child를 종료하지 않는다. Committed graph teardown은 정상 manager
+            // lifetime만 소유한다.
+            if (self.phase == .ownership_committed or self.phase == .readers_released)
+                return;
+            while (self.count > 0) {
+                self.count -= 1;
+                const item = self.items[self.count];
+                self.manager.discardRestoredItem(item);
+            }
+            self.manager.next_handle = 1;
+        }
+    };
+
+    /// `PreparedRestoredGraph.revalidateAll`만 만들 수 있는 commit token.
+    /// Durable manifest authority가 성공한 뒤 이 token을 소비하는 전환에는
+    /// allocation/syscall이 없다.
+    pub const ValidatedRestoredGraph = struct {
+        graph: *PreparedRestoredGraph,
+
+        pub fn commitOwnership(self: *ValidatedRestoredGraph) CommittedRestoredGraph {
+            // 단일-thread bootstrap에서 같은 token 복사본이 재사용돼도 child
+            // ownership store를 중복하지 않고 같은 committed view만 돌려준다.
+            if (self.graph.phase == .validated) {
+                for (self.graph.items[0..self.graph.count]) |item|
+                    item.terminal.live_pty.commitPreparedOwnership();
+                self.graph.phase = .ownership_committed;
+            }
+            std.debug.assert(self.graph.phase == .ownership_committed);
+            return .{ .graph = self.graph };
+        }
+    };
+
+    pub const CommittedRestoredGraph = struct {
+        graph: *PreparedRestoredGraph,
+
+        /// Inherited slot cleanup과 non-CLOEXEC-empty 검증 뒤 전량 release한다.
+        /// 호출은 idempotent라 stale cleanup/token copy도 reader를 두 번 시작하지 않는다.
+        pub fn releaseReaders(self: *CommittedRestoredGraph) void {
+            if (self.graph.phase == .readers_released) return;
+            std.debug.assert(self.graph.phase == .ownership_committed);
+            for (self.graph.items[0..self.graph.count]) |item|
+                item.terminal.live_pty.releasePreparedStart();
+            self.graph.phase = .readers_released;
+        }
+    };
+
+    /// Decoded handoff를 final manager graph에 한 번만 결합하는 SSOT.
+    /// Caller는 empty, stable-address manager를 제공하고 반환 guard가
+    /// release되기 전까지 manager를 이동하거나 외부 server에 publish하지 않는다.
+    pub fn prepareRestoredGraph(
+        self: *RuntimeManager,
+        host: *handoff_codec.HostState,
+    ) !PreparedRestoredGraph {
+        if (self.live_registry.count() != 0 or self.host_registry.count() != 0 or
+            self.surface_runtime.links.items.len != 0 or self.next_handle != 1)
+            return error.RestoreDestinationNotEmpty;
+        if (host.next_handle == 0 or
+            host.next_handle == std.math.maxInt(RuntimeHandle) or
+            host.runtimes.len > upgrade_limits.max_runtime_count)
+            return error.InvalidRestoreGraph;
+
+        var prepared = PreparedRestoredGraph{
+            .manager = self,
+            .expected_next_handle = host.next_handle,
+        };
+        errdefer prepared.discard();
+
+        for (host.runtimes) |*runtime| {
+            if (runtime.surface_id == 0 or runtime.surface_id >= host.next_handle)
+                return error.InvalidRestoreGraph;
+            var adoption = try maru.pty.PtySession.PreparedAdoption.prepareExact(
+                runtime.fd_slot,
+                runtime.child_pid,
+                .{ .cols = runtime.cols, .rows = runtime.rows },
+                .{
+                    .dev = runtime.pty_dev,
+                    .ino = runtime.pty_ino,
+                    .rdev = runtime.pty_rdev,
+                },
+            );
+            errdefer adoption.discard();
+
+            const slot = try self.live_registry.create(runtime.surface_id, 0);
+            slot.* = .{ .terminal = .{ .internal_allocator = self.allocator } };
+            var surface_initialized = false;
+            var live_initialized = false;
+            var reader_prepared = false;
+            var entry_registered = false;
+            errdefer {
+                if (entry_registered) self.host_registry.unregister(runtime.runtime_id);
+                if (reader_prepared) {
+                    slot.terminal.live_pty.discardPreparedAdoption(&self.surface_runtime);
+                    live_initialized = false;
+                }
+                if (live_initialized) slot.terminal.live_pty.deinit();
+                if (surface_initialized) slot.terminal.surface.deinit();
+                self.live_registry.removeUninitialized(runtime.surface_id) catch {};
+            }
+
+            slot.terminal.surface = try maru.session.Surface.initRestored(
+                self.allocator,
+                runtime.surface_id,
+                &runtime.core,
+            );
+            surface_initialized = true;
+            try slot.terminal.live_pty.initPreparedAdoption(
+                self.io,
+                self.allocator,
+                runtime.surface_id,
+                &adoption,
+                default_queue_capacity,
+            );
+            live_initialized = true;
+            _ = try slot.terminal.live_pty.attachSurfacePrepared(
+                &self.surface_runtime,
+                &slot.terminal.surface,
+            );
+            reader_prepared = true;
+            _ = try self.host_registry.registerRestored(
+                runtime.runtime_id,
+                runtime.cols,
+                runtime.rows,
+                runtime.resize_generation,
+                @ptrFromInt(runtime.surface_id),
+            );
+            entry_registered = true;
+
+            prepared.items[prepared.count] = .{
+                .runtime_id = runtime.runtime_id,
+                .handle = runtime.surface_id,
+                .terminal = &slot.terminal,
+                .expected_master = .{
+                    .dev = runtime.pty_dev,
+                    .ino = runtime.pty_ino,
+                    .rdev = runtime.pty_rdev,
+                },
+                .expected_size = .{ .cols = runtime.cols, .rows = runtime.rows },
+                .expected_resize_generation = runtime.resize_generation,
+            };
+            prepared.count += 1;
+            entry_registered = false;
+            reader_prepared = false;
+            live_initialized = false;
+            surface_initialized = false;
+        }
+        self.next_handle = host.next_handle;
+        return prepared;
+    }
+
+    fn discardRestoredItem(self: *RuntimeManager, item: RestoredGraphItem) void {
+        self.host_registry.unregister(item.runtime_id);
+        item.terminal.live_pty.discardPreparedAdoption(&self.surface_runtime);
+        item.terminal.surface.deinit();
+        self.live_registry.removeUninitialized(item.handle) catch {};
+    }
+
     /// Fully quiesced product rollback용 2-phase resume. Thread 생성만 전량 성공시키고 실제 PTY 접근 release는 caller가
     /// authority를 ready로 durable commit한 뒤 수행한다.
     pub fn prepareUpgradeResume(self: *RuntimeManager) ResumeError!PreparedResume {
@@ -881,6 +1127,10 @@ pub const RuntimeManager = struct {
     /// 에러 집합은 backend(anyerror)를 그대로 전파한다 — `error.EmptyArgv`/`error.IdSpaceExhausted`는 이 매니저 고유.
     fn spawnRuntime(self: *RuntimeManager, params: server.RuntimeSpawnParams) anyerror!u128 {
         if (params.argv.len == 0) return error.EmptyArgv; // server가 이미 거르지만 방어(handle 낭비 방지).
+        // maxInt handle을 발급하면 성공 뒤 cursor 증가가 wrap/trap한다. PTY를
+        // 만들기 전에 거부해 live child를 띄운 뒤 실패하는 경로도 없앤다.
+        if (self.next_handle == std.math.maxInt(RuntimeHandle))
+            return error.IdSpaceExhausted;
         const handle = self.next_handle;
         const be = self.backend_impl.backend();
         const size = maru.terminal.Size{ .cols = params.cols, .rows = params.rows };
@@ -1155,6 +1405,217 @@ test "runtime manager: U2 quiesce encodes and resumes the same live PTY without 
     try std.testing.expectEqual(child_before, terminal_slot.live_pty.session.childPid());
     try std.testing.expectEqual(fd_before, terminal_slot.live_pty.session.inheritedMasterFd().?);
     try ops.write_input(ops.ctx, rid, "after\n");
+}
+
+test "runtime manager: restored graph discard preserves inherited PTY and original child" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    var source_registry = reg.TerminalRuntimeRegistry.init(allocator);
+    defer source_registry.deinit();
+    var source: RuntimeManager = undefined;
+    source.init(allocator, std.testing.io, &source_registry);
+    defer source.deinit();
+    const source_ops = source.runtimeOps();
+    const runtime_id = try source_ops.spawn(source_ops.ctx, .{
+        .argv = &.{"/bin/cat"},
+        .cwd = null,
+        .cols = 24,
+        .rows = 6,
+    });
+    defer source_ops.terminate(source_ops.ctx, runtime_id);
+    const source_handle = source.handleFor(runtime_id) orelse return error.TestUnexpectedResult;
+    const source_terminal = source.backend_impl.terminalForHostLifecycle(source_handle) orelse
+        return error.TestUnexpectedResult;
+    const child_pid = source_terminal.live_pty.session.childPid();
+
+    try std.testing.expectEqual(@as(usize, 1), try source.requestUpgradeQuiesce());
+    var attempts: usize = 0;
+    while (attempts < 1000 and !source.upgradeQuiesceReached()) : (attempts += 1)
+        _ = usleep(1000);
+    try std.testing.expect(source.upgradeQuiesceReached());
+    try source.joinAndValidateUpgradeQuiesce();
+
+    const exec_fd_set = @import("exec_fd_set.zig");
+    var first_slot: std.c.fd_t = 40;
+    while (first_slot < 1000 and exec_fd_set.isOpen(first_slot)) : (first_slot += 1) {}
+    if (first_slot >= 1000) return error.SkipZigTest;
+    var capture = try source.prepareQuiescedCapture(
+        allocator,
+        0xCAFE,
+        3,
+        @intCast(first_slot),
+    );
+    defer capture.deinit();
+    var inherited: exec_fd_set.PreparedSlots = .{};
+    defer inherited.rollback();
+    try inherited.prepare(capture.resources[0].source_fd, first_slot);
+    const encoded = try capture.encode(null);
+    defer allocator.free(encoded);
+    var decoded = try handoff_codec.decodeHost(allocator, encoded);
+    defer decoded.deinit();
+
+    var target_registry = reg.TerminalRuntimeRegistry.init(allocator);
+    defer target_registry.deinit();
+    var target: RuntimeManager = undefined;
+    target.init(allocator, std.testing.io, &target_registry);
+    defer target.deinit();
+    var graph = try target.prepareRestoredGraph(&decoded);
+    var graph_active = true;
+    defer if (graph_active) graph.discard();
+    attempts = 0;
+    while (attempts < 1000 and !graph.allReadersPrepared()) : (attempts += 1)
+        _ = usleep(1000);
+    try std.testing.expect(graph.allReadersPrepared());
+    const restored_entry = target_registry.get(runtime_id) orelse
+        return error.TestUnexpectedResult;
+    restored_entry.cols += 1;
+    try std.testing.expectError(error.RestoreGraphChanged, graph.revalidateAll());
+    restored_entry.cols -= 1;
+    _ = try graph.revalidateAll();
+    try std.testing.expectEqual(@as(usize, 1), target_registry.count());
+    try std.testing.expectEqual(@as(usize, 1), target.live_registry.count());
+
+    graph.discard();
+    graph_active = false;
+    try std.testing.expectEqual(@as(usize, 0), target_registry.count());
+    try std.testing.expectEqual(@as(usize, 0), target.live_registry.count());
+    try std.testing.expect(exec_fd_set.isOpen(first_slot));
+    try std.testing.expectEqual(child_pid, source_terminal.live_pty.session.childPid());
+    try std.testing.expect(!(try source_terminal.live_pty.session.childExitedWithoutReap()));
+
+    try source.resumeUpgradeQuiesce();
+    try source_ops.write_input(source_ops.ctx, runtime_id, "still-owned-by-source\n");
+}
+
+test "runtime manager: second restored runtime failure rolls back the entire non-owning graph" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    var source_registry = reg.TerminalRuntimeRegistry.init(allocator);
+    defer source_registry.deinit();
+    var source: RuntimeManager = undefined;
+    source.init(allocator, std.testing.io, &source_registry);
+    defer source.deinit();
+    const source_ops = source.runtimeOps();
+    var runtime_ids: [2]u128 = undefined;
+    var child_pids: [2]std.c.pid_t = undefined;
+    for (&runtime_ids, 0..) |*runtime_id, index| {
+        runtime_id.* = try source_ops.spawn(source_ops.ctx, .{
+            .argv = &.{"/bin/cat"},
+            .cwd = null,
+            .cols = @intCast(30 + index),
+            .rows = 8,
+        });
+        const handle = source.handleFor(runtime_id.*) orelse return error.TestUnexpectedResult;
+        const terminal_slot = source.backend_impl.terminalForHostLifecycle(handle) orelse
+            return error.TestUnexpectedResult;
+        child_pids[index] = terminal_slot.live_pty.session.childPid();
+    }
+    defer for (runtime_ids) |runtime_id| source_ops.terminate(source_ops.ctx, runtime_id);
+
+    try std.testing.expectEqual(@as(usize, 2), try source.requestUpgradeQuiesce());
+    var attempts: usize = 0;
+    while (attempts < 1000 and !source.upgradeQuiesceReached()) : (attempts += 1)
+        _ = usleep(1000);
+    try std.testing.expect(source.upgradeQuiesceReached());
+    try source.joinAndValidateUpgradeQuiesce();
+
+    const exec_fd_set = @import("exec_fd_set.zig");
+    var first_slot: std.c.fd_t = 40;
+    while (first_slot < 999 and
+        (exec_fd_set.isOpen(first_slot) or exec_fd_set.isOpen(first_slot + 1))) : (first_slot += 1)
+    {}
+    if (first_slot >= 999) return error.SkipZigTest;
+    var capture = try source.prepareQuiescedCapture(
+        allocator,
+        0xCAFE,
+        3,
+        @intCast(first_slot),
+    );
+    defer capture.deinit();
+    var inherited: exec_fd_set.PreparedSlots = .{};
+    defer inherited.rollback();
+    for (capture.resources) |resource|
+        try inherited.prepare(resource.source_fd, resource.inherited_slot);
+    const encoded = try capture.encode(null);
+    defer allocator.free(encoded);
+    var decoded = try handoff_codec.decodeHost(allocator, encoded);
+    defer decoded.deinit();
+    try std.testing.expectEqual(@as(usize, 2), decoded.runtimes.len);
+
+    // Codec가 거부하는 wire corruption이 아니라 target graph 조립 중 두 번째
+    // registry publish 실패를 주입한다. 첫 runtime과 두 번째 reader까지 모두
+    // 준비된 뒤에도 전체 cleanup이 child/fd ownership을 건드리지 않아야 한다.
+    decoded.runtimes[1].runtime_id = decoded.runtimes[0].runtime_id;
+
+    var target_registry = reg.TerminalRuntimeRegistry.init(allocator);
+    defer target_registry.deinit();
+    var target: RuntimeManager = undefined;
+    target.init(allocator, std.testing.io, &target_registry);
+    defer target.deinit();
+    try std.testing.expectError(error.DuplicateRuntime, target.prepareRestoredGraph(&decoded));
+    try std.testing.expectEqual(@as(usize, 0), target_registry.count());
+    try std.testing.expectEqual(@as(usize, 0), target.live_registry.count());
+    try std.testing.expectEqual(@as(usize, 0), target.surface_runtime.links.items.len);
+    try std.testing.expectEqual(@as(RuntimeHandle, 1), target.next_handle);
+    for (capture.resources, 0..) |resource, index| {
+        try std.testing.expect(exec_fd_set.isOpen(resource.inherited_slot));
+        const handle = source.handleFor(runtime_ids[index]) orelse return error.TestUnexpectedResult;
+        const terminal_slot = source.backend_impl.terminalForHostLifecycle(handle) orelse
+            return error.TestUnexpectedResult;
+        try std.testing.expectEqual(child_pids[index], terminal_slot.live_pty.session.childPid());
+        try std.testing.expect(!(try terminal_slot.live_pty.session.childExitedWithoutReap()));
+    }
+
+    try source.resumeUpgradeQuiesce();
+    for (runtime_ids) |runtime_id|
+        try source_ops.write_input(source_ops.ctx, runtime_id, "still-source-owned\n");
+}
+
+test "runtime manager: empty restored graph commits and releases without fallible work" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    var host_registry = reg.TerminalRuntimeRegistry.init(allocator);
+    defer host_registry.deinit();
+    var manager: RuntimeManager = undefined;
+    manager.init(allocator, std.testing.io, &host_registry);
+    defer manager.deinit();
+    var host: handoff_codec.HostState = .{
+        .allocator = allocator,
+        .host_id = 0xAA,
+        .upgrade_epoch = 4,
+        .next_handle = 9,
+        .runtimes = try allocator.alloc(handoff_codec.RuntimeState, 0),
+        .attempt_record = null,
+    };
+    defer host.deinit();
+
+    var graph = try manager.prepareRestoredGraph(&host);
+    try std.testing.expect(graph.allReadersPrepared());
+    var validated = try graph.revalidateAll();
+    var committed = validated.commitOwnership();
+    committed.releaseReaders();
+    try std.testing.expectEqual(@as(u64, 9), manager.next_handle);
+    try std.testing.expect(graph.phase == .readers_released);
+}
+
+test "runtime manager: exhausted restored handle cursor rejects spawn before creating a child" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    var host_registry = reg.TerminalRuntimeRegistry.init(allocator);
+    defer host_registry.deinit();
+    var manager: RuntimeManager = undefined;
+    manager.init(allocator, std.testing.io, &host_registry);
+    defer manager.deinit();
+    manager.next_handle = std.math.maxInt(RuntimeHandle);
+    const ops = manager.runtimeOps();
+    try std.testing.expectError(error.IdSpaceExhausted, ops.spawn(ops.ctx, .{
+        .argv = &.{"/bin/cat"},
+        .cwd = null,
+        .cols = 20,
+        .rows = 4,
+    }));
+    try std.testing.expectEqual(@as(usize, 0), host_registry.count());
+    try std.testing.expectEqual(@as(usize, 0), manager.live_registry.count());
 }
 
 test "runtime manager: resume joins every reached reader before reopening a two-runtime frontier" {

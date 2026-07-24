@@ -608,6 +608,11 @@ pub const PtyReader = struct {
         self.start_gate_reached.store(false, .release);
     }
 
+    fn discardPreparedStartIfPending(self: *PtyReader) void {
+        if (self.thread != null and !self.start_released.load(.acquire))
+            self.discardPreparedStart();
+    }
+
     pub fn deinit(self: *PtyReader) void {
         std.debug.assert(self.thread == null);
         self.transfer_out.deinit(self.allocator);
@@ -622,6 +627,10 @@ pub const PtyReader = struct {
     }
 
     pub fn stopAndJoin(self: *PtyReader) void {
+        // Prepared restore/resume cleanup이 전용 discard API를 놓치더라도 gate
+        // thread를 먼저 abort/join한다. 그렇지 않으면 아래 session.close는
+        // release되지 않은 gate를 깨울 수 없어 join이 영구 대기한다.
+        self.discardPreparedStartIfPending();
         // 앱이 탭/창을 닫을 때는 queue를 먼저 닫아 reader가 더 이상 event를
         // 쌓지 못하게 하고, session.close로 blocking read를 깨운 뒤 join한다.
         // session.deinit은 reader가 끝난 뒤 호출해야 session memory를 안전하게 파괴할 수 있다.
@@ -1013,6 +1022,27 @@ test "prepared reader start can be created and discarded before touching PTY dep
     while (attempts < 1000 and !reader.preparedStartReached()) : (attempts += 1) _ = usleep(1000);
     try std.testing.expect(reader.preparedStartReached());
     reader.discardPreparedStart();
+    try std.testing.expect(reader.thread == null);
+}
+
+test "generic stopAndJoin aborts a pending prepared start before session cleanup" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    var session = try pty.PtySession.spawn(allocator, .{
+        .command = "/bin/cat",
+        .size = .{ .cols = 20, .rows = 4 },
+    });
+    defer session.deinit();
+    var queue = try PtyEventQueue.init(std.testing.io, allocator, 1);
+    defer queue.deinit();
+    var reader = PtyReader.init(allocator, 78, &session, &queue);
+    defer reader.deinit();
+    try reader.startPrepared();
+    var attempts: usize = 0;
+    while (attempts < 1000 and !reader.preparedStartReached()) : (attempts += 1)
+        _ = usleep(1000);
+    try std.testing.expect(reader.preparedStartReached());
+    reader.stopAndJoin();
     try std.testing.expect(reader.thread == null);
 }
 

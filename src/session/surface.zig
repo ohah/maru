@@ -73,6 +73,23 @@ pub const Surface = struct {
         };
     }
 
+    /// Exec-upgrade restore가 decoded core의 소유권을 Surface로 옮기는 유일한 경계.
+    ///
+    /// 먼저 정상 placeholder Surface를 완성한 뒤 core를 swap한다. 따라서 preedit/core
+    /// allocation이 실패하면 caller의 decoded core는 그대로이고, 성공하면 caller는
+    /// deinit 가능한 빈 placeholder core를 돌려받는다. 별도 moved flag나 부분 소유권
+    /// 상태가 없어 `HostState.deinit`과 Surface teardown이 항상 평범한 deinit을 쓴다.
+    pub fn initRestored(
+        allocator: std.mem.Allocator,
+        id: u64,
+        restored_core: *terminal.TerminalCore,
+    ) !Surface {
+        var result = try init(allocator, id, restored_core.size);
+        std.mem.swap(terminal.TerminalCore, &result.core, restored_core);
+        result.process_state = .running;
+        return result;
+    }
+
     pub fn deinit(self: *Surface) void {
         self.preedit.deinit();
         self.core.deinit();
@@ -200,6 +217,24 @@ test "surface metadata excludes live process handles and environment by default"
     try std.testing.expectEqual(terminal.Size{ .cols = 100, .rows = 30 }, metadata.size);
     try std.testing.expectEqual(ProcessState.running, metadata.process_state);
     try std.testing.expectEqual(@as(usize, 0), metadata.env.len);
+}
+
+test "restored surface swaps decoded core ownership without a moved-state sentinel" {
+    const allocator = std.testing.allocator;
+    var decoded = try terminal.TerminalCore.init(allocator, .{ .cols = 12, .rows = 3 });
+    defer decoded.deinit();
+    try decoded.write("restored-screen");
+    const decoded_cells = decoded.screen.cells.ptr;
+
+    var surface = try Surface.initRestored(allocator, 77, &decoded);
+    defer surface.deinit();
+
+    try std.testing.expectEqual(@as(u64, 77), surface.id);
+    try std.testing.expectEqual(ProcessState.running, surface.process_state);
+    try std.testing.expectEqual(decoded_cells, surface.core.screen.cells.ptr);
+    // The source now owns the freshly initialized placeholder and therefore
+    // remains independently deinitializable by HostState on every path.
+    try std.testing.expect(decoded.screen.cells.ptr != surface.core.screen.cells.ptr);
 }
 
 test "surface preedit update fails closed on OOM so stale marked text cannot be committed" {

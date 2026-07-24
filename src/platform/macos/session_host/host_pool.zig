@@ -9,6 +9,7 @@ pub fn HostPool(comptime Adapter: type) type {
         const Entry = struct {
             adapter: *Adapter,
             owned: bool,
+            runtime_refs: usize = 0,
         };
 
         allocator: std.mem.Allocator,
@@ -22,6 +23,7 @@ pub fn HostPool(comptime Adapter: type) type {
         pub fn deinit(self: *Self) void {
             var values = self.entries.valueIterator();
             while (values.next()) |entry| {
+                std.debug.assert(entry.runtime_refs == 0);
                 if (!entry.owned) continue;
                 entry.adapter.deinit();
                 self.allocator.destroy(entry.adapter);
@@ -56,7 +58,26 @@ pub fn HostPool(comptime Adapter: type) type {
             return self.get(self.spawn_host_id orelse return null);
         }
 
-        pub fn remove(self: *Self, host_id: u128) bool {
+        pub fn spawnHostId(self: *const Self) ?u128 {
+            return self.spawn_host_id;
+        }
+
+        pub fn retain(self: *Self, host_id: u128) !*Adapter {
+            const entry = self.entries.getPtr(host_id) orelse return error.UnknownHost;
+            entry.runtime_refs = std.math.add(usize, entry.runtime_refs, 1) catch return error.TooManyReferences;
+            return entry.adapter;
+        }
+
+        pub fn release(self: *Self, host_id: u128) void {
+            const entry = self.entries.getPtr(host_id) orelse unreachable;
+            std.debug.assert(entry.runtime_refs > 0);
+            entry.runtime_refs -= 1;
+        }
+
+        pub fn remove(self: *Self, host_id: u128) !bool {
+            if (self.entries.get(host_id)) |entry| {
+                if (entry.runtime_refs != 0) return error.HostInUse;
+            } else return false;
             const removed = self.entries.fetchRemove(host_id) orelse return false;
             if (removed.value.owned) {
                 removed.value.adapter.deinit();
@@ -100,8 +121,29 @@ test "host pool pins two hosts and selects spawn host explicitly" {
     try std.testing.expectError(error.UnknownHost, pool.setSpawnHost(0xCC));
     try pool.setSpawnHost(0xBB);
     try std.testing.expect(pool.spawnHost().? == second);
-    try std.testing.expect(pool.remove(0xBB));
+    try std.testing.expect(try pool.remove(0xBB));
     try std.testing.expect(pool.spawnHost() == null);
+    try std.testing.expectEqual(@as(usize, 1), deinit_count);
+}
+
+test "host pool refuses removal while a runtime lease is active" {
+    const FakeAdapter = struct {
+        deinit_count: *usize,
+        fn deinit(self: *@This()) void {
+            self.deinit_count.* += 1;
+        }
+    };
+    const Pool = HostPool(FakeAdapter);
+    var deinit_count: usize = 0;
+    var pool = Pool.init(std.testing.allocator);
+    defer pool.deinit();
+    const adapter = try std.testing.allocator.create(FakeAdapter);
+    adapter.* = .{ .deinit_count = &deinit_count };
+    try pool.addOwned(1, adapter);
+    try std.testing.expect(try pool.retain(1) == adapter);
+    try std.testing.expectError(error.HostInUse, pool.remove(1));
+    pool.release(1);
+    try std.testing.expect(try pool.remove(1));
     try std.testing.expectEqual(@as(usize, 1), deinit_count);
 }
 

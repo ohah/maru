@@ -58,6 +58,19 @@ pub fn runSessionHost(
         false;
     var test_idle_ticks: usize = 0;
 
+    // SocketServer.bind는 stale socket을 unlink하므로 lifetime owner lease보다 먼저 실행하면 안 된다. 경쟁 host가
+    // 기존 live host의 endpoint를 끊지 못하도록 owner-only directory를 먼저 검증하고 lease를 선취한다.
+    const mkdir_rc = c.mkdir(dir_path.ptr, 0o700);
+    if (mkdir_rc != 0 and posix.errno(mkdir_rc) != .EXIST) return error.OwnerLeaseFailed;
+    if (c.chmod(dir_path.ptr, 0o700) != 0) return error.OwnerLeaseFailed;
+    var dir_stat: posix.Stat = undefined;
+    if (c.fstatat(posix.AT.FDCWD, dir_path.ptr, &dir_stat, posix.AT.SYMLINK_NOFOLLOW) != 0 or
+        !posix.S.ISDIR(dir_stat.mode) or dir_stat.uid != c.getuid()) return error.OwnerLeaseFailed;
+    var owner_path_buf: [640]u8 = undefined;
+    const owner_path = discovery.ownerLockPathIn(&owner_path_buf, dir_path) catch return error.OwnerLeaseFailed;
+    var lifetime_owner = owner_lease.OwnerLease.acquire(owner_path) catch return error.OwnerLeaseFailed;
+    defer lifetime_owner.deinit();
+
     var registry = reg.TerminalRuntimeRegistry.init(allocator);
     defer registry.deinit();
 
@@ -68,10 +81,6 @@ pub fn runSessionHost(
 
     var server = try socket_server.SocketServer.bind(allocator, dir_path, socket_path, newHostId(), &registry);
     defer server.deinit();
-    var owner_path_buf: [640]u8 = undefined;
-    const owner_path = discovery.ownerLockPathIn(&owner_path_buf, dir_path) catch return error.OwnerLeaseFailed;
-    var lifetime_owner = owner_lease.OwnerLease.acquire(owner_path) catch return error.OwnerLeaseFailed;
-    defer lifetime_owner.deinit();
     server.runtime_ops = manager.runtimeOps(); // 이제 이 host는 read-only가 아니라 runtime.spawn/terminate를 처리한다.
     var admission_gate = upgrade.AdmissionGate.init(io);
     server.admission_gate = &admission_gate;
@@ -181,6 +190,38 @@ test "daemon: forked host survives parent-independent (setsid) and answers hello
     defer allocator.free(req);
     try socket_server.writeAll(fd, req);
     try testing.expect(readKindContains(fd, &parser, allocator, .response, "runtime_count"));
+}
+
+test "daemon: competing host is rejected before it can unlink the live owner socket" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var dir_buf: [256]u8 = undefined;
+    const dir_path = std.fmt.bufPrintZ(&dir_buf, "/tmp/maru-sh-owner-race-{d}", .{c.getpid()}) catch return error.SkipZigTest;
+    var socket_buf: [320]u8 = undefined;
+    const socket_path = std.fmt.bufPrintZ(&socket_buf, "{s}/control.sock", .{dir_path}) catch return error.SkipZigTest;
+    const child = c.fork();
+    if (child < 0) return error.SkipZigTest;
+    if (child == 0) {
+        _ = c.setsid();
+        runSessionHost(std.heap.page_allocator, testing.io, dir_path, socket_path) catch {};
+        c._exit(0);
+    }
+    defer {
+        _ = c.kill(child, posix.SIG.TERM);
+        var status: c_int = undefined;
+        _ = c.waitpid(child, &status, 0);
+        _ = c.unlink(socket_path.ptr);
+        var owner_buf: [320]u8 = undefined;
+        if (discovery.ownerLockPathIn(&owner_buf, dir_path)) |path| _ = c.unlink(path.ptr) else |_| {}
+        _ = c.rmdir(dir_path.ptr);
+    }
+    const first = waitConnect(socket_path, 3000) orelse return error.TestUnexpectedResult;
+    _ = c.close(first);
+    try testing.expectError(
+        error.OwnerLeaseFailed,
+        runSessionHost(std.heap.page_allocator, testing.io, dir_path, socket_path),
+    );
+    const second = waitConnect(socket_path, 500) orelse return error.TestUnexpectedResult;
+    _ = c.close(second);
 }
 
 fn readKind(fd: c.fd_t, parser: *framing.FrameParser, a: std.mem.Allocator, want: protocol.Kind) bool {

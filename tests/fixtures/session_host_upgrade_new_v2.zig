@@ -78,6 +78,9 @@ fn restore(ctx: Context) !void {
         host.runtimes[0].fd_slot != pty_slot) return error.IdentityMismatch;
 
     const runtime = &host.runtimes[0];
+    const staged_target_path = try std.fmt.allocPrintSentinel(allocator, "{s}/target-current", .{ctx.owner_dir}, 0);
+    defer allocator.free(staged_target_path);
+    const staged_target_identity = try session_host.staged_image.inspect(staged_target_path);
     if (std.mem.eql(u8, ctx.scenario, "target-adopt-fail")) return error.InjectedAdoptionFailure;
     var prepared = try maru.pty.PtySession.PreparedAdoption.prepareExact(
         pty_slot,
@@ -98,7 +101,42 @@ fn restore(ctx: Context) !void {
     _ = c.close(primary_state_slot);
     _ = c.close(backup_state_slot);
     _ = c.close(owner_slot);
-    if (!session.upgradeEligible()) return error.InvalidAdoption;
+    if (!session.upgradeEligible()) c._exit(124);
+    serveCommitted(ctx, &session, runtime, &host, staged_target_identity) catch c._exit(124);
+    c._exit(0);
+}
+
+/// Irreversible PTY ownership commit 뒤의 오류는 old-image rollback으로 돌아가지 않는다.
+fn serveCommitted(
+    ctx: Context,
+    session: *maru.pty.PtySession,
+    runtime: *session_host.handoff_codec.RuntimeState,
+    host: *session_host.handoff_codec.HostState,
+    staged_target_identity: session_host.staged_image.Identity,
+) !void {
+    const allocator = ctx.allocator;
+    const self_path = try std.fmt.allocPrintSentinel(allocator, "{s}/self-current", .{ctx.owner_dir}, 0);
+    defer allocator.free(self_path);
+    const target_path = try std.fmt.allocPrintSentinel(allocator, "{s}/target-current", .{ctx.owner_dir}, 0);
+    defer allocator.free(target_path);
+    const previous_path = try std.fmt.allocPrintSentinel(allocator, "{s}/self-previous", .{ctx.owner_dir}, 0);
+    defer allocator.free(previous_path);
+    const owner_dir_z = try std.fmt.allocPrintSentinel(allocator, "{s}", .{ctx.owner_dir}, 0);
+    defer allocator.free(owner_dir_z);
+    const inject_promotion = std.mem.eql(u8, ctx.scenario, "target-promotion-fail");
+    const promotion = session_host.staged_image.promote(
+        owner_dir_z,
+        target_path,
+        staged_target_identity,
+        self_path,
+        previous_path,
+        inject_promotion,
+    );
+    // promotion은 commit 이후 bookkeeping이다. 실패하면 runtime을 rollback/종료하지 않고 다음 upgrade capability만 철회한다.
+    var capability: []const u8 = "enabled";
+    if (promotion) |_| {} else |_| {
+        capability = "withdrawn";
+    }
 
     try session.writeInput("hello\n");
     var exit_ok = false;
@@ -122,27 +160,6 @@ fn restore(ctx: Context) !void {
     if (std.mem.indexOf(u8, dump, "MIGRATED:hello") == null or runtime.core.parser != .ground)
         return error.ParserContinuationFailed;
 
-    const self_path = try std.fmt.allocPrintSentinel(allocator, "{s}/self-current", .{ctx.owner_dir}, 0);
-    defer allocator.free(self_path);
-    const target_path = try std.fmt.allocPrintSentinel(allocator, "{s}/target-current", .{ctx.owner_dir}, 0);
-    defer allocator.free(target_path);
-    const previous_path = try std.fmt.allocPrintSentinel(allocator, "{s}/self-previous", .{ctx.owner_dir}, 0);
-    defer allocator.free(previous_path);
-    const owner_dir_z = try std.fmt.allocPrintSentinel(allocator, "{s}", .{ctx.owner_dir}, 0);
-    defer allocator.free(owner_dir_z);
-    const inject_promotion = std.mem.eql(u8, ctx.scenario, "target-promotion-fail");
-    const promotion = session_host.staged_image.promote(
-        owner_dir_z,
-        target_path,
-        self_path,
-        previous_path,
-        inject_promotion,
-    );
-    var capability: []const u8 = "enabled";
-    if (promotion) |_| {} else |err| {
-        if (err != error.InjectedPromotionFailure) return err;
-        capability = "withdrawn";
-    }
     const result = try std.fmt.allocPrint(
         allocator,
         "host_pid={d}\nchild_pid={d}\nhost_id={x}\nruntime_id={x}\nowner_lease=ok\nparser=ground\nexit=23\ninput_output=ok\nupgrade_capability={s}\n",

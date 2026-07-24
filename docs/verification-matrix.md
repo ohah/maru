@@ -131,9 +131,10 @@ FP11d 표 gate는 네 가지 outer-pipe 형태, data row가 있거나 없는 pla
 
 [Session host 실행 중 업그레이드](session-host-upgrade.md)는 U0 inventory, U1 codec, U2 quiesce 핵심,
 U3 exec/rollback fixture, U4 typed-connect/host-pool 기반과 U5 제품 daemon controller·preflight·pathname exec·
-target/rollback restore activation까지 연결했다. 다만 frozen signed N-1 앱의 실제 update, 최대치 근처 multi-runtime
-제품 restore, 전 구간 failure injection, 앱 재실행 orchestration과 soak가 남아 있으므로 U5 완료나 기본 자동 migration을
-주장하지 않는다. 단계별 증거 수준을 섞지 않는다.
+target/rollback restore activation까지 연결했다. caller-attested frozen signed N-1/current non-empty PTY 성공
+경로의 opt-in 자동 하네스도 구현했지만 실제 서명 release artifact로 아직 실행하지 않았다. 실제 제품 rollback activation, 최대치 근처
+multi-runtime 제품 restore, 전 구간 failure injection, 앱 재실행 orchestration과 soak가 남아 있으므로 U5 완료나
+기본 자동 migration을 주장하지 않는다. 단계별 증거 수준을 섞지 않는다.
 
 | 단계 | 자동 gate | 완료로 보지 않는 것 |
 | --- | --- | --- |
@@ -143,6 +144,14 @@ target/rollback restore activation까지 연결했다. 다만 frozen signed N-1 
 | U3 exec | frozen old test binary→new test binary, host/child PID·host/runtime ID 불변, post-upgrade input/output, exit status exact-once, 전 pre-commit failpoint rollback | unit fake process나 current binary 양면 실행만으로 N-1 호환을 증명하지 않는다 |
 | U4 adapter | current GUI→frozen N-1 MRSH adapter→upgrade→current attach, multi-runtime all-or-none, busy attachment side-by-side fallback | fixture-only adapter를 실제 구 binary 호환으로 부르지 않는다 |
 | U5 제품 | checksummed attempt ledger v3가 distinct target+canonical rollback image, 64 MiB two-copy preallocation, attempt 전체의 absolute monotonic deadline, exact host/epoch/sorted runtime set을 고정한다. 제품 daemon은 startup 때 rollback self-image·same-release codesign stager·controller를 준비하고, completed marker outer loop가 product preflight와 strict restore argv pathname `execv`를 실행한다. Product main의 target/rollback restore는 exact inherited PTY/owner/state FD를 검증하고 closed admission에서 graph·socket·restoring manifest를 준비한다. 비동기 reader start-gate는 target의 기존 absolute deadline 또는 rollback의 fresh bounded 5초 recovery deadline 안에서 전부 기다린 뒤 exact graph를 재검증하며, rollback ready publication은 기존 build/protocol/codec/epoch identity 보존을 durable frontier가 강제한다. 이후 `ready` durable commit→graph ownership→inherited FD close/zero scan→reader release→rollback image promotion→terminal ledger→capability/admission 순서로 활성화한다. target precommit 실패는 preallocated rollback argv를 한 번만 exec하고 rollback role은 재귀 없이 기존 ready identity로 복구한다. Promotion 실패는 owner permanent latch로 이미 연결된 client의 새 attempt도 거부하되 completed replay/status는 보존한다. 실제 product artifact **zero-runtime** E2E는 restoring manifest와 activation marker로 target commit을 증명하고, corrupt primary와 owner-adoption 뒤 manifest mismatch가 validation-only rollback fixture 성공으로 위장하지 않는지 분리한다. Component 증거는 real PTY의 old-side rollback 뒤 I/O·screen snapshot 재개, 2-runtime partial prepare 실패의 all-or-none discard, unexpected inherited FD, owner/socket/manifest/role/image mismatch, primary corruption+backup rollback, promotion reconcile를 각각 검증한다. macOS의 pathname executable 재-open은 kernel-loaded image pin 증거가 아니며, pathname object identity 재검증+same-release code-signature+same-UID owner가 명시적 제품 신뢰 경계다. | non-empty restored graph의 성공 commit→inherited close→reader release→I/O/exit exact-once, 실제 product rollback activation과 listener/`host.info` 재접속은 아직 자동 증거가 없다. frozen signed N-1 app을 사용한 실제 updater E2E, 1개·최대치 근처 multi-runtime의 제품 daemon→product restore→GUI exact reattach, manifest/reader/socket/FD/promotion 전 구간 failure injection, quiesce 전 handoff-size/disk/I/O budget admission, 앱 재실행 orchestration/notice와 장시간 soak도 남아 있다. 이 gate 전에는 U5 완료·기본 자동 migration·blocking syscall wall-time 절대 상한·kernel-loaded image pin을 주장하지 않는다. |
+
+U5의 non-empty 성공 경로는 `test-session-host-signed-upgrade`로 자동 실행할 수 있다. 이 opt-in gate는 strict
+same-release signer인 caller-attested frozen N-1/current executable을 받아 echo를 끈 실제 `/bin/cat` PTY의
+pre/post child output, 동일 host/child PID·host/runtime ID, epoch/build 전진과 `committed/none`, capability 유지를
+단언하고 pathname 대신 두 SHA/build ID와 signer requirement digest를 담은 JSON artifact를 남긴다. 입력의 release
+인접성/방향은 executable 내부에서 증명하지 않으므로 release job이 별도로 보증해야 한다.
+하네스 구현/compile 성공과 실제 signed release artifact 실행 성공은 다른 증거다. 현재 저장소와 일반 CI에는 해당
+아티팩트가 없어 후자는 여전히 미검증이며, 위 U5 미완료 판정을 바꾸지 않는다.
 
 모든 단계에서 host crash/SIGKILL 뒤 복구는 비목표지만, upgrade가 시작되기 전·quiesce 중·`exec` syscall 실패·새
 binary pre-commit restore 실패는 자동 failure injection으로 구 host 재개 또는 staged rollback을 증명해야 한다.

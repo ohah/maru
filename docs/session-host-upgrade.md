@@ -7,8 +7,11 @@
 
 > **상태: U0 inventory, U1 codec, U2 quiesce 핵심, U3 exec/rollback fixture, U4 typed adapter 기반과
 > U5 제품 daemon controller·preflight·pathname exec·target/rollback restore activation을 연결했다.
-> frozen signed N-1 update, 최대치 근처 multi-runtime 제품 restore, 전 구간 failure injection, 앱 재실행 orchestration과
-> soak gate가 아직 열려 있으므로 U5 완료나 기본 자동 migration은 주장하지 않는다.**
+> caller가 frozen N-1/current라고 증명한 signed executable의 non-empty PTY 성공 경로를 실행할 opt-in E2E
+> 하네스는 구현했지만, 저장소에는
+> 서명된 두 release artifact가 없어 아직 통과 증거를 만들지 못했다. 최대치 근처 multi-runtime 제품 restore,
+> 실제 제품 rollback activation, 전 구간 failure injection, 앱 재실행 orchestration과 soak gate도 열려 있으므로
+> U5 완료나 기본 자동 migration은 주장하지 않는다.**
 > 현재 살아 있는 host가 `host_exec_upgrade_v1`을 광고하지 않으면 새 앱은 그 host를 실행 중 교체할 수 없다.
 > 이 경우 지원하는 N-1 MRSH adapter로 attach해 기존 runtime을 그대로 쓰거나, attachment가 모두 끝난 뒤 구 host를
 > 계속 drain한다. **attachment가 0이어도 runtime이 하나라도 살아 있으면 구 host를 종료하지 않으며, runtime count가
@@ -438,7 +441,9 @@ absolute identity만** 기록하고 target의 page layout을 새로 만든다. s
   회전하고, 같은 PTY로 N→N+1 controlled pre-commit 실패를 일으켜 N image로 rollback하는 2회 연속 process E2E도
   검증한다. 두 번째 attempt의 target preflight/`exec` syscall 실패는 이미 committed N owner가 inherited slot을 닫고
   같은 PTY에서 계속 serve하는 것도 별도로 검증한다. 다만 old fixture가 현재 native 모듈과 함께 재컴파일되므로
-  frozen N-1 증거는 아니며, non-empty 제품 graph의 commit→reader release→재접속 E2E는 남아 있다.
+  frozen N-1 증거는 아니다. 서명된 frozen N-1/current 실행 파일을 받는 별도 opt-in 하네스가 non-empty 제품
+  graph의 commit→reader release→재접속 성공 경로를 자동화했지만, 실제 release artifact로 통과하기 전에는
+  제품 증거로 세지 않는다.
 
 ### U4 — 다중 runtime과 N-1 adapter
 
@@ -466,6 +471,26 @@ absolute identity만** 기록하고 target의 page layout을 새로 만든다. s
 - `host_exec_upgrade_v1`과 `host.upgrade.prepare`를 광고한다.
 - 앱 재실행 connect 경로가 upgrade 가능/호환 attach/upgrade busy/legacy 불가를 구분해 notice와 구조화 로그를 남긴다.
 - signed app update 전후 E2E와 soak가 통과한 뒤에만 자동 upgrade를 기본 활성화한다.
+- **구현된 opt-in signed 성공 gate:** 아래 명령은 개발 fixture가 아니라 명시적으로 전달한 두 제품 executable의
+  strict code signature와 exact designated requirement를 먼저 대조한다. N-1 daemon에 실제 `/bin/cat` runtime을
+  spawn/attach해 화면 marker를 확인하고 attachment를 0으로 만든 뒤 `host.upgrade.prepare`를 보낸다. 재접속 뒤에는
+  Unix peer PID, direct PTY child PID, `host_id`, `runtime_id`가 전부 같고 epoch/build가 current로 전진했는지,
+  pre-upgrade 화면과 post-upgrade child output이 모두 보이는지, status가 `committed/none`이고 다음 upgrade
+  capability도 유지되는지 단언한다. Harness는 release manifest나 binary version을 읽지 않으므로 두 입력이 실제
+  frozen N-1/current이고 방향·인접성이 맞다는 provenance는 release job/caller가 별도로 보증한다.
+
+  ```sh
+  zig build test-session-host-signed-upgrade \
+    -Dsession-host-signed-n1-exe=/absolute/path/to/n-1/maru \
+    -Dsession-host-signed-current-exe=/absolute/path/to/current/maru
+  ```
+
+  결과는 `zig-out/session-host-signed-upgrade/summary.json`에 binary pathname 없이 두 SHA/build ID와 signer
+  requirement digest를 기록하며 실행 시작 때 과거 summary를 제거한다. 두 옵션 누락, 동일 SHA,
+  same-UID/no-follow executable 조건 위반, signer 불일치는 **skip이 아니라 실패**다. 하네스 본체는
+  기본 `test-session-host`에서 항상 compile되고 순수 helper test도 실행한다. 저장소와 일반 CI에는 release
+  signing identity/frozen artifact가 없으므로 signed process 본체는 opt-in이며, 실행하지 않은 상태를 green으로
+  보고하지 않는다.
 - **구현된 component seam:** attempt-key exclusive target staging, strict same-release codesign authorizer,
   accepted/armed/running/terminal idempotency owner, exec를 넘는 checksummed attempt record, host/epoch/next-handle/live
   runtime/target/rollback-image identity 교차검증, descriptor-relative primary/backup commit, 64 MiB operational cap, exact disk
@@ -524,10 +549,11 @@ absolute identity만** 기록하고 target의 page layout을 새로 만든다. s
   기존 build/epoch ready authority로 같은 순서를 수행한다. `allow_validation_only_restore=true`인 별도 fixture는
   bootstrap만 검사하고, 제품 artifact의 zero-runtime process gate는 restoring manifest와 activation marker로 실제
   commit 경로와 rollback fallback을 구분한다.
-- **아직 미구현인 제품 종료 gate:** quiesce 전 handoff-size/disk/I/O budget admission, signed frozen N-1 app
-  artifact를 사용한 실제 update, 1개·최대치 근처 multi-runtime의 제품 daemon→product restore→GUI exact reattach,
-  manifest/reader/socket/FD/promotion 전 구간 failure injection, 장시간 soak와 앱 재실행 자동 orchestration/notice가
-  남아 있다. macOS 공개 API에는 fd-based exec가 없으므로 kernel-loaded-image pin은 목표에서 제거하고, 마지막
+- **아직 미구현 또는 미실행인 제품 종료 gate:** quiesce 전 handoff-size/disk/I/O budget admission, signed frozen
+  N-1/current artifact를 사용한 위 성공 gate의 실제 통과, 실제 제품 rollback activation, 1개·최대치 근처
+  multi-runtime의 제품 daemon→product restore→GUI exact reattach, manifest/reader/socket/FD/promotion 전 구간
+  failure injection, 장시간 soak와 앱 재실행 자동 orchestration/notice가 남아 있다. macOS 공개 API에는 fd-based
+  exec가 없으므로 kernel-loaded-image pin은 목표에서 제거하고, 마지막
   pathname object identity 재검증+same-release code-signature+same-UID owner boundary를 제품 계약으로 쓴다.
   이 종료 gate가 닫히기 전에는 U5 완료나 기본 자동 migration을 주장하지 않는다.
 

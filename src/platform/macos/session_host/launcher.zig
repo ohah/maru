@@ -20,6 +20,7 @@ const entrypoint = @import("entrypoint.zig");
 extern "c" fn execv(path: [*:0]const u8, argv: [*:null]const ?[*:0]const u8) c_int;
 // 상속 fd를 명시적으로 닫기 위한 descriptor table 크기(soft limit, macOS는 OPEN_MAX로 상한). std.c 미노출이라 extern.
 extern "c" fn getdtablesize() c_int;
+extern "c" fn unsetenv(name: [*:0]const u8) c_int;
 
 /// `maru <exe>`를 session host로 전환하는 hidden 서브커맨드 이름. main.zig dispatch와 이 launcher가 공유하는 단일 출처다.
 pub const subcommand = entrypoint.subcommand;
@@ -58,6 +59,40 @@ pub fn spawnSessionHostDetached(
         return error.OutOfMemory;
     defer allocator.free(host_hex);
     try spawnDetached(allocator, exe_path, &.{ subcommand, session_dir, socket_path, host_hex });
+}
+
+/// Signed release E2E 전용 supervised launch. 제품과 같은 hidden command/stdio/fd 경계를 실행하지만
+/// double-fork하지 않아 caller가 exact child PID를 소유하고 실패 경로에서도 `waitpid`로 반드시 회수할 수 있다.
+/// 앱의 persistent lifetime 계약은 `spawnSessionHostDetached`만 사용한다.
+pub fn spawnSessionHostSupervisedForTest(
+    allocator: std.mem.Allocator,
+    exe_path: [:0]const u8,
+    session_dir: [:0]const u8,
+    socket_path: [:0]const u8,
+    host_id: u128,
+) SpawnError!c.pid_t {
+    if (builtin.os.tag != .macos) return error.ForkFailed;
+    const host_hex = std.fmt.allocPrintSentinel(allocator, "{x:0>32}", .{host_id}, 0) catch
+        return error.OutOfMemory;
+    defer allocator.free(host_hex);
+    const args: []const [:0]const u8 = &.{ subcommand, session_dir, socket_path, host_hex };
+    var argv = allocator.alloc(?[*:0]const u8, args.len + 2) catch return error.OutOfMemory;
+    defer allocator.free(argv);
+    argv[0] = exe_path.ptr;
+    for (args, 0..) |arg, i| argv[i + 1] = arg.ptr;
+    argv[args.len + 1] = null;
+
+    const pid = c.fork();
+    if (pid < 0) return error.ForkFailed;
+    if (pid == 0) {
+        _ = c.setsid();
+        closeInheritedFds();
+        redirectStdioToDevNull();
+        clearSessionHostTestEnvironment();
+        _ = execv(exe_path.ptr, @ptrCast(argv.ptr));
+        std.c._exit(127);
+    }
+    return pid;
 }
 
 /// `exe_path`를 `args`(NUL 종단 슬라이스들)로 **detached** 실행한다: double-fork로 손자를 부모와 독립시키고, setsid로
@@ -119,6 +154,20 @@ fn redirectStdioToDevNull() void {
     if (fd > 2) _ = c.close(fd);
 }
 
+fn clearSessionHostTestEnvironment() void {
+    const names = [_][:0]const u8{
+        "MARU_SESSION_HOST_ACTIVATION_MARKER",
+        "MARU_SESSION_HOST_PRODUCT_EXE",
+        "MARU_SESSION_HOST_REQUIRE_PRODUCT_LAUNCH_SMOKE",
+        "MARU_SESSION_HOST_RESTORE_TEST_EXE",
+        "MARU_SESSION_HOST_TEST_ONESHOT",
+        "MARU_SESSION_HOST_UPGRADE_NEW_EXE",
+        "MARU_SESSION_HOST_UPGRADE_NEXT_EXE",
+        "MARU_SESSION_HOST_UPGRADE_OLD_EXE",
+    };
+    for (names) |name| _ = unsetenv(name.ptr);
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // 테스트
 //
@@ -145,6 +194,19 @@ test "launcher: sessionHostArgv includes exact session dir, socket, and host ide
     try testing.expectEqualStrings("/tmp/cache/session-host", argv[2]);
     try testing.expectEqualStrings("/tmp/maru-501/sh/0000000000000000000000000000aabb.sock", argv[3]);
     try testing.expectEqualStrings("0000000000000000000000000000aabb", argv[4]);
+}
+
+test "launcher: signed E2E supervised child has an exact waitpid owner" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const pid = try spawnSessionHostSupervisedForTest(
+        testing.allocator,
+        "/usr/bin/false",
+        "/tmp",
+        "/tmp/unused.sock",
+        1,
+    );
+    var status: c_int = undefined;
+    try testing.expectEqual(pid, c.waitpid(pid, &status, 0));
 }
 
 test "launcher: spawnDetached runs a detached child without blocking the parent (marker)" {

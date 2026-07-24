@@ -678,7 +678,19 @@ test "host_connect: falls back to null when no host exists and spawn cannot bind
 
 test "host_connect: launches the product maru session host and completes host.info" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
-    if (!@hasDecl(@import("root"), "require_product_launch_smoke")) return error.SkipZigTest;
+    // `@import("root")`는 Zig test runner module 배치에 따라 이 barrel의
+    // declaration을 보지 못해 전용 `test-session-host`에서도 조용히
+    // skip됐다. Build step이 주는 exact marker로 전용 실행과 전체 test의
+    // 중복 수집을 구분하고, marker가 있는데 product artifact가 빠졌다면
+    // wiring 회귀로 실패시킨다.
+    const required = std.c.getenv(
+        "MARU_SESSION_HOST_REQUIRE_PRODUCT_LAUNCH_SMOKE",
+    ) orelse return error.SkipZigTest;
+    if (!std.mem.eql(
+        u8,
+        std.mem.span(required),
+        "maru-test-only-v1",
+    )) return error.SkipZigTest;
     const allocator = testing.allocator;
     const product_exe_raw = std.c.getenv("MARU_SESSION_HOST_PRODUCT_EXE") orelse {
         try testing.expect(false); // macOS 공식 build wiring이 product artifact 주입을 잃으면 skip이 아니라 실패한다.

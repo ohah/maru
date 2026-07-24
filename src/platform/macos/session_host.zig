@@ -36,10 +36,6 @@
 
 const builtin = @import("builtin");
 
-/// `build.zig`의 전용 session-host test artifact만 product CLI exec smoke를 필수로 실행한다. 이 barrel의 테스트가
-/// 일반 `maru` 통합 test artifact를 통해 중복 수집될 때는 product 경로 env가 없으므로 해당 smoke만 skip한다.
-pub const require_product_launch_smoke = true;
-
 pub const entrypoint = @import("session_host/entrypoint.zig");
 pub const protocol = @import("session_host/protocol.zig");
 pub const framing = @import("session_host/framing.zig");

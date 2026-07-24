@@ -41,6 +41,18 @@ pub fn sameReleaseSigner(io: std.Io, current: [:0]const u8, target: [:0]const u8
     return std.mem.eql(u8, current_line, target_line);
 }
 
+/// Release E2E artifact가 pathname 없이 어떤 designated requirement를 검증했는지 남길 비민감 fingerprint.
+/// 승인 자체는 `sameReleaseSigner`의 exact line equality가 소유하며 이 digest로 대체하지 않는다.
+pub fn releaseRequirementDigest(io: std.Io, executable: [:0]const u8) ?[32]u8 {
+    if (!verify(io, executable)) return null;
+    var output: [capture_cap]u8 = undefined;
+    const line = requirementLine(requirement(io, executable, &output) orelse return null) orelse return null;
+    if (!releaseRequirement(line)) return null;
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(line, &digest, .{});
+    return digest;
+}
+
 fn verify(io: std.Io, path: [:0]const u8) bool {
     var output: [capture_cap]u8 = undefined;
     const argv = [_:null]?[*:0]const u8{

@@ -42,6 +42,7 @@ pub const RecordKind = enum(u16) {
     image_placement = 3,
     image_blob = 4,
     prompt_marks = 5, // OSC 133 행별 semantic prompt(분류+종료코드). full-replace라 snapshot·delta 공용.
+    link_spans = 6, // 뷰포트 링크(자동 감지 + OSC 8). full-replace라 snapshot·delta 공용.
     // delta records (증분 변경)
     set_runs = 10,
     clear_rect = 11,
@@ -54,7 +55,7 @@ pub const RecordKind = enum(u16) {
 
     pub fn isKnown(self: RecordKind) bool {
         return switch (self) {
-            .screen_meta, .row, .image_placement, .image_blob, .prompt_marks, .set_runs, .clear_rect, .scroll_rect, .cursor, .modes, .image_place, .image_remove => true,
+            .screen_meta, .row, .image_placement, .image_blob, .prompt_marks, .link_spans, .set_runs, .clear_rect, .scroll_rect, .cursor, .modes, .image_place, .image_remove => true,
             _ => false,
         };
     }
@@ -212,6 +213,32 @@ pub const PromptMarks = struct {
     }
 };
 
+/// 뷰포트 링크 하나 — 밑줄 범위(뷰포트 상대 행/열, 양끝 포함) + 종류 + 그 매치를 만든 감지 종류.
+/// `kind`는 `selection.LinkKind`(0=url, 1=file_path), `scope`는 `selection.LinkScope`의 **비트 위치**다
+/// (0 web … 5 bare_relative, 6 osc8). host는 client config를 모르므로 최대 집합으로 계산해 전부 싣고,
+/// client가 자기 `input.link-detection`으로 거른다(docs/link-detection.md §원격(host-backed) 세션).
+/// 이 모듈은 순수 codec이라 terminal 타입을 모른다 — 숫자 약속만 SSOT로 두고 매핑은 host/client 경계가 한다
+/// (`ColorTag`와 같은 규율).
+pub const LinkSpanWire = struct {
+    start_row: u16,
+    start_col: u16,
+    end_row: u16,
+    end_col: u16,
+    kind: u8 = 0,
+    scope: u8 = 0,
+};
+
+/// 화면 전체의 링크 목록. full-replace라 record 하나가 현재 전체를 싣는다(링크가 하나도 없으면 producer가
+/// 방출을 생략해 common case 무비용 — `PromptMarks`와 같은 패턴).
+/// wire: span_count:u16 | (start_row:u16 | start_col:u16 | end_row:u16 | end_col:u16 | kind:u8 | scope:u8)*.
+pub const LinkSpans = struct {
+    spans: []LinkSpanWire,
+
+    pub fn deinit(self: LinkSpans, allocator: std.mem.Allocator) void {
+        allocator.free(self.spans);
+    }
+};
+
 /// 28-byte record header. body는 record_kind에 따라 이 뒤에 이어진다.
 pub const RecordHeader = struct {
     kind: RecordKind,
@@ -263,6 +290,9 @@ pub const DecodeError = error{
     InvalidUtf8,
     /// run count·row 등 선언 수가 cap을 넘는다(메모리 폭주 방지).
     TooManyItems,
+    /// 필드 자체는 읽혔으나 값이 record 불변식을 깬다(예: link span의 끝이 시작보다 앞). 조용히 고치면 소비자가
+    /// 무한 루프/OOB를 낼 수 있어 §12 "손상은 reject" 규율대로 record를 버린다.
+    MalformedRecord,
     OutOfMemory,
 };
 
@@ -612,6 +642,44 @@ pub fn decodePromptMarks(allocator: std.mem.Allocator, body: []const u8) DecodeE
         row.* = .{ .kind = kind, .exit = if (has_exit != 0) exit_raw else null };
     }
     return .{ .rows = rows };
+}
+
+/// 뷰포트 링크 목록을 record로 굽는다. 손상 방어 cap은 span 65535개(u16 count 상한 — 화면 셀 수보다 훨씬 크다).
+pub fn encodeLinkSpans(allocator: std.mem.Allocator, header: RecordHeader, ls: LinkSpans) DecodeError![]u8 {
+    if (ls.spans.len > std.math.maxInt(u16)) return error.MalformedRecord;
+    var body: std.ArrayListUnmanaged(u8) = .empty;
+    defer body.deinit(allocator);
+    const w = BodyWriter{ .buf = &body, .allocator = allocator };
+    try w.u16v(@intCast(ls.spans.len));
+    for (ls.spans) |s| {
+        try w.u16v(s.start_row);
+        try w.u16v(s.start_col);
+        try w.u16v(s.end_row);
+        try w.u16v(s.end_col);
+        try w.u8v(s.kind);
+        try w.u8v(s.scope);
+    }
+    return finishRecord(allocator, .{ .kind = .link_spans, .generation = header.generation, .version = header.version, .sequence = header.sequence, .chunk_index = header.chunk_index, .chunk_count = header.chunk_count }, body.items);
+}
+
+pub fn decodeLinkSpans(allocator: std.mem.Allocator, body: []const u8) DecodeError!LinkSpans {
+    var r = BodyReader{ .bytes = body };
+    const count = try r.u16v();
+    const spans = allocator.alloc(LinkSpanWire, count) catch return error.OutOfMemory;
+    errdefer allocator.free(spans);
+    for (spans) |*s| {
+        const start_row = try r.u16v();
+        const start_col = try r.u16v();
+        const end_row = try r.u16v();
+        const end_col = try r.u16v();
+        const kind = try r.u8v();
+        const scope = try r.u8v();
+        // 뒤집힌 범위는 소비자가 무한 루프/OOB를 낼 수 있는 손상이다. 조용히 고치지 않고 record를 reject한다
+        // (§12 "손상은 snapshot 전체 reject" — client는 full 재동기화로 복구).
+        if (end_row < start_row or (end_row == start_row and end_col < start_col)) return error.MalformedRecord;
+        s.* = .{ .start_row = start_row, .start_col = start_col, .end_row = end_row, .end_col = end_col, .kind = kind, .scope = scope };
+    }
+    return .{ .spans = spans };
 }
 
 // ── delta record encode/decode ───────────────────────────────────────────────
@@ -966,6 +1034,50 @@ test "screen-stream: prompt_marks round-trips dense per-row semantic + exit code
     try testing.expectEqual(@as(u8, 3), pm.rows[1].kind);
     try testing.expectEqual(@as(?i16, -2), pm.rows[1].exit);
     try testing.expectEqual(@as(?i16, null), pm.rows[2].exit);
+}
+
+// 원격 client는 이 record 하나로 Cmd+hover 밑줄을 그린다(docs/link-detection.md §원격(host-backed) 세션).
+// 좌표·종류·scope가 한 비트라도 왕복에서 어긋나면 밑줄이 엉뚱한 칸에 그어지거나 client의 config 필터가
+// 잘못 걸러 링크가 사라진다. full-replace라 "링크 0개"도 유효한 상태다(host가 방출을 생략하는 것과 구분).
+test "screen-stream: link_spans round-trips coordinates, kind and scope" {
+    const allocator = testing.allocator;
+    var spans = [_]LinkSpanWire{
+        .{ .start_row = 0, .start_col = 3, .end_row = 0, .end_col = 26, .kind = 0, .scope = 0 }, // url/web
+        .{ .start_row = 2, .start_col = 4, .end_row = 3, .end_col = 9, .kind = 1, .scope = 5 }, // file_path/bare(soft-wrap)
+        .{ .start_row = 4, .start_col = 0, .end_row = 4, .end_col = 3, .kind = 0, .scope = 6 }, // osc8
+    };
+    const rec = try encodeLinkSpans(allocator, .{ .kind = .link_spans, .generation = 7 }, .{ .spans = &spans });
+    defer allocator.free(rec);
+    const ls = try decodeLinkSpans(allocator, rec[record_header_size..]);
+    defer ls.deinit(allocator);
+    try testing.expectEqual(@as(usize, 3), ls.spans.len);
+    try testing.expectEqualDeep(spans[0], ls.spans[0]);
+    try testing.expectEqualDeep(spans[1], ls.spans[1]); // 여러 행에 걸친 span도 그대로
+    try testing.expectEqual(@as(u8, 6), ls.spans[2].scope); // osc8 비트
+
+    // 빈 목록도 유효한 full-replace(= "지금 화면에 링크 없음")다 — 소비자가 이전 목록을 지우는 근거.
+    const empty = try encodeLinkSpans(allocator, .{ .kind = .link_spans, .generation = 8 }, .{ .spans = &.{} });
+    defer allocator.free(empty);
+    const none = try decodeLinkSpans(allocator, empty[record_header_size..]);
+    defer none.deinit(allocator);
+    try testing.expectEqual(@as(usize, 0), none.spans.len);
+}
+
+// 뒤집힌 범위를 그대로 받아들이면 소비자가 start..end를 순회하다 무한 루프/OOB에 빠진다. 손상은 조용히
+// 고치지 않고 record를 reject해 client가 full 재동기화하게 한다(§12).
+test "screen-stream: link_spans rejects a reversed span" {
+    const allocator = testing.allocator;
+    var body: std.ArrayListUnmanaged(u8) = .empty;
+    defer body.deinit(allocator);
+    const w = BodyWriter{ .buf = &body, .allocator = allocator };
+    try w.u16v(1);
+    try w.u16v(5); // start_row
+    try w.u16v(0); // start_col
+    try w.u16v(2); // end_row < start_row → 손상
+    try w.u16v(0);
+    try w.u8v(0);
+    try w.u8v(0);
+    try testing.expectError(error.MalformedRecord, decodeLinkSpans(allocator, body.items));
 }
 
 test "screen-stream: run count cap rejects a corrupt declared count before allocating" {

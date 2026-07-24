@@ -168,9 +168,19 @@
   붙어도 각자의 정책이 적용되기 때문이다(§[다중 client](persistent-session-host.md#9-다중-client와-resize)).
 - **hover/click 불일치는 원격에서도 같다**: host의 span 계산은 stat을 하지 않고(hover), `runtime.link_at`만 resolve+stat을 한다
   (click). 즉 아래 §hover와 click의 의도적 불일치가 로컬·원격에서 동일하게 성립한다.
+- **OSC 8 명시 링크도 같은 record로 간다**: screen-stream의 `run`에는 셀의 OSC 8 link id 필드가 **없다**(`grapheme|width|
+  count|fg|bg|underline_color|style_flags`가 전부). 즉 원격에서는 자동 감지뿐 아니라 **명시 하이퍼링크도 client 셀에 도달하지
+  않는다** — 이 문서 §두 가지 감지 경로가 "OSC 8은 항상 우선"이라고 한 전제가 host-backed에서는 성립하지 않았다. 그래서 host는
+  `link_spans`에 자동 감지 span과 **OSC 8 span을 함께** 싣고(`scope=osc8` 비트), client는 osc8 비트를 `input.link-detection`
+  프리셋과 무관하게 항상 표시한다(로컬에서 OSC 8이 scope 토글과 무관한 것과 동일). 열기 역시 `runtime.link_at`이 host의
+  `extractUrlAt`을 부르므로 저장된 URI가 그대로 쓰인다.
 - **capability와 구 host 호환**: `runtime_link_at_v1`을 광고하지 않는 구 host에는 클릭 RPC를 보내지 않고, `link_spans`를 보내지
-  않는 구 host에서는 자동 감지가 비활성이다(OSC 8 명시 링크는 셀의 link id로 스냅샷에 이미 실려 영향 없음). 감지가 조용히 빈
+  않는 구 host에서는 자동 감지·OSC 8 링크가 모두 비활성이다(현재 동작과 같음 — 새로 잃는 기능이 없다). 감지가 조용히 빈
   결과를 내는 것이 잘못된 경로를 여는 것보다 안전하다.
+- **scope 필터의 근사 한계**: host는 `full` 기준 한 번만 계산하고 span마다 매치 scope를 태그한다. `input.link-detection`이
+  프리셋 3종(`osc8-only`/`web`/`full`)뿐이라 실제 필터 결과는 로컬과 같지만, 한 토큰 안에 web 스킴과 추가 스킴이 함께 있고
+  추가 스킴이 더 앞서는 극단적 입력에서는 `web` 프리셋의 매치가 로컬과 갈릴 수 있다. 프리셋별 재계산은 비용 대비 실익이 없어
+  후속으로 둔다(임의 비트 조합 config가 생기면 재검토).
 
 ## 코드 위치
 

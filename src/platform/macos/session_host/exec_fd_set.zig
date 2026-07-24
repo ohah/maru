@@ -99,6 +99,27 @@ pub fn collectNonCloexec(out: []c.fd_t) Error!usize {
     return count;
 }
 
+/// Target entrypoint 직후에는 CLOEXEC fd가 이미 kernel에서 닫혔으므로 열린 fd 3+ 전체가 inherited allowlist와
+/// 정확히 같아야 한다.
+pub fn assertExactOpen(allowed: []const c.fd_t) Error!void {
+    const max_fd = getdtablesize();
+    var seen: [max_slots]bool = .{false} ** max_slots;
+    if (allowed.len > seen.len) return error.TooManyOpenFds;
+    var fd: c.fd_t = 3;
+    while (fd < max_fd) : (fd += 1) {
+        if (!isOpen(fd)) continue;
+        var match: ?usize = null;
+        for (allowed, 0..) |candidate, index| if (candidate == fd) {
+            match = index;
+            break;
+        };
+        const index = match orelse return error.UnexpectedInheritedFd;
+        if (seen[index]) return error.DuplicateSlot;
+        seen[index] = true;
+    }
+    for (seen[0..allowed.len]) |present| if (!present) return error.SourceClosed;
+}
+
 fn freeSlot(start: c.fd_t) ?c.fd_t {
     var fd = start;
     while (fd < getdtablesize()) : (fd += 1) if (!isOpen(fd)) return fd;

@@ -303,6 +303,7 @@ pub const RuntimeManager = struct {
             locked += 1;
             const session = item.terminal_slot.live_pty.session;
             const size = session.canonicalSize();
+            const identity = session.masterIdentity() catch return error.UnsafeFrontier;
             if (size.cols != item.entry.cols or size.rows != item.entry.rows) return error.UnsafeFrontier;
             views[index] = .{
                 .runtime_id = item.entry.id,
@@ -312,6 +313,9 @@ pub const RuntimeManager = struct {
                 .rows = item.entry.rows,
                 .resize_generation = item.entry.resize_generation,
                 .fd_slot = first_fd_slot + @as(u16, @intCast(index)),
+                .pty_dev = identity.dev,
+                .pty_ino = identity.ino,
+                .pty_rdev = identity.rdev,
                 .core = &item.terminal_slot.surface.core,
             };
         }

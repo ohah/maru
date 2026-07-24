@@ -108,6 +108,14 @@ pub const upgrade_attempt = if (builtin.os.tag == .macos)
     @import("session_host/upgrade_attempt.zig")
 else
     struct {};
+pub const exec_upgrade_e2e = if (builtin.os.tag == .macos)
+    @import("session_host/exec_upgrade_e2e.zig")
+else
+    struct {};
+pub const owner_lease = if (builtin.os.tag == .macos)
+    @import("session_host/owner_lease.zig")
+else
+    struct {};
 // screen_snapshot(실 TerminalCore 화면 → screen_stream 레코드 투영)도 `@import("maru")`로 terminal을 읽어 macOS 전용이다.
 // 투영 자체는 순수 로직이지만 terminal 타입 의존이라 barrel에서 조건부로 둔다(screen_stream codec은 그대로 순수 유지).
 pub const screen_snapshot = if (builtin.os.tag == .macos)

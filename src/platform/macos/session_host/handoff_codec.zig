@@ -811,6 +811,9 @@ pub const RuntimeView = struct {
     rows: u16,
     resize_generation: u64,
     fd_slot: u16,
+    pty_dev: i64,
+    pty_ino: u64,
+    pty_rdev: i64,
     core: *const TerminalCore,
 };
 
@@ -829,6 +832,9 @@ pub const RuntimeState = struct {
     rows: u16,
     resize_generation: u64,
     fd_slot: u16,
+    pty_dev: i64,
+    pty_ino: u64,
+    pty_rdev: i64,
     core: TerminalCore,
 
     fn deinit(self: *RuntimeState) void {
@@ -892,6 +898,9 @@ pub fn encodeHost(allocator: std.mem.Allocator, host: HostView) Error![]u8 {
         const core_bytes = try encodeCore(allocator, runtime.core);
         defer allocator.free(core_bytes);
         try encodeTaggedBytes(&writer, 8, core_bytes);
+        try encodeTaggedValue(&writer, 9, i64, &runtime.pty_dev);
+        try encodeTaggedValue(&writer, 10, u64, &runtime.pty_ino);
+        try encodeTaggedValue(&writer, 11, i64, &runtime.pty_rdev);
         try writer.endTlv(runtime_start);
         if (writer.bytes.items.len - runtime_start > max_runtime_section_bytes) return error.LimitExceeded;
     }
@@ -933,7 +942,7 @@ fn decodeHostMeta(section: *Reader, host_id: *u128, epoch: *u64, next_handle: *u
 
 fn decodeRuntime(allocator: std.mem.Allocator, section: *Reader) Error!RuntimeState {
     var result: RuntimeState = undefined;
-    var seen: [8]bool = .{false} ** 8;
+    var seen: [11]bool = .{false} ** 11;
     var core_initialized = false;
     errdefer if (core_initialized) result.core.deinit();
     while (section.pos < section.bytes.len) {
@@ -943,7 +952,7 @@ fn decodeRuntime(allocator: std.mem.Allocator, section: *Reader) Error!RuntimeSt
         const raw_len = try section.integer(u64);
         if (raw_len > max_single_blob_bytes) return error.LimitExceeded;
         var field = try section.sub(std.math.cast(usize, raw_len) orelse return error.LimitExceeded);
-        if (tag < 1 or tag > 8) {
+        if (tag < 1 or tag > 11) {
             if (flags & flag_optional == 0) return error.UnknownRequiredField;
             continue;
         }
@@ -963,6 +972,9 @@ fn decodeRuntime(allocator: std.mem.Allocator, section: *Reader) Error!RuntimeSt
                 core_initialized = true;
                 field.pos = field.bytes.len;
             },
+            9 => result.pty_dev = try readTagged(i64, &field, allocator),
+            10 => result.pty_ino = try readTagged(u64, &field, allocator),
+            11 => result.pty_rdev = try readTagged(i64, &field, allocator),
             else => unreachable,
         }
     }
@@ -1171,8 +1183,8 @@ test "handoff v1 host DTO atomically round-trips multiple runtime identities and
     defer second.deinit();
     try second.write("\x1b[31");
     const views = [_]RuntimeView{
-        .{ .runtime_id = 0xAA, .surface_id = 7, .child_pid = 101, .cols = 8, .rows = 2, .resize_generation = 3, .fd_slot = 40, .core = &first },
-        .{ .runtime_id = 0xBB, .surface_id = 8, .child_pid = 102, .cols = 10, .rows = 3, .resize_generation = 4, .fd_slot = 41, .core = &second },
+        .{ .runtime_id = 0xAA, .surface_id = 7, .child_pid = 101, .cols = 8, .rows = 2, .resize_generation = 3, .fd_slot = 40, .pty_dev = 1, .pty_ino = 2, .pty_rdev = 3, .core = &first },
+        .{ .runtime_id = 0xBB, .surface_id = 8, .child_pid = 102, .cols = 10, .rows = 3, .resize_generation = 4, .fd_slot = 41, .pty_dev = 4, .pty_ino = 5, .pty_rdev = 6, .core = &second },
     };
     const encoded = try encodeHost(allocator, .{ .host_id = 0xCAFE, .upgrade_epoch = 9, .next_handle = 12, .runtimes = &views });
     defer allocator.free(encoded);
@@ -1195,8 +1207,8 @@ test "handoff v1 host DTO rejects duplicate inherited slots without publishing a
     var second = try TerminalCore.init(allocator, .{ .cols = 8, .rows = 2 });
     defer second.deinit();
     const views = [_]RuntimeView{
-        .{ .runtime_id = 1, .surface_id = 1, .child_pid = 101, .cols = 8, .rows = 2, .resize_generation = 0, .fd_slot = 40, .core = &first },
-        .{ .runtime_id = 2, .surface_id = 2, .child_pid = 102, .cols = 8, .rows = 2, .resize_generation = 0, .fd_slot = 40, .core = &second },
+        .{ .runtime_id = 1, .surface_id = 1, .child_pid = 101, .cols = 8, .rows = 2, .resize_generation = 0, .fd_slot = 40, .pty_dev = 1, .pty_ino = 2, .pty_rdev = 3, .core = &first },
+        .{ .runtime_id = 2, .surface_id = 2, .child_pid = 102, .cols = 8, .rows = 2, .resize_generation = 0, .fd_slot = 40, .pty_dev = 1, .pty_ino = 2, .pty_rdev = 3, .core = &second },
     };
     const encoded = try encodeHost(allocator, .{ .host_id = 1, .upgrade_epoch = 0, .next_handle = 3, .runtimes = &views });
     defer allocator.free(encoded);
@@ -1209,7 +1221,7 @@ test "handoff v1 host DTO allocation failure never publishes a partial runtime s
     defer core.deinit();
     try core.write("atomic");
     const views = [_]RuntimeView{
-        .{ .runtime_id = 1, .surface_id = 1, .child_pid = 101, .cols = 8, .rows = 2, .resize_generation = 0, .fd_slot = 40, .core = &core },
+        .{ .runtime_id = 1, .surface_id = 1, .child_pid = 101, .cols = 8, .rows = 2, .resize_generation = 0, .fd_slot = 40, .pty_dev = 1, .pty_ino = 2, .pty_rdev = 3, .core = &core },
     };
     const encoded = try encodeHost(allocator, .{ .host_id = 1, .upgrade_epoch = 0, .next_handle = 2, .runtimes = &views });
     defer allocator.free(encoded);

@@ -227,6 +227,23 @@ pub const PtySession = struct {
         return self.size;
     }
 
+    pub const MasterIdentity = struct {
+        dev: i64,
+        ino: u64,
+        rdev: i64,
+    };
+
+    pub fn masterIdentity(self: *const PtySession) !MasterIdentity {
+        var stat: std.posix.Stat = undefined;
+        if (std.c.fstat(self.master_fd.load(.acquire), &stat) != 0 or !std.posix.S.ISCHR(stat.mode))
+            return error.InvalidPtyIdentity;
+        return .{
+            .dev = stat.dev,
+            .ino = @intCast(stat.ino),
+            .rdev = stat.rdev,
+        };
+    }
+
     /// Target image의 pre-commit PTY adoption. 이 타입은 child lifecycle을 소유하지 않으므로 `discard`가
     /// signal/waitpid를 절대 호출하지 않는다. inherited slot은 rollback exec를 위해 caller가 계속 소유한다.
     pub const PreparedAdoption = struct {
@@ -239,11 +256,25 @@ pub const PtySession = struct {
         committed: bool = false,
 
         pub fn prepare(inherited_slot: std.posix.fd_t, child_pid: std.c.pid_t, size: terminal.Size) !PreparedAdoption {
+            return prepareExact(inherited_slot, child_pid, size, null);
+        }
+
+        pub fn prepareExact(
+            inherited_slot: std.posix.fd_t,
+            child_pid: std.c.pid_t,
+            size: terminal.Size,
+            expected_identity: ?MasterIdentity,
+        ) !PreparedAdoption {
             if (inherited_slot < 3 or child_pid <= 0 or size.cols < 2 or size.rows < 1) return error.InvalidInheritedPty;
             const fd_flags = std.c.fcntl(inherited_slot, std.c.F.GETFD, @as(c_int, 0));
             if (fd_flags < 0 or fd_flags & std.c.FD_CLOEXEC != 0) return error.InvalidInheritedPty;
             var stat: std.posix.Stat = undefined;
             if (std.c.fstat(inherited_slot, &stat) != 0 or !std.posix.S.ISCHR(stat.mode)) return error.InvalidInheritedPty;
+            if (expected_identity) |expected| {
+                if (@as(i64, stat.dev) != expected.dev or
+                    @as(u64, @intCast(stat.ino)) != expected.ino or
+                    @as(i64, stat.rdev) != expected.rdev) return error.InvalidInheritedPty;
+            }
             const raw_flags = std.c.fcntl(inherited_slot, std.c.F.GETFL, @as(c_int, 0));
             if (raw_flags < 0) return error.InvalidInheritedPty;
             const open_flags: std.c.O = @bitCast(@as(u32, @intCast(raw_flags)));
@@ -1341,6 +1372,38 @@ test "prepared inherited PTY adoption discard never signals or reaps the live ch
     const probe_signal: std.c.SIG = @enumFromInt(0);
     try std.testing.expect(std.c.kill(session.childPid(), probe_signal) == 0);
     try session.writeInput("still-owned");
+}
+
+test "prepared inherited PTY adoption rejects a different same-sized PTY master" {
+    var expected_session = try PtySession.spawn(std.testing.allocator, .{
+        .command = "/bin/sleep",
+        .args = &.{"5"},
+        .size = .{ .cols = 40, .rows = 10 },
+    });
+    defer expected_session.deinit();
+    var replacement_session = try PtySession.spawn(std.testing.allocator, .{
+        .command = "/bin/sleep",
+        .args = &.{"5"},
+        .size = .{ .cols = 40, .rows = 10 },
+    });
+    defer replacement_session.deinit();
+    const replacement = replacement_session.inheritedMasterFd() orelse return error.TestUnexpectedResult;
+    var slot: c_int = 201;
+    while (slot < 1000 and std.c.fcntl(slot, std.c.F.GETFD, @as(c_int, 0)) >= 0) : (slot += 1) {}
+    if (slot >= 1000 or std.c.dup2(replacement, slot) < 0) return error.SkipZigTest;
+    defer _ = std.c.close(slot);
+    const slot_flags = std.c.fcntl(slot, std.c.F.GETFD, @as(c_int, 0));
+    try std.testing.expect(std.c.fcntl(slot, std.c.F.SETFD, slot_flags & ~@as(c_int, std.c.FD_CLOEXEC)) == 0);
+
+    try std.testing.expectError(
+        error.InvalidInheritedPty,
+        PtySession.PreparedAdoption.prepareExact(
+            slot,
+            expected_session.childPid(),
+            expected_session.canonicalSize(),
+            try expected_session.masterIdentity(),
+        ),
+    );
 }
 
 test "decodeExitStatus reports normal exit code" {

@@ -20,8 +20,10 @@ const socket_server = @import("socket_server.zig");
 const reg = @import("registry.zig");
 const runtime_manager = @import("runtime_manager.zig");
 const upgrade = @import("upgrade_coordinator.zig");
+const discovery = @import("discovery.zig");
+const owner_lease = @import("owner_lease.zig");
 
-pub const RunError = socket_server.BindError || error{OutOfMemory};
+pub const RunError = socket_server.BindError || error{ OutOfMemory, OwnerLeaseFailed };
 
 // macOS/BSD libc의 CSPRNG와 sleep(std.posix 미노출이라 직접 extern — daemon은 macOS 전용).
 extern "c" fn arc4random_buf(buf: [*]u8, nbytes: usize) void;
@@ -66,6 +68,10 @@ pub fn runSessionHost(
 
     var server = try socket_server.SocketServer.bind(allocator, dir_path, socket_path, newHostId(), &registry);
     defer server.deinit();
+    var owner_path_buf: [640]u8 = undefined;
+    const owner_path = discovery.ownerLockPathIn(&owner_path_buf, dir_path) catch return error.OwnerLeaseFailed;
+    var lifetime_owner = owner_lease.OwnerLease.acquire(owner_path) catch return error.OwnerLeaseFailed;
+    defer lifetime_owner.deinit();
     server.runtime_ops = manager.runtimeOps(); // 이제 이 host는 read-only가 아니라 runtime.spawn/terminate를 처리한다.
     var admission_gate = upgrade.AdmissionGate.init(io);
     server.admission_gate = &admission_gate;

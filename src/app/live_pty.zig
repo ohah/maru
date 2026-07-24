@@ -310,7 +310,9 @@ pub const LivePtySession = struct {
     }
 
     pub fn upgradeEligible(self: *LivePtySession) bool {
-        return !self.reader_finished and self.session.upgradeEligible() and self.queue.emptyAndOpen();
+        // Coalesced output signal은 pause 요청과 경합해 다시 생길 수 있으므로 phase-1 eligibility에서 empty를
+        // 요구하지 않는다. 모든 reader join 뒤 owner drain이 queue empty를 final gate로 검증한다.
+        return !self.reader_finished and self.session.upgradeEligible();
     }
 
     pub fn upgradePausedAndSafe(self: *LivePtySession) bool {

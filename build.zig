@@ -1407,10 +1407,47 @@ pub fn build(b: *std.Build) void {
             .imports = &.{.{ .name = "maru", .module = maru_mod }},
         }),
     });
+    // U3 same-PID exec E2E는 서로 다른 root source의 frozen-old/new helper artifact를 실제 exec한다.
+    // 테스트 binary를 두 번 같은 source로 빌드해 "교체"처럼 보이게 하지 않는다.
+    const session_host_fixture_mod = b.createModule(.{
+        .root_source_file = b.path("src/platform/macos/session_host.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{.{ .name = "maru", .module = maru_mod }},
+    });
+    const session_host_upgrade_old = b.addExecutable(.{
+        .name = "maru-session-host-upgrade-old-v1",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/fixtures/session_host_upgrade_old_v1.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{
+                .{ .name = "maru", .module = maru_mod },
+                .{ .name = "session_host", .module = session_host_fixture_mod },
+            },
+        }),
+    });
+    const session_host_upgrade_new = b.addExecutable(.{
+        .name = "maru-session-host-upgrade-new-v2",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/fixtures/session_host_upgrade_new_v2.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{
+                .{ .name = "maru", .module = maru_mod },
+                .{ .name = "session_host", .module = session_host_fixture_mod },
+            },
+        }),
+    });
     // `/usr/bin/env`가 build cache의 실제 `maru` artifact 경로를 test process에만 주입하고 test binary를 exec한다.
     // install step을 거치지 않으므로 `zig build test* --prefix ...`가 사용자 설치 경로를 쓰거나 덮어쓰지 않는다.
     const run_session_host_tests = b.addSystemCommand(&.{"/usr/bin/env"});
     run_session_host_tests.addPrefixedArtifactArg("MARU_SESSION_HOST_PRODUCT_EXE=", exe);
+    run_session_host_tests.addPrefixedArtifactArg("MARU_SESSION_HOST_UPGRADE_OLD_EXE=", session_host_upgrade_old);
+    run_session_host_tests.addPrefixedArtifactArg("MARU_SESSION_HOST_UPGRADE_NEW_EXE=", session_host_upgrade_new);
     run_session_host_tests.addArg("MARU_SESSION_HOST_TEST_ONESHOT=maru-test-only-v1");
     run_session_host_tests.addArtifactArg(session_host_tests);
     run_session_host_tests.enableTestRunnerMode();

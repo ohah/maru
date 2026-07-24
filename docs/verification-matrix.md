@@ -129,7 +129,8 @@ FP11d 표 gate는 네 가지 outer-pipe 형태, data row가 있거나 없는 pla
 
 ### Session host 실행 중 업그레이드 gate
 
-[Session host 실행 중 업그레이드](session-host-upgrade.md)는 현재 U0~U2 자동 gate를 통과했고 U3 exec/rollback 기반 구현 중이며,
+[Session host 실행 중 업그레이드](session-host-upgrade.md)는 현재 U0~U2 자동 gate를 통과했고 U3 exec/rollback 및
+U4 typed-connect/host-pool 기반 구현 중이며,
 제품 기능으로 활성화되지 않았다. 단계별
 증거 수준을 섞지 않는다.
 

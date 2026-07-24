@@ -391,6 +391,10 @@ absolute identity만** 기록하고 target의 page layout을 새로 만든다. s
 - 여러 runtime의 큰 scrollback/kitty/partial parser 상태를 한 attempt로 전량 옮긴다.
 - current GUI→frozen N-1 host adapter→upgrade→current attach 제품 경계를 자동화한다.
 - 한 runtime decode가 실패하면 어떤 runtime도 commit하지 않는다는 것을 검증한다.
+- **구현 중:** connect errno와 handshake/protocol 실패를 typed outcome으로 분리해 endpoint 부재만 launch하고,
+  permission/version/malformed peer는 spawn으로 우회하지 않는다. host ID별 heap-pinned client pool과 runtime→host
+  소속 seam을 추가했다. 제품 AppSession의 singleton client 교체, versioned discovery, frozen N-1 wire package/adapter,
+  current+old 동시 workspace restore E2E는 아직 남아 있다.
 
 ### U5 — 제품 활성화
 

@@ -1774,6 +1774,11 @@ fn keepAlivePolicyForNewSession(config_value: bool) bool {
 // 오인 방지). 첫 창의 ensureRemoteBackend가 실패하면 켠다 → 이후 창은 재시도(각 3s backoff) 없이 바로 in-process + 같은
 // notice(host가 정말 죽었으면 창마다 재시도 낭비 방지). 프로세스 전역 상태라 module-var.
 var host_connect_failed: bool = false;
+const HostConnectFailureReason = if (is_macos)
+    session_host.host_connect.FailureReason
+else
+    enum { unavailable };
+var host_connect_failure_reason: ?HostConnectFailureReason = null;
 
 /// FP10c1 C ABI가 앱 전역 Mermaid 정책 인스턴스를 찾는 유일한 접근점. 새 handle을 만들지 않아 모든 창과
 /// Swift adapter가 `AppRuntime.mermaid_queue` 하나를 공유한다.
@@ -5560,9 +5565,12 @@ pub const AppSession = struct {
                 return;
             };
             // §6 L291: host 연결/spawn 실패 시 조용히 in-process로 폴백하지 않고 사용자에게 알린다("유지된다" 오인 방지).
-            const client = session_host.host_connect.connectOrLaunch(alloc, exe_path, base, .{}) orelse {
-                self.markHostConnectFailed();
-                return;
+            const client = switch (session_host.host_connect.connectOrLaunchDetailed(alloc, exe_path, base, .{})) {
+                .connected => |connected| connected,
+                .failed => |reason| {
+                    self.markHostConnectFailedReason(reason);
+                    return;
+                },
             };
             app_remote_client = client;
             // 앱 전역 backend는 &app_remote_client.?(모듈-var 안정 주소)와 앱 전역 라우팅 표를 든다.
@@ -5574,6 +5582,13 @@ pub const AppSession = struct {
     /// pending을 함께 세운다. createTerm은 backendForNew가 null이라 in-process로 열되, 첫 tick의 notice가 "유지 안 됨"을 알린다.
     fn markHostConnectFailed(self: *AppSession) void {
         host_connect_failed = true;
+        host_connect_failure_reason = null;
+        self.host_connect_notice_pending = true;
+    }
+
+    fn markHostConnectFailedReason(self: *AppSession, reason: HostConnectFailureReason) void {
+        host_connect_failed = true;
+        host_connect_failure_reason = reason;
         self.host_connect_notice_pending = true;
     }
 

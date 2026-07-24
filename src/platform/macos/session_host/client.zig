@@ -19,7 +19,9 @@ const screen_stream = @import("screen_stream.zig");
 const observation_wire = @import("observation_wire.zig");
 
 pub const ClientError = error{
-    ConnectFailed,
+    EndpointAbsent,
+    EndpointDenied,
+    EndpointTransient,
     /// hello 왕복이 실패했다(전송/수신/파싱). 또는 host_id를 못 읽었다.
     HandshakeFailed,
     /// host가 겹치는 major version이 없다고 응답했다(§10). runtime을 죽이지 않고 client만 끝낸다.
@@ -34,6 +36,35 @@ pub const ClientError = error{
     EventQueueFull,
     OutOfMemory,
 };
+
+pub const EndpointFailure = enum { absent, denied, transient, other };
+
+pub fn classifyConnectErrno(err: posix.E) EndpointFailure {
+    return switch (err) {
+        .NOENT, .CONNREFUSED => .absent,
+        .ACCES, .PERM => .denied,
+        .INTR, .AGAIN, .TIMEDOUT => .transient,
+        else => .other,
+    };
+}
+
+test "client connect errno classification separates launchable absence from denial and retry" {
+    try std.testing.expectEqual(EndpointFailure.absent, classifyConnectErrno(.NOENT));
+    try std.testing.expectEqual(EndpointFailure.absent, classifyConnectErrno(.CONNREFUSED));
+    try std.testing.expectEqual(EndpointFailure.denied, classifyConnectErrno(.ACCES));
+    try std.testing.expectEqual(EndpointFailure.denied, classifyConnectErrno(.PERM));
+    try std.testing.expectEqual(EndpointFailure.transient, classifyConnectErrno(.INTR));
+    try std.testing.expectEqual(EndpointFailure.transient, classifyConnectErrno(.AGAIN));
+    try std.testing.expectEqual(EndpointFailure.transient, classifyConnectErrno(.TIMEDOUT));
+}
+
+fn endpointError(err: posix.E) ClientError {
+    return switch (classifyConnectErrno(err)) {
+        .absent => error.EndpointAbsent,
+        .denied, .other => error.EndpointDenied,
+        .transient => error.EndpointTransient,
+    };
+}
 
 /// `readStreamBatch`가 돌려주는 한 화면 stream 배치. `is_snapshot`이면 fresh full snapshot(화면 리셋), 아니면 delta 증분이다
 /// (§9 — host가 grid/alt 변화 시 delta 대신 snapshot을 push하므로 소비자는 둘 다 받는다). `bytes`는 `end_stream`까지 이은
@@ -90,13 +121,13 @@ pub const Client = struct {
         offset: usize = 0,
     };
 
-    /// host socket에 connect하고 hello를 왕복한다. 성공하면 `host_id`가 채워진 Client다. host가 없으면 ConnectFailed
+    /// host socket에 connect하고 hello를 왕복한다. 성공하면 `host_id`가 채워진 Client다. host가 없으면 EndpointAbsent
     /// (discovery가 이 신호로 spawn/host_unavailable을 가른다, P3-d2b). version 불일치는 IncompatibleVersion.
     pub fn connect(allocator: std.mem.Allocator, socket_path: [:0]const u8, client_kind: []const u8) ClientError!Client {
         // over-long path는 sun_path(104B)를 넘겨 slice-bounds panic이 되므로 syscall 전에 거부한다(bind의 socketPathFits 대칭).
-        if (!socket_server.socketPathFits(socket_path.len)) return error.ConnectFailed;
+        if (!socket_server.socketPathFits(socket_path.len)) return error.EndpointDenied;
         const fd = c.socket(posix.AF.UNIX, posix.SOCK.STREAM, 0);
-        if (fd < 0) return error.ConnectFailed;
+        if (fd < 0) return endpointError(posix.errno(fd));
         errdefer _ = c.close(fd);
         // host가 죽은 socket에 write하면 SIGPIPE로 **프로세스가 죽는다** — EPIPE로 바꿔 catchable하게 한다(server accept 경로와 대칭).
         socket_server.setNoSigPipe(fd);
@@ -105,7 +136,8 @@ pub const Client = struct {
         var addr = posix.sockaddr.un{ .family = posix.AF.UNIX, .path = undefined };
         @memset(&addr.path, 0);
         @memcpy(addr.path[0..socket_path.len], socket_path);
-        if (c.connect(fd, @ptrCast(&addr), @sizeOf(posix.sockaddr.un)) != 0) return error.ConnectFailed;
+        const connect_rc = c.connect(fd, @ptrCast(&addr), @sizeOf(posix.sockaddr.un));
+        if (connect_rc != 0) return endpointError(posix.errno(connect_rc));
 
         var self = Client{ .allocator = allocator, .fd = fd, .host_id = 0, .parser = framing.FrameParser.init(allocator) };
         errdefer self.parser.deinit();

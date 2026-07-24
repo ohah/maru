@@ -47,6 +47,11 @@ const AdapterPool = host_pool_mod.HostPool(HostAdapter);
 /// `host_pool`만 권위로 사용한다. **`RemoteRuntime`은 self-referential**(surface.remote가 자기 조립기를 가리킴)이라
 /// heap에 개별 할당해 안정 주소를 주며, map value가 runtime과 host lease identity를 한 단위로 소유한다.
 pub const RemoteTermBackend = struct {
+    const Mode = enum {
+        spawn_and_attach,
+        attach_only,
+    };
+
     const RuntimeEntry = struct {
         runtime: *RemoteRuntime,
         host_id: u128,
@@ -56,6 +61,7 @@ pub const RemoteTermBackend = struct {
     io: std.Io,
     client: ?*client_mod.Client,
     host_pool: ?*AdapterPool = null,
+    mode: Mode = .spawn_and_attach,
     // 앱의 in-process 라우팅 표(borrowed — 소유는 AppRuntime). attach가 원격 Term을 여기에 **원격 PtyIo**로 등록해,
     // GUI 입력 hot path(self.runtime.writeInput/resize/enqueueCoreCommand, surface.id 라우팅)가 in-process와 똑같이
     // 원격 Term에 도달하게 한다 — sink만 write_queue→client.sendInput/resize RPC로 갈린다(app_session hot path 무변경).
@@ -88,11 +94,20 @@ pub const RemoteTermBackend = struct {
 
     pub fn initWithPool(allocator: std.mem.Allocator, io: std.Io, pool: *AdapterPool, surface_runtime: *SurfaceRuntime) !RemoteTermBackend {
         _ = pool.spawnHost() orelse return error.SpawnHostUnavailable;
+        var result = initAttachOnlyWithPool(allocator, io, pool, surface_runtime);
+        result.mode = .spawn_and_attach;
+        return result;
+    }
+
+    /// current host bootstrap이 실패해도 saved N-1 runtime에는 attach할 수 있다. 이 모드는 spawn host가 없음을
+    /// 명시적으로 허용하며, 새 Term spawn은 `spawn()`의 `spawnHost()` gate에서 실패한다.
+    pub fn initAttachOnlyWithPool(allocator: std.mem.Allocator, io: std.Io, pool: *AdapterPool, surface_runtime: *SurfaceRuntime) RemoteTermBackend {
         return .{
             .allocator = allocator,
             .io = io,
             .client = null,
             .host_pool = pool,
+            .mode = .attach_only,
             .surface_runtime = surface_runtime,
         };
     }
@@ -205,6 +220,7 @@ pub const RemoteTermBackend = struct {
 
     fn spawn(ctx: *anyopaque, params: SpawnParams) anyerror!*Surface {
         const self: *RemoteTermBackend = @ptrCast(@alignCast(ctx));
+        if (self.mode == .attach_only) return error.SpawnHostUnavailable;
         if (self.runtimes.contains(params.handle)) return error.RuntimeAlreadyRegistered;
         var selected_host_id: u128 = 0;
         var retained = false;

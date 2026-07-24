@@ -22,8 +22,13 @@ const runtime_manager = @import("runtime_manager.zig");
 const upgrade = @import("upgrade_coordinator.zig");
 const discovery = @import("discovery.zig");
 const owner_lease = @import("owner_lease.zig");
+const host_manifest = @import("host_manifest.zig");
+const screen_stream = @import("screen_stream.zig");
+const short_endpoint = @import("short_endpoint.zig");
+const protocol = @import("protocol.zig");
+const host_authority = @import("host_authority.zig");
 
-pub const RunError = socket_server.BindError || error{ OutOfMemory, OwnerLeaseFailed };
+pub const RunError = socket_server.BindError || error{ OutOfMemory, OwnerLeaseFailed, ManifestFailed };
 
 // macOS/BSD libc의 CSPRNG와 sleep(std.posix 미노출이라 직접 extern — daemon은 macOS 전용).
 extern "c" fn arc4random_buf(buf: [*]u8, nbytes: usize) void;
@@ -48,12 +53,37 @@ pub fn runSessionHost(
     dir_path: [:0]const u8,
     socket_path: [:0]const u8,
 ) RunError!void {
+    return runSessionHostImpl(allocator, io, dir_path, socket_path, null);
+}
+
+/// Product host별 discovery 경로. Launcher가 먼저 발급한 host_id가 short endpoint, owner lease, manifest, hello에서
+/// 하나의 identity로 유지된다.
+pub fn runSessionHostWithIdentity(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    session_dir: [:0]const u8,
+    socket_path: [:0]const u8,
+    host_id: u128,
+) RunError!void {
+    if (host_id == 0) return error.ManifestFailed;
+    short_endpoint.validateCurrentSocketPath(socket_path, host_id) catch return error.ManifestFailed;
+    short_endpoint.prepareCurrentUserNamespace() catch return error.ManifestFailed;
+    return runSessionHostImpl(allocator, io, session_dir, socket_path, host_id);
+}
+
+fn runSessionHostImpl(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    dir_path: [:0]const u8,
+    socket_path: [:0]const u8,
+    exact_host_id: ?u128,
+) RunError!void {
     // 제품 launcher argv를 실제 `maru` 바이너리까지 관통하는 process smoke가 detached orphan을 남기지 않도록,
     // 테스트가 명시한 경우 첫 client 연결을 처리한 뒤 정상 종료한다. 일반 제품 환경에는 이 변수가 없어 기존의 영속
     // accept loop를 그대로 돈다. 환경은 시작 시 한 번만 읽어 parent가 spawn 직후 unset해도 child의 동작이 안정적이다.
     const test_oneshot = if (std.c.getenv("MARU_SESSION_HOST_TEST_ONESHOT")) |value|
         std.mem.eql(u8, std.mem.span(value), "maru-test-only-v1") and
-            std.mem.startsWith(u8, socket_path, "/tmp/maru-sh-product-")
+            exact_host_id != null
     else
         false;
     var test_idle_ticks: usize = 0;
@@ -66,8 +96,13 @@ pub fn runSessionHost(
     var dir_stat: posix.Stat = undefined;
     if (c.fstatat(posix.AT.FDCWD, dir_path.ptr, &dir_stat, posix.AT.SYMLINK_NOFOLLOW) != 0 or
         !posix.S.ISDIR(dir_stat.mode) or dir_stat.uid != c.getuid()) return error.OwnerLeaseFailed;
-    var owner_path_buf: [640]u8 = undefined;
-    const owner_path = discovery.ownerLockPathIn(&owner_path_buf, dir_path) catch return error.OwnerLeaseFailed;
+    if (exact_host_id) |host_id| host_manifest.prepareHostDirectory(dir_path, host_id) catch
+        return error.OwnerLeaseFailed;
+    var owner_path_buf: [832]u8 = undefined;
+    const owner_path = if (exact_host_id) |host_id|
+        host_manifest.ownerLockPathIn(&owner_path_buf, dir_path, host_id) catch return error.OwnerLeaseFailed
+    else
+        discovery.ownerLockPathIn(&owner_path_buf, dir_path) catch return error.OwnerLeaseFailed;
     var lifetime_owner = owner_lease.OwnerLease.acquire(owner_path) catch return error.OwnerLeaseFailed;
     defer lifetime_owner.deinit();
 
@@ -79,8 +114,46 @@ pub fn runSessionHost(
     manager.init(allocator, io, &registry);
     defer manager.deinit();
 
-    var server = try socket_server.SocketServer.bind(allocator, dir_path, socket_path, newHostId(), &registry);
+    const host_id = exact_host_id orelse newHostId();
+    var socket_dir_buf: [112]u8 = undefined;
+    const bind_dir = if (exact_host_id != null)
+        short_endpoint.socketDirPathIn(&socket_dir_buf, c.getuid()) catch return error.ManifestFailed
+    else
+        dir_path;
+    var server = try socket_server.SocketServer.bind(allocator, bind_dir, socket_path, host_id, &registry);
     defer server.deinit();
+    const executable_path_raw = std.process.executablePathAlloc(io, allocator) catch return error.ManifestFailed;
+    defer allocator.free(executable_path_raw);
+    const executable_path = allocator.dupeZ(u8, executable_path_raw) catch return error.OutOfMemory;
+    defer allocator.free(executable_path);
+    const build_id = host_manifest.buildIdForExecutable(allocator, executable_path) catch return error.ManifestFailed;
+    defer allocator.free(build_id);
+    var published_manifest: ?host_manifest.Published = null;
+    if (exact_host_id != null) {
+        published_manifest = host_manifest.publish(allocator, dir_path, .{
+            .host_id = host_id,
+            .build_id = build_id,
+            .protocol_major = protocol.version_major,
+            .screen_codec_version = screen_stream.codec_version,
+            .upgrade_epoch = 0,
+            .lifecycle = .ready,
+            .endpoint = socket_path,
+        }) catch return error.ManifestFailed;
+    }
+    defer if (published_manifest) |*published| published.deinit();
+    var authority: ?host_authority.HostAuthority = if (published_manifest) |*published|
+        host_authority.HostAuthority.init(published, &server, .{
+            .host_id = host_id,
+            .build_id = build_id,
+            .protocol_major = protocol.version_major,
+            .screen_codec_version = screen_stream.codec_version,
+            .upgrade_epoch = 0,
+            .lifecycle = .ready,
+            .endpoint = socket_path,
+        })
+    else
+        null;
+    _ = &authority;
     server.runtime_ops = manager.runtimeOps(); // 이제 이 host는 read-only가 아니라 runtime.spawn/terminate를 처리한다.
     var admission_gate = upgrade.AdmissionGate.init(io);
     server.admission_gate = &admission_gate;
@@ -122,7 +195,6 @@ pub fn runSessionHost(
 
 const testing = std.testing;
 const framing = @import("framing.zig");
-const protocol = @import("protocol.zig");
 
 fn waitConnect(socket_path: [:0]const u8, deadline_ms: u64) ?c.fd_t {
     // host가 bind할 때까지 짧게 재시도하며 connect한다(fork 직후 socket이 아직 없을 수 있다).

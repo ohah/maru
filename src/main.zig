@@ -252,25 +252,31 @@ fn runAppPtySmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Writ
     try stdout.flush();
 }
 
-/// `maru __session-host <socket>` — 영속 세션 host 프로세스 본체로 진입한다(P3-d2c/d, §10). 앱 launcher가 detached
+/// `maru __session-host <session-dir> <socket> <host-id>` — 영속 세션 host 프로세스 본체로 진입한다(P3-d2c/d, §10). 앱 launcher가 detached
 /// spawn한 자식이 이 경로를 탄다. macOS 전용(실 socket/fork). non-macOS에서는 daemon 참조를 comptime으로 배제해
 /// 컴파일을 보존한다. dir은 socket 경로의 parent이고, host는 SIGTERM(프로세스 종료)까지 accept loop를 돈다.
 fn runSessionHostDaemon(io: std.Io, allocator: std.mem.Allocator, args: anytype, stderr: *std.Io.Writer) !void {
     if (builtin.os.tag == .macos) {
         const session_host = @import("platform/macos/session_host.zig");
+        const session_dir = args.next() orelse {
+            try stderr.print("usage: maru {s} <session-dir> <socket-path> <host-id>\n", .{session_host_entrypoint.subcommand});
+            return error.UnknownCommand;
+        };
         const socket_path = args.next() orelse {
-            try stderr.print("usage: maru {s} <socket-path>\n", .{session_host_entrypoint.subcommand});
+            try stderr.print("usage: maru {s} <session-dir> <socket-path> <host-id>\n", .{session_host_entrypoint.subcommand});
             return error.UnknownCommand;
         };
-        const dir = std.fs.path.dirname(socket_path) orelse {
-            try stderr.print("maru {s}: invalid socket path\n", .{session_host_entrypoint.subcommand});
+        const host_id_raw = args.next() orelse {
+            try stderr.print("usage: maru {s} <session-dir> <socket-path> <host-id>\n", .{session_host_entrypoint.subcommand});
             return error.UnknownCommand;
         };
-        const dir_z = try allocator.dupeZ(u8, dir);
+        if (args.next() != null or host_id_raw.len != 32) return error.UnknownCommand;
+        const host_id = std.fmt.parseInt(u128, host_id_raw, 16) catch return error.UnknownCommand;
+        const dir_z = try allocator.dupeZ(u8, session_dir);
         defer allocator.free(dir_z);
         const socket_z = try allocator.dupeZ(u8, socket_path);
         defer allocator.free(socket_z);
-        session_host.daemon.runSessionHost(allocator, io, dir_z, socket_z) catch |err| {
+        session_host.daemon.runSessionHostWithIdentity(allocator, io, dir_z, socket_z, host_id) catch |err| {
             try stderr.print("maru {s} failed: {s}\n", .{ session_host_entrypoint.subcommand, @errorName(err) });
             return error.UnknownCommand;
         };

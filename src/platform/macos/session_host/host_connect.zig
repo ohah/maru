@@ -16,6 +16,9 @@ const framing = @import("framing.zig");
 const protocol = @import("protocol.zig");
 const registry_mod = @import("registry.zig");
 const socket_server = @import("socket_server.zig");
+const host_manifest = @import("host_manifest.zig");
+const short_endpoint = @import("short_endpoint.zig");
+const screen_stream = @import("screen_stream.zig");
 
 // flock(2)은 std.c 미노출(macOS 전용). start lock 직렬화용. LOCK_EX=2·LOCK_NB=4(sys/file.h).
 extern "c" fn flock(fd: c_int, operation: c_int) c_int;
@@ -23,6 +26,7 @@ const LOCK_EX: c_int = 2;
 const LOCK_NB: c_int = 4;
 extern "c" fn usleep(usec: c_uint) c_int;
 extern "c" fn arc4random_buf(buf: [*]u8, nbytes: usize) void;
+extern "c" fn unsetenv(name: [*:0]const u8) c_int;
 
 pub const Options = struct {
     /// spawn 뒤(또는 lock loser로서) host가 뜰 때까지 재connect 시도 횟수 × 간격. 기본 150×20ms=3s(cold launch 여유).
@@ -38,6 +42,8 @@ pub const FailureReason = enum {
     protocol_error,
     launch_failed,
     startup_timeout,
+    invalid_manifest,
+    stale_manifest,
     out_of_memory,
 };
 
@@ -71,6 +77,10 @@ pub fn connectOrLaunchDetailed(
 
     var dir_buf: [512]u8 = undefined;
     const dir = discovery.sessionHostDirPath(&dir_buf, base_cache_dir) catch return .{ .failed = .invalid_endpoint };
+
+    // Manifest-capable host는 host별 short endpoint를 쓰므로 fixed major socket보다 registry를 먼저 본다.
+    if (findCurrentManifestHost(allocator, exe_path, base_cache_dir, dir)) |outcome| return outcome;
+
     var sock_buf: [640]u8 = undefined;
     const socket = discovery.socketPathIn(&sock_buf, dir) catch return .{ .failed = .invalid_endpoint };
     var legacy_sock_buf: [640]u8 = undefined;
@@ -114,9 +124,83 @@ pub fn connectOrLaunchDetailed(
     }
     if (lock_probe == .contended) return connectWithBackoffDetailed(allocator, socket, opts);
 
-    // detached helper 띄우기: `maru __session-host <socket>`(daemon이 socket dirname으로 dir 도출).
-    launcher.spawnSessionHostDetached(allocator, exe_path, socket) catch return .{ .failed = .launch_failed };
-    return connectWithBackoffDetailed(allocator, socket, opts);
+    // Lock 취득 뒤 registry도 다시 읽는다. 다른 process가 manifest를 publish한 직후 fixed endpoint가 비어 있는
+    // host-specific 모델에서도 중복 spawn을 막는다.
+    if (findCurrentManifestHost(allocator, exe_path, base_cache_dir, dir)) |outcome| return outcome;
+
+    short_endpoint.prepareCurrentUserNamespace() catch return .{ .failed = .endpoint_denied };
+    var host_id: u128 = 0;
+    while (host_id == 0) arc4random_buf(std.mem.asBytes(&host_id).ptr, @sizeOf(u128));
+    var short_socket_buf: [128]u8 = undefined;
+    const short_socket = short_endpoint.currentSocketPathIn(&short_socket_buf, host_id) catch
+        return .{ .failed = .invalid_endpoint };
+    launcher.spawnSessionHostDetached(allocator, exe_path, dir, short_socket, host_id) catch
+        return .{ .failed = .launch_failed };
+    return connectNewHostWithBackoff(allocator, base_cache_dir, host_id, opts);
+}
+
+fn findCurrentManifestHost(
+    allocator: std.mem.Allocator,
+    exe_path: [:0]const u8,
+    base_cache_dir: []const u8,
+    session_dir: [:0]const u8,
+) ?Outcome {
+    const build_id = host_manifest.buildIdForExecutable(allocator, exe_path) catch return null;
+    defer allocator.free(build_id);
+    var hosts_buf: [640]u8 = undefined;
+    const hosts_root = host_manifest.hostsRootPathIn(&hosts_buf, session_dir) catch return .{ .failed = .invalid_endpoint };
+    const directory = c.opendir(hosts_root.ptr) orelse return null;
+    defer _ = c.closedir(directory);
+    while (c.readdir(directory)) |entry| {
+        const name = std.mem.sliceTo(entry.name[0..], 0);
+        if (name.len != 32) continue;
+        const host_id = std.fmt.parseInt(u128, name, 16) catch continue;
+        if (host_id == 0) continue;
+        var manifest = host_manifest.load(allocator, session_dir, host_id) catch continue;
+        defer manifest.deinit();
+        if (manifest.protocol_major != protocol.version_major or
+            manifest.screen_codec_version != screen_stream.codec_version or
+            manifest.lifecycle != .ready or
+            !std.mem.eql(u8, manifest.build_id, build_id) or
+            !ownerLeaseIsLive(session_dir, host_id))
+            continue;
+        switch (connectExistingHost(allocator, base_cache_dir, host_id)) {
+            .connected => |client| return .{ .connected = client },
+            .failed => |reason| if (reason == .out_of_memory) return .{ .failed = reason },
+        }
+    }
+    return null;
+}
+
+fn ownerLeaseIsLive(session_dir: [:0]const u8, host_id: u128) bool {
+    var path_buf: [832]u8 = undefined;
+    const path = host_manifest.ownerLockPathIn(&path_buf, session_dir, host_id) catch return false;
+    const fd = c.open(path.ptr, .{ .ACCMODE = .RDWR, .CLOEXEC = true, .NOFOLLOW = true }, @as(c.mode_t, 0));
+    if (fd < 0) return false;
+    defer _ = c.close(fd);
+    const rc = flock(fd, LOCK_EX | LOCK_NB);
+    if (rc == 0) return false;
+    return posix.errno(rc) == .AGAIN;
+}
+
+fn connectNewHostWithBackoff(
+    allocator: std.mem.Allocator,
+    base_cache_dir: []const u8,
+    host_id: u128,
+    opts: Options,
+) Outcome {
+    var attempts: usize = 0;
+    while (attempts < opts.connect_attempts) : (attempts += 1) {
+        switch (connectExistingHost(allocator, base_cache_dir, host_id)) {
+            .connected => |client| return .{ .connected = client },
+            .failed => |reason| switch (reason) {
+                .startup_timeout, .invalid_manifest => {},
+                else => return .{ .failed = reason },
+            },
+        }
+        _ = usleep(opts.connect_delay_ms * 1000);
+    }
+    return .{ .failed = .startup_timeout };
 }
 
 /// 이미 존재하는 특정 major host만 찾는다. 조회/restore 경로라 spawn하지 않으며 versioned endpoint를 먼저,
@@ -152,6 +236,127 @@ pub fn connectExistingMajor(
         }),
         .failed => |reason| .{ .failed = reason },
     };
+}
+
+/// Workspace의 exact `host_id`를 registry manifest로 resolve한다. Manifest가 있으면 그 endpoint/major만 사용하고
+/// hello identity·screen codec이 하나라도 다르면 다른 major socket을 추측하지 않는다. Manifest 도입 전 host에 한해
+/// current/N-1 legacy endpoint를 제한적으로 probe하고 hello host_id가 정확히 같은 연결만 반환한다.
+pub fn connectExistingHost(
+    allocator: std.mem.Allocator,
+    base_cache_dir: []const u8,
+    host_id: u128,
+) Outcome {
+    if (builtin.os.tag != .macos or host_id == 0) return .{ .failed = .invalid_endpoint };
+    var dir_buf: [512]u8 = undefined;
+    const dir = discovery.sessionHostDirPath(&dir_buf, base_cache_dir) catch
+        return .{ .failed = .invalid_endpoint };
+    const manifest = host_manifest.load(allocator, dir, host_id) catch |err| switch (err) {
+        error.ManifestNotFound => return connectLegacyExact(allocator, base_cache_dir, host_id),
+        error.OutOfMemory => return .{ .failed = .out_of_memory },
+        else => return .{ .failed = .invalid_manifest },
+    };
+    var exact = manifest;
+    defer exact.deinit();
+    if (exact.lifecycle == .restoring) return .{ .failed = .startup_timeout };
+    const endpoint = allocator.dupeZ(u8, exact.endpoint) catch return .{ .failed = .out_of_memory };
+    defer allocator.free(endpoint);
+    return connectExactWithBackoff(
+        allocator,
+        endpoint,
+        exact.protocol_major,
+        exact.descriptor(),
+        .{ .connect_attempts = 10, .connect_delay_ms = 20 },
+    );
+}
+
+fn connectLegacyExact(allocator: std.mem.Allocator, base_cache_dir: []const u8, host_id: u128) Outcome {
+    var dir_buf: [512]u8 = undefined;
+    const dir = discovery.sessionHostDirPath(&dir_buf, base_cache_dir) catch
+        return .{ .failed = .invalid_endpoint };
+    var major = protocol.version_major;
+    const minimum = if (protocol.version_major > 1) protocol.version_major - 1 else protocol.version_major;
+    while (true) {
+        var versioned_buf: [640]u8 = undefined;
+        const versioned = discovery.socketPathForMajorIn(&versioned_buf, dir, major) catch
+            return .{ .failed = .invalid_endpoint };
+        if (probeLegacyExactEndpoint(allocator, versioned, major, host_id)) |outcome| switch (outcome) {
+            .connected => |client| return .{ .connected = client },
+            .failed => |reason| if (reason != .startup_timeout) return .{ .failed = reason },
+        };
+
+        // 같은 major의 versioned current host가 다른 host_id여도 전환 전 control.sock을 별도로 probe한다. 한 endpoint의
+        // 성공이 다른 endpoint를 shadow하지 않게 해야 saved legacy handle을 정확히 복원할 수 있다.
+        var legacy_buf: [640]u8 = undefined;
+        const legacy = discovery.legacySocketPathIn(&legacy_buf, dir) catch
+            return .{ .failed = .invalid_endpoint };
+        if (probeLegacyExactEndpoint(allocator, legacy, major, host_id)) |outcome| switch (outcome) {
+            .connected => |client| return .{ .connected = client },
+            .failed => |reason| if (reason != .startup_timeout) return .{ .failed = reason },
+        };
+        if (major == minimum) break;
+        major -= 1;
+    }
+    return .{ .failed = .startup_timeout };
+}
+
+fn probeLegacyExactEndpoint(
+    allocator: std.mem.Allocator,
+    endpoint: [:0]const u8,
+    major: u16,
+    host_id: u128,
+) ?Outcome {
+    return switch (tryConnectMajor(allocator, endpoint, major)) {
+        .connected => |client| blk: {
+            // Manifest-capable peer가 entry를 잃었다면 legacy 추측으로 우회하지 않는다. 이 경우 registry corruption/stale
+            // publish를 숨기지 않고 exact manifest 오류로 닫는다.
+            if (client.host_manifest_v1) {
+                var rejected = client;
+                rejected.deinit();
+                break :blk .{ .failed = .invalid_manifest };
+            }
+            if (client.host_id == host_id) break :blk .{ .connected = client };
+            var mismatch = client;
+            mismatch.deinit();
+            break :blk .{ .failed = .startup_timeout };
+        },
+        .absent, .transient => null,
+        .failed => |reason| switch (reason) {
+            .incompatible_version, .handshake_failed, .protocol_error => null,
+            else => .{ .failed = reason },
+        },
+    };
+}
+
+fn validateExactClient(client: client_mod.Client, expected: host_manifest.Descriptor) Outcome {
+    if (client.host_manifest_v1 and client.host_id == expected.host_id and
+        client.screen_codec_version == expected.screen_codec_version and
+        client.wire_major == expected.protocol_major and
+        client.build_id != null and std.mem.eql(u8, client.build_id.?, expected.build_id) and
+        client.upgrade_epoch == expected.upgrade_epoch and
+        std.mem.eql(u8, client.lifecycle, @tagName(expected.lifecycle)))
+        return .{ .connected = client };
+    var stale = client;
+    stale.deinit();
+    return .{ .failed = .stale_manifest };
+}
+
+fn connectExactWithBackoff(
+    allocator: std.mem.Allocator,
+    endpoint: [:0]const u8,
+    major: u16,
+    expected: host_manifest.Descriptor,
+    opts: Options,
+) Outcome {
+    var attempts: usize = 0;
+    while (attempts < opts.connect_attempts) : (attempts += 1) {
+        switch (tryConnectMajor(allocator, endpoint, major)) {
+            .connected => |client| return validateExactClient(client, expected),
+            .absent, .transient => {},
+            .failed => |reason| return .{ .failed = reason },
+        }
+        _ = usleep(opts.connect_delay_ms * 1000);
+    }
+    return .{ .failed = .startup_timeout };
 }
 
 const TryConnectResult = union(enum) {
@@ -336,17 +541,21 @@ test "host_connect: connect-first attaches to an already-running host (no spawn)
     var base_buf: [128]u8 = undefined;
     const base = std.fmt.bufPrintZ(&base_buf, "/tmp/maru-sh-hc-{d}", .{c.getpid()}) catch return error.SkipZigTest;
     _ = c.mkdir(base.ptr, 0o700); // 제품에선 base=user cache dir(이미 존재). host bind는 <base>/session-host만 mkdir하므로 base를 먼저 만든다.
-    // discovery 경로와 **동일하게** host를 띄운다: <base>/session-host/{control.sock}.
+    // discovery 경로와 동일하게 host별 short endpoint + cache manifest를 띄운다.
     var dir_buf: [256]u8 = undefined;
     const dir = discovery.sessionHostDirPath(&dir_buf, base) catch return error.SkipZigTest;
-    var sock_buf: [320]u8 = undefined;
-    const socket = discovery.socketPathIn(&sock_buf, dir) catch return error.SkipZigTest;
+    _ = c.mkdir(dir.ptr, 0o700);
+    const host_id: u128 = 0xAABBCCDD;
+    try short_endpoint.prepareCurrentUserNamespace();
+    var sock_buf: [128]u8 = undefined;
+    const socket = try short_endpoint.currentSocketPathIn(&sock_buf, host_id);
 
     const child = c.fork();
     if (child < 0) return error.SkipZigTest;
     if (child == 0) {
         _ = c.setsid();
-        daemon.runSessionHost(std.heap.page_allocator, io, dir, socket) catch {};
+        _ = unsetenv("MARU_SESSION_HOST_TEST_ONESHOT");
+        daemon.runSessionHostWithIdentity(std.heap.page_allocator, io, dir, socket, host_id) catch {};
         std.c._exit(0);
     }
     defer {
@@ -354,8 +563,14 @@ test "host_connect: connect-first attaches to an already-running host (no spawn)
         var status: c_int = undefined;
         _ = c.waitpid(child, &status, 0);
         _ = c.unlink(socket.ptr);
-        var lp_buf: [320]u8 = undefined;
-        if (discovery.lockPathIn(&lp_buf, dir)) |lp| _ = c.unlink(lp.ptr) else |_| {}
+        var manifest_buf: [832]u8 = undefined;
+        if (host_manifest.manifestPathIn(&manifest_buf, dir, host_id)) |path| _ = c.unlink(path.ptr) else |_| {}
+        var owner_buf: [832]u8 = undefined;
+        if (host_manifest.ownerLockPathIn(&owner_buf, dir, host_id)) |path| _ = c.unlink(path.ptr) else |_| {}
+        var host_dir_buf: [768]u8 = undefined;
+        if (host_manifest.hostDirPathIn(&host_dir_buf, dir, host_id)) |path| _ = c.rmdir(path.ptr) else |_| {}
+        var hosts_buf: [640]u8 = undefined;
+        if (host_manifest.hostsRootPathIn(&hosts_buf, dir)) |path| _ = c.rmdir(path.ptr) else |_| {}
         _ = c.rmdir(dir.ptr);
         _ = c.rmdir(base.ptr);
     }
@@ -375,12 +590,46 @@ test "host_connect: connect-first attaches to an already-running host (no spawn)
     }
     try testing.expect(up);
 
-    var client = connectOrLaunch(allocator, "/nonexistent-maru", base, .{ .connect_attempts = 5, .connect_delay_ms = 10 }) orelse {
-        try testing.expect(false);
-        return;
-    };
-    defer client.deinit();
-    try testing.expect(client.host_id != 0); // hello_ack로 host_id를 받은 유효한 연결.
+    const current_exe_raw = try std.process.executablePathAlloc(io, allocator);
+    defer allocator.free(current_exe_raw);
+    const current_exe = try allocator.dupeZ(u8, current_exe_raw);
+    defer allocator.free(current_exe);
+    {
+        var client = connectOrLaunch(allocator, current_exe, base, .{ .connect_attempts = 5, .connect_delay_ms = 10 }) orelse {
+            try testing.expect(false);
+            return;
+        };
+        defer client.deinit();
+        try testing.expectEqual(host_id, client.host_id);
+        try testing.expect(client.host_manifest_v1);
+    }
+
+    // Workspace restore는 major endpoint를 추측하지 않고 daemon이 publish한 exact host manifest를 따라간다.
+    {
+        var exact = switch (connectExistingHost(allocator, base, host_id)) {
+            .connected => |value| value,
+            .failed => return error.TestUnexpectedResult,
+        };
+        defer exact.deinit();
+        try testing.expectEqual(host_id, exact.host_id);
+    }
+
+    // 같은 host_id/endpoint라도 disk generation의 build identity가 peer와 다르면 stale entry로 거부한다.
+    var manifest_path_buf: [832]u8 = undefined;
+    const manifest_path = try host_manifest.manifestPathIn(&manifest_path_buf, dir, host_id);
+    try testing.expect(c.unlink(manifest_path.ptr) == 0);
+    var stale_manifest = try host_manifest.publish(allocator, dir, .{
+        .host_id = host_id,
+        .build_id = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        .protocol_major = protocol.version_major,
+        .screen_codec_version = @import("screen_stream.zig").codec_version,
+        .upgrade_epoch = 0,
+        .lifecycle = .ready,
+        .endpoint = socket,
+    });
+    defer stale_manifest.deinit();
+    const stale = connectExistingHost(allocator, base, host_id);
+    try testing.expectEqual(FailureReason.stale_manifest, stale.failed);
 }
 
 test "host_connect: falls back to null when no host exists and spawn cannot bind" {
@@ -426,17 +675,8 @@ test "host_connect: launches the product maru session host and completes host.in
 
     var dir_buf: [256]u8 = undefined;
     const dir = discovery.sessionHostDirPath(&dir_buf, base) catch return error.SkipZigTest;
-    var sock_buf: [320]u8 = undefined;
-    const socket = discovery.socketPathIn(&sock_buf, dir) catch return error.SkipZigTest;
-    try testing.expect(c.access(socket.ptr, 0) != 0);
-
-    defer {
-        _ = c.unlink(socket.ptr);
-        var lock_buf: [320]u8 = undefined;
-        if (discovery.lockPathIn(&lock_buf, dir)) |lock| _ = c.unlink(lock.ptr) else |_| {}
-        _ = c.rmdir(dir.ptr);
-        _ = c.rmdir(base.ptr);
-    }
+    var launched_host_id: u128 = 0;
+    var launched_socket_buf: [128]u8 = undefined;
 
     {
         var client = connectOrLaunch(allocator, product_exe, base, .{}) orelse {
@@ -444,6 +684,9 @@ test "host_connect: launches the product maru session host and completes host.in
             return;
         };
         defer client.deinit();
+        launched_host_id = client.host_id;
+        try testing.expect(client.host_manifest_v1);
+        _ = try short_endpoint.currentSocketPathIn(&launched_socket_buf, launched_host_id);
         const response = try client.call("host.info", null);
         defer allocator.free(response);
         try testing.expect(std.mem.indexOf(u8, response, "\"runtime_count\":0") != null);
@@ -453,11 +696,22 @@ test "host_connect: launches the product maru session host and completes host.in
     var stopped = false;
     var attempts: usize = 0;
     while (attempts < 100) : (attempts += 1) {
-        if (c.access(socket.ptr, 0) != 0) {
+        if (c.access(@ptrCast(&launched_socket_buf), 0) != 0) {
             stopped = true;
             break;
         }
         _ = usleep(20 * 1000);
     }
     try testing.expect(stopped);
+
+    var owner_buf: [832]u8 = undefined;
+    if (host_manifest.ownerLockPathIn(&owner_buf, dir, launched_host_id)) |path| _ = c.unlink(path.ptr) else |_| {}
+    var host_dir_buf: [768]u8 = undefined;
+    if (host_manifest.hostDirPathIn(&host_dir_buf, dir, launched_host_id)) |path| _ = c.rmdir(path.ptr) else |_| {}
+    var hosts_buf: [640]u8 = undefined;
+    if (host_manifest.hostsRootPathIn(&hosts_buf, dir)) |path| _ = c.rmdir(path.ptr) else |_| {}
+    var lock_buf: [320]u8 = undefined;
+    if (discovery.lockPathIn(&lock_buf, dir)) |lock| _ = c.unlink(lock.ptr) else |_| {}
+    _ = c.rmdir(dir.ptr);
+    _ = c.rmdir(base.ptr);
 }

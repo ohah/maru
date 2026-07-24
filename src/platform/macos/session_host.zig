@@ -43,6 +43,16 @@ pub const require_product_launch_smoke = true;
 pub const entrypoint = @import("session_host/entrypoint.zig");
 pub const protocol = @import("session_host/protocol.zig");
 pub const framing = @import("session_host/framing.zig");
+pub const compatibility = @import("session_host/compatibility.zig");
+pub const host_identity = @import("session_host/host_identity.zig");
+pub const short_endpoint = if (builtin.os.tag == .macos)
+    @import("session_host/short_endpoint.zig")
+else
+    struct {};
+pub const host_authority = if (builtin.os.tag == .macos)
+    @import("session_host/host_authority.zig")
+else
+    struct {};
 pub const core_command_wire = @import("session_host/core_command_wire.zig");
 pub const screen_stream = @import("session_host/screen_stream.zig");
 // screen_assembler(records → client 화면 모델, screen_snapshot 투영의 역)는 screen_stream codec만 써서 순수 계층으로
@@ -100,6 +110,7 @@ else
 // upgrade_coordinator(U2)는 queue lifecycle과 분리된 process-local admission barrier다. OS syscall이 없어
 // non-macOS test에서도 gate 상태 머신을 검증한다.
 pub const upgrade_coordinator = @import("session_host/upgrade_coordinator.zig");
+pub const upgrade_wire = @import("session_host/upgrade_wire.zig");
 pub const exec_fd_set = if (builtin.os.tag == .macos)
     @import("session_host/exec_fd_set.zig")
 else
@@ -119,6 +130,10 @@ else
 pub const host_pool = @import("session_host/host_pool.zig");
 pub const host_adapter = if (builtin.os.tag == .macos)
     @import("session_host/host_adapter.zig")
+else
+    struct {};
+pub const host_manifest = if (builtin.os.tag == .macos)
+    @import("session_host/host_manifest.zig")
 else
     struct {};
 pub const staged_image = if (builtin.os.tag == .macos)

@@ -80,7 +80,7 @@ pub const Execution = struct {
 };
 
 const Phase = enum { staged, armed, running, terminal };
-pub const RestoreRole = enum { target, rollback };
+pub const RestoreRole = @import("entrypoint.zig").RestoreRole;
 pub const HandoffCopy = enum { primary, backup };
 pub const RestoreToken = struct {
     host_id: u128,
@@ -89,26 +89,22 @@ pub const RestoreToken = struct {
     role: RestoreRole,
 };
 
-/// Exec bootstrap이 argv role, exact attempt ID, inherited handoff copy role을 함께 검증한 뒤에만 발급한다.
+/// Exec bootstrap이 typed role, exact attempt ID, inherited handoff copy role을 함께 검증한 뒤에만 발급한다.
 pub fn validateRestoreEntry(
     state: attempt_record.State,
-    role_arg: []const u8,
-    attempt_arg: []const u8,
+    role: RestoreRole,
+    attempt_id: u128,
     copy: HandoffCopy,
 ) ?RestoreToken {
-    if (state.rollback_budget != 1 or attempt_arg.len != 32) return null;
-    for (attempt_arg) |byte|
-        if (!std.ascii.isDigit(byte) and !(byte >= 'a' and byte <= 'f')) return null;
-    const attempt_id = std.fmt.parseInt(u128, attempt_arg, 16) catch return null;
-    if (attempt_id != state.attempt_id) return null;
-    if (std.mem.eql(u8, role_arg, "target") and copy == .primary)
+    if (state.rollback_budget != 1 or attempt_id != state.attempt_id) return null;
+    if (role == .target and copy == .primary)
         return .{
             .host_id = state.host_id,
             .attempt_id = state.attempt_id,
             .copy = copy,
             .role = .target,
         };
-    if (std.mem.eql(u8, role_arg, "rollback") and copy == .backup)
+    if (role == .rollback and copy == .backup)
         return .{
             .host_id = state.host_id,
             .attempt_id = state.attempt_id,
@@ -529,14 +525,8 @@ fn testRequest(id: u128, path: []const u8) wire.PrepareRequest {
 }
 
 fn testRestoreToken(state: attempt_record.State, role: RestoreRole) RestoreToken {
-    var attempt_buf: [32]u8 = undefined;
-    const attempt = std.fmt.bufPrint(&attempt_buf, "{x:0>32}", .{state.attempt_id}) catch unreachable;
-    return validateRestoreEntry(
-        state,
-        @tagName(role),
-        attempt,
-        if (role == .target) .primary else .backup,
-    ) orelse unreachable;
+    return validateRestoreEntry(state, role, state.attempt_id, if (role == .target) .primary else .backup) orelse
+        unreachable;
 }
 
 const TestStager = struct {
@@ -827,14 +817,14 @@ test "upgrade owner immutable handoff allows one target to rollback transition o
     defer target.deinit();
     try std.testing.expect(validateRestoreEntry(
         state,
-        "target",
-        "00000000000000000000000000000032",
+        .target,
+        50,
         .backup,
     ) == null);
     try std.testing.expect(validateRestoreEntry(
         state,
-        "rollback",
-        "00000000000000000000000000000032",
+        .rollback,
+        50,
         .primary,
     ) == null);
     const replayed_token = testRestoreToken(state, .target);

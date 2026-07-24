@@ -29,6 +29,7 @@ const core_command_wire = @import("core_command_wire.zig");
 const screen_snapshot = @import("screen_snapshot.zig");
 const screen_stream = @import("screen_stream.zig");
 const handoff_codec = @import("handoff_codec.zig");
+const upgrade_fd_layout = @import("upgrade_fd_layout.zig");
 const upgrade_limits = @import("upgrade_limits.zig");
 const core_command = maru.session.core_command; // §6a 원격 스크롤 명령을 host core에 적용
 const terminal = maru.terminal; // §6c 원격 검색(Match) 등
@@ -484,6 +485,7 @@ pub const RuntimeManager = struct {
         upgrade_epoch: u64,
         first_fd_slot: u16,
     ) (QuiesceError || handoff_codec.Error)!QuiescedCapture {
+        const layout = upgrade_fd_layout.Layout.init(first_fd_slot) catch return error.LimitExceeded;
         if (!self.upgradeQuiesceReached() or self.host_registry.count() > handoff_codec.max_runtime_count)
             return error.UnsafeFrontier;
         var items: [handoff_codec.max_runtime_count]UpgradeItem = undefined;
@@ -508,7 +510,7 @@ pub const RuntimeManager = struct {
             const size = session.canonicalSize();
             const identity = session.masterIdentity() catch return error.UnsafeFrontier;
             if (size.cols != item.entry.cols or size.rows != item.entry.rows) return error.UnsafeFrontier;
-            const inherited_slot = first_fd_slot + @as(u16, @intCast(index));
+            const inherited_slot: u16 = @intCast(layout.runtimeSlot(index) orelse return error.LimitExceeded);
             resources[index] = .{
                 .runtime_id = item.entry.id,
                 .source_fd = session.inheritedMasterFd() orelse return error.UnsafeFrontier,

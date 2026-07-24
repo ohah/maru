@@ -48,6 +48,30 @@ pub fn begin(
     first_fd_slot: u16,
     deadline_ms: u64,
 ) Error!Quiesced {
+    return beginWithRecord(
+        allocator,
+        io,
+        manager,
+        gate,
+        host_id,
+        upgrade_epoch,
+        first_fd_slot,
+        deadline_ms,
+        null,
+    );
+}
+
+pub fn beginWithRecord(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    manager: *runtime_manager.RuntimeManager,
+    gate: *upgrade_coordinator.AdmissionGate,
+    host_id: u128,
+    upgrade_epoch: u64,
+    first_fd_slot: u16,
+    deadline_ms: u64,
+    attempt_record: ?[]const u8,
+) Error!Quiesced {
     if (!gate.close()) return error.UpgradeBusy;
     var gate_closed = true;
     var pause_requested = false;
@@ -70,7 +94,13 @@ pub fn begin(
     }
     try manager.joinAndValidateUpgradeQuiesce();
     if (std.Io.Clock.awake.now(io).nanoseconds - start >= budget_ns) return error.DeadlineExceeded;
-    var plan = try manager.encodeQuiescedPlan(allocator, host_id, upgrade_epoch, first_fd_slot);
+    var plan = try manager.encodeQuiescedPlanWithAttempt(
+        allocator,
+        host_id,
+        upgrade_epoch,
+        first_fd_slot,
+        attempt_record,
+    );
     if (std.Io.Clock.awake.now(io).nanoseconds - start >= budget_ns) {
         plan.deinit();
         return error.DeadlineExceeded;

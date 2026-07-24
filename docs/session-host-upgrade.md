@@ -381,11 +381,13 @@ absolute identity만** 기록하고 target의 page layout을 새로 만든다. s
 - **구현 중:** listener/accepted socket CLOEXEC, exec 직전 reserved PTY/state/owner slot만 non-CLOEXEC로 만드는 exact
   allowlist, exec 실패 slot rollback, child를 signal/reap하지 않는 `PreparedAdoption`, commit 전 PTY를 전혀 만지지
   않는 reader start gate를 구현했다. 별도 old/new process fixture에서 same-PID exec, 독립 primary/backup handoff,
-  실제 target decode/adopt 실패의 공통 rollback handler, PTY dev/inode/rdev 교체 거부, host/child/runtime identity,
+  old-reader 전량 read-back, PTY·owner·backup fd를 받지 않는 독립 target preflight process, 실제 target
+  decode/adopt 실패의 공통 rollback handler, PTY dev/inode/rdev 교체 거부, host/child/runtime identity,
   post-upgrade I/O와 exit exact-once, lifetime owner lease를 검증한다. target/self-image는 no-follow·same-UID
   검증 뒤 owner-only directory에 copy/hash/sync/atomic rename하며, 성공 target의 rollback image 승격과 promotion
-  실패 시 capability 철회도 fixture로 고정했다. 다만 old fixture가 현재 native 모듈과 함께 재컴파일되므로 frozen N-1
-  증거는 아니며, 독립 target preflight process·2회 연속 image rotation·제품 daemon graph commit은 남아 있다.
+  실패 시 capability 철회도 fixture로 고정했다. old가 기록한 staged target dev/inode/size/SHA-256을 new가 promotion
+  전에 다시 대조하며 path replacement failure injection도 둔다. 다만 old fixture가 현재 native 모듈과 함께
+  재컴파일되므로 frozen N-1 증거는 아니며, 2회 연속 image rotation·제품 daemon graph commit은 남아 있다.
 
 ### U4 — 다중 runtime과 N-1 adapter
 

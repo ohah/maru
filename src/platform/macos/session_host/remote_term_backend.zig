@@ -211,6 +211,14 @@ pub const RemoteTermBackend = struct {
         return (entry.runtime.selectedText(span) catch return null) orelse null;
     }
 
+    /// host-backed Term(handle)의 (row,col)에 있는 링크를 host가 추출·검증해 돌려준다(원격 Cmd+클릭 열기).
+    /// 없거나 연결 오류/구 host면 null(best-effort — 링크 열기가 실패해도 세션에 전파하지 않는다). caller가 `.text`를 free.
+    /// 열 대상 판정(soft-wrap 이음·cwd resolve·존재 stat)은 콘텐츠와 FS를 가진 host가 SSOT다.
+    pub fn linkAtFor(self: *RemoteTermBackend, handle: RuntimeHandle, row: u16, col: u16, scopes: u8) ?remote_runtime.RemoteRuntime.RemoteLink {
+        const entry = self.runtimes.get(handle) orelse return null;
+        return (entry.runtime.linkAt(row, col, scopes) catch return null) orelse null;
+    }
+
     /// host-backed Term(handle)에서 검색어 매치를 host가 찾게 하고(§6c — `findMatches` 재사용) 보이는 매치 뷰포트 span을
     /// `out_spans`에 채운다. 전체 매치 수를 돌려준다. 없거나 오류면 null(best-effort). 검색 의미론은 host core 단일 출처.
     pub fn findFor(self: *RemoteTermBackend, handle: RuntimeHandle, query: []const u8, cur_index: u32, scroll: bool, out_spans: *std.ArrayList(maru.terminal.SelectionSpan)) ?remote_runtime.RemoteRuntime.FindResult {

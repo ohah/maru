@@ -111,7 +111,7 @@ pub const RuntimeManager = struct {
 
     /// server.zig가 dispatch에 넘길 중립 vtable. `ctx`는 이 매니저다.
     pub fn runtimeOps(self: *RuntimeManager) server.RuntimeOps {
-        return .{ .ctx = self, .spawn = spawnOp, .terminate = terminateOp, .write_input = writeInputOp, .resize = resizeOp, .snapshot = snapshotOp, .delta = deltaOp, .notification = notificationOp, .core_command = coreCommandOp, .selected_text = selectedTextOp, .select_op = selectOpOp, .find = findOp, .observation = observationOp, .report_mouse = reportMouseOp };
+        return .{ .ctx = self, .spawn = spawnOp, .terminate = terminateOp, .write_input = writeInputOp, .resize = resizeOp, .snapshot = snapshotOp, .delta = deltaOp, .notification = notificationOp, .core_command = coreCommandOp, .selected_text = selectedTextOp, .select_op = selectOpOp, .find = findOp, .observation = observationOp, .report_mouse = reportMouseOp, .link_at = linkAtOp };
     }
 
     pub const OwnerDrainSummary = struct {
@@ -1042,6 +1042,47 @@ pub const RuntimeManager = struct {
         var js: std.json.Stringify = .{ .writer = &out.writer, .options = .{} };
         js.write(.{ .text = text }) catch return error.OutOfMemory;
         return allocator.dupe(u8, out.written()) catch return error.OutOfMemory;
+    }
+
+    /// 원격 Cmd+클릭 링크 열기: host가 **콘텐츠·cwd·파일시스템을 아는 자기 core**로 `extractUrlAt`(로컬과 같은 함수)을
+    /// 돌려 열 대상을 준다 — 추출은 soft-wrap 이음·스크롤백까지 충실하고, file_path는 host의 cwd/$HOME으로 resolve해
+    /// **host FS에서 존재를 확인**한 절대 경로만 돌려준다(client가 자기 FS로 stat하면 원격 경로를 잘못 판정한다).
+    /// `scopes`는 client의 `input.link-detection` 비트 — hover 필터와 같은 값이라 "밑줄 보이는 곳 = 열리는 곳"이 유지된다.
+    /// 링크가 없거나 미존재 경로면 `{text:""}`(client는 일반 클릭으로 처리). 텍스트는 임의 바이트라 실 encoder로 escape.
+    fn linkAtOp(ctx: *anyopaque, runtime_id: u128, row: u16, col: u16, scopes: u8, allocator: std.mem.Allocator) anyerror![]u8 {
+        const self: *RuntimeManager = @ptrCast(@alignCast(ctx));
+        const handle = self.handleFor(runtime_id) orelse return error.RuntimeNotFound;
+        const surface = self.backend_impl.surfaceFor(handle) orelse return error.RuntimeNotFound;
+        surface.lockCore(self.io);
+        defer surface.unlockCore(self.io);
+        // extractUrlAt은 스크롤백을 읽고 cwd(OSC 7)를 참조하며 존재 stat까지 한다 — 로컬 클릭 경로와 같은 함수라
+        // 분류·다듬기·:line:col 처리가 자동으로 일치한다.
+        const extracted = (surface.core.extractUrlAt(allocator, row, col, unpackLinkScopes(scopes)) catch null) orelse
+            return allocator.dupe(u8, "{\"text\":\"\"}") catch return error.OutOfMemory;
+        defer allocator.free(extracted.text);
+        var out: std.Io.Writer.Allocating = .init(allocator);
+        defer out.deinit();
+        var js: std.json.Stringify = .{ .writer = &out.writer, .options = .{} };
+        js.write(.{ .text = extracted.text, .kind = @intFromEnum(extracted.kind) }) catch return error.OutOfMemory;
+        return allocator.dupe(u8, out.written()) catch return error.OutOfMemory;
+    }
+
+    /// client가 보낸 scope 비트를 `LinkScopes`로 푼다(비트 위치는 `terminal.LinkScope`의 `@intFromEnum` — wire 약속).
+    /// 링크 감지 정책은 client config 소유라 host는 받은 값을 그대로 적용만 한다(host 해석 / client 정책 분리).
+    fn unpackLinkScopes(bits: u8) terminal.LinkScopes {
+        const bit = struct {
+            fn on(v: u8, scope: terminal.LinkScope) bool {
+                return (v & (@as(u8, 1) << @intCast(@intFromEnum(scope)))) != 0;
+            }
+        }.on;
+        return .{
+            .web = bit(bits, .web),
+            .extra_schemes = bit(bits, .extra_schemes),
+            .absolute_path = bit(bits, .absolute_path),
+            .home_path = bit(bits, .home_path),
+            .dot_relative = bit(bits, .dot_relative),
+            .bare_relative = bit(bits, .bare_relative),
+        };
     }
 
     /// 단어/줄 선택(§6b-2): host가 **콘텐츠를 아는 자기 core**로 경계를 계산해(`selectWordAt`/`selectLineAt`) 결과 뷰포트 선택
@@ -1989,6 +2030,53 @@ test "runtime manager: snapshot projects the runtime's live screen through Runti
     try std.testing.expectError(error.RuntimeNotFound, ops.snapshot(ops.ctx, 0xDEADBEEF, allocator));
 
     ops.terminate(ops.ctx, rid);
+}
+
+// 원격 Cmd+클릭은 host가 여는 대상을 정한다 — client core는 빈 placeholder라 추출이 불가능하고, file_path의
+// cwd resolve·존재 stat은 host 파일시스템에서 해야 정확하다. host가 자기 core의 extractUrlAt(로컬과 같은 함수)을
+// 돌려 URL을 돌려주는지, client가 보낸 scope 비트를 실제로 적용하는지(web만 켜면 경로는 안 열림) 고정한다.
+test "runtime manager: link_at extracts a URL from the host core and honors client scopes" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    var host_registry = reg.TerminalRuntimeRegistry.init(allocator);
+    defer host_registry.deinit();
+    var mgr: RuntimeManager = undefined;
+    mgr.init(allocator, std.testing.io, &host_registry);
+    defer mgr.deinit();
+
+    const ops = mgr.runtimeOps();
+    const rid = try ops.spawn(ops.ctx, .{ .argv = &.{"/bin/cat"}, .cwd = null, .cols = 40, .rows = 4 });
+    defer ops.terminate(ops.ctx, rid);
+
+    // host core에 직접 써 넣는다(PTY 왕복 없이 결정적으로 — 화면 소유자는 host다).
+    const handle = mgr.handleFor(rid).?;
+    const surface = mgr.backend_impl.surfaceFor(handle).?;
+    {
+        surface.lockCore(mgr.io);
+        defer surface.unlockCore(mgr.io);
+        try surface.core.write("go https://example.com/page now");
+    }
+
+    const full_bits: u8 = 0b0011_1111; // web|extra|absolute|home|dot|bare — client의 link-detection=full
+    {
+        const body = try ops.link_at(ops.ctx, rid, 0, 10, full_bits, allocator);
+        defer allocator.free(body);
+        try std.testing.expect(std.mem.indexOf(u8, body, "https://example.com/page") != null);
+    }
+    // 링크가 없는 셀은 빈 text(client는 일반 클릭으로 흘린다).
+    {
+        const body = try ops.link_at(ops.ctx, rid, 0, 0, full_bits, allocator);
+        defer allocator.free(body);
+        try std.testing.expect(std.mem.indexOf(u8, body, "https://") == null);
+    }
+    // scopes=0(osc8-only)이면 자동 감지가 꺼져 같은 셀도 안 열린다 — client 정책이 host까지 전달되는지.
+    {
+        const body = try ops.link_at(ops.ctx, rid, 0, 10, 0, allocator);
+        defer allocator.free(body);
+        try std.testing.expect(std.mem.indexOf(u8, body, "https://") == null);
+    }
+    // 없는 runtime_id는 RuntimeNotFound(다른 runtime으로 새지 않는다).
+    try std.testing.expectError(error.RuntimeNotFound, ops.link_at(ops.ctx, 0xDEADBEEF, 0, 0, full_bits, allocator));
 }
 
 test "runtime manager: observation exports host-owned cwd title ssh and semantic metadata" {

@@ -21084,6 +21084,20 @@ pub const AppSession = struct {
         // 그래서 lockCore 아래에서 추출하고, 결과 텍스트는 owned라 unlock 후 안전. 존재검증 access(F_OK)는 빠른
         // syscall이라 락 아래 허용한다(copyText가 무거운 extractSelection을 락 아래 하는 것과 같은 트레이드오프).
         const s = self.activeSurface();
+        // host-backed: 여는 대상은 **host가 뽑는다**(copyText·Find와 같은 "client 렌더 / host 해석" 불변식). client core는
+        // 빈 placeholder라 추출이 불가능하고, file_path의 cwd resolve·존재 stat도 **host의 파일시스템**에서 해야 맞다
+        // (client가 자기 FS로 stat하면 원격 경로를 잘못 판정). hover 필터와 같은 scope 비트를 보내 "밑줄 보이는 곳 =
+        // 열리는 곳"을 유지한다. capability 없는 구 host면 backend가 null을 줘 일반 클릭으로 흐른다.
+        if (is_macos and s.remote != null) {
+            if (app_remote_backend) |*rb| {
+                if (rb.linkAtFor(s.id, cell.row, cell.col, packLinkScopes(self.linkScopesFromConfig()))) |link| {
+                    self.url_buffer = link.text; // owned(host 추출 바이트) — 다음 urlAt까지 유효.
+                    self.url_kind = link.kind;
+                    return self.url_buffer;
+                }
+            }
+            return &.{};
+        }
         s.lockCore(self.io);
         const ext = s.core.extractUrlAt(self.allocator, cell.row, cell.col, self.linkScopesFromConfig()) catch null;
         s.unlockCore(self.io);
@@ -21091,6 +21105,24 @@ pub const AppSession = struct {
         self.url_buffer = e.text;
         self.url_kind = e.kind;
         return self.url_buffer;
+    }
+
+    /// `LinkScopes`를 wire 비트로 굽는다(비트 위치 = `terminal.LinkScope`의 `@intFromEnum` — host `unpackLinkScopes`의 짝).
+    /// 링크 감지 정책은 client config 소유이므로 원격에도 이 값을 실어 보내 host가 같은 범위로 추출하게 한다.
+    fn packLinkScopes(scopes: terminal.LinkScopes) u8 {
+        var bits: u8 = 0;
+        const set = struct {
+            fn on(b: *u8, enabled: bool, scope: terminal.LinkScope) void {
+                if (enabled) b.* |= @as(u8, 1) << @intCast(@intFromEnum(scope));
+            }
+        }.on;
+        set(&bits, scopes.web, .web);
+        set(&bits, scopes.extra_schemes, .extra_schemes);
+        set(&bits, scopes.absolute_path, .absolute_path);
+        set(&bits, scopes.home_path, .home_path);
+        set(&bits, scopes.dot_relative, .dot_relative);
+        set(&bits, scopes.bare_relative, .bare_relative);
+        return bits;
     }
 
     /// 선택 텍스트를 추출해 내부 버퍼로 돌려준다(없으면 빈 슬라이스). Swift가 NSPasteboard에 쓴다.
@@ -55222,4 +55254,16 @@ test "host-backed hover: client가 link-detection 프리셋으로 host 목록을
     try std.testing.expectEqual(CursorKind.text, session.hoverCursor(x, rowY(rect.y, ch, 0), 32));
     try std.testing.expectEqual(CursorKind.text, session.hoverCursor(x, rowY(rect.y, ch, 1), 32));
     try std.testing.expectEqual(CursorKind.link, session.hoverCursor(x, rowY(rect.y, ch, 2), 32));
+}
+
+// scope 비트는 client(packLinkScopes)와 host(unpackLinkScopes)가 공유하는 **wire 약속**이다. 한쪽이 비트 순서를
+// 바꾸면 원격에서 엉뚱한 범위로 링크를 열게 되고(예: web만 켠 사용자에게 파일 경로가 열림), 밑줄 필터(scope 태그)와도
+// 어긋난다. LinkScope enum 값이 곧 비트 위치라는 계약을 여기서 고정한다.
+test "packLinkScopes: config 프리셋을 wire 비트로 굽는다(LinkScope 값 = 비트 위치)" {
+    try std.testing.expectEqual(@as(u8, 0b0011_1111), AppSession.packLinkScopes(terminal.link_scopes_full));
+    try std.testing.expectEqual(@as(u8, 0b0000_0001), AppSession.packLinkScopes(terminal.link_scopes_web));
+    try std.testing.expectEqual(@as(u8, 0), AppSession.packLinkScopes(terminal.link_scopes_none));
+    // 개별 비트 위치가 enum 값과 1:1인지(host unpackLinkScopes의 짝).
+    try std.testing.expectEqual(@as(u8, 1) << @intCast(@intFromEnum(terminal.LinkScope.home_path)), AppSession.packLinkScopes(.{ .home_path = true }));
+    try std.testing.expectEqual(@as(u8, 1) << @intCast(@intFromEnum(terminal.LinkScope.bare_relative)), AppSession.packLinkScopes(.{ .bare_relative = true }));
 }

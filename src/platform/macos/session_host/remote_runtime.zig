@@ -667,6 +667,24 @@ pub const RemoteRuntime = struct {
         return text;
     }
 
+    /// 원격 Cmd+클릭 링크 열기: host가 **콘텐츠·cwd·파일시스템을 아는 자기 core**로 `extractUrlAt`(추출 + resolve + 존재
+    /// stat)을 실행하게 하고 열 대상을 받는다. `scopes`는 client의 `input.link-detection` 비트라 hover 필터와 같은 값을
+    /// 보낸다("밑줄 보이는 곳 = 열리는 곳" 유지). capability 없는 구 host에는 **보내지 않는다** — 모르는 RPC를 시험하는
+    /// 대신 원격 링크 열기를 비활성한다(잘못된 경로를 여는 것보다 안전). 링크가 없거나 미존재 경로면 null.
+    /// 반환 텍스트는 caller 소유. docs/link-detection.md §원격(host-backed) 세션.
+    pub const RemoteLink = struct { text: []u8, kind: terminal.LinkKind };
+
+    pub fn linkAt(self: *RemoteRuntime, row: u16, col: u16, scopes: u8) client_mod.ClientError!?RemoteLink {
+        if (!self.client.runtime_link_at_v1) return null;
+        var buf: [160]u8 = undefined;
+        const params = std.fmt.bufPrint(&buf, "{{\"stream_id\":{d},\"row\":{d},\"col\":{d},\"scopes\":{d}}}", .{ self.stream_id, row, col, scopes }) catch return error.OutOfMemory;
+        const resp = try self.callOrdered("runtime.link_at", params);
+        defer self.allocator.free(resp);
+        const kind_raw = client_mod.extractU64Field(resp, "\"kind\":") orelse 0;
+        const text = (try self.decodeSelectedTextResponse(resp)) orelse return null; // {text} schema 공용(빈 text=링크 없음).
+        return .{ .text = text, .kind = if (kind_raw == 1) .file_path else .url };
+    }
+
     /// 구 host 호환 경로. RemoteScreen이 조립한 현재 viewport에서만 추출한다. 구 screen wire에는 soft-wrap bit가 없어
     /// multi-row 선형 선택은 보이는 행 사이에 개행을 보존하는 degraded 정책이며, capability가 있는 최신 host에서는 반드시
     /// 위 RPC를 써 host SSOT를 유지한다.

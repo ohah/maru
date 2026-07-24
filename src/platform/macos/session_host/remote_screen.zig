@@ -354,6 +354,63 @@ pub const RemoteScreen = struct {
         return out.toOwnedSlice(allocator) catch return error.OutOfMemory;
     }
 
+    /// 같은 MRSH major지만 `runtime_selected_text_v1` 이전인 host를 위한 제한적 호환 adapter. 이미 수신해 렌더 중인
+    /// viewport cell projection에서만 선택을 추출한다. 이 wire에는 행별 soft-wrap bit가 없으므로 multi-row 선형 선택은
+    /// 각 화면 행 사이에 명시적으로 `\n`을 넣는다. 단일 행·block은 cell/grapheme projection만으로 정확히 복원된다.
+    pub fn extractVisibleSelection(
+        self: *RemoteScreen,
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        span: terminal.SelectionSpan,
+    ) error{OutOfMemory}!?[]u8 {
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+        const cols: usize = self.grid.size.cols;
+        const rows: usize = self.grid.size.rows;
+        if (cols == 0 or rows == 0 or self.grid.cells.len < cols * rows) return null;
+        if (span.start.row >= rows or span.end.row >= rows) return null;
+
+        var out: std.ArrayList(u8) = .empty;
+        errdefer out.deinit(allocator);
+        if (span.block) {
+            const start_row: usize = @min(span.start.row, span.end.row);
+            const end_row: usize = @max(span.start.row, span.end.row);
+            const lo: usize = @min(span.start.col, span.end.col);
+            const hi: usize = @min(@max(span.start.col, span.end.col), cols - 1);
+            var row = start_row;
+            while (row <= end_row) : (row += 1) {
+                const cells = self.grid.cells[row * cols ..][0..cols];
+                const from = @min(lo, cols);
+                const to = @max(from, @min(hi + 1, terminal.textTrimmedLen(cells)));
+                try appendCellsUtf8(&out, allocator, cells, self.grid.graphemes.items, from, to);
+                if (row != end_row) try out.append(allocator, '\n');
+            }
+        } else {
+            const reversed = span.start.row > span.end.row or
+                (span.start.row == span.end.row and span.start.col > span.end.col);
+            const start_row = if (reversed) span.end.row else span.start.row;
+            const start_col = if (reversed) span.end.col else span.start.col;
+            const end_row = if (reversed) span.start.row else span.end.row;
+            const end_col = if (reversed) span.start.col else span.end.col;
+            var row: usize = start_row;
+            while (row <= end_row) : (row += 1) {
+                const cells = self.grid.cells[row * cols ..][0..cols];
+                const from: usize = if (row == start_row) @min(start_col, cols) else 0;
+                const full_to: usize = if (row == end_row) @min(@as(usize, end_col) + 1, cols) else cols;
+                const to = @max(from, @min(full_to, terminal.textTrimmedLen(cells)));
+                try appendCellsUtf8(&out, allocator, cells, self.grid.graphemes.items, from, to);
+                // 구 screen wire에는 soft-wrap bit가 없다. 줄을 임의로 붙여 clipboard 내용을 변조하지 않고, 보이는
+                // viewport 행 경계를 그대로 보존하는 보수적 정책을 쓴다.
+                if (row != end_row) try out.append(allocator, '\n');
+            }
+        }
+        if (out.items.len == 0) {
+            out.deinit(allocator);
+            return null;
+        }
+        return out.toOwnedSlice(allocator) catch return error.OutOfMemory;
+    }
+
     fn rebuildGrid(self: *RemoteScreen) error{OutOfMemory}!void {
         const new_grid = try build(self.allocator, &self.assembler);
         self.grid.deinit();
@@ -390,6 +447,22 @@ pub const RemoteScreen = struct {
         self.mutex.unlock(io);
     }
 };
+
+fn appendCellsUtf8(
+    out: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    cells: []const terminal.Cell,
+    graphemes: []const []const u21,
+    from: usize,
+    to: usize,
+) error{OutOfMemory}!void {
+    var it: terminal.RowCodepoints = .{ .cells = cells[from..to], .graphemes = graphemes };
+    var buf: [4]u8 = undefined;
+    while (it.next()) |cp| {
+        const n = std.unicode.utf8Encode(cp, &buf) catch continue;
+        out.appendSlice(allocator, buf[0..n]) catch return error.OutOfMemory;
+    }
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 단위 테스트 (macOS — terminal.Cell/Style 필요)
@@ -483,6 +556,49 @@ test "remote screen: projection→assembler→cells preserves a real screen's te
     }
     try testing.expectEqual(local.cursor.col, remote.cursor.col);
     try testing.expectEqual(local.cursor.row, remote.cursor.row);
+}
+
+test "remote screen: legacy visible selection reads the assembled projection with explicit row boundaries" {
+    const allocator = testing.allocator;
+    const io = testing.io;
+    var core = try terminal.TerminalCore.init(allocator, .{ .cols = 6, .rows = 3 });
+    defer core.deinit();
+    try core.write("abcde\r\nxy\r\ne\u{0301}한Z");
+    const projected = try screen_snapshot.projectSnapshot(allocator, &core, .{ .generation = 1 });
+    defer allocator.free(projected);
+
+    var rs = try RemoteScreen.init(allocator);
+    defer rs.deinit();
+    try rs.applySnapshot(projected, io);
+
+    const linear = (try rs.extractVisibleSelection(allocator, io, .{
+        .start = .{ .row = 0, .col = 1 },
+        .end = .{ .row = 1, .col = 1 },
+    })).?;
+    defer allocator.free(linear);
+    try testing.expectEqualStrings("bcde\nxy", linear);
+
+    const block = (try rs.extractVisibleSelection(allocator, io, .{
+        .start = .{ .row = 0, .col = 1 },
+        .end = .{ .row = 1, .col = 3 },
+        .block = true,
+    })).?;
+    defer allocator.free(block);
+    try testing.expectEqualStrings("bcd\ny", block);
+
+    const cluster = (try rs.extractVisibleSelection(allocator, io, .{
+        .start = .{ .row = 2, .col = 0 },
+        .end = .{ .row = 2, .col = 0 },
+    })).?;
+    defer allocator.free(cluster);
+    try testing.expectEqualStrings("e\u{0301}", cluster);
+
+    const wide = (try rs.extractVisibleSelection(allocator, io, .{
+        .start = .{ .row = 2, .col = 1 },
+        .end = .{ .row = 2, .col = 3 },
+    })).?;
+    defer allocator.free(wide);
+    try testing.expectEqualStrings("한Z", wide);
 }
 
 test "remote screen: a Surface backed by RemoteScreen renders the assembled remote screen, updated by delta" {

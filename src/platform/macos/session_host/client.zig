@@ -59,6 +59,9 @@ pub const Client = struct {
     /// host가 scroll 외 focus/config/prompt를 포함한 bounded `runtime.core_command` v1 집합을 지원하는가.
     /// false인 구 host에는 기존 scroll만 보내고 새 명령은 degraded no-op으로 남긴다.
     runtime_core_command_v1: bool = false,
+    /// host가 `runtime.selected_text`로 자기 TerminalCore에서 선택 의미론을 해석할 수 있는가. false인 구 host는
+    /// 앱 업데이트보다 먼저 떠 계속 살아 있을 수 있으므로, client의 현재 화면 projection에서 보이는 선택만 추출한다.
+    runtime_selected_text_v1: bool = false,
     parser: framing.FrameParser,
     // async full-state를 하나라도 수용하지 못하면 server subscription base는 이미 전진했을 수 있다. 그 뒤 같은 socket을
     // 계속 쓰면 어떤 shared stream이 누락됐는지 복구할 수 없으므로 connection 전체를 poison/close한다.
@@ -123,6 +126,7 @@ pub const Client = struct {
         self.screen_viewport_scrolled_v1 = payloadHasCapability(ack.payload, "screen_viewport_scrolled_v1");
         self.async_scroll_to_bottom_v1 = payloadHasCapability(ack.payload, "async_scroll_to_bottom_v1");
         self.runtime_core_command_v1 = payloadHasCapability(ack.payload, "runtime_core_command_v1");
+        self.runtime_selected_text_v1 = payloadHasCapability(ack.payload, "runtime_selected_text_v1");
         return self;
     }
 
@@ -1118,7 +1122,7 @@ fn setReadTimeoutMs(fd: c.fd_t, ms: u32) void {
 fn buildHello(allocator: std.mem.Allocator, client_kind: []const u8) error{OutOfMemory}![]u8 {
     return std.fmt.allocPrint(
         allocator,
-        "{{\"protocol_min\":{d},\"protocol_max\":{d},\"client_kind\":\"{s}\",\"capabilities\":[\"runtime_metadata_v1\",\"screen_viewport_scrolled_v1\",\"async_scroll_to_bottom_v1\",\"runtime_core_command_v1\"]}}",
+        "{{\"protocol_min\":{d},\"protocol_max\":{d},\"client_kind\":\"{s}\",\"capabilities\":[\"runtime_metadata_v1\",\"screen_viewport_scrolled_v1\",\"async_scroll_to_bottom_v1\",\"runtime_core_command_v1\",\"runtime_selected_text_v1\"]}}",
         .{ protocol.version_major, protocol.version_major, client_kind },
     );
 }
@@ -1201,6 +1205,7 @@ test "client: hello/request JSON build and host_id parse are server-symmetric (p
     try testing.expect(std.mem.indexOf(u8, hello, "\"screen_viewport_scrolled_v1\"") != null);
     try testing.expect(std.mem.indexOf(u8, hello, "\"async_scroll_to_bottom_v1\"") != null);
     try testing.expect(std.mem.indexOf(u8, hello, "\"runtime_core_command_v1\"") != null);
+    try testing.expect(std.mem.indexOf(u8, hello, "\"runtime_selected_text_v1\"") != null);
 
     const req = try buildRequest(allocator, "runtime.get", "{\"runtime_id\":\"aa\"}");
     defer allocator.free(req);
@@ -1227,11 +1232,17 @@ test "client: hello/request JSON build and host_id parse are server-symmetric (p
     };
     defer legacy_client.deinit();
     try testing.expect(!legacy_client.screen_viewport_scrolled_v1);
+    try testing.expect(!legacy_client.runtime_selected_text_v1);
     legacy_client.screen_viewport_scrolled_v1 = payloadHasCapability(
         "{\"host_id\":\"1234\"}",
         "screen_viewport_scrolled_v1",
     );
     try testing.expect(!legacy_client.screen_viewport_scrolled_v1);
+    legacy_client.runtime_selected_text_v1 = payloadHasCapability(
+        "{\"host_id\":\"1234\"}",
+        "runtime_selected_text_v1",
+    );
+    try testing.expect(!legacy_client.runtime_selected_text_v1);
 }
 
 test "client: connects to a forked host, agrees on host_id, and calls host.info" {
@@ -1277,6 +1288,7 @@ test "client: connects to a forked host, agrees on host_id, and calls host.info"
     try testing.expect(client.screen_viewport_scrolled_v1);
     try testing.expect(client.async_scroll_to_bottom_v1);
     try testing.expect(client.runtime_core_command_v1);
+    try testing.expect(client.runtime_selected_text_v1);
     const resp = try client.call("host.info", null);
     defer allocator.free(resp);
     try testing.expect(std.mem.indexOf(u8, resp, "runtime_count") != null);

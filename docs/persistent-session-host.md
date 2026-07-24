@@ -619,6 +619,11 @@ request_id:u64 | stream_id:u64 | payload_len:u32
   host의 EOF cleanup이 attachment/controller lease를 회수한다.
 - 모든 frame header의 `major`는 현재 선택된 MRSH major와 같아야 한다. hello payload만 v2인데 header가 다른 혼합 frame은
   server/client 양쪽에서 protocol error로 connection을 닫고 runtime은 유지한다.
+- 현재 client는 hello의 `protocol_min`과 `protocol_max`를 둘 다 자기 `version_major`로 보내고, server는 hello를 읽기
+  전에 frame header major의 정확한 일치를 요구한다. 따라서 min/max 필드는 wire에 있어도 **현재 구현은 cross-major
+  범위 협상을 하지 않는다**. 같은 major 안의 additive 기능은 아래 capability로 구 host와 공존시키고, header/screen
+  codec처럼 호환 불가능한 변경은 major를 올린다. major가 달라지면 구 runtime은 종료되지는 않지만 새 GUI가 attach할 수
+  없으며, host binary live handoff는 §2 비목표다.
 - `screen_viewport_scrolled_v1`은 같은 MRSH v2 안에서 screen mode bit의 의미를 확장하는 hello capability다. 이 capability를
   host가 응답했을 때만 client는 `viewport_scrolled`와 scrolled snapshot의 canonical live cursor anchor를 신뢰한다. 앱 업데이트
   전에 이미 살아 있던 구 v2 host는 capability가 없으므로 bit 부재를 `false`로 해석하면 안 된다. 새 client는 그 연결에서
@@ -649,14 +654,71 @@ request_id:u64 | stream_id:u64 | payload_len:u32
   있는 runtime은 legacy scroll 4종만 기존 RPC로 보내고 나머지는 degraded no-op이다. 반면 새 config-bearing spawn은
   구 host가 `runtime_config`를 조용히 무시할 수 있으므로 PTY 생성 전에 `UnsupportedSpawnContract`로 거부하고 앱이
   명시적인 in-process fallback을 택한다. 이후 blocking mouse/resize/observation RPC는 input/control FIFO를 먼저 flush한다.
+- `runtime_selected_text_v1`은 host가 `runtime.selected_text`로 자기 `TerminalCore.extractSelection`을 실행할 수 있음을
+  뜻한다. 최신 host에서는 host가 선택 의미론의 SSOT이고 client는 렌더용 viewport span만 보낸다. 앱 업데이트보다 먼저
+  떠 있던 같은-major 구 host에는 이 capability가 없으므로 모르는 RPC를 보내 빈 복사로 삼키지 않고, 이미 렌더 중인
+  client viewport projection에서 **현재 보이는 선택만** 추출한다. 단일 행·block·wide/grapheme은 projection에서 정확히
+  복원하지만, 구 screen wire에는 행별 soft-wrap bit가 없으므로 multi-row 선형 선택은 보이는 화면 행 사이에 개행을
+  넣는다. 이는 구 host 전용 degraded 호환이며 host scrollback 전체를 client 의미론 출처로 복제하지 않는다.
 
 ### hello, command, stream 순서
 
 connection의 첫 frame은 반드시 `hello`다. 현재 client는 `{protocol_min:2, protocol_max:2, client_kind:"gui|cli",
-capabilities:["runtime_metadata_v1","screen_viewport_scrolled_v1","async_scroll_to_bottom_v1",...]}`를 보내고 host는 선택 version, `host_id`, 자신이 실제로
+capabilities:["runtime_metadata_v1","screen_viewport_scrolled_v1","async_scroll_to_bottom_v1","runtime_selected_text_v1",...]}`를 보내고 host는 선택 version, `host_id`, 자신이 실제로
 지원하는 capability를 응답한다. client는 hello_ack에도 이름이 있는 capability만 활성화하며, major가 같다는 사실만으로 새 screen 의미론을 가정하지 않는다.
-겹치는 major가 없으면 attach 요청을 받기 전에 `incompatible_version`으로 끝낸다. GUI는 manifest handle의 `host_id`와 hello의
-값이 다르면 stale로 처리한다.
+현재 서로 다른 header major끼리는 hello payload 협상 전에 server가 응답 없이 연결을 닫으므로 client에는 보통
+`ConnectionClosed`→host `.denied`로 보인다. `incompatible_version` 응답은 header major는 현재 값인데 hello의
+`protocol_min..protocol_max`가 현재 major를 포함하지 않는 경우에만 도달한다. GUI는 manifest handle의 `host_id`와
+hello의 값이 다르면 stale로 처리한다.
+
+### 앱 업데이트 호환 전략
+
+**목표 상태이며 현재 구현은 같은-major capability 호환까지만 제공한다.** 업데이트 때문에 살아 있는 runtime을 자동
+종료하지 않는 것을 최우선 불변식으로 둔다.
+
+1. **같은 major:** wire의 기존 필드·method 의미를 깨지 않고 additive capability로만 확장한다. 새 GUI는 hello_ack에 없는
+   기능을 보내지 않으며, 명시된 degraded adapter가 있으면 이미 받은 screen/metadata projection만 사용한다. capability를
+   광고한 host의 응답 schema가 어긋나면 구 host로 추측해 downgrade하지 않고 connection을 fail-close한다.
+2. **지원하는 이전 major(N-1):** 새 앱은 current와 직전 major codec/adapter를 함께 제공한다. 기존 runtime은 구 host에
+   그대로 남고 새 GUI가 그 adapter로 attach한다. 새 Term은 current host에 생성한다. 즉 실행 중 PTY를 옮기는
+   migration이 아니라 **old host drain + side-by-side host**다.
+3. **지원 범위 밖:** 구 host/runtime을 kill하거나 fresh shell로 위장하지 않는다. exact `host_id:runtime_id`가 어느 protocol
+   때문에 attach 불가능한지 사용자 notice와 진단 로그에 남긴다.
+
+이를 위해 고정 `<base>/session-host/control.sock` 하나를 host별 endpoint directory로 바꾼다.
+`<base>/session-host/hosts/<host_id>/host.v1.json` entry는 `host_id`, protocol major, 상대 `control.sock`, build identity,
+lifecycle 상태를 가지며 workspace manifest는 계속 `host_id:runtime_id`만 참조한다. 각 host는 자기 directory의
+`owner.lock`을 lifetime 동안 exclusive `flock`하고, socket bind가 끝난 뒤 manifest를 temp-write→`fsync`→rename으로
+publish한다. discovery는 lock이 live이고 manifest/socket/hello `host_id`가 모두 맞는 entry만 사용한다. 같은 major의
+동시 spawn은 `<base>/session-host/launch-v<major>.lock`을 잡고 registry를 다시 확인한 뒤 하나만 실행해 spawn storm을
+막는다. 별도 central registry daemon이나 mutable JSON 한 파일은 두지 않는다.
+
+runtime/PTY/screen의 SSOT는 각 host의 `TerminalRuntimeRegistry`이고, disk entry는 **발견·라우팅 정보만** 소유한다.
+새 앱은 workspace handle의 exact host entry로 구 세션에 붙고, 지원 major 중 current host를 기본으로 골라 새 세션을
+만든다. 구 host의 runtime 수가 0이 된 뒤에만 그 host가 socket/manifest를 내리고 directory를 정리한다. 전환 당시 이미
+살아 있는 unversioned v2 `<base>/session-host/control.sock`은 v2 adapter가 별도 connection으로 probe해 hello의
+`host_id`를 얻고 **in-memory legacy entry**로만 등록한다. 이 socket을 rename/대체하거나 구 host directory에 파일을
+쓰지 않으며, legacy runtime이 모두 끝난 뒤 고정 endpoint가 사라진다.
+
+cross-major adapter를 구현하려면 현재 header exact-major gate를 우회하려고 같은 socket에 다른 header를 반복 전송하지
+않는다. manifest/host registry가 알려 준 major에 맞는 codec으로 **새 connection**을 열어야 한다. 장기적으로 framing
+version과 선택된 application protocol version을 분리할 수 있지만, 그것만으로 이미 배포된 v2 host가 새 header를 이해하게
+되지는 않으므로 N-1 codec 보존은 필요하다.
+
+adapter는 구 wire를 앱 전체에 노출하지 않고 **현재 내부 모델로 one-way up-convert**한다. 예를 들어 v2 adapter가
+v2 snapshot/metadata/error를 현재 `RenderSnapshot`, owned runtime observation, typed availability로 바꾼 뒤
+`RemoteTermBackend`와 AppSession은 protocol major를 분기하지 않는다. 지원되는 command만 구 codec으로 내리고, 구 host에
+없는 기능은 `unsupported` 또는 문서화된 degraded 결과로 올린다. 앱 업데이트에는 adapter bug fix도 함께 포함할 수 있지만
+adapter가 구 host에 없던 source data나 method를 만들어냈다고 가장하면 안 된다.
+
+호환 보존의 최소 정책은 current+N-1이다. persistent-session wire major는 드물게 올리고, 이미 공개된 adapter를 제거할 때는
+지원 기간과 영향받는 live host를 먼저 notice해야 한다. skip-update 사용자를 더 길게 지원하려면 같은 경계에 N-2 이하
+adapter를 추가할 수 있으며, 앱의 나머지 계층과 host process를 다시 설계할 필요는 없다. 각 adapter는 frozen wire fixture와
+실제 해당 major host binary의 attach/input/resize/snapshot/copy 테스트를 통과해야 current app 호환으로 선언한다.
+
+workspace/config/host-registry 같은 disk schema는 versioned reader→current in-memory model→current writer로 one-way
+migration할 수 있다. 반면 실행 중 PTY의 fd·child ownership·parser/scrollback을 다른 process로 넘기는 live handoff는
+이 정책의 요구사항이 아니며 §2의 비목표로 유지한다.
 
 | 내부 command | 주요 입력 | 결과/효과 |
 | --- | --- | --- |
@@ -1004,8 +1066,10 @@ P3-e도 슬라이스로 나눈다(제품 통합이라 크다).
     기존 runtime 재접속은 attach 뒤 같은 snapshot을 다시 보내 현재 GUI config로 수렴시키며, theme/font reload도 모든 terminal
     runtime에 같은 command를 재전달한다. response timeout이나 잘못된 request id를 본 client는 늦은 response가 다음 RPC와
     섞이지 않도록 socket을 즉시 폐기한다. capability 없는 구 host에는 기존
-    scroll 4종만 보내고 새 command는 unknown RPC를 시험하지 않는 degraded no-op이다. 선택 highlight는 attachment-local,
-    선택 콘텐츠 계산은 기존 host RPC라는 소유권을 유지하며 `scroll_and_extend`·viewport 전체 선택 parity는 후속이다.
+    scroll 4종만 보내고 새 command는 unknown RPC를 시험하지 않는 degraded no-op이다. 선택 highlight는 attachment-local이다.
+    최신 host의 선택 콘텐츠는 `runtime_selected_text_v1` host RPC가 SSOT이며, capability 없는 같은-major 구 host만 현재
+    viewport projection에서 단일 행·block을 정확히, multi-row 선형은 화면 행마다 개행하는 degraded 복사를 한다.
+    `scroll_and_extend`·viewport 전체 선택 parity는 후속이다.
   - **P3-e4d(parity gate) 🟨**: 실제 독립 host PTY의 OSC 7/2/5379→client observation, host core의
     OSC 7/2/133/5379 export, owned-copy/OOM-safe replace, attach initial metadata, changed-only event,
     malformed/stale revision과 stream별 coalescing, capability 없는 v2 client event 억제, observation barrier revision,

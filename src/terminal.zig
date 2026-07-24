@@ -17,6 +17,8 @@ pub const pasteNeedsConfirmationWith = @import("terminal/input_report.zig").past
 pub const width = @import("width.zig");
 
 pub const Cell = types.Cell;
+pub const isTextTrimBlank = types.isTextTrimBlank;
+pub const textTrimmedLen = types.textTrimmedLen;
 pub const Color = types.Color;
 pub const Cursor = types.Cursor;
 pub const CursorShape = types.CursorShape;

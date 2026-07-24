@@ -36,6 +36,9 @@ pub const CellGrid = struct {
     images: []terminal.KittyImageView = &.{},
     // 행별 OSC 133 prompt 마크(dense; 마크 없으면 empty). 이 격자가 소유(조립기 wire → terminal 타입 값 복사).
     prompt_marks: []terminal.RowPrompt = &.{},
+    // host가 해석한 뷰포트 링크(없으면 empty). 이 격자가 소유(조립기 wire → terminal 타입 값 복사).
+    // client는 이것만으로 Cmd+hover 밑줄을 그린다 — 로컬 core는 빈 placeholder라 스스로 감지할 수 없다.
+    links: []terminal.ViewportLink = &.{},
 
     pub fn deinit(self: *CellGrid) void {
         if (self.cells.len != 0) self.allocator.free(self.cells); // len 가드 — emptyGrid(cells=&.{})도 안전히 deinit(리뷰 #2).
@@ -44,6 +47,7 @@ pub const CellGrid = struct {
         if (self.placements.len != 0) self.allocator.free(self.placements);
         if (self.images.len != 0) self.allocator.free(self.images); // 배열만 — 픽셀은 조립기 소유.
         if (self.prompt_marks.len != 0) self.allocator.free(self.prompt_marks);
+        if (self.links.len != 0) self.allocator.free(self.links);
         self.* = undefined;
     }
 
@@ -64,6 +68,7 @@ pub const CellGrid = struct {
             .placements = self.placements,
             .images = self.images,
             .prompt_marks = self.prompt_marks, // OSC 133 거터(✓/✗)·prompt 네비 입력.
+            .links = self.links, // Cmd+hover 밑줄·링크 커서 입력(host 해석 — docs/link-detection.md §원격(host-backed) 세션).
             // **dirty는 반드시 세운다**(리뷰 #1): draw 경로(draw_list.zig)가 셀·커서·거터 방출 전체를 `if (snapshot.dirty)`로
             // 게이트하므로 null이면 host-backed 패널이 통째로 blank로 그려진다. 원격은 apply마다 격자를 전부 다시 뜨므로(부분
             // dirty 추적 없음) 매 프레임 전체 화면을 dirty로 노출한다(in-process가 macOS live 경로에서 fullDirty를 유지하는 것과 동형).
@@ -177,7 +182,26 @@ pub fn build(allocator: std.mem.Allocator, asm_: *const screen_assembler.ScreenA
     };
     errdefer if (prompt_marks.len != 0) allocator.free(prompt_marks);
 
-    // images.toOwnedSlice를 **마지막 fallible 연산**으로 둔다 — 이후 return은 실패하지 않으므로, prompt_marks alloc(위)이
+    // links: 조립기의 wire(LinkSpanWire)를 core terminal.ViewportLink로 1:1 환산. kind/scope는 숫자 약속이라
+    // 범위 밖 값은 손상 방어로 안전한 기본(url / bare_relative 아님 — scope는 osc8로 승격하지 않고 web으로 clamp)에
+    // 매핑한다. 좌표는 host가 뷰포트 상대로 이미 클립해 보냈다(§12).
+    const src_links = asm_.linkSpans();
+    const links: []terminal.ViewportLink = if (src_links.len == 0) &.{} else ln: {
+        const arr = try allocator.alloc(terminal.ViewportLink, src_links.len);
+        for (src_links, 0..) |w, i| arr[i] = .{
+            .span = .{
+                .start = .{ .row = w.start_row, .col = w.start_col },
+                .end = .{ .row = w.end_row, .col = w.end_col },
+                .block = false, // 링크 밑줄은 항상 선형(types.zig §SelectionSpan.block 주석).
+            },
+            .kind = if (w.kind <= 1) @enumFromInt(w.kind) else .url,
+            .scope = if (w.scope <= 6) @enumFromInt(w.scope) else .web,
+        };
+        break :ln arr;
+    };
+    errdefer if (links.len != 0) allocator.free(links);
+
+    // images.toOwnedSlice를 **마지막 fallible 연산**으로 둔다 — 이후 return은 실패하지 않으므로, prompt_marks/links alloc(위)이
     // 실패해도 images ArrayList의 errdefer가 그대로 덮어 누수가 없다(리뷰 #9: toOwnedSlice 뒤 prompt OOM 시 images_slice 누수 해소).
     const images_slice = images.toOwnedSlice(allocator) catch return error.OutOfMemory;
 
@@ -193,6 +217,7 @@ pub fn build(allocator: std.mem.Allocator, asm_: *const screen_assembler.ScreenA
         .placements = placements,
         .images = images_slice,
         .prompt_marks = prompt_marks,
+        .links = links,
     };
 }
 
@@ -911,9 +936,9 @@ test "remote screen: build exposes kitty images + placements from the assembler 
 /// 불변식])을 비교하고, 의도적 드롭(cursor_blink 하드코딩·last_command_exit)은 제외한다. **comptime로 `RenderSnapshot`의 모든
 /// 필드가 "비교" 또는 "드롭"으로 분류됐는지 강제**한다 — 새 필드가 추가되면 여기서 **컴파일 에러**가 나 원격 경로 배선(투영/
 /// 조립/노출)을 잊지 않게 한다. 색·이미지·dirty가 조용히 유실됐던(리뷰 #1 blank 렌더) 재발을 막는 안전망이다.
-fn expectSnapshotParity(local: terminal.RenderSnapshot, remote: terminal.RenderSnapshot) !void {
+fn expectSnapshotParity(local_core: *const terminal.TerminalCore, local: terminal.RenderSnapshot, remote: terminal.RenderSnapshot) !void {
     // ── comptime 필드 커버리지: RenderSnapshot 새 필드는 반드시 아래 둘 중 하나로 분류돼야 한다 ──
-    const compared = [_][]const u8{ "size", "cursor", "cursor_shape", "viewport_scrolled", "viewport_scrolled_known", "ambiguous_wide", "cells", "graphemes", "placements", "images", "prompt_marks", "dirty" };
+    const compared = [_][]const u8{ "size", "cursor", "cursor_shape", "viewport_scrolled", "viewport_scrolled_known", "ambiguous_wide", "cells", "graphemes", "placements", "images", "prompt_marks", "links", "dirty" };
     const dropped = [_][]const u8{ "cursor_blink", "last_command_exit" };
     comptime {
         for (@typeInfo(terminal.RenderSnapshot).@"struct".fields) |f| {
@@ -989,6 +1014,24 @@ fn expectSnapshotParity(local: terminal.RenderSnapshot, remote: terminal.RenderS
         try testing.expectEqual(lm.kind, rm.kind);
         try testing.expectEqual(lm.exit, rm.exit);
     }
+    // links(Cmd+hover 밑줄): local snapshot은 이 필드를 **항상 비워 둔다**(로컬은 hover 시점에 core를 직접 분류).
+    // 그래서 값 대조 대신, 원격이 실은 목록이 **같은 화면을 로컬 분류기로 돌린 결과와 동일**한지 본다 — 이게 진짜
+    // parity다(host 해석과 client 로컬 해석이 갈리면 "밑줄 보이는 곳 ≠ 열리는 곳"이 된다).
+    try testing.expectEqual(@as(usize, 0), local.links.len);
+    {
+        var expected: std.ArrayList(terminal.ViewportLink) = .empty;
+        defer expected.deinit(testing.allocator);
+        try local_core.collectViewportLinks(testing.allocator, terminal.link_scopes_full, &expected);
+        try testing.expectEqual(expected.items.len, remote.links.len);
+        for (expected.items, remote.links) |e, r| {
+            try testing.expectEqual(e.span.start.row, r.span.start.row);
+            try testing.expectEqual(e.span.start.col, r.span.start.col);
+            try testing.expectEqual(e.span.end.row, r.span.end.row);
+            try testing.expectEqual(e.span.end.col, r.span.end.col);
+            try testing.expectEqual(e.kind, r.kind);
+            try testing.expectEqual(e.scope, r.scope);
+        }
+    }
     // dirty(리뷰 #1): 원격은 반드시 non-null·전체 화면이어야 draw 경로가 셀/커서/거터를 방출한다(null이면 blank 렌더).
     // local과의 값 비교보다 이 **불변식**을 못박아, 누가 remote.dirty를 null로 되돌리면 여기서 실패하게 한다.
     try testing.expect(remote.dirty != null);
@@ -1012,6 +1055,7 @@ test "remote screen: full RenderSnapshot parity with in-process (styles, colors,
     try core.write("e\u{0301}"); // grapheme cluster(e + combining acute)
     try core.write("\x1b[4 q"); // DECSCUSR: underline 커서 모양
     try core.write("\r\n\x1b]133;A\x1b\\$ x"); // OSC 133 A: 다음 행을 prompt로 마킹 — prompt_marks 축을 실제로 태운다.
+    try core.write("\r\ngo https://example.com/p"); // 링크 축(자동 감지) — links parity가 all-empty로 헛통과하지 않게.
 
     // kitty 이미지 transmit+display(2x2 RGBA, i=1).
     var raw = [_]u8{ 0x10, 0x20, 0x30, 0x40, 0x50, 0x60, 0x70, 0x80, 0x90, 0xA0, 0xB0, 0xC0, 0xD0, 0xE0, 0xF0, 0x11 };
@@ -1037,7 +1081,10 @@ test "remote screen: full RenderSnapshot parity with in-process (styles, colors,
         has_mark = true;
     };
     try testing.expect(has_mark);
-    try expectSnapshotParity(local, grid.renderSnapshot());
+    // 링크 축도 같은 이유로 non-empty를 보장한다 — 원격이 링크를 통째로 안 실어도 "둘 다 0개"로 헛통과하면
+    // 이 회귀(host-backed에서 밑줄 무동작)를 parity가 못 잡는다.
+    try testing.expect(grid.renderSnapshot().links.len > 0);
+    try expectSnapshotParity(&core, local, grid.renderSnapshot());
 }
 
 test "remote screen: host-backed snapshot renders drawable cells via the real draw path (review #1)" {

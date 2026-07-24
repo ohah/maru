@@ -82,6 +82,9 @@ pub const ScreenAssembler = struct {
     pending_images: std.AutoHashMapUnmanaged(u32, PendingImage) = .{},
     // 행별 OSC 133 prompt 마크(dense, positional; 마크 없으면 empty). remote_screen이 terminal.RowPrompt로 환산.
     prompt_marks: []screen_stream.RowPromptWire = &.{},
+    // 뷰포트 링크(자동 감지 + OSC 8; 없으면 empty). host가 해석해 실어 준 것으로, client는 이것만으로 Cmd+hover
+    // 밑줄을 그린다 — client core는 빈 placeholder라 스스로 감지할 수 없다(docs/link-detection.md §원격(host-backed) 세션).
+    link_spans: []screen_stream.LinkSpanWire = &.{},
 
     pub fn init(allocator: std.mem.Allocator) ScreenAssembler {
         return .{ .allocator = allocator };
@@ -98,6 +101,7 @@ pub const ScreenAssembler = struct {
         self.placement_list.deinit(self.allocator);
         self.pending_images.deinit(self.allocator);
         if (self.prompt_marks.len != 0) self.allocator.free(self.prompt_marks);
+        if (self.link_spans.len != 0) self.allocator.free(self.link_spans);
         self.* = undefined;
     }
 
@@ -220,6 +224,17 @@ pub const ScreenAssembler = struct {
         self.prompt_marks = pm.rows;
     }
 
+    /// 현재 뷰포트 링크(없으면 empty). remote_screen이 terminal.ViewportLink로 환산해 노출한다.
+    pub fn linkSpans(self: *const ScreenAssembler) []const screen_stream.LinkSpanWire {
+        return self.link_spans;
+    }
+
+    /// link_spans record 전체를 교체한다(full-replace — 소유권 이전). 빈 목록도 유효한 상태다("이제 링크 없음").
+    fn setLinkSpans(self: *ScreenAssembler, ls: screen_stream.LinkSpans) void {
+        if (self.link_spans.len != 0) self.allocator.free(self.link_spans);
+        self.link_spans = ls.spans;
+    }
+
     /// 이 행의 runs(렌더 입력). 범위를 벗어나면 빈 슬라이스.
     pub fn rowRuns(self: *const ScreenAssembler, row: u16) []const Run {
         if (row >= self.rows_count) return &.{};
@@ -240,6 +255,10 @@ pub const ScreenAssembler = struct {
         if (self.prompt_marks.len != 0) { // prompt 마크도 리셋(record 없으면 = 마크 없음).
             self.allocator.free(self.prompt_marks);
             self.prompt_marks = &.{};
+        }
+        if (self.link_spans.len != 0) { // 링크도 리셋(record 없으면 = 링크 없음) — stale 밑줄 방지.
+            self.allocator.free(self.link_spans);
+            self.link_spans = &.{};
         }
         const new_rows = self.allocator.alloc(OwnedRow, meta.rows) catch return error.OutOfMemory;
         for (new_rows) |*row| row.* = .{}; // 빈 행으로 초기화(누락 row record 대비).
@@ -270,6 +289,7 @@ pub const ScreenAssembler = struct {
                     self.placement_list.append(self.allocator, p) catch return error.OutOfMemory;
                 },
                 .prompt_marks => self.setPromptMarks(try screen_stream.decodePromptMarks(self.allocator, s.body)),
+                .link_spans => self.setLinkSpans(try screen_stream.decodeLinkSpans(self.allocator, s.body)),
                 else => {}, // 미래 record는 건너뛴다.
             }
         }
@@ -328,6 +348,12 @@ pub const ScreenAssembler = struct {
                 .prompt_marks => {
                     if (s.header.generation != self.generation) return error.GenerationGap;
                     self.setPromptMarks(try screen_stream.decodePromptMarks(self.allocator, s.body));
+                },
+                // link_spans도 full-replace다. **빈 목록도 유효한 전이**("링크가 사라졌다")이므로 record가 오면
+                // 그대로 반영해야 client에 stale 밑줄이 남지 않는다.
+                .link_spans => {
+                    if (s.header.generation != self.generation) return error.GenerationGap;
+                    self.setLinkSpans(try screen_stream.decodeLinkSpans(self.allocator, s.body));
                 },
                 else => {}, // scroll_rect/clear_rect — 현재 producer 미방출, 조립기는 무시(후속 확장).
             }

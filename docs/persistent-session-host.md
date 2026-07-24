@@ -667,8 +667,10 @@ request_id:u64 | stream_id:u64 | payload_len:u32
 - `runtime_link_at_v1`은 host가 `runtime.link_at`으로 자기 `TerminalCore.extractUrlAt`(추출 + cwd resolve + 존재 stat)을
   실행할 수 있음을 뜻한다. 링크를 **여는** 판정은 콘텐츠와 cwd, 그리고 파일이 실제로 있는 파일시스템을 가진 host가 SSOT다 —
   client가 자기 FS로 stat하면 host 쪽 경로를 잘못 판정한다. hover 밑줄은 이 RPC를 쓰지 않고 screen stream의 `link_spans`
-  record로 받는다(매 mouse-move RPC 회피). capability 없는 구 host에는 이 RPC를 보내지 않고 자동 감지가 비활성이며,
-  OSC 8 명시 링크는 셀 link id로 이미 스냅샷에 실려 영향받지 않는다. 단일 출처는 [링크 감지](link-detection.md#원격host-backed-세션).
+  record로 받는다(매 mouse-move RPC 회피). capability 없는 구 host에는 이 RPC를 보내지 않고 자동 감지가 비활성이다.
+  screen wire의 `run`에는 셀 OSC 8 link id 필드가 없어 **명시 하이퍼링크도 원격에서는 client 셀에 도달하지 않으므로**, host는
+  `link_spans`에 자동 감지 span과 OSC 8 span을 함께 싣는다(`scope`의 osc8 비트 — client는 이 비트를 config 프리셋과 무관하게
+  항상 표시). 단일 출처는 [링크 감지](link-detection.md#원격host-backed-세션).
 
 ### hello, command, stream 순서
 
@@ -804,8 +806,8 @@ chunk_index:u32 | chunk_count:u32 | record_bytes...
   `image_blob(image_id,generation,width,height,bpp,pixels)`(디코드된 raw 픽셀 — client 디코더 불필요, >1 MiB는 header
   chunk_index/count로 청크), `prompt_marks(row_count, (kind:u8, has_exit, exit:i16)*)`(행별 OSC 133 semantic prompt —
   거터 ✓/✗·prompt 네비 근거; dense positional full-replace라 snapshot·delta 공용, 마크 없으면 방출 생략),
-  `link_spans(span_count, (start_row:u16, start_col:u16, end_row:u16, end_col:u16, kind:u8, scope:u8)*)`(뷰포트 자동 감지
-  링크 — Cmd+hover 밑줄·링크 커서 근거; full-replace라 snapshot·delta 공용, 링크 없으면 방출 생략)다. row run은
+  `link_spans(span_count, (start_row:u16, start_col:u16, end_row:u16, end_col:u16, kind:u8, scope:u8)*)`(뷰포트 링크 —
+  자동 감지 + OSC 8 명시 링크. Cmd+hover 밑줄·링크 커서 근거; full-replace라 snapshot·delta 공용, 링크 없으면 방출 생략)다. row run은
   grapheme UTF-8, cell width/count와 태그드 Color intent(default/indexed/rgb)·style flags를 명시하고 Zig/Swift padding이나
   pointer를 포함하지 않는다.
 - delta record는 `set_runs`, `clear_rect`, `scroll_rect`, `cursor`, `modes`, `image_place/remove`, `prompt_marks`(full-replace)의
@@ -834,7 +836,8 @@ chunk_index:u32 | chunk_count:u32 | record_bytes...
   나눈 open enum이다(`prompt_marks`·`link_spans`는 full-replace라 두 대역에서 공용; 미래 record는 새 값 — decoder가 optional이면 skip, required면 reject).
 - `link_spans`의 좌표는 **뷰포트 상대 행**(0..rows-1)이다 — 스크롤은 host가 소유하고 화면이 바뀌면 다음 snapshot/delta가
   full-replace하므로, client가 절대 행을 재계산할 필요가 없다. `kind`는 `LinkKind`(0=url, 1=file_path), `scope`는 그 span이
-  매치된 감지 종류 비트(`LinkScopes`의 web/extra_schemes/absolute_path/home_path/dot_relative/bare_relative)다. host는 client
+  매치된 감지 종류 비트(bit0 web, bit1 extra_schemes, bit2 absolute_path, bit3 home_path, bit4 dot_relative,
+  bit5 bare_relative, **bit6 osc8**[명시 하이퍼링크 — config 프리셋과 무관하게 항상 표시])다. host는 client
   config를 모르므로 **항상 최대 집합으로 계산**하고, client가 자기 `input.link-detection`으로 `scope`를 걸러 밑줄을 그린다
   (host 해석 / client 정책 분리 — [링크 감지](link-detection.md#원격host-backed-세션)). host는 이 계산에서 stat을 하지 않는다
   (hover는 후보, 열기는 `runtime.link_at`이 검증 — 로컬 경로와 같은 의도적 불일치).

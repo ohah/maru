@@ -107,7 +107,8 @@ pub fn inspect(path: [:0]const u8) Error!Identity {
     if (fd < 0) return error.OpenFailed;
     defer _ = c.close(fd);
     var stat: posix.Stat = undefined;
-    if (c.fstat(fd, &stat) != 0 or !posix.S.ISREG(stat.mode) or stat.uid != c.getuid() or stat.size < 0)
+    if (c.fstat(fd, &stat) != 0 or !posix.S.ISREG(stat.mode) or stat.uid != c.getuid() or
+        stat.mode & 0o022 != 0 or stat.size < 0)
         return error.InvalidSource;
     var hasher = std.crypto.hash.sha2.Sha256.init(.{});
     var total: u64 = 0;
@@ -138,24 +139,27 @@ pub fn inspect(path: [:0]const u8) Error!Identity {
 pub fn promote(
     owner_dir: [:0]const u8,
     staged_path: [:0]const u8,
+    expected: Identity,
     current_path: [:0]const u8,
     previous_path: [:0]const u8,
     inject_before_rename: bool,
 ) Error!void {
     const dir_fd = try openOwnerDir(owner_dir);
     defer _ = c.close(dir_fd);
-    _ = try inspect(staged_path);
+    const actual = try inspect(staged_path);
+    if (!identityEqual(expected, actual)) return error.HashMismatch;
     if (inject_before_rename) return error.InjectedPromotionFailure;
 
-    const had_current = c.rename(current_path.ptr, previous_path.ptr) == 0;
-    if (!had_current and posix.errno(-1) != .NOENT) return error.RenameFailed;
-    if (c.rename(staged_path.ptr, current_path.ptr) != 0) {
-        if (had_current) _ = c.rename(previous_path.ptr, current_path.ptr);
-        return error.RenameFailed;
-    }
+    // destination replace가 한 번의 atomic rename이므로 current path는 old/new 중 하나로 항상 존재한다.
+    if (c.rename(staged_path.ptr, current_path.ptr) != 0) return error.RenameFailed;
     if (c.fsync(dir_fd) != 0) return error.SyncFailed;
-    if (had_current) _ = c.unlink(previous_path.ptr);
+    _ = c.unlink(previous_path.ptr); // 과거 구현 residue만 정리하며 rollback 권위로 쓰지 않는다.
     if (c.fsync(dir_fd) != 0) return error.SyncFailed;
+}
+
+pub fn identityEqual(a: Identity, b: Identity) bool {
+    return a.dev == b.dev and a.ino == b.ino and a.size == b.size and
+        std.mem.eql(u8, &a.sha256, &b.sha256);
 }
 
 fn validateLeaf(name: []const u8) Error!void {
@@ -176,7 +180,8 @@ fn openOwnerDir(path: [:0]const u8) Error!c.fd_t {
 
 fn validateRegular(fd: c.fd_t) Error!void {
     var stat: posix.Stat = undefined;
-    if (c.fstat(fd, &stat) != 0 or !posix.S.ISREG(stat.mode) or stat.uid != c.getuid() or stat.size < 0)
+    if (c.fstat(fd, &stat) != 0 or !posix.S.ISREG(stat.mode) or stat.uid != c.getuid() or
+        stat.mode & 0o022 != 0 or stat.size < 0)
         return error.InvalidSource;
 }
 
@@ -220,16 +225,16 @@ test "staged image copies hashes and atomically rotates two consecutive versions
     try writeFixture(source, "version-n");
     var first = try stage(std.testing.allocator, source, dir, "target-n");
     defer first.deinit();
-    try promote(dir, first.path, current, previous, false);
+    try promote(dir, first.path, first.identity, current, previous, false);
     try std.testing.expectEqual(@as(u64, 9), (try inspect(current)).size);
 
     try writeFixture(source, "version-n-plus-one");
     var second = try stage(std.testing.allocator, source, dir, "target-n-plus-one");
     defer second.deinit();
-    try std.testing.expectError(error.InjectedPromotionFailure, promote(dir, second.path, current, previous, true));
+    try std.testing.expectError(error.InjectedPromotionFailure, promote(dir, second.path, second.identity, current, previous, true));
     const before = try inspect(current);
     try std.testing.expect(std.mem.eql(u8, &before.sha256, &first.identity.sha256));
-    try promote(dir, second.path, current, previous, false);
+    try promote(dir, second.path, second.identity, current, previous, false);
     const after = try inspect(current);
     try std.testing.expect(std.mem.eql(u8, &after.sha256, &second.identity.sha256));
 }

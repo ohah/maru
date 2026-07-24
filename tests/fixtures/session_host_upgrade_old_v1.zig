@@ -240,6 +240,9 @@ pub fn main(init: std.process.Init) !void {
         try finishRuntime(allocator, &session, &core, "old-resume\n", "MIGRATED:old-resume");
         return writeResult(result_path, "old_exec_failed_resumed=ok\nowner_lease=ok\nparser=ground\nexit=23\n", allocator);
     }
+    if (!session_host.staged_image.identityEqual(target_image.identity, try session_host.staged_image.inspect(target_image.path)) or
+        !session_host.staged_image.identityEqual(self_image.identity, try session_host.staged_image.inspect(self_image.path)))
+        return error.StagedIdentityChanged;
     const argv = [_:null]?[*:0]const u8{ target_image.path.ptr, self_image.path.ptr, result_z.ptr, scenario_z.ptr, owner_dir_z.ptr };
     _ = execv(target_image.path.ptr, &argv);
     return error.ExecFailed;

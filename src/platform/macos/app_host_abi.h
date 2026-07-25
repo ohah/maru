@@ -1012,10 +1012,10 @@ int32_t maru_macos_app_session_serialize_sidebar_config(
     size_t *out_len
 );
 
-/* 저장된 workspace 텍스트(헤더 + N개 창; UTF-8)의 창 개수를 센다(Swift가 창마다 NSWindow 생성). 헤더·포맷
-   검증도 겸한다: parse 실패(헤더 불일치·손상)면 -1(Swift가 복원 건너뜀), 0이면 빈 workspace. 포맷 파싱은 Zig
-   단일 권위 — Swift는 'window ' 경계를 직접 나누지 않는다. session=NULL도 허용하며 이 경우 첫 PTY를 만들기 전
-   launch preflight로 쓴다(v142). */
+/* 저장된 workspace 텍스트(헤더 + N개 창; UTF-8)의 창 개수를 센다(Swift가 창마다 NSWindow 생성). 헤더·포맷과
+   manifest-wide runtime binding semantic validation을 함께 수행한다. parse/semantic 실패(중복 owner 포함)면
+   -1(Swift가 restore/checkpoint publish 건너뜀), 0이면 빈 workspace. Swift는 window 경계나 binding을 직접
+   해석하지 않는다. session=NULL도 허용하며 첫 PTY 전 launch preflight와 write 전 checkpoint preflight에 쓴다. */
 int64_t maru_macos_app_session_workspace_window_count(
     MaruAppHostSession *session,
     const uint8_t *text_ptr,

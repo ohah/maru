@@ -2,8 +2,8 @@
 //! 다시 열기 위한 **선언적 상태**를 `maru.workspace.v1` 텍스트로 굳힌다 — live PTY/process/grid 내용은 담지
 //! 않는다(docs/workspace-restore.md). snapshot/trace와 같은 규칙: 첫 줄 bare 토큰(`schema=` 접두어 없음),
 //! 이후 `<kind> <fields>` 라인, 따옴표 문자열은 `\` `"`·개행 escape. 이 파일은 값 모델과 text reader/writer를
-//! 함께 두고, platform live capture/apply는 이 모델만 소비·생산한다. P4 R2의 manifest-wide binding validator와
-//! host inventory reconciliation은 per-surface text parse와 별도 후속 경계다.
+//! 함께 두고, platform live capture/apply는 이 모델만 소비·생산한다. P4 R2a manifest-wide binding validator는
+//! 이 모듈의 semantic preflight이며, R2b host inventory reconciliation은 per-surface text parse와 별도 후속 경계다.
 //!
 //! 계층: workspace → windows → tabs → (pane split 트리 + panes) → panes → surfaces(Term). 멀티 창은 windows가
 //! N개(각 창 = 한 AppSession). split 트리는 preorder TreeNode 리스트로 — full binary tree라 self-delimiting
@@ -33,6 +33,9 @@ pub const max_line_fields: usize = 512;
 /// 수보다 충분히 크고 max_line_fields의 반복 키 예산 안에 있다.
 pub const max_dock_entries = dock_panel.max_entries;
 pub const max_dock_groups = dock_panel.max_groups;
+/// 하나의 checkpoint에 둘 수 있는 persistent runtime owner 상한. semantic preflight의 hash table 작업·메모리를
+/// attacker-controlled workspace 크기와 분리한다. 일반 in-process surface는 이 cap에 포함하지 않는다.
+pub const max_runtime_bindings = 4096;
 pub const max_explorer_roots: usize = 256;
 pub const max_explorer_root_payload_bytes: usize = 1_049_860;
 pub const max_explorer_root_raw_bytes: usize = 2_099_720;
@@ -173,9 +176,64 @@ pub const Workspace = struct {
     windows: []const Window,
 };
 
+pub const RuntimeBindingValidationError = error{
+    DuplicateRuntimeBinding,
+    TooManyRuntimeBindings,
+} || std.mem.Allocator.Error;
+
+/// manifest의 writable runtime owner가 전역에서 하나뿐인지 검증한다. host observer subscription 수와는 무관한
+/// layout 소유권 검증이며, restore attach/spawn과 checkpoint write보다 먼저 호출된다.
+pub fn validateRuntimeBindings(allocator: std.mem.Allocator, ws: Workspace) RuntimeBindingValidationError!void {
+    var full_handles = std.AutoHashMap([64]u8, void).init(allocator);
+    defer full_handles.deinit();
+    var full_runtime_ids = std.AutoHashMap([32]u8, void).init(allocator);
+    defer full_runtime_ids.deinit();
+    var bare_runtime_ids = std.AutoHashMap([32]u8, void).init(allocator);
+    defer bare_runtime_ids.deinit();
+    var binding_count: usize = 0;
+
+    for (ws.windows) |win| {
+        for (win.tabs) |tab| {
+            for (tab.panes) |pane| {
+                for (pane.surfaces) |surface| {
+                    if (surface.runtime_id.len == 0) continue;
+                    binding_count += 1;
+                    if (binding_count > max_runtime_bindings) return error.TooManyRuntimeBindings;
+                    // 구조적 identity 검증은 writeSurface/parseSurface의 단일 출처에 맡긴다. 여기서는 유효한 key만
+                    // 전역 비교하고, 손상 모델을 고정 길이 배열에 복사해 panic하지 않는다.
+                    if (surface.runtime_id.len != 32 or
+                        (surface.runtime_host_id.len != 0 and surface.runtime_host_id.len != 32)) continue;
+
+                    var runtime_id: [32]u8 = undefined;
+                    @memcpy(runtime_id[0..], surface.runtime_id);
+                    if (surface.runtime_host_id.len == 0) {
+                        // legacy bare ID는 current host namespace를 암묵적으로 쓰므로 같은 runtime ID의 full/bare owner와
+                        // 공존시키지 않는다. exact host를 증명할 수 없는 writable 중복은 attach 전에 fail-close한다.
+                        if (bare_runtime_ids.contains(runtime_id) or full_runtime_ids.contains(runtime_id))
+                            return error.DuplicateRuntimeBinding;
+                        try bare_runtime_ids.put(runtime_id, {});
+                        continue;
+                    }
+
+                    var handle: [64]u8 = undefined;
+                    @memcpy(handle[0..32], surface.runtime_host_id);
+                    @memcpy(handle[32..64], surface.runtime_id);
+                    if (full_handles.contains(handle) or bare_runtime_ids.contains(runtime_id))
+                        return error.DuplicateRuntimeBinding;
+                    try full_handles.put(handle, {});
+                    // 다른 host가 우연히 같은 runtime_id를 쓰는 것은 distinct full handle이라 허용한다. 이 보조 set은
+                    // 뒤에 bare ID가 나왔을 때만 모호한 중복을 잡는다.
+                    try full_runtime_ids.put(runtime_id, {});
+                }
+            }
+        }
+    }
+}
+
 /// 헤더 + 전체 workspace를 새 문자열로 직렬화한다(호출자 소유). live 캡처(R3)가 모델을 채워 넘기고, reader(R2)가
 /// 같은 규칙으로 되읽는다.
 pub fn serialize(allocator: std.mem.Allocator, ws: Workspace) ![]u8 {
+    try validateRuntimeBindings(allocator, ws);
     var out: std.Io.Writer.Allocating = .init(allocator);
     errdefer out.deinit();
     try out.writer.print("{s}\n", .{header});
@@ -186,6 +244,7 @@ pub fn serialize(allocator: std.mem.Allocator, ws: Workspace) ![]u8 {
 /// 한 창(Window) 블록만 직렬화한다(헤더 없음). 멀티 창 저장(R5)에서 각 AppSession이 자기 창 블록을 내고,
 /// Swift가 `maru.workspace.v1` 헤더 하나 아래로 모아 parse 가능한 전체 텍스트를 만든다.
 pub fn serializeWindow(allocator: std.mem.Allocator, win: Window) ![]u8 {
+    try validateRuntimeBindings(allocator, .{ .windows = &.{win} });
     var out: std.Io.Writer.Allocating = .init(allocator);
     errdefer out.deinit();
     try writeWindow(&out.writer, win);
@@ -450,6 +509,10 @@ pub const ParsedWorkspace = struct {
     }
 };
 
+const ParseLimits = struct {
+    runtime_bindings: usize = 0,
+};
+
 pub fn parse(allocator: std.mem.Allocator, text: []const u8) ParseError!ParsedWorkspace {
     var arena = std.heap.ArenaAllocator.init(allocator);
     errdefer arena.deinit();
@@ -459,15 +522,23 @@ pub fn parse(allocator: std.mem.Allocator, text: []const u8) ParseError!ParsedWo
     const head = lines.next() orelse return error.Truncated;
     if (!std.mem.eql(u8, head, header)) return error.BadHeader;
 
+    var limits: ParseLimits = .{};
     var windows: std.ArrayList(Window) = .empty;
     while (lines.peek()) |line| {
         if (!std.mem.startsWith(u8, line, "window ")) break; // 알 수 없는 trailing → forgiving 종료
-        try windows.append(a, try parseWindow(a, &lines));
+        try windows.append(a, try parseWindow(a, &lines, &limits));
     }
-    return .{ .arena = arena, .workspace = .{ .windows = try windows.toOwnedSlice(a) } };
+    const workspace: Workspace = .{ .windows = try windows.toOwnedSlice(a) };
+    // validator hash-map은 parse model arena의 일부가 아니다. caller allocator를 써서 이 함수 안에서 실제 free하고,
+    // ParsedWorkspace가 오래 살아도 scratch capacity가 함께 잔류하지 않게 한다.
+    validateRuntimeBindings(allocator, workspace) catch |err| switch (err) {
+        error.DuplicateRuntimeBinding, error.TooManyRuntimeBindings => return error.BadLine,
+        error.OutOfMemory => return error.OutOfMemory,
+    };
+    return .{ .arena = arena, .workspace = workspace };
 }
 
-fn parseWindow(a: std.mem.Allocator, lines: *LineIter) ParseError!Window {
+fn parseWindow(a: std.mem.Allocator, lines: *LineIter, limits: *ParseLimits) ParseError!Window {
     const f = try LineFields.parse(a, lines.next() orelse return error.Truncated);
     if (!std.mem.eql(u8, f.kind, "window")) return error.BadLine;
     const tab_count = try f.requireUint("tabs", usize); // 구조 키(탭 개수) — 없으면 BadLine
@@ -596,7 +667,7 @@ fn parseWindow(a: std.mem.Allocator, lines: *LineIter) ParseError!Window {
         (explorer_roots_field != null and !explorer_parse.valid);
     var tabs: std.ArrayList(Tab) = .empty;
     var i: usize = 0;
-    while (i < tab_count) : (i += 1) try tabs.append(a, try parseTab(a, lines));
+    while (i < tab_count) : (i += 1) try tabs.append(a, try parseTab(a, lines, limits));
     return .{ .active_tab = active_tab, .active = active, .frame = frame, .dock = dock_with_presented, .explorer = .{ .roots = explorer_roots }, .tabs = try tabs.toOwnedSlice(a) };
 }
 
@@ -743,7 +814,7 @@ fn dockEntryPart(encoded: []const u8, pos: *usize) ?[]const u8 {
     return part;
 }
 
-fn parseTab(a: std.mem.Allocator, lines: *LineIter) ParseError!Tab {
+fn parseTab(a: std.mem.Allocator, lines: *LineIter, limits: *ParseLimits) ParseError!Tab {
     const f = try LineFields.parse(a, lines.next() orelse return error.Truncated);
     if (!std.mem.eql(u8, f.kind, "tab")) return error.BadLine;
     const pane_count = try f.requireUint("panes", usize); // 구조 키(트리·pane 개수 결정) — 없으면 BadLine
@@ -784,7 +855,7 @@ fn parseTab(a: std.mem.Allocator, lines: *LineIter) ParseError!Tab {
 
     var panes: std.ArrayList(Pane) = .empty;
     var i: usize = 0;
-    while (i < pane_count) : (i += 1) try panes.append(a, try parsePane(a, lines));
+    while (i < pane_count) : (i += 1) try panes.append(a, try parsePane(a, lines, limits));
     return .{ .active_pane = active_pane, .custom_name = custom_name, .pinned = pinned, .background_color = background_color, .accent_color = accent_color, .group_start = group_start, .group_collapsed = group_collapsed, .group_depth = group_depth, .group_color = group_color, .local_pinned = local_pinned, .top_level = top_level, .tree = try tree.toOwnedSlice(a), .panes = try panes.toOwnedSlice(a) };
 }
 
@@ -814,7 +885,7 @@ fn parseTree(a: std.mem.Allocator, lines: *LineIter, out: *std.ArrayList(TreeNod
     } else return error.BadLine;
 }
 
-fn parsePane(a: std.mem.Allocator, lines: *LineIter) ParseError!Pane {
+fn parsePane(a: std.mem.Allocator, lines: *LineIter, limits: *ParseLimits) ParseError!Pane {
     const f = try LineFields.parse(a, lines.next() orelse return error.Truncated);
     if (!std.mem.eql(u8, f.kind, "pane")) return error.BadLine;
     const surface_count = try f.requireUint("surfaces", usize); // 구조 키(surface 개수) — 없으면 BadLine
@@ -823,11 +894,11 @@ fn parsePane(a: std.mem.Allocator, lines: *LineIter) ParseError!Pane {
 
     var surfaces: std.ArrayList(Surface) = .empty;
     var i: usize = 0;
-    while (i < surface_count) : (i += 1) try surfaces.append(a, try parseSurface(a, lines));
+    while (i < surface_count) : (i += 1) try surfaces.append(a, try parseSurface(a, lines, limits));
     return .{ .active_term = active_term, .custom_name = custom_name, .surfaces = try surfaces.toOwnedSlice(a) };
 }
 
-fn parseSurface(a: std.mem.Allocator, lines: *LineIter) ParseError!Surface {
+fn parseSurface(a: std.mem.Allocator, lines: *LineIter, limits: *ParseLimits) ParseError!Surface {
     const f = try LineFields.parse(a, lines.next() orelse return error.Truncated);
     if (!std.mem.eql(u8, f.kind, "surface")) return error.BadLine;
     // 스칼라 속성(순서 무관·없으면 기본값). cols/rows는 복원 시 실제 pane 크기로 resize되므로 누락 시 sane 터미널
@@ -854,6 +925,10 @@ fn parseSurface(a: std.mem.Allocator, lines: *LineIter) ParseError!Surface {
     } else if (legacy_runtime != null) {
         runtime_id = try f.getQuoted(a, "runtime-id", "");
         if (!validPersistentId(runtime_id)) return error.BadLine;
+    }
+    if (runtime_id.len > 0) {
+        limits.runtime_bindings += 1;
+        if (limits.runtime_bindings > max_runtime_bindings) return error.BadLine;
     }
     var runtime_state: RuntimeState = .live;
     if (f.find("runtime-state") != null) {
@@ -1224,6 +1299,206 @@ test "workspace round-trip: durable ended tombstone은 exact handle과 state를 
     try std.testing.expectEqual(RuntimeState.ended, round.runtime_state);
     try std.testing.expectEqualStrings(hid, round.runtime_host_id);
     try std.testing.expectEqualStrings(rid, round.runtime_id);
+}
+
+test "workspace binding validator: 같은 full handle의 live/ended owner를 창 전체에서 거부한다" {
+    const hid = "fedcba9876543210fedcba9876543210";
+    const rid = "0123456789abcdef0123456789abcdef";
+    const surfaces0 = [_]Surface{.{
+        .runtime_host_id = hid,
+        .runtime_id = rid,
+        .cols = 80,
+        .rows = 24,
+    }};
+    const surfaces1 = [_]Surface{.{
+        .runtime_host_id = hid,
+        .runtime_id = rid,
+        .runtime_state = .ended,
+        .cols = 80,
+        .rows = 24,
+    }};
+    const panes0 = [_]Pane{.{ .surfaces = &surfaces0 }};
+    const panes1 = [_]Pane{.{ .surfaces = &surfaces1 }};
+    const tree = [_]TreeNode{.{ .leaf = 0 }};
+    const tabs0 = [_]Tab{.{ .tree = &tree, .panes = &panes0 }};
+    const tabs1 = [_]Tab{.{ .tree = &tree, .panes = &panes1 }};
+    const windows = [_]Window{ .{ .tabs = &tabs0 }, .{ .tabs = &tabs1 } };
+
+    try std.testing.expectError(
+        error.DuplicateRuntimeBinding,
+        serialize(std.testing.allocator, .{ .windows = &windows }),
+    );
+}
+
+test "workspace binding validator: legacy bare ID의 full/bare 모호한 중복은 거부하고 distinct full host는 허용한다" {
+    const rid = "0123456789abcdef0123456789abcdef";
+    const tree = [_]TreeNode{.{ .leaf = 0 }};
+
+    const distinct_surfaces = [_]Surface{
+        .{ .runtime_host_id = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", .runtime_id = rid, .cols = 80, .rows = 24 },
+        .{ .runtime_host_id = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", .runtime_id = rid, .cols = 80, .rows = 24 },
+    };
+    const distinct_pane = [_]Pane{.{ .surfaces = &distinct_surfaces }};
+    const distinct_tabs = [_]Tab{.{ .tree = &tree, .panes = &distinct_pane }};
+    const distinct_windows = [_]Window{.{ .tabs = &distinct_tabs }};
+    const text = try serialize(std.testing.allocator, .{ .windows = &distinct_windows });
+    defer std.testing.allocator.free(text);
+
+    const ambiguous_surfaces = [_]Surface{
+        .{ .runtime_host_id = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", .runtime_id = rid, .cols = 80, .rows = 24 },
+        .{ .runtime_id = rid, .cols = 80, .rows = 24 },
+    };
+    const ambiguous_pane = [_]Pane{.{ .surfaces = &ambiguous_surfaces }};
+    const ambiguous_tabs = [_]Tab{.{ .tree = &tree, .panes = &ambiguous_pane }};
+    const ambiguous_windows = [_]Window{.{ .tabs = &ambiguous_tabs }};
+    try std.testing.expectError(
+        error.DuplicateRuntimeBinding,
+        serialize(std.testing.allocator, .{ .windows = &ambiguous_windows }),
+    );
+
+    const reverse_surfaces = [_]Surface{
+        .{ .runtime_id = rid, .cols = 80, .rows = 24 },
+        .{ .runtime_host_id = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", .runtime_id = rid, .cols = 80, .rows = 24 },
+    };
+    const reverse_pane = [_]Pane{.{ .surfaces = &reverse_surfaces }};
+    const reverse_tabs = [_]Tab{.{ .tree = &tree, .panes = &reverse_pane }};
+    const reverse_windows = [_]Window{.{ .tabs = &reverse_tabs }};
+    try std.testing.expectError(
+        error.DuplicateRuntimeBinding,
+        serialize(std.testing.allocator, .{ .windows = &reverse_windows }),
+    );
+
+    const bare_surfaces = [_]Surface{
+        .{ .runtime_id = rid, .cols = 80, .rows = 24 },
+        .{ .runtime_id = rid, .cols = 80, .rows = 24 },
+    };
+    const bare_pane = [_]Pane{.{ .surfaces = &bare_surfaces }};
+    const bare_tabs = [_]Tab{.{ .tree = &tree, .panes = &bare_pane }};
+    const bare_windows = [_]Window{.{ .tabs = &bare_tabs }};
+    try std.testing.expectError(
+        error.DuplicateRuntimeBinding,
+        serialize(std.testing.allocator, .{ .windows = &bare_windows }),
+    );
+}
+
+test "workspace binding validator: exact cap과 cap+1이 semantic preflight 작업량을 제한한다" {
+    const allocator = std.testing.allocator;
+    const count = max_runtime_bindings + 1;
+    const ids = try allocator.alloc([32]u8, count);
+    defer allocator.free(ids);
+    const surfaces = try allocator.alloc(Surface, count);
+    defer allocator.free(surfaces);
+    for (ids, surfaces, 0..) |*id, *surface, i| {
+        @memset(id, '0');
+        _ = try std.fmt.bufPrint(id[24..32], "{x:0>8}", .{i});
+        surface.* = .{
+            .runtime_host_id = "fedcba9876543210fedcba9876543210",
+            .runtime_id = id,
+            .cols = 80,
+            .rows = 24,
+        };
+    }
+    const tree = [_]TreeNode{.{ .leaf = 0 }};
+    var pane = [_]Pane{.{ .surfaces = surfaces[0..max_runtime_bindings] }};
+    const tabs = [_]Tab{.{ .tree = &tree, .panes = &pane }};
+    const windows = [_]Window{.{ .tabs = &tabs }};
+    try validateRuntimeBindings(allocator, .{ .windows = &windows });
+    pane[0].surfaces = surfaces;
+    try std.testing.expectError(
+        error.TooManyRuntimeBindings,
+        validateRuntimeBindings(allocator, .{ .windows = &windows }),
+    );
+}
+
+test "workspace parse: persistent binding wire cap은 exact 4096을 허용하고 4097을 BadLine으로 거부한다" {
+    const allocator = std.testing.allocator;
+    for ([_]usize{ max_runtime_bindings, max_runtime_bindings + 1 }) |count| {
+        var out: std.Io.Writer.Allocating = .init(allocator);
+        defer out.deinit();
+        try out.writer.print(
+            "{s}\n" ++
+                "window active-tab=0 tabs=1\n" ++
+                "tab active-pane=0 tree-nodes=1 panes=1 custom-name=\"\" pinned=0 background-color=0 accent-color=0\n" ++
+                "tree-node leaf pane=0\n" ++
+                "pane surfaces={d} active-term=0 custom-name=\"\"\n",
+            .{ header, count },
+        );
+        for (0..count) |i| {
+            try out.writer.print(
+                "surface runtime-handle=\"fedcba9876543210fedcba9876543210:000000000000000000000000{x:0>8}\" cols=80 rows=24\n",
+                .{i},
+            );
+        }
+        const text = out.writer.buffered();
+        if (count == max_runtime_bindings) {
+            var parsed = try parse(allocator, text);
+            parsed.deinit();
+        } else {
+            try std.testing.expectError(error.BadLine, parse(allocator, text));
+        }
+    }
+}
+
+test "workspace binding validator: allocation failure와 invalid model은 leak이나 고정 길이 copy panic이 없다" {
+    const hid = "fedcba9876543210fedcba9876543210";
+    const rid = "0123456789abcdef0123456789abcdef";
+    const surfaces = [_]Surface{
+        .{ .runtime_id = "11111111111111111111111111111111" },
+        .{ .runtime_host_id = hid, .runtime_id = rid },
+        .{ .runtime_host_id = hid, .runtime_id = rid },
+    };
+    const panes = [_]Pane{.{ .surfaces = &surfaces }};
+    const tree = [_]TreeNode{.{ .leaf = 0 }};
+    const tabs = [_]Tab{.{ .tree = &tree, .panes = &panes }};
+    const windows = [_]Window{.{ .tabs = &tabs }};
+    var saw_duplicate = false;
+    for (0..32) |fail_index| {
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = fail_index });
+        validateRuntimeBindings(failing.allocator(), .{ .windows = &windows }) catch |err| switch (err) {
+            error.OutOfMemory => {
+                try std.testing.expect(failing.has_induced_failure);
+                continue;
+            },
+            error.DuplicateRuntimeBinding => {
+                saw_duplicate = true;
+                break;
+            },
+            error.TooManyRuntimeBindings => return error.TestUnexpectedResult,
+        };
+        return error.TestUnexpectedResult;
+    }
+    try std.testing.expect(saw_duplicate);
+
+    const invalid = [_]Surface{
+        .{ .runtime_host_id = hid, .runtime_id = "short" },
+        .{ .runtime_host_id = "too-short", .runtime_id = rid },
+    };
+    const invalid_panes = [_]Pane{.{ .surfaces = &invalid }};
+    const invalid_tabs = [_]Tab{.{ .tree = &tree, .panes = &invalid_panes }};
+    const invalid_windows = [_]Window{.{ .tabs = &invalid_tabs }};
+    try validateRuntimeBindings(std.testing.allocator, .{ .windows = &invalid_windows });
+    try std.testing.expectError(
+        error.InvalidRuntimeIdentity,
+        serialize(std.testing.allocator, .{ .windows = &invalid_windows }),
+    );
+}
+
+test "workspace parse: 전역 duplicate runtime binding은 어떤 소비자 publish 전 BadLine이다" {
+    const text =
+        \\maru.workspace.v1
+        \\window active-tab=0 tabs=1
+        \\tab active-pane=0 tree-nodes=1 panes=1 custom-name="" pinned=0 background-color=0 accent-color=0
+        \\tree-node leaf pane=0
+        \\pane surfaces=1 active-term=0 custom-name=""
+        \\surface custom-name="" title="" cwd="" command="" runtime-handle="fedcba9876543210fedcba9876543210:0123456789abcdef0123456789abcdef" cols=80 rows=24
+        \\window active-tab=0 tabs=1
+        \\tab active-pane=0 tree-nodes=1 panes=1 custom-name="" pinned=0 background-color=0 accent-color=0
+        \\tree-node leaf pane=0
+        \\pane surfaces=1 active-term=0 custom-name=""
+        \\surface custom-name="" title="" cwd="" command="" runtime-handle="fedcba9876543210fedcba9876543210:0123456789abcdef0123456789abcdef" runtime-state="ended" cols=80 rows=24
+        \\
+    ;
+    try std.testing.expectError(error.BadLine, parse(std.testing.allocator, text));
 }
 
 test "workspace parse: legacy bare runtime-id는 읽되 다음 저장에서 handle로 위조하지 않는다" {

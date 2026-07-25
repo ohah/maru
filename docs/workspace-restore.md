@@ -53,8 +53,9 @@ workspace restore와 persistent-session attach는 서로 대체하지 않는다.
 첫 복원의 ended placeholder와 `⏎` 제자리 재생성은 구현됐다. **P4 R1 구현 슬라이스는**
 positive-Gone의 정확한 handle을 `runtime-state="ended"`와 함께 owned 상태로 보존하고, 다음 restore가 host
 probe·attach·새 shell spawn 없이 placeholder를 직접 만드는 durable tombstone까지를 한 gate로 묶는다. Enter로 새
-runtime 생성이 성공한 때만 구 handle/state를 버린다. 전역 runtime binding 중복 검증, `Recovered Sessions`,
-incremental checkpoint는 R1 뒤 단계이며 아직 구현되지 않았다. 정상 종료 한 번에만
+runtime 생성이 성공한 때만 구 handle/state를 버린다. **P4 R2a의 전역 runtime binding 중복 검증도 core/ABI/source-order
+fixture까지 구현됐다.** `Recovered Sessions`, host inventory reconciliation,
+incremental checkpoint는 R2a 뒤 단계이며 아직 구현되지 않았다. 정상 종료 한 번에만
 저장하는 현재 방식이라 GUI 비정상 종료 직전 layout은 잃을 수 있으므로 이 항목들은 영속 session 기본 전환 전 gate다.
 `workspace-binding-id`와 persistent quick layout은 default-on 범위에서 제거했다. 세부 소유권·ID·접속 실패 행렬은
 persistent-session 문서를 따른다.
@@ -124,10 +125,15 @@ surface custom-name="" title="ended" cwd="/repo" command="/bin/zsh" cols=100 row
 - **P4 R1 gate:** `runtime-state="ended"`는 `runtime-handle`과 함께 있을 때만 유효하다. reader는 host probe·attach·새 shell
   spawn 없이 placeholder를 만들고, writer는 Enter로 새 runtime 생성에 성공할 때만 구 handle/state를 새 live handle로
   교체한다. 알 수 없는 state, ended인데 handle 부재, live와 ended의 모순은 checkpoint 전체를 거부한다.
-- **계획:** publish 전 전체 모델을 검증한다. 하나의 `runtime-handle`은
+- **P4 R2a 구현 슬라이스:** publish 전 전체 모델을 검증한다. 하나의 `runtime-handle`은
   canonical owner terminal surface 하나에만 나타나야 한다. v1 manifest에는 같은 handle의 read-only mirror도 저장하지 않는다.
   중복이면 현재 live 모델과 마지막 완전 파일을 보존하고 새 checkpoint를 쓰지 않는다.
-- **계획:** reader도 어떤 runtime attach/spawn이나 Window publish보다 먼저 전역 중복을 검사한다. 검증 실패 때 일부 창만 attach하는
+- legacy bare `runtime-id`도 current host에서 같은 runtime을 가리킬 수 있으므로 같은 bare ID끼리, 또는 같은
+  `runtime_id`를 가진 full handle과 함께 나타나면 보수적으로 중복으로 거부한다. host namespace를 증명할 수 없는 입력을
+  두 writable owner로 attach하는 것보다 fail-close를 택한다.
+- semantic validator는 persistent binding을 최대 4,096개로 제한한다. exact cap은 허용하고 cap+1은 checkpoint 전체를
+  거부해 launch preflight의 hash-table 작업·메모리를 손상 manifest로 무한히 늘릴 수 없게 한다.
+- **P4 R2a 구현 슬라이스:** reader도 어떤 runtime attach/spawn이나 Window publish보다 먼저 전역 중복을 검사한다. 검증 실패 때 일부 창만 attach하는
   side effect를 만들지 않는다.
 - **계획:** live handle인데 host가 runtime 부재를 긍정적으로 확인하면 해당 surface를 ended로 전이시킨다. endpoint를
   찾지 못했거나 protocol 지원 범위 밖인 것만으로는 영구 부재를 단정하지 않는다. host에는 있지만 manifest에 없는 runtime은
@@ -477,7 +483,8 @@ reader/migration을 먼저 설계한다. **additive 스칼라 필드 추가는 k
 - writer가 duplicate runtime binding에서 새 파일을 publish하지 않고 기존 완전본을 보존하는 fail-before-effect 테스트.
 - 같은 runtime의 canonical owner Term 중복과 read-only mirror 표기를 모두 거부하되 host의 observer subscription N개는 허용하는
   layout-vs-client 경계 테스트.
-- reader가 전체 semantic validation 전 host attach/spawn/Window publish를 정확히 0회 수행하는 fake backend 테스트.
+- reader가 전체 semantic validation 전 host attach/spawn/Window publish를 정확히 0회 수행하는 deferred-AppSession
+  ABI sentinel 테스트.
 - 2 Window+3 Workspace의 cross-window Workspace/Pane/Term 이동에서 runtime handle byte identity, child/runtime 재생성 0, source/target
   원자 publish를 검증하는 headless transaction 테스트.
 - temp write/atomic replace 각 fail-index와 GUI SIGKILL에서 이전 또는 새 완전 manifest만 읽히는 process 테스트.

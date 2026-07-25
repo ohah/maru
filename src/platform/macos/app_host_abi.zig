@@ -179,6 +179,32 @@ test "Swift startup acquires the writer lease before AppKit and mutable app boot
     }
 }
 
+test "Swift workspace checkpoint validates the assembled manifest before backup or write" {
+    const source = @embedFile("MaruAppHost.swift");
+    const save_start = std.mem.indexOf(u8, source, "private func saveWorkspace()") orelse
+        return error.MissingSaveWorkspace;
+    const save_end = std.mem.indexOfPos(u8, source, save_start, "\n    private func shutdownAppSession") orelse
+        return error.MissingSaveWorkspaceEnd;
+    const body = source[save_start..save_end];
+    const assemble = std.mem.indexOf(u8, body, "let snapshot = MARU_WORKSPACE_HEADER") orelse
+        return error.MissingWorkspaceAssembly;
+    const validate = std.mem.indexOf(u8, body, "maru_macos_app_session_workspace_window_count(nil") orelse
+        return error.MissingWorkspaceValidation;
+    const count_gate = std.mem.indexOf(u8, body, "guard validatedWindowCount == blockCount else { return }") orelse
+        return error.MissingWorkspaceValidationGate;
+    const create_directory = std.mem.indexOf(u8, body, "createDirectory") orelse
+        return error.MissingWorkspaceDirectoryCreate;
+    const backup = std.mem.indexOf(u8, body, "backupWorkspaceCheckpoint") orelse
+        return error.MissingWorkspaceBackup;
+    const write = std.mem.indexOf(u8, body, "write(to: url, options: .atomic)") orelse
+        return error.MissingWorkspaceWrite;
+    try std.testing.expect(assemble < validate);
+    try std.testing.expect(validate < count_gate);
+    try std.testing.expect(count_gate < create_directory);
+    try std.testing.expect(count_gate < backup);
+    try std.testing.expect(count_gate < write);
+}
+
 test "ABI v133 live preview raw mode route and asset role values match the C header" {
     try std.testing.expectEqual(@as(u32, c.MARU_FILE_PANEL_MODE_READ), @intFromEnum(maru.session.dock_panel.Mode.read));
     try std.testing.expectEqual(@as(u32, c.MARU_FILE_PANEL_MODE_SOURCE_EDIT), @intFromEnum(maru.session.dock_panel.Mode.source_edit));
@@ -1602,9 +1628,9 @@ pub export fn maru_macos_app_session_apply_workspace_window(
     return @intFromEnum(Status.ok);
 }
 
-// 저장된 workspace 텍스트의 창 개수를 센다(Swift가 창마다 NSWindow를 만들기 위해). 헤더·포맷 검증도 겸한다:
-// parse 실패(헤더 불일치·손상)면 -1을 돌려 Swift가 복원을 건너뛰게 한다(0이면 빈 workspace). 포맷 파싱은 Zig
-// 단일 권위 — Swift는 'window ' 경계를 직접 안 나눈다. 세션 allocator로 parse(임시 arena, 즉시 해제).
+// 저장된 workspace 텍스트의 창 개수를 센다(Swift가 창마다 NSWindow를 만들기 위해). 헤더·포맷뿐 아니라 manifest-wide
+// runtime binding semantic validation도 겸한다. parse/semantic 실패(중복 owner 포함)면 -1을 돌려 restore 또는
+// checkpoint publish를 건너뛰게 한다(0이면 빈 workspace). Swift는 window 경계나 binding을 직접 해석하지 않는다.
 pub export fn maru_macos_app_session_workspace_window_count(
     session: ?*AppSession,
     text_ptr: ?[*]const u8,
@@ -5457,6 +5483,46 @@ test "workspace restore ABI preserves multi-window count active and apply" {
     try std.testing.expectEqual(@as(usize, 1), session1.?.tabs.items[0].panes.items.len);
     try std.testing.expectEqualStrings("second", session1.?.tabs.items[0].custom_name.?);
     try std.testing.expect(session1.?.surface_initialized);
+}
+
+test "workspace preflight ABI rejects cross-window duplicate runtime owner before session creation" {
+    const text =
+        "maru.workspace.v1\n" ++
+        "window tabs=1 active-tab=0\n" ++
+        "tab panes=1 active-pane=0 custom-name=\"\"\n" ++
+        "tree-node leaf pane=0\n" ++
+        "pane surfaces=1 active-term=0 custom-name=\"\"\n" ++
+        "surface custom-name=\"\" title=\"\" cwd=\"\" command=\"\" runtime-handle=\"fedcba9876543210fedcba9876543210:0123456789abcdef0123456789abcdef\" cols=80 rows=24\n" ++
+        "window tabs=1 active-tab=0\n" ++
+        "tab panes=1 active-pane=0 custom-name=\"\"\n" ++
+        "tree-node leaf pane=0\n" ++
+        "pane surfaces=1 active-term=0 custom-name=\"\"\n" ++
+        "surface custom-name=\"\" title=\"\" cwd=\"\" command=\"\" runtime-handle=\"fedcba9876543210fedcba9876543210:0123456789abcdef0123456789abcdef\" cols=80 rows=24\n";
+    try std.testing.expectEqual(
+        @as(i64, -1),
+        maru_macos_app_session_workspace_window_count(null, text.ptr, text.len),
+    );
+    if (@import("builtin").os.tag != .macos) return;
+    const config: AppSessionConfig = .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(AppCommandKind.controlled_smoke),
+        .defer_initial_surface = 1,
+    };
+    var session: ?*AppSession = null;
+    try std.testing.expectEqual(@as(c_int, @intFromEnum(Status.ok)), maru_macos_app_session_create(&config, &session));
+    defer maru_macos_app_session_destroy(session);
+    session.?.restore_runtime_host_id = "preflight-sentinel";
+    session.?.restore_runtime_id = "preflight-sentinel";
+    try std.testing.expectEqual(
+        @as(c_int, @intFromEnum(Status.invalid_config)),
+        maru_macos_app_session_apply_workspace_window(session, text.ptr, text.len, 0),
+    );
+    try std.testing.expectEqual(@as(usize, 0), session.?.tabs.items.len);
+    try std.testing.expectEqualStrings("preflight-sentinel", session.?.restore_runtime_host_id);
+    try std.testing.expectEqualStrings("preflight-sentinel", session.?.restore_runtime_id);
 }
 
 test "Metal key-down ABI repairs stale dock focus before routing Cmd+W" {

@@ -119,7 +119,7 @@ file-panel.external-link-target = in-app # 파일 패널 외부 링크: in-app |
 | `workspace.tab-inherit-cwd` | `true`\|`false` | `true` | 새 워크스페이스 탭(`new_tab`)·새 Term(`new_term`)이 포커스 Term의 현재 cwd(OSC 7)를 상속할지. `false`면 `workspace.root`에서 연다(Ghostty `tab-inherit-working-directory`). 아래 참조 |
 | `workspace.split-inherit-cwd` | `true`\|`false` | `true` | 새 분할(`split_*`, 팬)이 포커스 Term의 현재 cwd를 상속할지. `false`면 `workspace.root`에서 연다(Ghostty `split-inherit-working-directory`). 아래 참조 |
 | `workspace.hold-on-startup-failure` | `true`\|`false` | `true` | 첫(유일) 셸이 시작 직후 **비정상 종료**해 usable 세션에 도달 못 하면 앱을 종료하지 않고 창을 유지(원인·복구 표시, ⏎로 재시작). 잘못된 `shell.command`/`shell.args`로 앱이 시작하자마자 꺼지던 것 방지. `false`면 기존처럼 종료(Terminal.app "shell 종료 시 닫기" 취향) |
-| `session.keep-alive-after-quit` | `true`\|`false` | `false` | **영속 터미널 세션**(실험적 opt-in) — 정상 GUI Quit 뒤에도 일반 Window의 터미널 runtime(PTY·자식·화면)을 별도 host 프로세스(`maru-sessiond`)에서 유지하고 재실행 시 같은 `host_id:runtime_id`에 재접속한다(tmux식, `docs/persistent-session-host.md` §10). **기본 `false`**. 토글 뒤 새로 여는 일반 Workspace/Term/split부터 선택한 backend를 쓰며 이미 열린 Term은 process 사이로 이동하지 않는다. quick은 manifest 저장이 없어 현재 항상 in-process이고 Quit 때 종료된다. quick persistence·incremental checkpoint·외부 attach·다중 app process는 아직 미완료라 P4/P5 gate 전에는 기본값을 바꾸지 않는다. host 연결 실패 시 notice 뒤 in-process로 폴백한다. 설정 GUI(**workspace** 섹션 토글)에서 켜고 끌 수 있다(config 파일로도 편집 가능). 앱 전역 설정 snapshot을 모든 Window가 공유하므로 `false`로 바꾼 뒤 다음 Quit에서는 이미 연결된 remote runtime도 종료한다. **이 키는 "모든 설정 초기화"(Reset to Defaults)의 예외로 보존된다** — 취향 설정이 아니라 살아 있는 PTY의 소유권 모드라서, 리셋이 기본값으로 되돌리면 다음 Quit이 사용자가 켜 둔 세션을 경고 없이 terminate한다. 리셋은 이 값을 그대로 두고 notice로 "끄려면 세팅 › workspace에서 직접 변경"을 안내하며, 보존값이 기본값과 다르면 리셋이 덮어쓰는 config 파일에 override 한 줄로 함께 남긴다 |
+| `session.keep-alive-after-quit` | `true`\|`false` | `false` | **영속 터미널 세션**(실험적 opt-in) — 정상 GUI Quit 뒤에도 일반 Window의 terminal runtime을 `maru-sessiond`가 유지하고 재실행 시 같은 `host_id:runtime_id`에 재접속한다([전체 P4 종료 gate](persistent-session-host.md#p4--일반-window-default-readinessbackground-알림)). **현재 기본 `false`**. 새 일반 Workspace/Term/split부터 토글 값을 적용하고 열린 Term은 process 사이로 이동하지 않는다. quick은 항상 in-process이고 Quit 때 종료된다. 현재 host 실패는 one-shot notice 뒤 local fallback하고 handle을 쓰지 않으며, P4 전에 persistent `not preserved` 상태를 추가한다. Workspace 설정에서 편집하고 모든 Window가 앱 전역 snapshot을 공유한다. 현재 global Reset은 값을 보존하지만 기본값과 같은 explicit `false`는 다시 쓰지 않고, row Reset도 generic override 제거를 따른다. release A G2가 global/row Reset 모두에서 값과 explicit override를 항상 보존하도록 바꾼 뒤에만 B로 진행한다. 사용자가 토글을 직접 바꿀 때만 true/false를 교체한다. 기본 전환은 release A가 default=false로 durable tombstone/provenance를 먼저 배포한 뒤 B에서 수행한다. B의 app-global bootstrap은 마지막 occurrence 기준으로 `missing|readable_absent`만 atomic explicit true 생성 성공 후 true, 실패 시 false+retryable notice로 처리한다. `explicit_valid`는 true/false 그대로, `explicit_invalid|unreadable|oversize`는 false·파일 무변경·persistent typed notice다. 여러 Window는 이 1회 결과 snapshot을 빌린다. B→frozen A rollback과 A runtime→B exact adapter attach를 자동 검증하며 A보다 오래된 downgrade는 지원하지 않는다. 외부 CLI(P5)와 자동 migration(U5) 전체는 선결이 아니고 나머지 조건은 링크된 P4 gate가 단일 출처다 |
 | `scrollback.lines` | 정수(0~100000) | `1000` | 가시 화면 위로 보관할 과거 줄 수. `0`이면 스크롤백 비활성(과거 줄 안 보관). 범위 밖/비정수는 무시(기본 유지) |
 | `file-panel.max-live-views` | 정수(1~256) | `8` | 파일 도크에서 동시에 유지할 WKWebView 상한. 초과하면 가장 오래 안 본 non-dirty view만 해제하고 탭 metadata는 유지한다. dirty이거나 source editor 이탈 snapshot ack가 대기 중인 view는 해제하지 않으며 재선택한 탭은 새 surface id로 다시 생성한다. |
 | `file-panel.external-link-target` | `in-app`\|`system` | `in-app` | Markdown/HTML 파일 패널에서 사용자가 직접 누른 `http(s)` 링크의 기본 열기 대상. `in-app`은 현재 창의 새 browser 탭, `system`은 macOS 기본 브라우저로 연다. 어느 설정이든 `⌘⇧`+클릭은 이번 한 번만 시스템 브라우저를 강제한다. fragment는 현재 문서에 남고 로컬 `.md`/`.html` 링크는 파일 도크로 연다. |
@@ -563,8 +563,9 @@ keybind = F4 = esc:[2J
   `clear_screen`(화면+스크롤백 비우기, 빌트인 ⌘K — alt 화면 무동작, 셸 프롬프트면 ^L로 재그림. 자세히는
   [키 입력과 단축키](key-input-and-shortcuts.md))·`toggle_find`·`find_next`·
   `find_previous`·`toggle_command_palette`·`toggle_settings`(세팅 화면 ⌘,)·`reset_settings`
-  (모든 설정을 기본값으로 되돌리는 통합 리셋 — 커맨드 팝업 "Reset All Settings to Defaults". config 파일을
-  삭제해 schema·특수 키·주석까지 전부 내장 기본값으로 돌린다).
+  (설정을 기본값으로 되돌리는 통합 리셋 — 커맨드 팝업 "Reset All Settings to Defaults". 단
+  `session.keep-alive-after-quit`은 위 소유권 예외대로 현재 값을 보존·materialize하고, 나머지 config 파일의
+  schema·특수 키·주석은 내장 기본 상태로 돌린다).
 - **`unbind`**: action 자리에 `unbind`를 적으면 그 조합의 **빌트인 기본 동작을 끈다**(예:
   `keybind = Cmd+T = unbind` → Cmd+T가 새 Term을 안 연다). 끈 조합은 빌트인 테이블을 건너뛰어
   `Cmd`+키는 아무 동작도 안 하고, 그 외 조합은 셸로 입력이 전달된다. 다른 action을 지정하면(덮어쓰기)
@@ -593,7 +594,8 @@ keybind = F4 = esc:[2J
 > **현재 범위**: in-app 키바인딩(앱 액션·`unbind`·터미널 매크로)은 `KeyBindingResolver`로 동작에
 > 연결된다. 전역 단축키(`global:`)는 config 파싱 → OS 등록용 키코드 매핑 → macOS Carbon
 > `RegisterEventHotKey` 등록 → 동작(창 토글/표시, quick terminal 토글)까지 동작한다(앱이 비활성이어도
-> 발화). quick terminal의 슬라이드 애니메이션·Esc 숨김·포커스 폴리시는 후속이다.
+> 발화). quick terminal의 슬라이드 애니메이션과 `auto-hide` 포커스 정책은 구현됐다. Esc 숨김은 vim 등 terminal
+> 입력과 충돌하므로 의도적으로 채택하지 않는다.
 
 ## 검증 동작 (forgiving)
 
@@ -633,7 +635,7 @@ appearance(폰트/테마/커서)와 키바인딩 **파싱**까지 구현됐다. 
   8단계 탭/quick terminal/global shortcut에서.
 - **동작 토글**: paste 보호, 이모지 grapheme 기본값(DEC mode 2027 강제) 등.
 - **terminal 입력 remap**: `<조합> → 바이트` 매크로(TerminalBinding) config.
-- **파일 변경 자동 감지 reload**: 파일 watcher로 변경을 감지해 자동 재-resolve(자동 감지만 후속). 메뉴의 수동 **Reload Config**(파일 재로드해 재시작 없이 적용)·**Reset to Defaults**(확인 모달 후 모든 config를 내장 기본값으로 되돌리고 config 파일을 기본 상태로 덮어씀 — 커맨드 팝업 "Reset All Settings to Defaults"와 같은 통합 리셋)는 구현됨.
+- **파일 변경 자동 감지 reload**: 파일 watcher로 변경을 감지해 자동 재-resolve(자동 감지만 후속). 메뉴의 수동 **Reload Config**(파일 재로드해 재시작 없이 적용)·**Reset to Defaults**(확인 모달 후 `session.keep-alive-after-quit`은 보존하고 나머지 config를 내장 기본값으로 되돌려 파일을 덮어씀 — 커맨드 팝업 "Reset All Settings to Defaults"와 같은 통합 리셋)는 구현됨.
 - **다른 셸(bash/fish) 통합·ssh 라우팅**(보류, 2026-06): 셸 통합(macOS 편집키·OSC 133/7·`shell-integration.ssh` ssh 라우팅)은 **현재 zsh 전용**(`ZDOTDIR`+`.zshenv` 주입)이다. fish는 vendor `conf.d`로 깔끔히 주입할 수 있으나, bash는 maru가 **login 셸**로 띄워(`login=true`) `--rcfile`이 무시되고 `~/.bash_profile`만 읽어 사용자 설정을 안 깨는 주입이 까다롭다(레퍼런스 동작 비교 + 신중한 검증 필요). 그래서 별도 후속으로 둔다 — bash/fish 사용자는 그때까지 직접 `maru ssh`를 쓴다.
 - **설정 UI**: 앱 내 세팅 화면(GUI) + config 파일 양방향 반영. 전략·섹션 구조·신규 키·PR 분해는
   [세팅 페이지 전략과 구현 계획](settings-page.md)을 단일 출처로 둔다(계획 단계, 2026-06).

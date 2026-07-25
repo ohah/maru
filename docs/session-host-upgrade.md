@@ -231,23 +231,31 @@ host crash 비목표다.
 GUI 재실행이 업그레이드를 유발할 때는 runtime attach보다 upgrade preflight를 먼저 한다. `upgrade_busy`면 current/N-1
 adapter로 정상 attach하고, 마지막 attachment가 떨어진 뒤 다시 시도한다. 사용자 입력을 끊어서 업그레이드를 강행하지 않는다.
 
+P5의 multi-fd reactor가 들어간 뒤 `active connection`은 accept-loop의 지역 변수가 아니라 모든
+`ConnectionSlot`의 전역 상태다. `prepare accepted`의 linearization point에서 global frame admission을 닫고,
+그 전에 dispatch된 non-upgrade operation이 0인지 확인한다. accepted reply를 완전히 flush한 뒤 upgrade request
+slot 자체를 close/remove하고, queued mutation이 없는 unattached idle slot만 bounded close한다. partial request나
+queued reply가 있으면 idle로 간주하지 않고 `upgrade_busy`로 취소한다. 마지막에 controller/observer, slot,
+in-flight dispatch가 모두 0인지 다시 확인한 뒤에만 아래 quiesce로 넘긴다.
+
 ## 7. Quiesce 계약
 
 현재 reader의 stack-local response buffer와 실행 중 queue operation은 그대로는 직렬화할 수 없다. U2에서 reader의
 in-flight 상태를 명시적 owned transfer state로 옮긴 뒤 다음 barrier를 구현한다.
 
-1. 새 connection/frame admission을 닫는다.
-2. attachment 0을 다시 확인한다.
-3. 이미 admission된 input bytes와 core command를 fence 순서대로 PTY에 전량 쓴다.
-4. core가 만든 PTY response도 전량 쓴다. deadline 안에 flush되지 않으면 upgrade를 취소한다.
-5. reader는 한 poll iteration 경계에서 멈춘다. local read buffer에 처리되지 않은 bytes가 없어야 한다. 현재
+1. global frame admission을 닫고 in-flight non-upgrade dispatch 0을 확인한다.
+2. accepted reply를 flush하고 request slot을 close/remove한 뒤 unattached idle slot을 bounded close한다.
+3. attachment, active slot, in-flight dispatch가 모두 0인지 다시 확인한다.
+4. 이미 admission된 input bytes와 core command를 fence 순서대로 PTY에 전량 쓴다.
+5. core가 만든 PTY response도 전량 쓴다. deadline 안에 flush되지 않으면 upgrade를 취소한다.
+6. reader는 한 poll iteration 경계에서 멈춘다. local read buffer에 처리되지 않은 bytes가 없어야 한다. 현재
    `stopAndJoin`은 child를 종료하므로 사용할 수 없고, U2가 child/fd/queue를 닫지 않는 별도 pause→safe-point→join
    primitive를 먼저 추가한다.
-6. 모든 `PtySession`의 `exited/closing/reaping=false`와 event queue empty를 다시 확인한다. quiesce 중 EOF/exit/error가
+7. 모든 `PtySession`의 `exited/closing/reaping=false`와 event queue empty를 다시 확인한다. quiesce 중 EOF/exit/error가
    생겨 reader가 terminal event를 만들었으면 status를 버리거나 serialize하지 않고 upgrade를 취소해 구 host의 정상
    termination path가 정확히 한 번 소비하게 한다.
-7. core lock을 얻어 logical state를 encode한다.
-8. PTY kernel buffer에 아직 읽지 않은 output은 그대로 둔다.
+8. core lock을 얻어 logical state를 encode한다.
+9. PTY kernel buffer에 아직 읽지 않은 output은 그대로 둔다.
 
 admission close부터 old-reader read-back, 두 handoff sync, target preflight, exec 직전까지의 **전체 pause
 cooperative deadline budget은 5,000ms**다. 어느 하위 단계든 남은 예산 안에 끝나지 않으면 exec하지 않고
@@ -383,8 +391,8 @@ absolute identity만** 기록하고 target의 page layout을 새로 만든다. s
   upgrade하므로 Window 수는 handoff 조건에 영향을 주지 않는다.
 - 다른 Maru app process가 붙어 있으면 active attachment이므로 upgrade를 미룬다.
 - workspace마다 저장된 `host_id:runtime_id`가 유지돼 재실행 뒤 각 Term이 원래 runtime에 다시 붙는다.
-- Quick Terminal은 현재 명시적으로 in-process라 이 upgrade 대상이 아니다. Quick이 host-backed로 전환되는 별도 결정 전에는
-  앱 Quit 때 종료되는 기존 계약을 유지한다.
+- Quick Terminal은 확정적으로 in-process이며 이 upgrade 대상이 아니다. session 설정과 무관하게 앱 Quit 때 종료하고,
+  host graph·inventory·handoff codec·upgrade capability에 넣지 않는다.
 - SSH에서 실행한 `maru attach`도 동일 UID observer/controller다. 붙어 있으면 upgrade를 미루고 연결을 강제로 끊지 않는다.
 
 ## 11. 단계와 종료 gate
@@ -476,8 +484,8 @@ absolute identity만** 기록하고 target의 page layout을 새로 만든다. s
   spawn/attach해 화면 marker를 확인하고 attachment를 0으로 만든 뒤 `host.upgrade.prepare`를 보낸다. 재접속 뒤에는
   Unix peer PID, direct PTY child PID, `host_id`, `runtime_id`가 전부 같고 epoch/build가 current로 전진했는지,
   pre-upgrade 화면과 post-upgrade child output이 모두 보이는지, status가 `committed/none`이고 다음 upgrade
-  capability도 유지되는지 단언한다. Harness는 release manifest나 binary version을 읽지 않으므로 두 입력이 실제
-  frozen N-1/current이고 방향·인접성이 맞다는 provenance는 release job/caller가 별도로 보증한다.
+  capability도 유지되는지 단언한다. Harness 자체의 서로 다른 SHA/signature 확인만으로 두 입력이 실제 frozen
+  N-1/current release이고 방향·인접성이 맞다는 provenance를 증명할 수는 없다.
 
   ```sh
   zig build test-session-host-signed-upgrade \
@@ -491,13 +499,21 @@ absolute identity만** 기록하고 target의 page layout을 새로 만든다. s
   기본 `test-session-host`에서 항상 compile되고 순수 helper test도 실행한다. 저장소와 일반 CI에는 release
   signing identity/frozen artifact가 없으므로 signed process 본체는 opt-in이며, 실행하지 않은 상태를 green으로
   보고하지 않는다.
-- **구현된 component seam:** attempt-key exclusive target staging, strict same-release codesign authorizer,
+- **남은 release provenance gate:** release job이 immutable manifest로 두 artifact의 semver/tag/commit,
+  MRSH major, handoff schema, app bundle/build identity, SHA-256과 signer requirement를 제공하고, 하네스 summary와
+  교차검증해야 한다. `release.yml`의 계획된 `session-host-compat-artifact` job이 release A의 signed executable과
+  manifest를 current+N-1 지원 창 동안 Release asset으로 보존하고, release B의
+  `Session host compatibility / frozen N-1` protected job이
+  `A daemon spawn→B adapter attach→동일 PID exec→B GUI exact reattach`를 실행한다. Release maintainer가 보존
+  owner이며 B published 전 artifact/result 존재를 강제한다. 같은 source tree에서 이름만 바꾸거나 현재 native
+  module과 함께 재컴파일한 fixture는 이 gate를 만족하지 않는다.
+- **구현된 component seam:** attempt-key exclusive target staging, strict same-designated-requirement codesign authorizer,
   accepted/armed/running/terminal idempotency owner, exec를 넘는 checksummed attempt record, host/epoch/next-handle/live
   runtime/target/rollback-image identity 교차검증, descriptor-relative primary/backup commit, 64 MiB operational cap, exact disk
   preallocation, attempt 전체가 공유하는 absolute monotonic deadline, 동일 paused graph에서 outer handoff와 sorted
   attempt runtime set을 만드는 capture, 256 PTY+primary+backup+owner 259개 FD slot 선예약, unlink-before-exec FD pair와
   target/rollback restore role token을 자동 검증한다. 제품 daemon은 startup 때 canonical rollback self-image,
-  same-release target stager, controller와 completed marker outer loop를 준비하고 실제 product preflight/pathname
+  same-designated-requirement target stager, controller와 completed marker outer loop를 준비하고 실제 product preflight/pathname
   executor를 old-side coordinator에 연결한다. real PTY 한 개의 callback fixture도 같은 coordinator 순서를 고정한다.
   exec-return 실패의 `unchanged_retryable`
   authority rollback은 최초 호출을 포함해 최대 3회 시도하고, 첫 호출 뒤 재시도는 남은 absolute deadline 안에서 최대
@@ -549,15 +565,17 @@ absolute identity만** 기록하고 target의 page layout을 새로 만든다. s
   기존 build/epoch ready authority로 같은 순서를 수행한다. `allow_validation_only_restore=true`인 별도 fixture는
   bootstrap만 검사하고, 제품 artifact의 zero-runtime process gate는 restoring manifest와 activation marker로 실제
   commit 경로와 rollback fallback을 구분한다.
-- **아직 미구현 또는 미실행인 제품 종료 gate:** quiesce 전 handoff-size/disk/I/O budget admission, signed frozen
+- **아직 미구현 또는 미실행인 제품 종료 gate:** quiesce 전 handoff-size/disk/I/O budget admission, release manifest로
+  provenance가 고정된 signed frozen
   N-1/current artifact를 사용한 위 성공 gate의 실제 통과, 실제 제품 rollback activation, 1개·최대치 근처
   multi-runtime의 제품 daemon→product restore→GUI exact reattach, manifest/reader/socket/FD/promotion 전 구간
   failure injection, 장시간 soak와 앱 재실행 자동 orchestration/notice가 남아 있다. macOS 공개 API에는 fd-based
   exec가 없으므로 kernel-loaded-image pin은 목표에서 제거하고, 마지막
-  pathname object identity 재검증+same-release code-signature+same-UID owner boundary를 제품 계약으로 쓴다.
+  pathname object identity 재검증+same-designated-requirement signer+same-UID owner boundary를 제품 계약으로 쓴다.
   이 종료 gate가 닫히기 전에는 U5 완료나 기본 자동 migration을 주장하지 않는다.
 
-U0~U4가 끝나기 전에는 “구 host session이 새 host로 migration된다”고 제품/PR에 쓰지 않는다.
+U5 제품 종료 gate가 닫히기 전에는 “구 host session migration 완료”나 기본 자동 migration을 제품/PR에 쓰지 않는다.
+U1~U4와 현재 U5 component seam은 제품 완료가 아니라 기반 증거다.
 
 ## 12. 필수 적대적 검증
 

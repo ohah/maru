@@ -28,6 +28,31 @@ const screen_assembler = @import("screen_assembler.zig");
 
 const Run = screen_stream.Run;
 
+comptime {
+    // terminal enum을 늘리고 wire codec 범위를 갱신하지 않으면 producer가 새 값을 만들어 current decoder가 거부한다.
+    // 두 계층을 직접 import할 수 있는 projection 경계에서 모든 값의 0-based 연속성과 case 수를 함께 고정한다.
+    for (std.meta.fields(terminal.LinkKind), 0..) |field, i|
+        if (field.value != i) @compileError("LinkKind wire values must be contiguous from zero");
+    for (std.meta.fields(terminal.LinkScope), 0..) |field, i|
+        if (field.value != i) @compileError("LinkScope wire values must be contiguous from zero");
+    if (@intFromEnum(terminal.LinkKind.url) != 0 or @intFromEnum(terminal.LinkKind.file_path) != 1)
+        @compileError("LinkKind wire meanings must not be reordered");
+    if (@intFromEnum(terminal.LinkScope.web) != 0 or
+        @intFromEnum(terminal.LinkScope.extra_schemes) != 1 or
+        @intFromEnum(terminal.LinkScope.absolute_path) != 2 or
+        @intFromEnum(terminal.LinkScope.home_path) != 3 or
+        @intFromEnum(terminal.LinkScope.dot_relative) != 4 or
+        @intFromEnum(terminal.LinkScope.bare_relative) != 5 or
+        @intFromEnum(terminal.LinkScope.osc8) != 6)
+        @compileError("LinkScope wire meanings must not be reordered");
+    if (@intFromEnum(terminal.LinkKind.file_path) != screen_stream.link_kind_max or
+        std.meta.fields(terminal.LinkKind).len != @as(usize, screen_stream.link_kind_max) + 1)
+        @compileError("LinkKind and screen-stream wire range must change together");
+    if (@intFromEnum(terminal.LinkScope.osc8) != screen_stream.link_scope_max or
+        std.meta.fields(terminal.LinkScope).len != @as(usize, screen_stream.link_scope_max) + 1)
+        @compileError("LinkScope and screen-stream wire range must change together");
+}
+
 /// `ScreenMeta.modes` 비트 배치(§9 mode bitmask). core에 단일 u32 mode가 없어 개별 필드를 여기서 조립한다. 값은 wire
 /// 약속이라 고정 — client가 같은 비트로 해석한다(예: app_cursor_keys면 화살표를 SS3로 인코딩).
 pub const ModeBit = screen_stream.ModeBit;

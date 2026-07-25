@@ -696,10 +696,10 @@ pub const RemoteRuntime = struct {
         return self.decodeLinkAtResponse(resp);
     }
 
-    /// `runtime.link_at` 응답 `{"text":"...","kind":N}`을 푼다 — `decodeSelectedTextResponse`와 **같은 strict 디코더**를 쓰고
-    /// 선언 키 집합만 다르다. 예전엔 응답 스키마마다 파서를 골라 썼고, 필드가 정확히 하나인 객체만 받는 파서에 이
-    /// 두-필드 응답을 통과시키려다 정상 응답이 InvalidJson으로 떨어져 연결이 fail-close됐다(밑줄은 뜨는데 Cmd+클릭만
-    /// 안 열리던 버그). `{"error":...}`나 빈 text는 "링크 없음"(null)이다.
+    /// `runtime.link_at` success는 링크가 있으면 `{"text":"...","kind":N}`, 없으면 `{"text":""}`다.
+    /// `decodeSelectedTextResponse`와 **같은 strict 디코더**를 쓰되 이 두 형태만 허용한다. 예전엔 응답 스키마마다 파서를
+    /// 골라 썼고, 필드가 정확히 하나인 객체만 받는 파서에 link success를 통과시키려다 정상 응답이 InvalidJson으로 떨어져
+    /// 연결이 fail-close됐다(밑줄은 뜨는데 Cmd+클릭만 안 열리던 버그). `{"error":...}`나 빈 text는 "링크 없음"(null)이다.
     fn decodeLinkAtResponse(self: *RemoteRuntime, resp: []const u8) client_mod.ClientError!?RemoteLink {
         const obj = decodeStrictObject(self.allocator, resp) catch |err| {
             if (err == error.OutOfMemory) return error.OutOfMemory;
@@ -718,6 +718,15 @@ pub const RemoteRuntime = struct {
             self.client.failClosed();
             return error.ProtocolError;
         };
+        // host의 no-link success는 `{text:""}` 하나뿐이다. 이 분기를 kind보다 먼저 판정해야 기존 same-major host가
+        // 미존재 경로를 정상적으로 "링크 없음"으로 돌려줄 때 schema 위반으로 오인하지 않는다.
+        if (text.len == 0) {
+            if (obj.fields.len != 1) {
+                self.client.failClosed();
+                return error.ProtocolError;
+            }
+            return null;
+        }
         const kind_raw = obj.number("kind") orelse {
             self.client.failClosed();
             return error.ProtocolError;
@@ -726,10 +735,19 @@ pub const RemoteRuntime = struct {
             self.client.failClosed();
             return error.ProtocolError;
         }
-        if (text.len == 0) return null; // 링크가 없거나 미존재 경로 — host가 빈 text로 알린다.
+        const kind: terminal.LinkKind = switch (kind_raw) {
+            0 => .url,
+            1 => .file_path,
+            else => {
+                // 숫자로 파싱됐다는 사실만으로 wire enum이 유효한 것은 아니다. 미래 kind를 URL로 추측하면 새 의미를
+                // 잘못 실행하므로, 같은 major의 정의된 값만 받고 나머지는 connection 전체를 신뢰하지 않는다.
+                self.client.failClosed();
+                return error.ProtocolError;
+            },
+        };
         return .{
             .text = self.allocator.dupe(u8, text) catch return error.OutOfMemory,
-            .kind = if (kind_raw == 1) .file_path else .url,
+            .kind = kind,
         };
     }
 
@@ -870,6 +888,13 @@ pub const RemoteRuntime = struct {
         const params = std.fmt.bufPrint(&buf, "{{\"runtime_id\":\"{s}\"}}", .{self.runtime_id_hex}) catch return error.OutOfMemory;
         const resp = try self.callOrdered("runtime.notification", params);
         defer self.allocator.free(resp);
+        return self.decodeNotificationResponse(resp);
+    }
+
+    /// `runtime.notification`의 success envelope는 항상 문자열 `title`·`body` 두 필드다. 알림이 없어도 host가 둘을 빈
+    /// 문자열로 보내므로 필드 누락을 "없음"으로 추측하지 않는다. 같은 major에서 필드 집합이나 타입이 달라지면 이후 RPC도
+    /// 신뢰할 수 없어 connection을 fail-close한다.
+    fn decodeNotificationResponse(self: *RemoteRuntime, resp: []const u8) client_mod.ClientError!?Notification {
         // std.json.parseFromSlice 대신 **수동 디코드** — parseFromSlice가 숫자 파서(f128 소프트플로트 ___divtf3/___fixtfti
         // 등)를 링크로 끌어와, 이 경로가 live가 되면 ReleaseSafe 제품 빌드(macos-live-preview-perf)가 undefined symbol로
         // 깨진다(code-review 후속). 파싱은 selected_text/link_at과 **같은 strict 디코더**를 쓴다 — 응답 schema 위반을
@@ -887,8 +912,18 @@ pub const RemoteRuntime = struct {
             }
             return null;
         }
-        const title_src = obj.string("title") orelse return null; // 대기 알림 없음(host가 필드를 안 실었다).
-        const body_src = obj.string("body") orelse return null;
+        const title_src = obj.string("title") orelse {
+            self.client.failClosed();
+            return error.ProtocolError;
+        };
+        const body_src = obj.string("body") orelse {
+            self.client.failClosed();
+            return error.ProtocolError;
+        };
+        if (obj.hasUnknownKey(&.{ "title", "body" })) {
+            self.client.failClosed();
+            return error.ProtocolError;
+        }
         if (title_src.len == 0 and body_src.len == 0) return null; // host에 대기 알림 없음(빈 {title,body}).
         const title = self.allocator.dupe(u8, title_src) catch return error.OutOfMemory;
         errdefer self.allocator.free(title);
@@ -2387,10 +2422,10 @@ test "remote runtime: takeNotification pulls a host-side OSC 9/777 desktop notif
 
 // takeNotification의 수동 JSON 문자열 디코더(std.json.parseFromSlice의 f128 링크 회피). host의 std.json.Stringify escape를
 // 되돈다 — 순수 함수라 fork host 없이 escape 처리를 고정한다(제어문자 \u00XX·\" \\ \n \t \uXXXX·키 부재·빈 값·둘째 필드).
-// runtime.link_at 응답은 {text, kind} **두 필드**다. 처음엔 selected_text의 단일-필드 디코더를 재사용했는데,
-// 그건 필드가 정확히 하나인 객체만 받아들여 정상 응답을 InvalidJson으로 보고 연결을 fail-close시켰다 — 밑줄은
-// 뜨는데 Cmd+클릭만 안 열리던 실제 버그다. 두 필드 파싱·escape·빈 text(링크 없음)·error를 여기서 고정한다.
-test "remote runtime: decodeLinkAtResponse는 text와 kind 두 필드를 함께 푼다" {
+// runtime.link_at은 link success의 {text,kind}와 no-link의 {text:""} 두 형태다. 처음엔 selected_text의
+// 단일-필드 디코더를 재사용해 link success를 InvalidJson으로 보고 connection을 fail-close시켰다 — 밑줄은 뜨는데
+// Cmd+클릭만 안 열리던 실제 버그다. 두 success 형태·escape·error와 각 schema 위반을 여기서 고정한다.
+test "remote runtime: decodeLinkAtResponse는 link와 no-link success schema를 구분한다" {
     const allocator = testing.allocator;
     // schema 위반 경로가 connection을 fail-close 하므로 실 client를 붙인다(undefined client면 그 경로에서 크래시).
     var client = client_mod.Client{
@@ -2425,15 +2460,145 @@ test "remote runtime: decodeLinkAtResponse는 text와 kind 두 필드를 함께 
         defer allocator.free(link.text);
         try testing.expectEqualStrings("/tmp/a\"b", link.text);
     }
-    // 빈 text = 링크 없음(미존재 경로 포함) → null, client는 일반 클릭으로 흘린다.
-    try testing.expect((try rt.decodeLinkAtResponse("{\"text\":\"\",\"kind\":0}")) == null);
+    // host의 실제 no-link wire는 kind 없는 text-only다(미존재 경로 포함) → null, client는 일반 클릭으로 흘린다.
+    try testing.expect((try rt.decodeLinkAtResponse("{\"text\":\"\"}")) == null);
     // host error 응답도 링크 없음으로 본다(연결을 죽이지 않는다).
     try testing.expect((try rt.decodeLinkAtResponse("{\"error\":\"invalid_request\"}")) == null);
+    try testing.expect(!client.unusable);
 
-    // 회귀의 근본 계약: 선언 밖 필드가 섞이면 fail-close 한다(스키마 드리프트를 조용히 넘기지 않는다).
-    try testing.expectError(error.ProtocolError, rt.decodeLinkAtResponse("{\"text\":\"x\",\"kind\":0,\"extra\":\"no\"}"));
-    // kind가 빠진 응답도 success schema 위반이다 — 옛 단일-필드 디코더 재사용이 낳은 버그의 반대편 계약.
-    try testing.expectError(error.ProtocolError, rt.decodeLinkAtResponse("{\"text\":\"x\"}"));
+    const invalid = [_][]const u8{
+        "{\"text\":\"x\",\"kind\":0,\"extra\":\"no\"}", // 선언 밖 필드
+        "{\"text\":\"x\"}", // non-empty link의 kind 누락
+        "{\"text\":\"x\",\"kind\":2}", // 닫힌 wire enum 밖
+        "{\"text\":\"\",\"kind\":0}", // no-link success는 text-only
+        "{\"text\":\"\",\"kind\":2}", // 빈 text도 미래 enum을 숨기지 않음
+        "{\"error\":\"future_error\"}", // 모르는 error code
+    };
+    for (invalid) |response| {
+        // 각 schema 위반이 독립적으로 connection을 poison하는지 첫 실패 이전 상태에서 검증한다.
+        var bad_client = client_mod.Client{
+            .allocator = allocator,
+            .fd = -1,
+            .host_id = 1,
+            .runtime_link_at_v1 = true,
+            .parser = framing.FrameParser.init(allocator),
+        };
+        defer bad_client.deinit();
+        var bad_rt: RemoteRuntime = undefined;
+        bad_rt.client = &bad_client;
+        bad_rt.allocator = allocator;
+        try testing.expectError(error.ProtocolError, bad_rt.decodeLinkAtResponse(response));
+        try testing.expect(bad_client.unusable);
+    }
+}
+
+test "remote runtime: notification success schema는 title과 body만 정확히 허용한다" {
+    const allocator = testing.allocator;
+    var client = client_mod.Client{
+        .allocator = allocator,
+        .fd = -1,
+        .host_id = 1,
+        .parser = framing.FrameParser.init(allocator),
+    };
+    defer client.deinit();
+    var rt: RemoteRuntime = undefined;
+    rt.client = &client;
+    rt.allocator = allocator;
+
+    {
+        const notification = (try rt.decodeNotificationResponse(
+            "{\"title\":\"Deploy\",\"body\":\"done in 3s\"}",
+        )).?;
+        defer notification.deinit(allocator);
+        try testing.expectEqualStrings("Deploy", notification.title);
+        try testing.expectEqualStrings("done in 3s", notification.body);
+    }
+    try testing.expect((try rt.decodeNotificationResponse("{\"title\":\"\",\"body\":\"\"}")) == null);
+    try testing.expect((try rt.decodeNotificationResponse("{\"error\":\"invalid_request\"}")) == null);
+    try testing.expect(!client.unusable);
+
+    // host는 알림이 없어도 두 필드를 빈 문자열로 보낸다. 필드 누락이나 선언 밖 필드는 "알림 없음"이 아니라 schema drift다.
+    const invalid = [_][]const u8{
+        "{\"title\":\"Deploy\"}",
+        "{\"body\":\"done\"}",
+        "{\"title\":1,\"body\":\"done\"}",
+        "{\"title\":\"Deploy\",\"body\":1}",
+        "{\"title\":\"Deploy\",\"body\":\"done\",\"extra\":\"no\"}",
+        "{\"title\":\"Deploy\",\"body\":\"done\"",
+        "{\"title\":\"Deploy\",\"body\":\"done\"} trailing",
+        "{\"title\":\"Deploy\",\"title\":\"Again\",\"body\":\"done\"}",
+        "{\"error\":\"future_error\"}",
+        "{\"error\":1}",
+        "{\"error\":\"invalid_request\",\"title\":\"Deploy\",\"body\":\"done\"}",
+    };
+    for (invalid) |response| {
+        var bad_client = client_mod.Client{
+            .allocator = allocator,
+            .fd = -1,
+            .host_id = 1,
+            .parser = framing.FrameParser.init(allocator),
+        };
+        defer bad_client.deinit();
+        var bad_rt: RemoteRuntime = undefined;
+        bad_rt.client = &bad_client;
+        bad_rt.allocator = allocator;
+        try testing.expectError(error.ProtocolError, bad_rt.decodeNotificationResponse(response));
+        try testing.expect(bad_client.unusable);
+    }
+}
+
+test "remote runtime: notification decode는 모든 할당 실패 지점에서 소유 메모리를 회수한다" {
+    const Runner = struct {
+        fn run(allocator: std.mem.Allocator) !void {
+            var client = client_mod.Client{
+                .allocator = allocator,
+                .fd = -1,
+                .host_id = 1,
+                .parser = framing.FrameParser.init(allocator),
+            };
+            defer client.deinit();
+            var rt: RemoteRuntime = undefined;
+            rt.client = &client;
+            rt.allocator = allocator;
+            const notification = (rt.decodeNotificationResponse(
+                "{\"title\":\"Deploy\",\"body\":\"done in 3s\"}",
+            ) catch |err| {
+                // allocator 압박은 peer의 wire 손상이 아니다. 어느 할당 지점이 실패해도 shared connection은 재사용 가능해야 한다.
+                if (err != error.OutOfMemory) return err;
+                try testing.expect(!client.unusable);
+                return err;
+            }).?;
+            notification.deinit(allocator);
+        }
+    };
+    try testing.checkAllAllocationFailures(testing.allocator, Runner.run, .{});
+}
+
+test "remote runtime: link decode OOM은 소유 메모리를 회수하고 connection을 유지한다" {
+    const Runner = struct {
+        fn run(allocator: std.mem.Allocator) !void {
+            var client = client_mod.Client{
+                .allocator = allocator,
+                .fd = -1,
+                .host_id = 1,
+                .runtime_link_at_v1 = true,
+                .parser = framing.FrameParser.init(allocator),
+            };
+            defer client.deinit();
+            var rt: RemoteRuntime = undefined;
+            rt.client = &client;
+            rt.allocator = allocator;
+            const link = (rt.decodeLinkAtResponse(
+                "{\"text\":\"https://example.com/x\",\"kind\":0}",
+            ) catch |err| {
+                if (err != error.OutOfMemory) return err;
+                try testing.expect(!client.unusable);
+                return err;
+            }).?;
+            allocator.free(link.text);
+        }
+    };
+    try testing.checkAllAllocationFailures(testing.allocator, Runner.run, .{});
 }
 
 test "remote runtime: requestResync makes the host push a fresh snapshot (desync 복구)" {

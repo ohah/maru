@@ -26,6 +26,14 @@ pub const header_size = 32;
 /// unknown method로 거부하게 한다. major를 올리면 이미 살아 있는 v2 host/runtime에도 attach할 수 없고 host 교체 CLI가
 /// 아직 없으므로, 화면 wire가 같은 동안은 strict method 이름으로 spawn 의미론만 fail-closed한다.
 pub const version_major: u16 = 2;
+/// runtime.inventory_v1 complete snapshot의 host-side hard cap. page는 더 작지만 total이 이를 넘으면 partial prefix 대신
+/// resource_exhausted로 fail-close한다.
+/// Wire-only 모듈은 platform-import-0을 유지한다. `runtime_manager`의 compile-time boundary gate가 이 값을
+/// `session.workspace.max_runtime_bindings`와 같게 고정해 partial restore cap drift를 막는다.
+pub const max_inventory_runtimes: usize = 4096;
+pub const max_inventory_page_runtimes: usize = 256;
+pub const max_inventory_pages: usize =
+    (max_inventory_runtimes + max_inventory_page_runtimes - 1) / max_inventory_page_runtimes;
 
 /// payload cap(§10). control은 strict UTF-8 JSON, binary는 그대로. 이 상한들은 kind별로 framing이 적용한다.
 /// 한 viewport snapshot(16 MiB)은 여러 `snapshot_chunk`(각 1 MiB)로 나뉘므로 **단일 frame** payload 상한은 binary 1 MiB다.

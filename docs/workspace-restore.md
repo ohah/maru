@@ -138,6 +138,15 @@ surface custom-name="" title="ended" cwd="/repo" command="/bin/zsh" cols=100 row
 - **계획:** live handle인데 host가 runtime 부재를 긍정적으로 확인하면 해당 surface를 ended로 전이시킨다. endpoint를
   찾지 못했거나 protocol 지원 범위 밖인 것만으로는 영구 부재를 단정하지 않는다. host에는 있지만 manifest에 없는 runtime은
   `Recovered Sessions`에 둔다.
+- **P4 R2b 목표:** R2a가 승인한 manifest와 exact host별 bounded/paginated ID-only inventory를 attach/spawn 전에
+  대조하되, inventory는 derived recovery projection일 뿐 canonical restore의 성공 조건이 아니다. ended exact handle과
+  다시 일치한 live runtime은 generic orphan으로 새 탭을 만들지 않고 tombstone 제자리 복구 후보로 둔다.
+  inventory-only orphan은 삭제·자동 attach하지 않고 primary Window의 typed virtual `Recovered Sessions` group에
+  inert row로만 표시하며, 사용자의 개별 adopt가 authority를 fresh revalidate한 뒤에만 exact handle 하나를 publish한다.
+  inventory 실패는 빈 목록으로 간주하지 않고 그 host recovery projection만 unavailable로 두며 quick과 다른 Window에는
+  중복 투영하지 않는다. 상세 pagination/generation·legacy bare·redaction·rollback 계약은
+  [영속 터미널 세션 호스트](persistent-session-host.md)의
+  "R2b inventory reconciliation과 Recovered Sessions 계약"을 단일 출처로 둔다.
 - runtime이 살아 있는 attach는 saved `cwd`/`command`로 새 shell을 spawn하지 않는다. `cwd`/`title`은 초기 표시 fallback이고
   host snapshot/metadata가 도착하면 live 값을 따른다.
 - `runtime-handle`은 secret/capability가 아니다. workspace 파일을 읽은 client도 별도 session-host 인증 없이는 output/input을

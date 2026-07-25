@@ -312,7 +312,8 @@ Window 2
 surface ... runtime-handle="<32 lowercase host-id>:<32 lowercase runtime-id>" runtime-state="ended"
 ```
 
-- `runtime-handle`의 두 ID는 각각 128-bit opaque random 값의 canonical lowercase hex다. 두 부분은 모두 있어야 하는 단일
+- `runtime-handle`의 두 ID는 각각 128-bit opaque random **nonzero** 값의 canonical lowercase hex다. all-zero는
+  unresolved/first-page sentinel과 혼동하지 않도록 영구 reserved이며 generator·registry·workspace parser가 모두 거부한다. 두 부분은 모두 있어야 하는 단일
   quoted scalar라 partial handle을 표현하지 않는다.
 - persistent terminal surface와 종료 placeholder만 `runtime-handle`을 쓴다. `runtime-state="ended"`면 그 handle은
   재attach 대상이 아니라 마지막 runtime의 상관키다. 새 reader는 host를 probe하거나 셸을 자동 spawn하지 않고 묘비를 만든다.
@@ -553,6 +554,77 @@ sequenceDiagram
 8. host에는 있지만 manifest에 bind되지 않은 runtime은 삭제하지 않고 `Recovered Sessions`에 노출한다.
 9. 같은 runtime을 manifest의 두 writable Term 슬롯에 bind하면 잘못된 파일로 거부한다. 한 runtime의 canonical writable placement는 하나다.
 
+#### R2b inventory reconciliation과 Recovered Sessions 계약
+
+R2b는 restore를 하면서 우연히 발견한 runtime을 사후에 자동 attach하는 경로가 아니다. **Binding reconciliation**은
+R2a manifest 검증이 성공한 경우에만 그 binding set을 쓰고, **recovery discovery**는 manifest가 malformed/empty여도
+trusted binding set을 빈 집합으로 두고 독립 수행한다. recovery row 자체는 파일을 바꾸지 않으며 기존 malformed-file
+fallback/checkpoint 정책도 바꾸지 않는다. 두 경로 모두 terminal attach/spawn과 Window 모델 publish **전**에 secure
+host manifest enumeration으로 host 후보를 확정한다. launch primary는 항상 deferred로 만들고 inventory snapshot 뒤에만
+valid manifest를 apply하거나 default surface를 명시적으로 finish해, launch가 만든 runtime을 자기 orphan으로 오인하지
+않는다. keep-alive opt-out이면 discovery/list/row publish를 모두 하지 않는다.
+
+- identity는 `runtime_handle = host_id:runtime_id`다. inventory의 host ID는 hello에서 확정한 adapter identity를
+  사용하며 response가 host namespace를 다시 주장하게 하지 않는다. secure enumeration은 current UID 소유 regular
+  manifest·안전한 mode·exact host ID 파일명/내용·owner lease를 검증하고 bounded 개수만 연다.
+- metadata-heavy legacy `runtime.list`를 recovery에 재사용하지 않는다. additive capability
+  `runtime_inventory_v1`의 method는 `runtime.inventory`다. request는
+  `{"cursor":"<32-lower-hex-or-empty>","limit":256,"membership_generation":<u64-or-0>}`이고 첫 page만
+  cursor=""·generation=0이다. response는
+  `{"result":{"version":1,"membership_generation":N,"upgrade_epoch":U,"authority_generation":A,
+  "lifecycle":"ready","total":T,"cursor":"<echo>",
+  "runtime_ids":["<32-lower-hex>",...],"next_cursor":"<last-id-or-empty>","done":<bool>}}`다.
+  page는 cursor보다 큰 runtime ID를 canonical ascending으로 최대 256개 내며, done=false면 정확히 256개인 page의 마지막
+  ID가 strictly increasing next_cursor여야 한다. client는 다음 request에 첫 N과 그 cursor를 그대로 보낸다.
+  host registry의 register/unregister마다 checked monotonic `membership_generation`이 증가하고 overflow 시 새 runtime
+  admission을 중단한다. 모든 page의 version/generation/total/cursor가 일치하고 done=true의 next_cursor가 비었을 때만
+  complete snapshot이다. 모든 page의 `{upgrade_epoch,authority_generation,lifecycle=ready}`도 첫 page와 정확히
+  같아야 한다. duplicate JSON key도 malformed다.
+  host 하나는 최대 4,096개·16 page, 전체 host 합계는 최대 4,096개·31 page다(16 host에 나뉜 ceiling 포함).
+  cursor cycle/truncation/중복 ID·잘못된 JSON/타입·31/33자·uppercase/nonhex ID는 그 host recovery projection 전체를
+  unavailable로 버리고 partial prefix를 publish하지 않는다. Recovery inventory는 canonical attach를 소유한 pooled
+  adapter가 아니라 별도 ephemeral read-only connection에서 수집한다. 따라서 payload cap/OOM/transport close는 그
+  inventory connection만 폐기하고 canonical exact manifest attach connection은 보존한다. Valid frame의 malformed
+  semantic response는 같은 client에서도 connection을 poison하지 않는다. Host의 snapshot 조립 OOM은 가능한 경우
+  `resource_exhausted` typed response로 같은 connection을 유지하지만, 그 작은 error frame 자체도 할당할 수 없는
+  process-wide allocator 고갈은 transport-fatal이며 ephemeral connection 격리가 canonical attach를 보호한다.
+- plan authority는 `{host_id, adapter_generation, upgrade_epoch, lifecycle=ready, membership_generation,
+  authority_generation, workspace_generation}`이다. `authority_generation`은 ready/restoring/rollback/commit 등
+  host lifecycle transition마다 checked monotonic 증가하고 overflow면 transition을 fail-close한다. HostPool의
+  `adapter_generation`도 add/remove/reconnect마다 증가한다. page 수집·row publish·사용자 action commit마다 전부
+  재검증하고 ready→restoring→ready와 membership A→B→A도 stale로 폐기한다. inventory 실패는 **recovery projection만** 비활성화하며 canonical manifest의 기존 per-handle
+  attach/typed not-found restore를 막지 않는다.
+  `host.info`는 같은 `authority_generation`을 반환하고, explicit adopt 직전 `host.info`와 `runtime.get`을 새 request로
+  왕복해 saved authority tuple과 runtime 존재를 함께 재검증한다.
+- per-binding 상태는 `live_present_candidate | live_missing_candidate | ended_absent |
+  ended_present_conflict | host_unavailable | legacy_unresolved`, inventory-only 상태는 `orphan`으로 분리한다.
+  inventory만으로 live→ended를 저장하지 않고 기존 exact attach/get의 fresh typed `runtime_not_found`나 dead owner
+  lease가 최종 증거다. legacy bare ID는 current spawn host가 exact하게 확인될 때만 그 host와 대조한다.
+- ended exact handle은 R2a canonical placement를 **예약**한다. 같은 live runtime이 inventory에 나타나면 generic
+  orphan이 아니라 `ended_present_conflict` recovery row이며, 사용자 action이 기존 tombstone 슬롯을 제자리 live
+  Term으로 교체한다. tombstone과 새 recovery tab이 동시에 같은 handle을 갖는 순간은 허용하지 않는다.
+- inventory-only `orphan`은 terminate/delete하거나 startup에 attach하지 않는다. primary Window 하나에 app-global
+  derived `Recovered Sessions` virtual group/row로만 보이며 다른 Window와 quick에는 중복 투영하지 않는다. system
+  group identity는 사용자 그룹 이름과 별도 typed 값이고 rename/drag/checkpoint 대상이 아니다. attach 전 label은
+  control 문자 없는 짧은 runtime ID뿐이며 cwd/title/command/env/process/SSH/output/clipboard/notification은 inventory,
+  projection, log에 싣지 않는다.
+- 사용자가 row에서 Enter/click으로 개별 adopt할 때만 plan authority와 exact `runtime.get`을 fresh revalidate하고
+  attach를 stage한다. orphan은 새 비고정 tab 하나를 publish하고, ended conflict는 tombstone을 제자리 교체한다.
+  publish 실패/사라진 runtime/OOM이면 client-side detach만 하고 host runtime terminate·spawn·checkpoint mutation은
+  0이다. 성공 뒤 exact handle이 manifest에 정확히 하나일 때부터 일반 persistent Term close/checkpoint 규칙을 따른다.
+- inventory refresh는 derived row만 교체한다. 사라진 row·dismiss·앱 재실행·cap 초과·malformed manifest는 어떤
+  runtime도 종료하지 않는다. 4,096 inventory는 virtual row DTO일 뿐 4,096 Tab/Term/attach로 materialize하지 않는다.
+- secure enumeration의 host cap은 16이다. symlink/non-regular/wrong-owner/wrong-mode/malformed manifest 하나는 그
+  entry만 unavailable로 남기지만, valid 후보가 17개 이상이면 선택적 prefix를 믿지 않고 recovery discovery 전체를
+  unavailable로 둔다. enumeration은 host를 spawn/delete하거나 stale 파일을 회수하지 않는다.
+- frozen N-1 host에는 `runtime_inventory_v1`을 소급 추가할 수 없으므로 R2b orphan projection은 capability가 있는
+  current host만 지원한다. N-1 exact manifest binding attach는 기존 adapter로 계속 지원하고, N-1 orphan은 same-PID
+  exec upgrade로 current capability가 된 뒤 보인다. legacy `runtime.list`를 generation 없는 recovery snapshot으로
+  추측하지 않는다.
+- primary의 conflict row를 선택해도 adopt target은 기존 tombstone의 실제 Window/slot이다. row는
+  `{runtime_handle,projection_generation}` stable key만 들고 action 직전 all-window binding/Window token을 다시
+  찾아 workspace generation이 달라졌거나 target이 이동·닫힘이면 attach/spawn/terminate 0으로 stale 처리한다.
+
 **현재 구현 범위:** 1–6의 deferred/attach/rollback과 stale host·missing runtime fail-closed는 P3 core에 구현됐다.
 **7의 durable per-Term ended placeholder는 P4 R1에서 구현됐다** — exact handle이 영구 부재로 분류된 runtime만 그 Term을 읽기 전용 placeholder로 두고
 나머지 surface·split·탭·창 frame은 정상 복원한다. placeholder 화면에는 마지막 제목·위치와 `⏎` 안내가 **화면 콘텐츠로**
@@ -560,8 +632,8 @@ sequenceDiagram
 cwd에서 새 셸을 시작한다. 자동 fresh spawn은 없다 — `⏎`가 유일한 승격 경로이고 다른 키·수식자 조합으로는 되살아나지
 않는다. capture는 exact handle/state를 owned 상태에서 다시 쓰며, parse→apply→capture를 두 cycle 반복하는 자동
 fixture가 restoreSpawn/attach/probe/spawn 공통 진입점 0과 dropped 0을 고정한다. 실제 signed app process의 반복
-Quit/relaunch E2E는 별도 제품 gate로 남는다. 8의 `Recovered Sessions`,
-9의 manifest 전역 중복 검증은 R2a core/ABI/source-order fixture까지 구현됐다. 실제 제품 process에서 기존 checkpoint
+Quit/relaunch E2E는 별도 제품 gate로 남는다. 9의 manifest 전역 중복 검증은
+R2a core/ABI/source-order fixture까지 구현됐고, 8의 `Recovered Sessions`는 R2b 미구현이다. 실제 제품 process에서 기존 checkpoint
 file 무변경을 관측하는 E2E는 남아 있다. 일시 실패로 분류된 누락 runtime은 종전처럼 해당 Window apply를
 실패시키며, 추가 Window는 teardown하고 primary는 명시적인 새 default-shell fallback으로 전환한다. 이
 `restore incomplete` 실행은 종료 시 마지막 완전본을 `.bak`으로 한 번 보존한 뒤 현재 모델을 저장한다. capture/serialize/
@@ -1436,8 +1508,10 @@ controlled Claude/Codex foreground fixture를 낸 뒤 GUI observation까지 왕�
   local spawn도 실패하면 tombstone을 그대로 유지한다.
 - **R2a 구현 슬라이스:** manifest 전체의 writable `runtime-handle` 중복을 attach/spawn 전에 검증한다. legacy bare
   ID가 같은 runtime ID를 full/bare owner와 공유하는 경우도 host namespace 미확정 중복으로 fail-close한다.
-- **R2b 후속:** 검증된 binding을 host inventory와
-  `{bound, ended, temporarily_unavailable, orphan}`을 side effect 전에 reconcile한다.
+- **R2b 후속:** 위 §7 계약대로 paginated ID-only `runtime.inventory`와 authority generation을 검증하고,
+  manifest relation과 inventory-only orphan을 분리해 side effect 없이 reconcile한다. primary Window에는 typed
+  virtual `Recovered Sessions` projection만 publish하고, 사용자의 explicit one-item adopt가 fresh authority
+  revalidation 뒤 orphan 새 tab 또는 ended tombstone 제자리 교체를 수행한다.
 - GUI abnormal exit 직전 layout을 위해 `WorkspaceCheckpointCoordinator`를 구현한다. 결과는
   `committed(generation)|stale|capture_failed|write_failed`이며 background 실패는 dirty를 유지하고 bounded
   backoff/notice coalescing을 한다. 마지막 Quit은 AppKit `terminateLater`에서 mutation을 freeze하거나 captured

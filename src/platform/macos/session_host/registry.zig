@@ -69,10 +69,13 @@ pub const ResizeOutcome = union(enum) {
 pub const RegistryError = error{
     RuntimeNotFound,
     DuplicateRuntime,
+    InvalidRuntimeId,
     /// 같은 stream이 이미 이 runtime에 attach돼 있다(중복 subscription).
     AlreadyAttached,
     /// resize/input을 controller 아닌 stream이 요청했다.
     NotController,
+    /// membership generation을 더 올릴 수 없어 새 complete inventory authority를 만들 수 없다.
+    MembershipGenerationExhausted,
     OutOfMemory,
 };
 
@@ -129,6 +132,9 @@ pub const RuntimeEntry = struct {
 pub const TerminalRuntimeRegistry = struct {
     allocator: std.mem.Allocator,
     entries: std.AutoHashMapUnmanaged(RuntimeId, *RuntimeEntry) = .empty,
+    /// 0은 wire의 "첫 page에서 generation 미지정" sentinel이라 실제 complete snapshot은 1부터 시작한다.
+    membership_generation: u64 = 1,
+    membership_generation_exhausted: bool = false,
 
     pub fn init(allocator: std.mem.Allocator) TerminalRuntimeRegistry {
         return .{ .allocator = allocator };
@@ -172,6 +178,9 @@ pub const TerminalRuntimeRegistry = struct {
         resize_generation: u64,
         runtime: ?*anyopaque,
     ) RegistryError!*RuntimeEntry {
+        if (id == 0) return error.InvalidRuntimeId;
+        if (self.membership_generation_exhausted or self.membership_generation == std.math.maxInt(u64))
+            return error.MembershipGenerationExhausted;
         if (self.entries.contains(id)) return error.DuplicateRuntime;
         const entry = self.allocator.create(RuntimeEntry) catch return error.OutOfMemory;
         errdefer self.allocator.destroy(entry);
@@ -183,6 +192,7 @@ pub const TerminalRuntimeRegistry = struct {
             .runtime = runtime,
         };
         self.entries.put(self.allocator, id, entry) catch return error.OutOfMemory;
+        self.membership_generation += 1;
         return entry;
     }
 
@@ -191,7 +201,26 @@ pub const TerminalRuntimeRegistry = struct {
         if (self.entries.fetchRemove(id)) |kv| {
             kv.value.observers.deinit(self.allocator);
             self.allocator.destroy(kv.value);
+            if (self.membership_generation == std.math.maxInt(u64)) {
+                // Runtime teardown은 되돌릴 수 없으므로 계속하되 이후 inventory authority 발행을 영구 fail-close한다.
+                self.membership_generation_exhausted = true;
+            } else {
+                self.membership_generation += 1;
+            }
         }
+    }
+
+    pub fn membershipGeneration(self: *const TerminalRuntimeRegistry) RegistryError!u64 {
+        if (self.membership_generation_exhausted) return error.MembershipGenerationExhausted;
+        return self.membership_generation;
+    }
+
+    /// same-PID exec handoff가 source의 logical membership authority를 exact 복원한다. decoded runtime을 registerRestored로
+    /// 조립하는 동안 생긴 임시 증가값은 새 logical membership 변화가 아니므로 complete graph publish 직전에 덮는다.
+    pub fn restoreMembershipGeneration(self: *TerminalRuntimeRegistry, generation: u64) RegistryError!void {
+        if (generation == 0 or self.membership_generation_exhausted)
+            return error.MembershipGenerationExhausted;
+        self.membership_generation = generation;
     }
 
     pub fn get(self: *TerminalRuntimeRegistry, id: RuntimeId) ?*RuntimeEntry {
@@ -335,6 +364,34 @@ test "registry: register/get/duplicate and count" {
     const e = try reg.register(0xCCDD, 0, 0);
     try testing.expectEqual(min_cols, e.cols);
     try testing.expectEqual(min_rows, e.rows);
+}
+
+test "registry: membership generation changes only after a published membership mutation" {
+    var registry = TerminalRuntimeRegistry.init(testing.allocator);
+    defer registry.deinit();
+    try testing.expectEqual(@as(u64, 1), try registry.membershipGeneration());
+    try testing.expectError(error.InvalidRuntimeId, registry.register(0, 80, 24));
+    _ = try registry.register(1, 80, 24);
+    try testing.expectEqual(@as(u64, 2), try registry.membershipGeneration());
+    try testing.expectError(error.DuplicateRuntime, registry.register(1, 80, 24));
+    try testing.expectEqual(@as(u64, 2), try registry.membershipGeneration());
+    registry.unregister(2);
+    try testing.expectEqual(@as(u64, 2), try registry.membershipGeneration());
+    registry.unregister(1);
+    try testing.expectEqual(@as(u64, 3), try registry.membershipGeneration());
+}
+
+test "registry: membership generation exhaustion blocks publish but never blocks teardown" {
+    var registry = TerminalRuntimeRegistry.init(testing.allocator);
+    defer registry.deinit();
+    registry.membership_generation = std.math.maxInt(u64) - 1;
+    _ = try registry.register(1, 80, 24);
+    try testing.expectEqual(std.math.maxInt(u64), try registry.membershipGeneration());
+    try testing.expectError(error.MembershipGenerationExhausted, registry.register(2, 80, 24));
+    registry.unregister(1);
+    try testing.expectEqual(@as(usize, 0), registry.count());
+    try testing.expectError(error.MembershipGenerationExhausted, registry.membershipGeneration());
+    try testing.expectError(error.MembershipGenerationExhausted, registry.register(3, 80, 24));
 }
 
 test "registry: first controller gets input+resize, extra controller is demoted to observer" {

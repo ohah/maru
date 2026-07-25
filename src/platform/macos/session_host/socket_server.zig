@@ -208,6 +208,7 @@ pub const SocketServer = struct {
         conn.runtime_ops = self.runtime_ops; // host면 spawn/terminate/input/resize/delta 위임, read-only면 null(unauthorized).
         conn.upgrade_ops = self.upgrade_ops;
         conn.host_status = self.host_status;
+        conn.live_host_status = &self.host_status;
 
         var buf: [4096]u8 = undefined;
         while (true) {

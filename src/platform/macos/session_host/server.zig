@@ -28,6 +28,8 @@ pub const HostStatus = struct {
     protocol_major: u16 = protocol.version_major,
     screen_codec_version: u16 = screen_stream.codec_version,
     upgrade_epoch: u64 = 0,
+    /// lifecycle ready/restoring/rollback/commit 전이마다 증가하는 daemon-local ABA token.
+    authority_generation: u64 = 1,
     lifecycle: host_identity.Lifecycle = .ready,
 };
 
@@ -226,6 +228,8 @@ pub const Connection = struct {
     host_id: u128,
     registry: *reg.TerminalRuntimeRegistry,
     host_status: HostStatus = .{},
+    /// 실 socket server에서는 accept 뒤 lifecycle이 바뀌어도 fresh host.info/inventory가 최신 authority를 읽는다.
+    live_host_status: ?*const HostStatus = null,
     /// 실 runtime 소유 위임(host만 설정). null이면 read-only host라 spawn/terminate/input/resize가 unauthorized다.
     runtime_ops: ?RuntimeOps = null,
     /// `prepare`는 pending attempt 게시까지만 하고 즉시 반환해야 한다. Quiesce/exec는 reply-and-close와 gate lease
@@ -237,6 +241,9 @@ pub const Connection = struct {
     /// MRSH v2에 후속 비동기 event를 무조건 밀면 같은 major의 구 client가 protocol error로 종료한다. hello에서
     /// 명시적으로 협상한 client에게만 runtime metadata attach/event/RPC를 노출한다.
     runtime_metadata_v1: bool = false,
+    /// Deterministic fault injection: real builds leave false; tests force the snapshot-build failure boundary without
+    /// also starving the tiny typed error response allocation.
+    inventory_fail_snapshot_once: bool = false,
     /// 이 connection이 연 stream 구독 표(§9 attach subscription). key=`stream_id`, value=`Subscription`(runtime_id +
     /// 마지막 full snapshot base). input_bytes/resize/detach가 stream_id로 runtime을 찾고, delta push는 base 대비 diff한다.
     /// connection 종료 시 모두 detach하고 base를 해제한다. host가 stream_id를 발급한다(현재 per-connection 단조 — serial serve
@@ -383,6 +390,8 @@ pub const Connection = struct {
             const body = try self.runtimeListJson();
             defer self.allocator.free(body);
             return self.replyResult(frame.header.request_id, body);
+        } else if (std.mem.eql(u8, method, "runtime.inventory")) {
+            return self.dispatchRuntimeInventory(frame.header.request_id, frame.payload);
         } else if (std.mem.eql(u8, method, "runtime.get")) {
             const id_hex = if (params) |p| strField(p, "runtime_id") else null;
             const id = if (id_hex) |h| parseHex128(h) else null;
@@ -425,6 +434,93 @@ pub const Connection = struct {
             return self.dispatchNotification(frame.header.request_id, params);
         }
         return self.replyError(frame.header.request_id, .invalid_request);
+    }
+
+    fn dispatchRuntimeInventory(
+        self: *Connection,
+        request_id: u64,
+        request_payload: []const u8,
+    ) HandleError!Action {
+        if (!self.currentHostStatus().manifest_capable)
+            return self.replyError(request_id, .unauthorized);
+        const InventoryRequest = struct {
+            method: []const u8,
+            params: struct {
+                cursor: []const u8,
+                limit: u16,
+                membership_generation: u64,
+            },
+        };
+        var request = std.json.parseFromSlice(InventoryRequest, self.allocator, request_payload, .{}) catch
+            return self.replyError(request_id, .invalid_request);
+        defer request.deinit();
+        if (!std.mem.eql(u8, request.value.method, "runtime.inventory"))
+            return self.replyError(request_id, .invalid_request);
+        const cursor_text = request.value.params.cursor;
+        const limit = request.value.params.limit;
+        const requested_generation = request.value.params.membership_generation;
+        if (limit != protocol.max_inventory_page_runtimes)
+            return self.replyError(request_id, .invalid_request);
+        if ((cursor_text.len == 0) != (requested_generation == 0))
+            return self.replyError(request_id, .invalid_request);
+        const cursor: ?u128 = if (cursor_text.len == 0) null else (parseExactHex128(cursor_text) orelse return self.replyError(request_id, .invalid_request));
+        const generation = self.registry.membershipGeneration() catch
+            return self.replyError(request_id, .resource_exhausted);
+        if (requested_generation != 0 and requested_generation != generation)
+            return self.replyError(request_id, .invalid_generation);
+        if (self.registry.count() > protocol.max_inventory_runtimes)
+            return self.replyError(request_id, .resource_exhausted);
+        if (self.inventory_fail_snapshot_once) {
+            self.inventory_fail_snapshot_once = false;
+            return self.replyError(request_id, .resource_exhausted);
+        }
+
+        var ids = self.allocator.alloc(u128, self.registry.count()) catch
+            return self.replyError(request_id, .resource_exhausted);
+        defer self.allocator.free(ids);
+        var id_len: usize = 0;
+        var it = self.registry.entries.keyIterator();
+        while (it.next()) |id| {
+            ids[id_len] = id.*;
+            id_len += 1;
+        }
+        std.mem.sort(u128, ids, {}, comptime std.sort.asc(u128));
+        var first: usize = 0;
+        if (cursor) |after| {
+            while (first < ids.len and ids[first] <= after) first += 1;
+        }
+        const page_len = @min(@as(usize, @intCast(limit)), ids.len - first);
+
+        var arena = std.heap.ArenaAllocator.init(self.allocator);
+        defer arena.deinit();
+        const a = arena.allocator();
+        var wire_ids = a.alloc([]const u8, page_len) catch
+            return self.replyError(request_id, .resource_exhausted);
+        for (ids[first .. first + page_len], 0..) |id, i| {
+            wire_ids[i] = std.fmt.allocPrint(a, "{x:0>32}", .{id}) catch
+                return self.replyError(request_id, .resource_exhausted);
+        }
+        const done = first + page_len == ids.len;
+        const next_cursor = if (!done and page_len != 0)
+            wire_ids[page_len - 1]
+        else
+            "";
+        const status = self.currentHostStatus();
+        if (status.lifecycle != .ready) return self.replyError(request_id, .host_shutting_down);
+        const body = self.stringify(.{ .result = .{
+            .version = @as(u8, 1),
+            .membership_generation = generation,
+            .upgrade_epoch = status.upgrade_epoch,
+            .authority_generation = status.authority_generation,
+            .lifecycle = "ready",
+            .total = ids.len,
+            .cursor = cursor_text,
+            .runtime_ids = wire_ids,
+            .next_cursor = next_cursor,
+            .done = done,
+        } }) catch return self.replyError(request_id, .resource_exhausted);
+        defer self.allocator.free(body);
+        return self.replyResult(request_id, body);
     }
 
     fn dispatchUpgradePrepare(
@@ -1170,7 +1266,8 @@ pub const Connection = struct {
                 .screen_codec_version = self.host_status.screen_codec_version,
                 .upgrade_epoch = self.host_status.upgrade_epoch,
                 .lifecycle = @tagName(self.host_status.lifecycle),
-                .capabilities = [_][]const u8{ "host.info", "runtime.list", "runtime.get", "host_manifest_v1", "host_exec_upgrade_v1", "runtime_metadata_v1", "screen_stream_v2_current_body", "screen_viewport_scrolled_v1", "async_scroll_to_bottom_v1", "runtime_core_command_v1", "runtime_selected_text_v1", "runtime_link_at_v1", "runtime_clipboard_v1" },
+                .authority_generation = self.host_status.authority_generation,
+                .capabilities = [_][]const u8{ "host.info", "runtime.list", "runtime.get", "runtime_inventory_v1", "host_manifest_v1", "host_exec_upgrade_v1", "runtime_metadata_v1", "screen_stream_v2_current_body", "screen_viewport_scrolled_v1", "async_scroll_to_bottom_v1", "runtime_core_command_v1", "runtime_selected_text_v1", "runtime_link_at_v1", "runtime_clipboard_v1" },
             });
         }
         return self.stringify(.{
@@ -1181,22 +1278,29 @@ pub const Connection = struct {
             .screen_codec_version = self.host_status.screen_codec_version,
             .upgrade_epoch = self.host_status.upgrade_epoch,
             .lifecycle = @tagName(self.host_status.lifecycle),
-            .capabilities = [_][]const u8{ "host.info", "runtime.list", "runtime.get", "host_manifest_v1", "runtime_metadata_v1", "screen_stream_v2_current_body", "screen_viewport_scrolled_v1", "async_scroll_to_bottom_v1", "runtime_core_command_v1", "runtime_selected_text_v1", "runtime_link_at_v1", "runtime_clipboard_v1" },
+            .authority_generation = self.host_status.authority_generation,
+            .capabilities = [_][]const u8{ "host.info", "runtime.list", "runtime.get", "runtime_inventory_v1", "host_manifest_v1", "runtime_metadata_v1", "screen_stream_v2_current_body", "screen_viewport_scrolled_v1", "async_scroll_to_bottom_v1", "runtime_core_command_v1", "runtime_selected_text_v1", "runtime_link_at_v1", "runtime_clipboard_v1" },
         });
     }
 
     fn hostInfoJson(self: *Connection) HandleError![]u8 {
+        const status = self.currentHostStatus();
         const host_hex = try self.hostHex();
         defer self.allocator.free(host_hex);
         return self.stringify(.{ .result = .{
             .host_id = host_hex,
-            .build_id = self.host_status.build_id,
-            .protocol_major = self.host_status.protocol_major,
-            .screen_codec_version = self.host_status.screen_codec_version,
-            .upgrade_epoch = self.host_status.upgrade_epoch,
-            .lifecycle = @tagName(self.host_status.lifecycle),
+            .build_id = status.build_id,
+            .protocol_major = status.protocol_major,
+            .screen_codec_version = status.screen_codec_version,
+            .upgrade_epoch = status.upgrade_epoch,
+            .authority_generation = status.authority_generation,
+            .lifecycle = @tagName(status.lifecycle),
             .runtime_count = self.registry.count(),
         } });
+    }
+
+    fn currentHostStatus(self: *const Connection) HostStatus {
+        return if (self.live_host_status) |status| status.* else self.host_status;
     }
 
     fn runtimeMetaJson(self: *Connection, entry: *reg.RuntimeEntry) HandleError![]u8 {
@@ -1454,6 +1558,16 @@ fn parseHex128(s: []const u8) ?u128 {
     return v;
 }
 
+fn parseExactHex128(s: []const u8) ?u128 {
+    if (s.len != 32) return null;
+    for (s) |c| switch (c) {
+        '0'...'9', 'a'...'f' => {},
+        else => return null,
+    };
+    const value = parseHex128(s);
+    return if (value == 0) null else value;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // 단위 테스트
 //
@@ -1706,6 +1820,181 @@ test "server: host.info and runtime.list/get dispatch registry state after hello
         defer if (r.frame) |f| f.deinit(testing.allocator);
         try testing.expect(std.mem.indexOf(u8, r.frame.?.payload, "runtime_not_found") != null);
     }
+}
+
+test "server: runtime.inventory pages canonical IDs under one exact authority" {
+    var registry = reg.TerminalRuntimeRegistry.init(testing.allocator);
+    defer registry.deinit();
+    var runtime_id: u128 = 1;
+    while (runtime_id <= 257) : (runtime_id += 1)
+        _ = try registry.register(runtime_id, 80, 24);
+    var status: HostStatus = .{
+        .manifest_capable = true,
+        .upgrade_epoch = 7,
+        .authority_generation = 9,
+        .lifecycle = .ready,
+    };
+    var conn = Connection.init(testing.allocator, 0xF00D, &registry);
+    conn.state = .ready;
+    conn.live_host_status = &status;
+
+    const first = try feedJson(
+        &conn,
+        .request,
+        1,
+        "{\"method\":\"runtime.inventory\",\"params\":{\"cursor\":\"\",\"limit\":256,\"membership_generation\":0}}",
+    );
+    defer if (first.frame) |frame| frame.deinit(testing.allocator);
+    try testing.expect(std.mem.indexOf(u8, first.frame.?.payload, "\"membership_generation\":258") != null);
+    try testing.expect(std.mem.indexOf(u8, first.frame.?.payload, "\"upgrade_epoch\":7") != null);
+    try testing.expect(std.mem.indexOf(u8, first.frame.?.payload, "\"authority_generation\":9") != null);
+    try testing.expect(std.mem.indexOf(u8, first.frame.?.payload, "\"total\":257") != null);
+    try testing.expect(std.mem.indexOf(u8, first.frame.?.payload, "\"runtime_ids\":[\"00000000000000000000000000000001\",\"00000000000000000000000000000002\"") != null);
+    try testing.expect(std.mem.indexOf(u8, first.frame.?.payload, "\"next_cursor\":\"00000000000000000000000000000100\"") != null);
+    try testing.expect(std.mem.indexOf(u8, first.frame.?.payload, "\"done\":false") != null);
+
+    const second = try feedJson(
+        &conn,
+        .request,
+        2,
+        "{\"method\":\"runtime.inventory\",\"params\":{\"cursor\":\"00000000000000000000000000000100\",\"limit\":256,\"membership_generation\":258}}",
+    );
+    defer if (second.frame) |frame| frame.deinit(testing.allocator);
+    try testing.expect(std.mem.indexOf(u8, second.frame.?.payload, "\"cursor\":\"00000000000000000000000000000100\"") != null);
+    try testing.expect(std.mem.indexOf(u8, second.frame.?.payload, "\"runtime_ids\":[\"00000000000000000000000000000101\"]") != null);
+    try testing.expect(std.mem.indexOf(u8, second.frame.?.payload, "\"next_cursor\":\"\"") != null);
+    try testing.expect(std.mem.indexOf(u8, second.frame.?.payload, "\"done\":true") != null);
+
+    status.authority_generation = 10;
+    status.lifecycle = .restoring;
+    const stopped = try feedJson(
+        &conn,
+        .request,
+        3,
+        "{\"method\":\"runtime.inventory\",\"params\":{\"cursor\":\"\",\"limit\":256,\"membership_generation\":0}}",
+    );
+    defer if (stopped.frame) |frame| frame.deinit(testing.allocator);
+    try testing.expect(std.mem.indexOf(u8, stopped.frame.?.payload, "host_shutting_down") != null);
+}
+
+test "server: runtime.inventory rejects malformed requests and stale membership" {
+    var registry = reg.TerminalRuntimeRegistry.init(testing.allocator);
+    defer registry.deinit();
+    _ = try registry.register(1, 80, 24);
+    var conn = Connection.init(testing.allocator, 1, &registry);
+    conn.state = .ready;
+    conn.host_status = .{ .manifest_capable = true };
+    const invalid = [_][]const u8{
+        "{\"method\":\"runtime.inventory\",\"params\":{\"cursor\":\"\",\"limit\":0,\"membership_generation\":0}}",
+        "{\"method\":\"runtime.inventory\",\"params\":{\"cursor\":\"\",\"limit\":257,\"membership_generation\":0}}",
+        "{\"method\":\"runtime.inventory\",\"params\":{\"cursor\":\"\",\"limit\":256,\"membership_generation\":2}}",
+        "{\"method\":\"runtime.inventory\",\"params\":{\"cursor\":\"00000000000000000000000000000001\",\"limit\":256,\"membership_generation\":0}}",
+        "{\"method\":\"runtime.inventory\",\"params\":{\"cursor\":\"0000000000000000000000000000000\",\"limit\":256,\"membership_generation\":2}}",
+        "{\"method\":\"runtime.inventory\",\"params\":{\"cursor\":\"000000000000000000000000000000001\",\"limit\":256,\"membership_generation\":2}}",
+        "{\"method\":\"runtime.inventory\",\"params\":{\"cursor\":\"0000000000000000000000000000000A\",\"limit\":256,\"membership_generation\":2}}",
+        "{\"method\":\"runtime.inventory\",\"params\":{\"cursor\":\"0000000000000000000000000000000g\",\"limit\":256,\"membership_generation\":2}}",
+        "{\"method\":\"runtime.inventory\",\"method\":\"runtime.inventory\",\"params\":{\"cursor\":\"\",\"limit\":256,\"membership_generation\":0}}",
+        "{\"method\":\"runtime.inventory\",\"params\":{\"cursor\":\"\",\"cursor\":\"\",\"limit\":256,\"membership_generation\":0}}",
+        "{\"method\":\"runtime.inventory\",\"params\":{\"cursor\":\"\",\"limit\":256,\"membership_generation\":0,\"extra\":1}}",
+    };
+    for (invalid, 0..) |request, index| {
+        const result = try feedJson(&conn, .request, @intCast(index + 1), request);
+        defer if (result.frame) |frame| frame.deinit(testing.allocator);
+        try testing.expect(std.mem.indexOf(u8, result.frame.?.payload, "invalid_request") != null);
+    }
+
+    const stale = try feedJson(
+        &conn,
+        .request,
+        20,
+        "{\"method\":\"runtime.inventory\",\"params\":{\"cursor\":\"00000000000000000000000000000001\",\"limit\":256,\"membership_generation\":1}}",
+    );
+    defer if (stale.frame) |frame| frame.deinit(testing.allocator);
+    try testing.expect(std.mem.indexOf(u8, stale.frame.?.payload, "invalid_generation") != null);
+
+    registry.membership_generation_exhausted = true;
+    const exhausted = try feedJson(
+        &conn,
+        .request,
+        21,
+        "{\"method\":\"runtime.inventory\",\"params\":{\"cursor\":\"\",\"limit\":256,\"membership_generation\":0}}",
+    );
+    defer if (exhausted.frame) |frame| frame.deinit(testing.allocator);
+    try testing.expect(std.mem.indexOf(u8, exhausted.frame.?.payload, "resource_exhausted") != null);
+}
+
+test "server: runtime.inventory is neither advertised nor callable on a legacy host" {
+    var registry = reg.TerminalRuntimeRegistry.init(testing.allocator);
+    defer registry.deinit();
+    var conn = Connection.init(testing.allocator, 1, &registry);
+    const hello = try feedJson(&conn, .hello, 1, "{\"protocol_min\":2,\"protocol_max\":2}");
+    defer if (hello.frame) |frame| frame.deinit(testing.allocator);
+    try testing.expect(std.mem.indexOf(u8, hello.frame.?.payload, "runtime_inventory_v1") == null);
+    const result = try feedJson(
+        &conn,
+        .request,
+        2,
+        "{\"method\":\"runtime.inventory\",\"params\":{\"cursor\":\"\",\"limit\":256,\"membership_generation\":0}}",
+    );
+    defer if (result.frame) |frame| frame.deinit(testing.allocator);
+    try testing.expect(std.mem.indexOf(u8, result.frame.?.payload, "unauthorized") != null);
+}
+
+test "server: runtime.inventory accepts the workspace cap and rejects cap plus one without a prefix" {
+    var registry = reg.TerminalRuntimeRegistry.init(testing.allocator);
+    defer registry.deinit();
+    var id: u128 = 1;
+    while (id <= protocol.max_inventory_runtimes) : (id += 1)
+        _ = try registry.register(id, 80, 24);
+    var conn = Connection.init(testing.allocator, 1, &registry);
+    conn.state = .ready;
+    conn.host_status = .{ .manifest_capable = true };
+    const exact = try feedJson(
+        &conn,
+        .request,
+        1,
+        "{\"method\":\"runtime.inventory\",\"params\":{\"cursor\":\"\",\"limit\":256,\"membership_generation\":0}}",
+    );
+    defer if (exact.frame) |frame| frame.deinit(testing.allocator);
+    try testing.expect(std.mem.indexOf(u8, exact.frame.?.payload, "\"total\":4096") != null);
+    try testing.expect(std.mem.indexOf(u8, exact.frame.?.payload, "\"done\":false") != null);
+
+    _ = try registry.register(id, 80, 24);
+    const oversized = try feedJson(
+        &conn,
+        .request,
+        2,
+        "{\"method\":\"runtime.inventory\",\"params\":{\"cursor\":\"\",\"limit\":256,\"membership_generation\":0}}",
+    );
+    defer if (oversized.frame) |frame| frame.deinit(testing.allocator);
+    try testing.expect(std.mem.indexOf(u8, oversized.frame.?.payload, "resource_exhausted") != null);
+    try testing.expect(std.mem.indexOf(u8, oversized.frame.?.payload, "runtime_ids") == null);
+}
+
+test "server: inventory snapshot allocation failure is typed and preserves canonical RPC" {
+    var registry = reg.TerminalRuntimeRegistry.init(testing.allocator);
+    defer registry.deinit();
+    _ = try registry.register(1, 80, 24);
+    var conn = Connection.init(testing.allocator, 1, &registry);
+    conn.state = .ready;
+    conn.host_status = .{ .manifest_capable = true };
+    conn.inventory_fail_snapshot_once = true;
+    const inventory = try feedJson(
+        &conn,
+        .request,
+        1,
+        "{\"method\":\"runtime.inventory\",\"params\":{\"cursor\":\"\",\"limit\":256,\"membership_generation\":0}}",
+    );
+    defer if (inventory.frame) |frame| frame.deinit(testing.allocator);
+    try testing.expect(std.mem.indexOf(u8, inventory.frame.?.payload, "resource_exhausted") != null);
+    const get = try feedJson(
+        &conn,
+        .request,
+        2,
+        "{\"method\":\"runtime.get\",\"params\":{\"runtime_id\":\"01\"}}",
+    );
+    defer if (get.frame) |frame| frame.deinit(testing.allocator);
+    try testing.expect(std.mem.indexOf(u8, get.frame.?.payload, "\"runtime_id\"") != null);
 }
 
 test "server: oversize result replies payload_too_large instead of dropping the connection" {

@@ -826,6 +826,8 @@ pub const RuntimeView = struct {
 pub const HostView = struct {
     host_id: u128,
     upgrade_epoch: u64,
+    authority_generation: u64 = 1,
+    membership_generation: u64 = 1,
     next_handle: u64,
     runtimes: []const RuntimeView,
     /// Daemon attempt registry의 versioned opaque record. Outer optional section이라 frozen old reader는 안전하게
@@ -856,6 +858,8 @@ pub const HostState = struct {
     allocator: std.mem.Allocator,
     host_id: u128,
     upgrade_epoch: u64,
+    authority_generation: u64 = 1,
+    membership_generation: u64 = 1,
     next_handle: u64,
     runtimes: []RuntimeState,
     attempt_record: ?[]u8,
@@ -874,6 +878,12 @@ fn encodeTaggedValue(writer: *Writer, tag: u32, comptime T: type, value: *const 
     try writer.endTlv(start);
 }
 
+fn encodeOptionalTaggedValue(writer: *Writer, tag: u32, comptime T: type, value: *const T) Error!void {
+    const start = try writer.beginTlv(tag, flag_optional);
+    try encodeValue(writer, T, value);
+    try writer.endTlv(start);
+}
+
 fn encodeTaggedBytes(writer: *Writer, tag: u32, bytes: []const u8) Error!void {
     const start = try writer.beginTlv(tag, 0);
     try writer.append(bytes);
@@ -882,6 +892,9 @@ fn encodeTaggedBytes(writer: *Writer, tag: u32, bytes: []const u8) Error!void {
 
 /// Host 전체 logical DTO. Runtime section은 반복 가능하지만 각 runtime 내부 field tag는 exactly-once다.
 pub fn encodeHost(allocator: std.mem.Allocator, host: HostView) Error![]u8 {
+    if (host.host_id == 0 or host.authority_generation == 0 or host.membership_generation == 0)
+        return error.InvalidValue;
+    for (host.runtimes) |runtime| if (runtime.runtime_id == 0) return error.InvalidValue;
     if (host.runtimes.len > max_runtime_count or
         host.next_handle == 0 or
         host.next_handle == std.math.maxInt(u64))
@@ -904,6 +917,8 @@ pub fn encodeHost(allocator: std.mem.Allocator, host: HostView) Error![]u8 {
     try encodeTaggedValue(&writer, 3, u64, &host.next_handle);
     const runtime_count: u16 = @intCast(host.runtimes.len);
     try encodeTaggedValue(&writer, 4, u16, &runtime_count);
+    try encodeOptionalTaggedValue(&writer, 5, u64, &host.membership_generation);
+    try encodeOptionalTaggedValue(&writer, 6, u64, &host.authority_generation);
     try writer.endTlv(host_start);
 
     if (host.attempt_record) |record| {
@@ -942,8 +957,8 @@ fn readTagged(comptime T: type, field: *Reader, allocator: std.mem.Allocator) Er
     return result;
 }
 
-fn decodeHostMeta(section: *Reader, host_id: *u128, epoch: *u64, next_handle: *u64, runtime_count: *u16) Error!void {
-    var seen: [4]bool = .{false} ** 4;
+fn decodeHostMeta(section: *Reader, host_id: *u128, epoch: *u64, authority_generation: *u64, membership_generation: *u64, next_handle: *u64, runtime_count: *u16) Error!void {
+    var seen: [6]bool = .{false} ** 6;
     while (section.pos < section.bytes.len) {
         const tag = try section.integer(u32);
         const flags = try section.integer(u16);
@@ -951,7 +966,7 @@ fn decodeHostMeta(section: *Reader, host_id: *u128, epoch: *u64, next_handle: *u
         const raw_len = try section.integer(u64);
         if (raw_len > max_single_blob_bytes) return error.LimitExceeded;
         var field = try section.sub(std.math.cast(usize, raw_len) orelse return error.LimitExceeded);
-        if (tag < 1 or tag > 4) {
+        if (tag < 1 or tag > 6) {
             if (flags & flag_optional == 0) return error.UnknownRequiredField;
             continue;
         }
@@ -963,10 +978,12 @@ fn decodeHostMeta(section: *Reader, host_id: *u128, epoch: *u64, next_handle: *u
             2 => epoch.* = try readTagged(u64, &field, std.heap.page_allocator),
             3 => next_handle.* = try readTagged(u64, &field, std.heap.page_allocator),
             4 => runtime_count.* = try readTagged(u16, &field, std.heap.page_allocator),
+            5 => membership_generation.* = try readTagged(u64, &field, std.heap.page_allocator),
+            6 => authority_generation.* = try readTagged(u64, &field, std.heap.page_allocator),
             else => unreachable,
         }
     }
-    for (seen) |present| if (!present) return error.MissingRequiredField;
+    for (seen[0..4]) |present| if (!present) return error.MissingRequiredField;
 }
 
 fn decodeRuntime(allocator: std.mem.Allocator, section: *Reader) Error!RuntimeState {
@@ -1024,6 +1041,8 @@ pub fn decodeHost(allocator: std.mem.Allocator, bytes: []const u8) Error!HostSta
     }
     var host_id: u128 = 0;
     var epoch: u64 = 0;
+    var authority_generation: u64 = 1;
+    var membership_generation: u64 = 1;
     var next_handle: u64 = 0;
     var declared_count: u16 = 0;
     var saw_meta = false;
@@ -1041,7 +1060,7 @@ pub fn decodeHost(allocator: std.mem.Allocator, bytes: []const u8) Error!HostSta
             section_host_meta => {
                 if (saw_meta) return error.DuplicateField;
                 saw_meta = true;
-                try decodeHostMeta(&section, &host_id, &epoch, &next_handle, &declared_count);
+                try decodeHostMeta(&section, &host_id, &epoch, &authority_generation, &membership_generation, &next_handle, &declared_count);
             },
             section_runtime => {
                 if (runtimes.items.len == max_runtime_count) return error.LimitExceeded;
@@ -1061,10 +1080,12 @@ pub fn decodeHost(allocator: std.mem.Allocator, bytes: []const u8) Error!HostSta
         }
     }
     try payload.finish();
-    if (!saw_meta or declared_count != runtimes.items.len or next_handle == 0)
+    if (!saw_meta or host_id == 0 or declared_count != runtimes.items.len or next_handle == 0 or
+        authority_generation == 0 or membership_generation == 0)
         return error.MissingRequiredField;
     if (next_handle == std.math.maxInt(u64)) return error.LimitExceeded;
     for (runtimes.items, 0..) |runtime, index| {
+        if (runtime.runtime_id == 0) return error.InvalidValue;
         if (runtime.surface_id == 0 or runtime.surface_id >= next_handle)
             return error.InvalidValue;
         for (runtimes.items[0..index]) |prior| {
@@ -1076,6 +1097,8 @@ pub fn decodeHost(allocator: std.mem.Allocator, bytes: []const u8) Error!HostSta
         .allocator = allocator,
         .host_id = host_id,
         .upgrade_epoch = epoch,
+        .authority_generation = authority_generation,
+        .membership_generation = membership_generation,
         .next_handle = next_handle,
         .runtimes = try runtimes.toOwnedSlice(allocator),
         .attempt_record = attempt_record,
@@ -1347,6 +1370,8 @@ test "handoff v1 host DTO atomically round-trips multiple runtime identities and
     const encoded = try encodeHost(allocator, .{
         .host_id = 0xCAFE,
         .upgrade_epoch = 9,
+        .authority_generation = 31,
+        .membership_generation = 77,
         .next_handle = 12,
         .runtimes = &views,
         .attempt_record = "attempt-v1",
@@ -1357,6 +1382,8 @@ test "handoff v1 host DTO atomically round-trips multiple runtime identities and
 
     try std.testing.expectEqual(@as(u128, 0xCAFE), decoded.host_id);
     try std.testing.expectEqual(@as(u64, 9), decoded.upgrade_epoch);
+    try std.testing.expectEqual(@as(u64, 31), decoded.authority_generation);
+    try std.testing.expectEqual(@as(u64, 77), decoded.membership_generation);
     try std.testing.expectEqual(@as(u64, 12), decoded.next_handle);
     try std.testing.expectEqual(@as(usize, 2), decoded.runtimes.len);
     try std.testing.expectEqual(@as(u128, 0xAA), decoded.runtimes[0].runtime_id);
@@ -1378,6 +1405,37 @@ test "handoff v1 host DTO rejects duplicate inherited slots without publishing a
     const encoded = try encodeHost(allocator, .{ .host_id = 1, .upgrade_epoch = 0, .next_handle = 3, .runtimes = &views });
     defer allocator.free(encoded);
     try std.testing.expectError(error.DuplicateField, decodeHost(allocator, encoded));
+}
+
+test "handoff v1 host DTO reserves zero host and runtime identities" {
+    const allocator = std.testing.allocator;
+    var core = try TerminalCore.init(allocator, .{ .cols = 8, .rows = 2 });
+    defer core.deinit();
+    const runtime = [_]RuntimeView{.{
+        .runtime_id = 0,
+        .surface_id = 1,
+        .child_pid = 101,
+        .cols = 8,
+        .rows = 2,
+        .resize_generation = 0,
+        .fd_slot = 40,
+        .pty_dev = 1,
+        .pty_ino = 2,
+        .pty_rdev = 3,
+        .core = &core,
+    }};
+    try std.testing.expectError(error.InvalidValue, encodeHost(allocator, .{
+        .host_id = 1,
+        .upgrade_epoch = 0,
+        .next_handle = 2,
+        .runtimes = &runtime,
+    }));
+    try std.testing.expectError(error.InvalidValue, encodeHost(allocator, .{
+        .host_id = 0,
+        .upgrade_epoch = 0,
+        .next_handle = 2,
+        .runtimes = &.{},
+    }));
 }
 
 test "handoff v1 host DTO rejects zero and non-advancing restored handles" {

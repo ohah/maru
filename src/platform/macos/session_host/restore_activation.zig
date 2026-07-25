@@ -248,6 +248,12 @@ fn activateValidated(
         ready,
     );
     defer prepared_authority.discard();
+    const restored_authority_generation = std.math.add(
+        u64,
+        validated.state.host.authority_generation,
+        2,
+    ) catch return error.InvalidRestore;
+    try prepared_authority.restoreAuthorityGeneration(restored_authority_generation);
 
     try checkRoleDeadline(invocation.role, deadline);
     try lifetime_owner.revalidatePath(owner_path);

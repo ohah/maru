@@ -74,6 +74,7 @@ pub const Frozen = struct {
         allocator: std.mem.Allocator,
         host_id: u128,
         upgrade_epoch: u64,
+        authority_generation: u64,
         first_fd_slot: u16,
     ) (runtime_manager.RuntimeManager.QuiesceError || @import("handoff_codec.zig").Error)!runtime_manager.RuntimeManager.QuiescedCapture {
         std.debug.assert(self.active);
@@ -82,6 +83,7 @@ pub const Frozen = struct {
             allocator,
             host_id,
             upgrade_epoch,
+            authority_generation,
             first_fd_slot,
         );
         self.captured = true;
@@ -126,7 +128,7 @@ pub fn beginWithRecord(
     attempt_record: ?[]const u8,
 ) Error!Quiesced {
     var frozen = try freeze(manager, gate, deadline);
-    var capture = frozen.prepareCapture(allocator, host_id, upgrade_epoch, first_fd_slot) catch |err| {
+    var capture = frozen.prepareCapture(allocator, host_id, upgrade_epoch, 1, first_fd_slot) catch |err| {
         frozen.rollbackToServing() catch return error.ResumeFailed;
         return err;
     };

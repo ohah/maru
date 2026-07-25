@@ -8,18 +8,20 @@ const screen_stream = @import("screen_stream.zig");
 const upgrade_wire = @import("upgrade_wire.zig");
 const upgrade_product = @import("upgrade_product_coordinator.zig");
 
-pub const Error = host_manifest.Error || error{InvalidTransition};
+pub const Error = host_manifest.Error || error{ InvalidTransition, AuthorityGenerationExhausted };
 
 pub const HostAuthority = struct {
     allocator: std.mem.Allocator,
     published: *host_manifest.Published,
     server: *socket_server.SocketServer,
     descriptor: host_manifest.Descriptor,
+    authority_generation: u64 = 1,
 
     pub const PreparedInit = struct {
         allocator: std.mem.Allocator,
         server: *socket_server.SocketServer,
         descriptor: ?host_manifest.Descriptor,
+        authority_generation: u64 = 1,
 
         pub fn commit(
             self: *PreparedInit,
@@ -32,6 +34,7 @@ pub const HostAuthority = struct {
                 .published = published,
                 .server = self.server,
                 .descriptor = descriptor,
+                .authority_generation = self.authority_generation,
             };
             result.publishWireStatus(false);
             return result;
@@ -55,6 +58,13 @@ pub const HostAuthority = struct {
             self.descriptor = null;
             self.allocator.free(descriptor.build_id);
             self.allocator.free(descriptor.endpoint);
+        }
+
+        /// Same-PID exec restore가 source ready authority 뒤의 restoring/ready 두 commit을 반영한 generation을
+        /// allocation 없는 최종 publication 전에 주입한다.
+        pub fn restoreAuthorityGeneration(self: *PreparedInit, generation: u64) Error!void {
+            if (generation == 0) return error.InvalidTransition;
+            self.authority_generation = generation;
         }
     };
 
@@ -136,12 +146,17 @@ pub const HostAuthority = struct {
         return .{
             .host_id = self.descriptor.host_id,
             .upgrade_epoch = self.descriptor.upgrade_epoch,
+            .authority_generation = self.authority_generation,
             .lifecycle = self.descriptor.lifecycle,
         };
     }
 
     pub fn beginRestoring(self: *HostAuthority) Error!void {
         if (self.descriptor.lifecycle != .ready) return error.InvalidTransition;
+        // Same-PID exec는 restoring commit과 target/rollback ready commit 두 generation을 모두 예약해야 한다.
+        // 하나만 남은 상태에서 restoring을 publish하면 어느 이미지도 ready로 돌아갈 수 없다.
+        if (self.authority_generation > std.math.maxInt(u64) - 2)
+            return error.AuthorityGenerationExhausted;
         var next = self.descriptor;
         next.lifecycle = .restoring;
         try self.commitDescriptor(next);
@@ -192,9 +207,12 @@ pub const HostAuthority = struct {
         next: host_manifest.Descriptor,
         upgrade_capable: bool,
     ) Error!void {
+        if (self.authority_generation == std.math.maxInt(u64))
+            return error.AuthorityGenerationExhausted;
         // Disk routing authority가 먼저 durable해진 뒤에만 새 connection이 보는 wire identity를 바꾼다.
         try self.published.republish(next);
         self.descriptor = next;
+        self.authority_generation += 1;
         self.publishWireStatus(upgrade_capable);
     }
 
@@ -206,6 +224,7 @@ pub const HostAuthority = struct {
             .protocol_major = self.descriptor.protocol_major,
             .screen_codec_version = self.descriptor.screen_codec_version,
             .upgrade_epoch = self.descriptor.upgrade_epoch,
+            .authority_generation = self.authority_generation,
             .lifecycle = self.descriptor.lifecycle,
         };
     }
@@ -252,12 +271,15 @@ fn sameSnapshot(
 ) bool {
     return actual.host_id == expected.host_id and
         actual.upgrade_epoch == expected.upgrade_epoch and
+        actual.authority_generation == expected.authority_generation and
         actual.lifecycle == expected.lifecycle;
 }
 
 fn transitionForError(err: Error) upgrade_product.AuthorityTransition {
     return switch (err) {
         error.AuthorityPoisoned, error.InvalidTransition => .indeterminate_poisoned,
+        // generation budget precheck는 durable republish보다 먼저 실패하므로 authority가 확실히 unchanged다.
+        error.AuthorityGenerationExhausted => .unchanged_retryable,
         else => .unchanged_retryable,
     };
 }
@@ -359,19 +381,38 @@ test "host authority adapter CASes restoring and rollback through one disk and w
     try std.testing.expect(sameSnapshot(initial, .{
         .host_id = host_id,
         .upgrade_epoch = 7,
+        .authority_generation = 1,
         .lifecycle = .ready,
     }));
+    authority.authority_generation = std.math.maxInt(u64) - 1;
+    authority.publishWireStatus(true);
+    const no_transition_budget = authority.snapshot();
+    try std.testing.expectEqual(
+        upgrade_product.AuthorityTransition.unchanged_retryable,
+        adapter.begin_restoring(adapter.ctx, no_transition_budget),
+    );
+    try std.testing.expectEqual(host_manifest.Lifecycle.ready, authority.snapshot().lifecycle);
+    authority.authority_generation = initial.authority_generation;
+    authority.publishWireStatus(true);
     try std.testing.expectEqual(
         upgrade_product.AuthorityTransition.applied,
         adapter.begin_restoring(adapter.ctx, initial),
     );
+    const after_begin = authority.snapshot();
+    try std.testing.expectEqual(@as(u64, initial.authority_generation + 1), after_begin.authority_generation);
     var restoring = try host_manifest.load(allocator, dir, host_id);
     defer restoring.deinit();
     try std.testing.expectEqual(host_manifest.Lifecycle.restoring, restoring.lifecycle);
     try std.testing.expectEqual(host_manifest.Lifecycle.restoring, server.host_status.lifecycle);
     try std.testing.expectEqual(
         upgrade_product.AuthorityTransition.applied,
-        adapter.rollback_ready(adapter.ctx, authority.snapshot()),
+        adapter.rollback_ready(adapter.ctx, after_begin),
+    );
+    const after_rollback = authority.snapshot();
+    try std.testing.expectEqual(@as(u64, after_begin.authority_generation + 1), after_rollback.authority_generation);
+    try std.testing.expectEqual(
+        upgrade_product.AuthorityTransition.indeterminate_poisoned,
+        adapter.begin_restoring(adapter.ctx, initial),
     );
     var ready = try host_manifest.load(allocator, dir, host_id);
     defer ready.deinit();
@@ -382,6 +423,7 @@ test "host authority adapter CASes restoring and rollback through one disk and w
         adapter.begin_restoring(adapter.ctx, .{
             .host_id = host_id,
             .upgrade_epoch = 8,
+            .authority_generation = authority.snapshot().authority_generation,
             .lifecycle = .ready,
         }),
     );

@@ -532,6 +532,25 @@ sequenceDiagram
 primary는 notice가 보이는 명시적 default-shell fallback으로 전환하며 checkpoint 자동 저장을 막는다. 아래 per-Term
 ended placeholder와 orphan recovery entry는 P4에서 구현한다.
 
+**실패 원인 분류(구현됨).** ended placeholder는 "이 handle이 **다시는** 붙을 수 없다"가 참일 때만 세울 수 있으므로,
+그 판정에 쓸 구분을 attach 경로가 먼저 만든다. 오분류 비용이 비대칭이기 때문이다 — 영구를 일시로 보면 창 복원이 한 번
+실패할 뿐이지만, **일시를 영구로 보면 살아 있는 runtime이 placeholder로 굳어** 사용자가 되찾을 길이 사라진다(현재
+`Recovered Sessions`가 미구현이라 host에 남은 runtime을 다시 찾을 UI도 없다). 그래서 승격은 증거가 있는 것만 한다.
+
+| 관측 | 분류 | 근거 |
+| --- | --- | --- |
+| manifest 없음 + current/N-1 legacy endpoint 소진 | `FailureReason.host_gone` → `error.PersistentRuntimeGone` | 추측할 endpoint가 더 없다 |
+| manifest 있음 + endpoint 무응답 + owner lease 사망 | `host_gone` → `PersistentRuntimeGone` | 재부팅·crash 뒤 stale manifest. lease는 `findCurrentManifestHost`가 이미 쓰는 host 생존 증거 |
+| host가 `runtime_not_found`·`stale_host` 응답 | `error.RuntimeNotFound`·`StaleHostHandle` → `PersistentRuntimeGone` | host가 긍정적으로 부재를 말했다 |
+| pool 슬롯이 다른 host로 교체 | `HostIdentityMismatch` → `PersistentRuntimeGone` | 그 handle은 stale이다 |
+| `lifecycle = restoring`(host exec 업그레이드 중) | `startup_timeout` → `PersistentRuntimeUnavailable` | runtime은 생존한다 |
+| 소켓 끊김·타임아웃·`controller_busy`·`unauthorized`·`queue_invalidated`·미지 error code | `PersistentRuntimeUnavailable` | runtime이 살아 있을 수 있다 |
+| handle 형식 손상(길이·대소문자·구분자) | `InvalidPersistentRuntimeIdentity` | 존재하는 손상은 숨기지 않는다 |
+
+**두 에러는 아직 같게 처리된다** — `PersistentRuntimeGone`도 현재는 해당 Window apply 실패로 fail-close한다. 분류만
+선행 도입하고 placeholder 전환은 P4에서 이 신호를 소비한다. 분류를 placeholder와 같은 변경에 넣지 않는 이유는, 오분류
+회귀가 곧바로 checkpoint 오염으로 이어져 재현·롤백이 불가능한 손실이 되기 때문이다.
+
 | 상태 | 처리 |
 | --- | --- |
 | host가 없거나 종료됨 | 기존 handle은 ended 처리. 새 Term 생성 시 새 host를 시작하지만 동일 runtime 복구로 설명하지 않음 |

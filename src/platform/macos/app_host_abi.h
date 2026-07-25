@@ -8,7 +8,12 @@
 /* 이 header는 실제 앱 동작을 구현하지 않고 Swift/Zig 사이의 약속만 고정한다.
    Swift가 AppKit object나 Swift struct layout을 바로 넘기면 Zig 쪽에서 안전하게
    해석할 수 없으므로, 제품 host가 시작되기 전에 fixed-width C record만 허용한다. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 144u
+#define MARU_MACOS_APP_HOST_ABI_VERSION 145u
+#define MARU_APP_INSTANCE_LEASE_ACQUIRED 0u
+#define MARU_APP_INSTANCE_LEASE_HELD 1u
+#define MARU_APP_INSTANCE_LEASE_UNSAFE 2u
+#define MARU_APP_INSTANCE_LEASE_IO_FAILURE 3u
+#define MARU_APP_INSTANCE_LEASE_INVALID_PATH 4u
 #define MARU_FILE_PANEL_MODE_READ 0u
 #define MARU_FILE_PANEL_MODE_SOURCE_EDIT 1u
 #define MARU_FILE_PANEL_MODE_LIVE_PREVIEW 2u
@@ -459,6 +464,10 @@ typedef struct MaruAppHostMetalFrame {
 
 uint32_t maru_macos_app_host_abi_version(void);
 int32_t maru_macos_app_host_capabilities(MaruAppHostCapabilities *out_capabilities);
+/* ABI v145: 첫 AppSession/config/workspace/runtime보다 먼저 앱 전역 writer lease를 획득한다.
+   path는 workspace.v1.lock UTF-8 bytes다. Zig는 final leaf를 no-follow/0600/current-UID regular로
+   검증하고 CLOEXEC flock fd를 process lifetime 동안 보관한다. */
+uint32_t maru_macos_app_instance_lease_acquire(const uint8_t *path, size_t path_len);
 int32_t maru_macos_app_session_create(
     const MaruAppHostSessionConfig *config,
     MaruAppHostSession **out_session

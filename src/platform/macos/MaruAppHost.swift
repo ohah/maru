@@ -4142,6 +4142,49 @@ private func livePreviewRetirementCoordinatorSelfTest(limit: Int) -> Bool {
 
 private func selfTestRelease<T: AnyObject>(_ value: inout T?) { value = nil }
 
+private func maruWorkspaceFileURL() -> URL? {
+    guard let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
+        return nil
+    }
+    return support.appendingPathComponent("maru/workspace.v1")
+}
+
+/// AppKit process/Dock 등록보다 먼저 canonical workspace sibling lease를 획득한다. parent/leaf 생성은
+/// fresh profile에서 lease 자체를 만들기 위한 유일한 startup loser filesystem effect다.
+private func acquireAppInstanceWriterLeaseBeforeAppKit() -> UInt32 {
+    guard let workspace = maruWorkspaceFileURL() else {
+        return UInt32(MARU_APP_INSTANCE_LEASE_INVALID_PATH)
+    }
+    let parent = workspace.deletingLastPathComponent()
+    do {
+        try FileManager.default.createDirectory(
+            at: parent,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
+    } catch {
+        return UInt32(MARU_APP_INSTANCE_LEASE_IO_FAILURE)
+    }
+    let lock = workspace.appendingPathExtension("lock")
+    let bytes = Array(lock.path.utf8)
+    return bytes.withUnsafeBufferPointer { buffer in
+        maru_macos_app_instance_lease_acquire(buffer.baseAddress, buffer.count)
+    }
+}
+
+private func appInstanceLeaseFailureReason(_ status: UInt32) -> (code: Int32, reason: String) {
+    switch status {
+    case UInt32(MARU_APP_INSTANCE_LEASE_HELD):
+        return (2, "second instance unsupported: workspace writer lease held")
+    case UInt32(MARU_APP_INSTANCE_LEASE_UNSAFE):
+        return (1, "unsafe workspace writer lock")
+    case UInt32(MARU_APP_INSTANCE_LEASE_IO_FAILURE):
+        return (1, "workspace writer lease I/O failure")
+    default:
+        return (1, "invalid workspace writer lock path")
+    }
+}
+
 @main
 @MainActor
 final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDelegate, UNUserNotificationCenterDelegate {
@@ -4153,6 +4196,8 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     private let artifactDirectory = "zig-out/maru-macos-app"
     private let summaryPath = "zig-out/maru-macos-app/app.summary.txt"
     private var capabilities = MaruAppHostCapabilities()
+    // 이 controller는 pre-AppKit lease 획득 성공 뒤에만 생성된다. startup loser는 이 상태에 도달하지 않는다.
+    private let appInstanceLeaseStatus = UInt32(MARU_APP_INSTANCE_LEASE_ACQUIRED)
     // "Browser Grants" 서브메뉴(§9.2 per-grant revoke UX) — 열릴 때마다 menuNeedsUpdate가 Zig grant store를 조회해
     // 항목을 재생성한다(활성 grant 1개=1항목 + Revoke All). delegate=self·이 참조로 menuNeedsUpdate에서 식별한다.
     private let browserGrantsMenu = NSMenu(title: "Browser Grants")
@@ -4433,6 +4478,21 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     private var hotKeyEventHandler: EventHandlerRef?
 
     static func main() {
+        let leaseStatus = acquireAppInstanceWriterLeaseBeforeAppKit()
+        guard leaseStatus == UInt32(MARU_APP_INSTANCE_LEASE_ACQUIRED) else {
+            let failure = appInstanceLeaseFailureReason(leaseStatus)
+            fputs("maru: \(failure.reason)\n", stderr)
+            Darwin.exit(failure.code)
+        }
+        if ProcessInfo.processInfo.environment["MARU_APP_INSTANCE_LEASE_SMOKE_READY"] == "1" {
+            fputs("maru: app instance writer lease acquired\n", stderr)
+        }
+        // 제품 스모크가 AppKit/Window/AppSession/config/restore/runtime을 하나도 시작하지 않은 exact
+        // post-acquire 지점에서 winner를 붙잡는다. SIGKILL만 이 process-lifetime lease를 끝낸다.
+        if ProcessInfo.processInfo.environment["MARU_APP_INSTANCE_LEASE_SMOKE_HOLD"] == "1" {
+            while true { _ = Darwin.sleep(60) }
+        }
+
         let app = NSApplication.shared
         let delegate = MaruAppHostController()
 
@@ -4447,6 +4507,17 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         _ = notification
+        let abiReady = validateZigBoundary()
+        let smokeDuration = smokeDurationMs()
+        smokeMode = smokeDuration != nil
+
+        if !abiReady {
+            exitCode = 1
+            writeSummary(visibleUI: false, abiReady: false, smokeDurationMs: smokeDuration)
+            NSApp.terminate(nil)
+            return
+        }
+
         cleanupPasteImages() // 이전 세션이 남긴 임시 paste 이미지 청소(누적 방지 — 정상/비정상 종료 모두 커버).
         mermaidRenderCoordinator.onRenderError = { [weak self] capability in
             self?.failMermaidReply(capability: capability, error: "mermaid render failed")
@@ -4463,17 +4534,6 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         // 대입이 전부 이 첫 창(primary = windows.first)으로 forwarding되므로(forwarder setter), 창이 없으면
         // 그 대입이 사라진다. New Window(W2)는 같은 컬렉션에 surface를 추가한다.
         self.windows.append(makeTerminalSurface())
-
-        let abiReady = validateZigBoundary()
-        let smokeDuration = smokeDurationMs()
-        smokeMode = smokeDuration != nil
-
-        if !abiReady {
-            exitCode = 1
-            writeSummary(visibleUI: false, abiReady: false, smokeDurationMs: smokeDuration)
-            NSApp.terminate(nil)
-            return
-        }
 
         let window = makePlaceholderWindow()
         self.window = window
@@ -4544,7 +4604,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         // 꺼짐 — maru sessions list가 "인스턴스 없음"으로 접힌다). 소켓·스레드·collector·dispatch·auth는 전부 Zig.
         controlServerStarted = (maru_macos_control_server_start() == Self.statusOK)
 
-        if smokeMode {
+        if smokeMode && ProcessInfo.processInfo.environment["MARU_APP_INSTANCE_LEASE_SMOKE_HOLD"] != "1" {
             if filePanelHookEnabled {
                 // FP11f cold helper/WKWebView Mermaid와 iframe→read→render→edit→save가 끝나기 전에 controlled
                 // PTY가 `a\n`을 받아 종료하지 않게 입력을 늦춘다. 일반 smoke는 기존 즉시 입력 동작을 유지한다.
@@ -9197,10 +9257,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
 
     /// 저장된 workspace 파일 위치(~/Library/Application Support/maru/workspace.v1). R5 저장·R4 로드가 공유한다.
     private var workspaceFileURL: URL? {
-        guard let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
-            return nil
-        }
-        return support.appendingPathComponent("maru/workspace.v1")
+        maruWorkspaceFileURL()
     }
 
     /// 정상 종료 시 현재 멀티 창 workspace를 디스크에 저장한다(R5). 각 일반 창(세션)의 블록을 ABI로 받아
@@ -9333,6 +9390,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         visible_ui=\(visibleUI)
         swift_host=true
         abi_ready=\(abiReady)
+        app_instance_lease_status=\(appInstanceLeaseStatus)
         placeholder_window=true
         terminal_surface=\(terminalSurface)
         terminal_surface_note=zig_runtime_rendered_to_swift_cametal_layer

@@ -78,6 +78,10 @@ run = "zig build macos-app-host-abi-lib"
 description = "Type-check the Swift macOS app host"
 run = "zig build macos-app-host-swift-check"
 
+[tasks.macos-app-instance-lease-smoke]
+description = "Verify direct double-launch exclusion and SIGKILL lease reacquisition"
+run = "zig build macos-app-instance-lease-smoke"
+
 [tasks.macos-file-explorer-perf]
 description = "Run the macOS AppSession file-explorer performance artifact gate"
 run = "zig build test-macos-file-explorer-perf"

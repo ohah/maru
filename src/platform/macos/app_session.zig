@@ -181,7 +181,9 @@ fn navButtonAt(x_px: f64, band_x: u32, cw: u32) ?NavButton {
 // 별도 물리 CAMetalLayer로 분리, 두 drawable을 한 command buffer에 present + 단일 commit으로 전이 원자성). host↔renderer
 // draw 계약 변경이라 버전을 올린다. **MetalFrame/세션 struct·export 시그니처는 불변**(overlay_layer는 Zig가 아니라
 // Swift가 소유한 CAMetalLayer라 struct offset·layout test는 그대로 green). 렌더러 분할·컨테이너 재편은 Swift/ObjC 레이어.
-pub const abi_version: u32 = 144;
+pub const abi_version: u32 = 145;
+// 145: app instance writer lease acquire ABI. Swift가 첫 Window/AppSession/config/workspace/runtime보다 먼저
+// canonical `workspace.v1.lock`을 넘기고, Zig가 process-lifetime CLOEXEC exclusive flock을 보관한다.
 // 144: workspace 복원이 **조용히 버린 항목 수** getter(take_workspace_restore_dropped)를 추가한다. 복원은 손상된 파일
 // 패널 entry·비워진 dock 그룹·접근 불가 explorer root·**영구 부재로 분류돼 종료 placeholder가 된 Term**(저장된
 // runtime-handle을 잃는다)을 버리면서도 apply를 성공으로 반환한다 — Swift가 그 사실을 모르면 다음 Quit이 버려진 상태를

@@ -420,6 +420,14 @@ session.keep-alive-after-quit = true
   현재 앱에 연결된 기존 persistent runtime도 끝낸다. Quit 전 즉시 끝내려면
   `Quit and End All Sessions` 또는 Term별 close를 쓴다. host에 남은 다른 workspace/client의 unbound runtime까지
   설정 하나로 일괄 종료하지 않는다.
+- **"모든 설정 초기화"(Reset to Defaults)는 이 키를 초기화하지 않고 보존한다.** 리셋이 이 값을 기본값으로 되돌리면
+  live 정책이 그 자리에서 뒤집혀 다음 평범한 `Quit Maru`가 살아 있는 host-backed runtime을 전부 terminate한다 —
+  파괴를 `Quit and End All Sessions`라는 명시적 경로로 분리한 위 원칙을 리셋이 우회하는 셈이다(실측 사고: 리셋 뒤
+  일반 Quit으로 runtime 12개 소멸, workspace의 `host_id:runtime_id` 12개가 dangling). 그래서 `resetAllSettings`는
+  값과 live 정책을 모두 보존하고, 보존값이 `Config{}` 기본값과 다르면 리셋이 덮어쓰는 config 파일에 override 한 줄을
+  같은 atomic write로 남긴다(파일과 live 정책이 갈라져 다음 실행이 조용히 in-process로 떨어지는 것을 막는다).
+  끄는 결정은 사용자 몫이라 notice로 수동 변경 경로를 안내한다. 기본값이 `true`로 전환된 뒤에도 같은 규칙이라
+  "사용자가 명시적으로 끈 `false`"를 리셋이 도로 켜지 않는다(리터럴이 아니라 기본값과 비교하는 이유).
 - restore 중 saved Window 하나라도 host/runtime 불일치나 attach 실패로 apply되지 않으면 default shell 창을 성공한 복원으로
   남기지 않고 teardown한다. 해당 실행의 자동 checkpoint도 막아 마지막 완전 manifest를 보존한다.
 

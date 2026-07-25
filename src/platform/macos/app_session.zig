@@ -1123,6 +1123,8 @@ const TermRuntime = struct {
     /// 창을 닫지 않는다), `findTerminatedTerm`(자동 reap 대상 아님), `resizeTermForLayout`(core를 직접 resize),
     /// 드롭 배리어(읽기 전용).
     ended_placeholder: bool = false,
+    /// 위 안내 텍스트를 이미 core에 썼는가(멱등 래치). 매 resize·재적용마다 덧쓰면 화면이 안내로 도배된다.
+    ended_guidance_written: bool = false,
     /// 묘비가 다시 저장될 때 쓸 마지막 command. `surface.command`가 아니라 여기 드는 이유: `Surface.command`는 spawn이
     /// 채우는 borrowed 필드이고, 묘비는 spawn을 하지 않으며 복원 입력(파싱 arena)은 apply 직후 해제되므로 owned 복사가
     /// 필요하다. title·cwd는 이미 owned 저장소가 있는 `auto_title`·`observation`에 심어 capture가 무변경으로 읽는다.
@@ -5428,6 +5430,34 @@ pub const AppSession = struct {
         self.focusTerm(pane.terms.items.len - 1); // 새 Term으로 포커스(surface 재바인딩·rect·dirty)
     }
 
+    /// §7 묘비를 **같은 pane 슬롯에서 제자리 교체**해 새 셸로 되살린다(⏎). `newTermInActivePane`을 쓰면 안 되는
+    /// 이유: 그건 append라서 묘비가 좀비 탭으로 남고 사용자가 만든 탭 순서가 밀린다. 새 Term 생성이 **성공한 뒤에만**
+    /// 슬롯을 바꾸고 묘비를 해제하므로 spawn 실패 시 화면은 묘비 그대로다(부분 상태 없음).
+    /// cwd는 묘비가 들고 있던 마지막 위치를 형식 검증해 넘긴다 — 비었거나 사라진 디렉터리면 기본 cwd로 spawn된다.
+    /// Term 포인터를 들던 rename·컨텍스트 메뉴 상태는 `destroyTerm`이 단일 chokepoint로 정리한다.
+    fn respawnEndedPlaceholder(self: *AppSession) !void {
+        const pane = self.activePane();
+        const index = pane.active_term;
+        const tomb = pane.terms.items[index];
+        std.debug.assert(tomb.rt.ended_placeholder);
+
+        const size = layout_math.gridFromRectPx(self.cell_width_px, self.cell_height_px, self.active_pane_rect.w, self.active_pane_rect.h);
+        var cfg = self.new_tab_config;
+        cfg.size = size;
+        var req = spawnRequest(cfg, self.loaded_config.config.term, self.loaded_config.config.shell, self.loaded_config.config.env, self.new_tab_zdotdir, self.new_tab_ssh_bin);
+        if (usableRestoreCwd(tomb.rt.observation.cwd.items)) |c| req.cwd = c;
+        const fresh = try self.createTerm(req, size, cfg.queue_capacity, "Maru", commandName(cfg.command_kind));
+
+        // 여기부터는 실패할 수 없는 구간이다 — 슬롯 교체·해제·대표 surface 재바인딩은 에러를 내지 않는다.
+        pane.terms.items[index] = fresh;
+        self.destroyTerm(tomb);
+        // focusTerm은 같은 인덱스면 early-return하므로 대표 surface를 직접 갱신한다(탭바·렌더가 이걸 읽는다).
+        self.surface_ptrs.items[self.app_window.active_tab] = pane.activeTerm().surface;
+        self.app_window.tabs = self.surface_ptrs.items;
+        self.recomputeActivePaneRect();
+        self.metal_dirty = true;
+    }
+
     /// 활성 pane에 새 **web Term**(`panel_kind`=markdown|browser)을 띄우고 그 탭으로 포커스한다(command
     /// `new_web_tab`·File 메뉴 — 4e-5, 그리고 debug 훅 maybeDebugOpenWebPanel의 위임 대상). `newTermInActivePane`을
     /// 미러링하되 PTY spawn/셸 없이 `createWebTerm(panel_kind)`로 sentinel surface를 만든다(WKWebView는
@@ -6695,12 +6725,38 @@ pub const AppSession = struct {
     /// 아무 키에나 닫히지만 이건 화면 콘텐츠라 남아, 복구 방법이 계속 보인다. 리더가 이미 멈춘(finishAfterTermination)
     /// 죽은 surface라 락 아래 안전하게 쓴다. `~` 확장·에스케이프는 core가 파싱(평범한 텍스트 + SGR dim).
     fn writeHeldGuidance(self: *AppSession, detail: []const u8) void {
-        const surface = self.activePane().activeTerm().surface;
         var buf: [320]u8 = undefined;
         const line = std.fmt.bufPrint(&buf, "\r\n\x1b[2m  ▸ 셸이 시작 직후 종료됐습니다 ({s}).\r\n    ⏎ 다시 시도    ⌘, 설정에서 shell.command·shell.args 확인\x1b[0m\r\n", .{detail}) catch return;
+        self.writeSurfaceGuidance(self.activePane().activeTerm().surface, line);
+    }
+
+    /// 죽은/PTY 없는 surface의 core에 안내 텍스트를 쓰는 **락 규율 단일 출처**. 리더가 없거나 이미 멈춘 surface라
+    /// 락 아래 안전하며, `~` 확장·에스케이프는 core가 파싱한다(평범한 텍스트 + SGR). 화면 콘텐츠라 notice 토스트와
+    /// 달리 키 입력으로 사라지지 않는다 — 복구 방법이 계속 보이는 것이 요점이다(#5 지속성).
+    fn writeSurfaceGuidance(self: *AppSession, surface: *maru.session.Surface, line: []const u8) void {
         surface.lockCore(self.io);
         defer surface.unlockCore(self.io);
         surface.core.write(line) catch {};
+    }
+
+    /// §7 종료 placeholder의 화면에 "이 세션은 끝났고 ⏎로 새 셸을 시작할 수 있다"는 지속 안내를 남긴다. notice는
+    /// 아무 키에나 닫혀 그 뒤엔 이유를 확인할 방법이 없으므로, 화면 콘텐츠로도 남겨야 사용자가 빈 pane을 보고
+    /// 당황하지 않는다. 멱등(`ended_guidance_written`) — 매 resize/재적용마다 덧쓰지 않는다.
+    /// 호출 시점이 중요하다: `applyWorkspaceWindow` 꼬리의 `resizeTabPanes` **뒤**에 불러 최종 pane 폭에서 써야
+    /// reflow로 줄이 어긋나지 않는다.
+    fn writeEndedPlaceholderGuidance(self: *AppSession, term: *Term) void {
+        if (!term.rt.ended_placeholder or term.rt.ended_guidance_written) return;
+        term.rt.ended_guidance_written = true;
+        const title = term.auto_title.items;
+        const cwd = term.rt.observation.cwd.items;
+        var buf: [512]u8 = undefined;
+        var w = std.Io.Writer.fixed(&buf);
+        w.writeAll("\r\n\x1b[2m  ▸ 이 세션은 종료됐습니다(유지된 터미널이 없습니다).\r\n") catch return;
+        // 빈 값은 줄을 아예 생략한다 — "마지막 제목: " 같은 빈 라벨은 정보가 아니라 잡음이다.
+        if (title.len > 0) w.print("    마지막 제목: {s}\r\n", .{title}) catch {};
+        if (cwd.len > 0) w.print("    마지막 위치: {s}\r\n", .{cwd}) catch {};
+        w.writeAll("    ⏎ 이 자리에서 새 셸 시작\x1b[0m\r\n") catch return;
+        self.writeSurfaceGuidance(term.surface, w.buffered());
     }
 
     /// 빨간 닫기 버튼/창 단위 닫기 ABI(maru_macos_app_session_request_window_close)가 부른다. 실행 중 명령이 있으면
@@ -17656,6 +17712,25 @@ pub const AppSession = struct {
             self.last_summary.last_event_kind = @intFromEnum(EventKind.key_down);
             return self.last_summary;
         }
+        // §7 묘비: **⏎만** 그 자리에서 새 셸을 만든다. 복원이 위장 세션을 만들지 않도록 자동 fresh spawn을 금지했으므로
+        // 이 명시 입력이 유일한 승격 경로다(아무 키나 붙여넣기로는 되살아나지 않는다). 게이트는 위 startup_held와 같다 —
+        // rename·사이드바 검색·keybind 녹음이 자기 Enter를 먼저 소비했고, 입력받는 모달이 열려 있으면 양보한다.
+        // 위 래치와는 상호배타다: 묘비가 있으면 allTabsTerminated가 false라 startup_held가 서지 않는다.
+        if (self.surface_initialized and self.activePane().activeTerm().rt.ended_placeholder and
+            event.key == .enter and
+            !event.modifiers.command and !event.modifiers.control and !event.modifiers.option and !event.modifiers.shift and
+            !self.anyModalOverlayOpen())
+        {
+            self.chrome_host.notice.dismiss();
+            self.respawnEndedPlaceholder() catch {
+                self.showNotice("셸을 시작하지 못했습니다 — 설정(⌘,)에서 shell.command·shell.args를 확인하세요.");
+            };
+            self.metal_dirty = true;
+            self.total_app_key_events += 1;
+            self.writeSummaryFromState();
+            self.last_summary.last_event_kind = @intFromEnum(EventKind.key_down);
+            return self.last_summary;
+        }
         // chrome 모달(confirm/notice/context_menu/find/palette/settings) 중 하나라도 열려 있으면 키를 chrome으로
         // 라우팅한다 — 최상위(PTY/스크롤보다 먼저, 모달은 단일-오버레이 불변식으로 한 번에 하나). handleInput이 컴포넌트
         // handle로 보내 의도(HostAction)를 내고, dispatchChromeAction이 session 부수효과(재검색·스크롤·필터·실행·닫기)를
@@ -22895,6 +22970,13 @@ pub const AppSession = struct {
         // caller의 resizeAppSessionFromWindow→resize()는 (활성 탭만 + last_resize_size dedup) 배경 탭과 primary
         // 활성 탭을 빠뜨린다. 여기서 전 탭을 명시적으로 맞춰 dedup·활성탭-한정을 둘 다 우회한다(best-effort).
         for (self.tabs.items) |tab| self.resizeTabPanes(tab);
+        // §7 묘비 안내는 **resize 뒤**에 쓴다 — 최종 pane 폭이 정해진 다음이어야 reflow로 줄이 어긋나지 않는다.
+        // 멱등 래치가 있어 재적용에도 덧쓰지 않는다. 비-묘비 Term은 함수 첫 줄에서 no-op이다.
+        for (self.tabs.items) |tab| {
+            for (tab.panes.items) |pane| {
+                for (pane.terms.items) |term| self.writeEndedPlaceholderGuidance(term);
+            }
+        }
         // 활성 탭의 대표 surface는 위 swap 루프가 이미 surface_ptrs[*]에 바인딩했고 active_pane도 빌드 때
         // 세팅됐다(focusPane(active==active)는 early-return no-op이라 호출하지 않는다). 좌표·사이드바만 갱신.
         self.recomputeActivePaneRect();
@@ -36681,6 +36763,70 @@ test "R3 #3: host가 죽으면 createTerm이 in-process로 폴백한다(새 터�
     } else {
         return error.SkipZigTest;
     }
+}
+
+// §7 묘비의 **화면 안내와 ⏎ 되살리기**를 못박는다. notice는 아무 키에나 닫히므로 그것만으로는 사용자가 빈 pane을
+// 보고 이유를 다시 확인할 방법이 없다 — 화면 콘텐츠로 남아야 복구 방법이 계속 보인다(writeHeldGuidance와 같은 규율).
+// 되살리기는 **제자리 교체**여야 한다: append하면 묘비가 좀비 탭으로 남고 사용자가 만든 탭 순서가 밀린다.
+// 그리고 "자동 fresh spawn 금지"가 비어 있는 계약이 아님을 증명해야 한다 — 아무 키·수식자 조합으로는 되살아나지
+// 않고 ⏎만 승격시키는지 대조군으로 확인한다. 터미널에서 왜 중요한가: 사용자가 의도하지 않은 셸이 조용히 뜨면
+// "이어진 세션"으로 오인해 없는 이력을 신뢰하게 된다.
+test "종료 placeholder: 화면 안내가 남고 ⏎만 같은 슬롯을 새 셸로 되살린다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const session = try initSmokeSessionSized(a);
+    defer a.destroy(session);
+    defer session.deinit();
+
+    const pane = session.activePane();
+    const tomb = try session.createEndedPlaceholderTerm("배포 감시", "/tmp", "/bin/zsh", .{ .cols = 80, .rows = 24 });
+    try pane.terms.append(a, tomb);
+    session.focusTerm(pane.terms.items.len - 1);
+    const tomb_index = pane.active_term;
+
+    // 안내가 core에 남는다(멱등 — 두 번 불러도 덧쓰지 않는다).
+    session.writeEndedPlaceholderGuidance(tomb);
+    session.writeEndedPlaceholderGuidance(tomb);
+    {
+        tomb.surface.lockCore(session.io);
+        defer tomb.surface.unlockCore(session.io);
+        var found_cwd = false;
+        var found_hint = false;
+        var occurrences: usize = 0;
+        var row: u16 = 0;
+        while (row < tomb.surface.core.size.rows) : (row += 1) {
+            var line_buf: [1024]u8 = undefined;
+            var n: usize = 0;
+            for (tomb.surface.core.viewportRow(row)) |cell| {
+                if (cell.continuation or n + 4 > line_buf.len) continue;
+                n += std.unicode.utf8Encode(cell.codepoint, line_buf[n..]) catch continue;
+            }
+            const line = line_buf[0..n];
+            if (std.mem.indexOf(u8, line, "종료됐습니다") != null) occurrences += 1;
+            if (std.mem.indexOf(u8, line, "/tmp") != null) found_cwd = true;
+            if (std.mem.indexOf(u8, line, "새 셸 시작") != null) found_hint = true;
+        }
+        try std.testing.expectEqual(@as(usize, 1), occurrences); // 멱등 래치 — 안내로 화면이 도배되지 않는다
+        try std.testing.expect(found_cwd); // 마지막 위치가 보여야 사용자가 어디였는지 안다
+        try std.testing.expect(found_hint);
+    }
+
+    // 대조군: ⏎가 아닌 키와 수식자 조합으로는 되살아나지 않는다("자동 spawn 금지"의 non-vacuous 증명).
+    _ = session.handleKeyEvent(.{ .key = .{ .char = 'a' } }) catch {};
+    try std.testing.expect(pane.terms.items[tomb_index].rt.ended_placeholder);
+    _ = session.handleKeyEvent(.{ .key = .enter, .modifiers = .{ .command = true } }) catch {};
+    try std.testing.expect(pane.terms.items[tomb_index].rt.ended_placeholder);
+
+    // ⏎: 같은 슬롯이 라이브 Term으로 바뀌고 탭 수·활성 인덱스는 그대로다(append가 아니라 제자리 교체).
+    const before_terms = pane.terms.items.len;
+    _ = try session.handleKeyEvent(.{ .key = .enter });
+    try std.testing.expectEqual(before_terms, pane.terms.items.len);
+    try std.testing.expectEqual(tomb_index, pane.active_term);
+    const fresh = pane.terms.items[tomb_index];
+    try std.testing.expect(!fresh.rt.ended_placeholder);
+    try std.testing.expect(fresh.rt.live_initialized);
+    // 대표 surface가 새 Term으로 재바인딩됐다(탭바·렌더가 이걸 읽는다 — 안 하면 해제된 묘비 surface를 가리킨다).
+    try std.testing.expectEqual(fresh.surface, session.surface_ptrs.items[session.app_window.active_tab]);
 }
 
 // §7 복원 배선을 못박는다: runtime이 영구히 없는 Term **하나만** 묘비가 되고 같은 pane의 다른 surface·split 트리·탭

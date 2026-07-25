@@ -2208,6 +2208,11 @@ pub const AppSession = struct {
     // 사이드바 탭 슬롯 한 칸의 backing 픽셀 높이(= cell_height_px × 2.5). refreshCellMetrics가 갱신.
     // metalFrame()이 렌더러에 넘겨 사이드바 셀을 cell 높이가 아니라 이 슬롯 높이로 세로 배치한다.
     sidebar_slot_height_px: u32 = 0,
+    /// 사이드바 세로 레이아웃 메트릭(카드 높이는 **줄 수**에서 나온다 — docs/sidebar-agent-list.md §3).
+    /// `refreshCellMetrics`가 cell 메트릭에서 파생해 갱신하고, hit-test·밴드·glyph 배치가 `sidebarMetrics()`로 읽는다.
+    /// 필드로 두는 이유: 좌표 테스트가 cell 비율을 거치지 않고 원하는 카드 높이를 직접 박을 수 있게(고정 슬롯 시절
+    /// 기대값을 그대로 쓰는 회귀 테스트가 많다).
+    sidebar_metrics: chrome.components.sidebar.Metrics = .{ .line_h = 0, .line_step = 0, .card_pad_v = 0, .header_row_h = 0 },
     // 사이드바 상단 헤더(검색바 + 아이콘 2개) 높이(px) = cell_height × header_ratio. 0이면 헤더 없음. 밴드·카드·
     // hit-test가 이만큼 아래로 시프트되고, .m이 사이드바 셀 py_top에 더한다(chrome props.sidebar_header_height_px로 전달).
     sidebar_header_height_px: u32 = 0,
@@ -3976,7 +3981,6 @@ pub const AppSession = struct {
                 // 열이 사이드바 밖 터미널 위로 떠 조합창이 caret과 분리된다(.pane/.term의 세그먼트 우경계 clamp와 같은 규율).
                 const full_cols: u32 = self.sidebar_width_px / cw;
                 const caret_col = @min(indent_cols + qcols, full_cols -| 2);
-                const slot_h = self.sidebar_slot_height_px;
                 // 리네임 카드 줄 수: 이름줄(항상) + 상태줄(running·idle 에이전트면). 리네임 중 branch/path 보조줄은
                 // buildSidebarTitleDrawList가 항상 숨겨 줄 수에 안 든다. 렌더러(maru_metal_renderer.m)가 n줄 블록을 슬롯
                 // 세로 중앙 정렬하므로, 상태줄이 생기면 이름줄이 위로 (ch/2) 올라간다 — caret y도 같은 n을 써야 IME
@@ -4003,8 +4007,11 @@ pub const AppSession = struct {
                     };
                     break :blk_sr (self.displaySlotOf(idx) orelse return null);
                 };
-                const slot_top = chrome.components.sidebar.rowTop(rrows, slot_row, self.sidebar_header_height_px, slot_h, self.sidebar_header_row_h_px, self.sidebar_scroll_offset_px);
-                const block_off: i64 = @intCast((slot_h -| sidebarBlockHeight(line_count, ch)) / 2); // 줄 스텝 여유와 정합(fillSidebarGlyphPyTop 공유). 이름줄=line 0이라 +block_off만.
+                const slot_top = chrome.components.sidebar.rowTop(rrows, slot_row, self.sidebar_header_height_px, self.sidebarMetrics(), self.sidebar_scroll_offset_px);
+                // 블록중앙은 **그 row의 실제 높이**로 잡는다 — 카드 높이가 줄 수 가변이라 옛 고정 슬롯을 쓰면
+                // 리네임 caret이 카드 밖으로 밀린다(fillSidebarGlyphPyTop과 같은 계산을 공유). 이름줄=line 0이라 +block_off만.
+                const row_h_caret = chrome.components.sidebar.rowHeight(rrows[slot_row], self.sidebarMetrics());
+                const block_off: i64 = @intCast((row_h_caret -| sidebarBlockHeight(line_count, ch)) / 2);
                 const caret_y = @max(slot_top + block_off, @as(i64, self.sidebar_header_height_px));
                 return .{
                     .x = @intCast(caret_col * cw),
@@ -4061,8 +4068,6 @@ pub const AppSession = struct {
                     .card => {},
                 };
                 const sr = slot_row orelse return null;
-                const slot_h = self.sidebar_slot_height_px;
-                const hdr_h = self.sidebar_header_row_h_px;
                 // buildSidebarTitleDrawList는 모든 사이드바 glyph(헤더 삼각/이름 포함)를 indent_cols(=ceil((card_gap+
                 // accent_bar)/cw))만큼 우측으로 민다(13936). .workspace caret(2053)이 그 항을 더하듯 헤더 caret도 더해야
                 // 삼각/이름과 정렬된다 — 옛 코드는 이 항이 없어 캐럿·IME 후보창이 indent_cols만큼 왼쪽으로 어긋났다(code-review #5).
@@ -4078,8 +4083,8 @@ pub const AppSession = struct {
                 // 사이드바 밖 터미널 위로 안 뜨게 한다(.workspace와 같은 규율 + main #5의 indent_cols 항 보존).
                 const full_cols: u32 = self.sidebar_width_px / cw;
                 const caret_col: u32 = @min(indent_cols + hindent_cols + 2 + qcols, full_cols -| 2);
-                const slot_top = chrome.components.sidebar.rowTop(rrows, sr, self.sidebar_header_height_px, slot_h, hdr_h, self.sidebar_scroll_offset_px);
-                const block_off: i64 = @intCast((hdr_h -| ch) / 2); // 헤더 1줄 세로 중앙
+                const slot_top = chrome.components.sidebar.rowTop(rrows, sr, self.sidebar_header_height_px, self.sidebarMetrics(), self.sidebar_scroll_offset_px);
+                const block_off: i64 = @intCast((self.sidebar_header_row_h_px -| ch) / 2); // 헤더 1줄 세로 중앙
                 const caret_y = @max(slot_top + block_off, @as(i64, self.sidebar_header_height_px));
                 return .{ .x = @intCast(caret_col * cw), .y = @intCast(caret_y), .w = @intCast(cw), .h = @intCast(ch) };
             },
@@ -8006,8 +8011,8 @@ pub const AppSession = struct {
     fn dragInRowLowerBoundary(self: *AppSession, raw_row: usize, y_px: f64) bool {
         const rows = self.sidebar_rows.items;
         if (raw_row >= rows.len or !std.math.isFinite(y_px)) return false;
-        const top = chrome.components.sidebar.rowTop(rows, raw_row, self.sidebar_header_height_px, self.sidebar_slot_height_px, self.sidebar_header_row_h_px, self.sidebar_scroll_offset_px);
-        const h = chrome.components.sidebar.rowHeight(rows[raw_row], self.sidebar_slot_height_px, self.sidebar_header_row_h_px);
+        const top = chrome.components.sidebar.rowTop(rows, raw_row, self.sidebar_header_height_px, self.sidebarMetrics(), self.sidebar_scroll_offset_px);
+        const h = chrome.components.sidebar.rowHeight(rows[raw_row], self.sidebarMetrics());
         if (h == 0) return false;
         const frac = (y_px - @as(f64, @floatFromInt(top))) / @as(f64, @floatFromInt(h));
         return frac >= 0.6;
@@ -8065,17 +8070,17 @@ pub const AppSession = struct {
     /// 실앱 드래그에서 왜 흡수(top_level=false)인지 자기검증한다(관측 가능성 — diag.zig 단일 게이트).
     fn cardDropPlan(self: *AppSession, origin: usize, y_px: f64) DropPlan {
         const rows = self.sidebar_rows.items;
-        const raw_row = chrome.components.sidebar.dragTargetSlot(y_px, self.sidebar_header_height_px, rows, self.sidebar_slot_height_px, self.sidebar_header_row_h_px, self.sidebar_scroll_offset_px);
+        const raw_row = chrome.components.sidebar.dragTargetSlot(y_px, self.sidebar_header_height_px, rows, self.sidebarMetrics(), self.sidebar_scroll_offset_px);
         // 프리뷰 시프트 보정: 소스 카드 행이 raw_row **위**면(드래그 다운) 프리뷰가 그 아래 콘텐츠를 소스 높이만큼 위로 당긴다.
         var y_esc = y_px;
         if (self.displaySlotOf(origin)) |os| if (os < raw_row) {
-            y_esc = y_px + @as(f64, @floatFromInt(chrome.components.sidebar.rowHeight(rows[os], self.sidebar_slot_height_px, self.sidebar_header_row_h_px)));
+            y_esc = y_px + @as(f64, @floatFromInt(chrome.components.sidebar.rowHeight(rows[os], self.sidebarMetrics())));
         };
         // y_esc가 y_px와 같으면(드래그 업/동일 슬롯 — os >= raw_row라 보정이 없음) dragTargetSlot 결과도 raw_row와 동일하므로
         // 재계산을 건너뛰고 재사용한다(code-review 효율 — 드래그 다운일 때만 재계산). 부동소수 == 비교라도 보정을 안 한 경로면
         // 두 값이 **같은 리터럴**(y_esc = y_px 대입)이라 정확히 같다.
         const raw_esc = if (y_esc != y_px)
-            chrome.components.sidebar.dragTargetSlot(y_esc, self.sidebar_header_height_px, rows, self.sidebar_slot_height_px, self.sidebar_header_row_h_px, self.sidebar_scroll_offset_px)
+            chrome.components.sidebar.dragTargetSlot(y_esc, self.sidebar_header_height_px, rows, self.sidebarMetrics(), self.sidebar_scroll_offset_px)
         else
             raw_row;
         // **고정(pinned) 흡수 금지(사용자 정책 — "고정된 건 어디에도 흡수 안 됨")**: 드래그 소스 카드가 pinned면 드롭 위치가
@@ -8291,7 +8296,7 @@ pub const AppSession = struct {
     /// 확정 시 gap-clamp+relevel로 반영된다. (과거 SG5-4는 modifier 없이 헤더 드롭=넣기였으나, 사용자 요청으로 Cmd 게이트를 얹었다 —
     /// 확정 경로 moveGroupNesting/Sibling과 동일 plan.)
     fn groupDragPreviewFrame(self: *AppSession, marker: usize, y_px: f64, cmd_held: bool) void {
-        const raw_row = chrome.components.sidebar.dragTargetSlot(y_px, self.sidebar_header_height_px, self.sidebar_rows.items, self.sidebar_slot_height_px, self.sidebar_header_row_h_px, self.sidebar_scroll_offset_px);
+        const raw_row = chrome.components.sidebar.dragTargetSlot(y_px, self.sidebar_header_height_px, self.sidebar_rows.items, self.sidebarMetrics(), self.sidebar_scroll_offset_px);
         // plan 판정(사용자 확정 정책): **Cmd(⌘) 눌림 = 중첩 시도(안으로 넣기)**, **Cmd 없음 = 항상 형제(중첩 절대 안 함)**.
         //  - Cmd O: 헤더 드롭이면 groupNestPlan이 `.group_nest`를 내고(그 그룹의 자식으로), 헤더가 아닌 카드/최상위 드롭이면
         //           groupNestPlan이 null이라 아래 형제 경계로 폴백한다(N4 — Cmd라도 넣을 헤더가 없으면 형제).
@@ -16396,7 +16401,31 @@ pub const AppSession = struct {
             .depth = depth,
             .pin_derived = pin_derived,
             .local_pinned = local_pinned,
+            .lines = if (tab_index < self.tabs.items.len) self.sidebarCardLines(self.tabs.items[tab_index]) else 1,
         } }) catch {};
+    }
+
+    /// 이 Term이 **경로줄에 쓸 cwd**를 갖고 있는가 — `sidebarCwdPath`가 ""를 내는 조건의 할당 없는 판정판이다
+    /// (줄 수 계산은 매 rebuild마다 도므로 문자열을 만들지 않는다). 두 곳이 어긋나면 줄 수와 렌더가 갈린다.
+    fn sidebarHasCwd(term: *Term) bool {
+        return term.rt.observation.availability != .unavailable and term.rt.observation.cwd.items.len > 0;
+    }
+
+    /// 카드가 **실제로 그리는 줄 수**(이름 + 브랜치? + 경로? + 상태?). 카드 높이가 이 값에서 나오므로
+    /// (docs/sidebar-agent-list.md §3) 행 높이·hit-test·밴드·glyph 배치와 렌더(빈 줄을 생략하는 카드 조립부)가
+    /// **반드시 같은 값**을 봐야 한다 — 어긋나면 "보이는 곳과 눌리는 곳이 다른" 회귀가 난다. 그래서 조건을 카드
+    /// 조립부(buildSidebarTitleFrame)의 append 조건과 1:1로 맞춘 이 함수가 단일 출처다.
+    fn sidebarCardLines(self: *AppSession, tab: *Tab) u8 {
+        const term = tab.activePane().activeTerm();
+        var n: u8 = 1; // 이름줄은 항상 그린다(사용자 요청 — 보조줄만 조건부)
+        // 브랜치·경로줄은 **git repo 안**일 때만 존재한다(maru는 repo 밖 cwd 줄을 그리지 않는다). 그 전제 아래
+        // 각 토글(show-branch·show-folder)이 독립적으로 줄을 켠다.
+        if (self.termGitBranch(term) != null) {
+            if (self.loaded_config.config.sidebar.show_branch) n += 1;
+            if (self.loaded_config.config.sidebar.show_folder and sidebarHasCwd(term)) n += 1;
+        }
+        if (workspaceHasStatusLine(tab)) n += 1; // 에이전트 상태줄(4번째)
+        return n;
     }
 
     /// 표시 슬롯 → 원본 tab 인덱스(검색 필터 역매핑). 범위 밖이면 null. slotAt/click/hover가 표시 슬롯을 실제 탭으로.
@@ -17098,6 +17127,8 @@ pub const AppSession = struct {
         self.sidebar_slot_height_px = self.cell_height_px * sidebar_slot_height_ratio_milli / 1000;
         self.sidebar_header_height_px = self.cell_height_px * sidebar_header_height_ratio_milli / 1000;
         self.sidebar_header_row_h_px = self.cell_height_px * sidebar_header_row_h_ratio_milli / 1000; // 그룹 헤더 row(얇은 한 줄; SG3b-2-ii)
+        // 카드 높이는 줄 수 기반이라 cell·헤더 높이가 바뀔 때마다 함께 파생한다(줄 기하 공식은 chrome이 소유).
+        self.sidebar_metrics = .init(self.cell_height_px, self.sidebar_header_row_h_px);
         // 상단 타이틀바 띠(신호등·헤더 아이콘 줄, 탭 바는 그 아래). 펼침=한 줄, 접힘=신호등 높이 확보(computeTitlebarStripPx).
         self.titlebar_strip_px = self.computeTitlebarStripPx();
         // 사이드바 폭/cell 폭이 바뀌면 밴드의 칸 환산(sidebar_cols)도 달라지므로 다시 만든다.
@@ -25072,7 +25103,7 @@ pub const AppSession = struct {
     fn sidebarSlotAt(self: *const AppSession, y_px: f64) ?usize {
         // 가변 높이(카드=slot_h·헤더=cell_h). 반환은 row 인덱스(호출처 visibleTab이 row→tab). header_row_h는 SG3b-2에서
         // 헤더 row가 실제로 생길 때 의미를 갖고, 지금(카드만)은 안 쓰인다 — cell_height_px를 근사로 넘긴다.
-        return chrome.components.sidebar.slotAt(y_px, self.sidebar_header_height_px, self.sidebar_rows.items, self.sidebar_slot_height_px, self.sidebar_header_row_h_px, self.sidebar_scroll_offset_px);
+        return chrome.components.sidebar.slotAt(y_px, self.sidebar_header_height_px, self.sidebar_rows.items, self.sidebarMetrics(), self.sidebar_scroll_offset_px);
     }
 
     /// 사이드바 콘텐츠(표시 카드 전체 높이)가 헤더 아래 뷰포트를 넘는 양(backing px). 0이면 스크롤 불필요.
@@ -25083,7 +25114,7 @@ pub const AppSession = struct {
         // 도메인은 **sidebarRenderRows()**(SG8): collapsed 그룹 드래그는 subtree를 force-emit해 preview_rows가 sidebar_rows
         // 보다 길어지는데, 짧은 sidebar_rows로 content 높이를 재면 스크롤이 안 되고(max=0) thumb가 과대해진다. 렌더가
         // 보는 rows와 같은 도메인으로 재야 정합. 비드래그면 preview=null이라 sidebar_rows와 동일(byte-identical).
-        const content_h = chrome.components.sidebar.contentHeight(self.sidebarRenderRows(), self.sidebar_slot_height_px, self.sidebar_header_row_h_px);
+        const content_h = chrome.components.sidebar.contentHeight(self.sidebarRenderRows(), self.sidebarMetrics());
         return sidebarMaxScrollPx(content_h, self.backing_height_px, self.sidebar_header_height_px);
     }
 
@@ -25556,9 +25587,9 @@ pub const AppSession = struct {
             // 가변 높이(code-review #4): 카드 절대 y를 i*slot_h 대신 rowTop 누적으로(앞선 그룹 헤더는 header_row_h만
             // 차지). scroll=0으로 넘겨 sidebarScrollClipQuad가 뺀다(이중 차감 방지). 헤더 row는 위에서 continue라 여긴
             // 카드만 — 카드만이면 rowTop==i*slot_h+header라 동작 보존. card_h도 rowHeight로(카드=slot_h).
-            const slot_abs_y: f32 = @floatFromInt(chrome.components.sidebar.rowTop(rows, i, self.sidebar_header_height_px, slot_h, self.sidebar_header_row_h_px, 0));
+            const slot_abs_y: f32 = @floatFromInt(chrome.components.sidebar.rowTop(rows, i, self.sidebar_header_height_px, self.sidebarMetrics(), 0));
             const card_top = slot_abs_y + gap; // 카드 rect = 슬롯 사방 card_gap inset(chrome bandFill과 동일)
-            const card_h = @as(f32, @floatFromInt(chrome.components.sidebar.rowHeight(rows[i], slot_h, self.sidebar_header_row_h_px))) - 2.0 * gap;
+            const card_h = @as(f32, @floatFromInt(chrome.components.sidebar.rowHeight(row, self.sidebarMetrics()))) - 2.0 * gap;
             // ① 배경 tint — **밴드 없는 idle 슬롯에만** 오버레이 quad. 활성/호버/드롭 슬롯은 lowerSidebar가 밴드 색에
             // tint를 blend하므로 여기서 또 그리면 이중 tint(code-review). 카드 rect(gap inset)·둥근 모서리를 밴드와 맞춰
             // rich에서 카드 모양대로 보이게(전폭 직사각 bleed 방지) — tui(gap=0·radius=0)면 전폭·직각(기존 동일).
@@ -25609,10 +25640,10 @@ pub const AppSession = struct {
         // 고스트 glyph는 buildSidebarTitleDrawList가 muted 색으로 dim해 밴드와 함께 "고스트"로 읽힌다.
         if (self.sidebar_drag_preview) |dp| {
             if (dp.ghost_hi > dp.ghost_lo and dp.ghost_lo < rows.len and slot_h > 0 and self.sidebar_width_px > 0) {
-                const top_abs: f32 = @floatFromInt(chrome.components.sidebar.rowTop(rows, dp.ghost_lo, self.sidebar_header_height_px, slot_h, self.sidebar_header_row_h_px, 0));
+                const top_abs: f32 = @floatFromInt(chrome.components.sidebar.rowTop(rows, dp.ghost_lo, self.sidebar_header_height_px, self.sidebarMetrics(), 0));
                 var band_h: u32 = 0;
                 var gi = dp.ghost_lo;
-                while (gi < dp.ghost_hi and gi < rows.len) : (gi += 1) band_h +|= chrome.components.sidebar.rowHeight(rows[gi], slot_h, self.sidebar_header_row_h_px);
+                while (gi < dp.ghost_hi and gi < rows.len) : (gi += 1) band_h +|= chrome.components.sidebar.rowHeight(rows[gi], self.sidebarMetrics());
                 const is_nest = dp.plan == .group_nest;
                 const is_sibling = dp.plan == .group_sibling;
                 // 고스트 depth(첫 고스트 row = 드래그 마커/카드) — nest면 relevel된 새(더 깊은) depth를 든다.
@@ -25645,7 +25676,7 @@ pub const AppSession = struct {
                         }
                     }
                     if (pr < dp.ghost_lo) {
-                        const parent_top: f32 = @floatFromInt(chrome.components.sidebar.rowTop(rows, pr, self.sidebar_header_height_px, slot_h, self.sidebar_header_row_h_px, 0));
+                        const parent_top: f32 = @floatFromInt(chrome.components.sidebar.rowTop(rows, pr, self.sidebar_header_height_px, self.sidebarMetrics(), 0));
                         const hl_h: f32 = (top_abs + @as(f32, @floatFromInt(band_h))) - parent_top;
                         if (self.sidebarScrollClipQuad(parent_top + gap, hl_h - 2.0 * gap)) |sr| {
                             const rr: f32 = if (sr.clipped) 0 else @floatFromInt(card_tk.space.corner_radius_px);
@@ -26188,7 +26219,7 @@ pub const AppSession = struct {
     /// 접힘(폭 0)·헤더 없음·스크롤 불필요면 무동작. dropQuadsByLayer(3)가 매 프레임 비우므로 누적 안 됨.
     fn appendSidebarScrollbar(self: *AppSession) void {
         if (self.sidebar_width_px == 0 or self.cell_width_px == 0) return;
-        const slot_h = self.sidebar_slot_height_px;
+        const slot_h = self.sidebarMetrics().line_h; // 렌더 전 degenerate 판정(카드 높이는 줄 기하에서 나온다)
         if (slot_h == 0) return;
         const header = self.sidebar_header_height_px;
         if (self.backing_height_px <= header) return;
@@ -26196,7 +26227,7 @@ pub const AppSession = struct {
         const max_scroll = self.sidebarMaxScroll();
         if (max_scroll == 0) return; // 안 넘침 — 스크롤바 없음
         const view_px: f32 = @floatFromInt(viewport_h);
-        const content_px: f32 = @floatFromInt(chrome.components.sidebar.contentHeight(self.sidebarRenderRows(), slot_h, self.sidebar_header_row_h_px)); // 가변 높이(code-review #7)·드래그 중 preview_rows(SG8, sidebarMaxScroll과 같은 도메인)
+        const content_px: f32 = @floatFromInt(chrome.components.sidebar.contentHeight(self.sidebarRenderRows(), self.sidebarMetrics())); // 가변 높이(code-review #7)·드래그 중 preview_rows(SG8, sidebarMaxScroll과 같은 도메인)
         const min_thumb: f32 = @max(view_px * 0.04, 18.0);
         var thumb_h: f32 = if (content_px > 0) view_px * view_px / content_px else view_px;
         if (thumb_h < min_thumb) thumb_h = min_thumb;
@@ -26292,13 +26323,12 @@ pub const AppSession = struct {
     /// 콘텐츠 아래(목록 끝 초과)·음수면 null. lowerSidebar의 tint 역매핑·tui 셀 밴드 행 산출의 단일 출처.
     fn sidebarBandRow(self: *const AppSession, band_y: i32) ?usize {
         if (band_y < 0) return null;
-        const slot_h = self.sidebar_slot_height_px;
-        const header_row_h = self.sidebar_header_row_h_px;
+        const metrics = self.sidebarMetrics();
         const y: u32 = @intCast(band_y);
         var acc: u32 = 0;
         // SG8d: 밴드 op은 view(sidebarRenderRows())가 냈으므로 역매핑도 같은 도메인(카드 드래그 중=preview_rows)을 쓴다.
         for (self.sidebarRenderRows(), 0..) |row, i| {
-            const rh = chrome.components.sidebar.rowHeight(row, slot_h, header_row_h);
+            const rh = chrome.components.sidebar.rowHeight(row, metrics);
             if (rh == 0) continue;
             if (y < acc +| rh) return i;
             acc +|= rh;
@@ -26307,7 +26337,7 @@ pub const AppSession = struct {
     }
 
     fn lowerSidebar(self: *AppSession, ops: []const chrome.draw.Op) void {
-        const slot_h = self.sidebar_slot_height_px;
+        const slot_h = self.sidebarMetrics().line_h; // 렌더 전 degenerate 판정(카드 높이는 줄 기하에서 나온다)
         if (slot_h == 0) return;
         // SG8d: tint 소스 역매핑도 렌더 도메인(카드 드래그 중=preview_rows) — 밴드 op을 낸 view와 같은 rows를 본다.
         const rrows = self.sidebarRenderRows();
@@ -26910,20 +26940,35 @@ pub const AppSession = struct {
     /// 같은 단일 스크롤 소스). slot=압축 카드 서수(sidebarGlyphRow 인코딩과 동일 도메인). 밴드/배경 셀(slot_id==0)은
     /// 손대지 않는다(그 경로는 row 인덱스·별도 기하). replace/replaceSidebar 직후 metal_buffer.sidebar_cells에 in-place 적용.
     fn applySidebarGlyphPyTop(self: *AppSession) void {
-        fillSidebarGlyphPyTop(self.allocator, self.metal_buffer.sidebar_cells, self.sidebarRenderRows(), self.sidebar_slot_height_px, self.sidebar_header_row_h_px, self.cell_height_px);
+        fillSidebarGlyphPyTop(self.allocator, self.metal_buffer.sidebar_cells, self.sidebarRenderRows(), self.sidebarMetrics());
     }
 
     /// 사이드바 카드 줄의 세로 **스텝**(줄 top-to-top, px) = cell_height + 여유(≈0.15×ch). 예전엔 줄이 딱 ch 간격으로
     /// 붙어 촘촘했다(사용자 요청 "line-height 여유"). fillSidebarGlyphPyTop(줄 배치)·renameCaretRect(caret y)가 이 한
     /// 곳을 공유해 caret과 그려진 줄이 어긋나지 않는다. ch로 두면(여유 0) 옛 동작과 동일.
     fn sidebarLineStep(ch: u32) u32 {
-        return ch +| @max(1, ch * 15 / 100);
+        return chrome.components.sidebar.lineStep(ch); // 줄 기하 단일 출처는 chrome(높이 계산이 거기서 난다)
+    }
+
+    /// (테스트) 표시 row의 화면 y **중앙**. 카드 높이가 줄 수에 따라 달라지므로 테스트가 `sidebar_slot_height_px`를
+    /// 곱해 좌표를 만들면 카드 밖(아래)을 가리킨다 — 실제 `rowTop`/`rowHeight`로 계산해야 "보이는 곳"을 누른다.
+    fn testSidebarRowCenterY(self: *AppSession, row: usize) f64 {
+        const rows = self.sidebar_rows.items;
+        const m = self.sidebarMetrics();
+        const top = chrome.components.sidebar.rowTop(rows, row, self.sidebar_header_height_px, m, self.sidebar_scroll_offset_px);
+        const h: u32 = if (row < rows.len) chrome.components.sidebar.rowHeight(rows[row], m) else chrome.components.sidebar.cardHeight(1, m);
+        return @as(f64, @floatFromInt(top)) + @as(f64, @floatFromInt(h)) / 2.0;
+    }
+
+    /// 이 세션의 사이드바 세로 레이아웃 메트릭(카드 높이는 줄 수에서 나온다 — docs/sidebar-agent-list.md §3).
+    /// hit-test·밴드·glyph 배치가 **같은 값**을 쓰도록 여기 한 곳에서만 만든다.
+    fn sidebarMetrics(self: *const AppSession) chrome.components.sidebar.Metrics {
+        return self.sidebar_metrics;
     }
     /// `line_count` 줄이 차지하는 블록 높이(px) = (line_count-1)×step + ch(마지막 줄 뒤엔 여유 없음). 슬롯 안 블록중앙
     /// 정렬에 쓴다. step=ch면 옛 `line_count×ch`와 같아 회귀 없음.
     fn sidebarBlockHeight(line_count: u32, ch: u32) u32 {
-        if (line_count == 0) return ch;
-        return (line_count -| 1) *| sidebarLineStep(ch) +| ch;
+        return chrome.components.sidebar.blockHeight(line_count, .init(ch, 0)); // header_row_h는 블록 높이와 무관
     }
 
     /// (순수) 사이드바 glyph 셀(카드 + 그룹 헤더)의 origin_y를 **content-상대 rowTop py**로 채운다 — applySidebarGlyphPyTop의
@@ -26931,15 +26976,16 @@ pub const AppSession = struct {
     /// slot을 차지해 카드·헤더 통일 도메인). content_tops는 **모든 row**(카드·헤더)에 한 엔트리씩 = Σ(앞선 row 높이;
     /// 카드=slot_h·헤더=header_row_h) — rowTop의 헤더·스크롤 제외분. 블록중앙은 그 row 높이(rowHeight; 헤더=header_row_h·
     /// 카드=slot_h)로 잡아 헤더 한 줄이 얇은 밴드 안에서 세로 중앙에 온다. 밴드/배경 셀(slot_id==0)은 손대지 않는다(row 인덱스·별도 기하).
-    fn fillSidebarGlyphPyTop(allocator: std.mem.Allocator, cells: []metal_frame.NativeMetalCell, rows: []const chrome.components.sidebar.Row, slot_h: u32, header_row_h: u32, ch: u32) void {
-        if (cells.len == 0 or slot_h == 0 or ch == 0) return;
+    fn fillSidebarGlyphPyTop(allocator: std.mem.Allocator, cells: []metal_frame.NativeMetalCell, rows: []const chrome.components.sidebar.Row, m: chrome.components.sidebar.Metrics) void {
+        const ch = m.line_h;
+        if (cells.len == 0 or ch == 0) return;
         const base = coretext_frame_builder.sidebar_line_base; // 32 — sidebarGlyphRow 인코딩 단일 출처
         var content_tops: std.ArrayList(u32) = .empty;
         defer content_tops.deinit(allocator);
         var acc: u32 = 0;
         for (rows) |row| {
             content_tops.append(allocator, acc) catch return; // 카드·헤더 모두 한 엔트리(slot=row 인덱스). OOM: 이 프레임 skip
-            acc +|= chrome.components.sidebar.rowHeight(row, slot_h, header_row_h); // 카드=slot_h·헤더=header_row_h
+            acc +|= chrome.components.sidebar.rowHeight(row, m); // 카드=줄 수 기반·헤더=header_row_h
         }
         for (cells) |*c| {
             if (c.slot_id == 0) continue; // 밴드/배경 셀 — 자체 경로(row 인덱스)
@@ -26948,9 +26994,9 @@ pub const AppSession = struct {
             const rem = c.row % base;
             const line_count: u32 = rem / 4;
             const line_index: u32 = rem % 4;
-            const row_h = chrome.components.sidebar.rowHeight(rows[slot], slot_h, header_row_h); // 이 row의 실제 높이(헤더=얇은 줄)
+            const row_h = chrome.components.sidebar.rowHeight(rows[slot], m); // 이 row의 실제 높이(헤더=얇은 줄)
             const block_off: u32 = (row_h -| sidebarBlockHeight(line_count, ch)) / 2; // renameCaretRect와 같은 정수 블록중앙(정합)
-            c.origin_y = content_tops.items[slot] +| block_off +| line_index *| sidebarLineStep(ch); // 줄 스텝=ch+여유(촘촘함 완화)
+            c.origin_y = content_tops.items[slot] +| block_off +| line_index *| m.line_step; // 줄 스텝=ch+여유(촘촘함 완화)
         }
     }
 
@@ -27702,7 +27748,6 @@ pub const AppSession = struct {
         const sidebar = chrome.components.sidebar;
         if (!self.sidebar_collapsed and self.sidebar_width_px > 0 and self.sidebar_slot_height_px > 0) {
             const header_h: i64 = @intCast(self.sidebar_header_height_px);
-            const slot_h: i64 = @intCast(self.sidebar_slot_height_px);
             const vp_bottom: i64 = @intCast(self.backing_height_px);
             // SG8d: 카드 드래그 중이면 배지도 고스트 레이아웃(preview_rows)을 따라간다 — 렌더 도메인 단일화(놓친 소비자 이주).
             const brows = self.sidebarRenderRows();
@@ -27713,9 +27758,10 @@ pub const AppSession = struct {
                 };
                 if (abs >= 9) continue; // select_tab 0..8 → ⌘1~9만 바인딩이 있다
                 const cs = (try Local.chordStr(resolver, Action{ .select_tab = abs }, arena)) orelse continue;
-                const y = sidebar.rowTop(brows, s, self.sidebar_header_height_px, self.sidebar_slot_height_px, self.sidebar_header_row_h_px, self.sidebar_scroll_offset_px);
-                if (y + slot_h <= header_h or y >= vp_bottom) continue; // 헤더 위로 스크롤·뷰포트 아래로 벗어난 카드 생략(render scissor와 정합)
-                try badges.append(arena, .{ .rect = .{ .x = 0, .y = @intCast(@max(y, header_h)), .w = self.sidebar_width_px, .h = self.sidebar_slot_height_px }, .chord = cs });
+                const y = sidebar.rowTop(brows, s, self.sidebar_header_height_px, self.sidebarMetrics(), self.sidebar_scroll_offset_px);
+                const row_h_badge: i64 = @intCast(chrome.components.sidebar.rowHeight(row, self.sidebarMetrics()));
+                if (y + row_h_badge <= header_h or y >= vp_bottom) continue; // 헤더 위로 스크롤·뷰포트 아래로 벗어난 카드 생략(render scissor와 정합)
+                try badges.append(arena, .{ .rect = .{ .x = 0, .y = @intCast(@max(y, header_h)), .w = self.sidebar_width_px, .h = @intCast(row_h_badge) }, .chord = cs });
             }
             // 새 워크스페이스 + 버튼(헤더 줄0) → ⌘⇧T(new_tab). **헤더 아이콘 render 가드(cols<13이면 아이콘 안 그림)와 같게**
             // cols>=13에서만. 배지 rect 우단을 + 글리프 우단((cols-1)*cw, headerIconCol=cols-2의 셀 우단)에 맞춰 사이드바 밖으로 안 샌다.
@@ -30508,32 +30554,30 @@ test "그룹핀 리뷰 #1: 잃은 mouse-up 뒤 카드 재-arm이 stale 프리뷰
     session.recomputeVisibleTabs(); // rows: [c t0(0), c t1(1), c t2(2), c t3(3)]
     const sb = chrome.components.sidebar;
     const header_h = session.sidebar_header_height_px;
-    const header_row_h = session.sidebar_header_row_h_px;
-    const slot_h = session.sidebar_slot_height_px;
     const x: f64 = @floatFromInt(session.sidebar_width_px / 2);
     const rowY = struct {
-        fn f(s: *AppSession, row: usize, hh: u32, sh: u32, hrh: u32) f64 {
-            const top = chrome.components.sidebar.rowTop(s.sidebar_rows.items, row, hh, sh, hrh, 0);
-            return @floatFromInt(top + @as(i64, @intCast(sh / 2)));
+        fn f(s: *AppSession, row: usize, hh: u32) f64 {
+            const top = chrome.components.sidebar.rowTop(s.sidebar_rows.items, row, hh, s.sidebarMetrics(), 0);
+            return @floatFromInt(top + @as(i64, @intCast(chrome.components.sidebar.rowHeight(s.sidebar_rows.items[row], s.sidebarMetrics()) / 2)));
         }
     }.f;
     _ = sb;
 
     // t0(row0) 카드를 잡아(down) t2(row2) 위로 드래그 → 비커밋 카드 프리뷰(plan=.card, 실제 이동). self.tabs 불변.
-    session.mouse(1, x, rowY(session, 0, header_h, slot_h, header_row_h), 0, 0);
+    session.mouse(1, x, rowY(session, 0, header_h), 0, 0);
     try std.testing.expect(session.pointerGestureIs(.sidebar_tab));
     try std.testing.expectEqual(@as(usize, 0), session.pointer_gesture_owner.sidebar_tab.index);
-    session.mouse(2, x, rowY(session, 2, header_h, slot_h, header_row_h), 0, 0);
+    session.mouse(2, x, rowY(session, 2, header_h), 0, 0);
     try std.testing.expect(session.sidebar_drag_preview != null); // 프리뷰 활성
     try std.testing.expect(std.meta.activeTag(session.sidebar_drag_preview.?.plan) == .card); // up이 커밋하면 재배치될 plan
 
     // ★ 잃은 mouse-up 시뮬 — up 없이 다른 카드 t3(row3)에서 새 down(재-arm). 재-arm이 stale 프리뷰를 지운다.
-    session.mouse(1, x, rowY(session, 3, header_h, slot_h, header_row_h), 0, 0);
+    session.mouse(1, x, rowY(session, 3, header_h), 0, 0);
     try std.testing.expect(session.sidebar_drag_preview == null); // ★ 재-arm이 옛 프리뷰 클리어(잃은 up 정상화)
     try std.testing.expectEqual(@as(usize, 3), session.pointer_gesture_owner.sidebar_tab.index); // 새 origin(t3)
 
     // up → commitSidebarDragPreview는 프리뷰 null이라 no-op → 옛 plan 안 커밋(순서 불변).
-    session.mouse(3, x, rowY(session, 3, header_h, slot_h, header_row_h), 0, 0);
+    session.mouse(3, x, rowY(session, 3, header_h), 0, 0);
     try std.testing.expectEqual(t0, session.tabs.items[0]);
     try std.testing.expectEqual(t1, session.tabs.items[1]);
     try std.testing.expectEqual(t2, session.tabs.items[2]);
@@ -30731,6 +30775,9 @@ test "그룹핀 리뷰 #7: 드래그 중 sidebarMaxScroll이 preview_rows(더 �
 
     // 순수 스크롤 math 확인 — 실제 탭/기하와 무관하게 행 리스트만 바꿔 content 높이가 렌더 도메인을 따르는지 본다.
     session.sidebar_slot_height_px = 40;
+    // 카드 높이는 이제 줄 수 기반이라 슬롯 필드만으로는 안 잡힌다 — 1줄 카드 높이가 40이 되는 메트릭을 박아
+    // 고정 슬롯 시절 좌표 기대값을 그대로 쓴다(여백 0·스텝=줄높이).
+    session.sidebar_metrics = .{ .line_h = 40, .line_step = 40, .card_pad_v = 0, .header_row_h = session.sidebar_header_row_h_px };
     session.sidebar_header_row_h_px = 20;
     session.sidebar_header_height_px = 40;
     session.backing_height_px = 200; // 뷰포트 = 200 - 40(헤더) = 160
@@ -30780,27 +30827,25 @@ test "그룹핀 리뷰 #8: 그룹 헤더 드래그 시작이 hovered_slot을 클
     session.recomputeVisibleTabs(); // rows: [hA(0), c t0(1), c t1(2), hB(3), c t2(4), c t3(5)]
 
     const header_h = session.sidebar_header_height_px;
-    const header_row_h = session.sidebar_header_row_h_px;
-    const slot_h = session.sidebar_slot_height_px;
     const x: f64 = @floatFromInt(session.sidebar_width_px / 2);
     const rowY = struct {
-        fn f(s: *AppSession, row: usize, hh: u32, sh: u32, hrh: u32) f64 {
-            const top = chrome.components.sidebar.rowTop(s.sidebar_rows.items, row, hh, sh, hrh, 0);
-            const rh = chrome.components.sidebar.rowHeight(s.sidebar_rows.items[row], sh, hrh);
+        fn f(s: *AppSession, row: usize, hh: u32) f64 {
+            const top = chrome.components.sidebar.rowTop(s.sidebar_rows.items, row, hh, s.sidebarMetrics(), 0);
+            const rh = chrome.components.sidebar.rowHeight(s.sidebar_rows.items[row], s.sidebarMetrics());
             return @floatFromInt(top + @as(i64, @intCast(rh / 2)));
         }
     }.f;
 
     session.hovered_slot = 2; // stale 호버(카드 슬롯)
-    session.mouse(1, x, rowY(session, 0, header_h, slot_h, header_row_h), 0, 0); // down on 헤더 A → arm(토글 후보)
+    session.mouse(1, x, rowY(session, 0, header_h), 0, 0); // down on 헤더 A → arm(토글 후보)
     try std.testing.expect(session.pointerGestureIs(.sidebar_group));
     try std.testing.expectEqual(@as(?usize, 2), session.hovered_slot); // arm만으론 호버 유지(클릭=토글일 수 있음)
 
     // 그룹 B 카드(row4)로 drag → threshold 초과 → 그룹 통째 드래그 시작 → hovered_slot 클리어.
-    session.mouse(2, x, rowY(session, 4, header_h, slot_h, header_row_h), 0, 0);
+    session.mouse(2, x, rowY(session, 4, header_h), 0, 0);
     try std.testing.expect(session.pointer_gesture_owner.sidebar_group.phase == .dragging);
     try std.testing.expectEqual(@as(?usize, null), session.hovered_slot); // ★ 드래그 시작이 stale 호버 클리어
-    session.mouse(3, x, rowY(session, 4, header_h, slot_h, header_row_h), 0, 0); // up → 커밋(정리)
+    session.mouse(3, x, rowY(session, 4, header_h), 0, 0); // up → 커밋(정리)
     try std.testing.expectEqual(@as(?usize, null), session.hovered_slot);
 }
 
@@ -31271,6 +31316,9 @@ test "SR5(a): 빈 gap 첫 인터리브 — 마지막 멤버 아래 경계 드롭
     session.tabs.items[2].group_depth = 1;
     // 사이드바 가변 높이 메트릭(아래 경계 판정 rowTop/rowHeight가 필요) — 헤더=20·카드=40.
     session.sidebar_slot_height_px = 40;
+    // 카드 높이는 이제 줄 수 기반이라 슬롯 필드만으로는 안 잡힌다 — 1줄 카드 높이가 40이 되는 메트릭을 박아
+    // 고정 슬롯 시절 좌표 기대값을 그대로 쓴다(여백 0·스텝=줄높이).
+    session.sidebar_metrics = .{ .line_h = 40, .line_step = 40, .card_pad_v = 0, .header_row_h = session.sidebar_header_row_h_px };
     session.sidebar_header_row_h_px = 20;
     session.sidebar_header_height_px = 0;
     session.sidebar_scroll_offset_px = 0;
@@ -31285,8 +31333,8 @@ test "SR5(a): 빈 gap 첫 인터리브 — 마지막 멤버 아래 경계 드롭
         .group_header => {},
     };
     const rows = session.sidebar_rows.items;
-    const top = chrome.components.sidebar.rowTop(rows, a1_row, session.sidebar_header_height_px, session.sidebar_slot_height_px, session.sidebar_header_row_h_px, session.sidebar_scroll_offset_px);
-    const h = chrome.components.sidebar.rowHeight(rows[a1_row], session.sidebar_slot_height_px, session.sidebar_header_row_h_px);
+    const top = chrome.components.sidebar.rowTop(rows, a1_row, session.sidebar_header_height_px, session.sidebarMetrics(), session.sidebar_scroll_offset_px);
+    const h = chrome.components.sidebar.rowHeight(rows[a1_row], session.sidebarMetrics());
     const y_lower = @as(f64, @floatFromInt(top)) + @as(f64, @floatFromInt(h)) * 0.8; // 아래 40% 안 → gap 존
     const y_upper = @as(f64, @floatFromInt(top)) + @as(f64, @floatFromInt(h)) * 0.2; // 상단 → 일반 멤버 드롭
 
@@ -31335,6 +31383,9 @@ test "SR5(b): 접힌 그룹 헤더 아래 경계 gap drop + skip 엣지(펼친 �
     session.tabs.items[2].group_start = try allocator.dupe(u8, "B");
     session.tabs.items[2].group_depth = 1;
     session.sidebar_slot_height_px = 40;
+    // 카드 높이는 이제 줄 수 기반이라 슬롯 필드만으로는 안 잡힌다 — 1줄 카드 높이가 40이 되는 메트릭을 박아
+    // 고정 슬롯 시절 좌표 기대값을 그대로 쓴다(여백 0·스텝=줄높이).
+    session.sidebar_metrics = .{ .line_h = 40, .line_step = 40, .card_pad_v = 0, .header_row_h = session.sidebar_header_row_h_px };
     session.sidebar_header_row_h_px = 20;
     session.sidebar_header_height_px = 0;
     session.sidebar_scroll_offset_px = 0;
@@ -31351,8 +31402,8 @@ test "SR5(b): 접힌 그룹 헤더 아래 경계 gap drop + skip 엣지(펼친 �
         .card => {},
     };
     const rows = session.sidebar_rows.items;
-    const ta = chrome.components.sidebar.rowTop(rows, ha_row, session.sidebar_header_height_px, session.sidebar_slot_height_px, session.sidebar_header_row_h_px, session.sidebar_scroll_offset_px);
-    const hh = chrome.components.sidebar.rowHeight(rows[ha_row], session.sidebar_slot_height_px, session.sidebar_header_row_h_px);
+    const ta = chrome.components.sidebar.rowTop(rows, ha_row, session.sidebar_header_height_px, session.sidebarMetrics(), session.sidebar_scroll_offset_px);
+    const hh = chrome.components.sidebar.rowHeight(rows[ha_row], session.sidebarMetrics());
     const y_lower_a = @as(f64, @floatFromInt(ta)) + @as(f64, @floatFromInt(hh)) * 0.8;
 
     // 접힌 A 헤더 아래 경계로 b1(from=3) 드롭 → gap plan(target=groupSubtreeEnd(A)=2, top_level=true).
@@ -31361,8 +31412,8 @@ test "SR5(b): 접힌 그룹 헤더 아래 경계 gap drop + skip 엣지(펼친 �
     try std.testing.expect(gap.top_level);
 
     // 펼친 B 헤더 아래 경계는 null(첫 멤버와 모호 — 접힌 헤더만).
-    const tb = chrome.components.sidebar.rowTop(rows, hb_row, session.sidebar_header_height_px, session.sidebar_slot_height_px, session.sidebar_header_row_h_px, session.sidebar_scroll_offset_px);
-    const hb = chrome.components.sidebar.rowHeight(rows[hb_row], session.sidebar_slot_height_px, session.sidebar_header_row_h_px);
+    const tb = chrome.components.sidebar.rowTop(rows, hb_row, session.sidebar_header_height_px, session.sidebarMetrics(), session.sidebar_scroll_offset_px);
+    const hb = chrome.components.sidebar.rowHeight(rows[hb_row], session.sidebarMetrics());
     try std.testing.expect(session.sidebarCardDropAfterGroup(hb_row, 3, @as(f64, @floatFromInt(tb)) + @as(f64, @floatFromInt(hb)) * 0.8) == null);
 
     // 확정: b1이 접힌 A 뒤 top카드. [A(접힘), a1(숨김), b1(top), B].
@@ -32487,18 +32538,18 @@ test "code-review #3: pane grip을 그룹 헤더에 드롭 → 새 워크스페�
     const x: f64 = @floatFromInt(session.sidebar_width_px / 2);
 
     // 그룹 헤더 row(index 1) 중앙 y에 pane grip 드롭 → **null(no-op)**. 옛 코드는 new_workspace로 falls through했다.
-    const hdr_top = sb.rowTop(session.sidebar_rows.items, 1, header_h, slot_h, header_row_h, 0);
+    const hdr_top = sb.rowTop(session.sidebar_rows.items, 1, header_h, session.sidebarMetrics(), 0);
     const hdr_y: f64 = @floatFromInt(hdr_top + @as(i64, @intCast(header_row_h / 2)));
     try std.testing.expect(session.computePaneDropDest(x, hdr_y) == null); // 헤더 드롭 = 무동작
 
     // 비활성 카드 row(index 0 = t0) → merge(그 워크스페이스에 합치기).
-    const card_top = sb.rowTop(session.sidebar_rows.items, 0, header_h, slot_h, header_row_h, 0);
-    const card_y: f64 = @floatFromInt(card_top + @as(i64, @intCast(slot_h / 2)));
+    const card_top = sb.rowTop(session.sidebar_rows.items, 0, header_h, session.sidebarMetrics(), 0);
+    const card_y: f64 = @floatFromInt(card_top + @as(i64, @intCast(sb.rowHeight(session.sidebar_rows.items[0], session.sidebarMetrics()) / 2)));
     const dest = session.computePaneDropDest(x, card_y);
     try std.testing.expect(dest != null and dest.? == .merge);
 
     // 리스트 아래 빈 영역(past-end) → new_workspace(자연스러운 "빈 영역=새 워크스페이스" 보존).
-    const past_end = sb.rowTop(session.sidebar_rows.items, session.sidebar_rows.items.len, header_h, slot_h, header_row_h, 0);
+    const past_end = sb.rowTop(session.sidebar_rows.items, session.sidebar_rows.items.len, header_h, session.sidebarMetrics(), 0);
     const below_y: f64 = @floatFromInt(past_end + @as(i64, @intCast(slot_h)));
     const dest2 = session.computePaneDropDest(x, below_y);
     try std.testing.expect(dest2 != null and dest2.? == .new_workspace);
@@ -32780,19 +32831,17 @@ test "SG4/SG5-1: 두 그룹 사이 이동(펼친 헤더 from>M) + 마커 탭 카
     session.recomputeVisibleTabs(); // rows: [header A(0), card t0(1), card t3(2), card t1(3), header B(4), card t2(5)]
     const sb = chrome.components.sidebar;
     const header_h = session.sidebar_header_height_px;
-    const header_row_h = session.sidebar_header_row_h_px;
-    const slot_h = session.sidebar_slot_height_px;
     const x: f64 = @floatFromInt(session.sidebar_width_px / 2);
     // t0(마커 A) 카드 = row 1. row 상단 y = rowTop(rows,1,...). 그 중앙을 클릭해 드래그 arm.
-    const marker_card_top = sb.rowTop(session.sidebar_rows.items, 1, header_h, slot_h, header_row_h, 0);
-    const marker_card_y: f64 = @floatFromInt(marker_card_top + @as(i64, @intCast(slot_h / 2)));
+    const marker_card_top = sb.rowTop(session.sidebar_rows.items, 1, header_h, session.sidebarMetrics(), 0);
+    const marker_card_y: f64 = @floatFromInt(marker_card_top + @as(i64, @intCast(sb.rowHeight(session.sidebar_rows.items[1], session.sidebarMetrics()) / 2)));
     session.mouse(1, x, marker_card_y, 0, 0); // down → 마커 카드에서 드래그 arm
     try std.testing.expect(session.pointerGestureIs(.sidebar_tab));
     try std.testing.expectEqual(@as(usize, 0), session.pointer_gesture_owner.sidebar_tab.index); // t0(마커 A) 잡음
     // 그룹 B 카드(row 5) 위로 드래그 → **SG8e 비커밋 프리뷰**(self.tabs 불변, subtree 고스트). 옛 라이브 재배치 대신
     // up이 마지막 plan(group_sibling)을 1회 커밋한다. 드롭 하이라이트(drop_slot)는 고스트+삽입선이 대체하므로 null.
-    const groupb_card_top = sb.rowTop(session.sidebar_rows.items, 5, header_h, slot_h, header_row_h, 0);
-    const groupb_card_y: f64 = @floatFromInt(groupb_card_top + @as(i64, @intCast(slot_h / 2)));
+    const groupb_card_top = sb.rowTop(session.sidebar_rows.items, 5, header_h, session.sidebarMetrics(), 0);
+    const groupb_card_y: f64 = @floatFromInt(groupb_card_top + @as(i64, @intCast(sb.rowHeight(session.sidebar_rows.items[5], session.sidebarMetrics()) / 2)));
     var pre_grp: [8]*Tab = undefined; // 드래그 전 스냅샷(드래그 중 self.tabs 불변 확인)
     for (session.tabs.items, 0..) |t, i| pre_grp[i] = t;
     session.mouse(2, x, groupb_card_y, 0, 0);
@@ -32815,8 +32864,8 @@ test "SG4/SG5-1: 두 그룹 사이 이동(펼친 헤더 from>M) + 마커 탭 카
     // 현재 [t2(mk B), t0(mk A), t3, t1] → rows: [header B(0), card t2(1), header A(2), card t0(3), card t3(4), card t1(5)].
     // t1 카드 = row 5. 그 중앙을 down.
     session.recomputeVisibleTabs();
-    const t1_card_top = sb.rowTop(session.sidebar_rows.items, 5, header_h, slot_h, header_row_h, 0);
-    const t1_card_y: f64 = @floatFromInt(t1_card_top + @as(i64, @intCast(slot_h / 2)));
+    const t1_card_top = sb.rowTop(session.sidebar_rows.items, 5, header_h, session.sidebarMetrics(), 0);
+    const t1_card_y: f64 = @floatFromInt(t1_card_top + @as(i64, @intCast(sb.rowHeight(session.sidebar_rows.items[5], session.sidebarMetrics()) / 2)));
     // 드래그 전 self.tabs 스냅샷(드래그 중 불변 확인용).
     var pre_drag: [8]*Tab = undefined;
     for (session.tabs.items, 0..) |t, i| pre_drag[i] = t;
@@ -32824,10 +32873,10 @@ test "SG4/SG5-1: 두 그룹 사이 이동(펼친 헤더 from>M) + 마커 탭 카
     try std.testing.expect(session.pointerGestureIs(.sidebar_tab));
     try std.testing.expect(session.tabs.items[session.pointer_gesture_owner.sidebar_tab.index].group_start == null); // 마커 아님(t1)
     // drag to some row → 프리뷰 활성(고스트) + 원본-도메인 drop_slot은 세팅 안 함(고스트+삽입선이 대체) + self.tabs 불변.
-    session.mouse(2, x, @floatFromInt(header_h + slot_h + slot_h / 2), 0, 0);
+    session.mouse(2, x, session.testSidebarRowCenterY(1), 0, 0);
     try std.testing.expect(session.sidebar_drag_preview != null); // 비커밋 프리뷰 활성
     for (session.tabs.items, 0..) |t, i| try std.testing.expectEqual(pre_drag[i], t); // 드래그 중 self.tabs 불변
-    session.mouse(3, x, @floatFromInt(header_h + slot_h + slot_h / 2), 0, 0); // up → 마지막 plan 1회 커밋 + 프리뷰 정리
+    session.mouse(3, x, session.testSidebarRowCenterY(1), 0, 0); // up → 마지막 plan 1회 커밋 + 프리뷰 정리
     try std.testing.expect(session.sidebar_drag_preview == null); // 프리뷰 정리됨(원본 복귀)
     try std.testing.expectEqual(@as(usize, 0), session.sidebar_preview_rows.items.len);
     try std.testing.expect(!session.pointerGestureIs(.sidebar_tab));
@@ -34142,8 +34191,8 @@ fn cardRowOf(session: *AppSession, tab_idx: usize) usize {
 /// 표시 row의 화면 y(backing px)를 그 row 안 frac 위치로 — cardDropPlan 실좌표(y_px) 테스트가 커서 y를 구성한다.
 fn sidebarDragScreenY(session: *AppSession, row: usize, frac: f64) f64 {
     const rows = session.sidebar_rows.items;
-    const top = chrome.components.sidebar.rowTop(rows, row, session.sidebar_header_height_px, session.sidebar_slot_height_px, session.sidebar_header_row_h_px, session.sidebar_scroll_offset_px);
-    const h = chrome.components.sidebar.rowHeight(rows[row], session.sidebar_slot_height_px, session.sidebar_header_row_h_px);
+    const top = chrome.components.sidebar.rowTop(rows, row, session.sidebar_header_height_px, session.sidebarMetrics(), session.sidebar_scroll_offset_px);
+    const h = chrome.components.sidebar.rowHeight(rows[row], session.sidebarMetrics());
     return @as(f64, @floatFromInt(top)) + @as(f64, @floatFromInt(h)) * frac;
 }
 
@@ -34170,6 +34219,9 @@ test "(A) 카드 드래그 실좌표: 고정 탭을 그룹 꼬리로 끌면 top_
     // X=t0(고정 leading 탭, top_level=false — createGroup이 남기는 실제 상태), A=[a0=t1(마커), a1=t2(멤버)].
     try setGroupMarker(session, 1, "A", 1);
     session.sidebar_slot_height_px = 40;
+    // 카드 높이는 이제 줄 수 기반이라 슬롯 필드만으로는 안 잡힌다 — 1줄 카드 높이가 40이 되는 메트릭을 박아
+    // 고정 슬롯 시절 좌표 기대값을 그대로 쓴다(여백 0·스텝=줄높이).
+    session.sidebar_metrics = .{ .line_h = 40, .line_step = 40, .card_pad_v = 0, .header_row_h = session.sidebar_header_row_h_px };
     session.sidebar_header_row_h_px = 20;
     session.sidebar_header_height_px = 30;
     session.sidebar_scroll_offset_px = 0;
@@ -34184,7 +34236,7 @@ test "(A) 카드 드래그 실좌표: 고정 탭을 그룹 꼬리로 끌면 top_
     //    "그룹 꼬리"는 원본 a1 상단쯤이다. 옛 판정(보정 없이 이 y로 sidebarCardDropAfterGroup)은 하단 40% 밖이라 흡수였다.
     const y_tail = sidebarDragScreenY(session, a1_row, 0.15);
     // 옛 경로(보정 없음) 대비: raw_row=a1, 하단 경계 아님 → 탈출 null(흡수). 이게 헤드리스가 못 잡던 실패다.
-    const raw_uncomp = chrome.components.sidebar.dragTargetSlot(y_tail, session.sidebar_header_height_px, session.sidebar_rows.items, session.sidebar_slot_height_px, session.sidebar_header_row_h_px, session.sidebar_scroll_offset_px);
+    const raw_uncomp = chrome.components.sidebar.dragTargetSlot(y_tail, session.sidebar_header_height_px, session.sidebar_rows.items, session.sidebarMetrics(), session.sidebar_scroll_offset_px);
     try std.testing.expect(session.sidebarCardDropAfterGroup(raw_uncomp, 0, y_tail) == null); // 보정 없으면 탈출 안 함(흡수)
     // 새 경로(cardDropPlan, 프리뷰 시프트 보정) → top_level 탈출.
     const plan_tail = session.cardDropPlan(0, y_tail);
@@ -34222,6 +34274,9 @@ test "(A) 카드 드래그 실좌표: 고정 탭을 그룹 꼬리로 끌면 top_
     inline for (0..3) |i| s2.tabs.items[i].pinned = true;
     try setGroupMarker(s2, 1, "A", 1);
     s2.sidebar_slot_height_px = 40;
+    // 카드 높이는 이제 줄 수 기반이라 슬롯 필드만으로는 안 잡힌다 — 1줄 카드 높이가 40이 되는 메트릭을 박아
+    // 고정 슬롯 시절 좌표 기대값을 그대로 쓴다(여백 0·스텝=줄높이).
+    s2.sidebar_metrics = .{ .line_h = 40, .line_step = 40, .card_pad_v = 0, .header_row_h = s2.sidebar_header_row_h_px };
     s2.sidebar_header_row_h_px = 20;
     s2.sidebar_header_height_px = 30;
     s2.sidebar_scroll_offset_px = 0;
@@ -34260,6 +34315,9 @@ test "SR-PIN1: 고정 탭을 그룹 한복판에 드롭 → 흡수 금지(전체
     // X=t0(고정 leading 탭, 드래그 소스), A=[Am=t1(마커), a1=t2, a2=t3]. a1=**한복판 멤버**(꼬리/헤더 아님, gap 미발화).
     try setGroupMarker(session, 1, "A", 1);
     session.sidebar_slot_height_px = 40;
+    // 카드 높이는 이제 줄 수 기반이라 슬롯 필드만으로는 안 잡힌다 — 1줄 카드 높이가 40이 되는 메트릭을 박아
+    // 고정 슬롯 시절 좌표 기대값을 그대로 쓴다(여백 0·스텝=줄높이).
+    session.sidebar_metrics = .{ .line_h = 40, .line_step = 40, .card_pad_v = 0, .header_row_h = session.sidebar_header_row_h_px };
     session.sidebar_header_row_h_px = 20;
     session.sidebar_header_height_px = 30;
     session.sidebar_scroll_offset_px = 0;
@@ -34325,6 +34383,9 @@ test "SR-PIN2: 비고정 탭을 같은 그룹 한복판에 드롭 → 흡수 유
     inline for (0..3) |_| _ = try session.newTab(); // [t0..t3], 전부 **비고정**(기본)
     try setGroupMarker(session, 1, "A", 1); // X=t0(top카드), A=[Am=t1, a1=t2, a2=t3]
     session.sidebar_slot_height_px = 40;
+    // 카드 높이는 이제 줄 수 기반이라 슬롯 필드만으로는 안 잡힌다 — 1줄 카드 높이가 40이 되는 메트릭을 박아
+    // 고정 슬롯 시절 좌표 기대값을 그대로 쓴다(여백 0·스텝=줄높이).
+    session.sidebar_metrics = .{ .line_h = 40, .line_step = 40, .card_pad_v = 0, .header_row_h = session.sidebar_header_row_h_px };
     session.sidebar_header_row_h_px = 20;
     session.sidebar_header_height_px = 30;
     session.sidebar_scroll_offset_px = 0;
@@ -34434,6 +34495,9 @@ test "SR-PIN4: 고정 탭을 비고정 리전 위치로 드래그 → 고정 리
     session.tabs.items[1].pinned = true; // P1=t1(고정)
     // u2=t2 비고정. 고정 리전 [0,2), 비고정 [2,3).
     session.sidebar_slot_height_px = 40;
+    // 카드 높이는 이제 줄 수 기반이라 슬롯 필드만으로는 안 잡힌다 — 1줄 카드 높이가 40이 되는 메트릭을 박아
+    // 고정 슬롯 시절 좌표 기대값을 그대로 쓴다(여백 0·스텝=줄높이).
+    session.sidebar_metrics = .{ .line_h = 40, .line_step = 40, .card_pad_v = 0, .header_row_h = session.sidebar_header_row_h_px };
     session.sidebar_header_row_h_px = 20;
     session.sidebar_header_height_px = 30;
     session.sidebar_scroll_offset_px = 0;
@@ -34730,26 +34794,24 @@ test "SG5-1: 헤더 클릭(접기 토글) vs 헤더 드래그(그룹 통째 이�
 
     const sb = chrome.components.sidebar;
     const header_h = session.sidebar_header_height_px;
-    const header_row_h = session.sidebar_header_row_h_px;
-    const slot_h = session.sidebar_slot_height_px;
     const x: f64 = @floatFromInt(session.sidebar_width_px / 2);
     const rowCenterY = struct {
-        fn f(s: *AppSession, row: usize, hh: u32, sh: u32, hrh: u32) f64 {
-            const top = sb.rowTop(s.sidebar_rows.items, row, hh, sh, hrh, 0);
-            const rh = sb.rowHeight(s.sidebar_rows.items[row], sh, hrh);
+        fn f(s: *AppSession, row: usize, hh: u32) f64 {
+            const top = sb.rowTop(s.sidebar_rows.items, row, hh, s.sidebarMetrics(), 0);
+            const rh = sb.rowHeight(s.sidebar_rows.items[row], s.sidebarMetrics());
             return @floatFromInt(top + @as(i64, @intCast(rh / 2)));
         }
     }.f;
 
     // ── ① 헤더 드래그(threshold 초과) = 그룹 통째 이동. 헤더 A(row0)를 잡아 그룹 B 카드(row4) 위로 끈다.
     session.recomputeVisibleTabs(); // [hA(0), c t0(1), c t1(2), hB(3), c t2(4), c t3(5)]
-    const headerA_y = rowCenterY(session, 0, header_h, slot_h, header_row_h);
+    const headerA_y = rowCenterY(session, 0, header_h);
     session.mouse(1, x, headerA_y, 0, 0); // down on 헤더 A → 접기 토글 후보로 arm(즉시 토글 아님)
     try std.testing.expect(session.pointerGestureIs(.sidebar_group));
     try std.testing.expect(session.pointer_gesture_owner.sidebar_group.phase != .dragging); // 아직 threshold 전
     try std.testing.expectEqual(@as(usize, 0), session.pointer_gesture_owner.sidebar_group.marker); // 마커 A(t0, index0)
     try std.testing.expect(!session.tabs.items[0].group_collapsed); // 아직 토글 안 됨(down만으론)
-    const groupB_card_y = rowCenterY(session, 4, header_h, slot_h, header_row_h);
+    const groupB_card_y = rowCenterY(session, 4, header_h);
     session.mouse(2, x, groupB_card_y, 0, 0); // drag 멀리 → threshold 초과 → 그룹 통째 드래그(SG8e 비커밋 프리뷰)
     try std.testing.expect(session.pointer_gesture_owner.sidebar_group.phase == .dragging); // 승격됨
     try std.testing.expect(session.sidebar_drag_preview != null); // 비커밋 프리뷰(subtree 고스트)
@@ -34772,7 +34834,7 @@ test "SG5-1: 헤더 클릭(접기 토글) vs 헤더 드래그(그룹 통째 이�
 
     // ── ② 헤더 클릭(threshold 미달 = move 없음) = 접기 토글. 헤더 B(현 row0)를 down→up(움직임 없음).
     session.recomputeVisibleTabs(); // [hB(0), c t2(1), c t3(2), hA(3), c t0(4), c t1(5)]
-    const headerB_y = rowCenterY(session, 0, header_h, slot_h, header_row_h);
+    const headerB_y = rowCenterY(session, 0, header_h);
     const order_before = [_]*Tab{ session.tabs.items[0], session.tabs.items[1], session.tabs.items[2], session.tabs.items[3] };
     try std.testing.expect(!session.tabs.items[0].group_collapsed); // B(index0) 펼침
     session.mouse(1, x, headerB_y, 0, 0); // down → arm
@@ -34784,7 +34846,7 @@ test "SG5-1: 헤더 클릭(접기 토글) vs 헤더 드래그(그룹 통째 이�
 
     // ── ③ 헤더 살짝만 움직이고 up(threshold 미달) = 여전히 접기 토글(그룹 이동 아님). B는 접힘 상태 → 펼치기 토글.
     session.recomputeVisibleTabs(); // [hB(0,collapsed), hA(1), c t0(2), c t1(3)]
-    const headerB2_y = rowCenterY(session, 0, header_h, slot_h, header_row_h);
+    const headerB2_y = rowCenterY(session, 0, header_h);
     const order_before2 = [_]*Tab{ session.tabs.items[0], session.tabs.items[1], session.tabs.items[2], session.tabs.items[3] };
     session.mouse(1, x, headerB2_y, 0, 0); // down → arm
     session.mouse(2, x, headerB2_y + 1, 0, 0); // 아주 살짝(dy=1 < threshold) → active 승격 안 됨
@@ -34972,23 +35034,21 @@ test "SG5-4/N2: 그룹 헤더를 다른 그룹 헤더에 Cmd(⌘) 드롭 → 중
 
     const sb = chrome.components.sidebar;
     const header_h = session.sidebar_header_height_px;
-    const header_row_h = session.sidebar_header_row_h_px;
-    const slot_h = session.sidebar_slot_height_px;
     const x: f64 = @floatFromInt(session.sidebar_width_px / 2);
     const rowCenterY = struct {
-        fn f(s: *AppSession, row: usize, hh: u32, shh: u32, hrh: u32) f64 {
-            const top = sb.rowTop(s.sidebar_rows.items, row, hh, shh, hrh, 0);
-            const rh = sb.rowHeight(s.sidebar_rows.items[row], shh, hrh);
+        fn f(s: *AppSession, row: usize, hh: u32) f64 {
+            const top = sb.rowTop(s.sidebar_rows.items, row, hh, s.sidebarMetrics(), 0);
+            const rh = sb.rowHeight(s.sidebar_rows.items[row], s.sidebarMetrics());
             return @floatFromInt(top + @as(i64, @intCast(rh / 2)));
         }
     }.f;
 
     // 헤더 A(row0)를 잡아 헤더 B(row3) 위로 **Cmd(⌘, mods=32) 드래그** → A가 B의 자식으로 중첩(Cmd=중첩 정책).
     const CMD: i32 = 32;
-    const headerA_y = rowCenterY(session, 0, header_h, slot_h, header_row_h);
+    const headerA_y = rowCenterY(session, 0, header_h);
     session.mouse(1, x, headerA_y, 0, CMD); // down on 헤더 A → arm
     try std.testing.expect(session.pointerGestureIs(.sidebar_group));
-    const headerB_y = rowCenterY(session, 3, header_h, slot_h, header_row_h);
+    const headerB_y = rowCenterY(session, 3, header_h);
     session.mouse(2, x, headerB_y, 0, CMD); // Cmd 드래그 → threshold 초과 → 헤더 드롭=중첩 plan의 **비커밋 프리뷰**(SG8e)
     try std.testing.expect(session.pointer_gesture_owner.sidebar_group.phase == .dragging);
     try std.testing.expect(session.sidebar_drag_preview != null); // 비커밋 프리뷰(subtree 고스트, B 자식 depth로 들여쓰기)
@@ -35009,8 +35069,8 @@ test "SG5-4/N2: 그룹 헤더를 다른 그룹 헤더에 Cmd(⌘) 드롭 → 중
 // 표시 row의 세로 중앙 y(backing px, scroll=0). 그룹 드래그 mouse 시뮬레이션 테스트가 공유한다(N2와 같은 산식).
 fn sbRowCenterY(s: *AppSession, row: usize) f64 {
     const sb = chrome.components.sidebar;
-    const top = sb.rowTop(s.sidebar_rows.items, row, s.sidebar_header_height_px, s.sidebar_slot_height_px, s.sidebar_header_row_h_px, 0);
-    const rh = sb.rowHeight(s.sidebar_rows.items[row], s.sidebar_slot_height_px, s.sidebar_header_row_h_px);
+    const top = sb.rowTop(s.sidebar_rows.items, row, s.sidebar_header_height_px, s.sidebarMetrics(), 0);
+    const rh = sb.rowHeight(s.sidebar_rows.items[row], s.sidebarMetrics());
     return @floatFromInt(top + @as(i64, @intCast(rh / 2)));
 }
 
@@ -35348,7 +35408,6 @@ test "B1: 고정 그룹 0 + Cmd 미사용 그룹 드래그 = moveGroupSibling과
 
 test "fillSidebarGlyphPyTop: 그룹 헤더가 앞서면 카드 glyph py_top이 rowTop(가변 높이)로 밀린다 (SG3b-2-ii #1·#5·#6)" {
     const sb = chrome.components.sidebar;
-    const slot_h: u32 = 100;
     const header_row_h: u32 = 24;
     const ch: u32 = 20;
     // glyph 셀 하나 만들기(슬롯=**표시 row 인덱스**; 헤더도 slot을 차지, line_index/line_count는 sidebarGlyphRow로 인코딩). slot_id≠0=glyph.
@@ -35368,10 +35427,14 @@ test "fillSidebarGlyphPyTop: 그룹 헤더가 앞서면 카드 glyph py_top이 r
     };
     // 헤더 glyph(slot0, 1줄), 카드0 glyph(slot1), 카드1 glyph(slot2), 밴드 셀.
     var cells = [_]metal_frame.NativeMetalCell{ glyphCell(0, 0, 1), glyphCell(1, 0, 1), glyphCell(2, 0, 1), bandCell };
-    AppSession.fillSidebarGlyphPyTop(std.testing.allocator, &cells, &rows, slot_h, header_row_h, ch);
+    AppSession.fillSidebarGlyphPyTop(std.testing.allocator, &cells, &rows, .init(ch, header_row_h));
     try std.testing.expectEqual(@as(u32, (24 - 20) / 2), cells[0].origin_y); // 헤더 slot0: content top0 + 얇은 줄(24) 세로 중앙(24-20)/2=2
-    try std.testing.expectEqual(@as(u32, 24 + 40), cells[1].origin_y); // 카드0 slot1: content top=헤더(24) + block_off(100-20)/2=40
-    try std.testing.expectEqual(@as(u32, 24 + 100 + 40), cells[2].origin_y); // 카드1 slot2: content top=24+100 + 40
+    // 카드 높이는 이제 줄 수 기반(cardHeight)이라 기대값도 그 계산에서 파생한다 — 줄 기하 조정 시 자동 정합.
+    const m_t = chrome.components.sidebar.Metrics.init(ch, header_row_h);
+    const card_h_t = chrome.components.sidebar.cardHeight(1, m_t); // 이 rows의 카드는 1줄
+    const block_off_t = (card_h_t - AppSession.sidebarBlockHeight(1, ch)) / 2;
+    try std.testing.expectEqual(@as(u32, 24 + block_off_t), cells[1].origin_y); // 카드0 slot1: content top=헤더(24) + 블록중앙
+    try std.testing.expectEqual(@as(u32, 24 + card_h_t + block_off_t), cells[2].origin_y); // 카드1 slot2: + 카드0 높이
     try std.testing.expectEqual(@as(u32, 0), cells[3].origin_y); // 밴드 셀은 그대로
 
     // (B) 동작 보존: 헤더 없이 카드만이면 content top = row*slot_h(균일 — 옛 slot_idx*slot_h와 동일).
@@ -35380,16 +35443,58 @@ test "fillSidebarGlyphPyTop: 그룹 헤더가 앞서면 카드 glyph py_top이 r
         .{ .card = .{ .tab = 1, .label = "", .active = false } },
     };
     var cells2 = [_]metal_frame.NativeMetalCell{ glyphCell(0, 0, 1), glyphCell(1, 0, 1) };
-    AppSession.fillSidebarGlyphPyTop(std.testing.allocator, &cells2, &rows_flat, slot_h, header_row_h, ch);
-    try std.testing.expectEqual(@as(u32, 0 * 100 + 40), cells2[0].origin_y);
-    try std.testing.expectEqual(@as(u32, 1 * 100 + 40), cells2[1].origin_y);
+    AppSession.fillSidebarGlyphPyTop(std.testing.allocator, &cells2, &rows_flat, .init(ch, header_row_h));
+    try std.testing.expectEqual(@as(u32, 0 * card_h_t + block_off_t), cells2[0].origin_y);
+    try std.testing.expectEqual(@as(u32, 1 * card_h_t + block_off_t), cells2[1].origin_y);
 
     // (C) 다줄 카드: 카드0(slot1, 헤더 뒤) line_count=3. 줄 스텝=ch+여유(sidebarLineStep)라 블록 높이=sidebarBlockHeight(3,ch),
     // 블록중앙 오프셋=(slot_h-블록)/2, 2줄째는 +2*step. content top=헤더(24). 값은 헬퍼로 파생해 스텝 조정 시 자동 정합.
     var cells3 = [_]metal_frame.NativeMetalCell{glyphCell(1, 2, 3)};
-    AppSession.fillSidebarGlyphPyTop(std.testing.allocator, &cells3, &rows, slot_h, header_row_h, ch);
-    const block_off_c: u32 = (slot_h - AppSession.sidebarBlockHeight(3, ch)) / 2;
+    AppSession.fillSidebarGlyphPyTop(std.testing.allocator, &cells3, &rows, .init(ch, header_row_h));
+    // 이 카드 row의 실제 높이(1줄)로 블록중앙을 잡는다 — 3줄 glyph를 1줄 카드에 넣는 인코딩 검증이라
+    // 블록이 카드보다 크면 오프셋 0으로 포화된다(-|). 옛 고정 슬롯(100) 하드코딩을 대체.
+    const block_off_c: u32 = (card_h_t -| AppSession.sidebarBlockHeight(3, ch)) / 2;
     try std.testing.expectEqual(@as(u32, 24 + block_off_c + 2 * AppSession.sidebarLineStep(ch)), cells3[0].origin_y); // 헤더24 + block_off + 2줄*step(여유)
+}
+
+// 카드 줄 수는 **행 높이(hit-test·밴드·glyph)와 렌더가 공유하는 단일 출처**다(sidebarCardLines). 두 곳이 갈리면
+// 카드가 그리는 줄 수와 그 카드가 차지하는 높이가 어긋나 "보이는 곳과 눌리는 곳이 다른" 회귀가 난다. 이 테스트는
+// 상태 변화가 줄 수 → 카드 높이 → 다음 row의 시작 y까지 실제로 전파되는지 못박는다.
+test "사이드바 카드 줄 수: 에이전트 상태줄이 붙으면 카드가 그만큼 높아진다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const session = try initSmokeSessionSized(a);
+    defer a.destroy(session);
+    defer session.deinit();
+
+    const sb = chrome.components.sidebar;
+    const tab = session.tabs.items[0];
+    const term = tab.activeTerm();
+
+    // (1) 에이전트 없음 = 이름줄만(controlled_smoke는 git repo 밖이라 브랜치·경로줄이 없다).
+    term.agent_kind = .none;
+    session.rebuildSidebar() catch {};
+    try std.testing.expectEqual(@as(u8, 1), session.sidebarCardLines(tab));
+    const rows1 = session.sidebar_rows.items;
+    try std.testing.expectEqual(@as(u8, 1), rows1[0].card.lines); // 투영이 그 값을 실었다
+    const h1 = sb.rowHeight(rows1[0], session.sidebarMetrics());
+    try std.testing.expectEqual(sb.cardHeight(1, session.sidebarMetrics()), h1);
+
+    // (2) 에이전트가 붙으면 상태줄이 생겨 2줄 → 카드가 줄 스텝만큼 높아진다.
+    term.agent_kind = .claude;
+    term.agent_state = .idle;
+    session.rebuildSidebar() catch {};
+    try std.testing.expectEqual(@as(u8, 2), session.sidebarCardLines(tab));
+    const rows2 = session.sidebar_rows.items;
+    try std.testing.expectEqual(@as(u8, 2), rows2[0].card.lines);
+    const h2 = sb.rowHeight(rows2[0], session.sidebarMetrics());
+    try std.testing.expectEqual(session.sidebarMetrics().line_step, h2 - h1);
+
+    // (3) 그 높이가 **다음 row의 시작 y**로 전파된다 — 누적이 카드별 높이를 실제로 반영한다는 증거.
+    try std.testing.expectEqual(
+        @as(i64, @intCast(session.sidebar_header_height_px + h2)),
+        sb.rowTop(rows2, 1, session.sidebar_header_height_px, session.sidebarMetrics(), 0),
+    );
 }
 
 test "workspaceStatusLine: running=파형, blocked=입력 대기, idle=대기중, unknown=상태 확인" {
@@ -38368,6 +38473,9 @@ fn initRenameCaretTestSession(allocator: std.mem.Allocator) !*AppSession {
     session.cell_height_px = 16;
     session.sidebar_width_px = 80; // full_cols = 80/8 = 10 → 우경계 clamp = full_cols-2 = 8칸(x=64)
     session.sidebar_slot_height_px = 32;
+    // 카드 높이는 이제 줄 수 기반이라 슬롯 필드만으로는 안 잡힌다 — 1줄 카드 높이가 32이 되는 메트릭을 박아
+    // 고정 슬롯 시절 좌표 기대값을 그대로 쓴다(여백 0·스텝=줄높이).
+    session.sidebar_metrics = .{ .line_h = 32, .line_step = 32, .card_pad_v = 0, .header_row_h = session.sidebar_header_row_h_px };
     session.sidebar_header_height_px = 0;
     session.sidebar_header_row_h_px = 16;
     return session;
@@ -39958,12 +40066,11 @@ test "사이드바 드래그: 비고정 탭을 위로 끌어도 고정 영역을
     t1.pinned = true; // [P0, P1, u2, u3], pinned_count=2
     session.rebuildSidebar() catch {};
 
-    const slot_h: f64 = @floatFromInt(session.sidebar_slot_height_px);
     const header_h: f64 = @floatFromInt(session.sidebar_header_height_px); // 슬롯은 상단 헤더 아래로 시프트
     const x: f64 = @as(f64, @floatFromInt(session.sidebar_width_px)) - 1;
 
     // 비고정 끝 탭(slot 3=t3)을 잡아 slot 0(고정 영역)으로 드래그 → 비고정 영역 시작(index 2)으로만 안착.
-    session.mouse(1, x, header_h + slot_h * 3 + 1, 0, 0); // down on slot 3 → arm
+    session.mouse(1, x, session.testSidebarRowCenterY(3), 0, 0); // down on slot 3 → arm
     try std.testing.expect(session.pointerGestureIs(.sidebar_tab));
     try std.testing.expectEqual(@as(usize, 3), session.pointer_gesture_owner.sidebar_tab.index);
     session.mouse(2, x, header_h + 1, 0, 0); // drag toward slot 0
@@ -40000,7 +40107,6 @@ test "사이드바 드래그: 고정 탭끼리 재정렬(고정 영역 내 swap,
     t1.pinned = true; // [P0, P1, u2, u3], pinned_count=2
     session.rebuildSidebar() catch {};
 
-    const slot_h: f64 = @floatFromInt(session.sidebar_slot_height_px);
     const header_h: f64 = @floatFromInt(session.sidebar_header_height_px); // 슬롯은 상단 헤더 아래로 시프트
     const x: f64 = @as(f64, @floatFromInt(session.sidebar_width_px)) - 1;
 
@@ -40008,8 +40114,8 @@ test "사이드바 드래그: 고정 탭끼리 재정렬(고정 영역 내 swap,
     session.mouse(1, x, header_h + 1, 0, 0); // down slot 0(고정도 이제 arm)
     try std.testing.expect(session.pointerGestureIs(.sidebar_tab));
     try std.testing.expectEqual(@as(usize, 0), session.pointer_gesture_owner.sidebar_tab.index);
-    session.mouse(2, x, header_h + slot_h * 1 + 1, 0, 0); // drag to slot 1
-    session.mouse(3, x, header_h + slot_h * 1 + 1, 0, 0); // up
+    session.mouse(2, x, session.testSidebarRowCenterY(1), 0, 0); // drag to slot 1
+    session.mouse(3, x, session.testSidebarRowCenterY(1), 0, 0); // up
 
     try std.testing.expectEqual(t1, session.tabs.items[0]); // swap
     try std.testing.expectEqual(t0, session.tabs.items[1]);
@@ -40099,7 +40205,7 @@ test "double-click on a Term tab or sidebar slot starts rename" {
     // ② 사이드바 슬롯 더블클릭 → 그 워크스페이스 rename.
     const tab = session.activeTab();
     const sx = @as(f64, @floatFromInt(session.sidebar_width_px)) * 0.5;
-    const sy = @as(f64, @floatFromInt(session.sidebar_header_height_px)) + @as(f64, @floatFromInt(session.sidebar_slot_height_px)) * 0.5; // 슬롯 0 중앙(상단 헤더 아래)
+    const sy = session.testSidebarRowCenterY(0); // 슬롯 0 중앙(상단 헤더 아래)
     session.mouse(4, sx, sy, 0, 0);
     try std.testing.expect(session.renamingWorkspace(tab));
     session.closeRename();
@@ -40221,38 +40327,45 @@ test "F1: workspace rename caret y follows card line count + sidebar header/scro
     const tab = session.tabs.items[0];
     const term = tab.activeTerm();
     const ch: u32 = session.cell_height_px;
-    const slot_h: u32 = session.sidebar_slot_height_px;
     const header: u32 = session.sidebar_header_height_px;
-    try std.testing.expect(slot_h > 2 * ch); // 슬롯이 2줄을 담는다는 전제(ratio 4600)
+    // 카드 높이가 **줄 수 기반**이 되면서 블록중앙 오프셋은 항상 카드 상하 여백(card_pad_v)이다
+    // (카드 높이 = 줄 블록 + 2×여백이므로 (카드-블록)/2 = 여백). 즉 이름줄은 줄 수와 무관하게 카드 상단
+    // 같은 자리에 온다 — 옛 고정 슬롯에서 줄이 늘 때마다 이름줄이 위로 올라가던 것과 달라진 점이다.
+    const pad_v: u32 = session.sidebarMetrics().card_pad_v;
     try std.testing.expect(header > 0); // 헤더(검색바·아이콘)가 있다는 전제 — caret y가 그만큼 내려가야 렌더러와 정합
 
     // 1) non-agent 워크스페이스(scroll 0): 카드 1줄(이름만) → caret = header + 슬롯 세로 중앙(1줄 블록).
     term.agent_kind = .none;
+    session.rebuildSidebar() catch {}; // Row.lines(줄 수)는 투영 때 굳는다 — 상태를 바꿨으면 다시 투영해야 정합
     session.startRename(.{ .workspace = tab });
     const cr1 = session.renameCaretRect() orelse return error.NoCaret;
-    try std.testing.expectEqual(@as(i32, @intCast(header + (slot_h -| ch) / 2)), cr1.y);
+    try std.testing.expectEqual(@as(i32, @intCast(header + pad_v)), cr1.y);
     session.closeRename();
 
     // 2) idle 에이전트 워크스페이스(scroll 0): 상태줄(✓)이 붙어 카드 2줄 → 이름줄(line 0)이 2줄 블록 상단. 블록 높이는
     // sidebarBlockHeight(2,ch)(줄 스텝 여유 반영)라 block_off=(slot_h-그 값)/2. 이름줄=line 0이라 caret y=header+block_off.
     term.agent_kind = .claude;
     term.agent_state = .idle;
+    session.rebuildSidebar() catch {};
     session.startRename(.{ .workspace = tab });
     const cr2 = session.renameCaretRect() orelse return error.NoCaret;
-    try std.testing.expectEqual(@as(i32, @intCast(header + (slot_h -| AppSession.sidebarBlockHeight(2, ch)) / 2)), cr2.y);
+    try std.testing.expectEqual(@as(i32, @intCast(header + pad_v)), cr2.y);
     session.closeRename();
 
-    // 상태줄 유무로 caret이 실제로 위로 올라가야 한다(겹침 방지의 본질) — 안 그러면 후보창이 파형 상태줄에 겹친다.
-    try std.testing.expect(cr2.y < cr1.y);
+    // 겹침 방지의 본질은 유지된다: 상태줄은 이름줄 **아래**에 붙고 카드가 그만큼 길어지므로, caret(이름줄) 자리는
+    // 그대로여도 후보창이 파형 상태줄을 덮지 않는다. 옛 모델은 고정 슬롯 안에서 블록을 중앙 정렬해 줄이 늘면
+    // 이름줄이 올라갔지만, 동적 높이에서는 카드가 자라고 이름줄은 상단에 고정된다(더 자연스러운 상단 정렬).
+    try std.testing.expectEqual(cr1.y, cr2.y);
 
     // 3) scroll offset 반영: 콘텐츠가 offset만큼 위로 밀리면 caret도 따라 올라간다(slotTop이 scroll을 뺌). idx 0,
     // 작은 offset(블록중앙 (slot_h−ch)/2 보다 작아 헤더 clamp 전)이라 caret = header + block_off − offset.
     term.agent_kind = .none;
-    const offset: u32 = ch / 2; // (slot_h−ch)/2 > ch/2 (slot_h>2ch) 이므로 clamp(@max header) 안 걸림
+    session.rebuildSidebar() catch {};
+    const offset: u32 = @min(ch / 2, pad_v); // pad_v 이하라 헤더 clamp(@max header)에 안 걸린다
     session.sidebar_scroll_offset_px = offset;
     session.startRename(.{ .workspace = tab });
     const cr3 = session.renameCaretRect() orelse return error.NoCaret;
-    try std.testing.expectEqual(@as(i32, @intCast(header + (slot_h -| ch) / 2 - offset)), cr3.y);
+    try std.testing.expectEqual(@as(i32, @intCast(header + pad_v - offset)), cr3.y);
     session.closeRename();
     session.sidebar_scroll_offset_px = 0; // 복원
 }
@@ -40284,7 +40397,7 @@ test "review fixes: focus-loss commits rename, body right-click reports, close-z
     try std.testing.expectEqualStrings("z", term0.surface.custom_name.?);
 
     // (#8) 사이드바 슬롯 ✕(close) zone은 renameTargetAt가 null(닫기 자리에서 rename 방지), 좌측은 워크스페이스.
-    const slot_y = @as(f64, @floatFromInt(session.sidebar_header_height_px)) + @as(f64, @floatFromInt(session.sidebar_slot_height_px)) * 0.5; // 슬롯 0 중앙(상단 헤더 아래)
+    const slot_y = session.testSidebarRowCenterY(0); // 슬롯 0 중앙(상단 헤더 아래)
     const close_x = @as(f64, @floatFromInt(session.sidebar_width_px - session.cell_width_px)); // 우측 ✕ 영역
     try std.testing.expect(session.renameTargetAt(close_x, slot_y) == null);
     try std.testing.expect(session.renameTargetAt(@floatFromInt(session.cell_width_px), slot_y) != null); // 좌측=워크스페이스
@@ -45561,7 +45674,7 @@ test "code-review #8: 리스트 아래(past-end) 새-워크스페이스 드롭 �
     try session.rebuildSidebar();
     const sb = chrome.components.sidebar;
     const rows_len = session.sidebar_rows.items.len;
-    const content_h = sb.contentHeight(session.sidebar_rows.items, session.sidebar_slot_height_px, session.sidebar_header_row_h_px);
+    const content_h = sb.contentHeight(session.sidebar_rows.items, session.sidebarMetrics());
 
     // pane grip을 리스트 아래(past-end = rows.len)에 드롭 → 새 워크스페이스 하이라이트. 옛 코드는 sidebarBandRow(null)로
     // 이 셀을 삼켜(orelse continue) 하이라이트가 안 떴다(code-review #8). 이제 origin_y=contentHeight로 셀이 방출된다.
@@ -46150,7 +46263,7 @@ test "grip 드래그: 사이드바 빈 영역 드롭 → 새 워크스페이스 
 
     // 사이드바 빈 영역(카드 한참 아래)으로 drag + up → 새 워크스페이스 분리.
     const sx: f64 = @floatFromInt(session.sidebar_width_px / 2);
-    const empty_y: f64 = @floatFromInt(session.sidebar_header_height_px + session.sidebar_slot_height_px * 5 + 10);
+    const empty_y: f64 = @as(f64, @floatFromInt(session.sidebar_header_height_px + chrome.components.sidebar.contentHeight(session.sidebar_rows.items, session.sidebarMetrics()) + 10));
     session.mouse(2, sx, empty_y, 0, 0);
     session.mouse(3, sx, empty_y, 0, 0);
     try std.testing.expect(!session.pointerGestureIs(.pane)); // 드래그 종료
@@ -46192,7 +46305,7 @@ test "grip 드래그: 단독 pane을 다른 워크스페이스 카드에 드롭 
 
     // ws1 카드(slot 1) 중앙에 up → 합치기. visible_tabs=[0,1]이라 slot 1 = ws1.
     const sx: f64 = @floatFromInt(session.sidebar_width_px / 2);
-    const card_y: f64 = @floatFromInt(session.sidebar_header_height_px + session.sidebar_slot_height_px + session.sidebar_slot_height_px / 2);
+    const card_y: f64 = session.testSidebarRowCenterY(1);
     session.mouse(2, sx, card_y, 0, 0);
     session.mouse(3, sx, card_y, 0, 0);
 
@@ -46230,18 +46343,18 @@ test "grip 드래그: 드래그 중 드롭 타겟 하이라이트 슬롯 추적(
 
     const sx: f64 = @floatFromInt(session.sidebar_width_px / 2);
     // ① ws1 카드(slot 1) 위 → 하이라이트 슬롯 = 1(merge 타겟).
-    const card_y: f64 = @floatFromInt(session.sidebar_header_height_px + session.sidebar_slot_height_px + session.sidebar_slot_height_px / 2);
+    const card_y: f64 = session.testSidebarRowCenterY(1);
     session.mouse(2, sx, card_y, 0, 0);
     try std.testing.expectEqual(@as(?usize, 1), session.pointer_gesture_owner.pane.drop_slot);
     // ② 빈 영역(카드 아래) → 하이라이트 슬롯 = 표시 카드 수(새 워크스페이스 행).
-    const empty_y: f64 = @floatFromInt(session.sidebar_header_height_px + session.sidebar_slot_height_px * 5 + 10);
+    const empty_y: f64 = @as(f64, @floatFromInt(session.sidebar_header_height_px + chrome.components.sidebar.contentHeight(session.sidebar_rows.items, session.sidebarMetrics()) + 10));
     session.mouse(2, sx, empty_y, 0, 0);
     try std.testing.expectEqual(@as(?usize, session.sidebar_rows.items.len), session.pointer_gesture_owner.pane.drop_slot);
     // ③ 사이드바 밖(터미널) → 하이라이트 없음.
     session.mouse(2, @floatFromInt(pb.full.x + 20), @floatFromInt(pb.full.y + 1), 0, 0);
     try std.testing.expect(session.pointer_gesture_owner.pane.drop_slot == null);
     // ④ 자기 워크스페이스(ws0 = slot 0) 위 → 하이라이트 없음(merge 무의미).
-    const own_y: f64 = @floatFromInt(session.sidebar_header_height_px + session.sidebar_slot_height_px / 2);
+    const own_y: f64 = session.testSidebarRowCenterY(0);
     session.mouse(2, sx, own_y, 0, 0);
     try std.testing.expect(session.pointer_gesture_owner.pane.drop_slot == null);
     // ⑤ 헤더(검색바·아이콘) 위 → 하이라이트 없음·드롭 불가(검색바에서 새 워크스페이스 오생성 방지).
@@ -49737,9 +49850,9 @@ test "hoverCursor returns region-specific cursor kinds" {
     // 사이드바 워크스페이스 슬롯 위 = link(클릭=전환), "+" 슬롯 아래 빈 영역 = default(arrow) — #5c.
     if (session.sidebar_width_px > 0 and session.sidebar_slot_height_px > 0) {
         const sb_x: f64 = @floatFromInt(session.sidebar_width_px / 2);
-        const slot0_y: f64 = @as(f64, @floatFromInt(session.sidebar_header_height_px)) + @as(f64, @floatFromInt(session.sidebar_slot_height_px / 2)); // 슬롯 0 중앙(상단 헤더 아래) — 확실히 슬롯 안
+        const slot0_y: f64 = session.testSidebarRowCenterY(0); // 슬롯 0 중앙(상단 헤더 아래) — 확실히 슬롯 안
         try std.testing.expectEqual(CursorKind.link, session.hoverCursor(sb_x, slot0_y, 0));
-        const empty_y: f64 = @floatFromInt((session.tabs.items.len + 2) * session.sidebar_slot_height_px); // "+" 슬롯 아래(빈)
+        const empty_y: f64 = @as(f64, @floatFromInt(session.sidebar_header_height_px + chrome.components.sidebar.contentHeight(session.sidebar_rows.items, session.sidebarMetrics()))) + 40; // 목록 아래(빈)
         try std.testing.expectEqual(CursorKind.default, session.hoverCursor(sb_x, empty_y, 0));
     }
 
@@ -50101,7 +50214,6 @@ test "sidebar click switches tabs and hover adds a hover band via hit-test" {
     );
     try std.testing.expectEqual(@as(usize, 1), session.app_window.active_tab);
 
-    const slot_h: f64 = @floatFromInt(session.sidebar_slot_height_px);
     const header_h: f64 = @floatFromInt(session.sidebar_header_height_px); // 슬롯은 상단 헤더만큼 아래로 시프트
     const x_in: f64 = @as(f64, @floatFromInt(session.sidebar_width_px)) - 1; // 사이드바 영역 안
 
@@ -50109,10 +50221,10 @@ test "sidebar click switches tabs and hover adds a hover band via hit-test" {
     session.mouse(1, x_in, header_h + 1, 0, 0);
     try std.testing.expectEqual(@as(usize, 0), session.app_window.active_tab);
     // 슬롯 1 클릭 → 탭 1.
-    session.mouse(1, x_in, header_h + slot_h + 1, 0, 0);
+    session.mouse(1, x_in, session.testSidebarRowCenterY(1), 0, 0);
     try std.testing.expectEqual(@as(usize, 1), session.app_window.active_tab);
     // 슬롯 밖(마지막 슬롯 아래 빈 영역) 클릭은 전환 안 함.
-    session.mouse(1, x_in, header_h + slot_h * 10, 0, 0);
+    session.mouse(1, x_in, session.testSidebarRowCenterY(10), 0, 0);
     try std.testing.expectEqual(@as(usize, 1), session.app_window.active_tab);
     // 터미널 영역(x ≥ 사이드바 폭, 우측 경계 리사이즈 밴드보다 충분히 안쪽) 클릭은 탭 전환 경로가 아님(활성 불변).
     session.mouse(1, @floatFromInt(session.sidebar_width_px + 50), 1, 0, 0);
@@ -50123,7 +50235,7 @@ test "sidebar click switches tabs and hover adds a hover band via hit-test" {
     try std.testing.expectEqual(@as(?usize, 0), session.hovered_slot);
     try std.testing.expectEqual(@as(usize, 2), session.sidebar_cells.items.len);
     // 호버가 활성 슬롯(1) 위면 별도 호버 밴드 없음(활성 색 우선) → 밴드 1개.
-    _ = session.hoverCursor(x_in, header_h + slot_h + 1, 0);
+    _ = session.hoverCursor(x_in, session.testSidebarRowCenterY(1), 0);
     try std.testing.expectEqual(@as(?usize, 1), session.hovered_slot);
     try std.testing.expectEqual(@as(usize, 1), session.sidebar_cells.items.len);
     // 터미널 영역(리사이즈 밴드보다 안쪽)으로 나가면 호버 해제.
@@ -50240,7 +50352,6 @@ test "dragging a sidebar tab reorders the list and active follows the dragged ta
     try std.testing.expectEqualStrings("Maru shell", session.tabs.items[0].activePane().activeTerm().surface.title);
     try std.testing.expectEqual(@as(usize, 2), session.app_window.active_tab);
 
-    const slot_h: f64 = @floatFromInt(session.sidebar_slot_height_px);
     const header_h: f64 = @floatFromInt(session.sidebar_header_height_px); // 슬롯은 상단 헤더 아래로 시프트
     const x: f64 = @as(f64, @floatFromInt(session.sidebar_width_px)) - 1;
 
@@ -50248,8 +50359,8 @@ test "dragging a sidebar tab reorders the list and active follows the dragged ta
     session.mouse(1, x, header_h + 1, 0, 0);
     try std.testing.expectEqual(@as(usize, 0), session.app_window.active_tab);
     try std.testing.expect(session.pointerGestureIs(.sidebar_tab));
-    session.mouse(2, x, header_h + slot_h * 2 + 1, 0, 0);
-    session.mouse(3, x, header_h + slot_h * 2 + 1, 0, 0);
+    session.mouse(2, x, session.testSidebarRowCenterY(2), 0, 0);
+    session.mouse(3, x, session.testSidebarRowCenterY(2), 0, 0);
 
     // 순서 [tab 2, tab 3, Maru], 활성=드래그 탭(Maru)=2, 드래그 종료.
     try std.testing.expectEqualStrings("tab 2", session.tabs.items[0].activePane().activeTerm().surface.title);
@@ -50557,7 +50668,7 @@ test "sidebar search blurs when clicking outside it (terminal/card) — restores
 
     // 사이드바 카드 슬롯 클릭도 blur(카드 전환 + 검색 비활성, 검색어 보존).
     const card_x: f64 = @as(f64, @floatFromInt(session.cell_width_px));
-    const card_y: f64 = @as(f64, @floatFromInt(session.sidebar_header_height_px)) + @as(f64, @floatFromInt(session.sidebar_slot_height_px)) * 0.5; // 슬롯 0 중앙
+    const card_y: f64 = session.testSidebarRowCenterY(0); // 슬롯 0 중앙
     session.mouse(1, card_x, card_y, 0, 0);
     try std.testing.expect(!session.sidebar_search_active);
     try std.testing.expectEqual(AppSession.InputFocus.terminal, session.inputFocus());

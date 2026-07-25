@@ -23,7 +23,9 @@ cmux 같은 유연한 레이아웃:
   흐림). git repo 안이면 line1=`├ {branch}`, line2=cwd 경로(`$HOME`→`~` 축약). 보조줄(브랜치·경로)은
   git repo일 때만 추가되고 흐린 색, 줄들은 슬롯 안에 세로 중앙 정렬한다. 세로 위치는 row에 `slot*32 + line_count*4 +
   line_index`로 인코딩(`sidebarGlyphRow` 단일 출처)하고 렌더러(.m)가 디코드 — 인코딩은 향후 4번째 줄(상태)까지 여유,
-  현재 구현은 3줄. 카드 높이는 cell의 3.8×. **베이스/결정**: git 브랜치는 OSC 7 cwd에서 `.git/HEAD` walk-up(cwd 변경
+  현재 구현은 3줄. **카드 높이는 그 카드가 실제로 그리는 줄 수에서 나온다**(줄 블록 + 위아래 여백 — 옛 고정 슬롯
+  cell×5.2 폐기, [사이드바 에이전트 목록](sidebar-agent-list.md) §3이 단일 출처). 4줄 카드는 옛 슬롯과 같은 높이라
+  겉모습이 유지되고, 줄이 적은 카드에서 남던 빈 공간만 사라진다. **베이스/결정**: git 브랜치는 OSC 7 cwd에서 `.git/HEAD` walk-up(cwd 변경
   시에만 읽어 per-Term 캐시; 파생값·영속 안 함; `readGitBranch`/`termGitBranch`), repo 밖이면 보조줄 생략.
 - **에이전트 아이콘** — 그 Term 포그라운드가 claude/codex CLI인 동안만, 카드 **줄과 무관하게 슬롯 세로 중앙·좌측에 독립**
   배치한다(아바타식; 텍스트 줄은 그만큼 우측으로 들여씀). 아이콘 존재=그 Term의 foreground agent 종류,

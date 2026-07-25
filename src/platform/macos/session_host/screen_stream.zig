@@ -51,11 +51,12 @@ pub const RecordKind = enum(u16) {
     modes = 14,
     image_place = 15,
     image_remove = 16,
+    scroll_state = 17, // 스크롤백 길이·view offset 변화(스크롤바 thumb). screen_meta는 snapshot에만 실리므로 delta 전용.
     _,
 
     pub fn isKnown(self: RecordKind) bool {
         return switch (self) {
-            .screen_meta, .row, .image_placement, .image_blob, .prompt_marks, .link_spans, .set_runs, .clear_rect, .scroll_rect, .cursor, .modes, .image_place, .image_remove => true,
+            .screen_meta, .row, .image_placement, .image_blob, .prompt_marks, .link_spans, .set_runs, .clear_rect, .scroll_rect, .cursor, .modes, .image_place, .image_remove, .scroll_state => true,
             _ => false,
         };
     }
@@ -783,6 +784,33 @@ pub fn encodeCursor(allocator: std.mem.Allocator, header: RecordHeader, op: Curs
 pub fn decodeCursor(body: []const u8) DecodeError!CursorDelta {
     var r = BodyReader{ .bytes = body };
     return .{ .base_generation = try r.u64v(), .cursor = try r.cursor() };
+}
+
+/// 스크롤 상태 변화(delta). `screen_meta`는 snapshot에만 실려서, 스크롤만 바뀐 프레임에서는 client의 값이
+/// stale로 남았다 — 스크롤바가 안 뜨거나 thumb 위치가 화면과 어긋나던 원인이다(재동기화가 일어나야 겨우 맞았다).
+pub const ScrollStateDelta = struct {
+    base_generation: u64,
+    scrollback_len: u32,
+    view_offset: u32,
+};
+
+pub fn encodeScrollState(allocator: std.mem.Allocator, header: RecordHeader, op: ScrollStateDelta) DecodeError![]u8 {
+    var body: std.ArrayListUnmanaged(u8) = .empty;
+    defer body.deinit(allocator);
+    const w = BodyWriter{ .buf = &body, .allocator = allocator };
+    try w.u64v(op.base_generation);
+    try w.u32v(op.scrollback_len);
+    try w.u32v(op.view_offset);
+    return finishRecord(allocator, .{ .kind = .scroll_state, .generation = header.generation, .version = header.version, .sequence = header.sequence, .chunk_index = header.chunk_index, .chunk_count = header.chunk_count }, body.items);
+}
+
+pub fn decodeScrollState(body: []const u8) DecodeError!ScrollStateDelta {
+    var r = BodyReader{ .bytes = body };
+    return .{
+        .base_generation = try r.u64v(),
+        .scrollback_len = try r.u32v(),
+        .view_offset = try r.u32v(),
+    };
 }
 
 pub fn encodeModes(allocator: std.mem.Allocator, header: RecordHeader, op: ModesDelta) DecodeError![]u8 {

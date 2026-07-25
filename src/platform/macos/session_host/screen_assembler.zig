@@ -323,6 +323,12 @@ pub const ScreenAssembler = struct {
                     if (cd.base_generation != self.generation) return error.GenerationGap;
                     self.cursor = cd.cursor;
                 },
+                .scroll_state => {
+                    const sd = try screen_stream.decodeScrollState(s.body);
+                    if (sd.base_generation != self.generation) return error.GenerationGap;
+                    self.scrollback_len = sd.scrollback_len;
+                    self.view_offset = sd.view_offset;
+                },
                 .modes => {
                     const md = try screen_stream.decodeModes(s.body);
                     if (md.base_generation != self.generation) return error.GenerationGap;

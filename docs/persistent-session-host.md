@@ -824,8 +824,9 @@ slot의 `local_stream→subscription`과 daemon의
 
 각 socket은 stateful `ConnectionSlot`이 소유한다. slot은 partial header/payload read, partial frame write, 요청/응답
 correlation과 bounded outbound queue를 보관한다. socket은 nonblocking이며 한 slot의 `EAGAIN`이나 느린 reader가 PTY pump,
-다른 client, lifecycle reply를 막지 않는다. 첫 foundation은 연결당 16 MiB(outbound screen soft limit 8 MiB,
-reply/control reserve 512 KiB), daemon 전체 128 MiB, connection 32개 상한을 둔다. 한 reactor turn은 slot당
+다른 client, lifecycle reply를 막지 않는다. 첫 foundation은 연결당 18 MiB(outbound screen soft limit 8 MiB,
+16 MiB viewport의 1회 atomic resync batch ceiling 17 MiB, reply/control reserve 512 KiB), daemon 전체 128 MiB,
+connection 32개 상한을 둔다. 한 reactor turn은 slot당
 read/write 각각 1 MiB 또는 64 frame 중 먼저 닿는 값까지만 처리하고, partial frame이 10초 동안 전진하지 않으면 그
 connection만 닫는다. exact cap/cap+1은 named constants에서 테스트한다.
 - screen soft limit를 넘으면 그 subscription만 `snapshot.invalidated`로 전환한다. queue가 4 MiB low-water 아래로
@@ -1547,7 +1548,7 @@ controlled Claude/Codex foreground fixture를 낸 뒤 GUI observation까지 왕�
   winner 생존, config/workspace/cache sentinel 무변경, winner `SIGKILL` 뒤 successor 재획득을 검증한다.
   제품 release/reset ABI는 의도적으로 없다.
 - 여러 workspace·pane·Term binding, cross-window 이동, partial missing runtime, `Recovered Sessions`를 검증한다.
-- 기본 전환 전 단일 GUI connection에도 nonblocking partial write, 16 MiB bounded outbound, reply/control reserve,
+- 기본 전환 전 단일 GUI connection에도 nonblocking partial write, 18 MiB bounded outbound, reply/control reserve,
   screen invalidation을 가진 `ConnectionSlot`을 적용해 stalled GUI가 PTY/owner tick을 막지 않게 한다. P5는 이를
   local/global subscription ID와 multi-fd reactor로 확장한다.
 - shared Client의 `pending_stream`과 `pending_batches`를 하나의 bounded `ScreenInbox`로 관리한다. overflow handler는
@@ -1592,7 +1593,8 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
 ### P5 — 개별 runtime CLI attach
 
 - **T0a — `ConnectionSlot` reactor core:** P5a1 제품 fd 배선 전에 OS 중립 slot/queue/turn/drain state machine을
-  별도 구현한다. named cap은 connection 32, per-slot 16 MiB, screen soft 8 MiB, control reserve 512 KiB,
+  별도 구현한다. named cap은 connection 32, per-slot 18 MiB, screen soft 8 MiB, atomic resync 17 MiB,
+  control reserve 512 KiB,
   daemon aggregate 128 MiB, slot당 resident chunk 4,096개(그중 마지막 64개는 control 전용), turn당
   read/write 각각 1 MiB 또는 64 frame,
   partial-frame progress deadline 10초·absolute deadline 30초다. payload allocation은 chunk가 완전히 drain될 때까지
@@ -1619,7 +1621,7 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
     `local_stream→subscription` / `subscription→{connection_key,local_stream,runtime_id}` 양방향 map이 registry에
     global subscription ID만 전달한다. 두 connection이 모두 local stream 1을 받되 서로 다른 subscription으로 attach되는
     fixture, connection close revoke, slot ABA, counter overflow fail-close가 green이 되기 전 T0b1/T0b2를 제품에 열지 않는다.
-  - **T0b1 — readiness-turn adapter:** 리뷰 가능한 두 하위 slice를 모두 끝낸 뒤 완료로 센다.
+  - **T0b1 — readiness-turn adapter (구현):** 아래 두 하위 slice가 구현됐으며 아직 daemon listener에는 배선하지 않는다.
   - **T0b1a — bounded I/O owner (구현):** 기존 `serveConnection`의 connection-local
     `FrameParser`/`Connection`/outbound queue를 stable heap client로 추출한다. 한 호출은 nonblocking read/write를
     각각 T0a의 1 MiB/64 frame turn cap까지만 전진시키며 `EAGAIN`은 정상 yield다. attach의 첫 response는 control,
@@ -1637,19 +1639,49 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
     inbound parser resident cap은 최대 binary frame 하나(header 포함)이며 buffered frame을 새 read보다 먼저 drain한다.
     read/write partial clock은 서로 독립이고 10초 progress/30초 absolute deadline을 공유하지 않는다. pre-hello silent
     connection은 10초, handshake 뒤 attachment와 pending output이 없는 idle connection은 마지막 activity 30초에 닫는다.
-    이 foundation은 아직 daemon에서 호출되지 않는다. queue admission 실패는 연결을 canonical close하는 보수 정책이며,
-    `collectDeltas`의 다중 subscription 선할당과 per-subscription soft invalidation/resync 완료를 주장하지 않는다.
-  - **T0b1b — transactional per-subscription output (미구현):** `collectDeltas`를 subscription 한 개씩 bounded produce→queue
-    admission→base/revision commit 순서로 바꾼다. stream-scoped metadata event도 해당 tracker에 귀속하되 lifecycle/upgrade
-    reply의 control reserve와 FIFO 순서는 보존한다. screen soft cap은 그 tracker의 미전송 full-frame만 purge하고
-    `snapshot.invalidated` control event를 정확히 한 번 보낸다. client `runtime.resync` 뒤 fresh snapshot batch는
-    `enqueueResyncSnapshot`의 owned/atomic 경로로만 넣고 성공 뒤 valid로 전환한다. 이미 prefix가 write된 frame은 절대
-    splice하지 않고 connection fail-close한다. 이 slice가 끝나기 전 T0b1 완료나 T0b2 제품 배선을 선언하지 않는다.
+    이 foundation은 아직 daemon에서 호출되지 않는다. queue admission의 subscription별 복구 계약은 T0b1b가 소유한다.
+  - **T0b1b — transactional per-subscription output (구현):** readiness tick은 정렬된 local stream을 round-robin으로 한 개만
+    골라 `CollectedOutput`을 prepare한다. 이 transaction은 새 screen base와 metadata revision/base를 소유하되 reactor
+    queue가 batch 전체를 받아들인 뒤에만 commit하며, 거부되면 prepared screen base/revision을 rollback한다. purge로
+    delivery authority를 잃은 metadata base는 의도적으로 invalidate해 다음 성공 turn에서 full-state를 다시 보낸다.
+    stream-scoped metadata event도
+    해당 tracker에 귀속해 lifecycle/upgrade reply의 control reserve를 침범하지 않는다. screen soft/slot/global/chunk
+    pressure는 해당 tracker의 아직 쓰지 않은 full-frame만 purge하고 `snapshot.invalidated` control event를 정확히 한 번
+    남긴다. frame prefix가 이미 socket에 쓰였으면 splice하지 않고 connection을 fail-close한다.
+    client는 invalidation event를 allocation-free로 식별해 sticky intent를 세우고, frame pump가 응답 없는
+    `stream_ack {action:"resync"}`를 bounded outbound slot에 넣을 때까지 nonblocking 재시도한다. fresh metadata prefix와
+    snapshot의 owned multi-chunk batch는 `enqueueOwnedResyncSnapshot`이 원래 순서대로 전부 admission하거나 전부 rollback한다.
+    admission 성공 시 transaction base는 commit하지만 tracker는 `.resync_draining`이며, 마지막 byte가 socket에 쓰여
+    resident가 0이 된 뒤에만 `.valid`가 된다. 실패는 1초 bounded backoff 뒤 같은 client intent를 재시도하고 다른
+    subscription의 queue/base/revision은 건드리지 않는다. snapshot을 만들기 전에는 17 MiB worst-case slot/global/chunk
+    headroom을 보수적으로 preflight해 여러 invalidated stream이 admission 불가능한 full snapshot을 반복 할당하지 않는다.
+    initial attach의 response는 control로 먼저 admission하고 뒤 snapshot 전체는 같은 atomic owned/draining 경로를
+    사용한다. bootstrap에는 아직 `RemoteRuntime` ACK pump가 없으므로 이 최초 atomic admission이 실패하면 connection을
+    fail-close해 controller lease를 회수하고 attach 전체를 실패시킨다.
+    향후 same-UID 외부 client의 단일 spawn/resize는 canonical grid를 최대 1,048,576 cells로 제한한다. wire dispatch와
+    `RuntimeManager.spawnRuntime`, registry mutation이 같은 `gridSizeAllowed` 정책을 적용해 PTY/core allocation 전에
+    초과 요청을 `invalid_request`로 거부한다. 제품 snapshot/delta projector는 16 MiB allocation cap adapter와
+    `appendProjectedRecord` bounded builder를 사용한다. builder는 다음 amortized capacity를 ceiling으로 clamp해 작은
+    delta에 16 MiB를 선할당하거나 cap 근처에서 record마다 exact realloc하지 않으면서, cap 초과 parent allocation은
+    시작하지 않는다.
+    Debug/ReleaseFast `test-session-host`가 prepare 전 권위 불변·commit/rollback, stream event 분류, pressure→notice 1건,
+    sibling 격리, atomic snapshot recovery와 실제 socketpair resync ack를 검증한다. T0b1 완료는 daemon multi-fd
+    제품 지원을 뜻하지 않으며 그 공개 gate는 T0b2다.
   - **T0b2 — daemon multi-fd poll owner:** listener와 최대 32 client fd를 단일 owner poll set으로 묶고
     `ReactorCore.nextReady` 순서로 ready client를 한 turn씩 처리한다. accept cap+1은 즉시 close하고 기존 client는
     유지하며, canonical GUI connection을 열린 채 별도 ephemeral `runtime.inventory`가 완료되는 forked daemon process
     fixture를 필수 gate로 둔다. upgrade admission close 뒤 신규 accept 0, 모든 client queue/dispatch/attachment drain
-    뒤에만 same-PID migration을 시작한다.
+    뒤에만 same-PID migration을 시작한다. 한 producer turn은 subscription 하나만 materialize하되 outer owner는 같은
+    20 ms cadence 안에서 남은 cursor sweep을 ready work로 재예약해 metadata/urgent latency를 attachment 수만큼 늘리지 않는다.
+    제품 공개 전 subscription별 최대 16 MiB `base`/prepared `next_base`도 queue 밖 무회계 복제가 되지 않도록
+    per-connection/global base budget 또는 runtime-shared snapshot token으로 귀속하고 exact cap/cap+1을 검증한다.
+    단일 runtime의 1,048,576-cell cap만으로는 여러 spawn을 통한 heap/PTY/FD 고갈을 막지 못한다. 따라서 listener를
+    공개하기 전에 live runtime 256개와 daemon 전체 canonical grid 4,194,304 cells를 owner가 원자 예약하고,
+    spawn 실패·terminate·restore rollback에서 정확히 반환해야 한다. repeated-max, aggregate exact/cap+1, resize와
+    terminate가 경쟁하는 fixture가 green이 아니면 same-UID 외부 attach/spawn을 제품 지원으로 세지 않는다.
+    다른 connection의 terminate와 producer가 경쟁해 `RuntimeNotFound`를 받으면 shared transport를 닫지 않되 해당
+    attachment/tracker를 ended→detach로 수렴시켜야 한다. delta의 일시적 null이나 resync 영구 retry로 stale lease가
+    남지 않는 multi-client lifecycle fixture도 같은 제품 공개 gate다.
 - **P5a1 — bounded admin accept foundation**: 현재 connection 하나를 EOF까지 독점하는 serial serve loop를 먼저
   single-owner multi-fd reactor로 바꾼다. P4 GUI slot을 유지한 채 bounded admin request slot 하나를 accept/dispatch하고
   partial read/write, cap, idle deadline, same-login-UID/other-UID 거부를 process test로 고정한다. public CLI/help는 아직

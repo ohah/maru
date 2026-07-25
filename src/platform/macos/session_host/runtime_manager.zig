@@ -28,11 +28,14 @@ const reg = @import("registry.zig");
 const core_command_wire = @import("core_command_wire.zig");
 const screen_snapshot = @import("screen_snapshot.zig");
 const screen_stream = @import("screen_stream.zig");
+const protocol = @import("protocol.zig");
 const handoff_codec = @import("handoff_codec.zig");
 
 comptime {
     if (@import("protocol.zig").max_inventory_runtimes != maru.session.workspace.max_runtime_bindings)
         @compileError("session host inventory cap must equal workspace runtime binding cap");
+    if (protocol.max_viewport_snapshot != screen_stream.max_record_stream_bytes)
+        @compileError("MRSH viewport cap must equal screen record-stream cap");
 }
 const upgrade_fd_layout = @import("upgrade_fd_layout.zig");
 const upgrade_limits = @import("upgrade_limits.zig");
@@ -1041,7 +1044,12 @@ pub const RuntimeManager = struct {
         const generation = if (self.host_registry.get(runtime_id)) |e| e.resize_generation else 0;
         surface.lockCore(self.io);
         defer surface.unlockCore(self.io);
-        return screen_snapshot.projectSnapshot(allocator, &surface.core, .{ .generation = generation });
+        return screen_snapshot.projectSnapshotBounded(
+            allocator,
+            &surface.core,
+            .{ .generation = generation },
+            protocol.max_viewport_snapshot,
+        );
     }
 
     /// `base`(client가 마지막으로 받은 full snapshot) 대비 현재 화면 변화를 계산한다(§9 delta). core lock 아래에서 현재
@@ -1057,10 +1065,21 @@ pub const RuntimeManager = struct {
         defer surface.unlockCore(self.io);
 
         // computeDelta가 delta와 새 base(현재 full snapshot)를 **한 번의 row build로** 함께 준다(재투영 없음).
-        const result = screen_snapshot.computeDelta(allocator, base, &surface.core, opts) catch |e| switch (e) {
+        const result = screen_snapshot.computeDeltaBounded(
+            allocator,
+            base,
+            &surface.core,
+            opts,
+            protocol.max_viewport_snapshot,
+        ) catch |e| switch (e) {
             error.SnapshotRequired => {
                 // grid/alt 변화 → delta 불가, fresh snapshot을 보낸다. send는 new_base와 별개 버퍼여야 하므로 복사한다.
-                const snap = try screen_snapshot.projectSnapshot(allocator, &surface.core, opts);
+                const snap = try screen_snapshot.projectSnapshotBounded(
+                    allocator,
+                    &surface.core,
+                    opts,
+                    protocol.max_viewport_snapshot,
+                );
                 errdefer allocator.free(snap);
                 const send = allocator.dupe(u8, snap) catch return error.OutOfMemory;
                 return .{ .send = send, .is_snapshot = true, .new_base = snap };
@@ -1312,6 +1331,8 @@ pub const RuntimeManager = struct {
     /// 에러 집합은 backend(anyerror)를 그대로 전파한다 — `error.EmptyArgv`/`error.IdSpaceExhausted`는 이 매니저 고유.
     fn spawnRuntime(self: *RuntimeManager, params: server.RuntimeSpawnParams) anyerror!u128 {
         if (params.argv.len == 0) return error.EmptyArgv; // server가 이미 거르지만 방어(handle 낭비 방지).
+        if (!reg.gridSizeAllowed(params.cols, params.rows))
+            return error.InvalidGridSize;
         // maxInt handle을 발급하면 성공 뒤 cursor 증가가 wrap/trap한다. PTY를
         // 만들기 전에 거부해 live child를 띄운 뒤 실패하는 경로도 없앤다.
         if (self.next_handle == std.math.maxInt(RuntimeHandle))

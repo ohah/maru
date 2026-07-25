@@ -84,20 +84,25 @@ pub const RegistryError = error{
     NotController,
     /// membership generation을 더 올릴 수 없어 새 complete inventory authority를 만들 수 없다.
     MembershipGenerationExhausted,
+    InvalidGridSize,
     OutOfMemory,
 };
 
-/// grid 크기 하한(§9 `terminal.clampGridSize`와 같은 규칙). wide glyph continuation 때문에 cols>=2가 필요하고
-/// rows>=1이어야 한다. 상한은 두지 않는다(u16 범위). state machine이 clamp를 소유해 controller/observer가 같은
-/// canonical 크기를 본다.
+/// grid 크기 정책. u16 필드 각각만 검증하면 same-UID 외부 client가 65535×65535 cells를 요청해 host heap을
+/// 소진할 수 있으므로 canonical 곱을 registry mutation 전에 제한한다.
 pub const min_cols: u16 = 2;
 pub const min_rows: u16 = 1;
+pub const max_grid_cells: usize = 1024 * 1024;
 
 fn clampCols(c: u16) u16 {
     return if (c < min_cols) min_cols else c;
 }
 fn clampRows(r: u16) u16 {
     return if (r < min_rows) min_rows else r;
+}
+
+pub fn gridSizeAllowed(cols: u16, rows: u16) bool {
+    return @as(usize, clampCols(cols)) * @as(usize, clampRows(rows)) <= max_grid_cells;
 }
 
 /// runtime 하나의 소유·구독·크기 상태. `runtime`은 server가 실 `LivePtySession`/`TerminalCore` handle을 실어 두는
@@ -187,6 +192,7 @@ pub const TerminalRuntimeRegistry = struct {
         runtime: ?*anyopaque,
     ) RegistryError!*RuntimeEntry {
         if (id == 0) return error.InvalidRuntimeId;
+        if (!gridSizeAllowed(cols, rows)) return error.InvalidGridSize;
         if (self.membership_generation_exhausted or self.membership_generation == std.math.maxInt(u64))
             return error.MembershipGenerationExhausted;
         if (self.entries.contains(id)) return error.DuplicateRuntime;
@@ -331,11 +337,11 @@ pub const TerminalRuntimeRegistry = struct {
         if (entry.resize_seq_seen and client_sequence <= entry.controller_sequence) {
             return .stale; // controller별 last sequence 이하 — 재적용하지 않는다(seq 0도 첫 적용 뒤엔 stale).
         }
-        entry.resize_seq_seen = true;
-        entry.controller_sequence = client_sequence;
-
         const new_cols = clampCols(cols);
         const new_rows = clampRows(rows);
+        if (!gridSizeAllowed(new_cols, new_rows)) return error.InvalidGridSize;
+        entry.resize_seq_seen = true;
+        entry.controller_sequence = client_sequence;
         const changed = new_cols != entry.cols or new_rows != entry.rows;
         if (changed) {
             entry.cols = new_cols;
@@ -416,6 +422,29 @@ test "registry: register/get/duplicate and count" {
     const e = try reg.register(0xCCDD, 0, 0);
     try testing.expectEqual(min_cols, e.cols);
     try testing.expectEqual(min_rows, e.rows);
+}
+
+test "registry: live grid cap rejects oversized register and resize before mutation" {
+    var registry = TerminalRuntimeRegistry.init(testing.allocator);
+    defer registry.deinit();
+    const exact_cols: u16 = 4096;
+    const exact_rows: u16 = 256;
+    try testing.expectEqual(max_grid_cells, @as(usize, exact_cols) * exact_rows);
+    const entry = try registry.register(1, exact_cols, exact_rows);
+    _ = try registry.attach(1, 10, .controller);
+
+    try testing.expectError(
+        error.InvalidGridSize,
+        registry.register(2, exact_cols + 1, exact_rows),
+    );
+    try testing.expectEqual(@as(usize, 1), registry.count());
+    try testing.expectError(
+        error.InvalidGridSize,
+        registry.resize(1, 10, exact_cols + 1, exact_rows, 7),
+    );
+    try testing.expectEqual(exact_cols, entry.cols);
+    try testing.expectEqual(exact_rows, entry.rows);
+    try testing.expect(!entry.resize_seq_seen);
 }
 
 test "registry: membership generation changes only after a published membership mutation" {

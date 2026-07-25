@@ -614,9 +614,12 @@ valid manifest를 apply하거나 default surface를 명시적으로 finish해, l
   0이다. 성공 뒤 exact handle이 manifest에 정확히 하나일 때부터 일반 persistent Term close/checkpoint 규칙을 따른다.
 - inventory refresh는 derived row만 교체한다. 사라진 row·dismiss·앱 재실행·cap 초과·malformed manifest는 어떤
   runtime도 종료하지 않는다. 4,096 inventory는 virtual row DTO일 뿐 4,096 Tab/Term/attach로 materialize하지 않는다.
-- secure enumeration의 host cap은 16이다. symlink/non-regular/wrong-owner/wrong-mode/malformed manifest 하나는 그
-  entry만 unavailable로 남기지만, valid 후보가 17개 이상이면 선택적 prefix를 믿지 않고 recovery discovery 전체를
-  unavailable로 둔다. enumeration은 host를 spawn/delete하거나 stale 파일을 회수하지 않는다.
+- secure enumeration의 canonical exact registry entry cap은 16이다. symlink/non-regular/wrong-owner/wrong-mode/malformed
+  manifest 하나는 cap 안에서 그 entry만 unavailable로 남기지만, valid/invalid를 합쳐 17개 이상이면 선택적 prefix를
+  믿지 않고 recovery discovery 전체를
+  unavailable로 둔다. 열거 결과는 exact descriptor를 소유한 immutable candidate 목록 또는 typed whole-discovery
+  unavailable 중 하나이며, entry 오류를 빈 complete inventory로 바꾸지 않는다. enumeration은 host를
+  spawn/delete하거나 stale 파일을 회수하지 않는다.
 - frozen N-1 host에는 `runtime_inventory_v1`을 소급 추가할 수 없으므로 R2b orphan projection은 capability가 있는
   current host만 지원한다. N-1 exact manifest binding attach는 기존 adapter로 계속 지원하고, N-1 orphan은 same-PID
   exec upgrade로 current capability가 된 뒤 보인다. legacy `runtime.list`를 generation 없는 recovery snapshot으로
@@ -633,7 +636,10 @@ cwd에서 새 셸을 시작한다. 자동 fresh spawn은 없다 — `⏎`가 유
 않는다. capture는 exact handle/state를 owned 상태에서 다시 쓰며, parse→apply→capture를 두 cycle 반복하는 자동
 fixture가 restoreSpawn/attach/probe/spawn 공통 진입점 0과 dropped 0을 고정한다. 실제 signed app process의 반복
 Quit/relaunch E2E는 별도 제품 gate로 남는다. 9의 manifest 전역 중복 검증은
-R2a core/ABI/source-order fixture까지 구현됐고, 8의 `Recovered Sessions`는 R2b 미구현이다. 실제 제품 process에서 기존 checkpoint
+R2a core/ABI/source-order fixture까지 구현됐다. 8의 R2b는 core/wire와 secure host enumeration 및 canonical
+connection과 분리된 ephemeral inventory collector까지 구현됐고, 제품 restore coordinator·`Recovered Sessions`
+projection·fresh adopt는 미구현이다. 현재 단일 connection을 서비스 중인 host에서 별도 ephemeral handshake를
+동시에 처리하는 제품 scheduling/E2E도 coordinator 슬라이스의 선결 gate이며 아직 완료가 아니다. 실제 제품 process에서 기존 checkpoint
 file 무변경을 관측하는 E2E는 남아 있다. 일시 실패로 분류된 누락 runtime은 종전처럼 해당 Window apply를
 실패시키며, 추가 Window는 teardown하고 primary는 명시적인 새 default-shell fallback으로 전환한다. 이
 `restore incomplete` 실행은 종료 시 마지막 완전본을 `.bak`으로 한 번 보존한 뒤 현재 모델을 저장한다. capture/serialize/
@@ -1508,10 +1514,12 @@ controlled Claude/Codex foreground fixture를 낸 뒤 GUI observation까지 왕�
   local spawn도 실패하면 tombstone을 그대로 유지한다.
 - **R2a 구현 슬라이스:** manifest 전체의 writable `runtime-handle` 중복을 attach/spawn 전에 검증한다. legacy bare
   ID가 같은 runtime ID를 full/bare owner와 공유하는 경우도 host namespace 미확정 중복으로 fail-close한다.
-- **R2b 후속:** 위 §7 계약대로 paginated ID-only `runtime.inventory`와 authority generation을 검증하고,
-  manifest relation과 inventory-only orphan을 분리해 side effect 없이 reconcile한다. primary Window에는 typed
-  virtual `Recovered Sessions` projection만 publish하고, 사용자의 explicit one-item adopt가 fresh authority
-  revalidation 뒤 orphan 새 tab 또는 ended tombstone 제자리 교체를 수행한다.
+- **R2b core module 구현:** 위 §7 계약의 paginated ID-only `runtime.inventory`, authority generation,
+  secure registry discovery, pinned descriptor ephemeral collector와 manifest relation/inventory-only orphan의
+  side-effect-free reconcile까지 구현했다.
+- **R2b 제품 후속:** single-client host의 별도 ephemeral connection scheduling을 먼저 해결하고 restore coordinator에
+  core module을 연결한다. primary Window에는 typed virtual `Recovered Sessions` projection만 publish하며, 사용자의
+  explicit one-item adopt가 fresh authority revalidation 뒤 orphan 새 tab 또는 ended tombstone 제자리 교체를 수행한다.
 - GUI abnormal exit 직전 layout을 위해 `WorkspaceCheckpointCoordinator`를 구현한다. 결과는
   `committed(generation)|stale|capture_failed|write_failed`이며 background 실패는 dirty를 유지하고 bounded
   backoff/notice coalescing을 한다. 마지막 Quit은 AppKit `terminateLater`에서 mutation을 freeze하거나 captured

@@ -14,6 +14,33 @@ pub const Error = error{
     CleanupFailed,
 };
 
+/// Read-only 생존 관측. `unknown`을 `free`로 접으면 GUI의 fd/권한 실패를 host 사망 증거로 오인한다.
+pub const Observation = enum {
+    free,
+    held,
+    unknown,
+};
+
+pub fn observe(path: [:0]const u8) Observation {
+    const fd = c.open(path.ptr, .{ .ACCMODE = .RDWR, .CLOEXEC = true, .NOFOLLOW = true }, @as(c.mode_t, 0));
+    if (fd < 0) return if (posix.errno(fd) == .NOENT) .free else .unknown;
+    defer _ = c.close(fd);
+    var stat: posix.Stat = undefined;
+    if (c.fstat(fd, &stat) != 0 or !metadataIsValid(stat, c.getuid())) return .unknown;
+    var path_stat: posix.Stat = undefined;
+    if (c.fstatat(posix.AT.FDCWD, path.ptr, &path_stat, posix.AT.SYMLINK_NOFOLLOW) != 0 or
+        !metadataIsValid(path_stat, c.getuid()) or path_stat.dev != stat.dev or path_stat.ino != stat.ino)
+        return .unknown;
+    const rc = c.flock(fd, c.LOCK.EX | c.LOCK.NB);
+    const lock_contended = rc != 0 and posix.errno(rc) == .AGAIN;
+    // lock 판정 직후 pathname을 다시 pin한다. open→flock 사이 replacement를 old inode의 held/free로 보고하지 않는다.
+    if (c.fstatat(posix.AT.FDCWD, path.ptr, &path_stat, posix.AT.SYMLINK_NOFOLLOW) != 0 or
+        !metadataIsValid(path_stat, c.getuid()) or path_stat.dev != stat.dev or path_stat.ino != stat.ino)
+        return .unknown;
+    if (rc == 0) return .free;
+    return if (lock_contended) .held else .unknown;
+}
+
 pub const OwnerLease = struct {
     const Identity = struct {
         dev: posix.dev_t,

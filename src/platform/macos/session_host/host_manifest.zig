@@ -382,6 +382,15 @@ pub fn load(
     return (try loadExact(allocator, session_dir, host_id)).manifest;
 }
 
+/// Recovery 열거가 빈 registry도 안전하게 판정할 수 있게 root 자체를 검증한다.
+/// 개별 manifest load와 같은 owner/mode/no-symlink 규칙을 쓰며 파일을 만들거나 고치지 않는다.
+pub fn validateRegistryRoot(session_dir: [:0]const u8) Error!void {
+    try validateOwnerDir(session_dir);
+    var hosts_buf: [640]u8 = undefined;
+    const hosts_root = hostsRootPathIn(&hosts_buf, session_dir) catch return error.InvalidDirectory;
+    try validateOwnerDir(hosts_root);
+}
+
 fn loadExact(
     allocator: std.mem.Allocator,
     session_dir: [:0]const u8,
@@ -719,6 +728,10 @@ fn sameDescriptor(a: Descriptor, b: Descriptor) bool {
         a.lifecycle == b.lifecycle and
         std.mem.eql(u8, a.build_id, b.build_id) and
         std.mem.eql(u8, a.endpoint, b.endpoint);
+}
+
+pub fn descriptorEql(a: Descriptor, b: Descriptor) bool {
+    return sameDescriptor(a, b);
 }
 
 fn writeAll(fd: c.fd_t, bytes: []const u8) Error!void {

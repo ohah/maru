@@ -54,8 +54,9 @@ workspace restore와 persistent-session attach는 서로 대체하지 않는다.
 positive-Gone의 정확한 handle을 `runtime-state="ended"`와 함께 owned 상태로 보존하고, 다음 restore가 host
 probe·attach·새 shell spawn 없이 placeholder를 직접 만드는 durable tombstone까지를 한 gate로 묶는다. Enter로 새
 runtime 생성이 성공한 때만 구 handle/state를 버린다. **P4 R2a의 전역 runtime binding 중복 검증도 core/ABI/source-order
-fixture까지 구현됐다.** `Recovered Sessions`, host inventory reconciliation,
-incremental checkpoint는 R2a 뒤 단계이며 아직 구현되지 않았다. 정상 종료 한 번에만
+fixture까지 구현됐다.** R2b의 host inventory core/wire와 secure discovery/ephemeral collector 모듈은 구현됐지만
+제품 restore coordinator에 아직 연결되지 않았다. `Recovered Sessions` projection/adopt와 incremental checkpoint는
+여전히 미구현이다. 정상 종료 한 번에만
 저장하는 현재 방식이라 GUI 비정상 종료 직전 layout은 잃을 수 있으므로 이 항목들은 영속 session 기본 전환 전 gate다.
 `workspace-binding-id`와 persistent quick layout은 default-on 범위에서 제거했다. 세부 소유권·ID·접속 실패 행렬은
 persistent-session 문서를 따른다.

@@ -85,6 +85,9 @@ pub const ScreenAssembler = struct {
     // 뷰포트 링크(자동 감지 + OSC 8; 없으면 empty). host가 해석해 실어 준 것으로, client는 이것만으로 Cmd+hover
     // 밑줄을 그린다 — client core는 빈 placeholder라 스스로 감지할 수 없다(docs/link-detection.md §원격(host-backed) 세션).
     link_spans: []screen_stream.LinkSpanWire = &.{},
+    // 스크롤바 thumb 근거(host가 ScreenMeta로 실어 준다). 구 host면 0으로 남아 스크롤바 미표시(기존 동작).
+    scrollback_len: u32 = 0,
+    view_offset: u32 = 0,
 
     pub fn init(allocator: std.mem.Allocator) ScreenAssembler {
         return .{ .allocator = allocator };
@@ -267,6 +270,8 @@ pub const ScreenAssembler = struct {
         self.rows_count = meta.rows;
         self.active_screen = meta.active_screen;
         self.cursor = meta.cursor;
+        self.scrollback_len = meta.scrollback_len;
+        self.view_offset = meta.view_offset;
         self.modes = meta.modes;
         self.generation = fs.header.generation;
 

@@ -39,6 +39,9 @@ pub const CellGrid = struct {
     // host가 해석한 뷰포트 링크(없으면 empty). 이 격자가 소유(조립기 wire → terminal 타입 값 복사).
     // client는 이것만으로 Cmd+hover 밑줄을 그린다 — 로컬 core는 빈 placeholder라 스스로 감지할 수 없다.
     links: []terminal.ViewportLink = &.{},
+    // 스크롤바 thumb 근거(host ScreenMeta → 조립기 → 여기). 로컬 core가 채우는 같은 이름 필드와 짝이다.
+    scrollback_len: usize = 0,
+    view_offset: usize = 0,
 
     pub fn deinit(self: *CellGrid) void {
         if (self.cells.len != 0) self.allocator.free(self.cells); // len 가드 — emptyGrid(cells=&.{})도 안전히 deinit(리뷰 #2).
@@ -69,6 +72,8 @@ pub const CellGrid = struct {
             .images = self.images,
             .prompt_marks = self.prompt_marks, // OSC 133 거터(✓/✗)·prompt 네비 입력.
             .links = self.links, // Cmd+hover 밑줄·링크 커서 입력(host 해석 — docs/link-detection.md §원격(host-backed) 세션).
+            .scrollback_len = self.scrollback_len, // 스크롤바 thumb(로컬은 core가 같은 필드를 채운다)
+            .view_offset = self.view_offset,
             // **dirty는 반드시 세운다**(리뷰 #1): draw 경로(draw_list.zig)가 셀·커서·거터 방출 전체를 `if (snapshot.dirty)`로
             // 게이트하므로 null이면 host-backed 패널이 통째로 blank로 그려진다. 원격은 apply마다 격자를 전부 다시 뜨므로(부분
             // dirty 추적 없음) 매 프레임 전체 화면을 dirty로 노출한다(in-process가 macOS live 경로에서 fullDirty를 유지하는 것과 동형).
@@ -218,6 +223,8 @@ pub fn build(allocator: std.mem.Allocator, asm_: *const screen_assembler.ScreenA
         .images = images_slice,
         .prompt_marks = prompt_marks,
         .links = links,
+        .scrollback_len = asm_.scrollback_len,
+        .view_offset = asm_.view_offset,
     };
 }
 
@@ -938,7 +945,7 @@ test "remote screen: build exposes kitty images + placements from the assembler 
 /// 조립/노출)을 잊지 않게 한다. 색·이미지·dirty가 조용히 유실됐던(리뷰 #1 blank 렌더) 재발을 막는 안전망이다.
 fn expectSnapshotParity(local_core: *const terminal.TerminalCore, local: terminal.RenderSnapshot, remote: terminal.RenderSnapshot) !void {
     // ── comptime 필드 커버리지: RenderSnapshot 새 필드는 반드시 아래 둘 중 하나로 분류돼야 한다 ──
-    const compared = [_][]const u8{ "size", "cursor", "cursor_shape", "viewport_scrolled", "viewport_scrolled_known", "ambiguous_wide", "cells", "graphemes", "placements", "images", "prompt_marks", "links", "dirty" };
+    const compared = [_][]const u8{ "size", "cursor", "cursor_shape", "viewport_scrolled", "viewport_scrolled_known", "ambiguous_wide", "cells", "graphemes", "placements", "images", "prompt_marks", "links", "scrollback_len", "view_offset", "dirty" };
     const dropped = [_][]const u8{ "cursor_blink", "last_command_exit" };
     comptime {
         for (@typeInfo(terminal.RenderSnapshot).@"struct".fields) |f| {
@@ -1032,6 +1039,10 @@ fn expectSnapshotParity(local_core: *const terminal.TerminalCore, local: termina
             try testing.expectEqual(e.scope, r.scope);
         }
     }
+    // 스크롤 상태: 로컬 core가 채우는 값과 원격이 wire로 받은 값이 같아야 스크롤바 thumb이 동일하게 그려진다.
+    // (예전엔 원격이 이 값을 아예 못 받아 client가 placeholder의 0을 읽었고, 그래서 스크롤바가 안 떴다.)
+    try testing.expectEqual(local.scrollback_len, remote.scrollback_len);
+    try testing.expectEqual(local.view_offset, remote.view_offset);
     // dirty(리뷰 #1): 원격은 반드시 non-null·전체 화면이어야 draw 경로가 셀/커서/거터를 방출한다(null이면 blank 렌더).
     // local과의 값 비교보다 이 **불변식**을 못박아, 누가 remote.dirty를 null로 되돌리면 여기서 실패하게 한다.
     try testing.expect(remote.dirty != null);

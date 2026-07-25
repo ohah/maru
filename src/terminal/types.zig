@@ -379,6 +379,12 @@ pub const RenderSnapshot = struct {
     // 원격은 client core가 빈 placeholder라 스스로 감지할 수 없어, host가 해석한 결과를 이 중립 DTO에 실어 보낸다
     // (docs/link-detection.md §원격(host-backed) 세션). 소스 메모리를 alias하므로 lock 안에서 읽고 복사해야 한다.
     links: []const ViewportLink = &.{},
+    // 스크롤바가 thumb 크기·위치를 계산하는 데 쓰는 스크롤 상태. 로컬/원격 **양쪽이 채워** 소비자가 화면
+    // 소유자를 몰라도 되게 한다(host-backed면 client core가 빈 placeholder라 거기서 읽으면 항상 0이고,
+    // 그래서 원격 세션에 스크롤바가 안 뜬다). `scrollback_len`=스크롤백 행 수, `view_offset`=바닥에서 위로
+    // 올라간 행 수(0=바닥).
+    scrollback_len: usize = 0,
+    view_offset: usize = 0,
     // 가장 최근에 끝난 명령의 종료코드(OSC 133 ; D ; <code>). 없으면 null. shell이 음수(-1 등)를
     // 보낼 수 있어 i32. **주의: 거터는 이 값이 아니라 `prompt_marks[행].exit`(행별)로 그린다** —
     // 이건 MARU_DEBUG 덤프 헤더용 편의 값이라 거터/UI를 여기에 연결하지 말 것.

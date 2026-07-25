@@ -17232,6 +17232,13 @@ pub const AppSession = struct {
     pub fn resetInputModes(self: *AppSession) void {
         if (!self.surface_initialized) return;
         const surface = self.activeSurface();
+        // host-backed면 **실제 입력 모드를 든 host core**에 적용해야 한다 — client core는 빈 placeholder라 여기서
+        // 리셋해 봐야 원격 앱은 계속 mouse/focus 리포트를 보낸다(⌘⇧R이 원격에서 무동작이던 이유). 명령은 기존
+        // core_command 통로로 위임하고 reader가 input barrier 순서대로 적용한다.
+        if (surface.remote != null) {
+            self.runtime.enqueueCoreCommand(surface.id, .reset_input_modes, self.io) catch {};
+            return;
+        }
         surface.lockCore(self.io);
         defer surface.unlockCore(self.io);
         surface.core.resetInputModes();
@@ -25413,9 +25420,10 @@ pub const AppSession = struct {
             // scrollbackLen(리더 core.write가 증가)·viewOffset 스칼라를 락 아래 한 번에 읽는다
             // (docs/io-render-threading.md PR3). 비-const 메서드라 락 가능.
             psurface.lockCore(self.io);
-            const sb_len = psurface.core.scrollbackLen();
-            const vo = psurface.core.viewOffset();
+            const scroll_state = scrollStateOf(psurface);
             psurface.unlockCore(self.io);
+            const sb_len = scroll_state.scrollback_len;
+            const vo = scroll_state.view_offset;
             if (sb_len == 0) {
                 // 스크롤바 없음 — 다음 등장이 full로 시작하게 타이머 리셋(0→nonzero 전환).
                 pane.scrollbar_idle_ticks = 0;
@@ -25472,11 +25480,22 @@ pub const AppSession = struct {
     /// thumb 위면 그 offset(드래그가 thumb 내 상대 위치를 유지), thumb 밖 트랙이면 thumb_h/2(클릭 지점에 thumb
     /// 중앙을 맞춰 점프). 스크롤백 없음·메트릭 0·영역 밖이면 null. x 영역은 thumb 폭 + 좌측 4px 여유(잡기 쉽게),
     /// y는 트랙(pane) 전체. appendScrollbar와 같은 bar_w(cell_width*0.32, 최소 5)·우측 2px 안쪽 배치를 쓴다.
+    /// 스크롤바 thumb 계산에 쓰는 스크롤 상태. **화면 소유자를 묻지 않는다** — `renderSnapshot()`이 로컬은 core에서,
+    /// host-backed는 host가 wire로 보낸 값에서 같은 필드를 채우기 때문이다(중립 DTO). 예전엔 호출처들이
+    /// `core.scrollbackLen()`을 직접 읽어 원격에선 항상 0이었고(placeholder), 그래서 스크롤백이 쌓여도 스크롤바가
+    /// 뜨지 않았다. **호출자가 lockCore를 보유해야 한다**(snapshot이 소스 메모리를 alias — 스칼라만 읽고 복사).
+    fn scrollStateOf(surface: *maru.session.Surface) struct { scrollback_len: usize, view_offset: usize } {
+        const snap = surface.renderSnapshot();
+        return .{ .scrollback_len = snap.scrollback_len, .view_offset = snap.view_offset };
+    }
+
     fn scrollbarGrabAt(self: *const AppSession, x_px: f64, y_px: f64) ?f32 {
         const rect = self.active_pane_rect;
         if (rect.w == 0 or self.cell_width_px == 0) return null;
-        const core = &self.activeSurfaceConst().core;
-        const geom = scrollbarThumbGeom(core.scrollbackLen(), core.viewOffset(), self.cell_height_px, rect.h) orelse return null;
+        // 호출자(hoverCursor·mouse)가 락 밖에서 부르는 hit-test다. 스칼라 두 개만 읽으므로 renderSnapshot의
+        // 스크롤 상태를 그대로 쓴다(로컬/원격 공통 — 원격은 host가 실어 준 값).
+        const scroll_state = scrollStateOf(@constCast(self).activeSurface());
+        const geom = scrollbarThumbGeom(scroll_state.scrollback_len, scroll_state.view_offset, self.cell_height_px, rect.h) orelse return null;
         // thumb가 트랙을 꽉 채워 스크롤 여지가 없으면(track<=0, degenerate 작은 pane) 잡지 않는다 — 안 그러면
         // 클릭을 캡처하고도 dragScrollbarTo가 무동작이라 선택도 스크롤도 안 되는 dead zone이 된다.
         if (geom.h >= @as(f32, @floatFromInt(rect.h))) return null;
@@ -25511,9 +25530,9 @@ pub const AppSession = struct {
         const snap = blk: {
             surface.lockCore(self.io);
             defer surface.unlockCore(self.io);
-            break :blk .{ .total_sb = surface.core.scrollbackLen(), .view_offset = surface.core.viewOffset() };
+            break :blk scrollStateOf(surface);
         };
-        const total_sb = snap.total_sb;
+        const total_sb = snap.scrollback_len;
         if (total_sb == 0) return;
         // thumb_h는 view_offset과 무관(sb_count·ch·view_h만) — 현재 offset으로 구해도 .h는 안정적.
         const geom = scrollbarThumbGeom(total_sb, snap.view_offset, self.cell_height_px, rect.h) orelse return;
@@ -25659,8 +25678,8 @@ pub const AppSession = struct {
     /// 메모리 'UI는 Zig+GPU 렌더러로' — 네이티브 NSScroller가 아니라 chrome GpuQuad 프리미티브. 좌표는 backing 픽셀.
     fn appendScrollbar(self: *AppSession, rect: maru.session.SplitRect, pane: *Pane, is_active: bool) void {
         if (rect.w == 0) return;
-        const core = &pane.activeTerm().surface.core;
-        const geom = scrollbarThumbGeom(core.scrollbackLen(), core.viewOffset(), self.cell_height_px, rect.h) orelse return;
+        const scroll_state = scrollStateOf(pane.activeTerm().surface);
+        const geom = scrollbarThumbGeom(scroll_state.scrollback_len, scroll_state.view_offset, self.cell_height_px, rect.h) orelse return;
         const thumb_y: f32 = @as(f32, @floatFromInt(rect.y)) + geom.y;
         const thumb_h: f32 = geom.h;
         // 활성 pane만 hover/드래그로 굵게+full(세션 상태). alpha는 **per-pane fade**(각 pane scrollbar_idle_ticks) —
@@ -55375,4 +55394,48 @@ test "host-backed motion 리포팅: 관측 모드가 any(1003)면 motion을 보�
     const reported = session.last_motion_cell orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(u16, 5), reported.col);
     try std.testing.expectEqual(@as(u16, 2), reported.row);
+}
+
+// host-backed 스크롤바 회귀 가드. 스크롤바 thumb은 스크롤백 길이와 view offset으로 계산하는데, 예전 호출처들은
+// `core.scrollbackLen()`을 직접 읽어 host-backed에서 항상 0이었다(placeholder) — 원격 세션에 스크롤백이 아무리
+// 쌓여도 스크롤바가 뜨지 않았다. 이제 host가 ScreenMeta로 실어 준 값이 RenderSnapshot의 같은 필드로 들어와
+// 로컬/원격이 한 경로를 쓴다.
+test "host-backed 스크롤바: host가 실어 준 스크롤 상태로 thumb이 그려진다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    session.window_padding_px = .{};
+    _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
+
+    var fake = FakeLinkScreen{ .snap = .{ .size = .{ .cols = 40, .rows = 10 } } };
+    const surface = session.activeSurface();
+    surface.remote = .{ .ctx = &fake, .vtable = &FakeLinkScreen.vtable };
+    defer surface.remote = null;
+
+    // 스크롤백 없음 → thumb 없음(스크롤바 미표시).
+    try std.testing.expect(AppSession.scrollbarThumbGeom(
+        AppSession.scrollStateOf(surface).scrollback_len,
+        AppSession.scrollStateOf(surface).view_offset,
+        session.cell_height_px,
+        session.active_pane_rect.h,
+    ) == null);
+
+    // host가 스크롤백 500행·offset 120을 실어 주면 그대로 반영된다(예전엔 placeholder라 0이었다).
+    fake.snap.scrollback_len = 500;
+    fake.snap.view_offset = 120;
+    const state = AppSession.scrollStateOf(surface);
+    try std.testing.expectEqual(@as(usize, 500), state.scrollback_len);
+    try std.testing.expectEqual(@as(usize, 120), state.view_offset);
+    const geom = AppSession.scrollbarThumbGeom(state.scrollback_len, state.view_offset, session.cell_height_px, session.active_pane_rect.h) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expect(geom.h > 0); // thumb이 실제로 그려질 크기를 가진다
 }

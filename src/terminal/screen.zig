@@ -2003,6 +2003,8 @@ pub fn snapshot(self: *const TerminalCore) types.RenderSnapshot {
         .graphemes = self.grapheme_store.items, // cluster 본체 store를 zero-copy로 빌려준다(id로 참조)
         .prompt_marks = self.screen.prompt_marks, // 활성 화면 행 태그를 그대로 빌려준다(zero-copy)
         .last_command_exit = self.last_command_exit,
+        .scrollback_len = self.screen.sb.count, // 스크롤바 thumb 근거(원격은 host가 wire로 실어 준다)
+        .view_offset = self.view_offset,
         .dirty = self.dirty,
     };
 }

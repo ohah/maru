@@ -210,6 +210,11 @@ PTY raw bytes만 host가 보관하고 새 GUI가 처음부터 replay하는 방�
 - **벨(BEL)**(P3-e4c-8). host는 관측에 누적 카운터 `bell_count`만 싣고, `bell.*` 정책 판정과
   실제 실행(NSSound.beep·시각 flash·Dock 배지)은 client가 한다. 새 RPC를 만들지 않고 **관측 push에 얹은** 이유는
   벨이 드문 이벤트라 매 tick 폴링이 낭비이고, 관측은 이미 약 100ms마다 변화 시에만 push되기 때문이다.
+  다만 **관측 주기는 폴링 주기이지 이벤트 지연이 아니다**: 벨·OSC 52는 host가 발생 시점을 정확히 알므로
+  `RuntimeOps.observation_urgent`가 대기 중인 이벤트를 보고(소비하지 않고 조회만) true를 주면 그 tick 카운트를
+  건너뛰고 다음 serve tick(약 20ms)에 바로 관측을 만들어 push한다. 소리·클립보드는 지연이 그대로 체감되므로
+  통로(관측)는 그대로 두고 **트리거만 앞당기는** 선택이다. foreground process처럼 폴링 말고는 알 수 없는 상태는
+  기존 100ms 주기를 그대로 쓴다.
   **소비형 bool이 아니라 카운터**인 것이 핵심이다 — full-state 관측은 "이전과 같으면 미전송"이라 bool은 true→true
   전이를 잃어 둘째 벨을 놓친다. client는 마지막에 본 값보다 **클 때만** 울리고, 작아지면(host exec migration으로
   카운터가 0에서 재시작) 가짜 벨 대신 조용히 재동기화한다.

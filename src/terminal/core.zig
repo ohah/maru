@@ -1239,6 +1239,12 @@ pub const TerminalCore = struct {
 
     /// G12 BEL: pending 벨이 있으면 true를 돌려주고 플래그를 비운다(한 번 울리고 소비). platform이 매 tick
     /// 호출해 시스템 벨(NSSound.beep)을 울린다 — 코어는 OS 소리를 직접 내지 않는다(OSC 52/9·777과 같은 경계).
+    /// BEL이 대기 중인가 — **소비하지 않는다**. host가 "즉시 관측이 필요한지" 판정하는 데 쓴다(takeBell은
+    /// 관측을 만들 때 한 번만 호출해야 하므로 조회용을 따로 둔다).
+    pub fn bellPending(self: *const TerminalCore) bool {
+        return self.bell_pending;
+    }
+
     pub fn takeBell(self: *TerminalCore) bool {
         const had = self.bell_pending;
         self.bell_pending = false;

@@ -219,6 +219,13 @@ pub const RemoteTermBackend = struct {
         return (entry.runtime.linkAt(row, col, scopes) catch return null) orelse null;
     }
 
+    /// host-backed Term(handle)의 대기 중 OSC 52 write 텍스트를 host에서 가져온다(없거나 구 host면 null).
+    /// caller가 free. 정책 판정과 실제 NSPasteboard 쓰기는 client(app_session/Swift)가 한다.
+    pub fn clipboardWriteFor(self: *RemoteTermBackend, handle: RuntimeHandle) ?[]u8 {
+        const entry = self.runtimes.get(handle) orelse return null;
+        return (entry.runtime.clipboardWrite() catch return null) orelse null;
+    }
+
     /// host-backed Term(handle)에서 검색어 매치를 host가 찾게 하고(§6c — `findMatches` 재사용) 보이는 매치 뷰포트 span을
     /// `out_spans`에 채운다. 전체 매치 수를 돌려준다. 없거나 오류면 null(best-effort). 검색 의미론은 host core 단일 출처.
     pub fn findFor(self: *RemoteTermBackend, handle: RuntimeHandle, query: []const u8, cur_index: u32, scroll: bool, out_spans: *std.ArrayList(maru.terminal.SelectionSpan)) ?remote_runtime.RemoteRuntime.FindResult {

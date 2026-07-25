@@ -70,6 +70,11 @@ pub const RuntimeObservationView = struct {
     bracketed_paste: bool = false,
     /// host-backed BEL 누적 횟수. 소비자가 마지막에 본 값과의 차이로 벨을 울린다(0=구 host — 안 울림).
     bell_count: u64 = 0,
+    /// host-backed OSC 52 요청 seq(write/read). 소비자가 마지막에 본 값과의 차이로 처리한다(0=구 host — 비활성).
+    clipboard_write_seq: u64 = 0,
+    clipboard_read_seq: u64 = 0,
+    /// 마지막 OSC 52 read 요청의 target(Pc) — 응답 echo용. 짧아서 관측에 함께 싣는다.
+    clipboard_read_target: []const u8 = "",
     foreground_available: bool = false,
     foreground_pgid: ?i32 = null,
     foreground_processes: []const pty.types.ForegroundProcessName = &.{},
@@ -102,6 +107,11 @@ pub const RuntimeObservation = struct {
     bracketed_paste: bool = false,
     /// host-backed BEL 누적 횟수. 소비자가 마지막에 본 값과의 차이로 벨을 울린다(0=구 host — 안 울림).
     bell_count: u64 = 0,
+    /// host-backed OSC 52 요청 seq(write/read). 소비자가 마지막에 본 값과의 차이로 처리한다(0=구 host — 비활성).
+    clipboard_write_seq: u64 = 0,
+    clipboard_read_seq: u64 = 0,
+    /// 마지막 read 요청 target(Pc) — 소유 버퍼(스냅샷은 view라 캐시가 복사해 든다).
+    clipboard_read_target: std.ArrayListUnmanaged(u8) = .empty,
     foreground_available: bool = false,
     foreground_pgid: ?i32 = null,
     foreground_processes: std.ArrayListUnmanaged(pty.types.ForegroundProcessName) = .empty,
@@ -110,6 +120,7 @@ pub const RuntimeObservation = struct {
     pub fn deinit(self: *RuntimeObservation, allocator: std.mem.Allocator) void {
         self.cwd.deinit(allocator);
         self.window_title.deinit(allocator);
+        self.clipboard_read_target.deinit(allocator);
         self.ssh_remote_dest.deinit(allocator);
         self.foreground_processes.deinit(allocator);
         self.agent_progress.deinit(allocator);
@@ -135,6 +146,8 @@ pub const RuntimeObservation = struct {
             .mouse_tracking = snapshot.mouse_tracking,
             .mouse_tracking_mode = snapshot.mouse_tracking_mode,
             .bell_count = snapshot.bell_count,
+            .clipboard_write_seq = snapshot.clipboard_write_seq,
+            .clipboard_read_seq = snapshot.clipboard_read_seq,
             .bracketed_paste = snapshot.bracketed_paste,
             .foreground_available = snapshot.foreground_available,
             .foreground_pgid = snapshot.foreground_pgid,
@@ -143,6 +156,7 @@ pub const RuntimeObservation = struct {
         try next.cwd.appendSlice(allocator, snapshot.cwd);
         try next.window_title.appendSlice(allocator, snapshot.window_title);
         if (snapshot.ssh_remote_dest) |dest| try next.ssh_remote_dest.appendSlice(allocator, dest);
+        try next.clipboard_read_target.appendSlice(allocator, snapshot.clipboard_read_target);
         try next.foreground_processes.appendSlice(allocator, snapshot.foreground_processes);
         if (snapshot.agent_progress.len != 0)
             try next.agent_progress.appendSlice(allocator, snapshot.agent_progress)

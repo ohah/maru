@@ -207,16 +207,17 @@ PTY raw bytes만 host가 보관하고 새 GUI가 처음부터 replay하는 방�
 
 **아직 이 규칙을 적용하지 않은 것**(무동작 상태):
 
-- **OSC 52 클립보드**. host core가 파싱하지만 client로 나갈 통로가 없다. 위 규칙대로면 host는
-  "앱이 벨을 울렸다 / 클립보드를 요청했다"는 사실만 전달하고, `bell.*`·`osc52.read` 정책 판정과 실제 실행(소리·배지·
-  NSPasteboard)은 client가 한다. OSC 52 **읽기**는 응답을 PTY에 써야 하므로 client가 읽은 값을 host로 되돌리는
-  왕복이 추가로 필요하다(로컬 `take_clipboard_read_request`/`provide_clipboard_read` 쌍과 같은 구조).
 - **벨(BEL)은 이 규칙대로 이관했다**(P3-e4c-8). host는 관측에 누적 카운터 `bell_count`만 싣고, `bell.*` 정책 판정과
   실제 실행(NSSound.beep·시각 flash·Dock 배지)은 client가 한다. 새 RPC를 만들지 않고 **관측 push에 얹은** 이유는
   벨이 드문 이벤트라 매 tick 폴링이 낭비이고, 관측은 이미 약 100ms마다 변화 시에만 push되기 때문이다.
   **소비형 bool이 아니라 카운터**인 것이 핵심이다 — full-state 관측은 "이전과 같으면 미전송"이라 bool은 true→true
   전이를 잃어 둘째 벨을 놓친다. client는 마지막에 본 값보다 **클 때만** 울리고, 작아지면(host exec migration으로
   카운터가 0에서 재시작) 가짜 벨 대신 조용히 재동기화한다.
+- **OSC 52 클립보드도 같은 규칙으로 이관했다**(P3-e4c-9). host는 요청을 drain해 관측에 누적 seq(`clipboard_write_seq`·
+  `clipboard_read_seq`)와 read target(Pc)만 싣고, **정책 판정(`osc52.read`)과 OS 클립보드 접근은 client**가 한다.
+  write 텍스트는 커서 관측 full-state에 실을 수 없어 `runtime.clipboard_write` RPC로 따로 가져간다(seq가 증가했을
+  때만 호출 — 폴링 없음). **read 응답에는 추가 왕복이 없다**: 응답은 `ESC ] 52 ; Pc ; base64 ST` 바이트라 client가
+  만들어 기존 입력 경로(`writeInput`)로 host PTY에 쓰면 된다. seq 감소는 벨과 같이 재동기화로 본다.
 - 참고로 같은 문제를 tmux는 `set-clipboard`로 푼다 — 서버가 클립보드를 직접 만지지 않고 **바깥 터미널로 OSC 52를
   다시 내보내** 실제 접근을 위임한다(`man tmux`: "attempt to set the terminal clipboard using the xterm escape
   sequence"). 서버=전달, 바깥=실행이라는 배치가 위 규칙과 같다(동작 비교만 — 코드 표현은 참고하지 않았다).
@@ -1182,6 +1183,10 @@ P3-e도 슬라이스로 나눈다(제품 통합이라 크다).
     `observation_wire.fieldIsBoolOrAbsent`·`fieldFitsUnsignedOrAbsent`). 검증: override가 placeholder core를 이겨 host의
     DECCKM(화살표 SS3 `\x1bOA`)·kitty(escape `CSI 27u`)로 인코딩됨(host unit), 관측 wire round-trip으로 `app_keypad`·`kitty_flags`
     적용과 구 host 필드 부재 시 폴백을 고정한다. 관측이 backend-neutral 단일 출처라 placeholder `surface.core` 직접 읽기 금지 계약도 지킨다.
+  - **P3-e4c-9(OSC 52 parity) 🟨**: host-backed 클립보드 쓰기/읽기가 동작한다. host가 요청을 drain해 관측 seq와
+    read target을 싣고, write 텍스트만 `runtime.clipboard_write`(capability `runtime_clipboard_v1`)로 가져간다.
+    정책 게이트는 client에 그대로 남는다 — 읽기 허용은 client config이고 여러 client가 각자 다를 수 있다.
+    읽기 응답은 PTY 바이트라 기존 입력 경로를 타므로 왕복이 없다.
   - **P3-e4c-8(벨 parity) 🟨**: host-backed BEL이 client의 벨 경로(소리·시각 flash·Dock 배지)에 닿는다. 예전엔
     `dispatchBell`이 placeholder core의 `takeBell()`을 읽어 원격에서 통째로 무동작이었다. 관측에 누적 카운터
     `bell_count`(optional)를 실어 push로 나르고, client가 delta로 판정한다 — 소비형 bool은 full-state 관측에서

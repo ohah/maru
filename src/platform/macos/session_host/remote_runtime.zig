@@ -501,6 +501,9 @@ pub const RemoteRuntime = struct {
         // 모드는 optional — 없으면(구 host) bool에서 폴백한다. 폴백 값은 `normal`(클릭 리포팅)로 보수적으로 잡아
         // motion(any)을 추측 전송하지 않는다: 1000만 켠 앱에 motion을 쏟으면 PTY 부하와 오작동이 된다.
         const bell_count: u64 = if (metadata.get("bell_count")) |v| (jsonU64(v) orelse return false) else 0;
+        const clipboard_write_seq: u64 = if (metadata.get("clipboard_write_seq")) |v| (jsonU64(v) orelse return false) else 0;
+        const clipboard_read_seq: u64 = if (metadata.get("clipboard_read_seq")) |v| (jsonU64(v) orelse return false) else 0;
+        const clipboard_read_target: []const u8 = if (metadata.get("clipboard_read_target")) |v| (jsonString(v) orelse return false) else "";
         const mouse_tracking_mode: u8 = if (metadata.get("mouse_tracking_mode")) |v|
             (if (jsonU64(v)) |n| @intCast(@min(n, 4)) else return false)
         else if (mouse_tracking) 2 else 0;
@@ -570,6 +573,9 @@ pub const RemoteRuntime = struct {
             .mouse_tracking = mouse_tracking,
             .mouse_tracking_mode = mouse_tracking_mode,
             .bell_count = bell_count,
+            .clipboard_write_seq = clipboard_write_seq,
+            .clipboard_read_seq = clipboard_read_seq,
+            .clipboard_read_target = clipboard_read_target,
             .bracketed_paste = bracketed_paste,
             .foreground_available = foreground_available,
             .foreground_pgid = foreground_pgid,
@@ -725,6 +731,17 @@ pub const RemoteRuntime = struct {
             .text = self.allocator.dupe(u8, text) catch return error.OutOfMemory,
             .kind = if (kind_raw == 1) .file_path else .url,
         };
+    }
+
+    /// OSC 52 write 텍스트를 host에서 가져온다(host는 넘기면 비운다). capability 없는 구 host면 null —
+    /// 원격 클립보드 쓰기가 비활성이다(모르는 RPC를 시험하지 않는다). 반환 텍스트는 caller 소유.
+    pub fn clipboardWrite(self: *RemoteRuntime) client_mod.ClientError!?[]u8 {
+        if (!self.client.runtime_clipboard_v1) return null;
+        var buf: [64]u8 = undefined;
+        const params = std.fmt.bufPrint(&buf, "{{\"stream_id\":{d}}}", .{self.stream_id}) catch return error.OutOfMemory;
+        const resp = try self.callOrdered("runtime.clipboard_write", params);
+        defer self.allocator.free(resp);
+        return self.decodeSelectedTextResponse(resp); // {text} 단일 필드 schema 공용(빈 text=대기 없음)
     }
 
     /// 구 host 호환 경로. RemoteScreen이 조립한 현재 viewport에서만 추출한다. 구 screen wire에는 soft-wrap bit가 없어

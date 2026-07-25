@@ -56,6 +56,8 @@ fn revision(allocator: std.mem.Allocator, payload: []const u8, allow_response: b
         // mouse_tracking은 **optional**(호환): 이 필드 없이 보내는 구버전 host의 metadata를 통째로 거부하면 cwd·
         // alt_active 등 나머지 관측까지 잃으므로, 없으면 통과시키고 consumer가 false로 폴백한다(타입이 있으면 bool 검증).
         !fieldIsBoolOrAbsent(metadata, "mouse_tracking") or
+        // mouse_tracking_mode도 optional(구버전 host 호환) — 없으면 consumer가 bool에서 폴백한다(1003은 못 씀).
+        !fieldFitsUnsignedOrAbsent(metadata, "mouse_tracking_mode", 4) or
         // bracketed_paste도 optional(구버전 host 호환) — host-backed 붙여넣기 bracketed 판정·인코딩 게이트 모드.
         !fieldIsBoolOrAbsent(metadata, "bracketed_paste") or
         // app_keypad·kitty_flags도 optional(구버전 host 호환) — host-backed 일반 key의 DECKPAM·kitty 인코딩 모드.

@@ -17837,7 +17837,7 @@ pub const AppSession = struct {
         // host-backed(원격)면 placeholder core엔 mouse_tracking이 없으므로(진짜 코어는 host) 관측에서 온 실제
         // 모드로 게이트하고, 아래 enqueueCoreCommand(report_mouse)가 host로 라우팅돼 host가 인코딩·PTY 주입한다(§입력 패리티).
         const tracking = if (target.remote != null)
-            self.remoteMouseTracking(target.id)
+            self.remoteMouseTracking(target.id) != .none
         else blk: {
             target.lockCore(self.io);
             defer target.unlockCore(self.io);
@@ -18031,14 +18031,21 @@ pub const AppSession = struct {
     /// host-backed 터미널의 마우스 트래킹 여부를 관측(RuntimeObservation.mouse_tracking)에서 읽는다 — placeholder
     /// core는 항상 .none이라 오판하기 때문(§입력 패리티). 관측 미가용/term 없음이면 false(트래킹 아님=스크롤백 경로).
     /// 휠·클릭·드래그·hover 마우스 게이트가 host-backed 분기에서 공유한다.
-    fn remoteMouseTracking(self: *AppSession, surface_id: u64) bool {
+    /// host-backed Term의 마우스 트래킹 **모드**(관측이 SSOT — placeholder core는 항상 `.none`이다).
+    /// 클릭 리포팅은 `!= .none`, 버튼 없는 motion 리포팅은 `== .any`(DECSET 1003)로 각 호출자가 판정한다 —
+    /// 예전엔 관측이 bool뿐이라 모드를 가를 수 없었고, 그래서 host-backed에서 **motion 리포트가 통째로 빠져** 있었다
+    /// (클릭만 이관됨). 관측에 모드가 없는 구 host는 `mouse_tracking` bool에서 `.normal`로 보수적으로 폴백해
+    /// motion을 추측 전송하지 않는다(1000만 켠 앱에 motion을 쏟으면 PTY 부하·오작동).
+    fn remoteMouseTracking(self: *AppSession, surface_id: u64) terminal.MouseTracking {
         const loc = self.findTermWhere(surface_id, struct {
             fn pred(id: u64, term: *Term) bool {
                 return term.kind == .terminal and term.surface.id == id;
             }
-        }.pred) orelse return false;
+        }.pred) orelse return .none;
         const obs = &loc.pane.terms.items[loc.term_index].rt.observation;
-        return obs.availability != .unavailable and obs.mouse_tracking;
+        if (obs.availability == .unavailable) return .none;
+        if (obs.mouse_tracking_mode > @intFromEnum(terminal.MouseTracking.any)) return .none; // 손상 방어(범위 밖)
+        return @enumFromInt(obs.mouse_tracking_mode);
     }
 
     /// 줄 수만큼 스크롤한다. alt screen + alternate scroll(DECSET 1007)이면 화살표 키로 변환해
@@ -18130,10 +18137,16 @@ pub const AppSession = struct {
         }
         const active = self.activeSurface();
         // 비-1003이면 dedup도 비운다 — 다음 1003 진입의 첫 셀이 stale last_motion_cell로 막히지 않게.
+        // **host-backed면 관측 모드가 SSOT**다: placeholder core는 항상 `.none`이라 예전 코드는 여기서 항상 빠져
+        // 원격 세션의 motion 리포팅(vim/tmux hover 등)이 무동작이었다(클릭 경로만 관측을 쓰고 있었다).
         {
-            active.lockCore(self.io);
-            defer active.unlockCore(self.io);
-            if (active.core.mouse_tracking != .any) {
+            const tracking: terminal.MouseTracking = blk: {
+                if (active.remote != null) break :blk self.remoteMouseTracking(active.id);
+                active.lockCore(self.io);
+                defer active.unlockCore(self.io);
+                break :blk active.core.mouse_tracking;
+            };
+            if (tracking != .any) {
                 self.last_motion_cell = null;
                 return;
             }
@@ -18356,7 +18369,7 @@ pub const AppSession = struct {
             const tracking = blk: {
                 const s = self.activeSurface();
                 // host-backed면 placeholder 대신 관측의 mouse_tracking으로 게이트한다(§입력 패리티).
-                if (s.remote != null) break :blk self.remoteMouseTracking(s.id);
+                if (s.remote != null) break :blk self.remoteMouseTracking(s.id) != .none;
                 s.lockCore(self.io);
                 defer s.unlockCore(self.io);
                 break :blk s.core.mouse_tracking != .none;
@@ -18993,7 +19006,7 @@ pub const AppSession = struct {
         // full (a)(P3-4)로 reader에 위임 — reader가 적용 후 pendingResponse를 PTY로 흘린다(메인 직접 mutate 0).
         // host-backed면 placeholder 대신 관측의 mouse_tracking으로 게이트한다(§입력 패리티) — report_mouse는 host로 라우팅.
         const do_report = ((mods & 4) == 0 and (mods & 8) == 0) and if (click_surface.remote != null)
-            self.remoteMouseTracking(click_surface.id)
+            self.remoteMouseTracking(click_surface.id) != .none
         else blk: {
             click_surface.lockCore(self.io);
             defer click_surface.unlockCore(self.io);
@@ -55311,4 +55324,55 @@ test "로컬 hover: client core를 직접 분류해 밑줄과 링크 커서가 �
     try std.testing.expect(session.hoverLinkSpan() == null);
     try std.testing.expectEqual(CursorKind.text, session.hoverCursor(on_url, row0, 0));
     try std.testing.expect(session.hoverLinkSpan() == null);
+}
+
+// host-backed(원격) Term의 **버튼 없는 motion 리포팅(DECSET 1003)** 회귀 가드. 클릭 리포팅은 관측(observation)의
+// 트래킹 상태를 보도록 이관됐는데 motion 경로만 placeholder core를 읽고 있었다 — placeholder는 항상 `.none`이라
+// 원격 세션에서 1003을 켠 앱(vim/tmux hover 등)에 motion이 통째로 안 갔다. 관측 bool이 "켜짐" 여부만 실어
+// 1003을 가를 수 없었던 것이 근본 원인이라, 모드(ordinal)를 실어 보내고 두 경로가 그 모드로 판정한다.
+test "host-backed motion 리포팅: 관측 모드가 any(1003)면 motion을 보낸다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 6,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    session.window_padding_px = .{};
+    _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
+
+    var fake = FakeLinkScreen{ .snap = .{ .size = .{ .cols = 40, .rows = 6 } } };
+    const surface = session.activeSurface();
+    surface.remote = .{ .ctx = &fake, .vtable = &FakeLinkScreen.vtable };
+    defer surface.remote = null;
+
+    const term = session.activePane().terms.items[session.activePane().active_term];
+    term.rt.observation.availability = .current;
+    const rect = session.active_pane_rect;
+    const x = @as(f64, @floatFromInt(rect.x)) + 5.5 * @as(f64, @floatFromInt(session.cell_width_px));
+    const y = @as(f64, @floatFromInt(rect.y)) + 2.5 * @as(f64, @floatFromInt(session.cell_height_px));
+
+    // 트래킹 꺼짐 → motion 무시(dedup 상태도 비운다).
+    term.rt.observation.mouse_tracking = false;
+    term.rt.observation.mouse_tracking_mode = @intFromEnum(terminal.MouseTracking.none);
+    session.mouseMoved(x, y, 0);
+    try std.testing.expect(session.last_motion_cell == null);
+
+    // 클릭 트래킹(1000)만 켜짐 → motion은 여전히 안 보낸다(1000만 켠 앱에 motion을 쏟으면 오작동).
+    term.rt.observation.mouse_tracking = true;
+    term.rt.observation.mouse_tracking_mode = @intFromEnum(terminal.MouseTracking.normal);
+    session.mouseMoved(x, y, 0);
+    try std.testing.expect(session.last_motion_cell == null);
+
+    // any-event(1003) → motion을 보낸다. 예전에는 placeholder core(.none)를 읽어 여기서도 null이었다.
+    term.rt.observation.mouse_tracking_mode = @intFromEnum(terminal.MouseTracking.any);
+    session.mouseMoved(x, y, 0);
+    const reported = session.last_motion_cell orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u16, 5), reported.col);
+    try std.testing.expectEqual(@as(u16, 2), reported.row);
 }

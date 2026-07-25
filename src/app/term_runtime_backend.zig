@@ -64,6 +64,9 @@ pub const RuntimeObservationView = struct {
     kitty_flags: u5 = 0,
     alternate_scroll: bool = true,
     mouse_tracking: bool = false,
+    /// 트래킹 모드 ordinal(0=none,1=x10,2=normal,3=button,4=any). motion(1003) 판정의 단일 출처 — 위 bool은
+    /// "켜짐" 여부만이라 모션을 가를 수 없다(구 host면 0으로 남아 motion 미전송 = 기존 동작).
+    mouse_tracking_mode: u8 = 0,
     bracketed_paste: bool = false,
     foreground_available: bool = false,
     foreground_pgid: ?i32 = null,
@@ -91,6 +94,9 @@ pub const RuntimeObservation = struct {
     kitty_flags: u5 = 0,
     alternate_scroll: bool = true,
     mouse_tracking: bool = false,
+    /// 트래킹 모드 ordinal(0=none,1=x10,2=normal,3=button,4=any). motion(1003) 판정의 단일 출처 — 위 bool은
+    /// "켜짐" 여부만이라 모션을 가를 수 없다(구 host면 0으로 남아 motion 미전송 = 기존 동작).
+    mouse_tracking_mode: u8 = 0,
     bracketed_paste: bool = false,
     foreground_available: bool = false,
     foreground_pgid: ?i32 = null,
@@ -123,6 +129,7 @@ pub const RuntimeObservation = struct {
             .kitty_flags = snapshot.kitty_flags,
             .alternate_scroll = snapshot.alternate_scroll,
             .mouse_tracking = snapshot.mouse_tracking,
+            .mouse_tracking_mode = snapshot.mouse_tracking_mode,
             .bracketed_paste = snapshot.bracketed_paste,
             .foreground_available = snapshot.foreground_available,
             .foreground_pgid = snapshot.foreground_pgid,

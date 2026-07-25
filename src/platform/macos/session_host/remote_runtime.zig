@@ -498,6 +498,11 @@ pub const RemoteRuntime = struct {
         const alternate_scroll = jsonBool(metadata.get("alternate_scroll") orelse return false) orelse return false;
         // mouse_tracking은 optional(구버전 host 호환) — 없으면 false. host-backed 마우스 리포트 게이트(휠 리포트 vs 스크롤백)용.
         const mouse_tracking = if (metadata.get("mouse_tracking")) |v| (jsonBool(v) orelse return false) else false;
+        // 모드는 optional — 없으면(구 host) bool에서 폴백한다. 폴백 값은 `normal`(클릭 리포팅)로 보수적으로 잡아
+        // motion(any)을 추측 전송하지 않는다: 1000만 켠 앱에 motion을 쏟으면 PTY 부하와 오작동이 된다.
+        const mouse_tracking_mode: u8 = if (metadata.get("mouse_tracking_mode")) |v|
+            (if (jsonU64(v)) |n| @intCast(@min(n, 4)) else return false)
+        else if (mouse_tracking) 2 else 0;
         // bracketed_paste도 optional(구버전 host 호환) — 없으면 false. host-backed 붙여넣기 게이트/인코딩용.
         const bracketed_paste = if (metadata.get("bracketed_paste")) |v| (jsonBool(v) orelse return false) else false;
         // app_keypad·kitty_flags도 optional(구버전 host 호환) — host-backed 일반 key의 DECKPAM(numpad)·kitty keyboard
@@ -562,6 +567,7 @@ pub const RemoteRuntime = struct {
             .kitty_flags = kitty_flags,
             .alternate_scroll = alternate_scroll,
             .mouse_tracking = mouse_tracking,
+            .mouse_tracking_mode = mouse_tracking_mode,
             .bracketed_paste = bracketed_paste,
             .foreground_available = foreground_available,
             .foreground_pgid = foreground_pgid,
@@ -1322,6 +1328,36 @@ test "remote runtime: spawn wire preserves extended SpawnRequest fields" {
     try std.testing.expect(std.mem.indexOf(u8, json, "\"foreground\":11189196") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"cell_width\":9,\"cell_height\":18") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"max_scrollback\"") == null); // host decoder와 다른 내부 필드명 누출 금지.
+}
+
+// 마우스 트래킹 **모드**는 host-backed motion 리포팅(DECSET 1003)의 판정 근거다. 예전 관측은 bool뿐이라 1003을
+// 가를 수 없었고 그래서 원격 세션에서 motion이 통째로 빠졌다. 모드를 싣는 새 host는 그 값을 그대로 쓰고, 모드가
+// 없는 구 host는 **여기서 한 번만** `.normal`로 보수적 폴백한다 — motion을 추측 전송하면 1000만 켠 앱이 오작동한다.
+// (폴백이 이 파싱 지점 하나여야 소비자[app_session]가 중복 판정하지 않는다.)
+test "remote runtime: 관측의 마우스 트래킹 모드는 그대로, 없는 구 host는 normal로 폴백한다" {
+    const allocator = std.testing.allocator;
+    const parse = struct {
+        fn run(a: std.mem.Allocator, extra: []const u8) !u8 {
+            var rr: RemoteRuntime = undefined;
+            rr.allocator = a;
+            rr.observation = .{};
+            defer rr.observation.deinit(a);
+            const json = try std.fmt.allocPrint(a,
+                \\{{"event":"runtime.metadata","metadata_revision":2,"metadata":{{"cwd":"/r","window_title":"w","ssh_remote_dest":null,
+                \\"semantic_state":3,"alt_active":false,"app_cursor_keys":false,"alternate_scroll":true,"mouse_tracking":true,{s}
+                \\"observer_generation":1,"title_generation":1,"cols":80,"rows":24,"foreground_available":false,"foreground_pgid":null,"processes":[]}}}}
+            , .{extra});
+            defer a.free(json);
+            if (!try rr.applyObservationJson(json)) return error.TestUnexpectedResult;
+            return rr.observation.mouse_tracking_mode;
+        }
+    }.run;
+
+    // 새 host: 실은 모드를 그대로 반영한다(any=1003이어야 motion이 나간다).
+    try std.testing.expectEqual(@as(u8, 4), try parse(allocator, "\"mouse_tracking_mode\":4,"));
+    try std.testing.expectEqual(@as(u8, 2), try parse(allocator, "\"mouse_tracking_mode\":2,"));
+    // 구 host: 모드 필드가 없으면 bool(true)에서 normal(2)로 폴백 — any로 승격하지 않는다.
+    try std.testing.expectEqual(@as(u8, 2), try parse(allocator, ""));
 }
 
 test "remote runtime: metadata parser applies only newer coherent full-state revisions" {

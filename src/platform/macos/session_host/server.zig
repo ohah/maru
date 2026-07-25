@@ -73,6 +73,11 @@ pub const RuntimeObservation = struct {
     kitty_flags: u5,
     alternate_scroll: bool,
     mouse_tracking: bool,
+    /// 마우스 트래킹 **모드**(`terminal.MouseTracking`의 ordinal — 0=none,1=x10,2=normal,3=button,4=any).
+    /// 위 `mouse_tracking`은 "켜져 있는가"만 알려주는 레거시 bool이라 **1003(any-event motion)을 구분할 수 없다** —
+    /// 그래서 host-backed 세션에서 버튼 없는 motion 리포트가 통째로 빠져 있었다. 이 필드가 모드의 단일 출처이고,
+    /// bool은 구 client 호환을 위해 계속 싣는 미러다(consumer는 mode를 우선 보고 없을 때만 bool로 폴백).
+    mouse_tracking_mode: u8 = 0,
     bracketed_paste: bool,
     observer_generation: u64,
     title_generation: u32,
@@ -1906,6 +1911,7 @@ const FakeRuntimeOps = struct {
             .kitty_flags = 0,
             .alternate_scroll = true,
             .mouse_tracking = false,
+            .mouse_tracking_mode = 0,
             .bracketed_paste = false,
             .observer_generation = 7,
             .title_generation = 3,

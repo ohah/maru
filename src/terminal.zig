@@ -22,6 +22,9 @@ pub const textTrimmedLen = types.textTrimmedLen;
 pub const Color = types.Color;
 pub const Cursor = types.Cursor;
 pub const CursorShape = types.CursorShape;
+/// 마우스 트래킹 모드(DECSET 1000/1002/1003). host-backed 세션에서 관측이 이 모드를 실어 보내고 platform이
+/// 클릭(`!= .none`)·motion(`== .any`) 게이트를 각각 판정한다 — bool로 뭉개면 1003을 가를 수 없다.
+pub const MouseTracking = core.MouseTracking;
 pub const SelectionPoint = types.SelectionPoint;
 pub const SelectionSpan = types.SelectionSpan;
 // 링크 자동 감지(URL·파일 경로) 타입 — platform(app_session)이 config 범위를 scopes로 빌드해 core로 넘긴다.

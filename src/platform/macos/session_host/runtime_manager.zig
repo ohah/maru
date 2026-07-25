@@ -917,6 +917,7 @@ pub const RuntimeManager = struct {
             .kitty_flags = core.kitty_flags.current().int(),
             .alternate_scroll = core.alternate_scroll,
             .mouse_tracking = core.mouse_tracking != .none,
+            .mouse_tracking_mode = @intFromEnum(core.mouse_tracking), // 모드 단일 출처(위 bool은 구 client 미러)
             .bracketed_paste = core.bracketed_paste,
             .observer_generation = core.observerGeneration(),
             .title_generation = core.title_generation.load(.monotonic),

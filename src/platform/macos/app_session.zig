@@ -1939,6 +1939,9 @@ pub const AppSession = struct {
     // P4 §6 L291: keep-alive인데 host 연결 실패로 in-process 폴백했을 때 첫 tick에 사용자에게 notice로 알린다("유지 안 됨").
     // ensureRemoteBackend가 실패하면 켜고, showPendingHostConnectNotice가 한 번 표시하고 끈다.
     host_connect_notice_pending: bool = false,
+    /// §7 종료 placeholder로 복원한 Term 수(첫 tick에 한 번 알리고 0으로 비운다 — host connect notice와 같은 self-gate).
+    /// 복원은 AppSession init 중이라 chrome이 없어 그 자리에서 notice를 못 띄운다.
+    ended_placeholder_notice_pending: u32 = 0,
     // surface teardown의 단일 chokepoint(destroyTerm + deinit direct pass)가 알리는 선택적 관찰 훅. cross-window move는
     // destroy가 아니라 소유 이전이므로 호출하지 않는다. app_host_abi가 browser grant/wait 수명에 연결한다.
     surface_closed_context: ?*anyopaque = null,
@@ -5778,6 +5781,22 @@ pub const AppSession = struct {
         if (!self.host_connect_notice_pending) return;
         self.host_connect_notice_pending = false;
         self.showNotice("영속 세션 host에 연결하지 못했습니다. 이번 세션의 터미널은 유지되지 않습니다(종료 시 함께 종료).");
+    }
+
+    /// §7 종료 placeholder가 하나 이상 복원됐음을 첫 tick에 알린다(host connect notice와 같은 self-gate 패턴 — 복원은
+    /// AppSession init 중이라 chrome이 아직 없어 그 자리에서 showNotice를 못 부른다). 알리지 않으면 사용자는 탭은
+    /// 돌아왔는데 일부 pane이 비어 있는 이유를 알 수 없다 — 화면 내 지속 안내는 후속 슬라이스가 붙인다.
+    fn showPendingEndedPlaceholderNotice(self: *AppSession) void {
+        if (self.ended_placeholder_notice_pending == 0) return;
+        const count = self.ended_placeholder_notice_pending;
+        self.ended_placeholder_notice_pending = 0;
+        var buf: [160]u8 = undefined;
+        const msg = std.fmt.bufPrint(
+            &buf,
+            "이전 세션 {d}개가 이미 종료돼 해당 자리는 비어 있습니다 — 레이아웃은 복원했습니다.",
+            .{count},
+        ) catch "이전 세션이 이미 종료돼 해당 자리는 비어 있습니다 — 레이아웃은 복원했습니다.";
+        self.showNotice(msg);
     }
 
     /// GUI 바이너리의 형제 `maru` CLI 경로(§10 launcher가 `maru __session-host`로 exec). selfExePath는 앱 바이너리라
@@ -23026,22 +23045,48 @@ pub const AppSession = struct {
         return try self.allocator.dupe(u8, name);
     }
 
-    fn createPaneFromSurface(self: *AppSession, sm: maru.session.workspace.Surface) !*Pane {
+    /// 복원 surface 하나를 라이브 Term으로 만드는 **단일 분기점**. host runtime이 영구히 없으면
+    /// (`error.PersistentRuntimeGone`) 창 전체를 실패시키는 대신 **그 Term만 종료 placeholder**로 만들어, 탭·split·창
+    /// frame은 정상 복원한다(§7 "나머지는 attach, 누락 Term만 종료 placeholder"). `PersistentRuntimeUnavailable`은 그대로
+    /// 전파해 현행 fail-close를 유지한다 — 일시 실패를 placeholder로 굳히면 살아 있는 runtime을 영구히 잃는다.
+    /// pane 진입점과 term 진입점이 이 함수를 공유해 분기가 한 곳에만 있다.
+    fn createRestoredTerm(self: *AppSession, sm: maru.session.workspace.Surface) !*Term {
         const rs = self.restoreSpawn(sm);
         errdefer self.clearRestoreRuntimeIdentity();
         const cfg = self.new_tab_config;
-        const pane = try self.createPane(rs.req, rs.size, cfg.queue_capacity, "Maru", commandName(cfg.command_kind));
-        errdefer self.destroyPane(pane);
-        // 첫 Term(=이 surface)의 사용자 rename 복원. 실패 시 errdefer destroyPane이 정리한다.
-        pane.activeTerm().surface.custom_name = try self.dupeCustomName(sm.custom_name);
+        return self.createTerm(rs.req, rs.size, cfg.queue_capacity, "Maru", commandName(cfg.command_kind)) catch |err| {
+            if (err != error.PersistentRuntimeGone) return err;
+            self.clearRestoreRuntimeIdentity(); // createTerm이 이미 소비했지만 멱등 방어
+            self.ended_placeholder_notice_pending += 1;
+            // 관측: 묘비 1개당 한 줄(MARU_DEBUG 게이트). **cwd는 남기지 않는다** — 홈 경로가 노출되면
+            // project-rules.md redaction 기준에 걸린다. host/runtime id는 opaque hex라 안전하다.
+            if (diag_gate.maruDebugEnabled()) std.log.scoped(.restore).info(
+                "ended placeholder host={s} runtime={s} cols={d} rows={d}",
+                .{ sm.runtime_host_id, sm.runtime_id, rs.size.cols, rs.size.rows },
+            );
+            return try self.createEndedPlaceholderTerm(sm.title, sm.cwd, sm.command, rs.size);
+        };
+    }
+
+    /// 복원 surface 하나로 panel을 만든다. `createPane`을 부르지 않고 Term 생성을 `createRestoredTerm`에 위임한 뒤
+    /// 빈 Pane에 담는 이유: placeholder 분기를 pane/term 두 진입점에 복사하지 않기 위해서다(`createPane`은 내부에서
+    /// `createTerm`을 직접 부른다). 조립 순서·errdefer는 `createPane`과 동형이다.
+    fn createPaneFromSurface(self: *AppSession, sm: maru.session.workspace.Surface) !*Pane {
+        const pane = try self.allocator.create(Pane);
+        errdefer self.allocator.destroy(pane);
+        pane.* = .{};
+        errdefer pane.terms.deinit(self.allocator);
+        const term = try self.createRestoredTerm(sm);
+        errdefer self.destroyTerm(term);
+        try pane.terms.append(self.allocator, term);
+        pane.active_term = 0;
+        // 첫 Term(=이 surface)의 사용자 rename 복원. 실패 시 위 errdefer들이 역순으로 정리한다.
+        term.surface.custom_name = try self.dupeCustomName(sm.custom_name);
         return pane;
     }
 
     fn createTermFromSurface(self: *AppSession, sm: maru.session.workspace.Surface) !*Term {
-        const rs = self.restoreSpawn(sm);
-        errdefer self.clearRestoreRuntimeIdentity();
-        const cfg = self.new_tab_config;
-        const term = try self.createTerm(rs.req, rs.size, cfg.queue_capacity, "Maru", commandName(cfg.command_kind));
+        const term = try self.createRestoredTerm(sm);
         errdefer self.destroyTerm(term);
         term.surface.custom_name = try self.dupeCustomName(sm.custom_name);
         return term;
@@ -23542,6 +23587,7 @@ pub const AppSession = struct {
             self.startUpdateCheck();
         }
         self.showPendingHostConnectNotice(); // §6 L291: keep-alive host 연결 실패 시 첫 tick에 notice(플래그로 self-gate).
+        self.showPendingEndedPlaceholderNotice(); // §7: 종료 placeholder로 복원한 자리가 있으면 첫 tick에 한 번 알린다.
         self.applyDragAutoscroll(); // 드래그가 grid 밖에 머무는 동안 frame-loop tick마다 한 줄씩 스크롤+확장
         self.flushPendingPaste(); // 큰 붙여넣기의 잔여를 자식이 읽는 속도에 맞춰 흘려보낸다
         self.drainUploadResults(); // 완료된 드롭 업로드의 원격 경로를 paste 큐로(백그라운드 스레드 → 메인)
@@ -36635,6 +36681,96 @@ test "R3 #3: host가 죽으면 createTerm이 in-process로 폴백한다(새 터�
     } else {
         return error.SkipZigTest;
     }
+}
+
+// §7 복원 배선을 못박는다: runtime이 영구히 없는 Term **하나만** 묘비가 되고 같은 pane의 다른 surface·split 트리·탭
+// 이름은 정상 복원돼야 한다. 이 배선 전에는 그 Term 하나가 창 apply 전체를 실패시켜 **탭·split·창 frame까지 잃었다**
+// (실측 사고: host runtime 12개가 사라지자 탭 9개가 통째로 날아갔다). 터미널에서 왜 중요한가 — 세션 이어하기는 못
+// 해도 사용자가 손으로 만든 작업 공간 구조는 남아야 하고, 그게 이 기능의 전부다.
+// 격리: `sessionCacheBase`가 `XDG_CACHE_HOME`을 먼저 읽으므로 빈 tmp로 박아 "그 host_id는 어디에도 없다"를 결정적으로
+// 만든다. 실 캐시를 보게 두면 개발 머신에 살아 있는 host 유무로 결과가 갈려 flaky해진다.
+test "종료 placeholder 복원: runtime 없는 Term만 묘비가 되고 탭·split 구조는 살아남는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
+    const xdg = try std.fmt.allocPrintSentinel(a, "{s}", .{root}, 0);
+    defer a.free(xdg);
+    // 이전 값 보존(고정 버퍼 — defer에서 할당하지 않으려고). 다른 테스트의 캐시 경로를 오염시키지 않는다.
+    var prev_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var prev_len: usize = 0;
+    var had_prev = false;
+    if (std.c.getenv("XDG_CACHE_HOME")) |p| {
+        const s = std.mem.span(p);
+        if (s.len < prev_buf.len) {
+            @memcpy(prev_buf[0..s.len], s);
+            prev_buf[s.len] = 0;
+            prev_len = s.len;
+            had_prev = true;
+        }
+    }
+    try std.testing.expectEqual(@as(c_int, 0), setenv("XDG_CACHE_HOME", xdg.ptr, 1));
+    defer if (had_prev) {
+        _ = setenv("XDG_CACHE_HOME", prev_buf[0..prev_len :0].ptr, 1);
+    } else {
+        _ = unsetenv("XDG_CACHE_HOME");
+    };
+
+    const session = try initSmokeSessionSized(a);
+    defer a.destroy(session);
+    defer session.deinit();
+
+    // 재접속 게이트는 keep-alive가 켜져 있을 때만 열린다 — 꺼져 있으면 identity를 무시하고 평범히 spawn한다.
+    const prev_keep = app_keep_alive_after_quit;
+    app_keep_alive_after_quit = true;
+    defer app_keep_alive_after_quit = prev_keep;
+
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    var win = try session.captureWorkspaceWindow(arena.allocator(), false, null);
+    // 한 pane에 두 surface: handle 없는 것(선언적 restore → 평범한 spawn)과 사라진 host handle(→ 묘비).
+    const surfaces = [_]maru.session.workspace.Surface{
+        .{ .title = "살아있는", .cwd = "/tmp", .command = "/bin/zsh", .cols = 80, .rows = 24 },
+        .{
+            .title = "끝난 세션",
+            .cwd = "/tmp",
+            .command = "/bin/zsh",
+            .runtime_host_id = "1234567890abcdef1234567890abcdef", // 어느 registry에도 없는 host
+            .runtime_id = "fedcba0987654321fedcba0987654321",
+            .cols = 100,
+            .rows = 30,
+        },
+    };
+    const panes = [_]maru.session.workspace.Pane{.{ .surfaces = &surfaces }};
+    const tree = [_]maru.session.workspace.TreeNode{.{ .leaf = 0 }};
+    const tabs = [_]maru.session.workspace.Tab{.{ .tree = &tree, .panes = &panes, .custom_name = "복원됨" }};
+    win.tabs = &tabs;
+
+    // 핵심: apply가 **성공**한다(이전에는 여기서 error가 나 창이 teardown됐다).
+    try session.applyWorkspaceWindow(win);
+
+    try std.testing.expectEqual(@as(usize, 1), session.tabs.items.len);
+    try std.testing.expectEqualStrings("복원됨", session.tabs.items[0].custom_name.?);
+    const pane = session.tabs.items[0].panes.items[0];
+    try std.testing.expectEqual(@as(usize, 2), pane.terms.items.len); // 두 surface 다 살아남았다
+
+    // handle 없는 surface는 평범한 라이브 Term이다(묘비로 오염되지 않았다).
+    try std.testing.expect(!pane.terms.items[0].rt.ended_placeholder);
+    try std.testing.expect(pane.terms.items[0].rt.live_initialized);
+    // 사라진 host를 가리킨 surface만 묘비이고, 마지막 제목이 라벨 출처로 남았다.
+    try std.testing.expect(pane.terms.items[1].rt.ended_placeholder);
+    try std.testing.expect(!pane.terms.items[1].rt.live_initialized);
+    try std.testing.expectEqualStrings("끝난 세션", pane.terms.items[1].auto_title.items);
+    try std.testing.expectEqualStrings("/tmp", pane.terms.items[1].rt.observation.cwd.items);
+
+    // 사용자에게 한 번 알린다 — 알리지 않으면 탭은 돌아왔는데 일부 pane이 빈 이유를 알 수 없다.
+    try std.testing.expectEqual(@as(u32, 1), session.ended_placeholder_notice_pending);
+    session.showPendingEndedPlaceholderNotice();
+    try std.testing.expectEqual(@as(u32, 0), session.ended_placeholder_notice_pending); // self-gate: 두 번 안 띄운다
 }
 
 // §7 종료 placeholder(묘비) **객체가 통과하는 모든 관문**을 못박는다. 묘비는 지금까지 없던 조합이다 —

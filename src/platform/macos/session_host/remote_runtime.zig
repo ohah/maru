@@ -918,6 +918,12 @@ pub const RemoteRuntime = struct {
     /// `runtime.notification`의 success envelope는 항상 문자열 `title`·`body` 두 필드다. 알림이 없어도 host가 둘을 빈
     /// 문자열로 보내므로 필드 누락을 "없음"으로 추측하지 않는다. 같은 major에서 필드 집합이나 타입이 달라지면 이후 RPC도
     /// 신뢰할 수 없어 connection을 fail-close한다.
+    ///
+    /// fail-close의 폭발 반경(`self.client`는 그 host의 **모든 runtime이 공유**한다)이 정당한 이유는, 정상 경로가 여기로
+    /// 오지 않기 때문이다(code-review max에서 제기됨): 이 RPC를 모르는 구 host는 **error 응답**을 보내고 위 error 분기가
+    /// null로 접어 연결을 유지하며, 필드 집합이 다른 빌드에는 애초에 붙지 않는다(`validateExactClient`가 host_id·
+    /// screen_codec_version·wire_major·build_id 일치를 요구한다 — host_connect.zig). 여기 도달 = 같은 빌드가 계약을
+    /// 어겼다는 뜻이고, 그 연결로 이후 RPC를 계속 보내는 쪽이 더 위험하다.
     fn decodeNotificationResponse(self: *RemoteRuntime, resp: []const u8) client_mod.ClientError!?Notification {
         // std.json.parseFromSlice 대신 **수동 디코드** — parseFromSlice가 숫자 파서(f128 소프트플로트 ___divtf3/___fixtfti
         // 등)를 링크로 끌어와, 이 경로가 live가 되면 ReleaseSafe 제품 빌드(macos-live-preview-perf)가 undefined symbol로

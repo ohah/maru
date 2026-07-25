@@ -5833,18 +5833,23 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                 workspaceRestoreIncomplete = true
             }
         }
-        if workspaceRestoreIncomplete {
-            showNotice("저장된 작업 공간을 일부만 복원했습니다 — 이전 체크포인트를 보존하며 이번 실행의 변경은 자동 저장하지 않습니다.")
-        }
         // 복원으로 grid·레이아웃이 바뀌었으니 primary를 창에 다시 맞추고 즉시 repaint한다 — 추가 창은
         // createTerminalWindow가 renderTick하지만 primary는 안 그래서, 기본 레이아웃이 한 프레임 깜빡이는 걸 막는다.
-        // (showNotice의 metal_dirty도 이 renderTick이 그린다.)
         withSurface(primary) {
             // M3f: primary(창 0)도 저장된 창 frame으로 복원(없으면 현행 기본 위치). resize 전에 setFrame해 resize가
             // 복원 크기를 세션에 전달하게 한다(추가 창은 createTerminalWindow에서 동일 처리).
             if let w = primary?.window { applyRestoredWindowFrame(w, text: text, index: 0) }
             resizeAppSessionFromWindow()
             _ = renderTick()
+        }
+        // **첫 renderTick 뒤에** 띄운다. notice 버퍼는 세션당 하나뿐이고(showNotice가 dismissMessageOverlays로 교체)
+        // 그 첫 tick이 §7 묘비 notice(showPendingEndedPlaceholderNotice)를 띄우므로, 예전처럼 먼저 띄우면 이 경고가
+        // 즉시 덮여 사라졌다 — 복원이 무언가를 버리면서 묘비도 만든 경우(host 불통 시 가장 흔한 조합)에 사용자는
+        // 체크포인트가 백업된다는 사실을 전혀 못 봤다(code-review). 둘 중 이쪽이 데이터 관련이라 우선하고, 묘비는
+        // 화면 안내(writeEndedPlaceholderGuidance)로 pane에 계속 남으므로 토스트를 양보해도 정보가 사라지지 않는다.
+        if workspaceRestoreIncomplete {
+            showNotice("저장된 작업 공간을 일부만 복원했습니다 — 종료 시 이전 체크포인트를 workspace.v1.bak으로 남기고 저장합니다.")
+            withSurface(primary) { _ = renderTick() } // 위 renderTick은 이미 지나갔으므로 이 notice를 그릴 tick을 준다.
         }
         // M3e: 저장 시점 활성(key)이던 창을 다시 focus한다(docs/window-surface-mobility.md §8A.8). Zig가 active-window=1
         // 마커가 있는 창의 **블록 인덱스**를 주고(없으면 -1 → 무동작, 현행 동작 = 마지막 생성 창 key 유지),
@@ -9215,9 +9220,23 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         return Int32(r)
     }
 
+    /// 복원이 불완전했던 실행에서 **덮어쓰기 직전에 마지막 완전본을 한 번 남긴다**(`workspace.v1.bak`).
+    ///
+    /// v144는 이 상황에서 저장을 통째로 막았는데(`guard !workspaceRestoreIncomplete`), 그 래치는 해제 경로가 없고
+    /// 저장을 막으니 stale 파일이 그대로 남아 **다음 실행이 같은 drop을 다시 만든다** — 자기영속 루프다. 그동안
+    /// 사용자가 만든 창·탭·split·pane rename·창 위치는 매 종료마다 조용히 사라진다. 즉 무기한 차단은 데이터
+    /// 손실 방지가 아니라 데이터 손실 그 자체가 된다(code-review). 대신 잃을 뻔한 상태를 파일로 남기고 정상
+    /// 저장해 루프를 끊는다. 이미 `.bak`이 있으면 덮지 않는다 — 연속으로 불완전한 실행이 이어질 때 가장 완전한
+    /// 첫 사본이 밀려나지 않게(복구는 사용자가 .bak을 workspace.v1로 되돌리면 된다).
+    private func backupWorkspaceCheckpoint(_ url: URL) {
+        let backup = url.appendingPathExtension("bak")
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: url.path), !fm.fileExists(atPath: backup.path) else { return }
+        try? fm.copyItem(at: url, to: backup)
+    }
+
     private func saveWorkspace() {
         guard !smokeMode, !windows.isEmpty else { return }
-        guard !workspaceRestoreIncomplete else { return }
         // 복원을 끈 사용자(MARU_NO_WORKSPACE_RESTORE)는 저장도 막는다 — 안 그러면 복원 안 한 기본 단일 창이 종료 시
         // 저장 파일을 덮어써 사용자가 보존하려던 멀티 창 레이아웃이 사라진다(데이터 손실). 플래그=persistence 자체 off.
         guard ProcessInfo.processInfo.environment["MARU_NO_WORKSPACE_RESTORE"] == nil else { return }
@@ -9259,6 +9278,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         }
         guard !blocks.isEmpty, let url = workspaceFileURL else { return }
         try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        // 이번 실행의 복원이 무언가를 버렸으면(도크 entry·explorer root·§7 묘비로 잃은 runtime handle) 덮어쓰기 전에
+        // 마지막 완전본을 .bak으로 보존한다. 저장 자체는 막지 않는다(위 함수 주석의 자기영속 루프).
+        if workspaceRestoreIncomplete { backupWorkspaceCheckpoint(url) }
         try? (MARU_WORKSPACE_HEADER + "\n" + blocks).data(using: .utf8)?.write(to: url, options: .atomic)
     }
 

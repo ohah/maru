@@ -172,7 +172,9 @@ fn findCurrentManifestHost(
             manifest.screen_codec_version != screen_stream.codec_version or
             manifest.lifecycle != .ready or
             !std.mem.eql(u8, manifest.build_id, build_id) or
-            !ownerLeaseIsLive(session_dir, host_id))
+            // 여기서는 `held`(생존이 확인된 host)만 재사용 대상이다. `.unknown`(우리가 못 봄)에 새 spawn을 붙이는 쪽이
+            // 기존 세션에 안전하다 — 이 경로의 오판 비용은 host 하나를 더 띄우는 것뿐이다(restore 경로와 대비).
+            ownerLeaseState(session_dir, host_id) != .held)
             continue;
         switch (connectExistingHost(allocator, base_cache_dir, host_id)) {
             .connected => |client| return .{ .connected = client },
@@ -182,15 +184,31 @@ fn findCurrentManifestHost(
     return null;
 }
 
-fn ownerLeaseIsLive(session_dir: [:0]const u8, host_id: u128) bool {
+/// owner lease 관측 결과. bool로 뭉개면 **"lease가 없다"(host가 죽었다는 증거)** 와 **"우리가 볼 수 없었다"**(fd 고갈·
+/// 권한·심링크)가 같은 값이 되고, 그 값이 곧바로 `host_gone`(영구) 판정에 쓰인다 — 우리 쪽 사정으로 살아 있는 host를
+/// 사라졌다고 단정하는 것이다. 오분류 비용이 비대칭이므로(§7 접속 실패 행렬) 증거 없음을 별도 상태로 남긴다(code-review).
+const LeaseState = enum {
+    /// lease 파일이 없거나 우리가 잡을 수 있었다 — 그 host 프로세스는 lease를 들고 있지 않다(죽었다).
+    free,
+    /// 다른 프로세스가 들고 있다(flock EWOULDBLOCK) — host 생존.
+    held,
+    /// 판정 불가. host에 대한 증거가 아니라 우리 쪽 실패다.
+    unknown,
+};
+
+fn ownerLeaseState(session_dir: [:0]const u8, host_id: u128) LeaseState {
     var path_buf: [832]u8 = undefined;
-    const path = host_manifest.ownerLockPathIn(&path_buf, session_dir, host_id) catch return false;
+    const path = host_manifest.ownerLockPathIn(&path_buf, session_dir, host_id) catch return .unknown;
     const fd = c.open(path.ptr, .{ .ACCMODE = .RDWR, .CLOEXEC = true, .NOFOLLOW = true }, @as(c.mode_t, 0));
-    if (fd < 0) return false;
+    if (fd < 0) {
+        // ENOENT만 "lease 파일이 없다" = host가 놓았다는 증거다. EMFILE/ENFILE(프로세스 fd 고갈 — PTY·WKWebView·FS
+        // watcher를 많이 든 GUI에서 현실적이다)·EACCES·ELOOP는 파일 상태에 대해 아무것도 말해주지 않는다.
+        return if (posix.errno(fd) == .NOENT) .free else .unknown;
+    }
     defer _ = c.close(fd);
     const rc = flock(fd, LOCK_EX | LOCK_NB);
-    if (rc == 0) return false;
-    return posix.errno(rc) == .AGAIN;
+    if (rc == 0) return .free; // 우리가 잡았다 = 아무도 안 들고 있다.
+    return if (posix.errno(rc) == .AGAIN) .held else .unknown;
 }
 
 fn connectNewHostWithBackoff(
@@ -302,11 +320,12 @@ pub fn connectExistingHost(
         .failed => |reason| {
             // manifest는 남아 있는데 endpoint가 응답하지 않으면 두 가지다: host가 사라졌거나(재부팅·crash 뒤 stale
             // manifest) 아직/일시적으로 못 붙는 것이다. owner lease는 이미 `findCurrentManifestHost`가 host 생존
-            // 판정의 단일 출처로 쓰는 증거라 여기서도 그걸 쓴다 — lease를 잡을 수 있으면 그 host 프로세스는 죽었다.
-            // OOM은 host에 대한 증거가 아니므로 그대로 둔다. lease가 살아 있으면(예: incompatible_version — hello에
-            // 답한 host가 존재) 일시 실패로 남긴다. 이 보수성이 살아 있는 세션을 placeholder로 굳히는 것을 막는다.
+            // 판정의 단일 출처로 쓰는 증거라 여기서도 그걸 쓴다 — lease를 **잡을 수 있었을 때만** 그 host 프로세스가
+            // 죽었다고 단정한다. OOM은 host에 대한 증거가 아니므로 그대로 둔다. lease가 살아 있거나(예:
+            // incompatible_version — hello에 답한 host가 존재) **판정 자체가 불가능하면**(fd 고갈·권한 — 우리 쪽
+            // 사정) 일시 실패로 남긴다. 이 보수성이 살아 있는 세션을 placeholder로 굳히는 것을 막는다.
             if (reason == .out_of_memory) return outcome;
-            if (!ownerLeaseIsLive(dir, host_id)) return .{ .failed = .host_gone };
+            if (ownerLeaseState(dir, host_id) == .free) return .{ .failed = .host_gone };
             return outcome;
         },
     }
@@ -318,40 +337,56 @@ fn connectLegacyExact(allocator: std.mem.Allocator, base_cache_dir: []const u8, 
         return .{ .failed = .invalid_endpoint };
     var major = protocol.version_major;
     const minimum = if (protocol.version_major > 1) protocol.version_major - 1 else protocol.version_major;
+    // 한 endpoint라도 "지금은 모르겠다"였는지. 전 경로를 소진했다는 사실만으로는 부족하다 — 소진의 이유가 **부재**여야
+    // host_gone이고, 이유에 미확정이 섞이면 살아 있는 host를 묘비로 굳힐 수 있다(code-review).
+    var indeterminate = false;
     while (true) {
         var versioned_buf: [640]u8 = undefined;
         const versioned = discovery.socketPathForMajorIn(&versioned_buf, dir, major) catch
             return .{ .failed = .invalid_endpoint };
-        if (probeLegacyExactEndpoint(allocator, versioned, major, host_id)) |outcome| switch (outcome) {
-            .connected => |client| return .{ .connected = client },
-            .failed => |reason| if (reason != .startup_timeout) return .{ .failed = reason },
-        };
+        switch (probeLegacyExactEndpoint(allocator, versioned, major, host_id)) {
+            .outcome => |outcome| return outcome,
+            .absent => {},
+            .indeterminate => indeterminate = true,
+        }
 
         // 같은 major의 versioned current host가 다른 host_id여도 전환 전 control.sock을 별도로 probe한다. 한 endpoint의
         // 성공이 다른 endpoint를 shadow하지 않게 해야 saved legacy handle을 정확히 복원할 수 있다.
         var legacy_buf: [640]u8 = undefined;
         const legacy = discovery.legacySocketPathIn(&legacy_buf, dir) catch
             return .{ .failed = .invalid_endpoint };
-        if (probeLegacyExactEndpoint(allocator, legacy, major, host_id)) |outcome| switch (outcome) {
-            .connected => |client| return .{ .connected = client },
-            .failed => |reason| if (reason != .startup_timeout) return .{ .failed = reason },
-        };
+        switch (probeLegacyExactEndpoint(allocator, legacy, major, host_id)) {
+            .outcome => |outcome| return outcome,
+            .absent => {},
+            .indeterminate => indeterminate = true,
+        }
         if (major == minimum) break;
         major -= 1;
     }
     // manifest도 없고(호출자가 ManifestNotFound로 여기 왔다) current/N-1 legacy endpoint도 그 host_id로 응답하지 않았다.
-    // 추측할 endpoint가 더 없으므로 "아직 안 떴다"가 아니라 **그 host는 사라졌다**로 단정할 수 있다 — 저장된 runtime을
-    // 종료 placeholder로 둘지 판정하는 caller가 이 구분에 의존한다. 개별 probe의 startup_timeout은 위 루프가 계속
-    // 다음 endpoint를 시도하도록 흘려보내고, 여기 도달 = 전 경로 소진이다.
-    return .{ .failed = .host_gone };
+    // **모든 probe가 부재였을 때만** "그 host는 사라졌다"로 단정한다 — 저장된 runtime을 종료 placeholder로 둘지
+    // 판정하는 caller가 이 구분에 의존한다. 하나라도 미확정(EAGAIN/EINTR/ETIMEDOUT, 또는 말이 안 통한 peer)이 있었다면
+    // 그 뒤에 host가 살아 있을 수 있으므로 manifest 경로와 같은 fail-closed(startup_timeout=일시)로 남긴다.
+    return .{ .failed = if (indeterminate) .startup_timeout else .host_gone };
 }
+
+/// `probeLegacyExactEndpoint`의 결과. "부재"와 "미확정"을 같은 null로 접으면 호출자가 전 경로 소진을 곧바로
+/// `host_gone`(영구)으로 올려, 잠깐 바쁜 host의 세션이 묘비가 된다(code-review).
+const LegacyProbe = union(enum) {
+    /// 결론이 났다 — 연결 성공이거나 그대로 전파할 실패다.
+    outcome: Outcome,
+    /// 그 endpoint에는 아무도 없거나 다른 host_id였다. 이 경로에 없다는 **증거**.
+    absent,
+    /// 지금 못 붙었거나(transient) 붙었어도 말이 안 통했다. host 생존에 대한 증거가 아니다.
+    indeterminate,
+};
 
 fn probeLegacyExactEndpoint(
     allocator: std.mem.Allocator,
     endpoint: [:0]const u8,
     major: u16,
     host_id: u128,
-) ?Outcome {
+) LegacyProbe {
     return switch (tryConnectMajor(allocator, endpoint, major)) {
         .connected => |client| blk: {
             // Manifest-capable peer가 entry를 잃었다면 legacy 추측으로 우회하지 않는다. 이 경우 registry corruption/stale
@@ -359,17 +394,20 @@ fn probeLegacyExactEndpoint(
             if (client.host_manifest_v1) {
                 var rejected = client;
                 rejected.deinit();
-                break :blk .{ .failed = .invalid_manifest };
+                break :blk .{ .outcome = .{ .failed = .invalid_manifest } };
             }
-            if (client.host_id == host_id) break :blk .{ .connected = client };
+            if (client.host_id == host_id) break :blk .{ .outcome = .{ .connected = client } };
             var mismatch = client;
             mismatch.deinit();
-            break :blk .{ .failed = .startup_timeout };
+            break :blk .absent; // 응답한 host는 있으나 **우리가 찾는 host_id가 아니다** = 이 endpoint에는 없다.
         },
-        .absent, .transient => null,
+        .absent => .absent, // ENOENT/ECONNREFUSED — 소켓 자체가 없다.
+        .transient => .indeterminate, // EAGAIN/EINTR/ETIMEDOUT — 살아 있는데 잠깐 바쁠 수 있다.
         .failed => |reason| switch (reason) {
-            .incompatible_version, .handshake_failed, .protocol_error => null,
-            else => .{ .failed = reason },
+            // hello 단계에서 갈렸다는 것은 그 endpoint에 **무언가 살아 있다**는 뜻이다. 우리 host_id인지 확인하지
+            // 못했을 뿐이라 부재의 증거가 아니다.
+            .incompatible_version, .handshake_failed, .protocol_error => .indeterminate,
+            else => .{ .outcome = .{ .failed = reason } },
         },
     };
 }
@@ -731,6 +769,93 @@ test "host_connect: manifest도 endpoint도 없는 host_id는 host_gone으로 �
     const invalid = connectExistingHost(allocator, base, 0);
     try testing.expect(invalid == .failed);
     try testing.expectEqual(FailureReason.invalid_endpoint, invalid.failed);
+}
+
+// code-review(max) 회귀: owner lease 관측이 bool이라 **"lease 파일이 없다"(host 사망의 증거)** 와 **"우리가 볼 수 없었다"**
+// (fd 고갈·권한)가 같은 값이었고, 그 값이 곧바로 `host_gone`(영구) 판정에 쓰였다. 즉 우리 쪽 사정으로 살아 있는 host를
+// 사라졌다고 단정할 수 있었다. 터미널에서 왜 중요한가: 그 오분류의 대가는 실행 중인 셸·빌드·SSH 세션이 통째로 묘비가
+// 되고 다음 checkpoint가 그 handle을 지워 **되찾을 길이 사라지는** 것이다(§7 접속 실패 행렬의 비대칭).
+test "host_connect: owner lease는 부재(free)와 판정 불가(unknown)를 구분한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+
+    var base_buf: [128]u8 = undefined;
+    const base = std.fmt.bufPrintZ(&base_buf, "/tmp/maru-sh-lease-{d}", .{c.getpid()}) catch return error.SkipZigTest;
+    _ = c.mkdir(base.ptr, 0o700);
+    var dir_buf: [256]u8 = undefined;
+    const dir = discovery.sessionHostDirPath(&dir_buf, base) catch return error.SkipZigTest;
+    _ = c.mkdir(dir.ptr, 0o700);
+    defer {
+        _ = c.rmdir(dir.ptr);
+        _ = c.rmdir(base.ptr);
+    }
+
+    const host_id: u128 = 0xFEED_BEEF;
+    // (1) lease 파일이 아예 없다 = host가 lease를 놓았다 → free(= 사라졌다고 단정해도 되는 유일한 상태).
+    try testing.expectEqual(LeaseState.free, ownerLeaseState(dir, host_id));
+
+    // (2) 같은 경로가 **열 수 없는 것**이면(여기선 디렉터리 — open(RDWR)이 EISDIR) 파일 상태를 알 수 없다 → unknown.
+    //     예전 bool 구현은 이 경우도 "lease 없음"으로 접어 host_gone을 만들었다.
+    var hosts_buf: [640]u8 = undefined;
+    const hosts_root = host_manifest.hostsRootPathIn(&hosts_buf, dir) catch return error.SkipZigTest;
+    _ = c.mkdir(hosts_root.ptr, 0o700);
+    var host_dir_buf: [768]u8 = undefined;
+    const host_dir = host_manifest.hostDirPathIn(&host_dir_buf, dir, host_id) catch return error.SkipZigTest;
+    _ = c.mkdir(host_dir.ptr, 0o700);
+    var lock_buf: [832]u8 = undefined;
+    const lock_path = host_manifest.ownerLockPathIn(&lock_buf, dir, host_id) catch return error.SkipZigTest;
+    _ = c.mkdir(lock_path.ptr, 0o700);
+    defer {
+        _ = c.rmdir(lock_path.ptr);
+        _ = c.rmdir(host_dir.ptr);
+        _ = c.rmdir(hosts_root.ptr);
+    }
+    try testing.expectEqual(LeaseState.unknown, ownerLeaseState(dir, host_id));
+}
+
+/// legacy endpoint에 **연결은 되지만 hello가 갈리는** peer. 살아 있는 host를 흉내 내되 우리 major와 말이 안 통하는
+/// 상태다(mixed-build·구 host). 응답 없이 닫아 client가 handshake 실패로 보게 한다.
+const MismatchedPeer = struct {
+    fn serve(server: *socket_server.SocketServer, ok: *bool) void {
+        const fd = server.acceptOne() orelse return;
+        _ = c.close(fd); // hello를 읽지도 답하지도 않는다 → client는 ConnectionClosed(=handshake_failed).
+        ok.* = true;
+    }
+};
+
+// code-review(max) 회귀: `connectLegacyExact`가 **모든 probe가 일시 실패여도** 경로 소진만으로 `host_gone`(영구)을
+// 반환했다. manifest 경로와 달리 owner-lease 교차확인도 backoff도 없어, 잠깐 바쁘거나 말이 안 통한 host의 세션이
+// 그대로 묘비가 됐다. 이제 **모든 probe가 부재였을 때만** 영구로 올리고, 하나라도 미확정이면 fail-closed(일시)로 남긴다.
+// 터미널에서 왜 중요한가: 위 lease 테스트와 같은 비대칭 — 영구를 일시로 보면 창 복원이 한 번 실패할 뿐이지만, 반대는
+// 살아 있는 세션을 영구히 잃는다.
+test "host_connect: legacy 경로의 미확정 probe는 host_gone으로 승격되지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+
+    var base_buf: [128]u8 = undefined;
+    const base = std.fmt.bufPrintZ(&base_buf, "/tmp/maru-sh-ind-{d}", .{c.getpid()}) catch return error.SkipZigTest;
+    _ = c.mkdir(base.ptr, 0o700);
+    var dir_buf: [256]u8 = undefined;
+    const dir = discovery.sessionHostDirPath(&dir_buf, base) catch return error.SkipZigTest;
+    var socket_buf: [320]u8 = undefined;
+    // current major의 versioned endpoint에 peer를 세운다 — manifest는 없으므로 호출자는 legacy 경로로 내려온다.
+    const socket = discovery.socketPathForMajorIn(&socket_buf, dir, protocol.version_major) catch
+        return error.SkipZigTest;
+    var registry = registry_mod.TerminalRuntimeRegistry.init(allocator);
+    defer registry.deinit();
+    var server = try socket_server.SocketServer.bind(allocator, dir, socket, 0xBB, &registry);
+    defer {
+        server.deinit();
+        _ = c.rmdir(dir.ptr);
+        _ = c.rmdir(base.ptr);
+    }
+    var served = false;
+    var thread = try std.Thread.spawn(.{}, MismatchedPeer.serve, .{ &server, &served });
+    const outcome = connectExistingHost(allocator, base, 0x9999_8888_7777_6666);
+    thread.join();
+    try testing.expect(served);
+    try testing.expect(outcome == .failed);
+    // 핵심: 응답하지 않은 endpoint 뒤에 host가 살아 있을 수 있으므로 **영구(host_gone)가 아니다**.
+    try testing.expect(outcome.failed != .host_gone);
 }
 
 test "host_connect: launches the product maru session host and completes host.info" {

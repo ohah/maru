@@ -187,9 +187,9 @@ pub fn build(allocator: std.mem.Allocator, asm_: *const screen_assembler.ScreenA
     };
     errdefer if (prompt_marks.len != 0) allocator.free(prompt_marks);
 
-    // links: 조립기의 wire(LinkSpanWire)를 core terminal.ViewportLink로 1:1 환산. kind/scope는 숫자 약속이라
-    // 범위 밖 값은 손상 방어로 안전한 기본(url / bare_relative 아님 — scope는 osc8로 승격하지 않고 web으로 clamp)에
-    // 매핑한다. 좌표는 host가 뷰포트 상대로 이미 클립해 보냈다(§12).
+    // links: 조립기의 wire(LinkSpanWire)를 core terminal.ViewportLink로 1:1 환산. kind/scope의 닫힌 범위는
+    // screen_stream.decodeLinkSpans가 먼저 검증하므로 여기서 미래 값을 현재 의미로 다시 추측하지 않는다.
+    // 좌표는 host가 뷰포트 상대로 이미 클립해 보냈다(§12).
     const src_links = asm_.linkSpans();
     const links: []terminal.ViewportLink = if (src_links.len == 0) &.{} else ln: {
         const arr = try allocator.alloc(terminal.ViewportLink, src_links.len);
@@ -199,8 +199,8 @@ pub fn build(allocator: std.mem.Allocator, asm_: *const screen_assembler.ScreenA
                 .end = .{ .row = w.end_row, .col = w.end_col },
                 .block = false, // 링크 밑줄은 항상 선형(types.zig §SelectionSpan.block 주석).
             },
-            .kind = if (w.kind <= 1) @enumFromInt(w.kind) else .url,
-            .scope = if (w.scope <= 6) @enumFromInt(w.scope) else .web,
+            .kind = @enumFromInt(w.kind),
+            .scope = @enumFromInt(w.scope),
         };
         break :ln arr;
     };

@@ -740,7 +740,9 @@ request_id:u64 | stream_id:u64 | payload_len:u32
 - `runtime_link_at_v1`은 host가 `runtime.link_at`으로 자기 `TerminalCore.extractUrlAt`(추출 + cwd resolve + 존재 stat)을
   실행할 수 있음을 뜻한다. 링크를 **여는** 판정은 콘텐츠와 cwd, 그리고 파일이 실제로 있는 파일시스템을 가진 host가 SSOT다 —
   client가 자기 FS로 stat하면 host 쪽 경로를 잘못 판정한다. hover 밑줄은 이 RPC를 쓰지 않고 screen stream의 `link_spans`
-  record로 받는다(매 mouse-move RPC 회피). capability 없는 구 host에는 이 RPC를 보내지 않고 자동 감지가 비활성이다.
+  record로 받는다(매 mouse-move RPC 회피). RPC success wire는 링크가 있으면 정확히 `{text,kind}`(`kind` 0=url,
+  1=file_path), 없거나 미존재 경로면 정확히 `{text:""}`다. 선언 밖 필드·non-empty text의 kind 누락·범위 밖 kind는
+  같은-major schema drift로 connection을 fail-close한다. capability 없는 구 host에는 이 RPC를 보내지 않고 자동 감지가 비활성이다.
   screen wire의 `run`에는 셀 OSC 8 link id 필드가 없어 **명시 하이퍼링크도 원격에서는 client 셀에 도달하지 않으므로**, host는
   `link_spans`에 자동 감지 span과 OSC 8 span을 함께 싣는다(`scope`의 osc8 비트 — client는 이 비트를 config 프리셋과 무관하게
   항상 표시). 단일 출처는 [링크 감지](link-detection.md#원격host-backed-세션).
@@ -891,7 +893,9 @@ chunk_index:u32 | chunk_count:u32 | record_bytes...
   `runtime.metadata` event full-state로 전송한다. 같은 MRSH v2 구 client에는 알 수 없는 async event를 push하지 않는다.
   client는 response/snapshot/delta 대기 중에도 shared wire validator를 통과한 event만 stream별 단조 revision 최신 한 건으로
   coalesce해 demux한다. count 256/총 8 MiB cap 초과는 full-state를 조용히 evict하지 않고 connection/runtime을
-  fail-closed해 재attach initial metadata로 복구한다. OSC notification pull은 기존 별도 RPC 경로를 유지한다.
+  fail-closed해 재attach initial metadata로 복구한다. OSC notification pull은 기존 별도 `runtime.notification` RPC 경로를
+  유지하며, success는 정확히 문자열 `{title,body}` 두 필드다. 대기 알림이 없으면 둘 다 빈 문자열이고, 필드 누락·타입 오류·
+  선언 밖 필드는 "알림 없음"으로 접지 않고 같은-major schema drift로 connection을 fail-close한다.
 - snapshot은 하나의 generation과 `sequence=0`, delta는 `base_generation`을 record body에 추가하고 sequence를 1씩 올린다.
   chunk index는 0부터 연속이고 마지막 MRSH frame의 `end_stream`과 declared count가 함께 맞아야 publish한다.
 - scrollback page는 같은 row record를 쓰되 scrollback generation과 half-open line range를 meta에 둔다. eviction 뒤 generation이
@@ -915,8 +919,9 @@ chunk_index:u32 | chunk_count:u32 | record_bytes...
   매치된 감지 종류 비트(bit0 web, bit1 extra_schemes, bit2 absolute_path, bit3 home_path, bit4 dot_relative,
   bit5 bare_relative, **bit6 osc8**[명시 하이퍼링크 — config 프리셋과 무관하게 항상 표시])다. host는 client
   config를 모르므로 **항상 최대 집합으로 계산**하고, client가 자기 `input.link-detection`으로 `scope`를 걸러 밑줄을 그린다
-  (host 해석 / client 정책 분리 — [링크 감지](link-detection.md#원격host-backed-세션)). host는 이 계산에서 stat을 하지 않는다
-  (hover는 후보, 열기는 `runtime.link_at`이 검증 — 로컬 경로와 같은 의도적 불일치).
+  (host 해석 / client 정책 분리 — [링크 감지](link-detection.md#원격host-backed-세션)). 범위 밖 `kind`/`scope`는 현재
+  의미로 보정하지 않고 record를 reject한다. host는 이 계산에서 stat을 하지 않는다(hover는 후보, 열기는
+  `runtime.link_at`이 검증 — 로컬 경로와 같은 의도적 불일치).
 - `run`은 `grapheme(u32 len + UTF-8) | width:u8 | count:u32 | fg:u32 | bg:u32 | underline_color:u32 | style_flags:u32`다. 색
   (fg/bg/underline_color)은 resolved RGB가 아니라 **태그드 Color intent**다(상위 바이트=태그 default/indexed/rgb, 하위 24비트=
   payload — `ColorTag`가 SSOT). host는 색을 굽지 않고 의도를 실어 **client가 자기 theme로 in-process와 동일하게 해석**한다(config

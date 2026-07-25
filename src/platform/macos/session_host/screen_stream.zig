@@ -225,6 +225,9 @@ pub const PromptMarks = struct {
 /// client가 자기 `input.link-detection`으로 거른다(docs/link-detection.md §원격(host-backed) 세션).
 /// 이 모듈은 순수 codec이라 terminal 타입을 모른다 — 숫자 약속만 SSOT로 두고 매핑은 host/client 경계가 한다
 /// (`ColorTag`와 같은 규율).
+pub const link_kind_max: u8 = 1;
+pub const link_scope_max: u8 = 6;
+
 pub const LinkSpanWire = struct {
     start_row: u16,
     start_col: u16,
@@ -658,6 +661,8 @@ pub fn decodePromptMarks(allocator: std.mem.Allocator, body: []const u8) DecodeE
 /// 뷰포트 링크 목록을 record로 굽는다. 손상 방어 cap은 span 65535개(u16 count 상한 — 화면 셀 수보다 훨씬 크다).
 pub fn encodeLinkSpans(allocator: std.mem.Allocator, header: RecordHeader, ls: LinkSpans) DecodeError![]u8 {
     if (ls.spans.len > std.math.maxInt(u16)) return error.MalformedRecord;
+    // producer가 raw wire DTO를 직접 만들더라도 current codec이 해석할 수 없는 enum을 송신하지 않는다.
+    for (ls.spans) |s| if (s.kind > link_kind_max or s.scope > link_scope_max) return error.MalformedRecord;
     var body: std.ArrayListUnmanaged(u8) = .empty;
     defer body.deinit(allocator);
     const w = BodyWriter{ .buf = &body, .allocator = allocator };
@@ -686,8 +691,11 @@ pub fn decodeLinkSpans(allocator: std.mem.Allocator, body: []const u8) DecodeErr
         const kind = try r.u8v();
         const scope = try r.u8v();
         // 뒤집힌 범위는 소비자가 무한 루프/OOB를 낼 수 있는 손상이다. 조용히 고치지 않고 record를 reject한다
-        // (§12 "손상은 snapshot 전체 reject" — client는 full 재동기화로 복구).
+        // (§12 "손상은 snapshot 전체 reject" — 현재 remote pump 정책은 codec 손상으로 stream을 종료한다).
         if (end_row < start_row or (end_row == start_row and end_col < start_col)) return error.MalformedRecord;
+        // wire의 닫힌 enum 범위를 미래 값으로 추측해 URL/web으로 보정하면 schema drift가 정상 hover로 보인다.
+        // current codec 범위 밖은 record 손상으로 reject해 정상 화면 상태로 공개하지 않는다.
+        if (kind > link_kind_max or scope > link_scope_max) return error.MalformedRecord;
         s.* = .{ .start_row = start_row, .start_col = start_col, .end_row = end_row, .end_col = end_col, .kind = kind, .scope = scope };
     }
     return .{ .spans = spans };
@@ -1116,6 +1124,42 @@ test "screen-stream: link_spans rejects a reversed span" {
     try w.u8v(0);
     try w.u8v(0);
     try testing.expectError(error.MalformedRecord, decodeLinkSpans(allocator, body.items));
+}
+
+test "screen-stream: link_spans rejects unknown kind and scope instead of clamping" {
+    const allocator = testing.allocator;
+    const Case = struct { kind: u8, scope: u8 };
+    const cases = [_]Case{
+        .{ .kind = 2, .scope = 0 },
+        .{ .kind = 0, .scope = 7 },
+        .{ .kind = 255, .scope = 255 },
+    };
+    for (cases) |case| {
+        var invalid = [_]LinkSpanWire{.{
+            .start_row = 0,
+            .start_col = 0,
+            .end_row = 0,
+            .end_col = 1,
+            .kind = case.kind,
+            .scope = case.scope,
+        }};
+        try testing.expectError(
+            error.MalformedRecord,
+            encodeLinkSpans(allocator, .{ .kind = .link_spans }, .{ .spans = invalid[0..] }),
+        );
+
+        var body: std.ArrayListUnmanaged(u8) = .empty;
+        defer body.deinit(allocator);
+        const w = BodyWriter{ .buf = &body, .allocator = allocator };
+        try w.u16v(1);
+        try w.u16v(0);
+        try w.u16v(0);
+        try w.u16v(0);
+        try w.u16v(1);
+        try w.u8v(case.kind);
+        try w.u8v(case.scope);
+        try testing.expectError(error.MalformedRecord, decodeLinkSpans(allocator, body.items));
+    }
 }
 
 test "screen-stream: run count cap rejects a corrupt declared count before allocating" {

@@ -82,6 +82,12 @@ pub const RuntimeObservation = struct {
     /// BEL 누적 횟수(monotonic). client가 마지막에 본 값과 다르면 벨을 울린다 — core의 소비형 bool을 그대로
     /// 실으면 full-state 관측이 true→true 전이를 잃어 둘째 벨을 놓치기 때문이다.
     bell_count: u64 = 0,
+    /// OSC 52 요청 누적 seq(write/read 각각). client가 마지막에 본 값보다 크면 그 요청을 처리한다 —
+    /// 소비형 플래그는 full-state 관측에서 둘째 요청을 잃는다(벨과 같은 이유).
+    clipboard_write_seq: u64 = 0,
+    clipboard_read_seq: u64 = 0,
+    /// 마지막 read 요청의 target(Pc). 응답 echo용이라 짧아 관측에 그대로 싣는다(write 텍스트는 커서 RPC로 뺀다).
+    clipboard_read_target: []const u8 = "",
     observer_generation: u64,
     title_generation: u32,
     cols: u16,
@@ -96,6 +102,7 @@ pub const RuntimeObservation = struct {
         if (self.ssh_remote_dest) |dest| allocator.free(dest);
         for (self.processes) |p| allocator.free(p.name);
         allocator.free(self.processes);
+        allocator.free(self.clipboard_read_target);
         self.* = undefined;
     }
 };
@@ -152,6 +159,10 @@ pub const RuntimeOps = struct {
     /// `link_spans`로 오지만, 여는 대상은 스크롤백 soft-wrap 이음과 host FS 검증이 필요해 RPC다.
     /// docs/link-detection.md §원격(host-backed) 세션.
     link_at: *const fn (ctx: *anyopaque, runtime_id: u128, row: u16, col: u16, scopes: u8, allocator: std.mem.Allocator) anyerror![]u8,
+    /// OSC 52 write 요청 텍스트를 host에서 가져온다(가져가면 host 버퍼는 비운다). 텍스트가 커서 관측 full-state에
+    /// 실을 수 없어 별도 RPC다 — client는 관측의 `clipboard_write_seq` 증가를 보고 이걸 부른다.
+    /// 정책(`osc52` write allow)과 실제 NSPasteboard 쓰기는 client가 한다(§기능 배치 규칙).
+    clipboard_write: *const fn (ctx: *anyopaque, runtime_id: u128, allocator: std.mem.Allocator) anyerror![]u8,
 };
 
 /// host-backed 마우스 리포트 wire payload(primitive — codec 순수). `core_command.MouseReport`의 미러다(codec은
@@ -395,6 +406,8 @@ pub const Connection = struct {
             return self.dispatchReportMouse(frame.header.request_id, params);
         } else if (std.mem.eql(u8, method, "runtime.selected_text")) {
             return self.dispatchSelectedText(frame.header.request_id, params);
+        } else if (std.mem.eql(u8, method, "runtime.clipboard_write")) {
+            return self.dispatchClipboardWrite(frame.header.request_id, params);
         } else if (std.mem.eql(u8, method, "runtime.link_at")) {
             return self.dispatchLinkAt(frame.header.request_id, params);
         } else if (std.mem.eql(u8, method, "runtime.select_op")) {
@@ -844,6 +857,20 @@ pub const Connection = struct {
         return self.replyResult(request_id, body);
     }
 
+    /// `runtime.clipboard_write`: host가 모아 둔 OSC 52 write 텍스트를 넘긴다(가져가면 비운다). 대기 중이 없으면
+    /// 빈 text. 임의 바이트라 host가 실 JSON encoder로 escape한다. 정책·NSPasteboard 쓰기는 client 몫이다.
+    fn dispatchClipboardWrite(self: *Connection, request_id: u64, params: ?std.json.ObjectMap) HandleError!Action {
+        const p = params orelse return self.replyError(request_id, .invalid_request);
+        const stream = intFieldU64(p, "stream_id") orelse return self.replyError(request_id, .invalid_request);
+        const runtime_id = (self.attachments.get(stream) orelse return self.replyError(request_id, .invalid_request)).runtime_id;
+        const body = if (self.runtime_ops) |ops|
+            ops.clipboard_write(ops.ctx, runtime_id, self.allocator) catch return self.replyError(request_id, .internal)
+        else
+            (self.allocator.dupe(u8, "{\"text\":\"\"}") catch return error.OutOfMemory);
+        defer self.allocator.free(body);
+        return self.replyResult(request_id, body);
+    }
+
     /// `runtime.link_at`(원격 Cmd+클릭 링크 열기): client가 보낸 뷰포트 (row,col)에서 host가 `extractUrlAt`으로 링크를
     /// 추출하고 file_path면 자기 cwd/$HOME으로 resolve + 존재 stat까지 해 `{text,kind}`로 응답한다. client가 자기 FS로
     /// stat하면 host 쪽 경로를 잘못 판정하므로 검증은 host가 한다. `scopes`는 client의 `input.link-detection` 비트
@@ -1116,7 +1143,7 @@ pub const Connection = struct {
             return self.stringify(.{
                 .version = self.selected_version,
                 .host_id = host_hex,
-                .capabilities = [_][]const u8{ "host.info", "runtime.list", "runtime.get", "runtime_metadata_v1", "screen_stream_v2_current_body", "screen_viewport_scrolled_v1", "async_scroll_to_bottom_v1", "runtime_core_command_v1", "runtime_selected_text_v1", "runtime_link_at_v1" },
+                .capabilities = [_][]const u8{ "host.info", "runtime.list", "runtime.get", "runtime_metadata_v1", "screen_stream_v2_current_body", "screen_viewport_scrolled_v1", "async_scroll_to_bottom_v1", "runtime_core_command_v1", "runtime_selected_text_v1", "runtime_link_at_v1", "runtime_clipboard_v1" },
             });
         }
         if (self.host_status.upgrade_capable) {
@@ -1128,7 +1155,7 @@ pub const Connection = struct {
                 .screen_codec_version = self.host_status.screen_codec_version,
                 .upgrade_epoch = self.host_status.upgrade_epoch,
                 .lifecycle = @tagName(self.host_status.lifecycle),
-                .capabilities = [_][]const u8{ "host.info", "runtime.list", "runtime.get", "host_manifest_v1", "host_exec_upgrade_v1", "runtime_metadata_v1", "screen_stream_v2_current_body", "screen_viewport_scrolled_v1", "async_scroll_to_bottom_v1", "runtime_core_command_v1", "runtime_selected_text_v1", "runtime_link_at_v1" },
+                .capabilities = [_][]const u8{ "host.info", "runtime.list", "runtime.get", "host_manifest_v1", "host_exec_upgrade_v1", "runtime_metadata_v1", "screen_stream_v2_current_body", "screen_viewport_scrolled_v1", "async_scroll_to_bottom_v1", "runtime_core_command_v1", "runtime_selected_text_v1", "runtime_link_at_v1", "runtime_clipboard_v1" },
             });
         }
         return self.stringify(.{
@@ -1139,7 +1166,7 @@ pub const Connection = struct {
             .screen_codec_version = self.host_status.screen_codec_version,
             .upgrade_epoch = self.host_status.upgrade_epoch,
             .lifecycle = @tagName(self.host_status.lifecycle),
-            .capabilities = [_][]const u8{ "host.info", "runtime.list", "runtime.get", "host_manifest_v1", "runtime_metadata_v1", "screen_stream_v2_current_body", "screen_viewport_scrolled_v1", "async_scroll_to_bottom_v1", "runtime_core_command_v1", "runtime_selected_text_v1", "runtime_link_at_v1" },
+            .capabilities = [_][]const u8{ "host.info", "runtime.list", "runtime.get", "host_manifest_v1", "runtime_metadata_v1", "screen_stream_v2_current_body", "screen_viewport_scrolled_v1", "async_scroll_to_bottom_v1", "runtime_core_command_v1", "runtime_selected_text_v1", "runtime_link_at_v1", "runtime_clipboard_v1" },
         });
     }
 
@@ -1861,6 +1888,11 @@ const FakeRuntimeOps = struct {
         self.selected_text_runtime = runtime_id;
         return allocator.dupe(u8, "{\"text\":\"PICKED\"}");
     }
+    fn clipboardWriteFn(ctx: *anyopaque, runtime_id: u128, allocator: std.mem.Allocator) anyerror![]u8 {
+        _ = ctx;
+        _ = runtime_id;
+        return allocator.dupe(u8, "{\"text\":\"COPIED\"}");
+    }
     /// 받은 (row,col,scopes)를 기록하고 고정 링크를 준다 — server 라우팅·파싱 검증(실 추출은 runtime_manager가 담당).
     fn linkAtFn(ctx: *anyopaque, runtime_id: u128, row: u16, col: u16, scopes: u8, allocator: std.mem.Allocator) anyerror![]u8 {
         const self: *FakeRuntimeOps = @ptrCast(@alignCast(ctx));
@@ -1917,6 +1949,9 @@ const FakeRuntimeOps = struct {
             .mouse_tracking_mode = 0,
             .bracketed_paste = false,
             .bell_count = 0,
+            .clipboard_write_seq = 0,
+            .clipboard_read_seq = 0,
+            .clipboard_read_target = "",
             .observer_generation = 7,
             .title_generation = 3,
             .cols = 80,
@@ -1927,7 +1962,7 @@ const FakeRuntimeOps = struct {
         };
     }
     fn ops(self: *FakeRuntimeOps) RuntimeOps {
-        return .{ .ctx = self, .spawn = spawnFn, .terminate = terminateFn, .write_input = writeInputFn, .resize = resizeFn, .snapshot = snapshotFn, .delta = deltaFn, .notification = notificationFn, .core_command = coreCommandFn, .selected_text = selectedTextFn, .select_op = selectOpFn, .find = findFn, .observation = observationFn, .report_mouse = reportMouseFn, .link_at = linkAtFn };
+        return .{ .ctx = self, .spawn = spawnFn, .terminate = terminateFn, .write_input = writeInputFn, .resize = resizeFn, .snapshot = snapshotFn, .delta = deltaFn, .notification = notificationFn, .core_command = coreCommandFn, .selected_text = selectedTextFn, .select_op = selectOpFn, .find = findFn, .observation = observationFn, .report_mouse = reportMouseFn, .link_at = linkAtFn, .clipboard_write = clipboardWriteFn };
     }
 };
 

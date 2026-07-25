@@ -62,6 +62,9 @@ fn revision(allocator: std.mem.Allocator, payload: []const u8, allow_response: b
         !fieldIsBoolOrAbsent(metadata, "bracketed_paste") or
         // bell_count도 optional(구버전 host 호환) — 없으면 0으로 남아 원격 벨이 안 울린다(기존 동작).
         !fieldFitsUnsignedOrAbsent(metadata, "bell_count", std.math.maxInt(u32)) or
+        // OSC 52 요청 seq·target도 optional(구버전 host 호환) — 없으면 0/빈 값이라 원격 클립보드가 비활성(기존 동작).
+        !fieldFitsUnsignedOrAbsent(metadata, "clipboard_write_seq", std.math.maxInt(u32)) or
+        !fieldFitsUnsignedOrAbsent(metadata, "clipboard_read_seq", std.math.maxInt(u32)) or
         // app_keypad·kitty_flags도 optional(구버전 host 호환) — host-backed 일반 key의 DECKPAM·kitty 인코딩 모드.
         !fieldIsBoolOrAbsent(metadata, "app_keypad") or
         !fieldFitsUnsignedOrAbsent(metadata, "kitty_flags", std.math.maxInt(u5)) or

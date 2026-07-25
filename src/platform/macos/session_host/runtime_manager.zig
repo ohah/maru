@@ -46,6 +46,22 @@ const ForegroundProcessName = maru.pty.types.ForegroundProcessName;
 const default_queue_capacity: usize = 16;
 const foreground_refresh_ns: i128 = 500 * std.time.ns_per_ms;
 
+/// host가 drain해 보관하는 OSC 52 요청 상태(runtime별). client는 관측의 seq 증가로 요청을 알아채고,
+/// write 내용만 별도 RPC로 가져간다(텍스트가 커 관측 full-state에 실을 수 없다).
+const ClipboardState = struct {
+    write_seq: u64 = 0,
+    read_seq: u64 = 0,
+    /// 마지막 write 요청 텍스트(host 소유 — 다음 요청이 덮어쓴다). client가 가져가면 비운다.
+    write_text: std.ArrayListUnmanaged(u8) = .empty,
+    /// 마지막 read 요청의 target(Pc). 응답 echo에 쓰이며 짧아서 관측에 그대로 싣는다.
+    read_target: std.ArrayListUnmanaged(u8) = .empty,
+
+    fn deinit(self: *ClipboardState, allocator: std.mem.Allocator) void {
+        self.write_text.deinit(allocator);
+        self.read_target.deinit(allocator);
+    }
+};
+
 const ForegroundCache = struct {
     names: [64]ForegroundProcessName = undefined,
     count: usize = 0,
@@ -90,6 +106,10 @@ pub const RuntimeManager = struct {
     /// 그대로 실으면 true→true 전이를 잃어 둘째 벨을 놓친다. 그래서 host가 drain할 때마다 여기서 단조 증가시키고,
     /// client는 마지막에 본 값과의 **차이**로 울릴지 정한다(로컬이 bool을 소비하는 것과 결과 동일).
     bell_counts: std.AutoHashMapUnmanaged(RuntimeHandle, u64) = .empty,
+    /// runtime별 OSC 52 상태. 벨과 같은 이유로 **누적 seq**를 쓴다(full-state 관측은 같은 값을 다시 안 보내므로
+    /// 소비형 플래그로는 둘째 요청을 놓친다). write 텍스트는 클 수 있어 관측에 싣지 않고 여기 보관했다가 client가
+    /// `runtime.clipboard_write`로 가져간다. read는 target(Pc)만 짧아 관측에 함께 싣는다.
+    clipboards: std.AutoHashMapUnmanaged(RuntimeHandle, ClipboardState) = .empty,
 
     /// self-referential 필드를 안정 주소로 세운다. caller가 준 `*RuntimeManager` 슬롯을 채운다(반환 이동 없음).
     pub fn init(self: *RuntimeManager, allocator: std.mem.Allocator, io: std.Io, host_registry: *reg.TerminalRuntimeRegistry) void {
@@ -102,6 +122,7 @@ pub const RuntimeManager = struct {
         self.next_handle = 1;
         self.foreground_cache = .empty;
         self.bell_counts = .empty;
+        self.clipboards = .empty;
     }
 
     /// 소유 registry를 해제한다. **호출 전 모든 runtime이 terminate돼 있어야** 한다(reader join·슬롯 회수가 terminate에서
@@ -110,6 +131,11 @@ pub const RuntimeManager = struct {
     pub fn deinit(self: *RuntimeManager) void {
         self.foreground_cache.deinit(self.allocator);
         self.bell_counts.deinit(self.allocator);
+        {
+            var it = self.clipboards.valueIterator();
+            while (it.next()) |state| state.deinit(self.allocator);
+            self.clipboards.deinit(self.allocator);
+        }
         self.surface_runtime.deinit();
         self.live_registry.deinit();
         self.* = undefined;
@@ -117,7 +143,7 @@ pub const RuntimeManager = struct {
 
     /// server.zig가 dispatch에 넘길 중립 vtable. `ctx`는 이 매니저다.
     pub fn runtimeOps(self: *RuntimeManager) server.RuntimeOps {
-        return .{ .ctx = self, .spawn = spawnOp, .terminate = terminateOp, .write_input = writeInputOp, .resize = resizeOp, .snapshot = snapshotOp, .delta = deltaOp, .notification = notificationOp, .core_command = coreCommandOp, .selected_text = selectedTextOp, .select_op = selectOpOp, .find = findOp, .observation = observationOp, .report_mouse = reportMouseOp, .link_at = linkAtOp };
+        return .{ .ctx = self, .spawn = spawnOp, .terminate = terminateOp, .write_input = writeInputOp, .resize = resizeOp, .snapshot = snapshotOp, .delta = deltaOp, .notification = notificationOp, .core_command = coreCommandOp, .selected_text = selectedTextOp, .select_op = selectOpOp, .find = findOp, .observation = observationOp, .report_mouse = reportMouseOp, .link_at = linkAtOp, .clipboard_write = clipboardWriteOp };
     }
 
     pub const OwnerDrainSummary = struct {
@@ -890,6 +916,30 @@ pub const RuntimeManager = struct {
         }
         const bell_count = bell_gop.value_ptr.*;
 
+        // OSC 52: 벨과 같은 자리에서 drain한다. 요청은 core가 파싱하지만 **정책 판정과 OS 클립보드 접근은 client**가
+        // 하므로(§기능 배치 규칙) host는 사실만 모아 둔다. write 텍스트는 관측에 싣기엔 커서 여기 보관하고,
+        // read는 target만 관측에 함께 실어 client가 RPC 없이 판정할 수 있게 한다.
+        const clip_gop = try self.clipboards.getOrPut(self.allocator, handle);
+        if (!clip_gop.found_existing) clip_gop.value_ptr.* = .{};
+        const clip = clip_gop.value_ptr;
+        {
+            surface.lockCore(self.io);
+            defer surface.unlockCore(self.io);
+            const pending_write = surface.core.pendingClipboardWrite();
+            if (pending_write.len > 0) {
+                clip.write_text.clearRetainingCapacity();
+                clip.write_text.appendSlice(self.allocator, pending_write) catch {};
+                clip.write_seq +%= 1;
+                surface.core.clearClipboardWrite();
+            }
+            if (surface.core.clipboardReadPending()) {
+                clip.read_target.clearRetainingCapacity();
+                clip.read_target.appendSlice(self.allocator, surface.core.clipboardReadTarget()) catch {};
+                clip.read_seq +%= 1;
+                surface.core.clearClipboardRead(); // 정책과 무관하게 소비(로컬과 같은 규율 — 재트리거 방지)
+            }
+        }
+
         const cache_gop = try self.foreground_cache.getOrPut(self.allocator, handle);
         if (!cache_gop.found_existing) cache_gop.value_ptr.* = .{};
         const foreground = cache_gop.value_ptr;
@@ -937,6 +987,9 @@ pub const RuntimeManager = struct {
             .mouse_tracking_mode = @intFromEnum(core.mouse_tracking), // 모드 단일 출처(위 bool은 구 client 미러)
             .bracketed_paste = core.bracketed_paste,
             .bell_count = bell_count,
+            .clipboard_write_seq = clip.write_seq,
+            .clipboard_read_seq = clip.read_seq,
+            .clipboard_read_target = try allocator.dupe(u8, clip.read_target.items),
             .observer_generation = core.observerGeneration(),
             .title_generation = core.title_generation.load(.monotonic),
             .cols = core.size.cols,
@@ -1084,6 +1137,23 @@ pub const RuntimeManager = struct {
         var js: std.json.Stringify = .{ .writer = &out.writer, .options = .{} };
         js.write(.{ .text = extracted.text, .kind = @intFromEnum(extracted.kind) }) catch return error.OutOfMemory;
         return allocator.dupe(u8, out.written()) catch return error.OutOfMemory;
+    }
+
+    /// OSC 52 write 텍스트를 client에 넘긴다(가져가면 비운다 — 같은 데이터가 다시 나가지 않게). 대기 중이 없으면
+    /// 빈 text. 텍스트는 임의 바이트라 실 JSON encoder로 escape한다.
+    fn clipboardWriteOp(ctx: *anyopaque, runtime_id: u128, allocator: std.mem.Allocator) anyerror![]u8 {
+        const self: *RuntimeManager = @ptrCast(@alignCast(ctx));
+        const handle = self.handleFor(runtime_id) orelse return error.RuntimeNotFound;
+        const text: []const u8 = if (self.clipboards.getPtr(handle)) |clip| blk: {
+            break :blk clip.write_text.items;
+        } else "";
+        var out: std.Io.Writer.Allocating = .init(allocator);
+        defer out.deinit();
+        var js: std.json.Stringify = .{ .writer = &out.writer, .options = .{} };
+        js.write(.{ .text = text }) catch return error.OutOfMemory;
+        const body = allocator.dupe(u8, out.written()) catch return error.OutOfMemory;
+        if (self.clipboards.getPtr(handle)) |clip| clip.write_text.clearRetainingCapacity(); // 가져갔으니 비운다
+        return body;
     }
 
     /// client가 보낸 scope 비트를 `LinkScopes`로 푼다(비트 위치는 `terminal.LinkScope`의 `@intFromEnum` — wire 약속).

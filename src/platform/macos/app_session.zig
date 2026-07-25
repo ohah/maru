@@ -1088,6 +1088,10 @@ const TermRuntime = struct {
     /// `takeBell()`을 쓰므로 이 값을 안 쓴다 — 원격은 full-state 관측이라 소비형 플래그를 실을 수 없어 카운터
     /// delta로 판정한다(docs/persistent-session-host.md §기능을 어느 쪽에 둘 것인가).
     last_bell_count: u64 = 0,
+    /// host-backed OSC 52 요청 seq 중 이미 처리한 값(관측 미러). 벨과 같은 delta 판정이며, host live-upgrade로
+    /// seq가 0에서 재시작하면 감소를 재동기화로 보고 요청으로 오인하지 않는다.
+    last_clipboard_write_seq: u64 = 0,
+    last_clipboard_read_seq: u64 = 0,
     // workspace restore staging에서 **기존** host runtime에 attach한 Term. publish 전 rollback은 이 runtime을 종료하면
     // 안 되므로 destroyTerm이 detach-only로 회수한다. applyWorkspaceWindow가 commit point를 넘으면 false로 바꿔 이후
     // 사용자 명시 close는 정상 terminate 의미를 가진다.
@@ -21205,6 +21209,23 @@ pub const AppSession = struct {
             self.addr_clipboard_write = &.{};
             return self.clipboard_out_buffer;
         }
+        // host-backed: core는 빈 placeholder라 OSC 52가 안 들어온다. host가 관측 seq로 알려 준 요청만 RPC로
+        // 텍스트를 가져온다(텍스트가 커서 관측에 못 싣는다). 정책(write allow)과 NSPasteboard 쓰기는 로컬과
+        // 동일하게 client가 한다 — §기능을 어느 쪽에 둘 것인가.
+        if (is_macos and self.activeSurface().remote != null) {
+            const term = self.activePane().activeTerm();
+            const seq = term.rt.observation.clipboard_write_seq;
+            if (seq <= term.rt.last_clipboard_write_seq) {
+                term.rt.last_clipboard_write_seq = seq; // 감소(host exec 재시작)면 조용히 맞춘다
+                return &.{};
+            }
+            term.rt.last_clipboard_write_seq = seq;
+            const rb = &(app_remote_backend orelse return &.{});
+            const text = rb.clipboardWriteFor(term.rt.handle) orelse return &.{};
+            if (self.clipboard_out_buffer.len > 0) self.allocator.free(self.clipboard_out_buffer);
+            self.clipboard_out_buffer = text; // backend allocator 소유 바이트를 그대로 인계(다음 호출까지 유효)
+            return self.clipboard_out_buffer;
+        }
         const pending = self.activeSurface().core.pendingClipboardWrite();
         if (pending.len == 0) return &.{};
         if (self.clipboard_out_buffer.len > 0) {
@@ -21241,6 +21262,21 @@ pub const AppSession = struct {
     pub fn takeClipboardReadRequest(self: *AppSession) bool {
         if (!self.surface_initialized) return false;
         const s = self.activeSurface();
+        // host-backed: host가 요청을 drain해 관측 seq·target으로 알려 준다(target은 짧아 관측에 싣는다).
+        // **정책 게이트는 여기 그대로** — 클립보드 읽기 허용 여부는 client config이고, 응답 바이트는 아래
+        // provideClipboardRead가 PTY로 쓰므로(원격이면 host PTY) 추가 왕복이 필요 없다.
+        if (is_macos and s.remote != null) {
+            const term = self.activePane().activeTerm();
+            const seq = term.rt.observation.clipboard_read_seq;
+            if (seq <= term.rt.last_clipboard_read_seq) {
+                term.rt.last_clipboard_read_seq = seq; // 감소(host exec 재시작)면 조용히 맞춘다
+                return false;
+            }
+            term.rt.last_clipboard_read_seq = seq;
+            self.clipboard_read_target_buf.clearRetainingCapacity();
+            self.clipboard_read_target_buf.appendSlice(self.allocator, term.rt.observation.clipboard_read_target.items) catch {};
+            return self.loaded_config.config.osc52.read == .allow; // deny면 클립보드 안 읽음(로컬과 같은 판정)
+        }
         s.lockCore(self.io);
         const pending = s.core.clipboardReadPending();
         if (pending) {
@@ -55506,4 +55542,52 @@ test "host-backed 벨: 관측 카운터 증가로 울리고 리셋은 조용히 
     term.rt.observation.bell_count = 1;
     session.dispatchBell();
     try std.testing.expect(session.takeBell());
+}
+
+// host-backed OSC 52 회귀 가드. host core가 클립보드 요청을 파싱해도 client로 나갈 통로가 없어 원격 세션에서
+// 클립보드 쓰기/읽기가 통째로 무동작이었다. 이제 host가 관측 seq로 요청을 알리고(write 텍스트만 RPC로 뺀다),
+// **정책 판정과 OS 접근은 client가 그대로 소유**한다(§기능 배치 규칙). read 응답은 PTY 바이트라 기존 입력
+// 경로를 타므로 추가 왕복이 없다.
+test "host-backed OSC 52 read: 관측 seq로 요청을 받고 정책은 client가 판정한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    var fake = FakeLinkScreen{ .snap = .{ .size = .{ .cols = 20, .rows = 5 } } };
+    const surface = session.activeSurface();
+    surface.remote = .{ .ctx = &fake, .vtable = &FakeLinkScreen.vtable };
+    defer surface.remote = null;
+    const term = session.activePane().terms.items[session.activePane().active_term];
+    term.rt.observation.availability = .current;
+
+    // 요청 없음 → false.
+    try std.testing.expect(!session.takeClipboardReadRequest());
+
+    // host가 read 요청을 알리고 target을 실어 준다. 기본 정책은 deny라 **클립보드를 읽지 않는다**(탈취 방지).
+    session.loaded_config.config.osc52.read = .deny;
+    term.rt.observation.clipboard_read_seq = 1;
+    try term.rt.observation.clipboard_read_target.appendSlice(allocator, "p");
+    try std.testing.expect(!session.takeClipboardReadRequest());
+
+    // 같은 seq는 재트리거하지 않는다(full-state 관측이 반복 전송돼도 중복 요청 금지).
+    session.loaded_config.config.osc52.read = .allow;
+    try std.testing.expect(!session.takeClipboardReadRequest());
+
+    // 새 요청 + allow → true(Swift가 클립보드를 읽어 provideClipboardRead로 응답), target도 캡처된다.
+    term.rt.observation.clipboard_read_seq = 2;
+    try std.testing.expect(session.takeClipboardReadRequest());
+    try std.testing.expectEqualStrings("p", session.clipboard_read_target_buf.items);
+
+    // host live-upgrade(exec)로 seq가 0에서 재시작 → 요청으로 오인하지 않는다.
+    term.rt.observation.clipboard_read_seq = 0;
+    try std.testing.expect(!session.takeClipboardReadRequest());
 }

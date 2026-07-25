@@ -112,6 +112,8 @@ pub const Client = struct {
     /// host가 `runtime.link_at`으로 자기 core의 `extractUrlAt`(추출 + cwd resolve + 존재 stat)을 실행할 수 있는가.
     /// 없으면 client는 이 RPC를 보내지 않고 원격 링크 열기를 비활성한다(docs/link-detection.md §원격(host-backed) 세션).
     runtime_link_at_v1: bool = false,
+    /// host가 `runtime.clipboard_write`로 OSC 52 write 텍스트를 넘길 수 있는가. 없으면 원격 클립보드가 비활성이다.
+    runtime_clipboard_v1: bool = false,
     parser: framing.FrameParser,
     // async full-state를 하나라도 수용하지 못하면 server subscription base는 이미 전진했을 수 있다. 그 뒤 같은 socket을
     // 계속 쓰면 어떤 shared stream이 누락됐는지 복구할 수 없으므로 connection 전체를 poison/close한다.
@@ -228,6 +230,7 @@ pub const Client = struct {
         self.runtime_core_command_v1 = payloadHasCapability(ack.payload, "runtime_core_command_v1");
         self.runtime_selected_text_v1 = payloadHasCapability(ack.payload, "runtime_selected_text_v1");
         self.runtime_link_at_v1 = payloadHasCapability(ack.payload, "runtime_link_at_v1");
+        self.runtime_clipboard_v1 = payloadHasCapability(ack.payload, "runtime_clipboard_v1");
         return self;
     }
 
@@ -1328,7 +1331,7 @@ fn buildHelloMajor(
 ) error{OutOfMemory}![]u8 {
     return std.fmt.allocPrint(
         allocator,
-        "{{\"protocol_min\":{d},\"protocol_max\":{d},\"client_kind\":\"{s}\",\"capabilities\":[\"runtime_metadata_v1\",\"screen_viewport_scrolled_v1\",\"async_scroll_to_bottom_v1\",\"runtime_core_command_v1\",\"runtime_selected_text_v1\",\"runtime_link_at_v1\"]}}",
+        "{{\"protocol_min\":{d},\"protocol_max\":{d},\"client_kind\":\"{s}\",\"capabilities\":[\"runtime_metadata_v1\",\"screen_viewport_scrolled_v1\",\"async_scroll_to_bottom_v1\",\"runtime_core_command_v1\",\"runtime_selected_text_v1\",\"runtime_link_at_v1\",\"runtime_clipboard_v1\"]}}",
         .{ wire_major, wire_major, client_kind },
     );
 }

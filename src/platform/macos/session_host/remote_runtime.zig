@@ -110,7 +110,9 @@ pub const RemoteRuntime = struct {
 
     /// **이미 host에 있는 runtime에 재접속**한다(spawn 없이) — GUI를 재실행하면 workspace가 저장한 `runtime_id_hex`로 같은
     /// host runtime에 붙어 화면·PID·scrollback을 잇는다(§7). runtime이 없으면(host 재시작·runtime 종료 등) attach가
-    /// `error.AttachFailed`(host RuntimeNotFound → 응답에 stream_id 없음)를 내고, restore caller는 fail-closed한다.
+    /// **`error.RuntimeNotFound`**(host가 그 코드를 긍정적으로 응답)를 내고, stale handle은 `error.StaleHostHandle`,
+    /// 원인을 단정할 수 없으면 `error.AttachFailed`다. restore caller는 앞의 둘만 "영구 없음"으로 보고 그 Term을 종료
+    /// placeholder로 둘 수 있으며, `AttachFailed`는 계속 fail-closed다(§7 접속 실패 행렬).
     /// **`spawn`과 달리 실패해도 runtime을 terminate하지 않는다** — 우리가 띄운 게 아니라 pre-existing이므로(남의 runtime을
     /// attach 실패로 죽이면 안 됨). 성공 뒤 이 RemoteRuntime은 spawn한 것과 동일하게 다룬다(input/resize/pump/terminate).
     pub fn attachExisting(
@@ -137,6 +139,27 @@ pub const RemoteRuntime = struct {
         try self.attachAndAssemble(surface_id, size);
     }
 
+    /// stream_id 없는 attach 응답의 error envelope를 읽어 **영구 실패**와 **일시 실패**를 가른다. §7 접속 실패 행렬에서
+    /// "manifest엔 있으나 runtime이 없음"은 파일 손상이 아니라 ended 상태이므로 caller가 그 Term만 종료 placeholder로
+    /// 둘 수 있어야 하는데, 전부 `AttachFailed`로 접으면 그 판정이 불가능하다. 반대로 runtime이 **살아 있을 수 있는**
+    /// 코드(`controller_busy`·`unauthorized`·`queue_invalidated`·미지 코드)를 영구로 오분류하면 살아 있는 세션을
+    /// placeholder로 굳혀 사용자가 잃으므로, 확실한 둘만 승격하고 나머지는 `AttachFailed`를 유지한다(fail-closed).
+    /// envelope를 못 읽는 경우(비JSON·error 키 없음)도 단정하지 않고 `AttachFailed`다.
+    fn classifyAttachFailure(self: *RemoteRuntime, resp: []const u8) anyerror {
+        const obj = decodeStrictObject(self.allocator, resp) catch |err| return switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+            else => error.AttachFailed,
+        };
+        defer obj.deinit();
+        const code = obj.string("error") orelse return error.AttachFailed;
+        const parsed = protocol.ErrorCode.fromWireName(code) orelse return error.AttachFailed;
+        return switch (parsed) {
+            .runtime_not_found => error.RuntimeNotFound,
+            .stale_host => error.StaleHostHandle,
+            else => error.AttachFailed,
+        };
+    }
+
     /// spawn/attachExisting 공통(§10 attach 순서): controller attach(stream_id) → 첫 snapshot 조립 → 원격-backed Surface.
     /// `self.runtime_id_hex`가 이미 채워져 있어야 한다(spawn=runtime.spawn 응답, attachExisting=저장된 값).
     fn attachAndAssemble(self: *RemoteRuntime, surface_id: u64, size: terminal.Size) anyerror!void {
@@ -145,7 +168,8 @@ pub const RemoteRuntime = struct {
         const attach_params = std.fmt.bufPrint(&attach_buf, "{{\"runtime_id\":\"{s}\",\"mode\":\"controller\"}}", .{self.runtime_id_hex}) catch return error.AttachFailed;
         const attach_resp = try self.client.call("runtime.attach", attach_params);
         defer self.allocator.free(attach_resp);
-        self.stream_id = client_mod.extractU64Field(attach_resp, "\"stream_id\":") orelse return error.AttachFailed;
+        self.stream_id = client_mod.extractU64Field(attach_resp, "\"stream_id\":") orelse
+            return self.classifyAttachFailure(attach_resp);
         // 새 host는 attach response에 current full metadata를 싣는다. 구 host/누락은 attach 자체를 깨지 않고 unavailable로
         // 남겨 GUI가 empty와 혼동하지 않게 한다.
         _ = self.applyObservationJson(attach_resp) catch {};
@@ -2350,11 +2374,13 @@ test "remote runtime: attachExisting reconnects to a pre-existing host runtime a
     }
     try testing.expect(found);
 
-    // 없는 runtime_id에 attachExisting → error.AttachFailed(host RuntimeNotFound). app_session restore는 이 신호를
-    // 동일 세션 단절로 보고 fail-closed한다. 실패해도 남의 runtime을 안 죽인다(terminate errdefer 없음).
+    // 없는 runtime_id에 attachExisting → **error.RuntimeNotFound**. host가 `runtime_not_found`를 긍정적으로 응답했다는
+    // 뜻이라 그 handle은 다시는 붙을 수 없고, restore caller가 그 Term만 종료 placeholder로 둘 수 있다(§7 접속 실패
+    // 행렬). 뭉뚱그린 AttachFailed로 남기면 일시 장애와 구분이 안 돼 살아 있는 세션까지 버리게 된다. 실패해도 남의
+    // runtime을 안 죽인다(terminate errdefer 없음).
     var bogus: RemoteRuntime = undefined;
     const bogus_id: [32]u8 = "deadbeefdeadbeefdeadbeefdeadbeef".*;
-    try testing.expectError(error.AttachFailed, bogus.attachExisting(&client, allocator, io, 2, bogus_id, .{ .cols = 40, .rows = 10 }));
+    try testing.expectError(error.RuntimeNotFound, bogus.attachExisting(&client, allocator, io, 2, bogus_id, .{ .cols = 40, .rows = 10 }));
 }
 
 test "remote runtime: takeNotification pulls a host-side OSC 9/777 desktop notification (§6.32)" {

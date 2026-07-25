@@ -45,6 +45,11 @@ pub const FailureReason = enum {
     invalid_manifest,
     stale_manifest,
     out_of_memory,
+    /// 그 `host_id`의 host **프로세스가 사라졌다**는 긍정적 증거가 있다(manifest도 legacy endpoint도 없음, 또는 manifest는
+    /// 남았지만 endpoint 무응답 + owner lease 사망 = 재부팅·crash 뒤 stale manifest). 나머지 reason과 달리 "재시도하면
+    /// 될 수도"가 아니라 **영구**다. 저장된 runtime을 종료 placeholder로 둘지 판정하는 caller가 이 구분에 의존한다 —
+    /// 일시 실패를 영구로 오분류하면 살아 있는 세션을 placeholder로 굳혀 사용자가 잃는다(§7 접속 실패 행렬).
+    host_gone,
 };
 
 pub const Outcome = union(enum) {
@@ -199,7 +204,11 @@ fn connectNewHostWithBackoff(
         switch (connectExistingHost(allocator, base_cache_dir, host_id)) {
             .connected => |client| return .{ .connected = client },
             .failed => |reason| switch (reason) {
-                .startup_timeout, .invalid_manifest => {},
+                // 우리가 **방금 spawn한** host가 manifest를 publish할 때까지 기다리는 루프다. 이 시점의 "manifest도
+                // endpoint도 없다"(host_gone)는 "사라졌다"가 아니라 "아직 안 떴다"이므로 재시도 대상이다 — host_gone의
+                // 영구 의미는 이미 실행 중인 host를 조회하는 restore 경로(connectExistingHost 직접 호출)에서만 성립한다.
+                // 이걸 빼면 갓 띄운 host를 첫 폴에서 버리고 in-process로 폴백한다(회귀).
+                .startup_timeout, .invalid_manifest, .host_gone => {},
                 else => return .{ .failed = reason },
             },
         }
@@ -281,13 +290,26 @@ pub fn connectExistingHost(
     if (exact.lifecycle == .restoring) return .{ .failed = .startup_timeout };
     const endpoint = allocator.dupeZ(u8, exact.endpoint) catch return .{ .failed = .out_of_memory };
     defer allocator.free(endpoint);
-    return connectExactWithBackoff(
+    const outcome = connectExactWithBackoff(
         allocator,
         endpoint,
         exact.protocol_major,
         exact.descriptor(),
         .{ .connect_attempts = 10, .connect_delay_ms = 20 },
     );
+    switch (outcome) {
+        .connected => return outcome,
+        .failed => |reason| {
+            // manifest는 남아 있는데 endpoint가 응답하지 않으면 두 가지다: host가 사라졌거나(재부팅·crash 뒤 stale
+            // manifest) 아직/일시적으로 못 붙는 것이다. owner lease는 이미 `findCurrentManifestHost`가 host 생존
+            // 판정의 단일 출처로 쓰는 증거라 여기서도 그걸 쓴다 — lease를 잡을 수 있으면 그 host 프로세스는 죽었다.
+            // OOM은 host에 대한 증거가 아니므로 그대로 둔다. lease가 살아 있으면(예: incompatible_version — hello에
+            // 답한 host가 존재) 일시 실패로 남긴다. 이 보수성이 살아 있는 세션을 placeholder로 굳히는 것을 막는다.
+            if (reason == .out_of_memory) return outcome;
+            if (!ownerLeaseIsLive(dir, host_id)) return .{ .failed = .host_gone };
+            return outcome;
+        },
+    }
 }
 
 fn connectLegacyExact(allocator: std.mem.Allocator, base_cache_dir: []const u8, host_id: u128) Outcome {
@@ -317,7 +339,11 @@ fn connectLegacyExact(allocator: std.mem.Allocator, base_cache_dir: []const u8, 
         if (major == minimum) break;
         major -= 1;
     }
-    return .{ .failed = .startup_timeout };
+    // manifest도 없고(호출자가 ManifestNotFound로 여기 왔다) current/N-1 legacy endpoint도 그 host_id로 응답하지 않았다.
+    // 추측할 endpoint가 더 없으므로 "아직 안 떴다"가 아니라 **그 host는 사라졌다**로 단정할 수 있다 — 저장된 runtime을
+    // 종료 placeholder로 둘지 판정하는 caller가 이 구분에 의존한다. 개별 probe의 startup_timeout은 위 루프가 계속
+    // 다음 endpoint를 시도하도록 흘려보내고, 여기 도달 = 전 경로 소진이다.
+    return .{ .failed = .host_gone };
 }
 
 fn probeLegacyExactEndpoint(
@@ -674,6 +700,37 @@ test "host_connect: falls back to null when no host exists and spawn cannot bind
     // host 없음 + helper exe가 bind 못 함(/nonexistent → exec 실패 _exit 127) → 짧은 backoff 뒤 null(in-process 폴백).
     const result = connectOrLaunch(allocator, "/nonexistent-maru-helper", base, .{ .connect_attempts = 3, .connect_delay_ms = 10 });
     try testing.expect(result == null);
+}
+
+// §7 접속 실패 행렬의 **영구 vs 일시** 구분을 못박는다. 저장된 runtime을 종료 placeholder로 둘지는 이 구분 하나에만
+// 의존하므로, 일시 실패가 host_gone으로 새면 살아 있는 세션이 placeholder로 굳어 되찾을 길이 사라진다. 터미널에서
+// 중요한 이유: 이 판정이 사용자가 며칠 띄워 둔 셸·빌드·SSH를 살릴지 버릴지 가른다. 격리된 base를 쓰는 이유는 실
+// 사용자 캐시에 살아 있는 host가 있으면 결과가 환경에 따라 달라지기 때문이다(결정적 테스트).
+test "host_connect: manifest도 endpoint도 없는 host_id는 host_gone으로 단정한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+
+    var base_buf: [128]u8 = undefined;
+    const base = std.fmt.bufPrintZ(&base_buf, "/tmp/maru-sh-gone-{d}", .{c.getpid()}) catch return error.SkipZigTest;
+    _ = c.mkdir(base.ptr, 0o700);
+    var dir_buf: [256]u8 = undefined;
+    const dir = discovery.sessionHostDirPath(&dir_buf, base) catch return error.SkipZigTest;
+    _ = c.mkdir(dir.ptr, 0o700);
+    defer {
+        _ = c.rmdir(dir.ptr);
+        _ = c.rmdir(base.ptr);
+    }
+
+    // manifest 없음 + 그 host_id로 응답하는 current/N-1 legacy endpoint 없음 → 추측할 경로가 소진됐으므로 "아직 안
+    // 떴다"가 아니라 "사라졌다"다. host_id=0은 손상 입력이라 invalid_endpoint로 남아야 하고(영구로 승격 금지),
+    // 이 대조가 없으면 "전부 host_gone" 구현도 테스트를 통과한다.
+    const gone = connectExistingHost(allocator, base, 0x1234_5678_9abc_def0_1234_5678_9abc_def0);
+    try testing.expect(gone == .failed);
+    try testing.expectEqual(FailureReason.host_gone, gone.failed);
+
+    const invalid = connectExistingHost(allocator, base, 0);
+    try testing.expect(invalid == .failed);
+    try testing.expectEqual(FailureReason.invalid_endpoint, invalid.failed);
 }
 
 test "host_connect: launches the product maru session host and completes host.info" {

@@ -1588,6 +1588,28 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
 
 ### P5 — 개별 runtime CLI attach
 
+- **T0a — `ConnectionSlot` reactor core:** P5a1 제품 fd 배선 전에 OS 중립 slot/queue/turn/drain state machine을
+  별도 구현한다. named cap은 connection 32, per-slot 16 MiB, screen soft 8 MiB, control reserve 512 KiB,
+  daemon aggregate 128 MiB, slot당 resident chunk 4,096개(그중 마지막 64개는 control 전용), turn당
+  read/write 각각 1 MiB 또는 64 frame,
+  partial-frame progress deadline 10초·absolute deadline 30초다. payload allocation은 chunk가 완전히 drain될 때까지
+  resident budget에 남고 metadata는 slot별 heap 고정 4,096-entry ring이라 별도 증폭되거나 stack에 복제되지 않는다.
+  heap `ReactorCore`가 global budget·table·canonical Slot 주소를 함께 소유하고, upgrade drain은 caller가 전달한
+  Slot이 아니라 해당 canonical Slot만 조회한다. EOF/protocol error/timeout의 강제 close도 같은 owner가 table
+  generation과 canonical lookup을 먼저 무효화한 뒤 queued allocation과 tracker를 회수하며, ready 선택은 owner의
+  round-robin facade만 쓴다.
+  화면 상태/8 MiB soft limit은 connection 전체가 아니라 subscription별 stable heap `ScreenTracker`가 소유한다.
+  tracker는 canonical Slot이 최대 256개를 소유하고 외부에는 slot owner를 포함한 `{index,generation}` opaque key만
+  노출한다. 모든 접근은 owner/generation을 재검증하며 queued byte가 0이 되기 전 detach/free를 거부한다.
+  화면 snapshot resync는 non-empty chunk batch 전체를 원자 enqueue하며 중간 실패 시
+  이 batch의 prefix와 budget을 rollback한 뒤 invalidated를 유지한다. global screen/shared ceiling은
+  각 slot의 첫 512 KiB control reserve를 다른 slot이 소비하지 못하게 보존한다.
+  `ConnectionKey {monotonic_id,slot_generation}`은 0/overflow/reuse를 거부한다. exact cap/cap+1, slow-slot fairness,
+  partial progress/timeout, outbound accounting rollback, upgrade drain의 partial/queued/in-flight 거부를 순수
+  allocator fail-index fixture로 고정한다. 이 slice는 partial parser/request correlation 자체를 소유하지 않고 deadline/
+  accounting state만 제공하며, socket을 열거나 기존 serial daemon을 multi-client로 광고하지 않는다.
+- **T0b — reactor product wiring:** T0a를 `SocketServer`/daemon poll loop에 연결하고 아래 P5a1의 process gate를
+  완료한다. 이때부터만 canonical connection을 유지한 별도 ephemeral inventory connection을 제품 지원으로 센다.
 - **P5a1 — bounded admin accept foundation**: 현재 connection 하나를 EOF까지 독점하는 serial serve loop를 먼저
   single-owner multi-fd reactor로 바꾼다. P4 GUI slot을 유지한 채 bounded admin request slot 하나를 accept/dispatch하고
   partial read/write, cap, idle deadline, same-login-UID/other-UID 거부를 process test로 고정한다. public CLI/help는 아직

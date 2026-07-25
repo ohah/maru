@@ -1114,6 +1114,19 @@ const TermRuntime = struct {
     // 화면 외 runtime 관측의 caller-owned cache. in-process core와 host-backed event를 같은 SSOT로 노출해 AppSession이
     // 원격 placeholder `surface.core`를 cwd/title/semantic/SSH/agent 출처로 오인하지 않게 한다.
     observation: app.RuntimeObservation = .{},
+    /// §7 **종료 placeholder**: manifest엔 있었지만 host runtime이 영구히 없어(`error.PersistentRuntimeGone`) 읽기
+    /// 전용으로 복원한 Term. live PTY·pump·라우팅이 없고(`live_initialized=false`, `handle=0`) registry 슬롯은
+    /// `LiveSurface.web` arm sentinel을 재사용하지만, `Term.kind`는 **`.terminal` 그대로**다 — 그래야 기존 렌더·라벨
+    /// 경로가 무변경으로 마지막 화면과 안내를 그린다(`SurfaceKind`는 닫힌 열거라 확장에 사용자 승인이 필요하고,
+    /// `kind == .web` 분기 40여 곳이 "PTY 없음 + 렌더 안 함"을 함께 뜻하는데 묘비는 렌더는 해야 한다).
+    /// 이 플래그를 보는 곳: `destroyTerm`·세션 `deinit`(web과 같은 경량 teardown), `allTabsTerminated`(묘비만 남은
+    /// 창을 닫지 않는다), `findTerminatedTerm`(자동 reap 대상 아님), `resizeTermForLayout`(core를 직접 resize),
+    /// 드롭 배리어(읽기 전용).
+    ended_placeholder: bool = false,
+    /// 묘비가 다시 저장될 때 쓸 마지막 command. `surface.command`가 아니라 여기 드는 이유: `Surface.command`는 spawn이
+    /// 채우는 borrowed 필드이고, 묘비는 spawn을 하지 않으며 복원 입력(파싱 arena)은 apply 직후 해제되므로 owned 복사가
+    /// 필요하다. title·cwd는 이미 owned 저장소가 있는 `auto_title`·`observation`에 심어 capture가 무변경으로 읽는다.
+    ended_command: []const u8 = "",
 };
 
 // 이 테스트가 증명하는 것(그리고 터미널에서 왜 중요한가): persistent-session P2 seam의 완료 조건은 "GUI layout이
@@ -4120,6 +4133,25 @@ pub const AppSession = struct {
     /// 활성 surface 하나를 full term grid로 — 기존 resizeActiveSurface와 동일 효과. 활성 panel의 resize
     /// 에러만 전파하고(기존 resize()의 try 동작 보존), 비활성 panel의 죽은 PTY 등은 무시해 한 panel이 다른
     /// panel 재배치를 막지 않게 한다. leaf rect 계산 실패(OOM)는 전파.
+    /// layout grid를 이 Term에 적용하는 **단일 출처**. PTY 없는 Term 두 종류를 여기서 갈라, 호출부가 `kind == .web`
+    /// 스킵을 각자 복사하지 않게 한다.
+    /// - web(4e-2 §6): sentinel이고 WKWebView frame은 surfaceDiff가 따로 sync하므로 대상이 아니다(no-op).
+    /// - §7 종료 placeholder: live link가 없어 `SurfaceRuntime.resize`가 `UnknownSurface`를 낸다(runtime.zig:308).
+    ///   그런데 묘비는 **렌더는 해야 하므로** 그냥 스킵하면 저장 grid에 갇혀 창 크기와 어긋난 화면이 남는다. 그래서
+    ///   sentinel core를 락 아래 직접 resize한다(PTY winsize·trace recorder 없음 — 표시용 reflow만).
+    /// - 그 외: 기존 `runtime.resize`와 동일 의미(에러도 그대로 전파).
+    fn resizeTermForLayout(self: *AppSession, term: *Term, size: terminal.Size) app.RuntimeError!void {
+        if (term.kind == .web) return;
+        if (term.rt.ended_placeholder) {
+            const grid = terminal.clampGridSize(size); // runtime.resize와 같은 clamp(core는 cols>=2를 요구)
+            term.surface.lockCore(self.io);
+            defer term.surface.unlockCore(self.io);
+            term.surface.core.resize(grid.cols, grid.rows) catch {}; // OOM이면 기존 grid 유지(표시만 영향)
+            return;
+        }
+        return self.runtime.resize(term.surface.id, size, self.io);
+    }
+
     fn resizeActiveTabPanes(self: *AppSession) !void {
         var leaf_rects: std.ArrayList(PaneTree.LeafRect) = .empty;
         defer leaf_rects.deinit(self.allocator);
@@ -4132,14 +4164,13 @@ pub const AppSession = struct {
             // panel의 모든 Term(가로 탭)을 같은 rect grid로 맞춘다 — 비활성 Term도 전환 즉시 올바른 크기가 되게.
             // 활성 panel의 활성 Term만 에러를 전파(기존 단일 surface resize의 try 동작 보존), 나머지는 무시.
             for (lr.leaf.terms.items) |term| {
-                // [4e-2, §6] web Term은 PTY가 없다(sentinel, 미-attach) — runtime.resize가 UnknownSurface를 낸다.
-                // 활성 web이면 아래 `try`가 그 에러를 전파해 resize() 전체가 실패하므로(창 크기 조정 깨짐), web Term은
-                // 건너뛴다. WKWebView frame은 surfaceDiff가 별도로 sync한다. web Term 없으면 no-op(byte-identical).
-                if (term.kind == .web) continue;
+                // PTY 없는 Term(web sentinel·§7 종료 placeholder)의 처리는 resizeTermForLayout이 소유한다. 활성 pane의
+                // 활성 Term만 에러를 전파하는 계약은 그대로다 — 그 `try`가 PTY 없는 Term의 UnknownSurface를 전파하면
+                // resize() 전체가 실패해 recomputeActivePaneRect·metal_dirty가 스킵된 half-state가 남는다(창 크기 조정 깨짐).
                 if (lr.leaf == active_pane and term == lr.leaf.activeTerm()) {
-                    try self.runtime.resize(term.surface.id, psize, self.io);
+                    try self.resizeTermForLayout(term, psize);
                 } else {
-                    self.runtime.resize(term.surface.id, psize, self.io) catch {};
+                    self.resizeTermForLayout(term, psize) catch {};
                 }
             }
         }
@@ -4157,8 +4188,7 @@ pub const AppSession = struct {
             const trect = self.paneTermRect(lr.rect);
             const psize = layout_math.gridFromRectPx(self.cell_width_px, self.cell_height_px, trect.w, trect.h);
             for (lr.leaf.terms.items) |term| {
-                if (term.kind == .web) continue; // [4e-2, §6] web Term은 PTY 없음(sentinel) — resize 대상 아님(WKWebView=surfaceDiff)
-                self.runtime.resize(term.surface.id, psize, self.io) catch {};
+                self.resizeTermForLayout(term, psize) catch {}; // PTY 없는 Term 분기는 헬퍼가 소유(web=no-op, 묘비=core 직접)
             }
         }
     }
@@ -5305,10 +5335,13 @@ pub const AppSession = struct {
     }
 
     /// 모든 탭/panel을 훑어 첫 'terminated'(셸 exit 관측 완료) Term의 위치를 찾는다(reap 대상). 없으면 null.
+    /// §7 종료 placeholder는 **후보에서 제외**한다. 묘비는 `terminated=false`로 만들어지므로 지금도 걸리지 않지만,
+    /// reap은 사용자 확인 없이 Term을 닫고 마지막 Term이면 탭까지 닫으므로(closeTermAt → 캐스케이드) 복원해 놓은
+    /// 레이아웃이 조용히 사라지는 경로다. 방어적으로 명시해 나중에 누가 묘비를 terminated로 표시해도 안전하게 둔다.
     fn findTerminatedTerm(self: *AppSession) ?TermLoc {
         return self.findTermWhere({}, struct {
             fn pred(_: void, term: *Term) bool {
-                return term.rt.terminated;
+                return term.rt.terminated and !term.rt.ended_placeholder;
             }
         }.pred);
     }
@@ -5504,8 +5537,7 @@ pub const AppSession = struct {
 
         // 5) 기존 panel의 모든 Term을 a 크기로 줄인다(PTY winsize 포함). 죽은 PTY 등의 실패는 무시(split 자체는 성공).
         for (active.terms.items) |term| {
-            if (term.kind == .web) continue; // [4e-2, §6] web Term은 PTY 없음(sentinel) — resize 대상 아님(WKWebView=surfaceDiff)
-            self.runtime.resize(term.surface.id, a_size, self.io) catch {};
+            self.resizeTermForLayout(term, a_size) catch {}; // PTY 없는 Term 분기는 헬퍼가 소유(web=no-op, 묘비=core 직접)
         }
 
         // 6) 새 panel로 포커스 이동(멀티플렉서 split 관행). focusPane이 탭 대표 surface(= app_window.active())·
@@ -5992,10 +6024,13 @@ pub const AppSession = struct {
         // Phase 7e-2a: 이 Term(web browser)을 주소창 편집 중이면 편집·관련 pending을 정리한다(stale surface_id 방지 —
         // remove가 슬롯을 해제하기 전에 surface_id로 판정). 비-web·비대상이면 무동작(surface_id 불일치 = no-op).
         self.dropAddrEditIfSurface(term.surfaceId());
-        if (term.kind == .web) {
+        if (term.kind == .web or term.rt.ended_placeholder) {
             // 4e-1 web Term: PTY·reader·라우팅 없음(sentinel surface). detach/closeAndDetach 없이 registry.remove만
             // 부른다 — union web arm deinit(custom_name 해제 + sentinel surface.deinit + 슬롯 해제)이 소유를 정리한다.
             // surface_id는 remove 실행 전에 읽는다(remove가 슬롯을 해제하므로 이후 term.surface deref 금지).
+            // §7 종료 placeholder도 같은 슬롯 모양(web arm sentinel)이라 여기로 온다. 이 조건에서 빠뜨리면
+            // `live_initialized=false`라 아래 분기도 못 타 슬롯이 누수되고, 반대로 아래로 보내면 handle=0에
+            // `closeAndDetach`를 부른다(둘 다 틀렸다).
             self.live_registry.remove(surface_id) catch {};
         } else if (term.rt.live_initialized) {
             // P2 seam: detach(runtime routing) 선행 → backend.remove가 번들 소유를 teardown(deinit=live_pty reader join →
@@ -6017,6 +6052,7 @@ pub const AppSession = struct {
         if (term.git_branch_cwd) |c| self.allocator.free(c);
         term.auto_title.deinit(self.allocator);
         term.rt.observation.deinit(self.allocator);
+        if (term.rt.ended_command.len > 0) self.allocator.free(term.rt.ended_command); // §7 묘비 owned command(deinit과 동기 유지)
         self.allocator.destroy(term);
     }
 
@@ -6052,6 +6088,56 @@ pub const AppSession = struct {
         // sentinel: 최소 1×1 grid(빈 core, clampGridSize가 최소 보장). 렌더/PTY 없이 id·title만 실어 Term.surface를 유효화.
         term.surface.* = try maru.session.Surface.init(self.allocator, id, .{ .cols = 1, .rows = 1 });
         // web Term은 PTY/pump/attach 없음 — rt는 기본값(live_pty=undefined, live_initialized=false). destroyTerm이 kind로 가드.
+        return term;
+    }
+
+    /// §7 **종료 placeholder**(묘비)를 만든다 — manifest엔 있었지만 host runtime이 영구히 없어 읽기 전용으로 복원하는
+    /// Term이다. `createWebTerm`과 같은 "PTY 없는 registry 슬롯" 패턴(web arm sentinel + 제자리 `Surface.init`)을 쓰되
+    /// 두 곳이 다르다: (1) `kind`는 **`.terminal` 그대로**라 기존 렌더·라벨 경로가 무변경으로 화면을 그린다,
+    /// (2) core를 1×1이 아니라 **저장 grid로 연다** — sentinel 1×1에 텍스트를 쓰면 한 칸만 보이고, 그 크기가 다음
+    /// checkpoint에 저장돼 복원마다 2×1로 열화된다(`clampGridSize`가 cols를 2로 올린다).
+    ///
+    /// 마지막 알려진 값은 **이미 owned 저장소가 있는 곳**에 심어 capture 코드를 건드리지 않는다.
+    /// - title → `auto_title`: `syncAutoTitles`가 `!live_initialized`로 건너뛰어 덮이지 않고 `termLabel`이 라벨로 쓴다.
+    /// - cwd·size → `observation`(`.stale`): `refreshTermObservation`이 `!live_initialized`로 즉시 반환하므로 보존되고,
+    ///   `captureWorkspaceTab`이 `availability != .unavailable`일 때만 읽으므로 `.stale`이어야 저장된다.
+    /// - command → `rt.ended_command`.
+    /// `surface.title`/`surface.cwd`에는 **절대 넣지 않는다** — `Surface.title`은 borrowed 계약이고 복원 입력은 파싱
+    /// arena 소유라 apply 직후 해제되어 댕글링이 된다.
+    fn createEndedPlaceholderTerm(
+        self: *AppSession,
+        title: []const u8,
+        cwd: []const u8,
+        command: []const u8,
+        size: terminal.Size,
+    ) !*Term {
+        const term = try self.allocator.create(Term);
+        errdefer self.allocator.destroy(term);
+        term.* = .{}; // kind=.terminal 기본값 유지(SurfaceKind는 닫힌 열거 — 확장하지 않는다)
+        term.rt.ended_placeholder = true;
+
+        const id = self.surface_ids.next();
+        const slot = try self.live_registry.create(id, 0);
+        slot.* = .{ .web = .{ .internal_allocator = self.allocator } }; // PTY 없는 arm 재사용(경량 teardown)
+        term.surface = &slot.web.surface;
+        errdefer self.live_registry.removeUninitialized(id) catch {};
+        term.surface.* = try maru.session.Surface.init(self.allocator, id, terminal.clampGridSize(size));
+        errdefer self.live_registry.remove(id) catch {};
+
+        // createTerm과 같은 core 정책 chokepoint — 안내 텍스트가 사용자 테마·폭 규칙으로 보이게 한다.
+        term.surface.core.setConfigPalette(self.appearance.theme.palette);
+        term.surface.core.ambiguous_wide = self.loaded_config.config.ambiguous_width == .wide;
+        term.surface.core.emoji_wide = self.loaded_config.config.emoji_width == .wide;
+        // 읽기 전용: writeInput이 runtime에 닿기 전에 ProcessExited로 실패한다(runtime.zig의 process_state 가드).
+        term.surface.process_state = .exited;
+        if (title.len > 0) try term.auto_title.appendSlice(self.allocator, title);
+        try term.rt.observation.replace(self.allocator, .{
+            .availability = .stale, // "마지막으로 알려진 값" — unavailable이면 capture가 title/cwd를 빈 문자열로 쓴다
+            .size = terminal.clampGridSize(size),
+            .cwd = cwd,
+            .window_title = title,
+        });
+        term.rt.ended_command = try self.allocator.dupe(u8, command);
         return term;
     }
 
@@ -6951,8 +7037,7 @@ pub const AppSession = struct {
                 const trect = self.paneTermRect(lr.rect);
                 const psize = layout_math.gridFromRectPx(self.cell_width_px, self.cell_height_px, trect.w, trect.h);
                 for (lr.leaf.terms.items) |term| {
-                    if (term.kind == .web) continue; // [4e-2, §6] web Term은 PTY 없음(sentinel) — resize 대상 아님(WKWebView=surfaceDiff)
-                    self.runtime.resize(term.surface.id, psize, self.io) catch {};
+                    self.resizeTermForLayout(term, psize) catch {}; // PTY 없는 Term 분기는 헬퍼가 소유(web=no-op, 묘비=core 직접)
                 }
                 if (lr.leaf == active_pane) {
                     self.active_pane_rect = trect; // 상단 탭 바를 뺀 영역(좌표 origin) — recomputeActivePaneRect 동형
@@ -9229,6 +9314,11 @@ pub const AppSession = struct {
                     // 4e web Term은 sentinel core라 `live_initialized=false`지만 종료된 게 아니다 — 살아 있는 web
                     // 패널이 하나라도 있으면 세션(창)을 살려 둔다(안 그러면 터미널만 다 죽었을 때 web-only 창이 통째로 닫힘).
                     if (term.kind == .web) return false;
+                    // §7 종료 placeholder도 같은 이유로 "종료됨"이 아니다 — 사용자가 ⏎로 되살릴 자리다. 이 가드가 없으면
+                    // 묘비만 남은 창에서 매 tick의 latchSessionEndOrHold가 통과해 (a) 창이 즉시 닫히거나 (b) startup_held로
+                    // 오latch돼 "셸이 시작 직후 비정상 종료됐습니다"라는 거짓 안내가 뜬다. 창이 닫히면 Swift `windows`에서
+                    // 빠져 그 탭·split·frame이 다음 checkpoint에서 영구히 사라진다 — 복원해 놓고 잃는 최악의 경로다.
+                    if (term.rt.ended_placeholder) return false;
                     if (term.rt.live_initialized and !term.rt.terminated) return false;
                 }
             }
@@ -20473,6 +20563,9 @@ pub const AppSession = struct {
     pub fn handleDroppedFiles(self: *AppSession, paths_nul: []const u8) void {
         if (!self.surface_initialized or paths_nul.len == 0) return;
         if (self.structuralPasteBlocked()) return;
+        // §7 종료 placeholder는 읽기 전용이다(PTY도 handle도 없다). 여기서 막지 않으면 아래 SSH/paste 경로가 handle=0
+        // 관측을 시도해 실패 notice를 띄우는데, 사용자에겐 "왜 실패했는지" 설명이 안 되는 잡음이다. 되살리기는 ⏎만이다.
+        if (self.activePane().activeTerm().rt.ended_placeholder) return;
         const active_term = self.activePane().activeTerm();
         if (active_term.kind == .terminal) {
             self.backendFor(active_term).refreshObservation(
@@ -20523,6 +20616,9 @@ pub const AppSession = struct {
     /// cross-session 덮어쓰기를 막는다(카운터는 재시작 시 0이라 pid 없이는 다른 세션과 충돌). docs/ssh-integration.md §4.
     pub fn handleDroppedImage(self: *AppSession, bytes: []const u8) bool {
         if (!self.surface_initialized or bytes.len == 0) return false;
+        // §7 종료 placeholder는 읽기 전용 — **consumed(true)로 돌려** Swift의 텍스트 fallback이 PTY로 새지 않게 한다
+        // (아래 "구조 owner에서는 no-op도 consumed" 규율과 같은 이유). 되살리기는 ⏎만이다.
+        if (self.activePane().activeTerm().rt.ended_placeholder) return true;
         // true=consumed. 구조 owner에서는 no-op도 consumed로 돌려 Swift의 text fallback이 PTY로 새지 않게 한다.
         if (self.structuralPasteBlocked()) return true;
         const active_term = self.activePane().activeTerm();
@@ -22435,7 +22531,11 @@ pub const AppSession = struct {
                     .custom_name = try arena.dupe(u8, term.surface.custom_name orelse ""),
                     .title = try arena.dupe(u8, if (term.rt.observation.availability != .unavailable) term.rt.observation.window_title.items else ""),
                     .cwd = try arena.dupe(u8, if (term.rt.observation.availability != .unavailable) term.rt.observation.cwd.items else ""),
-                    .command = try arena.dupe(u8, term.surface.command orelse ""),
+                    // §7 종료 placeholder는 spawn을 안 해 `surface.command`가 비어 있다 — 복원 입력에서 옮겨 둔 owned
+                    // 사본을 쓴다. title·cwd·grid는 생성 시 observation에 `.stale`로 심어서 위 두 줄이 그대로 읽는다.
+                    .command = try arena.dupe(u8, if (term.rt.ended_placeholder) term.rt.ended_command else (term.surface.command orelse "")),
+                    // 묘비는 `surface.remote == null`이라 위 rid/host 블록을 타지 않아 **handle이 자동으로 빈값**이다.
+                    // 죽은 handle을 재기록하지 않는 것이 의도다 — 다음 실행은 선언적 restore로 이 cwd의 평범한 새 셸을 연다.
                     .runtime_host_id = runtime_host_id,
                     .runtime_id = runtime_id,
                     .cols = observed_size.cols,
@@ -27883,6 +27983,7 @@ pub const AppSession = struct {
                     if (term.git_branch_cwd) |c| self.allocator.free(c);
                     term.auto_title.deinit(self.allocator);
                     term.rt.observation.deinit(self.allocator);
+                    if (term.rt.ended_command.len > 0) self.allocator.free(term.rt.ended_command); // 묘비 owned command
                     // P3-e3-4d: 원격 Term은 live_registry가 아니라 **앱 전역 backend**가 소유하므로 여기서 회수한다(SurfaceRuntime
                     // detach + rr deinit + 공유 backend map에서 제거). 창 close가 이 창의 원격 Term만 뺀다(공유 backend 자체는 안
                     // 닫음). in-process/web Term은 기존대로 live_registry.remove.
@@ -27896,9 +27997,12 @@ pub const AppSession = struct {
                             self.backendFor(term).remove(term.rt.handle);
                         }
                         term.rt.live_initialized = false;
-                    } else if (term.rt.live_initialized or term.kind == .web) {
+                    } else if (term.rt.live_initialized or term.kind == .web or term.rt.ended_placeholder) {
                         // 4e-1: web Term은 live_initialized=false지만 registry 슬롯(web arm sentinel)을 소유하므로 remove 대상이다.
                         // remove가 union arm 태그로 분기(terminal=reader join·web=경량)해 해당 슬롯 소유를 teardown한다.
+                        // §7 종료 placeholder도 같다 — `live_initialized=false` + `remote == null` + `kind == .terminal`이라
+                        // 이 조건에 명시하지 않으면 **어느 분기도 타지 않아 registry 슬롯이 누수**된다(위 remote 분기는
+                        // `remote != null`을 요구하고 아래 조건은 live/web만 봤다).
                         self.live_registry.remove(term.surface.id) catch {}; // 번들/sentinel deinit(custom_name + surface.deinit + 슬롯)
                         term.rt.live_initialized = false;
                     }
@@ -36531,6 +36635,113 @@ test "R3 #3: host가 죽으면 createTerm이 in-process로 폴백한다(새 터�
     } else {
         return error.SkipZigTest;
     }
+}
+
+// §7 종료 placeholder(묘비) **객체가 통과하는 모든 관문**을 못박는다. 묘비는 지금까지 없던 조합이다 —
+// `kind == .terminal`(렌더는 해야 하므로)이면서 `live_initialized == false`, `handle == 0`, `remote == null`,
+// registry 슬롯은 web arm sentinel. 기존 분기들은 "PTY 없음"을 `kind == .web`으로만 표현했기 때문에, 이 조합은
+// 조건에 명시하지 않으면 **어느 분기도 타지 않는다**. 터미널에서 왜 중요한가: 각 관문의 누락은 조용한 손실로
+// 나타난다 — teardown 누락은 registry 슬롯 누수, `allTabsTerminated` 누락은 **묘비만 남은 창이 자동으로 닫혀 복원한
+// 탭·split·frame이 다음 checkpoint에서 영구 소멸**, resize 누락은 창 크기 조정 전체 실패(half-state), reap 누락은
+// 사용자 확인 없는 탭 닫힘. 그래서 복원 배선(후속) 전에 이 관문들을 먼저 고정한다.
+test "종료 placeholder: teardown·세션 종료 판정·resize·reap 관문을 모두 통과한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+
+    const pane = session.activePane();
+    const live_term = pane.activeTerm();
+    const before_slots = session.live_registry.count();
+
+    const tomb = try session.createEndedPlaceholderTerm("빌드 로그", "/tmp", "/bin/zsh", .{ .cols = 80, .rows = 24 });
+    try pane.terms.append(allocator, tomb);
+
+    // 정체성: kind는 .terminal이라 렌더 경로가 그대로 돌고, PTY 계열은 전부 미할당이다.
+    try std.testing.expectEqual(maru.session.control_surface.SurfaceKind.terminal, tomb.kind);
+    try std.testing.expect(tomb.rt.ended_placeholder);
+    try std.testing.expect(!tomb.rt.live_initialized);
+    try std.testing.expectEqual(@as(app.TermRuntimeHandle, 0), tomb.rt.handle);
+    try std.testing.expect(tomb.surface.remote == null);
+    // 마지막 알려진 값이 owned로 심겼다(파싱 arena가 해제돼도 유효해야 한다).
+    try std.testing.expectEqualStrings("빌드 로그", tomb.auto_title.items);
+    try std.testing.expectEqualStrings("/tmp", tomb.rt.observation.cwd.items);
+    try std.testing.expectEqualStrings("/bin/zsh", tomb.rt.ended_command);
+
+    // 관문 1: 살아 있는 Term이 죽어도 묘비가 있으면 세션을 끝내지 않는다. 이게 없으면 창이 닫히고 레이아웃이 사라진다.
+    live_term.rt.terminated = true;
+    try std.testing.expect(!session.allTabsTerminated());
+    // 관문 2: 자동 reap 후보가 아니다(사용자 확인 없이 닫히면 안 된다).
+    live_term.rt.terminated = false;
+    tomb.rt.terminated = true; // 방어적 이중화 검증 — terminated로 표시돼도 reap 대상이 아니어야 한다
+    try std.testing.expect(session.findTerminatedTerm() == null);
+    tomb.rt.terminated = false;
+
+    // 관문 3: 활성 묘비에서 resize()가 실패하지 않고 sentinel core가 실제로 커진다(1×1에 갇히면 안내가 한 칸만 보이고
+    // 그 크기가 checkpoint에 저장돼 복원마다 열화된다).
+    session.focusTerm(pane.terms.items.len - 1);
+    _ = try session.resize(1200, 800, 1000);
+    try std.testing.expect(tomb.surface.core.size.cols > 2);
+    try std.testing.expect(tomb.surface.core.size.rows > 1);
+
+    // 관문 4: 읽기 전용 — 드롭은 무동작이고 이미지는 consumed로 삼켜 Swift 텍스트 fallback이 PTY로 새지 않게 한다.
+    session.handleDroppedFiles("/tmp/x.txt\x00");
+    try std.testing.expect(session.handleDroppedImage("\x89PNG"));
+
+    // 관문 5: teardown이 registry 슬롯을 회수한다(누락하면 testing.allocator가 누수로 잡는다). 슬롯 수가 생성 전으로
+    // 돌아오는지까지 본다 — remove가 아니라 destroy만 됐으면 여기서 어긋난다.
+    session.focusTerm(0);
+    _ = pane.terms.pop();
+    session.destroyTerm(tomb);
+    try std.testing.expectEqual(before_slots, session.live_registry.count());
+}
+
+// 묘비가 **다시 저장될 때** 마지막 title·cwd·grid를 잃지 않고 죽은 runtime-handle을 남기지 않는지 못박는다.
+// 순진한 구현은 두 곳에서 조용히 망가진다. (1) capture는 title/cwd를 `rt.observation`에서만 읽는데
+// `refreshTermObservation`이 `!live_initialized`에 즉시 반환하므로, seed가 없으면 observation이 기본 `.unavailable`로
+// 남아 **빈 문자열로 저장**된다 — 묘비의 존재 이유(마지막 제목·위치)가 첫 Quit에 사라진다. (2) core가 sentinel
+// 1×1이면 그 크기가 저장돼 다음 복원에서 `clampGridSize`가 2×1 셸을 만든다(사이클마다 레이아웃 열화).
+// 그리고 죽은 handle을 재기록하면 다음 실행도 같은 묘비라 사용자가 영원히 ⏎를 눌러야 한다 — handle 없이 저장하면
+// 선언적 restore가 그 cwd의 평범한 새 셸을 연다(사용자가 택한 동작).
+test "종료 placeholder: capture가 마지막 title·cwd·grid를 저장하고 runtime-handle은 남기지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+
+    const pane = session.activePane();
+    const tomb = try session.createEndedPlaceholderTerm("배포 감시", "/tmp", "/bin/zsh", .{ .cols = 100, .rows = 30 });
+    try pane.terms.append(allocator, tomb);
+    defer {
+        _ = pane.terms.pop();
+        session.destroyTerm(tomb);
+    }
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const win = try session.captureWorkspaceWindow(arena.allocator(), false, null);
+    const surfaces = win.tabs[0].panes[0].surfaces;
+    try std.testing.expectEqual(@as(usize, 2), surfaces.len); // 살아 있는 Term + 묘비 — 묘비는 스킵되지 않는다
+    const saved = surfaces[1];
+
+    try std.testing.expectEqualStrings("배포 감시", saved.title);
+    try std.testing.expectEqualStrings("/tmp", saved.cwd);
+    try std.testing.expectEqualStrings("/bin/zsh", saved.command);
+    try std.testing.expect(saved.cols > 2 and saved.rows > 1); // sentinel 1×1이 그대로 새어 나오지 않는다
+    // 죽은 handle을 재기록하지 않는다 — 이 두 줄이 "다음 실행은 평범한 셸"을 보장한다.
+    try std.testing.expectEqual(@as(usize, 0), saved.runtime_host_id.len);
+    try std.testing.expectEqual(@as(usize, 0), saved.runtime_id.len);
+
+    // 직렬화 왕복까지: 저장 텍스트에 runtime-handle 키가 아예 없어야 하고, 파싱하면 같은 값이 돌아와야 한다.
+    const text = try maru.session.workspace.serialize(arena.allocator(), .{ .windows = &.{win} });
+    try std.testing.expect(std.mem.indexOf(u8, text, "runtime-handle=") == null);
+    var parsed = try maru.session.workspace.parse(arena.allocator(), text);
+    defer parsed.deinit();
+    const round = parsed.workspace.windows[0].tabs[0].panes[0].surfaces[1];
+    try std.testing.expectEqualStrings("배포 감시", round.title);
+    try std.testing.expectEqualStrings("/tmp", round.cwd);
 }
 
 // attach 실패의 **영구/일시 분류표**를 순수 함수 수준에서 못박는다. 이 분류 하나가 "저장된 세션을 종료 placeholder로

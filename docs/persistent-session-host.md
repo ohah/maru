@@ -551,6 +551,17 @@ ended placeholder와 orphan recovery entry는 P4에서 구현한다.
 선행 도입하고 placeholder 전환은 P4에서 이 신호를 소비한다. 분류를 placeholder와 같은 변경에 넣지 않는 이유는, 오분류
 회귀가 곧바로 checkpoint 오염으로 이어져 재현·롤백이 불가능한 손실이 되기 때문이다.
 
+**종료 placeholder 객체(구현됨, 아직 복원이 만들지 않음).** placeholder Term 자체와 그 수명은 `TermRuntime.ended_placeholder`
++ `createEndedPlaceholderTerm`으로 구현했다. `SurfaceKind`(닫힌 열거)를 확장하지 않고 `kind = .terminal`을 유지하며
+registry 슬롯만 `LiveSurface.web` arm sentinel을 재사용한다 — 그래야 기존 렌더·라벨 경로가 무변경으로 마지막 화면을
+그린다. 대신 "`kind == .web`이 곧 PTY 없음"이라는 기존 가정이 깨지므로, PTY 부재를 보던 분기를 전부 이 플래그로
+넓혔다: `destroyTerm`·세션 `deinit`(누락 시 registry 슬롯 누수), `allTabsTerminated`(누락 시 **묘비만 남은 창이 자동으로
+닫혀 복원한 레이아웃이 다음 checkpoint에서 소멸**), `findTerminatedTerm`(자동 reap 금지), `resizeTermForLayout`(live
+link가 없어 `SurfaceRuntime.resize`가 실패하므로 sentinel core를 직접 resize — 스킵하면 저장 grid에 갇힌다), 드롭 배리어.
+마지막 title·cwd·grid는 이미 owned 저장소가 있는 `auto_title`·`observation`(`.stale`)에 심어 `captureWorkspaceTab`이
+무변경으로 저장하고, command만 `rt.ended_command`에서 읽는다. `surface.remote == null`이라 **죽은 `runtime-handle`은
+자동으로 저장되지 않으므로**, 되살리지 않은 묘비는 다음 실행에서 선언적 restore로 그 cwd의 평범한 새 셸이 된다.
+
 | 상태 | 처리 |
 | --- | --- |
 | host가 없거나 종료됨 | 기존 handle은 ended 처리. 새 Term 생성 시 새 host를 시작하지만 동일 runtime 복구로 설명하지 않음 |

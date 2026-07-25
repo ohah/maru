@@ -5,7 +5,10 @@ const session_mod = @import("app_session.zig");
 const keycode = @import("keycode.zig");
 const keyhint_hold = maru.session.keyhint_hold; // OS-중립 홀드 gesture 정책(session L2 — session/keyhint_hold.zig)
 const command_catalog = @import("command_catalog.zig");
-const app_instance_lease_mod = @import("app_instance_lease.zig");
+const app_instance_lease_mod = if (builtin.os.tag == .macos)
+    @import("app_instance_lease.zig")
+else
+    struct {};
 const file_tree_mutation_backend = @import("file_tree_mutation_backend.zig");
 const control_server_mod = @import("control_server.zig"); // Track C A2b: 라이브 컨트롤 서버(소켓+accept 스레드+marshal)
 const control_socket = @import("control_socket.zig"); // 1b: formatInstanceKey(인스턴스 키)
@@ -53,24 +56,35 @@ pub const AppInstanceLeaseResult = enum(u32) {
     invalid_path = c.MARU_APP_INSTANCE_LEASE_INVALID_PATH,
 };
 
-const LeaseSlot = struct {
-    held: ?app_instance_lease_mod.AppInstanceLease = null,
+const LeaseSlot = if (builtin.os.tag == .macos)
+    struct {
+        held: ?app_instance_lease_mod.AppInstanceLease = null,
 
-    fn acquire(self: *LeaseSlot, path: [:0]const u8) AppInstanceLeaseResult {
-        if (self.held != null) return .held;
-        self.held = app_instance_lease_mod.AppInstanceLease.acquire(path) catch |err| return switch (err) {
-            error.AlreadyOwned => .held,
-            error.UnsafeLock => .unsafe,
-            error.IoFailure => .io_failure,
-        };
-        return .acquired;
-    }
+        fn acquire(self: *@This(), path: [:0]const u8) AppInstanceLeaseResult {
+            if (self.held != null) return .held;
+            self.held = app_instance_lease_mod.AppInstanceLease.acquire(path) catch |err| return switch (err) {
+                error.AlreadyOwned => .held,
+                error.UnsafeLock => .unsafe,
+                error.IoFailure => .io_failure,
+            };
+            return .acquired;
+        }
 
-    fn deinitForTest(self: *LeaseSlot) void {
-        if (self.held) |*lease| lease.deinit();
-        self.held = null;
+        fn deinitForTest(self: *@This()) void {
+            if (self.held) |*lease| lease.deinit();
+            self.held = null;
+        }
     }
-};
+else
+    struct {
+        fn acquire(_: *@This(), _: [:0]const u8) AppInstanceLeaseResult {
+            // 이 ABI의 제품 consumer는 macOS Swift host뿐이다. Linux check는 header/export
+            // shape만 컴파일하며 Darwin owner-lease primitive를 분석하지 않는다.
+            return .io_failure;
+        }
+
+        fn deinitForTest(_: *@This()) void {}
+    };
 
 // AppSession보다 먼저 생기고 모든 Window보다 오래 사는 process-global owner다. 제품에는 release/reset ABI를
 // 노출하지 않는다. 정상/비정상 process exit에서 kernel이 CLOEXEC fd와 flock을 함께 회수한다.

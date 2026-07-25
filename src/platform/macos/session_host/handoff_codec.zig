@@ -894,11 +894,13 @@ fn encodeTaggedBytes(writer: *Writer, tag: u32, bytes: []const u8) Error!void {
 pub fn encodeHost(allocator: std.mem.Allocator, host: HostView) Error![]u8 {
     if (host.host_id == 0 or host.authority_generation == 0 or host.membership_generation == 0)
         return error.InvalidValue;
-    for (host.runtimes) |runtime| if (runtime.runtime_id == 0) return error.InvalidValue;
     if (host.runtimes.len > max_runtime_count or
         host.next_handle == 0 or
         host.next_handle == std.math.maxInt(u64))
         return error.LimitExceeded;
+    // Count cap must precede element inspection: callers may provide capacity-only/uninitialized storage
+    // when asserting cap+1, and rejected elements are outside the codec's readable domain.
+    for (host.runtimes) |runtime| if (runtime.runtime_id == 0) return error.InvalidValue;
     for (host.runtimes) |runtime| {
         // RuntimeManager reserves handle 0 as the opaque-pointer null value,
         // and its next cursor must be strictly above every restored handle.

@@ -17009,9 +17009,27 @@ pub const AppSession = struct {
     /// 빈 슬라이스(빌트인만)로 비우고, reloadConfig와 같은 재적용(appearance·behavior·scrollback·palette·ambiguous·사이드바)
     /// + 카탈로그·전역 단축키 재빌드를 한 뒤, **config 파일을 안내 주석만 남긴 기본
     /// 상태로 덮어쓴다**(삭제가 아니라 — 파일·경로 보존, 사용자가 기본 상태를 보고 편집 가능; 사용자 요청).
+    /// **예외 하나: `session.keep-alive-after-quit`은 초기화하지 않고 보존한다.** 이 키는 취향이 아니라 살아 있는
+    /// PTY의 소유권 모드이고, 기본값으로 되돌리면 다음 Quit이 host-backed runtime을 terminate해 사용자의 터미널
+    /// 세션이 경고 없이 사라진다. 보존 근거와 notice 문구는 함수 본문 주석을 단일 출처로 둔다.
     pub fn resetAllSettings(self: *AppSession) void {
+        // `session.keep-alive-after-quit`은 취향 설정이 아니라 **runtime 소유권 모드**다. true면 PTY를 host
+        // (`maru-sessiond`)가 소유하고 GUI는 뷰어일 뿐이라 Quit이 detach지만, false면 PTY 수명이 이 앱 프로세스에
+        // 묶여 **다음 Quit이 살아 있는 host-backed runtime까지 terminate**한다(docs/persistent-session-host.md
+        // 토글 의미론 표 + docs/configuration.md `session.keep-alive-after-quit` 행). 그래서 "모든 설정 초기화"가
+        // 이 키까지 기본값으로 되돌리면, 사용자가 켜 둔 터미널 세션 전부가 **다음 종료에 경고 없이 전멸**한다 —
+        // 파괴는 명시적이어야 한다며 `Quit and End All Sessions`를 전용 경로로 따로 둔 같은 문서의 원칙과 정면으로
+        // 어긋난다(실제 사고: 리셋 뒤 평범한 Quit으로 host-backed runtime 12개가 소멸). 따라서 리셋은 이 키만
+        // 보존하고, 끄는 결정은 사용자가 세팅 workspace 섹션 토글로 직접 하도록 아래 notice로 안내한다.
+        const keep_alive = self.loaded_config.config.session.keep_alive_after_quit;
         self.loaded_config.config = config_mod.Config{}; // 내장 기본값(정적 — 옛 arena 문자열은 미참조로 남았다 다음 reload/deinit에 해제)
-        setAppKeepAlivePolicy(self.loaded_config.config.session.keep_alive_after_quit);
+        self.loaded_config.config.session.keep_alive_after_quit = keep_alive; // 보존 — 아래 파일 write도 같은 값을 남긴다
+        // 리터럴 false가 아니라 `Config{}` 기본값을 기준으로 "보존이 실제 override인지" 판정한다. 문서가 기능 완성
+        // 뒤 기본값을 true로 전환한다고 예고했으므로(persistent-session-host.md), 그때 리터럴 비교로 두면 사용자가
+        // 명시적으로 끈 false를 리셋이 도로 켜 버려 같은 사고가 반대 방향으로 난다.
+        const default_keep_alive = (config_mod.Config{}).session.keep_alive_after_quit;
+        const keep_alive_preserved = keep_alive != default_keep_alive;
+        setAppKeepAlivePolicy(keep_alive); // 보존값 그대로 — 리셋이 live 소유권 정책을 뒤집지 않는다.
         // keybind도 config다 — "모든 설정 초기화"는 인앱/파일 keybind 바인딩(keybindings·unbinds·terminal_bindings·
         // global_bindings)도 즉시 기본값(빈 슬라이스=빌트인만)으로 되돌린다. 옛 슬라이스는 arena 소유라 미참조로 남았다
         // 다음 reload/deinit에 해제(config.* 정적 교체와 같은 수명 규칙 — 여기서 free 금지). 이렇게 비워야 keyBindingResolver
@@ -17030,17 +17048,28 @@ pub const AppSession = struct {
         var wrote = false;
         const path = self.configWritePath(); // 안전 chokepoint: 테스트가 tmp redirect 안 했으면 ""(쓰기 스킵) — 실 config 보호
         if (path.len > 0) {
-            const header = "# Maru config — Reset to Defaults로 초기화됨(모든 설정 기본값). 키 설명: docs/configuration.md\n";
+            // 아래 `body` peer 타입(보존 override가 있으면 owned `[]u8`, 없으면 이 헤더)을 하나로 맞추려 슬라이스로 못박는다.
+            const header: []const u8 = "# Maru config — Reset to Defaults로 초기화됨(모든 설정 기본값). 키 설명: docs/configuration.md\n";
             // atomic write(temp + replace=rename) — 부분 쓰기가 원본 config를 손상하지 않게(serializeConfig→Swift atomic·
             // workspace write와 같은 보장). .replace=true는 File.Atomic.replace 계약(Dir.zig:1878), .make_path=true는 신규
             // 사용자의 ~/.config[/maru] 부모까지 재귀 생성(리뷰 #844-followup — 수동 단계별 mkdir 대체). 실패는 forgiving이되
             // wrote로 추적해 거짓 성공 notice는 피한다(파일 미반영이면 재부팅 시 옛 설정 부활하므로 사용자에게 알린다).
             write_blk: {
+                // 보존한 keep-alive가 기본값과 다르면 override 한 줄을 **같은 atomic write에** 담는다. 다음 tick
+                // serializeConfig에 미루면 그 사이 앱이 죽었을 때 파일(기본값)과 live 정책(보존값)이 갈라지고, 다음
+                // 실행이 조용히 in-process로 떨어져 지금 고치는 사고와 같은 결과가 된다. 키 문자열과 값 포맷은 스키마
+                // 직렬화 단일 출처(`updateConfigForKeys`)에 맡겨 손으로 렌더하지 않는다 — 키 rename 시 같이 따라간다.
+                const owned: ?[]u8 = if (keep_alive_preserved)
+                    (config_mod.updateConfigForKeys(self.allocator, header, self.loaded_config.config, &.{"session.keep-alive-after-quit"}) catch break :write_blk)
+                else
+                    null;
+                defer if (owned) |b| self.allocator.free(b);
+                const body: []const u8 = if (owned) |b| b else header;
                 var af = std.Io.Dir.cwd().createFileAtomic(self.io, path, .{ .replace = true, .make_path = true }) catch break :write_blk;
                 defer af.deinit(self.io); // replace 성공 시 no-op, 실패/중도 탈출 시 temp 정리
                 var wbuf: [256]u8 = undefined;
                 var fw = af.file.writer(self.io, &wbuf);
-                fw.interface.writeAll(header) catch break :write_blk;
+                fw.interface.writeAll(body) catch break :write_blk;
                 fw.interface.flush() catch break :write_blk;
                 af.replace(self.io) catch break :write_blk;
                 wrote = true;
@@ -17058,10 +17087,14 @@ pub const AppSession = struct {
         self.rebuildGlobalHotkeys() catch {};
         self.global_hotkeys_dirty = true;
         self.metal_dirty = true;
-        if (wrote or path.len == 0)
-            self.showNotice("모든 설정을 기본값으로 초기화했습니다")
+        if (!wrote and path.len > 0)
+            self.showNotice("기본값으로 초기화(화면은 적용됨) — config 파일 쓰기에 실패했습니다")
+        else if (keep_alive_preserved)
+            // 보존을 조용히 처리하면 사용자는 "모든 설정 초기화"라는 말대로 세션 유지도 꺼졌다고 믿고, 나중에
+            // 예상과 다른 Quit 동작을 만난다. 보존 사실과 **수동 변경 경로**를 같이 알려야 결정권이 사용자에게 남는다.
+            self.showNotice("모든 설정을 기본값으로 초기화했습니다 — 세션 유지(keep-alive)는 살아 있는 터미널을 지키려 그대로 뒀습니다. 끄려면 세팅 › workspace에서 직접 변경하세요")
         else
-            self.showNotice("기본값으로 초기화(화면은 적용됨) — config 파일 쓰기에 실패했습니다");
+            self.showNotice("모든 설정을 기본값으로 초기화했습니다");
     }
 
     /// serializeConfig가 소비하는 config write-back 대기열 전부를 비운다(takeConfigDirty가 OR로 보는 것과 동일 집합).
@@ -51406,6 +51439,68 @@ test "detectThemePreset / applyThemePreset / resetAllSettings: 테마 프리셋�
     defer if (nested_after) |na| allocator.free(na);
     try std.testing.expect(nested_after != null); // make_path가 nested/dir를 생성하고 헤더를 씀
     try std.testing.expect(std.mem.indexOf(u8, nested_after.?, "Reset to Defaults") != null);
+}
+
+// resetAllSettings의 **초기화 예외 하나**를 못박는다: `session.keep-alive-after-quit`은 취향 설정이 아니라 살아 있는
+// PTY의 소유권 모드다(true=host 소유라 Quit은 detach, false=앱 소유라 Quit이 terminate — persistent-session-host.md
+// 토글 의미론 표). 리셋이 이 값을 기본값으로 되돌리면 그 자리에서 live 정책이 뒤집혀 **다음 평범한 `Quit Maru`가
+// 사용자가 켜 둔 host-backed runtime을 전부 종료**한다. 실측 사고에서 이 경로로 runtime 12개가 소멸하고 workspace의
+// `host_id:runtime_id` 12개가 dangling이 됐다. 터미널에서 중요한 이유: 세션 유지는 사용자가 며칠 띄워 둔 셸·빌드·SSH의
+// 생사를 결정하므로, 파괴는 `Quit and End All Sessions` 같은 명시적 경로만 해야 한다. 값·live 정책·config 파일 override
+// 셋이 함께 보존돼야 재실행까지 유지되므로(하나만 빠지면 파일과 정책이 갈려 다음 실행이 조용히 in-process로 떨어진다)
+// 셋 다 검증한다.
+test "resetAllSettings: session.keep-alive-after-quit은 초기화 예외로 보존한다(값·live 정책·파일 override)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    // 안전 가드: resetAllSettings가 configPath()에 파일을 쓰므로 실 config(~/.config/maru/config) 대신 tmp로 박는다.
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [4096]u8 = undefined;
+    const cfg_path = try std.fmt.bufPrint(&path_buf, ".zig-cache/tmp/{s}/config", .{tmp.sub_path});
+    if (session.config_path_buffer) |b| allocator.free(b);
+    session.config_path_buffer = try allocator.dupe(u8, cfg_path); // 세션 소유 — deinit이 해제
+
+    // 기본값 뒤집기로 표현한다(리터럴 false 금지) — 문서가 기능 완성 뒤 기본값을 true로 전환한다고 예고했고,
+    // 그때도 "사용자가 명시적으로 정한 값"을 리셋이 되돌리지 않아야 이 테스트가 계속 옳다.
+    const default_keep_alive = (config_mod.Config{}).session.keep_alive_after_quit;
+    session.loaded_config.config.session.keep_alive_after_quit = !default_keep_alive;
+    setAppKeepAlivePolicy(!default_keep_alive);
+    session.loaded_config.config.font.size = 99; // 함께 갈려야 하는 대조군(보통 설정은 초기화된다)
+
+    session.resetAllSettings();
+
+    // 1) 값 보존 — 대조군은 기본값으로 갔는데 이 키만 사용자 값으로 남는다.
+    try std.testing.expectEqual(!default_keep_alive, session.loaded_config.config.session.keep_alive_after_quit);
+    try std.testing.expectEqual((config_mod.Config{}).font.size, session.loaded_config.config.font.size);
+    // 2) live 정책 보존 — 이 래치가 뒤집히는 것이 사고의 직접 원인이었다(다음 Quit이 detach 대신 terminate).
+    try std.testing.expectEqual(!default_keep_alive, app_keep_alive_after_quit);
+    // 3) 파일 override 보존 — 리셋이 덮어쓰는 파일에 같은 값이 남아야 재실행 뒤에도 정책이 이어진다.
+    const after = try tmp.dir.readFileAlloc(io, "config", allocator, .limited(4096));
+    defer allocator.free(after);
+    try std.testing.expect(std.mem.indexOf(u8, after, "Reset to Defaults") != null); // 안내 주석 헤더는 그대로
+    try std.testing.expect(std.mem.indexOf(u8, after, "session.keep-alive-after-quit") != null);
+    try std.testing.expect(std.mem.indexOf(u8, after, "font.size = 99") == null); // 다른 override는 사라진다
+
+    // 값이 기본값과 같으면 보존할 게 없으므로 파일에 이 키를 쏟지 않는다("기본값 위 override만 쓴다" 정책 유지 —
+    // 여기서 무조건 emit하면 리셋 결과 파일이 기본값 한 줄을 항상 갖게 되어 full-dump 회피 원칙이 깨진다).
+    session.loaded_config.config.session.keep_alive_after_quit = default_keep_alive;
+    setAppKeepAlivePolicy(default_keep_alive);
+    session.resetAllSettings();
+    const plain = try tmp.dir.readFileAlloc(io, "config", allocator, .limited(4096));
+    defer allocator.free(plain);
+    try std.testing.expect(std.mem.indexOf(u8, plain, "session.keep-alive-after-quit") == null);
 }
 
 test "테마 프리셋 잠금: 사용자 지정 순환 + 프리셋 활성 시 색·팔레트 잠금 + 프리셋 행 최상단" {

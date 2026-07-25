@@ -46,6 +46,15 @@ pub const inbound_resident_cap: usize =
 pub const handshake_deadline_ns: u64 = 10 * std.time.ns_per_s;
 pub const unattached_idle_deadline_ns: u64 = 30 * std.time.ns_per_s;
 
+comptime {
+    const max_snapshot_frames =
+        (protocol.max_viewport_snapshot + protocol.max_binary_chunk - 1) /
+        protocol.max_binary_chunk;
+    if (slot_mod.resync_batch_bytes <
+        protocol.max_viewport_snapshot + max_snapshot_frames * protocol.header_size)
+        @compileError("resync queue cap cannot hold one maximum wire snapshot");
+}
+
 pub const Options = struct {
     runtime_ops: ?server.RuntimeOps = null,
     upgrade_ops: ?upgrade_wire.Ops = null,
@@ -74,6 +83,7 @@ pub const Client = struct {
     created_ns: u64,
     last_activity_ns: u64,
     sync_fail_once: bool = false,
+    delta_stream_cursor: usize = 0,
 
     pub fn create(
         allocator: std.mem.Allocator,
@@ -325,23 +335,156 @@ pub const Client = struct {
         defer if (lease) |*held| held.release();
         slot.beginDispatch() catch return self.beginClose(.resource_exhausted);
         defer slot.endDispatch() catch unreachable;
-        const maybe_frames = self.connection.collectDeltas() catch {
+        const streams = self.connection.localStreams(self.allocator) catch {
             self.beginClose(.resource_exhausted);
             return;
         };
-        if (maybe_frames) |frames| {
-            defer self.allocator.free(frames);
-            var adopted: usize = 0;
-            for (frames) |bytes| {
-                self.adoptScreen(bytes) catch {
-                    for (frames[adopted + 1 ..]) |remaining|
-                        self.allocator.free(remaining);
-                    self.beginClose(.resource_exhausted);
-                    return;
-                };
-                adopted += 1;
+        defer self.allocator.free(streams);
+        if (streams.len == 0) return;
+        std.mem.sort(u64, streams, {}, std.sort.asc(u64));
+        // A recovery that can run owns this turn so healthy siblings cannot consume its available
+        // headroom first. Backoff and already-admitted draining are deliberately skipped here:
+        // neither state needs fresh capacity, so blocking siblings would turn one failed snapshot
+        // producer into connection-wide starvation.
+        for (streams, 0..) |candidate, index| {
+            const candidate_tracker = self.trackers.get(candidate) orelse
+                return self.beginClose(.socket_error);
+            const state = slot.screenState(candidate_tracker) catch
+                return self.beginClose(.socket_error);
+            if (state == .invalidated and
+                self.connection.resyncPending(candidate) and
+                (slot.canAttemptResync(candidate_tracker) catch
+                    return self.beginClose(.socket_error)) and
+                (slot.resyncAttemptReady(candidate_tracker, now_ns) catch
+                    return self.beginClose(.socket_error)))
+            {
+                self.delta_stream_cursor = index;
+                break;
             }
         }
+        // Exactly one producer per owner turn. T0b2 schedules the remaining cursor sweep without
+        // waiting for another 20 ms timer tick, preserving metadata latency without starving an fd.
+        var scanned: usize = 0;
+        while (scanned < streams.len) : (scanned += 1) {
+            const stream = streams[self.delta_stream_cursor % streams.len];
+            self.delta_stream_cursor = (self.delta_stream_cursor + 1) % streams.len;
+            const tracker = self.trackers.get(stream) orelse
+                return self.beginClose(.socket_error);
+            var tracker_state = slot.screenState(tracker) catch
+                return self.beginClose(.socket_error);
+            const resync_pending = self.connection.resyncPending(stream);
+            if (resync_pending and tracker_state == .valid) {
+                slot.invalidateAndPurgeScreenTracker(tracker) catch
+                    return self.beginClose(.socket_error);
+                self.connection.markResyncDeliveryPurged(stream);
+                tracker_state = .invalidated;
+            }
+            if (tracker_state == .resync_draining) continue;
+            if (tracker_state == .invalidated) {
+                if (!resync_pending) continue;
+                if (!(slot.canAttemptResync(tracker) catch
+                    return self.beginClose(.socket_error))) return;
+                if (!(slot.beginResyncAttempt(tracker, now_ns) catch
+                    return self.beginClose(.socket_error))) continue;
+            }
+            var maybe_output = self.connection.collectOutputForLocalStream(stream) catch {
+                self.beginClose(.resource_exhausted);
+                return;
+            };
+            if (maybe_output) |*output| {
+                const admitted = self.adoptSubscriptionTurn(stream, output.takeFrames());
+                if (admitted)
+                    output.commit(&self.connection)
+                else
+                    output.rollback(&self.connection);
+                if (self.isClosing()) return;
+            }
+            return;
+        }
+    }
+
+    /// A producer turn belongs to exactly one subscription. Ordinary output is admitted in order;
+    /// any admission failure purges that subscription's unsent prefix and emits one control-reserve
+    /// invalidation notice. An invalidated tracker may recover only through one atomic snapshot batch.
+    fn adoptSubscriptionTurn(
+        self: *Client,
+        stream: subscription_identity.LocalStreamId,
+        frames: [][]u8,
+    ) bool {
+        defer self.allocator.free(frames);
+        if (!validateSubscriptionBatch(stream, frames)) {
+            for (frames) |bytes| self.allocator.free(bytes);
+            return self.closeAndReject(.protocol_error);
+        }
+        const slot = self.reactor.get(self.admission) catch
+            return self.closeAndReject(.socket_error);
+        const tracker = self.trackers.get(stream) orelse {
+            for (frames) |bytes| self.allocator.free(bytes);
+            return self.closeAndReject(.socket_error);
+        };
+        const state = slot.screenState(tracker) catch {
+            for (frames) |bytes| self.allocator.free(bytes);
+            return self.closeAndReject(.socket_error);
+        };
+        if (state == .invalidated) {
+            var snapshot_start: ?usize = null;
+            for (frames, 0..) |bytes, index| {
+                const class = server.classifyOutbound(bytes) catch unreachable;
+                switch (class) {
+                    .control => unreachable,
+                    .subscription => |output| {
+                        if (output.kind == .delta) {
+                            for (frames) |owned| self.allocator.free(owned);
+                            return self.closeAndReject(.protocol_error);
+                        }
+                        if (output.kind == .snapshot and snapshot_start == null)
+                            snapshot_start = index;
+                    },
+                }
+            }
+            const start = snapshot_start orelse {
+                for (frames) |owned| self.allocator.free(owned);
+                return false;
+            };
+            _ = start;
+            // Metadata prefix and snapshot chunks share one atomic subscription batch. Keeping
+            // their original order avoids a valid->draining transition between the two classes.
+            slot.enqueueOwnedResyncSnapshot(tracker, frames) catch return false;
+            return true;
+        }
+
+        var adopted: usize = 0;
+        for (frames) |bytes| {
+            self.adoptScreen(bytes) catch {
+                for (frames[adopted + 1 ..]) |remaining|
+                    self.allocator.free(remaining);
+                self.invalidateSubscriptionOutput(stream, tracker);
+                return false;
+            };
+            adopted += 1;
+        }
+        return true;
+    }
+
+    fn closeAndReject(self: *Client, reason: CloseReason) bool {
+        self.beginClose(reason);
+        return false;
+    }
+
+    fn invalidateSubscriptionOutput(
+        self: *Client,
+        stream: subscription_identity.LocalStreamId,
+        tracker: slot_mod.ScreenTrackerKey,
+    ) void {
+        const slot = self.reactor.get(self.admission) catch
+            return self.beginClose(.socket_error);
+        slot.invalidateAndPurgeScreenTracker(tracker) catch
+            return self.beginClose(.socket_error);
+        self.connection.markSubscriptionOutputInvalidated(stream);
+        const notice = self.connection.snapshotInvalidatedFrame(stream) catch
+            return self.beginClose(.resource_exhausted);
+        self.adoptControl(notice) catch
+            return self.beginClose(.resource_exhausted);
     }
 
     fn dispatch(self: *Client, frame: framing.Frame) error{OutOfMemory}!void {
@@ -401,15 +544,58 @@ pub const Client = struct {
     fn adoptFrameBatch(self: *Client, frames: [][]u8) error{OutOfMemory}!void {
         defer self.allocator.free(frames);
         if (frames.len == 0) return;
-        var adopted: usize = 0;
-        errdefer for (frames[adopted..]) |bytes| self.allocator.free(bytes);
+        var remaining_start: usize = 0;
+        errdefer for (frames[remaining_start..]) |bytes| self.allocator.free(bytes);
         try self.syncTrackers();
-        adopted = 1;
+        remaining_start = 1;
         try self.adoptControl(frames[0]);
-        for (frames[1..]) |bytes| {
-            adopted += 1;
-            try self.adoptScreen(bytes);
+        if (frames.len == 1) return;
+        const class = server.classifyOutbound(frames[1]) catch {
+            for (frames[1..]) |bytes| self.allocator.free(bytes);
+            remaining_start = frames.len;
+            return error.OutOfMemory;
+        };
+        const stream = switch (class) {
+            .control => {
+                for (frames[1..]) |bytes| self.allocator.free(bytes);
+                remaining_start = frames.len;
+                return error.OutOfMemory;
+            },
+            .subscription => |output| blk: {
+                if (output.kind != .snapshot) {
+                    for (frames[1..]) |bytes| self.allocator.free(bytes);
+                    remaining_start = frames.len;
+                    return error.OutOfMemory;
+                }
+                break :blk output.stream;
+            },
+        };
+        if (!validateSubscriptionBatch(stream, frames[1..])) {
+            for (frames[1..]) |bytes| self.allocator.free(bytes);
+            remaining_start = frames.len;
+            return error.OutOfMemory;
         }
+        const slot = self.reactor.get(self.admission) catch {
+            for (frames[1..]) |bytes| self.allocator.free(bytes);
+            remaining_start = frames.len;
+            return self.beginClose(.socket_error);
+        };
+        const tracker = self.trackers.get(stream) orelse {
+            for (frames[1..]) |bytes| self.allocator.free(bytes);
+            remaining_start = frames.len;
+            return self.beginClose(.socket_error);
+        };
+        slot.invalidateScreen(tracker) catch {
+            for (frames[1..]) |bytes| self.allocator.free(bytes);
+            remaining_start = frames.len;
+            return self.beginClose(.socket_error);
+        };
+        remaining_start = frames.len;
+        slot.enqueueOwnedResyncSnapshot(tracker, frames[1..]) catch {
+            // Attach bootstrap has no RemoteRuntime pump yet to acknowledge invalidation. Fail the
+            // connection so the controller lease is revoked instead of leaving readSnapshot hung.
+            self.beginClose(.resource_exhausted);
+        };
     }
 
     fn syncTrackers(self: *Client) error{OutOfMemory}!void {
@@ -468,7 +654,7 @@ pub const Client = struct {
         };
         const stream = switch (class) {
             .control => return self.adoptControl(bytes),
-            .screen => |stream| stream,
+            .subscription => |output| output.stream,
         };
         const slot = self.reactor.get(self.admission) catch return self.beginClose(.socket_error);
         const tracker = self.trackers.get(stream) orelse {
@@ -514,6 +700,42 @@ pub const Client = struct {
         if (!self.isClosing()) self.state = .{ .closing = reason };
     }
 };
+
+fn validateSubscriptionBatch(
+    expected_stream: subscription_identity.LocalStreamId,
+    frames: []const []const u8,
+) bool {
+    var snapshot_batch: ?bool = null;
+    var screen_started = false;
+    for (frames, 0..) |bytes, index| {
+        if (bytes.len < protocol.header_size) return false;
+        const header_bytes: *const [protocol.header_size]u8 = @ptrCast(bytes.ptr);
+        const header = protocol.Header.decode(header_bytes) catch return false;
+        const class = server.classifyOutbound(bytes) catch return false;
+        const output = switch (class) {
+            .control => return false,
+            .subscription => |subscription| subscription,
+        };
+        if (output.stream != expected_stream or header.major != protocol.version_major)
+            return false;
+        switch (output.kind) {
+            .event => {
+                if (screen_started or header.flags != 0) return false;
+            },
+            .snapshot, .delta => {
+                const is_snapshot = output.kind == .snapshot;
+                if (snapshot_batch) |existing| {
+                    if (existing != is_snapshot) return false;
+                } else snapshot_batch = is_snapshot;
+                screen_started = true;
+                if (header.flags & ~protocol.Flags.end_stream != 0) return false;
+                const ends = protocol.Flags.hasEndStream(header.flags);
+                if (ends != (index + 1 == frames.len)) return false;
+            },
+        }
+    }
+    return true;
+}
 
 fn elapsedAtLeast(start_ns: u64, now_ns: u64, duration_ns: u64) bool {
     return now_ns >= start_ns and now_ns - start_ns >= duration_ns;
@@ -585,6 +807,25 @@ fn sendTestFrame(fd: c.fd_t, kind: protocol.Kind, request_id: u64, payload: []co
     const wire = try framing.encodeFrame(std.testing.allocator, .{
         .kind = kind,
         .request_id = request_id,
+    }, payload);
+    defer std.testing.allocator.free(wire);
+    var offset: usize = 0;
+    while (offset < wire.len) {
+        const rc = c.send(fd, wire.ptr + offset, wire.len - offset, 0);
+        if (rc <= 0) return error.TestUnexpectedResult;
+        offset += @intCast(rc);
+    }
+}
+
+fn sendTestStreamFrame(
+    fd: c.fd_t,
+    kind: protocol.Kind,
+    stream_id: u64,
+    payload: []const u8,
+) !void {
+    const wire = try framing.encodeFrame(std.testing.allocator, .{
+        .kind = kind,
+        .stream_id = stream_id,
     }, payload);
     defer std.testing.allocator.free(wire);
     var offset: usize = 0;
@@ -975,6 +1216,251 @@ test "socketpair attach creates tracker and detach purges only unsent screen fra
         const chunk = slot.chunks[(slot.chunk_head + index) % slot_mod.max_chunks_per_slot];
         try testing.expectEqual(slot_mod.QueueClass.control, chunk.class);
     }
+}
+
+test "subscription pressure emits one control notice and recovers with an atomic snapshot" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const testing = std.testing;
+    var fds: [2]c_int = undefined;
+    try testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds));
+    defer _ = c.close(fds[1]);
+    var registry_value = registry.TerminalRuntimeRegistry.init(testing.allocator);
+    defer registry_value.deinit();
+    _ = try registry_value.register(0xAA, 80, 24);
+    var subscriptions = subscription_identity.Table.init(testing.allocator);
+    defer subscriptions.deinit();
+    const reactor = try slot_mod.ReactorCore.create(testing.allocator);
+    defer reactor.destroy();
+    var runtime_ops: server.FakeRuntimeOps = .{};
+    const client = try Client.create(
+        testing.allocator,
+        fds[0],
+        reactor,
+        81,
+        &registry_value,
+        &subscriptions,
+        .{ .runtime_ops = runtime_ops.ops() },
+    );
+    defer client.destroy();
+    try sendTestFrame(
+        fds[1],
+        .hello,
+        1,
+        "{\"protocol_min\":2,\"protocol_max\":2,\"client_kind\":\"gui\",\"capabilities\":[\"runtime_metadata_v1\"],\"screen_stream_version\":2}",
+    );
+    client.readReady(1);
+    try sendTestFrame(
+        fds[1],
+        .request,
+        2,
+        "{\"method\":\"runtime.attach\",\"params\":{\"runtime_id\":\"aa\",\"mode\":\"controller\"}}",
+    );
+    client.readReady(2);
+    const slot = try reactor.get(client.admission);
+    const tracker = client.trackers.get(1).?;
+    try slot.consumeWritten(slot.pending_bytes);
+    try testing.expectEqual(slot_mod.ScreenState.valid, try slot.screenState(tracker));
+    for (0..slot_mod.max_chunks_per_slot - slot_mod.control_chunk_reserve - slot.chunk_len) |_| try slot.enqueueScreen(tracker, "queued");
+
+    const overflowing = try testing.allocator.alloc([]u8, 1);
+    overflowing[0] = try framing.encodeFrame(
+        testing.allocator,
+        .{ .kind = .delta_chunk, .stream_id = 1, .flags = protocol.Flags.end_stream },
+        "overflow",
+    );
+    try testing.expect(!client.adoptSubscriptionTurn(1, overflowing));
+    try testing.expect(!client.isClosing());
+    try testing.expectEqual(slot_mod.ScreenState.invalidated, try slot.screenState(tracker));
+    var notice_count: usize = 0;
+    for (0..slot.chunk_len) |logical| {
+        const chunk = slot.chunks[(slot.chunk_head + logical) % slot_mod.max_chunks_per_slot];
+        try testing.expectEqual(slot_mod.QueueClass.control, chunk.class);
+        if (std.mem.indexOf(u8, chunk.bytes, "snapshot.invalidated") != null)
+            notice_count += 1;
+    }
+    try testing.expectEqual(@as(usize, 1), notice_count);
+    try testing.expect(!client.connection.attachments.get(1).?.resync_pending);
+    try sendTestStreamFrame(fds[1], .stream_ack, 1, "{\"action\":\"resync\"}");
+    client.readReady(3);
+    try testing.expect(client.connection.attachments.get(1).?.resync_pending);
+    client.tick(4);
+    try testing.expect(!client.isClosing());
+    try testing.expectEqual(slot_mod.ScreenState.resync_draining, try slot.screenState(tracker));
+    try testing.expect(!client.connection.attachments.get(1).?.resync_pending);
+    try sendTestStreamFrame(fds[1], .stream_ack, 1, "{\"action\":\"resync\"}");
+    client.readReady(5);
+    try testing.expect(!client.connection.attachments.get(1).?.resync_pending);
+    try testing.expect((try slot.screenResidentBytes(tracker)) > 0);
+    var recovered_chunks: usize = 0;
+    for (0..slot.chunk_len) |logical| {
+        const chunk = slot.chunks[(slot.chunk_head + logical) % slot_mod.max_chunks_per_slot];
+        if (chunk.class == .screen) recovered_chunks += 1;
+    }
+    try testing.expectEqual(@as(usize, 2), recovered_chunks);
+    try slot.consumeWritten(slot.pending_bytes);
+    try testing.expectEqual(slot_mod.ScreenState.valid, try slot.screenState(tracker));
+}
+
+test "failed recovery backoff does not pin round robin ahead of healthy siblings" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const testing = std.testing;
+    var fds: [2]c_int = undefined;
+    try testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds));
+    defer _ = c.close(fds[1]);
+    var registry_value = registry.TerminalRuntimeRegistry.init(testing.allocator);
+    defer registry_value.deinit();
+    inline for (.{ 0xAA, 0xBB, 0xCC }) |id| _ = try registry_value.register(id, 80, 24);
+    var subscriptions = subscription_identity.Table.init(testing.allocator);
+    defer subscriptions.deinit();
+    const reactor = try slot_mod.ReactorCore.create(testing.allocator);
+    defer reactor.destroy();
+    var runtime_ops: server.FakeRuntimeOps = .{};
+    const client = try Client.create(
+        testing.allocator,
+        fds[0],
+        reactor,
+        82,
+        &registry_value,
+        &subscriptions,
+        .{ .runtime_ops = runtime_ops.ops() },
+    );
+    defer client.destroy();
+    try sendTestFrame(fds[1], .hello, 1, test_hello);
+    client.readReady(1);
+    inline for (.{ "aa", "bb", "cc" }, 0..) |id, index| {
+        var params: [128]u8 = undefined;
+        const request = try std.fmt.bufPrint(
+            &params,
+            "{{\"method\":\"runtime.attach\",\"params\":{{\"runtime_id\":\"{s}\",\"mode\":\"observer\"}}}}",
+            .{id},
+        );
+        try sendTestFrame(fds[1], .request, 2 + index, request);
+        client.readReady(2 + index);
+    }
+    const slot = try reactor.get(client.admission);
+    try slot.consumeWritten(slot.pending_bytes);
+    const recovering = client.trackers.get(2).?;
+    client.invalidateSubscriptionOutput(2, recovering);
+    try sendTestStreamFrame(fds[1], .stream_ack, 2, "{\"action\":\"resync\"}");
+    client.readReady(10);
+
+    runtime_ops.snapshot_fail_count = 1;
+    client.delta_stream_cursor = 0;
+    client.tick(100);
+    try testing.expect(client.connection.attachments.get(2).?.resync_pending);
+    try testing.expectEqualStrings("SNAPSHOT-BYTES", client.connection.attachments.get(1).?.base.?);
+    try testing.expectEqualStrings("SNAPSHOT-BYTES", client.connection.attachments.get(3).?.base.?);
+
+    // Stream 2 is now inside the one-second backoff. Priority selection must not rewind the
+    // cursor, so stream 3 and then stream 1 each get a normal producer turn.
+    client.tick(101);
+    try testing.expectEqualStrings("NEW-BASE", client.connection.attachments.get(3).?.base.?);
+    client.tick(102);
+    try testing.expectEqualStrings("NEW-BASE", client.connection.attachments.get(1).?.base.?);
+    try testing.expect(client.connection.attachments.get(2).?.resync_pending);
+}
+
+test "pressure after a written screen prefix fail closes instead of splicing the wire" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const testing = std.testing;
+    var fds: [2]c_int = undefined;
+    try testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds));
+    defer _ = c.close(fds[1]);
+    var registry_value = registry.TerminalRuntimeRegistry.init(testing.allocator);
+    defer registry_value.deinit();
+    _ = try registry_value.register(0xAA, 80, 24);
+    var subscriptions = subscription_identity.Table.init(testing.allocator);
+    defer subscriptions.deinit();
+    const reactor = try slot_mod.ReactorCore.create(testing.allocator);
+    defer reactor.destroy();
+    var runtime_ops: server.FakeRuntimeOps = .{};
+    const client = try Client.create(
+        testing.allocator,
+        fds[0],
+        reactor,
+        83,
+        &registry_value,
+        &subscriptions,
+        .{ .runtime_ops = runtime_ops.ops() },
+    );
+    defer client.destroy();
+    try sendTestFrame(fds[1], .hello, 1, test_hello);
+    client.readReady(1);
+    try sendTestFrame(
+        fds[1],
+        .request,
+        2,
+        "{\"method\":\"runtime.attach\",\"params\":{\"runtime_id\":\"aa\",\"mode\":\"observer\"}}",
+    );
+    client.readReady(2);
+    const slot = try reactor.get(client.admission);
+    try slot.consumeWritten(slot.pending_bytes);
+    const tracker = client.trackers.get(1).?;
+    try slot.enqueueScreen(tracker, "written-prefix");
+    try testing.expectEqual(slot_mod.QueueClass.screen, slot.firstPending().?.class);
+    try slot.consumeWritten(1);
+
+    const megabyte = try testing.allocator.alloc(u8, protocol.max_binary_chunk);
+    defer testing.allocator.free(megabyte);
+    @memset(megabyte, 'q');
+    for (0..7) |_| try slot.enqueueScreen(tracker, megabyte);
+    const batch = try testing.allocator.alloc([]u8, 1);
+    batch[0] = try framing.encodeFrame(
+        testing.allocator,
+        .{ .kind = .delta_chunk, .stream_id = 1, .flags = protocol.Flags.end_stream },
+        megabyte,
+    );
+    try testing.expect(!client.adoptSubscriptionTurn(1, batch));
+    try testing.expect(client.isClosing());
+}
+
+test "subscription batch preflight rejects cross-stream mixed and unterminated output" {
+    const testing = std.testing;
+    const valid = [_][]u8{
+        try framing.encodeFrame(
+            testing.allocator,
+            .{ .kind = .event, .stream_id = 1 },
+            "{\"event\":\"runtime.metadata\"}",
+        ),
+        try framing.encodeFrame(
+            testing.allocator,
+            .{ .kind = .snapshot_chunk, .stream_id = 1, .flags = protocol.Flags.end_stream },
+            "snapshot",
+        ),
+    };
+    defer for (valid) |frame| testing.allocator.free(frame);
+    try testing.expect(validateSubscriptionBatch(1, &valid));
+
+    const cross = [_][]u8{try framing.encodeFrame(
+        testing.allocator,
+        .{ .kind = .delta_chunk, .stream_id = 2, .flags = protocol.Flags.end_stream },
+        "delta",
+    )};
+    defer testing.allocator.free(cross[0]);
+    try testing.expect(!validateSubscriptionBatch(1, &cross));
+
+    const unterminated = [_][]u8{try framing.encodeFrame(
+        testing.allocator,
+        .{ .kind = .snapshot_chunk, .stream_id = 1 },
+        "snapshot",
+    )};
+    defer testing.allocator.free(unterminated[0]);
+    try testing.expect(!validateSubscriptionBatch(1, &unterminated));
+
+    const mixed = [_][]u8{
+        try framing.encodeFrame(
+            testing.allocator,
+            .{ .kind = .snapshot_chunk, .stream_id = 1 },
+            "a",
+        ),
+        try framing.encodeFrame(
+            testing.allocator,
+            .{ .kind = .delta_chunk, .stream_id = 1, .flags = protocol.Flags.end_stream },
+            "b",
+        ),
+    };
+    defer for (mixed) |frame| testing.allocator.free(frame);
+    try testing.expect(!validateSubscriptionBatch(1, &mixed));
 }
 
 test "reply-and-close waits through EAGAIN and closes only after full typed reply" {

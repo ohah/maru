@@ -60,6 +60,104 @@ test "client connect errno classification separates launchable absence from deni
     try std.testing.expectEqual(EndpointFailure.transient, classifyConnectErrno(.TIMEDOUT));
 }
 
+test "client screen assembler yields between split snapshot chunks and resumes boundedly" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fds: [2]c.fd_t = undefined;
+    try testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds));
+    defer _ = c.close(fds[1]);
+    var client = Client{
+        .allocator = allocator,
+        .fd = fds[0],
+        .host_id = 1,
+        .parser = framing.FrameParser.init(allocator),
+    };
+    defer client.deinit();
+    const first = try framing.encodeFrame(
+        allocator,
+        .{ .kind = .snapshot_chunk, .stream_id = 7 },
+        "first-",
+    );
+    defer allocator.free(first);
+    try socket_server.writeAll(fds[1], first);
+    try testing.expect((try client.readStreamBatch(allocator, 7)) == null);
+    try testing.expect(client.partial_batch != null);
+
+    const last = try framing.encodeFrame(
+        allocator,
+        .{ .kind = .snapshot_chunk, .stream_id = 7, .flags = protocol.Flags.end_stream },
+        "last",
+    );
+    defer allocator.free(last);
+    try socket_server.writeAll(fds[1], last);
+    const batch = (try client.readStreamBatch(allocator, 7)).?;
+    defer allocator.free(batch.bytes);
+    try testing.expect(batch.is_snapshot);
+    try testing.expectEqualStrings("first-last", batch.bytes);
+    try testing.expect(client.partial_batch == null);
+}
+
+test "client screen assembler poisons malformed async header and event interleave" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    const Scenario = enum { event_request, event_flags, screen_request, interleaved_event };
+    inline for (std.meta.tags(Scenario)) |scenario| {
+        var fds: [2]c.fd_t = undefined;
+        try testing.expectEqual(
+            @as(c_int, 0),
+            c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds),
+        );
+        defer _ = c.close(fds[1]);
+        var client = Client{
+            .allocator = allocator,
+            .fd = fds[0],
+            .host_id = 1,
+            .parser = framing.FrameParser.init(allocator),
+        };
+        defer client.deinit();
+        if (scenario == .interleaved_event) {
+            const first = try framing.encodeFrame(
+                allocator,
+                .{ .kind = .snapshot_chunk, .stream_id = 7 },
+                "partial",
+            );
+            defer allocator.free(first);
+            try socket_server.writeAll(fds[1], first);
+        }
+        const malformed = switch (scenario) {
+            .event_request => try framing.encodeFrame(
+                allocator,
+                .{ .kind = .event, .request_id = 9, .stream_id = 7 },
+                "{}",
+            ),
+            .event_flags => try framing.encodeFrame(
+                allocator,
+                .{ .kind = .event, .stream_id = 7, .flags = 1 },
+                "{}",
+            ),
+            .screen_request => try framing.encodeFrame(
+                allocator,
+                .{
+                    .kind = .snapshot_chunk,
+                    .request_id = 9,
+                    .stream_id = 7,
+                    .flags = protocol.Flags.end_stream,
+                },
+                "screen",
+            ),
+            .interleaved_event => try framing.encodeFrame(
+                allocator,
+                .{ .kind = .event, .stream_id = 7 },
+                "{}",
+            ),
+        };
+        defer allocator.free(malformed);
+        try socket_server.writeAll(fds[1], malformed);
+        try testing.expectError(error.ProtocolError, client.readStreamBatch(allocator, 7));
+        try testing.expectError(error.ConnectionClosed, client.readStreamBatch(allocator, 7));
+    }
+}
+
 fn endpointError(err: posix.E) ClientError {
     return switch (classifyConnectErrno(err)) {
         .absent => error.EndpointAbsent,
@@ -158,6 +256,7 @@ pub const Client = struct {
     // 응답을 기다리는 `call` 중에 host가 비동기로 push한 stream frame(delta_chunk/snapshot_chunk)을 여기 버퍼한다 — 드롭하면
     // 화면 갱신이 유실되므로(§9 delta는 증분이라 하나만 놓쳐도 desync), 다음 `readStreamBatch`가 소켓보다 먼저 이걸 비운다.
     pending_stream: std.ArrayListUnmanaged(framing.Frame) = .empty,
+    pending_stream_bytes: usize = 0,
     // screen batch와 별개인 full-state runtime metadata event. response/snapshot을 기다리는 중에도 올 수 있으므로 버리지
     // 않고 stream별 최신 한 건으로 coalesce한다. full-state라 중간 revision을 건너뛰어도 최신 event만 적용하면 된다.
     pending_events: std.ArrayListUnmanaged(framing.Frame) = .empty,
@@ -168,6 +267,8 @@ pub const Client = struct {
     // write하므로(프레임 인터리브 없음) 각 원소는 완결된 한 배치다. 모든 원격 runtime이 **단일 app-전역 backend**를 공유해 한
     // allocator로 이 배치들을 만들고/소비/해제하므로(불변식) 버퍼-소비 간 allocator가 일치한다. deinit이 잔여를 회수한다.
     pending_batches: std.ArrayListUnmanaged(StreamBatch) = .empty,
+    pending_batch_bytes: usize = 0,
+    partial_batch: ?PartialBatch = null,
     // UI의 non-blocking input/viewport-command 경로가 socket backpressure를 만났을 때 소유하는 **단 하나의 완성 wire
     // frame**. offset은 이미 kernel이 수락한 prefix 뒤를 가리킨다. frame을 이 슬롯에 넣는 순간 payload/command는 caller
     // 관점에서 accepted이므로 재전송하지 않는다. 한 슬롯 + RemoteRuntime의 stream별 sticky intent로 메모리가 고정 상한이다.
@@ -176,6 +277,13 @@ pub const Client = struct {
     const PendingOutbound = struct {
         frame: []u8,
         offset: usize = 0,
+    };
+
+    const PartialBatch = struct {
+        stream_id: u64,
+        is_snapshot: bool,
+        bytes: std.ArrayListUnmanaged(u8) = .empty,
+        chunk_count: usize = 0,
     };
 
     /// host socket에 connect하고 hello를 왕복한다. 성공하면 `host_id`가 채워진 Client다. host가 없으면 EndpointAbsent
@@ -288,6 +396,7 @@ pub const Client = struct {
         self.pending_events.deinit(self.allocator);
         for (self.pending_batches.items) |b| self.allocator.free(b.bytes); // 미소비 demux 배치 회수(§9 멀티 runtime).
         self.pending_batches.deinit(self.allocator);
+        if (self.partial_batch) |*partial| partial.bytes.deinit(self.allocator);
         self.parser.deinit();
         self.* = undefined;
     }
@@ -320,12 +429,20 @@ pub const Client = struct {
         while (true) {
             const resp = try self.readFrame();
             if (resp.header.kind == .delta_chunk or resp.header.kind == .snapshot_chunk) {
+                if (self.pending_stream.items.len >= protocol.max_client_screen_items or
+                    self.screenInboxBytes() +| resp.payload.len > protocol.max_client_screen_inbox)
+                {
+                    resp.deinit(self.allocator);
+                    self.invalidateConnection();
+                    return error.EventQueueFull;
+                }
                 self.pending_stream.append(self.allocator, resp) catch {
                     resp.deinit(self.allocator);
                     // frame은 socket에서 이미 소비됐다. 저장하지 못하면 다음 stream delta의 base가 끊기므로 fail-closed.
                     self.invalidateConnection();
                     return error.OutOfMemory;
                 };
+                self.pending_stream_bytes += resp.payload.len;
                 continue;
             }
             if (resp.header.kind == .event) {
@@ -514,26 +631,20 @@ pub const Client = struct {
     /// 받은 뒤 다음 request 전에 반드시 이걸로 stream을 비운다** — 안 그러면 leftover chunk가 다음 응답으로 오독된다.
     pub fn readSnapshot(self: *Client, stream_id: u64) ClientError![]u8 {
         try self.ensureUsable();
-        var out: std.ArrayListUnmanaged(u8) = .empty;
-        errdefer out.deinit(self.allocator);
-        while (true) {
-            const frame = try self.readFrame();
-            if (frame.header.kind == .event) {
-                try self.bufferEvent(frame);
-                continue;
+        var attempts: usize = 0;
+        while (attempts < 250) : (attempts += 1) {
+            if (try self.readStreamBatch(self.allocator, stream_id)) |batch| {
+                if (!batch.is_snapshot) {
+                    self.allocator.free(batch.bytes);
+                    self.invalidateConnection();
+                    return error.ProtocolError;
+                }
+                return batch.bytes;
             }
-            defer frame.deinit(self.allocator);
-            if (frame.header.kind != .snapshot_chunk or frame.header.stream_id != stream_id) {
-                self.invalidateConnection();
-                return error.ProtocolError;
-            }
-            out.appendSlice(self.allocator, frame.payload) catch {
-                self.invalidateConnection();
-                return error.OutOfMemory;
-            };
-            if (protocol.Flags.hasEndStream(frame.header.flags)) break;
+            _ = usleepMs(20);
         }
-        return out.toOwnedSlice(self.allocator) catch return error.OutOfMemory;
+        self.invalidateConnection();
+        return error.ConnectionClosed;
     }
 
     /// `want_stream_id`의 다음 **화면 stream 배치**를 논블로킹으로 돌려준다(caller가 `bytes` free). 여러 원격 runtime이 이
@@ -546,17 +657,30 @@ pub const Client = struct {
         try self.ensureUsable();
         // 1) 이 stream 앞으로 이미 버퍼된 배치(다른 runtime의 pump가 소켓을 비우며 넣어 둔 것)를 도착 순서대로 먼저 준다.
         for (self.pending_batches.items, 0..) |b, i| {
-            if (b.stream_id == want_stream_id) return self.pending_batches.orderedRemove(i);
+            if (b.stream_id == want_stream_id) {
+                const owned = self.pending_batches.orderedRemove(i);
+                self.pending_batch_bytes -= owned.bytes.len;
+                return owned;
+            }
         }
         // 2) 소켓에서 완성 배치를 읽는다. 내 것이면 반환, 남의 것이면 버퍼하고 계속(내 것/idle까지).
         while (true) {
             const batch = (try self.readOneBatch(allocator)) orelse return null; // idle — 내 배치 없음.
             if (batch.stream_id == want_stream_id) return batch;
+            if (self.pending_batches.items.len >= protocol.max_client_screen_items or
+                self.screenInboxBytes() +| batch.bytes.len > protocol.max_client_screen_inbox)
+            {
+                allocator.free(batch.bytes);
+                self.invalidateConnection();
+                return error.EventQueueFull;
+            }
             // 남의 stream 배치 — 그 runtime pump가 소비하도록 버퍼. append 실패 시 이 배치 bytes를 회수(누수 방지).
             self.pending_batches.append(self.allocator, batch) catch {
                 allocator.free(batch.bytes);
+                self.invalidateConnection();
                 return error.OutOfMemory;
             };
+            self.pending_batch_bytes += batch.bytes.len;
         }
     }
 
@@ -564,34 +688,80 @@ pub const Client = struct {
     /// 아직 없으면 `null`(recv timeout을 세션 종료로 오인 안 함, §9). host는 grid/alt 변화 시 delta 대신 fresh snapshot을 push한다
     /// (SnapshotRequired). demux는 상위 `readStreamBatch`가 한다 — 여기선 순수하게 "다음 배치 하나".
     fn readOneBatch(self: *Client, allocator: std.mem.Allocator) ClientError!?StreamBatch {
-        var out: std.ArrayListUnmanaged(u8) = .empty;
-        errdefer out.deinit(allocator);
-        var stream_id: u64 = 0;
-        var is_snapshot = false;
-        var started = false;
+        var state = self.partial_batch orelse PartialBatch{
+            .stream_id = 0,
+            .is_snapshot = false,
+        };
+        self.partial_batch = null;
+        errdefer state.bytes.deinit(allocator);
+        var started = state.stream_id != 0;
         while (true) {
             const frame = (try self.nextStreamFrame(started)) orelse {
-                // 배치 시작 전이면 그냥 "아직 없음". 시작 후 데이터가 끊기면(rare) 미완성 배치는 버린다 — host가 다음 tick에
-                // 새 delta/snapshot으로 다시 잇는다(부분 배치를 반영하는 것보다 안전).
-                out.deinit(allocator);
+                if (started) {
+                    self.partial_batch = state;
+                    return null;
+                }
+                state.bytes.deinit(allocator);
                 return null;
             };
             if (frame.header.kind == .event) {
-                // host는 한 screen chunk batch 안에 event를 interleave하지 않지만 방어적으로 started 여부와 무관하게
-                // full-state event를 보존하고 다음 async frame을 계속 찾는다.
+                if (started or frame.header.request_id != 0 or frame.header.flags != 0) {
+                    frame.deinit(self.allocator);
+                    self.invalidateConnection();
+                    return error.ProtocolError;
+                }
                 try self.bufferEvent(frame);
                 continue;
             }
             defer frame.deinit(self.allocator);
-            if (frame.header.kind != .snapshot_chunk and frame.header.kind != .delta_chunk) return error.ProtocolError;
-            if (!started) {
-                stream_id = frame.header.stream_id;
-                is_snapshot = frame.header.kind == .snapshot_chunk;
-                started = true;
+            if (frame.header.kind != .snapshot_chunk and frame.header.kind != .delta_chunk) {
+                self.invalidateConnection();
+                return error.ProtocolError;
             }
-            out.appendSlice(allocator, frame.payload) catch return error.OutOfMemory;
+            if (frame.header.request_id != 0) {
+                self.invalidateConnection();
+                return error.ProtocolError;
+            }
+            if (!started) {
+                if (frame.header.stream_id == 0) {
+                    self.invalidateConnection();
+                    return error.ProtocolError;
+                }
+                state.stream_id = frame.header.stream_id;
+                state.is_snapshot = frame.header.kind == .snapshot_chunk;
+                started = true;
+            } else if (frame.header.stream_id != state.stream_id or
+                (frame.header.kind == .snapshot_chunk) != state.is_snapshot)
+            {
+                self.invalidateConnection();
+                return error.ProtocolError;
+            }
+            if (frame.header.flags & ~protocol.Flags.end_stream != 0 or
+                state.chunk_count >= protocol.max_viewport_snapshot / protocol.max_binary_chunk or
+                state.bytes.items.len +| frame.payload.len > protocol.max_viewport_snapshot or
+                self.screenInboxBytes() +| state.bytes.items.len +| frame.payload.len >
+                    protocol.max_client_screen_inbox)
+            {
+                self.invalidateConnection();
+                return error.ProtocolError;
+            }
+            state.chunk_count += 1;
+            const next_len = state.bytes.items.len + frame.payload.len;
+            state.bytes.ensureTotalCapacityPrecise(allocator, next_len) catch {
+                self.invalidateConnection();
+                return error.OutOfMemory;
+            };
+            state.bytes.appendSliceAssumeCapacity(frame.payload);
             if (protocol.Flags.hasEndStream(frame.header.flags)) {
-                return .{ .is_snapshot = is_snapshot, .stream_id = stream_id, .bytes = out.toOwnedSlice(allocator) catch return error.OutOfMemory };
+                const bytes = state.bytes.toOwnedSlice(allocator) catch {
+                    self.invalidateConnection();
+                    return error.OutOfMemory;
+                };
+                return .{
+                    .is_snapshot = state.is_snapshot,
+                    .stream_id = state.stream_id,
+                    .bytes = bytes,
+                };
             }
         }
     }
@@ -603,7 +773,22 @@ pub const Client = struct {
         while (i < self.pending_batches.items.len) {
             if (self.pending_batches.items[i].stream_id == stream_id) {
                 const b = self.pending_batches.orderedRemove(i);
+                self.pending_batch_bytes -= b.bytes.len;
                 self.allocator.free(b.bytes);
+            } else i += 1;
+        }
+        if (self.partial_batch) |*partial| {
+            if (partial.stream_id == stream_id) {
+                partial.bytes.deinit(self.allocator);
+                self.partial_batch = null;
+            }
+        }
+        i = 0;
+        while (i < self.pending_stream.items.len) {
+            if (self.pending_stream.items[i].header.stream_id == stream_id) {
+                const frame = self.pending_stream.orderedRemove(i);
+                self.pending_stream_bytes -= frame.payload.len;
+                frame.deinit(self.allocator);
             } else i += 1;
         }
         i = 0;
@@ -614,6 +799,11 @@ pub const Client = struct {
                 frame.deinit(self.allocator);
             } else i += 1;
         }
+    }
+
+    fn screenInboxBytes(self: *const Client) usize {
+        const partial = if (self.partial_batch) |batch| batch.bytes.items.len else 0;
+        return self.pending_stream_bytes +| self.pending_batch_bytes +| partial;
     }
 
     /// stream의 최신 full-state metadata event를 소유권째 꺼낸다. 없으면 null. caller는 payload 적용 뒤 frame.deinit.
@@ -634,8 +824,16 @@ pub const Client = struct {
     /// event는 runtime별 full-state라 같은 stream의 이전 pending을 최신으로 교체한다. 악성/버그 host가 임의 stream id를
     /// 쏟아 count/byte cap을 넘기면 oldest를 버리지 않고 shared connection 전체를 poison해 모든 runtime을 fail-closed한다.
     fn bufferEvent(self: *Client, frame: framing.Frame) ClientError!void {
+        if (frame.header.kind != .event or frame.header.request_id != 0 or
+            frame.header.stream_id == 0 or frame.header.flags != 0)
+        {
+            frame.deinit(self.allocator);
+            self.invalidateConnection();
+            return error.ProtocolError;
+        }
         const metadata_revision = observation_wire.eventRevision(self.allocator, frame.payload) catch {
             frame.deinit(self.allocator);
+            self.invalidateConnection();
             return error.OutOfMemory;
         };
         if (std.mem.indexOf(u8, frame.payload, "\"event\":\"runtime.metadata\"") != null and metadata_revision == null) {
@@ -647,6 +845,7 @@ pub const Client = struct {
         for (self.pending_events.items, 0..) |old, i| {
             const old_revision = observation_wire.eventRevision(self.allocator, old.payload) catch {
                 frame.deinit(self.allocator);
+                self.invalidateConnection();
                 return error.OutOfMemory;
             };
             if (metadata_revision != null and old_revision != null and old.header.stream_id == frame.header.stream_id) {
@@ -679,30 +878,47 @@ pub const Client = struct {
         }
         self.pending_events.append(self.allocator, frame) catch {
             frame.deinit(self.allocator);
+            self.invalidateConnection();
             return error.OutOfMemory;
         };
         self.pending_event_bytes += frame.payload.len;
     }
 
     /// stream 배치를 잇는 다음 stream frame을 준다. 우선순위: `call`이 버퍼한 frame → parser에 남은 완성 frame → 소켓 read.
-    /// `started`=false(배치 첫 frame)면 소켓을 `pollReadable`로 논블로킹 확인해 데이터가 없으면 `null`(idle). `started`=true면
-    /// 배치의 나머지 frame이 곧 오므로(host가 한 번에 write) blocking read를 허용하되, EOF만 ConnectionClosed로 올린다.
-    fn nextStreamFrame(self: *Client, started: bool) ClientError!?framing.Frame {
+    /// 첫 frame과 continuation 모두 `pollReadable`로 논블로킹 확인하고, 데이터가 없으면 partial batch를 caller가 보존하도록
+    /// `null`을 돌려준다. UI frame pump에서 socket timeout까지 기다리지 않는다.
+    fn nextStreamFrame(self: *Client, _: bool) ClientError!?framing.Frame {
         try self.ensureUsable();
-        if (self.pending_stream.items.len > 0)
-            return try self.requireWireMajor(self.pending_stream.orderedRemove(0));
+        if (self.pending_stream.items.len > 0) {
+            const owned = self.pending_stream.orderedRemove(0);
+            self.pending_stream_bytes -= owned.payload.len;
+            return try self.requireWireMajor(owned);
+        }
         var buf: [4096]u8 = undefined;
         while (true) {
-            if (self.parser.next() catch return error.ProtocolError) |frame|
+            if (self.parser.next() catch {
+                self.invalidateConnection();
+                return error.ProtocolError;
+            }) |frame|
                 return try self.requireWireMajor(frame);
-            if (!started and !pollReadable(self.fd)) return null; // 배치 시작 전 + 데이터 없음 → idle.
+            // Partial batches live across pump calls, so neither the first nor a continuation may
+            // enter the socket's 5s blocking read timeout on the UI frame loop.
+            if (!pollReadable(self.fd)) return null;
             const n = c.read(self.fd, &buf, buf.len);
             if (n < 0) {
                 if (posix.errno(n) == .INTR) continue; // 시그널 인터럽트는 재시도.
-                return null; // EAGAIN/timeout → 더 없음(idle). 세션을 죽이지 않는다.
+                if (posix.errno(n) == .AGAIN or posix.errno(n) == .TIMEDOUT) return null;
+                self.invalidateConnection();
+                return error.ConnectionClosed;
             }
-            if (n == 0) return error.ConnectionClosed; // EOF — host 종료.
-            self.parser.push(buf[0..@intCast(n)]) catch return error.OutOfMemory;
+            if (n == 0) {
+                self.invalidateConnection();
+                return error.ConnectionClosed;
+            }
+            self.parser.push(buf[0..@intCast(n)]) catch {
+                self.invalidateConnection();
+                return error.OutOfMemory;
+            };
         }
     }
 
@@ -770,6 +986,22 @@ pub const Client = struct {
             self.allocator,
             .{ .kind = .scroll_to_bottom, .stream_id = stream_id, .major = self.wire_major },
             "",
+        ) catch return error.OutOfMemory;
+        std.debug.assert(self.pending_outbound == null);
+        self.pending_outbound = .{ .frame = frame };
+        _ = try self.pumpPendingOutput();
+        return true;
+    }
+
+    /// Coalesced invalidation recovery control for the UI frame pump. It shares the one bounded
+    /// pending outbound slot with input/core commands and never waits for a response.
+    pub fn sendResyncNonBlocking(self: *Client, stream_id: u64) ClientError!bool {
+        try self.ensureUsable();
+        if (!(try self.pumpPendingOutput())) return false;
+        const frame = framing.encodeFrame(
+            self.allocator,
+            .{ .kind = .stream_ack, .stream_id = stream_id, .major = self.wire_major },
+            "{\"action\":\"resync\"}",
         ) catch return error.OutOfMemory;
         std.debug.assert(self.pending_outbound == null);
         self.pending_outbound = .{ .frame = frame };
@@ -1216,6 +1448,40 @@ test "client call flushes accepted nonblocking input before its request frame" {
     peer.join();
     try std.testing.expectEqualStrings("{\"result\":{\"ok\":true}}", response);
     try std.testing.expect(peer_ok);
+}
+
+test "client call poisons malformed event headers instead of buffering them" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    inline for (.{ "request_id", "flags", "stream_id" }) |malformed_field| {
+        var fds: [2]c.fd_t = undefined;
+        try testing.expectEqual(
+            @as(c_int, 0),
+            c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds),
+        );
+        defer _ = c.close(fds[1]);
+        var client = Client{
+            .allocator = allocator,
+            .fd = fds[0],
+            .host_id = 1,
+            .parser = framing.FrameParser.init(allocator),
+        };
+        defer client.deinit();
+        const wire = try framing.encodeFrame(
+            allocator,
+            .{
+                .kind = .event,
+                .request_id = if (std.mem.eql(u8, malformed_field, "request_id")) 7 else 0,
+                .stream_id = if (std.mem.eql(u8, malformed_field, "stream_id")) 0 else 7,
+                .flags = if (std.mem.eql(u8, malformed_field, "flags")) 1 else 0,
+            },
+            "{\"event\":\"host.test\"}",
+        );
+        defer allocator.free(wire);
+        try socket_server.writeAll(fds[1], wire);
+        try testing.expectError(error.ProtocolError, client.call("host.info", null));
+        try testing.expectError(error.ConnectionClosed, client.call("host.info", null));
+    }
 }
 
 test "client request write failure invalidates the connection before another call" {

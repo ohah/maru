@@ -6,8 +6,10 @@
 const std = @import("std");
 
 pub const max_connections: usize = 32;
-pub const per_slot_bytes: usize = 16 * 1024 * 1024;
+pub const per_slot_bytes: usize = 18 * 1024 * 1024;
 pub const screen_soft_bytes: usize = 8 * 1024 * 1024;
+/// 16 MiB viewport payload plus at most sixteen charged MRSH frame headers/alignment.
+pub const resync_batch_bytes: usize = 17 * 1024 * 1024;
 pub const control_reserve_bytes: usize = 512 * 1024;
 pub const screen_low_water_bytes: usize = 4 * 1024 * 1024;
 pub const global_bytes: usize = 128 * 1024 * 1024;
@@ -22,6 +24,8 @@ pub const partial_absolute_deadline_ns: u64 = 30 * std.time.ns_per_s;
 comptime {
     if (screen_soft_bytes + control_reserve_bytes > per_slot_bytes)
         @compileError("screen soft limit and control reserve exceed per-slot cap");
+    if (resync_batch_bytes + control_reserve_bytes > per_slot_bytes)
+        @compileError("resync batch and control reserve exceed per-slot cap");
     if (per_slot_bytes * max_connections < global_bytes)
         @compileError("global cap cannot exceed the sum of all slot caps");
 }
@@ -154,12 +158,15 @@ pub const GlobalBudget = struct {
 
 pub const QueueClass = enum { screen, control };
 pub const EnqueueError = error{ ScreenInvalidated, SlotLimit, GlobalLimit, ChunkLimit, OutOfMemory };
-pub const ScreenState = enum { valid, invalidated, resync_pending };
+pub const ScreenState = enum { valid, invalidated, resync_pending, resync_draining };
 
 pub const ScreenTracker = struct {
     state: ScreenState = .valid,
     resident_bytes: usize = 0,
+    last_resync_attempt_ns: ?u64 = null,
 };
+
+pub const resync_retry_backoff_ns: u64 = std.time.ns_per_s;
 
 pub const ScreenTrackerKey = struct {
     owner: ConnectionKey,
@@ -259,7 +266,9 @@ pub const Slot = struct {
     ) error{ Stale, Busy }!void {
         const entry = try self.trackerEntry(key);
         const tracker = entry.tracker.?;
-        if (tracker.resident_bytes != 0 or tracker.state == .resync_pending) return error.Busy;
+        if (tracker.resident_bytes != 0 or
+            tracker.state == .resync_pending or tracker.state == .resync_draining)
+            return error.Busy;
         entry.tracker = null;
         entry.generation = std.math.add(u64, entry.generation, 1) catch blk: {
             entry.retired = true;
@@ -271,6 +280,27 @@ pub const Slot = struct {
     /// Detach path: discard only this subscription's queued screen frames, preserving FIFO order
     /// and every control/other-subscription chunk, then retire the tracker generation.
     pub fn purgeAndDestroyScreenTracker(
+        self: *Slot,
+        key: ScreenTrackerKey,
+    ) error{ Stale, PartialFrame }!void {
+        try self.purgeScreenTracker(key);
+        self.destroyScreenTracker(key) catch |err| switch (err) {
+            error.Stale => return error.Stale,
+            error.Busy => unreachable,
+        };
+    }
+
+    /// Backpressure invalidation keeps the tracker identity for a later atomic resync.
+    pub fn invalidateAndPurgeScreenTracker(
+        self: *Slot,
+        key: ScreenTrackerKey,
+    ) error{ Stale, PartialFrame }!void {
+        const entry = try self.trackerEntry(key);
+        try self.purgeScreenTracker(key);
+        entry.tracker.?.state = .invalidated;
+    }
+
+    fn purgeScreenTracker(
         self: *Slot,
         key: ScreenTrackerKey,
     ) error{ Stale, PartialFrame }!void {
@@ -305,10 +335,11 @@ pub const Slot = struct {
             }
             self.chunk_len -= 1;
         }
-        self.destroyScreenTracker(key) catch |err| switch (err) {
-            error.Stale => return error.Stale,
-            error.Busy => unreachable,
-        };
+        const tracker = self.screen_trackers[key.index].tracker.?;
+        if (tracker.resident_bytes == 0 and tracker.state == .resync_draining) {
+            tracker.state = .valid;
+            tracker.last_resync_attempt_ns = null;
+        }
     }
 
     fn trackerEntry(self: *Slot, key: ScreenTrackerKey) error{Stale}!*ScreenTrackerEntry {
@@ -328,6 +359,50 @@ pub const Slot = struct {
         return (try self.trackerEntry(key)).tracker.?.resident_bytes;
     }
 
+    pub fn beginResyncAttempt(
+        self: *Slot,
+        key: ScreenTrackerKey,
+        now_ns: u64,
+    ) error{Stale}!bool {
+        const tracker = (try self.trackerEntry(key)).tracker.?;
+        if (!(try self.resyncAttemptReady(key, now_ns))) return false;
+        tracker.last_resync_attempt_ns = now_ns;
+        return true;
+    }
+
+    /// Priority selection must inspect backoff without consuming the attempt. Otherwise it resets
+    /// the normal round-robin cursor to the same failed recovery on every tick and can starve
+    /// healthy subscriptions that sort before it.
+    pub fn resyncAttemptReady(
+        self: *Slot,
+        key: ScreenTrackerKey,
+        now_ns: u64,
+    ) error{Stale}!bool {
+        const tracker = (try self.trackerEntry(key)).tracker.?;
+        if (tracker.last_resync_attempt_ns) |last| {
+            if (now_ns >= last and now_ns - last < resync_retry_backoff_ns) return false;
+        }
+        return true;
+    }
+
+    /// Worst-case reservation preflight before RuntimeOps materializes a 16 MiB snapshot. This is
+    /// intentionally conservative: actual bytes are charged by enqueue, while this check prevents
+    /// many invalidated subscriptions from allocating snapshots that cannot possibly fit.
+    pub fn canAttemptResync(self: *Slot, key: ScreenTrackerKey) error{Stale}!bool {
+        const tracker = (try self.trackerEntry(key)).tracker.?;
+        if (tracker.resident_bytes >= screen_low_water_bytes) return false;
+        if (self.resident_bytes +| resync_batch_bytes > per_slot_bytes) return false;
+        const max_snapshot_chunks: usize = 17; // metadata prefix plus at most sixteen 1 MiB chunks.
+        if (self.chunk_len +| max_snapshot_chunks >
+            max_chunks_per_slot - control_chunk_reserve)
+            return false;
+        if (self.global.resident_bytes +| resync_batch_bytes > global_bytes) return false;
+        if (self.global.shared_bytes +| resync_batch_bytes >
+            global_bytes - max_connections * control_reserve_bytes)
+            return false;
+        return true;
+    }
+
     pub fn invalidateScreen(self: *Slot, key: ScreenTrackerKey) error{Stale}!void {
         (try self.trackerEntry(key)).tracker.?.state = .invalidated;
     }
@@ -339,21 +414,21 @@ pub const Slot = struct {
     ) (EnqueueError || error{Stale})!void {
         const tracker = (try self.trackerEntry(key)).tracker.?;
         if (tracker.state != .valid) return error.ScreenInvalidated;
-        return self.enqueue(.screen, key.index, bytes) catch |err| {
+        return self.enqueue(.screen, key.index, bytes, screen_soft_bytes) catch |err| {
             tracker.state = .invalidated;
             return err;
         };
     }
 
     pub fn enqueueControl(self: *Slot, bytes: []const u8) EnqueueError!void {
-        return self.enqueue(.control, null, bytes);
+        return self.enqueue(.control, null, bytes, null);
     }
 
     /// Ownership-transfer variants used by the readiness adapter. On success the slot owns `bytes`;
     /// on error the caller still owns it. This avoids a second full-frame allocation outside the
     /// charged resident queue.
     pub fn enqueueOwnedControl(self: *Slot, bytes: []u8) EnqueueError!void {
-        return self.enqueueOwned(.control, null, bytes);
+        return self.enqueueOwned(.control, null, bytes, null);
     }
 
     pub fn enqueueOwnedScreen(
@@ -363,7 +438,7 @@ pub const Slot = struct {
     ) (EnqueueError || error{Stale})!void {
         const tracker = (try self.trackerEntry(key)).tracker.?;
         if (tracker.state != .valid) return error.ScreenInvalidated;
-        return self.enqueueOwned(.screen, key.index, bytes) catch |err| {
+        return self.enqueueOwned(.screen, key.index, bytes, screen_soft_bytes) catch |err| {
             tracker.state = .invalidated;
             return err;
         };
@@ -374,6 +449,7 @@ pub const Slot = struct {
         class: QueueClass,
         tracker_index: ?usize,
         bytes: []const u8,
+        screen_limit: ?usize,
     ) EnqueueError!void {
         if (bytes.len == 0) return;
         if (self.chunk_len == max_chunks_per_slot) return error.ChunkLimit;
@@ -386,7 +462,7 @@ pub const Slot = struct {
             const tracker = self.screen_trackers[tracker_index.?].tracker.?;
             const next_screen = std.math.add(usize, tracker.resident_bytes, charge) catch
                 return error.ScreenInvalidated;
-            if (next_screen > screen_soft_bytes) {
+            if (next_screen > screen_limit.?) {
                 tracker.state = .invalidated;
                 return error.ScreenInvalidated;
             }
@@ -421,6 +497,7 @@ pub const Slot = struct {
         class: QueueClass,
         tracker_index: ?usize,
         bytes: []u8,
+        screen_limit: ?usize,
     ) EnqueueError!void {
         if (bytes.len == 0) {
             self.allocator.free(bytes);
@@ -437,7 +514,7 @@ pub const Slot = struct {
             const tracker = self.screen_trackers[tracker_index.?].tracker.?;
             const next_screen = std.math.add(usize, tracker.resident_bytes, charge) catch
                 return error.ScreenInvalidated;
-            if (next_screen > screen_soft_bytes) {
+            if (next_screen > screen_limit.?) {
                 tracker.state = .invalidated;
                 return error.ScreenInvalidated;
             }
@@ -481,7 +558,12 @@ pub const Slot = struct {
                 self.chunk_len -= 1;
                 self.resident_bytes -= charge;
                 if (class == .screen) {
-                    self.screen_trackers[first.screen_tracker_index.?].tracker.?.resident_bytes -= charge;
+                    const tracker = self.screen_trackers[first.screen_tracker_index.?].tracker.?;
+                    tracker.resident_bytes -= charge;
+                    if (tracker.resident_bytes == 0 and tracker.state == .resync_draining) {
+                        tracker.state = .valid;
+                        tracker.last_resync_attempt_ns = null;
+                    }
                     self.global.releaseScreen(charge);
                 } else {
                     self.global.releaseControl(self.control_resident_bytes, charge);
@@ -510,10 +592,44 @@ pub const Slot = struct {
         }
         for (chunks) |bytes| {
             if (bytes.len == 0) return error.ScreenInvalidated;
-            try self.enqueue(.screen, key.index, bytes);
+            try self.enqueue(.screen, key.index, bytes, resync_batch_bytes);
             added += 1;
         }
-        tracker.state = .valid;
+        tracker.state = .resync_draining;
+    }
+
+    /// Ownership-consuming resync batch. Every inner buffer is consumed on both success and error;
+    /// accepted prefixes are rolled back and freed atomically.
+    pub fn enqueueOwnedResyncSnapshot(
+        self: *Slot,
+        key: ScreenTrackerKey,
+        chunks: []const []u8,
+    ) (EnqueueError || error{Stale})!void {
+        const entry = self.trackerEntry(key) catch |err| {
+            for (chunks) |bytes| self.allocator.free(bytes);
+            return err;
+        };
+        const tracker = entry.tracker.?;
+        if (tracker.state != .invalidated or
+            tracker.resident_bytes >= screen_low_water_bytes or
+            chunks.len == 0)
+        {
+            for (chunks) |bytes| self.allocator.free(bytes);
+            return error.ScreenInvalidated;
+        }
+        tracker.state = .resync_pending;
+        var added: usize = 0;
+        errdefer {
+            self.rollbackTail(added);
+            for (chunks[added..]) |bytes| self.allocator.free(bytes);
+            tracker.state = .invalidated;
+        }
+        for (chunks) |bytes| {
+            if (bytes.len == 0) return error.ScreenInvalidated;
+            try self.enqueueOwned(.screen, key.index, bytes, resync_batch_bytes);
+            added += 1;
+        }
+        tracker.state = .resync_draining;
     }
 
     fn rollbackTail(self: *Slot, count: usize) void {
@@ -771,8 +887,9 @@ test "connection slot queue accepts exact caps and rolls back rejected allocatio
     try testing.expectEqual(ScreenState.invalidated, try slot.screenState(screen_tracker));
     global = .{};
     try slot.enqueueResyncSnapshot(screen_tracker, &.{ "snap", "shot" });
-    try testing.expectEqual(ScreenState.valid, try slot.screenState(screen_tracker));
+    try testing.expectEqual(ScreenState.resync_draining, try slot.screenState(screen_tracker));
     try slot.consumeWritten("snapshot".len);
+    try testing.expectEqual(ScreenState.valid, try slot.screenState(screen_tracker));
 }
 
 test "connection slot resync rejects empty chunk fail closed" {
@@ -832,6 +949,76 @@ test "multi chunk resync limit rolls back the accepted prefix" {
     try std.testing.expectEqual(max_chunks_per_slot - control_chunk_reserve - 1, slot.chunk_len);
     try std.testing.expectEqual(pending_before, slot.pending_bytes);
     try std.testing.expectEqual(@as(usize, 0), try slot.screenResidentBytes(tracker));
+}
+
+test "owned resync consumes every buffer and atomically restores a tracker" {
+    var global: GlobalBudget = .{};
+    var slot = try Slot.init(
+        std.testing.allocator,
+        &global,
+        .{ .monotonic_id = 1, .slot_generation = 1 },
+    );
+    defer slot.deinit();
+    const tracker = try slot.createScreenTracker();
+    try slot.invalidateScreen(tracker);
+    const chunks = [_][]u8{
+        try std.testing.allocator.dupe(u8, "fresh-a"),
+        try std.testing.allocator.dupe(u8, "fresh-b"),
+    };
+    try slot.enqueueOwnedResyncSnapshot(tracker, &chunks);
+    try std.testing.expectEqual(ScreenState.resync_draining, try slot.screenState(tracker));
+    try std.testing.expectEqual(@as(usize, 2), slot.chunk_len);
+    try slot.consumeWritten("fresh-a".len + "fresh-b".len);
+    try std.testing.expectEqual(ScreenState.valid, try slot.screenState(tracker));
+    try std.testing.expectEqual(@as(usize, 0), global.resident_bytes);
+}
+
+test "owned resync admits exact recovery ceiling rejects plus one and detaches while draining" {
+    var global: GlobalBudget = .{};
+    var slot = try Slot.init(
+        std.testing.allocator,
+        &global,
+        .{ .monotonic_id = 1, .slot_generation = 1 },
+    );
+    defer slot.deinit();
+    const tracker = try slot.createScreenTracker();
+    try slot.invalidateScreen(tracker);
+    const exact = [_][]u8{try std.testing.allocator.alloc(u8, resync_batch_bytes)};
+    try slot.enqueueOwnedResyncSnapshot(tracker, &exact);
+    try std.testing.expectEqual(ScreenState.resync_draining, try slot.screenState(tracker));
+    try slot.purgeAndDestroyScreenTracker(tracker);
+    try std.testing.expectEqual(@as(usize, 0), slot.pending_bytes);
+
+    const rejected_tracker = try slot.createScreenTracker();
+    try slot.invalidateScreen(rejected_tracker);
+    const over = [_][]u8{try std.testing.allocator.alloc(u8, resync_batch_bytes + 1)};
+    try std.testing.expectError(
+        error.ScreenInvalidated,
+        slot.enqueueOwnedResyncSnapshot(rejected_tracker, &over),
+    );
+    try std.testing.expectEqual(ScreenState.invalidated, try slot.screenState(rejected_tracker));
+}
+
+test "owned resync consumes all buffers when tracker provenance is stale" {
+    var global: GlobalBudget = .{};
+    var slot = try Slot.init(
+        std.testing.allocator,
+        &global,
+        .{ .monotonic_id = 1, .slot_generation = 1 },
+    );
+    defer slot.deinit();
+    var stale = try slot.createScreenTracker();
+    stale.generation +%= 1;
+    const chunks = [_][]u8{
+        try std.testing.allocator.dupe(u8, "a"),
+        try std.testing.allocator.dupe(u8, "b"),
+    };
+    try std.testing.expectError(
+        error.Stale,
+        slot.enqueueOwnedResyncSnapshot(stale, &chunks),
+    );
+    try std.testing.expectEqual(@as(usize, 0), slot.pending_bytes);
+    try std.testing.expectEqual(@as(usize, 0), global.resident_bytes);
 }
 
 test "multi chunk resync middle OOM rolls back allocation and accounting" {
@@ -977,8 +1164,10 @@ test "screen invalidation and resync are isolated per subscription" {
 
     try slot.consumeWritten(exact.len + "independent".len);
     try slot.enqueueResyncSnapshot(noisy, &.{"fresh"});
-    try std.testing.expectEqual(ScreenState.valid, try slot.screenState(noisy));
+    try std.testing.expectEqual(ScreenState.resync_draining, try slot.screenState(noisy));
     try std.testing.expectEqual(ScreenState.valid, try slot.screenState(healthy));
+    try slot.consumeWritten("fresh".len);
+    try std.testing.expectEqual(ScreenState.valid, try slot.screenState(noisy));
 }
 
 test "connection slot fixed ring stays bounded while a tail remains across long churn" {
@@ -1011,6 +1200,35 @@ test "connection slot partial deadline advances only on progress" {
     slot.notePartial(.write, 100 + partial_deadline_ns, true);
     try std.testing.expect(slot.partialExpired(.read, 100 + partial_absolute_deadline_ns));
     try std.testing.expect(!slot.partialExpired(.write, 100 + partial_deadline_ns));
+}
+
+test "resync retry backoff is closed before one second and opens at the exact boundary" {
+    var global: GlobalBudget = .{};
+    var slot = try Slot.init(
+        std.testing.allocator,
+        &global,
+        .{ .monotonic_id = 1, .slot_generation = 1 },
+    );
+    defer slot.deinit();
+    const tracker = try slot.createScreenTracker();
+
+    try std.testing.expect(try slot.beginResyncAttempt(tracker, 100));
+    try std.testing.expect(!try slot.resyncAttemptReady(
+        tracker,
+        100 + resync_retry_backoff_ns - 1,
+    ));
+    try std.testing.expect(!try slot.beginResyncAttempt(
+        tracker,
+        100 + resync_retry_backoff_ns - 1,
+    ));
+    try std.testing.expect(try slot.resyncAttemptReady(
+        tracker,
+        100 + resync_retry_backoff_ns,
+    ));
+    try std.testing.expect(try slot.beginResyncAttempt(
+        tracker,
+        100 + resync_retry_backoff_ns,
+    ));
 }
 
 test "connection slot upgrade drain rejects queued partial attached and dispatch state" {

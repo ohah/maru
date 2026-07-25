@@ -48,6 +48,7 @@ pub const RemoteRuntime = struct {
     // shared transport hard failure를 이 runtime surface에 한 번만 투영한다. connection 하나를 여러 runtime이
     // 공유하므로 각 runtime pump가 자기 surface를 exited로 latch하되 매 frame 같은 read_error를 재방출하지 않는다.
     transport_failed: bool,
+    resync_needed: bool,
     observation: term_backend.RuntimeObservation, // host attach/event에서 받은 화면 외 full-state owned cache.
     remote_screen: remote_screen.RemoteScreen, // 조립기+cell 격자(surface의 화면 소스).
     surface: Surface, // 원격-backed(surface.remote = remote_screen.screenSource()). GUI가 이걸 렌더.
@@ -88,6 +89,7 @@ pub const RemoteRuntime = struct {
         self.direct_input_offset = 0;
         self.pending_controls = .empty;
         self.transport_failed = false;
+        self.resync_needed = false;
         self.observation = .{};
         errdefer self.observation.deinit(allocator);
 
@@ -132,6 +134,7 @@ pub const RemoteRuntime = struct {
         self.direct_input_offset = 0;
         self.pending_controls = .empty;
         self.transport_failed = false;
+        self.resync_needed = false;
         self.observation = .{};
         errdefer self.observation.deinit(allocator);
         self.runtime_id_hex = runtime_id_hex;
@@ -207,8 +210,9 @@ pub const RemoteRuntime = struct {
 
     /// runtime을 종료하고(host `runtime.terminate`) client-side 자원을 회수한다. 멱등 시도(종료 실패는 무시).
     pub fn deinit(self: *RemoteRuntime) void {
-        self.client.dropBufferedStream(self.stream_id); // 이 stream 앞으로 남은 demux 배치 회수(더는 pump 안 함 — §멀티 runtime).
         self.terminateBestEffort();
+        // terminate response보다 먼저 온 async continuation도 call이 pending_stream에 보존하므로 RPC 뒤 한 번에 회수한다.
+        self.client.dropBufferedStream(self.stream_id);
         self.surface.deinit();
         self.remote_screen.deinit();
         self.observation.deinit(self.allocator);
@@ -453,6 +457,7 @@ pub const RemoteRuntime = struct {
         // 계속 DONTWAIT로 진전시킨다. Client 하나를 여러 runtime이 공유하므로 어느 runtime pump가 호출해도 충분하다.
         _ = try self.pumpQueuedInput();
         _ = try self.client.pumpPendingOutput();
+        try self.pumpResyncIntent();
         var changed = try self.drainObservationEvents();
         const maybe_batch = try self.client.readStreamBatch(self.allocator, self.stream_id);
         if (maybe_batch == null) {
@@ -471,13 +476,28 @@ pub const RemoteRuntime = struct {
         return .screen;
     }
 
-    fn drainObservationEvents(self: *RemoteRuntime) error{OutOfMemory}!bool {
+    fn drainObservationEvents(self: *RemoteRuntime) client_mod.ClientError!bool {
         var changed = false;
         while (self.client.takeEventForStream(self.stream_id)) |frame| {
             defer frame.deinit(self.allocator);
+            if (isSnapshotInvalidatedEvent(frame.payload)) {
+                // Latch before releasing the event. The next frame-pump turn admits one bounded,
+                // response-free stream ack; socket backpressure leaves the latch set for retry.
+                self.resync_needed = true;
+                continue;
+            }
             changed = (try self.applyObservationJson(frame.payload)) or changed;
         }
         return changed;
+    }
+
+    fn pumpResyncIntent(self: *RemoteRuntime) client_mod.ClientError!void {
+        if (!self.resync_needed) return;
+        const accepted = self.client.sendResyncNonBlocking(self.stream_id) catch |err| switch (err) {
+            error.OutOfMemory => return,
+            else => return err,
+        };
+        if (accepted) self.resync_needed = false;
     }
 
     /// attach response(`result.metadata`)와 후속 event(`metadata`)가 공유하는 parser. event는 full-state이므로 현재보다 큰
@@ -627,6 +647,12 @@ pub const RemoteRuntime = struct {
             .bool => |b| b,
             else => null,
         };
+    }
+
+    fn isSnapshotInvalidatedEvent(payload: []const u8) bool {
+        // The host owns one canonical allocation-free encoding. Exact matching prevents an
+        // allocator failure while classifying the recovery notice from silently losing intent.
+        return std.mem.eql(u8, payload, "{\"event\":\"snapshot.invalidated\"}");
     }
 
     /// host runtime을 종료한다(client-side 자원은 남긴다 — 회수는 `deinit`). `TermRuntimeBackend.close_and_detach`/`close`가
@@ -2685,6 +2711,121 @@ test "remote runtime: requestResync makes the host push a fresh snapshot (desync
         } else _ = usleep(20 * 1000);
     }
     try testing.expect(saw_snapshot); // resync 요청이 host의 fresh snapshot push를 유발했다(generation 리셋 = 복구 경로).
+}
+
+test "remote runtime: snapshot.invalidated latches one nonblocking resync ack" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fds: [2]c.fd_t = undefined;
+    try testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds));
+    var peer_ok = false;
+    const Peer = struct {
+        fn run(fd: c.fd_t, ok: *bool) void {
+            defer _ = c.close(fd);
+            const request = readPeerFrame(fd, std.heap.page_allocator) catch return;
+            defer std.heap.page_allocator.free(request.payload);
+            if (request.header.kind != .stream_ack or
+                request.header.stream_id != 9 or
+                !std.mem.eql(u8, request.payload, "{\"action\":\"resync\"}"))
+                return;
+            ok.* = true;
+        }
+    };
+    var peer = try std.Thread.spawn(.{}, Peer.run, .{ fds[1], &peer_ok });
+
+    var client = client_mod.Client{
+        .allocator = allocator,
+        .fd = fds[0],
+        .host_id = 1,
+        .parser = framing.FrameParser.init(allocator),
+    };
+    defer client.deinit();
+    const event = framing.Frame{
+        .header = .{ .kind = .event, .stream_id = 9 },
+        .payload = try allocator.dupe(u8, "{\"event\":\"snapshot.invalidated\"}"),
+    };
+    try client.pending_events.append(allocator, event);
+    client.pending_event_bytes = event.payload.len;
+    var rr: RemoteRuntime = undefined;
+    rr.client = &client;
+    rr.allocator = allocator;
+    rr.io = testing.io;
+    rr.stream_id = 9;
+    rr.direct_input = .empty;
+    rr.direct_input_offset = 0;
+    rr.pending_controls = .empty;
+    rr.resync_needed = false;
+    defer rr.direct_input.deinit(allocator);
+    defer rr.pending_controls.deinit(allocator);
+
+    try testing.expect(!(try rr.drainObservationEvents()));
+    try testing.expect(rr.resync_needed);
+    try rr.pumpResyncIntent();
+    try testing.expect(!rr.resync_needed);
+    peer.join();
+    try testing.expect(peer_ok);
+    try testing.expectEqual(@as(usize, 0), client.pending_events.items.len);
+}
+
+test "remote runtime: resync intent survives occupied outbound slot and emits one ack after drain" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fds: [2]c.fd_t = undefined;
+    try testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds));
+    defer _ = c.close(fds[1]);
+    var client = client_mod.Client{
+        .allocator = allocator,
+        .fd = fds[0],
+        .host_id = 1,
+        .parser = framing.FrameParser.init(allocator),
+    };
+    defer client.deinit();
+    const filled = try fillRemoteTestSendBuffer(fds[0]);
+    client.pending_outbound = .{ .frame = try framing.encodeFrame(
+        allocator,
+        .{ .kind = .input_bytes, .stream_id = 3 },
+        "older",
+    ) };
+    const event = framing.Frame{
+        .header = .{ .kind = .event, .stream_id = 9 },
+        .payload = try allocator.dupe(u8, "{\"event\":\"snapshot.invalidated\"}"),
+    };
+    try client.pending_events.append(allocator, event);
+    client.pending_event_bytes = event.payload.len;
+    var rr: RemoteRuntime = undefined;
+    rr.client = &client;
+    rr.allocator = allocator;
+    rr.io = testing.io;
+    rr.stream_id = 9;
+    rr.direct_input = .empty;
+    rr.direct_input_offset = 0;
+    rr.pending_controls = .empty;
+    rr.resync_needed = false;
+    defer rr.direct_input.deinit(allocator);
+    defer rr.pending_controls.deinit(allocator);
+
+    _ = try rr.drainObservationEvents();
+    try rr.pumpResyncIntent();
+    try testing.expect(rr.resync_needed);
+    try testing.expect(client.pending_outbound != null);
+
+    const filler = try allocator.alloc(u8, filled);
+    defer allocator.free(filler);
+    try readRemoteTestExact(fds[1], filler);
+    try testing.expect(try client.pumpPendingOutput());
+    const older = try readPeerFrame(fds[1], allocator);
+    defer allocator.free(older.payload);
+    try testing.expectEqual(protocol.Kind.input_bytes, older.header.kind);
+
+    try rr.pumpResyncIntent();
+    try testing.expect(!rr.resync_needed);
+    const ack = try readPeerFrame(fds[1], allocator);
+    defer allocator.free(ack.payload);
+    try testing.expectEqual(protocol.Kind.stream_ack, ack.header.kind);
+    try testing.expectEqual(@as(u64, 9), ack.header.stream_id);
+    try testing.expectEqualStrings("{\"action\":\"resync\"}", ack.payload);
+    try rr.pumpResyncIntent();
+    try testing.expect(client.pending_outbound == null);
 }
 
 // code-review #6a end-to-end — 원격 스크롤백. 스크롤 core command를 host로 라우팅하면 host가 자기 core view_offset을 바꾸고,

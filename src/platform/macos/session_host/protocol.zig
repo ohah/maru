@@ -42,6 +42,9 @@ pub const max_binary_chunk: usize = 1024 * 1024;
 pub const max_viewport_snapshot: usize = 16 * 1024 * 1024;
 pub const max_scrollback_page: usize = 1024 * 1024;
 pub const max_client_queue: usize = 8 * 1024 * 1024;
+/// Complete screen inbox across demux/pending RPC paths; mirrors one server connection slot.
+pub const max_client_screen_inbox: usize = 18 * 1024 * 1024;
+pub const max_client_screen_items: usize = 4096;
 
 /// frame 종류(§10 표). `enum(u16)`에 `_`를 둬 **open enum**으로 만든다 — 모르는 값도 decode되어 상위가
 /// required/optional flag로 처리를 가른다(모르는 required는 protocol error, optional은 skip). 값은 wire 약속이라 고정.

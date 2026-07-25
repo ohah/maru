@@ -66,6 +66,86 @@ pub const ProjectOptions = struct {
     default_bg: u32 = 0x000000,
 };
 
+/// Projection-only bounded builder. It keeps amortized growth, but clamps the next capacity to the
+/// codec ceiling instead of asking the allocator for a geometric capacity above it. This avoids
+/// both near-cap O(N²) exact reallocations and unconditional 16 MiB preallocation on small deltas.
+fn appendProjectedRecord(
+    stream: *std.ArrayListUnmanaged(u8),
+    allocator: std.mem.Allocator,
+    record: []const u8,
+) screen_stream.DecodeError!void {
+    if (record.len > std.math.maxInt(u32)) return error.LengthOverflow;
+    const total = std.math.add(usize, stream.items.len, 4 + record.len) catch
+        return error.LengthOverflow;
+    if (total > screen_stream.max_record_stream_bytes) return error.OutOfMemory;
+    if (stream.capacity < total) {
+        const geometric = stream.capacity +| stream.capacity / 2 +| 8;
+        const target = @min(
+            screen_stream.max_record_stream_bytes,
+            @max(total, geometric),
+        );
+        stream.ensureTotalCapacityPrecise(allocator, target) catch
+            return error.OutOfMemory;
+    }
+    var len_buf: [4]u8 = undefined;
+    std.mem.writeInt(u32, &len_buf, @intCast(record.len), .big);
+    stream.appendSliceAssumeCapacity(&len_buf);
+    stream.appendSliceAssumeCapacity(record);
+}
+
+/// Projection uses several temporary buffers, but no single one may grow beyond the negotiated
+/// viewport snapshot ceiling. In particular this stops the output ArrayList growth before the
+/// parent allocator receives an oversized request. Returned memory is still parent-owned because
+/// this adapter delegates allocation/free without adding headers.
+const AllocationCap = struct {
+    parent: std.mem.Allocator,
+    max: usize,
+
+    fn allocator(self: *AllocationCap) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &.{
+            .alloc = alloc,
+            .resize = resize,
+            .remap = remap,
+            .free = free,
+        } };
+    }
+
+    fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
+        const self: *AllocationCap = @ptrCast(@alignCast(ctx));
+        if (len > self.max) return null;
+        return self.parent.vtable.alloc(self.parent.ptr, len, alignment, ret_addr);
+    }
+
+    fn resize(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) bool {
+        const self: *AllocationCap = @ptrCast(@alignCast(ctx));
+        if (new_len > self.max) return false;
+        return self.parent.vtable.resize(self.parent.ptr, memory, alignment, new_len, ret_addr);
+    }
+
+    fn remap(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) ?[*]u8 {
+        const self: *AllocationCap = @ptrCast(@alignCast(ctx));
+        if (new_len > self.max) return null;
+        return self.parent.vtable.remap(self.parent.ptr, memory, alignment, new_len, ret_addr);
+    }
+
+    fn free(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret_addr: usize) void {
+        const self: *AllocationCap = @ptrCast(@alignCast(ctx));
+        self.parent.vtable.free(self.parent.ptr, memory, alignment, ret_addr);
+    }
+};
+
+/// Same projection contract with an allocation-time ceiling. The returned slice can be freed with
+/// `allocator`, not the adapter, because AllocationCap is transparent.
+pub fn projectSnapshotBounded(
+    allocator: std.mem.Allocator,
+    core: *terminal.TerminalCore,
+    opts: ProjectOptions,
+    max_allocation: usize,
+) screen_stream.DecodeError![]u8 {
+    var capped = AllocationCap{ .parent = allocator, .max = max_allocation };
+    return projectSnapshot(capped.allocator(), core, opts);
+}
+
 /// 현재 화면을 length-prefixed 레코드 스트림(screen_meta + row*)으로 투영한다(caller 소유 바이트). client는 이 바이트를
 /// `screen_stream.RecordStream`으로 순회해 화면을 조립한다. **동시 core 쓰기가 있으면 caller가 core lock을 잡고 부른다.**
 /// `renderSnapshot`(뷰포트 인지 — view_offset>0이면 스크롤백 윈도 합성)을 쓴다 = in-process 렌더와 같은 화면(#6a 원격
@@ -96,7 +176,7 @@ pub fn projectSnapshot(allocator: std.mem.Allocator, core: *terminal.TerminalCor
     };
     const meta_rec = try screen_stream.encodeScreenMeta(allocator, .{ .kind = .screen_meta, .generation = opts.generation }, meta);
     defer allocator.free(meta_rec);
-    try screen_stream.appendRecord(&stream, allocator, meta_rec);
+    try appendProjectedRecord(&stream, allocator, meta_rec);
 
     // 각 행을 run으로 압축해 row 레코드로 담는다.
     var row: u16 = 0;
@@ -137,7 +217,7 @@ fn appendImageBlobRecords(allocator: std.mem.Allocator, stream: *std.ArrayListUn
             .pixels = img.pixels[off..end],
         });
         defer allocator.free(rec);
-        try screen_stream.appendRecord(stream, allocator, rec);
+        try appendProjectedRecord(stream, allocator, rec);
         off = end;
     }
 }
@@ -156,7 +236,7 @@ fn appendImageBaseMeta(allocator: std.mem.Allocator, stream: *std.ArrayListUnman
         .pixels = &.{}, // base는 dedup 메타만 — 픽셀은 delta/resync가 나른다.
     });
     defer allocator.free(rec);
-    try screen_stream.appendRecord(stream, allocator, rec);
+    try appendProjectedRecord(stream, allocator, rec);
 }
 
 /// delta용 placement 방출: full-set 교체라 **clear 센티넬(image_place, image_id=0)** 뒤에 현재 placement 전체를 image_place로
@@ -165,7 +245,7 @@ fn appendImageBaseMeta(allocator: std.mem.Allocator, stream: *std.ArrayListUnman
 fn appendImagePlaceDelta(allocator: std.mem.Allocator, stream: *std.ArrayListUnmanaged(u8), generation: u64, placements: []const terminal.KittyPlacement) screen_stream.DecodeError!void {
     const clear = try screen_stream.encodeImagePlacement(allocator, .{ .kind = .image_place, .generation = generation }, .{ .image_id = 0, .row = 0, .col = 0 });
     defer allocator.free(clear);
-    try screen_stream.appendRecord(stream, allocator, clear);
+    try appendProjectedRecord(stream, allocator, clear);
     for (placements) |p| {
         const rec = try screen_stream.encodeImagePlacement(allocator, .{ .kind = .image_place, .generation = generation }, .{
             .image_id = p.image_id,
@@ -183,7 +263,7 @@ fn appendImagePlaceDelta(allocator: std.mem.Allocator, stream: *std.ArrayListUnm
             .z = p.z,
         });
         defer allocator.free(rec);
-        try screen_stream.appendRecord(stream, allocator, rec);
+        try appendProjectedRecord(stream, allocator, rec);
     }
 }
 
@@ -217,7 +297,7 @@ fn appendImagePlacementRecord(allocator: std.mem.Allocator, stream: *std.ArrayLi
         .z = p.z,
     });
     defer allocator.free(rec);
-    try screen_stream.appendRecord(stream, allocator, rec);
+    try appendProjectedRecord(stream, allocator, rec);
 }
 
 /// 행별 OSC 133 semantic prompt(분류+종료코드)를 prompt_marks record로 방출한다(#1 이후 prompt_marks 패리티). `skip_if_none`이면
@@ -240,7 +320,7 @@ fn appendPromptMarks(allocator: std.mem.Allocator, stream: *std.ArrayListUnmanag
     for (snap.prompt_marks, 0..) |m, i| rows[i] = .{ .kind = @intFromEnum(m.kind), .exit = m.exit };
     const rec = try screen_stream.encodePromptMarks(allocator, .{ .kind = .prompt_marks, .generation = generation }, .{ .rows = rows });
     defer allocator.free(rec);
-    try screen_stream.appendRecord(stream, allocator, rec);
+    try appendProjectedRecord(stream, allocator, rec);
 }
 
 /// 현재 뷰포트 링크(자동 감지 + OSC 8)를 link_spans record로 방출한다. host가 콘텐츠를 소유하므로 링크 **해석**도
@@ -268,7 +348,7 @@ fn appendLinkSpans(
     };
     const rec = try screen_stream.encodeLinkSpans(allocator, .{ .kind = .link_spans, .generation = generation }, .{ .spans = spans });
     defer allocator.free(rec);
-    try screen_stream.appendRecord(stream, allocator, rec);
+    try appendProjectedRecord(stream, allocator, rec);
 }
 
 /// 이전 link_spans(wire)와 현재(core 계산)가 다른가 — 둘 다 링크 없음이면 같음. delta 방출 여부 판정.
@@ -405,7 +485,7 @@ fn appendRowRecord(
     defer rr.deinit(allocator);
     const rec = try screen_stream.encodeRow(allocator, .{ .kind = .row, .generation = opts.generation }, .{ .row_index = row, .runs = rr.runs });
     defer allocator.free(rec);
-    try screen_stream.appendRecord(stream, allocator, rec);
+    try appendProjectedRecord(stream, allocator, rec);
 }
 
 /// 두 run 목록이 같은가(같은 grapheme·width·count·색·스타일). delta가 바뀐 행만 골라내는 비교 기준이다.
@@ -428,6 +508,17 @@ pub const DeltaError = screen_stream.DecodeError || error{
     /// 같은 grid 위 증분(set_runs/cursor/modes)만 담는다.
     SnapshotRequired,
 };
+
+pub fn computeDeltaBounded(
+    allocator: std.mem.Allocator,
+    prev_bytes: []const u8,
+    core: *terminal.TerminalCore,
+    opts: ProjectOptions,
+    max_allocation: usize,
+) DeltaError!DeltaResult {
+    var capped = AllocationCap{ .parent = allocator, .max = max_allocation };
+    return computeDelta(capped.allocator(), prev_bytes, core, opts);
+}
 
 /// `computeDelta` 결과. `delta`는 바뀐 것만(빈 스트림 가능), `snapshot`은 현재 full snapshot(다음 base이자 render용).
 /// **같은 row build 한 번에서** 둘 다 도출한다(재투영 없음). 둘 다 caller 소유이고 별개 버퍼다.
@@ -528,7 +619,7 @@ pub fn computeDelta(allocator: std.mem.Allocator, prev_bytes: []const u8, core: 
             .view_offset = @intCast(@min(core.viewOffset(), std.math.maxInt(u32))),
         });
         defer allocator.free(meta_rec);
-        try screen_stream.appendRecord(&snapshot, allocator, meta_rec);
+        try appendProjectedRecord(&snapshot, allocator, meta_rec);
     }
 
     // 각 행을 **한 번만** build해서 (a) snapshot의 row 레코드로 담고 (b) prev와 다르면 delta의 set_runs로 담는다(재투영 제거).
@@ -538,13 +629,13 @@ pub fn computeDelta(allocator: std.mem.Allocator, prev_bytes: []const u8, core: 
         defer rr.deinit(allocator);
         const row_rec = try screen_stream.encodeRow(allocator, .{ .kind = .row, .generation = opts.generation }, .{ .row_index = row, .runs = rr.runs });
         defer allocator.free(row_rec);
-        try screen_stream.appendRecord(&snapshot, allocator, row_rec);
+        try appendProjectedRecord(&snapshot, allocator, row_rec);
 
         const prev = prev_rows[row] orelse &[_]Run{};
         if (!runsEqual(rr.runs, prev)) {
             const rec = try screen_stream.encodeSetRuns(allocator, .{ .kind = .set_runs, .generation = opts.generation }, .{ .base_generation = opts.generation, .row_index = row, .start_col = 0, .runs = rr.runs });
             defer allocator.free(rec);
-            try screen_stream.appendRecord(&delta, allocator, rec);
+            try appendProjectedRecord(&delta, allocator, rec);
         }
     }
 
@@ -568,7 +659,7 @@ pub fn computeDelta(allocator: std.mem.Allocator, prev_bytes: []const u8, core: 
             if (!present) {
                 const rec = try screen_stream.encodeImageRemove(allocator, .{ .kind = .image_remove, .generation = opts.generation }, .{ .base_generation = opts.generation, .blob_id = prev_id.* });
                 defer allocator.free(rec);
-                try screen_stream.appendRecord(&delta, allocator, rec);
+                try appendProjectedRecord(&delta, allocator, rec);
             }
         }
     }
@@ -594,7 +685,7 @@ pub fn computeDelta(allocator: std.mem.Allocator, prev_bytes: []const u8, core: 
     if (!cursorsEqual(cur_cursor, prev_meta.cursor)) {
         const rec = try screen_stream.encodeCursor(allocator, .{ .kind = .cursor, .generation = opts.generation }, .{ .base_generation = opts.generation, .cursor = cur_cursor });
         defer allocator.free(rec);
-        try screen_stream.appendRecord(&delta, allocator, rec);
+        try appendProjectedRecord(&delta, allocator, rec);
     }
     // 스크롤 상태: snapshot(base)엔 screen_meta로 이미 실렸고, delta엔 **바뀌었을 때만** 별도 record로 보낸다.
     // 이게 없으면 스크롤만 한 프레임에서 client 값이 stale이라 스크롤바가 화면과 어긋난다(재동기화 전까지).
@@ -608,13 +699,13 @@ pub fn computeDelta(allocator: std.mem.Allocator, prev_bytes: []const u8, core: 
                 .view_offset = cur_vo,
             });
             defer allocator.free(rec);
-            try screen_stream.appendRecord(&delta, allocator, rec);
+            try appendProjectedRecord(&delta, allocator, rec);
         }
     }
     if (cur_modes != prev_meta.modes) {
         const rec = try screen_stream.encodeModes(allocator, .{ .kind = .modes, .generation = opts.generation }, .{ .base_generation = opts.generation, .modes = cur_modes });
         defer allocator.free(rec);
-        try screen_stream.appendRecord(&delta, allocator, rec);
+        try appendProjectedRecord(&delta, allocator, rec);
     }
 
     const delta_owned = delta.toOwnedSlice(allocator) catch return error.OutOfMemory;
@@ -1162,4 +1253,28 @@ fn hasRecordKind(bytes: []const u8, kind: screen_stream.RecordKind) !bool {
         if (s.header.kind == kind) return true;
     }
     return false;
+}
+
+test "bounded projector uses a transparent exact allocation ceiling" {
+    const allocator = std.testing.allocator;
+    var cap = AllocationCap{ .parent = allocator, .max = 64 };
+    const capped = cap.allocator();
+    const exact_allocation = try capped.alloc(u8, 64);
+    allocator.free(exact_allocation);
+    try std.testing.expectError(error.OutOfMemory, capped.alloc(u8, 65));
+
+    var core = try terminal.TerminalCore.init(allocator, .{ .cols = 4, .rows = 1 });
+    defer core.deinit();
+    try core.write("ABCD");
+    const expected = try projectSnapshot(allocator, &core, .{ .generation = 1 });
+    defer allocator.free(expected);
+
+    const exact = try projectSnapshotBounded(
+        allocator,
+        &core,
+        .{ .generation = 1 },
+        screen_stream.max_record_stream_bytes,
+    );
+    defer allocator.free(exact);
+    try std.testing.expectEqualSlices(u8, expected, exact);
 }

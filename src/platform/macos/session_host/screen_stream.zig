@@ -313,6 +313,9 @@ pub const max_string_len: usize = 64 * 1024;
 pub const max_image_blob: usize = 1024 * 1024;
 /// 한 row의 run 수 cap. 폭 8K 화면도 8K run 미만이라 넉넉하며 손상 count를 막는다.
 pub const max_runs_per_row: usize = 65536;
+/// Host/client viewport snapshot and delta base ceiling. Projection allocators and MRSH chunking
+/// compile-check against this codec-level record-stream bound.
+pub const max_record_stream_bytes: usize = 16 * 1024 * 1024;
 
 // ── record stream framing ─────────────────────────────────────────────────────
 //
@@ -324,10 +327,17 @@ pub const max_runs_per_row: usize = 65536;
 /// record(header+body 완성 바이트)를 length-prefixed로 stream 버퍼에 덧붙인다. caller가 버퍼를 소유한다.
 pub fn appendRecord(stream: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocator, record: []const u8) DecodeError!void {
     if (record.len > std.math.maxInt(u32)) return error.LengthOverflow;
+    const total = std.math.add(usize, stream.items.len, 4 + record.len) catch
+        return error.LengthOverflow;
+    if (total > max_record_stream_bytes) return error.OutOfMemory;
+    // Keep amortized growth on the hot delta path. A capped projection allocator may reject the
+    // geometric capacity even though the exact logical total still fits; only then retry precise.
+    stream.ensureTotalCapacity(allocator, total) catch
+        stream.ensureTotalCapacityPrecise(allocator, total) catch return error.OutOfMemory;
     var len_buf: [4]u8 = undefined;
     std.mem.writeInt(u32, &len_buf, @intCast(record.len), .big);
-    stream.appendSlice(allocator, &len_buf) catch return error.OutOfMemory;
-    stream.appendSlice(allocator, record) catch return error.OutOfMemory;
+    stream.appendSliceAssumeCapacity(&len_buf);
+    stream.appendSliceAssumeCapacity(record);
 }
 
 /// length-prefixed record stream을 순회한다(빌린 슬라이스 — 원본 버퍼 수명 안에서 유효). `next`가 record(header+body)

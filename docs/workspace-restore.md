@@ -50,9 +50,11 @@ workspace restore와 persistent-session attach는 서로 대체하지 않는다.
 현재 `maru.workspace.v1`의 terminal `runtime-handle`은 구현됐다. writer는
 `<host-id>:<runtime-id>`를 함께 쓰고 reader는 길이·lowercase hex·구분자를 fail-closed 검증한다. 옛
 `runtime-id` 단독 파일은 한 번의 attach migration을 위해 읽지만 새 live capture는 bare ID를 만들지 않는다.
-첫 복원의 ended placeholder와 `⏎` 제자리 재생성은 구현됐다. 그러나 capture가 죽은 handle을 제거하므로 Enter 없이
-Quit한 뒤 두 번째 재실행하면 선언적 surface로 읽혀 새 shell이 자동 생성된다. 이를 막는 durable tombstone scalar,
-전역 runtime binding 중복 검증, `Recovered Sessions`, incremental checkpoint는 아직 구현되지 않았다. 정상 종료 한 번에만
+첫 복원의 ended placeholder와 `⏎` 제자리 재생성은 구현됐다. **P4 R1 구현 슬라이스는**
+positive-Gone의 정확한 handle을 `runtime-state="ended"`와 함께 owned 상태로 보존하고, 다음 restore가 host
+probe·attach·새 shell spawn 없이 placeholder를 직접 만드는 durable tombstone까지를 한 gate로 묶는다. Enter로 새
+runtime 생성이 성공한 때만 구 handle/state를 버린다. 전역 runtime binding 중복 검증, `Recovered Sessions`,
+incremental checkpoint는 R1 뒤 단계이며 아직 구현되지 않았다. 정상 종료 한 번에만
 저장하는 현재 방식이라 GUI 비정상 종료 직전 layout은 잃을 수 있으므로 이 항목들은 영속 session 기본 전환 전 gate다.
 `workspace-binding-id`와 persistent quick layout은 default-on 범위에서 제거했다. 세부 소유권·ID·접속 실패 행렬은
 persistent-session 문서를 따른다.
@@ -63,9 +65,9 @@ persistent-session 문서를 따른다.
 terminate하지 않고 controller subscription만 detach해 rollback한다. saved Window 하나라도 apply하지 못하면 그 추가 창은
 default shell로 위장하지 않고 teardown하며, 이번 실행은 `restore incomplete`로 남는다. **apply가 성공했어도 복원이 조용히
 버린 항목이 있으면 같은 래치를 세운다**(v144): capability 검증에서 버린 파일 패널 entry, 그 결과로 비워져 제거된 dock 그룹,
-접근 불가로 강등한 explorer root, 그리고 **영구 부재로 분류돼 종료 placeholder가 된 Term**(저장된 `runtime-handle`을 잃는다 —
-[persistent-session-host.md](persistent-session-host.md) "접속 실패 행렬")은 apply를 실패시키지 않지만 복원된 모델이 저장
-파일을 표현하지 못한다는 뜻이므로, Zig가 그 개수를 `take_workspace_restore_dropped`로 노출한다. 개수는 정확한 회계가
+접근 불가로 강등한 explorer root, 그리고 **이번 restore에서 live handle을 영구 부재로 새로 분류한 Term**은 apply를
+실패시키지 않는다. 앞 세 범주는 입력을 온전히 표현하지 못했고, 마지막 범주는 오분류 때 마지막 완전본으로 돌아갈
+backup 신호가 필요하므로 Zig가 모두 `take_workspace_restore_dropped`로 노출한다. 개수는 정확한 회계가
 아니라 판정용 신호다 — 한 원인이 entry와 빈 그룹 둘로 세어질 수 있다.
 
 **checkpoint 보호(단일 출처).** 이 래치가 선 실행의 종료 저장은 **덮어쓰기 직전에 마지막 완전본을 `workspace.v1.bak`으로
@@ -76,9 +78,9 @@ default shell로 위장하지 않고 teardown하며, 이번 실행은 `restore i
 뻔한 상태를 파일로 남기면서 루프를 끊는다. 복구는 사용자가 `.bak`을 `workspace.v1`로 되돌리면 된다.
 
 quick은 영구히 checkpoint 대상이 아니며 host orphan을 막기 위해 in-process backend로만 생성되어 앱 Quit 때 종료한다.
-P4 R1 이후 positive-Gone Term은 `runtime-handle + runtime-state="ended"`를 완전하게 표현하므로 dropped 항목으로 세지
-않는다. file/dock/explorer처럼 실제로 표현을 잃은 항목만 위 backup 신호에 남고, durable tombstone은 정상 checkpoint로
-반복 보존한다.
+live→ended로 **처음** 전이한 실행은 exact `runtime-handle + runtime-state="ended"`를 저장하면서도 오분류 대비
+`dropped` backup 신호를 한 번 유지한다. 이미 durable ended로 저장된 다음 실행부터는 완전히 표현된 상태이므로 dropped
+0이며 정상 checkpoint로 반복 보존한다.
 
 시작 host는 workspace 텍스트를 **AppSession 생성 전** Zig parser로 preflight한다(ABI v142,
 `workspace_window_count(session=NULL)`). 복원할 Window가 하나 이상이면 각 AppSession을
@@ -87,7 +89,7 @@ P4 R1 이후 positive-Gone Term은 `runtime-handle + runtime-state="ended"`를 �
 throwaway host runtime을 하나도 spawn하지 않는다. primary Window 적용 실패 때만 빈 deferred session을 폐기하고 명시적인
 새 default-shell session으로 fallback하며, 이 실행은 위 `restore incomplete` 보호를 그대로 적용한다.
 
-## 영속 session binding wire (runtime-handle 구현, durable tombstone 계획)
+## 영속 session binding wire (runtime-handle 구현, durable tombstone R1)
 
 새 DB나 창별 파일을 만들지 않고 기존 `~/Library/Application Support/maru/workspace.v1` 하나가 Window/Workspace 배치의
 단일 출처다. 현재 직렬화 모델에서 `Window`=OS 창, `Tab`=Workspace, `Pane`=split leaf, `Surface`=terminal Term이므로
@@ -106,17 +108,20 @@ surface custom-name="" title="ended" cwd="/repo" command="/bin/zsh" cols=100 row
 | 필드 | 위치 | 형식·수명 | 키가 없을 때 |
 | --- | --- | --- | --- |
 | `runtime-handle` (**구현**) | terminal `surface` line | `<host-id>:<runtime-id>`, 양쪽 모두 lowercase 32 hex. 한 quoted scalar로 all-or-none | 선언적 surface. 설정에 맞는 새 runtime 생성 후보이며 기존 process continuation 아님 |
-| `runtime-state` (계획) | terminal `surface` line | 키 부재=`live`, 유일한 명시 값 `ended`. ended는 정확한 handle과 함께 마지막 runtime의 묘비로 유지 | live/legacy surface |
+| `runtime-state` (**P4 R1 구현**) | terminal `surface` line | 키 부재=`live`, 유일한 명시 값 `ended`. ended는 정확한 handle과 함께 마지막 runtime의 묘비로 유지 | live/legacy surface |
 
 규칙:
 
 - binding 필드는 기존 `LineFields`의 순서 무관 optional scalar다. 옛 reader는 미지 키로 skip하고 새 reader는 부재를
   legacy/default로 읽으므로 header는 `maru.workspace.v1`을 유지한다. 현재 구현된 `runtime-handle` reader는 옛
   `runtime-id` 단독 키도 엄격한 32 lowercase hex일 때만 migration 입력으로 허용하며 두 키가 함께 있으면 거부한다.
+- `runtime-id`·`runtime-handle`·`runtime-state`는 각각 한 surface에 최대 한 번만 올 수 있다. valid 앞값 뒤에 손상·모순
+  값을 숨기는 first-wins 해석은 하지 않는다. legacy bare ID가 Gone이어도 exact host namespace를 확정할 수 없으므로
+  host 없는 tombstone을 만들지 않고 unavailable로 fail-close한다.
 - 키가 있는데 quoted 형식, 길이, lowercase hex, `:` 구분이 깨졌으면 `BadLine`이며 기존 "존재하는 optional 손상은 숨기지
   않는다" 규칙대로 checkpoint 전체를 거부한다. `runtime-handle`을 두 키로 나눠 partial state를 만들지 않는다.
 - writer는 ID를 의미 있는 숫자나 path로 인코딩하지 않고, 같은 값의 재사용·자동 재발급으로 손상을 숨기지 않는다.
-- **계획:** `runtime-state="ended"`는 `runtime-handle`과 함께 있을 때만 유효하다. reader는 host probe·attach·새 shell
+- **P4 R1 gate:** `runtime-state="ended"`는 `runtime-handle`과 함께 있을 때만 유효하다. reader는 host probe·attach·새 shell
   spawn 없이 placeholder를 만들고, writer는 Enter로 새 runtime 생성에 성공할 때만 구 handle/state를 새 live handle로
   교체한다. 알 수 없는 state, ended인데 handle 부재, live와 ended의 모순은 checkpoint 전체를 거부한다.
 - **계획:** publish 전 전체 모델을 검증한다. 하나의 `runtime-handle`은

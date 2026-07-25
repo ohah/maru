@@ -40,8 +40,9 @@ control-plane, PTY 종료 정책과 책임이 겹치지 않도록 소유권·ID�
 > runtime observation override로 host 모드대로 인코딩된다(P3-e4c-4). 단 선택 autoscroll·Reset/Clear 등 input-mode/command
 > parity 전체가 완료됐다는 뜻은 아니다.
 > `keep-alive-after-quit` 토글은 **설정 GUI(workspace 섹션)에도 노출**된다. 기본값은 아직 `false`(opt-in)다.
-> 영구 부재 runtime의 per-Term 종료 placeholder와 `⏎` 제자리 재생성은 구현됐지만, placeholder를 다시 저장한 뒤 두 번째
-> 재실행에서도 자동 셸을 만들지 않는 **durable tombstone wire는 미구현**이다. incremental checkpoint, 외부
+> 영구 부재 runtime의 per-Term 종료 placeholder와 `⏎` 제자리 재생성은 구현됐다. **P4 R1 구현 슬라이스는**
+> `runtime-handle + runtime-state="ended"`를 owned 상태로 반복 저장하고, 두 번째 이후 재실행에서 host
+> probe·attach·새 셸 spawn 0을 자동 gate로 고정하는 durable tombstone이다. incremental checkpoint, 외부
 > `maru attach` CLI, 다중 app **process**(현재 daemon serial), mouse/resize/observation RPC와 delta push의 완전한 async bounded
 > socket event-loop 통합, GUI 부재 시 OS 배너, **host-backed echo 지연 제거(이벤트 기반
 > push — §perf, 백로그)**, **기본값 `true` 전환** 등은 **후속/백로그**다. 이 문서는 그 목표 상태를 함께 기술한다 — **구현 완료
@@ -253,7 +254,7 @@ GUI 0 host-backed 알림은 host가 bounded journal과 stable route를 소유하
 | `runtime_id` | session host | terminal runtime 생성부터 종료까지 | 동일 PTY/process를 찾는 opaque 128-bit random ID |
 | `runtime_handle` | manifest | `{host_id, runtime_id}` | Workspace Term 슬롯과 live runtime 연결 |
 | `surface_id + generation` | GUI/AppRuntime | GUI app instance와 surface 수명 | 렌더/input/control-plane 라우팅 |
-| `runtime_state` (계획) | workspace manifest | 저장된 Term 슬롯 수명 | `live`/`ended`를 구분해 묘비의 자동 재생성을 막는 additive scalar |
+| `runtime_state` (P4 R1 구현) | workspace manifest | 저장된 Term 슬롯 수명 | `live`/`ended`를 구분해 묘비의 자동 재생성을 막는 additive scalar |
 
 불변식:
 
@@ -305,7 +306,7 @@ Window 2
 현재 `maru.workspace.v1`에서 `Window`는 OS 창, `Tab`은 Workspace, `Pane`과 `Surface`는 각각 split leaf와 Term이다.
 별도 session DB나 창별 workspace 파일을 만들지 않고 기존 단일
 `~/Library/Application Support/maru/workspace.v1` 파일을 그대로 공유한다. 일반 Window/Workspace는 기존
-`runtime-handle`과 계획된 `runtime-state` scalar로 Term 슬롯을 연결한다.
+`runtime-handle`과 P4 R1에서 구현한 `runtime-state` scalar로 Term 슬롯을 연결한다.
 
 ```text
 surface ... runtime-handle="<32 lowercase host-id>:<32 lowercase runtime-id>" runtime-state="ended"
@@ -553,13 +554,13 @@ sequenceDiagram
 9. 같은 runtime을 manifest의 두 writable Term 슬롯에 bind하면 잘못된 파일로 거부한다. 한 runtime의 canonical writable placement는 하나다.
 
 **현재 구현 범위:** 1–6의 deferred/attach/rollback과 stale host·missing runtime fail-closed는 P3 core에 구현됐다.
-**7의 첫 복원 per-Term ended placeholder는 구현됐다** — 영구 부재로 분류된 runtime만 그 Term을 읽기 전용 placeholder로 두고
+**7의 durable per-Term ended placeholder는 P4 R1에서 구현됐다** — exact handle이 영구 부재로 분류된 runtime만 그 Term을 읽기 전용 placeholder로 두고
 나머지 surface·split·탭·창 frame은 정상 복원한다. placeholder 화면에는 마지막 제목·위치와 `⏎` 안내가 **화면 콘텐츠로**
 남고(notice는 아무 키에나 닫히므로 그것만으로는 복구 방법이 사라진다), `⏎`가 그 pane 슬롯을 **제자리 교체**해 마지막
 cwd에서 새 셸을 시작한다. 자동 fresh spawn은 없다 — `⏎`가 유일한 승격 경로이고 다른 키·수식자 조합으로는 되살아나지
-않는다. 그러나 현재 capture가 묘비의 죽은 handle을 제거하므로 **Enter 없이 Quit→두 번째 재실행하면 선언적 surface로
-읽혀 자동 셸이 생성되는 회귀가 있다**. 따라서 durable tombstone wire와 2회 이상 재실행 E2E 전에는 7 전체를 완료로
-세지 않는다. 8의 `Recovered Sessions`,
+않는다. capture는 exact handle/state를 owned 상태에서 다시 쓰며, parse→apply→capture를 두 cycle 반복하는 자동
+fixture가 restoreSpawn/attach/probe/spawn 공통 진입점 0과 dropped 0을 고정한다. 실제 signed app process의 반복
+Quit/relaunch E2E는 별도 제품 gate로 남는다. 8의 `Recovered Sessions`,
 9의 manifest 전역 중복 검증은 여전히 P4 계획이다. 일시 실패로 분류된 누락 runtime은 종전처럼 해당 Window apply를
 실패시키며, 추가 Window는 teardown하고 primary는 명시적인 새 default-shell fallback으로 전환한다. 이
 `restore incomplete` 실행은 종료 시 마지막 완전본을 `.bak`으로 한 번 보존한 뒤 현재 모델을 저장한다. capture/serialize/
@@ -593,26 +594,26 @@ orphan recovery entry
 현재 코드는 probe를 `absent|indeterminate`로, owner lease를 `free|held|unknown`으로 구분해 위 표의 긍정 증거 요건을
 구현했다. durable tombstone은 이 분류를 재사용하며 미확정 상태를 영구 부재로 넓히지 않는다.
 
-**두 에러의 귀결(구현됨).** `PersistentRuntimeGone`은 `createRestoredTerm`이 catch해 **그 Term만 종료 placeholder**로
+**두 에러의 귀결(구현됨).** exact `runtime-handle`의 `PersistentRuntimeGone`은 `createRestoredTerm`이 catch해 **그 Term만 종료 placeholder**로
 바꾸고 창 apply는 성공시킨다 — 탭·split·창 frame이 살아남는다. `PersistentRuntimeUnavailable`은 그대로 전파해 창 apply를
-실패시키는 현행 fail-close를 유지한다. 분류를 이 전환보다 **먼저** 별도로 도입한 이유는, 오분류 회귀가 곧바로
+실패시키는 현행 fail-close를 유지한다. legacy bare `runtime-id`는 Gone이어도 exact host namespace가 없어 unavailable로
+남는다. 분류를 이 전환보다 **먼저** 별도로 도입한 이유는, 오분류 회귀가 곧바로
 checkpoint 오염으로 이어져 재현·롤백이 불가능한 손실이 되기 때문이다.
 
-**묘비도 checkpoint 신호를 세운다(code-review max 수정).** 처음엔 "래치를 손대지 않는다"였다 — 일시 실패는 묘비가 되지
+**새 live→ended 판정은 checkpoint 신호를 한 번 세운다(code-review max 수정).** 처음엔 "래치를 손대지 않는다"였다 — 일시 실패는 묘비가 되지
 않으니 `Unreachable` 묘비라는 범주가 구조적으로 없고, 파일 패널·dock·explorer의 drop만 래치를 세우면 충분하다는 논리였다.
-그 논리의 구멍은 **분류가 틀렸을 때**다: 접속을 한 번만 영구로 오분류해도 그 Term은 묘비가 되고, `captureWorkspaceTab`이
-`runtime-handle`을 빈 값으로 쓰므로 **다음 Quit이 살아 있는 host runtime을 영구 고아로 만든다**(되찾을 UI도 없다). 도크
-entry 하나가 막는 checkpoint를 훨씬 비싼 이쪽이 안 막는 비대칭이었다. 그래서 `applyWorkspaceWindow`는 이번 창이 만든
-묘비 수를 `dropped`에 합산해 `take_workspace_restore_dropped`로 노출한다.
+그 논리의 구멍은 **분류가 틀렸을 때**다: 접속을 한 번만 영구로 오분류해도 그 Term은 묘비가 된다. durable wire가
+handle을 보존하더라도 현재 `Recovered Sessions`가 없어 오분류를 UI에서 되돌릴 수 없으므로 첫 전이 때 마지막 완전본
+backup 신호가 필요하다. 그래서 `applyWorkspaceWindow`는 이번 창에서 새로 live→ended가 된 수를 `dropped`에 합산한다.
+이미 `runtime-state="ended"`로 들어온 후속 relaunch는 완전히 표현된 상태라 dropped 0이다.
 
 **그 신호의 귀결은 "저장 차단"이 아니라 "마지막 완전본 백업 후 저장"이다**(v144에서 변경 — [workspace-restore.md](workspace-restore.md)
 "checkpoint 보호"가 단일 출처). 무기한 차단은 stale 파일을 고정시켜 다음 실행이 같은 drop을 재생산하는 자기영속 루프가
 되고, 그동안 사용자의 새 레이아웃이 매 종료마다 사라진다.
 
-**durable tombstone 전에는 반복 relaunch 회귀가 남는다.** 현재 capture는 placeholder의 `runtime-handle`을 제거하므로,
-백업 후 저장된 다음 파일은 그 Term을 일반 선언적 셸로 표현한다. 목표 writer는 마지막 handle과
-`runtime-state="ended"`를 함께 보존해 Enter 없는 두 번째 이후 relaunch에서도 spawn 0을 유지해야 한다. durable
-tombstone 구현은 위 backup 신호와 일시 실패 fail-close를 약화시키면 안 된다.
+**P4 R1 durable tombstone 구현.** capture는 placeholder의 마지막 handle과 `runtime-state="ended"`를 함께 보존하고,
+reader는 이 상태를 host 경계보다 먼저 placeholder로 만든다. Enter 없는 두 번째 이후 relaunch에서도 자동 spawn하지
+않으며, 위 최초 backup 신호와 일시 실패 fail-close는 그대로 유지한다.
 
 **종료 placeholder 객체와 첫 복원 배선(구현됨).** placeholder Term 자체와 그 수명은 `TermRuntime.ended_placeholder`
 + `createEndedPlaceholderTerm`으로 구현했다. `SurfaceKind`(닫힌 열거)를 확장하지 않고 `kind = .terminal`을 유지하며
@@ -622,8 +623,8 @@ registry 슬롯만 `LiveSurface.web` arm sentinel을 재사용한다 — 그래�
 닫혀 복원한 레이아웃이 다음 checkpoint에서 소멸**), `findTerminatedTerm`(자동 reap 금지), `resizeTermForLayout`(live
 link가 없어 `SurfaceRuntime.resize`가 실패하므로 sentinel core를 직접 resize — 스킵하면 저장 grid에 갇힌다), 드롭 배리어.
 마지막 title·cwd·grid는 이미 owned 저장소가 있는 `auto_title`·`observation`(`.stale`)에 심어 `captureWorkspaceTab`이
-무변경으로 저장하고, command만 `rt.ended_command`에서 읽는다. 미구현인 durable wire는 묘비가 마지막
-`runtime-handle`과 `runtime-state="ended"`를 owned 상태로 함께 보존하도록 이 capture 계약을 확장한다.
+저장하고, command와 exact host/runtime identity는 `TermRuntime` owned 상태에서 읽는다. capture는 이를
+`runtime-handle + runtime-state="ended"`로 함께 기록한다.
 
 **묘비 입력·수명 계약(code-review max 수정).** 위 "PTY 부재 분기"에 더해, 묘비가 **사용자 입력 경로에서** 지켜야 하는
 규칙이 넷 있다. 넷 다 "복원했더니 조용히 뭔가 사라져 있다"는 같은 실패 모양이라 한곳에 모아 둔다.
@@ -1122,7 +1123,7 @@ green을 만든 뒤 stress/실제 앱 gate를 붙인다. 이미 구현되어 red
 
 - 이 문서, workspace restore, session-host upgrade, configuration, verification matrix를 정합화한다.
 - quick persistent/restore/upgrade 결합은 명시적 비목표로 제거하고 local quick 회귀 gate만 남긴다.
-- durable tombstone wire, unsupported host 분류, checkpoint 실패 시 Quit 취소, GUI-crash까지만 지원하는 checkpoint
+- durable tombstone wire(후속 R1에서 구현), unsupported host 분류, checkpoint 실패 시 Quit 취소, GUI-crash까지만 지원하는 checkpoint
   실패 범위, default flip config provenance/rollback을 구현 전 계약으로 고정한다.
 - current evidence와 종료 gate를 분리하고, green fixture가 실제 frozen release/두 번째 재실행을 증명한다고 쓰지 않는다.
 - current `main`의 종료-placeholder 테스트는 registry endpoint를 못 찾으면 곧바로 tombstone이 된다고 기대하지만 제품
@@ -1428,7 +1429,7 @@ controlled Claude/Codex foreground fixture를 낸 뒤 GUI observation까지 왕�
 
 ### P4 — 일반 Window default readiness·background 알림
 
-- `runtime-state="ended"` durable tombstone을 구현해 Enter 없는 Quit/relaunch를 반복해도 자동 spawn 0을 보장한다.
+- **R1 구현:** `runtime-state="ended"` durable tombstone은 Enter 없는 parse→apply→capture 반복에도 자동 spawn 0을 보장한다.
   ended Term close는 host probe/terminate 0으로 manifest slot만 제거한다. `⏎` remote spawn 실패는 사용자 명시
   승격이므로 local fallback을 허용하되, 성공하면 구 handle/state를 제거하고 live-local `not preserved`로 전이한다.
   local spawn도 실패하면 tombstone을 그대로 유지한다.

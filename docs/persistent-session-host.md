@@ -207,10 +207,16 @@ PTY raw bytes만 host가 보관하고 새 GUI가 처음부터 replay하는 방�
 
 **아직 이 규칙을 적용하지 않은 것**(무동작 상태):
 
-- **벨(BEL)**과 **OSC 52 클립보드**. 둘 다 host core가 파싱하지만 client로 나갈 통로가 없다. 위 규칙대로면 host는
+- **OSC 52 클립보드**. host core가 파싱하지만 client로 나갈 통로가 없다. 위 규칙대로면 host는
   "앱이 벨을 울렸다 / 클립보드를 요청했다"는 사실만 전달하고, `bell.*`·`osc52.read` 정책 판정과 실제 실행(소리·배지·
   NSPasteboard)은 client가 한다. OSC 52 **읽기**는 응답을 PTY에 써야 하므로 client가 읽은 값을 host로 되돌리는
   왕복이 추가로 필요하다(로컬 `take_clipboard_read_request`/`provide_clipboard_read` 쌍과 같은 구조).
+- **벨(BEL)은 이 규칙대로 이관했다**(P3-e4c-8). host는 관측에 누적 카운터 `bell_count`만 싣고, `bell.*` 정책 판정과
+  실제 실행(NSSound.beep·시각 flash·Dock 배지)은 client가 한다. 새 RPC를 만들지 않고 **관측 push에 얹은** 이유는
+  벨이 드문 이벤트라 매 tick 폴링이 낭비이고, 관측은 이미 약 100ms마다 변화 시에만 push되기 때문이다.
+  **소비형 bool이 아니라 카운터**인 것이 핵심이다 — full-state 관측은 "이전과 같으면 미전송"이라 bool은 true→true
+  전이를 잃어 둘째 벨을 놓친다. client는 마지막에 본 값보다 **클 때만** 울리고, 작아지면(host exec migration으로
+  카운터가 0에서 재시작) 가짜 벨 대신 조용히 재동기화한다.
 - 참고로 같은 문제를 tmux는 `set-clipboard`로 푼다 — 서버가 클립보드를 직접 만지지 않고 **바깥 터미널로 OSC 52를
   다시 내보내** 실제 접근을 위임한다(`man tmux`: "attempt to set the terminal clipboard using the xterm escape
   sequence"). 서버=전달, 바깥=실행이라는 배치가 위 규칙과 같다(동작 비교만 — 코드 표현은 참고하지 않았다).
@@ -1176,6 +1182,11 @@ P3-e도 슬라이스로 나눈다(제품 통합이라 크다).
     `observation_wire.fieldIsBoolOrAbsent`·`fieldFitsUnsignedOrAbsent`). 검증: override가 placeholder core를 이겨 host의
     DECCKM(화살표 SS3 `\x1bOA`)·kitty(escape `CSI 27u`)로 인코딩됨(host unit), 관측 wire round-trip으로 `app_keypad`·`kitty_flags`
     적용과 구 host 필드 부재 시 폴백을 고정한다. 관측이 backend-neutral 단일 출처라 placeholder `surface.core` 직접 읽기 금지 계약도 지킨다.
+  - **P3-e4c-8(벨 parity) 🟨**: host-backed BEL이 client의 벨 경로(소리·시각 flash·Dock 배지)에 닿는다. 예전엔
+    `dispatchBell`이 placeholder core의 `takeBell()`을 읽어 원격에서 통째로 무동작이었다. 관측에 누적 카운터
+    `bell_count`(optional)를 실어 push로 나르고, client가 delta로 판정한다 — 소비형 bool은 full-state 관측에서
+    true→true 전이를 잃는다. 정책(`bell.visual`·`bell.dock-badge`·audible)과 실행은 client가 그대로 소유한다.
+    host 카운터는 exec migration 시 0에서 재시작하므로 client는 **감소를 리셋으로 보고 울리지 않는다**.
   - **P3-e4c-7(스크롤바·입력모드 리셋 parity) 🟨**: 스크롤바 thumb과 ⌘⇧R이 host-backed에서 동작한다.
     스크롤바는 `core.scrollbackLen()`을 직접 읽어 원격에선 항상 0이었고(placeholder) 스크롤백이 쌓여도 막대가
     안 떴다 — `screen_meta`에 `scrollback_len`/`view_offset`을 실어 보내고, **로컬 core도 같은 이름으로

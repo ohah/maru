@@ -1084,6 +1084,10 @@ const TermRuntime = struct {
     handle: app.TermRuntimeHandle = 0,
     pump: app.RuntimeEventPump = undefined,
     live_initialized: bool = false,
+    /// host-backed Term에서 마지막으로 처리한 BEL 누적 횟수(관측 `bell_count` 미러). 로컬은 core의 소비형
+    /// `takeBell()`을 쓰므로 이 값을 안 쓴다 — 원격은 full-state 관측이라 소비형 플래그를 실을 수 없어 카운터
+    /// delta로 판정한다(docs/persistent-session-host.md §기능을 어느 쪽에 둘 것인가).
+    last_bell_count: u64 = 0,
     // workspace restore staging에서 **기존** host runtime에 attach한 Term. publish 전 rollback은 이 runtime을 종료하면
     // 안 되므로 destroyTerm이 detach-only로 회수한다. applyWorkspaceWindow가 commit point를 넘으면 false로 바꿔 이후
     // 사용자 명시 close는 정상 terminate 의미를 가진다.
@@ -21521,6 +21525,15 @@ pub const AppSession = struct {
             for (tab.panes.items) |pane| {
                 for (pane.terms.items) |term| {
                     if (!term.rt.live_initialized or term.rt.terminated) continue;
+                    if (term.surface.remote != null) {
+                        // host-backed: core는 빈 placeholder라 BEL이 안 들어온다. host가 관측으로 실어 준 누적
+                        // 카운터를 마지막으로 본 값과 비교한다. **증가일 때만** 울린다 — host live-upgrade(exec)로
+                        // 카운터가 0에서 다시 시작하면 감소가 보이는데, 그건 벨이 아니라 재동기화이므로 조용히 맞춘다.
+                        const count = term.rt.observation.bell_count;
+                        if (count > term.rt.last_bell_count) rang = true;
+                        term.rt.last_bell_count = count;
+                        continue;
+                    }
                     if (term.surface.core.takeBell()) rang = true; // 매 live core drain(클리어) — OR로 누적
                 }
             }
@@ -55438,4 +55451,59 @@ test "host-backed 스크롤바: host가 실어 준 스크롤 상태로 thumb이 
     const geom = AppSession.scrollbarThumbGeom(state.scrollback_len, state.view_offset, session.cell_height_px, session.active_pane_rect.h) orelse
         return error.TestUnexpectedResult;
     try std.testing.expect(geom.h > 0); // thumb이 실제로 그려질 크기를 가진다
+}
+
+// host-backed 벨 회귀 가드. host core가 BEL을 파싱해도 client로 나갈 통로가 없어 원격 세션에서 벨(소리·시각 flash·
+// Dock 배지)이 통째로 무동작이었다. 이제 host가 관측에 누적 카운터를 실어 보내고 client가 delta로 판정한다.
+// 소비형 bool이 아니라 카운터인 이유와, host live-upgrade로 카운터가 리셋될 때 가짜 벨이 울리지 않아야 한다는
+// 계약을 함께 고정한다.
+test "host-backed 벨: 관측 카운터 증가로 울리고 리셋은 조용히 재동기화한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    var fake = FakeLinkScreen{ .snap = .{ .size = .{ .cols = 20, .rows = 5 } } };
+    const surface = session.activeSurface();
+    surface.remote = .{ .ctx = &fake, .vtable = &FakeLinkScreen.vtable };
+    defer surface.remote = null;
+    const term = session.activePane().terms.items[session.activePane().active_term];
+    term.rt.observation.availability = .current;
+    session.audible_bell = true;
+
+    // 카운터 변화 없음 → 안 울린다.
+    _ = session.takeBell(); // 이전 상태 비우기
+    session.dispatchBell();
+    try std.testing.expect(!session.takeBell());
+
+    // host가 벨을 실어 보내면(1회) 울린다 — 예전에는 placeholder core라 통째로 무동작이었다.
+    term.rt.observation.bell_count = 1;
+    session.dispatchBell();
+    try std.testing.expect(session.takeBell());
+
+    // 같은 값이 유지되면 다시 울리지 않는다(full-state 관측이 반복 전송돼도 중복 벨 금지).
+    session.dispatchBell();
+    try std.testing.expect(!session.takeBell());
+
+    // 여러 번 울린 뒤 한 번에 관측이 오면 1회로 합친다(로컬 bool 합침과 같은 동작).
+    term.rt.observation.bell_count = 5;
+    session.dispatchBell();
+    try std.testing.expect(session.takeBell());
+
+    // host live-upgrade(exec)로 카운터가 0에서 다시 시작 → **가짜 벨을 울리지 않고** 조용히 맞춘다.
+    term.rt.observation.bell_count = 0;
+    session.dispatchBell();
+    try std.testing.expect(!session.takeBell());
+    // 재동기화 후 새 벨은 정상 동작한다.
+    term.rt.observation.bell_count = 1;
+    session.dispatchBell();
+    try std.testing.expect(session.takeBell());
 }

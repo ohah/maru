@@ -500,6 +500,7 @@ pub const RemoteRuntime = struct {
         const mouse_tracking = if (metadata.get("mouse_tracking")) |v| (jsonBool(v) orelse return false) else false;
         // 모드는 optional — 없으면(구 host) bool에서 폴백한다. 폴백 값은 `normal`(클릭 리포팅)로 보수적으로 잡아
         // motion(any)을 추측 전송하지 않는다: 1000만 켠 앱에 motion을 쏟으면 PTY 부하와 오작동이 된다.
+        const bell_count: u64 = if (metadata.get("bell_count")) |v| (jsonU64(v) orelse return false) else 0;
         const mouse_tracking_mode: u8 = if (metadata.get("mouse_tracking_mode")) |v|
             (if (jsonU64(v)) |n| @intCast(@min(n, 4)) else return false)
         else if (mouse_tracking) 2 else 0;
@@ -568,6 +569,7 @@ pub const RemoteRuntime = struct {
             .alternate_scroll = alternate_scroll,
             .mouse_tracking = mouse_tracking,
             .mouse_tracking_mode = mouse_tracking_mode,
+            .bell_count = bell_count,
             .bracketed_paste = bracketed_paste,
             .foreground_available = foreground_available,
             .foreground_pgid = foreground_pgid,

@@ -86,6 +86,10 @@ pub const RuntimeManager = struct {
     /// observation은 client/창/stream마다 100ms cadence로 호출될 수 있지만 OS process 열거는 runtime당 최대 2Hz다.
     /// cwd/title/OSC 상태는 계속 100ms full-state로 읽고, 비싼 foreground syscall 결과만 공유 cache한다.
     foreground_cache: std.AutoHashMapUnmanaged(RuntimeHandle, ForegroundCache) = .empty,
+    /// runtime별 BEL 누적 횟수. core의 `takeBell()`은 **소비형 bool**이라 관측(full-state, "이전과 같으면 미전송")에
+    /// 그대로 실으면 true→true 전이를 잃어 둘째 벨을 놓친다. 그래서 host가 drain할 때마다 여기서 단조 증가시키고,
+    /// client는 마지막에 본 값과의 **차이**로 울릴지 정한다(로컬이 bool을 소비하는 것과 결과 동일).
+    bell_counts: std.AutoHashMapUnmanaged(RuntimeHandle, u64) = .empty,
 
     /// self-referential 필드를 안정 주소로 세운다. caller가 준 `*RuntimeManager` 슬롯을 채운다(반환 이동 없음).
     pub fn init(self: *RuntimeManager, allocator: std.mem.Allocator, io: std.Io, host_registry: *reg.TerminalRuntimeRegistry) void {
@@ -97,6 +101,7 @@ pub const RuntimeManager = struct {
         self.host_registry = host_registry;
         self.next_handle = 1;
         self.foreground_cache = .empty;
+        self.bell_counts = .empty;
     }
 
     /// 소유 registry를 해제한다. **호출 전 모든 runtime이 terminate돼 있어야** 한다(reader join·슬롯 회수가 terminate에서
@@ -104,6 +109,7 @@ pub const RuntimeManager = struct {
     /// 전까지 host는 SIGTERM으로 내려가 OS가 자식·스레드를 회수하므로 이 deinit은 clean-return 경로용이다.
     pub fn deinit(self: *RuntimeManager) void {
         self.foreground_cache.deinit(self.allocator);
+        self.bell_counts.deinit(self.allocator);
         self.surface_runtime.deinit();
         self.live_registry.deinit();
         self.* = undefined;
@@ -873,6 +879,17 @@ pub const RuntimeManager = struct {
         const surface = self.backend_impl.surfaceFor(handle) orelse return error.RuntimeNotFound;
         const be = self.backend_impl.backend();
 
+        // BEL drain은 관측을 만드는 **모든 경로**(주기 push·RPC pull·attach)에서 일어나지만, takeBell이 소비형이라
+        // 벨 1회당 카운터는 정확히 1 증가한다(중복 없음). 카운터는 단조 증가라 client가 delta로 판정한다.
+        const bell_gop = try self.bell_counts.getOrPut(self.allocator, handle);
+        if (!bell_gop.found_existing) bell_gop.value_ptr.* = 0;
+        {
+            surface.lockCore(self.io);
+            defer surface.unlockCore(self.io);
+            if (surface.core.takeBell()) bell_gop.value_ptr.* +%= 1;
+        }
+        const bell_count = bell_gop.value_ptr.*;
+
         const cache_gop = try self.foreground_cache.getOrPut(self.allocator, handle);
         if (!cache_gop.found_existing) cache_gop.value_ptr.* = .{};
         const foreground = cache_gop.value_ptr;
@@ -919,6 +936,7 @@ pub const RuntimeManager = struct {
             .mouse_tracking = core.mouse_tracking != .none,
             .mouse_tracking_mode = @intFromEnum(core.mouse_tracking), // 모드 단일 출처(위 bool은 구 client 미러)
             .bracketed_paste = core.bracketed_paste,
+            .bell_count = bell_count,
             .observer_generation = core.observerGeneration(),
             .title_generation = core.title_generation.load(.monotonic),
             .cols = core.size.cols,

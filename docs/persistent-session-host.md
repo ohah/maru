@@ -523,7 +523,10 @@ sequenceDiagram
 
 **현재 구현 범위:** 1–6의 deferred/attach/rollback과 stale host·missing runtime fail-closed는 P3 core에 구현됐다.
 **7의 per-Term ended placeholder는 구현됐다** — 영구 부재로 분류된 runtime만 그 Term을 읽기 전용 placeholder로 두고
-나머지 surface·split·탭·창 frame은 정상 복원한다(화면 내 지속 안내와 `⏎` 되살리기는 후속). 8의 `Recovered Sessions`,
+나머지 surface·split·탭·창 frame은 정상 복원한다. placeholder 화면에는 마지막 제목·위치와 `⏎` 안내가 **화면 콘텐츠로**
+남고(notice는 아무 키에나 닫히므로 그것만으로는 복구 방법이 사라진다), `⏎`가 그 pane 슬롯을 **제자리 교체**해 마지막
+cwd에서 새 셸을 시작한다. 자동 fresh spawn은 없다 — `⏎`가 유일한 승격 경로이고 다른 키·수식자 조합으로는 되살아나지
+않는다. 8의 `Recovered Sessions`,
 9의 manifest 전역 중복 검증은 여전히 P4 계획이다. 일시 실패로 분류된 누락 runtime은 종전처럼 해당 Window apply를
 실패시키며, 추가 Window는 teardown하고 primary는 명시적인 새 default-shell fallback으로 전환하되 마지막 완전
 checkpoint를 자동 저장으로 덮지 않는다.

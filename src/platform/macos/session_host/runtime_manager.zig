@@ -1280,6 +1280,7 @@ fn coreCommandFromWire(command: core_command_wire.Command) error{InvalidCommand}
             } else null,
         } },
         .jump_to_prompt => |direction| .{ .jump_to_prompt = direction },
+        .reset_input_modes => .reset_input_modes,
     };
 }
 

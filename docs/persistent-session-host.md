@@ -801,7 +801,7 @@ chunk_index:u32 | chunk_count:u32 | record_bytes...
 ```
 
 - 모든 정수는 network byte order, 문자열은 `length:u32 + UTF-8 bytes`, arbitrary input/output blob은 문자열 field에 넣지 않는다.
-- snapshot record는 `screen_meta(cols,rows,active_screen,cursor,modes)`, `row(row_index,run*)`,
+- snapshot record는 `screen_meta(cols,rows,active_screen,cursor,modes,scrollback_len,view_offset)`, `row(row_index,run*)`,
   `image_placement(image_id,placement_id,row,col,cell_x/y_offset,src_x/y/w/h,columns,rows,z)`(kitty display 충실),
   `image_blob(image_id,generation,width,height,bpp,pixels)`(디코드된 raw 픽셀 — client 디코더 불필요, >1 MiB는 header
   chunk_index/count로 청크), `prompt_marks(row_count, (kind:u8, has_exit, exit:i16)*)`(행별 OSC 133 semantic prompt —
@@ -1124,6 +1124,12 @@ P3-e도 슬라이스로 나눈다(제품 통합이라 크다).
     `observation_wire.fieldIsBoolOrAbsent`·`fieldFitsUnsignedOrAbsent`). 검증: override가 placeholder core를 이겨 host의
     DECCKM(화살표 SS3 `\x1bOA`)·kitty(escape `CSI 27u`)로 인코딩됨(host unit), 관측 wire round-trip으로 `app_keypad`·`kitty_flags`
     적용과 구 host 필드 부재 시 폴백을 고정한다. 관측이 backend-neutral 단일 출처라 placeholder `surface.core` 직접 읽기 금지 계약도 지킨다.
+  - **P3-e4c-7(스크롤바·입력모드 리셋 parity) 🟨**: 스크롤바 thumb과 ⌘⇧R이 host-backed에서 동작한다.
+    스크롤바는 `core.scrollbackLen()`을 직접 읽어 원격에선 항상 0이었고(placeholder) 스크롤백이 쌓여도 막대가
+    안 떴다 — `screen_meta`에 `scrollback_len`/`view_offset`을 실어 보내고, **로컬 core도 같은 이름으로
+    `RenderSnapshot`을 채워** 소비자가 화면 소유자를 묻지 않는 한 경로(`scrollStateOf`)를 쓴다. ⌘⇧R은 placeholder만
+    리셋해 원격 앱이 계속 mouse/focus 리포트를 보냈다 — `core_command`에 `reset_input_modes` op를 더해 host core에
+    적용한다. 두 필드는 record 끝에 붙은 optional이라 구 host는 0으로 남아 기존 동작(미표시)을 유지한다.
   - **P3-e4c-6(마우스 motion parity) 🟨**: host-backed의 **버튼 없는 motion 리포팅(DECSET 1003)**이 관측 모드를 쓴다.
     클릭 리포팅은 이미 관측으로 이관됐는데 `mouseMoved`만 placeholder core를 읽어(항상 `.none`) 원격에서 motion이
     통째로 빠져 있었다 — 1003을 켠 앱(vim/tmux hover)이 무동작. 근본 원인은 관측의 `mouse_tracking`이 **bool**이라

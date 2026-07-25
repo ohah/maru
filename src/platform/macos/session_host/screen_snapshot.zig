@@ -65,6 +65,9 @@ pub fn projectSnapshot(allocator: std.mem.Allocator, core: *terminal.TerminalCor
             .shape = @intFromEnum(snap.cursor_shape),
         },
         .modes = composeModes(core),
+        // 스크롤바 thumb 근거(§12) — client는 화면만 받으므로 길이/오프셋을 알 방법이 없다.
+        .scrollback_len = @intCast(@min(core.scrollbackLen(), std.math.maxInt(u32))),
+        .view_offset = @intCast(@min(core.viewOffset(), std.math.maxInt(u32))),
     };
     const meta_rec = try screen_stream.encodeScreenMeta(allocator, .{ .kind = .screen_meta, .generation = opts.generation }, meta);
     defer allocator.free(meta_rec);
@@ -496,6 +499,8 @@ pub fn computeDelta(allocator: std.mem.Allocator, prev_bytes: []const u8, core: 
             .active_screen = cur_active,
             .cursor = cur_cursor,
             .modes = cur_modes,
+            .scrollback_len = @intCast(@min(core.scrollbackLen(), std.math.maxInt(u32))),
+            .view_offset = @intCast(@min(core.viewOffset(), std.math.maxInt(u32))),
         });
         defer allocator.free(meta_rec);
         try screen_stream.appendRecord(&snapshot, allocator, meta_rec);

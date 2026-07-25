@@ -70,6 +70,10 @@ pub const CoreCommand = union(enum) {
     select_line: u16, // selectLineAt(트리플클릭, row)
     select_all,
     jump_to_prompt: i8, // jumpToPrompt(dir) — OSC 133 프롬프트 블록 점프(Cmd+↑/↓), view_offset mutate
+    /// 비파괴 입력 모드 리셋(Reset 메뉴 ⌘⇧R) — ssh 비정상 종료 등으로 남은 focus 1004·mouse·kitty keyboard 모드만
+    /// 끈다. host-backed면 **실제 모드를 든 host core**에 적용돼야 하므로 명령으로 위임한다(client core는 빈
+    /// placeholder라 거기서 리셋해 봐야 원격 앱은 계속 리포트를 보낸다).
+    reset_input_modes,
 };
 
 /// 명령을 코어에 적용한다. **호출자가 코어 락(core_mutex)을 잡은 상태여야 한다** — reader는 `owner_dbg.lock`,
@@ -123,6 +127,7 @@ pub fn apply(core: *terminal.TerminalCore, cmd: CoreCommand) void {
         .select_word => |s| core.selectWordAt(s.row, s.col, s.separators[0..s.sep_len]),
         .select_line => |row| core.selectLineAt(row),
         .select_all => core.selectAll(),
+        .reset_input_modes => core.resetInputModes(),
         .jump_to_prompt => |dir| _ = core.jumpToPrompt(dir), // bool 반환(스크롤됨)은 reader 렌더 트리거로 대체
     }
 }

@@ -148,6 +148,11 @@ pub const ScreenMeta = struct {
     active_screen: u8 = 0, // 0=primary, 1=alternate
     cursor: Cursor = .{},
     modes: u32 = 0,
+    /// 스크롤바 thumb 근거. client는 화면만 받고 스크롤백 **길이**를 알 방법이 없어(placeholder core는 0) 원격
+    /// 세션에 스크롤바가 뜨지 않았다. `modes`의 viewport_scrolled 비트는 "스크롤됐는가"만 알려줘 크기 계산에 부족하다.
+    /// 끝에 추가한 optional 필드라 구 decoder는 length로 무시하고(기존 동작), 구 host가 안 보내면 0으로 남는다.
+    scrollback_len: u32 = 0,
+    view_offset: u32 = 0,
 };
 
 /// 한 행의 run 목록. wire: row_index:u16 | run_count:u32 | run*. `runs`는 decode가 allocator로 소유(caller가 `deinit`).
@@ -501,6 +506,8 @@ pub fn encodeScreenMeta(allocator: std.mem.Allocator, header: RecordHeader, meta
     try w.u8v(meta.active_screen);
     try w.cursor(meta.cursor);
     try w.u32v(meta.modes);
+    try w.u32v(meta.scrollback_len);
+    try w.u32v(meta.view_offset);
     return finishRecord(allocator, .{ .kind = .screen_meta, .generation = header.generation, .version = header.version, .sequence = header.sequence, .chunk_index = header.chunk_index, .chunk_count = header.chunk_count }, body.items);
 }
 
@@ -512,6 +519,9 @@ pub fn decodeScreenMeta(body: []const u8) DecodeError!ScreenMeta {
         .active_screen = try r.u8v(),
         .cursor = try r.cursor(),
         .modes = try r.u32v(),
+        // 끝에 붙은 optional 필드 — 구 host의 짧은 body는 0으로 남긴다(스크롤바 미표시 = 기존 동작).
+        .scrollback_len = r.u32v() catch 0,
+        .view_offset = r.u32v() catch 0,
     };
 }
 

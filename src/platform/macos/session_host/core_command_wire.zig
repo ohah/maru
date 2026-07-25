@@ -23,6 +23,8 @@ pub const Command = union(enum) {
     set_emoji_wide: bool,
     set_runtime_config: RuntimeConfig,
     jump_to_prompt: i8,
+    /// 비파괴 입력 모드 리셋(⌘⇧R). 인자 없는 명령이라 op 이름만 실린다.
+    reset_input_modes,
 
     pub const CellMetrics = struct {
         width: u32,
@@ -102,6 +104,10 @@ pub fn encodeParams(allocator: std.mem.Allocator, stream_id: u64, command: Comma
             .op = "jump_to_prompt",
             .direction = direction,
         }),
+        .reset_input_modes => stringify(allocator, .{
+            .stream_id = stream_id,
+            .op = "reset_input_modes",
+        }),
     };
 }
 
@@ -152,6 +158,7 @@ pub fn decodeParams(params: std.json.ObjectMap) ?Command {
     if (std.mem.eql(u8, op, "set_runtime_config")) {
         return .{ .set_runtime_config = decodeRuntimeConfig(params) orelse return null };
     }
+    if (std.mem.eql(u8, op, "reset_input_modes")) return .reset_input_modes;
     if (std.mem.eql(u8, op, "jump_to_prompt")) {
         const direction = i64Field(params, "direction") orelse return null;
         if (direction != -1 and direction != 1) return null;

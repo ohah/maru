@@ -1448,6 +1448,15 @@ controlled Claude/Codex foreground fixture를 낸 뒤 GUI observation까지 왕�
   않는다. loser는 config·manifest write, restore, runtime spawn이 모두 0인 `second instance unsupported`로 종료한다.
   symlink/non-regular/wrong-owner/wrong-mode 거부, manifest atomic replace 중 loser 거부, winner `SIGKILL` 뒤 lease
   재획득을 자동 검증한다. 이는 collaborative multi-app editing이 아니라 last-writer-wins 손실 방지다.
+  **구현 완료:** Swift executable entry가 `NSApplication.shared`·Dock 등록·ABI/AppKit
+  bootstrap과 Window/AppSession/config/restore/runtime보다 먼저 Zig process-global lease를 획득한다. fresh profile의
+  parent directory와 lock leaf 생성은 lease 획득 자체에 필요한 유일한
+  선행 부수효과다. typed 결과는 `acquired|held|unsafe|io_failure|invalid_path`이며 startup loser는 controller/AppKit
+  생성 전에 즉시 종료하므로 termination·save 경로에 진입하지 않는다. unit/ABI gate는 secure leaf·경합·atomic replace·
+  restrictive umask create·fresh two-process race·exec descendant CLOEXEC·`SIGKILL` 회수를,
+  `macos-app-instance-lease-smoke`는 격리한 user home의 실제 제품 실행파일 두 개로 loser exit 2,
+  winner 생존, config/workspace/cache sentinel 무변경, winner `SIGKILL` 뒤 successor 재획득을 검증한다.
+  제품 release/reset ABI는 의도적으로 없다.
 - 여러 workspace·pane·Term binding, cross-window 이동, partial missing runtime, `Recovered Sessions`를 검증한다.
 - 기본 전환 전 단일 GUI connection에도 nonblocking partial write, 16 MiB bounded outbound, reply/control reserve,
   screen invalidation을 가진 `ConnectionSlot`을 적용해 stalled GUI가 PTY/owner tick을 막지 않게 한다. P5는 이를
@@ -1482,7 +1491,7 @@ Notification Center
 권한·로그인 UI 자동화가 준비된 전용 macOS runner가 없으면 수동 클릭으로 대체하지 않고 해당 notification gate를 미완료로
 둔다. P5 CLI나 U5 자동 migration 전체는 이 종료 gate에 포함하지 않는다.
 
-구현 순서는 L0 app-instance lease → R1 tombstone → R2 manifest validator/reconciliation →
+구현 순서는 L0 app-instance lease(완료) → R1 tombstone → R2 manifest validator/reconciliation →
 R3 `ScreenInbox`/R4 deferred resync →
 T0 single-connection `ConnectionSlot` → C1 pure checkpoint coordinator/C2 file adapter failure injection/C3 dirty wiring/
 C4 AppKit terminate handshake → E1 event wake/E2 observation cache → parity micro-PR → N1 journal/N2 sink/N3 cold route →

@@ -5,6 +5,7 @@ const session_mod = @import("app_session.zig");
 const keycode = @import("keycode.zig");
 const keyhint_hold = maru.session.keyhint_hold; // OS-중립 홀드 gesture 정책(session L2 — session/keyhint_hold.zig)
 const command_catalog = @import("command_catalog.zig");
+const app_instance_lease_mod = @import("app_instance_lease.zig");
 const file_tree_mutation_backend = @import("file_tree_mutation_backend.zig");
 const control_server_mod = @import("control_server.zig"); // Track C A2b: 라이브 컨트롤 서버(소켓+accept 스레드+marshal)
 const control_socket = @import("control_socket.zig"); // 1b: formatInstanceKey(인스턴스 키)
@@ -44,9 +45,125 @@ pub const Status = enum(c_int) {
     move_failed = 10,
 };
 
+pub const AppInstanceLeaseResult = enum(u32) {
+    acquired = c.MARU_APP_INSTANCE_LEASE_ACQUIRED,
+    held = c.MARU_APP_INSTANCE_LEASE_HELD,
+    unsafe = c.MARU_APP_INSTANCE_LEASE_UNSAFE,
+    io_failure = c.MARU_APP_INSTANCE_LEASE_IO_FAILURE,
+    invalid_path = c.MARU_APP_INSTANCE_LEASE_INVALID_PATH,
+};
+
+const LeaseSlot = struct {
+    held: ?app_instance_lease_mod.AppInstanceLease = null,
+
+    fn acquire(self: *LeaseSlot, path: [:0]const u8) AppInstanceLeaseResult {
+        if (self.held != null) return .held;
+        self.held = app_instance_lease_mod.AppInstanceLease.acquire(path) catch |err| return switch (err) {
+            error.AlreadyOwned => .held,
+            error.UnsafeLock => .unsafe,
+            error.IoFailure => .io_failure,
+        };
+        return .acquired;
+    }
+
+    fn deinitForTest(self: *LeaseSlot) void {
+        if (self.held) |*lease| lease.deinit();
+        self.held = null;
+    }
+};
+
+// AppSession보다 먼저 생기고 모든 Window보다 오래 사는 process-global owner다. 제품에는 release/reset ABI를
+// 노출하지 않는다. 정상/비정상 process exit에서 kernel이 CLOEXEC fd와 flock을 함께 회수한다.
+var app_instance_lease_slot: LeaseSlot = .{};
+
 // EventKind는 app_session.zig가 소유한다(FrameSummary.last_event_kind에 실린다).
 // 여기서는 ABI 표면으로 re-export만 한다.
 pub const EventKind = session_mod.EventKind;
+
+test "ABI v145 app instance lease result values match the C header" {
+    try std.testing.expectEqual(@as(u32, 145), abi_version);
+    try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_ACQUIRED), @intFromEnum(AppInstanceLeaseResult.acquired));
+    try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_HELD), @intFromEnum(AppInstanceLeaseResult.held));
+    try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_UNSAFE), @intFromEnum(AppInstanceLeaseResult.unsafe));
+    try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_IO_FAILURE), @intFromEnum(AppInstanceLeaseResult.io_failure));
+    try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_INVALID_PATH), @intFromEnum(AppInstanceLeaseResult.invalid_path));
+}
+
+test "app instance LeaseSlot acquires exactly once and preserves typed failure" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+
+    var path_buf: [256]u8 = undefined;
+    const path = std.fmt.bufPrintZ(&path_buf, "/private/tmp/maru-app-abi-lease-{d}", .{std.c.getpid()}) catch
+        return error.SkipZigTest;
+    _ = std.c.unlink(path.ptr);
+    defer _ = std.c.unlink(path.ptr);
+
+    var first: LeaseSlot = .{};
+    defer first.deinitForTest();
+    try std.testing.expectEqual(AppInstanceLeaseResult.acquired, first.acquire(path));
+    try std.testing.expectEqual(AppInstanceLeaseResult.held, first.acquire(path));
+
+    var competitor: LeaseSlot = .{};
+    defer competitor.deinitForTest();
+    try std.testing.expectEqual(AppInstanceLeaseResult.held, competitor.acquire(path));
+}
+
+test "app instance lease ABI rejects invalid paths without mutating the global slot" {
+    try std.testing.expectEqual(
+        @intFromEnum(AppInstanceLeaseResult.invalid_path),
+        maru_macos_app_instance_lease_acquire(null, 1),
+    );
+    const embedded_nul = [_]u8{ 'a', 0, 'b' };
+    try std.testing.expectEqual(
+        @intFromEnum(AppInstanceLeaseResult.invalid_path),
+        maru_macos_app_instance_lease_acquire(&embedded_nul, embedded_nul.len),
+    );
+}
+
+test "Swift startup acquires the writer lease before AppKit and mutable app bootstrap" {
+    const source = @embedFile("MaruAppHost.swift");
+    const main_start = std.mem.indexOf(u8, source, "static func main()") orelse
+        return error.MissingMain;
+    const main_end = std.mem.indexOfPos(u8, source, main_start, "\n    func applicationDidFinishLaunching") orelse
+        return error.MissingLaunchCallback;
+    const main_body = source[main_start..main_end];
+    const lease = std.mem.indexOf(u8, main_body, "acquireAppInstanceWriterLeaseBeforeAppKit()") orelse
+        return error.MissingLeaseAcquire;
+    const failure_exit = std.mem.indexOf(u8, main_body, "Darwin.exit(failure.code)") orelse
+        return error.MissingLeaseFailureExit;
+    try std.testing.expect(lease < failure_exit);
+    const prelease_forbidden = [_][]const u8{
+        "NSApplication.shared",
+        "MaruAppHostController()",
+        "setActivationPolicy",
+        "app.run()",
+    };
+    for (prelease_forbidden) |needle| {
+        const position = std.mem.indexOf(u8, main_body, needle) orelse
+            return error.MissingAppKitBootstrap;
+        try std.testing.expect(lease < position);
+        try std.testing.expect(failure_exit < position);
+    }
+
+    const launch_start = main_end;
+    const launch_end = std.mem.indexOfPos(u8, source, launch_start, "\n    func applicationWillTerminate") orelse
+        return error.MissingTerminateCallback;
+    const launch_body = source[launch_start..launch_end];
+    const mutable_bootstrap = [_][]const u8{
+        "cleanupPasteImages",
+        "makeTerminalSurface",
+        "makePlaceholderWindow",
+        "loadWorkspaceText",
+        "startAppSession",
+        "restoreWorkspace",
+        "registerGlobalHotkeys",
+        "maru_macos_control_server_start",
+    };
+    for (mutable_bootstrap) |needle| {
+        _ = std.mem.indexOf(u8, launch_body, needle) orelse
+            return error.MissingBootstrapOperation;
+    }
+}
 
 test "ABI v133 live preview raw mode route and asset role values match the C header" {
     try std.testing.expectEqual(@as(u32, c.MARU_FILE_PANEL_MODE_READ), @intFromEnum(maru.session.dock_panel.Mode.read));
@@ -169,6 +286,20 @@ pub export fn maru_macos_app_host_capabilities(out_capabilities: ?*Capabilities)
     const out = out_capabilities orelse return @intFromEnum(Status.null_out);
     out.* = defaultCapabilities();
     return @intFromEnum(Status.ok);
+}
+
+pub export fn maru_macos_app_instance_lease_acquire(path_ptr: ?[*]const u8, path_len: usize) u32 {
+    const ptr = path_ptr orelse return @intFromEnum(AppInstanceLeaseResult.invalid_path);
+    if (path_len == 0 or path_len > 4095) return @intFromEnum(AppInstanceLeaseResult.invalid_path);
+    const path = ptr[0..path_len];
+    if (std.mem.indexOfScalar(u8, path, 0) != null)
+        return @intFromEnum(AppInstanceLeaseResult.invalid_path);
+
+    var path_buf: [4096]u8 = undefined;
+    @memcpy(path_buf[0..path.len], path);
+    path_buf[path.len] = 0;
+    const path_z: [:0]const u8 = path_buf[0..path.len :0];
+    return @intFromEnum(app_instance_lease_slot.acquire(path_z));
 }
 
 pub export fn maru_macos_app_session_create(

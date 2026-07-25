@@ -3,6 +3,7 @@
 const std = @import("std");
 const c = std.c;
 const posix = std.posix;
+extern "c" fn nanosleep(rqtp: *const c.timespec, rmtp: ?*c.timespec) c_int;
 
 pub const Error = error{
     OpenFailed,
@@ -25,9 +26,27 @@ pub const OwnerLease = struct {
     identity: Identity,
 
     pub fn acquire(path: [:0]const u8) Error!OwnerLease {
-        const fd = c.open(path.ptr, .{ .ACCMODE = .RDWR, .CREAT = true, .CLOEXEC = true, .NOFOLLOW = true }, @as(c.mode_t, 0o600));
-        if (fd < 0) return error.OpenFailed;
+        var created = false;
+        var fd = c.open(path.ptr, .{ .ACCMODE = .RDWR, .CLOEXEC = true, .NOFOLLOW = true }, @as(c.mode_t, 0));
+        if (fd < 0 and posix.errno(fd) == .NOENT) {
+            fd = c.open(
+                path.ptr,
+                .{ .ACCMODE = .RDWR, .CREAT = true, .EXCL = true, .CLOEXEC = true, .NOFOLLOW = true },
+                @as(c.mode_t, 0o600),
+            );
+            if (fd >= 0) {
+                created = true;
+            } else if (posix.errno(fd) == .EXIST) {
+                fd = openExistingAfterCreateRace(path);
+            }
+        } else if (fd < 0 and posix.errno(fd) == .ACCES) {
+            fd = openExistingAfterCreateRace(path);
+        }
+        if (fd < 0) return classifyOpenFailure(path);
         errdefer _ = c.close(fd);
+        // open(2)의 mode는 umask 영향을 받는다. 우리가 O_EXCL로 새 inode를 만든 경우에만
+        // exact 0600으로 고정한다. 기존 unsafe leaf는 절대 자동 repair하지 않는다.
+        if (created and c.fchmod(fd, 0o600) != 0) return error.FcntlFailed;
         try validate(fd);
         const rc = c.flock(fd, c.LOCK.EX | c.LOCK.NB);
         // Darwin에서 EWOULDBLOCK은 EAGAIN과 같은 errno이며 Zig는 AGAIN으로 노출한다.
@@ -36,6 +55,36 @@ pub const OwnerLease = struct {
         const path_identity = identityForPath(path) catch return error.InvalidOwnerFile;
         if (!sameIdentity(identity, path_identity)) return error.InvalidOwnerFile;
         return .{ .fd = fd, .identity = identity };
+    }
+
+    fn openExistingAfterCreateRace(path: [:0]const u8) c.fd_t {
+        // O_EXCL winner가 restrictive umask로 mode 000 inode를 만든 직후 fchmod(0600)하기
+        // 전에는 peer open이 EACCES일 수 있다. current-UID regular leaf인 동안만 bounded
+        // retry하고, creator가 죽었거나 기존 unsafe leaf면 classifyOpenFailure가 unsafe로
+        // 확정한다. 기존 inode를 chmod하거나 repair하지 않는다.
+        var attempts: usize = 0;
+        while (attempts < 250) : (attempts += 1) {
+            const fd = c.open(path.ptr, .{ .ACCMODE = .RDWR, .CLOEXEC = true, .NOFOLLOW = true }, @as(c.mode_t, 0));
+            if (fd >= 0) return fd;
+            if (posix.errno(fd) != .ACCES and posix.errno(fd) != .NOENT) return fd;
+            var stat: posix.Stat = undefined;
+            if (c.fstatat(posix.AT.FDCWD, path.ptr, &stat, posix.AT.SYMLINK_NOFOLLOW) == 0 and
+                (!posix.S.ISREG(stat.mode) or stat.uid != c.getuid()))
+                return fd;
+            const delay = c.timespec{ .sec = 0, .nsec = 1_000_000 };
+            _ = nanosleep(&delay, null);
+        }
+        return -1;
+    }
+
+    fn classifyOpenFailure(path: [:0]const u8) Error {
+        // 성공 권위는 fd fstat뿐이다. 이 no-follow stat은 기존 unsafe leaf를
+        // generic I/O 실패로 숨기지 않기 위한 error classification 전용이다.
+        var stat: posix.Stat = undefined;
+        if (c.fstatat(posix.AT.FDCWD, path.ptr, &stat, posix.AT.SYMLINK_NOFOLLOW) == 0 and
+            !metadataIsValid(stat, c.getuid()))
+            return error.InvalidOwnerFile;
+        return error.OpenFailed;
     }
 
     /// Target image가 inherited non-CLOEXEC owner slot을 CLOEXEC working descriptor로 바꿔 lifetime lock을 이어받는다.
@@ -125,17 +174,15 @@ pub const OwnerLease = struct {
     }
 
     fn validate(fd: c.fd_t) Error!void {
-        const flags = c.fcntl(fd, c.F.GETFD, @as(c_int, 0));
-        if (flags < 0) return error.InvalidOwnerFile;
         var stat: posix.Stat = undefined;
-        if (c.fstat(fd, &stat) != 0 or !posix.S.ISREG(stat.mode) or stat.uid != c.getuid() or
-            stat.mode & 0o777 != 0o600) return error.InvalidOwnerFile;
+        if (c.fstat(fd, &stat) != 0 or !metadataIsValid(stat, c.getuid()))
+            return error.InvalidOwnerFile;
     }
 
     fn identityForFd(fd: c.fd_t) Error!Identity {
         var stat: posix.Stat = undefined;
-        if (c.fstat(fd, &stat) != 0 or !posix.S.ISREG(stat.mode) or stat.uid != c.getuid() or
-            stat.mode & 0o777 != 0o600) return error.InvalidOwnerFile;
+        if (c.fstat(fd, &stat) != 0 or !metadataIsValid(stat, c.getuid()))
+            return error.InvalidOwnerFile;
         return .{ .dev = stat.dev, .ino = stat.ino };
     }
 
@@ -143,8 +190,7 @@ pub const OwnerLease = struct {
         var stat: posix.Stat = undefined;
         if (c.fstatat(posix.AT.FDCWD, path.ptr, &stat, posix.AT.SYMLINK_NOFOLLOW) != 0)
             return error.OpenFailed;
-        if (!posix.S.ISREG(stat.mode) or stat.uid != c.getuid() or
-            stat.mode & 0o777 != 0o600)
+        if (!metadataIsValid(stat, c.getuid()))
             return error.InvalidOwnerFile;
         return .{ .dev = stat.dev, .ino = stat.ino };
     }
@@ -153,6 +199,10 @@ pub const OwnerLease = struct {
         return a.dev == b.dev and a.ino == b.ino;
     }
 };
+
+pub fn metadataIsValid(stat: posix.Stat, expected_uid: posix.uid_t) bool {
+    return posix.S.ISREG(stat.mode) and stat.uid == expected_uid and stat.mode & 0o777 == 0o600;
+}
 
 test "owner lease remains exclusive through inherited-slot adoption" {
     const exec_fd_set = @import("exec_fd_set.zig");
@@ -196,4 +246,12 @@ test "owner lease cleanup preserves a replacement inode" {
     try std.testing.expectEqual(OwnerLease.UnlinkOutcome.replaced, try old.unlinkOwnedWhileLocked(path));
     try std.testing.expectError(error.AlreadyOwned, OwnerLease.acquire(path));
     try std.testing.expectEqual(OwnerLease.UnlinkOutcome.removed, try replacement.unlinkOwnedWhileLocked(path));
+}
+
+test "owner lease metadata rejects a different uid without privileged chown" {
+    var stat: posix.Stat = std.mem.zeroes(posix.Stat);
+    stat.mode = posix.S.IFREG | 0o600;
+    stat.uid = c.getuid();
+    try std.testing.expect(metadataIsValid(stat, c.getuid()));
+    try std.testing.expect(!metadataIsValid(stat, c.getuid() +% 1));
 }

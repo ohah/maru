@@ -159,6 +159,12 @@ surface custom-name="" title="ended" cwd="/repo" command="/bin/zsh" cols=100 row
   atomic replace 대상인 `workspace.v1` inode를 직접 잠그거나 정상 실행 중 lock file을 unlink하지 않는다. 두 번째 app
   process는 config·manifest write, restore, runtime 생성이 0인 명시적 unsupported 상태로 종료해 last-writer-wins를
   막는다. collaborative multi-app edit/read-only attach는 P5 이후 별도 범위다. `maru attach` CLI는 manifest를 쓰지 않는다.
+  **L0 구현 완료:** lease는 Swift의 workspace URL에서 sibling path를 파생하고 Zig process-global owner가 보유한다.
+  `NSApplication.shared`/Dock/controller 생성 전 startup loser는 `second instance unsupported`와 exit 2로 종료해
+  termination/save 경로 자체에 진입하지 않는다.
+  lock parent/leaf 생성은 fresh profile 획득을 위한 lease artifact로 허용되는 유일한 loser-side filesystem effect다.
+  restrictive umask/fresh-create race/exec descendant는 unit gate가, 실제 실행파일 이중 실행의 sentinel 무변경과
+  `SIGKILL` 뒤 재획득은 `mise run macos-app-instance-lease-smoke`가 검증한다.
 - workspace 생성/삭제, split, rename/group/pin, Term 이동/닫기, cross-window 이동, binding 변경은 dirty를 만들고 짧은
   debounce 뒤 같은 디렉터리 temp write·atomic replace로 전체 manifest를 교체한다. GUI process 비정상 종료와 경합해도
   이전 또는 새 완전본 중 하나만 남겨야 하며, 창별로 따로 publish하지 않는다. 전원 손실 durability와 file/directory
@@ -472,8 +478,10 @@ reader/migration을 먼저 설계한다. **additive 스칼라 필드 추가는 k
 - temp write/atomic replace 각 fail-index와 GUI SIGKILL에서 이전 또는 새 완전 manifest만 읽히는 process 테스트.
 - checkpoint generation stale completion, overlapping debounce, background save 실패의 dirty 유지·bounded
   backoff/notice coalesce, final Quit capture/write 실패의 app-quitting 정책 rollback·detach 0·Quit 취소 테스트.
-- 두 app process의 lifetime lease 경쟁에서 writer 정확히 1, loser restore/write/runtime 생성 0, winner SIGKILL 뒤
-  lease release/reacquire, CLI write 0인 process 테스트.
+- L0 두 app process의 lifetime lease 경쟁에서 writer 정확히 1, loser의 pre-AppKit exit와 config/workspace/cache
+  무변경, winner SIGKILL 뒤 lease release/reacquire를 검증하는 process 테스트.
+- P5 `maru attach` CLI가 구현될 때 GUI lease 유무와 무관하게 manifest write 0을 별도 process gate로 고정한다.
+  아직 존재하지 않는 P5 CLI 명령을 L0 완료 증거로 세지 않는다.
 - 실제 signed app을 종료·재실행해 같은 `runtime-handle`이 같은 child/scrollback에 붙는 무인 macOS E2E.
 - ended Term을 Enter 없이 capture/Quit/relaunch하는 과정을 2회 이상 반복해 host probe·attach·새 shell spawn이 모두 0이고,
   Enter 성공 때만 새 live handle로 교체되는 durable tombstone E2E.

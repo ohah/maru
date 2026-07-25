@@ -1071,6 +1071,21 @@ pub fn build(b: *std.Build) void {
         macos_app_run.step.dependOn(&macos_app_bundle.step);
         macos_app_step.dependOn(&macos_app_run.step);
 
+        const macos_app_instance_lease_smoke_step = b.step(
+            "macos-app-instance-lease-smoke",
+            "Verify direct double-launch exclusion and SIGKILL reacquisition",
+        );
+        const macos_app_instance_lease_smoke = b.addSystemCommand(&.{
+            "sh",
+            "tools/test-macos-app-instance-lease.sh",
+        });
+        macos_app_instance_lease_smoke.addArg(b.pathFromRoot(
+            "zig-out/Maru.app/Contents/MacOS/maru-macos-app",
+        ));
+        macos_app_instance_lease_smoke.setCwd(b.path("."));
+        macos_app_instance_lease_smoke.step.dependOn(&macos_app_bundle.step);
+        macos_app_instance_lease_smoke_step.dependOn(&macos_app_instance_lease_smoke.step);
+
         const macos_app_smoke_step = b.step("macos-app-smoke", "Run the macOS Swift app host app shell smoke");
         const macos_app_smoke_fixture = b.addSystemCommand(&.{
             "sh", "-eu", "-c",

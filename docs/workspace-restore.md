@@ -57,14 +57,21 @@ workspace restore와 persistent-session attach는 서로 대체하지 않는다.
 직렬화에 실패하면 성공한 일부 Window만으로 기존 `workspace.v1`을 덮지 않고 마지막 완전본을 보존한다. restore도 Window
 모델 publish 전에 surface들을 stage하며, 기존 persistent runtime attach 뒤 후속 surface가 실패하면 앞 runtime은
 terminate하지 않고 controller subscription만 detach해 rollback한다. saved Window 하나라도 apply하지 못하면 그 추가 창은
-default shell로 위장하지 않고 teardown하며, 이번 실행은 `restore incomplete`로 남아 다음 Quit의 자동 checkpoint를 막아
-마지막 완전 파일을 보존한다. **apply가 성공했어도 복원이 조용히 버린 항목이 있으면 같은 보호를 적용한다**(v144):
-capability 검증에서 버린 파일 패널 entry, 그 결과로 비워져 제거된 dock 그룹, 접근 불가로 강등한 explorer root는
-apply를 실패시키지 않지만 복원된 모델이 저장 파일을 표현하지 못한다는 뜻이므로, Zig가 그 개수를
-`take_workspace_restore_dropped`로 노출하고 호출자가 0이 아니면 `restore incomplete`와 같은 래치를 세운다(이 신호가
-없으면 다음 Quit이 버려진 도크 배치와 root를 그대로 파일에 커밋해 사용자가 영구히 잃는다). 개수는 정확한 회계가
-아니라 차단 판정용 신호다 — 한 원인이 entry와 빈 그룹 둘로 세어질 수 있다. quick은 아직 checkpoint 대상이 아니며 host orphan을
-막기 위해 in-process backend로만 생성되어 앱 Quit 때 종료한다.
+default shell로 위장하지 않고 teardown하며, 이번 실행은 `restore incomplete`로 남는다. **apply가 성공했어도 복원이 조용히
+버린 항목이 있으면 같은 래치를 세운다**(v144): capability 검증에서 버린 파일 패널 entry, 그 결과로 비워져 제거된 dock 그룹,
+접근 불가로 강등한 explorer root, 그리고 **영구 부재로 분류돼 종료 placeholder가 된 Term**(저장된 `runtime-handle`을 잃는다 —
+[persistent-session-host.md](persistent-session-host.md) "접속 실패 행렬")은 apply를 실패시키지 않지만 복원된 모델이 저장
+파일을 표현하지 못한다는 뜻이므로, Zig가 그 개수를 `take_workspace_restore_dropped`로 노출한다. 개수는 정확한 회계가
+아니라 판정용 신호다 — 한 원인이 entry와 빈 그룹 둘로 세어질 수 있다.
+
+**checkpoint 보호(단일 출처).** 이 래치가 선 실행의 종료 저장은 **덮어쓰기 직전에 마지막 완전본을 `workspace.v1.bak`으로
+한 번 남기고 정상 진행**한다(이미 `.bak`이 있으면 덮지 않는다 — 연속 불완전 실행이 가장 완전한 첫 사본을 밀어내지 않게).
+처음 도입 때는 저장을 통째로 막았는데(v144), 그 래치에는 해제 경로가 없고 저장을 막으면 stale 파일이 그대로 남아 **다음
+실행이 같은 drop을 다시 만든다** — 자기영속 루프다. 그동안 사용자가 만든 창·탭·split·pane rename·창 위치는 매 종료마다
+조용히 사라져, 무기한 차단이 데이터 손실 방지가 아니라 데이터 손실 그 자체가 됐다(code-review max). 백업 후 저장은 잃을
+뻔한 상태를 파일로 남기면서 루프를 끊는다. 복구는 사용자가 `.bak`을 `workspace.v1`로 되돌리면 된다.
+
+quick은 아직 checkpoint 대상이 아니며 host orphan을 막기 위해 in-process backend로만 생성되어 앱 Quit 때 종료한다.
 
 시작 host는 workspace 텍스트를 **AppSession 생성 전** Zig parser로 preflight한다(ABI v142,
 `workspace_window_count(session=NULL)`). 복원할 Window가 하나 이상이면 각 AppSession을

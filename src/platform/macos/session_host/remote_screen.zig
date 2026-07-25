@@ -190,6 +190,11 @@ pub fn build(allocator: std.mem.Allocator, asm_: *const screen_assembler.ScreenA
     // links: 조립기의 wire(LinkSpanWire)를 core terminal.ViewportLink로 1:1 환산. kind/scope의 닫힌 범위는
     // screen_stream.decodeLinkSpans가 먼저 검증하므로 여기서 미래 값을 현재 의미로 다시 추측하지 않는다.
     // 좌표는 host가 뷰포트 상대로 이미 클립해 보냈다(§12).
+    //
+    // 여기서 관용 클램프(범위 밖 → .url/.web)를 걷어낸 것이 **혼합 빌드를 죽이지 않는 이유**(code-review max에서 제기됨):
+    // 연결은 `validateExactClient`가 `screen_codec_version`·`wire_major`·`build_id`를 **정확히** 일치시킬 때만 성립하고
+    // (`findCurrentManifestHost`도 같은 codec 일치를 요구한다), enum 확장은 codec_version bump를 동반한다. 즉 "같은 codec인데
+    // 모르는 scope 값"은 새 빌드가 아니라 **정의상 손상**이고, 손상은 §12대로 record를 reject한다(조용한 degrade 금지).
     const src_links = asm_.linkSpans();
     const links: []terminal.ViewportLink = if (src_links.len == 0) &.{} else ln: {
         const arr = try allocator.alloc(terminal.ViewportLink, src_links.len);

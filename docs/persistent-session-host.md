@@ -545,8 +545,10 @@ primary는 notice가 보이는 명시적 default-shell fallback + checkpoint 자
 
 | 관측 | 분류 | 근거 |
 | --- | --- | --- |
-| manifest 없음 + current/N-1 legacy endpoint 소진 | `FailureReason.host_gone` → `error.PersistentRuntimeGone` | 추측할 endpoint가 더 없다 |
-| manifest 있음 + endpoint 무응답 + owner lease 사망 | `host_gone` → `PersistentRuntimeGone` | 재부팅·crash 뒤 stale manifest. lease는 `findCurrentManifestHost`가 이미 쓰는 host 생존 증거 |
+| manifest 없음 + current/N-1 legacy endpoint 소진(**모든 probe가 부재**) | `FailureReason.host_gone` → `error.PersistentRuntimeGone` | 추측할 endpoint가 더 없고, 소진의 이유가 전부 "거기 없다"였다 |
+| manifest 없음 + 소진했지만 probe 중 **미확정**이 있었다(EAGAIN/EINTR/ETIMEDOUT, 또는 hello가 갈린 peer) | `startup_timeout` → `PersistentRuntimeUnavailable` | 응답하지 않은 endpoint 뒤에 host가 살아 있을 수 있다 |
+| manifest 있음 + endpoint 무응답 + owner lease **`free`**(잡을 수 있었거나 파일이 ENOENT) | `host_gone` → `PersistentRuntimeGone` | 재부팅·crash 뒤 stale manifest. lease는 `findCurrentManifestHost`가 이미 쓰는 host 생존 증거 |
+| manifest 있음 + endpoint 무응답 + owner lease **`unknown`**(fd 고갈·권한 등으로 못 봄) | 원래 실패 reason → `PersistentRuntimeUnavailable` | 판정 불가는 host에 대한 증거가 아니라 우리 쪽 사정이다 |
 | host가 `runtime_not_found`·`stale_host` 응답 | `error.RuntimeNotFound`·`StaleHostHandle` → `PersistentRuntimeGone` | host가 긍정적으로 부재를 말했다 |
 | pool 슬롯이 다른 host로 교체 | `HostIdentityMismatch` → `PersistentRuntimeGone` | 그 handle은 stale이다 |
 | `lifecycle = restoring`(host exec 업그레이드 중) | `startup_timeout` → `PersistentRuntimeUnavailable` | runtime은 생존한다 |
@@ -558,12 +560,16 @@ primary는 notice가 보이는 명시적 default-shell fallback + checkpoint 자
 실패시키는 현행 fail-close를 유지한다. 분류를 이 전환보다 **먼저** 별도로 도입한 이유는, 오분류 회귀가 곧바로
 checkpoint 오염으로 이어져 재현·롤백이 불가능한 손실이 되기 때문이다.
 
-**checkpoint 래치는 손대지 않았다.** placeholder가 생긴 창은 apply가 성공하므로 `workspaceRestoreIncomplete`가 서지
-않고 다음 Quit의 자동 저장이 진행된다 — 되살리지 않은 묘비가 `runtime-handle` 없이 cwd만 남기고 저장되는 의도된
-결과다. 이것이 안전한 이유는 두 가지가 이미 성립하기 때문이다: (1) 일시 실패(`Unreachable`)는 placeholder가 되지 않고
-여전히 창을 실패시켜 래치를 세운다 — 즉 "`Unreachable` 묘비"라는 범주는 **구조적으로 존재하지 않는다**, (2) 복원이
-조용히 버린 파일 패널 entry·dock 그룹·explorer root는 `take_workspace_restore_dropped`가 별도로 래치를 세운다. 두 가드
-중 하나라도 없으면 placeholder 성공이 "부분 복원을 저장해 원본을 덮는" 경로가 된다.
+**묘비도 checkpoint 신호를 세운다(code-review max 수정).** 처음엔 "래치를 손대지 않는다"였다 — 일시 실패는 묘비가 되지
+않으니 `Unreachable` 묘비라는 범주가 구조적으로 없고, 파일 패널·dock·explorer의 drop만 래치를 세우면 충분하다는 논리였다.
+그 논리의 구멍은 **분류가 틀렸을 때**다: 접속을 한 번만 영구로 오분류해도 그 Term은 묘비가 되고, `captureWorkspaceTab`이
+`runtime-handle`을 빈 값으로 쓰므로 **다음 Quit이 살아 있는 host runtime을 영구 고아로 만든다**(되찾을 UI도 없다). 도크
+entry 하나가 막는 checkpoint를 훨씬 비싼 이쪽이 안 막는 비대칭이었다. 그래서 `applyWorkspaceWindow`는 이번 창이 만든
+묘비 수를 `dropped`에 합산해 `take_workspace_restore_dropped`로 노출한다.
+
+**그 신호의 귀결은 "저장 차단"이 아니라 "마지막 완전본 백업 후 저장"이다**(v144에서 변경 — [workspace-restore.md](workspace-restore.md)
+"checkpoint 보호"가 단일 출처). 무기한 차단은 stale 파일을 고정시켜 다음 실행이 같은 drop을 재생산하는 자기영속 루프가
+되고, 그동안 사용자의 새 레이아웃이 매 종료마다 사라진다.
 
 **종료 placeholder 객체(구현됨, 아직 복원이 만들지 않음).** placeholder Term 자체와 그 수명은 `TermRuntime.ended_placeholder`
 + `createEndedPlaceholderTerm`으로 구현했다. `SurfaceKind`(닫힌 열거)를 확장하지 않고 `kind = .terminal`을 유지하며
@@ -575,6 +581,28 @@ link가 없어 `SurfaceRuntime.resize`가 실패하므로 sentinel core를 직�
 마지막 title·cwd·grid는 이미 owned 저장소가 있는 `auto_title`·`observation`(`.stale`)에 심어 `captureWorkspaceTab`이
 무변경으로 저장하고, command만 `rt.ended_command`에서 읽는다. `surface.remote == null`이라 **죽은 `runtime-handle`은
 자동으로 저장되지 않으므로**, 되살리지 않은 묘비는 다음 실행에서 선언적 restore로 그 cwd의 평범한 새 셸이 된다.
+
+**묘비 입력·수명 계약(code-review max 수정).** 위 "PTY 부재 분기"에 더해, 묘비가 **사용자 입력 경로에서** 지켜야 하는
+규칙이 넷 있다. 넷 다 "복원했더니 조용히 뭔가 사라져 있다"는 같은 실패 모양이라 한곳에 모아 둔다.
+
+- **구조 input owner가 우선한다.** ⏎ 되살리기와 드롭 가드는 파일 트리·빈 dock 그룹 라우팅보다 **아래**에 있어야 한다
+  (공유 판정 = `structuralInputOwner`). 위에 두면 탐색기에서 파일을 여는 Enter가 파일을 열지 못한 채 보고 있지도 않은
+  묘비를 되살린다. 같은 게이트를 비정상 시작 사망(`startup_held`)의 ⏎ 재시작도 쓴다.
+- **되살리기는 `surface.custom_name`을 승계한다.** `createTerm`은 rename을 만들지 않고 `destroyTerm(tomb)`이 묘비의
+  문자열을 해제하므로, 새 Term 생성 **전에** 사본을 떠 넘긴다. 안 하면 다음 checkpoint가 빈 이름을 저장해 영구 소실이다.
+- **화면 안내는 값을 잘라서라도 남긴다.** 제목·cwd는 상한 없는 사용자 데이터라 고정 버퍼를 넘길 수 있다. 값은
+  코드포인트 경계에서 자르고(각 240B), 줄 단위 실패는 그 줄만 생략하며, **한 줄도 못 쓰면 멱등 래치를 세우지 않는다** —
+  마지막 줄의 `⏎` 힌트가 이 화면의 유일한 복구 affordance다.
+- **레이아웃 resize는 관측 grid까지 옮긴다.** `refreshTermObservation`이 `live_initialized == false`에서 즉시 반환하므로
+  `resizeTermForLayout`이 `rt.observation.size`를 직접 갱신하지 않으면 저장 grid가 생성 시점 값에 갇힌다
+  (`captureWorkspaceTab`은 core.size보다 observation.size를 우선한다).
+- **드롭 라우팅은 `.refused`다.** `routeDropAtPoint`의 "붙일 PTY 없음" 게이트는 web Term과 묘비를 **같이** 본다.
+  `.routed`로 돌려주면 포커스만 죽은 pane으로 옮긴 뒤 삽입이 버려져, 사용자는 살아 있는 셸의 포커스와 드롭 내용을 함께 잃는다.
+
+**복원 pass의 negative memo.** 같은 창의 Term 여럿이 같은 죽은 host를 가리키는 것이 정상 케이스이므로(12개 Term = 12번
+복원), `AppSession.restore_gone_host_id`가 `host_gone` 판정을 기억한다. host pool은 성공만 캐시해서, 이게 없으면 surface마다
+`connectExactWithBackoff`(10회 × 20ms)를 **메인 스레드에서** 되풀이해 창이 그려지기 전에 수 초간 멈춘다. `host_id`는
+재사용되지 않는 128비트 식별자라 세션 중에 판정이 뒤집히지 않는다.
 
 | 상태 | 처리 |
 | --- | --- |

@@ -183,9 +183,11 @@ fn navButtonAt(x_px: f64, band_x: u32, cw: u32) ?NavButton {
 // Swift가 소유한 CAMetalLayer라 struct offset·layout test는 그대로 green). 렌더러 분할·컨테이너 재편은 Swift/ObjC 레이어.
 pub const abi_version: u32 = 144;
 // 144: workspace 복원이 **조용히 버린 항목 수** getter(take_workspace_restore_dropped)를 추가한다. 복원은 손상된 파일
-// 패널 entry·비워진 dock 그룹·접근 불가 explorer root를 버리면서도 apply를 성공으로 반환해 왔다 — Swift가 그 사실을
-// 모르면 checkpoint 차단 래치를 못 세우고 다음 Quit이 버려진 상태를 파일에 커밋한다. struct layout은 불변이고
-// export 하나만 추가된다.
+// 패널 entry·비워진 dock 그룹·접근 불가 explorer root·**영구 부재로 분류돼 종료 placeholder가 된 Term**(저장된
+// runtime-handle을 잃는다)을 버리면서도 apply를 성공으로 반환한다 — Swift가 그 사실을 모르면 다음 Quit이 버려진 상태를
+// 그대로 파일에 커밋한다. 신호를 받은 Swift는 저장을 막지 않고 **마지막 완전본을 workspace.v1.bak으로 남긴 뒤** 저장한다
+// (무기한 차단은 stale 파일을 고정시켜 같은 drop을 재생산하는 자기영속 루프였다 — docs/workspace-restore.md "checkpoint
+// 보호"가 단일 출처). struct layout은 불변이고 export 하나만 추가된다.
 // 143: 파일 패널 ⌘+/− 폰트 줌 — take_file_panel_zoom_dirty·file_panel_zoom_milli export를 추가한다.
 // fixed-width struct layout은 불변이고 export만 둘 추가된다.
 // 142: workspace restore session이 초기 throwaway PTY/shell 없이 모델을 먼저 적용하도록 defer_initial_surface를 추가한다.
@@ -2563,6 +2565,11 @@ pub const AppSession = struct {
     /// "복원된 모델이 저장 파일을 표현하지 못한다"를 알 수 없고 다음 Quit이 버려진 상태를 checkpoint에 커밋한다.
     /// 정확한 회계가 아니라 **차단 판정용 신호**다(한 원인이 entry와 빈 그룹 둘로 세어질 수 있다).
     workspace_restore_dropped: u32 = 0,
+    /// 이 세션의 복원에서 **사라졌다고 판정된 host_id**(0 = 없음). `ensureRestoreHostAdapter`의 negative memo다:
+    /// 성공만 pool이 캐시하므로 이게 없으면 같은 죽은 host를 가리키는 Term마다 blocking backoff를 되풀이한다.
+    /// host_id는 재사용되지 않는 128비트 식별자라 판정이 세션 중에 뒤집히지 않는다(같은 창의 Term들은 거의 항상
+    /// 같은 host를 가리키므로 슬롯 하나로 충분하다).
+    restore_gone_host_id: u128 = 0,
     file_panel_seen_generation: u64 = 0,
     debug_file_panel_opened: bool = false,
     // Phase 4e-3: web surface diff의 prev(직전 tick이 낸 layout **집합** 전체). computeWebSurfaceTransitions가 매 tick
@@ -4149,9 +4156,16 @@ pub const AppSession = struct {
         if (term.kind == .web) return;
         if (term.rt.ended_placeholder) {
             const grid = terminal.clampGridSize(size); // runtime.resize와 같은 clamp(core는 cols>=2를 요구)
-            term.surface.lockCore(self.io);
-            defer term.surface.unlockCore(self.io);
-            term.surface.core.resize(grid.cols, grid.rows) catch {}; // OOM이면 기존 grid 유지(표시만 영향)
+            {
+                term.surface.lockCore(self.io);
+                defer term.surface.unlockCore(self.io);
+                term.surface.core.resize(grid.cols, grid.rows) catch return; // OOM이면 기존 grid 유지(표시만 영향)
+            }
+            // 관측 캐시도 함께 옮긴다. 묘비는 `live_initialized == false`라 `refreshTermObservation`이 즉시 반환하므로
+            // 여기서 갱신하지 않으면 생성 시 심은 저장 grid에 영원히 갇힌다 — `captureWorkspaceTab`은 core.size보다
+            // observation.size를 **우선**하므로, 창을 키운 채 종료하면 예전 grid가 저장되고 다음 실행의 새 셸이 창과
+            // 다른 winsize로 떠 시작 프로그램이 잘못된 기하로 레이아웃한다(code-review).
+            term.rt.observation.size = grid;
             return;
         }
         return self.runtime.resize(term.surface.id, size, self.io);
@@ -5441,6 +5455,13 @@ pub const AppSession = struct {
         const tomb = pane.terms.items[index];
         std.debug.assert(tomb.rt.ended_placeholder);
 
+        // 사용자 rename(`surface.custom_name`)은 복원이 묘비에 되살려 탭바에 그대로 보이고 있다. `destroyTerm(tomb)`이
+        // 번들 deinit으로 그 문자열을 해제하고 `createTerm`은 custom_name을 만들지 않으므로, **새 Term 생성 전에** 사본을
+        // 떠서 승계한다. 안 하면 ⏎ 한 번에 탭 이름이 자동 제목으로 되돌아가고 다음 checkpoint가 빈 custom_name을 저장해
+        // rename이 영구히 사라진다 — 다른 restore-and-continue 경로는 모두 rename을 보존한다(code-review).
+        const carried_name: ?[]const u8 = if (tomb.surface.custom_name) |n| try self.allocator.dupe(u8, n) else null;
+        errdefer if (carried_name) |n| self.allocator.free(n);
+
         const size = layout_math.gridFromRectPx(self.cell_width_px, self.cell_height_px, self.active_pane_rect.w, self.active_pane_rect.h);
         var cfg = self.new_tab_config;
         cfg.size = size;
@@ -5449,6 +5470,7 @@ pub const AppSession = struct {
         const fresh = try self.createTerm(req, size, cfg.queue_capacity, "Maru", commandName(cfg.command_kind));
 
         // 여기부터는 실패할 수 없는 구간이다 — 슬롯 교체·해제·대표 surface 재바인딩은 에러를 내지 않는다.
+        fresh.surface.custom_name = carried_name; // 소유 이전(번들 deinit이 해제) — 없었으면 null 그대로.
         pane.terms.items[index] = fresh;
         self.destroyTerm(tomb);
         // focusTerm은 같은 인덱스면 early-return하므로 대표 surface를 직접 갱신한다(탭바·렌더가 이걸 읽는다).
@@ -5736,6 +5758,10 @@ pub const AppSession = struct {
     fn ensureRestoreHostAdapter(self: *AppSession, wanted_host_id: u128) RestoreHostOutcome {
         if (!is_macos) return .unavailable;
         if (app_remote_host_pool) |*pool| if (pool.get(wanted_host_id) != null) return .ready;
+        // 같은 창의 Term 여러 개가 같은 죽은 host를 가리키는 것이 §7의 정상 케이스다(예: 12개 Term = 12번 복원).
+        // 성공만 pool이 캐시하므로 host_gone을 기억하지 않으면 surface마다 connectExactWithBackoff(10회 × 20ms
+        // usleep ≈ 200ms)를 **메인 스레드에서** 되풀이해, 창이 한 번도 그려지기 전에 수 초간 멈춘다(code-review).
+        if (wanted_host_id != 0 and wanted_host_id == self.restore_gone_host_id) return .host_gone;
         if (session_host.protocol.version_major < 2) return .unavailable;
 
         const alloc = std.heap.smp_allocator;
@@ -5750,7 +5776,11 @@ pub const AppSession = struct {
             .connected => |client| client,
             // host_gone만 영구로 올린다. 나머지 reason(일시 연결 실패·incompatible_version·denied 등)은 host가
             // 살아 있을 수 있으므로 unavailable로 남겨 caller가 fail-closed하게 둔다.
-            .failed => |reason| return if (reason == .host_gone) .host_gone else .unavailable,
+            .failed => |reason| {
+                if (reason != .host_gone) return .unavailable;
+                self.restore_gone_host_id = wanted_host_id; // negative memo(위 주석) — 남은 surface는 즉시 답한다.
+                return .host_gone;
+            },
         };
         const adapter = alloc.create(RemoteSessionAdapter) catch {
             var failed = connected;
@@ -6177,7 +6207,13 @@ pub const AppSession = struct {
         term.surface.core.setConfigPalette(self.appearance.theme.palette);
         term.surface.core.ambiguous_wide = self.loaded_config.config.ambiguous_width == .wide;
         term.surface.core.emoji_wide = self.loaded_config.config.emoji_width == .wide;
-        // 읽기 전용: writeInput이 runtime에 닿기 전에 ProcessExited로 실패한다(runtime.zig의 process_state 가드).
+        // 읽기 전용. 정확히는 이 surface가 `SurfaceRuntime`에 **attach되지 않으므로**(link 없음 — PTY도 backend 슬롯도
+        // 없다) writeInput·enqueueCoreCommand·resize는 process_state 가드에 닿기 전에 `UnknownSurface`로 먼저 실패한다
+        // (runtime.zig의 `linkBySurface orelse return error.UnknownSurface`). `process_state = .exited`를 함께 세우는 것은
+        // 화면·라벨·capture가 "종료된 Term"과 같은 상태를 읽게 하기 위해서다(attach된 로컬 종료 Term과 동일 표현).
+        // 결과적으로 선택·스크롤 같은 core command는 묘비에서 no-op인데, 이는 **종료된 로컬 터미널과 같은 기존 동작**이다
+        // (그쪽도 `process_state == .exited`라 `ProcessExited`로 거부된다) — 묘비만의 회귀가 아니다. 화면 안내는 core에
+        // 직접 쓰고(writeSurfaceGuidance), 레이아웃 resize도 core를 직접 만진다(resizeTermForLayout).
         term.surface.process_state = .exited;
         if (title.len > 0) try term.auto_title.appendSlice(self.allocator, title);
         try term.rt.observation.replace(self.allocator, .{
@@ -6746,17 +6782,28 @@ pub const AppSession = struct {
     /// reflow로 줄이 어긋나지 않는다.
     fn writeEndedPlaceholderGuidance(self: *AppSession, term: *Term) void {
         if (!term.rt.ended_placeholder or term.rt.ended_guidance_written) return;
-        term.rt.ended_guidance_written = true;
         const title = term.auto_title.items;
         const cwd = term.rt.observation.cwd.items;
-        var buf: [512]u8 = undefined;
+        // 제목·cwd는 **길이 상한이 없는 사용자 데이터**다(OSC 0/2 제목, 깊은 경로 — UTF-8 한글은 3바이트/자).
+        // 그대로 넣으면 고정 버퍼를 넘겨 `catch return`이 안내를 통째로 버렸고, 래치가 이미 서 있어 재시도도 없었다:
+        // 되살리는 유일한 방법(⏎)이 적힌 화면이 **아무 설명 없는 빈 pane**이 됐다(code-review). 값은 코드포인트
+        // 경계에서 잘라 담고(한글이 U+FFFD로 깨지지 않게 — truncateToBoundary 단일 출처), 줄 단위 실패는 그 줄만
+        // 생략한다. 상한 계산: 고정 문자열 ~126B + 라벨 2개 ~48B + 값 2개 480B = 654B < 768B라 마지막 줄(⏎ 안내와
+        // SGR reset)은 항상 들어간다.
+        const max_value_bytes = 240;
+        var buf: [768]u8 = undefined;
         var w = std.Io.Writer.fixed(&buf);
-        w.writeAll("\r\n\x1b[2m  ▸ 이 세션은 종료됐습니다(유지된 터미널이 없습니다).\r\n") catch return;
+        w.writeAll("\r\n\x1b[2m  ▸ 이 세션은 종료됐습니다(유지된 터미널이 없습니다).\r\n") catch {};
         // 빈 값은 줄을 아예 생략한다 — "마지막 제목: " 같은 빈 라벨은 정보가 아니라 잡음이다.
-        if (title.len > 0) w.print("    마지막 제목: {s}\r\n", .{title}) catch {};
-        if (cwd.len > 0) w.print("    마지막 위치: {s}\r\n", .{cwd}) catch {};
-        w.writeAll("    ⏎ 이 자리에서 새 셸 시작\x1b[0m\r\n") catch return;
-        self.writeSurfaceGuidance(term.surface, w.buffered());
+        if (title.len > 0)
+            w.print("    마지막 제목: {s}\r\n", .{title[0..terminal.width.truncateToBoundary(title, max_value_bytes)]}) catch {};
+        if (cwd.len > 0)
+            w.print("    마지막 위치: {s}\r\n", .{cwd[0..terminal.width.truncateToBoundary(cwd, max_value_bytes)]}) catch {};
+        w.writeAll("    ⏎ 이 자리에서 새 셸 시작\x1b[0m\r\n") catch {};
+        const text = w.buffered();
+        if (text.len == 0) return; // 한 줄도 못 썼으면 래치를 세우지 않는다 — 다음 호출이 다시 시도한다.
+        term.rt.ended_guidance_written = true;
+        self.writeSurfaceGuidance(term.surface, text);
     }
 
     /// 빨간 닫기 버튼/창 단위 닫기 ABI(maru_macos_app_session_request_window_close)가 부른다. 실행 중 명령이 있으면
@@ -17699,7 +17746,7 @@ pub const AppSession = struct {
         // chrome-modal 라우팅이 아무 키로나 notice를 닫아 이 재시작 키를 삼키기 전에 가로챈다. macos-app-host-boundary.md "세션 자동 종료".
         if (self.startup_held and event.key == .enter and
             !event.modifiers.command and !event.modifiers.control and !event.modifiers.option and !event.modifiers.shift and
-            !self.anyModalOverlayOpen())
+            !self.anyModalOverlayOpen() and !self.structuralInputOwner())
         {
             self.chrome_host.notice.dismiss();
             self.newTermInActivePane() catch {
@@ -17716,10 +17763,14 @@ pub const AppSession = struct {
         // 이 명시 입력이 유일한 승격 경로다(아무 키나 붙여넣기로는 되살아나지 않는다). 게이트는 위 startup_held와 같다 —
         // rename·사이드바 검색·keybind 녹음이 자기 Enter를 먼저 소비했고, 입력받는 모달이 열려 있으면 양보한다.
         // 위 래치와는 상호배타다: 묘비가 있으면 allTabsTerminated가 false라 startup_held가 서지 않는다.
-        if (self.surface_initialized and self.activePane().activeTerm().rt.ended_placeholder and
+        // **구조 owner 게이트가 필수다**(structuralInputOwner): 이 블록은 아래 fileTreeFocused/pendingDockGroupOwnsInput
+        // 라우팅보다 위에 있어서, 게이트가 없으면 탐색기에서 파일을 여는 Enter(isFileTreeDefaultKey→.activate)와 빈 dock
+        // 그룹의 Enter를 전부 삼켜 **보고 있지도 않은 묘비**를 되살린다(code-review). tabs 0 가드는 activePane() deref 보호.
+        if (self.surface_initialized and self.tabs.items.len > 0 and
+            self.activePane().activeTerm().rt.ended_placeholder and
             event.key == .enter and
             !event.modifiers.command and !event.modifiers.control and !event.modifiers.option and !event.modifiers.shift and
-            !self.anyModalOverlayOpen())
+            !self.anyModalOverlayOpen() and !self.structuralInputOwner())
         {
             self.chrome_host.notice.dismiss();
             self.respawnEndedPlaceholder() catch {
@@ -20320,11 +20371,14 @@ pub const AppSession = struct {
         }
         // tree/dock-group/overlay input owner에서는 TerminalView가 native responder일 수 있어도 PTY가 대상이 아니다.
         // 특히 surface publish 대기 `.dock_group`의 Cmd+V가 보이지 않는 셸 명령으로 실행되지 않게 fail-close한다.
-        if (self.structuralPasteBlocked() or self.inputFocus() != .terminal) return;
+        if (self.structuralInputOwner() or self.inputFocus() != .terminal) return;
         self.pasteTextTo(self.activeSurface().id, bytes, escape_each); // Cmd+V·드롭 즉시 경로 = 지금 활성 surface
     }
 
-    fn structuralPasteBlocked(self: *const AppSession) bool {
+    /// 지금 **터미널이 아닌 구조 UI**(파일 트리 포커스·surface 대기 중인 빈 dock 그룹)가 입력 소유자인지.
+    /// paste 게이트(위)와 제자리 재시작 ⏎ 게이트(`handleKeyEvent`)가 같은 판정을 공유한다 — 둘 다 "보이지 않는
+    /// PTY로 입력이 새지 않게" 하는 같은 규율이고, 한쪽만 고치면 다른 쪽이 트리의 Enter를 훔친다(code-review).
+    fn structuralInputOwner(self: *const AppSession) bool {
         return self.fileTreeFocused() or self.pendingDockGroupOwnsInput();
     }
 
@@ -20595,8 +20649,8 @@ pub const AppSession = struct {
     ///   ① **chrome 오버레이/모달이 열려 있음**(anyOverlayOpen — 확인·notice·컨텍스트 메뉴·알림·find·팔레트·설정).
     ///      마우스 클릭이 모달에 삼켜지는 것과 **같은 규율**이다(mouse()의 게이트와 같은 단일 판정을 쓴다 — 예전엔
     ///      confirm만 손으로 베껴 설정 화면 뒤 pane에 드롭이 새어 포커스를 훔쳤다).
-    ///   ② **대상 Term이 터미널이 아님**(web 패널) — 붙일 PTY가 없어 내용이 조용히 사라진다. pane rect는 탭 바를
-    ///      포함하므로 web pane의 바 위 드롭이 실제로 이 경로를 탄다.
+    ///   ② **대상 Term에 붙일 PTY가 없음**(web 패널, 그리고 §7 종료 placeholder) — 내용이 조용히 사라진다. pane rect는
+    ///      탭 바를 포함하므로 web pane의 바 위 드롭이 실제로 이 경로를 탄다.
     ///
     /// hit-test는 클릭 경로와 같은 단일 출처(Model.paneAtPoint)를 쓴다. 여기에 더해 **Term 탭 위 드롭이면 그 Term**
     /// 까지 활성으로 만든다(탭 바는 Term 단위인데 pane까지만 라우팅하면, 특정 Term 탭에 떨어뜨려도 그 pane의 *현재*
@@ -20619,7 +20673,11 @@ pub const AppSession = struct {
         const pane = Model.paneAtPoint(leaf_rects.items, x_px, y_px) orelse return .not_applicable;
         // Term 탭 위면 그 Term, 아니면 그 pane의 현재 활성 Term이 대상이다.
         const term_index = self.dropTermIndexAt(pane, leaf_rects.items, x_px, y_px) orelse pane.active_term;
-        if (pane.terms.items[term_index].kind != .terminal) return .refused; // web pane/Term — 붙일 PTY 없음
+        // web Term과 §7 묘비는 "붙일 PTY가 없다"는 같은 상태다. 묘비를 `.routed`로 돌려주면 포커스만 죽은 pane으로 옮긴
+        // 뒤 `handleDroppedFiles`의 묘비 가드가 경로를 버려, 사용자는 살아 있는 셸에서 포커스를 뺏기고 드롭한 내용도
+        // 잃는다(위 ② 그대로 — code-review). `.refused`는 포커스를 건드리지 않고 host에도 삽입하지 말라고 알린다.
+        const drop_target = pane.terms.items[term_index];
+        if (drop_target.kind != .terminal or drop_target.rt.ended_placeholder) return .refused;
 
         // **포커스를 옮기기 전에 인라인 편집을 정리한다** — 마우스 down(kind==1)이 하는 것과 같은 규율.
         // 안 하면 rename 편집기가 **옛 Term에 바인딩된 채 열려 있고** 포커스만 새 pane으로 가서, 사용자가 붙여넣은
@@ -20655,8 +20713,11 @@ pub const AppSession = struct {
     /// 백그라운드 업로드하고(완료 시 원격 경로 paste), 로컬 세션이면 기존처럼 경로를 셸 이스케이프해
     /// paste한다. Swift 드롭 핸들러(3d ABI)가 fileURL 드롭 시 부른다. 설계: docs/ssh-integration.md §4.
     pub fn handleDroppedFiles(self: *AppSession, paths_nul: []const u8) void {
-        if (!self.surface_initialized or paths_nul.len == 0) return;
-        if (self.structuralPasteBlocked()) return;
+        // 탭이 없는 창(merge/이동으로 비워진 뒤 Swift가 닫기 전 tick)은 활성 pane 자체가 없다 — 아래 activePane()이
+        // 빈 리스트를 인덱싱한다. 구조 게이트보다 **먼저** 판정해야 게이트가 무엇을 반환하든 deref가 없다
+        // ([[empty-session-resign-activesurface-crash]]와 같은 클래스 — 새 진입점마다 전수 확인).
+        if (!self.surface_initialized or self.tabs.items.len == 0 or paths_nul.len == 0) return;
+        if (self.structuralInputOwner()) return;
         // §7 종료 placeholder는 읽기 전용이다(PTY도 handle도 없다). 여기서 막지 않으면 아래 SSH/paste 경로가 handle=0
         // 관측을 시도해 실패 notice를 띄우는데, 사용자에겐 "왜 실패했는지" 설명이 안 되는 잡음이다. 되살리기는 ⏎만이다.
         if (self.activePane().activeTerm().rt.ended_placeholder) return;
@@ -20709,12 +20770,15 @@ pub const AppSession = struct {
     /// 파일 드롭과 달리 경로가 없어 바이트를 직접 받고 "pasted-<pid>-<N>.png" 이름을 붙인다 — pid로 앱 재시작 후
     /// cross-session 덮어쓰기를 막는다(카운터는 재시작 시 0이라 pid 없이는 다른 세션과 충돌). docs/ssh-integration.md §4.
     pub fn handleDroppedImage(self: *AppSession, bytes: []const u8) bool {
-        if (!self.surface_initialized or bytes.len == 0) return false;
-        // §7 종료 placeholder는 읽기 전용 — **consumed(true)로 돌려** Swift의 텍스트 fallback이 PTY로 새지 않게 한다
-        // (아래 "구조 owner에서는 no-op도 consumed" 규율과 같은 이유). 되살리기는 ⏎만이다.
-        if (self.activePane().activeTerm().rt.ended_placeholder) return true;
+        // handleDroppedFiles와 **같은 순서**를 지킨다: 빈 창 가드 → 구조 게이트 → 묘비 게이트. 묘비 게이트를 먼저 두면
+        // 탭이 0인 창(merge/이동으로 비워진 뒤 Swift가 닫기 전 tick)에서 activePane()이 빈 리스트를 인덱싱해 패닉한다 —
+        // 예전 코드가 구조 게이트에서 먼저 반환하던 상태다([[empty-session-resign-activesurface-crash]] 클래스).
+        if (!self.surface_initialized or self.tabs.items.len == 0 or bytes.len == 0) return false;
         // true=consumed. 구조 owner에서는 no-op도 consumed로 돌려 Swift의 text fallback이 PTY로 새지 않게 한다.
-        if (self.structuralPasteBlocked()) return true;
+        if (self.structuralInputOwner()) return true;
+        // §7 종료 placeholder는 읽기 전용 — **consumed(true)로 돌려** Swift의 텍스트 fallback이 PTY로 새지 않게 한다
+        // (위 "구조 owner에서는 no-op도 consumed" 규율과 같은 이유). 되살리기는 ⏎만이다.
+        if (self.activePane().activeTerm().rt.ended_placeholder) return true;
         const active_term = self.activePane().activeTerm();
         if (active_term.kind == .terminal) {
             self.backendFor(active_term).refreshObservation(
@@ -22839,6 +22903,11 @@ pub const AppSession = struct {
         // 한 지역 변수에 모아 성공 publish 뒤 세션 필드로 넘긴다. 실패 경로에서는 기록하지 않는다 — 창 apply 자체가
         // 실패하면 Swift가 이미 checkpoint 차단 래치를 세우므로 신호가 중복이고, errdefer 롤백과 순서를 다툴 이유도 없다.
         var dropped: usize = 0;
+        // §7 묘비도 **버린 것**이다 — 그것도 가장 비싼 쪽이다. 묘비로 복원한 Term은 저장돼 있던 runtime_host_id/
+        // runtime_id를 잃고(`captureWorkspaceTab`이 빈 값으로 쓴다), 그 handle이 사실은 살아 있었다면(접속을 영구
+        // 부재로 오분류) 다음 checkpoint가 **살아 있는 host runtime을 영구히 고아로 만든다**. 도크 entry 하나가 막는
+        // checkpoint를 이쪽이 안 막는 비대칭을 없앤다(code-review). 아래 publish 뒤 차이로 개수를 센다.
+        const placeholders_before = self.ended_placeholder_notice_pending;
         dropped += self.pruneInvalidRestoredFilePanelEntries(&new_dock);
         // capability validation can empty a leaf after DockPanel.restore already normalized the wire tree.
         // Publish/assign surface IDs only after applying the same empty-leaf invariant a second time.
@@ -22983,7 +23052,8 @@ pub const AppSession = struct {
         self.rebuildSidebar() catch {};
         self.metal_dirty = true;
         // publish가 끝난 뒤에만 기록한다(실패 경로는 창 apply 실패로 이미 신호가 있다). Swift가 apply 성공 직후
-        // take_workspace_restore_dropped로 소비해 0이 아니면 이번 실행의 checkpoint를 막는다.
+        // take_workspace_restore_dropped로 소비해 0이 아니면 이번 실행의 checkpoint를 마지막 완전본 백업 뒤에 쓴다.
+        dropped += self.ended_placeholder_notice_pending - placeholders_before; // 이 창이 만든 묘비 수(위 주석)
         self.workspace_restore_dropped = std.math.lossyCast(u32, dropped);
         if (builtin.mode == .Debug) assertPinnedPrefixRuntime(self); // 복원 후 불변식 확인(디버그)
     }
@@ -36829,23 +36899,167 @@ test "종료 placeholder: 화면 안내가 남고 ⏎만 같은 슬롯을 새 �
     try std.testing.expectEqual(fresh.surface, session.surface_ptrs.items[session.app_window.active_tab]);
 }
 
+// code-review(max) 회귀: 묘비의 ⏎ 게이트와 드롭 가드가 **구조 input owner 라우팅보다 위**에 놓여 있었다. 그 순서에서는
+// 탐색기에서 파일을 여는 Enter(isFileTreeDefaultKey → .activate)가 파일을 열지 못한 채 **보고 있지도 않은** 묘비를
+// 되살렸고, 이미지 붙여넣기는 구조 게이트가 먼저 반환하던 자리에서 activePane()을 deref했다. 터미널에서 왜 중요한가:
+// 되살리기는 사용자가 그 pane을 보며 명시적으로 요청했을 때만 일어나야 하고("자동 fresh spawn 금지"의 실질), 입력
+// 소유권은 paste·키 두 경로가 같은 판정(structuralInputOwner)을 공유해야 한쪽만 고쳐지는 일이 없다.
+test "종료 placeholder: 파일 트리가 입력을 가지면 ⏎·드롭이 묘비를 건드리지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const session = try initSmokeSessionSized(a);
+    defer a.destroy(session);
+    defer session.deinit();
+
+    const pane = session.activePane();
+    const tomb = try session.createEndedPlaceholderTerm("배포 감시", "/tmp", "/bin/zsh", .{ .cols = 80, .rows = 24 });
+    try pane.terms.append(a, tomb);
+    session.focusTerm(pane.terms.items.len - 1);
+    const tomb_index = pane.active_term;
+
+    session.focus_owner = .{ .file_tree = .{ .restore_surface = null } };
+    _ = session.handleKeyEvent(.{ .key = .enter }) catch {};
+    try std.testing.expect(pane.terms.items[tomb_index].rt.ended_placeholder); // 트리의 Enter를 뺏지 않았다
+    // 이미지 붙여넣기는 구조 owner에서 consumed(true)지만 묘비를 만지지 않는다(순서가 지켜졌다는 뜻).
+    try std.testing.expect(session.handleDroppedImage("\x89PNG"));
+    try std.testing.expect(pane.terms.items[tomb_index].rt.ended_placeholder);
+
+    // 대조군: 워크스페이스가 입력을 되찾으면 같은 ⏎가 되살린다(게이트가 vacuous하지 않다).
+    session.focus_owner = .workspace;
+    _ = try session.handleKeyEvent(.{ .key = .enter });
+    try std.testing.expect(!pane.terms.items[tomb_index].rt.ended_placeholder);
+}
+
+// code-review(max) 회귀: 되살리기가 사용자 rename(`surface.custom_name`)을 승계하지 않았다. `createTerm`은 custom_name을
+// 만들지 않고 `destroyTerm(tomb)`이 묘비의 문자열을 해제하므로, ⏎ 한 번에 탭 이름이 자동 제목으로 되돌아가고 다음
+// checkpoint가 빈 값을 저장해 rename이 **영구히** 사라졌다. 터미널에서 왜 중요한가: 복원 직후 탭바에 보이던 이름이
+// 되살리는 순간 사라지면 사용자는 어느 탭이 무엇이었는지 잃는다(다른 restore-and-continue 경로는 모두 보존한다).
+test "종료 placeholder: 되살리기가 사용자 rename을 승계한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const session = try initSmokeSessionSized(a);
+    defer a.destroy(session);
+    defer session.deinit();
+
+    const pane = session.activePane();
+    const tomb = try session.createEndedPlaceholderTerm("끝난 세션", "/tmp", "/bin/zsh", .{ .cols = 80, .rows = 24 });
+    try pane.terms.append(a, tomb);
+    session.focusTerm(pane.terms.items.len - 1);
+    const tomb_index = pane.active_term;
+    tomb.surface.custom_name = try session.dupeCustomName("배포 감시");
+
+    _ = try session.handleKeyEvent(.{ .key = .enter });
+    const fresh = pane.terms.items[tomb_index];
+    try std.testing.expect(!fresh.rt.ended_placeholder);
+    try std.testing.expectEqualStrings("배포 감시", fresh.surface.custom_name.?);
+}
+
+// code-review(max) 회귀: 제목·cwd는 길이 상한이 없는 사용자 데이터인데(OSC 제목·깊은 경로, 한글은 3B/자) 고정 버퍼에
+// 그대로 담아, 넘치면 마지막 줄의 `catch return`이 안내를 **통째로** 버렸다. 멱등 래치는 이미 서 있어 재시도도 없어
+// 사용자는 아무 설명도 힌트도 없는 빈 pane을 봤다. 터미널에서 왜 중요한가: ⏎ 힌트는 이 화면의 유일한 복구 affordance다.
+test "종료 placeholder: 제목·경로가 버퍼를 넘겨도 ⏎ 힌트가 화면에 남는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const session = try initSmokeSessionSized(a);
+    defer a.destroy(session);
+    defer session.deinit();
+
+    // 고정 버퍼(768B)를 확실히 넘기는 길이 — 한글 제목 480B + 깊은 경로 598B.
+    const long_title = "한글제목" ** 40;
+    const long_cwd = "/very/deep/project/path" ** 26;
+    const tomb = try session.createEndedPlaceholderTerm(long_title, long_cwd, "/bin/zsh", .{ .cols = 80, .rows = 24 });
+    try session.activePane().terms.append(a, tomb);
+
+    session.writeEndedPlaceholderGuidance(tomb);
+    tomb.surface.lockCore(session.io);
+    defer tomb.surface.unlockCore(session.io);
+    var found_hint = false;
+    var row: u16 = 0;
+    while (row < tomb.surface.core.size.rows) : (row += 1) {
+        var line_buf: [1024]u8 = undefined;
+        var n: usize = 0;
+        for (tomb.surface.core.viewportRow(row)) |cell| {
+            if (cell.continuation or n + 4 > line_buf.len) continue;
+            n += std.unicode.utf8Encode(cell.codepoint, line_buf[n..]) catch continue;
+        }
+        if (std.mem.indexOf(u8, line_buf[0..n], "새 셸 시작") != null) found_hint = true;
+    }
+    try std.testing.expect(found_hint);
+}
+
+// code-review(max) 회귀: 레이아웃 resize가 묘비 core만 바꾸고 관측 grid를 그대로 뒀다. `refreshTermObservation`은
+// `live_initialized == false`에서 즉시 반환하므로 그 값은 생성 시 심은 저장 grid에 영원히 갇히는데,
+// `captureWorkspaceTab`은 core.size보다 observation.size를 **우선**한다. 터미널에서 왜 중요한가: 창을 키운 채 종료하면
+// 다음 실행의 새 셸이 창과 다른 winsize로 떠, 시작과 동시에 실행되는 TUI가 잘못된 기하로 레이아웃한다.
+test "종료 placeholder: 레이아웃 resize가 저장될 grid까지 옮긴다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const session = try initSmokeSessionSized(a);
+    defer a.destroy(session);
+    defer session.deinit();
+
+    const tomb = try session.createEndedPlaceholderTerm("끝난 세션", "/tmp", "/bin/zsh", .{ .cols = 80, .rows = 24 });
+    try session.activePane().terms.append(a, tomb);
+    try session.resizeTermForLayout(tomb, .{ .cols = 120, .rows = 40 });
+    try std.testing.expectEqual(@as(u16, 120), tomb.rt.observation.size.cols);
+    try std.testing.expectEqual(@as(u16, 40), tomb.rt.observation.size.rows);
+}
+
+// code-review(max) 회귀: 드롭 라우팅의 "붙일 PTY 없음" 게이트가 `kind != .terminal`만 봐서 묘비를 `.routed`로 돌려줬다.
+// 그러면 호스트는 포커스를 죽은 pane으로 옮긴 뒤 삽입을 시도하고, handleDroppedFiles의 묘비 가드가 경로를 버린다 —
+// 사용자는 **살아 있는 셸에서 포커스를 뺏기고 드롭한 내용도 잃는다**. `.refused`는 포커스를 건드리지 않는다.
+test "드롭 라우팅: 묘비 pane은 refused (포커스도 뺏지 않는다)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const session = try initSmokeSessionSized(a);
+    defer a.destroy(session);
+    defer session.deinit();
+
+    try session.splitActivePane(.horizontal); // 좌우 2 pane, 활성 = 새 pane(살아 있는 셸)
+    const tab = session.activeTab();
+    try std.testing.expectEqual(@as(usize, 2), tab.panes.items.len);
+    const live_pane = session.activePane();
+    const tomb_pane = if (tab.panes.items[0] == live_pane) tab.panes.items[1] else tab.panes.items[0];
+
+    // 대상 pane의 활성 Term을 묘비로 바꾼다(제자리 교체 — 슬롯 수·트리 불변).
+    const dead = tomb_pane.terms.items[tomb_pane.active_term];
+    const tomb = try session.createEndedPlaceholderTerm("끝난 세션", "/tmp", "/bin/zsh", .{ .cols = 80, .rows = 24 });
+    tomb_pane.terms.items[tomb_pane.active_term] = tomb;
+    session.destroyTerm(dead);
+    session.surface_ptrs.items[session.app_window.active_tab] = session.activePane().activeTerm().surface;
+    session.app_window.tabs = session.surface_ptrs.items;
+
+    var leaf_rects: std.ArrayList(PaneTree.LeafRect) = .empty;
+    defer leaf_rects.deinit(a);
+    try session.activeTabLeafRects(a, session.termRect(), &leaf_rects);
+    const rect = for (leaf_rects.items) |lr| {
+        if (lr.leaf == tomb_pane) break lr.rect;
+    } else return error.SkipZigTest;
+
+    const cx: f64 = @floatFromInt(rect.x + @as(i64, @intCast(rect.w / 2)));
+    const cy: f64 = @floatFromInt(rect.y + @as(i64, @intCast(rect.h / 2)));
+    try std.testing.expectEqual(AppSession.DropRoute.refused, session.routeDropAtPoint(cx, cy));
+    try std.testing.expectEqual(live_pane, session.activePane()); // 포커스는 살아 있는 pane에 그대로
+}
+
 // §7 복원 배선을 못박는다: runtime이 영구히 없는 Term **하나만** 묘비가 되고 같은 pane의 다른 surface·split 트리·탭
 // 이름은 정상 복원돼야 한다. 이 배선 전에는 그 Term 하나가 창 apply 전체를 실패시켜 **탭·split·창 frame까지 잃었다**
 // (실측 사고: host runtime 12개가 사라지자 탭 9개가 통째로 날아갔다). 터미널에서 왜 중요한가 — 세션 이어하기는 못
 // 해도 사용자가 손으로 만든 작업 공간 구조는 남아야 하고, 그게 이 기능의 전부다.
-// 격리: `sessionCacheBase`가 `XDG_CACHE_HOME`을 먼저 읽으므로 빈 tmp로 박아 "그 host_id는 어디에도 없다"를 결정적으로
-// 만든다. 실 캐시를 보게 두면 개발 머신에 살아 있는 host 유무로 결과가 갈려 flaky해진다.
+// 격리: `sessionCacheBase`가 `XDG_CACHE_HOME`을 먼저 읽으므로 빈 디렉터리로 박아 "그 host_id는 어디에도 없다"를
+// 결정적으로 만든다. 실 캐시를 보게 두면 개발 머신에 살아 있는 host 유무로 결과가 갈려 flaky해진다. 그 격리 경로는
+// **짧아야 한다**: 이 base 아래로 유닉스 소켓 경로가 만들어지고 `Client.connectMajor`가 sun_path(104B) 초과를
+// syscall 전에 `EndpointDenied`로 거부하므로(socketPathFits), `std.testing.tmpDir`(=`<cwd>/.zig-cache/tmp/<hash>`)를
+// 쓰면 **체크아웃 경로 길이에 따라** host_gone 대신 endpoint_denied가 나 이 테스트가 red가 된다(로컬 macOS 실측).
+// host_connect의 host_gone 테스트와 같은 `/tmp/<이름>-<pid>` 규율을 쓴다.
 test "종료 placeholder 복원: runtime 없는 Term만 묘비가 되고 탭·split 구조는 살아남는다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const a = std.testing.allocator;
-    const io = std.testing.io;
 
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
-    const xdg = try std.fmt.allocPrintSentinel(a, "{s}", .{root}, 0);
-    defer a.free(xdg);
+    var xdg_buf: [64]u8 = undefined;
+    const xdg = std.fmt.bufPrintZ(&xdg_buf, "/tmp/maru-tomb-{d}", .{std.c.getpid()}) catch return error.SkipZigTest;
+    _ = std.c.mkdir(xdg.ptr, 0o700);
+    defer _ = std.c.rmdir(xdg.ptr); // 이 경로 아래엔 아무것도 안 만든다(복원은 조회만 한다) — 빈 디렉터리 정리.
     // 이전 값 보존(고정 버퍼 — defer에서 할당하지 않으려고). 다른 테스트의 캐시 경로를 오염시키지 않는다.
     var prev_buf: [std.fs.max_path_bytes]u8 = undefined;
     var prev_len: usize = 0;
@@ -36917,6 +37131,13 @@ test "종료 placeholder 복원: runtime 없는 Term만 묘비가 되고 탭·sp
     try std.testing.expectEqual(@as(u32, 1), session.ended_placeholder_notice_pending);
     session.showPendingEndedPlaceholderNotice();
     try std.testing.expectEqual(@as(u32, 0), session.ended_placeholder_notice_pending); // self-gate: 두 번 안 띄운다
+
+    // code-review(max): 묘비는 저장돼 있던 runtime handle을 **버린 것**이고, 그것도 가장 비싼 쪽이다(다음 capture가
+    // 빈 handle을 쓴다). 도크 entry 하나가 막는 checkpoint 신호를 이쪽이 안 세우면, 접속을 영구 부재로 한 번만
+    // 오분류해도 살아 있는 host runtime이 영구히 고아가 된다. Swift는 이 신호로 마지막 완전본 .bak 보존을 켠다.
+    try std.testing.expectEqual(@as(u32, 1), session.takeWorkspaceRestoreDropped());
+    // 같은 죽은 host를 가리키는 다음 surface는 blocking backoff(10×20ms)를 되풀이하지 않는다 — negative memo가 남는다.
+    try std.testing.expectEqual(@as(u128, 0x1234_5678_90ab_cdef_1234_5678_90ab_cdef), session.restore_gone_host_id);
 }
 
 // §7 종료 placeholder(묘비) **객체가 통과하는 모든 관문**을 못박는다. 묘비는 지금까지 없던 조합이다 —

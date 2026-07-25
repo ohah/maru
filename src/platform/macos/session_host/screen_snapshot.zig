@@ -571,6 +571,21 @@ pub fn computeDelta(allocator: std.mem.Allocator, prev_bytes: []const u8, core: 
         defer allocator.free(rec);
         try screen_stream.appendRecord(&delta, allocator, rec);
     }
+    // 스크롤 상태: snapshot(base)엔 screen_meta로 이미 실렸고, delta엔 **바뀌었을 때만** 별도 record로 보낸다.
+    // 이게 없으면 스크롤만 한 프레임에서 client 값이 stale이라 스크롤바가 화면과 어긋난다(재동기화 전까지).
+    {
+        const cur_sb: u32 = @intCast(@min(core.scrollbackLen(), std.math.maxInt(u32)));
+        const cur_vo: u32 = @intCast(@min(core.viewOffset(), std.math.maxInt(u32)));
+        if (cur_sb != prev_meta.scrollback_len or cur_vo != prev_meta.view_offset) {
+            const rec = try screen_stream.encodeScrollState(allocator, .{ .kind = .scroll_state, .generation = opts.generation }, .{
+                .base_generation = opts.generation,
+                .scrollback_len = cur_sb,
+                .view_offset = cur_vo,
+            });
+            defer allocator.free(rec);
+            try screen_stream.appendRecord(&delta, allocator, rec);
+        }
+    }
     if (cur_modes != prev_meta.modes) {
         const rec = try screen_stream.encodeModes(allocator, .{ .kind = .modes, .generation = opts.generation }, .{ .base_generation = opts.generation, .modes = cur_modes });
         defer allocator.free(rec);
@@ -1005,6 +1020,44 @@ test "screen snapshot: computeDelta emits prompt_marks when an OSC 133 mark appe
         if (s.header.kind == .prompt_marks) found = true;
     }
     try testing.expect(found); // 마크가 생겼으니 delta에 prompt_marks record가 실린다.
+}
+
+// 스크롤바는 스크롤 상태(스크롤백 길이·view offset)로 thumb을 그리는데, screen_meta는 **snapshot에만** 실린다.
+// 그래서 스크롤만 바뀐 프레임에서는 client 값이 stale로 남아 스크롤바가 안 뜨거나 위치가 화면과 어긋났다
+// (재동기화가 일어나야 겨우 맞았다 — 사용자 보고: "처음엔 안 나오다 vim 갔다 오니 보이는데 위치가 안 맞음").
+test "screen snapshot: computeDelta emits scroll_state when scrollback or view offset changes" {
+    const allocator = testing.allocator;
+    var core = try terminal.TerminalCore.init(allocator, .{ .cols = 20, .rows = 3 });
+    defer core.deinit();
+    try core.write("a\r\nb\r\nc\r\n");
+    const base = try projectSnapshot(allocator, &core, .{ .generation = 1 });
+    defer allocator.free(base);
+
+    // 변화 없음 → scroll_state 없음(무의미한 재전송 방지).
+    {
+        const same = try computeDelta(allocator, base, &core, .{ .generation = 1 });
+        defer same.deinit(allocator);
+        try testing.expect(!try hasRecordKind(same.delta, .scroll_state));
+    }
+
+    // 출력으로 스크롤백이 늘면 delta에 실린다.
+    try core.write("d\r\ne\r\nf\r\n");
+    const grown = try computeDelta(allocator, base, &core, .{ .generation = 1 });
+    defer grown.deinit(allocator);
+    try testing.expect(try hasRecordKind(grown.delta, .scroll_state));
+
+    // 위로 스크롤하면 view_offset 변화도 실린다 — thumb 위치 동기화의 근거.
+    core.scrollViewport(2);
+    const scrolled = try computeDelta(allocator, grown.snapshot, &core, .{ .generation = 1 });
+    defer scrolled.deinit(allocator);
+    var seen_offset: ?u32 = null;
+    var rs = screen_stream.RecordStream{ .bytes = scrolled.delta };
+    while (try rs.next()) |rec| {
+        const sp = try screen_stream.RecordStream.split(rec);
+        if (sp.header.kind != .scroll_state) continue;
+        seen_offset = (try screen_stream.decodeScrollState(sp.body)).view_offset;
+    }
+    try testing.expectEqual(@as(u32, 2), seen_offset orelse return error.TestUnexpectedResult);
 }
 
 // host가 링크를 해석해 싣지 않으면 원격 client는 Cmd+hover 밑줄을 그릴 근거가 전혀 없다(client core는 빈

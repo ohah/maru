@@ -181,7 +181,11 @@ fn navButtonAt(x_px: f64, band_x: u32, cw: u32) ?NavButton {
 // 별도 물리 CAMetalLayer로 분리, 두 drawable을 한 command buffer에 present + 단일 commit으로 전이 원자성). host↔renderer
 // draw 계약 변경이라 버전을 올린다. **MetalFrame/세션 struct·export 시그니처는 불변**(overlay_layer는 Zig가 아니라
 // Swift가 소유한 CAMetalLayer라 struct offset·layout test는 그대로 green). 렌더러 분할·컨테이너 재편은 Swift/ObjC 레이어.
-pub const abi_version: u32 = 143;
+pub const abi_version: u32 = 144;
+// 144: workspace 복원이 **조용히 버린 항목 수** getter(take_workspace_restore_dropped)를 추가한다. 복원은 손상된 파일
+// 패널 entry·비워진 dock 그룹·접근 불가 explorer root를 버리면서도 apply를 성공으로 반환해 왔다 — Swift가 그 사실을
+// 모르면 checkpoint 차단 래치를 못 세우고 다음 Quit이 버려진 상태를 파일에 커밋한다. struct layout은 불변이고
+// export 하나만 추가된다.
 // 143: 파일 패널 ⌘+/− 폰트 줌 — take_file_panel_zoom_dirty·file_panel_zoom_milli export를 추가한다.
 // fixed-width struct layout은 불변이고 export만 둘 추가된다.
 // 142: workspace restore session이 초기 throwaway PTY/shell 없이 모델을 먼저 적용하도록 defer_initial_surface를 추가한다.
@@ -2536,6 +2540,11 @@ pub const AppSession = struct {
     workspace_focus_pending: bool = false,
     file_tree_focus_pending: bool = false,
     file_tree_restore_surface_pending: ?u64 = null,
+    /// 마지막 `applyWorkspaceWindow`가 **조용히 버린 항목 수**(손상된 파일 패널 entry + 그 결과로 비워진 dock 그룹 +
+    /// 접근 불가 explorer root). 복원은 이들을 버리면서도 apply를 성공으로 반환하므로, 이 값 없이는 Swift가
+    /// "복원된 모델이 저장 파일을 표현하지 못한다"를 알 수 없고 다음 Quit이 버려진 상태를 checkpoint에 커밋한다.
+    /// 정확한 회계가 아니라 **차단 판정용 신호**다(한 원인이 entry와 빈 그룹 둘로 세어질 수 있다).
+    workspace_restore_dropped: u32 = 0,
     file_panel_seen_generation: u64 = 0,
     debug_file_panel_opened: bool = false,
     // Phase 4e-3: web surface diff의 prev(직전 tick이 낸 layout **집합** 전체). computeWebSurfaceTransitions가 매 tick
@@ -11590,6 +11599,15 @@ pub const AppSession = struct {
         return pending;
     }
 
+    /// 마지막 복원이 조용히 버린 항목 수를 소비한다(읽고 0으로 리셋 — 다른 take_* 게터와 같은 규약). Swift는 apply
+    /// 성공 직후 이걸 읽어 0이 아니면 checkpoint 차단 래치를 세운다. 소비형인 이유: 창마다 apply가 따로 호출되므로
+    /// 창별 결과를 누적 없이 봐야 하고, 한 번 읽은 뒤 남겨 두면 다음 창의 판정을 오염시킨다.
+    pub fn takeWorkspaceRestoreDropped(self: *AppSession) u32 {
+        const dropped = self.workspace_restore_dropped;
+        self.workspace_restore_dropped = 0;
+        return dropped;
+    }
+
     fn fileTreeMutationTarget(row: file_tree.Row) ?file_tree_mutation.Target {
         return switch (row) {
             .root => |v| .{ .kind = .root, .path = v.path, .identity = v.identity },
@@ -12869,11 +12887,16 @@ pub const AppSession = struct {
     /// workspace.v1은 외부 입력이므로, DockPanel의 구조 검증 뒤에도 라이브 open과 같은 파일 capability 검증을 다시
     /// 적용한다. kind↔확장자·절대 UTF-8 경로·regular-file을 모두 만족하지 않는 entry만 버리고 terminal workspace는
     /// 계속 복원한다. 원래 active entry가 버려지면 첫 유효 entry를 활성화하며, 전부 버려지면 빈 도크다.
-    fn pruneInvalidRestoredFilePanelEntries(self: *AppSession, panel: *dock_panel.DockPanel) void {
-        for (0..panel.groupCount()) |group_index| self.pruneInvalidRestoredFilePanelGroup(panel.groupAt(group_index).?);
+    /// 반환은 **버린 entry 수**다. 호출자(applyWorkspaceWindow)가 이 값을 checkpoint 차단 판정에 쓴다 — 조용히 버리고
+    /// apply를 성공으로 반환하면 다음 Quit이 버려진 도크를 파일에 커밋해 사용자가 배치를 영구히 잃는다.
+    fn pruneInvalidRestoredFilePanelEntries(self: *AppSession, panel: *dock_panel.DockPanel) usize {
+        var dropped: usize = 0;
+        for (0..panel.groupCount()) |group_index| dropped += self.pruneInvalidRestoredFilePanelGroup(panel.groupAt(group_index).?);
+        return dropped;
     }
 
-    fn pruneInvalidRestoredFilePanelGroup(self: *AppSession, group: *dock_panel.DockGroup) void {
+    /// 반환은 이 그룹에서 버린 entry 수(원래 개수 − 남은 개수 — 분기마다 세지 않아도 정확하다).
+    fn pruneInvalidRestoredFilePanelGroup(self: *AppSession, group: *dock_panel.DockGroup) usize {
         const old_active = group.active;
         const original_len = group.entries.items.len;
         var original_index: usize = 0;
@@ -12903,6 +12926,7 @@ pub const AppSession = struct {
             current_index += 1;
         }
         group.active = if (group.entries.items.len == 0) null else new_active orelse 0;
+        return original_len - group.entries.items.len;
     }
 
     /// FP3 시각 픽스처. `MARU_FILE_PANEL=/absolute/path.md|html`이면 창-로컬 도크에 한 번만
@@ -22548,10 +22572,14 @@ pub const AppSession = struct {
         var new_dock = try dock_panel.DockPanel.restore(self.allocator, &app_runtime.entry_ids, win.dock);
         var new_dock_owned = true;
         errdefer if (new_dock_owned) new_dock.deinit();
-        self.pruneInvalidRestoredFilePanelEntries(&new_dock);
+        // 복원이 **조용히 버리는 것 셋**(손상된 파일 패널 entry, 그 결과로 비워진 dock 그룹, 접근 불가 explorer root)을
+        // 한 지역 변수에 모아 성공 publish 뒤 세션 필드로 넘긴다. 실패 경로에서는 기록하지 않는다 — 창 apply 자체가
+        // 실패하면 Swift가 이미 checkpoint 차단 래치를 세우므로 신호가 중복이고, errdefer 롤백과 순서를 다툴 이유도 없다.
+        var dropped: usize = 0;
+        dropped += self.pruneInvalidRestoredFilePanelEntries(&new_dock);
         // capability validation can empty a leaf after DockPanel.restore already normalized the wire tree.
         // Publish/assign surface IDs only after applying the same empty-leaf invariant a second time.
-        _ = new_dock.pruneEmptyGroups();
+        dropped += new_dock.pruneEmptyGroups();
         self.assignDockSurfaceIds(&new_dock);
 
         // Explorer roots, watcher union, projected rows, and backend lifetime are staged before the
@@ -22573,7 +22601,10 @@ pub const AppSession = struct {
             var validated_len: usize = 0;
             defer for (validated[0..validated_len]) |*root| root.deinit(self.allocator, self.io);
             for (roots) |root_path| {
-                const root = try file_tree_backend.validateRootSnapshot(self.allocator, self.io, root_path) orelse continue;
+                const root = try file_tree_backend.validateRootSnapshot(self.allocator, self.io, root_path) orelse {
+                    dropped += 1; // 미존재·접근 불가 root는 그 root만 버리고 복원을 계속한다 — 버린 사실은 위로 알린다.
+                    continue;
+                };
                 validated[validated_len] = root;
                 validated_len += 1;
             }
@@ -22681,6 +22712,9 @@ pub const AppSession = struct {
         self.recomputeActivePaneRect();
         self.rebuildSidebar() catch {};
         self.metal_dirty = true;
+        // publish가 끝난 뒤에만 기록한다(실패 경로는 창 apply 실패로 이미 신호가 있다). Swift가 apply 성공 직후
+        // take_workspace_restore_dropped로 소비해 0이 아니면 이번 실행의 checkpoint를 막는다.
+        self.workspace_restore_dropped = std.math.lossyCast(u32, dropped);
         if (builtin.mode == .Debug) assertPinnedPrefixRuntime(self); // 복원 후 불변식 확인(디버그)
     }
 
@@ -41660,6 +41694,9 @@ test "workspace restore validates explicit roots and atomically rebuilds explore
     try session.applyWorkspaceWindow(win);
 
     try std.testing.expect(session.dock.presented);
+    // v144: 미존재 root(missing)를 버렸다는 신호가 남아야 한다 — 이 root 강등은 apply를 실패시키지 않으므로, 신호가
+    // 없으면 다음 Quit이 root 하나가 빠진 explorer 상태를 checkpoint에 커밋한다(사용자 root 영구 손실).
+    try std.testing.expectEqual(@as(u32, 1), session.takeWorkspaceRestoreDropped());
     try std.testing.expectEqual(@as(usize, 1), session.dock.entryCountTotal());
     try std.testing.expectEqual(file_tree.RootMode.explicit, session.file_tree.rootMode());
     try std.testing.expectEqual(@as(usize, 1), session.file_tree.rootCount());
@@ -43857,6 +43894,11 @@ test "FP5 workspace restore prunes invalid file panel capabilities and degrades 
     var restored = captured;
     restored.dock = .{ .tree_size = 207, .entries = &entries };
     try session.applyWorkspaceWindow(restored);
+
+    // v144: 버린 entry 4개(kind 불일치·상대경로·미존재·디렉터리)를 신호로 남긴다. apply는 성공하므로 이 신호가
+    // 없으면 Swift가 checkpoint를 막지 못해 다음 Quit이 **버려진 도크를 파일에 커밋**한다(사용자 배치 영구 손실).
+    try std.testing.expectEqual(@as(u32, 4), session.takeWorkspaceRestoreDropped());
+    try std.testing.expectEqual(@as(u32, 0), session.takeWorkspaceRestoreDropped()); // 소비형 — 두 번째 읽기는 0
 
     const group = session.dock.singleGroup().?;
     try std.testing.expectEqual(@as(usize, 1), group.entries.items.len);

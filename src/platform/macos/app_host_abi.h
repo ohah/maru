@@ -8,7 +8,7 @@
 /* 이 header는 실제 앱 동작을 구현하지 않고 Swift/Zig 사이의 약속만 고정한다.
    Swift가 AppKit object나 Swift struct layout을 바로 넘기면 Zig 쪽에서 안전하게
    해석할 수 없으므로, 제품 host가 시작되기 전에 fixed-width C record만 허용한다. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 143u
+#define MARU_MACOS_APP_HOST_ABI_VERSION 144u
 #define MARU_FILE_PANEL_MODE_READ 0u
 #define MARU_FILE_PANEL_MODE_SOURCE_EDIT 1u
 #define MARU_FILE_PANEL_MODE_LIVE_PREVIEW 2u
@@ -874,6 +874,10 @@ uint32_t maru_macos_app_session_take_workspace_focus_action(MaruAppHostSession *
 /* Zig file-tree FocusOwner가 요청한 Metal firstResponder pull과 Esc dock surface restore. v127. */
 uint32_t maru_macos_app_session_take_file_tree_focus_action(MaruAppHostSession *session);
 uint64_t maru_macos_app_session_take_file_tree_restore_surface_action(MaruAppHostSession *session);
+/* 마지막 apply_workspace_window가 조용히 버린 항목 수(손상 파일 패널 entry + 비워진 dock 그룹 + 접근 불가
+   explorer root)를 1회 drain한다. 0이 아니면 복원 모델이 저장 파일을 표현하지 못하므로 호출자가 이번 실행의
+   checkpoint를 막아 마지막 완전본을 보존한다. v144. */
+uint32_t maru_macos_app_session_take_workspace_restore_dropped(MaruAppHostSession *session);
 /* GPU 헤더 토글이 바꾼 mode를 1회 drain한다. 반환 -1=없음, 0=read, 1=source-edit, 2=live-preview. v132. */
 int32_t maru_macos_app_session_take_file_panel_mode_action(MaruAppHostSession *session, uint64_t *surface_id_out);
 /* PendingDockFocus의 native firstResponder action을 mode refresh와 독립적으로 drain한다. 0=없음. v131. */

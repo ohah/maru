@@ -19,6 +19,7 @@ const socket_server = @import("socket_server.zig");
 const host_manifest = @import("host_manifest.zig");
 const short_endpoint = @import("short_endpoint.zig");
 const screen_stream = @import("screen_stream.zig");
+const owner_lease = @import("owner_lease.zig");
 
 // flock(2)은 std.c 미노출(macOS 전용). start lock 직렬화용. LOCK_EX=2·LOCK_NB=4(sys/file.h).
 extern "c" fn flock(fd: c_int, operation: c_int) c_int;
@@ -187,28 +188,10 @@ fn findCurrentManifestHost(
 /// owner lease 관측 결과. bool로 뭉개면 **"lease가 없다"(host가 죽었다는 증거)** 와 **"우리가 볼 수 없었다"**(fd 고갈·
 /// 권한·심링크)가 같은 값이 되고, 그 값이 곧바로 `host_gone`(영구) 판정에 쓰인다 — 우리 쪽 사정으로 살아 있는 host를
 /// 사라졌다고 단정하는 것이다. 오분류 비용이 비대칭이므로(§7 접속 실패 행렬) 증거 없음을 별도 상태로 남긴다(code-review).
-const LeaseState = enum {
-    /// lease 파일이 없거나 우리가 잡을 수 있었다 — 그 host 프로세스는 lease를 들고 있지 않다(죽었다).
-    free,
-    /// 다른 프로세스가 들고 있다(flock EWOULDBLOCK) — host 생존.
-    held,
-    /// 판정 불가. host에 대한 증거가 아니라 우리 쪽 실패다.
-    unknown,
-};
-
-fn ownerLeaseState(session_dir: [:0]const u8, host_id: u128) LeaseState {
+fn ownerLeaseState(session_dir: [:0]const u8, host_id: u128) owner_lease.Observation {
     var path_buf: [832]u8 = undefined;
     const path = host_manifest.ownerLockPathIn(&path_buf, session_dir, host_id) catch return .unknown;
-    const fd = c.open(path.ptr, .{ .ACCMODE = .RDWR, .CLOEXEC = true, .NOFOLLOW = true }, @as(c.mode_t, 0));
-    if (fd < 0) {
-        // ENOENT만 "lease 파일이 없다" = host가 놓았다는 증거다. EMFILE/ENFILE(프로세스 fd 고갈 — PTY·WKWebView·FS
-        // watcher를 많이 든 GUI에서 현실적이다)·EACCES·ELOOP는 파일 상태에 대해 아무것도 말해주지 않는다.
-        return if (posix.errno(fd) == .NOENT) .free else .unknown;
-    }
-    defer _ = c.close(fd);
-    const rc = flock(fd, LOCK_EX | LOCK_NB);
-    if (rc == 0) return .free; // 우리가 잡았다 = 아무도 안 들고 있다.
-    return if (posix.errno(rc) == .AGAIN) .held else .unknown;
+    return owner_lease.observe(path);
 }
 
 fn connectNewHostWithBackoff(
@@ -329,6 +312,36 @@ pub fn connectExistingHost(
             return outcome;
         },
     }
+}
+
+/// Recovery discovery가 pin한 exact descriptor에만 새 connection을 연다. pathname을 fresh revalidate하고
+/// legacy endpoint 추측이나 spawn으로 우회하지 않는다.
+pub fn connectDiscoveredHost(
+    allocator: std.mem.Allocator,
+    base_cache_dir: []const u8,
+    expected: host_manifest.Descriptor,
+) Outcome {
+    if (builtin.os.tag != .macos or expected.host_id == 0) return .{ .failed = .invalid_endpoint };
+    var dir_buf: [512]u8 = undefined;
+    const dir = discovery.sessionHostDirPath(&dir_buf, base_cache_dir) catch
+        return .{ .failed = .invalid_endpoint };
+    var current = host_manifest.load(allocator, dir, expected.host_id) catch |err| return .{ .failed = switch (err) {
+        error.OutOfMemory => .out_of_memory,
+        error.ManifestNotFound => .host_gone,
+        else => .invalid_manifest,
+    } };
+    defer current.deinit();
+    if (!host_manifest.descriptorEql(current.descriptor(), expected))
+        return .{ .failed = .stale_manifest };
+    const endpoint = allocator.dupeZ(u8, expected.endpoint) catch return .{ .failed = .out_of_memory };
+    defer allocator.free(endpoint);
+    return connectExactWithBackoff(
+        allocator,
+        endpoint,
+        expected.protocol_major,
+        expected,
+        .{ .connect_attempts = 10, .connect_delay_ms = 20 },
+    );
 }
 
 fn connectLegacyExact(allocator: std.mem.Allocator, base_cache_dir: []const u8, host_id: u128) Outcome {
@@ -771,6 +784,44 @@ test "host_connect: manifest도 endpoint도 없는 host_id는 host_gone으로 �
     try testing.expectEqual(FailureReason.invalid_endpoint, invalid.failed);
 }
 
+test "host_connect: recovery descriptor replacement는 legacy probe 없이 stale로 거부한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var base_buf: [128]u8 = undefined;
+    const base = std.fmt.bufPrintZ(&base_buf, "/tmp/maru-sh-discovered-{d}", .{c.getpid()}) catch
+        return error.SkipZigTest;
+    _ = c.mkdir(base.ptr, 0o700);
+    var dir_buf: [256]u8 = undefined;
+    const dir = discovery.sessionHostDirPath(&dir_buf, base) catch return error.SkipZigTest;
+    _ = c.mkdir(dir.ptr, 0o700);
+    const host_id: u128 = 0xD15C0;
+    var endpoint_buf: [128]u8 = undefined;
+    const endpoint = try short_endpoint.currentSocketPathIn(&endpoint_buf, host_id);
+    const original: host_manifest.Descriptor = .{
+        .host_id = host_id,
+        .build_id = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        .protocol_major = protocol.version_major,
+        .screen_codec_version = screen_stream.codec_version,
+        .upgrade_epoch = 1,
+        .lifecycle = .ready,
+        .endpoint = endpoint,
+    };
+    var published = try host_manifest.publish(allocator, dir, original);
+    defer {
+        published.deinit();
+        host_manifest.removeEmptyHostDirectories(dir, host_id);
+        _ = c.rmdir(dir.ptr);
+        _ = c.rmdir(base.ptr);
+    }
+    var replacement = original;
+    replacement.upgrade_epoch = 2;
+    try published.republish(replacement);
+
+    const result = connectDiscoveredHost(allocator, base, original);
+    try testing.expect(result == .failed);
+    try testing.expectEqual(FailureReason.stale_manifest, result.failed);
+}
+
 // code-review(max) 회귀: owner lease 관측이 bool이라 **"lease 파일이 없다"(host 사망의 증거)** 와 **"우리가 볼 수 없었다"**
 // (fd 고갈·권한)가 같은 값이었고, 그 값이 곧바로 `host_gone`(영구) 판정에 쓰였다. 즉 우리 쪽 사정으로 살아 있는 host를
 // 사라졌다고 단정할 수 있었다. 터미널에서 왜 중요한가: 그 오분류의 대가는 실행 중인 셸·빌드·SSH 세션이 통째로 묘비가
@@ -791,7 +842,7 @@ test "host_connect: owner lease는 부재(free)와 판정 불가(unknown)를 구
 
     const host_id: u128 = 0xFEED_BEEF;
     // (1) lease 파일이 아예 없다 = host가 lease를 놓았다 → free(= 사라졌다고 단정해도 되는 유일한 상태).
-    try testing.expectEqual(LeaseState.free, ownerLeaseState(dir, host_id));
+    try testing.expectEqual(owner_lease.Observation.free, ownerLeaseState(dir, host_id));
 
     // (2) 같은 경로가 **열 수 없는 것**이면(여기선 디렉터리 — open(RDWR)이 EISDIR) 파일 상태를 알 수 없다 → unknown.
     //     예전 bool 구현은 이 경우도 "lease 없음"으로 접어 host_gone을 만들었다.
@@ -809,7 +860,7 @@ test "host_connect: owner lease는 부재(free)와 판정 불가(unknown)를 구
         _ = c.rmdir(host_dir.ptr);
         _ = c.rmdir(hosts_root.ptr);
     }
-    try testing.expectEqual(LeaseState.unknown, ownerLeaseState(dir, host_id));
+    try testing.expectEqual(owner_lease.Observation.unknown, ownerLeaseState(dir, host_id));
 }
 
 /// legacy endpoint에 **연결은 되지만 hello가 갈리는** peer. 살아 있는 host를 흉내 내되 우리 major와 말이 안 통하는

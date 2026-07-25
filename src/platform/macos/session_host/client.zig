@@ -90,13 +90,18 @@ pub const InventoryUnavailable = enum {
 };
 
 pub const RuntimeInventory = union(enum) {
-    unavailable: InventoryUnavailable,
+    unavailable: struct {
+        reason: InventoryUnavailable,
+        page_count: u8,
+    },
     complete: Complete,
 
     pub const Complete = struct {
         membership_generation: u64,
         upgrade_epoch: u64,
         authority_generation: u64,
+        /// 전체 recovery collector가 host별 ceiling 합계를 31 page로 제한하기 위한 실제 소비량.
+        page_count: u8,
         runtime_ids: []u128,
 
         pub fn deinit(self: *Complete, allocator: std.mem.Allocator) void {
@@ -341,7 +346,17 @@ pub const Client = struct {
     /// 절대 반환하지 않고 typed unavailable로 강등한다. Recovery projection의 malformed response는 canonical exact
     /// manifest attach가 같은 adapter에서 계속 가능하도록 connection 전체를 poison하지 않는다.
     pub fn runtimeInventory(self: *Client) ClientError!RuntimeInventory {
-        if (!self.runtime_inventory_v1) return .{ .unavailable = .unsupported };
+        var consumed: u8 = 0;
+        return self.runtimeInventoryBounded(protocol.max_inventory_pages, &consumed);
+    }
+
+    pub fn runtimeInventoryBounded(
+        self: *Client,
+        max_pages: usize,
+        consumed: *u8,
+    ) ClientError!RuntimeInventory {
+        consumed.* = 0;
+        if (!self.runtime_inventory_v1) return .{ .unavailable = .{ .reason = .unsupported, .page_count = 0 } };
         var ids: std.ArrayListUnmanaged(u128) = .empty;
         errdefer ids.deinit(self.allocator);
         var cursor: []const u8 = "";
@@ -352,10 +367,14 @@ pub const Client = struct {
 
         while (true) {
             page_count += 1;
-            if (page_count > protocol.max_inventory_pages) {
+            if (page_count > protocol.max_inventory_pages or page_count > max_pages) {
                 ids.deinit(self.allocator);
-                return .{ .unavailable = .malformed };
+                return .{ .unavailable = .{
+                    .reason = if (page_count > max_pages) .cap_exceeded else .malformed,
+                    .page_count = @intCast(page_count - 1),
+                } };
             }
+            consumed.* = @intCast(page_count);
             var params: std.Io.Writer.Allocating = .init(self.allocator);
             defer params.deinit();
             var js: std.json.Stringify = .{ .writer = &params.writer, .options = .{} };
@@ -368,14 +387,17 @@ pub const Client = struct {
             defer self.allocator.free(response);
             if (parseInventoryError(response)) |code| {
                 ids.deinit(self.allocator);
-                return .{ .unavailable = inventoryUnavailableFor(code) };
+                return .{ .unavailable = .{
+                    .reason = inventoryUnavailableFor(code),
+                    .page_count = @intCast(page_count),
+                } };
             }
 
             const page = parseInventoryPage(self.allocator, response) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 error.Malformed => {
                     ids.deinit(self.allocator);
-                    return .{ .unavailable = .malformed };
+                    return .{ .unavailable = .{ .reason = .malformed, .page_count = @intCast(page_count) } };
                 },
             };
             defer page.deinit(self.allocator);
@@ -383,35 +405,36 @@ pub const Client = struct {
                 page.authority_generation != self.authority_generation)
             {
                 ids.deinit(self.allocator);
-                return .{ .unavailable = .authority_changed };
+                return .{ .unavailable = .{ .reason = .authority_changed, .page_count = @intCast(page_count) } };
             }
             if (generation == 0) {
                 generation = page.membership_generation;
                 expected_total = page.total;
             } else if (page.membership_generation != generation or page.total != expected_total.?) {
                 ids.deinit(self.allocator);
-                return .{ .unavailable = .malformed };
+                return .{ .unavailable = .{ .reason = .malformed, .page_count = @intCast(page_count) } };
             }
             if (!std.mem.eql(u8, page.cursor, cursor) or ids.items.len + page.runtime_ids.len > page.total) {
                 ids.deinit(self.allocator);
-                return .{ .unavailable = .malformed };
+                return .{ .unavailable = .{ .reason = .malformed, .page_count = @intCast(page_count) } };
             }
             if (ids.items.len != 0 and page.runtime_ids.len != 0 and
                 ids.items[ids.items.len - 1] >= page.runtime_ids[0])
             {
                 ids.deinit(self.allocator);
-                return .{ .unavailable = .malformed };
+                return .{ .unavailable = .{ .reason = .malformed, .page_count = @intCast(page_count) } };
             }
             ids.appendSlice(self.allocator, page.runtime_ids) catch return error.OutOfMemory;
             if (page.done) {
                 if (page.next_cursor.len != 0 or ids.items.len != page.total) {
                     ids.deinit(self.allocator);
-                    return .{ .unavailable = .malformed };
+                    return .{ .unavailable = .{ .reason = .malformed, .page_count = @intCast(page_count) } };
                 }
                 return .{ .complete = .{
                     .membership_generation = generation,
                     .upgrade_epoch = page.upgrade_epoch,
                     .authority_generation = page.authority_generation,
+                    .page_count = @intCast(page_count),
                     .runtime_ids = ids.toOwnedSlice(self.allocator) catch return error.OutOfMemory,
                 } };
             }
@@ -419,11 +442,11 @@ pub const Client = struct {
                 ids.items.len >= page.total or
                 page.runtime_ids[page.runtime_ids.len - 1] != (parseExactInventoryId(page.next_cursor) orelse {
                     ids.deinit(self.allocator);
-                    return .{ .unavailable = .malformed };
+                    return .{ .unavailable = .{ .reason = .malformed, .page_count = @intCast(page_count) } };
                 }))
             {
                 ids.deinit(self.allocator);
-                return .{ .unavailable = .malformed };
+                return .{ .unavailable = .{ .reason = .malformed, .page_count = @intCast(page_count) } };
             }
             @memcpy(&cursor_buf, page.next_cursor);
             cursor = &cursor_buf;
@@ -1438,11 +1461,32 @@ test "client inventory collector owns the exact 16-page maximum snapshot" {
             try std.testing.expect(peer_ok);
             defer complete.deinit(allocator);
             try std.testing.expectEqual(@as(u64, 44), complete.membership_generation);
+            try std.testing.expectEqual(@as(u8, protocol.max_inventory_pages), complete.page_count);
             try std.testing.expectEqual(protocol.max_inventory_runtimes, complete.runtime_ids.len);
             try std.testing.expectEqual(@as(u128, 1), complete.runtime_ids[0]);
             try std.testing.expectEqual(@as(u128, protocol.max_inventory_runtimes), complete.runtime_ids[complete.runtime_ids.len - 1]);
         },
     }
+}
+
+test "client inventory bounded collector는 page budget 0에서 request 전에 차단한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fds: [2]c.fd_t = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds));
+    defer _ = c.close(fds[1]);
+    var client: Client = .{
+        .allocator = std.testing.allocator,
+        .fd = fds[0],
+        .host_id = 1,
+        .runtime_inventory_v1 = true,
+        .parser = framing.FrameParser.init(std.testing.allocator),
+    };
+    defer client.deinit();
+    var consumed: u8 = 99;
+    const inventory = try client.runtimeInventoryBounded(0, &consumed);
+    try std.testing.expectEqual(@as(u8, 0), consumed);
+    try std.testing.expectEqual(InventoryUnavailable.cap_exceeded, inventory.unavailable.reason);
+    try std.testing.expectEqual(@as(u8, 0), inventory.unavailable.page_count);
 }
 
 test "client malformed recovery inventory leaves canonical RPC usable on the same adapter" {
@@ -1469,7 +1513,8 @@ test "client malformed recovery inventory leaves canonical RPC usable on the sam
         peer.join();
         return err;
     };
-    try std.testing.expectEqual(InventoryUnavailable.malformed, inventory.unavailable);
+    try std.testing.expectEqual(InventoryUnavailable.malformed, inventory.unavailable.reason);
+    try std.testing.expectEqual(@as(u8, 1), inventory.unavailable.page_count);
     try std.testing.expect(!client.unusable);
     const get = client.call("runtime.get", "{\"runtime_id\":\"00000000000000000000000000000001\"}") catch |err| {
         client.failClosed();

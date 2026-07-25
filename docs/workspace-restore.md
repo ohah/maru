@@ -42,7 +42,7 @@ workspace restore와 persistent-session attach는 서로 대체하지 않는다.
 | 상태 | 시작 동작 |
 | --- | --- |
 | 같은 `host_id/runtime_id`가 살아 있음 | 새 shell을 spawn하지 않고 기존 runtime attach (**구현**) |
-| manifest에는 있으나 runtime이 없음 | 자동 fresh spawn 금지. **그 Term만 종료 placeholder로 두고 나머지 surface·split·탭은 정상 복원한다(구현)**. 영구 부재(`PersistentRuntimeGone`)로 분류된 경우에만이며, 일시 실패는 계속 window apply를 실패시킨다 |
+| manifest에는 있으나 runtime이 없음 | 자동 fresh spawn 금지. **그 Term만 종료 placeholder로 두고 나머지 surface·split·탭은 정상 복원한다(구현)**. 영구 부재(`PersistentRuntimeGone`)로 분류된 경우에만이며, 일시 실패는 계속 window apply를 실패시킨다. placeholder는 마지막 제목·위치와 `⏎` 안내를 화면에 남기고, `⏎`가 그 슬롯을 제자리 교체해 저장된 cwd에서 새 셸을 시작한다 |
 | host가 없음·종료됨·재부팅됨 | 기존 handle은 ended. 새 shell을 열 수는 있지만 동일 session continuation 아님 |
 | host에만 runtime이 남음 | 삭제하지 않음. `Recovered Sessions` 노출은 P4 계획 |
 

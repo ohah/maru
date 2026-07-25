@@ -733,18 +733,63 @@ pub const RemoteRuntime = struct {
         };
     }
 
+    /// OSC 52 write 결과. `text`가 null이면 대기 중이 없거나(빈 요청) 너무 커서 못 실은 것이고, `too_large`가
+    /// 그 둘을 가른다 — client는 too_large면 로컬과 같은 "복사가 너무 큼" 안내를 띄운다(조용한 유실 금지).
+    pub const ClipboardWrite = struct { text: ?[]u8, too_large: bool };
+
     /// OSC 52 write 텍스트를 host에서 가져온다(host는 넘기면 비운다). capability 없는 구 host면 null —
     /// 원격 클립보드 쓰기가 비활성이다(모르는 RPC를 시험하지 않는다). 반환 텍스트는 caller 소유.
-    pub fn clipboardWrite(self: *RemoteRuntime) client_mod.ClientError!?[]u8 {
+    ///
+    /// **base64로 받는다**: OSC 52 데이터는 임의 바이트라 JSON 문자열로 그대로 오면 strict 디코더의 UTF-8 검증에
+    /// 걸려 connection이 fail-close된다(복사 한 번에 앱 전역 연결이 끊긴다). host가 base64로 싣고 여기서 푼다.
+    pub fn clipboardWrite(self: *RemoteRuntime) client_mod.ClientError!?ClipboardWrite {
         if (!self.client.runtime_clipboard_v1) return null;
         var buf: [64]u8 = undefined;
         const params = std.fmt.bufPrint(&buf, "{{\"stream_id\":{d}}}", .{self.stream_id}) catch return error.OutOfMemory;
         const resp = try self.callOrdered("runtime.clipboard_write", params);
         defer self.allocator.free(resp);
-        return self.decodeSelectedTextResponse(resp); // {text} 단일 필드 schema 공용(빈 text=대기 없음)
+        return self.decodeClipboardWriteResponse(resp);
     }
 
-    /// 구 host 호환 경로. RemoteScreen이 조립한 현재 viewport에서만 추출한다. 구 screen wire에는 soft-wrap bit가 없어
+    fn decodeClipboardWriteResponse(self: *RemoteRuntime, resp: []const u8) client_mod.ClientError!?ClipboardWrite {
+        const obj = decodeStrictObject(self.allocator, resp) catch |err| {
+            if (err == error.OutOfMemory) return error.OutOfMemory;
+            self.client.failClosed();
+            return error.ProtocolError;
+        };
+        defer obj.deinit();
+        if (obj.string("error")) |code| {
+            if (obj.fields.len != 1 or protocol.ErrorCode.fromWireName(code) == null) {
+                self.client.failClosed();
+                return error.ProtocolError;
+            }
+            return null;
+        }
+        const b64 = obj.string("b64") orelse {
+            self.client.failClosed();
+            return error.ProtocolError;
+        };
+        const too_large = (obj.number("too_large") orelse 0) != 0;
+        if (obj.hasUnknownKey(&.{ "b64", "too_large" })) {
+            self.client.failClosed();
+            return error.ProtocolError;
+        }
+        if (b64.len == 0) return .{ .text = null, .too_large = too_large };
+        const dec = std.base64.standard.Decoder;
+        const size = dec.calcSizeForSlice(b64) catch {
+            self.client.failClosed(); // capability를 광고한 host가 유효하지 않은 base64를 보냈다 = schema 드리프트
+            return error.ProtocolError;
+        };
+        const out = self.allocator.alloc(u8, size) catch return error.OutOfMemory;
+        errdefer self.allocator.free(out);
+        dec.decode(out, b64) catch {
+            self.client.failClosed();
+            return error.ProtocolError;
+        };
+        return .{ .text = out, .too_large = false };
+    }
+
+    /// 구 host 호환 경로. RemoteScreen이 조립한 현재 viewport에서만 추출한다.    /// 구 host 호환 경로. RemoteScreen이 조립한 현재 viewport에서만 추출한다. 구 screen wire에는 soft-wrap bit가 없어
     /// multi-row 선형 선택은 보이는 행 사이에 개행을 보존하는 degraded 정책이며, capability가 있는 최신 host에서는 반드시
     /// 위 RPC를 써 host SSOT를 유지한다.
     fn selectedTextFromProjection(self: *RemoteRuntime, span: terminal.SelectionSpan) client_mod.ClientError!?[]u8 {
@@ -1182,6 +1227,51 @@ test "remote runtime: advertised selected-text capability with a missing respons
         rr.decodeSelectedTextResponse("{\"error\":{\"code\":\"invalid_request\"}}"),
     );
     try std.testing.expectError(error.ConnectionClosed, client.call("host.info", null));
+}
+
+// OSC 52 데이터는 임의 바이트다. JSON 문자열로 그대로 보내면 strict 디코더의 UTF-8 검증에 걸려 connection이
+// fail-close되므로(복사 한 번에 앱 전역 연결이 끊긴다) base64로 나른다. 그 왕복과 too_large 신호를 고정한다.
+test "remote runtime: clipboardWrite는 base64로 임의 바이트를 복원하고 too_large를 전한다" {
+    const allocator = std.testing.allocator;
+    var client = client_mod.Client{
+        .allocator = allocator,
+        .fd = -1,
+        .host_id = 1,
+        .runtime_clipboard_v1 = true,
+        .parser = framing.FrameParser.init(allocator),
+    };
+    defer client.deinit();
+    var rr: RemoteRuntime = undefined;
+    rr.client = &client;
+    rr.allocator = allocator;
+
+    // 0xFF 같은 non-UTF-8 바이트도 그대로 복원된다(예전 구현은 여기서 연결을 죽였다).
+    {
+        const raw = [_]u8{ 0xFF, 0x00, 'h', 'i', 0xFE };
+        var b64: [16]u8 = undefined;
+        const enc = std.base64.standard.Encoder.encode(&b64, &raw);
+        const body = try std.fmt.allocPrint(allocator, "{{\"b64\":\"{s}\",\"too_large\":0}}", .{enc});
+        defer allocator.free(body);
+        const got = (try rr.decodeClipboardWriteResponse(body)).?;
+        defer if (got.text) |t| allocator.free(t);
+        try std.testing.expectEqualSlices(u8, &raw, got.text.?);
+        try std.testing.expect(!got.too_large);
+    }
+    // 대기 없음 → text null.
+    {
+        const got = (try rr.decodeClipboardWriteResponse("{\"b64\":\"\",\"too_large\":0}")).?;
+        try std.testing.expect(got.text == null);
+        try std.testing.expect(!got.too_large);
+    }
+    // 너무 커서 못 실은 경우 → text 없이 too_large(사용자에게 안내해야 하는 상태).
+    {
+        const got = (try rr.decodeClipboardWriteResponse("{\"b64\":\"\",\"too_large\":1}")).?;
+        try std.testing.expect(got.text == null);
+        try std.testing.expect(got.too_large);
+    }
+    // 선언 밖 키·깨진 base64는 schema 드리프트로 fail-close 한다.
+    try std.testing.expectError(error.ProtocolError, rr.decodeClipboardWriteResponse("{\"b64\":\"\",\"too_large\":0,\"extra\":\"x\"}"));
+    try std.testing.expectError(error.ProtocolError, rr.decodeClipboardWriteResponse("{\"b64\":\"!!!!\",\"too_large\":0}"));
 }
 
 test "remote runtime: 응답 객체 디코더는 strict다(escape·미종료·trailing·중복 키 거부)" {

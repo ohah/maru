@@ -44,6 +44,15 @@ const ForegroundProcessName = maru.pty.types.ForegroundProcessName;
 // host runtime의 PTY→core 이벤트 큐 용량. 제품 경로(app_session.default_queue_capacity)와 같은 16으로 맞춰
 // 재접속한 GUI가 in-process와 같은 backpressure를 보게 한다(e2d stream이 이 큐를 소비).
 const default_queue_capacity: usize = 16;
+/// control frame(`max_control_json` 256 KiB)에 base64(4/3배)로 담을 수 있는 원본 바이트 상한. 여유를 두고 잡는다 —
+/// 초과하는 복사는 host가 `too_large`로 알려 client가 로컬과 같은 안내를 띄운다(조용한 유실 금지).
+pub const max_clipboard_wire_bytes: usize = 160 * 1024;
+
+/// OSC 52 read 요청의 target(Pc) 상한. 표준 Pc는 `c`/`p`/`s` 같은 한 글자 선택자지만 파서는 길이를 제한하지 않아
+/// (OSC 52는 대용량 cap을 쓴다) 수백 KB짜리 Pc가 올 수 있다. 그걸 관측에 그대로 실으면 metadata JSON이
+/// `max_control_json`을 넘겨 **attach 응답과 metadata 이벤트가 영구히 실패**한다(runtime이 접속 불가가 된다).
+const max_clipboard_target_bytes: usize = 32;
+
 const foreground_refresh_ns: i128 = 500 * std.time.ns_per_ms;
 
 /// host가 drain해 보관하는 OSC 52 요청 상태(runtime별). client는 관측의 seq 증가로 요청을 알아채고,
@@ -928,13 +937,20 @@ pub const RuntimeManager = struct {
             const pending_write = surface.core.pendingClipboardWrite();
             if (pending_write.len > 0) {
                 clip.write_text.clearRetainingCapacity();
-                clip.write_text.appendSlice(self.allocator, pending_write) catch {};
-                clip.write_seq +%= 1;
-                surface.core.clearClipboardWrite();
+                // 저장에 성공했을 때만 seq를 올리고 core pending을 비운다 — OOM을 삼키면서 둘 다 하면 원본이
+                // 어디에도 남지 않은 채 client에는 "요청 있음"만 전해져 사용자의 복사가 조용히 파괴된다.
+                if (clip.write_text.appendSlice(self.allocator, pending_write)) |_| {
+                    clip.write_seq +%= 1;
+                    surface.core.clearClipboardWrite();
+                } else |_| {
+                    clip.write_text.clearRetainingCapacity(); // 부분 복사분 폐기 — 다음 관측에서 다시 시도한다
+                }
             }
             if (surface.core.clipboardReadPending()) {
                 clip.read_target.clearRetainingCapacity();
-                clip.read_target.appendSlice(self.allocator, surface.core.clipboardReadTarget()) catch {};
+                const target = surface.core.clipboardReadTarget();
+                // 상한 초과 Pc는 자른다 — 관측이 control frame을 넘겨 runtime이 attach 불가가 되는 것을 막는다.
+                clip.read_target.appendSlice(self.allocator, target[0..@min(target.len, max_clipboard_target_bytes)]) catch {};
                 clip.read_seq +%= 1;
                 surface.core.clearClipboardRead(); // 정책과 무관하게 소비(로컬과 같은 규율 — 재트리거 방지)
             }
@@ -1139,20 +1155,31 @@ pub const RuntimeManager = struct {
         return allocator.dupe(u8, out.written()) catch return error.OutOfMemory;
     }
 
-    /// OSC 52 write 텍스트를 client에 넘긴다(가져가면 비운다 — 같은 데이터가 다시 나가지 않게). 대기 중이 없으면
-    /// 빈 text. 텍스트는 임의 바이트라 실 JSON encoder로 escape한다.
+    /// OSC 52 write 텍스트를 client에 넘긴다. **base64로 싣는다** — OSC 52 데이터는 임의 바이트(0x80~0xFF 포함)라
+    /// JSON 문자열로 그대로 보내면 client의 strict 디코더가 UTF-8 검증에서 거부하고 connection을 fail-close한다
+    /// (복사 한 번에 앱 전역 host 연결이 끊긴다). `runtime.find`의 검색어 hex와 같은 규율이다.
+    ///
+    /// `too_large`는 0/1 정수다 — strict 응답 디코더가 string/number만 다루므로 bool을 쓰면 파싱이 깨진다.
+    /// 크기: control frame은 `max_control_json`(256 KiB)이라 그보다 큰 복사는 애초에 실을 수 없다. host가 **미리
+    /// 판정해** 초과분은 텍스트 없이 `too_large`로 알려 client가 로컬과 같은 안내를 띄우게 한다(조용한 유실 금지).
+    /// 가져간 뒤에만 버퍼를 비운다 — 인코딩/전송이 실패했는데 원본을 버리면 복구할 수 없다.
     fn clipboardWriteOp(ctx: *anyopaque, runtime_id: u128, allocator: std.mem.Allocator) anyerror![]u8 {
         const self: *RuntimeManager = @ptrCast(@alignCast(ctx));
         const handle = self.handleFor(runtime_id) orelse return error.RuntimeNotFound;
-        const text: []const u8 = if (self.clipboards.getPtr(handle)) |clip| blk: {
-            break :blk clip.write_text.items;
-        } else "";
-        var out: std.Io.Writer.Allocating = .init(allocator);
-        defer out.deinit();
-        var js: std.json.Stringify = .{ .writer = &out.writer, .options = .{} };
-        js.write(.{ .text = text }) catch return error.OutOfMemory;
-        const body = allocator.dupe(u8, out.written()) catch return error.OutOfMemory;
-        if (self.clipboards.getPtr(handle)) |clip| clip.write_text.clearRetainingCapacity(); // 가져갔으니 비운다
+        const clip = self.clipboards.getPtr(handle) orelse
+            return allocator.dupe(u8, "{\"b64\":\"\",\"too_large\":0}") catch return error.OutOfMemory;
+        const raw = clip.write_text.items;
+        if (raw.len == 0) return allocator.dupe(u8, "{\"b64\":\"\",\"too_large\":0}") catch return error.OutOfMemory;
+        if (raw.len > max_clipboard_wire_bytes) {
+            clip.write_text.clearRetainingCapacity(); // 못 보낼 것은 붙들지 않는다(다음 복사를 위해 비움)
+            return allocator.dupe(u8, "{\"b64\":\"\",\"too_large\":1}") catch return error.OutOfMemory;
+        }
+        const enc = std.base64.standard.Encoder;
+        const b64 = allocator.alloc(u8, enc.calcSize(raw.len)) catch return error.OutOfMemory;
+        defer allocator.free(b64);
+        _ = enc.encode(b64, raw);
+        const body = std.fmt.allocPrint(allocator, "{{\"b64\":\"{s}\",\"too_large\":0}}", .{b64}) catch return error.OutOfMemory;
+        clip.write_text.clearRetainingCapacity(); // 성공적으로 인코딩한 뒤에만 소비한다
         return body;
     }
 
@@ -1327,6 +1354,12 @@ pub const RuntimeManager = struct {
         be.closeAndDetach(handle); // PTY/자식/reader 종료 + routing detach(멱등).
         be.remove(handle); // reader join → surface/live_pty 번들 deinit → 슬롯 회수.
         _ = self.foreground_cache.remove(handle);
+        _ = self.bell_counts.remove(handle);
+        // 클립보드 텍스트는 최대 160 KiB라 닫힌 runtime마다 남기면 영속 데몬 메모리가 단조 증가한다(버퍼도 해제).
+        if (self.clipboards.fetchRemove(handle)) |kv| {
+            var state = kv.value;
+            state.deinit(self.allocator);
+        }
         self.host_registry.unregister(runtime_id);
     }
 };

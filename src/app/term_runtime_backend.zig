@@ -166,29 +166,30 @@ pub const RuntimeObservation = struct {
         self.* = next;
     }
 
+    /// 캐시(소유 버퍼)를 호출 동안만 유효한 view로 편다.
+    ///
+    /// **스칼라 필드는 `inline for`로 자동 복사한다.** 예전엔 필드를 하나씩 손으로 나열했는데, 새 관측 필드를
+    /// 추가하고 여기 한 줄을 빠뜨리면 struct 기본값(0/false)이 조용히 남아 **그 기능이 제품에서 통째로 무동작**했다
+    /// (mouse_tracking_mode·bell_count·clipboard_* 가 실제로 그렇게 죽어 있었고, 테스트가 `term.rt.observation.*`를
+    /// 직접 대입해 이 계층을 건너뛰는 바람에 CI도 못 잡았다). 이름과 타입이 같은 필드는 자동으로 실리므로 같은
+    /// 누락이 구조적으로 불가능하다. 표현이 다른 필드(ArrayList→slice, optional 표현)만 아래에서 명시한다.
     pub fn view(self: *const RuntimeObservation) RuntimeObservationView {
-        return .{
-            .availability = self.availability,
-            .revision = self.revision,
-            .observer_generation = self.observer_generation,
-            .title_generation = self.title_generation,
-            .size = self.size,
+        var out: RuntimeObservationView = .{
+            // 표현이 다른 필드(소유 버퍼 → 빌린 슬라이스, present 플래그 → optional)만 수동이다.
             .cwd = self.cwd.items,
             .window_title = self.window_title.items,
             .ssh_remote_dest = if (self.ssh_remote_dest_present) self.ssh_remote_dest.items else null,
-            .semantic_state = self.semantic_state,
-            .alt_active = self.alt_active,
-            .app_cursor_keys = self.app_cursor_keys,
-            .app_keypad = self.app_keypad,
-            .kitty_flags = self.kitty_flags,
-            .alternate_scroll = self.alternate_scroll,
-            .mouse_tracking = self.mouse_tracking,
-            .bracketed_paste = self.bracketed_paste,
-            .foreground_available = self.foreground_available,
-            .foreground_pgid = self.foreground_pgid,
+            .clipboard_read_target = self.clipboard_read_target.items,
             .foreground_processes = self.foreground_processes.items,
             .agent_progress = self.agent_progress.items,
         };
+        inline for (@typeInfo(RuntimeObservationView).@"struct".fields) |field| {
+            if (@hasField(RuntimeObservation, field.name)) {
+                const Src = @TypeOf(@field(self, field.name));
+                if (Src == field.type) @field(out, field.name) = @field(self, field.name);
+            }
+        }
+        return out;
     }
 
     pub fn clearAgentProgress(self: *RuntimeObservation) void {
@@ -733,4 +734,62 @@ test "runtime observation: every replacement allocation failure preserves the pr
         try std.testing.expectEqualStrings("codex", observation.foreground_processes.items[0].slice());
         try std.testing.expectEqualStrings("waiting", observation.agent_progress.items);
     }
+}
+
+// view()가 관측 스칼라를 하나라도 빠뜨리면 그 기능이 제품에서 조용히 무동작한다 — 실제로 mouse_tracking_mode·
+// bell_count·clipboard_* 가 그렇게 죽어 있었고(캐시엔 값이 있는데 view가 안 실어 term 캐시는 기본값), 테스트가
+// term.rt.observation.*를 직접 대입하는 바람에 CI도 통과했다. 이제 view()는 이름·타입이 같은 필드를 자동 복사하므로
+// 이 테스트는 그 자동 복사가 실제로 **모든** 스칼라를 덮는지(그리고 표현이 다른 필드는 수동으로 채워지는지) 고정한다.
+test "RuntimeObservation.view: 모든 관측 필드가 view로 전달된다(자동 복사 커버리지)" {
+    const allocator = std.testing.allocator;
+    var obs: RuntimeObservation = .{};
+    defer obs.deinit(allocator);
+
+    // 스칼라를 전부 기본값과 다른 값으로 채운다 — 하나라도 view가 안 실으면 아래 단언이 깨진다.
+    obs.availability = .current;
+    obs.revision = 7;
+    obs.observer_generation = 9;
+    obs.title_generation = 11;
+    obs.size = .{ .cols = 120, .rows = 40 };
+    obs.semantic_state = .command;
+    obs.alt_active = true;
+    obs.app_cursor_keys = true;
+    obs.app_keypad = true;
+    obs.kitty_flags = 5;
+    obs.alternate_scroll = false;
+    obs.mouse_tracking = true;
+    obs.mouse_tracking_mode = 4;
+    obs.bracketed_paste = true;
+    obs.bell_count = 3;
+    obs.clipboard_write_seq = 13;
+    obs.clipboard_read_seq = 17;
+    obs.foreground_available = true;
+    obs.foreground_pgid = 55;
+    try obs.cwd.appendSlice(allocator, "/repo");
+    try obs.window_title.appendSlice(allocator, "work");
+    try obs.clipboard_read_target.appendSlice(allocator, "p");
+    try obs.agent_progress.appendSlice(allocator, "working");
+
+    const v = obs.view();
+    // comptime 전수: View의 모든 필드가 기본값과 달라야 한다(= view가 실제로 채웠다). 표현이 다른 필드도 위에서
+    // 값을 넣었으므로 같은 규칙으로 검사된다. 새 필드를 추가하고 값을 안 채우면 여기서 실패해 누락을 알린다.
+    const defaults: RuntimeObservationView = .{};
+    inline for (@typeInfo(RuntimeObservationView).@"struct".fields) |field| {
+        if (field.type == []const u8) {
+            try std.testing.expect(@field(v, field.name).len > 0);
+        } else if (field.type == ?[]const u8 or field.type == []const pty.types.ForegroundProcessName) {
+            // optional/slice 표현은 값 유무만 본다(위에서 ssh_remote_dest·processes는 비워 두는 게 정상 상태).
+        } else if (@typeInfo(field.type) == .optional) {
+            // optional은 표현이 갈려(ssh_remote_dest는 미설정이 정상) 값 유무를 강제하지 않는다.
+        } else if (@typeInfo(field.type) == .bool or @typeInfo(field.type) == .int or @typeInfo(field.type) == .@"enum") {
+            try std.testing.expect(!std.meta.eql(@field(v, field.name), @field(defaults, field.name)));
+        }
+    }
+    // 대표 값 몇 개는 그대로 실렸는지 직접 확인(자동 복사가 엉뚱한 필드를 덮지 않았는지).
+    try std.testing.expectEqual(@as(u8, 4), v.mouse_tracking_mode);
+    try std.testing.expectEqual(@as(u64, 3), v.bell_count);
+    try std.testing.expectEqual(@as(u64, 13), v.clipboard_write_seq);
+    try std.testing.expectEqual(@as(u64, 17), v.clipboard_read_seq);
+    try std.testing.expectEqualStrings("p", v.clipboard_read_target);
+    try std.testing.expectEqualStrings("/repo", v.cwd);
 }

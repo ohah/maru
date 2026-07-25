@@ -862,7 +862,12 @@ pub const Connection = struct {
     fn dispatchClipboardWrite(self: *Connection, request_id: u64, params: ?std.json.ObjectMap) HandleError!Action {
         const p = params orelse return self.replyError(request_id, .invalid_request);
         const stream = intFieldU64(p, "stream_id") orelse return self.replyError(request_id, .invalid_request);
-        const runtime_id = (self.attachments.get(stream) orelse return self.replyError(request_id, .invalid_request)).runtime_id;
+        const sub = self.attachments.get(stream) orelse return self.replyError(request_id, .invalid_request);
+        const runtime_id = sub.runtime_id;
+        // 이 RPC는 host 상태를 **소비**한다(가져가면 write 버퍼가 비워진다). observer 모드 attachment가 controller의
+        // 클립보드를 가로채지 못하도록 core_command와 같은 경계에서 input capability를 확인한다.
+        if (!reg.Capability.has(self.registry.capabilitiesOf(runtime_id, stream), reg.Capability.input))
+            return self.replyError(request_id, .unauthorized);
         const body = if (self.runtime_ops) |ops|
             ops.clipboard_write(ops.ctx, runtime_id, self.allocator) catch return self.replyError(request_id, .internal)
         else
@@ -2629,6 +2634,38 @@ test "server: runtime.report_mouse routes the mouse event to RuntimeOps (§host-
 // 원격 Cmd+클릭 링크 열기는 host가 판정한다(client core는 빈 placeholder이고, file_path 존재 검증은 host FS에서
 // 해야 정확하다). server가 (row,col,scopes)를 RuntimeOps로 그대로 라우팅하고 host 응답을 돌려주는지 고정한다 —
 // scopes가 유실되면 client의 link-detection 설정이 무시돼 "밑줄은 뜨는데 안 열리는"(또는 그 반대) 불일치가 난다.
+// clipboard_write는 host 상태를 **소비**하는 RPC라 observer 모드가 controller의 클립보드를 가로채면 안 된다.
+// 라우팅과 권한 게이트를 함께 고정한다 — 이 경로는 이번 슬라이스에서 어느 계층에도 테스트가 없었다.
+test "server: runtime.clipboard_write requires input capability and returns the host text" {
+    const allocator = testing.allocator;
+    var registry = reg.TerminalRuntimeRegistry.init(allocator);
+    defer registry.deinit();
+    _ = try registry.register(0xAA, 80, 24);
+
+    var fake: FakeRuntimeOps = .{};
+    var conn = Connection.init(allocator, 1, &registry);
+    defer conn.deinit();
+    conn.runtime_ops = fake.ops();
+    {
+        const h = try feedJson(&conn, .hello, 1, "{\"protocol_min\":2,\"protocol_max\":2}");
+        if (h.frame) |f| f.deinit(allocator);
+    }
+    // observer로 attach하면 input capability가 없다 → 클립보드를 가져갈 수 없어야 한다.
+    {
+        const frames = try feedExpectFrames(&conn, .request, 2, "{\"method\":\"runtime.attach\",\"params\":{\"runtime_id\":\"aa\",\"mode\":\"observer\"}}");
+        defer {
+            for (frames) |f| f.deinit(allocator);
+            allocator.free(frames);
+        }
+    }
+    {
+        const r = try feedJson(&conn, .request, 3, "{\"method\":\"runtime.clipboard_write\",\"params\":{\"stream_id\":1}}");
+        defer if (r.frame) |f| f.deinit(allocator);
+        try testing.expect(std.mem.indexOf(u8, r.frame.?.payload, "unauthorized") != null);
+        try testing.expect(std.mem.indexOf(u8, r.frame.?.payload, "COPIED") == null);
+    }
+}
+
 test "server: runtime.link_at routes cell and scopes to RuntimeOps and returns the host link" {
     const allocator = testing.allocator;
     var registry = reg.TerminalRuntimeRegistry.init(allocator);

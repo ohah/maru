@@ -205,15 +205,27 @@ PTY raw bytes만 host가 보관하고 새 GUI가 처음부터 replay하는 방�
   인코딩으로 나갈 수 있다. 드물지만 모드 전환 직후(vim 진입 등)에 노출된다. 이 stale이 실제 문제로 관측되면 키도
   host 인코딩으로 옮긴다 — 그때는 키 이벤트 wire를 추가하고 바이트 단일 경로를 포기하는 교환이다.
 
-**아직 이 규칙을 적용하지 않은 것**(무동작 상태):
+**이 규칙으로 이관한 것**(모두 동작한다):
 
-- **벨(BEL)은 이 규칙대로 이관했다**(P3-e4c-8). host는 관측에 누적 카운터 `bell_count`만 싣고, `bell.*` 정책 판정과
+- **벨(BEL)**(P3-e4c-8). host는 관측에 누적 카운터 `bell_count`만 싣고, `bell.*` 정책 판정과
   실제 실행(NSSound.beep·시각 flash·Dock 배지)은 client가 한다. 새 RPC를 만들지 않고 **관측 push에 얹은** 이유는
   벨이 드문 이벤트라 매 tick 폴링이 낭비이고, 관측은 이미 약 100ms마다 변화 시에만 push되기 때문이다.
   **소비형 bool이 아니라 카운터**인 것이 핵심이다 — full-state 관측은 "이전과 같으면 미전송"이라 bool은 true→true
   전이를 잃어 둘째 벨을 놓친다. client는 마지막에 본 값보다 **클 때만** 울리고, 작아지면(host exec migration으로
   카운터가 0에서 재시작) 가짜 벨 대신 조용히 재동기화한다.
-- **OSC 52 클립보드도 같은 규칙으로 이관했다**(P3-e4c-9). host는 요청을 drain해 관측에 누적 seq(`clipboard_write_seq`·
+- **누적 seq를 소비하는 쪽의 두 가지 필수 규율**(리뷰에서 드러난 계약):
+  1. **첫 관측은 기준선만 잡고 발화하지 않는다.** host의 카운터는 client보다 오래 살아서, 재접속하면 이미 지나간
+     값이 곧바로 "증가"로 보인다. 이걸 처리하지 않으면 재접속 때마다 지난 벨이 울리고, 지난 OSC 52 read가 재생돼
+     **사용자 클립보드가 복원된 셸의 입력 줄에 주입**된다.
+  2. **소비는 전달에 성공한 뒤에 기록한다.** seq를 먼저 전진시키면 RPC 실패가 요청을 소비해 사용자의 복사가
+     영영 사라진다.
+- **관측에 싣는 값은 반드시 bounded여야 한다.** metadata JSON이 `max_control_json`을 넘으면 attach 응답과 metadata
+  이벤트가 **영구히 실패**해 그 runtime에 접속할 수 없게 된다. OSC 52의 Pc(target)는 파서가 길이를 제한하지 않으므로
+  host가 잘라서 싣고, 큰 클립보드 텍스트는 관측이 아니라 RPC로 빼되 그마저 넘치면 `too_large`로 알린다(조용한 유실 금지).
+- **임의 바이트는 JSON 문자열로 싣지 않는다.** client의 strict 응답 디코더는 UTF-8을 검증하므로 non-UTF-8이 오면
+  connection을 fail-close한다 — 복사 한 번에 앱 전역 host 연결이 끊긴다. OSC 52 데이터는 base64로 싣는다
+  (`runtime.find`의 검색어 hex와 같은 규율).
+- **OSC 52 클립보드**(P3-e4c-9). host는 요청을 drain해 관측에 누적 seq(`clipboard_write_seq`·
   `clipboard_read_seq`)와 read target(Pc)만 싣고, **정책 판정(`osc52.read`)과 OS 클립보드 접근은 client**가 한다.
   write 텍스트는 커서 관측 full-state에 실을 수 없어 `runtime.clipboard_write` RPC로 따로 가져간다(seq가 증가했을
   때만 호출 — 폴링 없음). **read 응답에는 추가 왕복이 없다**: 응답은 `ESC ] 52 ; Pc ; base64 ST` 바이트라 client가

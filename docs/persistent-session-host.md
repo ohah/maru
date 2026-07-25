@@ -166,6 +166,55 @@ host-backed runtime에서는 이 host `TerminalCore`가 cwd/title/semantic/OSC 5
 PTY raw bytes만 host가 보관하고 새 GUI가 처음부터 replay하는 방식은 무제한 transcript 또는 잘린 replay에서 생기는 화면 손실을
 요구하므로 채택하지 않는다. renderer는 GUI에 남고 host가 versioned screen snapshot/delta를 제공한다.
 
+### 기능을 어느 쪽에 둘 것인가 (배치 규칙)
+
+새 기능을 host-backed에 이관할 때 "host가 할 일인가 client가 할 일인가"를 매번 다시 판단하지 않도록 규칙을 고정한다.
+`Surface.core`가 client에서 **빈 placeholder**라는 사실만으로는 답이 안 나온다 — 실제로 링크·마우스 motion·스크롤바가
+그 core를 읽다가 조용히 무동작이었고(P3-e4c-5~7), 각각 답이 달랐다.
+
+**세 축으로 가른다.**
+
+| 축 | 어디 | 왜 |
+|---|---|---|
+| 터미널 상태·콘텐츠 **해석** | **host** | 화면·스크롤백·cwd·입력 모드의 실물을 host가 소유한다. client가 추측하면 placeholder를 읽거나 stale이 된다 |
+| OS capability **실행** | **client** | 클립보드·데스크톱 알림·브라우저 열기·소리는 GUI가 붙은 머신의 자원이다. host는 데몬이라 접근 대상이 없다(원격이면 더 명확) |
+| config **정책** | **client** | 정책은 client config이고, [다중 client](#9-다중-client와-resize)가 한 host에 붙으면 각자 달라야 한다 |
+
+그래서 전형적인 형태는 **"host가 사실을 전달하고, client가 정책을 적용해 실행한다"**이다. 이미 그 형태인 것들:
+
+| 기능 | 해석 | 실행 | 정책 |
+|---|---|---|---|
+| 선택 복사 | host `extractSelection`(soft-wrap·스크롤백) | client NSPasteboard | — |
+| Find | host `findMatches` | client 하이라이트 렌더 | client(검색어) |
+| OSC 9/777 알림 | host 파싱 | client UNUserNotificationCenter | client |
+| 링크 | host span·추출·존재 stat | client 열기(NSWorkspace) | client(`input.link-detection`) |
+| 스크롤·스크롤바 | host view·스크롤백 | client 렌더 | — |
+
+**입력 인코딩만 갈림 기준이 하나 더 있다: 그 인코딩이 core를 mutate하는가.**
+
+- `reportMouse`는 `*TerminalCore`로 **response 큐를 mutate**한다 → 단일 mutator 계약(§9.3)상 host에서만 실행해야 한다.
+  그래서 마우스는 client가 좌표만 보내고 **host가 인코딩·PTY 주입**한다.
+- `encodeKey`는 `*const TerminalCore`로 **순수 읽기**다 → 모드만 있으면 어디서 인코딩해도 같은 결과다. 그래서 키는
+  모드(DECCKM·DECKPAM·kitty flags)를 관측으로 **미러**하고 client가 로컬과 같은 인코더로 인코딩한다.
+
+키를 host 인코딩으로 바꾸는 것도 **기술적으로 가능하다**(마우스와 같은 형태). 지금 방식을 택한 대가와 이득은 이렇다:
+
+- **얻는 것**: 왕복 0, 로컬과 동일한 인코더 공유, 그리고 입력이 **바이트 한 경로**로 유지된다(키·IME 확정 텍스트·
+  붙여넣기가 모두 `writeInput`으로 나가 input barrier 순서 규칙이 단순하다).
+- **감수하는 것**: **모드 stale**. 앱이 방금 DECCKM/kitty를 켰는데 관측이 아직 도착하지 않았으면 그 직후 첫 키가 옛
+  인코딩으로 나갈 수 있다. 드물지만 모드 전환 직후(vim 진입 등)에 노출된다. 이 stale이 실제 문제로 관측되면 키도
+  host 인코딩으로 옮긴다 — 그때는 키 이벤트 wire를 추가하고 바이트 단일 경로를 포기하는 교환이다.
+
+**아직 이 규칙을 적용하지 않은 것**(무동작 상태):
+
+- **벨(BEL)**과 **OSC 52 클립보드**. 둘 다 host core가 파싱하지만 client로 나갈 통로가 없다. 위 규칙대로면 host는
+  "앱이 벨을 울렸다 / 클립보드를 요청했다"는 사실만 전달하고, `bell.*`·`osc52.read` 정책 판정과 실제 실행(소리·배지·
+  NSPasteboard)은 client가 한다. OSC 52 **읽기**는 응답을 PTY에 써야 하므로 client가 읽은 값을 host로 되돌리는
+  왕복이 추가로 필요하다(로컬 `take_clipboard_read_request`/`provide_clipboard_read` 쌍과 같은 구조).
+- 참고로 같은 문제를 tmux는 `set-clipboard`로 푼다 — 서버가 클립보드를 직접 만지지 않고 **바깥 터미널로 OSC 52를
+  다시 내보내** 실제 접근을 위임한다(`man tmux`: "attempt to set the terminal clipboard using the xterm escape
+  sequence"). 서버=전달, 바깥=실행이라는 배치가 위 규칙과 같다(동작 비교만 — 코드 표현은 참고하지 않았다).
+
 ## 4. 엔티티와 ID
 
 현재 `surface_id`는 **앱 인스턴스 전역** ID라 GUI process 재시작을 건너는 영속 ID로 승격하지 않는다.

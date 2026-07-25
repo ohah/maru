@@ -150,6 +150,7 @@
 로컬 `TerminalCore`는 **미사용 placeholder**라(§`src/session/surface.zig` `Surface.remote` 주석) 위 감지 함수들을 그 core에
 그대로 걸면 항상 빈 화면을 읽어 **밑줄도 커서도 클릭도 전부 동작하지 않는다**. 그래서 원격 경로는 host가 해석한다 —
 "client 렌더 / host 해석" 불변식(선택 복사 `copyText`·Find가 이미 따르는 규율)을 링크에도 그대로 적용한다.
+어느 기능을 host/client 중 어디에 두는지의 일반 규칙은 [영속 세션 호스트](persistent-session-host.md#기능을-어느-쪽에-둘-것인가-배치-규칙)가 단일 출처다.
 
 | 단계 | 로컬(in-process) | 원격(host-backed) |
 |---|---|---|

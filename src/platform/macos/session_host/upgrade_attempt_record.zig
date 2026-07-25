@@ -375,7 +375,7 @@ fn validateView(view: View) Error!void {
     if (view.expected_epoch_after != next) return error.InvalidValue;
     var previous: u128 = 0;
     for (view.runtime_ids, 0..) |runtime_id, index| {
-        if (index != 0 and runtime_id <= previous) return error.InvalidValue;
+        if (runtime_id == 0 or (index != 0 and runtime_id <= previous)) return error.InvalidValue;
         previous = runtime_id;
     }
     for (view.completed, 0..) |entry, index| {
@@ -636,7 +636,7 @@ test "running attempt record permits opaque zero id and reserves one terminal hi
         .rollback_image = test_rollback_image,
         .reader_min = 1,
         .reader_max = 1,
-        .runtime_ids = &.{0},
+        .runtime_ids = &.{1},
         .completed = completed[0..limits.max_running_record_completed],
     };
     const encoded = try encode(std.testing.allocator, view);

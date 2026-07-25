@@ -519,8 +519,12 @@ absolute identity만** 기록하고 target의 page layout을 새로 만든다. s
   authority rollback은 최초 호출을 포함해 최대 3회 시도하고, 첫 호출 뒤 재시도는 남은 absolute deadline 안에서 최대
   2회만 수행한다. 성공하면 모든 259개 slot을 닫고 admission과 기존 reader를 재개해
   같은 PTY의 후속 입력이 실제 screen snapshot에 나타나는 데까지 검증한다. 임의 preexisting non-CLOEXEC fd는 exec 전에
-  거부한다. 실제 `HostAuthority` adapter는 expected host/epoch/lifecycle CAS로 disk manifest와 wire status를 함께
-  `ready↔restoring` 전이한다. Manifest/slot 작업 뒤 pathname exec 직전에도 같은 paused child/fd graph를 재검증한다.
+  거부한다. 실제 `HostAuthority` adapter는 expected host/epoch/lifecycle/`authority_generation` CAS로 disk manifest와
+  wire status를 함께 `ready↔restoring` 전이한다. source ready의 `authority_generation`과 registry
+  `membership_generation`은 optional handoff field로 직렬화하며, target/rollback ready activation은
+  ready→restoring→ready 두 commit을 반영해 authority generation을 checked `source+2`로 복원한다. 두 전환 예산이
+  없는 `max-1` 이상에서는 durable restoring publish 전에 upgrade만 unchanged로 거부하고 기존 reader/admission을
+  재개한다. Manifest/slot 작업 뒤 pathname exec 직전에도 같은 paused child/fd graph를 재검증한다.
   rollback reader thread는 전부 생성 성공시킨 뒤 authority를 `ready`로 CAS하고, 그 다음 release flag를 전량 게시한
   뒤에만 admission을 연다. 하나라도 thread를 준비하지 못하면 `runtime_resume_failed`로 기록하고 authority/gate를
   열지 않는다. `begin_restoring` 전 resume 실패는 기존 `ready` discovery를 그대로 두지 않고 expected

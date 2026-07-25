@@ -77,6 +77,35 @@ pub const StreamBatch = struct {
     bytes: []u8,
 };
 
+pub const InventoryUnavailable = enum {
+    unsupported,
+    authority_changed,
+    generation_changed,
+    lifecycle_changed,
+    cap_exceeded,
+    unauthorized,
+    host_rejected,
+    protocol_rejected,
+    malformed,
+};
+
+pub const RuntimeInventory = union(enum) {
+    unavailable: InventoryUnavailable,
+    complete: Complete,
+
+    pub const Complete = struct {
+        membership_generation: u64,
+        upgrade_epoch: u64,
+        authority_generation: u64,
+        runtime_ids: []u128,
+
+        pub fn deinit(self: *Complete, allocator: std.mem.Allocator) void {
+            allocator.free(self.runtime_ids);
+            self.* = undefined;
+        }
+    };
+};
+
 /// host와의 한 connection. `host_id`는 hello_ack로 받은 값이다(§4 stale handle 판정에 쓴다). `call`은 read-only
 /// command를 왕복한다.
 pub const Client = struct {
@@ -86,11 +115,13 @@ pub const Client = struct {
     /// Exact host manifest ABA 검증용 hello identity. 과거 manifest 없는 peer는 null/0/empty일 수 있다.
     build_id: ?[]u8 = null,
     upgrade_epoch: u64 = 0,
+    authority_generation: u64 = 0,
     lifecycle: []u8 = &.{},
     /// host-id manifest를 publish하는 peer인지. 이 capability가 있으면 hello identity 필드는 전부 필수이며 legacy
     /// endpoint 추측 경로에서 받아들이지 않는다.
     host_manifest_v1: bool = false,
     host_exec_upgrade_v1: bool = false,
+    runtime_inventory_v1: bool = false,
     /// 이 connection이 협상한 MRSH header major. current GUI는 current와 frozen N-1 adapter를 별도
     /// connection으로 유지하므로 모든 outbound/inbound frame이 이 값을 사용한다.
     wire_major: u16 = protocol.version_major,
@@ -209,10 +240,15 @@ pub const Client = struct {
         const lifecycle = try parseStringFieldAlloc(self.allocator, ack.payload, "lifecycle");
         errdefer if (lifecycle) |owned| self.allocator.free(owned);
         const upgrade_epoch = parseUnsignedField(ack.payload, "upgrade_epoch");
+        const authority_generation = parseUnsignedField(ack.payload, "authority_generation");
         const peer_screen_codec = parseUnsignedField(ack.payload, "screen_codec_version");
         const manifest_capable = payloadHasCapability(ack.payload, "host_manifest_v1");
+        const inventory_capable = payloadHasCapability(ack.payload, "runtime_inventory_v1");
         if (manifest_capable and
             (build_id == null or lifecycle == null or upgrade_epoch == null or peer_screen_codec == null))
+            return error.HandshakeFailed;
+        if (inventory_capable and
+            (authority_generation == null or authority_generation.? == 0 or !manifest_capable))
             return error.HandshakeFailed;
         if (peer_screen_codec) |codec| {
             if (codec > std.math.maxInt(u16)) return error.HandshakeFailed;
@@ -222,9 +258,11 @@ pub const Client = struct {
         }
         self.build_id = build_id;
         self.upgrade_epoch = upgrade_epoch orelse 0;
+        self.authority_generation = authority_generation orelse 0;
         self.lifecycle = lifecycle orelse &.{};
         self.host_manifest_v1 = manifest_capable;
         self.host_exec_upgrade_v1 = payloadHasCapability(ack.payload, "host_exec_upgrade_v1");
+        self.runtime_inventory_v1 = inventory_capable;
         self.screen_viewport_scrolled_v1 = payloadHasCapability(ack.payload, "screen_viewport_scrolled_v1");
         self.async_scroll_to_bottom_v1 = payloadHasCapability(ack.payload, "async_scroll_to_bottom_v1");
         self.runtime_core_command_v1 = payloadHasCapability(ack.payload, "runtime_core_command_v1");
@@ -296,6 +334,99 @@ pub const Client = struct {
                 return error.ProtocolError;
             }
             return self.allocator.dupe(u8, resp.payload) catch return error.OutOfMemory;
+        }
+    }
+
+    /// ID-only inventory를 한 authority generation 아래 끝까지 모은다. 중간 page가 stale/error면 이미 모은 prefix를
+    /// 절대 반환하지 않고 typed unavailable로 강등한다. Recovery projection의 malformed response는 canonical exact
+    /// manifest attach가 같은 adapter에서 계속 가능하도록 connection 전체를 poison하지 않는다.
+    pub fn runtimeInventory(self: *Client) ClientError!RuntimeInventory {
+        if (!self.runtime_inventory_v1) return .{ .unavailable = .unsupported };
+        var ids: std.ArrayListUnmanaged(u128) = .empty;
+        errdefer ids.deinit(self.allocator);
+        var cursor: []const u8 = "";
+        var cursor_buf: [32]u8 = undefined;
+        var generation: u64 = 0;
+        var expected_total: ?usize = null;
+        var page_count: usize = 0;
+
+        while (true) {
+            page_count += 1;
+            if (page_count > protocol.max_inventory_pages) {
+                ids.deinit(self.allocator);
+                return .{ .unavailable = .malformed };
+            }
+            var params: std.Io.Writer.Allocating = .init(self.allocator);
+            defer params.deinit();
+            var js: std.json.Stringify = .{ .writer = &params.writer, .options = .{} };
+            js.write(.{
+                .cursor = cursor,
+                .limit = @as(u16, @intCast(protocol.max_inventory_page_runtimes)),
+                .membership_generation = generation,
+            }) catch return error.OutOfMemory;
+            const response = try self.call("runtime.inventory", params.written());
+            defer self.allocator.free(response);
+            if (parseInventoryError(response)) |code| {
+                ids.deinit(self.allocator);
+                return .{ .unavailable = inventoryUnavailableFor(code) };
+            }
+
+            const page = parseInventoryPage(self.allocator, response) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.Malformed => {
+                    ids.deinit(self.allocator);
+                    return .{ .unavailable = .malformed };
+                },
+            };
+            defer page.deinit(self.allocator);
+            if (page.upgrade_epoch != self.upgrade_epoch or
+                page.authority_generation != self.authority_generation)
+            {
+                ids.deinit(self.allocator);
+                return .{ .unavailable = .authority_changed };
+            }
+            if (generation == 0) {
+                generation = page.membership_generation;
+                expected_total = page.total;
+            } else if (page.membership_generation != generation or page.total != expected_total.?) {
+                ids.deinit(self.allocator);
+                return .{ .unavailable = .malformed };
+            }
+            if (!std.mem.eql(u8, page.cursor, cursor) or ids.items.len + page.runtime_ids.len > page.total) {
+                ids.deinit(self.allocator);
+                return .{ .unavailable = .malformed };
+            }
+            if (ids.items.len != 0 and page.runtime_ids.len != 0 and
+                ids.items[ids.items.len - 1] >= page.runtime_ids[0])
+            {
+                ids.deinit(self.allocator);
+                return .{ .unavailable = .malformed };
+            }
+            ids.appendSlice(self.allocator, page.runtime_ids) catch return error.OutOfMemory;
+            if (page.done) {
+                if (page.next_cursor.len != 0 or ids.items.len != page.total) {
+                    ids.deinit(self.allocator);
+                    return .{ .unavailable = .malformed };
+                }
+                return .{ .complete = .{
+                    .membership_generation = generation,
+                    .upgrade_epoch = page.upgrade_epoch,
+                    .authority_generation = page.authority_generation,
+                    .runtime_ids = ids.toOwnedSlice(self.allocator) catch return error.OutOfMemory,
+                } };
+            }
+            if (page.runtime_ids.len != protocol.max_inventory_page_runtimes or
+                ids.items.len >= page.total or
+                page.runtime_ids[page.runtime_ids.len - 1] != (parseExactInventoryId(page.next_cursor) orelse {
+                    ids.deinit(self.allocator);
+                    return .{ .unavailable = .malformed };
+                }))
+            {
+                ids.deinit(self.allocator);
+                return .{ .unavailable = .malformed };
+            }
+            @memcpy(&cursor_buf, page.next_cursor);
+            cursor = &cursor_buf;
         }
     }
 
@@ -1187,6 +1318,170 @@ fn callOrderingPeer(fd: c.fd_t, expected: []const u8, response: []const u8, ok: 
     socket_server.writeAll(fd, response) catch return;
 }
 
+fn readTestRequest(fd: c.fd_t, allocator: std.mem.Allocator) !protocol.Header {
+    var raw_header: [protocol.header_size]u8 = undefined;
+    try readExactFd(fd, &raw_header);
+    const header = try protocol.Header.decode(&raw_header);
+    if (header.kind != .request or header.payload_len > protocol.max_control_json)
+        return error.TestUnexpectedResult;
+    const payload = try allocator.alloc(u8, header.payload_len);
+    defer allocator.free(payload);
+    try readExactFd(fd, payload);
+    return header;
+}
+
+fn writeTestResponse(fd: c.fd_t, allocator: std.mem.Allocator, request_id: u64, payload: []const u8) !void {
+    const frame = try framing.encodeFrame(allocator, .{ .kind = .response, .request_id = request_id }, payload);
+    defer allocator.free(frame);
+    try socket_server.writeAll(fd, frame);
+}
+
+fn inventoryIsolationPeer(fd: c.fd_t, ok: *bool) void {
+    defer _ = c.close(fd);
+    const allocator = std.heap.page_allocator;
+    const inventory = readTestRequest(fd, allocator) catch return;
+    writeTestResponse(fd, allocator, inventory.request_id, "{\"result\":{\"broken\":true}}") catch return;
+    const get = readTestRequest(fd, allocator) catch return;
+    writeTestResponse(fd, allocator, get.request_id, "{\"result\":{\"runtime_id\":\"00000000000000000000000000000001\"}}") catch return;
+    ok.* = true;
+}
+
+fn writeInventoryTestPage(
+    fd: c.fd_t,
+    allocator: std.mem.Allocator,
+    request_id: u64,
+    start_id: usize,
+    count: usize,
+    total: usize,
+    generation: u64,
+    authority_generation: u64,
+    cursor: []const u8,
+    done: bool,
+) !void {
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    defer out.deinit();
+    try out.writer.print(
+        "{{\"result\":{{\"version\":1,\"membership_generation\":{d},\"upgrade_epoch\":3,\"authority_generation\":{d},\"lifecycle\":\"ready\",\"total\":{d},\"cursor\":\"{s}\",\"runtime_ids\":[",
+        .{ generation, authority_generation, total, cursor },
+    );
+    for (0..count) |offset| {
+        if (offset != 0) try out.writer.writeByte(',');
+        try out.writer.print("\"{x:0>32}\"", .{start_id + offset});
+    }
+    if (done) {
+        try out.writer.writeAll("],\"next_cursor\":\"\",\"done\":true}}");
+    } else {
+        try out.writer.print("],\"next_cursor\":\"{x:0>32}\",\"done\":false}}}}", .{start_id + count - 1});
+    }
+    try writeTestResponse(fd, allocator, request_id, out.written());
+}
+
+fn inventoryMaxPeer(fd: c.fd_t, ok: *bool) void {
+    defer _ = c.close(fd);
+    const allocator = std.heap.page_allocator;
+    var cursor_buf: [32]u8 = undefined;
+    var cursor: []const u8 = "";
+    for (0..protocol.max_inventory_pages) |page_index| {
+        const request = readTestRequest(fd, allocator) catch return;
+        const start_id = page_index * protocol.max_inventory_page_runtimes + 1;
+        const done = page_index + 1 == protocol.max_inventory_pages;
+        writeInventoryTestPage(
+            fd,
+            allocator,
+            request.request_id,
+            start_id,
+            protocol.max_inventory_page_runtimes,
+            protocol.max_inventory_runtimes,
+            44,
+            9,
+            cursor,
+            done,
+        ) catch return;
+        _ = std.fmt.bufPrint(&cursor_buf, "{x:0>32}", .{start_id + protocol.max_inventory_page_runtimes - 1}) catch return;
+        cursor = &cursor_buf;
+    }
+    ok.* = true;
+}
+
+test "client inventory collector owns the exact 16-page maximum snapshot" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    var fds: [2]c.fd_t = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds));
+    socket_server.setNoSigPipe(fds[0]);
+    setReadTimeoutMs(fds[0], 5000);
+    var client: Client = .{
+        .allocator = allocator,
+        .fd = fds[0],
+        .host_id = 1,
+        .upgrade_epoch = 3,
+        .authority_generation = 9,
+        .runtime_inventory_v1 = true,
+        .parser = framing.FrameParser.init(allocator),
+    };
+    defer client.deinit();
+    var peer_ok = false;
+    const peer = try std.Thread.spawn(.{}, inventoryMaxPeer, .{ fds[1], &peer_ok });
+    var inventory = client.runtimeInventory() catch |err| {
+        client.failClosed();
+        peer.join();
+        return err;
+    };
+    switch (inventory) {
+        .unavailable => {
+            client.failClosed();
+            peer.join();
+            return error.TestUnexpectedResult;
+        },
+        .complete => |*complete| {
+            peer.join();
+            try std.testing.expect(peer_ok);
+            defer complete.deinit(allocator);
+            try std.testing.expectEqual(@as(u64, 44), complete.membership_generation);
+            try std.testing.expectEqual(protocol.max_inventory_runtimes, complete.runtime_ids.len);
+            try std.testing.expectEqual(@as(u128, 1), complete.runtime_ids[0]);
+            try std.testing.expectEqual(@as(u128, protocol.max_inventory_runtimes), complete.runtime_ids[complete.runtime_ids.len - 1]);
+        },
+    }
+}
+
+test "client malformed recovery inventory leaves canonical RPC usable on the same adapter" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    var fds: [2]c.fd_t = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds));
+    socket_server.setNoSigPipe(fds[0]);
+    setReadTimeoutMs(fds[0], 1000);
+    var client: Client = .{
+        .allocator = allocator,
+        .fd = fds[0],
+        .host_id = 1,
+        .upgrade_epoch = 3,
+        .authority_generation = 9,
+        .runtime_inventory_v1 = true,
+        .parser = framing.FrameParser.init(allocator),
+    };
+    defer client.deinit();
+    var peer_ok = false;
+    const peer = try std.Thread.spawn(.{}, inventoryIsolationPeer, .{ fds[1], &peer_ok });
+    const inventory = client.runtimeInventory() catch |err| {
+        client.failClosed();
+        peer.join();
+        return err;
+    };
+    try std.testing.expectEqual(InventoryUnavailable.malformed, inventory.unavailable);
+    try std.testing.expect(!client.unusable);
+    const get = client.call("runtime.get", "{\"runtime_id\":\"00000000000000000000000000000001\"}") catch |err| {
+        client.failClosed();
+        peer.join();
+        return err;
+    };
+    defer allocator.free(get);
+    peer.join();
+    try std.testing.expect(peer_ok);
+    try std.testing.expect(std.mem.indexOf(u8, get, "\"runtime_id\"") != null);
+}
+
 test "client stream path rejects a frame with the wrong MRSH header major" {
     const allocator = std.testing.allocator;
     var client = Client{
@@ -1396,6 +1691,131 @@ fn parseUnsignedField(payload: []const u8, name: []const u8) ?u64 {
         else => return null,
     };
     return std.math.cast(u64, raw);
+}
+
+const InventoryPage = struct {
+    membership_generation: u64,
+    upgrade_epoch: u64,
+    authority_generation: u64,
+    total: usize,
+    cursor: []u8,
+    runtime_ids: []u128,
+    next_cursor: []u8,
+    done: bool,
+
+    fn deinit(self: *const InventoryPage, allocator: std.mem.Allocator) void {
+        allocator.free(self.cursor);
+        allocator.free(self.runtime_ids);
+        allocator.free(self.next_cursor);
+    }
+};
+
+const InventoryParseError = error{ OutOfMemory, Malformed };
+
+fn parseInventoryPage(allocator: std.mem.Allocator, payload: []const u8) InventoryParseError!InventoryPage {
+    const SuccessWire = struct {
+        result: struct {
+            version: u8,
+            membership_generation: u64,
+            upgrade_epoch: u64,
+            authority_generation: u64,
+            lifecycle: []const u8,
+            total: usize,
+            cursor: []const u8,
+            runtime_ids: []const []const u8,
+            next_cursor: []const u8,
+            done: bool,
+        },
+    };
+    var parsed = std.json.parseFromSlice(SuccessWire, allocator, payload, .{}) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.Malformed,
+    };
+    defer parsed.deinit();
+    const result = parsed.value.result;
+    if (result.version != 1 or
+        result.membership_generation == 0 or
+        result.authority_generation == 0 or
+        !std.mem.eql(u8, result.lifecycle, "ready") or
+        result.total > protocol.max_inventory_runtimes or
+        result.runtime_ids.len > protocol.max_inventory_page_runtimes or
+        (result.cursor.len != 0 and parseExactInventoryId(result.cursor) == null) or
+        (result.next_cursor.len != 0 and parseExactInventoryId(result.next_cursor) == null))
+        return error.Malformed;
+
+    const owned_cursor = allocator.dupe(u8, result.cursor) catch return error.OutOfMemory;
+    errdefer allocator.free(owned_cursor);
+    const owned_ids = allocator.alloc(u128, result.runtime_ids.len) catch return error.OutOfMemory;
+    errdefer allocator.free(owned_ids);
+    for (result.runtime_ids, 0..) |raw, index| {
+        const id = parseExactInventoryId(raw) orelse return error.Malformed;
+        if (index != 0 and owned_ids[index - 1] >= id) return error.Malformed;
+        owned_ids[index] = id;
+    }
+    const owned_next_cursor = allocator.dupe(u8, result.next_cursor) catch return error.OutOfMemory;
+    return .{
+        .membership_generation = result.membership_generation,
+        .upgrade_epoch = result.upgrade_epoch,
+        .authority_generation = result.authority_generation,
+        .total = result.total,
+        .cursor = owned_cursor,
+        .runtime_ids = owned_ids,
+        .next_cursor = owned_next_cursor,
+        .done = result.done,
+    };
+}
+
+fn parseInventoryError(payload: []const u8) ?protocol.ErrorCode {
+    const ErrorWire = struct { @"error": []const u8 };
+    var parsed = std.json.parseFromSlice(ErrorWire, std.heap.page_allocator, payload, .{}) catch return null;
+    defer parsed.deinit();
+    return protocol.ErrorCode.fromWireName(parsed.value.@"error");
+}
+
+fn inventoryUnavailableFor(code: protocol.ErrorCode) InventoryUnavailable {
+    return switch (code) {
+        .invalid_generation => .generation_changed,
+        .host_shutting_down => .lifecycle_changed,
+        .resource_exhausted, .payload_too_large => .cap_exceeded,
+        .unauthorized, .incompatible_version, .upgrade_unsupported => .unauthorized,
+        .host_unavailable, .stale_host, .runtime_not_found => .host_rejected,
+        else => .protocol_rejected,
+    };
+}
+
+fn parseExactInventoryId(raw: []const u8) ?u128 {
+    if (raw.len != 32) return null;
+    for (raw) |byte| if (!std.ascii.isDigit(byte) and !(byte >= 'a' and byte <= 'f')) return null;
+    const value = std.fmt.parseInt(u128, raw, 16) catch return null;
+    return if (value == 0) null else value;
+}
+
+test "client inventory page parser owns escaped cursors and rejects non-canonical payloads" {
+    const allocator = std.testing.allocator;
+    const payload =
+        \\{"result":{"version":1,"membership_generation":7,"upgrade_epoch":3,"authority_generation":9,"lifecycle":"ready","total":2,"cursor":"\u0030\u0030\u0030\u0030\u0030\u0030\u0030\u0030\u0030\u0030\u0030\u0030\u0030\u0030\u0030\u0030\u0030\u0030\u0030\u0030\u0030\u0030\u0030\u0030\u0030\u0030\u0030\u0030\u0030\u0030\u0030\u0031","runtime_ids":["00000000000000000000000000000002"],"next_cursor":"","done":true}}
+    ;
+    const page = try parseInventoryPage(allocator, payload);
+    defer page.deinit(allocator);
+    try std.testing.expectEqualStrings("00000000000000000000000000000001", page.cursor);
+    try std.testing.expectEqual(@as(u128, 2), page.runtime_ids[0]);
+
+    const malformed = [_][]const u8{
+        "{\"result\":{\"version\":2,\"membership_generation\":7,\"upgrade_epoch\":3,\"authority_generation\":9,\"lifecycle\":\"ready\",\"total\":0,\"cursor\":\"\",\"runtime_ids\":[],\"next_cursor\":\"\",\"done\":true}}",
+        "{\"result\":{\"version\":1,\"membership_generation\":0,\"upgrade_epoch\":3,\"authority_generation\":9,\"lifecycle\":\"ready\",\"total\":0,\"cursor\":\"\",\"runtime_ids\":[],\"next_cursor\":\"\",\"done\":true}}",
+        "{\"result\":{\"version\":1,\"membership_generation\":7,\"upgrade_epoch\":3,\"authority_generation\":0,\"lifecycle\":\"ready\",\"total\":0,\"cursor\":\"\",\"runtime_ids\":[],\"next_cursor\":\"\",\"done\":true}}",
+        "{\"result\":{\"version\":1,\"membership_generation\":7,\"upgrade_epoch\":3,\"authority_generation\":9,\"lifecycle\":\"restoring\",\"total\":0,\"cursor\":\"\",\"runtime_ids\":[],\"next_cursor\":\"\",\"done\":true}}",
+        "{\"result\":{\"version\":1,\"membership_generation\":7,\"upgrade_epoch\":3,\"authority_generation\":9,\"lifecycle\":\"ready\",\"total\":2,\"cursor\":\"\",\"runtime_ids\":[\"00000000000000000000000000000002\",\"00000000000000000000000000000001\"],\"next_cursor\":\"\",\"done\":true}}",
+        "{\"result\":{\"version\":1,\"membership_generation\":7,\"upgrade_epoch\":3,\"authority_generation\":9,\"lifecycle\":\"ready\",\"total\":0,\"cursor\":\"\",\"cursor\":\"\",\"runtime_ids\":[],\"next_cursor\":\"\",\"done\":true}}",
+        "{\"result\":{\"version\":1,\"membership_generation\":7,\"upgrade_epoch\":3,\"authority_generation\":9,\"lifecycle\":\"ready\",\"total\":0,\"cursor\":\"\",\"runtime_ids\":[],\"next_cursor\":\"\",\"done\":true,\"extra\":1}}",
+        "{\"error\":\"not_a_real_error\"}",
+    };
+    for (malformed) |bad|
+        try std.testing.expectError(error.Malformed, parseInventoryPage(allocator, bad));
+    try std.testing.expectEqual(protocol.ErrorCode.invalid_generation, parseInventoryError("{\"error\":\"invalid_generation\"}").?);
+    try std.testing.expectEqual(InventoryUnavailable.generation_changed, inventoryUnavailableFor(.invalid_generation));
+    try std.testing.expectEqual(InventoryUnavailable.lifecycle_changed, inventoryUnavailableFor(.host_shutting_down));
+    try std.testing.expectEqual(InventoryUnavailable.cap_exceeded, inventoryUnavailableFor(.resource_exhausted));
 }
 
 fn parseStringFieldAlloc(
@@ -1678,6 +2098,7 @@ pub fn extractRuntimeId(payload: []const u8) ?[32]u8 {
     if (hex_start + 32 > payload.len) return null;
     var out: [32]u8 = undefined;
     @memcpy(&out, payload[hex_start .. hex_start + 32]);
+    if (parseExactInventoryId(&out) == null) return null;
     return out;
 }
 

@@ -38,6 +38,7 @@ pub const AuthorityTransition = enum { applied, unchanged_retryable, indetermina
 pub const AuthoritySnapshot = struct {
     host_id: u128,
     upgrade_epoch: u64,
+    authority_generation: u64 = 0,
     lifecycle: host_manifest.Lifecycle,
 };
 
@@ -146,14 +147,15 @@ fn processArmedWithDeadline(
             finish(ctx.owner, attempt_id, report);
     };
     defer reservation.rollback();
-    const authority = ctx.authority.snapshot(ctx.authority.ctx);
-    if (authority.host_id == 0 or authority.lifecycle != .ready)
+    const ready_authority = ctx.authority.snapshot(ctx.authority.ctx);
+    if (ready_authority.host_id == 0 or ready_authority.lifecycle != .ready)
         return resumeAndFinish(ctx, &frozen, attempt_id, .{ .status = .resumed, .reason = .runtime_changed }, deadline);
 
     var capture = frozen.prepareCapture(
         ctx.allocator,
-        authority.host_id,
-        authority.upgrade_epoch,
+        ready_authority.host_id,
+        ready_authority.upgrade_epoch,
+        ready_authority.authority_generation,
         @intCast(ctx.layout.first_runtime_slot),
     ) catch |err| return resumeAndFinish(ctx, &frozen, attempt_id, reportForCaptureError(err), deadline);
     defer capture.deinit();
@@ -163,8 +165,8 @@ fn processArmedWithDeadline(
     const record = ctx.owner.encodeRunningRecordWithDeadline(
         ctx.allocator,
         execution,
-        authority.host_id,
-        authority.upgrade_epoch,
+        ready_authority.host_id,
+        ready_authority.upgrade_epoch,
         ctx.rollback_image.record(),
         runtime_ids,
         deadline.expiresAtNs(),
@@ -189,9 +191,9 @@ fn processArmedWithDeadline(
         ctx.allocator,
         ctx.owner_dir,
         .{
-            .host_id = authority.host_id,
+            .host_id = ready_authority.host_id,
             .attempt_id = attempt_id,
-            .upgrade_epoch = authority.upgrade_epoch,
+            .upgrade_epoch = ready_authority.upgrade_epoch,
             .next_handle = next_handle,
             .runtime_ids = runtime_ids,
             .request_path = execution.request_path,
@@ -237,7 +239,7 @@ fn processArmedWithDeadline(
             .reason = .runtime_changed,
         }, deadline);
 
-    switch (ctx.authority.begin_restoring(ctx.authority.ctx, authority)) {
+    switch (ctx.authority.begin_restoring(ctx.authority.ctx, ready_authority)) {
         .applied => {},
         .unchanged_retryable => return resumeAndFinish(ctx, &frozen, attempt_id, .{
             .status = .resumed,
@@ -251,18 +253,40 @@ fn processArmedWithDeadline(
             });
         },
     }
+    // begin_restoring 자체가 authority의 한 변경이다. ready 시점의 generation을 lifecycle만 바꿔 재사용하면
+    // ready→restoring→ready ABA를 구분하려고 추가한 CAS가 정상 rollback까지 거부한다. 전환 직후 fresh snapshot을
+    // 잡아 이후 모든 rollback의 exact restoring authority로 사용한다.
+    const restoring_authority = ctx.authority.snapshot(ctx.authority.ctx);
+    const expected_generation = std.math.add(u64, ready_authority.authority_generation, 1) catch {
+        frozen.active = false;
+        return finish(ctx.owner, attempt_id, .{
+            .status = .failed_nonretryable,
+            .reason = .authority_poisoned,
+        });
+    };
+    if (restoring_authority.host_id != ready_authority.host_id or
+        restoring_authority.upgrade_epoch != ready_authority.upgrade_epoch or
+        restoring_authority.lifecycle != .restoring or
+        restoring_authority.authority_generation != expected_generation)
+    {
+        frozen.active = false;
+        return finish(ctx.owner, attempt_id, .{
+            .status = .failed_nonretryable,
+            .reason = .authority_poisoned,
+        });
+    }
     if (!replaceAll(&reservation, capture.resources, pair, ctx.lifetime_owner, ctx.layout))
-        return rollbackAuthority(ctx, &frozen, authority, attempt_id, .handoff_failed, deadline);
+        return rollbackAuthority(ctx, &frozen, restoring_authority, attempt_id, .handoff_failed, deadline);
     reservation.assertExactNonCloexec(&.{}) catch
-        return rollbackAuthority(ctx, &frozen, authority, attempt_id, .handoff_failed, deadline);
+        return rollbackAuthority(ctx, &frozen, restoring_authority, attempt_id, .handoff_failed, deadline);
     if (deadline.expired())
-        return rollbackAuthority(ctx, &frozen, authority, attempt_id, .deadline_exceeded, deadline);
+        return rollbackAuthority(ctx, &frozen, restoring_authority, attempt_id, .deadline_exceeded, deadline);
     // Manifest republish와 FD replacement 사이에도 child/fd graph는 변할 수 있다. pathname exec 바로 전 같은 capture를
     // 다시 대조하고 달라졌으면 restoring authority를 rollback한 뒤 old graph만 재개한다.
     ctx.manager.revalidateQuiescedCapture(&capture) catch
-        return rollbackAuthority(ctx, &frozen, authority, attempt_id, .runtime_changed, deadline);
+        return rollbackAuthority(ctx, &frozen, restoring_authority, attempt_id, .runtime_changed, deadline);
     if (!ctx.rollback_image.revalidate())
-        return rollbackAuthority(ctx, &frozen, authority, attempt_id, .handoff_failed, deadline);
+        return rollbackAuthority(ctx, &frozen, restoring_authority, attempt_id, .handoff_failed, deadline);
 
     ctx.executor.execute(ctx.executor.ctx, .{
         .target_path = execution.target.artifact.path,
@@ -270,14 +294,14 @@ fn processArmedWithDeadline(
             .role = .target,
             .session_dir = ctx.session_dir,
             .socket_path = ctx.socket_path,
-            .host_id = authority.host_id,
+            .host_id = ready_authority.host_id,
             .attempt_id = attempt_id,
             .layout = ctx.layout,
         },
         .runtime_slots = capture.resources,
         .deadline = deadline,
     }) catch {};
-    return rollbackAuthority(ctx, &frozen, authority, attempt_id, .exec_failed, deadline);
+    return rollbackAuthority(ctx, &frozen, restoring_authority, attempt_id, .exec_failed, deadline);
 }
 
 fn replaceAll(
@@ -298,19 +322,15 @@ fn replaceAll(
 fn rollbackAuthority(
     ctx: Context,
     frozen: *upgrade_attempt.Frozen,
-    expected_ready: AuthoritySnapshot,
+    expected_restoring: AuthoritySnapshot,
     attempt_id: u128,
     reason: upgrade_wire.AttemptReason,
     deadline: upgrade_deadline.Deadline,
 ) Outcome {
     std.debug.assert(frozen.active);
-    var expected = expected_ready;
-    expected.lifecycle = .restoring;
     const actual = ctx.authority.snapshot(ctx.authority.ctx);
-    if (expected_ready.lifecycle != .ready or
-        actual.host_id != expected.host_id or
-        actual.upgrade_epoch != expected.upgrade_epoch or
-        actual.lifecycle != expected.lifecycle)
+    if (expected_restoring.lifecycle != .restoring or
+        !std.meta.eql(actual, expected_restoring))
     {
         frozen.active = false;
         return finish(ctx.owner, attempt_id, .{
@@ -326,7 +346,7 @@ fn rollbackAuthority(
         });
     };
     defer prepared.discard();
-    switch (rollbackReadyBounded(ctx.authority, expected, deadline)) {
+    switch (rollbackReadyBounded(ctx.authority, expected_restoring, deadline)) {
         .applied => {
             frozen.commitPreparedRollback(&prepared);
             return finish(ctx.owner, attempt_id, .{ .status = .resumed, .reason = reason });
@@ -722,36 +742,54 @@ test "product coordinator uses one graph capture then rolls back exact slots and
         begin_count: usize = 0,
         rollback_count: usize = 0,
         lifecycle: host_manifest.Lifecycle = .ready,
+        authority_generation: u64 = 1,
 
         fn snapshot(ctx: *anyopaque) AuthoritySnapshot {
             const self: *@This() = @ptrCast(@alignCast(ctx));
-            return .{ .host_id = 0xB2, .upgrade_epoch = 4, .lifecycle = self.lifecycle };
+            return .{
+                .host_id = 0xB2,
+                .upgrade_epoch = 4,
+                .authority_generation = self.authority_generation,
+                .lifecycle = self.lifecycle,
+            };
         }
 
         fn begin(ctx: *anyopaque, expected: AuthoritySnapshot) AuthorityTransition {
             const self: *@This() = @ptrCast(@alignCast(ctx));
             self.begin_count += 1;
-            if (expected.host_id != 0xB2 or expected.upgrade_epoch != 4 or expected.lifecycle != .ready)
+            if (expected.host_id != 0xB2 or
+                expected.upgrade_epoch != 4 or
+                expected.authority_generation != self.authority_generation or
+                expected.lifecycle != .ready)
                 return .indeterminate_poisoned;
             self.lifecycle = .restoring;
+            self.authority_generation += 1;
             return .applied;
         }
 
         fn rollback(ctx: *anyopaque, expected: AuthoritySnapshot) AuthorityTransition {
             const self: *@This() = @ptrCast(@alignCast(ctx));
             self.rollback_count += 1;
-            if (expected.host_id != 0xB2 or expected.upgrade_epoch != 4 or expected.lifecycle != .restoring)
+            if (expected.host_id != 0xB2 or
+                expected.upgrade_epoch != 4 or
+                expected.authority_generation != self.authority_generation or
+                expected.lifecycle != .restoring)
                 return .indeterminate_poisoned;
             if (self.rollback_count == 1) return .unchanged_retryable;
             self.lifecycle = .ready;
+            self.authority_generation += 1;
             return .applied;
         }
 
         fn failStop(ctx: *anyopaque, expected: AuthoritySnapshot) AuthorityTransition {
             const self: *@This() = @ptrCast(@alignCast(ctx));
-            if (expected.host_id != 0xB2 or expected.upgrade_epoch != 4 or expected.lifecycle != .ready)
+            if (expected.host_id != 0xB2 or
+                expected.upgrade_epoch != 4 or
+                expected.authority_generation != self.authority_generation or
+                expected.lifecycle != .ready)
                 return .indeterminate_poisoned;
             self.lifecycle = .draining;
+            self.authority_generation += 1;
             return .applied;
         }
     };

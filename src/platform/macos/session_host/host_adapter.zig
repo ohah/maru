@@ -42,6 +42,10 @@ pub const HostAdapter = struct {
         return self.client.wire_major;
     }
 
+    pub fn supportsRuntimeInventory(self: *const HostAdapter) bool {
+        return self.client.runtime_inventory_v1;
+    }
+
     /// host.info/runtime.list/host.upgrade.*처럼 screen codec과 독립된 control RPC.
     pub fn call(self: *HostAdapter, method: []const u8, params_json: ?[]const u8) client_mod.ClientError![]u8 {
         return self.client.call(method, params_json);

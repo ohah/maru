@@ -10,11 +10,14 @@ pub fn HostPool(comptime Adapter: type) type {
             adapter: *Adapter,
             owned: bool,
             runtime_refs: usize = 0,
+            adapter_generation: u64,
         };
 
         allocator: std.mem.Allocator,
         entries: std.AutoHashMapUnmanaged(u128, Entry) = .empty,
         spawn_host_id: ?u128 = null,
+        adapter_generation: u64 = 1,
+        adapter_generation_exhausted: bool = false,
 
         pub fn init(allocator: std.mem.Allocator) Self {
             return .{ .allocator = allocator };
@@ -36,16 +39,29 @@ pub fn HostPool(comptime Adapter: type) type {
         /// 성공하면 `adapter`의 소유권을 pool이 가져간다. 실패하면 caller가 계속 소유한다.
         pub fn addOwned(self: *Self, host_id: u128, adapter: *Adapter) !void {
             try validateInsert(self, host_id, adapter);
-            try self.entries.put(self.allocator, host_id, .{ .adapter = adapter, .owned = true });
+            const generation = try self.nextAdapterGeneration();
+            try self.entries.put(self.allocator, host_id, .{
+                .adapter = adapter,
+                .owned = true,
+                .adapter_generation = generation,
+            });
+            self.adapter_generation = generation;
         }
 
         /// Adapter lifetime을 caller가 pool보다 길게 보장할 때만 사용한다.
         pub fn addBorrowed(self: *Self, host_id: u128, adapter: *Adapter) !void {
             try validateInsert(self, host_id, adapter);
-            try self.entries.put(self.allocator, host_id, .{ .adapter = adapter, .owned = false });
+            const generation = try self.nextAdapterGeneration();
+            try self.entries.put(self.allocator, host_id, .{
+                .adapter = adapter,
+                .owned = false,
+                .adapter_generation = generation,
+            });
+            self.adapter_generation = generation;
         }
 
         fn validateInsert(self: *Self, host_id: u128, adapter: *Adapter) !void {
+            if (self.adapter_generation_exhausted) return error.AdapterGenerationExhausted;
             if (host_id == 0 or self.entries.contains(host_id)) return error.DuplicateHost;
             // 실제 session Client/HostAdapter는 handshake에서 확정한 host_id를 1급 필드로 가진다. 외부 descriptor
             // key와 adapter identity가 다르면 pool에 잠시라도 잘못된 routing entry를 publish하지 않는다.
@@ -57,9 +73,18 @@ pub fn HostPool(comptime Adapter: type) type {
             }
         }
 
+        fn nextAdapterGeneration(self: *const Self) !u64 {
+            return std.math.add(u64, self.adapter_generation, 1) catch
+                error.AdapterGenerationExhausted;
+        }
+
         pub fn get(self: *Self, host_id: u128) ?*Adapter {
             const entry = self.entries.get(host_id) orelse return null;
             return entry.adapter;
+        }
+
+        pub fn adapterGeneration(self: *const Self, host_id: u128) ?u64 {
+            return (self.entries.get(host_id) orelse return null).adapter_generation;
         }
 
         pub fn setSpawnHost(self: *Self, host_id: u128) !void {
@@ -98,6 +123,11 @@ pub fn HostPool(comptime Adapter: type) type {
                 self.allocator.destroy(removed.value.adapter);
             }
             if (self.spawn_host_id == host_id) self.spawn_host_id = null;
+            if (self.adapter_generation == std.math.maxInt(u64)) {
+                self.adapter_generation_exhausted = true;
+            } else {
+                self.adapter_generation += 1;
+            }
             return true;
         }
     };
@@ -121,12 +151,14 @@ test "host pool pins two hosts and selects spawn host explicitly" {
     errdefer std.testing.allocator.destroy(first);
     first.* = .{ .id = 1, .deinit_count = &deinit_count };
     try pool.addOwned(0xAA, first);
+    const first_generation = pool.adapterGeneration(0xAA).?;
     const pinned_first = pool.get(0xAA).?;
 
     const second = try std.testing.allocator.create(FakeAdapter);
     errdefer std.testing.allocator.destroy(second);
     second.* = .{ .id = 2, .deinit_count = &deinit_count };
     try pool.addOwned(0xBB, second);
+    try std.testing.expect(pool.adapterGeneration(0xBB).? > first_generation);
 
     try std.testing.expect(pool.get(0xAA).? == pinned_first);
     try std.testing.expectEqual(@as(u8, 1), pool.get(0xAA).?.id);
@@ -138,6 +170,26 @@ test "host pool pins two hosts and selects spawn host explicitly" {
     try std.testing.expect(try pool.remove(0xBB));
     try std.testing.expect(pool.spawnHost() == null);
     try std.testing.expectEqual(@as(usize, 1), deinit_count);
+}
+
+test "host pool reconnect gets a fresh adapter generation and overflow fail-closes new publication" {
+    const FakeAdapter = struct {
+        fn deinit(_: *@This()) void {}
+    };
+    const Pool = HostPool(FakeAdapter);
+    var first: FakeAdapter = .{};
+    var second: FakeAdapter = .{};
+    var pool = Pool.init(std.testing.allocator);
+    defer pool.deinit();
+    try pool.addBorrowed(1, &first);
+    const before = pool.adapterGeneration(1).?;
+    try std.testing.expect(try pool.remove(1));
+    try pool.addBorrowed(1, &second);
+    try std.testing.expect(pool.adapterGeneration(1).? > before);
+    try std.testing.expect(try pool.remove(1));
+    pool.adapter_generation = std.math.maxInt(u64);
+    pool.adapter_generation_exhausted = true;
+    try std.testing.expectError(error.AdapterGenerationExhausted, pool.addBorrowed(1, &first));
 }
 
 test "host pool refuses removal while a runtime lease is active" {

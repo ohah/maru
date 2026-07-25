@@ -46,9 +46,13 @@ pub const poll_timeout_ms: i32 = 200;
 
 /// 128-bit host_id를 발급한다(§4 opaque random). macOS `arc4random_buf`는 실패하지 않는 CSPRNG라 별도 fallback이 없다.
 fn newHostId() u128 {
-    var bytes: [16]u8 = undefined;
-    arc4random_buf(&bytes, bytes.len);
-    return std.mem.readInt(u128, &bytes, .big);
+    var id: u128 = 0;
+    while (id == 0) {
+        var bytes: [16]u8 = undefined;
+        arc4random_buf(&bytes, bytes.len);
+        id = std.mem.readInt(u128, &bytes, .big);
+    }
+    return id;
 }
 
 /// session host 본체. `dir_path`(0700)에 `socket_path`(0600)로 bind하고 SIGTERM(프로세스 종료)까지 accept loop를 돈다.

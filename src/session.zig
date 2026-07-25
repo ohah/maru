@@ -59,6 +59,7 @@ pub const file_tree = @import("session/file_tree.zig"); // FP7: OS-중립 파일
 pub const file_tree_navigation = @import("session/file_tree_navigation.zig"); // 파일 트리 transient selection·키보드 탐색·scroll 순수 정책
 pub const file_tree_mutation = @import("session/file_tree_mutation.zig"); // 파일 트리 변경 이름·root·dirty 보호·path remap 순수 정책
 pub const workspace = @import("session/workspace.zig");
+pub const runtime_reconcile = @import("session/runtime_reconcile.zig"); // P4 R2b: manifest↔host inventory 순수 분류
 
 // split_tree 헬퍼 re-export(app.zig에서 D1로 이동 — divider·app_session이 쓴다). SplitTree는 leaf-generic이라
 // platform이 `session.SplitTree(*Pane)`으로 인스턴스화한다.

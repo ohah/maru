@@ -511,9 +511,19 @@ pub const runtime_entry_groups = [_]Group{
 
 pub const terminal_runtime_registry_groups = [_]Group{
     .{
+        .disposition = .serialized,
+        .fields = &.{"membership_generation"},
+        .why = "runtime inventory ABA authority must remain monotonic across same-PID exec handoff",
+    },
+    .{
         .disposition = .reconstructed,
         .fields = &.{ "allocator", "entries" },
         .why = "the hash table and entry pointers are rebuilt from the serialized exhaustive RuntimeEntry records",
+    },
+    .{
+        .disposition = .must_be_empty,
+        .fields = &.{"membership_generation_exhausted"},
+        .why = "an exhausted inventory authority cannot safely enter a live upgrade",
     },
 };
 

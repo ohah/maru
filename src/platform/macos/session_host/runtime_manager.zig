@@ -29,6 +29,11 @@ const core_command_wire = @import("core_command_wire.zig");
 const screen_snapshot = @import("screen_snapshot.zig");
 const screen_stream = @import("screen_stream.zig");
 const handoff_codec = @import("handoff_codec.zig");
+
+comptime {
+    if (@import("protocol.zig").max_inventory_runtimes != maru.session.workspace.max_runtime_bindings)
+        @compileError("session host inventory cap must equal workspace runtime binding cap");
+}
 const upgrade_fd_layout = @import("upgrade_fd_layout.zig");
 const upgrade_limits = @import("upgrade_limits.zig");
 const core_command = maru.session.core_command; // §6a 원격 스크롤 명령을 host core에 적용
@@ -203,6 +208,8 @@ pub const RuntimeManager = struct {
         allocator: std.mem.Allocator,
         host_id: u128,
         upgrade_epoch: u64,
+        authority_generation: u64 = 1,
+        membership_generation: u64 = 1,
         next_handle: u64,
         resources: []UpgradeResource,
         views: []handoff_codec.RuntimeView,
@@ -233,6 +240,8 @@ pub const RuntimeManager = struct {
             return handoff_codec.encodeHost(self.allocator, .{
                 .host_id = self.host_id,
                 .upgrade_epoch = self.upgrade_epoch,
+                .authority_generation = self.authority_generation,
+                .membership_generation = self.membership_generation,
                 .next_handle = self.next_handle,
                 .runtimes = self.views,
                 .attempt_record = attempt_record,
@@ -638,6 +647,7 @@ pub const RuntimeManager = struct {
             live_initialized = false;
             surface_initialized = false;
         }
+        try self.host_registry.restoreMembershipGeneration(host.membership_generation);
         self.next_handle = host.next_handle;
         return prepared;
     }
@@ -759,6 +769,7 @@ pub const RuntimeManager = struct {
             allocator,
             host_id,
             upgrade_epoch,
+            1,
             first_fd_slot,
         );
         errdefer capture.deinit();
@@ -770,6 +781,7 @@ pub const RuntimeManager = struct {
         allocator: std.mem.Allocator,
         host_id: u128,
         upgrade_epoch: u64,
+        authority_generation: u64,
         first_fd_slot: u16,
     ) (QuiesceError || handoff_codec.Error)!QuiescedCapture {
         const layout = upgrade_fd_layout.Layout.init(first_fd_slot) catch return error.LimitExceeded;
@@ -821,6 +833,8 @@ pub const RuntimeManager = struct {
             .allocator = allocator,
             .host_id = host_id,
             .upgrade_epoch = upgrade_epoch,
+            .authority_generation = authority_generation,
+            .membership_generation = self.host_registry.membershipGeneration() catch return error.UnsafeFrontier,
             .next_handle = self.next_handle,
             .resources = resources,
             .views = views,
@@ -1479,9 +1493,13 @@ test "runtime manager maps every bounded wire command without silent variants" {
 
 /// 128-bit runtime_id를 발급한다(§4 opaque random). macOS `arc4random_buf`는 실패하지 않는 CSPRNG다(daemon.newHostId 대칭).
 fn newRuntimeId() u128 {
-    var bytes: [16]u8 = undefined;
-    arc4random_buf(&bytes, bytes.len);
-    return std.mem.readInt(u128, &bytes, .big);
+    var id: u128 = 0;
+    while (id == 0) {
+        var bytes: [16]u8 = undefined;
+        arc4random_buf(&bytes, bytes.len);
+        id = std.mem.readInt(u128, &bytes, .big);
+    }
+    return id;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1577,7 +1595,8 @@ test "runtime manager: U2 quiesce encodes and resumes the same live PTY without 
     const encoded = try mgr.encodeQuiescedHost(allocator, 0xCAFE, 3, 40);
     defer allocator.free(encoded);
     var decoded = try handoff_codec.decodeHost(allocator, encoded);
-    decoded.deinit();
+    defer decoded.deinit();
+    try std.testing.expectEqual(try host_registry.membershipGeneration(), decoded.membership_generation);
 
     try mgr.resumeUpgradeQuiesce();
     try std.testing.expectEqual(child_before, terminal_slot.live_pty.session.childPid());
@@ -1621,6 +1640,7 @@ test "runtime manager: restored graph discard preserves inherited PTY and origin
         allocator,
         0xCAFE,
         3,
+        1,
         @intCast(first_slot),
     );
     defer capture.deinit();
@@ -1707,6 +1727,7 @@ test "runtime manager: second restored runtime failure rolls back the entire non
         allocator,
         0xCAFE,
         3,
+        1,
         @intCast(first_slot),
     );
     defer capture.deinit();

@@ -954,8 +954,10 @@ fn parseSurface(a: std.mem.Allocator, lines: *LineIter, limits: *ParseLimits) Pa
 
 fn validPersistentId(id: []const u8) bool {
     if (id.len != 32) return false;
+    var nonzero = false;
     for (id) |c| if (!std.ascii.isDigit(c) and !(c >= 'a' and c <= 'f')) return false;
-    return true;
+    for (id) |c| nonzero = nonzero or c != '0';
+    return nonzero;
 }
 
 /// 텍스트를 개행 단위 라인으로 나눈다(마지막 개행 뒤 빈 줄은 내지 않는다). peek은 소비 없이 다음 라인을 본다.
@@ -1390,7 +1392,7 @@ test "workspace binding validator: exact cap과 cap+1이 semantic preflight 작�
     defer allocator.free(surfaces);
     for (ids, surfaces, 0..) |*id, *surface, i| {
         @memset(id, '0');
-        _ = try std.fmt.bufPrint(id[24..32], "{x:0>8}", .{i});
+        _ = try std.fmt.bufPrint(id[24..32], "{x:0>8}", .{i + 1});
         surface.* = .{
             .runtime_host_id = "fedcba9876543210fedcba9876543210",
             .runtime_id = id,
@@ -1426,7 +1428,7 @@ test "workspace parse: persistent binding wire cap은 exact 4096을 허용하고
         for (0..count) |i| {
             try out.writer.print(
                 "surface runtime-handle=\"fedcba9876543210fedcba9876543210:000000000000000000000000{x:0>8}\" cols=80 rows=24\n",
-                .{i},
+                .{i + 1},
             );
         }
         const text = out.writer.buffered();

@@ -222,6 +222,25 @@ pub const Action = union(enum) {
     frames: [][]u8,
 };
 
+pub const OutboundClass = union(enum) {
+    control,
+    screen: subscription_identity.LocalStreamId,
+};
+
+/// Single classification authority for already encoded server output. Socket adapters must not
+/// guess from JSON method names; screen stream identity is carried by the MRSH header itself.
+pub fn classifyOutbound(bytes: []const u8) error{InvalidFrame}!OutboundClass {
+    if (bytes.len < protocol.header_size) return error.InvalidFrame;
+    const header_bytes: *const [protocol.header_size]u8 = @ptrCast(bytes.ptr);
+    const header = protocol.Header.decode(header_bytes) catch return error.InvalidFrame;
+    if (bytes.len != protocol.header_size + @as(usize, header.payload_len))
+        return error.InvalidFrame;
+    return switch (header.kind) {
+        .snapshot_chunk, .delta_chunk => .{ .screen = header.stream_id },
+        else => .control,
+    };
+}
+
 pub const HandleError = error{OutOfMemory};
 
 /// 한 client connection의 상태. socket 하나당 하나. `host_id`는 server가 발급한 128-bit opaque(테스트는 고정 주입).
@@ -306,6 +325,30 @@ pub const Connection = struct {
         self.* = undefined;
     }
 
+    /// Readiness adapter lifecycle projection. The returned local stream IDs are a snapshot owned
+    /// by the caller; registry authority remains the daemon-global SubscriptionId table.
+    pub fn localStreams(self: *const Connection, allocator: std.mem.Allocator) error{OutOfMemory}![]subscription_identity.LocalStreamId {
+        const streams = allocator.alloc(
+            subscription_identity.LocalStreamId,
+            self.attachments.count(),
+        ) catch return error.OutOfMemory;
+        var index: usize = 0;
+        var it = self.attachments.keyIterator();
+        while (it.next()) |stream| {
+            streams[index] = stream.*;
+            index += 1;
+        }
+        return streams;
+    }
+
+    pub fn handshakeComplete(self: *const Connection) bool {
+        return self.state != .pre_hello;
+    }
+
+    pub fn attachmentCount(self: *const Connection) usize {
+        return self.attachments.count();
+    }
+
     /// MRSH frame 하나를 처리한다. connection state에 따라 hello 협상 또는 command dispatch를 하고, 응답 frame을
     /// 만들어 `Action`으로 돌려준다. 응답이 없거나 protocol을 어긴 경우 `.close`다(runtime은 유지).
     pub fn handleFrame(self: *Connection, frame: framing.Frame) HandleError!Action {
@@ -363,6 +406,10 @@ pub const Connection = struct {
     }
 
     fn handleReady(self: *Connection, frame: framing.Frame) HandleError!Action {
+        if (frame.header.kind == .request and frame.header.request_id == 0) {
+            self.state = .closed;
+            return .close;
+        }
         switch (frame.header.kind) {
             .ping => {
                 // diagnostic nonce를 그대로 되돌린다(payload passthrough). ping·pong cap이 같아 재초과 없음.
@@ -1422,8 +1469,6 @@ pub const Connection = struct {
         return framing.encodeFrame(self.allocator, .{ .kind = kind, .request_id = request_id, .stream_id = stream_id, .flags = flags }, payload) catch |e| switch (e) {
             error.OutOfMemory => error.OutOfMemory,
             error.PayloadTooLarge => error.PayloadTooLarge,
-            // encodeFrame은 직렬화만 하므로 decode 계열(magic·unknown kind) error를 낼 수 없다.
-            error.BadMagic, error.UnknownRequiredFrame => unreachable,
         };
     }
 

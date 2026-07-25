@@ -213,7 +213,7 @@ pub const Client = struct {
             .fd = fd,
             .host_id = 0,
             .wire_major = wire_major,
-            .parser = framing.FrameParser.init(allocator),
+            .parser = framing.FrameParser.initForMajor(allocator, wire_major),
         };
         errdefer self.parser.deinit();
 
@@ -1007,7 +1007,7 @@ test "client N-1 wire selection fixes hello range and every outbound header to t
         .fd = fds[0],
         .host_id = 1,
         .wire_major = previous_major,
-        .parser = framing.FrameParser.init(allocator),
+        .parser = framing.FrameParser.initForMajor(allocator, previous_major),
     };
     defer client.deinit();
     try client.sendInput(7, "legacy");

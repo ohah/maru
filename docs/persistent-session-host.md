@@ -914,7 +914,9 @@ request_id:u64 | stream_id:u64 | payload_len:u32
 | `scroll_to_bottom` | 12 | controller가 보낸 payload 없는 fire-and-forget live-viewport command |
 | `core_command` | 13 | controller가 보낸 strict bounded JSON host-core command. 응답 없는 stream frame |
 
-- `request_id=0`은 unsolicited event/stream, nonzero는 connection 안에서 재사용하지 않고 response와 1:1 대응한다.
+- `request_id=0`은 unsolicited event/stream 전용이다. ready-state RPC request는 nonzero ID를 쓰고 response와
+  1:1 대응한다. client는 response가 도착하기 전에 같은 ID를 재사용하지 않는다. host는 attacker-controlled lifetime
+  seen-set을 만들지 않고 FIFO response ordering을 유지하며, request의 0 ID는 protocol error로 fail-close한다.
 - `stream_id=0`은 비-stream RPC, attach 성공 뒤 server가 발급한 nonzero ID는 해당 runtime subscription에만 쓴다.
 - 현재 MRSH v2의 flags 어휘는 `end_stream=1`, `optional=2`다. 모르는 required kind/flag는 protocol error로 connection만 닫고 runtime은
   유지한다. `optional` unknown frame은 payload length만큼 안전하게 skip한다.
@@ -1617,12 +1619,32 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
     `local_stream→subscription` / `subscription→{connection_key,local_stream,runtime_id}` 양방향 map이 registry에
     global subscription ID만 전달한다. 두 connection이 모두 local stream 1을 받되 서로 다른 subscription으로 attach되는
     fixture, connection close revoke, slot ABA, counter overflow fail-close가 green이 되기 전 T0b1/T0b2를 제품에 열지 않는다.
-  - **T0b1 — readiness-turn adapter:** 기존 `serveConnection`의 connection-local
+  - **T0b1 — readiness-turn adapter:** 리뷰 가능한 두 하위 slice를 모두 끝낸 뒤 완료로 센다.
+  - **T0b1a — bounded I/O owner (구현):** 기존 `serveConnection`의 connection-local
     `FrameParser`/`Connection`/outbound queue를 stable heap client로 추출한다. 한 호출은 nonblocking read/write를
     각각 T0a의 1 MiB/64 frame turn cap까지만 전진시키며 `EAGAIN`은 정상 yield다. attach의 첫 response는 control,
     뒤 snapshot과 `collectDeltas` 결과는 subscription별 screen queue로 분류한다. partial parser progress/absolute
     deadline, EOF/protocol error/timeout의 canonical `closeConnection`, upgrade reply의 **전량 write 뒤 arm**을 실제
     `socketpair` fixture로 고정한다. 이 단계만으로 daemon listener가 아직 serial이면 제품 동시 연결 완료로 세지 않는다.
+    adapter는 fd와 `Connection`을 한 heap object가 소유하고, reactor slot의 outbound bytes만 write view로 빌린다.
+    `readReady`/`writeReady`는 호출마다 독립 `TurnBudget`을 내부 생성하고 `tick`과 함께 blocking syscall이나 내부 poll을
+    하지 않으며, cap에 도달하거나 `EAGAIN`이면 반환한다. protocol/EOF/deadline/OOM teardown은 adapter가 fd와 subscription을 먼저
+    정리한 뒤 정확히 한 번 `ReactorCore.closeConnection`으로 귀결한다. upgrade accepted reply는 control queue의 마지막
+    byte가 소비될 때까지 pending attempt로만 보관하고, 그 뒤에만 `arm_accepted`한다. owner는 armed ID를 한 번 take해
+    client를 canonical destroy한 다음에만 host-global completed marker를 publish한다. 이 marker는
+    `ArmedUpgrade {attempt_id, gate_preclosed=true}`이고 T0b2 consumer는 raw `attempt_id`를 기존 `freeze`에 넘기지 않고
+    반드시 typed preclosed 경로인 `freezePreclosed`를 선택한다. 그 consumer/process fixture가 없으면 T0b2 완료가 아니다.
+    inbound parser resident cap은 최대 binary frame 하나(header 포함)이며 buffered frame을 새 read보다 먼저 drain한다.
+    read/write partial clock은 서로 독립이고 10초 progress/30초 absolute deadline을 공유하지 않는다. pre-hello silent
+    connection은 10초, handshake 뒤 attachment와 pending output이 없는 idle connection은 마지막 activity 30초에 닫는다.
+    이 foundation은 아직 daemon에서 호출되지 않는다. queue admission 실패는 연결을 canonical close하는 보수 정책이며,
+    `collectDeltas`의 다중 subscription 선할당과 per-subscription soft invalidation/resync 완료를 주장하지 않는다.
+  - **T0b1b — transactional per-subscription output (미구현):** `collectDeltas`를 subscription 한 개씩 bounded produce→queue
+    admission→base/revision commit 순서로 바꾼다. stream-scoped metadata event도 해당 tracker에 귀속하되 lifecycle/upgrade
+    reply의 control reserve와 FIFO 순서는 보존한다. screen soft cap은 그 tracker의 미전송 full-frame만 purge하고
+    `snapshot.invalidated` control event를 정확히 한 번 보낸다. client `runtime.resync` 뒤 fresh snapshot batch는
+    `enqueueResyncSnapshot`의 owned/atomic 경로로만 넣고 성공 뒤 valid로 전환한다. 이미 prefix가 write된 frame은 절대
+    splice하지 않고 connection fail-close한다. 이 slice가 끝나기 전 T0b1 완료나 T0b2 제품 배선을 선언하지 않는다.
   - **T0b2 — daemon multi-fd poll owner:** listener와 최대 32 client fd를 단일 owner poll set으로 묶고
     `ReactorCore.nextReady` 순서로 ready client를 한 turn씩 처리한다. accept cap+1은 즉시 close하고 기존 client는
     유지하며, canonical GUI connection을 열린 채 별도 ephemeral `runtime.inventory`가 완료되는 forked daemon process

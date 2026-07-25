@@ -78,7 +78,10 @@ test "host adapter classifies current and N-1 without exposing N-1 as a current 
         .host_id = 0xBB,
         .wire_major = protocol.version_major - 1,
         .screen_codec_version = screen_stream.codec_version - 1,
-        .parser = @import("framing.zig").FrameParser.init(allocator),
+        .parser = @import("framing.zig").FrameParser.initForMajor(
+            allocator,
+            protocol.version_major - 1,
+        ),
     };
     var previous = try HostAdapter.init(previous_client);
     defer previous.deinit();

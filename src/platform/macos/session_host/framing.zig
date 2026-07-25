@@ -28,17 +28,25 @@ pub const ParseError = error{
     PayloadTooLarge,
     /// 모르는 kind이거나 v1 미정의 flag 비트인데 optional이 아니다 — 안전하게 무시할 수 없어 connection을 닫는다.
     UnknownRequiredFrame,
+    IncompatibleMajor,
     OutOfMemory,
 };
+pub const EncodeError = error{ PayloadTooLarge, OutOfMemory };
 
 /// 받은 바이트를 누적하다 완성된 frame을 하나씩 꺼내는 state machine. 소유는 caller(push/next/deinit).
 pub const FrameParser = struct {
     allocator: std.mem.Allocator,
+    expected_major: u16,
     /// 아직 완성 frame으로 소비되지 않은 바이트. header+payload 경계로 `next()`가 잘라 낸다.
     buf: std.ArrayListUnmanaged(u8) = .empty,
+    head: usize = 0,
 
     pub fn init(allocator: std.mem.Allocator) FrameParser {
-        return .{ .allocator = allocator };
+        return initForMajor(allocator, protocol.version_major);
+    }
+
+    pub fn initForMajor(allocator: std.mem.Allocator, expected_major: u16) FrameParser {
+        return .{ .allocator = allocator, .expected_major = expected_major };
     }
 
     pub fn deinit(self: *FrameParser) void {
@@ -48,46 +56,126 @@ pub const FrameParser = struct {
 
     /// socket에서 읽은 바이트를 누적한다. 여러 frame이 한 번에 와도 되고, 한 frame이 여러 push에 쪼개져도 된다.
     pub fn push(self: *FrameParser, bytes: []const u8) ParseError!void {
+        self.compactIfUseful();
         self.buf.appendSlice(self.allocator, bytes) catch return error.OutOfMemory;
+    }
+
+    /// Readiness adapter admission with a physical allocation ceiling. Dead prefix is compacted
+    /// before every bounded append and precise growth prevents ArrayList's geometric spare
+    /// capacity from exceeding `resident_cap`.
+    pub fn pushBounded(
+        self: *FrameParser,
+        bytes: []const u8,
+        resident_cap: usize,
+    ) ParseError!void {
+        self.compactAll();
+        const next_len = std.math.add(usize, self.buf.items.len, bytes.len) catch
+            return error.PayloadTooLarge;
+        if (next_len > resident_cap) return error.PayloadTooLarge;
+        self.buf.ensureTotalCapacityPrecise(self.allocator, next_len) catch
+            return error.OutOfMemory;
+        self.buf.appendSliceAssumeCapacity(bytes);
     }
 
     /// 완성된 다음 frame을 꺼낸다(버퍼에서 제거). 부족하면 null(더 push하라). optional unknown frame은 조용히
     /// skip하고 그 다음 처리 대상 frame을 찾는다. cap 초과·bad magic·unknown required는 error(connection 닫기).
     pub fn next(self: *FrameParser) ParseError!?Frame {
         while (true) {
-            if (self.buf.items.len < protocol.header_size) return null; // header 미완성
-
-            const header_bytes: *const [protocol.header_size]u8 = @ptrCast(self.buf.items.ptr);
-            const header = protocol.Header.decode(header_bytes) catch |err| switch (err) {
-                error.BadMagic => return error.BadMagic,
-            };
-
-            // cap을 payload 적재 전에 검사한다 — oversize 선언만으로 메모리를 못 늘리게.
-            const cap = protocol.maxPayloadForKind(header.kind);
-            if (header.payload_len > cap) return error.PayloadTooLarge;
-
-            const total = protocol.header_size + @as(usize, header.payload_len);
-            if (self.buf.items.len < total) return null; // payload 미완성
-
-            const understood = header.kind.isKnown() and !protocol.Flags.hasUnknownBits(header.flags);
-            if (!understood) {
-                if (!protocol.Flags.isOptional(header.flags)) return error.UnknownRequiredFrame;
-                // optional이라 안전하게 skip: 이 frame 전체를 소비하고 다음 frame을 시도한다.
-                self.consume(total);
-                continue;
+            const outcome = try self.nextOutcome();
+            switch (outcome) {
+                .incomplete => return null,
+                .skipped => continue,
+                .frame => |frame| return frame,
             }
-
-            const payload = self.allocator.dupe(u8, self.buf.items[protocol.header_size..total]) catch return error.OutOfMemory;
-            self.consume(total);
-            return Frame{ .header = header, .payload = payload };
         }
+    }
+
+    /// Reactor-facing parser step. Unlike `next`, this returns after consuming exactly one optional
+    /// frame so skipped extension traffic is charged to the same per-turn frame budget as known
+    /// frames and cannot monopolize the owner loop.
+    pub const Outcome = union(enum) {
+        incomplete,
+        skipped,
+        frame: Frame,
+    };
+
+    pub fn nextOutcome(self: *FrameParser) ParseError!Outcome {
+        const pending = self.buf.items[self.head..];
+        if (pending.len < protocol.header_size) return .incomplete;
+        const header_bytes: *const [protocol.header_size]u8 = @ptrCast(pending.ptr);
+        const header = protocol.Header.decode(header_bytes) catch return error.BadMagic;
+        if (header.major != self.expected_major) return error.IncompatibleMajor;
+        if (header.payload_len > protocol.maxPayloadForKind(header.kind))
+            return error.PayloadTooLarge;
+        const total = protocol.header_size + @as(usize, header.payload_len);
+        if (pending.len < total) return .incomplete;
+        const understood = header.kind.isKnown() and
+            !protocol.Flags.hasUnknownBits(header.flags);
+        if (!understood) {
+            if (!protocol.Flags.isOptional(header.flags))
+                return error.UnknownRequiredFrame;
+            self.consume(total);
+            return .skipped;
+        }
+        const payload = self.allocator.dupe(
+            u8,
+            pending[protocol.header_size..total],
+        ) catch return error.OutOfMemory;
+        self.consume(total);
+        return .{ .frame = .{ .header = header, .payload = payload } };
+    }
+
+    pub fn bufferedBytes(self: *const FrameParser) usize {
+        return self.buf.items.len - self.head;
+    }
+
+    pub fn residentBytes(self: *const FrameParser) usize {
+        return self.buf.capacity;
+    }
+
+    pub const BufferState = enum { empty, incomplete, complete_or_error };
+
+    /// Readiness owner distinguishes a true partial frame (deadline applies) from a complete
+    /// frame left behind by the 64-frame turn cap (schedule immediately, no socket read).
+    pub fn bufferState(self: *const FrameParser) BufferState {
+        const pending = self.buf.items[self.head..];
+        if (pending.len == 0) return .empty;
+        if (pending.len < protocol.header_size) return .incomplete;
+        const header_bytes: *const [protocol.header_size]u8 = @ptrCast(pending.ptr);
+        const header = protocol.Header.decode(header_bytes) catch return .complete_or_error;
+        if (header.payload_len > protocol.maxPayloadForKind(header.kind))
+            return .complete_or_error;
+        const total = protocol.header_size + @as(usize, header.payload_len);
+        return if (pending.len < total) .incomplete else .complete_or_error;
     }
 
     /// 버퍼 앞에서 `count`바이트를 제거하고 나머지를 앞으로 당긴다(capacity는 유지 — 다음 frame 재사용).
     fn consume(self: *FrameParser, count: usize) void {
-        const remaining = self.buf.items.len - count;
-        std.mem.copyForwards(u8, self.buf.items[0..remaining], self.buf.items[count..]);
+        std.debug.assert(count <= self.bufferedBytes());
+        self.head += count;
+        if (self.head == self.buf.items.len) {
+            self.buf.clearRetainingCapacity();
+            self.head = 0;
+        }
+    }
+
+    /// Avoid per-frame memmove. Compaction is amortized and happens only before append, after at
+    /// least 64 KiB and half the resident buffer became dead prefix.
+    fn compactIfUseful(self: *FrameParser) void {
+        if (self.head < 64 * 1024 or self.head * 2 < self.buf.items.len) return;
+        self.compactAll();
+    }
+
+    fn compactAll(self: *FrameParser) void {
+        if (self.head == 0) return;
+        const remaining = self.bufferedBytes();
+        std.mem.copyForwards(
+            u8,
+            self.buf.items[0..remaining],
+            self.buf.items[self.head..],
+        );
         self.buf.shrinkRetainingCapacity(remaining);
+        self.head = 0;
     }
 };
 
@@ -97,7 +185,7 @@ pub fn encodeFrame(
     allocator: std.mem.Allocator,
     header_in: protocol.Header,
     payload: []const u8,
-) ParseError![]u8 {
+) EncodeError![]u8 {
     if (payload.len > protocol.maxPayloadForKind(header_in.kind)) return error.PayloadTooLarge;
     var header = header_in;
     header.payload_len = @intCast(payload.len);
@@ -226,6 +314,104 @@ test "framing: unknown required kind closes; unknown optional kind is skipped" {
         try std.testing.expectEqual(@as(u64, 9), frame.header.request_id);
         try std.testing.expectEqualStrings("ok", frame.payload);
     }
+}
+
+test "framing: reactor step charges every optional frame instead of skipping without bound" {
+    const allocator = std.testing.allocator;
+    var parser = FrameParser.init(allocator);
+    defer parser.deinit();
+    const header = (protocol.Header{
+        .kind = @enumFromInt(55_000),
+        .flags = protocol.Flags.optional,
+    }).encode();
+    for (0..65) |_| try parser.push(&header);
+    for (0..64) |_| switch (try parser.nextOutcome()) {
+        .skipped => {},
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqual(@as(usize, protocol.header_size), parser.bufferedBytes());
+    switch (try parser.nextOutcome()) {
+        .skipped => {},
+        else => return error.TestUnexpectedResult,
+    }
+    try std.testing.expectEqual(@as(usize, 0), parser.bufferedBytes());
+}
+
+test "framing: large optional backlog advances a cursor without per-frame memmove" {
+    const allocator = std.testing.allocator;
+    var parser = FrameParser.init(allocator);
+    defer parser.deinit();
+    const header = (protocol.Header{
+        .kind = @enumFromInt(55_000),
+        .flags = protocol.Flags.optional,
+    }).encode();
+    for (0..32 * 1024) |_| try parser.push(&header);
+    const resident_before = parser.buf.items.len;
+    for (0..64) |_| switch (try parser.nextOutcome()) {
+        .skipped => {},
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqual(@as(usize, protocol.header_size * 64), parser.head);
+    try std.testing.expectEqual(resident_before, parser.buf.items.len);
+    try std.testing.expectEqual(
+        resident_before - protocol.header_size * 64,
+        parser.bufferedBytes(),
+    );
+}
+
+test "framing: optional unknown frame cannot bypass exact header major" {
+    const allocator = std.testing.allocator;
+    var parser = FrameParser.init(allocator);
+    defer parser.deinit();
+    const header = (protocol.Header{
+        .major = protocol.version_major - 1,
+        .kind = @enumFromInt(55_000),
+        .flags = protocol.Flags.optional,
+    }).encode();
+    try parser.push(&header);
+    try std.testing.expectError(error.IncompatibleMajor, parser.nextOutcome());
+}
+
+test "framing: bounded append compacts dead prefix and caps physical allocation" {
+    const allocator = std.testing.allocator;
+    var parser = FrameParser.init(allocator);
+    defer parser.deinit();
+    const cap: usize = 1000;
+    const first_payload = try allocator.alloc(u8, 368);
+    defer allocator.free(first_payload);
+    @memset(first_payload, 'a');
+    const first = try encodeFrame(allocator, .{ .kind = .ping }, first_payload);
+    defer allocator.free(first);
+    try std.testing.expectEqual(@as(usize, 400), first.len);
+
+    const second_header = (protocol.Header{
+        .kind = .snapshot_chunk,
+        .payload_len = 968,
+    }).encode();
+    const initial = try allocator.alloc(u8, cap);
+    defer allocator.free(initial);
+    @memcpy(initial[0..first.len], first);
+    @memcpy(initial[first.len..][0..protocol.header_size], &second_header);
+    @memset(initial[first.len + protocol.header_size ..], 'b');
+    try parser.pushBounded(initial, cap);
+    const consumed = switch (try parser.nextOutcome()) {
+        .frame => |frame| frame,
+        else => return error.TestUnexpectedResult,
+    };
+    consumed.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 600), parser.bufferedBytes());
+
+    const tail = try allocator.alloc(u8, 400);
+    defer allocator.free(tail);
+    @memset(tail, 'c');
+    try parser.pushBounded(tail, cap);
+    try std.testing.expect(parser.residentBytes() <= cap);
+    const second = switch (try parser.nextOutcome()) {
+        .frame => |frame| frame,
+        else => return error.TestUnexpectedResult,
+    };
+    defer second.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 968), second.payload.len);
 }
 
 test "framing: unknown flag bit on a required frame closes the connection" {

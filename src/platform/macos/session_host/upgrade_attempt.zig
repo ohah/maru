@@ -157,7 +157,29 @@ pub fn freeze(
     gate: *upgrade_coordinator.AdmissionGate,
     deadline: upgrade_deadline.Deadline,
 ) Error!Frozen {
-    if (!gate.close()) return error.UpgradeBusy;
+    return freezeGate(manager, gate, deadline, false);
+}
+
+/// Reactor accepted-reply path already closed the sole product admission gate before arm. Reusing
+/// `freeze` would interpret that valid handoff as UpgradeBusy, so the typed marker must select this
+/// entrypoint. It still waits for every pre-close lease before quiescing readers.
+pub fn freezePreclosed(
+    manager: *runtime_manager.RuntimeManager,
+    gate: *upgrade_coordinator.AdmissionGate,
+    deadline: upgrade_deadline.Deadline,
+) Error!Frozen {
+    return freezeGate(manager, gate, deadline, true);
+}
+
+fn freezeGate(
+    manager: *runtime_manager.RuntimeManager,
+    gate: *upgrade_coordinator.AdmissionGate,
+    deadline: upgrade_deadline.Deadline,
+    preclosed: bool,
+) Error!Frozen {
+    if (preclosed) {
+        if (gate.snapshot().open) return error.UpgradeBusy;
+    } else if (!gate.close()) return error.UpgradeBusy;
     var pause_requested = false;
 
     while (!gate.closedAndDrained()) {

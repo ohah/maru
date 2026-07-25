@@ -1711,7 +1711,7 @@ test "remote runtime attaches through N-1 MRSH and normalizes frozen v1 screen r
         .host_id = 0xAA,
         .wire_major = 1,
         .screen_codec_version = 1,
-        .parser = framing.FrameParser.init(allocator),
+        .parser = framing.FrameParser.initForMajor(allocator, 1),
     };
     defer client.deinit();
     var rr: RemoteRuntime = undefined;

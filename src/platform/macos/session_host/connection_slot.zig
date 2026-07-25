@@ -193,8 +193,10 @@ pub const Slot = struct {
     control_resident_bytes: usize = 0,
     screen_trackers: [max_screen_trackers_per_slot]ScreenTrackerEntry =
         [_]ScreenTrackerEntry{.{}} ** max_screen_trackers_per_slot,
-    partial_started_ns: ?u64 = null,
-    partial_progress_ns: ?u64 = null,
+    read_partial_started_ns: ?u64 = null,
+    read_partial_progress_ns: ?u64 = null,
+    write_partial_started_ns: ?u64 = null,
+    write_partial_progress_ns: ?u64 = null,
     in_flight_dispatch: usize = 0,
     attached_streams: usize = 0,
 
@@ -266,6 +268,49 @@ pub const Slot = struct {
         self.allocator.destroy(tracker);
     }
 
+    /// Detach path: discard only this subscription's queued screen frames, preserving FIFO order
+    /// and every control/other-subscription chunk, then retire the tracker generation.
+    pub fn purgeAndDestroyScreenTracker(
+        self: *Slot,
+        key: ScreenTrackerKey,
+    ) error{ Stale, PartialFrame }!void {
+        _ = try self.trackerEntry(key);
+        for (0..self.chunk_len) |logical| {
+            const index = (self.chunk_head + logical) % max_chunks_per_slot;
+            const chunk = self.chunks[index];
+            if (chunk.class == .screen and
+                chunk.screen_tracker_index.? == key.index and chunk.offset != 0)
+                return error.PartialFrame;
+        }
+        var logical: usize = 0;
+        while (logical < self.chunk_len) {
+            const index = (self.chunk_head + logical) % max_chunks_per_slot;
+            const chunk = self.chunks[index];
+            if (chunk.class != .screen or chunk.screen_tracker_index.? != key.index) {
+                logical += 1;
+                continue;
+            }
+            const remaining = chunk.bytes.len - chunk.offset;
+            const charge = chargeFor(chunk.bytes.len);
+            self.pending_bytes -= remaining;
+            self.resident_bytes -= charge;
+            self.screen_trackers[key.index].tracker.?.resident_bytes -= charge;
+            self.global.releaseScreen(charge);
+            self.allocator.free(chunk.bytes);
+            var shift = logical;
+            while (shift + 1 < self.chunk_len) : (shift += 1) {
+                const dst = (self.chunk_head + shift) % max_chunks_per_slot;
+                const src = (self.chunk_head + shift + 1) % max_chunks_per_slot;
+                self.chunks[dst] = self.chunks[src];
+            }
+            self.chunk_len -= 1;
+        }
+        self.destroyScreenTracker(key) catch |err| switch (err) {
+            error.Stale => return error.Stale,
+            error.Busy => unreachable,
+        };
+    }
+
     fn trackerEntry(self: *Slot, key: ScreenTrackerKey) error{Stale}!*ScreenTrackerEntry {
         if (!std.meta.eql(key.owner, self.key)) return error.Stale;
         const index: usize = key.index;
@@ -304,6 +349,26 @@ pub const Slot = struct {
         return self.enqueue(.control, null, bytes);
     }
 
+    /// Ownership-transfer variants used by the readiness adapter. On success the slot owns `bytes`;
+    /// on error the caller still owns it. This avoids a second full-frame allocation outside the
+    /// charged resident queue.
+    pub fn enqueueOwnedControl(self: *Slot, bytes: []u8) EnqueueError!void {
+        return self.enqueueOwned(.control, null, bytes);
+    }
+
+    pub fn enqueueOwnedScreen(
+        self: *Slot,
+        key: ScreenTrackerKey,
+        bytes: []u8,
+    ) (EnqueueError || error{Stale})!void {
+        const tracker = (try self.trackerEntry(key)).tracker.?;
+        if (tracker.state != .valid) return error.ScreenInvalidated;
+        return self.enqueueOwned(.screen, key.index, bytes) catch |err| {
+            tracker.state = .invalidated;
+            return err;
+        };
+    }
+
     fn enqueue(
         self: *Slot,
         class: QueueClass,
@@ -340,6 +405,51 @@ pub const Slot = struct {
         const tail = (self.chunk_head + self.chunk_len) % max_chunks_per_slot;
         self.chunks[tail] = .{
             .bytes = owned,
+            .class = class,
+            .screen_tracker_index = tracker_index,
+        };
+        self.chunk_len += 1;
+        self.resident_bytes = next_slot;
+        self.pending_bytes += bytes.len;
+        if (class == .screen)
+            self.screen_trackers[tracker_index.?].tracker.?.resident_bytes += charge;
+        if (class == .control) self.control_resident_bytes += charge;
+    }
+
+    fn enqueueOwned(
+        self: *Slot,
+        class: QueueClass,
+        tracker_index: ?usize,
+        bytes: []u8,
+    ) EnqueueError!void {
+        if (bytes.len == 0) {
+            self.allocator.free(bytes);
+            return;
+        }
+        if (self.chunk_len == max_chunks_per_slot) return error.ChunkLimit;
+        if (class == .screen and self.chunk_len >= max_chunks_per_slot - control_chunk_reserve)
+            return error.ChunkLimit;
+        const charge = chargeFor(bytes.len);
+        const next_slot = std.math.add(usize, self.resident_bytes, charge) catch
+            return error.SlotLimit;
+        if (next_slot > per_slot_bytes) return error.SlotLimit;
+        if (class == .screen) {
+            const tracker = self.screen_trackers[tracker_index.?].tracker.?;
+            const next_screen = std.math.add(usize, tracker.resident_bytes, charge) catch
+                return error.ScreenInvalidated;
+            if (next_screen > screen_soft_bytes) {
+                tracker.state = .invalidated;
+                return error.ScreenInvalidated;
+            }
+        }
+        const reserved = if (class == .screen)
+            self.global.reserveScreen(charge)
+        else
+            self.global.reserveControl(self.control_resident_bytes, charge);
+        if (!reserved) return error.GlobalLimit;
+        const tail = (self.chunk_head + self.chunk_len) % max_chunks_per_slot;
+        self.chunks[tail] = .{
+            .bytes = bytes,
             .class = class,
             .screen_tracker_index = tracker_index,
         };
@@ -433,19 +543,43 @@ pub const Slot = struct {
         return .{ .bytes = first.bytes[first.offset..], .class = first.class };
     }
 
-    pub fn notePartial(self: *Slot, now_ns: u64, progressed: bool) void {
-        if (self.partial_started_ns == null) self.partial_started_ns = now_ns;
-        if (progressed or self.partial_progress_ns == null) self.partial_progress_ns = now_ns;
+    pub const PartialDirection = enum { read, write };
+
+    pub fn notePartial(self: *Slot, direction: PartialDirection, now_ns: u64, progressed: bool) void {
+        const started = switch (direction) {
+            .read => &self.read_partial_started_ns,
+            .write => &self.write_partial_started_ns,
+        };
+        const progress = switch (direction) {
+            .read => &self.read_partial_progress_ns,
+            .write => &self.write_partial_progress_ns,
+        };
+        if (started.* == null) started.* = now_ns;
+        if (progressed or progress.* == null) progress.* = now_ns;
     }
 
-    pub fn clearPartial(self: *Slot) void {
-        self.partial_started_ns = null;
-        self.partial_progress_ns = null;
+    pub fn clearPartial(self: *Slot, direction: PartialDirection) void {
+        switch (direction) {
+            .read => {
+                self.read_partial_started_ns = null;
+                self.read_partial_progress_ns = null;
+            },
+            .write => {
+                self.write_partial_started_ns = null;
+                self.write_partial_progress_ns = null;
+            },
+        }
     }
 
-    pub fn partialExpired(self: *const Slot, now_ns: u64) bool {
-        const last = self.partial_progress_ns orelse return false;
-        const started = self.partial_started_ns.?;
+    pub fn partialExpired(self: *const Slot, direction: PartialDirection, now_ns: u64) bool {
+        const last = switch (direction) {
+            .read => self.read_partial_progress_ns,
+            .write => self.write_partial_progress_ns,
+        } orelse return false;
+        const started = (switch (direction) {
+            .read => self.read_partial_started_ns,
+            .write => self.write_partial_started_ns,
+        }).?;
         return (now_ns >= last and now_ns - last >= partial_deadline_ns) or
             (now_ns >= started and now_ns - started >= partial_absolute_deadline_ns);
     }
@@ -471,7 +605,8 @@ pub const Slot = struct {
     }
 
     pub fn idleForUpgrade(self: *const Slot) bool {
-        return self.partial_started_ns == null and self.pending_bytes == 0 and
+        return self.read_partial_started_ns == null and
+            self.write_partial_started_ns == null and self.pending_bytes == 0 and
             self.in_flight_dispatch == 0 and self.attached_streams == 0;
     }
 };
@@ -578,30 +713,32 @@ pub const ReactorCore = struct {
     }
 };
 
-pub const AdmissionGate = struct {
+/// Pure T0a drain oracle used only by OS-neutral invariant tests. Product frame admission authority
+/// is `upgrade_coordinator.AdmissionGate`; this type must never be wired beside it.
+pub const DrainModel = struct {
     open: bool = true,
     in_flight: usize = 0,
 
-    pub fn tryBegin(self: *AdmissionGate) error{ Closed, CounterExhausted }!void {
+    pub fn tryBegin(self: *DrainModel) error{ Closed, CounterExhausted }!void {
         if (!self.open) return error.Closed;
         self.in_flight = std.math.add(usize, self.in_flight, 1) catch
             return error.CounterExhausted;
     }
 
-    pub fn end(self: *AdmissionGate) error{CounterUnderflow}!void {
+    pub fn end(self: *DrainModel) error{CounterUnderflow}!void {
         if (self.in_flight == 0) return error.CounterUnderflow;
         self.in_flight -= 1;
     }
 
-    pub fn close(self: *AdmissionGate) void {
+    pub fn close(self: *DrainModel) void {
         self.open = false;
     }
 
-    pub fn reopen(self: *AdmissionGate) void {
+    pub fn reopen(self: *DrainModel) void {
         self.open = true;
     }
 
-    pub fn drained(self: *const AdmissionGate, reactor: *const ReactorCore) bool {
+    pub fn drained(self: *const DrainModel, reactor: *const ReactorCore) bool {
         return !self.open and self.in_flight == 0 and reactor.activeCount() == 0;
     }
 };
@@ -862,13 +999,18 @@ test "connection slot partial deadline advances only on progress" {
     var global: GlobalBudget = .{};
     var slot = try Slot.init(std.testing.allocator, &global, .{ .monotonic_id = 1, .slot_generation = 1 });
     defer slot.deinit();
-    slot.notePartial(100, true);
-    slot.notePartial(100 + partial_deadline_ns - 1, false);
-    try std.testing.expect(!slot.partialExpired(100 + partial_deadline_ns - 1));
-    try std.testing.expect(slot.partialExpired(100 + partial_deadline_ns));
-    slot.notePartial(100 + partial_deadline_ns, true);
-    try std.testing.expect(!slot.partialExpired(100 + partial_deadline_ns));
-    try std.testing.expect(slot.partialExpired(100 + partial_absolute_deadline_ns));
+    slot.notePartial(.read, 100, true);
+    slot.notePartial(.read, 100 + partial_deadline_ns - 1, false);
+    try std.testing.expect(!slot.partialExpired(.read, 100 + partial_deadline_ns - 1));
+    try std.testing.expect(slot.partialExpired(.read, 100 + partial_deadline_ns));
+    slot.notePartial(.read, 100 + partial_deadline_ns, true);
+    try std.testing.expect(!slot.partialExpired(.read, 100 + partial_deadline_ns));
+    try std.testing.expect(slot.partialExpired(.read, 100 + partial_absolute_deadline_ns));
+
+    // Outbound progress cannot keep an inbound slowloris alive, or vice versa.
+    slot.notePartial(.write, 100 + partial_deadline_ns, true);
+    try std.testing.expect(slot.partialExpired(.read, 100 + partial_absolute_deadline_ns));
+    try std.testing.expect(!slot.partialExpired(.write, 100 + partial_deadline_ns));
 }
 
 test "connection slot upgrade drain rejects queued partial attached and dispatch state" {
@@ -877,9 +1019,9 @@ test "connection slot upgrade drain rejects queued partial attached and dispatch
     const admission = try reactor.admit();
     const slot = try reactor.get(admission);
     try std.testing.expect(slot.idleForUpgrade());
-    slot.notePartial(1, true);
+    slot.notePartial(.read, 1, true);
     try std.testing.expect(!slot.idleForUpgrade());
-    slot.clearPartial();
+    slot.clearPartial(.read);
     try slot.enqueueControl("x");
     try std.testing.expect(!slot.idleForUpgrade());
     try slot.consumeWritten(1);
@@ -892,7 +1034,7 @@ test "connection slot upgrade drain rejects queued partial attached and dispatch
     try slot.detachStream();
     try std.testing.expectError(error.CounterUnderflow, slot.detachStream());
 
-    var gate: AdmissionGate = .{};
+    var gate: DrainModel = .{};
     try gate.tryBegin();
     gate.close();
     try std.testing.expectError(error.Closed, gate.tryBegin());
@@ -984,6 +1126,44 @@ test "screen tracker key rejects cross slot provenance" {
         second.enqueueResyncSnapshot(foreign, &.{"cross-slot"}),
     );
     try std.testing.expectError(error.Stale, second.destroyScreenTracker(foreign));
+}
+
+test "detach purge removes only one subscription screen queue and preserves FIFO control" {
+    const allocator = std.testing.allocator;
+    const reactor = try ReactorCore.create(allocator);
+    defer reactor.destroy();
+    const admission = try reactor.admit();
+    const slot = try reactor.get(admission);
+    const noisy = try slot.createScreenTracker();
+    const healthy = try slot.createScreenTracker();
+    try slot.enqueueScreen(noisy, "n1");
+    try slot.enqueueControl("control");
+    try slot.enqueueScreen(healthy, "h1");
+    try slot.enqueueScreen(noisy, "n2");
+
+    try slot.purgeAndDestroyScreenTracker(noisy);
+    try std.testing.expectError(error.Stale, slot.screenState(noisy));
+    try std.testing.expectEqualStrings("control", slot.firstPending().?.bytes);
+    try slot.consumeWritten("control".len);
+    try std.testing.expectEqualStrings("h1", slot.firstPending().?.bytes);
+    try std.testing.expectEqual(@as(usize, 1), slot.chunk_len);
+}
+
+test "detach purge refuses to truncate a screen frame whose prefix reached the peer" {
+    const allocator = std.testing.allocator;
+    const reactor = try ReactorCore.create(allocator);
+    defer reactor.destroy();
+    const admission = try reactor.admit();
+    const slot = try reactor.get(admission);
+    const tracker = try slot.createScreenTracker();
+    try slot.enqueueScreen(tracker, "frame");
+    try slot.consumeWritten(1);
+    try std.testing.expectError(
+        error.PartialFrame,
+        slot.purgeAndDestroyScreenTracker(tracker),
+    );
+    try std.testing.expectEqualStrings("rame", slot.firstPending().?.bytes);
+    try std.testing.expectEqual(ScreenState.valid, try slot.screenState(tracker));
 }
 
 test "connection key allocator never emits zero or reuses after overflow" {

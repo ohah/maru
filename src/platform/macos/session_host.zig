@@ -69,6 +69,10 @@ else
     struct {};
 pub const connection_slot = @import("session_host/connection_slot.zig");
 pub const subscription_identity = @import("session_host/subscription_identity.zig");
+pub const connection_turn = if (builtin.os.tag == .macos)
+    @import("session_host/connection_turn.zig")
+else
+    struct {};
 // socket_server는 macOS 전용 unix socket syscall(c.fstatat/mkdir/getpeereid, SO_NOSIGPIPE)을 써서 macOS에서만 컴파일한다
 // (§10 macOS endpoint). Linux에선 그 syscall 시그니처가 없어 참조만으로 컴파일이 깨지므로 barrel에서 조건부로 제외한다.
 // codec/state machine(protocol/framing/screen_stream/registry/server)은 OS 중립이라 그대로 두어 non-macOS에서도 회귀를 잡는다.

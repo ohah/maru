@@ -817,9 +817,10 @@ slot의 `local_stream→subscription`과 daemon의
 모두 revoke한 뒤 slot generation을 올려 storage를 재사용한다. connection/subscription counter overflow에서는 ID를
 재사용하지 않고 새 attach를 fail-close한다.
 
-> **현재 구현 공백:** 각 connection이 local stream counter를 1부터 발급하지만 registry가 그 값을 전역 subscription key로
-> 사용한다. 두 번째 connection의 첫 attach가 기존 구독을 덮거나 거부할 수 있으므로, 이 분리 없이 다중 connection reactor를
-> 여는 것은 금지한다.
+> **현재 구현 상태(T0b0):** wire `stream_id`는 connection-local counter를 유지하고 registry public authority는 distinct
+> `SubscriptionId`만 받는다. `SocketServer`가 `ConnectionKey`와 daemon-global 양방향 table을 제품 `Connection` 생성자에
+> 필수 주입하며, 두 번째 connection의 local stream 1은 별도 global subscription으로 attach된다. 아직 multi-fd reactor
+> 자체를 열지 않았으므로 이 identity 기반만으로 동시 제품 연결 완료로 세지 않는다.
 
 각 socket은 stateful `ConnectionSlot`이 소유한다. slot은 partial header/payload read, partial frame write, 요청/응답
 correlation과 bounded outbound queue를 보관한다. socket은 nonblocking이며 한 slot의 `EAGAIN`이나 느린 reader가 PTY pump,
@@ -1610,6 +1611,23 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
   accounting state만 제공하며, socket을 열거나 기존 serial daemon을 multi-client로 광고하지 않는다.
 - **T0b — reactor product wiring:** T0a를 `SocketServer`/daemon poll loop에 연결하고 아래 P5a1의 process gate를
   완료한다. 이때부터만 canonical connection을 유지한 별도 ephemeral inventory connection을 제품 지원으로 센다.
+  - **T0b0 — subscription identity 선행 (구현):** §9/P5b1을 reactor 공개보다 먼저 구현한다. wire `stream_id`는
+    connection-local을 유지하고 daemon-global `subscription_id`를 별도 단조 발급한다. T0a
+    `ConnectionKey {monotonic_id,slot_generation}`와 결합한
+    `local_stream→subscription` / `subscription→{connection_key,local_stream,runtime_id}` 양방향 map이 registry에
+    global subscription ID만 전달한다. 두 connection이 모두 local stream 1을 받되 서로 다른 subscription으로 attach되는
+    fixture, connection close revoke, slot ABA, counter overflow fail-close가 green이 되기 전 T0b1/T0b2를 제품에 열지 않는다.
+  - **T0b1 — readiness-turn adapter:** 기존 `serveConnection`의 connection-local
+    `FrameParser`/`Connection`/outbound queue를 stable heap client로 추출한다. 한 호출은 nonblocking read/write를
+    각각 T0a의 1 MiB/64 frame turn cap까지만 전진시키며 `EAGAIN`은 정상 yield다. attach의 첫 response는 control,
+    뒤 snapshot과 `collectDeltas` 결과는 subscription별 screen queue로 분류한다. partial parser progress/absolute
+    deadline, EOF/protocol error/timeout의 canonical `closeConnection`, upgrade reply의 **전량 write 뒤 arm**을 실제
+    `socketpair` fixture로 고정한다. 이 단계만으로 daemon listener가 아직 serial이면 제품 동시 연결 완료로 세지 않는다.
+  - **T0b2 — daemon multi-fd poll owner:** listener와 최대 32 client fd를 단일 owner poll set으로 묶고
+    `ReactorCore.nextReady` 순서로 ready client를 한 turn씩 처리한다. accept cap+1은 즉시 close하고 기존 client는
+    유지하며, canonical GUI connection을 열린 채 별도 ephemeral `runtime.inventory`가 완료되는 forked daemon process
+    fixture를 필수 gate로 둔다. upgrade admission close 뒤 신규 accept 0, 모든 client queue/dispatch/attachment drain
+    뒤에만 same-PID migration을 시작한다.
 - **P5a1 — bounded admin accept foundation**: 현재 connection 하나를 EOF까지 독점하는 serial serve loop를 먼저
   single-owner multi-fd reactor로 바꾼다. P4 GUI slot을 유지한 채 bounded admin request slot 하나를 accept/dispatch하고
   partial read/write, cap, idle deadline, same-login-UID/other-UID 거부를 process test로 고정한다. public CLI/help는 아직
@@ -1622,9 +1640,10 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
   응답, absent/denied/busy typed exit와 JSON 안정성이 gate다.
 - **P5a3 — mutating admin CLI**: `maru runtime end`를 controller/ownership 확인과 함께 별도 공개한다. exact runtime
   종료, stale identity, unauthorized, accepted reply flush를 gate로 삼는다.
-- **P5b1 — subscription identity**: connection-local wire `stream_id`와 registry-global `subscription_id`를 stable
-  `ConnectionKey` 양방향 map으로 분리한다. 두 connection의 local stream 1과 connection ABA를 hidden protocol
-  harness로 검증한다.
+- **P5b1 — subscription identity (T0b0에서 선행 구현)**: connection-local wire `stream_id`와
+  registry-global distinct `SubscriptionId`를 stable `ConnectionKey` 양방향 map으로 분리했다. 두 connection의
+  local stream 1, 권한 격리, close revoke, connection ABA, 256/8,192 cap과 overflow/OOM을 hidden protocol/core
+  harness로 검증한다. P5b에서는 이를 실제 multi-fd streaming harness에서 재검증한다.
 - **P5b2 — bounded stream slots**: P4 `ConnectionSlot` cap/reserve/fairness를 multi-slot streaming에 적용한다.
   slow observer가 controller/PTY를 막지 않고 per-connection/global cap을 넘지 않는 것이 gate다.
 - **P5b3 — controller/observer reactor**: observer/takeover protocol과 controller 전환을 hidden harness로 완성한다.

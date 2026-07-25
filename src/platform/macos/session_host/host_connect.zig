@@ -643,7 +643,9 @@ test "host_connect: connect-first attaches to an already-running host (no spawn)
     var dir_buf: [256]u8 = undefined;
     const dir = discovery.sessionHostDirPath(&dir_buf, base) catch return error.SkipZigTest;
     _ = c.mkdir(dir.ptr, 0o700);
-    const host_id: u128 = 0xAABBCCDD;
+    // short endpoint는 base dir 밖의 user-global namespace라 고정 host id를 쓰면 병렬 test process끼리 같은
+    // socket을 unlink/connect한다. PID를 identity 상위 비트에 넣어 manifest와 실제 endpoint를 함께 격리한다.
+    const host_id: u128 = (@as(u128, @intCast(c.getpid())) << 64) | 0xAABBCCDD;
     try short_endpoint.prepareCurrentUserNamespace();
     var sock_buf: [128]u8 = undefined;
     const socket = try short_endpoint.currentSocketPathIn(&sock_buf, host_id);

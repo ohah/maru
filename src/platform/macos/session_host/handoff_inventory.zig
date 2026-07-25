@@ -551,6 +551,8 @@ pub const socket_server_groups = [_]Group{
             "owner_tick",
             "active_connections",
             "completed_upgrade_attempt",
+            "connection_keys",
+            "subscriptions",
         },
         .why = "the listener, target build status, process-local callbacks, gate pointer, and connection count are rebuilt only after the complete runtime graph is prepared",
     },

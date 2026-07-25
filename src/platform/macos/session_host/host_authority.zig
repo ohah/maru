@@ -295,7 +295,9 @@ test "host authority owns wire build and endpoint strings" {
         .allocator = allocator,
         .host_id = 1,
         .registry = &registry,
+        .subscriptions = @import("subscription_identity.zig").Table.init(allocator),
     };
+    defer server.subscriptions.deinit();
     defer allocator.free(server.socket_path);
     var publication: host_manifest.Published = undefined;
     const source_build = try allocator.dupe(u8, "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef");
@@ -352,7 +354,9 @@ test "host authority adapter CASes restoring and rollback through one disk and w
         .allocator = allocator,
         .host_id = host_id,
         .registry = &registry,
+        .subscriptions = @import("subscription_identity.zig").Table.init(allocator),
     };
+    defer server.subscriptions.deinit();
     defer allocator.free(server.socket_path);
     var authority = try HostAuthority.init(allocator, &publication, &server, descriptor);
     defer authority.deinit();
@@ -495,7 +499,9 @@ test "prepared host authority activates a stable restoring manifest after all al
         .allocator = allocator,
         .host_id = host_id,
         .registry = &registry,
+        .subscriptions = @import("subscription_identity.zig").Table.init(allocator),
     };
+    defer server.subscriptions.deinit();
     defer allocator.free(server.socket_path);
     var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
     try std.testing.expectError(

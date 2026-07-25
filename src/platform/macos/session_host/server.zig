@@ -20,6 +20,8 @@ const core_command_wire = @import("core_command_wire.zig");
 const screen_stream = @import("screen_stream.zig");
 const host_identity = @import("host_identity.zig");
 const upgrade_wire = @import("upgrade_wire.zig");
+const connection_slot = @import("connection_slot.zig");
+const subscription_identity = @import("subscription_identity.zig");
 
 pub const HostStatus = struct {
     manifest_capable: bool = false,
@@ -246,10 +248,13 @@ pub const Connection = struct {
     inventory_fail_snapshot_once: bool = false,
     /// 이 connection이 연 stream 구독 표(§9 attach subscription). key=`stream_id`, value=`Subscription`(runtime_id +
     /// 마지막 full snapshot base). input_bytes/resize/detach가 stream_id로 runtime을 찾고, delta push는 base 대비 diff한다.
-    /// connection 종료 시 모두 detach하고 base를 해제한다. host가 stream_id를 발급한다(현재 per-connection 단조 — serial serve
-    /// 전제라 겹치지 않는다; 동시 연결 후속에서 host-global 발급으로 승격).
-    attachments: std.AutoHashMapUnmanaged(reg.StreamId, Subscription) = .empty,
-    next_stream_id: reg.StreamId = 1,
+    /// connection 종료 시 모두 detach하고 base를 해제한다.
+    attachments: std.AutoHashMapUnmanaged(subscription_identity.LocalStreamId, Subscription) = .empty,
+    subscription_identity: ?struct {
+        connection: connection_slot.ConnectionKey,
+        table: *subscription_identity.Table,
+    } = null,
+    next_stream_id: subscription_identity.LocalStreamId = 1,
 
     /// 한 stream 구독의 상태. `base`는 이 stream에 마지막으로 보낸 full snapshot 바이트(다음 delta diff의 기준). attach
     /// 직후 첫 snapshot으로 채워지고, delta push마다 갱신된다. null이면 아직 base가 없다(read-only host 또는 snapshot 실패).
@@ -257,6 +262,7 @@ pub const Connection = struct {
     /// 현재 full snapshot을 snapshot_chunk로 push하고 base를 그걸로 교체한다. client의 조립기 generation gap을 리셋한다.
     pub const Subscription = struct {
         runtime_id: u128,
+        subscription_id: subscription_identity.SubscriptionId,
         base: ?[]u8 = null,
         resync_pending: bool = false,
         observation_base: ?[]u8 = null,
@@ -266,8 +272,23 @@ pub const Connection = struct {
 
     pub const State = enum { pre_hello, ready, closed };
 
-    pub fn init(allocator: std.mem.Allocator, host_id: u128, registry: *reg.TerminalRuntimeRegistry) Connection {
+    fn init(allocator: std.mem.Allocator, host_id: u128, registry: *reg.TerminalRuntimeRegistry) Connection {
         return .{ .allocator = allocator, .host_id = host_id, .registry = registry };
+    }
+
+    pub fn initProduct(
+        allocator: std.mem.Allocator,
+        host_id: u128,
+        registry: *reg.TerminalRuntimeRegistry,
+        connection: connection_slot.ConnectionKey,
+        subscriptions: *subscription_identity.Table,
+    ) Connection {
+        var result = init(allocator, host_id, registry);
+        result.subscription_identity = .{
+            .connection = connection,
+            .table = subscriptions,
+        };
+        return result;
     }
 
     /// connection 종료(EOF/close) 시 이 connection의 모든 subscription을 registry에서 떼고 base를 해제한다(§9 "EOF는 모든
@@ -275,10 +296,12 @@ pub const Connection = struct {
     pub fn deinit(self: *Connection) void {
         var it = self.attachments.iterator();
         while (it.next()) |e| {
-            _ = self.registry.detach(e.value_ptr.runtime_id, e.key_ptr.*) catch {};
+            _ = self.registry.detachSubscription(e.value_ptr.runtime_id, e.value_ptr.subscription_id) catch {};
             if (e.value_ptr.base) |b| self.allocator.free(b);
             if (e.value_ptr.observation_base) |b| self.allocator.free(b);
         }
+        if (self.subscription_identity) |identity|
+            _ = identity.table.revokeConnection(identity.connection);
         self.attachments.deinit(self.allocator);
         self.* = undefined;
     }
@@ -605,7 +628,10 @@ pub const Connection = struct {
         const p = params orelse return self.replyError(request_id, .invalid_request);
         const stream = intFieldU64(p, "stream_id") orelse return self.replyError(request_id, .invalid_request);
         const sub = self.attachments.getPtr(stream) orelse return self.replyError(request_id, .runtime_not_found);
-        if (!reg.Capability.has(self.registry.capabilitiesOf(sub.runtime_id, stream), reg.Capability.observe))
+        if (!reg.Capability.has(
+            self.registry.capabilitiesOfSubscription(sub.runtime_id, sub.subscription_id),
+            reg.Capability.observe,
+        ))
             return self.replyError(request_id, .unauthorized);
 
         var observation = ops.observation(ops.ctx, sub.runtime_id, self.allocator) catch |err| switch (err) {
@@ -771,18 +797,57 @@ pub const Connection = struct {
         if (id == null) return self.replyError(request_id, .invalid_request);
         const mode = parseAttachMode(strField(p, "mode"));
 
+        if (self.next_stream_id == 0)
+            return self.replyError(request_id, .resource_exhausted);
         const stream = self.next_stream_id;
-        const outcome = self.registry.attach(id.?, stream, mode) catch |e| switch (e) {
-            error.RuntimeNotFound => return self.replyError(request_id, .runtime_not_found),
-            error.AlreadyAttached => return self.replyError(request_id, .invalid_request),
-            error.OutOfMemory => return error.OutOfMemory,
-            else => return self.replyError(request_id, .internal),
+        const subscription_id = if (self.subscription_identity) |identity|
+            identity.table.register(.{
+                .connection = identity.connection,
+                .stream_id = stream,
+            }, id.?) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.Full, error.Exhausted => return self.replyError(request_id, .resource_exhausted),
+                else => return self.replyError(request_id, .internal),
+            }
+        else
+            subscription_identity.SubscriptionId{ .value = stream };
+        var identity_registered = self.subscription_identity != null;
+        errdefer if (identity_registered) {
+            const identity = self.subscription_identity.?;
+            _ = identity.table.revoke(.{
+                .connection = identity.connection,
+                .stream_id = stream,
+            }) catch {};
         };
-        self.attachments.put(self.allocator, stream, .{ .runtime_id = id.? }) catch {
-            _ = self.registry.detach(id.?, stream) catch {}; // 매핑 실패 시 registry subscription을 되돌린다(유령 subscription 방지).
+        const outcome = self.registry.attachSubscription(id.?, subscription_id, mode) catch |e| {
+            if (identity_registered) {
+                const identity = self.subscription_identity.?;
+                _ = identity.table.revoke(.{
+                    .connection = identity.connection,
+                    .stream_id = stream,
+                }) catch {};
+                identity_registered = false;
+            }
+            return switch (e) {
+                error.RuntimeNotFound => self.replyError(request_id, .runtime_not_found),
+                error.AlreadyAttached => self.replyError(request_id, .invalid_request),
+                error.OutOfMemory => error.OutOfMemory,
+                else => self.replyError(request_id, .internal),
+            };
+        };
+        self.attachments.put(self.allocator, stream, .{
+            .runtime_id = id.?,
+            .subscription_id = subscription_id,
+        }) catch {
+            _ = self.registry.detachSubscription(id.?, subscription_id) catch {};
             return error.OutOfMemory;
         };
-        self.next_stream_id += 1;
+        identity_registered = false;
+        self.next_stream_id = std.math.add(
+            subscription_identity.LocalStreamId,
+            self.next_stream_id,
+            1,
+        ) catch 0;
 
         // attach 응답에 **현재 full metadata**를 함께 싣는다. response 뒤 snapshot만 온다는 기존 client 순서를 깨지 않으면서,
         // 재접속 GUI가 새 OSC를 기다리지 않고 cwd/title/SSH/agent 정보를 첫 frame 전에 복구한다. observation 실패는 화면
@@ -872,7 +937,11 @@ pub const Connection = struct {
         const p = params orelse return self.replyError(request_id, .invalid_request);
         const stream = intFieldU64(p, "stream_id") orelse return self.replyError(request_id, .invalid_request);
         const sub = self.attachments.get(stream) orelse return self.replyError(request_id, .invalid_request);
-        _ = self.registry.detach(sub.runtime_id, stream) catch {};
+        _ = self.registry.detachSubscription(sub.runtime_id, sub.subscription_id) catch {};
+        if (self.subscription_identity) |identity| _ = identity.table.revoke(.{
+            .connection = identity.connection,
+            .stream_id = stream,
+        }) catch {};
         if (sub.base) |b| self.allocator.free(b); // 이 stream의 delta base 해제.
         if (sub.observation_base) |b| self.allocator.free(b);
         _ = self.attachments.remove(stream);
@@ -899,8 +968,9 @@ pub const Connection = struct {
     fn dispatchCoreCommand(self: *Connection, request_id: u64, params: ?std.json.ObjectMap) HandleError!Action {
         const p = params orelse return self.replyError(request_id, .invalid_request);
         const stream = intFieldU64(p, "stream_id") orelse return self.replyError(request_id, .invalid_request);
-        const runtime_id = (self.attachments.get(stream) orelse return self.replyError(request_id, .invalid_request)).runtime_id;
-        if (!reg.Capability.has(self.registry.capabilitiesOf(runtime_id, stream), reg.Capability.input))
+        const sub = self.attachments.get(stream) orelse return self.replyError(request_id, .invalid_request);
+        const runtime_id = sub.runtime_id;
+        if (!reg.Capability.has(self.registry.capabilitiesOfSubscription(runtime_id, sub.subscription_id), reg.Capability.input))
             return self.replyError(request_id, .unauthorized);
         const command = core_command_wire.decodeParams(p) orelse return self.replyError(request_id, .invalid_request);
         if (self.runtime_ops) |ops| {
@@ -917,7 +987,13 @@ pub const Connection = struct {
     fn dispatchReportMouse(self: *Connection, request_id: u64, params: ?std.json.ObjectMap) HandleError!Action {
         const p = params orelse return self.replyError(request_id, .invalid_request);
         const stream = intFieldU64(p, "stream_id") orelse return self.replyError(request_id, .invalid_request);
-        const runtime_id = (self.attachments.get(stream) orelse return self.replyError(request_id, .invalid_request)).runtime_id;
+        const sub = self.attachments.get(stream) orelse return self.replyError(request_id, .invalid_request);
+        const runtime_id = sub.runtime_id;
+        if (!reg.Capability.has(
+            self.registry.capabilitiesOfSubscription(runtime_id, sub.subscription_id),
+            reg.Capability.input,
+        ))
+            return self.replyError(request_id, .unauthorized);
         const report = MouseReport{
             .button = @intCast(@min(intFieldU64(p, "button") orelse 0, std.math.maxInt(u8))),
             .col = @intCast(@min(intFieldU64(p, "col") orelse 0, std.math.maxInt(u16))),
@@ -967,7 +1043,7 @@ pub const Connection = struct {
         const runtime_id = sub.runtime_id;
         // 이 RPC는 host 상태를 **소비**한다(가져가면 write 버퍼가 비워진다). observer 모드 attachment가 controller의
         // 클립보드를 가로채지 못하도록 core_command와 같은 경계에서 input capability를 확인한다.
-        if (!reg.Capability.has(self.registry.capabilitiesOf(runtime_id, stream), reg.Capability.input))
+        if (!reg.Capability.has(self.registry.capabilitiesOfSubscription(runtime_id, sub.subscription_id), reg.Capability.input))
             return self.replyError(request_id, .unauthorized);
         const body = if (self.runtime_ops) |ops|
             ops.clipboard_write(ops.ctx, runtime_id, self.allocator) catch return self.replyError(request_id, .internal)
@@ -1043,9 +1119,10 @@ pub const Connection = struct {
         const cols = intField(p, "cols") orelse return self.replyError(request_id, .invalid_request);
         const rows = intField(p, "rows") orelse return self.replyError(request_id, .invalid_request);
         const seq = intFieldU64(p, "client_sequence") orelse 0;
-        const runtime_id = (self.attachments.get(stream) orelse return self.replyError(request_id, .invalid_request)).runtime_id;
+        const sub = self.attachments.get(stream) orelse return self.replyError(request_id, .invalid_request);
+        const runtime_id = sub.runtime_id;
 
-        const outcome = self.registry.resize(runtime_id, stream, cols, rows, seq) catch |e| switch (e) {
+        const outcome = self.registry.resizeSubscription(runtime_id, sub.subscription_id, cols, rows, seq) catch |e| switch (e) {
             error.NotController => return self.replyError(request_id, .unauthorized),
             error.RuntimeNotFound => return self.replyError(request_id, .runtime_not_found),
             else => return self.replyError(request_id, .internal),
@@ -1080,8 +1157,9 @@ pub const Connection = struct {
     /// detach 직후 도착한 stray input은 benign race라 연결을 끊지 않는다).
     fn routeInput(self: *Connection, frame: framing.Frame) HandleError!Action {
         const stream = frame.header.stream_id;
-        const runtime_id = (self.attachments.get(stream) orelse return .none).runtime_id;
-        if (!reg.Capability.has(self.registry.capabilitiesOf(runtime_id, stream), reg.Capability.input)) return .none;
+        const sub = self.attachments.get(stream) orelse return .none;
+        const runtime_id = sub.runtime_id;
+        if (!reg.Capability.has(self.registry.capabilitiesOfSubscription(runtime_id, sub.subscription_id), reg.Capability.input)) return .none;
         const ops = self.runtime_ops orelse return .none;
         ops.write_input(ops.ctx, runtime_id, frame.payload) catch {
             // controller bytes는 ACK 없는 ownership transfer다. host queue admission 실패 뒤 연결을 usable로
@@ -1098,8 +1176,9 @@ pub const Connection = struct {
     fn routeScrollToBottom(self: *Connection, frame: framing.Frame) HandleError!Action {
         if (frame.payload.len != 0) return .none;
         const stream = frame.header.stream_id;
-        const runtime_id = (self.attachments.get(stream) orelse return .none).runtime_id;
-        if (!reg.Capability.has(self.registry.capabilitiesOf(runtime_id, stream), reg.Capability.input)) return .none;
+        const sub = self.attachments.get(stream) orelse return .none;
+        const runtime_id = sub.runtime_id;
+        if (!reg.Capability.has(self.registry.capabilitiesOfSubscription(runtime_id, sub.subscription_id), reg.Capability.input)) return .none;
         const ops = self.runtime_ops orelse return .none;
         ops.core_command(ops.ctx, runtime_id, .scroll_to_bottom) catch {
             self.state = .closed;
@@ -1113,8 +1192,9 @@ pub const Connection = struct {
     /// 의미가 불명확하므로 fail-closed하며, detach 직후의 미attach/권한 없는 stream은 input과 같이 benign drop한다.
     fn routeCoreCommandFrame(self: *Connection, frame: framing.Frame) HandleError!Action {
         const stream = frame.header.stream_id;
-        const runtime_id = (self.attachments.get(stream) orelse return .none).runtime_id;
-        if (!reg.Capability.has(self.registry.capabilitiesOf(runtime_id, stream), reg.Capability.input)) return .none;
+        const sub = self.attachments.get(stream) orelse return .none;
+        const runtime_id = sub.runtime_id;
+        if (!reg.Capability.has(self.registry.capabilitiesOfSubscription(runtime_id, sub.subscription_id), reg.Capability.input)) return .none;
         const ops = self.runtime_ops orelse return .none;
 
         var parsed = std.json.parseFromSlice(std.json.Value, self.allocator, frame.payload, .{}) catch {
@@ -2837,6 +2917,91 @@ test "server: runtime.resync makes collectDeltas push a fresh snapshot_chunk, no
         defer if (r.frame) |f| f.deinit(allocator);
         try testing.expect(std.mem.indexOf(u8, r.frame.?.payload, "invalid_request") != null);
     }
+}
+
+test "server: product connections isolate same local stream through global subscription authority" {
+    const allocator = testing.allocator;
+    var registry = reg.TerminalRuntimeRegistry.init(allocator);
+    defer registry.deinit();
+    _ = try registry.register(0xAA, 80, 24);
+    var identities = subscription_identity.Table.init(allocator);
+    defer identities.deinit();
+    var fake: FakeRuntimeOps = .{};
+
+    var controller = Connection.initProduct(
+        allocator,
+        1,
+        &registry,
+        .{ .monotonic_id = 1, .slot_generation = 1 },
+        &identities,
+    );
+    var observer = Connection.initProduct(
+        allocator,
+        1,
+        &registry,
+        .{ .monotonic_id = 2, .slot_generation = 1 },
+        &identities,
+    );
+    controller.runtime_ops = fake.ops();
+    observer.runtime_ops = fake.ops();
+    inline for (&.{ &controller, &observer }) |conn| {
+        const hello = try feedJson(conn, .hello, 1, "{\"protocol_min\":2,\"protocol_max\":2}");
+        if (hello.frame) |frame| frame.deinit(allocator);
+        const frames = try feedExpectFrames(
+            conn,
+            .request,
+            2,
+            "{\"method\":\"runtime.attach\",\"params\":{\"runtime_id\":\"aa\",\"mode\":\"controller\"}}",
+        );
+        defer {
+            for (frames) |frame| frame.deinit(allocator);
+            allocator.free(frames);
+        }
+    }
+
+    try testing.expect(controller.attachments.contains(1));
+    try testing.expect(observer.attachments.contains(1));
+    const controller_sub = controller.attachments.get(1).?.subscription_id;
+    const observer_sub = observer.attachments.get(1).?.subscription_id;
+    try testing.expect(!std.meta.eql(controller_sub, observer_sub));
+    try testing.expect(reg.Capability.has(
+        registry.capabilitiesOfSubscription(0xAA, controller_sub),
+        reg.Capability.input,
+    ));
+    try testing.expect(!reg.Capability.has(
+        registry.capabilitiesOfSubscription(0xAA, observer_sub),
+        reg.Capability.input,
+    ));
+
+    const input = try feedStream(&observer, .input_bytes, 1, "blocked");
+    try testing.expectEqualStrings("none", input.action);
+    try testing.expectEqual(@as(usize, 0), fake.last_input_len);
+    const resize = try feedJson(
+        &observer,
+        .request,
+        3,
+        "{\"method\":\"runtime.resize\",\"params\":{\"stream_id\":1,\"cols\":90,\"rows\":30,\"client_sequence\":1}}",
+    );
+    defer if (resize.frame) |frame| frame.deinit(allocator);
+    try testing.expect(std.mem.indexOf(u8, resize.frame.?.payload, "unauthorized") != null);
+    const mouse = try feedJson(
+        &observer,
+        .request,
+        4,
+        "{\"method\":\"runtime.report_mouse\",\"params\":{\"stream_id\":1,\"button\":0,\"col\":1,\"row\":1,\"pressed\":true}}",
+    );
+    defer if (mouse.frame) |frame| frame.deinit(allocator);
+    try testing.expect(std.mem.indexOf(u8, mouse.frame.?.payload, "unauthorized") != null);
+    try testing.expect(fake.last_mouse_report == null);
+
+    observer.deinit();
+    try testing.expectEqual(@as(usize, 1), identities.count());
+    try testing.expect(reg.Capability.has(
+        registry.capabilitiesOfSubscription(0xAA, controller_sub),
+        reg.Capability.input,
+    ));
+    controller.deinit();
+    try testing.expectEqual(@as(usize, 0), identities.count());
 }
 
 test "server: runtime.core_command validates and routes bounded commands to controller RuntimeOps" {

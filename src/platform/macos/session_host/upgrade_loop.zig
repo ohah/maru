@@ -35,8 +35,8 @@ pub fn processCompleted(
     server: *socket_server.SocketServer,
     ctx: Context,
 ) Outcome {
-    const attempt_id = server.takeCompletedUpgradeAttempt() orelse
-        return .idle;
+    const maybe_attempt = server.takeCompletedUpgradeAttempt() catch return .fail_stop;
+    const attempt_id = maybe_attempt orelse return .idle;
     const layout = upgrade_product.findAvailableLayout(40) orelse {
         // Marker를 받은 attempt는 armed다. Layout resource failure도
         // beginExecution을 한 번 소비해 terminal ledger로 끝낸다.

@@ -1856,9 +1856,9 @@ test "runtime manager: U2 quiesce refuses attached runtimes without pausing thei
     const ops = mgr.runtimeOps();
     const rid = try ops.spawn(ops.ctx, .{ .argv = &.{"/bin/cat"}, .cwd = null, .cols = 24, .rows = 6 });
     defer ops.terminate(ops.ctx, rid);
-    _ = try host_registry.attach(rid, 99, .observer);
+    _ = try host_registry.attachSubscription(rid, .{ .value = 99 }, .observer);
     try std.testing.expectError(error.Attached, mgr.requestUpgradeQuiesce());
-    _ = try host_registry.detach(rid, 99);
+    _ = try host_registry.detachSubscription(rid, .{ .value = 99 });
 
     try ops.write_input(ops.ctx, rid, "still-live\n");
 }

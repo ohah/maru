@@ -21,6 +21,8 @@ const framing = @import("framing.zig");
 const reg = @import("registry.zig");
 const server_mod = @import("server.zig");
 const upgrade = @import("upgrade_coordinator.zig");
+const connection_slot = @import("connection_slot.zig");
+const subscription_identity = @import("subscription_identity.zig");
 
 /// peer 프로세스의 effective uid/gid(§11 LOCAL_PEERCRED(macOS·xucred)/SO_PEERCRED(Linux)를 libc가 래핑). std.c
 /// 미노출이라 직접 extern. session-host는 uid만 쓴다(same-UID 게이트).
@@ -77,6 +79,8 @@ pub const SocketServer = struct {
     active_connections: usize = 0,
     /// write 성공 이후에만 set된다. `serveConnection`의 defer가 fd/active count를 정리한 뒤 daemon이 take한다.
     completed_upgrade_attempt: ?u128 = null,
+    connection_keys: connection_slot.KeyAllocator = .{},
+    subscriptions: subscription_identity.Table,
 
     pub const backlog: c_uint = 16;
 
@@ -132,10 +136,13 @@ pub const SocketServer = struct {
             .allocator = allocator,
             .host_id = host_id,
             .registry = registry,
+            .subscriptions = subscription_identity.Table.init(allocator),
         };
     }
 
     pub fn deinit(self: *SocketServer) void {
+        std.debug.assert(self.active_connections == 0);
+        self.subscriptions.deinit();
         _ = c.close(self.listen_fd);
         _ = c.unlink(self.socket_path.ptr);
         self.allocator.free(self.socket_path);
@@ -203,7 +210,14 @@ pub const SocketServer = struct {
         defer self.active_connections -= 1;
         var parser = framing.FrameParser.init(self.allocator);
         defer parser.deinit();
-        var conn = server_mod.Connection.init(self.allocator, self.host_id, self.registry);
+        const connection_key = self.connection_keys.allocate(1) catch return;
+        var conn = server_mod.Connection.initProduct(
+            self.allocator,
+            self.host_id,
+            self.registry,
+            connection_key,
+            &self.subscriptions,
+        );
         defer conn.deinit(); // 연결 종료 시 이 connection의 attach subscription을 모두 detach한다(runtime은 유지, §9).
         conn.runtime_ops = self.runtime_ops; // host면 spawn/terminate/input/resize/delta 위임, read-only면 null(unauthorized).
         conn.upgrade_ops = self.upgrade_ops;
@@ -285,9 +299,14 @@ pub const SocketServer = struct {
         }
     }
 
-    pub fn takeCompletedUpgradeAttempt(self: *SocketServer) ?u128 {
-        std.debug.assert(self.active_connections == 0);
-        const attempt = self.completed_upgrade_attempt;
+    pub fn takeCompletedUpgradeAttempt(
+        self: *SocketServer,
+    ) error{UpgradeInvariantFailed}!?u128 {
+        const attempt = self.completed_upgrade_attempt orelse return null;
+        if (self.active_connections != 0 or
+            self.subscriptions.count() != 0 or
+            self.registry.attachmentCount() != 0)
+            return error.UpgradeInvariantFailed;
         self.completed_upgrade_attempt = null;
         return attempt;
     }
@@ -528,8 +547,10 @@ test "socket server: accepted upgrade arms exact attempt only after full reply a
         .allocator = testing.allocator,
         .host_id = 0xAABB,
         .registry = &registry,
+        .subscriptions = subscription_identity.Table.init(testing.allocator),
         .host_status = .{ .manifest_capable = true, .upgrade_capable = true },
     };
+    defer server.subscriptions.deinit();
     defer testing.allocator.free(server.socket_path);
     var gate = upgrade.AdmissionGate.init(testing.io);
     server.admission_gate = &gate;
@@ -559,8 +580,21 @@ test "socket server: accepted upgrade arms exact attempt only after full reply a
     try testing.expectEqual(@as(usize, 1), owner.stage_in_flight);
     try testing.expectEqual(@as(usize, 0), server.active_connections);
     try testing.expectEqual(@as(usize, 1), owner.arm_count);
-    try testing.expectEqual(attempt_id, server.takeCompletedUpgradeAttempt().?);
-    try testing.expect(server.takeCompletedUpgradeAttempt() == null);
+    try testing.expectEqual(attempt_id, (try server.takeCompletedUpgradeAttempt()).?);
+    try testing.expect((try server.takeCompletedUpgradeAttempt()) == null);
+    _ = try server.subscriptions.register(.{
+        .connection = .{ .monotonic_id = 99, .slot_generation = 1 },
+        .stream_id = 1,
+    }, 1);
+    try testing.expect((try server.takeCompletedUpgradeAttempt()) == null);
+    server.completed_upgrade_attempt = 123;
+    try testing.expectError(error.UpgradeInvariantFailed, server.takeCompletedUpgradeAttempt());
+    try testing.expectEqual(@as(?u128, 123), server.completed_upgrade_attempt);
+    _ = try server.subscriptions.revoke(.{
+        .connection = .{ .monotonic_id = 99, .slot_generation = 1 },
+        .stream_id = 1,
+    });
+    server.completed_upgrade_attempt = null;
 }
 
 test "socket server: failed accepted reply leaves staged attempt unarmed and unexecutable" {
@@ -577,8 +611,10 @@ test "socket server: failed accepted reply leaves staged attempt unarmed and une
         .allocator = testing.allocator,
         .host_id = 0xAABB,
         .registry = &registry,
+        .subscriptions = subscription_identity.Table.init(testing.allocator),
         .host_status = .{ .manifest_capable = true, .upgrade_capable = true },
     };
+    defer server.subscriptions.deinit();
     defer testing.allocator.free(server.socket_path);
     var gate = upgrade.AdmissionGate.init(testing.io);
     server.admission_gate = &gate;
@@ -610,7 +646,7 @@ test "socket server: failed accepted reply leaves staged attempt unarmed and une
     try testing.expect(owner.armed_attempt == null);
     try testing.expectEqual(@as(usize, 0), owner.arm_count);
     try testing.expectEqual(@as(usize, 0), server.active_connections);
-    try testing.expect(server.takeCompletedUpgradeAttempt() == null);
+    try testing.expect((try server.takeCompletedUpgradeAttempt()) == null);
 }
 
 test "socket server: real unix socket connect → hello → host.info roundtrip with peer-cred and 0600" {

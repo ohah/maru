@@ -14,13 +14,15 @@
 //!     `resize_generation`을 올리고 `runtime.resized`를 broadcast한다. client가 0명이어도 마지막 검증 크기를 유지한다.
 
 const std = @import("std");
+const subscription_identity = @import("subscription_identity.zig");
 
 /// runtime 하나를 가리키는 opaque 128-bit 상관키(§4). wire는 big-endian 16바이트지만 registry 내부는 비교·해시가
 /// 쉬운 u128로 다룬다(server가 wire ↔ u128 변환). 의미를 비트에 인코딩하지 않고 재사용하지 않는다.
 pub const RuntimeId = u128;
 
-/// connection 안의 한 attach subscription. MRSH `stream_id`와 같은 값이다.
-pub const StreamId = u64;
+/// Registry 내부의 daemon-global subscription scalar. Wire-local stream id를 이 타입에 직접 전달하지 못하게 public
+/// product API는 `subscription_identity.SubscriptionId`만 받고, 이 raw scalar API는 이 파일의 state-machine tests 전용이다.
+const StreamId = u64;
 
 /// capability 비트(§9). `is_controller` boolean 하나로 굳히지 않고 비트로 표현해 향후 여러 writable stream 같은
 /// 확장을 wire 변경 없이 수용한다. `terminate`는 attach가 부여하지 않는다(별도 경로).
@@ -42,10 +44,16 @@ pub const AttachMode = enum { observer, controller, takeover };
 /// attach 결과. `granted`는 이 subscription이 실제로 받은 capability다. `controller_busy`는 controller를 요청했으나
 /// 이미 controller가 있어 observer로 강등됐음을 뜻한다(GUI가 read-only banner 표시). `revoked_controller`는 takeover가
 /// 밀어낸 이전 controller stream으로, server가 그 stream에 revocation 이벤트를 보낸다.
-pub const AttachOutcome = struct {
+const AttachOutcome = struct {
     granted: u8,
     controller_busy: bool = false,
     revoked_controller: ?StreamId = null,
+};
+
+pub const SubscriptionAttachOutcome = struct {
+    granted: u8,
+    controller_busy: bool = false,
+    revoked_controller: ?subscription_identity.SubscriptionId = null,
 };
 
 pub const DetachOutcome = struct {
@@ -245,7 +253,7 @@ pub const TerminalRuntimeRegistry = struct {
     }
 
     /// 한 subscription을 runtime에 붙인다(§8·§9). 모드별로 controller/observer capability를 결정한다.
-    pub fn attach(self: *TerminalRuntimeRegistry, id: RuntimeId, stream: StreamId, mode: AttachMode) RegistryError!AttachOutcome {
+    fn attach(self: *TerminalRuntimeRegistry, id: RuntimeId, stream: StreamId, mode: AttachMode) RegistryError!AttachOutcome {
         const entry = self.entries.get(id) orelse return error.RuntimeNotFound;
         // observer/controller는 새 subscription이라 이미 붙어 있으면 중복이다. takeover는 이미 observer로 붙어 있던
         // stream이 controller로 **승격**하는 정상 경로(GUI가 observer로 붙었다가 명시 takeover)라 이 체크를 건너뛴다.
@@ -290,7 +298,7 @@ pub const TerminalRuntimeRegistry = struct {
     }
 
     /// subscription을 뗀다(detach/EOF/crash). controller가 끊겨도 자동 승격하지 않는다(§9). runtime은 유지된다.
-    pub fn detach(self: *TerminalRuntimeRegistry, id: RuntimeId, stream: StreamId) RegistryError!DetachOutcome {
+    fn detach(self: *TerminalRuntimeRegistry, id: RuntimeId, stream: StreamId) RegistryError!DetachOutcome {
         const entry = self.entries.get(id) orelse return error.RuntimeNotFound;
         if (entry.controller == stream) {
             entry.controller = null; // release. 자동 승격 없음.
@@ -301,7 +309,7 @@ pub const TerminalRuntimeRegistry = struct {
     }
 
     /// 이 subscription의 현재 capability를 계산한다.
-    pub fn capabilitiesOf(self: *TerminalRuntimeRegistry, id: RuntimeId, stream: StreamId) u8 {
+    fn capabilitiesOf(self: *TerminalRuntimeRegistry, id: RuntimeId, stream: StreamId) u8 {
         const entry = self.entries.get(id) orelse return 0;
         if (entry.controller == stream) return Capability.observe | Capability.input | Capability.resize;
         for (entry.observers.items) |o| if (o == stream) return Capability.observe;
@@ -310,7 +318,7 @@ pub const TerminalRuntimeRegistry = struct {
 
     /// controller가 요청한 resize를 판정한다(§9). stale sequence는 무시하고, 새 sequence면 clamp 후 크기 변화를
     /// 계산한다. 실제 크기가 바뀌면 `resize_generation`을 올린다. **실 core/PTY 적용은 server가 이 결과로 수행**한다.
-    pub fn resize(
+    fn resize(
         self: *TerminalRuntimeRegistry,
         id: RuntimeId,
         stream: StreamId,
@@ -335,6 +343,50 @@ pub const TerminalRuntimeRegistry = struct {
             entry.resize_generation += 1;
         }
         return .{ .applied = .{ .cols = new_cols, .rows = new_rows, .resize_generation = entry.resize_generation, .changed = changed } };
+    }
+
+    pub fn attachSubscription(
+        self: *TerminalRuntimeRegistry,
+        id: RuntimeId,
+        subscription: subscription_identity.SubscriptionId,
+        mode: AttachMode,
+    ) RegistryError!SubscriptionAttachOutcome {
+        const outcome = try self.attach(id, subscription.value, mode);
+        return .{
+            .granted = outcome.granted,
+            .controller_busy = outcome.controller_busy,
+            .revoked_controller = if (outcome.revoked_controller) |raw|
+                .{ .value = raw }
+            else
+                null,
+        };
+    }
+
+    pub fn detachSubscription(
+        self: *TerminalRuntimeRegistry,
+        id: RuntimeId,
+        subscription: subscription_identity.SubscriptionId,
+    ) RegistryError!DetachOutcome {
+        return self.detach(id, subscription.value);
+    }
+
+    pub fn capabilitiesOfSubscription(
+        self: *TerminalRuntimeRegistry,
+        id: RuntimeId,
+        subscription: subscription_identity.SubscriptionId,
+    ) u8 {
+        return self.capabilitiesOf(id, subscription.value);
+    }
+
+    pub fn resizeSubscription(
+        self: *TerminalRuntimeRegistry,
+        id: RuntimeId,
+        subscription: subscription_identity.SubscriptionId,
+        cols: u16,
+        rows: u16,
+        client_sequence: u64,
+    ) RegistryError!ResizeOutcome {
+        return self.resize(id, subscription.value, cols, rows, client_sequence);
     }
 
     fn appendObserver(allocator: std.mem.Allocator, entry: *RuntimeEntry, stream: StreamId) RegistryError!void {

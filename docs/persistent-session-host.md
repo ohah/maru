@@ -388,7 +388,7 @@ host crash·host 강제 종료·재부팅·전원 손실 뒤 동일 runtime 복�
 - `maru attach --workspace`는 같은 manifest parser를 사용하고 별도 workspace DB를 만들지 않는다.
 
 구체 wire와 손상/하위호환 규칙의 단일 출처는
-[Workspace Restore 전략](workspace-restore.md#영속-session-binding-wire-runtime-handle-구현-durable-tombstone-계획)이다.
+[Workspace Restore 전략](workspace-restore.md#영속-session-binding-wire-runtime-handle-구현-durable-tombstone-r1)이다.
 일반 layout은 optional scalar만으로 v1을 유지한다. 현재 parser가 첫 unknown top-level trailing line에서 성공 종료하는
 동작은 legacy 관용성이지 새 block 확장점이 아니다. 새 line kind·카운트·tree 변경이 필요해지면 여기서 정한 범위를
 벗어나므로 멈추고
@@ -561,7 +561,8 @@ cwd에서 새 셸을 시작한다. 자동 fresh spawn은 없다 — `⏎`가 유
 않는다. capture는 exact handle/state를 owned 상태에서 다시 쓰며, parse→apply→capture를 두 cycle 반복하는 자동
 fixture가 restoreSpawn/attach/probe/spawn 공통 진입점 0과 dropped 0을 고정한다. 실제 signed app process의 반복
 Quit/relaunch E2E는 별도 제품 gate로 남는다. 8의 `Recovered Sessions`,
-9의 manifest 전역 중복 검증은 여전히 P4 계획이다. 일시 실패로 분류된 누락 runtime은 종전처럼 해당 Window apply를
+9의 manifest 전역 중복 검증은 R2a core/ABI/source-order fixture까지 구현됐다. 실제 제품 process에서 기존 checkpoint
+file 무변경을 관측하는 E2E는 남아 있다. 일시 실패로 분류된 누락 runtime은 종전처럼 해당 Window apply를
 실패시키며, 추가 Window는 teardown하고 primary는 명시적인 새 default-shell fallback으로 전환한다. 이
 `restore incomplete` 실행은 종료 시 마지막 완전본을 `.bak`으로 한 번 보존한 뒤 현재 모델을 저장한다. capture/serialize/
 write 자체가 실패한 경우에만 write 0으로 이전 완전본을 유지한다.
@@ -1433,7 +1434,9 @@ controlled Claude/Codex foreground fixture를 낸 뒤 GUI observation까지 왕�
   ended Term close는 host probe/terminate 0으로 manifest slot만 제거한다. `⏎` remote spawn 실패는 사용자 명시
   승격이므로 local fallback을 허용하되, 성공하면 구 handle/state를 제거하고 live-local `not preserved`로 전이한다.
   local spawn도 실패하면 tombstone을 그대로 유지한다.
-- manifest 전체의 writable `runtime-handle` 중복을 attach/spawn 전에 검증하고, host inventory와
+- **R2a 구현 슬라이스:** manifest 전체의 writable `runtime-handle` 중복을 attach/spawn 전에 검증한다. legacy bare
+  ID가 같은 runtime ID를 full/bare owner와 공유하는 경우도 host namespace 미확정 중복으로 fail-close한다.
+- **R2b 후속:** 검증된 binding을 host inventory와
   `{bound, ended, temporarily_unavailable, orphan}`을 side effect 전에 reconcile한다.
 - GUI abnormal exit 직전 layout을 위해 `WorkspaceCheckpointCoordinator`를 구현한다. 결과는
   `committed(generation)|stale|capture_failed|write_failed`이며 background 실패는 dirty를 유지하고 bounded
@@ -1492,7 +1495,8 @@ Notification Center
 권한·로그인 UI 자동화가 준비된 전용 macOS runner가 없으면 수동 클릭으로 대체하지 않고 해당 notification gate를 미완료로
 둔다. P5 CLI나 U5 자동 migration 전체는 이 종료 gate에 포함하지 않는다.
 
-구현 순서는 L0 app-instance lease(완료) → R1 tombstone → R2 manifest validator/reconciliation →
+구현 순서는 L0 app-instance lease(완료) → R1 tombstone(완료) → R2a manifest validator(core/ABI/source-order fixture 완료,
+제품 file E2E 미완) → R2b inventory reconciliation/Recovered Sessions →
 R3 `ScreenInbox`/R4 deferred resync →
 T0 single-connection `ConnectionSlot` → C1 pure checkpoint coordinator/C2 file adapter failure injection/C3 dirty wiring/
 C4 AppKit terminate handshake → E1 event wake/E2 observation cache → parity micro-PR → N1 journal/N2 sink/N3 cold route →

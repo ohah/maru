@@ -9298,6 +9298,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         // 저장 파일을 덮어써 사용자가 보존하려던 멀티 창 레이아웃이 사라진다(데이터 손실). 플래그=persistence 자체 off.
         guard ProcessInfo.processInfo.environment["MARU_NO_WORKSPACE_RESTORE"] == nil else { return }
         var blocks = ""
+        var blockCount: Int64 = 0
         for surface in windows {
             // workspace.v1은 모든 normal Window가 한 atomic snapshot이다. 한 창이라도 캡처할 수 없으면 성공한 창만으로
             // 기존 완전본을 덮어쓰지 않는다(다음 실행에서 실패 창이 영구 삭제되는 partial checkpoint 방지).
@@ -9332,13 +9333,23 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             guard maru_macos_app_session_serialize_workspace(session, &ptr, &len, isActive, hasFrame, fx, fy, fw, fh) == Self.statusOK,
                   let bytes = ptr, len > 0 else { return } // 하나라도 실패하면 이전 전체 checkpoint 보존
             blocks += String(decoding: UnsafeBufferPointer(start: bytes, count: len), as: UTF8.self)
+            blockCount += 1
         }
         guard !blocks.isEmpty, let url = workspaceFileURL else { return }
+        let snapshot = MARU_WORKSPACE_HEADER + "\n" + blocks
+        // R2a: per-window writer만으로는 창을 가로지른 runtime-handle 중복을 볼 수 없다. 실제 publish할 전체 문자열을
+        // Zig parser/semantic validator에 다시 넣어, 어떤 파일 write/backup보다 먼저 global owner uniqueness를 확인한다.
+        // 실패하면 write 0으로 마지막 완전본을 보존한다. Swift는 binding 문법이나 창 경계를 해석하지 않는다.
+        let snapshotBytes = Array(snapshot.utf8)
+        let validatedWindowCount = snapshotBytes.withUnsafeBufferPointer { buf in
+            maru_macos_app_session_workspace_window_count(nil, buf.baseAddress, buf.count)
+        }
+        guard validatedWindowCount == blockCount else { return }
         try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
         // 이번 실행의 복원이 무언가를 버렸으면(도크 entry·explorer root·§7 묘비로 잃은 runtime handle) 덮어쓰기 전에
         // 마지막 완전본을 .bak으로 보존한다. 저장 자체는 막지 않는다(위 함수 주석의 자기영속 루프).
         if workspaceRestoreIncomplete { backupWorkspaceCheckpoint(url) }
-        try? (MARU_WORKSPACE_HEADER + "\n" + blocks).data(using: .utf8)?.write(to: url, options: .atomic)
+        try? snapshot.data(using: .utf8)?.write(to: url, options: .atomic)
     }
 
     private func shutdownAppSession(preserveWebPanelsFor summarySurface: TerminalSurface? = nil) {

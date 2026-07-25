@@ -79,6 +79,9 @@ pub const RuntimeObservation = struct {
     /// bool은 구 client 호환을 위해 계속 싣는 미러다(consumer는 mode를 우선 보고 없을 때만 bool로 폴백).
     mouse_tracking_mode: u8 = 0,
     bracketed_paste: bool,
+    /// BEL 누적 횟수(monotonic). client가 마지막에 본 값과 다르면 벨을 울린다 — core의 소비형 bool을 그대로
+    /// 실으면 full-state 관측이 true→true 전이를 잃어 둘째 벨을 놓치기 때문이다.
+    bell_count: u64 = 0,
     observer_generation: u64,
     title_generation: u32,
     cols: u16,
@@ -1913,6 +1916,7 @@ const FakeRuntimeOps = struct {
             .mouse_tracking = false,
             .mouse_tracking_mode = 0,
             .bracketed_paste = false,
+            .bell_count = 0,
             .observer_generation = 7,
             .title_generation = 3,
             .cols = 80,

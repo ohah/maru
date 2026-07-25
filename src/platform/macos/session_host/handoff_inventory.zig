@@ -668,8 +668,9 @@ pub const runtime_manager_groups = [_]Group{
             "backend_impl",
             "host_registry",
             "foreground_cache",
+            "bell_counts",
         },
-        .why = "the self-referential manager graph is rebuilt in place from serialized host and runtime records",
+        .why = "the self-referential manager graph is rebuilt in place from serialized host and runtime records; bell counters restart at zero and clients treat a decrease as a resync rather than a bell",
     },
 };
 

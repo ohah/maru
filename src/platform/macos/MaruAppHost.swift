@@ -5701,7 +5701,15 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         let status = bytes.withUnsafeBufferPointer { buf in
             maru_macos_app_session_apply_workspace_window(session, buf.baseAddress, buf.count, index)
         }
-        return status == Self.statusOK
+        guard status == Self.statusOK else { return false }
+        // 복원은 손상된 파일 패널 entry·그 결과로 비워진 dock 그룹·접근 불가 explorer root를 **버리면서도 성공을
+        // 반환**한다. 그 사실을 모르면 다음 Quit의 자동 checkpoint가 버려진 상태를 파일에 커밋해 사용자가 도크 배치와
+        // explorer root를 영구히 잃는다. apply가 성공했어도 버린 것이 있으면 이번 실행의 저장을 막아 마지막 완전본을
+        // 보존한다(v144, saveWorkspace의 guard와 같은 래치). 창마다 호출되므로 drain은 창별로 판정된다.
+        if maru_macos_app_session_take_workspace_restore_dropped(session) != 0 {
+            workspaceRestoreIncomplete = true
+        }
+        return true
     }
 
     /// (M3f) 저장된 workspace에서 window_index 창의 frame(전역 스크린 좌표)을 읽어, 화면 안이면 그대로·아니면 main

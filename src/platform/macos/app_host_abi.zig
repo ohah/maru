@@ -1111,6 +1111,13 @@ pub export fn maru_macos_app_session_take_file_tree_restore_surface_action(sessi
     return app_session.takeFileTreeRestoreSurfaceAction() orelse 0;
 }
 
+/// 마지막 `apply_workspace_window`가 조용히 버린 항목 수를 소비한다(읽고 0으로 리셋). 0이 아니면 복원된 모델이 저장
+/// 파일을 표현하지 못한다는 뜻이라 Swift가 이번 실행의 checkpoint를 막아 마지막 완전본을 보존한다. null 세션은 0.
+pub export fn maru_macos_app_session_take_workspace_restore_dropped(session: ?*AppSession) u32 {
+    const app_session = session orelse return 0;
+    return app_session.takeWorkspaceRestoreDropped();
+}
+
 pub export fn maru_macos_app_session_take_file_panel_mode_action(session: ?*AppSession, surface_id_out: ?*u64) i32 {
     const app_session = session orelse return -1;
     const out = surface_id_out orelse return -1;
@@ -5447,6 +5454,7 @@ test "macOS app exported session API reports null outputs as ABI errors" {
     try std.testing.expectEqual(@as(u32, 0), maru_macos_app_session_take_workspace_focus_action(null));
     try std.testing.expectEqual(@as(u32, 0), maru_macos_app_session_take_file_tree_focus_action(null));
     try std.testing.expectEqual(@as(u64, 0), maru_macos_app_session_take_file_tree_restore_surface_action(null));
+    try std.testing.expectEqual(@as(u32, 0), maru_macos_app_session_take_workspace_restore_dropped(null)); // v144
     var save_request_id: u64 = 99;
     try std.testing.expectEqual(@as(u64, 0), maru_macos_app_session_take_file_panel_save_close_action(null, &save_request_id));
     var dirty_request_id: u64 = 99;

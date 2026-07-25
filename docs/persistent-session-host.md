@@ -39,9 +39,11 @@ control-plane, PTY 종료 정책과 책임이 겹치지 않도록 소유권·ID�
 > focus report와 설정·prompt core command는 host reader까지 전달되고, 일반 key의 DECCKM/DECKPAM/kitty keyboard 인코딩은
 > runtime observation override로 host 모드대로 인코딩된다(P3-e4c-4). 단 선택 autoscroll·Reset/Clear 등 input-mode/command
 > parity 전체가 완료됐다는 뜻은 아니다.
-> `keep-alive-after-quit` 토글은 **설정 GUI(workspace 섹션)에도 노출**된다. 기본값은 아직 `false`(opt-in)다:
-> quick persistence(현재 quick은 명시적으로 in-process), incremental checkpoint, ended placeholder, 외부 `maru attach` CLI, 다중 app **process**(현재 daemon
-> serial), mouse/resize/observation RPC와 delta push의 완전한 async bounded socket event-loop 통합, GUI 부재 시 OS 배너, **host-backed echo 지연 제거(이벤트 기반
+> `keep-alive-after-quit` 토글은 **설정 GUI(workspace 섹션)에도 노출**된다. 기본값은 아직 `false`(opt-in)다.
+> 영구 부재 runtime의 per-Term 종료 placeholder와 `⏎` 제자리 재생성은 구현됐지만, placeholder를 다시 저장한 뒤 두 번째
+> 재실행에서도 자동 셸을 만들지 않는 **durable tombstone wire는 미구현**이다. incremental checkpoint, 외부
+> `maru attach` CLI, 다중 app **process**(현재 daemon serial), mouse/resize/observation RPC와 delta push의 완전한 async bounded
+> socket event-loop 통합, GUI 부재 시 OS 배너, **host-backed echo 지연 제거(이벤트 기반
 > push — §perf, 백로그)**, **기본값 `true` 전환** 등은 **후속/백로그**다. 이 문서는 그 목표 상태를 함께 기술한다 — **구현 완료
 > 여부는 각 절의 "구현 상태" 표식으로 구분한다**(표식 없는 서술은 목표 설계).
 
@@ -125,7 +127,7 @@ flowchart TD
   CLI["maru attach CLI client"] -->|"local Unix socket"| HOST
   SSH["ssh host maru attach"] -->|"host-local Unix socket"| HOST
   GUI --> LAYOUT["Window Workspace Pane Term layout"]
-  LAYOUT --> MANIFEST["crash-safe workspace manifest"]
+  LAYOUT --> MANIFEST["GUI-process-crash-consistent workspace checkpoint"]
   MANIFEST -->|"runtime_handle binding"| HOST
   HOST --> REG["TerminalRuntimeRegistry"]
   REG --> RT["TerminalRuntime"]
@@ -177,16 +179,18 @@ PTY raw bytes만 host가 보관하고 새 GUI가 처음부터 replay하는 방�
 | 축 | 어디 | 왜 |
 |---|---|---|
 | 터미널 상태·콘텐츠 **해석** | **host** | 화면·스크롤백·cwd·입력 모드의 실물을 host가 소유한다. client가 추측하면 placeholder를 읽거나 stale이 된다 |
-| OS capability **실행** | **client** | 클립보드·데스크톱 알림·브라우저 열기·소리는 GUI가 붙은 머신의 자원이다. host는 데몬이라 접근 대상이 없다(원격이면 더 명확) |
+| OS capability **실행** | **signed platform adapter** | 클립보드·브라우저 열기·소리는 GUI-live client가 실행한다. host-backed 알림만 예외로, GUI-live는 client fast path를 쓰고 GUI 0은 signed daemon process 내부 adapter가 같은 로컬 macOS 자원에 게시한다. 원격 host는 로컬 OS capability를 실행하지 않는다 |
 | config **정책** | **client** | 정책은 client config이고, [다중 client](#9-다중-client와-resize)가 한 host에 붙으면 각자 달라야 한다 |
 
-그래서 전형적인 형태는 **"host가 사실을 전달하고, client가 정책을 적용해 실행한다"**이다. 이미 그 형태인 것들:
+그래서 전형적인 형태는 **"host가 사실을 전달하고, GUI-live client가 정책을 적용해 실행한다"**이다. 유일한 P4 예외인
+GUI 0 host-backed 알림은 host가 bounded journal과 stable route를 소유하고 daemon 내부 platform adapter가 게시한다.
+이미 구현된 GUI-live 형태와 계획된 예외는 다음과 같다.
 
 | 기능 | 해석 | 실행 | 정책 |
 |---|---|---|---|
 | 선택 복사 | host `extractSelection`(soft-wrap·스크롤백) | client NSPasteboard | — |
 | Find | host `findMatches` | client 하이라이트 렌더 | client(검색어) |
-| OSC 9/777 알림 | host 파싱 | client UNUserNotificationCenter | client |
+| OSC 9/777 알림 | host 파싱·stable event journal(P4) | GUI-live client fast path / GUI 0 daemon-internal macOS adapter(P4) | app-global notification config snapshot(P4) |
 | 링크 | host span·추출·존재 stat | client 열기(NSWorkspace) | client(`input.link-detection`) |
 | 스크롤·스크롤바 | host view·스크롤백 | client 렌더 | — |
 
@@ -249,11 +253,11 @@ PTY raw bytes만 host가 보관하고 새 GUI가 처음부터 replay하는 방�
 | `runtime_id` | session host | terminal runtime 생성부터 종료까지 | 동일 PTY/process를 찾는 opaque 128-bit random ID |
 | `runtime_handle` | manifest | `{host_id, runtime_id}` | Workspace Term 슬롯과 live runtime 연결 |
 | `surface_id + generation` | GUI/AppRuntime | GUI app instance와 surface 수명 | 렌더/input/control-plane 라우팅 |
-| `workspace_binding_id` | workspace manifest | workspace 생성부터 명시 삭제까지 | 여러 client가 같은 workspace 배치를 찾는 opaque ID |
+| `runtime_state` (계획) | workspace manifest | 저장된 Term 슬롯 수명 | `live`/`ended`를 구분해 묘비의 자동 재생성을 막는 additive scalar |
 
 불변식:
 
-- `runtime_id`와 `workspace_binding_id`는 의미를 비트에 인코딩하지 않고 재사용하지 않는다.
+- `runtime_id`는 의미를 비트에 인코딩하지 않고 재사용하지 않는다.
 - canonical terminal 연결키는 Maru `runtime_id` 하나다. tmux `$session/@window/%pane` ID를 보조키나 fallback으로
   저장하지 않는다.
 - 기존 GUI 모델의 `DockGroup.runtime_id`는 파일 도크의 process-local group key일 뿐 terminal 연결 ID가 아니다.
@@ -282,7 +286,7 @@ tmux의 session/window/pane 계층으로 Maru workspace를 번역하지 않는�
 
 ```text
 Window 1
-  Workspace A [workspace_binding_id=W-A]
+  Workspace A
     Pane left
       Term shell  -> {host=H1, runtime=R101}
       Term claude -> {host=H1, runtime=R102}
@@ -290,7 +294,7 @@ Window 1
       Term dev    -> {host=H1, runtime=R103}
 
 Window 2
-  Workspace B [workspace_binding_id=W-B]
+  Workspace B
     Pane only
       Term codex  -> {host=H1, runtime=R201}
 ```
@@ -300,26 +304,30 @@ Window 2
 
 현재 `maru.workspace.v1`에서 `Window`는 OS 창, `Tab`은 Workspace, `Pane`과 `Surface`는 각각 split leaf와 Term이다.
 별도 session DB나 창별 workspace 파일을 만들지 않고 기존 단일
-`~/Library/Application Support/maru/workspace.v1` 파일을 그대로 공유한다. 일반 Window/Workspace는 다음 두 binding
-scalar를 추가한다.
+`~/Library/Application Support/maru/workspace.v1` 파일을 그대로 공유한다. 일반 Window/Workspace는 기존
+`runtime-handle`과 계획된 `runtime-state` scalar로 Term 슬롯을 연결한다.
 
 ```text
-tab ... workspace-binding-id="<32 lowercase hex>"
-surface ... runtime-handle="<32 lowercase host-id>:<32 lowercase runtime-id>"
+surface ... runtime-handle="<32 lowercase host-id>:<32 lowercase runtime-id>" runtime-state="ended"
 ```
 
-- 두 ID는 각각 128-bit opaque random 값의 canonical lowercase hex다. `runtime-handle`의 두 부분은 모두 있어야 하는 단일
+- `runtime-handle`의 두 ID는 각각 128-bit opaque random 값의 canonical lowercase hex다. 두 부분은 모두 있어야 하는 단일
   quoted scalar라 partial handle을 표현하지 않는다.
-- `workspace-binding-id`는 `Tab` 생성 때 한 번 발급하고 같은 Workspace를 창 사이로 이동해도 유지한다. Workspace 복제는
-  새 ID를 발급하며 writable runtime handle을 복제하지 않는다.
-- persistent terminal surface만 `runtime-handle`을 쓴다. in-process/옛 파일 surface는 키가 없으며 선언적 restore 규칙으로
-  새 runtime을 만들거나 placeholder를 표시한다.
-- 기존 reader는 두 미지 scalar를 무시하고, 새 reader는 키 부재를 legacy/default로 읽으므로 header는
+- persistent terminal surface와 종료 placeholder만 `runtime-handle`을 쓴다. `runtime-state="ended"`면 그 handle은
+  재attach 대상이 아니라 마지막 runtime의 상관키다. 새 reader는 host를 probe하거나 셸을 자동 spawn하지 않고 묘비를 만든다.
+  사용자가 `⏎`를 눌러 새 runtime 생성에 성공한 때만 `runtime-state`와 구 handle을 새 live handle로 교체한다.
+- in-process/옛 파일 surface는 두 키가 없으며 선언적 restore 규칙으로 새 runtime을 만든다.
+- 기존 reader는 미지 `runtime-state` scalar를 무시하고, 새 reader는 키 부재를 `live`로 읽으므로 header는
   `maru.workspace.v1`을 유지한다. 값이 있는데 길이·hex·구분자가 깨졌으면 기존 optional-scalar 손상 규칙대로 checkpoint
   전체를 거부한다.
-- writer는 publish 전에 workspace ID 전역 유일성과 writable `runtime-handle` 전역 유일성을 검증한다. 중복이면 파일을
+- `runtime-state="ended"`는 정확한 `runtime-handle`과 함께 있을 때만 유효하다. `ended`인데 handle이 없거나 알 수 없는
+  state면 checkpoint 전체를 거부한다. `live`는 키를 생략한다.
+- writer는 publish 전에 writable `runtime-handle` 전역 유일성을 검증한다. 중복이면 파일을
   덮어쓰지 않고 마지막 완전본과 live layout을 유지한다. reader도 attach/spawn 전에 같은 검증을 끝내 side effect가 일부만
   일어나지 않게 한다.
+- `workspace-binding-id`는 현재 소비자가 없어 default-on 선결에서 제외한다. workspace-aware 다중 app client가 실제로
+  필요해질 때 별도 wire/수명 계약으로 다시 제안한다. 일반 멀티윈도우·cross-window 이동은 기존 live Tab identity와 전체
+  manifest transaction만 사용한다.
 - runtime handle은 연결 위치이지 권한이 아니다. 파일을 읽었다는 사실만으로 attach/input/output 권한을 주지 않는다.
 
 ### 멀티윈도우와 동시 client 규칙
@@ -331,68 +339,58 @@ surface ... runtime-handle="<32 lowercase host-id>:<32 lowercase runtime-id>"
   이후 창은 재사용; 창 close는 그 창의 원격 Term만 회수하고 공유 backend는 안 닫는다 — `routing`/`live_registry`와 동일).
   창별로 연결하던 초기 배선은 두 번째 창이 handshake 타임아웃→in-process 폴백하는 버그였다(전역화로 해소). **단 현재 daemon은
   serial serve**(한 connection을 그 client 수명 내내 처리)라, 아래 "두 GUI **process** 동시 실행"은 아직 미지원이다 — 두 번째
-  app process는 handshake 타임아웃 후 notice를 예약하고 in-process로 폴백한다(아래 writer lease·read-only attach는 concurrent multi-client
-  daemon이 붙는 후속에서). 그래서 keep-alive opt-in 단계의 **지원 구성은 단일 app instance**(창/Workspace는 몇 개든 무방)다.
+  app process는 handshake 타임아웃 후 notice를 예약하고 in-process로 폴백한다. 그래서 keep-alive opt-in 단계의
+  **지원 구성은 단일 app instance**(창/Workspace는 몇 개든 무방)다.
 - Window를 닫거나 Workspace/Term을 다른 Window로 옮기는 것은 먼저 하나의 layout transaction으로 source/target을 검증한
-  뒤 manifest 위치만 바꾼다. 성공한 이동은 `workspace-binding-id`, `runtime-handle`, child pid, scrollback을 바꾸지 않는다.
+  뒤 manifest 위치만 바꾼다. 성공한 이동은 `runtime-handle`, child pid, scrollback을 바꾸지 않는다.
 - app-wide Quit은 모든 Window의 GUI subscription을 끊는 detach다. 비마지막 Window/Workspace/Term의 명시적 close는 기존
   destructive close 의미를 유지해 해당 runtime 종료 확인을 거친다. 창 하나를 닫았다는 이유로 다른 창 runtime은 건드리지 않는다.
 - 한 runtime의 **canonical owner Term은 manifest 전체에서 정확히 한 곳**이다. 같은 `runtime-handle`을 두
   Window/Workspace/Pane에 반복해 owner나 read-only mirror로 저장하지 않는다. observer는 manifest 배치가 아니라 client
   subscription이므로 CLI나 진단 UI에서 별도로 붙는다. Maru 내부 mirror UX가 실제로 필요해지면 owner의 terminate/알림 위치와
   독립 viewport를 정한 non-owning surface kind로 별도 설계하며 v1 wire를 느슨하게 중복 허용해 대신하지 않는다.
-- 정상 제품 경로는 macOS single app instance가 layout writer다. 두 GUI process가 같은 manifest를 열 수 있는 디버그/테스트
-  상황에는 `workspace-binding-id`가 아니라 manifest 파일 writer lease 하나를 둔다. lease를 못 얻은 process는 layout을
-  자동 restore·checkpoint하거나 controller를 탈취하지 않고 진단 후 read-only runtime attach만 할 수 있다.
-- CLI `maru attach`는 manifest를 수정하지 않는다. `maru attach --workspace`가 후속 구현되더라도 writer lease 없이 창/탭
-  배치를 저장하지 않는다.
+- 정상 제품 경로는 macOS single app instance가 layout writer다. 같은 process의 여러 Window는 기존 AppRuntime
+  transaction으로 한 manifest를 쓰고, process는 P4의 lifetime lease 하나를 소유한다. 두 GUI process의 동시
+  layout 편집/read-only attach는 P5 이후 별도 계약이며 지원하지 않는다.
+- CLI `maru attach`는 manifest를 수정하지 않는다. `maru attach --workspace`가 후속 구현되더라도 창/탭 배치를 저장하지 않는다.
 
 ### Quick terminal 규칙
 
 quick terminal은 main Window가 아니라 앱 전역 singleton `AppSession`이며 cross-window move/merge 대상이 아니다.
 
-> **현재 구현:** quick layout은 workspace manifest에 저장되지 않는다. 따라서 full/minimal chrome과 무관하게 quick
-> session은 명시적으로 in-process backend를 사용하고 앱 Quit 때 함께 종료한다. host-backed quick을 만들었다가 detach하면
-> 재접속할 handle 위치가 없어 orphan이 되기 때문이다. 아래 항목은 P4의 `quick-window` tail이 구현된 뒤의 목표 계약이다.
+> **확정 비목표:** quick은 session host, workspace manifest, `runtime-handle`, `Recovered Sessions`, background
+> notification cold attach, host exec upgrade의 대상이 아니다. `session.keep-alive-after-quit` 값과 무관하게 항상
+> in-process backend를 사용하고 앱 Quit 때 함께 종료한다.
 
-- 현재처럼 hide/auto-hide/Esc/toggle-off는 panel visibility와 GUI subscription만 끊는다. terminal runtime을 종료하지 않고
-  host는 마지막 검증 크기로 output·scrollback·OSC notification을 계속 처리한다.
-- 앱 전체 Quit은 quick의 모든 terminal runtime도 detach만 한다. quick 안의 Term/Workspace 명시 close 또는 shell `exit`만
-  해당 runtime을 끝낸다. `Quit and End All Sessions`는 quick runtime도 포함한다.
-- quick은 현재 정상 종료 workspace 저장에서 빠지므로 P4에서 같은 manifest의 **마지막 trailing block**으로 저장한다.
+- toggle/auto-hide는 같은 앱 process 안의 quick session만 숨기며 runtime을 유지한다. Esc는 vim 등 terminal
+  입력과 충돌하므로 hide shortcut으로 가로채지 않는다.
+- 앱 Quit은 quick runtime을 종료한다. 다음 실행은 dormant layout을 읽거나 이전 quick runtime에 attach하지 않는다.
+- quick의 위치·크기·`chrome`·`minimal-tabs` 설정과 기존 UX는 유지한다. 제거 대상은 quick 기능이 아니라
+  persistent-session 결합뿐이다.
+- 회귀 gate는 `is_quick => remote backend 생성 0`, workspace manifest의 quick block/handle 0, 앱 Quit 뒤 local runtime
+  종료다.
 
-```text
-quick-window tabs=<N> active-tab=<i>
-  tab/tree-node/pane/surface ... workspace-binding-id/runtime-handle
-```
+### GUI process crash-consistent manifest
 
-- `quick-window`는 0개 또는 정확히 1개다. 일반 `window` block이 모두 끝난 뒤에만 오며 내부 Tab/Pane/Surface wire와 전역 ID
-  유일성 규칙을 그대로 쓴다. quick의 화면 위치·크기·보임 여부·`chrome`/`minimal-tabs`는 manifest가 아니라 config가 소유한다.
-- 기존 reader는 normal `window` loop 뒤의 미지 trailing line에서 parsing을 끝내므로 quick block을 일반 Window로 잘못 열지
-  않고 안전하게 무시한다. 새 reader는 이 한 종류의 self-delimiting tail만 인식·전부 검증한다. 그래서 header와 파일 경로는
-  `maru.workspace.v1`을 유지한다.
-- 앱 재실행은 quick layout을 dormant 상태로 읽되 panel을 자동 표시하지 않는다. 첫 toggle은 새 shell을 만들지 않고 살아 있는
-  handle에 attach한다. quick runtime 알림을 클릭한 cold launch는 quick panel을 만들고 정확한 Workspace/Pane/Term을 활성화한다.
-- `chrome` 변경은 GUI client를 재구성해 같은 runtime handle에 다시 붙고 runtime을 끝내지 않는다. `minimal-tabs=false`는 이후
-  새 탭 생성만 막으며 이미 살아 있는 여러 탭/split을 삭제하지 않는다.
-- quick panel이 보이는 동안 그 GUI가 controller다. 숨길 때 controller를 release하며 임의 observer에게 자동 양도하지 않는다.
-  다른 terminal이 controller라면 quick 재표시는 observer로 붙고 명시 takeover 전에는 입력·resize를 보내지 않는다.
-
-### crash-safe manifest
-
-현재 workspace 저장은 정상 `applicationWillTerminate`에서 수행되므로 GUI crash 직전 구조 변경을 잃을 수 있다.
-영속 세션 전환 전 다음 계약을 추가한다.
+현재 workspace 저장은 정상 `applicationWillTerminate`에서 수행되므로 GUI 비정상 종료 직전 구조 변경을 잃을 수 있다.
+host crash·host 강제 종료·재부팅·전원 손실 뒤 동일 runtime 복구는 비목표로 유지한다. 영속 세션 전환 전에는 **host가
+살아 있고 GUI만 비정상 종료한 경우**의 layout orphan을 줄이는 다음 계약만 추가한다.
 
 - workspace 생성/삭제, split, Term 이동/닫기, cross-window 이동, runtime bind 변경은 manifest dirty를 세운다.
-- dirty manifest는 짧게 debounce할 수 있지만 같은 디렉터리의 임시 파일 write·flush 뒤 atomic rename으로 교체하고,
-  crash consistency를 지원하는 플랫폼에서는 directory metadata도 sync하는 checkpoint로 지속 저장한다.
-- 구조 mutation과 checkpoint 사이에 crash하면 이전 완전본으로 돌아가며 반쪽 파일은 사용하지 않는다.
+- dirty manifest는 짧게 debounce한 뒤 같은 디렉터리의 temp write + atomic replace로 전체 파일을 교체한다. 전원 손실
+  durability를 주장하지 않으므로 file/directory `fsync`와 별도 journal DB는 이 단계의 선결이 아니다.
+- 구조 mutation과 GUI process 종료가 경합하면 이전 또는 새 완전본만 읽고 반쪽 파일은 사용하지 않는다.
+- background checkpoint 실패는 기존 완전본을 유지하고 typed failure를 지속 표시한다. 정상 Quit의 마지막 checkpoint가
+  실패하면 GUI detach를 시작하지 않고 Quit을 취소한다. 사용자가 명시적으로 `Quit and End All Sessions`를 택한 경우에만
+  runtime 종료 뒤 workspace 갱신 실패를 허용하며, live runtime을 보이지 않는 orphan으로 남기는 선택지는 제공하지 않는다.
 - host는 layout 정책을 적용하지 않는다. 최신 manifest 사본을 발견/attach용으로 읽거나 캐시할 수만 있다.
 - `maru attach --workspace`는 같은 manifest parser를 사용하고 별도 workspace DB를 만들지 않는다.
 
-구체 wire와 손상/하위호환 규칙의 단일 출처는 [Workspace Restore 전략](workspace-restore.md#영속-session-binding-wire-계획-미구현)이다.
-일반 layout은 optional scalar, quick은 기존 reader가 안전하게 무시하는 마지막 self-delimiting `quick-window` 하나로 v1을
-유지한다. 구현 중 이 tail 이외의 새 line kind·카운트·tree 변경이 필요해지면 여기서 정한 범위를 벗어나므로 멈추고
+구체 wire와 손상/하위호환 규칙의 단일 출처는
+[Workspace Restore 전략](workspace-restore.md#영속-session-binding-wire-runtime-handle-구현-durable-tombstone-계획)이다.
+일반 layout은 optional scalar만으로 v1을 유지한다. 현재 parser가 첫 unknown top-level trailing line에서 성공 종료하는
+동작은 legacy 관용성이지 새 block 확장점이 아니다. 새 line kind·카운트·tree 변경이 필요해지면 여기서 정한 범위를
+벗어나므로 멈추고
 `maru.workspace.v2` migration/fallback을 사용자와 다시 결정한다.
 
 ### 새 Term과 설정
@@ -405,7 +403,7 @@ session.keep-alive-after-quit = true
 
 | 값 | 새 terminal runtime | `Quit Maru` |
 | --- | --- | --- |
-| `true` (**기능 완성 뒤 기본값**) | 새 일반 Window의 Workspace/Term/split은 `maru-sessiond`에 생성. quick은 P4 전까지 in-process | 일반 persistent runtime은 GUI만 detach, quick은 종료 |
+| `true` (**기능 완성 뒤 기본값**) | 새 일반 Window의 Workspace/Term/split은 `maru-sessiond`에 생성. quick은 항상 in-process | 일반 persistent runtime은 GUI만 detach, quick은 종료 |
 | `false` | 현재처럼 GUI process 안에 생성 | 현재 AppSession에 연결된 persistent runtime도 terminate |
 
 - 이 키는 config schema·`configuration.md`에 있고, **설정 GUI(workspace 섹션 토글)에도 노출된다**(과거 실험적이라 숨겼던 것을
@@ -414,7 +412,8 @@ session.keep-alive-after-quit = true
   즉시 terminate하지는 않는다. 토글을 켜면 host를 준비해 이후 일반 Term부터 persistent로 만들고, 끄면 이후 Term부터
   in-process로 만든다. 바뀐 quit 의미는 다음 app-wide `Quit Maru`부터 적용한다.
 - **현재 opt-in 구현:** `true`인데 host launch/handshake가 실패하면 notice를 예약하고 in-process terminal로 폴백한다.
-  기본 전환 전에는 silent semantic fallback을 제거하거나 사용자의 명시적 ephemeral 승인을 받는 UX가 필요하다.
+  기본 전환 전에는 해당 Term에 종료까지 남는 `not preserved` 상태를 표시하고, 그 Term에 `runtime-handle`을 쓰지 않으며,
+  checkpoint/quit structured artifact에 fallback 원인을 남겨야 한다.
 - persistent와 in-process runtime이 과도기 한 workspace에 함께 있어도 각 Term의 typed backend binding으로 구분한다.
 - 설정의 앱 전역 snapshot 하나를 모든 Window가 공유한다. 따라서 `false` 상태의 다음 Quit은 창별 stale config와 무관하게
   현재 앱에 연결된 기존 persistent runtime도 끝낸다. Quit 전 즉시 끝내려면
@@ -423,13 +422,37 @@ session.keep-alive-after-quit = true
 - **"모든 설정 초기화"(Reset to Defaults)는 이 키를 초기화하지 않고 보존한다.** 리셋이 이 값을 기본값으로 되돌리면
   live 정책이 그 자리에서 뒤집혀 다음 평범한 `Quit Maru`가 살아 있는 host-backed runtime을 전부 terminate한다 —
   파괴를 `Quit and End All Sessions`라는 명시적 경로로 분리한 위 원칙을 리셋이 우회하는 셈이다(실측 사고: 리셋 뒤
-  일반 Quit으로 runtime 12개 소멸, workspace의 `host_id:runtime_id` 12개가 dangling). 그래서 `resetAllSettings`는
-  값과 live 정책을 모두 보존하고, 보존값이 `Config{}` 기본값과 다르면 리셋이 덮어쓰는 config 파일에 override 한 줄을
-  같은 atomic write로 남긴다(파일과 live 정책이 갈라져 다음 실행이 조용히 in-process로 떨어지는 것을 막는다).
+  일반 Quit으로 runtime 12개 소멸, workspace의 `host_id:runtime_id` 12개가 dangling). 현재 `resetAllSettings`는
+  값과 live 정책을 보존하고 값이 현재 `Config{}` 기본값과 다르면 override를 남긴다. release A의 G2부터는 기본값과
+  같아도 session explicit override를 항상 보존·emit해 B→A rollback에서도 의미가 유지되게 한다.
   끄는 결정은 사용자 몫이라 notice로 수동 변경 경로를 안내한다. 기본값이 `true`로 전환된 뒤에도 같은 규칙이라
   "사용자가 명시적으로 끈 `false`"를 리셋이 도로 켜지 않는다(리터럴이 아니라 기본값과 비교하는 이유).
+- 기본 전환은 두 release로 나눈다. 준비 release A는 default `false`를 유지한 채 durable tombstone reader/writer,
+  반복 relaunch, config provenance와 explicit override retention을 먼저 배포한다. release B만 default를 `true`로
+  바꾼다. B loader는 key
+  `absent`/`explicit_valid`/`explicit_invalid`와 config file `missing`/`unreadable`/`oversize`를 구분한다. readable
+  absent profile은 explicit `true`를 원자적으로 materialize한 뒤에만 true를 적용한다. write가 실패하면 기존
+  `false`를 유지하고 retryable typed notice를 남긴다. explicit `false`는 보존한다.
+
+| B bootstrap 관측(마지막 syntactic occurrence 기준) | resolved 정책 | 파일/notice |
+| --- | --- | --- |
+| file `missing` 또는 `readable_absent` | atomic explicit true 생성 성공 뒤만 `true` | 실패면 `false`, retryable persistent notice |
+| `explicit_valid=true|false` | 해당 값 그대로 | 파일 무변경 |
+| `explicit_invalid` | `false` | 파일 무변경, persistent invalid-value notice |
+| file `unreadable` 또는 `oversize` | `false` | 파일 무변경, persistent read-error notice |
+
+duplicate key는 마지막 syntactic occurrence의 valid/invalid가 outcome을 정한다. G2 migration owner는 app-instance lease를
+획득한 AppRuntime bootstrap 하나이며 첫 AppSession/config resolve 전에 정확히 한 번 실행한다. 모든 Window/AppSession은
+그 owned result snapshot을 빌려 반복 materialize하지 않는다.
+- 별도 persisted migration marker나 만료 정책은 두지 않는다. `session.keep-alive-after-quit`의 explicit override는
+  global/row Reset이 항상 보존하고, 사용자가 Workspace 토글을 직접 바꿀 때만 true/false를 교체한다. 따라서 B의
+  기본값과 값이 같아도 explicit true가 남는다. B→frozen A rollback에서 true와 durable tombstone이 함께 보존되는
+  것을 검증하고, A보다 오래된 writer로의 downgrade round-trip은 지원하지 않는다. 이 provenance와 two-release gate
+  없이 기본값을 바꾸지 않는다.
 - restore 중 saved Window 하나라도 host/runtime 불일치나 attach 실패로 apply되지 않으면 default shell 창을 성공한 복원으로
-  남기지 않고 teardown한다. 해당 실행의 자동 checkpoint도 막아 마지막 완전 manifest를 보존한다.
+  남기지 않고 teardown하고 `restore incomplete`를 세운다. 다음 종료 checkpoint는 마지막 완전 manifest를
+  `workspace.v1.bak`으로 한 번 보존한 뒤 현재 모델을 정상 저장한다. 실제 capture/serialize/write 실패만 write 0으로
+  이전 완전본을 그대로 유지한다([Workspace Restore](workspace-restore.md)의 "checkpoint 보호"가 단일 출처).
 
 ## 6. 종료와 detach 의미
 
@@ -437,12 +460,12 @@ session.keep-alive-after-quit = true
 
 | 사용자 동작 | GUI | terminal runtime | web/file surface |
 | --- | --- | --- | --- |
-| `Quit Maru` (`keep-alive=true`) | 종료 | 일반 persistent runtime 유지·client detach. 현재 quick(local)은 종료 | 기존 dirty 보호 후 teardown/선언적 복원 |
+| `Quit Maru` (`keep-alive=true`) | 종료 | 일반 persistent runtime 유지·client detach. quick은 항상 local이고 종료 | 기존 dirty 보호 후 teardown/선언적 복원 |
 | `Quit Maru` (`keep-alive=false`) | 종료 | manifest-bound runtime 확인 후 terminate | 기존 dirty 보호 후 teardown/선언적 복원 |
 | `Quit and End All Sessions` | 종료 | 모든 runtime 명시 terminate | 기존 dirty 보호 후 teardown |
 | 마지막 일반 창 닫기 | 앱 전체 quit 경로라면 detach | 유지 | 기존 dirty 보호 적용 |
 | 비마지막 Window 닫기 | 현재 창 정책 유지 | v1에서는 기존처럼 소속 Term 종료 확인 | 기존 close 정책 유지 |
-| quick hide/auto-hide/Esc | panel 숨김 | 현재 local runtime 유지 | surface는 기존 quick 정책 유지 |
+| quick toggle/auto-hide | panel 숨김 | local runtime 유지 | surface는 기존 quick 정책 유지. Esc는 terminal input으로 전달 |
 | quick Term/Workspace 명시 close | 해당 quick layout 제거 | 소속 runtime 종료 확인 | 소속 surface close 정책 유지 |
 | Workspace 닫기 | Workspace 제거 | 소속 runtime 종료 확인 | 소속 surface close 정책 유지 |
 | Term 닫기 / shell `exit` | Term 제거 또는 종료 화면 | 명시 terminate / 검증된 exit | N/A |
@@ -469,22 +492,27 @@ dirty file editor는 session host가 보호하지 못한다. `Quit Maru`도 기�
 
 현재 알림의 단일 출처인 OSC 9/777은 `TerminalCore`가 파싱하므로 core와 함께 host로 이동해야 한다.
 
-- host는 `runtime.notification`을 runtime ID, bounded title/body, 발생 시각과 함께 보관한다. `surface_id`는 GUI 수명이라
-  host event에 저장하지 않는다.
-- GUI가 붙어 있으면 기존 [알림 전략](notifications.md)의 위치 라벨·전면 배너·인앱 이력 funnel로 전달한다.
+- host는 `runtime.notification`을 `{host_id,runtime_id,event_id}`, bounded title/body, 발생 시각과 함께 보관한다.
+  `event_id`는 host-lifetime monotonic u64이며 재사용하지 않는다. overflow면 ID를 wrap하지 않고 새 알림 admission을
+  중단해 typed diagnostic을 남긴다. `{host_id,event_id}`가 journal/OS/GUI dedup key다. `surface_id`는 GUI 수명이라
+  stable event에 저장하지 않는다.
+- GUI가 붙어 있으면 stable event identity를 유지한 채 기존 [알림 전략](notifications.md)의 위치 라벨·전면 배너·인앱
+  이력 funnel로 전달하고 `{app_instance_epoch,token,surface_id}`는 fast-path hint로만 추가한다.
 - GUI는 attach/binding 변경 때 runtime의 bounded display label을 host에 갱신한다. GUI가 없을 때 OS 배너는 마지막 label을
   힌트로 쓰되 layout 권위로 해석하지 않고, label이 없으면 짧은 Maru runtime ID로 표시한다.
 - GUI가 없으면 signed app bundle의 macOS notification sink가 OS 배너를 게시하고, event는 bounded pending history에도
   남겨 다음 GUI가 인앱 이력으로 가져간다. host가 임의 network service를 열지는 않는다.
-- 배너 클릭은 Maru를 cold launch한 뒤 `runtime_handle`을 attach하고 현재 manifest 위치를 찾는다. binding이 없으면
+- 배너 클릭은 live app epoch hint가 여전히 exact runtime을 가리킬 때만 fast path를 쓰고, 그 외에는 Maru를 cold
+  launch한 뒤 stable `runtime_handle`을 attach하고 현재 manifest 위치를 찾는다. binding이 없으면
   `Recovered Sessions`에서 해당 runtime을 연다.
 - `notifications.osc=false`는 GUI 유무와 관계없이 host 발화를 막는다. config snapshot/version 변경은 host에 전달한다.
 - agent `running → idle`은 완료 알림을 만들지 않는다. 구조화된 완료 신호가 없으므로 영속 host가 이를 추측하지 않는다.
 - visual bell과 인앱 overlay는 GUI가 있을 때만 표시할 수 있다. GUI가 없는 동안 보장하는 background 알림은 OSC 9/777
   OS 배너와 pending history다.
 
-`keep-alive-after-quit=true`를 기본값으로 바꾸기 전에 GUI를 종료한 실제 `.app` bundle에서 OSC 발화→배너→클릭 cold
-launch→정확한 Maru runtime attach까지 검증해야 한다. 이 gate가 없으면 “세션은 살았지만 알림은 죽은” 상태라 P4 미완료다.
+`keep-alive-after-quit=true`를 기본값으로 바꾸기 전에 실제 `.app` bundle에서 GUI 0 OSC 발화→배너→클릭과
+GUI 연결 중 발화→Quit→기존 배너 클릭이 모두 정확한 Maru runtime에 attach하는지 검증해야 한다. 이 gate가 없으면
+“세션은 살았지만 알림은 죽은” 상태라 P4 미완료다.
 
 ## 7. GUI 재접속과 binding 정합
 
@@ -501,7 +529,7 @@ sequenceDiagram
     alt runtime alive
       H-->>G: runtime metadata and screen snapshot
       G->>H: attach subscription
-    else runtime missing
+    else host가 runtime 부재를 긍정적으로 확인
       G-->>G: terminated placeholder
     end
   end
@@ -517,28 +545,35 @@ sequenceDiagram
 5. 살아 있으면 새 GUI `surface_id`를 만들고 snapshot을 받은 뒤 delta subscription을 연다.
 6. 한 Window의 모든 Term stage가 성공한 뒤 모델을 publish하고 renderer/frame loop를 처음 활성화한다. 이 성공 경로는
    saved `cwd`/`command`로 임시 shell을 먼저 spawn하지 않는다.
-7. manifest에는 있지만 runtime이 없으면 종료 placeholder로 표시한다. provider resume/fork나 마지막 command 자동 재실행은 없다.
+7. host의 `runtime_not_found`/`stale_host` 응답, dead owner lease 등 **영구 부재의 긍정적 증거**가 있으면 종료
+   placeholder로 표시한다. endpoint 미발견·지원 범위 밖 protocol·timeout은 unavailable로 fail-close한다.
+   placeholder는 `runtime-state="ended"`와 마지막 `runtime-handle`을 함께 저장해 재실행 횟수와 무관하게 유지한다.
+   provider resume/fork나 마지막 command 자동 재실행은 없다.
 8. host에는 있지만 manifest에 bind되지 않은 runtime은 삭제하지 않고 `Recovered Sessions`에 노출한다.
 9. 같은 runtime을 manifest의 두 writable Term 슬롯에 bind하면 잘못된 파일로 거부한다. 한 runtime의 canonical writable placement는 하나다.
 
 **현재 구현 범위:** 1–6의 deferred/attach/rollback과 stale host·missing runtime fail-closed는 P3 core에 구현됐다.
-**7의 per-Term ended placeholder는 구현됐다** — 영구 부재로 분류된 runtime만 그 Term을 읽기 전용 placeholder로 두고
+**7의 첫 복원 per-Term ended placeholder는 구현됐다** — 영구 부재로 분류된 runtime만 그 Term을 읽기 전용 placeholder로 두고
 나머지 surface·split·탭·창 frame은 정상 복원한다. placeholder 화면에는 마지막 제목·위치와 `⏎` 안내가 **화면 콘텐츠로**
 남고(notice는 아무 키에나 닫히므로 그것만으로는 복구 방법이 사라진다), `⏎`가 그 pane 슬롯을 **제자리 교체**해 마지막
 cwd에서 새 셸을 시작한다. 자동 fresh spawn은 없다 — `⏎`가 유일한 승격 경로이고 다른 키·수식자 조합으로는 되살아나지
-않는다. 8의 `Recovered Sessions`,
+않는다. 그러나 현재 capture가 묘비의 죽은 handle을 제거하므로 **Enter 없이 Quit→두 번째 재실행하면 선언적 surface로
+읽혀 자동 셸이 생성되는 회귀가 있다**. 따라서 durable tombstone wire와 2회 이상 재실행 E2E 전에는 7 전체를 완료로
+세지 않는다. 8의 `Recovered Sessions`,
 9의 manifest 전역 중복 검증은 여전히 P4 계획이다. 일시 실패로 분류된 누락 runtime은 종전처럼 해당 Window apply를
-실패시키며, 추가 Window는 teardown하고 primary는 명시적인 새 default-shell fallback으로 전환하되 마지막 완전
-checkpoint를 자동 저장으로 덮지 않는다.
+실패시키며, 추가 Window는 teardown하고 primary는 명시적인 새 default-shell fallback으로 전환한다. 이
+`restore incomplete` 실행은 종료 시 마지막 완전본을 `.bak`으로 한 번 보존한 뒤 현재 모델을 저장한다. capture/serialize/
+write 자체가 실패한 경우에만 write 0으로 이전 완전본을 유지한다.
 
 ### 접속 실패 행렬 (목표 계약)
 
 host/host_id/runtime 불일치는 **분류에 따라 갈린다**(아래 표). 영구 부재는 그 Term만 per-Term ended placeholder로 두고
 창 apply를 성공시키며, 일시 실패는 종전처럼 해당 Window apply 실패로 fail-close한다(additional Window는 teardown,
-primary는 notice가 보이는 명시적 default-shell fallback + checkpoint 자동 저장 차단). orphan recovery entry
+primary는 notice가 보이는 명시적 default-shell fallback + `restore incomplete`; 종료 시 `.bak` 1회 보존 후 현재 모델 저장).
+orphan recovery entry
 (`Recovered Sessions`)는 여전히 P4에서 구현한다.
 
-**실패 원인 분류(구현됨).** ended placeholder는 "이 handle이 **다시는** 붙을 수 없다"가 참일 때만 세울 수 있으므로,
+**실패 원인 분류(부분 구현).** ended placeholder는 "이 handle이 **다시는** 붙을 수 없다"가 참일 때만 세울 수 있으므로,
 그 판정에 쓸 구분을 attach 경로가 먼저 만든다. 오분류 비용이 비대칭이기 때문이다 — 영구를 일시로 보면 창 복원이 한 번
 실패할 뿐이지만, **일시를 영구로 보면 살아 있는 runtime이 placeholder로 굳어** 사용자가 되찾을 길이 사라진다(현재
 `Recovered Sessions`가 미구현이라 host에 남은 runtime을 다시 찾을 UI도 없다). 그래서 승격은 증거가 있는 것만 한다.
@@ -554,6 +589,9 @@ primary는 notice가 보이는 명시적 default-shell fallback + checkpoint 자
 | `lifecycle = restoring`(host exec 업그레이드 중) | `startup_timeout` → `PersistentRuntimeUnavailable` | runtime은 생존한다 |
 | 소켓 끊김·타임아웃·`controller_busy`·`unauthorized`·`queue_invalidated`·미지 error code | `PersistentRuntimeUnavailable` | runtime이 살아 있을 수 있다 |
 | handle 형식 손상(길이·대소문자·구분자) | `InvalidPersistentRuntimeIdentity` | 존재하는 손상은 숨기지 않는다 |
+
+현재 코드는 probe를 `absent|indeterminate`로, owner lease를 `free|held|unknown`으로 구분해 위 표의 긍정 증거 요건을
+구현했다. durable tombstone은 이 분류를 재사용하며 미확정 상태를 영구 부재로 넓히지 않는다.
 
 **두 에러의 귀결(구현됨).** `PersistentRuntimeGone`은 `createRestoredTerm`이 catch해 **그 Term만 종료 placeholder**로
 바꾸고 창 apply는 성공시킨다 — 탭·split·창 frame이 살아남는다. `PersistentRuntimeUnavailable`은 그대로 전파해 창 apply를
@@ -571,7 +609,12 @@ entry 하나가 막는 checkpoint를 훨씬 비싼 이쪽이 안 막는 비대�
 "checkpoint 보호"가 단일 출처). 무기한 차단은 stale 파일을 고정시켜 다음 실행이 같은 drop을 재생산하는 자기영속 루프가
 되고, 그동안 사용자의 새 레이아웃이 매 종료마다 사라진다.
 
-**종료 placeholder 객체(구현됨, 아직 복원이 만들지 않음).** placeholder Term 자체와 그 수명은 `TermRuntime.ended_placeholder`
+**durable tombstone 전에는 반복 relaunch 회귀가 남는다.** 현재 capture는 placeholder의 `runtime-handle`을 제거하므로,
+백업 후 저장된 다음 파일은 그 Term을 일반 선언적 셸로 표현한다. 목표 writer는 마지막 handle과
+`runtime-state="ended"`를 함께 보존해 Enter 없는 두 번째 이후 relaunch에서도 spawn 0을 유지해야 한다. durable
+tombstone 구현은 위 backup 신호와 일시 실패 fail-close를 약화시키면 안 된다.
+
+**종료 placeholder 객체와 첫 복원 배선(구현됨).** placeholder Term 자체와 그 수명은 `TermRuntime.ended_placeholder`
 + `createEndedPlaceholderTerm`으로 구현했다. `SurfaceKind`(닫힌 열거)를 확장하지 않고 `kind = .terminal`을 유지하며
 registry 슬롯만 `LiveSurface.web` arm sentinel을 재사용한다 — 그래야 기존 렌더·라벨 경로가 무변경으로 마지막 화면을
 그린다. 대신 "`kind == .web`이 곧 PTY 없음"이라는 기존 가정이 깨지므로, PTY 부재를 보던 분기를 전부 이 플래그로
@@ -579,8 +622,8 @@ registry 슬롯만 `LiveSurface.web` arm sentinel을 재사용한다 — 그래�
 닫혀 복원한 레이아웃이 다음 checkpoint에서 소멸**), `findTerminatedTerm`(자동 reap 금지), `resizeTermForLayout`(live
 link가 없어 `SurfaceRuntime.resize`가 실패하므로 sentinel core를 직접 resize — 스킵하면 저장 grid에 갇힌다), 드롭 배리어.
 마지막 title·cwd·grid는 이미 owned 저장소가 있는 `auto_title`·`observation`(`.stale`)에 심어 `captureWorkspaceTab`이
-무변경으로 저장하고, command만 `rt.ended_command`에서 읽는다. `surface.remote == null`이라 **죽은 `runtime-handle`은
-자동으로 저장되지 않으므로**, 되살리지 않은 묘비는 다음 실행에서 선언적 restore로 그 cwd의 평범한 새 셸이 된다.
+무변경으로 저장하고, command만 `rt.ended_command`에서 읽는다. 미구현인 durable wire는 묘비가 마지막
+`runtime-handle`과 `runtime-state="ended"`를 owned 상태로 함께 보존하도록 이 capture 계약을 확장한다.
 
 **묘비 입력·수명 계약(code-review max 수정).** 위 "PTY 부재 분기"에 더해, 묘비가 **사용자 입력 경로에서** 지켜야 하는
 규칙이 넷 있다. 넷 다 "복원했더니 조용히 뭔가 사라져 있다"는 같은 실패 모양이라 한곳에 모아 둔다.
@@ -606,9 +649,10 @@ link가 없어 `SurfaceRuntime.resize`가 실패하므로 sentinel core를 직�
 
 | 상태 | 처리 |
 | --- | --- |
-| host가 없거나 종료됨 | 기존 handle은 ended 처리. 새 Term 생성 시 새 host를 시작하지만 동일 runtime 복구로 설명하지 않음 |
+| manifest+dead owner lease로 host 종료를 검증함 | 기존 handle은 ended 처리. 새 Term 생성 시 새 host를 시작하지만 동일 runtime 복구로 설명하지 않음 |
+| endpoint 미발견·지원 범위 밖 protocol·timeout | runtime 생존 가능성이 있으므로 unavailable로 fail-close. ended로 저장하지 않음 |
 | host는 있으나 `host_id` 불일치 | stale handle, 자동 attach 금지 |
-| runtime 일부 없음 | 나머지는 attach, 누락 Term만 종료 placeholder |
+| host가 runtime 일부의 부재를 긍정 응답 | 나머지는 attach, 누락 Term만 종료 placeholder |
 | manifest 손상 | 기존 조용한 기본 workspace fallback + host orphan recovery entry |
 | protocol 호환 불가 | runtime을 죽이지 않고 attach 거부, 버전 진단 표시 |
 | client queue overflow | 그 client delta를 invalidated 처리하고 fresh snapshot 재요청; PTY reader는 계속 진행 |
@@ -636,7 +680,7 @@ maru runtime end [--yes] <runtime-id>
 | `maru attach --read-only` | observer로 snapshot/delta를 표시한다. input/resize는 보내지 않는다. |
 | `maru attach` | controller가 없으면 controller, 있으면 observer로 붙고 명확한 read-only banner를 표시한다. 조용히 기존 controller를 빼앗지 않는다. |
 | `maru attach --take-over` | 기존 controller revoke를 확인한 뒤 원자적으로 controller를 이전한다. |
-| `maru runtime end` | interactive TTY에서 runtime ID/command를 보여 주고 확인 후 종료한다. script는 `--yes`가 없으면 실패한다. normal/quick manifest slot은 다음 GUI에서 ended placeholder가 된다. |
+| `maru runtime end` | interactive TTY에서 runtime ID/command를 보여 주고 확인 후 종료한다. script는 `--yes`가 없으면 실패한다. normal manifest slot은 다음 GUI에서 ended placeholder가 된다. |
 
 attach client의 기본 local escape는 2-key chord `Ctrl-\`, `d`다. `Ctrl-\`, `Ctrl-\`는 literal `Ctrl-\` 하나를
 runtime input으로 보낸다. 일반 키는 지연 없이 binary input frame으로 전달하며 escape 첫 키만 짧은 chord timeout을 가진다.
@@ -646,7 +690,7 @@ CLI help와 parser fixture가 이 규칙의 단일 사용자 표면이고, 향�
 전체 workspace TUI는 후속이다.
 
 ```sh
-maru attach --workspace <workspace-binding-id> # 후속, v1 비범위
+maru attach --workspace <future-workspace-id> # 후속, v1 비범위
 ```
 
 일반 terminal emulator에 attach할 때 host의 `TerminalCore`가 이미 escape sequence를 소비했으므로 현재 raw PTY stream을
@@ -684,6 +728,34 @@ ssh -t workbox maru attach <runtime-id>
 여기서 client는 GUI process나 CLI process이고, attach 하나는 그 connection 안의 `stream_id` subscription이다. 한
 `Maru.app`의 여러 Window는 connection 하나를 공유해도 Term별 stream은 구분한다. v1은 runtime당 controller 한 명과 observer
 여러 명을 허용한다.
+
+`stream_id`의 namespace는 **connection-local**이다. 두 connection이 모두 첫 attach에 `stream_id=1`을 받아도 정상이다.
+host registry와 controller lease는 이를 전역 ID로 사용하지 않고, daemon-wide monotonic `subscription_id`를 별도로
+발급한다. routing key는 재사용 가능한 fd/pointer가 아니라 `ConnectionKey {monotonic_id, slot_generation}`이며,
+slot의 `local_stream→subscription`과 daemon의
+`subscription→{connection_key,local_stream,runtime_id}` 양방향 map을 유지한다. close는 global subscription을
+모두 revoke한 뒤 slot generation을 올려 storage를 재사용한다. connection/subscription counter overflow에서는 ID를
+재사용하지 않고 새 attach를 fail-close한다.
+
+> **현재 구현 공백:** 각 connection이 local stream counter를 1부터 발급하지만 registry가 그 값을 전역 subscription key로
+> 사용한다. 두 번째 connection의 첫 attach가 기존 구독을 덮거나 거부할 수 있으므로, 이 분리 없이 다중 connection reactor를
+> 여는 것은 금지한다.
+
+각 socket은 stateful `ConnectionSlot`이 소유한다. slot은 partial header/payload read, partial frame write, 요청/응답
+correlation과 bounded outbound queue를 보관한다. socket은 nonblocking이며 한 slot의 `EAGAIN`이나 느린 reader가 PTY pump,
+다른 client, lifecycle reply를 막지 않는다. 첫 foundation은 연결당 16 MiB(outbound screen soft limit 8 MiB,
+reply/control reserve 512 KiB), daemon 전체 128 MiB, connection 32개 상한을 둔다. 한 reactor turn은 slot당
+read/write 각각 1 MiB 또는 64 frame 중 먼저 닿는 값까지만 처리하고, partial frame이 10초 동안 전진하지 않으면 그
+connection만 닫는다. exact cap/cap+1은 named constants에서 테스트한다.
+- screen soft limit를 넘으면 그 subscription만 `snapshot.invalidated`로 전환한다. queue가 4 MiB low-water 아래로
+  내려가고 client가 resync를 요청하기 전에는 새 snapshot을 반복 생성하지 않는다. control reserve까지 소진되면 해당
+  connection만 fail-close하고 runtime은 유지한다.
+
+reactor 도입 뒤 upgrade의 `active_connections==0`은 단순 accept-loop 바깥 상태로는 성립하지 않는다.
+`prepare accepted`의 linearization은 global frame admission close다. 그 전에 dispatch된 non-upgrade operation이 0인지
+확인하고, accepted reply를 완전히 flush한 뒤 request slot 자체를 close/remove한다. 그 다음 queued mutation이 없는
+unattached idle slot만 bounded close하고, attachment/slot/in-flight dispatch가 모두 0인지 다시 검사한 뒤 기존 exec
+outer loop로 넘긴다. partial request·queued reply가 있는 slot은 idle로 간주하지 않고 upgrade를 busy로 취소한다.
 
 권한을 `is_controller` boolean 하나로 wire/type에 굳히지 않고 capability로 표현한다.
 
@@ -842,7 +914,8 @@ hello의 값이 다르면 stale로 처리한다.
 
 ### 앱 업데이트 호환 전략
 
-**목표 상태이며 현재 구현은 같은-major capability 호환까지만 제공한다.** 업데이트 때문에 살아 있는 runtime을 자동
+**current+N-1 adapter와 host-pool/동일 PID exec의 코드 기반은 구현됐지만, 실제 frozen 이전 release binary와 signed
+product update E2E는 아직 없다. 따라서 release 호환 완료로 선언하지 않는다.** 업데이트 때문에 살아 있는 runtime을 자동
 종료하지 않는 것을 최우선 불변식으로 둔다.
 
 1. **같은 major:** wire의 기존 필드·method 의미를 깨지 않고 additive capability로만 확장한다. 새 GUI는 hello_ack에 없는
@@ -1035,9 +1108,11 @@ redaction과 GUI 없이 replay 가능한 의미를 고정한 뒤 version을 유�
 
 ## 13. 구현 단계와 종료 gate
 
-이 계획의 **제품 완료 범위는 P1~P5**다. P4가 Maru GUI의 기본 영속 세션(멀티윈도우·manifest·background 알림)을,
-P5가 다른 terminal/SSH의 개별 runtime attach를 완성한다. P6 전체 workspace TUI와 tmux import adapter는 선택적 후속이며
-P1~P5 구현 약속이나 `session.keep-alive-after-quit=true` 기본 전환 조건에 포함하지 않는다.
+이 계획의 제품 범위는 P1~P5지만 **기본값 전환 owner는 P4**다. P4가 일반 Window의 기본 영속 세션
+(멀티윈도우·manifest·background 알림)을 완성하고, P5는 다른 terminal/SSH의 개별 runtime attach를 독립적으로 완성한다.
+P5 CLI와 U5 자동 host migration 전체는 `session.keep-alive-after-quit=true`의 선결이 아니다. 단 기본 전환 전 실제 frozen
+N-1 host에 current GUI가 attach하거나 안전하게 side-by-side로 유지하는 release E2E 하나는 필요하다. P6 전체 workspace
+TUI와 tmux import adapter는 선택적 후속이다.
 
 각 구현 slice는 TDD로 진행한다. 먼저 해당 phase의 실패 상태를 표현하는 red unit/contract/process E2E를 추가하고, 최소 구현으로
 green을 만든 뒤 stress/실제 앱 gate를 붙인다. 이미 구현되어 red를 먼저 만들 수 없는 platform wiring은 같은 PR에서 재현 fixture가
@@ -1045,11 +1120,19 @@ green을 만든 뒤 stress/실제 앱 gate를 붙인다. 이미 구현되어 red
 
 ### P0 — 문서 결정
 
-- 이 문서, tabs/splits, workspace restore, control-plane, implementation plan, verification matrix를 정합화한다.
+- 이 문서, workspace restore, session-host upgrade, configuration, verification matrix를 정합화한다.
+- quick persistent/restore/upgrade 결합은 명시적 비목표로 제거하고 local quick 회귀 gate만 남긴다.
+- durable tombstone wire, unsupported host 분류, checkpoint 실패 시 Quit 취소, GUI-crash까지만 지원하는 checkpoint
+  실패 범위, default flip config provenance/rollback을 구현 전 계약으로 고정한다.
+- current evidence와 종료 gate를 분리하고, green fixture가 실제 frozen release/두 번째 재실행을 증명한다고 쓰지 않는다.
+- current `main`의 종료-placeholder 테스트는 registry endpoint를 못 찾으면 곧바로 tombstone이 된다고 기대하지만 제품
+  코드는 이를 `PersistentRuntimeUnavailable`로 보수 분류해 red다. 구현 첫 slice는 이 stale expectation을
+  `{긍정적 부재 증거만 ended, unsupported/unlocatable은 unavailable}` fixture로 분리해 baseline suite를 복구한다.
 - tmux-CC를 필수/기본 driver 계획에서 제거한다.
 - 코드와 제품 동작은 바꾸지 않는다.
 
-종료 gate: `git diff --check`, 문서 링크/old tmux 계획 grep, PR 사용자 리뷰. P0는 설계 승인 단계라 사용자 리뷰가 필요하지만,
+종료 gate: `git diff --check`, 문서 링크/old tmux 계획 grep, 관련 targeted test. 전체 `mise run test`는 위
+current-main red 1건을 branch 회귀와 구분해 PR에 그대로 기록한다. P0는 설계 승인 단계라 사용자 리뷰가 필요하지만,
 P1 이후 구현 gate는 아래 자동화 계약을 만족해야 한다.
 
 ### P1 — legacy provider session continuity 잔여 제거 ✅
@@ -1343,39 +1426,111 @@ input/resize roundtrip, bounded shutdown이다. **runtime metadata parity 완료
 controlled Claude/Codex foreground fixture를 낸 뒤 GUI observation까지 왕복하고, detach 중 바뀐 최신 metadata가 reconnect
 첫 attach에 복원되며, sidebar cwd·임시 Git branch·agent 표시·SSH upload 분기를 자동 검증해야 선언한다.
 
-### P4 — 다중 Window/Workspace·기본 설정·background 알림
+### P4 — 일반 Window default readiness·background 알림
 
-- 구현된 `runtime-handle`에 더해 `workspace_binding_id`, 마지막 `quick-window` tail과 atomic incremental checkpoint를 구현한다.
-- 여러 workspace·pane·Term binding, cross-window 이동, 일부 missing runtime, orphan recovery를 검증한다.
-- quick hide/show, dormant relaunch attach, chrome config 재구성, notification click exact quick Term을 검증한다.
-- 이미 추가된 `session.keep-alive-after-quit` config/schema/세팅 GUI의 남은 gate를 닫고 기본값을 `true`로 전환한다.
-- 이미 구현된 app quit detach/terminate 분기를 signed-app E2E로 검증하고 explicit Term/Workspace close와 dirty file gate를 보존한다.
-- GUI가 없는 동안 OSC 9/777 OS 배너·pending history·배너 클릭 cold-launch attach를 구현한다.
-- shared Client의 다른 stream 화면 `pending_batches`에도 per-stream/전체 byte cap을 두고 overflow stream만 fresh snapshot
-  resync한다. 현재 metadata event queue만 256건/8 MiB로 bounded라 hidden/minimized window pump가 멈춘 상태의 화면 batch는
-  아직 무한 증가할 수 있다. visible window가 계속 socket을 읽고 hidden window가 소비하지 않는 E2E를 추가한다.
-- 현재 metadata는 attached subscription마다 100ms에 full observation allocation/canonical stringify를 수행한다
-  (foreground OS process 열거만 runtime별 500ms cache). 100-runtime idle CPU/allocation artifact를 측정하고, change token 또는
-  runtime-shared full-state cache로 unchanged poll allocation을 없앤 뒤 기본값을 전환한다.
+- `runtime-state="ended"` durable tombstone을 구현해 Enter 없는 Quit/relaunch를 반복해도 자동 spawn 0을 보장한다.
+  ended Term close는 host probe/terminate 0으로 manifest slot만 제거한다. `⏎` remote spawn 실패는 사용자 명시
+  승격이므로 local fallback을 허용하되, 성공하면 구 handle/state를 제거하고 live-local `not preserved`로 전이한다.
+  local spawn도 실패하면 tombstone을 그대로 유지한다.
+- manifest 전체의 writable `runtime-handle` 중복을 attach/spawn 전에 검증하고, host inventory와
+  `{bound, ended, temporarily_unavailable, orphan}`을 side effect 전에 reconcile한다.
+- GUI abnormal exit 직전 layout을 위해 `WorkspaceCheckpointCoordinator`를 구현한다. 결과는
+  `committed(generation)|stale|capture_failed|write_failed`이며 background 실패는 dirty를 유지하고 bounded
+  backoff/notice coalescing을 한다. 마지막 Quit은 AppKit `terminateLater`에서 mutation을 freeze하거나 captured
+  generation이 current임을 확인하고, checkpoint 성공 뒤에만 `NSApp.reply(true)`와 detach를 수행한다. 실패하면
+  `cancelAcceptedAppQuit` + `reply(false)`로 Quit을 취소하고 이전 완전본을 보존한다. 전원 손실·host crash
+  durability는 주장하지 않는다.
+- **L0 app-instance lease를 다른 P4 slice보다 먼저 구현한다.** 정확한 lock path는 manifest sibling
+  `~/Library/Application Support/maru/workspace.v1.lock`이며, atomic replace되는 `workspace.v1` inode 자체를 잠그지
+  않는다. AppRuntime bootstrap은 첫 AppSession/config migration/config write/restore/persistent runtime spawn보다
+  먼저 lock file을 no-follow로 열어 현재 UID 소유 regular file·mode `0600`을 확인하고, `FD_CLOEXEC`인 fd에
+  process-lifetime exclusive `flock`을 잡는다. fd는 daemon/child에 상속하지 않고 정상 실행 중 lock file을 unlink하지
+  않는다. loser는 config·manifest write, restore, runtime spawn이 모두 0인 `second instance unsupported`로 종료한다.
+  symlink/non-regular/wrong-owner/wrong-mode 거부, manifest atomic replace 중 loser 거부, winner `SIGKILL` 뒤 lease
+  재획득을 자동 검증한다. 이는 collaborative multi-app editing이 아니라 last-writer-wins 손실 방지다.
+- 여러 workspace·pane·Term binding, cross-window 이동, partial missing runtime, `Recovered Sessions`를 검증한다.
+- 기본 전환 전 단일 GUI connection에도 nonblocking partial write, 16 MiB bounded outbound, reply/control reserve,
+  screen invalidation을 가진 `ConnectionSlot`을 적용해 stalled GUI가 PTY/owner tick을 막지 않게 한다. P5는 이를
+  local/global subscription ID와 multi-fd reactor로 확장한다.
+- shared Client의 `pending_stream`과 `pending_batches`를 하나의 bounded `ScreenInbox`로 관리한다. overflow handler는
+  `Client.call()` 안에서 RPC를 재진입하지 않고 `needs_resync`만 기록하며, 바깥 runtime pump가 stream별 ordered resync
+  한 번을 보내 fresh snapshot 전 delta를 버린다.
+- event-driven delta wake와 runtime-shared observation cache/change token을 구현하고 100-runtime idle CPU/allocation,
+  hidden stream, slow observer artifact를 측정한다.
+- 남은 P3 product parity(metadata/selection/Reset·Clear/async SSH action)를 닫는다.
+- 모든 일반 persistent runtime의 OSC 9/777에 `{host_id,runtime_id,event_id}` stable identity를 부여하고, GUI 0
+  bounded journal·OS 배너·cold-launch attach와 GUI-live fast hint를 구현한다. notification sink는 daemon 내부
+  platform adapter이며 별도 MRSH client가 아니다. permission denied는 세션 실패가 아닌 명시적 degraded 상태다.
+- 준비 release A에서 durable tombstone과 typed config provenance/explicit override retention을 default `false`로
+  배포하고, release B에서만
+  absent materialization 성공 뒤 default `true`를 적용한다.
+- 이미 구현된 app quit detach/terminate 분기를 signed-app E2E로 검증한 뒤 기본값 전환은 별도 작은 PR로 수행한다.
 
-종료 gate: 무인 2 windows + 3 workspaces + hidden quick의 background output GUI restart E2E, 마지막 완전 checkpoint,
-stale/missing/orphan matrix, 실제 signed `.app`을 종료한 뒤 OSC 배너→클릭→정확한 runtime attach. 이 gate 전에는 config
-기본값을 `true`로 바꾸지 않는다. Notification Center 권한·UI 자동화가 준비된 전용 macOS runner가 없으면 수동 클릭으로
-대체하지 않고 P4를 미완료로 둔다.
+**P4 완료는 위 목록 전체의 gate를 포함한다.** durable tombstone/reconciliation, L0 lease/checkpoint/Quit 취소,
+`ConnectionSlot`, `ScreenInbox`/deferred resync, 100-runtime wake·cache·echo-latency perf, 남은 P3 parity와 async SSH,
+host-backed notification, release A→B config migration을 각각 L2/L3/L4 또는 명시된 product/perf gate로 통과해야 한다.
+아래 통합 E2E는 이 개별 gate의 대체재가 아니라 마지막 조합 검증이다.
+
+종료 gate: 무인 signed app의 clean profile/explicit false/토글 mixed backend, 2 windows + 3 workspaces topology hash,
+각 surface→host/runtime mapping, child PID·detached output·scrollback·spawn count, durable tombstone 2회 이상 relaunch,
+last-complete checkpoint/save-failure Quit 취소, stale/missing/unavailable/orphan matrix를 비교한다. release gate는
+`A non-empty runtime 생성→A GUI 종료→B가 A adapter로 exact attach(PID/runtime/input/output/copy/resize)→B 새 Term은
+B host에 spawn→A runtime 종료 뒤 A host drain cleanup` 또는 동등한 same-PID migration E2E다. 두 daemon이 단순히
+동시에 살아 있는 것만으로 통과시키지 않는다. GUI 0 notification 발행·click exact attach와 GUI 연결 중
+발행→Quit→기존 배너 click exact attach도 구조화 artifact로 비교한다.
+Notification Center
+권한·로그인 UI 자동화가 준비된 전용 macOS runner가 없으면 수동 클릭으로 대체하지 않고 해당 notification gate를 미완료로
+둔다. P5 CLI나 U5 자동 migration 전체는 이 종료 gate에 포함하지 않는다.
+
+구현 순서는 L0 app-instance lease → R1 tombstone → R2 manifest validator/reconciliation →
+R3 `ScreenInbox`/R4 deferred resync →
+T0 single-connection `ConnectionSlot` → C1 pure checkpoint coordinator/C2 file adapter failure injection/C3 dirty wiring/
+C4 AppKit terminate handshake → E1 event wake/E2 observation cache → parity micro-PR → N1 journal/N2 sink/N3 cold route →
+G1 loader provenance/G2 explicit override materialization·retention/G3 default flip 순이다. 각 slice는 한 invariant
+owner와 red→green gate를 갖고,
+G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는다.
 
 ### P5 — 개별 runtime CLI attach
 
-- `maru host status`, `maru runtime list/get/end`, `maru attach`, `Ctrl-\` 다음 `d` detach chord, observer, `--take-over`를 구현하고
-  parser/`--help`/`--json` fixture를 같은 PR에서 갱신한다.
-- same-login-UID 허용과 다른 UID 거부를 socket credential 보안 테스트로 고정한다.
-- 외부/SSH PTY adapter의 최초 `TIOCGWINSZ`, signal-safe `SIGWINCH` wake, resize coalesce/sequence, takeover 최초 resize,
-  `runtime.resized` observer 반영, detach 때 raw mode 복원을 구현한다.
-- SSH `ssh -t host maru attach ...` 실제 smoke를 추가한다.
+- **P5a1 — bounded admin accept foundation**: 현재 connection 하나를 EOF까지 독점하는 serial serve loop를 먼저
+  single-owner multi-fd reactor로 바꾼다. P4 GUI slot을 유지한 채 bounded admin request slot 하나를 accept/dispatch하고
+  partial read/write, cap, idle deadline, same-login-UID/other-UID 거부를 process test로 고정한다. public CLI/help는 아직
+  열지 않는다. 이 slice가 reactor-wide upgrade primitive도 함께 소유한다: prepare linearization에서 global admission
+  close→선행 dispatch 0→accepted reply flush→request slot close/remove→idle slot bounded close→slot/dispatch 0을
+  검증하며 partial request/queued reply가 있으면 `upgrade_busy`로 취소한다. 따라서 multi-fd를 연 중간 release에도
+  `host_exec_upgrade_v1`을 안전하게 계속 광고할 수 있다.
+- **P5a2 — read/admin CLI**: P5a1 위에서 `maru host status`, `maru runtime list/get`과 parser/`--help`/`--json`
+  fixture를 공개한다. CLI는 host를 자동 시작하지 않고 manifest writer도 되지 않는다. GUI가 연결된 실제 daemon에 대한
+  응답, absent/denied/busy typed exit와 JSON 안정성이 gate다.
+- **P5a3 — mutating admin CLI**: `maru runtime end`를 controller/ownership 확인과 함께 별도 공개한다. exact runtime
+  종료, stale identity, unauthorized, accepted reply flush를 gate로 삼는다.
+- **P5b1 — subscription identity**: connection-local wire `stream_id`와 registry-global `subscription_id`를 stable
+  `ConnectionKey` 양방향 map으로 분리한다. 두 connection의 local stream 1과 connection ABA를 hidden protocol
+  harness로 검증한다.
+- **P5b2 — bounded stream slots**: P4 `ConnectionSlot` cap/reserve/fairness를 multi-slot streaming에 적용한다.
+  slow observer가 controller/PTY를 막지 않고 per-connection/global cap을 넘지 않는 것이 gate다.
+- **P5b3 — controller/observer reactor**: observer/takeover protocol과 controller 전환을 hidden harness로 완성한다.
+  P5a1의 reactor-wide upgrade drain을 attachment/subscription graph까지 확장해 controller/observer,
+  attachment/slot/dispatch가 모두 0일 때만 upgrade outer loop로 넘기는 race gate를 추가한다. 아직 public
+  `maru attach`/help를 열지 않는다.
+- **P5c1 — raw TTY lifetime**: 외부 client의 raw mode enter와 모든 detach/error/signal 경로 restore, 최초
+  `TIOCGWINSZ`를 deterministic PTY harness로 검증한다.
+- **P5c2 — resize**: signal-safe `SIGWINCH` wake, resize coalesce/sequence, takeover 최초 resize,
+  `runtime.resized` observer 반영과 controller-only resize ACK/broadcast를 검증한다.
+- **P5c3 — public attach CLI**: P5b/P5c transport가 모두 green인 뒤에만 `maru attach`, observer,
+  `--take-over`, `Ctrl-\` 다음 `d` detach chord를 parser/`--help`와 함께 공개한다. 실제 PTY의
+  attach/input/detach/reattach가 완료 gate다.
+- **P5d — SSH packaging/smoke**: PATH와 signed artifact에서 `ssh -t host maru attach ...`가 같은 protocol client를
+  실행하는 packaging을 고정하고 localhost sshd smoke를 추가한다. runner에 sshd prerequisite가 없으면 이 slice는
+  미완료다.
 
-종료 gate: PTY-backed 외부 terminal harness와 최소 1개 실제 terminal emulator에서 무인 attach/input/detach/reattach,
-controller resize ownership, observer resize 무효, resize ACK/broadcast, unauthorized 거부, localhost SSH smoke.
-접근성/SSH test account 등 runner 사전 조건이 없으면 P5를
-미완료로 둔다.
+P5a1→P5d는 각각 이전 slice gate를 재실행하는 독립 PR이며 한 PR에서 묶어 완료 처리하지 않는다.
+
+종료 gate: 두 connection이 같은 runtime에 local stream 1로 붙어도 global subscription이 충돌하지 않는 process test,
+slow client가 controller/PTY를 막지 않는 backpressure test, upgrade drain race, PTY-backed deterministic harness의
+attach/input/detach/reattach, controller resize ownership, observer resize 무효, resize ACK/broadcast, unauthorized 거부,
+localhost SSH smoke. 실제 Terminal.app/iTerm2/Ghostty 자동화는 핵심 gate가 아니라 non-blocking compatibility smoke다.
+localhost sshd 등 runner 사전 조건이 없으면 해당 SSH gate를 미완료로 둔다.
 
 ### P6 — 전체 workspace TUI와 외부 adapter 검토
 
@@ -1389,6 +1544,12 @@ controller resize ownership, observer resize 무효, resize ACK/broadcast, unaut
 개발자가 창을 눌러 성공 여부를 판단하는 manual-only gate는 허용하지 않는다. OS 경계는 test double만으로 완료하지 않고,
 pre-authorized 전용 macOS runner에서 signed app·Notification Center·별도 PTY client·localhost SSH를 자동 조작하고 구조화된
 artifact를 판정한다. runner provision 자체는 CI 인프라 작업일 수 있지만 한 번 준비된 뒤 각 PR/run에는 사람 개입이 없어야 한다.
+일반 PR gate는 GitHub-hosted `macos-15`의 pure/process test까지다. 기본값 전환 gate
+`Session host product / default-on`은 logged-in Aqua session, 고정 signed test bundle ID, Notification 권한,
+localhost sshd/key가 사전 준비된 self-hosted runner에서 serialized로 실행한다. artifact에는 OS build, bundle/team/signature,
+permission/sshd 상태와 test UUID를 기록하고 run 뒤 notification/runtime을 정리한다. 이 runner가 없으면 component PR은
+merge할 수 있어도 G3 default flip은 blocked다. “한 명령”은 준비된 환경의 재실행을 뜻하며 인프라 provisioning까지
+portable하게 수행한다고 주장하지 않는다.
 
 | 층 | 반드시 자동화할 범위 | 대표 실패 주입/산출물 |
 | --- | --- | --- |
@@ -1417,7 +1578,7 @@ fake notification sink는 payload·routing·bounded history TDD에 사용하지�
   scrollback eviction 중 page invalidation과 fully-validated atomic publish.
 - runtime close의 SIGHUP→SIGTERM→SIGKILL bounded reap 계약 회귀.
 - multi-workspace runtime 중복 bind, stale handle, partial missing, orphan recovery.
-- quick tail 위치/개수/손상, hide/show/quit/relaunch/config 변경의 runtime 불변과 exact notification attach.
+- quick은 remote backend/manifest handle 0이며 hide/show는 같은 process에서만 local runtime을 유지하고 Quit은 종료함.
 - terminal input mode/alternate screen/resize/Unicode/grapheme/kitty graphics가 reconnect snapshot에서 회귀하지 않음.
 - controller/observer capability 부여, stale `client_sequence` 무효, resize burst coalesce, core/PTY partial failure 비관측,
   `runtime.resized` generation 연속성, SSH PTY `SIGWINCH`와 raw-mode 복원.
@@ -1447,6 +1608,7 @@ core 갱신 시 self-pipe/eventfd로 serve 루프를 깨워 즉시 push(추가�
    자식으로 spawn한 뒤 부모와 독립되게 detach하는 helper 프로세스다. launchd-managed agent는 배포·업데이트·로그아웃
    수명이 OS 정책에 묶여 P3 범위를 넘으므로 채택하지 않는다(필요 시 후속 재검토). 상세는 P3-d에서 배선한다.
 
-tmux-CC layout driver 제거, Maru-owned session host, `keep-alive-after-quit=true` 완성 후 기본값, provider session
-resume/fork 비도입, 기존 `maru.workspace.v1`의 binding scalar+`quick-window` tail, §10의 command/framing/stream 계약,
-host launch = detached helper는 이 문서의 확정 결정이다. v1 외부 attach는 same-login-UID로 확정했다.
+tmux-CC layout driver 제거, Maru-owned session host, P4 종료 gate 뒤 `keep-alive-after-quit=true`, provider session
+resume/fork 비도입, quick persistent/restore/upgrade 제외, 기존 `maru.workspace.v1`의 additive runtime scalar,
+§10의 command/framing/stream 계약, host launch = detached helper는 이 문서의 확정 결정이다. v1 외부 attach는
+same-login-UID로 확정했다.

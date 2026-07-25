@@ -489,13 +489,13 @@ TDD 방식:
 - **quick terminal 토글 더블-토글 race 수정(quickAnimating 가드)**: 리뷰 백로그 항목. `toggleQuickTerminal`이 `isVisible`로만 분기하고 `quickAnimating` 가드가 없어, 슬라이드/페이드(0.12~0.16s) 중 재토글하면 애니메이션이 겹쳐 — 먼저 시작한 hide의 완료 핸들러(`orderOut`)가 그 사이 새로 show한 패널을 닫아 버리는 race가 있었다. `toggleQuickTerminal` 맨 앞에 `if quickAnimating { return }`를 더해 애니메이션 중 토글을 무시한다(겹침 자체가 없어져 stale 완료 핸들러가 새 패널을 못 닫는다; 짧은 애니메이션 후 다시 토글하면 된다). `quickTerminalLostKey`(자동 숨김)의 기존 `!quickAnimating` 가드와 같은 패턴이라 일관. show/hide 양 경로(슬라이드·center 페이드) 공통. 검증: swift-check + coretext/metal 스모크 + 전체 테스트(Swift 애니메이션은 헤드리스 테스트 불가 — 실제 더블 토글은 앱 수동). **ABI·Zig 무변경**.
 - **quick terminal 인디케이터+테두리 코너 겹침 수정(z-order, 당시 구현 기록)**: 옛 minimal grid ring과 탭 점 인디케이터가 겹칠 때 인디케이터를 뒤에 append해 위로 올렸다. 현재 grid ring은 위 FP9 대체에 따라 제거됐으므로 이 z-order 예외도 제품 경로에는 남지 않는다.
 - **영속 terminal runtime 후속(설계 확정, 구현 전)**: tmux-CC layout driver 대신 `TermRuntimeBackend` seam →
-  `maru-sessiond` → 다중 workspace crash-safe manifest → 개별 `maru attach` 순서로 진행한다. 앱 종료 후 PTY 유지,
-  기존 `maru.workspace.v1`의 `workspace-binding-id`/`runtime-handle` optional scalar와 singleton `quick-window` tail,
-  멀티윈도우 writer lease, `runtime_handle`/`surface_id` 분리, `MRSH` framed JSON-control/binary-stream protocol,
+  `maru-sessiond` → 다중 workspace GUI-process-crash-consistent checkpoint → 개별 `maru attach` 순서로 진행한다. 앱 종료 후 PTY 유지,
+  기존 `maru.workspace.v1`의 `runtime-handle`과 durable `runtime-state` optional scalar,
+  `runtime_handle`/`surface_id` 분리, `MRSH` framed JSON-control/binary-stream protocol,
   `maru host status`·`runtime list/get/end`·`attach`, same-login-UID SSH, controller 1+observer N capability, signal-safe
   `SIGWINCH`→`runtime.resize` ACK/broadcast, canonical Term owner 1개와 무인 TDD/E2E gate는
   [영속 터미널 세션 호스트](persistent-session-host.md)를 단일 출처로 둔다. quick terminal의 현재
-  `chrome=minimal` UI는 유지하되 hide/relaunch/config 재구성이 같은 host runtime에 reattach하도록 P4에서 배선한다.
+  UI/config는 유지하지만 항상 in-process이며 앱 Quit 때 종료한다.
 
 이 단계에서 다루지 않고 별도로 확장하는 입력 영역:
 

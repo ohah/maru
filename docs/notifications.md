@@ -23,13 +23,17 @@ OSC는 `AppSession.pendingNotification()`이 `{ title, body, surface_id, foregro
 `session.keep-alive-after-quit=true`를 기본값으로 바꾸지 않는다.
 
 - OSC 9/777 parsing과 bounded pending event는 `TerminalCore`와 함께 `maru-sessiond`가 소유한다.
-- GUI가 붙어 있으면 현재 `PendingNotification` funnel로 변환하되, 새 GUI `surface_id`는 현재 `runtime_handle` binding에서 찾는다.
+- 모든 host-backed OSC event는 GUI 유무와 관계없이 source에서 `{host_id,runtime_id,event_id}`를 발급·보존한다.
+  GUI가 붙어 있으면 현재 `PendingNotification` funnel로 변환하고 process-local route는 fast-path hint로만 추가한다.
 - GUI가 없으면 signed app bundle의 macOS notification sink가 OS 배너를 게시하고, 다음 GUI가 host의 bounded pending
   history를 인앱 알림 이력으로 가져간다.
-- 배너 클릭 cold launch는 tmux/provider ID가 아니라 Maru `runtime_handle`로 attach한다.
+- 배너 클릭 cold launch는 tmux/provider ID나 process-local surface ID가 아니라
+  `{host_id,runtime_id,event_id}`로 attach한다. exact runtime이 manifest의 canonical Term에 bind돼 있으면 그
+  Window/Workspace/Pane/Term을 열고, binding이 없지만 runtime이 살아 있으면 `Recovered Sessions`에 노출한다.
 - 구조화된 완료 신호가 없는 agent completion은 emit하지 않는다. host가 `running → idle`을 완료로 추측하지 않는다.
-- pre-authorized macOS runner에서 실제 signed `.app` 종료 상태의 OSC 발화→배너→클릭→정확한 runtime attach가 **무인 자동
-  artifact**로 증명돼야 P4 완료다. runner가 없으면 수동 클릭으로 대체하지 않고 P4와 기본값 전환을 미완료로 둔다.
+- pre-authorized macOS runner에서 실제 signed `.app`의 GUI 0 OSC 발화→배너→클릭과
+  GUI 연결 중 발화→Quit→기존 배너 클릭이 모두 정확한 runtime에 attach한다는 **무인 자동 artifact**가 있어야 P4
+  완료다. runner가 없으면 수동 클릭으로 대체하지 않고 P4와 기본값 전환을 미완료로 둔다.
 
 **모든 pane·Term을 본다(핵심)**: OSC는 활성 surface만이 아니라 **모든 탭의 모든 split pane·모든 가로탭(Term)**을 본다.
 `pendingNotification`이 각 Term 코어를 훑어 첫 pending을 발신 `surface.id`와 함께 보내므로 클릭이 탭뿐 아니라 해당 split
@@ -78,10 +82,14 @@ OSC 알림 제목에는 **발신 위치**(워크스페이스=탭, Term=surface/p
 
 알림을 클릭하면 그 알림을 보낸 터미널의 **창 + 탭 + split panel + 가로탭(Term)까지** 정확히 포커스한다.
 
-- **식별자**: `surface.id`는 M0a 이후 앱 인스턴스 전역 `SurfaceIdAllocator`가 발급해 **창 간 유일**하다(옛 per-session `AppSession.next_id` 세션-로컬 중복은 해소됨 — [window-surface-mobility.md](window-surface-mobility.md) §8 M0a). `(token, surface_id)` 쌍을 싣는 건 이제 id 충돌 방지가 아니라 대상 창을 빠르게 고르는 위치 메타데이터 용도다.
-  그래서 알림 `userInfo`에 **`(token, surface_id)` 쌍**을 싣는다 — Swift `TerminalSurface.token`(창마다 유일,
-  `makeTerminalSurface` 채번)으로 정확한 창/세션을 먼저 고르고, 그 세션 안에서 `surface_id`로 Term을 찾는다.
-  `identifier`는 dedup용 UUID를 유지한다(라우팅 정보를 identifier에 쓰면 연속 알림이 서로 덮어쓴다).
+- **host-backed 식별자(P4 계획)**: GUI 유무와 관계없이 `userInfo`에
+  `{host_id,runtime_id,event_id}`를 필수로 싣는다. GUI가 살아 있으면
+  `{app_instance_epoch,token,surface_id}`를 fast-path hint로 추가한다. epoch가 현재 launch와 같고 surface의
+  runtime handle도 일치할 때만 즉시 활성화하며, 아니면 stable handle로 attach해 manifest binding을 찾고 없으면
+  `Recovered Sessions`에 둔다. `event_id`는 host-lifetime monotonic u64이고 재사용하지 않으며
+  `{host_id,event_id}`가 dedup key다.
+- **local/quick 식별자**: in-process runtime은 stable host handle이 없으므로
+  `{app_instance_epoch,token,surface_id}`만 쓴다. 앱 종료와 함께 route도 끝나며 cold attach 대상이 아니다.
 - **역조회·활성화(Zig)**: `activateSurfaceById(id)` — `findTermWhere`로 `(tab, pane, term)`을 찾아
   **`switchTab → focusPaneByPtr → focusTerm`** 순서로 활성화(focusPaneByPtr는 활성 탭의 panes만, focusTerm은 활성
   pane만 보므로 순서가 강제된다 — 이 계약을 한 메서드에 가둔다). id는 재사용하지 않으므로(단조 증가) stale id가 다른
@@ -91,9 +99,9 @@ OSC 알림 제목에는 **발신 위치**(워크스페이스=탭, Term=surface/p
 - **delegate 타이밍**: `UNUserNotificationCenterDelegate`는 `applicationDidFinishLaunching`에서 **launch 완료 전**
   등록한다(Apple 요구사항 — 앱이 꺼진 상태에서 알림 클릭으로 켜진 콜드 런치의 첫 `didReceive`를 놓치지 않게).
 - **quick 패널**: 알림 대상이 quick 터미널이고 숨김이면 `showQuickTerminalAnimated`로 띄운다(화면 밖에 있는 패널을
-  그냥 `makeKeyAndOrderFront`하면 보이지 않는 창이 키를 가져간다). persistent-session P4 뒤 앱이 종료된 상태에서는
-  notification의 `runtime_handle`을 workspace manifest 마지막 `quick-window` tail에서 찾아 panel/AppSession을 lazy 생성하고,
-  새 shell 없이 attach한 뒤 정확한 Workspace/Pane/Term을 활성화한다. normal Window binding으로 fallback하지 않는다.
+  그냥 `makeKeyAndOrderFront`하면 보이지 않는 창이 키를 가져간다). quick은 확정적으로 in-process이며 앱 Quit 때
+  runtime과 알림 route가 함께 끝난다. workspace manifest·persistent notification journal·cold-launch attach에는 넣지
+  않는다. 앱이 종료된 동안 살아 있는 일반 persistent runtime의 배너 클릭만 `runtime_handle`로 exact normal Term을 연다.
 
 ### 전면 배너 게이트
 
@@ -202,17 +210,27 @@ OSC 알림 제목에는 **발신 위치**(워크스페이스=탭, Term=surface/p
 
 ## 4. 경계 분담 (단일 출처)
 
-- **Zig**: OSC 알림 drain(`pendingNotification`), 업데이트 안내, **제목 위치 접두**(`notificationLocation` — `탭 › 팬`), 전면 배너 여부
-  (`foreground_banner`), surface 역조회·활성화 순서(`activateSurfaceById`), 히스토리 모델·정렬·상대시간 포맷, chrome
-  컴포넌트(state·hit-test·draw ops), 헤더 zone.
-- **Swift**: `UNUserNotificationCenter` 표시/권한/delegate(거부 상태에선 `NSWorkspace`로 시스템 알림 설정 열기), 창 키
-  활성화(`makeKeyAndOrderFront`/`NSApp.activate`), 알림 `userInfo`에 정수 2개(`wt`/`sid`) 싣기·꺼내기, 전면 표시 스타일
-  적용(`willPresent`). 정책 결정은 안 한다.
-- **ABI**: `app_host_abi.h`의 `MARU_MACOS_APP_HOST_ABI_VERSION` 매크로(+ `app_session.zig` `abi_version` 상수, Zig
+- **현재 GUI-local 경로**: Zig `AppSession`이 OSC 알림 drain(`pendingNotification`), 업데이트 안내,
+  **제목 위치 접두**(`notificationLocation` — `탭 › 팬`), 전면 배너 여부(`foreground_banner`), surface 역조회·
+  활성화 순서(`activateSurfaceById`), 히스토리 모델·정렬·상대시간 포맷과 chrome을 소유한다. Swift는
+  `UNUserNotificationCenter` 표시/권한/delegate, 창 활성화(`makeKeyAndOrderFront`/`NSApp.activate`),
+  legacy `userInfo` 정수 `wt`/`sid`, 전면 표시 스타일(`willPresent`)만 담당하고 정책은 결정하지 않는다.
+- **P4 host-backed 경로(계획)**: 배포물의 `maru-sessiond`는 별도 unsigned helper가 아니라 **서명된 Maru 실행 파일의
+  숨김 subcommand**다. 이 process 안의 macOS platform adapter가 host-owned bounded journal을 읽고
+  `UNUserNotificationCenter`에 직접 게시한다. 별도 MRSH client/connection이나 GUI `AppSession`을 만들지 않는다.
+  stable route는 `userInfo`의 `hid`(32-hex host ID), `rid`(32-hex runtime ID), `eid`(u64 decimal/`NSNumber`)에
+  항상 싣고, GUI-live fast hint가 있을 때만 `ae`(app epoch), `wt`, `sid`를 추가한다.
+- **P4 cold route(계획)**: App delegate는 Zig `AppRuntime`/`AppSession`이 아직 없을 수 있는 notification response에서
+  `{hid,rid,eid}`를 앱 전역 pending route로 보관한다. manifest load와 host attach가 준비된 뒤 planned
+  `activate_runtime_notification` AppRuntime entry point로 정확히 한 번 넘겨 canonical binding 또는
+  `Recovered Sessions`를 연다. ABI 번호와 C 서명은 구현 slice N3에서 정하고 Zig/Swift cross-check로 고정한다.
+  permission 요청/거부 시 시스템 설정 열기는 계속 GUI 설정 경계가 소유하며, daemon adapter는 현재 권한을 존중하고
+  거부를 session 실패가 아닌 degraded notification 상태로 기록한다.
+- **현재 ABI**: `app_host_abi.h`의 `MARU_MACOS_APP_HOST_ABI_VERSION` 매크로(+ `app_session.zig` `abi_version` 상수, Zig
   크로스체크가 동기 강제)가 ABI 버전의 단일 출처다. 현재 형태의 알림 함수는 **v76에서 확정**됐다 — `pending_notification`
   (v52 도입 원형에 v76에서 `surface_id` out 추가; `foreground` out 포함) + `activate_surface(session, surface_id) → found`(v76 신설). **v92**에서 세팅 GUI 알림 토글을
   macOS 권한 요청으로 잇는 `take_notification_authorization_request` 1회성 신호를 추가했다. 인앱 알림 센터는 chrome
-  오버레이라 추가 ABI가 없다(Swift 무변경).
+  오버레이라 추가 ABI가 없다. 이 문단의 ABI는 현재 GUI-local 경로이고 P4 cold-route ABI를 이미 구현했다는 뜻이 아니다.
 
 ## 5. 검증
 

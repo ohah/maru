@@ -79,7 +79,9 @@ src/
                         후속 — **구현됨, U0**);
                         P3-e2/e3 core 구현: runtime_manager·remote_runtime·remote_term_backend가 spawn/attach/input/resize/terminate,
                         snapshot/delta demux와 app_session discovery→launch→attach·workspace runtime-handle 재접속을 맡는다.
-                        incremental checkpoint·quick persistence·외부 attach·완전한 nonblocking writer는 P4/P5 후속. control-plane/browser
+                        incremental checkpoint·durable tombstone·single-connection nonblocking writer는 P4,
+                        multi-fd reactor·외부 attach는 P5 후속.
+                        quick terminal은 확정적으로 in-process이며 persistent 범위 밖. control-plane/browser
                         server와 ID·wire를 공유하지 않으며, macOS launch/peer-cred/socket adapter만 platform 경계에 두고
                         codec/state machine은 OS 중립(platform import 0)으로 둔다. 테스트는 `zig build test-session-host`(기본 `test`에도 편입).
                         `tests/session_host_signed_upgrade_e2e.zig`는 caller-attested signed frozen N-1/current 제품 executable을 입력받아

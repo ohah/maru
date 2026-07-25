@@ -5640,41 +5640,69 @@ pub const AppSession = struct {
         }
     }
 
+    /// host attach 실패를 "영구 없음"과 "일시 실패"로 가른다. 영구로 올리는 것은 **그 handle이 다시는 붙을 수 없다는
+    /// 증거가 있는 셋**뿐이다: host가 그 runtime을 모른다고 응답(`RuntimeNotFound`), host가 stale handle이라고 응답
+    /// (`StaleHostHandle`), pool의 그 슬롯이 다른 host로 바뀜(`HostIdentityMismatch`). 나머지(`ConnectionClosed`·
+    /// `WriteFailed`·`AttachFailed`·`HostNotFound`·`SpawnHostUnavailable` 등)는 host나 runtime이 살아 있을 수 있어
+    /// `PersistentRuntimeUnavailable`로 남긴다 — 일시 장애를 영구로 오분류하면 살아 있는 세션이 종료 placeholder로 굳어
+    /// 되찾을 길이 사라진다. OOM은 host에 대한 증거가 아니라 우리 쪽 사정이므로 그대로 전파한다.
+    fn classifyAttachError(err: anyerror) anyerror {
+        return switch (err) {
+            error.RuntimeNotFound, error.StaleHostHandle, error.HostIdentityMismatch => error.PersistentRuntimeGone,
+            error.OutOfMemory => error.OutOfMemory,
+            else => error.PersistentRuntimeUnavailable,
+        };
+    }
+
+    /// `ensureRestoreHostAdapter`의 결과. bool이 아닌 이유: 저장된 runtime을 종료 placeholder로 둘지 판정하려면
+    /// "그 host가 **사라졌다**"와 "지금 못 붙는다"를 구분해야 한다(§7 접속 실패 행렬). 전자만 영구이고, 후자를 영구로
+    /// 오분류하면 살아 있는 세션을 placeholder로 굳혀 사용자가 잃는다. 그래서 실패를 한 값으로 뭉개지 않는다.
+    const RestoreHostOutcome = enum {
+        /// 그 host_id의 adapter가 pool에 있다(이미 있었거나 방금 붙였다).
+        ready,
+        /// host 프로세스가 사라졌다는 긍정적 증거를 받았다(`FailureReason.host_gone`).
+        host_gone,
+        /// 붙지 못했지만 host 생존 여부를 단정할 수 없다(일시 실패·구 major·경로 부재·OOM). fail-closed 쪽이다.
+        unavailable,
+    };
+
     /// workspace가 가리키는 host가 current spawn host와 다르면 지원하는 N-1 endpoint를 조회해 pool에 추가한다.
     /// 조회는 host를 새로 띄우지 않고 hello의 exact host_id가 저장 binding과 일치할 때만 publish한다.
-    fn ensureRestoreHostAdapter(self: *AppSession, wanted_host_id: u128) bool {
-        if (!is_macos) return false;
-        if (app_remote_host_pool) |*pool| if (pool.get(wanted_host_id) != null) return true;
-        if (session_host.protocol.version_major < 2) return false;
+    fn ensureRestoreHostAdapter(self: *AppSession, wanted_host_id: u128) RestoreHostOutcome {
+        if (!is_macos) return .unavailable;
+        if (app_remote_host_pool) |*pool| if (pool.get(wanted_host_id) != null) return .ready;
+        if (session_host.protocol.version_major < 2) return .unavailable;
 
         const alloc = std.heap.smp_allocator;
         var arena = std.heap.ArenaAllocator.init(alloc);
         defer arena.deinit();
-        const base = sessionCacheBase(arena.allocator()) orelse return false;
+        const base = sessionCacheBase(arena.allocator()) orelse return .unavailable;
         const connected = switch (session_host.host_connect.connectExistingHost(
             alloc,
             base,
             wanted_host_id,
         )) {
             .connected => |client| client,
-            .failed => return false,
+            // host_gone만 영구로 올린다. 나머지 reason(일시 연결 실패·incompatible_version·denied 등)은 host가
+            // 살아 있을 수 있으므로 unavailable로 남겨 caller가 fail-closed하게 둔다.
+            .failed => |reason| return if (reason == .host_gone) .host_gone else .unavailable,
         };
         const adapter = alloc.create(RemoteSessionAdapter) catch {
             var failed = connected;
             failed.deinit();
-            return false;
+            return .unavailable;
         };
         adapter.* = RemoteSessionAdapter.init(connected) catch {
             var failed = connected;
             failed.deinit();
             alloc.destroy(adapter);
-            return false;
+            return .unavailable;
         };
         if (app_remote_host_pool) |*pool| {
             pool.addOwned(wanted_host_id, adapter) catch {
                 adapter.deinit();
                 alloc.destroy(adapter);
-                return false;
+                return .unavailable;
             };
         } else {
             // current host launch/connect가 실패해도 건강한 N-1 runtime restore는 독립적으로 열려야 한다.
@@ -5686,7 +5714,7 @@ pub const AppSession = struct {
                 alloc.destroy(adapter);
                 app_remote_host_pool.?.deinit();
                 app_remote_host_pool = null;
-                return false;
+                return .unavailable;
             };
             app_remote_backend = session_host.remote_term_backend.RemoteTermBackend.initAttachOnlyWithPool(
                 alloc,
@@ -5695,7 +5723,7 @@ pub const AppSession = struct {
                 self.runtime,
             );
         }
-        return true;
+        return .ready;
     }
 
     /// keep-alive host 연결 실패를 기록한다(§6 L291) — 프로세스 전역 flag(이후 창은 재시도 없이 폴백)와 이 창의 notice
@@ -5813,8 +5841,16 @@ pub const AppSession = struct {
                 const legacy_matches = app_remote_host_pool == null and
                     app_remote_client != null and app_remote_client.?.host_id == reconnect_host;
                 if (!legacy_matches and (app_remote_host_pool != null or reconnect_host_id.len > 0)) {
-                    if (!self.ensureRestoreHostAdapter(reconnect_host))
-                        return error.PersistentRuntimeUnavailable;
+                    // 여기서 처음으로 "영구"와 "일시"가 갈린다. host 프로세스가 사라졌다는 긍정적 증거(host_gone)만
+                    // PersistentRuntimeGone으로 올린다 — caller가 그 Term만 종료 placeholder로 둘 수 있게 하는 신호다.
+                    // 나머지는 종전처럼 Unavailable(fail-closed)이다. 오분류 비용이 비대칭이라 보수적으로 가른다:
+                    // 영구를 일시로 보면 창 복원이 한 번 실패할 뿐이지만, 일시를 영구로 보면 살아 있는 세션을
+                    // placeholder로 굳혀 사용자가 되찾을 길이 사라진다(§7 접속 실패 행렬).
+                    switch (self.ensureRestoreHostAdapter(reconnect_host)) {
+                        .ready => {},
+                        .host_gone => return error.PersistentRuntimeGone,
+                        .unavailable => return error.PersistentRuntimeUnavailable,
+                    }
                 }
                 const rb = if (app_remote_backend) |*remote| remote else return error.PersistentRuntimeUnavailable;
                 // `backendForNew()`는 이 함수 초입에서 평가된다. current host bootstrap이 실패한 뒤
@@ -5829,10 +5865,10 @@ pub const AppSession = struct {
                 var rid: [32]u8 = undefined;
                 @memcpy(&rid, reconnect_id[0..32]);
                 const attached = if (pooled)
-                    rb.attachTermOnHost(reconnect_host, id, rid, size) catch return error.PersistentRuntimeUnavailable
+                    rb.attachTermOnHost(reconnect_host, id, rid, size) catch |err| return classifyAttachError(err)
                 else blk: {
                     if (reconnect_host != legacy_client.?.host_id) return error.PersistentRuntimeUnavailable;
-                    break :blk rb.attachTerm(id, rid, size) catch return error.PersistentRuntimeUnavailable;
+                    break :blk rb.attachTerm(id, rid, size) catch |err| return classifyAttachError(err);
                 };
                 reconnected = true;
                 break :surface attached;
@@ -36497,6 +36533,29 @@ test "R3 #3: host가 죽으면 createTerm이 in-process로 폴백한다(새 터�
     }
 }
 
+// attach 실패의 **영구/일시 분류표**를 순수 함수 수준에서 못박는다. 이 분류 하나가 "저장된 세션을 종료 placeholder로
+// 버릴지, 창 복원을 실패시켜 다시 시도할 여지를 남길지"를 가르므로, 오분류 비용이 심하게 비대칭이다: 영구를 일시로
+// 보면 창 복원이 한 번 실패할 뿐이지만, **일시를 영구로 보면 살아 있는 셸·빌드·SSH가 placeholder로 굳어** 사용자가
+// 되찾을 길이 사라진다(§7 접속 실패 행렬). 그래서 영구 승격은 "다시는 붙을 수 없다는 증거가 있는 셋"으로 못박고,
+// 나머지는 전부 fail-closed로 남는지 대조군까지 검사한다(전부 Gone인 구현이 통과하지 못하게).
+test "classifyAttachError: 영구 없음만 Gone으로 올리고 일시 실패는 fail-closed로 남긴다" {
+    // 다시는 붙을 수 없다는 증거 — host가 그 runtime을 모른다 / stale handle이라고 응답 / pool 슬롯이 다른 host로 교체.
+    try std.testing.expectEqual(error.PersistentRuntimeGone, AppSession.classifyAttachError(error.RuntimeNotFound));
+    try std.testing.expectEqual(error.PersistentRuntimeGone, AppSession.classifyAttachError(error.StaleHostHandle));
+    try std.testing.expectEqual(error.PersistentRuntimeGone, AppSession.classifyAttachError(error.HostIdentityMismatch));
+
+    // host나 runtime이 살아 있을 수 있는 것들 — 영구로 승격하면 안 된다.
+    try std.testing.expectEqual(error.PersistentRuntimeUnavailable, AppSession.classifyAttachError(error.ConnectionClosed));
+    try std.testing.expectEqual(error.PersistentRuntimeUnavailable, AppSession.classifyAttachError(error.WriteFailed));
+    try std.testing.expectEqual(error.PersistentRuntimeUnavailable, AppSession.classifyAttachError(error.AttachFailed));
+    try std.testing.expectEqual(error.PersistentRuntimeUnavailable, AppSession.classifyAttachError(error.HostNotFound));
+    try std.testing.expectEqual(error.PersistentRuntimeUnavailable, AppSession.classifyAttachError(error.SpawnHostUnavailable));
+    try std.testing.expectEqual(error.PersistentRuntimeUnavailable, AppSession.classifyAttachError(error.RuntimeAlreadyRegistered));
+
+    // OOM은 host에 대한 증거가 아니라 우리 쪽 사정이라 그대로 전파한다(원인을 host 상태로 오해하지 않게).
+    try std.testing.expectEqual(error.OutOfMemory, AppSession.classifyAttachError(error.OutOfMemory));
+}
+
 // P3-e3-5 재접속 통합 스모크 — restore가 저장한 runtime_id로 createTerm이 **spawn 대신 attach**해 기존 host runtime에
 // 재접속하는지 고정한다(§7). "이전 실행"을 raw runtime.spawn(controller 없는 runtime)으로 흉내 내고, 그 runtime_id를
 // restore_runtime_id에 실어 createTerm을 부르면 새 Term이 그 runtime에 붙어야 한다(fresh spawn이면 다른 runtime_id).
@@ -36580,10 +36639,24 @@ test "P3-e3-5 재접속: restore_runtime_id로 createTerm이 기존 host runtime
         const current_host = std.fmt.bufPrint(&current_host_buf, "{x:0>32}", .{app_remote_client.?.host_id}) catch unreachable;
 
         // 다른 host namespace의 handle은 같은 runtime_id가 우연히 있어도 fresh spawn으로 위장하지 않고 실패한다.
+        // host_id=0은 손상 입력이므로 **일시 실패(Unavailable)로 남는다** — 영구로 승격하면 손상 파일 하나가 살아 있는
+        // 세션을 종료 placeholder로 버리게 된다.
         session.restore_runtime_host_id = "00000000000000000000000000000000";
         session.restore_runtime_id = &prev_rid;
         try std.testing.expectError(
             error.PersistentRuntimeUnavailable,
+            session.createTerm(.{ .command = "/bin/cat" }, .{ .cols = 40, .rows = 10 }, 16, "cat", "/bin/cat"),
+        );
+
+        // 살아 있는 host가 "그 runtime을 모른다"고 응답하면(runtime_not_found) 그 handle은 다시는 붙을 수 없다 →
+        // PersistentRuntimeGone. 위 Unavailable과 갈라야 caller가 **그 Term만** 종료 placeholder로 두고 나머지 레이아웃을
+        // 살릴 수 있다(§7 접속 실패 행렬). 둘을 한 에러로 뭉개면 일시 장애에도 살아 있는 세션을 버리게 된다.
+        // 이 경로는 host RPC 응답의 error envelope까지 실제로 왕복한다(legacy attach → attachExisting → runtime.attach).
+        var absent_rid: [32]u8 = "0123456789abcdef0123456789abcdef".*; // 유효 hex지만 이 host에 spawn된 적 없다
+        session.restore_runtime_host_id = current_host;
+        session.restore_runtime_id = &absent_rid;
+        try std.testing.expectError(
+            error.PersistentRuntimeGone,
             session.createTerm(.{ .command = "/bin/cat" }, .{ .cols = 40, .rows = 10 }, 16, "cat", "/bin/cat"),
         );
 
@@ -37076,9 +37149,11 @@ test "P4 Quit-End-All: alternate가 host-backed runtime을 terminate한다(재�
         // deinit이 host-backed Term을 **terminate**한다(detach 아님).
         session.deinit();
 
-        // 검증: 그 runtime_id에 재접속 시도 → AttachFailed(host RuntimeNotFound = 종료됨). e3-6(detach) 생존과 정반대.
+        // 검증: 그 runtime_id에 재접속 시도 → **RuntimeNotFound**(host가 종료를 긍정적으로 응답). e3-6(detach) 생존과
+        // 정반대다. 명시적으로 끝낸 세션이라 이 신호는 "영구 없음"이 맞다 — 복원이 그 Term을 종료 placeholder로 두는
+        // 근거가 되고, 일시 장애(Unavailable)와 뭉개면 안 된다(§7 접속 실패 행렬).
         var rr2: session_host.remote_runtime.RemoteRuntime = undefined;
-        try std.testing.expectError(error.AttachFailed, rr2.attachExisting(&app_remote_client.?, allocator, io, 99, rid, .{ .cols = 40, .rows = 10 }));
+        try std.testing.expectError(error.RuntimeNotFound, rr2.attachExisting(&app_remote_client.?, allocator, io, 99, rid, .{ .cols = 40, .rows = 10 }));
     } else {
         return error.SkipZigTest;
     }

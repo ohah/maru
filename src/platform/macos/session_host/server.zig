@@ -163,6 +163,11 @@ pub const RuntimeOps = struct {
     /// 실을 수 없어 별도 RPC다 — client는 관측의 `clipboard_write_seq` 증가를 보고 이걸 부른다.
     /// 정책(`osc52` write allow)과 실제 NSPasteboard 쓰기는 client가 한다(§기능 배치 규칙).
     clipboard_write: *const fn (ctx: *anyopaque, runtime_id: u128, allocator: std.mem.Allocator) anyerror![]u8,
+    /// 이 runtime에 **즉시 전달해야 할 이벤트**(BEL·OSC 52)가 core에 대기 중인가. 관측은 평소 약 100ms 주기로
+    /// 폴링하는데(foreground process처럼 폴링 말고는 알 방법이 없는 상태 때문), 벨·클립보드는 발생 시점을
+    /// host가 정확히 아는 **이벤트**라 그 주기를 기다릴 이유가 없다. true면 다음 serve tick(약 20ms)에 바로
+    /// 관측을 만들어 push한다 — 통로는 그대로 두고 트리거만 앞당긴다.
+    observation_urgent: *const fn (ctx: *anyopaque, runtime_id: u128) bool,
 };
 
 /// host-backed 마우스 리포트 wire payload(primitive — codec 순수). `core_command.MouseReport`의 미러다(codec은
@@ -1064,7 +1069,12 @@ pub const Connection = struct {
             // terminal output 없이도 바뀌므로 screen delta 유무로 게이트하면 Claude/Codex 전환을 놓친다. 동일 canonical
             // state는 전송하지 않고, 변화한 최신 full-state만 event 한 건으로 보낸다. client도 stream별 latest로 coalesce한다.
             sub.observation_ticks +%= 1;
-            if (self.runtime_metadata_v1 and sub.observation_ticks >= 5) {
+            // 벨·OSC 52는 host가 발생 시점을 정확히 아는 **이벤트**라 이 주기를 기다릴 이유가 없다. 대기 중이면
+            // 이번 tick(약 20ms)에 바로 관측한다 — 소리·클립보드는 지연이 그대로 체감된다. 주기가 이미 찼으면
+            // short-circuit으로 질의 자체를 건너뛴다(urgent 조회가 core lock을 잡는다).
+            if (self.runtime_metadata_v1 and
+                (sub.observation_ticks >= 5 or ops.observation_urgent(ops.ctx, sub.runtime_id)))
+            {
                 sub.observation_ticks = 0;
                 if (ops.observation(ops.ctx, sub.runtime_id, self.allocator) catch null) |obs_value| {
                     var obs = obs_value;
@@ -1759,6 +1769,8 @@ test "server: hex128 parse rejects malformed runtime ids" {
 /// dispatch가 실 runtime 소유를 위임하는 계약(RuntimeOps)을 검증하는 fake. spawn/terminate에 더해 write_input/resize도
 /// 기록해 input capability 라우팅과 resize 적용이 controller에게만 위임되는지 본다.
 const FakeRuntimeOps = struct {
+    /// 벨·OSC 52가 core에 대기 중인 상황을 흉내낸다(실 pending 조회는 runtime_manager smoke).
+    observation_urgent: bool = false,
     spawn_count: usize = 0,
     spawn_argv0: [64]u8 = undefined,
     spawn_argv0_len: usize = 0,
@@ -1893,6 +1905,11 @@ const FakeRuntimeOps = struct {
         self.selected_text_runtime = runtime_id;
         return allocator.dupe(u8, "{\"text\":\"PICKED\"}");
     }
+    fn observationUrgentFn(ctx: *anyopaque, runtime_id: u128) bool {
+        const self: *FakeRuntimeOps = @ptrCast(@alignCast(ctx));
+        _ = runtime_id;
+        return self.observation_urgent;
+    }
     fn clipboardWriteFn(ctx: *anyopaque, runtime_id: u128, allocator: std.mem.Allocator) anyerror![]u8 {
         _ = ctx;
         _ = runtime_id;
@@ -1967,7 +1984,7 @@ const FakeRuntimeOps = struct {
         };
     }
     fn ops(self: *FakeRuntimeOps) RuntimeOps {
-        return .{ .ctx = self, .spawn = spawnFn, .terminate = terminateFn, .write_input = writeInputFn, .resize = resizeFn, .snapshot = snapshotFn, .delta = deltaFn, .notification = notificationFn, .core_command = coreCommandFn, .selected_text = selectedTextFn, .select_op = selectOpFn, .find = findFn, .observation = observationFn, .report_mouse = reportMouseFn, .link_at = linkAtFn, .clipboard_write = clipboardWriteFn };
+        return .{ .ctx = self, .spawn = spawnFn, .terminate = terminateFn, .write_input = writeInputFn, .resize = resizeFn, .snapshot = snapshotFn, .delta = deltaFn, .notification = notificationFn, .core_command = coreCommandFn, .selected_text = selectedTextFn, .select_op = selectOpFn, .find = findFn, .observation = observationFn, .report_mouse = reportMouseFn, .link_at = linkAtFn, .clipboard_write = clipboardWriteFn, .observation_urgent = observationUrgentFn };
     }
 };
 
@@ -2332,6 +2349,52 @@ test "server: runtime metadata requires hello capability and fresh observation s
             allocator.free(frames);
         }
         try testing.expectEqual(@as(usize, 1), frames.len); // barrier state와 같아 metadata event 중복 없음.
+    }
+}
+
+test "server: 벨·OSC 52가 대기 중이면 관측 주기를 기다리지 않고 즉시 push한다" {
+    const allocator = testing.allocator;
+    var registry = reg.TerminalRuntimeRegistry.init(allocator);
+    defer registry.deinit();
+    _ = try registry.register(0xCC, 80, 24);
+    var fake: FakeRuntimeOps = .{};
+    var conn = Connection.init(allocator, 1, &registry);
+    defer conn.deinit();
+    conn.runtime_ops = fake.ops();
+    {
+        const h = try feedJson(&conn, .hello, 1, "{\"protocol_min\":2,\"protocol_max\":2,\"capabilities\":[\"runtime_metadata_v1\"]}");
+        if (h.frame) |f| f.deinit(allocator);
+    }
+    {
+        const frames = try feedExpectFrames(&conn, .request, 2, "{\"method\":\"runtime.attach\",\"params\":{\"runtime_id\":\"cc\",\"mode\":\"observer\"}}");
+        defer {
+            for (frames) |f| f.deinit(allocator);
+            allocator.free(frames);
+        }
+    }
+
+    // 기준선: attach 직후 첫 tick은 관측을 싣지 않는다(delta frame 1개뿐) — 주기(5 tick)가 아직 안 찼다.
+    {
+        const frames = (try conn.collectDeltas()).?;
+        defer {
+            for (frames) |wire| allocator.free(wire);
+            allocator.free(frames);
+        }
+        try testing.expectEqual(@as(usize, 1), frames.len);
+    }
+
+    // 벨이 대기 중이면 같은 자리(2번째 tick)에서 관측 event가 함께 나간다 — 100ms를 기다리지 않는다.
+    fake.observation_urgent = true;
+    fake.observation_version = 1; // 관측 내용이 바뀌어야 "동일 state 미전송"에 걸리지 않는다
+    {
+        const frames = (try conn.collectDeltas()).?;
+        defer {
+            for (frames) |wire| allocator.free(wire);
+            allocator.free(frames);
+        }
+        try testing.expectEqual(@as(usize, 2), frames.len);
+        try testing.expect(std.mem.indexOf(u8, frames[0], "runtime.metadata") != null); // 관측 event가 screen delta보다 먼저 실린다
+        try testing.expect(std.mem.indexOf(u8, frames[1], "DELTA-BYTES") != null);
     }
 }
 

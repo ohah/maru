@@ -152,7 +152,7 @@ pub const RuntimeManager = struct {
 
     /// server.zig가 dispatch에 넘길 중립 vtable. `ctx`는 이 매니저다.
     pub fn runtimeOps(self: *RuntimeManager) server.RuntimeOps {
-        return .{ .ctx = self, .spawn = spawnOp, .terminate = terminateOp, .write_input = writeInputOp, .resize = resizeOp, .snapshot = snapshotOp, .delta = deltaOp, .notification = notificationOp, .core_command = coreCommandOp, .selected_text = selectedTextOp, .select_op = selectOpOp, .find = findOp, .observation = observationOp, .report_mouse = reportMouseOp, .link_at = linkAtOp, .clipboard_write = clipboardWriteOp };
+        return .{ .ctx = self, .spawn = spawnOp, .terminate = terminateOp, .write_input = writeInputOp, .resize = resizeOp, .snapshot = snapshotOp, .delta = deltaOp, .notification = notificationOp, .core_command = coreCommandOp, .selected_text = selectedTextOp, .select_op = selectOpOp, .find = findOp, .observation = observationOp, .report_mouse = reportMouseOp, .link_at = linkAtOp, .clipboard_write = clipboardWriteOp, .observation_urgent = observationUrgentOp };
     }
 
     pub const OwnerDrainSummary = struct {
@@ -1153,6 +1153,20 @@ pub const RuntimeManager = struct {
         var js: std.json.Stringify = .{ .writer = &out.writer, .options = .{} };
         js.write(.{ .text = extracted.text, .kind = @intFromEnum(extracted.kind) }) catch return error.OutOfMemory;
         return allocator.dupe(u8, out.written()) catch return error.OutOfMemory;
+    }
+
+    /// 즉시 관측이 필요한가 — core에 BEL이나 OSC 52 요청이 대기 중이면 true. **소비하지 않는다**(관측을 만들 때
+    /// observationOp가 drain한다). 상태 폴링 주기(약 100ms)를 기다리면 소리·클립보드 지연이 그대로 체감되므로,
+    /// 이벤트가 있을 때만 다음 serve tick(약 20ms)으로 앞당기는 트리거다.
+    fn observationUrgentOp(ctx: *anyopaque, runtime_id: u128) bool {
+        const self: *RuntimeManager = @ptrCast(@alignCast(ctx));
+        const handle = self.handleFor(runtime_id) orelse return false;
+        const surface = self.backend_impl.surfaceFor(handle) orelse return false;
+        surface.lockCore(self.io);
+        defer surface.unlockCore(self.io);
+        return surface.core.bellPending() or
+            surface.core.pendingClipboardWrite().len > 0 or
+            surface.core.clipboardReadPending();
     }
 
     /// OSC 52 write 텍스트를 client에 넘긴다. **base64로 싣는다** — OSC 52 데이터는 임의 바이트(0x80~0xFF 포함)라

@@ -522,15 +522,18 @@ sequenceDiagram
 9. 같은 runtime을 manifest의 두 writable Term 슬롯에 bind하면 잘못된 파일로 거부한다. 한 runtime의 canonical writable placement는 하나다.
 
 **현재 구현 범위:** 1–6의 deferred/attach/rollback과 stale host·missing runtime fail-closed는 P3 core에 구현됐다.
-7의 per-Term ended placeholder, 8의 `Recovered Sessions`, 9의 manifest 전역 중복 검증은 P4 계획이다. 현재 누락 runtime은
-해당 Window apply를 실패시키며, 추가 Window는 teardown하고 primary는 명시적인 새 default-shell fallback으로 전환하되
-마지막 완전 checkpoint를 자동 저장으로 덮지 않는다.
+**7의 per-Term ended placeholder는 구현됐다** — 영구 부재로 분류된 runtime만 그 Term을 읽기 전용 placeholder로 두고
+나머지 surface·split·탭·창 frame은 정상 복원한다(화면 내 지속 안내와 `⏎` 되살리기는 후속). 8의 `Recovered Sessions`,
+9의 manifest 전역 중복 검증은 여전히 P4 계획이다. 일시 실패로 분류된 누락 runtime은 종전처럼 해당 Window apply를
+실패시키며, 추가 Window는 teardown하고 primary는 명시적인 새 default-shell fallback으로 전환하되 마지막 완전
+checkpoint를 자동 저장으로 덮지 않는다.
 
 ### 접속 실패 행렬 (목표 계약)
 
-현재 P3 core는 host/host_id/runtime 불일치를 해당 Window apply 실패로 fail-close한다. additional Window는 teardown하고
-primary는 notice가 보이는 명시적 default-shell fallback으로 전환하며 checkpoint 자동 저장을 막는다. 아래 per-Term
-ended placeholder와 orphan recovery entry는 P4에서 구현한다.
+host/host_id/runtime 불일치는 **분류에 따라 갈린다**(아래 표). 영구 부재는 그 Term만 per-Term ended placeholder로 두고
+창 apply를 성공시키며, 일시 실패는 종전처럼 해당 Window apply 실패로 fail-close한다(additional Window는 teardown,
+primary는 notice가 보이는 명시적 default-shell fallback + checkpoint 자동 저장 차단). orphan recovery entry
+(`Recovered Sessions`)는 여전히 P4에서 구현한다.
 
 **실패 원인 분류(구현됨).** ended placeholder는 "이 handle이 **다시는** 붙을 수 없다"가 참일 때만 세울 수 있으므로,
 그 판정에 쓸 구분을 attach 경로가 먼저 만든다. 오분류 비용이 비대칭이기 때문이다 — 영구를 일시로 보면 창 복원이 한 번
@@ -547,9 +550,17 @@ ended placeholder와 orphan recovery entry는 P4에서 구현한다.
 | 소켓 끊김·타임아웃·`controller_busy`·`unauthorized`·`queue_invalidated`·미지 error code | `PersistentRuntimeUnavailable` | runtime이 살아 있을 수 있다 |
 | handle 형식 손상(길이·대소문자·구분자) | `InvalidPersistentRuntimeIdentity` | 존재하는 손상은 숨기지 않는다 |
 
-**두 에러는 아직 같게 처리된다** — `PersistentRuntimeGone`도 현재는 해당 Window apply 실패로 fail-close한다. 분류만
-선행 도입하고 placeholder 전환은 P4에서 이 신호를 소비한다. 분류를 placeholder와 같은 변경에 넣지 않는 이유는, 오분류
-회귀가 곧바로 checkpoint 오염으로 이어져 재현·롤백이 불가능한 손실이 되기 때문이다.
+**두 에러의 귀결(구현됨).** `PersistentRuntimeGone`은 `createRestoredTerm`이 catch해 **그 Term만 종료 placeholder**로
+바꾸고 창 apply는 성공시킨다 — 탭·split·창 frame이 살아남는다. `PersistentRuntimeUnavailable`은 그대로 전파해 창 apply를
+실패시키는 현행 fail-close를 유지한다. 분류를 이 전환보다 **먼저** 별도로 도입한 이유는, 오분류 회귀가 곧바로
+checkpoint 오염으로 이어져 재현·롤백이 불가능한 손실이 되기 때문이다.
+
+**checkpoint 래치는 손대지 않았다.** placeholder가 생긴 창은 apply가 성공하므로 `workspaceRestoreIncomplete`가 서지
+않고 다음 Quit의 자동 저장이 진행된다 — 되살리지 않은 묘비가 `runtime-handle` 없이 cwd만 남기고 저장되는 의도된
+결과다. 이것이 안전한 이유는 두 가지가 이미 성립하기 때문이다: (1) 일시 실패(`Unreachable`)는 placeholder가 되지 않고
+여전히 창을 실패시켜 래치를 세운다 — 즉 "`Unreachable` 묘비"라는 범주는 **구조적으로 존재하지 않는다**, (2) 복원이
+조용히 버린 파일 패널 entry·dock 그룹·explorer root는 `take_workspace_restore_dropped`가 별도로 래치를 세운다. 두 가드
+중 하나라도 없으면 placeholder 성공이 "부분 복원을 저장해 원본을 덮는" 경로가 된다.
 
 **종료 placeholder 객체(구현됨, 아직 복원이 만들지 않음).** placeholder Term 자체와 그 수명은 `TermRuntime.ended_placeholder`
 + `createEndedPlaceholderTerm`으로 구현했다. `SurfaceKind`(닫힌 열거)를 확장하지 않고 `kind = .terminal`을 유지하며

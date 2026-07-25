@@ -1133,6 +1133,10 @@ const TermRuntime = struct {
     /// 채우는 borrowed 필드이고, 묘비는 spawn을 하지 않으며 복원 입력(파싱 arena)은 apply 직후 해제되므로 owned 복사가
     /// 필요하다. title·cwd는 이미 owned 저장소가 있는 `auto_title`·`observation`에 심어 capture가 무변경으로 읽는다.
     ended_command: []const u8 = "",
+    /// durable tombstone이 가리키던 exact identity. 복원 parser arena를 빌리지 않고 Term 수명 동안 owned로 보존해
+    /// capture가 반복 relaunch에도 같은 handle을 기록한다.
+    ended_runtime_host_id: []const u8 = "",
+    ended_runtime_id: []const u8 = "",
 };
 
 // 이 테스트가 증명하는 것(그리고 터미널에서 왜 중요한가): persistent-session P2 seam의 완료 조건은 "GUI layout이
@@ -1948,6 +1952,9 @@ pub const AppSession = struct {
     /// §7 종료 placeholder로 복원한 Term 수(첫 tick에 한 번 알리고 0으로 비운다 — host connect notice와 같은 self-gate).
     /// 복원은 AppSession init 중이라 chrome이 없어 그 자리에서 notice를 못 띄운다.
     ended_placeholder_notice_pending: u32 = 0,
+    /// 이번 restore에서 live handle을 positive-Gone으로 새로 강등한 수. 이미 durable ended였던 surface는 완전히
+    /// 표현되므로 dropped가 아니다. notice 회계와 backup 회계를 분리해 두 의미가 소비 순서에 얽히지 않게 한다.
+    ended_placeholder_dropped_pending: u32 = 0,
     // surface teardown의 단일 chokepoint(destroyTerm + deinit direct pass)가 알리는 선택적 관찰 훅. cross-window move는
     // destroy가 아니라 소유 이전이므로 호출하지 않는다. app_host_abi가 browser grant/wait 수명에 연결한다.
     surface_closed_context: ?*anyopaque = null,
@@ -5861,6 +5868,28 @@ pub const AppSession = struct {
         self.showNotice(msg);
     }
 
+    const RestoreAccountingSnapshot = struct {
+        notice: u32,
+        dropped: u32,
+
+        fn capture(session: *const AppSession) RestoreAccountingSnapshot {
+            return .{
+                .notice = session.ended_placeholder_notice_pending,
+                .dropped = session.ended_placeholder_dropped_pending,
+            };
+        }
+
+        fn restore(snapshot: RestoreAccountingSnapshot, session: *AppSession) void {
+            session.ended_placeholder_notice_pending = snapshot.notice;
+            session.ended_placeholder_dropped_pending = snapshot.dropped;
+        }
+    };
+
+    fn recordEndedPlaceholder(self: *AppSession, newly_gone: bool) void {
+        self.ended_placeholder_notice_pending += 1;
+        if (newly_gone) self.ended_placeholder_dropped_pending += 1;
+    }
+
     /// GUI 바이너리의 형제 `maru` CLI 경로(§10 launcher가 `maru __session-host`로 exec). selfExePath는 앱 바이너리라
     /// dirname의 형제 `maru`를 쓴다. 못 찾으면 null. **형제 maru 경로 도출의 단일 출처** — `installCli`도 이걸 쓴다(code-review #15).
     fn siblingMaruPath(self: *AppSession, a: std.mem.Allocator) ?[:0]const u8 {
@@ -6134,6 +6163,8 @@ pub const AppSession = struct {
         term.auto_title.deinit(self.allocator);
         term.rt.observation.deinit(self.allocator);
         if (term.rt.ended_command.len > 0) self.allocator.free(term.rt.ended_command); // §7 묘비 owned command(deinit과 동기 유지)
+        if (term.rt.ended_runtime_host_id.len > 0) self.allocator.free(term.rt.ended_runtime_host_id);
+        if (term.rt.ended_runtime_id.len > 0) self.allocator.free(term.rt.ended_runtime_id);
         self.allocator.destroy(term);
     }
 
@@ -6191,6 +6222,8 @@ pub const AppSession = struct {
         cwd: []const u8,
         command: []const u8,
         size: terminal.Size,
+        runtime_host_id: []const u8,
+        runtime_id: []const u8,
     ) !*Term {
         const term = try self.allocator.create(Term);
         errdefer self.allocator.destroy(term);
@@ -6204,6 +6237,14 @@ pub const AppSession = struct {
         errdefer self.live_registry.removeUninitialized(id) catch {};
         term.surface.* = try maru.session.Surface.init(self.allocator, id, terminal.clampGridSize(size));
         errdefer self.live_registry.remove(id) catch {};
+        // 아래 metadata는 Term-owned다. 중간 OOM에서도 registry뿐 아니라 이미 복사한 문자열을 모두 되돌린다.
+        errdefer {
+            term.auto_title.deinit(self.allocator);
+            term.rt.observation.deinit(self.allocator);
+            if (term.rt.ended_command.len > 0) self.allocator.free(term.rt.ended_command);
+            if (term.rt.ended_runtime_host_id.len > 0) self.allocator.free(term.rt.ended_runtime_host_id);
+            if (term.rt.ended_runtime_id.len > 0) self.allocator.free(term.rt.ended_runtime_id);
+        }
 
         // createTerm과 같은 core 정책 chokepoint — 안내 텍스트가 사용자 테마·폭 규칙으로 보이게 한다.
         term.surface.core.setConfigPalette(self.appearance.theme.palette);
@@ -6225,6 +6266,8 @@ pub const AppSession = struct {
             .window_title = title,
         });
         term.rt.ended_command = try self.allocator.dupe(u8, command);
+        term.rt.ended_runtime_host_id = try self.allocator.dupe(u8, runtime_host_id);
+        term.rt.ended_runtime_id = try self.allocator.dupe(u8, runtime_id);
         return term;
     }
 
@@ -22679,7 +22722,12 @@ pub const AppSession = struct {
                 // 바뀐 뒤 같은 숫자 namespace를 잘못 attach할 수 있으므로 live capture는 둘 중 하나만 만들지 않는다.
                 var runtime_host_id: []const u8 = "";
                 var runtime_id: []const u8 = "";
-                if (is_macos and term.surface.remote != null) {
+                var runtime_state: maru.session.workspace.RuntimeState = .live;
+                if (term.rt.ended_placeholder) {
+                    runtime_host_id = try arena.dupe(u8, term.rt.ended_runtime_host_id);
+                    runtime_id = try arena.dupe(u8, term.rt.ended_runtime_id);
+                    runtime_state = .ended;
+                } else if (is_macos and term.surface.remote != null) {
                     const rb = if (app_remote_backend) |*remote| remote else return error.PersistentRuntimeUnavailable;
                     const rid = rb.runtimeIdFor(term.rt.handle) orelse return error.PersistentRuntimeUnavailable;
                     const runtime_host = rb.runtimeHostId(term.rt.handle) orelse return error.PersistentRuntimeUnavailable;
@@ -22694,10 +22742,9 @@ pub const AppSession = struct {
                     // §7 종료 placeholder는 spawn을 안 해 `surface.command`가 비어 있다 — 복원 입력에서 옮겨 둔 owned
                     // 사본을 쓴다. title·cwd·grid는 생성 시 observation에 `.stale`로 심어서 위 두 줄이 그대로 읽는다.
                     .command = try arena.dupe(u8, if (term.rt.ended_placeholder) term.rt.ended_command else (term.surface.command orelse "")),
-                    // 묘비는 `surface.remote == null`이라 위 rid/host 블록을 타지 않아 **handle이 자동으로 빈값**이다.
-                    // 죽은 handle을 재기록하지 않는 것이 의도다 — 다음 실행은 선언적 restore로 이 cwd의 평범한 새 셸을 연다.
                     .runtime_host_id = runtime_host_id,
                     .runtime_id = runtime_id,
+                    .runtime_state = runtime_state,
                     .cols = observed_size.cols,
                     .rows = observed_size.rows,
                 });
@@ -22898,6 +22945,11 @@ pub const AppSession = struct {
         if (self.hasProtectedFilePanelsForExit() or self.hasFilePanelCloseTransition() or self.fileTreeNamespaceMutationBusy())
             return error.UnsupportedMove;
 
+        // restore build가 OOM/후속 surface 실패로 publish되지 않으면 후보 Term이 올린 notice/drop 회계도 존재하지 않았던
+        // 일이어야 한다. 모델 교체와 같은 transaction에 묶어 다음 tick/재시도에 유령 count가 남지 않게 한다.
+        const restore_accounting_before = RestoreAccountingSnapshot.capture(self);
+        errdefer restore_accounting_before.restore(self);
+
         var new_dock = try dock_panel.DockPanel.restore(self.allocator, &app_runtime.entry_ids, win.dock);
         var new_dock_owned = true;
         errdefer if (new_dock_owned) new_dock.deinit();
@@ -22905,11 +22957,7 @@ pub const AppSession = struct {
         // 한 지역 변수에 모아 성공 publish 뒤 세션 필드로 넘긴다. 실패 경로에서는 기록하지 않는다 — 창 apply 자체가
         // 실패하면 Swift가 이미 checkpoint 차단 래치를 세우므로 신호가 중복이고, errdefer 롤백과 순서를 다툴 이유도 없다.
         var dropped: usize = 0;
-        // §7 묘비도 **버린 것**이다 — 그것도 가장 비싼 쪽이다. 묘비로 복원한 Term은 저장돼 있던 runtime_host_id/
-        // runtime_id를 잃고(`captureWorkspaceTab`이 빈 값으로 쓴다), 그 handle이 사실은 살아 있었다면(접속을 영구
-        // 부재로 오분류) 다음 checkpoint가 **살아 있는 host runtime을 영구히 고아로 만든다**. 도크 entry 하나가 막는
-        // checkpoint를 이쪽이 안 막는 비대칭을 없앤다(code-review). 아래 publish 뒤 차이로 개수를 센다.
-        const placeholders_before = self.ended_placeholder_notice_pending;
+        const newly_ended_before = self.ended_placeholder_dropped_pending;
         dropped += self.pruneInvalidRestoredFilePanelEntries(&new_dock);
         // capability validation can empty a leaf after DockPanel.restore already normalized the wire tree.
         // Publish/assign surface IDs only after applying the same empty-leaf invariant a second time.
@@ -23055,7 +23103,7 @@ pub const AppSession = struct {
         self.metal_dirty = true;
         // publish가 끝난 뒤에만 기록한다(실패 경로는 창 apply 실패로 이미 신호가 있다). Swift가 apply 성공 직후
         // take_workspace_restore_dropped로 소비해 0이 아니면 이번 실행의 checkpoint를 마지막 완전본 백업 뒤에 쓴다.
-        dropped += self.ended_placeholder_notice_pending - placeholders_before; // 이 창이 만든 묘비 수(위 주석)
+        dropped += self.ended_placeholder_dropped_pending - newly_ended_before;
         self.workspace_restore_dropped = std.math.lossyCast(u32, dropped);
         if (builtin.mode == .Debug) assertPinnedPrefixRuntime(self); // 복원 후 불변식 확인(디버그)
     }
@@ -23199,26 +23247,56 @@ pub const AppSession = struct {
         return try self.allocator.dupe(u8, name);
     }
 
+    const RestoreFailureDisposition = enum { ended };
+
+    /// createTerm 실패를 durable tombstone 전이와 fail-close로 나누는 순수 경계. legacy bare runtime-id는 current host로
+    /// attach를 시도할 수 있어도 manifest가 exact host namespace를 증명하지 않으므로 Gone을 저장 가능한 묘비로 승격하지 않는다.
+    fn restoreFailureDisposition(err: anyerror, has_exact_host: bool) anyerror!RestoreFailureDisposition {
+        if (err != error.PersistentRuntimeGone) return err;
+        if (!has_exact_host) return error.PersistentRuntimeUnavailable;
+        return .ended;
+    }
+
     /// 복원 surface 하나를 라이브 Term으로 만드는 **단일 분기점**. host runtime이 영구히 없으면
     /// (`error.PersistentRuntimeGone`) 창 전체를 실패시키는 대신 **그 Term만 종료 placeholder**로 만들어, 탭·split·창
     /// frame은 정상 복원한다(§7 "나머지는 attach, 누락 Term만 종료 placeholder"). `PersistentRuntimeUnavailable`은 그대로
     /// 전파해 현행 fail-close를 유지한다 — 일시 실패를 placeholder로 굳히면 살아 있는 runtime을 영구히 잃는다.
     /// pane 진입점과 term 진입점이 이 함수를 공유해 분기가 한 곳에만 있다.
     fn createRestoredTerm(self: *AppSession, sm: maru.session.workspace.Surface) !*Term {
+        if (sm.runtime_state == .ended) {
+            self.recordEndedPlaceholder(false);
+            // 이미 완전하게 표현된 tombstone은 attach/probe/spawn 경계에 들어가지 않는다. restoreSpawn도 호출하지 않아
+            // 임시 identity 채널을 오염시키지 않는다.
+            return try self.createEndedPlaceholderTerm(
+                sm.title,
+                sm.cwd,
+                sm.command,
+                restoreSurfaceSize(sm),
+                sm.runtime_host_id,
+                sm.runtime_id,
+            );
+        }
         const rs = self.restoreSpawn(sm);
         errdefer self.clearRestoreRuntimeIdentity();
         const cfg = self.new_tab_config;
         return self.createTerm(rs.req, rs.size, cfg.queue_capacity, "Maru", commandName(cfg.command_kind)) catch |err| {
-            if (err != error.PersistentRuntimeGone) return err;
+            _ = try restoreFailureDisposition(err, sm.runtime_host_id.len > 0);
             self.clearRestoreRuntimeIdentity(); // createTerm이 이미 소비했지만 멱등 방어
-            self.ended_placeholder_notice_pending += 1;
+            self.recordEndedPlaceholder(true);
             // 관측: 묘비 1개당 한 줄(MARU_DEBUG 게이트). **cwd는 남기지 않는다** — 홈 경로가 노출되면
             // project-rules.md redaction 기준에 걸린다. host/runtime id는 opaque hex라 안전하다.
             if (diag_gate.maruDebugEnabled()) std.log.scoped(.restore).info(
                 "ended placeholder host={s} runtime={s} cols={d} rows={d}",
                 .{ sm.runtime_host_id, sm.runtime_id, rs.size.cols, rs.size.rows },
             );
-            return try self.createEndedPlaceholderTerm(sm.title, sm.cwd, sm.command, rs.size);
+            return try self.createEndedPlaceholderTerm(
+                sm.title,
+                sm.cwd,
+                sm.command,
+                rs.size,
+                sm.runtime_host_id,
+                sm.runtime_id,
+            );
         };
     }
 
@@ -28184,6 +28262,8 @@ pub const AppSession = struct {
                     term.auto_title.deinit(self.allocator);
                     term.rt.observation.deinit(self.allocator);
                     if (term.rt.ended_command.len > 0) self.allocator.free(term.rt.ended_command); // 묘비 owned command
+                    if (term.rt.ended_runtime_host_id.len > 0) self.allocator.free(term.rt.ended_runtime_host_id);
+                    if (term.rt.ended_runtime_id.len > 0) self.allocator.free(term.rt.ended_runtime_id);
                     // P3-e3-4d: 원격 Term은 live_registry가 아니라 **앱 전역 backend**가 소유하므로 여기서 회수한다(SurfaceRuntime
                     // detach + rr deinit + 공유 backend map에서 제거). 창 close가 이 창의 원격 Term만 뺀다(공유 backend 자체는 안
                     // 닫음). in-process/web Term은 기존대로 live_registry.remove.
@@ -36851,7 +36931,14 @@ test "종료 placeholder: 화면 안내가 남고 ⏎만 같은 슬롯을 새 �
     defer session.deinit();
 
     const pane = session.activePane();
-    const tomb = try session.createEndedPlaceholderTerm("배포 감시", "/tmp", "/bin/zsh", .{ .cols = 80, .rows = 24 });
+    const tomb = try session.createEndedPlaceholderTerm(
+        "배포 감시",
+        "/tmp",
+        "/bin/zsh",
+        .{ .cols = 80, .rows = 24 },
+        "1234567890abcdef1234567890abcdef",
+        "fedcba0987654321fedcba0987654321",
+    );
     try pane.terms.append(a, tomb);
     session.focusTerm(pane.terms.items.len - 1);
     const tomb_index = pane.active_term;
@@ -36897,6 +36984,8 @@ test "종료 placeholder: 화면 안내가 남고 ⏎만 같은 슬롯을 새 �
     const fresh = pane.terms.items[tomb_index];
     try std.testing.expect(!fresh.rt.ended_placeholder);
     try std.testing.expect(fresh.rt.live_initialized);
+    try std.testing.expectEqual(@as(usize, 0), fresh.rt.ended_runtime_host_id.len);
+    try std.testing.expectEqual(@as(usize, 0), fresh.rt.ended_runtime_id.len);
     // 대표 surface가 새 Term으로 재바인딩됐다(탭바·렌더가 이걸 읽는다 — 안 하면 해제된 묘비 surface를 가리킨다).
     try std.testing.expectEqual(fresh.surface, session.surface_ptrs.items[session.app_window.active_tab]);
 }
@@ -36914,7 +37003,7 @@ test "종료 placeholder: 파일 트리가 입력을 가지면 ⏎·드롭이 �
     defer session.deinit();
 
     const pane = session.activePane();
-    const tomb = try session.createEndedPlaceholderTerm("배포 감시", "/tmp", "/bin/zsh", .{ .cols = 80, .rows = 24 });
+    const tomb = try session.createEndedPlaceholderTerm("배포 감시", "/tmp", "/bin/zsh", .{ .cols = 80, .rows = 24 }, "", "");
     try pane.terms.append(a, tomb);
     session.focusTerm(pane.terms.items.len - 1);
     const tomb_index = pane.active_term;
@@ -36944,7 +37033,7 @@ test "종료 placeholder: 되살리기가 사용자 rename을 승계한다" {
     defer session.deinit();
 
     const pane = session.activePane();
-    const tomb = try session.createEndedPlaceholderTerm("끝난 세션", "/tmp", "/bin/zsh", .{ .cols = 80, .rows = 24 });
+    const tomb = try session.createEndedPlaceholderTerm("끝난 세션", "/tmp", "/bin/zsh", .{ .cols = 80, .rows = 24 }, "", "");
     try pane.terms.append(a, tomb);
     session.focusTerm(pane.terms.items.len - 1);
     const tomb_index = pane.active_term;
@@ -36969,7 +37058,7 @@ test "종료 placeholder: 제목·경로가 버퍼를 넘겨도 ⏎ 힌트가 �
     // 고정 버퍼(768B)를 확실히 넘기는 길이 — 한글 제목 480B + 깊은 경로 598B.
     const long_title = "한글제목" ** 40;
     const long_cwd = "/very/deep/project/path" ** 26;
-    const tomb = try session.createEndedPlaceholderTerm(long_title, long_cwd, "/bin/zsh", .{ .cols = 80, .rows = 24 });
+    const tomb = try session.createEndedPlaceholderTerm(long_title, long_cwd, "/bin/zsh", .{ .cols = 80, .rows = 24 }, "", "");
     try session.activePane().terms.append(a, tomb);
 
     session.writeEndedPlaceholderGuidance(tomb);
@@ -37000,7 +37089,7 @@ test "종료 placeholder: 레이아웃 resize가 저장될 grid까지 옮긴다"
     defer a.destroy(session);
     defer session.deinit();
 
-    const tomb = try session.createEndedPlaceholderTerm("끝난 세션", "/tmp", "/bin/zsh", .{ .cols = 80, .rows = 24 });
+    const tomb = try session.createEndedPlaceholderTerm("끝난 세션", "/tmp", "/bin/zsh", .{ .cols = 80, .rows = 24 }, "", "");
     try session.activePane().terms.append(a, tomb);
     try session.resizeTermForLayout(tomb, .{ .cols = 120, .rows = 40 });
     try std.testing.expectEqual(@as(u16, 120), tomb.rt.observation.size.cols);
@@ -37025,7 +37114,7 @@ test "드롭 라우팅: 묘비 pane은 refused (포커스도 뺏지 않는다)" 
 
     // 대상 pane의 활성 Term을 묘비로 바꾼다(제자리 교체 — 슬롯 수·트리 불변).
     const dead = tomb_pane.terms.items[tomb_pane.active_term];
-    const tomb = try session.createEndedPlaceholderTerm("끝난 세션", "/tmp", "/bin/zsh", .{ .cols = 80, .rows = 24 });
+    const tomb = try session.createEndedPlaceholderTerm("끝난 세션", "/tmp", "/bin/zsh", .{ .cols = 80, .rows = 24 }, "", "");
     tomb_pane.terms.items[tomb_pane.active_term] = tomb;
     session.destroyTerm(dead);
     session.surface_ptrs.items[session.app_window.active_tab] = session.activePane().activeTerm().surface;
@@ -37090,6 +37179,8 @@ test "종료 placeholder 복원: runtime 없는 Term만 묘비가 되고 탭·sp
     const prev_keep = app_keep_alive_after_quit;
     app_keep_alive_after_quit = true;
     defer app_keep_alive_after_quit = prev_keep;
+    const prev_host_connect_failed = host_connect_failed;
+    defer host_connect_failed = prev_host_connect_failed;
 
     var arena = std.heap.ArenaAllocator.init(a);
     defer arena.deinit();
@@ -37134,9 +37225,8 @@ test "종료 placeholder 복원: runtime 없는 Term만 묘비가 되고 탭·sp
     session.showPendingEndedPlaceholderNotice();
     try std.testing.expectEqual(@as(u32, 0), session.ended_placeholder_notice_pending); // self-gate: 두 번 안 띄운다
 
-    // code-review(max): 묘비는 저장돼 있던 runtime handle을 **버린 것**이고, 그것도 가장 비싼 쪽이다(다음 capture가
-    // 빈 handle을 쓴다). 도크 entry 하나가 막는 checkpoint 신호를 이쪽이 안 세우면, 접속을 영구 부재로 한 번만
-    // 오분류해도 살아 있는 host runtime이 영구히 고아가 된다. Swift는 이 신호로 마지막 완전본 .bak 보존을 켠다.
+    // code-review(max): durable wire가 exact handle을 보존해도 첫 영구 부재 판정이 오분류일 수 있다. Recovered Sessions
+    // UI 전에는 되돌릴 경로가 없으므로 첫 live→ended 전이만 마지막 완전본 .bak 신호를 세운다.
     try std.testing.expectEqual(@as(u32, 1), session.takeWorkspaceRestoreDropped());
     // 같은 죽은 host를 가리키는 다음 surface는 blocking backoff(10×20ms)를 되풀이하지 않는다 — negative memo가 남는다.
     try std.testing.expectEqual(@as(u128, 0x1234_5678_90ab_cdef_1234_5678_90ab_cdef), session.restore_gone_host_id);
@@ -37160,7 +37250,7 @@ test "종료 placeholder: teardown·세션 종료 판정·resize·reap 관문을
     const live_term = pane.activeTerm();
     const before_slots = session.live_registry.count();
 
-    const tomb = try session.createEndedPlaceholderTerm("빌드 로그", "/tmp", "/bin/zsh", .{ .cols = 80, .rows = 24 });
+    const tomb = try session.createEndedPlaceholderTerm("빌드 로그", "/tmp", "/bin/zsh", .{ .cols = 80, .rows = 24 }, "", "");
     try pane.terms.append(allocator, tomb);
 
     // 정체성: kind는 .terminal이라 렌더 경로가 그대로 돌고, PTY 계열은 전부 미할당이다.
@@ -37202,14 +37292,134 @@ test "종료 placeholder: teardown·세션 종료 판정·resize·reap 관문을
     try std.testing.expectEqual(before_slots, session.live_registry.count());
 }
 
-// 묘비가 **다시 저장될 때** 마지막 title·cwd·grid를 잃지 않고 죽은 runtime-handle을 남기지 않는지 못박는다.
+// 이미 durable tombstone으로 저장된 surface는 host의 생사와 keep-alive 설정을 다시 묻지 않는다. 이 테스트의 handle은
+// 어떤 registry에도 없으므로 일반 live 복원 경로에 들어가면 attach/spawn 결과가 달라진다. 직접 placeholder가 되고
+// dropped 신호가 0인 사실이 두 번째 이후 relaunch의 side-effect 0 계약을 고정한다.
+test "durable tombstone restore는 attach와 spawn 없이 placeholder를 직접 복원한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    var win = try session.captureWorkspaceWindow(arena.allocator(), false, null);
+    const surfaces = [_]maru.session.workspace.Surface{.{
+        .title = "이미 끝난 세션",
+        .cwd = "/tmp",
+        .command = "/bin/zsh",
+        .runtime_host_id = "1234567890abcdef1234567890abcdef",
+        .runtime_id = "fedcba0987654321fedcba0987654321",
+        .runtime_state = .ended,
+        .cols = 100,
+        .rows = 30,
+    }};
+    const panes = [_]maru.session.workspace.Pane{.{ .surfaces = &surfaces }};
+    const tree = [_]maru.session.workspace.TreeNode{.{ .leaf = 0 }};
+    const tabs = [_]maru.session.workspace.Tab{.{ .tree = &tree, .panes = &panes }};
+    win.tabs = &tabs;
+
+    session.restore_runtime_host_id = "restore-spawn-sentinel";
+    session.restore_runtime_id = "restore-spawn-sentinel";
+    try session.applyWorkspaceWindow(win);
+    const tomb = session.tabs.items[0].panes.items[0].terms.items[0];
+    try std.testing.expect(tomb.rt.ended_placeholder);
+    try std.testing.expect(!tomb.rt.live_initialized);
+    try std.testing.expectEqualStrings(surfaces[0].runtime_host_id, tomb.rt.ended_runtime_host_id);
+    try std.testing.expectEqualStrings(surfaces[0].runtime_id, tomb.rt.ended_runtime_id);
+    try std.testing.expectEqual(@as(u32, 0), session.takeWorkspaceRestoreDropped());
+    // restoreSpawn이 호출되면 이 임시 채널은 surface handle로 덮였다가 clear된다. sentinel 유지가 tombstone branch가
+    // attach/probe/spawn 공통 진입점보다 앞에서 끝났음을 직접 증명한다.
+    try std.testing.expectEqualStrings("restore-spawn-sentinel", session.restore_runtime_host_id);
+    try std.testing.expectEqualStrings("restore-spawn-sentinel", session.restore_runtime_id);
+
+    var captured_arena = std.heap.ArenaAllocator.init(allocator);
+    defer captured_arena.deinit();
+    const captured = try session.captureWorkspaceWindow(captured_arena.allocator(), false, null);
+    const saved = captured.tabs[0].panes[0].surfaces[0];
+    try std.testing.expectEqual(maru.session.workspace.RuntimeState.ended, saved.runtime_state);
+    try std.testing.expectEqualStrings(surfaces[0].runtime_host_id, saved.runtime_host_id);
+    try std.testing.expectEqualStrings(surfaces[0].runtime_id, saved.runtime_id);
+
+    // capture→wire→parse→새 AppSession restore를 한 번 더 반복한다. 두 번째 cycle도 exact identity, spawn 경계 0,
+    // dropped 0이어야 durable이라는 이름이 성립한다.
+    const text = try maru.session.workspace.serialize(captured_arena.allocator(), .{ .windows = &.{captured} });
+    var parsed = try maru.session.workspace.parse(captured_arena.allocator(), text);
+    defer parsed.deinit();
+    const second = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(second);
+    defer second.deinit();
+    second.restore_runtime_host_id = "second-cycle-sentinel";
+    second.restore_runtime_id = "second-cycle-sentinel";
+    try second.applyWorkspaceWindow(parsed.workspace.windows[0]);
+    const second_tomb = second.tabs.items[0].panes.items[0].terms.items[0];
+    try std.testing.expect(second_tomb.rt.ended_placeholder);
+    try std.testing.expectEqualStrings(surfaces[0].runtime_host_id, second_tomb.rt.ended_runtime_host_id);
+    try std.testing.expectEqualStrings(surfaces[0].runtime_id, second_tomb.rt.ended_runtime_id);
+    try std.testing.expectEqualStrings("second-cycle-sentinel", second.restore_runtime_host_id);
+    try std.testing.expectEqualStrings("second-cycle-sentinel", second.restore_runtime_id);
+    try std.testing.expectEqual(@as(u32, 0), second.takeWorkspaceRestoreDropped());
+}
+
+test "legacy bare runtime-id Gone은 host 없는 tombstone으로 승격하지 않는다" {
+    try std.testing.expectError(
+        error.PersistentRuntimeUnavailable,
+        AppSession.restoreFailureDisposition(error.PersistentRuntimeGone, false),
+    );
+    try std.testing.expectEqual(
+        AppSession.RestoreFailureDisposition.ended,
+        try AppSession.restoreFailureDisposition(error.PersistentRuntimeGone, true),
+    );
+    try std.testing.expectError(
+        error.PersistentRuntimeUnavailable,
+        AppSession.restoreFailureDisposition(error.PersistentRuntimeUnavailable, true),
+    );
+
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+
+    // production apply가 쓰는 동일 snapshot/record/restore 조합으로 newly-Gone의 두 counter가 함께 rollback되는지 고정한다.
+    const accounting = AppSession.RestoreAccountingSnapshot.capture(session);
+    session.recordEndedPlaceholder(true);
+    try std.testing.expectEqual(@as(u32, 1), session.ended_placeholder_notice_pending);
+    try std.testing.expectEqual(@as(u32, 1), session.ended_placeholder_dropped_pending);
+    accounting.restore(session);
+    try std.testing.expectEqual(@as(u32, 0), session.ended_placeholder_notice_pending);
+    try std.testing.expectEqual(@as(u32, 0), session.ended_placeholder_dropped_pending);
+
+    const prev_keep = app_keep_alive_after_quit;
+    app_keep_alive_after_quit = true;
+    defer app_keep_alive_after_quit = prev_keep;
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    var win = try session.captureWorkspaceWindow(arena.allocator(), false, null);
+    const surfaces = [_]maru.session.workspace.Surface{.{
+        .runtime_id = "fedcba0987654321fedcba0987654321",
+        .cols = 80,
+        .rows = 24,
+    }};
+    const panes = [_]maru.session.workspace.Pane{.{ .surfaces = &surfaces }};
+    const tree = [_]maru.session.workspace.TreeNode{.{ .leaf = 0 }};
+    const tabs = [_]maru.session.workspace.Tab{.{ .tree = &tree, .panes = &panes }};
+    win.tabs = &tabs;
+
+    try std.testing.expectError(error.PersistentRuntimeUnavailable, session.applyWorkspaceWindow(win));
+    try std.testing.expectEqual(@as(u32, 0), session.ended_placeholder_notice_pending);
+    try std.testing.expectEqual(@as(u32, 0), session.ended_placeholder_dropped_pending);
+}
+
+// 묘비가 **다시 저장될 때** 마지막 title·cwd·grid와 exact runtime-handle을 함께 보존하는지 못박는다.
 // 순진한 구현은 두 곳에서 조용히 망가진다. (1) capture는 title/cwd를 `rt.observation`에서만 읽는데
 // `refreshTermObservation`이 `!live_initialized`에 즉시 반환하므로, seed가 없으면 observation이 기본 `.unavailable`로
 // 남아 **빈 문자열로 저장**된다 — 묘비의 존재 이유(마지막 제목·위치)가 첫 Quit에 사라진다. (2) core가 sentinel
 // 1×1이면 그 크기가 저장돼 다음 복원에서 `clampGridSize`가 2×1 셸을 만든다(사이클마다 레이아웃 열화).
-// 그리고 죽은 handle을 재기록하면 다음 실행도 같은 묘비라 사용자가 영원히 ⏎를 눌러야 한다 — handle 없이 저장하면
-// 선언적 restore가 그 cwd의 평범한 새 셸을 연다(사용자가 택한 동작).
-test "종료 placeholder: capture가 마지막 title·cwd·grid를 저장하고 runtime-handle은 남기지 않는다" {
+// handle을 버리면 다음 실행이 선언적 surface로 오인해 사용자가 Enter를 누르지 않았는데도 새 셸을 spawn한다.
+test "종료 placeholder: capture가 metadata와 durable runtime tombstone을 보존한다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
     const session = try initSmokeSessionSized(allocator);
@@ -37217,7 +37427,14 @@ test "종료 placeholder: capture가 마지막 title·cwd·grid를 저장하고 
     defer session.deinit();
 
     const pane = session.activePane();
-    const tomb = try session.createEndedPlaceholderTerm("배포 감시", "/tmp", "/bin/zsh", .{ .cols = 100, .rows = 30 });
+    const tomb = try session.createEndedPlaceholderTerm(
+        "배포 감시",
+        "/tmp",
+        "/bin/zsh",
+        .{ .cols = 100, .rows = 30 },
+        "1234567890abcdef1234567890abcdef",
+        "fedcba0987654321fedcba0987654321",
+    );
     try pane.terms.append(allocator, tomb);
     defer {
         _ = pane.terms.pop();
@@ -37235,18 +37452,23 @@ test "종료 placeholder: capture가 마지막 title·cwd·grid를 저장하고 
     try std.testing.expectEqualStrings("/tmp", saved.cwd);
     try std.testing.expectEqualStrings("/bin/zsh", saved.command);
     try std.testing.expect(saved.cols > 2 and saved.rows > 1); // sentinel 1×1이 그대로 새어 나오지 않는다
-    // 죽은 handle을 재기록하지 않는다 — 이 두 줄이 "다음 실행은 평범한 셸"을 보장한다.
-    try std.testing.expectEqual(@as(usize, 0), saved.runtime_host_id.len);
-    try std.testing.expectEqual(@as(usize, 0), saved.runtime_id.len);
+    try std.testing.expectEqualStrings("1234567890abcdef1234567890abcdef", saved.runtime_host_id);
+    try std.testing.expectEqualStrings("fedcba0987654321fedcba0987654321", saved.runtime_id);
+    try std.testing.expectEqual(maru.session.workspace.RuntimeState.ended, saved.runtime_state);
 
-    // 직렬화 왕복까지: 저장 텍스트에 runtime-handle 키가 아예 없어야 하고, 파싱하면 같은 값이 돌아와야 한다.
+    // 직렬화 왕복까지 exact handle/state가 함께 남아야 두 번째 이후 relaunch도 side effect 없이 묘비로 복원된다.
     const text = try maru.session.workspace.serialize(arena.allocator(), .{ .windows = &.{win} });
-    try std.testing.expect(std.mem.indexOf(u8, text, "runtime-handle=") == null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        text,
+        "runtime-handle=\"1234567890abcdef1234567890abcdef:fedcba0987654321fedcba0987654321\" runtime-state=\"ended\"",
+    ) != null);
     var parsed = try maru.session.workspace.parse(arena.allocator(), text);
     defer parsed.deinit();
     const round = parsed.workspace.windows[0].tabs[0].panes[0].surfaces[1];
     try std.testing.expectEqualStrings("배포 감시", round.title);
     try std.testing.expectEqualStrings("/tmp", round.cwd);
+    try std.testing.expectEqual(maru.session.workspace.RuntimeState.ended, round.runtime_state);
 }
 
 // attach 실패의 **영구/일시 분류표**를 순수 함수 수준에서 못박는다. 이 분류 하나가 "저장된 세션을 종료 placeholder로
@@ -42553,10 +42775,19 @@ test "workspace restore allocation failures preserve the complete live tab dock 
     const new_path = try std.fs.path.join(allocator, &.{ tmp_root, "new.md" });
     defer allocator.free(new_path);
 
-    // A real terminal tab drives apply through its complete stage/build/capacity/swap path. Keep the
-    // model minimal because each failure index must spawn and tear down a fresh controlled PTY. The
-    // dock entry deliberately sits outside the explicit root so restore also stages the safety watcher.
-    const surfaces = [_]maru.session.workspace.Surface{.{ .cwd = tmp_root, .cols = 40, .rows = 24 }};
+    // Durable tombstone도 complete stage/build/capacity/swap path를 탄다. 이 후보는 build 중 notice 회계를 올리므로
+    // fail-index가 모델뿐 아니라 새 counter transaction rollback까지 검증한다.
+    const surfaces = [_]maru.session.workspace.Surface{
+        .{
+            .cwd = tmp_root,
+            .runtime_host_id = "abcdef1234567890abcdef1234567890",
+            .runtime_id = "0123456789abcdef0123456789abcdef",
+            .runtime_state = .ended,
+            .cols = 40,
+            .rows = 24,
+        },
+        .{ .cwd = tmp_root, .cols = 40, .rows = 24 },
+    };
     const panes = [_]maru.session.workspace.Pane{.{ .surfaces = &surfaces }};
     const tree = [_]maru.session.workspace.TreeNode{.{ .leaf = 0 }};
     const tabs = [_]maru.session.workspace.Tab{.{
@@ -42635,6 +42866,8 @@ test "workspace restore allocation failures preserve the complete live tab dock 
     const before_generation = session.file_tree.rootGeneration();
     const before_rows_ptr = session.file_tree_rows.items.ptr;
     const before_rows_len = session.file_tree_rows.items.len;
+    session.ended_placeholder_notice_pending = 7;
+    session.ended_placeholder_dropped_pending = 11;
     var saw_rollback = false;
     var saw_commit = false;
     for (0..512) |fail_index| {
@@ -42658,6 +42891,8 @@ test "workspace restore allocation failures preserve the complete live tab dock 
                 before_rows_ptr,
                 before_rows_len,
             );
+            try std.testing.expectEqual(@as(u32, 7), session.ended_placeholder_notice_pending);
+            try std.testing.expectEqual(@as(u32, 11), session.ended_placeholder_dropped_pending);
             saw_rollback = true;
             session.allocator = allocator; // rejected candidate retained no object backed by `failing`.
         } else {
@@ -42666,6 +42901,10 @@ test "workspace restore allocation failures preserve the complete live tab dock 
             try std.testing.expectEqualStrings(new_root, session.file_tree.rootAt(0).?);
             try std.testing.expectEqualStrings("replacement", session.tabs.items[0].custom_name.?);
             try std.testing.expect(session.dock.pathLocation(new_path) != null);
+            // plain live + already-ended 후보가 publish돼 notice가 실제 mutate된다. newly-Gone의 notice+dropped 동시
+            // rollback은 RestoreAccountingSnapshot/recordEndedPlaceholder production helper 회귀가 별도로 고정한다.
+            try std.testing.expectEqual(@as(u32, 11), session.ended_placeholder_dropped_pending);
+            try std.testing.expectEqual(@as(u32, 8), session.ended_placeholder_notice_pending);
             failing.fail_index = std.math.maxInt(usize);
             session.deinit(); // committed backends/terms retain failing.allocator(); tear down before it leaves scope.
             session_live = false;

@@ -1,8 +1,9 @@
 //! Workspace restore 직렬화(R1, writer). 실행 중이던 창/탭/split/터미널 레이아웃과 각 터미널의 cwd·shell을
 //! 다시 열기 위한 **선언적 상태**를 `maru.workspace.v1` 텍스트로 굳힌다 — live PTY/process/grid 내용은 담지
 //! 않는다(docs/workspace-restore.md). snapshot/trace와 같은 규칙: 첫 줄 bare 토큰(`schema=` 접두어 없음),
-//! 이후 `<kind> <fields>` 라인, 따옴표 문자열은 `\` `"`·개행 escape. 이 파일은 모델(값 타입)과 writer만 둔다 —
-//! reader(R2)·라이브 캡처(R3)·복원(R4)은 후속이 같은 모델을 소비/생산한다(snapshot.zig writer-only 선례).
+//! 이후 `<kind> <fields>` 라인, 따옴표 문자열은 `\` `"`·개행 escape. 이 파일은 값 모델과 text reader/writer를
+//! 함께 두고, platform live capture/apply는 이 모델만 소비·생산한다. P4 R2의 manifest-wide binding validator와
+//! host inventory reconciliation은 per-surface text parse와 별도 후속 경계다.
 //!
 //! 계층: workspace → windows → tabs → (pane split 트리 + panes) → panes → surfaces(Term). 멀티 창은 windows가
 //! N개(각 창 = 한 AppSession). split 트리는 preorder TreeNode 리스트로 — full binary tree라 self-delimiting
@@ -56,6 +57,11 @@ pub const TreeNode = union(enum) {
 /// 하고 복원 spawn엔 아직 안 쓴다(기본 셸·"Maru" 제목으로 살림). 헛방어/유령 필드가 아니라 docs/workspace-restore.md에
 /// 설계된 필드다: command=`shell_entry`(pane 재시작 기본 shell argv, round-trip 테스트까지 계획됨), title=pane title.
 /// command는 argv[0]=셸이라 `last_observed_command` 자동 재실행 금지 정책과는 별개다. 정확한 제목·argv 복원은 후속.
+pub const RuntimeState = enum {
+    live,
+    ended,
+};
+
 pub const Surface = struct {
     // custom_name = 사용자 지정 이름(rename), title = 자동 제목(OSC 0/2). 둘은 별도 필드다 — 표시 우선순위는
     // custom_name(비면 안 씀) → title → 기본값(app.label.pick). ""=없음. 단일 출처: docs/workspace-restore.md
@@ -71,6 +77,9 @@ pub const Surface = struct {
     // 저장하며, host namespace가 다른 runtime을 같은 세션으로 오인하지 않게 attach 전에 host_id를 대조한다.
     runtime_host_id: []const u8 = "",
     runtime_id: []const u8 = "",
+    // 키 부재는 live다. ended는 마지막 host/runtime identity를 버리지 않는 durable tombstone이며 full handle 없이는
+    // 유효하지 않다. 이 상태는 PTY를 직렬화하지 않고 restore side effect를 막는 manifest 지시다.
+    runtime_state: RuntimeState = .live,
 };
 
 /// split leaf 한 칸(panel) — 가로 탭으로 여러 Term을 들 수 있다(탭→pane 모델). active-term = 보이는 Term.
@@ -414,10 +423,17 @@ fn writeSurface(w: *std.Io.Writer, s: Surface) !void {
             try w.writeAll("\"");
         }
     }
+    if (s.runtime_state == .ended) {
+        // Tombstone이 handle 없이 기록되면 다음 reader가 어느 runtime의 종료 상태인지 증명할 수 없다. legacy bare ID도
+        // host namespace가 없어 durable identity가 아니므로 writer에서 fail-close한다.
+        if (!validPersistentId(s.runtime_host_id) or !validPersistentId(s.runtime_id))
+            return error.InvalidRuntimeIdentity;
+        try w.writeAll(" runtime-state=\"ended\"");
+    }
     try w.print(" cols={d} rows={d}\n", .{ s.cols, s.rows });
 }
 
-// ── R2: reader/parser ──────────────────────────────────────────────────────────
+// ── R1 wire reader/parser ──────────────────────────────────────────────────────
 // maru.workspace.v1 텍스트를 같은 모델로 되읽는다(round-trip). 결과는 arena가 모든 슬라이스·문자열을 소유하므로
 // ParsedWorkspace.deinit() 한 번으로 정리한다. split 트리는 writer와 같은 preorder를 재귀로 재구성한다(split는
 // 뒤따르는 두 subtree를 소비). 알 수 없는 trailing 라인은 forgiving하게 멈춘다(window 루프가 안 맞으면 종료).
@@ -822,6 +838,10 @@ fn parseSurface(a: std.mem.Allocator, lines: *LineIter) ParseError!Surface {
     const command = try f.getQuoted(a, "command", "");
     const legacy_runtime = f.find("runtime-id");
     const runtime_handle = f.find("runtime-handle");
+    // Identity/state는 first-wins가 허용되는 일반 additive scalar가 아니다. 중복 키 하나로 valid 앞값 뒤의 손상·모순을
+    // 숨길 수 있으므로 이 세 키만 exact uniqueness를 요구한다(unknown future scalar의 반복 관용성과 분리).
+    if (f.count("runtime-id") > 1 or f.count("runtime-handle") > 1 or f.count("runtime-state") > 1)
+        return error.BadLine;
     if (legacy_runtime != null and runtime_handle != null) return error.BadLine;
     var runtime_host_id: []const u8 = "";
     var runtime_id: []const u8 = "";
@@ -835,6 +855,13 @@ fn parseSurface(a: std.mem.Allocator, lines: *LineIter) ParseError!Surface {
         runtime_id = try f.getQuoted(a, "runtime-id", "");
         if (!validPersistentId(runtime_id)) return error.BadLine;
     }
+    var runtime_state: RuntimeState = .live;
+    if (f.find("runtime-state") != null) {
+        const state = try f.getQuoted(a, "runtime-state", "");
+        if (!std.mem.eql(u8, state, "ended")) return error.BadLine;
+        if (runtime_host_id.len == 0 or runtime_id.len == 0) return error.BadLine;
+        runtime_state = .ended;
+    }
     const cols = try f.getUint("cols", u16, 80);
     const rows = try f.getUint("rows", u16, 24);
     return .{
@@ -844,6 +871,7 @@ fn parseSurface(a: std.mem.Allocator, lines: *LineIter) ParseError!Surface {
         .command = command,
         .runtime_host_id = runtime_host_id,
         .runtime_id = runtime_id,
+        .runtime_state = runtime_state,
         .cols = cols,
         .rows = rows,
     };
@@ -986,6 +1014,14 @@ const LineFields = struct {
     fn find(self: LineFields, key: []const u8) ?Field {
         for (self.fields) |f| if (std.mem.eql(u8, f.key, key)) return f;
         return null;
+    }
+
+    fn count(self: LineFields, key: []const u8) usize {
+        var result: usize = 0;
+        for (self.fields) |f| if (std.mem.eql(u8, f.key, key)) {
+            result += 1;
+        };
+        return result;
     }
 
     /// 스칼라 정수 속성: 있으면 파싱(quoted면 BadLine·garbage면 BadLine — 있는데 깨졌으면 조용히 기본값 금지), 없으면 default.
@@ -1157,6 +1193,39 @@ test "workspace round-trip: surface runtime-handle은 host와 runtime identity�
     try std.testing.expectEqualStrings(text1, text2); // 고정점
 }
 
+test "workspace round-trip: durable ended tombstone은 exact handle과 state를 보존한다" {
+    const hid = "fedcba9876543210fedcba9876543210";
+    const rid = "0123456789abcdef0123456789abcdef";
+    const surfaces = [_]Surface{.{
+        .title = "ended",
+        .command = "/bin/zsh",
+        .runtime_host_id = hid,
+        .runtime_id = rid,
+        .runtime_state = .ended,
+        .cols = 80,
+        .rows = 24,
+    }};
+    const panes = [_]Pane{.{ .surfaces = &surfaces }};
+    const tree = [_]TreeNode{.{ .leaf = 0 }};
+    const tabs = [_]Tab{.{ .tree = &tree, .panes = &panes }};
+    const windows = [_]Window{.{ .tabs = &tabs }};
+
+    const text = try serialize(std.testing.allocator, .{ .windows = &windows });
+    defer std.testing.allocator.free(text);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        text,
+        "runtime-handle=\"fedcba9876543210fedcba9876543210:0123456789abcdef0123456789abcdef\" runtime-state=\"ended\"",
+    ) != null);
+
+    var parsed = try parse(std.testing.allocator, text);
+    defer parsed.deinit();
+    const round = parsed.workspace.windows[0].tabs[0].panes[0].surfaces[0];
+    try std.testing.expectEqual(RuntimeState.ended, round.runtime_state);
+    try std.testing.expectEqualStrings(hid, round.runtime_host_id);
+    try std.testing.expectEqualStrings(rid, round.runtime_id);
+}
+
 test "workspace parse: legacy bare runtime-id는 읽되 다음 저장에서 handle로 위조하지 않는다" {
     const text =
         \\maru.workspace.v1
@@ -1187,6 +1256,13 @@ test "workspace parse: ambiguous or malformed persistent runtime identity fails 
         "surface custom-name=\"\" title=\"\" cwd=\"\" command=\"\" runtime-handle=\"fedcba9876543210fedcba9876543210:0123456789abcdef0123456789abcdeF\" cols=80 rows=24",
         "surface custom-name=\"\" title=\"\" cwd=\"\" command=\"\" runtime-handle=\"fedcba9876543210fedcba9876543210-0123456789abcdef0123456789abcdef\" cols=80 rows=24",
         "surface custom-name=\"\" title=\"\" cwd=\"\" command=\"\" runtime-handle=\"fedcba9876543210fedcba9876543210:0123456789abcdef0123456789abcdef\" runtime-id=\"0123456789abcdef0123456789abcdef\" cols=80 rows=24",
+        "surface custom-name=\"\" title=\"\" cwd=\"\" command=\"\" runtime-state=\"ended\" cols=80 rows=24",
+        "surface custom-name=\"\" title=\"\" cwd=\"\" command=\"\" runtime-id=\"0123456789abcdef0123456789abcdef\" runtime-state=\"ended\" cols=80 rows=24",
+        "surface custom-name=\"\" title=\"\" cwd=\"\" command=\"\" runtime-handle=\"fedcba9876543210fedcba9876543210:0123456789abcdef0123456789abcdef\" runtime-state=\"live\" cols=80 rows=24",
+        "surface custom-name=\"\" title=\"\" cwd=\"\" command=\"\" runtime-handle=\"fedcba9876543210fedcba9876543210:0123456789abcdef0123456789abcdef\" runtime-state=ended cols=80 rows=24",
+        "surface custom-name=\"\" title=\"\" cwd=\"\" command=\"\" runtime-id=\"0123456789abcdef0123456789abcdef\" runtime-id=\"fedcba9876543210fedcba9876543210\" cols=80 rows=24",
+        "surface custom-name=\"\" title=\"\" cwd=\"\" command=\"\" runtime-handle=\"fedcba9876543210fedcba9876543210:0123456789abcdef0123456789abcdef\" runtime-handle=\"bad\" cols=80 rows=24",
+        "surface custom-name=\"\" title=\"\" cwd=\"\" command=\"\" runtime-handle=\"fedcba9876543210fedcba9876543210:0123456789abcdef0123456789abcdef\" runtime-state=\"ended\" runtime-state=\"live\" cols=80 rows=24",
     };
     for (invalid) |surface_line| {
         const text = try std.mem.concat(std.testing.allocator, u8, &.{ prefix, "\n", surface_line, suffix });

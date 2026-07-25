@@ -494,6 +494,11 @@ pub const LiveSurface = union(control_surface.SurfaceKind) {
     /// web Term의 라이브 소유(sentinel surface + 번들 allocator). PTY/reader 없음 — teardown이 경량(reader join
     /// 없이 custom_name 해제 + sentinel surface.deinit). panel_kind는 여기 두지 않고 `Term.web_panel_kind`가 단일
     /// 출처(중복 저장 없이) — web arm은 registry 안정 heap 슬롯이 필요한 sentinel `Surface`만 든다.
+    ///
+    /// **§7 종료 placeholder(묘비)도 이 arm을 쓴다.** 필요한 것이 정확히 같기 때문이다 — PTY 없는 안정 heap 슬롯 +
+    /// 경량 teardown. 다만 그 Term의 `kind`는 **`.terminal`** 이다(렌더·라벨 경로를 그대로 타야 하므로). 즉 이
+    /// union의 arm 태그와 `Term.kind`가 일치하지 않을 수 있으니, **arm 태그로 `Term.kind`를 파생하지 말 것**.
+    /// 반대 방향(`Term.kind`/`rt.ended_placeholder`로 teardown을 가르는 것)은 `destroyTerm`·세션 `deinit`이 한다.
     pub const Web = struct {
         surface: surface_mod.Surface = undefined,
         internal_allocator: std.mem.Allocator = undefined,

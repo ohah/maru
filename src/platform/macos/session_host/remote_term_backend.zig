@@ -221,7 +221,7 @@ pub const RemoteTermBackend = struct {
 
     /// host-backed Term(handle)의 대기 중 OSC 52 write 텍스트를 host에서 가져온다(없거나 구 host면 null).
     /// caller가 free. 정책 판정과 실제 NSPasteboard 쓰기는 client(app_session/Swift)가 한다.
-    pub fn clipboardWriteFor(self: *RemoteTermBackend, handle: RuntimeHandle) ?[]u8 {
+    pub fn clipboardWriteFor(self: *RemoteTermBackend, handle: RuntimeHandle) ?remote_runtime.RemoteRuntime.ClipboardWrite {
         const entry = self.runtimes.get(handle) orelse return null;
         return (entry.runtime.clipboardWrite() catch return null) orelse null;
     }

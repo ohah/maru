@@ -65,6 +65,8 @@ fn revision(allocator: std.mem.Allocator, payload: []const u8, allow_response: b
         // OSC 52 요청 seq·target도 optional(구버전 host 호환) — 없으면 0/빈 값이라 원격 클립보드가 비활성(기존 동작).
         !fieldFitsUnsignedOrAbsent(metadata, "clipboard_write_seq", std.math.maxInt(u32)) or
         !fieldFitsUnsignedOrAbsent(metadata, "clipboard_read_seq", std.math.maxInt(u32)) or
+        // target도 검증한다 — 빠뜨리면 손상된 최신 이벤트가 정상 대기 full-state를 밀어낼 수 있다(이 모듈의 불변식).
+        !fieldIsStringOrAbsent(metadata, "clipboard_read_target") or
         // app_keypad·kitty_flags도 optional(구버전 host 호환) — host-backed 일반 key의 DECKPAM·kitty 인코딩 모드.
         !fieldIsBoolOrAbsent(metadata, "app_keypad") or
         !fieldFitsUnsignedOrAbsent(metadata, "kitty_flags", std.math.maxInt(u5)) or
@@ -102,6 +104,14 @@ fn fieldIs(obj: std.json.ObjectMap, key: []const u8, comptime kind: JsonKind) bo
 fn fieldIsBoolOrAbsent(obj: std.json.ObjectMap, key: []const u8) bool {
     return switch (obj.get(key) orelse return true) {
         .bool => true,
+        else => false,
+    };
+}
+
+/// 없거나 문자열이면 통과(구 host 호환 optional 문자열). 값이 있는데 문자열이 아니면 손상으로 본다.
+fn fieldIsStringOrAbsent(obj: std.json.ObjectMap, key: []const u8) bool {
+    return switch (obj.get(key) orelse return true) {
+        .string => true,
         else => false,
     };
 }

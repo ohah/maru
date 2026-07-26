@@ -622,6 +622,16 @@ pub const Slot = struct {
         return true;
     }
 
+    /// ACK acceptance and a failed recovery both open a fresh one-second quiet period. Keeping
+    /// this clock on the tracker makes the owner-provided monotonic time the only authority.
+    pub fn deferResyncAttempt(
+        self: *Slot,
+        key: ScreenTrackerKey,
+        now_ns: u64,
+    ) error{Stale}!void {
+        (try self.trackerEntry(key)).tracker.?.last_resync_attempt_ns = now_ns;
+    }
+
     /// Priority selection must inspect backoff without consuming the attempt. Otherwise it resets
     /// the normal round-robin cursor to the same failed recovery on every tick and can starve
     /// healthy subscriptions that sort before it.
@@ -644,13 +654,30 @@ pub const Slot = struct {
         const tracker = (try self.trackerEntry(key)).tracker.?;
         if (tracker.resident_bytes >= screen_low_water_bytes) return false;
         if (self.resident_bytes +| resync_batch_bytes > per_slot_bytes) return false;
+        if (self.base_resident_bytes +| base_update_max_bytes > base_per_slot_bytes)
+            return false;
+        if (tracker.retained_base_bytes > self.base_resident_bytes or
+            self.base_resident_bytes - tracker.retained_base_bytes +|
+                base_update_max_bytes > base_steady_per_slot_bytes)
+            return false;
+        if (self.resident_bytes +| self.base_resident_bytes +|
+            resync_batch_bytes +| base_update_max_bytes > total_per_slot_bytes)
+            return false;
         const max_snapshot_chunks: usize = 17; // metadata prefix plus at most sixteen 1 MiB chunks.
         if (self.chunk_len +| max_snapshot_chunks >
             max_chunks_per_slot - control_chunk_reserve)
             return false;
-        if (self.global.resident_bytes +| resync_batch_bytes > global_bytes) return false;
-        if (self.global.shared_bytes +| resync_batch_bytes >
-            global_bytes - max_connections * control_reserve_bytes)
+        if (self.global.prepared_base_bytes +| base_update_max_bytes >
+            base_replacement_headroom_bytes)
+            return false;
+        const future_resident = self.global.resident_bytes +|
+            base_update_max_bytes +| resync_batch_bytes;
+        if (future_resident > global_bytes) return false;
+        const future_shared = self.global.shared_bytes +|
+            base_update_max_bytes +| resync_batch_bytes;
+        if (future_shared > shared_hard_bytes or
+            self.global.prepared_reclaim_bytes > future_shared or
+            future_shared - self.global.prepared_reclaim_bytes > shared_steady_bytes)
             return false;
         return true;
     }
@@ -1758,6 +1785,31 @@ test "resync retry backoff is closed before one second and opens at the exact bo
         tracker,
         100 + resync_retry_backoff_ns,
     ));
+}
+
+test "resync preflight includes prepared base and encoded batch global headroom" {
+    var global: GlobalBudget = .{};
+    var slot = try Slot.init(
+        std.testing.allocator,
+        &global,
+        .{ .monotonic_id = 1, .slot_generation = 1 },
+    );
+    defer slot.deinit();
+    const tracker = try slot.createScreenTracker();
+    const exact_existing = shared_steady_bytes -
+        base_update_max_bytes -
+        resync_batch_bytes;
+    try std.testing.expect(global.reserveScreen(exact_existing));
+    try std.testing.expect(try slot.canAttemptResync(tracker));
+    try std.testing.expect(global.reserveScreen(1));
+    try std.testing.expect(!try slot.canAttemptResync(tracker));
+    global.releaseScreen(exact_existing + 1);
+
+    slot.base_resident_bytes = base_steady_per_slot_bytes - base_update_max_bytes;
+    try std.testing.expect(try slot.canAttemptResync(tracker));
+    slot.base_resident_bytes += 1;
+    try std.testing.expect(!try slot.canAttemptResync(tracker));
+    slot.base_resident_bytes = 0;
 }
 
 test "global pressure retry is closed before one second and opens at the exact boundary" {

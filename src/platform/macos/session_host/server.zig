@@ -258,6 +258,9 @@ pub const Action = union(enum) {
     close,
     /// 응답 없이 connection을 유지한다(input_bytes 같은 fire-and-forget stream frame 처리 후). caller는 아무것도 write하지 않는다.
     none,
+    /// The first valid resync ACK changed connection authority. The socket owner uses its injected
+    /// monotonic dispatch time to arm the recovery deadline; duplicates remain `.none`.
+    resync_ack: subscription_identity.LocalStreamId,
     /// 여러 frame을 **순서대로** write하고 connection을 유지한다(attach 응답 + snapshot_chunk* — §10 attach 순서). 바깥
     /// 슬라이스와 각 `[]u8`은 caller 소유다(순서대로 write한 뒤 각 frame free, 마지막에 바깥 슬라이스 free). `frames[0]`이
     /// 응답 frame, 이후가 snapshot_chunk들이다.
@@ -1776,7 +1779,7 @@ pub const Connection = struct {
         if (!sub.awaiting_resync_ack) return .none;
         sub.awaiting_resync_ack = false;
         sub.resync_pending = true;
-        return .none;
+        return .{ .resync_ack = frame.header.stream_id };
     }
 
     /// `scroll_to_bottom`: controller 전용 fire-and-forget viewport command. AppKit IME callback에서
@@ -1914,43 +1917,60 @@ pub const Connection = struct {
                     self.endMissingRuntime(stream);
                     return null;
                 },
-                else => null,
+                error.TransientObservationUnavailable => null,
+                else => return error.OutOfMemory,
             };
             if (maybe_observation) |obs_value| {
                 var obs = obs_value;
                 defer obs.deinit(self.allocator);
-                const canonical = self.stringify(obs) catch null;
-                if (canonical) |current| {
-                    const changed = if (sub.observation_base) |old|
-                        !std.mem.eql(u8, old, current)
-                    else
-                        true;
-                    if (changed) {
-                        const next_revision = sub.observation_revision +% 1;
-                        const event_body = self.stringify(.{
-                            .event = "runtime.metadata",
-                            .metadata_revision = next_revision,
-                            .metadata = obs,
-                        }) catch null;
-                        if (event_body) |json| {
-                            defer self.allocator.free(json);
-                            const frame = self.encodeWithFlags(.event, 0, stream, 0, json) catch null;
-                            if (frame) |owned_frame| {
-                                list.append(self.allocator, owned_frame) catch {
-                                    self.allocator.free(owned_frame);
-                                    self.allocator.free(current);
-                                    return error.OutOfMemory;
-                                };
-                                output.next_observation_base = current;
-                                output.next_observation_revision = next_revision;
-                            } else self.allocator.free(current);
-                        } else self.allocator.free(current);
-                    } else self.allocator.free(current);
+                const current = try self.stringify(obs);
+                var current_owned = true;
+                errdefer if (current_owned) self.allocator.free(current);
+                const changed = if (sub.observation_base) |old|
+                    !std.mem.eql(u8, old, current)
+                else
+                    true;
+                if (changed) {
+                    const next_revision = sub.observation_revision +% 1;
+                    const event_body = try self.stringify(.{
+                        .event = "runtime.metadata",
+                        .metadata_revision = next_revision,
+                        .metadata = obs,
+                    });
+                    defer self.allocator.free(event_body);
+                    const frame = self.encodeWithFlags(
+                        .event,
+                        0,
+                        stream,
+                        0,
+                        event_body,
+                    ) catch return error.OutOfMemory;
+                    list.append(self.allocator, frame) catch {
+                        self.allocator.free(frame);
+                        return error.OutOfMemory;
+                    };
+                    output.next_observation_base = current;
+                    current_owned = false;
+                    output.next_observation_revision = next_revision;
+                } else {
+                    self.allocator.free(current);
+                    current_owned = false;
                 }
             }
         }
 
         if (sub.resync_pending) {
+            // Invalidation releases both screen and metadata delivery authority. A metadata-capable
+            // client must therefore receive a fresh prefix in the same atomic recovery batch; a
+            // transient observation/encoding miss cannot be committed as snapshot-only recovery.
+            if (self.runtime_metadata_v1 and sub.observation_base == null and
+                output.next_observation_base == null)
+            {
+                self.discardPreparedOutput(&list, &output);
+                sub.observation_ticks = output.previous_observation_ticks;
+                output.rollback(self);
+                return null;
+            }
             const snap = ops.snapshot(ops.ctx, sub.runtime_id, self.allocator) catch |err| {
                 if (err == error.RuntimeNotFound) {
                     if (!self.runtimeMissing(stream)) return error.OutOfMemory;
@@ -1959,17 +1979,14 @@ pub const Connection = struct {
                     self.endMissingRuntime(stream);
                     return null;
                 }
-                if (list.items.len == 0) {
-                    // Recovery still owes a full metadata prefix. A transient snapshot failure must
-                    // not consume the due cadence merely because observation allocation/encoding
-                    // also produced no frame in this attempt.
-                    sub.observation_ticks = output.previous_observation_ticks;
-                    output.rollback(self);
-                    return null;
-                }
-                output.frames = list.toOwnedSlice(self.allocator) catch return error.OutOfMemory;
-                output.frames_taken = false;
-                return output;
+                if (err != error.TransientSnapshotUnavailable)
+                    return error.OutOfMemory;
+                // Metadata and snapshot are one recovery transaction. Never expose a metadata-only
+                // batch to an adapter when the snapshot producer failed.
+                self.discardPreparedOutput(&list, &output);
+                sub.observation_ticks = output.previous_observation_ticks;
+                output.rollback(self);
+                return null;
             };
             defer self.allocator.free(snap);
             if (snap.len > protocol.max_viewport_snapshot) return error.OutOfMemory;
@@ -2561,6 +2578,7 @@ fn runWire(conn: *Connection, wire: []const u8) !FedResult {
     switch (action) {
         .close => return .{ .action = "close", .frame = null },
         .none => return .{ .action = "none", .frame = null },
+        .resync_ack => return .{ .action = "resync_ack", .frame = null },
         .reply, .reply_and_close => |bytes| {
             defer allocator.free(bytes);
             var rp = framing.FrameParser.init(allocator);
@@ -3484,6 +3502,7 @@ pub const FakeRuntimeOps = struct {
     delta_probe_ctx: ?*anyopaque = null,
     delta_probe: ?*const fn (*anyopaque) void = null,
     snapshot_fail_count: usize = 0,
+    snapshot_permanent_failure: bool = false,
     snapshot_calls: usize = 0,
     observation_fail_count: usize = 0,
     runtime_missing: bool = false,
@@ -3545,9 +3564,10 @@ pub const FakeRuntimeOps = struct {
         _ = runtime_id;
         self.snapshot_calls += 1;
         if (self.runtime_missing or self.snapshot_missing) return error.RuntimeNotFound;
+        if (self.snapshot_permanent_failure) return error.OutOfMemory;
         if (self.snapshot_fail_count != 0) {
             self.snapshot_fail_count -= 1;
-            return error.InjectedSnapshotFailure;
+            return error.TransientSnapshotUnavailable;
         }
         if (self.snapshot_len) |len| {
             const bytes = try allocator.alloc(u8, len);
@@ -3651,7 +3671,7 @@ pub const FakeRuntimeOps = struct {
         if (self.runtime_missing or self.observation_missing) return error.RuntimeNotFound;
         if (self.observation_fail_count != 0) {
             self.observation_fail_count -= 1;
-            return error.InjectedObservationFailure;
+            return error.TransientObservationUnavailable;
         }
         const cwd = try allocator.dupe(u8, if (self.observation_version == 0) "/tmp/project" else "/tmp/project-next");
         errdefer allocator.free(cwd);
@@ -4654,13 +4674,31 @@ test "server: output rollback preserves base and resync intent until queue admis
     conn.markSubscriptionOutputInvalidated(1);
     try testing.expectEqual(@as(?[]u8, null), conn.attachments.get(1).?.base);
     {
+        var unknown = framing.Frame{
+            .header = .{ .kind = .stream_ack, .stream_id = 99 },
+            .payload = try allocator.dupe(u8, "{\"action\":\"resync\"}"),
+        };
+        defer unknown.deinit(allocator);
+        try testing.expect((try conn.handleFrame(unknown)) == .none);
+        try testing.expect(conn.attachments.get(1).?.awaiting_resync_ack);
+        try testing.expect(!conn.attachments.get(1).?.resync_pending);
+    }
+    {
         var ack_frame = framing.Frame{
             .header = .{ .kind = .stream_ack, .stream_id = 1 },
             .payload = try allocator.dupe(u8, "{\"action\":\"resync\"}"),
         };
         defer ack_frame.deinit(allocator);
         const action = try conn.handleFrame(ack_frame);
-        try testing.expect(action == .none);
+        try testing.expect(action == .resync_ack);
+    }
+    for (0..8) |_| {
+        var duplicate = framing.Frame{
+            .header = .{ .kind = .stream_ack, .stream_id = 1 },
+            .payload = try allocator.dupe(u8, "{\"action\":\"resync\"}"),
+        };
+        defer duplicate.deinit(allocator);
+        try testing.expect((try conn.handleFrame(duplicate)) == .none);
     }
     var rejected = (try conn.collectOutputForLocalStream(1)).?;
     const rejected_frames = rejected.takeFrames();
@@ -4677,6 +4715,106 @@ test "server: output rollback preserves base and resync intent until queue admis
     accepted.commit(&conn);
     try testing.expect(!conn.attachments.get(1).?.resync_pending);
     try testing.expectEqualStrings("SNAPSHOT-BYTES", conn.attachments.get(1).?.base.?);
+}
+
+test "server: malformed resync acknowledgements fail close without granting recovery" {
+    const allocator = testing.allocator;
+    const malformed = [_]struct {
+        request_id: u64 = 0,
+        flags: u32 = 0,
+        payload: []const u8 = "{\"action\":\"resync\"}",
+    }{
+        .{ .request_id = 1 },
+        .{ .flags = 1 },
+        .{ .payload = "{\"action\":\"other\"}" },
+    };
+    for (malformed) |case| {
+        var registry = reg.TerminalRuntimeRegistry.init(allocator);
+        defer registry.deinit();
+        _ = try registry.register(0xAA, 80, 24);
+        var fake: FakeRuntimeOps = .{};
+        var conn = Connection.init(allocator, 1, &registry);
+        defer conn.deinit();
+        conn.runtime_ops = fake.ops();
+        const hello = try feedJson(
+            &conn,
+            .hello,
+            1,
+            "{\"protocol_min\":2,\"protocol_max\":2}",
+        );
+        if (hello.frame) |frame| frame.deinit(allocator);
+        const batch = try feedExpectFrames(
+            &conn,
+            .request,
+            2,
+            "{\"method\":\"runtime.attach\",\"params\":{\"runtime_id\":\"aa\",\"mode\":\"observer\"}}",
+        );
+        defer {
+            for (batch) |frame| frame.deinit(allocator);
+            allocator.free(batch);
+        }
+        conn.markSubscriptionOutputInvalidated(1);
+        var frame = framing.Frame{
+            .header = .{
+                .kind = .stream_ack,
+                .request_id = case.request_id,
+                .stream_id = 1,
+                .flags = case.flags,
+            },
+            .payload = try allocator.dupe(u8, case.payload),
+        };
+        defer frame.deinit(allocator);
+        try testing.expect((try conn.handleFrame(frame)) == .close);
+        try testing.expect(conn.attachments.get(1).?.awaiting_resync_ack);
+        try testing.expect(!conn.attachments.get(1).?.resync_pending);
+    }
+}
+
+test "server: metadata recovery allocation failures release canonical prefix ownership" {
+    const allocator = testing.allocator;
+    for (0..48) |fail_index| {
+        var registry = reg.TerminalRuntimeRegistry.init(allocator);
+        defer registry.deinit();
+        _ = try registry.register(0xAA, 80, 24);
+        var fake: FakeRuntimeOps = .{};
+        var conn = Connection.init(allocator, 1, &registry);
+        defer conn.deinit();
+        conn.runtime_ops = fake.ops();
+        const hello = try feedJson(
+            &conn,
+            .hello,
+            1,
+            "{\"protocol_min\":2,\"protocol_max\":2,\"capabilities\":[\"runtime_metadata_v1\"]}",
+        );
+        if (hello.frame) |frame| frame.deinit(allocator);
+        const batch = try feedExpectFrames(
+            &conn,
+            .request,
+            2,
+            "{\"method\":\"runtime.attach\",\"params\":{\"runtime_id\":\"aa\",\"mode\":\"observer\"}}",
+        );
+        defer {
+            for (batch) |frame| frame.deinit(allocator);
+            allocator.free(batch);
+        }
+        conn.markSubscriptionOutputInvalidated(1);
+        conn.attachments.getPtr(1).?.resync_pending = true;
+
+        var failing = testing.FailingAllocator.init(
+            allocator,
+            .{ .fail_index = fail_index },
+        );
+        conn.allocator = failing.allocator();
+        const maybe_output = conn.collectOutputForLocalStream(1) catch |err| blk: {
+            try testing.expectEqual(error.OutOfMemory, err);
+            break :blk null;
+        };
+        if (maybe_output) |value| {
+            var output = value;
+            output.rollback(&conn);
+        }
+        conn.allocator = allocator;
+    }
 }
 
 test "server: failed resync attempt keeps metadata prefix due for the retry" {
@@ -4713,15 +4851,17 @@ test "server: failed resync attempt keeps metadata prefix due for the retry" {
         .payload = try allocator.dupe(u8, "{\"action\":\"resync\"}"),
     };
     defer ack.deinit(allocator);
-    try testing.expect((try conn.handleFrame(ack)) == .none);
+    try testing.expect((try conn.handleFrame(ack)) == .resync_ack);
 
     fake.observation_fail_count = 1;
     fake.snapshot_fail_count = 1;
     try testing.expectEqual(@as(?CollectedOutput, null), try conn.collectOutputForLocalStream(1));
     try testing.expectEqual(@as(u8, 5), conn.attachments.get(1).?.observation_ticks);
+    try testing.expectEqual(@as(?CollectedOutput, null), try conn.collectOutputForLocalStream(1));
+    try testing.expectEqual(@as(u8, 5), conn.attachments.get(1).?.observation_ticks);
 
     var retry = (try conn.collectOutputForLocalStream(1)).?;
-    defer retry.rollback(&conn);
+    defer if (!retry.finished) retry.rollback(&conn);
     const frames = retry.takeFrames();
     defer {
         for (frames) |frame| allocator.free(frame);
@@ -4729,6 +4869,12 @@ test "server: failed resync attempt keeps metadata prefix due for the retry" {
     }
     try testing.expectEqual(.event, (try classifyOutbound(frames[0])).subscription.kind);
     try testing.expectEqual(.snapshot, (try classifyOutbound(frames[1])).subscription.kind);
+    retry.rollback(&conn);
+    fake.snapshot_permanent_failure = true;
+    try testing.expectError(
+        error.OutOfMemory,
+        conn.collectOutputForLocalStream(1),
+    );
 }
 
 test "server: runtime.resync makes collectDeltas push a fresh snapshot_chunk, not a delta (§9 desync 복구)" {

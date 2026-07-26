@@ -132,6 +132,10 @@ pub fn Model(comptime Rt: type) type {
             group_start: ?[]const u8 = null,
             /// group_start!=null일 때만 의미 — 그 그룹이 접혔는지(영속). 검색 활성 동안은 projectRows가 일시 무시.
             group_collapsed: bool = false,
+            /// 카드 하위 **에이전트 목록**이 접혔는가(docs/sidebar-agent-list.md §4). 에이전트가 2개 이상일 때만
+            /// 토글 행이 생기므로 그때만 의미가 있다. **영속하지 않는다** — 에이전트 구성은 실행마다 달라져
+            /// (어제 2개·오늘 0개) 접힘만 복원하면 빈 토글이나 어긋난 상태가 된다(파생 상태 비영속 규율).
+            agents_collapsed: bool = false,
             /// 중첩 그룹 깊이 레벨(SG5-3 — docs/sidebar-groups.md §9). group_start!=null일 때만 의미: 1=최상위 그룹,
             /// 2=그 안 중첩, … 소속과 마찬가지로 **정규화 depth는 위치에서 파생**(projectRows가 스택으로 재계산·클램프)하고
             /// 이 필드는 "이 마커가 얼마나 깊이 들어가려는가"의 힌트다. 최상위에서 create_group=1, 그룹 안에서=그 카드

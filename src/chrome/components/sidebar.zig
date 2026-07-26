@@ -45,6 +45,19 @@ pub const Row = union(enum) {
     /// "밴드를 낼지"만 판단하고, 실제 색 blend는 platform이 tab.group_color로 한다(층 분리). hover/active 밴드는 has_color와
     /// 무관하게 그대로(상호작용 하이라이트는 보더라인이 아니라 피드백이라 카드와 같은 경로로 유지).
     group_header: struct { collapsed: bool, label: []const u8, member_count: u16, tab: usize, depth: u8 = 0, has_color: bool = false },
+    /// 카드 하위 **에이전트 목록 토글**(`N agents`) — 에이전트가 **2개 이상**일 때만 방출한다(1개면 행 하나만 붙고
+    /// 토글이 없다, docs/sidebar-agent-list.md §1). tab=소속 워크스페이스의 원본 인덱스(클릭 시 그 탭의
+    /// `agents_collapsed`를 토글한다 — group_header와 같은 규율). count=그 워크스페이스의 에이전트 수.
+    /// last=이 행이 그 카드 묶음의 **마지막 행**인가(접혀서 토글만 남은 경우). 마지막 행은 아래 여백을 카드와 같게
+    /// 잡아 밴드 하단이 좁아지지 않게 한다(사용자 피드백 — 목록 행을 촘촘하게 만든 부작용).
+    agent_toggle: struct { tab: usize, count: u16, collapsed: bool, depth: u8 = 0, last: bool = false },
+    /// 에이전트 한 줄 — **Term 하나가 행 하나**다(§2). 표시 텍스트(kind·상태·시각·폴더·브랜치·마지막 대화)는
+    /// **싣지 않는다**: borrowed 슬라이스는 Term이 사라지면 dangling이고(group_header label에서 겪은 UAF),
+    /// 상태·시각은 매 tick 변하므로 platform이 이 인덱스 경로로 **라이브 재조회**해 그린다.
+    /// pane/term=그 워크스페이스 안의 인덱스 경로(클릭 라우팅이 워크스페이스 → Pane → Term 순으로 쓴다).
+    /// lines=이 행이 그리는 줄 수(라벨 / 폴더·브랜치 / 마지막 응답) — 카드와 같은 규율로 행 높이가 여기서 나온다.
+    /// last=이 행이 그 카드 묶음의 마지막 행인가(위 `agent_toggle.last`와 같은 목적).
+    agent: struct { tab: usize, pane: usize, term: usize, depth: u8 = 0, lines: u8 = 2, last: bool = false },
 };
 
 /// row_index가 그룹 헤더 row인가(클릭 시 선택이 아니라 접기 토글 대상). closeButton과 같은 결의 순수 hit-test
@@ -80,8 +93,8 @@ pub fn slotAt(y_px: f64, header_height_px: u32, rows: []const Row, m: Metrics, s
     if (rows.len == 0 or !std.math.isFinite(y_px)) return null;
     const h: f64 = @floatFromInt(header_height_px);
     if (y_px < h) return null; // 사이드바 헤더(검색바·아이콘) 영역 — row 아님(스크롤 무관, 고정)
-    const content = y_px - h + @as(f64, @floatFromInt(scroll_offset_px));
-    if (content < 0) return null;
+    const content = y_px - h - @as(f64, @floatFromInt(m.content_pad_v)) + @as(f64, @floatFromInt(scroll_offset_px));
+    if (content < 0) return null; // 목록 위 여백 = row 아님(카드가 없는 자리)
     var acc: f64 = 0;
     for (rows, 0..) |r, i| {
         const rh: f64 = @floatFromInt(rowHeight(r, m));
@@ -108,6 +121,14 @@ pub const Metrics = struct {
     card_pad_v: u32,
     /// 그룹 헤더 row 높이(얇은 한 줄 — 카드 줄 수와 무관한 별도 값).
     header_row_h: u32,
+    /// 목록 **전체**의 위/아래 여백 — 첫 카드가 검색바에 붙고 마지막 카드가 바닥에 붙는 답답함을 없앤다(사용자 피드백).
+    /// row 사이 간격이 아니라 콘텐츠 블록의 바깥 여백이라 `rowTop`·`slotAt`·`contentHeight`가 함께 반영해야
+    /// "보이는 곳 = 눌리는 곳"이 유지된다.
+    content_pad_v: u32,
+    /// **에이전트 목록 행**(토글·에이전트)의 위/아래 여백 — 카드보다 촘촘하다. 목록은 행이 연달아 쌓이므로 카드와
+    /// 같은 여백을 주면 통째로 성기고 스크롤이 길어진다(사용자 피드백). 카드는 서로 떨어져 있어야 구분되지만,
+    /// 목록 행은 한 카드에 딸린 묶음이라 붙어 있는 편이 읽기 좋다.
+    list_pad_v: u32,
 
     pub fn init(cell_height_px: u32, header_row_h: u32) Metrics {
         return .{
@@ -115,6 +136,8 @@ pub const Metrics = struct {
             .line_step = lineStep(cell_height_px),
             .card_pad_v = cardPadV(cell_height_px),
             .header_row_h = header_row_h,
+            .content_pad_v = cell_height_px * 3 / 4,
+            .list_pad_v = cell_height_px * 25 / 100,
         };
     }
 };
@@ -124,12 +147,13 @@ pub fn lineStep(cell_height_px: u32) u32 {
     return cell_height_px +| @max(1, cell_height_px * 15 / 100);
 }
 
-/// 카드 위/아래 각각의 여백 = cell × 0.375.
-/// **베이스/결정**: 옛 고정 슬롯(cell × 5.2)에서 4줄 카드가 차지하던 여백과 같은 값이다 — 4줄 블록이
-/// 3×step + line_h ≈ 4.45×cell이므로 (5.2 − 4.45)/2 = 0.375. 그래서 4줄 카드는 동적 높이로 바뀐 뒤에도
-/// **픽셀이 같고**, 줄이 적은 카드만 그만큼 짧아진다(옛 슬롯의 빈 공간 제거).
+/// 카드 위/아래 각각의 여백 = cell × 0.7.
+/// **베이스/결정**: 처음엔 0.375였다 — 옛 고정 슬롯(cell × 5.2)에서 **4줄 카드**(이름·브랜치·경로·상태)가 차지하던
+/// 여백과 같게 잡아 겉모습을 보존하려는 값이었다. 그런데 상태줄이 카드에서 **에이전트 목록 행으로 이동**해
+/// (docs/sidebar-agent-list.md §2) 4줄 카드 자체가 사라졌고, 남은 1~3줄 카드에서는 글자가 밴드 위아래에 붙어
+/// 답답했다(사용자 피드백). 4줄 동등성이 지킬 대상이 아니게 됐으므로 **읽기 편한 값**으로 올린다.
 pub fn cardPadV(cell_height_px: u32) u32 {
-    return cell_height_px * 375 / 1000;
+    return cell_height_px * 700 / 1000;
 }
 
 /// `lines` 줄이 차지하는 블록 높이 = (lines−1)×step + line_h(마지막 줄 뒤엔 스텝 여유가 없다).
@@ -143,11 +167,40 @@ pub fn cardHeight(lines: u8, m: Metrics) u32 {
     return blockHeight(lines, m) +| 2 *| m.card_pad_v;
 }
 
+/// 에이전트 목록 행의 높이 = 줄 블록 + 위 `list_pad_v` + 아래(마지막 행이면 `card_pad_v`, 아니면 `list_pad_v`).
+/// 마지막 행만 넉넉한 이유는 위 `rowHeight` 주석 참고(밴드 하단 여백).
+pub fn listRowHeight(lines: u8, m: Metrics, last: bool) u32 {
+    const below = if (last) m.card_pad_v else m.list_pad_v;
+    return blockHeight(lines, m) +| m.list_pad_v +| below;
+}
+
 /// row 하나의 세로 높이(px). 카드=줄 수에서 계산, 그룹 헤더=header_row_h(얇은 한 줄). 가변 누적의 단위.
 pub fn rowHeight(row: Row, m: Metrics) u32 {
     return switch (row) {
         .card => |c| cardHeight(c.lines, m),
         .group_header => m.header_row_h,
+        // 목록 행(토글·에이전트)은 카드와 **같은 줄 블록 규칙**을 쓰되 여백만 `list_pad_v`로 촘촘하게 잡는다.
+        // 단 **마지막 행의 아래 여백만 카드와 같게** 준다 — 밴드가 카드+목록을 한 덩어리로 덮으므로, 마지막 행이
+        // 촘촘한 여백을 그대로 쓰면 글자가 밴드 하단에 붙는다(사용자 피드백).
+        .agent_toggle => |t| listRowHeight(1, m, t.last),
+        .agent => |a| listRowHeight(a.lines, m, a.last),
+    };
+}
+
+/// row_index가 에이전트 목록 토글 행인가(클릭 시 선택이 아니라 접기 토글 대상 — `onGroupHeader`와 같은 결).
+pub fn onAgentToggle(rows: []const Row, row_index: usize) bool {
+    if (row_index >= rows.len) return false;
+    return rows[row_index] == .agent_toggle;
+}
+
+/// row_index가 에이전트 행이면 그 인덱스 경로(tab/pane/term)를, 아니면 null. host(mouseDown)가 이걸로
+/// 워크스페이스 → Pane → Term 이동을 수행한다. **포인터가 아니라 인덱스**라 사이 tick에 Term이 사라져도
+/// 재조회에서 걸러진다(stale deref 금지 — docs/sidebar-agent-list.md §5).
+pub fn agentAt(rows: []const Row, row_index: usize) ?struct { tab: usize, pane: usize, term: usize } {
+    if (row_index >= rows.len) return null;
+    return switch (rows[row_index]) {
+        .agent => |a| .{ .tab = a.tab, .pane = a.pane, .term = a.term },
+        else => null,
     };
 }
 
@@ -157,13 +210,13 @@ pub fn rowTop(rows: []const Row, index: usize, header_height_px: u32, m: Metrics
     var off: i64 = 0;
     const n = @min(index, rows.len);
     for (rows[0..n]) |r| off += @as(i64, rowHeight(r, m));
-    return @as(i64, header_height_px) + off - @as(i64, scroll_offset_px);
+    return @as(i64, header_height_px) + @as(i64, m.content_pad_v) + off - @as(i64, scroll_offset_px);
 }
 
 /// 표시 콘텐츠 전체 높이(px) — 모든 row 높이 합(옛 `rows.len*slot_h`의 가변판). 세로 스크롤 clamp(sidebarMaxScroll)용.
 /// u32 포화(비현실적으로 많은 row에서도 trap 없이 상한)로 clamp 계산이 degenerate하지 않게 한다.
 pub fn contentHeight(rows: []const Row, m: Metrics) u32 {
-    var acc: u64 = 0;
+    var acc: u64 = 2 * @as(u64, m.content_pad_v); // 목록 위·아래 여백도 콘텐츠 높이에 든다(스크롤 끝에서 잘리지 않게)
     for (rows) |r| acc += rowHeight(r, m);
     return @intCast(@min(acc, @as(u64, std.math.maxInt(u32))));
 }
@@ -220,7 +273,9 @@ pub fn headerHit(x_px: f64, y_px: f64, sidebar_width_px: u32, cell_width_px: u32
 pub fn closeButton(x_px: f64, sidebar_width_px: u32, cell_width_px: u32) bool {
     if (sidebar_width_px == 0 or cell_width_px == 0) return false;
     const width: f64 = @floatFromInt(sidebar_width_px);
-    const zone: f64 = @as(f64, @floatFromInt(cell_width_px)) * 2.0;
+    // **우측 3칸**: ✕ glyph는 `cols-3`에 그려지고 그 오른쪽 두 칸은 여백이다(coretext_frame_builder). 2칸으로 두면
+    // 그려진 ✕가 zone 왼쪽 밖에 놓여 "보이는 ✕는 안 눌리고 옆 빈칸이 닫는" 상태가 된다(code-review max).
+    const zone: f64 = @as(f64, @floatFromInt(cell_width_px)) * 3.0;
     return x_px >= width - zone and x_px < width;
 }
 
@@ -231,7 +286,7 @@ pub fn closeButton(x_px: f64, sidebar_width_px: u32, cell_width_px: u32) bool {
 pub fn dragTargetSlot(y_px: f64, header_height_px: u32, rows: []const Row, m: Metrics, scroll_offset_px: u32) usize {
     if (rows.len == 0 or !std.math.isFinite(y_px)) return 0;
     const h: f64 = @floatFromInt(header_height_px);
-    const content = y_px - h + @as(f64, @floatFromInt(scroll_offset_px));
+    const content = y_px - h - @as(f64, @floatFromInt(m.content_pad_v)) + @as(f64, @floatFromInt(scroll_offset_px));
     if (content <= 0) return 0;
     var acc: f64 = 0;
     for (rows, 0..) |r, i| {
@@ -263,7 +318,8 @@ pub fn view(rows: []const Row, hovered_slot: ?usize, drop_slot: ?usize, p: props
     // hover/active 밴드(아래)는 has_color 무관하게 그대로 — 상호작용 피드백은 보더라인이 아니라 카드와 같은 하이라이트다.
     for (rows, 0..) |r, i| switch (r) {
         .group_header => |h| if (h.has_color) try out.append(arena, bandFill(rows, i, w, m, .tab_hover_bg, p.shape)),
-        .card => {},
+        // 에이전트 목록 행은 소속 카드 아래 붙는 부속이라 자기 색 밴드를 내지 않는다(hover/active는 아래 공통 경로).
+        .card, .agent_toggle, .agent => {},
     };
 
     // 활성 슬롯 밴드(첫 active=true 카드 row). group_header row는 활성 대상이 아니다.
@@ -273,10 +329,18 @@ pub fn view(rows: []const Row, hovered_slot: ?usize, drop_slot: ?usize, p: props
             active_idx = i;
             break;
         },
-        .group_header => {},
+        .group_header, .agent_toggle, .agent => {},
     };
     if (active_idx) |ai| {
-        try out.append(arena, bandFill(rows, ai, w, m, .tab_active_bg, p.shape)); // 카드 배경 밴드
+        // 활성 밴드는 **카드 + 그 아래 에이전트 목록 전체**를 덮는다 — 목록은 그 워크스페이스에 딸린 부속이라
+        // 카드만 칠하면 "어디까지가 이 워크스페이스인지"가 안 보인다(사용자 피드백). 카드 뒤에 이어지는
+        // agent_toggle/agent row가 끝나는 지점까지 한 덩어리로 낸다.
+        var span_end = ai + 1;
+        while (span_end < rows.len) : (span_end += 1) switch (rows[span_end]) {
+            .agent_toggle, .agent => {},
+            else => break,
+        };
+        try out.append(arena, bandFillSpan(rows, ai, span_end, w, m, .tab_active_bg, p.shape)); // 카드+목록 배경 밴드
         // 좌측 accent 막대는 여기서 내지 않는다 — 막대색이 카드별(우클릭 "바: …", tab.accent_color)이라 role 기반
         // chrome op으로 임의 RGB를 실을 수 없어, 배경 tint와 같은 이유로 **platform이 카드별 GpuQuad로 직접 그린다**
         // (app_session rebuildSidebar의 per-tab accent 루프 — 활성=기본 앰버/지정색, 비활성=지정 시에만). 카드 폭 inset과
@@ -293,6 +357,10 @@ pub fn view(rows: []const Row, hovered_slot: ?usize, drop_slot: ?usize, p: props
             const hover_role: tokens.ColorRole = switch (rows[hs]) {
                 .group_header => |gh| if (gh.has_color) .tab_active_bg else .tab_hover_bg,
                 .card => .tab_hover_bg,
+                // 목록 행은 **활성 밴드 위에 놓일 수 있다**(활성 카드의 목록). 거기에 같은 .tab_hover_bg를 겹치면
+                // 활성 색보다 어두워 호버가 오히려 안 보인다 — 색 있는 그룹 헤더와 같은 처방으로 한 단계 밝은
+                // .tab_active_bg를 오버레이해 "지금 가리키는 행"이 드러나게 한다(사용자 피드백).
+                .agent_toggle, .agent => .tab_active_bg,
             };
             try out.append(arena, bandFill(rows, hs, w, m, hover_role, p.shape));
         }
@@ -311,9 +379,21 @@ pub fn view(rows: []const Row, hovered_slot: ?usize, drop_slot: ?usize, p: props
 /// 콘텐츠 하단·카드 높이로 둔다. platform lowerSidebar가 같은 누적으로 row를 역산해 tint를 얹고(.m이 header_h를 더해 절대
 /// y를 맞춘다 — 헤더 시프트는 .m 단일 책임).
 fn bandFill(rows: []const Row, row: usize, w: u32, m: Metrics, role: tokens.ColorRole, shape: props.ShapeTokens) draw.Op {
-    const top: i64 = rowTop(rows, row, 0, m, 0); // 슬롯 상대(헤더·스크롤 제외), ≥0
+    return bandFillSpan(rows, row, row + 1, w, m, role, shape);
+}
+
+/// `[from, to)` **여러 row를 한 덩어리로** 덮는 밴드. 활성 워크스페이스가 카드 + 에이전트 목록을 함께 칠할 때 쓴다
+/// (단일 row는 `bandFill`이 to=from+1로 위임). row→y는 앞선 row 높이 누적(rowTop의 헤더·스크롤 제외분).
+fn bandFillSpan(rows: []const Row, from: usize, to: usize, w: u32, m: Metrics, role: tokens.ColorRole, shape: props.ShapeTokens) draw.Op {
+    const top: i64 = rowTop(rows, from, 0, m, 0); // 슬롯 상대(헤더·스크롤 제외), ≥0
     // 목록 아래 행(새 워크스페이스)은 카드가 아니므로 **기본 1줄 카드 높이**로 둔다(옛 고정 slot_h 자리).
-    const rh: u32 = if (row < rows.len) rowHeight(rows[row], m) else cardHeight(1, m);
+    var rh: u32 = 0;
+    if (from >= rows.len) {
+        rh = cardHeight(1, m);
+    } else {
+        var i = from;
+        while (i < to and i < rows.len) : (i += 1) rh +|= rowHeight(rows[i], m);
+    }
     // U2: 슬롯 rect에서 사방 card_gap을 inset(content rect)으로 빼 카드 사이 여백을 둔다(선언적 패딩 — 좌표 산술 대신).
     // tui(gap=0)면 inset 0이라 슬롯 꽉(기존과 동일).
     const slot = draw.Rect{ .x = 0, .y = @intCast(top), .w = w, .h = rh };
@@ -329,7 +409,7 @@ fn bandFill(rows: []const Row, row: usize, w: u32, m: Metrics, role: tokens.Colo
 // 테스트용 메트릭: **1줄 카드 높이 = card_h**가 되도록 구성한다(여백 0·스텝=줄높이). 이러면 가변 높이 도입 전의
 // 균일 슬롯 기대값을 그대로 쓸 수 있어, 이 파일의 회귀 테스트가 옛 동작을 계속 고정한다.
 fn testMetrics(card_h: u32, header_row_h: u32) Metrics {
-    return .{ .line_h = card_h, .line_step = card_h, .card_pad_v = 0, .header_row_h = header_row_h };
+    return .{ .line_h = card_h, .line_step = card_h, .card_pad_v = 0, .header_row_h = header_row_h, .content_pad_v = 0, .list_pad_v = 0 };
 }
 
 test "sidebar hit-test: inSidebar·onResizeEdge·slotAt·headerHit·closeButton·dragTargetSlot 경계" {
@@ -385,9 +465,10 @@ test "sidebar hit-test: inSidebar·onResizeEdge·slotAt·headerHit·closeButton�
     // cols<13(너무 좁아 아이콘 4개가 안 들어감)이면 헤더 glyph가 안 그려지므로 클릭 무시(검색 무단 활성 방지).
     try std.testing.expectEqual(HeaderRegion.none, headerHit(50, 15, 96, 8, 10, 20)); // w=96,cw=8 → cols=12<13
     try std.testing.expectEqual(HeaderRegion.none, headerHit(35, 15, 40, 8, 10, 20)); // w=40,cw=8 → cols=5<13
-    // closeButton: [w-2cw, w). w=100, cw=8 → [84, 100).
+    // closeButton: [w-3cw, w). w=100, cw=8 → [76, 100) — ✕가 cols-3에 그려지므로 zone도 3칸이다.
     try std.testing.expect(closeButton(90, 100, 8));
-    try std.testing.expect(!closeButton(83, 100, 8));
+    try std.testing.expect(closeButton(83, 100, 8)); // zone이 우측 3칸(76~)으로 넓어졌다 — ✕가 cols-3에 그려지므로
+    try std.testing.expect(!closeButton(75, 100, 8)); // 그 왼쪽(제목 영역)은 여전히 밖
     // dragTargetSlot(header=0): 항상 clamp. 아래 빈 영역도 마지막 row(가변 누적, 카드만=균일). v3/v5/v0 재사용.
     try std.testing.expectEqual(@as(usize, 2), dragTargetSlot(999, 0, &v3, testMetrics(16, 16), 0)); // 끝으로 clamp
     try std.testing.expectEqual(@as(usize, 0), dragTargetSlot(8, 0, &v3, testMetrics(16, 16), 0));
@@ -426,15 +507,17 @@ test "sidebar view: 활성·호버·+ 밴드 fill(우선순위·좌표·role)" {
     // 활성: row 1 → y=40, role tab_active_bg, 전체 폭.
     try std.testing.expect(out.items[0] == .quad);
     try std.testing.expect(out.items[0].quad.fill_role == .tab_active_bg);
-    const card1_h = cardHeight(1, Metrics.init(16, 20)); // 1줄 카드(cell 16) 높이 — 아래 기대값의 단일 출처
-    try std.testing.expectEqual(@as(i32, @intCast(card1_h)), out.items[0].quad.rect.y);
+    const vm = Metrics.init(16, 20);
+    const card1_h = cardHeight(1, vm); // 1줄 카드(cell 16) 높이 — 아래 기대값의 단일 출처
+    const pad_top: i32 = @intCast(vm.content_pad_v); // 목록 위 여백만큼 모든 row가 내려간다
+    try std.testing.expectEqual(pad_top + @as(i32, @intCast(card1_h)), out.items[0].quad.rect.y);
     try std.testing.expectEqual(@as(u32, 120), out.items[0].quad.rect.w);
     try std.testing.expectEqual(card1_h, out.items[0].quad.rect.h);
     // p.shape 기본(tui) → corner_radii 0(직각 → lowering이 셀 밴드로).
     try std.testing.expectEqual(@as(u16, 0), out.items[0].quad.corner_radii[0]);
     // 호버: row 0 → y=0, tab_hover_bg.
     try std.testing.expect(out.items[1].quad.fill_role == .tab_hover_bg);
-    try std.testing.expectEqual(@as(i32, 0), out.items[1].quad.rect.y);
+    try std.testing.expectEqual(pad_top, out.items[1].quad.rect.y);
 
     // 호버 슬롯 == 활성이면 호버 밴드 생략(활성 색 우선).
     out.clearRetainingCapacity();
@@ -446,13 +529,13 @@ test "sidebar view: 활성·호버·+ 밴드 fill(우선순위·좌표·role)" {
     try view(&rows, null, 0, p, arena, &out); // 활성(idx1) + 드롭(slot 0)
     try std.testing.expectEqual(@as(usize, 2), out.items.len);
     try std.testing.expect(out.items[1].quad.fill_role == .drop_zone);
-    try std.testing.expectEqual(@as(i32, 0), out.items[1].quad.rect.y); // slot 0
+    try std.testing.expectEqual(pad_top, out.items[1].quad.rect.y); // slot 0
     // drop_slot == rows.len이면 카드 목록 아래 행(새 워크스페이스) — 범위 밖 행도 밴드를 낸다.
     out.clearRetainingCapacity();
     try view(&rows, null, rows.len, p, arena, &out);
     const last = out.items[out.items.len - 1].quad;
     try std.testing.expect(last.fill_role == .drop_zone);
-    try std.testing.expectEqual(@as(i32, @intCast(3 * card1_h)), last.rect.y); // row 3(카드 아래) = 카드 3장 높이 합
+    try std.testing.expectEqual(pad_top + @as(i32, @intCast(3 * card1_h)), last.rect.y); // row 3(카드 아래)
 
     // 사이드바 꺼짐(폭 0)·줄 높이 0(렌더 전 degenerate)·탭 없음이면 무동작.
     // **cell 높이 0**이 그 판정 입력이다 — 카드 높이가 줄 기하에서 나오므로 옛 `sidebar_slot_height_px = 0`은
@@ -485,7 +568,7 @@ test "sidebar view: 활성·호버·+ 밴드 fill(우선순위·좌표·role)" {
     const card = out.items[0].quad.rect;
     try std.testing.expectEqual(@as(i32, 4), card.x); // 좌 패딩(gap)
     try std.testing.expectEqual(@as(u32, 120 - 8), card.w); // w - 2×gap
-    try std.testing.expectEqual(@as(i32, @intCast(card1_h + 4)), card.y); // 카드1 y(=카드0 높이) + gap
+    try std.testing.expectEqual(pad_top + @as(i32, @intCast(card1_h + 4)), card.y); // 카드1 y + gap
     try std.testing.expectEqual(card1_h - 8, card.h); // 카드 높이 - 2×gap
 }
 
@@ -518,7 +601,7 @@ test "sidebar view: group_header 밴드 정책 — 무색=밴드 없음(화살�
     try view(&rows_nocolor, null, null, p, arena, &out);
     try std.testing.expectEqual(@as(usize, 1), out.items.len); // 활성 카드 밴드만(헤더 기본 밴드 없음)
     try std.testing.expect(out.items[0].quad.fill_role == .tab_active_bg);
-    try std.testing.expectEqual(@as(i32, 20), out.items[0].quad.rect.y); // row1 y=header_row_h(20) 가변 누적
+    try std.testing.expectEqual(@as(i32, @intCast(Metrics.init(16, 20).content_pad_v + 20)), out.items[0].quad.rect.y); // 여백 + header_row_h(20)
     try std.testing.expectEqual(cardHeight(1, Metrics.init(16, 20)), out.items[0].quad.rect.h);
 
     // 색 지정 헤더(has_color=true): 헤더 밴드(row0, y=0, h=20, tab_hover_bg) + 활성 카드 밴드(row1). lowerSidebar가 tint.
@@ -531,10 +614,10 @@ test "sidebar view: group_header 밴드 정책 — 무색=밴드 없음(화살�
     try view(&rows_color, null, null, p, arena, &out);
     try std.testing.expectEqual(@as(usize, 2), out.items.len); // 헤더 밴드(row0) + 활성 카드 밴드(row1)
     try std.testing.expect(out.items[0].quad.fill_role == .tab_hover_bg);
-    try std.testing.expectEqual(@as(i32, 0), out.items[0].quad.rect.y);
+    try std.testing.expectEqual(@as(i32, @intCast(Metrics.init(16, 20).content_pad_v)), out.items[0].quad.rect.y);
     try std.testing.expectEqual(@as(u32, 20), out.items[0].quad.rect.h); // 헤더 높이(header_row_h)
     try std.testing.expect(out.items[1].quad.fill_role == .tab_active_bg);
-    try std.testing.expectEqual(@as(i32, 20), out.items[1].quad.rect.y);
+    try std.testing.expectEqual(@as(i32, @intCast(Metrics.init(16, 20).content_pad_v + 20)), out.items[1].quad.rect.y);
 
     // 무색 헤더 hover(row0): 기본 밴드가 없어도 호버 밴드는 그대로 난다(카드와 같은 하이라이트 피드백 유지).
     out.clearRetainingCapacity();
@@ -543,7 +626,7 @@ test "sidebar view: group_header 밴드 정책 — 무색=밴드 없음(화살�
     // 호버 밴드는 헤더 row0(y=0)에 tab_hover_bg로 난다 — 그중 하나가 그 조건을 만족해야 한다.
     var saw_header_hover = false;
     for (out.items) |op| {
-        if (op.quad.fill_role == .tab_hover_bg and op.quad.rect.y == 0 and op.quad.rect.h == 20) saw_header_hover = true;
+        if (op.quad.fill_role == .tab_hover_bg and op.quad.rect.y == @as(i32, @intCast(Metrics.init(16, 20).content_pad_v)) and op.quad.rect.h == 20) saw_header_hover = true;
     }
     try std.testing.expect(saw_header_hover);
 
@@ -554,7 +637,7 @@ test "sidebar view: group_header 밴드 정책 — 무색=밴드 없음(화살�
     var saw_base_color_band = false; // 기본 색 밴드(.tab_hover_bg @ row0)
     var saw_header_hover_active = false; // 호버 밴드(.tab_active_bg @ row0) — 색 위 오버레이로 시각 변화
     for (out.items) |op| {
-        if (op.quad.rect.y == 0 and op.quad.rect.h == 20) {
+        if (op.quad.rect.y == @as(i32, @intCast(Metrics.init(16, 20).content_pad_v)) and op.quad.rect.h == 20) {
             if (op.quad.fill_role == .tab_hover_bg) saw_base_color_band = true;
             if (op.quad.fill_role == .tab_active_bg) saw_header_hover_active = true;
         }
@@ -573,11 +656,33 @@ test "sidebar onGroupHeader: 헤더 row만 true(카드·범위 밖 false)" {
     try std.testing.expect(!onGroupHeader(&rows, 2)); // 범위 밖
 }
 
-// 카드 높이가 **줄 수 기반**으로 바뀐 뒤에도 4줄 카드의 겉모습이 그대로여야 한다(이번 변경은 "적은 줄 카드의 빈
-// 공간 제거"이지 카드 크기 개편이 아니다). 옛 고정 슬롯은 4줄을 담으려고 cell×5.2로 잡은 값이었으므로, 그 값과
-// 4줄 카드 높이가 같은지를 못박으면 회귀가 드러난다. 사이드바에서 왜 중요한가: 카드 높이는 클릭 좌표(slotAt)·
-// 밴드·glyph 배치가 모두 공유하는 기준이라, 여기가 어긋나면 "보이는 곳과 눌리는 곳"이 통째로 갈린다.
-test "sidebar 카드 높이: 줄 수에 비례하고 4줄은 옛 고정 슬롯과 같다" {
+// 카드 높이가 **줄 수에 비례**하고 여백이 위아래 각각 들어가는지 못박는다. 사이드바에서 왜 중요한가: 카드 높이는
+// 클릭 좌표(slotAt)·밴드·glyph 배치가 모두 공유하는 기준이라, 여기가 어긋나면 "보이는 곳과 눌리는 곳"이 통째로
+// 갈린다. (옛 고정 슬롯 cell×5.2와의 4줄 동등성은 상태줄이 목록 행으로 이동해 4줄 카드가 사라지면서 폐기됐다.)
+// code-review(max) 회귀: 닫기 ✕ glyph는 `cols-3`에 그려지는데 hit zone은 우측 **2칸**이라, 보이는 ✕는 안 눌리고
+// 그 옆 빈칸이 닫는 상태였다. 사이드바에서 왜 중요한가: 그 빈칸 클릭은 워크스페이스나 Term을 되돌릴 수 없이
+// 닫으므로, "보이는 것 = 눌리는 것"이 깨지면 사용자가 의도하지 않은 파괴가 일어난다.
+test "sidebar closeButton: 그려진 ✕(cols-3)와 클릭 zone이 정합한다" {
+    const cw: u32 = 10;
+    const cols: u32 = 20;
+    const w: u32 = cw * cols; // 200
+
+    // ✕ glyph는 cols-3 = col 17 = px [170, 180). 그 칸을 누르면 닫혀야 한다.
+    try std.testing.expect(closeButton(170, w, cw));
+    try std.testing.expect(closeButton(179, w, cw));
+    // ✕ 오른쪽 두 칸(패딩)도 같은 zone — 경계에서 손이 미끄러져도 의도대로 동작한다.
+    try std.testing.expect(closeButton(180, w, cw));
+    try std.testing.expect(closeButton(199, w, cw));
+    // 그 왼쪽(제목 영역)은 zone 밖이어야 한다 — 여기서 닫히면 이름을 누르려다 워크스페이스가 사라진다.
+    try std.testing.expect(!closeButton(169, w, cw));
+    try std.testing.expect(!closeButton(0, w, cw));
+    // 메트릭 0(렌더 전)·폭 밖은 false.
+    try std.testing.expect(!closeButton(170, 0, cw));
+    try std.testing.expect(!closeButton(170, w, 0));
+    try std.testing.expect(!closeButton(200, w, cw));
+}
+
+test "sidebar 카드 높이: 줄 수에 비례하고 여백이 위아래 각각 들어간다" {
     const ch: u32 = 16;
     const m = Metrics.init(ch, 24);
 
@@ -589,10 +694,9 @@ test "sidebar 카드 높이: 줄 수에 비례하고 4줄은 옛 고정 슬롯�
     // 줄 하나가 느는 폭 = 줄 스텝(마지막 줄 뒤엔 여유가 없으므로 정확히 step만큼).
     try std.testing.expectEqual(m.line_step, cardHeight(3, m) - cardHeight(2, m));
 
-    // 회귀 가드: 4줄 카드 = 옛 고정 슬롯(cell × 5.2). 정수 나눗셈 오차(≤2px)만 허용한다.
-    const legacy_slot = ch * 5200 / 1000;
-    const four = cardHeight(4, m);
-    try std.testing.expect(four <= legacy_slot and legacy_slot - four <= 2);
+    // 여백은 **위아래 각각** 들어간다 — 카드 높이 = 줄 블록 + 2×여백. 이 관계가 깨지면 글자가 밴드에 붙는다
+    // (여백을 0.375→0.7로 올린 이유이자, 그 값이 계산에 실제로 두 번 반영되는지의 가드).
+    try std.testing.expectEqual(blockHeight(2, m) + 2 * m.card_pad_v, cardHeight(2, m));
 
     // 0줄(비정상 입력)도 1줄과 같은 최소 높이로 포화한다 — 높이 0 row가 생기면 slotAt이 그 row를 건너뛴다.
     try std.testing.expectEqual(cardHeight(1, m), cardHeight(0, m));

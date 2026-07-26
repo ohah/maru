@@ -68,7 +68,12 @@ pub const Metrics = struct {
         const sc = segCols(tab_index, self.tab_w, self.tab_cols, self.scroll_cols);
         const start_col = sc.start;
         const end_col = sc.end;
-        const has_close = self.tab_w >= 2 and end_col >= 2;
+        // ✕는 우측 안쪽 칸(end_col-2)에 그려지고 **좌우 한 칸씩 패딩**을 둔다(buildPaneTabBarDrawList와 같은 규칙).
+        // 판정은 **보이는 폭**(end_col-start_col) 기준이어야 한다 — 우단에서 잘린 탭은 nominal tab_w가 커도 실제 폭이
+        // 1~3칸이라, tab_w로 판정하면 ✕가 seg_end-2 = **이웃 탭 안**에 그려지고 클릭이 엉뚱한 Term을 닫는다(code-review max).
+        // 5칸인 이유: 좌패딩1 + 제목최소1 + ✕좌여백1 + ✕1 + ✕우여백1 — 렌더의 `title_end = seg_end-3`와 정확히 대응한다.
+        const visible_cols = if (end_col > start_col) end_col - start_col else 0;
+        const has_close = visible_cols >= 5;
         return .{
             .start_col = start_col,
             .end_col = end_col,
@@ -176,9 +181,18 @@ test "tabbar hit-test: tabIndex·inCloseZone·hasPlusZone·inPlusZone 경계" {
     degenerate.tab_cols = 0;
     try std.testing.expectEqual(@as(usize, 0), degenerate.tabIndex(4, 130));
     // ✕ zone: 탭0 segEnd=2 → [colPx(0), colPx(2))=[100,116).
-    try std.testing.expect(m.inCloseZone(0, 100));
-    try std.testing.expect(m.inCloseZone(0, 115));
-    try std.testing.expect(!m.inCloseZone(0, 116)); // 탭0 밖
+    // **2칸 탭엔 ✕가 없다**(제목 자리를 남겨야 하므로 tab_w>=4에서만) — 좁은 탭에서 close zone은 항상 false.
+    try std.testing.expect(!m.inCloseZone(0, 100));
+    try std.testing.expect(!m.inCloseZone(0, 115));
+    // 넉넉한 폭(보이는 폭 5칸 이상)에서만 ✕가 생긴다: tab_w=5 → 탭0=[100,140), ✕ zone=[colPx(3)=124, 140).
+    var wide4 = m;
+    wide4.tab_w = 5;
+    wide4.tab_cols = 10;
+    wide4.tab_count = 2;
+    try std.testing.expect(!wide4.inCloseZone(0, 123)); // 제목 영역
+    try std.testing.expect(wide4.inCloseZone(0, 124));
+    try std.testing.expect(wide4.inCloseZone(0, 139));
+    try std.testing.expect(!wide4.inCloseZone(0, 140)); // 탭0 밖
     // "+" zone [8,10)칸 = [164,180).
     try std.testing.expect(m.hasPlusZone());
     try std.testing.expect(m.inPlusZone(164));
@@ -221,14 +235,23 @@ test "tabbar 인라인 +: 탭이 영역을 안 채우면 마지막 탭 바로 �
 
 test "tabbar segOf: 탭 픽셀 경계 단일 소스 — hit-test와 정합(셀-열 정렬, 패딩 0)" {
     const m = testMetrics();
-    // 탭0=[100,116) 탭3=[148,164). 2칸 탭이라 ✕는 [end-2cell, end)=세그먼트 전체.
+    // 탭0=[100,116) 탭3=[148,164). **2칸 탭엔 ✕가 없다** — ✕는 좌우 한 칸씩 패딩을 두고 제목 자리를 최소 1칸
+    // 남겨야 하므로 tab_w>=4에서만 존재한다(렌더 buildPaneTabBarDrawList와 같은 조건).
     const s0 = m.segOf(0);
     try std.testing.expectEqual(@as(u32, 0), s0.start_col); // 셀 경계(view 밴드·제목용)
     try std.testing.expectEqual(@as(u32, 2), s0.end_col);
     try std.testing.expectEqual(@as(f64, 100), s0.start_px);
     try std.testing.expectEqual(@as(f64, 116), s0.end_px);
-    try std.testing.expect(s0.has_close);
-    try std.testing.expectEqual(@as(f64, 100), s0.close_start_px);
+    try std.testing.expect(!s0.has_close); // 2칸 = ✕ 접힘
+
+    // 폭이 넉넉하면(보이는 폭 5칸) ✕가 생기고 zone은 우측 2칸 = [end-2cell, end).
+    var wide = m;
+    wide.tab_w = 5;
+    wide.tab_cols = 10;
+    wide.tab_count = 2;
+    const w0 = wide.segOf(0);
+    try std.testing.expect(w0.has_close);
+    try std.testing.expectEqual(wide.colPx(w0.end_col - 2), w0.close_start_px);
     const s3 = m.segOf(3);
     try std.testing.expectEqual(@as(f64, 148), s3.start_px);
     try std.testing.expectEqual(@as(f64, 164), s3.end_px);
@@ -238,8 +261,11 @@ test "tabbar segOf: 탭 픽셀 경계 단일 소스 — hit-test와 정합(셀-�
     try std.testing.expect(!thin.segOf(0).has_close);
     // hit-test가 segOf 경계와 정합: 탭0 우경계 = 탭1 시작, ✕ zone이 segOf.close와 일치.
     try std.testing.expectEqual(@as(usize, 1), m.tabIndex(4, s0.end_px)); // end_px(반열림)는 다음 탭
-    try std.testing.expect(m.inCloseZone(3, s3.close_start_px));
-    try std.testing.expect(!m.inCloseZone(3, s3.end_px)); // end는 반열림 밖
+    // 2칸 탭(testMetrics)은 ✕가 없으므로 close zone도 없다 — 넉넉한 폭(wide)에서 정합을 확인한다.
+    try std.testing.expect(!m.inCloseZone(3, s3.start_px));
+    const w1 = wide.segOf(1);
+    try std.testing.expect(wide.inCloseZone(1, w1.close_start_px));
+    try std.testing.expect(!wide.inCloseZone(1, w1.end_px)); // end는 반열림 밖
 }
 
 test "tabbar tabIndex: overflow(term>탭칸) — 안 보이는 탭을 hit하지 않고 마지막 보이는 탭으로 clamp" {

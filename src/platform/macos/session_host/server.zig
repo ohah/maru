@@ -123,6 +123,8 @@ pub const RuntimeOps = struct {
     /// controller가 보낸 terminal input을 runtime PTY로 보낸다(§9 `input` capability). registry가 controller임을 확인한 뒤 호출.
     write_input: *const fn (ctx: *anyopaque, runtime_id: u128, bytes: []const u8) anyerror!void,
     /// canonical PTY size를 실 `TerminalCore`+`TIOCSWINSZ`에 적용한다(§9). registry가 controller/sequence를 검증한 뒤 호출.
+    /// 실패가 부분 core/PTY mutation 뒤 발생할 수 있는 backend는 반환 전에 runtime을 fail-stop terminate해 실제
+    /// allocation을 회수해야 한다. 그러면 registry transaction은 commit하지 않고 남은 runtime만 계속 정확히 계상한다.
     resize: *const fn (ctx: *anyopaque, runtime_id: u128, cols: u16, rows: u16) anyerror!void,
     /// runtime의 현재 화면을 §12 screen_stream 레코드 스트림(length-prefixed)으로 투영한다(attach 첫 snapshot). caller가
     /// 소유하는 바이트를 돌려주며(host가 core lock 아래 투영), server가 이를 snapshot_chunk frame으로 나눠 보낸다.
@@ -893,7 +895,11 @@ pub const Connection = struct {
             .cols = cols,
             .rows = rows,
             .initial_config = initial_config,
-        }) catch return self.replyError(request_id, .internal);
+        }) catch |err| switch (err) {
+            error.RuntimeLimitReached, error.AggregateGridLimitReached => return self.replyError(request_id, .resource_exhausted),
+            error.InvalidGridSize => return self.replyError(request_id, .invalid_request),
+            else => return self.replyError(request_id, .internal),
+        };
 
         const id_hex = try self.hex128(runtime_id);
         defer self.allocator.free(id_hex);
@@ -1269,8 +1275,10 @@ pub const Connection = struct {
     /// `runtime.resize`: controller가 canonical PTY size를 바꾼다(§9). registry가 controller/sequence를 검증하고, 실제
     /// 크기가 바뀔 때만 runtime_ops(실 `TerminalCore`+`TIOCSWINSZ`)에 적용한 뒤 applied size/generation을 응답한다.
     /// observer의 resize는 unauthorized, stale sequence는 `{stale:true}`. 모든 subscription으로의 `runtime.resized`
-    /// broadcast는 e2d(event fan-out)에서 얹는다. (registry가 canonical을 먼저 commit하므로 실 적용 실패는 드문 error 경로다.)
+    /// broadcast는 e2d(event fan-out)에서 얹는다. backend 성공 뒤에만 registry를 commit하며, 부분 적용 가능성이 있는
+    /// product backend는 실패 시 runtime을 fail-stop terminate해 실제 resource와 ledger를 다시 일치시킨다.
     fn dispatchResize(self: *Connection, request_id: u64, params: ?std.json.ObjectMap) HandleError!Action {
+        const ops = self.runtime_ops orelse return self.replyError(request_id, .unauthorized);
         const p = params orelse return self.replyError(request_id, .invalid_request);
         const stream = intFieldU64(p, "stream_id") orelse return self.replyError(request_id, .invalid_request);
         const cols = intField(p, "cols") orelse return self.replyError(request_id, .invalid_request);
@@ -1279,10 +1287,19 @@ pub const Connection = struct {
         const sub = self.attachments.get(stream) orelse return self.replyError(request_id, .invalid_request);
         const runtime_id = sub.runtime_id;
 
-        const outcome = self.registry.resizeSubscription(runtime_id, sub.subscription_id, cols, rows, seq) catch |e| switch (e) {
+        const outcome = self.registry.resizeSubscription(
+            runtime_id,
+            sub.subscription_id,
+            cols,
+            rows,
+            seq,
+            ops.ctx,
+            ops.resize,
+        ) catch |e| switch (e) {
             error.NotController => return self.replyError(request_id, .unauthorized),
             error.RuntimeNotFound => return self.replyError(request_id, .runtime_not_found),
             error.InvalidGridSize => return self.replyError(request_id, .invalid_request),
+            error.AggregateGridLimitReached => return self.replyError(request_id, .resource_exhausted),
             else => return self.replyError(request_id, .internal),
         };
         switch (outcome) {
@@ -1292,11 +1309,6 @@ pub const Connection = struct {
                 return self.replyResult(request_id, body);
             },
             .applied => |a| {
-                if (a.changed) {
-                    if (self.runtime_ops) |ops| {
-                        ops.resize(ops.ctx, runtime_id, a.cols, a.rows) catch return self.replyError(request_id, .internal);
-                    }
-                }
                 const body = try self.stringify(.{ .result = .{
                     .cols = a.cols,
                     .rows = a.rows,
@@ -2167,7 +2179,10 @@ test "server: host.info and runtime.list/get dispatch registry state after hello
 }
 
 test "server: runtime.inventory pages canonical IDs under one exact authority" {
-    var registry = reg.TerminalRuntimeRegistry.init(testing.allocator);
+    var registry = reg.TerminalRuntimeRegistry.initWithLimits(testing.allocator, .{
+        .max_live_runtimes = 257,
+        .max_aggregate_grid_cells = 257 * 80 * 24,
+    });
     defer registry.deinit();
     var runtime_id: u128 = 1;
     while (runtime_id <= 257) : (runtime_id += 1)
@@ -2285,7 +2300,10 @@ test "server: runtime.inventory is neither advertised nor callable on a legacy h
 }
 
 test "server: runtime.inventory accepts the workspace cap and rejects cap plus one without a prefix" {
-    var registry = reg.TerminalRuntimeRegistry.init(testing.allocator);
+    var registry = reg.TerminalRuntimeRegistry.initWithLimits(testing.allocator, .{
+        .max_live_runtimes = protocol.max_inventory_runtimes + 1,
+        .max_aggregate_grid_cells = (protocol.max_inventory_runtimes + 1) * 80 * 24,
+    });
     defer registry.deinit();
     var id: u128 = 1;
     while (id <= protocol.max_inventory_runtimes) : (id += 1)
@@ -2343,7 +2361,10 @@ test "server: inventory snapshot allocation failure is typed and preserves canon
 
 test "server: oversize result replies payload_too_large instead of dropping the connection" {
     const allocator = testing.allocator;
-    var registry = reg.TerminalRuntimeRegistry.init(allocator);
+    var registry = reg.TerminalRuntimeRegistry.initWithLimits(allocator, .{
+        .max_live_runtimes = 2600,
+        .max_aggregate_grid_cells = 2600 * 80 * 24,
+    });
     defer registry.deinit();
     // runtime.list JSON이 control cap(256 KiB)을 넘도록 충분히 많은 runtime을 등록한다(각 meta ~135B).
     var i: u128 = 1;
@@ -2429,6 +2450,7 @@ pub const FakeRuntimeOps = struct {
     resized_cols: u16 = 0,
     resized_rows: u16 = 0,
     resized_runtime: u128 = 0,
+    resize_fail_count: usize = 0,
     delta_base_seen: [64]u8 = undefined,
     delta_base_seen_len: usize = 0,
     last_core_command: ?core_command_wire.Command = null,
@@ -2495,6 +2517,10 @@ pub const FakeRuntimeOps = struct {
     }
     fn resizeFn(ctx: *anyopaque, runtime_id: u128, cols: u16, rows: u16) anyerror!void {
         const self: *FakeRuntimeOps = @ptrCast(@alignCast(ctx));
+        if (self.resize_fail_count != 0) {
+            self.resize_fail_count -= 1;
+            return error.InjectedResizeFailure;
+        }
         self.resized_cols = cols;
         self.resized_rows = rows;
         self.resized_runtime = runtime_id;
@@ -2798,6 +2824,57 @@ test "server: attach grants capabilities; controller input/resize dispatch throu
         try testing.expectEqualStrings("none", r.action);
     }
     try testing.expectEqual(@as(usize, 99), fake.last_input_len); // 미attach stream이라 write_input 미호출(값 그대로).
+}
+
+test "server: backend resize failure leaves canonical size sequence generation and ledger unchanged" {
+    const allocator = testing.allocator;
+    var registry = reg.TerminalRuntimeRegistry.init(allocator);
+    defer registry.deinit();
+    const entry = try registry.register(0xAA, 100, 40);
+    const initial_cells = registry.liveGridCells();
+
+    var fake: FakeRuntimeOps = .{ .resize_fail_count = 1 };
+    var conn = Connection.init(allocator, 1, &registry);
+    defer conn.deinit();
+    conn.runtime_ops = fake.ops();
+    {
+        const hello = try feedJson(&conn, .hello, 1, "{\"protocol_min\":2,\"protocol_max\":2}");
+        if (hello.frame) |frame| frame.deinit(allocator);
+    }
+    {
+        const attach = try feedJson(&conn, .request, 2, "{\"method\":\"runtime.attach\",\"params\":{\"runtime_id\":\"aa\",\"mode\":\"controller\"}}");
+        defer if (attach.frame) |frame| frame.deinit(allocator);
+    }
+
+    const failed = try feedJson(
+        &conn,
+        .request,
+        3,
+        "{\"method\":\"runtime.resize\",\"params\":{\"stream_id\":1,\"cols\":50,\"rows\":20,\"client_sequence\":7}}",
+    );
+    defer if (failed.frame) |frame| frame.deinit(allocator);
+    try testing.expect(std.mem.indexOf(u8, failed.frame.?.payload, "internal") != null);
+    try testing.expectEqual(@as(u16, 100), entry.cols);
+    try testing.expectEqual(@as(u16, 40), entry.rows);
+    try testing.expect(!entry.resize_seq_seen);
+    try testing.expectEqual(@as(u64, 0), entry.controller_sequence);
+    try testing.expectEqual(@as(u64, 0), entry.resize_generation);
+    try testing.expectEqual(initial_cells, registry.liveGridCells());
+
+    const retried = try feedJson(
+        &conn,
+        .request,
+        4,
+        "{\"method\":\"runtime.resize\",\"params\":{\"stream_id\":1,\"cols\":50,\"rows\":20,\"client_sequence\":7}}",
+    );
+    defer if (retried.frame) |frame| frame.deinit(allocator);
+    try testing.expect(std.mem.indexOf(u8, retried.frame.?.payload, "\"changed\":true") != null);
+    try testing.expectEqual(@as(u16, 50), entry.cols);
+    try testing.expectEqual(@as(u16, 20), entry.rows);
+    try testing.expect(entry.resize_seq_seen);
+    try testing.expectEqual(@as(u64, 7), entry.controller_sequence);
+    try testing.expectEqual(@as(u64, 1), entry.resize_generation);
+    try testing.expectEqual(@as(usize, 50 * 20), registry.liveGridCells());
 }
 
 test "server: observer attach is denied input and resize" {

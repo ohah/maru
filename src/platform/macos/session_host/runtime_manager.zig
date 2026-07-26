@@ -565,6 +565,10 @@ pub const RuntimeManager = struct {
             host.next_handle == std.math.maxInt(RuntimeHandle) or
             host.runtimes.len > upgrade_limits.max_runtime_count)
             return error.InvalidRestoreGraph;
+        var restore_sizes: [upgrade_limits.max_runtime_count]reg.GridSize = undefined;
+        for (host.runtimes, 0..) |runtime, index|
+            restore_sizes[index] = .{ .cols = runtime.cols, .rows = runtime.rows };
+        try self.host_registry.canRegisterBatch(restore_sizes[0..host.runtimes.len]);
 
         var prepared = PreparedRestoredGraph{
             .manager = self,
@@ -918,8 +922,29 @@ pub const RuntimeManager = struct {
 
     fn resizeOp(ctx: *anyopaque, runtime_id: u128, cols: u16, rows: u16) anyerror!void {
         const self: *RuntimeManager = @ptrCast(@alignCast(ctx));
+        return self.resizeWithApply(runtime_id, cols, rows, self, backendResizeApply);
+    }
+
+    fn backendResizeApply(ctx: *anyopaque, handle: RuntimeHandle, size: maru.terminal.Size, io: std.Io) anyerror!void {
+        const self: *RuntimeManager = @ptrCast(@alignCast(ctx));
+        return self.backend_impl.backend().resize(handle, size, io);
+    }
+
+    fn resizeWithApply(
+        self: *RuntimeManager,
+        runtime_id: u128,
+        cols: u16,
+        rows: u16,
+        apply_ctx: *anyopaque,
+        apply: *const fn (*anyopaque, RuntimeHandle, maru.terminal.Size, std.Io) anyerror!void,
+    ) anyerror!void {
         const handle = self.handleFor(runtime_id) orelse return error.RuntimeNotFound;
-        return self.backend_impl.backend().resize(handle, .{ .cols = cols, .rows = rows }, self.io);
+        apply(apply_ctx, handle, .{ .cols = cols, .rows = rows }, self.io) catch |err| {
+            // SurfaceRuntime resize는 core mutation 뒤 PTY ioctl에서 실패할 수 있어 rollback으로 원래 크기를 보장할 수
+            // 없다. 부분 적용 runtime을 살려 ledger보다 큰 heap을 숨기지 말고 fail-stop으로 실제 resource를 전량 회수한다.
+            self.terminateRuntime(runtime_id);
+            return err;
+        };
     }
 
     /// host 실제 core/PTY에서 화면 외 runtime 관측을 한 번에 owned copy한다. foreground syscall은 runtime별 500ms
@@ -1331,8 +1356,9 @@ pub const RuntimeManager = struct {
     /// 에러 집합은 backend(anyerror)를 그대로 전파한다 — `error.EmptyArgv`/`error.IdSpaceExhausted`는 이 매니저 고유.
     fn spawnRuntime(self: *RuntimeManager, params: server.RuntimeSpawnParams) anyerror!u128 {
         if (params.argv.len == 0) return error.EmptyArgv; // server가 이미 거르지만 방어(handle 낭비 방지).
-        if (!reg.gridSizeAllowed(params.cols, params.rows))
-            return error.InvalidGridSize;
+        // daemon-wide runtime/grid 예산은 registry가 SSOT다. forkpty/core allocation 전에 확인하고 실제 publish에서
+        // 같은 검사를 반복해, 거부된 same-UID spawn이 child/FD/heap을 잠시라도 만들지 않게 한다.
+        try self.host_registry.canRegister(params.cols, params.rows);
         // maxInt handle을 발급하면 성공 뒤 cursor 증가가 wrap/trap한다. PTY를
         // 만들기 전에 거부해 live child를 띄운 뒤 실패하는 경로도 없앤다.
         if (self.next_handle == std.math.maxInt(RuntimeHandle))
@@ -1561,8 +1587,50 @@ test "runtime manager: spawns a real PTY runtime through RuntimeOps and terminat
     // terminate: PTY/자식/reader를 정리하고 registry에서 제거한다.
     ops.terminate(ops.ctx, rid);
     try std.testing.expectEqual(@as(usize, 0), host_registry.count());
+    try std.testing.expectEqual(@as(usize, 0), host_registry.liveGridCells());
     // 두 번째 terminate는 no-op(없는 id 무시) — 멱등.
     ops.terminate(ops.ctx, rid);
+}
+
+test "runtime manager: daemon budget rejection happens before backend allocation" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+
+    var count_registry = reg.TerminalRuntimeRegistry.initWithLimits(allocator, .{
+        .max_live_runtimes = 1,
+        .max_aggregate_grid_cells = reg.max_aggregate_grid_cells,
+    });
+    defer count_registry.deinit();
+    _ = try count_registry.register(1, 80, 24);
+    var count_manager: RuntimeManager = undefined;
+    count_manager.init(allocator, std.testing.io, &count_registry);
+    defer count_manager.deinit();
+    const count_ops = count_manager.runtimeOps();
+    try std.testing.expectError(
+        error.RuntimeLimitReached,
+        count_ops.spawn(count_ops.ctx, .{ .argv = &.{"/bin/cat"}, .cwd = null, .cols = 2, .rows = 1 }),
+    );
+    try std.testing.expectEqual(@as(usize, 0), count_manager.live_registry.count());
+    try std.testing.expectEqual(@as(RuntimeHandle, 1), count_manager.next_handle);
+    try std.testing.expectEqual(@as(usize, 80 * 24), count_registry.liveGridCells());
+
+    var grid_registry = reg.TerminalRuntimeRegistry.initWithLimits(allocator, .{
+        .max_live_runtimes = 2,
+        .max_aggregate_grid_cells = 80 * 24,
+    });
+    defer grid_registry.deinit();
+    _ = try grid_registry.register(1, 80, 24);
+    var grid_manager: RuntimeManager = undefined;
+    grid_manager.init(allocator, std.testing.io, &grid_registry);
+    defer grid_manager.deinit();
+    const grid_ops = grid_manager.runtimeOps();
+    try std.testing.expectError(
+        error.AggregateGridLimitReached,
+        grid_ops.spawn(grid_ops.ctx, .{ .argv = &.{"/bin/cat"}, .cwd = null, .cols = 2, .rows = 1 }),
+    );
+    try std.testing.expectEqual(@as(usize, 0), grid_manager.live_registry.count());
+    try std.testing.expectEqual(@as(RuntimeHandle, 1), grid_manager.next_handle);
+    try std.testing.expectEqual(@as(usize, 80 * 24), grid_registry.liveGridCells());
 }
 
 test "runtime manager: owner drain reaps an exited runtime with zero GUI attachments exactly once" {
@@ -1584,6 +1652,7 @@ test "runtime manager: owner drain reaps an exited runtime with zero GUI attachm
         if (host_registry.count() != 0) _ = usleep(10 * 1000);
     }
     try std.testing.expectEqual(@as(usize, 0), host_registry.count());
+    try std.testing.expectEqual(@as(usize, 0), host_registry.liveGridCells());
     try std.testing.expectEqual(@as(usize, 1), total_exited);
     const after = mgr.drainOwnedEvents();
     try std.testing.expectEqual(@as(usize, 0), after.exited);
@@ -1685,6 +1754,10 @@ test "runtime manager: restored graph discard preserves inherited PTY and origin
     while (attempts < 1000 and !graph.allReadersPrepared()) : (attempts += 1)
         _ = usleep(1000);
     try std.testing.expect(graph.allReadersPrepared());
+    var restored_cells: usize = 0;
+    for (decoded.runtimes) |runtime|
+        restored_cells += @as(usize, runtime.cols) * @as(usize, runtime.rows);
+    try std.testing.expectEqual(restored_cells, target_registry.liveGridCells());
     const restored_entry = target_registry.get(runtime_id) orelse
         return error.TestUnexpectedResult;
     restored_entry.cols += 1;
@@ -1697,6 +1770,7 @@ test "runtime manager: restored graph discard preserves inherited PTY and origin
     graph.discard();
     graph_active = false;
     try std.testing.expectEqual(@as(usize, 0), target_registry.count());
+    try std.testing.expectEqual(@as(usize, 0), target_registry.liveGridCells());
     try std.testing.expectEqual(@as(usize, 0), target.live_registry.count());
     try std.testing.expect(exec_fd_set.isOpen(first_slot));
     try std.testing.expectEqual(child_pid, source_terminal.live_pty.session.childPid());
@@ -1774,6 +1848,7 @@ test "runtime manager: second restored runtime failure rolls back the entire non
     defer target.deinit();
     try std.testing.expectError(error.DuplicateRuntime, target.prepareRestoredGraph(&decoded));
     try std.testing.expectEqual(@as(usize, 0), target_registry.count());
+    try std.testing.expectEqual(@as(usize, 0), target_registry.liveGridCells());
     try std.testing.expectEqual(@as(usize, 0), target.live_registry.count());
     try std.testing.expectEqual(@as(usize, 0), target.surface_runtime.links.items.len);
     try std.testing.expectEqual(@as(RuntimeHandle, 1), target.next_handle);
@@ -1816,6 +1891,47 @@ test "runtime manager: empty restored graph commits and releases without fallibl
     committed.releaseReaders();
     try std.testing.expectEqual(@as(u64, 9), manager.next_handle);
     try std.testing.expect(graph.phase == .readers_released);
+}
+
+test "runtime manager: resize backend failure fail-stops runtime and releases daemon ledger" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    var host_registry = reg.TerminalRuntimeRegistry.init(allocator);
+    defer host_registry.deinit();
+    var manager: RuntimeManager = undefined;
+    manager.init(allocator, std.testing.io, &host_registry);
+    defer manager.deinit();
+    const ops = manager.runtimeOps();
+    const runtime_id = try ops.spawn(ops.ctx, .{
+        .argv = &.{"/bin/cat"},
+        .cwd = null,
+        .cols = 80,
+        .rows = 24,
+    });
+    try std.testing.expectEqual(@as(usize, 1), host_registry.count());
+    try std.testing.expectEqual(@as(usize, 80 * 24), host_registry.liveGridCells());
+    try std.testing.expectEqual(@as(usize, 1), manager.live_registry.count());
+
+    const Injected = struct {
+        fn apply(ctx: *anyopaque, handle: RuntimeHandle, size: maru.terminal.Size, io: std.Io) anyerror!void {
+            // 실제 SurfaceRuntime과 같은 순서로 core를 먼저 mutate한 뒤 PTY 단계 실패를 주입한다.
+            const owner: *RuntimeManager = @ptrCast(@alignCast(ctx));
+            const terminal_slot = owner.backend_impl.terminalForHostLifecycle(handle) orelse
+                return error.TestUnexpectedResult;
+            terminal_slot.surface.lockCore(io);
+            defer terminal_slot.surface.unlockCore(io);
+            try terminal_slot.surface.core.resize(size.cols, size.rows);
+            return error.InjectedPartialResizeFailure;
+        }
+    };
+    try std.testing.expectError(
+        error.InjectedPartialResizeFailure,
+        manager.resizeWithApply(runtime_id, 120, 40, &manager, Injected.apply),
+    );
+    try std.testing.expectEqual(@as(usize, 0), host_registry.count());
+    try std.testing.expectEqual(@as(usize, 0), host_registry.liveGridCells());
+    try std.testing.expectEqual(@as(usize, 0), manager.live_registry.count());
+    try std.testing.expect(manager.handleFor(runtime_id) == null);
 }
 
 test "runtime manager: exhausted restored handle cursor rejects spawn before creating a child" {

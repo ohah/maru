@@ -517,8 +517,8 @@ pub const terminal_runtime_registry_groups = [_]Group{
     },
     .{
         .disposition = .reconstructed,
-        .fields = &.{ "allocator", "entries" },
-        .why = "the hash table and entry pointers are rebuilt from the serialized exhaustive RuntimeEntry records",
+        .fields = &.{ "allocator", "entries", "live_grid_cells", "limits" },
+        .why = "the hash table, entry pointers, aggregate charge, and product limits are rebuilt from exhaustive RuntimeEntry records and binary constants",
     },
     .{
         .disposition = .must_be_empty,

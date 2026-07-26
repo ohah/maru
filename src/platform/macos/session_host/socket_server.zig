@@ -24,15 +24,74 @@ const subscription_identity = @import("subscription_identity.zig");
 /// peer 프로세스의 effective uid/gid(§11 LOCAL_PEERCRED(macOS·xucred)/SO_PEERCRED(Linux)를 libc가 래핑). std.c
 /// 미노출이라 직접 extern. session-host는 uid만 쓴다(same-UID 게이트).
 extern "c" fn getpeereid(fd: c.fd_t, euid: *posix.uid_t, egid: *posix.gid_t) c_int;
-/// accept-fail backoff용(std.c 미노출). fd 고갈 시 tight-spin을 막는 짧은 sleep.
-extern "c" fn usleep(usec: c_uint) c_int;
-
 /// sockaddr_un.sun_path 바이트 용량(macOS 104). 컴파일타임에 읽어 매직넘버를 피한다.
 pub const sun_path_cap: usize = @typeInfo(@FieldType(posix.sockaddr.un, "path")).array.len;
 
 /// accept 연결의 peer uid가 서버 uid와 같은가(§11). 파일 권한에만 의존하지 않는 하드 게이트.
 pub fn peerUidAllowed(server_uid: posix.uid_t, peer_uid: posix.uid_t) bool {
     return server_uid == peer_uid;
+}
+
+pub const PeerCredentialProvider = struct {
+    ctx: ?*anyopaque = null,
+    get: *const fn (?*anyopaque, c.fd_t, *posix.uid_t, *posix.gid_t) c_int = osGetPeerCredentials,
+
+    fn read(
+        self: PeerCredentialProvider,
+        fd: c.fd_t,
+        euid: *posix.uid_t,
+        egid: *posix.gid_t,
+    ) c_int {
+        return self.get(self.ctx, fd, euid, egid);
+    }
+};
+
+pub const AcceptResult = union(enum) {
+    accepted: c.fd_t,
+    would_block,
+    fd_exhausted,
+    denied,
+    failed,
+};
+
+pub const AcceptErrorClass = enum {
+    interrupted,
+    would_block,
+    fd_exhausted,
+    failed,
+};
+
+const AcceptAttempt = union(enum) {
+    accepted: c.fd_t,
+    failed: posix.E,
+};
+
+const AcceptProvider = struct {
+    ctx: ?*anyopaque = null,
+    call: *const fn (?*anyopaque, c.fd_t) AcceptAttempt = osAccept,
+};
+
+fn osAccept(_: ?*anyopaque, listen_fd: c.fd_t) AcceptAttempt {
+    const rc = c.accept(listen_fd, null, null);
+    return if (rc >= 0) .{ .accepted = rc } else .{ .failed = posix.errno(rc) };
+}
+
+pub fn classifyAcceptError(err: posix.E) AcceptErrorClass {
+    return switch (err) {
+        .INTR => .interrupted,
+        .AGAIN => .would_block,
+        .MFILE, .NFILE => .fd_exhausted,
+        else => .failed,
+    };
+}
+
+fn osGetPeerCredentials(
+    _: ?*anyopaque,
+    fd: c.fd_t,
+    euid: *posix.uid_t,
+    egid: *posix.gid_t,
+) c_int {
+    return getpeereid(fd, euid, egid);
 }
 
 /// socket path가 sun_path에 종단 NUL 포함해 들어가는가. 어떤 syscall 전에도 순수하게 판정(§11).
@@ -107,6 +166,7 @@ pub const SocketServer = struct {
         if (lfd < 0) return error.SocketCreateFailed;
         errdefer _ = c.close(lfd);
         setCloseOnExec(lfd) catch return error.SocketCreateFailed;
+        setNonBlocking(lfd) catch return error.SocketCreateFailed;
         var addr = posix.sockaddr.un{ .family = posix.AF.UNIX, .path = undefined };
         @memset(&addr.path, 0);
         @memcpy(addr.path[0..owned_path.len], owned_path);
@@ -160,32 +220,66 @@ pub const SocketServer = struct {
             st.dev == self.socket_dev and st.ino == self.socket_ino;
     }
 
-    /// 한 연결을 blocking accept한다. peer uid가 서버와 다르면 연결을 닫고 `null`(§11). 성공하면 그 연결의 fd.
+    /// Poll readiness 뒤 한 연결만 nonblocking accept한다. readiness가 다른 owner에 의해 소비됐거나 연결이
+    /// 취소된 `EAGAIN`은 정상 yield다. peer uid가 서버와 다르면 연결을 닫고 `null`(§11).
     pub fn acceptOne(self: *SocketServer) ?c.fd_t {
-        const cfd = while (true) {
-            const rc = c.accept(self.listen_fd, null, null);
-            if (rc < 0) {
-                if (posix.errno(rc) == .INTR) continue;
-                // EMFILE/ENFILE 등 fd 고갈: pending 연결이 listen fd를 계속 readable로 둬(pollReady가 즉시 .ready) accept
-                // 루프가 100% CPU tight-spin이 된다. 짧게 backoff해 fd가 풀릴 때까지 CPU를 태우지 않는다.
-                _ = usleep(10_000);
-                return null;
-            }
-            break rc;
+        return switch (self.acceptOneResult()) {
+            .accepted => |fd| fd,
+            else => null,
         };
+    }
+
+    pub fn acceptOneResult(self: *SocketServer) AcceptResult {
+        return self.acceptOneResultWithCredentials(.{});
+    }
+
+    fn acceptOneResultWithCredentials(
+        self: *SocketServer,
+        peer_credentials: PeerCredentialProvider,
+    ) AcceptResult {
+        return self.acceptOneResultWithProviders(peer_credentials, .{});
+    }
+
+    fn acceptOneResultWithProviders(
+        self: *SocketServer,
+        peer_credentials: PeerCredentialProvider,
+        accept_provider: AcceptProvider,
+    ) AcceptResult {
+        const raw = acceptRaw(self.listen_fd, accept_provider);
+        const cfd = switch (raw) {
+            .accepted => |fd| fd,
+            else => return raw,
+        };
+        var owned = true;
+        defer {
+            if (owned) _ = c.close(cfd);
+        }
+        setNonBlocking(cfd) catch return .failed;
         // 닫힌 소켓으로의 write가 SIGPIPE로 프로세스를 죽이지 않게(EPIPE로).
         setNoSigPipe(cfd);
-        setCloseOnExec(cfd) catch {
-            _ = c.close(cfd);
-            return null;
-        };
+        setCloseOnExec(cfd) catch return .failed;
         var euid: posix.uid_t = undefined;
         var egid: posix.gid_t = undefined;
-        if (getpeereid(cfd, &euid, &egid) != 0 or !peerUidAllowed(self.server_uid, euid)) {
-            _ = c.close(cfd);
-            return null;
+        if (peer_credentials.read(cfd, &euid, &egid) != 0 or !peerUidAllowed(self.server_uid, euid))
+            return .denied;
+        owned = false;
+        return .{ .accepted = cfd };
+    }
+
+    fn acceptRaw(listen_fd: c.fd_t, provider: AcceptProvider) AcceptResult {
+        var interrupted: u8 = 0;
+        while (interrupted < max_accept_interrupt_retries) : (interrupted += 1) {
+            switch (provider.call(provider.ctx, listen_fd)) {
+                .accepted => |fd| return .{ .accepted = fd },
+                .failed => |err| switch (classifyAcceptError(err)) {
+                    .interrupted => continue,
+                    .would_block => return .would_block,
+                    .fd_exhausted => return .fd_exhausted,
+                    .failed => return .failed,
+                },
+            }
         }
-        return cfd;
+        return .failed;
     }
 
     /// Delta producer cadence used by the sole readiness owner.
@@ -210,6 +304,23 @@ pub fn setCloseOnExec(fd: c.fd_t) !void {
     const flags = c.fcntl(fd, c.F.GETFD, @as(c_int, 0));
     if (flags < 0) return error.FcntlFailed;
     if (c.fcntl(fd, c.F.SETFD, flags | c.FD_CLOEXEC) < 0) return error.FcntlFailed;
+}
+
+pub const max_accept_interrupt_retries: u8 = 4;
+
+/// The listener belongs to a poll owner, so accept must never block after a stale readiness edge.
+pub fn setNonBlocking(fd: c.fd_t) !void {
+    const flags = c.fcntl(fd, c.F.GETFL, @as(c_int, 0));
+    const nonblocking: c_int = @bitCast(posix.O{ .NONBLOCK = true });
+    if (flags < 0) return error.FcntlFailed;
+    if (c.fcntl(fd, c.F.SETFL, flags | nonblocking) < 0) return error.FcntlFailed;
+}
+
+pub fn setBlocking(fd: c.fd_t) !void {
+    const flags = c.fcntl(fd, c.F.GETFL, @as(c_int, 0));
+    const nonblocking: c_int = @bitCast(posix.O{ .NONBLOCK = true });
+    if (flags < 0) return error.FcntlFailed;
+    if (c.fcntl(fd, c.F.SETFL, flags & ~nonblocking) < 0) return error.FcntlFailed;
 }
 
 /// 짧은 write를 이어 붙여 전량 전송(부분 write는 정상). EINTR 재시도, EPIPE/오류는 `WriteFailed`.
@@ -252,7 +363,35 @@ test "socket server: accepted client fd is CLOEXEC before protocol dispatch" {
     const accepted = srv.acceptOne() orelse return error.TestUnexpectedResult;
     defer _ = c.close(accepted);
     const flags = c.fcntl(accepted, c.F.GETFD, @as(c_int, 0));
+    const status_flags = c.fcntl(accepted, c.F.GETFL, @as(c_int, 0));
+    const nonblocking: c_int = @bitCast(posix.O{ .NONBLOCK = true });
     try testing.expect(flags >= 0 and flags & c.FD_CLOEXEC != 0);
+    try testing.expect(status_flags >= 0 and status_flags & nonblocking != 0);
+}
+
+test "socket server: listener is CLOEXEC and nonblocking; empty accept yields" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var dir_buf: [256]u8 = undefined;
+    const dir_path = std.fmt.bufPrintZ(&dir_buf, "/tmp/maru-sh-listener-flags-{d}", .{c.getpid()}) catch
+        return error.SkipZigTest;
+    var sp_buf: [320]u8 = undefined;
+    const socket_path = std.fmt.bufPrintZ(&sp_buf, "{s}/control.sock", .{dir_path}) catch
+        return error.SkipZigTest;
+    var registry = reg.TerminalRuntimeRegistry.init(allocator);
+    defer registry.deinit();
+    var srv = try SocketServer.bind(allocator, dir_path, socket_path, 1, &registry);
+    defer {
+        srv.deinit();
+        _ = c.rmdir(dir_path.ptr);
+    }
+
+    const descriptor_flags = c.fcntl(srv.listen_fd, c.F.GETFD, @as(c_int, 0));
+    const status_flags = c.fcntl(srv.listen_fd, c.F.GETFL, @as(c_int, 0));
+    const nonblocking: c_int = @bitCast(posix.O{ .NONBLOCK = true });
+    try testing.expect(descriptor_flags >= 0 and descriptor_flags & c.FD_CLOEXEC != 0);
+    try testing.expect(status_flags >= 0 and status_flags & nonblocking != 0);
+    try testing.expectEqual(@as(?c.fd_t, null), srv.acceptOne());
 }
 
 test "socket server: bind rejects an over-long socket path before any syscall" {
@@ -271,4 +410,98 @@ test "socket server: peerUidAllowed / socketPathFits pure gates" {
     try testing.expect(!peerUidAllowed(501, 0));
     try testing.expect(socketPathFits(10));
     try testing.expect(!socketPathFits(sun_path_cap)); // 종단 NUL 자리 없음
+    try testing.expectEqual(AcceptErrorClass.interrupted, classifyAcceptError(.INTR));
+    try testing.expectEqual(AcceptErrorClass.would_block, classifyAcceptError(.AGAIN));
+    try testing.expectEqual(AcceptErrorClass.fd_exhausted, classifyAcceptError(.MFILE));
+    try testing.expectEqual(AcceptErrorClass.fd_exhausted, classifyAcceptError(.NFILE));
+    try testing.expectEqual(AcceptErrorClass.failed, classifyAcceptError(.BADF));
+}
+
+test "socket server: accept EINTR retries are exact and fd pressure stays typed" {
+    const Interrupts = struct {
+        count: usize = 0,
+
+        fn call(ctx: ?*anyopaque, _: c.fd_t) AcceptAttempt {
+            const self: *@This() = @ptrCast(@alignCast(ctx.?));
+            self.count += 1;
+            return .{ .failed = .INTR };
+        }
+    };
+    var interrupts: Interrupts = .{};
+    try testing.expectEqual(
+        AcceptResult.failed,
+        SocketServer.acceptRaw(-1, .{ .ctx = &interrupts, .call = Interrupts.call }),
+    );
+    try testing.expectEqual(@as(usize, max_accept_interrupt_retries), interrupts.count);
+
+    const InterruptedThenAccepted = struct {
+        count: usize = 0,
+
+        fn call(ctx: ?*anyopaque, _: c.fd_t) AcceptAttempt {
+            const self: *@This() = @ptrCast(@alignCast(ctx.?));
+            self.count += 1;
+            return if (self.count < 3) .{ .failed = .INTR } else .{ .accepted = 42 };
+        }
+    };
+    var eventual: InterruptedThenAccepted = .{};
+    const accepted = SocketServer.acceptRaw(
+        -1,
+        .{ .ctx = &eventual, .call = InterruptedThenAccepted.call },
+    );
+    try testing.expectEqual(@as(c.fd_t, 42), accepted.accepted);
+    try testing.expectEqual(@as(usize, 3), eventual.count);
+
+    const Exhausted = struct {
+        fn call(_: ?*anyopaque, _: c.fd_t) AcceptAttempt {
+            return .{ .failed = .MFILE };
+        }
+    };
+    try testing.expectEqual(
+        AcceptResult.fd_exhausted,
+        SocketServer.acceptRaw(-1, .{ .call = Exhausted.call }),
+    );
+}
+
+test "socket server: injected other UID is rejected before fd admission" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const OtherUid = struct {
+        fn get(
+            _: ?*anyopaque,
+            _: c.fd_t,
+            euid: *posix.uid_t,
+            egid: *posix.gid_t,
+        ) c_int {
+            euid.* = c.getuid() +% 1;
+            egid.* = 0;
+            return 0;
+        }
+    };
+
+    const allocator = testing.allocator;
+    var dir_buf: [256]u8 = undefined;
+    const dir_path = std.fmt.bufPrintZ(&dir_buf, "/tmp/maru-sh-other-uid-{d}", .{c.getpid()}) catch
+        return error.SkipZigTest;
+    var sp_buf: [320]u8 = undefined;
+    const socket_path = std.fmt.bufPrintZ(&sp_buf, "{s}/control.sock", .{dir_path}) catch
+        return error.SkipZigTest;
+    var registry = reg.TerminalRuntimeRegistry.init(allocator);
+    defer registry.deinit();
+    var srv = try SocketServer.bind(allocator, dir_path, socket_path, 1, &registry);
+    defer {
+        srv.deinit();
+        _ = c.rmdir(dir_path.ptr);
+    }
+    const client_fd = c.socket(posix.AF.UNIX, posix.SOCK.STREAM, 0);
+    if (client_fd < 0) return error.SkipZigTest;
+    defer _ = c.close(client_fd);
+    var addr = posix.sockaddr.un{ .family = posix.AF.UNIX, .path = undefined };
+    @memset(&addr.path, 0);
+    @memcpy(addr.path[0..socket_path.len], socket_path);
+    try testing.expect(c.connect(client_fd, @ptrCast(&addr), @sizeOf(posix.sockaddr.un)) == 0);
+    try testing.expectEqual(
+        AcceptResult.denied,
+        srv.acceptOneResultWithCredentials(.{ .get = OtherUid.get }),
+    );
+    var byte: [1]u8 = undefined;
+    try testing.expectEqual(@as(isize, 0), c.read(client_fd, &byte, byte.len));
 }

@@ -31,6 +31,7 @@ pub const Owner = struct {
     producer_remaining: [max_clients]usize = [_]usize{0} ** max_clients,
     next_cadence_ns: u64,
     next_overflow_accept_ns: u64 = 0,
+    accept_retry_after_ns: u64 = 0,
     armed_upgrade: ?connection_turn.ArmedUpgrade = null,
     total_admitted: usize = 0,
     overflow_rejected: usize = 0,
@@ -81,9 +82,13 @@ pub const Owner = struct {
         // and immediately rejecting peers would still consume fd/client budgets while the upgrade
         // reply is draining.
         const gate_open = if (self.server.admission_gate) |gate| gate.snapshot().open else true;
-        const admission_open = gate_open and
-            (self.reactor.activeCount() < max_clients or
-                before_poll_ns >= self.next_overflow_accept_ns);
+        const admission_open = acceptAllowed(
+            gate_open,
+            self.reactor.activeCount(),
+            before_poll_ns,
+            self.accept_retry_after_ns,
+            self.next_overflow_accept_ns,
+        );
         poll_fds[0] = .{
             .fd = if (admission_open) self.server.listen_fd else -1,
             .events = if (admission_open) c.POLL.IN else 0,
@@ -167,7 +172,14 @@ pub const Owner = struct {
     }
 
     fn acceptOne(self: *Owner, now_ns: u64) error{OutOfMemory}!void {
-        const fd = self.server.acceptOne() orelse return;
+        const fd = switch (self.server.acceptOneResult()) {
+            .accepted => |fd| fd,
+            .fd_exhausted => {
+                self.accept_retry_after_ns = now_ns +| cadence_ns;
+                return;
+            },
+            .would_block, .denied, .failed => return,
+        };
         const client = connection_turn.Client.create(
             self.allocator,
             fd,
@@ -227,29 +239,60 @@ pub const Owner = struct {
         for (self.clients) |maybe_client|
             if (maybe_client) |client| if (client.hasBufferedReadWork()) return 0;
         for (self.producer_remaining) |remaining| if (remaining != 0) return 0;
+        var timeout_ms = outer_timeout_ms;
+        if (now_ns < self.accept_retry_after_ns)
+            timeout_ms = capTimeoutAt(now_ns, self.accept_retry_after_ns, timeout_ms);
         // Preserve the daemon's outer idle/oneshot accounting when no producer exists.
-        if (self.reactor.activeCount() == 0) return outer_timeout_ms;
+        if (self.reactor.activeCount() == 0) return timeout_ms;
         if (self.reactor.activeCount() == max_clients and now_ns < self.next_overflow_accept_ns) {
-            const until_ns = self.next_overflow_accept_ns - now_ns;
-            const until_ms = @max(
-                @as(u64, 1),
-                (until_ns + std.time.ns_per_ms - 1) / std.time.ns_per_ms,
-            );
-            return @min(
-                outer_timeout_ms,
-                std.math.cast(i32, until_ms) orelse std.math.maxInt(i32),
-            );
+            timeout_ms = capTimeoutAt(now_ns, self.next_overflow_accept_ns, timeout_ms);
         }
         if (now_ns >= self.next_cadence_ns) return 0;
         const until_ns = self.next_cadence_ns - now_ns;
         const until_ms = @max(@as(u64, 1), (until_ns + std.time.ns_per_ms - 1) / std.time.ns_per_ms);
-        return @min(outer_timeout_ms, std.math.cast(i32, until_ms) orelse std.math.maxInt(i32));
+        return @min(timeout_ms, std.math.cast(i32, until_ms) orelse std.math.maxInt(i32));
     }
 };
+
+fn capTimeoutAt(now_ns: u64, deadline_ns: u64, outer_timeout_ms: i32) i32 {
+    if (now_ns >= deadline_ns) return 0;
+    const until_ns = deadline_ns - now_ns;
+    const until_ms = @max(
+        @as(u64, 1),
+        (until_ns + std.time.ns_per_ms - 1) / std.time.ns_per_ms,
+    );
+    return @min(
+        outer_timeout_ms,
+        std.math.cast(i32, until_ms) orelse std.math.maxInt(i32),
+    );
+}
+
+fn acceptAllowed(
+    gate_open: bool,
+    active_count: usize,
+    now_ns: u64,
+    retry_after_ns: u64,
+    overflow_after_ns: u64,
+) bool {
+    return gate_open and now_ns >= retry_after_ns and
+        (active_count < max_clients or now_ns >= overflow_after_ns);
+}
 
 fn monotonicNow(io: std.Io) u64 {
     const ns = std.Io.Clock.awake.now(io).nanoseconds;
     return if (ns <= 0) 0 else std.math.cast(u64, ns) orelse std.math.maxInt(u64);
+}
+
+test "poll owner: fd-pressure retry deadline caps an otherwise idle outer poll" {
+    try std.testing.expectEqual(@as(i32, 20), capTimeoutAt(100, 20 * std.time.ns_per_ms, 1_000));
+    try std.testing.expectEqual(@as(i32, 0), capTimeoutAt(20 * std.time.ns_per_ms, 20 * std.time.ns_per_ms, 1_000));
+    const retry_capped = capTimeoutAt(0, 20 * std.time.ns_per_ms, 1_000);
+    const cadence_capped = capTimeoutAt(0, 1 * std.time.ns_per_ms, retry_capped);
+    try std.testing.expectEqual(@as(i32, 1), cadence_capped);
+    try std.testing.expect(!acceptAllowed(true, 0, 10, 20, 0));
+    try std.testing.expect(acceptAllowed(true, 0, 20, 20, 0));
+    try std.testing.expect(!acceptAllowed(true, max_clients, 20, 20, 21));
+    try std.testing.expect(!acceptAllowed(false, 0, 20, 20, 0));
 }
 
 const testing = std.testing;

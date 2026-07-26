@@ -21,6 +21,7 @@ const screen_assembler = @import("screen_assembler.zig");
 const observation_wire = @import("observation_wire.zig");
 const resize_wire = @import("resize_wire.zig");
 const core_command_wire = @import("core_command_wire.zig");
+const remote_attachment = @import("remote_attachment.zig");
 
 /// host에서 가져온 대기 OSC 9/777 데스크톱 알림 한 건(§6.32). title/body는 owned(caller가 deinit).
 pub const Notification = struct {
@@ -40,6 +41,7 @@ pub const RemoteRuntime = struct {
     io: std.Io,
     runtime_id_hex: [32]u8, // host 발급 runtime_id(hex) — terminate에 되먹인다.
     stream_id: u64, // attach가 발급한 stream — input/resize/delta 라우팅.
+    attachment_state: remote_attachment.State,
     resize_seq: u64, // 단조 증가 client_sequence — registry가 이하 sequence를 stale로 거부하므로 매 resize마다 올린다.
     resize_generation: u64,
     // blocking `SurfaceRuntime.writeInput`의 key bytes와 그 사이 core command를 한 시간축으로 보존한다.
@@ -175,8 +177,32 @@ pub const RemoteRuntime = struct {
         const attach_params = std.fmt.bufPrint(&attach_buf, "{{\"runtime_id\":\"{s}\",\"mode\":\"controller\"}}", .{self.runtime_id_hex}) catch return error.AttachFailed;
         const attach_resp = try self.client.call("runtime.attach", attach_params);
         defer self.allocator.free(attach_resp);
-        self.stream_id = client_mod.extractU64Field(attach_resp, "\"stream_id\":") orelse
-            return self.classifyAttachFailure(attach_resp);
+        const runtime_id = std.fmt.parseInt(u128, &self.runtime_id_hex, 16) catch
+            return error.AttachFailed;
+        const accepted = (if (self.client.wire_major == 1)
+            remote_attachment.decodeFrozenV1ControllerAttach(
+                self.allocator,
+                attach_resp,
+                runtime_id,
+            )
+        else
+            remote_attachment.decodeAttachForCapabilities(
+                self.allocator,
+                attach_resp,
+                runtime_id,
+                .controller,
+                self.client.controller_transfer_v1,
+            )) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.Malformed => {
+                // role/capability를 추측한 채 shared connection을 계속 쓰면 observer가 controller처럼 mutation을
+                // enqueue할 수 있으므로 strict grant 실패는 connection 전체를 poison한다.
+                self.client.failClosed();
+                return self.classifyAttachFailure(attach_resp);
+            },
+        };
+        self.attachment_state = accepted.state;
+        self.stream_id = accepted.state.stream_id;
         // 새 host는 attach response에 current full metadata를 싣는다. 구 host/누락은 attach 자체를 깨지 않고 unavailable로
         // 남겨 GUI가 empty와 혼동하지 않게 한다.
         _ = self.applyObservationJson(attach_resp) catch {};

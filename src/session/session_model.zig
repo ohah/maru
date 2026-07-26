@@ -66,6 +66,11 @@ pub fn Model(comptime Rt: type) type {
             /// observer가 마지막으로 읽은 TerminalCore write sequence와 마지막 PTY activity 시각(ms, awake clock).
             agent_screen_generation: u64 = 0,
             agent_last_output_ms: u64 = 0,
+            /// 마지막 출력의 **wall clock** 시각(ns, 0=없음). `agent_last_output_ms`는 awake clock이라 시스템이
+            /// 잠든 동안 멈춰, 사이드바 활동 시각이 잠자기를 통째로 건너뛴 값을 보여준다(밤새 재운 뒤 "3m"). 경과
+            /// 표시는 이 값으로 잰다. 판정용 activity window는 계속 awake clock을 쓴다 — 그쪽은 "앱이 깨어 있는
+            /// 동안 얼마나 최근인가"가 맞는 질문이라 의미가 다르다.
+            agent_last_output_wall_ns: i96 = 0,
             /// 사이드바 에이전트 행의 **마지막 대화**(프롬프트·응답) 캐시 + 세션 기록 파일 매핑
             /// (docs/sidebar-agent-list.md §7). 고정 크기라 힙을 잡지 않아 destroyTerm이 따로 해제하지 않는다.
             agent_transcript: agent_transcript_mod.Cache = .{},

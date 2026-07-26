@@ -394,8 +394,10 @@ pub fn collectCodexCandidates(io: std.Io, root: std.Io.Dir, out: []CodexCandidat
 /// 디렉터리의 **직속** `.jsonl` 중 mtime이 가장 최근인 것. 하위 디렉터리로 내려가지 않으므로 claude 서브에이전트
 /// 기록이 자동으로 배제된다(계약 3 — 실측: 직속 54개 ↔ 하위 포함 1805개).
 ///
+/// `exclude`에 든 이름은 건너뛴다 — 같은 cwd의 다른 Term이 이미 그 파일을 매핑했다는 뜻이다.
+///
 /// 이름을 `name_buf`에 쓰고 반환한다. 열 수 없거나 후보가 없으면 null(계약 1).
-pub fn latestSessionFile(io: std.Io, dir: std.Io.Dir, name_buf: []u8) ?struct { name: []const u8, mtime_ns: i96 } {
+pub fn latestSessionFile(io: std.Io, dir: std.Io.Dir, name_buf: []u8, exclude: []const []const u8) ?struct { name: []const u8, mtime_ns: i96 } {
     var it = dir.iterate();
     var best_ns: i96 = 0;
     var best_len: usize = 0;
@@ -403,6 +405,16 @@ pub fn latestSessionFile(io: std.Io, dir: std.Io.Dir, name_buf: []u8) ?struct { 
         if (entry.kind != .file) continue;
         if (!std.mem.endsWith(u8, entry.name, ".jsonl")) continue;
         if (entry.name.len > name_buf.len) continue;
+        // 같은 작업 디렉터리에서 에이전트를 둘 이상 돌리면 후보 디렉터리가 같아 **둘 다 전역 최신 파일**을 문다.
+        // 이미 다른 Term이 든 파일은 건너뛰어 각자 자기 세션에 앉게 한다(code-review max).
+        var taken = false;
+        for (exclude) |x| {
+            if (std.mem.eql(u8, x, entry.name)) {
+                taken = true;
+                break;
+            }
+        }
+        if (taken) continue;
         const st = dir.statFile(io, entry.name, .{}) catch continue;
         const ns = st.mtime.nanoseconds;
         if (best_len != 0 and ns <= best_ns) continue;

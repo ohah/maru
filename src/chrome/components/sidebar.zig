@@ -279,9 +279,10 @@ pub fn headerHit(x_px: f64, y_px: f64, sidebar_width_px: u32, cell_width_px: u32
 /// 들쭉날쭉하면 제목 잘리는 지점이 행마다 달라져 목록이 어수선해진다. 그래서 큰 값은 `99d`에서 멈춘다 —
 /// 그보다 오래된 것에 하루 단위 정밀도는 의미가 없다.
 ///
-/// `age_ms == 0`(활동 기록 없음)이면 빈 슬라이스 — 호출부가 그 자리를 비운다.
+/// **0은 sentinel이 아니다.** 방금 출력한 에이전트는 경과가 정확히 0ms일 수 있고(같은 tick에 스탬프된다),
+/// 그때 빈 문자열을 내면 이 칼럼이 가장 보여주고 싶은 행 — 지금 일하는 에이전트 — 만 빈칸이 되어 `""`↔`now`로
+/// 깜빡인다. "기록이 아예 없다"는 신호는 **호출부**가 낸다(활동 시각 자체가 없으면 이 함수를 부르지 않는다).
 pub fn formatRelativeAge(age_ms: u64, buf: []u8) []const u8 {
-    if (age_ms == 0) return "";
     const sec = age_ms / 1000;
     if (sec < 60) return "now"; // 초 단위는 매 tick 바뀌어 눈에 거슬리고, 정보 가치도 없다
     const min = sec / 60;
@@ -689,7 +690,8 @@ test "sidebar onGroupHeader: 헤더 row만 true(카드·범위 밖 false)" {
 // 닫으므로, "보이는 것 = 눌리는 것"이 깨지면 사용자가 의도하지 않은 파괴가 일어난다.
 test "formatRelativeAge: 상대 표기가 폭 상한 안에 머문다" {
     var buf: [8]u8 = undefined;
-    try std.testing.expectEqualStrings("", formatRelativeAge(0, &buf)); // 활동 기록 없음
+    // 0은 sentinel이 아니라 **방금**이다 — 같은 tick에 출력한 에이전트가 정확히 0ms로 들어온다(code-review max).
+    try std.testing.expectEqualStrings("now", formatRelativeAge(0, &buf));
     try std.testing.expectEqualStrings("now", formatRelativeAge(1, &buf));
     try std.testing.expectEqualStrings("now", formatRelativeAge(59_000, &buf));
     try std.testing.expectEqualStrings("1m", formatRelativeAge(60_000, &buf));

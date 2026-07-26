@@ -1916,6 +1916,9 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
       곧바로 invalidate하면 안 되며, reactor가 queued screen pressure를 만든 slow offender를 안정된
       `ConnectionKey`/tracker 세대로 선택·회수한 다음 healthy admission을 한 번 재시도한다. partial-prefix offender는
       wire를 splice하지 않고 그 connection만 fail-close한다.
+      한 victim을 회수한 뒤 base reservation 재시도도 부족하면 같은 turn에 두 번째 victim을 찾거나 requester를
+      invalidate하지 않는다. 실패한 reservation이 prepared 회계를 남기지 않고 requester의 valid/base/queue를
+      보존한 채 1초 뒤 재시도한다.
     - **P5b2b2 — real PTY/RSS artifact:** 독립 ReleaseFast session-host process와 controlled forkpty child,
       controller/slow/healthy 세 client를 사용한다. daemon과 같은 `server.tickOwner() → pollOnce()` 순서에서 stall
       이후 unique controller token이 실제 PTY child에 쓰이고 echo output이 healthy observer screen에 반영되는지

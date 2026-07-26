@@ -528,19 +528,33 @@ pub const UnfocusedCursor = enum {
 };
 
 pub const CursorConfig = struct {
+    /// 커서 **기본** 모양 — 앱이 DECSCUSR(`CSI Ps SP q`)로 지정하면 그게 이기고, `CSI 0 SP q`(지정 거둬들임)·RIS면
+    /// 이 값으로 돌아온다(코어 `default_cursor_shape`가 복귀 지점). vim이 모드마다 block↔bar를 바꾸는 게 표준이라
+    /// 설정이 그걸 덮으면 편집 모드 구분이 사라진다 — 그래서 강제가 아니라 기본값이다(베이스: Ghostty `cursor-style`).
+    /// `blink`가 "끔"을 강제하는 것과 의도적으로 다르다(blink 주석 참고).
     shape: CursorShape = .block,
+    /// 커서 깜빡임. `true`(기본)면 **앱에 위임** — 실제 깜빡임 여부는 앱의 DECSCUSR(`CSI Ps SP q`)가 정하고,
+    /// 아무도 안 보내면 터미널 기본대로 깜빡인다(vim의 steady/blink 모드 전환이 그대로 산다). `false`면 앱의
+    /// DECSCUSR blink 요청까지 **덮어** 커서를 고정한다 — 끈 사람이 모드 전환마다 깜빡임이 되살아나길 원하지
+    /// 않기 때문이다. 베이스는 Ghostty `cursor-style-blink`지만 그쪽은 `?bool`(null=무의견)이라 값이 있어도
+    /// DECSCUSR를 존중한다 — maru는 `bool`이라 "끔"의 의미를 우선했다(app이 `updateCursorBlink`에서 AND 게이트).
+    /// 오버레이(find·palette) 입력 caret은 이 설정과 무관하게 깜빡인다(텍스트 입력 caret 관용).
     blink: bool = true,
     /// 커서 깜빡임 **반주기**(ms) — on/off 각 단계의 길이. 기본 500ms(on 500 / off 500, 일반 터미널 관례).
     /// app이 host frame-loop 기준 tick으로 환산한다(round, 최소 1틱). `blink = false`면 이 값과 무관하게 깜빡이지
     /// 않는다. loader가 `cursor.blink-interval-ms` 파싱. (Ghostty `cursor-blink-interval` 대응)
     blink_interval_ms: u32 = 500,
     /// 커서 깜빡임 **페이드**(ms) — on↔off 전환을 이 시간에 걸쳐 부드럽게(알파 램프) 잇는다. 각 반주기 끝
-    /// (다음 위상 직전)에서 이 시간만큼 커서 알파가 1→0(사라짐)·0→1(나타남)로 선형 보간된다. 0이면 페이드
-    /// 없이 즉각 on/off(하위 호환). 반주기(blink_interval_ms)를 넘지 못하게 app이 clamp한다 —
-    /// blink_interval_ms와 같으면 hold 없는 삼각파(호흡). host frame-loop 기준 tick으로 환산(round)하므로
-    /// 주사율(render.frame-rate)과 무관하게 같은 속도로 페이드한다. `blink = false`면 무관(안 깜빡임).
-    /// loader가 `cursor.blink-fade-ms` 파싱.
-    blink_fade_ms: u32 = 120,
+    /// (다음 위상 직전)에서 이 시간만큼 커서 알파가 1→0(사라짐)·0→1(나타남)로 선형 보간된다. `0`(기본)이면
+    /// 페이드 없이 즉각 on/off. 반주기(blink_interval_ms)를 넘지 못하게 app이 clamp한다 — blink_interval_ms와
+    /// 같으면 hold 없는 삼각파(호흡). 주사율(render.frame-rate)과 무관하게 같은 속도로 페이드한다.
+    /// `blink = false`면 무관(안 깜빡임). loader가 `cursor.blink-fade-ms` 파싱.
+    ///
+    /// **기본이 0인 이유**: 터미널·에디터의 표준은 하드 토글이다 — xterm은 `cursorOnTime` 600ms /
+    /// `cursorOffTime` 300ms를 그냥 켜고 끄고, VS Code `editor.cursorBlinking`도 기본이 `blink`(on/off)이며
+    /// 페이드는 `smooth`/`phase`로 **opt-in**이다. maru도 같은 자리에 선다(부드러운 전환은 opt-in).
+    /// 페이드는 전환을 부드럽게 하는 대신 커서가 완전히 켜져 있는 시간을 줄여 **체감상 느리고 흐릿하게** 만든다.
+    blink_fade_ms: u32 = 0,
     // 커서 색(선택, #RRGGBB). 둘 다 테마와 독립적으로 커서만 칠하는 opt-in override다 — null이면 테마 동작을
     // 그대로 따른다(기존 호환). color=커서 칸 배경(null이면 theme.cursor). text=반전 블록 커서 위 glyph 색
     // (null이면 경로별 기존값 — 메인 터미널은 theme.background, chrome caret은 sidebar_background). nullable이라

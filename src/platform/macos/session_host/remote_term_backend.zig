@@ -555,6 +555,8 @@ pub const RemoteTermBackend = struct {
             .set_max_scrollback => |lines| try rr.queueCoreCommand(.{ .set_max_scrollback = @intCast(lines) }),
             .set_ambiguous_wide => |wide| try rr.queueCoreCommand(.{ .set_ambiguous_wide = wide }),
             .set_emoji_wide => |wide| try rr.queueCoreCommand(.{ .set_emoji_wide = wide }),
+            // cursor.shape reload — 기본 모양은 host core가 소유하므로(DECSCUSR 0/RIS 복귀 지점) 원격에 위임한다.
+            .set_default_cursor_shape => |shape| try rr.queueCoreCommand(.{ .set_default_cursor_shape = @intFromEnum(shape) }),
             .set_runtime_config => |config| try rr.queueCoreCommand(.{ .set_runtime_config = .{
                 .max_scrollback = @intCast(config.max_scrollback),
                 .ambiguous_wide = config.ambiguous_wide,
@@ -568,6 +570,7 @@ pub const RemoteTermBackend = struct {
                     .width = metrics.width,
                     .height = metrics.height,
                 } else null,
+                .cursor_shape = @intFromEnum(config.default_cursor_shape),
             } }),
             .jump_to_prompt => |direction| try rr.queueCoreCommand(.{ .jump_to_prompt = direction }),
             .reset_input_modes => try rr.queueCoreCommand(.reset_input_modes),

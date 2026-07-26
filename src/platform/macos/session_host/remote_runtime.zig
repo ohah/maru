@@ -1596,6 +1596,9 @@ const RuntimeConfigSpawnWire = struct {
     background: u32,
     cell_width: u32,
     cell_height: u32,
+    /// config `cursor.shape`(0=block/1=underline/2=bar). spawn 시점에 실어 보내야 child의 **첫 출력 전**에 host core
+    /// 기본 모양이 정해진다(set_runtime_config만 쓰면 첫 프롬프트가 block으로 한 프레임 스치는 race).
+    cursor_shape: u8,
 };
 
 fn coreConfigToSpawnWire(config: maru.session.core_command.RuntimeConfig) RuntimeConfigSpawnWire {
@@ -1619,6 +1622,7 @@ fn coreConfigToSpawnWire(config: maru.session.core_command.RuntimeConfig) Runtim
             config.default_colors.background.b,
         .cell_width = if (config.cell_metrics) |metrics| metrics.width else 0,
         .cell_height = if (config.cell_metrics) |metrics| metrics.height else 0,
+        .cursor_shape = @intFromEnum(config.default_cursor_shape),
     };
 }
 

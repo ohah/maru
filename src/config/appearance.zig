@@ -59,13 +59,18 @@ pub const ResolvedTheme = struct {
 };
 
 pub const ResolvedCursor = struct {
+    // 커서 기본 모양(근거는 theme.CursorConfig.shape 단일 출처). app이 코어 `default_cursor_shape`로 주입한다
+    // (createTerm chokepoint·config reload·원격 RuntimeConfig) — 앱 DECSCUSR 지정이 없을 때 보이는 모양.
+    // 주의: 이 config enum과 terminal.CursorShape는 **멤버 순서가 다르다**(app configCursorShape가 명시 매핑).
     shape: theme.CursorShape,
+    // 커서 깜빡임 허용 여부(근거는 theme.CursorConfig.blink 단일 출처). app updateCursorBlink가 DECSCUSR
+    // blink 상태와 AND로 묶는다 — false면 앱 요청과 무관하게 커서 고정, true면 앱(DECSCUSR)에 위임.
     blink: bool,
     // 커서 깜빡임 반주기(ms). app이 host frame-loop tick으로 환산(근거는 theme.CursorConfig.blink_interval_ms 단일 출처).
     blink_interval_ms: u32 = 500,
     // 커서 깜빡임 페이드(ms, 0=즉각 on/off). app이 반주기 끝의 알파 램프 길이를 tick으로 환산하고 반주기로 clamp한다
     // (근거는 theme.CursorConfig.blink_fade_ms 단일 출처). 주사율 무관 — ms→tick 환산으로 같은 속도.
-    blink_fade_ms: u32 = 120,
+    blink_fade_ms: u32 = 0,
     // 창 포커스 잃을 때 커서 처리(block 유지/hollow 외곽선/hidden). app이 window_focused와 함께 cursor overlay에 wiring.
     unfocused: theme.UnfocusedCursor = .block,
     // 커서 색 override(opt-in). null이면 렌더가 경로별 테마 기본으로 폴백한다(color→theme.cursor,

@@ -719,6 +719,14 @@ typedef struct {
     size_t cursor_cells;
     float cursor_opacity;
     bool draw_cursor;
+    // v146 본문 분할: 커서 구간을 뺀 앞/뒤 두 구간(셀 단위). 커서가 그 레이어에 없으면 b_len=0이라 한 번만 그린다.
+    size_t term_b_start;
+    size_t term_b_len;
+    size_t modal_a_len;
+    size_t modal_b_start;
+    size_t modal_b_len;
+    bool cursor_in_terminal;
+    bool cursor_in_modal;
     bool has_modal;
     // 모달 오버레이: 셀 시작 인덱스와 클리핑 px(w==0=없음).
     size_t modal_cells_start;
@@ -779,11 +787,14 @@ static void maru_draw_terminal_layer(const MaruDrawPass *c) {
     // 1a+. 헤더 quad(layer 4, 알림 종 배지 빨강 원) — 사이드바 bg strip '뒤' / 터미널·헤더 글리프 '앞'에 끼운다(흰 숫자
     //      글리프가 원 위에 보이게). 버퍼 구간 [bottom+under, +header). 배지 없으면 0이라 no-op(기존 경로 불변).
     if (c->quad_vertex_buffer != nil) MARU_DRAW_QUADS(c->bottom_vertex_count + c->under_vertex_count, c->header_vertex_count);
-    // 1b. 터미널(모달 제외, 탭 제목 포함) — cells는 bg quad 다음(cells_base_v)부터. opacity 1.0(커서 suffix는 terminal_end_v가 제외).
+    // 1b. 터미널(모달 제외, 탭 제목 포함) — cells는 bg quad 다음(cells_base_v)부터. opacity 1.0. 커서가 이 레이어에
+    //     있으면 그 구간을 빼고 앞[0,커서)·뒤(커서,끝) 두 번 그린다(v146 — 커서는 아래 페이드 pass가 따로 그린다).
     if (c->vertex_buffer != nil) MARU_DRAW_CELLS(c->cells_base_v, c->terminal_end_v, 1.0f);
-    // 1b+. 터미널 커서 페이드 pass(모달 없을 때 — 커서=터미널 suffix). 본문 '뒤'·kitty 텍스트-앞 이미지 '앞'에 그려 기존
+    if (c->vertex_buffer != nil && c->term_b_len > 0)
+        MARU_DRAW_CELLS(c->cells_base_v + c->term_b_start * 12, c->term_b_len * 12, 1.0f);
+    // 1b+. 터미널 커서 페이드 pass(커서가 터미널 레이어에 있을 때). 본문 '뒤'·kitty 텍스트-앞 이미지 '앞'에 그려 기존
     //      커서 레이어를 보존한다. cursor_fade_milli<1이면 반투명으로 아래 본문 셀에 합성돼 blink가 페이드.
-    if (c->vertex_buffer != nil && c->draw_cursor && !c->has_modal)
+    if (c->vertex_buffer != nil && c->draw_cursor && c->cursor_in_terminal)
         MARU_DRAW_CELLS(c->cells_base_v + c->cursor_start * 12, c->cursor_cells * 12, c->cursor_opacity);
     MARU_DRAW_IMAGES(c->image_above_start, c->gpu_image_n);                        // 1.5 kitty 이미지(텍스트 앞)
     if (c->quad_vertex_buffer != nil) MARU_DRAW_QUADS(c->bottom_vertex_count, c->under_vertex_count); // 3. under quad(사이드바 밴드)
@@ -839,13 +850,15 @@ static void maru_draw_overlay_layer(const MaruDrawPass *c) {
             const NSUInteger ch2 = (cy + (NSUInteger)c->modal_clip_h_px <= dh) ? (NSUInteger)c->modal_clip_h_px : (dh - cy);
             [c->encoder setScissorRect:(MTLScissorRect){ .x = cx, .y = cy, .width = cw2, .height = ch2 }];
         }
-        // 모달 본문(모달 셀 중 커서 suffix 제외 — 커서=모달 뒤 오버레이 caret). has_modal이면 항상
-        // modal_cells_start ≤ cursor_start ≤ cell_count.
-        MARU_DRAW_CELLS(c->cells_base_v + c->modal_cells_start * 12, (c->cursor_start - c->modal_cells_start) * 12, 1.0f); // 셀당 2 quad — ×12
+        // 모달 본문. 모달이 caret을 내면(find·palette) 그 구간을 빼고 앞/뒤로 나눠 그리고, 안 내면(notice·드래그
+        // 고스트·drop 하이라이트·포커스 테두리) 오버레이 영역 전체를 한 번에 그린다 — 그 경우 커서는 터미널 레이어에
+        // 남아 위 1b+가 페이드한다(v146: 옛 코드는 여기서 커서를 통째로 잃어 blink가 죽었다).
+        MARU_DRAW_CELLS(c->cells_base_v + c->modal_cells_start * 12, c->modal_a_len * 12, 1.0f); // 셀당 2 quad — ×12
+        if (c->modal_b_len > 0) MARU_DRAW_CELLS(c->cells_base_v + c->modal_b_start * 12, c->modal_b_len * 12, 1.0f);
     }
     // 6+. 오버레이 caret 페이드 pass(모달 열림 — 커서=모달 뒤 suffix). 모달 텍스트 '위'(마지막 draw)에 opacity로 그린다.
     //     modal_clip scissor가 위에서 걸렸으면 그대로 이어져 caret도 같은 영역에 클립된다(모달 셀의 일부라 의도된 동작).
-    if (c->vertex_buffer != nil && c->draw_cursor && c->has_modal)
+    if (c->vertex_buffer != nil && c->draw_cursor && c->cursor_in_modal)
         MARU_DRAW_CELLS(c->cells_base_v + c->cursor_start * 12, c->cursor_cells * 12, c->cursor_opacity);
 }
 #undef MARU_DRAW_CELLS
@@ -900,7 +913,9 @@ bool maru_metal_renderer_draw(
        본문 셀 draw에서 이 suffix를 제외하고, cursor_fade_milli>0이면 별도 pass로 opacity=cursor_fade_milli/1000에 그린다. */
     size_t cursor_cells,
     uint32_t cursor_fade_milli,
-    uint32_t overlay_cells_present
+    uint32_t overlay_cells_present,
+    /* 커서 구간 시작(ABI v146) — 근거는 헤더 주석 단일 출처. */
+    size_t cursor_start_in
 ) {
     if (renderer == NULL || terminal_layer == nil || cols == 0 || rows == 0) {
         return false;
@@ -1270,14 +1285,28 @@ bool maru_metal_renderer_draw(
     // 배경)를 그 '앞'에 끼운다. index 0도 유효하며 explicit overlay_cells_present가 존재 여부를 구분한다. 이름은
     // modal이지만 실제 게이트는 "오버레이 영역 존재"라 드래그 시각물도 이 경로로 최상위에 뜬다.
     const bool has_modal = (overlay_cells_present != 0 && modal_cells_start <= cell_count);
-    // 커서 blink 페이드: 커서 overlay는 항상 cells의 맨 끝(cursor_cells개)이다. 본문(터미널·모달) draw에서 이 suffix를
-    // 제외하고, opacity=cursor_opacity로 **별도 pass**로 그린다. fade_milli==0이면 커서 pass를 생략(옛 chop). 커서는
-    // 모달이 열렸으면 모달 뒤 suffix(오버레이 caret), 닫혔으면 터미널 뒤 suffix라 [cursor_start, cell_count)에 온다.
-    const size_t cursor_start = (cursor_cells <= cell_count) ? (cell_count - cursor_cells) : cell_count; // 커서 suffix 시작(셀)
+    // 커서 blink 페이드(v146): 커서 구간은 [cursor_start, cursor_start+cursor_cells)이고 **버퍼 어디에나 올 수 있다**.
+    // v95는 "항상 buffer suffix"를 가정했는데, caret 없는 오버레이 셀(포커스 테두리·drop 하이라이트·드래그 고스트)이
+    // 커서 뒤에 붙으면 그 가정이 깨진다 — 그때 옛 Zig가 cursor_cells=0으로 접어 커서가 본문과 함께 불투명하게 그려졌고
+    // blink가 죽었다. 이제 시작을 명시로 받아 본문을 커서 앞/뒤 두 구간으로 나눠 그린다(fade_milli==0이면 커서 pass 생략).
     const float cursor_opacity = (float)cursor_fade_milli / 1000.0f;
-    const bool draw_cursor = (cursor_cells > 0 && cursor_fade_milli > 0);
-    // 본문 터미널(모달 제외)은 모달 시작(모달 있음) 또는 커서 시작(모달 없음=커서가 터미널 suffix)에서 끝난다.
-    const size_t terminal_end_v = (has_modal ? modal_cells_start : cursor_start) * 12; // 셀당 2 quad(자간 자연폭) — ×12
+    const bool cursor_valid = (cursor_cells > 0 && cursor_start_in <= cell_count && cursor_start_in + cursor_cells <= cell_count);
+    const size_t cursor_start = cursor_valid ? cursor_start_in : cell_count;
+    const size_t cursor_end = cursor_valid ? (cursor_start_in + cursor_cells) : cell_count;
+    const bool draw_cursor = (cursor_valid && cursor_fade_milli > 0);
+    // 터미널 레이어 본문은 모달 시작(모달 있음) 또는 버퍼 끝에서 끝난다. 커서가 그 안에 있으면 두 구간으로 쪼갠다.
+    const size_t terminal_end = has_modal ? modal_cells_start : cell_count;
+    const bool cursor_in_terminal = cursor_valid && cursor_end <= terminal_end;
+    const size_t term_a_len = cursor_in_terminal ? cursor_start : terminal_end;                       // [0, 커서)
+    const size_t term_b_start = cursor_in_terminal ? cursor_end : 0;                                  // (커서, 터미널 끝)
+    const size_t term_b_len = (cursor_in_terminal && cursor_end < terminal_end) ? (terminal_end - cursor_end) : 0;
+    // 모달(오버레이) 레이어 본문도 같은 규칙. 커서가 오버레이 영역에 있으면(모달 caret) 그쪽을 쪼갠다.
+    const bool cursor_in_modal = cursor_valid && has_modal && cursor_start >= modal_cells_start;
+    const size_t modal_total = (cell_count > modal_cells_start) ? (cell_count - modal_cells_start) : 0;
+    const size_t modal_a_len = cursor_in_modal ? (cursor_start - modal_cells_start) : modal_total;    // [모달 시작, 커서)
+    const size_t modal_b_start = cursor_in_modal ? cursor_end : 0;                                    // (커서, 버퍼 끝)
+    const size_t modal_b_len = (cursor_in_modal && cursor_end < cell_count) ? (cell_count - cursor_end) : 0;
+    const size_t terminal_end_v = term_a_len * 12; // 셀당 2 quad(자간 자연폭) — ×12
 
     // 터미널 레이어 clear color: terminal_bg(0xAARRGGBB — OSC 11 배경 set 또는 theme.background)가 비-0이면 그 색,
     // 0이면 기존 기본(어두운 남색)으로 폴백. 빈 영역/기본 배경(A0) 셀이 비치는 색. window.opacity(배경 투명도)는
@@ -1325,6 +1354,13 @@ bool maru_metal_renderer_draw(
         .cursor_cells = cursor_cells,
         .cursor_opacity = cursor_opacity,
         .draw_cursor = draw_cursor,
+        .term_b_start = term_b_start,
+        .term_b_len = term_b_len,
+        .modal_a_len = modal_a_len,
+        .modal_b_start = modal_b_start,
+        .modal_b_len = modal_b_len,
+        .cursor_in_terminal = cursor_in_terminal,
+        .cursor_in_modal = cursor_in_modal,
         .has_modal = has_modal,
         .modal_cells_start = modal_cells_start,
         .modal_clip_x_px = modal_clip_x_px,

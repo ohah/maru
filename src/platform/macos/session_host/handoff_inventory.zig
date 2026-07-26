@@ -146,6 +146,8 @@ pub const terminal_core_groups = [_]Group{
             "cursor_visible",
             "cursor_shape",
             "cursor_blink",
+            "default_cursor_shape",
+            "cursor_shape_overridden",
             "saved_screen",
             "csi_subparam",
             "semantic_state",

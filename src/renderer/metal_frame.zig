@@ -1112,10 +1112,10 @@ pub const MetalFrame = extern struct {
     // (커서 강조선 reserved 2~5·GPU quad FocusOwner border와 분리라 divider만 config로 조절). 0이면 divider 안 그림(숨김).
     // 끝에 추가해 기존 offset 불변(ABI v94).
     divider_thickness_px: u32 = 0,
-    // 커서 overlay(터미널 블록/bar/underline 또는 오버레이 caret)가 차지하는 cells **suffix** 길이 —
-    // cells[cell_count - cursor_cells .. cell_count]가 커서다(buildNativeCellsSplit이 커서를 항상 맨 끝에 emit).
-    // 렌더러가 이 suffix를 본문 draw에서 제외하고, 아래 cursor_fade_milli 불투명도로 **별도 pass**로 그려 blink를
-    // 부드럽게 페이드한다(본문 셀은 항상 1.0). 0이면 커서 없음(hidden·조합 중 등). 끝에 추가해 기존 offset 불변(ABI v95).
+    // 커서 overlay(터미널 블록/bar/underline 또는 오버레이 caret)가 차지하는 cells 길이 —
+    // cells[cursor_start .. cursor_start + cursor_cells]가 커서다. 렌더러가 이 구간을 본문 draw에서 제외하고,
+    // 아래 cursor_fade_milli 불투명도로 **별도 pass**로 그려 blink를 부드럽게 페이드한다(본문 셀은 항상 1.0).
+    // 0이면 커서 없음(hidden·조합 중 등). 끝에 추가해 기존 offset 불변(ABI v95).
     cursor_cells: usize = 0,
     // 커서 overlay 불투명도 × 1000(0~1000, 1000=완전 표시). blink 페이드 위상 — app이 반주기 끝에서 1000→0(사라짐)·
     // 0→1000(나타남)로 램프하고(cursor.blink-fade-ms), 렌더러가 커서 suffix pass의 fragment opacity로 /1000해 곱한다
@@ -1124,6 +1124,13 @@ pub const MetalFrame = extern struct {
     cursor_fade_milli: u32 = 1000,
     // ABI v131: modal_cells_start=0을 "없음" sentinel로 재해석하지 않게 하는 명시 gate. 끝 필드라 기존 offset 불변.
     overlay_cells_present: u32 = 0,
+    // 커서 overlay 구간의 **시작 index**(cells 기준). 옛 v95는 "커서는 항상 버퍼 suffix"를 암묵 가정해 길이만 실었는데,
+    // 그 가정은 caret 없는 오버레이 셀(포커스 테두리·드롭 하이라이트·드래그 고스트)이 커서 **뒤에** 붙는 순간 깨진다 —
+    // 그때 옛 코드는 커서 구간을 통째로 포기(cursor_cells=0)해 **커서가 본문과 함께 불투명하게 그려져 blink가 죽었다**
+    // (포커스 테두리는 상시라 사실상 항상). 시작 index를 명시로 실어 커서가 버퍼 어디에 있든 페이드 pass를 걸 수 있게
+    // 한다 — 렌더러는 본문을 [0,cursor_start)와 [cursor_start+cursor_cells,cell_count) 두 구간으로 그린다.
+    // 끝에 추가해 기존 offset 불변(ABI v146).
+    cursor_start: usize = 0,
 };
 
 /// 사이드바 셀 = 밴드(전달받은 sentinel-UV 하이라이트) ++ 탭 제목 glyph(사이드바 RenderFrame 투영).
@@ -1252,10 +1259,13 @@ pub const MetalFrameBuffer = struct {
     cell_width_px: u32 = 0,
     cell_height_px: u32 = 0,
     generation: u64 = 0,
-    // cells의 suffix를 차지하는 커서 overlay cell 수(buildNativeCellsSplit). view()가 이 길이를 MetalFrame으로
-    // 넘겨 렌더러가 커서 suffix를 본문에서 분리해 cursor_fade_milli 불투명도로 별도 pass로 그린다 — blink 페이드가
-    // frame rebuild 없이(generation만 올려) 동작한다.
+    // 커서 overlay cell 수(buildNativeCellsSplit). view()가 아래 cursor_start와 함께 MetalFrame으로 넘겨 렌더러가
+    // 커서 구간을 본문에서 분리해 cursor_fade_milli 불투명도로 별도 pass로 그린다 — blink 페이드가 frame rebuild
+    // 없이(generation만 올려) 동작한다.
     cursor_cells: usize = 0,
+    // 커서 overlay 구간의 시작 index(cells 기준). caret 없는 오버레이 셀이 커서 뒤에 붙어도 페이드가 유지되게
+    // 명시로 든다(근거는 MetalFrame.cursor_start 주석 단일 출처 — ABI v146).
+    cursor_start: usize = 0,
     // 커서 overlay 불투명도 × 1000(0~1000). blink 페이드 위상 — app updateCursorBlink가 setCursorFadeMilli로 램프한다.
     // 0=완전히 사라짐(blink off 위상, 렌더러가 커서 pass 생략), 1000=완전 표시. 옛 show_cursor(bool)를 대체 —
     // 이진 on/off는 0/1000의 특수 경우다.
@@ -1352,6 +1362,10 @@ pub const MetalFrameBuffer = struct {
             setCellsPaneOrigin(hcells, 0, 0);
             try cells_list.insertSlice(allocator, cells_list.items.len - cursor_cells, hcells);
         }
+        // 터미널 커서 구간의 **시작 index**를 여기서 확정한다 — 위 두 삽입은 모두 커서 '앞'이라 이 시점에 커서는 아직
+        // 버퍼 끝이다. 아래 오버레이 영역은 커서 '뒤'에 붙으므로(그래야 모달이 커서를 덮는다) 이 index를 들고 있어야
+        // caret 없는 오버레이(포커스 테두리·드롭 하이라이트·고스트)가 있어도 커서를 페이드할 수 있다(ABI v146).
+        const terminal_cursor_start = cells_list.items.len - cursor_cells;
         // 오버레이 frame은 커서 suffix '뒤'(맨 뒤)에 append → 터미널·chrome·커서 위 최상위. 불투명 bg 셀이라
         // 아래(커서 포함)를 덮는다. 오버레이가 자기 caret(PaneFrame.cursor — find·palette 입력 커서)을 내면 그
         // caret이 **버퍼 맨 끝**(overlay suffix)에 와, 아래 cursor_cells를 그 길이로 잡아 setCursorVisible(suffix-trim)이
@@ -1445,11 +1459,22 @@ pub const MetalFrameBuffer = struct {
         self.image_uploads = new_image_uploads;
         self.image_pixels = new_image_pixels;
         self.live_image_ids = new_live_image_ids;
-        // 커서 suffix(blink chop 길이): 오버레이 영역이 있으면(모달·드래그) 오버레이 자신의 caret(맨 끝 —
-        // overlay_cursor_cells)을 쓴다. 모달이 caret을 내면(find·palette) 그걸 깜빡이고, 안 내면(notice·드래그 고스트·
-        // drop 하이라이트) overlay_cursor_cells=0이라 chop 없음(정적) — 터미널 커서는 오버레이 영역 '앞'이라 버퍼 맨 끝이
-        // 아니므로 blink suffix에서 빠져 정적으로 그려진다(모달 열림과 동일). 오버레이 영역이 없으면 활성 panel의 터미널 커서.
-        self.cursor_cells = if (has_overlay) overlay_cursor_cells else cursor_cells;
+        // 페이드 대상 커서 구간: **caret을 실제로 낸 쪽**이 임자다. 모달이 caret을 내면(find·palette) 그게 버퍼 맨 끝이라
+        // 그걸 깜빡이고, 안 내면(notice·드래그 고스트·drop 하이라이트·포커스 테두리) 터미널 커서를 그대로 쓴다.
+        //
+        // 옛 판정은 `if (has_overlay) overlay_cursor_cells else cursor_cells`였다 — 오버레이 **영역의 유무**만 보고
+        // caret 소유를 단정해, caret 없는 오버레이 셀이 하나라도 있으면 cursor_cells=0으로 접혔다. 그 순간 렌더러는
+        // 커서를 본문과 함께 불투명하게 그려 **blink가 죽는다**. 그런데 `appendFocusOwnerBorder`(포커스 테두리)가
+        // drag_overlay_cells로 흘러 상시 non-empty라, 정상 사용 중엔 커서가 사실상 **항상** 안 깜빡였다(사용자 제보의
+        // 진짜 원인). 이제 시작 index를 함께 실어(ABI v146) 커서가 버퍼 중간에 있어도 페이드 pass를 건다 —
+        // z-order는 불변(오버레이 셀은 여전히 커서 '뒤' = 위에 그려진다).
+        if (overlay_cursor_cells > 0) {
+            self.cursor_cells = overlay_cursor_cells;
+            self.cursor_start = new_cells.len - overlay_cursor_cells; // 모달 caret은 버퍼 맨 끝
+        } else {
+            self.cursor_cells = cursor_cells;
+            self.cursor_start = terminal_cursor_start;
+        }
         self.modal_cells_start = modal_cells_start;
         self.overlay_cells_present = has_overlay;
         self.modal_clip = modal_clip;
@@ -1527,6 +1552,9 @@ pub const MetalFrameBuffer = struct {
         // cursor_cells(커서 suffix)는 모달 caret(맨 끝 suffix)이라 modal_cells_start보다 항상 뒤다 — 이게 깨지면
         // 렌더러의 세그먼트 분할이 underflow하므로 여기서 일찍 잡는다.
         std.debug.assert(self.modal_cells_start <= exposed);
+        // 커서 구간도 노출 범위 안이어야 한다(렌더러가 두 본문 구간으로 쪼갤 때 underflow하지 않게) — v132에서 커서가
+        // 버퍼 중간에 올 수 있게 되면서 suffix 가정이 사라졌으므로, 그 자리를 이 불변으로 대신 지킨다.
+        std.debug.assert(self.cursor_start + self.cursor_cells <= exposed);
         return .{
             .cols = @intCast(self.size.cols),
             .rows = @intCast(self.size.rows),
@@ -1537,8 +1565,10 @@ pub const MetalFrameBuffer = struct {
             .generation = self.generation,
             .cells = if (exposed > 0) self.cells.ptr else null,
             .cell_count = exposed,
-            // 커서 페이드 pass: 렌더러가 cells[cell_count - cursor_cells ..]를 cursor_fade_milli 불투명도로 별도 그린다.
+            // 커서 페이드 pass: 렌더러가 cells[cursor_start .. cursor_start+cursor_cells]를 cursor_fade_milli
+            // 불투명도로 별도 그린다(나머지 본문은 그 앞/뒤 두 구간).
             .cursor_cells = self.cursor_cells,
+            .cursor_start = self.cursor_start,
             .cursor_fade_milli = self.cursor_fade_milli,
             .raster_uploads = if (self.uploads.len > 0) self.uploads.ptr else null,
             .raster_upload_count = self.uploads.len,
@@ -2911,6 +2941,39 @@ test "replace [5]: 모달(caret)+드래그 고스트 공존 → modal caret이 �
     try std.testing.expect(buf.cursor_cells >= 1);
     try std.testing.expect(buf.cells.len >= 2); // 고스트 커서 셀 + 모달 커서 셀
     try std.testing.expectEqual(@as(u32, 0), buf.cells[buf.cells.len - 1].origin_x); // 맨 끝 = 모달(origin 0), 고스트(500) 아님
+}
+
+// 회귀: caret **없는** 오버레이 셀(포커스 테두리·drop 하이라이트·드래그 고스트)이 커서 뒤에 붙어도 터미널 커서가
+// 페이드 대상으로 남는다. 옛 판정은 `if (has_overlay) overlay_cursor_cells else cursor_cells`라, 오버레이 영역이
+// 있기만 하면 caret 유무와 무관하게 cursor_cells=0으로 접혔다 → 렌더러가 커서를 본문과 함께 불투명하게 그려 **blink가
+// 죽었다**. `appendFocusOwnerBorder`가 이 버퍼로 상시 흘러 정상 사용 중엔 항상 재현됐다(사용자 제보의 진짜 원인).
+// 이제 시작 index(cursor_start)를 함께 실어 커서가 버퍼 중간이어도 구간을 특정한다(ABI v146).
+test "replace: caret 없는 오버레이 셀이 뒤에 붙어도 터미널 커서가 cursor_start/cells로 남는다(blink 유지)" {
+    const allocator = std.testing.allocator;
+    const atlas_config: renderer.GlyphAtlasConfig = .{ .atlas_width_px = 1024, .atlas_height_px = 1024 };
+    const colors: CellColors = .{ .default_fg = .{ .r = 0, .g = 0, .b = 0 }, .cursor = .{ .block = .{ .r = 0xFF, .g = 0xFF, .b = 0xFF }, .text = .{ .r = 0, .g = 0, .b = 0 } } };
+    var term_ov = [_]renderer.DrawOverlay{.{ .cursor = .{ .row = 0, .col = 0 } }};
+    const term_pf: PaneFrame = .{ .frame = fakeCursorFrame(&term_ov), .origin_x = 0, .origin_y = 0, .colors = colors };
+    var panes = [_]PaneFrame{term_pf};
+    // 포커스 테두리 한 셀(bg-only sentinel) — 실제 앱에서 drag_overlay_cells로 흘러오는 그 셀이다(caret 아님).
+    var border = [_]NativeMetalCell{.{ .row = 0, .col = 0, .origin_x = 777, .width = 1, .codepoint = ' ', .slot_id = 0, .atlas_x_px = 0, .atlas_y_px = 0, .atlas_width_px = 0, .atlas_height_px = 0, .u0 = -1.0, .v0 = -1.0, .u1 = -1.0, .v1 = -1.0, .foreground = 0, .background = 0xFF00FF00 }};
+
+    var buf: MetalFrameBuffer = .{};
+    defer buf.deinit(allocator);
+    try buf.replace(allocator, &panes, atlas_config, 8, 16, null, null, &.{}, .{ .default_fg = .{ .r = 0, .g = 0, .b = 0 } }, &.{}, &.{}, null, null, &border, &.{}, &.{}, &.{}, &.{}, &.{}, &.{});
+
+    // ★ 커서 구간이 살아 있어야 한다(옛 코드는 0이라 blink가 죽었다).
+    try std.testing.expect(buf.cursor_cells >= 1);
+    // ★ 커서는 **버퍼 맨 끝이 아니다** — 테두리 셀이 뒤에 붙었다. 그래서 시작 index가 필요하다.
+    try std.testing.expect(buf.cursor_start + buf.cursor_cells < buf.cells.len);
+    try std.testing.expectEqual(@as(u32, 777), buf.cells[buf.cells.len - 1].origin_x); // 맨 끝 = 테두리(z-order 불변)
+    // 지목한 구간이 실제 커서 셀인지 확인(테두리 sentinel origin과 구별).
+    try std.testing.expectEqual(@as(u32, 0), buf.cells[buf.cursor_start].origin_x);
+    // view()도 두 값을 함께 실어야 렌더러가 구간을 안다([[observation-view-must-carry-new-fields]]와 같은 계열).
+    const v = buf.view();
+    try std.testing.expectEqual(buf.cursor_start, v.cursor_start);
+    try std.testing.expectEqual(buf.cursor_cells, v.cursor_cells);
+    try std.testing.expect(v.cursor_start + v.cursor_cells <= v.cell_count);
 }
 
 test "replaceSidebar swaps only sidebar_cells and bumps generation, leaving grid cells untouched (A)" {

@@ -2351,7 +2351,7 @@ private func browserCtlExecuteScriptStream(
 //      받아 포커스된다. 모달이 **열려** 있으면 nil을 반환해 클릭이 아래 터미널 뷰로 통과하고(overlay hitTest=nil
 //      불변), Zig 모달 로직(바깥 클릭 dismiss·모달 요소 클릭)이 그대로 처리한다 — 웹뷰가 모달 위 클릭을 훔치지
 //      않게(§4). 본문 rect 밖(탭 바·divider·grip)은 애초에 이 프레임에 없어 늘 터미널이 받는다.
-//   2. **maru 키바인딩(performKeyEquivalent)**: 웹 포커스 중에는 ABI v132 typed WebKeyRoute를 조회한다. app_action은
+//   2. **maru 키바인딩(performKeyEquivalent)**: 웹 포커스 중에는 ABI v146 typed WebKeyRoute를 조회한다. app_action은
 //      같은 Zig resolver를 재평가하는 dispatchWebPanelAppAction이 현재 Action만 직접 실행하고, web_editor/pass-through는
 //      WebKit·메뉴에 양보하며 consume_unbound/unknown은 소비한다. 범용 handleKeyDown의 terminal copy/paste·scroll·macro
 //      전처리와 PTY write를 우회하고, route 뒤 config/mode가 달라졌으면 action 0회다. 웹이 포커스가 아니면 false만
@@ -5610,9 +5610,10 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             frame.window_opacity_milli,   // 창 배경 투명도 ×1000 — clear color alpha(default 배경만 투명)
             frame.sidebar_scroll_offset_px, // 사이드바 세로 스크롤량(px) — 카드를 위로 밀고 헤더 아래로 scissor 클립
             frame.divider_thickness_px,   // pane divider(reserved 30/31) 두께(px) — config split.divider-thickness(패스스루)
-            frame.cursor_cells,           // 커서 blink 페이드: 커서 overlay suffix 길이(본문서 제외·별도 pass; 패스스루)
+            frame.cursor_cells,           // 커서 blink 페이드: 커서 overlay 구간 길이(본문서 제외·별도 pass; 패스스루)
             frame.cursor_fade_milli,      // 커서 overlay 불투명도 ×1000 — blink 페이드 위상(cursor.blink-fade-ms; 패스스루)
-            frame.overlay_cells_present   // ABI v131: overlay가 cell index 0에서 시작해도 명시적으로 구분
+            frame.overlay_cells_present,  // ABI v131: overlay가 cell index 0에서 시작해도 명시적으로 구분
+            frame.cursor_start            // ABI v146: 커서 구간 시작 index — 커서가 버퍼 중간이어도 페이드(패스스루)
         )
         if drew {
             lastDrawnGeneration = frame.generation

@@ -764,11 +764,21 @@ pub fn absRowFromViewport(self: *const TerminalCore, viewport_row: u16) usize {
 // markCursorMoveDirty로 옛/새 칸을 dirty 마킹하고 deferred wrap(pending_wrap)·grapheme run(last_print)을 끊는다.
 // dispatchCsi(core 잔류, parser 후속)가 CSI 파라미터를 풀어 위임한다.
 
-/// DECSCUSR(CSI Ps SP q): 커서 모양/깜빡임. 0|1=깜빡 block, 2=고정 block, 3=깜빡 underline,
-/// 4=고정 underline, 5=깜빡 bar, 6=고정 bar. 모르는 값은 무시한다. vim이 모드 전환마다 보낸다.
+/// DECSCUSR(CSI Ps SP q): 커서 모양/깜빡임. 0=터미널 기본(config `cursor.shape`)으로 복귀, 1=깜빡 block,
+/// 2=고정 block, 3=깜빡 underline, 4=고정 underline, 5=깜빡 bar, 6=고정 bar. 모르는 값은 무시한다.
+/// vim이 모드 전환마다 보낸다.
+///
+/// 0과 1을 **가른다**(옛날엔 둘 다 하드코딩 block). VT520/xterm에서 0은 "terminal default", 1은 "blinking block"로
+/// 정의가 다르고, 0은 프로그램이 자기 override를 거둬들이는 유일한 수단이다 — 여기서 갈라야 사용자 config가 다시
+/// 보인다(Ghostty `CSI 0 q` → `.default` 동형). 1..6은 override로 표시해 config reload가 화면을 안 덮게 한다.
 pub fn setCursorStyle(self: *TerminalCore, param: u16) void {
     switch (param) {
-        0, 1 => {
+        0 => {
+            self.cursor_shape = self.default_cursor_shape; // 터미널 기본 = 사용자 config
+            self.cursor_blink = true; // 기본은 깜빡임(config cursor.blink=false는 app 렌더 게이트가 덮는다)
+            self.cursor_shape_overridden = false; // override 해제 — 이후 config reload가 라이브로 반영된다
+        },
+        1 => {
             self.cursor_shape = .block;
             self.cursor_blink = true;
         },
@@ -794,7 +804,20 @@ pub fn setCursorStyle(self: *TerminalCore, param: u16) void {
         },
         else => return,
     }
+    if (param != 0) self.cursor_shape_overridden = true; // 앱이 명시 — config reload가 이 커서를 안 덮는다
     markDirty(self, self.screen.cursor.row); // 모양이 바뀐 커서 칸을 다시 그린다
+}
+
+/// config `cursor.shape` 기본값을 주입한다(app createTerm chokepoint · config reload · 원격 RuntimeConfig 적용).
+/// 앱이 DECSCUSR로 모양을 명시 중이면(`cursor_shape_overridden`) 기본값만 갱신하고 라이브 커서는 안 건드린다 —
+/// 설정을 바꿨다고 vim insert-mode의 bar가 block으로 튀지 않게(Ghostty가 `default_cursor`일 때만 재적용하는 것과 동형).
+/// 명시가 없으면 즉시 반영해 reload가 화면에서 바로 보인다.
+pub fn setDefaultCursorShape(self: *TerminalCore, shape: types.CursorShape) void {
+    self.default_cursor_shape = shape;
+    if (self.cursor_shape_overridden) return;
+    if (self.cursor_shape == shape) return; // 값 불변 — dirty 마킹 없이 idle 유지
+    self.cursor_shape = shape;
+    markDirty(self, self.screen.cursor.row);
 }
 
 pub fn cursorPosition(self: *TerminalCore) void {

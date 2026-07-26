@@ -1461,20 +1461,32 @@ fn coreCommandFromWire(command: core_command_wire.Command) error{InvalidCommand}
         .set_max_scrollback => |lines| .{ .set_max_scrollback = std.math.cast(usize, lines) orelse return error.InvalidCommand },
         .set_ambiguous_wide => |wide| .{ .set_ambiguous_wide = wide },
         .set_emoji_wide => |wide| .{ .set_emoji_wide = wide },
-        .set_runtime_config => |config| .{ .set_runtime_config = .{
-            .max_scrollback = std.math.cast(usize, config.max_scrollback) orelse return error.InvalidCommand,
-            .ambiguous_wide = config.ambiguous_wide,
-            .emoji_wide = config.emoji_wide,
-            .palette = paletteFromWire(config.palette),
-            .default_colors = .{
-                .foreground = rgbFromWire(config.default_colors.foreground),
-                .background = rgbFromWire(config.default_colors.background),
+        .set_default_cursor_shape => |shape| if (shape <= 2)
+            .{ .set_default_cursor_shape = @enumFromInt(shape) }
+        else
+            return error.InvalidCommand,
+        .set_runtime_config => |config| .{
+            .set_runtime_config = .{
+                .max_scrollback = std.math.cast(usize, config.max_scrollback) orelse return error.InvalidCommand,
+                .ambiguous_wide = config.ambiguous_wide,
+                .emoji_wide = config.emoji_wide,
+                .palette = paletteFromWire(config.palette),
+                .default_colors = .{
+                    .foreground = rgbFromWire(config.default_colors.foreground),
+                    .background = rgbFromWire(config.default_colors.background),
+                },
+                .cell_metrics = if (config.cell_metrics) |metrics| .{
+                    .width = metrics.width,
+                    .height = metrics.height,
+                } else null,
+                // wire는 0=block/1=underline/2=bar. decode가 이미 범위를 좁혔지만 여기서도 닫아 둔다 —
+                // 다른 wire 소비처(paletteFromWire·cast)와 같은 fail-close 규율.
+                .default_cursor_shape = if (config.cursor_shape <= 2)
+                    @enumFromInt(config.cursor_shape)
+                else
+                    return error.InvalidCommand,
             },
-            .cell_metrics = if (config.cell_metrics) |metrics| .{
-                .width = metrics.width,
-                .height = metrics.height,
-            } else null,
-        } },
+        },
         .jump_to_prompt => |direction| .{ .jump_to_prompt = direction },
         .reset_input_modes => .reset_input_modes,
     };

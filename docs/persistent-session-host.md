@@ -1848,10 +1848,15 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
   따라 `maru runtime end`를 별도 capability와 local confirmation으로 공개한다. exact runtime membership,
   controller/observer가 있는 명시 종료, preview 뒤 stale host/runtime 재검증, unauthorized, reply preallocation과
   accepted full flush를 gate로 삼는다.
-- **P5b1 — subscription identity (T0b0에서 선행 구현)**: connection-local wire `stream_id`와
+- **P5b1 — subscription identity (구현; T0b0에서 선행)**: connection-local wire `stream_id`와
   registry-global distinct `SubscriptionId`를 stable `ConnectionKey` 양방향 map으로 분리했다. 두 connection의
   local stream 1, 권한 격리, close revoke, connection ABA, 256/8,192 cap과 overflow/OOM을 hidden protocol/core
-  harness로 검증한다. P5b에서는 이를 실제 multi-fd streaming harness에서 재검증한다.
+  harness로 검증한다. P5b1 product gate는 실제 `SocketServer`/`poll_owner.Owner`에 두 GUI fd를 동시에 붙여 같은
+  runtime의 observer로 attach하고, 두 wire response가 모두 local stream 1이며 각 fd가 initial snapshot의
+  `end_stream`까지 받되 daemon-global subscription과 `ConnectionKey`는 서로 다름을 검증한다. 한 fd의 EOF canonical
+  destroy 뒤에는 그 subscription/attachment만 revoke되고 sibling의 local stream 1→global record와 socket이
+  유지돼야 한다. 같은 slot을 재사용한 새 fd는 fresh `ConnectionKey`/subscription을 받고 old key는 계속 stale이어야
+  한다. 이 gate는 public CLI나 controller/takeover 권위, slow-client queue 정책을 P5b2/P5b3보다 먼저 완료 처리하지 않는다.
 - **P5b2 — bounded stream slots**: P4 `ConnectionSlot` cap/reserve/fairness를 multi-slot streaming에 적용한다.
   slow observer가 controller/PTY를 막지 않고 per-connection/global cap을 넘지 않는 것이 gate다.
 - **P5b3 — controller/observer reactor**: observer/takeover protocol과 controller 전환을 hidden harness로 완성한다.

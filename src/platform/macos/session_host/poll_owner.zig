@@ -443,6 +443,206 @@ fn pumpUntilClosed(owner: *Owner, fd: c.fd_t) !void {
     return error.TestUnexpectedResult;
 }
 
+fn pumpUntilLocalStreamOneSnapshot(owner: *Owner, fd: c.fd_t) !void {
+    var parser = framing.FrameParser.init(testing.allocator);
+    defer parser.deinit();
+    var buf: [4096]u8 = undefined;
+    var saw_response = false;
+    var saw_snapshot_end = false;
+    var attempts: usize = 0;
+    while ((!saw_response or !saw_snapshot_end) and attempts < 1000) : (attempts += 1) {
+        _ = try owner.pollOnce(5);
+        const rc = c.recv(fd, &buf, buf.len, posix.MSG.DONTWAIT);
+        if (rc < 0) {
+            if (posix.errno(rc) == .AGAIN) continue;
+            return error.TestUnexpectedResult;
+        }
+        if (rc == 0) return error.TestUnexpectedResult;
+        try parser.push(buf[0..@intCast(rc)]);
+        while (try parser.next()) |frame| {
+            defer frame.deinit(testing.allocator);
+            if (frame.header.kind == .response and
+                std.mem.indexOf(u8, frame.payload, "\"stream_id\":1") != null)
+                saw_response = true;
+            if (frame.header.kind == .snapshot_chunk and
+                frame.header.stream_id == 1 and
+                frame.header.flags & protocol.Flags.end_stream != 0)
+                saw_snapshot_end = true;
+        }
+    }
+    try testing.expect(saw_response);
+    try testing.expect(saw_snapshot_end);
+}
+
+fn admittedKeyExcept(
+    owner: *Owner,
+    excluded: ?connection_slot.ConnectionKey,
+) !connection_slot.ReactorCore.Admission {
+    for (owner.clients) |maybe_client| {
+        const client = maybe_client orelse continue;
+        if (excluded) |key| {
+            if (std.meta.eql(client.admission.key, key)) continue;
+        }
+        return client.admission;
+    }
+    return error.TestUnexpectedResult;
+}
+
+test "poll owner keeps connection-local stream one distinct across live slot reuse" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir_len = try tmp.dir.realPath(testing.io, &dir_buf);
+    const dir_raw = dir_buf[0..dir_len];
+    const dir_path = try testing.allocator.dupeZ(u8, dir_raw);
+    defer testing.allocator.free(dir_path);
+    const socket_path = try std.fmt.allocPrintSentinel(
+        testing.allocator,
+        "{s}/subscriptions.sock",
+        .{dir_raw},
+        0,
+    );
+    defer testing.allocator.free(socket_path);
+    var runtime_registry = registry.TerminalRuntimeRegistry.init(testing.allocator);
+    defer runtime_registry.deinit();
+    _ = try runtime_registry.register(0xAA, 80, 24);
+    var server = try socket_server.SocketServer.bind(
+        testing.allocator,
+        dir_path,
+        socket_path,
+        0xB1,
+        &runtime_registry,
+    );
+    defer server.deinit();
+    server.host_status = .{ .manifest_capable = true };
+    var fake_runtime: server_mod.FakeRuntimeOps = .{};
+    server.runtime_ops = fake_runtime.ops();
+    var owner = try Owner.init(testing.allocator, testing.io, &server);
+    defer owner.deinit();
+
+    var first_fd = try connectTestClient(socket_path);
+    defer {
+        if (first_fd >= 0) _ = c.close(first_fd);
+    }
+    _ = try owner.pollOnce(5);
+    try sendTestRequest(first_fd, .hello, 1, "{\"protocol_min\":2,\"protocol_max\":2,\"client_kind\":\"gui\"}");
+    try pumpUntilResponse(&owner, first_fd, "host_id");
+    const first_admission = try admittedKeyExcept(&owner, null);
+    const first_key = first_admission.key;
+    var second_fd = try connectTestClient(socket_path);
+    defer {
+        if (second_fd >= 0) _ = c.close(second_fd);
+    }
+    _ = try owner.pollOnce(5);
+    try sendTestRequest(second_fd, .hello, 1, "{\"protocol_min\":2,\"protocol_max\":2,\"client_kind\":\"gui\"}");
+    try pumpUntilResponse(&owner, second_fd, "host_id");
+    const second_admission = try admittedKeyExcept(&owner, first_key);
+    const second_key = second_admission.key;
+
+    try sendTestRequest(
+        first_fd,
+        .request,
+        2,
+        "{\"method\":\"runtime.attach\",\"params\":{\"runtime_id\":\"aa\",\"mode\":\"observer\"}}",
+    );
+    try pumpUntilLocalStreamOneSnapshot(&owner, first_fd);
+    try sendTestRequest(
+        second_fd,
+        .request,
+        2,
+        "{\"method\":\"runtime.attach\",\"params\":{\"runtime_id\":\"aa\",\"mode\":\"observer\"}}",
+    );
+    try pumpUntilLocalStreamOneSnapshot(&owner, second_fd);
+
+    try testing.expect(!std.meta.eql(first_key, second_key));
+    const first_subscription = server.subscriptions.resolveLocal(.{
+        .connection = first_key,
+        .stream_id = 1,
+    }).?;
+    const second_subscription = server.subscriptions.resolveLocal(.{
+        .connection = second_key,
+        .stream_id = 1,
+    }).?;
+    try testing.expect(first_subscription.value != second_subscription.value);
+    try testing.expectEqual(@as(usize, 2), server.subscriptions.count());
+    try testing.expectEqual(@as(usize, 2), runtime_registry.attachmentCount());
+    try testing.expectEqual(first_key, server.subscriptions.resolveGlobal(first_subscription).?.connection);
+    try testing.expectEqual(second_key, server.subscriptions.resolveGlobal(second_subscription).?.connection);
+
+    _ = c.shutdown(first_fd, c.SHUT.RDWR);
+    _ = c.close(first_fd);
+    first_fd = -1;
+    var attempts: usize = 0;
+    while (owner.activeCount() != 1 and attempts < 1000) : (attempts += 1)
+        _ = try owner.pollOnce(2);
+    try testing.expectEqual(@as(usize, 1), owner.activeCount());
+    try testing.expect(server.subscriptions.resolveLocal(.{
+        .connection = first_key,
+        .stream_id = 1,
+    }) == null);
+    try testing.expect(server.subscriptions.resolveGlobal(first_subscription) == null);
+    try testing.expectEqual(second_subscription, server.subscriptions.resolveLocal(.{
+        .connection = second_key,
+        .stream_id = 1,
+    }).?);
+    try testing.expectEqual(second_key, server.subscriptions.resolveGlobal(second_subscription).?.connection);
+    try testing.expectEqual(@as(usize, 1), server.subscriptions.count());
+    try testing.expectEqual(@as(usize, 1), runtime_registry.attachmentCount());
+
+    try sendTestRequest(second_fd, .request, 3, "{\"method\":\"host.info\"}");
+    try pumpUntilResponse(&owner, second_fd, "runtime_count");
+
+    var reused_fd = try connectTestClient(socket_path);
+    defer {
+        if (reused_fd >= 0) _ = c.close(reused_fd);
+    }
+    _ = try owner.pollOnce(5);
+    try sendTestRequest(reused_fd, .hello, 1, "{\"protocol_min\":2,\"protocol_max\":2,\"client_kind\":\"gui\"}");
+    try pumpUntilResponse(&owner, reused_fd, "host_id");
+    try sendTestRequest(
+        reused_fd,
+        .request,
+        2,
+        "{\"method\":\"runtime.attach\",\"params\":{\"runtime_id\":\"aa\",\"mode\":\"observer\"}}",
+    );
+    try pumpUntilLocalStreamOneSnapshot(&owner, reused_fd);
+    const reused_admission = try admittedKeyExcept(&owner, second_key);
+    const reused_key = reused_admission.key;
+    const reused_subscription = server.subscriptions.resolveLocal(.{
+        .connection = reused_key,
+        .stream_id = 1,
+    }).?;
+    try testing.expectEqual(first_admission.index, reused_admission.index);
+    try testing.expect(first_key.slot_generation != reused_key.slot_generation);
+    try testing.expectEqual(
+        reused_key,
+        server.subscriptions.resolveGlobal(reused_subscription).?.connection,
+    );
+    try testing.expect(!std.meta.eql(first_key, reused_key));
+    try testing.expect(reused_subscription.value != first_subscription.value);
+    try testing.expect(server.subscriptions.resolveLocal(.{
+        .connection = first_key,
+        .stream_id = 1,
+    }) == null);
+    try testing.expect(server.subscriptions.resolveGlobal(first_subscription) == null);
+    try testing.expectEqual(@as(usize, 2), server.subscriptions.count());
+    try testing.expectEqual(@as(usize, 2), runtime_registry.attachmentCount());
+
+    _ = c.shutdown(reused_fd, c.SHUT.RDWR);
+    _ = c.close(reused_fd);
+    reused_fd = -1;
+    _ = c.shutdown(second_fd, c.SHUT.RDWR);
+    _ = c.close(second_fd);
+    second_fd = -1;
+    attempts = 0;
+    while (owner.activeCount() != 0 and attempts < 1000) : (attempts += 1)
+        _ = try owner.pollOnce(2);
+    try testing.expectEqual(@as(usize, 0), owner.activeCount());
+    try testing.expectEqual(@as(usize, 0), server.subscriptions.count());
+    try testing.expectEqual(@as(usize, 0), runtime_registry.attachmentCount());
+}
+
 test "poll owner keeps canonical GUI connection while ephemeral inventory completes" {
     if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
     var tmp = testing.tmpDir(.{});

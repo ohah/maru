@@ -383,12 +383,19 @@ pub fn view(rows: []const Row, hovered_slot: ?usize, drop_slot: ?usize, p: props
             const hover_role: tokens.ColorRole = switch (rows[hs]) {
                 .group_header => |gh| if (gh.has_color) .tab_active_bg else .tab_hover_bg,
                 .card => .tab_hover_bg,
-                // 목록 행은 **활성 밴드 위에 놓일 수 있다**(활성 카드의 목록). 거기에 같은 .tab_hover_bg를 겹치면
-                // 활성 색보다 어두워 호버가 오히려 안 보인다 — 색 있는 그룹 헤더와 같은 처방으로 한 단계 밝은
-                // .tab_active_bg를 오버레이해 "지금 가리키는 행"이 드러나게 한다(사용자 피드백).
-                .agent_toggle, .agent => .tab_active_bg,
+                // 목록 행은 **활성 밴드 위에 놓일 수 있다**(활성 카드의 목록). `.tab_hover_bg`는 활성색보다 어둡고
+                // `.tab_active_bg`는 활성색과 **똑같아** 둘 다 그 위에서 구분이 사라진다(사용자 제보 — 활성 카드의
+                // 하위 행을 호버해도 색 변화가 없다). 활성보다 한 단계 밝은 전용 role로 오버레이한다.
+                .agent_toggle, .agent => .row_hover_bg,
             };
-            try out.append(arena, bandFill(rows, hs, w, m, hover_role, p.shape));
+            // 목록 행 호버 밴드는 **행 안쪽으로 들여** 그린다. 행 높이를 꽉 채우면 위아래 행과 맞닿아 답답하고,
+            // 어느 행을 가리키는지도 덜 또렷하다(사용자 피드백). 카드 호버는 카드가 이미 card_gap으로 떨어져 있어
+            // 그대로 둔다.
+            const row_inset: u16 = switch (rows[hs]) {
+                .agent_toggle, .agent => @intCast(@min(m.list_pad_v / 2, @as(u32, std.math.maxInt(u16)))),
+                else => 0,
+            };
+            try out.append(arena, bandFillInset(rows, hs, hs + 1, w, m, hover_role, p.shape, row_inset));
         }
     }
 
@@ -411,6 +418,11 @@ fn bandFill(rows: []const Row, row: usize, w: u32, m: Metrics, role: tokens.Colo
 /// `[from, to)` **여러 row를 한 덩어리로** 덮는 밴드. 활성 워크스페이스가 카드 + 에이전트 목록을 함께 칠할 때 쓴다
 /// (단일 row는 `bandFill`이 to=from+1로 위임). row→y는 앞선 row 높이 누적(rowTop의 헤더·스크롤 제외분).
 fn bandFillSpan(rows: []const Row, from: usize, to: usize, w: u32, m: Metrics, role: tokens.ColorRole, shape: props.ShapeTokens) draw.Op {
+    return bandFillInset(rows, from, to, w, m, role, shape, 0);
+}
+
+/// `bandFillSpan` + 사방 추가 인셋(px). 목록 행 호버처럼 밴드가 행을 꽉 채우면 답답한 자리에서 쓴다.
+fn bandFillInset(rows: []const Row, from: usize, to: usize, w: u32, m: Metrics, role: tokens.ColorRole, shape: props.ShapeTokens, extra: u16) draw.Op {
     const top: i64 = rowTop(rows, from, 0, m, 0); // 슬롯 상대(헤더·스크롤 제외), ≥0
     // 목록 아래 행(새 워크스페이스)은 카드가 아니므로 **기본 1줄 카드 높이**로 둔다(옛 고정 slot_h 자리).
     var rh: u32 = 0;
@@ -423,7 +435,7 @@ fn bandFillSpan(rows: []const Row, from: usize, to: usize, w: u32, m: Metrics, r
     // U2: 슬롯 rect에서 사방 card_gap을 inset(content rect)으로 빼 카드 사이 여백을 둔다(선언적 패딩 — 좌표 산술 대신).
     // tui(gap=0)면 inset 0이라 슬롯 꽉(기존과 동일).
     const slot = draw.Rect{ .x = 0, .y = @intCast(top), .w = w, .h = rh };
-    const g = shape.card_gap_px;
+    const g: u16 = shape.card_gap_px +| extra;
     const card = slot.inset(.{ .left = g, .right = g, .top = g, .bottom = g });
     const r = shape.corner_radius_px;
     // tui(r=0)면 lowerSidebar가 셀 밴드로, rich(r>0)면 GPU quad(둥근)로 lower한다 — 같은 op, 토큰만 다름.

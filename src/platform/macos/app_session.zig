@@ -510,6 +510,9 @@ const codex_candidate_probe_limit: usize = 48;
 /// 같은 cwd에서 이미 매핑된 형제 Term 파일을 몇 개까지 모을지(충돌 회피용). 한 워크스페이스에서 이보다 많은
 /// 에이전트를 같은 디렉터리에 돌리는 경우는 실질적으로 없고, 넘으면 그 이상은 그냥 충돌 회피 대상에서 빠진다.
 const transcript_sibling_scan_limit: usize = 8;
+/// 세션 기록이 Term의 마지막 출력보다 이만큼 넘게 과거면 그 Term이 쓴 기록으로 보지 않는다. 에이전트는 출력 직전·직후에
+/// 기록을 쓰므로 정상 세션의 간격은 초 단위다 — 넉넉히 잡아도 "방금 띄운 에이전트가 몇 분 전 세션을 무는" 것은 막힌다.
+const transcript_staleness_grace_ns: i96 = 60 * std.time.ns_per_s;
 /// codex `session_meta`(첫 레코드)를 찾는 데 읽는 앞부분 크기.
 const codex_head_bytes: usize = 64 * 1024;
 const agent_observer_interval_ms: u32 = 100; // 화면/OSC/activity 상태 판정 주기.
@@ -16636,18 +16639,19 @@ pub const AppSession = struct {
         defer agents.deinit(self.allocator);
         collectWorkspaceAgents(tab, &agents, self.allocator);
         if (agents.items.len == 0) return;
-        if (agents.items.len >= 2) {
-            out.append(self.allocator, .{
-                .agent_toggle = .{
-                    .tab = tab_index,
-                    .count = std.math.lossyCast(u16, agents.items.len),
-                    .collapsed = tab.agents_collapsed,
-                    .depth = depth,
-                    .last = tab.agents_collapsed, // 접히면 토글이 이 묶음의 마지막 행이다(아래 여백을 카드와 같게)
-                },
-            }) catch return;
-            if (tab.agents_collapsed) return; // 접혔으면 행은 안 낸다(토글만 남는다)
-        }
+        // **1개일 때도 토글을 낸다.** 처음엔 "1개면 토글 없이 행 하나"로 뒀지만(토글이 군더더기라고 봤다), 실사용에서
+        // 에이전트 하나짜리 카드도 접을 수 없어 목록이 길어지는 게 불편했다(사용자 요청). 접기는 개수와 무관하게
+        // "이 카드를 지금 얼마나 펼쳐 둘 것인가"의 문제다.
+        out.append(self.allocator, .{
+            .agent_toggle = .{
+                .tab = tab_index,
+                .count = std.math.lossyCast(u16, agents.items.len),
+                .collapsed = tab.agents_collapsed,
+                .depth = depth,
+                .last = tab.agents_collapsed, // 접히면 토글이 이 묶음의 마지막 행이다(아래 여백을 카드와 같게)
+            },
+        }) catch return;
+        if (tab.agents_collapsed) return; // 접혔으면 행은 안 낸다(토글만 남는다)
         for (agents.items, 0..) |ag, idx| {
             out.append(self.allocator, .{
                 .agent = .{
@@ -23994,6 +23998,13 @@ pub const AppSession = struct {
             var taken_buf: [transcript_sibling_scan_limit][]const u8 = undefined;
             const taken = self.claudeTranscriptsTakenBy(term, &taken_buf);
             const found = tr.latestSessionFile(self.io, dir, &name_buf, taken) orelse return false;
+            if (!self.transcriptPlausiblyBelongsTo(term, found.mtime_ns)) {
+                // **매핑을 확정하지 않고 물러난다.** 새로 띄운 에이전트는 몇 초 뒤 자기 파일을 만드는데, 여기서
+                // mapped_output_ms를 올려버리면 그 Term이 다시 출력할 때까지(= 사용자가 뭔가 칠 때까지) 재시도가
+                // 없어 그 사이 내내 대화 줄이 빈다. claude 경로의 재스캔은 단일 디렉터리라 값싸므로(실측 0.14ms)
+                // 폴링 주기마다 다시 보는 편이 낫다 — codex는 트리 전체라 사정이 달라 시도 시각을 기록한다.
+                return false;
+            }
             if (!std.mem.eql(u8, found.name, cache.fileName())) {
                 cache.setFileName(found.name);
                 cache.read_mtime_ns = 0; // 파일이 바뀌었으면 mtime 비교를 건너뛰고 무조건 읽는다
@@ -24030,6 +24041,26 @@ pub const AppSession = struct {
         // 실익이 작지만, 규율이 하나여야 codex와 코드가 갈리지 않고 포맷이 바뀌어도 조용히 비지 않는다.
         tr.mergeKeepingMissing(&cache.owned, &fresh);
         return true;
+    }
+
+    /// 이 세션 기록이 **그 Term의 것일 수 있는가** — 파일 갱신 시각과 Term의 마지막 출력 시각을 대조한다.
+    ///
+    /// 활동 상관 매핑(§7.2)의 전제는 "그 Term이 방금 말했고, 그 순간 갱신된 파일이 그 세션"이다. 그런데 픽은
+    /// **그 순간 최신 파일**만 보고 시간 관계를 보지 않았다 — 그래서 **새로 띄운 에이전트**가 아직 아무것도 쓰지
+    /// 않았는데(시작 화면만 그렸다) 직전 세션 파일이 여전히 최신이라 그걸 물었고, 새 터미널에 남의 옛 대화가
+    /// 붙었다(사용자 제보 — 시작 화면뿐인 pane 둘에 서로 다른 과거 대화가 떴다).
+    ///
+    /// 파일이 Term의 마지막 출력보다 **한참 과거**면 그 Term이 쓴 기록일 수 없다. 반대 방향(파일이 더 최신)은
+    /// 정상이다 — 에이전트는 화면에 그리기 전후로 기록을 쓴다.
+    ///
+    /// 출력 시각을 모르면(스탬프 전) 판단할 근거가 없으므로 통과시킨다 — 계약 1대로 틀린 대화를 띄우느니 비우는
+    /// 편이 낫지만, 여기서 막으면 정상 세션도 첫 폴링을 놓친다. 다음 출력에서 이 검사가 다시 걸린다.
+    fn transcriptPlausiblyBelongsTo(self: *AppSession, term: *Term, mtime_ns: i96) bool {
+        _ = self;
+        const out_ns = term.agent_last_output_wall_ns;
+        if (out_ns == 0 or mtime_ns == 0) return true;
+        if (mtime_ns >= out_ns) return true;
+        return (out_ns - mtime_ns) <= transcript_staleness_grace_ns;
     }
 
     /// 같은 작업 디렉터리에서 **다른** Term이 이미 매핑한 claude 세션 파일 이름들. `latestSessionFile`이 이들을
@@ -24086,6 +24117,7 @@ pub const AppSession = struct {
                 const meta = tr.parseCodexMeta(meta_arena.allocator(), head, &cwd_buf);
                 if (!meta.is_user) continue; // 서브에이전트·자동 스레드 — 사용자 카드에 내부 대화를 띄우지 않는다
                 if (!std.mem.eql(u8, meta.cwd, cwd)) continue; // 다른 워크스페이스의 세션
+                if (!self.transcriptPlausiblyBelongsTo(term, cand.mtime_ns)) continue; // 이 Term이 쓴 기록이 아니다
                 if (!std.mem.eql(u8, cand.slice(), cache.fileName())) {
                     cache.setFileName(cand.slice());
                     cache.read_mtime_ns = 0;
@@ -24121,6 +24153,44 @@ pub const AppSession = struct {
         // (실측 최악 22MB)으로 밀린다 — 사용자가 칠 때는 파일 끝이라 반드시 잡히고, 그 뒤로는 이 병합이 지킨다.
         tr.mergeKeepingMissing(&cache.owned, &fresh);
         return true;
+    }
+
+    /// 카드 줄 수가 투영 당시와 달라졌으면 사이드바를 다시 투영한다.
+    ///
+    /// **왜 필요한가**: 카드 줄 수는 활성 Term의 관측(cwd·git 브랜치)에서 파생되는데, 그 값은 투영 **뒤에** 바뀔 수
+    /// 있다. 두 경로가 실측으로 확인됐다(사용자 제보):
+    ///
+    /// 1. **새 워크스페이스** — 관측이 채워지기 전에 투영돼 브랜치가 없는 1줄로 박힌다. 곧 관측이 도착해 렌더는
+    ///    3줄을 그리지만 `Row.card.lines`는 1로 남는다.
+    /// 2. **Term 전환**(터미널 ↔ web 패널) — web Term은 cwd·브랜치가 없어 카드가 1줄, 터미널은 3줄이다. 같은 Pane
+    ///    안에서 탭을 옮기면 카드 줄 수가 3↔1로 바뀐다.
+    ///
+    /// 둘 다 결과가 같다: 밴드·hit-test가 쓰는 행 높이와 실제로 그려지는 글자가 어긋나, 활성 밴드가 이름줄이 아니라
+    /// 브랜치 줄에 걸린다. 에이전트 행에서 같은 클래스를 고쳤지만(응답 도착 시 재투영) 카드는 파생 경로가 달라
+    /// 여기서 막는다.
+    ///
+    /// **고정 높이(min-height)로 덮지 않는 이유**: 그러면 1줄 카드도 3줄 자리를 차지해 목록이 그만큼 길어지고,
+    /// "카드 높이는 내용에 따라 다르다"는 이 기능의 전제(docs/sidebar-agent-list.md §3)와 정면으로 충돌한다.
+    /// 어긋남의 원인은 높이가 변하는 것이 아니라 **변한 뒤 다시 투영하지 않는 것**이다.
+    ///
+    /// `sidebarCardLines`가 줄 수의 단일 출처이므로 그 값과 박힌 값을 그대로 대조한다. 값이 실제로 달라졌을 때만
+    /// 재투영하며, `termGitBranch`는 cwd가 바뀔 때만 재계산하므로 대부분의 tick에서 이 비교는 필드 읽기 몇 번이다.
+    fn reprojectSidebarIfCardLinesStale(self: *AppSession) void {
+        if (self.sidebar_collapsed or self.chrome_minimal) return; // 그릴 자리가 없으면 볼 이유도 없다
+        var stale = false;
+        for (self.sidebar_rows.items) |row| switch (row) {
+            .card => |c| {
+                if (c.tab >= self.tabs.items.len) continue;
+                if (self.sidebarCardLines(self.tabs.items[c.tab]) != c.lines) {
+                    stale = true;
+                    break;
+                }
+            },
+            else => {},
+        };
+        if (!stale) return;
+        self.rebuildSidebar() catch return;
+        self.metal_dirty = true;
     }
 
     /// 어느 Term이든 에이전트가 돌고 있는가 — 활동 시각 재렌더 게이트. 전-Term 순회지만 필드 읽기뿐이라 20초에
@@ -24399,6 +24469,7 @@ pub const AppSession = struct {
         self.pollAgentKinds(); // 포그라운드 프로세스(claude/codex) polling — throttled, 각 Term agent_kind 갱신
         if (ft_on) ft_pre = std.Io.Clock.awake.now(self.io).nanoseconds; // pre(housekeeping) 끝 = titles 시작
         self.syncAutoTitles(); // 라벨용 자동 제목 캐시 갱신(core_mutex 하 owned 복사 — termLabel use-after-free 회피)
+        self.reprojectSidebarIfCardLinesStale(); // 관측·활성 Term 변화로 카드 줄 수가 바뀌었으면 재투영(아래 주석)
         if (ft_on) ft_titles = std.Io.Clock.awake.now(self.io).nanoseconds; // titles(syncAutoTitles=전체 코어 lock) 끝
         // 모든 탭의 모든 panel의 모든 Term PTY를 drain한다 — 백그라운드 탭/panel/탭(Term)도 출력을 받게
         // (routing은 surface_id로 각 surface에 가고, frame은 아래에서 활성 탭만 빌드한다). summary는 보고용.
@@ -25636,6 +25707,23 @@ pub const AppSession = struct {
     /// 호버 슬롯 하이라이트 배경색(0xAARRGGBB) — 사이드바 배경(+24)과 활성(+48)의 중간으로 파생한다.
     /// 별도 테마 필드 없이 두 resolved 색의 채널 평균을 써서, 사용자가 사이드바 색을 커스텀해도 호버가
     /// 그 사이 톤을 따라간다(활성보다 약하고 배경보다 또렷한 호버 피드백).
+    /// 목록 행(에이전트 행·토글) 호버 배경 — **활성 밴드 위에 겹쳐도 구분되도록** 활성색을 배경 반대 방향으로 한
+    /// 단계 더 민다. 배경↔활성이 이루는 방향을 그대로 연장하므로 사용자가 사이드바 색을 바꿔도 관계가 유지된다
+    /// (호버가 활성보다 한 톤 밝다). 채널 포화는 클램프한다.
+    fn sidebarRowHoverBg(self: *const AppSession) u32 {
+        const bg = self.appearance.theme.sidebar_background;
+        const ac = self.appearance.theme.sidebar_active;
+        const step = struct {
+            fn f(b: u8, a: u8) u32 {
+                const bi: i32 = @intCast(b);
+                const ai: i32 = @intCast(a);
+                const v = ai + @divTrunc(ai - bi, 1); // 배경→활성 델타만큼 한 번 더
+                return @intCast(std.math.clamp(v, 0, 255));
+            }
+        }.f;
+        return 0xFF00_0000 | (step(bg.r, ac.r) << 16) | (step(bg.g, ac.g) << 8) | step(bg.b, ac.b);
+    }
+
     fn sidebarHoverBg(self: *const AppSession) u32 {
         const a = self.appearance.theme.sidebar_background;
         const b = self.appearance.theme.sidebar_active;
@@ -26986,6 +27074,7 @@ pub const AppSession = struct {
                 var color = switch (q.fill_role) {
                     .tab_active_bg => self.sidebarActiveBg(),
                     .drop_zone => packOpaqueRgb(self.buildChromeTokens().palette.get(.drop_zone)), // pane 드롭 타겟(rich=밝게)
+                    .row_hover_bg => self.sidebarRowHoverBg(), // 활성 밴드 위에서도 보이도록 활성보다 한 단계 밝게
                     else => self.sidebarHoverBg(),
                 };
                 // 이 슬롯 탭에 배경 tint가 있으면 밴드 색에 섞는다 — tui 활성/호버 슬롯은 불투명 밴드(셀)가 tint quad를
@@ -36525,7 +36614,7 @@ test "사이드바 에이전트 목록: 행 클릭이 워크스페이스·Pane·
     try std.testing.expectEqual(target_term, tab.panes.items[target_pane].active_term);
 }
 
-test "사이드바 에이전트 목록: Term 전수 나열·1개면 토글 없음·2개면 토글" {
+test "사이드바 에이전트 목록: Term 전수 나열·개수와 무관하게 접기 토글" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const a = std.testing.allocator;
     const session = try initSmokeSessionSized(a);
@@ -36539,14 +36628,23 @@ test "사이드바 에이전트 목록: Term 전수 나열·1개면 토글 없�
     session.rebuildSidebar() catch {};
     try std.testing.expectEqual(@as(usize, 1), session.sidebar_rows.items.len);
 
-    // (1) 에이전트 1개 = 토글 없이 행 하나(§1).
+    // (1) 에이전트가 **1개여도 토글**이 붙는다 — 접기는 개수가 아니라 "이 카드를 얼마나 펼쳐 둘 것인가"의
+    // 문제라서다(사용자 요청으로 초기 정책을 바꿨다). 카드 + 토글 + 행 1.
     const t0 = tab.panes.items[0].terms.items[0];
     t0.agent_kind = .claude;
     t0.agent_state = .idle;
     session.rebuildSidebar() catch {};
+    try std.testing.expectEqual(@as(usize, 3), session.sidebar_rows.items.len);
+    try std.testing.expect(sb.onAgentToggle(session.sidebar_rows.items, 1));
+    try std.testing.expectEqual(@as(u16, 1), session.sidebar_rows.items[1].agent_toggle.count);
+    try std.testing.expect(session.sidebar_rows.items[2] == .agent);
+
+    // 1개짜리도 실제로 접힌다 — 토글만 남는다.
+    tab.agents_collapsed = true;
+    session.rebuildSidebar() catch {};
     try std.testing.expectEqual(@as(usize, 2), session.sidebar_rows.items.len);
-    try std.testing.expect(session.sidebar_rows.items[1] == .agent);
-    try std.testing.expect(!sb.onAgentToggle(session.sidebar_rows.items, 1));
+    try std.testing.expect(session.sidebar_rows.items[1] == .agent_toggle);
+    tab.agents_collapsed = false;
 
     // (2) 같은 pane에 Term을 하나 더 띄워 에이전트 2개 → `N agents` 토글 + 행 2개.
     try session.newTermInActivePane();

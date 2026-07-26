@@ -1,4 +1,5 @@
 const std = @import("std");
+const diag_gate = @import("diag.zig"); // MARU_DEBUG 게이트(진단 로그 단일 출처)
 const builtin = @import("builtin");
 const maru = @import("maru");
 const session_mod = @import("app_session.zig");
@@ -917,6 +918,12 @@ pub export fn maru_macos_app_session_pending_notification(
 // 알림도 읽음 처리한다(배너↔센터 동기화 — 닫힌 surface여도 읽음은 한다).
 pub export fn maru_macos_app_session_activate_surface(session: ?*AppSession, surface_id: u64) u32 {
     const app_session = session orelse return 0;
+    // 진단: web 패널 클릭(webPanelPrimaryDown)이 이 경로로 활성 Term을 바꾼다. 탭 바에서 다른 Term을 고른 **직후**
+    // 여기가 다시 불리면 사용자가 고른 탭이 즉시 되돌아간다 — 그 인과를 실행 중에 확인하려고 남긴다.
+    if (diag_gate.maruDebugEnabled()) std.log.scoped(.websurface).info(
+        "activate_surface id={d}",
+        .{surface_id},
+    );
     const found = app_session.activateSurfaceById(surface_id);
     app_session.markNotificationsReadBySurface(surface_id);
     return if (found) 1 else 0;

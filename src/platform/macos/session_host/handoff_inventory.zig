@@ -223,8 +223,9 @@ pub const terminal_core_groups = [_]Group{
             "reflow_cells",
             "reflow_wrapped",
             "reflow_prompt_marks",
+            "notification_generation",
         },
-        .why = "allocator/debug ownership, dirty/scratch projections, and store-derived indexes are rebuilt and validated",
+        .why = "allocator/debug ownership, dirty/scratch projections, store-derived indexes, and notification admission token are rebuilt; upgrade requires all clients/control queues empty so no old token survives",
     },
     .{
         .disposition = .must_be_empty,
@@ -502,8 +503,8 @@ pub const runtime_entry_groups = [_]Group{
     },
     .{
         .disposition = .reconstructed,
-        .fields = &.{ "controller_sequence", "resize_seq_seen", "runtime" },
-        .why = "connection-local resize sequence resets and the opaque runtime pointer is rebound to the new graph",
+        .fields = &.{ "controller_generation", "controller_sequence", "resize_seq_seen", "runtime" },
+        .why = "v1 upgrade requires every attachment and authority event queue to be empty, so the disconnected controller epoch and connection-local resize sequence reset while the opaque runtime pointer is rebound",
     },
     .{
         .disposition = .must_be_empty,

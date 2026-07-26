@@ -978,11 +978,28 @@ pub const RemoteRuntime = struct {
     /// 터미널의 알림은 host의 `TerminalCore`가 파싱하므로 client가 이걸로 가져와 GUI 알림 funnel에 넣는다(app_session이 surfacing).
     /// 반환 title/body는 caller 소유(Notification.deinit로 회수). 둘 다 빈 값이면(host 대기 없음) null.
     pub fn takeNotification(self: *RemoteRuntime) client_mod.ClientError!?Notification {
+        // Capability 없는 same-major 구 host는 runtime_id-only RPC를 exact subscription으로
+        // authorize하지 못한다. Observer가 shared pending event를 소비하지 않도록 fail-closed한다.
+        if (!self.client.notification_stream_auth_v1) return null;
         var buf: [96]u8 = undefined;
-        const params = std.fmt.bufPrint(&buf, "{{\"runtime_id\":\"{s}\"}}", .{self.runtime_id_hex}) catch return error.OutOfMemory;
+        const params = notificationParams(
+            &buf,
+            self.stream_id,
+        ) catch return error.OutOfMemory;
         const resp = try self.callOrdered("runtime.notification", params);
         defer self.allocator.free(resp);
         return self.decodeNotificationResponse(resp);
+    }
+
+    fn notificationParams(
+        buf: []u8,
+        stream_id: u64,
+    ) error{NoSpaceLeft}![]u8 {
+        return std.fmt.bufPrint(
+            buf,
+            "{{\"stream_id\":{d}}}",
+            .{stream_id},
+        );
     }
 
     /// `runtime.notification`의 success envelope는 항상 문자열 `title`·`body` 두 필드다. 알림이 없어도 host가 둘을 빈
@@ -2747,6 +2764,14 @@ test "remote runtime: notification success schema는 title과 body만 정확히 
         try testing.expectError(error.ProtocolError, bad_rt.decodeNotificationResponse(response));
         try testing.expect(bad_client.unusable);
     }
+}
+
+test "remote runtime: notification selector follows negotiated stream auth capability" {
+    var buf: [96]u8 = undefined;
+    try testing.expectEqualStrings(
+        "{\"stream_id\":7}",
+        try RemoteRuntime.notificationParams(&buf, 7),
+    );
 }
 
 test "remote runtime: notification decode는 모든 할당 실패 지점에서 소유 메모리를 회수한다" {

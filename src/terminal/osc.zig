@@ -171,13 +171,21 @@ fn looksLikeConemu9(s: []const u8) bool {
 
 /// 알림 title/body를 pending에 둔다(소유 버퍼에 복사). 할당 실패면 조용히 폐기(알림은 best-effort).
 fn setNotification(self: *TerminalCore, title: []const u8, notify_body: []const u8) void {
-    self.notification_title.clearRetainingCapacity();
-    self.notification_body.clearRetainingCapacity();
-    self.notification_title.appendSlice(self.allocator, title) catch return;
-    self.notification_body.appendSlice(self.allocator, notify_body) catch {
-        self.notification_title.clearRetainingCapacity();
-        return;
-    };
+    const next_generation = std.math.add(
+        u64,
+        self.notification_generation,
+        1,
+    ) catch return;
+    var next_title: std.ArrayListUnmanaged(u8) = .empty;
+    defer next_title.deinit(self.allocator);
+    next_title.appendSlice(self.allocator, title) catch return;
+    var next_body: std.ArrayListUnmanaged(u8) = .empty;
+    defer next_body.deinit(self.allocator);
+    next_body.appendSlice(self.allocator, notify_body) catch return;
+
+    std.mem.swap(std.ArrayListUnmanaged(u8), &self.notification_title, &next_title);
+    std.mem.swap(std.ArrayListUnmanaged(u8), &self.notification_body, &next_body);
+    self.notification_generation = next_generation;
     self.notification_pending = true;
 }
 

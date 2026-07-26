@@ -65,6 +65,7 @@ pub const Options = struct {
     admin_admission: ?*server.AdminAdmission = null,
     upgrade_preflight: ?OwnerUpgradePreflight = null,
     pressure_reclaim: ?OwnerPressureReclaim = null,
+    controller_transition: ?OwnerControllerTransition = null,
     now_ns: u64 = 0,
 };
 
@@ -79,6 +80,17 @@ pub const OwnerPressureReclaim = struct {
         ctx: *anyopaque,
         requester: slot_mod.ConnectionKey,
         required_bytes: usize,
+    ) bool,
+};
+
+pub const OwnerControllerTransition = struct {
+    ctx: *anyopaque,
+    /// Consumes every frame and the owning prepared token in `transition` on both success and
+    /// failure. Caller must not discard or reuse any field after apply returns.
+    apply: *const fn (
+        ctx: *anyopaque,
+        requester: *Client,
+        transition: server.Action.ControllerTransitionRequested,
     ) bool,
 };
 
@@ -118,6 +130,7 @@ pub const Client = struct {
     admin_request_deadline_at_ns: ?u64 = null,
     upgrade_preflight: ?OwnerUpgradePreflight = null,
     pressure_reclaim: ?OwnerPressureReclaim = null,
+    controller_transition: ?OwnerControllerTransition = null,
     sync_fail_once: bool = false,
     control_admission_fail_once: bool = false,
     producer_streams: []u64 = &.{},
@@ -163,6 +176,7 @@ pub const Client = struct {
             .last_activity_ns = options.now_ns,
             .upgrade_preflight = options.upgrade_preflight,
             .pressure_reclaim = options.pressure_reclaim,
+            .controller_transition = options.controller_transition,
         };
         self.connection.runtime_ops = options.runtime_ops;
         self.connection.upgrade_ops = options.upgrade_ops;
@@ -845,6 +859,32 @@ pub const Client = struct {
                     return error.OutOfMemory;
                 };
                 prepared.output.commit(&self.connection);
+            },
+            .prepared_notification => |prepared| {
+                self.adoptControl(prepared.reply) catch return error.OutOfMemory;
+                const ops = self.connection.runtime_ops orelse
+                    return self.beginClose(.socket_error);
+                _ = ops.notification_commit(
+                    ops.ctx,
+                    prepared.runtime_id,
+                    prepared.generation,
+                );
+            },
+            .controller_transition_requested => |transition_value| {
+                var transition = transition_value;
+                const owner = self.controller_transition orelse {
+                    self.allocator.free(transition.success_reply);
+                    self.allocator.free(transition.stale_reply);
+                    self.allocator.free(transition.exhausted_reply);
+                    if (transition.revocation) |revocation|
+                        self.allocator.free(revocation.frame);
+                    self.connection.discardPreparedControllerTransition(
+                        &transition.prepared,
+                    );
+                    return self.beginClose(.resource_exhausted);
+                };
+                if (!owner.apply(owner.ctx, self, transition))
+                    return self.beginClose(.resource_exhausted);
             },
         }
     }
@@ -1582,7 +1622,7 @@ test "product attach admission failure and EOF release retained projection autho
             fds[1],
             .request,
             2,
-            "{\"method\":\"runtime.attach\",\"params\":{\"runtime_id\":\"aa\",\"mode\":\"observer\"}}",
+            "{\"method\":\"runtime.attach\",\"params\":{\"runtime_id\":\"aa\",\"mode\":\"controller\"}}",
         );
         client.readReady(2);
         try testing.expect(client.isClosing());
@@ -1593,6 +1633,10 @@ test "product attach admission failure and EOF release retained projection autho
         try testing.expectEqual(@as(usize, 0), reactor.budget.resident_bytes);
         try testing.expectEqual(@as(usize, 0), subscriptions.count());
         try testing.expectEqual(@as(usize, 0), registry_value.attachmentCount());
+        try testing.expectEqual(
+            @as(u64, 0),
+            registry_value.get(0xAA).?.controller_generation,
+        );
     }
 
     {
@@ -1729,6 +1773,65 @@ test "product attach admission failure and EOF release retained projection autho
         try testing.expectEqual(@as(usize, 0), subscriptions.count());
         try testing.expectEqual(@as(usize, 0), registry_value.attachmentCount());
     }
+}
+
+test "notification consume commits only after response control admission" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const testing = std.testing;
+    var registry_value = registry.TerminalRuntimeRegistry.init(testing.allocator);
+    defer registry_value.deinit();
+    _ = try registry_value.register(0xAA, 80, 24);
+    var subscriptions = subscription_identity.Table.init(testing.allocator);
+    defer subscriptions.deinit();
+    const reactor = try slot_mod.ReactorCore.create(testing.allocator);
+    defer reactor.destroy();
+    var runtime_ops: server.FakeRuntimeOps = .{};
+    var fds: [2]c_int = undefined;
+    try testing.expectEqual(
+        @as(c_int, 0),
+        c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds),
+    );
+    defer _ = c.close(fds[1]);
+    const client = try Client.create(
+        testing.allocator,
+        fds[0],
+        reactor,
+        71,
+        &registry_value,
+        &subscriptions,
+        .{ .runtime_ops = runtime_ops.ops() },
+    );
+    defer client.destroy();
+    try sendTestFrame(
+        fds[1],
+        .hello,
+        1,
+        "{\"protocol_min\":2,\"protocol_max\":2,\"client_kind\":\"gui\"}",
+    );
+    client.readReady(1);
+    client.writeReady(2);
+    _ = drainNonblocking(fds[1]);
+    try sendTestFrame(
+        fds[1],
+        .request,
+        2,
+        "{\"method\":\"runtime.attach\",\"params\":{\"runtime_id\":\"aa\",\"mode\":\"controller\"}}",
+    );
+    client.readReady(3);
+    client.writeReady(4);
+    _ = drainNonblocking(fds[1]);
+
+    client.control_admission_fail_once = true;
+    try sendTestFrame(
+        fds[1],
+        .request,
+        3,
+        "{\"method\":\"runtime.notification\",\"params\":{\"stream_id\":1}}",
+    );
+    client.readReady(5);
+    try testing.expectEqual(@as(usize, 1), runtime_ops.notification_calls);
+    try testing.expectEqual(@as(usize, 0), runtime_ops.notification_commit_calls);
+    try testing.expect(client.isClosing());
 }
 
 test "completed chunk gives the next queued frame a fresh absolute write deadline" {

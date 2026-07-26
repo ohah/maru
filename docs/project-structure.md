@@ -57,11 +57,16 @@ src/
                         core_command_wire.zig(host-authoritative focus/config/prompt command의 strict bounded JSON DTO·codec,
                         legacy scroll capability 분기 — **구현됨, P3-e4c-3**),
                         registry.zig(`TerminalRuntimeRegistry` + controller/observer capability state machine — runtime_id 소유표·
-                        attach/detach/takeover·resize sequence/generation·client 0 크기 유지, 실 runtime handle은 opaque 슬롯 —
-                        **구현됨, P3-c**),
+                        attach/detach·prepared takeover/release·resize sequence/generation·client 0 크기 유지, 실 runtime handle은
+                        opaque 슬롯이고 cross-fd routing/queue는 모름 — **구현됨, P3-c + P5b3 core**),
                         server.zig(connection dispatch state machine — hello 협상 + command dispatch(host.info·runtime.list·get read-only;
-                        runtime.spawn/terminate는 `RuntimeOps` 중립 vtable로 위임, host만 설정·read-only는 unauthorized)·pong echo·
-                        typed error, 순수 로직 — **구현됨, P3-d1 + P3-e2a**),
+                        runtime.spawn/terminate는 `RuntimeOps` 중립 vtable로 위임, controller.status/takeover/release는 side-effect-free
+                        typed intent와 control frame만 생성, host만 설정·read-only는 unauthorized)·pong echo·typed error,
+                        순수 로직 — **구현됨, P3-d1 + P3-e2a + P5b3 wire**),
+                        subscription_identity.zig(connection-local stream↔daemon-global SubscriptionId와 stable ConnectionKey
+                        양방향 권위), connection_slot.zig(fixed queue/ledger와 최대 2-slot authority control batch atomic admission),
+                        connection_turn.zig(fd readiness turn과 owner callback 경계), poll_owner.zig(cross-client controller
+                        revocation routing·control admission 뒤 registry commit 및 upgrade drain SSOT — **구현됨, P5b1~P5b3**),
                         socket_server.zig(실 unix socket bind(0700 dir·0600 socket·symlink 방어)·accept·peer-cred same-UID·read/write
                         I/O loop, self-contained macOS adapter(maru 무관)·process smoke — **구현됨, P3-d2a**),
                         discovery.zig(§10 socket 발견 state machine·경로 — connect-first·조회 auto-start 금지·spawn 의도 start lock

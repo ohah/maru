@@ -29,6 +29,27 @@ pub const marker_name = ".maru-statusline-installed";
 /// 신원을 바로 찾는다 — 소켓이나 포트 없이 파일 하나로 끝난다.
 pub const session_dir_rel = "agent-sessions";
 
+/// claude 설정 디렉터리 규칙 — `$CLAUDE_CONFIG_DIR`이 있으면 그것, 없으면 `<home>/.claude`(claude 자신의 규칙).
+/// env 조회는 platform이 하고 여기서는 값만 받아 규칙을 적용한다. 결과는 `buf` 소유이고, `home`도 없으면 null.
+///
+/// **훅 설치와 트랜스크립트 읽기가 이 한 판정을 공유해야 한다** — 한쪽만 `<home>/.claude`로 고정하면
+/// `CLAUDE_CONFIG_DIR`을 쓰는 사용자에게 훅은 엉뚱한 곳에 설치되고 대화 줄은 영원히 빈다.
+pub fn configDir(buf: []u8, config_dir_env: ?[]const u8, home: ?[]const u8) ?[]const u8 {
+    if (config_dir_env) |dir| {
+        if (dir.len > 0) return std.fmt.bufPrint(buf, "{s}", .{dir}) catch null;
+    }
+    return std.fmt.bufPrint(buf, "{s}/.claude", .{home orelse return null}) catch null;
+}
+
+test "configDir는 CLAUDE_CONFIG_DIR 우선, 없으면 home 기준" {
+    var buf: [512]u8 = undefined;
+    try testing.expectEqualStrings("/opt/claude", configDir(&buf, "/opt/claude", "/Users/a").?);
+    try testing.expectEqualStrings("/Users/a/.claude", configDir(&buf, null, "/Users/a").?);
+    // 빈 값은 "설정하지 않음"과 같게 본다 — 빈 경로에 설치하면 루트에 파일을 만든다.
+    try testing.expectEqualStrings("/Users/a/.claude", configDir(&buf, "", "/Users/a").?);
+    try testing.expectEqual(@as(?[]const u8, null), configDir(&buf, null, null));
+}
+
 /// 스크립트 본문. **claude가 stdin으로 주는 JSON**에서 `session_id`를 뽑아 per-pane 파일에 적고, stdout은 비운다.
 ///
 /// 규율 셋:

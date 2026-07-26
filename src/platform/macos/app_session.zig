@@ -1833,6 +1833,10 @@ var app_keep_alive_policy_initialized: bool = false;
 // Zig test runner 안에서 full AppSession fixture가 모두 내려가면 다음 test의 첫 세션이 새 앱 launch처럼 config를
 // 다시 채택하게 한다. 같은 test의 두 번째 Window는 production resolver를 그대로 탄다.
 var test_live_app_sessions: usize = 0;
+// test에서 `init`이 파싱할 config 텍스트. test는 개발자의 실제 config 파일을 읽지 않으므로(비결정적) 기본은 빈
+// 문자열이고, **config 값에 따라 갈리는 제품 경로**(예: 상태줄 훅 설치 여부)를 검사하는 test만 이 값을 세워
+// 결정적으로 주입한다. 세운 test는 defer로 되돌린다 — process-global이다.
+var test_config_text: []const u8 = "";
 // Quit 확인을 수락한 순간의 전역 정책 snapshot. 이후 여러 NSWindow/quick teardown이 같은 값을 본다.
 var app_quit_keep_alive: bool = false;
 // P4 "Quit and End All Sessions"(§6 종료 매트릭스 row 3). 종료 확인의 **alternate 버튼**("종료 및 세션 끝내기")을 누르면
@@ -2912,7 +2916,7 @@ pub const AppSession = struct {
         // (파싱 규칙은 loader 단위 테스트가 본다). loaded_config는 세션 동안 보관(family 슬라이스 빌림).
         // config_loaded 가드를 세워 이후 init 실패가 이 arena를 이중 해제하지 않게 한다.
         self.loaded_config = if (builtin.is_test)
-            try config_mod.parseConfig(allocator, "")
+            try config_mod.parseConfig(allocator, test_config_text)
         else
             try config_mod.loadConfigDefault(io, allocator);
         self.config_loaded = true;
@@ -24013,6 +24017,17 @@ pub const AppSession = struct {
         if (executable) file.setPermissions(io, @enumFromInt(0o755)) catch {};
     }
 
+    /// claude 설정 디렉터리(존재 여부는 호출부가 판정). 규칙 자체는 OS 중립이라 session 레이어가 갖고, 여기서는
+    /// env 조회만 해서 넘긴다. 결과는 `buf` 소유.
+    fn claudeConfigDir(buf: []u8) ?[]const u8 {
+        const env = struct {
+            fn get(name: [*:0]const u8) ?[]const u8 {
+                return if (std.c.getenv(name)) |value| std.mem.span(value) else null;
+            }
+        };
+        return maru.session.agent_statusline.configDir(buf, env.get("CLAUDE_CONFIG_DIR"), env.get("HOME"));
+    }
+
     /// `settings.json`에서 `statusLine.command`를 읽는다(없거나 파싱 실패면 null).
     fn readStatusLineCommand(a: std.mem.Allocator, io: std.Io, path: []const u8) ?[]const u8 {
         const raw = readFileAlloc(io, a, path) orelse return null;
@@ -24109,14 +24124,18 @@ pub const AppSession = struct {
     fn reconcileAgentStatusline(self: *AppSession) void {
         if (!is_macos) return;
         const sl = maru.session.agent_statusline;
-        const home_z = std.c.getenv("HOME") orelse return;
-        const home = std.mem.span(home_z);
 
         var arena_state = std.heap.ArenaAllocator.init(self.allocator);
         defer arena_state.deinit();
         const a = arena_state.allocator();
 
-        const claude_dir = std.fmt.allocPrint(a, "{s}/.claude", .{home}) catch return;
+        // **claude가 설치돼 있을 때만 손댄다.** 설정 디렉터리는 claude 자신의 규칙대로 `CLAUDE_CONFIG_DIR`이
+        // 우선이고 없으면 `$HOME/.claude`다(과거 hook cleanup과 같은 판정). 그 디렉터리가 없으면 claude를 쓰지
+        // 않는 사람이므로 **디렉터리를 만들지 않고 그대로 물러난다** — 남의 홈에 우리 흔적을 남길 이유가 없다.
+        var claude_dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const claude_dir = claudeConfigDir(&claude_dir_buf) orelse return;
+        const dir_handle = std.Io.Dir.openDirAbsolute(self.io, claude_dir, .{}) catch return;
+        dir_handle.close(self.io);
         const script_path = std.fmt.allocPrint(a, "{s}/{s}", .{ claude_dir, sl.script_name }) catch return;
         const settings_path = std.fmt.allocPrint(a, "{s}/settings.json", .{claude_dir}) catch return;
 
@@ -24193,12 +24212,12 @@ pub const AppSession = struct {
         // 새 터미널에 직전 세션의 대화를 붙이고(사용자 제보) 같은 cwd의 두 에이전트가 서로의 대화를 물게 했다.
         // 추측으로 틀린 대화를 보여주느니 비우는 편이 낫다는 계약 1과도 어긋났다 — 그래서 폴백을 없앴다(§7.2).
         if (cache.identity_len == 0) return false;
-        const home_z = std.c.getenv("HOME") orelse return false;
-        const home = std.mem.span(home_z);
+        var claude_dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const claude_dir = claudeConfigDir(&claude_dir_buf) orelse return false;
         var slug_buf: [1024]u8 = undefined;
         const slug = tr.claudeDirName(cwd, &slug_buf) orelse return false;
         var path_buf: [2048]u8 = undefined;
-        const dir_path = std.fmt.bufPrint(&path_buf, "{s}/.claude/projects/{s}", .{ home, slug }) catch return false;
+        const dir_path = std.fmt.bufPrint(&path_buf, "{s}/projects/{s}", .{ claude_dir, slug }) catch return false;
         const dir = std.Io.Dir.openDirAbsolute(self.io, dir_path, .{}) catch return false;
         defer dir.close(self.io);
 
@@ -29596,31 +29615,58 @@ fn expectProviderFixtureEntries(io: std.Io, base: []const u8, expected: []const 
 extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
 extern "c" fn unsetenv(name: [*:0]const u8) c_int;
 
-test "provider files remain unchanged across AppSession.init" {
-    if (builtin.os.tag != .macos or std.c.getenv("MARU_TEST_PROVIDER_NO_MUTATION") == null) return error.SkipZigTest;
-    const io = std.Io.Threaded.global_single_threaded.io();
-    const a = std.testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const env_names = [_][:0]const u8{ "HOME", "CLAUDE_CONFIG_DIR", "CODEX_HOME", "XDG_CONFIG_HOME", "MARU_CONFIG" };
-    var env_before: [env_names.len]?[:0]u8 = .{null} ** env_names.len;
-    defer {
-        for (env_names, env_before) |name, old| {
+/// `sidebar.agent-transcript-hook`을 끈 config 파일 내용. 이 계약의 "옵션이 꺼지면 provider 파일을 전혀 건드리지
+/// 않는다"를 검사하는 fixture다(docs/agent-session.md «사이드바 대화 표시와의 경계»).
+const hook_off_config = "sidebar.agent-transcript-hook = false\n";
+/// 같은 계약의 반대편 — 켠 경로에서 `statusLine` 키 외에는 손대지 않는지 검사하는 fixture.
+const hook_on_config = "sidebar.agent-transcript-hook = true\n";
+
+/// provider fixture 테스트가 실제 사용자 홈·설정·캐시를 건드리지 않도록 관련 env를 저장했다가 되돌린다. 이 테스트들은
+/// **실 파일시스템에 쓰는** 경로를 검증하므로 tmp로 밀어 넣는 것이 필수다.
+const ProviderEnvGuard = struct {
+    const names = [_][:0]const u8{ "HOME", "CLAUDE_CONFIG_DIR", "CODEX_HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "MARU_CONFIG" };
+
+    a: std.mem.Allocator,
+    saved: [names.len]?[:0]u8 = .{null} ** names.len,
+
+    fn capture(a: std.mem.Allocator) !ProviderEnvGuard {
+        var self = ProviderEnvGuard{ .a = a };
+        for (names, &self.saved) |name, *slot| {
+            if (std.c.getenv(name.ptr)) |raw| slot.* = try a.dupeZ(u8, std.mem.span(raw));
+        }
+        return self;
+    }
+
+    fn restore(self: *ProviderEnvGuard) void {
+        for (names, self.saved) |name, old| {
             if (old) |value| {
                 _ = setenv(name.ptr, value.ptr, 1);
-                a.free(value);
+                self.a.free(value);
             } else {
                 _ = unsetenv(name.ptr);
             }
         }
     }
-    for (env_names, &env_before) |name, *slot| {
-        if (std.c.getenv(name.ptr)) |raw| slot.* = try a.dupeZ(u8, std.mem.span(raw));
-    }
+};
+
+test "provider files remain unchanged across AppSession.init when the statusline hook is off" {
+    if (builtin.os.tag != .macos or std.c.getenv("MARU_TEST_PROVIDER_NO_MUTATION") == null) return error.SkipZigTest;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const a = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var env_guard = try ProviderEnvGuard.capture(a);
+    defer env_guard.restore();
+    // 옵션이 꺼진 제품 경로를 검사한다 — config 파일 파싱 자체는 loader 단위 테스트가 본다.
+    test_config_text = hook_off_config;
+    defer test_config_text = "";
     try tmp.dir.createDirPath(io, "home");
     try tmp.dir.createDirPath(io, "claude");
     try tmp.dir.createDirPath(io, "codex");
     try tmp.dir.createDirPath(io, "xdg/maru/agent-sessions");
+    // 캐시는 우리 소유라 내용을 검사하지 않는다. 미리 만들어 두는 것은 fixture 목록을 결정적으로 만들기 위해서다
+    // (테스트가 실행 환경의 실제 `XDG_CACHE_HOME`을 건드리지 않게 하는 것이 본래 목적이다).
+    try tmp.dir.createDirPath(io, "cache");
 
     const marker_command = "if [ -n \\\"$MARU_AGENT_MAPPING_ID\\\" ]; then key=\\\"$MARU_AGENT_MAPPING_ID\\\"; else key=\\\"$MARU_PANE_ID\\\"; fi; cat > \\\"/tmp/agent-sessions/$key\\\" # MARU_AGENT_MAP_HOOK_V2";
     const provider_config = "{\"hooks\":{\"Stop\":[{\"hooks\":[{\"command\":\"" ++ marker_command ++ "\"}]}]}}";
@@ -29641,12 +29687,17 @@ test "provider files remain unchanged across AppSession.init" {
     defer a.free(codex);
     const xdg = try std.fmt.allocPrintSentinel(a, "{s}/xdg", .{root}, 0);
     defer a.free(xdg);
+    // config 파일 자체는 test에서 읽지 않지만(위 `test_config_text`), 경로는 tmp 안으로 박아 config **쓰기** 경로가
+    // 개발자의 실제 파일로 새지 않게 한다.
     const config = try std.fmt.allocPrintSentinel(a, "{s}/missing-config", .{root}, 0);
     defer a.free(config);
+    const cache = try std.fmt.allocPrintSentinel(a, "{s}/cache", .{root}, 0);
+    defer a.free(cache);
     try std.testing.expectEqual(@as(c_int, 0), setenv("HOME", home.ptr, 1));
     try std.testing.expectEqual(@as(c_int, 0), setenv("CLAUDE_CONFIG_DIR", claude.ptr, 1));
     try std.testing.expectEqual(@as(c_int, 0), setenv("CODEX_HOME", codex.ptr, 1));
     try std.testing.expectEqual(@as(c_int, 0), setenv("XDG_CONFIG_HOME", xdg.ptr, 1));
+    try std.testing.expectEqual(@as(c_int, 0), setenv("XDG_CACHE_HOME", cache.ptr, 1));
     try std.testing.expectEqual(@as(c_int, 0), setenv("MARU_CONFIG", config.ptr, 1));
 
     var session: AppSession = undefined;
@@ -29676,6 +29727,7 @@ test "provider files remain unchanged across AppSession.init" {
         .{ .name = "claude", .kind = .directory },
         .{ .name = "codex", .kind = .directory },
         .{ .name = "xdg", .kind = .directory },
+        .{ .name = "cache", .kind = .directory },
     });
     try expectProviderFixtureEntries(io, home, &.{});
     try expectProviderFixtureEntries(io, claude, &.{.{ .name = "settings.json", .kind = .file }});
@@ -29702,13 +29754,12 @@ test "provider files remain unchanged across AppSession.init" {
     try tmp.dir.writeFile(io, .{ .sub_path = "fallback-home/.config/maru/agent-sessions/77", .data = mapping_77 });
     const fallback_home = try std.fmt.allocPrintSentinel(a, "{s}/fallback-home", .{root}, 0);
     defer a.free(fallback_home);
-    const fallback_config = try std.fmt.allocPrintSentinel(a, "{s}/fallback-home/missing-config", .{root}, 0);
-    defer a.free(fallback_config);
     try std.testing.expectEqual(@as(c_int, 0), setenv("HOME", fallback_home.ptr, 1));
     try std.testing.expectEqual(@as(c_int, 0), unsetenv("CLAUDE_CONFIG_DIR"));
     try std.testing.expectEqual(@as(c_int, 0), unsetenv("CODEX_HOME"));
     try std.testing.expectEqual(@as(c_int, 0), unsetenv("XDG_CONFIG_HOME"));
-    try std.testing.expectEqual(@as(c_int, 0), setenv("MARU_CONFIG", fallback_config.ptr, 1));
+    // config는 같은 hook-off fixture를 그대로 쓴다 — 검사 대상은 provider 경로 계산이지 config 위치가 아니다.
+    try std.testing.expectEqual(@as(c_int, 0), setenv("MARU_CONFIG", config.ptr, 1));
 
     var fallback_session: AppSession = undefined;
     try fallback_session.init(io, a, .{
@@ -29755,6 +29806,126 @@ test "provider files remain unchanged across AppSession.init" {
     try std.testing.expectEqualStrings(provider_config, fallback_codex_after);
     try std.testing.expectEqualStrings(mapping_42, fallback_mapping_42_after);
     try std.testing.expectEqualStrings(mapping_77, fallback_mapping_77_after);
+}
+
+test "agent statusline hook edits only the statusLine key and preserves the wrapped user command" {
+    if (builtin.os.tag != .macos or std.c.getenv("MARU_TEST_PROVIDER_NO_MUTATION") == null) return error.SkipZigTest;
+    const sl = maru.session.agent_statusline;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const a = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var env_guard = try ProviderEnvGuard.capture(a);
+    defer env_guard.restore();
+    test_config_text = hook_on_config;
+    defer test_config_text = "";
+    try tmp.dir.createDirPath(io, "home");
+    try tmp.dir.createDirPath(io, "claude");
+    try tmp.dir.createDirPath(io, "codex");
+    try tmp.dir.createDirPath(io, "xdg/maru/agent-sessions");
+    try tmp.dir.createDirPath(io, "cache");
+
+    // 사용자 파일에는 우리가 절대 건드리면 안 되는 것이 셋 있다 — 다른 최상위 키(`model`), provider **hook event**,
+    // 그리고 이미 쓰던 상태줄 명령. 셋 다 fixture에 넣고 설치 뒤에 그대로인지 본다.
+    const user_command = "bunx ccusage statusline --theme dark";
+    const user_hook = "printf ok # user hook";
+    const settings_before = "{\"model\":\"opus\",\"hooks\":{\"Stop\":[{\"hooks\":[{\"command\":\"" ++ user_hook ++ "\"}]}]},\"statusLine\":{\"type\":\"command\",\"command\":\"" ++ user_command ++ "\"}}";
+    const codex_before = "{\"hooks\":{\"Stop\":[]}}";
+    const mapping_42 = "{\"hook_event_name\":\"Stop\",\"session_id\":\"legacy\"}";
+    try tmp.dir.writeFile(io, .{ .sub_path = "claude/settings.json", .data = settings_before });
+    try tmp.dir.writeFile(io, .{ .sub_path = "codex/hooks.json", .data = codex_before });
+    try tmp.dir.writeFile(io, .{ .sub_path = "xdg/maru/agent-sessions/42", .data = mapping_42 });
+
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
+    const home = try std.fmt.allocPrintSentinel(a, "{s}/home", .{root}, 0);
+    defer a.free(home);
+    const claude = try std.fmt.allocPrintSentinel(a, "{s}/claude", .{root}, 0);
+    defer a.free(claude);
+    const codex = try std.fmt.allocPrintSentinel(a, "{s}/codex", .{root}, 0);
+    defer a.free(codex);
+    const xdg = try std.fmt.allocPrintSentinel(a, "{s}/xdg", .{root}, 0);
+    defer a.free(xdg);
+    const cache = try std.fmt.allocPrintSentinel(a, "{s}/cache", .{root}, 0);
+    defer a.free(cache);
+    const config = try std.fmt.allocPrintSentinel(a, "{s}/missing-config", .{root}, 0);
+    defer a.free(config);
+    try std.testing.expectEqual(@as(c_int, 0), setenv("HOME", home.ptr, 1));
+    try std.testing.expectEqual(@as(c_int, 0), setenv("CLAUDE_CONFIG_DIR", claude.ptr, 1));
+    try std.testing.expectEqual(@as(c_int, 0), setenv("CODEX_HOME", codex.ptr, 1));
+    try std.testing.expectEqual(@as(c_int, 0), setenv("XDG_CONFIG_HOME", xdg.ptr, 1));
+    try std.testing.expectEqual(@as(c_int, 0), setenv("XDG_CACHE_HOME", cache.ptr, 1));
+    try std.testing.expectEqual(@as(c_int, 0), setenv("MARU_CONFIG", config.ptr, 1));
+
+    var session: AppSession = undefined;
+    try session.init(io, a, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    session.deinit();
+
+    // 늘어난 파일은 이름으로 우리 것임이 드러나는 스크립트 하나뿐이다. codex와 옛 mapping은 이 경로와 무관하다.
+    try expectProviderFixtureEntries(io, claude, &.{
+        .{ .name = "settings.json", .kind = .file },
+        .{ .name = sl.script_name, .kind = .file },
+    });
+    try expectProviderFixtureEntries(io, codex, &.{.{ .name = "hooks.json", .kind = .file }});
+    const codex_after = try tmp.dir.readFileAlloc(io, "codex/hooks.json", a, .limited(4096));
+    defer a.free(codex_after);
+    try std.testing.expectEqualStrings(codex_before, codex_after);
+    const mapping_after = try tmp.dir.readFileAlloc(io, "xdg/maru/agent-sessions/42", a, .limited(4096));
+    defer a.free(mapping_after);
+    try std.testing.expectEqualStrings(mapping_42, mapping_after);
+
+    {
+        const settings_after = try tmp.dir.readFileAlloc(io, "claude/settings.json", a, .limited(16 * 1024));
+        defer a.free(settings_after);
+        var parsed = try std.json.parseFromSlice(std.json.Value, a, settings_after, .{});
+        defer parsed.deinit();
+        const obj = parsed.value.object;
+        // 키가 늘지도 줄지도 않았고(3개 그대로), 우리 것이 아닌 값은 그대로다 — 특히 사용자 hook event.
+        try std.testing.expectEqual(@as(usize, 3), obj.count());
+        try std.testing.expectEqualStrings("opus", obj.get("model").?.string);
+        try std.testing.expectEqualStrings(user_hook, obj.get("hooks").?.object
+            .get("Stop").?.array.items[0].object
+            .get("hooks").?.array.items[0].object
+            .get("command").?.string);
+        try std.testing.expect(sl.commandIsOurs(obj.get("statusLine").?.object.get("command").?.string));
+    }
+
+    // 사용자 상태줄은 지워진 게 아니라 우리 스크립트 안에 감싸여 있다 — 그게 복원의 근거이기도 하다.
+    const script_after = try tmp.dir.readFileAlloc(io, "claude/" ++ sl.script_name, a, .limited(16 * 1024));
+    defer a.free(script_after);
+    const wrapped = sl.extractWrappedCommand(script_after) orelse {
+        std.debug.print("설치한 스크립트에 사용자 상태줄이 감싸여 있지 않다:\n{s}\n", .{script_after});
+        return error.WrappedUserCommandMissing;
+    };
+    try std.testing.expectEqualStrings(user_command, wrapped);
+
+    // 옵션을 끄면 설치 전 상태로 돌아간다 — 원래 명령이 `statusLine`에 복원되고 우리 스크립트는 사라진다.
+    test_config_text = hook_off_config;
+    var off_session: AppSession = undefined;
+    try off_session.init(io, a, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    off_session.deinit();
+
+    try expectProviderFixtureEntries(io, claude, &.{.{ .name = "settings.json", .kind = .file }});
+    const restored = try tmp.dir.readFileAlloc(io, "claude/settings.json", a, .limited(16 * 1024));
+    defer a.free(restored);
+    var restored_parsed = try std.json.parseFromSlice(std.json.Value, a, restored, .{});
+    defer restored_parsed.deinit();
+    const restored_obj = restored_parsed.value.object;
+    try std.testing.expectEqual(@as(usize, 3), restored_obj.count());
+    try std.testing.expectEqualStrings("opus", restored_obj.get("model").?.string);
+    try std.testing.expectEqualStrings(user_command, restored_obj.get("statusLine").?.object.get("command").?.string);
 }
 
 test "macOS app session config rejects unsafe fixed-width ABI input" {

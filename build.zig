@@ -587,7 +587,8 @@ pub fn build(b: *std.Build) void {
     const provider_no_mutation_tests = b.addTest(.{
         .root_module = macos_app_host_abi_tests.root_module,
         .filters = &.{
-            "provider files remain unchanged across AppSession.init",
+            "provider files remain unchanged across AppSession.init when the statusline hook is off",
+            "agent statusline hook edits only the statusLine key and preserves the wrapped user command",
             "legacy provider workspace fields are ignored across multi-window parse apply and write-new",
             "workspace restore ABI preserves multi-window count active and apply",
         },

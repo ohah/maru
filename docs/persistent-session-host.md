@@ -1709,12 +1709,25 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
     pressure는 해당 tracker의 아직 쓰지 않은 full-frame만 purge하고 `snapshot.invalidated` control event를 정확히 한 번
     남긴다. frame prefix가 이미 socket에 쓰였으면 splice하지 않고 connection을 fail-close한다.
     client는 invalidation event를 allocation-free로 식별해 sticky intent를 세우고, frame pump가 응답 없는
-    `stream_ack {action:"resync"}`를 bounded outbound slot에 넣을 때까지 nonblocking 재시도한다. fresh metadata prefix와
+    `stream_ack {action:"resync"}`를 bounded outbound slot에 넣을 때까지 nonblocking 재시도한다. host owner는
+    `awaiting_resync_ack -> resync_pending` 전이를 실제로 수락한 dispatch의 monotonic `now_ns`를 recovery deadline의
+    단일 출처로 삼고, 그 시각부터 **정확히 1초가 지나기 전에는 projector를 호출하지 않는다**. unknown stream 또는 이미
+    수락한 ACK의 **같은 invalidation epoch 내** 중복 frame은 상태도 deadline도 바꾸지 않는다. ACK wire에는 epoch
+    nonce가 없으므로 과거 epoch에서 지연된 ACK가 다음 invalidation의 ACK 대기 중 도착하면 새 intent로 수락될 수 있다.
+    이는 same-UID client의 recovery를 1초 뒤 시작시킬 뿐 권한을 늘리거나 deadline을 우회하지 않으며, cross-epoch replay
+    방지는 v2 wire 범위가 아니다. fresh metadata prefix와
     snapshot의 owned multi-chunk batch는 `enqueueOwnedResyncSnapshot`이 원래 순서대로 전부 admission하거나 전부 rollback한다.
     admission 성공 시 transaction base는 commit하지만 tracker는 `.resync_draining`이며, 마지막 byte가 socket에 쓰여
     resident가 0이 된 뒤에만 `.valid`가 된다. 실패는 1초 bounded backoff 뒤 같은 client intent를 재시도하고 다른
-    subscription의 queue/base/revision은 건드리지 않는다. snapshot을 만들기 전에는 17 MiB worst-case slot/global/chunk
-    headroom을 보수적으로 preflight해 여러 invalidated stream이 admission 불가능한 full snapshot을 반복 할당하지 않는다.
+    subscription의 queue/base/revision은 건드리지 않는다. recoverable projector failure 또는 atomic admission 실패는
+    `resync_pending`을 유지하고 새 invalidation notice나 두 번째 ACK 요구를 만들지 않으며, 실패를 처리한 owner turn의
+    monotonic `now_ns`부터 정확히 1초를 다시 센다. snapshot을 만들기 전에는 17 MiB worst-case slot/global/chunk
+    headroom을 보수적으로 preflight한다. 이 preflight는 encoded batch 17 MiB뿐 아니라 아직 materialize하지 않은
+    prepared base 16 MiB+metadata 256 KiB도 같은 slot/global shared budget에 동시에 더해, 여러 invalidated stream이
+    admission 불가능한 full snapshot을 반복 할당하지 않는다. retryable producer failure는 명시적
+    `TransientSnapshotUnavailable`/`TransientObservationUnavailable`만 허용한다. 제품 projector의 `OutOfMemory`
+    (16 MiB cap 초과 포함), malformed/unknown error와 host-side metadata 직렬화·base 복제·frame encoding allocation
+    failure는 connection 자체의 신뢰 가능한 진행을 보장할 수 없으므로 resource-exhausted fail-close한다.
     initial attach의 response는 control로 먼저 admission하고 뒤 snapshot 전체는 같은 atomic owned/draining 경로를
     사용한다. bootstrap에는 아직 `RemoteRuntime` ACK pump가 없으므로 이 최초 atomic admission이 실패하면 connection을
     fail-close해 controller lease를 회수하고 attach 전체를 실패시킨다.
@@ -1872,8 +1885,10 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
     권위를 rollback하고 connection을 fail-close한다. valid delta projector의 OOM/cap 위반도 prepared를
     rollback한 다음 connection을 fail-close한다. 반면 이미 invalidated된 stream의 resync snapshot producer
     실패는 prepared를 rollback하고 `resync_pending`을 유지해 1초 backoff 뒤 재시도한다. 이 경로는 old retained
-    base가 이미 반환돼 반복 실패가 base memory를 pin하지 않는다. 같은 turn에 metadata prefix만 준비됐다면 그
-    prefix의 queue admission/commit은 허용하되 resync intent는 소비하지 않는다. observation barrier의 control
+    base가 이미 반환돼 반복 실패가 base memory를 pin하지 않는다. 같은 turn에 metadata prefix만 준비됐더라도 fresh
+    snapshot이 없으면 atomic recovery batch가 아니므로 prefix와 metadata base/revision을 함께 rollback한다. 반대로
+    metadata-capable client의 fresh observation prefix 준비가 실패해도 snapshot-only recovery를 허용하지 않고 projector
+    호출 전 attempt 전체를 rollback/backoff한다. observation barrier의 control
     admission 실패는 response가 client에 도달하지 않았으므로 metadata base/revision을 rollback하고 shared
     connection을 fail-close한다.
     prepare 동안 old retained와 worst-case prepared를 모두 charge하고, 성공 commit은 prepared의 실제 길이만

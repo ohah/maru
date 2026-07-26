@@ -93,6 +93,7 @@ pub const ScreenPressureCandidate = struct {
 const SubscriptionAdoption = enum {
     admitted,
     deferred_global_pressure,
+    deferred_resync,
     rejected,
 };
 
@@ -588,6 +589,11 @@ pub const Client = struct {
                     slot.deferGlobalPressure(tracker, now_ns) catch
                         return self.beginClose(.socket_error);
                 },
+                .deferred_resync => {
+                    output.rollback(&self.connection);
+                    slot.deferResyncAttempt(tracker, now_ns) catch
+                        return self.beginClose(.socket_error);
+                },
                 .rejected => {
                     output.rollback(&self.connection);
                     if (!self.isClosing())
@@ -638,6 +644,7 @@ pub const Client = struct {
     ) bool {
         switch (self.tryAdoptSubscriptionTurn(stream, frames)) {
             .admitted => return true,
+            .deferred_resync => return false,
             .deferred_global_pressure, .rejected => {
                 if (!self.isClosing()) {
                     const tracker = self.trackers.get(stream) orelse
@@ -693,12 +700,22 @@ pub const Client = struct {
             }
             const start = snapshot_start orelse {
                 for (frames) |owned| self.allocator.free(owned);
-                return .rejected;
+                return .deferred_resync;
             };
             _ = start;
             // Metadata prefix and snapshot chunks share one atomic subscription batch. Keeping
             // their original order avoids a valid->draining transition between the two classes.
-            slot.enqueueOwnedResyncSnapshot(tracker, frames) catch return .rejected;
+            slot.enqueueOwnedResyncSnapshot(tracker, frames) catch |err| switch (err) {
+                error.SlotLimit, error.GlobalLimit, error.ChunkLimit => return .deferred_resync,
+                error.OutOfMemory => {
+                    _ = self.closeAndReject(.resource_exhausted);
+                    return .rejected;
+                },
+                error.Stale, error.ScreenInvalidated => {
+                    _ = self.closeAndReject(.socket_error);
+                    return .rejected;
+                },
+            };
             return .admitted;
         }
 
@@ -807,6 +824,13 @@ pub const Client = struct {
             },
             .close => self.beginClose(.peer_requested),
             .none => try self.syncTrackers(),
+            .resync_ack => |stream| {
+                try self.syncTrackers();
+                const tracker = self.trackers.get(stream) orelse
+                    return self.beginClose(.socket_error);
+                slot.deferResyncAttempt(tracker, now_ns) catch
+                    return self.beginClose(.socket_error);
+            },
             .frames => |frames| {
                 try self.adoptFrameBatch(frames);
             },
@@ -1241,6 +1265,19 @@ fn drainNonblocking(fd: c.fd_t) usize {
         const rc = c.recv(fd, &buf, buf.len, posix.MSG.DONTWAIT);
         if (rc <= 0) return total;
         total += @intCast(rc);
+    }
+}
+
+fn receiveIntoParserNonblocking(fd: c.fd_t, parser: *framing.FrameParser) !usize {
+    var total: usize = 0;
+    var buf: [64 * 1024]u8 = undefined;
+    while (true) {
+        const rc = c.recv(fd, &buf, buf.len, posix.MSG.DONTWAIT);
+        if (rc < 0 and posix.errno(rc) == .AGAIN) return total;
+        if (rc <= 0) return total;
+        const len: usize = @intCast(rc);
+        try parser.push(buf[0..len]);
+        total += len;
     }
 }
 
@@ -1909,7 +1946,8 @@ test "subscription pressure emits one control notice and recovers with an atomic
         &subscriptions,
         .{ .runtime_ops = runtime_ops.ops() },
     );
-    defer client.destroy();
+    var client_alive = true;
+    defer if (client_alive) client.destroy();
     try sendTestFrame(
         fds[1],
         .hello,
@@ -1927,6 +1965,7 @@ test "subscription pressure emits one control notice and recovers with an atomic
     const slot = try reactor.get(client.admission);
     const tracker = client.trackers.get(1).?;
     try slot.consumeWritten(slot.pending_bytes);
+    runtime_ops.snapshot_len = 2 * 1024 * 1024 + 17;
     try testing.expectEqual(slot_mod.ScreenState.valid, try slot.screenState(tracker));
 
     try slot.enqueueScreen(tracker, "controller-zero-prefix");
@@ -1979,16 +2018,36 @@ test "subscription pressure emits one control notice and recovers with an atomic
             notice_count += 1;
     }
     try testing.expectEqual(@as(usize, 1), notice_count);
+    var notice_parser = framing.FrameParser.init(testing.allocator);
+    defer notice_parser.deinit();
+    client.writeReady(3);
+    try testing.expect((try receiveIntoParserNonblocking(fds[1], &notice_parser)) != 0);
+    var wire_notices: usize = 0;
+    while (try notice_parser.next()) |frame| {
+        defer frame.deinit(testing.allocator);
+        try testing.expectEqual(protocol.Kind.event, frame.header.kind);
+        try testing.expectEqual(@as(u64, 1), frame.header.stream_id);
+        try testing.expect(std.mem.indexOf(u8, frame.payload, "snapshot.invalidated") != null);
+        wire_notices += 1;
+    }
+    try testing.expectEqual(@as(usize, 1), wire_notices);
     try testing.expect(!client.connection.attachments.get(1).?.resync_pending);
     try sendTestStreamFrame(fds[1], .stream_ack, 1, "{\"action\":\"resync\"}");
-    client.readReady(3);
+    const ack_at: u64 = 4;
+    client.readReady(ack_at);
     try testing.expect(client.connection.attachments.get(1).?.resync_pending);
-    client.tick(4);
+    try sendTestStreamFrame(fds[1], .stream_ack, 1, "{\"action\":\"resync\"}");
+    client.readReady(ack_at + 1);
+    client.tick(ack_at + slot_mod.resync_retry_backoff_ns - 1);
+    try testing.expectEqual(@as(usize, 1), runtime_ops.snapshot_calls);
+    try testing.expectEqual(slot_mod.ScreenState.invalidated, try slot.screenState(tracker));
+    client.tick(ack_at + slot_mod.resync_retry_backoff_ns);
+    try testing.expectEqual(@as(usize, 2), runtime_ops.snapshot_calls);
     try testing.expect(!client.isClosing());
     try testing.expectEqual(slot_mod.ScreenState.resync_draining, try slot.screenState(tracker));
     try testing.expect(!client.connection.attachments.get(1).?.resync_pending);
     try sendTestStreamFrame(fds[1], .stream_ack, 1, "{\"action\":\"resync\"}");
-    client.readReady(5);
+    client.readReady(ack_at + slot_mod.resync_retry_backoff_ns + 1);
     try testing.expect(!client.connection.attachments.get(1).?.resync_pending);
     try testing.expect((try slot.screenResidentBytes(tracker)) > 0);
     var recovered_chunks: usize = 0;
@@ -1996,7 +2055,7 @@ test "subscription pressure emits one control notice and recovers with an atomic
         const chunk = slot.chunks[(slot.chunk_head + logical) % slot_mod.max_chunks_per_slot];
         if (chunk.class == .screen) recovered_chunks += 1;
     }
-    try testing.expectEqual(@as(usize, 2), recovered_chunks);
+    try testing.expectEqual(@as(usize, 4), recovered_chunks);
     const recovered = client.connection.attachments.get(1).?;
     const recovered_retained = recovered.base.?.len +
         (if (recovered.observation_base) |base| base.len else 0);
@@ -2005,8 +2064,60 @@ test "subscription pressure emits one control notice and recovers with an atomic
         try slot.retainedBaseBytes(tracker),
     );
     try testing.expectEqual(@as(usize, 0), reactor.budget.prepared_base_bytes);
-    try slot.consumeWritten(slot.pending_bytes);
+    var recovery_parser = framing.FrameParser.init(testing.allocator);
+    defer recovery_parser.deinit();
+    const recovery_write_at = ack_at + slot_mod.resync_retry_backoff_ns + 2;
+    client.writeReady(recovery_write_at);
+    _ = try receiveIntoParserNonblocking(fds[1], &recovery_parser);
+    try testing.expect(slot.pending_bytes != 0);
+    try testing.expectEqual(
+        slot_mod.ScreenState.resync_draining,
+        try slot.screenState(tracker),
+    );
+    var write_attempts: usize = 1;
+    while (slot.pending_bytes != 0 and write_attempts < 1024) : (write_attempts += 1) {
+        client.writeReady(recovery_write_at + write_attempts);
+        _ = try receiveIntoParserNonblocking(fds[1], &recovery_parser);
+    }
+    try testing.expectEqual(@as(usize, 0), slot.pending_bytes);
+    try testing.expect(write_attempts < 1024);
+    _ = try receiveIntoParserNonblocking(fds[1], &recovery_parser);
+    var metadata_frames: usize = 0;
+    var snapshot_frames: usize = 0;
+    var snapshot_bytes: usize = 0;
+    var wire_index: usize = 0;
+    while (try recovery_parser.next()) |frame| {
+        defer frame.deinit(testing.allocator);
+        try testing.expectEqual(@as(u64, 1), frame.header.stream_id);
+        switch (frame.header.kind) {
+            .event => {
+                try testing.expectEqual(@as(usize, 0), wire_index);
+                metadata_frames += 1;
+            },
+            .snapshot_chunk => {
+                snapshot_frames += 1;
+                try testing.expectEqual(snapshot_frames, wire_index);
+                snapshot_bytes += frame.payload.len;
+                try testing.expectEqual(
+                    snapshot_frames == 3,
+                    protocol.Flags.hasEndStream(frame.header.flags),
+                );
+            },
+            else => return error.TestUnexpectedResult,
+        }
+        wire_index += 1;
+    }
+    try testing.expectEqual(@as(usize, 1), metadata_frames);
+    try testing.expectEqual(@as(usize, 3), snapshot_frames);
+    try testing.expectEqual(@as(usize, 2 * 1024 * 1024 + 17), snapshot_bytes);
     try testing.expectEqual(slot_mod.ScreenState.valid, try slot.screenState(tracker));
+    client.destroy();
+    client_alive = false;
+    try testing.expectEqual(@as(usize, 0), subscriptions.count());
+    try testing.expectEqual(@as(usize, 0), reactor.budget.resident_bytes);
+    try testing.expectEqual(@as(usize, 0), reactor.budget.shared_bytes);
+    try testing.expectEqual(@as(usize, 0), reactor.budget.prepared_base_bytes);
+    try testing.expectEqual(@as(usize, 0), reactor.budget.prepared_reclaim_bytes);
 }
 
 test "partial observer in a mixed controller connection is not a fail-close victim" {
@@ -2097,7 +2208,12 @@ test "failed recovery backoff does not pin round robin ahead of healthy siblings
         .{ .runtime_ops = runtime_ops.ops() },
     );
     defer client.destroy();
-    try sendTestFrame(fds[1], .hello, 1, test_hello);
+    try sendTestFrame(
+        fds[1],
+        .hello,
+        1,
+        "{\"protocol_min\":2,\"protocol_max\":2,\"client_kind\":\"gui\",\"capabilities\":[\"runtime_metadata_v1\"],\"screen_stream_version\":2}",
+    );
     client.readReady(1);
     inline for (.{ "aa", "bb", "cc" }, 0..) |id, index| {
         var params: [128]u8 = undefined;
@@ -2116,26 +2232,100 @@ test "failed recovery backoff does not pin round robin ahead of healthy siblings
     try sendTestStreamFrame(fds[1], .stream_ack, 2, "{\"action\":\"resync\"}");
     client.readReady(10);
 
+    runtime_ops.observation_fail_count = 1;
     runtime_ops.snapshot_fail_count = 1;
-    client.tick(100);
+    const preflight_blocked_at = 10 + slot_mod.resync_retry_backoff_ns;
+    const injected_pressure = slot_mod.shared_steady_bytes -
+        reactor.budget.shared_bytes -
+        slot_mod.base_update_max_bytes -
+        slot_mod.resync_batch_bytes +
+        1;
+    reactor.budget.resident_bytes += injected_pressure;
+    reactor.budget.shared_bytes += injected_pressure;
+    _ = client.beginProducerSweep(preflight_blocked_at);
+    client.tick(preflight_blocked_at);
+    try testing.expectEqual(@as(usize, 3), runtime_ops.snapshot_calls);
+    try testing.expect(client.connection.attachments.get(2).?.resync_pending);
+    try testing.expectEqualStrings(
+        "NEW-BASE",
+        client.connection.attachments.get(1).?.base.?,
+    );
+    try testing.expectEqual(@as(usize, 1), runtime_ops.delta_calls);
+    reactor.budget.resident_bytes -= injected_pressure;
+    reactor.budget.shared_bytes -= injected_pressure;
+
+    const revision_before_failure =
+        client.connection.attachments.get(2).?.observation_revision;
+    const observation_failure_at = preflight_blocked_at + 1;
+    _ = client.beginProducerSweep(observation_failure_at);
+    client.tick(observation_failure_at);
+    try testing.expectEqual(@as(usize, 3), runtime_ops.snapshot_calls);
+    try testing.expect(client.connection.attachments.get(2).?.resync_pending);
+    try testing.expectEqual(
+        revision_before_failure,
+        client.connection.attachments.get(2).?.observation_revision,
+    );
+    try testing.expectEqual(
+        @as(?[]u8, null),
+        client.connection.attachments.get(2).?.observation_base,
+    );
+
+    const first_attempt = observation_failure_at + slot_mod.resync_retry_backoff_ns;
+    _ = client.beginProducerSweep(first_attempt);
+    client.tick(first_attempt);
+    try testing.expectEqual(@as(usize, 4), runtime_ops.snapshot_calls);
     try testing.expect(client.connection.attachments.get(2).?.resync_pending);
     try testing.expectEqual(
         @as(usize, 0),
         try slot.preparedBaseBytes(recovering),
     );
     try testing.expectEqual(@as(usize, 0), try slot.retainedBaseBytes(recovering));
+    try testing.expectEqual(@as(usize, 0), try slot.screenResidentBytes(recovering));
+    try testing.expectEqual(
+        revision_before_failure,
+        client.connection.attachments.get(2).?.observation_revision,
+    );
+    try testing.expectEqual(
+        @as(?[]u8, null),
+        client.connection.attachments.get(2).?.observation_base,
+    );
     try testing.expectEqual(@as(usize, 0), reactor.budget.prepared_base_bytes);
     try testing.expectEqual(@as(usize, 0), reactor.budget.prepared_reclaim_bytes);
-    try testing.expectEqualStrings("SNAPSHOT-BYTES", client.connection.attachments.get(1).?.base.?);
+    try testing.expectEqualStrings("NEW-BASE", client.connection.attachments.get(1).?.base.?);
     try testing.expectEqualStrings("SNAPSHOT-BYTES", client.connection.attachments.get(3).?.base.?);
 
     // Stream 2 is now inside the one-second backoff. Priority selection must not rewind the
     // cursor, so stream 3 and then stream 1 each get a normal producer turn.
-    client.tick(101);
+    client.tick(first_attempt + 1);
     try testing.expectEqualStrings("NEW-BASE", client.connection.attachments.get(3).?.base.?);
-    client.tick(102);
+    try testing.expectEqual(@as(usize, 2), runtime_ops.delta_calls);
+    client.tick(first_attempt + 2);
     try testing.expectEqualStrings("NEW-BASE", client.connection.attachments.get(1).?.base.?);
+    try testing.expectEqual(@as(usize, 3), runtime_ops.delta_calls);
     try testing.expect(client.connection.attachments.get(2).?.resync_pending);
+    try testing.expect(!client.connection.attachments.get(2).?.awaiting_resync_ack);
+    var notices_after_failure: usize = 0;
+    for (0..slot.chunk_len) |logical| {
+        const chunk = slot.chunks[(slot.chunk_head + logical) % slot_mod.max_chunks_per_slot];
+        if (chunk.class == .control and
+            std.mem.indexOf(u8, chunk.bytes, "snapshot.invalidated") != null)
+            notices_after_failure += 1;
+    }
+    try testing.expectEqual(@as(usize, 1), notices_after_failure);
+
+    const retry_at = first_attempt + slot_mod.resync_retry_backoff_ns;
+    _ = client.beginProducerSweep(retry_at - 1);
+    client.tick(retry_at - 1);
+    try testing.expectEqual(@as(usize, 4), runtime_ops.snapshot_calls);
+    try testing.expect(client.connection.attachments.get(2).?.resync_pending);
+    _ = client.beginProducerSweep(retry_at);
+    client.tick(retry_at);
+    try testing.expectEqual(@as(usize, 5), runtime_ops.snapshot_calls);
+    try testing.expect(!client.connection.attachments.get(2).?.resync_pending);
+    try testing.expectEqual(
+        slot_mod.ScreenState.resync_draining,
+        try slot.screenState(recovering),
+    );
 }
 
 test "pressure after a written screen prefix fail closes instead of splicing the wire" {

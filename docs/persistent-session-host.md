@@ -847,9 +847,31 @@ ssh -t workbox maru attach <runtime-id>
 실행되어 원격 `~/Library/Caches/maru/session-host/control.sock`에 연결한다. MRSH socket이나 session host는 network에 노출되지
 않는다. `runtime list/attach`는 이미 살아 있는 원격 host/runtime 조회이므로 SSH 요청이 빈 host나 새 shell을 자동 생성하지 않는다.
 
-외부 terminal adapter의 resize 계약은 GUI와 같은 `runtime.resize`를 사용한다.
+외부 attach client의 local TTY 수명은 host/socket 수명과 분리한 단일 owner가 관리한다.
 
-1. attach 직후 controlling TTY의 `TIOCGWINSZ`로 최초 `cols/rows`를 읽어 controller 요청에 포함한다.
+1. stdin이 TTY인지 확인한 뒤 **어떤 terminal mutation보다 먼저** 원래 `termios` 전체와 현재
+   `TIOCGWINSZ`를 읽는다. 둘 중 하나라도 실패하면 raw mode나 signal handler를 설치하지 않고 attach를 거부한다.
+   최초 크기는 0이 아닌 `cols/rows`여야 하며 P5c2의 controller 첫 resize 입력이 된다.
+2. `HUP/INT/QUIT/TERM` handler와 nonblocking+CLOEXEC self-pipe를 설치한 뒤 raw mode를 마지막으로 적용한다.
+   raw mode는 POSIX `cfmakeraw`와 같은 flag 집합, `VMIN=1`, `VTIME=0`을 사용하며 enter/restore 모두
+   `TCSAFLUSH`로 경계 밖의 detach chord나 미처리 입력이 caller shell에 새지 않게 한다. handler는 signal 번호를
+   self-pipe에 쓰는 것 외에 allocation·IPC·`tcsetattr`을 하지 않는다.
+3. 정상 detach, local/SSH EOF, protocol 오류, socket read/write 오류, controller revoke와 signal wake는 모두 같은
+   idempotent restore 경로로 수렴한다. 이 경로는 저장한 `termios`를 정확히 복원하고 설치했던 handler를 복원한 뒤
+   fd를 닫는다. 복원 실패는 숨기지 않고 attach 실패로 보고하되 runtime/child를 종료하지 않는다.
+4. 종료 signal은 일반 event-loop 문맥에서 TTY와 handler를 먼저 복원한 다음 원래 disposition으로 같은 signal을
+   process 자신에게 다시 전달한다. 따라서 caller는 signal 기반 exit status를 그대로 관측한다. `SIGKILL`과 host
+   crash 뒤 복원은 OS상 실행할 cleanup 코드가 없으므로 보장 범위가 아니다.
+5. P5c1의 제품 계약은 공개 `maru attach` parser를 열지 않은 hidden deterministic PTY child로 검증한다. 실제
+   `openpty` slave의 초기 canonical+echo 속성과 window size를 부모가 설정하고, child의 raw 전환을 관측한 뒤
+   정상 반환·각 pre-raw 실패·각 post-raw 오류·`HUP/INT/QUIT/TERM`을 주입한다. 부모는 매 경우 원래 termios의
+   byte-for-byte 복원, signal exit status, fd/handler 회수와 runtime 종료 요청 0을 확인한다. pure injected-ops
+   테스트는 단계별 실패 지점마다 mutation 0 또는 exact-once rollback을 고정한다.
+
+외부 terminal adapter의 resize 계약은 GUI와 같은 `runtime.resize`를 사용하며 위 owner의 TTY fd와 signal wake 경계를
+재사용한다.
+
+1. attach 직후 P5c1이 읽은 최초 `cols/rows`를 controller 요청에 포함한다.
 2. local/SSH terminal의 `SIGWINCH` handler는 allocation·IPC·`ioctl`을 하지 않고 signal-safe flag 또는 self-pipe로 event loop만
    깨운다.
 3. event loop가 최신 `TIOCGWINSZ`를 읽고 같은 크기는 제거하며, 연속 변화는 최신 값으로 coalesce한 뒤 증가하는
@@ -2093,8 +2115,13 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
     per-slot chunk/byte와 prepared-reclaim 중 shared/global hard cap의 exact/cap+1을 모두 prefix 0 실패로 고정한다. 각 실패
     뒤 registry capability, global subscription table, connection attachment/tracker, reactor queue/base/control accounting이
     계약에 정의된 rollback 또는 commit 뒤 canonical EOF 상태 하나로 수렴해야 하며 중간 상태는 허용하지 않는다.
-- **P5c1 — raw TTY lifetime**: 외부 client의 raw mode enter와 모든 detach/error/signal 경로 restore, 최초
-  `TIOCGWINSZ`를 deterministic PTY harness로 검증한다.
+- **P5c1 — raw TTY lifetime**: 외부 client의 transactional raw mode enter와 단일 idempotent restore owner를
+  구현한다. 원래 termios+최초 `TIOCGWINSZ`를 mutation 전에 확보하고, 정상 detach·EOF·protocol/socket 오류와
+  `HUP/INT/QUIT/TERM` wake를 같은 restore 경로로 수렴시킨다. signal handler는 self-pipe write만 하고 일반 문맥이
+  exact termios/handler 복원 뒤 원 signal을 재전달한다. pure fail-index와 실제 `openpty` child harness가
+  mutation 전 실패 0, mutation 뒤 exact-once rollback, byte-for-byte termios 복원, signal exit status,
+  fd/handler 회수와 runtime terminate request 0을 결정적으로 검증해야 구현 완료다. `SIGKILL`/host crash 복원은
+  실행 가능한 cleanup 문맥이 없으므로 비범위다.
 - **P5c2 — resize**: signal-safe `SIGWINCH` wake, resize coalesce/sequence, takeover 최초 resize,
   `runtime.resized` observer 반영과 controller-only resize ACK/broadcast를 검증한다.
 - **P5c3 — public attach CLI**: P5b/P5c transport가 모두 green인 뒤에만 `maru attach`, observer,

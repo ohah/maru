@@ -2140,8 +2140,33 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
   fd/handler 회수와 runtime terminate request 0을 결정적으로 검증해야 구현 완료다. 공개 attach의 실제
   detach/EOF/socket E2E는 P5c3가 맡는다. `SIGKILL`/host crash 복원은
   실행 가능한 cleanup 문맥이 없으므로 비범위다.
-- **P5c2 — resize**: signal-safe `SIGWINCH` wake, resize coalesce/sequence, takeover 최초 resize,
-  `runtime.resized` observer 반영과 controller-only resize ACK/broadcast를 검증한다.
+- **P5c2 — resize**: P5c1 owner의 self-pipe에 `SIGWINCH` wake를 추가하고 external client resize state machine,
+  host broadcast, observer 반영을 hidden harness로 완성한다. 공개 `maru attach` parser는 아직 열지 않는다.
+  - signal handler는 기존 종료 signal과 마찬가지로 byte write 외 allocation·`ioctl`·IPC를 하지 않는다. event loop는
+    한 wake turn에서 pipe를 `EAGAIN`까지 비우고 `SIGWINCH` 여러 개를 하나의 pending resize로 coalesce한다. 종료
+    signal과 함께 있으면 종료가 우선이며 resize request는 0이다. invalid byte는 P5c1처럼 typed fail-close다.
+  - `ExternalResizeState`는 `observer|controller` role, 최초 P5c1 size, 마지막 전송 size, 마지막 host-applied size와
+    다음 `client_sequence`를 소유한다. sequence는 1부터 시작하고 **실제 request를 만들 때만** 증가하며 wrap하지 않는다.
+    controller attach/takeover 성공 직후에는 같은 크기여도 현재 `TIOCGWINSZ`를 최초 resize로 한 번 보내고, 이후에는
+    최신 non-zero size가 마지막 전송값과 다를 때만 보낸다. observer의 local `SIGWINCH`는 canonical request 0이다.
+  - request는 기존 `runtime.resize {stream_id,cols,rows,client_sequence}`를 쓰며 response의 echoed sequence,
+    applied `cols/rows`, `resize_generation`, `changed`를 전부 strict decode한다. stale response는 local last-applied를
+    바꾸지 않는다. controller revoke/release 뒤 pending local resize는 폐기하며 자동 재승격하지 않는다.
+  - host `dispatchResize`는 backend+registry commit 뒤 requester response와 같은 owner turn에
+    `runtime.resized {runtime_id,cols,rows,resize_generation,reason:"controller"}` event를 해당 runtime의 모든
+    subscription에 fan-out한다. `changed=false`와 stale request는 broadcast 0이다. response와 event batch를 필요한
+    모든 target queue에 all-or-none preflight한 뒤 commit하며 admission/OOM 실패는 새 canonical size를 publish하지
+    않는다. 이를 위해 backend mutation도 admission 뒤에 실행돼야 하며 기존 prepare→backend→commit transaction을
+    owner-level prepared action으로 올린다.
+  - observer/client는 자기 local TTY size가 아니라 strictly increasing `resize_generation`의 host event만 canonical
+    applied size로 받아 ANSI projection의 crop/letterbox 기준을 갱신한다. duplicate/older generation은 무시하고,
+    generation gap은 화면 byte 유실이 아니므로 최신 full-state size를 적용한다. controller도 같은 event를 받아
+    response/event 순서와 무관하게 max generation으로 수렴한다.
+  - pure state tests는 burst coalesce, unchanged/zero size, observer no-op, takeover forced first resize,
+    revoke pending drop, sequence max를 검증한다. actual `openpty` child는 `TIOCSWINSZ` burst가 `SIGWINCH` wake를 만들고
+    최신 size 하나만 request가 되는지 5초 deadline으로 검증한다. product `SocketServer`/`poll_owner.Owner` fixture는
+    controller ACK+broadcast, observer request unauthorized, changed=false/stale broadcast 0, multi-client all-or-none
+    admission rollback, event generation의 client 적용을 검증한다.
 - **P5c3 — public attach CLI**: P5b/P5c transport가 모두 green인 뒤에만 `maru attach`, observer,
   `--take-over`, `Ctrl-\` 다음 `d` detach chord를 parser/`--help`와 함께 공개한다. 실제 PTY의
   attach/input/detach/reattach가 완료 gate다. 같은 MRSH v2이지만 `controller_transfer_v1`이 없는 pre-P5b3 개발 host에는

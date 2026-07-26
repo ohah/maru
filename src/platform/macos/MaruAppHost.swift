@@ -7096,7 +7096,8 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         var ptr: UnsafePointer<UInt8>? = nil
         var len: size_t = 0
         var kind: Int32 = 0
-        guard maru_macos_app_session_url_at(session, xPx, yPx, mods, &ptr, &len, &kind) == Self.statusOK,
+        var webSurfaceId: UInt64 = 0
+        guard maru_macos_app_session_url_at(session, xPx, yPx, mods, &ptr, &len, &kind, &webSurfaceId) == Self.statusOK,
               let bytes = ptr, len > 0 else { return false }
         let text = String(decoding: UnsafeBufferPointer(start: bytes, count: len), as: UTF8.self)
         // FP5: 파일 경로 중 .md/.html은 현재 창 도크로 라우팅한다. Zig가 확장자·regular-file·중복 활성화를 단일
@@ -7110,6 +7111,16 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                 if result == 2 { NSSound.beep() }
                 return true
             }
+        }
+        // v147: Zig가 이 링크를 띄울 인앱 브라우저 패널을 정했으면(surface_id != 0) 그 WKWebView에 load한다.
+        // 정책(config input.link-open-target·"보이는 browser 패널")은 Zig 단일 출처이고 여기는 실행만 한다 —
+        // 파일 패널 외부 링크 drain이 같은 BrowserControl.navigate를 쓰는 것과 동형. 패널이 이미 사라졌으면
+        // (닫히는 중 클릭) 0인 것과 같이 시스템 브라우저로 폴백한다 — 링크를 조용히 삼키지 않는다.
+        if kind == 0, webSurfaceId != 0,
+           let panel = surfaceOwning(byId: webSurfaceId)?.webPanels[webSurfaceId],
+           BrowserControl.navigate(panel.webView, url: text)
+        {
+            return true
         }
         // 나머지 파일 경로는 기존 기본 앱, 웹/스킴 URL은 기본 브라우저로 연다.
         let url: URL? = (kind == 1) ? URL(fileURLWithPath: text) : URL(string: text)

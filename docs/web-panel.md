@@ -123,6 +123,7 @@ z-order상 모달(최상위)을 제외한 모든 터미널 마우스 인터랙�
 - 매 tick **surface diff**: "어느 surface_id ↔ 어느 NSView, url/panel_kind/trust, 생성/숨김/파괴" — [control-plane.md] §3 엔티티·`panel.open` 생애주기와 직접 커플링.
 - web surface는 **Term**이다(leaf=Pane이 아니라 Pane 안 Term). 한 Pane이 terminal Term + web Term을 가로 탭으로 섞을 수 있고, per-pane 탭바가 둘을 같이 보인다. **web Term마다 WKWebView**(한 leaf에 N개 가능, 활성만 show, 비활성 hidden으로 상태 유지). **(4e-1 구현 완료 — 모델 토대)**: `session_model.Term.kind`(terminal|web) + `LiveSurface` `union(SurfaceKind)`(web arm=sentinel surface)로 web Term을 트리에 담고, `createWebTerm`이 PTY 없이 생성한다. **(4e-3 구현 완료 — per-Term WKWebView 호스팅)**: `computeWebSurfaceTransitions`가 활성 워크스페이스 탭 pane 트리를 walk해 web Term 집합(각 `{surface_id, panel_kind, 자기 pane 본문 rect, visible=자기 pane 활성 탭인가}`)을 만들고 직전 tick 집합과 `surfaceDiff`한 **batch 전이**(count+at ABI, v101)를 낸다. Swift가 `webPanels[surface_id]` dict에 create/destroy/reframe/hide/show를 적용해 web Term마다 WKWebView를 자기 pane 본문 rect에 고정한다(활성 pane 추종 완전 제거). Term 이동 시 **재부모화**는 4e-4(§10).
 - Term 탭을 다른 pane으로 이동하면 WKWebView **재부모화·재프레임**.
+- **터미널 링크의 착지점**(v147): 터미널에서 Cmd+클릭한 http(s) 링크는 `input.link-open-target = auto`(기본)일 때 이 브라우저 패널로 들어온다 — 활성 탭에서 **보이는** browser Term이 대상이고 없으면 시스템 브라우저다(새 패널을 만들지 않는다). 정책·대상 선택은 Zig(`webLinkTargetSurfaceId`)가 소유하고 Swift는 `BrowserControl.navigate`만 실행한다. 단일 출처는 [링크 감지](link-detection.md) §링크를 어디에 여는가.
 
 ## 7. web 특유 보안 (브리지 게이트는 control §8.1)
 

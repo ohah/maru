@@ -631,6 +631,20 @@ pub const LinkDetection = enum {
     full,
 };
 
+/// 터미널에서 연 **웹 링크(http/https)를 어디에 띄울지**. auto(기본)=현재 워크스페이스 탭에 **보이는 브라우저
+/// 패널**이 있으면 그 패널에서 열고, 없으면 시스템 기본 브라우저. system=항상 시스템 기본 브라우저(이전 동작).
+///
+/// 기본을 auto로 두는 근거: 브라우저 패널을 띄워 둔 사용자는 링크를 그 패널에서 보길 기대하고(사용자 결정),
+/// 패널이 없으면 동작이 이전과 100% 같아 회귀가 없다. **새 브라우저 패널을 만들지는 않는다** — 링크 하나에
+/// 탭이 늘어나는 건 놀람이 크고, "열려 있으면 재사용"이 사용자가 요청한 정확한 범위다(파일 패널의
+/// `file-panel.external-link-target = in-app`은 반대로 **새 browser Term을 만든다** — 그쪽은 문서 안에서
+/// 링크를 따라가는 문맥이라 새 탭이 자연스럽다. 두 설정은 목적이 달라 분리한다).
+/// 단일 출처: docs/link-detection.md §링크를 어디에 여는가.
+pub const LinkOpenTarget = enum {
+    auto,
+    system,
+};
+
 /// EAW Ambiguous 문자(동그란 번호 ① 등)를 한 칸으로 볼지(narrow) 두 칸으로 볼지(wide).
 /// **기본 narrow** — UAX#11 §5 권고("문맥 불명 시 narrow") + Ghostty·xterm.js와 같아 1칸 가정 프로그램
 /// (셸 readline·대부분 TUI)과 정렬·커서가 안 깨진다. wide는 CJK 로캘처럼 그 문자를 2칸으로 가정하는 환경,
@@ -683,6 +697,10 @@ pub const InputConfig = struct {
     /// 연다(클릭 시 존재 stat 게이트가 오탐 차단). web=http(s)만(이전 동작), osc8-only=자동 감지 끔(OSC 8 명시 링크만).
     /// 단일 출처: docs/link-detection.md.
     link_detection: LinkDetection = .full,
+    /// 터미널 링크(http/https)를 인앱 브라우저 패널에서 열지(auto, 기본) 항상 시스템 브라우저로 보낼지(system).
+    /// auto도 **보이는 브라우저 패널이 있을 때만** 인앱이고 없으면 시스템이라, 브라우저를 안 쓰면 이전과 동일하다.
+    /// 파일 경로 링크·`mailto:` 같은 비-HTTP 스킴은 이 값과 무관하다(기본 앱). 단일 출처: docs/link-detection.md.
+    link_open_target: LinkOpenTarget = .auto,
     /// 붙여넣기 보호. 기본 true. 개행(\n/\r)이나 bracketed paste 종료 마커(ESC[201~ 인젝션)가 있는 붙여넣기를
     /// 바로 PTY로 보내지 않고 확인 모달을 띄운다 — 웹/문서에서 몰래 명령이 딸려온 클립보드가 붙여넣는 순간
     /// 실행되는 "copy/paste 공격"을 막는다. 베이스: Ghostty `clipboard-paste-protection`(기본 true). 단일 출처:
@@ -694,7 +712,7 @@ pub const InputConfig = struct {
     /// 검사를 거친다. 베이스: Ghostty `clipboard-paste-bracketed-safe`(기본 true).
     bracketed_paste_is_safe: bool = true,
 
-    pub const schema = .{ // 키: input.page-keys / input.shift-enter / input.ime-enter / input.url-click-modifier / input.mouse-hide-while-typing / input.option-as-meta / input.right-click / input.word-separators / input.link-detection / input.paste-protection / input.bracketed-paste-is-safe (필드명 dashed)
+    pub const schema = .{ // 키: input.page-keys / input.shift-enter / input.ime-enter / input.url-click-modifier / input.mouse-hide-while-typing / input.option-as-meta / input.right-click / input.word-separators / input.link-detection / input.link-open-target / input.paste-protection / input.bracketed-paste-is-safe (필드명 dashed)
         .page_keys = Meta{ .doc = "메인 화면 PageUp/Down", .widget = .dropdown, .section = .input },
         .shift_enter = Meta{ .doc = "Shift+Enter 인코딩", .widget = .dropdown, .section = .input },
         .ime_enter = Meta{ .doc = "IME 조합 중 Enter", .widget = .dropdown, .section = .input },
@@ -704,6 +722,7 @@ pub const InputConfig = struct {
         .right_click = Meta{ .doc = "터미널 우클릭 동작", .widget = .dropdown, .section = .input },
         .word_separators = Meta{ .doc = "더블클릭 단어 구분자", .widget = .text, .section = .input },
         .link_detection = Meta{ .doc = "링크 자동 감지 범위", .widget = .dropdown, .section = .input },
+        .link_open_target = Meta{ .doc = "웹 링크 열기 대상", .widget = .dropdown, .section = .input },
         .paste_protection = Meta{ .doc = "위험한 붙여넣기 확인", .widget = .toggle, .section = .input },
         .bracketed_paste_is_safe = Meta{ .doc = "bracketed paste는 안전으로", .widget = .toggle, .section = .input },
     };

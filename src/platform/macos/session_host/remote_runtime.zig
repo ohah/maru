@@ -529,13 +529,17 @@ pub const RemoteRuntime = struct {
                 frame.payload,
                 "\"event\":\"runtime.resized\"",
             ) != null) {
-                result.metadata = (try applyResizeEvent(
+                const applied = applyResizeEvent(
                     self.allocator,
                     frame.payload,
                     self.runtime_id_hex,
                     &self.resize_generation,
                     &self.observation.size,
-                )) or result.metadata;
+                ) catch |err| {
+                    if (err == error.ProtocolError) self.client.failClosed();
+                    return err;
+                };
+                result.metadata = applied or result.metadata;
                 continue;
             }
             result.metadata = (try self.applyObservationJson(frame.payload)) or result.metadata;
@@ -1359,17 +1363,17 @@ fn applyResizeEvent(
     runtime_id_hex: [32]u8,
     generation: *u64,
     size: *terminal.Size,
-) error{OutOfMemory}!bool {
+) error{ OutOfMemory, ProtocolError }!bool {
     const resized = resize_wire.parseEvent(allocator, payload) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
-        error.Invalid => return false,
+        error.Invalid => return error.ProtocolError,
     };
     var expected_id: [32]u8 = undefined;
     _ = std.fmt.bufPrint(&expected_id, "{x:0>32}", .{resized.runtime_id}) catch
-        return false;
-    if (!std.mem.eql(u8, &expected_id, &runtime_id_hex) or
-        resized.resize_generation <= generation.*)
-        return false;
+        return error.ProtocolError;
+    if (!std.mem.eql(u8, &expected_id, &runtime_id_hex))
+        return error.ProtocolError;
+    if (resized.resize_generation <= generation.*) return false;
     generation.* = resized.resize_generation;
     size.* = .{ .cols = resized.cols, .rows = resized.rows };
     return true;
@@ -1488,7 +1492,7 @@ test "remote runtime: resize reply preserves stale size and uses host-clamped ap
     );
 }
 
-test "remote runtime applies resize event gaps and ignores duplicate foreign or malformed state" {
+test "remote runtime applies resize gaps, ignores duplicates, and rejects foreign or malformed state" {
     const runtime_id: [32]u8 = "000000000000000000000000000000aa".*;
     var generation: u64 = 0;
     var size: terminal.Size = .{ .cols = 80, .rows = 24 };
@@ -1521,7 +1525,7 @@ test "remote runtime applies resize event gaps and ignores duplicate foreign or 
     ));
     try std.testing.expectEqual(@as(u64, 9), generation);
     try std.testing.expectEqual(terminal.Size{ .cols = 120, .rows = 40 }, size);
-    try std.testing.expect(!try applyResizeEvent(
+    try std.testing.expectError(error.ProtocolError, applyResizeEvent(
         std.testing.allocator,
         \\{"event":"runtime.resized","data":{"runtime_id":"000000000000000000000000000000bb","cols":140,"rows":50,"resize_generation":10,"reason":"controller"}}
     ,
@@ -1529,7 +1533,7 @@ test "remote runtime applies resize event gaps and ignores duplicate foreign or 
         &generation,
         &size,
     ));
-    try std.testing.expect(!try applyResizeEvent(
+    try std.testing.expectError(error.ProtocolError, applyResizeEvent(
         std.testing.allocator,
         "{\"event\":\"runtime.resized\"}",
         runtime_id,
@@ -1537,6 +1541,39 @@ test "remote runtime applies resize event gaps and ignores duplicate foreign or 
         &size,
     ));
     try std.testing.expectEqual(@as(u64, 9), generation);
+}
+
+test "remote runtime fails the shared connection on an immediately consumed foreign resize" {
+    const allocator = std.testing.allocator;
+    var client = client_mod.Client{
+        .allocator = allocator,
+        .fd = -1,
+        .host_id = 1,
+        .parser = framing.FrameParser.init(allocator),
+    };
+    defer client.deinit();
+    const foreign = framing.Frame{
+        .header = .{ .kind = .event, .stream_id = 7 },
+        .payload = try allocator.dupe(
+            u8,
+            \\{"event":"runtime.resized","data":{"runtime_id":"000000000000000000000000000000bb","cols":140,"rows":50,"resize_generation":10,"reason":"controller"}}
+            ,
+        ),
+    };
+    try client.pending_events.append(allocator, foreign);
+    client.pending_event_bytes = foreign.payload.len;
+
+    var runtime: RemoteRuntime = undefined;
+    runtime.client = &client;
+    runtime.allocator = allocator;
+    runtime.stream_id = 7;
+    runtime.runtime_id_hex = "000000000000000000000000000000aa".*;
+    runtime.resize_generation = 0;
+    runtime.observation = .{};
+    defer runtime.observation.deinit(allocator);
+    try std.testing.expectError(error.ProtocolError, runtime.drainObservationEvents());
+    try std.testing.expect(client.unusable);
+    try std.testing.expectEqual(@as(usize, 0), client.pending_events.items.len);
 }
 
 test "remote runtime: extended core commands require capability while legacy scroll remains compatible" {

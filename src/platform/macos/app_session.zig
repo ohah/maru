@@ -2760,6 +2760,11 @@ pub const AppSession = struct {
     // 조회한다 — 화면이 스크롤·갱신되면 host가 보낸 새 목록으로 자연히 갱신된다(로컬의 "anchor로 재계산"과 동형).
     // docs/link-detection.md §원격(host-backed) 세션.
     hover_remote_cell: ?terminal.SelectionPoint = null,
+    // 위 두 hover 좌표가 **어느 surface**의 것인지(0=hover 없음). hover는 클릭과 같이 '포인터 아래 pane'을 보므로
+    // (paneTargetAt) anchor 하나만으로는 밑줄을 어느 pane에 그릴지 알 수 없다 — split에서 비활성 pane에 hover하면
+    // 활성 pane의 같은 좌표에 엉뚱한 밑줄이 그려진다. 렌더는 `hoverLinkSpanFor`가 이 id와 일치하는 surface에만
+    // span을 돌려줘 "밑줄 보이는 곳 = 열리는 곳"을 pane 단위로 유지한다. surface_id는 앱 전역·비재사용이라 stale 안전.
+    hover_url_surface_id: u64 = 0,
     // 현재 선택이 down(1) 드래그로 시작했는지. 더블/트리플클릭(4/5) 선택은 직후의 up(3)이
     // "이동 없는 클릭 -> 해제" 판정을 타면 안 되므로 이 플래그로 구분한다.
     mouse_drag_selecting: bool = false,
@@ -18564,7 +18569,7 @@ pub const AppSession = struct {
         // 이어도 옆 셸 pane 위 휠이 그 셸 스크롤백을 움직인다. 사이드바/밖(hit null)이면 활성 surface로 fallback.
         // surface와 rect는 한 leaf에서 온 한 쌍이라 함께 unwrap한다 — 둘을 따로 풀면 다른 분기에서 와 pane↔좌표가
         // 어긋날 수 있다(이 rework가 막으려는 것). rect는 트래킹 리포트 좌표용(pxToCellIn).
-        const hit = self.scrollTargetAt(x_px, y_px);
+        const hit = self.paneTargetAt(x_px, y_px);
         const target, const rect = if (hit) |h| .{ h.surface, h.rect } else .{ self.activeSurface(), self.active_pane_rect };
         // mouse_tracking 읽기 + reportMouse(코어 response 생성)는 락 아래(리더 core.write와 response 경합 방지,
         // docs/io-render-threading.md PR3). writeInput은 락 밖(PR1 패턴).
@@ -18681,10 +18686,15 @@ pub const AppSession = struct {
     }
 
     /// 스크린 점(backing px) 아래 panel의 활성 Term surface + 그 터미널 본문 rect(탭 바 제외 = 셀 origin).
-    /// 휠 라우팅 단일 출처 — 휠은 '커서 아래' surface가 스크롤백/mouse reporting을 처리하고 리포트 좌표도 그
-    /// rect 기준이라 정합한다(pane↔좌표). 활성 탭 leaf rect를 펴 점을 담는 leaf를 찾는다(없으면 — 사이드바/밖
-    /// — null). 단일 panel이면 그 panel(=활성)을 돌려준다.
-    fn scrollTargetAt(self: *AppSession, x_px: f64, y_px: f64) ?struct { surface: *maru.session.Surface, rect: maru.session.SplitRect } {
+    /// **'포인터 아래 pane이 소유' 라우팅의 단일 출처**로, 두 소비처가 공유한다.
+    ///  - 휠: '커서 아래' surface가 스크롤백/mouse reporting을 처리하고 리포트 좌표도 그 rect 기준이라 정합한다.
+    ///  - 링크(URL·파일 경로) 클릭/hover: 클릭한 pane의 화면에서 링크를 찾는다. 활성 pane 고정으로 두면 **활성이
+    ///    아닌 pane의 링크가 영영 안 열린다** — `pxToCell`은 좌표를 grid 안으로 **clamp**하므로 다른 pane을 눌러도
+    ///    null이 아니라 활성 pane의 엉뚱한 셀이 나오고, 활성이 web Term(빈 sentinel core)이면 항상 (0,0) 빈 셀만
+    ///    보게 된다(브라우저 패널을 띄운 뒤 터미널 링크가 먹통이던 사용자 제보의 루트커즈).
+    ///
+    /// 활성 탭 leaf rect를 펴 점을 담는 leaf를 찾는다(없으면 — 사이드바/밖 — null). 단일 panel이면 그 panel(=활성)을 돌려준다.
+    fn paneTargetAt(self: *AppSession, x_px: f64, y_px: f64) ?struct { surface: *maru.session.Surface, rect: maru.session.SplitRect } {
         if (!self.surface_initialized) return null;
         var leaf_rects: std.ArrayList(PaneTree.LeafRect) = .empty;
         defer leaf_rects.deinit(self.allocator);
@@ -18799,7 +18809,7 @@ pub const AppSession = struct {
     /// 줄 수만큼 스크롤한다. alt screen + alternate scroll(DECSET 1007)이면 화살표 키로 변환해
     /// 프로그램(less/vim)에 보낸다(iTerm2/Terminal.app 동작, DECCKM이면 SS3 형식). 휠과
     /// Shift+PageUp/Down이 같은 경로를 타 일관되게 동작한다.
-    /// 활성 surface를 줄 수만큼 스크롤(키보드 PageUp/Down 경로). 휠은 scrollTargetAt으로 고른 surface에 직접 쓴다.
+    /// 활성 surface를 줄 수만큼 스크롤(키보드 PageUp/Down 경로). 휠은 paneTargetAt으로 고른 surface에 직접 쓴다.
     fn scrollLines(self: *AppSession, lines: i32) void {
         self.scrollSurfaceLines(self.activeSurface(), lines);
     }
@@ -21798,30 +21808,43 @@ pub const AppSession = struct {
         // 터미널 영역: (config 수식키)+hover URL이면 link(pointingHand), 아니면 text(iBeam).
         var next: ?terminal.SelectionPoint = null; // 로컬: 링크 시작 셀의 **절대** 좌표
         var next_remote: ?terminal.SelectionPoint = null; // 원격: hover 중인 **뷰포트** 셀
+        var next_surface_id: u64 = 0; // 위 두 좌표가 속한 surface(0=hover 없음)
         if (self.urlModifierHeld(mods)) {
-            if (self.pxToCell(x_px, y_px)) |cell| {
-                const s = self.activeSurface();
-                // 분류(로컬 wordIsUrl / 원격 링크 목록 조회)가 화면·스크롤백을 읽으므로 락 아래에서 한다 —
-                // urlAt 클릭 경로와 대칭(reader의 evict/realloc race 방지). hover는 매 mouse-move라 클릭보다
-                // 빈번해 노출이 더 크다(focusedTermCwd/copyText와 같은 규율). 원격이면 lockCore가 화면 소스의
-                // 락을 잡는다(Surface.lockCore가 갈라 준다).
-                s.lockCore(self.io);
-                defer s.unlockCore(self.io);
-                if (s.remote != null) {
-                    // host-backed: client core는 빈 placeholder라 스스로 분류할 수 없다. host가 실어 준 목록에
-                    // 이 셀을 덮는 링크가 있으면 hover로 친다(docs/link-detection.md §원격(host-backed) 세션).
-                    if (self.remoteLinkSpanAt(s, cell.row, cell.col) != null) next_remote = .{ .row = cell.row, .col = cell.col };
-                } else {
-                    // 로컬: URL이면 그 시작 셀의 절대 좌표를 저장한다(뷰포트 좌표가 아님) — 스크롤/출력으로
-                    // 내용이 움직여도 밑줄이 내용을 따라가고, 좁아진 폭에서도 매 frame 뷰포트로 다시
-                    // 클립(아래 hoverLinkSpan)되므로 stale·OOB가 안 생긴다.
-                    if (s.core.urlAnchorAt(cell.row, cell.col, self.linkScopesFromConfig())) |a| next = a;
+            // 클릭(urlAt)과 **같은** paneTargetAt 라우팅 — "밑줄 보이는 곳 = 열리는 곳"이 pane 단위로도 성립하게.
+            // 활성 pane 고정이면 비활성 pane/브라우저 옆 터미널에서 밑줄이 안 뜨거나 엉뚱한 pane에 그려진다.
+            if (self.paneTargetAt(x_px, y_px)) |hit| {
+                if (self.pxToCellIn(hit.surface, hit.rect, x_px, y_px)) |cell| {
+                    const s = hit.surface;
+                    // 분류(로컬 wordIsUrl / 원격 링크 목록 조회)가 화면·스크롤백을 읽으므로 락 아래에서 한다 —
+                    // urlAt 클릭 경로와 대칭(reader의 evict/realloc race 방지). hover는 매 mouse-move라 클릭보다
+                    // 빈번해 노출이 더 크다(focusedTermCwd/copyText와 같은 규율). 원격이면 lockCore가 화면 소스의
+                    // 락을 잡는다(Surface.lockCore가 갈라 준다).
+                    s.lockCore(self.io);
+                    defer s.unlockCore(self.io);
+                    if (s.remote != null) {
+                        // host-backed: client core는 빈 placeholder라 스스로 분류할 수 없다. host가 실어 준 목록에
+                        // 이 셀을 덮는 링크가 있으면 hover로 친다(docs/link-detection.md §원격(host-backed) 세션).
+                        if (self.remoteLinkSpanAt(s, cell.row, cell.col) != null) {
+                            next_remote = .{ .row = cell.row, .col = cell.col };
+                            next_surface_id = s.id;
+                        }
+                    } else {
+                        // 로컬: URL이면 그 시작 셀의 절대 좌표를 저장한다(뷰포트 좌표가 아님) — 스크롤/출력으로
+                        // 내용이 움직여도 밑줄이 내용을 따라가고, 좁아진 폭에서도 매 frame 뷰포트로 다시
+                        // 클립(아래 hoverLinkSpanFor)되므로 stale·OOB가 안 생긴다.
+                        if (s.core.urlAnchorAt(cell.row, cell.col, self.linkScopesFromConfig())) |a| {
+                            next = a;
+                            next_surface_id = s.id;
+                        }
+                    }
                 }
             }
         }
-        const changed = !pointEql(self.hover_url_anchor, next) or !pointEql(self.hover_remote_cell, next_remote);
+        const changed = !pointEql(self.hover_url_anchor, next) or !pointEql(self.hover_remote_cell, next_remote) or
+            self.hover_url_surface_id != next_surface_id; // 같은 좌표라도 pane이 바뀌면 밑줄을 옮겨 그려야 한다
         self.hover_url_anchor = next;
         self.hover_remote_cell = next_remote;
+        self.hover_url_surface_id = next_surface_id;
         if (changed) self.metal_dirty = true; // 밑줄이 생기거나 사라지면 다시 그린다
         return if (next != null or next_remote != null) .link else .text;
     }
@@ -21850,22 +21873,28 @@ pub const AppSession = struct {
         if (self.hover_url_anchor != null or self.hover_remote_cell != null) {
             self.hover_url_anchor = null;
             self.hover_remote_cell = null;
+            self.hover_url_surface_id = 0;
             self.metal_dirty = true;
         }
     }
 
-    /// hover URL의 현재 뷰포트 밑줄 범위. 매 frame 다시 계산하므로 스크롤·출력·resize 후에도 항상 현재
-    /// 폭/위치에 맞는다(stale 좌표 OOB 차단). 로컬은 절대 좌표 anchor에서 클립하고, 원격은 host가 실어 준
-    /// 목록에서 hover 셀을 덮는 span을 다시 찾는다(둘 다 "저장한 위치 + 최신 화면"으로 재계산 — 같은 규율).
-    /// 호출자가 활성 surface의 `lockCore`를 보유한 상태로 부른다(tick의 cell_colors 빌드 — 재진입 금지).
-    pub fn hoverLinkSpan(self: *AppSession) ?terminal.SelectionSpan {
-        const s = self.activeSurface();
-        if (s.remote != null) {
+    /// `surface`에 그릴 hover URL 밑줄 범위(그 surface에 hover 중이 아니면 null). 매 frame 다시 계산하므로
+    /// 스크롤·출력·resize 후에도 항상 현재 폭/위치에 맞는다(stale 좌표 OOB 차단). 로컬은 절대 좌표 anchor에서
+    /// 클립하고, 원격은 host가 실어 준 목록에서 hover 셀을 덮는 span을 다시 찾는다(둘 다 "저장한 위치 + 최신
+    /// 화면"으로 재계산 — 같은 규율).
+    ///
+    /// **surface를 인자로 받는 이유**: hover 판정이 활성 pane이 아니라 '포인터 아래 pane'(paneTargetAt)이라, 활성
+    /// surface에 고정해 그리면 비활성 pane의 링크에 hover할 때 밑줄이 **엉뚱한 pane**에 뜬다. id 대조로 hover 중인
+    /// 그 pane에만 span을 준다(활성·비활성 렌더 경로가 같은 함수를 공유 — 밑줄 규칙 단일 출처).
+    /// 호출자가 그 surface의 `lockCore`를 보유한 상태로 부른다(tick의 cell_colors/pane_colors 빌드 — 재진입 금지).
+    pub fn hoverLinkSpanFor(self: *AppSession, surface: *maru.session.Surface) ?terminal.SelectionSpan {
+        if (self.hover_url_surface_id == 0 or surface.id != self.hover_url_surface_id) return null;
+        if (surface.remote != null) {
             const cell = self.hover_remote_cell orelse return null;
-            return self.remoteLinkSpanAt(s, cell.row, cell.col);
+            return self.remoteLinkSpanAt(surface, cell.row, cell.col);
         }
         const anchor = self.hover_url_anchor orelse return null;
-        return s.core.urlSpanAtAbs(anchor);
+        return surface.core.urlSpanAtAbs(anchor);
     }
 
     fn pointEql(a: ?terminal.SelectionPoint, b: ?terminal.SelectionPoint) bool {
@@ -21882,9 +21911,13 @@ pub const AppSession = struct {
         // config 수식키가 안 눌렸으면 URL을 안 연다(빈 슬라이스 → Swift는 일반 클릭으로 처리). hover 밑줄과 같은
         // urlModifierHeld 단일 판정이라 "밑줄 보이는 키 = 열리는 키"가 항상 일치한다.
         if (!self.urlModifierHeld(mods)) return &.{};
-        // 스크린→셀 변환은 pxToCell 단일 출처를 쓴다(사이드바 offset 차감 포함) — 별도 변환을 두면
-        // 사이드바 폭만큼 어긋난 셀에서 URL을 찾는다(직접 x/cw로 계산하던 버그를 여기로 일원화해 고침).
-        const cell = self.pxToCell(x_px, y_px) orelse return &.{};
+        // **포인터 아래 pane**에서 찾는다(paneTargetAt — 휠과 공유하는 라우팅 단일 출처). 활성 pane 고정이던 옛
+        // 코드는 활성이 아닌 pane의 링크를 못 열었다 — pxToCell이 grid 안으로 clamp라 엉뚱한 셀을 보고, 활성이
+        // browser web Term이면 빈 sentinel core라 항상 빈 결과였다(사용자 제보). 사이드바/터미널 밖이면 null.
+        // 스크린→셀 변환은 pxToCellIn 단일 출처를 쓴다(pane rect origin 차감 포함) — 별도 변환을 두면 사이드바
+        // 폭·pane origin만큼 어긋난 셀에서 URL을 찾는다(직접 x/cw로 계산하던 버그를 여기로 일원화해 고침).
+        const hit = self.paneTargetAt(x_px, y_px) orelse return &.{};
+        const cell = self.pxToCellIn(hit.surface, hit.rect, x_px, y_px) orelse return &.{};
         if (self.url_buffer.len > 0) {
             self.allocator.free(self.url_buffer);
             self.url_buffer = &.{};
@@ -21897,7 +21930,7 @@ pub const AppSession = struct {
         // 없이 읽으면 torn read·use-after-free(focusedTermCwd가 같은 cwd 위험을 락으로 고친 선례 — copyText도 동일).
         // 그래서 lockCore 아래에서 추출하고, 결과 텍스트는 owned라 unlock 후 안전. 존재검증 access(F_OK)는 빠른
         // syscall이라 락 아래 허용한다(copyText가 무거운 extractSelection을 락 아래 하는 것과 같은 트레이드오프).
-        const s = self.activeSurface();
+        const s = hit.surface;
         // host-backed: 여는 대상은 **host가 뽑는다**(copyText·Find와 같은 "client 렌더 / host 해석" 불변식). client core는
         // 빈 placeholder라 추출이 불가능하고, file_path의 cwd resolve·존재 stat도 **host의 파일시스템**에서 해야 맞다
         // (client가 자기 FS로 stat하면 원격 경로를 잘못 판정). hover 필터와 같은 scope 비트를 보내 "밑줄 보이는 곳 =
@@ -24985,7 +25018,7 @@ pub const AppSession = struct {
                     .bold_is_bright = self.appearance.bold_is_bright,
                     .selection_bg = self.appearance.theme.selection,
                     .selection = self.activeSurface().core.selectionViewportSpan(),
-                    .hover_link = self.hoverLinkSpan(),
+                    .hover_link = self.hoverLinkSpanFor(cc_surface), // 이 pane에 hover 중일 때만(비활성 pane은 아래 pane_colors가 자기 것을 채운다)
                     // 스크롤백 Find 매치 하이라이트(활성 surface에만 적용 — 비활성 pane은 inactive_colors).
                     .search_match_bg = self.appearance.theme.search_match,
                     .search_matches = self.find_view_spans.items,
@@ -25252,7 +25285,9 @@ pub const AppSession = struct {
                 for (built_frames.items) |*bf| bf.deinit(self.allocator);
                 built_frames.deinit(self.allocator);
             }
-            // 비활성 panel 색: 포커스 안 된 panel이라 커서/선택/호버 없음(default 전경/배경만). config_palette는 ANSI 16색
+            // 비활성 panel 색: 포커스 안 된 panel이라 커서/선택 없음(default 전경/배경만). **단 Cmd+hover 링크 밑줄은
+            // 예외** — hover는 포커스가 아니라 포인터 위치를 따르므로 아래 루프가 pane별로 pane_colors.hover_link를 채운다.
+            // config_palette는 ANSI 16색
             // base(theme.palette) — 비활성 pane도 자기 OSC4(palette)를 쓰되, OSC4가 없으면 이 config base로 폴백한다
             // (pane_colors가 inactive_colors를 복사해 쓰므로 여기 한 곳에 둔다). appearance는 세션 불변·소유라 포인터 안전.
             const inactive_colors: metal_frame.CellColors = .{
@@ -25587,6 +25622,10 @@ pub const AppSession = struct {
                         const pane_rev = pane_core.reverseScreen(); // DECSCNM(G9) per-pane
                         const pane_fg = pane_core.defaultFgOverride();
                         const pane_bg = pane_core.defaultBgOverride();
+                        // Cmd+hover 밑줄은 **포인터 아래 pane**의 것이므로 비활성 pane에도 그린다(hover 판정 paneTargetAt과
+                        // 짝 — 안 그리면 "밑줄 없는데 클릭은 열림"이 된다). 이 pane에 hover 중이 아니면 null이라 무비용.
+                        // urlSpanAtAbs가 코어를 읽으므로 락 아래에서 계산한다(활성 경로가 cell_colors를 락 아래 채우는 것과 동형).
+                        const pane_hover_link = self.hoverLinkSpanFor(pane_surface);
                         pane_surface.unlockCore(self.io);
                         const dl = dl_or catch continue;
                         // 비활성 pane도 자기 core의 OSC 4 팔레트·OSC 10/11 색 설정을 쓴다(둘 다 per-터미널 상태). collect는
@@ -25595,6 +25634,7 @@ pub const AppSession = struct {
                         var pane_colors = inactive_colors;
                         pane_colors.palette = pane_palette_ptr;
                         pane_colors.screen_reverse = pane_rev;
+                        pane_colors.hover_link = pane_hover_link; // 이 pane에 Cmd+hover 중인 링크 밑줄(없으면 null)
                         pane_colors.blink_on = !self.appearance.blink_text or self.blink_visible; // blink 위상(전역, config 게이트)
                         if (pane_fg) |fg| pane_colors.default_fg = fg;
                         if (pane_bg) |bg| pane_colors.default_bg = bg;
@@ -51372,6 +51412,101 @@ test "urlModifierHeld: config url-click-modifier가 mods 비트와 매칭 (F1-5)
     try std.testing.expect(!session.urlModifierHeld(8));
 }
 
+// 링크 클릭·hover는 **포인터 아래 pane**이 소유한다(휠과 같은 paneTargetAt 라우팅). 옛 코드는 활성 pane에
+// 고정(activeSurface + active_pane_rect)이라, split에서 비활성 pane의 링크를 Cmd+클릭해도 활성 pane의 엉뚱한
+// 셀(pxToCell이 grid 안으로 clamp)에서 찾아 아무것도 안 열렸다. 밑줄도 같은 규율이라 hover한 pane에만 뜬다
+// (활성 pane에 stale 밑줄이 뜨면 "밑줄 보이는 곳 = 열리는 곳"이 깨진다). 실 init/split이라 macOS 게이트.
+test "링크 클릭·hover는 포인터 아래 pane에서 찾는다(비활성 pane 회귀)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    session.window_padding_px = .{};
+    _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
+    try session.splitActivePane(.horizontal); // 좌(기존, 비활성)·우(새, 활성)
+
+    var lr: std.ArrayList(PaneTree.LeafRect) = .empty;
+    defer lr.deinit(allocator);
+    try session.activeTabLeafRects(allocator, session.termRect(), &lr);
+    const left_surface = lr.items[0].leaf.activeTerm().surface;
+    try std.testing.expect(left_surface != session.activeSurface()); // 왼쪽 = 비활성
+
+    // 비활성(왼쪽) pane의 첫 행에만 링크를 둔다. 활성 pane은 빈 화면이라, 옛 동작(활성 고정)이면 무엇을 눌러도 빈 결과다.
+    try left_surface.core.write("https://a.co");
+    const body = session.paneTermRect(lr.items[0].rect);
+    const cw: f64 = @floatFromInt(session.cell_width_px);
+    const ch: f64 = @floatFromInt(session.cell_height_px);
+    const x = @as(f64, @floatFromInt(body.x)) + 3.5 * cw; // URL 안(col 3)
+    const y = @as(f64, @floatFromInt(body.y)) + 0.5 * ch; // 첫 행
+
+    // 클릭(Cmd=32): 비활성 pane의 URL이 그대로 나온다.
+    try std.testing.expectEqualStrings("https://a.co", session.urlAt(x, y, 32));
+
+    // hover: 커서는 link이고, 밑줄 span은 **hover한 pane에만** 달린다(활성 pane엔 null).
+    try std.testing.expectEqual(CursorKind.link, session.hoverCursor(x, y, 32));
+    try std.testing.expect(session.hoverLinkSpanFor(left_surface) != null);
+    try std.testing.expect(session.hoverLinkSpanFor(session.activeSurface()) == null);
+
+    // 활성(오른쪽) pane의 같은 상대 위치는 빈 화면이라 링크가 아니다 — hit-test가 pane을 실제로 가르는지.
+    const right_body = session.paneTermRect(lr.items[1].rect);
+    const rx = @as(f64, @floatFromInt(right_body.x)) + 3.5 * cw;
+    try std.testing.expectEqualStrings("", session.urlAt(rx, y, 32));
+    try std.testing.expectEqual(CursorKind.text, session.hoverCursor(rx, y, 32));
+    try std.testing.expect(session.hoverLinkSpanFor(left_surface) == null); // hover가 떠나면 밑줄도 사라진다
+}
+
+// 사용자 제보의 루트커즈: 브라우저(web Term) 패널이 **활성**이면 터미널 pane의 링크가 아예 안 열렸다. 활성 web
+// Term의 surface는 빈 sentinel core라(createWebTerm), 활성 고정 조회는 좌표가 어디든 (0,0) 빈 셀만 봤다.
+// 포인터 아래 pane 라우팅이면 브라우저가 활성이어도 옆 터미널의 링크가 정상으로 열린다. 실 init/split이라 macOS 게이트.
+test "브라우저(web Term)가 활성이어도 옆 터미널 pane의 링크가 열린다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    session.window_padding_px = .{};
+    _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
+    try session.splitActivePane(.horizontal); // 좌(터미널)·우(활성)
+
+    var lr: std.ArrayList(PaneTree.LeafRect) = .empty;
+    defer lr.deinit(allocator);
+    try session.activeTabLeafRects(allocator, session.termRect(), &lr);
+    const term_surface = lr.items[0].leaf.activeTerm().surface;
+    try term_surface.core.write("https://a.co");
+
+    // 오른쪽 pane에 browser web Term을 열고 활성으로 둔다(제보 상황 — 브라우저를 클릭해 포커스가 그쪽에 있는 상태).
+    _ = try session.appendWebTermInActivePane(.browser);
+    try std.testing.expect(session.activePane().activeTerm().kind == .web);
+    // sentinel은 빈 core다(createWebTerm이 1×1 요청 → clampGridSize가 cols 최소 2로 올려 2×1). 화면이 없으니
+    // 활성 고정 조회는 좌표와 무관하게 늘 빈 결과였다.
+    try std.testing.expectEqual(@as(u16, 2), session.activeSurface().core.size.cols);
+    try std.testing.expectEqual(@as(u16, 1), session.activeSurface().core.size.rows);
+
+    const body = session.paneTermRect(lr.items[0].rect);
+    const cw: f64 = @floatFromInt(session.cell_width_px);
+    const ch: f64 = @floatFromInt(session.cell_height_px);
+    const x = @as(f64, @floatFromInt(body.x)) + 3.5 * cw;
+    const y = @as(f64, @floatFromInt(body.y)) + 0.5 * ch;
+    try std.testing.expectEqualStrings("https://a.co", session.urlAt(x, y, 32));
+    try std.testing.expectEqual(CursorKind.link, session.hoverCursor(x, y, 32));
+    try std.testing.expect(session.hoverLinkSpanFor(term_surface) != null);
+}
+
 // 휠은 '커서 아래' surface가 소유한다(Ghostty/Warp) — 포커스(활성) pane이 마우스 트래킹 앱(vim/tmux 등)이어도,
 // 커서가 옆 비활성 셸 pane 위면 그 셸의 스크롤백이 움직이고(트래킹이 휠을 가로채지 않음) 포커스도 안 바뀐다.
 // 반대로 활성·트래킹 pane 본문 위 휠은 앱이 소비해 스크롤백이 안 움직인다. 실 init/split이라 macOS 게이트.
@@ -58204,17 +58339,17 @@ test "host-backed hover: host가 실어 준 링크로 밑줄과 링크 커서가
     const on_url_x = pxOf(rect.x, cw, 10);
     const row0_y = pxOf(rect.y, ch, 0);
     try std.testing.expectEqual(CursorKind.link, session.hoverCursor(on_url_x, row0_y, 32));
-    const span = session.hoverLinkSpan() orelse return error.TestUnexpectedResult;
+    const span = session.hoverLinkSpanFor(session.activeSurface()) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(u16, 5), span.start.col);
     try std.testing.expectEqual(@as(u16, 28), span.end.col);
 
     // 같은 행이라도 span 밖(col 2)이면 링크가 아니다 — 범위 판정이 실제로 걸리는지.
     try std.testing.expectEqual(CursorKind.text, session.hoverCursor(pxOf(rect.x, cw, 2), row0_y, 32));
-    try std.testing.expect(session.hoverLinkSpan() == null);
+    try std.testing.expect(session.hoverLinkSpanFor(session.activeSurface()) == null);
 
     // 수식키가 없으면 밑줄을 띄우지 않는다(로컬과 같은 게이트 — urlModifierHeld 단일 판정).
     try std.testing.expectEqual(CursorKind.text, session.hoverCursor(on_url_x, row0_y, 0));
-    try std.testing.expect(session.hoverLinkSpan() == null);
+    try std.testing.expect(session.hoverLinkSpanFor(session.activeSurface()) == null);
 }
 
 // host는 client config를 모르므로 **최대 집합**으로 계산해 보내고, 무엇을 그릴지는 client가 정한다. 이 필터가
@@ -58319,15 +58454,15 @@ test "로컬 hover: client core를 직접 분류해 밑줄과 링크 커서가 �
     const row0 = @as(f64, @floatFromInt(rect.y)) + 0.5 * ch;
 
     try std.testing.expectEqual(CursorKind.link, session.hoverCursor(on_url, row0, 32));
-    const span = session.hoverLinkSpan() orelse return error.TestUnexpectedResult;
+    const span = session.hoverLinkSpanFor(session.activeSurface()) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(u16, 3), span.start.col); // "go " 다음 토큰 전체가 밑줄
     try std.testing.expectEqual(@as(u16, 26), span.end.col);
 
     // 링크 밖·수식키 없음은 밑줄 없음(로컬 게이트도 그대로).
     try std.testing.expectEqual(CursorKind.text, session.hoverCursor(@as(f64, @floatFromInt(rect.x)) + 1.5 * cw, row0, 32));
-    try std.testing.expect(session.hoverLinkSpan() == null);
+    try std.testing.expect(session.hoverLinkSpanFor(session.activeSurface()) == null);
     try std.testing.expectEqual(CursorKind.text, session.hoverCursor(on_url, row0, 0));
-    try std.testing.expect(session.hoverLinkSpan() == null);
+    try std.testing.expect(session.hoverLinkSpanFor(session.activeSurface()) == null);
 }
 
 // host-backed(원격) Term의 **버튼 없는 motion 리포팅(DECSET 1003)** 회귀 가드. 클릭 리포팅은 관측(observation)의

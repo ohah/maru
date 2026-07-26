@@ -1693,9 +1693,27 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
       않으며 error response에서는 local observed size를 갱신하지 않는다.
       exact/cap+1, repeated max, failed register/resize rollback, unregister 후 재사용 fixture가 Debug/ReleaseFast에서
       green이어야 다음 multi-fd wiring으로 간다.
-    - **T0b2b — daemon poll owner wiring:** listener와 bounded `connection_turn.Client` 32개를 실제 daemon의 단일
+    - **T0b2b — daemon poll owner wiring (구현):** listener와 bounded `connection_turn.Client` 32개를 실제 daemon의 단일
       poll owner에 연결하고 accept cap, one-turn fairness, cadence 재예약, upgrade admission/drain을 process fixture로
-      닫는다.
+      닫는다. owner는 `pollfd[0]`을 listener, 나머지를 `ReactorCore` admission index에 대응시키고 kernel read/write
+      readiness와 20ms producer sweep을 같은 `ReactorCore.nextReady` round-robin 입력으로 합친다. 한 owner iteration은
+      선택된 client의 bounded read, bounded write, subscription producer 한 turn만 실행한다. cadence가 시작되면
+      connection별 stream 목록을 한 번 snapshot/sort하고 현재 tracker 수만큼 synthetic producer readiness를 남겨
+      poll timeout 0으로 재예약한다. 각 후속 turn은 snapshot의 정확히 한 producer만 소비하므로 attachment마다
+      재할당·재정렬하지 않고 metadata/urgent output도 attachment 수×20ms로 늦어지지 않는다. parser에 이미 완성됐지만
+      64-frame read turn cap 뒤 남은 frame도 synthetic read readiness로 재예약한다.
+      listener ready에서도 client 하나만 accept하고 33번째 fd는 `Client.create`의 admission 실패 경로가 닫는다.
+      full 상태의 overflow accept는 20 ms에 한 번으로 제한해 connect flood가 zero-time accept/close loop를 만들지 않는다.
+      기존 32개 client와 그 queue/subscription은 그대로 유지한다. accept한 fd는 nonblocking/CLOEXEC/NOSIGPIPE,
+      same-login-UID 검사를 모두 통과한 뒤에만 stable heap `Client`가 된다.
+      upgrade accepted reply의 마지막 byte가 drain돼 `ArmedUpgrade {gate_preclosed=true}`가 나오면 owner는 신규 accept를
+      중단하고 모든 client를 canonical `destroy` 경로로 닫아 queue/dispatch/subscription/attachment를 0으로 만든 뒤에만
+      typed marker를 outer coordinator에 넘긴다. outer coordinator는 반드시 `freezePreclosed`를 사용한다. retryable
+      pre-freeze 실패는 preclosed admission gate를 다시 열어 host serving을 복구한다. legacy serial serve/완료 marker
+      API는 제거해 poll owner가 connection count와 `ArmedUpgrade`의 단일 권위다. normal launch와 restored launch가
+      같은 poll owner/typed upgrade consumer를 공유하며, canonical GUI connection을 유지한 채 별도
+      ephemeral `runtime.inventory`가 끝나는 forked process fixture, cap+1 기존 연결 생존, slow/partial sibling 격리,
+      same-PID upgrade preclosed drain이 green이어야 구현으로 표시한다.
     - **T0b2c — cross-connection lifecycle convergence:** 한 connection의 terminate가 다른 connection의
       attachment/tracker를 ended→detach로 수렴시키고 stale controller lease나 무한 resync retry를 남기지 않는
       multi-client process fixture를 닫는다.

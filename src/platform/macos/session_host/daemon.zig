@@ -34,6 +34,7 @@ const code_signature = @import("code_signature.zig");
 const upgrade_owner = @import("upgrade_owner.zig");
 const upgrade_executor = @import("upgrade_executor.zig");
 const upgrade_loop = @import("upgrade_loop.zig");
+const poll_owner = @import("poll_owner.zig");
 
 pub const RunError = socket_server.BindError || error{ OutOfMemory, OwnerLeaseFailed, ManifestFailed };
 
@@ -64,7 +65,7 @@ pub fn runSessionHost(
     dir_path: [:0]const u8,
     socket_path: [:0]const u8,
 ) RunError!void {
-    return runSessionHostImpl(allocator, io, dir_path, socket_path, null);
+    return runSessionHostImpl(allocator, io, dir_path, socket_path, null, false);
 }
 
 /// Product host별 discovery 경로. Launcher가 먼저 발급한 host_id가 short endpoint, owner lease, manifest, hello에서
@@ -79,7 +80,24 @@ pub fn runSessionHostWithIdentity(
     if (host_id == 0) return error.ManifestFailed;
     short_endpoint.validateCurrentSocketPath(socket_path, host_id) catch return error.ManifestFailed;
     short_endpoint.prepareCurrentUserNamespace() catch return error.ManifestFailed;
-    return runSessionHostImpl(allocator, io, session_dir, socket_path, host_id);
+    return runSessionHostImpl(allocator, io, session_dir, socket_path, host_id, false);
+}
+
+/// Process fixture entrypoint. It changes only the release-signer decision; staging, typed
+/// readiness marker, coordinator, real exec, restore activation, and poll owners remain product
+/// code. A non-test artifact cannot reference this declaration.
+pub fn runSessionHostWithIdentityTestAuthorizer(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    session_dir: [:0]const u8,
+    socket_path: [:0]const u8,
+    host_id: u128,
+) RunError!void {
+    if (!builtin.is_test) @compileError("test upgrade authorizer is test-only");
+    if (host_id == 0) return error.ManifestFailed;
+    short_endpoint.validateCurrentSocketPath(socket_path, host_id) catch return error.ManifestFailed;
+    short_endpoint.prepareCurrentUserNamespace() catch return error.ManifestFailed;
+    return runSessionHostImpl(allocator, io, session_dir, socket_path, host_id, true);
 }
 
 fn runSessionHostImpl(
@@ -88,6 +106,7 @@ fn runSessionHostImpl(
     dir_path: [:0]const u8,
     socket_path: [:0]const u8,
     exact_host_id: ?u128,
+    test_allow_any_upgrade_target: bool,
 ) RunError!void {
     // 제품 launcher argv를 실제 `maru` 바이너리까지 관통하는 process smoke가 detached orphan을 남기지 않도록,
     // 테스트가 명시한 경우 첫 client 연결을 처리한 뒤 정상 종료한다. 일반 제품 환경에는 이 변수가 없어 기존의 영속
@@ -155,9 +174,20 @@ fn runSessionHostImpl(
         .io = io,
         .current_executable = executable_path,
     };
+    const test_authorizer: upgrade_target.Authorizer = .{
+        .ctx = @ptrFromInt(1),
+        .allowed = struct {
+            fn allowed(_: *anyopaque, _: [:0]const u8) bool {
+                return true;
+            }
+        }.allowed,
+    };
     var target_stager = upgrade_target.Stager{
         .owner_dir = host_dir,
-        .authorizer = signature_authorizer.ops(),
+        .authorizer = if (test_allow_any_upgrade_target)
+            test_authorizer
+        else
+            signature_authorizer.ops(),
     };
     var upgrade_attempt_owner: ?upgrade_owner.UpgradeOwner = null;
     defer if (upgrade_attempt_owner) |*owner| owner.deinit();
@@ -242,15 +272,15 @@ fn runSessionHostImpl(
         }
     }.tick;
 
+    var fd_owner = poll_owner.Owner.init(allocator, io, &server) catch return error.OutOfMemory;
+    defer fd_owner.deinit();
     while (true) {
         server.tickOwner();
-        switch (server.pollReady(poll_timeout_ms)) {
-            .ready => {
-                if (upgrade_loop.serveOne(&server) == .fail_stop)
-                    return error.ManifestFailed;
-                if (upgrade_attempt_owner != null and
-                    rollback_authority != null and
-                    upgrade_loop.processCompleted(&server, .{
+        switch (fd_owner.pollOnce(poll_timeout_ms) catch return error.OutOfMemory) {
+            .upgrade_ready => {
+                const marker = fd_owner.takeArmedUpgrade() orelse return error.ManifestFailed;
+                if (upgrade_attempt_owner == null or rollback_authority == null or
+                    upgrade_loop.processPreclosed(marker, .{
                         .allocator = allocator,
                         .io = io,
                         .owner = &upgrade_attempt_owner.?,
@@ -265,17 +295,15 @@ fn runSessionHostImpl(
                         .socket_path = socket_path,
                     }) == .fail_stop)
                     return error.ManifestFailed;
-                if (test_oneshot) break;
             },
-            .timeout => {
-                // test runner가 client 연결 전에 중단돼도 detached orphan을 남기지 않는다(25×200ms=5s).
-                if (test_oneshot) {
-                    test_idle_ticks += 1;
-                    if (test_idle_ticks >= 25) break;
-                }
+            .idle => if (test_oneshot) {
+                test_idle_ticks += 1;
+                if (test_idle_ticks >= 25) break;
             },
-            .broken => break, // listen fd 회복 불가 — 루프 종료.
+            .progress => {},
+            .listener_broken => break,
         }
+        if (test_oneshot and fd_owner.total_admitted != 0 and fd_owner.activeCount() == 0) break;
     }
 }
 

@@ -83,7 +83,8 @@ pub const Client = struct {
     created_ns: u64,
     last_activity_ns: u64,
     sync_fail_once: bool = false,
-    delta_stream_cursor: usize = 0,
+    producer_streams: []u64 = &.{},
+    producer_sweep_cursor: usize = 0,
 
     pub fn create(
         allocator: std.mem.Allocator,
@@ -147,6 +148,7 @@ pub const Client = struct {
         self.fd = -1;
         self.connection.deinit();
         self.trackers.deinit(self.allocator);
+        self.allocator.free(self.producer_streams);
         self.parser.deinit();
         self.reactor.closeConnection(self.admission) catch unreachable;
         const allocator = self.allocator;
@@ -159,7 +161,8 @@ pub const Client = struct {
     }
 
     pub fn hasBufferedReadWork(self: *const Client) bool {
-        return self.parser.bufferState() == .complete_or_error;
+        return !self.isClosing() and self.close_after_flush == null and
+            self.parser.bufferState() == .complete_or_error;
     }
 
     pub fn isClosing(self: *const Client) bool {
@@ -167,6 +170,35 @@ pub const Client = struct {
             .open => false,
             .closing => true,
         };
+    }
+
+    /// Captures and sorts one cadence epoch exactly once. Subsequent owner turns consume one entry
+    /// each, avoiding an allocation+sort and whole-stream scan for every subscription.
+    pub fn beginProducerSweep(self: *Client, now_ns: u64) usize {
+        self.allocator.free(self.producer_streams);
+        self.producer_streams = self.connection.localStreams(self.allocator) catch {
+            self.producer_streams = &.{};
+            self.beginClose(.resource_exhausted);
+            return 1;
+        };
+        std.mem.sort(u64, self.producer_streams, {}, std.sort.asc(u64));
+        self.producer_sweep_cursor = 0;
+        if (self.producer_streams.len == 0) return 1;
+
+        const slot = self.reactor.get(self.admission) catch return 1;
+        for (self.producer_streams, 0..) |candidate, index| {
+            const candidate_tracker = self.trackers.get(candidate) orelse continue;
+            const state = slot.screenState(candidate_tracker) catch continue;
+            if (state == .invalidated and
+                self.connection.resyncPending(candidate) and
+                (slot.canAttemptResync(candidate_tracker) catch false) and
+                (slot.resyncAttemptReady(candidate_tracker, now_ns) catch false))
+            {
+                self.producer_sweep_cursor = index;
+                break;
+            }
+        }
+        return self.producer_streams.len;
     }
 
     /// T0b2 owner calls this before canonical destroy, but publishes the host-global completed
@@ -335,72 +367,47 @@ pub const Client = struct {
         defer if (lease) |*held| held.release();
         slot.beginDispatch() catch return self.beginClose(.resource_exhausted);
         defer slot.endDispatch() catch unreachable;
-        const streams = self.connection.localStreams(self.allocator) catch {
+        if (self.producer_streams.len == 0 and self.trackers.count() != 0)
+            _ = self.beginProducerSweep(now_ns);
+        if (self.producer_streams.len == 0) return;
+        // Exactly one captured producer candidate per owner turn. Missing trackers mean the
+        // subscription detached after the cadence snapshot and are skipped without harming peers.
+        const stream = self.producer_streams[
+            self.producer_sweep_cursor % self.producer_streams.len
+        ];
+        self.producer_sweep_cursor =
+            (self.producer_sweep_cursor + 1) % self.producer_streams.len;
+        const tracker = self.trackers.get(stream) orelse return;
+        var tracker_state = slot.screenState(tracker) catch
+            return self.beginClose(.socket_error);
+        const resync_pending = self.connection.resyncPending(stream);
+        if (resync_pending and tracker_state == .valid) {
+            slot.invalidateAndPurgeScreenTracker(tracker) catch
+                return self.beginClose(.socket_error);
+            self.connection.markResyncDeliveryPurged(stream);
+            tracker_state = .invalidated;
+        }
+        if (tracker_state == .resync_draining) return;
+        if (tracker_state == .invalidated) {
+            if (!resync_pending) return;
+            if (!(slot.canAttemptResync(tracker) catch
+                return self.beginClose(.socket_error))) return;
+            if (!(slot.beginResyncAttempt(tracker, now_ns) catch
+                return self.beginClose(.socket_error))) return;
+        }
+        var maybe_output = self.connection.collectOutputForLocalStream(stream) catch {
             self.beginClose(.resource_exhausted);
             return;
         };
-        defer self.allocator.free(streams);
-        if (streams.len == 0) return;
-        std.mem.sort(u64, streams, {}, std.sort.asc(u64));
-        // A recovery that can run owns this turn so healthy siblings cannot consume its available
-        // headroom first. Backoff and already-admitted draining are deliberately skipped here:
-        // neither state needs fresh capacity, so blocking siblings would turn one failed snapshot
-        // producer into connection-wide starvation.
-        for (streams, 0..) |candidate, index| {
-            const candidate_tracker = self.trackers.get(candidate) orelse
-                return self.beginClose(.socket_error);
-            const state = slot.screenState(candidate_tracker) catch
-                return self.beginClose(.socket_error);
-            if (state == .invalidated and
-                self.connection.resyncPending(candidate) and
-                (slot.canAttemptResync(candidate_tracker) catch
-                    return self.beginClose(.socket_error)) and
-                (slot.resyncAttemptReady(candidate_tracker, now_ns) catch
-                    return self.beginClose(.socket_error)))
-            {
-                self.delta_stream_cursor = index;
-                break;
-            }
+        if (maybe_output) |*output| {
+            const admitted = self.adoptSubscriptionTurn(stream, output.takeFrames());
+            if (admitted)
+                output.commit(&self.connection)
+            else
+                output.rollback(&self.connection);
+            if (self.isClosing()) return;
         }
-        // Exactly one producer per owner turn. T0b2 schedules the remaining cursor sweep without
-        // waiting for another 20 ms timer tick, preserving metadata latency without starving an fd.
-        var scanned: usize = 0;
-        while (scanned < streams.len) : (scanned += 1) {
-            const stream = streams[self.delta_stream_cursor % streams.len];
-            self.delta_stream_cursor = (self.delta_stream_cursor + 1) % streams.len;
-            const tracker = self.trackers.get(stream) orelse
-                return self.beginClose(.socket_error);
-            var tracker_state = slot.screenState(tracker) catch
-                return self.beginClose(.socket_error);
-            const resync_pending = self.connection.resyncPending(stream);
-            if (resync_pending and tracker_state == .valid) {
-                slot.invalidateAndPurgeScreenTracker(tracker) catch
-                    return self.beginClose(.socket_error);
-                self.connection.markResyncDeliveryPurged(stream);
-                tracker_state = .invalidated;
-            }
-            if (tracker_state == .resync_draining) continue;
-            if (tracker_state == .invalidated) {
-                if (!resync_pending) continue;
-                if (!(slot.canAttemptResync(tracker) catch
-                    return self.beginClose(.socket_error))) return;
-                if (!(slot.beginResyncAttempt(tracker, now_ns) catch
-                    return self.beginClose(.socket_error))) continue;
-            }
-            var maybe_output = self.connection.collectOutputForLocalStream(stream) catch {
-                self.beginClose(.resource_exhausted);
-                return;
-            };
-            if (maybe_output) |*output| {
-                const admitted = self.adoptSubscriptionTurn(stream, output.takeFrames());
-                if (admitted)
-                    output.commit(&self.connection)
-                else
-                    output.rollback(&self.connection);
-                if (self.isClosing()) return;
-            }
-            return;
-        }
+        return;
     }
 
     /// A producer turn belongs to exactly one subscription. Ordinary output is admitted in order;
@@ -1345,7 +1352,6 @@ test "failed recovery backoff does not pin round robin ahead of healthy siblings
     client.readReady(10);
 
     runtime_ops.snapshot_fail_count = 1;
-    client.delta_stream_cursor = 0;
     client.tick(100);
     try testing.expect(client.connection.attachments.get(2).?.resync_pending);
     try testing.expectEqualStrings("SNAPSHOT-BYTES", client.connection.attachments.get(1).?.base.?);

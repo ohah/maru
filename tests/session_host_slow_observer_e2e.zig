@@ -707,7 +707,7 @@ fn connectRetry(
     io: std.Io,
 ) !session_host.client.Client {
     while (monotonicNow(io) < deadline_ns) {
-        return session_host.client.Client.connect(allocator, socket, "gui") catch |err| switch (err) {
+        return session_host.client.Client.connect(allocator, socket, .gui) catch |err| switch (err) {
             error.EndpointAbsent, error.ConnectionClosed, error.EndpointTransient => {
                 _ = usleep(2_000);
                 continue;

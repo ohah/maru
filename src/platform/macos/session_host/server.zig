@@ -275,6 +275,14 @@ pub const Action = union(enum) {
         exhausted_reply: []u8,
         revocation: ?Revocation = null,
     };
+    pub const ResizeRequested = struct {
+        prepared: reg.PreparedResize,
+        runtime_id: u128,
+        success_reply: []u8,
+        internal_reply: []u8,
+        exhausted_reply: []u8,
+        event_body: ?[]u8,
+    };
 
     reply: []u8,
     reply_and_close: []u8,
@@ -304,6 +312,9 @@ pub const Action = union(enum) {
     /// daemon poll owner resolves the global subscription, atomically admits every control frame,
     /// and only then commits the prepared registry transition in the same dispatch turn.
     controller_transition_requested: ControllerTransitionRequested,
+    /// Canonical resize and its all-subscription event are committed only by the daemon owner
+    /// after every destination queue has admitted the complete response/event batch.
+    resize_requested: ResizeRequested,
 };
 
 pub const OutboundClass = union(enum) {
@@ -2040,12 +2051,10 @@ pub const Connection = struct {
     }
 
     /// `runtime.resize`: controller가 canonical PTY size를 바꾼다(§9). registry가 controller/sequence를 검증하고, 실제
-    /// 크기가 바뀔 때만 runtime_ops(실 `TerminalCore`+`TIOCSWINSZ`)에 적용한 뒤 applied size/generation을 응답한다.
-    /// observer의 resize는 unauthorized, stale sequence는 `{stale:true}`. 모든 subscription으로의 `runtime.resized`
-    /// broadcast는 e2d(event fan-out)에서 얹는다. backend 성공 뒤에만 registry를 commit하며, 부분 적용 가능성이 있는
-    /// product backend는 실패 시 runtime을 fail-stop terminate해 실제 resource와 ledger를 다시 일치시킨다.
+    /// 크기가 바뀔 때만 owner가 response+event 전체를 선예약한 뒤 runtime_ops(실 `TerminalCore`+`TIOCSWINSZ`)에
+    /// 적용하고 registry를 commit한다. observer의 resize는 unauthorized, stale sequence는 `{stale:true}`.
     fn dispatchResize(self: *Connection, request_id: u64, params: ?std.json.ObjectMap) HandleError!Action {
-        const ops = self.runtime_ops orelse return self.replyError(request_id, .unauthorized);
+        _ = self.runtime_ops orelse return self.replyError(request_id, .unauthorized);
         const p = params orelse return self.replyError(request_id, .invalid_request);
         const stream = intFieldU64(p, "stream_id") orelse return self.replyError(request_id, .invalid_request);
         const cols = intField(p, "cols") orelse return self.replyError(request_id, .invalid_request);
@@ -2054,22 +2063,20 @@ pub const Connection = struct {
         const sub = self.attachments.get(stream) orelse return self.replyError(request_id, .invalid_request);
         const runtime_id = sub.runtime_id;
 
-        const outcome = self.registry.resizeSubscription(
+        var prepared = self.registry.prepareResizeSubscription(
             runtime_id,
             sub.subscription_id,
             cols,
             rows,
             seq,
-            ops.ctx,
-            ops.resize,
         ) catch |e| switch (e) {
             error.NotController => return self.replyError(request_id, .unauthorized),
             error.RuntimeNotFound => return self.replyError(request_id, .runtime_not_found),
             error.InvalidGridSize => return self.replyError(request_id, .invalid_request),
-            error.AggregateGridLimitReached => return self.replyError(request_id, .resource_exhausted),
+            error.AggregateGridLimitReached, error.ResizeGenerationExhausted => return self.replyError(request_id, .resource_exhausted),
             else => return self.replyError(request_id, .internal),
         };
-        switch (outcome) {
+        switch (prepared.preview()) {
             .stale => {
                 const body = try self.stringify(.{ .result = .{ .stale = true } });
                 defer self.allocator.free(body);
@@ -2084,9 +2091,46 @@ pub const Connection = struct {
                     .changed = a.changed,
                 } });
                 defer self.allocator.free(body);
-                return self.replyResult(request_id, body);
+                const success = try self.encodeSmall(.response, request_id, 0, body);
+                errdefer self.allocator.free(success);
+                const internal = try self.replyErrorFrame(request_id, .internal);
+                errdefer self.allocator.free(internal);
+                const exhausted = try self.replyErrorFrame(request_id, .resource_exhausted);
+                errdefer self.allocator.free(exhausted);
+                var event_body: ?[]u8 = null;
+                errdefer if (event_body) |bytes| self.allocator.free(bytes);
+                if (a.changed) {
+                    const runtime_hex = try self.hex128(runtime_id);
+                    defer self.allocator.free(runtime_hex);
+                    event_body = try self.stringify(.{
+                        .event = "runtime.resized",
+                        .data = .{
+                            .runtime_id = runtime_hex,
+                            .cols = a.cols,
+                            .rows = a.rows,
+                            .resize_generation = a.resize_generation,
+                            .reason = "controller",
+                        },
+                    });
+                }
+                return .{ .resize_requested = .{
+                    .prepared = prepared,
+                    .runtime_id = runtime_id,
+                    .success_reply = success,
+                    .internal_reply = internal,
+                    .exhausted_reply = exhausted,
+                    .event_body = event_body,
+                } };
             },
         }
+    }
+
+    pub fn discardPreparedResize(self: *Connection, resize: *Action.ResizeRequested) void {
+        self.allocator.free(resize.success_reply);
+        self.allocator.free(resize.internal_reply);
+        self.allocator.free(resize.exhausted_reply);
+        if (resize.event_body) |body| self.allocator.free(body);
+        resize.* = undefined;
     }
 
     /// `input_bytes`: controller가 보낸 terminal input을 runtime PTY로 보낸다(§9 `input` capability). 응답 없는 stream
@@ -2991,6 +3035,39 @@ fn runWire(conn: *Connection, wire: []const u8) !FedResult {
             try rp.push(transition.success_reply);
             const out = (try rp.next()).?;
             return .{ .action = "controller_transition_requested", .frame = out };
+        },
+        .resize_requested => |resize_value| {
+            var resize = resize_value;
+            var response = resize.success_reply;
+            const preview = resize.prepared.preview();
+            const backend_ok = switch (preview) {
+                .stale => unreachable,
+                .applied => |applied| if (applied.changed) blk: {
+                    const ops = conn.runtime_ops orelse break :blk false;
+                    ops.resize(
+                        ops.ctx,
+                        resize.runtime_id,
+                        applied.cols,
+                        applied.rows,
+                    ) catch break :blk false;
+                    break :blk true;
+                } else true,
+            };
+            if (backend_ok) {
+                _ = conn.registry.commitResizeSubscription(&resize.prepared);
+                allocator.free(resize.internal_reply);
+            } else {
+                response = resize.internal_reply;
+                allocator.free(resize.success_reply);
+            }
+            defer allocator.free(response);
+            allocator.free(resize.exhausted_reply);
+            if (resize.event_body) |body| allocator.free(body);
+            var rp = framing.FrameParser.init(allocator);
+            defer rp.deinit();
+            try rp.push(response);
+            const out = (try rp.next()).?;
+            return .{ .action = "resize_requested", .frame = out };
         },
         .prepared_notification => |prepared| {
             defer allocator.free(prepared.reply);

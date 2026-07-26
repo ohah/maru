@@ -19,6 +19,7 @@ const protocol = @import("protocol.zig");
 const remote_screen = @import("remote_screen.zig");
 const screen_assembler = @import("screen_assembler.zig");
 const observation_wire = @import("observation_wire.zig");
+const resize_wire = @import("resize_wire.zig");
 const core_command_wire = @import("core_command_wire.zig");
 
 /// host에서 가져온 대기 OSC 9/777 데스크톱 알림 한 건(§6.32). title/body는 owned(caller가 deinit).
@@ -40,6 +41,7 @@ pub const RemoteRuntime = struct {
     runtime_id_hex: [32]u8, // host 발급 runtime_id(hex) — terminate에 되먹인다.
     stream_id: u64, // attach가 발급한 stream — input/resize/delta 라우팅.
     resize_seq: u64, // 단조 증가 client_sequence — registry가 이하 sequence를 stale로 거부하므로 매 resize마다 올린다.
+    resize_generation: u64,
     // blocking `SurfaceRuntime.writeInput`의 key bytes와 그 사이 core command를 한 시간축으로 보존한다.
     // control.barrier는 그 명령보다 먼저 host에 도착해야 하는 direct_input byte prefix 끝이다.
     direct_input: std.ArrayListUnmanaged(u8),
@@ -85,6 +87,7 @@ pub const RemoteRuntime = struct {
         self.allocator = allocator;
         self.io = io;
         self.resize_seq = 0;
+        self.resize_generation = 0;
         self.direct_input = .empty;
         self.direct_input_offset = 0;
         self.pending_controls = .empty;
@@ -130,6 +133,7 @@ pub const RemoteRuntime = struct {
         self.allocator = allocator;
         self.io = io;
         self.resize_seq = 0;
+        self.resize_generation = 0;
         self.direct_input = .empty;
         self.direct_input_offset = 0;
         self.pending_controls = .empty;
@@ -439,21 +443,28 @@ pub const RemoteRuntime = struct {
         ResizeRejected,
         RuntimeNotFound,
         ResourceExhausted,
+        SequenceExhausted,
     };
 
     pub fn resize(self: *RemoteRuntime, cols: u16, rows: u16) ResizeError!void {
-        self.resize_seq += 1; // 단조 증가 — registry가 이하 sequence를 stale로 거부(첫 resize만 적용되는 버그 방지).
+        self.resize_seq = std.math.add(u64, self.resize_seq, 1) catch
+            return error.SequenceExhausted;
         var buf: [96]u8 = undefined;
         const params = std.fmt.bufPrint(&buf, "{{\"stream_id\":{d},\"cols\":{d},\"rows\":{d},\"client_sequence\":{d}}}", .{ self.stream_id, cols, rows, self.resize_seq }) catch return error.OutOfMemory;
         const resp = try self.callOrdered("runtime.resize", params);
         defer self.allocator.free(resp);
-        const reply = parseResizeReply(self.allocator, resp) catch |err| {
+        const reply = parseResizeReply(self.allocator, resp, self.resize_seq) catch |err| {
             if (err == error.ProtocolError) self.client.failClosed();
             return err;
         };
         switch (reply) {
             .stale => {},
-            .applied => |size| self.observation.size = size,
+            .applied => |applied| {
+                if (applied.resize_generation >= self.resize_generation) {
+                    self.resize_generation = applied.resize_generation;
+                    self.observation.size = applied.size;
+                }
+            },
         }
     }
 
@@ -510,6 +521,20 @@ pub const RemoteRuntime = struct {
                 // Latch before releasing the event. The next frame-pump turn admits one bounded,
                 // response-free stream ack; socket backpressure leaves the latch set for retry.
                 self.resync_needed = true;
+                continue;
+            }
+            if (std.mem.indexOf(
+                u8,
+                frame.payload,
+                "\"event\":\"runtime.resized\"",
+            ) != null) {
+                result.metadata = (try applyResizeEvent(
+                    self.allocator,
+                    frame.payload,
+                    self.runtime_id_hex,
+                    &self.resize_generation,
+                    &self.observation.size,
+                )) or result.metadata;
                 continue;
             }
             result.metadata = (try self.applyObservationJson(frame.payload)) or result.metadata;
@@ -1320,12 +1345,39 @@ pub const RemoteRuntime = struct {
 
 const ResizeReply = union(enum) {
     stale,
-    applied: terminal.Size,
+    applied: struct {
+        size: terminal.Size,
+        resize_generation: u64,
+        changed: bool,
+    },
 };
+
+fn applyResizeEvent(
+    allocator: std.mem.Allocator,
+    payload: []const u8,
+    runtime_id_hex: [32]u8,
+    generation: *u64,
+    size: *terminal.Size,
+) error{OutOfMemory}!bool {
+    const resized = resize_wire.parseEvent(allocator, payload) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.Invalid => return false,
+    };
+    var expected_id: [32]u8 = undefined;
+    _ = std.fmt.bufPrint(&expected_id, "{x:0>32}", .{resized.runtime_id}) catch
+        return false;
+    if (!std.mem.eql(u8, &expected_id, &runtime_id_hex) or
+        resized.resize_generation <= generation.*)
+        return false;
+    generation.* = resized.resize_generation;
+    size.* = .{ .cols = resized.cols, .rows = resized.rows };
+    return true;
+}
 
 fn parseResizeReply(
     allocator: std.mem.Allocator,
     payload: []const u8,
+    expected_sequence: u64,
 ) RemoteRuntime.ResizeError!ResizeReply {
     var parsed = std.json.parseFromSlice(std.json.Value, allocator, payload, .{}) catch |err| return switch (err) {
         error.OutOfMemory => error.OutOfMemory,
@@ -1374,22 +1426,30 @@ fn parseResizeReply(
         else => return error.ProtocolError,
     };
     switch (result.get("client_sequence") orelse return error.ProtocolError) {
-        .integer => |value| if (value < 0) return error.ProtocolError,
+        .integer => |value| if (value < 0 or
+            std.math.cast(u64, value) != expected_sequence) return error.ProtocolError,
         else => return error.ProtocolError,
     }
-    switch (result.get("resize_generation") orelse return error.ProtocolError) {
-        .integer => |value| if (value < 0) return error.ProtocolError,
+    const generation = switch (result.get("resize_generation") orelse return error.ProtocolError) {
+        .integer => |value| if (value >= 0)
+            std.math.cast(u64, value) orelse return error.ProtocolError
+        else
+            return error.ProtocolError,
         else => return error.ProtocolError,
-    }
-    switch (result.get("changed") orelse return error.ProtocolError) {
-        .bool => {},
+    };
+    const changed = switch (result.get("changed") orelse return error.ProtocolError) {
+        .bool => |value| value,
         else => return error.ProtocolError,
-    }
+    };
     if (cols_raw < 0 or rows_raw < 0) return error.ProtocolError;
     const cols = std.math.cast(u16, cols_raw) orelse return error.ProtocolError;
     const rows = std.math.cast(u16, rows_raw) orelse return error.ProtocolError;
     if (cols < 2 or rows < 1) return error.ProtocolError;
-    return .{ .applied = .{ .cols = cols, .rows = rows } };
+    return .{ .applied = .{
+        .size = .{ .cols = cols, .rows = rows },
+        .resize_generation = generation,
+        .changed = changed,
+    } };
 }
 
 fn shouldSendCoreCommand(runtime_core_command_v1: bool, command: core_command_wire.Command) bool {
@@ -1399,23 +1459,83 @@ fn shouldSendCoreCommand(runtime_core_command_v1: bool, command: core_command_wi
 test "remote runtime: resize reply preserves stale size and uses host-clamped applied size" {
     try std.testing.expectEqual(
         ResizeReply.stale,
-        try parseResizeReply(std.testing.allocator, "{\"result\":{\"stale\":true}}"),
+        try parseResizeReply(std.testing.allocator, "{\"result\":{\"stale\":true}}", 7),
     );
     try std.testing.expectEqual(
         terminal.Size{ .cols = 2, .rows = 1 },
         (try parseResizeReply(
             std.testing.allocator,
             "{\"result\":{\"cols\":2,\"rows\":1,\"client_sequence\":7,\"resize_generation\":3,\"changed\":true}}",
-        )).applied,
+            7,
+        )).applied.size,
     );
     try std.testing.expectError(
         error.ResourceExhausted,
-        parseResizeReply(std.testing.allocator, "{\"error\":\"resource_exhausted\"}"),
+        parseResizeReply(std.testing.allocator, "{\"error\":\"resource_exhausted\"}", 7),
     );
     try std.testing.expectError(
         error.ProtocolError,
-        parseResizeReply(std.testing.allocator, "{\"result\":{\"cols\":1,\"rows\":1,\"client_sequence\":7,\"resize_generation\":3,\"changed\":true}}"),
+        parseResizeReply(std.testing.allocator, "{\"result\":{\"cols\":1,\"rows\":1,\"client_sequence\":7,\"resize_generation\":3,\"changed\":true}}", 7),
     );
+    try std.testing.expectError(
+        error.ProtocolError,
+        parseResizeReply(
+            std.testing.allocator,
+            "{\"result\":{\"cols\":2,\"rows\":1,\"client_sequence\":8,\"resize_generation\":3,\"changed\":true}}",
+            7,
+        ),
+    );
+}
+
+test "remote runtime applies resize event gaps and ignores duplicate foreign or malformed state" {
+    const runtime_id: [32]u8 = "000000000000000000000000000000aa".*;
+    var generation: u64 = 0;
+    var size: terminal.Size = .{ .cols = 80, .rows = 24 };
+    const generation4 =
+        \\{"event":"runtime.resized","data":{"runtime_id":"000000000000000000000000000000aa","cols":100,"rows":30,"resize_generation":4,"reason":"controller"}}
+    ;
+    const generation9 =
+        \\{"event":"runtime.resized","data":{"runtime_id":"000000000000000000000000000000aa","cols":120,"rows":40,"resize_generation":9,"reason":"controller"}}
+    ;
+    try std.testing.expect(try applyResizeEvent(
+        std.testing.allocator,
+        generation4,
+        runtime_id,
+        &generation,
+        &size,
+    ));
+    try std.testing.expect(!try applyResizeEvent(
+        std.testing.allocator,
+        generation4,
+        runtime_id,
+        &generation,
+        &size,
+    ));
+    try std.testing.expect(try applyResizeEvent(
+        std.testing.allocator,
+        generation9,
+        runtime_id,
+        &generation,
+        &size,
+    ));
+    try std.testing.expectEqual(@as(u64, 9), generation);
+    try std.testing.expectEqual(terminal.Size{ .cols = 120, .rows = 40 }, size);
+    try std.testing.expect(!try applyResizeEvent(
+        std.testing.allocator,
+        \\{"event":"runtime.resized","data":{"runtime_id":"000000000000000000000000000000bb","cols":140,"rows":50,"resize_generation":10,"reason":"controller"}}
+    ,
+        runtime_id,
+        &generation,
+        &size,
+    ));
+    try std.testing.expect(!try applyResizeEvent(
+        std.testing.allocator,
+        "{\"event\":\"runtime.resized\"}",
+        runtime_id,
+        &generation,
+        &size,
+    ));
+    try std.testing.expectEqual(@as(u64, 9), generation);
 }
 
 test "remote runtime: extended core commands require capability while legacy scroll remains compatible" {

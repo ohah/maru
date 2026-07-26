@@ -66,6 +66,7 @@ pub const Options = struct {
     upgrade_preflight: ?OwnerUpgradePreflight = null,
     pressure_reclaim: ?OwnerPressureReclaim = null,
     controller_transition: ?OwnerControllerTransition = null,
+    resize: ?OwnerResize = null,
     now_ns: u64 = 0,
 };
 
@@ -91,6 +92,16 @@ pub const OwnerControllerTransition = struct {
         ctx: *anyopaque,
         requester: *Client,
         transition: server.Action.ControllerTransitionRequested,
+    ) bool,
+};
+
+pub const OwnerResize = struct {
+    ctx: *anyopaque,
+    /// Consumes every owned frame/body and the prepared token on both success and failure.
+    apply: *const fn (
+        ctx: *anyopaque,
+        requester: *Client,
+        resize: server.Action.ResizeRequested,
     ) bool,
 };
 
@@ -131,6 +142,7 @@ pub const Client = struct {
     upgrade_preflight: ?OwnerUpgradePreflight = null,
     pressure_reclaim: ?OwnerPressureReclaim = null,
     controller_transition: ?OwnerControllerTransition = null,
+    resize: ?OwnerResize = null,
     sync_fail_once: bool = false,
     control_admission_fail_once: bool = false,
     producer_streams: []u64 = &.{},
@@ -177,6 +189,7 @@ pub const Client = struct {
             .upgrade_preflight = options.upgrade_preflight,
             .pressure_reclaim = options.pressure_reclaim,
             .controller_transition = options.controller_transition,
+            .resize = options.resize,
         };
         self.connection.runtime_ops = options.runtime_ops;
         self.connection.upgrade_ops = options.upgrade_ops;
@@ -886,6 +899,15 @@ pub const Client = struct {
                 if (!owner.apply(owner.ctx, self, transition))
                     return self.beginClose(.resource_exhausted);
             },
+            .resize_requested => |resize_value| {
+                var resize = resize_value;
+                const owner = self.resize orelse {
+                    self.connection.discardPreparedResize(&resize);
+                    return self.beginClose(.resource_exhausted);
+                };
+                if (!owner.apply(owner.ctx, self, resize))
+                    return self.beginClose(.resource_exhausted);
+            },
         }
     }
 
@@ -1009,6 +1031,10 @@ pub const Client = struct {
             if (self.trackers.contains(stream)) continue;
             _ = try self.ensureTracker(stream);
         }
+    }
+
+    pub fn screenTracker(self: *const Client, stream: u64) ?slot_mod.ScreenTrackerKey {
+        return self.trackers.get(stream);
     }
 
     fn ensureTracker(

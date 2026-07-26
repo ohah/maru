@@ -47,7 +47,7 @@ pub const RemoteRuntime = struct {
     pending_controls: std.ArrayListUnmanaged(PendingControl),
     // shared transport hard failure를 이 runtime surface에 한 번만 투영한다. connection 하나를 여러 runtime이
     // 공유하므로 각 runtime pump가 자기 surface를 exited로 latch하되 매 frame 같은 read_error를 재방출하지 않는다.
-    transport_failed: bool,
+    pump_ended: bool,
     resync_needed: bool,
     observation: term_backend.RuntimeObservation, // host attach/event에서 받은 화면 외 full-state owned cache.
     remote_screen: remote_screen.RemoteScreen, // 조립기+cell 격자(surface의 화면 소스).
@@ -88,7 +88,7 @@ pub const RemoteRuntime = struct {
         self.direct_input = .empty;
         self.direct_input_offset = 0;
         self.pending_controls = .empty;
-        self.transport_failed = false;
+        self.pump_ended = false;
         self.resync_needed = false;
         self.observation = .{};
         errdefer self.observation.deinit(allocator);
@@ -133,7 +133,7 @@ pub const RemoteRuntime = struct {
         self.direct_input = .empty;
         self.direct_input_offset = 0;
         self.pending_controls = .empty;
-        self.transport_failed = false;
+        self.pump_ended = false;
         self.resync_needed = false;
         self.observation = .{};
         errdefer self.observation.deinit(allocator);
@@ -463,7 +463,7 @@ pub const RemoteRuntime = struct {
     /// drain이 이걸로 `RuntimeEventPump.drainAvailable`과 같은 의미를 만든다). client가 `stream_id`로 demux하므로 여기 도달한
     /// 배치는 **항상 내 것**이다(예전엔 남의 배치를 free해 유실 — code-review #1; 이제 client가 남의 것은 버퍼해 그 runtime pump로
     /// 보낸다). host가 grid/alt 변화 시 delta 대신 fresh snapshot을 push하므로 둘 다 처리한다(is_snapshot이면 리셋, 아니면 증분).
-    pub const PumpResult = enum { idle, metadata, screen };
+    pub const PumpResult = enum { idle, metadata, screen, ended };
 
     pub fn pumpDelta(self: *RemoteRuntime) (client_mod.ClientError || screen_assembler.ApplyError)!PumpResult {
         // 마지막 non-blocking input 뒤에 새 입력/RPC가 영원히 없더라도 frame-loop pump가 연결의 bounded pending frame을
@@ -471,12 +471,15 @@ pub const RemoteRuntime = struct {
         _ = try self.pumpQueuedInput();
         _ = try self.client.pumpPendingOutput();
         try self.pumpResyncIntent();
-        var changed = try self.drainObservationEvents();
+        var events = try self.drainObservationEvents();
+        if (events.ended) return .ended;
         const maybe_batch = try self.client.readStreamBatch(self.allocator, self.stream_id);
         if (maybe_batch == null) {
             // readStreamBatch가 socket에서 event만 읽어 pending queue에 넣고 screen batch 없이 돌아올 수 있다.
-            changed = (try self.drainObservationEvents()) or changed;
-            return if (changed) .metadata else .idle;
+            const after_read = try self.drainObservationEvents();
+            if (after_read.ended) return .ended;
+            events.metadata = after_read.metadata or events.metadata;
+            return if (events.metadata) .metadata else .idle;
         }
         const batch = maybe_batch.?;
         defer self.allocator.free(batch.bytes);
@@ -485,23 +488,34 @@ pub const RemoteRuntime = struct {
         } else {
             try self.remote_screen.applyDelta(batch.bytes, self.io);
         }
-        _ = try self.drainObservationEvents();
+        const after_screen = try self.drainObservationEvents();
+        if (after_screen.ended) return .ended;
         return .screen;
     }
 
-    fn drainObservationEvents(self: *RemoteRuntime) client_mod.ClientError!bool {
-        var changed = false;
+    const EventDrain = struct {
+        metadata: bool = false,
+        ended: bool = false,
+    };
+
+    fn drainObservationEvents(self: *RemoteRuntime) client_mod.ClientError!EventDrain {
+        var result: EventDrain = .{};
         while (self.client.takeEventForStream(self.stream_id)) |frame| {
             defer frame.deinit(self.allocator);
+            if (isRuntimeEndedEvent(frame.payload)) {
+                result.ended = true;
+                continue;
+            }
             if (isSnapshotInvalidatedEvent(frame.payload)) {
                 // Latch before releasing the event. The next frame-pump turn admits one bounded,
                 // response-free stream ack; socket backpressure leaves the latch set for retry.
                 self.resync_needed = true;
                 continue;
             }
-            changed = (try self.applyObservationJson(frame.payload)) or changed;
+            result.metadata = (try self.applyObservationJson(frame.payload)) or result.metadata;
         }
-        return changed;
+        if (result.ended) self.client.dropBufferedStream(self.stream_id);
+        return result;
     }
 
     fn pumpResyncIntent(self: *RemoteRuntime) client_mod.ClientError!void {
@@ -666,6 +680,23 @@ pub const RemoteRuntime = struct {
         // The host owns one canonical allocation-free encoding. Exact matching prevents an
         // allocator failure while classifying the recovery notice from silently losing intent.
         return std.mem.eql(u8, payload, "{\"event\":\"snapshot.invalidated\"}");
+    }
+
+    fn isRuntimeEndedEvent(payload: []const u8) bool {
+        if (std.mem.eql(u8, payload, "{\"event\":\"runtime.ended\"}")) return true;
+        var parsed = std.json.parseFromSlice(
+            std.json.Value,
+            std.heap.page_allocator,
+            payload,
+            .{},
+        ) catch return false;
+        defer parsed.deinit();
+        const root = switch (parsed.value) {
+            .object => |value| value,
+            else => return false,
+        };
+        const event = jsonString(root.get("event") orelse return false) orelse return false;
+        return std.mem.eql(u8, event, "runtime.ended");
     }
 
     /// host runtime을 종료한다(client-side 자원은 남긴다 — 회수는 `deinit`). `TermRuntimeBackend.close_and_detach`/`close`가
@@ -2084,7 +2115,7 @@ test "remote runtime control allocation failure also fail-closes instead of sile
     rr.direct_input = .empty;
     rr.direct_input_offset = 0;
     rr.pending_controls = .empty;
-    rr.transport_failed = false;
+    rr.pump_ended = false;
     defer rr.pending_controls.deinit(rr.allocator);
 
     try testing.expectError(error.ConnectionClosed, rr.queueCoreCommand(.{ .report_focus = false }));
@@ -2867,13 +2898,67 @@ test "remote runtime: snapshot.invalidated latches one nonblocking resync ack" {
     defer rr.direct_input.deinit(allocator);
     defer rr.pending_controls.deinit(allocator);
 
-    try testing.expect(!(try rr.drainObservationEvents()));
+    const drained = try rr.drainObservationEvents();
+    try testing.expect(!drained.metadata);
+    try testing.expect(!drained.ended);
     try testing.expect(rr.resync_needed);
     try rr.pumpResyncIntent();
     try testing.expect(!rr.resync_needed);
     peer.join();
     try testing.expect(peer_ok);
     try testing.expectEqual(@as(usize, 0), client.pending_events.items.len);
+}
+
+test "remote runtime: typed ended event terminates only its stream pump" {
+    const allocator = testing.allocator;
+    var client = client_mod.Client{
+        .allocator = allocator,
+        .fd = -1,
+        .host_id = 1,
+        .parser = framing.FrameParser.init(allocator),
+    };
+    defer client.deinit();
+    const ended = framing.Frame{
+        .header = .{ .kind = .event, .stream_id = 9 },
+        .payload = try allocator.dupe(u8, "{\"event\":\"runtime.ended\"}"),
+    };
+    const sibling = framing.Frame{
+        .header = .{ .kind = .event, .stream_id = 10 },
+        .payload = try allocator.dupe(u8, "{\"event\":\"runtime.ended\"}"),
+    };
+    try client.pending_events.append(allocator, ended);
+    try client.pending_events.append(allocator, sibling);
+    client.pending_event_bytes = ended.payload.len + sibling.payload.len;
+    try client.pending_batches.append(allocator, .{
+        .stream_id = 9,
+        .is_snapshot = false,
+        .bytes = try allocator.dupe(u8, "stale"),
+    });
+    try client.pending_batches.append(allocator, .{
+        .stream_id = 10,
+        .is_snapshot = false,
+        .bytes = try allocator.dupe(u8, "sibling"),
+    });
+    client.pending_batch_bytes = "stale".len + "sibling".len;
+    var rr: RemoteRuntime = undefined;
+    rr.client = &client;
+    rr.allocator = allocator;
+    rr.io = testing.io;
+    rr.stream_id = 9;
+    rr.direct_input = .empty;
+    rr.direct_input_offset = 0;
+    rr.pending_controls = .empty;
+    rr.pump_ended = false;
+    rr.resync_needed = false;
+    defer rr.direct_input.deinit(allocator);
+    defer rr.pending_controls.deinit(allocator);
+
+    try testing.expectEqual(RemoteRuntime.PumpResult.ended, try rr.pumpDelta());
+    try testing.expectEqual(@as(usize, 1), client.pending_events.items.len);
+    try testing.expectEqual(@as(u64, 10), client.pending_events.items[0].header.stream_id);
+    try testing.expectEqual(@as(usize, 1), client.pending_batches.items.len);
+    try testing.expectEqual(@as(u64, 10), client.pending_batches.items[0].stream_id);
+    try testing.expectEqualStrings("sibling", client.pending_batches.items[0].bytes);
 }
 
 test "remote runtime: resync intent survives occupied outbound slot and emits one ack after drain" {

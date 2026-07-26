@@ -341,6 +341,7 @@ pub const Connection = struct {
     /// MRSH v2에 후속 비동기 event를 무조건 밀면 같은 major의 구 client가 protocol error로 종료한다. hello에서
     /// 명시적으로 협상한 client에게만 runtime metadata attach/event/RPC를 노출한다.
     runtime_metadata_v1: bool = false,
+    runtime_ended_v1: bool = false,
     /// Deterministic fault injection: real builds leave false; tests force the snapshot-build failure boundary without
     /// also starving the tiny typed error response allocation.
     inventory_fail_snapshot_once: bool = false,
@@ -429,6 +430,83 @@ pub const Connection = struct {
         return self.attachments.count();
     }
 
+    pub fn hasLocalStream(
+        self: *const Connection,
+        stream: subscription_identity.LocalStreamId,
+    ) bool {
+        return self.attachments.contains(stream);
+    }
+
+    /// Registry membership is the lifecycle SSOT. Owner adapters call this before tracker-state
+    /// early returns so an invalidated/resync-draining stream cannot hide a completed teardown.
+    pub fn runtimeMissing(
+        self: *Connection,
+        stream: subscription_identity.LocalStreamId,
+    ) bool {
+        const sub = self.attachments.get(stream) orelse return false;
+        return self.registry.get(sub.runtime_id) == null;
+    }
+
+    pub fn convergeEndedStream(
+        self: *Connection,
+        stream: subscription_identity.LocalStreamId,
+    ) void {
+        self.endMissingRuntime(stream);
+    }
+
+    pub fn runtimeEndedFrame(
+        self: *Connection,
+        stream: subscription_identity.LocalStreamId,
+    ) HandleError![]u8 {
+        const body = try self.stringify(.{ .event = "runtime.ended" });
+        defer self.allocator.free(body);
+        return self.encodeWithFlags(.event, 0, stream, 0, body) catch error.OutOfMemory;
+    }
+
+    pub fn supportsRuntimeEnded(self: *const Connection) bool {
+        return self.runtime_ended_v1;
+    }
+
+    /// Registry/runtime ownership has already ended. Reclaim only this connection-local projection;
+    /// the shared socket and sibling subscriptions remain live.
+    fn endMissingRuntime(
+        self: *Connection,
+        stream: subscription_identity.LocalStreamId,
+    ) void {
+        _ = self.removeAttachment(stream);
+    }
+
+    fn discardPreparedOutput(
+        self: *Connection,
+        list: *std.ArrayListUnmanaged([]u8),
+        output: *CollectedOutput,
+    ) void {
+        for (list.items) |frame| self.allocator.free(frame);
+        list.deinit(self.allocator);
+        if (output.next_base) |bytes| self.allocator.free(bytes);
+        if (output.next_observation_base) |bytes| self.allocator.free(bytes);
+        output.next_base = null;
+        output.next_observation_base = null;
+    }
+
+    /// Canonical per-stream ownership release shared by explicit detach, attach rollback, and
+    /// RuntimeNotFound convergence. Every external race therefore reaches the same idempotent edge.
+    fn removeAttachment(
+        self: *Connection,
+        stream: subscription_identity.LocalStreamId,
+    ) bool {
+        const removed = self.attachments.fetchRemove(stream) orelse return false;
+        const sub = removed.value;
+        _ = self.registry.detachSubscription(sub.runtime_id, sub.subscription_id) catch {};
+        if (self.subscription_identity) |identity| _ = identity.table.revoke(.{
+            .connection = identity.connection,
+            .stream_id = stream,
+        }) catch {};
+        if (sub.base) |bytes| self.allocator.free(bytes);
+        if (sub.observation_base) |bytes| self.allocator.free(bytes);
+        return true;
+    }
+
     /// MRSH frame 하나를 처리한다. connection state에 따라 hello 협상 또는 command dispatch를 하고, 응답 frame을
     /// 만들어 `Action`으로 돌려준다. 응답이 없거나 protocol을 어긴 경우 `.close`다(runtime은 유지).
     pub fn handleFrame(self: *Connection, frame: framing.Frame) HandleError!Action {
@@ -467,6 +545,7 @@ pub const Connection = struct {
         const pmax = intField(obj, "protocol_max") orelse 0;
         self.client_kind = parseClientKind(strField(obj, "client_kind"));
         self.runtime_metadata_v1 = stringArrayContains(obj, "capabilities", "runtime_metadata_v1");
+        self.runtime_ended_v1 = stringArrayContains(obj, "capabilities", "runtime_ended_v1");
 
         // 겹치는 major가 없으면 incompatible_version으로 끝낸다(§10). 이때는 응답을 준 뒤 닫는다.
         if (!(pmin <= protocol.version_major and protocol.version_major <= pmax)) {
@@ -1061,15 +1140,7 @@ pub const Connection = struct {
     /// without publishing a success response; otherwise the client would wait for a snapshot that
     /// can never arrive while an orphan controller lease remains live.
     fn rollbackAttach(self: *Connection, stream: subscription_identity.LocalStreamId) void {
-        const sub = self.attachments.get(stream) orelse return;
-        _ = self.registry.detachSubscription(sub.runtime_id, sub.subscription_id) catch {};
-        if (self.subscription_identity) |identity| _ = identity.table.revoke(.{
-            .connection = identity.connection,
-            .stream_id = stream,
-        }) catch {};
-        if (sub.base) |bytes| self.allocator.free(bytes);
-        if (sub.observation_base) |bytes| self.allocator.free(bytes);
-        _ = self.attachments.remove(stream);
+        _ = self.removeAttachment(stream);
     }
 
     /// record 바이트를 `kind` frame(각 ≤ `max_binary_chunk`)으로 잘라 `list`에 덧붙인다. 마지막 chunk에 `end_stream` flag를
@@ -1099,15 +1170,8 @@ pub const Connection = struct {
     fn dispatchDetach(self: *Connection, request_id: u64, params: ?std.json.ObjectMap) HandleError!Action {
         const p = params orelse return self.replyError(request_id, .invalid_request);
         const stream = intFieldU64(p, "stream_id") orelse return self.replyError(request_id, .invalid_request);
-        const sub = self.attachments.get(stream) orelse return self.replyError(request_id, .invalid_request);
-        _ = self.registry.detachSubscription(sub.runtime_id, sub.subscription_id) catch {};
-        if (self.subscription_identity) |identity| _ = identity.table.revoke(.{
-            .connection = identity.connection,
-            .stream_id = stream,
-        }) catch {};
-        if (sub.base) |b| self.allocator.free(b); // 이 stream의 delta base 해제.
-        if (sub.observation_base) |b| self.allocator.free(b);
-        _ = self.attachments.remove(stream);
+        if (!self.removeAttachment(stream))
+            return self.replyError(request_id, .invalid_request);
         const body = try self.stringify(.{ .result = .{ .detached = true } });
         defer self.allocator.free(body);
         return self.replyResult(request_id, body);
@@ -1471,7 +1535,19 @@ pub const Connection = struct {
             (sub.observation_ticks >= 5 or ops.observation_urgent(ops.ctx, sub.runtime_id)))
         {
             sub.observation_ticks = 0;
-            if (ops.observation(ops.ctx, sub.runtime_id, self.allocator) catch null) |obs_value| {
+            const maybe_observation = ops.observation(
+                ops.ctx,
+                sub.runtime_id,
+                self.allocator,
+            ) catch |err| switch (err) {
+                error.RuntimeNotFound => {
+                    if (!self.runtimeMissing(stream)) return error.OutOfMemory;
+                    self.endMissingRuntime(stream);
+                    return null;
+                },
+                else => null,
+            };
+            if (maybe_observation) |obs_value| {
                 var obs = obs_value;
                 defer obs.deinit(self.allocator);
                 const canonical = self.stringify(obs) catch null;
@@ -1506,7 +1582,13 @@ pub const Connection = struct {
         }
 
         if (sub.resync_pending) {
-            const snap = ops.snapshot(ops.ctx, sub.runtime_id, self.allocator) catch {
+            const snap = ops.snapshot(ops.ctx, sub.runtime_id, self.allocator) catch |err| {
+                if (err == error.RuntimeNotFound) {
+                    if (!self.runtimeMissing(stream)) return error.OutOfMemory;
+                    self.discardPreparedOutput(&list, &output);
+                    self.endMissingRuntime(stream);
+                    return null;
+                }
                 if (list.items.len == 0) {
                     // Recovery still owes a full metadata prefix. A transient snapshot failure must
                     // not consume the due cadence merely because observation allocation/encoding
@@ -1532,7 +1614,12 @@ pub const Connection = struct {
                 switch (err) {
                     // Runtime teardown races are stream lifecycle, not transport corruption. The
                     // caller's existing ended/detach path must keep the shared connection usable.
-                    error.RuntimeNotFound => return null,
+                    error.RuntimeNotFound => {
+                        if (!self.runtimeMissing(stream)) return error.OutOfMemory;
+                        self.discardPreparedOutput(&list, &output);
+                        self.endMissingRuntime(stream);
+                        return null;
+                    },
                     // Projection cap/OOM and unknown producer failures cannot masquerade as an
                     // unchanged screen; fail-close prevents an infinite stale-base retry loop.
                     else => return error.OutOfMemory,
@@ -1612,7 +1699,7 @@ pub const Connection = struct {
             return self.stringify(.{
                 .version = self.selected_version,
                 .host_id = host_hex,
-                .capabilities = [_][]const u8{ "host.info", "runtime.list", "runtime.get", "runtime_metadata_v1", "screen_stream_v2_current_body", "screen_viewport_scrolled_v1", "async_scroll_to_bottom_v1", "runtime_core_command_v1", "runtime_selected_text_v1", "runtime_link_at_v1", "runtime_clipboard_v1" },
+                .capabilities = [_][]const u8{ "host.info", "runtime.list", "runtime.get", "runtime_metadata_v1", "runtime_ended_v1", "screen_stream_v2_current_body", "screen_viewport_scrolled_v1", "async_scroll_to_bottom_v1", "runtime_core_command_v1", "runtime_selected_text_v1", "runtime_link_at_v1", "runtime_clipboard_v1" },
             });
         }
         if (self.host_status.upgrade_capable) {
@@ -1625,7 +1712,7 @@ pub const Connection = struct {
                 .upgrade_epoch = self.host_status.upgrade_epoch,
                 .lifecycle = @tagName(self.host_status.lifecycle),
                 .authority_generation = self.host_status.authority_generation,
-                .capabilities = [_][]const u8{ "host.info", "runtime.list", "runtime.get", "runtime_inventory_v1", "host_manifest_v1", "host_exec_upgrade_v1", "runtime_metadata_v1", "screen_stream_v2_current_body", "screen_viewport_scrolled_v1", "async_scroll_to_bottom_v1", "runtime_core_command_v1", "runtime_selected_text_v1", "runtime_link_at_v1", "runtime_clipboard_v1" },
+                .capabilities = [_][]const u8{ "host.info", "runtime.list", "runtime.get", "runtime_inventory_v1", "host_manifest_v1", "host_exec_upgrade_v1", "runtime_metadata_v1", "runtime_ended_v1", "screen_stream_v2_current_body", "screen_viewport_scrolled_v1", "async_scroll_to_bottom_v1", "runtime_core_command_v1", "runtime_selected_text_v1", "runtime_link_at_v1", "runtime_clipboard_v1" },
             });
         }
         return self.stringify(.{
@@ -1637,7 +1724,7 @@ pub const Connection = struct {
             .upgrade_epoch = self.host_status.upgrade_epoch,
             .lifecycle = @tagName(self.host_status.lifecycle),
             .authority_generation = self.host_status.authority_generation,
-            .capabilities = [_][]const u8{ "host.info", "runtime.list", "runtime.get", "runtime_inventory_v1", "host_manifest_v1", "runtime_metadata_v1", "screen_stream_v2_current_body", "screen_viewport_scrolled_v1", "async_scroll_to_bottom_v1", "runtime_core_command_v1", "runtime_selected_text_v1", "runtime_link_at_v1", "runtime_clipboard_v1" },
+            .capabilities = [_][]const u8{ "host.info", "runtime.list", "runtime.get", "runtime_inventory_v1", "host_manifest_v1", "runtime_metadata_v1", "runtime_ended_v1", "screen_stream_v2_current_body", "screen_viewport_scrolled_v1", "async_scroll_to_bottom_v1", "runtime_core_command_v1", "runtime_selected_text_v1", "runtime_link_at_v1", "runtime_clipboard_v1" },
         });
     }
 
@@ -2476,6 +2563,10 @@ pub const FakeRuntimeOps = struct {
     snapshot_fail_count: usize = 0,
     snapshot_calls: usize = 0,
     observation_fail_count: usize = 0,
+    runtime_missing: bool = false,
+    snapshot_missing: bool = false,
+    delta_missing: bool = false,
+    observation_missing: bool = false,
 
     fn spawnFn(ctx: *anyopaque, params: RuntimeSpawnParams) anyerror!u128 {
         const self: *FakeRuntimeOps = @ptrCast(@alignCast(ctx));
@@ -2530,6 +2621,7 @@ pub const FakeRuntimeOps = struct {
         const self: *FakeRuntimeOps = @ptrCast(@alignCast(ctx));
         _ = runtime_id;
         self.snapshot_calls += 1;
+        if (self.runtime_missing or self.snapshot_missing) return error.RuntimeNotFound;
         if (self.snapshot_fail_count != 0) {
             self.snapshot_fail_count -= 1;
             return error.InjectedSnapshotFailure;
@@ -2545,6 +2637,7 @@ pub const FakeRuntimeOps = struct {
     fn deltaFn(ctx: *anyopaque, runtime_id: u128, base: []const u8, allocator: std.mem.Allocator) anyerror!StreamUpdate {
         const self: *FakeRuntimeOps = @ptrCast(@alignCast(ctx));
         _ = runtime_id;
+        if (self.runtime_missing or self.delta_missing) return error.RuntimeNotFound;
         const n = @min(base.len, self.delta_base_seen.len);
         @memcpy(self.delta_base_seen[0..n], base[0..n]);
         self.delta_base_seen_len = n;
@@ -2622,6 +2715,7 @@ pub const FakeRuntimeOps = struct {
     fn observationFn(ctx: *anyopaque, runtime_id: u128, allocator: std.mem.Allocator) anyerror!RuntimeObservation {
         const self: *FakeRuntimeOps = @ptrCast(@alignCast(ctx));
         _ = runtime_id;
+        if (self.runtime_missing or self.observation_missing) return error.RuntimeNotFound;
         if (self.observation_fail_count != 0) {
             self.observation_fail_count -= 1;
             return error.InjectedObservationFailure;
@@ -2838,7 +2932,12 @@ test "server: backend resize failure leaves canonical size sequence generation a
     defer conn.deinit();
     conn.runtime_ops = fake.ops();
     {
-        const hello = try feedJson(&conn, .hello, 1, "{\"protocol_min\":2,\"protocol_max\":2}");
+        const hello = try feedJson(
+            &conn,
+            .hello,
+            1,
+            "{\"protocol_min\":2,\"protocol_max\":2,\"capabilities\":[\"runtime_metadata_v1\"]}",
+        );
         if (hello.frame) |frame| frame.deinit(allocator);
     }
     {
@@ -3282,7 +3381,12 @@ test "server: one-stream delta collection never materializes a sibling subscript
     defer conn.deinit();
     conn.runtime_ops = fake.ops();
     {
-        const hello = try feedJson(&conn, .hello, 1, "{\"protocol_min\":2,\"protocol_max\":2}");
+        const hello = try feedJson(
+            &conn,
+            .hello,
+            1,
+            "{\"protocol_min\":2,\"protocol_max\":2,\"capabilities\":[\"runtime_metadata_v1\"]}",
+        );
         if (hello.frame) |frame| frame.deinit(allocator);
     }
     for ([_][]const u8{
@@ -3311,6 +3415,153 @@ test "server: one-stream delta collection never materializes a sibling subscript
     try testing.expectEqualStrings("SNAPSHOT-BYTES", conn.attachments.get(2).?.base.?);
     output.commit(&conn);
     try testing.expectEqualStrings("NEW-BASE", conn.attachments.get(2).?.base.?);
+}
+
+test "server: missing runtime wins over resync retry and preserves sibling stream" {
+    const allocator = testing.allocator;
+    var registry = reg.TerminalRuntimeRegistry.init(allocator);
+    defer registry.deinit();
+    _ = try registry.register(0xAA, 80, 24);
+    _ = try registry.register(0xBB, 80, 24);
+    var subscriptions = subscription_identity.Table.init(allocator);
+    defer subscriptions.deinit();
+    var fake: FakeRuntimeOps = .{};
+    var conn = Connection.initProduct(
+        allocator,
+        1,
+        &registry,
+        .{ .monotonic_id = 7, .slot_generation = 1 },
+        &subscriptions,
+    );
+    defer conn.deinit();
+    conn.runtime_ops = fake.ops();
+    {
+        const hello = try feedJson(
+            &conn,
+            .hello,
+            1,
+            "{\"protocol_min\":2,\"protocol_max\":2,\"capabilities\":[\"runtime_metadata_v1\"]}",
+        );
+        if (hello.frame) |frame| frame.deinit(allocator);
+    }
+    for ([_][]const u8{
+        "{\"method\":\"runtime.attach\",\"params\":{\"runtime_id\":\"aa\",\"mode\":\"observer\"}}",
+        "{\"method\":\"runtime.attach\",\"params\":{\"runtime_id\":\"bb\",\"mode\":\"observer\"}}",
+    }, 0..) |request, index| {
+        const batch = try feedExpectFrames(&conn, .request, index + 2, request);
+        defer {
+            for (batch) |frame| frame.deinit(allocator);
+            allocator.free(batch);
+        }
+    }
+    conn.attachments.getPtr(1).?.resync_pending = true;
+    conn.attachments.getPtr(1).?.observation_ticks = 5;
+    registry.unregister(0xAA);
+    fake.snapshot_missing = true;
+
+    try testing.expectEqual(@as(?CollectedOutput, null), try conn.collectOutputForLocalStream(1));
+    try testing.expect(!conn.hasLocalStream(1));
+    try testing.expect(conn.hasLocalStream(2));
+    try testing.expectEqual(@as(usize, 1), conn.attachmentCount());
+    try testing.expectEqual(@as(usize, 1), subscriptions.count());
+    // A concurrent connection close after ended convergence is an idempotent no-op for stream 1.
+}
+
+test "server: metadata RuntimeNotFound ends the stream before screen production" {
+    const allocator = testing.allocator;
+    var registry = reg.TerminalRuntimeRegistry.init(allocator);
+    defer registry.deinit();
+    _ = try registry.register(0xAA, 80, 24);
+    var fake: FakeRuntimeOps = .{};
+    var conn = Connection.init(allocator, 1, &registry);
+    defer conn.deinit();
+    conn.runtime_ops = fake.ops();
+    {
+        const hello = try feedJson(
+            &conn,
+            .hello,
+            1,
+            "{\"protocol_min\":2,\"protocol_max\":2,\"capabilities\":[\"runtime_metadata_v1\"]}",
+        );
+        if (hello.frame) |frame| frame.deinit(allocator);
+        const batch = try feedExpectFrames(
+            &conn,
+            .request,
+            2,
+            "{\"method\":\"runtime.attach\",\"params\":{\"runtime_id\":\"aa\",\"mode\":\"observer\"}}",
+        );
+        defer {
+            for (batch) |frame| frame.deinit(allocator);
+            allocator.free(batch);
+        }
+    }
+    conn.attachments.getPtr(1).?.observation_ticks = 5;
+    registry.unregister(0xAA);
+    fake.runtime_missing = true;
+
+    try testing.expectEqual(@as(?CollectedOutput, null), try conn.collectOutputForLocalStream(1));
+    try testing.expectEqual(@as(usize, 0), conn.attachmentCount());
+    try testing.expectEqual(@as(usize, 0), registry.attachmentCount());
+}
+
+test "server: RuntimeNotFound cannot override live registry SSOT" {
+    const allocator = testing.allocator;
+    var registry = reg.TerminalRuntimeRegistry.init(allocator);
+    defer registry.deinit();
+    _ = try registry.register(0xAA, 80, 24);
+    var fake: FakeRuntimeOps = .{ .delta_missing = true };
+    var conn = Connection.init(allocator, 1, &registry);
+    defer conn.deinit();
+    conn.runtime_ops = fake.ops();
+    {
+        const hello = try feedJson(&conn, .hello, 1, "{\"protocol_min\":2,\"protocol_max\":2}");
+        if (hello.frame) |frame| frame.deinit(allocator);
+        const batch = try feedExpectFrames(
+            &conn,
+            .request,
+            2,
+            "{\"method\":\"runtime.attach\",\"params\":{\"runtime_id\":\"aa\",\"mode\":\"observer\"}}",
+        );
+        defer {
+            for (batch) |frame| frame.deinit(allocator);
+            allocator.free(batch);
+        }
+    }
+
+    try testing.expectError(error.OutOfMemory, conn.collectOutputForLocalStream(1));
+    try testing.expect(conn.hasLocalStream(1));
+    registry.unregister(0xAA);
+    try testing.expectEqual(@as(?CollectedOutput, null), try conn.collectOutputForLocalStream(1));
+    try testing.expect(!conn.hasLocalStream(1));
+    conn.convergeEndedStream(1);
+    try testing.expectEqual(@as(usize, 0), conn.attachmentCount());
+}
+
+test "server: runtime ended event requires explicit hello capability" {
+    const allocator = testing.allocator;
+    var registry = reg.TerminalRuntimeRegistry.init(allocator);
+    defer registry.deinit();
+    var legacy = Connection.init(allocator, 1, &registry);
+    defer legacy.deinit();
+    const legacy_hello = try feedJson(
+        &legacy,
+        .hello,
+        1,
+        "{\"protocol_min\":2,\"protocol_max\":2}",
+    );
+    if (legacy_hello.frame) |frame| frame.deinit(allocator);
+    try testing.expect(!legacy.supportsRuntimeEnded());
+
+    var current = Connection.init(allocator, 1, &registry);
+    defer current.deinit();
+    const current_hello = try feedJson(
+        &current,
+        .hello,
+        1,
+        "{\"protocol_min\":2,\"protocol_max\":2,\"capabilities\":[\"runtime_ended_v1\"]}",
+    );
+    if (current_hello.frame) |frame| frame.deinit(allocator);
+    try testing.expect(current.supportsRuntimeEnded());
 }
 
 test "server: stream event is subscription output while invalidation notice is explicit control" {

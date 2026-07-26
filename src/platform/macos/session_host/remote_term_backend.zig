@@ -283,7 +283,7 @@ pub const RemoteTermBackend = struct {
     fn drainRemote(ctx: *anyopaque) DrainSummary {
         const rr: *RemoteRuntime = @ptrCast(@alignCast(ctx));
         var summary: DrainSummary = .{};
-        if (rr.transport_failed) return summary;
+        if (rr.pump_ended) return summary;
         while (true) {
             const result = rr.pumpDelta() catch |err| {
                 switch (err) {
@@ -301,7 +301,7 @@ pub const RemoteTermBackend = struct {
                         // remote pump는 local RuntimeEventPump.applyQueuedEvent를 거치지 않으므로 여기서 surface를 직접
                         // latch해야 SurfaceRuntime 입력 gate가 죽은 PtyIo로 재전송하지 않는다. runtime별 one-shot으로
                         // 올려 shared connection 실패가 매 frame 같은 read_error를 재발행하는 것도 막는다.
-                        rr.transport_failed = true;
+                        rr.pump_ended = true;
                         rr.surface.process_state = .exited;
                         summary.ended = .{ .read_error = @errorName(err) };
                         break;
@@ -312,6 +312,15 @@ pub const RemoteTermBackend = struct {
                 .idle => break,
                 .metadata => continue,
                 .screen => summary.output_events += 1,
+                .ended => {
+                    rr.pump_ended = true;
+                    rr.surface.process_state = .exited;
+                    // Registry membership proves lifecycle end but no tombstone carries the child
+                    // wait status. Preserve that uncertainty instead of fabricating exit code 0.
+                    summary.ended = .{ .exited = .{ .unknown = 0 } };
+                    summary.exit_events = 1;
+                    break;
+                },
             }
         }
         return summary;
@@ -337,7 +346,7 @@ pub const RemoteTermBackend = struct {
         rr.direct_input_offset = 0;
         rr.pending_controls = .empty;
         defer rr.pending_controls.deinit(allocator);
-        rr.transport_failed = false;
+        rr.pump_ended = false;
         rr.surface = try Surface.init(allocator, 77, .{ .cols = 20, .rows = 3 });
         defer rr.surface.deinit();
         rr.surface.process_state = .running;
@@ -348,6 +357,53 @@ pub const RemoteTermBackend = struct {
         const second = drainRemote(&rr);
         try std.testing.expect(second.ended == null);
         try std.testing.expectEqual(@as(usize, 0), second.output_events);
+    }
+
+    test "typed runtime end projects unknown status and exits surface exactly once" {
+        const allocator = std.testing.allocator;
+        var client = client_mod.Client{
+            .allocator = allocator,
+            .fd = -1,
+            .host_id = 1,
+            .parser = framing.FrameParser.init(allocator),
+        };
+        defer client.deinit();
+        const ended = framing.Frame{
+            .header = .{ .kind = .event, .stream_id = 7 },
+            .payload = try allocator.dupe(u8, "{\"reason\":\"natural\",\"event\":\"runtime.ended\"}"),
+        };
+        try client.pending_events.append(allocator, ended);
+        client.pending_event_bytes = ended.payload.len;
+
+        var rr: RemoteRuntime = undefined;
+        rr.client = &client;
+        rr.allocator = allocator;
+        rr.io = std.testing.io;
+        rr.stream_id = 7;
+        rr.direct_input = .empty;
+        defer rr.direct_input.deinit(allocator);
+        rr.direct_input_offset = 0;
+        rr.pending_controls = .empty;
+        defer rr.pending_controls.deinit(allocator);
+        rr.pump_ended = false;
+        rr.resync_needed = false;
+        rr.surface = try Surface.init(allocator, 77, .{ .cols = 20, .rows = 3 });
+        defer rr.surface.deinit();
+        rr.surface.process_state = .running;
+
+        const first = drainRemote(&rr);
+        try std.testing.expectEqual(@as(usize, 1), first.exit_events);
+        switch (first.ended.?) {
+            .exited => |status| try std.testing.expectEqual(
+                maru.pty.ExitStatus{ .unknown = 0 },
+                status,
+            ),
+            .read_error => return error.TestUnexpectedResult,
+        }
+        try std.testing.expect(rr.surface.process_state == .exited);
+        const second = drainRemote(&rr);
+        try std.testing.expect(second.ended == null);
+        try std.testing.expectEqual(@as(usize, 0), second.exit_events);
     }
 
     fn writeInput(ctx: *anyopaque, handle: RuntimeHandle, bytes: []const u8) anyerror!void {

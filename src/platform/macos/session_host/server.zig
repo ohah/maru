@@ -3481,6 +3481,8 @@ pub const FakeRuntimeOps = struct {
     new_base_len: ?usize = null,
     delta_send_len: ?usize = null,
     delta_calls: usize = 0,
+    delta_probe_ctx: ?*anyopaque = null,
+    delta_probe: ?*const fn (*anyopaque) void = null,
     snapshot_fail_count: usize = 0,
     snapshot_calls: usize = 0,
     observation_fail_count: usize = 0,
@@ -3559,6 +3561,7 @@ pub const FakeRuntimeOps = struct {
         const self: *FakeRuntimeOps = @ptrCast(@alignCast(ctx));
         _ = runtime_id;
         self.delta_calls += 1;
+        if (self.delta_probe) |probe| probe(self.delta_probe_ctx.?);
         if (self.runtime_missing or self.delta_missing) return error.RuntimeNotFound;
         const n = @min(base.len, self.delta_base_seen.len);
         @memcpy(self.delta_base_seen[0..n], base[0..n]);

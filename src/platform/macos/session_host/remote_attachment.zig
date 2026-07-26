@@ -108,9 +108,15 @@ pub fn decodeAttachForCapabilities(
     else
         0;
     const busy = boolField(result, "controller_busy") orelse return error.Malformed;
-    _ = u64Field(result, "metadata_revision") orelse return error.Malformed;
-    if (result.get("metadata") == null or stream_id == 0)
+    const metadata_revision = u64Field(result, "metadata_revision") orelse
         return error.Malformed;
+    const metadata = result.get("metadata") orelse return error.Malformed;
+    switch (metadata) {
+        .null => if (metadata_revision != 0) return error.Malformed,
+        .object => if (metadata_revision == 0) return error.Malformed,
+        else => return error.Malformed,
+    }
+    if (stream_id == 0) return error.Malformed;
     const granted = objectField(result, "granted") orelse return error.Malformed;
     if (granted.count() != 3 or boolField(granted, "observe") != true)
         return error.Malformed;
@@ -118,6 +124,9 @@ pub fn decodeAttachForCapabilities(
     const resize = boolField(granted, "resize") orelse return error.Malformed;
     if (input != resize) return error.Malformed;
     const role: Role = if (input) .controller else .observer;
+    // Generation zero is the registry's pre-transition sentinel. A transfer-capable host has
+    // already acquired or observed a controller before either controller grant or busy demotion.
+    if (controller_transfer_v1 and generation == 0) return error.Malformed;
     switch (requested) {
         .observer => if (role != .observer or busy) return error.Malformed,
         .controller => switch (role) {
@@ -163,7 +172,7 @@ pub fn decodeFrozenV1ControllerAttach(
 pub fn decodeStatus(
     allocator: std.mem.Allocator,
     bytes: []const u8,
-    state: State,
+    state: *State,
 ) DecodeError!Status {
     var parsed = try parseObject(allocator, bytes);
     defer parsed.deinit();
@@ -181,6 +190,7 @@ pub fn decodeStatus(
         status.controller_generation < state.controller_generation or
         status.controller != (state.role == .controller))
         return error.Malformed;
+    state.controller_generation = status.controller_generation;
     return status;
 }
 
@@ -203,8 +213,9 @@ pub fn decodeTakeover(
     const generation = u64Field(result, "controller_generation") orelse return error.Malformed;
     const reason = stringField(result, "reason") orelse return error.Malformed;
     const granted = objectField(result, "granted") orelse return error.Malformed;
+    const successor = std.math.add(u64, expected_generation, 1) catch return error.Malformed;
     if (runtime_id != state.runtime_id or stream_id != state.stream_id or
-        generation <= expected_generation or !std.mem.eql(u8, reason, "takeover") or
+        generation != successor or !std.mem.eql(u8, reason, "takeover") or
         granted.count() != 3 or boolField(granted, "observe") != true or
         boolField(granted, "input") != true or boolField(granted, "resize") != true)
         return error.Malformed;
@@ -230,8 +241,10 @@ pub fn decodeRevoked(
     const stream_id = u64Field(data, "stream_id") orelse return error.Malformed;
     const generation = u64Field(data, "controller_generation") orelse return error.Malformed;
     const reason = stringField(data, "reason") orelse return error.Malformed;
+    const successor = std.math.add(u64, state.controller_generation, 1) catch
+        return error.Malformed;
     if (runtime_id != state.runtime_id or stream_id != state.stream_id or
-        generation <= state.controller_generation or !std.mem.eql(u8, reason, "takeover"))
+        generation != successor or !std.mem.eql(u8, reason, "takeover"))
         return error.Malformed;
     state.role = .observer;
     state.controller_generation = generation;
@@ -247,6 +260,9 @@ const ParsedObject = std.json.Parsed(std.json.Value);
 fn parseObject(allocator: std.mem.Allocator, bytes: []const u8) DecodeError!ParsedObject {
     const parsed = std.json.parseFromSlice(std.json.Value, allocator, bytes, .{
         .allocate = .alloc_always,
+        // Dynamic Value's default integer is i64. Wire generations are u64, so preserve the
+        // lexical number and parse it below instead of rejecting the valid upper half.
+        .parse_numbers = false,
     }) catch |err| return switch (err) {
         error.OutOfMemory => error.OutOfMemory,
         else => error.Malformed,
@@ -287,8 +303,15 @@ fn u64Field(object: std.json.ObjectMap, name: []const u8) ?u64 {
     const value = object.get(name) orelse return null;
     return switch (value) {
         .integer => |number| if (number >= 0) @intCast(number) else null,
+        .number_string => |text| parseCanonicalU64(text),
         else => null,
     };
+}
+
+fn parseCanonicalU64(text: []const u8) ?u64 {
+    if (text.len == 0 or (text.len > 1 and text[0] == '0')) return null;
+    for (text) |byte| if (!std.ascii.isDigit(byte)) return null;
+    return std.fmt.parseInt(u64, text, 10) catch null;
 }
 
 fn runtimeIdField(object: std.json.ObjectMap, name: []const u8) ?u128 {
@@ -318,13 +341,15 @@ test "remote attachment strictly decodes controller grant and busy demotion" {
         error.Malformed,
         decodeAttach(std.testing.allocator, observer_attach, 0xaa, .observer),
     );
-    const no_controller = try decodeAttach(
-        std.testing.allocator,
-        "{\"result\":{\"stream_id\":8,\"controller_generation\":0,\"granted\":{\"observe\":true,\"input\":false,\"resize\":false},\"controller_busy\":false,\"metadata_revision\":0,\"metadata\":null}}",
-        0xaa,
-        .observer,
+    try std.testing.expectError(
+        error.Malformed,
+        decodeAttach(
+            std.testing.allocator,
+            "{\"result\":{\"stream_id\":8,\"controller_generation\":0,\"granted\":{\"observe\":true,\"input\":false,\"resize\":false},\"controller_busy\":false,\"metadata_revision\":0,\"metadata\":null}}",
+            0xaa,
+            .observer,
+        ),
     );
-    try std.testing.expectEqual(@as(u64, 0), no_controller.state.controller_generation);
 }
 
 test "remote attachment accepts exact pre-transfer same-major attach without inventing generation" {
@@ -387,6 +412,9 @@ test "remote attachment rejects malformed or authority-inconsistent grants" {
         "{\"result\":{\"stream_id\":7,\"controller_generation\":3,\"granted\":{\"observe\":true,\"input\":true,\"resize\":false},\"controller_busy\":false,\"metadata_revision\":0,\"metadata\":null}}",
         "{\"result\":{\"stream_id\":7,\"controller_generation\":3,\"granted\":{\"observe\":true,\"input\":true,\"resize\":true,\"extra\":true},\"controller_busy\":false,\"metadata_revision\":0,\"metadata\":null}}",
         "{\"result\":{\"stream_id\":7,\"controller_generation\":3,\"granted\":{\"observe\":true,\"input\":true,\"resize\":true},\"controller_busy\":false,\"metadata_revision\":0,\"metadata\":null,\"extra\":1}}",
+        "{\"result\":{\"stream_id\":7,\"controller_generation\":3,\"granted\":{\"observe\":true,\"input\":true,\"resize\":true},\"controller_busy\":false,\"metadata_revision\":0,\"metadata\":\"wrong\"}}",
+        "{\"result\":{\"stream_id\":7,\"controller_generation\":3,\"granted\":{\"observe\":true,\"input\":true,\"resize\":true},\"controller_busy\":false,\"metadata_revision\":1,\"metadata\":null}}",
+        "{\"result\":{\"stream_id\":7,\"controller_generation\":3,\"granted\":{\"observe\":true,\"input\":true,\"resize\":true},\"controller_busy\":false,\"metadata_revision\":0,\"metadata\":{}}}",
     };
     for (invalid) |bytes| try std.testing.expectError(
         error.Malformed,
@@ -399,7 +427,7 @@ test "remote attachment status takeover and revoke are generation fenced" {
     const status = try decodeStatus(
         std.testing.allocator,
         "{\"result\":{\"stream_id\":7,\"controller_generation\":3,\"controller\":false}}",
-        state,
+        &state,
     );
     try std.testing.expectEqual(@as(u64, 3), status.controller_generation);
     try decodeTakeover(
@@ -431,7 +459,7 @@ test "remote attachment rejects foreign and stale status transitions without mut
         decodeStatus(
             std.testing.allocator,
             "{\"result\":{\"stream_id\":8,\"controller_generation\":3,\"controller\":false}}",
-            state,
+            &state,
         ),
     );
     try std.testing.expectError(
@@ -445,4 +473,96 @@ test "remote attachment rejects foreign and stale status transitions without mut
     );
     try std.testing.expectEqual(Role.observer, state.role);
     try std.testing.expectEqual(@as(u64, 3), state.controller_generation);
+}
+
+test "remote attachment status advances the CAS token before takeover" {
+    var state = State{
+        .runtime_id = 0xaa,
+        .stream_id = 7,
+        .role = .observer,
+        .controller_generation = 3,
+    };
+    _ = try decodeStatus(
+        std.testing.allocator,
+        "{\"result\":{\"stream_id\":7,\"controller_generation\":4,\"controller\":false}}",
+        &state,
+    );
+    try std.testing.expectEqual(@as(u64, 4), state.controller_generation);
+    try decodeTakeover(
+        std.testing.allocator,
+        "{\"result\":{\"runtime_id\":\"000000000000000000000000000000aa\",\"stream_id\":7,\"controller_generation\":5,\"reason\":\"takeover\",\"granted\":{\"observe\":true,\"input\":true,\"resize\":true}}}",
+        &state,
+        4,
+    );
+    try std.testing.expectEqual(Role.controller, state.role);
+    try std.testing.expectEqual(@as(u64, 5), state.controller_generation);
+}
+
+test "remote attachment preserves the full u64 controller generation domain" {
+    var state = State{
+        .runtime_id = 0xaa,
+        .stream_id = 7,
+        .role = .observer,
+        .controller_generation = std.math.maxInt(i64),
+    };
+    _ = try decodeStatus(
+        std.testing.allocator,
+        "{\"result\":{\"stream_id\":7,\"controller_generation\":18446744073709551614,\"controller\":false}}",
+        &state,
+    );
+    try std.testing.expectEqual(std.math.maxInt(u64) - 1, state.controller_generation);
+    try decodeTakeover(
+        std.testing.allocator,
+        "{\"result\":{\"runtime_id\":\"000000000000000000000000000000aa\",\"stream_id\":7,\"controller_generation\":18446744073709551615,\"reason\":\"takeover\",\"granted\":{\"observe\":true,\"input\":true,\"resize\":true}}}",
+        &state,
+        std.math.maxInt(u64) - 1,
+    );
+    try std.testing.expectEqual(std.math.maxInt(u64), state.controller_generation);
+    var exhausted = State{
+        .runtime_id = 0xaa,
+        .stream_id = 7,
+        .role = .observer,
+        .controller_generation = std.math.maxInt(u64),
+    };
+    try std.testing.expectError(
+        error.Malformed,
+        decodeTakeover(
+            std.testing.allocator,
+            "{\"result\":{\"runtime_id\":\"000000000000000000000000000000aa\",\"stream_id\":7,\"controller_generation\":18446744073709551615,\"reason\":\"takeover\",\"granted\":{\"observe\":true,\"input\":true,\"resize\":true}}}",
+            &exhausted,
+            std.math.maxInt(u64),
+        ),
+    );
+}
+
+test "remote attachment rejects generation gaps for takeover and revoke" {
+    var observer = State{
+        .runtime_id = 0xaa,
+        .stream_id = 7,
+        .role = .observer,
+        .controller_generation = 3,
+    };
+    try std.testing.expectError(
+        error.Malformed,
+        decodeTakeover(
+            std.testing.allocator,
+            "{\"result\":{\"runtime_id\":\"000000000000000000000000000000aa\",\"stream_id\":7,\"controller_generation\":5,\"reason\":\"takeover\",\"granted\":{\"observe\":true,\"input\":true,\"resize\":true}}}",
+            &observer,
+            3,
+        ),
+    );
+    var controller = State{
+        .runtime_id = 0xaa,
+        .stream_id = 7,
+        .role = .controller,
+        .controller_generation = 3,
+    };
+    try std.testing.expectError(
+        error.Malformed,
+        decodeRevoked(
+            std.testing.allocator,
+            "{\"event\":\"controller.revoked\",\"data\":{\"runtime_id\":\"000000000000000000000000000000aa\",\"stream_id\":7,\"controller_generation\":5,\"reason\":\"takeover\"}}",
+            &controller,
+        ),
+    );
 }

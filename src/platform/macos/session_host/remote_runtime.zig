@@ -41,7 +41,6 @@ pub const RemoteRuntime = struct {
     io: std.Io,
     runtime_id_hex: [32]u8, // host 발급 runtime_id(hex) — terminate에 되먹인다.
     stream_id: u64, // attach가 발급한 stream — input/resize/delta 라우팅.
-    attachment_state: remote_attachment.State,
     resize_seq: u64, // 단조 증가 client_sequence — registry가 이하 sequence를 stale로 거부하므로 매 resize마다 올린다.
     resize_generation: u64,
     // blocking `SurfaceRuntime.writeInput`의 key bytes와 그 사이 core command를 한 시간축으로 보존한다.
@@ -154,19 +153,21 @@ pub const RemoteRuntime = struct {
     /// 코드(`controller_busy`·`unauthorized`·`queue_invalidated`·미지 코드)를 영구로 오분류하면 살아 있는 세션을
     /// placeholder로 굳혀 사용자가 잃으므로, 확실한 둘만 승격하고 나머지는 `AttachFailed`를 유지한다(fail-closed).
     /// envelope를 못 읽는 경우(비JSON·error 키 없음)도 단정하지 않고 `AttachFailed`다.
-    fn classifyAttachFailure(self: *RemoteRuntime, resp: []const u8) anyerror {
-        const obj = decodeStrictObject(self.allocator, resp) catch |err| return switch (err) {
+    fn attachFailureCode(
+        allocator: std.mem.Allocator,
+        resp: []const u8,
+    ) error{ OutOfMemory, UnknownWireError }!?protocol.ErrorCode {
+        const obj = decodeStrictObject(allocator, resp) catch |err| return switch (err) {
             error.OutOfMemory => error.OutOfMemory,
-            else => error.AttachFailed,
+            else => null,
         };
         defer obj.deinit();
-        const code = obj.string("error") orelse return error.AttachFailed;
-        const parsed = protocol.ErrorCode.fromWireName(code) orelse return error.AttachFailed;
-        return switch (parsed) {
-            .runtime_not_found => error.RuntimeNotFound,
-            .stale_host => error.StaleHostHandle,
-            else => error.AttachFailed,
-        };
+        // A success object can be parsed by this shallow decoder too (notably frozen v1's
+        // `{"stream_id":N}`), so exact-envelope checks apply only when an error key exists.
+        const code = obj.string("error") orelse return null;
+        if (obj.fields.len != 1 or obj.hasUnknownKey(&.{"error"}))
+            return error.UnknownWireError;
+        return protocol.ErrorCode.fromWireName(code) orelse error.UnknownWireError;
     }
 
     /// spawn/attachExisting 공통(§10 attach 순서): controller attach(stream_id) → 첫 snapshot 조립 → 원격-backed Surface.
@@ -177,6 +178,18 @@ pub const RemoteRuntime = struct {
         const attach_params = std.fmt.bufPrint(&attach_buf, "{{\"runtime_id\":\"{s}\",\"mode\":\"controller\"}}", .{self.runtime_id_hex}) catch return error.AttachFailed;
         const attach_resp = try self.client.call("runtime.attach", attach_params);
         defer self.allocator.free(attach_resp);
+        const remote_failure = attachFailureCode(self.allocator, attach_resp) catch |err| {
+            // OOM cannot distinguish a committed success from an error envelope, while an unknown
+            // wire error means same-major schema drift. Neither has a trustworthy stream-local
+            // rollback target, so poison the shared connection.
+            self.client.failClosed();
+            return err;
+        };
+        if (remote_failure) |code| return switch (code) {
+            .runtime_not_found => error.RuntimeNotFound,
+            .stale_host => error.StaleHostHandle,
+            else => error.AttachFailed,
+        };
         const runtime_id = std.fmt.parseInt(u128, &self.runtime_id_hex, 16) catch
             return error.AttachFailed;
         const accepted = (if (self.client.wire_major == 1)
@@ -191,17 +204,21 @@ pub const RemoteRuntime = struct {
                 attach_resp,
                 runtime_id,
                 .controller,
-                self.client.controller_transfer_v1,
+                self.client.attach_generation_v1,
             )) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
+            error.OutOfMemory => {
+                // Same unknown-commit boundary as error-envelope parsing: strict decode OOM
+                // cannot recover a trustworthy stream id for targeted detach.
+                self.client.failClosed();
+                return error.OutOfMemory;
+            },
             error.Malformed => {
                 // role/capability를 추측한 채 shared connection을 계속 쓰면 observer가 controller처럼 mutation을
                 // enqueue할 수 있으므로 strict grant 실패는 connection 전체를 poison한다.
                 self.client.failClosed();
-                return self.classifyAttachFailure(attach_resp);
+                return error.AttachFailed;
             },
         };
-        self.attachment_state = accepted.state;
         self.stream_id = accepted.state.stream_id;
         // 새 host는 attach response에 current full metadata를 싣는다. 구 host/누락은 attach 자체를 깨지 않고 unavailable로
         // 남겨 GUI가 empty와 혼동하지 않게 한다.
@@ -2094,6 +2111,34 @@ test "remote runtime attaches through N-1 MRSH and normalizes frozen v1 screen r
     rr.detachClientSide();
     peer.join();
     try std.testing.expect(peer_ok);
+}
+
+test "remote runtime preserves only exact known attach error envelopes" {
+    try testing.expectEqual(
+        protocol.ErrorCode.runtime_not_found,
+        (try RemoteRuntime.attachFailureCode(
+            testing.allocator,
+            "{\"error\":\"runtime_not_found\"}",
+        )).?,
+    );
+    try testing.expect((try RemoteRuntime.attachFailureCode(
+        testing.allocator,
+        "{\"stream_id\":9}",
+    )) == null);
+    try testing.expectError(
+        error.UnknownWireError,
+        RemoteRuntime.attachFailureCode(
+            testing.allocator,
+            "{\"error\":\"future_error\"}",
+        ),
+    );
+    try testing.expectError(
+        error.UnknownWireError,
+        RemoteRuntime.attachFailureCode(
+            testing.allocator,
+            "{\"error\":\"runtime_not_found\",\"result\":1}",
+        ),
+    );
 }
 const socket_server = @import("socket_server.zig");
 

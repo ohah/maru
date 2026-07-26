@@ -13,6 +13,7 @@ const std = @import("std");
 const surface_mod = @import("surface.zig");
 const split_tree = @import("split_tree.zig");
 const agent_observer = @import("agent_observer.zig");
+const agent_transcript_mod = @import("agent_transcript.zig");
 const workspace = @import("workspace.zig"); // OS-중립 직렬화 모델(session.workspace.v1) — TreeNode 변환용
 const control_surface = @import("control_surface.zig"); // SurfaceKind(terminal|web)·PanelKind 열거 재사용(web-panel.md §6 4e)
 
@@ -65,6 +66,9 @@ pub fn Model(comptime Rt: type) type {
             /// observer가 마지막으로 읽은 TerminalCore write sequence와 마지막 PTY activity 시각(ms, awake clock).
             agent_screen_generation: u64 = 0,
             agent_last_output_ms: u64 = 0,
+            /// 사이드바 에이전트 행의 **마지막 대화**(프롬프트·응답) 캐시 + 세션 기록 파일 매핑
+            /// (docs/sidebar-agent-list.md §7). 고정 크기라 힙을 잡지 않아 destroyTerm이 따로 해제하지 않는다.
+            agent_transcript: agent_transcript_mod.Cache = .{},
             /// 사이드바·탭 라벨용 자동 제목 캐시(owned). syncAutoTitles가 core.windowTitle()을 복사해 채운다. destroyTerm이 해제.
             auto_title: std.ArrayListUnmanaged(u8) = .empty,
             /// syncAutoTitles가 마지막으로 auto_title에 반영한 core.title_generation(P4-1). 코어의 현재 generation과 같으면

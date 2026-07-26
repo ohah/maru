@@ -114,6 +114,8 @@ v1 provider allowlist는 현재 UI·브랜드가 있는 claude/codex다. manifes
   않는다. 표준(ConEmu) 기반 데이터라 존치하되 근거 없는 값으로 오해하지 않도록 여기 기록한다.
 - 두 provider 모두 **작업 완료·입력 대기를 자체 데스크톱 알림(OSC 9 본문)으로 보낸다.** 예: claude의
   `Claude is waiting for your input`. Maru는 이를 가공 없이 인앱 알림 센터와 OS 배너로 전달한다(제목이 비면 팬 라벨로 채운다).
+  **본문 뒤에는 그 Term의 마지막 대화가 붙는다** — provider 문구만으로는 에이전트를 여럿 돌릴 때 어느 세션인지 알 수
+  없기 때문이다. provider 문구 자체는 고치지 않는다. 단일 출처는 [사이드바 에이전트 목록](sidebar-agent-list.md) §7.6.
   즉 **알림 자체는 이미 동작하며**, observer 주도 알림의 목적은 아래 절에 다시 적는다. OS 배너는 별도로 macOS 알림 권한이
   필요하다 — 권한이 없으면 인앱 센터에만 쌓인다.
 

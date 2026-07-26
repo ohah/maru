@@ -270,6 +270,31 @@ pub fn headerHit(x_px: f64, y_px: f64, sidebar_width_px: u32, cell_width_px: u32
 }
 
 /// x가 사이드바 슬롯의 닫기(✕) zone(우측 2칸) 안인가 — 호버 시 ✕를 그 자리에 그리므로 그 폭만큼을 닫기 영역으로 본다.
+/// 마지막 활동 시각을 사이드바 폭에 맞는 **짧은 상대 표기**로(`now`·`5m`·`3h`·`2d`).
+///
+/// 절대 시각(`14:23`)이 아니라 상대인 이유: 이 줄이 답하는 질문은 "언제였나"가 아니라 **"얼마나 됐나"**다 —
+/// 방금 멈춘 에이전트와 어제 멈춘 에이전트를 한눈에 가르는 게 목적이고, 정확한 시각이 필요하면 그 자리로 가면 된다.
+///
+/// 폭을 **최대 4칸**으로 묶는다. 이 표기는 행 우측에 고정 폭으로 자리를 잡고 제목이 그만큼 일찍 잘리므로, 폭이
+/// 들쭉날쭉하면 제목 잘리는 지점이 행마다 달라져 목록이 어수선해진다. 그래서 큰 값은 `99d`에서 멈춘다 —
+/// 그보다 오래된 것에 하루 단위 정밀도는 의미가 없다.
+///
+/// `age_ms == 0`(활동 기록 없음)이면 빈 슬라이스 — 호출부가 그 자리를 비운다.
+pub fn formatRelativeAge(age_ms: u64, buf: []u8) []const u8 {
+    if (age_ms == 0) return "";
+    const sec = age_ms / 1000;
+    if (sec < 60) return "now"; // 초 단위는 매 tick 바뀌어 눈에 거슬리고, 정보 가치도 없다
+    const min = sec / 60;
+    if (min < 60) return std.fmt.bufPrint(buf, "{d}m", .{min}) catch "";
+    const hour = min / 60;
+    if (hour < 24) return std.fmt.bufPrint(buf, "{d}h", .{hour}) catch "";
+    const day = hour / 24;
+    return std.fmt.bufPrint(buf, "{d}d", .{@min(day, 99)}) catch "";
+}
+
+/// `formatRelativeAge`가 쓸 수 있는 최대 칸 수. 렌더러가 이 값으로 우측 자리를 예약한다.
+pub const relative_age_cols: u16 = 3;
+
 pub fn closeButton(x_px: f64, sidebar_width_px: u32, cell_width_px: u32) bool {
     if (sidebar_width_px == 0 or cell_width_px == 0) return false;
     const width: f64 = @floatFromInt(sidebar_width_px);
@@ -662,6 +687,23 @@ test "sidebar onGroupHeader: 헤더 row만 true(카드·범위 밖 false)" {
 // code-review(max) 회귀: 닫기 ✕ glyph는 `cols-3`에 그려지는데 hit zone은 우측 **2칸**이라, 보이는 ✕는 안 눌리고
 // 그 옆 빈칸이 닫는 상태였다. 사이드바에서 왜 중요한가: 그 빈칸 클릭은 워크스페이스나 Term을 되돌릴 수 없이
 // 닫으므로, "보이는 것 = 눌리는 것"이 깨지면 사용자가 의도하지 않은 파괴가 일어난다.
+test "formatRelativeAge: 상대 표기가 폭 상한 안에 머문다" {
+    var buf: [8]u8 = undefined;
+    try std.testing.expectEqualStrings("", formatRelativeAge(0, &buf)); // 활동 기록 없음
+    try std.testing.expectEqualStrings("now", formatRelativeAge(1, &buf));
+    try std.testing.expectEqualStrings("now", formatRelativeAge(59_000, &buf));
+    try std.testing.expectEqualStrings("1m", formatRelativeAge(60_000, &buf));
+    try std.testing.expectEqualStrings("59m", formatRelativeAge(59 * 60_000, &buf));
+    try std.testing.expectEqualStrings("1h", formatRelativeAge(60 * 60_000, &buf));
+    try std.testing.expectEqualStrings("23h", formatRelativeAge(23 * 60 * 60_000, &buf));
+    try std.testing.expectEqualStrings("1d", formatRelativeAge(24 * 60 * 60_000, &buf));
+    // 폭이 행마다 달라지면 제목 잘리는 지점이 흔들린다 — 큰 값은 99d에서 멈춘다.
+    try std.testing.expectEqualStrings("99d", formatRelativeAge(500 * 24 * 60 * 60_000, &buf));
+    // 어떤 입력도 예약 폭을 넘지 않아야 한다(렌더러가 이 값으로 자리를 잡는다).
+    const samples = [_]u64{ 1, 60_000, 3_600_000, 86_400_000, std.math.maxInt(u64) };
+    for (samples) |ms| try std.testing.expect(formatRelativeAge(ms, &buf).len <= relative_age_cols);
+}
+
 test "sidebar closeButton: 그려진 ✕(cols-3)와 클릭 zone이 정합한다" {
     const cw: u32 = 10;
     const cols: u32 = 20;

@@ -2395,7 +2395,156 @@ test "client: connects to a forked host, agrees on host_id, and calls host.info"
     try testing.expect(std.mem.indexOf(u8, resp, host_hex) != null);
 }
 
+test "client: forked daemon serves ephemeral inventory while canonical GUI stays connected" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    const discovery_mod = @import("discovery.zig");
+    const short_endpoint_mod = @import("short_endpoint.zig");
+    const host_manifest_mod = @import("host_manifest.zig");
+    var base_buf: [128]u8 = undefined;
+    const base = std.fmt.bufPrintZ(&base_buf, "/tmp/maru-sh-multifd-{d}", .{c.getpid()}) catch
+        return error.SkipZigTest;
+    _ = c.mkdir(base.ptr, 0o700);
+    var dir_buf: [256]u8 = undefined;
+    const dir_path = discovery_mod.sessionHostDirPath(&dir_buf, base) catch return error.SkipZigTest;
+    _ = c.mkdir(dir_path.ptr, 0o700);
+    const host_id: u128 = (@as(u128, @intCast(c.getpid())) << 64) | 0x4D554C54494644;
+    try short_endpoint_mod.prepareCurrentUserNamespace();
+    var sp_buf: [128]u8 = undefined;
+    const socket_path = try short_endpoint_mod.currentSocketPathIn(&sp_buf, host_id);
+
+    const child = c.fork();
+    if (child < 0) return error.SkipZigTest;
+    if (child == 0) {
+        _ = c.setsid();
+        // Match a detached product host's inherited-fd baseline. Otherwise the Zig test runner's
+        // protocol/cache descriptors correctly make the upgrade coordinator fail closed before
+        // exec, which would test rollback rather than the intended same-PID success path.
+        var inherited_fd: c_int = 3;
+        while (inherited_fd < getdtablesize()) : (inherited_fd += 1)
+            _ = c.close(inherited_fd);
+        daemon.runSessionHostWithIdentityTestAuthorizer(
+            std.heap.page_allocator,
+            testing.io,
+            dir_path,
+            socket_path,
+            host_id,
+        ) catch {};
+        std.c._exit(0);
+    }
+    defer {
+        _ = c.kill(child, posix.SIG.TERM);
+        var status: c_int = undefined;
+        _ = c.waitpid(child, &status, 0);
+        _ = c.unlink(socket_path.ptr);
+        var manifest_buf: [832]u8 = undefined;
+        if (host_manifest_mod.manifestPathIn(&manifest_buf, dir_path, host_id)) |path|
+            _ = c.unlink(path.ptr)
+        else |_| {}
+        var owner_buf: [832]u8 = undefined;
+        if (host_manifest_mod.ownerLockPathIn(&owner_buf, dir_path, host_id)) |path|
+            _ = c.unlink(path.ptr)
+        else |_| {}
+        var host_dir_buf: [768]u8 = undefined;
+        if (host_manifest_mod.hostDirPathIn(&host_dir_buf, dir_path, host_id)) |path|
+            _ = c.rmdir(path.ptr)
+        else |_| {}
+        var hosts_buf: [640]u8 = undefined;
+        if (host_manifest_mod.hostsRootPathIn(&hosts_buf, dir_path)) |path|
+            _ = c.rmdir(path.ptr)
+        else |_| {}
+        _ = c.rmdir(dir_path.ptr);
+        _ = c.rmdir(base.ptr);
+    }
+
+    var gui: Client = blk: {
+        var attempts: usize = 0;
+        while (attempts < 150) : (attempts += 1) {
+            if (Client.connect(allocator, socket_path, "gui")) |connected|
+                break :blk connected
+            else |_|
+                _ = usleepMs(20);
+        }
+        return error.TestUnexpectedResult;
+    };
+    defer gui.deinit();
+    try testing.expect(gui.runtime_inventory_v1);
+    try testing.expectEqual(child, try testPeerPid(gui.fd));
+
+    var ephemeral = try Client.connect(allocator, socket_path, "cli");
+    const inventory = try ephemeral.call(
+        "runtime.inventory",
+        "{\"cursor\":\"\",\"limit\":256,\"membership_generation\":0}",
+    );
+    defer allocator.free(inventory);
+    try testing.expect(std.mem.indexOf(u8, inventory, "\"runtime_ids\":[]") != null);
+    ephemeral.deinit();
+
+    const still_live = try gui.call("host.info", null);
+    defer allocator.free(still_live);
+    try testing.expect(std.mem.indexOf(u8, still_live, "\"runtime_count\":0") != null);
+
+    try testing.expect(gui.host_exec_upgrade_v1);
+    const product_raw = c.getenv("MARU_SESSION_HOST_PRODUCT_EXE") orelse
+        return error.SkipZigTest;
+    const product_path = try std.Io.Dir.cwd().realPathFileAlloc(
+        testing.io,
+        std.mem.span(product_raw),
+        allocator,
+    );
+    defer allocator.free(product_path);
+    const product_z = try allocator.dupeZ(u8, product_path);
+    defer allocator.free(product_z);
+    const target_identity = try @import("staged_image.zig").inspect(product_z);
+    const target_build_id = try host_manifest_mod.buildIdForExecutable(allocator, product_z);
+    defer allocator.free(target_build_id);
+    const prior_epoch = gui.upgrade_epoch;
+    const upgrade_result = try gui.prepareUpgrade(.{
+        .attempt_id = (@as(u128, @intCast(c.getpid())) << 64) | 0x55504752414445,
+        .target_path = product_path,
+        .target_build_id = target_build_id,
+        .target_sha256 = target_identity.sha256,
+        .handoff_reader_min = 1,
+        .handoff_reader_max = 1,
+    });
+    switch (upgrade_result) {
+        .accepted_reconnect_required => {},
+        else => return error.TestUnexpectedResult,
+    }
+
+    var restored: Client = blk: {
+        var attempts: usize = 0;
+        while (attempts < 250) : (attempts += 1) {
+            if (Client.connect(allocator, socket_path, "gui")) |connected|
+                break :blk connected
+            else |_|
+                _ = usleepMs(20);
+        }
+        return error.TestUnexpectedResult;
+    };
+    defer restored.deinit();
+    try testing.expectEqual(host_id, restored.host_id);
+    try testing.expect(restored.upgrade_epoch > prior_epoch);
+    try testing.expectEqual(child, try testPeerPid(restored.fd));
+    const restored_info = try restored.call("host.info", null);
+    defer allocator.free(restored_info);
+    try testing.expect(std.mem.indexOf(u8, restored_info, "\"runtime_count\":0") != null);
+    try testing.expectEqual(@as(c_int, 0), c.kill(child, @enumFromInt(0)));
+}
+
 extern "c" fn usleep(usec: c_uint) c_int;
+extern "c" fn getdtablesize() c_int;
+
+fn testPeerPid(fd: c.fd_t) !c.pid_t {
+    const sol_local: c_int = 0;
+    const local_peerpid: c_int = 0x002;
+    var pid: c.pid_t = 0;
+    var len: c.socklen_t = @sizeOf(c.pid_t);
+    if (c.getsockopt(fd, sol_local, local_peerpid, &pid, &len) != 0 or
+        len != @sizeOf(c.pid_t) or pid <= 0)
+        return error.TestUnexpectedResult;
+    return pid;
+}
 fn usleepMs(ms: c_uint) c_int {
     return usleep(ms * 1000);
 }

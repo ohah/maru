@@ -549,12 +549,9 @@ pub const socket_server_groups = [_]Group{
             "admission_gate",
             "owner_tick_ctx",
             "owner_tick",
-            "active_connections",
-            "completed_upgrade_attempt",
-            "connection_keys",
             "subscriptions",
         },
-        .why = "the listener, target build status, process-local callbacks, gate pointer, and connection count are rebuilt only after the complete runtime graph is prepared",
+        .why = "the listener, target build status, process-local callbacks, gate pointer, and subscription table are rebuilt only after the complete runtime graph is prepared; poll_owner is the sole transient connection/upgrade-marker authority and is drained before capture",
     },
 };
 

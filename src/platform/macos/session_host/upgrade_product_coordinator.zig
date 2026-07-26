@@ -107,38 +107,71 @@ pub const Outcome = union(enum) {
 
 const max_authority_rollback_attempts: usize = 3;
 
-pub fn processArmed(
+fn processArmed(
     ctx: Context,
     attempt_id: u128,
 ) Outcome {
+    return processArmedMode(ctx, attempt_id, false);
+}
+
+/// Readiness reactor가 accepted reply를 전량 flush하고 admission gate를 이미 닫은 typed marker 전용 경로.
+pub fn processArmedPreclosed(
+    ctx: Context,
+    attempt_id: u128,
+) Outcome {
+    return processArmedMode(ctx, attempt_id, true);
+}
+
+fn processArmedMode(ctx: Context, attempt_id: u128, gate_preclosed: bool) Outcome {
     const deadline = upgrade_deadline.Deadline.after(ctx.io, upgrade_limits.pause_budget_ns) catch
         return .invariant_violation;
-    return processArmedWithDeadline(ctx, attempt_id, deadline);
+    return processArmedWithDeadline(ctx, attempt_id, deadline, gate_preclosed);
 }
 
 fn processArmedWithDeadline(
     ctx: Context,
     attempt_id: u128,
     deadline: upgrade_deadline.Deadline,
+    gate_preclosed: bool,
 ) Outcome {
     const execution = ctx.owner.beginExecution(attempt_id) orelse {
         const report = ctx.owner.status(attempt_id) orelse return .not_armed;
-        return if (report.status == .pending) .not_armed else .{ .terminal = report };
+        if (report.status == .pending) return .not_armed;
+        if (gate_preclosed and report.status == .resumed) ctx.gate.cancelClose();
+        return .{ .terminal = report };
     };
     if (!ctx.rollback_image.revalidate())
-        return finish(ctx.owner, attempt_id, .{ .status = .resumed, .reason = .handoff_failed });
+        return finishBeforeFreeze(ctx, attempt_id, gate_preclosed, .{
+            .status = .resumed,
+            .reason = .handoff_failed,
+        });
     if (deadline.expired())
-        return finish(ctx.owner, attempt_id, .{ .status = .resumed, .reason = .deadline_exceeded });
+        return finishBeforeFreeze(ctx, attempt_id, gate_preclosed, .{
+            .status = .resumed,
+            .reason = .deadline_exceeded,
+        });
 
     const requested = ctx.layout.requested() orelse
-        return finish(ctx.owner, attempt_id, .{ .status = .resumed, .reason = .state_too_large });
+        return finishBeforeFreeze(ctx, attempt_id, gate_preclosed, .{
+            .status = .resumed,
+            .reason = .state_too_large,
+        });
     assertNoUnexpectedInherited() catch
-        return finish(ctx.owner, attempt_id, .{ .status = .resumed, .reason = .handoff_failed });
+        return finishBeforeFreeze(ctx, attempt_id, gate_preclosed, .{
+            .status = .resumed,
+            .reason = .handoff_failed,
+        });
     var reservation: exec_fd_set.SlotReservation = .{};
     reservation.reserve(&requested) catch
-        return finish(ctx.owner, attempt_id, .{ .status = .resumed, .reason = .handoff_failed });
+        return finishBeforeFreeze(ctx, attempt_id, gate_preclosed, .{
+            .status = .resumed,
+            .reason = .handoff_failed,
+        });
 
-    var frozen = upgrade_attempt.freeze(ctx.manager, ctx.gate, deadline) catch |err| {
+    var frozen = (if (gate_preclosed)
+        upgrade_attempt.freezePreclosed(ctx.manager, ctx.gate, deadline)
+    else
+        upgrade_attempt.freeze(ctx.manager, ctx.gate, deadline)) catch |err| {
         reservation.rollback();
         const report = reportForFreezeError(err);
         return if (report.reason == .runtime_resume_failed)
@@ -302,6 +335,150 @@ fn processArmedWithDeadline(
         .deadline = deadline,
     }) catch {};
     return rollbackAuthority(ctx, &frozen, restoring_authority, attempt_id, .exec_failed, deadline);
+}
+
+/// The readiness owner closes admission before publishing its typed marker. Any retryable failure
+/// before runtime quiesce therefore owns the matching reopen; after `freezePreclosed` succeeds the
+/// Frozen rollback guard becomes the sole owner instead.
+fn finishBeforeFreeze(
+    ctx: Context,
+    attempt_id: u128,
+    gate_preclosed: bool,
+    report: upgrade_wire.AttemptReport,
+) Outcome {
+    const outcome = finish(ctx.owner, attempt_id, report);
+    if (gate_preclosed) switch (outcome) {
+        .terminal => |terminal| if (terminal.status == .resumed) ctx.gate.cancelClose(),
+        else => {},
+    };
+    return outcome;
+}
+
+test "preclosed retryable failure reopens admission before runtime freeze" {
+    var owner = upgrade_owner.UpgradeOwner.init(std.testing.allocator, TestStager.ops(), null);
+    defer owner.deinit();
+    const attempt_id: u128 = 0xD1;
+    try std.testing.expectEqual(upgrade_wire.PrepareDecision.accepted, owner.stagePending(.{
+        .attempt_id = attempt_id,
+        .target_path = "/Applications/Maru.app/Contents/MacOS/maru",
+        .target_build_id = "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        .target_sha256 = [_]u8{0xDD} ** 32,
+        .handoff_reader_min = 1,
+        .handoff_reader_max = 1,
+    }));
+    try std.testing.expectEqual(upgrade_wire.ArmDecision.armed, owner.armAccepted(attempt_id));
+    _ = owner.beginExecution(attempt_id) orelse return error.TestUnexpectedResult;
+    var gate = @import("upgrade_coordinator.zig").AdmissionGate.init(std.testing.io);
+    try std.testing.expect(gate.close());
+    var ctx: Context = undefined;
+    ctx.owner = &owner;
+    ctx.gate = &gate;
+    const outcome = finishBeforeFreeze(ctx, attempt_id, true, .{
+        .status = .resumed,
+        .reason = .handoff_failed,
+    });
+    const report = switch (outcome) {
+        .terminal => |terminal| terminal,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqual(upgrade_wire.AttemptStatus.resumed, report.status);
+    try std.testing.expect(gate.snapshot().open);
+}
+
+test "preclosed target revalidation failure reopens admission through product entrypoint" {
+    const MutableStager = struct {
+        valid: bool = true,
+
+        fn stage(
+            _: *anyopaque,
+            allocator: std.mem.Allocator,
+            request: upgrade_wire.PrepareRequest,
+        ) upgrade_owner.StageDecision {
+            const path = std.fmt.allocPrintSentinel(
+                allocator,
+                "/staged/{x:0>32}",
+                .{request.attempt_id},
+                0,
+            ) catch return .resource_exhausted;
+            const build_id = allocator.dupe(u8, request.target_build_id) catch {
+                allocator.free(path);
+                return .resource_exhausted;
+            };
+            return .{ .verified = .{
+                .artifact = .{
+                    .path = path,
+                    .exec_fd = -1,
+                    .sha256 = request.target_sha256,
+                    .dev = 1,
+                    .ino = 1,
+                    .size = 1,
+                },
+                .build_id = build_id,
+                .reader_min = request.handoff_reader_min,
+                .reader_max = request.handoff_reader_max,
+            } };
+        }
+        fn restore(
+            _: *anyopaque,
+            _: std.mem.Allocator,
+            _: upgrade_owner.RecordedTarget,
+        ) upgrade_owner.StageDecision {
+            return .unsupported;
+        }
+        fn release(
+            _: *anyopaque,
+            allocator: std.mem.Allocator,
+            artifact: *upgrade_owner.StagedArtifact,
+        ) void {
+            allocator.free(artifact.path);
+            artifact.* = undefined;
+        }
+        fn verify(ctx: *anyopaque, _: upgrade_owner.VerifiedTarget) bool {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            return self.valid;
+        }
+        fn ops(self: *@This()) upgrade_owner.TargetStager {
+            return .{
+                .ctx = self,
+                .stage = stage,
+                .restore = restore,
+                .release_artifact = release,
+                .verify = verify,
+            };
+        }
+    };
+    var stager: MutableStager = .{};
+    var owner = upgrade_owner.UpgradeOwner.init(std.testing.allocator, stager.ops(), null);
+    defer owner.deinit();
+    const attempt_id: u128 = 0xD2;
+    try std.testing.expectEqual(upgrade_wire.PrepareDecision.accepted, owner.stagePending(.{
+        .attempt_id = attempt_id,
+        .target_path = "/Applications/Maru.app/Contents/MacOS/maru",
+        .target_build_id = "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        .target_sha256 = [_]u8{0xEE} ** 32,
+        .handoff_reader_min = 1,
+        .handoff_reader_max = 1,
+    }));
+    try std.testing.expectEqual(upgrade_wire.ArmDecision.armed, owner.armAccepted(attempt_id));
+    stager.valid = false;
+    var gate = @import("upgrade_coordinator.zig").AdmissionGate.init(std.testing.io);
+    try std.testing.expect(gate.close());
+    var ctx: Context = undefined;
+    ctx.owner = &owner;
+    ctx.gate = &gate;
+    const outcome = processArmedWithDeadline(
+        ctx,
+        attempt_id,
+        upgrade_deadline.Deadline.testingNever(),
+        true,
+    );
+    const report = switch (outcome) {
+        .terminal => |terminal| terminal,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqual(upgrade_wire.AttemptStatus.resumed, report.status);
+    try std.testing.expectEqual(upgrade_wire.AttemptReason.target_invalid, report.reason);
+    try std.testing.expect(gate.snapshot().open);
 }
 
 fn replaceAll(

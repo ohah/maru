@@ -25,6 +25,7 @@ const upgrade_deadline = @import("upgrade_deadline.zig");
 const upgrade_executor = @import("upgrade_executor.zig");
 const upgrade_limits = @import("upgrade_limits.zig");
 const upgrade_loop = @import("upgrade_loop.zig");
+const poll_owner = @import("poll_owner.zig");
 const upgrade_owner = @import("upgrade_owner.zig");
 const upgrade_target = @import("upgrade_target.zig");
 const upgrade_wire = @import("upgrade_wire.zig");
@@ -428,25 +429,24 @@ fn serveLoop(
     else
         false;
     var idle_ticks: usize = 0;
+    var owner = try poll_owner.Owner.init(upgrade_context.allocator, upgrade_context.io, server);
+    defer owner.deinit();
     while (true) {
         server.tickOwner();
-        switch (server.pollReady(poll_timeout_ms)) {
-            .ready => {
-                if (upgrade_loop.serveOne(server) == .fail_stop)
+        switch (try owner.pollOnce(poll_timeout_ms)) {
+            .upgrade_ready => {
+                const marker = owner.takeArmedUpgrade() orelse return error.PostCommitFailStop;
+                if (upgrade_loop.processPreclosed(marker, upgrade_context) == .fail_stop)
                     return error.PostCommitFailStop;
-                if (upgrade_loop.processCompleted(
-                    server,
-                    upgrade_context,
-                ) == .fail_stop)
-                    return error.PostCommitFailStop;
-                if (test_oneshot) return;
             },
-            .timeout => if (test_oneshot) {
+            .idle => if (test_oneshot) {
                 idle_ticks += 1;
                 if (idle_ticks >= 25) return;
             },
-            .broken => return,
+            .progress => {},
+            .listener_broken => return,
         }
+        if (test_oneshot and owner.total_admitted != 0 and owner.activeCount() == 0) return;
     }
 }
 

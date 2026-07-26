@@ -127,6 +127,31 @@ pub const Table = struct {
         return self.global_to_record.count();
     }
 
+    /// 같은 owner turn에서 runtime event fan-out 대상을 안정된 owned snapshot으로 만든다.
+    pub fn collectRuntimeRecords(
+        self: *const Table,
+        allocator: std.mem.Allocator,
+        runtime_id: u128,
+    ) error{OutOfMemory}![]Record {
+        var count_for_runtime: usize = 0;
+        var count_it = self.global_to_record.valueIterator();
+        while (count_it.next()) |record|
+            if (record.runtime_id == runtime_id) {
+                count_for_runtime += 1;
+            };
+        const records = allocator.alloc(Record, count_for_runtime) catch
+            return error.OutOfMemory;
+        var index: usize = 0;
+        var it = self.global_to_record.valueIterator();
+        while (it.next()) |record| {
+            if (record.runtime_id != runtime_id) continue;
+            records[index] = record.*;
+            index += 1;
+        }
+        std.debug.assert(index == records.len);
+        return records;
+    }
+
     fn connectionCount(self: *const Table, connection: connection_slot.ConnectionKey) usize {
         var total: usize = 0;
         var it = self.global_to_record.valueIterator();

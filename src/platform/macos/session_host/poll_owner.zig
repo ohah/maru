@@ -56,6 +56,7 @@ pub const Owner = struct {
     first_stall_ns: u64 = 0,
     first_stall_send_buffer_bytes: u64 = 0,
     controller_transition_admission_fail_once: bool = false,
+    resize_admission_fail_once: bool = false,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -304,6 +305,10 @@ pub const Owner = struct {
                 .controller_transition = .{
                     .ctx = self,
                     .apply = applyControllerTransition,
+                },
+                .resize = .{
+                    .ctx = self,
+                    .apply = applyResize,
                 },
                 .now_ns = now_ns,
             },
@@ -582,6 +587,144 @@ pub const Owner = struct {
             &owned_transition.prepared,
         ) catch unreachable;
         transition_owned = false;
+        return true;
+    }
+
+    fn applyResize(
+        ctx: *anyopaque,
+        requester: *connection_turn.Client,
+        resize_value: server_mod.Action.ResizeRequested,
+    ) bool {
+        const self: *Owner = @ptrCast(@alignCast(ctx));
+        var resize = resize_value;
+        var success_owned = true;
+        var internal_owned = true;
+        var exhausted_owned = true;
+        const event_body_owned = resize.event_body != null;
+        var screen_items: []connection_slot.ReactorCore.OwnedScreenItem = &.{};
+        var screen_items_owned = false;
+        var screen_frames_owned: usize = 0;
+        defer {
+            if (success_owned) self.allocator.free(resize.success_reply);
+            if (internal_owned) self.allocator.free(resize.internal_reply);
+            if (exhausted_owned) self.allocator.free(resize.exhausted_reply);
+            if (event_body_owned) self.allocator.free(resize.event_body.?);
+            for (screen_items[0..screen_frames_owned]) |item|
+                self.allocator.free(item.bytes);
+            if (screen_items_owned) self.allocator.free(screen_items);
+        }
+
+        if (resize.event_body) |event_body| {
+            const records = self.server.subscriptions.collectRuntimeRecords(
+                self.allocator,
+                resize.runtime_id,
+            ) catch return self.rejectResize(
+                requester,
+                resize.exhausted_reply,
+                &exhausted_owned,
+            );
+            defer self.allocator.free(records);
+            screen_items = self.allocator.alloc(
+                connection_slot.ReactorCore.OwnedScreenItem,
+                records.len,
+            ) catch return self.rejectResize(
+                requester,
+                resize.exhausted_reply,
+                &exhausted_owned,
+            );
+            screen_items_owned = true;
+            for (records) |record| {
+                const client = self.clientForKey(record.connection) orelse
+                    return self.rejectResize(
+                        requester,
+                        resize.exhausted_reply,
+                        &exhausted_owned,
+                    );
+                const tracker = client.screenTracker(record.stream_id) orelse
+                    return self.rejectResize(
+                        requester,
+                        resize.exhausted_reply,
+                        &exhausted_owned,
+                    );
+                const frame = framing.encodeFrame(self.allocator, .{
+                    .kind = .event,
+                    .stream_id = record.stream_id,
+                }, event_body) catch return self.rejectResize(
+                    requester,
+                    resize.exhausted_reply,
+                    &exhausted_owned,
+                );
+                screen_items[screen_frames_owned] = .{
+                    .admission = client.admission,
+                    .tracker = tracker,
+                    .bytes = frame,
+                };
+                screen_frames_owned += 1;
+            }
+        }
+
+        const control = connection_slot.ReactorCore.OwnedControlItem{
+            .admission = requester.admission,
+            .bytes = resize.success_reply,
+        };
+        if (self.resize_admission_fail_once) {
+            self.resize_admission_fail_once = false;
+            return self.rejectResize(
+                requester,
+                resize.exhausted_reply,
+                &exhausted_owned,
+            );
+        }
+        self.reactor.preflightOwnedControlAndScreenBatch(
+            control,
+            screen_items[0..screen_frames_owned],
+        ) catch return self.rejectResize(
+            requester,
+            resize.exhausted_reply,
+            &exhausted_owned,
+        );
+
+        const preview = resize.prepared.preview();
+        switch (preview) {
+            .stale => unreachable,
+            .applied => |applied| if (applied.changed) {
+                const ops = self.server.runtime_ops orelse
+                    return self.rejectResize(
+                        requester,
+                        resize.internal_reply,
+                        &internal_owned,
+                    );
+                ops.resize(
+                    ops.ctx,
+                    resize.runtime_id,
+                    applied.cols,
+                    applied.rows,
+                ) catch return self.rejectResize(
+                    requester,
+                    resize.internal_reply,
+                    &internal_owned,
+                );
+            },
+        }
+
+        self.reactor.enqueueOwnedControlAndScreenBatch(
+            control,
+            screen_items[0..screen_frames_owned],
+        ) catch unreachable;
+        success_owned = false;
+        screen_frames_owned = 0;
+        _ = self.server.registry.commitResizeSubscription(&resize.prepared);
+        return true;
+    }
+
+    fn rejectResize(
+        self: *Owner,
+        requester: *connection_turn.Client,
+        frame: []u8,
+        owned: *bool,
+    ) bool {
+        if (!self.enqueueControllerFailure(requester, frame)) return false;
+        owned.* = false;
         return true;
     }
 
@@ -2852,6 +2995,74 @@ test "poll owner keeps committed controller after partial revocation write and o
     const final = owner.reactor.accountingSnapshot();
     try testing.expectEqual(@as(usize, 0), final.resident_bytes);
     try testing.expectEqual(@as(usize, 0), final.shared_bytes);
+}
+
+test "poll owner publishes changed resize to controller and observer all or none" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir_len = try tmp.dir.realPath(testing.io, &dir_buf);
+    const dir_raw = dir_buf[0..dir_len];
+    const dir_path = try testing.allocator.dupeZ(u8, dir_raw);
+    defer testing.allocator.free(dir_path);
+    const socket_path = try std.fmt.allocPrintSentinel(
+        testing.allocator,
+        "{s}/resize.sock",
+        .{dir_raw},
+        0,
+    );
+    defer testing.allocator.free(socket_path);
+    var runtime_registry = registry.TerminalRuntimeRegistry.init(testing.allocator);
+    defer runtime_registry.deinit();
+    const runtime = try runtime_registry.register(0xAA, 80, 24);
+    var server = try socket_server.SocketServer.bind(
+        testing.allocator,
+        dir_path,
+        socket_path,
+        0xB9,
+        &runtime_registry,
+    );
+    defer server.deinit();
+    var fake_runtime: server_mod.FakeRuntimeOps = .{};
+    server.runtime_ops = fake_runtime.ops();
+    var owner = try Owner.init(testing.allocator, testing.io, &server);
+    defer owner.deinit();
+    const controller = try connectAttachedTestClient(&owner, socket_path, "controller");
+    defer _ = c.close(controller.fd);
+    const observer = try connectAttachedTestClient(&owner, socket_path, "observer");
+    defer _ = c.close(observer.fd);
+
+    try sendTestRequest(
+        controller.fd,
+        .request,
+        3,
+        "{\"method\":\"runtime.resize\",\"params\":{\"stream_id\":1,\"cols\":100,\"rows\":30,\"client_sequence\":1}}",
+    );
+    try pumpUntilResponse(&owner, controller.fd, "\"changed\":true");
+    try pumpUntilResponse(&owner, observer.fd, "\"event\":\"runtime.resized\"");
+    try testing.expectEqual(@as(u16, 100), fake_runtime.resized_cols);
+    try testing.expectEqual(@as(u16, 30), fake_runtime.resized_rows);
+    try testing.expectEqual(@as(u16, 100), runtime.cols);
+    try testing.expectEqual(@as(u64, 1), runtime.resize_generation);
+
+    // Injected owner admission failure must reject the complete publication before the backend
+    // or canonical registry changes. Reactor cap+1 rollback is covered independently above.
+    owner.resize_admission_fail_once = true;
+    fake_runtime.resized_cols = 0;
+    fake_runtime.resized_rows = 0;
+    try sendTestRequest(
+        controller.fd,
+        .request,
+        4,
+        "{\"method\":\"runtime.resize\",\"params\":{\"stream_id\":1,\"cols\":120,\"rows\":40,\"client_sequence\":2}}",
+    );
+    try pumpUntilResponse(&owner, controller.fd, "\"resource_exhausted\"");
+    try testing.expectEqual(@as(u16, 0), fake_runtime.resized_cols);
+    try testing.expectEqual(@as(u16, 100), runtime.cols);
+    try testing.expectEqual(@as(u16, 30), runtime.rows);
+    try testing.expectEqual(@as(u64, 1), runtime.resize_generation);
+    try testing.expectEqual(@as(u64, 1), runtime.controller_sequence);
 }
 
 test "poll owner rejects a prepared transition after requester slot ABA reuse" {

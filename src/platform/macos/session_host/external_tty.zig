@@ -17,6 +17,7 @@ extern "c" fn openpty(
 ) c_int;
 extern "c" fn cfmakeraw(termios_p: *posix.termios) void;
 extern "c" fn usleep(usec: c_uint) c_int;
+const darwin_tiocswinsz: c_int = @bitCast(@as(u32, 0x80087467));
 
 pub const Size = struct {
     cols: u16,
@@ -979,6 +980,93 @@ test "SIGWINCH bursts coalesce and termination wins in one wake batch" {
     const terminated = try owner.drainWakeBatch();
     try std.testing.expect(!terminated.resize);
     try std.testing.expectEqual(posix.SIG.TERM, terminated.termination.?);
+}
+
+test "openpty child turns SIGWINCH burst into one latest window size" {
+    const initial = fakeInitialTermios();
+    const window: posix.winsize = .{ .row = 24, .col = 80, .xpixel = 0, .ypixel = 0 };
+    var master: c.fd_t = -1;
+    var slave: c.fd_t = -1;
+    try std.testing.expectEqual(@as(c_int, 0), openpty(&master, &slave, null, &initial, &window));
+    defer _ = c.close(master);
+    defer _ = c.close(slave);
+    var ready: [2]c.fd_t = undefined;
+    var release: [2]c.fd_t = undefined;
+    var report: [2]c.fd_t = undefined;
+    if (c.pipe(&ready) != 0 or c.pipe(&release) != 0 or c.pipe(&report) != 0)
+        return error.TestUnexpectedResult;
+    defer {
+        for (ready ++ release ++ report) |fd| _ = c.close(fd);
+    }
+
+    const pid = c.fork();
+    if (pid < 0) return error.TestUnexpectedResult;
+    var child_reaped = false;
+    errdefer if (!child_reaped) killAndReap(pid);
+    if (pid == 0) {
+        _ = c.close(master);
+        _ = c.close(ready[0]);
+        _ = c.close(release[1]);
+        _ = c.close(report[0]);
+        var owner = RawTty.enter(slave) catch c._exit(130);
+        const marker = [1]u8{1};
+        if (c.write(ready[1], &marker, 1) != 1) c._exit(131);
+        var go: [1]u8 = undefined;
+        while (true) {
+            const count = c.read(release[0], &go, 1);
+            if (count == 1) break;
+            if (count < 0 and posix.errno(count) == .INTR) continue;
+            c._exit(132);
+        }
+        const batch = owner.drainWakeBatch() catch c._exit(133);
+        if (!batch.resize or batch.termination != null) c._exit(134);
+        const latest = owner.currentSize() catch c._exit(135);
+        if (c.write(report[1], std.mem.asBytes(&latest), @sizeOf(Size)) !=
+            @sizeOf(Size)) c._exit(136);
+        owner.restore() catch c._exit(137);
+        c._exit(0);
+    }
+
+    _ = c.close(ready[1]);
+    ready[1] = -1;
+    _ = c.close(release[0]);
+    release[0] = -1;
+    _ = c.close(report[1]);
+    report[1] = -1;
+    var marker: [1]u8 = undefined;
+    var ready_poll = [_]posix.pollfd{.{
+        .fd = ready[0],
+        .events = posix.POLL.IN,
+        .revents = 0,
+    }};
+    if (try posix.poll(&ready_poll, 5_000) != 1 or c.read(ready[0], &marker, 1) != 1)
+        return error.TestTimedOut;
+    inline for (&.{
+        posix.winsize{ .row = 30, .col = 100, .xpixel = 0, .ypixel = 0 },
+        posix.winsize{ .row = 40, .col = 120, .xpixel = 0, .ypixel = 0 },
+        posix.winsize{ .row = 50, .col = 140, .xpixel = 0, .ypixel = 0 },
+    }) |next| {
+        var mutable = next;
+        if (c.ioctl(master, darwin_tiocswinsz, &mutable) != 0 or
+            c.kill(pid, posix.SIG.WINCH) != 0)
+            return error.TestUnexpectedResult;
+    }
+    if (c.write(release[1], &marker, 1) != 1) return error.TestUnexpectedResult;
+    var latest: Size = undefined;
+    var report_poll = [_]posix.pollfd{.{
+        .fd = report[0],
+        .events = posix.POLL.IN,
+        .revents = 0,
+    }};
+    if (try posix.poll(&report_poll, 5_000) != 1 or
+        c.read(report[0], std.mem.asBytes(&latest), @sizeOf(Size)) !=
+            @sizeOf(Size))
+        return error.TestTimedOut;
+    try std.testing.expectEqual(Size{ .cols = 140, .rows = 50 }, latest);
+    const status = try waitChildDeadline(pid, 5_000);
+    child_reaped = true;
+    try std.testing.expect(c.W.IFEXITED(status));
+    try std.testing.expectEqual(@as(u8, 0), c.W.EXITSTATUS(status));
 }
 
 fn signalActionsEqual(a: posix.Sigaction, b: posix.Sigaction) bool {

@@ -18,7 +18,9 @@ const framing = @import("framing.zig");
 const socket_server = @import("socket_server.zig");
 const screen_stream = @import("screen_stream.zig");
 const observation_wire = @import("observation_wire.zig");
+const resize_wire = @import("resize_wire.zig");
 const upgrade_wire = @import("upgrade_wire.zig");
+const max_pending_event_count: usize = 4 * 256;
 
 pub const ClientError = error{
     EndpointAbsent,
@@ -266,8 +268,7 @@ pub const Client = struct {
     // 화면 갱신이 유실되므로(§9 delta는 증분이라 하나만 놓쳐도 desync), 다음 `readStreamBatch`가 소켓보다 먼저 이걸 비운다.
     pending_stream: std.ArrayListUnmanaged(framing.Frame) = .empty,
     pending_stream_bytes: usize = 0,
-    // screen batch와 별개인 full-state runtime metadata event. response/snapshot을 기다리는 중에도 올 수 있으므로 버리지
-    // 않고 stream별 최신 한 건으로 coalesce한다. full-state라 중간 revision을 건너뛰어도 최신 event만 적용하면 된다.
+    // screen batch와 별개인 full-state runtime metadata/resize event. 종류별로 최신 한 건을 coalesce한다.
     pending_events: std.ArrayListUnmanaged(framing.Frame) = .empty,
     pending_event_bytes: usize = 0,
     // 멀티 runtime demux(§9): 여러 원격 runtime이 이 connection **하나**를 공유하므로, `readStreamBatch(want)`가 소켓에서 읽은
@@ -847,7 +848,7 @@ pub const Client = struct {
         return self.pending_stream_bytes +| self.pending_batch_bytes +| partial;
     }
 
-    /// stream의 최신 full-state metadata event를 소유권째 꺼낸다. 없으면 null. caller는 payload 적용 뒤 frame.deinit.
+    /// stream의 다음 full-state/control event를 소유권째 꺼낸다. caller는 payload 적용 뒤 frame.deinit.
     pub fn takeEventForStream(self: *Client, stream_id: u64) ?framing.Frame {
         // poison 전에 쌓인 event도 어느 stream의 누락보다 최신인지 증명할 수 없다. 일부 runtime만 한 번 더 전진시키지 않고
         // 모든 shared runtime이 다음 pump에서 같은 ConnectionClosed를 보게 한다.
@@ -862,7 +863,7 @@ pub const Client = struct {
         return null;
     }
 
-    /// event는 runtime별 full-state라 같은 stream의 이전 pending을 최신으로 교체한다. 악성/버그 host가 임의 stream id를
+    /// full-state event는 같은 stream+종류의 이전 pending을 최신으로 교체한다. 악성/버그 host가 임의 stream id를
     /// 쏟아 count/byte cap을 넘기면 oldest를 버리지 않고 shared connection 전체를 poison해 모든 runtime을 fail-closed한다.
     fn bufferEvent(self: *Client, frame: framing.Frame) ClientError!void {
         if (frame.header.kind != .event or frame.header.request_id != 0 or
@@ -883,6 +884,24 @@ pub const Client = struct {
             frame.deinit(self.allocator);
             return;
         }
+        const resized = if (std.mem.indexOf(
+            u8,
+            frame.payload,
+            "\"event\":\"runtime.resized\"",
+        ) != null)
+            resize_wire.parseEvent(self.allocator, frame.payload) catch |err| switch (err) {
+                error.OutOfMemory => {
+                    frame.deinit(self.allocator);
+                    self.invalidateConnection();
+                    return error.OutOfMemory;
+                },
+                error.Invalid => {
+                    frame.deinit(self.allocator);
+                    return;
+                },
+            }
+        else
+            null;
         const runtime_ended = std.mem.eql(u8, frame.payload, "{\"event\":\"runtime.ended\"}");
         if (runtime_ended) {
             // Ended terminally supersedes every pending full-state/control event for this stream.
@@ -899,13 +918,27 @@ pub const Client = struct {
             }
         }
         for (self.pending_events.items, 0..) |old, i| {
-            const old_revision = observation_wire.eventRevision(self.allocator, old.payload) catch {
-                frame.deinit(self.allocator);
-                self.invalidateConnection();
-                return error.OutOfMemory;
-            };
-            if (metadata_revision != null and old_revision != null and old.header.stream_id == frame.header.stream_id) {
-                if (metadata_revision.? <= old_revision.?) {
+            if (metadata_revision != null and
+                old.header.stream_id == frame.header.stream_id and
+                std.mem.indexOf(
+                    u8,
+                    old.payload,
+                    "\"event\":\"runtime.metadata\"",
+                ) != null)
+            {
+                const old_revision = observation_wire.eventRevision(
+                    self.allocator,
+                    old.payload,
+                ) catch {
+                    frame.deinit(self.allocator);
+                    self.invalidateConnection();
+                    return error.OutOfMemory;
+                } orelse {
+                    frame.deinit(self.allocator);
+                    self.invalidateConnection();
+                    return error.ProtocolError;
+                };
+                if (metadata_revision.? <= old_revision) {
                     frame.deinit(self.allocator);
                     return;
                 }
@@ -921,8 +954,47 @@ pub const Client = struct {
                 replaced.deinit(self.allocator);
                 return;
             }
+            if (resized != null and old.header.stream_id == frame.header.stream_id and
+                std.mem.indexOf(
+                    u8,
+                    old.payload,
+                    "\"event\":\"runtime.resized\"",
+                ) != null)
+            {
+                const old_resize = resize_wire.parseEvent(
+                    self.allocator,
+                    old.payload,
+                ) catch |err| switch (err) {
+                    error.OutOfMemory => {
+                        frame.deinit(self.allocator);
+                        self.invalidateConnection();
+                        return error.OutOfMemory;
+                    },
+                    error.Invalid => {
+                        frame.deinit(self.allocator);
+                        self.invalidateConnection();
+                        return error.ProtocolError;
+                    },
+                };
+                if (resized.?.resize_generation <= old_resize.resize_generation) {
+                    frame.deinit(self.allocator);
+                    return;
+                }
+                const replaced = self.pending_events.items[i];
+                const next_bytes =
+                    self.pending_event_bytes - replaced.payload.len +| frame.payload.len;
+                if (next_bytes > protocol.max_client_queue) {
+                    frame.deinit(self.allocator);
+                    self.invalidateConnection();
+                    return error.EventQueueFull;
+                }
+                self.pending_events.items[i] = frame;
+                self.pending_event_bytes = next_bytes;
+                replaced.deinit(self.allocator);
+                return;
+            }
         }
-        if (self.pending_events.items.len >= 256 or
+        if (self.pending_events.items.len >= max_pending_event_count or
             self.pending_event_bytes +| frame.payload.len > protocol.max_client_queue)
         {
             // Eviction 금지: server는 event를 만들 때 이미 subscription base/revision을 전진시켰다. 해당 stream의 최신
@@ -1959,6 +2031,51 @@ test "client metadata events coalesce by stream and preserve other streams" {
     try std.testing.expectEqual(@as(usize, 0), client.pending_event_bytes);
 }
 
+test "client resize events coalesce by generation without replacing metadata" {
+    const allocator = std.testing.allocator;
+    var client = Client{
+        .allocator = allocator,
+        .fd = -1,
+        .host_id = 0,
+        .parser = framing.FrameParser.init(allocator),
+    };
+    defer client.parser.deinit();
+    defer {
+        for (client.pending_events.items) |frame| frame.deinit(allocator);
+        client.pending_events.deinit(allocator);
+    }
+    const metadata =
+        \\{"event":"runtime.metadata","metadata_revision":1,"metadata":{"cwd":"/one","window_title":"one","ssh_remote_dest":null,
+        \\"semantic_state":0,"alt_active":false,"app_cursor_keys":false,"alternate_scroll":true,"observer_generation":1,
+        \\"title_generation":1,"cols":80,"rows":24,"foreground_available":false,"foreground_pgid":null,"processes":[]}}
+    ;
+    const resized4 =
+        \\{"event":"runtime.resized","data":{"runtime_id":"000000000000000000000000000000aa","cols":100,"rows":30,"resize_generation":4,"reason":"controller"}}
+    ;
+    const resized9 =
+        \\{"event":"runtime.resized","data":{"runtime_id":"000000000000000000000000000000aa","cols":120,"rows":40,"resize_generation":9,"reason":"controller"}}
+    ;
+    try client.bufferEvent(.{
+        .header = .{ .kind = .event, .stream_id = 7 },
+        .payload = try allocator.dupe(u8, metadata),
+    });
+    try client.bufferEvent(.{
+        .header = .{ .kind = .event, .stream_id = 7 },
+        .payload = try allocator.dupe(u8, resized4),
+    });
+    try client.bufferEvent(.{
+        .header = .{ .kind = .event, .stream_id = 7 },
+        .payload = try allocator.dupe(u8, resized9),
+    });
+    try client.bufferEvent(.{
+        .header = .{ .kind = .event, .stream_id = 7 },
+        .payload = try allocator.dupe(u8, resized4),
+    });
+    try std.testing.expectEqual(@as(usize, 2), client.pending_events.items.len);
+    try std.testing.expectEqualStrings(metadata, client.pending_events.items[0].payload);
+    try std.testing.expectEqualStrings(resized9, client.pending_events.items[1].payload);
+}
+
 test "client event queue overflow poisons every runtime sharing the connection" {
     const allocator = std.testing.allocator;
     var client = Client{
@@ -1975,7 +2092,7 @@ test "client event queue overflow poisons every runtime sharing the connection" 
     }
     defer client.pending_batches.deinit(allocator);
 
-    for (0..256) |i| {
+    for (0..max_pending_event_count) |i| {
         try client.bufferEvent(.{
             .header = .{ .kind = .event, .stream_id = @intCast(i + 1) },
             .payload = try allocator.dupe(u8, "{\"event\":\"other\"}"),
@@ -1983,10 +2100,10 @@ test "client event queue overflow poisons every runtime sharing the connection" 
     }
     const first_payload = client.pending_events.items[0].payload;
     try std.testing.expectError(error.EventQueueFull, client.bufferEvent(.{
-        .header = .{ .kind = .event, .stream_id = 999 },
+        .header = .{ .kind = .event, .stream_id = max_pending_event_count + 1 },
         .payload = try allocator.dupe(u8, "{\"event\":\"overflow\"}"),
     }));
-    try std.testing.expectEqual(@as(usize, 256), client.pending_events.items.len);
+    try std.testing.expectEqual(max_pending_event_count, client.pending_events.items.len);
     try std.testing.expectEqualStrings("{\"event\":\"other\"}", first_payload);
     // Overflow frame은 stream 999였지만 어느 subscription base가 전진했는지 client가 증명할 수 없다. 기존 stream 1의
     // pending event도 적용하지 않고, stream 1/2 양쪽 pump와 input/RPC가 모두 동일 connection failure를 보게 한다.

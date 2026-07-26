@@ -1109,6 +1109,23 @@ fn chargeFor(payload_len: usize) usize {
     return payload_len;
 }
 
+fn appendOwnedBatchChunk(
+    slot: *Slot,
+    class: QueueClass,
+    tracker_index: ?usize,
+    bytes: []u8,
+) void {
+    const tail = (slot.chunk_head + slot.chunk_len) % max_chunks_per_slot;
+    slot.chunks[tail] = .{
+        .bytes = bytes,
+        .class = class,
+        .screen_tracker_index = tracker_index,
+    };
+    slot.chunk_len += 1;
+    slot.pending_bytes += bytes.len;
+    slot.resident_bytes += chargeFor(bytes.len);
+}
+
 pub const TurnBudget = struct {
     read_bytes: usize = 0,
     write_bytes: usize = 0,
@@ -1143,6 +1160,11 @@ pub const ReactorCore = struct {
     pub const Admission = SlotTable.Admission;
     pub const OwnedControlItem = struct {
         admission: Admission,
+        bytes: []u8,
+    };
+    pub const OwnedScreenItem = struct {
+        admission: Admission,
+        tracker: ScreenTrackerKey,
         bytes: []u8,
     };
     pub const AccountingSnapshot = struct {
@@ -1285,6 +1307,162 @@ pub const ReactorCore = struct {
 
         for (items, slots[0..items.len]) |item, slot|
             slot.enqueueOwnedControl(item.bytes) catch unreachable;
+    }
+
+    /// One requester response plus a runtime-wide set of stream events is a single publication.
+    /// This preflights every slot/tracker/global charge before taking ownership of any buffer.
+    pub fn preflightOwnedControlAndScreenBatch(
+        self: *ReactorCore,
+        control: OwnedControlItem,
+        screens: []const OwnedScreenItem,
+    ) (EnqueueError || error{ Stale, InvalidBatch })!void {
+        return self.controlAndScreenBatch(control, screens, false);
+    }
+
+    pub fn enqueueOwnedControlAndScreenBatch(
+        self: *ReactorCore,
+        control: OwnedControlItem,
+        screens: []const OwnedScreenItem,
+    ) (EnqueueError || error{ Stale, InvalidBatch })!void {
+        return self.controlAndScreenBatch(control, screens, true);
+    }
+
+    fn controlAndScreenBatch(
+        self: *ReactorCore,
+        control: OwnedControlItem,
+        screens: []const OwnedScreenItem,
+        commit: bool,
+    ) (EnqueueError || error{ Stale, InvalidBatch })!void {
+        if (control.bytes.len == 0) return error.InvalidBatch;
+        const control_slot = try self.get(control.admission);
+        const control_charge = chargeFor(control.bytes.len);
+
+        const SlotDelta = struct {
+            slot: *Slot,
+            screen_charge: usize = 0,
+            screen_chunks: usize = 0,
+            control_charge: usize = 0,
+            control_chunks: usize = 0,
+        };
+        var deltas: [max_connections]SlotDelta = undefined;
+        var delta_len: usize = 0;
+        const control_delta = blk: {
+            deltas[0] = .{ .slot = control_slot };
+            delta_len = 1;
+            break :blk &deltas[0];
+        };
+        control_delta.control_charge = control_charge;
+        control_delta.control_chunks = 1;
+
+        var total_screen_charge: usize = 0;
+        for (screens, 0..) |item, item_index| {
+            if (item.bytes.len == 0) return error.InvalidBatch;
+            const slot = try self.get(item.admission);
+            const tracker = (try slot.trackerEntry(item.tracker)).tracker.?;
+            if (tracker.state != .valid) return error.ScreenInvalidated;
+            const charge = chargeFor(item.bytes.len);
+            if (tracker.resident_bytes +| charge > screen_soft_bytes)
+                return error.ScreenInvalidated;
+            // One runtime has at most one event per subscription/tracker in a publication.
+            for (screens[0..item_index]) |previous|
+                if (std.meta.eql(previous.tracker, item.tracker))
+                    return error.InvalidBatch;
+            total_screen_charge = std.math.add(
+                usize,
+                total_screen_charge,
+                charge,
+            ) catch return error.GlobalLimit;
+
+            var delta: ?*SlotDelta = null;
+            for (deltas[0..delta_len]) |*candidate|
+                if (candidate.slot == slot) {
+                    delta = candidate;
+                    break;
+                };
+            if (delta == null) {
+                std.debug.assert(delta_len < deltas.len);
+                deltas[delta_len] = .{ .slot = slot };
+                delta = &deltas[delta_len];
+                delta_len += 1;
+            }
+            delta.?.screen_charge = std.math.add(
+                usize,
+                delta.?.screen_charge,
+                charge,
+            ) catch return error.SlotLimit;
+            delta.?.screen_chunks += 1;
+        }
+
+        var control_shared_delta: usize = 0;
+        for (deltas[0..delta_len]) |delta| {
+            const added_chunks = delta.screen_chunks + delta.control_chunks;
+            if (delta.slot.chunk_len +| added_chunks > max_chunks_per_slot)
+                return error.ChunkLimit;
+            if (delta.slot.chunk_len +| delta.screen_chunks >
+                max_chunks_per_slot - control_chunk_reserve)
+                return error.ChunkLimit;
+            const added_charge = std.math.add(
+                usize,
+                delta.screen_charge,
+                delta.control_charge,
+            ) catch return error.SlotLimit;
+            if (delta.slot.resident_bytes +| added_charge > per_slot_bytes)
+                return error.SlotLimit;
+            if (delta.control_charge != 0) {
+                const old_shared =
+                    delta.slot.control_resident_bytes -| control_reserve_bytes;
+                const new_control = std.math.add(
+                    usize,
+                    delta.slot.control_resident_bytes,
+                    delta.control_charge,
+                ) catch return error.SlotLimit;
+                control_shared_delta = std.math.add(
+                    usize,
+                    control_shared_delta,
+                    (new_control -| control_reserve_bytes) - old_shared,
+                ) catch return error.GlobalLimit;
+            }
+        }
+        const total_charge = std.math.add(
+            usize,
+            total_screen_charge,
+            control_charge,
+        ) catch return error.GlobalLimit;
+        const future_resident = std.math.add(
+            usize,
+            self.budget.resident_bytes,
+            total_charge,
+        ) catch return error.GlobalLimit;
+        if (future_resident > global_bytes) return error.GlobalLimit;
+        const shared_delta = std.math.add(
+            usize,
+            total_screen_charge,
+            control_shared_delta,
+        ) catch return error.GlobalLimit;
+        const future_shared = std.math.add(
+            usize,
+            self.budget.shared_bytes,
+            shared_delta,
+        ) catch return error.GlobalLimit;
+        if (future_shared > shared_hard_bytes or
+            self.budget.prepared_reclaim_bytes > future_shared or
+            future_shared - self.budget.prepared_reclaim_bytes >
+                shared_steady_bytes)
+            return error.GlobalLimit;
+
+        if (!commit) return;
+        self.budget.resident_bytes = future_resident;
+        self.budget.shared_bytes = future_shared;
+        self.budget.recordPeak();
+        appendOwnedBatchChunk(control_slot, .control, null, control.bytes);
+        control_slot.control_resident_bytes += control_charge;
+        for (screens) |item| {
+            const slot = self.get(item.admission) catch unreachable;
+            appendOwnedBatchChunk(slot, .screen, item.tracker.index, item.bytes);
+            slot.screen_trackers[item.tracker.index].tracker.?.resident_bytes +=
+                chargeFor(item.bytes.len);
+        }
+        for (deltas[0..delta_len]) |delta| delta.slot.recordPeak();
     }
 
     pub fn closeIdleForUpgrade(self: *ReactorCore, admission: Admission) error{ Stale, Busy }!void {
@@ -1675,6 +1853,101 @@ test "reactor atomically admits authority control across two stable slots" {
         "takeover.success",
         (try reactor.get(requester)).firstPending().?.bytes,
     );
+}
+
+test "reactor atomically admits resize response and subscription events" {
+    const reactor = try ReactorCore.create(std.testing.allocator);
+    defer reactor.destroy();
+    const requester = try reactor.admit();
+    const observer = try reactor.admit();
+    const requester_tracker = try (try reactor.get(requester)).createScreenTracker();
+    const observer_tracker = try (try reactor.get(observer)).createScreenTracker();
+    const response = try std.testing.allocator.dupe(u8, "resize.response");
+    const requester_event = try std.testing.allocator.dupe(u8, "resize.requester.event");
+    const observer_event = try std.testing.allocator.dupe(u8, "resize.observer.event");
+    var owned = false;
+    defer if (!owned) {
+        std.testing.allocator.free(response);
+        std.testing.allocator.free(requester_event);
+        std.testing.allocator.free(observer_event);
+    };
+
+    const control = ReactorCore.OwnedControlItem{
+        .admission = requester,
+        .bytes = response,
+    };
+    const events = [_]ReactorCore.OwnedScreenItem{
+        .{
+            .admission = requester,
+            .tracker = requester_tracker,
+            .bytes = requester_event,
+        },
+        .{
+            .admission = observer,
+            .tracker = observer_tracker,
+            .bytes = observer_event,
+        },
+    };
+    const before = reactor.accountingSnapshot();
+    try reactor.preflightOwnedControlAndScreenBatch(control, &events);
+    try std.testing.expectEqual(
+        before.resident_bytes,
+        reactor.accountingSnapshot().resident_bytes,
+    );
+    try reactor.enqueueOwnedControlAndScreenBatch(control, &events);
+    owned = true;
+    try std.testing.expectEqualStrings(
+        "resize.response",
+        (try reactor.get(requester)).firstPending().?.bytes,
+    );
+    try std.testing.expectEqualStrings(
+        "resize.observer.event",
+        (try reactor.get(observer)).firstPending().?.bytes,
+    );
+}
+
+test "resize batch cap plus one leaves every destination and accounting unchanged" {
+    const reactor = try ReactorCore.create(std.testing.allocator);
+    defer reactor.destroy();
+    const requester = try reactor.admit();
+    const observer = try reactor.admit();
+    const requester_tracker = try (try reactor.get(requester)).createScreenTracker();
+    const observer_slot = try reactor.get(observer);
+    const observer_tracker = try observer_slot.createScreenTracker();
+    const full = try std.testing.allocator.alloc(u8, screen_soft_bytes);
+    @memset(full, 'x');
+    try observer_slot.enqueueOwnedScreen(observer_tracker, full);
+
+    const response = try std.testing.allocator.dupe(u8, "resize.response");
+    defer std.testing.allocator.free(response);
+    const requester_event = try std.testing.allocator.dupe(u8, "requester.event");
+    defer std.testing.allocator.free(requester_event);
+    const observer_event = try std.testing.allocator.dupe(u8, "observer.event");
+    defer std.testing.allocator.free(observer_event);
+    const control = ReactorCore.OwnedControlItem{
+        .admission = requester,
+        .bytes = response,
+    };
+    const events = [_]ReactorCore.OwnedScreenItem{
+        .{
+            .admission = requester,
+            .tracker = requester_tracker,
+            .bytes = requester_event,
+        },
+        .{
+            .admission = observer,
+            .tracker = observer_tracker,
+            .bytes = observer_event,
+        },
+    };
+    const before = reactor.accountingSnapshot();
+    try std.testing.expectError(
+        error.ScreenInvalidated,
+        reactor.preflightOwnedControlAndScreenBatch(control, &events),
+    );
+    try std.testing.expect((try reactor.get(requester)).firstPending() == null);
+    try std.testing.expectEqual(ScreenState.valid, try observer_slot.screenState(observer_tracker));
+    try std.testing.expectEqualDeep(before, reactor.accountingSnapshot());
 }
 
 test "authority control batch rejects stale peer without a requester prefix" {

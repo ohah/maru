@@ -99,17 +99,37 @@ pub const ResizeOutcome = union(enum) {
 
 /// Backend 적용 전 registry mutation을 보류하는 owner-turn token. 생성 뒤 같은 single owner turn에서 backend를
 /// 적용하고 `commitPreparedResize`로 소비하므로, backend 실패는 canonical size/sequence/generation/ledger를 바꾸지 않는다.
-const PreparedResize = union(enum) {
+pub const PreparedResize = union(enum) {
     stale,
     ready: struct {
         entry: *RuntimeEntry,
+        subscription: subscription_identity.SubscriptionId,
         cols: u16,
         rows: u16,
         client_sequence: u64,
         changed: bool,
         cells_without_entry: usize,
         new_cells: usize,
+        expected_cols: u16,
+        expected_rows: u16,
+        expected_resize_generation: u64,
+        expected_controller_sequence: u64,
+        expected_resize_seq_seen: bool,
+        consumed: bool = false,
     },
+
+    pub fn preview(self: *const PreparedResize) ResizeOutcome {
+        return switch (self.*) {
+            .stale => .stale,
+            .ready => |ready| .{ .applied = .{
+                .cols = ready.cols,
+                .rows = ready.rows,
+                .resize_generation = ready.expected_resize_generation +
+                    @intFromBool(ready.changed),
+                .changed = ready.changed,
+            } },
+        };
+    }
 };
 
 pub const RegistryError = error{
@@ -123,6 +143,7 @@ pub const RegistryError = error{
     NotObserver,
     StaleControllerTransition,
     ControllerGenerationExhausted,
+    ResizeGenerationExhausted,
     /// membership generation을 더 올릴 수 없어 새 complete inventory authority를 만들 수 없다.
     MembershipGenerationExhausted,
     InvalidGridSize,
@@ -438,26 +459,43 @@ pub const TerminalRuntimeRegistry = struct {
         if (cells_without_entry > self.limits.max_aggregate_grid_cells or
             new_cells > self.limits.max_aggregate_grid_cells - cells_without_entry)
             return error.AggregateGridLimitReached;
+        if (new_cols != entry.cols or new_rows != entry.rows)
+            if (entry.resize_generation == std.math.maxInt(u64))
+                return error.ResizeGenerationExhausted;
         return .{ .ready = .{
             .entry = entry,
+            .subscription = .{ .value = stream },
             .cols = new_cols,
             .rows = new_rows,
             .client_sequence = client_sequence,
             .changed = new_cols != entry.cols or new_rows != entry.rows,
             .cells_without_entry = cells_without_entry,
             .new_cells = new_cells,
+            .expected_cols = entry.cols,
+            .expected_rows = entry.rows,
+            .expected_resize_generation = entry.resize_generation,
+            .expected_controller_sequence = entry.controller_sequence,
+            .expected_resize_seq_seen = entry.resize_seq_seen,
         } };
     }
 
     /// `prepareResize`와 같은 owner turn에서 backend 성공 뒤 호출한다. 외부 dispatch가 끼어들 수 없는 single-owner
     /// 계약이므로 token의 entry는 여전히 canonical entry이며 이 단계에는 allocation/syscall/error가 없다.
-    fn commitPreparedResize(self: *TerminalRuntimeRegistry, prepared: PreparedResize) ResizeOutcome {
-        const ready = switch (prepared) {
+    fn commitPreparedResize(self: *TerminalRuntimeRegistry, prepared: *PreparedResize) ResizeOutcome {
+        const ready = switch (prepared.*) {
             .stale => return .stale,
-            .ready => |value| value,
+            .ready => |*value| value,
         };
+        std.debug.assert(!ready.consumed);
         const entry = ready.entry;
         std.debug.assert(self.entries.get(entry.id) == entry);
+        std.debug.assert(entry.controller == ready.subscription.value);
+        std.debug.assert(entry.cols == ready.expected_cols);
+        std.debug.assert(entry.rows == ready.expected_rows);
+        std.debug.assert(entry.resize_generation == ready.expected_resize_generation);
+        std.debug.assert(entry.controller_sequence == ready.expected_controller_sequence);
+        std.debug.assert(entry.resize_seq_seen == ready.expected_resize_seq_seen);
+        ready.consumed = true;
         entry.resize_seq_seen = true;
         entry.controller_sequence = ready.client_sequence;
         if (ready.changed) {
@@ -482,7 +520,8 @@ pub const TerminalRuntimeRegistry = struct {
         rows: u16,
         client_sequence: u64,
     ) RegistryError!ResizeOutcome {
-        return self.commitPreparedResize(try self.prepareResize(id, stream, cols, rows, client_sequence));
+        var prepared = try self.prepareResize(id, stream, cols, rows, client_sequence);
+        return self.commitPreparedResize(&prepared);
     }
 
     pub fn attachSubscription(
@@ -695,12 +734,32 @@ pub const TerminalRuntimeRegistry = struct {
         apply_ctx: *anyopaque,
         apply: *const fn (ctx: *anyopaque, runtime_id: RuntimeId, cols: u16, rows: u16) anyerror!void,
     ) anyerror!ResizeOutcome {
-        const prepared = try self.prepareResize(id, subscription.value, cols, rows, client_sequence);
+        var prepared = try self.prepareResize(id, subscription.value, cols, rows, client_sequence);
         switch (prepared) {
             .stale => {},
             .ready => |ready| if (ready.changed)
                 try apply(apply_ctx, id, ready.cols, ready.rows),
         }
+        return self.commitPreparedResize(&prepared);
+    }
+
+    /// Owner-level response/event admission 전에 canonical state나 backend를 바꾸지 않는 resize token을 만든다.
+    pub fn prepareResizeSubscription(
+        self: *TerminalRuntimeRegistry,
+        id: RuntimeId,
+        subscription: subscription_identity.SubscriptionId,
+        cols: u16,
+        rows: u16,
+        client_sequence: u64,
+    ) RegistryError!PreparedResize {
+        return self.prepareResize(id, subscription.value, cols, rows, client_sequence);
+    }
+
+    /// 같은 owner dispatch turn의 all-or-none admission과 backend 적용이 성공한 뒤에만 호출한다.
+    pub fn commitResizeSubscription(
+        self: *TerminalRuntimeRegistry,
+        prepared: *PreparedResize,
+    ) ResizeOutcome {
         return self.commitPreparedResize(prepared);
     }
 
@@ -1166,6 +1225,29 @@ test "registry: sequence 0 is a valid first resize but a replayed 0 is stale" {
     _ = try reg.commitControllerTransition(&prepared);
     const r2 = try reg.resize(1, 200, 90, 20, 0);
     try testing.expect(r2.applied.changed);
+}
+
+test "registry: resize generation exhaustion leaves size sequence and ledger unchanged" {
+    var reg = TerminalRuntimeRegistry.init(testing.allocator);
+    defer reg.deinit();
+    const entry = try reg.register(1, 80, 24);
+    _ = try reg.attach(1, 100, .controller);
+    entry.resize_generation = std.math.maxInt(u64);
+    const before_cells = reg.liveGridCells();
+    try testing.expectError(
+        error.ResizeGenerationExhausted,
+        reg.prepareResizeSubscription(
+            1,
+            .{ .value = 100 },
+            100,
+            30,
+            1,
+        ),
+    );
+    try testing.expectEqual(@as(u16, 80), entry.cols);
+    try testing.expect(!entry.resize_seq_seen);
+    try testing.expectEqual(@as(u64, 0), entry.controller_sequence);
+    try testing.expectEqual(before_cells, reg.liveGridCells());
 }
 
 test "registry: canonical size survives all clients detaching (client 0)" {

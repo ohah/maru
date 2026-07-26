@@ -9,6 +9,7 @@ const c = std.c;
 const posix = std.posix;
 const connection_slot = @import("connection_slot.zig");
 const connection_turn = @import("connection_turn.zig");
+const server_mod = @import("server.zig");
 const socket_server = @import("socket_server.zig");
 
 pub const max_clients: usize = connection_slot.max_connections;
@@ -32,6 +33,7 @@ pub const Owner = struct {
     next_cadence_ns: u64,
     next_overflow_accept_ns: u64 = 0,
     accept_retry_after_ns: u64 = 0,
+    admin_admission: server_mod.AdminAdmission = .{},
     armed_upgrade: ?connection_turn.ArmedUpgrade = null,
     total_admitted: usize = 0,
     overflow_rejected: usize = 0,
@@ -123,13 +125,19 @@ pub const Owner = struct {
         var ready: [max_clients]bool = [_]bool{false} ** max_clients;
         var read_ready: [max_clients]bool = [_]bool{false} ** max_clients;
         var write_ready: [max_clients]bool = [_]bool{false} ** max_clients;
+        var peer_broken: [max_clients]bool = [_]bool{false} ** max_clients;
         var poll_index: usize = 1;
         while (poll_index < poll_count) : (poll_index += 1) {
             const slot_index = poll_slots[poll_index - 1].?;
             const revents = poll_fds[poll_index].revents;
             if (revents & c.POLL.IN != 0) read_ready[slot_index] = true;
             if (revents & c.POLL.OUT != 0) write_ready[slot_index] = true;
-            if (revents & (c.POLL.ERR | c.POLL.HUP | c.POLL.NVAL) != 0 and
+            peer_broken[slot_index] =
+                revents & (c.POLL.ERR | c.POLL.HUP | c.POLL.NVAL) != 0;
+            if (peer_broken[slot_index] and
+                self.clients[slot_index].?.wantsWrite())
+                write_ready[slot_index] = true;
+            if (peer_broken[slot_index] and
                 !read_ready[slot_index] and !write_ready[slot_index])
                 read_ready[slot_index] = true;
             ready[slot_index] = read_ready[slot_index] or
@@ -152,6 +160,8 @@ pub const Owner = struct {
         const client = self.clients[slot_index] orelse return .listener_broken;
         if (read_ready[slot_index]) client.readReady(now_ns);
         if (!client.isClosing() and write_ready[slot_index]) client.writeReady(now_ns);
+        if (!client.isClosing() and peer_broken[slot_index] and !client.wantsWrite())
+            client.peerBroken();
         if (!client.isClosing() and self.producer_remaining[slot_index] != 0) {
             self.producer_remaining[slot_index] -= 1;
             client.tick(now_ns);
@@ -193,6 +203,7 @@ pub const Owner = struct {
                 .admission_gate = self.server.admission_gate,
                 .host_status = self.server.host_status,
                 .live_host_status = &self.server.host_status,
+                .admin_admission = &self.admin_admission,
                 .now_ns = now_ns,
             },
         ) catch |err| switch (err) {
@@ -373,6 +384,17 @@ fn pumpResponseCount(owner: *Owner, fd: c.fd_t, first_request_id: u64, expected:
     try testing.expectEqual(expected, count);
 }
 
+fn pumpUntilClosed(owner: *Owner, fd: c.fd_t) !void {
+    var byte: [1]u8 = undefined;
+    for (0..1000) |_| {
+        _ = try owner.pollOnce(2);
+        const rc = c.recv(fd, &byte, byte.len, posix.MSG.DONTWAIT);
+        if (rc == 0) return;
+        if (rc < 0 and posix.errno(rc) != .AGAIN) return error.TestUnexpectedResult;
+    }
+    return error.TestUnexpectedResult;
+}
+
 test "poll owner keeps canonical GUI connection while ephemeral inventory completes" {
     if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
     var tmp = testing.tmpDir(.{});
@@ -458,6 +480,132 @@ test "poll owner keeps canonical GUI connection while ephemeral inventory comple
     try testing.expectEqual(@as(usize, 1), owner.activeCount());
     try sendTestRequest(gui_fd, .request, 4, "{\"method\":\"host.info\"}");
     try pumpUntilResponse(&owner, gui_fd, "runtime_count");
+}
+
+test "poll owner admits one one-shot admin without displacing canonical GUI" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir_len = try tmp.dir.realPath(testing.io, &dir_buf);
+    const dir_raw = dir_buf[0..dir_len];
+    const dir_path = try testing.allocator.dupeZ(u8, dir_raw);
+    defer testing.allocator.free(dir_path);
+    const socket_path = try std.fmt.allocPrintSentinel(
+        testing.allocator,
+        "{s}/admin.sock",
+        .{dir_raw},
+        0,
+    );
+    defer testing.allocator.free(socket_path);
+    var runtime_registry = registry.TerminalRuntimeRegistry.init(testing.allocator);
+    defer runtime_registry.deinit();
+    var server = try socket_server.SocketServer.bind(
+        testing.allocator,
+        dir_path,
+        socket_path,
+        0xAD,
+        &runtime_registry,
+    );
+    defer server.deinit();
+    server.host_status = .{ .manifest_capable = true };
+    var owner = try Owner.init(testing.allocator, testing.io, &server);
+    defer owner.deinit();
+
+    const gui_fd = try connectTestClient(socket_path);
+    defer _ = c.close(gui_fd);
+    _ = try owner.pollOnce(5);
+    try sendTestRequest(gui_fd, .hello, 1, "{\"protocol_min\":2,\"protocol_max\":2,\"client_kind\":\"gui\"}");
+    try pumpUntilResponse(&owner, gui_fd, "host_id");
+
+    const first_admin_fd = try connectTestClient(socket_path);
+    defer _ = c.close(first_admin_fd);
+    _ = try owner.pollOnce(5);
+    try sendTestRequest(first_admin_fd, .hello, 1, "{\"protocol_min\":2,\"protocol_max\":2,\"client_kind\":\"admin\"}");
+    try pumpUntilResponse(&owner, first_admin_fd, "host_id");
+    try testing.expect(owner.admin_admission.active);
+
+    const second_admin_fd = try connectTestClient(socket_path);
+    defer _ = c.close(second_admin_fd);
+    _ = try owner.pollOnce(5);
+    try sendTestRequest(second_admin_fd, .hello, 1, "{\"protocol_min\":2,\"protocol_max\":2,\"client_kind\":\"admin\"}");
+    try pumpUntilResponse(&owner, second_admin_fd, "resource_exhausted");
+    try pumpUntilClosed(&owner, second_admin_fd);
+    try testing.expect(owner.admin_admission.active);
+
+    try sendTestRequest(first_admin_fd, .request, 2, "{\"method\":\"runtime.list\",\"params\":{}}");
+    try pumpUntilResponse(&owner, first_admin_fd, "runtimes");
+    try pumpUntilClosed(&owner, first_admin_fd);
+    try testing.expect(!owner.admin_admission.active);
+    try testing.expectEqual(@as(usize, 1), owner.activeCount());
+
+    try sendTestRequest(gui_fd, .request, 2, "{\"method\":\"host.info\"}");
+    try pumpUntilResponse(&owner, gui_fd, "runtime_count");
+    try testing.expectEqual(@as(usize, 1), owner.activeCount());
+
+    const replacement_admin_fd = try connectTestClient(socket_path);
+    defer _ = c.close(replacement_admin_fd);
+    _ = try owner.pollOnce(5);
+    try sendTestRequest(replacement_admin_fd, .hello, 1, "{\"protocol_min\":2,\"protocol_max\":2,\"client_kind\":\"admin\"}");
+    try pumpUntilResponse(&owner, replacement_admin_fd, "host_id");
+    try sendTestRequest(replacement_admin_fd, .request, 2, "{\"method\":\"runtime.terminate\",\"params\":{\"runtime_id\":\"1\"}}");
+    try pumpUntilResponse(&owner, replacement_admin_fd, "unauthorized");
+    try pumpUntilClosed(&owner, replacement_admin_fd);
+    try testing.expect(!owner.admin_admission.active);
+
+    try sendTestRequest(gui_fd, .request, 3, "{\"method\":\"host.info\"}");
+    try pumpUntilResponse(&owner, gui_fd, "runtime_count");
+
+    const idle_admin_fd = try connectTestClient(socket_path);
+    defer _ = c.close(idle_admin_fd);
+    _ = try owner.pollOnce(5);
+    try sendTestRequest(idle_admin_fd, .hello, 1, "{\"protocol_min\":2,\"protocol_max\":2,\"client_kind\":\"admin\"}");
+    try pumpUntilResponse(&owner, idle_admin_fd, "host_id");
+    const now_ns = monotonicNow(testing.io);
+    for (owner.clients) |maybe_client| {
+        const client = maybe_client orelse continue;
+        if (client.connection.isAdmin())
+            client.tick(now_ns +| connection_turn.admin_request_deadline_ns);
+    }
+    owner.next_cadence_ns = 0;
+    try pumpUntilClosed(&owner, idle_admin_fd);
+    try testing.expect(!owner.admin_admission.active);
+    try sendTestRequest(gui_fd, .request, 4, "{\"method\":\"host.info\"}");
+    try pumpUntilResponse(&owner, gui_fd, "runtime_count");
+
+    const eof_admin_fd = try connectTestClient(socket_path);
+    _ = try owner.pollOnce(5);
+    try sendTestRequest(eof_admin_fd, .hello, 1, "{\"protocol_min\":2,\"protocol_max\":2,\"client_kind\":\"admin\"}");
+    try pumpUntilResponse(&owner, eof_admin_fd, "host_id");
+    _ = c.close(eof_admin_fd);
+    var eof_attempts: usize = 0;
+    while (owner.activeCount() != 1 and eof_attempts < 1000) : (eof_attempts += 1)
+        _ = try owner.pollOnce(2);
+    try testing.expectEqual(@as(usize, 1), owner.activeCount());
+    try testing.expect(!owner.admin_admission.active);
+
+    const half_close_fd = try connectTestClient(socket_path);
+    defer _ = c.close(half_close_fd);
+    _ = try owner.pollOnce(5);
+    try sendTestRequest(half_close_fd, .hello, 1, "{\"protocol_min\":2,\"protocol_max\":2,\"client_kind\":\"admin\"}");
+    try pumpUntilResponse(&owner, half_close_fd, "host_id");
+    try sendTestRequest(half_close_fd, .request, 2, "{\"method\":\"runtime.list\",\"params\":{}}");
+    try testing.expectEqual(@as(c_int, 0), c.shutdown(half_close_fd, c.SHUT.WR));
+    try pumpUntilResponse(&owner, half_close_fd, "runtimes");
+    try pumpUntilClosed(&owner, half_close_fd);
+    try testing.expect(!owner.admin_admission.active);
+
+    const peer_close_fd = try connectTestClient(socket_path);
+    _ = try owner.pollOnce(5);
+    try sendTestRequest(peer_close_fd, .hello, 1, "{\"protocol_min\":2,\"protocol_max\":2,\"client_kind\":\"admin\"}");
+    try pumpUntilResponse(&owner, peer_close_fd, "host_id");
+    try sendTestRequest(peer_close_fd, .request, 2, "{\"method\":\"runtime.list\",\"params\":{}}");
+    _ = c.close(peer_close_fd);
+    var close_attempts: usize = 0;
+    while (owner.activeCount() != 1 and close_attempts < 1000) : (close_attempts += 1)
+        _ = try owner.pollOnce(2);
+    try testing.expectEqual(@as(usize, 1), owner.activeCount());
+    try testing.expect(!owner.admin_admission.active);
 }
 
 test "poll owner drains parser-resident frames past one 64-frame read turn" {

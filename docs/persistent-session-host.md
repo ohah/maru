@@ -985,7 +985,7 @@ request_id:u64 | stream_id:u64 | payload_len:u32
 
 ### hello, command, stream 순서
 
-connection의 첫 frame은 반드시 `hello`다. 현재 client는 `{protocol_min:2, protocol_max:2, client_kind:"gui|cli",
+connection의 첫 frame은 반드시 `hello`다. 현재 hello는 `{protocol_min:2, protocol_max:2, client_kind:"gui|cli|admin",
 capabilities:["runtime_metadata_v1","screen_viewport_scrolled_v1","async_scroll_to_bottom_v1","runtime_selected_text_v1","runtime_link_at_v1",...]}`를 보내고 host는 선택 version, `host_id`, 자신이 실제로
 지원하는 capability를 응답한다. client는 hello_ack에도 이름이 있는 capability만 활성화하며, major가 같다는 사실만으로 새 screen 의미론을 가정하지 않는다.
 목표 상태의 `host_exec_upgrade_v1`은 current/N-1 adapter가 `host.upgrade.prepare/status`를 쓸 수 있다는 별도
@@ -1747,7 +1747,7 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
     credential-provider seam fixture로 검증한다. 기본 자동 gate는 실제 same-UID socket과 credential-provider seam의
     other-UID rejection을 포함한다.
     일반 CI에서 실제 다른 UID를 만들 수 없으므로 real other-UID process는 provisioned-runner gate로 정직하게 남긴다.
-  - **P5a1b — one-shot admin policy:** 기존 32-slot pool 안에서 hidden `admin` hello role의 동시 lease를 정확히
+  - **P5a1b — one-shot admin policy (구현):** 기존 32-slot pool 안에서 hidden `admin` hello role의 동시 lease를 정확히
     하나만 허용한다. hard-reserved 33번째 fd나 별도 listener는 두지 않으며 이미 연결된 GUI를 밀어내지 않는다.
     pre-hello peer는 10초 handshake deadline과 전역 cap을 그대로 적용받는다. `client_kind`는 same-UID 인증 뒤의
     traffic class/quota hint일 뿐 보안 identity가 아니다. admin은 `host.info`, `runtime.list`, `runtime.get`,
@@ -1755,8 +1755,11 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
     mutation/stream/upgrade 요청은 각각 `resource_exhausted`, `unauthorized` reply+close이며 malformed/unknown
     요청은 `invalid_request`+close다. valid admin hello에서만 lease를 acquire하고 EOF/timeout/malformed/denied/
     write-fail을 포함한 release는 기존 `Client.destroy → Connection.deinit` canonical 경로 한 곳에서 exact-once 한다.
+    hello 성공 시 socket activity로 연장되지 않는 5초 absolute request deadline을 세운다. incomplete byte drip도 이를
+    연장하지 않으며 첫 complete post-hello frame dispatch를 시작하면 deadline을 해제해 느린 reader의 reply flush는 기존 partial
+    write deadline을 따른다. request 없이 만료한 admin은 같은 teardown으로 lease를 반환한다.
     pipelined 두 번째 request는 dispatch하지 않는다. public CLI/help는 아직 열지 않는다. 향후 raw attach는 장기 연결
-    `cli` role을 사용하므로 admin과 분리한다.
+    `cli` role을 사용하므로 admin과 분리한다. current host는 hello ack에 `admin_one_shot_v1`을 광고한다.
   - **P5a1c — upgrade all-or-none preflight:** prepare를 stage하기 전에 owner가 requester의 현재 dispatch 하나를
     제외한 모든 slot의 partial parser/read, partial 또는 queued write, 선행/in-flight dispatch, attachment를 한 번
     검사한다. 하나라도 busy면 slot을 하나도 닫거나 stage/gate-close하지 않고 `upgrade_busy`를 보낸다. idle이면
@@ -1766,7 +1769,9 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
     `ReactorCore.closeIdleForUpgrade`로 slot을 먼저 닫아 canonical client teardown과 이중 회수하지 않는다. 따라서
     실행됐지만 reply가 유실된 mutation을 upgrade 성공으로 숨기지 않는다.
 - **P5a2 — read/admin CLI**: P5a1 위에서 `maru host status`, `maru runtime list/get`과 parser/`--help`/`--json`
-  fixture를 공개한다. CLI는 host를 자동 시작하지 않고 manifest writer도 되지 않는다. GUI가 연결된 실제 daemon에 대한
+  fixture를 공개한다. client는 hello ack의 `admin_one_shot_v1`을 확인한 current host에서만 admin command를 보내며,
+  capability가 없는 same-major/N-1 host를 일반 `unknown` role semantics로 추측하지 않고 typed unsupported로 끝낸다.
+  CLI는 host를 자동 시작하지 않고 manifest writer도 되지 않는다. GUI가 연결된 실제 daemon에 대한
   응답, absent/denied/busy typed exit와 JSON 안정성이 gate다.
 - **P5a3 — mutating admin CLI**: `maru runtime end`를 controller/ownership 확인과 함께 별도 공개한다. exact runtime
   종료, stale identity, unauthorized, accepted reply flush를 gate로 삼는다.

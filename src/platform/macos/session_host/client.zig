@@ -1979,7 +1979,7 @@ fn setReadTimeoutMs(fd: c.fd_t, ms: u32) void {
 
 // ── 순수 JSON helper(client wire) ────────────────────────────────────────────
 //
-// 신뢰 계약: `client_kind`·`method`는 **코드 내부 고정 리터럴**만 받는다(client_kind∈{"gui","cli"}, method는 정의된
+// 신뢰 계약: `client_kind`·`method`는 **코드 내부 고정 리터럴**만 받는다(client_kind∈{"gui","cli","admin"}, method는 정의된
 // 명령 이름 집합). 그래서 JSON escape 없이 그대로 interpolate한다 — 이 값들엔 `"`·`\`·제어문자가 없다. `params_json`은
 // 이미 유효한 JSON object 문자열이라는 계약이라 raw로 싣는다(호출자가 조립 시 escape 책임). runtime.spawn(P3-e2b)처럼
 // **임의 바이트(argv/cwd)**를 실어야 하는 params는 반드시 실 JSON encoder(server.zig `stringify` 대칭)로 만들어 넘긴다

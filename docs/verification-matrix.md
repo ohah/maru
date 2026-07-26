@@ -8,7 +8,8 @@
 
 | slice | 상태 | 자동 gate | 환경 의존 gate |
 | --- | --- | --- | --- |
-| P5a1a accept hardening | 구현 | Debug/ReleaseFast `zig build test-session-host`가 listener/accepted fd의 명시적 nonblocking+CLOEXEC, empty accept, EINTR→success와 exact retry exhaustion, typed fd pressure와 owner retry/cadence predicate, same-UID 실제 socket, credential-provider seam의 other-UID rejection+peer EOF, frozen N-1/mismatched peer bounded readiness를 검증한다. | 일반 CI는 실제 다른 UID process를 만들지 않으므로 real cross-UID process rejection은 provisioned runner gate다. P5a1b admin policy, P5a1c upgrade preflight와 public CLI/TTY/SSH는 계속 미구현이다. |
+| P5a1a accept hardening | 구현 | Debug/ReleaseFast `zig build test-session-host`가 listener/accepted fd의 명시적 nonblocking+CLOEXEC, empty accept, EINTR→success와 exact retry exhaustion, typed fd pressure와 owner retry/cadence predicate, same-UID 실제 socket, credential-provider seam의 other-UID rejection+peer EOF, frozen N-1/mismatched peer bounded readiness를 검증한다. | 일반 CI는 실제 다른 UID process를 만들지 않으므로 real cross-UID process rejection은 provisioned runner gate다. P5a1c upgrade preflight와 public CLI/TTY/SSH는 계속 미구현이다. |
+| P5a1b one-shot admin policy | 구현 | `test-session-host`가 hidden `admin` hello의 owner-wide exact-one lease와 `admin_one_shot_v1`, 두 번째 admin의 `resource_exhausted` full reply+close, canonical deinit 뒤 재획득, byte-drip으로 연장되지 않는 5초 absolute request deadline과 post-hello frame 뒤 slow flush, canonical `RequestMethod` 전체의 exhaustive policy·4개 read dispatcher, privileged/non-request `unauthorized`, malformed/unknown `invalid_request`, pipelined 두 번째 request 미실행, EOF/full-close exact release, half-close reply drain과 같은 pool의 GUI 생존을 server/connection-turn/real poll-owner fixture로 검증한다. | `client_kind`는 same-UID gate 뒤의 quota hint이며 인증 identity가 아니다. hard-reserved 33번째 fd는 없고 32개가 이미 찼으면 admin도 전역 cap을 따른다. public parser/help는 P5a2까지 열지 않으며 P5a1c upgrade preflight와 CLI/TTY/SSH는 미구현이다. |
 
 ## 현재 자동 검증되는 영역
 

@@ -21,8 +21,8 @@ pub const control_reserve_bytes: usize = 512 * 1024;
 pub const screen_low_water_bytes: usize = 4 * 1024 * 1024;
 pub const global_bytes: usize = 128 * 1024 * 1024;
 pub const base_replacement_headroom_bytes: usize = base_update_max_bytes;
-const shared_hard_bytes: usize = global_bytes - max_connections * control_reserve_bytes;
-const shared_steady_bytes: usize = shared_hard_bytes - base_replacement_headroom_bytes;
+pub const shared_hard_bytes: usize = global_bytes - max_connections * control_reserve_bytes;
+pub const shared_steady_bytes: usize = shared_hard_bytes - base_replacement_headroom_bytes;
 pub const max_chunks_per_slot: usize = 4096;
 pub const control_chunk_reserve: usize = 64;
 pub const max_screen_trackers_per_slot: usize = 256;
@@ -128,6 +128,36 @@ pub const GlobalBudget = struct {
     shared_bytes: usize = 0,
     prepared_base_bytes: usize = 0,
     prepared_reclaim_bytes: usize = 0,
+    peak_resident_bytes: usize = 0,
+    peak_shared_bytes: usize = 0,
+    peak_prepared_base_bytes: usize = 0,
+    peak_prepared_reclaim_bytes: usize = 0,
+    peak_slot_queue_bytes: usize = 0,
+    peak_slot_base_bytes: usize = 0,
+    peak_slot_control_bytes: usize = 0,
+    peak_slot_total_bytes: usize = 0,
+
+    fn recordPeak(self: *GlobalBudget) void {
+        self.peak_resident_bytes = @max(self.peak_resident_bytes, self.resident_bytes);
+        self.peak_shared_bytes = @max(self.peak_shared_bytes, self.shared_bytes);
+        self.peak_prepared_base_bytes =
+            @max(self.peak_prepared_base_bytes, self.prepared_base_bytes);
+        self.peak_prepared_reclaim_bytes =
+            @max(self.peak_prepared_reclaim_bytes, self.prepared_reclaim_bytes);
+    }
+
+    fn recordSlotPeak(
+        self: *GlobalBudget,
+        queue_bytes: usize,
+        base_bytes: usize,
+        control_bytes: usize,
+    ) void {
+        self.peak_slot_queue_bytes = @max(self.peak_slot_queue_bytes, queue_bytes);
+        self.peak_slot_base_bytes = @max(self.peak_slot_base_bytes, base_bytes);
+        self.peak_slot_control_bytes = @max(self.peak_slot_control_bytes, control_bytes);
+        self.peak_slot_total_bytes =
+            @max(self.peak_slot_total_bytes, queue_bytes +| base_bytes);
+    }
 
     fn reserveScreen(self: *GlobalBudget, amount: usize) bool {
         const next = std.math.add(usize, self.resident_bytes, amount) catch return false;
@@ -139,6 +169,7 @@ pub const GlobalBudget = struct {
             return false;
         self.resident_bytes = next;
         self.shared_bytes = next_shared;
+        self.recordPeak();
         return true;
     }
 
@@ -156,6 +187,7 @@ pub const GlobalBudget = struct {
             return false;
         self.resident_bytes = next;
         self.shared_bytes = next_shared;
+        self.recordPeak();
         return true;
     }
 
@@ -199,6 +231,7 @@ pub const GlobalBudget = struct {
             self.prepared_reclaim_bytes,
             old_retained,
         ) catch unreachable;
+        self.recordPeak();
         return true;
     }
 
@@ -228,6 +261,7 @@ pub const ScreenTracker = struct {
     base_update_generation: u64 = 1,
     base_update_prepared: bool = false,
     last_resync_attempt_ns: ?u64 = null,
+    global_pressure_retry_after_ns: u64 = 0,
 };
 
 pub const resync_retry_backoff_ns: u64 = std.time.ns_per_s;
@@ -291,6 +325,14 @@ pub const Slot = struct {
             .generation = key.slot_generation,
             .chunks = chunks,
         };
+    }
+
+    fn recordPeak(self: *Slot) void {
+        self.global.recordSlotPeak(
+            self.resident_bytes,
+            self.base_resident_bytes,
+            self.control_resident_bytes,
+        );
     }
 
     pub fn deinit(self: *Slot) void {
@@ -393,6 +435,11 @@ pub const Slot = struct {
         key: ScreenTrackerKey,
     ) error{ Stale, PartialFrame }!void {
         _ = try self.trackerEntry(key);
+        const purges_head = if (self.chunk_len == 0) false else blk: {
+            const head = self.chunks[self.chunk_head];
+            break :blk head.class == .screen and
+                head.screen_tracker_index.? == key.index;
+        };
         for (0..self.chunk_len) |logical| {
             const index = (self.chunk_head + logical) % max_chunks_per_slot;
             const chunk = self.chunks[index];
@@ -400,12 +447,15 @@ pub const Slot = struct {
                 chunk.screen_tracker_index.? == key.index and chunk.offset != 0)
                 return error.PartialFrame;
         }
-        var logical: usize = 0;
-        while (logical < self.chunk_len) {
+        const old_len = self.chunk_len;
+        var kept: usize = 0;
+        for (0..old_len) |logical| {
             const index = (self.chunk_head + logical) % max_chunks_per_slot;
             const chunk = self.chunks[index];
             if (chunk.class != .screen or chunk.screen_tracker_index.? != key.index) {
-                logical += 1;
+                const dst = (self.chunk_head + kept) % max_chunks_per_slot;
+                if (dst != index) self.chunks[dst] = chunk;
+                kept += 1;
                 continue;
             }
             const remaining = chunk.bytes.len - chunk.offset;
@@ -415,14 +465,12 @@ pub const Slot = struct {
             self.screen_trackers[key.index].tracker.?.resident_bytes -= charge;
             self.global.releaseScreen(charge);
             self.allocator.free(chunk.bytes);
-            var shift = logical;
-            while (shift + 1 < self.chunk_len) : (shift += 1) {
-                const dst = (self.chunk_head + shift) % max_chunks_per_slot;
-                const src = (self.chunk_head + shift + 1) % max_chunks_per_slot;
-                self.chunks[dst] = self.chunks[src];
-            }
-            self.chunk_len -= 1;
         }
+        self.chunk_len = kept;
+        // An offset-zero screen head may have started a write EAGAIN clock without sending bytes.
+        // Purging it changes queue-head identity, so the following control notice/sibling frame must
+        // receive a fresh absolute/progress deadline on its own first write attempt.
+        if (purges_head) self.clearPartial(.write);
         const tracker = self.screen_trackers[key.index].tracker.?;
         if (tracker.resident_bytes == 0 and tracker.state == .resync_draining) {
             tracker.state = .valid;
@@ -431,6 +479,18 @@ pub const Slot = struct {
     }
 
     fn trackerEntry(self: *Slot, key: ScreenTrackerKey) error{Stale}!*ScreenTrackerEntry {
+        if (!std.meta.eql(key.owner, self.key)) return error.Stale;
+        const index: usize = key.index;
+        if (index >= max_screen_trackers_per_slot) return error.Stale;
+        const entry = &self.screen_trackers[index];
+        if (entry.tracker == null or entry.generation != key.generation) return error.Stale;
+        return entry;
+    }
+
+    fn trackerEntryConst(
+        self: *const Slot,
+        key: ScreenTrackerKey,
+    ) error{Stale}!*const ScreenTrackerEntry {
         if (!std.meta.eql(key.owner, self.key)) return error.Stale;
         const index: usize = key.index;
         if (index >= max_screen_trackers_per_slot) return error.Stale;
@@ -484,6 +544,7 @@ pub const Slot = struct {
         self.base_resident_bytes = next_base;
         tracker.prepared_base_bytes = amount;
         tracker.base_update_prepared = true;
+        self.recordPeak();
         return .{ .tracker = key, .generation = tracker.base_update_generation };
     }
 
@@ -605,7 +666,7 @@ pub const Slot = struct {
         const tracker = (try self.trackerEntry(key)).tracker.?;
         if (tracker.state != .valid) return error.ScreenInvalidated;
         return self.enqueue(.screen, key.index, bytes, screen_soft_bytes) catch |err| {
-            tracker.state = .invalidated;
+            if (err != error.GlobalLimit) tracker.state = .invalidated;
             return err;
         };
     }
@@ -629,9 +690,49 @@ pub const Slot = struct {
         const tracker = (try self.trackerEntry(key)).tracker.?;
         if (tracker.state != .valid) return error.ScreenInvalidated;
         return self.enqueueOwned(.screen, key.index, bytes, screen_soft_bytes) catch |err| {
-            tracker.state = .invalidated;
+            if (err != error.GlobalLimit) tracker.state = .invalidated;
             return err;
         };
+    }
+
+    /// Ordinary producer batches are admitted atomically so a global-pressure retry never leaves
+    /// a requester prefix queued or changes its valid tracker state.
+    pub fn enqueueOwnedScreenBatch(
+        self: *Slot,
+        key: ScreenTrackerKey,
+        chunks: []const []u8,
+    ) (EnqueueError || error{Stale})!void {
+        const tracker = (try self.trackerEntry(key)).tracker.?;
+        if (tracker.state != .valid) return error.ScreenInvalidated;
+        if (chunks.len == 0) return;
+        if (self.chunk_len +| chunks.len > max_chunks_per_slot - control_chunk_reserve)
+            return error.ChunkLimit;
+        var total: usize = 0;
+        for (chunks) |bytes| {
+            if (bytes.len == 0) return error.ScreenInvalidated;
+            total = std.math.add(usize, total, chargeFor(bytes.len)) catch
+                return error.SlotLimit;
+        }
+        if (self.resident_bytes +| total > per_slot_bytes) return error.SlotLimit;
+        if (tracker.resident_bytes +| total > screen_soft_bytes) {
+            tracker.state = .invalidated;
+            return error.ScreenInvalidated;
+        }
+        if (!self.global.reserveScreen(total)) return error.GlobalLimit;
+        errdefer self.global.releaseScreen(total);
+        for (chunks) |bytes| {
+            const tail = (self.chunk_head + self.chunk_len) % max_chunks_per_slot;
+            self.chunks[tail] = .{
+                .bytes = bytes,
+                .class = .screen,
+                .screen_tracker_index = key.index,
+            };
+            self.chunk_len += 1;
+            self.pending_bytes += bytes.len;
+        }
+        self.resident_bytes += total;
+        tracker.resident_bytes += total;
+        self.recordPeak();
     }
 
     fn enqueue(
@@ -680,6 +781,7 @@ pub const Slot = struct {
         if (class == .screen)
             self.screen_trackers[tracker_index.?].tracker.?.resident_bytes += charge;
         if (class == .control) self.control_resident_bytes += charge;
+        self.recordPeak();
     }
 
     fn enqueueOwned(
@@ -726,6 +828,7 @@ pub const Slot = struct {
         if (class == .screen)
             self.screen_trackers[tracker_index.?].tracker.?.resident_bytes += charge;
         if (class == .control) self.control_resident_bytes += charge;
+        self.recordPeak();
     }
 
     /// Adapter가 실제 write한 만큼만 queue/global accounting을 해제한다.
@@ -849,6 +952,38 @@ pub const Slot = struct {
         return .{ .bytes = first.bytes[first.offset..], .class = first.class };
     }
 
+    pub fn writeBackpressured(self: *const Slot) bool {
+        return self.write_partial_started_ns != null;
+    }
+
+    pub fn trackerHasWrittenPrefix(
+        self: *const Slot,
+        key: ScreenTrackerKey,
+    ) error{Stale}!bool {
+        _ = try self.trackerEntryConst(key);
+        if (self.chunk_len == 0) return false;
+        const head = self.chunks[self.chunk_head];
+        return head.class == .screen and
+            head.screen_tracker_index.? == key.index and head.offset != 0;
+    }
+
+    pub fn globalPressureReady(
+        self: *const Slot,
+        key: ScreenTrackerKey,
+        now_ns: u64,
+    ) error{Stale}!bool {
+        return now_ns >= (try self.trackerEntryConst(key)).tracker.?.global_pressure_retry_after_ns;
+    }
+
+    pub fn deferGlobalPressure(
+        self: *Slot,
+        key: ScreenTrackerKey,
+        now_ns: u64,
+    ) error{Stale}!void {
+        (try self.trackerEntry(key)).tracker.?.global_pressure_retry_after_ns =
+            now_ns +| resync_retry_backoff_ns;
+    }
+
     pub const PartialDirection = enum { read, write };
 
     pub fn notePartial(self: *Slot, direction: PartialDirection, now_ns: u64, progressed: bool) void {
@@ -961,6 +1096,20 @@ pub const ReactorCore = struct {
     slots: [max_connections]?*Slot = [_]?*Slot{null} ** max_connections,
 
     pub const Admission = SlotTable.Admission;
+    pub const AccountingSnapshot = struct {
+        resident_bytes: usize,
+        shared_bytes: usize,
+        prepared_base_bytes: usize,
+        prepared_reclaim_bytes: usize,
+        peak_resident_bytes: usize,
+        peak_shared_bytes: usize,
+        peak_prepared_base_bytes: usize,
+        peak_prepared_reclaim_bytes: usize,
+        peak_slot_queue_bytes: usize,
+        peak_slot_base_bytes: usize,
+        peak_slot_control_bytes: usize,
+        peak_slot_total_bytes: usize,
+    };
 
     pub fn create(allocator: std.mem.Allocator) error{OutOfMemory}!*ReactorCore {
         const self = allocator.create(ReactorCore) catch return error.OutOfMemory;
@@ -1008,6 +1157,23 @@ pub const ReactorCore = struct {
 
     pub fn activeCount(self: *const ReactorCore) usize {
         return self.table.active_count;
+    }
+
+    pub fn accountingSnapshot(self: *const ReactorCore) AccountingSnapshot {
+        return .{
+            .resident_bytes = self.budget.resident_bytes,
+            .shared_bytes = self.budget.shared_bytes,
+            .prepared_base_bytes = self.budget.prepared_base_bytes,
+            .prepared_reclaim_bytes = self.budget.prepared_reclaim_bytes,
+            .peak_resident_bytes = self.budget.peak_resident_bytes,
+            .peak_shared_bytes = self.budget.peak_shared_bytes,
+            .peak_prepared_base_bytes = self.budget.peak_prepared_base_bytes,
+            .peak_prepared_reclaim_bytes = self.budget.peak_prepared_reclaim_bytes,
+            .peak_slot_queue_bytes = self.budget.peak_slot_queue_bytes,
+            .peak_slot_base_bytes = self.budget.peak_slot_base_bytes,
+            .peak_slot_control_bytes = self.budget.peak_slot_control_bytes,
+            .peak_slot_total_bytes = self.budget.peak_slot_total_bytes,
+        };
     }
 
     pub fn drainedForUpgrade(self: *const ReactorCore) bool {
@@ -1388,6 +1554,55 @@ test "screen invalidation and resync are isolated per subscription" {
     try std.testing.expectEqual(ScreenState.valid, try slot.screenState(noisy));
 }
 
+test "atomic screen batch preserves requester state and ownership on global pressure" {
+    var global: GlobalBudget = .{};
+    var slot = try Slot.init(
+        std.testing.allocator,
+        &global,
+        .{ .monotonic_id = 1, .slot_generation = 1 },
+    );
+    defer slot.deinit();
+    const tracker = try slot.createScreenTracker();
+    try std.testing.expect(global.reserveScreen(shared_steady_bytes - 4));
+    defer global.releaseScreen(shared_steady_bytes - 4);
+    const frames = [_][]u8{
+        try std.testing.allocator.dupe(u8, "abc"),
+        try std.testing.allocator.dupe(u8, "def"),
+    };
+    defer for (frames) |bytes| std.testing.allocator.free(bytes);
+
+    try std.testing.expectError(
+        error.GlobalLimit,
+        slot.enqueueOwnedScreenBatch(tracker, &frames),
+    );
+    try std.testing.expectEqual(ScreenState.valid, try slot.screenState(tracker));
+    try std.testing.expectEqual(@as(usize, 0), slot.chunk_len);
+    try std.testing.expectEqual(@as(usize, 0), slot.resident_bytes);
+}
+
+test "accounting snapshot retains intra-turn prepared and slot high water" {
+    const reactor = try ReactorCore.create(std.testing.allocator);
+    defer reactor.destroy();
+    const admission = try reactor.admit();
+    const slot = try reactor.get(admission);
+    const tracker = try slot.createScreenTracker();
+    try slot.enqueueScreen(tracker, "queued");
+    try slot.enqueueControl("control");
+    const reservation = try slot.reserveBaseUpdate(tracker, 16);
+    try slot.rollbackBaseUpdate(reservation);
+    const peak = reactor.accountingSnapshot();
+    try std.testing.expect(peak.peak_resident_bytes >= "queued".len + "control".len + 16);
+    try std.testing.expect(peak.peak_prepared_base_bytes >= 16);
+    try std.testing.expect(peak.peak_slot_queue_bytes >= "queued".len + "control".len);
+    try std.testing.expect(peak.peak_slot_base_bytes >= 16);
+    try std.testing.expect(peak.peak_slot_control_bytes >= "control".len);
+    try std.testing.expect(peak.peak_slot_total_bytes >= "queued".len + "control".len + 16);
+    try std.testing.expect(peak.peak_resident_bytes <= global_bytes);
+    try std.testing.expect(peak.peak_slot_queue_bytes <= per_slot_bytes);
+    try std.testing.expect(peak.peak_slot_base_bytes <= base_per_slot_bytes);
+    try std.testing.expect(peak.peak_slot_total_bytes <= total_per_slot_bytes);
+}
+
 test "connection slot fixed ring stays bounded while a tail remains across long churn" {
     var global: GlobalBudget = .{};
     var slot = try Slot.init(std.testing.allocator, &global, .{ .monotonic_id = 1, .slot_generation = 1 });
@@ -1420,6 +1635,60 @@ test "connection slot partial deadline advances only on progress" {
     try std.testing.expect(!slot.partialExpired(.write, 100 + partial_deadline_ns));
 }
 
+test "purging an unsent screen head resets its inherited write deadline" {
+    var global: GlobalBudget = .{};
+    var slot = try Slot.init(
+        std.testing.allocator,
+        &global,
+        .{ .monotonic_id = 1, .slot_generation = 1 },
+    );
+    defer slot.deinit();
+    const slow = try slot.createScreenTracker();
+    const sibling = try slot.createScreenTracker();
+
+    try slot.enqueueScreen(slow, "slow");
+    try slot.enqueueScreen(sibling, "sibling");
+    slot.notePartial(.write, 100, false);
+    try std.testing.expect(slot.partialExpired(.write, 100 + partial_deadline_ns));
+
+    try slot.invalidateAndPurgeScreenTracker(slow);
+    try std.testing.expect(!slot.partialExpired(.write, 100 + partial_absolute_deadline_ns));
+    const head = slot.firstPending().?;
+    try std.testing.expectEqual(QueueClass.screen, head.class);
+    try std.testing.expectEqualStrings("sibling", head.bytes);
+
+    const next_attempt_ns = 100 + partial_absolute_deadline_ns;
+    slot.notePartial(.write, next_attempt_ns, false);
+    try std.testing.expect(!slot.partialExpired(
+        .write,
+        next_attempt_ns + partial_deadline_ns - 1,
+    ));
+    try std.testing.expect(slot.partialExpired(
+        .write,
+        next_attempt_ns + partial_deadline_ns,
+    ));
+}
+
+test "purging a partially sent screen head remains fail-close only" {
+    var global: GlobalBudget = .{};
+    var slot = try Slot.init(
+        std.testing.allocator,
+        &global,
+        .{ .monotonic_id = 1, .slot_generation = 1 },
+    );
+    defer slot.deinit();
+    const slow = try slot.createScreenTracker();
+
+    try slot.enqueueScreen(slow, "slow");
+    try slot.consumeWritten(1);
+    try std.testing.expectError(
+        error.PartialFrame,
+        slot.invalidateAndPurgeScreenTracker(slow),
+    );
+    try std.testing.expectEqual(ScreenState.valid, try slot.screenState(slow));
+    try std.testing.expectEqualStrings("low", slot.firstPending().?.bytes);
+}
+
 test "resync retry backoff is closed before one second and opens at the exact boundary" {
     var global: GlobalBudget = .{};
     var slot = try Slot.init(
@@ -1444,6 +1713,26 @@ test "resync retry backoff is closed before one second and opens at the exact bo
         100 + resync_retry_backoff_ns,
     ));
     try std.testing.expect(try slot.beginResyncAttempt(
+        tracker,
+        100 + resync_retry_backoff_ns,
+    ));
+}
+
+test "global pressure retry is closed before one second and opens at the exact boundary" {
+    var global: GlobalBudget = .{};
+    var slot = try Slot.init(
+        std.testing.allocator,
+        &global,
+        .{ .monotonic_id = 1, .slot_generation = 1 },
+    );
+    defer slot.deinit();
+    const tracker = try slot.createScreenTracker();
+    try slot.deferGlobalPressure(tracker, 100);
+    try std.testing.expect(!try slot.globalPressureReady(
+        tracker,
+        100 + resync_retry_backoff_ns - 1,
+    ));
+    try std.testing.expect(try slot.globalPressureReady(
         tracker,
         100 + resync_retry_backoff_ns,
     ));

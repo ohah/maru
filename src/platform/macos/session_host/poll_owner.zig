@@ -37,6 +37,7 @@ pub const Owner = struct {
     armed_upgrade: ?connection_turn.ArmedUpgrade = null,
     total_admitted: usize = 0,
     overflow_rejected: usize = 0,
+    total_pressure_reclaims: usize = 0,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -158,6 +159,8 @@ pub const Owner = struct {
                 ready[slot_index] = true;
             }
             if (self.producer_remaining[slot_index] != 0) ready[slot_index] = true;
+            if (client.wantsWrite() and !write_ready[slot_index])
+                client.noteWriteStalled(now_ns);
         }
 
         const admission = self.reactor.nextReady(&ready) orelse
@@ -219,6 +222,10 @@ pub const Owner = struct {
                 .upgrade_preflight = .{
                     .ctx = self,
                     .check = upgradePreflight,
+                },
+                .pressure_reclaim = .{
+                    .ctx = self,
+                    .reclaim = reclaimScreenPressure,
                 },
                 .now_ns = now_ns,
             },
@@ -326,6 +333,45 @@ pub const Owner = struct {
         return requester_membership == 1;
     }
 
+    fn reclaimScreenPressure(
+        ctx: *anyopaque,
+        requester: connection_slot.ConnectionKey,
+        required_bytes: usize,
+    ) bool {
+        const self: *Owner = @ptrCast(@alignCast(ctx));
+        _ = required_bytes;
+        const requester_client = for (self.clients) |maybe_client| {
+            const client = maybe_client orelse continue;
+            if (std.meta.eql(client.admission.key, requester)) break client;
+        } else return false;
+        if (!requester_client.acceptsPressureReclaim()) return false;
+        var victim_index: ?usize = null;
+        var victim_candidate: ?connection_turn.ScreenPressureCandidate = null;
+        var victim_key: ?connection_slot.ConnectionKey = null;
+        for (self.clients, 0..) |maybe_client, index| {
+            const client = maybe_client orelse continue;
+            if (std.meta.eql(client.admission.key, requester)) continue;
+            const candidate = client.largestScreenPressure() orelse continue;
+            if (victim_candidate == null or
+                candidate.queued_bytes > victim_candidate.?.queued_bytes or
+                (candidate.queued_bytes == victim_candidate.?.queued_bytes and
+                    (candidate.reclaimable_bytes > victim_candidate.?.reclaimable_bytes or
+                        (candidate.reclaimable_bytes == victim_candidate.?.reclaimable_bytes and
+                            client.admission.key.monotonic_id < victim_key.?.monotonic_id))))
+            {
+                victim_index = index;
+                victim_candidate = candidate;
+                victim_key = client.admission.key;
+            }
+        }
+        const index = victim_index orelse return false;
+        const victim = self.clients[index].?;
+        if (!victim.reclaimScreenPressure(victim_candidate.?)) return false;
+        if (victim.isClosing()) self.destroyClient(index);
+        self.total_pressure_reclaims += 1;
+        return true;
+    }
+
     fn pollTimeout(self: *const Owner, now_ns: u64, outer_timeout_ms: i32) i32 {
         const gate_open = if (self.server.admission_gate) |gate| gate.snapshot().open else true;
         // Parser-resident complete frames have no corresponding kernel POLLIN edge.
@@ -427,6 +473,76 @@ fn sendTestRequest(fd: c.fd_t, kind: protocol.Kind, request_id: u64, payload: []
     }
 }
 
+fn sendTestStream(fd: c.fd_t, kind: protocol.Kind, stream_id: u64, payload: []const u8) !void {
+    const bytes = try framing.encodeFrame(testing.allocator, .{
+        .kind = kind,
+        .stream_id = stream_id,
+    }, payload);
+    defer testing.allocator.free(bytes);
+    var offset: usize = 0;
+    while (offset < bytes.len) {
+        const rc = c.send(fd, bytes.ptr + offset, bytes.len - offset, 0);
+        if (rc <= 0) return error.TestUnexpectedResult;
+        offset += @intCast(rc);
+    }
+}
+
+const AttachedTestClient = struct {
+    fd: c.fd_t,
+    index: usize,
+};
+
+fn connectAttachedTestClient(
+    owner: *Owner,
+    path: [:0]const u8,
+    mode: []const u8,
+) !AttachedTestClient {
+    var occupied: [max_clients]bool = undefined;
+    for (owner.clients, 0..) |client, index| occupied[index] = client != null;
+    const fd = try connectTestClient(path);
+    errdefer _ = c.close(fd);
+    _ = try owner.pollOnce(5);
+    try sendTestRequest(
+        fd,
+        .hello,
+        1,
+        "{\"protocol_min\":2,\"protocol_max\":2,\"client_kind\":\"gui\"}",
+    );
+    try pumpUntilResponse(owner, fd, "host_id");
+    const request = try std.fmt.allocPrint(
+        testing.allocator,
+        "{{\"method\":\"runtime.attach\",\"params\":{{\"runtime_id\":\"aa\",\"mode\":\"{s}\"}}}}",
+        .{mode},
+    );
+    defer testing.allocator.free(request);
+    try sendTestRequest(fd, .request, 2, request);
+    try pumpUntilLocalStreamOneSnapshot(owner, fd);
+    for (owner.clients, 0..) |client, index|
+        if (!occupied[index] and client != null) return .{ .fd = fd, .index = index };
+    return error.TestUnexpectedResult;
+}
+
+fn fillServerSendBuffer(fd: c.fd_t) !void {
+    const tiny: c_int = 1024;
+    try testing.expectEqual(
+        @as(c_int, 0),
+        c.setsockopt(
+            fd,
+            posix.SOL.SOCKET,
+            posix.SO.SNDBUF,
+            @ptrCast(&tiny),
+            @sizeOf(c_int),
+        ),
+    );
+    var bytes: [4096]u8 = [_]u8{'P'} ** 4096;
+    for (0..4096) |_| {
+        const rc = c.send(fd, &bytes, bytes.len, posix.MSG.DONTWAIT);
+        if (rc < 0 and posix.errno(rc) == .AGAIN) return;
+        if (rc <= 0) return error.TestUnexpectedResult;
+    }
+    return error.TestUnexpectedResult;
+}
+
 fn pumpUntilResponse(owner: *Owner, fd: c.fd_t, needle: []const u8) !void {
     var parser = framing.FrameParser.init(testing.allocator);
     defer parser.deinit();
@@ -526,6 +642,166 @@ fn admittedKeyExcept(
         return client.admission;
     }
     return error.TestUnexpectedResult;
+}
+
+test "poll owner reclaims one observer offender and preserves controller and healthy producer" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir_len = try tmp.dir.realPath(testing.io, &dir_buf);
+    const dir_raw = dir_buf[0..dir_len];
+    const dir_path = try testing.allocator.dupeZ(u8, dir_raw);
+    defer testing.allocator.free(dir_path);
+    const socket_path = try std.fmt.allocPrintSentinel(
+        testing.allocator,
+        "{s}/global-pressure.sock",
+        .{dir_raw},
+        0,
+    );
+    defer testing.allocator.free(socket_path);
+    var runtime_registry = registry.TerminalRuntimeRegistry.init(testing.allocator);
+    defer runtime_registry.deinit();
+    _ = try runtime_registry.register(0xAA, 80, 24);
+    var server = try socket_server.SocketServer.bind(
+        testing.allocator,
+        dir_path,
+        socket_path,
+        0xB2,
+        &runtime_registry,
+    );
+    defer server.deinit();
+    server.host_status = .{ .manifest_capable = true };
+    var fake_runtime: server_mod.FakeRuntimeOps = .{};
+    server.runtime_ops = fake_runtime.ops();
+    var owner = try Owner.init(testing.allocator, testing.io, &server);
+    defer owner.deinit();
+    owner.next_cadence_ns = std.math.maxInt(u64);
+
+    var fds: [12]c.fd_t = undefined;
+    var fd_count: usize = 0;
+    defer {
+        for (fds[0..fd_count]) |fd| {
+            if (fd >= 0) _ = c.close(fd);
+        }
+    }
+    const controller = try connectAttachedTestClient(&owner, socket_path, "controller");
+    fds[fd_count] = controller.fd;
+    fd_count += 1;
+    const healthy = try connectAttachedTestClient(&owner, socket_path, "observer");
+    fds[fd_count] = healthy.fd;
+    fd_count += 1;
+    var slow_indices: [10]usize = undefined;
+    for (&slow_indices) |*slow_index| {
+        const slow = try connectAttachedTestClient(&owner, socket_path, "observer");
+        fds[fd_count] = slow.fd;
+        fd_count += 1;
+        slow_index.* = slow.index;
+    }
+    for (slow_indices) |slow_index| {
+        const slow_client = owner.clients[slow_index].?;
+        try fillServerSendBuffer(slow_client.fd);
+        const slot = try owner.reactor.get(slow_client.admission);
+        const tracker = slow_client.trackers.get(1).?;
+        const pressure = try testing.allocator.alloc(u8, connection_slot.screen_soft_bytes);
+        @memset(pressure, 'Q');
+        slot.enqueueOwnedScreen(tracker, pressure) catch |err| {
+            testing.allocator.free(pressure);
+            return err;
+        };
+    }
+    _ = try owner.pollOnce(0);
+    for (slow_indices) |slow_index| {
+        const slow_client = owner.clients[slow_index].?;
+        const slot = try owner.reactor.get(slow_client.admission);
+        try testing.expect(slot.writeBackpressured());
+        try testing.expectEqual(connection_slot.screen_soft_bytes, slot.firstPending().?.bytes.len);
+    }
+
+    const before = owner.reactor.accountingSnapshot();
+    try testing.expect(before.shared_bytes >= 80 * 1024 * 1024);
+    const healthy_client = owner.clients[healthy.index].?;
+    const healthy_tracker = healthy_client.trackers.get(1).?;
+    const now_ns = monotonicNow(testing.io);
+    owner.next_cadence_ns = std.math.maxInt(u64);
+    owner.producer_remaining[healthy.index] = healthy_client.beginProducerSweep(now_ns);
+    const delta_before = fake_runtime.delta_calls;
+    var producer_attempts: usize = 0;
+    while (fake_runtime.delta_calls == delta_before and producer_attempts < 100) : (producer_attempts += 1)
+        _ = try owner.pollOnce(0);
+    try testing.expect(fake_runtime.delta_calls > delta_before);
+    try pumpUntilResponse(&owner, healthy.fd, "DELTA-BYTES");
+    try testing.expectEqual(
+        connection_slot.ScreenState.valid,
+        try (try owner.reactor.get(healthy_client.admission)).screenState(healthy_tracker),
+    );
+
+    var invalidated: usize = 0;
+    for (slow_indices) |index| {
+        const client = owner.clients[index] orelse continue;
+        const tracker = client.trackers.get(1).?;
+        if ((try (try owner.reactor.get(client.admission)).screenState(tracker)) ==
+            .invalidated) invalidated += 1;
+    }
+    try testing.expectEqual(@as(usize, 1), invalidated);
+    const selected_victim = owner.clients[slow_indices[0]].?;
+    try testing.expectEqual(
+        connection_slot.ScreenState.invalidated,
+        try (try owner.reactor.get(selected_victim.admission)).screenState(
+            selected_victim.trackers.get(1).?,
+        ),
+    );
+    try testing.expectEqual(@as(usize, 1), owner.total_pressure_reclaims);
+    try testing.expect(owner.clients[controller.index] != null);
+    try sendTestStream(controller.fd, .input_bytes, 1, "CTRL-AFTER-PRESSURE");
+    var input_attempts: usize = 0;
+    while (fake_runtime.last_input_len == 0 and input_attempts < 1000) : (input_attempts += 1)
+        _ = try owner.pollOnce(0);
+    try testing.expectEqualStrings(
+        "CTRL-AFTER-PRESSURE",
+        fake_runtime.last_input[0..fake_runtime.last_input_len],
+    );
+
+    const peak = owner.reactor.accountingSnapshot();
+    try testing.expect(peak.peak_resident_bytes <= connection_slot.global_bytes);
+    try testing.expect(peak.peak_shared_bytes > 0);
+    try testing.expect(peak.peak_shared_bytes <= connection_slot.shared_hard_bytes);
+    try testing.expect(peak.peak_prepared_base_bytes > 0);
+    try testing.expect(
+        peak.peak_prepared_base_bytes <= connection_slot.base_replacement_headroom_bytes,
+    );
+    try testing.expect(peak.peak_prepared_reclaim_bytes > 0);
+    try testing.expect(peak.peak_prepared_reclaim_bytes <= connection_slot.shared_hard_bytes);
+    try testing.expect(peak.peak_slot_queue_bytes <= connection_slot.per_slot_bytes);
+    try testing.expect(peak.peak_slot_base_bytes <= connection_slot.base_per_slot_bytes);
+    try testing.expect(peak.peak_slot_control_bytes > 0);
+    try testing.expect(
+        peak.peak_slot_control_bytes <= connection_slot.per_slot_bytes,
+    );
+    try testing.expect(peak.peak_slot_total_bytes <= connection_slot.total_per_slot_bytes);
+
+    for (fds[0..fd_count]) |*fd| {
+        _ = c.shutdown(fd.*, c.SHUT.RDWR);
+        _ = c.close(fd.*);
+        fd.* = -1;
+    }
+    var close_attempts: usize = 0;
+    while (owner.activeCount() != 0 and close_attempts < 4000) : (close_attempts += 1)
+        _ = try owner.pollOnce(0);
+    try testing.expectEqual(@as(usize, 0), owner.activeCount());
+    for (owner.clients, owner.producer_remaining) |client, remaining| {
+        try testing.expect(client == null);
+        try testing.expectEqual(@as(usize, 0), remaining);
+    }
+    try testing.expectEqual(@as(usize, 0), server.subscriptions.count());
+    try testing.expectEqual(@as(usize, 0), runtime_registry.attachmentCount());
+    try testing.expectEqual(@as(usize, 0), server.host_status.client_count);
+    try testing.expect(!owner.admin_admission.active);
+    const final = owner.reactor.accountingSnapshot();
+    try testing.expectEqual(@as(usize, 0), final.resident_bytes);
+    try testing.expectEqual(@as(usize, 0), final.shared_bytes);
+    try testing.expectEqual(@as(usize, 0), final.prepared_base_bytes);
+    try testing.expectEqual(@as(usize, 0), final.prepared_reclaim_bytes);
 }
 
 test "poll owner keeps connection-local stream one distinct across live slot reuse" {

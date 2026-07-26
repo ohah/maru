@@ -27042,6 +27042,37 @@ pub const AppSession = struct {
         return std.fmt.allocPrint(self.allocator, "{s} \u{00b7} {s}", .{ kind_name, status });
     }
 
+    /// 에이전트 행 **마지막 활동 시각**(owned, `"5m"`·`"now"`·빈 문자열).
+    ///
+    /// 기준은 `agent_last_output_ms` — 그 Term이 마지막으로 출력한 시각이다. transcript 파일 mtime을 쓰지 않는
+    /// 이유는 그것이 **대화** 기록의 시각이라 도구 실행처럼 대화 없이 오래 도는 구간을 "멈춘 것"으로 보이게 하기
+    /// 때문이다. 행이 답해야 하는 건 "이 에이전트가 살아 움직이는가"다.
+    ///
+    /// awake clock 기준이라 앱을 새로 켜면 0(= 표시 없음)이고, 첫 출력에서 채워진다 — 그 앱 세션에서 아직 아무
+    /// 일도 없었다는 뜻이라 빈 편이 맞다.
+    fn agentAgeOwned(self: *AppSession, term: ?*Term) ![]const u8 {
+        const t = term orelse return self.allocator.dupe(u8, "");
+        var buf: [8]u8 = undefined;
+        if (t.agent_last_output_ms != 0) {
+            const age_ms = self.awakeMs() -| t.agent_last_output_ms;
+            return self.allocator.dupe(u8, chrome.components.sidebar.formatRelativeAge(age_ms, &buf));
+        }
+        // **폴백**: 앱을 새로 켠 직후에는 `agent_last_output_ms`(awake clock)가 0이라 아무 값도 못 낸다. 그런데
+        // 사이드바를 보는 이유가 바로 "언제 마지막으로 움직였나"인 순간이 그때다. 그래서 세션 기록 파일의 mtime을
+        // 쓴다 — wall clock이라 앱 생애와 무관하고, 그 Term에 이미 매핑된 파일이라 추가 IO가 없다.
+        //
+        // mtime은 **대화만이 아니라 도구 실행도** 따라간다(실측: 도구만 연달아 도는 세션의 mtime이 25초 전 —
+        // tool_use/tool_result가 그때그때 기록된다). 그래서 "대화가 없으면 멈춘 것처럼 보인다"는 걱정은 근거가
+        // 없다. 그럼에도 출력을 **우선**하는 이유는 두 가지다: PTY 출력은 파일 쓰기보다 촘촘하고 즉각적이며,
+        // 이 캐시의 mtime은 우리가 마지막으로 폴링해 **읽은** 시점 기준이라 최대 폴링 주기만큼 뒤처진다.
+        const mtime_ns = t.agent_transcript.read_mtime_ns;
+        if (mtime_ns == 0) return self.allocator.dupe(u8, "");
+        const now_ns: i128 = std.Io.Clock.real.now(self.io).nanoseconds;
+        if (now_ns <= mtime_ns) return self.allocator.dupe(u8, "now"); // 시계 되감김·미래 mtime 방어
+        const age_ms: u64 = @intCast(@divTrunc(now_ns - @as(i128, mtime_ns), std.time.ns_per_ms));
+        return self.allocator.dupe(u8, chrome.components.sidebar.formatRelativeAge(age_ms, &buf));
+    }
+
     /// 에이전트 행 **응답 줄**(owned) — 마지막 에이전트 응답(§7). 없으면 빈 문자열이라 렌더가 그 줄을 건너뛴다.
     fn agentRowReplyOwned(self: *AppSession, term: *Term, indent: []const u8) ![]const u8 {
         const reply = term.agent_transcript.reply();
@@ -27328,6 +27359,14 @@ pub const AppSession = struct {
         var active_row: ?usize = null;
         // 닫기 ✕는 **호버 전용이 아니라 행별 고정 표시**다(사용자 요청) — 카드는 그 워크스페이스를, 에이전트 행은
         // 그 Term을 닫는다. row별 bool로 실어 여러 행이 동시에 ✕를 가질 수 있게 한다.
+        // 각 행의 **마지막 활동 상대 시각**("5m"·"now", 빈 문자열=표시 안 함). close_rows와 같은 per-row 병렬
+        // 배열이라 **모든 분기가 정확히 한 번씩** append해야 한다 — 하나라도 빠지면 이후 모든 행의 시각이 밀린다
+        // (close_rows에서 실제로 겪은 회귀).
+        var ages: std.ArrayList([]const u8) = .empty;
+        defer {
+            for (ages.items) |a| self.allocator.free(a);
+            ages.deinit(self.allocator);
+        }
         var close_rows: std.ArrayList(bool) = .empty;
         defer close_rows.deinit(self.allocator);
         var editing_row: ?usize = null; // rename 중인 표시 슬롯(카드 또는 그룹 헤더) — buildSidebarDrawList가 그 이름줄을 tail 앵커로.
@@ -27373,6 +27412,8 @@ pub const AppSession = struct {
                     try card_kinds.append(self.allocator, if (trep) |r| r.term.agent_kind else .none);
                     try card_running.append(self.allocator, if (trep) |r| (r.state == .running) else false);
                     try close_rows.append(self.allocator, false); // 토글 자체는 닫기 대상이 아니다(접기만)
+                    // 접힘 요약이 상태의 유일한 단서이므로 시각도 대표 에이전트 것으로 채운다(파형 색과 같은 이유).
+                    try ages.append(self.allocator, try self.agentAgeOwned(if (trep) |r| r.term else null));
                     continue;
                 },
                 .agent => |ar| {
@@ -27411,6 +27452,7 @@ pub const AppSession = struct {
                     try card_kinds.append(self.allocator, if (aterm) |t| t.agent_kind else .none);
                     try card_running.append(self.allocator, if (aterm) |t| (t.agent_state == .running) else false);
                     try close_rows.append(self.allocator, aterm != null); // 에이전트 행 ✕ = 그 Term 닫기
+                    try ages.append(self.allocator, try self.agentAgeOwned(aterm));
                     continue;
                 },
                 .group_header => |gh| {
@@ -27449,6 +27491,7 @@ pub const AppSession = struct {
                     try card_kinds.append(self.allocator, .none); // 색칠 루프 인덱스 정합(헤더=none → 무색)
                     try card_running.append(self.allocator, false);
                     try close_rows.append(self.allocator, false); // 그룹 헤더엔 ✕ 없음
+                    try ages.append(self.allocator, try self.allocator.dupe(u8, "")); // 시각은 에이전트 행 전용
                     continue; // 헤더 row 엔트리 1개 append 완료 — 다음 row로(i==row 인덱스 유지)
                 },
             };
@@ -27493,6 +27536,7 @@ pub const AppSession = struct {
                 // row별 병렬 배열이라 한 칸이 비면 이후 모든 행의 ✕가 한 줄씩 밀리고 마지막 행은 "안 보이는데
                 // 눌리는" 파괴적 hotspot이 된다(code-review max).
                 try close_rows.append(self.allocator, false);
+                try ages.append(self.allocator, try self.allocator.dupe(u8, "")); // 편집 중엔 시각도 숨긴다(핀·✕와 같은 이유)
             } else {
                 const base = workspaceLabel(tab);
                 // 이름줄 선두 = 동작/활성 마커: 활성 워크스페이스='*', 그 외='·'(U+00B7). 핀(📌)은 옛 설계처럼 선두에 박지
@@ -27512,6 +27556,9 @@ pub const AppSession = struct {
                 // 직접 읽기는 그룹 멤버 캐시 pinned=1을 그대로 그려 모든 멤버에 📌 노이즈를 냈다(§12.8 루트커즈).
                 try pins.append(self.allocator, self.sidebarRowShowsPin(disp_row));
                 try close_rows.append(self.allocator, true); // 카드 ✕ = 그 워크스페이스 닫기(고정 표시)
+                // 카드 헤더엔 시각을 두지 않는다 — 카드는 워크스페이스이지 한 에이전트가 아니라 "언제"의 주체가
+                // 모호하고, 아래 목록의 행마다 자기 시각이 이미 있다.
+                try ages.append(self.allocator, try self.allocator.dupe(u8, ""));
                 // 브랜치줄·경로줄: cwd가 git repo 안일 때만(branch != null) + view options 토글로 표시 여부 결정.
                 // 이름줄은 항상 표시(사용자 요청). show-branch=false면 브랜치줄 생략, show-folder=false면 경로줄 생략.
                 // 토글은 독립적이다 — 둘 다 "git repo 안"을 전제로 하되(maru는 repo 밖 cwd 줄을 안 그림) 서로 안 묶인다.
@@ -27547,7 +27594,7 @@ pub const AppSession = struct {
         // plus_row=null — 하단 "+" 버튼은 헤더 우측 아이콘으로 이동·폐기(P2). 호버 슬롯엔 닫기 ✕(없으면 null).
         // close_row/active_row는 **표시 row 인덱스**(위 padding 루프가 헤더도 slot을 차지하게 해 i==row) — buildSidebarDrawList가
         // 이 i로 슬롯을 인코딩·비교하므로 도메인이 일치한다(SG3c). 헤더 row는 위 루프가 close_row를 안 세워 ✕가 안 붙는다.
-        var draw_list = try coretext_frame_builder.buildSidebarDrawList(self.allocator, names.items, branch_lines.items, path_lines.items, status_lines.items, agents.items, pins.items, sidebar_cols, fg, close_rows.items, null, active_row, active_fg, editing_row);
+        var draw_list = try coretext_frame_builder.buildSidebarDrawList(self.allocator, names.items, branch_lines.items, path_lines.items, status_lines.items, agents.items, pins.items, sidebar_cols, fg, close_rows.items, ages.items, null, active_row, active_fg, editing_row);
         // 에이전트 아이콘(✶ claude / ◆ codex)과 상태줄 running 스피너(이퀄라이저 바 ▁~█)에 **브랜드색**을 입힌다 — claude=Anthropic 코랄,
         // codex=OpenAI 청록. 종류를 색으로 구분하고, **관측 상태는 상태줄**(running=이퀄라이저 파형[브랜드색]·idle=✓ 대기중)이 담당한다
         // (옛 아이콘 밝기 펄스는 폐기 — 아래 루프는 아이콘·스피너 모두 솔리드 브랜드색). 색은 `term.agent_kind` 단일 출처로 고른다.
@@ -36192,6 +36239,49 @@ test "fillSidebarGlyphPyTop: 그룹 헤더가 앞서면 카드 glyph py_top이 r
 // 4단계(§7): 세션 기록에서 읽은 마지막 대화가 **행 라벨·줄 수·알림 본문** 셋에 실제로 도달하는지 고정한다.
 // 캐시(Term.agent_transcript)까지는 폴링이 채우고, 여기서 검증하는 건 그 아래 소비 경로다 — 파일→캐시 구간은
 // 실제 FS·provider 포맷에 의존해 단위 테스트가 못 덮으므로 앱 실행으로 확인한다(§10).
+// 활동 시각의 **우선순위**를 고정한다: 관측된 출력 > 세션 기록 mtime > 빈칸. mtime 폴백이 없으면 앱을 새로 켠
+// 직후(= 사이드바를 보는 바로 그 순간) 모든 행이 빈칸이 된다.
+test "에이전트 행 활동 시각: 출력이 mtime보다 우선하고, 둘 다 없으면 빈칸이다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const session = try initSmokeSessionSized(a);
+    defer a.destroy(session);
+    defer session.deinit();
+
+    const term = session.tabs.items[0].panes.items[0].terms.items[0];
+    term.agent_kind = .claude;
+
+    // 관측된 출력도, 기록 mtime도 없다 → 빈칸(그 앱 세션에서 아직 아무 일도 없었다).
+    {
+        const age = try session.agentAgeOwned(term);
+        defer a.free(age);
+        try std.testing.expectEqualStrings("", age);
+    }
+
+    // mtime만 있다 → 폴백이 값을 낸다. wall clock 기준이라 앱 생애와 무관하다.
+    term.agent_transcript.read_mtime_ns = @intCast(std.Io.Clock.real.now(session.io).nanoseconds - 2 * std.time.ns_per_hour);
+    {
+        const age = try session.agentAgeOwned(term);
+        defer a.free(age);
+        try std.testing.expectEqualStrings("2h", age);
+    }
+
+    // 출력이 관측되면 그쪽이 이긴다 — 도구를 오래 돌려 대화가 없는 구간을 "멈춘 것"으로 보이게 하지 않는다.
+    term.agent_last_output_ms = session.awakeMs() -| (5 * std.time.ms_per_min);
+    {
+        const age = try session.agentAgeOwned(term);
+        defer a.free(age);
+        try std.testing.expectEqualStrings("5m", age);
+    }
+
+    // Term이 없는 행(그룹 헤더·편집 중 카드)은 빈칸이다.
+    {
+        const age = try session.agentAgeOwned(null);
+        defer a.free(age);
+        try std.testing.expectEqualStrings("", age);
+    }
+}
+
 test "에이전트 행: 마지막 대화가 라벨·줄 수·알림 본문에 실린다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const a = std.testing.allocator;
@@ -40345,13 +40435,13 @@ test "buildSidebarTitleFrame: 에이전트 심볼(✶/◆) prefix여도 프레�
         // (1) 시프트만 하고 size.cols를 안 넓히면 ShapedRecordOutsideSurface로 실패함을 고정(버그 재현 — buildFromDrawList가
         //     실패 시 draw_list를 정리하므로 별도 free 안 함).
         {
-            const dl = try coretext_frame_builder.buildSidebarDrawList(allocator, &names, &branches, &paths, &[_][]const u8{}, &[_]u21{}, &[_]bool{}, sidebar_cols, muted, &.{}, 1, 0, muted, null);
+            const dl = try coretext_frame_builder.buildSidebarDrawList(allocator, &names, &branches, &paths, &[_][]const u8{}, &[_]u21{}, &[_]bool{}, sidebar_cols, muted, &.{}, &.{}, 1, 0, muted, null);
             for (dl.cells) |*c| c.col += indent_cols;
             try std.testing.expectError(error.ShapedRecordOutsideSurface, fb.buildFromDrawList(allocator, dl, &session.renderer_state));
         }
         // (2) 시프트 후 size.cols=full_cols로 넓히면(수정) 정상 빌드 + row 보존(이름 idx0·경로 idx2, count=3).
         {
-            var dl = try coretext_frame_builder.buildSidebarDrawList(allocator, &names, &branches, &paths, &[_][]const u8{}, &[_]u21{}, &[_]bool{}, sidebar_cols, muted, &.{}, 1, 0, muted, null);
+            var dl = try coretext_frame_builder.buildSidebarDrawList(allocator, &names, &branches, &paths, &[_][]const u8{}, &[_]u21{}, &[_]bool{}, sidebar_cols, muted, &.{}, &.{}, 1, 0, muted, null);
             for (dl.cells) |*c| c.col += indent_cols;
             dl.size.cols = full_cols;
             var f = try fb.buildFromDrawList(allocator, dl, &session.renderer_state);

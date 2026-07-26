@@ -754,8 +754,8 @@ maru runtime end [--yes] <runtime-id>
 
 | 명령 | 동작 |
 | --- | --- |
-| `maru host status` | host 존재, `host_id`, protocol/capability, runtime/client 수를 진단한다. host를 새로 시작하지 않는다. |
-| `maru runtime list` | runtime ID, process state, title/cwd의 redacted 표시, size, controller 유무를 나열한다. full ID가 canonical이고 짧은 ID는 현재 목록에서 유일할 때만 입력으로 허용한다. |
+| `maru host status` | host 존재, `host_id`, build/protocol/lifecycle, runtime/client 수를 진단한다. host를 새로 시작하지 않는다. |
+| `maru runtime list` | canonical runtime ID, size, resize generation, controller/observer 상태를 나열한다. P5a2에서는 짧은 ID 입력을 허용하지 않는다. |
 | `maru runtime get` | 단일 runtime metadata를 조회한다. output/scrollback은 출력하지 않는다. |
 | `maru attach --read-only` | observer로 snapshot/delta를 표시한다. input/resize는 보내지 않는다. |
 | `maru attach` | controller가 없으면 controller, 있으면 observer로 붙고 명확한 read-only banner를 표시한다. 조용히 기존 controller를 빼앗지 않는다. |
@@ -768,6 +768,36 @@ CLI help와 parser fixture가 이 규칙의 단일 사용자 표면이고, 향�
 추가하지 않는다.
 
 전체 workspace TUI는 후속이다.
+
+`host status`의 `client_count`는 응답을 읽는 현재 one-shot admin connection을 포함해 poll owner가 admission한
+실시간 connection 수다. 따라서 다른 client가 전혀 없어도 명령 실행 중 값은 1이며, GUI 하나가 함께 붙어 있으면 2다.
+
+### Read/admin CLI 출력과 종료 계약
+
+P5a2의 read 명령은 현재 실행 중인 `maru`와 같은 build identity·current protocol major·ready lifecycle인
+manifest host 하나에만 one-shot `admin`으로 연결한다. secure registry에서 이 조건을 만족하는 host가 없거나 둘 이상이면
+추측해서 다른 host를 고르지 않고 실패한다. 조회는 host를 spawn하거나 manifest/lock을 생성·수정하지 않는다. N-1 host,
+workspace handle이 가리키는 특정 old host, 여러 host를 합친 runtime 목록은 후속 명시적 `--host`/all-host UX 전에는
+대상으로 삼지 않는다.
+
+- `maru host status [--json]`, `maru runtime list [--json]`,
+  `maru runtime get <32-lower-hex-runtime-id> [--json]`만 P5a2에서 공개한다. runtime ID의 짧은 prefix 입력은 여러
+  host를 합치는 discovery가 생길 때까지 허용하지 않는다.
+- `--json` 성공 stdout은 daemon response의 `result`를 정규화한 단일 JSON value와 마지막 LF다. field order는
+  `host status`, `runtime list`, `runtime get`별 CLI DTO writer가 고정하고 unknown field는 출력하지 않는다.
+  operational 실패 stdout은 비어 있고 stderr는 경로·raw daemon payload 없이 한 줄만 쓴다. usage 오류는 예외로
+  해당 command help 전체를 stderr에 쓰고 exit 2로 끝낸다.
+- 기본 text 출력도 같은 parsed CLI DTO만 소비한다. `runtime list`는 runtime ID 오름차순이며 빈 목록은 header나
+  placeholder 없이 `No persistent runtimes.` 한 줄이다. P5a2 DTO는 runtime ID·size·resize generation·
+  controller/observer 상태만 포함하며 raw output·scrollback·cwd·title·command·환경변수는 조회하거나 출력하지 않는다.
+- hello ack에 `admin_one_shot_v1`이 없으면 일반 `cli`/`unknown` role로 재접속하거나 read method를 추측하지 않고
+  `unsupported`로 끝낸다. 한 admin connection에는 정확히 한 request만 보내고 full response/EOF 뒤 닫는다.
+- process exit는 `0=success`, `2=usage`, `3=host_unavailable/absent/stale_host/host_shutting_down`,
+  `4=endpoint_denied/unauthorized/invalid registry authority`,
+  `5=unsupported/incompatible_version`, `6=busy/resource_exhausted`, `7=runtime_not_found`,
+  `8=transport/protocol/malformed response/ambiguous current host`로 고정한다. discovery와 hello가 끝난 뒤의
+  connection close/transient I/O는 host absence가 아니라 transport 실패다. `--json` 실패도 같은 exit와 stderr를
+  사용하며 성공처럼 보이는 error JSON을 stdout에 쓰지 않는다.
 
 ```sh
 maru attach --workspace <future-workspace-id> # 후속, v1 비범위
@@ -992,7 +1022,7 @@ capabilities:["runtime_metadata_v1","screen_viewport_scrolled_v1","async_scroll_
 capability다. 제품 daemon은 controller·rollback self-image·target stager 준비가 모두 성공한 경우에만 이를 광고한다.
 frozen signed N-1 update와 soak 종료 gate 전에는 이 capability의 자동 migration을 기본 동작으로 주장하지 않는다.
 현재 서로 다른 header major끼리는 hello payload 협상 전에 server가 응답 없이 연결을 닫으므로 client에는 보통
-`ConnectionClosed`→host `.denied`로 보인다. `incompatible_version` 응답은 header major는 현재 값인데 hello의
+`ConnectionClosed`→GUI `handshake_failed`, public admin CLI `protocol_error`(exit 8)로 보인다. `incompatible_version` 응답은 header major는 현재 값인데 hello의
 `protocol_min..protocol_max`가 현재 major를 포함하지 않는 경우에만 도달한다. GUI는 manifest handle의 `host_id`와
 hello의 값이 다르면 stale로 처리한다.
 
@@ -1085,7 +1115,7 @@ client crash, timeout은 모든 stream을 detach하지만 runtime/child에는 �
 
 공통 error code는 `host_unavailable`, `invalid_request`, `incompatible_version`, `unauthorized`, `runtime_not_found`, `stale_host`,
 `controller_busy`, `invalid_generation`, `payload_too_large`, `queue_invalidated`, `host_shutting_down`, `upgrade_busy`,
-`upgrade_incompatible`, `attempt_conflict`, `upgrade_failed_retryable`, `upgrade_failed_nonretryable`, `internal`이다.
+`attempt_conflict`, `upgrade_unsupported`, `invalid_target`, `resource_exhausted`, `internal`이다.
 CLI exit code와 사용자 문구는 이 typed error를 한 곳에서 매핑하고 server의 임의 문자열을 그대로 출력하지 않는다.
 
 ## 11. 보안과 개인정보
@@ -1777,11 +1807,13 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
     배출하는 requester만 fd/buffered-read/producer-cadence 대상으로 두고 sibling은 그대로 동결한다. stage reject,
     reply encode/admission 실패, requester write/HUP 실패는 staged attempt를 취소하고 gate를 다시 연 뒤 sibling의
     parser/kernel bytes와 cadence cursor를 이어서 처리한다.
-- **P5a2 — read/admin CLI**: P5a1 위에서 `maru host status`, `maru runtime list/get`과 parser/`--help`/`--json`
+- **P5a2 — read/admin CLI (구현)**: P5a1 위에서 `maru host status`, `maru runtime list/get`과 parser/`--help`/`--json`
   fixture를 공개한다. client는 hello ack의 `admin_one_shot_v1`을 확인한 current host에서만 admin command를 보내며,
-  capability가 없는 same-major/N-1 host를 일반 `unknown` role semantics로 추측하지 않고 typed unsupported로 끝낸다.
+  exact-current manifest로 선택됐지만 hello에 capability가 없는 host를 일반 `unknown` role semantics로 추측하지 않고
+  typed unsupported로 끝낸다. N-1 build는 이 명령의 current-host discovery 대상이 아니므로 연결을 시도하지 않는다.
   CLI는 host를 자동 시작하지 않고 manifest writer도 되지 않는다. GUI가 연결된 실제 daemon에 대한
-  응답, absent/denied/busy typed exit와 JSON 안정성이 gate다.
+  응답, absent/denied/busy typed exit와 JSON 안정성이 gate다. current host 선택, canonical runtime ID, text/JSON 및
+  process exit의 정확한 계약은 위 [Read/admin CLI 출력과 종료 계약](#readadmin-cli-출력과-종료-계약)이 단일 출처다.
 - **P5a3 — mutating admin CLI**: `maru runtime end`를 controller/ownership 확인과 함께 별도 공개한다. exact runtime
   종료, stale identity, unauthorized, accepted reply flush를 gate로 삼는다.
 - **P5b1 — subscription identity (T0b0에서 선행 구현)**: connection-local wire `stream_id`와

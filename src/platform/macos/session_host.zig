@@ -5,7 +5,7 @@
 //!
 //! 레이어 규율(project-structure.md session_host/): **codec/state machine은 OS 중립**(platform import 0)이고,
 //! macOS launch/peer-cred/socket adapter만 platform 경계에 둔다. 그래서 이 서브트리는 platform/macos 아래 있지만
-//! `protocol`/`framing` 같은 codec은 std만 의존해 나중에 이식하거나 CLI(P5)와 공유할 수 있다.
+//! `protocol`/`framing` 같은 codec은 std와 OS-중립 L2 shared leaf만 의존해 나중에 이식하거나 CLI(P5)와 공유할 수 있다.
 //!
 //! 구현 순서(각 슬라이스가 별도 PR):
 //!   - P3-a ✅: `protocol`(MRSH 32-byte header·kind/flag·error 어휘) + `framing`(partial I/O parser·cap).
@@ -57,6 +57,14 @@ pub const screen_assembler = @import("session_host/screen_assembler.zig");
 pub const registry = @import("session_host/registry.zig");
 pub const server = @import("session_host/server.zig");
 pub const discovery = @import("session_host/discovery.zig");
+pub const admin_client = if (builtin.os.tag == .macos)
+    @import("session_host/admin_client.zig")
+else
+    struct {};
+pub const admin_cli = if (builtin.os.tag == .macos)
+    @import("session_host/admin_cli.zig")
+else
+    struct {};
 // host_connect(client의 connect-or-launch 오케스트레이션 — discovery 결정을 실 connect/flock/spawnDetached로 수행)는 실
 // syscall을 써서 macOS 전용이다(순수 결정은 discovery.zig가 이미 테스트). AppSession이 keep-alive일 때 이걸 부른다(e3-4).
 pub const host_connect = if (builtin.os.tag == .macos)

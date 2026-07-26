@@ -26,6 +26,8 @@ pub const ClientError = error{
     EndpointTransient,
     /// hello 왕복이 실패했다(전송/수신/파싱). 또는 host_id를 못 읽었다.
     HandshakeFailed,
+    AdminBusy,
+    Unauthorized,
     /// host가 겹치는 major version이 없다고 응답했다(§10). runtime을 죽이지 않고 client만 끝낸다.
     IncompatibleVersion,
     /// frame codec 위반 또는 예상치 못한 frame kind.
@@ -225,6 +227,8 @@ pub const Client = struct {
     host_manifest_v1: bool = false,
     host_exec_upgrade_v1: bool = false,
     runtime_inventory_v1: bool = false,
+    /// Hidden one-shot admin role을 host가 명시적으로 지원하는가. CLI는 이 값 없이 read method를 추측하지 않는다.
+    admin_one_shot_v1: bool = false,
     /// 이 connection이 협상한 MRSH header major. current GUI는 current와 frozen N-1 adapter를 별도
     /// connection으로 유지하므로 모든 outbound/inbound frame이 이 값을 사용한다.
     wire_major: u16 = protocol.version_major,
@@ -292,6 +296,22 @@ pub const Client = struct {
         return connectMajor(allocator, socket_path, client_kind, protocol.version_major);
     }
 
+    pub fn connectAdmin(
+        allocator: std.mem.Allocator,
+        socket_path: [:0]const u8,
+    ) ClientError!Client {
+        return requireAdminCapability(try connect(allocator, socket_path, "admin"));
+    }
+
+    fn requireAdminCapability(candidate: Client) ClientError!Client {
+        var client = candidate;
+        if (!client.admin_one_shot_v1) {
+            client.deinit();
+            return error.IncompatibleVersion;
+        }
+        return client;
+    }
+
     /// Frozen N-1 adapter 전용 연결점. 범위 협상처럼 보이게 여러 major를 한 connection에 광고하지 않고,
     /// 선택한 wire major의 header와 hello 범위를 정확히 하나로 고정한다.
     pub fn connectMajor(
@@ -341,6 +361,10 @@ pub const Client = struct {
         defer ack.deinit(allocator);
         if (ack.header.kind != .hello_ack) return error.HandshakeFailed;
         if (std.mem.indexOf(u8, ack.payload, "incompatible_version") != null) return error.IncompatibleVersion;
+        if (std.mem.indexOf(u8, ack.payload, "\"error\":\"resource_exhausted\"") != null)
+            return error.AdminBusy;
+        if (std.mem.indexOf(u8, ack.payload, "\"error\":\"unauthorized\"") != null)
+            return error.Unauthorized;
         if (parseSelectedVersion(ack.payload) != wire_major) return error.HandshakeFailed;
         // 과거 개발 중 같은 MRSH v1 아래 screen body 의미가 여러 번 바뀌었다. build identity가 없는 untagged v1을
         // current body로 추측하면 structurally-valid silent misrender가 가능하므로, frozen release가 명시한
@@ -376,6 +400,7 @@ pub const Client = struct {
         self.host_manifest_v1 = manifest_capable;
         self.host_exec_upgrade_v1 = payloadHasCapability(ack.payload, "host_exec_upgrade_v1");
         self.runtime_inventory_v1 = inventory_capable;
+        self.admin_one_shot_v1 = payloadHasCapability(ack.payload, "admin_one_shot_v1");
         self.screen_viewport_scrolled_v1 = payloadHasCapability(ack.payload, "screen_viewport_scrolled_v1");
         self.async_scroll_to_bottom_v1 = payloadHasCapability(ack.payload, "async_scroll_to_bottom_v1");
         self.runtime_core_command_v1 = payloadHasCapability(ack.payload, "runtime_core_command_v1");
@@ -1224,6 +1249,24 @@ pub const Client = struct {
         self.invalidateConnection();
     }
 };
+
+test "admin client without one-shot capability closes before sending any request" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fds: [2]c.fd_t = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds));
+    defer _ = c.close(fds[1]);
+    const candidate: Client = .{
+        .allocator = std.testing.allocator,
+        .fd = fds[0],
+        .host_id = 1,
+        .wire_major = protocol.version_major,
+        .parser = framing.FrameParser.init(std.testing.allocator),
+        .admin_one_shot_v1 = false,
+    };
+    try std.testing.expectError(error.IncompatibleVersion, Client.requireAdminCapability(candidate));
+    var byte: [1]u8 = undefined;
+    try std.testing.expectEqual(@as(isize, 0), c.read(fds[1], &byte, byte.len));
+}
 
 fn inputChunkEnd(offset: usize, total: usize) usize {
     std.debug.assert(offset <= total);

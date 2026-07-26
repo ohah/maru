@@ -470,7 +470,12 @@ fn connectFailure(err: client_mod.ClientError) TryConnectResult {
         error.EndpointTransient => .transient,
         error.EndpointDenied => .{ .failed = .endpoint_denied },
         error.IncompatibleVersion => .{ .failed = .incompatible_version },
-        error.HandshakeFailed, error.ConnectionClosed, error.WriteFailed => .{ .failed = .handshake_failed },
+        error.HandshakeFailed,
+        error.AdminBusy,
+        error.Unauthorized,
+        error.ConnectionClosed,
+        error.WriteFailed,
+        => .{ .failed = .handshake_failed },
         error.ProtocolError, error.EventQueueFull => .{ .failed = .protocol_error },
         error.OutOfMemory => .{ .failed = .out_of_memory },
     };

@@ -855,20 +855,32 @@ ssh -t workbox maru attach <runtime-id>
 2. `HUP/INT/QUIT/TERM`을 setup/restore transaction 동안 signal mask로 막고, handler와
    nonblocking+CLOEXEC self-pipe를 설치한 뒤 raw mode를 마지막으로 적용한다. transaction이 끝나기 전에 원래 mask를
    복원하므로 그 사이 도착한 signal은 handler 설치 전 default action이나 handler 제거 뒤 닫힌 pipe와 경합하지 않는다.
-   raw mode는 POSIX `cfmakeraw`와 같은 flag 집합, `VMIN=1`, `VTIME=0`을 사용하며 enter/restore 모두
+   v1 external attach는 네 signal 모두 기존 disposition이 `SIG_DFL`일 때만 시작한다. `SIG_IGN`, custom handler,
+   `SA_SIGINFO`는 sender provenance와 계속 실행 의미를 teardown 뒤 self-signal로 정확히 보존할 수 없으므로
+   `UnsupportedSignalDisposition`으로 mutation 없이 거부한다.
+   raw mode는 macOS libc `cfmakeraw(3)`를 저장본 복사에 적용하며 enter/restore 모두
    `TCSAFLUSH`로 경계 밖의 detach chord나 미처리 입력이 caller shell에 새지 않게 한다. handler는 signal 번호를
    self-pipe에 쓰는 것 외에 allocation·IPC·`tcsetattr`을 하지 않는다.
 3. 정상 detach, local/SSH EOF, protocol 오류, socket read/write 오류, controller revoke와 signal wake는 모두 같은
    idempotent restore 경로로 수렴한다. 이 경로는 저장한 `termios`를 정확히 복원하고 설치했던 handler를 복원한 뒤
-   fd를 닫는다. 복원 실패는 숨기지 않고 attach 실패로 보고하되 runtime/child를 종료하지 않는다.
+   fd를 닫는다. process-unique owner token이 stale struct copy의 두 번째 cleanup을 거부해 fd 재사용 뒤 double-close를
+   막는다. 복원 실패는 숨기지 않고 attach 실패로 보고하되 runtime/child를 종료하지 않는다.
 4. 종료 signal은 일반 event-loop 문맥에서 TTY와 handler를 먼저 복원한 다음 원래 disposition으로 같은 signal을
-   process 자신에게 다시 전달한다. 따라서 caller는 signal 기반 exit status를 그대로 관측한다. `SIGKILL`과 host
+   process 자신에게 다시 전달한다. 복원은 실패 state(termios/개별 handler/pipe)를 잃지 않고 최대 3회 즉시 재시도한다.
+   세 번 모두 실패하면 signal을 전달해 raw TTY를 버리지 않고 typed restore failure로 fail-stop한다. 지원하는 default
+   disposition에서는 caller가 signal 기반 exit status를 그대로 관측한다. `SIGKILL`과 host
    crash 뒤 복원은 OS상 실행할 cleanup 코드가 없으므로 보장 범위가 아니다.
-5. P5c1의 제품 계약은 공개 `maru attach` parser를 열지 않은 hidden deterministic PTY child로 검증한다. 실제
-   `openpty` slave의 초기 canonical+echo 속성과 window size를 부모가 설정하고, child의 raw 전환을 관측한 뒤
-   정상 반환·각 pre-raw 실패·각 post-raw 오류·`HUP/INT/QUIT/TERM`을 주입한다. 부모는 매 경우 원래 termios의
-   byte-for-byte 복원, signal exit status, fd/handler 회수와 runtime 종료 요청 0을 확인한다. pure injected-ops
-   테스트는 단계별 실패 지점마다 mutation 0 또는 exact-once rollback을 고정한다.
+5. P5c1의 제품 계약은 공개 `maru attach` parser를 열지 않은 결정적 테스트 조합으로 검증한다. 실제 `openpty`
+   slave의 초기 canonical+echo 속성과 window size를 설정한 in-process fixture가 raw 전환·정상 exact restore를
+   확인하고, 별도 `openpty` child fixture에 `HUP/INT/QUIT/TERM`을 각각 주입해 부모가 byte-for-byte termios 복원과
+   signal exit status를 확인한다. 정상 detach·EOF·protocol/socket 오류는 pure injected-ops 전수 테스트가 같은
+   idempotent restore 호출과 runtime 종료 요청 0을 확인하며, 단계별 fail-index는 mutation 0 또는 exact-once
+   rollback과 handler/fd 회수를 고정한다. 모든 실제 child wait/read에는 5초 monotonic deadline과 timeout
+   `SIGKILL`+reap cleanup이 있다. 공개 CLI의 실제 detach/EOF/socket E2E는 P5c3 완료 gate다.
+6. handler와 wake fd는 process-global이고 signal mask는 thread-local이므로 v1 `maru attach`는 raw owner의 enter부터
+   restore까지 helper thread를 만들지 않는 standalone single-thread process여야 한다. active owner 중 `fork`된 child는
+   parent PID provenance와 다른 handler invocation을 즉시 fail-close하며 parent self-pipe에는 쓰지 않는다. P5c3 제품
+   fixture가 attach loop의 no-thread/no-fork 구조를 고정한다.
 
 외부 terminal adapter의 resize 계약은 GUI와 같은 `runtime.resize`를 사용하며 위 owner의 TTY fd와 signal wake 경계를
 재사용한다.
@@ -2121,9 +2133,12 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
   구현한다. 원래 termios+최초 `TIOCGWINSZ`를 mutation 전에 확보하고, 정상 detach·EOF·protocol/socket 오류와
   `HUP/INT/QUIT/TERM` wake를 같은 restore 경로로 수렴시킨다. setup/restore는 해당 signal을 잠시 block해
   handler·raw mode·pipe 경계의 race를 닫고 원래 mask를 복원한다. signal handler는 self-pipe write만 하고 일반 문맥이
-  exact termios/handler 복원 뒤 원 signal을 재전달한다. pure fail-index와 실제 `openpty` child harness가
-  mutation 전 실패 0, mutation 뒤 exact-once rollback, byte-for-byte termios 복원, signal exit status,
-  fd/handler 회수와 runtime terminate request 0을 결정적으로 검증해야 구현 완료다. `SIGKILL`/host crash 복원은
+  exact termios/handler 복원을 최대 3회 재시도한 뒤 원 signal을 재전달한다. non-default disposition은 mutation 전
+  typed reject하며 active owner 중 fork child는 PID provenance mismatch로 parent pipe를 깨우지 않는다. pure fail-index와
+  5초 deadline을 가진 실제 in-process/child `openpty` fixture의 조합이 mutation 전 실패 0, mutation 뒤 retryable
+  exact rollback, byte-for-byte termios 복원, default signal exit status,
+  fd/handler 회수와 runtime terminate request 0을 결정적으로 검증해야 구현 완료다. 공개 attach의 실제
+  detach/EOF/socket E2E는 P5c3가 맡는다. `SIGKILL`/host crash 복원은
   실행 가능한 cleanup 문맥이 없으므로 비범위다.
 - **P5c2 — resize**: signal-safe `SIGWINCH` wake, resize coalesce/sequence, takeover 최초 resize,
   `runtime.resized` observer 반영과 controller-only resize ACK/broadcast를 검증한다.

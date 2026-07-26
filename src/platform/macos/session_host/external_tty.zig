@@ -15,6 +15,8 @@ extern "c" fn openpty(
     termp: ?*const posix.termios,
     winp: ?*const posix.winsize,
 ) c_int;
+extern "c" fn cfmakeraw(termios_p: *posix.termios) void;
+extern "c" fn usleep(usec: c_uint) c_int;
 
 pub const Size = struct {
     cols: u16,
@@ -27,10 +29,12 @@ pub const EnterError = error{
     InvalidWindowSize,
     SignalPipeFailed,
     SignalHandlerFailed,
+    UnsupportedSignalDisposition,
     RawModeFailed,
 };
 
 pub const RestoreError = error{RestoreFailed};
+pub const SignalReadError = error{InvalidSignalByte};
 
 pub const ExitReason = enum {
     detach,
@@ -82,7 +86,11 @@ pub const RawTty = struct {
     signals: [termination_signals.len]SignalRecord,
     installed_signals: usize,
     ops: Ops,
-    active: bool,
+    termios_pending: bool,
+    resources_pending: bool,
+    restore_mask_pending: bool,
+    restore_mask: posix.sigset_t,
+    owner_token: u64,
 
     pub fn enter(fd: c.fd_t) EnterError!RawTty {
         return enterWithOps(fd, posix_ops);
@@ -111,10 +119,20 @@ pub const RawTty = struct {
             .signals = undefined,
             .installed_signals = 0,
             .ops = ops,
-            .active = false,
+            .termios_pending = false,
+            .resources_pending = true,
+            .restore_mask_pending = false,
+            .restore_mask = undefined,
+            .owner_token = @atomicRmw(
+                u64,
+                &next_owner_token,
+                .Add,
+                1,
+                .seq_cst,
+            ),
         };
         errdefer {
-            self.restoreSignals();
+            _ = self.restoreSignals();
             self.closeWakePipe();
         }
 
@@ -122,6 +140,10 @@ pub const RawTty = struct {
         // installing handlers prevents an installed handler from ever observing an invalid fd.
         if (@cmpxchgStrong(c.fd_t, &active_signal_write_fd, -1, pipe[1], .seq_cst, .seq_cst) != null)
             return error.SignalHandlerFailed;
+        @atomicStore(c.pid_t, &active_signal_pid, c.getpid(), .seq_cst);
+        @atomicStore(u64, &active_owner_token, self.owner_token, .seq_cst);
+        errdefer @atomicStore(c.pid_t, &active_signal_pid, -1, .seq_cst);
+        errdefer @atomicStore(u64, &active_owner_token, 0, .seq_cst);
         errdefer _ = @cmpxchgStrong(
             c.fd_t,
             &active_signal_write_fd,
@@ -139,6 +161,16 @@ pub const RawTty = struct {
                 signalAction(),
                 &previous,
             ) catch return error.SignalHandlerFailed;
+            if (previous.handler.handler != posix.SIG.DFL) {
+                var ignored: posix.Sigaction = undefined;
+                ops.install_signal(
+                    ops.context,
+                    signal,
+                    previous,
+                    &ignored,
+                ) catch return error.SignalHandlerFailed;
+                return error.UnsupportedSignalDisposition;
+            }
             self.signals[self.installed_signals] = .{
                 .signal = signal,
                 .previous = previous,
@@ -153,10 +185,10 @@ pub const RawTty = struct {
             _ = ops.set_termios(ops.context, fd, original) catch {};
             return error.RawModeFailed;
         };
-        self.active = true;
+        self.termios_pending = true;
         ops.restore_signal_mask(ops.context, previous_mask) catch {
             _ = ops.set_termios(ops.context, fd, original) catch {};
-            self.active = false;
+            self.termios_pending = false;
             return error.SignalHandlerFailed;
         };
         mask_blocked = false;
@@ -165,33 +197,55 @@ pub const RawTty = struct {
 
     /// Restores the borrowed TTY exactly once. All attach exits converge here.
     pub fn restore(self: *RawTty) RestoreError!void {
-        if (!self.active) return;
-        self.active = false;
+        if (!self.termios_pending and !self.resources_pending and !self.restore_mask_pending)
+            return;
+        if (@atomicLoad(u64, &active_owner_token, .seq_cst) != self.owner_token)
+            return error.RestoreFailed;
 
         var failed = false;
-        var previous_mask: posix.sigset_t = undefined;
-        var mask_blocked = true;
-        self.ops.block_signals(self.ops.context, &previous_mask) catch {
-            failed = true;
-            mask_blocked = false;
-        };
-        self.ops.set_termios(self.ops.context, self.fd, self.original) catch {
-            failed = true;
-        };
-        self.restoreSignals();
-        _ = @cmpxchgStrong(
-            c.fd_t,
-            &active_signal_write_fd,
-            self.wake_write_fd,
-            -1,
-            .seq_cst,
-            .seq_cst,
-        );
-        self.closeWakePipe();
-        if (mask_blocked)
-            self.ops.restore_signal_mask(self.ops.context, previous_mask) catch {
+        if (!self.restore_mask_pending) {
+            self.ops.block_signals(self.ops.context, &self.restore_mask) catch {
                 failed = true;
             };
+            if (!failed) self.restore_mask_pending = true;
+        }
+        if (self.termios_pending) {
+            var termios_failed = false;
+            self.ops.set_termios(self.ops.context, self.fd, self.original) catch {
+                failed = true;
+                termios_failed = true;
+            };
+            if (!termios_failed) self.termios_pending = false;
+        }
+        // Keep the signal wake bridge alive while termios is still raw so a retryable restore
+        // failure cannot turn the next termination signal into an unclean raw-TTY exit.
+        if (self.resources_pending and !self.termios_pending) {
+            if (!self.restoreSignals()) {
+                failed = true;
+            } else {
+                _ = @cmpxchgStrong(
+                    c.fd_t,
+                    &active_signal_write_fd,
+                    self.wake_write_fd,
+                    -1,
+                    .seq_cst,
+                    .seq_cst,
+                );
+                @atomicStore(c.pid_t, &active_signal_pid, -1, .seq_cst);
+                self.closeWakePipe();
+                self.resources_pending = false;
+            }
+        }
+        if (self.restore_mask_pending) {
+            var mask_restore_failed = false;
+            self.ops.restore_signal_mask(self.ops.context, self.restore_mask) catch {
+                failed = true;
+                mask_restore_failed = true;
+            };
+            if (!mask_restore_failed) self.restore_mask_pending = false;
+        }
+        if (!self.termios_pending and !self.resources_pending and !self.restore_mask_pending)
+            @atomicStore(u64, &active_owner_token, 0, .seq_cst);
         if (failed) return error.RestoreFailed;
     }
 
@@ -204,11 +258,15 @@ pub const RawTty = struct {
 
     /// Returns one pending termination signal. The handler only writes this byte; restoration is
     /// deliberately performed by the ordinary attach event-loop context.
-    pub fn readSignal(self: *RawTty) ?posix.SIG {
+    pub fn readSignal(self: *RawTty) SignalReadError!?posix.SIG {
         var byte: [1]u8 = undefined;
         while (true) {
             const count = c.read(self.wake_read_fd, &byte, 1);
-            if (count == 1) return @enumFromInt(byte[0]);
+            if (count == 1) {
+                for (termination_signals) |signal|
+                    if (byte[0] == @intFromEnum(signal)) return signal;
+                return error.InvalidSignalByte;
+            }
             if (count == 0) return null;
             return switch (posix.errno(count)) {
                 .INTR => continue,
@@ -220,22 +278,32 @@ pub const RawTty = struct {
 
     /// Restores local state and then preserves the caller-visible signal semantics.
     pub fn restoreAndForward(self: *RawTty, signal: posix.SIG) RestoreError!void {
-        try self.restore();
+        var attempt: usize = 0;
+        while (attempt < 3) : (attempt += 1) {
+            self.restore() catch continue;
+            break;
+        } else return error.RestoreFailed;
         _ = c.kill(c.getpid(), signal);
     }
 
-    fn restoreSignals(self: *RawTty) void {
+    fn restoreSignals(self: *RawTty) bool {
         while (self.installed_signals > 0) {
-            self.installed_signals -= 1;
-            const record = self.signals[self.installed_signals];
+            const index = self.installed_signals - 1;
+            const record = self.signals[index];
             var ignored: posix.Sigaction = undefined;
             self.ops.install_signal(
                 self.ops.context,
                 record.signal,
                 record.previous,
                 &ignored,
-            ) catch {};
+            ) catch {
+                // Stop at the first failed reverse-order record. The failed record and every
+                // lower record remain in their original slots for an alias-free retry.
+                return false;
+            };
+            self.installed_signals = index;
         }
+        return true;
     }
 
     fn closeWakePipe(self: *RawTty) void {
@@ -252,28 +320,17 @@ pub const RawTty = struct {
 
 fn makeRaw(original: posix.termios) posix.termios {
     var raw = original;
-    raw.iflag.IGNBRK = false;
-    raw.iflag.BRKINT = false;
-    raw.iflag.PARMRK = false;
-    raw.iflag.ISTRIP = false;
-    raw.iflag.INLCR = false;
-    raw.iflag.IGNCR = false;
-    raw.iflag.ICRNL = false;
-    raw.iflag.IXON = false;
-    raw.oflag.OPOST = false;
-    raw.lflag.ECHO = false;
-    raw.lflag.ECHONL = false;
-    raw.lflag.ICANON = false;
-    raw.lflag.ISIG = false;
-    raw.lflag.IEXTEN = false;
-    raw.cflag.CSIZE = .CS8;
-    raw.cflag.PARENB = false;
-    raw.cc[@intFromEnum(posix.V.MIN)] = 1;
-    raw.cc[@intFromEnum(posix.V.TIME)] = 0;
+    // Use the target libc's documented terminal policy rather than maintaining a subtly
+    // divergent local flag list. Darwin cfmakeraw intentionally differs from common Linux
+    // summaries (notably IGNBRK/IMAXBEL/CREAD).
+    cfmakeraw(&raw);
     return raw;
 }
 
 var active_signal_write_fd: c.fd_t = -1;
+var active_signal_pid: c.pid_t = -1;
+var next_owner_token: u64 = 1;
+var active_owner_token: u64 = 0;
 
 fn signalAction() posix.Sigaction {
     return .{
@@ -284,10 +341,21 @@ fn signalAction() posix.Sigaction {
 }
 
 fn terminationSignalHandler(signal: posix.SIG) callconv(.c) void {
+    // `fork` duplicates process memory but not the ownership identity. A child must never write
+    // into the parent's inherited self-pipe. P5c3 additionally keeps the attach CLI single-threaded
+    // and fork-free while this process-global handler is installed.
+    if (c.getpid() != @atomicLoad(c.pid_t, &active_signal_pid, .seq_cst))
+        c._exit(@intCast(128 + @intFromEnum(signal)));
     const fd = @atomicLoad(c.fd_t, &active_signal_write_fd, .seq_cst);
     if (fd < 0) return;
     const byte = [1]u8{@intCast(@intFromEnum(signal))};
-    _ = c.write(fd, &byte, byte.len);
+    while (true) {
+        const written = c.write(fd, &byte, byte.len);
+        if (written == byte.len) return;
+        if (written < 0 and posix.errno(written) == .INTR) continue;
+        // EAGAIN means the pipe is already readable, so the event loop is guaranteed a wake.
+        return;
+    }
 }
 
 var posix_context: u8 = 0;
@@ -369,6 +437,7 @@ test "raw mode matches cfmakeraw contract without changing the saved value" {
     original.iflag.IGNCR = true;
     original.iflag.ICRNL = true;
     original.iflag.IXON = true;
+    original.iflag.IMAXBEL = true;
     original.oflag.OPOST = true;
     original.lflag.ECHO = true;
     original.lflag.ECHONL = true;
@@ -376,13 +445,14 @@ test "raw mode matches cfmakeraw contract without changing the saved value" {
     original.lflag.ISIG = true;
     original.lflag.IEXTEN = true;
     original.cflag.PARENB = true;
+    original.cflag.CREAD = false;
     original.cc[@intFromEnum(posix.V.MIN)] = 7;
     original.cc[@intFromEnum(posix.V.TIME)] = 9;
     const saved = original;
 
     const raw = makeRaw(original);
     try std.testing.expectEqualDeep(saved, original);
-    try std.testing.expect(!raw.iflag.IGNBRK);
+    try std.testing.expect(raw.iflag.IGNBRK);
     try std.testing.expect(!raw.iflag.BRKINT);
     try std.testing.expect(!raw.iflag.PARMRK);
     try std.testing.expect(!raw.iflag.ISTRIP);
@@ -390,6 +460,7 @@ test "raw mode matches cfmakeraw contract without changing the saved value" {
     try std.testing.expect(!raw.iflag.IGNCR);
     try std.testing.expect(!raw.iflag.ICRNL);
     try std.testing.expect(!raw.iflag.IXON);
+    try std.testing.expect(!raw.iflag.IMAXBEL);
     try std.testing.expect(!raw.oflag.OPOST);
     try std.testing.expect(!raw.lflag.ECHO);
     try std.testing.expect(!raw.lflag.ECHONL);
@@ -398,6 +469,7 @@ test "raw mode matches cfmakeraw contract without changing the saved value" {
     try std.testing.expect(!raw.lflag.IEXTEN);
     try std.testing.expectEqual(posix.CSIZE.CS8, raw.cflag.CSIZE);
     try std.testing.expect(!raw.cflag.PARENB);
+    try std.testing.expect(raw.cflag.CREAD);
     try std.testing.expectEqual(@as(u8, 1), raw.cc[@intFromEnum(posix.V.MIN)]);
     try std.testing.expectEqual(@as(u8, 0), raw.cc[@intFromEnum(posix.V.TIME)]);
 }
@@ -423,6 +495,17 @@ test "real openpty enters raw mode, reports initial size, and restores exactly" 
     const before = try posix.tcgetattr(slave);
 
     var owner = try RawTty.enter(slave);
+    const wake_read_fd = owner.wake_read_fd;
+    const wake_write_fd = owner.wake_write_fd;
+    const read_status = c.fcntl(wake_read_fd, c.F.GETFL, @as(c_int, 0));
+    const write_status = c.fcntl(wake_write_fd, c.F.GETFL, @as(c_int, 0));
+    const read_descriptor = c.fcntl(wake_read_fd, c.F.GETFD, @as(c_int, 0));
+    const write_descriptor = c.fcntl(wake_write_fd, c.F.GETFD, @as(c_int, 0));
+    const nonblocking: c_int = @bitCast(posix.O{ .NONBLOCK = true });
+    try std.testing.expect(read_status & nonblocking != 0);
+    try std.testing.expect(write_status & nonblocking != 0);
+    try std.testing.expect(read_descriptor & c.FD_CLOEXEC != 0);
+    try std.testing.expect(write_descriptor & c.FD_CLOEXEC != 0);
     try std.testing.expectEqual(Size{ .cols = 113, .rows = 37 }, owner.initial_size);
     const during = try posix.tcgetattr(slave);
     try std.testing.expect(!during.lflag.ECHO);
@@ -432,6 +515,18 @@ test "real openpty enters raw mode, reports initial size, and restores exactly" 
 
     try owner.restore();
     try owner.restore();
+    try std.testing.expectEqual(@as(c_int, -1), c.fcntl(
+        wake_read_fd,
+        c.F.GETFD,
+        @as(c_int, 0),
+    ));
+    try std.testing.expectEqual(posix.E.BADF, posix.errno(-1));
+    try std.testing.expectEqual(@as(c_int, -1), c.fcntl(
+        wake_write_fd,
+        c.F.GETFD,
+        @as(c_int, 0),
+    ));
+    try std.testing.expectEqual(posix.E.BADF, posix.errno(-1));
     const after = try posix.tcgetattr(slave);
     try std.testing.expectEqualSlices(
         u8,
@@ -452,6 +547,9 @@ const FakeOps = struct {
     raw_sets: usize = 0,
     original_sets: usize = 0,
     terminate_requests: usize = 0,
+    block_calls: usize = 0,
+    restore_mask_calls: usize = 0,
+    restored_by_signal: [termination_signals.len]usize = .{0} ** termination_signals.len,
 
     fn ops(self: *FakeOps) Ops {
         return .{
@@ -492,12 +590,15 @@ fn fakeGetWinsize(context: *anyopaque, _: c.fd_t) !posix.winsize {
 
 fn fakeBlockSignals(context: *anyopaque, previous: *posix.sigset_t) !void {
     const self = fake(context);
+    self.block_calls += 1;
     try self.hit();
     previous.* = std.mem.zeroes(posix.sigset_t);
 }
 
 fn fakeRestoreSignalMask(context: *anyopaque, _: posix.sigset_t) !void {
-    try fake(context).hit();
+    const self = fake(context);
+    self.restore_mask_calls += 1;
+    try self.hit();
 }
 
 fn fakeMakePipe(context: *anyopaque) ![2]c.fd_t {
@@ -508,7 +609,7 @@ fn fakeMakePipe(context: *anyopaque) ![2]c.fd_t {
 
 fn fakeInstallSignal(
     context: *anyopaque,
-    _: posix.SIG,
+    signal: posix.SIG,
     action: posix.Sigaction,
     previous: *posix.Sigaction,
 ) !void {
@@ -519,6 +620,9 @@ fn fakeInstallSignal(
         self.installed += 1;
     } else {
         self.restored += 1;
+        for (termination_signals, 0..) |candidate, index| {
+            if (candidate == signal) self.restored_by_signal[index] += 1;
+        }
     }
 }
 
@@ -602,6 +706,22 @@ test "raw TTY enter fail-index has zero mutation or exact rollback" {
     }
 }
 
+test "zero window dimensions fail before signal or terminal mutation" {
+    const original = fakeInitialTermios();
+    var backend: FakeOps = .{
+        .original = original,
+        .current = original,
+        .window = .{ .row = 0, .col = 113, .xpixel = 0, .ypixel = 0 },
+    };
+    try std.testing.expectError(
+        error.InvalidWindowSize,
+        RawTty.enterWithOps(42, backend.ops()),
+    );
+    try std.testing.expectEqual(@as(usize, 2), backend.call_index);
+    try std.testing.expectEqual(@as(usize, 0), backend.raw_sets);
+    try std.testing.expectEqual(@as(usize, 0), backend.close_count);
+}
+
 test "every non-signal exit reason uses one idempotent restore and never terminates runtime" {
     for (std.enums.values(ExitReason)) |reason| {
         const original = fakeInitialTermios();
@@ -617,14 +737,22 @@ test "every non-signal exit reason uses one idempotent restore and never termina
     }
 }
 
-test "restore failure is reported after signal handlers and pipe are still reclaimed" {
+test "termios restore failure keeps signal resources and retries to exact cleanup" {
     const original = fakeInitialTermios();
     var backend: FakeOps = .{ .original = original, .current = original };
     var owner = try RawTty.enterWithOps(42, backend.ops());
-    backend.fail_at = backend.call_index;
+    // restore: block mask, then original termios.
+    backend.fail_at = backend.call_index + 1;
 
     try std.testing.expectError(error.RestoreFailed, owner.finish(.socket_read_error));
+    try std.testing.expectEqual(@as(usize, 0), backend.close_count);
+    try std.testing.expectEqual(@as(c.fd_t, 101), @atomicLoad(
+        c.fd_t,
+        &active_signal_write_fd,
+        .seq_cst,
+    ));
     try owner.finish(.socket_read_error);
+    try std.testing.expectEqual(@as(usize, 3), backend.block_calls);
     try std.testing.expectEqual(@as(usize, 2), backend.close_count);
     try std.testing.expectEqual(backend.installed, backend.restored);
     try std.testing.expectEqual(@as(usize, 0), backend.terminate_requests);
@@ -635,14 +763,60 @@ test "restore failure is reported after signal handlers and pipe are still recla
     ));
 }
 
-fn waitChild(pid: c.pid_t) !u32 {
+test "signal mask restore failure remains retryable after other resources close" {
+    const original = fakeInitialTermios();
+    var backend: FakeOps = .{ .original = original, .current = original };
+    var owner = try RawTty.enterWithOps(42, backend.ops());
+    // restore: block, termios, four handlers, then original mask.
+    backend.fail_at = backend.call_index + 6;
+
+    try std.testing.expectError(error.RestoreFailed, owner.finish(.detach));
+    try std.testing.expect(owner.restore_mask_pending);
+    try std.testing.expectEqual(@as(usize, 2), backend.close_count);
+    try owner.finish(.detach);
+    try std.testing.expect(!owner.restore_mask_pending);
+}
+
+test "signal handler restore failure retries every signal identity exactly once" {
+    const original = fakeInitialTermios();
+    var backend: FakeOps = .{ .original = original, .current = original };
+    var owner = try RawTty.enterWithOps(42, backend.ops());
+    // restore: block mask, termios, then the first reverse-order handler.
+    backend.fail_at = backend.call_index + 2;
+
+    try std.testing.expectError(error.RestoreFailed, owner.finish(.protocol_error));
+    try std.testing.expectEqual(@as(usize, 0), backend.restored);
+    try std.testing.expectEqual(@as(usize, 0), backend.close_count);
+    try std.testing.expectEqual(@as(c.fd_t, 101), @atomicLoad(
+        c.fd_t,
+        &active_signal_write_fd,
+        .seq_cst,
+    ));
+    // The failed handler remains retryable; the second call restores it before closing the pipe.
+    try owner.finish(.protocol_error);
+    try std.testing.expectEqual(@as(usize, 3), backend.block_calls);
+    try std.testing.expectEqual(@as(usize, termination_signals.len), backend.restored);
+    for (backend.restored_by_signal) |count|
+        try std.testing.expectEqual(@as(usize, 1), count);
+    try std.testing.expectEqual(@as(usize, 2), backend.close_count);
+}
+
+fn waitChildDeadline(pid: c.pid_t, timeout_ms: i64) !u32 {
     var status: c_int = 0;
-    while (true) {
-        const result = c.waitpid(pid, &status, 0);
+    const started = std.Io.Timestamp.now(std.testing.io, .awake);
+    while (started.untilNow(std.testing.io, .awake).toMilliseconds() < timeout_ms) {
+        const result = c.waitpid(pid, &status, c.W.NOHANG);
         if (result == pid) return @bitCast(status);
         if (result < 0 and posix.errno(result) == .INTR) continue;
-        return error.TestUnexpectedResult;
+        if (result < 0) return error.TestUnexpectedResult;
+        _ = usleep(10_000);
     }
+    return error.TestTimedOut;
+}
+
+fn killAndReap(pid: c.pid_t) void {
+    _ = c.kill(pid, posix.SIG.KILL);
+    _ = waitChildDeadline(pid, 5_000) catch {};
 }
 
 fn runSignalRestoreCase(signal: posix.SIG) !void {
@@ -663,6 +837,8 @@ fn runSignalRestoreCase(signal: posix.SIG) !void {
 
     const pid = c.fork();
     if (pid < 0) return error.TestUnexpectedResult;
+    var child_reaped = false;
+    errdefer if (!child_reaped) killAndReap(pid);
     if (pid == 0) {
         _ = c.close(master);
         _ = c.close(ready[0]);
@@ -676,7 +852,7 @@ fn runSignalRestoreCase(signal: posix.SIG) !void {
         }};
         while (true) {
             _ = posix.poll(&poll_fds, -1) catch c._exit(122);
-            if (owner.readSignal()) |received| {
+            if (owner.readSignal() catch c._exit(126)) |received| {
                 owner.restoreAndForward(received) catch c._exit(123);
                 c._exit(124);
             }
@@ -686,12 +862,18 @@ fn runSignalRestoreCase(signal: posix.SIG) !void {
     _ = c.close(ready[1]);
     ready[1] = -1;
     var marker: [1]u8 = undefined;
+    var ready_poll = [_]posix.pollfd{.{
+        .fd = ready[0],
+        .events = posix.POLL.IN,
+        .revents = 0,
+    }};
+    const ready_count = try posix.poll(&ready_poll, 5_000);
+    if (ready_count != 1 or ready_poll[0].revents & (posix.POLL.IN | posix.POLL.HUP) == 0)
+        return error.TestTimedOut;
     while (true) {
         const count = c.read(ready[0], &marker, marker.len);
         if (count == 1) break;
         if (count < 0 and posix.errno(count) == .INTR) continue;
-        _ = c.kill(pid, posix.SIG.KILL);
-        _ = waitChild(pid) catch {};
         return error.TestUnexpectedResult;
     }
     const during = try posix.tcgetattr(slave);
@@ -699,7 +881,8 @@ fn runSignalRestoreCase(signal: posix.SIG) !void {
     try std.testing.expect(!during.lflag.ICANON);
 
     if (c.kill(pid, signal) != 0) return error.TestUnexpectedResult;
-    const status = try waitChild(pid);
+    const status = try waitChildDeadline(pid, 5_000);
+    child_reaped = true;
     try std.testing.expect(c.W.IFSIGNALED(status));
     try std.testing.expectEqual(signal, c.W.TERMSIG(status));
     const after = try posix.tcgetattr(slave);
@@ -712,4 +895,124 @@ fn runSignalRestoreCase(signal: posix.SIG) !void {
 
 test "real PTY restores before reraising every supported termination signal" {
     for (termination_signals) |signal| try runSignalRestoreCase(signal);
+}
+
+test "invalid self-pipe byte is rejected without constructing an arbitrary signal" {
+    const initial = fakeInitialTermios();
+    const window: posix.winsize = .{ .row = 37, .col = 113, .xpixel = 0, .ypixel = 0 };
+    var master: c.fd_t = -1;
+    var slave: c.fd_t = -1;
+    try std.testing.expectEqual(@as(c_int, 0), openpty(&master, &slave, null, &initial, &window));
+    defer _ = c.close(master);
+    defer _ = c.close(slave);
+    var owner = try RawTty.enter(slave);
+    defer owner.restore() catch {};
+    const invalid = [1]u8{255};
+    try std.testing.expectEqual(@as(isize, 1), c.write(
+        owner.wake_write_fd,
+        &invalid,
+        invalid.len,
+    ));
+    try std.testing.expectError(error.InvalidSignalByte, owner.readSignal());
+}
+
+fn signalActionsEqual(a: posix.Sigaction, b: posix.Sigaction) bool {
+    return a.handler.handler == b.handler.handler and
+        a.flags == b.flags and
+        std.mem.eql(u8, std.mem.asBytes(&a.mask), std.mem.asBytes(&b.mask));
+}
+
+fn expectUnsupportedDisposition(action: posix.Sigaction) !void {
+    var previous: posix.Sigaction = undefined;
+    posix.sigaction(.HUP, &action, &previous);
+    defer posix.sigaction(.HUP, &previous, null);
+
+    const initial = fakeInitialTermios();
+    const window: posix.winsize = .{ .row = 37, .col = 113, .xpixel = 0, .ypixel = 0 };
+    var master: c.fd_t = -1;
+    var slave: c.fd_t = -1;
+    try std.testing.expectEqual(@as(c_int, 0), openpty(&master, &slave, null, &initial, &window));
+    defer _ = c.close(master);
+    defer _ = c.close(slave);
+    const before = try posix.tcgetattr(slave);
+
+    try std.testing.expectError(
+        error.UnsupportedSignalDisposition,
+        RawTty.enter(slave),
+    );
+    var after_action: posix.Sigaction = undefined;
+    posix.sigaction(.HUP, null, &after_action);
+    try std.testing.expect(signalActionsEqual(action, after_action));
+    const after = try posix.tcgetattr(slave);
+    try std.testing.expectEqualSlices(
+        u8,
+        std.mem.asBytes(&before),
+        std.mem.asBytes(&after),
+    );
+}
+
+fn customSignalHandler(_: posix.SIG) callconv(.c) void {}
+
+test "ignored and custom termination dispositions are rejected without mutation" {
+    const ignored: posix.Sigaction = .{
+        .handler = .{ .handler = posix.SIG.IGN },
+        .mask = posix.sigemptyset(),
+        .flags = 0,
+    };
+    try expectUnsupportedDisposition(ignored);
+
+    var custom_mask = posix.sigemptyset();
+    posix.sigaddset(&custom_mask, .INT);
+    const custom: posix.Sigaction = .{
+        .handler = .{ .handler = customSignalHandler },
+        .mask = custom_mask,
+        .flags = posix.SA.RESTART,
+    };
+    try expectUnsupportedDisposition(custom);
+}
+
+test "forked child cannot signal the parent raw TTY self-pipe" {
+    const initial = fakeInitialTermios();
+    const window: posix.winsize = .{ .row = 37, .col = 113, .xpixel = 0, .ypixel = 0 };
+    var master: c.fd_t = -1;
+    var slave: c.fd_t = -1;
+    try std.testing.expectEqual(@as(c_int, 0), openpty(&master, &slave, null, &initial, &window));
+    defer _ = c.close(master);
+    defer _ = c.close(slave);
+    var owner = try RawTty.enter(slave);
+    defer owner.restore() catch {};
+
+    const pid = c.fork();
+    if (pid < 0) return error.TestUnexpectedResult;
+    if (pid == 0) {
+        _ = c.kill(c.getpid(), posix.SIG.TERM);
+        c._exit(124);
+    }
+    var child_reaped = false;
+    errdefer if (!child_reaped) killAndReap(pid);
+    const status = try waitChildDeadline(pid, 5_000);
+    child_reaped = true;
+    try std.testing.expect(c.W.IFEXITED(status));
+    try std.testing.expectEqual(@as(u8, 143), c.W.EXITSTATUS(status));
+
+    var poll_fds = [_]posix.pollfd{.{
+        .fd = owner.wake_read_fd,
+        .events = posix.POLL.IN,
+        .revents = 0,
+    }};
+    try std.testing.expectEqual(@as(usize, 0), try posix.poll(&poll_fds, 0));
+}
+
+test "stale copied owner cannot repeat cleanup after the lexical owner finishes" {
+    const initial = fakeInitialTermios();
+    const window: posix.winsize = .{ .row = 37, .col = 113, .xpixel = 0, .ypixel = 0 };
+    var master: c.fd_t = -1;
+    var slave: c.fd_t = -1;
+    try std.testing.expectEqual(@as(c_int, 0), openpty(&master, &slave, null, &initial, &window));
+    defer _ = c.close(master);
+    defer _ = c.close(slave);
+    var owner = try RawTty.enter(slave);
+    var stale_copy = owner;
+    try owner.restore();
+    try std.testing.expectError(error.RestoreFailed, stale_copy.restore());
 }

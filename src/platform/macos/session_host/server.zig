@@ -36,7 +36,24 @@ pub const HostStatus = struct {
 };
 
 /// hello가 밝히는 client 종류. GUI window인지 CLI(`maru attach`)인지 — 권한/표시에 쓴다(§9).
-pub const ClientKind = enum { gui, cli, unknown };
+pub const ClientKind = enum { gui, cli, admin, unknown };
+
+/// Single-owner daemon lease for the hidden one-shot admin traffic class. This is a quota, not an
+/// authentication identity; peer credentials remain the security boundary.
+pub const AdminAdmission = struct {
+    active: bool = false,
+
+    pub fn acquire(self: *AdminAdmission) bool {
+        if (self.active) return false;
+        self.active = true;
+        return true;
+    }
+
+    pub fn release(self: *AdminAdmission) void {
+        std.debug.assert(self.active);
+        self.active = false;
+    }
+};
 
 /// `runtime.spawn`의 중립 파라미터(server가 JSON에서 파싱해 넘긴다). host가 이 argv/크기로 실 PTY를 띄운다.
 pub const RuntimeSpawnParams = struct {
@@ -338,6 +355,8 @@ pub const Connection = struct {
     state: State = .pre_hello,
     selected_version: u16 = 0,
     client_kind: ClientKind = .unknown,
+    admin_admission: ?*AdminAdmission = null,
+    admin_lease_held: bool = false,
     /// MRSH v2에 후속 비동기 event를 무조건 밀면 같은 major의 구 client가 protocol error로 종료한다. hello에서
     /// 명시적으로 협상한 client에게만 runtime metadata attach/event/RPC를 노출한다.
     runtime_metadata_v1: bool = false,
@@ -403,6 +422,7 @@ pub const Connection = struct {
         if (self.subscription_identity) |identity|
             _ = identity.table.revokeConnection(identity.connection);
         self.attachments.deinit(self.allocator);
+        if (self.admin_lease_held) self.admin_admission.?.release();
         self.* = undefined;
     }
 
@@ -428,6 +448,10 @@ pub const Connection = struct {
 
     pub fn attachmentCount(self: *const Connection) usize {
         return self.attachments.count();
+    }
+
+    pub fn isAdmin(self: *const Connection) bool {
+        return self.client_kind == .admin and self.admin_lease_held;
     }
 
     pub fn hasLocalStream(
@@ -556,6 +580,24 @@ pub const Connection = struct {
             return .{ .reply_and_close = wire };
         }
 
+        if (self.client_kind == .admin) {
+            const admission = self.admin_admission orelse {
+                const body = try self.errorJson(.unauthorized);
+                defer self.allocator.free(body);
+                const wire = try self.encodeSmall(.hello_ack, frame.header.request_id, 0, body);
+                self.state = .closed;
+                return .{ .reply_and_close = wire };
+            };
+            if (!admission.acquire()) {
+                const body = try self.errorJson(.resource_exhausted);
+                defer self.allocator.free(body);
+                const wire = try self.encodeSmall(.hello_ack, frame.header.request_id, 0, body);
+                self.state = .closed;
+                return .{ .reply_and_close = wire };
+            }
+            self.admin_lease_held = true;
+        }
+
         self.selected_version = protocol.version_major;
         self.state = .ready;
         const ack = try self.helloAckJson();
@@ -569,6 +611,7 @@ pub const Connection = struct {
             self.state = .closed;
             return .close;
         }
+        if (self.client_kind == .admin) return self.handleAdminReady(frame);
         switch (frame.header.kind) {
             .ping => {
                 // diagnostic nonce를 그대로 되돌린다(payload passthrough). ping·pong cap이 같아 재초과 없음.
@@ -593,6 +636,42 @@ pub const Connection = struct {
         }
     }
 
+    fn handleAdminReady(self: *Connection, frame: framing.Frame) HandleError!Action {
+        if (frame.header.kind != .request)
+            return self.adminErrorAndClose(frame.header.request_id, .unauthorized);
+        var parsed = std.json.parseFromSlice(std.json.Value, self.allocator, frame.payload, .{}) catch
+            return self.adminErrorAndClose(frame.header.request_id, .invalid_request);
+        defer parsed.deinit();
+        const obj = switch (parsed.value) {
+            .object => |o| o,
+            else => return self.adminErrorAndClose(frame.header.request_id, .invalid_request),
+        };
+        const method_text = strField(obj, "method") orelse
+            return self.adminErrorAndClose(frame.header.request_id, .invalid_request);
+        const method = parseRequestMethod(method_text) orelse
+            return self.adminErrorAndClose(frame.header.request_id, .invalid_request);
+        const params: ?std.json.ObjectMap = switch (obj.get("params") orelse std.json.Value.null) {
+            .object => |o| o,
+            else => null,
+        };
+        const action = switch (requestPolicy(method)) {
+            .admin_read => try self.dispatchParsedRequest(frame, method, params),
+            .privileged => return self.adminErrorAndClose(frame.header.request_id, .unauthorized),
+        };
+        self.state = .closed;
+        return .{ .reply_and_close = action.reply };
+    }
+
+    fn adminErrorAndClose(
+        self: *Connection,
+        request_id: u64,
+        code: protocol.ErrorCode,
+    ) HandleError!Action {
+        const action = try self.replyError(request_id, code);
+        self.state = .closed;
+        return .{ .reply_and_close = action.reply };
+    }
+
     fn dispatchRequest(self: *Connection, frame: framing.Frame) HandleError!Action {
         var parsed = std.json.parseFromSlice(std.json.Value, self.allocator, frame.payload, .{}) catch {
             return self.replyError(frame.header.request_id, .invalid_request);
@@ -602,68 +681,64 @@ pub const Connection = struct {
             .object => |o| o,
             else => return self.replyError(frame.header.request_id, .invalid_request),
         };
-        const method = strField(obj, "method") orelse return self.replyError(frame.header.request_id, .invalid_request);
+        const method_text = strField(obj, "method") orelse return self.replyError(frame.header.request_id, .invalid_request);
+        const method = parseRequestMethod(method_text) orelse
+            return self.replyError(frame.header.request_id, .invalid_request);
         const params: ?std.json.ObjectMap = switch (obj.get("params") orelse std.json.Value.null) {
             .object => |o| o,
             else => null,
         };
 
-        if (std.mem.eql(u8, method, "host.info")) {
-            const body = try self.hostInfoJson();
-            defer self.allocator.free(body);
-            return self.replyResult(frame.header.request_id, body);
-        } else if (std.mem.eql(u8, method, "host.upgrade.prepare")) {
-            return self.dispatchUpgradePrepare(frame.header.request_id, params);
-        } else if (std.mem.eql(u8, method, "host.upgrade.status")) {
-            return self.dispatchUpgradeStatus(frame.header.request_id, params);
-        } else if (std.mem.eql(u8, method, "runtime.list")) {
-            const body = try self.runtimeListJson();
-            defer self.allocator.free(body);
-            return self.replyResult(frame.header.request_id, body);
-        } else if (std.mem.eql(u8, method, "runtime.inventory")) {
-            return self.dispatchRuntimeInventory(frame.header.request_id, frame.payload);
-        } else if (std.mem.eql(u8, method, "runtime.get")) {
-            const id_hex = if (params) |p| strField(p, "runtime_id") else null;
-            const id = if (id_hex) |h| parseHex128(h) else null;
-            if (id == null) return self.replyError(frame.header.request_id, .invalid_request);
-            const entry = self.registry.get(id.?) orelse return self.replyError(frame.header.request_id, .runtime_not_found);
-            const body = try self.runtimeMetaJson(entry);
-            defer self.allocator.free(body);
-            return self.replyResult(frame.header.request_id, body);
-        } else if (std.mem.eql(u8, method, "runtime.spawn")) {
-            return self.dispatchSpawn(frame.header.request_id, params, false);
-        } else if (std.mem.eql(u8, method, "runtime.spawn_full")) {
-            return self.dispatchSpawn(frame.header.request_id, params, true);
-        } else if (std.mem.eql(u8, method, "runtime.terminate")) {
-            return self.dispatchTerminate(frame.header.request_id, params);
-        } else if (std.mem.eql(u8, method, "runtime.attach")) {
-            return self.dispatchAttach(frame.header.request_id, params);
-        } else if (std.mem.eql(u8, method, "runtime.detach")) {
-            return self.dispatchDetach(frame.header.request_id, params);
-        } else if (std.mem.eql(u8, method, "runtime.resync")) {
-            return self.dispatchResync(frame.header.request_id, params);
-        } else if (std.mem.eql(u8, method, "runtime.observation")) {
-            return self.dispatchObservation(frame.header.request_id, params);
-        } else if (std.mem.eql(u8, method, "runtime.core_command")) {
-            return self.dispatchCoreCommand(frame.header.request_id, params);
-        } else if (std.mem.eql(u8, method, "runtime.report_mouse")) {
-            return self.dispatchReportMouse(frame.header.request_id, params);
-        } else if (std.mem.eql(u8, method, "runtime.selected_text")) {
-            return self.dispatchSelectedText(frame.header.request_id, params);
-        } else if (std.mem.eql(u8, method, "runtime.clipboard_write")) {
-            return self.dispatchClipboardWrite(frame.header.request_id, params);
-        } else if (std.mem.eql(u8, method, "runtime.link_at")) {
-            return self.dispatchLinkAt(frame.header.request_id, params);
-        } else if (std.mem.eql(u8, method, "runtime.select_op")) {
-            return self.dispatchSelectOp(frame.header.request_id, params);
-        } else if (std.mem.eql(u8, method, "runtime.find")) {
-            return self.dispatchFind(frame.header.request_id, params);
-        } else if (std.mem.eql(u8, method, "runtime.resize")) {
-            return self.dispatchResize(frame.header.request_id, params);
-        } else if (std.mem.eql(u8, method, "runtime.notification")) {
-            return self.dispatchNotification(frame.header.request_id, params);
-        }
-        return self.replyError(frame.header.request_id, .invalid_request);
+        return self.dispatchParsedRequest(frame, method, params);
+    }
+
+    fn dispatchParsedRequest(
+        self: *Connection,
+        frame: framing.Frame,
+        method: RequestMethod,
+        params: ?std.json.ObjectMap,
+    ) HandleError!Action {
+        return switch (method) {
+            .host_info => blk: {
+                const body = try self.hostInfoJson();
+                defer self.allocator.free(body);
+                break :blk self.replyResult(frame.header.request_id, body);
+            },
+            .host_upgrade_prepare => self.dispatchUpgradePrepare(frame.header.request_id, params),
+            .host_upgrade_status => self.dispatchUpgradeStatus(frame.header.request_id, params),
+            .runtime_list => blk: {
+                const body = try self.runtimeListJson();
+                defer self.allocator.free(body);
+                break :blk self.replyResult(frame.header.request_id, body);
+            },
+            .runtime_inventory => self.dispatchRuntimeInventory(frame.header.request_id, frame.payload),
+            .runtime_get => blk: {
+                const id_hex = if (params) |p| strField(p, "runtime_id") else null;
+                const id = if (id_hex) |h| parseHex128(h) else null;
+                if (id == null) break :blk self.replyError(frame.header.request_id, .invalid_request);
+                const entry = self.registry.get(id.?) orelse
+                    break :blk self.replyError(frame.header.request_id, .runtime_not_found);
+                const body = try self.runtimeMetaJson(entry);
+                defer self.allocator.free(body);
+                break :blk self.replyResult(frame.header.request_id, body);
+            },
+            .runtime_spawn => self.dispatchSpawn(frame.header.request_id, params, false),
+            .runtime_spawn_full => self.dispatchSpawn(frame.header.request_id, params, true),
+            .runtime_terminate => self.dispatchTerminate(frame.header.request_id, params),
+            .runtime_attach => self.dispatchAttach(frame.header.request_id, params),
+            .runtime_detach => self.dispatchDetach(frame.header.request_id, params),
+            .runtime_resync => self.dispatchResync(frame.header.request_id, params),
+            .runtime_observation => self.dispatchObservation(frame.header.request_id, params),
+            .runtime_core_command => self.dispatchCoreCommand(frame.header.request_id, params),
+            .runtime_report_mouse => self.dispatchReportMouse(frame.header.request_id, params),
+            .runtime_selected_text => self.dispatchSelectedText(frame.header.request_id, params),
+            .runtime_clipboard_write => self.dispatchClipboardWrite(frame.header.request_id, params),
+            .runtime_link_at => self.dispatchLinkAt(frame.header.request_id, params),
+            .runtime_select_op => self.dispatchSelectOp(frame.header.request_id, params),
+            .runtime_find => self.dispatchFind(frame.header.request_id, params),
+            .runtime_resize => self.dispatchResize(frame.header.request_id, params),
+            .runtime_notification => self.dispatchNotification(frame.header.request_id, params),
+        };
     }
 
     fn dispatchRuntimeInventory(
@@ -1699,7 +1774,7 @@ pub const Connection = struct {
             return self.stringify(.{
                 .version = self.selected_version,
                 .host_id = host_hex,
-                .capabilities = [_][]const u8{ "host.info", "runtime.list", "runtime.get", "runtime_metadata_v1", "runtime_ended_v1", "screen_stream_v2_current_body", "screen_viewport_scrolled_v1", "async_scroll_to_bottom_v1", "runtime_core_command_v1", "runtime_selected_text_v1", "runtime_link_at_v1", "runtime_clipboard_v1" },
+                .capabilities = [_][]const u8{ "host.info", "runtime.list", "runtime.get", "admin_one_shot_v1", "runtime_metadata_v1", "runtime_ended_v1", "screen_stream_v2_current_body", "screen_viewport_scrolled_v1", "async_scroll_to_bottom_v1", "runtime_core_command_v1", "runtime_selected_text_v1", "runtime_link_at_v1", "runtime_clipboard_v1" },
             });
         }
         if (self.host_status.upgrade_capable) {
@@ -1712,7 +1787,7 @@ pub const Connection = struct {
                 .upgrade_epoch = self.host_status.upgrade_epoch,
                 .lifecycle = @tagName(self.host_status.lifecycle),
                 .authority_generation = self.host_status.authority_generation,
-                .capabilities = [_][]const u8{ "host.info", "runtime.list", "runtime.get", "runtime_inventory_v1", "host_manifest_v1", "host_exec_upgrade_v1", "runtime_metadata_v1", "runtime_ended_v1", "screen_stream_v2_current_body", "screen_viewport_scrolled_v1", "async_scroll_to_bottom_v1", "runtime_core_command_v1", "runtime_selected_text_v1", "runtime_link_at_v1", "runtime_clipboard_v1" },
+                .capabilities = [_][]const u8{ "host.info", "runtime.list", "runtime.get", "runtime_inventory_v1", "host_manifest_v1", "host_exec_upgrade_v1", "admin_one_shot_v1", "runtime_metadata_v1", "runtime_ended_v1", "screen_stream_v2_current_body", "screen_viewport_scrolled_v1", "async_scroll_to_bottom_v1", "runtime_core_command_v1", "runtime_selected_text_v1", "runtime_link_at_v1", "runtime_clipboard_v1" },
             });
         }
         return self.stringify(.{
@@ -1724,7 +1799,7 @@ pub const Connection = struct {
             .upgrade_epoch = self.host_status.upgrade_epoch,
             .lifecycle = @tagName(self.host_status.lifecycle),
             .authority_generation = self.host_status.authority_generation,
-            .capabilities = [_][]const u8{ "host.info", "runtime.list", "runtime.get", "runtime_inventory_v1", "host_manifest_v1", "runtime_metadata_v1", "runtime_ended_v1", "screen_stream_v2_current_body", "screen_viewport_scrolled_v1", "async_scroll_to_bottom_v1", "runtime_core_command_v1", "runtime_selected_text_v1", "runtime_link_at_v1", "runtime_clipboard_v1" },
+            .capabilities = [_][]const u8{ "host.info", "runtime.list", "runtime.get", "runtime_inventory_v1", "host_manifest_v1", "admin_one_shot_v1", "runtime_metadata_v1", "runtime_ended_v1", "screen_stream_v2_current_body", "screen_viewport_scrolled_v1", "async_scroll_to_bottom_v1", "runtime_core_command_v1", "runtime_selected_text_v1", "runtime_link_at_v1", "runtime_clipboard_v1" },
         });
     }
 
@@ -1982,7 +2057,93 @@ fn parseClientKind(s: ?[]const u8) ClientKind {
     const v = s orelse return .unknown;
     if (std.mem.eql(u8, v, "gui")) return .gui;
     if (std.mem.eql(u8, v, "cli")) return .cli;
+    if (std.mem.eql(u8, v, "admin")) return .admin;
     return .unknown;
+}
+
+const RequestMethod = enum {
+    host_info,
+    host_upgrade_prepare,
+    host_upgrade_status,
+    runtime_list,
+    runtime_inventory,
+    runtime_get,
+    runtime_spawn,
+    runtime_spawn_full,
+    runtime_terminate,
+    runtime_attach,
+    runtime_detach,
+    runtime_resync,
+    runtime_observation,
+    runtime_core_command,
+    runtime_report_mouse,
+    runtime_selected_text,
+    runtime_clipboard_write,
+    runtime_link_at,
+    runtime_select_op,
+    runtime_find,
+    runtime_resize,
+    runtime_notification,
+
+    fn wireName(self: RequestMethod) []const u8 {
+        return switch (self) {
+            .host_info => "host.info",
+            .host_upgrade_prepare => "host.upgrade.prepare",
+            .host_upgrade_status => "host.upgrade.status",
+            .runtime_list => "runtime.list",
+            .runtime_inventory => "runtime.inventory",
+            .runtime_get => "runtime.get",
+            .runtime_spawn => "runtime.spawn",
+            .runtime_spawn_full => "runtime.spawn_full",
+            .runtime_terminate => "runtime.terminate",
+            .runtime_attach => "runtime.attach",
+            .runtime_detach => "runtime.detach",
+            .runtime_resync => "runtime.resync",
+            .runtime_observation => "runtime.observation",
+            .runtime_core_command => "runtime.core_command",
+            .runtime_report_mouse => "runtime.report_mouse",
+            .runtime_selected_text => "runtime.selected_text",
+            .runtime_clipboard_write => "runtime.clipboard_write",
+            .runtime_link_at => "runtime.link_at",
+            .runtime_select_op => "runtime.select_op",
+            .runtime_find => "runtime.find",
+            .runtime_resize => "runtime.resize",
+            .runtime_notification => "runtime.notification",
+        };
+    }
+};
+
+fn parseRequestMethod(text: []const u8) ?RequestMethod {
+    inline for (std.enums.values(RequestMethod)) |method|
+        if (std.mem.eql(u8, text, method.wireName())) return method;
+    return null;
+}
+
+const RequestPolicy = enum { admin_read, privileged };
+
+fn requestPolicy(method: RequestMethod) RequestPolicy {
+    return switch (method) {
+        .host_info, .runtime_list, .runtime_inventory, .runtime_get => .admin_read,
+        .host_upgrade_prepare,
+        .host_upgrade_status,
+        .runtime_spawn,
+        .runtime_spawn_full,
+        .runtime_terminate,
+        .runtime_attach,
+        .runtime_detach,
+        .runtime_resync,
+        .runtime_observation,
+        .runtime_core_command,
+        .runtime_report_mouse,
+        .runtime_selected_text,
+        .runtime_clipboard_write,
+        .runtime_link_at,
+        .runtime_select_op,
+        .runtime_find,
+        .runtime_resize,
+        .runtime_notification,
+        => .privileged,
+    };
 }
 
 /// 32자 이하 lowercase hex → u128. 길이/문자가 어긋나면 null(invalid_request). runtime_id·host_id wire 파싱.
@@ -2484,6 +2645,148 @@ test "server: unknown method returns invalid_request; a request before hello clo
     const r = try feedJson(&conn, .request, 2, "{\"method\":\"no.such.method\"}");
     defer if (r.frame) |f| f.deinit(testing.allocator);
     try testing.expect(std.mem.indexOf(u8, r.frame.?.payload, "invalid_request") != null);
+}
+
+test "server: admin lease is exact one and releases only on canonical deinit" {
+    var registry = reg.TerminalRuntimeRegistry.init(testing.allocator);
+    defer registry.deinit();
+    var admission: AdminAdmission = .{};
+    var first = Connection.init(testing.allocator, 0xAA, &registry);
+    first.admin_admission = &admission;
+    var first_live = true;
+    defer if (first_live) first.deinit();
+
+    const hello = try feedJson(
+        &first,
+        .hello,
+        1,
+        "{\"protocol_min\":2,\"protocol_max\":2,\"client_kind\":\"admin\"}",
+    );
+    defer if (hello.frame) |f| f.deinit(testing.allocator);
+    try testing.expectEqualStrings("reply", hello.action);
+    try testing.expect(std.mem.indexOf(u8, hello.frame.?.payload, "admin_one_shot_v1") != null);
+    try testing.expect(admission.active);
+
+    var second = Connection.init(testing.allocator, 0xAA, &registry);
+    second.admin_admission = &admission;
+    defer second.deinit();
+    const denied = try feedJson(
+        &second,
+        .hello,
+        2,
+        "{\"protocol_min\":2,\"protocol_max\":2,\"client_kind\":\"admin\"}",
+    );
+    defer if (denied.frame) |f| f.deinit(testing.allocator);
+    try testing.expectEqualStrings("reply_and_close", denied.action);
+    try testing.expect(std.mem.indexOf(u8, denied.frame.?.payload, "resource_exhausted") != null);
+    try testing.expect(admission.active);
+
+    const info = try feedJson(&first, .request, 3, "{\"method\":\"host.info\",\"params\":{}}");
+    defer if (info.frame) |f| f.deinit(testing.allocator);
+    try testing.expectEqualStrings("reply_and_close", info.action);
+    try testing.expect(admission.active);
+    first.deinit();
+    first_live = false;
+    try testing.expect(!admission.active);
+
+    var third = Connection.init(testing.allocator, 0xAA, &registry);
+    third.admin_admission = &admission;
+    var third_live = true;
+    defer if (third_live) third.deinit();
+    const reacquired = try feedJson(
+        &third,
+        .hello,
+        4,
+        "{\"protocol_min\":2,\"protocol_max\":2,\"client_kind\":\"admin\"}",
+    );
+    defer if (reacquired.frame) |f| f.deinit(testing.allocator);
+    try testing.expectEqualStrings("reply", reacquired.action);
+    try testing.expect(admission.active);
+    third.deinit();
+    third_live = false;
+    try testing.expect(!admission.active);
+}
+
+test "server: admin is one-shot read-only and rejects malformed or privileged requests" {
+    var registry = reg.TerminalRuntimeRegistry.init(testing.allocator);
+    defer registry.deinit();
+    const cases = [_]struct {
+        payload: []const u8,
+        code: []const u8,
+    }{
+        .{ .payload = "{\"method\":\"runtime.terminate\",\"params\":{\"runtime_id\":\"1\"}}", .code = "unauthorized" },
+        .{ .payload = "{\"method\":\"host.upgrade.prepare\",\"params\":{}}", .code = "unauthorized" },
+        .{ .payload = "{\"method\":\"unknown.method\",\"params\":{}}", .code = "invalid_request" },
+        .{ .payload = "{", .code = "invalid_request" },
+    };
+    for (cases, 0..) |case, index| {
+        var admission: AdminAdmission = .{};
+        var conn = Connection.init(testing.allocator, 0xAA, &registry);
+        conn.admin_admission = &admission;
+        defer conn.deinit();
+        const admin_hello = try feedJson(
+            &conn,
+            .hello,
+            @intCast(index * 2 + 1),
+            "{\"protocol_min\":2,\"protocol_max\":2,\"client_kind\":\"admin\"}",
+        );
+        defer if (admin_hello.frame) |f| f.deinit(testing.allocator);
+        const response = try feedJson(&conn, .request, @intCast(index * 2 + 2), case.payload);
+        defer if (response.frame) |f| f.deinit(testing.allocator);
+        try testing.expectEqualStrings("reply_and_close", response.action);
+        try testing.expect(std.mem.indexOf(u8, response.frame.?.payload, case.code) != null);
+    }
+}
+
+test "server: every canonical request method has one exhaustive admin policy" {
+    var admin_reads: usize = 0;
+    inline for (std.enums.values(RequestMethod), 0..) |method, index| {
+        try testing.expectEqual(method, parseRequestMethod(method.wireName()).?);
+        inline for (std.enums.values(RequestMethod)[0..index]) |prior|
+            try testing.expect(!std.mem.eql(u8, method.wireName(), prior.wireName()));
+        if (requestPolicy(method) == .admin_read) admin_reads += 1;
+    }
+    try testing.expectEqual(@as(usize, 4), admin_reads);
+    try testing.expect(parseRequestMethod("runtime.future_method") == null);
+}
+
+test "server: all four admin read methods share the canonical dispatcher" {
+    var registry = reg.TerminalRuntimeRegistry.init(testing.allocator);
+    defer registry.deinit();
+    const cases = [_]struct {
+        payload: []const u8,
+        expected: []const u8,
+    }{
+        .{ .payload = "{\"method\":\"host.info\",\"params\":{}}", .expected = "host_id" },
+        .{ .payload = "{\"method\":\"runtime.list\",\"params\":{}}", .expected = "runtimes" },
+        .{
+            .payload = "{\"method\":\"runtime.inventory\",\"params\":{\"cursor\":\"\",\"limit\":256,\"membership_generation\":0}}",
+            .expected = "runtime_ids",
+        },
+        .{
+            .payload = "{\"method\":\"runtime.get\",\"params\":{\"runtime_id\":\"00000000000000000000000000000001\"}}",
+            .expected = "runtime_not_found",
+        },
+    };
+    for (cases, 0..) |case, index| {
+        var admission: AdminAdmission = .{};
+        var conn = Connection.init(testing.allocator, 0xAA, &registry);
+        conn.admin_admission = &admission;
+        conn.host_status = .{ .manifest_capable = true };
+        defer conn.deinit();
+        const hello = try feedJson(
+            &conn,
+            .hello,
+            @intCast(index * 2 + 1),
+            "{\"protocol_min\":2,\"protocol_max\":2,\"client_kind\":\"admin\"}",
+        );
+        defer if (hello.frame) |f| f.deinit(testing.allocator);
+        const response = try feedJson(&conn, .request, @intCast(index * 2 + 2), case.payload);
+        defer if (response.frame) |f| f.deinit(testing.allocator);
+        try testing.expectEqualStrings("reply_and_close", response.action);
+        try testing.expect(std.mem.indexOf(u8, response.frame.?.payload, case.expected) != null);
+        try testing.expect(std.mem.indexOf(u8, response.frame.?.payload, "unauthorized") == null);
+    }
 }
 
 test "server: ping echoes as pong after hello" {

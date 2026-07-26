@@ -44,6 +44,7 @@ pub const ArmedUpgrade = struct {
 pub const inbound_resident_cap: usize =
     protocol.header_size + protocol.max_binary_chunk;
 pub const handshake_deadline_ns: u64 = 10 * std.time.ns_per_s;
+pub const admin_request_deadline_ns: u64 = 5 * std.time.ns_per_s;
 pub const unattached_idle_deadline_ns: u64 = 30 * std.time.ns_per_s;
 
 comptime {
@@ -61,6 +62,7 @@ pub const Options = struct {
     admission_gate: ?*upgrade.AdmissionGate = null,
     host_status: server.HostStatus = .{},
     live_host_status: ?*const server.HostStatus = null,
+    admin_admission: ?*server.AdminAdmission = null,
     now_ns: u64 = 0,
 };
 
@@ -82,6 +84,7 @@ pub const Client = struct {
     destroyed: bool = false,
     created_ns: u64,
     last_activity_ns: u64,
+    admin_request_deadline_at_ns: ?u64 = null,
     sync_fail_once: bool = false,
     producer_streams: []u64 = &.{},
     producer_sweep_cursor: usize = 0,
@@ -125,6 +128,7 @@ pub const Client = struct {
         };
         self.connection.runtime_ops = options.runtime_ops;
         self.connection.upgrade_ops = options.upgrade_ops;
+        self.connection.admin_admission = options.admin_admission;
         self.connection.host_status = options.host_status;
         self.connection.live_host_status = options.live_host_status;
         return self;
@@ -170,6 +174,12 @@ pub const Client = struct {
             .open => false,
             .closing => true,
         };
+    }
+
+    /// Kernel HUP/ERR/NVAL after the final readable bytes means no queued reply can be delivered.
+    /// Cancel upgrade state if present, then converge through the canonical owner destroy path.
+    pub fn peerBroken(self: *Client) void {
+        self.failPendingUpgrade(.socket_error);
     }
 
     /// Captures and sorts one cadence epoch exactly once. Subsequent owner turns consume one entry
@@ -281,7 +291,7 @@ pub const Client = struct {
                     slot.clearPartial(.read);
                     _ = budget.allowRead(0, 1);
                     defer frame.deinit(self.allocator);
-                    self.dispatch(frame) catch {
+                    self.dispatch(frame, now_ns) catch {
                         self.beginClose(.resource_exhausted);
                         return true;
                     };
@@ -355,6 +365,8 @@ pub const Client = struct {
         if (!self.connection.handshakeComplete() and
             elapsedAtLeast(self.created_ns, now_ns, handshake_deadline_ns))
             return self.beginClose(.partial_timeout);
+        if (self.admin_request_deadline_at_ns) |deadline|
+            if (now_ns >= deadline) return self.beginClose(.partial_timeout);
         if (self.connection.handshakeComplete() and
             self.connection.attachmentCount() == 0 and
             !self.wantsWrite() and
@@ -527,7 +539,7 @@ pub const Client = struct {
             return self.beginClose(.resource_exhausted);
     }
 
-    fn dispatch(self: *Client, frame: framing.Frame) error{OutOfMemory}!void {
+    fn dispatch(self: *Client, frame: framing.Frame, now_ns: u64) error{OutOfMemory}!void {
         const slot = self.reactor.get(self.admission) catch return self.beginClose(.socket_error);
         var lease = if (self.admission_gate) |gate| gate.tryEnter() orelse {
             self.beginClose(.admission_closed);
@@ -537,7 +549,11 @@ pub const Client = struct {
         slot.beginDispatch() catch return self.beginClose(.resource_exhausted);
         defer slot.endDispatch() catch unreachable;
 
+        const was_admin = self.connection.isAdmin();
+        if (was_admin) self.admin_request_deadline_at_ns = null;
         const action = try self.connection.handleFrame(frame);
+        if (!was_admin and self.connection.isAdmin())
+            self.admin_request_deadline_at_ns = now_ns +| admin_request_deadline_ns;
         switch (action) {
             .reply => |bytes| {
                 try self.adoptControl(bytes);
@@ -1615,6 +1631,111 @@ test "reply-and-close waits through EAGAIN and closes only after full typed repl
     try testing.expect(!client.isClosing());
     try testing.expect(drainNonblocking(fds[1]) != 0);
     client.writeReady(3);
+    try testing.expect(client.isClosing());
+}
+
+test "one-shot admin leaves a pipelined second request undispatched" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const testing = std.testing;
+    var fds: [2]c_int = undefined;
+    try testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds));
+    defer _ = c.close(fds[1]);
+    var registry_value = registry.TerminalRuntimeRegistry.init(testing.allocator);
+    defer registry_value.deinit();
+    var subscriptions = subscription_identity.Table.init(testing.allocator);
+    defer subscriptions.deinit();
+    var admin_admission: server.AdminAdmission = .{};
+    const reactor = try slot_mod.ReactorCore.create(testing.allocator);
+    defer reactor.destroy();
+    const client = try Client.create(
+        testing.allocator,
+        fds[0],
+        reactor,
+        9,
+        &registry_value,
+        &subscriptions,
+        .{ .admin_admission = &admin_admission },
+    );
+    defer client.destroy();
+
+    try sendTestFrame(
+        fds[1],
+        .hello,
+        1,
+        "{\"protocol_min\":2,\"protocol_max\":2,\"client_kind\":\"admin\"}",
+    );
+    client.readReady(1);
+    client.writeReady(2);
+    _ = drainNonblocking(fds[1]);
+    try testing.expect(admin_admission.active);
+
+    try sendTestFrame(fds[1], .ping, 2, "admin-ping");
+    try sendTestFrame(fds[1], .request, 3, "{\"method\":\"host.info\"}");
+    client.readReady(3);
+    try testing.expect(client.close_after_flush != null);
+    try testing.expect(client.admin_request_deadline_at_ns == null);
+    client.tick(3 +| admin_request_deadline_ns);
+    try testing.expect(!client.isClosing());
+    try testing.expect(client.hasBufferedReadWork() == false);
+    client.writeReady(4);
+    try testing.expect(client.isClosing());
+
+    var parser = framing.FrameParser.init(testing.allocator);
+    defer parser.deinit();
+    var bytes: [4096]u8 = undefined;
+    const rc = c.recv(fds[1], &bytes, bytes.len, 0);
+    try testing.expect(rc > 0);
+    try parser.push(bytes[0..@intCast(rc)]);
+    var responses: usize = 0;
+    while (try parser.next()) |frame| {
+        defer frame.deinit(testing.allocator);
+        try testing.expectEqual(@as(u64, 2), frame.header.request_id);
+        try testing.expect(std.mem.indexOf(u8, frame.payload, "unauthorized") != null);
+        responses += 1;
+    }
+    try testing.expectEqual(@as(usize, 1), responses);
+}
+
+test "admin request deadline is immutable under incomplete-byte drip" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const testing = std.testing;
+    var fds: [2]c_int = undefined;
+    try testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds));
+    defer _ = c.close(fds[1]);
+    var registry_value = registry.TerminalRuntimeRegistry.init(testing.allocator);
+    defer registry_value.deinit();
+    var subscriptions = subscription_identity.Table.init(testing.allocator);
+    defer subscriptions.deinit();
+    var admin_admission: server.AdminAdmission = .{};
+    const reactor = try slot_mod.ReactorCore.create(testing.allocator);
+    defer reactor.destroy();
+    const client = try Client.create(
+        testing.allocator,
+        fds[0],
+        reactor,
+        9,
+        &registry_value,
+        &subscriptions,
+        .{ .admin_admission = &admin_admission },
+    );
+    defer client.destroy();
+
+    try sendTestFrame(
+        fds[1],
+        .hello,
+        1,
+        "{\"protocol_min\":2,\"protocol_max\":2,\"client_kind\":\"admin\"}",
+    );
+    client.readReady(1);
+    client.writeReady(2);
+    _ = drainNonblocking(fds[1]);
+    try testing.expectEqual(@as(?u64, 1 + admin_request_deadline_ns), client.admin_request_deadline_at_ns);
+
+    const partial = [_]u8{'M'};
+    try testing.expectEqual(@as(isize, 1), c.send(fds[1], &partial, partial.len, 0));
+    client.readReady(admin_request_deadline_ns);
+    try testing.expect(!client.isClosing());
+    client.tick(1 + admin_request_deadline_ns);
     try testing.expect(client.isClosing());
 }
 

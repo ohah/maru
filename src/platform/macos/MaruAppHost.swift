@@ -3340,10 +3340,17 @@ final class MaruWebPanelView: NSView {
         // firstResponder identity가 이미 이 WKWebView인 재클릭도 새 사용자 intent다. passive tick reconcile로는
         // 구분할 수 없으므로 실제 primary-down hit-test에서만 Zig direct-focus를 통지한다. seam/overlay는 위에서
         // nil로 빠져 divider drag나 modal click이 dock focus를 훔치지 않는다.
-        if NSApp.currentEvent?.type == .leftMouseDown {
+        //
+        // **결과가 우리 것일 때만 통지한다.** `hitTest`는 이벤트 수신이 아니라 **조회** 함수라, AppKit이 목적지를
+        // 찾는 동안 형제 뷰를 순회하며 이 패널의 frame **밖** 좌표로도, 숨긴 패널에도 호출한다. 좌표를 보지 않고
+        // 통지하면 탭 바나 사이드바 클릭이 web surface를 활성화해 **터미널 탭을 눌러도 브라우저로 되튄다**(사용자
+        // 제보 → MARU_DEBUG 로그에서 클릭마다 `activate_surface id=4`로 확정). `super.hitTest`가 nil이면 이 패널도
+        // 그 자손도 그 클릭을 받지 않는다는 뜻이므로 통지하지 않는다 — drop-zone 드래그 중 `isHidden` 패널도 같다.
+        let hit = super.hitTest(point)
+        if hit != nil, NSApp.currentEvent?.type == .leftMouseDown {
             controller?.webPanelPrimaryDown(self)
         }
-        return super.hitTest(point)
+        return hit
     }
 
     private func pinnedFileURLMatches(_ candidate: URL) -> Bool {

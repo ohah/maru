@@ -9,6 +9,7 @@ pub const ssh = @import("cli/ssh.zig");
 pub const install = @import("cli/install.zig");
 pub const terminfo = @import("cli/terminfo.zig");
 pub const sessions = @import("cli/sessions.zig"); // Track C 1d: `maru sessions list`/`session get` read-only 메타데이터 CLI(파서·--help·client wire)
+pub const runtime = @import("cli/runtime.zig"); // P5a2: session-host `host status`/`runtime list|get` parser, DTO, rendering, typed exit
 pub const browser = @import("cli/browser.zig"); // CLI-1: `maru browser navigate/get-url/exec/get-cookies` — browser.* 클라이언트(파서·wire·렌더, §9.6)
 pub const trace = @import("cli/trace.zig"); // `maru trace anonymize` — 캡처 trace의 PII 익명화(fixture 승격용)
 

@@ -3,6 +3,10 @@ const builtin = @import("builtin");
 const maru = @import("maru");
 const session_host_entrypoint = @import("platform/macos/session_host/entrypoint.zig");
 const session_host_build_options = @import("session_host_build_options");
+const session_host_admin_cli = if (builtin.os.tag == .macos)
+    @import("platform/macos/session_host/admin_cli.zig")
+else
+    struct {};
 
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
@@ -97,6 +101,16 @@ fn dispatch(
 
     if (std.mem.eql(u8, command, "session")) {
         try runSessionCli(io, allocator, &args, stdout, stderr, .session);
+        return;
+    }
+
+    if (std.mem.eql(u8, command, "host")) {
+        try runPersistentReadCli(io, allocator, &args, stdout, stderr, .host);
+        return;
+    }
+
+    if (std.mem.eql(u8, command, "runtime")) {
+        try runPersistentReadCli(io, allocator, &args, stdout, stderr, .runtime);
         return;
     }
 
@@ -582,6 +596,62 @@ fn runTrace(io: std.Io, allocator: std.mem.Allocator, args: anytype, stdout: *st
 /// crash/트레이스 없이 graceful하게 안내하고 종료한다. 서버가 소켓을 실제로 띄우는 배선(accept-loop 스레드·메인
 /// marshal(§5)·실 collector·capability auth(1e))은 **A2b/후속**이라, 지금은 보통 "인스턴스 없음"으로 접힌다.
 const SessionCli = enum { sessions, session };
+
+const PersistentReadCli = enum { host, runtime };
+
+fn runPersistentReadCli(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    args: anytype,
+    stdout: *std.Io.Writer,
+    stderr: *std.Io.Writer,
+    which: PersistentReadCli,
+) !void {
+    const runtime_cli = maru.cli.runtime;
+    var collected: std.ArrayList([]const u8) = .empty;
+    defer {
+        for (collected.items) |item| allocator.free(item);
+        collected.deinit(allocator);
+    }
+    while (args.next()) |arg| try collected.append(allocator, try allocator.dupe(u8, arg));
+    const parsed = (switch (which) {
+        .host => runtime_cli.parseHost(collected.items),
+        .runtime => runtime_cli.parseRuntime(collected.items),
+    }) catch {
+        try stderr.writeAll(switch (which) {
+            .host => runtime_cli.host_help,
+            .runtime => runtime_cli.runtime_help,
+        });
+        return persistentCliExit(stdout, stderr, .usage);
+    };
+    switch (parsed) {
+        .help => {
+            try stdout.writeAll(switch (which) {
+                .host => runtime_cli.host_help,
+                .runtime => runtime_cli.runtime_help,
+            });
+            try stdout.flush();
+            return;
+        },
+        .request => |request| {
+            if (builtin.os.tag != .macos) {
+                try stderr.writeAll("maru: persistent session host is unsupported on this platform\n");
+                return persistentCliExit(stdout, stderr, .unsupported);
+            }
+            return session_host_admin_cli.runRequest(io, allocator, request, stdout, stderr);
+        },
+    }
+}
+
+fn persistentCliExit(
+    stdout: *std.Io.Writer,
+    stderr: *std.Io.Writer,
+    code: maru.cli.runtime.ExitCode,
+) noreturn {
+    stderr.flush() catch {};
+    stdout.flush() catch {};
+    std.process.exit(@intFromEnum(code));
+}
 
 fn runSessionCli(
     io: std.Io,
@@ -1152,6 +1222,9 @@ fn printUsage(writer: *std.Io.Writer) !void {
         \\  maru terminfo [--status|--refresh|--clear|--path]
         \\  maru sessions list [--window <id>]
         \\  maru session get <id>
+        \\  maru host status [--json]
+        \\  maru runtime list [--json]
+        \\  maru runtime get <32-lower-hex-runtime-id> [--json]
         \\  maru trace anonymize <input.trace> [output.trace]
         \\
         \\commands:
@@ -1166,6 +1239,8 @@ fn printUsage(writer: *std.Io.Writer) !void {
         \\  terminfo   manage the local xterm-maru terminfo cache (--status default, --refresh, --clear, --path)
         \\  sessions   list running Maru sessions (surfaces) as read-only metadata (`sessions --help`)
         \\  session    read-only metadata for a single surface (`session get <id>`, `session --help`)
+        \\  host       inspect the existing persistent session host without starting one (`host --help`)
+        \\  runtime    inspect persistent runtimes without output or scrollback (`runtime --help`)
         \\  browser    control a web surface (navigate/get-url/exec/get-cookies; asks for confirmation) (`browser --help`)
         \\  trace      anonymize a captured MARU_TRACE (paths/IPs/user@host/username) for fixture promotion
         \\

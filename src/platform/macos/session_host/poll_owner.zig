@@ -64,6 +64,10 @@ pub const Owner = struct {
         return self.reactor.activeCount();
     }
 
+    fn syncClientCount(self: *Owner) void {
+        self.server.host_status.client_count = self.activeCount();
+    }
+
     pub fn takeArmedUpgrade(self: *Owner) ?connection_turn.ArmedUpgrade {
         const marker = self.armed_upgrade;
         self.armed_upgrade = null;
@@ -225,6 +229,7 @@ pub const Owner = struct {
         std.debug.assert(self.clients[index] == null);
         self.clients[index] = client;
         self.total_admitted += 1;
+        self.syncClientCount();
     }
 
     fn destroyClient(self: *Owner, index: usize) void {
@@ -232,6 +237,7 @@ pub const Owner = struct {
         self.clients[index] = null;
         self.producer_remaining[index] = 0;
         client.destroy();
+        self.syncClientCount();
     }
 
     fn destroyAll(self: *Owner) void {

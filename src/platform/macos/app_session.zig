@@ -5931,12 +5931,9 @@ pub const AppSession = struct {
     /// 세션 host 캐시 base = `${XDG_CACHE_HOME:-$HOME/.cache}/maru`(terminfo_cache 등 다른 maru 캐시와 같은 규칙 —
     /// discovery가 그 아래 `session-host/`를 붙인다). $HOME 부재면 null(폴백). 반환은 arena 소유.
     fn sessionCacheBase(a: std.mem.Allocator) ?[]const u8 {
-        if (std.c.getenv("XDG_CACHE_HOME")) |x| {
-            const xs = std.mem.span(x);
-            if (xs.len > 0) return std.fmt.allocPrint(a, "{s}/maru", .{xs}) catch null;
-        }
-        const home = std.c.getenv("HOME") orelse return null;
-        return std.fmt.allocPrint(a, "{s}/.cache/maru", .{std.mem.span(home)}) catch null;
+        const xdg = if (std.c.getenv("XDG_CACHE_HOME")) |value| std.mem.span(value) else null;
+        const home = if (std.c.getenv("HOME")) |value| std.mem.span(value) else null;
+        return maru.session.cache_path.maruBaseAlloc(a, xdg, home) catch null;
     }
 
     /// 한 Term(터미널)을 만든다 — backend가 registry `LiveSurface` 번들 슬롯 소유 + live PTY spawn + surface init을

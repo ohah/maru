@@ -30,7 +30,7 @@ pub const version_major: u16 = 2;
 /// resource_exhausted로 fail-close한다.
 /// Wire-only 모듈은 platform-import-0을 유지한다. `runtime_manager`의 compile-time boundary gate가 이 값을
 /// `session.workspace.max_runtime_bindings`와 같게 고정해 partial restore cap drift를 막는다.
-pub const max_inventory_runtimes: usize = 4096;
+pub const max_inventory_runtimes: usize = @import("maru").session.host_protocol.max_inventory_runtimes;
 pub const max_inventory_page_runtimes: usize = 256;
 pub const max_inventory_pages: usize =
     (max_inventory_runtimes + max_inventory_page_runtimes - 1) / max_inventory_page_runtimes;
@@ -105,55 +105,7 @@ pub const Flags = struct {
 
 /// §10 공통 typed error. CLI exit code·사용자 문구는 이 enum을 **한 곳에서** 매핑하고 server의 임의 문자열을 그대로
 /// 쓰지 않는다. `wireName`은 JSON 응답(`{error:"<name>"}`)과 fixture의 안정 식별자다(코드 이름과 1:1, snake_case).
-pub const ErrorCode = enum {
-    host_unavailable,
-    invalid_request,
-    incompatible_version,
-    unauthorized,
-    runtime_not_found,
-    stale_host,
-    controller_busy,
-    invalid_generation,
-    payload_too_large,
-    queue_invalidated,
-    host_shutting_down,
-    upgrade_busy,
-    attempt_conflict,
-    upgrade_unsupported,
-    invalid_target,
-    resource_exhausted,
-    internal,
-
-    pub fn wireName(self: ErrorCode) []const u8 {
-        return switch (self) {
-            .host_unavailable => "host_unavailable",
-            .invalid_request => "invalid_request",
-            .incompatible_version => "incompatible_version",
-            .unauthorized => "unauthorized",
-            .runtime_not_found => "runtime_not_found",
-            .stale_host => "stale_host",
-            .controller_busy => "controller_busy",
-            .invalid_generation => "invalid_generation",
-            .payload_too_large => "payload_too_large",
-            .queue_invalidated => "queue_invalidated",
-            .host_shutting_down => "host_shutting_down",
-            .upgrade_busy => "upgrade_busy",
-            .attempt_conflict => "attempt_conflict",
-            .upgrade_unsupported => "upgrade_unsupported",
-            .invalid_target => "invalid_target",
-            .resource_exhausted => "resource_exhausted",
-            .internal => "internal",
-        };
-    }
-
-    /// wire 이름을 enum으로 되돌린다(CLI가 host 응답을 typed error로 매핑). 모르는 이름은 null — 호출자가 `internal`로 폴백.
-    pub fn fromWireName(name: []const u8) ?ErrorCode {
-        inline for (@typeInfo(ErrorCode).@"enum".fields) |f| {
-            if (std.mem.eql(u8, name, f.name)) return @enumFromInt(f.value);
-        }
-        return null;
-    }
-};
+pub const ErrorCode = @import("maru").session.host_protocol.ErrorCode;
 
 /// header decode가 낼 수 있는 구조 오류. cap 초과·unknown kind 정책은 여기서 판정하지 않고 framing/dispatch가 맡는다
 /// (codec은 구조만 본다 — payload_len은 그대로 반환한다).

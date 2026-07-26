@@ -32,6 +32,8 @@ pub const HostStatus = struct {
     upgrade_epoch: u64 = 0,
     /// lifecycle ready/restoring/rollback/commit 전이마다 증가하는 daemon-local ABA token.
     authority_generation: u64 = 1,
+    /// 현재 owner reactor에 admitted된 연결 수. listener/PTY 수가 아니라 GUI/CLI/admin socket 수다.
+    client_count: usize = 0,
     lifecycle: host_identity.Lifecycle = .ready,
 };
 
@@ -1831,6 +1833,7 @@ pub const Connection = struct {
             .authority_generation = status.authority_generation,
             .lifecycle = @tagName(status.lifecycle),
             .runtime_count = self.registry.count(),
+            .client_count = status.client_count,
         } });
     }
 

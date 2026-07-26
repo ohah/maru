@@ -35,6 +35,7 @@ pub const EnterError = error{
 
 pub const RestoreError = error{RestoreFailed};
 pub const SignalReadError = error{InvalidSignalByte};
+pub const WindowSizeError = error{ WindowSizeUnavailable, InvalidWindowSize };
 
 pub const ExitReason = enum {
     detach,
@@ -51,6 +52,7 @@ const termination_signals = [_]posix.SIG{
     .QUIT,
     .TERM,
 };
+const managed_signals = termination_signals ++ [_]posix.SIG{.WINCH};
 
 const SignalRecord = struct {
     signal: posix.SIG,
@@ -83,7 +85,7 @@ pub const RawTty = struct {
     initial_size: Size,
     wake_read_fd: c.fd_t,
     wake_write_fd: c.fd_t,
-    signals: [termination_signals.len]SignalRecord,
+    signals: [managed_signals.len]SignalRecord,
     installed_signals: usize,
     ops: Ops,
     termios_pending: bool,
@@ -153,7 +155,7 @@ pub const RawTty = struct {
             .seq_cst,
         );
 
-        for (termination_signals) |signal| {
+        for (managed_signals) |signal| {
             var previous: posix.Sigaction = undefined;
             ops.install_signal(
                 ops.context,
@@ -263,7 +265,7 @@ pub const RawTty = struct {
         while (true) {
             const count = c.read(self.wake_read_fd, &byte, 1);
             if (count == 1) {
-                for (termination_signals) |signal|
+                for (managed_signals) |signal|
                     if (byte[0] == @intFromEnum(signal)) return signal;
                 return error.InvalidSignalByte;
             }
@@ -274,6 +276,31 @@ pub const RawTty = struct {
                 else => null,
             };
         }
+    }
+
+    pub const WakeBatch = struct {
+        termination: ?posix.SIG = null,
+        resize: bool = false,
+    };
+
+    pub fn drainWakeBatch(self: *RawTty) SignalReadError!WakeBatch {
+        var batch: WakeBatch = .{};
+        while (try self.readSignal()) |signal| {
+            if (signal == .WINCH) {
+                batch.resize = true;
+            } else if (batch.termination == null) {
+                batch.termination = signal;
+            }
+        }
+        if (batch.termination != null) batch.resize = false;
+        return batch;
+    }
+
+    pub fn currentSize(self: *const RawTty) WindowSizeError!Size {
+        const window = self.ops.get_winsize(self.ops.context, self.fd) catch
+            return error.WindowSizeUnavailable;
+        if (window.col == 0 or window.row == 0) return error.InvalidWindowSize;
+        return .{ .cols = window.col, .rows = window.row };
     }
 
     /// Restores local state and then preserves the caller-visible signal semantics.
@@ -334,13 +361,13 @@ var active_owner_token: u64 = 0;
 
 fn signalAction() posix.Sigaction {
     return .{
-        .handler = .{ .handler = terminationSignalHandler },
+        .handler = .{ .handler = wakeSignalHandler },
         .mask = std.mem.zeroes(posix.sigset_t),
         .flags = 0,
     };
 }
 
-fn terminationSignalHandler(signal: posix.SIG) callconv(.c) void {
+fn wakeSignalHandler(signal: posix.SIG) callconv(.c) void {
     // `fork` duplicates process memory but not the ownership identity. A child must never write
     // into the parent's inherited self-pipe. P5c3 additionally keeps the attach CLI single-threaded
     // and fork-free while this process-global handler is installed.
@@ -383,7 +410,7 @@ fn posixGetWinsize(_: *anyopaque, fd: c.fd_t) !posix.winsize {
 
 fn posixBlockSignals(_: *anyopaque, previous: *posix.sigset_t) !void {
     var set = posix.sigemptyset();
-    for (termination_signals) |signal| posix.sigaddset(&set, signal);
+    for (managed_signals) |signal| posix.sigaddset(&set, signal);
     posix.sigprocmask(posix.SIG.BLOCK, &set, previous);
 }
 
@@ -549,7 +576,7 @@ const FakeOps = struct {
     terminate_requests: usize = 0,
     block_calls: usize = 0,
     restore_mask_calls: usize = 0,
-    restored_by_signal: [termination_signals.len]usize = .{0} ** termination_signals.len,
+    restored_by_signal: [managed_signals.len]usize = .{0} ** managed_signals.len,
 
     fn ops(self: *FakeOps) Ops {
         return .{
@@ -616,11 +643,11 @@ fn fakeInstallSignal(
     const self = fake(context);
     try self.hit();
     previous.* = std.mem.zeroes(posix.Sigaction);
-    if (action.handler.handler == terminationSignalHandler) {
+    if (action.handler.handler == wakeSignalHandler) {
         self.installed += 1;
     } else {
         self.restored += 1;
-        for (termination_signals, 0..) |candidate, index| {
+        for (managed_signals, 0..) |candidate, index| {
             if (candidate == signal) self.restored_by_signal[index] += 1;
         }
     }
@@ -659,9 +686,9 @@ fn fakeInitialTermios() posix.termios {
 }
 
 test "raw TTY enter fail-index has zero mutation or exact rollback" {
-    // get termios, get winsize, block mask, pipe, four handlers, raw tcsetattr,
+    // get termios, get winsize, block mask, pipe, five handlers, raw tcsetattr,
     // restore mask. Cleanup calls occur after the one-shot injected failure.
-    for (0..10) |fail_at| {
+    for (0..11) |fail_at| {
         const original = fakeInitialTermios();
         var backend: FakeOps = .{
             .original = original,
@@ -674,15 +701,15 @@ test "raw TTY enter fail-index has zero mutation or exact rollback" {
                 1 => error.WindowSizeUnavailable,
                 2 => error.SignalHandlerFailed,
                 3 => error.SignalPipeFailed,
-                4...7 => error.SignalHandlerFailed,
-                8 => error.RawModeFailed,
-                9 => error.SignalHandlerFailed,
+                4...8 => error.SignalHandlerFailed,
+                9 => error.RawModeFailed,
+                10 => error.SignalHandlerFailed,
                 else => unreachable,
             },
             RawTty.enterWithOps(42, backend.ops()),
         );
         try std.testing.expectEqual(
-            @as(usize, if (fail_at == 9) 1 else 0),
+            @as(usize, if (fail_at == 10) 1 else 0),
             backend.raw_sets,
         );
         try std.testing.expectEqual(@as(usize, 0), backend.terminate_requests);
@@ -694,7 +721,7 @@ test "raw TTY enter fail-index has zero mutation or exact rollback" {
             try std.testing.expectEqual(@as(usize, 2), backend.close_count);
             try std.testing.expectEqual(backend.installed, backend.restored);
         }
-        if (fail_at == 8 or fail_at == 9) {
+        if (fail_at == 9 or fail_at == 10) {
             try std.testing.expectEqual(@as(usize, 1), backend.original_sets);
             try std.testing.expectEqualDeep(original, backend.current);
         }
@@ -767,8 +794,8 @@ test "signal mask restore failure remains retryable after other resources close"
     const original = fakeInitialTermios();
     var backend: FakeOps = .{ .original = original, .current = original };
     var owner = try RawTty.enterWithOps(42, backend.ops());
-    // restore: block, termios, four handlers, then original mask.
-    backend.fail_at = backend.call_index + 6;
+    // restore: block, termios, five handlers, then original mask.
+    backend.fail_at = backend.call_index + 7;
 
     try std.testing.expectError(error.RestoreFailed, owner.finish(.detach));
     try std.testing.expect(owner.restore_mask_pending);
@@ -795,7 +822,7 @@ test "signal handler restore failure retries every signal identity exactly once"
     // The failed handler remains retryable; the second call restores it before closing the pipe.
     try owner.finish(.protocol_error);
     try std.testing.expectEqual(@as(usize, 3), backend.block_calls);
-    try std.testing.expectEqual(@as(usize, termination_signals.len), backend.restored);
+    try std.testing.expectEqual(@as(usize, managed_signals.len), backend.restored);
     for (backend.restored_by_signal) |count|
         try std.testing.expectEqual(@as(usize, 1), count);
     try std.testing.expectEqual(@as(usize, 2), backend.close_count);
@@ -914,6 +941,44 @@ test "invalid self-pipe byte is rejected without constructing an arbitrary signa
         invalid.len,
     ));
     try std.testing.expectError(error.InvalidSignalByte, owner.readSignal());
+}
+
+test "SIGWINCH bursts coalesce and termination wins in one wake batch" {
+    const initial = fakeInitialTermios();
+    const window: posix.winsize = .{ .row = 37, .col = 113, .xpixel = 0, .ypixel = 0 };
+    var master: c.fd_t = -1;
+    var slave: c.fd_t = -1;
+    try std.testing.expectEqual(@as(c_int, 0), openpty(&master, &slave, null, &initial, &window));
+    defer _ = c.close(master);
+    defer _ = c.close(slave);
+    var owner = try RawTty.enter(slave);
+    defer owner.restore() catch {};
+
+    const resize_bytes = [_]u8{
+        @intCast(@intFromEnum(posix.SIG.WINCH)),
+        @intCast(@intFromEnum(posix.SIG.WINCH)),
+        @intCast(@intFromEnum(posix.SIG.WINCH)),
+    };
+    try std.testing.expectEqual(
+        @as(isize, resize_bytes.len),
+        c.write(owner.wake_write_fd, &resize_bytes, resize_bytes.len),
+    );
+    const resize_only = try owner.drainWakeBatch();
+    try std.testing.expect(resize_only.resize);
+    try std.testing.expectEqual(@as(?posix.SIG, null), resize_only.termination);
+
+    const mixed = [_]u8{
+        @intCast(@intFromEnum(posix.SIG.WINCH)),
+        @intCast(@intFromEnum(posix.SIG.TERM)),
+        @intCast(@intFromEnum(posix.SIG.WINCH)),
+    };
+    try std.testing.expectEqual(
+        @as(isize, mixed.len),
+        c.write(owner.wake_write_fd, &mixed, mixed.len),
+    );
+    const terminated = try owner.drainWakeBatch();
+    try std.testing.expect(!terminated.resize);
+    try std.testing.expectEqual(posix.SIG.TERM, terminated.termination.?);
 }
 
 fn signalActionsEqual(a: posix.Sigaction, b: posix.Sigaction) bool {

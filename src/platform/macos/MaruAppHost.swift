@@ -7096,8 +7096,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         var ptr: UnsafePointer<UInt8>? = nil
         var len: size_t = 0
         var kind: Int32 = 0
-        var webSurfaceId: UInt64 = 0
-        guard maru_macos_app_session_url_at(session, xPx, yPx, mods, &ptr, &len, &kind, &webSurfaceId) == Self.statusOK,
+        guard maru_macos_app_session_url_at(session, xPx, yPx, mods, &ptr, &len, &kind) == Self.statusOK,
               let bytes = ptr, len > 0 else { return false }
         let text = String(decoding: UnsafeBufferPointer(start: bytes, count: len), as: UTF8.self)
         // FP5: 파일 경로 중 .md/.html은 현재 창 도크로 라우팅한다. Zig가 확장자·regular-file·중복 활성화를 단일
@@ -7112,15 +7111,16 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                 return true
             }
         }
-        // v147: Zig가 이 링크를 띄울 인앱 브라우저 패널을 정했으면(surface_id != 0) 그 WKWebView에 load한다.
-        // 정책(config input.link-open-target·"보이는 browser 패널")은 Zig 단일 출처이고 여기는 실행만 한다 —
-        // 파일 패널 외부 링크 drain이 같은 BrowserControl.navigate를 쓰는 것과 동형. 패널이 이미 사라졌으면
-        // (닫히는 중 클릭) 0인 것과 같이 시스템 브라우저로 폴백한다 — 링크를 조용히 삼키지 않는다.
-        if kind == 0, webSurfaceId != 0,
-           let panel = surfaceOwning(byId: webSurfaceId)?.webPanels[webSurfaceId],
-           BrowserControl.navigate(panel.webView, url: text)
-        {
-            return true
+        // v147: 웹 링크(kind==0)는 Zig 정책(config input.link-open-target)에 먼저 물어본다. 1이면 인앱 browser
+        // 패널로 열기로 하고 pending action을 세웠으므로(다음 tick take_external_link_action drain이 navigate를
+        // 실행한다 — 새 패널이면 그 tick의 surface 전이 batch가 WKWebView를 먼저 만든다) 클릭을 여기서 소비한다.
+        // 0이면 아래 시스템 브라우저 경로로 흐른다. 정책은 Zig 단일 출처이고 Swift는 실행만 한다.
+        if kind == 0 {
+            let urlBytes = Array(text.utf8)
+            let handled = urlBytes.withUnsafeBufferPointer { p in
+                maru_macos_app_session_open_terminal_web_link(session, p.baseAddress, p.count)
+            }
+            if handled == 1 { return true }
         }
         // 나머지 파일 경로는 기존 기본 앱, 웹/스킴 URL은 기본 브라우저로 연다.
         let url: URL? = (kind == 1) ? URL(fileURLWithPath: text) : URL(string: text)
@@ -7668,21 +7668,27 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             default: break // None — 무동작
             }
         }
-        // v125: 파일 패널 외부 링크 정책 결과. in-app은 위 transition batch가 방금 생성한 browser surface에 load하고,
-        // system은 사용자 click one-shot만 NSWorkspace로 넘긴다. script/meta redirect는 delegate/renderer에서 이 경계에
-        // 도달하지 않으며 Zig도 literal HTTP(S)를 재검증한다.
+        // v125: 외부 링크 정책 결과(파일 패널 문서 안 링크 + v147부터 터미널 화면 링크가 공유하는 실행 경로).
+        // in-app은 위 transition batch가 방금 생성했거나 이미 살아 있는 browser surface에 load하고, system은 사용자
+        // click one-shot만 NSWorkspace로 넘긴다. **전이 batch보다 뒤**에 두는 순서가 계약이다 — 새로 만든 browser
+        // Term의 WKWebView는 이 batch에서 생기므로 앞에 두면 방금 만든 패널에 load가 유실된다.
+        // script/meta redirect는 delegate/renderer에서 이 경계에 도달하지 않으며 Zig도 literal HTTP(S)를 재검증한다.
         var externalLinkSid: UInt64 = 0
         var externalLinkKind: UInt32 = 0
         let externalLinkLen = webNavigateUrlBuf.withUnsafeMutableBufferPointer { p in
-            maru_macos_app_session_take_file_panel_external_link_action(
+            maru_macos_app_session_take_external_link_action(
                 session, p.baseAddress, p.count, &externalLinkSid, &externalLinkKind
             )
         }
         if externalLinkLen > 0 {
             let target = String(decoding: webNavigateUrlBuf[0 ..< Int(externalLinkLen)], as: UTF8.self)
+            var delivered = false
             if externalLinkKind == 1, let wp = surface.webPanels[externalLinkSid] {
-                _ = BrowserControl.navigate(wp.webView, url: target)
-            } else if externalLinkKind == 2, let url = URL(string: target) {
+                delivered = BrowserControl.navigate(wp.webView, url: target)
+            }
+            // in-app 대상이 사라졌거나(요청과 drain 사이에 그 Term이 닫힘) load가 거부되면 시스템 브라우저로
+            // 폴백한다 — 사용자가 누른 링크를 조용히 삼키지 않는다. kind==2(system)는 원래 이 경로다.
+            if !delivered, let url = URL(string: target) {
                 NSWorkspace.shared.open(url)
             }
         }

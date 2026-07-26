@@ -178,7 +178,7 @@ Node = leaf(Pane)
   **mouse tracking(vim/tmux 등 앱이 휠을 받는지) 판정도 커서 아래 surface 기준**이라, 포커스 panel이 트래킹 앱이어도 옆
   비트래킹 셸 panel 위 휠은 그 셸 스크롤백을 움직이고, 반대로 커서 아래 panel이 트래킹이면 그 panel로 휠 리포트(SGR
   64/65)를 보낸다 — 리포트 좌표(`pxToCellIn`)도 그 panel의 본문 rect 기준이라 pane↔좌표가 정합한다. 라우팅 단일 출처는
-  `scrollTargetAt`(점을 담는 leaf의 활성 Term surface + 본문 rect)이되 **커서가 사이드바 위면 그 전에 사이드바 세로 스크롤
+  `paneTargetAt`(점을 담는 leaf의 활성 Term surface + 본문 rect — 링크 클릭/hover와 공유하는 '포인터 아래 pane이 소유' 라우팅 단일 출처, [링크 감지](link-detection.md) §어느 pane에서 찾는가)이되 **커서가 사이드바 위면 그 전에 사이드바 세로 스크롤
   (③c)이 휠을 소비**하고, 사이드바도 터미널 leaf도 아닌 영역(밖)이면 활성 surface로 폴백한다. alt 화면 +
   alternate scroll(DECSET 1007)이면 스크롤백 대신 그 surface로 화살표 키를 보낸다(less/vim). 가로(트랙패드 2-finger)
   델타는 직교 축이라 커서 아래 pane **탭 바**를 가로 스크롤한다(`scrollTabBarAt`, 탭 넘칠 때만).

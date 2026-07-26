@@ -134,6 +134,54 @@ pub fn pxToCell(cell_width_px: u32, cell_height_px: u32, cols: u16, rows: u16, r
     };
 }
 
+/// `pxToCell`의 **clamp 없는** 변형 — 좌표가 실제로 그 pane 본문의 셀 위일 때만 CellHit, 아니면 null.
+///
+/// clamp 버전은 "이 pane이 소유한 좌표를 셀로 바꾼다"는 용도(선택 드래그가 가장자리 밖으로 나가도 끝 셀에
+/// 붙어야 하고, 마우스 리포트도 마찬가지)라 **영역 밖을 조용히 가장자리로 접는다**. 링크 조회처럼 "여기에
+/// 링크가 있나?"를 묻는 경로가 그걸 쓰면, pane의 탭 바·divider 밴드·grid 뒤 여백을 누른 클릭이 첫 행/끝 열의
+/// 링크로 **오인**된다(수식키+클릭이 탭 전환을 삼키고 엉뚱한 URL을 여는 버그). 그런 경로는 이 함수를 쓴다.
+///
+/// 판정: rect 안(반열린) + `cols×cell_width`·`rows×cell_height` 안. rect가 grid보다 큰 나머지 여백(정수 나눗셈
+/// 잔여)도 셀이 없으므로 null이다.
+pub fn pxToCellExact(cell_width_px: u32, cell_height_px: u32, cols: u16, rows: u16, rect: SplitRect, x_px: f64, y_px: f64) ?CellHit {
+    if (!pointInRect(x_px, y_px, rect)) return null;
+    const cw: f64 = @floatFromInt(if (cell_width_px > 0) cell_width_px else input_math.placeholder_cell_width_px);
+    const ch: f64 = @floatFromInt(if (cell_height_px > 0) cell_height_px else input_math.placeholder_cell_height_px);
+    const term_x = x_px - @as(f64, @floatFromInt(rect.x));
+    const term_y = y_px - @as(f64, @floatFromInt(rect.y));
+    if (term_x >= @as(f64, @floatFromInt(cols)) * cw) return null; // grid 오른쪽 여백
+    if (term_y >= @as(f64, @floatFromInt(rows)) * ch) return null; // grid 아래 여백
+    return pxToCell(cell_width_px, cell_height_px, cols, rows, rect, x_px, y_px);
+}
+
+// 링크 조회가 pane chrome(탭 바·divider·여백) 클릭을 링크로 오인하지 않으려면 clamp 없는 변환이 필요하다.
+// clamp 버전과 나란히 검증해 "같은 좌표, 다른 답"이 의도된 것임을 고정한다.
+test "pxToCellExact: 본문 grid 밖은 null(clamp 버전은 가장자리 셀)" {
+    const rect: SplitRect = .{ .x = 100, .y = 50, .w = 80, .h = 40 }; // 10×4 셀(8×10) + 오른쪽/아래 여백 없음
+    // 안쪽: 두 함수가 같은 셀을 준다.
+    const inside = pxToCellExact(8, 10, 10, 4, rect, 132, 75).?;
+    try std.testing.expectEqual(@as(u16, 4), inside.col);
+    try std.testing.expectEqual(@as(u16, 2), inside.row);
+    try std.testing.expectEqual(inside.col, pxToCell(8, 10, 10, 4, rect, 132, 75).?.col);
+
+    // rect 위(탭 바 영역): clamp는 row 0으로 접지만 exact는 null — 이게 오인 클릭을 막는 지점이다.
+    try std.testing.expectEqual(@as(u16, 0), pxToCell(8, 10, 10, 4, rect, 132, 40).?.row);
+    try std.testing.expect(pxToCellExact(8, 10, 10, 4, rect, 132, 40) == null);
+    // rect 왼쪽(사이드바/이웃 pane 쪽)·아래(다음 pane)도 null.
+    try std.testing.expect(pxToCellExact(8, 10, 10, 4, rect, 99, 75) == null);
+    try std.testing.expect(pxToCellExact(8, 10, 10, 4, rect, 132, 90) == null);
+
+    // rect가 grid보다 큰 경우(잔여 여백): rect 안이지만 셀이 없는 오른쪽/아래 띠도 null.
+    const padded: SplitRect = .{ .x = 0, .y = 0, .w = 100, .h = 100 }; // 8×10 셀이면 grid는 64×40px만 채운다
+    try std.testing.expect(pxToCellExact(8, 10, 8, 4, padded, 70, 20) == null); // 오른쪽 여백
+    try std.testing.expect(pxToCellExact(8, 10, 8, 4, padded, 20, 50) == null); // 아래 여백
+    try std.testing.expectEqual(@as(u16, 7), pxToCell(8, 10, 8, 4, padded, 70, 20).?.col); // clamp는 끝 열
+    try std.testing.expect(pxToCellExact(8, 10, 8, 4, padded, 63, 39) != null); // 마지막 셀 안쪽은 유효
+
+    // 비유한 좌표는 두 함수 모두 null.
+    try std.testing.expect(pxToCellExact(8, 10, 10, 4, rect, std.math.nan(f64), 75) == null);
+}
+
 test "gridFromBacking divides backing pixels by cell size with placeholder + clamps" {
     // 960×600 backing at 8×18 cell -> 120×33 (이전엔 Swift가 placeholder 12×24로 80×25를 잡아
     // 창과 grid가 어긋났다). 이제 app session이 실제 메트릭으로 직접 계산한다.

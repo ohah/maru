@@ -111,25 +111,35 @@
 
 무엇을 열지(§감지 종류)와 **어디에 띄울지**는 별개다. 후자는 `input.link-open-target`이 정한다.
 
-| 값 | 동작 |
-|---|---|
-| `auto`(기본) | 현재 워크스페이스 탭에 **보이는 브라우저 패널**이 있으면 그 패널에서 열고, 없으면 시스템 기본 브라우저 |
-| `system` | 항상 시스템 기본 브라우저(이전 동작) |
+| 값 | 보이는 브라우저 패널이 있을 때 | 없을 때 |
+|---|---|---|
+| `auto`(기본) | 그 패널에서 연다 | 시스템 기본 브라우저 |
+| `in-app` | 그 패널에서 연다(재사용) | **새 browser 탭을 열어** 그곳에 띄운다 |
+| `system` | 시스템 기본 브라우저 | 시스템 기본 브라우저(이전 동작) |
 
 - **대상은 http(s) 리터럴만**이다. 파일 경로(`kind=file_path`)와 `mailto:`·`ssh://` 같은 비-HTTP 스킴은 이 설정과
   무관하게 기존 경로(`NSWorkspace`, `.md`/`.html`은 파일 도크)로 간다. 허용 스킴 판정은 파일 패널 외부 링크와 **같은**
   `isExplicitHttpLink`를 공유한다(단일 출처) — 브라우저 패널에 `file:`·`javascript:`가 실릴 경로를 구조적으로 막는다.
-- **"보이는" 브라우저만 대상**이다. 각 pane의 **활성 Term**만 보고, 활성 pane의 브라우저를 먼저 고른 뒤 같은 탭의
-  다른 pane을 순회한다. 숨은 Term 탭의 브라우저를 대상으로 하면 화면이 그대로라 "아무 일도 안 일어난 것"처럼 보인다.
+  길이 상한도 그 모듈의 `max_http_link_bytes`(8 KiB)가 단일 출처다. **파일 경로 상한(PATH_MAX=1024)을 쓰면 안 된다** —
+  OAuth 콜백·pre-signed URL처럼 1 KB를 넘는 URL이 조용히 거부돼 같은 링크가 길이에 따라 다른 곳에서 열린다.
+- **"보이는" 브라우저만 재사용 대상**이다. 각 pane의 **활성 Term**만 보고, 활성 pane의 브라우저를 먼저 고른 뒤 같은 탭의
+  다른 pane을 순회한다. 숨은 Term 탭의 브라우저에 띄우면 화면이 그대로라 "아무 일도 안 일어난 것"처럼 보인다.
   여럿이면 이 순서의 첫 번째를 쓴다(브라우저를 둘 이상 띄우는 경우가 드물어 별도 정책을 두지 않는다).
-- **새 브라우저 패널을 만들지 않는다.** 링크 하나로 탭이 늘어나는 건 놀람이 크고, "열려 있으면 그걸로, 아니면 외부"가
-  요청된 범위다(사용자 결정). 그래서 브라우저를 안 쓰는 사용자에게는 기본값 `auto`가 이전과 **동작이 같다**(회귀 없음).
+- **기본이 `auto`인 근거**: 브라우저 패널을 띄워 둔 사용자는 링크를 그 패널에서 보길 기대하지만(사용자 결정), 패널이
+  없는데 탭이 새로 생기는 건 놀람이 크다. `auto`는 패널이 없으면 동작이 이전과 **동일**해 브라우저를 안 쓰는 사용자에게
+  회귀가 0이다. "터미널 링크는 늘 인앱에서 본다"면 `in-app`으로 올린다.
 - **파일 패널의 `file-panel.external-link-target`과는 다른 설정**이다. 그쪽은 Markdown/HTML 문서 **안의** 링크를
-  따라가는 문맥이라 `in-app`이면 **새** browser Term을 연다. 터미널 링크는 문서 문맥이 아니라 분리한다.
-- **경계**: 정책 판정은 Zig가 단일 출처로 소유하고(`webLinkTargetSurfaceId`), Swift는 결과 surface_id가 0이면
-  `NSWorkspace.open`·아니면 `BrowserControl.navigate`를 실행만 한다(ABI v147 `url_at`의 `out_web_surface_id`). 같은
-  클릭이 만든 URL의 라우팅이므로 URL을 Swift가 다시 Zig로 넘기는 왕복을 두지 않는다. 대상 패널이 그 사이 닫혔으면
-  시스템 브라우저로 폴백한다 — 링크를 조용히 삼키지 않는다.
+  따라가는 문맥이라 `in-app`이 항상 **새** browser Term을 만들고 재사용 개념이 없다. 터미널 링크는 문서 문맥이 아니라
+  분리한다(두 경로의 **실행**은 아래 pending action 하나로 합쳐 둔다).
+- **경계와 순서**: 정책 판정은 Zig가 단일 출처로 소유하고(`openTerminalWebLink`), Swift는 결과가 `1`이면 그대로 두고
+  `0`이면 `NSWorkspace.open`을 부른다(ABI v147 `open_terminal_web_link`). 인앱으로 정해진 링크는 **즉시 반환이 아니라
+  pending action**으로 실린다 — 새로 만든 browser Term의 WKWebView는 **다음 tick의 surface 전이 batch**에서 생기므로,
+  클릭 시점에 surface_id를 넘겨도 Swift `webPanels`에는 아직 없어 load가 유실된다. Swift는 매 tick 전이 batch를 적용한
+  **뒤** `take_external_link_action`으로 drain하므로 "생성 → navigate" 순서가 구조적으로 보장된다(기존 패널 재사용도
+  같은 경로로 보내 분기를 하나로 유지한다 — 한 tick 지연은 최대 ~16ms). 대상 패널이 그 사이 닫혔거나 load가 거부되면
+  시스템 브라우저로 폴백한다 — 사용자가 누른 링크를 조용히 삼키지 않는다.
+- **연타 보호**: drain 전 두 번째 요청은 거부하고 시스템 브라우저로 보낸다. pending URL을 덮어쓰면 앞 링크를 잃거나
+  (in-app에서) 탭만 늘고 목적지가 바뀐 상태가 된다.
 
 ## soft-wrap(강제개행)된 링크
 
@@ -236,7 +246,10 @@
   scopes 빌드·kind·`openFilePanelPath`), `app_host_abi.{zig,h}`(`url_at` out_kind·파일 패널 ABI),
   `MaruAppHost.swift`(`handleUrlClick` — `.md`/`.html`은 도크, 그 외는 `URL(fileURLWithPath:)`/`URL(string:)`). ABI 경계는
   [macOS 앱 호스트 경계](macos-app-host-boundary.md).
-- 열기 대상 라우팅: `src/platform/macos/app_session.zig`(`webLinkTargetSurfaceId` — 정책 단일 출처),
-  `app_host_abi.{zig,h}`(`url_at`의 `out_web_surface_id`, ABI v147), `MaruAppHost.swift`(`handleUrlClick` —
-  0이면 `NSWorkspace.open`, 아니면 `BrowserControl.navigate`). 브라우저 패널 자체는 [웹 패널](web-panel.md).
+- 열기 대상 라우팅: `src/platform/macos/app_session.zig`(`openTerminalWebLink` — 정책 단일 출처,
+  `visibleBrowserSurfaceId`·`queueExternalLinkAction`[파일 패널과 공유하는 실행 경로]),
+  `app_host_abi.{zig,h}`(`open_terminal_web_link`·`take_external_link_action`, ABI v147),
+  `MaruAppHost.swift`(`handleUrlClick`가 0이면 `NSWorkspace.open` / tick drain이 `BrowserControl.navigate`).
+  URL 허용 스킴·길이 상한은 `src/session/file_panel_bridge.zig`(`isExplicitHttpLink`·`max_http_link_bytes`).
+  브라우저 패널 자체는 [웹 패널](web-panel.md).
 - config: `src/config/theme.zig`(`InputConfig.link_detection`·`InputConfig.link_open_target`), `docs/configuration.md` 키 표.

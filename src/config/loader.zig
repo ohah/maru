@@ -1064,19 +1064,23 @@ test "parse: file panel external link target defaults in-app and accepts system"
     try std.testing.expectEqual(@as(usize, 1), invalid.diagnostics.len);
 }
 
-// input.link-open-target: 터미널 웹 링크를 보이는 브라우저 패널에서 열지(auto, 기본) 항상 시스템 브라우저로
-// 보낼지(system). 기본이 auto여도 브라우저 패널이 없으면 시스템으로 가므로(정책은 app_session.webLinkTargetSurfaceId)
-// 이 키 자체는 "인앱을 허용할지"의 스위치다. 오타는 무시하고 기본값을 유지한다(다른 dropdown 키와 같은 규율).
-test "parse: input.link-open-target defaults auto and accepts system" {
+// input.link-open-target: 터미널 웹 링크를 보이는 브라우저 패널에서 열지(auto, 기본)·없으면 새 탭까지 열지
+// (in-app)·항상 시스템 브라우저로 보낼지(system). 정책 소비는 app_session.openTerminalWebLink.
+// 오타는 무시하고 기본값을 유지한다(다른 dropdown 키와 같은 규율).
+test "parse: input.link-open-target defaults auto and accepts in-app/system" {
     var defaults = try parse(std.testing.allocator, "font.size = 14");
     defer defaults.deinit();
     try std.testing.expectEqual(theme.LinkOpenTarget.auto, defaults.config.input.link_open_target);
+
+    var in_app = try parse(std.testing.allocator, "input.link-open-target = in-app");
+    defer in_app.deinit();
+    try std.testing.expectEqual(theme.LinkOpenTarget.in_app, in_app.config.input.link_open_target);
 
     var system = try parse(std.testing.allocator, "input.link-open-target = system");
     defer system.deinit();
     try std.testing.expectEqual(theme.LinkOpenTarget.system, system.config.input.link_open_target);
 
-    var invalid = try parse(std.testing.allocator, "input.link-open-target = in-app");
+    var invalid = try parse(std.testing.allocator, "input.link-open-target = embedded");
     defer invalid.deinit();
     try std.testing.expectEqual(theme.LinkOpenTarget.auto, invalid.config.input.link_open_target);
     try std.testing.expectEqual(@as(usize, 1), invalid.diagnostics.len);

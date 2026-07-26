@@ -1594,7 +1594,7 @@ P3-e도 슬라이스로 나눈다(제품 통합이라 크다).
     클릭은 `!= .none`, motion은 `== .any`로 판정한다. 모드 없는 구 host는 **client 파싱에서 한 번만** bool→`.normal`로
     보수적 폴백해(motion 추측 전송 금지) 기존 동작을 유지한다. bool 필드는 구 client 호환 미러로 남긴다.
   - **P3-e4c-5(링크 감지 parity) 🟨**: host-backed Term의 Cmd+hover 밑줄·링크 커서·Cmd+클릭 열기가 **placeholder core가
-    아니라 host 해석**을 쓴다. 이전에는 `hoverCursor`/`hoverLinkSpan`/`urlAt`이 `activeSurface().core`(host-backed면 빈
+    아니라 host 해석**을 쓴다. 이전에는 `hoverCursor`/`hoverLinkSpanFor`/`urlAt`이 `activeSurface().core`(host-backed면 빈
     placeholder)를 직접 읽어 host에 붙은 세션에서 **밑줄·커서·열기가 모두 무동작**이었다(선택 복사·Find는 이미 host-backed
     분기가 있었으나 링크만 이관에서 누락). hover는 screen stream의 `link_spans` record(뷰포트 상대·full-replace, host가
     최대 scope로 계산)로 받아 client가 자기 `input.link-detection`으로 걸러 그리고, 열기는 `runtime_link_at_v1` capability의

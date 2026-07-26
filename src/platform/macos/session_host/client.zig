@@ -229,6 +229,9 @@ pub const Client = struct {
     host_manifest_v1: bool = false,
     host_exec_upgrade_v1: bool = false,
     runtime_inventory_v1: bool = false,
+    /// Attached stream의 controller status/takeover/release generation-CAS protocol을 양쪽이 협상했는가.
+    /// public attach는 false인 same-major 구 host에서 observer만 허용하고 takeover method를 보내지 않는다.
+    controller_transfer_v1: bool = false,
     /// Hidden one-shot admin role을 host가 명시적으로 지원하는가. CLI는 이 값 없이 read method를 추측하지 않는다.
     admin_one_shot_v1: bool = false,
     /// Public `runtime end`를 exact one-shot admin mutation으로 지원하는가.
@@ -412,6 +415,7 @@ pub const Client = struct {
         self.host_manifest_v1 = manifest_capable;
         self.host_exec_upgrade_v1 = payloadHasCapability(ack.payload, "host_exec_upgrade_v1");
         self.runtime_inventory_v1 = inventory_capable;
+        self.controller_transfer_v1 = payloadHasCapability(ack.payload, "controller_transfer_v1");
         self.admin_one_shot_v1 = payloadHasCapability(ack.payload, "admin_one_shot_v1");
         self.admin_runtime_end_v1 = payloadHasCapability(ack.payload, "admin_runtime_end_v1");
         self.screen_viewport_scrolled_v1 = payloadHasCapability(ack.payload, "screen_viewport_scrolled_v1");
@@ -2234,7 +2238,7 @@ fn buildHelloMajor(
 ) error{OutOfMemory}![]u8 {
     return std.fmt.allocPrint(
         allocator,
-        "{{\"protocol_min\":{d},\"protocol_max\":{d},\"client_kind\":\"{s}\",\"capabilities\":[\"runtime_metadata_v1\",\"runtime_ended_v1\",\"screen_viewport_scrolled_v1\",\"async_scroll_to_bottom_v1\",\"runtime_core_command_v1\",\"runtime_selected_text_v1\",\"runtime_link_at_v1\",\"runtime_clipboard_v1\"]}}",
+        "{{\"protocol_min\":{d},\"protocol_max\":{d},\"client_kind\":\"{s}\",\"capabilities\":[\"runtime_metadata_v1\",\"runtime_ended_v1\",\"controller_transfer_v1\",\"screen_viewport_scrolled_v1\",\"async_scroll_to_bottom_v1\",\"runtime_core_command_v1\",\"runtime_selected_text_v1\",\"runtime_link_at_v1\",\"runtime_clipboard_v1\"]}}",
         .{ wire_major, wire_major, client_kind },
     );
 }
@@ -2595,6 +2599,7 @@ test "client: hello/request JSON build and host_id parse are server-symmetric (p
     try testing.expect(std.mem.indexOf(u8, hello, "\"client_kind\":\"gui\"") != null);
     try testing.expect(std.mem.indexOf(u8, hello, "\"runtime_metadata_v1\"") != null);
     try testing.expect(std.mem.indexOf(u8, hello, "\"runtime_ended_v1\"") != null);
+    try testing.expect(std.mem.indexOf(u8, hello, "\"controller_transfer_v1\"") != null);
     try testing.expect(std.mem.indexOf(u8, hello, "\"screen_viewport_scrolled_v1\"") != null);
     try testing.expect(std.mem.indexOf(u8, hello, "\"async_scroll_to_bottom_v1\"") != null);
     try testing.expect(std.mem.indexOf(u8, hello, "\"runtime_core_command_v1\"") != null);
@@ -2629,6 +2634,7 @@ test "client: hello/request JSON build and host_id parse are server-symmetric (p
     try testing.expect(!legacy_client.screen_viewport_scrolled_v1);
     try testing.expect(!legacy_client.runtime_selected_text_v1);
     try testing.expect(!legacy_client.notification_stream_auth_v1);
+    try testing.expect(!legacy_client.controller_transfer_v1);
     legacy_client.screen_viewport_scrolled_v1 = payloadHasCapability(
         "{\"host_id\":\"1234\"}",
         "screen_viewport_scrolled_v1",
@@ -2644,6 +2650,11 @@ test "client: hello/request JSON build and host_id parse are server-symmetric (p
         "notification_stream_auth_v1",
     );
     try testing.expect(legacy_client.notification_stream_auth_v1);
+    legacy_client.controller_transfer_v1 = payloadHasCapability(
+        "{\"host_id\":\"1234\",\"capabilities\":[\"controller_transfer_v1\"]}",
+        "controller_transfer_v1",
+    );
+    try testing.expect(legacy_client.controller_transfer_v1);
 }
 
 test "client: connects to a forked host, agrees on host_id, and calls host.info" {

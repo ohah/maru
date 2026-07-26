@@ -2221,6 +2221,21 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
     부재는 request 0·detach·unsupported 5, stale/busy/unauthorized 또는 malformed response는 retry 0·detach와 각각
     busy/denied/protocol exit다. host unavailable 3, denied 4, unsupported 5, busy 6, runtime-not-found 7, protocol 8의
     기존 exit mapping을 재사용한다.
+
+    **P5c3a 구현 완료:** `src/cli/attach.zig`가 parser/TTY preflight/exit mapping을,
+    `attach_resolver.zig`가 부수효과 없는 all-or-none reducer를, `attach_product_resolver.zig`가 secure
+    discovery·isolated `runtime.get`·owned descriptor·fresh membership/socket 재검증·long `.cli_attach`
+    connection을 소유한다. `Client.ConnectionProfile`은 hello kind와 transfer 광고를 함께 파생한다.
+    `RemoteAttachment`는 allocator·role/generation·screen·stream queue를 소유하고 transport를 한 번 borrow하며,
+    `RemoteRuntime`은 own-stream revoke가 buffered된 순간부터 새 입력을 typed suppression하고, revoke를 mutation보다
+    먼저 적용해 기존 queued input/control과 zero-byte pending frame을 stream별 취소한다. shared `Client`에 foreign
+    stream의 revoke가 buffered되면 형제 runtime의 새 입력은 local bounded queue에
+    보존하되 shared wire admission/flush를 멈추는 connection-wide priority latch를 사용한다. partial wire frame만 framing 보존을 위해 connection
+    fail-close한다. observer GUI의 key/paste/IME는 backend `unauthorized`를 앱 계층의 typed
+    `InputSuppressed`로 바꿔 local consume하며 paste queue를 즉시 폐기하고 trace input을 0으로 둔다. resize는
+    no-op으로 수렴해 host mutation과 stale retry를 모두 0으로 둔다. 실제 두 host의 match+inconclusive, wire-capable proxy socket의 exact inode mismatch,
+    membership 소멸, 두 client takeover→old revoke/demotion을 Debug/ReleaseFast fixture로 검증한다.
+    P5c3b~d 전에는 public attach 전체 완료로 표시하지 않는다.
   - **P5c3b — neutral screen→ANSI projector**: 별도 `external_ansi.zig` adapter가 `ScreenSource` lock 안에서
     backend-neutral `RenderSnapshot`을 한 immutable bounded full-repaint frame으로 직렬화한다. `RemoteScreen` private
     grid, PTY byte stream이나 parser state는 읽거나 다시 해석하지 않는다. exact enter bytes는 공백 없는

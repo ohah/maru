@@ -57,6 +57,9 @@ pub const RuntimeError = std.mem.Allocator.Error || error{
     SurfaceAlreadyAttached,
     PtyAlreadyAttached,
     ProcessExited,
+    /// Backend가 입력을 의도적으로 받아들이지 않았다. observer처럼 현재 권위로는 앞으로도
+    /// 전송할 수 없는 입력이므로 caller는 재시도하지 않으며 trace에도 PTY 입력으로 기록하지 않는다.
+    InputSuppressed,
     WriteFailed,
     ResizeFailed,
     ReadFailed,
@@ -250,7 +253,10 @@ pub const SurfaceRuntime = struct {
             var ebuf: [320]u8 = undefined;
             input_diag.info("core->pty {d}B: {s}", .{ input.bytes.len, escapeForLog(input.bytes, &ebuf) });
         }
-        link.pty_io.writeInput(input.bytes) catch return error.WriteFailed;
+        link.pty_io.writeInput(input.bytes) catch |err| return switch (err) {
+            error.Unauthorized => error.InputSuppressed,
+            else => error.WriteFailed,
+        };
         // MARU_TRACE: 실제 child로 전송된 사용자 입력을 기록(완전한 세션 기록·분석용 — 재생 화면엔 영향 없음,
         // 화면은 output의 echo로 재구성). 터미널이 만든 응답(CPR 등)은 pty_io.writeInput을 직접 타 여기 안 걸린다.
         if (link.trace_recorder) |rec| rec.recordInput(surface_id, input.bytes);
@@ -266,7 +272,10 @@ pub const SurfaceRuntime = struct {
             var ebuf: [320]u8 = undefined;
             input_diag.info("core->pty(nb) {d}B: {s}", .{ bytes.len, escapeForLog(bytes, &ebuf) });
         }
-        const written = link.pty_io.writeInputNonBlocking(bytes) catch return error.WriteFailed;
+        const written = link.pty_io.writeInputNonBlocking(bytes) catch |err| return switch (err) {
+            error.Unauthorized => error.InputSuppressed,
+            else => error.WriteFailed,
+        };
         // MARU_TRACE: **실제 전송된 만큼만**(written) 기록한다 — 호출자가 나머지를 재시도하며 다시 호출하므로,
         // 전체를 매번 기록하면 부분 write가 중복 기록된다. 이어붙이면 전송된 입력 스트림 전체가 된다.
         if (link.trace_recorder) |rec| rec.recordInput(surface_id, bytes[0..written]);
@@ -433,6 +442,7 @@ const FakePty = struct {
     resize_calls: usize = 0,
     last_size: ?terminal.Size = null,
     fail_write: bool = false,
+    suppress_input: bool = false,
     fail_resize: bool = false,
 
     fn init(allocator: std.mem.Allocator) FakePty {
@@ -447,14 +457,24 @@ const FakePty = struct {
         return .{
             .ctx = self,
             .write_input = fakeWriteInput,
+            .write_input_nb = fakeWriteInputNonBlocking,
             .resize_fn = fakeResize,
         };
     }
 
     fn fakeWriteInput(ctx: *anyopaque, bytes: []const u8) !void {
         const self: *FakePty = @ptrCast(@alignCast(ctx));
+        if (self.suppress_input) return error.Unauthorized;
         if (self.fail_write) return error.FakeWriteFailed;
         try self.writes.appendSlice(self.allocator, bytes);
+    }
+
+    fn fakeWriteInputNonBlocking(ctx: *anyopaque, bytes: []const u8) !usize {
+        const self: *FakePty = @ptrCast(@alignCast(ctx));
+        if (self.suppress_input) return error.Unauthorized;
+        if (self.fail_write) return error.FakeWriteFailed;
+        try self.writes.appendSlice(self.allocator, bytes);
+        return bytes.len;
     }
 
     fn fakeResize(ctx: *anyopaque, size: terminal.Size) !void {
@@ -695,6 +715,36 @@ test "runtime: 사용자 입력을 trace input 이벤트로 기록하되 재생 
     defer allocator.free(screen);
     try std.testing.expect(std.mem.indexOf(u8, screen, "ls") == null); // 입력은 화면 미적용
     try std.testing.expect(std.mem.indexOf(u8, screen, "cd") == null);
+}
+
+// observer backend의 로컬 억제는 PTY 전송 성공이 아니다. 이 경계를 성공/bytes.len으로 뭉개면 trace와
+// replay가 실제 child가 받지 않은 입력을 받았다고 거짓 기록하고, paste caller는 stale bytes를 계속 재시도한다.
+test "runtime: backend가 억제한 blocking/nonblocking 입력은 typed 결과이고 trace input은 0이다" {
+    const allocator = std.testing.allocator;
+    var runtime = SurfaceRuntime.init(allocator);
+    defer runtime.deinit();
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    defer out.deinit();
+    var rec = TraceRecorder.init(&out.writer);
+
+    var surface = try surface_mod.Surface.init(allocator, 5, .{ .cols = 8, .rows = 2 });
+    defer surface.deinit();
+    var fake_pty = FakePty.init(allocator);
+    defer fake_pty.deinit();
+    fake_pty.suppress_input = true;
+    _ = try runtime.attach(&surface, 10, fake_pty.io());
+    try runtime.setSurfaceTraceRecorder(surface.id, &rec);
+
+    try std.testing.expectError(
+        error.InputSuppressed,
+        runtime.writeInput(surface.id, .{ .bytes = "key" }),
+    );
+    try std.testing.expectError(
+        error.InputSuppressed,
+        runtime.writeInputNonBlocking(surface.id, "paste"),
+    );
+    try std.testing.expectEqual(@as(usize, 0), fake_pty.writes.items.len);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), " input ") == null);
 }
 
 // per-link 레코더의 격리 계약(리뷰 [0]): 두 surface에 **서로 다른** recorder를 붙이면 각자 자기 것에만 기록된다 —

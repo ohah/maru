@@ -1,5 +1,5 @@
-//! Public attach의 secure discovery와 transport probe 사이의 deterministic reduction seam.
-//! Registry/path syscall은 recovery discovery가, one-shot `runtime.get` wire는 caller ProbeOps가 소유한다.
+//! Public attach의 secure discovery와 transport probe 사이의 순수 deterministic reduction seam.
+//! Registry/path syscall과 one-shot `runtime.get` wire는 제품 adapter가 소유한다.
 
 const std = @import("std");
 const attach_cli = @import("maru").cli.attach;
@@ -125,7 +125,10 @@ test "attach resolver never publishes partial membership evidence" {
         .{ .candidate = .{ .manifest = second } },
     };
     var probe = TestProbe{ .evidence = &.{ .match, .busy } };
-    try std.testing.expectEqual(attach_cli.ExitCode.busy, resolve(&entries, 0xaa, probe.ops()).failed);
+    try std.testing.expectEqual(
+        attach_cli.ExitCode.busy,
+        resolve(&entries, 0xaa, probe.ops()).failed,
+    );
     try std.testing.expectEqual(@as(usize, 2), probe.calls);
 }
 

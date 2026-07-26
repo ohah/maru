@@ -789,7 +789,7 @@ test "product read CLI connects to an existing daemon without spawning and emits
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, busy_result.stderr, "\n"));
     held_admin.deinit();
 
-    var gui = try client_mod.Client.connect(allocator, socket_path, "gui");
+    var gui = try client_mod.Client.connect(allocator, socket_path, .gui);
     var gui_active = true;
     errdefer if (gui_active) gui.deinit();
     const spawn_response = try gui.call(
@@ -887,7 +887,7 @@ test "product read CLI connects to an existing daemon without spawning and emits
     try std.testing.expectEqual(@as(c_int, 0), after_gui.exit_code);
     try std.testing.expect(std.mem.indexOf(u8, after_gui.stdout, "\"runtime_count\":1,\"client_count\":1") != null);
 
-    var end_gui = try client_mod.Client.connect(allocator, socket_path, "gui");
+    var end_gui = try client_mod.Client.connect(allocator, socket_path, .gui);
     defer end_gui.deinit();
     const end_spawn_response = try end_gui.call(
         "runtime.spawn",
@@ -1006,7 +1006,7 @@ test "product read CLI connects to an existing daemon without spawning and emits
     defer observer_spawn.deinit();
     const observer_runtime_id = try allocator.dupeZ(u8, observer_spawn.value.result.runtime_id);
     defer allocator.free(observer_runtime_id);
-    var observer_gui = try client_mod.Client.connect(allocator, socket_path, "gui");
+    var observer_gui = try client_mod.Client.connect(allocator, socket_path, .gui);
     defer observer_gui.deinit();
     const observer_params = try std.fmt.allocPrint(
         allocator,
@@ -1075,7 +1075,7 @@ test "product read CLI connects to an existing daemon without spawning and emits
     defer after_eof.deinit(allocator);
     try std.testing.expectEqual(@as(c_int, 0), after_eof.exit_code);
 
-    var race_gui = try client_mod.Client.connect(allocator, socket_path, "gui");
+    var race_gui = try client_mod.Client.connect(allocator, socket_path, .gui);
     defer race_gui.deinit();
     const race_spawn_response = try race_gui.call(
         "runtime.spawn",
@@ -1162,7 +1162,7 @@ test "product read CLI connects to an existing daemon without spawning and emits
         removeProductHostFiles(session_dir, replacement_socket, replacement_host_id);
     };
     try waitProductHostReady(allocator, session_dir, replacement_host_id);
-    var replacement_gui = try client_mod.Client.connect(allocator, replacement_socket, "gui");
+    var replacement_gui = try client_mod.Client.connect(allocator, replacement_socket, .gui);
     var replacement_gui_active = true;
     defer if (replacement_gui_active) replacement_gui.deinit();
     const replacement_spawn_response = try replacement_gui.call(

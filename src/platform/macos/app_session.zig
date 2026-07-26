@@ -21539,6 +21539,15 @@ pub const AppSession = struct {
         return false;
     }
 
+    /// 입력 backend가 명시적으로 억제한 바이트는 transient backpressure가 아니다. observer가 나중에
+    /// controller가 되더라도 과거 paste/IME를 재생하면 안 되므로 수명 종료와 같은 영구 폐기 분기로 보낸다.
+    fn discardPendingPasteOnError(err: app.runtime.RuntimeError) bool {
+        return switch (err) {
+            error.ProcessExited, error.UnknownSurface, error.InputSuppressed => true,
+            else => false,
+        };
+    }
+
     /// 각 surface 큐의 잔여를 지금 쓸 수 있는 만큼 non-blocking으로 흘려보낸다(0이 나오면 다음 tick에 이어서).
     /// 큐마다 독립이라 한 surface의 PTY가 막혀도 다른 surface는 계속 흐른다(옛 단일 FIFO는 서로 막았다).
     /// 다 썼거나 더 쓸 수 없는(닫힌 Term 등) 큐는 **비우되 엔트리는 남긴다** — 맵 순회 중 remove는 iterator를
@@ -21552,14 +21561,14 @@ pub const AppSession = struct {
             if (q.offset >= q.buf.items.len) continue; // 이미 빈 큐(엔트리만 남음)
             // tick당 surface별 한 번만 시도한다. 원격 backend의 16 KiB 상한을 여기서 while로 반복하면
             // 같은 tick에 큰 paste 전체를 동기 RPC로 밀어 UI를 다시 막으므로, 잔여는 다음 tick으로 넘긴다.
-            const written = self.runtime.writeInputNonBlocking(target_id, q.buf.items[q.offset..]) catch |err| switch (err) {
-                // 대상 수명이 끝났으면 재시도할 곳이 없으므로 잔여를 회수한다. transient OOM/WriteFailed는
-                // queue ownership을 보존해 다음 tick에 재시도한다.
-                error.ProcessExited, error.UnknownSurface => {
+            const written = self.runtime.writeInputNonBlocking(target_id, q.buf.items[q.offset..]) catch |err| {
+                // 대상 수명이 끝났거나 권위상 영구 억제됐으면 잔여를 회수한다. transient
+                // OOM/WriteFailed는 queue ownership을 보존해 다음 tick에 재시도한다.
+                if (discardPendingPasteOnError(err)) {
                     self.resetPasteQueue(q);
                     continue;
-                },
-                else => continue,
+                }
+                continue;
             };
             q.offset += written;
             if (q.offset >= q.buf.items.len) self.resetPasteQueue(q);
@@ -38246,7 +38255,7 @@ test "P3-e3 통합: keep-alive AppSession가 새 Term을 host-backed backend로 
         var up = false;
         var w: usize = 0;
         while (w < 250) : (w += 1) {
-            if (session_host.client.Client.connect(allocator, socket, "gui")) |cl| {
+            if (session_host.client.Client.connect(allocator, socket, .gui)) |cl| {
                 var probe = cl;
                 probe.deinit();
                 up = true;
@@ -38413,7 +38422,7 @@ test "R3 #3: host가 죽으면 createTerm이 in-process로 폴백한다(새 터�
         var up = false;
         var w: usize = 0;
         while (w < 250) : (w += 1) {
-            if (session_host.client.Client.connect(allocator, socket, "gui")) |cl| {
+            if (session_host.client.Client.connect(allocator, socket, .gui)) |cl| {
                 var p = cl;
                 p.deinit();
                 up = true;
@@ -39090,7 +39099,7 @@ test "P3-e3-5 재접속: restore_runtime_id로 createTerm이 기존 host runtime
         var up = false;
         var w: usize = 0;
         while (w < 250) : (w += 1) {
-            if (session_host.client.Client.connect(allocator, socket, "gui")) |cl| {
+            if (session_host.client.Client.connect(allocator, socket, .gui)) |cl| {
                 var p = cl;
                 p.deinit();
                 up = true;
@@ -39224,7 +39233,7 @@ test "P3-e3-6 app-quit: host-backed Term을 detach해 host runtime이 생존하�
         var up = false;
         var w: usize = 0;
         while (w < 250) : (w += 1) {
-            if (session_host.client.Client.connect(allocator, socket, "gui")) |cl| {
+            if (session_host.client.Client.connect(allocator, socket, .gui)) |cl| {
                 var p = cl;
                 p.deinit();
                 up = true;
@@ -39282,7 +39291,7 @@ test "P3-e3-6 app-quit: host-backed Term을 detach해 host runtime이 생존하�
         }
 
         // **재실행 흉내**: 새 연결로 그 runtime_id에 재접속되면 = 생존 증명(terminate였으면 host RuntimeNotFound → AttachFailed).
-        var client2 = session_host.client.Client.connect(allocator, socket, "gui") catch {
+        var client2 = session_host.client.Client.connect(allocator, socket, .gui) catch {
             try std.testing.expect(false);
             return;
         };
@@ -39332,7 +39341,7 @@ test "R1: app-quit 중 close()가 먼저 돌아도 host-backed runtime이 생존
         var up = false;
         var w: usize = 0;
         while (w < 250) : (w += 1) {
-            if (session_host.client.Client.connect(allocator, socket, "gui")) |cl| {
+            if (session_host.client.Client.connect(allocator, socket, .gui)) |cl| {
                 var p = cl;
                 p.deinit();
                 up = true;
@@ -39389,7 +39398,7 @@ test "R1: app-quit 중 close()가 먼저 돌아도 host-backed runtime이 생존
         }
 
         // 재실행 흉내: 새 연결로 그 runtime_id에 재접속 → 성공하면 close()가 terminate 안 했다는 증명.
-        var client2 = session_host.client.Client.connect(allocator, socket, "gui") catch {
+        var client2 = session_host.client.Client.connect(allocator, socket, .gui) catch {
             try std.testing.expect(false);
             return;
         };
@@ -39441,7 +39450,7 @@ test "① host-backed 스크롤은 observation 미가용(재접속 직후)에도
         var up = false;
         var w: usize = 0;
         while (w < 250) : (w += 1) {
-            if (session_host.client.Client.connect(allocator, socket, "gui")) |cl| {
+            if (session_host.client.Client.connect(allocator, socket, .gui)) |cl| {
                 var p = cl;
                 p.deinit();
                 up = true;
@@ -39503,6 +39512,9 @@ test "persistent session quit policy: setting off terminates instead of detachin
     }
 
     var session: AppSession = undefined;
+    // 이 순수 정책 테스트가 읽는 AppSession 필드는 is_quick 하나다. ReleaseFast에서 undefined
+    // 값을 읽으면 UB 최적화로 분기가 비결정적이므로 필요한 projection을 명시적으로 초기화한다.
+    session.is_quick = false;
     var surface: maru.session.Surface = undefined;
     surface.remote = .{ .ctx = @ptrFromInt(1), .vtable = @ptrFromInt(@alignOf(maru.session.surface.ScreenSource.VTable)) };
     var term: Term = .{};
@@ -39598,7 +39610,7 @@ test "P4 Quit-End-All: alternate가 host-backed runtime을 terminate한다(재�
         var up = false;
         var w: usize = 0;
         while (w < 250) : (w += 1) {
-            if (session_host.client.Client.connect(allocator, socket, "gui")) |cl| {
+            if (session_host.client.Client.connect(allocator, socket, .gui)) |cl| {
                 var p = cl;
                 p.deinit();
                 up = true;
@@ -39720,7 +39732,7 @@ test "P4 §6.32: host-backed Term의 OSC 9/777 알림이 GUI 알림 경로로 su
         var up = false;
         var w: usize = 0;
         while (w < 250) : (w += 1) {
-            if (session_host.client.Client.connect(allocator, socket, "gui")) |cl| {
+            if (session_host.client.Client.connect(allocator, socket, .gui)) |cl| {
                 var p = cl;
                 p.deinit();
                 up = true;
@@ -55076,6 +55088,14 @@ test "large paste drains through the non-blocking queue without freezing ticks" 
     }
     // 자식(read 대기 중)이 소비하므로 결국 큐가 빈다.
     try std.testing.expect(!session.hasPendingPaste());
+}
+
+test "observer input suppression permanently discards paste while transient writes remain retryable" {
+    try std.testing.expect(AppSession.discardPendingPasteOnError(error.InputSuppressed));
+    try std.testing.expect(AppSession.discardPendingPasteOnError(error.ProcessExited));
+    try std.testing.expect(AppSession.discardPendingPasteOnError(error.UnknownSurface));
+    try std.testing.expect(!AppSession.discardPendingPasteOnError(error.WriteFailed));
+    try std.testing.expect(!AppSession.discardPendingPasteOnError(error.OutOfMemory));
 }
 
 test "paste protection: 개행 붙여넣기는 확인 모달로 보류, 확인 시 자식까지 도달·취소는 미도달·off는 즉시 (input.paste-protection)" {

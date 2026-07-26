@@ -213,6 +213,35 @@ pub const RuntimeInventory = union(enum) {
     };
 };
 
+pub const AttachmentCapabilities = struct {
+    peer_attach_generation: bool = false,
+    negotiated_controller_transfer: bool = false,
+};
+
+/// Hello identity and capability policy are one closed profile. A caller cannot advertise
+/// controller transfer without selecting a consumer that owns the corresponding revoke fence.
+pub const ConnectionProfile = enum {
+    gui,
+    cli_probe,
+    cli_attach,
+    admin,
+
+    fn wireKind(self: ConnectionProfile) []const u8 {
+        return switch (self) {
+            .gui => "gui",
+            .cli_probe, .cli_attach => "cli",
+            .admin => "admin",
+        };
+    }
+
+    fn advertisesControllerTransfer(self: ConnectionProfile) bool {
+        return switch (self) {
+            .gui, .cli_attach => true,
+            .cli_probe, .admin => false,
+        };
+    }
+};
+
 /// host와의 한 connection. `host_id`는 hello_ack로 받은 값이다(§4 stale handle 판정에 쓴다). `call`은 read-only
 /// command를 왕복한다.
 pub const Client = struct {
@@ -231,11 +260,10 @@ pub const Client = struct {
     runtime_inventory_v1: bool = false,
     /// Attached stream의 controller status/takeover/release generation-CAS protocol을 양쪽이 협상했는가.
     /// public attach는 false인 same-major 구 host에서 observer만 허용하고 takeover method를 보내지 않는다.
-    controller_transfer_v1: bool = false,
-    /// Host attach replies include controller_generation when this peer supports the transfer
-    /// schema. This is intentionally separate from controller_transfer_v1: the latter also means
-    /// this client advertised that it can consume revoke and fence queued mutation.
-    attach_generation_v1: bool = false,
+    /// Peer reply schema and our revoke/fencing promise are different facts. Keep them in one
+    /// typed capability value so call sites cannot accidentally pass the promise bit as a decoder
+    /// schema bit.
+    attachment_capabilities: AttachmentCapabilities = .{},
     /// Hidden one-shot admin role을 host가 명시적으로 지원하는가. CLI는 이 값 없이 read method를 추측하지 않는다.
     admin_one_shot_v1: bool = false,
     /// Public `runtime end`를 exact one-shot admin mutation으로 지원하는가.
@@ -293,6 +321,7 @@ pub const Client = struct {
 
     const PendingOutbound = struct {
         frame: []u8,
+        stream_id: u64,
         offset: usize = 0,
     };
 
@@ -305,15 +334,15 @@ pub const Client = struct {
 
     /// host socket에 connect하고 hello를 왕복한다. 성공하면 `host_id`가 채워진 Client다. host가 없으면 EndpointAbsent
     /// (discovery가 이 신호로 spawn/host_unavailable을 가른다, P3-d2b). version 불일치는 IncompatibleVersion.
-    pub fn connect(allocator: std.mem.Allocator, socket_path: [:0]const u8, client_kind: []const u8) ClientError!Client {
-        return connectMajor(allocator, socket_path, client_kind, protocol.version_major);
+    pub fn connect(allocator: std.mem.Allocator, socket_path: [:0]const u8, profile: ConnectionProfile) ClientError!Client {
+        return connectMajor(allocator, socket_path, profile, protocol.version_major);
     }
 
     pub fn connectAdmin(
         allocator: std.mem.Allocator,
         socket_path: [:0]const u8,
     ) ClientError!Client {
-        return requireAdminCapability(try connect(allocator, socket_path, "admin"));
+        return requireAdminCapability(try connect(allocator, socket_path, .admin));
     }
 
     fn requireAdminCapability(candidate: Client) ClientError!Client {
@@ -336,7 +365,7 @@ pub const Client = struct {
     pub fn connectMajor(
         allocator: std.mem.Allocator,
         socket_path: [:0]const u8,
-        client_kind: []const u8,
+        connection_profile: ConnectionProfile,
         wire_major: u16,
     ) ClientError!Client {
         const profile = compatibility.profileForMajor(wire_major) orelse return error.IncompatibleVersion;
@@ -365,7 +394,12 @@ pub const Client = struct {
         errdefer self.parser.deinit();
 
         // hello 전송.
-        const hello = buildHelloMajor(allocator, client_kind, wire_major) catch return error.OutOfMemory;
+        const hello = buildHelloMajorFeatures(
+            allocator,
+            connection_profile.wireKind(),
+            wire_major,
+            connection_profile.advertisesControllerTransfer(),
+        ) catch return error.OutOfMemory;
         defer allocator.free(hello);
         const hello_frame = framing.encodeFrame(
             allocator,
@@ -419,12 +453,13 @@ pub const Client = struct {
         self.host_manifest_v1 = manifest_capable;
         self.host_exec_upgrade_v1 = payloadHasCapability(ack.payload, "host_exec_upgrade_v1");
         self.runtime_inventory_v1 = inventory_capable;
-        // Capability request is a promise that this client consumes revoke and fences queued
-        // mutation. Public attach (`cli`) makes that promise; current GUI RemoteRuntime does not
-        // yet, so an unsolicited ACK capability must not silently enable takeover against it.
-        self.attach_generation_v1 = payloadHasCapability(ack.payload, "controller_transfer_v1");
-        self.controller_transfer_v1 = std.mem.eql(u8, client_kind, "cli") and
-            self.attach_generation_v1;
+        // Capability request is a promise that the selected profile consumes revoke and fences
+        // queued mutation; unsolicited host support alone never enables transfer.
+        self.attachment_capabilities.peer_attach_generation =
+            payloadHasCapability(ack.payload, "controller_transfer_v1");
+        self.attachment_capabilities.negotiated_controller_transfer =
+            connection_profile.advertisesControllerTransfer() and
+            self.attachment_capabilities.peer_attach_generation;
         self.admin_one_shot_v1 = payloadHasCapability(ack.payload, "admin_one_shot_v1");
         self.admin_runtime_end_v1 = payloadHasCapability(ack.payload, "admin_runtime_end_v1");
         self.screen_viewport_scrolled_v1 = payloadHasCapability(ack.payload, "screen_viewport_scrolled_v1");
@@ -504,13 +539,15 @@ pub const Client = struct {
                 try self.bufferEvent(resp);
                 continue;
             }
-            defer resp.deinit(self.allocator);
             // kind와 request_id를 함께 확인한다 — out-of-order frame을 이 call의 응답으로 오귀속하지 않는다.
             if (resp.header.kind != .response or resp.header.request_id != request_id) {
+                resp.deinit(self.allocator);
                 self.invalidateConnection();
                 return error.ProtocolError;
             }
-            return self.allocator.dupe(u8, resp.payload) catch return error.OutOfMemory;
+            // FrameParser already returned an owned payload. Transfer it directly so a committed
+            // mutating response cannot be consumed and then lost to a second allocation failure.
+            return resp.payload;
         }
     }
 
@@ -1114,7 +1151,7 @@ pub const Client = struct {
             bytes[0..accepted],
         ) catch return error.OutOfMemory;
         std.debug.assert(self.pending_outbound == null);
-        self.pending_outbound = .{ .frame = frame };
+        self.pending_outbound = .{ .frame = frame, .stream_id = stream_id };
 
         // EAGAIN/partial write여도 frame 소유권은 이미 client로 넘어왔다. hard error만 connection을 fail-closed한다.
         _ = try self.pumpPendingOutput();
@@ -1134,7 +1171,7 @@ pub const Client = struct {
             "",
         ) catch return error.OutOfMemory;
         std.debug.assert(self.pending_outbound == null);
-        self.pending_outbound = .{ .frame = frame };
+        self.pending_outbound = .{ .frame = frame, .stream_id = stream_id };
         _ = try self.pumpPendingOutput();
         return true;
     }
@@ -1150,7 +1187,7 @@ pub const Client = struct {
             "{\"action\":\"resync\"}",
         ) catch return error.OutOfMemory;
         std.debug.assert(self.pending_outbound == null);
-        self.pending_outbound = .{ .frame = frame };
+        self.pending_outbound = .{ .frame = frame, .stream_id = stream_id };
         _ = try self.pumpPendingOutput();
         return true;
     }
@@ -1167,7 +1204,7 @@ pub const Client = struct {
             payload,
         ) catch return error.OutOfMemory;
         std.debug.assert(self.pending_outbound == null);
-        self.pending_outbound = .{ .frame = frame };
+        self.pending_outbound = .{ .frame = frame, .stream_id = stream_id };
         _ = try self.pumpPendingOutput();
         return true;
     }
@@ -1246,6 +1283,46 @@ pub const Client = struct {
         return true;
     }
 
+    pub const RevokeFence = enum {
+        no_pending_stream_frame,
+        cancelled_before_write,
+        partial_frame_requires_close,
+    };
+
+    /// Revoke may race a frame already admitted by a previous UI turn. A zero-byte frame can be
+    /// removed without changing the wire; a partial frame cannot be truncated without corrupting
+    /// framing and requires connection fail-close. Another stream's frame is unrelated and stays.
+    pub fn fenceRevokedStream(self: *Client, stream_id: u64) RevokeFence {
+        const pending = self.pending_outbound orelse return .no_pending_stream_frame;
+        if (pending.stream_id != stream_id) return .no_pending_stream_frame;
+        if (pending.offset != 0) return .partial_frame_requires_close;
+        self.clearPendingOutbound();
+        return .cancelled_before_write;
+    }
+
+    /// A shared GUI connection must let the owning RemoteRuntime consume every buffered revoke
+    /// before any sibling admits or flushes mutation. This is a connection-wide priority latch;
+    /// the stream-local consumer still performs strict decode and generation transition.
+    pub fn hasBufferedControllerRevoke(self: *const Client) bool {
+        return self.hasBufferedControllerRevokeForStream(null);
+    }
+
+    /// 권위 판정용 stream-local latch. foreign revoke는 shared wire 진행만 멈추지만 이 stream의
+    /// revoke는 role cache가 아직 controller여도 새 mutation을 받아서는 안 된다.
+    pub fn hasBufferedControllerRevokeForStream(self: *const Client, stream_id: ?u64) bool {
+        for (self.pending_events.items) |frame| {
+            if (stream_id) |expected| {
+                if (frame.header.stream_id != expected) continue;
+            }
+            if (std.mem.indexOf(
+                u8,
+                frame.payload,
+                "\"event\":\"controller.revoked\"",
+            ) != null) return true;
+        }
+        return false;
+    }
+
     const NonblockingSend = union(enum) {
         written: usize,
         would_block,
@@ -1307,13 +1384,20 @@ pub const Client = struct {
                 };
             const n = c.read(self.fd, &buf, buf.len);
             if (n < 0) {
-                if (posix.errno(n) == .INTR) continue; // 시그널 인터럽트는 재시도(timeout/EAGAIN·기타 오류는 종료로).
+                const read_errno = posix.errno(n);
+                if (read_errno == .INTR) continue;
+                const partial = self.parser.bufferedBytes() != 0;
                 self.invalidateConnection();
-                return error.ConnectionClosed;
+                if (partial) return error.ProtocolError;
+                return if (read_errno == .AGAIN or read_errno == .TIMEDOUT)
+                    error.EndpointTransient
+                else
+                    error.ConnectionClosed;
             }
             if (n == 0) {
+                const partial = self.parser.bufferedBytes() != 0;
                 self.invalidateConnection();
-                return error.ConnectionClosed; // EOF.
+                return if (partial) error.ProtocolError else error.ConnectionClosed;
             }
             self.parser.push(buf[0..@intCast(n)]) catch {
                 // 이미 socket에서 소비한 바이트를 parser에 보존하지 못했다. 다음 frame 경계를 복구할 수 없다.
@@ -1690,7 +1774,7 @@ test "client request write failure invalidates the connection before another cal
     try std.testing.expectError(error.ConnectionClosed, client.call("host.info", null));
 }
 
-test "client response timeout invalidates the connection before another request id can desync" {
+test "client response timeout is transient evidence and invalidates before another request" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
     var fds: [2]c.fd_t = undefined;
@@ -1706,7 +1790,7 @@ test "client response timeout invalidates the connection before another request 
         .parser = framing.FrameParser.init(allocator),
     };
     defer client.deinit();
-    try std.testing.expectError(error.ConnectionClosed, client.call("host.info", null));
+    try std.testing.expectError(error.EndpointTransient, client.call("host.info", null));
     try std.testing.expect(client.unusable);
     try std.testing.expectEqual(@as(c.fd_t, -1), client.fd);
     // 늦은 response가 다음 request에 오귀속될 수 없도록 같은 socket은 재사용하지 않는다.
@@ -1720,11 +1804,77 @@ test "client invalidation releases an owned pending outbound frame" {
         .fd = -1,
         .host_id = 1,
         .parser = framing.FrameParser.init(allocator),
-        .pending_outbound = .{ .frame = try allocator.dupe(u8, "owned-frame") },
+        .pending_outbound = .{
+            .frame = try allocator.dupe(u8, "owned-frame"),
+            .stream_id = 7,
+        },
     };
     defer client.deinit();
     client.invalidateConnection();
     try std.testing.expect(client.pending_outbound == null);
+    try std.testing.expect(client.unusable);
+}
+
+test "client revoke fence cancels only zero-byte frame for the revoked stream" {
+    const allocator = std.testing.allocator;
+    var client = Client{
+        .allocator = allocator,
+        .fd = -1,
+        .host_id = 1,
+        .parser = framing.FrameParser.init(allocator),
+        .pending_outbound = .{
+            .frame = try allocator.dupe(u8, "owned-frame"),
+            .stream_id = 7,
+        },
+    };
+    defer client.deinit();
+    try std.testing.expectEqual(
+        Client.RevokeFence.no_pending_stream_frame,
+        client.fenceRevokedStream(8),
+    );
+    try std.testing.expect(client.pending_outbound != null);
+    try std.testing.expectEqual(
+        Client.RevokeFence.cancelled_before_write,
+        client.fenceRevokedStream(7),
+    );
+    try std.testing.expect(client.pending_outbound == null);
+
+    client.pending_outbound = .{
+        .frame = try allocator.dupe(u8, "partial"),
+        .stream_id = 7,
+        .offset = 1,
+    };
+    try std.testing.expectEqual(
+        Client.RevokeFence.partial_frame_requires_close,
+        client.fenceRevokedStream(7),
+    );
+    try std.testing.expect(client.pending_outbound != null);
+}
+
+test "client classifies EOF after partial frame bytes as protocol evidence" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    var fds: [2]c.fd_t = undefined;
+    try std.testing.expectEqual(
+        @as(c_int, 0),
+        c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds),
+    );
+    var client = Client{
+        .allocator = allocator,
+        .fd = fds[0],
+        .host_id = 1,
+        .parser = framing.FrameParser.init(allocator),
+    };
+    defer client.deinit();
+    const frame = try framing.encodeFrame(
+        allocator,
+        .{ .kind = .response, .request_id = 7 },
+        "{\"result\":{}}",
+    );
+    defer allocator.free(frame);
+    try socket_server.writeAll(fds[1], frame[0 .. protocol.header_size + 1]);
+    _ = c.close(fds[1]);
+    try std.testing.expectError(error.ProtocolError, client.readFrame());
     try std.testing.expect(client.unusable);
 }
 
@@ -2245,7 +2395,21 @@ fn buildHelloMajor(
     client_kind: []const u8,
     wire_major: u16,
 ) error{OutOfMemory}![]u8 {
-    const transfer_capability = if (std.mem.eql(u8, client_kind, "cli"))
+    return buildHelloMajorFeatures(
+        allocator,
+        client_kind,
+        wire_major,
+        std.mem.eql(u8, client_kind, "cli"),
+    );
+}
+
+fn buildHelloMajorFeatures(
+    allocator: std.mem.Allocator,
+    client_kind: []const u8,
+    wire_major: u16,
+    advertise_controller_transfer: bool,
+) error{OutOfMemory}![]u8 {
+    const transfer_capability = if (advertise_controller_transfer)
         ",\"controller_transfer_v1\""
     else
         "";
@@ -2650,7 +2814,7 @@ test "client: hello/request JSON build and host_id parse are server-symmetric (p
     try testing.expect(!legacy_client.screen_viewport_scrolled_v1);
     try testing.expect(!legacy_client.runtime_selected_text_v1);
     try testing.expect(!legacy_client.notification_stream_auth_v1);
-    try testing.expect(!legacy_client.controller_transfer_v1);
+    try testing.expect(!legacy_client.attachment_capabilities.negotiated_controller_transfer);
     legacy_client.screen_viewport_scrolled_v1 = payloadHasCapability(
         "{\"host_id\":\"1234\"}",
         "screen_viewport_scrolled_v1",
@@ -2666,11 +2830,11 @@ test "client: hello/request JSON build and host_id parse are server-symmetric (p
         "notification_stream_auth_v1",
     );
     try testing.expect(legacy_client.notification_stream_auth_v1);
-    legacy_client.controller_transfer_v1 = payloadHasCapability(
+    legacy_client.attachment_capabilities.negotiated_controller_transfer = payloadHasCapability(
         "{\"host_id\":\"1234\",\"capabilities\":[\"controller_transfer_v1\"]}",
         "controller_transfer_v1",
     );
-    try testing.expect(legacy_client.controller_transfer_v1);
+    try testing.expect(legacy_client.attachment_capabilities.negotiated_controller_transfer);
 }
 
 test "client: connects to a forked host, agrees on host_id, and calls host.info" {
@@ -2701,7 +2865,7 @@ test "client: connects to a forked host, agrees on host_id, and calls host.info"
     var client: Client = blk: {
         var attempts: usize = 0;
         while (attempts < 150) : (attempts += 1) {
-            if (Client.connect(allocator, socket_path, "cli")) |cl| {
+            if (Client.connect(allocator, socket_path, .cli_attach)) |cl| {
                 break :blk cl;
             } else |_| {
                 _ = usleepMs(20);
@@ -2718,8 +2882,8 @@ test "client: connects to a forked host, agrees on host_id, and calls host.info"
     try testing.expect(client.runtime_core_command_v1);
     try testing.expect(client.runtime_selected_text_v1);
     try testing.expect(client.notification_stream_auth_v1);
-    try testing.expect(client.attach_generation_v1);
-    try testing.expect(client.controller_transfer_v1);
+    try testing.expect(client.attachment_capabilities.peer_attach_generation);
+    try testing.expect(client.attachment_capabilities.negotiated_controller_transfer);
     const resp = try client.call("host.info", null);
     defer allocator.free(resp);
     try testing.expect(std.mem.indexOf(u8, resp, "runtime_count") != null);
@@ -2794,7 +2958,7 @@ test "client: forked daemon serves ephemeral inventory while canonical GUI stays
     var gui: Client = blk: {
         var attempts: usize = 0;
         while (attempts < 150) : (attempts += 1) {
-            if (Client.connect(allocator, socket_path, "gui")) |connected|
+            if (Client.connect(allocator, socket_path, .gui)) |connected|
                 break :blk connected
             else |_|
                 _ = usleepMs(20);
@@ -2803,11 +2967,12 @@ test "client: forked daemon serves ephemeral inventory while canonical GUI stays
     };
     defer gui.deinit();
     try testing.expect(gui.runtime_inventory_v1);
-    try testing.expect(gui.attach_generation_v1);
-    try testing.expect(!gui.controller_transfer_v1);
+    try testing.expect(gui.attachment_capabilities.peer_attach_generation);
+    try testing.expect(gui.attachment_capabilities.negotiated_controller_transfer);
     try testing.expectEqual(child, try testPeerPid(gui.fd));
 
-    var ephemeral = try Client.connect(allocator, socket_path, "cli");
+    var ephemeral = try Client.connect(allocator, socket_path, .cli_probe);
+    try testing.expect(!ephemeral.attachment_capabilities.negotiated_controller_transfer);
     const inventory = try ephemeral.call(
         "runtime.inventory",
         "{\"cursor\":\"\",\"limit\":256,\"membership_generation\":0}",
@@ -2851,7 +3016,7 @@ test "client: forked daemon serves ephemeral inventory while canonical GUI stays
     var restored: Client = blk: {
         var attempts: usize = 0;
         while (attempts < 250) : (attempts += 1) {
-            if (Client.connect(allocator, socket_path, "gui")) |connected|
+            if (Client.connect(allocator, socket_path, .gui)) |connected|
                 break :blk connected
             else |_|
                 _ = usleepMs(20);
@@ -2938,7 +3103,7 @@ test "client: spawns, lists, and terminates a real runtime on a forked host over
     var client: Client = blk: {
         var attempts: usize = 0;
         while (attempts < 150) : (attempts += 1) {
-            if (Client.connect(allocator, socket_path, "gui")) |cl| break :blk cl else |_| _ = usleepMs(20);
+            if (Client.connect(allocator, socket_path, .gui)) |cl| break :blk cl else |_| _ = usleepMs(20);
         }
         try testing.expect(false); // host가 3초 안에 안 떴다.
         return;
@@ -3000,7 +3165,7 @@ test "client: sibling attachment converges after explicit terminate and natural 
     var first: Client = blk: {
         var attempts: usize = 0;
         while (attempts < 150) : (attempts += 1) {
-            if (Client.connect(allocator, socket_path, "gui")) |connected|
+            if (Client.connect(allocator, socket_path, .gui)) |connected|
                 break :blk connected
             else |_|
                 _ = usleepMs(20);
@@ -3008,7 +3173,7 @@ test "client: sibling attachment converges after explicit terminate and natural 
         return error.TestUnexpectedResult;
     };
     defer first.deinit();
-    var sibling = try Client.connect(allocator, socket_path, "gui");
+    var sibling = try Client.connect(allocator, socket_path, .gui);
     defer sibling.deinit();
 
     const spawn_resp = try first.call(
@@ -3139,7 +3304,7 @@ test "client: attach, input, resize, and detach a real runtime over the wire" {
     var client: Client = blk: {
         var attempts: usize = 0;
         while (attempts < 150) : (attempts += 1) {
-            if (Client.connect(allocator, socket_path, "gui")) |cl| break :blk cl else |_| _ = usleepMs(20);
+            if (Client.connect(allocator, socket_path, .gui)) |cl| break :blk cl else |_| _ = usleepMs(20);
         }
         try testing.expect(false);
         return;
@@ -3231,7 +3396,7 @@ test "client: receives a delta_chunk stream reflecting input echoed onto the scr
     var client: Client = blk: {
         var attempts: usize = 0;
         while (attempts < 150) : (attempts += 1) {
-            if (Client.connect(allocator, socket_path, "gui")) |cl| break :blk cl else |_| _ = usleepMs(20);
+            if (Client.connect(allocator, socket_path, .gui)) |cl| break :blk cl else |_| _ = usleepMs(20);
         }
         try testing.expect(false);
         return;

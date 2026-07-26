@@ -11,11 +11,17 @@ pub const Kind = enum {
     previous,
 };
 
+pub const AttachSchema = enum {
+    frozen_controller_only,
+    granted_roles,
+};
+
 pub const Profile = struct {
     kind: Kind,
     wire_major: u16,
     screen_codec_version: u16,
     required_fingerprint: ?[]const u8,
+    attach_schema: AttachSchema,
 };
 
 // 공개된 release row는 산술로 추론하지 않는다. 다음 major/codec bump는 먼저 이 표와 frozen fixture를 갱신해야
@@ -26,12 +32,14 @@ pub const profiles = [_]Profile{
         .wire_major = 2,
         .screen_codec_version = 2,
         .required_fingerprint = null,
+        .attach_schema = .granted_roles,
     },
     .{
         .kind = .previous,
         .wire_major = 1,
         .screen_codec_version = 1,
         .required_fingerprint = "screen_stream_v1_current_body",
+        .attach_schema = .frozen_controller_only,
     },
 };
 
@@ -52,10 +60,12 @@ test "compatibility table has one exact current and one fingerprinted N-1 profil
     const current = profileForMajor(protocol.version_major).?;
     try std.testing.expectEqual(Kind.current, current.kind);
     try std.testing.expectEqual(screen_stream.codec_version, current.screen_codec_version);
+    try std.testing.expectEqual(AttachSchema.granted_roles, current.attach_schema);
     try std.testing.expect(current.required_fingerprint == null);
     const previous = profileForMajor(1).?;
     try std.testing.expectEqual(Kind.previous, previous.kind);
     try std.testing.expectEqual(@as(u16, 1), previous.screen_codec_version);
     try std.testing.expectEqualStrings("screen_stream_v1_current_body", previous.required_fingerprint.?);
+    try std.testing.expectEqual(AttachSchema.frozen_controller_only, previous.attach_schema);
     try std.testing.expect(profileForMajor(0) == null);
 }

@@ -495,12 +495,21 @@ const agent_poll_interval_ms: u32 = 500; // 포그라운드 프로세스(에이�
 /// 세션 기록 파일(transcript) polling 주기. 대화는 **사람이 치는 속도**로 바뀌므로 상태 polling(≈0.5s)보다 느려도
 /// 충분하고, 디렉터리 스캔·tail 파싱을 그만큼 덜 한다(docs/sidebar-agent-list.md §7.4).
 const transcript_poll_interval_ms: u64 = 1000;
+/// 활동 시각은 **시간이 흐르는 것만으로** 값이 바뀐다(5m → 6m). 다른 재렌더 사유가 없으면 화면에 멈춘 값이 남다가
+/// 무관한 이벤트에 갑자기 뛴다 — 값이 틀린 것보다 그 거동이 더 헷갈린다(code-review max). 그래서 에이전트를 보여주는
+/// 동안 이 주기로 재렌더한다. 표기 최소 단위가 분이므로 이보다 촘촘할 이유가 없다.
+const agent_age_repaint_interval_ms: u32 = 20_000;
 /// 알림 본문에 싣는 대화 한 줄의 상한(bytes). 표시 상한(`max_text_bytes`)보다 짧다 — OS 배너는 몇 줄만 보여주고
 /// 자르므로, 긴 원문을 통째로 넣어봐야 뒤가 안 보이면서 알림만 커진다.
 const notification_conversation_max_bytes: usize = 160;
-/// codex 후보를 **몇 개까지 열어** 신원을 확인할지. 서브에이전트가 같은 계층에 섞여(실측 최근 40개 중 32개) 사용자
-/// 세션이 상위에 없을 수 있으므로 하나만 보면 못 찾는다. 늘릴수록 회수율이 오르지만 여는 비용도 는다.
-const codex_candidate_probe_limit: usize = 20;
+/// codex 후보를 **몇 개까지 열어** 신원을 확인할지. 서브에이전트가 같은 계층에 섞이므로(실측 최근 40개 중 32개)
+/// 하나만 보면 못 찾는다. 20이면 그 밀도보다 작아 서브에이전트를 대량으로 돌린 직후 사용자 세션이 후보 밖으로
+/// 밀렸다(code-review max) — 관측된 밀도(80%)에 여유를 둬 48로 잡는다. 매핑이 잡히면 mtime이 바뀔 때만 다시
+/// 훑으므로 이 상한이 상시 비용은 아니다.
+const codex_candidate_probe_limit: usize = 48;
+/// 같은 cwd에서 이미 매핑된 형제 Term 파일을 몇 개까지 모을지(충돌 회피용). 한 워크스페이스에서 이보다 많은
+/// 에이전트를 같은 디렉터리에 돌리는 경우는 실질적으로 없고, 넘으면 그 이상은 그냥 충돌 회피 대상에서 빠진다.
+const transcript_sibling_scan_limit: usize = 8;
 /// codex `session_meta`(첫 레코드)를 찾는 데 읽는 앞부분 크기.
 const codex_head_bytes: usize = 64 * 1024;
 const agent_observer_interval_ms: u32 = 100; // 화면/OSC/activity 상태 판정 주기.
@@ -2814,6 +2823,8 @@ pub const AppSession = struct {
     // 에이전트 감지 polling 카운터 — 매 tick tcgetpgrp+proc_name(syscall)은 비싸므로 N tick마다(≈0.5s) 각 Term의
     // 포그라운드 프로세스명을 polling해 agent_kind를 갱신한다(claude/codex/none).
     agent_poll_ticks: u32 = 0,
+    /// 활동 시각 재렌더 tick 카운터(agent_age_repaint_interval_ms).
+    agent_age_repaint_ticks: u32 = 0,
     agent_observer_poll_ticks: u32 = 0,
     // synchronized output(2026) hold가 이어진 tick 수(활성 surface 기준). sync_timeout_ms에 해당하는 tick 수를 넘으면 ESU
     // 유실로 보고 강제 투영해 freeze를 푼다. sync가 꺼지면 0으로 리셋한다.
@@ -22120,8 +22131,30 @@ pub const AppSession = struct {
         };
         const osc_surface_id = term.surface.id;
         const fg_banner = !(focused_term != null and term == focused_term.?);
-        _ = self.pushNotificationHistory(self.notification_title_out, self.notification_body_out, osc_surface_id);
+        // 인앱 알림 센터는 body를 **한 줄 텍스트 run**으로 그린다 — 개행이 살아 있으면 글자가 뭉개진다. OS 배너는
+        // 여러 줄을 제대로 보여주므로 그쪽엔 원문을 그대로 보내고, 히스토리에만 눕힌 사본을 넣는다(code-review max).
+        const history_body = self.flattenForHistory(self.notification_body_out) catch null;
+        defer if (history_body) |h| self.allocator.free(h);
+        _ = self.pushNotificationHistory(self.notification_title_out, history_body orelse self.notification_body_out, osc_surface_id);
         return .{ .title = self.notification_title_out, .body = self.notification_body_out, .surface_id = osc_surface_id, .foreground_banner = fg_banner };
+    }
+
+    /// 알림 **히스토리용** 한 줄 사본(owned) — 개행을 중점(·)으로 바꾼다. 원문을 안 고치는 이유는 OS 배너가
+    /// 여러 줄을 제대로 보여주기 때문이다(두 표면의 요구가 다르다).
+    fn flattenForHistory(self: *AppSession, body: []const u8) ![]u8 {
+        if (std.mem.indexOfScalar(u8, body, '\n') == null) return self.allocator.dupe(u8, body);
+        var out: std.ArrayListUnmanaged(u8) = .empty;
+        errdefer out.deinit(self.allocator);
+        var it = std.mem.splitScalar(u8, body, '\n');
+        var first = true;
+        while (it.next()) |line| {
+            const t = std.mem.trim(u8, line, " \t\r");
+            if (t.len == 0) continue;
+            if (!first) try out.appendSlice(self.allocator, " \u{00b7} ");
+            try out.appendSlice(self.allocator, t);
+            first = false;
+        }
+        return out.toOwnedSlice(self.allocator);
     }
 
     /// 알림 본문(owned) = provider 문구 + 그 Term의 **마지막 대화**(docs/sidebar-agent-list.md §7).
@@ -23837,6 +23870,14 @@ pub const AppSession = struct {
     fn pollAgentKinds(self: *AppSession) void {
         self.agent_poll_ticks += 1;
         self.agent_observer_poll_ticks += 1;
+        // 시간 경과만으로 바뀌는 표시(활동 시각)를 위한 주기적 재렌더. 사이드바가 보이고 에이전트가 하나라도
+        // 있을 때만 — 그 조건이 아니면 그릴 것이 없다.
+        self.agent_age_repaint_ticks += 1;
+        if (self.agent_age_repaint_ticks >= self.ticksForMs(agent_age_repaint_interval_ms)) {
+            self.agent_age_repaint_ticks = 0;
+            // 사이드바 카드가 실제로 보이는 상태에서만(접힘·minimal chrome이면 그릴 자리가 없다).
+            if (!self.sidebar_collapsed and !self.chrome_minimal and self.anyAgentPresent()) self.metal_dirty = true;
+        }
         const periodic_kind_probe = self.agent_poll_ticks >= self.agentPollIntervalTicks();
         const observer_probe = self.agent_observer_poll_ticks >= self.agentObserverIntervalTicks();
         if (!periodic_kind_probe and !observer_probe) return;
@@ -23877,7 +23918,11 @@ pub const AppSession = struct {
                             term.agent_stabilizer.reset();
                             term.agent_screen_generation = 0;
                             term.agent_last_output_ms = 0;
-                            term.agent_transcript.reset(); // 새 프로세스의 대화를 이전 세션 것과 섞지 않는다
+                            // 새 프로세스의 대화를 이전 세션 것과 섞지 않는다. 응답 줄이 사라지면 행 줄 수도
+                            // 바뀌므로 **재투영까지** 해야 한다 — metal_dirty만으로는 행 높이가 옛 값으로 남는다.
+                            const had_reply_kind = term.agent_transcript.owned.reply().len > 0;
+                            term.agent_transcript.reset();
+                            if (had_reply_kind) self.rebuildSidebar() catch {};
                         }
                     }
                     if (observer_probe and observation_current and term.agent_kind != .none) {
@@ -23903,7 +23948,11 @@ pub const AppSession = struct {
         if (cache.last_poll_ms != 0 and now -| cache.last_poll_ms < transcript_poll_interval_ms) return;
         cache.last_poll_ms = now;
 
-        const had_text = !cache.owned.isEmpty();
+        // **줄 수를 좌우하는 값**으로 재투영을 판정한다. 예전엔 `isEmpty()`(프롬프트 OR 응답) 변화로 봤는데, 행
+        // 줄 수는 `reply()`만 늘리므로 "프롬프트는 이미 있고 응답만 새로 왔다"에서 재투영이 안 돌아 렌더는 3줄을
+        // 그리고 행 높이는 2줄로 남았다 — 그러면 응답 줄이 다음 행 위에 그려지고 클릭이 이웃 행의 ✕에 닿는다
+        // (code-review max). 프롬프트는 1행 안에서 자리를 바꿀 뿐이라 줄 수에 영향이 없다.
+        const had_reply = cache.owned.reply().len > 0;
         // provider마다 다른 건 **경로 규칙·신원 확인·레코드 모양** 셋뿐이다(§7.3). 매핑 규율(고정하지 않음)·throttle·
         // 재투영은 여기 공통으로 남는다.
         const changed = switch (term.agent_kind) {
@@ -23915,8 +23964,8 @@ pub const AppSession = struct {
 
         // 대화 **유무**가 바뀌면 행 줄 수가 바뀌므로 재투영이 필요하다(행 높이·hit-test·밴드가 sidebar_rows에서
         // 나온다). 텍스트만 바뀐 경우엔 라벨이 매 프레임 조립되므로 dirty만 세우면 된다.
-        const has_text = !cache.owned.isEmpty();
-        if (has_text != had_text) self.rebuildSidebar() catch {};
+        const has_reply = cache.owned.reply().len > 0;
+        if (has_reply != had_reply) self.rebuildSidebar() catch {};
         if (displayed) self.metal_dirty = true;
     }
 
@@ -23939,7 +23988,12 @@ pub const AppSession = struct {
         // 갱신되지 않으므로 "그 순간 최신 = 그 Term이 방금 말한 세션"이 성립한다(실측: claude 4/4).
         var name_buf: [tr.max_name_bytes]u8 = undefined;
         if (cache.name_len == 0 or cache.mapped_output_ms != term.agent_last_output_ms) {
-            const found = tr.latestSessionFile(self.io, dir, &name_buf) orelse return false;
+            // 같은 cwd의 **다른** Term이 이미 매핑한 파일은 후보에서 뺀다. 안 그러면 한 저장소에서 에이전트 둘을
+            // 돌릴 때 둘 다 전역 최신 파일을 물어 한쪽 행에 다른 쪽 대화가 뜨고, 같은 캐시를 읽는 알림 본문까지
+            // 옆 팬의 프롬프트로 캡션된다(code-review max). cwd 대조는 둘 다 같은 cwd라 못 걸러낸다.
+            var taken_buf: [transcript_sibling_scan_limit][]const u8 = undefined;
+            const taken = self.claudeTranscriptsTakenBy(term, &taken_buf);
+            const found = tr.latestSessionFile(self.io, dir, &name_buf, taken) orelse return false;
             if (!std.mem.eql(u8, found.name, cache.fileName())) {
                 cache.setFileName(found.name);
                 cache.read_mtime_ns = 0; // 파일이 바뀌었으면 mtime 비교를 건너뛰고 무조건 읽는다
@@ -23967,13 +24021,41 @@ pub const AppSession = struct {
         // 인코딩 규칙(claudeDirName)이 불완전해 엉뚱한 디렉터리를 열더라도 여기서 걸린다(§7.3).
         const claimed = fresh.cwd();
         if (claimed.len > 0 and !std.mem.eql(u8, claimed, cwd)) {
-            cache.owned.clear();
+            // 대화만 비우면 **거부한 파일의 mtime이 캐시에 남아** 활동 시각 폴백이 남의 파일 시각을 이 행의 값으로
+            // 보여준다(code-review max). 매핑 자체가 틀린 것이므로 통째로 버려 다음 폴링이 다시 고르게 한다.
+            cache.reset();
             return true;
         }
         // 못 찾은 항목은 이전 값을 지킨다 — provider와 무관한 같은 규율이다(§7.8). claude는 지금 회수율이 높아
         // 실익이 작지만, 규율이 하나여야 codex와 코드가 갈리지 않고 포맷이 바뀌어도 조용히 비지 않는다.
         tr.mergeKeepingMissing(&cache.owned, &fresh);
         return true;
+    }
+
+    /// 같은 작업 디렉터리에서 **다른** Term이 이미 매핑한 claude 세션 파일 이름들. `latestSessionFile`이 이들을
+    /// 건너뛰어 에이전트마다 자기 세션에 앉는다.
+    ///
+    /// 완벽한 소유권 등록부가 아니라 **충돌 회피**다 — 정확한 Term↔파일 결속은 provider가 그 연결을 노출해야
+    /// 가능하고(§7.2 반증), 여기서 필요한 건 "둘이 같은 파일을 보지 않게" 하는 것뿐이다. 상한을 둬 Term이 많아도
+    /// 이 스캔이 커지지 않게 한다.
+    fn claudeTranscriptsTakenBy(self: *AppSession, self_term: *Term, out: [][]const u8) []const []const u8 {
+        const cwd = self_term.rt.observation.cwd.items;
+        var n: usize = 0;
+        for (self.tabs.items) |tab| {
+            for (tab.panes.items) |pane| {
+                for (pane.terms.items) |other| {
+                    if (other == self_term) continue;
+                    if (other.agent_kind != .claude) continue;
+                    if (other.agent_transcript.name_len == 0) continue;
+                    // 같은 디렉터리를 보는 Term만 충돌한다.
+                    if (!std.mem.eql(u8, other.rt.observation.cwd.items, cwd)) continue;
+                    if (n >= out.len) return out[0..n];
+                    out[n] = other.agent_transcript.fileName();
+                    n += 1;
+                }
+            }
+        }
+        return out[0..n];
     }
 
     /// codex: 날짜 계층(`YYYY/MM/DD`)이라 디렉터리 이름이 작업 디렉터리를 말해주지 않고, 서브에이전트 기록이
@@ -24012,8 +24094,12 @@ pub const AppSession = struct {
                 picked = true;
                 break;
             }
-            if (!picked) return false;
+            // **실패도 기록한다.** 안 그러면 이 출력 시각에 대해 매 폴링(1s)마다 날짜 트리 전체를 stat하고 상위
+            // 후보를 열어 파싱하는 일이 그 Term이 사는 내내 반복된다 — cwd가 문자열로 안 맞는 경우(심볼릭 경로 등)
+            // 영영 성공하지 않으므로 프레임 히치만 남는다(code-review max). 다음 출력 때 다시 시도하므로 세션이
+            // 새로 생기면 그때 잡힌다.
             cache.mapped_output_ms = term.agent_last_output_ms;
+            if (!picked) return false;
         }
         if (cache.name_len == 0) return false;
 
@@ -24035,6 +24121,19 @@ pub const AppSession = struct {
         // (실측 최악 22MB)으로 밀린다 — 사용자가 칠 때는 파일 끝이라 반드시 잡히고, 그 뒤로는 이 병합이 지킨다.
         tr.mergeKeepingMissing(&cache.owned, &fresh);
         return true;
+    }
+
+    /// 어느 Term이든 에이전트가 돌고 있는가 — 활동 시각 재렌더 게이트. 전-Term 순회지만 필드 읽기뿐이라 20초에
+    /// 한 번 도는 비용으로 무시할 만하다.
+    fn anyAgentPresent(self: *AppSession) bool {
+        for (self.tabs.items) |tab| {
+            for (tab.panes.items) |pane| {
+                for (pane.terms.items) |term| {
+                    if (term.agent_kind != .none) return true;
+                }
+            }
+        }
+        return false;
     }
 
     /// foreground process와 터미널이 이미 소유한 bounded 화면 tail·OSC title/progress·최근 PTY 출력을 결합한다.
@@ -24309,7 +24408,10 @@ pub const AppSession = struct {
                 for (pane.terms.items) |term| {
                     if (!term.rt.live_initialized) continue;
                     const ds = try term.rt.pump.drainAvailable();
-                    if (ds.output_events > 0) term.agent_last_output_ms = self.awakeMs();
+                    if (ds.output_events > 0) {
+                        term.agent_last_output_ms = self.awakeMs();
+                        term.agent_last_output_wall_ns = @intCast(std.Io.Clock.real.now(self.io).nanoseconds);
+                    }
                     drain_summary.output_events += ds.output_events;
                     drain_summary.exit_events += ds.exit_events;
                     // Term별로 종료를 한 번만 finish(reader join + child reap). 세션 종료는 '모든' Term이 끝났을 때.
@@ -27041,17 +27143,20 @@ pub const AppSession = struct {
 
     /// 에이전트 행 **마지막 활동 시각**(owned, `"5m"`·`"now"`·빈 문자열).
     ///
-    /// 기준은 `agent_last_output_ms` — 그 Term이 마지막으로 출력한 시각이다. transcript 파일 mtime을 쓰지 않는
+    /// 기준은 그 Term이 마지막으로 출력한 **wall clock** 시각이다. transcript 파일 mtime을 쓰지 않는
     /// 이유는 그것이 **대화** 기록의 시각이라 도구 실행처럼 대화 없이 오래 도는 구간을 "멈춘 것"으로 보이게 하기
     /// 때문이다. 행이 답해야 하는 건 "이 에이전트가 살아 움직이는가"다.
     ///
-    /// awake clock 기준이라 앱을 새로 켜면 0(= 표시 없음)이고, 첫 출력에서 채워진다 — 그 앱 세션에서 아직 아무
-    /// 일도 없었다는 뜻이라 빈 편이 맞다.
+    /// 앱을 새로 켜면 출력 스탬프가 없어(0) 아래 mtime 폴백으로 넘어간다. 둘 다 없으면 빈 문자열이다.
     fn agentAgeOwned(self: *AppSession, term: ?*Term) ![]const u8 {
         const t = term orelse return self.allocator.dupe(u8, "");
         var buf: [8]u8 = undefined;
-        if (t.agent_last_output_ms != 0) {
-            const age_ms = self.awakeMs() -| t.agent_last_output_ms;
+        const now_wall: i96 = @intCast(std.Io.Clock.real.now(self.io).nanoseconds);
+        if (t.agent_last_output_wall_ns != 0) {
+            // **wall clock으로 잰다.** awake clock은 시스템이 잠든 동안 멈춰, 밤새 재운 뒤에도 "3m"으로 보인다
+            // (code-review max). 시계 되감김은 `now`로 방어한다.
+            if (now_wall <= t.agent_last_output_wall_ns) return self.allocator.dupe(u8, "now");
+            const age_ms: u64 = @intCast(@divTrunc(now_wall - t.agent_last_output_wall_ns, std.time.ns_per_ms));
             return self.allocator.dupe(u8, chrome.components.sidebar.formatRelativeAge(age_ms, &buf));
         }
         // **폴백**: 앱을 새로 켠 직후에는 `agent_last_output_ms`(awake clock)가 0이라 아무 값도 못 낸다. 그런데
@@ -27064,9 +27169,8 @@ pub const AppSession = struct {
         // 이 캐시의 mtime은 우리가 마지막으로 폴링해 **읽은** 시점 기준이라 최대 폴링 주기만큼 뒤처진다.
         const mtime_ns = t.agent_transcript.read_mtime_ns;
         if (mtime_ns == 0) return self.allocator.dupe(u8, "");
-        const now_ns: i128 = std.Io.Clock.real.now(self.io).nanoseconds;
-        if (now_ns <= mtime_ns) return self.allocator.dupe(u8, "now"); // 시계 되감김·미래 mtime 방어
-        const age_ms: u64 = @intCast(@divTrunc(now_ns - @as(i128, mtime_ns), std.time.ns_per_ms));
+        if (now_wall <= mtime_ns) return self.allocator.dupe(u8, "now"); // 시계 되감김·미래 mtime 방어
+        const age_ms: u64 = @intCast(@divTrunc(now_wall - mtime_ns, std.time.ns_per_ms));
         return self.allocator.dupe(u8, chrome.components.sidebar.formatRelativeAge(age_ms, &buf));
     }
 
@@ -27410,7 +27514,12 @@ pub const AppSession = struct {
                     try card_running.append(self.allocator, if (trep) |r| (r.state == .running) else false);
                     try close_rows.append(self.allocator, false); // 토글 자체는 닫기 대상이 아니다(접기만)
                     // 접힘 요약이 상태의 유일한 단서이므로 시각도 대표 에이전트 것으로 채운다(파형 색과 같은 이유).
-                    try ages.append(self.allocator, try self.agentAgeOwned(if (trep) |r| r.term else null));
+                    // **접혔을 때만**이다 — 펼친 상태에선 바로 아래 행이 자기 시각을 이미 보여줘 중복이고, 요약을
+                    // 접힘 전용으로 둔 규칙(toggle_summary)과도 어긋난다(code-review max).
+                    try ages.append(self.allocator, if (t.collapsed)
+                        try self.agentAgeOwned(if (trep) |r| r.term else null)
+                    else
+                        try self.allocator.dupe(u8, ""));
                     continue;
                 },
                 .agent => |ar| {
@@ -36247,6 +36356,10 @@ test "에이전트 행 활동 시각: 출력이 mtime보다 우선하고, 둘 �
 
     const term = session.tabs.items[0].panes.items[0].terms.items[0];
     term.agent_kind = .claude;
+    // 두 경로 모두 wall clock 기준이라 호스트 uptime에 의존하지 않는다 — 예전 테스트는 출력 시각을
+    // `awakeMs() -| 5분`으로 만들어, uptime이 5분 미만인 호스트(CI 러너)에서 0으로 포화돼 mtime 경로로
+    // 조용히 미끄러졌고 우선순위를 전혀 검증하지 못했다(code-review max).
+    const now: i96 = @intCast(std.Io.Clock.real.now(session.io).nanoseconds);
 
     // 관측된 출력도, 기록 mtime도 없다 → 빈칸(그 앱 세션에서 아직 아무 일도 없었다).
     {
@@ -36255,20 +36368,28 @@ test "에이전트 행 활동 시각: 출력이 mtime보다 우선하고, 둘 �
         try std.testing.expectEqualStrings("", age);
     }
 
-    // mtime만 있다 → 폴백이 값을 낸다. wall clock 기준이라 앱 생애와 무관하다.
-    term.agent_transcript.read_mtime_ns = @intCast(std.Io.Clock.real.now(session.io).nanoseconds - 2 * std.time.ns_per_hour);
+    // mtime만 있다 → 폴백이 값을 낸다. 앱을 새로 켠 직후가 정확히 이 상태다.
+    term.agent_transcript.read_mtime_ns = now - 2 * std.time.ns_per_hour;
     {
         const age = try session.agentAgeOwned(term);
         defer a.free(age);
         try std.testing.expectEqualStrings("2h", age);
     }
 
-    // 출력이 관측되면 그쪽이 이긴다 — 도구를 오래 돌려 대화가 없는 구간을 "멈춘 것"으로 보이게 하지 않는다.
-    term.agent_last_output_ms = session.awakeMs() -| (5 * std.time.ms_per_min);
+    // 출력이 관측되면 그쪽이 이긴다 — 값이 확실히 달라야 우선순위가 검증된다(2h ↔ 5m).
+    term.agent_last_output_wall_ns = now - 5 * std.time.ns_per_min;
     {
         const age = try session.agentAgeOwned(term);
         defer a.free(age);
         try std.testing.expectEqualStrings("5m", age);
+    }
+
+    // 방금 출력한 에이전트는 경과가 0에 가깝다 — 빈칸이 아니라 `now`여야 한다(이 칼럼이 가장 보여줘야 할 행이다).
+    term.agent_last_output_wall_ns = now;
+    {
+        const age = try session.agentAgeOwned(term);
+        defer a.free(age);
+        try std.testing.expectEqualStrings("now", age);
     }
 
     // Term이 없는 행(그룹 헤더·편집 중 카드)은 빈칸이다.

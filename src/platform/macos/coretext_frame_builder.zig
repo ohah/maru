@@ -537,7 +537,11 @@ pub fn buildSidebarDrawList(
             const close_limit: u16 = if (close_here) (cols -| 4) else (cols -| 1);
             // 활동 시각이 있으면 이름줄 제목은 그 **왼쪽**에서 멈춘다(시각 폭 + 간격 1칸). 안 그러면 긴 제목의
             // 말줄임표 위에 시각이 덧그려져 둘 다 못 읽는다 — ✕에서 겪은 것과 같은 문제다.
-            const age_limit: u16 = if (j == 0 and age_cols > 0) close_limit -| (age_cols + 1) else close_limit;
+            //
+            // 예약은 실제 글자 수가 아니라 **고정 폭**(relative_age_cols)으로 잡는다. 실제 폭을 쓰면 `5m`인 행과
+            // `12m`인 행의 제목이 서로 다른 col에서 잘려, 폭 상한을 둔 이유(잘리는 지점이 행마다 흔들리지 않게)가
+            // 무효가 된다(code-review max).
+            const age_limit: u16 = if (j == 0 and age_cols > 0) close_limit -| (sidebar_component.relative_age_cols + 1) else close_limit;
             const end_col: u16 = if (j == 0 and draw_pin) @min(pin_col, age_limit) else age_limit;
             // rename 중인 슬롯의 **이름줄(j==0)만** tail 앵커 — 긴 이름을 칠 때 선두를 "…"로 자르고 끝(caret)을 보여준다(탭·pane과 같은 규칙).
             // 보조줄(브랜치·경로·상태)은 rename 중 숨겨지므로 j>0은 늘 head다(편집 중엔 이름줄만 남는다).
@@ -553,7 +557,13 @@ pub fn buildSidebarDrawList(
         // 활동 시각: 이름줄 우측 정렬. 보조줄이 아니라 이름줄에 두는 이유는 그 행이 "무엇을/언제"를 한 줄로 답해야
         // 하기 때문이다. 색은 보조줄과 같은 흐린 fg — 제목과 경쟁하면 안 된다.
         if (age_cols > 0) {
-            const age_start: u16 = (if (close_here) (cols -| 4) else (cols -| 1)) -| age_cols;
+            // 핀이 있으면 그 **왼쪽**에 둔다. 예전엔 핀을 전혀 고려하지 않아 둘이 같은 칸에 덧그려질 수 있었다 —
+            // 지금 호출부는 그런 행을 만들지 않지만(에이전트 행은 pins=false) 공개 draw-list API의 계약이므로
+            // 여기서 지킨다(code-review max). 우측 정렬이라 고정 폭 슬롯의 오른쪽 끝에 붙인다.
+            const age_right: u16 = if (draw_pin)
+                pin_col -| 1
+            else if (close_here) (cols -| 4) else (cols -| 1);
+            const age_start: u16 = age_right -| age_cols;
             var ac: u16 = 0;
             var au = std.unicode.Utf8View.initUnchecked(age_text).iterator();
             while (au.nextCodepoint()) |cp| {

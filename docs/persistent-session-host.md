@@ -2152,30 +2152,36 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
     최신 non-zero size가 마지막 전송값과 다를 때만 보낸다. observer의 local `SIGWINCH`는 canonical request 0이다.
   - request는 기존 `runtime.resize {stream_id,cols,rows,client_sequence}`를 쓰며 response의 echoed sequence,
     applied `cols/rows`, `resize_generation`, `changed`를 전부 strict decode한다. stale response는 local last-applied를
-    바꾸지 않는다. controller revoke/release 뒤 pending local resize는 폐기하며 자동 재승격하지 않는다.
+    바꾸지 않는다. controller revoke/release 뒤에는 새 local resize request를 만들지 않으며 자동 재승격하지 않는다.
+    이미 adapter가 소유한 전송 대기 request의 취소는 실제 event loop를 묶는 P5c3에서 고정한다.
   - host `dispatchResize`는 backend+registry commit 뒤 requester response와 같은 owner turn에
     `runtime.resized {runtime_id,cols,rows,resize_generation,reason:"controller"}` event를 해당 runtime의 모든
     subscription에 fan-out한다. `changed=false`와 stale request는 broadcast 0이다. response와 event batch를 필요한
     모든 target queue에 all-or-none preflight한 뒤 commit하며 admission/OOM 실패는 새 canonical size를 publish하지
     않는다. 이를 위해 backend mutation도 admission 뒤에 실행돼야 하며 기존 prepare→backend→commit transaction을
     owner-level prepared action으로 올린다.
+    registry token은 runtime ID와 controller generation을 함께 고정해 authority가 다른 controller를 거쳐 원래
+    subscription으로 돌아오는 ABA도 stale로 거부한다. reactor publication token도 monotonic reservation ID를 가져
+    cancel 뒤 새 reservation이 열린 상태에서 옛 token을 commit/cancel할 수 없다.
   - 특정 non-requester observer의 stream queue가 invalidated/soft-cap 상태라 event를 받을 수 없으면 그 observer
     connection을 fail-close해 subscription을 먼저 detach하고, 남은 live target snapshot으로 all-or-none preflight를
     다시 수행한다. event를 조용히 skip한 채 observer를 살려두거나 그 observer 때문에 controller resize를 영구 거부하지
     않는다. requester 자체 또는 aggregate/global admission 실패는 typed failure이며 backend/registry mutation 0이다.
   - observer/client는 자기 local TTY size가 아니라 strictly increasing `resize_generation`의 host full-state만
-    canonical applied size로 받아 ANSI projection의 crop/letterbox 기준을 갱신한다. observer는 event만 적용하고,
-    controller는 strict response 또는 event를 적용한다. duplicate/older generation은 무시하고 generation gap은 화면 byte
-    유실이 아니므로 최신 full-state size를 적용하며, controller도 response/event 순서와 무관하게 max generation으로 수렴한다.
+    canonical applied size cache로 받는다. observer는 event만 적용하고 controller는 strict response 또는 event를 적용한다.
+    duplicate/older generation은 무시하고 generation gap은 화면 byte 유실이 아니므로 최신 full-state size를 적용하며,
+    controller도 response/event 순서와 무관하게 max generation으로 수렴한다. 이 cache를 외부 ANSI projection의
+    crop/letterbox에 연결하는 renderer는 P5c3 범위다.
   - pure state tests는 burst coalesce, unchanged/zero size, observer no-op, takeover forced first resize,
-    revoke pending drop, JSON signed-integer counter max를 검증한다. actual `openpty` child는 `TIOCSWINSZ` burst가
+    revoke 뒤 새 request 생성 0, JSON signed-integer counter max를 검증한다. actual `openpty` child는 `TIOCSWINSZ` burst가
     `SIGWINCH` wake를 만들고 latest size candidate 하나로 coalesce되는지 5초 deadline으로 검증하며, self-pipe가
     `SIGWINCH` byte로 포화돼도 atomic pending class로 termination이 우선하는 회귀를 별도로 고정한다. request 생성은
     이 candidate를 pure external state에 넣는 테스트가 맡는다. product `SocketServer`/`poll_owner.Owner` fixture는
     controller ACK+broadcast, non-requester observer invalidation의 connection fail-close+target rebuild, backend 실패의
     publication reservation 취소, owner allocation fail-index 전수, multi-client all-or-none admission rollback을 검증한다.
-    lower server/registry tests가 observer unauthorized, changed=false/stale broadcast 0, handoff restore generation wire max와
-    event generation 적용을 보완한다. 같은 stream에 다른 runtime의 resize event가 섞이면 client는 coalesce하지 않고
+    lower server/registry tests가 observer unauthorized, unchanged generation, stale resize action 0, handoff restore
+    generation wire max와 event generation 적용을 보완한다. 같은 stream에 다른 runtime의 resize event가 섞이면 client는
+    coalesce하지 않고
     connection 전체를 protocol fail-close한다.
 - **P5c3 — public attach CLI**: P5b/P5c transport가 모두 green인 뒤에만 `maru attach`, observer,
   `--take-over`, `Ctrl-\` 다음 `d` detach chord를 parser/`--help`와 함께 공개한다. 실제 PTY의

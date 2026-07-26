@@ -1156,7 +1156,8 @@ pub const ReactorCore = struct {
     table: SlotTable = .{},
     budget: GlobalBudget = .{},
     slots: [max_connections]?*Slot = [_]?*Slot{null} ** max_connections,
-    mixed_batch_reserved: bool = false,
+    next_mixed_batch_reservation_id: u64 = 1,
+    active_mixed_batch_reservation_id: ?u64 = null,
 
     pub const Admission = SlotTable.Admission;
     pub const OwnedControlItem = struct {
@@ -1173,6 +1174,7 @@ pub const ReactorCore = struct {
         screens: []const OwnedScreenItem,
         future_resident: usize,
         future_shared: usize,
+        reservation_id: u64,
         consumed: bool = false,
     };
     pub const AccountingSnapshot = struct {
@@ -1380,9 +1382,15 @@ pub const ReactorCore = struct {
         self: *ReactorCore,
         control: OwnedControlItem,
         screens: []const OwnedScreenItem,
-    ) (EnqueueError || error{ Stale, InvalidBatch, ReservationBusy })!void {
+    ) (EnqueueError || error{
+        Stale,
+        InvalidBatch,
+        ReservationBusy,
+        ReservationExhausted,
+        StaleReservation,
+    })!void {
         var prepared = try self.prepareOwnedControlAndScreenBatch(control, screens);
-        self.commitPreparedControlAndScreenBatch(&prepared);
+        try self.commitPreparedControlAndScreenBatch(&prepared);
     }
 
     /// Reserves the single-owner publication lane. Between prepare and commit/cancel no owner
@@ -1391,34 +1399,52 @@ pub const ReactorCore = struct {
         self: *ReactorCore,
         control: OwnedControlItem,
         screens: []const OwnedScreenItem,
-    ) (EnqueueError || error{ Stale, InvalidBatch, ReservationBusy })!PreparedControlAndScreenBatch {
-        if (self.mixed_batch_reserved) return error.ReservationBusy;
+    ) (EnqueueError || error{
+        Stale,
+        InvalidBatch,
+        ReservationBusy,
+        ReservationExhausted,
+    })!PreparedControlAndScreenBatch {
+        if (self.active_mixed_batch_reservation_id != null)
+            return error.ReservationBusy;
+        if (self.next_mixed_batch_reservation_id == std.math.maxInt(u64))
+            return error.ReservationExhausted;
         const totals = try self.analyzeControlAndScreenBatch(control, screens);
-        self.mixed_batch_reserved = true;
+        const reservation_id = self.next_mixed_batch_reservation_id;
+        self.next_mixed_batch_reservation_id += 1;
+        self.active_mixed_batch_reservation_id = reservation_id;
         return .{
             .control = control,
             .screens = screens,
             .future_resident = totals.future_resident,
             .future_shared = totals.future_shared,
+            .reservation_id = reservation_id,
         };
+    }
+
+    pub fn validatePreparedControlAndScreenBatch(
+        self: *const ReactorCore,
+        prepared: *const PreparedControlAndScreenBatch,
+    ) error{StaleReservation}!void {
+        if (prepared.consumed or
+            self.active_mixed_batch_reservation_id != prepared.reservation_id)
+            return error.StaleReservation;
     }
 
     pub fn cancelPreparedControlAndScreenBatch(
         self: *ReactorCore,
         prepared: *PreparedControlAndScreenBatch,
-    ) void {
-        if (prepared.consumed or !self.mixed_batch_reserved)
-            @panic("stale mixed batch reservation");
+    ) error{StaleReservation}!void {
+        try self.validatePreparedControlAndScreenBatch(prepared);
         prepared.consumed = true;
-        self.mixed_batch_reserved = false;
+        self.active_mixed_batch_reservation_id = null;
     }
 
     pub fn commitPreparedControlAndScreenBatch(
         self: *ReactorCore,
         prepared: *PreparedControlAndScreenBatch,
-    ) void {
-        if (prepared.consumed or !self.mixed_batch_reserved)
-            @panic("stale mixed batch reservation");
+    ) error{StaleReservation}!void {
+        try self.validatePreparedControlAndScreenBatch(prepared);
         prepared.consumed = true;
         self.budget.resident_bytes = prepared.future_resident;
         self.budget.shared_bytes = prepared.future_shared;
@@ -1434,7 +1460,7 @@ pub const ReactorCore = struct {
                 chargeFor(item.bytes.len);
             slot.recordPeak();
         }
-        self.mixed_batch_reserved = false;
+        self.active_mixed_batch_reservation_id = null;
     }
 
     const MixedBatchTotals = struct {
@@ -1625,7 +1651,8 @@ pub const ReactorCore = struct {
     }
 
     pub fn drainedForUpgrade(self: *const ReactorCore) bool {
-        return !self.mixed_batch_reserved and self.table.active_count == 0 and
+        return self.active_mixed_batch_reservation_id == null and
+            self.table.active_count == 0 and
             self.budget.resident_bytes == 0 and self.budget.shared_bytes == 0 and
             self.budget.prepared_base_bytes == 0 and
             self.budget.prepared_reclaim_bytes == 0;
@@ -1634,7 +1661,8 @@ pub const ReactorCore = struct {
     /// Canonical slot teardown 뒤 aggregate counters만 drift한 경우의 upgrade rollback repair.
     /// SlotTable/ConnectionKey allocator를 보존해 stale key가 다음 admission과 ABA alias하지 않게 한다.
     pub fn repairEmptyBudget(self: *ReactorCore) bool {
-        if (self.mixed_batch_reserved or self.table.active_count != 0) return false;
+        if (self.active_mixed_batch_reservation_id != null or
+            self.table.active_count != 0) return false;
         for (self.table.entries) |entry| if (entry.key != null) return false;
         for (self.slots) |maybe_slot| if (maybe_slot != null) return false;
         self.budget = .{};
@@ -2031,6 +2059,37 @@ test "resize local observer preflight accumulates multiple streams on one connec
         .{ .admission = observer, .tracker = second, .bytes = &second_byte },
     }, requester).?;
     try std.testing.expectEqualDeep(observer, offender);
+}
+
+test "mixed publication reservation rejects a cancelled token after lane reuse" {
+    const reactor = try ReactorCore.create(std.testing.allocator);
+    defer reactor.destroy();
+    const requester = try reactor.admit();
+    const tracker = try (try reactor.get(requester)).createScreenTracker();
+    var response_a = [_]u8{'a'};
+    var event_a = [_]u8{'b'};
+    var prepared_a = try reactor.prepareOwnedControlAndScreenBatch(
+        .{ .admission = requester, .bytes = &response_a },
+        &.{.{ .admission = requester, .tracker = tracker, .bytes = &event_a }},
+    );
+    var stale_a = prepared_a;
+    try reactor.cancelPreparedControlAndScreenBatch(&prepared_a);
+
+    var response_b = [_]u8{'c'};
+    var event_b = [_]u8{'d'};
+    var prepared_b = try reactor.prepareOwnedControlAndScreenBatch(
+        .{ .admission = requester, .bytes = &response_b },
+        &.{.{ .admission = requester, .tracker = tracker, .bytes = &event_b }},
+    );
+    try std.testing.expectError(
+        error.StaleReservation,
+        reactor.validatePreparedControlAndScreenBatch(&stale_a),
+    );
+    try std.testing.expectError(
+        error.StaleReservation,
+        reactor.commitPreparedControlAndScreenBatch(&stale_a),
+    );
+    try reactor.cancelPreparedControlAndScreenBatch(&prepared_b);
 }
 
 test "resize batch cap plus one leaves every destination and accounting unchanged" {

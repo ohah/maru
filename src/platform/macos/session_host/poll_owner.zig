@@ -607,7 +607,8 @@ pub const Owner = struct {
         var publication: ?connection_slot.ReactorCore.PreparedControlAndScreenBatch = null;
         defer {
             if (publication) |*prepared|
-                self.reactor.cancelPreparedControlAndScreenBatch(prepared);
+                self.reactor.cancelPreparedControlAndScreenBatch(prepared) catch
+                    @panic("stale resize publication reservation");
             if (success_owned) self.allocator.free(resize.success_reply);
             if (internal_owned) self.allocator.free(resize.internal_reply);
             if (exhausted_owned) self.allocator.free(resize.exhausted_reply);
@@ -735,7 +736,8 @@ pub const Owner = struct {
             },
         }
 
-        self.reactor.commitPreparedControlAndScreenBatch(&publication.?);
+        self.reactor.commitPreparedControlAndScreenBatch(&publication.?) catch
+            @panic("stale resize publication reservation");
         publication = null;
         success_owned = false;
         screen_frames_owned = 0;
@@ -3132,7 +3134,7 @@ test "poll owner publishes changed resize to controller and observer all or none
             break;
         }
         try testing.expectEqual(@as(u16, 100), runtime.cols);
-        try testing.expect(!owner.reactor.mixed_batch_reserved);
+        try testing.expect(owner.reactor.active_mixed_batch_reservation_id == null);
     }
     try testing.expect(first_success != null);
     try testing.expectEqual(@as(u16, 105), runtime.cols);
@@ -3163,7 +3165,7 @@ test "poll owner publishes changed resize to controller and observer all or none
         "{\"method\":\"runtime.resize\",\"params\":{\"stream_id\":1,\"cols\":115,\"rows\":36,\"client_sequence\":4}}",
     );
     try pumpUntilResponse(&owner, controller.fd, "\"internal\"");
-    try testing.expect(!owner.reactor.mixed_batch_reserved);
+    try testing.expect(owner.reactor.active_mixed_batch_reservation_id == null);
     try testing.expectEqual(@as(u16, 110), runtime.cols);
     try testing.expectEqual(@as(u64, 3), runtime.controller_sequence);
 

@@ -30,38 +30,96 @@ pub const max_tail_bytes: usize = 256 * 1024;
 /// 표시용 상한. 사이드바 폭이 좁아 이보다 길면 어차피 잘리고, 무한정 복사할 이유가 없다.
 pub const max_text_bytes: usize = 512;
 
-/// 한 세션의 마지막 대화. 빈 슬라이스 = 그 줄 없음(계약 1).
-pub const Conversation = struct {
-    /// 마지막 **사용자** 프롬프트.
-    prompt: []const u8 = "",
-    /// 마지막 **에이전트** 응답 텍스트.
-    reply: []const u8 = "",
-    /// 이 기록이 주장하는 작업 디렉터리. 호출부가 Term의 cwd와 대조해 **오매핑을 거른다**(§7.3 — 디렉터리 이름
-    /// 인코딩 규칙이 불완전해도 여기서 걸린다).
-    cwd: []const u8 = "",
-
-    pub fn isEmpty(self: Conversation) bool {
-        return self.prompt.len == 0 and self.reply.len == 0;
-    }
-};
-
-/// `Conversation`이 가리키는 실제 바이트를 담는 소유 버퍼. 슬라이스가 이 안을 가리키므로 **함께 살아야 한다**.
+/// 한 세션의 마지막 대화를 담는 소유 버퍼.
+///
+/// **슬라이스가 아니라 오프셋으로 든다.** 슬라이스로 들면 이 구조체를 복사하는 순간 새 사본의 필드가 원본 버퍼를
+/// 가리켜 dangling이 된다 — `mergeKeepingMissing`이 정확히 그 복사를 하므로, 오프셋이어야 병합이 성립한다.
 pub const Owned = struct {
     buf: [max_text_bytes * 3]u8 = undefined,
     used: usize = 0,
-    conversation: Conversation = .{},
+    prompt_off: usize = 0,
+    prompt_len: usize = 0,
+    reply_off: usize = 0,
+    reply_len: usize = 0,
+    cwd_off: usize = 0,
+    cwd_len: usize = 0,
 
-    /// `text`를 이 버퍼에 복사하고 그 슬라이스를 준다. 상한을 넘으면 앞부분만 남긴다(잘라도 UTF-8 경계는 지킨다).
-    pub fn store(self: *Owned, text: []const u8) []const u8 {
+    /// 마지막 **사용자** 프롬프트. 빈 슬라이스 = 그 줄 없음(계약 1).
+    pub fn prompt(self: *const Owned) []const u8 {
+        return self.buf[self.prompt_off..][0..self.prompt_len];
+    }
+
+    /// 마지막 **에이전트** 응답.
+    pub fn reply(self: *const Owned) []const u8 {
+        return self.buf[self.reply_off..][0..self.reply_len];
+    }
+
+    /// 이 기록이 주장하는 작업 디렉터리. 호출부가 Term의 cwd와 대조해 **오매핑을 거른다**(§7.3 — 디렉터리 이름
+    /// 인코딩 규칙이 불완전해도 여기서 걸린다). codex는 tail에 없어 비어 있다(후보를 고를 때 이미 대조했다).
+    pub fn cwd(self: *const Owned) []const u8 {
+        return self.buf[self.cwd_off..][0..self.cwd_len];
+    }
+
+    pub fn isEmpty(self: *const Owned) bool {
+        return self.prompt_len == 0 and self.reply_len == 0;
+    }
+
+    pub fn clear(self: *Owned) void {
+        self.used = 0;
+        self.prompt_len = 0;
+        self.reply_len = 0;
+        self.cwd_len = 0;
+    }
+
+    /// `text`를 이 버퍼에 복사하고 (오프셋, 길이)를 준다. 상한을 넘으면 앞부분만 남긴다(UTF-8 경계는 지킨다).
+    pub fn store(self: *Owned, text: []const u8) struct { off: usize, len: usize } {
         const room = self.buf.len - self.used;
         const n = @min(text.len, @min(room, max_text_bytes));
-        if (n == 0) return "";
+        if (n == 0) return .{ .off = self.used, .len = 0 };
         @memcpy(self.buf[self.used..][0..n], text[0..n]);
-        const out = self.buf[self.used..][0..trimToCharBoundary(self.buf[self.used..][0..n])];
+        const kept = trimToCharBoundary(self.buf[self.used..][0..n]);
+        const off = self.used;
         self.used += n;
-        return out;
+        return .{ .off = off, .len = kept };
+    }
+
+    pub fn setPrompt(self: *Owned, text: []const u8) void {
+        const r = self.store(text);
+        self.prompt_off = r.off;
+        self.prompt_len = r.len;
+    }
+
+    pub fn setReply(self: *Owned, text: []const u8) void {
+        const r = self.store(text);
+        self.reply_off = r.off;
+        self.reply_len = r.len;
+    }
+
+    pub fn setCwd(self: *Owned, text: []const u8) void {
+        const r = self.store(text);
+        self.cwd_off = r.off;
+        self.cwd_len = r.len;
     }
 };
+
+/// `fresh`에서 **찾은 것만** 반영하고 못 찾은 항목은 `dst`의 값을 지킨다.
+///
+/// **왜 필요한가**: codex는 긴 턴에 추론·도구 레코드가 대량으로 쌓여 마지막 응답은 파일 끝 근처지만 그에 대응하는
+/// 사용자 프롬프트는 **수 MB 앞**에 있을 수 있다(실측 최악 22MB — claude는 14KB). tail을 그만큼 키우는 건 매 갱신
+/// 비용을 그만큼 올리는 일이라 답이 아니다. 대신 사용자가 프롬프트를 친 **직후에는 그게 파일 끝**이라 작은 tail로
+/// 반드시 잡히고, 그 뒤 턴이 길어져도 이 병합이 값을 지킨다.
+///
+/// 파일이 **바뀌면** 호출부가 먼저 `clear`해야 한다 — 안 그러면 옛 세션의 대화가 새 세션 행에 남는다.
+pub fn mergeKeepingMissing(dst: *Owned, fresh: *const Owned) void {
+    const p = if (fresh.prompt_len > 0) fresh.prompt() else dst.prompt();
+    const r = if (fresh.reply_len > 0) fresh.reply() else dst.reply();
+    const c = if (fresh.cwd_len > 0) fresh.cwd() else dst.cwd();
+    var tmp: Owned = .{};
+    tmp.setPrompt(p);
+    tmp.setReply(r);
+    tmp.setCwd(c);
+    dst.* = tmp; // 오프셋 기반이라 복사가 안전하다(슬라이스였다면 여기서 dangling)
+}
 
 /// 세션 파일 이름 상한. claude는 `<uuid>.jsonl`(41자)이라 넉넉하다.
 pub const max_name_bytes: usize = 128;
@@ -99,15 +157,15 @@ pub const Cache = struct {
         self.read_mtime_ns = 0;
         self.mapped_output_ms = 0;
         self.owned.used = 0;
-        self.owned.conversation = .{};
+        self.owned.clear();
     }
 
     pub fn prompt(self: *const Cache) []const u8 {
-        return self.owned.conversation.prompt;
+        return self.owned.prompt();
     }
 
     pub fn reply(self: *const Cache) []const u8 {
-        return self.owned.conversation.reply;
+        return self.owned.reply();
     }
 };
 
@@ -147,8 +205,194 @@ pub fn claudeDirName(cwd: []const u8, buf: []u8) ?[]const u8 {
     return buf[0..cwd.len];
 }
 
+/// codex 세션 파일이 밝히는 신원 — 첫 `session_meta` 레코드에서 뽑는다.
+///
+/// claude는 디렉터리 **이름**이 작업 디렉터리를 말해주지만 codex는 날짜 계층(`YYYY/MM/DD`)이라 **파일을 열어야**
+/// 알 수 있다. 서브에이전트 배제도 여기서 갈린다 — claude는 하위 디렉터리라 스캔에서 자동으로 빠지지만
+/// codex는 **같은 계층에 섞이므로**(실측: 최근 40개 중 32개가 서브에이전트) 이 필드로 거르는 수밖에 없다.
+pub const CodexMeta = struct {
+    cwd: []const u8 = "",
+    /// `thread_source == "user"` — 사람이 연 세션. 서브에이전트·자동 스레드는 false.
+    is_user: bool = false,
+};
+
+/// 파일 **앞부분**에서 `session_meta`를 찾아 신원을 뽑는다(순수 — IO 없음). `session_meta`는 첫 레코드라
+/// 앞 몇 KB면 충분하다. 못 찾으면 빈 결과(계약 1) → 호출부가 그 후보를 건너뛴다.
+pub fn parseCodexMeta(allocator: std.mem.Allocator, head: []const u8, out: []u8) CodexMeta {
+    var it = std.mem.splitScalar(u8, head, '\n');
+    while (it.next()) |line| {
+        if (line.len < 2 or line[0] != '{') continue;
+        if (std.mem.indexOf(u8, line, "\"session_meta\"") == null) continue;
+        var parsed = std.json.parseFromSlice(std.json.Value, allocator, line, .{}) catch continue;
+        defer parsed.deinit();
+        const obj = switch (parsed.value) {
+            .object => |o| o,
+            else => continue,
+        };
+        const payload = switch (obj.get("payload") orelse std.json.Value{ .null = {} }) {
+            .object => |p| p,
+            else => continue,
+        };
+        var meta: CodexMeta = .{};
+        switch (payload.get("thread_source") orelse std.json.Value{ .null = {} }) {
+            .string => |src| meta.is_user = std.mem.eql(u8, src, "user"),
+            else => {},
+        }
+        switch (payload.get("cwd") orelse std.json.Value{ .null = {} }) {
+            .string => |c| {
+                const n = @min(c.len, out.len);
+                @memcpy(out[0..n], c[0..n]);
+                meta.cwd = out[0..n];
+            },
+            else => {},
+        }
+        return meta;
+    }
+    return .{};
+}
+
+/// codex `## My request for Codex:` 마커 뒤만 남긴다. codex는 사용자 요청 앞에 컨텍스트를 덧대 보낼 때 이 마커로
+/// 실제 요청의 시작을 표시한다 — codex 자신의 추출기(`state/extract.rs::strip_user_message_prefix`)와 같은 규칙이다.
+/// 마커가 없으면 통째로 쓴다(대부분의 평범한 입력).
+pub fn stripCodexUserPrefix(text: []const u8) []const u8 {
+    const marker = "## My request for Codex:";
+    if (std.mem.indexOf(u8, text, marker)) |idx| {
+        return std.mem.trim(u8, text[idx + marker.len ..], " \t\r\n");
+    }
+    return std.mem.trim(u8, text, " \t\r\n");
+}
+
+/// codex JSONL tail에서 마지막 대화를 뽑는다(순수 — IO 없음).
+///
+/// **`event_msg`를 본다 — `response_item`이 아니다.** codex 자신의 추출기(`state/extract.rs`)가 그렇게 한다.
+/// `response_item`의 `role == "user"` 메시지에는 환경 컨텍스트·규칙 파일·이미지 마커가 섞여 들어와 사람이 친 말과
+/// 구분하려면 주입 태그 목록(`<environment_context>`·`<user_instructions>` 등 10종)을 따라다녀야 한다. 반면
+/// `event_msg`의 `user_message`/`agent_message`는 **UI에 보여줄 원문**이라 그 필터가 통째로 필요 없다.
+///
+/// `cwd`는 tail이 아니라 **파일 앞** `session_meta`에 있으므로 여기서 채우지 않는다 — 후보를 고를 때 이미 봤다.
+pub fn parseCodexTail(allocator: std.mem.Allocator, tail: []const u8, out: *Owned) void {
+    out.clear();
+
+    var scratch: [max_text_bytes]u8 = undefined;
+    var it = std.mem.splitBackwardsScalar(u8, tail, '\n');
+    var want_prompt = true;
+    var want_reply = true;
+    while (it.next()) |line| {
+        if (!want_prompt and !want_reply) break;
+        if (line.len < 2 or line[0] != '{') continue;
+        // 값싼 사전 검사 — tail 안 대부분은 토큰 집계·도구 이벤트라 파싱이 낭비다.
+        if (std.mem.indexOf(u8, line, "_message\"") == null) continue;
+
+        var parsed = std.json.parseFromSlice(std.json.Value, allocator, line, .{}) catch continue;
+        defer parsed.deinit();
+        const obj = switch (parsed.value) {
+            .object => |o| o,
+            else => continue,
+        };
+        switch (obj.get("type") orelse std.json.Value{ .null = {} }) {
+            .string => |t| if (!std.mem.eql(u8, t, "event_msg")) continue,
+            else => continue,
+        }
+        const payload = switch (obj.get("payload") orelse std.json.Value{ .null = {} }) {
+            .object => |p| p,
+            else => continue,
+        };
+        const kind: []const u8 = switch (payload.get("type") orelse std.json.Value{ .null = {} }) {
+            .string => |k| k,
+            else => continue,
+        };
+        const is_user = std.mem.eql(u8, kind, "user_message");
+        const is_agent = std.mem.eql(u8, kind, "agent_message");
+        if (!is_user and !is_agent) continue;
+        if (is_user and !want_prompt) continue;
+        if (is_agent and !want_reply) continue;
+
+        const message: []const u8 = switch (payload.get("message") orelse std.json.Value{ .null = {} }) {
+            .string => |m| m,
+            else => "",
+        };
+        var text = message;
+        if (is_user) {
+            text = stripCodexUserPrefix(text);
+            // 이미지만 보낸 턴은 본문이 비어 있다 — codex UI가 쓰는 것과 같은 자리표시자를 둔다(state/extract.rs).
+            if (text.len == 0) {
+                const has_image = payload.get("images") != null or payload.get("local_images") != null;
+                if (has_image) text = "[Image]";
+            }
+        }
+        if (text.len == 0) continue;
+        const flat = flatten(text, &scratch);
+        if (flat.len == 0) continue;
+        if (is_user) {
+            out.setPrompt(flat);
+            want_prompt = false;
+        } else {
+            out.setReply(flat);
+            want_reply = false;
+        }
+    }
+}
+
+/// codex 세션 파일 후보 하나 — `sessions` 루트 기준 상대 경로(`YYYY/MM/DD/rollout-….jsonl`)와 mtime.
+pub const CodexCandidate = struct {
+    path: [max_name_bytes]u8 = undefined,
+    path_len: usize = 0,
+    mtime_ns: i96 = 0,
+
+    pub fn slice(self: *const CodexCandidate) []const u8 {
+        return self.path[0..self.path_len];
+    }
+};
+
+/// codex `sessions` 루트를 훑어 최근 파일을 **mtime 내림차순**으로 최대 `out.len`개 모은다.
+///
+/// **왜 날짜 디렉터리만 최근 것으로 자르지 않는가**: resume은 옛 파일에 append하므로(양쪽 CLI 실측) 며칠 전
+/// 디렉터리의 파일이 방금 갱신될 수 있다. 날짜로 자르면 그 세션을 영영 놓친다. 대신 stat만 전수로 돌리고
+/// (실측 232개 ≈ 1ms) **파일을 여는 건 상위 후보 몇 개로 제한**한다 — 여는 쪽이 진짜 비용이다(전량 파싱 82ms).
+///
+/// 반환값은 채워진 개수. 실패는 0(계약 1).
+pub fn collectCodexCandidates(io: std.Io, root: std.Io.Dir, out: []CodexCandidate) usize {
+    var n: usize = 0;
+    var years = root.iterate();
+    while ((years.next(io) catch return n)) |y| {
+        if (y.kind != .directory) continue;
+        var ydir = root.openDir(io, y.name, .{}) catch continue;
+        defer ydir.close(io);
+        var months = ydir.iterate();
+        while ((months.next(io) catch break)) |mo| {
+            if (mo.kind != .directory) continue;
+            var mdir = ydir.openDir(io, mo.name, .{}) catch continue;
+            defer mdir.close(io);
+            var days = mdir.iterate();
+            while ((days.next(io) catch break)) |d| {
+                if (d.kind != .directory) continue;
+                var ddir = mdir.openDir(io, d.name, .{}) catch continue;
+                defer ddir.close(io);
+                var files = ddir.iterate();
+                while ((files.next(io) catch break)) |f| {
+                    if (f.kind != .file) continue;
+                    if (!std.mem.endsWith(u8, f.name, ".jsonl")) continue;
+                    const st = ddir.statFile(io, f.name, .{}) catch continue;
+                    const ns = st.mtime.nanoseconds;
+                    // 이미 out이 찼고 가장 오래된 후보보다도 낡았으면 볼 필요가 없다.
+                    if (n == out.len and ns <= out[n - 1].mtime_ns) continue;
+                    var cand: CodexCandidate = .{ .mtime_ns = ns };
+                    const written = std.fmt.bufPrint(&cand.path, "{s}/{s}/{s}/{s}", .{ y.name, mo.name, d.name, f.name }) catch continue;
+                    cand.path_len = written.len;
+                    // 삽입 정렬(out은 작다 — 상위 몇 개만 든다).
+                    var i: usize = @min(n, out.len - 1);
+                    while (i > 0 and out[i - 1].mtime_ns < ns) : (i -= 1) out[i] = out[i - 1];
+                    out[i] = cand;
+                    if (n < out.len) n += 1;
+                }
+            }
+        }
+    }
+    return n;
+}
+
 /// 디렉터리의 **직속** `.jsonl` 중 mtime이 가장 최근인 것. 하위 디렉터리로 내려가지 않으므로 claude 서브에이전트
-/// 기록이 자동으로 배제된다(계약 3).
+/// 기록이 자동으로 배제된다(계약 3 — 실측: 직속 54개 ↔ 하위 포함 1805개).
 ///
 /// 이름을 `name_buf`에 쓰고 반환한다. 열 수 없거나 후보가 없으면 null(계약 1).
 pub fn latestSessionFile(io: std.Io, dir: std.Io.Dir, name_buf: []u8) ?struct { name: []const u8, mtime_ns: i96 } {
@@ -168,6 +412,18 @@ pub fn latestSessionFile(io: std.Io, dir: std.Io.Dir, name_buf: []u8) ?struct { 
     }
     if (best_len == 0) return null;
     return .{ .name = name_buf[0..best_len], .mtime_ns = best_ns };
+}
+
+/// 파일 **앞** `buf.len` 바이트. `session_meta`가 첫 레코드라 신원 확인은 이만큼이면 된다.
+pub fn readHead(io: std.Io, dir: std.Io.Dir, name: []const u8, buf: []u8) []const u8 {
+    const file = dir.openFile(io, name, .{}) catch return "";
+    defer file.close(io);
+    const size = (file.stat(io) catch return "").size;
+    // 파일이 buf보다 짧을 수 있으므로 **실제 크기로 자른다** — 통째로 요청하면 짧은 읽기가 EndOfStream이 된다.
+    const want: usize = @intCast(@min(size, buf.len));
+    if (want == 0) return "";
+    const n = file.readPositionalAll(io, buf[0..want], 0) catch return "";
+    return buf[0..n];
 }
 
 /// 파일 **끝** `buf.len` 바이트. 첫 줄은 중간에서 잘렸을 수 있으므로 버린다(부분 JSON을 파싱하면 잡음이 된다).
@@ -196,8 +452,7 @@ pub fn readTail(io: std.Io, dir: std.Io.Dir, name: []const u8, buf: []u8) []cons
 ///
 /// 뒤에서 앞으로 훑으며 필요한 것을 다 찾으면 멈춘다 — tail 전체를 파싱하지 않는다.
 pub fn parseClaudeTail(allocator: std.mem.Allocator, tail: []const u8, out: *Owned) void {
-    out.used = 0;
-    out.conversation = .{};
+    out.clear();
 
     var scratch: [max_text_bytes]u8 = undefined;
     var it = std.mem.splitBackwardsScalar(u8, tail, '\n');
@@ -223,7 +478,7 @@ pub fn parseClaudeTail(allocator: std.mem.Allocator, tail: []const u8, out: *Own
         if (want_cwd) {
             if (obj.get("cwd")) |v| switch (v) {
                 .string => |s| {
-                    out.conversation.cwd = out.store(s);
+                    out.setCwd(s);
                     want_cwd = false;
                 },
                 else => {},
@@ -240,7 +495,7 @@ pub fn parseClaudeTail(allocator: std.mem.Allocator, tail: []const u8, out: *Own
                 .string => |s| {
                     const flat = flatten(s, &scratch);
                     if (flat.len > 0) {
-                        out.conversation.prompt = out.store(flat);
+                        out.setPrompt(flat);
                         want_prompt = false;
                     }
                 },
@@ -283,7 +538,7 @@ pub fn parseClaudeTail(allocator: std.mem.Allocator, tail: []const u8, out: *Own
             if (found.len > 0) {
                 const flat = flatten(found, &scratch);
                 if (flat.len > 0) {
-                    out.conversation.reply = out.store(flat);
+                    out.setReply(flat);
                     want_reply = false;
                 }
             }
@@ -343,10 +598,10 @@ test "parseClaudeTail: last-prompt와 마지막 assistant text를 뽑고 cwd를 
     ;
     var owned: Owned = .{};
     parseClaudeTail(testing.allocator, tail, &owned);
-    try testing.expectEqualStrings("배포 스크립트 고쳐줘", owned.conversation.prompt);
+    try testing.expectEqualStrings("배포 스크립트 고쳐줘", owned.prompt());
     // thinking·tool_use가 아니라 text 블록이어야 한다 — 속마음이 사이드바에 뜨면 안 된다.
-    try testing.expectEqualStrings("네, 수정했습니다", owned.conversation.reply);
-    try testing.expectEqualStrings("/w/maru", owned.conversation.cwd);
+    try testing.expectEqualStrings("네, 수정했습니다", owned.reply());
+    try testing.expectEqualStrings("/w/maru", owned.cwd());
 }
 
 test "parseClaudeTail: 자동 입력을 사용자 프롬프트로 착각하지 않는다" {
@@ -359,8 +614,8 @@ test "parseClaudeTail: 자동 입력을 사용자 프롬프트로 착각하지 �
     ;
     var owned: Owned = .{};
     parseClaudeTail(testing.allocator, tail, &owned);
-    try testing.expectEqualStrings("", owned.conversation.prompt);
-    try testing.expect(owned.conversation.isEmpty());
+    try testing.expectEqualStrings("", owned.prompt());
+    try testing.expect(owned.isEmpty());
 }
 
 test "parseClaudeTail: 서브에이전트(sidechain) 응답을 배제한다" {
@@ -371,28 +626,112 @@ test "parseClaudeTail: 서브에이전트(sidechain) 응답을 배제한다" {
     ;
     var owned: Owned = .{};
     parseClaudeTail(testing.allocator, tail, &owned);
-    try testing.expectEqualStrings("사용자 응답", owned.conversation.reply);
+    try testing.expectEqualStrings("사용자 응답", owned.reply());
 }
 
 test "parseClaudeTail: 잘린 줄·깨진 JSON·빈 입력에도 죽지 않는다(계약 1)" {
     var owned: Owned = .{};
     parseClaudeTail(testing.allocator, "", &owned);
-    try testing.expect(owned.conversation.isEmpty());
+    try testing.expect(owned.isEmpty());
     parseClaudeTail(testing.allocator, "{\"type\":\"last-prompt\",\"lastPro", &owned); // 중간에서 잘린 줄
-    try testing.expect(owned.conversation.isEmpty());
+    try testing.expect(owned.isEmpty());
     parseClaudeTail(testing.allocator, "not json at all\n{}\n[]\n", &owned);
-    try testing.expect(owned.conversation.isEmpty());
+    try testing.expect(owned.isEmpty());
     // type이 있어도 기대한 필드가 없으면 그냥 빈다.
     parseClaudeTail(testing.allocator, "{\"type\":\"last-prompt\"}\n{\"type\":\"assistant\",\"message\":{}}\n", &owned);
-    try testing.expect(owned.conversation.isEmpty());
+    try testing.expect(owned.isEmpty());
 }
 
-test "flatten: 여러 줄을 한 줄로 눕히고 UTF-8 경계를 지킨다" {
-    var buf: [64]u8 = undefined;
-    try testing.expectEqualStrings("a b c", flatten("  a\n\n b\t\tc  ", &buf));
-    // 버퍼가 한글 한 글자(3바이트) 중간에서 끝나면 그 글자를 통째로 버린다 — U+FFFD가 뜨지 않게.
-    var tight: [4]u8 = undefined;
-    try testing.expectEqualStrings("가", flatten("가나", &tight));
+test "parseCodexMeta: thread_source로 사용자 세션과 서브에이전트를 가른다" {
+    var buf: [256]u8 = undefined;
+    const user_head =
+        \\{"timestamp":"2026-07-24T17:42:43.137Z","type":"session_meta","payload":{"id":"x","cwd":"/w/maru","thread_source":"user","originator":"codex-tui"}}
+        \\{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"안녕"}]}}
+        \\
+    ;
+    const m1 = parseCodexMeta(testing.allocator, user_head, &buf);
+    try testing.expect(m1.is_user);
+    try testing.expectEqualStrings("/w/maru", m1.cwd);
+
+    // 서브에이전트는 **같은 계층에 섞이므로** 이 필드가 유일한 구분선이다(실측: 최근 40개 중 32개가 서브에이전트).
+    const sub_head =
+        \\{"type":"session_meta","payload":{"id":"y","cwd":"/w/maru","thread_source":"subagent"}}
+        \\
+    ;
+    const m2 = parseCodexMeta(testing.allocator, sub_head, &buf);
+    try testing.expect(!m2.is_user);
+
+    // session_meta가 없거나 깨진 앞부분은 빈 결과 — 호출부가 그 후보를 건너뛴다(계약 1).
+    const m3 = parseCodexMeta(testing.allocator, "not json\n{}\n", &buf);
+    try testing.expect(!m3.is_user);
+    try testing.expectEqualStrings("", m3.cwd);
+}
+
+test "parseCodexTail: event_msg의 user_message/agent_message를 뽑는다" {
+    // codex 자신의 추출기(state/extract.rs)와 같은 레코드를 본다 — response_item의 role=user에는 환경 컨텍스트·
+    // 규칙 파일이 섞여 들어오지만 event_msg는 UI에 보여줄 원문이라 그 필터가 필요 없다.
+    const tail =
+        \\{"type":"event_msg","payload":{"type":"agent_message","message":"고쳤습니다"}}
+        \\{"type":"event_msg","payload":{"type":"user_message","message":"빌드 고쳐줘"}}
+        \\{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<environment_context>주입</environment_context>"}]}}
+        \\
+    ;
+    var owned: Owned = .{};
+    parseCodexTail(testing.allocator, tail, &owned);
+    try testing.expectEqualStrings("빌드 고쳐줘", owned.prompt());
+    try testing.expectEqualStrings("고쳤습니다", owned.reply());
+    // response_item은 보지 않으므로 주입 블록이 프롬프트를 덮지 않는다.
+    try testing.expect(std.mem.indexOf(u8, owned.prompt(), "environment_context") == null);
+}
+
+test "parseCodexTail: 사용자 요청 마커 뒤만 남기고 이미지 전용 턴을 표시한다" {
+    const tail =
+        \\{"type":"event_msg","payload":{"type":"user_message","message":"컨텍스트 잔뜩…\n## My request for Codex: 이것만 실제 요청"}}
+        \\
+    ;
+    var owned: Owned = .{};
+    parseCodexTail(testing.allocator, tail, &owned);
+    try testing.expectEqualStrings("이것만 실제 요청", owned.prompt());
+
+    // 이미지만 보낸 턴은 본문이 비어 codex UI가 자리표시자를 쓴다 — 빈 줄로 두면 그 턴이 없던 일이 된다.
+    const img =
+        \\{"type":"event_msg","payload":{"type":"user_message","message":"","images":["data:…"]}}
+        \\
+    ;
+    parseCodexTail(testing.allocator, img, &owned);
+    try testing.expectEqualStrings("[Image]", owned.prompt());
+}
+
+test "parseCodexTail: 토큰 집계·도구 이벤트는 대화가 아니다" {
+    const tail =
+        \\{"type":"event_msg","payload":{"type":"token_count","info":{}}}
+        \\{"type":"response_item","payload":{"type":"reasoning","summary":[{"type":"summary_text","text":"속마음"}]}}
+        \\{"type":"response_item","payload":{"type":"function_call","name":"shell"}}
+        \\
+    ;
+    var owned: Owned = .{};
+    parseCodexTail(testing.allocator, tail, &owned);
+    try testing.expect(owned.isEmpty());
+}
+
+test "mergeKeepingMissing: 못 찾은 항목은 이전 값을 지킨다" {
+    // codex는 긴 턴에서 프롬프트가 tail 밖(실측 최악 22MB)으로 밀린다. 그때 응답만 갱신하고 프롬프트는 지켜야
+    // 한다 — 안 그러면 턴이 길어지는 순간 "무엇을 시켰는지"가 화면에서 사라진다.
+    var dst: Owned = .{};
+    dst.setPrompt("배포 스크립트 고쳐줘");
+    dst.setReply("작업 시작합니다");
+
+    var fresh: Owned = .{};
+    fresh.setReply("다 고쳤습니다"); // 프롬프트는 tail 밖이라 못 찾음
+    mergeKeepingMissing(&dst, &fresh);
+    try testing.expectEqualStrings("배포 스크립트 고쳐줘", dst.prompt());
+    try testing.expectEqualStrings("다 고쳤습니다", dst.reply());
+
+    // 복사가 안전해야 한다 — 슬라이스 기반이었다면 여기서 dangling이다.
+    var copy = dst;
+    try testing.expectEqualStrings("배포 스크립트 고쳐줘", copy.prompt());
+    copy.setPrompt("새 프롬프트");
+    try testing.expectEqualStrings("배포 스크립트 고쳐줘", dst.prompt()); // 원본 불변
 }
 
 test "clampUtf8: 상한을 넘으면 글자 경계에서 자른다" {

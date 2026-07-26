@@ -498,6 +498,11 @@ const transcript_poll_interval_ms: u64 = 1000;
 /// 알림 본문에 싣는 대화 한 줄의 상한(bytes). 표시 상한(`max_text_bytes`)보다 짧다 — OS 배너는 몇 줄만 보여주고
 /// 자르므로, 긴 원문을 통째로 넣어봐야 뒤가 안 보이면서 알림만 커진다.
 const notification_conversation_max_bytes: usize = 160;
+/// codex 후보를 **몇 개까지 열어** 신원을 확인할지. 서브에이전트가 같은 계층에 섞여(실측 최근 40개 중 32개) 사용자
+/// 세션이 상위에 없을 수 있으므로 하나만 보면 못 찾는다. 늘릴수록 회수율이 오르지만 여는 비용도 는다.
+const codex_candidate_probe_limit: usize = 20;
+/// codex `session_meta`(첫 레코드)를 찾는 데 읽는 앞부분 크기.
+const codex_head_bytes: usize = 64 * 1024;
 const agent_observer_interval_ms: u32 = 100; // 화면/OSC/activity 상태 판정 주기.
 const agent_activity_window_ms: u64 = 500; // 이 안의 마지막 PTY output은 recent activity로 본다.
 const agent_spin_interval_ms: u32 = 133; // running 스피너 프레임 주기(옛 30Hz 4틱 ≈133ms).
@@ -23893,8 +23898,7 @@ pub const AppSession = struct {
     /// 어긋나든), 파일을 못 열든, JSON이 깨졌든 행은 아이콘·상태·폴더·브랜치로 정상 동작하고 대화 줄만 빈다.
     /// 그래서 이 함수는 error를 내지 않는다.
     fn pollAgentTranscript(self: *AppSession, term: *Term, displayed: bool) void {
-        const tr = maru.session.agent_transcript;
-        if (term.agent_kind != .claude) return; // codex 어댑터는 5단계(경로·파서·서브에이전트 필터만 다르다)
+        if (term.agent_kind == .none) return;
         const cwd = term.rt.observation.cwd.items;
         const cache = &term.agent_transcript;
         if (cwd.len == 0) return;
@@ -23902,13 +23906,35 @@ pub const AppSession = struct {
         if (cache.last_poll_ms != 0 and now -| cache.last_poll_ms < transcript_poll_interval_ms) return;
         cache.last_poll_ms = now;
 
-        const home_z = std.c.getenv("HOME") orelse return;
+        const had_text = !cache.owned.isEmpty();
+        // provider마다 다른 건 **경로 규칙·신원 확인·레코드 모양** 셋뿐이다(§7.3). 매핑 규율(고정하지 않음)·throttle·
+        // 재투영은 여기 공통으로 남는다.
+        const changed = switch (term.agent_kind) {
+            .claude => self.refreshClaudeTranscript(term, cwd),
+            .codex => self.refreshCodexTranscript(term, cwd),
+            .none => false,
+        };
+        if (!changed) return;
+
+        // 대화 **유무**가 바뀌면 행 줄 수가 바뀌므로 재투영이 필요하다(행 높이·hit-test·밴드가 sidebar_rows에서
+        // 나온다). 텍스트만 바뀐 경우엔 라벨이 매 프레임 조립되므로 dirty만 세우면 된다.
+        const has_text = !cache.owned.isEmpty();
+        if (has_text != had_text) self.rebuildSidebar() catch {};
+        if (displayed) self.metal_dirty = true;
+    }
+
+    /// claude: 작업 디렉터리를 인코딩한 디렉터리의 **직속** 파일만 본다 — 서브에이전트 기록은 `<세션 id>/` 하위에
+    /// 쌓이므로 그것만으로 배제된다(§7.3). 대화가 갱신됐으면 true.
+    fn refreshClaudeTranscript(self: *AppSession, term: *Term, cwd: []const u8) bool {
+        const tr = maru.session.agent_transcript;
+        const cache = &term.agent_transcript;
+        const home_z = std.c.getenv("HOME") orelse return false;
         const home = std.mem.span(home_z);
         var slug_buf: [1024]u8 = undefined;
-        const slug = tr.claudeDirName(cwd, &slug_buf) orelse return;
+        const slug = tr.claudeDirName(cwd, &slug_buf) orelse return false;
         var path_buf: [2048]u8 = undefined;
-        const dir_path = std.fmt.bufPrint(&path_buf, "{s}/.claude/projects/{s}", .{ home, slug }) catch return;
-        const dir = std.Io.Dir.openDirAbsolute(self.io, dir_path, .{}) catch return;
+        const dir_path = std.fmt.bufPrint(&path_buf, "{s}/.claude/projects/{s}", .{ home, slug }) catch return false;
+        const dir = std.Io.Dir.openDirAbsolute(self.io, dir_path, .{}) catch return false;
         defer dir.close(self.io);
 
         // **매핑을 고정하지 않는다**(계약 2). Term이 새로 출력했으면(= mapped_output_ms가 어긋나면) 그 시점의 최신
@@ -23916,40 +23942,102 @@ pub const AppSession = struct {
         // 갱신되지 않으므로 "그 순간 최신 = 그 Term이 방금 말한 세션"이 성립한다(실측: claude 4/4).
         var name_buf: [tr.max_name_bytes]u8 = undefined;
         if (cache.name_len == 0 or cache.mapped_output_ms != term.agent_last_output_ms) {
-            const found = tr.latestSessionFile(self.io, dir, &name_buf) orelse return;
+            const found = tr.latestSessionFile(self.io, dir, &name_buf) orelse return false;
             if (!std.mem.eql(u8, found.name, cache.fileName())) {
                 cache.setFileName(found.name);
                 cache.read_mtime_ns = 0; // 파일이 바뀌었으면 mtime 비교를 건너뛰고 무조건 읽는다
+                cache.owned.clear(); // 세션이 바뀌었다 — 병합이 옛 대화를 새 세션 행에 남기지 않게 먼저 비운다
             }
             cache.mapped_output_ms = term.agent_last_output_ms;
         }
-        if (cache.name_len == 0) return;
+        if (cache.name_len == 0) return false;
 
-        // mtime이 그대로면 다시 읽지 않는다(계약 4) — 대화가 안 바뀌었는데 매초 256KB를 파싱할 이유가 없다.
-        const st = dir.statFile(self.io, cache.fileName(), .{}) catch return;
-        if (st.mtime.nanoseconds == cache.read_mtime_ns) return;
+        // mtime이 그대로면 다시 읽지 않는다(계약 4) — 대화가 안 바뀌었는데 매초 파싱할 이유가 없다.
+        const st = dir.statFile(self.io, cache.fileName(), .{}) catch return false;
+        if (st.mtime.nanoseconds == cache.read_mtime_ns) return false;
         cache.read_mtime_ns = st.mtime.nanoseconds;
 
-        const tail_buf = self.allocator.alloc(u8, tr.max_tail_bytes) catch return;
+        const tail_buf = self.allocator.alloc(u8, tr.max_tail_bytes) catch return false;
         defer self.allocator.free(tail_buf);
         const tail = tr.readTail(self.io, dir, cache.fileName(), tail_buf);
-        if (tail.len == 0) return;
+        if (tail.len == 0) return false;
 
-        const had_text = !cache.owned.conversation.isEmpty();
-        // 줄 하나를 파싱하는 데만 쓰고 통째로 버리는 arena — JSON Value 트리를 개별 free할 이유가 없다.
         var parse_arena = std.heap.ArenaAllocator.init(self.allocator);
         defer parse_arena.deinit();
-        tr.parseClaudeTail(parse_arena.allocator(), tail, &cache.owned);
+        var fresh: maru.session.agent_transcript.Owned = .{};
+        tr.parseClaudeTail(parse_arena.allocator(), tail, &fresh);
         // **남의 기록을 띄우지 않는다**: 파일이 스스로 밝힌 cwd가 이 Term의 cwd와 다르면 버린다. 디렉터리 이름
         // 인코딩 규칙(claudeDirName)이 불완전해 엉뚱한 디렉터리를 열더라도 여기서 걸린다(§7.3).
-        const claimed = cache.owned.conversation.cwd;
-        if (claimed.len > 0 and !std.mem.eql(u8, claimed, cwd)) cache.owned.conversation = .{};
+        const claimed = fresh.cwd();
+        if (claimed.len > 0 and !std.mem.eql(u8, claimed, cwd)) {
+            cache.owned.clear();
+            return true;
+        }
+        // 못 찾은 항목은 이전 값을 지킨다 — provider와 무관한 같은 규율이다(§7.8). claude는 지금 회수율이 높아
+        // 실익이 작지만, 규율이 하나여야 codex와 코드가 갈리지 않고 포맷이 바뀌어도 조용히 비지 않는다.
+        tr.mergeKeepingMissing(&cache.owned, &fresh);
+        return true;
+    }
 
-        // 대화 **유무**가 바뀌면 행 줄 수가 바뀌므로 재투영이 필요하다(행 높이·hit-test·밴드가 sidebar_rows에서
-        // 나온다). 텍스트만 바뀐 경우엔 라벨이 매 프레임 조립되므로 dirty만 세우면 된다.
-        const has_text = !cache.owned.conversation.isEmpty();
-        if (has_text != had_text) self.rebuildSidebar() catch {};
-        if (displayed) self.metal_dirty = true;
+    /// codex: 날짜 계층(`YYYY/MM/DD`)이라 디렉터리 이름이 작업 디렉터리를 말해주지 않고, 서브에이전트 기록이
+    /// **같은 계층에 섞인다**(실측: 최근 40개 중 32개). 그래서 최근 후보를 열어 `session_meta`로 신원을 확인한다 —
+    /// `thread_source == "user"`이고 cwd가 이 Term과 같은 첫 후보를 고른다. 대화가 갱신됐으면 true.
+    fn refreshCodexTranscript(self: *AppSession, term: *Term, cwd: []const u8) bool {
+        const tr = maru.session.agent_transcript;
+        const cache = &term.agent_transcript;
+        const home_z = std.c.getenv("HOME") orelse return false;
+        const home = std.mem.span(home_z);
+        var path_buf: [2048]u8 = undefined;
+        const root_path = std.fmt.bufPrint(&path_buf, "{s}/.codex/sessions", .{home}) catch return false;
+        const root = std.Io.Dir.openDirAbsolute(self.io, root_path, .{}) catch return false;
+        defer root.close(self.io);
+
+        if (cache.name_len == 0 or cache.mapped_output_ms != term.agent_last_output_ms) {
+            // stat은 전수로 돌리되(실측 232개 ≈ 1ms) **여는 건 상위 후보만** — 여는 쪽이 진짜 비용이다(전량 파싱 82ms).
+            var candidates: [codex_candidate_probe_limit]maru.session.agent_transcript.CodexCandidate = undefined;
+            const n = tr.collectCodexCandidates(self.io, root, &candidates);
+            var head_buf: [codex_head_bytes]u8 = undefined;
+            var cwd_buf: [1024]u8 = undefined;
+            var picked = false;
+            for (candidates[0..n]) |cand| {
+                const head = tr.readHead(self.io, root, cand.slice(), &head_buf);
+                if (head.len == 0) continue;
+                var meta_arena = std.heap.ArenaAllocator.init(self.allocator);
+                defer meta_arena.deinit();
+                const meta = tr.parseCodexMeta(meta_arena.allocator(), head, &cwd_buf);
+                if (!meta.is_user) continue; // 서브에이전트·자동 스레드 — 사용자 카드에 내부 대화를 띄우지 않는다
+                if (!std.mem.eql(u8, meta.cwd, cwd)) continue; // 다른 워크스페이스의 세션
+                if (!std.mem.eql(u8, cand.slice(), cache.fileName())) {
+                    cache.setFileName(cand.slice());
+                    cache.read_mtime_ns = 0;
+                    cache.owned.clear(); // 세션이 바뀌었다 — 옛 대화를 새 세션 행에 남기지 않는다
+                }
+                picked = true;
+                break;
+            }
+            if (!picked) return false;
+            cache.mapped_output_ms = term.agent_last_output_ms;
+        }
+        if (cache.name_len == 0) return false;
+
+        const st = root.statFile(self.io, cache.fileName(), .{}) catch return false;
+        if (st.mtime.nanoseconds == cache.read_mtime_ns) return false;
+        cache.read_mtime_ns = st.mtime.nanoseconds;
+
+        const tail_buf = self.allocator.alloc(u8, tr.max_tail_bytes) catch return false;
+        defer self.allocator.free(tail_buf);
+        const tail = tr.readTail(self.io, root, cache.fileName(), tail_buf);
+        if (tail.len == 0) return false;
+
+        var parse_arena = std.heap.ArenaAllocator.init(self.allocator);
+        defer parse_arena.deinit();
+        // cwd 대조는 후보를 고를 때 이미 했다(session_meta) — tail엔 cwd가 없다.
+        var fresh: maru.session.agent_transcript.Owned = .{};
+        tr.parseCodexTail(parse_arena.allocator(), tail, &fresh);
+        // **못 찾은 항목은 이전 값을 지킨다**(§7.8). codex는 긴 턴에 추론·도구 레코드가 쌓여 프롬프트가 tail 밖
+        // (실측 최악 22MB)으로 밀린다 — 사용자가 칠 때는 파일 끝이라 반드시 잡히고, 그 뒤로는 이 병합이 지킨다.
+        tr.mergeKeepingMissing(&cache.owned, &fresh);
+        return true;
     }
 
     /// foreground process와 터미널이 이미 소유한 bounded 화면 tail·OSC title/progress·최근 PTY 출력을 결합한다.
@@ -36124,10 +36212,8 @@ test "에이전트 행: 마지막 대화가 라벨·줄 수·알림 본문에 �
     }
     const lines_before = session.sidebarAgentRowLines(tab, .{ .pane = 0, .term = 0 });
 
-    term.agent_transcript.owned.conversation = .{
-        .prompt = term.agent_transcript.owned.store("배포 스크립트 고쳐줘"),
-        .reply = term.agent_transcript.owned.store("네, 수정했습니다"),
-    };
+    term.agent_transcript.owned.setPrompt("배포 스크립트 고쳐줘");
+    term.agent_transcript.owned.setReply("네, 수정했습니다");
 
     // 라벨: 종류 이름 대신 **프롬프트**가 오고, 상태 마커(✓)는 남는다 — 진행 여부를 잃지 않는다.
     {

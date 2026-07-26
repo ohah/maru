@@ -4,6 +4,12 @@
 
 이 문서는 Maru의 각 영역이 무엇으로 검증되는지 추적하기 위한 표다. 목표는 "나중에 구현하자"가 아니라, 아직 구현되지 않은 영역도 어떤 자동 테스트와 산출물로 증명할지 먼저 정해 두는 것이다.
 
+### 영속 세션 P5 세부 상태
+
+| slice | 상태 | 자동 gate | 환경 의존 gate |
+| --- | --- | --- | --- |
+| P5a1a accept hardening | 구현 | Debug/ReleaseFast `zig build test-session-host`가 listener/accepted fd의 명시적 nonblocking+CLOEXEC, empty accept, EINTR→success와 exact retry exhaustion, typed fd pressure와 owner retry/cadence predicate, same-UID 실제 socket, credential-provider seam의 other-UID rejection+peer EOF, frozen N-1/mismatched peer bounded readiness를 검증한다. | 일반 CI는 실제 다른 UID process를 만들지 않으므로 real cross-UID process rejection은 provisioned runner gate다. P5a1b admin policy, P5a1c upgrade preflight와 public CLI/TTY/SSH는 계속 미구현이다. |
+
 ## 현재 자동 검증되는 영역
 
 | 영역 | 현재 검증 방법 | 산출물 | 의미 |

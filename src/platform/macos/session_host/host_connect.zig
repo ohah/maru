@@ -502,8 +502,15 @@ fn readExact(fd: c.fd_t, bytes: []u8) bool {
 
 const FrozenV1Peer = struct {
     fn serve(server: *socket_server.SocketServer, ok: *bool) void {
+        var ready = c.pollfd{
+            .fd = server.listen_fd,
+            .events = c.POLL.IN,
+            .revents = 0,
+        };
+        if (c.poll(@ptrCast(&ready), 1, 1_000) <= 0 or ready.revents & c.POLL.IN == 0) return;
         const fd = server.acceptOne() orelse return;
         defer _ = c.close(fd);
+        socket_server.setBlocking(fd) catch return;
         var header_bytes: [protocol.header_size]u8 = undefined;
         if (!readExact(fd, &header_bytes)) return;
         const header = protocol.Header.decode(&header_bytes) catch return;
@@ -869,6 +876,12 @@ test "host_connect: owner lease는 부재(free)와 판정 불가(unknown)를 구
 /// 상태다(mixed-build·구 host). 응답 없이 닫아 client가 handshake 실패로 보게 한다.
 const MismatchedPeer = struct {
     fn serve(server: *socket_server.SocketServer, ok: *bool) void {
+        var ready = c.pollfd{
+            .fd = server.listen_fd,
+            .events = c.POLL.IN,
+            .revents = 0,
+        };
+        if (c.poll(@ptrCast(&ready), 1, 1_000) <= 0 or ready.revents & c.POLL.IN == 0) return;
         const fd = server.acceptOne() orelse return;
         _ = c.close(fd); // hello를 읽지도 답하지도 않는다 → client는 ConnectionClosed(=handshake_failed).
         ok.* = true;

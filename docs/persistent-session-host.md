@@ -638,9 +638,9 @@ fixture가 restoreSpawn/attach/probe/spawn 공통 진입점 0과 dropped 0을 �
 Quit/relaunch E2E는 별도 제품 gate로 남는다. 9의 manifest 전역 중복 검증은
 R2a core/ABI/source-order fixture까지 구현됐다. 8의 R2b는 core/wire와 secure host enumeration 및 canonical
 connection과 분리된 ephemeral inventory collector까지 구현됐고, 제품 restore coordinator·`Recovered Sessions`
-projection·fresh adopt는 미구현이다. 현재 단일 connection을 서비스 중인 host에서 별도 ephemeral handshake를
-동시에 처리하는 제품 scheduling/E2E도 coordinator 슬라이스의 선결 gate이며 아직 완료가 아니다. 실제 제품 process에서 기존 checkpoint
-file 무변경을 관측하는 E2E는 남아 있다. 일시 실패로 분류된 누락 runtime은 종전처럼 해당 Window apply를
+projection·fresh adopt는 미구현이다. canonical GUI connection을 유지한 채 별도 ephemeral inventory를 동시에
+처리하는 제품 scheduling/process fixture는 T0b2b에서 구현됐다. 실제 제품 process에서 기존 checkpoint file 무변경을
+관측하는 E2E는 남아 있다. 일시 실패로 분류된 누락 runtime은 종전처럼 해당 Window apply를
 실패시키며, 추가 Window는 teardown하고 primary는 명시적인 새 default-shell fallback으로 전환한다. 이
 `restore incomplete` 실행은 종료 시 마지막 완전본을 `.bak`으로 한 번 보존한 뒤 현재 모델을 저장한다. capture/serialize/
 write 자체가 실패한 경우에만 write 0으로 이전 완전본을 유지한다.
@@ -817,10 +817,10 @@ slot의 `local_stream→subscription`과 daemon의
 모두 revoke한 뒤 slot generation을 올려 storage를 재사용한다. connection/subscription counter overflow에서는 ID를
 재사용하지 않고 새 attach를 fail-close한다.
 
-> **현재 구현 상태(T0b0):** wire `stream_id`는 connection-local counter를 유지하고 registry public authority는 distinct
+> **현재 구현 상태(T0b2b):** wire `stream_id`는 connection-local counter를 유지하고 registry public authority는 distinct
 > `SubscriptionId`만 받는다. `SocketServer`가 `ConnectionKey`와 daemon-global 양방향 table을 제품 `Connection` 생성자에
-> 필수 주입하며, 두 번째 connection의 local stream 1은 별도 global subscription으로 attach된다. 아직 multi-fd reactor
-> 자체를 열지 않았으므로 이 identity 기반만으로 동시 제품 연결 완료로 세지 않는다.
+> 필수 주입하며, 두 번째 connection의 local stream 1은 별도 global subscription으로 attach된다. 제품 daemon은
+> listener와 최대 32개 connection을 같은 single-owner poll reactor에서 서비스한다.
 
 각 socket은 stateful `ConnectionSlot`이 소유한다. slot은 partial header/payload read, partial frame write, 요청/응답
 correlation과 bounded outbound queue를 보관한다. socket은 nonblocking이며 한 slot의 `EAGAIN`이나 느린 reader가 PTY pump,
@@ -1738,13 +1738,33 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
       새 `host.info`를 계속 왕복하는 process fixture, natural exit, resync-pending과 allocator-failure fail-close를
       Debug/ReleaseFast 기본 gate로 닫은 뒤에만 `(구현)`으로 표시한다. close race와 slot ABA/reuse는 이 경로가 공유하는
       T0a/T0b0 canonical primitive gate를 재사용한다.
-- **P5a1 — bounded admin accept foundation**: 현재 connection 하나를 EOF까지 독점하는 serial serve loop를 먼저
-  single-owner multi-fd reactor로 바꾼다. P4 GUI slot을 유지한 채 bounded admin request slot 하나를 accept/dispatch하고
-  partial read/write, cap, idle deadline, same-login-UID/other-UID 거부를 process test로 고정한다. public CLI/help는 아직
-  열지 않는다. 이 slice가 reactor-wide upgrade primitive도 함께 소유한다: prepare linearization에서 global admission
-  close→선행 dispatch 0→accepted reply flush→request slot close/remove→idle slot bounded close→slot/dispatch 0을
-  검증하며 partial request/queued reply가 있으면 `upgrade_busy`로 취소한다. 따라서 multi-fd를 연 중간 release에도
-  `host_exec_upgrade_v1`을 안전하게 계속 광고할 수 있다.
+- **P5a1 — bounded admin admission과 reactor-wide upgrade drain**: T0b2b가 이미 serial serve loop를
+  listener+32-client single-owner poll reactor로 교체했으므로 reactor를 다시 만들지 않는다. 남은 범위를 다음처럼
+  독립 gate로 닫는다.
+  - **P5a1a — accept hardening (구현):** listener 자체도 nonblocking/CLOEXEC로 만들고, poll readiness와 accept 사이의
+    race에서 `EAGAIN`은 정상 yield한다. `EINTR`은 bounded하게 재시도하고 fd 고갈만 cadence backoff 대상으로 둔다.
+    same-login-UID gate를 통과하기 전에는 `Client`/reactor admission이 0임을 real socket +
+    credential-provider seam fixture로 검증한다. 기본 자동 gate는 실제 same-UID socket과 credential-provider seam의
+    other-UID rejection을 포함한다.
+    일반 CI에서 실제 다른 UID를 만들 수 없으므로 real other-UID process는 provisioned-runner gate로 정직하게 남긴다.
+  - **P5a1b — one-shot admin policy:** 기존 32-slot pool 안에서 hidden `admin` hello role의 동시 lease를 정확히
+    하나만 허용한다. hard-reserved 33번째 fd나 별도 listener는 두지 않으며 이미 연결된 GUI를 밀어내지 않는다.
+    pre-hello peer는 10초 handshake deadline과 전역 cap을 그대로 적용받는다. `client_kind`는 same-UID 인증 뒤의
+    traffic class/quota hint일 뿐 보안 identity가 아니다. admin은 `host.info`, `runtime.list`, `runtime.get`,
+    `runtime.inventory`만 한 요청 수행하고 reply를 전량 flush한 뒤 canonical close한다. 두 번째 admin과
+    mutation/stream/upgrade 요청은 각각 `resource_exhausted`, `unauthorized` reply+close이며 malformed/unknown
+    요청은 `invalid_request`+close다. valid admin hello에서만 lease를 acquire하고 EOF/timeout/malformed/denied/
+    write-fail을 포함한 release는 기존 `Client.destroy → Connection.deinit` canonical 경로 한 곳에서 exact-once 한다.
+    pipelined 두 번째 request는 dispatch하지 않는다. public CLI/help는 아직 열지 않는다. 향후 raw attach는 장기 연결
+    `cli` role을 사용하므로 admin과 분리한다.
+  - **P5a1c — upgrade all-or-none preflight:** prepare를 stage하기 전에 owner가 requester의 현재 dispatch 하나를
+    제외한 모든 slot의 partial parser/read, partial 또는 queued write, 선행/in-flight dispatch, attachment를 한 번
+    검사한다. 하나라도 busy면 slot을 하나도 닫거나 stage/gate-close하지 않고 `upgrade_busy`를 보낸다. idle이면
+    global admission close→선행 dispatch 0→accepted reply flush→request slot close/remove→검증된 idle slot canonical
+    close→slot/dispatch/subscription/attachment 0 순서로만 typed preclosed marker를 outer coordinator에 넘긴다.
+    idle 판정은 `Client`가 slot과 parser 상태를 함께 검사하고, 실제 정리는 `Owner.destroyClient`만 사용한다.
+    `ReactorCore.closeIdleForUpgrade`로 slot을 먼저 닫아 canonical client teardown과 이중 회수하지 않는다. 따라서
+    실행됐지만 reply가 유실된 mutation을 upgrade 성공으로 숨기지 않는다.
 - **P5a2 — read/admin CLI**: P5a1 위에서 `maru host status`, `maru runtime list/get`과 parser/`--help`/`--json`
   fixture를 공개한다. CLI는 host를 자동 시작하지 않고 manifest writer도 되지 않는다. GUI가 연결된 실제 daemon에 대한
   응답, absent/denied/busy typed exit와 JSON 안정성이 gate다.
@@ -1757,8 +1777,8 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
 - **P5b2 — bounded stream slots**: P4 `ConnectionSlot` cap/reserve/fairness를 multi-slot streaming에 적용한다.
   slow observer가 controller/PTY를 막지 않고 per-connection/global cap을 넘지 않는 것이 gate다.
 - **P5b3 — controller/observer reactor**: observer/takeover protocol과 controller 전환을 hidden harness로 완성한다.
-  P5a1의 reactor-wide upgrade drain을 attachment/subscription graph까지 확장해 controller/observer,
-  attachment/slot/dispatch가 모두 0일 때만 upgrade outer loop로 넘기는 race gate를 추가한다. 아직 public
+  P5a1의 reactor-wide upgrade drain에 controller/observer lease와 takeover/revocation state 검사를 추가해
+  모든 capability lease가 0일 때만 upgrade outer loop로 넘기는 race gate를 추가한다. 아직 public
   `maru attach`/help를 열지 않는다.
 - **P5c1 — raw TTY lifetime**: 외부 client의 raw mode enter와 모든 detach/error/signal 경로 restore, 최초
   `TIOCGWINSZ`를 deterministic PTY harness로 검증한다.

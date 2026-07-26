@@ -21,8 +21,12 @@ const pressure_sample_count_min: usize = 20;
 const pressure_sample_count_max: usize = 4096;
 const post_drain_sample_count: usize = 10;
 const sample_target_interval_ms: u64 = 20;
-const sample_gap_max_ms: u64 = 100;
-const sample_gap_max_ns: u64 = sample_gap_max_ms * std.time.ns_per_ms;
+const pressure_sample_gap_max_ms: u64 = 100;
+const settle_sample_gap_max_ms: u64 = 250;
+const pressure_sample_gap_max_ns: u64 =
+    pressure_sample_gap_max_ms * std.time.ns_per_ms;
+const settle_sample_gap_max_ns: u64 =
+    settle_sample_gap_max_ms * std.time.ns_per_ms;
 const deadline_ms: u64 = 30_000;
 
 const base_update_max_bytes: u64 = connection_slot.base_update_max_bytes;
@@ -99,7 +103,8 @@ const Artifact = struct {
     healthy_marker_matches_nonce: bool,
 
     sample_target_interval_ms: u64,
-    sample_gap_max_ms: u64,
+    pressure_sample_gap_max_ms: u64,
+    settle_sample_gap_max_ms: u64,
     baseline_samples: []const RawSample,
     pressure_samples: []const RawSample,
     post_drain_samples: []const RawSample,
@@ -323,7 +328,8 @@ fn validateArtifact(allocator: std.mem.Allocator, artifact: Artifact) !void {
     }
 
     if (artifact.sample_target_interval_ms != sample_target_interval_ms or
-        artifact.sample_gap_max_ms != sample_gap_max_ms)
+        artifact.pressure_sample_gap_max_ms != pressure_sample_gap_max_ms or
+        artifact.settle_sample_gap_max_ms != settle_sample_gap_max_ms)
     {
         return error.InvalidSampleInterval;
     }
@@ -334,9 +340,21 @@ fn validateArtifact(allocator: std.mem.Allocator, artifact: Artifact) !void {
     {
         return error.InvalidSampleCount;
     }
-    try validateSamples(artifact, artifact.baseline_samples, sample_gap_max_ns);
-    try validateSamples(artifact, artifact.pressure_samples, sample_gap_max_ns);
-    try validateSamples(artifact, artifact.post_drain_samples, sample_gap_max_ns);
+    try validateSamples(
+        artifact,
+        artifact.baseline_samples,
+        settle_sample_gap_max_ns,
+    );
+    try validateSamples(
+        artifact,
+        artifact.pressure_samples,
+        pressure_sample_gap_max_ns,
+    );
+    try validateSamples(
+        artifact,
+        artifact.post_drain_samples,
+        settle_sample_gap_max_ns,
+    );
 
     const baseline_last = artifact.baseline_samples[artifact.baseline_samples.len - 1].monotonic_ns;
     const pressure_first = artifact.pressure_samples[0].monotonic_ns;
@@ -575,7 +593,8 @@ fn goodArtifact() Artifact {
         .baseline_reset_ack = true,
         .healthy_marker_matches_nonce = true,
         .sample_target_interval_ms = 20,
-        .sample_gap_max_ms = 100,
+        .pressure_sample_gap_max_ms = 100,
+        .settle_sample_gap_max_ms = 250,
         .baseline_samples = &baseline_fixture,
         .pressure_samples = &pressure_fixture,
         .post_drain_samples = &post_fixture,
@@ -727,7 +746,7 @@ test "run peak includes post-drain and post delta saturates below baseline" {
     try validateArtifact(testing.allocator, artifact);
 }
 
-test "timestamp reversal and over-100ms sample gap fail" {
+test "timestamp reversal and pressure gap over 100ms fail" {
     var reversed = pressure_fixture;
     reversed[5].monotonic_ns = reversed[4].monotonic_ns;
     var artifact = goodArtifact();
@@ -753,6 +772,27 @@ test "timestamp reversal and over-100ms sample gap fail" {
     try testing.expectError(
         error.InvalidSampleCount,
         validateArtifact(testing.allocator, artifact),
+    );
+}
+
+test "settle samples allow runner scheduling to 250ms but reject larger gaps" {
+    var runner_delayed = baseline_fixture;
+    for (runner_delayed[5..]) |*sample| sample.monotonic_ns += 160_000_000;
+    try validateSamples(
+        goodArtifact(),
+        &runner_delayed,
+        settle_sample_gap_max_ns,
+    );
+
+    var too_delayed = baseline_fixture;
+    for (too_delayed[5..]) |*sample| sample.monotonic_ns += 231_000_000;
+    try testing.expectError(
+        error.InvalidSampleInterval,
+        validateSamples(
+            goodArtifact(),
+            &too_delayed,
+            settle_sample_gap_max_ns,
+        ),
     );
 }
 

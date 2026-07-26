@@ -101,7 +101,8 @@ const Artifact = struct {
     baseline_reset_ack: bool,
     healthy_marker_matches_nonce: bool,
     sample_target_interval_ms: u64,
-    sample_gap_max_ms: u64,
+    pressure_sample_gap_max_ms: u64,
+    settle_sample_gap_max_ms: u64,
     baseline_samples: []const RawSample,
     pressure_samples: []const RawSample,
     post_drain_samples: []const RawSample,
@@ -208,10 +209,16 @@ pub fn main(init: std.process.Init) !void {
     _ = c.close(report_pair[1]);
     report_pair_open[1] = false;
     defer {
-        if (command_pair_open[0]) _ = c.close(command_pair[0]);
+        if (command_pair_open[0]) {
+            _ = c.close(command_pair[0]);
+            command_pair_open[0] = false;
+        }
     }
     defer {
-        if (report_pair_open[0]) _ = c.close(report_pair[0]);
+        if (report_pair_open[0]) {
+            _ = c.close(report_pair[0]);
+            report_pair_open[0] = false;
+        }
     }
     var host_reaped = false;
     defer {
@@ -612,7 +619,8 @@ pub fn main(init: std.process.Init) !void {
         .baseline_reset_ack = true,
         .healthy_marker_matches_nonce = marker_seen,
         .sample_target_interval_ms = 20,
-        .sample_gap_max_ms = 100,
+        .pressure_sample_gap_max_ms = 100,
+        .settle_sample_gap_max_ms = 250,
         .baseline_samples = &baseline_samples,
         .pressure_samples = pressure_samples.items,
         .post_drain_samples = &post_samples,
@@ -841,8 +849,9 @@ fn probe(
             posix.MSG.DONTWAIT | posix.MSG.TRUNC,
         );
         if (received == @sizeOf(probe_wire.Report)) {
-            var report: probe_wire.Report = undefined;
-            @memcpy(std.mem.asBytes(&report), packet_bytes[0..@sizeOf(probe_wire.Report)]);
+            const report = probe_wire.decodeReportDatagram(
+                packet_bytes[0..@intCast(received)],
+            ) orelse return error.ProbeProtocolError;
             if (!report.valid() or report.sequence != wanted)
                 return error.ProbeProtocolError;
             const expected: probe_wire.ReportKind = switch (command) {

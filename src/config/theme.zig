@@ -832,10 +832,21 @@ pub const SidebarConfig = struct {
     /// macOS 어댑터) 상수를 직접 공유하진 못하고 값만 맞춘다. 여기 range는 거친 저장 검증 하한일 뿐이고, 런타임은
     /// 헤더 아이콘 겹침을 막는 **동적** 하한(sidebarMinPt — cell 폭 비례)으로 다시 clamp한다.
     width_pt: u32 = 180,
+    /// 사이드바 에이전트 행의 **마지막 대화**를 항상 채우기 위해 claude 상태줄 훅을 설치할지(기본 true).
+    /// loader `sidebar.agent-transcript-hook`.
+    ///
+    /// **왜 옵션인가**: 이걸 켜면 Maru가 `~/.claude/settings.json`(사용자 소유 파일)에 상태줄 명령을 써 넣는다.
+    /// 그게 없어도 대화는 대부분 보이지만(에이전트가 자식에게 내려주는 세션 신원을 읽는다), 도구를 한 번도 쓰지
+    /// 않는 세션은 신원을 얻을 수 없어 빈다. 훅은 그 빈틈을 없애는 대신 남의 설정 파일을 건드리는 대가를 치른다.
+    /// 설치물은 이름과 마커로 **Maru가 넣은 것임이 한눈에 보이고**, 끄면 그것만 정확히 제거한다.
+    ///
+    /// codex는 해당 없다 — 외부 스크립트를 실행하는 상태줄/훅 설정이 없어 자식 신원 경로만 쓴다.
+    agent_transcript_hook: bool = true,
 
     pub const schema = .{ // 키: sidebar.show-branch / sidebar.show-folder / sidebar.width
         .show_branch = Meta{ .doc = "사이드바 카드에 git 브랜치 표시", .widget = .toggle, .section = .sidebar },
         .show_folder = Meta{ .doc = "사이드바 카드에 폴더 경로 표시", .widget = .toggle, .section = .sidebar },
+        .agent_transcript_hook = Meta{ .doc = "에이전트 대화 표시용 claude 상태줄 훅 설치", .widget = .toggle, .section = .sidebar },
         // 필드명은 width_pt지만 키는 `sidebar.width`(key_seg). u32라 range 메타 필수(파서 검증 + GUI number 위젯 공유).
         .width_pt = Meta{ .key_seg = "width", .doc = "사이드바 폭(pt)", .range = .{ 120, 480 }, .widget = .number, .section = .sidebar },
     };

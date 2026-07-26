@@ -45,6 +45,7 @@ pub const ime = @import("session/ime.zig");
 pub const keyhint_hold = @import("session/keyhint_hold.zig"); // 단축키 힌트 홀드 gesture 정책(OS-중립, platform이 alias로 참조)
 pub const agent_observer = @import("session/agent_observer.zig");
 pub const agent_transcript = @import("session/agent_transcript.zig"); // 세션 기록 파일에서 마지막 대화(사이드바 행 §7)
+pub const agent_statusline = @import("session/agent_statusline.zig"); // claude 상태줄 훅(§7.2.2 — 옵션 보강)
 pub const session_model = @import("session/session_model.zig");
 pub const split_tree = @import("session/split_tree.zig");
 pub const dock_panel = @import("session/dock_panel.zig"); // FP1: 창 레벨 파일 도크의 OS-중립 소유 모델 + 단일 그룹 영속 DTO

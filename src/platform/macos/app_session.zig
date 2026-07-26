@@ -3073,6 +3073,9 @@ pub const AppSession = struct {
         if (self.surface_initialized) return;
         std.debug.assert(self.tabs.items.len > 0);
         self.surface_initialized = true;
+        // 상태줄 훅을 config에 맞춘다(설치/복원). 사용자 파일을 건드리는 유일한 자리라 시작 시 한 번만 조정하고,
+        // config를 다시 적용할 때 같은 함수가 다시 맞춘다.
+        self.reconcileAgentStatusline();
         self.renderer_state = renderer.RendererState.init(self.allocator, .{});
         self.renderer_initialized = true;
         self.frame_loop = app.AppFrameLoop.init(
@@ -15976,6 +15979,7 @@ pub const AppSession = struct {
     /// config 기본으로 되돌려야 하므로 applyLoadedConfig(false)를 직접 부른다.
     fn reapplyLoadedConfig(self: *AppSession) void {
         self.applyLoadedConfig(true);
+        self.reconcileAgentStatusline(); // 토글을 껐으면 여기서 복원·제거까지 간다
     }
 
     /// reapplyLoadedConfig 본체. 메모리의 loaded_config(스키마 필드 in-place 변경)에서 appearance를 다시 resolve해 적용한다.
@@ -23987,6 +23991,175 @@ pub const AppSession = struct {
         if (displayed) self.metal_dirty = true;
     }
 
+    /// 파일 전체를 arena에 읽는다(없거나 크면 null). 상태줄 스크립트·settings.json처럼 작은 파일 전용.
+    fn readFileAlloc(io: std.Io, a: std.mem.Allocator, path: []const u8) ?[]u8 {
+        const file = std.Io.Dir.cwd().openFile(io, path, .{}) catch return null;
+        defer file.close(io);
+        const size = (file.stat(io) catch return null).size;
+        if (size == 0 or size > 1 << 20) return null;
+        const buf = a.alloc(u8, @intCast(size)) catch return null;
+        const n = file.readPositionalAll(io, buf, 0) catch return null;
+        return buf[0..n];
+    }
+
+    /// 실행 권한(0o755)으로 파일을 쓴다 — 상태줄 스크립트는 claude가 직접 실행한다.
+    fn writeExecutableFile(io: std.Io, path: []const u8, body: []const u8, executable: bool) !void {
+        const dir = std.fs.path.dirname(path) orelse return error.BadPath;
+        std.Io.Dir.cwd().createDirPath(io, dir) catch {};
+        const file = try std.Io.Dir.cwd().createFile(io, path, .{ .truncate = true });
+        defer file.close(io);
+        try file.writePositionalAll(io, body, 0);
+        // 상태줄 스크립트는 claude가 **직접 실행**하므로 실행 권한이 필요하다(settings.json은 아니다).
+        if (executable) file.setPermissions(io, @enumFromInt(0o755)) catch {};
+    }
+
+    /// `settings.json`에서 `statusLine.command`를 읽는다(없거나 파싱 실패면 null).
+    fn readStatusLineCommand(a: std.mem.Allocator, io: std.Io, path: []const u8) ?[]const u8 {
+        const raw = readFileAlloc(io, a, path) orelse return null;
+        var parsed = std.json.parseFromSlice(std.json.Value, a, raw, .{}) catch return null;
+        defer parsed.deinit();
+        const root = switch (parsed.value) {
+            .object => |o| o,
+            else => return null,
+        };
+        const sl = switch (root.get("statusLine") orelse return null) {
+            .object => |o| o,
+            else => return null,
+        };
+        return switch (sl.get("command") orelse return null) {
+            .string => |cmd| a.dupe(u8, cmd) catch null,
+            else => null,
+        };
+    }
+
+    /// `settings.json`의 `statusLine`만 바꿔 쓴다(`command`가 null이면 그 키를 제거).
+    ///
+    /// **다른 키를 보존한다** — 이 파일은 사용자 것이고 우리가 아는 건 statusLine뿐이다. 통째로 다시 쓰면 우리가 모르는
+    /// 설정이 사라진다. 그래서 파싱한 트리에서 그 키만 갈아 끼우고 나머지는 그대로 직렬화한다.
+    fn writeStatusLineCommand(a: std.mem.Allocator, io: std.Io, path: []const u8, command: ?[]const u8) void {
+        const raw = readFileAlloc(io, a, path);
+        var root: std.json.ObjectMap = .empty;
+        var parsed_opt: ?std.json.Parsed(std.json.Value) = null;
+        defer if (parsed_opt) |*p| p.deinit();
+        if (raw) |text| {
+            if (std.json.parseFromSlice(std.json.Value, a, text, .{})) |parsed| {
+                parsed_opt = parsed;
+                switch (parsed.value) {
+                    .object => |o| root = o,
+                    else => {},
+                }
+            } else |_| {
+                // 파싱 실패 = 사용자 파일이 우리가 모르는 상태다. **덮어쓰지 않는다** — 고치는 것보다 두는 편이 안전하다.
+                return;
+            }
+        }
+        if (command) |cmd| {
+            var sl: std.json.ObjectMap = .empty;
+            sl.put(a, "type", .{ .string = "command" }) catch return;
+            sl.put(a, "command", .{ .string = cmd }) catch return;
+            root.put(a, "statusLine", .{ .object = sl }) catch return;
+        } else {
+            _ = root.orderedRemove("statusLine");
+        }
+        var out: std.ArrayListUnmanaged(u8) = .empty;
+        defer out.deinit(a);
+        var aw: std.Io.Writer.Allocating = .fromArrayList(a, &out);
+        std.json.Stringify.value(std.json.Value{ .object = root }, .{ .whitespace = .indent_2 }, &aw.writer) catch return;
+        out = aw.toArrayList();
+        writeExecutableFile(io, path, out.items, false) catch return;
+    }
+
+    /// 자식 프로세스 env에서 세션 신원을 읽는다(§7.2.1 — 기본 경로, 사용자 파일 무침습).
+    fn agentIdentityFromChildEnv(self: *AppSession, term: *Term, key: []const u8, buf: []u8) ?[]const u8 {
+        _ = self;
+        const pid = agentProcessPid(term.rt.observation.foreground_processes.items, term.agent_kind) orelse return null;
+        return maru.pty.PtySession.agentSessionIdentity(pid, key, buf);
+    }
+
+    /// claude 상태줄 훅이 적어둔 per-pane 신원 파일을 읽는다(§7.2.2 — 옵션 보강).
+    ///
+    /// 훅은 `MARU_PANE_ID`(= surface id)를 파일명으로 쓰므로 **어느 Term의 세션인지가 자동으로 붙는다**. 자식 env가
+    /// 안 잡히는 경우(도구를 한 번도 안 쓴 세션)를 이 경로가 메운다. codex는 해당 없다 — 외부 스크립트를 실행하는
+    /// 상태줄 설정이 없다.
+    fn agentIdentityFromStatuslineFile(self: *AppSession, term: *Term, buf: []u8) ?[]const u8 {
+        if (term.agent_kind != .claude) return null;
+        const sl = maru.session.agent_statusline;
+        var arena_state = std.heap.ArenaAllocator.init(self.allocator);
+        defer arena_state.deinit();
+        const a = arena_state.allocator();
+        const base = sessionCacheBase(a) orelse return null;
+        const path = std.fmt.allocPrint(a, "{s}/{s}/{d}", .{ base, sl.session_dir_rel, term.surfaceId() }) catch return null;
+        const raw = readFileAlloc(self.io, a, path) orelse return null;
+        const trimmed = std.mem.trim(u8, raw, " \t\r\n");
+        if (!sl.plausibleIdentity(trimmed)) return null;
+        const n = @min(trimmed.len, buf.len);
+        @memcpy(buf[0..n], trimmed[0..n]);
+        return buf[0..n];
+    }
+
+    /// claude 상태줄 훅을 config(`sidebar.agent-transcript-hook`)에 맞춰 설치하거나 제거한다. 앱 시작 시 한 번,
+    /// 그리고 config 재적용 때 호출한다(docs/sidebar-agent-list.md §7.2.2).
+    ///
+    /// **사용자 소유 파일을 건드리는 유일한 자리**라 규율을 여기서 지킨다:
+    /// - 이미 사용자가 쓰던 상태줄이 있으면 **지우지 않고 감싼다**(우리 스크립트가 그 명령을 그대로 실행).
+    /// - 우리가 넣은 것은 파일명(`maru-statusline.sh`)과 스크립트 안 표식 블록으로 드러난다.
+    /// - 끄면 감쌌던 원래 명령을 `statusLine`에 복원하고 우리 스크립트를 지운다 — 설치 전 상태로 돌아간다.
+    ///
+    /// best-effort다. 실패는 조용히 지나간다 — 이 훅이 없어도 대화는 자식 신원 경로(§7.2.1)로 대부분 잡힌다.
+    fn reconcileAgentStatusline(self: *AppSession) void {
+        if (!is_macos) return;
+        const sl = maru.session.agent_statusline;
+        const home_z = std.c.getenv("HOME") orelse return;
+        const home = std.mem.span(home_z);
+
+        var arena_state = std.heap.ArenaAllocator.init(self.allocator);
+        defer arena_state.deinit();
+        const a = arena_state.allocator();
+
+        const claude_dir = std.fmt.allocPrint(a, "{s}/.claude", .{home}) catch return;
+        const script_path = std.fmt.allocPrint(a, "{s}/{s}", .{ claude_dir, sl.script_name }) catch return;
+        const settings_path = std.fmt.allocPrint(a, "{s}/settings.json", .{claude_dir}) catch return;
+
+        const want = self.loaded_config.config.sidebar.agent_transcript_hook;
+        const existing_script = readFileAlloc(self.io, a, script_path);
+        const current_cmd = readStatusLineCommand(a, self.io, settings_path);
+
+        if (!want) {
+            // **복원**: 우리가 감쌌던 원래 명령을 되돌리고 우리 것을 지운다. 사용자가 그 사이 statusLine을 직접
+            // 바꿨다면(우리 것이 아니면) 아무것도 건드리지 않는다.
+            if (current_cmd) |cmd| if (sl.commandIsOurs(cmd)) {
+                const restore = if (existing_script) |body| sl.extractWrappedCommand(body) else null;
+                writeStatusLineCommand(a, self.io, settings_path, restore);
+            };
+            std.Io.Dir.cwd().deleteFile(self.io, script_path) catch {};
+            return;
+        }
+
+        // 어떤 계획인가 — 없으면 설치, 우리 것이면 갱신, 남의 것이면 감싼다.
+        const plan = sl.planFor(current_cmd);
+        const wrapped: ?[]const u8 = switch (plan) {
+            .install => null,
+            // 갱신이면 이미 스크립트 안에 감싸둔 원래 명령을 유지한다(두 번 감싸지 않게).
+            .refresh => if (existing_script) |body| sl.extractWrappedCommand(body) else null,
+            .wrap_existing => current_cmd,
+        };
+
+        const cache_base = sessionCacheBase(a) orelse return;
+        const session_dir = std.fmt.allocPrint(a, "{s}/{s}", .{ cache_base, sl.session_dir_rel }) catch return;
+
+        var body: std.ArrayListUnmanaged(u8) = .empty;
+        defer body.deinit(a);
+        sl.scriptBody(&body, a, session_dir, wrapped) catch return;
+
+        // 내용이 같으면 쓰지 않는다 — 매 실행마다 사용자 파일의 mtime을 흔들 이유가 없다.
+        if (existing_script) |old| if (std.mem.eql(u8, old, body.items)) {
+            if (plan != .refresh) writeStatusLineCommand(a, self.io, settings_path, script_path);
+            return;
+        };
+        writeExecutableFile(self.io, script_path, body.items, true) catch return;
+        writeStatusLineCommand(a, self.io, settings_path, script_path);
+    }
+
     /// 에이전트가 자식에게 내려주는 **세션 신원**을 캐시에 채운다(claude `CLAUDE_CODE_SESSION_ID`, codex
     /// `CODEX_THREAD_ID`). 이미 값이 있으면 자식이 없어도 유지하고, 새 값이 오면 교체한다(`/clear`로 세션이
     /// 갈리는 경우 — 같은 프로세스가 새 id를 내려준다).
@@ -24000,9 +24173,9 @@ pub const AppSession = struct {
             .codex => "CODEX_THREAD_ID",
             .none => return,
         };
-        const pid = agentProcessPid(term.rt.observation.foreground_processes.items, term.agent_kind) orelse return;
         var buf: [maru.session.agent_transcript.max_identity_bytes]u8 = undefined;
-        const value = maru.pty.PtySession.agentSessionIdentity(pid, key, &buf) orelse return;
+        const value = self.agentIdentityFromChildEnv(term, key, &buf) orelse
+            self.agentIdentityFromStatuslineFile(term, &buf) orelse return;
         const cache = &term.agent_transcript;
         if (std.mem.eql(u8, cache.identity(), value)) return;
         // 신원이 바뀌었다 = 다른 세션이다. 옛 대화가 새 세션 행에 남지 않게 매핑을 통째로 버린다.

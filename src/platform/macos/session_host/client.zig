@@ -842,6 +842,21 @@ pub const Client = struct {
             frame.deinit(self.allocator);
             return;
         }
+        const runtime_ended = std.mem.eql(u8, frame.payload, "{\"event\":\"runtime.ended\"}");
+        if (runtime_ended) {
+            // Ended terminally supersedes every pending full-state/control event for this stream.
+            // With 256 live attachments this replacement must not become a 257th queue item and
+            // poison otherwise healthy sibling runtimes.
+            const ended_stream = frame.header.stream_id;
+            var ended_index: usize = 0;
+            while (ended_index < self.pending_events.items.len) {
+                if (self.pending_events.items[ended_index].header.stream_id == ended_stream) {
+                    const replaced = self.pending_events.orderedRemove(ended_index);
+                    self.pending_event_bytes -= replaced.payload.len;
+                    replaced.deinit(self.allocator);
+                } else ended_index += 1;
+            }
+        }
         for (self.pending_events.items, 0..) |old, i| {
             const old_revision = observation_wire.eventRevision(self.allocator, old.payload) catch {
                 frame.deinit(self.allocator);
@@ -1903,6 +1918,50 @@ test "client event queue overflow poisons every runtime sharing the connection" 
     try std.testing.expectError(error.ConnectionClosed, client.call("host.info", null));
 }
 
+test "client ended event replaces same-stream metadata at exact event cap" {
+    const allocator = std.testing.allocator;
+    const metadata =
+        \\{"event":"runtime.metadata","metadata_revision":1,"metadata":{"cwd":"/one","window_title":"one","ssh_remote_dest":null,
+        \\"semantic_state":0,"alt_active":false,"app_cursor_keys":false,"alternate_scroll":true,"observer_generation":1,
+        \\"title_generation":1,"cols":80,"rows":24,"foreground_available":false,"foreground_pgid":null,"processes":[]}}
+    ;
+    var client = Client{
+        .allocator = allocator,
+        .fd = -1,
+        .host_id = 0,
+        .parser = framing.FrameParser.init(allocator),
+    };
+    defer client.parser.deinit();
+    defer client.pending_stream.deinit(allocator);
+    defer {
+        for (client.pending_events.items) |frame| frame.deinit(allocator);
+        client.pending_events.deinit(allocator);
+    }
+    defer client.pending_batches.deinit(allocator);
+
+    for (0..256) |i| try client.bufferEvent(.{
+        .header = .{ .kind = .event, .stream_id = @intCast(i + 1) },
+        .payload = try allocator.dupe(u8, metadata),
+    });
+    try std.testing.expectEqual(@as(usize, 256), client.pending_events.items.len);
+    try client.bufferEvent(.{
+        .header = .{ .kind = .event, .stream_id = 1 },
+        .payload = try allocator.dupe(u8, "{\"event\":\"runtime.ended\"}"),
+    });
+
+    try std.testing.expect(!client.unusable);
+    try std.testing.expectEqual(@as(usize, 256), client.pending_events.items.len);
+    const ended = client.takeEventForStream(1) orelse return error.TestUnexpectedResult;
+    defer ended.deinit(allocator);
+    try std.testing.expectEqualStrings("{\"event\":\"runtime.ended\"}", ended.payload);
+    const sibling = client.takeEventForStream(256) orelse return error.TestUnexpectedResult;
+    defer sibling.deinit(allocator);
+    try std.testing.expectEqual(
+        @as(?u64, 1),
+        try observation_wire.eventRevision(allocator, sibling.payload),
+    );
+}
+
 /// 소켓에 읽을 데이터가 즉시 있는지 논블로킹 확인한다(timeout 0). `readStreamBatch`가 배치 첫 frame에서 idle이면 곧장
 /// 빠져나오게 한다(blocking read로 recv timeout까지 매달리지 않음 — socket_server serveConnection의 poll gate와 대칭).
 fn pollReadable(fd: c.fd_t) bool {
@@ -1937,7 +1996,7 @@ fn buildHelloMajor(
 ) error{OutOfMemory}![]u8 {
     return std.fmt.allocPrint(
         allocator,
-        "{{\"protocol_min\":{d},\"protocol_max\":{d},\"client_kind\":\"{s}\",\"capabilities\":[\"runtime_metadata_v1\",\"screen_viewport_scrolled_v1\",\"async_scroll_to_bottom_v1\",\"runtime_core_command_v1\",\"runtime_selected_text_v1\",\"runtime_link_at_v1\",\"runtime_clipboard_v1\"]}}",
+        "{{\"protocol_min\":{d},\"protocol_max\":{d},\"client_kind\":\"{s}\",\"capabilities\":[\"runtime_metadata_v1\",\"runtime_ended_v1\",\"screen_viewport_scrolled_v1\",\"async_scroll_to_bottom_v1\",\"runtime_core_command_v1\",\"runtime_selected_text_v1\",\"runtime_link_at_v1\",\"runtime_clipboard_v1\"]}}",
         .{ wire_major, wire_major, client_kind },
     );
 }
@@ -2297,6 +2356,7 @@ test "client: hello/request JSON build and host_id parse are server-symmetric (p
     try testing.expect(std.mem.indexOf(u8, hello, "\"protocol_min\":2") != null); // 리뷰 #3: version_major v2.
     try testing.expect(std.mem.indexOf(u8, hello, "\"client_kind\":\"gui\"") != null);
     try testing.expect(std.mem.indexOf(u8, hello, "\"runtime_metadata_v1\"") != null);
+    try testing.expect(std.mem.indexOf(u8, hello, "\"runtime_ended_v1\"") != null);
     try testing.expect(std.mem.indexOf(u8, hello, "\"screen_viewport_scrolled_v1\"") != null);
     try testing.expect(std.mem.indexOf(u8, hello, "\"async_scroll_to_bottom_v1\"") != null);
     try testing.expect(std.mem.indexOf(u8, hello, "\"runtime_core_command_v1\"") != null);
@@ -2628,6 +2688,152 @@ test "client: spawns, lists, and terminates a real runtime on a forked host over
     const term_resp = try client.call("runtime.terminate", term_params);
     defer allocator.free(term_resp);
     try testing.expect(std.mem.indexOf(u8, term_resp, "terminated") != null);
+}
+
+test "client: sibling attachment converges after explicit terminate and natural exit" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var dir_buf: [256]u8 = undefined;
+    const dir_path = std.fmt.bufPrintZ(
+        &dir_buf,
+        "/tmp/maru-sh-converge-{d}",
+        .{c.getpid()},
+    ) catch return error.SkipZigTest;
+    var sp_buf: [320]u8 = undefined;
+    const socket_path = std.fmt.bufPrintZ(
+        &sp_buf,
+        "{s}/control.sock",
+        .{dir_path},
+    ) catch return error.SkipZigTest;
+
+    const child = c.fork();
+    if (child < 0) return error.SkipZigTest;
+    if (child == 0) {
+        _ = c.setsid();
+        daemon.runSessionHost(std.heap.page_allocator, testing.io, dir_path, socket_path) catch {};
+        std.c._exit(0);
+    }
+    defer {
+        _ = c.kill(child, posix.SIG.TERM);
+        var status: c_int = undefined;
+        _ = c.waitpid(child, &status, 0);
+        _ = c.unlink(socket_path.ptr);
+        _ = c.rmdir(dir_path.ptr);
+    }
+
+    var first: Client = blk: {
+        var attempts: usize = 0;
+        while (attempts < 150) : (attempts += 1) {
+            if (Client.connect(allocator, socket_path, "gui")) |connected|
+                break :blk connected
+            else |_|
+                _ = usleepMs(20);
+        }
+        return error.TestUnexpectedResult;
+    };
+    defer first.deinit();
+    var sibling = try Client.connect(allocator, socket_path, "gui");
+    defer sibling.deinit();
+
+    const spawn_resp = try first.call(
+        "runtime.spawn",
+        "{\"argv\":[\"/bin/cat\"],\"cols\":40,\"rows\":10}",
+    );
+    defer allocator.free(spawn_resp);
+    const rid = extractRuntimeId(spawn_resp) orelse return error.TestUnexpectedResult;
+    var first_attach_buf: [96]u8 = undefined;
+    const first_attach_params = std.fmt.bufPrint(
+        &first_attach_buf,
+        "{{\"runtime_id\":\"{s}\",\"mode\":\"controller\"}}",
+        .{rid},
+    ) catch return error.SkipZigTest;
+    const first_attach = try first.call("runtime.attach", first_attach_params);
+    defer allocator.free(first_attach);
+    const first_stream = extractU64Field(first_attach, "\"stream_id\":") orelse
+        return error.TestUnexpectedResult;
+    const first_initial = try first.readSnapshot(first_stream);
+    allocator.free(first_initial);
+    var attach_buf: [96]u8 = undefined;
+    const attach_params = std.fmt.bufPrint(
+        &attach_buf,
+        "{{\"runtime_id\":\"{s}\",\"mode\":\"observer\"}}",
+        .{rid},
+    ) catch return error.SkipZigTest;
+    const attach_resp = try sibling.call("runtime.attach", attach_params);
+    defer allocator.free(attach_resp);
+    const sibling_stream = extractU64Field(attach_resp, "\"stream_id\":") orelse
+        return error.TestUnexpectedResult;
+    const initial = try sibling.readSnapshot(sibling_stream);
+    allocator.free(initial);
+
+    var term_buf: [64]u8 = undefined;
+    const term_params = std.fmt.bufPrint(
+        &term_buf,
+        "{{\"runtime_id\":\"{s}\"}}",
+        .{rid},
+    ) catch return error.SkipZigTest;
+    const term_resp = try first.call("runtime.terminate", term_params);
+    defer allocator.free(term_resp);
+    try testing.expect(std.mem.indexOf(u8, term_resp, "terminated") != null);
+    _ = usleepMs(100);
+    const still_live = try sibling.call("host.info", null);
+    defer allocator.free(still_live);
+    try testing.expect(std.mem.indexOf(u8, still_live, "\"runtime_count\":0") != null);
+    const ended_event = sibling.takeEventForStream(sibling_stream) orelse
+        return error.TestUnexpectedResult;
+    defer ended_event.deinit(allocator);
+    try testing.expectEqualStrings("{\"event\":\"runtime.ended\"}", ended_event.payload);
+    const terminator_live = try first.call("host.info", null);
+    defer allocator.free(terminator_live);
+    const first_ended = first.takeEventForStream(first_stream) orelse
+        return error.TestUnexpectedResult;
+    defer first_ended.deinit(allocator);
+    try testing.expectEqualStrings("{\"event\":\"runtime.ended\"}", first_ended.payload);
+    var detach_buf: [48]u8 = undefined;
+    const detach_params = std.fmt.bufPrint(
+        &detach_buf,
+        "{{\"stream_id\":{d}}}",
+        .{sibling_stream},
+    ) catch return error.SkipZigTest;
+    const stale_detach = try sibling.call("runtime.detach", detach_params);
+    defer allocator.free(stale_detach);
+    try testing.expect(std.mem.indexOf(u8, stale_detach, "invalid_request") != null);
+
+    const natural_resp = try first.call(
+        "runtime.spawn",
+        "{\"argv\":[\"/bin/sh\",\"-c\",\"sleep 0.2\"],\"cols\":40,\"rows\":10}",
+    );
+    defer allocator.free(natural_resp);
+    const natural_rid = extractRuntimeId(natural_resp) orelse return error.TestUnexpectedResult;
+    var natural_attach_buf: [96]u8 = undefined;
+    const natural_attach_params = std.fmt.bufPrint(
+        &natural_attach_buf,
+        "{{\"runtime_id\":\"{s}\",\"mode\":\"observer\"}}",
+        .{natural_rid},
+    ) catch return error.SkipZigTest;
+    const natural_attach = try sibling.call("runtime.attach", natural_attach_params);
+    defer allocator.free(natural_attach);
+    const natural_stream = extractU64Field(natural_attach, "\"stream_id\":") orelse
+        return error.TestUnexpectedResult;
+    const natural_initial = try sibling.readSnapshot(natural_stream);
+    allocator.free(natural_initial);
+    _ = usleepMs(400);
+    const after_exit = try sibling.call("host.info", null);
+    defer allocator.free(after_exit);
+    try testing.expect(std.mem.indexOf(u8, after_exit, "\"runtime_count\":0") != null);
+    const natural_ended = sibling.takeEventForStream(natural_stream) orelse
+        return error.TestUnexpectedResult;
+    defer natural_ended.deinit(allocator);
+    try testing.expectEqualStrings("{\"event\":\"runtime.ended\"}", natural_ended.payload);
+    var natural_detach_buf: [48]u8 = undefined;
+    const natural_detach_params = std.fmt.bufPrint(
+        &natural_detach_buf,
+        "{{\"stream_id\":{d}}}",
+        .{natural_stream},
+    ) catch return error.SkipZigTest;
+    const natural_stale = try sibling.call("runtime.detach", natural_detach_params);
+    defer allocator.free(natural_stale);
+    try testing.expect(std.mem.indexOf(u8, natural_stale, "invalid_request") != null);
 }
 
 test "client: attach, input, resize, and detach a real runtime over the wire" {

@@ -378,6 +378,10 @@ pub const Client = struct {
         self.producer_sweep_cursor =
             (self.producer_sweep_cursor + 1) % self.producer_streams.len;
         const tracker = self.trackers.get(stream) orelse return;
+        if (self.connection.runtimeMissing(stream)) {
+            self.notifyEndedAndRemoveTracker(stream);
+            return;
+        }
         var tracker_state = slot.screenState(tracker) catch
             return self.beginClose(.socket_error);
         const resync_pending = self.connection.resyncPending(stream);
@@ -406,8 +410,37 @@ pub const Client = struct {
             else
                 output.rollback(&self.connection);
             if (self.isClosing()) return;
+        } else if (!self.connection.hasLocalStream(stream)) {
+            self.notifyEndedAndRemoveTracker(stream);
         }
         return;
+    }
+
+    fn notifyEndedAndRemoveTracker(self: *Client, stream: u64) void {
+        if (!self.connection.supportsRuntimeEnded()) {
+            self.connection.convergeEndedStream(stream);
+            self.removeEndedTracker(stream);
+            return;
+        }
+        const frame = self.connection.runtimeEndedFrame(stream) catch {
+            self.connection.convergeEndedStream(stream);
+            self.removeEndedTracker(stream);
+            return self.beginClose(.resource_exhausted);
+        };
+        self.adoptControl(frame) catch return self.beginClose(.resource_exhausted);
+        self.connection.convergeEndedStream(stream);
+        self.removeEndedTracker(stream);
+    }
+
+    /// RuntimeNotFound is a stream lifecycle transition, not a transport failure. Purge its queued
+    /// prefix and accounting without allocating, while preserving the shared client connection.
+    fn removeEndedTracker(self: *Client, stream: u64) void {
+        const tracker = self.trackers.fetchRemove(stream) orelse return;
+        const slot = self.reactor.get(self.admission) catch
+            return self.beginClose(.socket_error);
+        slot.purgeAndDestroyScreenTracker(tracker.value) catch
+            return self.beginClose(.socket_error);
+        slot.detachStream() catch return self.beginClose(.socket_error);
     }
 
     /// A producer turn belongs to exactly one subscription. Ordinary output is admitted in order;
@@ -1223,6 +1256,79 @@ test "socketpair attach creates tracker and detach purges only unsent screen fra
         const chunk = slot.chunks[(slot.chunk_head + index) % slot_mod.max_chunks_per_slot];
         try testing.expectEqual(slot_mod.QueueClass.control, chunk.class);
     }
+}
+
+test "missing runtime converges attachment identity tracker and queued screen in one turn" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const testing = std.testing;
+    var failing = testing.FailingAllocator.init(
+        testing.allocator,
+        .{ .fail_index = std.math.maxInt(usize) },
+    );
+    const allocator = failing.allocator();
+    var fds: [2]c_int = undefined;
+    try testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds));
+    defer _ = c.close(fds[1]);
+    var registry_value = registry.TerminalRuntimeRegistry.init(allocator);
+    defer registry_value.deinit();
+    _ = try registry_value.register(0xAA, 80, 24);
+    var subscriptions = subscription_identity.Table.init(allocator);
+    defer subscriptions.deinit();
+    const reactor = try slot_mod.ReactorCore.create(allocator);
+    defer reactor.destroy();
+    var runtime_ops: server.FakeRuntimeOps = .{};
+    const client = try Client.create(
+        allocator,
+        fds[0],
+        reactor,
+        82,
+        &registry_value,
+        &subscriptions,
+        .{ .runtime_ops = runtime_ops.ops() },
+    );
+    defer client.destroy();
+    try sendTestFrame(
+        fds[1],
+        .hello,
+        1,
+        "{\"protocol_min\":2,\"protocol_max\":2,\"client_kind\":\"gui\",\"capabilities\":[\"runtime_ended_v1\"]}",
+    );
+    client.readReady(1);
+    try sendTestFrame(
+        fds[1],
+        .request,
+        2,
+        "{\"method\":\"runtime.attach\",\"params\":{\"runtime_id\":\"aa\",\"mode\":\"controller\"}}",
+    );
+    client.readReady(2);
+    const slot = try reactor.get(client.admission);
+    const tracker = client.trackers.get(1).?;
+    try slot.consumeWritten(slot.pending_bytes);
+    try slot.enqueueScreen(tracker, "stale-screen");
+    try testing.expectEqual(@as(usize, 1), client.connection.attachmentCount());
+    try testing.expectEqual(@as(usize, 1), subscriptions.count());
+    try testing.expectEqual(@as(usize, 1), slot.attached_streams);
+
+    // Pressure invalidation waits for a stream ACK and used to return before consulting the
+    // registry, stranding authority forever if another client terminated the runtime meanwhile.
+    try slot.invalidateAndPurgeScreenTracker(tracker);
+    client.connection.markSubscriptionOutputInvalidated(1);
+    try testing.expectEqual(slot_mod.ScreenState.invalidated, try slot.screenState(tracker));
+    try testing.expect(!client.connection.resyncPending(1));
+    _ = client.beginProducerSweep(3);
+    registry_value.unregister(0xAA);
+    runtime_ops.runtime_missing = true;
+    // Ended convergence itself is allocation-free; a starved allocator cannot strand ownership.
+    failing.fail_index = failing.alloc_index;
+    client.tick(3);
+
+    try testing.expect(client.isClosing());
+    try testing.expectEqual(@as(usize, 0), client.connection.attachmentCount());
+    try testing.expectEqual(@as(usize, 0), subscriptions.count());
+    try testing.expectEqual(@as(usize, 0), client.trackers.count());
+    try testing.expectEqual(@as(usize, 0), slot.attached_streams);
+    try testing.expectEqual(@as(usize, 0), slot.chunk_len);
+    try testing.expectEqual(@as(usize, 0), slot.pending_bytes);
 }
 
 test "subscription pressure emits one control notice and recovers with an atomic snapshot" {

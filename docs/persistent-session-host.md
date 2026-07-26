@@ -1714,9 +1714,30 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
       같은 poll owner/typed upgrade consumer를 공유하며, canonical GUI connection을 유지한 채 별도
       ephemeral `runtime.inventory`가 끝나는 forked process fixture, cap+1 기존 연결 생존, slow/partial sibling 격리,
       same-PID upgrade preclosed drain이 green이어야 구현으로 표시한다.
-    - **T0b2c — cross-connection lifecycle convergence:** 한 connection의 terminate가 다른 connection의
+    - **T0b2c — cross-connection lifecycle convergence (구현):** 한 connection의 terminate가 다른 connection의
       attachment/tracker를 ended→detach로 수렴시키고 stale controller lease나 무한 resync retry를 남기지 않는
-      multi-client process fixture를 닫는다.
+      multi-client process fixture를 닫는다. runtime 제거의 SSOT는 계속 `TerminalRuntimeRegistry.unregister`이며,
+      connection별 producer가 metadata/snapshot/delta 중 `RuntimeNotFound`를 관찰하면 transport 오류나 일시적
+      no-change로 숨기지 않고 그 local stream을 `ended`로 분류한다. 같은 bounded owner turn에서
+      `Connection.attachments`의 base/observation base, global `SubscriptionId`, `Client.trackers`와 해당 tracker의
+      queued screen prefix를 canonical detach 경로로 정확히 한 번 회수한다. shared connection의 다른 stream과 다른
+      connection은 유지한다.
+      회수 전에 control reserve의 typed `{"event":"runtime.ended"}`를 해당 local stream으로 보내
+      `RemoteRuntime`/`RemoteTermBackend`가 마지막 화면을 idle로 남기지 않고 surface를 ended로 전이한다. registry
+      tombstone에 wait status를 보존하지 않는 현재 범위에서는 exit code 0을 만들지 않고 `ExitStatus.unknown`으로 투영한다.
+      ended event allocation이 실패하면 해당 stream 권위를 먼저 회수한 뒤 connection을 fail-close한다.
+      이 event는 `runtime_ended_v1` hello capability를 양쪽이 협상한 current↔current connection에서만 보낸다.
+      capability가 없는 N-1 host에 붙은 새 client의 lifecycle polling/fallback은 adapter 후속 범위다.
+      단, 해당 stream frame의 prefix가 이미 kernel write로 진행된 경우에는 frame 경계를 splice할 수 없으므로 T0b1의
+      `PartialFrame` fail-close 규칙이 우선하며, 이때 shared connection의 sibling도 재접속으로 복구한다.
+      natural exit의 `RuntimeManager.drainOwnedEvents → terminateRuntime → unregister`와 explicit
+      `runtime.terminate`가 같은 수렴 경로를 사용한다. resync pending/snapshot retry 중 runtime이 사라져도 ended가
+      우선해 retry를 중단한다. connection close와 ended 수렴이 경합해도 revoke/detach는 idempotent하며 controller
+      lease, registry attachment count, subscription table, screen tracker/queue charge가 모두 0이 되어야 한다.
+      두 real client가 같은 runtime을 attach한 뒤 한 client가 terminate하고 양쪽 typed ended를 받은 뒤 다른 client가
+      새 `host.info`를 계속 왕복하는 process fixture, natural exit, resync-pending과 allocator-failure fail-close를
+      Debug/ReleaseFast 기본 gate로 닫은 뒤에만 `(구현)`으로 표시한다. close race와 slot ABA/reuse는 이 경로가 공유하는
+      T0a/T0b0 canonical primitive gate를 재사용한다.
 - **P5a1 — bounded admin accept foundation**: 현재 connection 하나를 EOF까지 독점하는 serial serve loop를 먼저
   single-owner multi-fd reactor로 바꾼다. P4 GUI slot을 유지한 채 bounded admin request slot 하나를 accept/dispatch하고
   partial read/write, cap, idle deadline, same-login-UID/other-UID 거부를 process test로 고정한다. public CLI/help는 아직

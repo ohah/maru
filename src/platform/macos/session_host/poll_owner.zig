@@ -971,6 +971,280 @@ test "poll owner preserves requester and backs off when only partial controllers
     try testing.expectEqual(@as(usize, 0), final.shared_bytes);
 }
 
+test "poll owner backs off when one observer reclaim is insufficient for base reservation" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir_len = try tmp.dir.realPath(testing.io, &dir_buf);
+    const dir_raw = dir_buf[0..dir_len];
+    const dir_path = try testing.allocator.dupeZ(u8, dir_raw);
+    defer testing.allocator.free(dir_path);
+    const socket_path = try std.fmt.allocPrintSentinel(
+        testing.allocator,
+        "{s}/insufficient-base-reclaim.sock",
+        .{dir_raw},
+        0,
+    );
+    defer testing.allocator.free(socket_path);
+    var runtime_registry = registry.TerminalRuntimeRegistry.init(testing.allocator);
+    defer runtime_registry.deinit();
+    _ = try runtime_registry.register(0xAA, 80, 24);
+    for (0..10) |index| _ = try runtime_registry.register(0x300 + index, 80, 24);
+    var server = try socket_server.SocketServer.bind(
+        testing.allocator,
+        dir_path,
+        socket_path,
+        0xB5,
+        &runtime_registry,
+    );
+    defer server.deinit();
+    server.host_status = .{ .manifest_capable = true };
+    var fake_runtime: server_mod.FakeRuntimeOps = .{};
+    server.runtime_ops = fake_runtime.ops();
+    var owner = try Owner.init(testing.allocator, testing.io, &server);
+    defer owner.deinit();
+    owner.next_cadence_ns = std.math.maxInt(u64);
+
+    var fds: [13]c.fd_t = undefined;
+    var fd_count: usize = 0;
+    defer {
+        for (fds[0..fd_count]) |fd| {
+            if (fd >= 0) _ = c.close(fd);
+        }
+    }
+    const healthy = try connectAttachedTestClient(&owner, socket_path, "observer");
+    fds[fd_count] = healthy.fd;
+    fd_count += 1;
+    const victim = try connectAttachedTestClient(&owner, socket_path, "observer");
+    fds[fd_count] = victim.fd;
+    fd_count += 1;
+    const second_victim = try connectAttachedTestClient(&owner, socket_path, "observer");
+    fds[fd_count] = second_victim.fd;
+    fd_count += 1;
+    var pin_indices: [10]usize = undefined;
+    var controller_peer: c.fd_t = -1;
+    for (&pin_indices, 0..) |*pin_index, index| {
+        const runtime_hex = try std.fmt.allocPrint(testing.allocator, "{x}", .{0x300 + index});
+        defer testing.allocator.free(runtime_hex);
+        const pin = try connectAttachedTestClientForRuntime(
+            &owner,
+            socket_path,
+            runtime_hex,
+            "controller",
+        );
+        fds[fd_count] = pin.fd;
+        fd_count += 1;
+        if (index == 0) controller_peer = pin.fd;
+        pin_index.* = pin.index;
+    }
+    for (pin_indices) |pin_index| {
+        const pin = owner.clients[pin_index].?;
+        try fillServerSendBuffer(pin.fd);
+        const slot = try owner.reactor.get(pin.admission);
+        const tracker = pin.trackers.get(1).?;
+        const pressure = try testing.allocator.alloc(u8, connection_slot.screen_soft_bytes);
+        @memset(pressure, 'P');
+        slot.enqueueOwnedScreen(tracker, pressure) catch |err| {
+            testing.allocator.free(pressure);
+            return err;
+        };
+        try slot.consumeWritten(1);
+        pin.noteWriteStalled(10);
+        try testing.expect(pin.largestScreenPressure() == null);
+    }
+
+    const victim_client = owner.clients[victim.index].?;
+    try fillServerSendBuffer(victim_client.fd);
+    const victim_slot = try owner.reactor.get(victim_client.admission);
+    const victim_tracker = victim_client.trackers.get(1).?;
+    const small_pressure = try testing.allocator.alloc(u8, 1024 * 1024);
+    @memset(small_pressure, 'V');
+    victim_slot.enqueueOwnedScreen(victim_tracker, small_pressure) catch |err| {
+        testing.allocator.free(small_pressure);
+        return err;
+    };
+    _ = try owner.pollOnce(0);
+    try testing.expect(victim_slot.writeStallObserved());
+    const victim_candidate = victim_client.largestScreenPressure().?;
+    try testing.expect(victim_candidate.reclaimable_bytes > 0);
+    try testing.expect(
+        victim_candidate.reclaimable_bytes < connection_slot.base_update_max_bytes,
+    );
+    const second_victim_client = owner.clients[second_victim.index].?;
+    try fillServerSendBuffer(second_victim_client.fd);
+    const second_victim_slot = try owner.reactor.get(second_victim_client.admission);
+    const second_victim_tracker = second_victim_client.trackers.get(1).?;
+    const second_pressure = try testing.allocator.alloc(u8, 1024 * 1024);
+    @memset(second_pressure, 'W');
+    second_victim_slot.enqueueOwnedScreen(second_victim_tracker, second_pressure) catch |err| {
+        testing.allocator.free(second_pressure);
+        return err;
+    };
+    _ = try owner.pollOnce(0);
+    const second_victim_candidate = second_victim_client.largestScreenPressure().?;
+    const pressure_before = owner.reactor.accountingSnapshot();
+
+    const healthy_client = owner.clients[healthy.index].?;
+    const healthy_slot = try owner.reactor.get(healthy_client.admission);
+    const healthy_tracker = healthy_client.trackers.get(1).?;
+    const base_before = try healthy_slot.retainedBaseBytes(healthy_tracker);
+    try testing.expect(
+        pressure_before.shared_bytes - victim_candidate.reclaimable_bytes - base_before +
+            connection_slot.base_update_max_bytes >
+            connection_slot.shared_steady_bytes,
+    );
+    try testing.expect(
+        pressure_before.shared_bytes - victim_candidate.reclaimable_bytes -
+            second_victim_candidate.reclaimable_bytes - base_before +
+            connection_slot.base_update_max_bytes >
+            connection_slot.shared_steady_bytes,
+    );
+    const pending_before = healthy_slot.pending_bytes;
+    const screen_before = try healthy_slot.screenResidentBytes(healthy_tracker);
+    const attachment_before = healthy_client.connection.attachments.get(1).?;
+    const base_bytes_before = try testing.allocator.dupe(u8, attachment_before.base.?);
+    defer testing.allocator.free(base_bytes_before);
+    try testing.expect(attachment_before.observation_base == null);
+    const observation_revision_before = attachment_before.observation_revision;
+    const observation_ticks_before = attachment_before.observation_ticks;
+    const delta_before = fake_runtime.delta_calls;
+    const reclaim_before = owner.total_pressure_reclaims;
+    owner.producer_remaining[healthy.index] = healthy_client.beginProducerSweep(100);
+    var attempts: usize = 0;
+    while ((try healthy_slot.globalPressureRetryAfter(healthy_tracker)) == 0 and
+        attempts < 100) : (attempts += 1)
+        _ = try owner.pollOnce(0);
+    const retry_at = try healthy_slot.globalPressureRetryAfter(healthy_tracker);
+    try testing.expect(retry_at != 0);
+    try testing.expectEqual(reclaim_before + 1, owner.total_pressure_reclaims);
+    try testing.expectEqual(delta_before, fake_runtime.delta_calls);
+    try testing.expectEqual(
+        connection_slot.ScreenState.invalidated,
+        try victim_slot.screenState(victim_tracker),
+    );
+    try testing.expectEqual(@as(usize, 0), try victim_slot.screenResidentBytes(victim_tracker));
+    try testing.expectEqual(@as(usize, 0), try victim_slot.retainedBaseBytes(victim_tracker));
+    try testing.expectEqual(@as(usize, 0), try victim_slot.preparedBaseBytes(victim_tracker));
+    try testing.expectEqual(
+        connection_slot.ScreenState.valid,
+        try second_victim_slot.screenState(second_victim_tracker),
+    );
+    try testing.expectEqual(
+        connection_slot.ScreenState.valid,
+        try healthy_slot.screenState(healthy_tracker),
+    );
+    try testing.expectEqual(base_before, try healthy_slot.retainedBaseBytes(healthy_tracker));
+    try testing.expectEqual(pending_before, healthy_slot.pending_bytes);
+    try testing.expectEqual(screen_before, try healthy_slot.screenResidentBytes(healthy_tracker));
+    const attachment_after = healthy_client.connection.attachments.get(1).?;
+    try testing.expectEqualSlices(u8, base_bytes_before, attachment_after.base.?);
+    try testing.expect(attachment_after.observation_base == null);
+    try testing.expectEqual(observation_revision_before, attachment_after.observation_revision);
+    try testing.expectEqual(observation_ticks_before, attachment_after.observation_ticks);
+    try testing.expectEqual(@as(usize, 0), try healthy_slot.preparedBaseBytes(healthy_tracker));
+    const failed_attempt = owner.reactor.accountingSnapshot();
+    try testing.expectEqual(@as(usize, 0), failed_attempt.prepared_base_bytes);
+    try testing.expectEqual(@as(usize, 0), failed_attempt.prepared_reclaim_bytes);
+    try sendTestStream(controller_peer, .input_bytes, 1, "INPUT-DURING-BASE-BACKOFF");
+    var input_attempts: usize = 0;
+    while (fake_runtime.last_input_len == 0 and input_attempts < 1000) : (input_attempts += 1)
+        _ = try owner.pollOnce(0);
+    try testing.expectEqualStrings(
+        "INPUT-DURING-BASE-BACKOFF",
+        fake_runtime.last_input[0..fake_runtime.last_input_len],
+    );
+    try testing.expectEqual(retry_at, try healthy_slot.globalPressureRetryAfter(healthy_tracker));
+    try testing.expectEqual(reclaim_before + 1, owner.total_pressure_reclaims);
+    try testing.expectEqual(
+        connection_slot.ScreenState.valid,
+        try second_victim_slot.screenState(second_victim_tracker),
+    );
+
+    _ = healthy_client.beginProducerSweep(retry_at - 1);
+    healthy_client.tick(retry_at - 1);
+    try testing.expectEqual(retry_at, try healthy_slot.globalPressureRetryAfter(healthy_tracker));
+    try testing.expectEqual(delta_before, fake_runtime.delta_calls);
+    try testing.expectEqual(reclaim_before + 1, owner.total_pressure_reclaims);
+    try testing.expectEqual(
+        connection_slot.ScreenState.valid,
+        try second_victim_slot.screenState(second_victim_tracker),
+    );
+    try testing.expectEqual(
+        connection_slot.ScreenState.valid,
+        try healthy_slot.screenState(healthy_tracker),
+    );
+    try testing.expectEqual(base_before, try healthy_slot.retainedBaseBytes(healthy_tracker));
+    try testing.expectEqual(pending_before, healthy_slot.pending_bytes);
+    try testing.expectEqual(screen_before, try healthy_slot.screenResidentBytes(healthy_tracker));
+    const attachment_before_boundary = healthy_client.connection.attachments.get(1).?;
+    try testing.expectEqualSlices(u8, base_bytes_before, attachment_before_boundary.base.?);
+    try testing.expectEqual(
+        observation_revision_before,
+        attachment_before_boundary.observation_revision,
+    );
+    try testing.expectEqual(observation_ticks_before, attachment_before_boundary.observation_ticks);
+    try testing.expectEqual(@as(usize, 0), try healthy_slot.preparedBaseBytes(healthy_tracker));
+    const boundary_failure = owner.reactor.accountingSnapshot();
+    try testing.expectEqual(@as(usize, 0), boundary_failure.prepared_base_bytes);
+    try testing.expectEqual(@as(usize, 0), boundary_failure.prepared_reclaim_bytes);
+    _ = healthy_client.beginProducerSweep(retry_at);
+    healthy_client.tick(retry_at);
+    try testing.expectEqual(
+        retry_at + connection_slot.resync_retry_backoff_ns,
+        try healthy_slot.globalPressureRetryAfter(healthy_tracker),
+    );
+    try testing.expectEqual(delta_before, fake_runtime.delta_calls);
+    try testing.expectEqual(reclaim_before + 2, owner.total_pressure_reclaims);
+    try testing.expectEqual(
+        connection_slot.ScreenState.invalidated,
+        try second_victim_slot.screenState(second_victim_tracker),
+    );
+    try testing.expectEqual(
+        @as(usize, 0),
+        try second_victim_slot.screenResidentBytes(second_victim_tracker),
+    );
+    try testing.expectEqual(
+        connection_slot.ScreenState.valid,
+        try healthy_slot.screenState(healthy_tracker),
+    );
+    try testing.expectEqual(base_before, try healthy_slot.retainedBaseBytes(healthy_tracker));
+    try testing.expectEqual(pending_before, healthy_slot.pending_bytes);
+    try testing.expectEqual(screen_before, try healthy_slot.screenResidentBytes(healthy_tracker));
+    const attachment_exact = healthy_client.connection.attachments.get(1).?;
+    try testing.expectEqualSlices(u8, base_bytes_before, attachment_exact.base.?);
+    try testing.expect(attachment_exact.observation_base == null);
+    try testing.expectEqual(observation_revision_before, attachment_exact.observation_revision);
+    try testing.expectEqual(observation_ticks_before, attachment_exact.observation_ticks);
+    try testing.expectEqual(@as(usize, 0), try healthy_slot.preparedBaseBytes(healthy_tracker));
+    const exact_boundary_failure = owner.reactor.accountingSnapshot();
+    try testing.expectEqual(@as(usize, 0), exact_boundary_failure.prepared_base_bytes);
+    try testing.expectEqual(@as(usize, 0), exact_boundary_failure.prepared_reclaim_bytes);
+
+    for (fds[0..fd_count]) |*fd| {
+        _ = c.shutdown(fd.*, c.SHUT.RDWR);
+        _ = c.close(fd.*);
+        fd.* = -1;
+    }
+    var close_attempts: usize = 0;
+    while (owner.activeCount() != 0 and close_attempts < 4000) : (close_attempts += 1)
+        _ = try owner.pollOnce(0);
+    try testing.expectEqual(@as(usize, 0), owner.activeCount());
+    for (owner.clients, owner.producer_remaining) |client, remaining| {
+        try testing.expect(client == null);
+        try testing.expectEqual(@as(usize, 0), remaining);
+    }
+    try testing.expectEqual(@as(usize, 0), server.subscriptions.count());
+    try testing.expectEqual(@as(usize, 0), runtime_registry.attachmentCount());
+    try testing.expectEqual(@as(usize, 0), server.host_status.client_count);
+    try testing.expect(!owner.admin_admission.active);
+    const final = owner.reactor.accountingSnapshot();
+    try testing.expectEqual(@as(usize, 0), final.resident_bytes);
+    try testing.expectEqual(@as(usize, 0), final.shared_bytes);
+    try testing.expectEqual(@as(usize, 0), final.prepared_base_bytes);
+    try testing.expectEqual(@as(usize, 0), final.prepared_reclaim_bytes);
+}
+
 test "poll owner closes only the observer whose valid screen frame reached a kernel partial write" {
     if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
     var tmp = testing.tmpDir(.{});

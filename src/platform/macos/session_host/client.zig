@@ -976,6 +976,11 @@ pub const Client = struct {
                         return error.ProtocolError;
                     },
                 };
+                if (resized.?.runtime_id != old_resize.runtime_id) {
+                    frame.deinit(self.allocator);
+                    self.invalidateConnection();
+                    return error.ProtocolError;
+                }
                 if (resized.?.resize_generation <= old_resize.resize_generation) {
                     frame.deinit(self.allocator);
                     return;
@@ -2074,6 +2079,43 @@ test "client resize events coalesce by generation without replacing metadata" {
     try std.testing.expectEqual(@as(usize, 2), client.pending_events.items.len);
     try std.testing.expectEqualStrings(metadata, client.pending_events.items[0].payload);
     try std.testing.expectEqualStrings(resized9, client.pending_events.items[1].payload);
+}
+
+test "client fails closed when one stream receives resize events for different runtimes" {
+    const allocator = std.testing.allocator;
+    const runtime_a =
+        \\{"event":"runtime.resized","data":{"runtime_id":"000000000000000000000000000000aa","cols":100,"rows":30,"resize_generation":4,"reason":"controller"}}
+    ;
+    const runtime_b =
+        \\{"event":"runtime.resized","data":{"runtime_id":"000000000000000000000000000000bb","cols":120,"rows":40,"resize_generation":9,"reason":"controller"}}
+    ;
+    for ([_][2][]const u8{
+        .{ runtime_a, runtime_b },
+        .{ runtime_b, runtime_a },
+    }) |order| {
+        var client = Client{
+            .allocator = allocator,
+            .fd = -1,
+            .host_id = 0,
+            .parser = framing.FrameParser.init(allocator),
+        };
+        defer client.parser.deinit();
+        defer {
+            for (client.pending_events.items) |frame| frame.deinit(allocator);
+            client.pending_events.deinit(allocator);
+        }
+        try client.bufferEvent(.{
+            .header = .{ .kind = .event, .stream_id = 7 },
+            .payload = try allocator.dupe(u8, order[0]),
+        });
+        try std.testing.expectError(error.ProtocolError, client.bufferEvent(.{
+            .header = .{ .kind = .event, .stream_id = 7 },
+            .payload = try allocator.dupe(u8, order[1]),
+        }));
+        try std.testing.expect(client.unusable);
+        try std.testing.expectEqual(@as(usize, 1), client.pending_events.items.len);
+        try std.testing.expectEqualStrings(order[0], client.pending_events.items[0].payload);
+    }
 }
 
 test "client event queue overflow poisons every runtime sharing the connection" {

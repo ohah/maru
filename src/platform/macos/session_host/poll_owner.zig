@@ -604,7 +604,10 @@ pub const Owner = struct {
         var screen_items: []connection_slot.ReactorCore.OwnedScreenItem = &.{};
         var screen_items_owned = false;
         var screen_frames_owned: usize = 0;
+        var publication: ?connection_slot.ReactorCore.PreparedControlAndScreenBatch = null;
         defer {
+            if (publication) |*prepared|
+                self.reactor.cancelPreparedControlAndScreenBatch(prepared);
             if (success_owned) self.allocator.free(resize.success_reply);
             if (internal_owned) self.allocator.free(resize.internal_reply);
             if (exhausted_owned) self.allocator.free(resize.exhausted_reply);
@@ -615,51 +618,70 @@ pub const Owner = struct {
         }
 
         if (resize.event_body) |event_body| {
-            const records = self.server.subscriptions.collectRuntimeRecords(
-                self.allocator,
-                resize.runtime_id,
-            ) catch return self.rejectResize(
-                requester,
-                resize.exhausted_reply,
-                &exhausted_owned,
-            );
-            defer self.allocator.free(records);
-            screen_items = self.allocator.alloc(
-                connection_slot.ReactorCore.OwnedScreenItem,
-                records.len,
-            ) catch return self.rejectResize(
-                requester,
-                resize.exhausted_reply,
-                &exhausted_owned,
-            );
-            screen_items_owned = true;
-            for (records) |record| {
-                const client = self.clientForKey(record.connection) orelse
-                    return self.rejectResize(
-                        requester,
-                        resize.exhausted_reply,
-                        &exhausted_owned,
-                    );
-                const tracker = client.screenTracker(record.stream_id) orelse
-                    return self.rejectResize(
-                        requester,
-                        resize.exhausted_reply,
-                        &exhausted_owned,
-                    );
-                const frame = framing.encodeFrame(self.allocator, .{
-                    .kind = .event,
-                    .stream_id = record.stream_id,
-                }, event_body) catch return self.rejectResize(
+            while (true) {
+                const records = self.server.subscriptions.collectRuntimeRecords(
+                    self.allocator,
+                    resize.runtime_id,
+                ) catch return self.rejectResize(
                     requester,
                     resize.exhausted_reply,
                     &exhausted_owned,
                 );
-                screen_items[screen_frames_owned] = .{
-                    .admission = client.admission,
-                    .tracker = tracker,
-                    .bytes = frame,
-                };
-                screen_frames_owned += 1;
+                defer self.allocator.free(records);
+                screen_items = self.allocator.alloc(
+                    connection_slot.ReactorCore.OwnedScreenItem,
+                    records.len,
+                ) catch return self.rejectResize(
+                    requester,
+                    resize.exhausted_reply,
+                    &exhausted_owned,
+                );
+                screen_items_owned = true;
+                var offending_observer: ?usize = null;
+                for (records) |record| {
+                    const client = self.clientForKey(record.connection) orelse
+                        return self.rejectResize(
+                            requester,
+                            resize.exhausted_reply,
+                            &exhausted_owned,
+                        );
+                    const tracker = client.screenTracker(record.stream_id) orelse
+                        return self.rejectResize(
+                            requester,
+                            resize.exhausted_reply,
+                            &exhausted_owned,
+                        );
+                    const frame = framing.encodeFrame(self.allocator, .{
+                        .kind = .event,
+                        .stream_id = record.stream_id,
+                    }, event_body) catch return self.rejectResize(
+                        requester,
+                        resize.exhausted_reply,
+                        &exhausted_owned,
+                    );
+                    screen_items[screen_frames_owned] = .{
+                        .admission = client.admission,
+                        .tracker = tracker,
+                        .bytes = frame,
+                    };
+                    screen_frames_owned += 1;
+                }
+                if (self.reactor.firstLocallyUnadmissibleScreenConnection(
+                    screen_items[0..screen_frames_owned],
+                    requester.admission,
+                )) |offender| offending_observer = offender.index;
+                if (offending_observer == null) break;
+
+                // A locally invalid/full observer cannot hold the runtime's canonical resize
+                // authority hostage. Drop its whole connection (and thus every subscription),
+                // then rebuild from the registry's new complete target snapshot.
+                for (screen_items[0..screen_frames_owned]) |item|
+                    self.allocator.free(item.bytes);
+                screen_frames_owned = 0;
+                self.allocator.free(screen_items);
+                screen_items = &.{};
+                screen_items_owned = false;
+                self.destroyClient(offending_observer.?);
             }
         }
 
@@ -667,6 +689,12 @@ pub const Owner = struct {
             .admission = requester.admission,
             .bytes = resize.success_reply,
         };
+        self.server.registry.validatePreparedResize(&resize.prepared) catch
+            return self.rejectResize(
+                requester,
+                resize.internal_reply,
+                &internal_owned,
+            );
         if (self.resize_admission_fail_once) {
             self.resize_admission_fail_once = false;
             return self.rejectResize(
@@ -675,7 +703,7 @@ pub const Owner = struct {
                 &exhausted_owned,
             );
         }
-        self.reactor.preflightOwnedControlAndScreenBatch(
+        publication = self.reactor.prepareOwnedControlAndScreenBatch(
             control,
             screen_items[0..screen_frames_owned],
         ) catch return self.rejectResize(
@@ -707,13 +735,12 @@ pub const Owner = struct {
             },
         }
 
-        self.reactor.enqueueOwnedControlAndScreenBatch(
-            control,
-            screen_items[0..screen_frames_owned],
-        ) catch unreachable;
+        self.reactor.commitPreparedControlAndScreenBatch(&publication.?);
+        publication = null;
         success_owned = false;
         screen_frames_owned = 0;
-        _ = self.server.registry.commitResizeSubscription(&resize.prepared);
+        _ = self.server.registry.commitResizeSubscription(&resize.prepared) catch
+            unreachable;
         return true;
     }
 
@@ -1026,6 +1053,33 @@ fn pumpUntilResponse(owner: *Owner, fd: c.fd_t, needle: []const u8) !void {
         while (try parser.next()) |frame| {
             defer frame.deinit(testing.allocator);
             if (std.mem.indexOf(u8, frame.payload, needle) != null) return;
+        }
+    }
+    return error.TestUnexpectedResult;
+}
+
+fn pumpUntilEitherResponse(
+    owner: *Owner,
+    fd: c.fd_t,
+    first: []const u8,
+    second: []const u8,
+) !bool {
+    var parser = framing.FrameParser.init(testing.allocator);
+    defer parser.deinit();
+    var buf: [4096]u8 = undefined;
+    for (0..1000) |_| {
+        _ = try owner.pollOnce(5);
+        const rc = c.recv(fd, &buf, buf.len, posix.MSG.DONTWAIT);
+        if (rc < 0) {
+            if (posix.errno(rc) == .AGAIN) continue;
+            return error.TestUnexpectedResult;
+        }
+        if (rc == 0) return error.TestUnexpectedResult;
+        try parser.push(buf[0..@intCast(rc)]);
+        while (try parser.next()) |frame| {
+            defer frame.deinit(testing.allocator);
+            if (std.mem.indexOf(u8, frame.payload, first) != null) return true;
+            if (std.mem.indexOf(u8, frame.payload, second) != null) return false;
         }
     }
     return error.TestUnexpectedResult;
@@ -3046,6 +3100,73 @@ test "poll owner publishes changed resize to controller and observer all or none
     try testing.expectEqual(@as(u16, 100), runtime.cols);
     try testing.expectEqual(@as(u64, 1), runtime.resize_generation);
 
+    // Exhaust every owner-side allocation boundary in records/items/per-subscription frame
+    // construction. Each failed prefix owns and frees everything, publishes no backend/registry
+    // mutation, and leaves the same sequence retryable; the first non-failing index succeeds.
+    var first_success: ?usize = null;
+    for (0..32) |fail_index| {
+        var failing = testing.FailingAllocator.init(
+            testing.allocator,
+            .{ .fail_index = fail_index },
+        );
+        owner.allocator = failing.allocator();
+        try sendTestRequest(
+            controller.fd,
+            .request,
+            40 + fail_index,
+            "{\"method\":\"runtime.resize\",\"params\":{\"stream_id\":1,\"cols\":105,\"rows\":32,\"client_sequence\":2}}",
+        );
+        const succeeded = pumpUntilEitherResponse(
+            &owner,
+            controller.fd,
+            "\"cols\":105",
+            "\"resource_exhausted\"",
+        ) catch |err| {
+            owner.allocator = testing.allocator;
+            return err;
+        };
+        owner.allocator = testing.allocator;
+        if (succeeded) {
+            try testing.expectEqual(@as(u64, 2), runtime.controller_sequence);
+            first_success = fail_index;
+            break;
+        }
+        try testing.expectEqual(@as(u16, 100), runtime.cols);
+        try testing.expect(!owner.reactor.mixed_batch_reserved);
+    }
+    try testing.expect(first_success != null);
+    try testing.expectEqual(@as(u16, 105), runtime.cols);
+
+    // A locally invalid observer is fail-closed and removed from the rebuilt target set; it
+    // cannot permanently veto the controller's next canonical resize.
+    const observer_client = owner.clients[observer.index].?;
+    const observer_tracker = observer_client.screenTracker(1).?;
+    try (try owner.reactor.get(observer_client.admission)).invalidateScreen(observer_tracker);
+    try sendTestRequest(
+        controller.fd,
+        .request,
+        31,
+        "{\"method\":\"runtime.resize\",\"params\":{\"stream_id\":1,\"cols\":110,\"rows\":35,\"client_sequence\":3}}",
+    );
+    try pumpUntilResponse(&owner, controller.fd, "\"cols\":110");
+    try testing.expect(owner.clients[observer.index] == null);
+    try testing.expectEqual(@as(u16, 110), runtime.cols);
+    try testing.expectEqual(@as(u64, 3), runtime.resize_generation);
+
+    // Backend failure cancels the opaque reactor publication reservation and leaves the same
+    // client sequence retryable.
+    fake_runtime.resize_fail_count = 1;
+    try sendTestRequest(
+        controller.fd,
+        .request,
+        32,
+        "{\"method\":\"runtime.resize\",\"params\":{\"stream_id\":1,\"cols\":115,\"rows\":36,\"client_sequence\":4}}",
+    );
+    try pumpUntilResponse(&owner, controller.fd, "\"internal\"");
+    try testing.expect(!owner.reactor.mixed_batch_reserved);
+    try testing.expectEqual(@as(u16, 110), runtime.cols);
+    try testing.expectEqual(@as(u64, 3), runtime.controller_sequence);
+
     // Injected owner admission failure must reject the complete publication before the backend
     // or canonical registry changes. Reactor cap+1 rollback is covered independently above.
     owner.resize_admission_fail_once = true;
@@ -3055,14 +3176,14 @@ test "poll owner publishes changed resize to controller and observer all or none
         controller.fd,
         .request,
         4,
-        "{\"method\":\"runtime.resize\",\"params\":{\"stream_id\":1,\"cols\":120,\"rows\":40,\"client_sequence\":2}}",
+        "{\"method\":\"runtime.resize\",\"params\":{\"stream_id\":1,\"cols\":120,\"rows\":40,\"client_sequence\":4}}",
     );
     try pumpUntilResponse(&owner, controller.fd, "\"resource_exhausted\"");
     try testing.expectEqual(@as(u16, 0), fake_runtime.resized_cols);
-    try testing.expectEqual(@as(u16, 100), runtime.cols);
-    try testing.expectEqual(@as(u16, 30), runtime.rows);
-    try testing.expectEqual(@as(u64, 1), runtime.resize_generation);
-    try testing.expectEqual(@as(u64, 1), runtime.controller_sequence);
+    try testing.expectEqual(@as(u16, 110), runtime.cols);
+    try testing.expectEqual(@as(u16, 35), runtime.rows);
+    try testing.expectEqual(@as(u64, 3), runtime.resize_generation);
+    try testing.expectEqual(@as(u64, 3), runtime.controller_sequence);
 }
 
 test "poll owner rejects a prepared transition after requester slot ABA reuse" {

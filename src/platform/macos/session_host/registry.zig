@@ -16,6 +16,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const subscription_identity = @import("subscription_identity.zig");
+const resize_wire = @import("resize_wire.zig");
 const upgrade_limits = @import("upgrade_limits.zig");
 
 /// runtime 하나를 가리키는 opaque 128-bit 상관키(§4). wire는 big-endian 16바이트지만 registry 내부는 비교·해시가
@@ -102,13 +103,13 @@ pub const ResizeOutcome = union(enum) {
 pub const PreparedResize = union(enum) {
     stale,
     ready: struct {
-        entry: *RuntimeEntry,
+        runtime_id: RuntimeId,
         subscription: subscription_identity.SubscriptionId,
         cols: u16,
         rows: u16,
         client_sequence: u64,
         changed: bool,
-        cells_without_entry: usize,
+        old_cells: usize,
         new_cells: usize,
         expected_cols: u16,
         expected_rows: u16,
@@ -144,6 +145,7 @@ pub const RegistryError = error{
     StaleControllerTransition,
     ControllerGenerationExhausted,
     ResizeGenerationExhausted,
+    StalePreparedResize,
     /// membership generation을 더 올릴 수 없어 새 complete inventory authority를 만들 수 없다.
     MembershipGenerationExhausted,
     InvalidGridSize,
@@ -302,6 +304,8 @@ pub const TerminalRuntimeRegistry = struct {
         resize_generation: u64,
         runtime: *anyopaque,
     ) RegistryError!*RuntimeEntry {
+        if (resize_generation > resize_wire.max_counter)
+            return error.ResizeGenerationExhausted;
         return self.registerExact(id, cols, rows, resize_generation, runtime);
     }
 
@@ -460,16 +464,16 @@ pub const TerminalRuntimeRegistry = struct {
             new_cells > self.limits.max_aggregate_grid_cells - cells_without_entry)
             return error.AggregateGridLimitReached;
         if (new_cols != entry.cols or new_rows != entry.rows)
-            if (entry.resize_generation == std.math.maxInt(u64))
+            if (entry.resize_generation == resize_wire.max_counter)
                 return error.ResizeGenerationExhausted;
         return .{ .ready = .{
-            .entry = entry,
+            .runtime_id = id,
             .subscription = .{ .value = stream },
             .cols = new_cols,
             .rows = new_rows,
             .client_sequence = client_sequence,
             .changed = new_cols != entry.cols or new_rows != entry.rows,
-            .cells_without_entry = cells_without_entry,
+            .old_cells = old_cells,
             .new_cells = new_cells,
             .expected_cols = entry.cols,
             .expected_rows = entry.rows,
@@ -481,20 +485,43 @@ pub const TerminalRuntimeRegistry = struct {
 
     /// `prepareResize`와 같은 owner turn에서 backend 성공 뒤 호출한다. 외부 dispatch가 끼어들 수 없는 single-owner
     /// 계약이므로 token의 entry는 여전히 canonical entry이며 이 단계에는 allocation/syscall/error가 없다.
-    fn commitPreparedResize(self: *TerminalRuntimeRegistry, prepared: *PreparedResize) ResizeOutcome {
+    pub fn validatePreparedResize(
+        self: *TerminalRuntimeRegistry,
+        prepared: *const PreparedResize,
+    ) RegistryError!void {
+        const ready = switch (prepared.*) {
+            .stale => return,
+            .ready => |*value| value,
+        };
+        if (ready.consumed) return error.StalePreparedResize;
+        const entry = self.entries.get(ready.runtime_id) orelse
+            return error.StalePreparedResize;
+        if (entry.controller != ready.subscription.value or
+            entry.cols != ready.expected_cols or
+            entry.rows != ready.expected_rows or
+            entry.resize_generation != ready.expected_resize_generation or
+            entry.controller_sequence != ready.expected_controller_sequence or
+            entry.resize_seq_seen != ready.expected_resize_seq_seen)
+            return error.StalePreparedResize;
+        if (self.live_grid_cells < ready.old_cells)
+            return error.StalePreparedResize;
+        const cells_without_entry = self.live_grid_cells - ready.old_cells;
+        if (cells_without_entry > self.limits.max_aggregate_grid_cells or
+            ready.new_cells > self.limits.max_aggregate_grid_cells - cells_without_entry)
+            return error.AggregateGridLimitReached;
+    }
+
+    fn commitPreparedResize(
+        self: *TerminalRuntimeRegistry,
+        prepared: *PreparedResize,
+    ) RegistryError!ResizeOutcome {
+        try self.validatePreparedResize(prepared);
         const ready = switch (prepared.*) {
             .stale => return .stale,
             .ready => |*value| value,
         };
-        std.debug.assert(!ready.consumed);
-        const entry = ready.entry;
-        std.debug.assert(self.entries.get(entry.id) == entry);
-        std.debug.assert(entry.controller == ready.subscription.value);
-        std.debug.assert(entry.cols == ready.expected_cols);
-        std.debug.assert(entry.rows == ready.expected_rows);
-        std.debug.assert(entry.resize_generation == ready.expected_resize_generation);
-        std.debug.assert(entry.controller_sequence == ready.expected_controller_sequence);
-        std.debug.assert(entry.resize_seq_seen == ready.expected_resize_seq_seen);
+        const entry = self.entries.get(ready.runtime_id) orelse
+            return error.StalePreparedResize;
         ready.consumed = true;
         entry.resize_seq_seen = true;
         entry.controller_sequence = ready.client_sequence;
@@ -502,7 +529,8 @@ pub const TerminalRuntimeRegistry = struct {
             entry.cols = ready.cols;
             entry.rows = ready.rows;
             entry.resize_generation += 1;
-            self.live_grid_cells = ready.cells_without_entry + ready.new_cells;
+            self.live_grid_cells =
+                self.live_grid_cells - ready.old_cells + ready.new_cells;
         }
         return .{ .applied = .{
             .cols = ready.cols,
@@ -521,7 +549,7 @@ pub const TerminalRuntimeRegistry = struct {
         client_sequence: u64,
     ) RegistryError!ResizeOutcome {
         var prepared = try self.prepareResize(id, stream, cols, rows, client_sequence);
-        return self.commitPreparedResize(&prepared);
+        return try self.commitPreparedResize(&prepared);
     }
 
     pub fn attachSubscription(
@@ -740,7 +768,7 @@ pub const TerminalRuntimeRegistry = struct {
             .ready => |ready| if (ready.changed)
                 try apply(apply_ctx, id, ready.cols, ready.rows),
         }
-        return self.commitPreparedResize(&prepared);
+        return try self.commitPreparedResize(&prepared);
     }
 
     /// Owner-level response/event admission 전에 canonical state나 backend를 바꾸지 않는 resize token을 만든다.
@@ -759,7 +787,7 @@ pub const TerminalRuntimeRegistry = struct {
     pub fn commitResizeSubscription(
         self: *TerminalRuntimeRegistry,
         prepared: *PreparedResize,
-    ) ResizeOutcome {
+    ) RegistryError!ResizeOutcome {
         return self.commitPreparedResize(prepared);
     }
 
@@ -1232,7 +1260,7 @@ test "registry: resize generation exhaustion leaves size sequence and ledger unc
     defer reg.deinit();
     const entry = try reg.register(1, 80, 24);
     _ = try reg.attach(1, 100, .controller);
-    entry.resize_generation = std.math.maxInt(u64);
+    entry.resize_generation = resize_wire.max_counter;
     const before_cells = reg.liveGridCells();
     try testing.expectError(
         error.ResizeGenerationExhausted,
@@ -1248,6 +1276,65 @@ test "registry: resize generation exhaustion leaves size sequence and ledger unc
     try testing.expect(!entry.resize_seq_seen);
     try testing.expectEqual(@as(u64, 0), entry.controller_sequence);
     try testing.expectEqual(before_cells, reg.liveGridCells());
+}
+
+test "registry: prepared resize cannot commit twice or after authority changes" {
+    var reg = TerminalRuntimeRegistry.init(testing.allocator);
+    defer reg.deinit();
+    _ = try reg.register(1, 80, 24);
+    _ = try reg.attach(1, 100, .controller);
+    var prepared = try reg.prepareResizeSubscription(
+        1,
+        .{ .value = 100 },
+        100,
+        30,
+        1,
+    );
+    var stale_copy = prepared;
+    _ = try reg.commitResizeSubscription(&prepared);
+    try testing.expectError(
+        error.StalePreparedResize,
+        reg.commitResizeSubscription(&prepared),
+    );
+    try testing.expectError(
+        error.StalePreparedResize,
+        reg.commitResizeSubscription(&stale_copy),
+    );
+
+    _ = try reg.attach(1, 200, .observer);
+    var before_takeover = try reg.prepareResizeSubscription(
+        1,
+        .{ .value = 100 },
+        120,
+        40,
+        2,
+    );
+    var takeover = try reg.prepareControllerTakeover(1, .{ .value = 200 });
+    _ = try reg.commitControllerTransition(&takeover);
+    try testing.expectError(
+        error.StalePreparedResize,
+        reg.validatePreparedResize(&before_takeover),
+    );
+}
+
+test "registry: prepared resize applies a delta without overwriting sibling ledger changes" {
+    var reg = TerminalRuntimeRegistry.init(testing.allocator);
+    defer reg.deinit();
+    _ = try reg.register(1, 80, 24);
+    _ = try reg.attach(1, 100, .controller);
+    var prepared = try reg.prepareResizeSubscription(
+        1,
+        .{ .value = 100 },
+        100,
+        30,
+        1,
+    );
+    _ = try reg.register(2, 40, 10);
+    _ = try reg.commitResizeSubscription(&prepared);
+    try testing.expectEqual(
+        @as(usize, 100 * 30 + 40 * 10),
+        reg.liveGridCells(),
+    );
 }
 
 test "registry: canonical size survives all clients detaching (client 0)" {
@@ -1284,4 +1371,28 @@ test "registry: restored registration publishes generation and handle atomically
     try testing.expectEqual(@as(?StreamId, null), entry.controller);
     try testing.expectEqual(@as(usize, 0), entry.observers.items.len);
     try testing.expectEqual(@as(*anyopaque, @ptrCast(&fake_runtime)), entry.runtime.?);
+}
+
+test "registry: restored generation is bounded by the JSON wire counter" {
+    var registry = TerminalRuntimeRegistry.init(testing.allocator);
+    defer registry.deinit();
+    var fake_runtime: u32 = 9;
+    _ = try registry.registerRestored(
+        0xAA,
+        120,
+        40,
+        resize_wire.max_counter,
+        &fake_runtime,
+    );
+    try testing.expectError(
+        error.ResizeGenerationExhausted,
+        registry.registerRestored(
+            0xBB,
+            120,
+            40,
+            resize_wire.max_counter + 1,
+            &fake_runtime,
+        ),
+    );
+    try testing.expect(registry.get(0xBB) == null);
 }

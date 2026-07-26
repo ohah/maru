@@ -51684,6 +51684,71 @@ test "링크 조회는 pane chrome(탭 바·여백)을 셀로 접지 않는다" 
     }
 }
 
+// [코드리뷰] 밑줄 배선의 **마지막 계층**까지 본다: hoverLinkSpanFor를 직접 부르는 단언만으로는 그 값이
+// 비활성 pane의 CellColors로 실려 프레임까지 가는지 증명되지 않는다(그 대입이 빠져도 테스트는 통과한다).
+// tick을 돌려 실제 MetalFrame에 밑줄 셀(reserved=9 부분 사각형)이 생기는지 확인한다. 텍스트에 SGR 밑줄을 쓰지
+// 않으므로 reserved=9는 hover 밑줄뿐이다.
+test "비활성 pane hover 밑줄이 실제 프레임 셀까지 실린다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    session.window_padding_px = .{};
+    _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
+    try session.splitActivePane(.horizontal); // 좌(비활성)·우(활성)
+
+    var lr: std.ArrayList(PaneTree.LeafRect) = .empty;
+    defer lr.deinit(allocator);
+    try session.activeTabLeafRects(allocator, session.termRect(), &lr);
+    const left_surface = lr.items[0].leaf.activeTerm().surface;
+    try std.testing.expect(left_surface != session.activeSurface());
+    try left_surface.core.write("https://a.co");
+
+    // 밑줄 셀(reserved=9 가는 부분 사각형)을 **그 pane 영역 안**에서만 센다 — 개수 자체는 렌더 세부(합성 셀 분할
+    // 등)에 묶여 취약하므로, "어느 pane에 그려졌나"만 본다.
+    const countUnderlineIn = struct {
+        fn run(sess: *AppSession, rect: maru.session.SplitRect) usize {
+            var n: usize = 0;
+            for (sess.metal_buffer.cells) |cell| {
+                if (cell.reserved != 9) continue;
+                if (cell.origin_x >= rect.x and cell.origin_x < rect.x + rect.w) n += 1;
+            }
+            return n;
+        }
+    }.run;
+
+    const left_body = session.paneTermRect(lr.items[0].rect);
+    const right_body = session.paneTermRect(lr.items[1].rect);
+
+    // hover 없음 → 어느 pane에도 밑줄 없음.
+    session.metal_dirty = true;
+    _ = try session.tick();
+    try std.testing.expectEqual(@as(usize, 0), countUnderlineIn(session, left_body));
+
+    // 비활성(왼쪽) pane의 링크에 Cmd+hover → **그 pane**에 밑줄이 그려지고 활성 pane에는 안 그려진다.
+    const x = @as(f64, @floatFromInt(left_body.x)) + 3.5 * @as(f64, @floatFromInt(session.cell_width_px));
+    const y = @as(f64, @floatFromInt(left_body.y)) + 0.5 * @as(f64, @floatFromInt(session.cell_height_px));
+    try std.testing.expectEqual(CursorKind.link, session.hoverCursor(x, y, 32));
+    session.metal_dirty = true;
+    _ = try session.tick();
+    try std.testing.expect(countUnderlineIn(session, left_body) > 0); // ← pane_colors.hover_link 배선이 없으면 0
+    try std.testing.expectEqual(@as(usize, 0), countUnderlineIn(session, right_body));
+
+    // hover가 떠나면 프레임에서도 사라진다.
+    session.clearHoverUrlAnchor();
+    session.metal_dirty = true;
+    _ = try session.tick();
+    try std.testing.expectEqual(@as(usize, 0), countUnderlineIn(session, left_body));
+}
+
 // [코드리뷰] chrome 오버레이(세팅·find·팔레트·알림·notice·확인 모달)가 떠 있으면 그 아래 pane의 링크를 열지
 // 않는다. Swift mouseDown이 handleUrlClick을 **가장 먼저** 부르므로, 가드가 없으면 모달 위 클릭이 뒤 터미널
 // 링크로 소비돼 모달이 클릭을 못 받는다(hover는 이미 모달마다 밑줄을 끄고 있었다 — 그 비대칭을 없앤다).

@@ -62,11 +62,9 @@ const Probe = struct {
         );
         if (rc < 0 and posix.errno(rc) == .AGAIN) return .continue_serving;
         if (rc != @sizeOf(probe_wire.CommandPacket)) return .stop;
-        var command: probe_wire.CommandPacket = undefined;
-        @memcpy(
-            std.mem.asBytes(&command),
-            packet_bytes[0..@sizeOf(probe_wire.CommandPacket)],
-        );
+        const command = probe_wire.decodeCommandDatagram(
+            packet_bytes[0..@intCast(rc)],
+        ) orelse return .stop;
         const action = command.command() orelse return .stop;
         self.pending_sequence = command.sequence;
         switch (action) {

@@ -122,6 +122,22 @@ pub const Report = extern struct {
     }
 };
 
+pub fn decodeCommandDatagram(bytes: []const u8) ?CommandPacket {
+    if (bytes.len != @sizeOf(CommandPacket)) return null;
+    var packet: CommandPacket = undefined;
+    @memcpy(std.mem.asBytes(&packet), bytes);
+    _ = packet.command() orelse return null;
+    return packet;
+}
+
+pub fn decodeReportDatagram(bytes: []const u8) ?Report {
+    if (bytes.len != @sizeOf(Report)) return null;
+    var report: Report = undefined;
+    @memcpy(std.mem.asBytes(&report), bytes);
+    if (!report.valid()) return null;
+    return report;
+}
+
 comptime {
     if (@sizeOf(CommandPacket) > max_packet_bytes)
         @compileError("slow-observer probe command exceeds private packet cap");
@@ -196,4 +212,46 @@ test "report rejects every framing field corruption" {
     bad = valid;
     bad.exit_reserved = 1;
     try std.testing.expect(!bad.valid());
+}
+
+test "exact packet decodes and exact plus one datagram is rejected" {
+    const command = CommandPacket.init(17, .stop);
+    try std.testing.expectEqual(
+        Command.stop,
+        decodeCommandDatagram(std.mem.asBytes(&command)).?.command().?,
+    );
+    var oversized_command: [@sizeOf(CommandPacket) + 1]u8 = undefined;
+    @memcpy(oversized_command[0..@sizeOf(CommandPacket)], std.mem.asBytes(&command));
+    oversized_command[oversized_command.len - 1] = 0;
+    try std.testing.expect(decodeCommandDatagram(&oversized_command) == null);
+
+    const telemetry: session_host.poll_owner.TelemetrySnapshot = .{
+        .accounting = std.mem.zeroes(
+            session_host.connection_slot.ReactorCore.AccountingSnapshot,
+        ),
+        .pressure_reclaims = 0,
+        .stalled_clients = 0,
+        .active_clients = 0,
+        .total_admitted = 0,
+        .pollout_absent_count = 0,
+        .first_stall_connection_id = 0,
+        .first_stall_ns = 0,
+        .first_stall_send_buffer_bytes = 0,
+        .stale_client_observations = 0,
+    };
+    const report = Report.from(18, .stop_ack, telemetry, 0, .{
+        .live_child_pid = 0,
+        .reaped_children = 0,
+        .last_exit_status = -1,
+    });
+    try std.testing.expectEqual(
+        ReportKind.stop_ack,
+        @as(ReportKind, @enumFromInt(decodeReportDatagram(
+            std.mem.asBytes(&report),
+        ).?.kind)),
+    );
+    var oversized_report: [@sizeOf(Report) + 1]u8 = undefined;
+    @memcpy(oversized_report[0..@sizeOf(Report)], std.mem.asBytes(&report));
+    oversized_report[oversized_report.len - 1] = 0;
+    try std.testing.expect(decodeReportDatagram(&oversized_report) == null);
 }

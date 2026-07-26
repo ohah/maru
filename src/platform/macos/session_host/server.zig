@@ -238,6 +238,14 @@ pub const Action = union(enum) {
         bytes: []u8,
         runtime_id: u128,
     };
+    pub const PreparedAttach = struct {
+        reply: []u8,
+        output: CollectedOutput,
+    };
+    pub const PreparedReply = struct {
+        reply: []u8,
+        output: CollectedOutput,
+    };
 
     reply: []u8,
     reply_and_close: []u8,
@@ -254,6 +262,11 @@ pub const Action = union(enum) {
     /// 슬라이스와 각 `[]u8`은 caller 소유다(순서대로 write한 뒤 각 frame free, 마지막에 바깥 슬라이스 free). `frames[0]`이
     /// 응답 frame, 이후가 snapshot_chunk들이다.
     frames: [][]u8,
+    /// Product attach keeps projection bases prepared until the owner admits both the response and
+    /// the complete snapshot batch.
+    prepared_attach: PreparedAttach,
+    /// A response that advances retained metadata only after control-queue admission.
+    prepared_reply: PreparedReply,
 };
 
 pub const OutboundClass = union(enum) {
@@ -293,6 +306,30 @@ pub fn classifyOutbound(bytes: []const u8) error{InvalidFrame}!OutboundClass {
 
 pub const HandleError = error{OutOfMemory};
 
+/// The reactor remains the sole accounting authority. The protocol state machine only carries the
+/// stable reservation token between prepare and queue admission.
+pub const ProjectionBudgetOps = struct {
+    ctx: *anyopaque,
+    prepare: *const fn (
+        ctx: *anyopaque,
+        stream: subscription_identity.LocalStreamId,
+        upper_bound: usize,
+    ) ?connection_slot.BaseReservation,
+    commit: *const fn (
+        ctx: *anyopaque,
+        reservation: connection_slot.BaseReservation,
+        actual: usize,
+    ) void,
+    rollback: *const fn (
+        ctx: *anyopaque,
+        reservation: connection_slot.BaseReservation,
+    ) void,
+    release: *const fn (
+        ctx: *anyopaque,
+        stream: subscription_identity.LocalStreamId,
+    ) void,
+};
+
 pub const CollectedOutput = struct {
     allocator: std.mem.Allocator,
     stream: subscription_identity.LocalStreamId,
@@ -303,6 +340,7 @@ pub const CollectedOutput = struct {
     next_observation_base: ?[]u8 = null,
     next_observation_revision: ?u64 = null,
     previous_observation_ticks: u8,
+    base_reservation: ?connection_slot.BaseReservation = null,
     frames_taken: bool = true,
     finished: bool = false,
 
@@ -318,6 +356,25 @@ pub const CollectedOutput = struct {
             self.rollback(connection);
             return;
         };
+        const next_screen_len = if (self.replace_base)
+            if (self.next_base) |base| base.len else 0
+        else if (sub.base) |base| base.len else 0;
+        const next_observation_len = if (self.next_observation_base) |base|
+            base.len
+        else if (sub.observation_base) |base| base.len else 0;
+        const retained_len = std.math.add(
+            usize,
+            next_screen_len,
+            next_observation_len,
+        ) catch unreachable;
+        if (self.base_reservation) |reservation| {
+            connection.projection_budget.?.commit(
+                connection.projection_budget.?.ctx,
+                reservation,
+                retained_len,
+            );
+            self.base_reservation = null;
+        }
         if (self.replace_base) {
             if (sub.base) |old| connection.allocator.free(old);
             sub.base = self.next_base;
@@ -341,6 +398,13 @@ pub const CollectedOutput = struct {
         if (self.finished) return;
         if (connection.attachments.getPtr(self.stream)) |sub|
             sub.observation_ticks = self.previous_observation_ticks;
+        if (self.base_reservation) |reservation| {
+            connection.projection_budget.?.rollback(
+                connection.projection_budget.?.ctx,
+                reservation,
+            );
+            self.base_reservation = null;
+        }
         if (self.next_base) |owned| self.allocator.free(owned);
         if (self.next_observation_base) |owned| self.allocator.free(owned);
         self.finishFrames();
@@ -384,6 +448,9 @@ pub const Connection = struct {
     /// 마지막 full snapshot base). input_bytes/resize/detach가 stream_id로 runtime을 찾고, delta push는 base 대비 diff한다.
     /// connection 종료 시 모두 detach하고 base를 해제한다.
     attachments: std.AutoHashMapUnmanaged(subscription_identity.LocalStreamId, Subscription) = .empty,
+    /// Product poll-owner injection. Null is retained only for isolated pure protocol tests and
+    /// read-only legacy seams that never expose a multi-fd product connection.
+    projection_budget: ?ProjectionBudgetOps = null,
     subscription_identity: ?struct {
         connection: connection_slot.ConnectionKey,
         table: *subscription_identity.Table,
@@ -432,6 +499,8 @@ pub const Connection = struct {
         var it = self.attachments.iterator();
         while (it.next()) |e| {
             _ = self.registry.detachSubscription(e.value_ptr.runtime_id, e.value_ptr.subscription_id) catch {};
+            if (self.projection_budget) |budget|
+                budget.release(budget.ctx, e.key_ptr.*);
             if (e.value_ptr.base) |b| self.allocator.free(b);
             if (e.value_ptr.observation_base) |b| self.allocator.free(b);
         }
@@ -538,6 +607,8 @@ pub const Connection = struct {
         const removed = self.attachments.fetchRemove(stream) orelse return false;
         const sub = removed.value;
         _ = self.registry.detachSubscription(sub.runtime_id, sub.subscription_id) catch {};
+        if (self.projection_budget) |budget|
+            budget.release(budget.ctx, stream);
         if (self.subscription_identity) |identity| _ = identity.table.revoke(.{
             .connection = identity.connection,
             .stream_id = stream,
@@ -952,6 +1023,8 @@ pub const Connection = struct {
             reg.Capability.observe,
         ))
             return self.replyError(request_id, .unauthorized);
+        if (self.projection_budget != null)
+            return self.dispatchPreparedObservation(request_id, stream, ops, sub);
 
         var observation = ops.observation(ops.ctx, sub.runtime_id, self.allocator) catch |err| switch (err) {
             error.RuntimeNotFound => return self.replyError(request_id, .runtime_not_found),
@@ -979,6 +1052,62 @@ pub const Connection = struct {
             canonical_owned = false;
         }
         return action;
+    }
+
+    fn dispatchPreparedObservation(
+        self: *Connection,
+        request_id: u64,
+        stream: subscription_identity.LocalStreamId,
+        ops: RuntimeOps,
+        sub: *Subscription,
+    ) HandleError!Action {
+        var output: CollectedOutput = .{
+            .allocator = self.allocator,
+            .stream = stream,
+            .frames = &.{},
+            .previous_observation_ticks = sub.observation_ticks,
+        };
+        const budget = self.projection_budget.?;
+        output.base_reservation = budget.prepare(
+            budget.ctx,
+            stream,
+            connection_slot.base_update_max_bytes,
+        ) orelse return self.replyError(request_id, .resource_exhausted);
+        var transferred = false;
+        defer if (!transferred) output.rollback(self);
+
+        var observation = ops.observation(ops.ctx, sub.runtime_id, self.allocator) catch |err| switch (err) {
+            error.RuntimeNotFound => return self.replyError(request_id, .runtime_not_found),
+            else => return self.replyError(request_id, .internal),
+        };
+        defer observation.deinit(self.allocator);
+        const canonical = self.stringify(observation) catch return error.OutOfMemory;
+        var canonical_owned = true;
+        defer if (canonical_owned) self.allocator.free(canonical);
+        const changed = if (sub.observation_base) |old|
+            !std.mem.eql(u8, old, canonical)
+        else
+            true;
+        const revision = if (changed)
+            sub.observation_revision +% 1
+        else
+            sub.observation_revision;
+        const body = try self.stringify(.{ .result = .{
+            .metadata_revision = revision,
+            .metadata = observation,
+        } });
+        defer self.allocator.free(body);
+        const reply = self.encode(.response, request_id, 0, body) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.PayloadTooLarge => return self.replyError(request_id, .payload_too_large),
+        };
+        if (!changed) return .{ .reply = reply };
+
+        output.next_observation_base = canonical;
+        output.next_observation_revision = revision;
+        canonical_owned = false;
+        transferred = true;
+        return .{ .prepared_reply = .{ .reply = reply, .output = output } };
     }
 
     /// `runtime.notification`(§6.32): runtime의 대기 중인 OSC 9/777 알림을 빼서 `{title, body}`로 응답한다. read-only host면
@@ -1189,6 +1318,28 @@ pub const Connection = struct {
             self.next_stream_id,
             1,
         ) catch 0;
+        var prepared_output: CollectedOutput = .{
+            .allocator = self.allocator,
+            .stream = stream,
+            .frames = &.{},
+            .previous_observation_ticks = 0,
+        };
+        const prepared_product = self.projection_budget != null and self.runtime_ops != null;
+        if (prepared_product) {
+            const budget = self.projection_budget.?;
+            prepared_output.base_reservation = budget.prepare(
+                budget.ctx,
+                stream,
+                connection_slot.base_update_max_bytes,
+            ) orelse {
+                self.rollbackAttach(stream);
+                self.state = .closed;
+                return .close;
+            };
+        }
+        var prepared_transferred = false;
+        defer if (prepared_product and !prepared_transferred)
+            prepared_output.rollback(self);
 
         // attach 응답에 **현재 full metadata**를 함께 싣는다. response 뒤 snapshot만 온다는 기존 client 순서를 깨지 않으면서,
         // 재접속 GUI가 새 OSC를 기다리지 않고 cwd/title/SSH/agent 정보를 첫 frame 전에 복구한다. observation 실패는 화면
@@ -1201,8 +1352,13 @@ pub const Connection = struct {
                 const canonical = self.stringify(obs) catch null;
                 if (canonical) |bytes| {
                     if (self.attachments.getPtr(stream)) |sub| {
-                        sub.observation_base = bytes;
-                        sub.observation_revision = 1;
+                        if (prepared_product) {
+                            prepared_output.next_observation_base = bytes;
+                            prepared_output.next_observation_revision = 1;
+                        } else {
+                            sub.observation_base = bytes;
+                            sub.observation_revision = 1;
+                        }
                     } else self.allocator.free(bytes);
                 } else {
                     // response revision과 subscription base를 원자적으로 세운다. canonical을 소유하지 못했는데 rev1
@@ -1212,7 +1368,12 @@ pub const Connection = struct {
                 }
             }
         };
-        const metadata_revision: u64 = if (self.attachments.get(stream)) |sub| sub.observation_revision else 0;
+        const metadata_revision: u64 = if (prepared_output.next_observation_revision) |revision|
+            revision
+        else if (self.attachments.get(stream)) |sub|
+            sub.observation_revision
+        else
+            0;
         const body = try self.stringify(.{ .result = .{
             .stream_id = stream,
             .granted = .{
@@ -1227,39 +1388,80 @@ pub const Connection = struct {
         defer self.allocator.free(body);
         const reply_frame = self.encode(.response, request_id, 0, body) catch |e| switch (e) {
             error.OutOfMemory => return error.OutOfMemory,
-            error.PayloadTooLarge => return self.replyError(request_id, .payload_too_large),
+            error.PayloadTooLarge => {
+                if (prepared_product) {
+                    prepared_output.rollback(self);
+                    prepared_transferred = true;
+                }
+                self.rollbackAttach(stream);
+                return self.replyError(request_id, .payload_too_large);
+            },
         };
+        var reply_transferred = false;
+        defer if (!reply_transferred) self.allocator.free(reply_frame);
 
         // read-only 관리 seam만 응답-only다. product runtime snapshot 실패는 아래에서 권위를 rollback하고 fail-close한다.
-        const ops = self.runtime_ops orelse return .{ .reply = reply_frame };
+        const ops = self.runtime_ops orelse {
+            reply_transferred = true;
+            return .{ .reply = reply_frame };
+        };
         const snap_bytes = ops.snapshot(ops.ctx, id.?, self.allocator) catch {
-            self.allocator.free(reply_frame);
+            if (prepared_product) {
+                prepared_output.rollback(self);
+                prepared_transferred = true;
+            }
             self.rollbackAttach(stream);
             self.state = .closed;
             return .close;
         };
         if (snap_bytes.len > protocol.max_viewport_snapshot) {
             self.allocator.free(snap_bytes);
-            self.allocator.free(reply_frame);
+            if (prepared_product) {
+                prepared_output.rollback(self);
+                prepared_transferred = true;
+            }
             self.rollbackAttach(stream);
             self.state = .closed;
             return .close;
         }
         // snapshot을 이 stream의 delta base로 보관한다(free하지 않고 subscription이 소유). chunk frame은 payload를 복사한다.
-        if (self.attachments.getPtr(stream)) |sub| sub.base = snap_bytes else self.allocator.free(snap_bytes);
+        if (prepared_product) {
+            prepared_output.next_base = snap_bytes;
+            prepared_output.replace_base = true;
+        } else if (self.attachments.getPtr(stream)) |sub|
+            sub.base = snap_bytes
+        else
+            self.allocator.free(snap_bytes);
 
-        // 응답 frame + snapshot_chunk*를 순서대로 실어 보낸다(§10). errdefer가 부분 조립 시 전부 회수한다.
+        // snapshot_chunk*를 조립한다. Product path는 response와 이 batch를 owner가 각각 admission한 뒤
+        // transaction을 commit하고, pure legacy seam만 기존 frames 배열로 합친다.
         var list: std.ArrayListUnmanaged([]u8) = .empty;
         errdefer {
             for (list.items) |f| self.allocator.free(f);
             list.deinit(self.allocator);
         }
-        list.append(self.allocator, reply_frame) catch {
-            self.allocator.free(reply_frame); // 아직 list 밖이라 직접 회수.
+        try self.appendChunks(&list, .snapshot_chunk, stream, snap_bytes);
+        const snapshot_frames = list.toOwnedSlice(self.allocator) catch return error.OutOfMemory;
+        if (prepared_product) {
+            prepared_output.frames = snapshot_frames;
+            prepared_output.frames_taken = false;
+            prepared_transferred = true;
+            reply_transferred = true;
+            return .{ .prepared_attach = .{
+                .reply = reply_frame,
+                .output = prepared_output,
+            } };
+        }
+        const frames = self.allocator.alloc([]u8, snapshot_frames.len + 1) catch {
+            for (snapshot_frames) |frame| self.allocator.free(frame);
+            self.allocator.free(snapshot_frames);
             return error.OutOfMemory;
         };
-        try self.appendChunks(&list, .snapshot_chunk, stream, snap_bytes);
-        return .{ .frames = list.toOwnedSlice(self.allocator) catch return error.OutOfMemory };
+        frames[0] = reply_frame;
+        @memcpy(frames[1..], snapshot_frames);
+        self.allocator.free(snapshot_frames);
+        reply_transferred = true;
+        return .{ .frames = frames };
     }
 
     /// A product attach cannot recover before `RemoteRuntime` exists. If the initial snapshot
@@ -1268,6 +1470,13 @@ pub const Connection = struct {
     /// can never arrive while an orphan controller lease remains live.
     fn rollbackAttach(self: *Connection, stream: subscription_identity.LocalStreamId) void {
         _ = self.removeAttachment(stream);
+    }
+
+    pub fn rollbackPreparedAttach(
+        self: *Connection,
+        stream: subscription_identity.LocalStreamId,
+    ) void {
+        self.rollbackAttach(stream);
     }
 
     /// record 바이트를 `kind` frame(각 ≤ `max_binary_chunk`)으로 잘라 `list`에 덧붙인다. 마지막 chunk에 `end_stream` flag를
@@ -1617,7 +1826,10 @@ pub const Connection = struct {
             all.deinit(self.allocator);
         }
         for (streams) |stream| {
-            var output = (try self.collectOutputForLocalStream(stream)) orelse continue;
+            var output = self.collectOutputForLocalStream(stream) catch |err| switch (err) {
+                error.ProjectionBudgetUnavailable => return error.OutOfMemory,
+                else => |other| return other,
+            } orelse continue;
             const frames = output.takeFrames();
             all.appendSlice(self.allocator, frames) catch {
                 for (frames) |frame| self.allocator.free(frame);
@@ -1641,7 +1853,7 @@ pub const Connection = struct {
     pub fn collectOutputForLocalStream(
         self: *Connection,
         stream: subscription_identity.LocalStreamId,
-    ) HandleError!?CollectedOutput {
+    ) (HandleError || error{ProjectionBudgetUnavailable})!?CollectedOutput {
         const ops = self.runtime_ops orelse return null;
         const sub = self.attachments.getPtr(stream) orelse return null;
         var list: std.ArrayListUnmanaged([]u8) = .empty;
@@ -1656,6 +1868,13 @@ pub const Connection = struct {
             .previous_observation_ticks = sub.observation_ticks,
         };
         errdefer output.rollback(self);
+        if (self.projection_budget) |budget| {
+            output.base_reservation = budget.prepare(
+                budget.ctx,
+                stream,
+                connection_slot.base_update_max_bytes,
+            ) orelse return error.ProjectionBudgetUnavailable;
+        }
 
         sub.observation_ticks +%= 1;
         if (self.runtime_metadata_v1 and
@@ -1669,6 +1888,7 @@ pub const Connection = struct {
             ) catch |err| switch (err) {
                 error.RuntimeNotFound => {
                     if (!self.runtimeMissing(stream)) return error.OutOfMemory;
+                    output.rollback(self);
                     self.endMissingRuntime(stream);
                     return null;
                 },
@@ -1713,6 +1933,7 @@ pub const Connection = struct {
                 if (err == error.RuntimeNotFound) {
                     if (!self.runtimeMissing(stream)) return error.OutOfMemory;
                     self.discardPreparedOutput(&list, &output);
+                    output.rollback(self);
                     self.endMissingRuntime(stream);
                     return null;
                 }
@@ -1721,6 +1942,7 @@ pub const Connection = struct {
                     // not consume the due cadence merely because observation allocation/encoding
                     // also produced no frame in this attempt.
                     sub.observation_ticks = output.previous_observation_ticks;
+                    output.rollback(self);
                     return null;
                 }
                 output.frames = list.toOwnedSlice(self.allocator) catch return error.OutOfMemory;
@@ -1744,6 +1966,7 @@ pub const Connection = struct {
                     error.RuntimeNotFound => {
                         if (!self.runtimeMissing(stream)) return error.OutOfMemory;
                         self.discardPreparedOutput(&list, &output);
+                        output.rollback(self);
                         self.endMissingRuntime(stream);
                         return null;
                     },
@@ -1752,7 +1975,9 @@ pub const Connection = struct {
                     else => return error.OutOfMemory,
                 };
             defer self.allocator.free(update.send);
-            if (update.send.len > protocol.max_viewport_snapshot) {
+            if (update.send.len > protocol.max_viewport_snapshot or
+                update.new_base.len > protocol.max_viewport_snapshot)
+            {
                 self.allocator.free(update.new_base);
                 return error.OutOfMemory;
             }
@@ -1766,7 +1991,10 @@ pub const Connection = struct {
 
         if (list.items.len == 0 and !output.replace_base and
             output.next_observation_base == null)
+        {
+            output.rollback(self);
             return null;
+        }
         output.frames = list.toOwnedSlice(self.allocator) catch return error.OutOfMemory;
         output.frames_taken = false;
         return output;
@@ -1780,7 +2008,7 @@ pub const Connection = struct {
     ) void {
         const sub = self.attachments.getPtr(stream) orelse return;
         sub.awaiting_resync_ack = true;
-        self.resetObservationAfterPurge(sub);
+        self.resetBasesAfterPurge(stream, sub);
     }
 
     /// An explicit resync also purges already-committed but unsent metadata from the tracker queue.
@@ -1790,11 +2018,21 @@ pub const Connection = struct {
         stream: subscription_identity.LocalStreamId,
     ) void {
         const sub = self.attachments.getPtr(stream) orelse return;
-        self.resetObservationAfterPurge(sub);
+        self.resetBasesAfterPurge(stream, sub);
     }
 
-    fn resetObservationAfterPurge(self: *Connection, sub: *Subscription) void {
+    fn resetBasesAfterPurge(
+        self: *Connection,
+        stream: subscription_identity.LocalStreamId,
+        sub: *Subscription,
+    ) void {
         sub.observation_ticks = 5;
+        if (self.projection_budget) |budget|
+            budget.release(budget.ctx, stream);
+        if (sub.base) |old| {
+            self.allocator.free(old);
+            sub.base = null;
+        }
         if (sub.observation_base) |old| {
             self.allocator.free(old);
             sub.observation_base = null;
@@ -2319,6 +2557,7 @@ fn runWire(conn: *Connection, wire: []const u8) !FedResult {
             const out = (try rp.next()).?;
             return .{ .action = "frames", .frame = out };
         },
+        .prepared_attach, .prepared_reply => unreachable,
     }
 }
 
@@ -3085,6 +3324,7 @@ pub const FakeRuntimeOps = struct {
     last_find_scroll: bool = false,
     observation_version: u8 = 0,
     snapshot_len: ?usize = null,
+    new_base_len: ?usize = null,
     snapshot_fail_count: usize = 0,
     snapshot_calls: usize = 0,
     observation_fail_count: usize = 0,
@@ -3168,7 +3408,11 @@ pub const FakeRuntimeOps = struct {
         self.delta_base_seen_len = n;
         const send = try allocator.dupe(u8, "DELTA-BYTES");
         errdefer allocator.free(send);
-        const new_base = try allocator.dupe(u8, "NEW-BASE");
+        const new_base = if (self.new_base_len) |len| blk: {
+            const bytes = try allocator.alloc(u8, len);
+            @memset(bytes, 'N');
+            break :blk bytes;
+        } else try allocator.dupe(u8, "NEW-BASE");
         return .{ .send = send, .is_snapshot = false, .new_base = new_base };
     }
     /// 대기 알림 없음(빈 title/body)을 돌려준다 — 기본 fake. server dispatch 배선만 검증(실 core 파싱은 runtime_manager smoke).
@@ -3650,6 +3894,64 @@ test "server: initial attach accepts exact viewport snapshot cap and rejects cap
     );
 }
 
+test "server: product attach reserves retained budget before snapshot projection" {
+    const RejectBudget = struct {
+        prepare_calls: usize = 0,
+
+        fn prepare(
+            ctx: *anyopaque,
+            _: subscription_identity.LocalStreamId,
+            _: usize,
+        ) ?connection_slot.BaseReservation {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            self.prepare_calls += 1;
+            return null;
+        }
+        fn commit(_: *anyopaque, _: connection_slot.BaseReservation, _: usize) void {
+            unreachable;
+        }
+        fn rollback(_: *anyopaque, _: connection_slot.BaseReservation) void {
+            unreachable;
+        }
+        fn release(_: *anyopaque, _: subscription_identity.LocalStreamId) void {}
+    };
+
+    var registry = reg.TerminalRuntimeRegistry.init(testing.allocator);
+    defer registry.deinit();
+    _ = try registry.register(0xAA, 80, 24);
+    var fake: FakeRuntimeOps = .{};
+    var budget: RejectBudget = .{};
+    var conn = Connection.init(testing.allocator, 1, &registry);
+    defer conn.deinit();
+    conn.runtime_ops = fake.ops();
+    conn.projection_budget = .{
+        .ctx = &budget,
+        .prepare = RejectBudget.prepare,
+        .commit = RejectBudget.commit,
+        .rollback = RejectBudget.rollback,
+        .release = RejectBudget.release,
+    };
+    {
+        const hello = try feedJson(
+            &conn,
+            .hello,
+            1,
+            "{\"protocol_min\":2,\"protocol_max\":2}",
+        );
+        defer if (hello.frame) |frame| frame.deinit(testing.allocator);
+    }
+    const attach = try feedJson(
+        &conn,
+        .request,
+        2,
+        "{\"method\":\"runtime.attach\",\"params\":{\"runtime_id\":\"aa\",\"mode\":\"observer\"}}",
+    );
+    try testing.expectEqualStrings("close", attach.action);
+    try testing.expectEqual(@as(usize, 1), budget.prepare_calls);
+    try testing.expectEqual(@as(usize, 0), fake.snapshot_calls);
+    try testing.expectEqual(@as(usize, 0), conn.attachmentCount());
+}
+
 test "server: runtime metadata changes emit one full-state event and unchanged polls stay silent" {
     const allocator = testing.allocator;
     var registry = reg.TerminalRuntimeRegistry.init(allocator);
@@ -3895,6 +4197,55 @@ test "server: collectDeltas pushes delta_chunk for attached streams and advances
     try testing.expectEqual(@as(?[][]u8, null), try ro.collectDeltas());
 }
 
+test "server: delta rejects oversized new base independently and preserves old base" {
+    const allocator = testing.allocator;
+    var registry = reg.TerminalRuntimeRegistry.init(allocator);
+    defer registry.deinit();
+    _ = try registry.register(0xAA, 80, 24);
+
+    var fake: FakeRuntimeOps = .{ .new_base_len = protocol.max_viewport_snapshot };
+    var conn = Connection.init(allocator, 1, &registry);
+    defer conn.deinit();
+    conn.runtime_ops = fake.ops();
+    {
+        const hello = try feedJson(
+            &conn,
+            .hello,
+            1,
+            "{\"protocol_min\":2,\"protocol_max\":2}",
+        );
+        defer if (hello.frame) |frame| frame.deinit(allocator);
+    }
+    {
+        const frames = try feedExpectFrames(
+            &conn,
+            .request,
+            2,
+            "{\"method\":\"runtime.attach\",\"params\":{\"runtime_id\":\"aa\",\"mode\":\"observer\"}}",
+        );
+        defer {
+            for (frames) |frame| frame.deinit(allocator);
+            allocator.free(frames);
+        }
+    }
+    var exact = (try conn.collectOutputForLocalStream(1)).?;
+    const exact_frames = exact.takeFrames();
+    for (exact_frames) |frame| allocator.free(frame);
+    allocator.free(exact_frames);
+    exact.commit(&conn);
+    try testing.expectEqual(
+        protocol.max_viewport_snapshot,
+        conn.attachments.get(1).?.base.?.len,
+    );
+
+    fake.new_base_len = protocol.max_viewport_snapshot + 1;
+    try testing.expectError(error.OutOfMemory, conn.collectOutputForLocalStream(1));
+    try testing.expectEqual(
+        protocol.max_viewport_snapshot,
+        conn.attachments.get(1).?.base.?.len,
+    );
+}
+
 test "server: one-stream delta collection never materializes a sibling subscription" {
     const allocator = testing.allocator;
     var registry = reg.TerminalRuntimeRegistry.init(allocator);
@@ -4135,7 +4486,9 @@ test "server: output rollback preserves base and resync intent until queue admis
             allocator.free(batch);
         }
     }
+    try testing.expectEqualStrings("SNAPSHOT-BYTES", conn.attachments.get(1).?.base.?);
     conn.markSubscriptionOutputInvalidated(1);
+    try testing.expectEqual(@as(?[]u8, null), conn.attachments.get(1).?.base);
     {
         var ack_frame = framing.Frame{
             .header = .{ .kind = .stream_ack, .stream_id = 1 },
@@ -4145,16 +4498,13 @@ test "server: output rollback preserves base and resync intent until queue admis
         const action = try conn.handleFrame(ack_frame);
         try testing.expect(action == .none);
     }
-    const original = try allocator.dupe(u8, conn.attachments.get(1).?.base.?);
-    defer allocator.free(original);
-
     var rejected = (try conn.collectOutputForLocalStream(1)).?;
     const rejected_frames = rejected.takeFrames();
     for (rejected_frames) |frame| allocator.free(frame);
     allocator.free(rejected_frames);
     rejected.rollback(&conn);
     try testing.expect(conn.attachments.get(1).?.resync_pending);
-    try testing.expectEqualStrings(original, conn.attachments.get(1).?.base.?);
+    try testing.expectEqual(@as(?[]u8, null), conn.attachments.get(1).?.base);
 
     var accepted = (try conn.collectOutputForLocalStream(1)).?;
     const accepted_frames = accepted.takeFrames();

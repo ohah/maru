@@ -1859,6 +1859,44 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
   한다. 이 gate는 public CLI나 controller/takeover 권위, slow-client queue 정책을 P5b2/P5b3보다 먼저 완료 처리하지 않는다.
 - **P5b2 — bounded stream slots**: P4 `ConnectionSlot` cap/reserve/fairness를 multi-slot streaming에 적용한다.
   slow observer가 controller/PTY를 막지 않고 per-connection/global cap을 넘지 않는 것이 gate다.
+  - **P5b2a — retained/prepared base accounting (구현):** 제품 `poll_owner` 경로의 subscription screen
+    `base`, metadata `observation_base`, 교체 transaction의 `next_base`/`next_observation_base`를 outbound
+    queue와 같은 `ReactorCore.GlobalBudget`의 screen/shared class에 귀속한다. `Connection`은 별도 counter나
+    cap을 소유하지 않고 opaque reservation callback만 사용하며, 실제 authority는 stable
+    `ConnectionKey`+`ScreenTrackerKey`가 가리키는 reactor tracker 하나다. 한 subscription의 retained 합계는
+    `base.len + observation_base.len`, prepared 합계는 아직 commit되지 않은 두 replacement의 합계다.
+    producer와 initial attach는 최대 viewport snapshot 16 MiB와 control JSON 256 KiB의 합을 **projector 호출
+    전에** 원자 예약한다. 예약 실패는 큰 projection allocation을 시작하지 않으며 initial attach는 권위를
+    rollback하고 fail-close, 기존 stream producer는 해당 stream만 invalidation/backoff 경로로 보낸다.
+    initial attach의 reservation/control/snapshot admission 또는 snapshot projection 실패는 prepared와 attach
+    권위를 rollback하고 connection을 fail-close한다. valid delta projector의 OOM/cap 위반도 prepared를
+    rollback한 다음 connection을 fail-close한다. 반면 이미 invalidated된 stream의 resync snapshot producer
+    실패는 prepared를 rollback하고 `resync_pending`을 유지해 1초 backoff 뒤 재시도한다. 이 경로는 old retained
+    base가 이미 반환돼 반복 실패가 base memory를 pin하지 않는다. 같은 turn에 metadata prefix만 준비됐다면 그
+    prefix의 queue admission/commit은 허용하되 resync intent는 소비하지 않는다. observation barrier의 control
+    admission 실패는 response가 client에 도달하지 않았으므로 metadata base/revision을 rollback하고 shared
+    connection을 fail-close한다.
+    prepare 동안 old retained와 worst-case prepared를 모두 charge하고, 성공 commit은 prepared의 실제 길이만
+    retained로 전환하면서 old retained와 미사용 headroom을 반환한다. 기존 stream producer의 budget reservation
+    실패는 reservation 없이 해당 stream을 invalidate한다. reservation 성공 후 기존 stream의 screen queue
+    admission이 실패하면 prepared를 rollback한 뒤 해당 stream을 invalidate한다. invalidated stream은 ACK를 보내지 않는 slow
+    observer가 old base charge를 무기한 pin하지 않도록 delivery 권위를 잃은 screen/metadata retained base도
+    반환하고, fresh resync만 새 base를 commit한다.
+    detach, runtime-ended convergence, EOF/close는 해당 tracker의
+    retained/prepared를 queue purge와 함께 정확히 한 번 반환하고, stale/foreign tracker key는 회계를 바꾸지
+    않는다. slot/global cap과 control reserve는 queue와 base를 합친 물리 resident bytes에 적용하며,
+    `drainedForUpgrade`는 queue뿐 아니라 retained/prepared가 0이어야 true다. 한 transaction 상한은 screen
+    16 MiB + metadata 256 KiB다. connection별 steady retained는 이 generation 두 개, 물리 peak는 거기에
+    prepared generation 하나를 더한 값으로 제한한다. daemon 전역 shared steady ceiling은 control reserve와
+    prepared generation 하나의 16.25 MiB headroom을 항상 남기며 single poll owner만 그 headroom을 빌린다.
+    prepared 중 queue admission은 old retained reclaim을 반영하되 물리 hard cap을 넘지 않는다. Debug/ReleaseFast
+    `test-session-host`는 exact cap/cap+1, old+new 동시 charge, actual-size reconcile, commit/rollback,
+    initial attach preflight와 control/snapshot admission rollback, resync projector 실패, product observation
+    barrier, retained detach/EOF, 실제 slot 재사용 ABA와 sibling 격리를 검증한다.
+  - **P5b2b — slow observer isolation:** P5b2a의 통합 회계를 사용해 실제 slow observer의 queue/base
+    pressure가 그 observer만 invalidate/backoff시키고 controller input, PTY drain, sibling observer cadence를
+    멈추지 않는 product poll fixture와 bounded RSS/queue artifact를 추가한다. 이 gate 전에는 P5b2 전체를
+    구현 완료로 표시하지 않는다.
 - **P5b3 — controller/observer reactor**: observer/takeover protocol과 controller 전환을 hidden harness로 완성한다.
   P5a1의 reactor-wide upgrade drain에 controller/observer lease와 takeover/revocation state 검사를 추가해
   모든 capability lease가 0일 때만 upgrade outer loop로 넘기는 race gate를 추가한다. 아직 public

@@ -174,9 +174,11 @@ pub const UpgradeOwner = struct {
     pub fn ops(self: *UpgradeOwner) wire.Ops {
         return .{
             .ctx = self,
+            .probe_prepare = probePrepareOpaque,
             .stage_pending = stagePendingOpaque,
             .cancel_unaccepted = cancelUnacceptedOpaque,
             .arm_accepted = armAcceptedOpaque,
+            .abort_armed = abortArmedOpaque,
             .status = statusOpaque,
         };
     }
@@ -229,6 +231,24 @@ pub const UpgradeOwner = struct {
         return .accepted;
     }
 
+    pub fn probePrepare(
+        self: *const UpgradeOwner,
+        candidate: wire.PrepareRequest,
+    ) wire.PrepareProbe {
+        if (self.attempt) |attempt| {
+            if (!sameRequest(attempt, candidate)) return .conflict;
+            return .requires_preflight;
+        }
+        for (self.completed[0..self.completed_count]) |completed| {
+            if (completed.id != candidate.attempt_id) continue;
+            return if (completedMatches(completed, candidate))
+                .{ .completed = completed.report }
+            else
+                .conflict;
+        }
+        return .requires_preflight;
+    }
+
     pub fn cancelUnaccepted(self: *UpgradeOwner, attempt_id: u128) void {
         const attempt = if (self.attempt) |value| value else return;
         if (attempt.id != attempt_id or attempt.phase != .staged) return;
@@ -248,6 +268,20 @@ pub const UpgradeOwner = struct {
             .running, .finishing => return .conflict,
         }
         return .armed;
+    }
+
+    pub fn abortArmed(
+        self: *UpgradeOwner,
+        attempt_id: u128,
+        report: wire.AttemptReport,
+    ) bool {
+        const attempt = if (self.attempt) |*value| value else return false;
+        if (attempt.id != attempt_id or attempt.phase != .armed or
+            !reportAllowedForRole(attempt.restored_role, report) or
+            self.completed_count >= max_completed)
+            return false;
+        attempt.phase = .running;
+        return self.finish(attempt_id, report);
     }
 
     /// SocketServer가 connection cleanup 뒤 돌려준 exact marker와 owner의 armed state가 모두 맞을 때만 실행권을 한 번
@@ -597,6 +631,11 @@ pub const UpgradeOwner = struct {
         return self.stagePending(candidate);
     }
 
+    fn probePrepareOpaque(ctx: *anyopaque, candidate: wire.PrepareRequest) wire.PrepareProbe {
+        const self: *UpgradeOwner = @ptrCast(@alignCast(ctx));
+        return self.probePrepare(candidate);
+    }
+
     fn armAcceptedOpaque(ctx: *anyopaque, attempt_id: u128) wire.ArmDecision {
         const self: *UpgradeOwner = @ptrCast(@alignCast(ctx));
         return self.armAccepted(attempt_id);
@@ -605,6 +644,15 @@ pub const UpgradeOwner = struct {
     fn cancelUnacceptedOpaque(ctx: *anyopaque, attempt_id: u128) void {
         const self: *UpgradeOwner = @ptrCast(@alignCast(ctx));
         self.cancelUnaccepted(attempt_id);
+    }
+
+    fn abortArmedOpaque(
+        ctx: *anyopaque,
+        attempt_id: u128,
+        report: wire.AttemptReport,
+    ) bool {
+        const self: *UpgradeOwner = @ptrCast(@alignCast(ctx));
+        return self.abortArmed(attempt_id, report);
     }
 
     fn statusOpaque(ctx: *anyopaque, attempt_id: u128) ?wire.AttemptReport {
@@ -632,19 +680,40 @@ fn reportAllowedForRole(
 
 fn sameRequest(attempt: Attempt, candidate: wire.PrepareRequest) bool {
     return attempt.id == candidate.attempt_id and
-        std.mem.eql(u8, attempt.request_path, candidate.target_path) and
-        std.mem.eql(u8, attempt.target.build_id, candidate.target_build_id) and
-        std.mem.eql(u8, &attempt.target.artifact.sha256, &candidate.target_sha256) and
-        attempt.target.reader_min == candidate.handoff_reader_min and
-        attempt.target.reader_max == candidate.handoff_reader_max;
+        immutableRequestMatches(
+            attempt.request_path,
+            attempt.target.build_id,
+            attempt.target.artifact.sha256,
+            attempt.target.reader_min,
+            attempt.target.reader_max,
+            candidate,
+        );
 }
 
 fn completedMatches(completed: UpgradeOwner.Completed, candidate: wire.PrepareRequest) bool {
-    return std.mem.eql(u8, completed.request_path, candidate.target_path) and
-        std.mem.eql(u8, completed.build_id, candidate.target_build_id) and
-        std.mem.eql(u8, &completed.sha256, &candidate.target_sha256) and
-        completed.reader_min == candidate.handoff_reader_min and
-        completed.reader_max == candidate.handoff_reader_max;
+    return immutableRequestMatches(
+        completed.request_path,
+        completed.build_id,
+        completed.sha256,
+        completed.reader_min,
+        completed.reader_max,
+        candidate,
+    );
+}
+
+fn immutableRequestMatches(
+    request_path: []const u8,
+    build_id: []const u8,
+    sha256: [32]u8,
+    reader_min: u16,
+    reader_max: u16,
+    candidate: wire.PrepareRequest,
+) bool {
+    return std.mem.eql(u8, request_path, candidate.target_path) and
+        std.mem.eql(u8, build_id, candidate.target_build_id) and
+        std.mem.eql(u8, &sha256, &candidate.target_sha256) and
+        reader_min == candidate.handoff_reader_min and
+        reader_max == candidate.handoff_reader_max;
 }
 
 fn targetMatchesRecord(target: VerifiedTarget, state: attempt_record.State) bool {
@@ -821,6 +890,68 @@ test "upgrade owner stages atomically and enforces exact idempotency" {
     try std.testing.expectEqual(wire.PrepareDecision.conflict, owner.stagePending(testRequest(1, "/target-b")));
     try std.testing.expectEqual(wire.PrepareDecision.conflict, owner.stagePending(testRequest(2, "/target-a")));
     try std.testing.expectEqual(wire.AttemptStatus.pending, owner.status(1).?.status);
+}
+
+test "upgrade owner prepare probe compares every immutable field" {
+    var owner = UpgradeOwner.init(std.testing.allocator, TestStager.ops(), null);
+    defer owner.deinit();
+    const request = testRequest(61, "/target");
+    try std.testing.expectEqual(wire.PrepareDecision.accepted, owner.stagePending(request));
+    try std.testing.expect(owner.probePrepare(request) == .requires_preflight);
+
+    var mismatch = request;
+    mismatch.target_path = "/other";
+    try std.testing.expect(owner.probePrepare(mismatch) == .conflict);
+    mismatch = request;
+    mismatch.target_build_id = "sha256:other";
+    try std.testing.expect(owner.probePrepare(mismatch) == .conflict);
+    mismatch = request;
+    mismatch.target_sha256[0] ^= 0xFF;
+    try std.testing.expect(owner.probePrepare(mismatch) == .conflict);
+    mismatch = request;
+    mismatch.handoff_reader_min += 1;
+    try std.testing.expect(owner.probePrepare(mismatch) == .conflict);
+    mismatch = request;
+    mismatch.handoff_reader_max += 1;
+    try std.testing.expect(owner.probePrepare(mismatch) == .conflict);
+    try std.testing.expect(owner.probePrepare(testRequest(62, "/new")) == .conflict);
+
+    try std.testing.expectEqual(wire.ArmDecision.armed, owner.armAccepted(61));
+    _ = owner.beginExecution(61).?;
+    try std.testing.expect(owner.finish(61, .{ .status = .resumed, .reason = .exec_failed }));
+    try std.testing.expect(owner.probePrepare(request) == .completed);
+
+    mismatch = request;
+    mismatch.target_path = "/other";
+    try std.testing.expect(owner.probePrepare(mismatch) == .conflict);
+    mismatch = request;
+    mismatch.target_build_id = "sha256:other";
+    try std.testing.expect(owner.probePrepare(mismatch) == .conflict);
+    mismatch = request;
+    mismatch.target_sha256[0] ^= 0xFF;
+    try std.testing.expect(owner.probePrepare(mismatch) == .conflict);
+    mismatch = request;
+    mismatch.handoff_reader_min += 1;
+    try std.testing.expect(owner.probePrepare(mismatch) == .conflict);
+    mismatch = request;
+    mismatch.handoff_reader_max += 1;
+    try std.testing.expect(owner.probePrepare(mismatch) == .conflict);
+    try std.testing.expect(owner.probePrepare(testRequest(62, "/new")) == .requires_preflight);
+}
+
+test "upgrade owner aborts only exact armed attempt into terminal resume" {
+    var owner = UpgradeOwner.init(std.testing.allocator, TestStager.ops(), null);
+    defer owner.deinit();
+    const request = testRequest(63, "/target");
+    try std.testing.expectEqual(wire.PrepareDecision.accepted, owner.stagePending(request));
+    try std.testing.expect(!owner.abortArmed(63, .{ .status = .resumed, .reason = .handoff_failed }));
+    try std.testing.expectEqual(wire.ArmDecision.armed, owner.armAccepted(63));
+    try std.testing.expect(!owner.abortArmed(64, .{ .status = .resumed, .reason = .handoff_failed }));
+    try std.testing.expect(!owner.abortArmed(63, .{ .status = .committed, .reason = .none }));
+    try std.testing.expect(owner.abortArmed(63, .{ .status = .resumed, .reason = .handoff_failed }));
+    try std.testing.expectEqual(wire.AttemptStatus.resumed, owner.status(63).?.status);
+    try std.testing.expectEqual(wire.AttemptReason.handoff_failed, owner.status(63).?.reason);
+    try std.testing.expect(!owner.abortArmed(63, .{ .status = .resumed, .reason = .handoff_failed }));
 }
 
 test "upgrade owner disables new attempts through already-copied ops" {

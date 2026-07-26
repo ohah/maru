@@ -119,6 +119,13 @@ recorded hash/dev/inode 불일치로 commit하지 않고 rollback한다. 이를 
 같은 `attempt_id`와 같은 target identity 재요청은 같은 결과를 돌려주며, 같은 ID의 다른 target은
 `attempt_conflict`다. accepted는 upgrade 성공을 뜻하지 않는다.
 
+완료 attempt replay는 새 실행 예약이 아니라 read-only 결과 조회이므로 all-or-none preflight보다 먼저 분류한다.
+단, 이 우회는 `attempt_id`만 보지 않는다. owner가 보존한 요청 source path, target build ID, SHA-256,
+`handoff_reader_min`, `handoff_reader_max`가 모두 같은 경우에만 completed report를 돌려준다. 같은 ID에서 이
+immutable identity 중 하나라도 다르면 preflight·target staging을 건드리지 않고 `attempt_conflict`다. active
+attempt도 같은 ID·identity의 write retry만 기존 all-or-none preflight를 다시 통과하며, active attempt와 충돌하는
+다른 ID/identity는 read-only probe에서 `attempt_conflict`다. 알려지지 않은 신규 요청은 기존 preflight를 통과한다.
+
 `host.upgrade.status {attempt_id}`는 `pending | resumed | rolled_back | committed | failed_nonretryable`와 typed reason을
 돌려준다. client의 성공 판정은 EOF가 아니라 재접속한 `host.info`의 **같은 `host_id`**, target build/protocol,
 증가한 `upgrade_epoch`, exact runtime ID 집합이다. `resumed`/`rolled_back`은 원 target으로 자동 재시도하지 않으며
@@ -237,6 +244,16 @@ P5의 multi-fd reactor가 들어간 뒤 `active connection`은 accept-loop의 �
 slot 자체를 close/remove하고, queued mutation이 없는 unattached idle slot만 bounded close한다. partial request나
 queued reply가 있으면 idle로 간주하지 않고 `upgrade_busy`로 취소한다. 마지막에 controller/observer, slot,
 in-flight dispatch가 모두 0인지 다시 확인한 뒤에만 아래 quiesce로 넘긴다.
+
+accepted reply를 flush한 뒤 canonical client teardown이 final authority 0을 만들지 못하면 잔여 상태를 무시하고
+exec하지 않는다. subscription, runtime attachment, admin lease, active slot/client/producer가 남은 경우는 소유권
+원인을 증명할 수 없으므로 process fail-stop이다. 모든 connection authority는 0이고 빈 reactor의 aggregate budget
+counter만 남은 경우에 한해 slot table과 `ConnectionKey` allocator generation은 보존하고 aggregate budget만 empty
+값으로 canonical repair할 수 있다. key allocator를 재생성해 stale key가 새 slot과 ABA alias하게 만들지 않는다.
+repair와 closed-and-drained gate 검증이 성공하면 armed attempt를 `resumed/handoff_failed`로 terminal 기록하고
+strict preclosed admission gate를 다시 열어
+기존 PTY/runtime serving을 계속한다. terminal 기록 또는 gate reopen을 확정하지 못하면 역시 fail-stop이다. 이 경계는
+Debug assert나 ReleaseFast no-op에 의존하지 않고 두 최적화 모드에서 같은 typed 결과를 낸다.
 
 ## 7. Quiesce 계약
 

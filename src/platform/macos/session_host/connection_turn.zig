@@ -1052,9 +1052,11 @@ const TestUpgradeOwner = struct {
     fn ops(self: *@This()) upgrade_wire.Ops {
         return .{
             .ctx = self,
+            .probe_prepare = upgrade_wire.requiresPreflight,
             .stage_pending = stage,
             .cancel_unaccepted = cancel,
             .arm_accepted = arm,
+            .abort_armed = upgrade_wire.cannotAbortArmed,
             .status = status,
         };
     }

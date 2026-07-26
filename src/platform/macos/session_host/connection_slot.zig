@@ -1017,6 +1017,16 @@ pub const ReactorCore = struct {
             self.budget.prepared_reclaim_bytes == 0;
     }
 
+    /// Canonical slot teardown 뒤 aggregate counters만 drift한 경우의 upgrade rollback repair.
+    /// SlotTable/ConnectionKey allocator를 보존해 stale key가 다음 admission과 ABA alias하지 않게 한다.
+    pub fn repairEmptyBudget(self: *ReactorCore) bool {
+        if (self.table.active_count != 0) return false;
+        for (self.table.entries) |entry| if (entry.key != null) return false;
+        for (self.slots) |maybe_slot| if (maybe_slot != null) return false;
+        self.budget = .{};
+        return true;
+    }
+
     /// EOF/protocol error/timeout teardown. Unsent queue and tracker accounting are purged by Slot.deinit.
     pub fn closeConnection(self: *ReactorCore, admission: Admission) error{Stale}!void {
         const slot = try self.get(admission);
@@ -1475,6 +1485,34 @@ test "connection slot upgrade drain rejects queued partial attached and dispatch
     try slot.consumeWritten("queued".len);
     try reactor.closeIdleForUpgrade(admission);
     try std.testing.expect(gate.drained(reactor));
+}
+
+test "reactor empty budget repair preserves stale connection key ABA" {
+    const reactor = try ReactorCore.create(std.testing.allocator);
+    defer reactor.destroy();
+    const stale = try reactor.admit();
+    try reactor.closeConnection(stale);
+    for (0..4) |counter| {
+        switch (counter) {
+            0 => reactor.budget.resident_bytes = 1,
+            1 => reactor.budget.shared_bytes = 1,
+            2 => reactor.budget.prepared_base_bytes = 1,
+            3 => reactor.budget.prepared_reclaim_bytes = 1,
+            else => unreachable,
+        }
+        try std.testing.expect(reactor.repairEmptyBudget());
+        try std.testing.expect(reactor.drainedForUpgrade());
+    }
+
+    reactor.table.entries[0].key = .{ .monotonic_id = 999, .slot_generation = 999 };
+    try std.testing.expect(!reactor.repairEmptyBudget());
+    reactor.table.entries[0].key = null;
+
+    const current = try reactor.admit();
+    defer reactor.closeConnection(current) catch unreachable;
+    try std.testing.expectError(error.Stale, reactor.get(stale));
+    try std.testing.expect(!std.meta.eql(stale.key, current.key));
+    try std.testing.expect(!reactor.repairEmptyBudget());
 }
 
 test "reactor upgrade close cannot be fooled by an idle slot clone" {

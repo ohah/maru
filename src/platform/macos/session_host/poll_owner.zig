@@ -178,7 +178,14 @@ pub const Owner = struct {
             self.destroyClient(slot_index);
             if (marker) |armed| {
                 self.destroyAll();
-                if (!self.upgradeTeardownDrained()) return .listener_broken;
+                if (!self.upgradeTeardownDrained()) {
+                    if (self.repairEmptyUpgradeTeardown(armed)) return .progress;
+                    std.log.scoped(.session_host).err(
+                        "upgrade teardown retained non-repairable authority; refusing handoff",
+                        .{},
+                    );
+                    return .listener_broken;
+                }
                 self.armed_upgrade = armed;
                 return .upgrade_ready;
             }
@@ -251,6 +258,38 @@ pub const Owner = struct {
             self.admin_admission.active) return false;
         for (self.clients, self.producer_remaining) |maybe_client, remaining|
             if (maybe_client != null or remaining != 0) return false;
+        return true;
+    }
+
+    /// Canonical client teardown 뒤 connection authority는 모두 사라졌지만 empty reactor의 aggregate
+    /// counters만 남은 경우에만 key allocator를 보존한 채 aggregate budget을 고친다.
+    /// Subscription/attachment/admin/active authority를 추측해 지우거나 mid-drain exec하지 않는다.
+    fn repairEmptyUpgradeTeardown(
+        self: *Owner,
+        armed: connection_turn.ArmedUpgrade,
+    ) bool {
+        if (self.server.subscriptions.count() != 0 or
+            self.server.registry.attachmentCount() != 0 or
+            self.admin_admission.active or
+            self.reactor.activeCount() != 0) return false;
+        for (self.clients, self.producer_remaining) |maybe_client, remaining|
+            if (maybe_client != null or remaining != 0) return false;
+
+        const ops = self.server.upgrade_ops orelse return false;
+        const gate = self.server.admission_gate orelse return false;
+        if (!gate.closedAndDrained()) return false;
+        if (!self.reactor.repairEmptyBudget()) return false;
+        if (!self.upgradeTeardownDrained()) return false;
+        if (!ops.abort_armed(ops.ctx, armed.attempt_id, .{
+            .status = .resumed,
+            .reason = .handoff_failed,
+        })) return false;
+        gate.reopen();
+        self.syncClientCount();
+        std.log.scoped(.session_host).warn(
+            "repaired empty upgrade reactor accounting and resumed serving",
+            .{},
+        );
         return true;
     }
 
@@ -358,6 +397,7 @@ const testing = std.testing;
 const framing = @import("framing.zig");
 const protocol = @import("protocol.zig");
 const registry = @import("registry.zig");
+const subscription_identity = @import("subscription_identity.zig");
 const upgrade = @import("upgrade_coordinator.zig");
 const upgrade_wire = @import("upgrade_wire.zig");
 
@@ -1117,6 +1157,8 @@ const TestUpgradeOwner = struct {
     attempt_id: u128 = 0,
     staged: usize = 0,
     armed: usize = 0,
+    aborted: usize = 0,
+    abort_reject: bool = false,
     canceled: usize = 0,
     reject_next: bool = false,
 
@@ -1145,16 +1187,141 @@ const TestUpgradeOwner = struct {
         if (self.attempt_id != attempt_id) return null;
         return .{ .status = .pending };
     }
+    fn abortArmed(
+        ctx: *anyopaque,
+        attempt_id: u128,
+        report: upgrade_wire.AttemptReport,
+    ) bool {
+        const self: *@This() = @ptrCast(@alignCast(ctx));
+        if (self.abort_reject or self.attempt_id != attempt_id or self.armed == 0 or
+            report.status != .resumed or report.reason != .handoff_failed) return false;
+        self.aborted += 1;
+        return true;
+    }
     fn ops(self: *@This()) upgrade_wire.Ops {
         return .{
             .ctx = self,
+            .probe_prepare = upgrade_wire.requiresPreflight,
             .stage_pending = stage,
             .cancel_unaccepted = cancel,
             .arm_accepted = arm,
+            .abort_armed = abortArmed,
             .status = status,
         };
     }
 };
+
+test "poll owner repairs only empty reactor accounting and strictly reopens gate" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir_len = try tmp.dir.realPath(testing.io, &dir_buf);
+    const dir_raw = dir_buf[0..dir_len];
+    const dir_path = try testing.allocator.dupeZ(u8, dir_raw);
+    defer testing.allocator.free(dir_path);
+    const socket_path = try std.fmt.allocPrintSentinel(
+        testing.allocator,
+        "{s}/upgrade-repair.sock",
+        .{dir_raw},
+        0,
+    );
+    defer testing.allocator.free(socket_path);
+    var runtime_registry = registry.TerminalRuntimeRegistry.init(testing.allocator);
+    defer runtime_registry.deinit();
+    _ = try runtime_registry.register(0xAA, 80, 24);
+    var server = try socket_server.SocketServer.bind(
+        testing.allocator,
+        dir_path,
+        socket_path,
+        0xCD,
+        &runtime_registry,
+    );
+    defer server.deinit();
+    var gate = upgrade.AdmissionGate.init(testing.io);
+    server.admission_gate = &gate;
+    var upgrade_owner: TestUpgradeOwner = .{ .attempt_id = 0x77, .armed = 1 };
+    server.upgrade_ops = upgrade_owner.ops();
+    var owner = try Owner.init(testing.allocator, testing.io, &server);
+    defer owner.deinit();
+
+    try testing.expect(gate.close());
+    owner.reactor.budget.resident_bytes = 1;
+    try testing.expect(owner.repairEmptyUpgradeTeardown(.{ .attempt_id = 0x77 }));
+    try testing.expectEqual(@as(usize, 1), upgrade_owner.aborted);
+    try testing.expect(owner.reactor.drainedForUpgrade());
+    try testing.expect(gate.snapshot().open);
+    try testing.expect(runtime_registry.get(0xAA) != null);
+    const resumed_admission = try owner.reactor.admit();
+    try owner.reactor.closeConnection(resumed_admission);
+
+    try testing.expect(gate.close());
+    owner.reactor.budget.shared_bytes = 1;
+    owner.admin_admission.active = true;
+    try testing.expect(!owner.repairEmptyUpgradeTeardown(.{ .attempt_id = 0x77 }));
+    try testing.expectEqual(@as(usize, 1), upgrade_owner.aborted);
+    try testing.expect(!gate.snapshot().open);
+    owner.admin_admission.active = false;
+    owner.reactor.budget = .{};
+    gate.reopen();
+
+    try testing.expect(gate.close());
+    owner.reactor.budget.resident_bytes = 1;
+    const local_key: connection_slot.ConnectionKey = .{ .monotonic_id = 41, .slot_generation = 1 };
+    _ = try server.subscriptions.register(.{ .connection = local_key, .stream_id = 1 }, 0xAA);
+    try testing.expect(!owner.repairEmptyUpgradeTeardown(.{ .attempt_id = 0x77 }));
+    try testing.expectEqual(@as(usize, 1), upgrade_owner.aborted);
+    _ = server.subscriptions.revokeConnection(local_key);
+    owner.reactor.budget = .{};
+    gate.reopen();
+
+    try testing.expect(gate.close());
+    owner.reactor.budget.resident_bytes = 1;
+    const orphan_subscription: subscription_identity.SubscriptionId = .{ .value = 99 };
+    _ = try runtime_registry.attachSubscription(0xAA, orphan_subscription, .observer);
+    try testing.expect(!owner.repairEmptyUpgradeTeardown(.{ .attempt_id = 0x77 }));
+    try testing.expectEqual(@as(usize, 1), upgrade_owner.aborted);
+    _ = try runtime_registry.detachSubscription(0xAA, orphan_subscription);
+    owner.reactor.budget = .{};
+    gate.reopen();
+
+    try testing.expect(gate.close());
+    owner.reactor.budget.resident_bytes = 1;
+    const active = try owner.reactor.admit();
+    try testing.expect(!owner.repairEmptyUpgradeTeardown(.{ .attempt_id = 0x77 }));
+    try testing.expectEqual(@as(usize, 1), upgrade_owner.aborted);
+    try owner.reactor.closeConnection(active);
+    owner.reactor.budget = .{};
+    gate.reopen();
+
+    try testing.expect(gate.close());
+    owner.reactor.budget.resident_bytes = 1;
+    owner.producer_remaining[0] = 1;
+    try testing.expect(!owner.repairEmptyUpgradeTeardown(.{ .attempt_id = 0x77 }));
+    try testing.expectEqual(@as(usize, 1), upgrade_owner.aborted);
+    owner.producer_remaining[0] = 0;
+    owner.reactor.budget = .{};
+    gate.reopen();
+
+    var lease = gate.tryEnter().?;
+    try testing.expect(gate.close());
+    owner.reactor.budget.resident_bytes = 1;
+    try testing.expect(!owner.repairEmptyUpgradeTeardown(.{ .attempt_id = 0x77 }));
+    try testing.expectEqual(@as(usize, 1), upgrade_owner.aborted);
+    lease.release();
+    owner.reactor.budget = .{};
+    gate.reopen();
+
+    try testing.expect(gate.close());
+    owner.reactor.budget.resident_bytes = 1;
+    upgrade_owner.abort_reject = true;
+    try testing.expect(!owner.repairEmptyUpgradeTeardown(.{ .attempt_id = 0x77 }));
+    try testing.expectEqual(@as(usize, 1), upgrade_owner.aborted);
+    try testing.expect(owner.reactor.drainedForUpgrade());
+    try testing.expect(!gate.snapshot().open);
+    upgrade_owner.abort_reject = false;
+    gate.reopen();
+}
 
 test "poll owner drains every client before publishing typed preclosed upgrade marker" {
     if (@import("builtin").os.tag != .macos) return error.SkipZigTest;

@@ -374,9 +374,11 @@ test "host authority adapter CASes restoring and rollback through one disk and w
     };
     authority.installUpgradeController(.{
         .ctx = @ptrFromInt(1),
+        .probe_prepare = upgrade_wire.requiresPreflight,
         .stage_pending = FakeUpgrade.stage,
         .cancel_unaccepted = FakeUpgrade.cancel,
         .arm_accepted = FakeUpgrade.arm,
+        .abort_armed = upgrade_wire.cannotAbortArmed,
         .status = FakeUpgrade.status,
     });
     try std.testing.expect(server.host_status.upgrade_capable);
@@ -444,9 +446,11 @@ test "host authority adapter CASes restoring and rollback through one disk and w
     try std.testing.expect(server.upgrade_ops == null);
     authority.installUpgradeStatusOnly(.{
         .ctx = @ptrFromInt(1),
+        .probe_prepare = upgrade_wire.requiresPreflight,
         .stage_pending = FakeUpgrade.stage,
         .cancel_unaccepted = FakeUpgrade.cancel,
         .arm_accepted = FakeUpgrade.arm,
+        .abort_armed = upgrade_wire.cannotAbortArmed,
         .status = FakeUpgrade.status,
     });
     try std.testing.expect(!server.host_status.upgrade_capable);

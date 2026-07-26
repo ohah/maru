@@ -1,0 +1,926 @@
+//! P5b2b2 독립 session-host PTY/RSS artifact의 fail-closed validator.
+//!
+//! 이 도구가 raw sample부터 요약과 분석 상한을 다시 계산하는 이유는 producer가 같은 잘못된 값을
+//! summary와 pass boolean에 함께 기록하는 false-green을 막기 위해서다. Typed JSON decode의 기본
+//! duplicate/unknown/missing-field 거부를 유지해 artifact schema 자체도 완료 gate로 고정한다.
+
+const std = @import("std");
+const connection_slot = @import("connection_slot");
+
+const schema_name = "maru.session-host-slow-observer-macos.v1";
+const scenario_name = "slow-observer-real-pty-rss";
+const build_mode = "ReleaseFast";
+const sample_api = "proc_pid_rusage:RUSAGE_INFO_V4";
+
+const mib: u64 = 1024 * 1024;
+const workload_bytes_per_iteration: u64 = 2 * mib;
+const workload_iterations_max: u64 = 8;
+const marker_input_bytes: u64 = 33; // 128-bit nonce의 lowercase hex 32 byte + LF.
+const baseline_sample_count: usize = 10;
+const pressure_sample_count_min: usize = 20;
+const pressure_sample_count_max: usize = 4096;
+const post_drain_sample_count: usize = 10;
+const sample_target_interval_ms: u64 = 20;
+const sample_gap_max_ms: u64 = 100;
+const sample_gap_max_ns: u64 = sample_gap_max_ms * std.time.ns_per_ms;
+const deadline_ms: u64 = 30_000;
+
+const base_update_max_bytes: u64 = connection_slot.base_update_max_bytes;
+const projection_transient_cap_bytes: u64 = 2 * base_update_max_bytes;
+const allocator_slack_bytes: u64 = 64 * mib;
+const global_ledger_cap_bytes: u64 = connection_slot.global_bytes;
+const shared_ledger_cap_bytes: u64 = connection_slot.shared_hard_bytes;
+const per_slot_bytes: u64 = connection_slot.per_slot_bytes;
+const base_per_slot_bytes: u64 = connection_slot.base_per_slot_bytes;
+const total_per_slot_bytes: u64 = connection_slot.total_per_slot_bytes;
+
+const RawSample = struct {
+    monotonic_ns: u64,
+    pid: u32,
+    uid: u32,
+    start_tvsec: u64,
+    start_tvusec: u32,
+    ri_resident_size: u64,
+    ri_phys_footprint: u64,
+    ri_proc_start_abstime: u64,
+};
+
+/// Flat top-level fields make the artifact easy to inspect in CI while RawSample remains a typed
+/// nested object. No field has a default: absent fields fail parsing, as do duplicate/unknown keys.
+const Artifact = struct {
+    schema: []const u8,
+    scenario: []const u8,
+    build_mode: []const u8,
+    sample_api: []const u8,
+    run_nonce_hex: []const u8,
+
+    host_pid: u32,
+    host_uid: u32,
+    host_start_tvsec: u64,
+    host_start_tvusec: u32,
+    host_ri_proc_start_abstime: u64,
+    local_peer_pid: u32,
+    waitpid_pid: u32,
+    pty_child_pid: u32,
+    pty_child_uid: u32,
+    pty_child_start_tvsec: u64,
+    pty_child_start_tvusec: u32,
+    pty_child_ppid: u32,
+    pty_child_identity_rechecked: bool,
+    pty_probe_fds_closed: bool,
+
+    controller_clients: u32,
+    slow_observer_clients: u32,
+    healthy_observer_clients: u32,
+    total_admitted: u32,
+    stale_admission_count: u32,
+    slow_connection_id: u64,
+    first_stall_connection_id: u64,
+    effective_host_send_buffer_bytes: u64,
+    effective_slow_receive_buffer_bytes: u64,
+
+    workload_iterations: u64,
+    workload_bytes_per_iteration: u64,
+    pressure_generated_bytes: u64,
+    marker_input_bytes: u64,
+    baseline_pty_output_bytes: u64,
+    final_pty_output_bytes: u64,
+    pty_produced_bytes: u64,
+    healthy_drained_bytes: u64,
+
+    slow_eagain_count: u64,
+    slow_pollout_absent_count: u64,
+    stall_at_ns: u64,
+    controller_input_at_ns: u64,
+    healthy_marker_at_ns: u64,
+    healthy_progress_batches_before: u64,
+    healthy_progress_batches_after: u64,
+    baseline_reset_ack: bool,
+    healthy_marker_matches_nonce: bool,
+
+    sample_target_interval_ms: u64,
+    sample_gap_max_ms: u64,
+    baseline_samples: []const RawSample,
+    pressure_samples: []const RawSample,
+    post_drain_samples: []const RawSample,
+
+    baseline_rss_bytes: u64,
+    peak_rss_bytes: u64,
+    run_peak_rss_bytes: u64,
+    post_drain_rss_bytes: u64,
+    peak_delta_bytes: u64,
+    run_peak_delta_bytes: u64,
+    post_drain_delta_bytes: u64,
+
+    baseline_ledger_resident_bytes: u64,
+    global_ledger_cap_bytes: u64,
+    projection_transient_cap_bytes: u64,
+    allocator_slack_bytes: u64,
+    analytic_cap_bytes: u64,
+
+    peak_ledger_resident_bytes: u64,
+    peak_ledger_shared_bytes: u64,
+    peak_ledger_prepared_base_bytes: u64,
+    peak_ledger_prepared_reclaim_bytes: u64,
+    peak_ledger_slot_queue_bytes: u64,
+    peak_ledger_slot_base_bytes: u64,
+    peak_ledger_slot_control_bytes: u64,
+    peak_ledger_slot_total_bytes: u64,
+
+    final_ledger_resident_bytes: u64,
+    final_ledger_shared_bytes: u64,
+    final_ledger_prepared_base_bytes: u64,
+    final_ledger_prepared_reclaim_bytes: u64,
+
+    deadline_ms: u64,
+    elapsed_ms: u64,
+    child_reaped: bool,
+    child_exit_status: i32,
+    client_fds_closed: u32,
+    final_active_clients: u32,
+    host_graceful_stop: bool,
+    host_reaped: bool,
+    host_exit_status: i32,
+    socket_removed: bool,
+    directory_removed: bool,
+};
+
+const ValidationError = error{
+    InvalidJsonSchema,
+    InvalidIdentity,
+    InvalidNonce,
+    InvalidRoleCount,
+    InvalidSocketBuffer,
+    InvalidWorkload,
+    MissingStallEvidence,
+    InvalidProgress,
+    InvalidSampleCount,
+    InvalidSampleInterval,
+    InvalidSample,
+    IdentityChanged,
+    TimestampOrder,
+    SummaryMismatch,
+    LedgerCapExceeded,
+    LedgerFormulaMismatch,
+    RssCapExceeded,
+    FinalLedgerNotZero,
+    DeadlineExceeded,
+    CleanupIncomplete,
+};
+
+fn checkedAdd(a: u64, b: u64) ValidationError!u64 {
+    return std.math.add(u64, a, b) catch error.LedgerFormulaMismatch;
+}
+
+fn checkedMul(a: u64, b: u64) ValidationError!u64 {
+    return std.math.mul(u64, a, b) catch error.InvalidWorkload;
+}
+
+fn isLowerHex128(value: []const u8) bool {
+    if (value.len != 32) return false;
+    for (value) |ch| {
+        if (!std.ascii.isDigit(ch) and !(ch >= 'a' and ch <= 'f')) return false;
+    }
+    return true;
+}
+
+fn sameIdentity(sample: RawSample, artifact: Artifact) bool {
+    return sample.pid == artifact.host_pid and
+        sample.uid == artifact.host_uid and
+        sample.start_tvsec == artifact.host_start_tvsec and
+        sample.start_tvusec == artifact.host_start_tvusec and
+        sample.ri_proc_start_abstime == artifact.host_ri_proc_start_abstime;
+}
+
+fn validateSamples(
+    artifact: Artifact,
+    samples: []const RawSample,
+    max_interval_ns: ?u64,
+) ValidationError!void {
+    var previous_ns: ?u64 = null;
+    for (samples) |sample| {
+        if (sample.monotonic_ns == 0 or sample.pid == 0 or sample.start_tvsec == 0 or
+            sample.start_tvusec >= std.time.us_per_s or
+            sample.ri_resident_size == 0 or sample.ri_phys_footprint == 0 or
+            sample.ri_proc_start_abstime == 0)
+        {
+            return error.InvalidSample;
+        }
+        if (!sameIdentity(sample, artifact)) return error.IdentityChanged;
+        if (previous_ns) |previous| {
+            if (sample.monotonic_ns <= previous) return error.TimestampOrder;
+            if (max_interval_ns) |limit| {
+                if (sample.monotonic_ns - previous > limit) return error.InvalidSampleInterval;
+            }
+        }
+        previous_ns = sample.monotonic_ns;
+    }
+}
+
+fn rssMedian(allocator: std.mem.Allocator, samples: []const RawSample) !u64 {
+    const values = try allocator.alloc(u64, samples.len);
+    defer allocator.free(values);
+    for (samples, values) |sample, *value| value.* = sample.ri_resident_size;
+    std.mem.sort(u64, values, {}, std.sort.asc(u64));
+    const upper = values[values.len / 2];
+    if (values.len % 2 == 1) return upper;
+    const lower = values[values.len / 2 - 1];
+    // Difference-first average avoids overflow while keeping the integer artifact deterministic.
+    return lower + (upper - lower) / 2;
+}
+
+fn rssMax(samples: []const RawSample) u64 {
+    var result: u64 = 0;
+    for (samples) |sample| result = @max(result, sample.ri_resident_size);
+    return result;
+}
+
+fn validateArtifact(allocator: std.mem.Allocator, artifact: Artifact) !void {
+    if (!std.mem.eql(u8, artifact.schema, schema_name) or
+        !std.mem.eql(u8, artifact.scenario, scenario_name) or
+        !std.mem.eql(u8, artifact.build_mode, build_mode) or
+        !std.mem.eql(u8, artifact.sample_api, sample_api))
+    {
+        return error.InvalidIdentity;
+    }
+    if (!isLowerHex128(artifact.run_nonce_hex)) return error.InvalidNonce;
+    if (artifact.host_pid == 0 or artifact.local_peer_pid != artifact.host_pid or
+        artifact.waitpid_pid != artifact.host_pid or artifact.pty_child_pid == 0 or
+        artifact.host_pid == artifact.pty_child_pid or artifact.host_start_tvsec == 0 or
+        artifact.host_start_tvusec >= std.time.us_per_s or
+        artifact.host_ri_proc_start_abstime == 0)
+    {
+        return error.InvalidIdentity;
+    }
+    if (artifact.pty_child_uid != artifact.host_uid or
+        artifact.pty_child_start_tvsec == 0 or
+        artifact.pty_child_start_tvusec >= std.time.us_per_s or
+        artifact.pty_child_ppid != artifact.host_pid or
+        !artifact.pty_child_identity_rechecked or
+        !artifact.pty_probe_fds_closed)
+    {
+        return error.InvalidIdentity;
+    }
+    if (artifact.controller_clients != 1 or artifact.slow_observer_clients != 1 or
+        artifact.healthy_observer_clients != 1 or artifact.total_admitted != 3 or
+        artifact.stale_admission_count != 0)
+    {
+        return error.InvalidRoleCount;
+    }
+    if (artifact.slow_connection_id == 0 or
+        artifact.slow_connection_id != artifact.first_stall_connection_id)
+    {
+        return error.MissingStallEvidence;
+    }
+    if (artifact.effective_host_send_buffer_bytes == 0 or
+        artifact.effective_slow_receive_buffer_bytes == 0)
+    {
+        return error.InvalidSocketBuffer;
+    }
+
+    if (artifact.workload_iterations == 0 or
+        artifact.workload_iterations > workload_iterations_max or
+        artifact.workload_bytes_per_iteration == 0 or
+        artifact.workload_bytes_per_iteration > workload_bytes_per_iteration)
+    {
+        return error.InvalidWorkload;
+    }
+    const payload_bytes = try checkedMul(
+        artifact.workload_iterations,
+        artifact.workload_bytes_per_iteration,
+    );
+    if (artifact.pressure_generated_bytes != payload_bytes or
+        artifact.marker_input_bytes != marker_input_bytes)
+    {
+        return error.InvalidWorkload;
+    }
+    const total_generated = std.math.add(
+        u64,
+        artifact.pressure_generated_bytes,
+        artifact.marker_input_bytes,
+    ) catch return error.InvalidWorkload;
+    if (artifact.final_pty_output_bytes < artifact.baseline_pty_output_bytes or
+        artifact.pty_produced_bytes !=
+            artifact.final_pty_output_bytes - artifact.baseline_pty_output_bytes or
+        artifact.pty_produced_bytes != total_generated or
+        artifact.healthy_drained_bytes == 0)
+    {
+        return error.InvalidWorkload;
+    }
+    const stall_evidence_count = std.math.add(
+        u64,
+        artifact.slow_eagain_count,
+        artifact.slow_pollout_absent_count,
+    ) catch return error.MissingStallEvidence;
+    if (stall_evidence_count == 0) return error.MissingStallEvidence;
+    if (!(artifact.stall_at_ns < artifact.controller_input_at_ns and
+        artifact.controller_input_at_ns < artifact.healthy_marker_at_ns) or
+        artifact.healthy_progress_batches_after <=
+            artifact.healthy_progress_batches_before or
+        !artifact.baseline_reset_ack or !artifact.healthy_marker_matches_nonce)
+    {
+        return error.InvalidProgress;
+    }
+
+    if (artifact.sample_target_interval_ms != sample_target_interval_ms or
+        artifact.sample_gap_max_ms != sample_gap_max_ms)
+    {
+        return error.InvalidSampleInterval;
+    }
+    if (artifact.baseline_samples.len != baseline_sample_count or
+        artifact.pressure_samples.len < pressure_sample_count_min or
+        artifact.pressure_samples.len > pressure_sample_count_max or
+        artifact.post_drain_samples.len != post_drain_sample_count)
+    {
+        return error.InvalidSampleCount;
+    }
+    try validateSamples(artifact, artifact.baseline_samples, sample_gap_max_ns);
+    try validateSamples(artifact, artifact.pressure_samples, sample_gap_max_ns);
+    try validateSamples(artifact, artifact.post_drain_samples, sample_gap_max_ns);
+
+    const baseline_last = artifact.baseline_samples[artifact.baseline_samples.len - 1].monotonic_ns;
+    const pressure_first = artifact.pressure_samples[0].monotonic_ns;
+    const pressure_last = artifact.pressure_samples[artifact.pressure_samples.len - 1].monotonic_ns;
+    const post_first = artifact.post_drain_samples[0].monotonic_ns;
+    if (!(baseline_last < pressure_first and pressure_last < post_first and
+        pressure_first <= artifact.stall_at_ns and
+        artifact.healthy_marker_at_ns <= pressure_last and
+        artifact.healthy_marker_at_ns < post_first))
+    {
+        return error.TimestampOrder;
+    }
+    var sampled_between_stall_and_marker = false;
+    for (artifact.pressure_samples) |sample| {
+        if (artifact.stall_at_ns < sample.monotonic_ns and
+            sample.monotonic_ns < artifact.healthy_marker_at_ns)
+        {
+            sampled_between_stall_and_marker = true;
+            break;
+        }
+    }
+    if (!sampled_between_stall_and_marker) return error.InvalidSampleCount;
+
+    const baseline = try rssMedian(allocator, artifact.baseline_samples);
+    const peak = rssMax(artifact.pressure_samples);
+    const post_drain = try rssMedian(allocator, artifact.post_drain_samples);
+    const run_peak = @max(peak, @max(
+        rssMax(artifact.baseline_samples),
+        rssMax(artifact.post_drain_samples),
+    ));
+    const peak_delta = peak -| baseline;
+    const run_peak_delta = run_peak -| baseline;
+    const post_drain_delta = post_drain -| baseline;
+    if (artifact.baseline_rss_bytes != baseline or artifact.peak_rss_bytes != peak or
+        artifact.run_peak_rss_bytes != run_peak or
+        artifact.post_drain_rss_bytes != post_drain or
+        artifact.peak_delta_bytes != peak_delta or
+        artifact.run_peak_delta_bytes != run_peak_delta or
+        artifact.post_drain_delta_bytes != post_drain_delta)
+    {
+        return error.SummaryMismatch;
+    }
+
+    if (artifact.global_ledger_cap_bytes != global_ledger_cap_bytes or
+        artifact.projection_transient_cap_bytes != projection_transient_cap_bytes or
+        artifact.allocator_slack_bytes != allocator_slack_bytes)
+    {
+        return error.LedgerCapExceeded;
+    }
+    if (artifact.baseline_ledger_resident_bytes > artifact.peak_ledger_resident_bytes)
+        return error.LedgerFormulaMismatch;
+    const ledger_delta =
+        artifact.peak_ledger_resident_bytes - artifact.baseline_ledger_resident_bytes;
+    const expected_cap = try checkedAdd(
+        try checkedAdd(ledger_delta, projection_transient_cap_bytes),
+        allocator_slack_bytes,
+    );
+    if (artifact.analytic_cap_bytes != expected_cap) return error.LedgerFormulaMismatch;
+
+    if (artifact.peak_ledger_resident_bytes > global_ledger_cap_bytes or
+        artifact.peak_ledger_shared_bytes > shared_ledger_cap_bytes or
+        artifact.peak_ledger_prepared_base_bytes > base_update_max_bytes or
+        artifact.peak_ledger_prepared_reclaim_bytes > shared_ledger_cap_bytes or
+        artifact.peak_ledger_slot_queue_bytes > per_slot_bytes or
+        artifact.peak_ledger_slot_base_bytes > base_per_slot_bytes or
+        // 512 KiB is a guaranteed control reserve, not the control queue's hard ceiling.
+        artifact.peak_ledger_slot_control_bytes > per_slot_bytes or
+        artifact.peak_ledger_slot_total_bytes > total_per_slot_bytes or
+        artifact.peak_ledger_shared_bytes > artifact.peak_ledger_resident_bytes or
+        artifact.peak_ledger_prepared_base_bytes > artifact.peak_ledger_shared_bytes or
+        artifact.peak_ledger_prepared_reclaim_bytes > artifact.peak_ledger_shared_bytes or
+        artifact.peak_ledger_slot_control_bytes > artifact.peak_ledger_slot_queue_bytes or
+        artifact.peak_ledger_slot_total_bytes < artifact.peak_ledger_slot_queue_bytes or
+        artifact.peak_ledger_slot_total_bytes < artifact.peak_ledger_slot_base_bytes or
+        artifact.peak_ledger_slot_total_bytes >
+            try checkedAdd(
+                artifact.peak_ledger_slot_queue_bytes,
+                artifact.peak_ledger_slot_base_bytes,
+            ))
+    {
+        return error.LedgerCapExceeded;
+    }
+    if (run_peak_delta > artifact.analytic_cap_bytes or
+        post_drain_delta > artifact.analytic_cap_bytes)
+    {
+        return error.RssCapExceeded;
+    }
+
+    if (artifact.final_ledger_resident_bytes != 0 or
+        artifact.final_ledger_shared_bytes != 0 or
+        artifact.final_ledger_prepared_base_bytes != 0 or
+        artifact.final_ledger_prepared_reclaim_bytes != 0)
+    {
+        return error.FinalLedgerNotZero;
+    }
+    if (artifact.deadline_ms != deadline_ms or
+        artifact.elapsed_ms == 0 or artifact.elapsed_ms > deadline_ms)
+        return error.DeadlineExceeded;
+    if (!artifact.child_reaped or artifact.child_exit_status != 0 or
+        artifact.client_fds_closed != 3 or artifact.final_active_clients != 0 or
+        !artifact.host_graceful_stop or
+        !artifact.host_reaped or artifact.host_exit_status != 0 or
+        !artifact.socket_removed or !artifact.directory_removed)
+    {
+        return error.CleanupIncomplete;
+    }
+}
+
+fn validateBytes(allocator: std.mem.Allocator, bytes: []const u8) !void {
+    var parsed = std.json.parseFromSlice(Artifact, allocator, bytes, .{
+        .duplicate_field_behavior = .@"error",
+        .ignore_unknown_fields = false,
+    }) catch return error.InvalidJsonSchema;
+    defer parsed.deinit();
+    try validateArtifact(allocator, parsed.value);
+}
+
+pub fn main(init: std.process.Init) !void {
+    const io = init.io;
+    const allocator = init.gpa;
+    var stderr_buffer: [4096]u8 = undefined;
+    var stderr_file_writer: std.Io.File.Writer = .init(.stderr(), io, &stderr_buffer);
+    const stderr = &stderr_file_writer.interface;
+
+    var args = try init.minimal.args.iterateAllocator(allocator);
+    defer args.deinit();
+    _ = args.next();
+    const path = args.next() orelse return usage(stderr);
+    if (args.next() != null) return usage(stderr);
+
+    const bytes = std.Io.Dir.cwd().readFileAlloc(
+        io,
+        path,
+        allocator,
+        .limited(4 * 1024 * 1024),
+    ) catch |err| {
+        try stderr.print("artifact 읽기 실패 '{s}' ({s})\n", .{ path, @errorName(err) });
+        try stderr.flush();
+        std.process.exit(1);
+    };
+    defer allocator.free(bytes);
+
+    validateBytes(allocator, bytes) catch |err| {
+        try stderr.print(
+            "session-host slow-observer artifact 검증 실패 '{s}': {s}\n",
+            .{ path, @errorName(err) },
+        );
+        try stderr.flush();
+        std.process.exit(1);
+    };
+}
+
+fn usage(stderr: *std.Io.Writer) !void {
+    try stderr.writeAll(
+        "usage: session-host-slow-observer-validator <session-host-slow-observer-macos.json>\n",
+    );
+    try stderr.flush();
+    std.process.exit(2);
+}
+
+// ---- TDD fixtures: producer summary를 신뢰하지 않고 raw/identity/formula를 각각 깨뜨린다. ----
+
+const testing = std.testing;
+
+fn sampleSeries(
+    comptime count: usize,
+    start_ns: u64,
+    interval_ns: u64,
+    resident: u64,
+) [count]RawSample {
+    var result: [count]RawSample = undefined;
+    for (&result, 0..) |*sample, index| {
+        sample.* = .{
+            .monotonic_ns = start_ns + index * interval_ns,
+            .pid = 100,
+            .uid = 501,
+            .start_tvsec = 1234,
+            .start_tvusec = 5678,
+            .ri_resident_size = resident,
+            .ri_phys_footprint = resident - 1024,
+            .ri_proc_start_abstime = 999,
+        };
+    }
+    return result;
+}
+
+const baseline_fixture = sampleSeries(10, 1_000_000_000, 20_000_000, 100_000_000);
+const pressure_fixture = sampleSeries(20, 1_200_000_000, 10_000_000, 120_000_000);
+const post_fixture = sampleSeries(10, 1_500_000_000, 20_000_000, 110_000_000);
+
+fn goodArtifact() Artifact {
+    return .{
+        .schema = schema_name,
+        .scenario = scenario_name,
+        .build_mode = build_mode,
+        .sample_api = sample_api,
+        .run_nonce_hex = "0123456789abcdef0123456789abcdef",
+        .host_pid = 100,
+        .host_uid = 501,
+        .host_start_tvsec = 1234,
+        .host_start_tvusec = 5678,
+        .host_ri_proc_start_abstime = 999,
+        .local_peer_pid = 100,
+        .waitpid_pid = 100,
+        .pty_child_pid = 101,
+        .pty_child_uid = 501,
+        .pty_child_start_tvsec = 1235,
+        .pty_child_start_tvusec = 6789,
+        .pty_child_ppid = 100,
+        .pty_child_identity_rechecked = true,
+        .pty_probe_fds_closed = true,
+        .controller_clients = 1,
+        .slow_observer_clients = 1,
+        .healthy_observer_clients = 1,
+        .total_admitted = 3,
+        .stale_admission_count = 0,
+        .slow_connection_id = 22,
+        .first_stall_connection_id = 22,
+        .effective_host_send_buffer_bytes = 131_072,
+        .effective_slow_receive_buffer_bytes = 131_072,
+        .workload_iterations = 1,
+        .workload_bytes_per_iteration = workload_bytes_per_iteration,
+        .pressure_generated_bytes = workload_bytes_per_iteration,
+        .marker_input_bytes = marker_input_bytes,
+        .baseline_pty_output_bytes = 4096,
+        .final_pty_output_bytes = 4096 + workload_bytes_per_iteration + marker_input_bytes,
+        .pty_produced_bytes = workload_bytes_per_iteration + marker_input_bytes,
+        .healthy_drained_bytes = 4096,
+        .slow_eagain_count = 1,
+        .slow_pollout_absent_count = 0,
+        .stall_at_ns = 1_250_000_000,
+        .controller_input_at_ns = 1_260_000_000,
+        .healthy_marker_at_ns = 1_270_000_000,
+        .healthy_progress_batches_before = 10,
+        .healthy_progress_batches_after = 11,
+        .baseline_reset_ack = true,
+        .healthy_marker_matches_nonce = true,
+        .sample_target_interval_ms = 20,
+        .sample_gap_max_ms = 100,
+        .baseline_samples = &baseline_fixture,
+        .pressure_samples = &pressure_fixture,
+        .post_drain_samples = &post_fixture,
+        .baseline_rss_bytes = 100_000_000,
+        .peak_rss_bytes = 120_000_000,
+        .run_peak_rss_bytes = 120_000_000,
+        .post_drain_rss_bytes = 110_000_000,
+        .peak_delta_bytes = 20_000_000,
+        .run_peak_delta_bytes = 20_000_000,
+        .post_drain_delta_bytes = 10_000_000,
+        .baseline_ledger_resident_bytes = 10_000_000,
+        .global_ledger_cap_bytes = global_ledger_cap_bytes,
+        .projection_transient_cap_bytes = projection_transient_cap_bytes,
+        .allocator_slack_bytes = allocator_slack_bytes,
+        .analytic_cap_bytes = 20_000_000 +
+            projection_transient_cap_bytes +
+            allocator_slack_bytes,
+        .peak_ledger_resident_bytes = 30_000_000,
+        .peak_ledger_shared_bytes = 25_000_000,
+        .peak_ledger_prepared_base_bytes = 1_000_000,
+        .peak_ledger_prepared_reclaim_bytes = 1_000_000,
+        .peak_ledger_slot_queue_bytes = 8_000_000,
+        .peak_ledger_slot_base_bytes = 2_000_000,
+        .peak_ledger_slot_control_bytes = 1024,
+        .peak_ledger_slot_total_bytes = 10_000_000,
+        .final_ledger_resident_bytes = 0,
+        .final_ledger_shared_bytes = 0,
+        .final_ledger_prepared_base_bytes = 0,
+        .final_ledger_prepared_reclaim_bytes = 0,
+        .deadline_ms = 30_000,
+        .elapsed_ms = 1000,
+        .child_reaped = true,
+        .child_exit_status = 0,
+        .client_fds_closed = 3,
+        .final_active_clients = 0,
+        .host_graceful_stop = true,
+        .host_reaped = true,
+        .host_exit_status = 0,
+        .socket_removed = true,
+        .directory_removed = true,
+    };
+}
+
+fn stringifyArtifact(allocator: std.mem.Allocator, artifact: Artifact) ![]u8 {
+    var output: std.Io.Writer.Allocating = .init(allocator);
+    errdefer output.deinit();
+    var json: std.json.Stringify = .{ .writer = &output.writer, .options = .{} };
+    try json.write(artifact);
+    return output.toOwnedSlice();
+}
+
+test "valid typed artifact passes after raw RSS recomputation" {
+    const bytes = try stringifyArtifact(testing.allocator, goodArtifact());
+    defer testing.allocator.free(bytes);
+    try validateBytes(testing.allocator, bytes);
+}
+
+test "unknown duplicate and missing keys fail exact schema parsing" {
+    const bytes = try stringifyArtifact(testing.allocator, goodArtifact());
+    defer testing.allocator.free(bytes);
+
+    const extra = try std.mem.concat(
+        testing.allocator,
+        u8,
+        &.{ bytes[0 .. bytes.len - 1], ",\"unexpected\":1}" },
+    );
+    defer testing.allocator.free(extra);
+    try testing.expectError(error.InvalidJsonSchema, validateBytes(testing.allocator, extra));
+
+    const duplicate = try std.mem.concat(
+        testing.allocator,
+        u8,
+        &.{ bytes[0 .. bytes.len - 1], ",\"schema\":\"duplicate\"}" },
+    );
+    defer testing.allocator.free(duplicate);
+    try testing.expectError(error.InvalidJsonSchema, validateBytes(testing.allocator, duplicate));
+
+    const missing =
+        \\{"schema":"maru.session-host-slow-observer-macos.v1"}
+    ;
+    try testing.expectError(error.InvalidJsonSchema, validateBytes(testing.allocator, missing));
+}
+
+test "negative and overflowing unsigned fields fail typed parsing" {
+    const bytes = try stringifyArtifact(testing.allocator, goodArtifact());
+    defer testing.allocator.free(bytes);
+    const negative = try std.mem.replaceOwned(
+        u8,
+        testing.allocator,
+        bytes,
+        "\"host_pid\":100",
+        "\"host_pid\":-1",
+    );
+    defer testing.allocator.free(negative);
+    try testing.expectError(error.InvalidJsonSchema, validateBytes(testing.allocator, negative));
+
+    const overflow = try std.mem.replaceOwned(
+        u8,
+        testing.allocator,
+        bytes,
+        "\"host_pid\":100",
+        "\"host_pid\":4294967296",
+    );
+    defer testing.allocator.free(overflow);
+    try testing.expectError(error.InvalidJsonSchema, validateBytes(testing.allocator, overflow));
+}
+
+test "raw summary mismatch and changed process identity fail" {
+    var artifact = goodArtifact();
+    artifact.peak_rss_bytes += 1;
+    try testing.expectError(
+        error.SummaryMismatch,
+        validateArtifact(testing.allocator, artifact),
+    );
+
+    var changed_samples = pressure_fixture;
+    changed_samples[5].ri_proc_start_abstime += 1;
+    artifact = goodArtifact();
+    artifact.pressure_samples = &changed_samples;
+    try testing.expectError(
+        error.IdentityChanged,
+        validateArtifact(testing.allocator, artifact),
+    );
+}
+
+test "run peak includes post-drain and post delta saturates below baseline" {
+    var high_post = post_fixture;
+    for (&high_post) |*sample| {
+        sample.ri_resident_size = 130_000_000;
+        sample.ri_phys_footprint = 129_000_000;
+    }
+    var artifact = goodArtifact();
+    artifact.post_drain_samples = &high_post;
+    artifact.post_drain_rss_bytes = 130_000_000;
+    artifact.run_peak_rss_bytes = 130_000_000;
+    artifact.post_drain_delta_bytes = 30_000_000;
+    artifact.run_peak_delta_bytes = 30_000_000;
+    try validateArtifact(testing.allocator, artifact);
+
+    var low_post = post_fixture;
+    for (&low_post) |*sample| {
+        sample.ri_resident_size = 90_000_000;
+        sample.ri_phys_footprint = 89_000_000;
+    }
+    artifact = goodArtifact();
+    artifact.post_drain_samples = &low_post;
+    artifact.post_drain_rss_bytes = 90_000_000;
+    artifact.post_drain_delta_bytes = 0;
+    try validateArtifact(testing.allocator, artifact);
+}
+
+test "timestamp reversal and over-100ms sample gap fail" {
+    var reversed = pressure_fixture;
+    reversed[5].monotonic_ns = reversed[4].monotonic_ns;
+    var artifact = goodArtifact();
+    artifact.pressure_samples = &reversed;
+    try testing.expectError(
+        error.TimestampOrder,
+        validateArtifact(testing.allocator, artifact),
+    );
+
+    var delayed = pressure_fixture;
+    for (delayed[5..]) |*sample| sample.monotonic_ns += 91_000_000;
+    artifact = goodArtifact();
+    artifact.pressure_samples = &delayed;
+    try testing.expectError(
+        error.InvalidSampleInterval,
+        validateArtifact(testing.allocator, artifact),
+    );
+
+    artifact = goodArtifact();
+    artifact.stall_at_ns = 1_251_000_000;
+    artifact.controller_input_at_ns = 1_253_000_000;
+    artifact.healthy_marker_at_ns = 1_259_000_000;
+    try testing.expectError(
+        error.InvalidSampleCount,
+        validateArtifact(testing.allocator, artifact),
+    );
+}
+
+test "missing stall and marker ordering regressions fail" {
+    var artifact = goodArtifact();
+    artifact.slow_eagain_count = 0;
+    artifact.slow_pollout_absent_count = 0;
+    try testing.expectError(
+        error.MissingStallEvidence,
+        validateArtifact(testing.allocator, artifact),
+    );
+
+    artifact = goodArtifact();
+    artifact.controller_input_at_ns = artifact.stall_at_ns;
+    try testing.expectError(
+        error.InvalidProgress,
+        validateArtifact(testing.allocator, artifact),
+    );
+
+    artifact = goodArtifact();
+    artifact.first_stall_connection_id += 1;
+    try testing.expectError(
+        error.MissingStallEvidence,
+        validateArtifact(testing.allocator, artifact),
+    );
+
+    artifact = goodArtifact();
+    artifact.healthy_marker_matches_nonce = false;
+    try testing.expectError(
+        error.InvalidProgress,
+        validateArtifact(testing.allocator, artifact),
+    );
+}
+
+test "peer waitpid admission and split workload evidence regressions fail" {
+    var artifact = goodArtifact();
+    artifact.local_peer_pid += 1;
+    try testing.expectError(
+        error.InvalidIdentity,
+        validateArtifact(testing.allocator, artifact),
+    );
+
+    artifact = goodArtifact();
+    artifact.waitpid_pid += 1;
+    try testing.expectError(
+        error.InvalidIdentity,
+        validateArtifact(testing.allocator, artifact),
+    );
+
+    artifact = goodArtifact();
+    artifact.pty_child_ppid += 1;
+    try testing.expectError(
+        error.InvalidIdentity,
+        validateArtifact(testing.allocator, artifact),
+    );
+
+    artifact = goodArtifact();
+    artifact.pty_child_uid += 1;
+    try testing.expectError(
+        error.InvalidIdentity,
+        validateArtifact(testing.allocator, artifact),
+    );
+
+    artifact = goodArtifact();
+    artifact.pty_child_start_tvusec = std.time.us_per_s;
+    try testing.expectError(
+        error.InvalidIdentity,
+        validateArtifact(testing.allocator, artifact),
+    );
+
+    artifact = goodArtifact();
+    artifact.pty_child_identity_rechecked = false;
+    try testing.expectError(
+        error.InvalidIdentity,
+        validateArtifact(testing.allocator, artifact),
+    );
+
+    artifact = goodArtifact();
+    artifact.pty_probe_fds_closed = false;
+    try testing.expectError(
+        error.InvalidIdentity,
+        validateArtifact(testing.allocator, artifact),
+    );
+
+    artifact = goodArtifact();
+    artifact.stale_admission_count = 1;
+    try testing.expectError(
+        error.InvalidRoleCount,
+        validateArtifact(testing.allocator, artifact),
+    );
+
+    artifact = goodArtifact();
+    artifact.pressure_generated_bytes -= 1;
+    try testing.expectError(
+        error.InvalidWorkload,
+        validateArtifact(testing.allocator, artifact),
+    );
+
+    artifact = goodArtifact();
+    artifact.marker_input_bytes = 32;
+    try testing.expectError(
+        error.InvalidWorkload,
+        validateArtifact(testing.allocator, artifact),
+    );
+
+    artifact = goodArtifact();
+    artifact.baseline_pty_output_bytes -= 1;
+    try testing.expectError(
+        error.InvalidWorkload,
+        validateArtifact(testing.allocator, artifact),
+    );
+}
+
+test "analytic formula cap and final ledger regressions fail" {
+    var artifact = goodArtifact();
+    artifact.analytic_cap_bytes += 1;
+    try testing.expectError(
+        error.LedgerFormulaMismatch,
+        validateArtifact(testing.allocator, artifact),
+    );
+
+    artifact = goodArtifact();
+    artifact.peak_ledger_slot_queue_bytes = per_slot_bytes + 1;
+    try testing.expectError(
+        error.LedgerCapExceeded,
+        validateArtifact(testing.allocator, artifact),
+    );
+
+    artifact = goodArtifact();
+    artifact.final_ledger_resident_bytes = 1;
+    try testing.expectError(
+        error.FinalLedgerNotZero,
+        validateArtifact(testing.allocator, artifact),
+    );
+}
+
+test "RSS cap deadline and cleanup regressions fail" {
+    var high_pressure = pressure_fixture;
+    for (&high_pressure) |*sample| sample.ri_resident_size = 230_000_000;
+    var artifact = goodArtifact();
+    artifact.pressure_samples = &high_pressure;
+    artifact.peak_rss_bytes = 230_000_000;
+    artifact.run_peak_rss_bytes = 230_000_000;
+    artifact.peak_delta_bytes = 130_000_000;
+    artifact.run_peak_delta_bytes = 130_000_000;
+    try testing.expectError(
+        error.RssCapExceeded,
+        validateArtifact(testing.allocator, artifact),
+    );
+
+    artifact = goodArtifact();
+    artifact.elapsed_ms = deadline_ms + 1;
+    try testing.expectError(
+        error.DeadlineExceeded,
+        validateArtifact(testing.allocator, artifact),
+    );
+
+    artifact = goodArtifact();
+    artifact.host_reaped = false;
+    try testing.expectError(
+        error.CleanupIncomplete,
+        validateArtifact(testing.allocator, artifact),
+    );
+
+    artifact = goodArtifact();
+    artifact.final_active_clients = 1;
+    try testing.expectError(
+        error.CleanupIncomplete,
+        validateArtifact(testing.allocator, artifact),
+    );
+}

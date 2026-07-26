@@ -432,8 +432,9 @@ pub const pty_reader_groups = [_]Group{
             "start_released",
             "start_aborted",
             "start_gate_reached",
+            "output_byte_counter",
         },
-        .why = "all pointers, synchronization context, and processing latch are rebuilt after the quiesced runtime graph exists",
+        .why = "all pointers, synchronization context, processing latch, and diagnostic byte counter are rebuilt after the quiesced runtime graph exists",
     },
     .{
         .disposition = .must_be_empty,
@@ -679,8 +680,12 @@ pub const runtime_manager_groups = [_]Group{
             "foreground_cache",
             "bell_counts",
             "clipboards",
+            "observed_reaped_children",
+            "observed_last_child_exit_status",
+            "output_metrics_enabled",
+            "observed_output_bytes",
         },
-        .why = "the self-referential manager graph is rebuilt in place from serialized host and runtime records; bell and clipboard sequence counters restart at zero and clients treat a decrease as a resync rather than a new request",
+        .why = "the self-referential manager graph is rebuilt in place from serialized host and runtime records; bell, clipboard, and fixture-only diagnostic counters restart at zero",
     },
 };
 

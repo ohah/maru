@@ -38,6 +38,21 @@ const poll_owner = @import("poll_owner.zig");
 
 pub const RunError = socket_server.BindError || error{ OutOfMemory, OwnerLeaseFailed, ManifestFailed };
 
+/// ReleaseFast process fixture 전용 private observation seam. 제품 protocol/capability를
+/// 넓히지 않고 actual owner turn 뒤 canonical ledger/stall과 PTY reader bytes를 전달한다.
+/// callback action이 reset 또는 stop을 요청할 수 있으며 stop은 loop를 정상 종료한다.
+pub const FixtureAction = enum { continue_serving, reset_stall, stop };
+
+pub const FixtureProbe = struct {
+    ctx: *anyopaque,
+    after_turn: *const fn (
+        ctx: *anyopaque,
+        telemetry: poll_owner.TelemetrySnapshot,
+        pty_output_bytes: u64,
+        child_exit: runtime_manager.RuntimeManager.ChildExitEvidence,
+    ) FixtureAction,
+};
+
 // macOS/BSD libc의 CSPRNG와 sleep(std.posix 미노출이라 직접 extern — daemon은 macOS 전용).
 extern "c" fn arc4random_buf(buf: [*]u8, nbytes: usize) void;
 extern "c" fn usleep(usec: c_uint) c_int;
@@ -65,7 +80,19 @@ pub fn runSessionHost(
     dir_path: [:0]const u8,
     socket_path: [:0]const u8,
 ) RunError!void {
-    return runSessionHostImpl(allocator, io, dir_path, socket_path, null, false);
+    return runSessionHostImpl(allocator, io, dir_path, socket_path, null, false, null);
+}
+
+/// 별도 ReleaseFast fixture executable만 사용하는 entrypoint. ambient env나 public MRSH
+/// method가 아니라 caller가 명시적으로 넘긴 private channel adapter만 관측한다.
+pub fn runSessionHostForFixture(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    dir_path: [:0]const u8,
+    socket_path: [:0]const u8,
+    probe: FixtureProbe,
+) RunError!void {
+    return runSessionHostImpl(allocator, io, dir_path, socket_path, null, false, probe);
 }
 
 /// Product host별 discovery 경로. Launcher가 먼저 발급한 host_id가 short endpoint, owner lease, manifest, hello에서
@@ -80,7 +107,7 @@ pub fn runSessionHostWithIdentity(
     if (host_id == 0) return error.ManifestFailed;
     short_endpoint.validateCurrentSocketPath(socket_path, host_id) catch return error.ManifestFailed;
     short_endpoint.prepareCurrentUserNamespace() catch return error.ManifestFailed;
-    return runSessionHostImpl(allocator, io, session_dir, socket_path, host_id, false);
+    return runSessionHostImpl(allocator, io, session_dir, socket_path, host_id, false, null);
 }
 
 /// Process fixture entrypoint. It changes only the release-signer decision; staging, typed
@@ -97,7 +124,7 @@ pub fn runSessionHostWithIdentityTestAuthorizer(
     if (host_id == 0) return error.ManifestFailed;
     short_endpoint.validateCurrentSocketPath(socket_path, host_id) catch return error.ManifestFailed;
     short_endpoint.prepareCurrentUserNamespace() catch return error.ManifestFailed;
-    return runSessionHostImpl(allocator, io, session_dir, socket_path, host_id, true);
+    return runSessionHostImpl(allocator, io, session_dir, socket_path, host_id, true, null);
 }
 
 fn runSessionHostImpl(
@@ -107,6 +134,7 @@ fn runSessionHostImpl(
     socket_path: [:0]const u8,
     exact_host_id: ?u128,
     test_allow_any_upgrade_target: bool,
+    fixture_probe: ?FixtureProbe,
 ) RunError!void {
     // 제품 launcher argv를 실제 `maru` 바이너리까지 관통하는 process smoke가 detached orphan을 남기지 않도록,
     // 테스트가 명시한 경우 첫 client 연결을 처리한 뒤 정상 종료한다. 일반 제품 환경에는 이 변수가 없어 기존의 영속
@@ -147,6 +175,7 @@ fn runSessionHostImpl(
     var manager: runtime_manager.RuntimeManager = undefined;
     manager.init(allocator, io, &registry);
     defer manager.deinit();
+    if (fixture_probe != null) manager.enableOutputMetrics();
 
     const host_id = exact_host_id orelse newHostId();
     var socket_dir_buf: [112]u8 = undefined;
@@ -302,6 +331,18 @@ fn runSessionHostImpl(
             },
             .progress => {},
             .listener_broken => break,
+        }
+        if (fixture_probe) |probe| {
+            switch (probe.after_turn(
+                probe.ctx,
+                fd_owner.telemetrySnapshot(),
+                manager.totalPtyOutputBytes(),
+                manager.fixtureChildExitEvidence(),
+            )) {
+                .continue_serving => {},
+                .reset_stall => fd_owner.resetFixtureStallTelemetry(),
+                .stop => break,
+            }
         }
         if (test_oneshot and fd_owner.total_admitted != 0 and fd_owner.activeCount() == 0) break;
     }

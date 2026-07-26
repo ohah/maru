@@ -530,6 +530,12 @@ pub const PtyReader = struct {
     start_released: std.atomic.Value(bool) = .init(true),
     start_aborted: std.atomic.Value(bool) = .init(false),
     start_gate_reached: std.atomic.Value(bool) = .init(false),
+    // 실제 PTY read 경계의 누적 byte 수. processing 경로는 큐에 빈 coalescing 신호만 남기므로
+    // queue event 길이로 세면 항상 0이 된다. owner-side perf probe가 입력 길이를 출력량으로
+    // 오인하지 않도록 reader가 읽은 자리에서 단조 증가시킨다.
+    /// 선택적 제품 관측 sink. 기본 제품 경로는 null이라 read hot path에서 atomic
+    /// 연산을 하지 않는다. 별도 process gate가 reader 시작 전에만 주입한다.
+    output_byte_counter: ?*std.atomic.Value(u64) = null,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -624,6 +630,24 @@ pub const PtyReader = struct {
             thread.join();
             self.thread = null;
         }
+    }
+
+    pub fn outputBytesRead(self: *const PtyReader) u64 {
+        const counter = self.output_byte_counter orelse return 0;
+        return counter.load(.acquire);
+    }
+
+    pub fn setOutputByteCounter(
+        self: *PtyReader,
+        counter: *std.atomic.Value(u64),
+    ) void {
+        std.debug.assert(self.thread == null);
+        self.output_byte_counter = counter;
+    }
+
+    fn recordOutputBytes(self: *PtyReader, amount: usize) void {
+        const counter = self.output_byte_counter orelse return;
+        _ = counter.fetchAdd(@intCast(amount), .release);
     }
 
     pub fn stopAndJoin(self: *PtyReader) void {
@@ -734,6 +758,7 @@ pub const PtyReader = struct {
             };
             switch (event) {
                 .output => |bytes| {
+                    self.recordOutputBytes(bytes.len);
                     self.queue.pushBlocking(.{ .output = .{
                         .pty_id = self.pty_id,
                         .bytes = bytes,
@@ -881,6 +906,7 @@ pub const PtyReader = struct {
                 }) {
                     .again => {}, // readable/read race — 다음 poll에서 재시도
                     .data => |n| {
+                        self.recordOutputBytes(n);
                         core.owner_dbg.lock(mutex, self.io);
                         core.write(readbuf[0..n]) catch {}; // best-effort(파서 OOM 등은 그 청크 드롭)
                         const reply = core.pendingResponse();
@@ -1009,6 +1035,20 @@ test "setProcessing wires core/lock and enables reader core-processing (PR3)" {
     try std.testing.expect(reader.processing.load(.acquire)); // 켜짐 — run()이 직접 처리
     try std.testing.expectEqual(@as(?*terminal.TerminalCore, &core), reader.core);
     try std.testing.expectEqual(@as(?*std.Io.Mutex, &mutex), reader.core_mutex);
+}
+
+test "PTY reader raw byte counter is monotonic across coalesced output signals" {
+    const allocator = std.testing.allocator;
+    var queue = try PtyEventQueue.init(std.testing.io, allocator, 1);
+    defer queue.deinit();
+    var session: pty.PtySession = undefined;
+    var reader = PtyReader.init(allocator, 8, &session, &queue);
+    var counter: std.atomic.Value(u64) = .init(0);
+    reader.setOutputByteCounter(&counter);
+    try std.testing.expectEqual(@as(u64, 0), reader.outputBytesRead());
+    reader.recordOutputBytes(7);
+    reader.recordOutputBytes(11);
+    try std.testing.expectEqual(@as(u64, 18), reader.outputBytesRead());
 }
 
 test "prepared reader start can be created and discarded before touching PTY dependencies" {

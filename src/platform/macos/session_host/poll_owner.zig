@@ -23,6 +23,19 @@ pub const Outcome = enum {
     upgrade_ready,
 };
 
+pub const TelemetrySnapshot = struct {
+    accounting: connection_slot.ReactorCore.AccountingSnapshot,
+    pressure_reclaims: usize,
+    stalled_clients: usize,
+    active_clients: usize,
+    total_admitted: usize,
+    pollout_absent_count: usize,
+    first_stall_connection_id: u64,
+    first_stall_ns: u64,
+    first_stall_send_buffer_bytes: u64,
+    stale_client_observations: usize,
+};
+
 pub const Owner = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -38,6 +51,10 @@ pub const Owner = struct {
     total_admitted: usize = 0,
     overflow_rejected: usize = 0,
     total_pressure_reclaims: usize = 0,
+    pollout_absent_count: usize = 0,
+    first_stall_connection_id: u64 = 0,
+    first_stall_ns: u64 = 0,
+    first_stall_send_buffer_bytes: u64 = 0,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -63,6 +80,41 @@ pub const Owner = struct {
 
     pub fn activeCount(self: *const Owner) usize {
         return self.reactor.activeCount();
+    }
+
+    /// Private process-fixture telemetry. 제품 wire/CLI를 넓히지 않고도 실제 poll owner가
+    /// 관측한 stall과 canonical ledger를 같은 owner turn에서 읽게 한다.
+    pub fn telemetrySnapshot(self: *const Owner) TelemetrySnapshot {
+        var stalled: usize = 0;
+        var stale: usize = 0;
+        for (self.clients) |maybe_client| {
+            const client = maybe_client orelse continue;
+            const slot = self.reactor.get(client.admission) catch {
+                stale += 1;
+                continue;
+            };
+            if (slot.writeStallObserved()) stalled += 1;
+        }
+        return .{
+            .accounting = self.reactor.accountingSnapshot(),
+            .pressure_reclaims = self.total_pressure_reclaims,
+            .stalled_clients = stalled,
+            .active_clients = self.activeCount(),
+            .total_admitted = self.total_admitted,
+            .pollout_absent_count = self.pollout_absent_count,
+            .first_stall_connection_id = self.first_stall_connection_id,
+            .first_stall_ns = self.first_stall_ns,
+            .first_stall_send_buffer_bytes = self.first_stall_send_buffer_bytes,
+            .stale_client_observations = stale,
+        };
+    }
+
+    pub fn resetFixtureStallTelemetry(self: *Owner) void {
+        self.pollout_absent_count = 0;
+        self.first_stall_connection_id = 0;
+        self.first_stall_ns = 0;
+        self.first_stall_send_buffer_bytes = 0;
+        self.reactor.resetFixturePeaksToCurrent();
     }
 
     fn syncClientCount(self: *Owner) void {
@@ -162,8 +214,25 @@ pub const Owner = struct {
             if (client.wantsWrite()) {
                 if (write_ready[slot_index])
                     client.noteWriteReady()
-                else
+                else {
                     client.noteWriteStalled(now_ns);
+                    self.pollout_absent_count +|= 1;
+                    if (self.first_stall_connection_id == 0) {
+                        self.first_stall_connection_id =
+                            client.admission.key.monotonic_id;
+                        self.first_stall_ns = now_ns;
+                        var bytes: c_int = 0;
+                        var bytes_len: c.socklen_t = @sizeOf(c_int);
+                        if (c.getsockopt(
+                            client.fd,
+                            c.SOL.SOCKET,
+                            c.SO.SNDBUF,
+                            &bytes,
+                            &bytes_len,
+                        ) == 0 and bytes > 0)
+                            self.first_stall_send_buffer_bytes = @intCast(bytes);
+                    }
+                }
             }
         }
 

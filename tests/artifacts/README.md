@@ -8,7 +8,10 @@ trace, snapshot, config, 로그 같은 실패 분석 자료가 들어갈 수 있
 
 GitHub `CI` workflow는 `tests/artifacts/**`를 업로드한다. 그래서 로컬에서만 보는 파일이 아니라, PR 실패 시 GitHub Actions 화면에서도 같은 screen/snapshot/summary를 내려받아 확인할 수 있다.
 
-GitHub `Performance` workflow는 `tests/artifacts/perf/**`를 별도 artifact로 업로드한다. 성능 숫자는 runner 상태에 영향을 받으므로 PR 필수 게이트가 아니라 장기 추적용으로 사용한다.
+GitHub `Performance` workflow의 일반 microbenchmark는 `tests/artifacts/perf/**`를 장기 추적용 artifact로 업로드한다.
+다만 문서화된 구조 guardrail인 core performance, file explorer, live preview와
+`session-host-slow-observer-macos.json`은 각 required job의 typed validator가 판정한다.
+required 여부의 단일 출처는 `docs/performance-budget.md`의 필수 CI 체크 표다.
 
 현재 생성되는 예시는 다음과 같다.
 

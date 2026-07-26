@@ -44,6 +44,10 @@ fn probeChildExitedWithoutReap(pid: std.c.pid_t) error{ChildProbeFailed}!bool {
 extern "c" fn tcgetpgrp(fd: c_int) c_int;
 extern "c" fn proc_name(pid: c_int, buffer: [*]u8, buffersize: u32) c_int;
 extern "c" fn proc_listpgrppids(pgrpid: c_int, buffer: ?*anyopaque, buffersize: c_int) c_int;
+// proc_listchildpids: 그 pid의 **직속 자식** 목록. 에이전트(claude/codex)는 도구를 실행할 때 자식을 별도 프로세스
+// 그룹으로 띄우므로(실측: claude pgid 33854 ↔ 자식 pgid 83612) foreground pgid 열거로는 그 자식을 못 본다.
+// 세션 신원 env는 **자식에게만** 내려오므로(agentSessionIdentity) 자식을 직접 열거해야 한다. 공개 libproc API.
+extern "c" fn proc_listchildpids(ppid: c_int, buffer: ?*anyopaque, buffersize: c_int) c_int;
 extern "c" fn getpgid(pid: c_int) c_int;
 // KERN_PROCARGS2: pid의 argv/envp 덤프(공개 macOS sysctl — ps·libproc도 같은 방식). codex처럼 `#!/usr/bin/env node`
 // 스크립트로 도는 에이전트는 proc_name이 "node"라 미감지되므로, comm이 인터프리터면 argv[1] 스크립트 basename
@@ -92,6 +96,41 @@ fn parseArgv1Basename(data: []const u8) ?[]const u8 {
     return if (base.len == 0) null else base; // 끝-슬래시뿐인 비정상 경로면 null
 }
 
+/// KERN_PROCARGS2 버퍼의 **envp**에서 `key=`로 시작하는 값을 뽑는 순수 함수(sysctl과 분리해 단위 테스트).
+///
+/// 레이아웃은 `[argc:int][exec_path\0][\0 패딩][argv0\0]…[argv{argc-1}\0][envp0\0][envp1\0]…`이다. argv를
+/// argc개 건너뛴 뒤부터가 envp라, **argc를 세지 않고** 전체를 훑으면 argv에 있는 `FOO=bar` 꼴 인자를 환경변수로
+/// 오독한다(에이전트에 `--env X=Y`를 넘기는 경우가 실제로 있다).
+///
+/// 에이전트가 **자식에게** 세션 신원을 env로 내려주므로(claude `CLAUDE_CODE_SESSION_ID`, codex `CODEX_THREAD_ID`)
+/// 이 파서가 사이드바 대화 결속의 근거가 된다 — 추측(활동 상관) 대신 provider가 스스로 밝힌 값을 쓴다.
+pub fn parseEnvValue(data: []const u8, key: []const u8) ?[]const u8 {
+    if (data.len <= @sizeOf(c_int)) return null;
+    const argc: u32 = @as(u32, data[0]) | (@as(u32, data[1]) << 8) | (@as(u32, data[2]) << 16) | (@as(u32, data[3]) << 24);
+    var off: usize = @sizeOf(c_int);
+    while (off < data.len and data[off] != 0) off += 1; // exec_path
+    while (off < data.len and data[off] == 0) off += 1; // null 패딩
+    // argv를 argc개 건너뛴다 — 그 뒤부터가 envp다.
+    var consumed: u32 = 0;
+    while (consumed < argc and off < data.len) : (consumed += 1) {
+        while (off < data.len and data[off] != 0) off += 1;
+        while (off < data.len and data[off] == 0) off += 1;
+    }
+    // envp를 `key=` 접두로 훑는다.
+    while (off < data.len) {
+        const start = off;
+        while (off < data.len and data[off] != 0) off += 1;
+        const entry = data[start..off];
+        while (off < data.len and data[off] == 0) off += 1;
+        if (entry.len == 0) break; // envp 끝(빈 문자열 뒤는 apple[] 영역)
+        if (entry.len > key.len and std.mem.startsWith(u8, entry, key) and entry[key.len] == '=') {
+            const value = entry[key.len + 1 ..];
+            return if (value.len == 0) null else value;
+        }
+    }
+    return null;
+}
+
 /// KERN_PROCARGS2 바이트에서 **argv[0]** basename 추출 — parseArgv1Basename과 같되 argv[1]이 아니라 argv[0]에서 멈춘다.
 /// comm이 버전으로 바뀐 에이전트(claude "2.1.197")를 argv[0]="claude"로 되짚는 폴백용. argc>=1이면 argv[0]이 존재한다.
 fn parseArgv0Basename(data: []const u8) ?[]const u8 {
@@ -112,6 +151,44 @@ fn parseArgv0Basename(data: []const u8) ?[]const u8 {
 // comm 기반 감지가 comm="claude"가 아니라 "2.1.197"을 읽어 실패했다(실측). 이 테스트는 그 폴백 파서(argv[0] basename)가
 // claude를 되짚는지 고정한다 — comm이 숫자로 시작하면 foregroundProcessName이 이 결과를 쓴다. (KERN_PROCARGS2 실 sysctl은
 // 프로세스 필요라, 순수 파서만 검증.)
+test "parseEnvValue: argv를 건너뛰고 envp에서만 값을 찾는다" {
+    // KERN_PROCARGS2 레이아웃: [argc][exec_path\0][패딩\0][argv0\0]…[envp…]
+    // argc=2, argv[1]이 `CLAUDE_CODE_SESSION_ID=fake`인 함정 — argv를 안 건너뛰면 이걸 환경변수로 오독한다.
+    var buf: [256]u8 = undefined;
+    var n: usize = 0;
+    const argc: u32 = 2;
+    buf[0] = @intCast(argc & 0xFF);
+    buf[1] = @intCast((argc >> 8) & 0xFF);
+    buf[2] = @intCast((argc >> 16) & 0xFF);
+    buf[3] = @intCast((argc >> 24) & 0xFF);
+    n = 4;
+    const parts = [_][]const u8{
+        "/usr/bin/claude", // exec_path
+        "", // 패딩
+        "claude", // argv[0]
+        "CLAUDE_CODE_SESSION_ID=from-argv", // argv[1] — 함정
+        "PATH=/bin", // envp[0]
+        "CLAUDE_CODE_SESSION_ID=03e06864-real", // envp[1] — 정답
+        "HOME=/Users/me",
+    };
+    for (parts) |part| {
+        @memcpy(buf[n..][0..part.len], part);
+        n += part.len;
+        buf[n] = 0;
+        n += 1;
+    }
+    const got = parseEnvValue(buf[0..n], "CLAUDE_CODE_SESSION_ID") orelse return error.NotFound;
+    try std.testing.expectEqualStrings("03e06864-real", got);
+
+    // codex 키도 같은 파서로 읽는다.
+    try std.testing.expect(parseEnvValue(buf[0..n], "CODEX_THREAD_ID") == null);
+    // 접두만 같고 `=`가 아닌 키는 매치되지 않아야 한다(CLAUDE_CODE_SESSION_ID_EXTRA 같은 변수 오독 방지).
+    try std.testing.expect(parseEnvValue(buf[0..n], "CLAUDE_CODE_SESSION") == null);
+    // 값이 빈 변수는 없는 것으로 본다.
+    try std.testing.expect(parseEnvValue(buf[0..n], "PATH") != null);
+    try std.testing.expect(parseEnvValue(buf[0..4], "PATH") == null); // envp 없음
+}
+
 test "parseArgv0Basename: comm이 버전으로 바뀐 claude를 argv[0]으로 되짚는다" {
     const a = std.testing.allocator;
     var buf: std.ArrayList(u8) = .empty;
@@ -735,6 +812,56 @@ pub const PtySession = struct {
         var window_size: std.posix.winsize = undefined;
         if (std.c.ioctl(fd, std.c.T.IOCGWINSZ, &window_size) < 0) return error.IoctlFailed;
         return .{ .cols = window_size.col, .rows = window_size.row };
+    }
+
+    /// 에이전트가 **자식에게 내려주는 세션 신원**을 읽는다 — claude는 `CLAUDE_CODE_SESSION_ID`(그 값이 곧
+    /// `<id>.jsonl` 파일명), codex는 `CODEX_THREAD_ID`(rollout 파일명의 uuid이자 `session_meta.id`)다.
+    ///
+    /// **왜 자식인가**: 두 provider 모두 자기 프로세스 env에는 이 값을 두지 않고(실측) 자식을 띄울 때만 주입한다.
+    /// 그래서 `agent_pid`의 직속 자식을 열거해 첫 매치를 반환한다. 자식은 도구 실행 중에만 존재하므로 호출자가
+    /// **한 번 얻은 값을 캐시**해야 한다 — 못 얻으면 null이고, 그때는 호출자가 활동 상관 폴백으로 내려간다.
+    ///
+    /// 값은 `out`에 복사해 슬라이스로 돌려준다(정적 procargs_buf를 가리키지 않게 — 다음 호출이 덮는다).
+    /// **틱 스레드 전용**(procargs_buf 공유).
+    pub fn agentSessionIdentity(agent_pid: i32, key: []const u8, out: []u8) ?[]const u8 {
+        if (agent_pid <= 0 or out.len == 0) return null;
+        // **손자까지 본다.** claude는 단일 프로세스라 도구 자식이 직속이지만, codex는 npm wrapper를 거쳐
+        // (node wrapper → rust 바이너리) 도구 자식이 **손자**가 될 수 있다 — 한 단계만 보면 그 provider에서
+        // 통째로 무동작이 된다. 깊이 2면 관측된 모든 배치를 덮고, 프로세스 수가 적어(에이전트당 한 자릿수)
+        // 비용도 무시할 만하다.
+        if (scanChildrenForEnv(agent_pid, key, out)) |found| return found;
+        var top: [64]c_int = undefined;
+        const top_count = proc_listchildpids(@intCast(agent_pid), &top, @intCast(@sizeOf(@TypeOf(top))));
+        if (top_count > 0) {
+            const n: usize = @min(@as(usize, @intCast(top_count)), top.len);
+            for (top[0..n]) |kid| {
+                if (kid <= 0) continue;
+                if (scanChildrenForEnv(kid, key, out)) |found| return found;
+            }
+        }
+        return null;
+    }
+
+    /// `ppid`의 **직속 자식**만 훑어 `key=` 환경변수를 찾는다(agentSessionIdentity의 한 단계).
+    fn scanChildrenForEnv(ppid: i32, key: []const u8, out: []u8) ?[]const u8 {
+        var kids: [64]c_int = undefined;
+        // **반환값은 자식 개수다 — 바이트가 아니다.** 형제 API(`proc_listpids`·`proc_listpgrppids`)가 바이트를
+        // 돌려주므로 나누고 싶어지지만, 실측하면 `ret=2, buf=[2397, 1862]`처럼 개수와 pid가 정확히 맞는다
+        // (ps로 대조 확인). 나누면 자식 2개가 0으로 접혀 이 경로 전체가 조용히 무동작이 된다(적대적 검증에서 발견).
+        const child_count = proc_listchildpids(@intCast(ppid), &kids, @intCast(@sizeOf(@TypeOf(kids))));
+        if (child_count <= 0) return null;
+        const count: usize = @min(@as(usize, @intCast(child_count)), kids.len);
+        for (kids[0..count]) |kid| {
+            if (kid <= 0) continue;
+            var mib = [_]c_int{ ctl_kern, kern_procargs2, kid };
+            var size: usize = procargs_buf.len;
+            if (sysctl(&mib, mib.len, &procargs_buf, &size, null, 0) != 0) continue;
+            const value = parseEnvValue(procargs_buf[0..size], key) orelse continue;
+            const n = @min(value.len, out.len);
+            @memcpy(out[0..n], value[0..n]);
+            return out[0..n];
+        }
+        return null;
     }
 
     /// 이 PTY의 foreground process group 구성원 이름을 bounded fixed buffer에 채운다. 제품 spawn은 login(1)이

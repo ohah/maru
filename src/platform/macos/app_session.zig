@@ -1419,6 +1419,17 @@ fn classifyAgent(name: ?[]const u8) AgentKind {
 /// login/shell wrapper를 건너뛰고 같은 foreground group 안의 실제 agent 구성원을 찾는다. OS 열거와 provider 정책을
 /// 섞지 않도록 PTY는 이름 목록만 준다. 서로 다른 provider가 같은 group에 동시에 보이면 열거 순서로 임의 선택하지 않고
 /// none으로 실패해 오분류를 피한다. 같은 provider의 wrapper/native 중복은 하나로 취급한다.
+/// foreground 목록에서 **에이전트 프로세스의 pid**를 고른다(없으면 null). 세션 신원 env는 이 pid의 자식에게만
+/// 내려오므로(`agentSessionIdentity`) 결속의 출발점이다. 이름 판정은 `classifyAgent` 단일 출처를 재사용한다.
+fn agentProcessPid(processes: []const maru.pty.types.ForegroundProcessName, kind: AgentKind) ?i32 {
+    if (kind == .none) return null;
+    for (processes) |*process| {
+        if (classifyAgent(process.slice()) != kind) continue;
+        if (process.pid > 0) return process.pid;
+    }
+    return null;
+}
+
 fn classifyAgentProcesses(processes: []const maru.pty.types.ForegroundProcessName) AgentKind {
     var found: AgentKind = .none;
     for (processes) |*process| {
@@ -23956,6 +23967,9 @@ pub const AppSession = struct {
         // 줄 수는 `reply()`만 늘리므로 "프롬프트는 이미 있고 응답만 새로 왔다"에서 재투영이 안 돌아 렌더는 3줄을
         // 그리고 행 높이는 2줄로 남았다 — 그러면 응답 줄이 다음 행 위에 그려지고 클릭이 이웃 행의 ✕에 닿는다
         // (code-review max). 프롬프트는 1행 안에서 자리를 바꿀 뿐이라 줄 수에 영향이 없다.
+        // **provider가 밝힌 세션 신원**을 먼저 확보한다(§7.2 채택안). 얻으면 그 값으로 파일을 확정하고, 못 얻으면
+        // 아래 provider 경로가 활동 상관 폴백으로 내려간다. 자식이 떠 있는 순간에만 읽히므로 캐시가 필수다.
+        self.refreshAgentSessionIdentity(term);
         const had_reply = cache.owned.reply().len > 0;
         // provider마다 다른 건 **경로 규칙·신원 확인·레코드 모양** 셋뿐이다(§7.3). 매핑 규율(고정하지 않음)·throttle·
         // 재투영은 여기 공통으로 남는다.
@@ -23973,11 +23987,39 @@ pub const AppSession = struct {
         if (displayed) self.metal_dirty = true;
     }
 
+    /// 에이전트가 자식에게 내려주는 **세션 신원**을 캐시에 채운다(claude `CLAUDE_CODE_SESSION_ID`, codex
+    /// `CODEX_THREAD_ID`). 이미 값이 있으면 자식이 없어도 유지하고, 새 값이 오면 교체한다(`/clear`로 세션이
+    /// 갈리는 경우 — 같은 프로세스가 새 id를 내려준다).
+    ///
+    /// 자식은 **도구 실행 중에만** 존재하므로 대부분의 호출은 null이다. 그래서 값을 얻지 못한 것 자체는 실패가
+    /// 아니고, 호출부는 신원이 있으면 확정 결속·없으면 활동 상관 폴백으로 갈린다.
+    fn refreshAgentSessionIdentity(self: *AppSession, term: *Term) void {
+        if (!is_macos) return; // 원격 host-backed는 pid가 이 기계에 없다 — 폴백 경로가 받는다
+        const key: []const u8 = switch (term.agent_kind) {
+            .claude => "CLAUDE_CODE_SESSION_ID",
+            .codex => "CODEX_THREAD_ID",
+            .none => return,
+        };
+        const pid = agentProcessPid(term.rt.observation.foreground_processes.items, term.agent_kind) orelse return;
+        var buf: [maru.session.agent_transcript.max_identity_bytes]u8 = undefined;
+        const value = maru.pty.PtySession.agentSessionIdentity(pid, key, &buf) orelse return;
+        const cache = &term.agent_transcript;
+        if (std.mem.eql(u8, cache.identity(), value)) return;
+        // 신원이 바뀌었다 = 다른 세션이다. 옛 대화가 새 세션 행에 남지 않게 매핑을 통째로 버린다.
+        cache.reset();
+        cache.setIdentity(value);
+        self.metal_dirty = true;
+    }
+
     /// claude: 작업 디렉터리를 인코딩한 디렉터리의 **직속** 파일만 본다 — 서브에이전트 기록은 `<세션 id>/` 하위에
     /// 쌓이므로 그것만으로 배제된다(§7.3). 대화가 갱신됐으면 true.
     fn refreshClaudeTranscript(self: *AppSession, term: *Term, cwd: []const u8) bool {
         const tr = maru.session.agent_transcript;
         const cache = &term.agent_transcript;
+        // **신원이 없으면 아무것도 하지 않는다.** 예전엔 여기서 "그 디렉터리의 가장 최신 파일"을 추측했는데, 그게
+        // 새 터미널에 직전 세션의 대화를 붙이고(사용자 제보) 같은 cwd의 두 에이전트가 서로의 대화를 물게 했다.
+        // 추측으로 틀린 대화를 보여주느니 비우는 편이 낫다는 계약 1과도 어긋났다 — 그래서 폴백을 없앴다(§7.2).
+        if (cache.identity_len == 0) return false;
         const home_z = std.c.getenv("HOME") orelse return false;
         const home = std.mem.span(home_z);
         var slug_buf: [1024]u8 = undefined;
@@ -23987,34 +24029,17 @@ pub const AppSession = struct {
         const dir = std.Io.Dir.openDirAbsolute(self.io, dir_path, .{}) catch return false;
         defer dir.close(self.io);
 
-        // **매핑을 고정하지 않는다**(계약 2). Term이 새로 출력했으면(= mapped_output_ms가 어긋나면) 그 시점의 최신
-        // 파일을 다시 고른다 — `/clear`로 같은 프로세스가 파일을 갈아타도 따라간다(§7.2 반증 2). 유휴 세션은 스스로
-        // 갱신되지 않으므로 "그 순간 최신 = 그 Term이 방금 말한 세션"이 성립한다(실측: claude 4/4).
+        // **신원이 곧 파일명이다** — `CLAUDE_CODE_SESSION_ID`가 그대로 `<id>.jsonl`이다(provider가 자식 env로 밝힌
+        // 값, §7.2). 디렉터리를 훑을 것도 시간을 비교할 것도 없다.
         var name_buf: [tr.max_name_bytes]u8 = undefined;
-        if (cache.name_len == 0 or cache.mapped_output_ms != term.agent_last_output_ms) {
-            // 같은 cwd의 **다른** Term이 이미 매핑한 파일은 후보에서 뺀다. 안 그러면 한 저장소에서 에이전트 둘을
-            // 돌릴 때 둘 다 전역 최신 파일을 물어 한쪽 행에 다른 쪽 대화가 뜨고, 같은 캐시를 읽는 알림 본문까지
-            // 옆 팬의 프롬프트로 캡션된다(code-review max). cwd 대조는 둘 다 같은 cwd라 못 걸러낸다.
-            var taken_buf: [transcript_sibling_scan_limit][]const u8 = undefined;
-            const taken = self.claudeTranscriptsTakenBy(term, &taken_buf);
-            const found = tr.latestSessionFile(self.io, dir, &name_buf, taken) orelse return false;
-            if (!self.transcriptPlausiblyBelongsTo(term, found.mtime_ns)) {
-                // **매핑을 확정하지 않고 물러난다.** 새로 띄운 에이전트는 몇 초 뒤 자기 파일을 만드는데, 여기서
-                // mapped_output_ms를 올려버리면 그 Term이 다시 출력할 때까지(= 사용자가 뭔가 칠 때까지) 재시도가
-                // 없어 그 사이 내내 대화 줄이 빈다. claude 경로의 재스캔은 단일 디렉터리라 값싸므로(실측 0.14ms)
-                // 폴링 주기마다 다시 보는 편이 낫다 — codex는 트리 전체라 사정이 달라 시도 시각을 기록한다.
-                return false;
-            }
-            if (!std.mem.eql(u8, found.name, cache.fileName())) {
-                cache.setFileName(found.name);
-                cache.read_mtime_ns = 0; // 파일이 바뀌었으면 mtime 비교를 건너뛰고 무조건 읽는다
-                cache.owned.clear(); // 세션이 바뀌었다 — 병합이 옛 대화를 새 세션 행에 남기지 않게 먼저 비운다
-            }
-            cache.mapped_output_ms = term.agent_last_output_ms;
+        const wanted = std.fmt.bufPrint(&name_buf, "{s}.jsonl", .{cache.identity()}) catch return false;
+        if (!std.mem.eql(u8, wanted, cache.fileName())) {
+            cache.setFileName(wanted);
+            cache.read_mtime_ns = 0;
+            cache.owned.clear();
         }
-        if (cache.name_len == 0) return false;
 
-        // mtime이 그대로면 다시 읽지 않는다(계약 4) — 대화가 안 바뀌었는데 매초 파싱할 이유가 없다.
+        // mtime이 그대로면 다시 읽지 않는다(계약 4).
         const st = dir.statFile(self.io, cache.fileName(), .{}) catch return false;
         if (st.mtime.nanoseconds == cache.read_mtime_ns) return false;
         cache.read_mtime_ns = st.mtime.nanoseconds;
@@ -24028,65 +24053,9 @@ pub const AppSession = struct {
         defer parse_arena.deinit();
         var fresh: maru.session.agent_transcript.Owned = .{};
         tr.parseClaudeTail(parse_arena.allocator(), tail, &fresh);
-        // **남의 기록을 띄우지 않는다**: 파일이 스스로 밝힌 cwd가 이 Term의 cwd와 다르면 버린다. 디렉터리 이름
-        // 인코딩 규칙(claudeDirName)이 불완전해 엉뚱한 디렉터리를 열더라도 여기서 걸린다(§7.3).
-        const claimed = fresh.cwd();
-        if (claimed.len > 0 and !std.mem.eql(u8, claimed, cwd)) {
-            // 대화만 비우면 **거부한 파일의 mtime이 캐시에 남아** 활동 시각 폴백이 남의 파일 시각을 이 행의 값으로
-            // 보여준다(code-review max). 매핑 자체가 틀린 것이므로 통째로 버려 다음 폴링이 다시 고르게 한다.
-            cache.reset();
-            return true;
-        }
-        // 못 찾은 항목은 이전 값을 지킨다 — provider와 무관한 같은 규율이다(§7.8). claude는 지금 회수율이 높아
-        // 실익이 작지만, 규율이 하나여야 codex와 코드가 갈리지 않고 포맷이 바뀌어도 조용히 비지 않는다.
+        // 못 찾은 항목은 이전 값을 지킨다(§7.8) — provider 무관 공통 규율.
         tr.mergeKeepingMissing(&cache.owned, &fresh);
         return true;
-    }
-
-    /// 이 세션 기록이 **그 Term의 것일 수 있는가** — 파일 갱신 시각과 Term의 마지막 출력 시각을 대조한다.
-    ///
-    /// 활동 상관 매핑(§7.2)의 전제는 "그 Term이 방금 말했고, 그 순간 갱신된 파일이 그 세션"이다. 그런데 픽은
-    /// **그 순간 최신 파일**만 보고 시간 관계를 보지 않았다 — 그래서 **새로 띄운 에이전트**가 아직 아무것도 쓰지
-    /// 않았는데(시작 화면만 그렸다) 직전 세션 파일이 여전히 최신이라 그걸 물었고, 새 터미널에 남의 옛 대화가
-    /// 붙었다(사용자 제보 — 시작 화면뿐인 pane 둘에 서로 다른 과거 대화가 떴다).
-    ///
-    /// 파일이 Term의 마지막 출력보다 **한참 과거**면 그 Term이 쓴 기록일 수 없다. 반대 방향(파일이 더 최신)은
-    /// 정상이다 — 에이전트는 화면에 그리기 전후로 기록을 쓴다.
-    ///
-    /// 출력 시각을 모르면(스탬프 전) 판단할 근거가 없으므로 통과시킨다 — 계약 1대로 틀린 대화를 띄우느니 비우는
-    /// 편이 낫지만, 여기서 막으면 정상 세션도 첫 폴링을 놓친다. 다음 출력에서 이 검사가 다시 걸린다.
-    fn transcriptPlausiblyBelongsTo(self: *AppSession, term: *Term, mtime_ns: i96) bool {
-        _ = self;
-        const out_ns = term.agent_last_output_wall_ns;
-        if (out_ns == 0 or mtime_ns == 0) return true;
-        if (mtime_ns >= out_ns) return true;
-        return (out_ns - mtime_ns) <= transcript_staleness_grace_ns;
-    }
-
-    /// 같은 작업 디렉터리에서 **다른** Term이 이미 매핑한 claude 세션 파일 이름들. `latestSessionFile`이 이들을
-    /// 건너뛰어 에이전트마다 자기 세션에 앉는다.
-    ///
-    /// 완벽한 소유권 등록부가 아니라 **충돌 회피**다 — 정확한 Term↔파일 결속은 provider가 그 연결을 노출해야
-    /// 가능하고(§7.2 반증), 여기서 필요한 건 "둘이 같은 파일을 보지 않게" 하는 것뿐이다. 상한을 둬 Term이 많아도
-    /// 이 스캔이 커지지 않게 한다.
-    fn claudeTranscriptsTakenBy(self: *AppSession, self_term: *Term, out: [][]const u8) []const []const u8 {
-        const cwd = self_term.rt.observation.cwd.items;
-        var n: usize = 0;
-        for (self.tabs.items) |tab| {
-            for (tab.panes.items) |pane| {
-                for (pane.terms.items) |other| {
-                    if (other == self_term) continue;
-                    if (other.agent_kind != .claude) continue;
-                    if (other.agent_transcript.name_len == 0) continue;
-                    // 같은 디렉터리를 보는 Term만 충돌한다.
-                    if (!std.mem.eql(u8, other.rt.observation.cwd.items, cwd)) continue;
-                    if (n >= out.len) return out[0..n];
-                    out[n] = other.agent_transcript.fileName();
-                    n += 1;
-                }
-            }
-        }
-        return out[0..n];
     }
 
     /// codex: 날짜 계층(`YYYY/MM/DD`)이라 디렉터리 이름이 작업 디렉터리를 말해주지 않고, 서브에이전트 기록이
@@ -24095,6 +24064,8 @@ pub const AppSession = struct {
     fn refreshCodexTranscript(self: *AppSession, term: *Term, cwd: []const u8) bool {
         const tr = maru.session.agent_transcript;
         const cache = &term.agent_transcript;
+        _ = cwd; // 신원으로 파일을 확정하므로 cwd 대조가 필요 없다(그 값이 곧 그 세션이다)
+        if (cache.identity_len == 0) return false; // claude와 같은 이유로 폴백 없음(§7.2)
         const home_z = std.c.getenv("HOME") orelse return false;
         const home = std.mem.span(home_z);
         var path_buf: [2048]u8 = undefined;
@@ -24102,38 +24073,16 @@ pub const AppSession = struct {
         const root = std.Io.Dir.openDirAbsolute(self.io, root_path, .{}) catch return false;
         defer root.close(self.io);
 
-        if (cache.name_len == 0 or cache.mapped_output_ms != term.agent_last_output_ms) {
-            // stat은 전수로 돌리되(실측 232개 ≈ 1ms) **여는 건 상위 후보만** — 여는 쪽이 진짜 비용이다(전량 파싱 82ms).
-            var candidates: [codex_candidate_probe_limit]maru.session.agent_transcript.CodexCandidate = undefined;
-            const n = tr.collectCodexCandidates(self.io, root, &candidates);
-            var head_buf: [codex_head_bytes]u8 = undefined;
-            var cwd_buf: [1024]u8 = undefined;
-            var picked = false;
-            for (candidates[0..n]) |cand| {
-                const head = tr.readHead(self.io, root, cand.slice(), &head_buf);
-                if (head.len == 0) continue;
-                var meta_arena = std.heap.ArenaAllocator.init(self.allocator);
-                defer meta_arena.deinit();
-                const meta = tr.parseCodexMeta(meta_arena.allocator(), head, &cwd_buf);
-                if (!meta.is_user) continue; // 서브에이전트·자동 스레드 — 사용자 카드에 내부 대화를 띄우지 않는다
-                if (!std.mem.eql(u8, meta.cwd, cwd)) continue; // 다른 워크스페이스의 세션
-                if (!self.transcriptPlausiblyBelongsTo(term, cand.mtime_ns)) continue; // 이 Term이 쓴 기록이 아니다
-                if (!std.mem.eql(u8, cand.slice(), cache.fileName())) {
-                    cache.setFileName(cand.slice());
-                    cache.read_mtime_ns = 0;
-                    cache.owned.clear(); // 세션이 바뀌었다 — 옛 대화를 새 세션 행에 남기지 않는다
-                }
-                picked = true;
-                break;
-            }
-            // **실패도 기록한다.** 안 그러면 이 출력 시각에 대해 매 폴링(1s)마다 날짜 트리 전체를 stat하고 상위
-            // 후보를 열어 파싱하는 일이 그 Term이 사는 내내 반복된다 — cwd가 문자열로 안 맞는 경우(심볼릭 경로 등)
-            // 영영 성공하지 않으므로 프레임 히치만 남는다(code-review max). 다음 출력 때 다시 시도하므로 세션이
-            // 새로 생기면 그때 잡힌다.
-            cache.mapped_output_ms = term.agent_last_output_ms;
-            if (!picked) return false;
+        // **신원이 파일명에 박혀 있다** — rollout 파일명이 `rollout-<ts>-<thread_id>.jsonl`이고 `CODEX_THREAD_ID`가
+        // 그 thread_id(= `session_meta.id`)다. 후보를 열어 신원을 확인할 필요가 없어졌다.
+        if (cache.name_len == 0) {
+            var suffix_buf: [tr.max_identity_bytes + 8]u8 = undefined;
+            const suffix = std.fmt.bufPrint(&suffix_buf, "{s}.jsonl", .{cache.identity()}) catch return false;
+            var found_buf: [tr.max_name_bytes]u8 = undefined;
+            const found = tr.findCodexByThreadId(self.io, root, suffix, &found_buf) orelse return false;
+            cache.setFileName(found);
+            cache.read_mtime_ns = 0;
         }
-        if (cache.name_len == 0) return false;
 
         const st = root.statFile(self.io, cache.fileName(), .{}) catch return false;
         if (st.mtime.nanoseconds == cache.read_mtime_ns) return false;
@@ -24146,11 +24095,8 @@ pub const AppSession = struct {
 
         var parse_arena = std.heap.ArenaAllocator.init(self.allocator);
         defer parse_arena.deinit();
-        // cwd 대조는 후보를 고를 때 이미 했다(session_meta) — tail엔 cwd가 없다.
         var fresh: maru.session.agent_transcript.Owned = .{};
         tr.parseCodexTail(parse_arena.allocator(), tail, &fresh);
-        // **못 찾은 항목은 이전 값을 지킨다**(§7.8). codex는 긴 턴에 추론·도구 레코드가 쌓여 프롬프트가 tail 밖
-        // (실측 최악 22MB)으로 밀린다 — 사용자가 칠 때는 파일 끝이라 반드시 잡히고, 그 뒤로는 이 병합이 지킨다.
         tr.mergeKeepingMissing(&cache.owned, &fresh);
         return true;
     }

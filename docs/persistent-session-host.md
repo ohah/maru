@@ -2190,6 +2190,129 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
   unsupported notice를 반환하며 기존 controller와 runtime을 바꾸지 않는다. 실제 frozen old host에서 observer attach
   성공, takeover request 0, 기존 controller input 지속을 고정하고, 새 host에는 generation-CAS
   `controller.takeover`만 보낸다는 양방향 fixture도 포함한다.
+  P5c3는 아래 네 merge slice를 모두 통과해야 완료이며 중간 slice만으로 공개 attach 완료를 주장하지 않는다.
+  - **P5c3a — parser·runtime resolver·attachment role**: `src/cli/attach.zig`가
+    `maru attach [--read-only | --take-over] <32-lower-hex-runtime-id>`의 순수 parser/help/exit mapping을 소유한다.
+    두 option은 상호 배타적이고 runtime ID는 P5a2와 같은 canonical lower hex만 허용한다. discovery 전에
+    `!isatty(stdin) || !isatty(stdout)`이면 usage exit 2로 거부하고 두 fd의 `fstat.st_rdev`가 같아 같은 controlling
+    TTY를 가리켜야 한다. stderr는 banner/error 전용이라 TTY를 요구하지 않는다. resolver는 read/admin CLI의 secure manifest
+    열거·same-UID/owner/mode/link/regular-file 검증을 재사용하되 exact-current-build만 고르는 `connectCurrent`나
+    admin one-shot connection을 재사용하지 않는다. 지원 adapter 범위의 live descriptor 각각에 one-shot
+    `runtime.get(runtime_id)`를 보내 membership을 확인한다. live compatible descriptor가 0이면 host-unavailable 3이다.
+    descriptor가 하나 이상이고 모든 eligible candidate가 conclusively `match` 또는 `runtime_not_found`를 반환했을 때만
+    0/1/2 match를 판정한다. 확정 0 match는 runtime-not-found 7이고, exactly one이면 immutable
+    `ResolvedHostDescriptor(host_id, socket identity, build/major/codec/epoch)`로 pin한다. 0개는 runtime-not-found, 2개
+    이상은 denied다. eligible candidate 하나라도 busy/transient/denied/protocol/OOM이면 match가 따로 있어도 전체 resolver를
+    fail-closed하고 attach/connect 0으로 반환한다. 서로 다른 inconclusive가 섞이면 열거 순서와 무관하게
+    internal/OOM exit 1 → denied 4 → protocol 8 → busy 6 → host-unavailable 3 순서로 가장 앞의 원인을 고른다.
+    host를 spawn하지 않는다. 장기 `client_kind=cli`
+    connect 직전에 descriptor를 다시 열거해 exact identity를 재검증하여 path/manifest ABA를 막는다.
+
+    GUI `RemoteRuntime`에 CLI role을 덧대지 않고 `RemoteAttachment`를 공용 lower seam으로 추출한다. 이 객체는
+    stream subscription, granted role/generation, `RemoteScreen`과 per-stream queue만 소유하고 connection transport는
+    `AttachmentTransport` interface로 borrow한다. fd/parser/request-id/TX/RX demux의 단일 owner는 GUI에서는 app-global
+    `Client`, CLI에서는 CLI stack이 소유한 단 하나의 `Client`다. `RemoteAttachment`는 strict
+    attach/status/takeover/revoked decoder와 input/resize 권위 검사를 제공하며 GUI `Surface`를 소유하지 않는다. GUI
+    `RemoteRuntime`과 외부 attach가 이를 각각 소비한다. hello는 `controller_transfer_v1`을 광고하고 ACK capability를
+    bool로 보존한다. `--read-only`는
+    `mode=observer`, 기본은 `mode=controller`이며 host의 strict `granted` 결과가 role SSOT다. busy→observer demotion만
+    허용하고 stderr banner를 한 번 낸다. `--take-over`는 observer attach/snapshot과 capability 확인 뒤, raw 진입 전에
+    `controller.status` exact runtime/stream/generation을 읽고 generation-CAS takeover를 정확히 한 번 보낸다. capability
+    부재는 request 0·detach·unsupported 5, stale/busy/unauthorized 또는 malformed response는 retry 0·detach와 각각
+    busy/denied/protocol exit다. host unavailable 3, denied 4, unsupported 5, busy 6, runtime-not-found 7, protocol 8의
+    기존 exit mapping을 재사용한다.
+  - **P5c3b — neutral screen→ANSI projector**: 별도 `external_ansi.zig` adapter가 `ScreenSource` lock 안에서
+    backend-neutral `RenderSnapshot`을 한 immutable bounded full-repaint frame으로 직렬화한다. `RemoteScreen` private
+    grid, PTY byte stream이나 parser state는 읽거나 다시 해석하지 않는다. exact enter bytes는 공백 없는
+    `\x1b[?1049h\x1b[?25l`, exact leave bytes는 `\x1b[0m\x1b[?25h\x1b[?1049l`이다. ECMA-48 표준 모드가 아니라
+    xterm ctlseqs의 private alternate-screen mode지만 Terminal.app/iTerm2/Ghostty가 공통 지원하고 caller 화면과 cursor를
+    함께 복원하는 de-facto 계약이라 채택한다. `1049`가 cursor save/restore까지 소유하므로 별도 save/restore sequence를
+    섞지 않는다. repaint는 완결 검증된 snapshot/delta 뒤에만 만들고 `ED 2`로 이전 cell과 letterbox를 모두
+    지운 뒤 각 grapheme anchor를 CUP로 다시 고정해 local `wcwidth` 차이가 다음 cell 위치로 전파되지 않게 한다. wide
+    continuation과 right-edge에서 잘린 anchor는 출력하지 않고 bottom-right autowrap은 CUP/erase로 회피한다. 마지막에
+    host cursor가 viewport 안이고 visible일 때만 exact CUP와 show를 내고, 아니면 hide한다. cursor shape/blink는
+    caller terminal의 1049 save/restore에 맡기며 P5c3에서 DECSCUSR로 재생하지 않는다.
+
+    text는 ESC, C0, C1, DEL을 U+FFFD로 치환하고 hard-coded emitter 밖의 byte가 terminal control이 될 수 없게 한다.
+    default/indexed/RGB foreground/background, bold/faint/italic/underline style·color, blink, inverse, invisible,
+    strikethrough의 허용 SGR 표를 명시적으로 매핑하며 unknown enum/value는 protocol error이고 raw escape passthrough는
+    없다. OSC 8 link target, kitty image payload, prompt mark와 scrollback history는 P5c3 ANSI projection에서 재생하지
+    않는다. local size가 P5c2 applied-size와 다르면 top-left crop/blank letterbox한다. local viewport는 host
+    per-runtime `1,048,576` cell 상한을 넘지 못하고 checked arithmetic으로 만든 enter/leave는 각각 64 byte,
+    full repaint 한 장은 `32 MiB`가 hard cap이다. current+latest repaint resident 합은 `64 MiB`이며 exact-cap은
+    허용한다. cap+1·곱셈/덧셈 overflow·unknown style은 publish 0과 protocol exit 8 fail-close, allocation OOM은
+    publish 0과 internal exit 1 cleanup이다. 이미 적용된 generation을 stale 화면으로 계속 보여주지 않는다.
+  - **P5c3c — nonblocking single-owner event loop**: `external_attach.zig`의 한 stack owner가 `RawTty`, 단 하나의
+    `Client`, 그 client를 borrow하는 `RemoteAttachment`, ANSI stdout queue, resize와 detach chord를 소유한다. raw 진입
+    전에도 기존 `SO_RCVTIMEO`/blocking `writeAll`을 deadline으로 간주하지 않는다. resolver 전체, selected
+    connect+hello, role-selected attach+initial snapshot, optional status+takeover를 각각 하나의 5초 absolute monotonic
+    phase로 감싼 deadline-aware `Client` transport를 먼저 구현한다. nonblocking poll과 같은 incremental parser를 써
+    byte drip이나 write stall이 있어도 progress로 absolute deadline을 연장하지 않는다. timeout은 socket close,
+    detach request 0, raw/ANSI mutation 0으로 끝나며 resolver/connect는 host-unavailable 3, selected attach/snapshot과
+    takeover는 protocol 8이다. raw 진입 뒤에는
+    blocking `Client.call`/`readSnapshot`/`resize`/`detachBestEffort`를 호출하지 않는다. 별도 socket wrapper로 fd를
+    handoff하지 않고 같은 `Client`를 nonblocking pump mode로 전환한다. 따라서 blocking phase parser에 미리 들어온
+    delta/event, pending stream/batch, next request ID와 negotiated capability가 그대로 보존되고 fd/parser reader는
+    계속 하나다. 이 mode의 `AttachmentTransport` 구현은 nonblocking socket, 기존 incremental parser, request-id response
+    correlation, 단일 in-flight control RPC, bounded TX frame+offset, RX turn byte/frame budget와 response/event/screen
+    demux를 제공한다. mode 전환은 allocation/mutation 실패 시 blocking 상태를 보존하는 transaction이며 성공 뒤 blocking
+    API 호출을 typed reject한다. stdin은 남은 64 KiB input admission만 읽고 queue가 차면 POLLIN interest를 끈다.
+
+    inherited stdout open-file-description에 `O_NONBLOCK`을 설정하지 않는다. raw 진입 전에 `ttyname_r(stdout)`의
+    canonical slave path를 얻고 `O_WRONLY|O_NOCTTY|O_CLOEXEC|O_NONBLOCK|O_NOFOLLOW`의 새 open-file-description으로
+    연다. open 전후 stdout `st_rdev`가 같고 새 fd가 character device이며 같은 `st_rdev`인지 재검증한다. path/identity
+    race나 open/fstat 실패는 raw 진입 전에 denied 4다. 이 dedicated fd만 cleanup에서 닫으므로 parent shell의 status
+    flags는 모든 exit/signal에서 byte-for-byte 불변이다. poll set은 stdin, host socket, 전용 tty output, P5c1
+    self-pipe를 포함한다. 한 turn의 우선순위는
+    termination signal → host RX read/demux의 revoke/EOF/protocol failure → chord deadline → socket TX flush →
+    stdout flush →
+    latest resize → stdin이며 각 lower-priority action 직전에 terminal/role generation을 재검증한다. stdout은
+    nonblocking `POLLOUT`으로 immutable frame+offset 하나를 보존한다. 일부라도 출력한 frame은 섞지 않고 완성하며 그
+    동안 새 repaint는 latest full frame 하나로 coalesce한다. 아직 0 byte인 frame만 최신 frame으로 교체할 수 있다.
+    socket RX/TX는 각각 turn당 `1 MiB/64 frame`, stdin과 tty output은 각각 `64 KiB`까지 처리한다. stdout frame은
+    마지막 progress부터 10초 또는 최초 write 시도부터 absolute 30초 중 먼저 도달하면 socket을 닫고 repaint를 폐기한
+    뒤 cleanup으로 수렴한다. cleanup용 64-byte leave frame은 별도 고정 reserve를 쓴다. 정상 cleanup은 active repaint
+    완료에 최대 100 ms, leave에 최대 100 ms만 쓰고, signal/revoke/error cleanup은 active/latest repaint를 즉시
+    폐기한 뒤 leave를 최대 100 ms만 시도한다. 이미 출력된 partial ANSI prefix 때문에 visual state의 exact 복원이
+    불가능할 수 있어 이 실패 경로는 raw/status-flag 복원만 보장하며 leave 시도는 raw restore·signal 재발행을
+    지연시키지 않는다.
+
+    observer도 stdin을 drain해 detach chord만 해석하고 나머지 bytes를 로컬에서 억제하여 host input/resize를 0으로
+    유지한다. detach prefix `0x1c`(`Ctrl-\`) 뒤 `d`는 local detach, 두 번째 prefix는 literal 한 byte, 다른 byte는
+    prefix+byte 순서 전송이며 prefix만 있으면 1초 monotonic deadline 뒤 literal로 전송하고 EOF면 버린다. controller
+    attach/takeover 완전 응답 뒤에만 forced first resize와 input을 허용한다. revoke는 아직 wire에 0 byte인 queued
+    input/resize만 취소한다. 일부 전송된 frame이 있으면 truncation하지 않고 connection fail-close하며, host의 role
+    generation fence는 takeover commit 뒤 owner가 dispatch하려는 old-stream input을 재검증해 거부한다. commit 전에
+    이미 linearize된 old-controller input은 적용될 수 있으며 P5b3의 두 허용 linearization을 바꾸지 않는다.
+    `controller.revoked`를 strict 적용하면 role generation을 갱신하고 chord/input/resize/current+latest repaint를
+    폐기한 뒤 read-only observer로 계속 남지 않고 stderr notice 1회와 denied exit 4로 teardown한다. 모든
+    detach·EOF·오류는 runtime terminate 0,
+    nonblocking detach enqueue 또는 socket close(EOF detach), bounded ANSI leave, raw restore로 수렴한다. signal은
+    입력/resize를 더 만들지 않고 leave를 bounded 시도한 뒤 `RawTty.restoreAndForward`가 원래 disposition으로
+    재발행한다.
+  - **P5c3d — product compatibility/E2E**: built `maru`와 실제 session host/runtime, 별도 `openpty` attach child를
+    각 단계별 5초 monotonic deadline으로 구동한다. controller fixture는 initial snapshot marker, raw input→PTY output,
+    resize ACK 뒤 repaint, 모든 chord chunk 경계·timeout·EOF, detach 뒤 byte-for-byte termios restore, runtime·child PID
+    생존과 두 번째 attach의 같은 marker를 검증한다. enter/repaint/leave exact byte oracle과 작은 ANSI state model이
+    alternate-screen·cursor·blank/style/crop/wide/grapheme/injection 결과를 검증하며 `openpty`가 terminal emulator
+    상태를 증명한다고 주장하지 않는다. observer는 banner·local input 억제·host input/resize 0·sibling 진행을,
+    takeover는 stale CAS request 1/retry 0과 성공 뒤 old revoke/new authority를 검증한다.
+
+    P5c3d가 먼저 pre-P5b3 same-major fixture source와 expected fingerprint를 저장소의 hermetic build input으로 추가해
+    provenance를 고정한 뒤 resolver의 old descriptor 선택, observer attach/detach, capability 없는 takeover request 0과
+    기존 controller input 지속을 검증한다. 기존 `session_host_upgrade_old_v1`은 이전 major fixture라 이 증거를 대신하지
+    않는다. resolver는 no-live-host, 0/1/2 match뿐 아니라 1 match+1 inconclusive에서도 정해진 typed exit와
+    attach/connect 0이어야 한다. one-sided
+    non-TTY와 다른 `st_rdev`는 discovery/connect 0이어야 한다. blocking→nonblocking mode 전환 직전/직후 주입한
+    snapshot+delta+event와 request ID/capability 보존도 검증한다. pre-raw 각 absolute 5초 phase는 injected clock의
+    byte-drip/read stall/write stall에서 deadline을 늘리지 않고 socket close·detach 0·raw mutation 0이어야 한다.
+    inherited stdin/stdout status flags의 모든
+    exit/signal 전후 equality와 `ttyname_r`로 연 exact slave fd close, exact/cap+1/overflow도 고정한다. 10/30초와
+    100ms deadline state machine은 injected monotonic clock/test budget으로 결정적으로 검증한다. socket/stdout backpressure,
+    partial wire/repaint 중 signal·revoke, malformed granted/status/revoke/resize, allocator fail-index와 all exit mapping을
+    포함한다. timeout artifact에는 phase·last progress·child/host/runtime identity와 bounded queue counters를 남기고
+    모든 subprocess/fd/socket/PTY를 `SIGKILL`+exact reap한다. runtime/child 생존을 단언한 뒤 fixture cleanup에서만
+    explicit terminate하고 subscription/attachment/reactor ledger 0을 단언한다.
 - **P5d — SSH packaging/smoke**: PATH와 signed artifact에서 `ssh -t host maru attach ...`가 같은 protocol client를
   실행하는 packaging을 고정하고 localhost sshd smoke를 추가한다. runner에 sshd prerequisite가 없으면 이 slice는
   미완료다.

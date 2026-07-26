@@ -1760,14 +1760,23 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
     write deadline을 따른다. request 없이 만료한 admin은 같은 teardown으로 lease를 반환한다.
     pipelined 두 번째 request는 dispatch하지 않는다. public CLI/help는 아직 열지 않는다. 향후 raw attach는 장기 연결
     `cli` role을 사용하므로 admin과 분리한다. current host는 hello ack에 `admin_one_shot_v1`을 광고한다.
-  - **P5a1c — upgrade all-or-none preflight:** prepare를 stage하기 전에 owner가 requester의 현재 dispatch 하나를
+  - **P5a1c — upgrade all-or-none preflight (구현):** prepare를 stage하기 전에 global admission을 임시
+    reservation으로 먼저 닫고 owner가 requester의 현재 dispatch 하나를
     제외한 모든 slot의 partial parser/read, partial 또는 queued write, 선행/in-flight dispatch, attachment를 한 번
-    검사한다. 하나라도 busy면 slot을 하나도 닫거나 stage/gate-close하지 않고 `upgrade_busy`를 보낸다. idle이면
+    검사한다. parser 밖의 requester/sibling kernel receive queue도 non-destructive `MSG_PEEK`으로 검사해
+    reservation 선형화점 전에 이미 도착했지만 poll owner가 아직 소비하지 않은 frame의 유실을 막는다.
+    reservation 뒤 새로 도착한 frame은 admission되지 않은 요청이며 성공 시 connection close 뒤 client retry
+    대상이다. peer write 자체를 멈추는 protocol fence/ACK는 이 slice의 계약이 아니다. 하나라도 busy면 slot을
+    하나도 닫거나 stage하지 않고
+    임시 reservation을 즉시 다시 열어 `upgrade_busy`를 보낸다. idle이면
     global admission close→선행 dispatch 0→accepted reply flush→request slot close/remove→검증된 idle slot canonical
     close→slot/dispatch/subscription/attachment 0 순서로만 typed preclosed marker를 outer coordinator에 넘긴다.
     idle 판정은 `Client`가 slot과 parser 상태를 함께 검사하고, 실제 정리는 `Owner.destroyClient`만 사용한다.
     `ReactorCore.closeIdleForUpgrade`로 slot을 먼저 닫아 canonical client teardown과 이중 회수하지 않는다. 따라서
-    실행됐지만 reply가 유실된 mutation을 upgrade 성공으로 숨기지 않는다.
+    실행됐지만 reply가 유실된 mutation을 upgrade 성공으로 숨기지 않는다. reservation 뒤에는 accepted reply를
+    배출하는 requester만 fd/buffered-read/producer-cadence 대상으로 두고 sibling은 그대로 동결한다. stage reject,
+    reply encode/admission 실패, requester write/HUP 실패는 staged attempt를 취소하고 gate를 다시 연 뒤 sibling의
+    parser/kernel bytes와 cadence cursor를 이어서 처리한다.
 - **P5a2 — read/admin CLI**: P5a1 위에서 `maru host status`, `maru runtime list/get`과 parser/`--help`/`--json`
   fixture를 공개한다. client는 hello ack의 `admin_one_shot_v1`을 확인한 current host에서만 admin command를 보내며,
   capability가 없는 same-major/N-1 host를 일반 `unknown` role semantics로 추측하지 않고 typed unsupported로 끝낸다.

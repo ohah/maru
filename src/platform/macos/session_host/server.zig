@@ -55,6 +55,12 @@ pub const AdminAdmission = struct {
     }
 };
 
+pub const UpgradePreflight = struct {
+    ctx: *anyopaque,
+    reserve: *const fn (ctx: *anyopaque) bool,
+    cancel: *const fn (ctx: *anyopaque) void,
+};
+
 /// `runtime.spawn`의 중립 파라미터(server가 JSON에서 파싱해 넘긴다). host가 이 argv/크기로 실 PTY를 띄운다.
 pub const RuntimeSpawnParams = struct {
     /// `[command, args...]` — argv[0]은 실행 파일 경로. server는 JSON string 배열만 파싱하고 프로세스는 host가 띄운다.
@@ -352,6 +358,7 @@ pub const Connection = struct {
     /// `prepare`는 pending attempt 게시까지만 하고 즉시 반환해야 한다. Quiesce/exec는 reply-and-close와 gate lease
     /// release 뒤 daemon outer loop가 실행한다.
     upgrade_ops: ?upgrade_wire.Ops = null,
+    upgrade_preflight: ?UpgradePreflight = null,
     state: State = .pre_hello,
     selected_version: u16 = 0,
     client_kind: ClientKind = .unknown,
@@ -833,11 +840,18 @@ pub const Connection = struct {
         request_id: u64,
         params: ?std.json.ObjectMap,
     ) HandleError!Action {
-        if (!self.host_status.upgrade_capable) return self.replyError(request_id, .upgrade_unsupported);
+        if (!self.currentHostStatus().upgrade_capable)
+            return self.replyError(request_id, .upgrade_unsupported);
         const ops = self.upgrade_ops orelse return self.replyError(request_id, .upgrade_unsupported);
         const request = upgrade_wire.parsePrepare(params orelse
             return self.replyError(request_id, .invalid_request)) orelse
             return self.replyError(request_id, .invalid_request);
+        const preflight = self.upgrade_preflight orelse
+            return self.replyError(request_id, .upgrade_busy);
+        if (!preflight.reserve(preflight.ctx))
+            return self.replyError(request_id, .upgrade_busy);
+        var reservation_transferred = false;
+        defer if (!reservation_transferred) preflight.cancel(preflight.ctx);
         return switch (ops.stage_pending(ops.ctx, request)) {
             .accepted => blk: {
                 var action_ready = false;
@@ -856,6 +870,7 @@ pub const Connection = struct {
                 };
                 self.state = .closed;
                 action_ready = true;
+                reservation_transferred = true;
                 break :blk .{ .upgrade_accepted = .{
                     .bytes = wire,
                     .attempt_id = request.attempt_id,
@@ -2309,10 +2324,14 @@ test "server: hello with overlapping version acks host_id and moves to ready" {
 test "server: upgrade prepare publishes pending then replies-and-closes before daemon work" {
     const FakeOwner = struct {
         accepted: bool = false,
+        reject: bool = false,
         attempt_id: u128 = 0,
+        reservations: usize = 0,
+        reservation_cancels: usize = 0,
 
         fn stagePending(ctx: *anyopaque, request: upgrade_wire.PrepareRequest) upgrade_wire.PrepareDecision {
             const self: *@This() = @ptrCast(@alignCast(ctx));
+            if (self.reject) return .busy;
             if (self.accepted and self.attempt_id != request.attempt_id) return .conflict;
             self.accepted = true;
             self.attempt_id = request.attempt_id;
@@ -2333,6 +2352,17 @@ test "server: upgrade prepare publishes pending then replies-and-closes before d
         }
 
         fn cancelUnaccepted(_: *anyopaque, _: u128) void {}
+
+        fn reserve(ctx: *anyopaque) bool {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            self.reservations += 1;
+            return true;
+        }
+
+        fn cancelReservation(ctx: *anyopaque) void {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            self.reservation_cancels += 1;
+        }
     };
 
     var registry = reg.TerminalRuntimeRegistry.init(testing.allocator);
@@ -2352,9 +2382,43 @@ test "server: upgrade prepare publishes pending then replies-and-closes before d
     const request =
         \\{"method":"host.upgrade.prepare","params":{"attempt_id":"0000000000000000000000000000aabb","target_path":"/Applications/Maru.app/Contents/MacOS/maru","target_build_id":"sha256:build","target_sha256":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","handoff_reader_min":1,"handoff_reader_max":1}}
     ;
-    const result = try feedJson(&conn, .request, 9, request);
+    const missing_preflight = try feedJson(&conn, .request, 7, request);
+    defer if (missing_preflight.frame) |frame| frame.deinit(testing.allocator);
+    try testing.expect(!owner.accepted);
+    try testing.expect(std.mem.indexOf(
+        u8,
+        missing_preflight.frame.?.payload,
+        "\"error\":\"upgrade_busy\"",
+    ) != null);
+
+    conn.upgrade_preflight = .{
+        .ctx = &owner,
+        .reserve = FakeOwner.reserve,
+        .cancel = FakeOwner.cancelReservation,
+    };
+    var live_status: HostStatus = .{ .manifest_capable = true, .upgrade_capable = false };
+    conn.live_host_status = &live_status;
+    const revoked = try feedJson(&conn, .request, 8, request);
+    defer if (revoked.frame) |frame| frame.deinit(testing.allocator);
+    try testing.expect(!owner.accepted);
+    try testing.expect(std.mem.indexOf(
+        u8,
+        revoked.frame.?.payload,
+        "\"error\":\"upgrade_unsupported\"",
+    ) != null);
+    live_status.upgrade_capable = true;
+    owner.reject = true;
+    const stage_busy = try feedJson(&conn, .request, 9, request);
+    defer if (stage_busy.frame) |frame| frame.deinit(testing.allocator);
+    try testing.expect(!owner.accepted);
+    try testing.expectEqual(@as(usize, 1), owner.reservations);
+    try testing.expectEqual(@as(usize, 1), owner.reservation_cancels);
+    owner.reject = false;
+    const result = try feedJson(&conn, .request, 10, request);
     defer if (result.frame) |frame| frame.deinit(testing.allocator);
     try testing.expect(owner.accepted);
+    try testing.expectEqual(@as(usize, 2), owner.reservations);
+    try testing.expectEqual(@as(usize, 1), owner.reservation_cancels);
     try testing.expectEqual(@as(u128, 0xAABB), owner.attempt_id);
     try testing.expectEqualStrings("upgrade_accepted", result.action);
     try testing.expect(std.mem.indexOf(u8, result.frame.?.payload, "\"state\":\"accepted\"") != null);

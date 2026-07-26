@@ -721,9 +721,17 @@ pub const Slot = struct {
     }
 
     pub fn idleForUpgrade(self: *const Slot) bool {
+        return self.upgradeReady(0);
+    }
+
+    pub fn requesterReadyForUpgrade(self: *const Slot) bool {
+        return self.upgradeReady(1);
+    }
+
+    fn upgradeReady(self: *const Slot, expected_in_flight: usize) bool {
         return self.read_partial_started_ns == null and
             self.write_partial_started_ns == null and self.pending_bytes == 0 and
-            self.in_flight_dispatch == 0 and self.attached_streams == 0;
+            self.in_flight_dispatch == expected_in_flight and self.attached_streams == 0;
     }
 };
 
@@ -810,6 +818,11 @@ pub const ReactorCore = struct {
 
     pub fn activeCount(self: *const ReactorCore) usize {
         return self.table.active_count;
+    }
+
+    pub fn drainedForUpgrade(self: *const ReactorCore) bool {
+        return self.table.active_count == 0 and
+            self.budget.resident_bytes == 0 and self.budget.shared_bytes == 0;
     }
 
     /// EOF/protocol error/timeout teardown. Unsent queue and tracker accounting are purged by Slot.deinit.
@@ -1235,6 +1248,7 @@ test "connection slot upgrade drain rejects queued partial attached and dispatch
     const reactor = try ReactorCore.create(std.testing.allocator);
     defer reactor.destroy();
     const admission = try reactor.admit();
+    try std.testing.expect(!reactor.drainedForUpgrade());
     const slot = try reactor.get(admission);
     try std.testing.expect(slot.idleForUpgrade());
     slot.notePartial(.read, 1, true);
@@ -1299,6 +1313,7 @@ test "reactor normal close purges queued accounting and stale admission" {
     try reactor.closeConnection(admission);
     try std.testing.expectEqual(@as(usize, 0), reactor.budget.resident_bytes);
     try std.testing.expectEqual(@as(usize, 0), reactor.activeCount());
+    try std.testing.expect(reactor.drainedForUpgrade());
     try std.testing.expectError(error.Stale, reactor.get(admission));
     try std.testing.expectError(error.Stale, reactor.closeConnection(admission));
 }

@@ -99,6 +99,7 @@ pub const Owner = struct {
         var poll_count: usize = 1;
         for (self.clients, 0..) |maybe_client, slot_index| {
             const client = maybe_client orelse continue;
+            if (!gate_open and !client.isUpgradeDraining()) continue;
             var events: c_short = c.POLL.IN;
             if (client.wantsWrite()) events |= c.POLL.OUT;
             poll_fds[poll_count] = .{ .fd = client.fd, .events = events, .revents = 0 };
@@ -147,6 +148,7 @@ pub const Owner = struct {
         // clients must remain schedulable even when no kernel fd was ready.
         for (self.clients, 0..) |maybe_client, slot_index| {
             const client = maybe_client orelse continue;
+            if (!gate_open and !client.isUpgradeDraining()) continue;
             if (client.hasBufferedReadWork()) {
                 read_ready[slot_index] = true;
                 ready[slot_index] = true;
@@ -172,8 +174,7 @@ pub const Owner = struct {
             self.destroyClient(slot_index);
             if (marker) |armed| {
                 self.destroyAll();
-                std.debug.assert(self.server.subscriptions.count() == 0);
-                std.debug.assert(self.server.registry.attachmentCount() == 0);
+                if (!self.upgradeTeardownDrained()) return .listener_broken;
                 self.armed_upgrade = armed;
                 return .upgrade_ready;
             }
@@ -204,6 +205,10 @@ pub const Owner = struct {
                 .host_status = self.server.host_status,
                 .live_host_status = &self.server.host_status,
                 .admin_admission = &self.admin_admission,
+                .upgrade_preflight = .{
+                    .ctx = self,
+                    .check = upgradePreflight,
+                },
                 .now_ns = now_ns,
             },
         ) catch |err| switch (err) {
@@ -233,11 +238,23 @@ pub const Owner = struct {
         for (0..max_clients) |index| self.destroyClient(index);
     }
 
+    fn upgradeTeardownDrained(self: *const Owner) bool {
+        if (!self.reactor.drainedForUpgrade() or
+            self.server.subscriptions.count() != 0 or
+            self.server.registry.attachmentCount() != 0 or
+            self.admin_admission.active) return false;
+        for (self.clients, self.producer_remaining) |maybe_client, remaining|
+            if (maybe_client != null or remaining != 0) return false;
+        return true;
+    }
+
     fn scheduleCadence(self: *Owner, now_ns: u64) void {
         if (now_ns < self.next_cadence_ns) return;
         self.next_cadence_ns = now_ns +| cadence_ns;
+        const gate_open = if (self.server.admission_gate) |gate| gate.snapshot().open else true;
         for (self.clients, 0..) |maybe_client, index| {
             const client = maybe_client orelse continue;
+            if (!gate_open and !client.isUpgradeDraining()) continue;
             // A large sweep may span the next cadence. Resetting it to the full tracker count on
             // every timer edge would keep it permanently nonzero and revisit the same prefix.
             if (self.producer_remaining[index] == 0)
@@ -245,11 +262,36 @@ pub const Owner = struct {
         }
     }
 
+    fn upgradePreflight(ctx: *anyopaque, requester: *connection_turn.Client) bool {
+        const self: *Owner = @ptrCast(@alignCast(ctx));
+        if (self.server.subscriptions.count() != 0 or
+            self.server.registry.attachmentCount() != 0) return false;
+        var requester_membership: usize = 0;
+        for (self.clients) |maybe_client| {
+            const client = maybe_client orelse continue;
+            if (client == requester) {
+                requester_membership += 1;
+                if (!client.requesterReadyForUpgrade() or
+                    !client.socketQuiescentForUpgrade()) return false;
+                continue;
+            }
+            if (!client.idleForUpgrade() or
+                !client.socketQuiescentForUpgrade()) return false;
+        }
+        return requester_membership == 1;
+    }
+
     fn pollTimeout(self: *const Owner, now_ns: u64, outer_timeout_ms: i32) i32 {
+        const gate_open = if (self.server.admission_gate) |gate| gate.snapshot().open else true;
         // Parser-resident complete frames have no corresponding kernel POLLIN edge.
         for (self.clients) |maybe_client|
-            if (maybe_client) |client| if (client.hasBufferedReadWork()) return 0;
-        for (self.producer_remaining) |remaining| if (remaining != 0) return 0;
+            if (maybe_client) |client|
+                if ((gate_open or client.isUpgradeDraining()) and client.hasBufferedReadWork())
+                    return 0;
+        for (self.clients, self.producer_remaining) |maybe_client, remaining| {
+            const client = maybe_client orelse continue;
+            if ((gate_open or client.isUpgradeDraining()) and remaining != 0) return 0;
+        }
         var timeout_ms = outer_timeout_ms;
         if (now_ns < self.accept_retry_after_ns)
             timeout_ms = capTimeoutAt(now_ns, self.accept_retry_after_ns, timeout_ms);
@@ -870,9 +912,14 @@ const TestUpgradeOwner = struct {
     staged: usize = 0,
     armed: usize = 0,
     canceled: usize = 0,
+    reject_next: bool = false,
 
     fn stage(ctx: *anyopaque, request: upgrade_wire.PrepareRequest) upgrade_wire.PrepareDecision {
         const self: *@This() = @ptrCast(@alignCast(ctx));
+        if (self.reject_next) {
+            self.reject_next = false;
+            return .busy;
+        }
         self.attempt_id = request.attempt_id;
         self.staged += 1;
         return .accepted;
@@ -930,6 +977,9 @@ test "poll owner drains every client before publishing typed preclosed upgrade m
     );
     defer server.deinit();
     server.host_status = .{ .manifest_capable = true, .upgrade_capable = true };
+    var fake_runtime: server_mod.FakeRuntimeOps = .{};
+    server.runtime_ops = fake_runtime.ops();
+    _ = try runtime_registry.register(0xAA, 80, 24);
     var gate = upgrade.AdmissionGate.init(testing.io);
     server.admission_gate = &gate;
     var upgrade_owner: TestUpgradeOwner = .{};
@@ -948,6 +998,133 @@ test "poll owner drains every client before publishing typed preclosed upgrade m
     try sendTestRequest(sibling_fd, .hello, 1, "{\"protocol_min\":2,\"protocol_max\":2,\"client_kind\":\"cli\"}");
     try pumpUntilResponse(&owner, sibling_fd, "host_id");
     try testing.expectEqual(@as(usize, 2), owner.activeCount());
+
+    const partial = [_]u8{'M'};
+    try testing.expectEqual(@as(isize, 1), c.send(sibling_fd, &partial, partial.len, 0));
+    for (0..4) |_| _ = try owner.pollOnce(1);
+    try sendTestRequest(
+        upgrade_fd,
+        .request,
+        20,
+        "{\"method\":\"host.upgrade.prepare\",\"params\":{\"attempt_id\":\"0000000000000000000000000000aa01\",\"target_path\":\"/Applications/Maru.app/Contents/MacOS/maru\",\"target_build_id\":\"sha256:build\",\"target_sha256\":\"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\",\"handoff_reader_min\":1,\"handoff_reader_max\":1}}",
+    );
+    try pumpUntilResponse(&owner, upgrade_fd, "upgrade_busy");
+    try testing.expectEqual(@as(usize, 0), upgrade_owner.staged);
+    try testing.expect(gate.snapshot().open);
+    try testing.expectEqual(@as(usize, 2), owner.activeCount());
+    _ = c.shutdown(sibling_fd, c.SHUT.RDWR);
+    var sibling_close_attempts: usize = 0;
+    while (owner.activeCount() != 1 and sibling_close_attempts < 1000) : (sibling_close_attempts += 1)
+        _ = try owner.pollOnce(2);
+    try testing.expectEqual(@as(usize, 1), owner.activeCount());
+    try sendTestRequest(upgrade_fd, .request, 21, "{\"method\":\"host.info\"}");
+    try pumpUntilResponse(&owner, upgrade_fd, "runtime_count");
+
+    const pipelined_prepare = try framing.encodeFrame(
+        testing.allocator,
+        .{ .kind = .request, .request_id = 30 },
+        "{\"method\":\"host.upgrade.prepare\",\"params\":{\"attempt_id\":\"0000000000000000000000000000aa02\",\"target_path\":\"/Applications/Maru.app/Contents/MacOS/maru\",\"target_build_id\":\"sha256:build\",\"target_sha256\":\"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\",\"handoff_reader_min\":1,\"handoff_reader_max\":1}}",
+    );
+    defer testing.allocator.free(pipelined_prepare);
+    const pipelined_info = try framing.encodeFrame(
+        testing.allocator,
+        .{ .kind = .request, .request_id = 31 },
+        "{\"method\":\"host.info\"}",
+    );
+    defer testing.allocator.free(pipelined_info);
+    const pipelined = try testing.allocator.alloc(
+        u8,
+        pipelined_prepare.len + pipelined_info.len,
+    );
+    defer testing.allocator.free(pipelined);
+    @memcpy(pipelined[0..pipelined_prepare.len], pipelined_prepare);
+    @memcpy(pipelined[pipelined_prepare.len..], pipelined_info);
+    var pipeline_offset: usize = 0;
+    while (pipeline_offset < pipelined.len) {
+        const rc = c.send(
+            upgrade_fd,
+            pipelined.ptr + pipeline_offset,
+            pipelined.len - pipeline_offset,
+            0,
+        );
+        if (rc <= 0) return error.TestUnexpectedResult;
+        pipeline_offset += @intCast(rc);
+    }
+    try pumpResponseCount(&owner, upgrade_fd, 30, 2);
+    try testing.expectEqual(@as(usize, 0), upgrade_owner.staged);
+    try testing.expect(gate.snapshot().open);
+
+    var requester: ?*connection_turn.Client = null;
+    for (owner.clients) |maybe_client| {
+        if (maybe_client) |client| requester = client;
+    }
+    const queued_fd = try connectTestClient(socket_path);
+    defer _ = c.close(queued_fd);
+    _ = try owner.pollOnce(5);
+    try sendTestRequest(queued_fd, .hello, 1, "{\"protocol_min\":2,\"protocol_max\":2,\"client_kind\":\"cli\"}");
+    try pumpUntilResponse(&owner, queued_fd, "host_id");
+    var queued: ?*connection_turn.Client = null;
+    for (owner.clients) |maybe_client| {
+        const client = maybe_client orelse continue;
+        if (client != requester.?) queued = client;
+    }
+    // A real prepare dispatch must close admission before peeking the sibling kernel queue, reject
+    // the upgrade, reopen admission, and leave the sibling request untouched.
+    try sendTestRequest(queued_fd, .request, 2, "{\"method\":\"host.info\"}");
+    try sendTestRequest(
+        upgrade_fd,
+        .request,
+        32,
+        "{\"method\":\"host.upgrade.prepare\",\"params\":{\"attempt_id\":\"0000000000000000000000000000aa03\",\"target_path\":\"/Applications/Maru.app/Contents/MacOS/maru\",\"target_build_id\":\"sha256:build\",\"target_sha256\":\"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\",\"handoff_reader_min\":1,\"handoff_reader_max\":1}}",
+    );
+    try pumpUntilResponse(&owner, upgrade_fd, "upgrade_busy");
+    try testing.expectEqual(@as(usize, 0), upgrade_owner.staged);
+    try testing.expect(gate.snapshot().open);
+    try pumpUntilResponse(&owner, queued_fd, "runtime_count");
+
+    const requester_slot = try owner.reactor.get(requester.?.admission);
+    upgrade_owner.reject_next = true;
+    try sendTestRequest(
+        upgrade_fd,
+        .request,
+        33,
+        "{\"method\":\"host.upgrade.prepare\",\"params\":{\"attempt_id\":\"0000000000000000000000000000aa04\",\"target_path\":\"/Applications/Maru.app/Contents/MacOS/maru\",\"target_build_id\":\"sha256:build\",\"target_sha256\":\"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\",\"handoff_reader_min\":1,\"handoff_reader_max\":1}}",
+    );
+    try pumpUntilResponse(&owner, upgrade_fd, "upgrade_busy");
+    try testing.expectEqual(@as(usize, 0), upgrade_owner.staged);
+    try testing.expect(gate.snapshot().open);
+    try sendTestRequest(queued_fd, .request, 3, "{\"method\":\"host.info\"}");
+    try pumpUntilResponse(&owner, queued_fd, "runtime_count");
+
+    try sendTestRequest(
+        queued_fd,
+        .request,
+        4,
+        "{\"method\":\"runtime.attach\",\"params\":{\"runtime_id\":\"aa\",\"mode\":\"observer\"}}",
+    );
+    try pumpUntilResponse(&owner, queued_fd, "\"observe\":true");
+    try testing.expectEqual(@as(usize, 1), server.registry.attachmentCount());
+    try testing.expectEqual(@as(usize, 1), server.subscriptions.count());
+    try sendTestRequest(
+        upgrade_fd,
+        .request,
+        34,
+        "{\"method\":\"host.upgrade.prepare\",\"params\":{\"attempt_id\":\"0000000000000000000000000000aa05\",\"target_path\":\"/Applications/Maru.app/Contents/MacOS/maru\",\"target_build_id\":\"sha256:build\",\"target_sha256\":\"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\",\"handoff_reader_min\":1,\"handoff_reader_max\":1}}",
+    );
+    try pumpUntilResponse(&owner, upgrade_fd, "upgrade_busy");
+    try testing.expectEqual(@as(usize, 0), upgrade_owner.staged);
+    try testing.expect(gate.snapshot().open);
+
+    const queued_bytes = try testing.allocator.dupe(u8, "queued-reply");
+    try (try owner.reactor.get(queued.?.admission)).enqueueOwnedControl(queued_bytes);
+    try requester_slot.beginDispatch();
+    try testing.expect(!Owner.upgradePreflight(&owner, requester.?));
+    try requester_slot.endDispatch();
+    _ = c.shutdown(queued_fd, c.SHUT.RDWR);
+    var queued_close_attempts: usize = 0;
+    while (owner.activeCount() != 1 and queued_close_attempts < 1000) : (queued_close_attempts += 1)
+        _ = try owner.pollOnce(2);
+    try testing.expectEqual(@as(usize, 1), owner.activeCount());
 
     try sendTestRequest(
         upgrade_fd,
@@ -982,4 +1159,127 @@ test "poll owner drains every client before publishing typed preclosed upgrade m
     try testing.expectEqual(@as(u128, 0xAABB), marker.attempt_id);
     try testing.expect(marker.gate_preclosed);
     try testing.expect(owner.takeArmedUpgrade() == null);
+}
+
+test "failed accepted upgrade reopens admission and preserves frozen sibling input" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir_len = try tmp.dir.realPath(testing.io, &dir_buf);
+    const dir_raw = dir_buf[0..dir_len];
+    const dir_path = try testing.allocator.dupeZ(u8, dir_raw);
+    defer testing.allocator.free(dir_path);
+    const socket_path = try std.fmt.allocPrintSentinel(
+        testing.allocator,
+        "{s}/upgrade-rollback.sock",
+        .{dir_raw},
+        0,
+    );
+    defer testing.allocator.free(socket_path);
+    var runtime_registry = registry.TerminalRuntimeRegistry.init(testing.allocator);
+    defer runtime_registry.deinit();
+    var server = try socket_server.SocketServer.bind(
+        testing.allocator,
+        dir_path,
+        socket_path,
+        0xCD,
+        &runtime_registry,
+    );
+    defer server.deinit();
+    server.host_status = .{ .manifest_capable = true, .upgrade_capable = true };
+    var gate = upgrade.AdmissionGate.init(testing.io);
+    server.admission_gate = &gate;
+    var upgrade_owner: TestUpgradeOwner = .{};
+    server.upgrade_ops = upgrade_owner.ops();
+    var owner = try Owner.init(testing.allocator, testing.io, &server);
+    defer owner.deinit();
+
+    var requester_fd = try connectTestClient(socket_path);
+    defer {
+        if (requester_fd >= 0) _ = c.close(requester_fd);
+    }
+    _ = try owner.pollOnce(5);
+    try sendTestRequest(requester_fd, .hello, 1, "{\"protocol_min\":2,\"protocol_max\":2,\"client_kind\":\"gui\"}");
+    try pumpUntilResponse(&owner, requester_fd, "host_id");
+    const sibling_fd = try connectTestClient(socket_path);
+    defer _ = c.close(sibling_fd);
+    _ = try owner.pollOnce(5);
+    try sendTestRequest(sibling_fd, .hello, 1, "{\"protocol_min\":2,\"protocol_max\":2,\"client_kind\":\"cli\"}");
+    try pumpUntilResponse(&owner, sibling_fd, "host_id");
+
+    var requester: ?*connection_turn.Client = null;
+    for (owner.clients) |maybe_client| {
+        const client = maybe_client orelse continue;
+        if (requester == null) requester = client;
+    }
+    var filler: [64 * 1024]u8 = [_]u8{0xA5} ** (64 * 1024);
+    while (true) {
+        const rc = c.send(requester.?.fd, &filler, filler.len, posix.MSG.DONTWAIT);
+        if (rc < 0 and posix.errno(rc) == .AGAIN) break;
+        if (rc <= 0) return error.TestUnexpectedResult;
+    }
+    try sendTestRequest(
+        requester_fd,
+        .request,
+        2,
+        "{\"method\":\"host.upgrade.prepare\",\"params\":{\"attempt_id\":\"0000000000000000000000000000bbcc\",\"target_path\":\"/Applications/Maru.app/Contents/MacOS/maru\",\"target_build_id\":\"sha256:build\",\"target_sha256\":\"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\",\"handoff_reader_min\":1,\"handoff_reader_max\":1}}",
+    );
+    var stage_attempts: usize = 0;
+    while (upgrade_owner.staged == 0 and stage_attempts < 100) : (stage_attempts += 1)
+        _ = try owner.pollOnce(1);
+    try testing.expectEqual(@as(usize, 1), upgrade_owner.staged);
+    try testing.expect(!gate.snapshot().open);
+
+    var sibling_index: ?usize = null;
+    for (owner.clients, 0..) |maybe_client, index| {
+        const client = maybe_client orelse continue;
+        if (client != requester.?) sibling_index = index;
+    }
+    owner.producer_remaining[sibling_index.?] = 3;
+    try sendTestRequest(sibling_fd, .request, 2, "{\"method\":\"host.info\"}");
+    for (0..5) |_| _ = try owner.pollOnce(1);
+    try testing.expectEqual(@as(usize, 3), owner.producer_remaining[sibling_index.?]);
+    _ = c.close(requester_fd);
+    requester_fd = -1;
+    var rollback_attempts: usize = 0;
+    while ((!gate.snapshot().open or owner.activeCount() != 1) and
+        rollback_attempts < 1000) : (rollback_attempts += 1)
+        _ = try owner.pollOnce(2);
+    try testing.expect(gate.snapshot().open);
+    try testing.expectEqual(@as(usize, 1), owner.activeCount());
+    try testing.expectEqual(@as(usize, 1), upgrade_owner.canceled);
+    try testing.expectEqual(@as(usize, 0), upgrade_owner.armed);
+    try testing.expect(owner.takeArmedUpgrade() == null);
+    try pumpUntilResponse(&owner, sibling_fd, "runtime_count");
+    try testing.expect(owner.producer_remaining[sibling_index.?] < 3);
+
+    const admission_fail_fd = try connectTestClient(socket_path);
+    defer _ = c.close(admission_fail_fd);
+    _ = try owner.pollOnce(5);
+    try sendTestRequest(admission_fail_fd, .hello, 1, "{\"protocol_min\":2,\"protocol_max\":2,\"client_kind\":\"gui\"}");
+    try pumpUntilResponse(&owner, admission_fail_fd, "host_id");
+    var admission_fail_client: ?*connection_turn.Client = null;
+    for (owner.clients) |maybe_client| {
+        const client = maybe_client orelse continue;
+        if (client.admission.index != sibling_index.?) admission_fail_client = client;
+    }
+    admission_fail_client.?.control_admission_fail_once = true;
+    try sendTestRequest(
+        admission_fail_fd,
+        .request,
+        2,
+        "{\"method\":\"host.upgrade.prepare\",\"params\":{\"attempt_id\":\"0000000000000000000000000000bbdd\",\"target_path\":\"/Applications/Maru.app/Contents/MacOS/maru\",\"target_build_id\":\"sha256:build\",\"target_sha256\":\"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\",\"handoff_reader_min\":1,\"handoff_reader_max\":1}}",
+    );
+    var admission_fail_attempts: usize = 0;
+    while ((owner.activeCount() != 1 or upgrade_owner.canceled != 2) and
+        admission_fail_attempts < 1000) : (admission_fail_attempts += 1)
+        _ = try owner.pollOnce(2);
+    try testing.expect(gate.snapshot().open);
+    try testing.expectEqual(@as(usize, 2), upgrade_owner.staged);
+    try testing.expectEqual(@as(usize, 2), upgrade_owner.canceled);
+    try testing.expectEqual(@as(usize, 0), upgrade_owner.armed);
+    try testing.expect(owner.takeArmedUpgrade() == null);
+    try sendTestRequest(sibling_fd, .request, 3, "{\"method\":\"host.info\"}");
+    try pumpUntilResponse(&owner, sibling_fd, "runtime_count");
 }

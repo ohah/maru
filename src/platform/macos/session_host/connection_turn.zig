@@ -63,7 +63,13 @@ pub const Options = struct {
     host_status: server.HostStatus = .{},
     live_host_status: ?*const server.HostStatus = null,
     admin_admission: ?*server.AdminAdmission = null,
+    upgrade_preflight: ?OwnerUpgradePreflight = null,
     now_ns: u64 = 0,
+};
+
+pub const OwnerUpgradePreflight = struct {
+    ctx: *anyopaque,
+    check: *const fn (ctx: *anyopaque, requester: *Client) bool,
 };
 
 pub const Client = struct {
@@ -85,7 +91,9 @@ pub const Client = struct {
     created_ns: u64,
     last_activity_ns: u64,
     admin_request_deadline_at_ns: ?u64 = null,
+    upgrade_preflight: ?OwnerUpgradePreflight = null,
     sync_fail_once: bool = false,
+    control_admission_fail_once: bool = false,
     producer_streams: []u64 = &.{},
     producer_sweep_cursor: usize = 0,
 
@@ -125,10 +133,18 @@ pub const Client = struct {
             .admission_gate = options.admission_gate,
             .created_ns = options.now_ns,
             .last_activity_ns = options.now_ns,
+            .upgrade_preflight = options.upgrade_preflight,
         };
         self.connection.runtime_ops = options.runtime_ops;
         self.connection.upgrade_ops = options.upgrade_ops;
         self.connection.admin_admission = options.admin_admission;
+        if (options.upgrade_preflight != null) {
+            self.connection.upgrade_preflight = .{
+                .ctx = self,
+                .reserve = reserveServerUpgrade,
+                .cancel = cancelServerUpgrade,
+            };
+        }
         self.connection.host_status = options.host_status;
         self.connection.live_host_status = options.live_host_status;
         return self;
@@ -176,10 +192,47 @@ pub const Client = struct {
         };
     }
 
+    pub fn isUpgradeDraining(self: *const Client) bool {
+        return self.pending_upgrade != null or
+            (self.close_after_flush orelse return false) == .upgrade_completed;
+    }
+
     /// Kernel HUP/ERR/NVAL after the final readable bytes means no queued reply can be delivered.
     /// Cancel upgrade state if present, then converge through the canonical owner destroy path.
     pub fn peerBroken(self: *Client) void {
         self.failPendingUpgrade(.socket_error);
+    }
+
+    pub fn idleForUpgrade(self: *Client) bool {
+        return self.upgradeReady(false);
+    }
+
+    pub fn requesterReadyForUpgrade(self: *Client) bool {
+        return self.upgradeReady(true);
+    }
+
+    fn upgradeReady(self: *Client, requester: bool) bool {
+        if (self.isClosing() or self.close_after_flush != null or
+            self.pending_upgrade != null or self.armed_upgrade != null or
+            self.parser.bufferState() != .empty or self.trackers.count() != 0 or
+            self.connection.attachmentCount() != 0)
+            return false;
+        const slot = self.reactor.get(self.admission) catch return false;
+        return if (requester)
+            slot.requesterReadyForUpgrade()
+        else
+            slot.idleForUpgrade();
+    }
+
+    pub fn socketQuiescentForUpgrade(self: *Client) bool {
+        var byte: [1]u8 = undefined;
+        var interrupted: u8 = 0;
+        while (interrupted < 4) : (interrupted += 1) {
+            const rc = c.recv(self.fd, &byte, byte.len, posix.MSG.PEEK | posix.MSG.DONTWAIT);
+            if (rc < 0 and posix.errno(rc) == .INTR) continue;
+            return rc < 0 and posix.errno(rc) == .AGAIN;
+        }
+        return false;
     }
 
     /// Captures and sorts one cadence epoch exactly once. Subsequent owner turns consume one entry
@@ -574,12 +627,11 @@ pub const Client = struct {
                     self.allocator.free(accepted.bytes);
                     return self.beginClose(.upgrade_failed);
                 };
-                if (!gate.close()) {
+                if (!self.upgrade_gate_closed) {
                     ops.cancel_unaccepted(ops.ctx, accepted.attempt_id);
                     self.allocator.free(accepted.bytes);
                     return self.beginClose(.upgrade_failed);
                 }
-                self.upgrade_gate_closed = true;
                 self.adoptControl(accepted.bytes) catch {
                     ops.cancel_unaccepted(ops.ctx, accepted.attempt_id);
                     gate.cancelClose();
@@ -696,6 +748,11 @@ pub const Client = struct {
     }
 
     fn adoptControl(self: *Client, bytes: []u8) error{OutOfMemory}!void {
+        if (self.control_admission_fail_once) {
+            self.control_admission_fail_once = false;
+            self.allocator.free(bytes);
+            return error.OutOfMemory;
+        }
         const slot = self.reactor.get(self.admission) catch return self.beginClose(.socket_error);
         slot.enqueueOwnedControl(bytes) catch {
             self.allocator.free(bytes);
@@ -756,6 +813,24 @@ pub const Client = struct {
         if (!self.isClosing()) self.state = .{ .closing = reason };
     }
 };
+
+fn reserveServerUpgrade(ctx: *anyopaque) bool {
+    const client: *Client = @ptrCast(@alignCast(ctx));
+    const preflight = client.upgrade_preflight orelse return false;
+    const gate = client.admission_gate orelse return false;
+    if (!gate.close()) return false;
+    client.upgrade_gate_closed = true;
+    if (preflight.check(preflight.ctx, client)) return true;
+    cancelServerUpgrade(ctx);
+    return false;
+}
+
+fn cancelServerUpgrade(ctx: *anyopaque) void {
+    const client: *Client = @ptrCast(@alignCast(ctx));
+    if (!client.upgrade_gate_closed) return;
+    client.admission_gate.?.cancelClose();
+    client.upgrade_gate_closed = false;
+}
 
 fn validateSubscriptionBatch(
     expected_stream: subscription_identity.LocalStreamId,
@@ -852,6 +927,10 @@ const TestUpgradeOwner = struct {
         };
     }
 };
+
+fn allowReadyTestUpgrade(_: *anyopaque, requester: *Client) bool {
+    return requester.requesterReadyForUpgrade() and requester.socketQuiescentForUpgrade();
+}
 
 const test_hello =
     "{\"protocol_min\":2,\"protocol_max\":2,\"client_kind\":\"gui\",\"capabilities\":[],\"screen_stream_version\":2}";
@@ -1028,6 +1107,7 @@ test "upgrade reply arms only after EAGAIN tail is fully written and marker is t
         &subscriptions,
         .{
             .upgrade_ops = owner.ops(),
+            .upgrade_preflight = .{ .ctx = &owner, .check = allowReadyTestUpgrade },
             .admission_gate = &gate,
             .host_status = .{ .manifest_capable = true, .upgrade_capable = true },
         },
@@ -1086,6 +1166,7 @@ test "upgrade write after peer close cancels once without SIGPIPE" {
         &subscriptions,
         .{
             .upgrade_ops = owner.ops(),
+            .upgrade_preflight = .{ .ctx = &owner, .check = allowReadyTestUpgrade },
             .admission_gate = &gate,
             .host_status = .{ .manifest_capable = true, .upgrade_capable = true },
         },

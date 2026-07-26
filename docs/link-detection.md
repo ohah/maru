@@ -90,6 +90,23 @@
   이라는 약한 불일치를 의도적으로 허용한다(hover에 디스크 I/O를 넣지 않기 위함). 더 엄격히 하려면 hover에도
   stat을 거는 후속이 가능하다.
 
+## 어느 pane에서 찾는가 (포인터 아래 pane이 소유)
+
+클릭(`urlAt`)과 hover(`hoverCursor`) 모두 **포인터 좌표 아래 pane**의 화면에서 링크를 찾는다(`paneTargetAt` —
+휠 라우팅과 공유하는 단일 출처). 포커스(활성 pane)와 무관하며, 링크를 여는 클릭이 pane 포커스를 바꾸지도 않는다.
+
+- **왜 활성 pane 고정이면 안 되는가**: `pxToCell`은 좌표를 grid 안으로 **clamp**한다. 활성 pane에 고정하면 다른
+  pane을 눌러도 "영역 밖(null)"이 아니라 **활성 pane의 엉뚱한 셀**이 나와, 조용히 아무것도 안 열리거나 최악엔
+  다른 화면의 링크를 연다. 활성 Term이 **browser web Term**이면 그 surface는 렌더/PTY 없는 빈 sentinel core라
+  좌표와 무관하게 늘 빈 결과였다 — "브라우저 패널을 띄우면 터미널 링크가 먹통"의 루트커즈(사용자 제보).
+- **밑줄도 그 pane에만**: hover 상태는 anchor와 함께 **surface_id**를 싣고, 렌더는 `hoverLinkSpanFor(surface)`가
+  id가 일치하는 pane에만 span을 준다. 활성·비활성 pane 렌더 경로가 이 함수를 공유하므로 비활성 pane에도 밑줄이
+  뜬다 — 안 그리면 "밑줄은 없는데 클릭하면 열리는" 불일치가 생긴다(§hover와 click의 의도적 불일치는 stat 유무
+  하나뿐이어야 한다).
+- **포커스와의 관계**: 링크가 아닌 일반 클릭은 그대로 `Model.paneAtPoint`로 그 pane에 포커스를 옮긴다(수식키+클릭은
+  URL 열기가 먼저 소비하므로 포커스가 안 옮겨간다). 즉 "브라우저를 보다가 옆 터미널 링크를 Cmd+클릭" 흐름에서
+  포커스는 브라우저에 남고 링크만 열린다.
+
 ## soft-wrap(강제개행)된 링크
 
 터미널 폭보다 긴 링크는 여러 화면 행으로 soft-wrap된다. `wordBoundsAt`(휴리스틱)·`linkBoundsAt`(OSC 8)이
@@ -191,7 +208,8 @@
 - 원격(host-backed): wire record `src/platform/macos/session_host/screen_stream.zig`(`link_spans`), host 방출
   `screen_snapshot.zig`, client 조립 `screen_assembler.zig`·`remote_screen.zig`, 클릭 RPC `remote_runtime.zig`
   (`runtime.link_at`)·`server.zig`. 설계 근거는 위 §원격(host-backed) 세션.
-- 플랫폼: `src/platform/macos/app_session.zig`(`urlAt`·scopes 빌드·kind·`openFilePanelPath`), `app_host_abi.{zig,h}`(`url_at` out_kind·파일 패널 ABI),
+- 플랫폼: `src/platform/macos/app_session.zig`(`urlAt`·`hoverCursor`·pane 라우팅 `paneTargetAt`·밑줄 `hoverLinkSpanFor`·
+  scopes 빌드·kind·`openFilePanelPath`), `app_host_abi.{zig,h}`(`url_at` out_kind·파일 패널 ABI),
   `MaruAppHost.swift`(`handleUrlClick` — `.md`/`.html`은 도크, 그 외는 `URL(fileURLWithPath:)`/`URL(string:)`). ABI 경계는
   [macOS 앱 호스트 경계](macos-app-host-boundary.md).
 - config: `src/config/theme.zig`(`InputConfig.link_detection`), `docs/configuration.md` 키 표.

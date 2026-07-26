@@ -2068,6 +2068,24 @@ pub const Connection = struct {
         return if (self.attachments.get(stream)) |sub| sub.resync_pending else false;
     }
 
+    pub fn streamHasInputCapability(
+        self: *const Connection,
+        stream: subscription_identity.LocalStreamId,
+    ) bool {
+        const sub = self.attachments.get(stream) orelse return false;
+        return reg.Capability.has(
+            self.registry.capabilitiesOfSubscription(sub.runtime_id, sub.subscription_id),
+            reg.Capability.input,
+        );
+    }
+
+    pub fn hasInputCapability(self: *const Connection) bool {
+        var iterator = self.attachments.iterator();
+        while (iterator.next()) |entry|
+            if (self.streamHasInputCapability(entry.key_ptr.*)) return true;
+        return false;
+    }
+
     pub fn snapshotInvalidatedFrame(
         self: *Connection,
         stream: subscription_identity.LocalStreamId,
@@ -3461,6 +3479,8 @@ pub const FakeRuntimeOps = struct {
     observation_version: u8 = 0,
     snapshot_len: ?usize = null,
     new_base_len: ?usize = null,
+    delta_send_len: ?usize = null,
+    delta_calls: usize = 0,
     snapshot_fail_count: usize = 0,
     snapshot_calls: usize = 0,
     observation_fail_count: usize = 0,
@@ -3538,11 +3558,16 @@ pub const FakeRuntimeOps = struct {
     fn deltaFn(ctx: *anyopaque, runtime_id: u128, base: []const u8, allocator: std.mem.Allocator) anyerror!StreamUpdate {
         const self: *FakeRuntimeOps = @ptrCast(@alignCast(ctx));
         _ = runtime_id;
+        self.delta_calls += 1;
         if (self.runtime_missing or self.delta_missing) return error.RuntimeNotFound;
         const n = @min(base.len, self.delta_base_seen.len);
         @memcpy(self.delta_base_seen[0..n], base[0..n]);
         self.delta_base_seen_len = n;
-        const send = try allocator.dupe(u8, "DELTA-BYTES");
+        const send = if (self.delta_send_len) |len| blk: {
+            const bytes = try allocator.alloc(u8, len);
+            @memset(bytes, 'D');
+            break :blk bytes;
+        } else try allocator.dupe(u8, "DELTA-BYTES");
         errdefer allocator.free(send);
         const new_base = if (self.new_base_len) |len| blk: {
             const bytes = try allocator.alloc(u8, len);

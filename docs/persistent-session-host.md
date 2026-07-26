@@ -1894,9 +1894,33 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
     initial attach preflight와 control/snapshot admission rollback, resync projector 실패, product observation
     barrier, retained detach/EOF, 실제 slot 재사용 ABA와 sibling 격리를 검증한다.
   - **P5b2b — slow observer isolation:** P5b2a의 통합 회계를 사용해 실제 slow observer의 queue/base
-    pressure가 그 observer만 invalidate/backoff시키고 controller input, PTY drain, sibling observer cadence를
-    멈추지 않는 product poll fixture와 bounded RSS/queue artifact를 추가한다. 이 gate 전에는 P5b2 전체를
-    구현 완료로 표시하지 않는다.
+    pressure가 controller input, PTY drain, sibling observer cadence를 멈추지 않는 product poll fixture와 bounded
+    RSS/queue artifact를 추가한다. wire frame prefix가 아직 전송되지 않은 queue pressure는 해당 stream만 정확히
+    한 번 invalidate하고 retained/prepared base를 반환한다. 반면 frame 일부가 이미 kernel socket에 쓰인 뒤
+    EAGAIN인 상태에서는 queued suffix만 purge하면 wire frame이 splice되므로 해당 **slow connection만** fail-close한다.
+    같은 connection 안의 sibling stream은 FIFO head-of-line을 공유하므로 cross-connection isolation처럼 주장하지 않는다.
+    이 gate는 다음 둘로 나누며 둘 다 green이기 전에는 P5b2b/P5b2 전체를 구현 완료로 표시하지 않는다.
+    - **P5b2b1 — product poll accounting/isolation:** 실제 `SocketServer`+`poll_owner.Owner`에 controller,
+      slow observer, healthy observer를 서로 다른 fd로 붙인다. zero-prefix pressure의 stream-only invalidation과
+      exactly-one notice, ACK 전 projector 0, ACK 뒤 1초 backoff 경계와 atomic resync를 검증한다. 별도
+      partial-prefix socket scenario는 작은 실제 `SO_SNDBUF`/`SO_RCVBUF`, nonblocking send progress/EAGAIN을
+      관측해 slow fd만 close하고 controller input과 healthy sibling의 여러 cadence generation이 계속 진행함을
+      검증한다. 각 reserve/commit mutation에서 slot queue/control/base(prepared 포함)와 global
+      resident/shared/prepared/reclaim lifetime high-water를 갱신해 compile-time cap 이하임을 검사하고 final
+      subscription/attachment/budget 0을 확인한다. 단일 slow fd만
+      채우는 false-green을 피하려고 여러 slow connection이 각각 stream soft cap 아래에서 global steady ceiling을
+      압박한 뒤 healthy producer가 admission하는 시나리오도 둔다. 현재 first-come `GlobalBudget`처럼 실패한 requester를
+      곧바로 invalidate하면 안 되며, reactor가 queued screen pressure를 만든 slow offender를 안정된
+      `ConnectionKey`/tracker 세대로 선택·회수한 다음 healthy admission을 한 번 재시도한다. partial-prefix offender는
+      wire를 splice하지 않고 그 connection만 fail-close한다.
+    - **P5b2b2 — real PTY/RSS artifact:** 독립 ReleaseFast session-host process와 controlled forkpty child,
+      controller/slow/healthy 세 client를 사용한다. daemon과 같은 `server.tickOwner() → pollOnce()` 순서에서 stall
+      이후 unique controller token이 실제 PTY child에 쓰이고 echo output이 healthy observer screen에 반영되는지
+      확인한다. host PID만 public `proc_pid_rusage` 계열 API로 warm baseline/반복 peak/post-drain RSS를 샘플링하며
+      high-water RSS를 baseline delta로 오인하지 않는다. `tests/artifacts/perf/session-host-slow-observer-macos.json`은
+      schema/scenario, generated·PTY produced/drained bytes, marker/sibling progress, sample API/count,
+      baseline/peak/post-drain RSS와 분석 상한, peak/final ledger, deadline, child/fd/host cleanup을 기록한다.
+      전용 validator와 macOS required job artifact upload가 이 파일을 검사한다.
 - **P5b3 — controller/observer reactor**: observer/takeover protocol과 controller 전환을 hidden harness로 완성한다.
   P5a1의 reactor-wide upgrade drain에 controller/observer lease와 takeover/revocation state 검사를 추가해
   모든 capability lease가 0일 때만 upgrade outer loop로 넘기는 race gate를 추가한다. 아직 public

@@ -64,12 +64,36 @@ pub const Options = struct {
     live_host_status: ?*const server.HostStatus = null,
     admin_admission: ?*server.AdminAdmission = null,
     upgrade_preflight: ?OwnerUpgradePreflight = null,
+    pressure_reclaim: ?OwnerPressureReclaim = null,
     now_ns: u64 = 0,
 };
 
 pub const OwnerUpgradePreflight = struct {
     ctx: *anyopaque,
     check: *const fn (ctx: *anyopaque, requester: *Client) bool,
+};
+
+pub const OwnerPressureReclaim = struct {
+    ctx: *anyopaque,
+    reclaim: *const fn (
+        ctx: *anyopaque,
+        requester: slot_mod.ConnectionKey,
+        required_bytes: usize,
+    ) bool,
+};
+
+pub const ScreenPressureCandidate = struct {
+    stream: subscription_identity.LocalStreamId,
+    tracker: slot_mod.ScreenTrackerKey,
+    queued_bytes: usize,
+    reclaimable_bytes: usize,
+    written_prefix: bool,
+};
+
+const SubscriptionAdoption = enum {
+    admitted,
+    deferred_global_pressure,
+    rejected,
 };
 
 pub const Client = struct {
@@ -92,10 +116,13 @@ pub const Client = struct {
     last_activity_ns: u64,
     admin_request_deadline_at_ns: ?u64 = null,
     upgrade_preflight: ?OwnerUpgradePreflight = null,
+    pressure_reclaim: ?OwnerPressureReclaim = null,
     sync_fail_once: bool = false,
     control_admission_fail_once: bool = false,
     producer_streams: []u64 = &.{},
     producer_sweep_cursor: usize = 0,
+    pressure_reclaim_available: bool = false,
+    projection_global_unavailable: bool = false,
 
     pub fn create(
         allocator: std.mem.Allocator,
@@ -134,6 +161,7 @@ pub const Client = struct {
             .created_ns = options.now_ns,
             .last_activity_ns = options.now_ns,
             .upgrade_preflight = options.upgrade_preflight,
+            .pressure_reclaim = options.pressure_reclaim,
         };
         self.connection.runtime_ops = options.runtime_ops;
         self.connection.upgrade_ops = options.upgrade_ops;
@@ -185,6 +213,60 @@ pub const Client = struct {
     pub fn wantsWrite(self: *Client) bool {
         const slot = self.reactor.get(self.admission) catch return false;
         return slot.firstPending() != null;
+    }
+
+    /// Owner-only pressure selection keeps protocol mutation in Client while exposing only the
+    /// stable local stream identity and charged queued bytes.
+    pub fn largestScreenPressure(self: *Client) ?ScreenPressureCandidate {
+        const slot = self.reactor.get(self.admission) catch return null;
+        if (!slot.writeBackpressured()) return null;
+        var result: ?ScreenPressureCandidate = null;
+        var iterator = self.trackers.iterator();
+        while (iterator.next()) |entry| {
+            const state = slot.screenState(entry.value_ptr.*) catch continue;
+            if (state != .valid and state != .resync_draining) continue;
+            const queued = slot.screenResidentBytes(entry.value_ptr.*) catch continue;
+            if (queued == 0) continue;
+            if ((slot.preparedBaseBytes(entry.value_ptr.*) catch continue) != 0) continue;
+            const retained = slot.retainedBaseBytes(entry.value_ptr.*) catch continue;
+            const reclaimable = queued +| retained;
+            const written_prefix = slot.trackerHasWrittenPrefix(entry.value_ptr.*) catch continue;
+            if (written_prefix and
+                (self.connection.streamHasInputCapability(entry.key_ptr.*) or
+                    self.connection.hasInputCapability())) continue;
+            if (result == null or queued > result.?.queued_bytes or
+                (queued == result.?.queued_bytes and
+                    (reclaimable > result.?.reclaimable_bytes or
+                        (reclaimable == result.?.reclaimable_bytes and
+                            entry.key_ptr.* < result.?.stream))))
+                result = .{
+                    .stream = entry.key_ptr.*,
+                    .tracker = entry.value_ptr.*,
+                    .queued_bytes = queued,
+                    .reclaimable_bytes = reclaimable,
+                    .written_prefix = written_prefix,
+                };
+        }
+        return result;
+    }
+
+    pub fn acceptsPressureReclaim(self: *Client) bool {
+        const slot = self.reactor.get(self.admission) catch return false;
+        return !slot.writeBackpressured();
+    }
+
+    pub fn noteWriteStalled(self: *Client, now_ns: u64) void {
+        const slot = self.reactor.get(self.admission) catch return;
+        if (slot.firstPending() != null) slot.notePartial(.write, now_ns, false);
+    }
+
+    /// The owner selected this connection as the global queued-screen pressure offender.
+    /// Zero-prefix queues become one stream invalidation; partial-prefix queues fail-close.
+    pub fn reclaimScreenPressure(self: *Client, candidate: ScreenPressureCandidate) bool {
+        const tracker = self.trackers.get(candidate.stream) orelse return false;
+        if (!std.meta.eql(tracker, candidate.tracker)) return false;
+        self.invalidateSubscriptionOutput(candidate.stream, tracker);
+        return true;
     }
 
     pub fn hasBufferedReadWork(self: *const Client) bool {
@@ -417,6 +499,9 @@ pub const Client = struct {
     /// Deadline/lifecycle tick; screen updates are queued and therefore cannot block another fd.
     pub fn tick(self: *Client, now_ns: u64) void {
         if (self.isClosing()) return;
+        self.pressure_reclaim_available = true;
+        self.projection_global_unavailable = false;
+        defer self.pressure_reclaim_available = false;
         const slot = self.reactor.get(self.admission) catch return self.beginClose(.socket_error);
         if (self.pending_upgrade != null and !self.wantsWrite()) {
             self.finalizePendingUpgrade();
@@ -456,6 +541,8 @@ pub const Client = struct {
         }
         var tracker_state = slot.screenState(tracker) catch
             return self.beginClose(.socket_error);
+        if (!(slot.globalPressureReady(tracker, now_ns) catch
+            return self.beginClose(.socket_error))) return;
         const resync_pending = self.connection.resyncPending(stream);
         if (resync_pending and tracker_state == .valid) {
             slot.invalidateAndPurgeScreenTracker(tracker) catch
@@ -474,8 +561,12 @@ pub const Client = struct {
         var maybe_output = self.connection.collectOutputForLocalStream(stream) catch |err| {
             switch (err) {
                 error.ProjectionBudgetUnavailable => {
-                    if (tracker_state == .valid)
+                    if (self.projection_global_unavailable) {
+                        slot.deferGlobalPressure(tracker, now_ns) catch
+                            return self.beginClose(.socket_error);
+                    } else if (tracker_state == .valid) {
                         self.invalidateSubscriptionOutput(stream, tracker);
+                    }
                     return;
                 },
                 error.OutOfMemory => {
@@ -485,13 +576,18 @@ pub const Client = struct {
             }
         };
         if (maybe_output) |*output| {
-            const admitted = self.tryAdoptSubscriptionTurn(stream, output.takeFrames());
-            if (admitted) {
-                output.commit(&self.connection);
-            } else {
-                output.rollback(&self.connection);
-                if (!self.isClosing())
-                    self.invalidateSubscriptionOutput(stream, tracker);
+            switch (self.tryAdoptSubscriptionTurn(stream, output.takeFrames())) {
+                .admitted => output.commit(&self.connection),
+                .deferred_global_pressure => {
+                    output.rollback(&self.connection);
+                    slot.deferGlobalPressure(tracker, now_ns) catch
+                        return self.beginClose(.socket_error);
+                },
+                .rejected => {
+                    output.rollback(&self.connection);
+                    if (!self.isClosing())
+                        self.invalidateSubscriptionOutput(stream, tracker);
+                },
             }
             if (self.isClosing()) return;
         } else if (!self.connection.hasLocalStream(stream)) {
@@ -535,34 +631,43 @@ pub const Client = struct {
         stream: subscription_identity.LocalStreamId,
         frames: [][]u8,
     ) bool {
-        const admitted = self.tryAdoptSubscriptionTurn(stream, frames);
-        if (!admitted and !self.isClosing()) {
-            const tracker = self.trackers.get(stream) orelse
-                return self.closeAndReject(.socket_error);
-            self.invalidateSubscriptionOutput(stream, tracker);
+        switch (self.tryAdoptSubscriptionTurn(stream, frames)) {
+            .admitted => return true,
+            .deferred_global_pressure, .rejected => {
+                if (!self.isClosing()) {
+                    const tracker = self.trackers.get(stream) orelse
+                        return self.closeAndReject(.socket_error);
+                    self.invalidateSubscriptionOutput(stream, tracker);
+                }
+                return false;
+            },
         }
-        return admitted;
     }
 
     fn tryAdoptSubscriptionTurn(
         self: *Client,
         stream: subscription_identity.LocalStreamId,
         frames: [][]u8,
-    ) bool {
+    ) SubscriptionAdoption {
         defer self.allocator.free(frames);
         if (!validateSubscriptionBatch(stream, frames)) {
             for (frames) |bytes| self.allocator.free(bytes);
-            return self.closeAndReject(.protocol_error);
+            _ = self.closeAndReject(.protocol_error);
+            return .rejected;
         }
-        const slot = self.reactor.get(self.admission) catch
-            return self.closeAndReject(.socket_error);
+        const slot = self.reactor.get(self.admission) catch {
+            _ = self.closeAndReject(.socket_error);
+            return .rejected;
+        };
         const tracker = self.trackers.get(stream) orelse {
             for (frames) |bytes| self.allocator.free(bytes);
-            return self.closeAndReject(.socket_error);
+            _ = self.closeAndReject(.socket_error);
+            return .rejected;
         };
         const state = slot.screenState(tracker) catch {
             for (frames) |bytes| self.allocator.free(bytes);
-            return self.closeAndReject(.socket_error);
+            _ = self.closeAndReject(.socket_error);
+            return .rejected;
         };
         if (state == .invalidated) {
             var snapshot_start: ?usize = null;
@@ -573,7 +678,8 @@ pub const Client = struct {
                     .subscription => |output| {
                         if (output.kind == .delta) {
                             for (frames) |owned| self.allocator.free(owned);
-                            return self.closeAndReject(.protocol_error);
+                            _ = self.closeAndReject(.protocol_error);
+                            return .rejected;
                         }
                         if (output.kind == .snapshot and snapshot_start == null)
                             snapshot_start = index;
@@ -582,25 +688,39 @@ pub const Client = struct {
             }
             const start = snapshot_start orelse {
                 for (frames) |owned| self.allocator.free(owned);
-                return false;
+                return .rejected;
             };
             _ = start;
             // Metadata prefix and snapshot chunks share one atomic subscription batch. Keeping
             // their original order avoids a valid->draining transition between the two classes.
-            slot.enqueueOwnedResyncSnapshot(tracker, frames) catch return false;
-            return true;
+            slot.enqueueOwnedResyncSnapshot(tracker, frames) catch return .rejected;
+            return .admitted;
         }
 
-        var adopted: usize = 0;
-        for (frames) |bytes| {
-            self.adoptScreen(bytes) catch {
-                for (frames[adopted + 1 ..]) |remaining|
-                    self.allocator.free(remaining);
-                return false;
-            };
-            adopted += 1;
-        }
-        return true;
+        slot.enqueueOwnedScreenBatch(tracker, frames) catch |err| {
+            if (err == error.GlobalLimit) {
+                if (self.pressure_reclaim_available) if (self.pressure_reclaim) |ops| {
+                    self.pressure_reclaim_available = false;
+                    var total: usize = 0;
+                    for (frames) |bytes| total +|= bytes.len;
+                    if (ops.reclaim(ops.ctx, self.admission.key, total)) {
+                        slot.enqueueOwnedScreenBatch(tracker, frames) catch |retry_err| {
+                            for (frames) |bytes| self.allocator.free(bytes);
+                            return if (retry_err == error.GlobalLimit)
+                                .deferred_global_pressure
+                            else
+                                .rejected;
+                        };
+                        return .admitted;
+                    }
+                };
+                for (frames) |bytes| self.allocator.free(bytes);
+                return .deferred_global_pressure;
+            }
+            for (frames) |bytes| self.allocator.free(bytes);
+            return .rejected;
+        };
+        return .admitted;
     }
 
     fn closeAndReject(self: *Client, reason: CloseReason) bool {
@@ -716,11 +836,11 @@ pub const Client = struct {
             self.connection.rollbackPreparedAttach(stream);
             return error.OutOfMemory;
         };
-        const admitted = self.tryAdoptSubscriptionTurn(
+        const adopted = self.tryAdoptSubscriptionTurn(
             stream,
             prepared.output.takeFrames(),
         );
-        if (!admitted) {
+        if (adopted != .admitted) {
             prepared.output.rollback(&self.connection);
             self.connection.rollbackPreparedAttach(stream);
             return self.beginClose(.resource_exhausted);
@@ -847,7 +967,31 @@ pub const Client = struct {
         const self: *Client = @ptrCast(@alignCast(ctx));
         const tracker = self.ensureTracker(stream) catch return null;
         const slot = self.reactor.get(self.admission) catch return null;
-        return slot.reserveBaseUpdate(tracker, upper_bound) catch null;
+        return slot.reserveBaseUpdate(tracker, upper_bound) catch |err| {
+            if (err != error.GlobalLimit) return null;
+            if ((slot.screenState(tracker) catch return null) != .valid) {
+                self.projection_global_unavailable = true;
+                return null;
+            }
+            if (!self.pressure_reclaim_available) {
+                self.projection_global_unavailable = true;
+                return null;
+            }
+            const ops = self.pressure_reclaim orelse {
+                self.projection_global_unavailable = true;
+                return null;
+            };
+            self.pressure_reclaim_available = false;
+            if (!ops.reclaim(ops.ctx, self.admission.key, upper_bound)) {
+                self.projection_global_unavailable = true;
+                return null;
+            }
+            return slot.reserveBaseUpdate(tracker, upper_bound) catch |retry_err| {
+                if (retry_err == error.GlobalLimit)
+                    self.projection_global_unavailable = true;
+                return null;
+            };
+        };
     }
 
     fn commitProjectionBudget(
@@ -887,26 +1031,6 @@ pub const Client = struct {
         }
         const slot = self.reactor.get(self.admission) catch return self.beginClose(.socket_error);
         slot.enqueueOwnedControl(bytes) catch {
-            self.allocator.free(bytes);
-            return error.OutOfMemory;
-        };
-    }
-
-    fn adoptScreen(self: *Client, bytes: []u8) error{OutOfMemory}!void {
-        const class = server.classifyOutbound(bytes) catch {
-            self.allocator.free(bytes);
-            return error.OutOfMemory;
-        };
-        const stream = switch (class) {
-            .control => return self.adoptControl(bytes),
-            .subscription => |output| output.stream,
-        };
-        const slot = self.reactor.get(self.admission) catch return self.beginClose(.socket_error);
-        const tracker = self.trackers.get(stream) orelse {
-            self.allocator.free(bytes);
-            return error.OutOfMemory;
-        };
-        slot.enqueueOwnedScreen(tracker, bytes) catch {
             self.allocator.free(bytes);
             return error.OutOfMemory;
         };
@@ -1799,6 +1923,30 @@ test "subscription pressure emits one control notice and recovers with an atomic
     const tracker = client.trackers.get(1).?;
     try slot.consumeWritten(slot.pending_bytes);
     try testing.expectEqual(slot_mod.ScreenState.valid, try slot.screenState(tracker));
+
+    try slot.enqueueScreen(tracker, "controller-zero-prefix");
+    slot.notePartial(.write, 10, false);
+    const controller_candidate = client.largestScreenPressure().?;
+    try testing.expectEqual(@as(u64, 1), controller_candidate.stream);
+    try testing.expect(std.meta.eql(tracker, controller_candidate.tracker));
+    try testing.expect(!controller_candidate.written_prefix);
+    try testing.expect(registry.Capability.has(
+        registry_value.capabilitiesOfSubscription(
+            0xAA,
+            client.connection.attachments.get(1).?.subscription_id,
+        ),
+        registry.Capability.input,
+    ));
+    slot.clearPartial(.write);
+    try slot.consumeWritten("controller-zero-prefix".len);
+
+    try slot.enqueueScreen(tracker, "controller-written-prefix");
+    try slot.consumeWritten(1);
+    slot.notePartial(.write, 20, false);
+    try testing.expect(client.largestScreenPressure() == null);
+    slot.clearPartial(.write);
+    try slot.consumeWritten("controller-written-prefix".len - 1);
+
     for (0..slot_mod.max_chunks_per_slot - slot_mod.control_chunk_reserve - slot.chunk_len) |_| try slot.enqueueScreen(tracker, "queued");
 
     const overflowing = try testing.allocator.alloc([]u8, 1);
@@ -1810,6 +1958,13 @@ test "subscription pressure emits one control notice and recovers with an atomic
     try testing.expect(!client.adoptSubscriptionTurn(1, overflowing));
     try testing.expect(!client.isClosing());
     try testing.expectEqual(slot_mod.ScreenState.invalidated, try slot.screenState(tracker));
+    try testing.expect(registry.Capability.has(
+        registry_value.capabilitiesOfSubscription(
+            0xAA,
+            client.connection.attachments.get(1).?.subscription_id,
+        ),
+        registry.Capability.input,
+    ));
     try testing.expectEqual(@as(usize, 0), try slot.retainedBaseBytes(tracker));
     var notice_count: usize = 0;
     for (0..slot.chunk_len) |logical| {

@@ -147,6 +147,13 @@ pub const Client = struct {
         }
         self.connection.host_status = options.host_status;
         self.connection.live_host_status = options.live_host_status;
+        self.connection.projection_budget = .{
+            .ctx = self,
+            .prepare = prepareProjectionBudget,
+            .commit = commitProjectionBudget,
+            .rollback = rollbackProjectionBudget,
+            .release = releaseProjectionBudget,
+        };
         return self;
     }
 
@@ -464,16 +471,28 @@ pub const Client = struct {
             if (!(slot.beginResyncAttempt(tracker, now_ns) catch
                 return self.beginClose(.socket_error))) return;
         }
-        var maybe_output = self.connection.collectOutputForLocalStream(stream) catch {
-            self.beginClose(.resource_exhausted);
-            return;
+        var maybe_output = self.connection.collectOutputForLocalStream(stream) catch |err| {
+            switch (err) {
+                error.ProjectionBudgetUnavailable => {
+                    if (tracker_state == .valid)
+                        self.invalidateSubscriptionOutput(stream, tracker);
+                    return;
+                },
+                error.OutOfMemory => {
+                    self.beginClose(.resource_exhausted);
+                    return;
+                },
+            }
         };
         if (maybe_output) |*output| {
-            const admitted = self.adoptSubscriptionTurn(stream, output.takeFrames());
-            if (admitted)
-                output.commit(&self.connection)
-            else
+            const admitted = self.tryAdoptSubscriptionTurn(stream, output.takeFrames());
+            if (admitted) {
+                output.commit(&self.connection);
+            } else {
                 output.rollback(&self.connection);
+                if (!self.isClosing())
+                    self.invalidateSubscriptionOutput(stream, tracker);
+            }
             if (self.isClosing()) return;
         } else if (!self.connection.hasLocalStream(stream)) {
             self.notifyEndedAndRemoveTracker(stream);
@@ -512,6 +531,20 @@ pub const Client = struct {
     /// any admission failure purges that subscription's unsent prefix and emits one control-reserve
     /// invalidation notice. An invalidated tracker may recover only through one atomic snapshot batch.
     fn adoptSubscriptionTurn(
+        self: *Client,
+        stream: subscription_identity.LocalStreamId,
+        frames: [][]u8,
+    ) bool {
+        const admitted = self.tryAdoptSubscriptionTurn(stream, frames);
+        if (!admitted and !self.isClosing()) {
+            const tracker = self.trackers.get(stream) orelse
+                return self.closeAndReject(.socket_error);
+            self.invalidateSubscriptionOutput(stream, tracker);
+        }
+        return admitted;
+    }
+
+    fn tryAdoptSubscriptionTurn(
         self: *Client,
         stream: subscription_identity.LocalStreamId,
         frames: [][]u8,
@@ -563,7 +596,6 @@ pub const Client = struct {
             self.adoptScreen(bytes) catch {
                 for (frames[adopted + 1 ..]) |remaining|
                     self.allocator.free(remaining);
-                self.invalidateSubscriptionOutput(stream, tracker);
                 return false;
             };
             adopted += 1;
@@ -653,7 +685,47 @@ pub const Client = struct {
             .frames => |frames| {
                 try self.adoptFrameBatch(frames);
             },
+            .prepared_attach => |prepared_value| {
+                var prepared = prepared_value;
+                try self.adoptPreparedAttach(&prepared);
+            },
+            .prepared_reply => |prepared_value| {
+                var prepared = prepared_value;
+                self.adoptControl(prepared.reply) catch {
+                    prepared.output.rollback(&self.connection);
+                    return error.OutOfMemory;
+                };
+                prepared.output.commit(&self.connection);
+            },
         }
+    }
+
+    fn adoptPreparedAttach(
+        self: *Client,
+        prepared: *server.Action.PreparedAttach,
+    ) error{OutOfMemory}!void {
+        const stream = prepared.output.stream;
+        self.syncTrackers() catch {
+            self.allocator.free(prepared.reply);
+            prepared.output.rollback(&self.connection);
+            self.connection.rollbackPreparedAttach(stream);
+            return error.OutOfMemory;
+        };
+        self.adoptControl(prepared.reply) catch {
+            prepared.output.rollback(&self.connection);
+            self.connection.rollbackPreparedAttach(stream);
+            return error.OutOfMemory;
+        };
+        const admitted = self.tryAdoptSubscriptionTurn(
+            stream,
+            prepared.output.takeFrames(),
+        );
+        if (!admitted) {
+            prepared.output.rollback(&self.connection);
+            self.connection.rollbackPreparedAttach(stream);
+            return self.beginClose(.resource_exhausted);
+        }
+        prepared.output.commit(&self.connection);
     }
 
     fn adoptFrameBatch(self: *Client, frames: [][]u8) error{OutOfMemory}!void {
@@ -746,12 +818,65 @@ pub const Client = struct {
         }
         for (streams) |stream| {
             if (self.trackers.contains(stream)) continue;
-            const tracker = slot.createScreenTracker() catch return error.OutOfMemory;
-            errdefer slot.destroyScreenTracker(tracker) catch unreachable;
-            self.trackers.put(self.allocator, stream, tracker) catch
-                return error.OutOfMemory;
-            slot.attachStream() catch return self.beginClose(.resource_exhausted);
+            _ = try self.ensureTracker(stream);
         }
+    }
+
+    fn ensureTracker(
+        self: *Client,
+        stream: subscription_identity.LocalStreamId,
+    ) error{OutOfMemory}!slot_mod.ScreenTrackerKey {
+        if (self.trackers.get(stream)) |tracker| return tracker;
+        const slot = self.reactor.get(self.admission) catch return error.OutOfMemory;
+        const tracker = slot.createScreenTracker() catch return error.OutOfMemory;
+        errdefer slot.destroyScreenTracker(tracker) catch unreachable;
+        self.trackers.put(self.allocator, stream, tracker) catch
+            return error.OutOfMemory;
+        slot.attachStream() catch {
+            _ = self.trackers.remove(stream);
+            return error.OutOfMemory;
+        };
+        return tracker;
+    }
+
+    fn prepareProjectionBudget(
+        ctx: *anyopaque,
+        stream: subscription_identity.LocalStreamId,
+        upper_bound: usize,
+    ) ?slot_mod.BaseReservation {
+        const self: *Client = @ptrCast(@alignCast(ctx));
+        const tracker = self.ensureTracker(stream) catch return null;
+        const slot = self.reactor.get(self.admission) catch return null;
+        return slot.reserveBaseUpdate(tracker, upper_bound) catch null;
+    }
+
+    fn commitProjectionBudget(
+        ctx: *anyopaque,
+        reservation: slot_mod.BaseReservation,
+        actual: usize,
+    ) void {
+        const self: *Client = @ptrCast(@alignCast(ctx));
+        const slot = self.reactor.get(self.admission) catch unreachable;
+        slot.commitBaseUpdate(reservation, actual) catch unreachable;
+    }
+
+    fn rollbackProjectionBudget(
+        ctx: *anyopaque,
+        reservation: slot_mod.BaseReservation,
+    ) void {
+        const self: *Client = @ptrCast(@alignCast(ctx));
+        const slot = self.reactor.get(self.admission) catch unreachable;
+        slot.rollbackBaseUpdate(reservation) catch unreachable;
+    }
+
+    fn releaseProjectionBudget(
+        ctx: *anyopaque,
+        stream: subscription_identity.LocalStreamId,
+    ) void {
+        const self: *Client = @ptrCast(@alignCast(ctx));
+        const tracker = self.trackers.get(stream) orelse return;
+        const slot = self.reactor.get(self.admission) catch unreachable;
+        slot.releaseBaseState(tracker) catch unreachable;
     }
 
     fn adoptControl(self: *Client, bytes: []u8) error{OutOfMemory}!void {
@@ -1252,6 +1377,192 @@ test "frame batch sync failure frees every still-owned inner frame" {
     try testing.expectError(error.OutOfMemory, client.adoptFrameBatch(frames));
 }
 
+test "product attach admission failure and EOF release retained projection authority" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const testing = std.testing;
+    var registry_value = registry.TerminalRuntimeRegistry.init(testing.allocator);
+    defer registry_value.deinit();
+    _ = try registry_value.register(0xAA, 80, 24);
+    var subscriptions = subscription_identity.Table.init(testing.allocator);
+    defer subscriptions.deinit();
+    const reactor = try slot_mod.ReactorCore.create(testing.allocator);
+    defer reactor.destroy();
+    var runtime_ops: server.FakeRuntimeOps = .{};
+
+    {
+        var fds: [2]c_int = undefined;
+        try testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds));
+        defer _ = c.close(fds[1]);
+        const client = try Client.create(
+            testing.allocator,
+            fds[0],
+            reactor,
+            61,
+            &registry_value,
+            &subscriptions,
+            .{ .runtime_ops = runtime_ops.ops() },
+        );
+        try sendTestFrame(
+            fds[1],
+            .hello,
+            1,
+            "{\"protocol_min\":2,\"protocol_max\":2,\"client_kind\":\"gui\",\"capabilities\":[\"runtime_metadata_v1\"],\"screen_stream_version\":2}",
+        );
+        client.readReady(1);
+        client.control_admission_fail_once = true;
+        try sendTestFrame(
+            fds[1],
+            .request,
+            2,
+            "{\"method\":\"runtime.attach\",\"params\":{\"runtime_id\":\"aa\",\"mode\":\"observer\"}}",
+        );
+        client.readReady(2);
+        try testing.expect(client.isClosing());
+        try testing.expectEqual(@as(usize, 0), client.connection.attachmentCount());
+        try testing.expectEqual(@as(usize, 0), reactor.budget.prepared_base_bytes);
+        try testing.expectEqual(@as(usize, 0), reactor.budget.prepared_reclaim_bytes);
+        client.destroy();
+        try testing.expectEqual(@as(usize, 0), reactor.budget.resident_bytes);
+        try testing.expectEqual(@as(usize, 0), subscriptions.count());
+        try testing.expectEqual(@as(usize, 0), registry_value.attachmentCount());
+    }
+
+    {
+        var fds: [2]c_int = undefined;
+        try testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds));
+        defer _ = c.close(fds[1]);
+        const client = try Client.create(
+            testing.allocator,
+            fds[0],
+            reactor,
+            64,
+            &registry_value,
+            &subscriptions,
+            .{ .runtime_ops = runtime_ops.ops() },
+        );
+        try sendTestFrame(fds[1], .hello, 1, test_hello);
+        client.readReady(1);
+        try sendTestFrame(
+            fds[1],
+            .request,
+            2,
+            "{\"method\":\"runtime.attach\",\"params\":{\"runtime_id\":\"aa\",\"mode\":\"observer\"}}",
+        );
+        client.readReady(2);
+        const slot = try reactor.get(client.admission);
+        const tracker = client.trackers.get(1).?;
+        try testing.expect((try slot.retainedBaseBytes(tracker)) > 0);
+        try sendTestFrame(
+            fds[1],
+            .request,
+            3,
+            "{\"method\":\"runtime.detach\",\"params\":{\"stream_id\":1}}",
+        );
+        client.readReady(3);
+        try testing.expect(!client.isClosing());
+        try testing.expectEqual(@as(usize, 0), client.connection.attachmentCount());
+        try testing.expectEqual(@as(usize, 0), client.trackers.count());
+        try testing.expectEqual(@as(usize, 0), reactor.budget.prepared_base_bytes);
+        try testing.expectEqual(@as(usize, 0), reactor.budget.prepared_reclaim_bytes);
+        client.destroy();
+        try testing.expectEqual(@as(usize, 0), reactor.budget.resident_bytes);
+        try testing.expectEqual(@as(usize, 0), subscriptions.count());
+        try testing.expectEqual(@as(usize, 0), registry_value.attachmentCount());
+    }
+
+    {
+        var fds: [2]c_int = undefined;
+        try testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds));
+        defer _ = c.close(fds[1]);
+        const client = try Client.create(
+            testing.allocator,
+            fds[0],
+            reactor,
+            63,
+            &registry_value,
+            &subscriptions,
+            .{ .runtime_ops = runtime_ops.ops() },
+        );
+        try sendTestFrame(fds[1], .hello, 1, test_hello);
+        client.readReady(1);
+        const slot = try reactor.get(client.admission);
+        try slot.consumeWritten(slot.pending_bytes);
+        for (slot.chunk_len..slot_mod.max_chunks_per_slot - 1) |_|
+            try slot.enqueueControl("x");
+        try sendTestFrame(
+            fds[1],
+            .request,
+            2,
+            "{\"method\":\"runtime.attach\",\"params\":{\"runtime_id\":\"aa\",\"mode\":\"observer\"}}",
+        );
+        client.readReady(2);
+        try testing.expect(client.isClosing());
+        try testing.expectEqual(@as(usize, 0), client.connection.attachmentCount());
+        try testing.expectEqual(@as(usize, 0), reactor.budget.prepared_base_bytes);
+        try testing.expectEqual(@as(usize, 0), reactor.budget.prepared_reclaim_bytes);
+        client.destroy();
+        try testing.expectEqual(@as(usize, 0), reactor.budget.resident_bytes);
+        try testing.expectEqual(@as(usize, 0), subscriptions.count());
+        try testing.expectEqual(@as(usize, 0), registry_value.attachmentCount());
+    }
+
+    {
+        var fds: [2]c_int = undefined;
+        try testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds));
+        defer _ = c.close(fds[1]);
+        const client = try Client.create(
+            testing.allocator,
+            fds[0],
+            reactor,
+            62,
+            &registry_value,
+            &subscriptions,
+            .{ .runtime_ops = runtime_ops.ops() },
+        );
+        try sendTestFrame(
+            fds[1],
+            .hello,
+            1,
+            "{\"protocol_min\":2,\"protocol_max\":2,\"client_kind\":\"gui\",\"capabilities\":[\"runtime_metadata_v1\"],\"screen_stream_version\":2}",
+        );
+        client.readReady(1);
+        try sendTestFrame(
+            fds[1],
+            .request,
+            2,
+            "{\"method\":\"runtime.attach\",\"params\":{\"runtime_id\":\"aa\",\"mode\":\"observer\"}}",
+        );
+        client.readReady(2);
+        const slot = try reactor.get(client.admission);
+        const tracker = client.trackers.get(1).?;
+        try testing.expect((try slot.retainedBaseBytes(tracker)) > 0);
+        try slot.consumeWritten(slot.pending_bytes);
+        runtime_ops.observation_version = 1;
+        try sendTestFrame(
+            fds[1],
+            .request,
+            3,
+            "{\"method\":\"runtime.observation\",\"params\":{\"stream_id\":1}}",
+        );
+        client.readReady(3);
+        try testing.expect(!client.isClosing());
+        try testing.expectEqual(@as(usize, 0), try slot.preparedBaseBytes(tracker));
+        try testing.expectEqual(@as(usize, 0), reactor.budget.prepared_base_bytes);
+        const observed = client.connection.attachments.get(1).?;
+        try testing.expectEqual(
+            observed.base.?.len + observed.observation_base.?.len,
+            try slot.retainedBaseBytes(tracker),
+        );
+        client.peerBroken();
+        try testing.expect(client.isClosing());
+        client.destroy();
+        try testing.expectEqual(@as(usize, 0), reactor.budget.resident_bytes);
+        try testing.expectEqual(@as(usize, 0), reactor.budget.prepared_base_bytes);
+        try testing.expectEqual(@as(usize, 0), subscriptions.count());
+        try testing.expectEqual(@as(usize, 0), registry_value.attachmentCount());
+    }
+}
+
 test "completed chunk gives the next queued frame a fresh absolute write deadline" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const testing = std.testing;
@@ -1407,6 +1718,15 @@ test "missing runtime converges attachment identity tracker and queued screen in
     client.readReady(2);
     const slot = try reactor.get(client.admission);
     const tracker = client.trackers.get(1).?;
+    const attached = client.connection.attachments.get(1).?;
+    const attached_retained = attached.base.?.len +
+        (if (attached.observation_base) |base| base.len else 0);
+    try testing.expectEqual(
+        attached_retained,
+        try slot.retainedBaseBytes(tracker),
+    );
+    try testing.expectEqual(@as(usize, 0), try slot.preparedBaseBytes(tracker));
+    try testing.expectEqual(@as(usize, 0), reactor.budget.prepared_base_bytes);
     try slot.consumeWritten(slot.pending_bytes);
     try slot.enqueueScreen(tracker, "stale-screen");
     try testing.expectEqual(@as(usize, 1), client.connection.attachmentCount());
@@ -1488,6 +1808,7 @@ test "subscription pressure emits one control notice and recovers with an atomic
     try testing.expect(!client.adoptSubscriptionTurn(1, overflowing));
     try testing.expect(!client.isClosing());
     try testing.expectEqual(slot_mod.ScreenState.invalidated, try slot.screenState(tracker));
+    try testing.expectEqual(@as(usize, 0), try slot.retainedBaseBytes(tracker));
     var notice_count: usize = 0;
     for (0..slot.chunk_len) |logical| {
         const chunk = slot.chunks[(slot.chunk_head + logical) % slot_mod.max_chunks_per_slot];
@@ -1514,6 +1835,14 @@ test "subscription pressure emits one control notice and recovers with an atomic
         if (chunk.class == .screen) recovered_chunks += 1;
     }
     try testing.expectEqual(@as(usize, 2), recovered_chunks);
+    const recovered = client.connection.attachments.get(1).?;
+    const recovered_retained = recovered.base.?.len +
+        (if (recovered.observation_base) |base| base.len else 0);
+    try testing.expectEqual(
+        recovered_retained,
+        try slot.retainedBaseBytes(tracker),
+    );
+    try testing.expectEqual(@as(usize, 0), reactor.budget.prepared_base_bytes);
     try slot.consumeWritten(slot.pending_bytes);
     try testing.expectEqual(slot_mod.ScreenState.valid, try slot.screenState(tracker));
 }
@@ -1564,6 +1893,13 @@ test "failed recovery backoff does not pin round robin ahead of healthy siblings
     runtime_ops.snapshot_fail_count = 1;
     client.tick(100);
     try testing.expect(client.connection.attachments.get(2).?.resync_pending);
+    try testing.expectEqual(
+        @as(usize, 0),
+        try slot.preparedBaseBytes(recovering),
+    );
+    try testing.expectEqual(@as(usize, 0), try slot.retainedBaseBytes(recovering));
+    try testing.expectEqual(@as(usize, 0), reactor.budget.prepared_base_bytes);
+    try testing.expectEqual(@as(usize, 0), reactor.budget.prepared_reclaim_bytes);
     try testing.expectEqualStrings("SNAPSHOT-BYTES", client.connection.attachments.get(1).?.base.?);
     try testing.expectEqualStrings("SNAPSHOT-BYTES", client.connection.attachments.get(3).?.base.?);
 

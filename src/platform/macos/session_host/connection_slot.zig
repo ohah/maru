@@ -7,12 +7,22 @@ const std = @import("std");
 
 pub const max_connections: usize = 32;
 pub const per_slot_bytes: usize = 18 * 1024 * 1024;
+/// One subscription may transiently own the old 16 MiB screen/256 KiB metadata base and a
+/// worst-case replacement at the same time. Queue limits remain independently bounded below, while
+/// this combined ceiling prevents one connection from composing both maxima without a cap.
+pub const base_update_max_bytes: usize = 16 * 1024 * 1024 + 256 * 1024;
+pub const base_steady_per_slot_bytes: usize = 2 * base_update_max_bytes;
+pub const base_per_slot_bytes: usize = base_steady_per_slot_bytes + base_update_max_bytes;
+pub const total_per_slot_bytes: usize = base_per_slot_bytes + per_slot_bytes;
 pub const screen_soft_bytes: usize = 8 * 1024 * 1024;
 /// 16 MiB viewport payload plus at most sixteen charged MRSH frame headers/alignment.
 pub const resync_batch_bytes: usize = 17 * 1024 * 1024;
 pub const control_reserve_bytes: usize = 512 * 1024;
 pub const screen_low_water_bytes: usize = 4 * 1024 * 1024;
 pub const global_bytes: usize = 128 * 1024 * 1024;
+pub const base_replacement_headroom_bytes: usize = base_update_max_bytes;
+const shared_hard_bytes: usize = global_bytes - max_connections * control_reserve_bytes;
+const shared_steady_bytes: usize = shared_hard_bytes - base_replacement_headroom_bytes;
 pub const max_chunks_per_slot: usize = 4096;
 pub const control_chunk_reserve: usize = 64;
 pub const max_screen_trackers_per_slot: usize = 256;
@@ -28,6 +38,8 @@ comptime {
         @compileError("resync batch and control reserve exceed per-slot cap");
     if (per_slot_bytes * max_connections < global_bytes)
         @compileError("global cap cannot exceed the sum of all slot caps");
+    if (base_replacement_headroom_bytes >= shared_hard_bytes)
+        @compileError("base replacement headroom consumes the shared budget");
 }
 
 pub const ConnectionKey = struct {
@@ -114,12 +126,17 @@ const SlotTable = struct {
 pub const GlobalBudget = struct {
     resident_bytes: usize = 0,
     shared_bytes: usize = 0,
+    prepared_base_bytes: usize = 0,
+    prepared_reclaim_bytes: usize = 0,
 
     fn reserveScreen(self: *GlobalBudget, amount: usize) bool {
         const next = std.math.add(usize, self.resident_bytes, amount) catch return false;
         if (next > global_bytes) return false;
         const next_shared = std.math.add(usize, self.shared_bytes, amount) catch return false;
-        if (next_shared > global_bytes - max_connections * control_reserve_bytes) return false;
+        if (next_shared > shared_hard_bytes) return false;
+        if (self.prepared_reclaim_bytes > next_shared) return false;
+        if (next_shared - self.prepared_reclaim_bytes > shared_steady_bytes)
+            return false;
         self.resident_bytes = next;
         self.shared_bytes = next_shared;
         return true;
@@ -133,7 +150,10 @@ pub const GlobalBudget = struct {
         const new_shared = new_slot_control -| control_reserve_bytes;
         const shared_delta = new_shared - old_shared;
         const next_shared = std.math.add(usize, self.shared_bytes, shared_delta) catch return false;
-        if (next_shared > global_bytes - max_connections * control_reserve_bytes) return false;
+        if (next_shared > shared_hard_bytes) return false;
+        if (self.prepared_reclaim_bytes > next_shared) return false;
+        if (next_shared - self.prepared_reclaim_bytes > shared_steady_bytes)
+            return false;
         self.resident_bytes = next;
         self.shared_bytes = next_shared;
         return true;
@@ -154,6 +174,46 @@ pub const GlobalBudget = struct {
         self.resident_bytes -= amount;
         self.shared_bytes -= old_shared - new_shared;
     }
+
+    fn reserveBase(self: *GlobalBudget, old_retained: usize, amount: usize) bool {
+        if (amount == 0 or amount > base_update_max_bytes) return false;
+        if (old_retained > self.shared_bytes) return false;
+        const next = std.math.add(usize, self.resident_bytes, amount) catch return false;
+        if (next > global_bytes) return false;
+        const next_shared = std.math.add(usize, self.shared_bytes, amount) catch return false;
+        if (next_shared > shared_hard_bytes) return false;
+        const future_steady = std.math.add(
+            usize,
+            self.shared_bytes - old_retained,
+            amount,
+        ) catch return false;
+        if (future_steady > shared_steady_bytes) return false;
+        const next_prepared = std.math.add(usize, self.prepared_base_bytes, amount) catch
+            return false;
+        if (next_prepared > base_replacement_headroom_bytes) return false;
+        self.resident_bytes = next;
+        self.shared_bytes = next_shared;
+        self.prepared_base_bytes = next_prepared;
+        self.prepared_reclaim_bytes = std.math.add(
+            usize,
+            self.prepared_reclaim_bytes,
+            old_retained,
+        ) catch unreachable;
+        return true;
+    }
+
+    fn finishBase(
+        self: *GlobalBudget,
+        reserved: usize,
+        old_retained: usize,
+        released: usize,
+    ) void {
+        std.debug.assert(reserved <= self.prepared_base_bytes);
+        std.debug.assert(old_retained <= self.prepared_reclaim_bytes);
+        self.prepared_base_bytes -= reserved;
+        self.prepared_reclaim_bytes -= old_retained;
+        if (released != 0) self.releaseScreen(released);
+    }
 };
 
 pub const QueueClass = enum { screen, control };
@@ -163,6 +223,10 @@ pub const ScreenState = enum { valid, invalidated, resync_pending, resync_draini
 pub const ScreenTracker = struct {
     state: ScreenState = .valid,
     resident_bytes: usize = 0,
+    retained_base_bytes: usize = 0,
+    prepared_base_bytes: usize = 0,
+    base_update_generation: u64 = 1,
+    base_update_prepared: bool = false,
     last_resync_attempt_ns: ?u64 = null,
 };
 
@@ -171,6 +235,11 @@ pub const resync_retry_backoff_ns: u64 = std.time.ns_per_s;
 pub const ScreenTrackerKey = struct {
     owner: ConnectionKey,
     index: u16,
+    generation: u64,
+};
+
+pub const BaseReservation = struct {
+    tracker: ScreenTrackerKey,
     generation: u64,
 };
 
@@ -197,6 +266,7 @@ pub const Slot = struct {
     chunk_len: usize = 0,
     pending_bytes: usize = 0,
     resident_bytes: usize = 0,
+    base_resident_bytes: usize = 0,
     control_resident_bytes: usize = 0,
     screen_trackers: [max_screen_trackers_per_slot]ScreenTrackerEntry =
         [_]ScreenTrackerEntry{.{}} ** max_screen_trackers_per_slot,
@@ -238,9 +308,22 @@ pub const Slot = struct {
         }
         for (self.screen_trackers) |entry| {
             const tracker = entry.tracker orelse continue;
+            const base_charge = tracker.retained_base_bytes + tracker.prepared_base_bytes;
+            if (base_charge != 0) {
+                if (tracker.base_update_prepared)
+                    self.global.finishBase(
+                        tracker.prepared_base_bytes,
+                        tracker.retained_base_bytes,
+                        base_charge,
+                    )
+                else
+                    self.global.releaseScreen(base_charge);
+                self.base_resident_bytes -= base_charge;
+            }
             std.debug.assert(tracker.resident_bytes == 0);
             self.allocator.destroy(tracker);
         }
+        std.debug.assert(self.base_resident_bytes == 0);
         self.allocator.free(self.chunks);
         self.* = undefined;
     }
@@ -266,7 +349,8 @@ pub const Slot = struct {
     ) error{ Stale, Busy }!void {
         const entry = try self.trackerEntry(key);
         const tracker = entry.tracker.?;
-        if (tracker.resident_bytes != 0 or
+        if (tracker.resident_bytes != 0 or tracker.retained_base_bytes != 0 or
+            tracker.prepared_base_bytes != 0 or tracker.base_update_prepared or
             tracker.state == .resync_pending or tracker.state == .resync_draining)
             return error.Busy;
         entry.tracker = null;
@@ -284,6 +368,10 @@ pub const Slot = struct {
         key: ScreenTrackerKey,
     ) error{ Stale, PartialFrame }!void {
         try self.purgeScreenTracker(key);
+        self.releaseBaseState(key) catch |err| switch (err) {
+            error.Stale => return error.Stale,
+            error.Busy => unreachable,
+        };
         self.destroyScreenTracker(key) catch |err| switch (err) {
             error.Stale => return error.Stale,
             error.Busy => unreachable,
@@ -357,6 +445,108 @@ pub const Slot = struct {
 
     pub fn screenResidentBytes(self: *Slot, key: ScreenTrackerKey) error{Stale}!usize {
         return (try self.trackerEntry(key)).tracker.?.resident_bytes;
+    }
+
+    pub fn retainedBaseBytes(self: *Slot, key: ScreenTrackerKey) error{Stale}!usize {
+        return (try self.trackerEntry(key)).tracker.?.retained_base_bytes;
+    }
+
+    pub fn preparedBaseBytes(self: *Slot, key: ScreenTrackerKey) error{Stale}!usize {
+        return (try self.trackerEntry(key)).tracker.?.prepared_base_bytes;
+    }
+
+    pub fn reserveBaseUpdate(
+        self: *Slot,
+        key: ScreenTrackerKey,
+        amount: usize,
+    ) error{ Stale, Busy, InvalidAmount, SlotLimit, GlobalLimit, Exhausted }!BaseReservation {
+        const tracker = (try self.trackerEntry(key)).tracker.?;
+        if (tracker.base_update_prepared) return error.Busy;
+        if (amount == 0 or amount > base_update_max_bytes) return error.InvalidAmount;
+        const next_base = std.math.add(usize, self.base_resident_bytes, amount) catch
+            return error.SlotLimit;
+        if (next_base > base_per_slot_bytes) return error.SlotLimit;
+        const future_steady = std.math.add(
+            usize,
+            self.base_resident_bytes - tracker.retained_base_bytes,
+            amount,
+        ) catch return error.SlotLimit;
+        if (future_steady > base_steady_per_slot_bytes) return error.SlotLimit;
+        const next_total = std.math.add(usize, self.resident_bytes, next_base) catch
+            return error.SlotLimit;
+        if (next_total > total_per_slot_bytes) return error.SlotLimit;
+        if (!self.global.reserveBase(tracker.retained_base_bytes, amount))
+            return error.GlobalLimit;
+        if (tracker.base_update_generation == 0) {
+            self.global.finishBase(amount, tracker.retained_base_bytes, amount);
+            return error.Exhausted;
+        }
+        self.base_resident_bytes = next_base;
+        tracker.prepared_base_bytes = amount;
+        tracker.base_update_prepared = true;
+        return .{ .tracker = key, .generation = tracker.base_update_generation };
+    }
+
+    pub fn commitBaseUpdate(
+        self: *Slot,
+        reservation: BaseReservation,
+        actual: usize,
+    ) error{ Stale, NotPrepared, InvalidAmount, Exhausted }!void {
+        const tracker = (try self.trackerEntry(reservation.tracker)).tracker.?;
+        if (!tracker.base_update_prepared or
+            tracker.base_update_generation != reservation.generation)
+            return error.NotPrepared;
+        if (actual > tracker.prepared_base_bytes) return error.InvalidAmount;
+        const released = tracker.retained_base_bytes +
+            (tracker.prepared_base_bytes - actual);
+        self.global.finishBase(
+            tracker.prepared_base_bytes,
+            tracker.retained_base_bytes,
+            released,
+        );
+        self.base_resident_bytes -= released;
+        tracker.retained_base_bytes = actual;
+        tracker.prepared_base_bytes = 0;
+        tracker.base_update_prepared = false;
+        tracker.base_update_generation = std.math.add(
+            u64,
+            tracker.base_update_generation,
+            1,
+        ) catch 0;
+    }
+
+    pub fn rollbackBaseUpdate(
+        self: *Slot,
+        reservation: BaseReservation,
+    ) error{ Stale, NotPrepared, Exhausted }!void {
+        const tracker = (try self.trackerEntry(reservation.tracker)).tracker.?;
+        if (!tracker.base_update_prepared or
+            tracker.base_update_generation != reservation.generation)
+            return error.NotPrepared;
+        const released = tracker.prepared_base_bytes;
+        self.global.finishBase(released, tracker.retained_base_bytes, released);
+        self.base_resident_bytes -= released;
+        tracker.prepared_base_bytes = 0;
+        tracker.base_update_prepared = false;
+        tracker.base_update_generation = std.math.add(
+            u64,
+            tracker.base_update_generation,
+            1,
+        ) catch 0;
+    }
+
+    pub fn releaseBaseState(
+        self: *Slot,
+        key: ScreenTrackerKey,
+    ) error{ Stale, Busy }!void {
+        const tracker = (try self.trackerEntry(key)).tracker.?;
+        if (tracker.base_update_prepared) return error.Busy;
+        const released = tracker.retained_base_bytes;
+        if (released != 0) {
+            self.global.releaseScreen(released);
+            self.base_resident_bytes -= released;
+            tracker.retained_base_bytes = 0;
+        }
     }
 
     pub fn beginResyncAttempt(
@@ -822,7 +1012,9 @@ pub const ReactorCore = struct {
 
     pub fn drainedForUpgrade(self: *const ReactorCore) bool {
         return self.table.active_count == 0 and
-            self.budget.resident_bytes == 0 and self.budget.shared_bytes == 0;
+            self.budget.resident_bytes == 0 and self.budget.shared_bytes == 0 and
+            self.budget.prepared_base_bytes == 0 and
+            self.budget.prepared_reclaim_bytes == 0;
     }
 
     /// EOF/protocol error/timeout teardown. Unsent queue and tracker accounting are purged by Slot.deinit.
@@ -1106,11 +1298,14 @@ test "connection slot table enforces 32 cap, generation ABA, and round-robin fai
 
 test "global screen ceiling preserves every connection control reserve" {
     var budget: GlobalBudget = .{};
-    const max_screen_global = global_bytes - max_connections * control_reserve_bytes;
+    const max_screen_global = shared_steady_bytes;
     try std.testing.expect(budget.reserveScreen(max_screen_global));
     try std.testing.expect(!budget.reserveScreen(1));
     for (0..max_connections) |_| try std.testing.expect(budget.reserveControl(0, control_reserve_bytes));
-    try std.testing.expectEqual(global_bytes, budget.resident_bytes);
+    try std.testing.expectEqual(
+        global_bytes - base_replacement_headroom_bytes,
+        budget.resident_bytes,
+    );
     for (0..max_connections) |_| budget.releaseControl(control_reserve_bytes, control_reserve_bytes);
     budget.releaseScreen(max_screen_global);
 }
@@ -1397,6 +1592,171 @@ test "detach purge refuses to truncate a screen frame whose prefix reached the p
     );
     try std.testing.expectEqualStrings("rame", slot.firstPending().?.bytes);
     try std.testing.expectEqual(ScreenState.valid, try slot.screenState(tracker));
+}
+
+test "retained base reservation charges old and prepared then reconciles actual commit" {
+    var global: GlobalBudget = .{};
+    const key: ConnectionKey = .{ .monotonic_id = 1, .slot_generation = 1 };
+    var slot = try Slot.init(std.testing.allocator, &global, key);
+    defer slot.deinit();
+    const tracker = try slot.createScreenTracker();
+
+    const first = try slot.reserveBaseUpdate(tracker, 10);
+    try std.testing.expectEqual(@as(usize, 10), global.resident_bytes);
+    try std.testing.expectEqual(@as(usize, 10), try slot.preparedBaseBytes(tracker));
+    try slot.commitBaseUpdate(first, 6);
+    try std.testing.expectEqual(@as(usize, 6), global.resident_bytes);
+    try std.testing.expectEqual(@as(usize, 6), try slot.retainedBaseBytes(tracker));
+
+    const second = try slot.reserveBaseUpdate(tracker, 9);
+    try std.testing.expectEqual(@as(usize, 15), global.resident_bytes);
+    try slot.commitBaseUpdate(second, 7);
+    try std.testing.expectEqual(@as(usize, 7), global.resident_bytes);
+    try std.testing.expectEqual(@as(usize, 7), try slot.retainedBaseBytes(tracker));
+}
+
+test "retained base rollback and detach release exactly without harming sibling" {
+    var global: GlobalBudget = .{};
+    const key: ConnectionKey = .{ .monotonic_id = 1, .slot_generation = 1 };
+    var slot = try Slot.init(std.testing.allocator, &global, key);
+    defer slot.deinit();
+    const first = try slot.createScreenTracker();
+    const sibling = try slot.createScreenTracker();
+
+    const first_initial = try slot.reserveBaseUpdate(first, 10);
+    try slot.commitBaseUpdate(first_initial, 8);
+    const sibling_initial = try slot.reserveBaseUpdate(sibling, 6);
+    try slot.commitBaseUpdate(sibling_initial, 5);
+    const rejected = try slot.reserveBaseUpdate(first, 7);
+    try slot.rollbackBaseUpdate(rejected);
+    try std.testing.expectEqual(@as(usize, 13), global.resident_bytes);
+
+    try slot.purgeAndDestroyScreenTracker(first);
+    try std.testing.expectEqual(@as(usize, 5), global.resident_bytes);
+    try std.testing.expectEqual(@as(usize, 5), try slot.retainedBaseBytes(sibling));
+}
+
+test "retained base exact cap rejects plus one and stale key changes no accounting" {
+    var global: GlobalBudget = .{};
+    const key: ConnectionKey = .{ .monotonic_id = 1, .slot_generation = 1 };
+    var slot = try Slot.init(std.testing.allocator, &global, key);
+    defer slot.deinit();
+    const tracker = try slot.createScreenTracker();
+
+    try std.testing.expectError(
+        error.InvalidAmount,
+        slot.reserveBaseUpdate(tracker, base_update_max_bytes + 1),
+    );
+    try std.testing.expectEqual(@as(usize, 0), global.resident_bytes);
+    const initial = try slot.reserveBaseUpdate(tracker, base_update_max_bytes);
+    try std.testing.expectError(error.Busy, slot.reserveBaseUpdate(tracker, 1));
+    try slot.commitBaseUpdate(initial, base_update_max_bytes);
+    const replacement = try slot.reserveBaseUpdate(tracker, base_update_max_bytes);
+    try std.testing.expectEqual(
+        2 * base_update_max_bytes,
+        global.resident_bytes,
+    );
+    try slot.rollbackBaseUpdate(replacement);
+    try std.testing.expectEqual(base_update_max_bytes, global.resident_bytes);
+
+    var stale = tracker;
+    stale.generation +%= 1;
+    try std.testing.expectError(error.Stale, slot.releaseBaseState(stale));
+    try std.testing.expectEqual(base_update_max_bytes, global.resident_bytes);
+}
+
+test "retained base keeps one global replacement headroom and reuses it after rollback" {
+    var global: GlobalBudget = .{};
+    const first_key: ConnectionKey = .{ .monotonic_id = 1, .slot_generation = 1 };
+    const second_key: ConnectionKey = .{ .monotonic_id = 2, .slot_generation = 1 };
+    var first = try Slot.init(std.testing.allocator, &global, first_key);
+    defer first.deinit();
+    var second = try Slot.init(std.testing.allocator, &global, second_key);
+    defer second.deinit();
+    const first_tracker = try first.createScreenTracker();
+    const second_tracker = try second.createScreenTracker();
+
+    const first_initial = try first.reserveBaseUpdate(first_tracker, base_update_max_bytes);
+    try first.commitBaseUpdate(first_initial, base_update_max_bytes);
+    const second_initial = try second.reserveBaseUpdate(second_tracker, base_update_max_bytes);
+    try second.commitBaseUpdate(second_initial, base_update_max_bytes);
+
+    const replacement = try first.reserveBaseUpdate(first_tracker, base_update_max_bytes);
+    try std.testing.expectError(
+        error.GlobalLimit,
+        second.reserveBaseUpdate(second_tracker, 1),
+    );
+    try first.rollbackBaseUpdate(replacement);
+    const reused = try second.reserveBaseUpdate(second_tracker, 1);
+    try second.rollbackBaseUpdate(reused);
+    try std.testing.expectEqual(@as(usize, 0), global.prepared_base_bytes);
+    try std.testing.expectEqual(@as(usize, 0), global.prepared_reclaim_bytes);
+}
+
+test "prepared reclaim admits eventual screen and control queue state under the hard cap" {
+    var global: GlobalBudget = .{};
+    const key: ConnectionKey = .{ .monotonic_id = 1, .slot_generation = 1 };
+    var slot = try Slot.init(std.testing.allocator, &global, key);
+    defer slot.deinit();
+    const tracker = try slot.createScreenTracker();
+    const initial = try slot.reserveBaseUpdate(tracker, base_update_max_bytes);
+    try slot.commitBaseUpdate(initial, base_update_max_bytes);
+
+    const replacement = try slot.reserveBaseUpdate(tracker, base_update_max_bytes);
+    try slot.enqueueScreen(tracker, "screen");
+    try slot.enqueueControl("control");
+    try std.testing.expectEqual(
+        base_update_max_bytes,
+        global.prepared_reclaim_bytes,
+    );
+    try std.testing.expect(
+        global.shared_bytes > base_update_max_bytes * 2,
+    );
+    try slot.commitBaseUpdate(replacement, base_update_max_bytes);
+    try std.testing.expect(global.shared_bytes <= shared_steady_bytes);
+    try std.testing.expectEqual(@as(usize, 0), global.prepared_reclaim_bytes);
+}
+
+test "stale active base reservation cannot mutate a reused reactor slot" {
+    const reactor = try ReactorCore.create(std.testing.allocator);
+    defer reactor.destroy();
+    const old_admission = try reactor.admit();
+    const old_slot = try reactor.get(old_admission);
+    const old_tracker = try old_slot.createScreenTracker();
+    const stale = try old_slot.reserveBaseUpdate(old_tracker, 8);
+    try reactor.closeConnection(old_admission);
+    try std.testing.expectEqual(@as(usize, 0), reactor.budget.resident_bytes);
+
+    const new_admission = try reactor.admit();
+    const new_slot = try reactor.get(new_admission);
+    const new_tracker = try new_slot.createScreenTracker();
+    const current = try new_slot.reserveBaseUpdate(new_tracker, 7);
+    const before = reactor.budget.resident_bytes;
+    try std.testing.expectError(error.Stale, new_slot.commitBaseUpdate(stale, 1));
+    try std.testing.expectEqual(before, reactor.budget.resident_bytes);
+    try new_slot.rollbackBaseUpdate(current);
+    try new_slot.purgeAndDestroyScreenTracker(new_tracker);
+    try reactor.closeConnection(new_admission);
+}
+
+test "reactor upgrade drain includes retained and prepared base authority" {
+    const reactor = try ReactorCore.create(std.testing.allocator);
+    defer reactor.destroy();
+    const admission = try reactor.admit();
+    const slot = try reactor.get(admission);
+    const tracker = try slot.createScreenTracker();
+
+    const committed = try slot.reserveBaseUpdate(tracker, 8);
+    try slot.commitBaseUpdate(committed, 6);
+    try std.testing.expect(!reactor.drainedForUpgrade());
+    const prepared = try slot.reserveBaseUpdate(tracker, 7);
+    try std.testing.expect(!reactor.drainedForUpgrade());
+    try slot.rollbackBaseUpdate(prepared);
+    try slot.purgeAndDestroyScreenTracker(tracker);
+    try reactor.closeConnection(admission);
+    try std.testing.expect(reactor.drainedForUpgrade());
+    try std.testing.expectEqual(@as(usize, 0), reactor.budget.prepared_base_bytes);
+    try std.testing.expectEqual(@as(usize, 0), reactor.budget.prepared_reclaim_bytes);
 }
 
 test "connection key allocator never emits zero or reuses after overflow" {

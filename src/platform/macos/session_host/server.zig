@@ -933,12 +933,34 @@ pub const Connection = struct {
         request_id: u64,
         params: ?std.json.ObjectMap,
     ) HandleError!Action {
-        if (!self.currentHostStatus().upgrade_capable)
-            return self.replyError(request_id, .upgrade_unsupported);
         const ops = self.upgrade_ops orelse return self.replyError(request_id, .upgrade_unsupported);
         const request = upgrade_wire.parsePrepare(params orelse
             return self.replyError(request_id, .invalid_request)) orelse
             return self.replyError(request_id, .invalid_request);
+        // Completed replay는 read-only 결과 조회지만 attempt ID만으로 우회하면 다른 target identity가 성공으로
+        // 위장된다. Owner가 immutable request 전체를 exact-match/conflict로 분류하고, active exact retry와
+        // 알려지지 않은 new request만 종전 all-or-none preflight로 보낸다.
+        switch (ops.probe_prepare(ops.ctx, request)) {
+            .completed => |report| {
+                if (!upgrade_wire.validReport(report) or report.status == .pending)
+                    return self.replyError(request_id, .upgrade_busy);
+                var replay_buf: [32]u8 = undefined;
+                const replay_attempt = std.fmt.bufPrint(&replay_buf, "{x:0>32}", .{request.attempt_id}) catch
+                    return error.OutOfMemory;
+                const replay_body = try self.stringify(.{ .result = .{
+                    .attempt_id = replay_attempt,
+                    .state = @tagName(report.status),
+                    .reason = @tagName(report.reason),
+                    .replayed = true,
+                } });
+                defer self.allocator.free(replay_body);
+                return self.replyResult(request_id, replay_body);
+            },
+            .conflict => return self.replyError(request_id, .attempt_conflict),
+            .requires_preflight => {},
+        }
+        if (!self.currentHostStatus().upgrade_capable)
+            return self.replyError(request_id, .upgrade_unsupported);
         const preflight = self.upgrade_preflight orelse
             return self.replyError(request_id, .upgrade_busy);
         if (!preflight.reserve(preflight.ctx))
@@ -2638,6 +2660,113 @@ test "server: hello with overlapping version acks host_id and moves to ready" {
     try testing.expect(std.mem.indexOf(u8, r.frame.?.payload, "\"runtime_selected_text_v1\"") != null);
 }
 
+// code-review(max) 회귀: preflight(전체 정지 판정)가 **완료된 attempt의 멱등 replay**까지 가로막아, 결과를
+// 다시 조회하면 완료 보고 대신 upgrade_busy가 돌아왔다. 클라이언트는 이미 성공한 업그레이드를 다시 몰아붙일 수
+// 있다. 새 시도는 종전대로 preflight가 먼저여야 하므로(all-or-none 규율) 둘을 함께 고정한다.
+test "server: 완료된 attempt replay는 preflight를 거치지 않는다" {
+    const FakeOwner = struct {
+        staged: usize = 0,
+        reservations: usize = 0,
+
+        fn stagePending(ctx: *anyopaque, _: upgrade_wire.PrepareRequest) upgrade_wire.PrepareDecision {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            self.staged += 1;
+            return .accepted;
+        }
+        fn probePrepare(_: *anyopaque, request: upgrade_wire.PrepareRequest) upgrade_wire.PrepareProbe {
+            if (request.attempt_id != 0xAABB) return .requires_preflight;
+            const exact = std.mem.eql(u8, request.target_path, "/Applications/Maru.app/Contents/MacOS/maru") and
+                std.mem.eql(u8, request.target_build_id, "sha256:build") and
+                std.mem.eql(u8, &request.target_sha256, &([_]u8{
+                    0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF,
+                } ** 4)) and
+                request.handoff_reader_min == 1 and request.handoff_reader_max == 1;
+            return if (exact)
+                .{ .completed = .{ .status = .committed, .reason = .none } }
+            else
+                .conflict;
+        }
+        fn status(_: *anyopaque, _: u128) ?upgrade_wire.AttemptReport {
+            return .{ .status = .committed, .reason = .none }; // 이미 끝난 attempt
+        }
+        fn armAccepted(_: *anyopaque, _: u128) upgrade_wire.ArmDecision {
+            return .armed;
+        }
+        fn cancelUnaccepted(_: *anyopaque, _: u128) void {}
+        fn reserve(ctx: *anyopaque) bool {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            self.reservations += 1;
+            return false; // 전체 정지가 아니다 — 예전엔 이 한 표로 replay까지 막혔다
+        }
+        fn cancelReserve(_: *anyopaque) void {}
+    };
+
+    var registry = reg.TerminalRuntimeRegistry.init(testing.allocator);
+    defer registry.deinit();
+    var owner: FakeOwner = .{};
+    var conn = Connection.init(testing.allocator, 0x1234, &registry);
+    conn.state = .ready;
+    conn.selected_version = protocol.version_major;
+    conn.host_status = .{ .manifest_capable = true, .upgrade_capable = true };
+    conn.upgrade_ops = .{
+        .ctx = &owner,
+        .probe_prepare = FakeOwner.probePrepare,
+        .stage_pending = FakeOwner.stagePending,
+        .cancel_unaccepted = FakeOwner.cancelUnaccepted,
+        .arm_accepted = FakeOwner.armAccepted,
+        .abort_armed = upgrade_wire.cannotAbortArmed,
+        .status = FakeOwner.status,
+    };
+    conn.upgrade_preflight = .{
+        .ctx = &owner,
+        .reserve = FakeOwner.reserve,
+        .cancel = FakeOwner.cancelReserve,
+    };
+
+    const request =
+        \\{"method":"host.upgrade.prepare","params":{"attempt_id":"0000000000000000000000000000aabb","target_path":"/Applications/Maru.app/Contents/MacOS/maru","target_build_id":"sha256:build","target_sha256":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","handoff_reader_min":1,"handoff_reader_max":1}}
+    ;
+    const replay = try feedJson(&conn, .request, 7, request);
+    defer if (replay.frame) |frame| frame.deinit(testing.allocator);
+
+    // 완료 보고가 돌아오고, preflight도 스테이징도 건드리지 않는다.
+    const payload = replay.frame.?.payload;
+    try testing.expect(std.mem.indexOf(u8, payload, "\"replayed\":true") != null);
+    try testing.expect(std.mem.indexOf(u8, payload, "\"state\":\"committed\"") != null);
+    try testing.expect(std.mem.indexOf(u8, payload, "upgrade_busy") == null);
+    try testing.expectEqual(@as(usize, 0), owner.reservations);
+    try testing.expectEqual(@as(usize, 0), owner.staged);
+
+    const conflicts = [_][]const u8{
+        \\{"method":"host.upgrade.prepare","params":{"attempt_id":"0000000000000000000000000000aabb","target_path":"/other","target_build_id":"sha256:build","target_sha256":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","handoff_reader_min":1,"handoff_reader_max":1}}
+        ,
+        \\{"method":"host.upgrade.prepare","params":{"attempt_id":"0000000000000000000000000000aabb","target_path":"/Applications/Maru.app/Contents/MacOS/maru","target_build_id":"sha256:other","target_sha256":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","handoff_reader_min":1,"handoff_reader_max":1}}
+        ,
+        \\{"method":"host.upgrade.prepare","params":{"attempt_id":"0000000000000000000000000000aabb","target_path":"/Applications/Maru.app/Contents/MacOS/maru","target_build_id":"sha256:build","target_sha256":"1123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","handoff_reader_min":1,"handoff_reader_max":1}}
+        ,
+        \\{"method":"host.upgrade.prepare","params":{"attempt_id":"0000000000000000000000000000aabb","target_path":"/Applications/Maru.app/Contents/MacOS/maru","target_build_id":"sha256:build","target_sha256":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","handoff_reader_min":1,"handoff_reader_max":2}}
+        ,
+    };
+    for (conflicts, 0..) |conflict_request, index| {
+        const conflict = try feedJson(&conn, .request, @intCast(20 + index), conflict_request);
+        defer if (conflict.frame) |frame| frame.deinit(testing.allocator);
+        try testing.expect(std.mem.indexOf(u8, conflict.frame.?.payload, "attempt_conflict") != null);
+    }
+    try testing.expectEqual(@as(usize, 0), owner.reservations);
+    try testing.expectEqual(@as(usize, 0), owner.staged);
+
+    conn.host_status.upgrade_capable = false;
+    const revoked_replay = try feedJson(&conn, .request, 30, request);
+    defer if (revoked_replay.frame) |frame| frame.deinit(testing.allocator);
+    try testing.expect(std.mem.indexOf(u8, revoked_replay.frame.?.payload, "\"replayed\":true") != null);
+    const new_request =
+        \\{"method":"host.upgrade.prepare","params":{"attempt_id":"0000000000000000000000000000aabc","target_path":"/Applications/Maru.app/Contents/MacOS/maru","target_build_id":"sha256:build","target_sha256":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","handoff_reader_min":1,"handoff_reader_max":1}}
+    ;
+    const unsupported = try feedJson(&conn, .request, 31, new_request);
+    defer if (unsupported.frame) |frame| frame.deinit(testing.allocator);
+    try testing.expect(std.mem.indexOf(u8, unsupported.frame.?.payload, "upgrade_unsupported") != null);
+}
+
 test "server: upgrade prepare publishes pending then replies-and-closes before daemon work" {
     const FakeOwner = struct {
         accepted: bool = false,
@@ -2645,9 +2774,12 @@ test "server: upgrade prepare publishes pending then replies-and-closes before d
         attempt_id: u128 = 0,
         reservations: usize = 0,
         reservation_cancels: usize = 0,
+        stage_without_reservation: bool = false,
 
         fn stagePending(ctx: *anyopaque, request: upgrade_wire.PrepareRequest) upgrade_wire.PrepareDecision {
             const self: *@This() = @ptrCast(@alignCast(ctx));
+            if (self.reservations == self.reservation_cancels)
+                self.stage_without_reservation = true;
             if (self.reject) return .busy;
             if (self.accepted and self.attempt_id != request.attempt_id) return .conflict;
             self.accepted = true;
@@ -2691,9 +2823,11 @@ test "server: upgrade prepare publishes pending then replies-and-closes before d
     conn.host_status = .{ .manifest_capable = true, .upgrade_capable = true };
     conn.upgrade_ops = .{
         .ctx = &owner,
+        .probe_prepare = upgrade_wire.requiresPreflight,
         .stage_pending = FakeOwner.stagePending,
         .cancel_unaccepted = FakeOwner.cancelUnaccepted,
         .arm_accepted = FakeOwner.armAccepted,
+        .abort_armed = upgrade_wire.cannotAbortArmed,
         .status = FakeOwner.status,
     };
     const request =
@@ -2730,12 +2864,14 @@ test "server: upgrade prepare publishes pending then replies-and-closes before d
     try testing.expect(!owner.accepted);
     try testing.expectEqual(@as(usize, 1), owner.reservations);
     try testing.expectEqual(@as(usize, 1), owner.reservation_cancels);
+    try testing.expect(!owner.stage_without_reservation);
     owner.reject = false;
     const result = try feedJson(&conn, .request, 10, request);
     defer if (result.frame) |frame| frame.deinit(testing.allocator);
     try testing.expect(owner.accepted);
     try testing.expectEqual(@as(usize, 2), owner.reservations);
     try testing.expectEqual(@as(usize, 1), owner.reservation_cancels);
+    try testing.expect(!owner.stage_without_reservation);
     try testing.expectEqual(@as(u128, 0xAABB), owner.attempt_id);
     try testing.expectEqualStrings("upgrade_accepted", result.action);
     try testing.expect(std.mem.indexOf(u8, result.frame.?.payload, "\"state\":\"accepted\"") != null);

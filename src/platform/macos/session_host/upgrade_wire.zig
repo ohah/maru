@@ -62,8 +62,17 @@ pub const ArmDecision = enum {
     conflict,
 };
 
+pub const PrepareProbe = union(enum) {
+    requires_preflight,
+    completed: AttemptReport,
+    conflict,
+};
+
 pub const Ops = struct {
     ctx: *anyopaque,
+    /// Known attempt의 immutable request identity를 read-only로 분류한다. Exact completed replay와
+    /// active/completed conflict는 preflight를 우회하고 active exact retry/new request만 preflight가 필요하다.
+    probe_prepare: *const fn (ctx: *anyopaque, request: PrepareRequest) PrepareProbe,
     /// Admission lease 안에서는 target 검증/복사와 pending metadata 게시까지만 한다. Quiesce는 accepted reply가 전량
     /// write되고 connection lease가 해제된 뒤 daemon outer loop가 시작해야 한다.
     stage_pending: *const fn (ctx: *anyopaque, request: PrepareRequest) PrepareDecision,
@@ -71,8 +80,18 @@ pub const Ops = struct {
     cancel_unaccepted: *const fn (ctx: *anyopaque, attempt_id: u128) void,
     /// accepted response 전량 write 뒤 exact pending attempt만 실행 가능 상태로 바꾼다. Quiesce/exec는 하지 않는다.
     arm_accepted: *const fn (ctx: *anyopaque, attempt_id: u128) ArmDecision,
+    /// Runtime freeze 전 teardown repair가 성공한 exact armed attempt를 terminal resumed로 되돌린다.
+    abort_armed: *const fn (ctx: *anyopaque, attempt_id: u128, report: AttemptReport) bool,
     status: *const fn (ctx: *anyopaque, attempt_id: u128) ?AttemptReport,
 };
+
+pub fn requiresPreflight(_: *anyopaque, _: PrepareRequest) PrepareProbe {
+    return .requires_preflight;
+}
+
+pub fn cannotAbortArmed(_: *anyopaque, _: u128, _: AttemptReport) bool {
+    return false;
+}
 
 pub fn validReport(report: AttemptReport) bool {
     return switch (report.status) {

@@ -113,6 +113,10 @@ pub const external_tty = if (builtin.os.tag == .macos)
     @import("session_host/external_tty.zig")
 else
     struct {};
+pub const external_resize = if (builtin.os.tag == .macos)
+    @import("session_host/external_resize.zig")
+else
+    struct {};
 // runtime_manager(실 runtime 소유 — app InProcessTermBackend 재사용)는 `@import("maru")`로 app 스택을 끌어와 macOS에서만
 // 컴파일한다. codec(protocol/framing/screen_stream/registry/server)은 여전히 maru를 모르는 platform-import-0 순수 계층이다.
 pub const runtime_manager = if (builtin.os.tag == .macos)

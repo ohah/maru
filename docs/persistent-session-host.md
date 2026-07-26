@@ -852,10 +852,10 @@ ssh -t workbox maru attach <runtime-id>
 1. stdin이 TTY인지 확인한 뒤 **어떤 terminal mutation보다 먼저** 원래 `termios` 전체와 현재
    `TIOCGWINSZ`를 읽는다. 둘 중 하나라도 실패하면 raw mode나 signal handler를 설치하지 않고 attach를 거부한다.
    최초 크기는 0이 아닌 `cols/rows`여야 하며 P5c2의 controller 첫 resize 입력이 된다.
-2. `HUP/INT/QUIT/TERM`을 setup/restore transaction 동안 signal mask로 막고, handler와
+2. `HUP/INT/QUIT/TERM/WINCH`를 setup/restore transaction 동안 signal mask로 막고, handler와
    nonblocking+CLOEXEC self-pipe를 설치한 뒤 raw mode를 마지막으로 적용한다. transaction이 끝나기 전에 원래 mask를
    복원하므로 그 사이 도착한 signal은 handler 설치 전 default action이나 handler 제거 뒤 닫힌 pipe와 경합하지 않는다.
-   v1 external attach는 네 signal 모두 기존 disposition이 `SIG_DFL`일 때만 시작한다. `SIG_IGN`, custom handler,
+   v1 external attach는 다섯 signal 모두 기존 disposition이 `SIG_DFL`일 때만 시작한다. `SIG_IGN`, custom handler,
    `SA_SIGINFO`는 sender provenance와 계속 실행 의미를 teardown 뒤 self-signal로 정확히 보존할 수 없으므로
    `UnsupportedSignalDisposition`으로 mutation 없이 거부한다.
    raw mode는 macOS libc `cfmakeraw(3)`를 저장본 복사에 적용하며 enter/restore 모두

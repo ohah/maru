@@ -2283,8 +2283,94 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
     lock 대칭을 Debug/ReleaseFast 테스트로 검증한다.
     이 단계는 stdout event loop에 연결하지 않으며 P5c3c~d 전에는 public attach 전체 완료로 표시하지 않는다.
   - **P5c3c — nonblocking single-owner event loop**: `external_attach.zig`의 한 stack owner가 `RawTty`, 단 하나의
-    `Client`, 그 client를 borrow하는 `RemoteAttachment`, ANSI stdout queue, resize와 detach chord를 소유한다. raw 진입
-    전에도 기존 `SO_RCVTIMEO`/blocking `writeAll`을 deadline으로 간주하지 않는다. resolver 전체, selected
+    `Client`, 그 client를 borrow하는 `RemoteAttachment`, ANSI stdout queue, resize와 detach chord를 소유한다.
+    P5c3c는 다음 세 phase의 여섯 merge slice를 순서대로 통과해야 하며 일부만으로 event loop 완료를 주장하지 않는다.
+    - **P5c3c-1 — absolute-deadline transport**는 두 merge slice다.
+      - **P5c3c-1a — deadline leaf + connect/hello**: `client_deadline.zig`가 `AbsoluteDeadline`과
+        injected connector ops(monotonic clock, socket, connect, fcntl, poll, getsockopt `SO_ERROR`,
+        setsockopt `SO_NOSIGPIPE`, read, write, close)를 소유하고 `client.zig`는 thin facade로
+        `Client.connectUntil`만 제공한다. injected connector
+        state fixture가 `EINPROGRESS → poll → SO_ERROR` 성공/실패, EINTR/EAGAIN, fd flag rollback과 close를
+        결정적으로 검증한다. real AF_UNIX listener fixture는 실제 nonblocking connect/hello를 고정하고,
+        socketpair는 established I/O byte-drip/partial read-write에만 쓴다.
+      - **P5c3c-1b — phase propagation + call/snapshot**:
+        `attach_product_resolver.resolveProduct/revalidate/connectPinned`→`host_connect`→`Client` 호출 경계가
+        `PhaseDeadline`을 명시적으로 전달하고 기존 backoff sleep을 deadline-aware poll로 교체한다.
+        `PhaseDeadline`은 phase kind와 `AbsoluteDeadline` 하나를 묶은 non-resettable wrapper이며 새 clock이 아니다.
+        `resolve`, `connect_hello`, `attach_snapshot`, `status_takeover` 네 phase는 서로 독립된 5초 phase이며
+        각 phase 안의 모든 read/write/poll만 phase 시작 때 한 번 계산한 absolute deadline 하나를 공유한다.
+        `resolve` deadline은 모든 candidate probe와 완전증거 비교를 포함하며 candidate마다 다시 시작하지 않는다.
+        `connect_hello` deadline은 `connectPinned` 진입 전에 시작해 그 내부 final revalidation, backoff,
+        connect와 hello 전체를 포함하고 backoff마다 다시 시작하지 않는다.
+        connect completion은 `SO_ERROR`까지, request는 write+response까지 같은 phase deadline에 포함된다.
+      두 slice 모두 parser,
+      pending stream/event/batch, next request ID와 capability는 기존 `Client` 필드 하나를 그대로 사용하며 별도 parser나
+      fd wrapper를 만들지 않는다. 정상 partial read/write는 같은 absolute deadline까지 offset/parser를 보존해
+      계속한다. in-flight RPC의 hard error·EOF·deadline·malformed response는 partial offset 유무와 무관하게
+      connection을 poison/close해 late response가 다음 request에 오귀속되지 않게 한다. connect completion 전 실패는
+      candidate fd를 닫고 같은 phase deadline 안의 fresh fd로만 retry하며,
+      established connection은 wire byte 0인 local allocation 실패에서만 재사용할 수 있다.
+      exact deadline, byte-drip,
+      EINTR, EAGAIN, partial read/write, fd flag 보존, allocation fail-index를 pure
+      connector state fixture, established socketpair와 injected clock으로 고정한다.
+    - **P5c3c-2 — blocking→pump**는 두 merge slice다.
+      - **P5c3c-2a — mode transaction**: 같은 `Client`에 단일 mode gate를 두고 RX/TX storage를 먼저 staging한 뒤
+        saved `F_GETFL`을 기록하고 단 하나의 `F_SETFL(saved_flags | O_NONBLOCK)`을 마지막 atomic commit으로 둔다.
+        `SO_RCVTIMEO`는 nonblocking poll mode에서 사용되지 않으므로 읽거나 변경하지 않는다. allocation/fcntl 실패는
+        flags, parser/pending/outbound/mode 무변경이며 성공 뒤 모든 blocking API는 I/O 전에 typed reject한다.
+        모든 blocking primitive는 `requireBlockingMode()` 하나를 통과하며 leaf별 임의 guard를 두지 않는다.
+        전환은 기존 `pending_outbound`가 null일 때만 허용하고 offset 0/partial 모두 typed busy로 거부한다.
+        external mode는 GUI용 `pending_outbound`을 재사용하지 않고 mode-exclusive bounded `external_tx`와
+        단일 in-flight response correlation만 새로 소유한다. `sendDontWait`의 일시적 flag 토글은 blocking mode에서만
+        허용하고 external mode는 transition이 commit한 영구 `O_NONBLOCK`만 사용한다. GUI용 legacy
+        `call`/`readSnapshot`/`readStreamBatch`/`pumpPendingOutput`/`sendInput`/scroll/core-command/resize/detach를
+        포함한 모든 public socket I/O API도 같은 blocking-mode chokepoint에서 typed reject한다.
+      - **P5c3c-2b — bounded pump/demux**: `client_pump.zig`는 turn policy만 소유하고 parser, pending stream/event/batch,
+        request ID/capability와 wire queue의 SSOT는 계속 `Client` 하나다. TX resident는 connection당
+        `protocol.max_binary_chunk + protocol.header_size` bytes(`1 MiB + 32`)/64 frame이며 두 조건을 모두 적용한다.
+        socket RX/TX의 `1 MiB/64 frame`은 resident가 아니라 한 poll turn의 공정성 budget이다.
+        resident cap은 header 포함 wire bytes의 exact/cap+1과 64/65 frame fixture로, turn budget은 별도
+        `tx_turn_bytes/tx_turn_frames` counter fixture로 검증한다.
+        screen RX+`RemoteAttachment.pending_batches`는 기존 `18 MiB/4,096 item` shared ledger에 함께 charge한다.
+        공유 `AttachmentTransport.read_batch`는 plain batch가 아니라 `.untracked | .charged` tagged
+        `AttachmentBatchLease`를 반환한다. 기존 GUI adapter는 no-op `.untracked`를 사용하고 external pump만
+        shared ledger token을 가진 `.charged`를 사용하며 두 adapter와 기존 RemoteRuntime 회귀를 함께 검증한다.
+        `RemoteAttachment`가 apply/free 뒤 release callback을 exact once 호출한다. 따라서 attachment로 handoff한
+        batch도 apply/free 전까지 Client ledger charge를 유지한다. `ExternalInboxLedger`는 event-loop stack owner가
+        `Client`와 `RemoteAttachment`보다 오래 소유하고 teardown은 attachment→Client→ledger 순서이며 final zero를
+        assert한다. lease는 이 stable ledger만 borrow하므로 Client 선종료에도 UAF가 없고 append OOM, decode/apply 실패,
+        drop/deinit 모든 경로가 byte+item charge를 함께 exact once 반환한다. request correlation, revoke 선소비,
+        단일 in-flight control RPC와 `RemoteAttachment.AttachmentTransport`를 구현한다. 별도 raw RX queue는 만들지
+        않고 existing parser resident와 pending inbox caps를 그대로 적용한다. control RPC는 admission 때 시작한
+        5초 absolute response deadline 하나를 가지며 write/read progress로 연장하지 않는다. timeout은 partial 여부와
+        무관하게 socket fail-close이고 forced-first-resize 응답 전 input gate도 teardown으로 끝나 영구 pending이 없다.
+        parser frame과 별개로 `partial_batch` logical snapshot/delta stream은 첫 non-end frame에서 30초 absolute와
+        10초 completed-chunk progress deadline을 시작하고 `end_stream`에서만 clear한다. complete non-end chunk 뒤
+        stall이나 10초 미만 chunk drip도 absolute deadline을 연장하지 않으며 timeout은 connection fail-close다.
+        no-end stall과 complete-chunk drip fixture를 이 slice에서 고정한다.
+      전환 직전 parser partial/pending frame과 request ID/capability가 byte-for-byte 보존되는 fixture를 둔다.
+    - **P5c3c-3 — raw TTY loop/cleanup**은 두 merge slice다.
+      - **P5c3c-3a — tty output/chord primitives**: dedicated tty output open/identity transaction과 detach chord,
+        stdout progress/absolute deadline state를 pure injected clock/fd ops로 고정한다. 네 pre-raw phase,
+        dedicated output identity, ANSI enter allocation이 모두 성공한 뒤 `RawTty.enter`와 enter write를 마지막
+        commit barrier로 실행하며 그 전 실패는 termios/ANSI mutation 0이다. 이 barrier 전에는 external-pump
+        transition, `RemoteAttachment`+screen 초기화, buffered own-stream revoke 선소비, initial full repaint,
+        64-byte leave reserve와 poll storage까지 모두 할당·검증되고 첫 poll turn을 allocation 없이 즉시 실행할 수
+        있어야 한다. `POLLOUT=0`에서 zero-byte current를 계속 교체하는 fixture는 blocked epoch clock이
+        reset되지 않고 최초 activation+30초에 exact 만료함을 고정한다.
+      - **P5c3c-3b — integrated stack owner**: `RawTty`, ANSI queue, resize, chord, signal self-pipe와
+        `Client.external_pump`를 한 stack owner에 묶는다. controller/observer/revoke/partial stdout·wire를
+        injected poll/clock과 실제 `openpty` child로 검증한다. cleanup 진입 시 `in_flight_control != null`이거나
+        일부 전송된 MRSH frame이 있으면 fully-sent 여부와 무관하게 detach를 뒤에 붙이지 않고 socket fail-close한다.
+        in-flight control이 없을 때만 offset 0 TX를 취소하고 terminal detach를 100 ms absolute deadline 안에서
+        best-effort flush한다. 정상 cleanup은 하나의 200 ms absolute deadline을 사용해 detach와 active repaint가 앞 100 ms를
+        공유하고 leave가 남은 budget 중 최대 100 ms를 쓴다. signal/revoke/error cleanup은 active/latest와 detach를
+        버리고 하나의 100 ms deadline 안에서 leave를 시도한 뒤 즉시 raw restore/signal forwarding으로 간다.
+
+    **P5c3c-1a~3b는 모두 계획 상태다.** 각 slice는 P5c3a~b의 Debug/ReleaseFast gate를 재실행하고 다음 slice가 실제
+    consumer로 쓰지 않는 임시 public API는 만들지 않는다.
+
+    raw 진입 전에도 기존 `SO_RCVTIMEO`/blocking `writeAll`을 deadline으로 간주하지 않는다. resolver 전체, selected
     connect+hello, role-selected attach+initial snapshot, optional status+takeover를 각각 하나의 5초 absolute monotonic
     phase로 감싼 deadline-aware `Client` transport를 먼저 구현한다. nonblocking poll과 같은 incremental parser를 써
     byte drip이나 write stall이 있어도 progress로 absolute deadline을 연장하지 않는다. timeout은 socket close,
@@ -2309,13 +2395,21 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
     latest resize → stdin이며 각 lower-priority action 직전에 terminal/role generation을 재검증한다. stdout은
     nonblocking `POLLOUT`으로 immutable frame+offset 하나를 보존한다. 일부라도 출력한 frame은 섞지 않고 완성하며 그
     동안 새 repaint는 latest full frame 하나로 coalesce한다. 아직 0 byte인 frame만 최신 frame으로 교체할 수 있다.
-    socket RX/TX는 각각 turn당 `1 MiB/64 frame`, stdin과 tty output은 각각 `64 KiB`까지 처리한다. stdout frame은
-    마지막 progress부터 10초 또는 최초 write 시도부터 absolute 30초 중 먼저 도달하면 socket을 닫고 repaint를 폐기한
-    뒤 cleanup으로 수렴한다. cleanup용 64-byte leave frame은 별도 고정 reserve를 쓴다. 정상 cleanup은 active repaint
-    완료에 최대 100 ms, leave에 최대 100 ms만 쓰고, signal/revoke/error cleanup은 active/latest repaint를 즉시
-    폐기한 뒤 leave를 최대 100 ms만 시도한다. 이미 출력된 partial ANSI prefix 때문에 visual state의 exact 복원이
+    이 교체는 기존 blocked epoch의 activation/last-progress clock을 상속하고 reset하지 않는다. 따라서 `POLLOUT=0`
+    중 repaint가 계속 와도 최초 current activation+30초에 반드시 만료한다. external TX의 zero-byte
+    coalesce/replace도 동일하게 queue head의 blocked epoch clock을 상속한다.
+    socket RX/TX는 각각 turn당 `1 MiB/64 frame`, stdin과 tty output은 각각 `64 KiB`까지 처리한다. stdout frame,
+    parser의 partial MRSH RX frame, partial logical stream batch와 각 MRSH TX frame은 모두 마지막 progress부터 10초 또는
+    activation/admission부터 absolute 30초 중 먼저 도달하는 deadline을 가진다. 출력은 frame이 current/TX queue에
+    admission된 시각에 progress/absolute clock을 함께 시작해 `POLLOUT`이 한 번도 오지 않아도 만료하고, RX는 첫
+    partial byte에서 시작한다. poll timeout은 signal/chord/resize/control-response/각 I/O/cleanup deadline의
+    remaining 중 최솟값이며 byte drip은 absolute deadline을 연장하지 않는다. deadline 시 socket을 fail-close하고
+    repaint/TX를 폐기한 뒤 cleanup으로 수렴한다. cleanup용 64-byte leave frame은 별도 고정 reserve를 쓴다.
+    정상 cleanup은 global 200 ms 안에서 detach+active repaint에 최대 100 ms, leave에 남은 budget 중 최대
+    100 ms만 쓴다. signal/revoke/error cleanup은 active/latest/detach를 즉시 폐기하고 global 100 ms 안에서
+    leave만 시도한다. 이미 출력된 partial ANSI prefix 때문에 visual state의 exact 복원이
     불가능할 수 있어 이 실패 경로는 raw/status-flag 복원만 보장하며 leave 시도는 raw restore·signal 재발행을
-    지연시키지 않는다.
+    global 100 ms deadline을 넘어 지연시키지 않는다.
 
     observer도 stdin을 drain해 detach chord만 해석하고 나머지 bytes를 로컬에서 억제하여 host input/resize를 0으로
     유지한다. detach prefix `0x1c`(`Ctrl-\`) 뒤 `d`는 local detach, 두 번째 prefix는 literal 한 byte, 다른 byte는

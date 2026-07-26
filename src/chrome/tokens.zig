@@ -35,6 +35,10 @@ pub const ColorRole = enum {
     muted_fg,
     tab_active_bg,
     tab_hover_bg,
+    /// 목록 행(에이전트 행·토글) 호버 — **활성 밴드 위에 겹쳐도 구분되어야** 하므로 활성보다 한 단계 밝다.
+    /// `tab_hover_bg`(배경↔활성 중간)를 쓰면 활성 카드의 목록에서 활성색보다 어두워 호버가 사라지고,
+    /// `tab_active_bg`를 쓰면 활성색과 **완전히 같아** 역시 구분이 0이다(사용자 제보).
+    row_hover_bg,
     divider,
     focus_accent,
     drop_zone,
@@ -140,6 +144,7 @@ pub const Tokens = struct {
         palette.set(.muted_fg, theme.sidebar_foreground);
         palette.set(.tab_active_bg, theme.sidebar_active);
         palette.set(.tab_hover_bg, theme.sidebar_active);
+        palette.set(.row_hover_bg, theme.sidebar_active);
         palette.set(.divider, lightenRgb(theme.sidebar_background, 14)); // 박스 배경에서 살짝 밝은 은은한 구분선(표 경계선·모달 외곽선·pane 분할선 공용) — 예전 sidebar_active(강조)는 너무 도드라졌다
         palette.set(.focus_accent, theme.sidebar_active);
         palette.set(.drop_zone, theme.sidebar_active);

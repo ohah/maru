@@ -133,10 +133,13 @@ pub const WebNavState = struct {
     url: []u8, // gpa 소유(빈 문자열이면 len 0)
 };
 
-pub const FilePanelExternalLinkActionKind = enum(u8) { in_app = 1, system = 2 };
+/// 사용자가 활성화한 외부 링크(http/https)를 platform이 **어떻게** 열지. in_app=`surface_id`의 WKWebView에
+/// navigate, system=OS 기본 브라우저(`NSWorkspace.open`). 파일 패널(문서 안 링크)과 터미널 화면 링크가 같은
+/// 실행 경로를 공유한다 — 정책(어느 쪽을 고를지)만 호출처별로 다르고 실행은 하나다.
+pub const ExternalLinkActionKind = enum(u8) { in_app = 1, system = 2 };
 
-pub const FilePanelExternalLinkAction = struct {
-    kind: FilePanelExternalLinkActionKind,
+pub const ExternalLinkAction = struct {
+    kind: ExternalLinkActionKind,
     surface_id: u64,
     url: []const u8,
 };
@@ -182,12 +185,12 @@ fn navButtonAt(x_px: f64, band_x: u32, cw: u32) ?NavButton {
 // draw 계약 변경이라 버전을 올린다. **MetalFrame/세션 struct·export 시그니처는 불변**(overlay_layer는 Zig가 아니라
 // Swift가 소유한 CAMetalLayer라 struct offset·layout test는 그대로 green). 렌더러 분할·컨테이너 재편은 Swift/ObjC 레이어.
 pub const abi_version: u32 = 147;
-// 147: url_at에 out_web_surface_id 추가(터미널 웹 링크를 **인앱 브라우저 패널**로 열지 시스템 브라우저로 보낼지 —
-// config input.link-open-target=auto|system). 정책은 Zig 단일 출처(webLinkTargetSurfaceId: system이면 0 / http(s)
-// 리터럴만 / 활성 탭에서 **보이는** browser 패널만 / 새 패널은 안 만듦)이고, Swift는 0이면 NSWorkspace.open,
-// 아니면 webPanels[id]에 BrowserControl.navigate로 실행만 한다. 같은 클릭이 만든 URL의 라우팅이라 url_at의 out으로
-// 함께 실어 왕복을 없앤다(URL을 Swift가 다시 Zig로 넘기지 않는다). *out_len>0 && *out_kind==0(url)일 때만 유효.
-// 끝에 인자 1개 추가 — 구조체 offset·기존 인자 순서 불변. docs/link-detection.md §링크를 어디에 여는가.
+// 147: open_terminal_web_link export 추가 + take_file_panel_external_link_action → take_external_link_action rename
+// (터미널 웹 링크를 **인앱 브라우저 패널**에서 열기 — config input.link-open-target=auto|in-app|system). 정책은 Zig
+// 단일 출처(openTerminalWebLink: system이면 0 / http(s) 리터럴만 / 활성 탭에서 **보이는** browser 패널 재사용 /
+// 없으면 auto=시스템·in-app=새 browser Term). 인앱이면 파일 패널 외부 링크와 **같은 pending 경로**로 실어 Swift가
+// 매 tick surface 전이 batch 적용 **뒤** drain한다 — 방금 만든 WKWebView가 준비된 다음 navigate되도록. 구조체
+// layout 불변(export 2개: 신규 1 + rename 1). docs/link-detection.md §링크를 어디에 여는가.
 // 146: MetalFrame.cursor_start + maru_metal_renderer_draw 마지막 인자(커서 구간의 **시작 index**). v95는 "커서는 항상
 // cells suffix"를 암묵 가정해 길이만 실었는데, caret 없는 오버레이 셀(포커스 테두리·drop 하이라이트·드래그 고스트)이
 // 커서 뒤에 붙으면 그 가정이 깨진다 — 그때 Zig가 cursor_cells=0으로 접어 커서가 본문과 함께 불투명하게 그려졌고
@@ -239,7 +242,7 @@ pub const abi_version: u32 = 147;
 // 126: 파일 탭 닫기. focus 기반 Cmd+W를 위해 workspace focus 동기 export를 추가하고, dirty 저장-후-닫기의
 // request-scoped sync/save/unlock one-shot과 terminal failure ack를 추가한다. 신규 export만 — fixed-width struct offset 불변.
 // 125: 파일 패널 외부 HTTP(S) 링크의 설정 기반 in-app/system 라우팅. open_file_panel_link +
-// take_file_panel_external_link_action export를 추가한다(구조체 layout 불변).
+// take_external_link_action export를 추가한다(구조체 layout 불변).
 // 124: FP8 다중 파일 그룹. native WKWebView firstResponder surface를 Zig DockPanel.focused_group에 동기하는
 // focus_file_panel_surface export를 추가한다(그룹별 split command target 단일 출처).
 // 123: FP7 파일 트리. background snapshot scanner와 Swift FSEvents 사이 root reset/add·changed path,
@@ -2111,13 +2114,15 @@ pub const AppSession = struct {
     // `open_file_panel` 액션(Cmd+O·팔릿·메뉴)이 요청한 Markdown/HTML NSOpenPanel. 배경 PNG picker와 목적/필터가
     // 다르므로 별도 one-shot으로 두되 take/provide ABI 패턴은 재사용한다.
     file_panel_pick_pending: bool = false,
-    // Markdown/HTML 파일 패널의 사용자 클릭 외부 링크를 platform에 넘기는 단일 pending. 정책(config·강제 열기)과
-    // browser Term 생성은 Zig가 결정하고, Swift는 system open 또는 새 WKWebView navigate만 수행한다. drain 전 연속
-    // 요청은 Busy로 거부해 URL 덮어쓰기나 목적지 없는 빈 browser 탭을 만들지 않는다.
-    file_panel_external_link_kind: ?FilePanelExternalLinkActionKind = null,
-    file_panel_external_link_surface_id: u64 = 0,
-    file_panel_external_link_url_buf: [std.fs.max_path_bytes]u8 = undefined,
-    file_panel_external_link_url_len: usize = 0,
+    // 사용자 클릭 외부 링크(파일 패널 문서 안 링크 + 터미널 화면 링크)를 platform에 넘기는 단일 pending. 정책
+    // (config·강제 열기·대상 패널 선택)과 browser Term 생성은 Zig가 결정하고, Swift는 system open 또는 WKWebView
+    // navigate만 수행한다. drain 전 연속 요청은 Busy로 거부해 URL 덮어쓰기나 목적지 없는 빈 browser 탭을 만들지 않는다.
+    // 버퍼 크기는 URL 상한 단일 출처(file_panel_bridge.max_http_link_bytes) — 파일 경로 상한(PATH_MAX)을 쓰면 긴
+    // URL이 잘리거나 거부된다.
+    external_link_kind: ?ExternalLinkActionKind = null,
+    external_link_surface_id: u64 = 0,
+    external_link_url_buf: [file_panel_bridge.max_http_link_bytes]u8 = undefined,
+    external_link_url_len: usize = 0,
     // HSV picker에서 `i`(스포이드)를 누르면 켜는 1회성 신호 — Swift가 tick마다 takeColorSampleRequest로 drain해 1이면
     // NSColorSampler(OS 화면 색 추출기)를 열고, 사용자가 고른 화면 픽셀 색을 provideSampledColor로 되돌린다(비동기 콜백).
     color_sample_pending: bool = false,
@@ -2651,6 +2656,11 @@ pub const AppSession = struct {
     // 들고(다음 tick clearRetainingCapacity로 재사용), web_leaf_rects_scratch는 collectWebSurfaces 내부 leaf-rect 임시.
     web_cur_scratch: std.ArrayList(web_panel_layout.SurfaceLayout) = .empty,
     web_leaf_rects_scratch: std.ArrayList(PaneTree.LeafRect) = .empty,
+    // `paneTargetAt`(포인터 아래 pane 라우팅)의 **영속 scratch** — 위 web scratch와 같은 이유·같은 패턴이되, 이건
+    // 렌더 tick이 아니라 **입력 이벤트** hot path다(수식키를 든 채 움직이면 매 mouse-move마다 hover가 부른다).
+    // 매번 ArrayList를 새로 할당/해제하면 마우스를 움직이는 내내 alloc/free가 돌고, 실패하면 링크가 조용히 죽는다.
+    // 별도 버퍼로 두는 이유: web scratch는 tick 안에서 살아 있는 채로 소비되므로 공유하면 서로 덮어쓴다.
+    pane_target_rects_scratch: std.ArrayList(PaneTree.LeafRect) = .empty,
     // Phase 7e-1a: browser 웹 패널 nav 상태(surface_id → WebNavState). Swift KVO가 setWebNavState로 upsert하고,
     // collectWebSurfaces가 매 tick 활성 탭 web surface 집합에 없는 키를 prune(surface 닫힘/이동 시 stale url 누수 방지),
     // 7e-1b 주소창이 webNavState로 읽는다. url은 gpa 소유(dup) — deinit이 모든 url + 맵을 해제한다. `.empty` 기본
@@ -2759,7 +2769,7 @@ pub const AppSession = struct {
     // 메뉴에서 이 경로를 받아 파일을 열기만 한다(파일 열기는 OS 동작이라 platform 소유).
     config_path_buffer: ?[]const u8 = null,
     // Cmd+hover 중인 URL 시작 셀의 절대 좌표(밑줄 렌더용). 뷰포트가 아니라 절대 좌표라 스크롤/출력
-    // 으로 내용이 움직여도 따라간다(매 frame hoverLinkSpan이 현재 뷰포트로 클립).
+    // 으로 내용이 움직여도 따라간다(매 frame hoverLinkSpanFor가 현재 뷰포트로 클립).
     hover_url_anchor: ?terminal.SelectionPoint = null,
     // 원격(host-backed) surface의 Cmd+hover 위치(**뷰포트 상대 셀**). 원격은 client core가 빈 placeholder라 절대
     // 좌표 anchor를 만들 수 없고, host가 실어 준 뷰포트 상대 span 목록(RenderSnapshot.links)에서 매 frame 다시
@@ -2771,6 +2781,12 @@ pub const AppSession = struct {
     // 활성 pane의 같은 좌표에 엉뚱한 밑줄이 그려진다. 렌더는 `hoverLinkSpanFor`가 이 id와 일치하는 surface에만
     // span을 돌려줘 "밑줄 보이는 곳 = 열리는 곳"을 pane 단위로 유지한다. surface_id는 앱 전역·비재사용이라 stale 안전.
     hover_url_surface_id: u64 = 0,
+    // 위 hover를 만든 포인터 좌표(backing px). hover 상태를 갱신하는 건 마우스 이벤트뿐이라, **커서가 멈춘 채
+    // 레이아웃이 바뀌면**(⌘D split·pane 닫기·사이드바 폭 변경) 밑줄은 옛 pane에 남는데 클릭은 새 pane으로 가 서로
+    // 어긋난다("밑줄은 보이는데 클릭하면 안 열림"). 이 좌표로 매 tick 재검증해(`revalidateHoverLink`) 포인터 아래
+    // pane이 달라졌으면 밑줄을 내린다 — 재분류는 하지 않는다(수식키 상태는 마우스 이벤트에만 실려 오고, 다음
+    // 이동에서 정상 복구된다).
+    hover_url_pos_px: ?struct { x: f64, y: f64 } = null,
     // 현재 선택이 down(1) 드래그로 시작했는지. 더블/트리플클릭(4/5) 선택은 직후의 up(3)이
     // "이동 없는 클릭 -> 해제" 판정을 타면 안 되므로 이 플래그로 구분한다.
     mouse_drag_selecting: bool = false,
@@ -12854,23 +12870,38 @@ pub const AppSession = struct {
         StaleDocument,
     };
 
-    fn queueFilePanelExternalLink(
+    /// 파일 패널(문서 안 링크) 전용 정책: `file-panel.external-link-target`(+`⌘⇧` 강제)에 따라 **새** browser Term을
+    /// 만들거나 시스템 브라우저로 보낸다. 재사용 개념이 없다(문서에서 따라간 링크는 새 탭이 자연스럽다).
+    /// 터미널 화면 링크는 정책이 달라(`input.link-open-target` — 재사용 우선) `openTerminalWebLink`가 소유하고,
+    /// 둘 다 아래 `queueExternalLinkAction` 실행 경로를 공유한다.
+    fn queueExternalLink(
         self: *AppSession,
         href: []const u8,
         force_system: bool,
     ) FilePanelLinkError!void {
         if (!file_panel_bridge.isExplicitHttpLink(href)) return error.InvalidLink;
-        if (self.file_panel_external_link_kind != null) return error.LinkBusy;
-        @memcpy(self.file_panel_external_link_url_buf[0..href.len], href);
+        if (self.external_link_kind != null) return error.LinkBusy;
 
         const use_system = force_system or self.loaded_config.config.file_panel.external_link_target == .system;
         const surface_id = if (use_system) 0 else self.appendWebTermInActivePane(.browser) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             else => return error.OpenFailed,
         };
-        self.file_panel_external_link_url_len = href.len;
-        self.file_panel_external_link_surface_id = surface_id;
-        self.file_panel_external_link_kind = if (use_system) .system else .in_app;
+        return self.queueExternalLinkAction(href, surface_id);
+    }
+
+    /// 결정된 대상(`surface_id`, 0=시스템 브라우저)으로 외부 링크 열기 action 하나를 세운다 — 파일 패널과 터미널
+    /// 링크의 **공유 실행 경로**. Swift가 매 tick surface 전이 batch를 적용한 뒤 `takeExternalLinkAction`으로
+    /// drain하므로, 방금 만든 browser Term의 WKWebView가 준비된 다음에 navigate가 실행된다.
+    /// drain 전 연속 요청은 `LinkBusy`로 거부해 URL 덮어쓰기나 목적지 없는 빈 browser 탭을 만들지 않는다.
+    fn queueExternalLinkAction(self: *AppSession, href: []const u8, surface_id: u64) FilePanelLinkError!void {
+        if (!file_panel_bridge.isExplicitHttpLink(href)) return error.InvalidLink;
+        if (self.external_link_kind != null) return error.LinkBusy;
+        if (href.len > self.external_link_url_buf.len) return error.InvalidLink;
+        @memcpy(self.external_link_url_buf[0..href.len], href);
+        self.external_link_url_len = href.len;
+        self.external_link_surface_id = surface_id;
+        self.external_link_kind = if (surface_id == 0) .system else .in_app;
     }
 
     /// 격리 Markdown renderer 또는 로컬 HTML delegate가 활성화한 링크를 source surface에 고정해 처리한다.
@@ -12884,7 +12915,7 @@ pub const AppSession = struct {
     ) FilePanelLinkError!void {
         if (!self.dock_initialized) return error.SurfaceNotFound;
         const source = self.dock.entryForSurfaceId(surface_id) orelse return error.SurfaceNotFound;
-        if (file_panel_bridge.isExplicitHttpLink(href)) return self.queueFilePanelExternalLink(href, force_system);
+        if (file_panel_bridge.isExplicitHttpLink(href)) return self.queueExternalLink(href, force_system);
         if (source.kind != .markdown) return error.WrongKind;
         const source_group = self.dock.groupForSurfaceId(surface_id) orelse return error.SurfaceNotFound;
         const target = file_panel_bridge.resolveMarkdownFileLink(self.allocator, source.path, href) catch |err| switch (err) {
@@ -12914,22 +12945,22 @@ pub const AppSession = struct {
     }
 
     /// 외부 링크 action을 caller-owned 버퍼로 복사한 뒤 1회 소비한다. 버퍼가 작으면 pending을 보존해 재시도할 수 있다.
-    pub fn takeFilePanelExternalLinkAction(
+    pub fn takeExternalLinkAction(
         self: *AppSession,
         out: []u8,
-    ) ?FilePanelExternalLinkAction {
-        const kind = self.file_panel_external_link_kind orelse return null;
-        if (self.file_panel_external_link_url_len > out.len) return null;
-        const len = self.file_panel_external_link_url_len;
-        @memcpy(out[0..len], self.file_panel_external_link_url_buf[0..len]);
-        const action: FilePanelExternalLinkAction = .{
+    ) ?ExternalLinkAction {
+        const kind = self.external_link_kind orelse return null;
+        if (self.external_link_url_len > out.len) return null;
+        const len = self.external_link_url_len;
+        @memcpy(out[0..len], self.external_link_url_buf[0..len]);
+        const action: ExternalLinkAction = .{
             .kind = kind,
-            .surface_id = self.file_panel_external_link_surface_id,
+            .surface_id = self.external_link_surface_id,
             .url = out[0..len],
         };
-        self.file_panel_external_link_kind = null;
-        self.file_panel_external_link_url_len = 0;
-        self.file_panel_external_link_surface_id = 0;
+        self.external_link_kind = null;
+        self.external_link_url_len = 0;
+        self.external_link_surface_id = 0;
         return action;
     }
 
@@ -14360,35 +14391,64 @@ pub const AppSession = struct {
     /// 0은 유효 surface_id가 아니므로(1부터 발급) sentinel로 안전.
     pub fn activeWebSurfaceId(self: *AppSession) u64 {
         const term = self.activePane().activeTerm();
-        if (term.kind == .web and term.web_panel_kind == .browser) return term.surfaceId();
-        return 0;
+        return if (isBrowserTerm(term)) term.surfaceId() else 0;
     }
 
-    /// 터미널에서 연 웹 링크(http/https)를 **인앱 브라우저 패널로 라우팅할 대상 surface_id**(0 = 시스템 기본
-    /// 브라우저로 보낸다). 정책은 Zig 단일 출처이고 Swift는 결과대로 `BrowserControl.navigate` 또는
-    /// `NSWorkspace.open`을 실행만 한다(macos-app-host-boundary.md의 "정책=Zig / 실행=platform").
-    ///
-    /// 규칙(docs/link-detection.md §링크를 어디에 여는가):
-    ///  1. `input.link-open-target = system`이면 항상 0(이전 동작 그대로).
-    ///  2. http/https 리터럴이 아니면 0 — 파일 경로·`mailto:`·`ssh://` 등은 브라우저에 실을 대상이 아니다.
-    ///     검증기는 파일 패널 외부 링크와 **같은** `isExplicitHttpLink`를 공유한다(허용 스킴 판정 단일 출처).
-    ///  3. **현재 화면에 보이는** browser 패널만 대상이다 — 활성 pane의 browser를 먼저 보고(브라우저를 보다가 옆
-    ///     터미널 링크를 누르는 흐름이 가장 흔하다), 없으면 활성 탭의 다른 pane을 순회한다. **각 pane의 활성 Term만**
-    ///     본다: 숨은 Term 탭의 브라우저로 열면 화면이 안 바뀌어 "아무 일도 안 일어난 것"처럼 보인다.
-    ///  4. 그래도 없으면 0 — **새 브라우저 패널을 만들지 않는다**(사용자 요청 범위: "열려 있으면 그걸로, 아니면 외부").
-    ///
-    /// 보이는 브라우저가 여럿이면 위 순서의 첫 번째를 쓴다(브라우저를 둘 이상 띄우는 건 드물어 별도 정책을 두지 않는다).
-    pub fn webLinkTargetSurfaceId(self: *AppSession, url: []const u8) u64 {
-        if (self.loaded_config.config.input.link_open_target == .system) return 0;
-        if (!file_panel_bridge.isExplicitHttpLink(url)) return 0;
-        if (!self.surface_initialized or self.tabs.items.len == 0) return 0;
-        const active = self.activeWebSurfaceId(); // 활성 pane의 browser 우선
+    /// 이 Term이 **browser 웹 패널**인가(markdown/HTML 파일 패널 web Term은 제외). browser 전용 기능
+    /// (nav 단축키·주소창·터미널 링크 착지)이 공유하는 단일 판정 — 인라인 복사가 늘면 `web_panel_kind`가
+    /// 늘어날 때 한 곳을 놓쳐 "안 보이는 WKWebView에 링크가 로드되는" 류의 버그가 난다(코드리뷰 지적).
+    fn isBrowserTerm(term: *const Term) bool {
+        return term.kind == .web and term.web_panel_kind == .browser;
+    }
+
+    /// 지금 **화면에 보이는** browser 패널의 surface_id(없으면 0). 각 pane의 **활성 Term만** 본다 — 숨은 Term 탭의
+    /// 브라우저에 링크를 띄우면 화면이 그대로라 "아무 일도 안 일어난 것"처럼 보인다. 활성 pane의 browser를 먼저
+    /// 고른다(브라우저를 보다가 옆 터미널 링크를 누르는 흐름이 가장 흔하다). 여럿이면 이 순서의 첫 번째.
+    fn visibleBrowserSurfaceId(self: *AppSession) u64 {
+        const active = self.activeWebSurfaceId();
         if (active != 0) return active;
         for (self.activeTab().panes.items) |pane| {
             const term = pane.activeTerm();
-            if (term.kind == .web and term.web_panel_kind == .browser) return term.surfaceId();
+            if (isBrowserTerm(term)) return term.surfaceId();
         }
         return 0;
+    }
+
+    /// 터미널 화면에서 (수식키)+클릭한 **웹 링크(http/https)** 를 `input.link-open-target` 정책대로 연다.
+    /// 인앱(browser 패널)으로 열기로 정했으면 pending action을 세우고 `true`, 시스템 브라우저로 보내야 하면
+    /// `false`를 돌려준다(호출처인 Swift `handleUrlClick`이 `NSWorkspace.open`으로 그 자리에서 연다).
+    ///
+    /// 규칙(docs/link-detection.md §링크를 어디에 여는가):
+    ///  1. `system`이면 false(이전 동작 그대로).
+    ///  2. http/https 리터럴이 아니면 false — 파일 경로·`mailto:`·`ssh://`는 브라우저 패널에 실을 대상이 아니다.
+    ///     검증기는 파일 패널 외부 링크와 **같은** `isExplicitHttpLink`를 공유한다(허용 스킴 판정 단일 출처).
+    ///  3. 보이는 browser 패널이 있으면 그 패널에 띄운다(auto·in-app 공통).
+    ///  4. 없을 때: `auto`(기본)는 false(시스템) — 링크 하나로 탭이 늘어나는 놀람을 피한다. `in-app`은 **새 browser
+    ///     Term을 열어** 그곳에 띄운다(파일 패널 `in-app`과 같은 `appendWebTermInActivePane`).
+    ///
+    /// **왜 즉시 반환이 아니라 pending인가**: 새로 만든 browser Term의 WKWebView는 **다음 tick의 surface 전이
+    /// batch**에서 생성된다. 클릭 시점에 surface_id를 돌려줘도 Swift `webPanels`에는 아직 없어 load가 유실된다.
+    /// 그래서 파일 패널 외부 링크와 **같은 pending 경로**(`takeExternalLinkAction`)를 쓴다 — Swift가 매 tick 전이
+    /// batch를 적용한 **뒤** drain하므로 "생성 → navigate" 순서가 구조적으로 보장된다. 기존 패널 재사용도 같은
+    /// 경로로 보내 분기를 하나로 유지한다(한 tick 지연은 최대 ~16ms).
+    pub fn openTerminalWebLink(self: *AppSession, url: []const u8) bool {
+        const target = self.loaded_config.config.input.link_open_target;
+        if (target == .system) return false;
+        if (!file_panel_bridge.isExplicitHttpLink(url)) return false;
+        // **호출 계약**: `urlAt`이 비어 있지 않은 URL을 돌려준 뒤에만 불린다(Swift handleUrlClick). 그 경로가 이미
+        // surface_initialized와 활성 탭 존재를 통과했으므로 여기서 다시 방어하지 않는다(프로젝트 규칙 "헛방어 금지").
+        const visible = self.visibleBrowserSurfaceId();
+        const surface_id = if (visible != 0) visible else switch (target) {
+            .auto => return false, // 보이는 패널이 없으면 시스템 — auto는 탭을 새로 만들지 않는다
+            // in-app: 없으면 새로 연다. 실패(OOM 등)는 링크를 삼키는 대신 시스템 브라우저로 폴백한다.
+            .in_app => self.appendWebTermInActivePane(.browser) catch return false,
+            .system => unreachable, // 위에서 이미 걸렀다
+        };
+        // 직전 요청이 아직 drain되지 않았으면(같은 tick 안 연타) 이번 클릭은 시스템으로 보낸다 — URL을 덮어써
+        // 앞 요청을 잃거나 목적지 없는 빈 탭을 남기지 않는다(파일 패널 LinkBusy와 같은 규율이되, 터미널 클릭은
+        // 조용히 무시하는 것보다 시스템에서라도 열어 주는 편이 낫다).
+        self.queueExternalLinkAction(url, surface_id) catch return false;
+        return true;
     }
 
     /// Phase 4g-0: 활성 pane의 활성 term이 **web term(browser·markdown 무관)** 이면 그 surface_id, 아니면 0. focus-sync
@@ -18727,16 +18787,27 @@ pub const AppSession = struct {
     ///    보게 된다(브라우저 패널을 띄운 뒤 터미널 링크가 먹통이던 사용자 제보의 루트커즈).
     ///
     /// 활성 탭 leaf rect를 펴 점을 담는 leaf를 찾는다(없으면 — 사이드바/밖 — null). 단일 panel이면 그 panel(=활성)을 돌려준다.
+    /// hit-test는 **pane 전체 rect**(탭 바 포함)로 한다 — 휠은 탭 바 위에서도 그 pane이 소유해야 자연스럽다. 반환
+    /// `rect`는 본문(탭 바 제외)이므로, "여기에 링크가 있나"를 묻는 소비처는 `pxToCellIn`(clamp)이 아니라
+    /// `paneCellAtExact`를 써서 탭 바·여백 좌표가 첫 행 셀로 접히지 않게 해야 한다(리뷰 지적 — chrome 클릭이 링크로 오인).
     fn paneTargetAt(self: *AppSession, x_px: f64, y_px: f64) ?struct { surface: *maru.session.Surface, rect: maru.session.SplitRect } {
         if (!self.surface_initialized) return null;
-        var leaf_rects: std.ArrayList(PaneTree.LeafRect) = .empty;
-        defer leaf_rects.deinit(self.allocator);
-        self.activeTabLeafRects(self.allocator, self.termRect(), &leaf_rects) catch return null;
-        for (leaf_rects.items) |lr| {
+        // 입력 hot path라 영속 scratch를 재사용한다(매 mouse-move 할당 회피 — web/dock scratch와 같은 패턴).
+        self.pane_target_rects_scratch.clearRetainingCapacity();
+        self.activeTabLeafRects(self.allocator, self.termRect(), &self.pane_target_rects_scratch) catch return null;
+        for (self.pane_target_rects_scratch.items) |lr| {
             if (!layout_math.pointInRect(x_px, y_px, lr.rect)) continue; // paneAtPoint와 같은 반열린 hit-test
             return .{ .surface = lr.leaf.activeTerm().surface, .rect = self.paneTermRect(lr.rect) };
         }
         return null;
+    }
+
+    /// 링크 조회 전용 셀 변환 — `paneTargetAt`이 준 (surface, 본문 rect)에서 좌표가 **실제 셀 위**일 때만 CellHit.
+    /// 탭 바·divider 밴드·주소창 밴드·grid 뒤 여백은 null이다. `pxToCellIn`(clamp)을 쓰면 그런 chrome 클릭이 첫 행
+    /// 셀로 접혀, 수식키+클릭이 탭 전환을 삼키고 엉뚱한 링크를 여는 오인이 생긴다(hover는 chrome 분기에서 먼저
+    /// 밑줄을 지우므로 "밑줄 없는 곳이 열리는" 비대칭까지 됐다). 클릭과 hover가 같이 쓴다.
+    fn paneCellAtExact(self: *const AppSession, surface: *const maru.session.Surface, rect: maru.session.SplitRect, x_px: f64, y_px: f64) ?layout_math.CellHit {
+        return layout_math.pxToCellExact(self.cell_width_px, self.cell_height_px, surface.core.size.cols, surface.core.size.rows, rect, x_px, y_px);
     }
 
     /// 가로 스와이프(delta_x→cols)를 커서 아래 pane의 탭 바 가로 스크롤로 바꾼다(#2b). 그 pane이 탭 넘침(has_scroll)이
@@ -21843,10 +21914,11 @@ pub const AppSession = struct {
         var next_remote: ?terminal.SelectionPoint = null; // 원격: hover 중인 **뷰포트** 셀
         var next_surface_id: u64 = 0; // 위 두 좌표가 속한 surface(0=hover 없음)
         if (self.urlModifierHeld(mods)) {
-            // 클릭(urlAt)과 **같은** paneTargetAt 라우팅 — "밑줄 보이는 곳 = 열리는 곳"이 pane 단위로도 성립하게.
-            // 활성 pane 고정이면 비활성 pane/브라우저 옆 터미널에서 밑줄이 안 뜨거나 엉뚱한 pane에 그려진다.
+            // 클릭(urlAt)과 **같은** paneTargetAt 라우팅 + **같은** clamp 없는 셀 변환 — "밑줄 보이는 곳 = 열리는 곳"이
+            // pane 단위로도, pane 안 chrome(탭 바·여백) 단위로도 성립하게. 활성 pane 고정이면 비활성 pane/브라우저 옆
+            // 터미널에서 밑줄이 안 뜨거나 엉뚱한 pane에 그려진다.
             if (self.paneTargetAt(x_px, y_px)) |hit| {
-                if (self.pxToCellIn(hit.surface, hit.rect, x_px, y_px)) |cell| {
+                if (self.paneCellAtExact(hit.surface, hit.rect, x_px, y_px)) |cell| {
                     const s = hit.surface;
                     // 분류(로컬 wordIsUrl / 원격 링크 목록 조회)가 화면·스크롤백을 읽으므로 락 아래에서 한다 —
                     // urlAt 클릭 경로와 대칭(reader의 evict/realloc race 방지). hover는 매 mouse-move라 클릭보다
@@ -21878,6 +21950,8 @@ pub const AppSession = struct {
         self.hover_url_anchor = next;
         self.hover_remote_cell = next_remote;
         self.hover_url_surface_id = next_surface_id;
+        // 재검증용 좌표(레이아웃이 커서 아래에서 바뀌는 경우) — hover가 없으면 null로 비워 헛 재검증을 막는다.
+        self.hover_url_pos_px = if (next_surface_id != 0) .{ .x = x_px, .y = y_px } else null;
         if (changed) self.metal_dirty = true; // 밑줄이 생기거나 사라지면 다시 그린다
         return if (next != null or next_remote != null) .link else .text;
     }
@@ -21907,8 +21981,20 @@ pub const AppSession = struct {
             self.hover_url_anchor = null;
             self.hover_remote_cell = null;
             self.hover_url_surface_id = 0;
+            self.hover_url_pos_px = null;
             self.metal_dirty = true;
         }
+    }
+
+    /// hover 밑줄이 아직 **포인터 아래 pane**의 것인지 매 tick 확인하고, 아니면 내린다. hover는 마우스 이벤트로만
+    /// 갱신되므로 커서가 멈춘 채 레이아웃이 바뀌면(⌘D split·pane 닫기·사이드바 폭 변경) 밑줄과 클릭 대상이 갈라진다
+    /// — 밑줄은 옛 pane에 남는데 그 자리 클릭은 새 pane을 조회해 아무것도 안 열린다. 저장한 좌표로 라우팅을 다시
+    /// 돌려 surface가 달라졌으면 해제한다(재분류는 안 한다 — 수식키 상태를 모르므로. 다음 마우스 이동이 복구한다).
+    /// 비용: hover 중일 때만, tick당 leaf rect 계산 1회(영속 scratch라 할당 0).
+    fn revalidateHoverLink(self: *AppSession) void {
+        const pos = self.hover_url_pos_px orelse return;
+        const still: u64 = if (self.paneTargetAt(pos.x, pos.y)) |hit| hit.surface.id else 0;
+        if (still != self.hover_url_surface_id) self.clearHoverUrlAnchor();
     }
 
     /// `surface`에 그릴 hover URL 밑줄 범위(그 surface에 hover 중이 아니면 null). 매 frame 다시 계산하므로
@@ -21944,13 +22030,18 @@ pub const AppSession = struct {
         // config 수식키가 안 눌렸으면 URL을 안 연다(빈 슬라이스 → Swift는 일반 클릭으로 처리). hover 밑줄과 같은
         // urlModifierHeld 단일 판정이라 "밑줄 보이는 키 = 열리는 키"가 항상 일치한다.
         if (!self.urlModifierHeld(mods)) return &.{};
+        // chrome 오버레이(세팅·find·팔레트·컨텍스트 메뉴·알림·notice·확인 모달)가 열려 있으면 터미널 링크를 열지
+        // 않는다. Swift mouseDown이 handleUrlClick을 **가장 먼저** 부르므로(다른 hit-test보다 앞), 이 가드가 없으면
+        // 모달 위 클릭이 그 아래 pane의 링크로 소비돼 모달은 클릭을 못 받는다. hover(hoverCursor)는 이미 모달마다
+        // 전용 분기로 밑줄을 끄므로, 이 가드가 "밑줄 보이는 곳 = 열리는 곳"을 모달 상황까지 맞춘다.
+        if (self.anyOverlayOpen()) return &.{};
         // **포인터 아래 pane**에서 찾는다(paneTargetAt — 휠과 공유하는 라우팅 단일 출처). 활성 pane 고정이던 옛
         // 코드는 활성이 아닌 pane의 링크를 못 열었다 — pxToCell이 grid 안으로 clamp라 엉뚱한 셀을 보고, 활성이
         // browser web Term이면 빈 sentinel core라 항상 빈 결과였다(사용자 제보). 사이드바/터미널 밖이면 null.
-        // 스크린→셀 변환은 pxToCellIn 단일 출처를 쓴다(pane rect origin 차감 포함) — 별도 변환을 두면 사이드바
-        // 폭·pane origin만큼 어긋난 셀에서 URL을 찾는다(직접 x/cw로 계산하던 버그를 여기로 일원화해 고침).
+        // 셀 변환은 **clamp 없는** paneCellAtExact를 쓴다 — 탭 바·divider·여백 좌표가 첫 행 셀로 접히면 그 위 클릭이
+        // 링크로 오인돼 탭 전환을 삼킨다(hover는 그 영역에서 밑줄을 지우므로 비대칭까지 생긴다).
         const hit = self.paneTargetAt(x_px, y_px) orelse return &.{};
-        const cell = self.pxToCellIn(hit.surface, hit.rect, x_px, y_px) orelse return &.{};
+        const cell = self.paneCellAtExact(hit.surface, hit.rect, x_px, y_px) orelse return &.{};
         if (self.url_buffer.len > 0) {
             self.allocator.free(self.url_buffer);
             self.url_buffer = &.{};
@@ -24740,6 +24831,7 @@ pub const AppSession = struct {
         self.updateFileTreeMutations(); // mutation completion memory queue only; at most one result per frame
         self.assignOneVisibleDockSurfaceId(); // path-pinned rename recreation is bounded to one visible WebView per frame
         self.pollAgentKinds(); // 포그라운드 프로세스(claude/codex) polling — throttled, 각 Term agent_kind 갱신
+        self.revalidateHoverLink(); // 커서가 멈춘 채 레이아웃이 바뀌었으면 stale 링크 밑줄을 내린다(hover는 마우스 이벤트로만 갱신됨)
         if (ft_on) ft_pre = std.Io.Clock.awake.now(self.io).nanoseconds; // pre(housekeeping) 끝 = titles 시작
         self.syncAutoTitles(); // 라벨용 자동 제목 캐시 갱신(core_mutex 하 owned 복사 — termLabel use-after-free 회피)
         self.reprojectSidebarIfCardLinesStale(); // 관측·활성 Term 변화로 카드 줄 수가 바뀌었으면 재투영(아래 주석)
@@ -29357,6 +29449,7 @@ pub const AppSession = struct {
         self.web_surface_transitions.deinit(self.allocator); // Phase 4e-3: web surface 전이 batch
         self.web_cur_scratch.deinit(self.allocator); // Phase 4e: web surface 수집 영속 scratch(swap 후 옛 prev 버퍼 보유)
         self.web_leaf_rects_scratch.deinit(self.allocator); // Phase 4e: web leaf-rect 영속 scratch
+        self.pane_target_rects_scratch.deinit(self.allocator); // paneTargetAt(입력 hot path) 영속 scratch
         // Phase 7e-1a: browser 웹 패널 nav 상태 — 각 엔트리의 소유 url을 free한 뒤 맵을 해제한다(prune이 살아 있는
         // 동안 stale을 지우므로 여기 남은 건 세션 종료 시점의 활성 nav 상태들뿐).
         var nav_it = self.web_nav_states.valueIterator();
@@ -46030,24 +46123,24 @@ test "FP5 file panel routing: picker one-shot, md/html open, duplicate activatio
         error.StaleDocument,
         session.openFilePanelDocumentLink(md_surface_id, first_editor_epoch, "https://stale.example", false),
     );
-    try std.testing.expect(session.takeFilePanelExternalLinkAction(&external_buf) == null);
+    try std.testing.expect(session.takeExternalLinkAction(&external_buf) == null);
     try session.openFilePanelDocumentLink(md_surface_id, current_editor_epoch, "https://example.com/guide?q=1#usage", false);
-    try std.testing.expect(session.takeFilePanelExternalLinkAction(external_buf[0..8]) == null); // 작은 버퍼는 소비하지 않는다.
-    const in_app = session.takeFilePanelExternalLinkAction(&external_buf).?;
-    try std.testing.expectEqual(FilePanelExternalLinkActionKind.in_app, in_app.kind);
+    try std.testing.expect(session.takeExternalLinkAction(external_buf[0..8]) == null); // 작은 버퍼는 소비하지 않는다.
+    const in_app = session.takeExternalLinkAction(&external_buf).?;
+    try std.testing.expectEqual(ExternalLinkActionKind.in_app, in_app.kind);
     try std.testing.expect(in_app.surface_id != 0);
     try std.testing.expectEqualStrings("https://example.com/guide?q=1#usage", in_app.url);
 
     try session.openFilePanelLink(html_surface_id, "http://example.com", true);
-    const forced = session.takeFilePanelExternalLinkAction(&external_buf).?;
-    try std.testing.expectEqual(FilePanelExternalLinkActionKind.system, forced.kind);
+    const forced = session.takeExternalLinkAction(&external_buf).?;
+    try std.testing.expectEqual(ExternalLinkActionKind.system, forced.kind);
     try std.testing.expectEqual(@as(u64, 0), forced.surface_id);
 
     session.loaded_config.config.file_panel.external_link_target = .system;
     try session.openFilePanelLink(md_surface_id, "https://example.com", false);
     try std.testing.expectError(error.LinkBusy, session.openFilePanelLink(md_surface_id, "https://example.org", false));
-    const configured = session.takeFilePanelExternalLinkAction(&external_buf).?;
-    try std.testing.expectEqual(FilePanelExternalLinkActionKind.system, configured.kind);
+    const configured = session.takeExternalLinkAction(&external_buf).?;
+    try std.testing.expectEqual(ExternalLinkActionKind.system, configured.kind);
     try std.testing.expectError(error.InvalidLink, session.openFilePanelLink(md_surface_id, "javascript:alert(1)", false));
 
     try std.testing.expectEqual(AppSession.FilePanelOpenPathResult.opened, session.openFilePanelPath(md_path));
@@ -51540,11 +51633,11 @@ test "브라우저(web Term)가 활성이어도 옆 터미널 pane의 링크가 
     try std.testing.expect(session.hoverLinkSpanFor(term_surface) != null);
 }
 
-// input.link-open-target: 터미널 웹 링크를 **열려 있는 브라우저 패널**에서 열지(auto, 기본) 항상 시스템
-// 브라우저로 보낼지(system). auto도 "지금 보이는 browser 패널"이 있을 때만 인앱이라, 브라우저를 안 쓰면 이전과
-// 동작이 같다(회귀 없음). 대상 판정은 Zig 단일 출처(webLinkTargetSurfaceId)이고 Swift는 결과대로 실행만 한다.
-// 실 init/split/web Term이라 macOS 게이트.
-test "webLinkTargetSurfaceId: 보이는 브라우저 패널이 있을 때만 인앱, 아니면 시스템(0)" {
+// [코드리뷰] pane **chrome**(탭 바·grid 뒤 여백) 위 수식키+클릭은 링크가 아니다. paneTargetAt은 휠을 위해 pane
+// 전체 rect로 hit-test하는데, 셀 변환까지 clamp 버전(pxToCellIn)을 쓰면 탭 바의 y가 row 0으로 접혀 **첫 행의 링크**로
+// 오인된다 — Swift mouseDown이 handleUrlClick을 먼저 부르므로 탭 전환 클릭까지 삼킨다. hover는 탭 바 분기에서 이미
+// 밑줄을 지우므로 "밑줄 없는 곳이 열리는" 비대칭이 됐다. clamp 없는 paneCellAtExact가 이를 막는다.
+test "링크 조회는 pane chrome(탭 바·여백)을 셀로 접지 않는다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
     const session = try allocator.create(AppSession);
@@ -51560,37 +51653,239 @@ test "webLinkTargetSurfaceId: 보이는 브라우저 패널이 있을 때만 인
     session.window_padding_px = .{};
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
 
-    // ① 브라우저가 없으면 0 — 기본값 auto여도 시스템 브라우저로 간다(브라우저를 안 쓰는 사용자는 이전 동작 그대로).
+    const surface = session.activeSurface();
+    try surface.core.write("https://a.co"); // 첫 행에 링크
+    var lr: std.ArrayList(PaneTree.LeafRect) = .empty;
+    defer lr.deinit(allocator);
+    try session.activeTabLeafRects(allocator, session.termRect(), &lr);
+    const full = lr.items[0].rect;
+    const body = session.paneTermRect(full);
+    const cw: f64 = @floatFromInt(session.cell_width_px);
+    const ch: f64 = @floatFromInt(session.cell_height_px);
+    const x = @as(f64, @floatFromInt(body.x)) + 3.5 * cw; // 링크 열 위
+    try std.testing.expect(body.y > full.y); // 탭 바가 실제로 존재해야 이 테스트가 의미 있다
+
+    // 본문 첫 행은 정상 동작(대조군).
+    const in_body_y = @as(f64, @floatFromInt(body.y)) + 0.5 * ch;
+    try std.testing.expectEqualStrings("https://a.co", session.urlAt(x, in_body_y, 32));
+
+    // 탭 바 위 같은 열: 옛 clamp 변환이면 row 0 링크로 오인됐다. 이제 빈 결과 + 밑줄도 없다.
+    const in_bar_y = @as(f64, @floatFromInt(full.y)) + (@as(f64, @floatFromInt(body.y - full.y)) / 2);
+    try std.testing.expectEqualStrings("", session.urlAt(x, in_bar_y, 32));
+    // 커서 종류로는 못 가른다(탭 바도 클릭 가능이라 .link) — 밑줄이 안 뜨는지로 본다.
+    _ = session.hoverCursor(x, in_bar_y, 32);
+    try std.testing.expect(session.hoverLinkSpanFor(surface) == null);
+
+    // grid 아래 여백(rect 안이지만 셀이 없는 띠)도 마찬가지 — 마지막 행 링크로 접히면 안 된다.
+    const rows: f64 = @floatFromInt(surface.core.size.rows);
+    const below_grid_y = @as(f64, @floatFromInt(body.y)) + rows * ch + 1;
+    if (below_grid_y < @as(f64, @floatFromInt(body.y + body.h))) {
+        try std.testing.expectEqualStrings("", session.urlAt(x, below_grid_y, 32));
+    }
+}
+
+// [코드리뷰] chrome 오버레이(세팅·find·팔레트·알림·notice·확인 모달)가 떠 있으면 그 아래 pane의 링크를 열지
+// 않는다. Swift mouseDown이 handleUrlClick을 **가장 먼저** 부르므로, 가드가 없으면 모달 위 클릭이 뒤 터미널
+// 링크로 소비돼 모달이 클릭을 못 받는다(hover는 이미 모달마다 밑줄을 끄고 있었다 — 그 비대칭을 없앤다).
+test "모달 오버레이가 열려 있으면 터미널 링크를 열지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    session.window_padding_px = .{};
+    _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
+    try session.activeSurface().core.write("https://a.co");
+    const body = session.active_pane_rect; // 이미 본문 rect(탭 바 제외) — paneTermRect를 또 씌우면 어긋난다
+    const x = @as(f64, @floatFromInt(body.x)) + 3.5 * @as(f64, @floatFromInt(session.cell_width_px));
+    const y = @as(f64, @floatFromInt(body.y)) + 0.5 * @as(f64, @floatFromInt(session.cell_height_px));
+    try std.testing.expectEqualStrings("https://a.co", session.urlAt(x, y, 32)); // 대조군: 모달 없으면 열린다
+
+    session.chrome_host.settings.open = true; // 세팅 모달(anyOverlayOpen 대상)
+    try std.testing.expect(session.anyOverlayOpen());
+    try std.testing.expectEqualStrings("", session.urlAt(x, y, 32));
+    session.chrome_host.settings.open = false;
+    try std.testing.expectEqualStrings("https://a.co", session.urlAt(x, y, 32)); // 닫으면 복구
+}
+
+// [코드리뷰] hover 상태는 마우스 이벤트로만 갱신되므로, 커서가 **멈춘 채** 레이아웃이 바뀌면(⌘D split) 밑줄은
+// 옛 pane에 남고 클릭은 새 pane으로 간다. tick의 revalidateHoverLink가 저장한 좌표로 라우팅을 다시 돌려
+// 포인터 아래 pane이 달라졌으면 밑줄을 내린다 — "밑줄 보이는데 클릭하면 안 열림"을 없앤다.
+test "커서가 멈춘 채 split하면 stale 링크 밑줄이 내려간다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    session.window_padding_px = .{};
+    _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
+
+    const left = session.activeSurface();
+    try left.core.write("https://a.co"); // 첫 행 왼쪽 끝에 링크
+    const body = session.active_pane_rect; // 이미 본문 rect(탭 바 제외)
+    const ch: f64 = @floatFromInt(session.cell_height_px);
+    const on_link_x = @as(f64, @floatFromInt(body.x)) + 3.5 * @as(f64, @floatFromInt(session.cell_width_px));
+    const y = @as(f64, @floatFromInt(body.y)) + 0.5 * ch;
+    try std.testing.expectEqual(CursorKind.link, session.hoverCursor(on_link_x, y, 32));
+    try std.testing.expect(session.hoverLinkSpanFor(left) != null);
+
+    // 마우스를 움직이지 않고 split. 링크는 창 왼쪽 끝이라 그 좌표는 여전히 왼쪽 pane → 밑줄 유지(과잉 해제 금지).
+    try session.splitActivePane(.horizontal);
+    session.revalidateHoverLink();
+    try std.testing.expect(session.hoverLinkSpanFor(left) != null);
+
+    // 포인터가 새로 생긴 오른쪽 pane 위였다면(같은 hover 상태, 좌표만 오른쪽) 재검증이 밑줄을 내린다 —
+    // 그 자리 클릭은 오른쪽 pane을 조회하므로 왼쪽 밑줄은 "보이는데 안 열리는" stale이다.
+    session.hover_url_pos_px = .{ .x = @as(f64, @floatFromInt(body.x)) + @as(f64, @floatFromInt(body.w)) * 0.9, .y = y };
+    session.revalidateHoverLink();
+    try std.testing.expect(session.hoverLinkSpanFor(left) == null);
+}
+
+// input.link-open-target = auto(기본): 터미널 웹 링크를 **보이는 브라우저 패널**이 있을 때만 그 패널에서 열고,
+// 없으면 시스템 브라우저로 보낸다(true=인앱 pending / false=호출자가 NSWorkspace). 브라우저를 안 쓰면 동작이
+// 이전과 같다(회귀 없음). 인앱 대상은 pending action으로 실려 Swift가 다음 tick에 navigate한다.
+// 실 init/split/web Term이라 macOS 게이트.
+test "openTerminalWebLink(auto): 보이는 브라우저 패널이 있을 때만 인앱, 아니면 시스템" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    session.window_padding_px = .{};
+    _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
+    var url_buf: [512]u8 = undefined;
+
+    // ① 브라우저가 없으면 false — 기본값 auto는 탭을 새로 만들지 않고 시스템 브라우저로 보낸다.
     try std.testing.expectEqual(config_mod.theme.LinkOpenTarget.auto, session.loaded_config.config.input.link_open_target);
-    try std.testing.expectEqual(@as(u64, 0), session.webLinkTargetSurfaceId("https://a.co"));
+    try std.testing.expect(!session.openTerminalWebLink("https://a.co"));
+    try std.testing.expect(session.takeExternalLinkAction(&url_buf) == null); // pending도 안 남는다
 
     try session.splitActivePane(.horizontal); // 좌(터미널)·우(활성)
     const browser_id = try session.appendWebTermInActivePane(.browser); // 우 pane에 브라우저 탭
 
     // ② 활성 pane이 브라우저면 그 패널이 대상이다(브라우저를 보다가 옆 터미널 링크를 누르는 흐름).
-    try std.testing.expectEqual(browser_id, session.webLinkTargetSurfaceId("https://a.co"));
+    try std.testing.expect(session.openTerminalWebLink("https://a.co"));
+    {
+        const action = session.takeExternalLinkAction(&url_buf) orelse return error.TestUnexpectedResult;
+        try std.testing.expectEqual(ExternalLinkActionKind.in_app, action.kind);
+        try std.testing.expectEqual(browser_id, action.surface_id);
+        try std.testing.expectEqualStrings("https://a.co", action.url);
+    }
 
     // ③ http(s) 리터럴이 아니면 브라우저로 안 보낸다 — 파일 경로·비-HTTP 스킴은 기본 앱 몫(isExplicitHttpLink 공유).
-    try std.testing.expectEqual(@as(u64, 0), session.webLinkTargetSurfaceId("/tmp/x.txt"));
-    try std.testing.expectEqual(@as(u64, 0), session.webLinkTargetSurfaceId("mailto:a@b.co"));
-    try std.testing.expectEqual(@as(u64, 0), session.webLinkTargetSurfaceId("ssh://host"));
+    try std.testing.expect(!session.openTerminalWebLink("/tmp/x.txt"));
+    try std.testing.expect(!session.openTerminalWebLink("mailto:a@b.co"));
+    try std.testing.expect(!session.openTerminalWebLink("ssh://host"));
+    try std.testing.expect(session.takeExternalLinkAction(&url_buf) == null);
 
     // ④ config system이면 브라우저가 보여도 항상 시스템(이전 동작으로 되돌리는 탈출구).
     session.loaded_config.config.input.link_open_target = .system;
-    try std.testing.expectEqual(@as(u64, 0), session.webLinkTargetSurfaceId("https://a.co"));
+    try std.testing.expect(!session.openTerminalWebLink("https://a.co"));
+    try std.testing.expect(session.takeExternalLinkAction(&url_buf) == null);
     session.loaded_config.config.input.link_open_target = .auto;
 
     // ⑤ 포커스가 왼쪽 터미널 pane으로 가도 오른쪽 브라우저가 **화면에 보이므로** 여전히 대상이다.
     try std.testing.expect(session.focusPaneByPtr(session.activeTab().panes.items[0]));
     try std.testing.expect(session.activePane().activeTerm().kind == .terminal);
-    try std.testing.expectEqual(browser_id, session.webLinkTargetSurfaceId("https://a.co"));
+    try std.testing.expect(session.openTerminalWebLink("https://a.co"));
+    try std.testing.expectEqual(browser_id, (session.takeExternalLinkAction(&url_buf).?).surface_id);
 
-    // ⑥ 브라우저가 **숨은 Term 탭**이면 대상이 아니다(0) — 안 보이는 패널에 열면 화면이 안 바뀌어 먹통처럼 보인다.
-    //    오른쪽 pane으로 돌아가 첫 Term(터미널)을 활성화하면 브라우저 탭은 뒤로 숨는다.
+    // ⑥ 브라우저가 **숨은 Term 탭**이면 대상이 아니다 — 안 보이는 패널에 열면 화면이 안 바뀌어 먹통처럼 보인다.
+    //    오른쪽 pane으로 돌아가 첫 Term(터미널)을 활성화하면 브라우저 탭은 뒤로 숨는다. auto라 시스템으로 간다.
     try std.testing.expect(session.focusPaneByPtr(session.activeTab().panes.items[1]));
     session.focusTerm(0);
     try std.testing.expect(session.activePane().activeTerm().kind == .terminal);
-    try std.testing.expectEqual(@as(u64, 0), session.webLinkTargetSurfaceId("https://a.co"));
+    try std.testing.expect(!session.openTerminalWebLink("https://a.co"));
+}
+
+// input.link-open-target = in-app: 보이는 브라우저 패널이 없으면 **새 browser Term을 열어서** 그곳에 띄운다
+// (auto와 갈리는 유일한 지점). 새 패널의 WKWebView는 다음 tick 전이 batch에서 생기므로, 이 경로는 즉시 반환이
+// 아니라 pending action이어야 한다 — Swift가 batch 적용 뒤 drain해 "생성 → navigate" 순서가 보장된다.
+test "openTerminalWebLink(in-app): 보이는 브라우저가 없으면 새 browser Term을 열어 거기로 보낸다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    session.window_padding_px = .{};
+    _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
+    session.loaded_config.config.input.link_open_target = .in_app;
+    var url_buf: [512]u8 = undefined;
+
+    const terms_before = session.activePane().terms.items.len;
+    try std.testing.expect(session.openTerminalWebLink("https://a.co"));
+
+    // 새 browser Term이 활성 pane에 생기고, pending action이 그 surface를 가리킨다.
+    try std.testing.expectEqual(terms_before + 1, session.activePane().terms.items.len);
+    const created = session.activePane().activeTerm();
+    try std.testing.expect(created.kind == .web and created.web_panel_kind == .browser);
+    const action = session.takeExternalLinkAction(&url_buf) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(ExternalLinkActionKind.in_app, action.kind);
+    try std.testing.expectEqual(created.surfaceId(), action.surface_id);
+    try std.testing.expectEqualStrings("https://a.co", action.url);
+
+    // 두 번째 링크는 방금 만든 브라우저가 **보이므로** 재사용한다 — 클릭마다 탭이 늘지 않는다.
+    try std.testing.expect(session.openTerminalWebLink("https://b.co"));
+    try std.testing.expectEqual(terms_before + 1, session.activePane().terms.items.len);
+    try std.testing.expectEqual(created.surfaceId(), (session.takeExternalLinkAction(&url_buf).?).surface_id);
+
+    // in-app이어도 http(s)가 아니면 브라우저로 안 보내고 탭도 안 만든다.
+    try std.testing.expect(!session.openTerminalWebLink("mailto:a@b.co"));
+    try std.testing.expectEqual(terms_before + 1, session.activePane().terms.items.len);
+}
+
+// 앞 요청이 아직 drain되지 않았으면(같은 tick 안 연타) 이번 클릭은 시스템으로 보낸다 — pending URL을 덮어써
+// 앞 링크를 잃지 않는다. in-app에서 이 규칙이 없으면 "탭은 늘었는데 목적지가 바뀐" 상태가 된다.
+test "openTerminalWebLink: drain 전 두 번째 요청은 pending을 덮어쓰지 않고 시스템으로" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    session.window_padding_px = .{};
+    _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
+    _ = try session.appendWebTermInActivePane(.browser);
+    var url_buf: [512]u8 = undefined;
+
+    try std.testing.expect(session.openTerminalWebLink("https://first.co"));
+    try std.testing.expect(!session.openTerminalWebLink("https://second.co")); // busy → 호출자가 시스템으로 연다
+    const action = session.takeExternalLinkAction(&url_buf) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("https://first.co", action.url); // 첫 링크가 보존된다
 }
 
 // 휠은 '커서 아래' surface가 소유한다(Ghostty/Warp) — 포커스(활성) pane이 마우스 트래킹 앱(vim/tmux 등)이어도,

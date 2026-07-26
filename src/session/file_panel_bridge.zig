@@ -171,10 +171,17 @@ fn hasUriScheme(path: []const u8) bool {
     return true;
 }
 
+/// 외부로 넘길 수 있는 HTTP(S) 링크의 최대 바이트. **파일 경로 상한(`std.fs.max_path_bytes`)을 쓰면 안 된다** —
+/// macOS에서 그 값은 PATH_MAX=1024라, OAuth/SSO 콜백·pre-signed URL·큰 쿼리스트링처럼 흔히 1KB를 넘는 URL이
+/// 조용히 거부돼 같은 종류의 링크가 길이에 따라 다른 곳에서 열린다(코드리뷰 지적). 브라우저 실측 상한은
+/// 제각각이라(IE 2083, Chrome ~32KB, WebKit은 사실상 무제한) 명세가 아니라 **버퍼 정책**으로 정한다: 8 KiB면
+/// 실사용 URL을 모두 담고, 이 값이 곧 pending 버퍼 크기라 상한이 한 곳에서만 정의된다.
+pub const max_http_link_bytes: usize = 8 * 1024;
+
 /// 파일 패널이 앱 내부 browser 또는 시스템 브라우저로 넘길 수 있는 외부 목적지. literal `http(s)://`만
 /// 허용해 percent-encoded scheme, protocol-relative URL, WebKit 특수 scheme이 native 경계를 넘지 못하게 한다.
 pub fn isExplicitHttpLink(href: []const u8) bool {
-    if (href.len == 0 or href.len > std.fs.max_path_bytes or !std.unicode.utf8ValidateSlice(href)) return false;
+    if (href.len == 0 or href.len > max_http_link_bytes or !std.unicode.utf8ValidateSlice(href)) return false;
     const rest = if (std.ascii.startsWithIgnoreCase(href, "https://"))
         href["https://".len..]
     else if (std.ascii.startsWithIgnoreCase(href, "http://"))

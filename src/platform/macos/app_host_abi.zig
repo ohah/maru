@@ -822,7 +822,6 @@ pub export fn maru_macos_app_session_url_at(
     out_ptr: ?*?[*]const u8,
     out_len: ?*usize,
     out_kind: ?*i32,
-    out_web_surface_id: ?*u64,
 ) c_int {
     const app_session = session orelse return @intFromEnum(Status.null_out);
     const ptr_out = out_ptr orelse return @intFromEnum(Status.null_out);
@@ -832,13 +831,25 @@ pub export fn maru_macos_app_session_url_at(
     len_out.* = url.len;
     // 링크 종류(0=url, 1=file_path) — url.len>0일 때만 의미. LinkKind 태그 순서(url=0, file_path=1)에 묶인다.
     if (out_kind) |k| k.* = @intFromEnum(app_session.url_kind);
-    // v147: 이 링크를 띄울 인앱 브라우저 패널의 surface_id(0=시스템 기본 브라우저로). 정책은 Zig 단일 출처
-    // (webLinkTargetSurfaceId). url_kind가 file_path면 브라우저 대상이 아니므로 항상 0 — 판정 함수가 http(s)
-    // 리터럴만 통과시키지만, 여기서도 kind로 좁혀 "파일 경로가 브라우저로 새는" 경로를 구조적으로 막는다.
-    if (out_web_surface_id) |w| {
-        w.* = if (url.len > 0 and app_session.url_kind == .url) app_session.webLinkTargetSurfaceId(url) else 0;
-    }
     return @intFromEnum(Status.ok);
+}
+
+// v147: 터미널에서 클릭한 **웹 링크(http/https)** 를 `input.link-open-target` 정책대로 연다. 1이면 Zig가 인앱
+// browser 패널로 열기로 하고 pending action을 세웠으므로(Swift가 다음 tick `take_external_link_action`으로 drain)
+// 호출자는 클릭을 소비하고 아무것도 더 하지 않는다. 0이면 정책이 시스템 브라우저이거나 대상이 아니므로
+// 호출자가 그 자리에서 `NSWorkspace.open`으로 연다. url_at의 out_kind가 url(0)일 때만 부른다 — 파일 경로는
+// 브라우저 대상이 아니다(Zig도 isExplicitHttpLink로 다시 좁힌다). docs/link-detection.md §링크를 어디에 여는가.
+pub export fn maru_macos_app_session_open_terminal_web_link(
+    session: ?*AppSession,
+    url: ?[*]const u8,
+    url_len: usize,
+) u32 {
+    const app_session = session orelse return 0;
+    const ptr = url orelse return 0;
+    // 상한은 URL 정책 단일 출처(file_panel_bridge.max_http_link_bytes) — 파일 경로 상한(PATH_MAX=1024)을 쓰면
+    // OAuth 콜백·pre-signed URL 같은 긴 링크가 여기서 조용히 잘린다.
+    if (url_len == 0 or url_len > maru.session.file_panel_bridge.max_http_link_bytes) return 0;
+    return if (app_session.openTerminalWebLink(ptr[0..url_len])) 1 else 0;
 }
 
 // 선택 텍스트 추출. 반환 버퍼는 Zig 소유로 다음 copy_text/destroy까지 유효하다. 비어 있으면 len 0.
@@ -1254,12 +1265,14 @@ pub export fn maru_macos_app_session_open_file_panel_link(
 ) u32 {
     const app_session = session orelse return 0;
     const ptr = url orelse return 0;
-    if (url_len == 0 or url_len > std.fs.max_path_bytes) return 0;
+    // http(s) 링크와 로컬 문서 링크가 같이 오는 경로라 둘 중 넉넉한 쪽(URL 상한)으로 재는다 — 파일 경로는
+    // 이어지는 resolve/존재 검증이 다시 거른다.
+    if (url_len == 0 or url_len > maru.session.file_panel_bridge.max_http_link_bytes) return 0;
     app_session.openFilePanelLink(surface_id, ptr[0..url_len], force_system != 0) catch return 0;
     return 1;
 }
 
-pub export fn maru_macos_app_session_take_file_panel_external_link_action(
+pub export fn maru_macos_app_session_take_external_link_action(
     session: ?*AppSession,
     url_out: ?[*]u8,
     url_cap: usize,
@@ -1270,7 +1283,7 @@ pub export fn maru_macos_app_session_take_file_panel_external_link_action(
     const out = url_out orelse return 0;
     const sid = surface_id_out orelse return 0;
     const kind = kind_out orelse return 0;
-    const action = app_session.takeFilePanelExternalLinkAction(out[0..url_cap]) orelse return 0;
+    const action = app_session.takeExternalLinkAction(out[0..url_cap]) orelse return 0;
     sid.* = action.surface_id;
     kind.* = @intFromEnum(action.kind);
     return action.url.len;
@@ -5666,7 +5679,7 @@ test "macOS app exported session API reports null outputs as ABI errors" {
     try std.testing.expectEqual(@as(u32, 0), maru_macos_app_session_open_file_panel_link(null, 1, "https://example.com", 19, 0));
     try std.testing.expectEqual(
         @as(usize, 0),
-        maru_macos_app_session_take_file_panel_external_link_action(
+        maru_macos_app_session_take_external_link_action(
             null,
             &external_link_buf,
             external_link_buf.len,

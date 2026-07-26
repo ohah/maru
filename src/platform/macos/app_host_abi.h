@@ -716,11 +716,7 @@ int32_t maru_macos_app_session_hover(
 /* (config 수식키)+클릭 위치의 링크. mods(hover와 같은 xterm 비트)가 url-click-modifier와 안 맞으면 *out_len=0
    (일반 클릭으로 처리). 버퍼는 Zig 소유(다음 url_at/destroy까지). *out_kind는 링크 종류(0=url, 1=file_path) —
    *out_len>0일 때만 유효하고, Swift가 1이면 URL(fileURLWithPath:)·아니면 URL(string:)으로 연다(out_kind는 NULL 허용).
-   *out_web_surface_id는 이 링크를 띄울 **인앱 브라우저 패널**의 surface_id다(0 = 시스템 기본 브라우저로 연다).
-   config input.link-open-target(auto|system)과 "활성 탭에 보이는 browser 패널" 판정은 Zig가 소유하고, Swift는
-   0이면 NSWorkspace.open·아니면 webPanels[id]에 navigate를 실행만 한다(NULL 허용). *out_len>0 && *out_kind==0일 때만 유효.
-   v71: mods 인자 추가(modifier 판정 Zig 단일 출처). v89: out_kind 추가(파일 경로 링크 — docs/link-detection.md).
-   v147: out_web_surface_id 추가(웹 링크를 인앱 브라우저 패널로 — docs/link-detection.md §링크를 어디에 여는가). */
+   v71: mods 인자 추가(modifier 판정 Zig 단일 출처). v89: out_kind 추가(파일 경로 링크 — docs/link-detection.md). */
 int32_t maru_macos_app_session_url_at(
     MaruAppHostSession *session,
     double x_px,
@@ -728,8 +724,16 @@ int32_t maru_macos_app_session_url_at(
     int32_t mods,
     const uint8_t **out_ptr,
     size_t *out_len,
-    int32_t *out_kind,
-    uint64_t *out_web_surface_id
+    int32_t *out_kind
+);
+/* (v147) 터미널에서 클릭한 웹 링크(http/https)를 config input.link-open-target(auto|in-app|system)대로 연다.
+   1 = Zig가 인앱 browser 패널로 열기로 하고 pending action을 세웠다(Swift는 다음 tick take_external_link_action으로
+   drain — 새로 만든 browser Term의 WKWebView가 surface 전이 batch로 준비된 뒤 navigate된다). 클릭을 소비하고 끝.
+   0 = 시스템 기본 브라우저로 열어야 한다(호출자가 NSWorkspace.open). url_at의 *out_kind==0(url)일 때만 부른다. */
+uint32_t maru_macos_app_session_open_terminal_web_link(
+    MaruAppHostSession *session,
+    const uint8_t *url,
+    size_t url_len
 );
 int32_t maru_macos_app_session_copy_text(
     MaruAppHostSession *session,
@@ -880,7 +884,7 @@ uint32_t maru_macos_app_session_open_file_panel_link(
 );
 /* 설정에 따라 결정된 외부 링크 action one-shot. 반환 URL 길이(0=없음/인자·cap 오류), kind 1=in-app browser,
    2=system browser. in-app이면 surface_id는 이미 생성한 browser Term id, system이면 0. v125. */
-size_t maru_macos_app_session_take_file_panel_external_link_action(
+size_t maru_macos_app_session_take_external_link_action(
     MaruAppHostSession *session,
     uint8_t *url_out,
     size_t url_cap,

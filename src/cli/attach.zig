@@ -1,0 +1,322 @@
+//! Public `maru attach`의 OS-neutral policy boundary.
+//! argv/role intent, canonical runtime id, deterministic resolver reduction and typed exit mapping만 소유한다.
+//! TTY syscalls, manifest enumeration, socket transport and process exit are platform/main adapters.
+
+const std = @import("std");
+
+pub const ExitCode = enum(u8) {
+    success = 0,
+    internal = 1,
+    usage = 2,
+    host_unavailable = 3,
+    denied = 4,
+    unsupported = 5,
+    busy = 6,
+    runtime_not_found = 7,
+    protocol = 8,
+};
+
+pub const Intent = enum {
+    default_controller,
+    read_only,
+    take_over,
+};
+
+pub const Request = struct {
+    runtime_id: u128,
+    intent: Intent,
+};
+
+pub const Command = union(enum) {
+    attach: Request,
+    help,
+};
+
+pub const ParseError = error{
+    MissingRuntimeId,
+    InvalidRuntimeId,
+    ConflictingOptions,
+    DuplicateOption,
+    UnknownOption,
+    UnexpectedArgument,
+};
+
+pub const help =
+    \\usage: maru attach [--read-only | --take-over] <32-lower-hex-runtime-id>
+    \\
+    \\Attach this terminal to an existing persistent runtime without starting a host.
+    \\
+;
+
+pub const Probe = enum {
+    match,
+    runtime_not_found,
+    host_unavailable,
+    denied,
+    busy,
+    protocol,
+    out_of_memory,
+};
+
+pub const Resolution = union(enum) {
+    selected: usize,
+    failed: ExitCode,
+};
+
+pub const AttachMode = enum { observer, controller };
+pub const GrantedRole = enum { observer, controller };
+
+pub const InitialRole = struct {
+    mode: AttachMode,
+    require_transfer_capability: bool,
+};
+
+pub const AcceptedRole = struct {
+    role: GrantedRole,
+    show_read_only_banner: bool,
+};
+
+pub const RoleError = error{
+    MalformedGrantedRole,
+    UnexpectedGrantedRole,
+};
+
+pub fn initialRole(intent: Intent) InitialRole {
+    return switch (intent) {
+        .default_controller => .{ .mode = .controller, .require_transfer_capability = false },
+        .read_only => .{ .mode = .observer, .require_transfer_capability = false },
+        .take_over => .{ .mode = .observer, .require_transfer_capability = true },
+    };
+}
+
+pub fn acceptGrantedRole(intent: Intent, granted_text: []const u8) RoleError!AcceptedRole {
+    const granted: GrantedRole = if (std.mem.eql(u8, granted_text, "observer"))
+        .observer
+    else if (std.mem.eql(u8, granted_text, "controller"))
+        .controller
+    else
+        return error.MalformedGrantedRole;
+    return switch (intent) {
+        .default_controller => .{
+            .role = granted,
+            .show_read_only_banner = granted == .observer,
+        },
+        .read_only, .take_over => if (granted == .observer)
+            .{ .role = .observer, .show_read_only_banner = intent == .read_only }
+        else
+            error.UnexpectedGrantedRole,
+    };
+}
+
+pub const TakeoverResult = enum {
+    success,
+    unsupported,
+    stale,
+    busy,
+    unauthorized,
+    malformed,
+};
+
+pub fn takeoverExit(result: TakeoverResult) ?ExitCode {
+    return switch (result) {
+        .success => null,
+        .unsupported => .unsupported,
+        .stale, .busy => .busy,
+        .unauthorized => .denied,
+        .malformed => .protocol,
+    };
+}
+
+pub fn parse(args: []const []const u8) ParseError!Command {
+    if (args.len == 0) return error.MissingRuntimeId;
+    if (isHelp(args[0])) {
+        if (args.len != 1) return error.UnexpectedArgument;
+        return .help;
+    }
+
+    var runtime_id: ?u128 = null;
+    var intent: Intent = .default_controller;
+    var option_seen = false;
+    for (args) |arg| {
+        if (std.mem.eql(u8, arg, "--read-only") or std.mem.eql(u8, arg, "--take-over")) {
+            const next: Intent = if (std.mem.eql(u8, arg, "--read-only")) .read_only else .take_over;
+            if (option_seen) {
+                if (intent == next) return error.DuplicateOption;
+                return error.ConflictingOptions;
+            }
+            option_seen = true;
+            intent = next;
+            continue;
+        }
+        if (std.mem.startsWith(u8, arg, "--")) return error.UnknownOption;
+        if (runtime_id != null) return error.UnexpectedArgument;
+        runtime_id = parseRuntimeId(arg) orelse return error.InvalidRuntimeId;
+    }
+    return .{ .attach = .{
+        .runtime_id = runtime_id orelse return error.MissingRuntimeId,
+        .intent = intent,
+    } };
+}
+
+fn isHelp(arg: []const u8) bool {
+    return std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h");
+}
+
+fn parseRuntimeId(text: []const u8) ?u128 {
+    if (text.len != 32) return null;
+    for (text) |byte|
+        if (!std.ascii.isDigit(byte) and !(byte >= 'a' and byte <= 'f')) return null;
+    const value = std.fmt.parseInt(u128, text, 16) catch return null;
+    return if (value == 0) null else value;
+}
+
+pub fn resolve(probes: []const Probe) Resolution {
+    if (probes.len == 0) return .{ .failed = .host_unavailable };
+
+    var matches: usize = 0;
+    var selected: usize = 0;
+    var failure: ?ExitCode = null;
+    for (probes, 0..) |probe, index| switch (probe) {
+        .match => {
+            matches += 1;
+            selected = index;
+        },
+        .runtime_not_found => {},
+        .host_unavailable => failure = strongerFailure(failure, .host_unavailable),
+        .busy => failure = strongerFailure(failure, .busy),
+        .protocol => failure = strongerFailure(failure, .protocol),
+        .denied => failure = strongerFailure(failure, .denied),
+        .out_of_memory => failure = strongerFailure(failure, .internal),
+    };
+    if (failure) |code| return .{ .failed = code };
+    if (matches == 0) return .{ .failed = .runtime_not_found };
+    if (matches != 1) return .{ .failed = .denied };
+    return .{ .selected = selected };
+}
+
+fn strongerFailure(current: ?ExitCode, candidate: ExitCode) ExitCode {
+    const current_code = current orelse return candidate;
+    return if (failureRank(candidate) > failureRank(current_code)) candidate else current_code;
+}
+
+fn failureRank(code: ExitCode) u8 {
+    return switch (code) {
+        .internal => 5,
+        .denied => 4,
+        .protocol => 3,
+        .busy => 2,
+        .host_unavailable => 1,
+        else => 0,
+    };
+}
+
+test "attach parser accepts canonical id and each mutually exclusive intent" {
+    const id_text = "0000000000000000000000000000002a";
+    const plain = try parse(&.{id_text});
+    try std.testing.expectEqual(Intent.default_controller, plain.attach.intent);
+    try std.testing.expectEqual(@as(u128, 0x2a), plain.attach.runtime_id);
+
+    const read_only = try parse(&.{ "--read-only", id_text });
+    try std.testing.expectEqual(Intent.read_only, read_only.attach.intent);
+    const take_over = try parse(&.{ id_text, "--take-over" });
+    try std.testing.expectEqual(Intent.take_over, take_over.attach.intent);
+}
+
+test "attach parser rejects noncanonical ids, option conflicts, duplicates and extras" {
+    try std.testing.expectError(error.MissingRuntimeId, parse(&.{}));
+    try std.testing.expectError(error.InvalidRuntimeId, parse(&.{"2a"}));
+    try std.testing.expectError(error.InvalidRuntimeId, parse(&.{"0000000000000000000000000000002A"}));
+    try std.testing.expectError(error.InvalidRuntimeId, parse(&.{"00000000000000000000000000000000"}));
+    try std.testing.expectError(
+        error.ConflictingOptions,
+        parse(&.{ "--read-only", "--take-over", "0000000000000000000000000000002a" }),
+    );
+    try std.testing.expectError(
+        error.DuplicateOption,
+        parse(&.{ "--read-only", "--read-only", "0000000000000000000000000000002a" }),
+    );
+    try std.testing.expectError(
+        error.UnknownOption,
+        parse(&.{ "--wat", "0000000000000000000000000000002a" }),
+    );
+    try std.testing.expectError(
+        error.UnexpectedArgument,
+        parse(&.{ "0000000000000000000000000000002a", "0000000000000000000000000000002b" }),
+    );
+}
+
+test "attach help is exact and accepts only a standalone help option" {
+    try std.testing.expect((try parse(&.{"--help"})) == .help);
+    try std.testing.expect((try parse(&.{"-h"})) == .help);
+    try std.testing.expectError(
+        error.UnexpectedArgument,
+        parse(&.{ "--help", "0000000000000000000000000000002a" }),
+    );
+    try std.testing.expectEqualStrings(
+        "usage: maru attach [--read-only | --take-over] <32-lower-hex-runtime-id>\n\n" ++
+            "Attach this terminal to an existing persistent runtime without starting a host.\n",
+        help,
+    );
+}
+
+test "resolver reduction requires complete evidence and exactly one match" {
+    try std.testing.expectEqual(ExitCode.host_unavailable, resolve(&.{}).failed);
+    try std.testing.expectEqual(
+        ExitCode.runtime_not_found,
+        resolve(&.{ .runtime_not_found, .runtime_not_found }).failed,
+    );
+    try std.testing.expectEqual(@as(usize, 1), resolve(&.{ .runtime_not_found, .match }).selected);
+    try std.testing.expectEqual(ExitCode.denied, resolve(&.{ .match, .match }).failed);
+    try std.testing.expectEqual(ExitCode.busy, resolve(&.{ .match, .busy }).failed);
+}
+
+test "resolver inconclusive precedence is order independent" {
+    const expected = [_]struct {
+        probes: []const Probe,
+        exit: ExitCode,
+    }{
+        .{ .probes = &.{ .host_unavailable, .busy }, .exit = .busy },
+        .{ .probes = &.{ .busy, .protocol }, .exit = .protocol },
+        .{ .probes = &.{ .protocol, .denied }, .exit = .denied },
+        .{ .probes = &.{ .denied, .out_of_memory }, .exit = .internal },
+    };
+    for (expected) |case| {
+        try std.testing.expectEqual(case.exit, resolve(case.probes).failed);
+        var reversed: [2]Probe = .{ case.probes[1], case.probes[0] };
+        try std.testing.expectEqual(case.exit, resolve(&reversed).failed);
+    }
+}
+
+test "attach role policy is host-granted and takeover starts as observer" {
+    try std.testing.expectEqual(AttachMode.controller, initialRole(.default_controller).mode);
+    try std.testing.expectEqual(AttachMode.observer, initialRole(.read_only).mode);
+    const takeover = initialRole(.take_over);
+    try std.testing.expectEqual(AttachMode.observer, takeover.mode);
+    try std.testing.expect(takeover.require_transfer_capability);
+
+    const controller = try acceptGrantedRole(.default_controller, "controller");
+    try std.testing.expectEqual(GrantedRole.controller, controller.role);
+    try std.testing.expect(!controller.show_read_only_banner);
+    const demoted = try acceptGrantedRole(.default_controller, "observer");
+    try std.testing.expectEqual(GrantedRole.observer, demoted.role);
+    try std.testing.expect(demoted.show_read_only_banner);
+    try std.testing.expect((try acceptGrantedRole(.read_only, "observer")).show_read_only_banner);
+    try std.testing.expect(!(try acceptGrantedRole(.take_over, "observer")).show_read_only_banner);
+    try std.testing.expectError(
+        error.UnexpectedGrantedRole,
+        acceptGrantedRole(.take_over, "controller"),
+    );
+    try std.testing.expectError(
+        error.MalformedGrantedRole,
+        acceptGrantedRole(.default_controller, "Controller"),
+    );
+}
+
+test "takeover result has no retry and deterministic exit mapping" {
+    try std.testing.expect(takeoverExit(.success) == null);
+    try std.testing.expectEqual(ExitCode.unsupported, takeoverExit(.unsupported).?);
+    try std.testing.expectEqual(ExitCode.busy, takeoverExit(.stale).?);
+    try std.testing.expectEqual(ExitCode.busy, takeoverExit(.busy).?);
+    try std.testing.expectEqual(ExitCode.denied, takeoverExit(.unauthorized).?);
+    try std.testing.expectEqual(ExitCode.protocol, takeoverExit(.malformed).?);
+}

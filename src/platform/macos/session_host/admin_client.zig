@@ -1,4 +1,4 @@
-//! Read-only public CLI의 existing-current-host connector.
+//! Public admin CLI의 existing-current-host connector.
 //! Secure manifest registry를 읽기만 하며 host spawn, lock acquisition, manifest publication을 하지 않는다.
 
 const std = @import("std");
@@ -12,6 +12,13 @@ const recovery_discovery = @import("recovery_discovery.zig");
 const screen_stream = @import("screen_stream.zig");
 const short_endpoint = @import("short_endpoint.zig");
 extern "c" fn usleep(usec: c_uint) c_int;
+extern "c" fn openpty(
+    amaster: *c.fd_t,
+    aslave: *c.fd_t,
+    name: ?[*]u8,
+    termp: ?*anyopaque,
+    winp: ?*posix.winsize,
+) c_int;
 
 pub const Unavailable = enum {
     absent,
@@ -170,21 +177,144 @@ const ProductResult = struct {
     }
 };
 
-fn readTestPipe(allocator: std.mem.Allocator, fd: c_int) ![]u8 {
-    var output: std.ArrayList(u8) = .empty;
-    errdefer output.deinit(allocator);
+const ControlledProductCli = struct {
+    pid: c.pid_t,
+    master: c.fd_t,
+    stdout_fd: c.fd_t,
+    stderr_fd: c.fd_t,
+
+    fn closeMaster(self: *ControlledProductCli) void {
+        closeOwnedFd(&self.master);
+    }
+
+    fn cleanup(self: *ControlledProductCli, io: std.Io) void {
+        if (self.pid > 0) {
+            var status: c_int = 0;
+            while (true) {
+                const waited = c.waitpid(self.pid, &status, c.W.NOHANG);
+                if (waited == self.pid or (waited < 0 and posix.errno(waited) == .CHILD)) {
+                    self.pid = -1;
+                    break;
+                }
+                if (waited < 0 and posix.errno(waited) == .INTR) continue;
+                if (waited < 0) {
+                    self.pid = -1;
+                    break;
+                }
+                break;
+            }
+            if (self.pid > 0) {
+                _ = c.kill(self.pid, posix.SIG.KILL);
+                const started = std.Io.Timestamp.now(io, .awake);
+                while (started.untilNow(io, .awake).toMilliseconds() < 10_000) {
+                    const waited = c.waitpid(self.pid, &status, c.W.NOHANG);
+                    if (waited == self.pid or (waited < 0 and posix.errno(waited) == .CHILD)) break;
+                    if (waited < 0 and posix.errno(waited) != .INTR) break;
+                    _ = usleep(10_000);
+                }
+                self.pid = -1;
+            }
+        }
+        self.closeMaster();
+        closeOwnedFd(&self.stdout_fd);
+        closeOwnedFd(&self.stderr_fd);
+    }
+};
+
+fn closeOwnedFd(fd: *c.fd_t) void {
+    if (fd.* >= 0) {
+        _ = c.close(fd.*);
+        fd.* = -1;
+    }
+}
+
+fn setNonblocking(fd: c.fd_t) !void {
+    const flags = c.fcntl(fd, c.F.GETFL, @as(c_int, 0));
+    const nonblocking: c_int = @bitCast(posix.O{ .NONBLOCK = true });
+    if (flags < 0 or c.fcntl(fd, c.F.SETFL, flags | nonblocking) < 0)
+        return error.TestUnexpectedResult;
+}
+
+fn drainProductFd(
+    allocator: std.mem.Allocator,
+    fd: *c.fd_t,
+    output: *std.ArrayList(u8),
+) !void {
+    if (fd.* < 0) return;
     var buf: [4096]u8 = undefined;
     while (true) {
-        const read_len = c.read(fd, &buf, buf.len);
-        if (read_len < 0) {
-            if (posix.errno(read_len) == .INTR) continue;
-            return error.TestUnexpectedResult;
+        const count = c.read(fd.*, &buf, buf.len);
+        if (count > 0) {
+            try output.appendSlice(allocator, buf[0..@intCast(count)]);
+            if (output.items.len > 64 * 1024) return error.TestUnexpectedResult;
+            continue;
         }
-        if (read_len == 0) break;
-        try output.appendSlice(allocator, buf[0..@intCast(read_len)]);
-        if (output.items.len > 64 * 1024) return error.TestUnexpectedResult;
+        if (count == 0) {
+            closeOwnedFd(fd);
+            return;
+        }
+        return switch (posix.errno(count)) {
+            .INTR => continue,
+            .AGAIN => {},
+            else => error.TestUnexpectedResult,
+        };
     }
-    return output.toOwnedSlice(allocator);
+}
+
+fn collectProductProcess(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    process: *ControlledProductCli,
+    stderr_prefix: []const u8,
+) !ProductResult {
+    try setNonblocking(process.stdout_fd);
+    try setNonblocking(process.stderr_fd);
+    var stdout_list: std.ArrayList(u8) = .empty;
+    defer stdout_list.deinit(allocator);
+    var stderr_list: std.ArrayList(u8) = .empty;
+    defer stderr_list.deinit(allocator);
+    try stderr_list.appendSlice(allocator, stderr_prefix);
+    const started = std.Io.Timestamp.now(io, .awake);
+    var status: c_int = 0;
+    var reaped = false;
+
+    while (!reaped or process.stdout_fd >= 0 or process.stderr_fd >= 0) {
+        if (!reaped) {
+            const waited = c.waitpid(process.pid, &status, c.W.NOHANG);
+            if (waited == process.pid) {
+                reaped = true;
+                process.pid = -1;
+                process.closeMaster();
+            } else if (waited < 0 and posix.errno(waited) != .INTR) {
+                return error.TestUnexpectedResult;
+            }
+        }
+        try drainProductFd(allocator, &process.stdout_fd, &stdout_list);
+        try drainProductFd(allocator, &process.stderr_fd, &stderr_list);
+        if (reaped and process.stdout_fd < 0 and process.stderr_fd < 0) break;
+
+        const elapsed = started.untilNow(io, .awake).toMilliseconds();
+        if (elapsed >= 10_000) return error.TestUnexpectedResult;
+        var fds = [_]posix.pollfd{
+            .{ .fd = process.stdout_fd, .events = posix.POLL.IN, .revents = 0 },
+            .{ .fd = process.stderr_fd, .events = posix.POLL.IN, .revents = 0 },
+        };
+        const remaining: i64 = 10_000 - elapsed;
+        const timeout: i32 = @intCast(@min(remaining, 50));
+        _ = posix.poll(&fds, timeout) catch return error.TestUnexpectedResult;
+    }
+
+    const stdout = try stdout_list.toOwnedSlice(allocator);
+    errdefer allocator.free(stdout);
+    const stderr = try stderr_list.toOwnedSlice(allocator);
+    return .{
+        .exit_code = blk: {
+            const unsigned: u32 = @bitCast(status);
+            break :blk if (c.W.IFEXITED(unsigned)) @intCast(c.W.EXITSTATUS(unsigned)) else -1;
+        },
+        .stdout = stdout,
+        .stderr = stderr,
+    };
 }
 
 fn runProductCli(
@@ -193,14 +323,51 @@ fn runProductCli(
     xdg_cache_home: [:0]const u8,
     args: []const [:0]const u8,
 ) !ProductResult {
+    return runProductCliInput(allocator, product_exe, xdg_cache_home, args);
+}
+
+fn runProductCliTtyInput(
+    allocator: std.mem.Allocator,
+    product_exe: [:0]const u8,
+    xdg_cache_home: [:0]const u8,
+    args: []const [:0]const u8,
+    input: []const u8,
+) !ProductResult {
+    var process = try startControlledProductCli(allocator, product_exe, xdg_cache_home, args);
+    defer process.cleanup(std.testing.io);
+    var offset: usize = 0;
+    while (offset < input.len) {
+        const written = c.write(process.master, input.ptr + offset, input.len - offset);
+        if (written < 0) {
+            if (posix.errno(written) == .INTR) continue;
+            return error.TestUnexpectedResult;
+        }
+        offset += @intCast(written);
+    }
+    return collectProductProcess(std.testing.io, allocator, &process, "");
+}
+
+fn runProductCliInput(
+    allocator: std.mem.Allocator,
+    product_exe: [:0]const u8,
+    xdg_cache_home: [:0]const u8,
+    args: []const [:0]const u8,
+) !ProductResult {
+    var pipes_transferred = false;
     var stdout_fds: [2]c_int = undefined;
     var stderr_fds: [2]c_int = undefined;
     if (c.pipe(&stdout_fds) != 0) return error.TestUnexpectedResult;
-    if (c.pipe(&stderr_fds) != 0) {
+    errdefer if (!pipes_transferred) {
         _ = c.close(stdout_fds[0]);
         _ = c.close(stdout_fds[1]);
+    };
+    if (c.pipe(&stderr_fds) != 0) {
         return error.TestUnexpectedResult;
     }
+    errdefer if (!pipes_transferred) {
+        _ = c.close(stderr_fds[0]);
+        _ = c.close(stderr_fds[1]);
+    };
     const env_arg = try std.fmt.allocPrintSentinel(
         allocator,
         "XDG_CACHE_HOME={s}",
@@ -227,20 +394,117 @@ fn runProductCli(
     }
     _ = c.close(stdout_fds[1]);
     _ = c.close(stderr_fds[1]);
-    const stdout = try readTestPipe(allocator, stdout_fds[0]);
-    errdefer allocator.free(stdout);
-    const stderr = try readTestPipe(allocator, stderr_fds[0]);
-    errdefer allocator.free(stderr);
-    _ = c.close(stdout_fds[0]);
-    _ = c.close(stderr_fds[0]);
-    var status: c_int = 0;
-    if (c.waitpid(pid, &status, 0) != pid) return error.TestUnexpectedResult;
-    const unsigned: u32 = @bitCast(status);
-    return .{
-        .exit_code = if (c.W.IFEXITED(unsigned)) @intCast(c.W.EXITSTATUS(unsigned)) else -1,
-        .stdout = stdout,
-        .stderr = stderr,
+    var process: ControlledProductCli = .{
+        .pid = pid,
+        .master = -1,
+        .stdout_fd = stdout_fds[0],
+        .stderr_fd = stderr_fds[0],
     };
+    pipes_transferred = true;
+    defer process.cleanup(std.testing.io);
+    return collectProductProcess(std.testing.io, allocator, &process, "");
+}
+
+fn startControlledProductCli(
+    allocator: std.mem.Allocator,
+    product_exe: [:0]const u8,
+    xdg_cache_home: [:0]const u8,
+    args: []const [:0]const u8,
+) !ControlledProductCli {
+    var master: c.fd_t = -1;
+    var slave: c.fd_t = -1;
+    if (openpty(&master, &slave, null, null, null) != 0) return error.TestUnexpectedResult;
+    errdefer _ = c.close(master);
+    errdefer _ = c.close(slave);
+    var stdout_fds: [2]c_int = undefined;
+    var stderr_fds: [2]c_int = undefined;
+    if (c.pipe(&stdout_fds) != 0) return error.TestUnexpectedResult;
+    errdefer {
+        _ = c.close(stdout_fds[0]);
+        _ = c.close(stdout_fds[1]);
+    }
+    if (c.pipe(&stderr_fds) != 0) return error.TestUnexpectedResult;
+    errdefer {
+        _ = c.close(stderr_fds[0]);
+        _ = c.close(stderr_fds[1]);
+    }
+    const env_arg = try std.fmt.allocPrintSentinel(
+        allocator,
+        "XDG_CACHE_HOME={s}",
+        .{xdg_cache_home},
+        0,
+    );
+    defer allocator.free(env_arg);
+    var argv: [8:null]?[*:0]const u8 = [_:null]?[*:0]const u8{null} ** 8;
+    argv[0] = "env";
+    argv[1] = env_arg.ptr;
+    argv[2] = product_exe.ptr;
+    for (args, 0..) |arg, index| argv[index + 3] = arg.ptr;
+    const pid = c.fork();
+    if (pid < 0) return error.TestUnexpectedResult;
+    if (pid == 0) {
+        _ = c.dup2(slave, 0);
+        _ = c.dup2(stdout_fds[1], 1);
+        _ = c.dup2(stderr_fds[1], 2);
+        _ = c.close(master);
+        _ = c.close(slave);
+        _ = c.close(stdout_fds[0]);
+        _ = c.close(stdout_fds[1]);
+        _ = c.close(stderr_fds[0]);
+        _ = c.close(stderr_fds[1]);
+        _ = c.execve("/usr/bin/env", &argv, @ptrCast(c.environ));
+        c._exit(127);
+    }
+    _ = c.close(slave);
+    _ = c.close(stdout_fds[1]);
+    _ = c.close(stderr_fds[1]);
+    return .{
+        .pid = pid,
+        .master = master,
+        .stdout_fd = stdout_fds[0],
+        .stderr_fd = stderr_fds[0],
+    };
+}
+
+fn readUntilPrompt(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    fd: c.fd_t,
+) ![]u8 {
+    const started = std.Io.Timestamp.now(io, .awake);
+    var output: std.ArrayList(u8) = .empty;
+    errdefer output.deinit(allocator);
+    var bytes: [1024]u8 = undefined;
+    while (std.mem.indexOf(u8, output.items, "? [y/N] ") == null) {
+        const elapsed = started.untilNow(io, .awake).toMilliseconds();
+        if (elapsed >= 10_000) return error.TestUnexpectedResult;
+        var fds = [_]posix.pollfd{.{
+            .fd = fd,
+            .events = posix.POLL.IN,
+            .revents = 0,
+        }};
+        const ready = posix.poll(&fds, @intCast(10_000 - elapsed)) catch
+            return error.TestUnexpectedResult;
+        if (ready != 1 or fds[0].revents & (posix.POLL.IN | posix.POLL.HUP) == 0)
+            return error.TestUnexpectedResult;
+        const count = c.read(fd, &bytes, bytes.len);
+        if (count < 0) {
+            if (posix.errno(count) == .INTR) continue;
+            return error.TestUnexpectedResult;
+        }
+        if (count == 0) return error.TestUnexpectedResult;
+        try output.appendSlice(allocator, bytes[0..@intCast(count)]);
+        if (output.items.len > 64 * 1024) return error.TestUnexpectedResult;
+    }
+    return output.toOwnedSlice(allocator);
+}
+
+fn finishControlledProductCli(
+    allocator: std.mem.Allocator,
+    process: *ControlledProductCli,
+    stderr_prefix: []const u8,
+) !ProductResult {
+    return collectProductProcess(std.testing.io, allocator, process, stderr_prefix);
 }
 
 fn spawnProductHost(
@@ -407,12 +671,26 @@ test "product read CLI connects to an existing daemon without spawning and emits
     try std.testing.expectEqual(@as(usize, 0), usage.stdout.len);
     try std.testing.expect(std.mem.indexOf(u8, usage.stderr, "usage:") != null);
 
+    var non_tty_end = try runProductCli(
+        allocator,
+        product_z,
+        xdg,
+        &.{ "runtime", "end", "000000000000000000000000000000aa" },
+    );
+    defer non_tty_end.deinit(allocator);
+    try std.testing.expectEqual(@as(c_int, 2), non_tty_end.exit_code);
+    try std.testing.expectEqual(@as(usize, 0), non_tty_end.stdout.len);
+    try std.testing.expect(std.mem.indexOf(u8, non_tty_end.stderr, "usage:") != null);
+
     const child = try spawnProductHost(product_raw, xdg, session_dir, socket_path, host_text);
+    var child_active = true;
     defer {
-        _ = c.kill(child, posix.SIG.TERM);
-        var status: c_int = 0;
-        _ = c.waitpid(child, &status, 0);
-        removeProductHostFiles(session_dir, socket_path, host_id);
+        if (child_active) {
+            _ = c.kill(child, posix.SIG.TERM);
+            var status: c_int = 0;
+            _ = c.waitpid(child, &status, 0);
+            removeProductHostFiles(session_dir, socket_path, host_id);
+        }
         var hosts_buf: [640]u8 = undefined;
         if (host_manifest.hostsRootPathIn(&hosts_buf, session_dir)) |path|
             _ = c.rmdir(path.ptr)
@@ -512,7 +790,8 @@ test "product read CLI connects to an existing daemon without spawning and emits
     held_admin.deinit();
 
     var gui = try client_mod.Client.connect(allocator, socket_path, "gui");
-    errdefer gui.deinit();
+    var gui_active = true;
+    errdefer if (gui_active) gui.deinit();
     const spawn_response = try gui.call(
         "runtime.spawn",
         "{\"argv\":[\"/bin/cat\"],\"cols\":80,\"rows\":24}",
@@ -596,6 +875,7 @@ test "product read CLI connects to an existing daemon without spawning and emits
     try std.testing.expectEqual(@as(c_int, 0), with_gui.exit_code);
     try std.testing.expect(std.mem.indexOf(u8, with_gui.stdout, "\"runtime_count\":1,\"client_count\":2") != null);
     gui.deinit();
+    gui_active = false;
 
     var after_gui = try runProductCli(
         allocator,
@@ -606,6 +886,231 @@ test "product read CLI connects to an existing daemon without spawning and emits
     defer after_gui.deinit(allocator);
     try std.testing.expectEqual(@as(c_int, 0), after_gui.exit_code);
     try std.testing.expect(std.mem.indexOf(u8, after_gui.stdout, "\"runtime_count\":1,\"client_count\":1") != null);
+
+    var end_gui = try client_mod.Client.connect(allocator, socket_path, "gui");
+    defer end_gui.deinit();
+    const end_spawn_response = try end_gui.call(
+        "runtime.spawn",
+        "{\"argv\":[\"/bin/cat\"],\"cols\":100,\"rows\":30}",
+    );
+    defer allocator.free(end_spawn_response);
+    var end_spawn = try std.json.parseFromSlice(SpawnWire, allocator, end_spawn_response, .{});
+    defer end_spawn.deinit();
+    const ended_runtime_id = try allocator.dupeZ(u8, end_spawn.value.result.runtime_id);
+    defer allocator.free(ended_runtime_id);
+    var ended = try runProductCli(
+        allocator,
+        product_z,
+        xdg,
+        &.{ "runtime", "end", ended_runtime_id, "--yes" },
+    );
+    defer ended.deinit(allocator);
+    try std.testing.expectEqual(@as(c_int, 0), ended.exit_code);
+    try std.testing.expectEqual(@as(usize, 0), ended.stderr.len);
+    const expected_ended = try std.fmt.allocPrint(allocator, "Ended runtime {s}.\n", .{ended_runtime_id});
+    defer allocator.free(expected_ended);
+    try std.testing.expectEqualStrings(expected_ended, ended.stdout);
+
+    var ended_missing = try runProductCli(
+        allocator,
+        product_z,
+        xdg,
+        &.{ "runtime", "get", ended_runtime_id, "--json" },
+    );
+    defer ended_missing.deinit(allocator);
+    try std.testing.expectEqual(@as(c_int, 7), ended_missing.exit_code);
+    var sibling_still_live = try runProductCli(
+        allocator,
+        product_z,
+        xdg,
+        &.{ "runtime", "get", runtime_id, "--json" },
+    );
+    defer sibling_still_live.deinit(allocator);
+    try std.testing.expectEqual(@as(c_int, 0), sibling_still_live.exit_code);
+
+    const interactive_spawn_response = try end_gui.call(
+        "runtime.spawn",
+        "{\"argv\":[\"/bin/cat\"],\"cols\":90,\"rows\":28}",
+    );
+    defer allocator.free(interactive_spawn_response);
+    var interactive_spawn = try std.json.parseFromSlice(SpawnWire, allocator, interactive_spawn_response, .{});
+    defer interactive_spawn.deinit();
+    const interactive_runtime_id = try allocator.dupeZ(u8, interactive_spawn.value.result.runtime_id);
+    defer allocator.free(interactive_runtime_id);
+    const attach_params = try std.fmt.allocPrint(
+        allocator,
+        "{{\"runtime_id\":\"{s}\",\"mode\":\"controller\",\"cols\":90,\"rows\":28}}",
+        .{interactive_runtime_id},
+    );
+    defer allocator.free(attach_params);
+    const attach_response = try end_gui.call("runtime.attach", attach_params);
+    defer allocator.free(attach_response);
+    try std.testing.expect(std.mem.indexOf(u8, attach_response, "\"input\":true") != null);
+
+    var declined = try runProductCliTtyInput(
+        allocator,
+        product_z,
+        xdg,
+        &.{ "runtime", "end", interactive_runtime_id },
+        "n\n",
+    );
+    defer declined.deinit(allocator);
+    try std.testing.expectEqual(@as(c_int, 9), declined.exit_code);
+    try std.testing.expectEqual(@as(usize, 0), declined.stdout.len);
+    const expected_declined_stderr = try std.fmt.allocPrint(
+        allocator,
+        "End runtime {s} (90x28, controller=yes, observers=0)? [y/N] \nmaru: runtime was not ended\n",
+        .{interactive_runtime_id},
+    );
+    defer allocator.free(expected_declined_stderr);
+    try std.testing.expectEqualStrings(expected_declined_stderr, declined.stderr);
+    var after_decline = try runProductCli(
+        allocator,
+        product_z,
+        xdg,
+        &.{ "runtime", "get", interactive_runtime_id, "--json" },
+    );
+    defer after_decline.deinit(allocator);
+    try std.testing.expectEqual(@as(c_int, 0), after_decline.exit_code);
+
+    var confirmed = try runProductCliTtyInput(
+        allocator,
+        product_z,
+        xdg,
+        &.{ "runtime", "end", interactive_runtime_id },
+        "yes\n",
+    );
+    defer confirmed.deinit(allocator);
+    try std.testing.expectEqual(@as(c_int, 0), confirmed.exit_code);
+    const expected_confirmed_stderr = try std.fmt.allocPrint(
+        allocator,
+        "End runtime {s} (90x28, controller=yes, observers=0)? [y/N] \n",
+        .{interactive_runtime_id},
+    );
+    defer allocator.free(expected_confirmed_stderr);
+    try std.testing.expectEqualStrings(expected_confirmed_stderr, confirmed.stderr);
+    const expected_confirmed = try std.fmt.allocPrint(
+        allocator,
+        "Ended runtime {s}.\n",
+        .{interactive_runtime_id},
+    );
+    defer allocator.free(expected_confirmed);
+    try std.testing.expectEqualStrings(expected_confirmed, confirmed.stdout);
+
+    const observer_spawn_response = try end_gui.call(
+        "runtime.spawn",
+        "{\"argv\":[\"/bin/cat\"],\"cols\":88,\"rows\":26}",
+    );
+    defer allocator.free(observer_spawn_response);
+    var observer_spawn = try std.json.parseFromSlice(SpawnWire, allocator, observer_spawn_response, .{});
+    defer observer_spawn.deinit();
+    const observer_runtime_id = try allocator.dupeZ(u8, observer_spawn.value.result.runtime_id);
+    defer allocator.free(observer_runtime_id);
+    var observer_gui = try client_mod.Client.connect(allocator, socket_path, "gui");
+    defer observer_gui.deinit();
+    const observer_params = try std.fmt.allocPrint(
+        allocator,
+        "{{\"runtime_id\":\"{s}\",\"mode\":\"observer\",\"cols\":88,\"rows\":26}}",
+        .{observer_runtime_id},
+    );
+    defer allocator.free(observer_params);
+    const observer_attach = try observer_gui.call("runtime.attach", observer_params);
+    defer allocator.free(observer_attach);
+    try std.testing.expect(std.mem.indexOf(u8, observer_attach, "\"observe\":true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, observer_attach, "\"input\":false") != null);
+    var observer_ended = try runProductCliTtyInput(
+        allocator,
+        product_z,
+        xdg,
+        &.{ "runtime", "end", observer_runtime_id },
+        "y\n",
+    );
+    defer observer_ended.deinit(allocator);
+    try std.testing.expectEqual(@as(c_int, 0), observer_ended.exit_code);
+    const expected_observer_stderr = try std.fmt.allocPrint(
+        allocator,
+        "End runtime {s} (88x26, controller=no, observers=1)? [y/N] \n",
+        .{observer_runtime_id},
+    );
+    defer allocator.free(expected_observer_stderr);
+    try std.testing.expectEqualStrings(expected_observer_stderr, observer_ended.stderr);
+
+    const eof_spawn_response = try end_gui.call(
+        "runtime.spawn",
+        "{\"argv\":[\"/bin/cat\"],\"cols\":72,\"rows\":22}",
+    );
+    defer allocator.free(eof_spawn_response);
+    var eof_spawn = try std.json.parseFromSlice(SpawnWire, allocator, eof_spawn_response, .{});
+    defer eof_spawn.deinit();
+    const eof_runtime_id = try allocator.dupeZ(u8, eof_spawn.value.result.runtime_id);
+    defer allocator.free(eof_runtime_id);
+    var eof_process = try startControlledProductCli(
+        allocator,
+        product_z,
+        xdg,
+        &.{ "runtime", "end", eof_runtime_id },
+    );
+    defer eof_process.cleanup(std.testing.io);
+    const eof_prompt = try readUntilPrompt(std.testing.io, allocator, eof_process.stderr_fd);
+    defer allocator.free(eof_prompt);
+    try std.testing.expectEqual(@as(isize, 3), c.write(eof_process.master, "yes", 3));
+    eof_process.closeMaster();
+    var eof_declined = try finishControlledProductCli(allocator, &eof_process, eof_prompt);
+    defer eof_declined.deinit(allocator);
+    try std.testing.expectEqual(@as(c_int, 9), eof_declined.exit_code);
+    try std.testing.expectEqual(@as(usize, 0), eof_declined.stdout.len);
+    const expected_eof_stderr = try std.fmt.allocPrint(
+        allocator,
+        "End runtime {s} (72x22, controller=no, observers=0)? [y/N] \nmaru: runtime was not ended\n",
+        .{eof_runtime_id},
+    );
+    defer allocator.free(expected_eof_stderr);
+    try std.testing.expectEqualStrings(expected_eof_stderr, eof_declined.stderr);
+    var after_eof = try runProductCli(
+        allocator,
+        product_z,
+        xdg,
+        &.{ "runtime", "get", eof_runtime_id, "--json" },
+    );
+    defer after_eof.deinit(allocator);
+    try std.testing.expectEqual(@as(c_int, 0), after_eof.exit_code);
+
+    var race_gui = try client_mod.Client.connect(allocator, socket_path, "gui");
+    defer race_gui.deinit();
+    const race_spawn_response = try race_gui.call(
+        "runtime.spawn",
+        "{\"argv\":[\"/bin/cat\"],\"cols\":70,\"rows\":20}",
+    );
+    defer allocator.free(race_spawn_response);
+    var race_spawn = try std.json.parseFromSlice(SpawnWire, allocator, race_spawn_response, .{});
+    defer race_spawn.deinit();
+    const race_runtime_id = try allocator.dupeZ(u8, race_spawn.value.result.runtime_id);
+    defer allocator.free(race_runtime_id);
+    var race_process = try startControlledProductCli(
+        allocator,
+        product_z,
+        xdg,
+        &.{ "runtime", "end", race_runtime_id },
+    );
+    defer race_process.cleanup(std.testing.io);
+    const race_prompt = try readUntilPrompt(std.testing.io, allocator, race_process.stderr_fd);
+    defer allocator.free(race_prompt);
+    const race_terminate_params = try std.fmt.allocPrint(
+        allocator,
+        "{{\"runtime_id\":\"{s}\"}}",
+        .{race_runtime_id},
+    );
+    defer allocator.free(race_terminate_params);
+    const race_terminate = try race_gui.call("runtime.terminate", race_terminate_params);
+    defer allocator.free(race_terminate);
+    try std.testing.expect(std.mem.indexOf(u8, race_terminate, "\"terminated\":true") != null);
+    try std.testing.expectEqual(@as(isize, 4), c.write(race_process.master, "yes\n", 4));
+    var raced = try finishControlledProductCli(allocator, &race_process, race_prompt);
+    defer raced.deinit(allocator);
+    try std.testing.expectEqual(@as(c_int, 7), raced.exit_code);
+    try std.testing.expectEqual(@as(usize, 0), raced.stdout.len);
+    try std.testing.expect(std.mem.indexOf(u8, raced.stderr, "runtime_not_found") != null);
+
     try std.testing.expectEqualDeep(manifest_before, try snapshotFile(manifest_path));
     try std.testing.expectEqualDeep(owner_before, try snapshotFile(owner_path));
     try std.testing.expect(c.fstatat(
@@ -614,4 +1119,85 @@ test "product read CLI connects to an existing daemon without spawning and emits
         &launch_stat,
         posix.AT.SYMLINK_NOFOLLOW,
     ) != 0);
+
+    // Preview authority is host-specific. A가 사라진 뒤 같은 current slot에 B가 나타나도 B에는 mutation request를
+    // 보내지 않는다(runtime id 충돌 여부와 무관하게 opaque host_id가 먼저 gate한다).
+    var swap_process = try startControlledProductCli(
+        allocator,
+        product_z,
+        xdg,
+        &.{ "runtime", "end", runtime_id },
+    );
+    defer swap_process.cleanup(std.testing.io);
+    const swap_prompt = try readUntilPrompt(std.testing.io, allocator, swap_process.stderr_fd);
+    defer allocator.free(swap_prompt);
+
+    _ = c.kill(child, posix.SIG.TERM);
+    var child_status: c_int = 0;
+    try std.testing.expectEqual(child, c.waitpid(child, &child_status, 0));
+    removeProductHostFiles(session_dir, socket_path, host_id);
+    child_active = false;
+
+    const replacement_host_id = host_id + 2;
+    var replacement_socket_buf: [128]u8 = undefined;
+    const replacement_socket = try short_endpoint.currentSocketPathIn(&replacement_socket_buf, replacement_host_id);
+    var replacement_host_buf: [33]u8 = undefined;
+    const replacement_host_text = try std.fmt.bufPrintZ(
+        &replacement_host_buf,
+        "{x:0>32}",
+        .{replacement_host_id},
+    );
+    const replacement_child = try spawnProductHost(
+        product_raw,
+        xdg,
+        session_dir,
+        replacement_socket,
+        replacement_host_text,
+    );
+    var replacement_active = true;
+    defer if (replacement_active) {
+        _ = c.kill(replacement_child, posix.SIG.TERM);
+        var status: c_int = 0;
+        _ = c.waitpid(replacement_child, &status, 0);
+        removeProductHostFiles(session_dir, replacement_socket, replacement_host_id);
+    };
+    try waitProductHostReady(allocator, session_dir, replacement_host_id);
+    var replacement_gui = try client_mod.Client.connect(allocator, replacement_socket, "gui");
+    var replacement_gui_active = true;
+    defer if (replacement_gui_active) replacement_gui.deinit();
+    const replacement_spawn_response = try replacement_gui.call(
+        "runtime.spawn",
+        "{\"argv\":[\"/bin/cat\"],\"cols\":64,\"rows\":18}",
+    );
+    defer allocator.free(replacement_spawn_response);
+    var replacement_spawn = try std.json.parseFromSlice(SpawnWire, allocator, replacement_spawn_response, .{});
+    defer replacement_spawn.deinit();
+    const replacement_runtime_id = try allocator.dupeZ(u8, replacement_spawn.value.result.runtime_id);
+    defer allocator.free(replacement_runtime_id);
+
+    try std.testing.expectEqual(@as(isize, 4), c.write(swap_process.master, "yes\n", 4));
+    var swapped = try finishControlledProductCli(allocator, &swap_process, swap_prompt);
+    defer swapped.deinit(allocator);
+    try std.testing.expectEqual(@as(c_int, 3), swapped.exit_code);
+    try std.testing.expectEqual(@as(usize, 0), swapped.stdout.len);
+    try std.testing.expect(std.mem.indexOf(u8, swapped.stderr, "host changed after confirmation") != null);
+    var replacement_still_live = try runProductCli(
+        allocator,
+        product_z,
+        xdg,
+        &.{ "runtime", "get", replacement_runtime_id, "--json" },
+    );
+    defer replacement_still_live.deinit(allocator);
+    try std.testing.expectEqual(@as(c_int, 0), replacement_still_live.exit_code);
+
+    replacement_gui.deinit();
+    replacement_gui_active = false;
+    _ = c.kill(replacement_child, posix.SIG.TERM);
+    var replacement_status: c_int = 0;
+    try std.testing.expectEqual(
+        replacement_child,
+        c.waitpid(replacement_child, &replacement_status, 0),
+    );
+    removeProductHostFiles(session_dir, replacement_socket, replacement_host_id);
+    replacement_active = false;
 }

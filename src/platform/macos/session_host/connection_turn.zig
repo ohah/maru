@@ -617,6 +617,13 @@ pub const Client = struct {
                 try self.syncTrackers();
                 self.close_after_flush = .reply_flushed;
             },
+            .admin_terminate_accepted => |accepted| {
+                self.adoptControl(accepted.bytes) catch return error.OutOfMemory;
+                const ops = self.connection.runtime_ops orelse
+                    return self.beginClose(.socket_error);
+                ops.terminate(ops.ctx, accepted.runtime_id);
+                self.close_after_flush = .reply_flushed;
+            },
             .upgrade_accepted => |accepted| {
                 const ops = self.upgrade_ops orelse {
                     self.allocator.free(accepted.bytes);
@@ -1775,6 +1782,96 @@ test "one-shot admin leaves a pipelined second request undispatched" {
         responses += 1;
     }
     try testing.expectEqual(@as(usize, 1), responses);
+}
+
+test "admin runtime end mutates only after reply queue admission and then flushes before close" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const testing = std.testing;
+    var registry_value = registry.TerminalRuntimeRegistry.init(testing.allocator);
+    defer registry_value.deinit();
+    _ = try registry_value.register(0xAA, 80, 24);
+    var runtime_ops: server.FakeRuntimeOps = .{};
+    var subscriptions = subscription_identity.Table.init(testing.allocator);
+    defer subscriptions.deinit();
+    const reactor = try slot_mod.ReactorCore.create(testing.allocator);
+    defer reactor.destroy();
+
+    {
+        var fds: [2]c_int = undefined;
+        try testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds));
+        defer _ = c.close(fds[1]);
+        var admin_admission: server.AdminAdmission = .{};
+        const client = try Client.create(
+            testing.allocator,
+            fds[0],
+            reactor,
+            9,
+            &registry_value,
+            &subscriptions,
+            .{ .admin_admission = &admin_admission, .runtime_ops = runtime_ops.ops() },
+        );
+        defer client.destroy();
+        try sendTestFrame(
+            fds[1],
+            .hello,
+            1,
+            "{\"protocol_min\":2,\"protocol_max\":2,\"client_kind\":\"admin\"}",
+        );
+        client.readReady(1);
+        client.writeReady(2);
+        _ = drainNonblocking(fds[1]);
+        client.control_admission_fail_once = true;
+        try sendTestFrame(
+            fds[1],
+            .request,
+            2,
+            "{\"method\":\"runtime.terminate\",\"params\":{\"runtime_id\":\"aa\"}}",
+        );
+        client.readReady(3);
+        try testing.expectEqual(@as(u128, 0), runtime_ops.terminated_id);
+    }
+
+    {
+        var fds: [2]c_int = undefined;
+        try testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds));
+        defer _ = c.close(fds[1]);
+        var admin_admission: server.AdminAdmission = .{};
+        const client = try Client.create(
+            testing.allocator,
+            fds[0],
+            reactor,
+            9,
+            &registry_value,
+            &subscriptions,
+            .{ .admin_admission = &admin_admission, .runtime_ops = runtime_ops.ops() },
+        );
+        defer client.destroy();
+        try sendTestFrame(
+            fds[1],
+            .hello,
+            3,
+            "{\"protocol_min\":2,\"protocol_max\":2,\"client_kind\":\"admin\"}",
+        );
+        client.readReady(4);
+        client.writeReady(5);
+        _ = drainNonblocking(fds[1]);
+        try sendTestFrame(
+            fds[1],
+            .request,
+            4,
+            "{\"method\":\"runtime.terminate\",\"params\":{\"runtime_id\":\"aa\"}}",
+        );
+        client.readReady(6);
+        try testing.expectEqual(@as(u128, 0xAA), runtime_ops.terminated_id);
+        try testing.expect(client.close_after_flush != null);
+        try testing.expect(!client.isClosing());
+        client.writeReady(7);
+        try testing.expect(client.isClosing());
+        var response: [4096]u8 = undefined;
+        const count = c.recv(fds[1], &response, response.len, 0);
+        try testing.expect(count > 0);
+        try testing.expect(std.mem.indexOf(u8, response[0..@intCast(count)], "\"terminated\":true") != null);
+    }
 }
 
 test "admin request deadline is immutable under incomplete-byte drip" {

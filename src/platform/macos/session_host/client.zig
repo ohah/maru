@@ -229,6 +229,8 @@ pub const Client = struct {
     runtime_inventory_v1: bool = false,
     /// Hidden one-shot admin role을 host가 명시적으로 지원하는가. CLI는 이 값 없이 read method를 추측하지 않는다.
     admin_one_shot_v1: bool = false,
+    /// Public `runtime end`를 exact one-shot admin mutation으로 지원하는가.
+    admin_runtime_end_v1: bool = false,
     /// 이 connection이 협상한 MRSH header major. current GUI는 current와 frozen N-1 adapter를 별도
     /// connection으로 유지하므로 모든 outbound/inbound frame이 이 값을 사용한다.
     wire_major: u16 = protocol.version_major,
@@ -310,6 +312,12 @@ pub const Client = struct {
             return error.IncompatibleVersion;
         }
         return client;
+    }
+
+    pub fn requireAdminRuntimeEnd(self: *Client) ClientError!void {
+        if (self.admin_runtime_end_v1) return;
+        self.failClosed();
+        return error.IncompatibleVersion;
     }
 
     /// Frozen N-1 adapter 전용 연결점. 범위 협상처럼 보이게 여러 major를 한 connection에 광고하지 않고,
@@ -401,6 +409,7 @@ pub const Client = struct {
         self.host_exec_upgrade_v1 = payloadHasCapability(ack.payload, "host_exec_upgrade_v1");
         self.runtime_inventory_v1 = inventory_capable;
         self.admin_one_shot_v1 = payloadHasCapability(ack.payload, "admin_one_shot_v1");
+        self.admin_runtime_end_v1 = payloadHasCapability(ack.payload, "admin_runtime_end_v1");
         self.screen_viewport_scrolled_v1 = payloadHasCapability(ack.payload, "screen_viewport_scrolled_v1");
         self.async_scroll_to_bottom_v1 = payloadHasCapability(ack.payload, "async_scroll_to_bottom_v1");
         self.runtime_core_command_v1 = payloadHasCapability(ack.payload, "runtime_core_command_v1");
@@ -1264,6 +1273,26 @@ test "admin client without one-shot capability closes before sending any request
         .admin_one_shot_v1 = false,
     };
     try std.testing.expectError(error.IncompatibleVersion, Client.requireAdminCapability(candidate));
+    var byte: [1]u8 = undefined;
+    try std.testing.expectEqual(@as(isize, 0), c.read(fds[1], &byte, byte.len));
+}
+
+test "admin runtime end capability absence closes before sending any request" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fds: [2]c.fd_t = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds));
+    defer _ = c.close(fds[1]);
+    var client: Client = .{
+        .allocator = std.testing.allocator,
+        .fd = fds[0],
+        .host_id = 1,
+        .wire_major = protocol.version_major,
+        .parser = framing.FrameParser.init(std.testing.allocator),
+        .admin_one_shot_v1 = true,
+        .admin_runtime_end_v1 = false,
+    };
+    defer client.deinit();
+    try std.testing.expectError(error.IncompatibleVersion, client.requireAdminRuntimeEnd());
     var byte: [1]u8 = undefined;
     try std.testing.expectEqual(@as(isize, 0), c.read(fds[1], &byte, byte.len));
 }

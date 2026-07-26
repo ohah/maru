@@ -1,5 +1,5 @@
 //! session-host **connection dispatch state machine**(§10 hello·command 순서). 한 client connection이 보낸 MRSH
-//! frame을 받아 hello를 협상하고 read-only command를 `TerminalRuntimeRegistry`로 dispatch해 응답 frame을 만든다.
+//! frame을 받아 hello를 협상하고 command를 `TerminalRuntimeRegistry`/`RuntimeOps`로 dispatch해 응답 frame을 만든다.
 //!
 //! 이 파일은 **순수 상태 기계**다 — socket·fd·프로세스를 모른다(platform import 0). 실제 unix socket bind/accept/
 //! peer-cred와 read/write loop는 P3-d1의 platform 통합 층이 이 `Connection.handleFrame`을 구동하고, on-demand
@@ -9,8 +9,8 @@
 //! 현재 major 규칙:
 //!   - connection의 첫 frame은 반드시 `hello`다. 아니면 protocol error로 connection을 닫는다(runtime은 유지).
 //!   - header major는 현재 MRSH major와 같아야 하며, client `{protocol_min, protocol_max}`도 그 major를 포함해야 한다.
-//!   - d1이 dispatch하는 command는 **read-only**다: `host.info`, `runtime.list`, `runtime.get`. host를 auto-start하지
-//!     않는 조회 명령이라 실 runtime 소유·spawn/attach(P3-d2 이후)와 무관하게 registry 상태만 읽는다.
+//!   - 초기 d1 read command 뒤 spawn/attach와 same-UID admin mutation이 추가됐다. canonical `RequestPolicy`가
+//!     admin read/mutation과 GUI privileged command를 한 곳에서 분류한다.
 
 const std = @import("std");
 const protocol = @import("protocol.zig");
@@ -234,9 +234,16 @@ pub const Action = union(enum) {
         bytes: []u8,
         attempt_id: u128,
     };
+    pub const AdminTerminateAccepted = struct {
+        bytes: []u8,
+        runtime_id: u128,
+    };
 
     reply: []u8,
     reply_and_close: []u8,
+    /// Public admin mutation은 reply frame이 owner outbound queue에 들어간 뒤에만 실행한다. socket adapter가
+    /// admission에 실패하면 bytes만 회수하고 mutation은 0이다.
+    admin_terminate_accepted: AdminTerminateAccepted,
     /// Socket adapter가 bytes 전량 write에 성공한 뒤 completed marker를 publish하고, fd close/active count 감소가 끝난
     /// 후에만 daemon outer loop가 attempt를 take한다.
     upgrade_accepted: UpgradeAccepted,
@@ -663,12 +670,25 @@ pub const Connection = struct {
             .object => |o| o,
             else => null,
         };
-        const action = switch (requestPolicy(method)) {
-            .admin_read => try self.dispatchParsedRequest(frame, method, params),
-            .privileged => return self.adminErrorAndClose(frame.header.request_id, .unauthorized),
+        return switch (requestPolicy(method)) {
+            .admin_read => blk: {
+                const action = try self.dispatchParsedRequest(frame, method, params);
+                self.state = .closed;
+                break :blk .{ .reply_and_close = action.reply };
+            },
+            .admin_mutation => blk: {
+                if (self.runtime_ops == null)
+                    return self.adminErrorAndClose(frame.header.request_id, .unauthorized);
+                const action = try self.dispatchParsedRequest(frame, method, params);
+                self.state = .closed;
+                break :blk switch (action) {
+                    .reply => |bytes| .{ .reply_and_close = bytes },
+                    .admin_terminate_accepted => action,
+                    else => unreachable,
+                };
+            },
+            .privileged => self.adminErrorAndClose(frame.header.request_id, .unauthorized),
         };
-        self.state = .closed;
-        return .{ .reply_and_close = action.reply };
     }
 
     fn adminErrorAndClose(
@@ -1079,12 +1099,27 @@ pub const Connection = struct {
         return self.replyResult(request_id, body);
     }
 
-    /// `runtime.terminate`: read-only host면 unauthorized. `runtime_id`를 파싱해 `RuntimeOps.terminate`로 종료(멱등).
+    /// `runtime.terminate`: read-only host면 unauthorized. 일반 GUI 요청은 기존 멱등 semantics를 유지하지만,
+    /// admin mutation은 같은 owner turn의 registry exact membership을 다시 확인한다. success frame을 먼저 전량
+    /// allocate/encode한 뒤 backend를 종료해 OOM이 "실행됐지만 응답 없음"으로 바뀌지 않게 한다.
     fn dispatchTerminate(self: *Connection, request_id: u64, params: ?std.json.ObjectMap) HandleError!Action {
         const ops = self.runtime_ops orelse return self.replyError(request_id, .unauthorized);
         const p = params orelse return self.replyError(request_id, .invalid_request);
         const id = if (strField(p, "runtime_id")) |h| parseHex128(h) else null;
         if (id == null) return self.replyError(request_id, .invalid_request);
+        if (self.client_kind == .admin and self.registry.get(id.?) == null)
+            return self.replyError(request_id, .runtime_not_found);
+        if (self.client_kind == .admin) {
+            const body = try self.stringify(.{ .result = .{ .terminated = true } });
+            defer self.allocator.free(body);
+            const action = try self.replyResult(request_id, body);
+            return .{ .admin_terminate_accepted = .{
+                .bytes = action.reply,
+                .runtime_id = id.?,
+            } };
+        }
+        // GUI close는 기존 best-effort 의미론을 보존한다. 응답 allocation 실패가 runtime 종료를 취소하면
+        // 명시적으로 닫은 tab만 사라지고 host runtime이 남는 회귀가 된다.
         ops.terminate(ops.ctx, id.?);
         const body = try self.stringify(.{ .result = .{ .terminated = true } });
         defer self.allocator.free(body);
@@ -1787,11 +1822,13 @@ pub const Connection = struct {
     fn helloAckJson(self: *Connection) HandleError![]u8 {
         const host_hex = try self.hostHex();
         defer self.allocator.free(host_hex);
+        var capability_buf: [20][]const u8 = undefined;
+        const capabilities = self.helloCapabilities(&capability_buf);
         if (!self.host_status.manifest_capable) {
             return self.stringify(.{
                 .version = self.selected_version,
                 .host_id = host_hex,
-                .capabilities = [_][]const u8{ "host.info", "runtime.list", "runtime.get", "admin_one_shot_v1", "runtime_metadata_v1", "runtime_ended_v1", "screen_stream_v2_current_body", "screen_viewport_scrolled_v1", "async_scroll_to_bottom_v1", "runtime_core_command_v1", "runtime_selected_text_v1", "runtime_link_at_v1", "runtime_clipboard_v1" },
+                .capabilities = capabilities,
             });
         }
         if (self.host_status.upgrade_capable) {
@@ -1804,7 +1841,7 @@ pub const Connection = struct {
                 .upgrade_epoch = self.host_status.upgrade_epoch,
                 .lifecycle = @tagName(self.host_status.lifecycle),
                 .authority_generation = self.host_status.authority_generation,
-                .capabilities = [_][]const u8{ "host.info", "runtime.list", "runtime.get", "runtime_inventory_v1", "host_manifest_v1", "host_exec_upgrade_v1", "admin_one_shot_v1", "runtime_metadata_v1", "runtime_ended_v1", "screen_stream_v2_current_body", "screen_viewport_scrolled_v1", "async_scroll_to_bottom_v1", "runtime_core_command_v1", "runtime_selected_text_v1", "runtime_link_at_v1", "runtime_clipboard_v1" },
+                .capabilities = capabilities,
             });
         }
         return self.stringify(.{
@@ -1816,8 +1853,38 @@ pub const Connection = struct {
             .upgrade_epoch = self.host_status.upgrade_epoch,
             .lifecycle = @tagName(self.host_status.lifecycle),
             .authority_generation = self.host_status.authority_generation,
-            .capabilities = [_][]const u8{ "host.info", "runtime.list", "runtime.get", "runtime_inventory_v1", "host_manifest_v1", "admin_one_shot_v1", "runtime_metadata_v1", "runtime_ended_v1", "screen_stream_v2_current_body", "screen_viewport_scrolled_v1", "async_scroll_to_bottom_v1", "runtime_core_command_v1", "runtime_selected_text_v1", "runtime_link_at_v1", "runtime_clipboard_v1" },
+            .capabilities = capabilities,
         });
+    }
+
+    fn helloCapabilities(self: *const Connection, buf: *[20][]const u8) []const []const u8 {
+        var count: usize = 0;
+        const append = struct {
+            fn one(target: *[20][]const u8, index: *usize, value: []const u8) void {
+                target[index.*] = value;
+                index.* += 1;
+            }
+        }.one;
+        append(buf, &count, "host.info");
+        append(buf, &count, "runtime.list");
+        append(buf, &count, "runtime.get");
+        if (self.host_status.manifest_capable) {
+            append(buf, &count, "runtime_inventory_v1");
+            append(buf, &count, "host_manifest_v1");
+            if (self.host_status.upgrade_capable) append(buf, &count, "host_exec_upgrade_v1");
+        }
+        append(buf, &count, "admin_one_shot_v1");
+        if (self.runtime_ops != null) append(buf, &count, "admin_runtime_end_v1");
+        append(buf, &count, "runtime_metadata_v1");
+        append(buf, &count, "runtime_ended_v1");
+        append(buf, &count, "screen_stream_v2_current_body");
+        append(buf, &count, "screen_viewport_scrolled_v1");
+        append(buf, &count, "async_scroll_to_bottom_v1");
+        append(buf, &count, "runtime_core_command_v1");
+        append(buf, &count, "runtime_selected_text_v1");
+        append(buf, &count, "runtime_link_at_v1");
+        append(buf, &count, "runtime_clipboard_v1");
+        return buf[0..count];
     }
 
     fn hostInfoJson(self: *Connection) HandleError![]u8 {
@@ -2137,16 +2204,16 @@ fn parseRequestMethod(text: []const u8) ?RequestMethod {
     return null;
 }
 
-const RequestPolicy = enum { admin_read, privileged };
+const RequestPolicy = enum { admin_read, admin_mutation, privileged };
 
 fn requestPolicy(method: RequestMethod) RequestPolicy {
     return switch (method) {
         .host_info, .runtime_list, .runtime_inventory, .runtime_get => .admin_read,
+        .runtime_terminate => .admin_mutation,
         .host_upgrade_prepare,
         .host_upgrade_status,
         .runtime_spawn,
         .runtime_spawn_full,
-        .runtime_terminate,
         .runtime_attach,
         .runtime_detach,
         .runtime_resync,
@@ -2231,6 +2298,14 @@ fn runWire(conn: *Connection, wire: []const u8) !FedResult {
             try rp.push(accepted.bytes);
             const out = (try rp.next()).?;
             return .{ .action = "upgrade_accepted", .frame = out };
+        },
+        .admin_terminate_accepted => |accepted| {
+            defer allocator.free(accepted.bytes);
+            var rp = framing.FrameParser.init(allocator);
+            defer rp.deinit();
+            try rp.push(accepted.bytes);
+            const out = (try rp.next()).?;
+            return .{ .action = "admin_terminate_accepted", .frame = out };
         },
         .frames => |list| {
             // 첫 frame(응답)만 파싱해 돌려주고 나머지(snapshot_chunk)는 이 helper에선 버린다. 전 frame 검사는 feedExpectFrames.
@@ -2807,14 +2882,94 @@ test "server: admin is one-shot read-only and rejects malformed or privileged re
 
 test "server: every canonical request method has one exhaustive admin policy" {
     var admin_reads: usize = 0;
+    var admin_mutations: usize = 0;
     inline for (std.enums.values(RequestMethod), 0..) |method, index| {
         try testing.expectEqual(method, parseRequestMethod(method.wireName()).?);
         inline for (std.enums.values(RequestMethod)[0..index]) |prior|
             try testing.expect(!std.mem.eql(u8, method.wireName(), prior.wireName()));
         if (requestPolicy(method) == .admin_read) admin_reads += 1;
+        if (requestPolicy(method) == .admin_mutation) admin_mutations += 1;
     }
     try testing.expectEqual(@as(usize, 4), admin_reads);
+    try testing.expectEqual(@as(usize, 1), admin_mutations);
     try testing.expect(parseRequestMethod("runtime.future_method") == null);
+}
+
+test "server: admin runtime end requires exact membership and preallocates success before mutation" {
+    var registry = reg.TerminalRuntimeRegistry.init(testing.allocator);
+    defer registry.deinit();
+    const target = try registry.register(0xAA, 80, 24);
+    target.controller = 11;
+    try target.observers.append(testing.allocator, 22);
+    _ = try registry.register(0xBB, 100, 30);
+    var fake: FakeRuntimeOps = .{};
+    var admission: AdminAdmission = .{};
+
+    var missing = Connection.init(testing.allocator, 1, &registry);
+    missing.runtime_ops = fake.ops();
+    missing.admin_admission = &admission;
+    const missing_hello = try feedJson(
+        &missing,
+        .hello,
+        1,
+        "{\"protocol_min\":2,\"protocol_max\":2,\"client_kind\":\"admin\"}",
+    );
+    defer if (missing_hello.frame) |frame| frame.deinit(testing.allocator);
+    try testing.expect(std.mem.indexOf(u8, missing_hello.frame.?.payload, "admin_runtime_end_v1") != null);
+    const missing_reply = try feedJson(
+        &missing,
+        .request,
+        2,
+        "{\"method\":\"runtime.terminate\",\"params\":{\"runtime_id\":\"cc\"}}",
+    );
+    defer if (missing_reply.frame) |frame| frame.deinit(testing.allocator);
+    try testing.expect(std.mem.indexOf(u8, missing_reply.frame.?.payload, "runtime_not_found") != null);
+    try testing.expectEqual(@as(u128, 0), fake.terminated_id);
+    missing.deinit();
+
+    var terminate = Connection.init(testing.allocator, 1, &registry);
+    terminate.runtime_ops = fake.ops();
+    terminate.admin_admission = &admission;
+    defer terminate.deinit();
+    const terminate_hello = try feedJson(
+        &terminate,
+        .hello,
+        3,
+        "{\"protocol_min\":2,\"protocol_max\":2,\"client_kind\":\"admin\"}",
+    );
+    defer if (terminate_hello.frame) |frame| frame.deinit(testing.allocator);
+    const terminated = try feedJson(
+        &terminate,
+        .request,
+        4,
+        "{\"method\":\"runtime.terminate\",\"params\":{\"runtime_id\":\"aa\"}}",
+    );
+    defer if (terminated.frame) |frame| frame.deinit(testing.allocator);
+    try testing.expectEqualStrings("admin_terminate_accepted", terminated.action);
+    try testing.expect(std.mem.indexOf(u8, terminated.frame.?.payload, "\"terminated\":true") != null);
+    try testing.expectEqual(@as(u128, 0), fake.terminated_id);
+    try testing.expect(registry.get(0xBB) != null);
+
+    fake.terminated_id = 0;
+    var params: std.json.ObjectMap = .empty;
+    defer params.deinit(testing.allocator);
+    try params.put(testing.allocator, "runtime_id", .{ .string = "aa" });
+    var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 0 });
+    var oom = Connection.init(failing.allocator(), 1, &registry);
+    defer oom.deinit();
+    oom.runtime_ops = fake.ops();
+    oom.client_kind = .admin;
+    try testing.expectError(error.OutOfMemory, oom.dispatchTerminate(5, params));
+    try testing.expectEqual(@as(u128, 0), fake.terminated_id);
+
+    // GUI의 명시적 tab close는 기존 best-effort 계약이다. reply allocation OOM이어도 runtime 종료는 취소하지 않는다.
+    var gui_failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 0 });
+    var gui_oom = Connection.init(gui_failing.allocator(), 1, &registry);
+    defer gui_oom.deinit();
+    gui_oom.runtime_ops = fake.ops();
+    gui_oom.client_kind = .gui;
+    try testing.expectError(error.OutOfMemory, gui_oom.dispatchTerminate(6, params));
+    try testing.expectEqual(@as(u128, 0xAA), fake.terminated_id);
 }
 
 test "server: all four admin read methods share the canonical dispatcher" {

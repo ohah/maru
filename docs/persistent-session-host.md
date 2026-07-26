@@ -2140,7 +2140,7 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
   fd/handler 회수와 runtime terminate request 0을 결정적으로 검증해야 구현 완료다. 공개 attach의 실제
   detach/EOF/socket E2E는 P5c3가 맡는다. `SIGKILL`/host crash 복원은
   실행 가능한 cleanup 문맥이 없으므로 비범위다.
-- **P5c2 — resize**: P5c1 owner의 self-pipe에 `SIGWINCH` wake를 추가하고 external client resize state machine,
+- **P5c2 — resize (구현)**: P5c1 owner의 self-pipe에 `SIGWINCH` wake를 추가하고 external client resize state machine,
   host broadcast, observer 반영을 hidden harness로 완성한다. 공개 `maru attach` parser는 아직 열지 않는다.
   - signal handler는 기존 종료 signal과 마찬가지로 byte write 외 allocation·`ioctl`·IPC를 하지 않는다. event loop는
     한 wake turn에서 pipe를 `EAGAIN`까지 비우고 `SIGWINCH` 여러 개를 하나의 pending resize로 coalesce한다. 종료

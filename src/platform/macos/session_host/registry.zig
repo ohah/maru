@@ -39,28 +39,49 @@ pub const Capability = struct {
     }
 };
 
-/// attach 요청 모드(§8 CLI·GUI). `controller`는 controller가 없으면 획득하고 있으면 observer로 강등된다(조용히
-/// 빼앗지 않음). `takeover`만 기존 controller를 revoke하고 이전한다.
-pub const AttachMode = enum { observer, controller, takeover };
+/// 새 subscription의 attach 모드(§8 CLI·GUI). `controller`는 controller가 없으면 획득하고 있으면 observer로
+/// 강등된다. 기존 observer의 승격은 이 API에 섞지 않고 prepared controller transition만 사용한다.
+pub const AttachMode = enum { observer, controller };
 
 /// attach 결과. `granted`는 이 subscription이 실제로 받은 capability다. `controller_busy`는 controller를 요청했으나
-/// 이미 controller가 있어 observer로 강등됐음을 뜻한다(GUI가 read-only banner 표시). `revoked_controller`는 takeover가
-/// 밀어낸 이전 controller stream으로, server가 그 stream에 revocation 이벤트를 보낸다.
+/// 이미 controller가 있어 observer로 강등됐음을 뜻한다(GUI가 read-only banner 표시).
 const AttachOutcome = struct {
     granted: u8,
     controller_busy: bool = false,
-    revoked_controller: ?StreamId = null,
 };
 
 pub const SubscriptionAttachOutcome = struct {
     granted: u8,
     controller_busy: bool = false,
-    revoked_controller: ?subscription_identity.SubscriptionId = null,
 };
 
 pub const DetachOutcome = struct {
     was_controller: bool,
     was_observer: bool,
+};
+
+pub const ControllerTransitionKind = enum { takeover, release };
+
+/// One owner-turn capability transition token. Preparation may reserve observer capacity but does
+/// not mutate semantic state. Commit revalidates every exact identity/epoch and then performs only
+/// infallible array mutations, so a cross-connection owner can first reserve both control frames.
+pub const PreparedControllerTransition = struct {
+    runtime_id: RuntimeId,
+    target: subscription_identity.SubscriptionId,
+    expected_controller: ?subscription_identity.SubscriptionId,
+    expected_generation: u64,
+    next_generation: u64,
+    kind: ControllerTransitionKind,
+    /// Release keeps the controller attached as an observer. Its replacement list is prepared off
+    /// to the side so a failed cross-fd publish can free it and leave allocator state/semantics
+    /// untouched; commit swaps it without allocation.
+    release_observers: ?[]StreamId = null,
+    consumed: bool = false,
+};
+
+pub const ControllerTransitionOutcome = struct {
+    revoked_controller: ?subscription_identity.SubscriptionId,
+    controller_generation: u64,
 };
 
 /// resize 요청 판정(§9). `.stale`은 controller별 last sequence 이하라 무시(다른 output/client에 관측되지 않음).
@@ -99,6 +120,9 @@ pub const RegistryError = error{
     AlreadyAttached,
     /// resize/input을 controller 아닌 stream이 요청했다.
     NotController,
+    NotObserver,
+    StaleControllerTransition,
+    ControllerGenerationExhausted,
     /// membership generation을 더 올릴 수 없어 새 complete inventory authority를 만들 수 없다.
     MembershipGenerationExhausted,
     InvalidGridSize,
@@ -143,6 +167,9 @@ pub const RuntimeEntry = struct {
     cols: u16,
     rows: u16,
     resize_generation: u64 = 0,
+    /// Authority event epoch. It changes once per committed takeover/release and lets clients reject
+    /// delayed revocation/success events from a previous controller lifetime.
+    controller_generation: u64 = 0,
     controller: ?StreamId = null,
     /// controller가 마지막으로 적용한 client_sequence. controller가 바뀌면(takeover/재attach) 0으로 리셋한다.
     controller_sequence: u64 = 0,
@@ -157,6 +184,11 @@ pub const RuntimeEntry = struct {
     fn isAttached(self: *const RuntimeEntry, stream: StreamId) bool {
         if (self.controller == stream) return true;
         for (self.observers.items) |o| if (o == stream) return true;
+        return false;
+    }
+
+    fn hasObserver(self: *const RuntimeEntry, stream: StreamId) bool {
+        for (self.observers.items) |observer| if (observer == stream) return true;
         return false;
     }
 
@@ -336,9 +368,7 @@ pub const TerminalRuntimeRegistry = struct {
     /// 한 subscription을 runtime에 붙인다(§8·§9). 모드별로 controller/observer capability를 결정한다.
     fn attach(self: *TerminalRuntimeRegistry, id: RuntimeId, stream: StreamId, mode: AttachMode) RegistryError!AttachOutcome {
         const entry = self.entries.get(id) orelse return error.RuntimeNotFound;
-        // observer/controller는 새 subscription이라 이미 붙어 있으면 중복이다. takeover는 이미 observer로 붙어 있던
-        // stream이 controller로 **승격**하는 정상 경로(GUI가 observer로 붙었다가 명시 takeover)라 이 체크를 건너뛴다.
-        if (mode != .takeover and entry.isAttached(stream)) return error.AlreadyAttached;
+        if (entry.isAttached(stream)) return error.AlreadyAttached;
 
         switch (mode) {
             .observer => {
@@ -347,33 +377,20 @@ pub const TerminalRuntimeRegistry = struct {
             },
             .controller => {
                 if (entry.controller == null) {
+                    const next_generation = std.math.add(
+                        u64,
+                        entry.controller_generation,
+                        1,
+                    ) catch return error.ControllerGenerationExhausted;
                     entry.controller = stream;
                     entry.controller_sequence = 0; // 새 controller — sequence 창을 새로 연다.
                     entry.resize_seq_seen = false;
+                    entry.controller_generation = next_generation;
                     return .{ .granted = Capability.observe | Capability.input | Capability.resize };
                 }
                 // 이미 controller가 있으면 조용히 빼앗지 않고 observer로 강등한다(§8).
                 try appendObserver(self.allocator, entry, stream);
                 return .{ .granted = Capability.observe, .controller_busy = true };
-            },
-            .takeover => {
-                if (entry.controller == stream) {
-                    // 이미 이 stream이 controller다 — takeover는 no-op(자기 자신을 revoke하지 않는다).
-                    return .{ .granted = Capability.observe | Capability.input | Capability.resize };
-                }
-                const revoked = entry.controller;
-                if (revoked) |old| {
-                    // 이전 controller는 observer로 강등한다(계속 관찰). server가 old에 revocation 이벤트를 보낸다.
-                    try appendObserver(self.allocator, entry, old);
-                }
-                _ = entry.removeObserver(stream); // 이 stream이 observer였다면 승격(observer 목록에서 제거).
-                entry.controller = stream;
-                entry.controller_sequence = 0;
-                entry.resize_seq_seen = false;
-                return .{
-                    .granted = Capability.observe | Capability.input | Capability.resize,
-                    .revoked_controller = revoked,
-                };
             },
         }
     }
@@ -478,10 +495,6 @@ pub const TerminalRuntimeRegistry = struct {
         return .{
             .granted = outcome.granted,
             .controller_busy = outcome.controller_busy,
-            .revoked_controller = if (outcome.revoked_controller) |raw|
-                .{ .value = raw }
-            else
-                null,
         };
     }
 
@@ -493,12 +506,181 @@ pub const TerminalRuntimeRegistry = struct {
         return self.detach(id, subscription.value);
     }
 
+    /// Failed product attach is not a published controller lease. The same owner turn may restore
+    /// the immediately preceding epoch only when exact subscription and generation still match.
+    pub fn rollbackControllerAttach(
+        self: *TerminalRuntimeRegistry,
+        id: RuntimeId,
+        subscription: subscription_identity.SubscriptionId,
+        acquired_generation: u64,
+    ) bool {
+        const entry = self.entries.get(id) orelse return false;
+        if (acquired_generation == 0 or
+            entry.controller != subscription.value or
+            entry.controller_generation != acquired_generation) return false;
+        entry.controller = null;
+        entry.controller_sequence = 0;
+        entry.resize_seq_seen = false;
+        entry.controller_generation = acquired_generation - 1;
+        return true;
+    }
+
     pub fn capabilitiesOfSubscription(
         self: *TerminalRuntimeRegistry,
         id: RuntimeId,
         subscription: subscription_identity.SubscriptionId,
     ) u8 {
         return self.capabilitiesOf(id, subscription.value);
+    }
+
+    pub fn controllerGeneration(self: *const TerminalRuntimeRegistry, id: RuntimeId) RegistryError!u64 {
+        const entry = self.entries.get(id) orelse return error.RuntimeNotFound;
+        return entry.controller_generation;
+    }
+
+    pub fn prepareControllerTakeover(
+        self: *TerminalRuntimeRegistry,
+        id: RuntimeId,
+        target: subscription_identity.SubscriptionId,
+    ) RegistryError!PreparedControllerTransition {
+        const entry = self.entries.get(id) orelse return error.RuntimeNotFound;
+        if (!entry.hasObserver(target.value)) return error.NotObserver;
+        const next_generation = std.math.add(
+            u64,
+            entry.controller_generation,
+            1,
+        ) catch return error.ControllerGenerationExhausted;
+        return .{
+            .runtime_id = id,
+            .target = target,
+            .expected_controller = if (entry.controller) |controller|
+                .{ .value = controller }
+            else
+                null,
+            .expected_generation = entry.controller_generation,
+            .next_generation = next_generation,
+            .kind = .takeover,
+        };
+    }
+
+    pub fn prepareControllerRelease(
+        self: *TerminalRuntimeRegistry,
+        id: RuntimeId,
+        target: subscription_identity.SubscriptionId,
+    ) RegistryError!PreparedControllerTransition {
+        const entry = self.entries.get(id) orelse return error.RuntimeNotFound;
+        if (entry.controller != target.value) return error.NotController;
+        const next_generation = std.math.add(
+            u64,
+            entry.controller_generation,
+            1,
+        ) catch return error.ControllerGenerationExhausted;
+        const replacement = self.allocator.alloc(
+            StreamId,
+            entry.observers.items.len + 1,
+        ) catch return error.OutOfMemory;
+        @memcpy(replacement[0..entry.observers.items.len], entry.observers.items);
+        replacement[replacement.len - 1] = target.value;
+        return .{
+            .runtime_id = id,
+            .target = target,
+            .expected_controller = target,
+            .expected_generation = entry.controller_generation,
+            .next_generation = next_generation,
+            .kind = .release,
+            .release_observers = replacement,
+        };
+    }
+
+    pub fn discardControllerTransition(
+        self: *TerminalRuntimeRegistry,
+        prepared: *PreparedControllerTransition,
+    ) void {
+        if (prepared.release_observers) |replacement|
+            self.allocator.free(replacement);
+        prepared.release_observers = null;
+        prepared.consumed = true;
+    }
+
+    /// The daemon owner calls this only after every authority-critical control frame has passed one
+    /// all-or-none queue preflight. Exact identity and generation checks make a delayed token inert.
+    pub fn validateControllerTransition(
+        self: *TerminalRuntimeRegistry,
+        prepared: *const PreparedControllerTransition,
+    ) RegistryError!void {
+        if (prepared.consumed) return error.StaleControllerTransition;
+        const entry = self.entries.get(prepared.runtime_id) orelse
+            return error.StaleControllerTransition;
+        const current_controller = if (entry.controller) |controller|
+            subscription_identity.SubscriptionId{ .value = controller }
+        else
+            null;
+        if (!optionalSubscriptionEqual(
+            current_controller,
+            prepared.expected_controller,
+        ) or
+            entry.controller_generation != prepared.expected_generation or
+            prepared.next_generation != prepared.expected_generation + 1)
+            return error.StaleControllerTransition;
+        switch (prepared.kind) {
+            .takeover => {
+                if (prepared.release_observers != null or
+                    !entry.hasObserver(prepared.target.value))
+                    return error.StaleControllerTransition;
+            },
+            .release => {
+                const replacement = prepared.release_observers orelse
+                    return error.StaleControllerTransition;
+                if (entry.controller != prepared.target.value or
+                    replacement.len != entry.observers.items.len + 1 or
+                    replacement[replacement.len - 1] != prepared.target.value)
+                    return error.StaleControllerTransition;
+                if (!std.mem.eql(
+                    StreamId,
+                    replacement[0..entry.observers.items.len],
+                    entry.observers.items,
+                )) return error.StaleControllerTransition;
+            },
+        }
+    }
+
+    pub fn commitControllerTransition(
+        self: *TerminalRuntimeRegistry,
+        prepared: *PreparedControllerTransition,
+    ) RegistryError!ControllerTransitionOutcome {
+        try self.validateControllerTransition(prepared);
+        const entry = self.entries.get(prepared.runtime_id).?;
+
+        switch (prepared.kind) {
+            .takeover => {
+                const removed = entry.removeObserver(prepared.target.value);
+                std.debug.assert(removed);
+                if (entry.controller) |old|
+                    entry.observers.appendAssumeCapacity(old);
+                entry.controller = prepared.target.value;
+            },
+            .release => {
+                if (entry.controller != prepared.target.value)
+                    return error.StaleControllerTransition;
+                const replacement = prepared.release_observers orelse
+                    return error.StaleControllerTransition;
+                entry.observers.deinit(self.allocator);
+                entry.observers = .{
+                    .items = replacement,
+                    .capacity = replacement.len,
+                };
+                prepared.release_observers = null;
+                entry.controller = null;
+            },
+        }
+        entry.controller_sequence = 0;
+        entry.resize_seq_seen = false;
+        entry.controller_generation = prepared.next_generation;
+        prepared.consumed = true;
+        return .{
+            .revoked_controller = prepared.expected_controller,
+            .controller_generation = prepared.next_generation,
+        };
     }
 
     /// Controller/sequence/budget prepare, fallible backend apply, infallible canonical commit을 한 API call에 가둔다.
@@ -526,6 +708,14 @@ pub const TerminalRuntimeRegistry = struct {
         entry.observers.append(allocator, stream) catch return error.OutOfMemory;
     }
 };
+
+fn optionalSubscriptionEqual(
+    a: ?subscription_identity.SubscriptionId,
+    b: ?subscription_identity.SubscriptionId,
+) bool {
+    if (a == null or b == null) return a == null and b == null;
+    return a.?.value == b.?.value;
+}
 
 fn gridCells(cols: u16, rows: u16) usize {
     return @as(usize, clampCols(cols)) * @as(usize, clampRows(rows));
@@ -706,6 +896,7 @@ test "registry: first controller gets input+resize, extra controller is demoted 
     const a = try reg.attach(1, 100, .controller);
     try testing.expect(Capability.has(a.granted, Capability.input) and Capability.has(a.granted, Capability.resize));
     try testing.expect(!a.controller_busy);
+    try testing.expectEqual(@as(u64, 1), reg.get(1).?.controller_generation);
 
     // 두 번째 controller 요청 → 조용히 빼앗지 않고 observer로 강등(controller_busy).
     const b = try reg.attach(1, 200, .controller);
@@ -713,6 +904,29 @@ test "registry: first controller gets input+resize, extra controller is demoted 
     try testing.expectEqual(@as(u8, Capability.observe), b.granted);
     try testing.expectEqual(@as(u8, Capability.observe), reg.capabilitiesOf(1, 200));
     try testing.expect(Capability.has(reg.capabilitiesOf(1, 100), Capability.input));
+    try testing.expectEqual(@as(u64, 1), reg.get(1).?.controller_generation);
+}
+
+test "registry: an exhausted empty controller lease refuses reacquire without mutation" {
+    var reg = TerminalRuntimeRegistry.init(testing.allocator);
+    defer reg.deinit();
+    _ = try reg.register(1, 80, 24);
+    const observer = subscription_identity.SubscriptionId{ .value = 200 };
+    _ = try reg.attachSubscription(1, observer, .observer);
+    reg.get(1).?.controller_generation = std.math.maxInt(u64);
+    try testing.expectError(
+        error.ControllerGenerationExhausted,
+        reg.attachSubscription(
+            1,
+            .{ .value = 100 },
+            .controller,
+        ),
+    );
+    try testing.expect(reg.get(1).?.controller == null);
+    try testing.expectEqual(
+        Capability.observe,
+        reg.capabilitiesOfSubscription(1, observer),
+    );
 }
 
 test "registry: observers only observe; terminate is never granted by attach" {
@@ -727,29 +941,159 @@ test "registry: observers only observe; terminate is never granted by attach" {
     try testing.expectError(error.AlreadyAttached, reg.attach(1, 300, .observer));
 }
 
-test "registry: takeover revokes old controller and transfers input+resize atomically" {
+test "registry: prepared controller takeover does not mutate before infallible commit" {
     var reg = TerminalRuntimeRegistry.init(testing.allocator);
     defer reg.deinit();
     _ = try reg.register(1, 80, 24);
-    _ = try reg.attach(1, 100, .controller);
-    // observer였다가 takeover로 승격하는 경우도 포함해 검증.
-    _ = try reg.attach(1, 200, .observer);
+    const old = subscription_identity.SubscriptionId{ .value = 100 };
+    const next = subscription_identity.SubscriptionId{ .value = 200 };
+    _ = try reg.attachSubscription(1, old, .controller);
+    _ = try reg.attachSubscription(1, next, .observer);
 
-    const t = try reg.attach(1, 200, .takeover);
-    try testing.expectEqual(@as(?StreamId, 100), t.revoked_controller);
-    try testing.expect(Capability.has(t.granted, Capability.input));
-    // 새 controller=200, 이전 controller 100은 observer로 강등(계속 observe).
-    try testing.expect(Capability.has(reg.capabilitiesOf(1, 200), Capability.resize));
-    try testing.expectEqual(@as(u8, Capability.observe), reg.capabilitiesOf(1, 100));
+    var prepared = try reg.prepareControllerTakeover(1, next);
+    try testing.expect(Capability.has(
+        reg.capabilitiesOfSubscription(1, old),
+        Capability.input,
+    ));
+    try testing.expect(!Capability.has(
+        reg.capabilitiesOfSubscription(1, next),
+        Capability.input,
+    ));
+
+    const committed = try reg.commitControllerTransition(&prepared);
+    try testing.expectEqual(old, committed.revoked_controller.?);
+    try testing.expectEqual(@as(u64, 2), committed.controller_generation);
+    try testing.expect(!Capability.has(
+        reg.capabilitiesOfSubscription(1, old),
+        Capability.input,
+    ));
+    try testing.expect(Capability.has(
+        reg.capabilitiesOfSubscription(1, next),
+        Capability.input,
+    ));
 }
 
-test "registry: takeover with no existing controller just acquires control" {
+test "registry: stale prepared takeover cannot revoke a replacement controller" {
     var reg = TerminalRuntimeRegistry.init(testing.allocator);
     defer reg.deinit();
     _ = try reg.register(1, 80, 24);
-    const t = try reg.attach(1, 100, .takeover);
-    try testing.expectEqual(@as(?StreamId, null), t.revoked_controller);
-    try testing.expect(Capability.has(t.granted, Capability.input));
+    const old = subscription_identity.SubscriptionId{ .value = 100 };
+    const next = subscription_identity.SubscriptionId{ .value = 200 };
+    const replacement = subscription_identity.SubscriptionId{ .value = 300 };
+    _ = try reg.attachSubscription(1, old, .controller);
+    _ = try reg.attachSubscription(1, next, .observer);
+    var prepared = try reg.prepareControllerTakeover(1, next);
+
+    _ = try reg.detachSubscription(1, old);
+    _ = try reg.attachSubscription(1, replacement, .controller);
+    try testing.expectError(
+        error.StaleControllerTransition,
+        reg.commitControllerTransition(&prepared),
+    );
+    try testing.expect(Capability.has(
+        reg.capabilitiesOfSubscription(1, replacement),
+        Capability.input,
+    ));
+    try testing.expect(!Capability.has(
+        reg.capabilitiesOfSubscription(1, next),
+        Capability.input,
+    ));
+}
+
+test "registry: prepared release demotes controller without promoting observers" {
+    var reg = TerminalRuntimeRegistry.init(testing.allocator);
+    defer reg.deinit();
+    _ = try reg.register(1, 80, 24);
+    const controller = subscription_identity.SubscriptionId{ .value = 100 };
+    const observer = subscription_identity.SubscriptionId{ .value = 200 };
+    _ = try reg.attachSubscription(1, controller, .controller);
+    _ = try reg.attachSubscription(1, observer, .observer);
+
+    var prepared = try reg.prepareControllerRelease(1, controller);
+    const committed = try reg.commitControllerTransition(&prepared);
+    try testing.expectEqual(controller, committed.revoked_controller.?);
+    try testing.expectEqual(@as(u64, 2), committed.controller_generation);
+    try testing.expectEqual(
+        Capability.observe,
+        reg.capabilitiesOfSubscription(1, controller),
+    );
+    try testing.expectEqual(
+        Capability.observe,
+        reg.capabilitiesOfSubscription(1, observer),
+    );
+    try testing.expect(prepared.consumed);
+    try testing.expect(prepared.release_observers == null);
+    try testing.expectError(
+        error.StaleControllerTransition,
+        reg.commitControllerTransition(&prepared),
+    );
+    reg.discardControllerTransition(&prepared);
+}
+
+test "registry: release prepare OOM preserves controller and generation" {
+    var reg = TerminalRuntimeRegistry.init(testing.allocator);
+    defer reg.deinit();
+    _ = try reg.register(1, 80, 24);
+    const controller = subscription_identity.SubscriptionId{ .value = 100 };
+    _ = try reg.attachSubscription(1, controller, .controller);
+    var failing = std.testing.FailingAllocator.init(
+        testing.allocator,
+        .{ .fail_index = 0 },
+    );
+    reg.allocator = failing.allocator();
+    try testing.expectError(
+        error.OutOfMemory,
+        reg.prepareControllerRelease(1, controller),
+    );
+    reg.allocator = testing.allocator;
+    try testing.expect(Capability.has(
+        reg.capabilitiesOfSubscription(1, controller),
+        Capability.input,
+    ));
+    try testing.expectEqual(@as(u64, 1), reg.get(1).?.controller_generation);
+}
+
+test "registry: observer acquires an empty controller and stale self takeover is inert" {
+    var reg = TerminalRuntimeRegistry.init(testing.allocator);
+    defer reg.deinit();
+    _ = try reg.register(1, 80, 24);
+    const observer = subscription_identity.SubscriptionId{ .value = 100 };
+    _ = try reg.attachSubscription(1, observer, .observer);
+    var prepared = try reg.prepareControllerTakeover(1, observer);
+    const committed = try reg.commitControllerTransition(&prepared);
+    try testing.expect(committed.revoked_controller == null);
+    try testing.expect(Capability.has(
+        reg.capabilitiesOfSubscription(1, observer),
+        Capability.input,
+    ));
+    try testing.expectError(
+        error.NotObserver,
+        reg.prepareControllerTakeover(1, observer),
+    );
+    try testing.expectEqual(@as(u64, 1), reg.get(1).?.controller_generation);
+}
+
+test "registry: controller generation exhaustion leaves authority unchanged" {
+    var reg = TerminalRuntimeRegistry.init(testing.allocator);
+    defer reg.deinit();
+    _ = try reg.register(1, 80, 24);
+    const controller = subscription_identity.SubscriptionId{ .value = 100 };
+    const observer = subscription_identity.SubscriptionId{ .value = 200 };
+    _ = try reg.attachSubscription(1, controller, .controller);
+    _ = try reg.attachSubscription(1, observer, .observer);
+    reg.get(1).?.controller_generation = std.math.maxInt(u64);
+    try testing.expectError(
+        error.ControllerGenerationExhausted,
+        reg.prepareControllerTakeover(1, observer),
+    );
+    try testing.expect(Capability.has(
+        reg.capabilitiesOfSubscription(1, controller),
+        Capability.input,
+    ));
+    try testing.expectEqual(
+        Capability.observe,
+        reg.capabilitiesOfSubscription(1, observer),
+    );
 }
 
 test "registry: controller detach releases without auto-promoting an observer" {
@@ -817,7 +1161,9 @@ test "registry: sequence 0 is a valid first resize but a replayed 0 is stale" {
     const r1 = try reg.resize(1, 100, 120, 40, 1);
     try testing.expect(r1.applied.changed);
     // takeover한 새 controller는 sequence 창이 리셋돼 다시 seq=0을 받아들인다.
-    _ = try reg.attach(1, 200, .takeover);
+    _ = try reg.attach(1, 200, .observer);
+    var prepared = try reg.prepareControllerTakeover(1, .{ .value = 200 });
+    _ = try reg.commitControllerTransition(&prepared);
     const r2 = try reg.resize(1, 200, 90, 20, 0);
     try testing.expect(r2.applied.changed);
 }

@@ -228,7 +228,9 @@ host crash 비목표다.
 
 - 모든 runtime의 controller와 observer가 0이다.
 - upgrade request connection 외 다른 active connection이 없다.
-- spawn/terminate/resize/attach request가 처리 중이지 않다.
+- spawn/terminate/resize/attach 및 controller takeover/release request가 처리 중이지 않다.
+- notification response admission 전의 peek token과 controller transition owner turn이 남아 있지 않다. notification
+  generation은 모든 client/control queue가 0인 upgrade gate 뒤 reconstructed=0이며, old token은 exec를 건너지 않는다.
 - target executable이 same-UID regular file이고 허용된 Maru build identity를 가진다.
 - host 시작 때 보존한 staged rollback self-image가 존재하고 recorded hash와 일치한다.
 - target reader가 writer handoff schema와 runtime field set을 지원한다.
@@ -242,7 +244,11 @@ P5의 multi-fd reactor가 들어간 뒤 `active connection`은 accept-loop의 �
 `ConnectionSlot`의 전역 상태다. `prepare accepted`의 linearization point에서 global frame admission을 닫고,
 그 전에 dispatch된 non-upgrade operation이 0인지 확인한다. accepted reply를 완전히 flush한 뒤 upgrade request
 slot 자체를 close/remove하고, queued mutation이 없는 unattached idle slot만 bounded close한다. partial request나
-queued reply가 있으면 idle로 간주하지 않고 `upgrade_busy`로 취소한다. 마지막에 controller/observer, slot,
+queued reply가 있으면 idle로 간주하지 않고 `upgrade_busy`로 취소한다. controller transition은 owner turn 밖에
+prepared token을 보관하지 않고 AdmissionGate lease와 slot `in_flight_dispatch` 안에서 old revocation/new response
+control batch admission과 registry commit까지 끝낸다. 이 batch는 requester response가 필수이고 기존 controller가 있을
+때만 old revocation이 추가되는 최대 2-frame이다. 그러므로 queued revocation/response는 canonical pending/control ledger에
+남고 attachment와 함께 drain을 막는다. 마지막에 controller/observer, subscription, pending control, slot,
 in-flight dispatch가 모두 0인지 다시 확인한 뒤에만 아래 quiesce로 넘긴다.
 
 accepted reply를 flush한 뒤 canonical client teardown이 final authority 0을 만들지 못하면 잔여 상태를 무시하고
@@ -336,7 +342,9 @@ workspace/app 계층이 권위다. 따라서 handoff는 `Surface.id`와 `Termina
 
 - allocator, mutex, condition variable, thread, self-pipe, hash-map bucket allocation.
 - `CoreOwner` debug owner, dirty/projection/reflow scratch buffer, renderer/client delta base.
-- connection, stream ID, controller/observer attachment. v1 precondition상 모두 비어 있다.
+- connection, stream ID, controller/observer attachment와 `controller_generation`. v1 precondition상 attachment와
+  authority event queue가 모두 비어 있어 stale event receiver가 없으므로 새 host graph의 controller generation은 0에서
+  다시 시작한다.
 - foreground-process cache. restore 뒤 lazy refresh한다.
 
 ### encode 전에 비워야 하는 상태

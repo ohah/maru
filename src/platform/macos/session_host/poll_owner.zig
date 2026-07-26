@@ -55,6 +55,7 @@ pub const Owner = struct {
     first_stall_connection_id: u64 = 0,
     first_stall_ns: u64 = 0,
     first_stall_send_buffer_bytes: u64 = 0,
+    controller_transition_admission_fail_once: bool = false,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -300,6 +301,10 @@ pub const Owner = struct {
                     .ctx = self,
                     .reclaim = reclaimScreenPressure,
                 },
+                .controller_transition = .{
+                    .ctx = self,
+                    .apply = applyControllerTransition,
+                },
                 .now_ns = now_ns,
             },
         ) catch |err| switch (err) {
@@ -443,6 +448,176 @@ pub const Owner = struct {
         if (victim.isClosing()) self.destroyClient(index);
         self.total_pressure_reclaims += 1;
         return true;
+    }
+
+    fn applyControllerTransition(
+        ctx: *anyopaque,
+        requester: *connection_turn.Client,
+        transition: server_mod.Action.ControllerTransitionRequested,
+    ) bool {
+        const self: *Owner = @ptrCast(@alignCast(ctx));
+        var owned_transition = transition;
+        var success_owned = true;
+        var stale_owned = true;
+        var exhausted_owned = true;
+        var revocation_owned = owned_transition.revocation != null;
+        var transition_owned = true;
+        defer if (success_owned) self.allocator.free(owned_transition.success_reply);
+        defer if (stale_owned) self.allocator.free(owned_transition.stale_reply);
+        defer if (exhausted_owned)
+            self.allocator.free(owned_transition.exhausted_reply);
+        defer if (revocation_owned)
+            self.allocator.free(owned_transition.revocation.?.frame);
+        defer if (transition_owned)
+            self.server.registry.discardControllerTransition(
+                &owned_transition.prepared,
+            );
+
+        self.server.registry.validateControllerTransition(
+            &owned_transition.prepared,
+        ) catch {
+            if (!self.enqueueControllerFailure(
+                requester,
+                owned_transition.stale_reply,
+            )) return false;
+            stale_owned = false;
+            return true;
+        };
+        const requester_record = self.server.subscriptions.resolveGlobal(
+            owned_transition.prepared.target,
+        ) orelse {
+            if (!self.enqueueControllerFailure(
+                requester,
+                owned_transition.stale_reply,
+            )) return false;
+            stale_owned = false;
+            return true;
+        };
+        if (!std.meta.eql(requester_record.connection, requester.admission.key) or
+            requester_record.runtime_id != owned_transition.prepared.runtime_id)
+        {
+            if (!self.enqueueControllerFailure(
+                requester,
+                owned_transition.stale_reply,
+            )) return false;
+            stale_owned = false;
+            return true;
+        }
+
+        var items: [2]connection_slot.ReactorCore.OwnedControlItem = undefined;
+        var item_count: usize = 0;
+        if (owned_transition.revocation) |revocation| {
+            if (owned_transition.prepared.kind != .takeover or
+                owned_transition.prepared.expected_controller == null or
+                revocation.subscription.value !=
+                    owned_transition.prepared.expected_controller.?.value)
+                return self.rejectControllerTransitionResource(
+                    requester,
+                    owned_transition.exhausted_reply,
+                    &exhausted_owned,
+                );
+            const old_record = self.server.subscriptions.resolveGlobal(
+                revocation.subscription,
+            ) orelse return self.rejectControllerTransitionResource(
+                requester,
+                owned_transition.exhausted_reply,
+                &exhausted_owned,
+            );
+            if (old_record.runtime_id != owned_transition.prepared.runtime_id)
+                return self.rejectControllerTransitionResource(
+                    requester,
+                    owned_transition.exhausted_reply,
+                    &exhausted_owned,
+                );
+            const old_client = self.clientForKey(old_record.connection) orelse
+                return self.rejectControllerTransitionResource(
+                    requester,
+                    owned_transition.exhausted_reply,
+                    &exhausted_owned,
+                );
+            // Revoking a same-major legacy GUI that never negotiated the event would leave it
+            // silently typing into a server-side deny path. Refuse the transition instead; after
+            // that GUI reconnects with current capabilities, takeover can be retried explicitly.
+            if (!old_client.connection.controller_transfer_v1)
+                return self.rejectControllerTransitionResource(
+                    requester,
+                    owned_transition.exhausted_reply,
+                    &exhausted_owned,
+                );
+            items[item_count] = .{
+                .admission = old_client.admission,
+                .bytes = revocation.frame,
+            };
+            item_count += 1;
+        } else if (owned_transition.prepared.kind == .takeover and
+            owned_transition.prepared.expected_controller != null)
+            return self.rejectControllerTransitionResource(
+                requester,
+                owned_transition.exhausted_reply,
+                &exhausted_owned,
+            );
+
+        items[item_count] = .{
+            .admission = requester.admission,
+            .bytes = owned_transition.success_reply,
+        };
+        item_count += 1;
+        if (self.controller_transition_admission_fail_once) {
+            self.controller_transition_admission_fail_once = false;
+            return self.rejectControllerTransitionResource(
+                requester,
+                owned_transition.exhausted_reply,
+                &exhausted_owned,
+            );
+        }
+        self.reactor.enqueueOwnedControlBatch(items[0..item_count]) catch
+            return self.rejectControllerTransitionResource(
+                requester,
+                owned_transition.exhausted_reply,
+                &exhausted_owned,
+            );
+        success_owned = false;
+        revocation_owned = false;
+        _ = self.server.registry.commitControllerTransition(
+            &owned_transition.prepared,
+        ) catch unreachable;
+        transition_owned = false;
+        return true;
+    }
+
+    fn enqueueControllerFailure(
+        self: *Owner,
+        requester: *connection_turn.Client,
+        frame: []u8,
+    ) bool {
+        var item = connection_slot.ReactorCore.OwnedControlItem{
+            .admission = requester.admission,
+            .bytes = frame,
+        };
+        self.reactor.enqueueOwnedControlBatch((&item)[0..1]) catch return false;
+        return true;
+    }
+
+    fn rejectControllerTransitionResource(
+        self: *Owner,
+        requester: *connection_turn.Client,
+        frame: []u8,
+        owned: *bool,
+    ) bool {
+        if (!self.enqueueControllerFailure(requester, frame)) return false;
+        owned.* = false;
+        return true;
+    }
+
+    fn clientForKey(
+        self: *Owner,
+        key: connection_slot.ConnectionKey,
+    ) ?*connection_turn.Client {
+        for (self.clients) |maybe_client| {
+            const client = maybe_client orelse continue;
+            if (std.meta.eql(client.admission.key, key)) return client;
+        }
+        return null;
     }
 
     fn pollTimeout(self: *const Owner, now_ns: u64, outer_timeout_ms: i32) i32 {
@@ -630,7 +805,7 @@ fn connectAttachedTestClientForRuntime(
         fd,
         .hello,
         1,
-        "{\"protocol_min\":2,\"protocol_max\":2,\"client_kind\":\"gui\"}",
+        "{\"protocol_min\":2,\"protocol_max\":2,\"client_kind\":\"gui\",\"capabilities\":[\"controller_transfer_v1\"]}",
     );
     try pumpUntilResponse(owner, fd, "host_id");
     const request = try std.fmt.allocPrint(
@@ -2073,6 +2248,732 @@ test "poll owner keeps connection-local stream one distinct across live slot reu
     try testing.expectEqual(@as(usize, 0), owner.activeCount());
     try testing.expectEqual(@as(usize, 0), server.subscriptions.count());
     try testing.expectEqual(@as(usize, 0), runtime_registry.attachmentCount());
+}
+
+test "poll owner atomically transfers controller across local stream one peers" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir_len = try tmp.dir.realPath(testing.io, &dir_buf);
+    const dir_raw = dir_buf[0..dir_len];
+    const dir_path = try testing.allocator.dupeZ(u8, dir_raw);
+    defer testing.allocator.free(dir_path);
+    const socket_path = try std.fmt.allocPrintSentinel(
+        testing.allocator,
+        "{s}/controller-takeover.sock",
+        .{dir_raw},
+        0,
+    );
+    defer testing.allocator.free(socket_path);
+
+    var runtime_registry = registry.TerminalRuntimeRegistry.init(testing.allocator);
+    defer runtime_registry.deinit();
+    _ = try runtime_registry.register(0xAA, 80, 24);
+    var server = try socket_server.SocketServer.bind(
+        testing.allocator,
+        dir_path,
+        socket_path,
+        0xB3,
+        &runtime_registry,
+    );
+    defer server.deinit();
+    server.host_status = .{ .manifest_capable = true, .upgrade_capable = true };
+    var fake_runtime: server_mod.FakeRuntimeOps = .{};
+    server.runtime_ops = fake_runtime.ops();
+    var gate = upgrade.AdmissionGate.init(testing.io);
+    server.admission_gate = &gate;
+    var upgrade_owner: TestUpgradeOwner = .{};
+    server.upgrade_ops = upgrade_owner.ops();
+    var owner = try Owner.init(testing.allocator, testing.io, &server);
+    defer owner.deinit();
+
+    var old = try connectAttachedTestClient(&owner, socket_path, "controller");
+    defer {
+        if (old.fd >= 0) _ = c.close(old.fd);
+    }
+    var next = try connectAttachedTestClient(&owner, socket_path, "observer");
+    defer {
+        if (next.fd >= 0) _ = c.close(next.fd);
+    }
+    var third = try connectAttachedTestClient(&owner, socket_path, "observer");
+    defer {
+        if (third.fd >= 0) _ = c.close(third.fd);
+    }
+    var upgrade_fd = try connectTestClient(socket_path);
+    defer {
+        if (upgrade_fd >= 0) _ = c.close(upgrade_fd);
+    }
+    _ = try owner.pollOnce(5);
+    try sendTestRequest(
+        upgrade_fd,
+        .hello,
+        1,
+        "{\"protocol_min\":2,\"protocol_max\":2,\"client_kind\":\"gui\"}",
+    );
+    try pumpUntilResponse(&owner, upgrade_fd, "host_id");
+    const old_key = owner.clients[old.index].?.admission.key;
+    const next_key = owner.clients[next.index].?.admission.key;
+    const old_subscription = server.subscriptions.resolveLocal(.{
+        .connection = old_key,
+        .stream_id = 1,
+    }).?;
+    const next_subscription = server.subscriptions.resolveLocal(.{
+        .connection = next_key,
+        .stream_id = 1,
+    }).?;
+    try testing.expect(old_subscription.value != next_subscription.value);
+    try sendTestRequest(
+        third.fd,
+        .request,
+        3,
+        "{\"method\":\"controller.status\",\"params\":{\"stream_id\":1}}",
+    );
+    try pumpUntilResponse(&owner, third.fd, "\"controller_generation\":1");
+
+    // Put upgrade and takeover into two kernel receive queues before polling. Either readiness
+    // order must leave upgrade unstaged and let the authority transition complete in one turn.
+    try sendTestRequest(
+        upgrade_fd,
+        .request,
+        2,
+        "{\"method\":\"host.upgrade.prepare\",\"params\":{\"attempt_id\":\"0000000000000000000000000000b301\",\"target_path\":\"/Applications/Maru.app/Contents/MacOS/maru\",\"target_build_id\":\"sha256:build\",\"target_sha256\":\"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\",\"handoff_reader_min\":1,\"handoff_reader_max\":1}}",
+    );
+    try sendTestRequest(
+        next.fd,
+        .request,
+        3,
+        "{\"method\":\"controller.takeover\",\"params\":{\"stream_id\":1,\"expected_controller_generation\":1}}",
+    );
+    // Do not read the old peer yet: socket delivery is not the authority linearization point.
+    try pumpUntilResponse(&owner, next.fd, "\"controller_generation\":2");
+    try pumpUntilResponse(&owner, upgrade_fd, "upgrade_busy");
+    try testing.expectEqual(@as(usize, 0), upgrade_owner.staged);
+    try testing.expect(gate.snapshot().open);
+    try testing.expectEqual(
+        registry.Capability.observe,
+        runtime_registry.capabilitiesOfSubscription(0xAA, old_subscription),
+    );
+    try testing.expect(registry.Capability.has(
+        runtime_registry.capabilitiesOfSubscription(0xAA, next_subscription),
+        registry.Capability.input,
+    ));
+    try testing.expect(!Owner.upgradePreflight(
+        &owner,
+        owner.clients[next.index].?,
+    ));
+    // A third long-lived observer's pre-transfer intent is stale, but it can refresh generation
+    // without detach/reattach and require a new explicit user confirmation before retrying.
+    try sendTestRequest(
+        third.fd,
+        .request,
+        4,
+        "{\"method\":\"controller.takeover\",\"params\":{\"stream_id\":1,\"expected_controller_generation\":1}}",
+    );
+    try pumpUntilResponse(&owner, third.fd, "\"invalid_generation\"");
+    try sendTestRequest(
+        third.fd,
+        .request,
+        5,
+        "{\"method\":\"controller.status\",\"params\":{\"stream_id\":1}}",
+    );
+    try pumpUntilResponse(&owner, third.fd, "\"controller_generation\":2");
+
+    fake_runtime.last_input_len = 0;
+    try sendTestStream(old.fd, .input_bytes, 1, "OLD-DENIED");
+    for (0..16) |_| _ = try owner.pollOnce(0);
+    try testing.expectEqual(@as(usize, 0), fake_runtime.last_input_len);
+    try sendTestStream(next.fd, .input_bytes, 1, "NEW-ALLOWED");
+    var attempts: usize = 0;
+    while (fake_runtime.last_input_len == 0 and attempts < 1000) : (attempts += 1)
+        _ = try owner.pollOnce(0);
+    try testing.expectEqualStrings(
+        "NEW-ALLOWED",
+        fake_runtime.last_input[0..fake_runtime.last_input_len],
+    );
+    try pumpUntilResponse(&owner, old.fd, "controller.revoked");
+
+    // Post-commit old EOF removes only its observer lease and cannot restore it as controller.
+    _ = c.shutdown(old.fd, c.SHUT.RDWR);
+    _ = c.close(old.fd);
+    old.fd = -1;
+    attempts = 0;
+    while (owner.clients[old.index] != null and attempts < 1000) : (attempts += 1)
+        _ = try owner.pollOnce(0);
+    try testing.expect(owner.clients[old.index] == null);
+    try testing.expect(registry.Capability.has(
+        runtime_registry.capabilitiesOfSubscription(0xAA, next_subscription),
+        registry.Capability.input,
+    ));
+
+    // Reverse the enqueue order for release versus upgrade. Attachments and the transition's
+    // dispatch/control authority keep upgrade fail-closed without starving release.
+    try sendTestRequest(
+        next.fd,
+        .request,
+        4,
+        "{\"method\":\"controller.release\",\"params\":{\"stream_id\":1,\"expected_controller_generation\":2}}",
+    );
+    try sendTestRequest(
+        upgrade_fd,
+        .request,
+        3,
+        "{\"method\":\"host.upgrade.prepare\",\"params\":{\"attempt_id\":\"0000000000000000000000000000b302\",\"target_path\":\"/Applications/Maru.app/Contents/MacOS/maru\",\"target_build_id\":\"sha256:build\",\"target_sha256\":\"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\",\"handoff_reader_min\":1,\"handoff_reader_max\":1}}",
+    );
+    try pumpUntilResponse(&owner, next.fd, "\"controller_generation\":3");
+    try pumpUntilResponse(&owner, upgrade_fd, "upgrade_busy");
+    try testing.expectEqual(@as(usize, 0), upgrade_owner.staged);
+    try testing.expect(gate.snapshot().open);
+    try testing.expectEqual(
+        registry.Capability.observe,
+        runtime_registry.capabilitiesOfSubscription(0xAA, next_subscription),
+    );
+    fake_runtime.last_input_len = 0;
+    try sendTestStream(next.fd, .input_bytes, 1, "RELEASED-DENIED");
+    for (0..16) |_| _ = try owner.pollOnce(0);
+    try testing.expectEqual(@as(usize, 0), fake_runtime.last_input_len);
+
+    _ = c.shutdown(next.fd, c.SHUT.RDWR);
+    _ = c.close(next.fd);
+    next.fd = -1;
+    _ = c.shutdown(third.fd, c.SHUT.RDWR);
+    _ = c.close(third.fd);
+    third.fd = -1;
+    _ = c.shutdown(upgrade_fd, c.SHUT.RDWR);
+    _ = c.close(upgrade_fd);
+    upgrade_fd = -1;
+    attempts = 0;
+    while (owner.activeCount() != 0 and attempts < 1000) : (attempts += 1)
+        _ = try owner.pollOnce(0);
+    try testing.expectEqual(@as(usize, 0), owner.activeCount());
+    try testing.expectEqual(@as(usize, 0), server.subscriptions.count());
+    try testing.expectEqual(@as(usize, 0), runtime_registry.attachmentCount());
+    const final = owner.reactor.accountingSnapshot();
+    try testing.expectEqual(@as(usize, 0), final.resident_bytes);
+    try testing.expectEqual(@as(usize, 0), final.shared_bytes);
+    try testing.expectEqual(@as(usize, 0), final.prepared_base_bytes);
+    try testing.expectEqual(@as(usize, 0), final.prepared_reclaim_bytes);
+}
+
+test "poll owner takeover admission failure preserves the old controller exactly" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir_len = try tmp.dir.realPath(testing.io, &dir_buf);
+    const dir_raw = dir_buf[0..dir_len];
+    const dir_path = try testing.allocator.dupeZ(u8, dir_raw);
+    defer testing.allocator.free(dir_path);
+    const socket_path = try std.fmt.allocPrintSentinel(
+        testing.allocator,
+        "{s}/controller-takeover-full.sock",
+        .{dir_raw},
+        0,
+    );
+    defer testing.allocator.free(socket_path);
+    var runtime_registry = registry.TerminalRuntimeRegistry.init(testing.allocator);
+    defer runtime_registry.deinit();
+    _ = try runtime_registry.register(0xAA, 80, 24);
+    var server = try socket_server.SocketServer.bind(
+        testing.allocator,
+        dir_path,
+        socket_path,
+        0xB4,
+        &runtime_registry,
+    );
+    defer server.deinit();
+    var fake_runtime: server_mod.FakeRuntimeOps = .{};
+    server.runtime_ops = fake_runtime.ops();
+    var owner = try Owner.init(testing.allocator, testing.io, &server);
+    defer owner.deinit();
+
+    var old = try connectAttachedTestClient(&owner, socket_path, "controller");
+    defer {
+        if (old.fd >= 0) _ = c.close(old.fd);
+    }
+    var next = try connectAttachedTestClient(&owner, socket_path, "observer");
+    defer {
+        if (next.fd >= 0) _ = c.close(next.fd);
+    }
+    const old_client = owner.clients[old.index].?;
+    const old_subscription = server.subscriptions.resolveLocal(.{
+        .connection = old_client.admission.key,
+        .stream_id = 1,
+    }).?;
+    const next_client = owner.clients[next.index].?;
+    const next_subscription = server.subscriptions.resolveLocal(.{
+        .connection = next_client.admission.key,
+        .stream_id = 1,
+    }).?;
+    const generation_before = runtime_registry.get(0xAA).?.controller_generation;
+    owner.controller_transition_admission_fail_once = true;
+
+    try sendTestRequest(
+        next.fd,
+        .request,
+        3,
+        "{\"method\":\"controller.takeover\",\"params\":{\"stream_id\":1,\"expected_controller_generation\":1}}",
+    );
+    try pumpUntilResponse(&owner, next.fd, "\"resource_exhausted\"");
+    try testing.expect(owner.clients[next.index] != null);
+    try testing.expectEqual(
+        generation_before,
+        runtime_registry.get(0xAA).?.controller_generation,
+    );
+    try testing.expect(registry.Capability.has(
+        runtime_registry.capabilitiesOfSubscription(0xAA, old_subscription),
+        registry.Capability.input,
+    ));
+    try testing.expectEqual(
+        registry.Capability.observe,
+        runtime_registry.capabilitiesOfSubscription(0xAA, next_subscription),
+    );
+    try testing.expectEqual(@as(usize, 2), server.subscriptions.count());
+    try testing.expectEqual(@as(usize, 2), runtime_registry.attachmentCount());
+
+    try sendTestRequest(
+        next.fd,
+        .request,
+        4,
+        "{\"method\":\"controller.takeover\",\"params\":{\"stream_id\":1,\"expected_controller_generation\":1}}",
+    );
+    try pumpUntilResponse(&owner, next.fd, "\"controller_generation\":2");
+    try pumpUntilResponse(&owner, old.fd, "controller.revoked");
+    owner.controller_transition_admission_fail_once = true;
+    try sendTestRequest(
+        next.fd,
+        .request,
+        5,
+        "{\"method\":\"controller.release\",\"params\":{\"stream_id\":1,\"expected_controller_generation\":2}}",
+    );
+    try pumpUntilResponse(&owner, next.fd, "\"resource_exhausted\"");
+    try testing.expectEqual(
+        @as(u64, 2),
+        runtime_registry.get(0xAA).?.controller_generation,
+    );
+    try testing.expect(registry.Capability.has(
+        runtime_registry.capabilitiesOfSubscription(0xAA, next_subscription),
+        registry.Capability.input,
+    ));
+
+    _ = c.shutdown(old.fd, c.SHUT.RDWR);
+    _ = c.close(old.fd);
+    old.fd = -1;
+    _ = c.shutdown(next.fd, c.SHUT.RDWR);
+    _ = c.close(next.fd);
+    next.fd = -1;
+    var attempts: usize = 0;
+    while (owner.activeCount() != 0 and attempts < 2000) : (attempts += 1)
+        _ = try owner.pollOnce(0);
+    try testing.expectEqual(@as(usize, 0), owner.activeCount());
+    try testing.expectEqual(@as(usize, 0), server.subscriptions.count());
+    try testing.expectEqual(@as(usize, 0), runtime_registry.attachmentCount());
+    const final = owner.reactor.accountingSnapshot();
+    try testing.expectEqual(@as(usize, 0), final.resident_bytes);
+    try testing.expectEqual(@as(usize, 0), final.shared_bytes);
+}
+
+test "poll owner controller transition converges across old and requester EOF linearization" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    const Scenario = enum {
+        old_eof_before_request,
+        requester_eof_before_owner_poll,
+        requester_eof_after_commit,
+    };
+    inline for (std.meta.tags(Scenario)) |scenario| {
+        var tmp = testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const dir_len = try tmp.dir.realPath(testing.io, &dir_buf);
+        const dir_raw = dir_buf[0..dir_len];
+        const dir_path = try testing.allocator.dupeZ(u8, dir_raw);
+        defer testing.allocator.free(dir_path);
+        const socket_path = try std.fmt.allocPrintSentinel(
+            testing.allocator,
+            "{s}/ce{d}.sock",
+            .{ dir_raw, @intFromEnum(scenario) },
+            0,
+        );
+        defer testing.allocator.free(socket_path);
+        var runtime_registry = registry.TerminalRuntimeRegistry.init(testing.allocator);
+        defer runtime_registry.deinit();
+        _ = try runtime_registry.register(0xAA, 80, 24);
+        var server = try socket_server.SocketServer.bind(
+            testing.allocator,
+            dir_path,
+            socket_path,
+            0xB5,
+            &runtime_registry,
+        );
+        defer server.deinit();
+        var fake_runtime: server_mod.FakeRuntimeOps = .{};
+        server.runtime_ops = fake_runtime.ops();
+        var owner = try Owner.init(testing.allocator, testing.io, &server);
+        defer owner.deinit();
+        var old = try connectAttachedTestClient(&owner, socket_path, "controller");
+        defer {
+            if (old.fd >= 0) _ = c.close(old.fd);
+        }
+        var next = try connectAttachedTestClient(&owner, socket_path, "observer");
+        defer {
+            if (next.fd >= 0) _ = c.close(next.fd);
+        }
+        const old_subscription = server.subscriptions.resolveLocal(.{
+            .connection = owner.clients[old.index].?.admission.key,
+            .stream_id = 1,
+        }).?;
+        const next_subscription = server.subscriptions.resolveLocal(.{
+            .connection = owner.clients[next.index].?.admission.key,
+            .stream_id = 1,
+        }).?;
+
+        if (scenario == .old_eof_before_request) {
+            _ = c.shutdown(old.fd, c.SHUT.RDWR);
+            _ = c.close(old.fd);
+            old.fd = -1;
+            var attempts: usize = 0;
+            while (owner.clients[old.index] != null and attempts < 1000) : (attempts += 1)
+                _ = try owner.pollOnce(0);
+            try testing.expect(runtime_registry.get(0xAA).?.controller == null);
+            try testing.expectEqual(
+                @as(u64, 1),
+                runtime_registry.get(0xAA).?.controller_generation,
+            );
+            try sendTestRequest(
+                next.fd,
+                .request,
+                3,
+                "{\"method\":\"controller.takeover\",\"params\":{\"stream_id\":1,\"expected_controller_generation\":1}}",
+            );
+            try pumpUntilResponse(&owner, next.fd, "\"controller_generation\":2");
+            try testing.expect(registry.Capability.has(
+                runtime_registry.capabilitiesOfSubscription(
+                    0xAA,
+                    next_subscription,
+                ),
+                registry.Capability.input,
+            ));
+        } else if (scenario == .requester_eof_before_owner_poll) {
+            try sendTestRequest(
+                next.fd,
+                .request,
+                3,
+                "{\"method\":\"controller.takeover\",\"params\":{\"stream_id\":1,\"expected_controller_generation\":1}}",
+            );
+            _ = c.shutdown(next.fd, c.SHUT.RDWR);
+            _ = c.close(next.fd);
+            next.fd = -1;
+            var attempts: usize = 0;
+            while (owner.clients[next.index] != null and attempts < 1000) : (attempts += 1)
+                _ = try owner.pollOnce(0);
+            try testing.expect(owner.clients[next.index] == null);
+            const runtime = runtime_registry.get(0xAA).?;
+            try testing.expect(
+                (runtime.controller_generation == 1 and
+                    runtime.controller != null and
+                    runtime.controller.? == old_subscription.value and
+                    registry.Capability.has(
+                        runtime_registry.capabilitiesOfSubscription(
+                            0xAA,
+                            old_subscription,
+                        ),
+                        registry.Capability.input,
+                    )) or
+                    (runtime.controller_generation == 2 and
+                        runtime.controller == null and
+                        runtime_registry.capabilitiesOfSubscription(
+                            0xAA,
+                            old_subscription,
+                        ) == registry.Capability.observe),
+            );
+            try testing.expect(
+                runtime_registry.capabilitiesOfSubscription(
+                    0xAA,
+                    next_subscription,
+                ) == 0,
+            );
+        } else {
+            try sendTestRequest(
+                next.fd,
+                .request,
+                3,
+                "{\"method\":\"controller.takeover\",\"params\":{\"stream_id\":1,\"expected_controller_generation\":1}}",
+            );
+            var attempts: usize = 0;
+            while (!registry.Capability.has(
+                runtime_registry.capabilitiesOfSubscription(
+                    0xAA,
+                    next_subscription,
+                ),
+                registry.Capability.input,
+            ) and attempts < 1000) : (attempts += 1)
+                _ = try owner.pollOnce(0);
+            try testing.expect(registry.Capability.has(
+                runtime_registry.capabilitiesOfSubscription(
+                    0xAA,
+                    next_subscription,
+                ),
+                registry.Capability.input,
+            ));
+            _ = c.shutdown(next.fd, c.SHUT.RDWR);
+            _ = c.close(next.fd);
+            next.fd = -1;
+            attempts = 0;
+            while (owner.clients[next.index] != null and attempts < 1000) : (attempts += 1)
+                _ = try owner.pollOnce(0);
+            try testing.expect(runtime_registry.get(0xAA).?.controller == null);
+            try testing.expectEqual(
+                registry.Capability.observe,
+                runtime_registry.capabilitiesOfSubscription(
+                    0xAA,
+                    old_subscription,
+                ),
+            );
+            try testing.expectEqual(
+                @as(u64, 2),
+                runtime_registry.get(0xAA).?.controller_generation,
+            );
+        }
+
+        if (old.fd >= 0) {
+            _ = c.shutdown(old.fd, c.SHUT.RDWR);
+            _ = c.close(old.fd);
+            old.fd = -1;
+        }
+        if (next.fd >= 0) {
+            _ = c.shutdown(next.fd, c.SHUT.RDWR);
+            _ = c.close(next.fd);
+            next.fd = -1;
+        }
+        var close_attempts: usize = 0;
+        while (owner.activeCount() != 0 and close_attempts < 1000) : (close_attempts += 1)
+            _ = try owner.pollOnce(0);
+        try testing.expectEqual(@as(usize, 0), owner.activeCount());
+        try testing.expectEqual(@as(usize, 0), server.subscriptions.count());
+        try testing.expectEqual(@as(usize, 0), runtime_registry.attachmentCount());
+    }
+}
+
+test "poll owner keeps committed controller after partial revocation write and old close" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir_len = try tmp.dir.realPath(testing.io, &dir_buf);
+    const dir_raw = dir_buf[0..dir_len];
+    const dir_path = try testing.allocator.dupeZ(u8, dir_raw);
+    defer testing.allocator.free(dir_path);
+    const socket_path = try std.fmt.allocPrintSentinel(
+        testing.allocator,
+        "{s}/cp.sock",
+        .{dir_raw},
+        0,
+    );
+    defer testing.allocator.free(socket_path);
+    var runtime_registry = registry.TerminalRuntimeRegistry.init(testing.allocator);
+    defer runtime_registry.deinit();
+    _ = try runtime_registry.register(0xAA, 80, 24);
+    var server = try socket_server.SocketServer.bind(
+        testing.allocator,
+        dir_path,
+        socket_path,
+        0xB6,
+        &runtime_registry,
+    );
+    defer server.deinit();
+    var fake_runtime: server_mod.FakeRuntimeOps = .{};
+    server.runtime_ops = fake_runtime.ops();
+    var owner = try Owner.init(testing.allocator, testing.io, &server);
+    defer owner.deinit();
+    var old = try connectAttachedTestClient(&owner, socket_path, "controller");
+    defer {
+        if (old.fd >= 0) _ = c.close(old.fd);
+    }
+    var next = try connectAttachedTestClient(&owner, socket_path, "observer");
+    defer {
+        if (next.fd >= 0) _ = c.close(next.fd);
+    }
+    const next_subscription = server.subscriptions.resolveLocal(.{
+        .connection = owner.clients[next.index].?.admission.key,
+        .stream_id = 1,
+    }).?;
+
+    try sendTestRequest(
+        next.fd,
+        .request,
+        3,
+        "{\"method\":\"controller.takeover\",\"params\":{\"stream_id\":1,\"expected_controller_generation\":1}}",
+    );
+    var attempts: usize = 0;
+    while (runtime_registry.get(0xAA).?.controller_generation != 2 and attempts < 1000) : (attempts += 1)
+        _ = try owner.pollOnce(0);
+    try testing.expectEqual(@as(u64, 2), runtime_registry.get(0xAA).?.controller_generation);
+    const old_client = owner.clients[old.index].?;
+    const old_slot = try owner.reactor.get(old_client.admission);
+    const revocation = old_slot.firstPending().?;
+    try testing.expect(
+        std.mem.indexOf(u8, revocation.bytes, "controller.revoked") != null,
+    );
+    const first_revocation_byte = revocation.bytes[0];
+    try testing.expectEqual(
+        @as(isize, 1),
+        c.send(old_client.fd, revocation.bytes.ptr, 1, 0),
+    );
+    try old_slot.consumeWritten(1);
+    var partial: [2]u8 = undefined;
+    try testing.expectEqual(@as(isize, 1), c.recv(old.fd, &partial, partial.len, 0));
+    try testing.expectEqual(first_revocation_byte, partial[0]);
+    _ = c.shutdown(old.fd, c.SHUT.RDWR);
+    attempts = 0;
+    while (owner.clients[old.index] != null and attempts < 1000) : (attempts += 1)
+        _ = try owner.pollOnce(0);
+    try testing.expect(owner.clients[old.index] == null);
+    try testing.expect(registry.Capability.has(
+        runtime_registry.capabilitiesOfSubscription(0xAA, next_subscription),
+        registry.Capability.input,
+    ));
+    try testing.expectEqual(
+        next_subscription.value,
+        runtime_registry.get(0xAA).?.controller.?,
+    );
+    try pumpUntilResponse(&owner, next.fd, "\"controller_generation\":2");
+
+    _ = c.close(old.fd);
+    old.fd = -1;
+    _ = c.shutdown(next.fd, c.SHUT.RDWR);
+    _ = c.close(next.fd);
+    next.fd = -1;
+    attempts = 0;
+    while (owner.activeCount() != 0 and attempts < 1000) : (attempts += 1)
+        _ = try owner.pollOnce(0);
+    try testing.expectEqual(@as(usize, 0), owner.activeCount());
+    try testing.expectEqual(@as(usize, 0), server.subscriptions.count());
+    try testing.expectEqual(@as(usize, 0), runtime_registry.attachmentCount());
+    const final = owner.reactor.accountingSnapshot();
+    try testing.expectEqual(@as(usize, 0), final.resident_bytes);
+    try testing.expectEqual(@as(usize, 0), final.shared_bytes);
+}
+
+test "poll owner rejects a prepared transition after requester slot ABA reuse" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir_len = try tmp.dir.realPath(testing.io, &dir_buf);
+    const dir_raw = dir_buf[0..dir_len];
+    const dir_path = try testing.allocator.dupeZ(u8, dir_raw);
+    defer testing.allocator.free(dir_path);
+    const socket_path = try std.fmt.allocPrintSentinel(
+        testing.allocator,
+        "{s}/ca.sock",
+        .{dir_raw},
+        0,
+    );
+    defer testing.allocator.free(socket_path);
+    var runtime_registry = registry.TerminalRuntimeRegistry.init(testing.allocator);
+    defer runtime_registry.deinit();
+    _ = try runtime_registry.register(0xAA, 80, 24);
+    var server = try socket_server.SocketServer.bind(
+        testing.allocator,
+        dir_path,
+        socket_path,
+        0xB7,
+        &runtime_registry,
+    );
+    defer server.deinit();
+    var fake_runtime: server_mod.FakeRuntimeOps = .{};
+    server.runtime_ops = fake_runtime.ops();
+    var owner = try Owner.init(testing.allocator, testing.io, &server);
+    defer owner.deinit();
+    var old = try connectAttachedTestClient(&owner, socket_path, "controller");
+    defer {
+        if (old.fd >= 0) _ = c.close(old.fd);
+    }
+    var stale_requester = try connectAttachedTestClient(&owner, socket_path, "observer");
+    defer {
+        if (stale_requester.fd >= 0) _ = c.close(stale_requester.fd);
+    }
+    const old_subscription = server.subscriptions.resolveLocal(.{
+        .connection = owner.clients[old.index].?.admission.key,
+        .stream_id = 1,
+    }).?;
+    const stale_key = owner.clients[stale_requester.index].?.admission.key;
+    const stale_subscription = server.subscriptions.resolveLocal(.{
+        .connection = stale_key,
+        .stream_id = 1,
+    }).?;
+    const prepared = try runtime_registry.prepareControllerTakeover(
+        0xAA,
+        stale_subscription,
+    );
+    const action = server_mod.Action.ControllerTransitionRequested{
+        .prepared = prepared,
+        .success_reply = try testing.allocator.dupe(u8, "success"),
+        .stale_reply = try testing.allocator.dupe(u8, "stale"),
+        .exhausted_reply = try testing.allocator.dupe(u8, "exhausted"),
+        .revocation = .{
+            .subscription = old_subscription,
+            .frame = try testing.allocator.dupe(u8, "revoked"),
+        },
+    };
+    owner.destroyClient(stale_requester.index);
+    try testing.expect(owner.clients[stale_requester.index] == null);
+
+    var replacement = try connectAttachedTestClient(&owner, socket_path, "observer");
+    defer {
+        if (replacement.fd >= 0) _ = c.close(replacement.fd);
+    }
+    const replacement_client = owner.clients[replacement.index].?;
+    const replacement_key = replacement_client.admission.key;
+    const replacement_subscription = server.subscriptions.resolveLocal(.{
+        .connection = replacement_key,
+        .stream_id = 1,
+    }).?;
+    try testing.expectEqual(stale_requester.index, replacement.index);
+    try testing.expect(!std.meta.eql(stale_key, replacement_key));
+    try testing.expect(stale_subscription.value != replacement_subscription.value);
+    try testing.expect(Owner.applyControllerTransition(
+        &owner,
+        replacement_client,
+        action,
+    ));
+    try testing.expectEqualStrings(
+        "stale",
+        (try owner.reactor.get(replacement_client.admission)).firstPending().?.bytes,
+    );
+    try testing.expectEqual(@as(u64, 1), runtime_registry.get(0xAA).?.controller_generation);
+    try testing.expectEqual(
+        old_subscription.value,
+        runtime_registry.get(0xAA).?.controller.?,
+    );
+    try testing.expect(registry.Capability.has(
+        runtime_registry.capabilitiesOfSubscription(0xAA, old_subscription),
+        registry.Capability.input,
+    ));
+    try testing.expectEqual(
+        registry.Capability.observe,
+        runtime_registry.capabilitiesOfSubscription(0xAA, replacement_subscription),
+    );
+    try (try owner.reactor.get(replacement_client.admission)).consumeWritten("stale".len);
+
+    _ = c.shutdown(stale_requester.fd, c.SHUT.RDWR);
+    _ = c.close(stale_requester.fd);
+    stale_requester.fd = -1;
+    _ = c.shutdown(old.fd, c.SHUT.RDWR);
+    _ = c.close(old.fd);
+    old.fd = -1;
+    _ = c.shutdown(replacement.fd, c.SHUT.RDWR);
+    _ = c.close(replacement.fd);
+    replacement.fd = -1;
+    var attempts: usize = 0;
+    while (owner.activeCount() != 0 and attempts < 1000) : (attempts += 1)
+        _ = try owner.pollOnce(0);
+    try testing.expectEqual(@as(usize, 0), owner.activeCount());
+    try testing.expectEqual(@as(usize, 0), server.subscriptions.count());
+    try testing.expectEqual(@as(usize, 0), runtime_registry.attachmentCount());
+    const final = owner.reactor.accountingSnapshot();
+    try testing.expectEqual(@as(usize, 0), final.resident_bytes);
+    try testing.expectEqual(@as(usize, 0), final.shared_bytes);
 }
 
 test "poll owner keeps canonical GUI connection while ephemeral inventory completes" {

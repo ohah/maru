@@ -249,6 +249,9 @@ pub const Client = struct {
     /// host가 `runtime.selected_text`로 자기 TerminalCore에서 선택 의미론을 해석할 수 있는가. false인 구 host는
     /// 앱 업데이트보다 먼저 떠 계속 살아 있을 수 있으므로, client의 현재 화면 projection에서 보이는 선택만 추출한다.
     runtime_selected_text_v1: bool = false,
+    /// host가 consumptive notification RPC를 exact attached stream으로 인가하는가. false인 same-major 구 host에는
+    /// legacy runtime selector를 보내되, 새 host도 그 connection의 live controller만 fallback으로 허용한다.
+    notification_stream_auth_v1: bool = false,
     /// host가 `runtime.link_at`으로 자기 core의 `extractUrlAt`(추출 + cwd resolve + 존재 stat)을 실행할 수 있는가.
     /// 없으면 client는 이 RPC를 보내지 않고 원격 링크 열기를 비활성한다(docs/link-detection.md §원격(host-backed) 세션).
     runtime_link_at_v1: bool = false,
@@ -414,6 +417,10 @@ pub const Client = struct {
         self.async_scroll_to_bottom_v1 = payloadHasCapability(ack.payload, "async_scroll_to_bottom_v1");
         self.runtime_core_command_v1 = payloadHasCapability(ack.payload, "runtime_core_command_v1");
         self.runtime_selected_text_v1 = payloadHasCapability(ack.payload, "runtime_selected_text_v1");
+        self.notification_stream_auth_v1 = payloadHasCapability(
+            ack.payload,
+            "notification_stream_auth_v1",
+        );
         self.runtime_link_at_v1 = payloadHasCapability(ack.payload, "runtime_link_at_v1");
         self.runtime_clipboard_v1 = payloadHasCapability(ack.payload, "runtime_clipboard_v1");
         return self;
@@ -2462,6 +2469,7 @@ test "client: hello/request JSON build and host_id parse are server-symmetric (p
     defer legacy_client.deinit();
     try testing.expect(!legacy_client.screen_viewport_scrolled_v1);
     try testing.expect(!legacy_client.runtime_selected_text_v1);
+    try testing.expect(!legacy_client.notification_stream_auth_v1);
     legacy_client.screen_viewport_scrolled_v1 = payloadHasCapability(
         "{\"host_id\":\"1234\"}",
         "screen_viewport_scrolled_v1",
@@ -2472,6 +2480,11 @@ test "client: hello/request JSON build and host_id parse are server-symmetric (p
         "runtime_selected_text_v1",
     );
     try testing.expect(!legacy_client.runtime_selected_text_v1);
+    legacy_client.notification_stream_auth_v1 = payloadHasCapability(
+        "{\"host_id\":\"1234\",\"capabilities\":[\"notification_stream_auth_v1\"]}",
+        "notification_stream_auth_v1",
+    );
+    try testing.expect(legacy_client.notification_stream_auth_v1);
 }
 
 test "client: connects to a forked host, agrees on host_id, and calls host.info" {
@@ -2518,6 +2531,7 @@ test "client: connects to a forked host, agrees on host_id, and calls host.info"
     try testing.expect(client.async_scroll_to_bottom_v1);
     try testing.expect(client.runtime_core_command_v1);
     try testing.expect(client.runtime_selected_text_v1);
+    try testing.expect(client.notification_stream_auth_v1);
     const resp = try client.call("host.info", null);
     defer allocator.free(resp);
     try testing.expect(std.mem.indexOf(u8, resp, "runtime_count") != null);

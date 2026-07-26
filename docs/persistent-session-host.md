@@ -1040,6 +1040,18 @@ request_id:u64 | stream_id:u64 | payload_len:u32
   screen wire의 `run`에는 셀 OSC 8 link id 필드가 없어 **명시 하이퍼링크도 원격에서는 client 셀에 도달하지 않으므로**, host는
   `link_spans`에 자동 감지 span과 OSC 8 span을 함께 싣는다(`scope`의 osc8 비트 — client는 이 비트를 config 프리셋과 무관하게
   항상 표시). 단일 출처는 [링크 감지](link-detection.md#원격host-backed-세션).
+- `controller_transfer_v1`은 product multi-fd owner가 기존 observer stream의
+  `controller.status/takeover/release`,
+  authority-critical revocation event와 atomic control admission을 지원한다는 뜻이다. capability가 없는 같은-major host에는
+  이 method를 보내지 않는다. 요청 client와 기존 controller client가 hello에서 모두 이를 광고해야 전환한다. 그래야
+  `controller.revoked`를 모르는 구 GUI를 조용히 read-only로 만들어 입력이 먹통처럼 보이는 일을 막는다. P5b3에서는 hidden
+  harness만 이를 광고하며 제품 `Client`의 revoke 처리·role cache와 public CLI/GUI takeover UX는 P5c3에서 함께 연다.
+- `notification_stream_auth_v1`은 consumptive `runtime.notification`을 exact attached `stream_id`로 인가하고
+  `peek/response control admission/commit` 순서로 같은 notification generation만 지운다는 뜻이다. 새 GUI는 capability 없는
+  같은-major 구 host의 runtime-id-only pull을 **호출하지 않는다**. 구 host는 observer 여부를 구분할 수 없어 새 GUI가
+  fallback하면 shared pending notification을 소비할 수 있기 때문이다. 반대 방향의 구 GUI→새 host는 legacy
+  `{runtime_id}`를 받되 그 connection이 해당 runtime의 live controller를 실제 보유한 경우에만 허용한다. 따라서 업데이트
+  중 notification은 안전하게 일시 비활성화될 수 있지만 observer 권한을 넓히지는 않는다.
 
 ### hello, command, stream 순서
 
@@ -1063,6 +1075,14 @@ product update E2E는 아직 없다. 따라서 release 호환 완료로 선언�
 1. **같은 major:** wire의 기존 필드·method 의미를 깨지 않고 additive capability로만 확장한다. 새 GUI는 hello_ack에 없는
    기능을 보내지 않으며, 명시된 degraded adapter가 있으면 이미 받은 screen/metadata projection만 사용한다. capability를
    광고한 host의 응답 schema가 어긋나면 구 host로 추측해 downgrade하지 않고 connection을 fail-close한다.
+   단, MRSH v2는 아직 tag/release artifact로 배포되지 않았고 session host도 기본 `false`인 개발 계약이다. P5b3는
+   release 전에 기존 `runtime.attach(mode=takeover)`를 새 stream 생성·즉시 revoke 방식에서 기존 observer stream의
+   generation-CAS `controller.takeover`로 교체하는 **일회성 pre-release wire reset**이다. 따라서 구 개발 GUI가 새 host에
+   legacy takeover를 보내면 mutation 없이 `invalid_request`를 받지만 runtime은 종료하지 않는다. 새 GUI는
+   `controller_transfer_v1`이 없는 구 개발 host에 legacy takeover를 재전송하지 않고 observer attach/detach만 허용하며,
+   public `--take-over`는 host 업데이트가 필요하다는 typed unsupported notice로 거부한다. 이 거부와 실제 frozen binary
+   observer 호환은 P5c3에서 검증한다. P5b3 merge 뒤 `controller_transfer_v1` 계약과 최초 session-host release부터는 이
+   예외를 닫고 같은-major additive 규칙을 적용한다.
 2. **지원하는 이전 major(N-1):** 새 앱은 current와 직전 major codec/adapter를 함께 제공한다. 직전 release는
    해당 screen body fingerprint capability(현재 N-1은 `screen_stream_v1_current_body`)를 hello에서 광고해야 하며,
    capability 없는 같은-major 개발 빌드를 body-compatible이라고 추측하지 않는다. 지원되는 기존 runtime은 구 host에
@@ -1125,13 +1145,15 @@ migration할 수 있다. 실행 중 PTY를 **다른 PID**로 넘기는 방식은
 | `runtime.list` / `runtime.get` | filter 또는 `runtime_id` | 권한 범위 안 redacted metadata |
 | `runtime.spawn` | argv, cols/rows와 legacy optional 값 | 구 MRSH v2 client용 최소 spawn. 기존 runtime attach 호환을 위해 유지 |
 | `runtime.spawn_full` | argv/cwd/login/env/GUI parent-env snapshot/env-overrides/TERM/ZDOTDIR/SSH integration/cols/rows/`runtime_config` | 새 GUI의 fail-closed spawn. capability가 확인된 host만 `runtime_config`를 reader 시작 전에 적용해 첫 output부터 같은 scrollback·폭·theme·cell metric을 쓴다. 필드가 존재하면서 타입·범위가 틀리면 PTY를 만들지 않고 `invalid_request`; capability 없는 구 host에는 요청 자체를 보내지 않고 앱이 in-process로 fallback |
-| `runtime.attach` | `runtime_id`, observer/controller/takeover, cols/rows | `runtime_metadata_v1` 협상 client에는 initial full metadata+revision, 공통으로 `stream_id`, granted capabilities, snapshot generation 또는 `controller_busy` |
+| `runtime.attach` | `runtime_id`, observer/controller, cols/rows | `runtime_metadata_v1` 협상 client에는 initial full metadata+revision, 공통으로 새 `stream_id`, granted capabilities, snapshot generation 또는 `controller_busy`; `mode=takeover`와 미지 mode는 `invalid_request` |
 | `runtime.observation` | `stream_id` | `runtime_metadata_v1` observe subscription 전용 user-action barrier. 현재 host full-state와 subscription metadata revision/base를 원자적으로 전진시켜 응답 |
 | `runtime.detach` | `stream_id` | 해당 subscription/controller release, runtime 유지 |
 | `runtime.resize` | `stream_id`, cols/rows, `client_sequence` | controller만 PTY와 `TerminalCore`에 적용하고 applied size/`resize_generation` 응답; 변경은 `runtime.resized` broadcast |
 | `runtime.snapshot` | `stream_id`, expected generation | fresh snapshot chunk stream |
 | `scrollback.page` | `runtime_id`, generation, line range | bounded binary page 또는 `invalid_generation` |
-| `controller.takeover` / `controller.release` | `runtime_id`/`stream_id` | 기존 controller revoke event 뒤 원자 이전 / 명시 release |
+| `controller.status` | 기존 attachment의 `stream_id` | 현재 `controller_generation`과 이 exact subscription의 controller 여부를 조회한다. long-lived observer가 전환 뒤 generation을 갱신하고 사용자 재확인 전 stale intent를 재사용하지 않게 한다. |
+| `controller.takeover` / `controller.release` | 기존 attachment의 `stream_id`, `expected_controller_generation` | daemon-global subscription과 generation을 CAS 재검증하고 old revoke+new response control batch admission 뒤 원자 이전 / controller를 observer로 유지하는 명시 release. mismatch는 `invalid_generation`. |
+| `runtime.notification` | 새 client는 exact `stream_id`; legacy client는 `runtime_id` | controller만 pending notification을 소비한다. 새 stream-auth 경로는 response queue admission 뒤 generation CAS clear하고, legacy runtime 경로는 같은 connection의 live controller가 있을 때만 허용한다. |
 | `runtime.terminate` | `runtime_id`, graceful deadline | idempotent 종료 요청과 최종 exit event |
 | `notification.subscribe` / `notification.ack` | cursor/config version / event ID | bounded pending/live event stream / 소비 확인 |
 | `config.update` | config generation, host 관련 allowlisted keys | `notifications.osc` 등 GUI 없는 동작의 검증된 snapshot 교체 |
@@ -1359,8 +1381,9 @@ GUI가 `*LivePtySession`을 안 드는 컴파일 타임 red test, boundary check
   clear_rect·scroll_rect·cursor·modes·image_place·image_remove·prompt_marks) encode/decode와 `rowWidthMatches`(폭·continuation 검증)·UTF-8/truncation/
   cap 거부. 순수 codec이라 non-macOS에서 wire 회귀를 고정한다(`test-session-host`).
 - **P3-c(runtime registry) ✅**: `session_host/registry.zig`에 `TerminalRuntimeRegistry`와 controller/observer capability
-  state machine(§9)을 구현했다 — runtime_id(u128) 소유표, attach(observer/controller/takeover)·detach·resize를 결정한다.
-  두 번째 controller는 조용히 observer로 강등(`controller_busy`), takeover만 기존 controller를 revoke하고 원자 이전,
+  state machine(§9)을 구현했다 — runtime_id(u128) 소유표, 새 attach(observer/controller)·detach·prepared takeover/release·
+  resize를 결정한다. 두 번째 controller는 조용히 observer로 강등(`controller_busy`), prepared takeover만 기존
+  controller를 revoke하고 원자 이전,
   controller detach는 자동 승격 없음, resize는 controller만·stale sequence 무시·실제 변경 시만 generation++·client 0에서도
   크기 유지. 실 `TerminalCore`+`LivePtySession` 소유와 `TIOCSWINSZ`/core resize 적용은 이 결정을 받아 server(P3-d)가
   수행한다(state machine은 opaque `RuntimeEntry.runtime` 슬롯만 둔다 — 순수 로직이라 non-macOS에서 controller 정책 회귀를 고정).
@@ -2013,16 +2036,74 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
         summary 재계산 불일치, 순서 위반, cap 위반, final ledger nonzero와 cleanup false를 fail-close한다. 실행 전
         stale artifact를 지우고 성공 cleanup 뒤 임시 파일을 atomic rename한다.
 - **P5b3 — controller/observer reactor**: observer/takeover protocol과 controller 전환을 hidden harness로 완성한다.
-  P5a1의 reactor-wide upgrade drain에 controller/observer lease와 takeover/revocation state 검사를 추가해
-  모든 capability lease가 0일 때만 upgrade outer loop로 넘기는 race gate를 추가한다. 아직 public
-  `maru attach`/help를 열지 않는다.
+  아직 public `maru attach`/help를 열지 않으며 다음 계약을 모두 만족해야 구현 완료다.
+  - `runtime.attach(mode=observer|controller)`는 새 subscription을 만든다. 이미 붙은 observer가 제어권을 요구할 때는
+    새 stream을 만드는 `runtime.attach(mode=takeover)`를 사용하지 않고, 그 **기존 `stream_id`**를
+    `controller.takeover`에 전달한다. `controller.release`도 현재 controller의 기존 `stream_id`만 받는다.
+    두 command는 같은 connection의 attachment가 가리키는 daemon-wide `SubscriptionId`를 다시 resolve하고
+    `runtime_id` 일치와 현재 capability를 검사한다. 다른 connection에서 우연히 같은 local stream 번호를 쓰거나,
+    detach 뒤 slot/stream 번호가 재사용되거나, 이전 generation의 stale ID가 도착해도 새 attachment를 바꾸지 못한다.
+  - controller generation은 controller가 비어 있을 때의 새 controller attach, takeover, explicit release가 실제
+    publish될 때마다 증가한다. controller EOF 자체는 증가시키지 않지만 다음 acquire가 반드시 증가하므로
+    `A EOF → C acquire` 뒤 지연된 B의 이전 generation 요청은 실패한다. initial controller attach가 snapshot/control
+    admission 전에 실패하면 exact subscription+generation rollback token으로 controller와 generation을 함께 원복한다.
+    `controller.status`는 long-lived observer의 refresh 경로이며 stale takeover/release는 allocation 전에
+    `invalid_generation`으로 거부한다.
+  - takeover는 `prepare → commit/rollback` 전환이다. prepare는 expected old controller, exact new observer와
+    controller generation을 고정하지만 capability를 바꾸지 않는다. release prepare만 commit 후 controller를 observer로
+    남길 replacement observer slice를 off-side 소유한다. owner가 기존 controller의
+    `controller.revoked` event와 요청자의 성공 response를 control queue에 **all-or-none 선예약**한 뒤에만 commit한다.
+    commit 한 reactor turn에서 old의 `input+resize`를 제거해 observer로 남기고 new에 부여하며 generation을 한 번만
+    증가시킨다. 그 turn 사이에는 다른 client input/resize나 upgrade commit을 실행하지 않는다. enqueue/admission,
+    old/new EOF, identity 재검증, snapshot/projection 실패 중 하나라도 commit 전에 발생하면 전환이 만든
+    registry·identity·attachment·queue/accounting 변경을 원상복구한다. action build OOM도 prepared authority와 frame
+    ownership을 전량 원복하지만, typed 오류 frame조차 만들 수 없는 allocator 고갈은 기존 connection-turn 규칙대로
+    requester connection을 fail-close하므로 그 connection의 기존 attachment는 canonical EOF teardown에서 제거된다.
+    sibling connection과 runtime authority에는 영향을 주지 않는다. 반면 batch admission 실패는 미리 만든
+    `resource_exhausted`를 requester queue에 넣어 requester observer 및 같은 GUI connection의 sibling attachment까지
+    유지하며, 그 작은 오류 frame조차 admission할 수 없을 때만 connection을 fail-close한다. commit 뒤 old event 전송이
+    peer close/partial write로 실패해도 이미 revoke된 권위를 되돌리거나 새 controller를 제거하지 않으며, 해당 old
+    connection만 일반 EOF cleanup으로 수렴한다.
+  - takeover 성공 event/response에는 `runtime_id`, 해당 client의 local `stream_id`, monotonic
+    `controller_generation`, `reason=takeover`를 싣고 release success response는 `reason=release`를 싣는다. old
+    revocation event는 old stream에, 성공 response는 요청 connection의 control queue에
+    들어간다. 새 controller input은 commit 뒤에만, old input은 commit 전까지만 허용된다. controller release는 같은
+    generation 규칙으로 controller를 `null`로 만들고 어떤 observer도 자동 승격하지 않는다.
+  - P5a1의 reactor-wide upgrade drain은 registry attachment 수만 간접 검사하지 않는다. prepared transition,
+    reserved revocation/response, in-flight capability dispatch와 publish 대기 event를 놓치지 않아야 한다. P5b3는
+    transition을 owner turn 밖에 보관하지 않는다. admission close와 같은 lease 및 slot `in_flight_dispatch` 안에서
+    prepare→필수 requester response와 기존 controller가 있을 때의 optional revocation으로 구성된 최대 2-frame control
+    batch admission→commit을 끝내고, batch charge는 기존 canonical control/pending ledger에 들어간다. 따라서 별도 중복
+    counter 대신 attachment/subscription, in-flight dispatch, pending control bytes와 reactor ledger가 하나라도 남으면
+    `upgrade_busy`이며, 모두 0일 때만 `upgrade_ready`를 outer loop에 넘긴다.
+    v1 upgrade는 attachment와 authority event queue가 0인 상태만 받으므로 same-PID exec 뒤
+    `controller_generation`은 0에서 다시 시작해도 관측 가능한 stale event와 충돌하지 않는다.
+  - observe-only subscription은 shared runtime을 읽을 수 있지만 바꾸지 못한다. 특히 `runtime.find(scroll=true)`와
+    pending notification을 소비하는 `runtime.notification`은 `input` capability가 없으면 `unauthorized`다. notification
+    bytes와 generation은 core lock 아래 peek하지만 clear하지 않고, response frame이 canonical control queue에 admission된
+    뒤에만 같은 generation을 CAS clear한다. encode/OOM/backpressure 실패나 그 사이 더 새 notification이 들어오면 이전
+    token은 새 pending event를 지우지 않는다. generation은 wrap하지 않고 max에서 새 notification admission을 중단한다.
+    `runtime.find(scroll=false)`의 검색 결과 조회는 observer에도 허용한다. 선택 결과가 장차 subscription-local projection이
+    되기 전까지 shared core viewport/selection을 지속 변경하는 새 RPC는 같은 controller gate를 거쳐야 한다.
+  - hidden product-path owner/socket fixture는 두 실제 socket connection의 local `stream_id=1` 충돌,
+    observer→takeover→release,
+    old/new input의 commit 경계, poll 전 requester EOF, commit 뒤 requester EOF, revocation 1-byte write 뒤 old peer HUP,
+    queue admission과 action-build allocation fail-index, stale prepared target의 slot generation 재사용, stale request,
+    takeover/release와 upgrade prepare의 양방향 kernel-queue 경합을 결정적으로 실행한다. queue test는 same/cross-slot FIFO,
+    per-slot chunk/byte와 prepared-reclaim 중 shared/global hard cap의 exact/cap+1을 모두 prefix 0 실패로 고정한다. 각 실패
+    뒤 registry capability, global subscription table, connection attachment/tracker, reactor queue/base/control accounting이
+    계약에 정의된 rollback 또는 commit 뒤 canonical EOF 상태 하나로 수렴해야 하며 중간 상태는 허용하지 않는다.
 - **P5c1 — raw TTY lifetime**: 외부 client의 raw mode enter와 모든 detach/error/signal 경로 restore, 최초
   `TIOCGWINSZ`를 deterministic PTY harness로 검증한다.
 - **P5c2 — resize**: signal-safe `SIGWINCH` wake, resize coalesce/sequence, takeover 최초 resize,
   `runtime.resized` observer 반영과 controller-only resize ACK/broadcast를 검증한다.
 - **P5c3 — public attach CLI**: P5b/P5c transport가 모두 green인 뒤에만 `maru attach`, observer,
   `--take-over`, `Ctrl-\` 다음 `d` detach chord를 parser/`--help`와 함께 공개한다. 실제 PTY의
-  attach/input/detach/reattach가 완료 gate다.
+  attach/input/detach/reattach가 완료 gate다. 같은 MRSH v2이지만 `controller_transfer_v1`이 없는 pre-P5b3 개발 host에는
+  observer attach/detach만 허용한다. `--take-over`는 legacy method를 보내지 않고 host 업데이트가 필요하다는 typed
+  unsupported notice를 반환하며 기존 controller와 runtime을 바꾸지 않는다. 실제 frozen old host에서 observer attach
+  성공, takeover request 0, 기존 controller input 지속을 고정하고, 새 host에는 generation-CAS
+  `controller.takeover`만 보낸다는 양방향 fixture도 포함한다.
 - **P5d — SSH packaging/smoke**: PATH와 signed artifact에서 `ssh -t host maru attach ...`가 같은 protocol client를
   실행하는 packaging을 고정하고 localhost sshd smoke를 추가한다. runner에 sshd prerequisite가 없으면 이 slice는
   미완료다.

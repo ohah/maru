@@ -375,6 +375,7 @@ pub const TerminalCore = struct {
     // 네이티브 알림(UNUserNotificationCenter)으로 띄운다(후속 PR). 한 tick에 여럿 오면 마지막만 남는다(드묾, 허용).
     // 알림은 transient 이벤트라 RIS 대상 아님(pending은 다음 tick에 drain되어 곧 사라진다). osc_overflow가 크기 방어.
     notification_pending: bool = false,
+    notification_generation: u64 = 0,
     notification_title: std.ArrayListUnmanaged(u8) = .empty,
     notification_body: std.ArrayListUnmanaged(u8) = .empty,
     // ConEmu OSC 9;4 progress의 최신 payload. 에이전트 관측기가 터미널이 이미 받은 공개 프로토콜 신호를
@@ -1227,15 +1228,33 @@ pub const TerminalCore = struct {
 
     /// OSC 9/777로 들어온 데스크톱 알림(title, body). 없으면 null. platform이 매 tick drain해 네이티브 알림으로
     /// 띄우고 clearNotification한다 — 코어는 OS 알림을 직접 만지지 않는다(경계, OSC 52와 같은 결).
-    pub fn pendingNotification(self: *const TerminalCore) ?struct { title: []const u8, body: []const u8 } {
+    pub fn pendingNotification(self: *const TerminalCore) ?struct {
+        title: []const u8,
+        body: []const u8,
+        generation: u64,
+    } {
         if (!self.notification_pending) return null;
-        return .{ .title = self.notification_title.items, .body = self.notification_body.items };
+        return .{
+            .title = self.notification_title.items,
+            .body = self.notification_body.items,
+            .generation = self.notification_generation,
+        };
     }
 
     pub fn clearNotification(self: *TerminalCore) void {
         self.notification_pending = false;
         self.notification_title.clearRetainingCapacity();
         self.notification_body.clearRetainingCapacity();
+    }
+
+    pub fn clearNotificationIfGeneration(
+        self: *TerminalCore,
+        expected_generation: u64,
+    ) bool {
+        if (!self.notification_pending or
+            self.notification_generation != expected_generation) return false;
+        self.clearNotification();
+        return true;
     }
 
     /// 마지막 ConEmu OSC 9;4 progress payload(`4;state[;value]`). 없으면 빈 슬라이스다.
@@ -4281,6 +4300,7 @@ test "OSC 9/777 desktop notification: parse iTerm2/rxvt, ConEmu sub-commands ign
 
     // OSC 9 ; <message> → iTerm2 알림(title 없음, body=메시지).
     try core.write("\x1b]9;Build finished\x1b\\");
+    const first_generation = core.pendingNotification().?.generation;
     {
         const n = core.pendingNotification().?;
         try std.testing.expectEqualStrings("", n.title);
@@ -4296,6 +4316,8 @@ test "OSC 9/777 desktop notification: parse iTerm2/rxvt, ConEmu sub-commands ign
         try std.testing.expectEqualStrings("Deploy", n.title);
         try std.testing.expectEqualStrings("done in 3s", n.body);
     }
+    try std.testing.expect(!core.clearNotificationIfGeneration(first_generation));
+    try std.testing.expect(core.pendingNotification() != null);
     core.clearNotification();
 
     // body에 ';'가 더 있어도 첫 ';'만 title/body 경계(body는 ';' 포함 가능).
@@ -4329,6 +4351,53 @@ test "OSC 9/777 desktop notification: parse iTerm2/rxvt, ConEmu sub-commands ign
     // OSC 777의 notify 외 서브타입은 무시.
     try core.write("\x1b]777;precmd\x1b\\");
     try std.testing.expect(core.pendingNotification() == null);
+
+    core.notification_generation = std.math.maxInt(u64);
+    try core.write("\x1b]9;must not wrap\x1b\\");
+    try std.testing.expect(core.pendingNotification() == null);
+    try std.testing.expectEqual(
+        std.math.maxInt(u64),
+        core.notification_generation,
+    );
+}
+
+test "OSC notification allocation failure preserves prior payload and generation atomically" {
+    inline for (0..3) |fail_index| {
+        var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 2 });
+        defer core.deinit();
+        osc.dispatchNotify777(&core, "notify;old-title;old-body");
+        const before = core.pendingNotification().?;
+        const generation_before = before.generation;
+        try std.testing.expectEqualStrings("old-title", before.title);
+        try std.testing.expectEqualStrings("old-body", before.body);
+
+        var failing = std.testing.FailingAllocator.init(
+            std.testing.allocator,
+            .{ .fail_index = fail_index },
+        );
+        core.allocator = failing.allocator();
+        osc.dispatchNotify777(
+            &core,
+            "notify;replacement-title-that-allocates;replacement-body-that-allocates",
+        );
+        core.allocator = std.testing.allocator;
+        const after = core.pendingNotification().?;
+        if (fail_index < 2) {
+            try std.testing.expectEqual(generation_before, after.generation);
+            try std.testing.expectEqualStrings("old-title", after.title);
+            try std.testing.expectEqualStrings("old-body", after.body);
+        } else {
+            try std.testing.expectEqual(generation_before + 1, after.generation);
+            try std.testing.expectEqualStrings(
+                "replacement-title-that-allocates",
+                after.title,
+            );
+            try std.testing.expectEqualStrings(
+                "replacement-body-that-allocates",
+                after.body,
+            );
+        }
+    }
 }
 
 test "dumpRecentUtf8 bounds rows and bytes without splitting UTF-8" {

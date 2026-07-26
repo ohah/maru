@@ -168,7 +168,7 @@ pub const RuntimeManager = struct {
 
     /// server.zig가 dispatch에 넘길 중립 vtable. `ctx`는 이 매니저다.
     pub fn runtimeOps(self: *RuntimeManager) server.RuntimeOps {
-        return .{ .ctx = self, .spawn = spawnOp, .terminate = terminateOp, .write_input = writeInputOp, .resize = resizeOp, .snapshot = snapshotOp, .delta = deltaOp, .notification = notificationOp, .core_command = coreCommandOp, .selected_text = selectedTextOp, .select_op = selectOpOp, .find = findOp, .observation = observationOp, .report_mouse = reportMouseOp, .link_at = linkAtOp, .clipboard_write = clipboardWriteOp, .observation_urgent = observationUrgentOp };
+        return .{ .ctx = self, .spawn = spawnOp, .terminate = terminateOp, .write_input = writeInputOp, .resize = resizeOp, .snapshot = snapshotOp, .delta = deltaOp, .notification_peek = notificationPeekOp, .notification_commit = notificationCommitOp, .core_command = coreCommandOp, .selected_text = selectedTextOp, .select_op = selectOpOp, .find = findOp, .observation = observationOp, .report_mouse = reportMouseOp, .link_at = linkAtOp, .clipboard_write = clipboardWriteOp, .observation_urgent = observationUrgentOp };
     }
 
     pub const OwnerDrainSummary = struct {
@@ -1169,10 +1169,13 @@ pub const RuntimeManager = struct {
         return .{ .send = result.delta, .is_snapshot = false, .new_base = result.snapshot };
     }
 
-    /// runtime의 대기 중인 OSC 9/777 데스크톱 알림을 빼서 JSON `{title, body}`로 준다(§6.32). host의 `TerminalCore`가
-    /// 파싱해 둔 title/body를 **core lock 아래** 읽고 clearNotification한다(reader 스레드가 core를 쓰므로, snapshot과 동일한
-    /// off-thread 동기화). 없으면 `{title:"",body:""}`. title/body는 임의 바이트라 실 JSON encoder로 escape한다.
-    fn notificationOp(ctx: *anyopaque, runtime_id: u128, allocator: std.mem.Allocator) anyerror![]u8 {
+    /// Core lock 아래 pending bytes+generation을 복제하되 아직 clear하지 않는다. response frame이 owner control
+    /// queue에 admission된 뒤 notificationCommitOp가 같은 generation만 지워 OOM/backpressure 소실을 막는다.
+    fn notificationPeekOp(
+        ctx: *anyopaque,
+        runtime_id: u128,
+        allocator: std.mem.Allocator,
+    ) anyerror!server.NotificationSnapshot {
         const self: *RuntimeManager = @ptrCast(@alignCast(ctx));
         const handle = self.handleFor(runtime_id) orelse return error.RuntimeNotFound;
         const surface = self.backend_impl.surfaceFor(handle) orelse return error.RuntimeNotFound;
@@ -1181,13 +1184,31 @@ pub const RuntimeManager = struct {
         var out: std.Io.Writer.Allocating = .init(allocator);
         defer out.deinit();
         var js: std.json.Stringify = .{ .writer = &out.writer, .options = .{} };
+        var generation: ?u64 = null;
         if (surface.core.pendingNotification()) |n| {
             js.write(.{ .title = n.title, .body = n.body }) catch return error.OutOfMemory;
-            surface.core.clearNotification(); // drain — 다음 조회는 없음.
+            generation = n.generation;
         } else {
             js.write(.{ .title = "", .body = "" }) catch return error.OutOfMemory;
         }
-        return allocator.dupe(u8, out.written()) catch return error.OutOfMemory;
+        return .{
+            .body = allocator.dupe(u8, out.written()) catch return error.OutOfMemory,
+            .generation = generation,
+        };
+    }
+
+    fn notificationCommitOp(
+        ctx: *anyopaque,
+        runtime_id: u128,
+        generation: ?u64,
+    ) bool {
+        const expected = generation orelse return true;
+        const self: *RuntimeManager = @ptrCast(@alignCast(ctx));
+        const handle = self.handleFor(runtime_id) orelse return false;
+        const surface = self.backend_impl.surfaceFor(handle) orelse return false;
+        surface.lockCore(self.io);
+        defer surface.unlockCore(self.io);
+        return surface.core.clearNotificationIfGeneration(expected);
     }
 
     /// 검증된 wire command를 내부 `CoreCommand`로 명시 변환해 host reader queue에 넣는다. focus가 만드는

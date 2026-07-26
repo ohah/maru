@@ -157,10 +157,18 @@ pub const RuntimeOps = struct {
     /// `base`(client가 마지막으로 받은 full snapshot 바이트) 대비 현재 화면 변화를 계산한다(§9 delta). host가 core lock
     /// 아래 diff하고 `StreamUpdate`를 돌려준다 — `send`(delta 또는 fresh snapshot)와 다음 diff의 base가 될 현재 snapshot.
     delta: *const fn (ctx: *anyopaque, runtime_id: u128, base: []const u8, allocator: std.mem.Allocator) anyerror!StreamUpdate,
-    /// runtime의 대기 중인 OSC 9/777 데스크톱 알림(host의 `TerminalCore`가 파싱)을 빼서 JSON `{title, body}`로 준다(§6.32
-    /// GUI가 종료된 동안의 알림 — host가 core와 함께 알림을 소유). host가 core lock 아래 읽고 clearNotification한다(off-thread
-    /// 동기화, snapshot과 동형). 없으면 `{title:"",body:""}`. caller 소유 바이트.
-    notification: *const fn (ctx: *anyopaque, runtime_id: u128, allocator: std.mem.Allocator) anyerror![]u8,
+    /// Pending notification을 지우지 않고 off-side JSON과 generation token으로 복제한다. server가 response를
+    /// canonical control queue에 admission한 뒤에만 `notification_commit`으로 같은 generation을 소비한다.
+    notification_peek: *const fn (
+        ctx: *anyopaque,
+        runtime_id: u128,
+        allocator: std.mem.Allocator,
+    ) anyerror!NotificationSnapshot,
+    notification_commit: *const fn (
+        ctx: *anyopaque,
+        runtime_id: u128,
+        generation: ?u64,
+    ) bool,
     /// host-authoritative core command. JSON은 server에서 strict bounded DTO로 검증하고, runtime_manager가 내부
     /// `session.CoreCommand`로 명시 변환해 reader queue에 넣는다.
     core_command: *const fn (ctx: *anyopaque, runtime_id: u128, command: core_command_wire.Command) anyerror!void,
@@ -199,6 +207,11 @@ pub const RuntimeOps = struct {
     /// host가 정확히 아는 **이벤트**라 그 주기를 기다릴 이유가 없다. true면 다음 serve tick(약 20ms)에 바로
     /// 관측을 만들어 push한다 — 통로는 그대로 두고 트리거만 앞당긴다.
     observation_urgent: *const fn (ctx: *anyopaque, runtime_id: u128) bool,
+};
+
+pub const NotificationSnapshot = struct {
+    body: []u8,
+    generation: ?u64,
 };
 
 /// host-backed 마우스 리포트 wire payload(primitive — codec 순수). `core_command.MouseReport`의 미러다(codec은
@@ -246,6 +259,22 @@ pub const Action = union(enum) {
         reply: []u8,
         output: CollectedOutput,
     };
+    pub const PreparedNotification = struct {
+        reply: []u8,
+        runtime_id: u128,
+        generation: ?u64,
+    };
+    pub const ControllerTransitionRequested = struct {
+        pub const Revocation = struct {
+            subscription: subscription_identity.SubscriptionId,
+            frame: []u8,
+        };
+        prepared: reg.PreparedControllerTransition,
+        success_reply: []u8,
+        stale_reply: []u8,
+        exhausted_reply: []u8,
+        revocation: ?Revocation = null,
+    };
 
     reply: []u8,
     reply_and_close: []u8,
@@ -270,6 +299,11 @@ pub const Action = union(enum) {
     prepared_attach: PreparedAttach,
     /// A response that advances retained metadata only after control-queue admission.
     prepared_reply: PreparedReply,
+    prepared_notification: PreparedNotification,
+    /// Cross-connection authority mutation is deliberately not executed in `Connection`. The
+    /// daemon poll owner resolves the global subscription, atomically admits every control frame,
+    /// and only then commits the prepared registry transition in the same dispatch turn.
+    controller_transition_requested: ControllerTransitionRequested,
 };
 
 pub const OutboundClass = union(enum) {
@@ -387,6 +421,7 @@ pub const CollectedOutput = struct {
             sub.resync_pending = false;
             sub.awaiting_resync_ack = false;
         }
+        sub.unpublished_controller_generation = null;
         if (self.next_observation_base) |next| {
             if (sub.observation_base) |old| connection.allocator.free(old);
             sub.observation_base = next;
@@ -444,6 +479,7 @@ pub const Connection = struct {
     /// 명시적으로 협상한 client에게만 runtime metadata attach/event/RPC를 노출한다.
     runtime_metadata_v1: bool = false,
     runtime_ended_v1: bool = false,
+    controller_transfer_v1: bool = false,
     /// Deterministic fault injection: real builds leave false; tests force the snapshot-build failure boundary without
     /// also starving the tiny typed error response allocation.
     inventory_fail_snapshot_once: bool = false,
@@ -473,6 +509,9 @@ pub const Connection = struct {
         observation_base: ?[]u8 = null,
         observation_revision: u64 = 0,
         observation_ticks: u8 = 0,
+        /// Non-null only while a newly acquired controller attach is unpublished. rollbackAttach
+        /// may restore this exact epoch; normal detach never decrements generation.
+        unpublished_controller_generation: ?u64 = null,
     };
 
     pub const State = enum { pre_hello, ready, closed };
@@ -660,6 +699,11 @@ pub const Connection = struct {
         self.client_kind = parseClientKind(strField(obj, "client_kind"));
         self.runtime_metadata_v1 = stringArrayContains(obj, "capabilities", "runtime_metadata_v1");
         self.runtime_ended_v1 = stringArrayContains(obj, "capabilities", "runtime_ended_v1");
+        self.controller_transfer_v1 = stringArrayContains(
+            obj,
+            "capabilities",
+            "controller_transfer_v1",
+        );
 
         // 겹치는 major가 없으면 incompatible_version으로 끝낸다(§10). 이때는 응답을 준 뒤 닫는다.
         if (!(pmin <= protocol.version_major and protocol.version_major <= pmax)) {
@@ -830,6 +874,20 @@ pub const Connection = struct {
             .runtime_terminate => self.dispatchTerminate(frame.header.request_id, params),
             .runtime_attach => self.dispatchAttach(frame.header.request_id, params),
             .runtime_detach => self.dispatchDetach(frame.header.request_id, params),
+            .controller_status => self.dispatchControllerStatus(
+                frame.header.request_id,
+                params,
+            ),
+            .controller_takeover => self.dispatchControllerTransition(
+                frame.header.request_id,
+                params,
+                .takeover,
+            ),
+            .controller_release => self.dispatchControllerTransition(
+                frame.header.request_id,
+                params,
+                .release,
+            ),
             .runtime_resync => self.dispatchResync(frame.header.request_id, params),
             .runtime_observation => self.dispatchObservation(frame.header.request_id, params),
             .runtime_core_command => self.dispatchCoreCommand(frame.header.request_id, params),
@@ -1135,19 +1193,60 @@ pub const Connection = struct {
         return .{ .prepared_reply = .{ .reply = reply, .output = output } };
     }
 
-    /// `runtime.notification`(§6.32): runtime의 대기 중인 OSC 9/777 알림을 빼서 `{title, body}`로 응답한다. read-only host면
-    /// unauthorized. 없으면 `{title:"",body:""}`(client가 빈 값을 "없음"으로 해석). runtime 없으면 runtime_not_found.
+    /// `runtime.notification`(§6.32): exact subscription이 가리키는 runtime의 대기 중인 OSC 9/777 알림을 빼서
+    /// `{title, body}`로 응답한다. 소비는 shared runtime mutation이므로 controller stream만 허용한다. 같은 connection에
+    /// 같은 runtime의 controller가 따로 있어도 observer `stream_id` 권위를 빌릴 수 없다. 없으면
+    /// `{title:"",body:""}`(client가 빈 값을 "없음"으로 해석). runtime 없으면 runtime_not_found.
     fn dispatchNotification(self: *Connection, request_id: u64, params: ?std.json.ObjectMap) HandleError!Action {
         const ops = self.runtime_ops orelse return self.replyError(request_id, .unauthorized);
         const p = params orelse return self.replyError(request_id, .invalid_request);
-        const id_hex = strField(p, "runtime_id") orelse return self.replyError(request_id, .invalid_request);
-        const id = parseHex128(id_hex) orelse return self.replyError(request_id, .invalid_request);
-        const body = ops.notification(ops.ctx, id, self.allocator) catch |err| switch (err) {
+        if (p.count() != 1) return self.replyError(request_id, .invalid_request);
+        const runtime_id = if (intFieldU64(p, "stream_id")) |stream| blk: {
+            const attachment = self.attachments.get(stream) orelse
+                return self.replyError(request_id, .invalid_request);
+            if (!reg.Capability.has(
+                self.registry.capabilitiesOfSubscription(
+                    attachment.runtime_id,
+                    attachment.subscription_id,
+                ),
+                reg.Capability.input,
+            )) return self.replyError(request_id, .unauthorized);
+            break :blk attachment.runtime_id;
+        } else if (strField(p, "runtime_id")) |id_hex| blk: {
+            // Same-major legacy adapter: old clients do not know stream-scoped notification auth.
+            // The fallback still requires a live controller for this runtime on this connection.
+            const id = parseHex128(id_hex) orelse
+                return self.replyError(request_id, .invalid_request);
+            if (!self.hasRuntimeCapability(id, reg.Capability.input))
+                return self.replyError(request_id, .unauthorized);
+            break :blk id;
+        } else return self.replyError(request_id, .invalid_request);
+        const snapshot = ops.notification_peek(
+            ops.ctx,
+            runtime_id,
+            self.allocator,
+        ) catch |err| switch (err) {
             error.RuntimeNotFound => return self.replyError(request_id, .runtime_not_found),
             else => return self.replyError(request_id, .internal),
         };
-        defer self.allocator.free(body);
-        return self.replyResult(request_id, body);
+        defer self.allocator.free(snapshot.body);
+        const reply = self.encode(
+            .response,
+            request_id,
+            0,
+            snapshot.body,
+        ) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.PayloadTooLarge => return self.replyError(
+                request_id,
+                .payload_too_large,
+            ),
+        };
+        return .{ .prepared_notification = .{
+            .reply = reply,
+            .runtime_id = runtime_id,
+            .generation = snapshot.generation,
+        } };
     }
 
     /// `runtime.spawn`: read-only host면 unauthorized. argv/cwd/cols/rows를 파싱해 `RuntimeOps`로 실 PTY를 띄우고
@@ -1280,17 +1379,20 @@ pub const Connection = struct {
         return self.replyResult(request_id, body);
     }
 
-    /// `runtime.attach`: runtime에 subscription을 연다(§8·§9). mode(observer/controller/takeover)에 따라 capability를
-    /// 부여하고 host가 발급한 `stream_id`·granted·`controller_busy`를 응답한 뒤, **현재 화면 snapshot을 `snapshot_chunk`
-    /// frame으로 이어 보낸다**(§10 attach 순서: response → snapshot_chunk*의 마지막 end_stream → delta_chunk*). delta_chunk
-    /// stream과 takeover revocation event fan-out은 e2d-3에서 얹는다. read-only host는 응답만 보내는 관리용 seam이다.
+    /// `runtime.attach`: runtime에 새 subscription을 연다(§8·§9). mode는 observer/controller만 받는다. 이미 붙은
+    /// observer의 권위 요청과 controller release는 기존 stream을 지정하는 별도
+    /// `controller.takeover`/`controller.release` owner transaction만 사용한다. host가 발급한
+    /// `stream_id`·granted·`controller_busy`를 응답한 뒤, **현재 화면 snapshot을 `snapshot_chunk`
+    /// frame으로 이어 보낸다**(§10 attach 순서: response → snapshot_chunk*의 마지막 end_stream → delta_chunk*).
+    /// read-only host는 응답만 보내는 관리용 seam이다.
     /// runtime을 가진 product host에서 initial snapshot 생성이 실패하면 pre-runtime recovery pump가 없으므로 attach 권위를
     /// rollback하고 success reply 없이 fail-close한다.
     fn dispatchAttach(self: *Connection, request_id: u64, params: ?std.json.ObjectMap) HandleError!Action {
         const p = params orelse return self.replyError(request_id, .invalid_request);
         const id = if (strField(p, "runtime_id")) |h| parseHex128(h) else null;
         if (id == null) return self.replyError(request_id, .invalid_request);
-        const mode = parseAttachMode(strField(p, "mode"));
+        const mode = parseAttachMode(strField(p, "mode")) orelse
+            return self.replyError(request_id, .invalid_request);
 
         if (self.next_stream_id == 0)
             return self.replyError(request_id, .resource_exhausted);
@@ -1326,14 +1428,37 @@ pub const Connection = struct {
             return switch (e) {
                 error.RuntimeNotFound => self.replyError(request_id, .runtime_not_found),
                 error.AlreadyAttached => self.replyError(request_id, .invalid_request),
+                error.ControllerGenerationExhausted => self.replyError(
+                    request_id,
+                    .resource_exhausted,
+                ),
                 error.OutOfMemory => error.OutOfMemory,
                 else => self.replyError(request_id, .internal),
             };
         };
+        const unpublished_controller_generation = if (reg.Capability.has(
+            outcome.granted,
+            reg.Capability.input,
+        ))
+            self.registry.controllerGeneration(id.?) catch {
+                _ = self.registry.detachSubscription(id.?, subscription_id) catch {};
+                return self.replyError(request_id, .internal);
+            }
+        else
+            null;
         self.attachments.put(self.allocator, stream, .{
             .runtime_id = id.?,
             .subscription_id = subscription_id,
+            .unpublished_controller_generation = unpublished_controller_generation,
         }) catch {
+            if (unpublished_controller_generation) |generation| {
+                const rolled_back = self.registry.rollbackControllerAttach(
+                    id.?,
+                    subscription_id,
+                    generation,
+                );
+                std.debug.assert(rolled_back);
+            }
             _ = self.registry.detachSubscription(id.?, subscription_id) catch {};
             return error.OutOfMemory;
         };
@@ -1399,8 +1524,15 @@ pub const Connection = struct {
             sub.observation_revision
         else
             0;
+        const controller_generation = self.registry.controllerGeneration(
+            id.?,
+        ) catch {
+            self.rollbackAttach(stream);
+            return self.replyError(request_id, .internal);
+        };
         const body = try self.stringify(.{ .result = .{
             .stream_id = stream,
+            .controller_generation = controller_generation,
             .granted = .{
                 .observe = reg.Capability.has(outcome.granted, reg.Capability.observe),
                 .input = reg.Capability.has(outcome.granted, reg.Capability.input),
@@ -1427,6 +1559,8 @@ pub const Connection = struct {
 
         // read-only 관리 seam만 응답-only다. product runtime snapshot 실패는 아래에서 권위를 rollback하고 fail-close한다.
         const ops = self.runtime_ops orelse {
+            if (self.attachments.getPtr(stream)) |sub|
+                sub.unpublished_controller_generation = null;
             reply_transferred = true;
             return .{ .reply = reply_frame };
         };
@@ -1486,6 +1620,8 @@ pub const Connection = struct {
         @memcpy(frames[1..], snapshot_frames);
         self.allocator.free(snapshot_frames);
         reply_transferred = true;
+        if (self.attachments.getPtr(stream)) |sub|
+            sub.unpublished_controller_generation = null;
         return .{ .frames = frames };
     }
 
@@ -1494,6 +1630,16 @@ pub const Connection = struct {
     /// without publishing a success response; otherwise the client would wait for a snapshot that
     /// can never arrive while an orphan controller lease remains live.
     fn rollbackAttach(self: *Connection, stream: subscription_identity.LocalStreamId) void {
+        if (self.attachments.get(stream)) |attachment| {
+            if (attachment.unpublished_controller_generation) |generation| {
+                const rolled_back = self.registry.rollbackControllerAttach(
+                    attachment.runtime_id,
+                    attachment.subscription_id,
+                    generation,
+                );
+                std.debug.assert(rolled_back);
+            }
+        }
         _ = self.removeAttachment(stream);
     }
 
@@ -1502,6 +1648,13 @@ pub const Connection = struct {
         stream: subscription_identity.LocalStreamId,
     ) void {
         self.rollbackAttach(stream);
+    }
+
+    pub fn discardPreparedControllerTransition(
+        self: *Connection,
+        prepared: *reg.PreparedControllerTransition,
+    ) void {
+        self.registry.discardControllerTransition(prepared);
     }
 
     /// record 바이트를 `kind` frame(각 ≤ `max_binary_chunk`)으로 잘라 `list`에 덧붙인다. 마지막 chunk에 `end_stream` flag를
@@ -1534,6 +1687,167 @@ pub const Connection = struct {
         if (!self.removeAttachment(stream))
             return self.replyError(request_id, .invalid_request);
         const body = try self.stringify(.{ .result = .{ .detached = true } });
+        defer self.allocator.free(body);
+        return self.replyResult(request_id, body);
+    }
+
+    fn dispatchControllerTransition(
+        self: *Connection,
+        request_id: u64,
+        params: ?std.json.ObjectMap,
+        kind: reg.ControllerTransitionKind,
+    ) HandleError!Action {
+        if (!self.controller_transfer_v1)
+            return self.replyError(request_id, .unauthorized);
+        const p = params orelse return self.replyError(request_id, .invalid_request);
+        if (p.count() != 2)
+            return self.replyError(request_id, .invalid_request);
+        const stream = intFieldU64(p, "stream_id") orelse
+            return self.replyError(request_id, .invalid_request);
+        const expected_generation = intFieldU64(
+            p,
+            "expected_controller_generation",
+        ) orelse return self.replyError(request_id, .invalid_request);
+        const attachment = self.attachments.get(stream) orelse
+            return self.replyError(request_id, .invalid_request);
+        const identity = self.subscription_identity orelse
+            return self.replyError(request_id, .unauthorized);
+        const local_subscription = identity.table.resolveLocal(.{
+            .connection = identity.connection,
+            .stream_id = stream,
+        }) orelse return self.replyError(request_id, .unauthorized);
+        if (local_subscription.value != attachment.subscription_id.value)
+            return self.replyError(request_id, .unauthorized);
+        const current_generation = self.registry.controllerGeneration(
+            attachment.runtime_id,
+        ) catch return self.replyError(request_id, .runtime_not_found);
+        if (current_generation != expected_generation)
+            return self.replyError(request_id, .invalid_generation);
+
+        var prepared = switch (kind) {
+            .takeover => self.registry.prepareControllerTakeover(
+                attachment.runtime_id,
+                attachment.subscription_id,
+            ),
+            .release => self.registry.prepareControllerRelease(
+                attachment.runtime_id,
+                attachment.subscription_id,
+            ),
+        } catch |err| return switch (err) {
+            error.RuntimeNotFound => self.replyError(request_id, .runtime_not_found),
+            error.NotController, error.NotObserver, error.StaleControllerTransition => self.replyError(request_id, .unauthorized),
+            error.ControllerGenerationExhausted => self.replyError(request_id, .resource_exhausted),
+            error.OutOfMemory => error.OutOfMemory,
+            else => self.replyError(request_id, .internal),
+        };
+        var prepared_owned = true;
+        defer if (prepared_owned)
+            self.registry.discardControllerTransition(&prepared);
+        std.debug.assert(prepared.expected_generation == expected_generation);
+
+        const runtime_hex = try self.hex128(attachment.runtime_id);
+        defer self.allocator.free(runtime_hex);
+        const success_body = try self.stringify(.{ .result = .{
+            .runtime_id = runtime_hex,
+            .stream_id = stream,
+            .controller_generation = prepared.next_generation,
+            .reason = @tagName(kind),
+            .granted = .{
+                .observe = true,
+                .input = kind == .takeover,
+                .resize = kind == .takeover,
+            },
+        } });
+        defer self.allocator.free(success_body);
+        const success_reply = self.encode(
+            .response,
+            request_id,
+            0,
+            success_body,
+        ) catch return error.OutOfMemory;
+        var success_owned = true;
+        defer if (success_owned)
+            self.allocator.free(success_reply);
+        const stale_reply = try self.replyErrorFrame(
+            request_id,
+            .invalid_generation,
+        );
+        var stale_owned = true;
+        defer if (stale_owned) self.allocator.free(stale_reply);
+        const exhausted_reply = try self.replyErrorFrame(
+            request_id,
+            .resource_exhausted,
+        );
+        var exhausted_owned = true;
+        defer if (exhausted_owned) self.allocator.free(exhausted_reply);
+
+        var revocation: ?Action.ControllerTransitionRequested.Revocation = null;
+        if (kind == .takeover) if (prepared.expected_controller) |old| {
+            const old_record = identity.table.resolveGlobal(old) orelse {
+                return self.replyError(request_id, .unauthorized);
+            };
+            if (old_record.runtime_id != attachment.runtime_id) {
+                return self.replyError(request_id, .unauthorized);
+            }
+            const event_body = try self.stringify(.{ .event = "controller.revoked", .data = .{
+                .runtime_id = runtime_hex,
+                .stream_id = old_record.stream_id,
+                .controller_generation = prepared.next_generation,
+                .reason = "takeover",
+            } });
+            defer self.allocator.free(event_body);
+            const event_frame = self.encodeWithFlags(
+                .event,
+                0,
+                old_record.stream_id,
+                0,
+                event_body,
+            ) catch {
+                return error.OutOfMemory;
+            };
+            revocation = .{
+                .subscription = old,
+                .frame = event_frame,
+            };
+        };
+        prepared_owned = false;
+        success_owned = false;
+        stale_owned = false;
+        exhausted_owned = false;
+        return .{ .controller_transition_requested = .{
+            .prepared = prepared,
+            .success_reply = success_reply,
+            .stale_reply = stale_reply,
+            .exhausted_reply = exhausted_reply,
+            .revocation = revocation,
+        } };
+    }
+
+    fn dispatchControllerStatus(
+        self: *Connection,
+        request_id: u64,
+        params: ?std.json.ObjectMap,
+    ) HandleError!Action {
+        if (!self.controller_transfer_v1)
+            return self.replyError(request_id, .unauthorized);
+        const p = params orelse return self.replyError(request_id, .invalid_request);
+        if (p.count() != 1) return self.replyError(request_id, .invalid_request);
+        const stream = intFieldU64(p, "stream_id") orelse
+            return self.replyError(request_id, .invalid_request);
+        const attachment = self.attachments.get(stream) orelse
+            return self.replyError(request_id, .invalid_request);
+        const generation = self.registry.controllerGeneration(
+            attachment.runtime_id,
+        ) catch return self.replyError(request_id, .runtime_not_found);
+        const capabilities = self.registry.capabilitiesOfSubscription(
+            attachment.runtime_id,
+            attachment.subscription_id,
+        );
+        const body = try self.stringify(.{ .result = .{
+            .stream_id = stream,
+            .controller_generation = generation,
+            .controller = reg.Capability.has(capabilities, reg.Capability.input),
+        } });
         defer self.allocator.free(body);
         return self.replyResult(request_id, body);
     }
@@ -1688,13 +2002,41 @@ pub const Connection = struct {
         const query_hex = strField(p, "q") orelse "";
         const cur_index: u32 = @intCast(intFieldU64(p, "cur") orelse 0);
         const scroll = boolField(p, "scroll");
-        const runtime_id = (self.attachments.get(stream) orelse return self.replyError(request_id, .invalid_request)).runtime_id;
+        const attachment = self.attachments.get(stream) orelse
+            return self.replyError(request_id, .invalid_request);
+        const runtime_id = attachment.runtime_id;
+        if (scroll and !reg.Capability.has(
+            self.registry.capabilitiesOfSubscription(
+                runtime_id,
+                attachment.subscription_id,
+            ),
+            reg.Capability.input,
+        )) return self.replyError(request_id, .unauthorized);
         const body = if (self.runtime_ops) |ops|
             ops.find(ops.ctx, runtime_id, query_hex, cur_index, scroll, self.allocator) catch return self.replyError(request_id, .internal)
         else
             (self.allocator.dupe(u8, "{\"count\":0,\"cur\":[],\"spans\":[]}") catch return error.OutOfMemory);
         defer self.allocator.free(body);
         return self.replyResult(request_id, body);
+    }
+
+    fn hasRuntimeCapability(
+        self: *Connection,
+        runtime_id: u128,
+        capability: u8,
+    ) bool {
+        var it = self.attachments.valueIterator();
+        while (it.next()) |attachment| {
+            if (attachment.runtime_id != runtime_id) continue;
+            if (reg.Capability.has(
+                self.registry.capabilitiesOfSubscription(
+                    runtime_id,
+                    attachment.subscription_id,
+                ),
+                capability,
+            )) return true;
+        }
+        return false;
     }
 
     /// `runtime.resize`: controller가 canonical PTY size를 바꾼다(§9). registry가 controller/sequence를 검증하고, 실제
@@ -2179,6 +2521,10 @@ pub const Connection = struct {
         append(buf, &count, "runtime_selected_text_v1");
         append(buf, &count, "runtime_link_at_v1");
         append(buf, &count, "runtime_clipboard_v1");
+        if (self.runtime_ops != null and self.subscription_identity != null) {
+            append(buf, &count, "controller_transfer_v1");
+            append(buf, &count, "notification_stream_auth_v1");
+        }
         return buf[0..count];
     }
 
@@ -2231,9 +2577,13 @@ pub const Connection = struct {
     // ── low-level helpers ──────────────────────────────────────────────────
 
     fn replyError(self: *Connection, request_id: u64, code: protocol.ErrorCode) HandleError!Action {
+        return .{ .reply = try self.replyErrorFrame(request_id, code) };
+    }
+
+    fn replyErrorFrame(self: *Connection, request_id: u64, code: protocol.ErrorCode) HandleError![]u8 {
         const body = try self.errorJson(code);
         defer self.allocator.free(body);
-        return .{ .reply = try self.encodeSmall(.response, request_id, 0, body) };
+        return try self.encodeSmall(.response, request_id, 0, body);
     }
 
     const FrameError = error{ OutOfMemory, PayloadTooLarge };
@@ -2337,11 +2687,13 @@ fn boolField(obj: std.json.ObjectMap, key: []const u8) bool {
     };
 }
 
-fn parseAttachMode(s: ?[]const u8) reg.AttachMode {
+fn parseAttachMode(s: ?[]const u8) ?reg.AttachMode {
     const v = s orelse return .observer;
+    if (std.mem.eql(u8, v, "observer")) return .observer;
     if (std.mem.eql(u8, v, "controller")) return .controller;
-    if (std.mem.eql(u8, v, "takeover")) return .takeover;
-    return .observer;
+    // P5b3 deliberately removes the unsafe bootstrap takeover path. A client first completes an
+    // observer attach, then promotes that exact existing stream through controller.takeover.
+    return null;
 }
 
 fn strField(obj: std.json.ObjectMap, key: []const u8) ?[]const u8 {
@@ -2453,6 +2805,9 @@ const RequestMethod = enum {
     runtime_terminate,
     runtime_attach,
     runtime_detach,
+    controller_status,
+    controller_takeover,
+    controller_release,
     runtime_resync,
     runtime_observation,
     runtime_core_command,
@@ -2478,6 +2833,9 @@ const RequestMethod = enum {
             .runtime_terminate => "runtime.terminate",
             .runtime_attach => "runtime.attach",
             .runtime_detach => "runtime.detach",
+            .controller_status => "controller.status",
+            .controller_takeover => "controller.takeover",
+            .controller_release => "controller.release",
             .runtime_resync => "runtime.resync",
             .runtime_observation => "runtime.observation",
             .runtime_core_command => "runtime.core_command",
@@ -2511,6 +2869,9 @@ fn requestPolicy(method: RequestMethod) RequestPolicy {
         .runtime_spawn_full,
         .runtime_attach,
         .runtime_detach,
+        .controller_status,
+        .controller_takeover,
+        .controller_release,
         .runtime_resync,
         .runtime_observation,
         .runtime_core_command,
@@ -2614,6 +2975,36 @@ fn runWire(conn: *Connection, wire: []const u8) !FedResult {
             try rp.push(list[0]);
             const out = (try rp.next()).?;
             return .{ .action = "frames", .frame = out };
+        },
+        .controller_transition_requested => |transition_value| {
+            var transition = transition_value;
+            defer allocator.free(transition.success_reply);
+            defer allocator.free(transition.stale_reply);
+            defer allocator.free(transition.exhausted_reply);
+            if (transition.revocation) |revocation|
+                allocator.free(revocation.frame);
+            defer conn.discardPreparedControllerTransition(
+                &transition.prepared,
+            );
+            var rp = framing.FrameParser.init(allocator);
+            defer rp.deinit();
+            try rp.push(transition.success_reply);
+            const out = (try rp.next()).?;
+            return .{ .action = "controller_transition_requested", .frame = out };
+        },
+        .prepared_notification => |prepared| {
+            defer allocator.free(prepared.reply);
+            if (conn.runtime_ops) |ops|
+                _ = ops.notification_commit(
+                    ops.ctx,
+                    prepared.runtime_id,
+                    prepared.generation,
+                );
+            var rp = framing.FrameParser.init(allocator);
+            defer rp.deinit();
+            try rp.push(prepared.reply);
+            const out = (try rp.next()).?;
+            return .{ .action = "prepared_notification", .frame = out };
         },
         .prepared_attach, .prepared_reply => unreachable,
     }
@@ -3292,6 +3683,7 @@ test "server: admin is one-shot read-only and rejects malformed or privileged re
 }
 
 test "server: every canonical request method has one exhaustive admin policy" {
+    @setEvalBranchQuota(2000);
     var admin_reads: usize = 0;
     var admin_mutations: usize = 0;
     inline for (std.enums.values(RequestMethod), 0..) |method, index| {
@@ -3505,6 +3897,8 @@ pub const FakeRuntimeOps = struct {
     snapshot_permanent_failure: bool = false,
     snapshot_calls: usize = 0,
     observation_fail_count: usize = 0,
+    notification_calls: usize = 0,
+    notification_commit_calls: usize = 0,
     runtime_missing: bool = false,
     snapshot_missing: bool = false,
     delta_missing: bool = false,
@@ -3600,10 +3994,29 @@ pub const FakeRuntimeOps = struct {
         return .{ .send = send, .is_snapshot = false, .new_base = new_base };
     }
     /// 대기 알림 없음(빈 title/body)을 돌려준다 — 기본 fake. server dispatch 배선만 검증(실 core 파싱은 runtime_manager smoke).
-    fn notificationFn(ctx: *anyopaque, runtime_id: u128, allocator: std.mem.Allocator) anyerror![]u8 {
-        _ = ctx;
+    fn notificationPeekFn(
+        ctx: *anyopaque,
+        runtime_id: u128,
+        allocator: std.mem.Allocator,
+    ) anyerror!NotificationSnapshot {
+        const self: *FakeRuntimeOps = @ptrCast(@alignCast(ctx));
         _ = runtime_id;
-        return allocator.dupe(u8, "{\"title\":\"\",\"body\":\"\"}");
+        self.notification_calls += 1;
+        return .{
+            .body = try allocator.dupe(u8, "{\"title\":\"\",\"body\":\"\"}"),
+            .generation = null,
+        };
+    }
+    fn notificationCommitFn(
+        ctx: *anyopaque,
+        runtime_id: u128,
+        generation: ?u64,
+    ) bool {
+        const self: *FakeRuntimeOps = @ptrCast(@alignCast(ctx));
+        _ = runtime_id;
+        _ = generation;
+        self.notification_commit_calls += 1;
+        return true;
     }
     /// 검증을 마친 bounded core command와 runtime을 기록한다 — 실 core 적용은 runtime_manager smoke가 맡는다.
     fn coreCommandFn(ctx: *anyopaque, runtime_id: u128, command: core_command_wire.Command) anyerror!void {
@@ -3708,7 +4121,7 @@ pub const FakeRuntimeOps = struct {
         };
     }
     pub fn ops(self: *FakeRuntimeOps) RuntimeOps {
-        return .{ .ctx = self, .spawn = spawnFn, .terminate = terminateFn, .write_input = writeInputFn, .resize = resizeFn, .snapshot = snapshotFn, .delta = deltaFn, .notification = notificationFn, .core_command = coreCommandFn, .selected_text = selectedTextFn, .select_op = selectOpFn, .find = findFn, .observation = observationFn, .report_mouse = reportMouseFn, .link_at = linkAtFn, .clipboard_write = clipboardWriteFn, .observation_urgent = observationUrgentFn };
+        return .{ .ctx = self, .spawn = spawnFn, .terminate = terminateFn, .write_input = writeInputFn, .resize = resizeFn, .snapshot = snapshotFn, .delta = deltaFn, .notification_peek = notificationPeekFn, .notification_commit = notificationCommitFn, .core_command = coreCommandFn, .selected_text = selectedTextFn, .select_op = selectOpFn, .find = findFn, .observation = observationFn, .report_mouse = reportMouseFn, .link_at = linkAtFn, .clipboard_write = clipboardWriteFn, .observation_urgent = observationUrgentFn };
     }
 };
 
@@ -3871,6 +4284,38 @@ test "server: attach grants capabilities; controller input/resize dispatch throu
         try testing.expectEqualStrings("none", r.action);
     }
     try testing.expectEqual(@as(usize, 99), fake.last_input_len); // 미attach stream이라 write_input 미호출(값 그대로).
+}
+
+test "server: attach rejects unknown and legacy takeover modes without authority mutation" {
+    var registry = reg.TerminalRuntimeRegistry.init(testing.allocator);
+    defer registry.deinit();
+    _ = try registry.register(0xAA, 80, 24);
+    var conn = Connection.init(testing.allocator, 1, &registry);
+    defer conn.deinit();
+    {
+        const result = try feedJson(
+            &conn,
+            .hello,
+            1,
+            "{\"protocol_min\":2,\"protocol_max\":2}",
+        );
+        if (result.frame) |frame| frame.deinit(testing.allocator);
+    }
+
+    inline for (&.{
+        "{\"method\":\"runtime.attach\",\"params\":{\"runtime_id\":\"aa\",\"mode\":\"takeover\"}}",
+        "{\"method\":\"runtime.attach\",\"params\":{\"runtime_id\":\"aa\",\"mode\":\"takevoer\"}}",
+    }) |request| {
+        const result = try feedJson(&conn, .request, 2, request);
+        defer if (result.frame) |frame| frame.deinit(testing.allocator);
+        try testing.expect(std.mem.indexOf(
+            u8,
+            result.frame.?.payload,
+            "\"invalid_request\"",
+        ) != null);
+        try testing.expectEqual(@as(usize, 0), registry.attachmentCount());
+        try testing.expectEqual(@as(usize, 0), conn.attachmentCount());
+    }
 }
 
 test "server: backend resize failure leaves canonical size sequence generation and ledger unchanged" {
@@ -5042,6 +5487,126 @@ test "server: product connections isolate same local stream through global subsc
     try testing.expectEqual(@as(usize, 0), identities.count());
 }
 
+test "server: controller transition action build OOM never publishes authority" {
+    const allocator = testing.allocator;
+    inline for (.{ reg.ControllerTransitionKind.takeover, .release }) |kind| {
+        var saw_oom = false;
+        var saw_success = false;
+        var fail_index: usize = 0;
+        while (fail_index < 48) : (fail_index += 1) {
+            var registry = reg.TerminalRuntimeRegistry.init(allocator);
+            defer registry.deinit();
+            _ = try registry.register(0xAA, 80, 24);
+            var identities = subscription_identity.Table.init(allocator);
+            defer identities.deinit();
+            var fake: FakeRuntimeOps = .{};
+            var controller = Connection.initProduct(
+                allocator,
+                1,
+                &registry,
+                .{ .monotonic_id = 1, .slot_generation = 1 },
+                &identities,
+            );
+            defer controller.deinit();
+            var observer = Connection.initProduct(
+                allocator,
+                1,
+                &registry,
+                .{ .monotonic_id = 2, .slot_generation = 1 },
+                &identities,
+            );
+            defer observer.deinit();
+            controller.runtime_ops = fake.ops();
+            observer.runtime_ops = fake.ops();
+            inline for (&.{ &controller, &observer }) |conn| {
+                const hello = try feedJson(
+                    conn,
+                    .hello,
+                    1,
+                    "{\"protocol_min\":2,\"protocol_max\":2}",
+                );
+                if (hello.frame) |frame| frame.deinit(allocator);
+            }
+            const controller_frames = try feedExpectFrames(
+                &controller,
+                .request,
+                2,
+                "{\"method\":\"runtime.attach\",\"params\":{\"runtime_id\":\"aa\",\"mode\":\"controller\"}}",
+            );
+            for (controller_frames) |frame| frame.deinit(allocator);
+            allocator.free(controller_frames);
+            const observer_frames = try feedExpectFrames(
+                &observer,
+                .request,
+                2,
+                "{\"method\":\"runtime.attach\",\"params\":{\"runtime_id\":\"aa\",\"mode\":\"observer\"}}",
+            );
+            for (observer_frames) |frame| frame.deinit(allocator);
+            allocator.free(observer_frames);
+            controller.controller_transfer_v1 = true;
+            observer.controller_transfer_v1 = true;
+            const controller_subscription = controller.attachments.get(1).?.subscription_id;
+            const observer_subscription = observer.attachments.get(1).?.subscription_id;
+
+            var params: std.json.ObjectMap = .empty;
+            defer params.deinit(allocator);
+            try params.put(allocator, "stream_id", .{ .integer = 1 });
+            try params.put(
+                allocator,
+                "expected_controller_generation",
+                .{ .integer = 1 },
+            );
+            var failing = testing.FailingAllocator.init(
+                allocator,
+                .{ .fail_index = fail_index },
+            );
+            const failing_allocator = failing.allocator();
+            const subject = if (kind == .takeover) &observer else &controller;
+            subject.allocator = failing_allocator;
+            registry.allocator = failing_allocator;
+            const result = subject.dispatchControllerTransition(
+                3,
+                params,
+                kind,
+            );
+            if (result) |action| {
+                saw_success = true;
+                var transition = switch (action) {
+                    .controller_transition_requested => |value| value,
+                    else => return error.TestUnexpectedResult,
+                };
+                failing_allocator.free(transition.success_reply);
+                failing_allocator.free(transition.stale_reply);
+                failing_allocator.free(transition.exhausted_reply);
+                if (transition.revocation) |revocation|
+                    failing_allocator.free(revocation.frame);
+                registry.discardControllerTransition(&transition.prepared);
+            } else |err| {
+                saw_oom = true;
+                try testing.expectEqual(error.OutOfMemory, err);
+            }
+            subject.allocator = allocator;
+            registry.allocator = allocator;
+            try testing.expectEqual(@as(u64, 1), registry.get(0xAA).?.controller_generation);
+            try testing.expectEqual(
+                controller_subscription.value,
+                registry.get(0xAA).?.controller.?,
+            );
+            try testing.expect(reg.Capability.has(
+                registry.capabilitiesOfSubscription(0xAA, controller_subscription),
+                reg.Capability.input,
+            ));
+            try testing.expectEqual(
+                reg.Capability.observe,
+                registry.capabilitiesOfSubscription(0xAA, observer_subscription),
+            );
+            if (saw_success) break;
+        }
+        try testing.expect(saw_oom);
+        try testing.expect(saw_success);
+    }
+}
+
 test "server: runtime.core_command validates and routes bounded commands to controller RuntimeOps" {
     const allocator = testing.allocator;
     var registry = reg.TerminalRuntimeRegistry.init(allocator);
@@ -5374,4 +5939,200 @@ test "server: runtime.find routes query(hex) to RuntimeOps and returns {count,sp
         defer if (r.frame) |f| f.deinit(allocator);
         try testing.expect(std.mem.indexOf(u8, r.frame.?.payload, "invalid_request") != null);
     }
+}
+
+test "server: observer find cannot mutate the shared viewport" {
+    const allocator = testing.allocator;
+    var registry = reg.TerminalRuntimeRegistry.init(allocator);
+    defer registry.deinit();
+    _ = try registry.register(0xAA, 80, 24);
+    var fake: FakeRuntimeOps = .{};
+    var conn = Connection.init(allocator, 1, &registry);
+    defer conn.deinit();
+    conn.runtime_ops = fake.ops();
+    {
+        const h = try feedJson(
+            &conn,
+            .hello,
+            1,
+            "{\"protocol_min\":2,\"protocol_max\":2}",
+        );
+        if (h.frame) |frame| frame.deinit(allocator);
+    }
+    {
+        const frames = try feedExpectFrames(
+            &conn,
+            .request,
+            2,
+            "{\"method\":\"runtime.attach\",\"params\":{\"runtime_id\":\"aa\",\"mode\":\"observer\"}}",
+        );
+        defer {
+            for (frames) |frame| frame.deinit(allocator);
+            allocator.free(frames);
+        }
+    }
+    {
+        const read_only = try feedJson(
+            &conn,
+            .request,
+            3,
+            "{\"method\":\"runtime.find\",\"params\":{\"stream_id\":1,\"q\":\"6869\",\"scroll\":false}}",
+        );
+        defer if (read_only.frame) |frame| frame.deinit(allocator);
+        try testing.expect(std.mem.indexOf(
+            u8,
+            read_only.frame.?.payload,
+            "\"count\":2",
+        ) != null);
+    }
+    fake.last_find_scroll = false;
+    {
+        const mutating = try feedJson(
+            &conn,
+            .request,
+            4,
+            "{\"method\":\"runtime.find\",\"params\":{\"stream_id\":1,\"q\":\"6869\",\"scroll\":true}}",
+        );
+        defer if (mutating.frame) |frame| frame.deinit(allocator);
+        try testing.expect(std.mem.indexOf(
+            u8,
+            mutating.frame.?.payload,
+            "\"unauthorized\"",
+        ) != null);
+    }
+    try testing.expect(!fake.last_find_scroll);
+}
+
+test "server: notification consumption is authorized by the exact stream subscription" {
+    const allocator = testing.allocator;
+    var registry = reg.TerminalRuntimeRegistry.init(allocator);
+    defer registry.deinit();
+    _ = try registry.register(0xAA, 80, 24);
+    var fake: FakeRuntimeOps = .{};
+    var conn = Connection.init(allocator, 1, &registry);
+    defer conn.deinit();
+    conn.runtime_ops = fake.ops();
+    {
+        const hello = try feedJson(
+            &conn,
+            .hello,
+            1,
+            "{\"protocol_min\":2,\"protocol_max\":2}",
+        );
+        if (hello.frame) |frame| frame.deinit(allocator);
+    }
+    inline for (.{ "controller", "observer" }, 0..) |mode, index| {
+        var request_buf: [128]u8 = undefined;
+        const request = try std.fmt.bufPrint(
+            &request_buf,
+            "{{\"method\":\"runtime.attach\",\"params\":{{\"runtime_id\":\"aa\",\"mode\":\"{s}\"}}}}",
+            .{mode},
+        );
+        const frames = try feedExpectFrames(
+            &conn,
+            .request,
+            index + 2,
+            request,
+        );
+        defer {
+            for (frames) |frame| frame.deinit(allocator);
+            allocator.free(frames);
+        }
+    }
+
+    // 같은 connection의 stream 1이 controller여도 observer stream 2는 그 권위를 빌려
+    // shared pending notification을 소비할 수 없다.
+    {
+        const observer = try feedJson(
+            &conn,
+            .request,
+            4,
+            "{\"method\":\"runtime.notification\",\"params\":{\"stream_id\":2}}",
+        );
+        defer if (observer.frame) |frame| frame.deinit(allocator);
+        try testing.expect(std.mem.indexOf(
+            u8,
+            observer.frame.?.payload,
+            "\"unauthorized\"",
+        ) != null);
+    }
+    try testing.expectEqual(@as(usize, 0), fake.notification_calls);
+    {
+        const controller = try feedJson(
+            &conn,
+            .request,
+            5,
+            "{\"method\":\"runtime.notification\",\"params\":{\"stream_id\":1}}",
+        );
+        defer if (controller.frame) |frame| frame.deinit(allocator);
+        try testing.expect(std.mem.indexOf(
+            u8,
+            controller.frame.?.payload,
+            "\"title\":\"\"",
+        ) != null);
+    }
+    try testing.expectEqual(@as(usize, 1), fake.notification_calls);
+    try testing.expectEqual(@as(usize, 1), fake.notification_commit_calls);
+    // Same-major old client → new host: legacy runtime selector remains accepted only because this
+    // connection owns the live controller for that runtime.
+    {
+        const legacy_controller = try feedJson(
+            &conn,
+            .request,
+            6,
+            "{\"method\":\"runtime.notification\",\"params\":{\"runtime_id\":\"aa\"}}",
+        );
+        defer if (legacy_controller.frame) |frame| frame.deinit(allocator);
+        try testing.expect(std.mem.indexOf(
+            u8,
+            legacy_controller.frame.?.payload,
+            "\"title\":\"\"",
+        ) != null);
+    }
+    try testing.expectEqual(@as(usize, 2), fake.notification_calls);
+    try testing.expectEqual(@as(usize, 2), fake.notification_commit_calls);
+
+    var legacy_observer = Connection.init(allocator, 2, &registry);
+    defer legacy_observer.deinit();
+    // This pure seam has no daemon-wide SubscriptionIdentityTable; keep its raw registry ID
+    // distinct from conn's local 1/2. Product owner tests cover colliding local stream 1 safely.
+    legacy_observer.next_stream_id = 3;
+    legacy_observer.runtime_ops = fake.ops();
+    {
+        const hello = try feedJson(
+            &legacy_observer,
+            .hello,
+            1,
+            "{\"protocol_min\":2,\"protocol_max\":2}",
+        );
+        if (hello.frame) |frame| frame.deinit(allocator);
+    }
+    {
+        const frames = try feedExpectFrames(
+            &legacy_observer,
+            .request,
+            2,
+            "{\"method\":\"runtime.attach\",\"params\":{\"runtime_id\":\"aa\",\"mode\":\"observer\"}}",
+        );
+        defer {
+            for (frames) |frame| frame.deinit(allocator);
+            allocator.free(frames);
+        }
+    }
+    {
+        const denied = try feedJson(
+            &legacy_observer,
+            .request,
+            3,
+            "{\"method\":\"runtime.notification\",\"params\":{\"runtime_id\":\"aa\"}}",
+        );
+        defer if (denied.frame) |frame| frame.deinit(allocator);
+        try testing.expect(std.mem.indexOf(
+            u8,
+            denied.frame.?.payload,
+            "\"unauthorized\"",
+        ) != null);
+    }
+    try testing.expectEqual(@as(usize, 2), fake.notification_calls);
+    try testing.expectEqual(@as(usize, 2), fake.notification_commit_calls);
 }

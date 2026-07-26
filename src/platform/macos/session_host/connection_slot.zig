@@ -1141,6 +1141,10 @@ pub const ReactorCore = struct {
     slots: [max_connections]?*Slot = [_]?*Slot{null} ** max_connections,
 
     pub const Admission = SlotTable.Admission;
+    pub const OwnedControlItem = struct {
+        admission: Admission,
+        bytes: []u8,
+    };
     pub const AccountingSnapshot = struct {
         resident_bytes: usize,
         shared_bytes: usize,
@@ -1189,6 +1193,98 @@ pub const ReactorCore = struct {
         const slot = self.slots[admission.index] orelse return error.Stale;
         if (!std.meta.eql(slot.key, admission.key)) return error.Stale;
         return slot;
+    }
+
+    /// Atomically admits one authority-critical control frame per item (currently at most old
+    /// revocation + requester success). The fixed chunk tables need no allocation; a complete
+    /// cross-slot/global preflight makes the subsequent owned enqueues infallible in this
+    /// single-owner turn. On error the caller retains every buffer.
+    pub fn enqueueOwnedControlBatch(
+        self: *ReactorCore,
+        items: []const OwnedControlItem,
+    ) (EnqueueError || error{ Stale, InvalidBatch })!void {
+        if (items.len == 0 or items.len > 2) return error.InvalidBatch;
+
+        var slots: [2]*Slot = undefined;
+        var charges: [2]usize = undefined;
+        var total_charge: usize = 0;
+        for (items, 0..) |item, index| {
+            if (item.bytes.len == 0) return error.InvalidBatch;
+            slots[index] = try self.get(item.admission);
+            charges[index] = chargeFor(item.bytes.len);
+            total_charge = std.math.add(
+                usize,
+                total_charge,
+                charges[index],
+            ) catch return error.GlobalLimit;
+        }
+
+        var unique_slots: [2]*Slot = undefined;
+        var unique_charge: [2]usize = .{ 0, 0 };
+        var unique_chunks: [2]usize = .{ 0, 0 };
+        var unique_len: usize = 0;
+        for (slots[0..items.len], charges[0..items.len]) |slot, charge| {
+            var found: ?usize = null;
+            for (unique_slots[0..unique_len], 0..) |candidate, index|
+                if (candidate == slot) {
+                    found = index;
+                    break;
+                };
+            const index = found orelse blk: {
+                unique_slots[unique_len] = slot;
+                unique_len += 1;
+                break :blk unique_len - 1;
+            };
+            unique_charge[index] = std.math.add(
+                usize,
+                unique_charge[index],
+                charge,
+            ) catch return error.SlotLimit;
+            unique_chunks[index] += 1;
+        }
+
+        var shared_delta: usize = 0;
+        for (
+            unique_slots[0..unique_len],
+            unique_charge[0..unique_len],
+            unique_chunks[0..unique_len],
+        ) |slot, added_charge, added_chunks| {
+            if (slot.chunk_len +| added_chunks > max_chunks_per_slot)
+                return error.ChunkLimit;
+            if (slot.resident_bytes +| added_charge > per_slot_bytes)
+                return error.SlotLimit;
+            const old_shared = slot.control_resident_bytes -| control_reserve_bytes;
+            const new_control = std.math.add(
+                usize,
+                slot.control_resident_bytes,
+                added_charge,
+            ) catch return error.SlotLimit;
+            const new_shared = new_control -| control_reserve_bytes;
+            shared_delta = std.math.add(
+                usize,
+                shared_delta,
+                new_shared - old_shared,
+            ) catch return error.GlobalLimit;
+        }
+        const future_resident = std.math.add(
+            usize,
+            self.budget.resident_bytes,
+            total_charge,
+        ) catch return error.GlobalLimit;
+        if (future_resident > global_bytes) return error.GlobalLimit;
+        const future_shared = std.math.add(
+            usize,
+            self.budget.shared_bytes,
+            shared_delta,
+        ) catch return error.GlobalLimit;
+        if (future_shared > shared_hard_bytes or
+            self.budget.prepared_reclaim_bytes > future_shared or
+            future_shared - self.budget.prepared_reclaim_bytes >
+                shared_steady_bytes)
+            return error.GlobalLimit;
+
+        for (items, slots[0..items.len]) |item, slot|
+            slot.enqueueOwnedControl(item.bytes) catch unreachable;
     }
 
     pub fn closeIdleForUpgrade(self: *ReactorCore, admission: Admission) error{ Stale, Busy }!void {
@@ -1551,6 +1647,296 @@ test "global screen ceiling preserves every connection control reserve" {
     );
     for (0..max_connections) |_| budget.releaseControl(control_reserve_bytes, control_reserve_bytes);
     budget.releaseScreen(max_screen_global);
+}
+
+test "reactor atomically admits authority control across two stable slots" {
+    const reactor = try ReactorCore.create(std.testing.allocator);
+    defer reactor.destroy();
+    const old = try reactor.admit();
+    const requester = try reactor.admit();
+    const revoked = try std.testing.allocator.dupe(u8, "controller.revoked");
+    const success = try std.testing.allocator.dupe(u8, "takeover.success");
+    var owned = false;
+    defer if (!owned) {
+        std.testing.allocator.free(revoked);
+        std.testing.allocator.free(success);
+    };
+
+    try reactor.enqueueOwnedControlBatch(&.{
+        .{ .admission = old, .bytes = revoked },
+        .{ .admission = requester, .bytes = success },
+    });
+    owned = true;
+    try std.testing.expectEqualStrings(
+        "controller.revoked",
+        (try reactor.get(old)).firstPending().?.bytes,
+    );
+    try std.testing.expectEqualStrings(
+        "takeover.success",
+        (try reactor.get(requester)).firstPending().?.bytes,
+    );
+}
+
+test "authority control batch rejects stale peer without a requester prefix" {
+    const reactor = try ReactorCore.create(std.testing.allocator);
+    defer reactor.destroy();
+    const stale = try reactor.admit();
+    try reactor.closeConnection(stale);
+    const requester = try reactor.admit();
+    const revoked = try std.testing.allocator.dupe(u8, "controller.revoked");
+    defer std.testing.allocator.free(revoked);
+    const success = try std.testing.allocator.dupe(u8, "takeover.success");
+    defer std.testing.allocator.free(success);
+    const before = reactor.accountingSnapshot();
+
+    try std.testing.expectError(
+        error.Stale,
+        reactor.enqueueOwnedControlBatch(&.{
+            .{ .admission = stale, .bytes = revoked },
+            .{ .admission = requester, .bytes = success },
+        }),
+    );
+    try std.testing.expect((try reactor.get(requester)).firstPending() == null);
+    try std.testing.expectEqual(before.resident_bytes, reactor.accountingSnapshot().resident_bytes);
+    try std.testing.expectEqual(before.shared_bytes, reactor.accountingSnapshot().shared_bytes);
+}
+
+test "authority control batch preserves FIFO when old and requester share one slot" {
+    const reactor = try ReactorCore.create(std.testing.allocator);
+    defer reactor.destroy();
+    const shared = try reactor.admit();
+    const revoked = try std.testing.allocator.dupe(u8, "controller.revoked");
+    const success = try std.testing.allocator.dupe(u8, "takeover.success");
+    var owned = false;
+    defer if (!owned) {
+        std.testing.allocator.free(revoked);
+        std.testing.allocator.free(success);
+    };
+
+    try reactor.enqueueOwnedControlBatch(&.{
+        .{ .admission = shared, .bytes = revoked },
+        .{ .admission = shared, .bytes = success },
+    });
+    owned = true;
+    const slot = try reactor.get(shared);
+    try std.testing.expectEqualStrings("controller.revoked", slot.firstPending().?.bytes);
+    try slot.consumeWritten("controller.revoked".len);
+    try std.testing.expectEqualStrings("takeover.success", slot.firstPending().?.bytes);
+}
+
+test "authority control batch exact chunk cap rejects both frames without prefix" {
+    const reactor = try ReactorCore.create(std.testing.allocator);
+    defer reactor.destroy();
+    const shared = try reactor.admit();
+    const slot = try reactor.get(shared);
+    for (0..max_chunks_per_slot - 1) |_|
+        try slot.enqueueControl("x");
+    const before = reactor.accountingSnapshot();
+    const before_chunks = slot.chunk_len;
+    const revoked = try std.testing.allocator.dupe(u8, "controller.revoked");
+    defer std.testing.allocator.free(revoked);
+    const success = try std.testing.allocator.dupe(u8, "takeover.success");
+    defer std.testing.allocator.free(success);
+    try std.testing.expectError(
+        error.ChunkLimit,
+        reactor.enqueueOwnedControlBatch(&.{
+            .{ .admission = shared, .bytes = revoked },
+            .{ .admission = shared, .bytes = success },
+        }),
+    );
+    try std.testing.expectEqual(before_chunks, slot.chunk_len);
+    try std.testing.expectEqual(before.resident_bytes, reactor.accountingSnapshot().resident_bytes);
+    try std.testing.expectEqual(before.shared_bytes, reactor.accountingSnapshot().shared_bytes);
+}
+
+test "authority control batch admits exact byte cap and rejects cap plus one without prefix" {
+    const testing = std.testing;
+    inline for (.{ false, true }) |plus_one| {
+        const reactor = try ReactorCore.create(testing.allocator);
+        defer reactor.destroy();
+        const shared = try reactor.admit();
+        const slot = try reactor.get(shared);
+        const revoked = try testing.allocator.dupe(u8, "controller.revoked");
+        var revoked_owned = true;
+        defer if (revoked_owned) testing.allocator.free(revoked);
+        const success = try testing.allocator.dupe(u8, "takeover.success");
+        var success_owned = true;
+        defer if (success_owned) testing.allocator.free(success);
+        const prefix_len = per_slot_bytes - revoked.len - success.len +
+            @intFromBool(plus_one);
+        const prefix = try testing.allocator.alloc(u8, prefix_len);
+        @memset(prefix, 'p');
+        try slot.enqueueOwnedControl(prefix);
+        const before = reactor.accountingSnapshot();
+        const before_chunks = slot.chunk_len;
+        const result = reactor.enqueueOwnedControlBatch(&.{
+            .{ .admission = shared, .bytes = revoked },
+            .{ .admission = shared, .bytes = success },
+        });
+        if (plus_one) {
+            try testing.expectError(error.SlotLimit, result);
+            try testing.expectEqual(before_chunks, slot.chunk_len);
+            try testing.expectEqual(
+                before.resident_bytes,
+                reactor.accountingSnapshot().resident_bytes,
+            );
+            try testing.expectEqual(
+                before.shared_bytes,
+                reactor.accountingSnapshot().shared_bytes,
+            );
+        } else {
+            try result;
+            revoked_owned = false;
+            success_owned = false;
+            try testing.expectEqual(per_slot_bytes, slot.pending_bytes);
+        }
+    }
+}
+
+test "authority control batch honors cross-slot shared exact cap without either prefix" {
+    const testing = std.testing;
+    inline for (.{ false, true }) |plus_one| {
+        const reactor = try ReactorCore.create(testing.allocator);
+        defer reactor.destroy();
+        const old = try reactor.admit();
+        const requester = try reactor.admit();
+        const old_slot = try reactor.get(old);
+        const requester_slot = try reactor.get(requester);
+        const old_reserve = try testing.allocator.alloc(u8, control_reserve_bytes);
+        defer testing.allocator.free(old_reserve);
+        @memset(old_reserve, 'o');
+        const requester_reserve = try testing.allocator.alloc(u8, control_reserve_bytes);
+        defer testing.allocator.free(requester_reserve);
+        @memset(requester_reserve, 'r');
+        try old_slot.enqueueControl(old_reserve);
+        try requester_slot.enqueueControl(requester_reserve);
+
+        const revoked = try testing.allocator.dupe(u8, "controller.revoked");
+        var revoked_owned = true;
+        defer if (revoked_owned) testing.allocator.free(revoked);
+        const success = try testing.allocator.dupe(u8, "takeover.success");
+        var success_owned = true;
+        defer if (success_owned) testing.allocator.free(success);
+        const authority_bytes = revoked.len + success.len;
+        const seeded_shared = shared_steady_bytes - authority_bytes +
+            @intFromBool(plus_one);
+        try testing.expect(reactor.budget.reserveScreen(seeded_shared));
+        defer reactor.budget.releaseScreen(seeded_shared);
+        const before = reactor.accountingSnapshot();
+        const old_chunks = old_slot.chunk_len;
+        const requester_chunks = requester_slot.chunk_len;
+
+        const result = reactor.enqueueOwnedControlBatch(&.{
+            .{ .admission = old, .bytes = revoked },
+            .{ .admission = requester, .bytes = success },
+        });
+        if (plus_one) {
+            try testing.expectError(error.GlobalLimit, result);
+            try testing.expectEqual(old_chunks, old_slot.chunk_len);
+            try testing.expectEqual(requester_chunks, requester_slot.chunk_len);
+            try testing.expectEqual(
+                before.resident_bytes,
+                reactor.accountingSnapshot().resident_bytes,
+            );
+            try testing.expectEqual(
+                before.shared_bytes,
+                reactor.accountingSnapshot().shared_bytes,
+            );
+        } else {
+            try result;
+            revoked_owned = false;
+            success_owned = false;
+            try testing.expectEqual(shared_steady_bytes, reactor.budget.shared_bytes);
+            try testing.expectEqual(old_chunks + 1, old_slot.chunk_len);
+            try testing.expectEqual(requester_chunks + 1, requester_slot.chunk_len);
+        }
+        try old_slot.consumeWritten(old_slot.pending_bytes);
+        try requester_slot.consumeWritten(requester_slot.pending_bytes);
+    }
+}
+
+test "authority control batch reaches global and shared hard caps atomically" {
+    const testing = std.testing;
+    inline for (.{ false, true }) |plus_one| {
+        const reactor = try ReactorCore.create(testing.allocator);
+        defer reactor.destroy();
+        var admissions: [max_connections]SlotTable.Admission = undefined;
+        for (&admissions) |*admission| admission.* = try reactor.admit();
+        const reserve = try testing.allocator.alloc(u8, control_reserve_bytes);
+        defer testing.allocator.free(reserve);
+        @memset(reserve, 'c');
+        for (admissions) |admission|
+            try (try reactor.get(admission)).enqueueControl(reserve);
+        const old = admissions[max_connections - 2];
+        const requester = admissions[max_connections - 1];
+        const old_slot = try reactor.get(old);
+        const requester_slot = try reactor.get(requester);
+        const tracker = try old_slot.createScreenTracker();
+        const retained = try old_slot.reserveBaseUpdate(tracker, base_update_max_bytes);
+        try old_slot.commitBaseUpdate(retained, base_update_max_bytes);
+        const authority_bytes: usize = 1024 * 1024;
+        const steady_screen = shared_steady_bytes - base_update_max_bytes -
+            authority_bytes;
+        try testing.expect(reactor.budget.reserveScreen(steady_screen));
+        const replacement = try old_slot.reserveBaseUpdate(tracker, base_update_max_bytes);
+        var seeded = true;
+        defer {
+            if (seeded) {
+                old_slot.rollbackBaseUpdate(replacement) catch unreachable;
+                old_slot.releaseBaseState(tracker) catch unreachable;
+                reactor.budget.releaseScreen(steady_screen);
+            }
+        }
+
+        const target_bytes = authority_bytes + @intFromBool(plus_one);
+        const revoked = try testing.allocator.alloc(u8, target_bytes / 2);
+        var revoked_owned = true;
+        defer if (revoked_owned) testing.allocator.free(revoked);
+        @memset(revoked, 'v');
+        const success = try testing.allocator.alloc(u8, target_bytes - revoked.len);
+        var success_owned = true;
+        defer if (success_owned) testing.allocator.free(success);
+        @memset(success, 's');
+        const before = reactor.accountingSnapshot();
+        const old_chunks = old_slot.chunk_len;
+        const requester_chunks = requester_slot.chunk_len;
+
+        const result = reactor.enqueueOwnedControlBatch(&.{
+            .{ .admission = old, .bytes = revoked },
+            .{ .admission = requester, .bytes = success },
+        });
+        if (plus_one) {
+            try testing.expectError(error.GlobalLimit, result);
+            try testing.expectEqual(old_chunks, old_slot.chunk_len);
+            try testing.expectEqual(requester_chunks, requester_slot.chunk_len);
+            try testing.expectEqual(
+                before.resident_bytes,
+                reactor.accountingSnapshot().resident_bytes,
+            );
+            try testing.expectEqual(
+                before.shared_bytes,
+                reactor.accountingSnapshot().shared_bytes,
+            );
+        } else {
+            try result;
+            revoked_owned = false;
+            success_owned = false;
+            try testing.expectEqual(global_bytes, reactor.budget.resident_bytes);
+            try testing.expectEqual(shared_hard_bytes, reactor.budget.shared_bytes);
+        }
+        for (admissions) |admission| {
+            const slot = try reactor.get(admission);
+            try slot.consumeWritten(slot.pending_bytes);
+        }
+        try old_slot.rollbackBaseUpdate(replacement);
+        try old_slot.releaseBaseState(tracker);
+        reactor.budget.releaseScreen(steady_screen);
+        seeded = false;
+        try testing.expectEqual(@as(usize, 0), reactor.budget.resident_bytes);
+        try testing.expectEqual(@as(usize, 0), reactor.budget.shared_bytes);
+        try testing.expectEqual(@as(usize, 0), reactor.budget.prepared_base_bytes);
+        try testing.expectEqual(@as(usize, 0), reactor.budget.prepared_reclaim_bytes);
+    }
 }
 
 test "connection slot control resident cap and chunk cap reject cap plus one" {

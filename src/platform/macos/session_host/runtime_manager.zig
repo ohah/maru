@@ -114,6 +114,10 @@ pub const RuntimeManager = struct {
     backend_impl: InProcessTermBackend,
     /// host의 runtime_id 키드 표. 이 매니저가 아니라 daemon이 소유한다(SocketServer도 참조) — 여기선 등록/해제만 한다.
     host_registry: *reg.TerminalRuntimeRegistry,
+    observed_reaped_children: u64 = 0,
+    observed_last_child_exit_status: i32 = -1,
+    output_metrics_enabled: bool = false,
+    observed_output_bytes: std.atomic.Value(u64) = .init(0),
     /// 다음 in-process handle. 1부터 발급한다 — 0은 opaque 슬롯의 null과 겹치므로 handle로 쓰지 않는다.
     next_handle: RuntimeHandle = 1,
     /// observation은 client/창/stream마다 100ms cadence로 호출될 수 있지만 OS process 열거는 runtime당 최대 2Hz다.
@@ -136,6 +140,10 @@ pub const RuntimeManager = struct {
         self.surface_runtime = SurfaceRuntime.init(allocator);
         self.backend_impl = InProcessTermBackend.init(allocator, io, &self.live_registry, &self.surface_runtime);
         self.host_registry = host_registry;
+        self.observed_reaped_children = 0;
+        self.observed_last_child_exit_status = -1;
+        self.output_metrics_enabled = false;
+        self.observed_output_bytes = .init(0);
         self.next_handle = 1;
         self.foreground_cache = .empty;
         self.bell_counts = .empty;
@@ -298,8 +306,14 @@ pub const RuntimeManager = struct {
             };
             result.output_events += drained.output_events;
             if (drained.ended) |ended| switch (ended) {
-                .exited => {
+                .exited => |status| {
                     result.exited += 1;
+                    self.observed_reaped_children +|= 1;
+                    self.observed_last_child_exit_status = switch (status) {
+                        .exited => |code| code,
+                        .signaled => |signal| 128 + @as(i32, signal),
+                        .unknown => |raw| raw,
+                    };
                     remove_ids[remove_count] = item.runtime_id;
                     remove_count += 1;
                 },
@@ -311,6 +325,47 @@ pub const RuntimeManager = struct {
         }
         for (remove_ids[0..remove_count]) |runtime_id| self.terminateRuntime(runtime_id);
         return result;
+    }
+
+    /// 현재 host가 소유한 실제 PTY reader들의 누적 raw output bytes. test fixture가
+    /// controller input bytes를 PTY output으로 재명명하는 false-green 없이 제품 reader
+    /// 경계를 계측하도록 제공하는 owner-only 관측값이다.
+    pub fn enableOutputMetrics(self: *RuntimeManager) void {
+        std.debug.assert(self.host_registry.count() == 0);
+        self.output_metrics_enabled = true;
+    }
+
+    pub fn totalPtyOutputBytes(self: *const RuntimeManager) u64 {
+        if (!self.output_metrics_enabled) return 0;
+        return self.observed_output_bytes.load(.acquire);
+    }
+
+    pub const ChildExitEvidence = struct {
+        live_child_pid: std.c.pid_t,
+        reaped_children: u64,
+        last_exit_status: i32,
+    };
+
+    pub fn fixtureChildExitEvidence(self: *RuntimeManager) ChildExitEvidence {
+        var live_child_pid: std.c.pid_t = 0;
+        var it = self.host_registry.entries.iterator();
+        while (it.next()) |entry| {
+            const slot = entry.value_ptr.*.runtime orelse continue;
+            const terminal_slot = self.backend_impl.terminalForHostLifecycle(
+                @intFromPtr(slot),
+            ) orelse continue;
+            if (live_child_pid != 0) return .{
+                .live_child_pid = -1,
+                .reaped_children = self.observed_reaped_children,
+                .last_exit_status = self.observed_last_child_exit_status,
+            };
+            live_child_pid = terminal_slot.live_pty.childPid();
+        }
+        return .{
+            .live_child_pid = live_child_pid,
+            .reaped_children = self.observed_reaped_children,
+            .last_exit_status = self.observed_last_child_exit_status,
+        };
     }
 
     /// U2 phase 1: owner event를 먼저 drain한 뒤 attachment/lifecycle을 재검사하고 모든 reader에 pause를 요청한다.
@@ -1398,6 +1453,11 @@ pub const RuntimeManager = struct {
         errdefer {
             be.closeAndDetach(handle);
             be.remove(handle);
+        }
+        if (self.output_metrics_enabled) {
+            const terminal_slot = self.backend_impl.terminalForHostLifecycle(handle) orelse
+                return error.RuntimeNotFound;
+            terminal_slot.live_pty.setOutputByteCounter(&self.observed_output_bytes);
         }
         _ = try be.attach(handle, true); // backend가 initial_config를 적용한 뒤 reader 시작 — 첫 output부터 host 설정 사용.
 

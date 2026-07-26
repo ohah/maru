@@ -1221,6 +1221,28 @@ pub const ReactorCore = struct {
         };
     }
 
+    /// ReleaseFast fixture phase barrier: lifetime high-water를 pressure phase에 잘못
+    /// 귀속하지 않도록 peak만 현재 canonical accounting에서 다시 시작한다.
+    /// admission/current charge와 authority는 바꾸지 않는다.
+    pub fn resetFixturePeaksToCurrent(self: *ReactorCore) void {
+        self.budget.peak_resident_bytes = self.budget.resident_bytes;
+        self.budget.peak_shared_bytes = self.budget.shared_bytes;
+        self.budget.peak_prepared_base_bytes = self.budget.prepared_base_bytes;
+        self.budget.peak_prepared_reclaim_bytes = self.budget.prepared_reclaim_bytes;
+        self.budget.peak_slot_queue_bytes = 0;
+        self.budget.peak_slot_base_bytes = 0;
+        self.budget.peak_slot_control_bytes = 0;
+        self.budget.peak_slot_total_bytes = 0;
+        for (self.slots) |maybe_slot| {
+            const slot = maybe_slot orelse continue;
+            self.budget.recordSlotPeak(
+                slot.resident_bytes,
+                slot.base_resident_bytes,
+                slot.control_resident_bytes,
+            );
+        }
+    }
+
     pub fn drainedForUpgrade(self: *const ReactorCore) bool {
         return self.table.active_count == 0 and
             self.budget.resident_bytes == 0 and self.budget.shared_bytes == 0 and
@@ -1646,6 +1668,41 @@ test "accounting snapshot retains intra-turn prepared and slot high water" {
     try std.testing.expect(peak.peak_slot_queue_bytes <= per_slot_bytes);
     try std.testing.expect(peak.peak_slot_base_bytes <= base_per_slot_bytes);
     try std.testing.expect(peak.peak_slot_total_bytes <= total_per_slot_bytes);
+}
+
+test "fixture peak reset starts at exact current charged accounting" {
+    const reactor = try ReactorCore.create(std.testing.allocator);
+    defer reactor.destroy();
+    const admission = try reactor.admit();
+    const slot = try reactor.get(admission);
+    const tracker = try slot.createScreenTracker();
+    try slot.enqueueScreen(tracker, "screen");
+    try slot.enqueueControl("control");
+    const reservation = try slot.reserveBaseUpdate(tracker, 16);
+    defer slot.rollbackBaseUpdate(reservation) catch unreachable;
+
+    reactor.resetFixturePeaksToCurrent();
+    const reset = reactor.accountingSnapshot();
+    try std.testing.expectEqual(reset.resident_bytes, reset.peak_resident_bytes);
+    try std.testing.expectEqual(reset.shared_bytes, reset.peak_shared_bytes);
+    try std.testing.expectEqual(
+        reset.prepared_base_bytes,
+        reset.peak_prepared_base_bytes,
+    );
+    try std.testing.expectEqual(
+        reset.prepared_reclaim_bytes,
+        reset.peak_prepared_reclaim_bytes,
+    );
+    try std.testing.expectEqual(slot.resident_bytes, reset.peak_slot_queue_bytes);
+    try std.testing.expectEqual(slot.base_resident_bytes, reset.peak_slot_base_bytes);
+    try std.testing.expectEqual(
+        slot.control_resident_bytes,
+        reset.peak_slot_control_bytes,
+    );
+    try std.testing.expectEqual(
+        slot.resident_bytes + slot.base_resident_bytes,
+        reset.peak_slot_total_bytes,
+    );
 }
 
 test "connection slot fixed ring stays bounded while a tail remains across long churn" {

@@ -337,6 +337,23 @@ pub const LivePtySession = struct {
         return self.queue;
     }
 
+    /// 실제 PTY reader가 받은 누적 raw bytes. processing 모드의 queue에는 빈 렌더 신호만
+    /// 들어가므로 session-host RSS fixture는 이 reader-owned counter를 사용한다.
+    pub fn outputBytesRead(self: *const LivePtySession) u64 {
+        return self.reader.outputBytesRead();
+    }
+
+    pub fn setOutputByteCounter(
+        self: *LivePtySession,
+        counter: *std.atomic.Value(u64),
+    ) void {
+        self.reader.setOutputByteCounter(counter);
+    }
+
+    pub fn childPid(self: *const LivePtySession) std.c.pid_t {
+        return self.session.childPid();
+    }
+
     pub fn pump(self: *LivePtySession, runtime: *runtime_mod.SurfaceRuntime) runtime_pump.RuntimeEventPump {
         return runtime_pump.RuntimeEventPump.init(self.allocator, self.queue, runtime);
     }

@@ -92,6 +92,31 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  # P5b2b2: Debug test runner나 ru_maxrss가 아니라 독립 ReleaseFast session-host PID의
+  # 실제 forkpty/3-client backpressure와 현재 RSS를 구조화 artifact로 판정한다.
+  session-host-slow-observer-macos:
+    name: session host slow observer macOS
+    runs-on: macos-15
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5c # v4
+        with:
+          persist-credentials: false
+      - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac # v2
+        with:
+          version: 2026.2.7
+          sha256: f8becf318705e1bd91227ed0efee4f9fd988d1d5c66bb48e996f030792a0d3b7 # macos-arm64 binary
+      - name: Verify real PTY slow-observer isolation and host RSS
+        run: zig build test-session-host-slow-observer-macos
+      - name: Upload session-host slow-observer artifact
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: maru-session-host-slow-observer-macos-artifact
+          path: tests/artifacts/perf/session-host-slow-observer-macos.json
+          if-no-files-found: error
+          retention-days: 14
+
   # 외부 reference 오라클(opt-in). 손으로 기록한 golden을 실제 VT 구현과 대조한다.
   # CI에서는 설치가 가벼운 libvterm(apt)과 Alacritty(runner 기본 Rust)만 돌린다.
   # Ghostty libghostty-vt 오라클은 Zig 0.15.2 + 무거운 Ghostty 빌드가 필요해

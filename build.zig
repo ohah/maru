@@ -1227,6 +1227,28 @@ pub fn build(b: *std.Build) void {
     });
     const run_perf_validate_tests = b.addRunArtifact(perf_validate_tests);
     test_step.dependOn(&run_perf_validate_tests.step);
+    const session_host_connection_slot_mod = b.createModule(.{
+        .root_source_file = b.path(
+            "src/platform/macos/session_host/connection_slot.zig",
+        ),
+        .target = target,
+        .optimize = optimize,
+    });
+    const session_host_slow_observer_validator_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path(
+                "tools/perf/session_host_slow_observer_validator.zig",
+            ),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "connection_slot", .module = session_host_connection_slot_mod },
+            },
+        }),
+    });
+    const run_session_host_slow_observer_validator_tests =
+        b.addRunArtifact(session_host_slow_observer_validator_tests);
+    test_step.dependOn(&run_session_host_slow_observer_validator_tests.step);
     // control_socket.zig(Track C 1b)는 실제 unix domain socket을 bind/accept하는 L4 컨트롤 플레인 부트스트랩이다.
     // getpeereid + std.c로 이식 가능하게 썼지만, 검증이 macOS에서만 되고 후속 slice(1e/1g)가 macOS 전용
     // xucred/LOCAL_PEERPID를 더하므로 **macOS에서만** test step에 배선한다(ubuntu CI에 미검증 Linux 소켓
@@ -1572,6 +1594,136 @@ pub fn build(b: *std.Build) void {
             "Run signed N-1 to current live PTY session-host upgrade E2E (macOS)",
         );
         signed_upgrade_e2e_step.dependOn(&run_signed_upgrade_e2e.step);
+
+        // P5b2b2는 Debug test runner RSS가 아니라 별도 ReleaseFast host PID를 잰다.
+        // 제품 daemon/runtime/poll owner를 재사용하되 private inherited socketpair만
+        // fixture telemetry로 허용하고 public MRSH에는 diagnostics를 추가하지 않는다.
+        const slow_observer_session_host_mod = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/session_host.zig"),
+            .target = target,
+            .optimize = .ReleaseFast,
+            .link_libc = true,
+            .imports = &.{.{ .name = "maru", .module = maru_mod }},
+        });
+        const slow_observer_probe_mod = b.createModule(.{
+            .root_source_file = b.path(
+                "tests/support/session_host_slow_observer_probe.zig",
+            ),
+            .target = target,
+            .optimize = .ReleaseFast,
+            .imports = &.{
+                .{ .name = "session_host", .module = slow_observer_session_host_mod },
+            },
+        });
+        const slow_observer_probe_tests = b.addTest(.{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(
+                    "tests/support/session_host_slow_observer_probe.zig",
+                ),
+                .target = target,
+                .optimize = .ReleaseFast,
+                .imports = &.{
+                    .{ .name = "session_host", .module = slow_observer_session_host_mod },
+                },
+            }),
+        });
+        const run_slow_observer_probe_tests = b.addRunArtifact(
+            slow_observer_probe_tests,
+        );
+        const slow_observer_host = b.addExecutable(.{
+            .name = "maru-session-host-slow-observer-host",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(
+                    "tests/session_host_slow_observer_host.zig",
+                ),
+                .target = target,
+                .optimize = .ReleaseFast,
+                .link_libc = true,
+                .imports = &.{
+                    .{ .name = "session_host", .module = slow_observer_session_host_mod },
+                    .{ .name = "slow_observer_probe", .module = slow_observer_probe_mod },
+                },
+            }),
+        });
+        const slow_observer_e2e = b.addExecutable(.{
+            .name = "maru-session-host-slow-observer-e2e",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(
+                    "tests/session_host_slow_observer_e2e.zig",
+                ),
+                .target = target,
+                .optimize = .ReleaseFast,
+                .link_libc = true,
+                .imports = &.{
+                    .{ .name = "session_host", .module = slow_observer_session_host_mod },
+                    .{ .name = "slow_observer_probe", .module = slow_observer_probe_mod },
+                },
+            }),
+        });
+        const slow_observer_e2e_tests = b.addTest(.{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(
+                    "tests/session_host_slow_observer_e2e.zig",
+                ),
+                .target = target,
+                .optimize = .ReleaseFast,
+                .link_libc = true,
+                .imports = &.{
+                    .{ .name = "session_host", .module = slow_observer_session_host_mod },
+                    .{ .name = "slow_observer_probe", .module = slow_observer_probe_mod },
+                },
+            }),
+        });
+        const run_slow_observer_e2e_tests = b.addRunArtifact(
+            slow_observer_e2e_tests,
+        );
+        const run_slow_observer_e2e = b.addRunArtifact(slow_observer_e2e);
+        run_slow_observer_e2e.addArtifactArg(slow_observer_host);
+        run_slow_observer_e2e.addArg(
+            "tests/artifacts/perf/session-host-slow-observer-macos.json",
+        );
+        run_slow_observer_e2e.setCwd(b.path("."));
+        run_slow_observer_e2e.has_side_effects = true;
+
+        const slow_observer_validator = b.addExecutable(.{
+            .name = "maru-session-host-slow-observer-validator",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(
+                    "tools/perf/session_host_slow_observer_validator.zig",
+                ),
+                .target = target,
+                .optimize = .ReleaseFast,
+                .imports = &.{
+                    .{
+                        .name = "connection_slot",
+                        .module = b.createModule(.{
+                            .root_source_file = b.path(
+                                "src/platform/macos/session_host/connection_slot.zig",
+                            ),
+                            .target = target,
+                            .optimize = .ReleaseFast,
+                        }),
+                    },
+                },
+            }),
+        });
+        const run_slow_observer_validator = b.addRunArtifact(
+            slow_observer_validator,
+        );
+        run_slow_observer_validator.addArg(
+            "tests/artifacts/perf/session-host-slow-observer-macos.json",
+        );
+        run_slow_observer_validator.setCwd(b.path("."));
+        run_slow_observer_validator.has_side_effects = true;
+        run_slow_observer_validator.step.dependOn(&run_slow_observer_e2e.step);
+
+        const slow_observer_step = b.step(
+            "test-session-host-slow-observer-macos",
+            "Run the ReleaseFast real PTY/RSS slow-observer artifact gate",
+        );
+        slow_observer_step.dependOn(&run_slow_observer_validator.step);
+        slow_observer_step.dependOn(&run_slow_observer_probe_tests.step);
+        slow_observer_step.dependOn(&run_slow_observer_e2e_tests.step);
     }
     run_session_host_tests.addArg("MARU_SESSION_HOST_TEST_ONESHOT=maru-test-only-v1");
     run_session_host_tests.addArtifactArg(session_host_tests);

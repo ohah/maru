@@ -1225,6 +1225,7 @@ fn printUsage(writer: *std.Io.Writer) !void {
         \\  maru host status [--json]
         \\  maru runtime list [--json]
         \\  maru runtime get <32-lower-hex-runtime-id> [--json]
+        \\  maru runtime end <32-lower-hex-runtime-id> [--yes]
         \\  maru trace anonymize <input.trace> [output.trace]
         \\
         \\commands:
@@ -1240,7 +1241,7 @@ fn printUsage(writer: *std.Io.Writer) !void {
         \\  sessions   list running Maru sessions (surfaces) as read-only metadata (`sessions --help`)
         \\  session    read-only metadata for a single surface (`session get <id>`, `session --help`)
         \\  host       inspect the existing persistent session host without starting one (`host --help`)
-        \\  runtime    inspect persistent runtimes without output or scrollback (`runtime --help`)
+        \\  runtime    inspect or explicitly end persistent runtimes without starting a host (`runtime --help`)
         \\  browser    control a web surface (navigate/get-url/exec/get-cookies; asks for confirmation) (`browser --help`)
         \\  trace      anonymize a captured MARU_TRACE (paths/IPs/user@host/username) for fixture promotion
         \\

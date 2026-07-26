@@ -15,6 +15,7 @@ pub const ExitCode = enum(u8) {
     busy = 6,
     runtime_not_found = 7,
     protocol = 8,
+    not_confirmed = 9,
 };
 
 pub const Output = enum { text, json };
@@ -26,12 +27,17 @@ pub const Request = union(enum) {
         runtime_id: u128,
         output: Output,
     },
+    runtime_end: struct {
+        runtime_id: u128,
+        assume_yes: bool,
+    },
 
     pub fn output(self: Request) Output {
         return switch (self) {
             .host_status => |value| value,
             .runtime_list => |value| value,
             .runtime_get => |value| value.output,
+            .runtime_end => .text,
         };
     }
 
@@ -40,6 +46,7 @@ pub const Request = union(enum) {
             .host_status => "host.info",
             .runtime_list => "runtime.list",
             .runtime_get => "runtime.get",
+            .runtime_end => "runtime.terminate",
         };
     }
 };
@@ -69,8 +76,9 @@ pub const runtime_help =
     \\usage:
     \\  maru runtime list [--json]
     \\  maru runtime get <32-lower-hex-runtime-id> [--json]
+    \\  maru runtime end <32-lower-hex-runtime-id> [--yes]
     \\
-    \\Read persistent runtime metadata without output or scrollback.
+    \\Inspect or explicitly end persistent runtimes without starting a host.
     \\
 ;
 
@@ -92,12 +100,33 @@ pub fn parseRuntime(args: []const []const u8) ParseError!Command {
     }
     if (std.mem.eql(u8, args[0], "list"))
         return .{ .request = .{ .runtime_list = try parseOutput(args[1..]) } };
+    if (std.mem.eql(u8, args[0], "end")) return parseRuntimeEnd(args[1..]);
     if (!std.mem.eql(u8, args[0], "get")) return error.UnknownSubcommand;
     if (args.len == 1) return error.MissingRuntimeId;
     const runtime_id = parseRuntimeId(args[1]) orelse return error.InvalidRuntimeId;
     return .{ .request = .{ .runtime_get = .{
         .runtime_id = runtime_id,
         .output = try parseOutput(args[2..]),
+    } } };
+}
+
+fn parseRuntimeEnd(args: []const []const u8) ParseError!Command {
+    if (args.len == 0) return error.MissingRuntimeId;
+    var runtime_id: ?u128 = null;
+    var assume_yes = false;
+    for (args) |arg| {
+        if (std.mem.eql(u8, arg, "--yes")) {
+            if (assume_yes) return error.UnexpectedArgument;
+            assume_yes = true;
+            continue;
+        }
+        if (std.mem.startsWith(u8, arg, "--")) return error.UnknownOption;
+        if (runtime_id != null) return error.UnexpectedArgument;
+        runtime_id = parseRuntimeId(arg) orelse return error.InvalidRuntimeId;
+    }
+    return .{ .request = .{ .runtime_end = .{
+        .runtime_id = runtime_id orelse return error.MissingRuntimeId,
+        .assume_yes = assume_yes,
     } } };
 }
 
@@ -119,6 +148,11 @@ pub fn parseRuntimeId(text: []const u8) ?u128 {
     return if (value == 0) null else value;
 }
 
+pub fn confirmationAccepted(line: []const u8) bool {
+    const answer = std.mem.trim(u8, line, " \t\r\n");
+    return std.ascii.eqlIgnoreCase(answer, "y") or std.ascii.eqlIgnoreCase(answer, "yes");
+}
+
 pub fn cacheBase(
     allocator: std.mem.Allocator,
     xdg_cache_home: ?[]const u8,
@@ -133,16 +167,19 @@ pub fn paramsJson(
 ) std.mem.Allocator.Error!?[]u8 {
     return switch (request) {
         .host_status, .runtime_list => null,
-        .runtime_get => |value| blk: {
-            var id_buf: [32]u8 = undefined;
-            const id = std.fmt.bufPrint(&id_buf, "{x:0>32}", .{value.runtime_id}) catch unreachable;
-            var out: std.Io.Writer.Allocating = .init(allocator);
-            defer out.deinit();
-            var json: std.json.Stringify = .{ .writer = &out.writer, .options = .{} };
-            json.write(.{ .runtime_id = &id }) catch return error.OutOfMemory;
-            break :blk try allocator.dupe(u8, out.written());
-        },
+        .runtime_get => |value| try runtimeIdParams(allocator, value.runtime_id),
+        .runtime_end => |value| try runtimeIdParams(allocator, value.runtime_id),
     };
+}
+
+fn runtimeIdParams(allocator: std.mem.Allocator, runtime_id: u128) std.mem.Allocator.Error![]u8 {
+    var id_buf: [32]u8 = undefined;
+    const id = std.fmt.bufPrint(&id_buf, "{x:0>32}", .{runtime_id}) catch unreachable;
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    defer out.deinit();
+    var json: std.json.Stringify = .{ .writer = &out.writer, .options = .{} };
+    json.write(.{ .runtime_id = &id }) catch return error.OutOfMemory;
+    return allocator.dupe(u8, out.written());
 }
 
 pub const RemoteError = host_protocol.ErrorCode;
@@ -199,12 +236,14 @@ pub const Result = union(enum) {
     host_status: HostStatus,
     runtime_list: []RuntimeMeta,
     runtime_get: RuntimeMeta,
+    runtime_end: [32]u8,
 
     pub fn deinit(self: *Result, allocator: std.mem.Allocator) void {
         switch (self.*) {
             .host_status => |*value| value.deinit(allocator),
             .runtime_list => |items| allocator.free(items),
             .runtime_get => {},
+            .runtime_end => {},
         }
         self.* = undefined;
     }
@@ -250,7 +289,28 @@ pub fn decodeResponse(
             envelope.value,
             get.runtime_id,
         ) },
+        .runtime_end => |end| .{ .runtime_end = try decodeRuntimeEnd(
+            allocator,
+            envelope.value,
+            end.runtime_id,
+        ) },
     };
+}
+
+fn decodeRuntimeEnd(
+    allocator: std.mem.Allocator,
+    value: std.json.Value,
+    expected_runtime_id: u128,
+) DecodeError![32]u8 {
+    const Wire = struct { result: struct { terminated: bool } };
+    var parsed = std.json.parseFromValue(Wire, allocator, value, .{
+        .ignore_unknown_fields = true,
+    }) catch |err| return if (err == error.OutOfMemory) error.OutOfMemory else error.Malformed;
+    defer parsed.deinit();
+    if (!parsed.value.result.terminated) return error.Malformed;
+    var id_buf: [32]u8 = undefined;
+    _ = std.fmt.bufPrint(&id_buf, "{x:0>32}", .{expected_runtime_id}) catch unreachable;
+    return id_buf;
 }
 
 fn parseRemoteError(name: []const u8) ?RemoteError {
@@ -413,6 +473,7 @@ pub fn render(result: Result, output: Output, writer: *std.Io.Writer) !void {
             for (items) |item| try renderRuntimeLine(item, writer);
         },
         .runtime_get => |item| try renderRuntimeLine(item, writer),
+        .runtime_end => |runtime_id| try writer.print("Ended runtime {s}.\n", .{&runtime_id}),
     }
 }
 
@@ -453,6 +514,7 @@ fn renderJson(result: Result, writer: *std.Io.Writer) !void {
             try writer.writeAll("]}");
         },
         .runtime_get => |item| try writeRuntimeJson(item, writer),
+        .runtime_end => return error.JsonOutputUnsupported,
     }
     try writer.writeByte('\n');
 }
@@ -479,8 +541,14 @@ test "runtime CLI parser exposes only implemented read commands and canonical ID
     try std.testing.expectEqual(Output.json, get.output);
     try std.testing.expectError(error.InvalidRuntimeId, parseRuntime(&.{ "get", "aabb" }));
     try std.testing.expectError(error.InvalidRuntimeId, parseRuntime(&.{ "get", "0000000000000000000000000000AABB" }));
-    try std.testing.expectError(error.UnknownSubcommand, parseRuntime(&.{"end"}));
-    try std.testing.expect(std.mem.indexOf(u8, runtime_help, " end ") == null);
+    const end = (try parseRuntime(&.{ "end", "--yes", "0000000000000000000000000000aabb" })).request.runtime_end;
+    try std.testing.expectEqual(@as(u128, 0xAABB), end.runtime_id);
+    try std.testing.expect(end.assume_yes);
+    try std.testing.expectError(error.MissingRuntimeId, parseRuntime(&.{"end"}));
+    try std.testing.expectError(error.UnexpectedArgument, parseRuntime(&.{ "end", "0000000000000000000000000000aabb", "--yes", "--yes" }));
+    try std.testing.expect(confirmationAccepted("yes\n"));
+    try std.testing.expect(confirmationAccepted(" Y "));
+    try std.testing.expect(!confirmationAccepted("no\n"));
 }
 
 test "runtime CLI decodes, sorts, and renders stable text and JSON DTOs" {
@@ -541,6 +609,45 @@ test "runtime CLI renders exact host get and empty-list text snapshots" {
     out.clearRetainingCapacity();
     try render(.{ .runtime_list = &.{} }, .text, &out.writer);
     try std.testing.expectEqualStrings("No persistent runtimes.\n", out.written());
+}
+
+test "runtime end decodes only explicit success and renders the requested canonical id" {
+    const request: Request = .{ .runtime_end = .{
+        .runtime_id = 0xaa,
+        .assume_yes = true,
+    } };
+    const params = (try paramsJson(std.testing.allocator, request)).?;
+    defer std.testing.allocator.free(params);
+    try std.testing.expectEqualStrings(
+        "{\"runtime_id\":\"000000000000000000000000000000aa\"}",
+        params,
+    );
+    var remote: ?RemoteError = null;
+    var result = try decodeResponse(
+        std.testing.allocator,
+        request,
+        "{\"result\":{\"terminated\":true}}",
+        null,
+        &remote,
+    );
+    defer result.deinit(std.testing.allocator);
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    try render(result, .text, &out.writer);
+    try std.testing.expectEqualStrings(
+        "Ended runtime 000000000000000000000000000000aa.\n",
+        out.written(),
+    );
+    try std.testing.expectError(
+        error.Malformed,
+        decodeResponse(
+            std.testing.allocator,
+            request,
+            "{\"result\":{\"terminated\":false}}",
+            null,
+            &remote,
+        ),
+    );
 }
 
 test "runtime CLI maps typed remote errors to stable exits" {

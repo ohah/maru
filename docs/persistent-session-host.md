@@ -746,7 +746,7 @@ maru host status [--json]
 maru runtime list [--json]
 maru runtime get <runtime-id> [--json]
 maru attach [--read-only | --take-over] <runtime-id>
-maru runtime end [--yes] <runtime-id>
+maru runtime end <runtime-id> [--yes]
 ```
 
 기존 `maru sessions list`는 살아 있는 GUI surface를 조회하는 `maru.control.v1` CLI이므로 의미를 바꾸지 않는다.
@@ -760,7 +760,7 @@ maru runtime end [--yes] <runtime-id>
 | `maru attach --read-only` | observer로 snapshot/delta를 표시한다. input/resize는 보내지 않는다. |
 | `maru attach` | controller가 없으면 controller, 있으면 observer로 붙고 명확한 read-only banner를 표시한다. 조용히 기존 controller를 빼앗지 않는다. |
 | `maru attach --take-over` | 기존 controller revoke를 확인한 뒤 원자적으로 controller를 이전한다. |
-| `maru runtime end` | interactive TTY에서 runtime ID/command를 보여 주고 확인 후 종료한다. script는 `--yes`가 없으면 실패한다. normal manifest slot은 다음 GUI에서 ended placeholder가 된다. |
+| `maru runtime end` | interactive TTY에서 runtime ID·size·controller/observer 상태를 보여 주고 확인 후 종료한다. script는 `--yes`가 없으면 실패한다. normal manifest slot은 다음 GUI에서 ended placeholder가 된다. |
 
 attach client의 기본 local escape는 2-key chord `Ctrl-\`, `d`다. `Ctrl-\`, `Ctrl-\`는 literal `Ctrl-\` 하나를
 runtime input으로 보낸다. 일반 키는 지연 없이 binary input frame으로 전달하며 escape 첫 키만 짧은 chord timeout을 가진다.
@@ -798,6 +798,34 @@ workspace handle이 가리키는 특정 old host, 여러 host를 합친 runtime 
   `8=transport/protocol/malformed response/ambiguous current host`로 고정한다. discovery와 hello가 끝난 뒤의
   connection close/transient I/O는 host absence가 아니라 transport 실패다. `--json` 실패도 같은 exit와 stderr를
   사용하며 성공처럼 보이는 error JSON을 stdout에 쓰지 않는다.
+
+### Mutating admin CLI 확인과 종료 계약
+
+P5a3은 `maru runtime end <32-lower-hex-runtime-id> [--yes]` 하나만 추가한다. 이 명령은 same-UID socket이라는
+사실만으로 조용히 mutation하지 않고 `admin_runtime_end_v1`을 별도 협상한다. capability가 없으면 일반 GUI
+`runtime.terminate`를 추측해 보내지 않고 exit 5로 끝낸다. current-host 0/1/2 선택, 무-spawn, stdout/stderr,
+transport와 공통 typed error exit는 P5a2 계약을 그대로 재사용한다.
+
+- `--yes`가 없으면 stdin이 TTY인지 mutation connection을 열기 전에 검사한다. non-TTY에서는 usage help와 exit 2이며
+  host 조회·종료 요청은 0이다. TTY에서는 별도 one-shot admin `runtime.get`으로 runtime ID·size·controller/observer
+  상태를 읽고 stderr에 `End runtime <id> (<cols>x<rows>, controller=<yes|no>, observers=<n>)? [y/N] `를 쓴 뒤
+  flush한다. 앞뒤 ASCII space/tab을 무시한 ASCII `y` 또는 `yes`(대소문자 무시) 한 줄만 승인이고 그 밖의 입력·EOF는
+  mutation 0, stderr 한 줄
+  `maru: runtime was not ended`와 exit 9다.
+- `--yes`는 interactive preview를 생략하지만 server의 exact runtime membership 재검증은 생략하지 않는다. 서버는
+  admin request를 처리하는 single-owner turn에서 canonical registry에 ID가 없으면 `runtime_not_found`를 반환하고
+  `RuntimeOps.terminate`를 호출하지 않는다. controller/observer가 있더라도 명시 확인 또는 `--yes`는 그 runtime과
+  모든 attachment를 종료할 권한이며, sibling runtime은 보존한다.
+- interactive preview와 승인 사이에 runtime/host가 바뀔 수 있으므로 mutation은 새 one-shot admin connection으로
+  current manifest/hello/capability를 다시 검증한다. preview의 opaque `host_id`와 새 connection의 `host_id`가 다르면
+  runtime ID가 우연히 같더라도 request를 보내지 않고 `stale_host` exit 3으로 끝내며 자동 재-preview하지 않는다.
+  같은 host에서 runtime만 사라졌으면 exit 7이다. preview 성공 자체는 mutation 권위가 아니다.
+- success reply frame은 backend mutation 전에 전량 allocation·encode한다. allocation/response admission 실패면
+  terminate 0이다. frame이 owner queue에 accepted된 뒤에만 terminate하고, full flush 뒤 admin connection을 닫는다.
+  client가 accepted reply를 읽기 전에 사라져도 이미 수행된 종료를 rollback하거나 반복하지 않는다.
+- 성공 stdout은 `Ended runtime <id>.\n`이고 exit 0이다. `--yes` 성공 stderr는 비어 있으며 interactive 성공 stderr에는
+  위 확인 prompt와 그 뒤 LF만 있다. `--json`은 P5a3에 추가하지 않는다.
+  새 exit `9=not_confirmed`는 local confirmation 거부/EOF에만 쓰며 daemon error와 섞지 않는다.
 
 ```sh
 maru attach --workspace <future-workspace-id> # 후속, v1 비범위
@@ -876,7 +904,7 @@ outer loop로 넘긴다. partial request·queued reply가 있는 slot은 idle로
 | `observe` | metadata, snapshot, delta, bounded scrollback 조회 | controller와 모든 observer |
 | `input` | binary terminal input 전송 | controller 한 명만 |
 | `resize` | canonical PTY size 변경 | `input`과 같은 controller 한 명만 |
-| `terminate` | runtime 종료 요청 | attach 역할에 암묵 부여하지 않고 별도 auth와 `runtime end` 확인을 거침 |
+| `terminate` | runtime 종료 요청 | attach 역할에 암묵 부여하지 않고 same-UID hard gate, 별도 admin capability, 공식 CLI의 local `runtime end` 확인을 거침 |
 
 - controller만 terminal input과 PTY resize를 보낸다.
 - 추가 client는 observer(read-only)다.
@@ -1129,6 +1157,8 @@ CLI exit code와 사용자 문구는 이 typed error를 한 곳에서 매핑하�
 - socket/token/capability, raw output, cwd, command는 trace fixture에 그대로 넣지 않는다. redaction은
   `docs/project-rules.md`의 단일 기준을 쓴다.
 - SSH attach는 SSH 계정 인증 뒤 host-local socket을 사용하고 daemon이 network port를 listen하지 않는다.
+- `admin_runtime_end_v1`은 별도 OS 인증 identity가 아니라 same-UID trust boundary 안의 protocol capability다.
+  공식 CLI의 confirmation은 오조작 방지 UX이며, same-UID raw protocol client를 막는 보안 경계가 아니다.
 - protocol auth가 실패해도 runtime을 인가되지 않은 client에 자동 export하지 않는다.
 
 ## 12. screen snapshot과 관측 가능성
@@ -1814,8 +1844,10 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
   CLI는 host를 자동 시작하지 않고 manifest writer도 되지 않는다. GUI가 연결된 실제 daemon에 대한
   응답, absent/denied/busy typed exit와 JSON 안정성이 gate다. current host 선택, canonical runtime ID, text/JSON 및
   process exit의 정확한 계약은 위 [Read/admin CLI 출력과 종료 계약](#readadmin-cli-출력과-종료-계약)이 단일 출처다.
-- **P5a3 — mutating admin CLI**: `maru runtime end`를 controller/ownership 확인과 함께 별도 공개한다. exact runtime
-  종료, stale identity, unauthorized, accepted reply flush를 gate로 삼는다.
+- **P5a3 — mutating admin CLI (구현)**: 위 [Mutating admin CLI 확인과 종료 계약](#mutating-admin-cli-확인과-종료-계약)에
+  따라 `maru runtime end`를 별도 capability와 local confirmation으로 공개한다. exact runtime membership,
+  controller/observer가 있는 명시 종료, preview 뒤 stale host/runtime 재검증, unauthorized, reply preallocation과
+  accepted full flush를 gate로 삼는다.
 - **P5b1 — subscription identity (T0b0에서 선행 구현)**: connection-local wire `stream_id`와
   registry-global distinct `SubscriptionId`를 stable `ConnectionKey` 양방향 map으로 분리했다. 두 connection의
   local stream 1, 권한 격리, close revoke, connection ABA, 256/8,192 cap과 overflow/OOM을 hidden protocol/core

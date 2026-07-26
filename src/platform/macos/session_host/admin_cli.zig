@@ -1,4 +1,4 @@
-//! macOS persistent session-host read CLI 실행 facade.
+//! macOS persistent session-host admin CLI 실행 facade.
 //! main dispatcher와 분리해 cache/discovery/transport/typed-exit 정책을 한 경계에서 소유한다.
 
 const std = @import("std");
@@ -12,6 +12,10 @@ pub fn runRequest(
     stdout: *std.Io.Writer,
     stderr: *std.Io.Writer,
 ) !void {
+    if (rejectNonTtyWithoutConfirmation(request, std.c.isatty(0) == 1)) {
+        try stderr.writeAll(runtime_cli.runtime_help);
+        return exit(stdout, stderr, .usage);
+    }
     const exe_raw = std.process.executablePathAlloc(io, allocator) catch {
         try stderr.writeAll("maru: cannot resolve the current executable\n");
         return exit(stdout, stderr, .protocol);
@@ -26,6 +30,78 @@ pub fn runRequest(
         return exit(stdout, stderr, .host_unavailable);
     };
     defer allocator.free(base);
+
+    if (request == .runtime_end and !request.runtime_end.assume_yes) {
+        var preview_call = try callCurrent(
+            allocator,
+            exe,
+            base,
+            .{ .runtime_get = .{
+                .runtime_id = request.runtime_end.runtime_id,
+                .output = .text,
+            } },
+            stderr,
+            stdout,
+            null,
+        );
+        defer preview_call.result.deinit(allocator);
+        const meta = switch (preview_call.result) {
+            .runtime_get => |value| value,
+            else => unreachable,
+        };
+        const preview_host_id = preview_call.host_id;
+        try stderr.print(
+            "End runtime {s} ({d}x{d}, controller={s}, observers={d})? [y/N] ",
+            .{
+                &meta.runtime_id,
+                meta.cols,
+                meta.rows,
+                if (meta.has_controller) "yes" else "no",
+                meta.observer_count,
+            },
+        );
+        try stderr.flush();
+        if (!readConfirmation()) {
+            try stderr.writeAll("\nmaru: runtime was not ended\n");
+            return exit(stdout, stderr, .not_confirmed);
+        }
+        try stderr.writeByte('\n');
+        try stderr.flush();
+        var result_call = try callCurrent(
+            allocator,
+            exe,
+            base,
+            request,
+            stderr,
+            stdout,
+            preview_host_id,
+        );
+        defer result_call.result.deinit(allocator);
+        try runtime_cli.render(result_call.result, request.output(), stdout);
+        try stdout.flush();
+        return;
+    }
+
+    var result_call = try callCurrent(allocator, exe, base, request, stderr, stdout, null);
+    defer result_call.result.deinit(allocator);
+    try runtime_cli.render(result_call.result, request.output(), stdout);
+    try stdout.flush();
+}
+
+const CallResult = struct {
+    result: runtime_cli.Result,
+    host_id: u128,
+};
+
+fn callCurrent(
+    allocator: std.mem.Allocator,
+    exe: [:0]const u8,
+    base: []const u8,
+    request: runtime_cli.Request,
+    stderr: *std.Io.Writer,
+    stdout: *std.Io.Writer,
+    expected_host_id: ?u128,
+) !CallResult {
     var client = switch (admin_client.connectCurrent(allocator, exe, base)) {
         .connected => |value| value,
         .unavailable => |reason| {
@@ -36,6 +112,17 @@ pub fn runRequest(
         },
     };
     defer client.deinit();
+    if (expected_host_id) |expected| {
+        if (!samePreviewHost(expected, client.host_id)) {
+            try stderr.writeAll("maru: persistent session host changed after confirmation\n");
+            return exit(stdout, stderr, .host_unavailable);
+        }
+    }
+    if (request == .runtime_end)
+        client.requireAdminRuntimeEnd() catch |err| {
+            try stderr.writeAll("maru: persistent session host does not support runtime end\n");
+            return exit(stdout, stderr, runtimeEndCapabilityExit(err));
+        };
     const params = try runtime_cli.paramsJson(allocator, request);
     defer if (params) |owned| allocator.free(owned);
     const payload = client.call(request.method(), params) catch |err| {
@@ -52,7 +139,7 @@ pub fn runRequest(
     };
     defer allocator.free(payload);
     var remote_error: ?runtime_cli.RemoteError = null;
-    var result = runtime_cli.decodeResponse(
+    const result = runtime_cli.decodeResponse(
         allocator,
         request,
         payload,
@@ -84,9 +171,39 @@ pub fn runRequest(
             return exit(stdout, stderr, .protocol);
         },
     };
-    defer result.deinit(allocator);
-    try runtime_cli.render(result, request.output(), stdout);
-    try stdout.flush();
+    return .{ .result = result, .host_id = client.host_id };
+}
+
+fn samePreviewHost(expected: u128, actual: u128) bool {
+    return expected == actual;
+}
+
+fn rejectNonTtyWithoutConfirmation(request: runtime_cli.Request, is_tty: bool) bool {
+    return request == .runtime_end and !request.runtime_end.assume_yes and !is_tty;
+}
+
+fn runtimeEndCapabilityExit(_: anyerror) runtime_cli.ExitCode {
+    return .unsupported;
+}
+
+fn readConfirmation() bool {
+    var input: [16]u8 = undefined;
+    var used: usize = 0;
+    while (used < input.len) {
+        const count = std.c.read(0, input[used..].ptr, input.len - used);
+        if (count < 0) {
+            if (std.posix.errno(count) == .INTR) continue;
+            return false;
+        }
+        if (count == 0) break;
+        const end = used + @as(usize, @intCast(count));
+        if (std.mem.indexOfScalar(u8, input[used..end], '\n')) |offset| {
+            used += offset + 1;
+            return runtime_cli.confirmationAccepted(input[0..used]);
+        }
+        used = end;
+    }
+    return false;
 }
 
 fn unavailableExit(reason: admin_client.Unavailable) ?runtime_cli.ExitCode {
@@ -116,4 +233,22 @@ test "post-discovery endpoint races are transport failures, not absent hosts" {
     try std.testing.expectEqual(runtime_cli.ExitCode.protocol, unavailableExit(.ambiguous).?);
     try std.testing.expectEqual(runtime_cli.ExitCode.denied, unavailableExit(.denied).?);
     try std.testing.expect(unavailableExit(.out_of_memory) == null);
+}
+
+test "interactive mutation authority is pinned to the preview host identity" {
+    try std.testing.expect(samePreviewHost(0xAA, 0xAA));
+    try std.testing.expect(!samePreviewHost(0xAA, 0xBB));
+}
+
+test "non-tty rejection and missing mutation capability are local pre-request exits" {
+    const end: runtime_cli.Request = .{ .runtime_end = .{
+        .runtime_id = 0xAA,
+        .assume_yes = false,
+    } };
+    try std.testing.expect(rejectNonTtyWithoutConfirmation(end, false));
+    try std.testing.expect(!rejectNonTtyWithoutConfirmation(end, true));
+    try std.testing.expectEqual(
+        runtime_cli.ExitCode.unsupported,
+        runtimeEndCapabilityExit(error.IncompatibleVersion),
+    );
 }

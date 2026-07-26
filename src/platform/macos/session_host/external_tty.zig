@@ -230,7 +230,7 @@ pub const RawTty = struct {
 
 fn makeRaw(original: posix.termios) posix.termios {
     var raw = original;
-    // P5c1 TDD red: IGNBRK clearing is still intentionally absent; the contract test fails.
+    raw.iflag.IGNBRK = false;
     raw.iflag.BRKINT = false;
     raw.iflag.PARMRK = false;
     raw.iflag.ISTRIP = false;

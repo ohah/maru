@@ -2244,19 +2244,44 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
     함께 복원하는 de-facto 계약이라 채택한다. `1049`가 cursor save/restore까지 소유하므로 별도 save/restore sequence를
     섞지 않는다. repaint는 완결 검증된 snapshot/delta 뒤에만 만들고 `ED 2`로 이전 cell과 letterbox를 모두
     지운 뒤 각 grapheme anchor를 CUP로 다시 고정해 local `wcwidth` 차이가 다음 cell 위치로 전파되지 않게 한다. wide
-    continuation과 right-edge에서 잘린 anchor는 출력하지 않고 bottom-right autowrap은 CUP/erase로 회피한다. 마지막에
+    continuation과 right-edge에서 잘린 anchor는 출력하지 않는다. 외부 terminal의 EAW/emoji width policy는
+    협상할 수 없으므로 local viewport 우하단의 non-ASCII 또는 grapheme anchor만 ASCII `?`로 대체한다. 이 한 cell의
+    보수적 손실로 caller가 glyph를 wide로 해석해 출력 순간 scroll하는 경우를 없애며, 다른 위치는 anchor별 CUP가
+    local width 차이의 누적을 끊는다. 정상 ASCII bottom-right의 wrap-pending은 CUP로 취소한다. 마지막에
     host cursor가 viewport 안이고 visible일 때만 exact CUP와 show를 내고, 아니면 hide한다. cursor shape/blink는
     caller terminal의 1049 save/restore에 맡기며 P5c3에서 DECSCUSR로 재생하지 않는다.
 
     text는 ESC, C0, C1, DEL을 U+FFFD로 치환하고 hard-coded emitter 밖의 byte가 terminal control이 될 수 없게 한다.
+    단 local viewport 우하단 위험 anchor는 위 규칙보다 강한 ASCII `?` 대체가 전체 grapheme에 적용된다.
     default/indexed/RGB foreground/background, bold/faint/italic/underline style·color, blink, inverse, invisible,
     strikethrough의 허용 SGR 표를 명시적으로 매핑하며 unknown enum/value는 protocol error이고 raw escape passthrough는
-    없다. OSC 8 link target, kitty image payload, prompt mark와 scrollback history는 P5c3 ANSI projection에서 재생하지
+    없다. cropped/skipped cell도 포함해 모든 Unicode scalar와 style을 encode 전에 검증한다. grapheme entry는
+    viewport cell cap, aggregate codepoint는 `32 MiB / sizeof(u21)` cap을 먼저 적용해 unreferenced store가
+    ScreenSource lock을 무제한 점유하지 못한다. OSC 8 link target, kitty image payload, prompt mark와 scrollback history는 P5c3 ANSI projection에서 재생하지
     않는다. local size가 P5c2 applied-size와 다르면 top-left crop/blank letterbox한다. local viewport는 host
     per-runtime `1,048,576` cell 상한을 넘지 못하고 checked arithmetic으로 만든 enter/leave는 각각 64 byte,
     full repaint 한 장은 `32 MiB`가 hard cap이다. current+latest repaint resident 합은 `64 MiB`이며 exact-cap은
     허용한다. cap+1·곱셈/덧셈 overflow·unknown style은 publish 0과 protocol exit 8 fail-close, allocation OOM은
-    publish 0과 internal exit 1 cleanup이다. 이미 적용된 generation을 stale 화면으로 계속 보여주지 않는다.
+    publish 0과 internal exit 1 cleanup이다. host generation은 local resize repaint 사이에도 같을 수 있으므로
+    화면 ordering의 SSOT로 쓰지 않는다. 단일 event-loop owner가 dequeue 순서대로 부여하는 monotonic
+    projection sequence보다 같거나 오래된 repaint는 projection 전에 거부한다.
+
+    **P5c3b 구현 완료:** `external_ansi.zig`는 `ScreenSource` vtable만 borrow하고 lock 안에서
+    backend-neutral `RenderSnapshot`을 immutable full repaint로 만든다. repaint는 cursor 선행 hide,
+    reset+ED2, anchor별 CUP+허용 SGR+sanitized grapheme, bottom-right wrap-pending 취소, 최종 cursor
+    순서다. host/local cell 곱·cell 수·wide/continuation·grapheme id·style 조합을 먼저 검증하고
+    `1,048,576` cells와 `32 MiB` exact cap을 적용한다. allocation 없는 첫 encode pass가 exact 길이를
+    계산하고 둘째 pass가 그 길이 storage 한 장만 할당해 geometric growth, shrink-copy와 작은 repaint의
+    32 MiB hard reservation을 모두 피한다. allocator와 projection 생성까지 소유하는
+    `RepaintQueue`는 active current와 replaceable latest만 보존한다. 새 projection 전에 기존 latest를
+    먼저 회수하므로 builder를 포함한 resident 합도 최대 `64 MiB`이고, projection 실패 시 current와
+    마지막 성공 sequence는 보존하되 latest는 비운다. monotonic projection sequence는 stale 요청을
+    projection 전에 거부한다. raw projector는 module-private이고 제품 frame 생성 seam은
+    `RepaintQueue.replaceLatest` 하나뿐이다. C0/C1/DEL 전수 치환, SGR 표, crop/wide/grapheme/cursor, malformed DTO,
+    실제 `32 MiB` 상수의 bounded-builder exact cap/cap+1, queue-owned builder 구조의 두-frame 상한,
+    우하단 local-width-independent placeholder, grapheme entry/aggregate cap+1, allocation fail-index 전수와
+    lock 대칭을 Debug/ReleaseFast 테스트로 검증한다.
+    이 단계는 stdout event loop에 연결하지 않으며 P5c3c~d 전에는 public attach 전체 완료로 표시하지 않는다.
   - **P5c3c — nonblocking single-owner event loop**: `external_attach.zig`의 한 stack owner가 `RawTty`, 단 하나의
     `Client`, 그 client를 borrow하는 `RemoteAttachment`, ANSI stdout queue, resize와 detach chord를 소유한다. raw 진입
     전에도 기존 `SO_RCVTIMEO`/blocking `writeAll`을 deadline으로 간주하지 않는다. resolver 전체, selected

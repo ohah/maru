@@ -117,6 +117,10 @@ pub const external_resize = if (builtin.os.tag == .macos)
     @import("session_host/external_resize.zig")
 else
     struct {};
+pub const external_ansi = if (builtin.os.tag == .macos)
+    @import("session_host/external_ansi.zig")
+else
+    struct {};
 pub const remote_attachment = if (builtin.os.tag == .macos)
     @import("session_host/remote_attachment.zig")
 else

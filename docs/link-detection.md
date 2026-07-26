@@ -107,6 +107,30 @@
   URL 열기가 먼저 소비하므로 포커스가 안 옮겨간다). 즉 "브라우저를 보다가 옆 터미널 링크를 Cmd+클릭" 흐름에서
   포커스는 브라우저에 남고 링크만 열린다.
 
+## 링크를 어디에 여는가 (`input.link-open-target`)
+
+무엇을 열지(§감지 종류)와 **어디에 띄울지**는 별개다. 후자는 `input.link-open-target`이 정한다.
+
+| 값 | 동작 |
+|---|---|
+| `auto`(기본) | 현재 워크스페이스 탭에 **보이는 브라우저 패널**이 있으면 그 패널에서 열고, 없으면 시스템 기본 브라우저 |
+| `system` | 항상 시스템 기본 브라우저(이전 동작) |
+
+- **대상은 http(s) 리터럴만**이다. 파일 경로(`kind=file_path`)와 `mailto:`·`ssh://` 같은 비-HTTP 스킴은 이 설정과
+  무관하게 기존 경로(`NSWorkspace`, `.md`/`.html`은 파일 도크)로 간다. 허용 스킴 판정은 파일 패널 외부 링크와 **같은**
+  `isExplicitHttpLink`를 공유한다(단일 출처) — 브라우저 패널에 `file:`·`javascript:`가 실릴 경로를 구조적으로 막는다.
+- **"보이는" 브라우저만 대상**이다. 각 pane의 **활성 Term**만 보고, 활성 pane의 브라우저를 먼저 고른 뒤 같은 탭의
+  다른 pane을 순회한다. 숨은 Term 탭의 브라우저를 대상으로 하면 화면이 그대로라 "아무 일도 안 일어난 것"처럼 보인다.
+  여럿이면 이 순서의 첫 번째를 쓴다(브라우저를 둘 이상 띄우는 경우가 드물어 별도 정책을 두지 않는다).
+- **새 브라우저 패널을 만들지 않는다.** 링크 하나로 탭이 늘어나는 건 놀람이 크고, "열려 있으면 그걸로, 아니면 외부"가
+  요청된 범위다(사용자 결정). 그래서 브라우저를 안 쓰는 사용자에게는 기본값 `auto`가 이전과 **동작이 같다**(회귀 없음).
+- **파일 패널의 `file-panel.external-link-target`과는 다른 설정**이다. 그쪽은 Markdown/HTML 문서 **안의** 링크를
+  따라가는 문맥이라 `in-app`이면 **새** browser Term을 연다. 터미널 링크는 문서 문맥이 아니라 분리한다.
+- **경계**: 정책 판정은 Zig가 단일 출처로 소유하고(`webLinkTargetSurfaceId`), Swift는 결과 surface_id가 0이면
+  `NSWorkspace.open`·아니면 `BrowserControl.navigate`를 실행만 한다(ABI v147 `url_at`의 `out_web_surface_id`). 같은
+  클릭이 만든 URL의 라우팅이므로 URL을 Swift가 다시 Zig로 넘기는 왕복을 두지 않는다. 대상 패널이 그 사이 닫혔으면
+  시스템 브라우저로 폴백한다 — 링크를 조용히 삼키지 않는다.
+
 ## soft-wrap(강제개행)된 링크
 
 터미널 폭보다 긴 링크는 여러 화면 행으로 soft-wrap된다. `wordBoundsAt`(휴리스틱)·`linkBoundsAt`(OSC 8)이
@@ -212,4 +236,7 @@
   scopes 빌드·kind·`openFilePanelPath`), `app_host_abi.{zig,h}`(`url_at` out_kind·파일 패널 ABI),
   `MaruAppHost.swift`(`handleUrlClick` — `.md`/`.html`은 도크, 그 외는 `URL(fileURLWithPath:)`/`URL(string:)`). ABI 경계는
   [macOS 앱 호스트 경계](macos-app-host-boundary.md).
-- config: `src/config/theme.zig`(`InputConfig.link_detection`), `docs/configuration.md` 키 표.
+- 열기 대상 라우팅: `src/platform/macos/app_session.zig`(`webLinkTargetSurfaceId` — 정책 단일 출처),
+  `app_host_abi.{zig,h}`(`url_at`의 `out_web_surface_id`, ABI v147), `MaruAppHost.swift`(`handleUrlClick` —
+  0이면 `NSWorkspace.open`, 아니면 `BrowserControl.navigate`). 브라우저 패널 자체는 [웹 패널](web-panel.md).
+- config: `src/config/theme.zig`(`InputConfig.link_detection`·`InputConfig.link_open_target`), `docs/configuration.md` 키 표.

@@ -181,7 +181,13 @@ fn navButtonAt(x_px: f64, band_x: u32, cw: u32) ?NavButton {
 // 별도 물리 CAMetalLayer로 분리, 두 drawable을 한 command buffer에 present + 단일 commit으로 전이 원자성). host↔renderer
 // draw 계약 변경이라 버전을 올린다. **MetalFrame/세션 struct·export 시그니처는 불변**(overlay_layer는 Zig가 아니라
 // Swift가 소유한 CAMetalLayer라 struct offset·layout test는 그대로 green). 렌더러 분할·컨테이너 재편은 Swift/ObjC 레이어.
-pub const abi_version: u32 = 146;
+pub const abi_version: u32 = 147;
+// 147: url_at에 out_web_surface_id 추가(터미널 웹 링크를 **인앱 브라우저 패널**로 열지 시스템 브라우저로 보낼지 —
+// config input.link-open-target=auto|system). 정책은 Zig 단일 출처(webLinkTargetSurfaceId: system이면 0 / http(s)
+// 리터럴만 / 활성 탭에서 **보이는** browser 패널만 / 새 패널은 안 만듦)이고, Swift는 0이면 NSWorkspace.open,
+// 아니면 webPanels[id]에 BrowserControl.navigate로 실행만 한다. 같은 클릭이 만든 URL의 라우팅이라 url_at의 out으로
+// 함께 실어 왕복을 없앤다(URL을 Swift가 다시 Zig로 넘기지 않는다). *out_len>0 && *out_kind==0(url)일 때만 유효.
+// 끝에 인자 1개 추가 — 구조체 offset·기존 인자 순서 불변. docs/link-detection.md §링크를 어디에 여는가.
 // 146: MetalFrame.cursor_start + maru_metal_renderer_draw 마지막 인자(커서 구간의 **시작 index**). v95는 "커서는 항상
 // cells suffix"를 암묵 가정해 길이만 실었는데, caret 없는 오버레이 셀(포커스 테두리·drop 하이라이트·드래그 고스트)이
 // 커서 뒤에 붙으면 그 가정이 깨진다 — 그때 Zig가 cursor_cells=0으로 접어 커서가 본문과 함께 불투명하게 그려졌고
@@ -14355,6 +14361,33 @@ pub const AppSession = struct {
     pub fn activeWebSurfaceId(self: *AppSession) u64 {
         const term = self.activePane().activeTerm();
         if (term.kind == .web and term.web_panel_kind == .browser) return term.surfaceId();
+        return 0;
+    }
+
+    /// 터미널에서 연 웹 링크(http/https)를 **인앱 브라우저 패널로 라우팅할 대상 surface_id**(0 = 시스템 기본
+    /// 브라우저로 보낸다). 정책은 Zig 단일 출처이고 Swift는 결과대로 `BrowserControl.navigate` 또는
+    /// `NSWorkspace.open`을 실행만 한다(macos-app-host-boundary.md의 "정책=Zig / 실행=platform").
+    ///
+    /// 규칙(docs/link-detection.md §링크를 어디에 여는가):
+    ///  1. `input.link-open-target = system`이면 항상 0(이전 동작 그대로).
+    ///  2. http/https 리터럴이 아니면 0 — 파일 경로·`mailto:`·`ssh://` 등은 브라우저에 실을 대상이 아니다.
+    ///     검증기는 파일 패널 외부 링크와 **같은** `isExplicitHttpLink`를 공유한다(허용 스킴 판정 단일 출처).
+    ///  3. **현재 화면에 보이는** browser 패널만 대상이다 — 활성 pane의 browser를 먼저 보고(브라우저를 보다가 옆
+    ///     터미널 링크를 누르는 흐름이 가장 흔하다), 없으면 활성 탭의 다른 pane을 순회한다. **각 pane의 활성 Term만**
+    ///     본다: 숨은 Term 탭의 브라우저로 열면 화면이 안 바뀌어 "아무 일도 안 일어난 것"처럼 보인다.
+    ///  4. 그래도 없으면 0 — **새 브라우저 패널을 만들지 않는다**(사용자 요청 범위: "열려 있으면 그걸로, 아니면 외부").
+    ///
+    /// 보이는 브라우저가 여럿이면 위 순서의 첫 번째를 쓴다(브라우저를 둘 이상 띄우는 건 드물어 별도 정책을 두지 않는다).
+    pub fn webLinkTargetSurfaceId(self: *AppSession, url: []const u8) u64 {
+        if (self.loaded_config.config.input.link_open_target == .system) return 0;
+        if (!file_panel_bridge.isExplicitHttpLink(url)) return 0;
+        if (!self.surface_initialized or self.tabs.items.len == 0) return 0;
+        const active = self.activeWebSurfaceId(); // 활성 pane의 browser 우선
+        if (active != 0) return active;
+        for (self.activeTab().panes.items) |pane| {
+            const term = pane.activeTerm();
+            if (term.kind == .web and term.web_panel_kind == .browser) return term.surfaceId();
+        }
         return 0;
     }
 
@@ -51505,6 +51538,59 @@ test "브라우저(web Term)가 활성이어도 옆 터미널 pane의 링크가 
     try std.testing.expectEqualStrings("https://a.co", session.urlAt(x, y, 32));
     try std.testing.expectEqual(CursorKind.link, session.hoverCursor(x, y, 32));
     try std.testing.expect(session.hoverLinkSpanFor(term_surface) != null);
+}
+
+// input.link-open-target: 터미널 웹 링크를 **열려 있는 브라우저 패널**에서 열지(auto, 기본) 항상 시스템
+// 브라우저로 보낼지(system). auto도 "지금 보이는 browser 패널"이 있을 때만 인앱이라, 브라우저를 안 쓰면 이전과
+// 동작이 같다(회귀 없음). 대상 판정은 Zig 단일 출처(webLinkTargetSurfaceId)이고 Swift는 결과대로 실행만 한다.
+// 실 init/split/web Term이라 macOS 게이트.
+test "webLinkTargetSurfaceId: 보이는 브라우저 패널이 있을 때만 인앱, 아니면 시스템(0)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    session.window_padding_px = .{};
+    _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
+
+    // ① 브라우저가 없으면 0 — 기본값 auto여도 시스템 브라우저로 간다(브라우저를 안 쓰는 사용자는 이전 동작 그대로).
+    try std.testing.expectEqual(config_mod.theme.LinkOpenTarget.auto, session.loaded_config.config.input.link_open_target);
+    try std.testing.expectEqual(@as(u64, 0), session.webLinkTargetSurfaceId("https://a.co"));
+
+    try session.splitActivePane(.horizontal); // 좌(터미널)·우(활성)
+    const browser_id = try session.appendWebTermInActivePane(.browser); // 우 pane에 브라우저 탭
+
+    // ② 활성 pane이 브라우저면 그 패널이 대상이다(브라우저를 보다가 옆 터미널 링크를 누르는 흐름).
+    try std.testing.expectEqual(browser_id, session.webLinkTargetSurfaceId("https://a.co"));
+
+    // ③ http(s) 리터럴이 아니면 브라우저로 안 보낸다 — 파일 경로·비-HTTP 스킴은 기본 앱 몫(isExplicitHttpLink 공유).
+    try std.testing.expectEqual(@as(u64, 0), session.webLinkTargetSurfaceId("/tmp/x.txt"));
+    try std.testing.expectEqual(@as(u64, 0), session.webLinkTargetSurfaceId("mailto:a@b.co"));
+    try std.testing.expectEqual(@as(u64, 0), session.webLinkTargetSurfaceId("ssh://host"));
+
+    // ④ config system이면 브라우저가 보여도 항상 시스템(이전 동작으로 되돌리는 탈출구).
+    session.loaded_config.config.input.link_open_target = .system;
+    try std.testing.expectEqual(@as(u64, 0), session.webLinkTargetSurfaceId("https://a.co"));
+    session.loaded_config.config.input.link_open_target = .auto;
+
+    // ⑤ 포커스가 왼쪽 터미널 pane으로 가도 오른쪽 브라우저가 **화면에 보이므로** 여전히 대상이다.
+    try std.testing.expect(session.focusPaneByPtr(session.activeTab().panes.items[0]));
+    try std.testing.expect(session.activePane().activeTerm().kind == .terminal);
+    try std.testing.expectEqual(browser_id, session.webLinkTargetSurfaceId("https://a.co"));
+
+    // ⑥ 브라우저가 **숨은 Term 탭**이면 대상이 아니다(0) — 안 보이는 패널에 열면 화면이 안 바뀌어 먹통처럼 보인다.
+    //    오른쪽 pane으로 돌아가 첫 Term(터미널)을 활성화하면 브라우저 탭은 뒤로 숨는다.
+    try std.testing.expect(session.focusPaneByPtr(session.activeTab().panes.items[1]));
+    session.focusTerm(0);
+    try std.testing.expect(session.activePane().activeTerm().kind == .terminal);
+    try std.testing.expectEqual(@as(u64, 0), session.webLinkTargetSurfaceId("https://a.co"));
 }
 
 // 휠은 '커서 아래' surface가 소유한다(Ghostty/Warp) — 포커스(활성) pane이 마우스 트래킹 앱(vim/tmux 등)이어도,

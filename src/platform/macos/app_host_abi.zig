@@ -95,8 +95,8 @@ var app_instance_lease_slot: LeaseSlot = .{};
 // 여기서는 ABI 표면으로 re-export만 한다.
 pub const EventKind = session_mod.EventKind;
 
-test "ABI v146 app instance lease result values match the C header" {
-    try std.testing.expectEqual(@as(u32, 146), abi_version);
+test "ABI v147 app instance lease result values match the C header" {
+    try std.testing.expectEqual(@as(u32, 147), abi_version);
     try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_ACQUIRED), @intFromEnum(AppInstanceLeaseResult.acquired));
     try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_HELD), @intFromEnum(AppInstanceLeaseResult.held));
     try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_UNSAFE), @intFromEnum(AppInstanceLeaseResult.unsafe));
@@ -822,6 +822,7 @@ pub export fn maru_macos_app_session_url_at(
     out_ptr: ?*?[*]const u8,
     out_len: ?*usize,
     out_kind: ?*i32,
+    out_web_surface_id: ?*u64,
 ) c_int {
     const app_session = session orelse return @intFromEnum(Status.null_out);
     const ptr_out = out_ptr orelse return @intFromEnum(Status.null_out);
@@ -831,6 +832,12 @@ pub export fn maru_macos_app_session_url_at(
     len_out.* = url.len;
     // 링크 종류(0=url, 1=file_path) — url.len>0일 때만 의미. LinkKind 태그 순서(url=0, file_path=1)에 묶인다.
     if (out_kind) |k| k.* = @intFromEnum(app_session.url_kind);
+    // v147: 이 링크를 띄울 인앱 브라우저 패널의 surface_id(0=시스템 기본 브라우저로). 정책은 Zig 단일 출처
+    // (webLinkTargetSurfaceId). url_kind가 file_path면 브라우저 대상이 아니므로 항상 0 — 판정 함수가 http(s)
+    // 리터럴만 통과시키지만, 여기서도 kind로 좁혀 "파일 경로가 브라우저로 새는" 경로를 구조적으로 막는다.
+    if (out_web_surface_id) |w| {
+        w.* = if (url.len > 0 and app_session.url_kind == .url) app_session.webLinkTargetSurfaceId(url) else 0;
+    }
     return @intFromEnum(Status.ok);
 }
 

@@ -8,7 +8,7 @@
 /* 이 header는 실제 앱 동작을 구현하지 않고 Swift/Zig 사이의 약속만 고정한다.
    Swift가 AppKit object나 Swift struct layout을 바로 넘기면 Zig 쪽에서 안전하게
    해석할 수 없으므로, 제품 host가 시작되기 전에 fixed-width C record만 허용한다. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 146u
+#define MARU_MACOS_APP_HOST_ABI_VERSION 147u
 #define MARU_APP_INSTANCE_LEASE_ACQUIRED 0u
 #define MARU_APP_INSTANCE_LEASE_HELD 1u
 #define MARU_APP_INSTANCE_LEASE_UNSAFE 2u
@@ -716,7 +716,11 @@ int32_t maru_macos_app_session_hover(
 /* (config 수식키)+클릭 위치의 링크. mods(hover와 같은 xterm 비트)가 url-click-modifier와 안 맞으면 *out_len=0
    (일반 클릭으로 처리). 버퍼는 Zig 소유(다음 url_at/destroy까지). *out_kind는 링크 종류(0=url, 1=file_path) —
    *out_len>0일 때만 유효하고, Swift가 1이면 URL(fileURLWithPath:)·아니면 URL(string:)으로 연다(out_kind는 NULL 허용).
-   v71: mods 인자 추가(modifier 판정 Zig 단일 출처). v89: out_kind 추가(파일 경로 링크 — docs/link-detection.md). */
+   *out_web_surface_id는 이 링크를 띄울 **인앱 브라우저 패널**의 surface_id다(0 = 시스템 기본 브라우저로 연다).
+   config input.link-open-target(auto|system)과 "활성 탭에 보이는 browser 패널" 판정은 Zig가 소유하고, Swift는
+   0이면 NSWorkspace.open·아니면 webPanels[id]에 navigate를 실행만 한다(NULL 허용). *out_len>0 && *out_kind==0일 때만 유효.
+   v71: mods 인자 추가(modifier 판정 Zig 단일 출처). v89: out_kind 추가(파일 경로 링크 — docs/link-detection.md).
+   v147: out_web_surface_id 추가(웹 링크를 인앱 브라우저 패널로 — docs/link-detection.md §링크를 어디에 여는가). */
 int32_t maru_macos_app_session_url_at(
     MaruAppHostSession *session,
     double x_px,
@@ -724,7 +728,8 @@ int32_t maru_macos_app_session_url_at(
     int32_t mods,
     const uint8_t **out_ptr,
     size_t *out_len,
-    int32_t *out_kind
+    int32_t *out_kind,
+    uint64_t *out_web_surface_id
 );
 int32_t maru_macos_app_session_copy_text(
     MaruAppHostSession *session,

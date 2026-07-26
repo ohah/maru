@@ -5,9 +5,10 @@
 
 const std = @import("std");
 const external_tty = @import("external_tty.zig");
+const resize_wire = @import("resize_wire.zig");
 
 pub const Role = enum { observer, controller };
-pub const Error = error{SequenceExhausted};
+pub const Error = error{ SequenceExhausted, InvalidSize };
 
 pub const Request = struct {
     size: external_tty.Size,
@@ -44,8 +45,10 @@ pub const ExternalResizeState = struct {
         self: *ExternalResizeState,
         current: external_tty.Size,
     ) Error!Request {
+        const request = (try self.emit(current, true)) orelse
+            return error.InvalidSize;
         self.role = .controller;
-        return (try self.emit(current, true)).?;
+        return request;
     }
 
     pub fn becomeObserver(self: *ExternalResizeState) void {
@@ -73,7 +76,7 @@ pub const ExternalResizeState = struct {
             std.meta.eql(self.last_sent_size.?, size)) return null;
         if (self.sequence_exhausted) return error.SequenceExhausted;
         const sequence = self.next_sequence;
-        if (sequence == std.math.maxInt(u64)) {
+        if (sequence == resize_wire.max_counter) {
             self.sequence_exhausted = true;
         } else {
             self.next_sequence += 1;
@@ -119,13 +122,29 @@ test "zero sizes are suppressed, revoke drops authority, and takeover forces cur
 
 test "sequence emits max once without wrap" {
     var state = ExternalResizeState.init(.{ .cols = 80, .rows = 24 }, .controller);
-    state.next_sequence = std.math.maxInt(u64);
+    state.next_sequence = resize_wire.max_counter;
     const final = (try state.localResize(.{ .cols = 81, .rows = 24 })).?;
-    try std.testing.expectEqual(std.math.maxInt(u64), final.client_sequence);
+    try std.testing.expectEqual(resize_wire.max_counter, final.client_sequence);
     try std.testing.expectError(
         error.SequenceExhausted,
         state.localResize(.{ .cols = 82, .rows = 24 }),
     );
+}
+
+test "failed takeover preserves observer role at zero size and exhausted sequence" {
+    var state = ExternalResizeState.init(.{ .cols = 80, .rows = 24 }, .observer);
+    try std.testing.expectError(
+        error.InvalidSize,
+        state.becomeController(.{ .cols = 0, .rows = 24 }),
+    );
+    try std.testing.expectEqual(Role.observer, state.role);
+    state.next_sequence = resize_wire.max_counter;
+    state.sequence_exhausted = true;
+    try std.testing.expectError(
+        error.SequenceExhausted,
+        state.becomeController(.{ .cols = 80, .rows = 24 }),
+    );
+    try std.testing.expectEqual(Role.observer, state.role);
 }
 
 test "host resize applies increasing generation and accepts gaps" {

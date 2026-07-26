@@ -956,8 +956,9 @@ outer loop로 넘긴다. partial request·queued reply가 있는 slot은 idle로
   sequence 이하 요청을 다시 적용하지 않는다. 실제 크기가 바뀌면 모든 subscription에
   `runtime.resized {runtime_id, cols, rows, resize_generation, reason}`을 보내며 observer도 이 이벤트로 표시 크기를 맞춘다.
 - `TIOCSWINSZ`가 foreground process group에 유발한 `SIGWINCH` 뒤 child가 내는 repaint output은 resize transaction 뒤에
-  `TerminalCore`로 적용되고 같은 generation 기반 delta로 전파된다. client가 generation/sequence gap을 발견하면 기존 규칙대로
-  fresh snapshot을 요청한다.
+  `TerminalCore`로 적용되고 같은 generation 기반 delta로 전파된다. **screen frame sequence** gap은 기존 규칙대로 fresh
+  snapshot을 요청한다. 반면 `runtime.resized`는 크기 전체를 담은 full-state이므로 **resize generation** gap은 최신 event를
+  바로 적용한다.
 
 여러 writable client는 PTY byte stream만 놓고 보면 가능하지만 v1에서는 열지 않는다. 향후 실제 협업 수요가 확인되면 여러
 stream에 `input`만 명시적으로 부여하고 `resize`는 한 stream에 유지할 수 있다. 그 전까지 input frame 원자성, paste 상한,
@@ -2158,15 +2159,24 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
     모든 target queue에 all-or-none preflight한 뒤 commit하며 admission/OOM 실패는 새 canonical size를 publish하지
     않는다. 이를 위해 backend mutation도 admission 뒤에 실행돼야 하며 기존 prepare→backend→commit transaction을
     owner-level prepared action으로 올린다.
-  - observer/client는 자기 local TTY size가 아니라 strictly increasing `resize_generation`의 host event만 canonical
-    applied size로 받아 ANSI projection의 crop/letterbox 기준을 갱신한다. duplicate/older generation은 무시하고,
-    generation gap은 화면 byte 유실이 아니므로 최신 full-state size를 적용한다. controller도 같은 event를 받아
-    response/event 순서와 무관하게 max generation으로 수렴한다.
+  - 특정 non-requester observer의 stream queue가 invalidated/soft-cap 상태라 event를 받을 수 없으면 그 observer
+    connection을 fail-close해 subscription을 먼저 detach하고, 남은 live target snapshot으로 all-or-none preflight를
+    다시 수행한다. event를 조용히 skip한 채 observer를 살려두거나 그 observer 때문에 controller resize를 영구 거부하지
+    않는다. requester 자체 또는 aggregate/global admission 실패는 typed failure이며 backend/registry mutation 0이다.
+  - observer/client는 자기 local TTY size가 아니라 strictly increasing `resize_generation`의 host full-state만
+    canonical applied size로 받아 ANSI projection의 crop/letterbox 기준을 갱신한다. observer는 event만 적용하고,
+    controller는 strict response 또는 event를 적용한다. duplicate/older generation은 무시하고 generation gap은 화면 byte
+    유실이 아니므로 최신 full-state size를 적용하며, controller도 response/event 순서와 무관하게 max generation으로 수렴한다.
   - pure state tests는 burst coalesce, unchanged/zero size, observer no-op, takeover forced first resize,
-    revoke pending drop, sequence max를 검증한다. actual `openpty` child는 `TIOCSWINSZ` burst가 `SIGWINCH` wake를 만들고
-    최신 size 하나만 request가 되는지 5초 deadline으로 검증한다. product `SocketServer`/`poll_owner.Owner` fixture는
-    controller ACK+broadcast, observer request unauthorized, changed=false/stale broadcast 0, multi-client all-or-none
-    admission rollback, event generation의 client 적용을 검증한다.
+    revoke pending drop, JSON signed-integer counter max를 검증한다. actual `openpty` child는 `TIOCSWINSZ` burst가
+    `SIGWINCH` wake를 만들고 latest size candidate 하나로 coalesce되는지 5초 deadline으로 검증하며, self-pipe가
+    `SIGWINCH` byte로 포화돼도 atomic pending class로 termination이 우선하는 회귀를 별도로 고정한다. request 생성은
+    이 candidate를 pure external state에 넣는 테스트가 맡는다. product `SocketServer`/`poll_owner.Owner` fixture는
+    controller ACK+broadcast, non-requester observer invalidation의 connection fail-close+target rebuild, backend 실패의
+    publication reservation 취소, owner allocation fail-index 전수, multi-client all-or-none admission rollback을 검증한다.
+    lower server/registry tests가 observer unauthorized, changed=false/stale broadcast 0, handoff restore generation wire max와
+    event generation 적용을 보완한다. 같은 stream에 다른 runtime의 resize event가 섞이면 client는 coalesce하지 않고
+    connection 전체를 protocol fail-close한다.
 - **P5c3 — public attach CLI**: P5b/P5c transport가 모두 green인 뒤에만 `maru attach`, observer,
   `--take-over`, `Ctrl-\` 다음 `d` detach chord를 parser/`--help`와 함께 공개한다. 실제 PTY의
   attach/input/detach/reattach가 완료 gate다. 같은 MRSH v2이지만 `controller_transfer_v1`이 없는 pre-P5b3 개발 host에는

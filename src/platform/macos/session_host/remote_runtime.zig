@@ -447,8 +447,9 @@ pub const RemoteRuntime = struct {
     };
 
     pub fn resize(self: *RemoteRuntime, cols: u16, rows: u16) ResizeError!void {
-        self.resize_seq = std.math.add(u64, self.resize_seq, 1) catch
+        if (self.resize_seq == resize_wire.max_counter)
             return error.SequenceExhausted;
+        self.resize_seq += 1;
         var buf: [96]u8 = undefined;
         const params = std.fmt.bufPrint(&buf, "{{\"stream_id\":{d},\"cols\":{d},\"rows\":{d},\"client_sequence\":{d}}}", .{ self.stream_id, cols, rows, self.resize_seq }) catch return error.OutOfMemory;
         const resp = try self.callOrdered("runtime.resize", params);

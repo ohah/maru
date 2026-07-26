@@ -2059,7 +2059,8 @@ pub const Connection = struct {
         const stream = intFieldU64(p, "stream_id") orelse return self.replyError(request_id, .invalid_request);
         const cols = intField(p, "cols") orelse return self.replyError(request_id, .invalid_request);
         const rows = intField(p, "rows") orelse return self.replyError(request_id, .invalid_request);
-        const seq = intFieldU64(p, "client_sequence") orelse 0;
+        const seq = intFieldU64(p, "client_sequence") orelse
+            return self.replyError(request_id, .invalid_request);
         const sub = self.attachments.get(stream) orelse return self.replyError(request_id, .invalid_request);
         const runtime_id = sub.runtime_id;
 
@@ -2707,7 +2708,8 @@ fn intField(obj: std.json.ObjectMap, key: []const u8) ?u16 {
     };
 }
 
-/// stream_id·client_sequence(u64) 필드. std.json integer는 i64라 음수만 거른다 — host 발급 값은 작아 표현 범위 안이다.
+/// stream_id·client_sequence wire field. JSON integers are signed i64, which is also the
+/// canonical counter ceiling shared with resize response/event encoding.
 fn intFieldU64(obj: std.json.ObjectMap, key: []const u8) ?u64 {
     return switch (obj.get(key) orelse return null) {
         .integer => |n| if (n >= 0) @intCast(n) else null,
@@ -3054,7 +3056,7 @@ fn runWire(conn: *Connection, wire: []const u8) !FedResult {
                 } else true,
             };
             if (backend_ok) {
-                _ = conn.registry.commitResizeSubscription(&resize.prepared);
+                _ = try conn.registry.commitResizeSubscription(&resize.prepared);
                 allocator.free(resize.internal_reply);
             } else {
                 response = resize.internal_reply;
@@ -4328,6 +4330,17 @@ test "server: attach grants capabilities; controller input/resize dispatch throu
     }
     try testing.expectEqualDeep(core_command_wire.Command.scroll_to_bottom, fake.last_core_command.?);
     try testing.expectEqual(@as(u128, 0xAA), fake.core_command_runtime);
+
+    // client_sequence is required and strictly typed; malformed requests cannot mutate backend.
+    for ([_][]const u8{
+        "{\"method\":\"runtime.resize\",\"params\":{\"stream_id\":1,\"cols\":100,\"rows\":40}}",
+        "{\"method\":\"runtime.resize\",\"params\":{\"stream_id\":1,\"cols\":100,\"rows\":40,\"client_sequence\":\"1\"}}",
+    }) |payload| {
+        const r = try feedJson(&conn, .request, 30, payload);
+        defer if (r.frame) |f| f.deinit(allocator);
+        try testing.expect(std.mem.indexOf(u8, r.frame.?.payload, "invalid_request") != null);
+    }
+    try testing.expectEqual(@as(u16, 0), fake.resized_cols);
 
     // resize(controller, seq 1) → registry 적용 + runtime_ops.resize 위임 + applied 응답(changed=true).
     {

@@ -143,6 +143,7 @@ pub const RawTty = struct {
         // installing handlers prevents an installed handler from ever observing an invalid fd.
         if (@cmpxchgStrong(c.fd_t, &active_signal_write_fd, -1, pipe[1], .seq_cst, .seq_cst) != null)
             return error.SignalHandlerFailed;
+        @atomicStore(u32, &active_pending_signal_bits, 0, .seq_cst);
         @atomicStore(c.pid_t, &active_signal_pid, c.getpid(), .seq_cst);
         @atomicStore(u64, &active_owner_token, self.owner_token, .seq_cst);
         errdefer @atomicStore(c.pid_t, &active_signal_pid, -1, .seq_cst);
@@ -235,6 +236,7 @@ pub const RawTty = struct {
                     .seq_cst,
                 );
                 @atomicStore(c.pid_t, &active_signal_pid, -1, .seq_cst);
+                @atomicStore(u32, &active_pending_signal_bits, 0, .seq_cst);
                 self.closeWakePipe();
                 self.resources_pending = false;
             }
@@ -267,7 +269,16 @@ pub const RawTty = struct {
             const count = c.read(self.wake_read_fd, &byte, 1);
             if (count == 1) {
                 for (managed_signals) |signal|
-                    if (byte[0] == @intFromEnum(signal)) return signal;
+                    if (byte[0] == @intFromEnum(signal)) {
+                        _ = @atomicRmw(
+                            u32,
+                            &active_pending_signal_bits,
+                            .And,
+                            ~signalBit(signal),
+                            .seq_cst,
+                        );
+                        return signal;
+                    };
                 return error.InvalidSignalByte;
             }
             if (count == 0) return null;
@@ -287,6 +298,21 @@ pub const RawTty = struct {
     pub fn drainWakeBatch(self: *RawTty) SignalReadError!WakeBatch {
         var batch: WakeBatch = .{};
         while (try self.readSignal()) |signal| {
+            if (signal == .WINCH) {
+                batch.resize = true;
+            } else if (batch.termination == null) {
+                batch.termination = signal;
+            }
+        }
+        const pending = @atomicRmw(
+            u32,
+            &active_pending_signal_bits,
+            .Xchg,
+            0,
+            .seq_cst,
+        );
+        for (managed_signals) |signal| {
+            if (pending & signalBit(signal) == 0) continue;
             if (signal == .WINCH) {
                 batch.resize = true;
             } else if (batch.termination == null) {
@@ -357,8 +383,16 @@ fn makeRaw(original: posix.termios) posix.termios {
 
 var active_signal_write_fd: c.fd_t = -1;
 var active_signal_pid: c.pid_t = -1;
+var active_pending_signal_bits: u32 = 0;
 var next_owner_token: u64 = 1;
 var active_owner_token: u64 = 0;
+
+fn signalBit(signal: posix.SIG) u32 {
+    for (managed_signals, 0..) |candidate, index|
+        if (candidate == signal)
+            return @as(u32, 1) << @intCast(index);
+    return 0;
+}
 
 fn signalAction() posix.Sigaction {
     return .{
@@ -376,6 +410,13 @@ fn wakeSignalHandler(signal: posix.SIG) callconv(.c) void {
         c._exit(@intCast(128 + @intFromEnum(signal)));
     const fd = @atomicLoad(c.fd_t, &active_signal_write_fd, .seq_cst);
     if (fd < 0) return;
+    _ = @atomicRmw(
+        u32,
+        &active_pending_signal_bits,
+        .Or,
+        signalBit(signal),
+        .seq_cst,
+    );
     const byte = [1]u8{@intCast(@intFromEnum(signal))};
     while (true) {
         const written = c.write(fd, &byte, byte.len);
@@ -980,6 +1021,34 @@ test "SIGWINCH bursts coalesce and termination wins in one wake batch" {
     const terminated = try owner.drainWakeBatch();
     try std.testing.expect(!terminated.resize);
     try std.testing.expectEqual(posix.SIG.TERM, terminated.termination.?);
+}
+
+test "termination survives a SIGWINCH-saturated wake pipe" {
+    const initial = fakeInitialTermios();
+    const window: posix.winsize = .{ .row = 37, .col = 113, .xpixel = 0, .ypixel = 0 };
+    var master: c.fd_t = -1;
+    var slave: c.fd_t = -1;
+    try std.testing.expectEqual(@as(c_int, 0), openpty(&master, &slave, null, &initial, &window));
+    defer _ = c.close(master);
+    defer _ = c.close(slave);
+    var owner = try RawTty.enter(slave);
+    defer owner.restore() catch {};
+
+    const winch_byte = [1]u8{@intCast(@intFromEnum(posix.SIG.WINCH))};
+    var written: usize = 0;
+    while (written < 1024 * 1024) : (written += 1) {
+        const result = c.write(owner.wake_write_fd, &winch_byte, winch_byte.len);
+        if (result == 1) continue;
+        try std.testing.expectEqual(posix.E.AGAIN, posix.errno(result));
+        break;
+    }
+    try std.testing.expect(written < 1024 * 1024);
+
+    // The signal byte cannot enter the full pipe. The atomic pending class remains authoritative.
+    wakeSignalHandler(.TERM);
+    const batch = try owner.drainWakeBatch();
+    try std.testing.expectEqual(posix.SIG.TERM, batch.termination.?);
+    try std.testing.expect(!batch.resize);
 }
 
 test "openpty child turns SIGWINCH burst into one latest window size" {

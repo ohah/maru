@@ -303,9 +303,9 @@ fn unavailableInventory(host_id: u128, reason: reconcile.UnavailableReason) reco
 fn connectReason(reason: host_connect.FailureReason) reconcile.UnavailableReason {
     return switch (reason) {
         .out_of_memory => .out_of_memory,
-        .invalid_endpoint, .endpoint_denied, .launch_failed, .startup_timeout, .host_gone => .endpoint,
+        .invalid_endpoint, .endpoint_denied, .launch_failed, .startup_timeout, .host_gone, .resource_exhausted, .transient_timeout => .endpoint,
         .invalid_manifest, .stale_manifest => .stale,
-        .incompatible_version, .handshake_failed, .protocol_error => .protocol,
+        .incompatible_version, .handshake_failed, .protocol_error, .unauthorized => .protocol,
     };
 }
 

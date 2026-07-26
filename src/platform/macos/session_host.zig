@@ -125,6 +125,10 @@ pub const attach_resolver = if (builtin.os.tag == .macos)
     @import("session_host/attach_resolver.zig")
 else
     struct {};
+pub const attach_product_resolver = if (builtin.os.tag == .macos)
+    @import("session_host/attach_product_resolver.zig")
+else
+    struct {};
 pub const attach_tty = if (builtin.os.tag == .macos)
     @import("session_host/attach_tty.zig")
 else

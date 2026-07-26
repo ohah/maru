@@ -2,6 +2,20 @@
 //! Connection transport와 GUI Surface를 소유하지 않으며 strict host result/event를 attachment-local state로 접는다.
 
 const std = @import("std");
+const client_mod = @import("client.zig");
+const remote_screen = @import("remote_screen.zig");
+const screen_assembler = @import("screen_assembler.zig");
+
+pub const AttachmentTransport = struct {
+    context: *anyopaque,
+    read_batch: *const fn (
+        context: *anyopaque,
+        allocator: std.mem.Allocator,
+        stream_id: u64,
+    ) client_mod.ClientError!?client_mod.StreamBatch,
+    drop_stream: *const fn (context: *anyopaque, stream_id: u64) void,
+    fail_closed: *const fn (context: *anyopaque) void,
+};
 
 pub const Role = enum { observer, controller };
 pub const Mode = enum { observer, controller };
@@ -11,6 +25,89 @@ pub const State = struct {
     stream_id: u64,
     role: Role,
     controller_generation: u64,
+};
+
+/// Attachment-local authority SSOT shared by GUI and the external adapter. It borrows the single
+/// connection transport while owning its stream-local queue and screen; callers use the same
+/// object for every mutation gate so a busy demotion cannot act like a controller.
+pub const RemoteAttachment = struct {
+    allocator: std.mem.Allocator,
+    state: State,
+    transport: ?AttachmentTransport = null,
+    screen: ?remote_screen.RemoteScreen = null,
+    pending_batches: std.ArrayListUnmanaged(client_mod.StreamBatch) = .empty,
+
+    pub fn init(allocator: std.mem.Allocator, state: State) RemoteAttachment {
+        return .{ .allocator = allocator, .state = state };
+    }
+
+    pub fn streamId(self: *const RemoteAttachment) u64 {
+        return self.state.stream_id;
+    }
+
+    pub fn allowsMutation(self: *const RemoteAttachment) bool {
+        return self.state.role == .controller;
+    }
+
+    pub fn bindTransport(self: *RemoteAttachment, transport: AttachmentTransport) error{AlreadyBound}!void {
+        if (self.transport != null) return error.AlreadyBound;
+        self.transport = transport;
+    }
+
+    pub fn initScreen(self: *RemoteAttachment, codec: u16) anyerror!void {
+        if (self.screen != null) return;
+        self.screen = try remote_screen.RemoteScreen.initForCodec(self.allocator, codec);
+    }
+
+    pub fn deinit(self: *RemoteAttachment) void {
+        if (self.transport) |transport| transport.drop_stream(transport.context, self.state.stream_id);
+        for (self.pending_batches.items) |batch| self.allocator.free(batch.bytes);
+        self.pending_batches.deinit(self.allocator);
+        if (self.screen) |*screen| screen.deinit();
+        self.* = undefined;
+    }
+
+    /// Pull one stream-local batch from the borrowed connection into attachment-owned storage,
+    /// then apply it to the attachment-owned screen. The queue owns bytes across any future split
+    /// between transport and render turns.
+    pub fn pumpScreen(
+        self: *RemoteAttachment,
+        io: std.Io,
+    ) (client_mod.ClientError || screen_assembler.ApplyError)!bool {
+        const transport = self.transport orelse return error.ConnectionClosed;
+        if (try transport.read_batch(transport.context, self.allocator, self.state.stream_id)) |batch| {
+            self.pending_batches.append(self.allocator, batch) catch {
+                self.allocator.free(batch.bytes);
+                transport.fail_closed(transport.context);
+                return error.OutOfMemory;
+            };
+        }
+        if (self.pending_batches.items.len == 0) return false;
+        const batch = self.pending_batches.orderedRemove(0);
+        defer self.allocator.free(batch.bytes);
+        const screen = &(self.screen orelse {
+            transport.fail_closed(transport.context);
+            return error.ProtocolError;
+        });
+        if (batch.is_snapshot)
+            screen.applySnapshot(batch.bytes, io) catch |err| {
+                transport.fail_closed(transport.context);
+                return err;
+            }
+        else
+            screen.applyDelta(batch.bytes, io) catch |err| {
+                transport.fail_closed(transport.context);
+                return err;
+            };
+        return true;
+    }
+
+    pub fn applyRevoked(
+        self: *RemoteAttachment,
+        bytes: []const u8,
+    ) DecodeError!Revoked {
+        return decodeRevoked(self.allocator, bytes, &self.state);
+    }
 };
 
 pub const AttachResult = struct {
@@ -93,17 +190,17 @@ pub fn decodeAttachForCapabilities(
     bytes: []const u8,
     runtime_id: u128,
     requested: Mode,
-    controller_transfer_v1: bool,
+    peer_attach_generation: bool,
 ) DecodeError!AttachResult {
     var parsed = try parseObject(allocator, bytes);
     defer parsed.deinit();
     const root = parsed.value.object;
     if (root.count() != 1) return error.Malformed;
     const result = objectField(root, "result") orelse return error.Malformed;
-    const expected_fields: usize = if (controller_transfer_v1) 6 else 5;
+    const expected_fields: usize = if (peer_attach_generation) 6 else 5;
     if (result.count() != expected_fields) return error.Malformed;
     const stream_id = u64Field(result, "stream_id") orelse return error.Malformed;
-    const generation = if (controller_transfer_v1)
+    const generation = if (peer_attach_generation)
         u64Field(result, "controller_generation") orelse return error.Malformed
     else
         0;
@@ -124,9 +221,10 @@ pub fn decodeAttachForCapabilities(
     const resize = boolField(granted, "resize") orelse return error.Malformed;
     if (input != resize) return error.Malformed;
     const role: Role = if (input) .controller else .observer;
-    // Generation zero is the registry's pre-transition sentinel. A transfer-capable host has
-    // already acquired or observed a controller before either controller grant or busy demotion.
-    if (controller_transfer_v1 and generation == 0) return error.Malformed;
+    // Generation zero is valid only for a pure observer on a runtime that has never had a
+    // controller. Controller acquisition and busy demotion both prove a controller transition.
+    if (peer_attach_generation and generation == 0 and (role == .controller or busy))
+        return error.Malformed;
     switch (requested) {
         .observer => if (role != .observer or busy) return error.Malformed,
         .controller => switch (role) {
@@ -341,15 +439,13 @@ test "remote attachment strictly decodes controller grant and busy demotion" {
         error.Malformed,
         decodeAttach(std.testing.allocator, observer_attach, 0xaa, .observer),
     );
-    try std.testing.expectError(
-        error.Malformed,
-        decodeAttach(
-            std.testing.allocator,
-            "{\"result\":{\"stream_id\":8,\"controller_generation\":0,\"granted\":{\"observe\":true,\"input\":false,\"resize\":false},\"controller_busy\":false,\"metadata_revision\":0,\"metadata\":null}}",
-            0xaa,
-            .observer,
-        ),
+    const no_controller = try decodeAttach(
+        std.testing.allocator,
+        "{\"result\":{\"stream_id\":8,\"controller_generation\":0,\"granted\":{\"observe\":true,\"input\":false,\"resize\":false},\"controller_busy\":false,\"metadata_revision\":0,\"metadata\":null}}",
+        0xaa,
+        .observer,
     );
+    try std.testing.expectEqual(@as(u64, 0), no_controller.state.controller_generation);
 }
 
 test "remote attachment accepts exact pre-transfer same-major attach without inventing generation" {
@@ -409,6 +505,7 @@ test "remote attachment request builders are canonical and bounded" {
 test "remote attachment rejects malformed or authority-inconsistent grants" {
     const invalid = [_][]const u8{
         "{\"result\":{\"stream_id\":0,\"controller_generation\":3,\"granted\":{\"observe\":true,\"input\":true,\"resize\":true},\"controller_busy\":false,\"metadata_revision\":0,\"metadata\":null}}",
+        "{\"result\":{\"stream_id\":7,\"controller_generation\":0,\"granted\":{\"observe\":true,\"input\":false,\"resize\":false},\"controller_busy\":true,\"metadata_revision\":0,\"metadata\":null}}",
         "{\"result\":{\"stream_id\":7,\"controller_generation\":3,\"granted\":{\"observe\":true,\"input\":true,\"resize\":false},\"controller_busy\":false,\"metadata_revision\":0,\"metadata\":null}}",
         "{\"result\":{\"stream_id\":7,\"controller_generation\":3,\"granted\":{\"observe\":true,\"input\":true,\"resize\":true,\"extra\":true},\"controller_busy\":false,\"metadata_revision\":0,\"metadata\":null}}",
         "{\"result\":{\"stream_id\":7,\"controller_generation\":3,\"granted\":{\"observe\":true,\"input\":true,\"resize\":true},\"controller_busy\":false,\"metadata_revision\":0,\"metadata\":null,\"extra\":1}}",
@@ -565,4 +662,143 @@ test "remote attachment rejects generation gaps for takeover and revoke" {
             &controller,
         ),
     );
+}
+
+test "remote attachment authority rejects mutation after busy demotion or revoke" {
+    var busy = RemoteAttachment.init(std.testing.allocator, (try decodeAttach(
+        std.testing.allocator,
+        observer_attach,
+        0xaa,
+        .controller,
+    )).state);
+    try std.testing.expect(!busy.allowsMutation());
+
+    var controller = RemoteAttachment.init(std.testing.allocator, (try decodeAttach(
+        std.testing.allocator,
+        "{\"result\":{\"stream_id\":7,\"controller_generation\":3,\"granted\":{\"observe\":true,\"input\":true,\"resize\":true},\"controller_busy\":false,\"metadata_revision\":0,\"metadata\":null}}",
+        0xaa,
+        .controller,
+    )).state);
+    try std.testing.expect(controller.allowsMutation());
+    _ = try controller.applyRevoked(
+        "{\"event\":\"controller.revoked\",\"data\":{\"runtime_id\":\"000000000000000000000000000000aa\",\"stream_id\":7,\"controller_generation\":4,\"reason\":\"takeover\"}}",
+    );
+    try std.testing.expect(!controller.allowsMutation());
+}
+
+const TestTransport = struct {
+    batch: ?client_mod.StreamBatch,
+    fail_closed_calls: usize = 0,
+    drop_calls: usize = 0,
+
+    fn read(
+        context: *anyopaque,
+        _: std.mem.Allocator,
+        _: u64,
+    ) client_mod.ClientError!?client_mod.StreamBatch {
+        const self: *TestTransport = @ptrCast(@alignCast(context));
+        const batch = self.batch;
+        self.batch = null;
+        return batch;
+    }
+
+    fn drop(context: *anyopaque, _: u64) void {
+        const self: *TestTransport = @ptrCast(@alignCast(context));
+        self.drop_calls += 1;
+    }
+
+    fn failClosed(context: *anyopaque) void {
+        const self: *TestTransport = @ptrCast(@alignCast(context));
+        self.fail_closed_calls += 1;
+    }
+
+    fn interface(self: *TestTransport) AttachmentTransport {
+        return .{
+            .context = self,
+            .read_batch = read,
+            .drop_stream = drop,
+            .fail_closed = failClosed,
+        };
+    }
+};
+
+test "remote attachment fail-closes when a consumed batch has no screen owner" {
+    var transport = TestTransport{
+        .batch = .{
+            .is_snapshot = true,
+            .stream_id = 7,
+            .bytes = try std.testing.allocator.dupe(u8, "consumed"),
+        },
+    };
+    var attachment = RemoteAttachment.init(std.testing.allocator, .{
+        .runtime_id = 0xaa,
+        .stream_id = 7,
+        .role = .observer,
+        .controller_generation = 0,
+    });
+    try attachment.bindTransport(transport.interface());
+    try std.testing.expectError(
+        error.ProtocolError,
+        attachment.pumpScreen(std.testing.io),
+    );
+    try std.testing.expectEqual(@as(usize, 1), transport.fail_closed_calls);
+    try std.testing.expectEqual(@as(usize, 0), attachment.pending_batches.items.len);
+    attachment.deinit();
+    try std.testing.expectEqual(@as(usize, 1), transport.drop_calls);
+}
+
+test "remote attachment fail-closes when consumed batch queue admission runs out of memory" {
+    var transport = TestTransport{
+        // Queue admission is the only allocation in this path. A zero-length payload keeps the
+        // matching cleanup in the same failing allocator domain without adding setup allocation.
+        .batch = .{
+            .is_snapshot = true,
+            .stream_id = 7,
+            .bytes = @constCast(&[_]u8{}),
+        },
+    };
+    var failing = std.testing.FailingAllocator.init(
+        std.testing.allocator,
+        .{ .fail_index = 0 },
+    );
+    var attachment = RemoteAttachment.init(failing.allocator(), .{
+        .runtime_id = 0xaa,
+        .stream_id = 7,
+        .role = .observer,
+        .controller_generation = 0,
+    });
+    try attachment.bindTransport(transport.interface());
+    try std.testing.expectError(
+        error.OutOfMemory,
+        attachment.pumpScreen(std.testing.io),
+    );
+    try std.testing.expectEqual(@as(usize, 1), transport.fail_closed_calls);
+    try std.testing.expectEqual(@as(usize, 0), attachment.pending_batches.items.len);
+    attachment.deinit();
+    try std.testing.expectEqual(@as(usize, 1), transport.drop_calls);
+}
+
+test "remote attachment fail-closes malformed consumed screen bytes" {
+    var transport = TestTransport{
+        .batch = .{
+            .is_snapshot = true,
+            .stream_id = 7,
+            .bytes = try std.testing.allocator.dupe(u8, "not-a-screen-frame"),
+        },
+    };
+    var attachment = RemoteAttachment.init(std.testing.allocator, .{
+        .runtime_id = 0xaa,
+        .stream_id = 7,
+        .role = .observer,
+        .controller_generation = 0,
+    });
+    try attachment.bindTransport(transport.interface());
+    try attachment.initScreen(2);
+    defer attachment.deinit();
+    try std.testing.expectError(
+        error.Truncated,
+        attachment.pumpScreen(std.testing.io),
+    );
+    try std.testing.expectEqual(@as(usize, 1), transport.fail_closed_calls);
+    try std.testing.expectEqual(@as(usize, 0), attachment.pending_batches.items.len);
 }

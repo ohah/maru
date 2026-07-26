@@ -340,7 +340,7 @@ pub const RemoteTermBackend = struct {
         var rr: RemoteRuntime = undefined;
         rr.client = &client;
         rr.allocator = allocator;
-        rr.stream_id = 7;
+        rr.attachment = .init(testing.allocator, .{ .runtime_id = 1, .stream_id = 7, .role = .controller, .controller_generation = 1 });
         rr.direct_input = .empty;
         defer rr.direct_input.deinit(allocator);
         rr.direct_input_offset = 0;
@@ -379,7 +379,7 @@ pub const RemoteTermBackend = struct {
         rr.client = &client;
         rr.allocator = allocator;
         rr.io = std.testing.io;
-        rr.stream_id = 7;
+        rr.attachment = .init(testing.allocator, .{ .runtime_id = 1, .stream_id = 7, .role = .controller, .controller_generation = 1 });
         rr.direct_input = .empty;
         defer rr.direct_input.deinit(allocator);
         rr.direct_input_offset = 0;
@@ -504,7 +504,7 @@ pub const RemoteTermBackend = struct {
     fn dumpRecentText(ctx: *anyopaque, handle: RuntimeHandle, allocator: std.mem.Allocator, max_rows: usize, max_bytes: usize) anyerror![]u8 {
         const self: *RemoteTermBackend = @ptrCast(@alignCast(ctx));
         const rr = (self.runtimes.get(handle) orelse return error.UnknownSurface).runtime;
-        return rr.remote_screen.dumpRecentTextUtf8(allocator, self.io, max_rows, max_bytes);
+        return rr.attachment.screen.?.dumpRecentTextUtf8(allocator, self.io, max_rows, max_bytes);
     }
 
     // ── 원격 PtyIo(SurfaceRuntime link의 input/resize sink) ─────────────────────────
@@ -719,7 +719,7 @@ test "remote term backend: drives a real host runtime through the TermRuntimeBac
     const client_value: client_mod.Client = blk: {
         var attempts: usize = 0;
         while (attempts < 150) : (attempts += 1) {
-            if (client_mod.Client.connect(allocator, socket_path, "gui")) |cl| break :blk cl else |_| _ = usleep(20 * 1000);
+            if (client_mod.Client.connect(allocator, socket_path, .gui)) |cl| break :blk cl else |_| _ = usleep(20 * 1000);
         }
         try testing.expect(false);
         return;
@@ -852,14 +852,14 @@ test "remote term backend: two daemon pool routes exact hosts and retiring A pre
     const connect_a: client_mod.Client = blk: {
         var attempts: usize = 0;
         while (attempts < 150) : (attempts += 1) {
-            if (client_mod.Client.connect(allocator, socket_a, "gui")) |client| break :blk client else |_| _ = usleep(20 * 1000);
+            if (client_mod.Client.connect(allocator, socket_a, .gui)) |client| break :blk client else |_| _ = usleep(20 * 1000);
         }
         return error.TestUnexpectedResult;
     };
     const connect_b: client_mod.Client = blk: {
         var attempts: usize = 0;
         while (attempts < 150) : (attempts += 1) {
-            if (client_mod.Client.connect(allocator, socket_b, "gui")) |client| break :blk client else |_| _ = usleep(20 * 1000);
+            if (client_mod.Client.connect(allocator, socket_b, .gui)) |client| break :blk client else |_| _ = usleep(20 * 1000);
         }
         var failed_a = connect_a;
         failed_a.deinit();

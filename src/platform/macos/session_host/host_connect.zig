@@ -41,6 +41,9 @@ pub const FailureReason = enum {
     incompatible_version,
     handshake_failed,
     protocol_error,
+    resource_exhausted,
+    transient_timeout,
+    unauthorized,
     launch_failed,
     startup_timeout,
     invalid_manifest,
@@ -321,6 +324,17 @@ pub fn connectDiscoveredHost(
     base_cache_dir: []const u8,
     expected: host_manifest.Descriptor,
 ) Outcome {
+    return connectDiscoveredHostProfile(allocator, base_cache_dir, expected, .gui);
+}
+
+/// Unlike connectOrLaunch this path never creates a host or guesses another endpoint. The closed
+/// profile derives wire identity and transfer capability together.
+pub fn connectDiscoveredHostProfile(
+    allocator: std.mem.Allocator,
+    base_cache_dir: []const u8,
+    expected: host_manifest.Descriptor,
+    connection_profile: client_mod.ConnectionProfile,
+) Outcome {
     if (builtin.os.tag != .macos or expected.host_id == 0) return .{ .failed = .invalid_endpoint };
     var dir_buf: [512]u8 = undefined;
     const dir = discovery.sessionHostDirPath(&dir_buf, base_cache_dir) catch
@@ -335,11 +349,12 @@ pub fn connectDiscoveredHost(
         return .{ .failed = .stale_manifest };
     const endpoint = allocator.dupeZ(u8, expected.endpoint) catch return .{ .failed = .out_of_memory };
     defer allocator.free(endpoint);
-    return connectExactWithBackoff(
+    return connectExactWithBackoffKind(
         allocator,
         endpoint,
         expected.protocol_major,
         expected,
+        connection_profile,
         .{ .connect_attempts = 10, .connect_delay_ms = 20 },
     );
 }
@@ -445,16 +460,34 @@ fn connectExactWithBackoff(
     expected: host_manifest.Descriptor,
     opts: Options,
 ) Outcome {
+    return connectExactWithBackoffKind(allocator, endpoint, major, expected, .gui, opts);
+}
+
+fn connectExactWithBackoffKind(
+    allocator: std.mem.Allocator,
+    endpoint: [:0]const u8,
+    major: u16,
+    expected: host_manifest.Descriptor,
+    connection_profile: client_mod.ConnectionProfile,
+    opts: Options,
+) Outcome {
     var attempts: usize = 0;
+    var saw_transient = false;
     while (attempts < opts.connect_attempts) : (attempts += 1) {
-        switch (tryConnectMajor(allocator, endpoint, major)) {
+        switch (tryConnectMajorKind(
+            allocator,
+            endpoint,
+            major,
+            connection_profile,
+        )) {
             .connected => |client| return validateExactClient(client, expected),
-            .absent, .transient => {},
+            .absent => {},
+            .transient => saw_transient = true,
             .failed => |reason| return .{ .failed = reason },
         }
         _ = usleep(opts.connect_delay_ms * 1000);
     }
-    return .{ .failed = .startup_timeout };
+    return .{ .failed = if (saw_transient) .transient_timeout else .startup_timeout };
 }
 
 const TryConnectResult = union(enum) {
@@ -471,11 +504,11 @@ fn connectFailure(err: client_mod.ClientError) TryConnectResult {
         error.EndpointDenied => .{ .failed = .endpoint_denied },
         error.IncompatibleVersion => .{ .failed = .incompatible_version },
         error.HandshakeFailed,
-        error.AdminBusy,
-        error.Unauthorized,
         error.ConnectionClosed,
         error.WriteFailed,
         => .{ .failed = .handshake_failed },
+        error.AdminBusy => .{ .failed = .resource_exhausted },
+        error.Unauthorized => .{ .failed = .unauthorized },
         error.ProtocolError, error.EventQueueFull => .{ .failed = .protocol_error },
         error.OutOfMemory => .{ .failed = .out_of_memory },
     };
@@ -488,6 +521,8 @@ test "host_connect preserves endpoint and handshake failure classes" {
     try testing.expectEqual(FailureReason.incompatible_version, connectFailure(error.IncompatibleVersion).failed);
     try testing.expectEqual(FailureReason.handshake_failed, connectFailure(error.ConnectionClosed).failed);
     try testing.expectEqual(FailureReason.protocol_error, connectFailure(error.ProtocolError).failed);
+    try testing.expectEqual(FailureReason.resource_exhausted, connectFailure(error.AdminBusy).failed);
+    try testing.expectEqual(FailureReason.unauthorized, connectFailure(error.Unauthorized).failed);
     try testing.expectEqual(FailureReason.out_of_memory, connectFailure(error.OutOfMemory).failed);
 }
 
@@ -571,7 +606,7 @@ test "host_connect finds an existing frozen N-1 major without spawning and prese
 
 /// 한 번 connect를 시도하되 endpoint 부재/권한/일시 오류와 wire 실패를 잃지 않는다.
 fn tryConnect(allocator: std.mem.Allocator, socket: [:0]const u8) TryConnectResult {
-    if (client_mod.Client.connect(allocator, socket, "gui")) |client| {
+    if (client_mod.Client.connect(allocator, socket, .gui)) |client| {
         return .{ .connected = client };
     } else |err| {
         return connectFailure(err);
@@ -579,7 +614,21 @@ fn tryConnect(allocator: std.mem.Allocator, socket: [:0]const u8) TryConnectResu
 }
 
 fn tryConnectMajor(allocator: std.mem.Allocator, socket: [:0]const u8, major: u16) TryConnectResult {
-    if (client_mod.Client.connectMajor(allocator, socket, "gui", major)) |client| {
+    return tryConnectMajorKind(allocator, socket, major, .gui);
+}
+
+fn tryConnectMajorKind(
+    allocator: std.mem.Allocator,
+    socket: [:0]const u8,
+    major: u16,
+    connection_profile: client_mod.ConnectionProfile,
+) TryConnectResult {
+    if (client_mod.Client.connectMajor(
+        allocator,
+        socket,
+        connection_profile,
+        major,
+    )) |client| {
         return .{ .connected = client };
     } else |err| {
         return connectFailure(err);
@@ -693,7 +742,7 @@ test "host_connect: connect-first attaches to an already-running host (no spawn)
     var up = false;
     var attempts: usize = 0;
     while (attempts < 200) : (attempts += 1) {
-        if (client_mod.Client.connect(allocator, socket, "gui")) |cl| {
+        if (client_mod.Client.connect(allocator, socket, .gui)) |cl| {
             var probe = cl;
             probe.deinit();
             up = true;

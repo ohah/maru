@@ -16,7 +16,6 @@ const Surface = maru.session.Surface;
 const term_backend = maru.app.term_runtime_backend;
 const client_mod = @import("client.zig");
 const protocol = @import("protocol.zig");
-const remote_screen = @import("remote_screen.zig");
 const screen_assembler = @import("screen_assembler.zig");
 const observation_wire = @import("observation_wire.zig");
 const resize_wire = @import("resize_wire.zig");
@@ -33,14 +32,42 @@ pub const Notification = struct {
     }
 };
 
-/// 한 원격 runtime. self-referential(`surface.remote`가 `&self.remote_screen`을 가리킴)이라 **in-place `spawn`**을 쓴다
+fn attachmentReadBatch(
+    context: *anyopaque,
+    allocator: std.mem.Allocator,
+    stream_id: u64,
+) client_mod.ClientError!?client_mod.StreamBatch {
+    const client: *client_mod.Client = @ptrCast(@alignCast(context));
+    return client.readStreamBatch(allocator, stream_id);
+}
+
+fn attachmentDropStream(context: *anyopaque, stream_id: u64) void {
+    const client: *client_mod.Client = @ptrCast(@alignCast(context));
+    client.dropBufferedStream(stream_id);
+}
+
+fn attachmentFailClosed(context: *anyopaque) void {
+    const client: *client_mod.Client = @ptrCast(@alignCast(context));
+    client.failClosed();
+}
+
+fn attachmentTransport(client: *client_mod.Client) remote_attachment.AttachmentTransport {
+    return .{
+        .context = client,
+        .read_batch = attachmentReadBatch,
+        .drop_stream = attachmentDropStream,
+        .fail_closed = attachmentFailClosed,
+    };
+}
+
+/// 한 원격 runtime. self-referential(`surface.remote`가 attachment screen을 가리킴)이라 **in-place `spawn`**을 쓴다
 /// (caller가 `var rr: RemoteRuntime = undefined; try rr.spawn(...)`). spawn 후 이 값을 이동하면 안 된다.
 pub const RemoteRuntime = struct {
     client: *client_mod.Client, // borrowed — 여러 runtime이 한 connection을 공유한다(stream_id로 구분).
     allocator: std.mem.Allocator,
     io: std.Io,
     runtime_id_hex: [32]u8, // host 발급 runtime_id(hex) — terminate에 되먹인다.
-    stream_id: u64, // attach가 발급한 stream — input/resize/delta 라우팅.
+    attachment: remote_attachment.RemoteAttachment,
     resize_seq: u64, // 단조 증가 client_sequence — registry가 이하 sequence를 stale로 거부하므로 매 resize마다 올린다.
     resize_generation: u64,
     // blocking `SurfaceRuntime.writeInput`의 key bytes와 그 사이 core command를 한 시간축으로 보존한다.
@@ -53,8 +80,7 @@ pub const RemoteRuntime = struct {
     pump_ended: bool,
     resync_needed: bool,
     observation: term_backend.RuntimeObservation, // host attach/event에서 받은 화면 외 full-state owned cache.
-    remote_screen: remote_screen.RemoteScreen, // 조립기+cell 격자(surface의 화면 소스).
-    surface: Surface, // 원격-backed(surface.remote = remote_screen.screenSource()). GUI가 이걸 렌더.
+    surface: Surface, // 원격-backed(surface.remote = attachment screen source). GUI가 이걸 렌더.
 
     /// host에 runtime을 띄우고(`runtime.spawn`) controller로 attach한 뒤 첫 snapshot을 조립해 원격 Surface를 세운다.
     /// 실패 시 이미 띄운 host runtime을 회수한다(orphan 방지). `argv`/`size`는 spawn할 셸 스펙이다.
@@ -176,7 +202,13 @@ pub const RemoteRuntime = struct {
         // 2. runtime.attach(controller) — stream_id + snapshot 순서(§10).
         var attach_buf: [96]u8 = undefined;
         const attach_params = std.fmt.bufPrint(&attach_buf, "{{\"runtime_id\":\"{s}\",\"mode\":\"controller\"}}", .{self.runtime_id_hex}) catch return error.AttachFailed;
-        const attach_resp = try self.client.call("runtime.attach", attach_params);
+        const attach_resp = self.client.call("runtime.attach", attach_params) catch |err| {
+            // `Client.call` can consume a committed response and then fail while duplicating its
+            // payload. At that point no stream id exists for targeted rollback, so even an OOM
+            // that might have happened before send is conservatively connection-fatal.
+            if (err == error.OutOfMemory) self.client.failClosed();
+            return err;
+        };
         defer self.allocator.free(attach_resp);
         const remote_failure = attachFailureCode(self.allocator, attach_resp) catch |err| {
             // OOM cannot distinguish a committed success from an error envelope, while an unknown
@@ -204,7 +236,7 @@ pub const RemoteRuntime = struct {
                 attach_resp,
                 runtime_id,
                 .controller,
-                self.client.attach_generation_v1,
+                self.client.attachment_capabilities.peer_attach_generation,
             )) catch |err| switch (err) {
             error.OutOfMemory => {
                 // Same unknown-commit boundary as error-envelope parsing: strict decode OOM
@@ -219,7 +251,11 @@ pub const RemoteRuntime = struct {
                 return error.AttachFailed;
             },
         };
-        self.stream_id = accepted.state.stream_id;
+        self.attachment = .init(self.allocator, accepted.state);
+        self.attachment.bindTransport(attachmentTransport(self.client)) catch {
+            self.client.failClosed();
+            return error.AttachFailed;
+        };
         // 새 host는 attach response에 current full metadata를 싣는다. 구 host/누락은 attach 자체를 깨지 않고 unavailable로
         // 남겨 GUI가 empty와 혼동하지 않게 한다.
         _ = self.applyObservationJson(attach_resp) catch {};
@@ -227,27 +263,22 @@ pub const RemoteRuntime = struct {
         // RemoteRuntime이 없어 detachClientSide를 부를 수 없다. 이 구간에서 반드시 lease와 demux 큐를 되돌린다.
         errdefer {
             self.detachBestEffort();
-            self.client.dropBufferedStream(self.stream_id);
-            self.stream_id = 0;
+            self.attachment.deinit();
         }
 
         // 3. 첫 snapshot을 읽어 원격 화면을 조립한다.
-        const snap = try self.client.readSnapshot(self.stream_id);
+        const snap = try self.client.readSnapshot(self.attachment.streamId());
         defer self.allocator.free(snap);
-        self.remote_screen = try remote_screen.RemoteScreen.initForCodec(
-            self.allocator,
-            self.client.screen_codec_version,
-        );
-        errdefer self.remote_screen.deinit();
+        try self.attachment.initScreen(self.client.screen_codec_version);
         // mode bit 자체는 v2에도 우연히 존재할 수 있으므로 hello_ack에서 명시 협상한 host일 때만 "0 = live bottom"을
         // 신뢰한다. 구 host는 capability=false로 두고, RemoteScreen이 snapshot별 visible cursor 증거만으로
         // legacy live preedit/candidate를 허용한다. hidden/ambiguous snapshot은 계속 fail-closed다.
-        self.remote_screen.viewport_scrolled_known = self.client.screen_viewport_scrolled_v1;
-        try self.remote_screen.applySnapshot(snap, self.io);
+        self.attachment.screen.?.viewport_scrolled_known = self.client.screen_viewport_scrolled_v1;
+        try self.attachment.screen.?.applySnapshot(snap, self.io);
 
         // 4. 원격-backed Surface를 세운다(로컬 core는 placeholder — 렌더는 remote 소스로 간다).
         self.surface = try Surface.init(self.allocator, surface_id, size);
-        self.surface.remote = self.remote_screen.screenSource();
+        self.surface.remote = self.attachment.screen.?.screenSource();
     }
 
     /// host가 발급한 runtime_id(hex)를 돌려준다 — workspace가 저장해 재실행 시 `attachExisting`으로 재접속한다(§7, e3-5).
@@ -259,9 +290,8 @@ pub const RemoteRuntime = struct {
     pub fn deinit(self: *RemoteRuntime) void {
         self.terminateBestEffort();
         // terminate response보다 먼저 온 async continuation도 call이 pending_stream에 보존하므로 RPC 뒤 한 번에 회수한다.
-        self.client.dropBufferedStream(self.stream_id);
         self.surface.deinit();
-        self.remote_screen.deinit();
+        self.attachment.deinit();
         self.observation.deinit(self.allocator);
         self.direct_input.deinit(self.allocator);
         self.pending_controls.deinit(self.allocator);
@@ -275,9 +305,8 @@ pub const RemoteRuntime = struct {
         // shared connection은 앱 종료 전까지 EOF가 오지 않을 수 있다. RPC detach 없이 로컬 객체만 버리면 host의 controller
         // lease가 남아 같은 connection의 재attach가 controller_busy가 되므로 subscription을 먼저 명시 해제한다.
         self.detachBestEffort();
-        self.client.dropBufferedStream(self.stream_id); // 이 stream 앞으로 남은 demux 배치 회수(더는 pump 안 함 — §멀티 runtime).
         self.surface.deinit();
-        self.remote_screen.deinit();
+        self.attachment.deinit(); // stream demux queue + attachment-owned screen.
         self.observation.deinit(self.allocator);
         self.direct_input.deinit(self.allocator);
         self.pending_controls.deinit(self.allocator);
@@ -289,9 +318,17 @@ pub const RemoteRuntime = struct {
         return &self.surface;
     }
 
+    fn mutationAllowed(self: *const RemoteRuntime) bool {
+        return self.attachment.allowsMutation() and
+            !self.client.hasBufferedControllerRevokeForStream(self.attachment.streamId());
+    }
+
     /// terminal input을 host runtime으로 보낸다(controller). 응답 없는 fire-and-forget.
     pub fn sendInput(self: *RemoteRuntime, bytes: []const u8) client_mod.ClientError!void {
         if (bytes.len == 0) return;
+        // SurfaceRuntime가 이 권위 거부를 InputSuppressed로 바꿔 trace 0과 paste 영구 폐기를
+        // 함께 보장한다. 성공으로 숨기면 실제 PTY에 안 간 입력이 trace에 기록된다.
+        if (!self.mutationAllowed()) return error.Unauthorized;
         self.compactDirectInput();
         const pending = self.direct_input.items.len - self.direct_input_offset;
         if (bytes.len > max_direct_input_bytes -| pending) return error.OutOfMemory;
@@ -304,14 +341,16 @@ pub const RemoteRuntime = struct {
     /// UI tick의 입력을 client 연결의 bounded pending frame에 맡긴다. 반환값은 wire write량이 아니라 client가 소유권을
     /// 인수한 payload 길이라 caller가 partial socket write를 같은 입력으로 재시도하지 않는다.
     pub fn sendInputNonBlocking(self: *RemoteRuntime, bytes: []const u8) client_mod.ClientError!usize {
+        if (!self.mutationAllowed()) return error.Unauthorized;
         if (!(try self.pumpQueuedInput())) return 0;
-        return self.client.sendInputNonBlocking(self.stream_id, bytes);
+        return self.client.sendInputNonBlocking(self.attachment.streamId(), bytes);
     }
 
     /// AppKit callback-safe live-bottom 요청. socket read/blocking write를 하지 않고 stream-local intent만
     /// bounded control FIFO에 넣은 뒤 DONTWAIT admission을 한 번 시도한다. 같은 byte barrier의 연속 scroll은
     /// coalesce하고, 슬롯이 다른 frame으로 막혔으면 tick/input 경로가 다시 시도한다.
     pub fn requestScrollToBottom(self: *RemoteRuntime) client_mod.ClientError!void {
+        if (!self.mutationAllowed()) return error.Unauthorized;
         if (!self.client.async_scroll_to_bottom_v1) return;
         const barrier = self.direct_input.items.len;
         if (self.pending_controls.items.len > 0) {
@@ -330,6 +369,7 @@ pub const RemoteRuntime = struct {
     /// focus/config/prompt 등 host-authoritative 명령을 input과 같은 stream-local 시간축에 넣는다. queue가 인수한 뒤
     /// socket backpressure가 생겨도 다음 frame tick이 재시도하며, bounded cap을 넘으면 명시적으로 실패한다.
     pub fn queueCoreCommand(self: *RemoteRuntime, command: core_command_wire.Command) client_mod.ClientError!void {
+        if (!self.mutationAllowed()) return error.Unauthorized;
         if (!self.client.runtime_core_command_v1) {
             if (command.isLegacyScroll()) return self.sendCoreCommandBlocking(command);
             return;
@@ -362,15 +402,16 @@ pub const RemoteRuntime = struct {
     };
 
     fn admitControl(self: *RemoteRuntime, control: PendingControl) client_mod.ClientError!bool {
+        if (!self.mutationAllowed()) return error.Unauthorized;
         return switch (control.op) {
-            .scroll_to_bottom => self.client.sendScrollToBottomNonBlocking(self.stream_id) catch |err| switch (err) {
+            .scroll_to_bottom => self.client.sendScrollToBottomNonBlocking(self.attachment.streamId()) catch |err| switch (err) {
                 error.OutOfMemory => false,
                 else => return err,
             },
             .core_command => |command| blk: {
-                const params = core_command_wire.encodeParams(self.allocator, self.stream_id, command) catch break :blk false;
+                const params = core_command_wire.encodeParams(self.allocator, self.attachment.streamId(), command) catch break :blk false;
                 defer self.allocator.free(params);
-                break :blk self.client.sendCoreCommandNonBlocking(self.stream_id, params) catch |err| switch (err) {
+                break :blk self.client.sendCoreCommandNonBlocking(self.attachment.streamId(), params) catch |err| switch (err) {
                     error.OutOfMemory => false,
                     else => return err,
                 };
@@ -396,13 +437,18 @@ pub const RemoteRuntime = struct {
     /// 직접 key FIFO와 control FIFO를 단일 시간 순서로 Client outbound에 넘긴다.
     /// 반환 false는 socket backpressure로 아직 queue/barrier가 남았다는 뜻이며 데이터 소유권은 유지된다.
     fn pumpQueuedInput(self: *RemoteRuntime) client_mod.ClientError!bool {
+        if (!self.attachment.allowsMutation()) {
+            self.discardQueuedMutations();
+            return true;
+        }
+        if (self.client.hasBufferedControllerRevoke()) return false;
         while (true) {
             if (self.pending_controls.items.len > 0) {
                 const control = self.pending_controls.items[0];
                 const barrier = control.barrier;
                 if (self.direct_input_offset < barrier) {
                     const accepted = self.client.sendInputNonBlocking(
-                        self.stream_id,
+                        self.attachment.streamId(),
                         self.direct_input.items[self.direct_input_offset..barrier],
                     ) catch |err| switch (err) {
                         error.OutOfMemory => return false,
@@ -418,7 +464,7 @@ pub const RemoteRuntime = struct {
             }
             if (self.direct_input_offset < self.direct_input.items.len) {
                 const accepted = self.client.sendInputNonBlocking(
-                    self.stream_id,
+                    self.attachment.streamId(),
                     self.direct_input.items[self.direct_input_offset..],
                 ) catch |err| switch (err) {
                     error.OutOfMemory => return false,
@@ -438,25 +484,30 @@ pub const RemoteRuntime = struct {
     /// Client의 connection-level pending frame이라는 두 ownership 층 사이에서 mouse/core/resize RPC가 key를
     /// 추월하지 않게 하는 단일 경계다. 각 blocking RPC는 원래도 Client.call에서 pending socket write를 기다린다.
     fn flushQueuedInputBlocking(self: *RemoteRuntime) client_mod.ClientError!void {
+        if (!self.attachment.allowsMutation()) {
+            self.discardQueuedMutations();
+            return;
+        }
+        if (self.client.hasBufferedControllerRevoke()) return error.AdminBusy;
         while (true) {
             if (self.pending_controls.items.len > 0) {
                 const control = self.pending_controls.items[0];
                 const barrier = control.barrier;
                 if (self.direct_input_offset < barrier) {
                     try self.client.sendInput(
-                        self.stream_id,
+                        self.attachment.streamId(),
                         self.direct_input.items[self.direct_input_offset..barrier],
                     );
                     self.direct_input_offset = barrier;
                     continue;
                 }
                 switch (control.op) {
-                    .scroll_to_bottom => try self.client.sendScrollToBottom(self.stream_id),
+                    .scroll_to_bottom => try self.client.sendScrollToBottom(self.attachment.streamId()),
                     .core_command => |command| {
-                        const params = core_command_wire.encodeParams(self.allocator, self.stream_id, command) catch
+                        const params = core_command_wire.encodeParams(self.allocator, self.attachment.streamId(), command) catch
                             return error.OutOfMemory;
                         defer self.allocator.free(params);
-                        try self.client.sendCoreCommand(self.stream_id, params);
+                        try self.client.sendCoreCommand(self.attachment.streamId(), params);
                     },
                 }
                 _ = self.pending_controls.orderedRemove(0);
@@ -464,7 +515,7 @@ pub const RemoteRuntime = struct {
             }
             if (self.direct_input_offset < self.direct_input.items.len) {
                 try self.client.sendInput(
-                    self.stream_id,
+                    self.attachment.streamId(),
                     self.direct_input.items[self.direct_input_offset..],
                 );
                 self.direct_input_offset = self.direct_input.items.len;
@@ -481,6 +532,12 @@ pub const RemoteRuntime = struct {
         return self.client.call(method, params_json);
     }
 
+    fn discardQueuedMutations(self: *RemoteRuntime) void {
+        self.direct_input.clearRetainingCapacity();
+        self.direct_input_offset = 0;
+        self.pending_controls.clearRetainingCapacity();
+    }
+
     /// canonical PTY size를 바꾼다(host `runtime.resize`). host가 실 `TerminalCore`+`TIOCSWINSZ`에 적용한다.
     pub const ResizeError = client_mod.ClientError || error{
         ResizeRejected,
@@ -490,11 +547,14 @@ pub const RemoteRuntime = struct {
     };
 
     pub fn resize(self: *RemoteRuntime, cols: u16, rows: u16) ResizeError!void {
+        // Observer viewport follows the controller's canonical runtime size; local window changes
+        // are acknowledged as a no-op instead of becoming an infinite GUI retry.
+        if (!self.mutationAllowed()) return;
         if (self.resize_seq == resize_wire.max_counter)
             return error.SequenceExhausted;
         self.resize_seq += 1;
         var buf: [96]u8 = undefined;
-        const params = std.fmt.bufPrint(&buf, "{{\"stream_id\":{d},\"cols\":{d},\"rows\":{d},\"client_sequence\":{d}}}", .{ self.stream_id, cols, rows, self.resize_seq }) catch return error.OutOfMemory;
+        const params = std.fmt.bufPrint(&buf, "{{\"stream_id\":{d},\"cols\":{d},\"rows\":{d},\"client_sequence\":{d}}}", .{ self.attachment.streamId(), cols, rows, self.resize_seq }) catch return error.OutOfMemory;
         const resp = try self.callOrdered("runtime.resize", params);
         defer self.allocator.free(resp);
         const reply = parseResizeReply(self.allocator, resp, self.resize_seq) catch |err| {
@@ -521,27 +581,22 @@ pub const RemoteRuntime = struct {
     pub const PumpResult = enum { idle, metadata, screen, ended };
 
     pub fn pumpDelta(self: *RemoteRuntime) (client_mod.ClientError || screen_assembler.ApplyError)!PumpResult {
-        // 마지막 non-blocking input 뒤에 새 입력/RPC가 영원히 없더라도 frame-loop pump가 연결의 bounded pending frame을
-        // 계속 DONTWAIT로 진전시킨다. Client 하나를 여러 runtime이 공유하므로 어느 runtime pump가 호출해도 충분하다.
-        _ = try self.pumpQueuedInput();
-        _ = try self.client.pumpPendingOutput();
-        try self.pumpResyncIntent();
+        // Revoke/ended events fence mutation. Consume already-buffered authority events before
+        // advancing any input/control that was accepted on a previous UI turn.
         var events = try self.drainObservationEvents();
         if (events.ended) return .ended;
-        const maybe_batch = try self.client.readStreamBatch(self.allocator, self.stream_id);
-        if (maybe_batch == null) {
+        // 마지막 non-blocking input 뒤에 새 입력/RPC가 영원히 없더라도 frame-loop pump가 연결의 bounded pending frame을
+        // 계속 DONTWAIT로 진전시킨다. Client 하나를 여러 runtime이 공유하므로 어느 runtime pump가 호출해도 충분하다.
+        if (!(try self.pumpQueuedInput()))
+            return if (events.metadata) .metadata else .idle;
+        _ = try self.client.pumpPendingOutput();
+        try self.pumpResyncIntent();
+        if (!(try self.attachment.pumpScreen(self.io))) {
             // readStreamBatch가 socket에서 event만 읽어 pending queue에 넣고 screen batch 없이 돌아올 수 있다.
             const after_read = try self.drainObservationEvents();
             if (after_read.ended) return .ended;
             events.metadata = after_read.metadata or events.metadata;
             return if (events.metadata) .metadata else .idle;
-        }
-        const batch = maybe_batch.?;
-        defer self.allocator.free(batch.bytes);
-        if (batch.is_snapshot) {
-            try self.remote_screen.applySnapshot(batch.bytes, self.io); // §9 fresh snapshot(grid/alt 변화) → 화면 리셋.
-        } else {
-            try self.remote_screen.applyDelta(batch.bytes, self.io);
         }
         const after_screen = try self.drainObservationEvents();
         if (after_screen.ended) return .ended;
@@ -555,8 +610,30 @@ pub const RemoteRuntime = struct {
 
     fn drainObservationEvents(self: *RemoteRuntime) client_mod.ClientError!EventDrain {
         var result: EventDrain = .{};
-        while (self.client.takeEventForStream(self.stream_id)) |frame| {
+        while (self.client.takeEventForStream(self.attachment.streamId())) |frame| {
             defer frame.deinit(self.allocator);
+            if (std.mem.indexOf(u8, frame.payload, "\"event\":\"controller.revoked\"") != null) {
+                _ = self.attachment.applyRevoked(frame.payload) catch |err| {
+                    self.client.failClosed();
+                    return switch (err) {
+                        error.OutOfMemory => error.OutOfMemory,
+                        error.Malformed => error.ProtocolError,
+                    };
+                };
+                self.discardQueuedMutations();
+                switch (self.client.fenceRevokedStream(self.attachment.streamId())) {
+                    .no_pending_stream_frame, .cancelled_before_write => {},
+                    .partial_frame_requires_close => {
+                        // A partial frame cannot be truncated without corrupting the shared wire.
+                        // The host generation fence decides the documented old/new-controller
+                        // linearization; this exceptional case must close sibling streams too.
+                        self.client.failClosed();
+                        return error.ConnectionClosed;
+                    },
+                }
+                result.metadata = true;
+                continue;
+            }
             if (isRuntimeEndedEvent(frame.payload)) {
                 result.ended = true;
                 continue;
@@ -587,13 +664,13 @@ pub const RemoteRuntime = struct {
             }
             result.metadata = (try self.applyObservationJson(frame.payload)) or result.metadata;
         }
-        if (result.ended) self.client.dropBufferedStream(self.stream_id);
+        if (result.ended) self.client.dropBufferedStream(self.attachment.streamId());
         return result;
     }
 
     fn pumpResyncIntent(self: *RemoteRuntime) client_mod.ClientError!void {
         if (!self.resync_needed) return;
-        const accepted = self.client.sendResyncNonBlocking(self.stream_id) catch |err| switch (err) {
+        const accepted = self.client.sendResyncNonBlocking(self.attachment.streamId()) catch |err| switch (err) {
             error.OutOfMemory => return,
             else => return err,
         };
@@ -783,7 +860,7 @@ pub const RemoteRuntime = struct {
     /// 받아 generation을 리셋해 복구한다(delta는 base_generation이 현재라 stale client를 못 고쳐 snapshot이 유일한 복구). 응답 무시.
     pub fn requestResync(self: *RemoteRuntime) client_mod.ClientError!void {
         var buf: [64]u8 = undefined;
-        const params = std.fmt.bufPrint(&buf, "{{\"stream_id\":{d}}}", .{self.stream_id}) catch return error.OutOfMemory;
+        const params = std.fmt.bufPrint(&buf, "{{\"stream_id\":{d}}}", .{self.attachment.streamId()}) catch return error.OutOfMemory;
         const resp = try self.callOrdered("runtime.resync", params);
         self.allocator.free(resp);
     }
@@ -793,7 +870,7 @@ pub const RemoteRuntime = struct {
     /// 응답을 만든 시점의 full-state다.
     pub fn refreshObservation(self: *RemoteRuntime) client_mod.ClientError!void {
         var buf: [64]u8 = undefined;
-        const params = std.fmt.bufPrint(&buf, "{{\"stream_id\":{d}}}", .{self.stream_id}) catch return error.OutOfMemory;
+        const params = std.fmt.bufPrint(&buf, "{{\"stream_id\":{d}}}", .{self.attachment.streamId()}) catch return error.OutOfMemory;
         const before = self.observation.revision;
         const resp = try self.callOrdered("runtime.observation", params);
         defer self.allocator.free(resp);
@@ -812,7 +889,7 @@ pub const RemoteRuntime = struct {
     pub fn selectedText(self: *RemoteRuntime, span: terminal.SelectionSpan) client_mod.ClientError!?[]u8 {
         if (!self.client.runtime_selected_text_v1) return self.selectedTextFromProjection(span);
         var buf: [160]u8 = undefined;
-        const params = std.fmt.bufPrint(&buf, "{{\"stream_id\":{d},\"sr\":{d},\"sc\":{d},\"er\":{d},\"ec\":{d},\"block\":{}}}", .{ self.stream_id, span.start.row, span.start.col, span.end.row, span.end.col, span.block }) catch return error.OutOfMemory;
+        const params = std.fmt.bufPrint(&buf, "{{\"stream_id\":{d},\"sr\":{d},\"sc\":{d},\"er\":{d},\"ec\":{d},\"block\":{}}}", .{ self.attachment.streamId(), span.start.row, span.start.col, span.end.row, span.end.col, span.block }) catch return error.OutOfMemory;
         const resp = try self.callOrdered("runtime.selected_text", params);
         defer self.allocator.free(resp);
         return self.decodeSelectedTextResponse(resp);
@@ -857,7 +934,7 @@ pub const RemoteRuntime = struct {
     pub fn linkAt(self: *RemoteRuntime, row: u16, col: u16, scopes: u8) client_mod.ClientError!?RemoteLink {
         if (!self.client.runtime_link_at_v1) return null;
         var buf: [160]u8 = undefined;
-        const params = std.fmt.bufPrint(&buf, "{{\"stream_id\":{d},\"row\":{d},\"col\":{d},\"scopes\":{d}}}", .{ self.stream_id, row, col, scopes }) catch return error.OutOfMemory;
+        const params = std.fmt.bufPrint(&buf, "{{\"stream_id\":{d},\"row\":{d},\"col\":{d},\"scopes\":{d}}}", .{ self.attachment.streamId(), row, col, scopes }) catch return error.OutOfMemory;
         const resp = try self.callOrdered("runtime.link_at", params);
         defer self.allocator.free(resp);
         return self.decodeLinkAtResponse(resp);
@@ -928,9 +1005,10 @@ pub const RemoteRuntime = struct {
     /// **base64로 받는다**: OSC 52 데이터는 임의 바이트라 JSON 문자열로 그대로 오면 strict 디코더의 UTF-8 검증에
     /// 걸려 connection이 fail-close된다(복사 한 번에 앱 전역 연결이 끊긴다). host가 base64로 싣고 여기서 푼다.
     pub fn clipboardWrite(self: *RemoteRuntime) client_mod.ClientError!?ClipboardWrite {
+        if (!self.mutationAllowed()) return error.Unauthorized;
         if (!self.client.runtime_clipboard_v1) return null;
         var buf: [64]u8 = undefined;
-        const params = std.fmt.bufPrint(&buf, "{{\"stream_id\":{d}}}", .{self.stream_id}) catch return error.OutOfMemory;
+        const params = std.fmt.bufPrint(&buf, "{{\"stream_id\":{d}}}", .{self.attachment.streamId()}) catch return error.OutOfMemory;
         const resp = try self.callOrdered("runtime.clipboard_write", params);
         defer self.allocator.free(resp);
         return self.decodeClipboardWriteResponse(resp);
@@ -978,7 +1056,7 @@ pub const RemoteRuntime = struct {
     /// multi-row 선형 선택은 보이는 행 사이에 개행을 보존하는 degraded 정책이며, capability가 있는 최신 host에서는 반드시
     /// 위 RPC를 써 host SSOT를 유지한다.
     fn selectedTextFromProjection(self: *RemoteRuntime, span: terminal.SelectionSpan) client_mod.ClientError!?[]u8 {
-        return self.remote_screen.extractVisibleSelection(self.allocator, self.io, span);
+        return self.attachment.screen.?.extractVisibleSelection(self.allocator, self.io, span);
     }
 
     /// 원격 검색(§6c): 검색어로 host가 **콘텐츠·스크롤백을 아는 자기 core**에서 `findMatches`(로컬과 같은 함수)로 매치를 찾게
@@ -989,6 +1067,7 @@ pub const RemoteRuntime = struct {
     pub const FindResult = struct { count: usize, cur: ?terminal.SelectionSpan };
 
     pub fn find(self: *RemoteRuntime, query: []const u8, cur_index: u32, scroll: bool, out_spans: *std.ArrayList(terminal.SelectionSpan)) client_mod.ClientError!FindResult {
+        if (scroll and !self.mutationAllowed()) return error.Unauthorized;
         out_spans.clearRetainingCapacity();
         var hexbuf: [512]u8 = undefined;
         const qn = @min(query.len, hexbuf.len / 2);
@@ -998,7 +1077,7 @@ pub const RemoteRuntime = struct {
             hexbuf[i * 2 + 1] = hex_chars[b & 0xf];
         }
         var buf: [640]u8 = undefined;
-        const params = std.fmt.bufPrint(&buf, "{{\"stream_id\":{d},\"q\":\"{s}\",\"cur\":{d},\"scroll\":{}}}", .{ self.stream_id, hexbuf[0 .. qn * 2], cur_index, scroll }) catch return error.OutOfMemory;
+        const params = std.fmt.bufPrint(&buf, "{{\"stream_id\":{d},\"q\":\"{s}\",\"cur\":{d},\"scroll\":{}}}", .{ self.attachment.streamId(), hexbuf[0 .. qn * 2], cur_index, scroll }) catch return error.OutOfMemory;
         const resp = try self.callOrdered("runtime.find", params);
         defer self.allocator.free(resp);
         const count = client_mod.extractU64Field(resp, "\"count\":") orelse 0;
@@ -1011,8 +1090,9 @@ pub const RemoteRuntime = struct {
     /// 선택 span을 받는다(빈 placeholder는 경계를 모른다 = 선택 의미론 host 단일 출처). caller는 이 span을 placeholder에 적용해
     /// 하이라이트한다(복사는 #6b-1 selectedText가 그 span으로 host 추출). `op`는 고정 리터럴("word"/"line"). 선택 없으면 null.
     pub fn selectContentAware(self: *RemoteRuntime, op: []const u8, row: u16, col: u16) client_mod.ClientError!?terminal.SelectionSpan {
+        if (!self.mutationAllowed()) return error.Unauthorized;
         var buf: [96]u8 = undefined;
-        const params = std.fmt.bufPrint(&buf, "{{\"stream_id\":{d},\"op\":\"{s}\",\"row\":{d},\"col\":{d}}}", .{ self.stream_id, op, row, col }) catch return error.OutOfMemory;
+        const params = std.fmt.bufPrint(&buf, "{{\"stream_id\":{d},\"op\":\"{s}\",\"row\":{d},\"col\":{d}}}", .{ self.attachment.streamId(), op, row, col }) catch return error.OutOfMemory;
         const resp = try self.callOrdered("runtime.select_op", params);
         defer self.allocator.free(resp);
         if (std.mem.indexOf(u8, resp, "\"sel\":true") == null) return null; // 빈 선택(공백 셀 등).
@@ -1027,8 +1107,9 @@ pub const RemoteRuntime = struct {
     /// host-authoritative core command를 strict bounded codec으로 보낸다. 구 host는 scroll 4종만 이해하므로 capability가
     /// 없는 연결에는 그 legacy subset만 보내고 focus/config/prompt는 unknown RPC를 시험하지 않고 degraded no-op으로 둔다.
     pub fn sendCoreCommandBlocking(self: *RemoteRuntime, command: core_command_wire.Command) client_mod.ClientError!void {
+        if (!self.mutationAllowed()) return error.Unauthorized;
         if (!shouldSendCoreCommand(self.client.runtime_core_command_v1, command)) return;
-        const params = core_command_wire.encodeParams(self.allocator, self.stream_id, command) catch return error.OutOfMemory;
+        const params = core_command_wire.encodeParams(self.allocator, self.attachment.streamId(), command) catch return error.OutOfMemory;
         defer self.allocator.free(params);
         const resp = try self.callOrdered("runtime.core_command", params);
         self.allocator.free(resp);
@@ -1037,11 +1118,12 @@ pub const RemoteRuntime = struct {
     /// host-backed 마우스 리포트(§ 입력 패리티): 마우스 이벤트를 host로 보내 host core가 자기 mouse_tracking/format으로
     /// SGR 리포트를 인코딩·PTY 주입하게 한다. 인코딩 모드가 host에만 있어 client는 raw 이벤트만 전달한다(방식 B).
     pub fn sendMouseReport(self: *RemoteRuntime, m: maru.session.core_command.MouseReport) client_mod.ClientError!void {
+        if (!self.mutationAllowed()) return error.Unauthorized;
         var buf: [192]u8 = undefined;
         const params = std.fmt.bufPrint(
             &buf,
             "{{\"stream_id\":{d},\"button\":{d},\"col\":{d},\"row\":{d},\"x_px\":{d},\"y_px\":{d},\"pressed\":{},\"motion\":{},\"mods\":{d}}}",
-            .{ self.stream_id, m.button, m.col, m.row, m.x_px, m.y_px, m.pressed, m.motion, m.mods },
+            .{ self.attachment.streamId(), m.button, m.col, m.row, m.x_px, m.y_px, m.pressed, m.motion, m.mods },
         ) catch return error.OutOfMemory;
         const resp = try self.callOrdered("runtime.report_mouse", params);
         self.allocator.free(resp);
@@ -1057,7 +1139,7 @@ pub const RemoteRuntime = struct {
         var buf: [96]u8 = undefined;
         const params = notificationParams(
             &buf,
-            self.stream_id,
+            self.attachment.streamId(),
         ) catch return error.OutOfMemory;
         const resp = try self.callOrdered("runtime.notification", params);
         defer self.allocator.free(resp);
@@ -1378,9 +1460,9 @@ pub const RemoteRuntime = struct {
     }
 
     fn detachBestEffort(self: *RemoteRuntime) void {
-        if (self.stream_id == 0) return;
+        if (self.attachment.streamId() == 0) return;
         var buf: [64]u8 = undefined;
-        const params = std.fmt.bufPrint(&buf, "{{\"stream_id\":{d}}}", .{self.stream_id}) catch return;
+        const params = std.fmt.bufPrint(&buf, "{{\"stream_id\":{d}}}", .{self.attachment.streamId()}) catch return;
         // controller lease 해제는 transient input-frame OOM보다 우선한다. hard connection error면 어차피 EOF detach된다.
         self.flushQueuedInputBlocking() catch |err| if (err != error.OutOfMemory) return;
         const resp = self.client.call("runtime.detach", params) catch |err| {
@@ -1609,7 +1691,7 @@ test "remote runtime fails the shared connection on an immediately consumed fore
     var runtime: RemoteRuntime = undefined;
     runtime.client = &client;
     runtime.allocator = allocator;
-    runtime.stream_id = 7;
+    runtime.attachment = .init(testing.allocator, .{ .runtime_id = 1, .stream_id = 7, .role = .controller, .controller_generation = 1 });
     runtime.runtime_id_hex = "000000000000000000000000000000aa".*;
     runtime.resize_generation = 0;
     runtime.observation = .{};
@@ -2140,6 +2222,174 @@ test "remote runtime preserves only exact known attach error envelopes" {
         ),
     );
 }
+
+test "remote runtime observer locally consumes input and sends no resize mutation" {
+    var runtime: RemoteRuntime = undefined;
+    runtime.attachment = .init(testing.allocator, .{
+        .runtime_id = 0xaa,
+        .stream_id = 7,
+        .role = .observer,
+        .controller_generation = 3,
+    });
+    defer runtime.attachment.deinit();
+    try testing.expectError(error.Unauthorized, runtime.sendInput("x"));
+    try testing.expectError(error.Unauthorized, runtime.sendInputNonBlocking("paste"));
+    try runtime.resize(80, 24);
+}
+
+test "remote runtime revoke demotes authority and cancels queued mutation before write" {
+    const allocator = testing.allocator;
+    var client: client_mod.Client = .{
+        .allocator = allocator,
+        .fd = -1,
+        .host_id = 1,
+        .parser = framing.FrameParser.init(allocator),
+        .pending_outbound = .{
+            .frame = try allocator.dupe(u8, "not-yet-written"),
+            .stream_id = 7,
+        },
+    };
+    defer client.deinit();
+    const event = framing.Frame{
+        .header = .{ .kind = .event, .stream_id = 7 },
+        .payload = try allocator.dupe(
+            u8,
+            "{\"event\":\"controller.revoked\",\"data\":{\"runtime_id\":\"000000000000000000000000000000aa\",\"stream_id\":7,\"controller_generation\":4,\"reason\":\"takeover\"}}",
+        ),
+    };
+    try client.pending_events.append(allocator, event);
+    client.pending_event_bytes = event.payload.len;
+
+    var runtime: RemoteRuntime = undefined;
+    runtime.client = &client;
+    runtime.allocator = allocator;
+    runtime.attachment = .init(allocator, .{
+        .runtime_id = 0xaa,
+        .stream_id = 7,
+        .role = .controller,
+        .controller_generation = 3,
+    });
+    defer runtime.attachment.deinit();
+    runtime.direct_input = .empty;
+    defer runtime.direct_input.deinit(allocator);
+    try runtime.direct_input.appendSlice(allocator, "queued");
+    runtime.direct_input_offset = 0;
+    runtime.pending_controls = .empty;
+    defer runtime.pending_controls.deinit(allocator);
+    try runtime.pending_controls.append(allocator, .{
+        .barrier = 6,
+        .op = .scroll_to_bottom,
+    });
+    runtime.observation = .{};
+
+    const drained = try runtime.drainObservationEvents();
+    try testing.expect(drained.metadata);
+    try testing.expectEqual(remote_attachment.Role.observer, runtime.attachment.state.role);
+    try testing.expectEqual(@as(u64, 4), runtime.attachment.state.controller_generation);
+    try testing.expectEqual(@as(usize, 0), runtime.direct_input.items.len);
+    try testing.expectEqual(@as(usize, 0), runtime.pending_controls.items.len);
+    try testing.expect(client.pending_outbound == null);
+    try testing.expect(!client.unusable);
+}
+
+test "own buffered revoke suppresses newly arriving input before role cache catches up" {
+    const allocator = testing.allocator;
+    var client: client_mod.Client = .{
+        .allocator = allocator,
+        .fd = -1,
+        .host_id = 1,
+        .parser = framing.FrameParser.init(allocator),
+    };
+    defer client.deinit();
+    const revoke = framing.Frame{
+        .header = .{ .kind = .event, .stream_id = 7 },
+        .payload = try allocator.dupe(
+            u8,
+            "{\"event\":\"controller.revoked\",\"data\":{\"runtime_id\":\"000000000000000000000000000000aa\",\"stream_id\":7,\"controller_generation\":4,\"reason\":\"takeover\"}}",
+        ),
+    };
+    try client.pending_events.append(allocator, revoke);
+    client.pending_event_bytes = revoke.payload.len;
+
+    var runtime: RemoteRuntime = undefined;
+    runtime.client = &client;
+    runtime.allocator = allocator;
+    runtime.attachment = .init(allocator, .{
+        .runtime_id = 0xaa,
+        .stream_id = 7,
+        .role = .controller,
+        .controller_generation = 3,
+    });
+    defer runtime.attachment.deinit();
+    runtime.direct_input = .empty;
+    defer runtime.direct_input.deinit(allocator);
+    runtime.direct_input_offset = 0;
+    runtime.pending_controls = .empty;
+    defer runtime.pending_controls.deinit(allocator);
+
+    // Role cache는 아직 controller지만 own-stream revoke가 먼저 도착했으므로 SurfaceRuntime가
+    // InputSuppressed로 바꿀 Unauthorized를 반환하고 queue/wire ownership을 만들지 않는다.
+    try testing.expect(runtime.attachment.allowsMutation());
+    try testing.expect(client.hasBufferedControllerRevokeForStream(7));
+    try testing.expect(!client.hasBufferedControllerRevokeForStream(8));
+    try testing.expectError(error.Unauthorized, runtime.sendInput("key"));
+    try testing.expectError(error.Unauthorized, runtime.sendInputNonBlocking("paste"));
+    try testing.expectEqual(@as(usize, 0), runtime.direct_input.items.len);
+    try testing.expect(client.pending_outbound == null);
+}
+
+test "sibling runtime cannot flush a stream whose buffered revoke is not consumed yet" {
+    const allocator = testing.allocator;
+    var client: client_mod.Client = .{
+        .allocator = allocator,
+        .fd = -1,
+        .host_id = 1,
+        .parser = framing.FrameParser.init(allocator),
+        .pending_outbound = .{
+            .frame = try allocator.dupe(u8, "stream-eight"),
+            .stream_id = 8,
+        },
+    };
+    defer client.deinit();
+    const revoke = framing.Frame{
+        .header = .{ .kind = .event, .stream_id = 8 },
+        .payload = try allocator.dupe(
+            u8,
+            "{\"event\":\"controller.revoked\",\"data\":{\"runtime_id\":\"000000000000000000000000000000bb\",\"stream_id\":8,\"controller_generation\":4,\"reason\":\"takeover\"}}",
+        ),
+    };
+    try client.pending_events.append(allocator, revoke);
+    client.pending_event_bytes = revoke.payload.len;
+
+    var sibling: RemoteRuntime = undefined;
+    sibling.client = &client;
+    sibling.allocator = allocator;
+    sibling.io = testing.io;
+    sibling.attachment = .init(allocator, .{
+        .runtime_id = 0xaa,
+        .stream_id = 7,
+        .role = .controller,
+        .controller_generation = 3,
+    });
+    defer sibling.attachment.deinit();
+    sibling.direct_input = .empty;
+    defer sibling.direct_input.deinit(allocator);
+    try sibling.direct_input.appendSlice(allocator, "preserve-me");
+    sibling.direct_input_offset = 0;
+    sibling.pending_controls = .empty;
+    defer sibling.pending_controls.deinit(allocator);
+    sibling.resync_needed = false;
+    sibling.observation = .{};
+
+    // A foreign-stream revoke blocks shared wire progress, not local admission for this still-
+    // controller sibling. The input remains owned by its bounded queue until stream 8 consumes.
+    try sibling.sendInput("-new");
+    try testing.expectEqual(RemoteRuntime.PumpResult.idle, try sibling.pumpDelta());
+    try testing.expectEqualStrings("preserve-me-new", sibling.direct_input.items);
+    try testing.expect(client.pending_outbound != null);
+    try testing.expectEqual(@as(usize, 0), client.pending_outbound.?.offset);
+    try testing.expect(client.hasBufferedControllerRevoke());
+}
 const socket_server = @import("socket_server.zig");
 
 fn fillRemoteTestSendBuffer(fd: c.fd_t) !usize {
@@ -2207,7 +2457,7 @@ test "remote runtime retains direct key behind async scroll barrier under socket
     var rr: RemoteRuntime = undefined;
     rr.client = &client;
     rr.allocator = allocator;
-    rr.stream_id = 9;
+    rr.attachment = .init(testing.allocator, .{ .runtime_id = 1, .stream_id = 9, .role = .controller, .controller_generation = 1 });
     rr.direct_input = .empty;
     rr.direct_input_offset = 0;
     rr.pending_controls = .empty;
@@ -2269,7 +2519,7 @@ test "remote runtime preserves input core-command input order under socket backp
     var rr: RemoteRuntime = undefined;
     rr.client = &client;
     rr.allocator = allocator;
-    rr.stream_id = 10;
+    rr.attachment = .init(testing.allocator, .{ .runtime_id = 1, .stream_id = 10, .role = .controller, .controller_generation = 1 });
     rr.direct_input = .empty;
     rr.direct_input_offset = 0;
     rr.pending_controls = .empty;
@@ -2325,7 +2575,7 @@ test "remote runtime control cap overflow fail-closes instead of silently losing
     var rr: RemoteRuntime = undefined;
     rr.client = &client;
     rr.allocator = allocator;
-    rr.stream_id = 10;
+    rr.attachment = .init(testing.allocator, .{ .runtime_id = 1, .stream_id = 10, .role = .controller, .controller_generation = 1 });
     rr.direct_input = .empty;
     rr.direct_input_offset = 0;
     rr.pending_controls = .empty;
@@ -2361,7 +2611,7 @@ test "remote runtime control allocation failure also fail-closes instead of sile
     var rr: RemoteRuntime = undefined;
     rr.client = &client;
     rr.allocator = failing.allocator();
-    rr.stream_id = 10;
+    rr.attachment = .init(testing.allocator, .{ .runtime_id = 1, .stream_id = 10, .role = .controller, .controller_generation = 1 });
     rr.direct_input = .empty;
     rr.direct_input_offset = 0;
     rr.pending_controls = .empty;
@@ -2393,7 +2643,7 @@ test "remote runtime owns exact-cap key after client encode OOM and rejects cap 
     var rr: RemoteRuntime = undefined;
     rr.client = &client;
     rr.allocator = allocator;
-    rr.stream_id = 11;
+    rr.attachment = .init(testing.allocator, .{ .runtime_id = 1, .stream_id = 11, .role = .controller, .controller_generation = 1 });
     rr.direct_input = .empty;
     rr.direct_input_offset = 0;
     rr.pending_controls = .empty;
@@ -2462,7 +2712,7 @@ test "remote runtime flushes key and scroll barrier before mouse RPC" {
     var rr: RemoteRuntime = undefined;
     rr.client = &client;
     rr.allocator = allocator;
-    rr.stream_id = 13;
+    rr.attachment = .init(testing.allocator, .{ .runtime_id = 1, .stream_id = 13, .role = .controller, .controller_generation = 1 });
     rr.direct_input = .empty;
     rr.direct_input_offset = 0;
     rr.pending_controls = .empty;
@@ -2552,7 +2802,7 @@ test "remote runtime lifecycle cleanup fail-closes the connection on persistent 
     var rr: RemoteRuntime = undefined;
     rr.client = &client;
     rr.allocator = allocator;
-    rr.stream_id = 17;
+    rr.attachment = .init(testing.allocator, .{ .runtime_id = 1, .stream_id = 17, .role = .controller, .controller_generation = 1 });
     rr.direct_input = .empty;
     rr.direct_input_offset = 0;
     rr.pending_controls = .empty;
@@ -2600,7 +2850,7 @@ test "remote runtime: spawns over the wire, renders host screen into a Surface, 
     var client: client_mod.Client = blk: {
         var attempts: usize = 0;
         while (attempts < 150) : (attempts += 1) {
-            if (client_mod.Client.connect(allocator, socket_path, "gui")) |cl| break :blk cl else |_| _ = usleep(20 * 1000);
+            if (client_mod.Client.connect(allocator, socket_path, .gui)) |cl| break :blk cl else |_| _ = usleep(20 * 1000);
         }
         try testing.expect(false);
         return;
@@ -2684,7 +2934,7 @@ test "remote runtime: two runtimes sharing one connection both receive their own
     var client: client_mod.Client = blk: {
         var attempts: usize = 0;
         while (attempts < 150) : (attempts += 1) {
-            if (client_mod.Client.connect(allocator, socket_path, "gui")) |cl| break :blk cl else |_| _ = usleep(20 * 1000);
+            if (client_mod.Client.connect(allocator, socket_path, .gui)) |cl| break :blk cl else |_| _ = usleep(20 * 1000);
         }
         try testing.expect(false);
         return;
@@ -2698,7 +2948,7 @@ test "remote runtime: two runtimes sharing one connection both receive their own
     var rr2: RemoteRuntime = undefined;
     try rr2.spawn(&client, allocator, io, 2, .{ .command = "/bin/cat" }, .{ .cols = 40, .rows = 10 });
     defer rr2.deinit();
-    try testing.expect(rr1.stream_id != rr2.stream_id); // 공유 connection이지만 stream이 갈린다(demux 대상).
+    try testing.expect(rr1.attachment.streamId() != rr2.attachment.streamId()); // 공유 connection이지만 stream이 갈린다.
 
     const s1 = rr1.surfacePtr();
     const s2 = rr2.surfacePtr();
@@ -2756,7 +3006,7 @@ test "remote runtime: attachExisting reconnects to a pre-existing host runtime a
     var client: client_mod.Client = blk: {
         var attempts: usize = 0;
         while (attempts < 150) : (attempts += 1) {
-            if (client_mod.Client.connect(allocator, socket_path, "gui")) |cl| break :blk cl else |_| _ = usleep(20 * 1000);
+            if (client_mod.Client.connect(allocator, socket_path, .gui)) |cl| break :blk cl else |_| _ = usleep(20 * 1000);
         }
         try testing.expect(false);
         return;
@@ -2833,7 +3083,7 @@ test "remote runtime: takeNotification pulls a host-side OSC 9/777 desktop notif
     var client: client_mod.Client = blk: {
         var attempts: usize = 0;
         while (attempts < 150) : (attempts += 1) {
-            if (client_mod.Client.connect(allocator, socket_path, "gui")) |cl| break :blk cl else |_| _ = usleep(20 * 1000);
+            if (client_mod.Client.connect(allocator, socket_path, .gui)) |cl| break :blk cl else |_| _ = usleep(20 * 1000);
         }
         try testing.expect(false);
         return;
@@ -3085,7 +3335,7 @@ test "remote runtime: requestResync makes the host push a fresh snapshot (desync
     var client: client_mod.Client = blk: {
         var attempts: usize = 0;
         while (attempts < 150) : (attempts += 1) {
-            if (client_mod.Client.connect(allocator, socket_path, "gui")) |cl| break :blk cl else |_| _ = usleep(20 * 1000);
+            if (client_mod.Client.connect(allocator, socket_path, .gui)) |cl| break :blk cl else |_| _ = usleep(20 * 1000);
         }
         try testing.expect(false);
         return;
@@ -3103,7 +3353,7 @@ test "remote runtime: requestResync makes the host push a fresh snapshot (desync
     var saw_snapshot = false;
     var attempts: usize = 0;
     while (attempts < 150 and !saw_snapshot) : (attempts += 1) {
-        if (try rr.client.readStreamBatch(allocator, rr.stream_id)) |batch| {
+        if (try rr.client.readStreamBatch(allocator, rr.attachment.streamId())) |batch| {
             defer allocator.free(batch.bytes);
             if (batch.is_snapshot) saw_snapshot = true;
         } else _ = usleep(20 * 1000);
@@ -3148,7 +3398,7 @@ test "remote runtime: snapshot.invalidated latches one nonblocking resync ack" {
     rr.client = &client;
     rr.allocator = allocator;
     rr.io = testing.io;
-    rr.stream_id = 9;
+    rr.attachment = .init(testing.allocator, .{ .runtime_id = 1, .stream_id = 9, .role = .controller, .controller_generation = 1 });
     rr.direct_input = .empty;
     rr.direct_input_offset = 0;
     rr.pending_controls = .empty;
@@ -3202,7 +3452,7 @@ test "remote runtime: typed ended event terminates only its stream pump" {
     rr.client = &client;
     rr.allocator = allocator;
     rr.io = testing.io;
-    rr.stream_id = 9;
+    rr.attachment = .init(testing.allocator, .{ .runtime_id = 1, .stream_id = 9, .role = .controller, .controller_generation = 1 });
     rr.direct_input = .empty;
     rr.direct_input_offset = 0;
     rr.pending_controls = .empty;
@@ -3233,11 +3483,14 @@ test "remote runtime: resync intent survives occupied outbound slot and emits on
     };
     defer client.deinit();
     const filled = try fillRemoteTestSendBuffer(fds[0]);
-    client.pending_outbound = .{ .frame = try framing.encodeFrame(
-        allocator,
-        .{ .kind = .input_bytes, .stream_id = 3 },
-        "older",
-    ) };
+    client.pending_outbound = .{
+        .frame = try framing.encodeFrame(
+            allocator,
+            .{ .kind = .input_bytes, .stream_id = 3 },
+            "older",
+        ),
+        .stream_id = 3,
+    };
     const event = framing.Frame{
         .header = .{ .kind = .event, .stream_id = 9 },
         .payload = try allocator.dupe(u8, "{\"event\":\"snapshot.invalidated\"}"),
@@ -3248,7 +3501,7 @@ test "remote runtime: resync intent survives occupied outbound slot and emits on
     rr.client = &client;
     rr.allocator = allocator;
     rr.io = testing.io;
-    rr.stream_id = 9;
+    rr.attachment = .init(testing.allocator, .{ .runtime_id = 1, .stream_id = 9, .role = .controller, .controller_generation = 1 });
     rr.direct_input = .empty;
     rr.direct_input_offset = 0;
     rr.pending_controls = .empty;
@@ -3311,7 +3564,7 @@ test "remote runtime: scroll core command routes to host so client sees scrolled
     var client: client_mod.Client = blk: {
         var attempts: usize = 0;
         while (attempts < 150) : (attempts += 1) {
-            if (client_mod.Client.connect(allocator, socket_path, "gui")) |cl| break :blk cl else |_| _ = usleep(20 * 1000);
+            if (client_mod.Client.connect(allocator, socket_path, .gui)) |cl| break :blk cl else |_| _ = usleep(20 * 1000);
         }
         try testing.expect(false);
         return;
@@ -3386,7 +3639,7 @@ test "remote runtime: selectedText extracts the selection text on the host (§6b
     var client: client_mod.Client = blk: {
         var attempts: usize = 0;
         while (attempts < 150) : (attempts += 1) {
-            if (client_mod.Client.connect(allocator, socket_path, "gui")) |cl| break :blk cl else |_| _ = usleep(20 * 1000);
+            if (client_mod.Client.connect(allocator, socket_path, .gui)) |cl| break :blk cl else |_| _ = usleep(20 * 1000);
         }
         try testing.expect(false);
         return;
@@ -3463,7 +3716,7 @@ test "remote runtime: selectContentAware computes word/line boundaries on the ho
     var client: client_mod.Client = blk: {
         var attempts: usize = 0;
         while (attempts < 150) : (attempts += 1) {
-            if (client_mod.Client.connect(allocator, socket_path, "gui")) |cl| break :blk cl else |_| _ = usleep(20 * 1000);
+            if (client_mod.Client.connect(allocator, socket_path, .gui)) |cl| break :blk cl else |_| _ = usleep(20 * 1000);
         }
         try testing.expect(false);
         return;
@@ -3544,7 +3797,7 @@ test "remote runtime: find matches on the host and returns viewport spans (§6c)
     var client: client_mod.Client = blk: {
         var attempts: usize = 0;
         while (attempts < 150) : (attempts += 1) {
-            if (client_mod.Client.connect(allocator, socket_path, "gui")) |cl| break :blk cl else |_| _ = usleep(20 * 1000);
+            if (client_mod.Client.connect(allocator, socket_path, .gui)) |cl| break :blk cl else |_| _ = usleep(20 * 1000);
         }
         try testing.expect(false);
         return;

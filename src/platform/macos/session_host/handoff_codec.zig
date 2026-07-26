@@ -153,6 +153,8 @@ const core_fields_v1 = [_]FieldSpec{
     .{ .tag = 85, .name = "title" },
     .{ .tag = 86, .name = "title_generation" },
     .{ .tag = 87, .name = "observer_generation" },
+    .{ .tag = 88, .name = "default_cursor_shape" },
+    .{ .tag = 89, .name = "cursor_shape_overridden" },
 };
 
 comptime {

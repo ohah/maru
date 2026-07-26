@@ -27,6 +27,9 @@ pub const RuntimeConfig = struct {
     palette: [16]?terminal.Rgb,
     default_colors: DefaultColors,
     cell_metrics: ?CellMetrics,
+    /// config `cursor.shape` — 코어의 DECSCUSR 0/RIS 복귀 지점. 원격(host-backed) core는 host가 소유하므로 이 값을
+    /// 실어 보내야 로컬과 같은 규칙으로 동작한다(안 보내면 host 기본 block으로 굳어 설정이 원격에서만 무동작).
+    default_cursor_shape: terminal.CursorShape = .block,
 };
 
 /// 마우스 선택 위치(셀). full (a)(P3-4)에서 선택 코어 mutate는 명령으로 위임하고, read-modify-decide(아래
@@ -57,6 +60,7 @@ pub const CoreCommand = union(enum) {
     set_max_scrollback: usize,
     set_ambiguous_wide: bool, // text.ambiguous-width reload — 라이브 코어의 EAW Ambiguous 폭(이후 putCell부터 반영)
     set_emoji_wide: bool, // text.emoji-width reload — 라이브 코어의 이모지(VS16/키캡) 폭 승격(이후 putCell부터 반영)
+    set_default_cursor_shape: terminal.CursorShape, // cursor.shape reload — DECSCUSR 0/RIS 복귀 지점(앱 override 중이면 저장만)
     set_runtime_config: RuntimeConfig, // attach/reconnect bootstrap — 한 queue slot에서 host 권위 config를 함께 적용
     // P3-4 scroll·선택 위임(full (a) — read-modify-decide는 reader가 원자 실행, 메인 코어 mutate 0):
     scroll_to_abs: usize, // scrollToAbs(절대 행) — find 점프
@@ -91,6 +95,7 @@ pub fn apply(core: *terminal.TerminalCore, cmd: CoreCommand) void {
         .set_max_scrollback => |lines| core.setMaxScrollback(lines),
         .set_ambiguous_wide => |v| core.ambiguous_wide = v,
         .set_emoji_wide => |v| core.emoji_wide = v,
+        .set_default_cursor_shape => |shape| core.setDefaultCursorShape(shape),
         .set_runtime_config => |config| {
             core.setMaxScrollback(config.max_scrollback);
             core.ambiguous_wide = config.ambiguous_wide;
@@ -98,6 +103,7 @@ pub fn apply(core: *terminal.TerminalCore, cmd: CoreCommand) void {
             core.setConfigPalette(config.palette);
             core.setDefaultColors(config.default_colors.foreground, config.default_colors.background);
             if (config.cell_metrics) |metrics| core.setCellMetrics(metrics.width, metrics.height);
+            core.setDefaultCursorShape(config.default_cursor_shape);
         },
         .scroll_to_abs => |abs| core.scrollToAbs(abs),
         .scroll_to_offset => |target| {

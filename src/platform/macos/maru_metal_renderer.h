@@ -129,13 +129,18 @@ bool maru_metal_renderer_draw(
        scale로 환산해 넘긴다. renderer가 seam 중앙정렬·셀 clamp로 divider strip을 그린다. 커서 강조선
        (reserved 2~5, 셀 15%)·GPU quad FocusOwner border와 분리돼 divider만 이 값으로 두께가 정해진다. 0=안 그림. 끝에 추가해 인자 순서 불변(ABI v94). */
     uint32_t divider_thickness_px,
-    /* 커서 blink 페이드(ABI v95): 커서 overlay가 차지하는 cells suffix 길이(cells[cell_count-cursor_cells..])와
-       그 불투명도×1000. 렌더러가 본문 셀 draw에서 이 suffix를 제외하고, cursor_fade_milli>0이면 별도 pass로
-       opacity=cursor_fade_milli/1000에 그린다(셀 fragment의 opacity uniform). 끝에 2인자 추가해 인자 순서 불변. */
+    /* 커서 blink 페이드(ABI v95): 커서 overlay가 차지하는 cells 길이와 그 불투명도×1000. 렌더러가 본문 셀 draw에서
+       이 구간을 제외하고, cursor_fade_milli>0이면 별도 pass로 opacity=cursor_fade_milli/1000에 그린다(셀 fragment의
+       opacity uniform). 끝에 2인자 추가해 인자 순서 불변. 구간의 시작은 아래 cursor_start(v146). */
     size_t cursor_cells,
     uint32_t cursor_fade_milli,
     /* ABI v131: modal_cells_start=0에서도 overlay 존재를 표현하는 명시 gate. */
-    uint32_t overlay_cells_present
+    uint32_t overlay_cells_present,
+    /* 커서 구간의 시작 index — cells[cursor_start, cursor_start+cursor_cells). v95는 "커서는 항상 버퍼 suffix"를
+       암묵 가정했지만, caret 없는 오버레이 셀(포커스 테두리·drop 하이라이트·드래그 고스트)이 커서 뒤에 붙으면
+       그 가정이 깨져 커서가 본문과 함께 불투명하게 그려졌다(=blink 죽음). 시작을 명시로 받아 커서가 버퍼 중간에
+       있어도 본문을 [.., cursor_start)와 [cursor_start+cursor_cells, ..) 두 구간으로 나눠 그린다(ABI v146). */
+    size_t cursor_start
 );
 
 void maru_metal_renderer_destroy(MaruMetalRenderer *renderer);

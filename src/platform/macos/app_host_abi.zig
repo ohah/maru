@@ -95,8 +95,8 @@ var app_instance_lease_slot: LeaseSlot = .{};
 // 여기서는 ABI 표면으로 re-export만 한다.
 pub const EventKind = session_mod.EventKind;
 
-test "ABI v145 app instance lease result values match the C header" {
-    try std.testing.expectEqual(@as(u32, 145), abi_version);
+test "ABI v146 app instance lease result values match the C header" {
+    try std.testing.expectEqual(@as(u32, 146), abi_version);
     try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_ACQUIRED), @intFromEnum(AppInstanceLeaseResult.acquired));
     try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_HELD), @intFromEnum(AppInstanceLeaseResult.held));
     try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_UNSAFE), @intFromEnum(AppInstanceLeaseResult.unsafe));

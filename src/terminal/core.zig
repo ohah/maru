@@ -229,6 +229,15 @@ pub const TerminalCore = struct {
     // DECSCUSR(CSI Ps SP q): 커서 모양과 깜빡임. vim이 모드별로 bar/block을 전환하는 표준 수단.
     cursor_shape: types.CursorShape = .block,
     cursor_blink: bool = true,
+    // config `cursor.shape`가 정한 **기본** 커서 모양 — DECSCUSR 0(`CSI 0 SP q`, "터미널 기본으로")과 RIS가 여기로
+    // 되돌아간다. 앱이 DECSCUSR 1..6으로 명시하면 그게 이기고(vim 모드별 bar/block 보존), 명시를 거둬들이면 사용자
+    // 설정이 다시 보인다 — 베이스는 Ghostty `cursor-style` + `default_cursor_style`(같은 "설정=기본값" 모델).
+    // app(createTerm chokepoint·config reload)이 setDefaultCursorShape로 주입한다. 원격 core는 host가 소유하므로
+    // RuntimeConfig로 실어 보낸다(같은 값·같은 규칙 — 로컬/원격 동작 동일).
+    default_cursor_shape: types.CursorShape = .block,
+    // 앱이 DECSCUSR 1..6으로 모양을 **명시**했는가. config reload가 라이브 커서를 덮어쓸지 판정하는 단일 근거다 —
+    // 명시 중이면(vim insert-mode bar 등) 새 기본값은 저장만 하고 화면은 안 건드린다(Ghostty `default_cursor` 동형).
+    cursor_shape_overridden: bool = false,
     // alt 화면 동안 비활성 화면(primary)을 통째로 보관하는 슬롯 — grid(cells·wrapped·prompt_marks) + 스크롤백(sb)을
     // 한 Screen으로 묶어 alt 전환이 `self.screen ↔ saved_screen` struct 교환 한 번이 된다(B3). primary 활성 중엔
     // 빈 인스턴스(cells 등 &.{}, sb cap 0). "alt엔 스크롤백 없음"이 grid까지 타입으로 보장된다(architecture.md 2단계).
@@ -543,6 +552,9 @@ pub const TerminalCore = struct {
         self.scroll_top = 0;
         self.scroll_bottom = self.size.rows - 1;
         self.cursor_visible = true; // DECTCEM(25) — 입력 모드가 아니라 화면 표시라 fullReset에 남긴다.
+        // DECSCUSR도 공장 초기화 = **사용자 config 기본**(xterm RIS가 커서 스타일을 기본으로 되돌리는 것과 같다).
+        // 프로그램의 override를 거둬들이는 것이므로 DECSCUSR 0과 같은 경로를 쓴다(기본 모양 단일 출처).
+        screen.setCursorStyle(self, 0);
         self.sync_output = false; // 2026 동기 출력 — 입력 모드가 아니라 렌더 타이밍이라 fullReset에 남긴다.
         // 입력 인코딩 모드(application_cursor_keys/keypad·bracketed_paste·focus_events·mouse_tracking·
         // mouse_format·kitty_flags)는 resetInputModes가 단일 출처로 끈다 — 메뉴 Reset과 같은 코드를 공유(중복 제거).
@@ -1464,6 +1476,12 @@ pub const TerminalCore = struct {
     /// 렌더용 snapshot. 본문은 screen.zig가 소유 — 외부(app/session/renderer)가 점-호출하므로 facade 메서드로 남긴다.
     pub fn snapshot(self: *const TerminalCore) types.RenderSnapshot {
         return screen.snapshot(self);
+    }
+
+    /// config `cursor.shape` 기본값 주입. 본문은 screen.zig(DECSCUSR와 같은 자리) — app/host가 점-호출하는
+    /// 경계라 facade 메서드로 남긴다(resize·snapshot과 같은 규율).
+    pub fn setDefaultCursorShape(self: *TerminalCore, shape: types.CursorShape) void {
+        screen.setDefaultCursorShape(self, shape);
     }
 
     /// 뷰포트 합성 snapshot(스크롤 시 [스크롤백 ++ 활성] 윈도). IME preedit은 Surface projection이
@@ -4953,11 +4971,47 @@ test "DECSCUSR (CSI Ps SP q) sets the cursor shape and blink" {
     try core.write("\x1b[4 q"); // 고정 underline
     try std.testing.expectEqual(types.CursorShape.underline, core.cursor_shape);
     try std.testing.expect(!core.cursor_blink);
-    try core.write("\x1b[0 q"); // 0 -> 기본(깜빡 block)
+    try core.write("\x1b[0 q"); // 0 -> 터미널 기본(default_cursor_shape, 주입 없으면 깜빡 block)
     try std.testing.expectEqual(types.CursorShape.block, core.cursor_shape);
     try std.testing.expect(core.snapshot().cursor_shape == .block);
     try core.write("\x1b[9 q"); // 모르는 값은 무시
     try std.testing.expectEqual(types.CursorShape.block, core.cursor_shape);
+}
+
+// config `cursor.shape`가 코어 **기본** 모양으로 살아 있는지 고정한다. 회귀: `ResolvedCursor.shape`가 resolve만 되고
+// 소비처가 없어 설정이 무동작이었다(cursor.blink와 같은 배선 누락 계열). 계약은 "config=기본값, DECSCUSR 1..6=앱
+// override, DECSCUSR 0·RIS=기본으로 복귀" — 이 셋을 한 테스트에서 잠근다.
+test "default cursor shape: config 기본값 + DECSCUSR override + 0/RIS 복귀" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 2 });
+    defer core.deinit();
+
+    // ① 주입 즉시 반영(앱이 아직 아무것도 안 시켰으므로) — createTerm chokepoint가 첫 출력 전에 부르는 경로.
+    core.setDefaultCursorShape(.bar);
+    try std.testing.expectEqual(types.CursorShape.bar, core.cursor_shape);
+    try std.testing.expectEqual(types.CursorShape.bar, core.default_cursor_shape);
+    try std.testing.expect(!core.cursor_shape_overridden);
+
+    // ② 앱 DECSCUSR가 이긴다(vim normal-mode block) — override 표시.
+    try core.write("\x1b[2 q");
+    try std.testing.expectEqual(types.CursorShape.block, core.cursor_shape);
+    try std.testing.expect(core.cursor_shape_overridden);
+
+    // ③ override 중 config reload는 기본값만 갱신하고 화면은 안 건드린다(설정 바꿨다고 vim 커서가 튀지 않게).
+    core.setDefaultCursorShape(.underline);
+    try std.testing.expectEqual(types.CursorShape.block, core.cursor_shape); // 라이브 커서 불변
+    try std.testing.expectEqual(types.CursorShape.underline, core.default_cursor_shape); // 기본값만 갱신
+
+    // ④ DECSCUSR 0 = 앱이 override를 거둬들임 → 사용자 config가 다시 보인다(옛 코드는 여기서 하드코딩 block이었다).
+    try core.write("\x1b[0 q");
+    try std.testing.expectEqual(types.CursorShape.underline, core.cursor_shape);
+    try std.testing.expect(!core.cursor_shape_overridden);
+
+    // ⑤ RIS(ESC c)도 공장 초기화 = 사용자 기본으로(override 중이었어도 해제).
+    try core.write("\x1b[5 q"); // 앱이 다시 bar로 override
+    try std.testing.expectEqual(types.CursorShape.bar, core.cursor_shape);
+    try core.write("\x1bc");
+    try std.testing.expectEqual(types.CursorShape.underline, core.cursor_shape);
+    try std.testing.expect(!core.cursor_shape_overridden);
 }
 
 test "selection extracts text across soft-wrapped and hard rows (scrollback + active)" {

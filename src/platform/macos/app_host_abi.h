@@ -8,7 +8,7 @@
 /* 이 header는 실제 앱 동작을 구현하지 않고 Swift/Zig 사이의 약속만 고정한다.
    Swift가 AppKit object나 Swift struct layout을 바로 넘기면 Zig 쪽에서 안전하게
    해석할 수 없으므로, 제품 host가 시작되기 전에 fixed-width C record만 허용한다. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 145u
+#define MARU_MACOS_APP_HOST_ABI_VERSION 146u
 #define MARU_APP_INSTANCE_LEASE_ACQUIRED 0u
 #define MARU_APP_INSTANCE_LEASE_HELD 1u
 #define MARU_APP_INSTANCE_LEASE_UNSAFE 2u
@@ -450,8 +450,8 @@ typedef struct MaruAppHostMetalFrame {
        scale로 환산. renderer가 seam 중앙정렬·셀 clamp로 divider strip을 그린다(커서 강조선 reserved 2~5·GPU quad
        FocusOwner border와 분리). 0=안 그림. 끝에 추가해 기존 offset 불변(ABI v94). */
     uint32_t divider_thickness_px;
-    /* 커서 overlay(터미널 블록/bar/underline·오버레이 caret)가 차지하는 cells suffix 길이 —
-       cells[cell_count - cursor_cells .. cell_count]가 커서다. 렌더러가 이 suffix를 본문 draw에서 제외하고
+    /* 커서 overlay(터미널 블록/bar/underline·오버레이 caret)가 차지하는 cells 길이 —
+       cells[cursor_start .. cursor_start + cursor_cells]가 커서다. 렌더러가 이 구간을 본문 draw에서 제외하고
        아래 cursor_fade_milli 불투명도로 별도 pass로 그려 blink를 부드럽게 페이드한다. 0=커서 없음. 끝에 추가(ABI v95). */
     size_t cursor_cells;
     /* 커서 overlay 불투명도 × 1000(0~1000, 1000=완전 표시). blink 페이드 위상 — app이 반주기 끝에서 1000↔0으로 램프
@@ -460,6 +460,11 @@ typedef struct MaruAppHostMetalFrame {
     uint32_t cursor_fade_milli;
     /* ABI v131: overlay 셀이 index 0에서 시작해도 "없음"과 구별하는 명시 gate. modal_cells_start는 순수 index다. */
     uint32_t overlay_cells_present;
+    /* 커서 구간의 시작 index(ABI v146). v95는 "커서는 항상 cells suffix"를 암묵 가정했는데, caret 없는 오버레이 셀
+       (포커스 테두리·drop 하이라이트·드래그 고스트)이 커서 뒤에 붙는 순간 그 가정이 깨져 커서가 본문과 함께
+       불투명하게 그려졌다(=blink 죽음, 포커스 테두리는 상시라 사실상 항상). 시작을 명시로 실어 커서가 버퍼 중간에
+       있어도 페이드 pass를 건다 — 렌더러가 본문을 커서 앞/뒤 두 구간으로 나눠 그린다. 끝에 추가해 기존 offset 불변. */
+    size_t cursor_start;
 } MaruAppHostMetalFrame;
 
 uint32_t maru_macos_app_host_abi_version(void);

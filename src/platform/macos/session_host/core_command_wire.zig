@@ -21,6 +21,8 @@ pub const Command = union(enum) {
     set_max_scrollback: u64,
     set_ambiguous_wide: bool,
     set_emoji_wide: bool,
+    /// config `cursor.shape` reload — 0=block/1=underline/2=bar(`terminal.CursorShape` 순서).
+    set_default_cursor_shape: u8,
     set_runtime_config: RuntimeConfig,
     jump_to_prompt: i8,
     /// 비파괴 입력 모드 리셋(⌘⇧R). 인자 없는 명령이라 op 이름만 실린다.
@@ -45,6 +47,11 @@ pub const Command = union(enum) {
         palette: Palette,
         default_colors: DefaultColors,
         cell_metrics: ?CellMetrics,
+        /// config `cursor.shape` — 0=block/1=underline/2=bar(`terminal.CursorShape` 순서, screen_stream.Cursor.shape와
+        /// 같은 인코딩). 기본 `0`은 **구 클라이언트 호환**이다: 이 필드를 모르는 클라이언트의 payload에서
+        /// `set_runtime_config` 전체가 fail-close되면 scrollback·palette·색까지 함께 날아가므로(커서 모양보다 훨씬 큰
+        /// 손실), 이 필드만 기본값으로 접는다. 새 클라이언트 → 구 host는 필드가 무시돼 block으로 남는다(degraded).
+        cursor_shape: u8 = 0,
     };
 
     /// 구 host도 지원하던 v1 스크롤 명령인가. 나머지는 hello capability가 있는 host에만 보낸다.
@@ -87,6 +94,7 @@ pub fn encodeParams(allocator: std.mem.Allocator, stream_id: u64, command: Comma
         .set_max_scrollback => |lines| stringify(allocator, .{ .stream_id = stream_id, .op = "set_max_scrollback", .lines = lines }),
         .set_ambiguous_wide => |wide| stringify(allocator, .{ .stream_id = stream_id, .op = "set_ambiguous_wide", .wide = wide }),
         .set_emoji_wide => |wide| stringify(allocator, .{ .stream_id = stream_id, .op = "set_emoji_wide", .wide = wide }),
+        .set_default_cursor_shape => |shape| stringify(allocator, .{ .stream_id = stream_id, .op = "set_default_cursor_shape", .shape = shape }),
         .set_runtime_config => |config| stringify(allocator, .{
             .stream_id = stream_id,
             .op = "set_runtime_config",
@@ -98,6 +106,7 @@ pub fn encodeParams(allocator: std.mem.Allocator, stream_id: u64, command: Comma
             .background = config.default_colors.background,
             .cell_width = if (config.cell_metrics) |metrics| metrics.width else 0,
             .cell_height = if (config.cell_metrics) |metrics| metrics.height else 0,
+            .cursor_shape = config.cursor_shape,
         }),
         .jump_to_prompt => |direction| stringify(allocator, .{
             .stream_id = stream_id,
@@ -155,6 +164,13 @@ pub fn decodeParams(params: std.json.ObjectMap) ?Command {
     if (std.mem.eql(u8, op, "set_emoji_wide")) {
         return .{ .set_emoji_wide = boolField(params, "wide") orelse return null };
     }
+    if (std.mem.eql(u8, op, "set_default_cursor_shape")) {
+        // 이 op는 필드가 하나뿐이라 누락/범위 밖은 fail-close다(runtime_config의 tolerant 기본값과 다름 —
+        // 거기선 다른 config까지 함께 날아가는 게 더 나쁘지만, 여기선 버릴 게 이 명령뿐이다).
+        const shape = u32Field(params, "shape") orelse return null;
+        if (shape > 2) return null;
+        return .{ .set_default_cursor_shape = @intCast(shape) };
+    }
     if (std.mem.eql(u8, op, "set_runtime_config")) {
         return .{ .set_runtime_config = decodeRuntimeConfig(params) orelse return null };
     }
@@ -190,6 +206,17 @@ pub fn decodeRuntimeConfig(params: std.json.ObjectMap) ?Command.RuntimeConfig {
             .background = rgbField(params, "background") orelse return null,
         },
         .cell_metrics = cell_metrics,
+        // 없으면 block(0) — 구 클라이언트 호환(위 필드 주석). 범위 밖 값은 fail-close: 아는 필드를 잘못 보낸 것은
+        // 모르고 안 보낸 것과 다르다(부분 적용 금지 규율 유지).
+        .cursor_shape = shape: {
+            const raw = params.get("cursor_shape") orelse break :shape 0;
+            const value = switch (raw) {
+                .integer => |v| v,
+                else => return null,
+            };
+            if (value < 0 or value > 2) return null;
+            break :shape @intCast(value);
+        },
     };
 }
 
@@ -283,6 +310,7 @@ test "core command wire round-trips every bounded command" {
         .{ .set_max_scrollback = 20_000 },
         .{ .set_ambiguous_wide = true },
         .{ .set_emoji_wide = false },
+        .{ .set_default_cursor_shape = 2 },
         .{ .set_runtime_config = .{
             .max_scrollback = 50_000,
             .ambiguous_wide = true,
@@ -290,6 +318,7 @@ test "core command wire round-trips every bounded command" {
             .palette = palette,
             .default_colors = .{ .foreground = 0x11_22_33, .background = 0x44_55_66 },
             .cell_metrics = .{ .width = 18, .height = 36 },
+            .cursor_shape = 1,
         } },
         .{ .jump_to_prompt = -1 },
     };
@@ -312,6 +341,13 @@ test "core command wire rejects malformed bounded values without partial command
         "{\"op\":\"set_max_scrollback\",\"lines\":100001}",
         "{\"op\":\"set_runtime_config\",\"lines\":1,\"ambiguous_wide\":true,\"emoji_wide\":true,\"palette\":[null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null],\"foreground\":0,\"background\":0,\"cell_width\":8,\"cell_height\":0}",
         "{\"op\":\"jump_to_prompt\",\"direction\":0}",
+        // cursor.shape: 0~2 밖·비정수·필드 자체 누락(단일 필드 op라 fail-close)은 부분 적용 없이 거부한다.
+        "{\"op\":\"set_default_cursor_shape\",\"shape\":3}",
+        "{\"op\":\"set_default_cursor_shape\",\"shape\":-1}",
+        "{\"op\":\"set_default_cursor_shape\"}",
+        // runtime_config의 cursor_shape는 **없으면** 관대하지만(아래 별도 테스트), **틀리면** 거부한다.
+        "{\"op\":\"set_runtime_config\",\"lines\":1,\"ambiguous_wide\":true,\"emoji_wide\":true,\"palette\":[null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null],\"foreground\":0,\"background\":0,\"cell_width\":8,\"cell_height\":16,\"cursor_shape\":3}",
+        "{\"op\":\"set_runtime_config\",\"lines\":1,\"ambiguous_wide\":true,\"emoji_wide\":true,\"palette\":[null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null],\"foreground\":0,\"background\":0,\"cell_width\":8,\"cell_height\":16,\"cursor_shape\":\"bar\"}",
         "{\"op\":\"unknown\",\"arg\":1}",
     };
     for (malformed) |json| {
@@ -323,4 +359,23 @@ test "core command wire rejects malformed bounded values without partial command
         };
         try std.testing.expectEqual(@as(?Command, null), decodeParams(params));
     }
+}
+
+// 구 클라이언트 호환: `cursor_shape`를 모르는 payload가 와도 `set_runtime_config` **전체가 죽지 않는다**.
+// 이 필드 하나 때문에 fail-close하면 scrollback·palette·기본색까지 함께 유실되므로(커서 모양보다 큰 손실),
+// 이 필드만 block(0)으로 접는다. host 데몬은 앱 재빌드보다 오래 사는 게 정상이라 버전 skew는 가정이 아니라 상수다.
+test "core command wire: runtime_config는 cursor_shape 누락을 block으로 접는다(구 클라이언트 호환)" {
+    const allocator = std.testing.allocator;
+    const json = "{\"op\":\"set_runtime_config\",\"lines\":1,\"ambiguous_wide\":false,\"emoji_wide\":false," ++
+        "\"palette\":[null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null]," ++
+        "\"foreground\":0,\"background\":0,\"cell_width\":8,\"cell_height\":16}";
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, json, .{});
+    defer parsed.deinit();
+    const params = switch (parsed.value) {
+        .object => |object| object,
+        else => return error.TestUnexpectedResult,
+    };
+    const decoded = decodeParams(params) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u8, 0), decoded.set_runtime_config.cursor_shape);
+    try std.testing.expectEqual(@as(u64, 1), decoded.set_runtime_config.max_scrollback); // 나머지 config는 그대로 산다
 }

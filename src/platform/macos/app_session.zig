@@ -181,7 +181,12 @@ fn navButtonAt(x_px: f64, band_x: u32, cw: u32) ?NavButton {
 // 별도 물리 CAMetalLayer로 분리, 두 drawable을 한 command buffer에 present + 단일 commit으로 전이 원자성). host↔renderer
 // draw 계약 변경이라 버전을 올린다. **MetalFrame/세션 struct·export 시그니처는 불변**(overlay_layer는 Zig가 아니라
 // Swift가 소유한 CAMetalLayer라 struct offset·layout test는 그대로 green). 렌더러 분할·컨테이너 재편은 Swift/ObjC 레이어.
-pub const abi_version: u32 = 145;
+pub const abi_version: u32 = 146;
+// 146: MetalFrame.cursor_start + maru_metal_renderer_draw 마지막 인자(커서 구간의 **시작 index**). v95는 "커서는 항상
+// cells suffix"를 암묵 가정해 길이만 실었는데, caret 없는 오버레이 셀(포커스 테두리·drop 하이라이트·드래그 고스트)이
+// 커서 뒤에 붙으면 그 가정이 깨진다 — 그때 Zig가 cursor_cells=0으로 접어 커서가 본문과 함께 불투명하게 그려졌고
+// **blink가 죽었다**(appendFocusOwnerBorder가 상시 non-empty라 사실상 항상). 시작을 명시로 실어 커서가 버퍼 어디에
+// 있든 페이드 pass를 걸고, 렌더러는 본문을 커서 앞/뒤 두 구간으로 나눠 그린다(z-order 불변).
 // 145: app instance writer lease acquire ABI. Swift가 첫 Window/AppSession/config/workspace/runtime보다 먼저
 // canonical `workspace.v1.lock`을 넘기고, Zig가 process-lifetime CLOEXEC exclusive flock을 보관한다.
 // 144: workspace 복원이 **조용히 버린 항목 수** getter(take_workspace_restore_dropped)를 추가한다. 복원은 손상된 파일
@@ -489,8 +494,8 @@ const scrollbar_fade_ms: u32 = 450; // 옛 30Hz 14틱과 같은 약 0.45s 동안
 const scrollbar_alpha_full: u8 = 0xFF; // 활성/hover/드래그
 const scrollbar_alpha_idle: u8 = 0x4D; // idle(faint) — ~30%
 
-// 커서 깜빡임 반주기는 config(`cursor.blink-interval-ms`, 기본 500ms)에서 온다 — blinkIntervalTicks()가
-// Swift host의 실제 frame-loop cadence에 맞춰 tick으로 환산한다(F1-4b). 일반 터미널 관례(on 500ms / off 500ms)가 기본값.
+// 커서 깜빡임 반주기는 config(`cursor.blink-interval-ms`, 기본 500ms)에서 온다 — updateCursorBlink가 **실경과 시간**
+// (wall-clock)으로 재 tick rate와 무관하게 그 속도를 지킨다(§10.5). 기본값은 macOS 캐럿 관례(on 500ms / off 500ms).
 const agent_poll_interval_ms: u32 = 500; // 포그라운드 프로세스(에이전트) polling 주기.
 /// 세션 기록 파일(transcript) polling 주기. 대화는 **사람이 치는 속도**로 바뀌므로 상태 polling(≈0.5s)보다 느려도
 /// 충분하고, 디렉터리 스캔·tail 파싱을 그만큼 덜 한다(docs/sidebar-agent-list.md §7.4).
@@ -2826,12 +2831,19 @@ pub const AppSession = struct {
     // 이번 트랜잭션에서 imeInsert가 OOM으로 일부를 못 담았는지. 그러면 imeEnd는 잘린 텍스트를
     // 보내지 않고 통째로 버린다(fail-closed — 반쪽 문자열이 PTY에 들어가지 않게).
     ime_insert_failed: bool = false,
-    // 커서/오버레이 caret 깜빡임 위상. host frame-loop cadence에 맞춘 tick 수(기본 60Hz 30틱=500ms)마다 토글하고,
-    // 입력/출력이 있으면 보이는 상태로 리셋한다(타이핑 중 안 사라짐). 터미널 커서(DECSCUSR blink)와 오버레이 caret(find·palette)이 **같은 위상·같은
+    // 커서/오버레이 caret 깜빡임 위상. **wall-clock 경과**(blink_phase_ns 이후 실경과 ms)로 반주기
+    // (cursor.blink-interval-ms, 기본 500ms)마다 토글하고, 활성 surface에 입력/출력이 있으면 보이는 상태로
+    // 리셋한다(타이핑 중 안 사라짐). 터미널 커서(DECSCUSR blink)와 오버레이 caret(find·palette)이 **같은 위상·같은
     // 메커니즘**을 공유한다 — 커서는 blink 켜졌을 때만, caret은 열린 동안 늘. 렌더도 공유: caret이 오버레이
-    // PaneFrame.cursor라 setCursorVisible(suffix-trim)이 재빌드 없이 토글한다(터미널 커서와 동일 경로 재활용).
+    // PaneFrame.cursor라 커서 suffix 페이드 pass가 재빌드 없이 토글한다(터미널 커서와 동일 경로 재활용).
+    //
+    // **tick 카운트가 아니라 실시간 기준인 이유**(§10.5 secondary — 스피너가 먼저 옮겨간 그 이유): 옛 코드는
+    // ms를 **설정값** `render.frame-rate`(기본 60Hz)로 틱 환산해 세었는데, NSTimer 실효 발사율은 무거운 tick·
+    // 백그라운드 스로틀링으로 그보다 낮을 수 있다(실측 ~17Hz). 그러면 30틱 반주기가 0.5초가 아니라 1.7초가 돼
+    // **깜빡임이 3배 넘게 느려진다**. 실경과로 재면 tick rate와 무관하게 항상 설정한 속도를 지킨다.
     blink_visible: bool = true,
-    blink_ticks: u32 = 0,
+    // 현재 반주기가 시작된 시각(ns, awake clock). 0=미초기화(다음 tick이 baseline을 잡는다 — 스피너와 같은 규약).
+    blink_phase_ns: i128 = 0,
     // 에이전트 running 스피너(상태줄 "▁▅▇▃ 진행중" codex식 이퀄라이저 파형). advanceAgentSpinner가 **wall-clock 경과**
     // (agent_spin_last_ns 이후 실경과 ms)로 agent_spin_frame을 진행한다(mod spinner_wave.len=14) — tick 카운트가 아니라
     // 실시간 기준이라 tick rate가 떨어져도(무거운 tick) 위상이 실시간을 따라가 부드럽고, stall 후엔 여러 프레임 catch-up
@@ -6020,6 +6032,9 @@ pub const AppSession = struct {
                 .width = self.cell_width_px,
                 .height = self.cell_height_px,
             } else null,
+            // config cursor.shape — 원격 core는 host 소유라 spawn snapshot에 실어야 첫 출력 전에 기본 모양이 선다
+            // (in-process는 아래 chokepoint가 같은 값을 직접 주입 — 로컬/원격 동일 규칙).
+            .default_cursor_shape = self.configCursorShape(),
         };
         const surface = surface: {
             if (is_macos and app_keep_alive_after_quit and reconnect_id.len > 0) {
@@ -6145,6 +6160,10 @@ pub const AppSession = struct {
         // config theme.palette(ANSI 16색 base)를 코어에 주입한다 — OSC 4 query 응답이 렌더(metal_frame)와 같은
         // 우선순위(OSC4 override > config base > xterm256)를 보도록(화면·보고 정합). RIS/OSC104는 override만 리셋.
         term.surface.core.setConfigPalette(self.appearance.theme.palette);
+        // config cursor.shape를 코어 **기본** 커서 모양으로 주입한다(DECSCUSR 0·RIS 복귀 지점). 앱이 DECSCUSR로
+        // 명시하면 그게 이기고(vim 모드별 bar/block), 거둬들이면 이 값으로 돌아온다. 원격은 위 runtime_config가
+        // 같은 값을 host core에 싣는다 — 여기 직접 주입은 in-process 경로(placeholder core는 host가 덮어씀).
+        term.surface.core.setDefaultCursorShape(self.configCursorShape());
         term.surface.title = title;
         term.surface.command = command;
 
@@ -6309,6 +6328,7 @@ pub const AppSession = struct {
         term.surface.core.setConfigPalette(self.appearance.theme.palette);
         term.surface.core.ambiguous_wide = self.loaded_config.config.ambiguous_width == .wide;
         term.surface.core.emoji_wide = self.loaded_config.config.emoji_width == .wide;
+        term.surface.core.setDefaultCursorShape(self.configCursorShape());
         // 읽기 전용. 정확히는 이 surface가 `SurfaceRuntime`에 **attach되지 않으므로**(link 없음 — PTY도 backend 슬롯도
         // 없다) writeInput·enqueueCoreCommand·resize는 process_state 가드에 닿기 전에 `UnknownSurface`로 먼저 실패한다
         // (runtime.zig의 `linkBySurface orelse return error.UnknownSurface`). `process_state = .exited`를 함께 세우는 것은
@@ -16014,6 +16034,7 @@ pub const AppSession = struct {
         self.reapplyConfigPalette();
         self.reapplyAmbiguousWidth();
         self.reapplyEmojiWidth();
+        self.reapplyDefaultCursorShape();
         self.rebuildSidebar() catch {};
         // 커맨드 카탈로그는 여기서 재빌드하지 않는다 — reapplyLoadedConfig 자체는 keybindings/unbinds를 바꾸지 않는다
         // (GUI 토글·슬라이더·색 선택은 스키마 GUI 필드라 keybind 무관). keybind를 실제로 바꾸는 경로가 직접 재빌드한다:
@@ -17609,6 +17630,7 @@ pub const AppSession = struct {
         self.reapplyConfigPalette();
         self.reapplyAmbiguousWidth();
         self.reapplyEmojiWidth();
+        self.reapplyDefaultCursorShape();
         // 사이드바 카드 표시 토글(sidebar.show-branch/folder)이 파일에서 바뀌었을 수 있다 — 카드를 다시
         // 빌드해 즉시 반영한다(config→앱 양방향). rebuildSidebar 실패는 무시(다음 프레임에 자연 복구).
         self.rebuildSidebar() catch {};
@@ -17978,6 +18000,21 @@ pub const AppSession = struct {
             for (tab.panes.items) |pane| {
                 for (pane.terms.items) |term| {
                     self.runtime.enqueueCoreCommand(term.surface.id, .{ .set_emoji_wide = wide }, self.io) catch {};
+                }
+            }
+        }
+    }
+
+    /// cursor.shape reload를 라이브 코어에 재적용한다(createTerm chokepoint와 같은 값을 이미 떠 있는 surface에도 —
+    /// reapplyEmojiWidth와 같은 위임·best-effort 패턴). **앱이 DECSCUSR로 모양을 명시 중인 Term은 코어가 스스로
+    /// 건너뛴다**(setDefaultCursorShape의 `cursor_shape_overridden` 가드) — 설정 한 번 바꿨다고 vim insert-mode의
+    /// bar가 block으로 튀지 않는다. 원격 Term도 같은 명령이 host core에서 같은 규칙으로 적용된다.
+    fn reapplyDefaultCursorShape(self: *AppSession) void {
+        const shape = self.configCursorShape();
+        for (self.tabs.items) |tab| {
+            for (tab.panes.items) |pane| {
+                for (pane.terms.items) |term| {
+                    self.runtime.enqueueCoreCommand(term.surface.id, .{ .set_default_cursor_shape = shape }, self.io) catch {};
                 }
             }
         }
@@ -18600,6 +18637,17 @@ pub const AppSession = struct {
     pub fn terminalOwnsInput(self: *const AppSession) bool {
         return self.anyModalOverlayOpen() or self.addr_edit != null or self.rename != null or
             self.sidebar_search_active or self.fileTreeFocused() or self.pendingDockGroupOwnsInput();
+    }
+
+    /// config `cursor.shape`(config enum)를 코어/렌더가 쓰는 terminal enum으로 옮긴다. 두 enum은 **멤버 순서가 다르다**
+    /// (config: block/bar/underline, terminal: block/underline/bar) — `@intFromEnum` 재해석은 bar↔underline을 조용히
+    /// 뒤바꾼다. 명시 switch라 어느 쪽에 variant가 늘면 컴파일이 멈춘다(unfocusedCursorMode와 같은 경계 규율).
+    fn configCursorShape(self: *const AppSession) terminal.CursorShape {
+        return switch (self.appearance.cursor.shape) {
+            .block => .block,
+            .bar => .bar,
+            .underline => .underline,
+        };
     }
 
     fn unfocusedCursorMode(self: *const AppSession) renderer.CursorUnfocused {
@@ -19857,22 +19905,6 @@ pub const AppSession = struct {
         return self.ticksForMs(sync_timeout_ms);
     }
 
-    /// 커서 깜빡임 반주기를 현재 host frame-loop cadence tick으로 환산한다(config `cursor.blink-interval-ms` → 틱).
-    /// ticks = round(ms × frame_loop_rate_hz / 1000)이고, 최소 1틱(0틱이면 토글이 멈춰 영구 visible로 굳음).
-    /// 한 반주기 = on 또는 off 한 단계라 사용자가 적은 ms가 곧 깜빡임 속도다. blink=false는 updateCursorBlink
-    /// 가드가 호출 전에 걸러낸다.
-    fn blinkIntervalTicks(self: *const AppSession) u32 {
-        return self.ticksForMs(self.appearance.cursor.blink_interval_ms);
-    }
-
-    /// 커서 깜빡임 페이드 길이를 tick으로 환산한다(config `cursor.blink-fade-ms` → 틱). 0(페이드 끔)이면
-    /// 0을 그대로 반환해 하드 on/off로 돌아간다(ticksForMs의 최소-1틱 floor를 우회 — 0=끔이 유지되게).
-    /// 양수는 최소 1틱. cursorFadeMilliForPhase가 반주기로 clamp하므로 여기선 raw 환산만.
-    fn cursorFadeTicks(self: *const AppSession) u32 {
-        if (self.appearance.cursor.blink_fade_ms == 0) return 0;
-        return self.ticksForMs(self.appearance.cursor.blink_fade_ms);
-    }
-
     /// blink 위상(반주기 안 tick 위치 `ticks_into_half` + 어느 반인지 `visible_half`)을 커서 불투명도(0~1000)로 푼다.
     /// 각 반주기는 [hold]→[fade]로, hold 동안 고정(visible=1000·hidden=0)이고 마지막 fade_ticks 구간에서 다음 위상으로
     /// 선형 램프한다(visible 반: 1000→0 사라짐, hidden 반: 0→1000 나타남). fade_ticks==0이면 하드 토글(하위 호환).
@@ -19929,9 +19961,18 @@ pub const AppSession = struct {
     fn updateCursorBlink(self: *AppSession, snap: CoreSnapshot) void {
         // [P4-2, §12] 코어 읽기(cursor 상태 + viewportHasBlink 셀 스캔)는 tick의 readActiveSnapshot이 이미 단일 lock으로
         // 복사했다 — 여기선 스냅샷 값만 읽어 별도 lock을 안 잡는다(sync 게이트와 lock 통합, 리더 경합 접점 축소).
-        // 커서 자체가 깜빡이는 조건(DECSCUSR blink·표시·조합 아님). 모달(anyOverlayOpen)이 열리면 터미널 커서 blink를
-        // 멈춘다 — 포커스를 잃은 터미널 커서가 모달 뒤에서 계속 깜빡이지 않게. 커서 모양은 unfocusedCursorMode가 hollow로.
-        const cursor_blinks = snap.cursor_blink and snap.cursor_visible and !snap.preedit_present and !self.anyOverlayOpen();
+        // 커서 자체가 깜빡이는 조건(config `cursor.blink` · DECSCUSR blink · 표시 · 조합 아님). 모달(anyOverlayOpen)이
+        // 열리면 터미널 커서 blink를 멈춘다 — 포커스를 잃은 터미널 커서가 모달 뒤에서 계속 깜빡이지 않게. 커서 모양은
+        // unfocusedCursorMode가 hollow로.
+        //
+        // **config `cursor.blink = false`가 앱의 DECSCUSR 요청을 덮는다**(AND 게이트). 베이스는 Ghostty
+        // `cursor-style-blink`이지만 의미가 다르다 — Ghostty는 `?bool`(null=무의견)이라 값이 있어도 DECSCUSR를 존중하고
+        // DEC mode 12만 무시한다. maru는 `bool`(기본 `true`)이라 "true=앱에 위임(기본 깜빡임), false=사용자가 끔"으로
+        // 읽는 게 설정 의미에 맞다: 끈 사람이 vim 모드 전환(DECSCUSR 1/3/5)마다 깜빡임이 되살아나길 원하지 않는다.
+        // (maru는 DEC mode 12를 아예 파싱하지 않아 Ghostty의 mode-12 예외는 해당 없음.) `true`면 이 항은 무해한 항등이라
+        // DECSCUSR steady(2/4/6)는 그대로 커서를 고정한다.
+        const cursor_blinks = self.appearance.cursor.blink and
+            snap.cursor_blink and snap.cursor_visible and !snap.preedit_present and !self.anyOverlayOpen();
         // 텍스트 blink(SGR 5): config text.blink가 켜졌고 보이는 뷰포트에 blink 셀이 있을 때만 위상 진행. viewport_has_blink는
         // need_blink_scan(idle + blink_text)일 때만 스냅샷이 실제 스캔한 값이라, blink_text off면 false로 접혀 안전.
         const text_blinks = self.appearance.blink_text and snap.viewport_has_blink;
@@ -19955,21 +19996,40 @@ pub const AppSession = struct {
             self.resetCursorBlink(); // 깜빡일 게 없거나 조합 중 — 보이는 위상 고정
             return;
         }
-        const interval = self.blinkIntervalTicks();
-        self.blink_ticks += 1;
-        if (self.blink_ticks >= interval) {
-            self.blink_ticks = 0;
-            self.blink_visible = !self.blink_visible;
+        // 위상 진행은 **wall-clock 경과** 기준이다(스피너 advanceAgentSpinner와 같은 모델 — §10.5 secondary).
+        // tick 카운트로 세면 실효 tick rate가 설정 Hz보다 낮을 때(무거운 tick·백그라운드 스로틀링, 실측 ~17Hz)
+        // 반주기가 그만큼 길어져 깜빡임이 통째로 느려진다. 실경과로 재면 tick rate와 무관하게 설정 속도를 지킨다.
+        const interval_ms = @max(self.appearance.cursor.blink_interval_ms, 1);
+        const interval_ns: i128 = @as(i128, interval_ms) * std.time.ns_per_ms;
+        const now_ns = std.Io.Clock.awake.now(self.io).nanoseconds;
+        if (self.blink_phase_ns == 0) self.blink_phase_ns = now_ns; // 첫 tick — baseline만 잡고 위상 불변
+        const elapsed_ns = now_ns - self.blink_phase_ns;
+        if (elapsed_ns >= interval_ns) {
+            // 소비한 반주기 수만큼 한 번에 catch-up한다(stall 후 재개도 실시간을 따라감). 홀수 번이면 위상이 뒤집힌다.
+            // 나머지는 남겨 baseline을 정확히 소비분만큼 전진 — 위상이 실시간에 drift 없이 고정된다(스피너와 동형).
+            const steps = @divTrunc(elapsed_ns, interval_ns);
+            if (@mod(steps, 2) == 1) self.blink_visible = !self.blink_visible;
+            self.blink_phase_ns += steps * interval_ns;
             // 텍스트 blink·rename caret·검색 caret은 blink_visible로 **하드 토글**되는 별도 glyph 셀이라 full rebuild가 필요하다
-            // (suffix-trim으로 못 숨김). 이들은 페이드 없이 위상 경계에서 즉각 on/off한다. 에이전트 스피너는 위 자기 위상(약
+            // (커서 suffix 페이드로 못 숨김). 이들은 페이드 없이 위상 경계에서 즉각 on/off한다. 에이전트 스피너는 자기 위상(약
             // 133ms)에서 따로 dirty하므로 여기엔 안 넣는다(옛 펄스 폐기 후 500ms 재투영은 byte-identical 낭비, #3).
             if (text_blinks or rename_active or sidebar_search) self.metal_dirty = true;
         }
-        // 터미널/오버레이 커서 suffix는 **부드럽게 페이드**한다(하드 토글 아님) — 반주기 안 위치(blink_ticks)와 현재 반
-        // (blink_visible)을 불투명도(0~1000)로 풀어 setCursorFadeMilli로 넘긴다. 오버레이가 열렸으면 suffix=오버레이 caret,
+        // 반주기 안 위치(ms) — 아래 페이드 램프의 위상 입력. baseline을 위에서 전진시켰으므로 항상 [0, interval_ms).
+        const into_ms: u32 = @intCast(@divFloor(now_ns - self.blink_phase_ns, std.time.ns_per_ms));
+        // 터미널/오버레이 커서 suffix 페이드(cursor.blink-fade-ms>0일 때 — 기본 0=하드 토글) — 반주기 안 위치(into_ms)와
+        // 현재 반(blink_visible)을 불투명도(0~1000)로 풀어 setCursorFadeMilli로 넘긴다. 오버레이가 열렸으면 suffix=오버레이 caret,
         // 닫혔으면 터미널 커서 — 같은 suffix pass가 페이드한다. 값이 바뀔 때만 generation↑(램프 중 매 tick 재present, hold 중엔
         // 값 불변이라 idle). 재빌드/재셰이프 없음 — 렌더러가 커서 pass 불투명도만 바꿔 재present한다(cursor.blink-fade-ms).
-        const fade = cursorFadeMilliForPhase(self.blink_ticks, interval, self.cursorFadeTicks(), self.blink_visible);
+        //
+        // 단 페이드는 **그 suffix의 주인이 깜빡일 때만** 건다. 위상은 텍스트 blink·rename·검색 caret 때문에도 돌기
+        // 때문에, 옛 무조건 페이드는 깜빡이면 안 되는 커서(DECSCUSR steady 또는 config `cursor.blink = false`)를 화면에
+        // blink 셀 하나만 있어도 같이 깜빡이게 했다. 주인이 안 깜빡이면 완전 표시(1000)로 고정한다.
+        const suffix_blinks = overlay_open or cursor_blinks;
+        const fade = if (suffix_blinks)
+            cursorFadeMilliForPhase(into_ms, interval_ms, self.appearance.cursor.blink_fade_ms, self.blink_visible)
+        else
+            1000;
         self.metal_buffer.setCursorFadeMilli(fade);
     }
 
@@ -19996,7 +20056,7 @@ pub const AppSession = struct {
     /// 커서를 즉시 완전 표시(1000)로 고정한다 — 입력에 커서가 반쯤 사라진 채로 굳지 않게. 이미 표시 위상 + 완전
     /// 표시면 blink_visible·fade 둘 다 불변이라 generation이 안 올라 idle이 유지된다(setCursorFadeMilli가 게이트).
     fn resetCursorBlink(self: *AppSession) void {
-        self.blink_ticks = 0;
+        self.blink_phase_ns = 0; // baseline 폐기 — 다음 idle tick이 지금부터 새 반주기를 시작한다
         self.blink_visible = true;
         self.metal_buffer.setCursorFadeMilli(1000);
     }
@@ -24612,6 +24672,10 @@ pub const AppSession = struct {
         // 모든 탭의 모든 panel의 모든 Term PTY를 drain한다 — 백그라운드 탭/panel/탭(Term)도 출력을 받게
         // (routing은 surface_id로 각 surface에 가고, frame은 아래에서 활성 탭만 빌드한다). summary는 보고용.
         var drain_summary: app.RuntimePumpDrainSummary = .{};
+        // 활성 surface **자신의** 출력만 따로 센다(커서 blink 리셋 판정용 — 아래 루프 주석). 활성 탭이 없는 빈 창
+        // (마지막 워크스페이스를 옮겨 비운 창)은 `active()`가 null이라 id 비교를 건너뛴다(그 창엔 그릴 커서도 없다).
+        const active_surface_id: ?u64 = if (self.app_window.active()) |s| s.id else null;
+        var active_output_events: u64 = 0;
         for (self.tabs.items) |tab| {
             for (tab.panes.items) |pane| {
                 for (pane.terms.items) |term| {
@@ -24620,6 +24684,14 @@ pub const AppSession = struct {
                     if (ds.output_events > 0) {
                         term.agent_last_output_ms = self.awakeMs();
                         term.agent_last_output_wall_ns = @intCast(std.Io.Clock.real.now(self.io).nanoseconds);
+                        // 커서 blink 리셋은 **활성 surface 자신의 출력**에만 반응한다 — 아래 drain_summary는 모든
+                        // 탭/pane/Term의 합이라, 그걸로 리셋하면 백그라운드 Term 하나가 계속 출력하는 동안(에이전트·
+                        // 로그 tail·dev 서버) 활성 커서 위상이 매 tick 리셋돼 **영영 안 깜빡인다**. 스피너가 같은
+                        // 이유로 출력 게이트 밖으로 나갔던 것과 같은 결함(§10.5 primary)이고, 여기선 게이트를 활성
+                        // surface로 좁혀 고친다(깜빡임은 "내가 보는 커서가 움직이는 중인가"가 판정 기준이므로).
+                        if (active_surface_id) |aid| {
+                            if (term.surface.id == aid) active_output_events += ds.output_events;
+                        }
                     }
                     drain_summary.output_events += ds.output_events;
                     drain_summary.exit_events += ds.exit_events;
@@ -24685,16 +24757,17 @@ pub const AppSession = struct {
         // 가정: 모든 시각 변화는 PTY output(또는 resize)에서 온다. cursor blink나 주기적 redraw
         // 같은 PTY와 무관한 변화를 넣게 되면, 그 트리거에서도 metal_dirty를 세워야 한다.
         if (drain_summary.output_events > 0) self.metal_dirty = true;
-        // 깜빡임: 출력이 흐르면 보이는 위상으로 리셋(커서가 움직이는 동안 항상 보이게), idle이면 500ms마다 토글.
-        // steady/숨김 커서 + 오버레이 닫힘이면 updateCursorBlink가 무토글로 고정한다. 오버레이 caret도 같은 위상으로
-        // 깜빡이고, suffix-trim(setCursorVisible)이라 재빌드 없이 토글된다(터미널 커서와 같은 메커니즘 재활용).
+        // 깜빡임: **활성 surface에** 출력이 흐르면 보이는 위상으로 리셋(내 커서가 움직이는 동안 항상 보이게),
+        // idle이면 500ms마다 토글. steady/숨김 커서 + 오버레이 닫힘이면 updateCursorBlink가 무토글로 고정한다.
+        // 오버레이 caret도 같은 위상으로 깜빡이고, 커서 suffix 페이드라 재빌드 없이 토글된다.
         // 스피너는 출력과 무관하게 매 tick 진행한다(출력 게이트 밖) — 연속 출력이 스피너를 굶기던 버그 수정(§10.5).
-        // 커서/텍스트 blink는 출력 시 보이는 위상으로 리셋(resetCursorBlink), idle이면 위상 진행(updateCursorBlink).
+        // 커서/텍스트 blink 게이트가 `drain_summary`(전 Term 합)가 아니라 `active_output_events`인 이유는 위 drain
+        // 루프 주석 — 백그라운드 Term의 출력이 활성 커서 위상을 굶기던 같은 계열 결함의 수정이다.
         self.advanceAgentSpinner();
         // [P4-2, §12] 활성 surface per-tick read를 단일 lock 스냅샷으로 통합 — sync 게이트(D)와 idle blink(B)가 이 한
         // lock을 공유한다. viewportHasBlink 셀 스캔은 idle+blink_text일 때만(출력 tick은 updateCursorBlink 미호출).
-        const core_snap = self.readActiveSnapshot(drain_summary.output_events == 0 and self.appearance.blink_text);
-        if (drain_summary.output_events > 0) self.resetCursorBlink() else self.updateCursorBlink(core_snap);
+        const core_snap = self.readActiveSnapshot(active_output_events == 0 and self.appearance.blink_text);
+        if (active_output_events > 0) self.resetCursorBlink() else self.updateCursorBlink(core_snap);
         self.dispatchBell(); // BEL 1회 drain → audible/visual/dock-badge 분배(아래 frame이 flash·페이드 그림)
         self.refreshFileTreeScrollbarGeometry(); // frame당 geometry build 1회; fade/render는 같은 snapshot만 소비한다.
         self.updateScrollbarFade(); // 스크롤바 fade: view_offset 변화/hover/드래그로 full↔faint(appendScrollbar 전에 갱신)
@@ -40546,26 +40619,69 @@ test "frame-rate helpers: config 희망값과 host cadence를 분리해 ms→tic
     try std.testing.expectEqual(@as(u32, 1), ticksForMsAtRate(10, 60)); // 극단값도 최소 1틱
 }
 
-test "blinkIntervalTicks: cursor.blink-interval-ms를 host frame-loop 틱으로 환산(round, 최소 1) (F1-4b)" {
+// 위상 진행이 **tick 수가 아니라 실경과 시간** 기준임을 고정한다(§10.5 secondary — 스피너와 같은 모델).
+// 회귀: 옛 코드는 ms를 **설정값** render.frame-rate로 틱 환산해 셌다. 실효 tick rate가 그보다 낮으면(무거운 tick·
+// 백그라운드 스로틀링, 실측 ~17Hz vs 설정 60Hz) 반주기가 그만큼 늘어나 깜빡임이 3배 넘게 느려졌다(사용자 제보
+// "너무 느리다"). 이제 tick을 아무리 많이 돌려도 시간이 안 지났으면 위상이 안 넘어가고, baseline을 과거로 밀면
+// tick 한 번으로도 넘어간다 — 두 방향을 함께 잠근다.
+/// 테스트 전용: blink 위상 baseline을 `halves`개 반주기만큼 과거로 밀어, 다음 `updateCursorBlink` 한 번이
+/// 그만큼 실경과한 것으로 보게 한다. wall-clock 모델이라 tick을 여러 번 도는 것으로는 위상이 안 넘어간다.
+fn testAdvanceBlinkHalves(session: *AppSession, halves: i128) void {
+    const interval_ns: i128 = @as(i128, @max(session.appearance.cursor.blink_interval_ms, 1)) * std.time.ns_per_ms;
+    session.blink_phase_ns = std.Io.Clock.awake.now(session.io).nanoseconds - halves * interval_ns;
+}
+
+test "cursor blink 위상: tick 수가 아니라 wall-clock 경과로 진행한다" {
     var session: AppSession = undefined;
-    // blinkIntervalTicks는 cursor interval과 host frame-loop cadence를 읽는다 — 그 필드만 명시 초기화(undefined 트랩 회피).
+    session.allocator = std.testing.allocator;
+    session.addr_edit = null;
+    session.focus_owner = .workspace;
+    session.pending_dock_focus = null;
+    session.io = std.Io.Threaded.global_single_threaded.io();
+    var tab_surface = try maru.session.Surface.init(std.testing.allocator, 1, .{ .cols = 4, .rows = 2 });
+    defer tab_surface.deinit();
+    session.surface_initialized = true;
+    var st_ptrs = [_]*maru.session.Surface{&tab_surface};
+    session.app_window = .{ .tabs = &st_ptrs };
+    session.metal_dirty = false;
+    session.metal_buffer = .{};
+    session.blink_visible = true;
+    session.blink_phase_ns = 0;
+    session.chrome_host = .{};
+    session.rename = null;
+    session.tabs = .empty;
+    session.sidebar_rows = .empty;
+    session.sidebar_collapsed = false;
+    session.sidebar_search_active = false;
     session.loaded_config.config = .{};
     session.frame_loop_rate_hz = config_mod.theme.render_frame_rate_default;
+    session.appearance.cursor.blink = true;
     session.appearance.cursor.blink_interval_ms = 500;
-    try std.testing.expectEqual(@as(u32, 30), session.blinkIntervalTicks()); // 500ms@60Hz=30틱(기본)
-    session.appearance.cursor.blink_interval_ms = 1000;
-    try std.testing.expectEqual(@as(u32, 60), session.blinkIntervalTicks());
-    session.appearance.cursor.blink_interval_ms = 100;
-    try std.testing.expectEqual(@as(u32, 6), session.blinkIntervalTicks()); // round(100×60/1000)=6
-    session.loaded_config.config.render_frame_rate = 30;
-    session.setFrameLoopRateHz(30);
-    session.appearance.cursor.blink_interval_ms = 500;
-    try std.testing.expectEqual(@as(u32, 15), session.blinkIntervalTicks()); // 500ms@30Hz=15틱
-    session.loaded_config.config.render_frame_rate = 120;
-    session.setFrameLoopRateHz(120);
-    try std.testing.expectEqual(@as(u32, 60), session.blinkIntervalTicks()); // 500ms@120Hz=60틱
-    session.appearance.cursor.blink_interval_ms = 10; // 극단값도 0틱이 되지 않게 최소 1틱(토글 멈춤 방지)
-    try std.testing.expectEqual(@as(u32, 1), session.blinkIntervalTicks());
+    session.appearance.cursor.blink_fade_ms = 0;
+    session.appearance.blink_text = false;
+
+    // ① tick을 반주기 틱 수(60Hz면 30틱)의 몇 배로 돌려도 **실시간이 안 지났으면** 위상은 그대로다.
+    //    (옛 tick-카운트 모델이면 여기서 여러 번 토글됐다.)
+    var i: u32 = 0;
+    while (i < 201) : (i += 1) session.updateCursorBlink(session.readActiveSnapshot(false)); // 홀수 — tick당 토글 모델이면 false로 뒤집힌다
+    try std.testing.expect(session.blink_visible);
+    try std.testing.expect(session.blink_phase_ns != 0); // 첫 tick이 baseline을 잡았다
+
+    // ② baseline을 정확히 한 반주기 과거로 밀면 다음 tick 한 번에 토글된다(실경과 기준).
+    const interval_ns: i128 = 500 * std.time.ns_per_ms;
+    session.blink_phase_ns = std.Io.Clock.awake.now(session.io).nanoseconds - interval_ns;
+    session.updateCursorBlink(session.readActiveSnapshot(false));
+    try std.testing.expect(!session.blink_visible);
+
+    // ③ 두 반주기를 한 번에 건너뛰면(stall 후 재개) 짝수 번이라 위상이 제자리로 catch-up한다 — drift 없음.
+    session.blink_phase_ns = std.Io.Clock.awake.now(session.io).nanoseconds - 2 * interval_ns;
+    session.updateCursorBlink(session.readActiveSnapshot(false));
+    try std.testing.expect(!session.blink_visible);
+
+    // ④ 활동 리셋은 baseline을 폐기해 다음 tick이 새 반주기를 시작하게 한다(보이는 위상 고정).
+    session.resetCursorBlink();
+    try std.testing.expect(session.blink_visible);
+    try std.testing.expectEqual(@as(i128, 0), session.blink_phase_ns);
 }
 
 test "cursor blink: 틱마다 토글·steady/조합 고정·활동 리셋·오버레이 caret도 깜빡(suffix-trim 재활용)" {
@@ -40583,7 +40699,7 @@ test "cursor blink: 틱마다 토글·steady/조합 고정·활동 리셋·오�
     session.metal_dirty = false;
     session.metal_buffer = .{};
     session.blink_visible = true;
-    session.blink_ticks = 0;
+    session.blink_phase_ns = 0;
     session.chrome_host = .{}; // updateCursorBlink이 find/palette.open을 읽음 — undefined면 UB([[devsession-undefined-test-field-trap]])
     session.rename = null; // inputFocus/updateCursorBlink가 rename을 읽음(undefined면 garbage가 .rename 분기)
     session.tabs = .empty;
@@ -40591,40 +40707,41 @@ test "cursor blink: 틱마다 토글·steady/조합 고정·활동 리셋·오�
     session.sidebar_collapsed = false; // anyAgentRunning이 먼저 읽음(접힘이면 false 조기반환) — undefined면 garbage 분기
     session.loaded_config.config = .{}; // configured frame-rate 기본값
     session.frame_loop_rate_hz = config_mod.theme.render_frame_rate_default;
-    session.appearance.cursor.blink_interval_ms = 500; // blinkIntervalTicks가 읽음(F1-4b) — undefined면 overflow([[devsession-undefined-test-field-trap]])
-    session.appearance.cursor.blink_fade_ms = 0; // 페이드 끔 = 하드 토글 — 이 테스트는 위상/리셋/steady 로직 검증(페이드 램프는 cursorFadeMilliForPhase 순수 테스트). cursorFadeTicks가 읽음 — undefined면 UB([[devsession-undefined-test-field-trap]])
+    session.appearance.cursor.blink = true; // config 게이트(앱 DECSCUSR에 위임) — updateCursorBlink가 읽음, undefined면 UB([[devsession-undefined-test-field-trap]])
+    session.appearance.cursor.blink_interval_ms = 500; // updateCursorBlink 위상 계산이 읽음 — undefined면 overflow([[devsession-undefined-test-field-trap]])
+    session.appearance.cursor.blink_fade_ms = 0; // 페이드 끔 = 하드 토글 — 이 테스트는 위상/리셋/steady 로직 검증(페이드 램프는 cursorFadeMilliForPhase 순수 테스트). updateCursorBlink가 읽음 — undefined면 UB([[devsession-undefined-test-field-trap]])
 
     // 기본(DECSCUSR 1 = 깜빡 block, 페이드 끔): interval 틱마다 즉각 토글. rebuild(metal_dirty) 없이 generation만(suffix 불투명도).
-    var i: u32 = 0;
-    while (i < session.blinkIntervalTicks()) : (i += 1) session.updateCursorBlink(session.readActiveSnapshot(false));
+    testAdvanceBlinkHalves(&session, 1);
+    session.updateCursorBlink(session.readActiveSnapshot(false));
     try std.testing.expect(!session.blink_visible);
     try std.testing.expect(!session.metal_dirty);
     try std.testing.expectEqual(@as(u64, 1), session.metal_buffer.generation);
     try std.testing.expectEqual(@as(u32, 0), session.metal_buffer.cursor_fade_milli); // off 위상 = 완전히 사라짐(페이드 끔이라 즉각)
-    while (i < session.blinkIntervalTicks() * 2) : (i += 1) session.updateCursorBlink(session.readActiveSnapshot(false));
+    testAdvanceBlinkHalves(&session, 1);
+    session.updateCursorBlink(session.readActiveSnapshot(false));
     try std.testing.expect(session.blink_visible);
 
     // 활동(입력/출력) 리셋: off 위상이어도 즉시 보이게.
     session.blink_visible = false;
-    session.blink_ticks = 7;
+    testAdvanceBlinkHalves(&session, 1); // 위상 한복판
     session.resetCursorBlink();
     try std.testing.expect(session.blink_visible);
-    try std.testing.expectEqual(@as(u32, 0), session.blink_ticks);
+    try std.testing.expectEqual(@as(i128, 0), session.blink_phase_ns); // baseline 폐기 = 다음 tick이 새 반주기
 
     // steady 커서(DECSCUSR 2) + 오버레이 닫힘: 토글 안 함(보이는 위상 고정 — idle 절전).
     try tab_surface.core.write("\x1b[2 q");
     session.blink_visible = true;
-    i = 0;
-    while (i < session.blinkIntervalTicks() * 3) : (i += 1) session.updateCursorBlink(session.readActiveSnapshot(false));
-    try std.testing.expect(session.blink_visible);
+    testAdvanceBlinkHalves(&session, 3);
+    session.updateCursorBlink(session.readActiveSnapshot(false));
+    try std.testing.expect(session.blink_visible); // steady/조합 중 — 위상이 아무리 지나도 고정
 
     // 오버레이(find) 열림: steady 커서여도 caret은 깜빡인다(overlay_open이라 토글 — suffix=오버레이 caret). 회귀:
     // 사용자 제보 "오버레이 커서가 안 깜빡임" 수정 — 터미널 커서와 같은 틱-카운터+suffix-trim 재활용.
     session.chrome_host.find.open = true;
     session.blink_visible = true;
-    session.blink_ticks = 0;
-    i = 0;
-    while (i < session.blinkIntervalTicks()) : (i += 1) session.updateCursorBlink(session.readActiveSnapshot(false));
+    testAdvanceBlinkHalves(&session, 1);
+    session.updateCursorBlink(session.readActiveSnapshot(false));
     try std.testing.expect(!session.blink_visible); // caret이 off 위상으로 토글됨
     session.chrome_host.find.open = false;
 
@@ -40634,12 +40751,88 @@ test "cursor blink: 틱마다 토글·steady/조합 고정·활동 리셋·오�
     try std.testing.expect(tab_surface.setPreeditLocked("\xec\x95\x88"));
     tab_surface.unlockCore(session.io);
     session.blink_visible = true;
-    i = 0;
-    while (i < session.blinkIntervalTicks() * 3) : (i += 1) session.updateCursorBlink(session.readActiveSnapshot(false));
-    try std.testing.expect(session.blink_visible);
+    testAdvanceBlinkHalves(&session, 3);
+    session.updateCursorBlink(session.readActiveSnapshot(false));
+    try std.testing.expect(session.blink_visible); // steady/조합 중 — 위상이 아무리 지나도 고정
     tab_surface.lockCore(session.io);
     try std.testing.expect(tab_surface.setPreeditLocked(""));
     tab_surface.unlockCore(session.io);
+}
+
+// config `cursor.blink = false`가 실제로 커서를 고정하는지 고정한다. 회귀: `ResolvedCursor.blink`이 resolve만 되고
+// **아무도 읽지 않아** 설정이 무동작이었다(사용자 제보 "커서 깜빡임 옵션이 동작하지 않음"). 두 갈래를 함께 잠근다 —
+// ① 앱 DECSCUSR blink 요청(기본 `CSI 1 SP q` 상태)을 config가 덮는가, ② 텍스트 blink(SGR 5)로 위상이 도는 동안에도
+// 커서 suffix가 페이드되지 않는가(옛 코드는 위상이 돌면 주인과 무관하게 무조건 커서를 페이드했다).
+test "cursor blink: config cursor.blink=false가 앱 DECSCUSR blink를 덮어 커서를 고정(텍스트 blink 위상 중에도)" {
+    var session: AppSession = undefined;
+    session.allocator = std.testing.allocator;
+    session.addr_edit = null;
+    session.focus_owner = .workspace;
+    session.pending_dock_focus = null;
+    session.io = std.Io.Threaded.global_single_threaded.io();
+    var tab_surface = try maru.session.Surface.init(std.testing.allocator, 1, .{ .cols = 4, .rows = 2 });
+    defer tab_surface.deinit();
+    session.surface_initialized = true;
+    var st_ptrs = [_]*maru.session.Surface{&tab_surface};
+    session.app_window = .{ .tabs = &st_ptrs };
+    session.metal_dirty = false;
+    session.metal_buffer = .{};
+    session.blink_visible = true;
+    session.blink_phase_ns = 0;
+    session.chrome_host = .{};
+    session.rename = null;
+    session.tabs = .empty;
+    session.sidebar_rows = .empty;
+    session.sidebar_collapsed = false;
+    session.sidebar_search_active = false; // 검색 caret이 위상을 돌리지 않게 명시(undefined면 UB — [[devsession-undefined-test-field-trap]])
+    session.loaded_config.config = .{};
+    session.frame_loop_rate_hz = config_mod.theme.render_frame_rate_default;
+    session.appearance.cursor.blink = false; // ← 검증 대상: 사용자가 깜빡임을 껐다
+    session.appearance.cursor.blink_interval_ms = 500;
+    session.appearance.cursor.blink_fade_ms = 0; // 페이드 끔 = 하드 토글 → 고정이면 1000, 안 고쳤으면 off 위상에 0
+    session.appearance.blink_text = false;
+
+    // ① 커서는 DECSCUSR 기본(깜빡 block)인데 config가 껐다: 위상이 아예 안 돈다(다른 깜빡임도 없음 → idle 유지).
+    testAdvanceBlinkHalves(&session, 3);
+    session.updateCursorBlink(session.readActiveSnapshot(false));
+    try std.testing.expect(session.blink_visible);
+    try std.testing.expectEqual(@as(u32, 1000), session.metal_buffer.cursor_fade_milli); // 완전 표시로 고정
+    try std.testing.expectEqual(@as(u64, 0), session.metal_buffer.generation); // 값 불변 = 재present 없음(idle)
+    try std.testing.expect(!session.metal_dirty);
+
+    // ② 화면에 blink 글자(SGR 5)가 있어 위상은 돈다 — 그래도 커서는 고정이어야 한다(옛 코드는 여기서 같이 깜빡였다).
+    try tab_surface.core.write("\x1b[5mblink\x1b[m");
+    session.appearance.blink_text = true;
+    session.blink_visible = true;
+    testAdvanceBlinkHalves(&session, 1);
+    session.updateCursorBlink(session.readActiveSnapshot(true));
+    try std.testing.expect(!session.blink_visible); // 텍스트 blink 위상은 정상 진행(off 위상으로 토글)
+    try std.testing.expect(session.metal_dirty); // 텍스트 blink는 full rebuild
+    try std.testing.expectEqual(@as(u32, 1000), session.metal_buffer.cursor_fade_milli); // 커서 suffix는 그대로 완전 표시
+
+    // ③ config를 다시 켜면(true=앱 DECSCUSR에 위임) 같은 조건에서 커서가 off 위상으로 사라진다 — 게이트가 config 값을
+    //    실제로 보고 있다는 양방향 증거(true로도 red→green이 갈린다).
+    session.appearance.cursor.blink = true;
+    session.blink_visible = true;
+    testAdvanceBlinkHalves(&session, 1);
+    session.updateCursorBlink(session.readActiveSnapshot(true));
+    try std.testing.expect(!session.blink_visible);
+    try std.testing.expectEqual(@as(u32, 0), session.metal_buffer.cursor_fade_milli); // 페이드 끔 = 즉각 사라짐
+}
+
+// config enum(`theme.CursorShape` = block/bar/underline)과 terminal enum(`types.CursorShape` = block/underline/bar)은
+// **멤버 순서가 다르다**. 숫자 재해석(@intFromEnum)으로 옮기면 bar↔underline이 조용히 뒤바뀌어, `cursor.shape = bar`가
+// underline으로 그려진다(테스트 없이는 "그려지긴 하니까" 통과해 보이는 종류의 버그). 세 값을 전수 고정한다.
+test "configCursorShape: config↔terminal CursorShape 멤버 순서가 달라도 값이 보존된다" {
+    var session: AppSession = undefined;
+    session.appearance.cursor.shape = .block;
+    try std.testing.expectEqual(terminal.CursorShape.block, session.configCursorShape());
+    session.appearance.cursor.shape = .bar;
+    try std.testing.expectEqual(terminal.CursorShape.bar, session.configCursorShape());
+    session.appearance.cursor.shape = .underline;
+    try std.testing.expectEqual(terminal.CursorShape.underline, session.configCursorShape());
+    // 숫자 재해석이었다면 bar(config 1)가 underline(terminal 1)로 갔을 것 — 그 경로를 명시적으로 배제한다.
+    try std.testing.expect(@intFromEnum(config_mod.theme.CursorShape.bar) != @intFromEnum(terminal.CursorShape.bar));
 }
 
 test "cursorFadeMilliForPhase: 반주기 끝에서 대칭 램프(사라짐 1000→0·나타남 0→1000)·hold·페이드끔·clamp" {
@@ -40684,7 +40877,7 @@ test "cursor blink fade: updateCursorBlink이 반주기 끝에서 커서 불투�
     session.metal_dirty = false;
     session.metal_buffer = .{};
     session.blink_visible = true;
-    session.blink_ticks = 0;
+    session.blink_phase_ns = 0;
     session.chrome_host = .{};
     session.rename = null;
     session.tabs = .empty;
@@ -40692,40 +40885,37 @@ test "cursor blink fade: updateCursorBlink이 반주기 끝에서 커서 불투�
     session.sidebar_collapsed = false;
     session.loaded_config.config = .{};
     session.frame_loop_rate_hz = 60; // 500ms@60Hz=30틱 반주기
+    session.appearance.cursor.blink = true; // config 게이트 — updateCursorBlink가 읽음, undefined면 UB([[devsession-undefined-test-field-trap]])
     session.appearance.cursor.blink_interval_ms = 500;
-    session.appearance.cursor.blink_fade_ms = 167; // ticksForMs(167,60)=round(10.02)=10틱 페이드 → hold 20 + 램프 10
+    session.appearance.cursor.blink_fade_ms = 150; // 반주기 500 중 마지막 150ms가 램프 → hold 350ms
 
-    try std.testing.expectEqual(@as(u32, 30), session.blinkIntervalTicks());
-    try std.testing.expectEqual(@as(u32, 10), session.cursorFadeTicks());
-
-    // hold 구간(첫 19틱, blink_ticks 1..19 < hold 20): 완전 표시 유지 — 값 불변이라 generation 안 오름(idle 절전).
-    var i: u32 = 0;
-    while (i < 19) : (i += 1) session.updateCursorBlink(session.readActiveSnapshot(false));
+    // hold 구간(경과 300ms < hold 350ms): 완전 표시 유지 — 값 불변이라 generation 안 오름(idle 절전).
+    session.blink_phase_ns = std.Io.Clock.awake.now(session.io).nanoseconds - 300 * std.time.ns_per_ms;
+    session.updateCursorBlink(session.readActiveSnapshot(false));
     try std.testing.expectEqual(@as(u32, 1000), session.metal_buffer.cursor_fade_milli);
     try std.testing.expectEqual(@as(u64, 0), session.metal_buffer.generation);
 
-    // 램프 첫 틱(blink_ticks 20 = hold 경계): 1000→900으로 내려가 중간값이 생기고(하드 토글 아님) generation이 오른다.
+    // 램프 한복판(경과 425ms = hold 350 + 75/150): 1000도 0도 아닌 **중간 불투명도**가 나온다(부드러운 페이드 증거).
+    // 값이 바뀌었으니 generation이 오르고, 재빌드(metal_dirty)는 없다 — 커서 pass 불투명도만 바꿔 재present.
+    session.blink_phase_ns = std.Io.Clock.awake.now(session.io).nanoseconds - 425 * std.time.ns_per_ms;
     session.updateCursorBlink(session.readActiveSnapshot(false));
-    i += 1;
     const mid = session.metal_buffer.cursor_fade_milli;
-    try std.testing.expect(mid > 0 and mid < 1000); // 중간 불투명도 = 부드러운 페이드 증거
-    try std.testing.expectEqual(@as(u32, 900), mid);
-    try std.testing.expectEqual(@as(u64, 1), session.metal_buffer.generation);
-    while (i < 30) : (i += 1) session.updateCursorBlink(session.readActiveSnapshot(false)); // 반주기 끝까지(blink_ticks 21..30, 마지막에 flip)
-    try std.testing.expect(!session.blink_visible); // off 위상으로 토글
-    try std.testing.expectEqual(@as(u32, 0), session.metal_buffer.cursor_fade_milli); // 완전히 사라짐
-    // 램프 10틱(blink_ticks 20..29) 동안 매 틱 값이 바뀌어 generation이 10 올랐다(하드 토글이면 1). 재빌드(metal_dirty)는
-    // 없다 — 커서 suffix 불투명도만 바뀌어 재present(재셰이프·재투영 아님).
-    try std.testing.expectEqual(@as(u64, 10), session.metal_buffer.generation);
+    try std.testing.expect(mid > 0 and mid < 1000);
+    try std.testing.expect(session.metal_buffer.generation >= 1);
     try std.testing.expect(!session.metal_dirty);
 
-    // 활동 리셋: 페이드 중이어도 즉시 완전 표시(1000)로 복귀.
-    session.blink_ticks = 25; // 램프 한복판
+    // 반주기를 넘기면 off 위상으로 토글 + 완전히 사라짐.
+    testAdvanceBlinkHalves(&session, 1);
+    session.updateCursorBlink(session.readActiveSnapshot(false));
+    try std.testing.expect(!session.blink_visible);
+    try std.testing.expectEqual(@as(u32, 0), session.metal_buffer.cursor_fade_milli);
+
+    // 활동 리셋: 페이드 중이어도 즉시 완전 표시(1000)로 복귀 + baseline 폐기.
     session.blink_visible = true;
     session.metal_buffer.cursor_fade_milli = 400; // 반쯤 사라진 상태 가정
     session.resetCursorBlink();
     try std.testing.expectEqual(@as(u32, 1000), session.metal_buffer.cursor_fade_milli);
-    try std.testing.expectEqual(@as(u32, 0), session.blink_ticks);
+    try std.testing.expectEqual(@as(i128, 0), session.blink_phase_ns);
 }
 
 // 셸을 처음부터 실제 창 크기로 spawn하는 핸드셰이크 제거(zsh 첫 프롬프트 % 잔상 방지)를 고정한다. backing px가
@@ -40981,22 +41171,19 @@ test "headless ticks toggle the blink phase and bump the metal generation" {
     // 출력 타이밍에 흔들리지 않게(느린 CI에서 controlled 출력이 여러 tick에 걸쳐 와 위상을
     // 계속 리셋할 수 있다) "첫 토글이 관측될 때까지" 충분한 상한으로 tick한다 — 출력은 유한하니
     // 멎은 뒤 interval 틱이 지나면 반드시 토글된다.
+    // 먼저 controlled 출력이 멎을 때까지 tick한다(출력 tick은 resetCursorBlink라 위상이 계속 리셋된다).
+    var i: usize = 0;
+    while (i < 200) : (i += 1) _ = try session.tick();
+    // 위상은 이제 **실경과 시간** 기준이라(§10.5) tick을 아무리 돌려도 500ms가 안 지나면 안 넘어간다 — CI 속도에
+    // 의존하지 않게 baseline을 한 반주기 과거로 밀어 다음 tick이 정확히 한 번 토글하게 한다(타이밍만 주입, 경로는 실제 tick).
     var toggles: usize = 0;
     var gen_changes: usize = 0;
-    var last_vis = session.blink_visible;
-    var last_gen: u64 = session.metal_buffer.generation;
-    var i: usize = 0;
-    while (i < session.blinkIntervalTicks() * 20 and toggles == 0) : (i += 1) {
-        _ = try session.tick();
-        if (session.blink_visible != last_vis) {
-            toggles += 1;
-            last_vis = session.blink_visible;
-        }
-        if (session.metal_buffer.generation != last_gen) {
-            gen_changes += 1;
-            last_gen = session.metal_buffer.generation;
-        }
-    }
+    const last_vis = session.blink_visible;
+    const last_gen: u64 = session.metal_buffer.generation;
+    testAdvanceBlinkHalves(session, 1);
+    _ = try session.tick();
+    if (session.blink_visible != last_vis) toggles += 1;
+    if (session.metal_buffer.generation != last_gen) gen_changes += 1;
     try std.testing.expect(toggles >= 1);
     // 토글은 rebuild 없이도 재드로우를 유발해야 한다(setCursorVisible의 generation 증가).
     try std.testing.expect(gen_changes >= toggles);
@@ -42146,6 +42333,53 @@ fn setupTwoTabsSettled(allocator: std.mem.Allocator) !*AppSession {
     i = 0;
     while (i < 150) : (i += 1) _ = try session.tick(); // tab1 정착
     return session;
+}
+
+// ── 회귀: 백그라운드 Term의 출력이 활성 커서 blink 위상을 굶기지 않는다 ─────────────────────────────
+// tick의 blink 게이트가 `drain_summary.output_events`(**모든** 탭/pane/Term의 합)를 보던 탓에, 백그라운드에서
+// 계속 출력하는 Term이 하나라도 있으면(에이전트·로그 tail·dev 서버) 활성 커서가 매 tick resetCursorBlink로
+// 위상 0에 묶여 **영영 깜빡이지 않았다**. 사용자 제보 "커서가 안 깜빡인다"의 실제 원인이고, 스피너가 같은 이유로
+// 출력 게이트 밖으로 나갔던 §10.5 primary와 같은 계열이다. 게이트를 활성 surface 출력으로 좁혀 고쳤다.
+//
+// 기존 blink 단위 테스트가 못 잡은 이유: 전부 `updateCursorBlink`를 **직접** 불러 tick의 게이트를 건너뛴다.
+// 그래서 이 테스트는 반드시 `session.tick()`을 돈다.
+test "cursor blink: 백그라운드 Term이 계속 출력해도 활성 커서 위상은 진행한다(전역 output 게이트 회귀)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest; // 실제 PTY + CoreText tick 경로
+    const allocator = std.testing.allocator;
+    const session = try setupTwoTabsSettled(allocator); // tab1 활성, 둘 다 출력 소진 상태
+    defer {
+        session.deinit();
+        allocator.destroy(session);
+    }
+    // 실 config 파일 값에 의존하지 않게 고정(다른 머신에서 cursor.blink=false면 무의미해진다).
+    session.appearance.cursor.blink = true;
+    session.appearance.cursor.blink_fade_ms = 0; // 하드 토글 — 위상 판정을 blink_visible로 단순화
+
+    const bg_id = session.tabs.items[0].panes.items[0].terms.items[0].surface.id; // tab0 = 백그라운드
+    const active_id = session.activeSurface().id;
+    try std.testing.expect(bg_id != active_id);
+
+    session.blink_visible = true;
+    session.blink_phase_ns = 0;
+    // 매 tick 백그라운드에 개행 없는 paste를 밀어 넣어 **그쪽 PTY만** 계속 에코(출력)하게 한다. 개행이 없어야
+    // 자식이 `read`에서 살아남아 reap/UAF가 없다([[controlled-smoke-child-exit-reap-uaf]] 규율).
+    // 위상은 wall-clock 기준이라 tick 수로는 안 넘어간다 — baseline을 매번 한 반주기 과거로 밀어, 백그라운드 출력이
+    // 흐르는 **동안에도** 위상이 진행되는지(=리셋에 굶지 않는지) 본다. 수정 전이면 매 tick resetCursorBlink가
+    // baseline을 0으로 되돌리고 blink_visible을 true로 고정해 아래 토글이 한 번도 안 일어난다.
+    var toggles: u32 = 0;
+    var last = session.blink_visible;
+    var i: u32 = 0;
+    while (i < 3) : (i += 1) {
+        session.pasteTextTo(bg_id, "x", false);
+        testAdvanceBlinkHalves(session, 1);
+        _ = try session.tick();
+        if (session.blink_visible != last) {
+            toggles += 1;
+            last = session.blink_visible;
+        }
+    }
+    // ★ 활성 커서 위상은 백그라운드 출력과 무관하게 세 번 다 진행했어야 한다.
+    try std.testing.expectEqual(@as(u32, 3), toggles);
 }
 
 // ── 회귀: 탭 전환 시 mid-sync·완성 프레임 없는(esu==0) surface는 미완성 프레임을 안 그리고 hold한다 ──────

@@ -114,6 +114,7 @@ pub const PreparedResize = union(enum) {
         expected_cols: u16,
         expected_rows: u16,
         expected_resize_generation: u64,
+        expected_controller_generation: u64,
         expected_controller_sequence: u64,
         expected_resize_seq_seen: bool,
         consumed: bool = false,
@@ -478,6 +479,7 @@ pub const TerminalRuntimeRegistry = struct {
             .expected_cols = entry.cols,
             .expected_rows = entry.rows,
             .expected_resize_generation = entry.resize_generation,
+            .expected_controller_generation = entry.controller_generation,
             .expected_controller_sequence = entry.controller_sequence,
             .expected_resize_seq_seen = entry.resize_seq_seen,
         } };
@@ -500,6 +502,7 @@ pub const TerminalRuntimeRegistry = struct {
             entry.cols != ready.expected_cols or
             entry.rows != ready.expected_rows or
             entry.resize_generation != ready.expected_resize_generation or
+            entry.controller_generation != ready.expected_controller_generation or
             entry.controller_sequence != ready.expected_controller_sequence or
             entry.resize_seq_seen != ready.expected_resize_seq_seen)
             return error.StalePreparedResize;
@@ -1314,6 +1317,29 @@ test "registry: prepared resize cannot commit twice or after authority changes" 
     try testing.expectError(
         error.StalePreparedResize,
         reg.validatePreparedResize(&before_takeover),
+    );
+
+    // Returning authority to the original subscription cannot revive a token from an older
+    // controller generation even when size/sequence fields happen to match again.
+    var reg_aba = TerminalRuntimeRegistry.init(testing.allocator);
+    defer reg_aba.deinit();
+    _ = try reg_aba.register(2, 80, 24);
+    _ = try reg_aba.attach(2, 300, .controller);
+    _ = try reg_aba.attach(2, 400, .observer);
+    var before_aba = try reg_aba.prepareResizeSubscription(
+        2,
+        .{ .value = 300 },
+        100,
+        30,
+        1,
+    );
+    var to_second = try reg_aba.prepareControllerTakeover(2, .{ .value = 400 });
+    _ = try reg_aba.commitControllerTransition(&to_second);
+    var back_to_first = try reg_aba.prepareControllerTakeover(2, .{ .value = 300 });
+    _ = try reg_aba.commitControllerTransition(&back_to_first);
+    try testing.expectError(
+        error.StalePreparedResize,
+        reg_aba.validatePreparedResize(&before_aba),
     );
 }
 

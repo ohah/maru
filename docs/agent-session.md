@@ -1,22 +1,40 @@
 # 에이전트 상태 감지(터미널 관측)
 
 > 단일 출처(design). Maru는 터미널에서 실행되는 대화형 에이전트의 종류와 상태를 **터미널이 이미 소유한
-> 관측값만으로** 판정한다. 사용자 홈의 provider 설정을 수정하거나 세션 트랜스크립트를 읽지 않는다.
+> 관측값만으로** 판정한다. 사이드바의 "마지막 대화" 표시는 이 판정과 분리된 별도 기능이며, 그 계약은
+> [사이드바 에이전트 목록](sidebar-agent-list.md)이 단일 출처다(아래 «목표와 비목표»).
 
 ## 목표와 비목표
 
 목표는 claude/codex가 어느 Term에서 실행 중인지, 작업 중인지, 사용자 입력을 기다리는지, 입력 가능한 idle
 화면인지 사이드바와 컨트롤 플레인에 표시하는 것이다. 에이전트 TUI는 기존처럼 PTY foreground에서 그대로 실행된다.
 
-다음은 의도적으로 제공하지 않는다.
+이 관측 계층은 다음을 의도적으로 제공하지 않는다.
 
-- provider 훅 설치·신뢰·매핑과 트랜스크립트 JSONL 해석
-- 마지막 답변 미리보기
+- provider 파일에 의존하는 상태 판정 — kind·state는 화면과 process tree만으로 정한다
 - provider session id를 저장하거나 자동 resume/fork하는 workspace restore
 - 에이전트 내부 단계, tool call, API 대기 원인을 정확히 복원하는 기능
 
 터미널 밖의 private 상태를 읽지 않는 대신 설치가 필요 없고, 같은 cwd의 여러 세션·중첩 프로세스·provider 포맷
 변경에 결합되지 않는다. 상태는 **화면에 드러난 사용자 관점**이며 provider 내부 상태의 증명은 아니다.
+
+### 사이드바 대화 표시와의 경계
+
+이 문서는 처음에 트랜스크립트 JSONL 해석과 마지막 답변 미리보기도 비목표로 뒀다. 이후 사용자 결정으로 사이드바
+에이전트 행에 **마지막 대화**를 싣기로 했고, 그 설계의 단일 출처는 [사이드바 에이전트 목록](sidebar-agent-list.md)이다.
+관측 계약을 지키기 위해 경계는 이렇게 둔다.
+
+- **상태 판정은 여전히 provider 파일을 보지 않는다.** 트랜스크립트에서 오는 것은 표시할 대화 텍스트뿐이다.
+- **세션 신원은 추측하지 않는다.** provider가 자식 프로세스에 내려주는 env가 1차 근거이고(§7.2.1), 도구를 한 번도
+  실행하지 않는 세션을 메우는 claude 상태줄 훅이 보강이다(§7.2.2). 파일 mtime으로 어느 세션인지 고르지 않는다.
+- **훅 설치는 끌 수 있고 되돌릴 수 있다**(`sidebar.agent-transcript-hook`, 기본 on). 끄면 provider 설정을 전혀
+  수정하지 않고 이미 설치한 것도 원상 복구한다. 켜도 `settings.json`의 `statusLine` 키 하나만 바꾸고 `hooks`를
+  포함한 나머지 JSON은 바이트 그대로 두며, 사용자가 쓰던 상태줄 명령은 지우지 않고 감싼다.
+- 과거 `MARU_AGENT_MAP_HOOK_V2` 계열 **hook event 설치는 되살리지 않는다**(아래 «과거 source build 훅 수동 정리»).
+  그 방식은 provider 실행 흐름에 개입하지만 상태줄은 표시 전용이라 실패해도 세션이 멈추지 않는다.
+
+이 경계는 CI 게이트 `mise run test-provider-session-removal`이 무인 검증한다 — 옵션이 꺼진 기본 경로에서 provider
+파일 무변경, 켠 경로에서 `statusLine` 외 무변경과 사용자 명령 보존.
 
 ## 영속 session host와의 관계
 
@@ -278,8 +296,9 @@ visible blocker는 향후 attention refresh가 필요할 때만 별도 이벤트
 
 ## 과거 source build 훅 수동 정리
 
-P1 이후 Maru는 provider config나 mapping 파일을 읽거나 신뢰하거나 수정하지 않는다. 과거 source build/dev 버전이 설치한
-훅은 provider가 계속 실행할 수 있으므로 필요할 때만 아래 경계로 수동 정리한다.
+P1 이후 Maru는 provider **hook event**를 설치하지 않고 과거 mapping 파일을 읽거나 신뢰하지 않는다(현재 쓰는 상태줄
+경로는 위 «사이드바 대화 표시와의 경계»가 별도 계약이다). 과거 source build/dev 버전이 설치한 훅은 provider가 계속
+실행할 수 있으므로 필요할 때만 아래 경계로 수동 정리한다.
 
 - provider config에서 `MARU_AGENT_MAP_HOOK_V2` 또는 `MARU_PANE_MAP_HOOK` marker를 찾는다.
 - marker만으로 지우지 않는다. 같은 command가 `agent-sessions`, `cat`, pane/mapping selector를 함께 포함하는 **그 hook group만**

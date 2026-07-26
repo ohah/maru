@@ -63,49 +63,12 @@ pub const Resolution = union(enum) {
     failed: ExitCode,
 };
 
-pub const AttachMode = enum { observer, controller };
-pub const GrantedRole = enum { observer, controller };
-
-pub const InitialRole = struct {
-    mode: AttachMode,
-    require_transfer_capability: bool,
-};
-
-pub const AcceptedRole = struct {
-    role: GrantedRole,
-    show_read_only_banner: bool,
-};
-
-pub const RoleError = error{
-    MalformedGrantedRole,
-    UnexpectedGrantedRole,
-};
-
-pub fn initialRole(intent: Intent) InitialRole {
-    return switch (intent) {
-        .default_controller => .{ .mode = .controller, .require_transfer_capability = false },
-        .read_only => .{ .mode = .observer, .require_transfer_capability = false },
-        .take_over => .{ .mode = .observer, .require_transfer_capability = true },
-    };
+pub fn requestsController(intent: Intent) bool {
+    return intent == .default_controller;
 }
 
-pub fn acceptGrantedRole(intent: Intent, granted_text: []const u8) RoleError!AcceptedRole {
-    const granted: GrantedRole = if (std.mem.eql(u8, granted_text, "observer"))
-        .observer
-    else if (std.mem.eql(u8, granted_text, "controller"))
-        .controller
-    else
-        return error.MalformedGrantedRole;
-    return switch (intent) {
-        .default_controller => .{
-            .role = granted,
-            .show_read_only_banner = granted == .observer,
-        },
-        .read_only, .take_over => if (granted == .observer)
-            .{ .role = .observer, .show_read_only_banner = intent == .read_only }
-        else
-            error.UnexpectedGrantedRole,
-    };
+pub fn requiresTransfer(intent: Intent) bool {
+    return intent == .take_over;
 }
 
 pub const TakeoverResult = enum {
@@ -287,29 +250,13 @@ test "resolver inconclusive precedence is order independent" {
     }
 }
 
-test "attach role policy is host-granted and takeover starts as observer" {
-    try std.testing.expectEqual(AttachMode.controller, initialRole(.default_controller).mode);
-    try std.testing.expectEqual(AttachMode.observer, initialRole(.read_only).mode);
-    const takeover = initialRole(.take_over);
-    try std.testing.expectEqual(AttachMode.observer, takeover.mode);
-    try std.testing.expect(takeover.require_transfer_capability);
-
-    const controller = try acceptGrantedRole(.default_controller, "controller");
-    try std.testing.expectEqual(GrantedRole.controller, controller.role);
-    try std.testing.expect(!controller.show_read_only_banner);
-    const demoted = try acceptGrantedRole(.default_controller, "observer");
-    try std.testing.expectEqual(GrantedRole.observer, demoted.role);
-    try std.testing.expect(demoted.show_read_only_banner);
-    try std.testing.expect((try acceptGrantedRole(.read_only, "observer")).show_read_only_banner);
-    try std.testing.expect(!(try acceptGrantedRole(.take_over, "observer")).show_read_only_banner);
-    try std.testing.expectError(
-        error.UnexpectedGrantedRole,
-        acceptGrantedRole(.take_over, "controller"),
-    );
-    try std.testing.expectError(
-        error.MalformedGrantedRole,
-        acceptGrantedRole(.default_controller, "Controller"),
-    );
+test "attach intent requests controller only for default and transfer only for takeover" {
+    try std.testing.expect(requestsController(.default_controller));
+    try std.testing.expect(!requestsController(.read_only));
+    try std.testing.expect(!requestsController(.take_over));
+    try std.testing.expect(!requiresTransfer(.default_controller));
+    try std.testing.expect(!requiresTransfer(.read_only));
+    try std.testing.expect(requiresTransfer(.take_over));
 }
 
 test "takeover result has no retry and deterministic exit mapping" {

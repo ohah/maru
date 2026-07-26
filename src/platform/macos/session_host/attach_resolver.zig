@@ -17,7 +17,10 @@ pub const ProbeOps = struct {
 };
 
 pub const Result = union(enum) {
-    selected: host_manifest.Descriptor,
+    /// Index into the caller-owned discovery slice. This reducer intentionally does not return a
+    /// Descriptor because its build_id/endpoint slices borrow the Manifest. The product resolver
+    /// must clone and stat-pin it while discovery remains alive.
+    selected_index: usize,
     failed: attach_cli.ExitCode,
 };
 
@@ -30,9 +33,10 @@ pub fn resolve(
         return .{ .failed = .denied };
 
     var descriptors: [recovery_discovery.max_hosts]host_manifest.Descriptor = undefined;
+    var entry_indices: [recovery_discovery.max_hosts]usize = undefined;
     var eligible: usize = 0;
     var previous_host_id: u128 = 0;
-    for (entries) |entry| switch (entry) {
+    for (entries, 0..) |entry, entry_index| switch (entry) {
         .unavailable => |unavailable| {
             if (unavailable.host_id <= previous_host_id) return .{ .failed = .denied };
             previous_host_id = unavailable.host_id;
@@ -50,6 +54,7 @@ pub fn resolve(
             if (profile.screen_codec_version != descriptor.screen_codec_version)
                 return .{ .failed = .protocol };
             descriptors[eligible] = descriptor;
+            entry_indices[eligible] = entry_index;
             eligible += 1;
         },
     };
@@ -62,7 +67,7 @@ pub fn resolve(
     const reduced = attach_cli.resolve(evidence[0..eligible]);
     return switch (reduced) {
         .failed => |code| .{ .failed = code },
-        .selected => |index| .{ .selected = descriptors[index] },
+        .selected => |index| .{ .selected_index = entry_indices[index] },
     };
 }
 
@@ -108,7 +113,7 @@ test "attach resolver probes every supported live descriptor and selects exact o
     };
     var probe = TestProbe{ .evidence = &.{ .runtime_not_found, .match } };
     const result = resolve(&entries, 0xaa, probe.ops());
-    try std.testing.expectEqual(@as(u128, 2), result.selected.host_id);
+    try std.testing.expectEqual(@as(usize, 1), result.selected_index);
     try std.testing.expectEqual(@as(usize, 2), probe.calls);
 }
 

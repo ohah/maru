@@ -1898,6 +1898,9 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
     RSS/queue artifact를 추가한다. wire frame prefix가 아직 전송되지 않은 queue pressure는 해당 stream만 정확히
     한 번 invalidate하고 retained/prepared base를 반환한다. 반면 frame 일부가 이미 kernel socket에 쓰인 뒤
     EAGAIN인 상태에서는 queued suffix만 purge하면 wire frame이 splice되므로 해당 **slow connection만** fail-close한다.
+    단순 short write 진행만으로는 victim 자격을 주지 않고, 그 뒤 owner poll에서 `POLLOUT` 부재 또는 `EAGAIN`을
+    실제로 관측한 connection만 stalled victim 후보가 된다. `POLLOUT` readiness 또는 write progress가 다시
+    관측되면 victim 선택 전에 이 stall 증거를 지운다.
     같은 connection 안의 sibling stream은 FIFO head-of-line을 공유하므로 cross-connection isolation처럼 주장하지 않는다.
     이 gate는 다음 둘로 나누며 둘 다 green이기 전에는 P5b2b/P5b2 전체를 구현 완료로 표시하지 않는다.
     - **P5b2b1 — product poll accounting/isolation:** 실제 `SocketServer`+`poll_owner.Owner`에 controller,

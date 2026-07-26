@@ -159,8 +159,12 @@ pub const Owner = struct {
                 ready[slot_index] = true;
             }
             if (self.producer_remaining[slot_index] != 0) ready[slot_index] = true;
-            if (client.wantsWrite() and !write_ready[slot_index])
-                client.noteWriteStalled(now_ns);
+            if (client.wantsWrite()) {
+                if (write_ready[slot_index])
+                    client.noteWriteReady()
+                else
+                    client.noteWriteStalled(now_ns);
+            }
         }
 
         const admission = self.reactor.nextReady(&ready) orelse
@@ -552,6 +556,30 @@ fn fillServerSendBuffer(fd: c.fd_t) !void {
     return error.TestUnexpectedResult;
 }
 
+fn setTinySocketBuffers(server_fd: c.fd_t, peer_fd: c.fd_t) !void {
+    const tiny: c_int = 1024;
+    try testing.expectEqual(
+        @as(c_int, 0),
+        c.setsockopt(
+            server_fd,
+            posix.SOL.SOCKET,
+            posix.SO.SNDBUF,
+            @ptrCast(&tiny),
+            @sizeOf(c_int),
+        ),
+    );
+    try testing.expectEqual(
+        @as(c_int, 0),
+        c.setsockopt(
+            peer_fd,
+            posix.SOL.SOCKET,
+            posix.SO.RCVBUF,
+            @ptrCast(&tiny),
+            @sizeOf(c_int),
+        ),
+    );
+}
+
 fn pumpUntilResponse(owner: *Owner, fd: c.fd_t, needle: []const u8) !void {
     var parser = framing.FrameParser.init(testing.allocator);
     defer parser.deinit();
@@ -941,6 +969,253 @@ test "poll owner preserves requester and backs off when only partial controllers
     const final = owner.reactor.accountingSnapshot();
     try testing.expectEqual(@as(usize, 0), final.resident_bytes);
     try testing.expectEqual(@as(usize, 0), final.shared_bytes);
+}
+
+test "poll owner closes only the observer whose valid screen frame reached a kernel partial write" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir_len = try tmp.dir.realPath(testing.io, &dir_buf);
+    const dir_raw = dir_buf[0..dir_len];
+    const dir_path = try testing.allocator.dupeZ(u8, dir_raw);
+    defer testing.allocator.free(dir_path);
+    const socket_path = try std.fmt.allocPrintSentinel(
+        testing.allocator,
+        "{s}/actual-partial-pressure.sock",
+        .{dir_raw},
+        0,
+    );
+    defer testing.allocator.free(socket_path);
+    var runtime_registry = registry.TerminalRuntimeRegistry.init(testing.allocator);
+    defer runtime_registry.deinit();
+    _ = try runtime_registry.register(0xAA, 80, 24);
+    for (0..9) |index| _ = try runtime_registry.register(0x200 + index, 80, 24);
+    var server = try socket_server.SocketServer.bind(
+        testing.allocator,
+        dir_path,
+        socket_path,
+        0xB4,
+        &runtime_registry,
+    );
+    defer server.deinit();
+    server.host_status = .{ .manifest_capable = true };
+    var fake_runtime: server_mod.FakeRuntimeOps = .{};
+    server.runtime_ops = fake_runtime.ops();
+    var owner = try Owner.init(testing.allocator, testing.io, &server);
+    defer owner.deinit();
+    owner.next_cadence_ns = std.math.maxInt(u64);
+
+    var fds: [12]c.fd_t = undefined;
+    var fd_count: usize = 0;
+    defer {
+        for (fds[0..fd_count]) |fd| {
+            if (fd >= 0) _ = c.close(fd);
+        }
+    }
+    const controller = try connectAttachedTestClient(&owner, socket_path, "controller");
+    fds[fd_count] = controller.fd;
+    fd_count += 1;
+    const healthy = try connectAttachedTestClient(&owner, socket_path, "observer");
+    fds[fd_count] = healthy.fd;
+    fd_count += 1;
+    const partial = try connectAttachedTestClient(&owner, socket_path, "observer");
+    fds[fd_count] = partial.fd;
+    fd_count += 1;
+    try setTinySocketBuffers(owner.clients[partial.index].?.fd, partial.fd);
+
+    var pin_indices: [9]usize = undefined;
+    for (&pin_indices, 0..) |*pin_index, index| {
+        const runtime_hex = try std.fmt.allocPrint(testing.allocator, "{x}", .{0x200 + index});
+        defer testing.allocator.free(runtime_hex);
+        const pin = try connectAttachedTestClientForRuntime(
+            &owner,
+            socket_path,
+            runtime_hex,
+            "controller",
+        );
+        fds[fd_count] = pin.fd;
+        fd_count += 1;
+        pin_index.* = pin.index;
+    }
+    for (pin_indices) |pin_index| {
+        const pin = owner.clients[pin_index].?;
+        try fillServerSendBuffer(pin.fd);
+        const slot = try owner.reactor.get(pin.admission);
+        const tracker = pin.trackers.get(1).?;
+        const pressure = try testing.allocator.alloc(u8, connection_slot.screen_soft_bytes);
+        @memset(pressure, 'C');
+        slot.enqueueOwnedScreen(tracker, pressure) catch |err| {
+            testing.allocator.free(pressure);
+            return err;
+        };
+        try slot.consumeWritten(1);
+        pin.noteWriteStalled(10);
+        try testing.expect(pin.largestScreenPressure() == null);
+    }
+
+    const partial_client = owner.clients[partial.index].?;
+    const partial_admission = partial_client.admission;
+    const partial_slot = try owner.reactor.get(partial_client.admission);
+    const partial_tracker = partial_client.trackers.get(1).?;
+    const payload = try testing.allocator.alloc(u8, protocol.max_binary_chunk);
+    defer testing.allocator.free(payload);
+    @memset(payload, 'S');
+    var first_wire: ?[]u8 = null;
+    defer if (first_wire) |bytes| testing.allocator.free(bytes);
+    for (0..8) |index| {
+        const frame_payload = if (index == 0)
+            payload
+        else
+            payload[0 .. protocol.max_binary_chunk - 8192];
+        const wire = try framing.encodeFrame(testing.allocator, .{
+            .kind = .delta_chunk,
+            .stream_id = 1,
+            .flags = if (index == 7) protocol.Flags.end_stream else 0,
+        }, frame_payload);
+        if (index == 0) first_wire = try testing.allocator.dupe(u8, wire);
+        partial_slot.enqueueOwnedScreen(partial_tracker, wire) catch |err| {
+            testing.allocator.free(wire);
+            return err;
+        };
+    }
+    const first_len = first_wire.?.len;
+    try testing.expect(first_len > connection_slot.turn_bytes);
+    const pending_before = partial_slot.pending_bytes;
+    var partial_attempts: usize = 0;
+    while (!(try partial_slot.trackerHasWrittenPrefix(partial_tracker)) and
+        partial_attempts < 100) : (partial_attempts += 1)
+        _ = try owner.pollOnce(0);
+    try testing.expect(try partial_slot.trackerHasWrittenPrefix(partial_tracker));
+    try testing.expect(partial_slot.writeBackpressured());
+    const remaining = partial_slot.firstPending().?.bytes.len;
+    const initial_written = first_len - remaining;
+    try testing.expect(initial_written > 0);
+    // A frame larger than one write turn remains partial even when send(2) accepts the whole
+    // allowance. Less than the allowance proves that the kernel itself short-wrote.
+    try testing.expect(initial_written < @min(first_len, connection_slot.turn_bytes));
+    try testing.expectEqual(pending_before - initial_written, partial_slot.pending_bytes);
+    try testing.expect(!partial_slot.writeStallObserved());
+    try testing.expect(partial_client.largestScreenPressure() == null);
+    const stalled_pending = partial_slot.pending_bytes;
+    _ = try owner.pollOnce(0);
+    try testing.expectEqual(stalled_pending, partial_slot.pending_bytes);
+    try testing.expect(partial_slot.writeStallObserved());
+    try testing.expect(partial_client.largestScreenPressure() != null);
+    try testing.expect(owner.clients[partial.index] != null);
+
+    // Make the peer writable again. The next poll snapshot must clear stale stall eligibility
+    // before another requester's pressure turn can select this connection.
+    const early_received = try testing.allocator.alloc(u8, initial_written);
+    defer testing.allocator.free(early_received);
+    var early_len: usize = 0;
+    var early_attempts: usize = 0;
+    while (early_len < early_received.len and early_attempts < 1000) : (early_attempts += 1) {
+        const rc = c.recv(
+            partial.fd,
+            early_received.ptr + early_len,
+            early_received.len - early_len,
+            posix.MSG.DONTWAIT,
+        );
+        if (rc < 0 and posix.errno(rc) == .AGAIN) continue;
+        if (rc <= 0) return error.TestUnexpectedResult;
+        early_len += @intCast(rc);
+    }
+    try testing.expectEqual(early_received.len, early_len);
+    var ready_attempts: usize = 0;
+    while (partial_slot.writeStallObserved() and ready_attempts < 100) : (ready_attempts += 1)
+        _ = try owner.pollOnce(0);
+    try testing.expect(!partial_slot.writeStallObserved());
+    try testing.expect(partial_client.largestScreenPressure() == null);
+    var restall_attempts: usize = 0;
+    while (!partial_slot.writeStallObserved() and restall_attempts < 100) : (restall_attempts += 1)
+        _ = try owner.pollOnce(0);
+    try testing.expect(partial_slot.writeStallObserved());
+    try testing.expect(partial_client.largestScreenPressure() != null);
+    const written = first_len - partial_slot.firstPending().?.bytes.len;
+    try testing.expect(written > initial_written);
+
+    const healthy_client = owner.clients[healthy.index].?;
+    const delta_before = fake_runtime.delta_calls;
+    const active_before_reclaim = owner.activeCount();
+    owner.producer_remaining[healthy.index] =
+        healthy_client.beginProducerSweep(monotonicNow(testing.io));
+    var pressure_attempts: usize = 0;
+    while (owner.clients[partial.index] != null and pressure_attempts < 1000) : (pressure_attempts += 1)
+        _ = try owner.pollOnce(0);
+    try testing.expect(owner.clients[partial.index] == null);
+    try testing.expectError(error.Stale, owner.reactor.get(partial_admission));
+    try testing.expectEqual(active_before_reclaim - 1, owner.activeCount());
+    for (pin_indices) |pin_index| try testing.expect(owner.clients[pin_index] != null);
+    try testing.expectEqual(@as(usize, 1), owner.total_pressure_reclaims);
+
+    // Drain only after canonical close. Exact incomplete prefix followed by EOF proves reclaim
+    // appended no invalidation suffix that could splice the peer's MRSH stream.
+    const received = try testing.allocator.alloc(u8, written);
+    defer testing.allocator.free(received);
+    @memcpy(received[0..early_len], early_received);
+    var received_len: usize = early_len;
+    var eof_attempts: usize = 0;
+    var saw_eof = false;
+    while (!saw_eof and eof_attempts < 1000) : (eof_attempts += 1) {
+        var extra: [1]u8 = undefined;
+        const target = if (received_len < received.len)
+            received[received_len..]
+        else
+            extra[0..];
+        const rc = c.recv(partial.fd, target.ptr, target.len, posix.MSG.DONTWAIT);
+        if (rc < 0 and posix.errno(rc) == .AGAIN) continue;
+        if (rc < 0) return error.TestUnexpectedResult;
+        if (rc == 0) {
+            saw_eof = true;
+            break;
+        }
+        if (received_len == received.len) return error.TestUnexpectedResult;
+        received_len += @intCast(rc);
+    }
+    try testing.expect(saw_eof);
+    try testing.expectEqual(written, received_len);
+    try testing.expectEqualSlices(u8, first_wire.?[0..written], received);
+    var incomplete_parser = framing.FrameParser.init(testing.allocator);
+    defer incomplete_parser.deinit();
+    try incomplete_parser.push(received);
+    try testing.expect((try incomplete_parser.next()) == null);
+
+    owner.producer_remaining[healthy.index] =
+        healthy_client.beginProducerSweep(monotonicNow(testing.io));
+    try pumpUntilResponse(&owner, healthy.fd, "DELTA-BYTES");
+    try testing.expect(fake_runtime.delta_calls > delta_before);
+    const first_healthy_delta = fake_runtime.delta_calls;
+    owner.producer_remaining[healthy.index] =
+        healthy_client.beginProducerSweep(monotonicNow(testing.io));
+    try pumpUntilResponse(&owner, healthy.fd, "DELTA-BYTES");
+    try testing.expect(fake_runtime.delta_calls > first_healthy_delta);
+    try testing.expect(owner.clients[controller.index] != null);
+    try sendTestStream(controller.fd, .input_bytes, 1, "CTRL-AFTER-PARTIAL");
+    var input_attempts: usize = 0;
+    while (fake_runtime.last_input_len == 0 and input_attempts < 1000) : (input_attempts += 1)
+        _ = try owner.pollOnce(0);
+    try testing.expectEqualStrings(
+        "CTRL-AFTER-PARTIAL",
+        fake_runtime.last_input[0..fake_runtime.last_input_len],
+    );
+
+    for (fds[0..fd_count]) |*fd| {
+        _ = c.shutdown(fd.*, c.SHUT.RDWR);
+        _ = c.close(fd.*);
+        fd.* = -1;
+    }
+    var close_attempts: usize = 0;
+    while (owner.activeCount() != 0 and close_attempts < 4000) : (close_attempts += 1)
+        _ = try owner.pollOnce(0);
+    try testing.expectEqual(@as(usize, 0), owner.activeCount());
+    try testing.expectEqual(@as(usize, 0), server.subscriptions.count());
+    try testing.expectEqual(@as(usize, 0), runtime_registry.attachmentCount());
+    const final = owner.reactor.accountingSnapshot();
+    try testing.expectEqual(@as(usize, 0), final.resident_bytes);
+    try testing.expectEqual(@as(usize, 0), final.shared_bytes);
+    try testing.expectEqual(@as(usize, 0), final.prepared_base_bytes);
+    try testing.expectEqual(@as(usize, 0), final.prepared_reclaim_bytes);
 }
 
 test "poll owner keeps connection-local stream one distinct across live slot reuse" {

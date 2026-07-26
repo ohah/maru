@@ -219,7 +219,7 @@ pub const Client = struct {
     /// stable local stream identity and charged queued bytes.
     pub fn largestScreenPressure(self: *Client) ?ScreenPressureCandidate {
         const slot = self.reactor.get(self.admission) catch return null;
-        if (!slot.writeBackpressured()) return null;
+        if (!slot.writeBackpressured() or !slot.writeStallObserved()) return null;
         var result: ?ScreenPressureCandidate = null;
         var iterator = self.trackers.iterator();
         while (iterator.next()) |entry| {
@@ -258,6 +258,11 @@ pub const Client = struct {
     pub fn noteWriteStalled(self: *Client, now_ns: u64) void {
         const slot = self.reactor.get(self.admission) catch return;
         if (slot.firstPending() != null) slot.notePartial(.write, now_ns, false);
+    }
+
+    pub fn noteWriteReady(self: *Client) void {
+        const slot = self.reactor.get(self.admission) catch return;
+        slot.noteWriteReady();
     }
 
     /// The owner selected this connection as the global queued-screen pressure offender.

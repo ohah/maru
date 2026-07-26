@@ -1159,6 +1159,9 @@ const PendingClose = union(enum) {
     term_or_pane, // close_term 액션(⌘W Term cascade): Term>pane>워크스페이스
     tab_index: usize, // 사이드바 ✕ 클릭 — 특정 탭(마지막이면 창)
     active_term, // 탭바 ✕ 클릭 — 활성 pane의 활성 Term
+    /// 사이드바 **에이전트 행 ✕** — 활성과 무관한 특정 Term(그 워크스페이스의 pane/term 인덱스 경로).
+    /// 다른 타깃과 달리 활성 위치를 안 쓰므로 인덱스를 싣는다(클릭 시점 재조회로 stale 방어).
+    agent_term: struct { tab: usize, pane: usize, term: usize },
     window, // macOS 빨간 닫기 버튼 — 창(세션) 전체
 };
 
@@ -2219,7 +2222,7 @@ pub const AppSession = struct {
     /// `refreshCellMetrics`가 cell 메트릭에서 파생해 갱신하고, hit-test·밴드·glyph 배치가 `sidebarMetrics()`로 읽는다.
     /// 필드로 두는 이유: 좌표 테스트가 cell 비율을 거치지 않고 원하는 카드 높이를 직접 박을 수 있게(고정 슬롯 시절
     /// 기대값을 그대로 쓰는 회귀 테스트가 많다).
-    sidebar_metrics: chrome.components.sidebar.Metrics = .{ .line_h = 0, .line_step = 0, .card_pad_v = 0, .header_row_h = 0 },
+    sidebar_metrics: chrome.components.sidebar.Metrics = .{ .line_h = 0, .line_step = 0, .card_pad_v = 0, .header_row_h = 0, .content_pad_v = 0, .list_pad_v = 0 },
     // 사이드바 상단 헤더(검색바 + 아이콘 2개) 높이(px) = cell_height × header_ratio. 0이면 헤더 없음. 밴드·카드·
     // hit-test가 이만큼 아래로 시프트되고, .m이 사이드바 셀 py_top에 더한다(chrome props.sidebar_header_height_px로 전달).
     sidebar_header_height_px: u32 = 0,
@@ -3992,6 +3995,10 @@ pub const AppSession = struct {
                 // buildSidebarTitleDrawList가 항상 숨겨 줄 수에 안 든다. 렌더러(maru_metal_renderer.m)가 n줄 블록을 슬롯
                 // 세로 중앙 정렬하므로, 상태줄이 생기면 이름줄이 위로 (ch/2) 올라간다 — caret y도 같은 n을 써야 IME
                 // 후보창이 이름 caret 아래에 오고 파형 상태줄과 안 겹친다(buildSidebarDrawList의 line_count 인코딩과 동형).
+                // rename 중 카드 줄 수 = 이름줄 + **상태줄**(있으면). 보조줄(브랜치·경로)만 편집 중 숨긴다.
+                // 렌더(buildSidebarTitleDrawList의 rename 분기)가 workspaceStatusLine을 여전히 append하므로 여기서
+                // 1로 고정하면 caret이 반 줄 아래로 밀려 IME 후보창이 상태줄을 덮는다(code-review max — 원래 있던
+                // 계산을 되돌린다).
                 const line_count: u32 = if (workspaceHasStatusLine(tab)) 2 else 1;
                 // 카드 이름줄(line 0)의 view 절대 y — Swift firstRect가 backing px 좌상단 원점을 view 좌표로 변환만
                 // 하므로(사이드바 origin 보정 없음), 렌더러(maru_metal_renderer.m: slot_idx*slot_h + header − scroll +
@@ -4010,6 +4017,7 @@ pub const AppSession = struct {
                 const slot_row = blk_sr: {
                     for (rrows, 0..) |r, s| switch (r) {
                         .card => |c| if (c.tab == idx) break :blk_sr s,
+                        .agent_toggle, .agent => {},
                         .group_header => {},
                     };
                     break :blk_sr (self.displaySlotOf(idx) orelse return null);
@@ -4072,6 +4080,7 @@ pub const AppSession = struct {
                         hdr_depth = gh.depth;
                         break;
                     },
+                    .agent_toggle, .agent => {},
                     .card => {},
                 };
                 const sr = slot_row orelse return null;
@@ -4767,6 +4776,10 @@ pub const AppSession = struct {
         src.active_term = if (src.terms.items.len == 0) 0 else activeIndexAfterRemoval(src.active_term, src_idx, src.terms.items.len);
         self.hovered_tab = null; // 트리/탭 변경 — stale 호버 정리
         self.hovered_nav_button = null; // Phase 7e-4: 밴드 nav 버튼 호버도 함께 정리(stale 하이라이트 방지)
+        // **사이드바도 다시 투영한다**: 에이전트 목록 행은 pane/term **인덱스**를 들고 있어, Term이 reap으로 빠지면
+        // 남은 행의 인덱스가 다른 Term을 가리킨다(범위 검사만으로는 못 걸러낸다 — 길이는 여전히 유효하므로).
+        // 그대로 두면 사용자가 보는 행과 클릭이 닫는 Term이 어긋난다(code-review max).
+        self.rebuildSidebar() catch {};
         if (src.terms.items.len == 0) self.collapsePaneIn(tab, src); // src가 비면 collapse(removeLeaf)
         // 4) 새 pane으로 포커스 + 대표 surface 재바인딩 + 전 panel을 새 leaf rect grid로 resize + 좌표 재계산.
         _ = self.focusPaneByPtr(new_pane);
@@ -5304,6 +5317,7 @@ pub const AppSession = struct {
         const insert_at = self.firstGroupStartInRegion(self.countPinnedTabs(), self.tabs.items.len) orelse return self.sidebar_rows.items.len;
         for (self.sidebar_rows.items, 0..) |row, slot| switch (row) {
             .group_header => |h| if (h.tab == insert_at) return slot,
+            .agent_toggle, .agent => {},
             .card => {},
         };
         return self.sidebar_rows.items.len;
@@ -6701,6 +6715,18 @@ pub const AppSession = struct {
                 .session // 마지막 탭 = 창 전체
             else
                 .{ .tab = idx },
+            // 에이전트 행 ✕: 그 Term이 pane의 마지막이면 pane이, pane이 탭의 마지막이면 탭(마지막 탭이면 세션)이
+            // 함께 닫히는 **캐스케이드**를 그대로 반영한다 — 확인 모달의 범위와 실제 teardown 범위가 같아야 한다.
+            .agent_term => |a| blk: {
+                if (a.tab >= self.tabs.items.len) break :blk .none;
+                const t = self.tabs.items[a.tab];
+                if (a.pane >= t.panes.items.len) break :blk .none;
+                const pane = t.panes.items[a.pane];
+                if (a.term >= pane.terms.items.len) break :blk .none;
+                if (pane.terms.items.len > 1) break :blk .term; // 그 Term만
+                if (t.panes.items.len > 1) break :blk .pane; // pane까지
+                break :blk if (self.tabs.items.len == 1) .session else .{ .tab = a.tab };
+            },
             .window => .session,
         };
     }
@@ -6718,7 +6744,26 @@ pub const AppSession = struct {
 
     /// 보류 대상이 실제 닫을 Term들에 실행 중 명령이 있나 — resolveCloseScope(cascade 단일 출처)로 범위를 풀고 검사.
     fn closeTargetHasRunningJob(self: *AppSession, target: PendingClose) bool {
-        return self.scopeHasRunningJob(self.resolveCloseScope(target));
+        const scope = self.resolveCloseScope(target);
+        // 에이전트 행 ✕는 **활성과 다른 Term**을 닫을 수 있다 — scopeHasRunningJob의 .term/.pane 가지는 활성 기준이라
+        // 그대로 쓰면 "돌고 있는 백그라운드 에이전트를 닫는데 활성 Term이 idle이라 확인 없이 죽는다". 인덱스 경로로
+        // 그 대상만 검사한다(그 위 범위 .tab/.session은 활성 무관이라 공통 경로 그대로).
+        if (target == .agent_term) {
+            const a = target.agent_term;
+            if (a.tab < self.tabs.items.len) {
+                const t = self.tabs.items[a.tab];
+                if (a.pane < t.panes.items.len) {
+                    const pane = t.panes.items[a.pane];
+                    switch (scope) {
+                        .term => if (a.term < pane.terms.items.len)
+                            return termHasRunningJob(pane.terms.items[a.term], self.io),
+                        .pane => return paneHasRunningJob(pane, self.io),
+                        else => {},
+                    }
+                }
+            }
+        }
+        return self.scopeHasRunningJob(scope);
     }
 
     /// 닫기 진입점 게이트(in-app 경로). 닫힐 대상에 실행 중 명령이 있으면 확인 모달을 띄우고 보류, 없으면 즉시 실행.
@@ -6756,6 +6801,24 @@ pub const AppSession = struct {
     /// resolveCloseScope(cascade 단일 출처)로 범위를 풀어 그 범위의 leaf teardown으로 디스패치한다 — 판정
     /// (closeTargetHasRunningJob)과 정확히 같은 cascade를 타므로 "묻고 닫는 대상"이 항상 일치한다.
     fn executeClose(self: *AppSession, target: PendingClose) void {
+        // 에이전트 행 ✕는 **활성과 무관한 Term**이라 활성 기준 closeActiveTerm/closeActivePane을 쓸 수 없다 —
+        // 인덱스 경로로 직접 닫고, 캐스케이드(마지막 Term→pane→탭)는 closeTermAt이 처리한다.
+        if (target == .agent_term) {
+            const a = target.agent_term;
+            switch (self.resolveCloseScope(target)) {
+                .none => return,
+                .session => {
+                    if (!self.blockSessionExitForFilePanels()) self.latchSessionClose();
+                    return;
+                },
+                else => {},
+            }
+            const t = self.tabs.items[a.tab];
+            self.closeTermAt(a.tab, t.panes.items[a.pane], a.term);
+            self.rebuildSidebar() catch {};
+            self.metal_dirty = true;
+            return;
+        }
         switch (self.resolveCloseScope(target)) {
             .none => {},
             .term => self.closeActiveTerm(),
@@ -7968,12 +8031,29 @@ pub const AppSession = struct {
     /// raw_row 범위 밖·마커 인덱스 이상이면 null(무동작). 반환값은 pre-clamp(moveTab이 pinned 경계로 다시 clamp).
     /// **연속 파티션 불변식은 공짜**다 — 마커는 탭에 얹혀 있고 이 경로는 마커 없는 카드만 재정렬하므로(마커 탭 드래그는
     /// 호출 전 제외), 어떤 재배열이든 그룹은 항상 [마커, 다음 마커) 연속 구간으로 유지된다(§2.1, 위반 자체가 불가능).
+    /// 드롭 좌표가 **에이전트 목록 행**에 떨어졌으면 그 행이 딸린 **카드 row**로 접어 준다. 목록은 카드의 부속이라
+    /// "그 워크스페이스 위에 떨어뜨렸다"로 보는 것이 사용자 기대이고, 접지 않으면 카드 높이의 몇 배나 되는 목록
+    /// 영역 전체가 드롭 불가 사각지대가 된다(code-review max — 재정렬·그룹 이동이 조용히 무효).
+    fn sidebarCardRowFor(self: *const AppSession, raw_row: usize) usize {
+        const rows = self.sidebarRenderRows();
+        var r = raw_row;
+        while (r < rows.len) : (r -= 1) {
+            switch (rows[r]) {
+                .agent_toggle, .agent => {},
+                else => return r,
+            }
+            if (r == 0) break;
+        }
+        return raw_row;
+    }
+
     fn sidebarGroupDropTargetTab(self: *AppSession, raw_row: usize, from: usize) ?usize {
         if (raw_row >= self.sidebar_rows.items.len) return null;
         const len = self.tabs.items.len;
         if (len == 0) return null;
         switch (self.sidebar_rows.items[raw_row]) {
             .card => |c| return c.tab, // 그 카드 위치로 — 위치 파생이 소속을 정한다(같은 그룹/최상위)
+            .agent_toggle, .agent => return null, // 에이전트 목록 행은 그룹 소속 판정 대상이 아니다(그 카드의 부속)
             .group_header => |h| {
                 const m = h.tab; // 그룹 시작(마커) 탭 인덱스
                 if (m >= len) return null;
@@ -8006,6 +8086,7 @@ pub const AppSession = struct {
         if (raw_row >= self.sidebar_rows.items.len) return false;
         return switch (self.sidebar_rows.items[raw_row]) {
             .card => |c| c.tab < self.tabs.items.len and self.enclosingGroupMarkerIndex(c.tab) == null, // 타겟이 최상위면 최상위 복귀
+            .agent_toggle, .agent => false, // 에이전트 목록 행은 드롭 타겟이 아니다
             .group_header => false, // 헤더 드롭 = 그룹 안(멤버)
         };
     }
@@ -8086,6 +8167,7 @@ pub const AppSession = struct {
                 if (self.groupSubtreeEnd(tl, null, null) != c.tab + 1) return null; // c가 최상위 그룹의 마지막 원소 아님 → 일반 멤버 드롭
                 break :blk .{ .m = tl, .j = c.tab + 1 }; // 위 가드가 j==c.tab+1 확립 → 재사용
             },
+            .agent_toggle, .agent => return null, // 에이전트 목록 행은 그룹 gap 판정 대상이 아니다
             .group_header => |h| blk: {
                 if (h.tab >= len) return null;
                 if (!h.collapsed) return null; // 펼친 헤더 아래 경계 = 첫 멤버(모호) → skip(일반 헤더 드롭)
@@ -8113,17 +8195,27 @@ pub const AppSession = struct {
     /// 실앱 드래그에서 왜 흡수(top_level=false)인지 자기검증한다(관측 가능성 — diag.zig 단일 게이트).
     fn cardDropPlan(self: *AppSession, origin: usize, y_px: f64) DropPlan {
         const rows = self.sidebar_rows.items;
-        const raw_row = chrome.components.sidebar.dragTargetSlot(y_px, self.sidebar_header_height_px, rows, self.sidebarMetrics(), self.sidebar_scroll_offset_px);
+        // 목록 행에 떨어졌으면 **소속 카드 row로 접는다** — 목록은 카드의 부속이라 그 위 드롭은 "그 워크스페이스에
+        // 떨어뜨렸다"가 자연스럽고, 접지 않으면 목록 높이만큼이 드롭 사각지대가 된다(code-review max).
+        const raw_row = self.sidebarCardRowFor(chrome.components.sidebar.dragTargetSlot(y_px, self.sidebar_header_height_px, rows, self.sidebarMetrics(), self.sidebar_scroll_offset_px));
         // 프리뷰 시프트 보정: 소스 카드 행이 raw_row **위**면(드래그 다운) 프리뷰가 그 아래 콘텐츠를 소스 높이만큼 위로 당긴다.
+        // **카드 + 그 에이전트 목록 행 전체**가 함께 들리므로(projectRowsCore가 묶음으로 옮긴다) 그 합만큼 보정해야
+        // 한다 — 카드 높이만 더하면 목록이 있는 워크스페이스에서 보정이 모자라 그룹 탈출 판정이 어긋난다(code-review max).
         var y_esc = y_px;
         if (self.displaySlotOf(origin)) |os| if (os < raw_row) {
-            y_esc = y_px + @as(f64, @floatFromInt(chrome.components.sidebar.rowHeight(rows[os], self.sidebarMetrics())));
+            var lifted: u32 = chrome.components.sidebar.rowHeight(rows[os], self.sidebarMetrics());
+            var k = os + 1;
+            while (k < rows.len) : (k += 1) switch (rows[k]) {
+                .agent_toggle, .agent => lifted +|= chrome.components.sidebar.rowHeight(rows[k], self.sidebarMetrics()),
+                else => break,
+            };
+            y_esc = y_px + @as(f64, @floatFromInt(lifted));
         };
         // y_esc가 y_px와 같으면(드래그 업/동일 슬롯 — os >= raw_row라 보정이 없음) dragTargetSlot 결과도 raw_row와 동일하므로
         // 재계산을 건너뛰고 재사용한다(code-review 효율 — 드래그 다운일 때만 재계산). 부동소수 == 비교라도 보정을 안 한 경로면
         // 두 값이 **같은 리터럴**(y_esc = y_px 대입)이라 정확히 같다.
         const raw_esc = if (y_esc != y_px)
-            chrome.components.sidebar.dragTargetSlot(y_esc, self.sidebar_header_height_px, rows, self.sidebarMetrics(), self.sidebar_scroll_offset_px)
+            self.sidebarCardRowFor(chrome.components.sidebar.dragTargetSlot(y_esc, self.sidebar_header_height_px, rows, self.sidebarMetrics(), self.sidebar_scroll_offset_px))
         else
             raw_row;
         // **고정(pinned) 흡수 금지(사용자 정책 — "고정된 건 어디에도 흡수 안 됨")**: 드래그 소스 카드가 pinned면 드롭 위치가
@@ -8261,6 +8353,7 @@ pub const AppSession = struct {
         if (m >= len or raw_row >= self.sidebar_rows.items.len) return null;
         const target_tab: usize = switch (self.sidebar_rows.items[raw_row]) {
             .card => |c| c.tab,
+            .agent_toggle, .agent => return null, // 목록 행은 탭 인덱스 도메인이 아니다
             .group_header => |h| h.tab,
         };
         if (target_tab >= len) return null;
@@ -8388,6 +8481,7 @@ pub const AppSession = struct {
         if (raw_row >= self.sidebar_rows.items.len) return null;
         const gh = switch (self.sidebar_rows.items[raw_row]) {
             .group_header => |h| h,
+            .agent_toggle, .agent => return null, // 목록 행 드롭은 그룹 경계 판정 대상이 아니다
             .card => return null, // 카드 드롭 = 형제 경계(SG5-1 보존)
         };
         const g = gh.tab;
@@ -9103,11 +9197,57 @@ pub const AppSession = struct {
     // 소속은 저장하지 않고 self.tabs 순서에서 파생한다(docs/sidebar-groups.md §2.1). 세 트리거(헤더 클릭·단축키/팔레트·
     // 우클릭)가 같은 세션 메서드를 부른다(rename 패턴). 접힘/이름/마커 상태는 workspace.v1 캡처로 영속(정상 종료 saveWorkspace).
 
+    /// 표시 slot의 **에이전트 목록 토글** 클릭 → 그 워크스페이스의 `agents_collapsed` 토글 → 재투영·재빌드.
+    /// 그룹 헤더 토글과 같은 규율이되 상태는 영속하지 않는다(§4 — 에이전트 구성은 실행마다 달라진다).
+    fn toggleAgentsCollapsedAt(self: *AppSession, slot: usize) void {
+        if (slot >= self.sidebar_rows.items.len) return;
+        const t = switch (self.sidebar_rows.items[slot]) {
+            .agent_toggle => |x| x,
+            else => return,
+        };
+        if (t.tab >= self.tabs.items.len) return;
+        self.tabs.items[t.tab].agents_collapsed = !self.tabs.items[t.tab].agents_collapsed;
+        self.rebuildSidebar() catch {};
+        self.metal_dirty = true;
+    }
+
+    /// 에이전트 행의 ✕ → **그 Term 하나만** 닫는다(워크스페이스나 pane이 아니라). 인덱스는 클릭 시점에 재조회해
+    /// 유효하지 않으면 무동작한다. 실행 중 명령 확인은 Term 단위 닫기의 기존 규율(`closeTermAt` → 캐스케이드)을
+    /// 그대로 따른다 — 마지막 Term이면 pane이, 마지막 pane이면 워크스페이스가 함께 닫힌다.
+    fn closeAgentRow(self: *AppSession, tab_index: usize, pane_index: usize, term_index: usize) void {
+        if (tab_index >= self.tabs.items.len) return;
+        const tab = self.tabs.items[tab_index];
+        if (pane_index >= tab.panes.items.len) return;
+        if (term_index >= tab.panes.items[pane_index].terms.items.len) return;
+        // **반드시 requestClose를 거친다**: 실행 중 명령 확인 모달과 마지막-Term 캐스케이드(pane→탭→세션 latch)가
+        // 거기 있다. closeTermAt을 직접 부르면 (1) 돌고 있는 에이전트가 확인 없이 죽고 (2) 마지막 워크스페이스의
+        // 마지막 Term에서 closeTab이 세션 latch로 빠지며 해제된 surface에 쓰고(UAF) 이어지는 rebuild가 빈 pane을
+        // 인덱싱해 패닉한다(code-review max).
+        self.requestClose(.{ .agent_term = .{ .tab = tab_index, .pane = pane_index, .term = term_index } });
+    }
+
+    /// 에이전트 행 클릭 → **그 에이전트가 도는 자리**로 이동한다(§5): 워크스페이스 전환 → 그 Pane 포커스 →
+    /// 그 Pane 안에서 그 Term 탭 활성화. **3단계가 핵심이다** — Pane까지만 가면 그 Pane의 현재 활성 탭이 보일 뿐,
+    /// 사용자가 목록에서 지목한 에이전트는 여전히 가려진 탭에 있다.
+    /// 인덱스는 클릭 시점에 **재조회**해 유효하지 않으면(사이 tick에 닫힘·종료) 무동작한다(stale deref 금지).
+    fn focusAgentRow(self: *AppSession, tab_index: usize, pane_index: usize, term_index: usize) void {
+        if (tab_index >= self.tabs.items.len) return;
+        _ = self.switchTab(tab_index); // 1) 다른 카드였으면 그 워크스페이스로
+        const tab = self.tabs.items[tab_index];
+        if (pane_index >= tab.panes.items.len) return;
+        const pane = tab.panes.items[pane_index];
+        _ = self.focusPaneByPtr(pane); // 2) 그 Pane으로(같은 pane이면 무동작)
+        if (term_index >= pane.terms.items.len) return;
+        self.focusTerm(term_index); // 3) 그 Pane 안 그 Term 탭으로 — 가려진 탭이 실제로 앞으로 나온다
+        self.metal_dirty = true;
+    }
+
     /// 표시 slot의 그룹 헤더 클릭 → 그 그룹 시작 탭의 group_collapsed 토글 → 재투영·재빌드(즉시 반영). 헤더가 아니면 no-op.
     fn toggleGroupCollapsedAt(self: *AppSession, slot: usize) void {
         if (slot >= self.sidebar_rows.items.len) return;
         const gh = switch (self.sidebar_rows.items[slot]) {
             .group_header => |h| h,
+            .agent_toggle, .agent => return, // 목록 행 클릭은 별도 경로(접기 토글·Term 이동)
             .card => return,
         };
         if (gh.tab >= self.tabs.items.len) return;
@@ -9874,6 +10014,7 @@ pub const AppSession = struct {
                     .group_header => |gh| if (gh.tab == 3) {
                         b_row = s;
                     },
+                    .agent_toggle, .agent => {},
                     .card => {},
                 };
                 if (self.groupNestPlan(b_row, 1)) |plan| {
@@ -9928,6 +10069,7 @@ pub const AppSession = struct {
                 self.recomputeVisibleTabs(); // rows에서 B 헤더 표시 row를 찾는다
                 var b_row: usize = 0;
                 for (self.sidebar_rows.items, 0..) |row, s| switch (row) {
+                    .agent_toggle, .agent => {},
                     .group_header => |gh| if (gh.tab == 3) {
                         b_row = s;
                     },
@@ -10035,6 +10177,7 @@ pub const AppSession = struct {
                 const target_tab: usize = if (std.c.getenv("MARU_FORCE_SR4_DRAG_INTO") != null) 1 else 2;
                 var into_row: usize = 0;
                 for (self.sidebar_rows.items, 0..) |row, s| switch (row) {
+                    .agent_toggle, .agent => {},
                     .card => |c| if (c.tab == target_tab) {
                         into_row = s;
                     },
@@ -10140,6 +10283,7 @@ pub const AppSession = struct {
                     // 그룹 A(마커 index1)를 X row 앞으로 드래그 확정 → [그룹 A, 탭 X].
                     var x_row: usize = 0;
                     for (self.sidebar_rows.items, 0..) |row, s| switch (row) {
+                        .agent_toggle, .agent => {},
                         .card => |c| if (c.tab == 0) {
                             x_row = s;
                         },
@@ -16446,6 +16590,92 @@ pub const AppSession = struct {
             .local_pinned = local_pinned,
             .lines = if (tab_index < self.tabs.items.len) self.sidebarCardLines(self.tabs.items[tab_index]) else 1,
         } }) catch {};
+        self.appendAgentRows(out, tab_index, depth); // 카드 **바로 아래** 그 워크스페이스의 에이전트 목록(§2)
+    }
+
+    /// 워크스페이스가 들고 있는 에이전트 Term 하나의 **인덱스 경로**. 포인터가 아니라 인덱스인 이유는 Row와 같다 —
+    /// 사이 tick에 Term이 사라져도 재조회에서 걸러지고 dangling이 없다.
+    const WorkspaceAgent = struct { pane: usize, term: usize };
+
+    /// 이 워크스페이스의 **모든 에이전트 Term**을 트리 순서(Pane 순회 → Pane 안 Term 순서)로 모은다.
+    /// 상태나 시각으로 재정렬하지 않는다 — 같은 자리의 에이전트가 상태 변화마다 목록에서 튀면 클릭 대상이 흔들린다(§2).
+    fn collectWorkspaceAgents(tab: *Tab, out: *std.ArrayList(WorkspaceAgent), allocator: std.mem.Allocator) void {
+        for (tab.panes.items, 0..) |pane, pi| {
+            for (pane.terms.items, 0..) |t, ti| {
+                if (t.kind != .terminal or t.agent_kind == .none) continue;
+                out.append(allocator, .{ .pane = pi, .term = ti }) catch return; // OOM: 이번 투영만 짧게(다음 rebuild가 복구)
+            }
+        }
+    }
+
+    /// 카드 아래에 붙는 **에이전트 목록 행**을 방출한다(§1 규칙): 0개면 아무것도, 1개면 행 하나만(토글 없음),
+    /// 2개 이상이면 `N agents` 토글 + (펼쳐졌으면) 행들. 접힘은 `tab.agents_collapsed`가 든다(비영속, §4).
+    fn appendAgentRows(self: *AppSession, out: *std.ArrayList(chrome.components.sidebar.Row), tab_index: usize, depth: u8) void {
+        if (tab_index >= self.tabs.items.len) return;
+        const tab = self.tabs.items[tab_index];
+        var agents: std.ArrayList(WorkspaceAgent) = .empty;
+        defer agents.deinit(self.allocator);
+        collectWorkspaceAgents(tab, &agents, self.allocator);
+        if (agents.items.len == 0) return;
+        if (agents.items.len >= 2) {
+            out.append(self.allocator, .{
+                .agent_toggle = .{
+                    .tab = tab_index,
+                    .count = std.math.lossyCast(u16, agents.items.len),
+                    .collapsed = tab.agents_collapsed,
+                    .depth = depth,
+                    .last = tab.agents_collapsed, // 접히면 토글이 이 묶음의 마지막 행이다(아래 여백을 카드와 같게)
+                },
+            }) catch return;
+            if (tab.agents_collapsed) return; // 접혔으면 행은 안 낸다(토글만 남는다)
+        }
+        for (agents.items, 0..) |ag, idx| {
+            out.append(self.allocator, .{
+                .agent = .{
+                    .tab = tab_index,
+                    .pane = ag.pane,
+                    .term = ag.term,
+                    .depth = depth,
+                    .lines = self.sidebarAgentRowLines(tab, ag),
+                    .last = idx + 1 == agents.items.len, // 마지막 행만 아래 여백을 카드와 같게(밴드 하단)
+                },
+            }) catch return;
+        }
+    }
+
+    /// 에이전트 행이 그리는 줄 수 — 라벨(항상) + 폴더·브랜치(그 Term의 cwd를 알 때, §2.1). 마지막 대화 두 줄은
+    /// transcript 보강(4·5단계)이 붙으면 여기서 함께 센다. 카드와 같은 규율로 이 값이 행 높이의 입력이다.
+    fn sidebarAgentRowLines(self: *AppSession, tab: *Tab, ag: WorkspaceAgent) u8 {
+        const term = agentTermOf(tab, ag) orelse return 1;
+        var n: u8 = 1; // 라벨(종류 · 상태)은 항상
+        // **termGitBranch를 먼저** 부른다 — 이 호출이 관측(cwd)을 refresh하므로, sidebarHasCwd를 앞세우면 관측이
+        // stale한 rebuild에서 줄 수를 1로 재고 같은 rebuild의 렌더는 2줄을 그려 행 높이와 글자가 어긋난다
+        // (code-review max). sidebarCardLines가 쓰는 순서와 같게 맞춘다.
+        const has_branch = self.termGitBranch(term) != null;
+        if (sidebarHasCwd(term)) {
+            n += 1; // 폴더 줄
+            if (has_branch) n += 1; // 브랜치 줄(repo 안일 때만 — 카드 보조줄과 같은 규칙)
+        }
+        return n;
+    }
+
+    /// 인덱스 경로 → 라이브 Term(범위 밖이면 null). 목록 행이 포인터 대신 인덱스를 드는 계약의 재조회 지점이다.
+    fn agentTermOf(tab: *Tab, ag: WorkspaceAgent) ?*Term {
+        if (ag.pane >= tab.panes.items.len) return null;
+        const pane = tab.panes.items[ag.pane];
+        if (ag.term >= pane.terms.items.len) return null;
+        return pane.terms.items[ag.term];
+    }
+
+    /// 카드 정보(줄 수·브랜치·경로)의 기준 Term — 활성 pane의 활성 Term이되 **teardown 중간 상태에서 null**을 낸다.
+    /// reap/close 캐스케이드는 Term을 제거한 뒤 pane/탭을 정리하기 **전에** 사이드바를 다시 투영할 수 있고, 그때
+    /// `tab.activePane().activeTerm()`은 길이 0 리스트를 인덱싱해 패닉한다(실측). 인덱스도 함께 clamp해 활성 인덱스가
+    /// 아직 시프트 보정되기 전이어도 안전하다.
+    fn sidebarCardTerm(tab: *Tab) ?*Term {
+        if (tab.panes.items.len == 0) return null;
+        const pane = tab.panes.items[@min(tab.active_pane, tab.panes.items.len - 1)];
+        if (pane.terms.items.len == 0) return null;
+        return pane.terms.items[@min(pane.active_term, pane.terms.items.len - 1)];
     }
 
     /// 이 Term이 **경로줄에 쓸 cwd**를 갖고 있는가 — `sidebarCwdPath`가 ""를 내는 조건의 할당 없는 판정판이다
@@ -16459,7 +16689,8 @@ pub const AppSession = struct {
     /// **반드시 같은 값**을 봐야 한다 — 어긋나면 "보이는 곳과 눌리는 곳이 다른" 회귀가 난다. 그래서 조건을 카드
     /// 조립부(buildSidebarTitleFrame)의 append 조건과 1:1로 맞춘 이 함수가 단일 출처다.
     fn sidebarCardLines(self: *AppSession, tab: *Tab) u8 {
-        const term = tab.activePane().activeTerm();
+        const term = sidebarCardTerm(tab) orelse return 1; // teardown 중간 상태(빈 pane) 방어 — 아래 헬퍼 주석
+
         var n: u8 = 1; // 이름줄은 항상 그린다(사용자 요청 — 보조줄만 조건부)
         // 브랜치·경로줄은 **git repo 안**일 때만 존재한다(maru는 repo 밖 cwd 줄을 그리지 않는다). 그 전제 아래
         // 각 토글(show-branch·show-folder)이 독립적으로 줄을 켠다.
@@ -16467,7 +16698,7 @@ pub const AppSession = struct {
             if (self.loaded_config.config.sidebar.show_branch) n += 1;
             if (self.loaded_config.config.sidebar.show_folder and sidebarHasCwd(term)) n += 1;
         }
-        if (workspaceHasStatusLine(tab)) n += 1; // 에이전트 상태줄(4번째)
+        // 에이전트 상태줄은 카드에서 빠졌다(목록 행이 대체) — 줄 수도 그만큼 줄어 카드가 짧아진다.
         return n;
     }
 
@@ -16476,6 +16707,7 @@ pub const AppSession = struct {
         if (display_slot >= self.sidebar_rows.items.len) return null;
         return switch (self.sidebar_rows.items[display_slot]) {
             .card => |c| c.tab,
+            .agent_toggle, .agent => null, // 선택 대상이 아님(각자 접기 토글·Term 이동으로 분기)
             .group_header => null, // 헤더 row는 탭이 아님 — 클릭 시 선택 아니라 접기 토글(SG3c)
         };
     }
@@ -16484,6 +16716,7 @@ pub const AppSession = struct {
     fn displaySlotOf(self: *const AppSession, tab_index: usize) ?usize {
         for (self.sidebar_rows.items, 0..) |row, slot| switch (row) {
             .card => |c| if (c.tab == tab_index) return slot,
+            .agent_toggle, .agent => {},
             .group_header => {},
         };
         return null;
@@ -19217,7 +19450,18 @@ pub const AppSession = struct {
                         // onGroupHeader가 헤더/카드를 가른다. down에선 접기 토글 후보로 **arm만** 하고(현 동작 보존), 이어지는
                         // drag가 threshold를 넘으면 위 캡처 가드가 그룹 통째 드래그로 승격한다. 검색 중엔 재정렬이 모호하므로
                         // (부분 목록) 카드 드래그와 같은 규율로 arm 없이 즉시 토글한다.
-                        if (chrome.components.sidebar.onGroupHeader(self.sidebar_rows.items, slot)) {
+                        // 에이전트 목록 토글 = 즉시 접기/펼치기(드래그 대상이 아니라 arm 없이 바로).
+                        if (chrome.components.sidebar.onAgentToggle(self.sidebar_rows.items, slot)) {
+                            self.toggleAgentsCollapsedAt(slot);
+                        } else if (chrome.components.sidebar.agentAt(self.sidebar_rows.items, slot)) |ag| {
+                            // 에이전트 행: 우측 ✕ zone이면 **그 Term만 닫고**, 아니면 그 에이전트가 도는 자리로 이동한다
+                            // (워크스페이스 → Pane → Term, §5). ✕는 호버 없이 고정 표시라 zone 판정만으로 가른다.
+                            if (chrome.components.sidebar.closeButton(x_px, self.sidebar_width_px, self.cell_width_px)) {
+                                self.closeAgentRow(ag.tab, ag.pane, ag.term);
+                            } else {
+                                self.focusAgentRow(ag.tab, ag.pane, ag.term);
+                            }
+                        } else if (chrome.components.sidebar.onGroupHeader(self.sidebar_rows.items, slot)) {
                             if (self.sidebar_search_active) {
                                 self.toggleGroupCollapsedAt(slot); // 검색 중 = 즉시 토글(그룹 통째 드래그 비활성)
                             } else {
@@ -19229,8 +19473,9 @@ pub const AppSession = struct {
                             }
                         } else if (self.visibleTab(slot)) |tab_idx| {
                             // slot=표시 슬롯, tab_idx=원본 탭(검색 필터 역매핑). 닫기/전환/드래그는 원본 인덱스로 한다.
-                            const on_close = chrome.components.sidebar.closeButton(x_px, self.sidebar_width_px, self.cell_width_px) and
-                                self.hovered_slot != null and self.hovered_slot.? == slot;
+                            // ✕는 이제 **호버 없이 고정 표시**라(사용자 요청) 호버 일치 조건을 걸지 않는다 — 보이는 자리를
+                            // 누르면 언제나 닫힌다("보이는 것 = 눌리는 것").
+                            const on_close = chrome.components.sidebar.closeButton(x_px, self.sidebar_width_px, self.cell_width_px);
                             if (on_close) {
                                 self.requestClose(.{ .tab_index = tab_idx }); // 실행 중 명령 있으면 확인 모달(없으면 즉시 closeTab)
                             } else {
@@ -19313,9 +19558,9 @@ pub const AppSession = struct {
                             return;
                         };
                         const tab = if (m) |bm| bm.tabIndex(count, x_px) else 0;
-                        const on_close = m != null and self.hovered_tab != null and self.hovered_tab.?.pane == lr.leaf and
-                            self.hovered_tab.?.tab == tab and
-                            m.?.inCloseZone(tab, x_px);
+                        // ✕는 **모든 탭에 고정 표시**라 호버 일치 조건을 걸지 않는다(사이드바와 같은 규율 —
+                        // "보이는 것 = 눌리는 것"). zone 판정만으로 닫기와 전환을 가른다.
+                        const on_close = m != null and m.?.inCloseZone(tab, x_px);
                         _ = self.focusPaneByPtr(lr.leaf); // 다른 pane이면 포커스 이동(같으면 무동작)
                         self.focusTerm(tab); // 그 pane의 클릭한 Term으로(같으면 무동작)
                         if (on_close) {
@@ -19696,6 +19941,7 @@ pub const AppSession = struct {
         if (self.sidebar_collapsed or self.chrome_minimal) return false;
         for (self.sidebar_rows.items) |row| switch (row) {
             .card => |c| if (c.tab < self.tabs.items.len and tabHasRunningAgent(self.tabs.items[c.tab])) return true,
+            .agent_toggle, .agent => {}, // 같은 탭의 부속이라 카드 판정으로 충분
             .group_header => {}, // 헤더 row엔 에이전트가 없다
         };
         return false;
@@ -24521,8 +24767,9 @@ pub const AppSession = struct {
                     // 비활성 Term 탭은 흐린 색(muted), 그 pane의 활성 Term 탭은 full sidebar_foreground로 강조한다.
                     const tab_fg: terminal.Color = .{ .rgb = self.mutedForeground() };
                     const active_tab_fg: terminal.Color = .{ .rgb = self.appearance.theme.sidebar_foreground };
-                    // 이 pane의 탭이 호버 중이면 그 탭에 ✕를 그린다(다른 pane이면 null).
-                    const close_tab: ?usize = if (self.hovered_tab) |h| (if (h.pane == lr.leaf) h.tab else null) else null;
+                    // ✕는 **모든 Term 탭에 고정 표시**한다(호버 전용 폐기 — 사용자 요청). 어디를 눌러야 닫히는지
+                    // 마우스를 올려보기 전에 알 수 있어야 한다는 같은 이유로 사이드바 카드·에이전트 행도 고정이다.
+                    const close_tab = true;
                     const dl = coretext_frame_builder.buildPaneTabBarDrawList(self.allocator, titles.items, @intCast(bar_cols), tab_fg, close_tab, lr.leaf.active_term, active_tab_fg, self.buildChromeTokens().space.tab_width_cols, lr.leaf.tab_scroll_cols, editing_tab) catch continue;
                     // running Term 탭 플래그 ● → 브랜드색(pane 대표 kind). 탭마다 종류가 다를 수 있으나 혼재는 드물어 pane 대표색으로 통일.
                     if (paneHasRunningAgent(lr.leaf)) recolorAgentFlagCells(dl.cells, paneAgentKind(lr.leaf));
@@ -25419,6 +25666,7 @@ pub const AppSession = struct {
     ///    위치 고정). 도메인은 sidebarRenderRows()(드래그 중 preview_rows).
     fn sidebarRowShowsPin(self: *const AppSession, row: chrome.components.sidebar.Row) bool {
         return switch (row) {
+            .agent_toggle, .agent => false, // 목록 행 자체는 pin 대상이 아니다(소속 카드가 든다)
             .group_header => |gh| gh.tab < self.tabs.items.len and self.tabs.items[gh.tab].pinned,
             .card => |c| blk: {
                 if (c.local_pinned) break :blk true; // 로컬 pin 멤버 📌(§13.6 선두 분기 — pin_derived 억제보다 우선)
@@ -25629,6 +25877,7 @@ pub const AppSession = struct {
             // ghost 카드도 self.tabs pinned가 드래그 내내 불변이라 추적이 안정. 고정 그룹 0개면 flip이 없어 no-op(byte-identical).
             const row_pinned: ?bool = switch (row) {
                 .card => |c| if (c.tab < self.tabs.items.len) self.tabs.items[c.tab].pinned else null,
+                .agent_toggle, .agent => null,
                 .group_header => |h| if (h.tab < self.tabs.items.len) self.tabs.items[h.tab].pinned else null,
             };
             if (row_pinned) |rp| {
@@ -25645,6 +25894,7 @@ pub const AppSession = struct {
                 .card => |c| if (c.tab < self.tabs.items.len and self.tabs.items[c.tab].top_level) {
                     current_group_color = 0;
                 },
+                .agent_toggle, .agent => {},
                 .group_header => {},
             }
             const orig = switch (row) {
@@ -25655,6 +25905,7 @@ pub const AppSession = struct {
                     current_group_color = if (h.tab < self.tabs.items.len) self.tabs.items[h.tab].group_color else 0;
                     continue;
                 },
+                .agent_toggle, .agent => continue, // 목록 행은 per-card tint/accent 대상이 아니다(소속 카드가 그린다)
             };
             // SG8d: 고스트 카드(preview_rows[ghost_lo,hi))는 아래 반투명 밴드+삽입선으로만 표시하고 per-card 배경 tint·
             // 불투명 accent 막대는 생략한다 — 불투명 막대가 "떠 있는" 반투명 고스트를 깨뜨리기 때문. current_group_color
@@ -25667,7 +25918,18 @@ pub const AppSession = struct {
             // 카드만 — 카드만이면 rowTop==i*slot_h+header라 동작 보존. card_h도 rowHeight로(카드=slot_h).
             const slot_abs_y: f32 = @floatFromInt(chrome.components.sidebar.rowTop(rows, i, self.sidebar_header_height_px, self.sidebarMetrics(), 0));
             const card_top = slot_abs_y + gap; // 카드 rect = 슬롯 사방 card_gap inset(chrome bandFill과 동일)
-            const card_h = @as(f32, @floatFromInt(chrome.components.sidebar.rowHeight(row, self.sidebarMetrics()))) - 2.0 * gap;
+            // 카드 높이에 **그 카드에 딸린 에이전트 목록 행**을 더한다 — 배경 tint·좌측 accent 막대가 밴드
+            // (chrome bandFillSpan이 카드+목록을 한 덩어리로 덮는다)와 같은 범위를 써야 목록 옆에서 막대가 끊기지
+            // 않는다(사용자 피드백). 목록은 그 카드의 부속이므로 소속 표시가 거기서 멈추면 안 된다.
+            var span_px: u32 = chrome.components.sidebar.rowHeight(row, self.sidebarMetrics());
+            {
+                var k = i + 1;
+                while (k < rows.len) : (k += 1) switch (rows[k]) {
+                    .agent_toggle, .agent => span_px +|= chrome.components.sidebar.rowHeight(rows[k], self.sidebarMetrics()),
+                    else => break,
+                };
+            }
+            const card_h = @as(f32, @floatFromInt(span_px)) - 2.0 * gap;
             // ① 배경 tint — **밴드 없는 idle 슬롯에만** 오버레이 quad. 활성/호버/드롭 슬롯은 lowerSidebar가 밴드 색에
             // tint를 blend하므로 여기서 또 그리면 이중 tint(code-review). 카드 rect(gap inset)·둥근 모서리를 밴드와 맞춰
             // rich에서 카드 모양대로 보이게(전폭 직사각 bleed 방지) — tui(gap=0·radius=0)면 전폭·직각(기존 동일).
@@ -25728,6 +25990,8 @@ pub const AppSession = struct {
                 const ghost_depth: u8 = switch (rows[dp.ghost_lo]) {
                     .group_header => |h| h.depth,
                     .card => |c| c.depth,
+                    // 목록 행은 드래그 대상이 아니라 고스트가 될 수 없다 — 방어적으로 최상위 depth를 쓴다.
+                    .agent_toggle, .agent => 1,
                 };
                 // nest 들여쓰기(기존 group_depth 반영) — 헤더 glyph indent (depth-1)*group_indent와 정렬. 형제/카드는 0(전폭).
                 const indent_px: f32 = if (is_nest and ghost_depth > 1)
@@ -25746,7 +26010,7 @@ pub const AppSession = struct {
                         scan -= 1;
                         const hit = switch (rows[scan]) {
                             .group_header => |h| h.depth == want, // 타깃 그룹 마커(depth == ghost_depth-1)
-                            .card => false,
+                            .card, .agent_toggle, .agent => false,
                         };
                         if (hit) {
                             pr = scan;
@@ -26438,6 +26702,10 @@ pub const AppSession = struct {
                         if (self.tabs.items[c.tab].background_color != 0) // 카드 배경 tint(개별 background_color)
                             color = blendRgb(color, self.tabs.items[c.tab].background_color & 0x00FF_FFFF, tab_bg_tint_alpha);
                     },
+                    // 목록 행은 **배경 tint 소스가 없을 뿐** 밴드 자체는 그려야 한다. 예전 `continue`는 Zig에서 바깥
+                    // for를 탈출해 밴드 op을 통째로 버렸고, 그 결과 에이전트 행 호버 하이라이트가 100% 사라졌다
+                    // (code-review max — view()가 일부러 내는 밴드를 platform이 삼킨 것).
+                    .agent_toggle, .agent => {},
                     .group_header => |h| {
                         // SG5-2: 그룹 헤더 밴드에 그룹 공통 색을 블렌드(카드 배경 tint와 **같은** blend 경로·같은 알파). 층
                         // 분리 — 그룹 색은 헤더 밴드·소속 카드 막대에만 실리고 개별 카드 background_color와 안 겹친다(서로 다른 row).
@@ -26553,6 +26821,39 @@ pub const AppSession = struct {
     /// 한 Term의 상태줄 텍스트(owned). 에이전트 아니면(none) "" — 그 줄은 생략된다. running이면 "▁▅▇▃ 진행중"(파형),
     /// blocked/idle/unknown도 오해 없는 짧은 상태 문구로 표시한다.
     /// 사이드바는 workspaceStatusLine이 고른 대표 Term을 이 함수로 넘긴다.
+    /// 에이전트 행 **1행 텍스트**(owned) — 종류 이름 + 상태 문구. 카드 상태줄(agentStatusLine)이 상태 마커·문구의
+    /// 단일 출처이므로 그대로 쓰고, 앞에 종류 이름을 붙여 "무엇이 어떤 상태인지"를 한 줄로 읽게 한다.
+    /// 예: `✓ 대기중` → `Claude Code · ✓ 대기중`. 마지막 프롬프트로 이 자리를 대체하는 것은 transcript 보강(4·5단계)이다.
+    fn agentRowLabelOwned(self: *AppSession, term: *Term) ![]const u8 {
+        const status = try self.agentStatusLine(term);
+        defer self.allocator.free(status);
+        const kind_name: []const u8 = switch (term.agent_kind) {
+            .claude => "Claude Code",
+            .codex => "Codex",
+            .none => "",
+        };
+        if (status.len == 0) return self.allocator.dupe(u8, kind_name);
+        return std.fmt.allocPrint(self.allocator, "{s} \u{00b7} {s}", .{ kind_name, status });
+    }
+
+    /// 에이전트 행 **폴더 줄**(owned) — 그 Term이 도는 디렉터리(§2.1). 카드 헤더가 활성 Term 기준이라 다른 Pane에서
+    /// 도는 에이전트의 자리는 여기서만 드러난다. 폭이 좁으므로 경로 전체가 아니라 **마지막 세그먼트**만 쓴다.
+    fn agentRowFolderOwned(self: *AppSession, term: *Term, indent: []const u8) ![]const u8 {
+        const path = try sidebarCwdPath(self.allocator, term);
+        defer self.allocator.free(path);
+        if (path.len == 0) return self.allocator.dupe(u8, "");
+        const leaf = std.fs.path.basename(path);
+        const folder: []const u8 = if (leaf.len > 0) leaf else path;
+        return std.fmt.allocPrint(self.allocator, "{s}  \u{F000A} {s}", .{ indent, folder });
+    }
+
+    /// 에이전트 행 **브랜치 줄**(owned) — git repo 안일 때만(카드 보조줄과 같은 규칙). **폴더와 같은 줄에 합치지
+    /// 않는다**: 사이드바 폭에서 둘을 한 줄에 넣으면 브랜치가 잘린다(사용자 실측 피드백 — 설계의 "이어 붙인다"를 정정).
+    fn agentRowBranchOwned(self: *AppSession, term: *Term, indent: []const u8) ![]const u8 {
+        const branch = self.termGitBranch(term) orelse return self.allocator.dupe(u8, "");
+        return std.fmt.allocPrint(self.allocator, "{s}  \u{F0009} {s}", .{ indent, branch });
+    }
+
     fn agentStatusLine(self: *AppSession, term: *Term) ![]const u8 {
         if (term.agent_kind == .none) return self.allocator.dupe(u8, "");
         return switch (term.agent_state) {
@@ -26812,7 +27113,10 @@ pub const AppSession = struct {
         // 들여쓰기 공백 버퍼(카드 depth·중첩 헤더 depth-1 공유). depth×group_indent_cols가 24를 넘으면 clamp(오버플로 없음).
         const indent_buf = [_]u8{' '} ** 24;
         var active_row: ?usize = null;
-        var close_row: ?usize = null;
+        // 닫기 ✕는 **호버 전용이 아니라 행별 고정 표시**다(사용자 요청) — 카드는 그 워크스페이스를, 에이전트 행은
+        // 그 Term을 닫는다. row별 bool로 실어 여러 행이 동시에 ✕를 가질 수 있게 한다.
+        var close_rows: std.ArrayList(bool) = .empty;
+        defer close_rows.deinit(self.allocator);
         var editing_row: ?usize = null; // rename 중인 표시 슬롯(카드 또는 그룹 헤더) — buildSidebarDrawList가 그 이름줄을 tail 앵커로.
         // SG8d: 카드 드래그 프리뷰 중엔 고스트를 담은 preview_rows를 glyph로 조립한다(비드래그=원본 sidebar_rows). 아래
         // applySidebarGlyphPyTop·view 밴드도 같은 rows를 봐 세로 위치가 정합한다(단일 렌더 도메인).
@@ -26820,6 +27124,78 @@ pub const AppSession = struct {
         for (rrows, 0..) |disp_row, row_i| {
             const card = switch (disp_row) {
                 .card => |c| c,
+                // 에이전트 목록 행: 카드와 같은 "row 하나 = 배열 엔트리 하나" 규율로 자기 줄을 채우고 넘어간다
+                // (group_header padding 엔트리와 동형 — i == row 인덱스 유지). 표시 텍스트는 Row에 실린 인덱스로
+                // **라이브 재조회**해 만든다(상태·시각이 매 tick 변하고, borrowed 슬라이스는 dangling 위험).
+                .agent_toggle => |t| {
+                    // 삼각은 **텍스트 줄이 아니라 gutter 아이콘 경로**로 그린다 — 텍스트 줄의 글리프는 1칸이라
+                    // 이 자리에서 너무 작아 "눌러야 할 토글"로 안 읽혔다(사용자 피드백 2회). gutter는 에이전트 kind
+                    // 아이콘과 같은 **2칸 렌더**라 또렷하다(카드 아이콘이 크게 보이는 그 경로).
+                    const ind_n = @min(@as(usize, t.depth) * @as(usize, group_indent_cols), indent_buf.len);
+                    // **접혔을 때만** 상태 요약을 붙인다. 접으면 행들이 사라져 "무엇이 돌고 있는지"를 알 방법이
+                    // 아예 없어지기 때문이다(사용자 피드백 — 카드 상태줄을 없앤 판단의 빈틈). 펼친 상태에서는 각 행이
+                    // 자기 상태를 보여주므로 요약이 잉여라 붙이지 않는다. 요약 상태는 기존 대표 규칙
+                    // (blocked > running > idle > unknown)을 그대로 써 **주의가 필요한 것이 먼저** 드러나게 한다.
+                    const toggle_summary: []const u8 = if (t.collapsed and t.tab < self.tabs.items.len) blk: {
+                        const rep = tabAgentRepresentative(self.tabs.items[t.tab]) orelse break :blk try self.allocator.dupe(u8, "");
+                        const st = try self.agentStatusLine(rep.term);
+                        defer self.allocator.free(st);
+                        if (st.len == 0) break :blk try self.allocator.dupe(u8, "");
+                        break :blk try std.fmt.allocPrint(self.allocator, " \u{00b7} {s}", .{st});
+                    } else try self.allocator.dupe(u8, "");
+                    defer self.allocator.free(toggle_summary);
+                    try names.append(self.allocator, try std.fmt.allocPrint(
+                        self.allocator,
+                        "{s}{d} agents{s}",
+                        .{ indent_buf[0..ind_n], t.count, toggle_summary },
+                    ));
+                    try branch_lines.append(self.allocator, try self.allocator.dupe(u8, ""));
+                    try path_lines.append(self.allocator, try self.allocator.dupe(u8, ""));
+                    try status_lines.append(self.allocator, try self.allocator.dupe(u8, ""));
+                    try agents.append(self.allocator, if (t.collapsed) @as(u21, 0x25B6) else @as(u21, 0x25BC));
+                    try pins.append(self.allocator, false);
+                    // 접힘 요약의 파형도 **브랜드색**이어야 한다 — 요약은 접었을 때 유일한 상태 단서인데, kind=none·
+                    // running=false를 실으면 색칠 루프가 그 자리만 흐린 회색으로 남긴다(code-review max).
+                    const trep = if (t.tab < self.tabs.items.len) tabAgentRepresentative(self.tabs.items[t.tab]) else null;
+                    try card_kinds.append(self.allocator, if (trep) |r| r.term.agent_kind else .none);
+                    try card_running.append(self.allocator, if (trep) |r| (r.state == .running) else false);
+                    try close_rows.append(self.allocator, false); // 토글 자체는 닫기 대상이 아니다(접기만)
+                    continue;
+                },
+                .agent => |ar| {
+                    const atab: ?*Tab = if (ar.tab < self.tabs.items.len) self.tabs.items[ar.tab] else null;
+                    const aterm: ?*Term = if (atab) |t| agentTermOf(t, .{ .pane = ar.pane, .term = ar.term }) else null;
+                    const ind_n = @min(@as(usize, ar.depth) * @as(usize, group_indent_cols), indent_buf.len);
+                    const ind = indent_buf[0..ind_n];
+                    // 1행: 상태 마커 + 종류 이름 + 상태 문구. 시각(우측 정렬)은 폭 계산이 필요해 후속 슬라이스로 미룬다.
+                    // 라벨은 owned라 **중간 변수로 받아 반드시 해제**한다 — 예전엔 allocPrint 인자로 바로 넘겨
+                    // 바깥 문자열만 names가 소유하고 안쪽이 매 rebuild마다 누수됐다(code-review max).
+                    if (aterm) |t| {
+                        const label = try self.agentRowLabelOwned(t);
+                        defer self.allocator.free(label);
+                        try names.append(self.allocator, try std.fmt.allocPrint(self.allocator, "{s}  {s}", .{ ind, label }));
+                    } else {
+                        try names.append(self.allocator, try self.allocator.dupe(u8, ""));
+                    }
+                    // 2·3행: 그 Term의 폴더와 브랜치(§2.1 — 항상 표시, 카드 헤더와 달리 **그 에이전트가 도는 자리**).
+                    // **한 줄에 합치지 않는다**: 사이드바 폭에서 폴더+브랜치를 한 줄에 넣으면 브랜치가 잘린다(실측).
+                    try branch_lines.append(self.allocator, if (aterm) |t|
+                        try self.agentRowFolderOwned(t, ind)
+                    else
+                        try self.allocator.dupe(u8, ""));
+                    try path_lines.append(self.allocator, if (aterm) |t|
+                        try self.agentRowBranchOwned(t, ind)
+                    else
+                        try self.allocator.dupe(u8, ""));
+                    try status_lines.append(self.allocator, try self.allocator.dupe(u8, ""));
+                    // gutter 아이콘: 그 Term의 kind(카드 대표 아이콘이 사라진 자리를 행마다 대신한다).
+                    try agents.append(self.allocator, if (aterm) |t| agentIconCodepoint(t.agent_kind) else 0);
+                    try pins.append(self.allocator, false);
+                    try card_kinds.append(self.allocator, if (aterm) |t| t.agent_kind else .none);
+                    try card_running.append(self.allocator, if (aterm) |t| (t.agent_state == .running) else false);
+                    try close_rows.append(self.allocator, aterm != null); // 에이전트 행 ✕ = 그 Term 닫기
+                    continue;
+                },
                 .group_header => |gh| {
                     // 그룹 헤더 padding 엔트리 — 삼각(펼침 ▾ U+25BE / 접힘 ▸ U+25B8) + 그룹 이름(접힘 시 " (N)" 배지).
                     // 이름은 소스 탭의 group_start를 **live 재조회**(#8 UAF 회피 — borrowed label 미사용). 빈 이름은 "그룹" 폴백.
@@ -26855,14 +27231,13 @@ pub const AppSession = struct {
                     try pins.append(self.allocator, if (header_renaming) false else self.sidebarRowShowsPin(disp_row));
                     try card_kinds.append(self.allocator, .none); // 색칠 루프 인덱스 정합(헤더=none → 무색)
                     try card_running.append(self.allocator, false);
+                    try close_rows.append(self.allocator, false); // 그룹 헤더엔 ✕ 없음
                     continue; // 헤더 row 엔트리 1개 append 완료 — 다음 row로(i==row 인덱스 유지)
                 },
             };
             const orig = card.tab;
             if (orig == self.app_window.active_tab) active_row = row_i;
-            if (self.hovered_slot) |h| {
-                if (h == row_i) close_row = row_i; // 호버가 이 카드 row면 ✕를 이 row에(헤더 row 호버면 ✕ 없음 — 위 branch가 skip)
-            }
+
             const tab = self.tabs.items[orig]; // 표시 슬롯 순서 → 원본 탭(검색 필터)
             // **의도된 기준 분리(사용자 결정 A)**: 카드의 이름·브랜치(저장소)·경로는 **활성 Term**(아래 `term`) 기준이고,
             // 스피너·gutter 아이콘·브랜드색은 **워크스페이스(탭) 전체**(tabHasRunningAgent/tabAgentKind, 아무 pane/Term) 기준이다.
@@ -26882,7 +27257,9 @@ pub const AppSession = struct {
             // 에이전트 아이콘은 슬롯 중앙에 독립 배치. 단 rename 중엔 숨긴다(0) — 안 그러면 편집 텍스트가 icon_cols
             // 만큼 우측으로 밀려 renameCaretRect(아이콘 오프셋 미반영)의 caret/IME 후보창과 어긋난다.
             // 아이콘은 **탭 대표 kind**(running Term 우선) — 백그라운드 Term의 에이전트도 카드 gutter에 종류 아이콘을 띄운다.
-            try agents.append(self.allocator, if (renaming) 0 else agentIconCodepoint(card_kind));
+            // 대표 아이콘 없음: 종류·상태는 **에이전트 목록 행**이 행마다 보여주므로(docs/sidebar-agent-list.md §2)
+            // 카드에 대표 하나를 또 그리면 같은 정보가 두 곳에 다른 형태로 나온다. gutter는 목록 행이 쓴다.
+            try agents.append(self.allocator, 0);
             // 이름줄 = custom_name(rename) 우선, 없으면 활성 Term 라벨. rename 중이면 편집 텍스트로 대체하고 보조줄은 숨긴다.
             if (renaming) {
                 // rename 중엔 마커·핀을 안 붙인다 — 마커 prefix를 붙이면 편집 텍스트가 2칸 밀려 renameCaretRect(이름줄
@@ -26895,6 +27272,10 @@ pub const AppSession = struct {
                 // non-git 에이전트 워크스페이스(브랜치/경로 없이 상태줄만)와 동형이라 안전하다. 브랜치/경로는 편집 집중 위해 계속 숨김.
                 try status_lines.append(self.allocator, try self.workspaceStatusLine(tab));
                 try pins.append(self.allocator, false);
+                // ✕도 편집 중엔 숨긴다(핀과 같은 이유 — 편집 폭 확보). **append 자체를 빼면 안 된다**: close_rows는
+                // row별 병렬 배열이라 한 칸이 비면 이후 모든 행의 ✕가 한 줄씩 밀리고 마지막 행은 "안 보이는데
+                // 눌리는" 파괴적 hotspot이 된다(code-review max).
+                try close_rows.append(self.allocator, false);
             } else {
                 const base = workspaceLabel(tab);
                 // 이름줄 선두 = 동작/활성 마커: 활성 워크스페이스='*', 그 외='·'(U+00B7). 핀(📌)은 옛 설계처럼 선두에 박지
@@ -26913,6 +27294,7 @@ pub const AppSession = struct {
                 // 그룹 마커 카드의 📌를 억제**한다(그룹 고정은 헤더 인디케이터가 든다). 최상위 개별 pin만 📌 유지. 옛 `tab.pinned`
                 // 직접 읽기는 그룹 멤버 캐시 pinned=1을 그대로 그려 모든 멤버에 📌 노이즈를 냈다(§12.8 루트커즈).
                 try pins.append(self.allocator, self.sidebarRowShowsPin(disp_row));
+                try close_rows.append(self.allocator, true); // 카드 ✕ = 그 워크스페이스 닫기(고정 표시)
                 // 브랜치줄·경로줄: cwd가 git repo 안일 때만(branch != null) + view options 토글로 표시 여부 결정.
                 // 이름줄은 항상 표시(사용자 요청). show-branch=false면 브랜치줄 생략, show-folder=false면 경로줄 생략.
                 // 토글은 독립적이다 — 둘 다 "git repo 안"을 전제로 하되(maru는 repo 밖 cwd 줄을 안 그림) 서로 안 묶인다.
@@ -26935,11 +27317,9 @@ pub const AppSession = struct {
                 // 상태줄은 **탭 단위** — running이면(어느 pane/Term이든) 파형 스피너, 아니면 활성 Term 상태(위에서 계산한 running 재사용).
                 // **빈 상태줄(에이전트 아님)엔 indent를 붙이지 않는다** — 안 그러면 공백-only 줄이 돼 buildSidebarDrawList가
                 // 빈 줄로 생략하지 못하고 **없던 4번째 줄이 렌더**된다(사용자 제보 버그). 빈 줄은 반드시 ""로 유지.
-                const status_raw = try self.workspaceStatusLine(tab);
-                try status_lines.append(self.allocator, if (indent.len == 0 or status_raw.len == 0) status_raw else blk: {
-                    defer self.allocator.free(status_raw);
-                    break :blk try std.fmt.allocPrint(self.allocator, "{s}{s}", .{ indent, status_raw });
-                });
+                // 상태줄 없음: 대표 하나로 압축하던 자리를 **에이전트 목록**이 대체한다(§2 "기존 대표 표시는 제거").
+                // 대표를 고르는 규칙(blocked > running > idle)도 목록 앞에서는 의미가 없다.
+                try status_lines.append(self.allocator, try self.allocator.dupe(u8, ""));
             }
         }
 
@@ -26950,7 +27330,7 @@ pub const AppSession = struct {
         // plus_row=null — 하단 "+" 버튼은 헤더 우측 아이콘으로 이동·폐기(P2). 호버 슬롯엔 닫기 ✕(없으면 null).
         // close_row/active_row는 **표시 row 인덱스**(위 padding 루프가 헤더도 slot을 차지하게 해 i==row) — buildSidebarDrawList가
         // 이 i로 슬롯을 인코딩·비교하므로 도메인이 일치한다(SG3c). 헤더 row는 위 루프가 close_row를 안 세워 ✕가 안 붙는다.
-        var draw_list = try coretext_frame_builder.buildSidebarDrawList(self.allocator, names.items, branch_lines.items, path_lines.items, status_lines.items, agents.items, pins.items, sidebar_cols, fg, close_row, null, active_row, active_fg, editing_row);
+        var draw_list = try coretext_frame_builder.buildSidebarDrawList(self.allocator, names.items, branch_lines.items, path_lines.items, status_lines.items, agents.items, pins.items, sidebar_cols, fg, close_rows.items, null, active_row, active_fg, editing_row);
         // 에이전트 아이콘(✶ claude / ◆ codex)과 상태줄 running 스피너(이퀄라이저 바 ▁~█)에 **브랜드색**을 입힌다 — claude=Anthropic 코랄,
         // codex=OpenAI 청록. 종류를 색으로 구분하고, **관측 상태는 상태줄**(running=이퀄라이저 파형[브랜드색]·idle=✓ 대기중)이 담당한다
         // (옛 아이콘 밝기 펄스는 폐기 — 아래 루프는 아이콘·스피너 모두 솔리드 브랜드색). 색은 `term.agent_kind` 단일 출처로 고른다.
@@ -26960,15 +27340,16 @@ pub const AppSession = struct {
         // (표시 슬롯 = 배열 인덱스) — 셀·슬롯마다 tabAgentKind/tabHasRunningAgent(O(panes×terms))를 다시 안 돌린다(code-review high).
         for (draw_list.cells) |*c| {
             const is_icon = c.col == 0 and (c.codepoint == 0xF0007 or c.codepoint == 0xF0008); // ✶ claude / ◆ codex
-            // 상태줄(카드 마지막 줄)의 이퀄라이저 바(블록 ▁~█)만 스피너로 본다. row=slot*base + line_count*4 + line_index라
-            // within=row%base, line_count=within/4, line_index=within%4; 상태줄=line_index==line_count-1(에이전트 카드의 마지막 줄).
-            const within = c.row % coretext_frame_builder.sidebar_line_base;
-            const on_status_line = (within / 4) >= 1 and (within % 4) == (within / 4) - 1;
-            const is_spinner = on_status_line and isAgentSpinnerCp(c.codepoint);
-            if (!is_icon and !is_spinner) continue;
             // 셀 row에서 표시 슬롯 인덱스를 디코드(row=slot*sidebar_line_base+줄offset, 줄offset<base라 아이콘/스피너 같은 슬롯).
             const slot = c.row / coretext_frame_builder.sidebar_line_base; // = card_kinds/card_running 인덱스(조립 순서와 동일)
             if (slot >= card_kinds.items.len) continue;
+            // 이퀄라이저 바(블록 ▁~█)는 이제 **에이전트 목록 행**에 있다 — 카드 상태줄이 목록으로 이동했기 때문
+            // (docs/sidebar-agent-list.md §2). 옛 게이트는 "카드의 마지막 줄"(line_index==line_count-1)로 좁혀서,
+            // 목록 행의 첫 줄에 오는 파형을 못 잡아 브랜드색이 빠졌다(사용자 제보). row **종류**로 게이트하면
+            // 위치가 바뀌어도 따라오고, 이름·경로 줄의 우연한 블록 문자가 오염되는 것도 막는다.
+            const on_agent_row = slot < rrows.len and (rrows[slot] == .agent or rrows[slot] == .agent_toggle);
+            const is_spinner = on_agent_row and isAgentSpinnerCp(c.codepoint);
+            if (!is_icon and !is_spinner) continue;
             // 스피너 색칠은 **어느 Term이든 running일 때만** — idle/blocked/unknown 상태 문구에 블록 글자가 우연히 있어도
             // 브랜드색으로 오염되지 않게 한다(넓힌 블록 게이트 부작용 차단, code-review high). 아이콘은 상태 무관 솔리드.
             if (is_spinner and !card_running.items[slot]) continue;
@@ -27060,7 +27441,10 @@ pub const AppSession = struct {
         const base = coretext_frame_builder.sidebar_line_base; // 32 — sidebarGlyphRow 인코딩 단일 출처
         var content_tops: std.ArrayList(u32) = .empty;
         defer content_tops.deinit(allocator);
-        var acc: u32 = 0;
+        // **목록 위 여백에서 시작한다** — `rowTop`(밴드·hit-test·caret이 쓰는 기준)이 content_pad_v를 더하므로
+        // 여기서 0부터 누적하면 글자만 여백 위로 올라가 **밴드가 글자보다 한 줄 아래로 밀린다**(사용자 제보).
+        // 세 좌표계(밴드·글자·클릭)가 같은 기준을 써야 "보이는 곳 = 눌리는 곳"이 성립한다.
+        var acc: u32 = m.content_pad_v;
         for (rows) |row| {
             content_tops.append(allocator, acc) catch return; // 카드·헤더 모두 한 엔트리(slot=row 인덱스). OOM: 이 프레임 skip
             acc +|= chrome.components.sidebar.rowHeight(row, m); // 카드=줄 수 기반·헤더=header_row_h
@@ -27832,6 +28216,7 @@ pub const AppSession = struct {
             for (brows, 0..) |row, s| {
                 const abs = switch (row) {
                     .card => |c| c.tab,
+                    .agent_toggle, .agent => continue, // 목록 행엔 ⌘숫자 배지가 없다
                     .group_header => continue, // 헤더 row엔 ⌘숫자(select_tab) 배지가 없다
                 };
                 if (abs >= 9) continue; // select_tab 0..8 → ⌘1~9만 바인딩이 있다
@@ -29160,6 +29545,7 @@ test "SG8a: projectRowsFrom(identity)가 recomputeVisibleTabs와 byte-identical 
         const want = expected[i];
         try std.testing.expectEqual(std.meta.activeTag(want), std.meta.activeTag(got));
         switch (want) {
+            .agent_toggle, .agent => try std.testing.expect(false), // 이 fixture는 목록 행을 만들지 않는다
             .card => |wc| {
                 try std.testing.expectEqual(wc.tab, got.card.tab);
                 try std.testing.expectEqual(wc.active, got.card.active);
@@ -30566,6 +30952,7 @@ test "GP4(a): pin_derived·sidebarRowShowsPin — 멤버 📌 억제·헤더 인
         .card => if (session.sidebarRowShowsPin(r)) {
             card_pins += 1;
         },
+        .agent_toggle, .agent => {},
         .group_header => if (session.sidebarRowShowsPin(r)) {
             header_pins += 1;
         },
@@ -30857,7 +31244,7 @@ test "그룹핀 리뷰 #7: 드래그 중 sidebarMaxScroll이 preview_rows(더 �
     session.sidebar_slot_height_px = 40;
     // 카드 높이는 이제 줄 수 기반이라 슬롯 필드만으로는 안 잡힌다 — 1줄 카드 높이가 40이 되는 메트릭을 박아
     // 고정 슬롯 시절 좌표 기대값을 그대로 쓴다(여백 0·스텝=줄높이).
-    session.sidebar_metrics = .{ .line_h = 40, .line_step = 40, .card_pad_v = 0, .header_row_h = session.sidebar_header_row_h_px };
+    session.sidebar_metrics = .{ .line_h = 40, .line_step = 40, .card_pad_v = 0, .header_row_h = session.sidebar_header_row_h_px, .content_pad_v = 0, .list_pad_v = 0 };
     session.sidebar_header_row_h_px = 20;
     session.sidebar_header_height_px = 40;
     session.backing_height_px = 200; // 뷰포트 = 200 - 40(헤더) = 160
@@ -30970,6 +31357,7 @@ test "그룹핀 리뷰 #9: 그룹 먼저 고정 → 독립 top카드 개별 고�
         fn f(s: *AppSession, tab_index: usize) chrome.components.sidebar.Row {
             for (s.sidebar_rows.items) |r| switch (r) {
                 .card => |c| if (c.tab == tab_index) return r,
+                .agent_toggle, .agent => {},
                 .group_header => {},
             };
             unreachable;
@@ -31037,6 +31425,7 @@ test "그룹핀 리뷰 #9: 그룹 먼저 고정 → 독립 top카드 개별 고�
         .card => if (session.sidebarRowShowsPin(r)) {
             card_pins += 1;
         },
+        .agent_toggle, .agent => {},
         .group_header => {},
     };
     try std.testing.expectEqual(@as(usize, 2), card_pins); // X1·X2만
@@ -31137,6 +31526,7 @@ test "SR4(a): 카드를 그룹 뒤 top카드 옆(gap)으로 드래그 → top_le
     // X를 TOP1 row(=그룹 뒤 gap의 top카드) 옆으로 드래그. 분류: 타겟 TOP1이 최상위 → 전이 의도 true(그룹 밖 gap).
     var top1_row: usize = 0;
     for (session.sidebar_rows.items, 0..) |row, s| switch (row) {
+        .agent_toggle, .agent => {},
         .card => |c| if (c.tab == 2) {
             top1_row = s;
         },
@@ -31167,6 +31557,7 @@ test "SR4(a): 카드를 그룹 뒤 top카드 옆(gap)으로 드래그 → top_le
     session.recomputeVisibleTabs();
     var x_depth: u8 = 255;
     for (session.sidebar_rows.items) |row| switch (row) {
+        .agent_toggle, .agent => {},
         .card => |c| if (c.tab == x_idx) {
             x_depth = c.depth;
         },
@@ -31200,6 +31591,7 @@ test "SR4(b): 카드를 그룹 안(멤버 카드)으로 드래그 → top_level=
     // X를 a1(멤버) row로 드래그 → 그룹 A 안(멤버). 분류: 타겟 a1이 멤버 → 전이 의도 false(그룹 안).
     var a1_row: usize = 0;
     for (session.sidebar_rows.items, 0..) |row, s| switch (row) {
+        .agent_toggle, .agent => {},
         .card => |c| if (c.tab == 1) {
             a1_row = s;
         },
@@ -31282,6 +31674,7 @@ test "SR4(d): 고정 리전 인터리빙 — 고정 top카드를 고정 그룹 �
         try session.refreshDragPreview(3, .{ .card = .{ .target_tab = 2, .top_level = true } }, 0, arena2.allocator());
         var hdrs: usize = 0;
         for (session.sidebar_preview_rows.items) |row| switch (row) {
+            .agent_toggle, .agent => {},
             .group_header => hdrs += 1,
             .card => {},
         };
@@ -31295,6 +31688,7 @@ test "SR4(d): 고정 리전 인터리빙 — 고정 top카드를 고정 그룹 �
     {
         var hdrs: usize = 0;
         for (session.sidebar_rows.items) |row| switch (row) {
+            .agent_toggle, .agent => {},
             .group_header => hdrs += 1,
             .card => {},
         };
@@ -31345,6 +31739,7 @@ test "SR4(e): VirtualLayout.top_level[] 가상화가 projectRowsCore 프리뷰 d
     // 프리뷰 고스트(X)가 depth 0(그룹 밖 최상위)로 투영되는가 — 가상 top_level[]이 pass1 depth를 몰았는지.
     var preview_depth: u8 = 255;
     for (session.sidebar_preview_rows.items) |row| switch (row) {
+        .agent_toggle, .agent => {},
         .card => |c| if (c.tab == 3) {
             preview_depth = c.depth;
         },
@@ -31363,6 +31758,7 @@ test "SR4(e): VirtualLayout.top_level[] 가상화가 projectRowsCore 프리뷰 d
     };
     var confirmed_depth: u8 = 255;
     for (session.sidebar_rows.items) |row| switch (row) {
+        .agent_toggle, .agent => {},
         .card => |c| if (c.tab == x_idx) {
             confirmed_depth = c.depth;
         },
@@ -31398,7 +31794,7 @@ test "SR5(a): 빈 gap 첫 인터리브 — 마지막 멤버 아래 경계 드롭
     session.sidebar_slot_height_px = 40;
     // 카드 높이는 이제 줄 수 기반이라 슬롯 필드만으로는 안 잡힌다 — 1줄 카드 높이가 40이 되는 메트릭을 박아
     // 고정 슬롯 시절 좌표 기대값을 그대로 쓴다(여백 0·스텝=줄높이).
-    session.sidebar_metrics = .{ .line_h = 40, .line_step = 40, .card_pad_v = 0, .header_row_h = session.sidebar_header_row_h_px };
+    session.sidebar_metrics = .{ .line_h = 40, .line_step = 40, .card_pad_v = 0, .header_row_h = session.sidebar_header_row_h_px, .content_pad_v = 0, .list_pad_v = 0 };
     session.sidebar_header_row_h_px = 20;
     session.sidebar_header_height_px = 0;
     session.sidebar_scroll_offset_px = 0;
@@ -31407,6 +31803,7 @@ test "SR5(a): 빈 gap 첫 인터리브 — 마지막 멤버 아래 경계 드롭
     // a1(t1) row + 그 row의 아래/위 경계 y(production과 같은 rowTop/rowHeight 누적).
     var a1_row: usize = 0;
     for (session.sidebar_rows.items, 0..) |row, s| switch (row) {
+        .agent_toggle, .agent => {},
         .card => |c| if (c.tab == 1) {
             a1_row = s;
         },
@@ -31465,7 +31862,7 @@ test "SR5(b): 접힌 그룹 헤더 아래 경계 gap drop + skip 엣지(펼친 �
     session.sidebar_slot_height_px = 40;
     // 카드 높이는 이제 줄 수 기반이라 슬롯 필드만으로는 안 잡힌다 — 1줄 카드 높이가 40이 되는 메트릭을 박아
     // 고정 슬롯 시절 좌표 기대값을 그대로 쓴다(여백 0·스텝=줄높이).
-    session.sidebar_metrics = .{ .line_h = 40, .line_step = 40, .card_pad_v = 0, .header_row_h = session.sidebar_header_row_h_px };
+    session.sidebar_metrics = .{ .line_h = 40, .line_step = 40, .card_pad_v = 0, .header_row_h = session.sidebar_header_row_h_px, .content_pad_v = 0, .list_pad_v = 0 };
     session.sidebar_header_row_h_px = 20;
     session.sidebar_header_height_px = 0;
     session.sidebar_scroll_offset_px = 0;
@@ -31475,6 +31872,7 @@ test "SR5(b): 접힌 그룹 헤더 아래 경계 gap drop + skip 엣지(펼친 �
     var ha_row: usize = 0;
     var hb_row: usize = 0;
     for (session.sidebar_rows.items, 0..) |row, s| switch (row) {
+        .agent_toggle, .agent => {},
         .group_header => |gh| {
             if (gh.tab == 0) ha_row = s;
             if (gh.tab == 2) hb_row = s;
@@ -31599,6 +31997,7 @@ test "SR5(d): pin × local_pinned × top_level 3축 공존 — 고정 그룹 안
     var saw_lp = false;
     var saw_top_card = false;
     for (session.sidebar_rows.items) |row| switch (row) {
+        .agent_toggle, .agent => {},
         .card => |c| {
             if (c.tab == 1) {
                 saw_lp = c.local_pinned; // lp 카드 local_pinned 힌트
@@ -31861,6 +32260,7 @@ test "SG8b: none·자기 subtree 제자리 드롭 → identity + self.tabs 불�
 /// (원본 tab이 카드 row로 방출됐는가)과 depth 정확성을 함께 본다(카드 .tab=원본 인덱스, 프리뷰 가상순서도 동일).
 fn sg8cFindCardDepth(rows: []const chrome.components.sidebar.Row, tab: usize) ?u8 {
     for (rows) |row| switch (row) {
+        .agent_toggle, .agent => {},
         .card => |c| if (c.tab == tab) return c.depth,
         .group_header => {},
     };
@@ -31871,6 +32271,7 @@ fn sg8cFindCardDepth(rows: []const chrome.components.sidebar.Row, tab: usize) ?u
 /// member_count·depth 단언용(헤더 .tab=마커 원본 인덱스).
 fn sg8cFindHeader(rows: []const chrome.components.sidebar.Row, tab: usize) ?chrome.components.sidebar.Row {
     for (rows) |row| switch (row) {
+        .agent_toggle, .agent => {},
         .group_header => |h| if (h.tab == tab) return row,
         .card => {},
     };
@@ -32028,6 +32429,7 @@ test "SG8c: none plan 프리뷰 → preview_rows == 원본 rows·ghost range 비
         const want = live[i];
         try std.testing.expectEqual(std.meta.activeTag(want), std.meta.activeTag(got));
         switch (want) {
+            .agent_toggle, .agent => {},
             .card => |wc| {
                 try std.testing.expectEqual(wc.tab, got.card.tab);
                 try std.testing.expectEqual(wc.depth, got.card.depth);
@@ -32071,6 +32473,7 @@ test "code-review #6: 검색 중 접힌 그룹은 헤더도 펼침 표시(collap
     // 매치 카드(t1)가 접힘 무시하고 펼쳐 보인다.
     var saw_t1_card = false;
     for (session.sidebar_rows.items) |row| switch (row) {
+        .agent_toggle, .agent => {},
         .card => |c| if (c.tab == 1) {
             saw_t1_card = true;
         },
@@ -32438,6 +32841,7 @@ test "SG5-3: create_sibling_group(형제 같은 depth) vs create_group(중첩 de
     var header_depths: [4]u8 = undefined;
     var hc: usize = 0;
     for (session.sidebar_rows.items) |row| switch (row) {
+        .agent_toggle, .agent => {},
         .group_header => |gh| {
             if (hc < header_depths.len) header_depths[hc] = gh.depth;
             hc += 1;
@@ -33210,6 +33614,7 @@ test "GL3(a): 렌더 📌 — 로컬 pin 멤버 sidebarRowShowsPin=true·비pin 
     var card_pins: usize = 0;
     var header_pins: usize = 0;
     for (rows) |r| switch (r) {
+        .agent_toggle, .agent => {},
         .card => if (session.sidebarRowShowsPin(r)) {
             card_pins += 1;
         },
@@ -33253,6 +33658,7 @@ test "GL3(a2): 공존 렌더 — 그룹째 고정 그룹 안 로컬 pin 멤버 =
     var header_pins: usize = 0;
     var member_pins: usize = 0;
     for (rows) |r| switch (r) {
+        .agent_toggle, .agent => {},
         .group_header => if (session.sidebarRowShowsPin(r)) {
             header_pins += 1;
         },
@@ -33350,6 +33756,7 @@ test "GL3(d): 마커 카드 로컬 pin 뒤 렌더(§13.6.1) — 순서·hit-test
         var preview_ptrs: [8]*Tab = undefined;
         var pn: usize = 0;
         for (session.sidebar_preview_rows.items) |r| switch (r) {
+            .agent_toggle, .agent => {},
             .card => |c| {
                 preview_ptrs[pn] = pre[c.tab]; // 프리뷰 .tab = pre-move self.tabs 인덱스
                 pn += 1;
@@ -33367,6 +33774,7 @@ test "GL3(d): 마커 카드 로컬 pin 뒤 렌더(§13.6.1) — 순서·hit-test
         var commit_ptrs: [8]*Tab = undefined;
         var cn: usize = 0;
         for (session.sidebar_rows.items) |r| switch (r) {
+            .agent_toggle, .agent => {},
             .card => |c| {
                 commit_ptrs[cn] = session.tabs.items[c.tab]; // 확정 .tab = post-move self.tabs 인덱스
                 cn += 1;
@@ -33400,6 +33808,7 @@ test "GL3(d): 마커 카드 로컬 pin 뒤 렌더(§13.6.1) — 순서·hit-test
         var preview_ptrs: [8]*Tab = undefined;
         var pn: usize = 0;
         for (session.sidebar_preview_rows.items) |r| switch (r) {
+            .agent_toggle, .agent => {},
             .card => |c| {
                 preview_ptrs[pn] = pre[c.tab];
                 pn += 1;
@@ -33420,6 +33829,7 @@ test "GL3(d): 마커 카드 로컬 pin 뒤 렌더(§13.6.1) — 순서·hit-test
         var commit_ptrs: [8]*Tab = undefined;
         var cn: usize = 0;
         for (session.sidebar_rows.items) |r| switch (r) {
+            .agent_toggle, .agent => {},
             .card => |c| {
                 commit_ptrs[cn] = session.tabs.items[c.tab];
                 cn += 1;
@@ -33661,6 +34071,7 @@ test "GL4(a): 공존 keystone — 그룹째 고정이 로컬 pin 그룹을 전�
     var header_pins: usize = 0;
     var member_pins: usize = 0;
     for (rows) |r| switch (r) {
+        .agent_toggle, .agent => {},
         .group_header => if (session.sidebarRowShowsPin(r)) {
             header_pins += 1;
         },
@@ -33690,6 +34101,7 @@ test "GL4(a): 공존 keystone — 그룹째 고정이 로컬 pin 그룹을 전�
     session.recomputeVisibleTabs();
     var member_pins_after: usize = 0;
     for (session.sidebar_rows.items) |r| switch (r) {
+        .agent_toggle, .agent => {},
         .card => if (session.sidebarRowShowsPin(r)) {
             member_pins_after += 1;
         },
@@ -33772,6 +34184,7 @@ test "GL4(b): 중첩 — 자식 subgroup 안 leaf 로컬 pin float(부모→자�
     // 로컬 pin 📌: A 직접(t2)·자식 B(t5) 둘. 마커 카드·최상위·헤더는 억제.
     var member_pins: usize = 0;
     for (rows) |r| switch (r) {
+        .agent_toggle, .agent => {},
         .card => |c| if (session.sidebarRowShowsPin(r)) {
             if (c.local_pinned) member_pins += 1;
         },
@@ -33850,6 +34263,7 @@ test "GL4(c): 회귀 매트릭스 — 로컬 pin이 그룹 색·rename·검색·
         // 매치 카드 t3(로컬 pin)이 접힘 무시하고 보이며, local_pinned 힌트·📌 유지.
         var saw_lp = false;
         for (session.sidebar_rows.items) |row| switch (row) {
+            .agent_toggle, .agent => {},
             .card => |c| if (c.tab == 2) { // t3 = float 후 self.tabs index2
                 saw_lp = true;
                 try std.testing.expect(c.local_pinned); // ★ 검색 중에도 로컬 pin 힌트
@@ -33934,6 +34348,7 @@ fn expectCardTopLevelPinned(session: *AppSession, tab: *Tab) !void {
     session.recomputeVisibleTabs();
     var found = false;
     for (session.sidebar_rows.items) |r| switch (r) {
+        .agent_toggle, .agent => {},
         .card => |c| if (c.tab == idx) {
             found = true;
             try std.testing.expectEqual(@as(u8, 0), c.depth); // ★ 렌더 depth 0 = 최상위(그룹 흡수 없음)
@@ -34059,6 +34474,7 @@ test "pin매트릭스 #2(버그2 회귀): 그룹째 고정/해제 — 고정 멤
             s.recomputeVisibleTabs();
             var n: usize = 0;
             for (s.sidebar_rows.items) |r| switch (r) {
+                .agent_toggle, .agent => {},
                 .card => if (s.sidebarRowShowsPin(r)) {
                     n += 1;
                 },
@@ -34137,6 +34553,7 @@ test "pin매트릭스 #3(조합): 최상위 개별 pin + 그룹째 고정 + 멤�
     var card_pins: usize = 0;
     var header_pins: usize = 0;
     for (session.sidebar_rows.items) |r| switch (r) {
+        .agent_toggle, .agent => {},
         .card => if (session.sidebarRowShowsPin(r)) {
             card_pins += 1;
         },
@@ -34262,6 +34679,7 @@ test "SG5-1: 그룹 통째 이동(moveGroupRange + sidebarGroupDropBoundary) —
 /// 표시 카드 row 인덱스를 tab 인덱스로 찾는다(그룹 드래그 경계 테스트가 커서 hit-test 대신 쓰는 헤드리스 헬퍼).
 fn cardRowOf(session: *AppSession, tab_idx: usize) usize {
     for (session.sidebar_rows.items, 0..) |row, s| switch (row) {
+        .agent_toggle, .agent => {},
         .card => |c| if (c.tab == tab_idx) return s,
         .group_header => {},
     };
@@ -34301,7 +34719,7 @@ test "(A) 카드 드래그 실좌표: 고정 탭을 그룹 꼬리로 끌면 top_
     session.sidebar_slot_height_px = 40;
     // 카드 높이는 이제 줄 수 기반이라 슬롯 필드만으로는 안 잡힌다 — 1줄 카드 높이가 40이 되는 메트릭을 박아
     // 고정 슬롯 시절 좌표 기대값을 그대로 쓴다(여백 0·스텝=줄높이).
-    session.sidebar_metrics = .{ .line_h = 40, .line_step = 40, .card_pad_v = 0, .header_row_h = session.sidebar_header_row_h_px };
+    session.sidebar_metrics = .{ .line_h = 40, .line_step = 40, .card_pad_v = 0, .header_row_h = session.sidebar_header_row_h_px, .content_pad_v = 0, .list_pad_v = 0 };
     session.sidebar_header_row_h_px = 20;
     session.sidebar_header_height_px = 30;
     session.sidebar_scroll_offset_px = 0;
@@ -34356,7 +34774,7 @@ test "(A) 카드 드래그 실좌표: 고정 탭을 그룹 꼬리로 끌면 top_
     s2.sidebar_slot_height_px = 40;
     // 카드 높이는 이제 줄 수 기반이라 슬롯 필드만으로는 안 잡힌다 — 1줄 카드 높이가 40이 되는 메트릭을 박아
     // 고정 슬롯 시절 좌표 기대값을 그대로 쓴다(여백 0·스텝=줄높이).
-    s2.sidebar_metrics = .{ .line_h = 40, .line_step = 40, .card_pad_v = 0, .header_row_h = s2.sidebar_header_row_h_px };
+    s2.sidebar_metrics = .{ .line_h = 40, .line_step = 40, .card_pad_v = 0, .header_row_h = s2.sidebar_header_row_h_px, .content_pad_v = 0, .list_pad_v = 0 };
     s2.sidebar_header_row_h_px = 20;
     s2.sidebar_header_height_px = 30;
     s2.sidebar_scroll_offset_px = 0;
@@ -34397,7 +34815,7 @@ test "SR-PIN1: 고정 탭을 그룹 한복판에 드롭 → 흡수 금지(전체
     session.sidebar_slot_height_px = 40;
     // 카드 높이는 이제 줄 수 기반이라 슬롯 필드만으로는 안 잡힌다 — 1줄 카드 높이가 40이 되는 메트릭을 박아
     // 고정 슬롯 시절 좌표 기대값을 그대로 쓴다(여백 0·스텝=줄높이).
-    session.sidebar_metrics = .{ .line_h = 40, .line_step = 40, .card_pad_v = 0, .header_row_h = session.sidebar_header_row_h_px };
+    session.sidebar_metrics = .{ .line_h = 40, .line_step = 40, .card_pad_v = 0, .header_row_h = session.sidebar_header_row_h_px, .content_pad_v = 0, .list_pad_v = 0 };
     session.sidebar_header_row_h_px = 20;
     session.sidebar_header_height_px = 30;
     session.sidebar_scroll_offset_px = 0;
@@ -34465,7 +34883,7 @@ test "SR-PIN2: 비고정 탭을 같은 그룹 한복판에 드롭 → 흡수 유
     session.sidebar_slot_height_px = 40;
     // 카드 높이는 이제 줄 수 기반이라 슬롯 필드만으로는 안 잡힌다 — 1줄 카드 높이가 40이 되는 메트릭을 박아
     // 고정 슬롯 시절 좌표 기대값을 그대로 쓴다(여백 0·스텝=줄높이).
-    session.sidebar_metrics = .{ .line_h = 40, .line_step = 40, .card_pad_v = 0, .header_row_h = session.sidebar_header_row_h_px };
+    session.sidebar_metrics = .{ .line_h = 40, .line_step = 40, .card_pad_v = 0, .header_row_h = session.sidebar_header_row_h_px, .content_pad_v = 0, .list_pad_v = 0 };
     session.sidebar_header_row_h_px = 20;
     session.sidebar_header_height_px = 30;
     session.sidebar_scroll_offset_px = 0;
@@ -34512,6 +34930,7 @@ test "SR-PIN3: 고정 그룹은 다른 그룹에 nest 흡수 금지(Cmd nest여�
         session.recomputeVisibleTabs();
         var b_header_row: usize = 0;
         for (session.sidebar_rows.items, 0..) |row, s| switch (row) {
+            .agent_toggle, .agent => {},
             .group_header => |gh| if (gh.tab == 2) {
                 b_header_row = s;
             },
@@ -34544,6 +34963,7 @@ test "SR-PIN3: 고정 그룹은 다른 그룹에 nest 흡수 금지(Cmd nest여�
         session.recomputeVisibleTabs();
         var b_header_row: usize = 0;
         for (session.sidebar_rows.items, 0..) |row, s| switch (row) {
+            .agent_toggle, .agent => {},
             .group_header => |gh| if (gh.tab == 2) {
                 b_header_row = s;
             },
@@ -34577,7 +34997,7 @@ test "SR-PIN4: 고정 탭을 비고정 리전 위치로 드래그 → 고정 리
     session.sidebar_slot_height_px = 40;
     // 카드 높이는 이제 줄 수 기반이라 슬롯 필드만으로는 안 잡힌다 — 1줄 카드 높이가 40이 되는 메트릭을 박아
     // 고정 슬롯 시절 좌표 기대값을 그대로 쓴다(여백 0·스텝=줄높이).
-    session.sidebar_metrics = .{ .line_h = 40, .line_step = 40, .card_pad_v = 0, .header_row_h = session.sidebar_header_row_h_px };
+    session.sidebar_metrics = .{ .line_h = 40, .line_step = 40, .card_pad_v = 0, .header_row_h = session.sidebar_header_row_h_px, .content_pad_v = 0, .list_pad_v = 0 };
     session.sidebar_header_row_h_px = 20;
     session.sidebar_header_height_px = 30;
     session.sidebar_scroll_offset_px = 0;
@@ -34654,6 +35074,7 @@ test "(3) 드래그 대상이 접힌 그룹이면 프리뷰=접힌 헤더만 (�
         var a_card_rows: usize = 0;
         var a_header_collapsed = false;
         for (session.sidebar_preview_rows.items) |row| switch (row) {
+            .agent_toggle, .agent => {},
             .group_header => |h| if (h.tab == 0) {
                 a_header_rows += 1;
                 a_header_collapsed = h.collapsed;
@@ -34691,6 +35112,7 @@ test "(3) 드래그 대상이 접힌 그룹이면 프리뷰=접힌 헤더만 (�
         try session.refreshDragPreview(2, .{ .card = .{ .target_tab = target } }, 0, arena_state.allocator());
         var x_visible = false;
         for (session.sidebar_preview_rows.items) |row| switch (row) {
+            .agent_toggle, .agent => {},
             .card => |c| if (c.tab == 2) {
                 x_visible = true;
             },
@@ -34976,6 +35398,7 @@ test "SG5-4: 그룹을 다른 그룹 헤더에 드롭 → 중첩(depth+1) + subt
     session.recomputeVisibleTabs();
     var b_header_row: usize = 0;
     for (session.sidebar_rows.items, 0..) |row, s| switch (row) {
+        .agent_toggle, .agent => {},
         .group_header => |gh| if (gh.tab == 4) {
             b_header_row = s;
         },
@@ -34998,6 +35421,7 @@ test "SG5-4: 그룹을 다른 그룹 헤더에 드롭 → 중첩(depth+1) + subt
     var hc: usize = 0;
     var prev_marker_ok = true;
     for (session.sidebar_rows.items) |row| switch (row) {
+        .agent_toggle, .agent => {},
         .group_header => |gh| {
             if (hc < depths.len) depths[hc] = gh.depth;
             hc += 1;
@@ -35507,14 +35931,15 @@ test "fillSidebarGlyphPyTop: 그룹 헤더가 앞서면 카드 glyph py_top이 r
     };
     // 헤더 glyph(slot0, 1줄), 카드0 glyph(slot1), 카드1 glyph(slot2), 밴드 셀.
     var cells = [_]metal_frame.NativeMetalCell{ glyphCell(0, 0, 1), glyphCell(1, 0, 1), glyphCell(2, 0, 1), bandCell };
-    AppSession.fillSidebarGlyphPyTop(std.testing.allocator, &cells, &rows, .init(ch, header_row_h));
-    try std.testing.expectEqual(@as(u32, (24 - 20) / 2), cells[0].origin_y); // 헤더 slot0: content top0 + 얇은 줄(24) 세로 중앙(24-20)/2=2
-    // 카드 높이는 이제 줄 수 기반(cardHeight)이라 기대값도 그 계산에서 파생한다 — 줄 기하 조정 시 자동 정합.
+    // 카드 높이는 줄 수 기반(cardHeight)이라 기대값도 그 계산에서 파생한다 — 줄 기하 조정 시 자동 정합.
     const m_t = chrome.components.sidebar.Metrics.init(ch, header_row_h);
+    const pad_t = m_t.content_pad_v; // 목록 위 여백 — 밴드·글자·클릭이 공유하는 시작 오프셋
+    AppSession.fillSidebarGlyphPyTop(std.testing.allocator, &cells, &rows, m_t);
+    try std.testing.expectEqual(@as(u32, pad_t + (24 - 20) / 2), cells[0].origin_y); // 여백 + 헤더 slot0: content top0 + 얇은 줄(24) 세로 중앙(24-20)/2=2
     const card_h_t = chrome.components.sidebar.cardHeight(1, m_t); // 이 rows의 카드는 1줄
     const block_off_t = (card_h_t - AppSession.sidebarBlockHeight(1, ch)) / 2;
-    try std.testing.expectEqual(@as(u32, 24 + block_off_t), cells[1].origin_y); // 카드0 slot1: content top=헤더(24) + 블록중앙
-    try std.testing.expectEqual(@as(u32, 24 + card_h_t + block_off_t), cells[2].origin_y); // 카드1 slot2: + 카드0 높이
+    try std.testing.expectEqual(@as(u32, pad_t + 24 + block_off_t), cells[1].origin_y); // 카드0 slot1: content top=헤더(24) + 블록중앙
+    try std.testing.expectEqual(@as(u32, pad_t + 24 + card_h_t + block_off_t), cells[2].origin_y); // 카드1 slot2: + 카드0 높이
     try std.testing.expectEqual(@as(u32, 0), cells[3].origin_y); // 밴드 셀은 그대로
 
     // (B) 동작 보존: 헤더 없이 카드만이면 content top = row*slot_h(균일 — 옛 slot_idx*slot_h와 동일).
@@ -35524,8 +35949,8 @@ test "fillSidebarGlyphPyTop: 그룹 헤더가 앞서면 카드 glyph py_top이 r
     };
     var cells2 = [_]metal_frame.NativeMetalCell{ glyphCell(0, 0, 1), glyphCell(1, 0, 1) };
     AppSession.fillSidebarGlyphPyTop(std.testing.allocator, &cells2, &rows_flat, .init(ch, header_row_h));
-    try std.testing.expectEqual(@as(u32, 0 * card_h_t + block_off_t), cells2[0].origin_y);
-    try std.testing.expectEqual(@as(u32, 1 * card_h_t + block_off_t), cells2[1].origin_y);
+    try std.testing.expectEqual(@as(u32, pad_t + 0 * card_h_t + block_off_t), cells2[0].origin_y);
+    try std.testing.expectEqual(@as(u32, pad_t + 1 * card_h_t + block_off_t), cells2[1].origin_y);
 
     // (C) 다줄 카드: 카드0(slot1, 헤더 뒤) line_count=3. 줄 스텝=ch+여유(sidebarLineStep)라 블록 높이=sidebarBlockHeight(3,ch),
     // 블록중앙 오프셋=(slot_h-블록)/2, 2줄째는 +2*step. content top=헤더(24). 값은 헬퍼로 파생해 스텝 조정 시 자동 정합.
@@ -35534,13 +35959,89 @@ test "fillSidebarGlyphPyTop: 그룹 헤더가 앞서면 카드 glyph py_top이 r
     // 이 카드 row의 실제 높이(1줄)로 블록중앙을 잡는다 — 3줄 glyph를 1줄 카드에 넣는 인코딩 검증이라
     // 블록이 카드보다 크면 오프셋 0으로 포화된다(-|). 옛 고정 슬롯(100) 하드코딩을 대체.
     const block_off_c: u32 = (card_h_t -| AppSession.sidebarBlockHeight(3, ch)) / 2;
-    try std.testing.expectEqual(@as(u32, 24 + block_off_c + 2 * AppSession.sidebarLineStep(ch)), cells3[0].origin_y); // 헤더24 + block_off + 2줄*step(여유)
+    try std.testing.expectEqual(@as(u32, pad_t + 24 + block_off_c + 2 * AppSession.sidebarLineStep(ch)), cells3[0].origin_y); // 헤더24 + block_off + 2줄*step(여유)
 }
 
 // 카드 줄 수는 **행 높이(hit-test·밴드·glyph)와 렌더가 공유하는 단일 출처**다(sidebarCardLines). 두 곳이 갈리면
 // 카드가 그리는 줄 수와 그 카드가 차지하는 높이가 어긋나 "보이는 곳과 눌리는 곳이 다른" 회귀가 난다. 이 테스트는
 // 상태 변화가 줄 수 → 카드 높이 → 다음 row의 시작 y까지 실제로 전파되는지 못박는다.
-test "사이드바 카드 줄 수: 에이전트 상태줄이 붙으면 카드가 그만큼 높아진다" {
+// 목록의 **조작**을 못박는다: 토글 클릭은 접기만, 에이전트 행 클릭은 그 자리로 이동한다(§5 3단계).
+// 터미널에서 왜 중요한가: 3단계(Term 탭 활성화)가 빠지면 Pane까지만 가고 사용자가 지목한 에이전트는 여전히
+// 가려진 탭에 있다 — 목록이 "보여주기"만 하고 "데려다주기"를 못 하면 이 기능의 절반이 없는 것이다.
+// code-review(max) 회귀: 에이전트 행 ✕가 `closeTermAt`을 직접 불러 (1) 실행 중 에이전트를 확인 없이 죽이고
+// (2) 마지막 워크스페이스의 마지막 Term에서 해제된 surface에 쓰는 UAF + 빈 pane 인덱싱 패닉으로 이어졌다.
+// 터미널에서 왜 중요한가: 사이드바 ✕ 한 번이 되돌릴 수 없는 종료인데, 다른 모든 닫기 경로가 거치는 확인 규율만
+// 이 자리에서 빠져 있었다. 이제 requestClose가 캐스케이드 범위(Term→pane→탭→세션)를 풀고 그 범위로 확인한다.
+test "에이전트 행 ✕: 실행 중이면 확인 모달을 거치고, 마지막 Term에서도 크래시하지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const session = try initSmokeSessionSized(a);
+    defer a.destroy(session);
+    defer session.deinit();
+
+    const tab = session.tabs.items[0];
+    const t0 = tab.panes.items[0].terms.items[0];
+    t0.agent_kind = .claude;
+    t0.agent_state = .running;
+    session.rebuildSidebar() catch {};
+
+    // 단일 워크스페이스·단일 pane·단일 Term = 캐스케이드가 세션 종료까지 가는 최악 경로. 예전엔 여기서
+    // closeTab→latchSessionClose가 해제된 surface에 쓰고 이어지는 rebuild가 빈 pane을 인덱싱했다.
+    session.closeAgentRow(0, 0, 0);
+
+    // 확인 모달이 열렸고(실행 중 명령) 아직 아무것도 파괴되지 않았다 — 즉시 종료가 아니다.
+    try std.testing.expectEqual(@as(usize, 1), session.tabs.items.len);
+    try std.testing.expectEqual(@as(usize, 1), tab.panes.items[0].terms.items.len);
+
+    // 투영은 teardown 중간 상태에서도 안전해야 한다(빈 pane 방어) — 강제로 비운 뒤 재투영해도 패닉하지 않는다.
+    const doomed = tab.panes.items[0].terms.orderedRemove(0);
+    session.destroyTerm(doomed);
+    session.rebuildSidebar() catch {};
+}
+
+test "사이드바 에이전트 목록: 행 클릭이 워크스페이스·Pane·Term까지 데려간다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const session = try initSmokeSessionSized(a);
+    defer a.destroy(session);
+    defer session.deinit();
+
+    const tab = session.tabs.items[0];
+    // pane 2개, 각 pane에 Term 2개 → 그 중 **가려진 탭**(pane0의 term1)에 에이전트를 둔다.
+    try session.splitActivePane(.horizontal);
+    _ = session.focusPaneByPtr(tab.panes.items[0]);
+    try session.newTermInActivePane();
+    const target_pane: usize = 0;
+    const target_term: usize = 1;
+    const t = tab.panes.items[target_pane].terms.items[target_term];
+    t.agent_kind = .claude;
+    t.agent_state = .idle;
+    // 다른 pane을 활성으로 만들어 "가려진 자리"를 재현한다.
+    _ = session.focusPaneByPtr(tab.panes.items[1]);
+    tab.panes.items[target_pane].active_term = 0; // 그 pane의 활성 탭도 0(에이전트는 1에 있다)
+    session.rebuildSidebar() catch {};
+
+    // 목록에 그 에이전트 행이 있고, 인덱스 경로가 실제 자리를 가리킨다.
+    const rows = session.sidebar_rows.items;
+    var agent_row: ?usize = null;
+    for (rows, 0..) |r, i| if (r == .agent) {
+        agent_row = i;
+    };
+    const ar = agent_row orelse return error.NoAgentRow;
+    try std.testing.expectEqual(target_pane, rows[ar].agent.pane);
+    try std.testing.expectEqual(target_term, rows[ar].agent.term);
+
+    // 클릭 → 세 단계가 모두 수행된다.
+    session.focusAgentRow(rows[ar].agent.tab, rows[ar].agent.pane, rows[ar].agent.term);
+    try std.testing.expectEqual(tab.panes.items[target_pane], session.activePane()); // 2) Pane
+    try std.testing.expectEqual(target_term, tab.panes.items[target_pane].active_term); // 3) Term 탭
+
+    // 사라진 Term을 가리키는 행은 무동작(stale 인덱스 방어).
+    session.focusAgentRow(0, target_pane, 999);
+    try std.testing.expectEqual(target_term, tab.panes.items[target_pane].active_term);
+}
+
+test "사이드바 에이전트 목록: Term 전수 나열·1개면 토글 없음·2개면 토글" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const a = std.testing.allocator;
     const session = try initSmokeSessionSized(a);
@@ -35549,32 +36050,39 @@ test "사이드바 카드 줄 수: 에이전트 상태줄이 붙으면 카드가
 
     const sb = chrome.components.sidebar;
     const tab = session.tabs.items[0];
-    const term = tab.activeTerm();
 
-    // (1) 에이전트 없음 = 이름줄만(controlled_smoke는 git repo 밖이라 브랜치·경로줄이 없다).
-    term.agent_kind = .none;
+    // (0) 에이전트가 없으면 카드만 — 목록 행이 붙지 않는다.
     session.rebuildSidebar() catch {};
-    try std.testing.expectEqual(@as(u8, 1), session.sidebarCardLines(tab));
-    const rows1 = session.sidebar_rows.items;
-    try std.testing.expectEqual(@as(u8, 1), rows1[0].card.lines); // 투영이 그 값을 실었다
-    const h1 = sb.rowHeight(rows1[0], session.sidebarMetrics());
-    try std.testing.expectEqual(sb.cardHeight(1, session.sidebarMetrics()), h1);
+    try std.testing.expectEqual(@as(usize, 1), session.sidebar_rows.items.len);
 
-    // (2) 에이전트가 붙으면 상태줄이 생겨 2줄 → 카드가 줄 스텝만큼 높아진다.
-    term.agent_kind = .claude;
-    term.agent_state = .idle;
+    // (1) 에이전트 1개 = 토글 없이 행 하나(§1).
+    const t0 = tab.panes.items[0].terms.items[0];
+    t0.agent_kind = .claude;
+    t0.agent_state = .idle;
     session.rebuildSidebar() catch {};
-    try std.testing.expectEqual(@as(u8, 2), session.sidebarCardLines(tab));
-    const rows2 = session.sidebar_rows.items;
-    try std.testing.expectEqual(@as(u8, 2), rows2[0].card.lines);
-    const h2 = sb.rowHeight(rows2[0], session.sidebarMetrics());
-    try std.testing.expectEqual(session.sidebarMetrics().line_step, h2 - h1);
+    try std.testing.expectEqual(@as(usize, 2), session.sidebar_rows.items.len);
+    try std.testing.expect(session.sidebar_rows.items[1] == .agent);
+    try std.testing.expect(!sb.onAgentToggle(session.sidebar_rows.items, 1));
 
-    // (3) 그 높이가 **다음 row의 시작 y**로 전파된다 — 누적이 카드별 높이를 실제로 반영한다는 증거.
-    try std.testing.expectEqual(
-        @as(i64, @intCast(session.sidebar_header_height_px + h2)),
-        sb.rowTop(rows2, 1, session.sidebar_header_height_px, session.sidebarMetrics(), 0),
-    );
+    // (2) 같은 pane에 Term을 하나 더 띄워 에이전트 2개 → `N agents` 토글 + 행 2개.
+    try session.newTermInActivePane();
+    const t1 = tab.panes.items[0].terms.items[1];
+    t1.agent_kind = .claude;
+    t1.agent_state = .idle;
+    session.rebuildSidebar() catch {};
+    try std.testing.expectEqual(@as(usize, 4), session.sidebar_rows.items.len); // 카드 + 토글 + 행 2
+    try std.testing.expect(sb.onAgentToggle(session.sidebar_rows.items, 1));
+    try std.testing.expectEqual(@as(u16, 2), session.sidebar_rows.items[1].agent_toggle.count);
+
+    // 행은 **Term 단위 전수**다 — 같은 pane의 두 Term이 각각 행을 갖는다(가려진 탭도 포함, §2).
+    try std.testing.expectEqual(@as(usize, 0), session.sidebar_rows.items[2].agent.term);
+    try std.testing.expectEqual(@as(usize, 1), session.sidebar_rows.items[3].agent.term);
+
+    // (3) 접으면 행이 사라지고 토글만 남는다(§4).
+    tab.agents_collapsed = true;
+    session.rebuildSidebar() catch {};
+    try std.testing.expectEqual(@as(usize, 2), session.sidebar_rows.items.len); // 카드 + 토글
+    try std.testing.expect(session.sidebar_rows.items[1] == .agent_toggle);
 }
 
 test "workspaceStatusLine: running=파형, blocked=입력 대기, idle=대기중, unknown=상태 확인" {
@@ -38697,7 +39205,7 @@ fn initRenameCaretTestSession(allocator: std.mem.Allocator) !*AppSession {
     session.sidebar_slot_height_px = 32;
     // 카드 높이는 이제 줄 수 기반이라 슬롯 필드만으로는 안 잡힌다 — 1줄 카드 높이가 32이 되는 메트릭을 박아
     // 고정 슬롯 시절 좌표 기대값을 그대로 쓴다(여백 0·스텝=줄높이).
-    session.sidebar_metrics = .{ .line_h = 32, .line_step = 32, .card_pad_v = 0, .header_row_h = session.sidebar_header_row_h_px };
+    session.sidebar_metrics = .{ .line_h = 32, .line_step = 32, .card_pad_v = 0, .header_row_h = session.sidebar_header_row_h_px, .content_pad_v = 0, .list_pad_v = 0 };
     session.sidebar_header_height_px = 0;
     session.sidebar_header_row_h_px = 16;
     return session;
@@ -39561,13 +40069,13 @@ test "buildSidebarTitleFrame: 에이전트 심볼(✶/◆) prefix여도 프레�
         // (1) 시프트만 하고 size.cols를 안 넓히면 ShapedRecordOutsideSurface로 실패함을 고정(버그 재현 — buildFromDrawList가
         //     실패 시 draw_list를 정리하므로 별도 free 안 함).
         {
-            const dl = try coretext_frame_builder.buildSidebarDrawList(allocator, &names, &branches, &paths, &[_][]const u8{}, &[_]u21{}, &[_]bool{}, sidebar_cols, muted, null, 1, 0, muted, null);
+            const dl = try coretext_frame_builder.buildSidebarDrawList(allocator, &names, &branches, &paths, &[_][]const u8{}, &[_]u21{}, &[_]bool{}, sidebar_cols, muted, &.{}, 1, 0, muted, null);
             for (dl.cells) |*c| c.col += indent_cols;
             try std.testing.expectError(error.ShapedRecordOutsideSurface, fb.buildFromDrawList(allocator, dl, &session.renderer_state));
         }
         // (2) 시프트 후 size.cols=full_cols로 넓히면(수정) 정상 빌드 + row 보존(이름 idx0·경로 idx2, count=3).
         {
-            var dl = try coretext_frame_builder.buildSidebarDrawList(allocator, &names, &branches, &paths, &[_][]const u8{}, &[_]u21{}, &[_]bool{}, sidebar_cols, muted, null, 1, 0, muted, null);
+            var dl = try coretext_frame_builder.buildSidebarDrawList(allocator, &names, &branches, &paths, &[_][]const u8{}, &[_]u21{}, &[_]bool{}, sidebar_cols, muted, &.{}, 1, 0, muted, null);
             for (dl.cells) |*c| c.col += indent_cols;
             dl.size.cols = full_cols;
             var f = try fb.buildFromDrawList(allocator, dl, &session.renderer_state);
@@ -40134,6 +40642,7 @@ fn sidebarCardDepth(session: *AppSession, tab: *Tab) ?u8 {
     };
     const ti = idx orelse return null;
     for (session.sidebar_rows.items) |row| switch (row) {
+        .agent_toggle, .agent => {},
         .card => |c| if (c.tab == ti) return c.depth,
         .group_header => {},
     };
@@ -40288,15 +40797,14 @@ test "사이드바 드래그: 비고정 탭을 위로 끌어도 고정 영역을
     t1.pinned = true; // [P0, P1, u2, u3], pinned_count=2
     session.rebuildSidebar() catch {};
 
-    const header_h: f64 = @floatFromInt(session.sidebar_header_height_px); // 슬롯은 상단 헤더 아래로 시프트
-    const x: f64 = @as(f64, @floatFromInt(session.sidebar_width_px)) - 1;
+    const x: f64 = @as(f64, @floatFromInt(session.sidebar_width_px)) / 2; // ✕ zone(우측 2칸) 밖 — ✕는 이제 고정 표시라 그 자리는 닫기다
 
     // 비고정 끝 탭(slot 3=t3)을 잡아 slot 0(고정 영역)으로 드래그 → 비고정 영역 시작(index 2)으로만 안착.
     session.mouse(1, x, session.testSidebarRowCenterY(3), 0, 0); // down on slot 3 → arm
     try std.testing.expect(session.pointerGestureIs(.sidebar_tab));
     try std.testing.expectEqual(@as(usize, 3), session.pointer_gesture_owner.sidebar_tab.index);
-    session.mouse(2, x, header_h + 1, 0, 0); // drag toward slot 0
-    session.mouse(3, x, header_h + 1, 0, 0); // up
+    session.mouse(2, x, session.testSidebarRowCenterY(0), 0, 0); // drag toward slot 0
+    session.mouse(3, x, session.testSidebarRowCenterY(0), 0, 0); // up
 
     // 고정(t0,t1)은 [0,1] 불변, t3는 비고정 영역 시작(2)으로만, t2가 3으로 밀림.
     try std.testing.expectEqual(t0, session.tabs.items[0]);
@@ -40329,11 +40837,10 @@ test "사이드바 드래그: 고정 탭끼리 재정렬(고정 영역 내 swap,
     t1.pinned = true; // [P0, P1, u2, u3], pinned_count=2
     session.rebuildSidebar() catch {};
 
-    const header_h: f64 = @floatFromInt(session.sidebar_header_height_px); // 슬롯은 상단 헤더 아래로 시프트
-    const x: f64 = @as(f64, @floatFromInt(session.sidebar_width_px)) - 1;
+    const x: f64 = @as(f64, @floatFromInt(session.sidebar_width_px)) / 2; // ✕ zone(우측 2칸) 밖 — ✕는 이제 고정 표시라 그 자리는 닫기다
 
     // 고정 탭 0(t0)을 slot 1(다른 고정)로 드래그 → 고정 영역 내 swap. 비고정 영향 없음.
-    session.mouse(1, x, header_h + 1, 0, 0); // down slot 0(고정도 이제 arm)
+    session.mouse(1, x, session.testSidebarRowCenterY(0), 0, 0); // down slot 0(고정도 이제 arm)
     try std.testing.expect(session.pointerGestureIs(.sidebar_tab));
     try std.testing.expectEqual(@as(usize, 0), session.pointer_gesture_owner.sidebar_tab.index);
     session.mouse(2, x, session.testSidebarRowCenterY(1), 0, 0); // drag to slot 1
@@ -40553,7 +41060,7 @@ test "F1: workspace rename caret y follows card line count + sidebar header/scro
     // 카드 높이가 **줄 수 기반**이 되면서 블록중앙 오프셋은 항상 카드 상하 여백(card_pad_v)이다
     // (카드 높이 = 줄 블록 + 2×여백이므로 (카드-블록)/2 = 여백). 즉 이름줄은 줄 수와 무관하게 카드 상단
     // 같은 자리에 온다 — 옛 고정 슬롯에서 줄이 늘 때마다 이름줄이 위로 올라가던 것과 달라진 점이다.
-    const pad_v: u32 = session.sidebarMetrics().card_pad_v;
+    const pad_v: u32 = session.sidebarMetrics().card_pad_v + session.sidebarMetrics().content_pad_v; // 카드 여백 + 목록 위 여백
     try std.testing.expect(header > 0); // 헤더(검색바·아이콘)가 있다는 전제 — caret y가 그만큼 내려가야 렌더러와 정합
 
     // 1) non-agent 워크스페이스(scroll 0): 카드 1줄(이름만) → caret = header + 슬롯 세로 중앙(1줄 블록).
@@ -40564,20 +41071,20 @@ test "F1: workspace rename caret y follows card line count + sidebar header/scro
     try std.testing.expectEqual(@as(i32, @intCast(header + pad_v)), cr1.y);
     session.closeRename();
 
-    // 2) idle 에이전트 워크스페이스(scroll 0): 상태줄(✓)이 붙어 카드 2줄 → 이름줄(line 0)이 2줄 블록 상단. 블록 높이는
-    // sidebarBlockHeight(2,ch)(줄 스텝 여유 반영)라 block_off=(slot_h-그 값)/2. 이름줄=line 0이라 caret y=header+block_off.
+    // 2) 에이전트가 있으면 **rename 중에도 상태줄이 그려지므로**(편집 화면에서 파형을 보여달라는 사용자 요청)
+    // 카드는 2줄 블록이고 이름줄은 그만큼 위로 올라간다. caret은 렌더와 **같은 줄 수**를 봐야 IME 후보창이
+    // 상태줄을 덮지 않는다(code-review max: 이 계산을 1로 고정했다가 반 줄 어긋났다).
     term.agent_kind = .claude;
     term.agent_state = .idle;
     session.rebuildSidebar() catch {};
     session.startRename(.{ .workspace = tab });
     const cr2 = session.renameCaretRect() orelse return error.NoCaret;
-    try std.testing.expectEqual(@as(i32, @intCast(header + pad_v)), cr2.y);
+    const m2 = session.sidebarMetrics();
+    const row_h2 = chrome.components.sidebar.rowHeight(session.sidebar_rows.items[0], m2);
+    const off2 = (row_h2 -| AppSession.sidebarBlockHeight(2, ch)) / 2;
+    try std.testing.expectEqual(@as(i32, @intCast(header + m2.content_pad_v + off2)), cr2.y);
     session.closeRename();
-
-    // 겹침 방지의 본질은 유지된다: 상태줄은 이름줄 **아래**에 붙고 카드가 그만큼 길어지므로, caret(이름줄) 자리는
-    // 그대로여도 후보창이 파형 상태줄을 덮지 않는다. 옛 모델은 고정 슬롯 안에서 블록을 중앙 정렬해 줄이 늘면
-    // 이름줄이 올라갔지만, 동적 높이에서는 카드가 자라고 이름줄은 상단에 고정된다(더 자연스러운 상단 정렬).
-    try std.testing.expectEqual(cr1.y, cr2.y);
+    try std.testing.expect(cr2.y < cr1.y); // 상태줄이 붙으면 이름줄(=caret)이 위로 올라간다
 
     // 3) scroll offset 반영: 콘텐츠가 offset만큼 위로 밀리면 caret도 따라 올라간다(slotTop이 scroll을 뺌). idx 0,
     // 작은 offset(블록중앙 (slot_h−ch)/2 보다 작아 헤더 clamp 전)이라 caret = header + block_off − offset.
@@ -45921,7 +46428,9 @@ test "code-review #8: 리스트 아래(past-end) 새-워크스페이스 드롭 �
     try session.rebuildSidebar();
     var saw_past_end_band = false;
     for (session.sidebar_cells.items) |c| {
-        if (c.slot_id == 0 and c.origin_y == content_h) saw_past_end_band = true; // past-end 드롭 밴드(콘텐츠 하단)
+        // past-end 밴드의 y = 마지막 row 다음 자리(= 목록 위 여백 + 모든 row 높이). contentHeight는 **아래 여백까지**
+        // 포함하므로 그 차이(content_pad_v)를 빼야 같은 지점이다.
+        if (c.slot_id == 0 and c.origin_y == content_h - session.sidebarMetrics().content_pad_v) saw_past_end_band = true;
     }
     try std.testing.expect(saw_past_end_band);
     session.pointer_gesture_owner = .none;
@@ -46271,6 +46780,7 @@ test "promotePaneToNewWorkspace: 그룹이 있으면 새 워크스페이스를 �
     var new_card_slot: ?usize = null;
     var first_header_slot: ?usize = null;
     for (session.sidebar_rows.items, 0..) |row, slot| switch (row) {
+        .agent_toggle, .agent => {},
         .card => |c| if (c.tab == 1) {
             new_card_slot = slot;
             try std.testing.expectEqual(@as(u8, 0), c.depth); // 최상위 = 들여쓰기 0
@@ -46320,6 +46830,7 @@ test "promotePaneToNewWorkspace: 마지막 그룹이 접혀 있어도 새 워크
     var saw_header = false;
     var saw_grouped_member = false;
     for (session.sidebar_rows.items) |row| switch (row) {
+        .agent_toggle, .agent => {},
         .card => |c| {
             if (c.tab == 1) {
                 saw_new_card = true;
@@ -50453,11 +50964,10 @@ test "sidebar click switches tabs and hover adds a hover band via hit-test" {
     );
     try std.testing.expectEqual(@as(usize, 1), session.app_window.active_tab);
 
-    const header_h: f64 = @floatFromInt(session.sidebar_header_height_px); // 슬롯은 상단 헤더만큼 아래로 시프트
-    const x_in: f64 = @as(f64, @floatFromInt(session.sidebar_width_px)) - 1; // 사이드바 영역 안
+    const x_in: f64 = @as(f64, @floatFromInt(session.sidebar_width_px)) / 2; // 사이드바 영역 안(✕ zone 밖)
 
     // 슬롯 0(y in [header, header+slot_h)) 다운클릭 → 탭 0으로 전환.
-    session.mouse(1, x_in, header_h + 1, 0, 0);
+    session.mouse(1, x_in, session.testSidebarRowCenterY(0), 0, 0);
     try std.testing.expectEqual(@as(usize, 0), session.app_window.active_tab);
     // 슬롯 1 클릭 → 탭 1.
     session.mouse(1, x_in, session.testSidebarRowCenterY(1), 0, 0);
@@ -50470,7 +50980,7 @@ test "sidebar click switches tabs and hover adds a hover band via hit-test" {
     try std.testing.expectEqual(@as(usize, 1), session.app_window.active_tab);
 
     // 호버: 비활성 슬롯(0, 활성은 1) 위면 호버 밴드가 추가된다(활성 밴드 + 호버 밴드 = 2).
-    _ = session.hoverCursor(x_in, header_h + 1, 0);
+    _ = session.hoverCursor(x_in, session.testSidebarRowCenterY(0), 0);
     try std.testing.expectEqual(@as(?usize, 0), session.hovered_slot);
     try std.testing.expectEqual(@as(usize, 2), session.sidebar_cells.items.len);
     // 호버가 활성 슬롯(1) 위면 별도 호버 밴드 없음(활성 색 우선) → 밴드 1개.
@@ -50506,7 +51016,6 @@ test "hovering the sidebar + slot adds a hover band at the plus row" {
         "tab 2",
         "sh",
     );
-    const header_h: f64 = @floatFromInt(session.sidebar_header_height_px);
     const icon_y: f64 = @as(f64, @floatFromInt(session.cell_height_px)) / 2; // 아이콘 줄(row 0) — 3줄 헤더의 빈 가운데 줄 아님
     const x_in: f64 = @as(f64, @floatFromInt(session.sidebar_width_px)) - 1; // 사이드바 우측 끝(헤더 새 워크스페이스 아이콘 영역)
 
@@ -50516,7 +51025,7 @@ test "hovering the sidebar + slot adds a hover band at the plus row" {
     try std.testing.expectEqual(@as(?usize, null), session.hovered_slot);
 
     // 탭 슬롯(0, 비활성)으로 이동(헤더 아래) → 호버 밴드가 그 탭 행으로(slotAt이 header_h를 빼고 슬롯 0).
-    _ = session.hoverCursor(x_in, header_h + 1, 0);
+    _ = session.hoverCursor(x_in, session.testSidebarRowCenterY(0), 0);
     try std.testing.expectEqual(@as(?usize, 0), session.hovered_slot);
     try std.testing.expectEqual(@as(usize, 2), session.sidebar_cells.items.len);
 }
@@ -50549,7 +51058,7 @@ test "clicking the hovered slot close zone closes that tab, elsewhere switches" 
     const w: f64 = @floatFromInt(session.sidebar_width_px);
     const cw: f64 = @floatFromInt(session.cell_width_px);
     const close_x = w - cw; // ✕ zone(우측 2칸) 안
-    const slot0_y: f64 = @as(f64, @floatFromInt(session.sidebar_header_height_px)) + 1; // 슬롯 0(상단 헤더 아래)
+    const slot0_y: f64 = session.testSidebarRowCenterY(0); // 슬롯 0 중앙(목록 위 여백이 있어 header+1은 카드 밖)
 
     // 슬롯 0 좌측(✕ zone 밖) 클릭 → 닫지 않고 전환(active 0). 닫기 전 전환 동작 가드.
     session.mouse(1, 2, slot0_y, 0, 0);
@@ -50591,11 +51100,10 @@ test "dragging a sidebar tab reorders the list and active follows the dragged ta
     try std.testing.expectEqualStrings("Maru shell", session.tabs.items[0].activePane().activeTerm().surface.title);
     try std.testing.expectEqual(@as(usize, 2), session.app_window.active_tab);
 
-    const header_h: f64 = @floatFromInt(session.sidebar_header_height_px); // 슬롯은 상단 헤더 아래로 시프트
-    const x: f64 = @as(f64, @floatFromInt(session.sidebar_width_px)) - 1;
+    const x: f64 = @as(f64, @floatFromInt(session.sidebar_width_px)) / 2; // ✕ zone(우측 2칸) 밖 — ✕는 이제 고정 표시라 그 자리는 닫기다
 
     // 탭 0(Maru)을 슬롯 2로 드래그: down(슬롯0)=전환+드래그 시작 → drag(슬롯2)=moveTab(0,2) → up.
-    session.mouse(1, x, header_h + 1, 0, 0);
+    session.mouse(1, x, session.testSidebarRowCenterY(0), 0, 0);
     try std.testing.expectEqual(@as(usize, 0), session.app_window.active_tab);
     try std.testing.expect(session.pointerGestureIs(.sidebar_tab));
     session.mouse(2, x, session.testSidebarRowCenterY(2), 0, 0);

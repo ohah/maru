@@ -496,6 +496,48 @@ const AttachedTestClient = struct {
     index: usize,
 };
 
+const BatchProjectorProbe = struct {
+    owner: *Owner,
+    requester_index: usize,
+    first_victim_index: usize,
+    second_victim_index: usize,
+    reclaim_before: usize,
+    requester_retained: usize,
+    call_count: usize = 0,
+    first_entered_at_batch_stage: bool = false,
+    second_entered_at_batch_stage: bool = false,
+};
+
+fn observeBatchProjector(ctx: *anyopaque) void {
+    const probe: *BatchProjectorProbe = @ptrCast(@alignCast(ctx));
+    probe.call_count += 1;
+    if (probe.call_count > 2) return;
+    const requester = probe.owner.clients[probe.requester_index] orelse return;
+    const first = probe.owner.clients[probe.first_victim_index] orelse return;
+    const second = probe.owner.clients[probe.second_victim_index] orelse return;
+    const requester_slot = probe.owner.reactor.get(requester.admission) catch return;
+    const requester_tracker = requester.trackers.get(1) orelse return;
+    const accounting = probe.owner.reactor.accountingSnapshot();
+    const prepared =
+        (requester_slot.preparedBaseBytes(requester_tracker) catch return) ==
+        connection_slot.base_update_max_bytes and
+        accounting.prepared_base_bytes == connection_slot.base_update_max_bytes and
+        accounting.prepared_reclaim_bytes == probe.requester_retained;
+    if (probe.call_count == 1) {
+        probe.first_entered_at_batch_stage =
+            prepared and
+            probe.owner.total_pressure_reclaims == probe.reclaim_before and
+            first.largestScreenPressure() != null and
+            second.largestScreenPressure() != null;
+    } else {
+        probe.second_entered_at_batch_stage =
+            prepared and
+            probe.owner.total_pressure_reclaims == probe.reclaim_before + 1 and
+            first.largestScreenPressure() == null and
+            second.largestScreenPressure() != null;
+    }
+}
+
 fn connectAttachedTestClient(
     owner: *Owner,
     path: [:0]const u8,
@@ -1220,6 +1262,323 @@ test "poll owner backs off when one observer reclaim is insufficient for base re
     const exact_boundary_failure = owner.reactor.accountingSnapshot();
     try testing.expectEqual(@as(usize, 0), exact_boundary_failure.prepared_base_bytes);
     try testing.expectEqual(@as(usize, 0), exact_boundary_failure.prepared_reclaim_bytes);
+
+    for (fds[0..fd_count]) |*fd| {
+        _ = c.shutdown(fd.*, c.SHUT.RDWR);
+        _ = c.close(fd.*);
+        fd.* = -1;
+    }
+    var close_attempts: usize = 0;
+    while (owner.activeCount() != 0 and close_attempts < 4000) : (close_attempts += 1)
+        _ = try owner.pollOnce(0);
+    try testing.expectEqual(@as(usize, 0), owner.activeCount());
+    for (owner.clients, owner.producer_remaining) |client, remaining| {
+        try testing.expect(client == null);
+        try testing.expectEqual(@as(usize, 0), remaining);
+    }
+    try testing.expectEqual(@as(usize, 0), server.subscriptions.count());
+    try testing.expectEqual(@as(usize, 0), runtime_registry.attachmentCount());
+    try testing.expectEqual(@as(usize, 0), server.host_status.client_count);
+    try testing.expect(!owner.admin_admission.active);
+    const final = owner.reactor.accountingSnapshot();
+    try testing.expectEqual(@as(usize, 0), final.resident_bytes);
+    try testing.expectEqual(@as(usize, 0), final.shared_bytes);
+    try testing.expectEqual(@as(usize, 0), final.prepared_base_bytes);
+    try testing.expectEqual(@as(usize, 0), final.prepared_reclaim_bytes);
+}
+
+test "poll owner rolls back a batch when one reclaim is insufficient and retries atomically" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir_len = try tmp.dir.realPath(testing.io, &dir_buf);
+    const dir_raw = dir_buf[0..dir_len];
+    const dir_path = try testing.allocator.dupeZ(u8, dir_raw);
+    defer testing.allocator.free(dir_path);
+    const socket_path = try std.fmt.allocPrintSentinel(
+        testing.allocator,
+        "{s}/insufficient-batch-reclaim.sock",
+        .{dir_raw},
+        0,
+    );
+    defer testing.allocator.free(socket_path);
+    var runtime_registry = registry.TerminalRuntimeRegistry.init(testing.allocator);
+    defer runtime_registry.deinit();
+    _ = try runtime_registry.register(0xAA, 80, 24);
+    for (0..9) |index| _ = try runtime_registry.register(0x400 + index, 80, 24);
+    var server = try socket_server.SocketServer.bind(
+        testing.allocator,
+        dir_path,
+        socket_path,
+        0xB6,
+        &runtime_registry,
+    );
+    defer server.deinit();
+    server.host_status = .{ .manifest_capable = true };
+    var fake_runtime: server_mod.FakeRuntimeOps = .{
+        .new_base_len = 1024 * 1024,
+        .delta_send_len = 7 * 1024 * 1024,
+    };
+    server.runtime_ops = fake_runtime.ops();
+    var owner = try Owner.init(testing.allocator, testing.io, &server);
+    defer owner.deinit();
+    owner.next_cadence_ns = std.math.maxInt(u64);
+
+    var fds: [12]c.fd_t = undefined;
+    var fd_count: usize = 0;
+    defer {
+        for (fds[0..fd_count]) |fd| {
+            if (fd >= 0) _ = c.close(fd);
+        }
+    }
+    const requester = try connectAttachedTestClient(&owner, socket_path, "observer");
+    fds[fd_count] = requester.fd;
+    fd_count += 1;
+    const first_victim = try connectAttachedTestClient(&owner, socket_path, "observer");
+    fds[fd_count] = first_victim.fd;
+    fd_count += 1;
+    const second_victim = try connectAttachedTestClient(&owner, socket_path, "observer");
+    fds[fd_count] = second_victim.fd;
+    fd_count += 1;
+    var pin_indices: [9]usize = undefined;
+    var controller_peer: c.fd_t = -1;
+    for (&pin_indices, 0..) |*pin_index, index| {
+        const runtime_hex = try std.fmt.allocPrint(testing.allocator, "{x}", .{0x400 + index});
+        defer testing.allocator.free(runtime_hex);
+        const pin = try connectAttachedTestClientForRuntime(
+            &owner,
+            socket_path,
+            runtime_hex,
+            "controller",
+        );
+        fds[fd_count] = pin.fd;
+        fd_count += 1;
+        if (index == 0) controller_peer = pin.fd;
+        pin_index.* = pin.index;
+    }
+    for (pin_indices) |pin_index| {
+        const pin = owner.clients[pin_index].?;
+        try fillServerSendBuffer(pin.fd);
+        const slot = try owner.reactor.get(pin.admission);
+        const tracker = pin.trackers.get(1).?;
+        const pressure = try testing.allocator.alloc(u8, connection_slot.screen_soft_bytes);
+        @memset(pressure, 'P');
+        slot.enqueueOwnedScreen(tracker, pressure) catch |err| {
+            testing.allocator.free(pressure);
+            return err;
+        };
+        try slot.consumeWritten(1);
+        pin.noteWriteStalled(10);
+        try testing.expect(pin.largestScreenPressure() == null);
+    }
+
+    const victim_bytes = 1024 * 1024;
+    const first_victim_client = owner.clients[first_victim.index].?;
+    try fillServerSendBuffer(first_victim_client.fd);
+    const first_victim_slot = try owner.reactor.get(first_victim_client.admission);
+    const first_victim_tracker = first_victim_client.trackers.get(1).?;
+    const first_pressure = try testing.allocator.alloc(u8, victim_bytes);
+    @memset(first_pressure, 'V');
+    first_victim_slot.enqueueOwnedScreen(first_victim_tracker, first_pressure) catch |err| {
+        testing.allocator.free(first_pressure);
+        return err;
+    };
+    _ = try owner.pollOnce(0);
+    const first_candidate = first_victim_client.largestScreenPressure().?;
+
+    const second_victim_client = owner.clients[second_victim.index].?;
+    try fillServerSendBuffer(second_victim_client.fd);
+    const second_victim_slot = try owner.reactor.get(second_victim_client.admission);
+    const second_victim_tracker = second_victim_client.trackers.get(1).?;
+    const second_pressure = try testing.allocator.alloc(u8, victim_bytes);
+    @memset(second_pressure, 'W');
+    second_victim_slot.enqueueOwnedScreen(second_victim_tracker, second_pressure) catch |err| {
+        testing.allocator.free(second_pressure);
+        return err;
+    };
+    _ = try owner.pollOnce(0);
+    const second_candidate = second_victim_client.largestScreenPressure().?;
+
+    const requester_client = owner.clients[requester.index].?;
+    const requester_slot = try owner.reactor.get(requester_client.admission);
+    const requester_tracker = requester_client.trackers.get(1).?;
+    const attachment_before = requester_client.connection.attachments.get(1).?;
+    const base_before = try testing.allocator.dupe(u8, attachment_before.base.?);
+    defer testing.allocator.free(base_before);
+    try testing.expect(attachment_before.observation_base == null);
+    const retained_before = try requester_slot.retainedBaseBytes(requester_tracker);
+    const pending_before = requester_slot.pending_bytes;
+    const chunks_before = requester_slot.chunk_len;
+    const screen_before = try requester_slot.screenResidentBytes(requester_tracker);
+    const revision_before = attachment_before.observation_revision;
+    const ticks_before = attachment_before.observation_ticks;
+    const pressure_before = owner.reactor.accountingSnapshot();
+    const encoded_batch_bytes =
+        7 * 1024 * 1024 + 7 * protocol.header_size;
+    const prepared_shared = pressure_before.shared_bytes - retained_before +
+        connection_slot.base_update_max_bytes;
+    try testing.expect(prepared_shared <= connection_slot.shared_steady_bytes);
+    try testing.expect(
+        prepared_shared + encoded_batch_bytes > connection_slot.shared_steady_bytes,
+    );
+    try testing.expect(
+        prepared_shared - first_candidate.reclaimable_bytes + encoded_batch_bytes >
+            connection_slot.shared_steady_bytes,
+    );
+    try testing.expect(
+        prepared_shared - first_candidate.reclaimable_bytes -
+            second_candidate.reclaimable_bytes + encoded_batch_bytes <=
+            connection_slot.shared_steady_bytes,
+    );
+
+    const delta_before = fake_runtime.delta_calls;
+    const reclaim_before = owner.total_pressure_reclaims;
+    var projector_probe: BatchProjectorProbe = .{
+        .owner = &owner,
+        .requester_index = requester.index,
+        .first_victim_index = first_victim.index,
+        .second_victim_index = second_victim.index,
+        .reclaim_before = reclaim_before,
+        .requester_retained = retained_before,
+    };
+    fake_runtime.delta_probe_ctx = &projector_probe;
+    fake_runtime.delta_probe = observeBatchProjector;
+    owner.producer_remaining[requester.index] = requester_client.beginProducerSweep(100);
+    var attempts: usize = 0;
+    while ((try requester_slot.globalPressureRetryAfter(requester_tracker)) == 0 and
+        attempts < 100) : (attempts += 1)
+        _ = try owner.pollOnce(0);
+    const retry_at = try requester_slot.globalPressureRetryAfter(requester_tracker);
+    try testing.expect(retry_at != 0);
+    try testing.expectEqual(@as(usize, 1), projector_probe.call_count);
+    try testing.expect(projector_probe.first_entered_at_batch_stage);
+    try testing.expectEqual(delta_before + 1, fake_runtime.delta_calls);
+    try testing.expectEqualSlices(u8, base_before, fake_runtime.delta_base_seen[0..fake_runtime.delta_base_seen_len]);
+    try testing.expectEqual(reclaim_before + 1, owner.total_pressure_reclaims);
+    try testing.expectEqual(
+        connection_slot.ScreenState.invalidated,
+        try first_victim_slot.screenState(first_victim_tracker),
+    );
+    try testing.expectEqual(
+        connection_slot.ScreenState.valid,
+        try second_victim_slot.screenState(second_victim_tracker),
+    );
+    try testing.expectEqual(@as(usize, 0), try first_victim_slot.screenResidentBytes(first_victim_tracker));
+    try testing.expectEqual(
+        pressure_before.shared_bytes - first_candidate.reclaimable_bytes,
+        owner.reactor.accountingSnapshot().shared_bytes,
+    );
+    try testing.expectEqual(connection_slot.ScreenState.valid, try requester_slot.screenState(requester_tracker));
+    try testing.expectEqual(retained_before, try requester_slot.retainedBaseBytes(requester_tracker));
+    try testing.expectEqual(pending_before, requester_slot.pending_bytes);
+    try testing.expectEqual(chunks_before, requester_slot.chunk_len);
+    try testing.expectEqual(screen_before, try requester_slot.screenResidentBytes(requester_tracker));
+    const attachment_failed = requester_client.connection.attachments.get(1).?;
+    try testing.expectEqualSlices(u8, base_before, attachment_failed.base.?);
+    try testing.expect(attachment_failed.observation_base == null);
+    try testing.expectEqual(revision_before, attachment_failed.observation_revision);
+    try testing.expectEqual(ticks_before, attachment_failed.observation_ticks);
+    try testing.expectEqual(@as(usize, 0), try requester_slot.preparedBaseBytes(requester_tracker));
+    const failed = owner.reactor.accountingSnapshot();
+    try testing.expectEqual(@as(usize, 0), failed.prepared_base_bytes);
+    try testing.expectEqual(@as(usize, 0), failed.prepared_reclaim_bytes);
+    var no_prefix: [1]u8 = undefined;
+    const no_prefix_rc = c.recv(requester.fd, &no_prefix, no_prefix.len, posix.MSG.DONTWAIT);
+    try testing.expect(no_prefix_rc < 0 and posix.errno(no_prefix_rc) == .AGAIN);
+
+    try sendTestStream(controller_peer, .input_bytes, 1, "INPUT-DURING-BATCH-BACKOFF");
+    var input_attempts: usize = 0;
+    while (fake_runtime.last_input_len == 0 and input_attempts < 1000) : (input_attempts += 1)
+        _ = try owner.pollOnce(0);
+    try testing.expectEqualStrings(
+        "INPUT-DURING-BATCH-BACKOFF",
+        fake_runtime.last_input[0..fake_runtime.last_input_len],
+    );
+    try testing.expectEqual(retry_at, try requester_slot.globalPressureRetryAfter(requester_tracker));
+    try testing.expectEqual(reclaim_before + 1, owner.total_pressure_reclaims);
+
+    _ = requester_client.beginProducerSweep(retry_at - 1);
+    requester_client.tick(retry_at - 1);
+    try testing.expectEqual(delta_before + 1, fake_runtime.delta_calls);
+    try testing.expectEqual(reclaim_before + 1, owner.total_pressure_reclaims);
+    try testing.expectEqual(pending_before, requester_slot.pending_bytes);
+    try testing.expectEqual(
+        connection_slot.ScreenState.valid,
+        try second_victim_slot.screenState(second_victim_tracker),
+    );
+
+    _ = requester_client.beginProducerSweep(retry_at);
+    requester_client.tick(retry_at);
+    try testing.expectEqual(delta_before + 2, fake_runtime.delta_calls);
+    try testing.expectEqual(@as(usize, 2), projector_probe.call_count);
+    try testing.expect(projector_probe.second_entered_at_batch_stage);
+    try testing.expectEqual(reclaim_before + 2, owner.total_pressure_reclaims);
+    try testing.expectEqual(
+        retry_at,
+        try requester_slot.globalPressureRetryAfter(requester_tracker),
+    );
+    try testing.expectEqual(
+        connection_slot.ScreenState.invalidated,
+        try second_victim_slot.screenState(second_victim_tracker),
+    );
+    try testing.expectEqual(connection_slot.ScreenState.valid, try requester_slot.screenState(requester_tracker));
+    try testing.expectEqual(@as(usize, 1024 * 1024), try requester_slot.retainedBaseBytes(requester_tracker));
+    try testing.expectEqual(@as(usize, encoded_batch_bytes), requester_slot.pending_bytes - pending_before);
+    try testing.expectEqual(chunks_before + 7, requester_slot.chunk_len);
+    try testing.expectEqual(
+        screen_before + encoded_batch_bytes,
+        try requester_slot.screenResidentBytes(requester_tracker),
+    );
+    const attachment_succeeded = requester_client.connection.attachments.get(1).?;
+    try testing.expectEqual(@as(usize, 1024 * 1024), attachment_succeeded.base.?.len);
+    try testing.expect(attachment_succeeded.base.?[0] == 'N');
+    try testing.expect(attachment_succeeded.base.?[attachment_succeeded.base.?.len - 1] == 'N');
+    try testing.expectEqual(@as(usize, 0), try requester_slot.preparedBaseBytes(requester_tracker));
+    const succeeded = owner.reactor.accountingSnapshot();
+    try testing.expectEqual(
+        pressure_before.shared_bytes - first_candidate.reclaimable_bytes -
+            second_candidate.reclaimable_bytes - retained_before +
+            1024 * 1024 + encoded_batch_bytes,
+        succeeded.shared_bytes,
+    );
+    try testing.expectEqual(@as(usize, 0), succeeded.prepared_base_bytes);
+    try testing.expectEqual(@as(usize, 0), succeeded.prepared_reclaim_bytes);
+
+    var parser = framing.FrameParser.init(testing.allocator);
+    defer parser.deinit();
+    var wire_buf: [64 * 1024]u8 = undefined;
+    var wire_frames: usize = 0;
+    var wire_payload_bytes: usize = 0;
+    var wire_end_streams: usize = 0;
+    var wire_attempts: usize = 0;
+    while (wire_frames < 7 and wire_attempts < 4000) : (wire_attempts += 1) {
+        _ = try owner.pollOnce(0);
+        const rc = c.recv(requester.fd, &wire_buf, wire_buf.len, posix.MSG.DONTWAIT);
+        if (rc < 0 and posix.errno(rc) == .AGAIN) continue;
+        if (rc <= 0) return error.TestUnexpectedResult;
+        try parser.push(wire_buf[0..@intCast(rc)]);
+        while (try parser.next()) |frame| {
+            defer frame.deinit(testing.allocator);
+            try testing.expectEqual(protocol.Kind.delta_chunk, frame.header.kind);
+            try testing.expectEqual(@as(u64, 1), frame.header.stream_id);
+            try testing.expect(frame.payload.len != 0);
+            try testing.expect(frame.payload[0] == 'D');
+            try testing.expect(frame.payload[frame.payload.len - 1] == 'D');
+            wire_frames += 1;
+            wire_payload_bytes += frame.payload.len;
+            if (frame.header.flags & protocol.Flags.end_stream != 0) {
+                wire_end_streams += 1;
+                try testing.expectEqual(@as(usize, 7), wire_frames);
+            }
+        }
+    }
+    try testing.expectEqual(@as(usize, 7), wire_frames);
+    try testing.expectEqual(@as(usize, 7 * 1024 * 1024), wire_payload_bytes);
+    try testing.expectEqual(@as(usize, 1), wire_end_streams);
+    try testing.expectEqual(pending_before, requester_slot.pending_bytes);
+    try testing.expectEqual(chunks_before, requester_slot.chunk_len);
+    try testing.expectEqual(connection_slot.ScreenState.valid, try requester_slot.screenState(requester_tracker));
 
     for (fds[0..fd_count]) |*fd| {
         _ = c.shutdown(fd.*, c.SHUT.RDWR);

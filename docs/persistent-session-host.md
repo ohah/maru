@@ -1919,6 +1919,10 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
       한 victim을 회수한 뒤 base reservation 재시도도 부족하면 같은 turn에 두 번째 victim을 찾거나 requester를
       invalidate하지 않는다. 실패한 reservation이 prepared 회계를 남기지 않고 requester의 valid/base/queue를
       보존한 채 1초 뒤 재시도한다.
+      base reservation과 projector가 성공했더라도 valid batch의 최초 admission과 victim 하나 회수 뒤 재admission이
+      모두 `GlobalLimit`이면 batch prefix를 한 바이트도 commit하지 않는다. `CollectedOutput`과 prepared base를
+      rollback하고 requester의 valid/base/queue를 보존한 채 1초 뒤 새 turn에서 재시도한다. 다음 turn도 victim은
+      최대 하나만 회수하며, 충분해진 경우에만 전체 batch를 atomic admission한다.
     - **P5b2b2 — real PTY/RSS artifact:** 독립 ReleaseFast session-host process와 controlled forkpty child,
       controller/slow/healthy 세 client를 사용한다. daemon과 같은 `server.tickOwner() → pollOnce()` 순서에서 stall
       이후 unique controller token이 실제 PTY child에 쓰이고 echo output이 healthy observer screen에 반영되는지

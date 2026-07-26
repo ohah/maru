@@ -492,6 +492,12 @@ const scrollbar_alpha_idle: u8 = 0x4D; // idle(faint) — ~30%
 // 커서 깜빡임 반주기는 config(`cursor.blink-interval-ms`, 기본 500ms)에서 온다 — blinkIntervalTicks()가
 // Swift host의 실제 frame-loop cadence에 맞춰 tick으로 환산한다(F1-4b). 일반 터미널 관례(on 500ms / off 500ms)가 기본값.
 const agent_poll_interval_ms: u32 = 500; // 포그라운드 프로세스(에이전트) polling 주기.
+/// 세션 기록 파일(transcript) polling 주기. 대화는 **사람이 치는 속도**로 바뀌므로 상태 polling(≈0.5s)보다 느려도
+/// 충분하고, 디렉터리 스캔·tail 파싱을 그만큼 덜 한다(docs/sidebar-agent-list.md §7.4).
+const transcript_poll_interval_ms: u64 = 1000;
+/// 알림 본문에 싣는 대화 한 줄의 상한(bytes). 표시 상한(`max_text_bytes`)보다 짧다 — OS 배너는 몇 줄만 보여주고
+/// 자르므로, 긴 원문을 통째로 넣어봐야 뒤가 안 보이면서 알림만 커진다.
+const notification_conversation_max_bytes: usize = 160;
 const agent_observer_interval_ms: u32 = 100; // 화면/OSC/activity 상태 판정 주기.
 const agent_activity_window_ms: u64 = 500; // 이 안의 마지막 PTY output은 recent activity로 본다.
 const agent_spin_interval_ms: u32 = 133; // running 스피너 프레임 주기(옛 30Hz 4틱 ≈133ms).
@@ -16656,6 +16662,9 @@ pub const AppSession = struct {
             n += 1; // 폴더 줄
             if (has_branch) n += 1; // 브랜치 줄(repo 안일 때만 — 카드 보조줄과 같은 규칙)
         }
+        // 마지막 **응답** 줄(§7). 프롬프트는 라벨 줄이 자리를 내주므로 줄 수를 늘리지 않는다. 세션 기록을 못 읽으면
+        // (계약 1) 이 줄이 없어 행이 예전 높이로 돌아간다 — 조립부의 append 조건과 1:1이어야 한다.
+        if (term.agent_transcript.reply().len > 0) n += 1;
         return n;
     }
 
@@ -22102,7 +22111,7 @@ pub const AppSession = struct {
             std.fmt.allocPrint(self.allocator, "{s} · {s}", .{ location, title })
         else
             self.allocator.dupe(u8, location)) catch return null;
-        self.notification_body_out = self.allocator.dupe(u8, body) catch {
+        self.notification_body_out = self.notificationBodyOwned(term, body) catch {
             self.allocator.free(self.notification_title_out);
             self.notification_title_out = &.{};
             return null;
@@ -22111,6 +22120,36 @@ pub const AppSession = struct {
         const fg_banner = !(focused_term != null and term == focused_term.?);
         _ = self.pushNotificationHistory(self.notification_title_out, self.notification_body_out, osc_surface_id);
         return .{ .title = self.notification_title_out, .body = self.notification_body_out, .surface_id = osc_surface_id, .foreground_banner = fg_banner };
+    }
+
+    /// 알림 본문(owned) = provider 문구 + 그 Term의 **마지막 대화**(docs/sidebar-agent-list.md §7).
+    ///
+    /// provider가 주는 문구는 `Claude is waiting for your input`처럼 **어느 세션인지 말해주지 않는다**. 에이전트를
+    /// 여럿 돌리면 배너만 보고는 무엇에 대한 알림인지 알 수 없어 결국 창을 뒤져야 한다. 제목의 위치 라벨(탭 › 팬)이
+    /// 자리를 알려준다면, 마지막 프롬프트는 **무엇을 시킨 건지**를 알려준다.
+    ///
+    /// 프롬프트를 먼저 싣는다 — OS 배너는 몇 줄만 보여주고 잘라내므로, 식별에 더 쓸모 있는 쪽이 앞에 와야 한다.
+    /// 대화를 못 읽었으면(계약 1) provider 문구만 그대로 나가 기존 동작과 같다.
+    fn notificationBodyOwned(self: *AppSession, term: *Term, body: []const u8) ![]u8 {
+        const tr = maru.session.agent_transcript;
+        const prompt = tr.clampUtf8(term.agent_transcript.prompt(), notification_conversation_max_bytes);
+        const reply = tr.clampUtf8(term.agent_transcript.reply(), notification_conversation_max_bytes);
+        if (prompt.len == 0 and reply.len == 0) return self.allocator.dupe(u8, body);
+
+        var out: std.ArrayListUnmanaged(u8) = .empty;
+        errdefer out.deinit(self.allocator);
+        if (body.len > 0) try out.appendSlice(self.allocator, body);
+        if (prompt.len > 0) {
+            if (out.items.len > 0) try out.append(self.allocator, '\n');
+            // 프롬프트 마커(❯)로 "사용자가 친 것"임을 응답과 구분한다 — 두 줄이 붙어 나오면 누가 한 말인지 흐려진다.
+            try out.appendSlice(self.allocator, "\u{276F} ");
+            try out.appendSlice(self.allocator, prompt);
+        }
+        if (reply.len > 0) {
+            if (out.items.len > 0) try out.append(self.allocator, '\n');
+            try out.appendSlice(self.allocator, reply);
+        }
+        return out.toOwnedSlice(self.allocator);
     }
 
     /// host-backed Term의 OSC 9/777 알림을 host에서 pull해 GUI 알림 경로에 잇는다(§6.32 — #1523 host→client 전달의 GUI
@@ -23836,13 +23875,81 @@ pub const AppSession = struct {
                             term.agent_stabilizer.reset();
                             term.agent_screen_generation = 0;
                             term.agent_last_output_ms = 0;
+                            term.agent_transcript.reset(); // 새 프로세스의 대화를 이전 세션 것과 섞지 않는다
                         }
                     }
-                    if (observer_probe and observation_current and term.agent_kind != .none)
+                    if (observer_probe and observation_current and term.agent_kind != .none) {
                         self.pollAgentState(term, displayed);
+                        self.pollAgentTranscript(term, displayed);
+                    }
                 }
             }
         }
+    }
+
+    /// 세션 기록 파일에서 그 Term의 **마지막 대화**(프롬프트·응답)를 갱신한다(docs/sidebar-agent-list.md §7).
+    ///
+    /// **선택적 보강**(계약 1)이라 어떤 실패도 조용히 지나간다 — 디렉터리가 없든(경로 인코딩 규칙이 provider 변경으로
+    /// 어긋나든), 파일을 못 열든, JSON이 깨졌든 행은 아이콘·상태·폴더·브랜치로 정상 동작하고 대화 줄만 빈다.
+    /// 그래서 이 함수는 error를 내지 않는다.
+    fn pollAgentTranscript(self: *AppSession, term: *Term, displayed: bool) void {
+        const tr = maru.session.agent_transcript;
+        if (term.agent_kind != .claude) return; // codex 어댑터는 5단계(경로·파서·서브에이전트 필터만 다르다)
+        const cwd = term.rt.observation.cwd.items;
+        const cache = &term.agent_transcript;
+        if (cwd.len == 0) return;
+        const now = self.awakeMs();
+        if (cache.last_poll_ms != 0 and now -| cache.last_poll_ms < transcript_poll_interval_ms) return;
+        cache.last_poll_ms = now;
+
+        const home_z = std.c.getenv("HOME") orelse return;
+        const home = std.mem.span(home_z);
+        var slug_buf: [1024]u8 = undefined;
+        const slug = tr.claudeDirName(cwd, &slug_buf) orelse return;
+        var path_buf: [2048]u8 = undefined;
+        const dir_path = std.fmt.bufPrint(&path_buf, "{s}/.claude/projects/{s}", .{ home, slug }) catch return;
+        const dir = std.Io.Dir.openDirAbsolute(self.io, dir_path, .{}) catch return;
+        defer dir.close(self.io);
+
+        // **매핑을 고정하지 않는다**(계약 2). Term이 새로 출력했으면(= mapped_output_ms가 어긋나면) 그 시점의 최신
+        // 파일을 다시 고른다 — `/clear`로 같은 프로세스가 파일을 갈아타도 따라간다(§7.2 반증 2). 유휴 세션은 스스로
+        // 갱신되지 않으므로 "그 순간 최신 = 그 Term이 방금 말한 세션"이 성립한다(실측: claude 4/4).
+        var name_buf: [tr.max_name_bytes]u8 = undefined;
+        if (cache.name_len == 0 or cache.mapped_output_ms != term.agent_last_output_ms) {
+            const found = tr.latestSessionFile(self.io, dir, &name_buf) orelse return;
+            if (!std.mem.eql(u8, found.name, cache.fileName())) {
+                cache.setFileName(found.name);
+                cache.read_mtime_ns = 0; // 파일이 바뀌었으면 mtime 비교를 건너뛰고 무조건 읽는다
+            }
+            cache.mapped_output_ms = term.agent_last_output_ms;
+        }
+        if (cache.name_len == 0) return;
+
+        // mtime이 그대로면 다시 읽지 않는다(계약 4) — 대화가 안 바뀌었는데 매초 256KB를 파싱할 이유가 없다.
+        const st = dir.statFile(self.io, cache.fileName(), .{}) catch return;
+        if (st.mtime.nanoseconds == cache.read_mtime_ns) return;
+        cache.read_mtime_ns = st.mtime.nanoseconds;
+
+        const tail_buf = self.allocator.alloc(u8, tr.max_tail_bytes) catch return;
+        defer self.allocator.free(tail_buf);
+        const tail = tr.readTail(self.io, dir, cache.fileName(), tail_buf);
+        if (tail.len == 0) return;
+
+        const had_text = !cache.owned.conversation.isEmpty();
+        // 줄 하나를 파싱하는 데만 쓰고 통째로 버리는 arena — JSON Value 트리를 개별 free할 이유가 없다.
+        var parse_arena = std.heap.ArenaAllocator.init(self.allocator);
+        defer parse_arena.deinit();
+        tr.parseClaudeTail(parse_arena.allocator(), tail, &cache.owned);
+        // **남의 기록을 띄우지 않는다**: 파일이 스스로 밝힌 cwd가 이 Term의 cwd와 다르면 버린다. 디렉터리 이름
+        // 인코딩 규칙(claudeDirName)이 불완전해 엉뚱한 디렉터리를 열더라도 여기서 걸린다(§7.3).
+        const claimed = cache.owned.conversation.cwd;
+        if (claimed.len > 0 and !std.mem.eql(u8, claimed, cwd)) cache.owned.conversation = .{};
+
+        // 대화 **유무**가 바뀌면 행 줄 수가 바뀌므로 재투영이 필요하다(행 높이·hit-test·밴드가 sidebar_rows에서
+        // 나온다). 텍스트만 바뀐 경우엔 라벨이 매 프레임 조립되므로 dirty만 세우면 된다.
+        const has_text = !cache.owned.conversation.isEmpty();
+        if (has_text != had_text) self.rebuildSidebar() catch {};
+        if (displayed) self.metal_dirty = true;
     }
 
     /// foreground process와 터미널이 이미 소유한 bounded 화면 tail·OSC title/progress·최근 PTY 출력을 결합한다.
@@ -26827,6 +26934,17 @@ pub const AppSession = struct {
     fn agentRowLabelOwned(self: *AppSession, term: *Term) ![]const u8 {
         const status = try self.agentStatusLine(term);
         defer self.allocator.free(status);
+        // 마지막 **사용자 프롬프트**가 있으면 종류 이름·상태 문구 대신 그것을 싣는다(§7). 사용자가 이 행에서 알고
+        // 싶은 건 "무엇을 시켰는가"이고, 진행 여부는 앞의 마커(파형·✓)가 이미 말한다. 종류는 gutter 아이콘에 남는다.
+        const prompt = term.agent_transcript.prompt();
+        if (prompt.len > 0) {
+            // 상태 문구는 "<마커> <문구>" 꼴이라(agentStatusLine 단일 출처) 첫 공백 앞이 마커다 — 파형 애니메이션도
+            // 그 자리에서 그대로 살아 있다. 마커를 따로 만들지 않는 이유는 상태 문구가 바뀔 때 둘이 어긋나지 않게.
+            const marker_end = std.mem.indexOfScalar(u8, status, ' ') orelse status.len;
+            const marker = status[0..marker_end];
+            if (marker.len == 0) return self.allocator.dupe(u8, prompt);
+            return std.fmt.allocPrint(self.allocator, "{s} {s}", .{ marker, prompt });
+        }
         const kind_name: []const u8 = switch (term.agent_kind) {
             .claude => "Claude Code",
             .codex => "Codex",
@@ -26834,6 +26952,13 @@ pub const AppSession = struct {
         };
         if (status.len == 0) return self.allocator.dupe(u8, kind_name);
         return std.fmt.allocPrint(self.allocator, "{s} \u{00b7} {s}", .{ kind_name, status });
+    }
+
+    /// 에이전트 행 **응답 줄**(owned) — 마지막 에이전트 응답(§7). 없으면 빈 문자열이라 렌더가 그 줄을 건너뛴다.
+    fn agentRowReplyOwned(self: *AppSession, term: *Term, indent: []const u8) ![]const u8 {
+        const reply = term.agent_transcript.reply();
+        if (reply.len == 0) return self.allocator.dupe(u8, "");
+        return std.fmt.allocPrint(self.allocator, "{s}  {s}", .{ indent, reply });
     }
 
     /// 에이전트 행 **폴더 줄**(owned) — 그 Term이 도는 디렉터리(§2.1). 카드 헤더가 활성 Term 기준이라 다른 Pane에서
@@ -27187,7 +27312,11 @@ pub const AppSession = struct {
                         try self.agentRowBranchOwned(t, ind)
                     else
                         try self.allocator.dupe(u8, ""));
-                    try status_lines.append(self.allocator, try self.allocator.dupe(u8, ""));
+                    // 4행: 마지막 **응답**(§7). sidebarAgentRowLines의 줄 수 조건과 1:1이다.
+                    try status_lines.append(self.allocator, if (aterm) |t|
+                        try self.agentRowReplyOwned(t, ind)
+                    else
+                        try self.allocator.dupe(u8, ""));
                     // gutter 아이콘: 그 Term의 kind(카드 대표 아이콘이 사라진 자리를 행마다 대신한다).
                     try agents.append(self.allocator, if (aterm) |t| agentIconCodepoint(t.agent_kind) else 0);
                     try pins.append(self.allocator, false);
@@ -35972,6 +36101,67 @@ test "fillSidebarGlyphPyTop: 그룹 헤더가 앞서면 카드 glyph py_top이 r
 // (2) 마지막 워크스페이스의 마지막 Term에서 해제된 surface에 쓰는 UAF + 빈 pane 인덱싱 패닉으로 이어졌다.
 // 터미널에서 왜 중요한가: 사이드바 ✕ 한 번이 되돌릴 수 없는 종료인데, 다른 모든 닫기 경로가 거치는 확인 규율만
 // 이 자리에서 빠져 있었다. 이제 requestClose가 캐스케이드 범위(Term→pane→탭→세션)를 풀고 그 범위로 확인한다.
+// 4단계(§7): 세션 기록에서 읽은 마지막 대화가 **행 라벨·줄 수·알림 본문** 셋에 실제로 도달하는지 고정한다.
+// 캐시(Term.agent_transcript)까지는 폴링이 채우고, 여기서 검증하는 건 그 아래 소비 경로다 — 파일→캐시 구간은
+// 실제 FS·provider 포맷에 의존해 단위 테스트가 못 덮으므로 앱 실행으로 확인한다(§10).
+test "에이전트 행: 마지막 대화가 라벨·줄 수·알림 본문에 실린다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const session = try initSmokeSessionSized(a);
+    defer a.destroy(session);
+    defer session.deinit();
+
+    const tab = session.tabs.items[0];
+    const term = tab.panes.items[0].terms.items[0];
+    term.agent_kind = .claude;
+    term.agent_state = .idle;
+
+    // 대화가 없을 때(계약 1: 기록을 못 읽은 상태) — 기존 표시가 그대로다.
+    {
+        const label = try session.agentRowLabelOwned(term);
+        defer a.free(label);
+        try std.testing.expect(std.mem.indexOf(u8, label, "Claude Code") != null);
+    }
+    const lines_before = session.sidebarAgentRowLines(tab, .{ .pane = 0, .term = 0 });
+
+    term.agent_transcript.owned.conversation = .{
+        .prompt = term.agent_transcript.owned.store("배포 스크립트 고쳐줘"),
+        .reply = term.agent_transcript.owned.store("네, 수정했습니다"),
+    };
+
+    // 라벨: 종류 이름 대신 **프롬프트**가 오고, 상태 마커(✓)는 남는다 — 진행 여부를 잃지 않는다.
+    {
+        const label = try session.agentRowLabelOwned(term);
+        defer a.free(label);
+        try std.testing.expect(std.mem.indexOf(u8, label, "배포 스크립트 고쳐줘") != null);
+        try std.testing.expect(std.mem.indexOf(u8, label, "Claude Code") == null);
+        try std.testing.expect(std.mem.indexOf(u8, label, "\u{2713}") != null);
+    }
+
+    // 줄 수: 응답 줄이 하나 늘어야 한다. 늘지 않으면 응답이 행 높이 밖에 그려져 아래 행을 침범한다.
+    const lines_after = session.sidebarAgentRowLines(tab, .{ .pane = 0, .term = 0 });
+    try std.testing.expectEqual(lines_before + 1, lines_after);
+    try std.testing.expect(lines_after <= 4); // sidebarGlyphRow의 line_index는 2비트다
+
+    // 알림 본문: provider 문구 뒤에 대화가 붙는다. 프롬프트가 먼저다 — OS 배너는 뒷줄을 자른다.
+    {
+        const body = try session.notificationBodyOwned(term, "Claude is waiting for your input");
+        defer a.free(body);
+        const pi = std.mem.indexOf(u8, body, "배포 스크립트 고쳐줘") orelse return error.PromptMissing;
+        const ri = std.mem.indexOf(u8, body, "네, 수정했습니다") orelse return error.ReplyMissing;
+        try std.testing.expect(std.mem.indexOf(u8, body, "Claude is waiting") != null);
+        try std.testing.expect(pi < ri);
+    }
+
+    // 대화가 없으면 알림은 provider 문구 그대로 — 기존 동작과 byte-identical이어야 한다.
+    term.agent_transcript.reset();
+    {
+        const body = try session.notificationBodyOwned(term, "Claude is waiting for your input");
+        defer a.free(body);
+        try std.testing.expectEqualStrings("Claude is waiting for your input", body);
+    }
+}
+
 test "에이전트 행 ✕: 실행 중이면 확인 모달을 거치고, 마지막 Term에서도 크래시하지 않는다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const a = std.testing.allocator;

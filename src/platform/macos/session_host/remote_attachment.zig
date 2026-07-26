@@ -32,6 +32,53 @@ pub const Revoked = struct {
 
 pub const DecodeError = error{ OutOfMemory, Malformed };
 
+pub fn attachParams(
+    allocator: std.mem.Allocator,
+    runtime_id: u128,
+    mode: Mode,
+) error{OutOfMemory}![]u8 {
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    defer out.deinit();
+    const runtime_text = runtimeIdText(runtime_id);
+    out.writer.print(
+        "{{\"runtime_id\":\"{s}\",\"mode\":\"{s}\"}}",
+        .{ &runtime_text, @tagName(mode) },
+    ) catch return error.OutOfMemory;
+    return allocator.dupe(u8, out.written());
+}
+
+pub fn statusParams(
+    allocator: std.mem.Allocator,
+    stream_id: u64,
+) error{OutOfMemory}![]u8 {
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    defer out.deinit();
+    var json: std.json.Stringify = .{ .writer = &out.writer, .options = .{} };
+    json.write(.{ .stream_id = stream_id }) catch return error.OutOfMemory;
+    return allocator.dupe(u8, out.written());
+}
+
+pub fn takeoverParams(
+    allocator: std.mem.Allocator,
+    stream_id: u64,
+    expected_controller_generation: u64,
+) error{OutOfMemory}![]u8 {
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    defer out.deinit();
+    var json: std.json.Stringify = .{ .writer = &out.writer, .options = .{} };
+    json.write(.{
+        .stream_id = stream_id,
+        .expected_controller_generation = expected_controller_generation,
+    }) catch return error.OutOfMemory;
+    return allocator.dupe(u8, out.written());
+}
+
+fn runtimeIdText(runtime_id: u128) [32]u8 {
+    var text: [32]u8 = undefined;
+    _ = std.fmt.bufPrint(&text, "{x:0>32}", .{runtime_id}) catch unreachable;
+    return text;
+}
+
 pub fn decodeAttach(
     allocator: std.mem.Allocator,
     bytes: []const u8,
@@ -313,6 +360,24 @@ test "remote attachment frozen v1 controller schema is isolated from current sch
             "{\"stream_id\":9,\"granted\":{}}",
             0xaa,
         ),
+    );
+}
+
+test "remote attachment request builders are canonical and bounded" {
+    const attach = try attachParams(std.testing.allocator, 0xaa, .observer);
+    defer std.testing.allocator.free(attach);
+    try std.testing.expectEqualStrings(
+        "{\"runtime_id\":\"000000000000000000000000000000aa\",\"mode\":\"observer\"}",
+        attach,
+    );
+    const status = try statusParams(std.testing.allocator, 7);
+    defer std.testing.allocator.free(status);
+    try std.testing.expectEqualStrings("{\"stream_id\":7}", status);
+    const takeover = try takeoverParams(std.testing.allocator, 7, 3);
+    defer std.testing.allocator.free(takeover);
+    try std.testing.expectEqualStrings(
+        "{\"stream_id\":7,\"expected_controller_generation\":3}",
+        takeover,
     );
 }
 

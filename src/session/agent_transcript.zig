@@ -12,8 +12,10 @@
 //! **계약**(§7.1) — 이 모듈의 모든 함수가 지킨다:
 //! 1. **선택적 보강이다.** 어떤 실패도 error가 아니라 **빈 결과**로 돌아온다. 행은 아이콘·상태로 정상 동작하고
 //!    대화 줄만 빈다. 이 계약이 없으면 provider가 포맷을 바꿀 때 목록 전체가 죽는다.
-//! 2. **프로세스에서 파일을 추론하지 않는다.** 매핑을 고정하지 않고 "그 Term이 출력한 시점에 갱신된 파일"을
-//!    매번 따라간다(호출부 책임 — §7.2 반증 2: `/clear`로 같은 프로세스가 파일을 갈아탄다).
+//! 2. **파일을 추측하지 않는다.** provider가 **자식 프로세스 env로 밝힌 세션 신원**으로만 파일을 고른다
+//!    (claude `CLAUDE_CODE_SESSION_ID`=파일명, codex `CODEX_THREAD_ID`=rollout 접미사 — §7.2.1). 신원을 얻지
+//!    못하면 아무것도 보여주지 않는다. 예전엔 "그 순간 갱신된 파일"을 따라갔지만(활동 상관) 그 추측이 새
+//!    터미널에 옛 대화를 붙이고 같은 cwd의 두 에이전트가 서로의 대화를 물게 해 폐기했다.
 //! 3. **서브에이전트를 배제한다.** claude는 서브에이전트 기록이 `<세션 id>/` **하위 디렉터리**에 쌓이므로 직속
 //!    파일만 훑으면 배제된다(§7.3). 실측: 직속 54개 ↔ 하위 포함 1805개.
 //! 4. **tail만 읽는다.** 47MB 파일도 끝 `max_tail_bytes`만 본다(§7.4).
@@ -130,9 +132,16 @@ pub const max_name_bytes: usize = 128;
 /// **매핑을 고정하지 않는다**(계약 2). `mapped_output_ms`가 그 규율의 구현이다 — Term이 새로 출력할 때마다
 /// (= 이 값이 `agent_last_output_ms`와 어긋날 때마다) 디렉터리를 다시 훑어 그 시점의 최신 파일을 채택한다.
 /// `/clear`로 같은 프로세스가 파일을 갈아타도, resume으로 옛 파일에 이어 써도 자동으로 따라간다.
+/// 세션 신원 문자열 상한(uuid 36자 + 여유).
+pub const max_identity_bytes: usize = 64;
+
 pub const Cache = struct {
     name: [max_name_bytes]u8 = undefined,
     name_len: usize = 0,
+    /// provider가 **자식 env로 밝힌** 세션 신원(claude=세션 파일명, codex=rollout thread id). 비면 미확보 —
+    /// 그때만 활동 상관 폴백을 쓴다(§7.2). 이 값이 있으면 파일 선택에 추측이 없다.
+    identity_buf: [max_identity_bytes]u8 = undefined,
+    identity_len: usize = 0,
     /// 마지막으로 **읽어서 파싱한** 파일 mtime. 그대로면 다시 읽지 않는다(계약 4).
     read_mtime_ns: i96 = 0,
     /// 마지막 폴링 시각(awake ms) — throttle.
@@ -145,6 +154,16 @@ pub const Cache = struct {
         return self.name[0..self.name_len];
     }
 
+    pub fn identity(self: *const Cache) []const u8 {
+        return self.identity_buf[0..self.identity_len];
+    }
+
+    pub fn setIdentity(self: *Cache, value: []const u8) void {
+        const n = @min(value.len, self.identity_buf.len);
+        @memcpy(self.identity_buf[0..n], value[0..n]);
+        self.identity_len = n;
+    }
+
     pub fn setFileName(self: *Cache, name: []const u8) void {
         const n = @min(name.len, self.name.len);
         @memcpy(self.name[0..n], name[0..n]);
@@ -152,6 +171,9 @@ pub const Cache = struct {
     }
 
     /// 매핑과 대화를 모두 버린다. cwd가 바뀌었거나 기록이 그 Term의 것이 아님이 드러났을 때.
+    ///
+    /// **신원은 지우지 않는다** — 그건 provider가 밝힌 사실이지 우리가 추론한 매핑이 아니다. 신원이 바뀌는 경우는
+    /// 호출부가 `setIdentity`로 덮어쓴다(그 전에 이 함수로 매핑을 버린다).
     pub fn reset(self: *Cache) void {
         self.name_len = 0;
         self.read_mtime_ns = 0;
@@ -424,6 +446,39 @@ pub fn latestSessionFile(io: std.Io, dir: std.Io.Dir, name_buf: []u8, exclude: [
     }
     if (best_len == 0) return null;
     return .{ .name = name_buf[0..best_len], .mtime_ns = best_ns };
+}
+
+/// codex 날짜 계층에서 **파일명이 `suffix`로 끝나는** 파일을 찾는다(`rollout-<ts>-<thread_id>.jsonl`).
+///
+/// 신원(`CODEX_THREAD_ID`)을 아는 경우의 경로다 — 후보를 열어 `session_meta`를 파싱할 필요도, mtime을 비교할
+/// 필요도 없다. 상대 경로를 `out`에 쓰고 반환한다. 없으면 null(아직 파일이 안 생겼거나 다른 기계의 세션).
+pub fn findCodexByThreadId(io: std.Io, root: std.Io.Dir, suffix: []const u8, out: []u8) ?[]const u8 {
+    var years = root.iterate();
+    while ((years.next(io) catch return null)) |y| {
+        if (y.kind != .directory) continue;
+        var ydir = root.openDir(io, y.name, .{}) catch continue;
+        defer ydir.close(io);
+        var months = ydir.iterate();
+        while ((months.next(io) catch break)) |mo| {
+            if (mo.kind != .directory) continue;
+            var mdir = ydir.openDir(io, mo.name, .{}) catch continue;
+            defer mdir.close(io);
+            var days = mdir.iterate();
+            while ((days.next(io) catch break)) |d| {
+                if (d.kind != .directory) continue;
+                var ddir = mdir.openDir(io, d.name, .{}) catch continue;
+                defer ddir.close(io);
+                var files = ddir.iterate();
+                while ((files.next(io) catch break)) |f| {
+                    if (f.kind != .file) continue;
+                    if (!std.mem.endsWith(u8, f.name, suffix)) continue;
+                    const written = std.fmt.bufPrint(out, "{s}/{s}/{s}/{s}", .{ y.name, mo.name, d.name, f.name }) catch return null;
+                    return written;
+                }
+            }
+        }
+    }
+    return null;
 }
 
 /// 파일 **앞** `buf.len` 바이트. `session_meta`가 첫 레코드라 신원 확인은 이만큼이면 된다.

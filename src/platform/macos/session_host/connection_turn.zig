@@ -2004,6 +2004,70 @@ test "subscription pressure emits one control notice and recovers with an atomic
     try testing.expectEqual(slot_mod.ScreenState.valid, try slot.screenState(tracker));
 }
 
+test "partial observer in a mixed controller connection is not a fail-close victim" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const testing = std.testing;
+    var fds: [2]c_int = undefined;
+    try testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds));
+    defer _ = c.close(fds[1]);
+    var registry_value = registry.TerminalRuntimeRegistry.init(testing.allocator);
+    defer registry_value.deinit();
+    _ = try registry_value.register(0xAA, 80, 24);
+    _ = try registry_value.register(0xBB, 80, 24);
+    var subscriptions = subscription_identity.Table.init(testing.allocator);
+    defer subscriptions.deinit();
+    const reactor = try slot_mod.ReactorCore.create(testing.allocator);
+    defer reactor.destroy();
+    var runtime_ops: server.FakeRuntimeOps = .{};
+    const client = try Client.create(
+        testing.allocator,
+        fds[0],
+        reactor,
+        83,
+        &registry_value,
+        &subscriptions,
+        .{ .runtime_ops = runtime_ops.ops() },
+    );
+    defer client.destroy();
+    try sendTestFrame(
+        fds[1],
+        .hello,
+        1,
+        "{\"protocol_min\":2,\"protocol_max\":2,\"client_kind\":\"gui\"}",
+    );
+    client.readReady(1);
+    try sendTestFrame(
+        fds[1],
+        .request,
+        2,
+        "{\"method\":\"runtime.attach\",\"params\":{\"runtime_id\":\"aa\",\"mode\":\"controller\"}}",
+    );
+    client.readReady(2);
+    try sendTestFrame(
+        fds[1],
+        .request,
+        3,
+        "{\"method\":\"runtime.attach\",\"params\":{\"runtime_id\":\"bb\",\"mode\":\"observer\"}}",
+    );
+    client.readReady(3);
+    const slot = try reactor.get(client.admission);
+    try slot.consumeWritten(slot.pending_bytes);
+    const observer = client.trackers.get(2).?;
+    try slot.enqueueScreen(observer, "partial-observer");
+    try slot.consumeWritten(1);
+    slot.notePartial(.write, 10, false);
+
+    try testing.expect(client.largestScreenPressure() == null);
+    try testing.expect(registry.Capability.has(
+        registry_value.capabilitiesOfSubscription(
+            0xAA,
+            client.connection.attachments.get(1).?.subscription_id,
+        ),
+        registry.Capability.input,
+    ));
+    try testing.expect(!client.isClosing());
+}
+
 test "failed recovery backoff does not pin round robin ahead of healthy siblings" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const testing = std.testing;

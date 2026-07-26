@@ -497,6 +497,15 @@ fn connectAttachedTestClient(
     path: [:0]const u8,
     mode: []const u8,
 ) !AttachedTestClient {
+    return connectAttachedTestClientForRuntime(owner, path, "aa", mode);
+}
+
+fn connectAttachedTestClientForRuntime(
+    owner: *Owner,
+    path: [:0]const u8,
+    runtime_hex: []const u8,
+    mode: []const u8,
+) !AttachedTestClient {
     var occupied: [max_clients]bool = undefined;
     for (owner.clients, 0..) |client, index| occupied[index] = client != null;
     const fd = try connectTestClient(path);
@@ -511,8 +520,8 @@ fn connectAttachedTestClient(
     try pumpUntilResponse(owner, fd, "host_id");
     const request = try std.fmt.allocPrint(
         testing.allocator,
-        "{{\"method\":\"runtime.attach\",\"params\":{{\"runtime_id\":\"aa\",\"mode\":\"{s}\"}}}}",
-        .{mode},
+        "{{\"method\":\"runtime.attach\",\"params\":{{\"runtime_id\":\"{s}\",\"mode\":\"{s}\"}}}}",
+        .{ runtime_hex, mode },
     );
     defer testing.allocator.free(request);
     try sendTestRequest(fd, .request, 2, request);
@@ -802,6 +811,136 @@ test "poll owner reclaims one observer offender and preserves controller and hea
     try testing.expectEqual(@as(usize, 0), final.shared_bytes);
     try testing.expectEqual(@as(usize, 0), final.prepared_base_bytes);
     try testing.expectEqual(@as(usize, 0), final.prepared_reclaim_bytes);
+}
+
+test "poll owner preserves requester and backs off when only partial controllers pin global budget" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir_len = try tmp.dir.realPath(testing.io, &dir_buf);
+    const dir_raw = dir_buf[0..dir_len];
+    const dir_path = try testing.allocator.dupeZ(u8, dir_raw);
+    defer testing.allocator.free(dir_path);
+    const socket_path = try std.fmt.allocPrintSentinel(
+        testing.allocator,
+        "{s}/pressure-backoff.sock",
+        .{dir_raw},
+        0,
+    );
+    defer testing.allocator.free(socket_path);
+    var runtime_registry = registry.TerminalRuntimeRegistry.init(testing.allocator);
+    defer runtime_registry.deinit();
+    _ = try runtime_registry.register(0xAA, 80, 24);
+    for (0..10) |index| _ = try runtime_registry.register(0x100 + index, 80, 24);
+    var server = try socket_server.SocketServer.bind(
+        testing.allocator,
+        dir_path,
+        socket_path,
+        0xB3,
+        &runtime_registry,
+    );
+    defer server.deinit();
+    server.host_status = .{ .manifest_capable = true };
+    var fake_runtime: server_mod.FakeRuntimeOps = .{};
+    server.runtime_ops = fake_runtime.ops();
+    var owner = try Owner.init(testing.allocator, testing.io, &server);
+    defer owner.deinit();
+    owner.next_cadence_ns = std.math.maxInt(u64);
+
+    var fds: [11]c.fd_t = undefined;
+    var fd_count: usize = 0;
+    defer {
+        for (fds[0..fd_count]) |fd| {
+            if (fd >= 0) _ = c.close(fd);
+        }
+    }
+    const healthy = try connectAttachedTestClient(&owner, socket_path, "observer");
+    fds[fd_count] = healthy.fd;
+    fd_count += 1;
+    var controller_indices: [10]usize = undefined;
+    for (&controller_indices, 0..) |*controller_index, index| {
+        const runtime_hex = try std.fmt.allocPrint(testing.allocator, "{x}", .{0x100 + index});
+        defer testing.allocator.free(runtime_hex);
+        const controller = try connectAttachedTestClientForRuntime(
+            &owner,
+            socket_path,
+            runtime_hex,
+            "controller",
+        );
+        fds[fd_count] = controller.fd;
+        fd_count += 1;
+        controller_index.* = controller.index;
+    }
+    for (controller_indices) |controller_index| {
+        const controller = owner.clients[controller_index].?;
+        try fillServerSendBuffer(controller.fd);
+        const slot = try owner.reactor.get(controller.admission);
+        const tracker = controller.trackers.get(1).?;
+        const pressure = try testing.allocator.alloc(u8, connection_slot.screen_soft_bytes);
+        @memset(pressure, 'C');
+        slot.enqueueOwnedScreen(tracker, pressure) catch |err| {
+            testing.allocator.free(pressure);
+            return err;
+        };
+        try slot.consumeWritten(1);
+        controller.noteWriteStalled(10);
+        try testing.expect(slot.writeBackpressured());
+        try testing.expect(try slot.trackerHasWrittenPrefix(tracker));
+        try testing.expect(controller.largestScreenPressure() == null);
+    }
+
+    const healthy_client = owner.clients[healthy.index].?;
+    const healthy_slot = try owner.reactor.get(healthy_client.admission);
+    const healthy_tracker = healthy_client.trackers.get(1).?;
+    const base_before = try healthy_slot.retainedBaseBytes(healthy_tracker);
+    const delta_before = fake_runtime.delta_calls;
+    owner.producer_remaining[healthy.index] = healthy_client.beginProducerSweep(100);
+    owner.next_cadence_ns = std.math.maxInt(u64);
+    var attempts: usize = 0;
+    while ((try healthy_slot.globalPressureRetryAfter(healthy_tracker)) == 0 and attempts < 100) : (attempts += 1)
+        _ = try owner.pollOnce(0);
+    const retry_at = try healthy_slot.globalPressureRetryAfter(healthy_tracker);
+    try testing.expect(retry_at != 0);
+    try testing.expectEqual(@as(usize, 0), owner.total_pressure_reclaims);
+    try testing.expectEqual(delta_before, fake_runtime.delta_calls);
+    try testing.expectEqual(
+        connection_slot.ScreenState.valid,
+        try healthy_slot.screenState(healthy_tracker),
+    );
+    try testing.expectEqual(base_before, try healthy_slot.retainedBaseBytes(healthy_tracker));
+
+    _ = healthy_client.beginProducerSweep(retry_at - 1);
+    healthy_client.tick(retry_at - 1);
+    try testing.expectEqual(retry_at, try healthy_slot.globalPressureRetryAfter(healthy_tracker));
+    try testing.expectEqual(delta_before, fake_runtime.delta_calls);
+    _ = healthy_client.beginProducerSweep(retry_at);
+    healthy_client.tick(retry_at);
+    try testing.expect(
+        (try healthy_slot.globalPressureRetryAfter(healthy_tracker)) > retry_at,
+    );
+    try testing.expectEqual(delta_before, fake_runtime.delta_calls);
+    try testing.expectEqual(@as(usize, 0), owner.total_pressure_reclaims);
+    try testing.expectEqual(
+        connection_slot.ScreenState.valid,
+        try healthy_slot.screenState(healthy_tracker),
+    );
+    try testing.expectEqual(base_before, try healthy_slot.retainedBaseBytes(healthy_tracker));
+
+    for (fds[0..fd_count]) |*fd| {
+        _ = c.shutdown(fd.*, c.SHUT.RDWR);
+        _ = c.close(fd.*);
+        fd.* = -1;
+    }
+    var close_attempts: usize = 0;
+    while (owner.activeCount() != 0 and close_attempts < 4000) : (close_attempts += 1)
+        _ = try owner.pollOnce(0);
+    try testing.expectEqual(@as(usize, 0), owner.activeCount());
+    try testing.expectEqual(@as(usize, 0), server.subscriptions.count());
+    try testing.expectEqual(@as(usize, 0), runtime_registry.attachmentCount());
+    const final = owner.reactor.accountingSnapshot();
+    try testing.expectEqual(@as(usize, 0), final.resident_bytes);
+    try testing.expectEqual(@as(usize, 0), final.shared_bytes);
 }
 
 test "poll owner keeps connection-local stream one distinct across live slot reuse" {

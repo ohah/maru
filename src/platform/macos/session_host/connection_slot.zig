@@ -975,6 +975,13 @@ pub const Slot = struct {
         return now_ns >= (try self.trackerEntryConst(key)).tracker.?.global_pressure_retry_after_ns;
     }
 
+    pub fn globalPressureRetryAfter(
+        self: *const Slot,
+        key: ScreenTrackerKey,
+    ) error{Stale}!u64 {
+        return (try self.trackerEntryConst(key)).tracker.?.global_pressure_retry_after_ns;
+    }
+
     pub fn deferGlobalPressure(
         self: *Slot,
         key: ScreenTrackerKey,

@@ -435,13 +435,26 @@ pub const RemoteRuntime = struct {
     }
 
     /// canonical PTY size를 바꾼다(host `runtime.resize`). host가 실 `TerminalCore`+`TIOCSWINSZ`에 적용한다.
-    pub fn resize(self: *RemoteRuntime, cols: u16, rows: u16) client_mod.ClientError!void {
+    pub const ResizeError = client_mod.ClientError || error{
+        ResizeRejected,
+        RuntimeNotFound,
+        ResourceExhausted,
+    };
+
+    pub fn resize(self: *RemoteRuntime, cols: u16, rows: u16) ResizeError!void {
         self.resize_seq += 1; // 단조 증가 — registry가 이하 sequence를 stale로 거부(첫 resize만 적용되는 버그 방지).
         var buf: [96]u8 = undefined;
         const params = std.fmt.bufPrint(&buf, "{{\"stream_id\":{d},\"cols\":{d},\"rows\":{d},\"client_sequence\":{d}}}", .{ self.stream_id, cols, rows, self.resize_seq }) catch return error.OutOfMemory;
         const resp = try self.callOrdered("runtime.resize", params);
-        self.allocator.free(resp);
-        self.observation.size = .{ .cols = cols, .rows = rows };
+        defer self.allocator.free(resp);
+        const reply = parseResizeReply(self.allocator, resp) catch |err| {
+            if (err == error.ProtocolError) self.client.failClosed();
+            return err;
+        };
+        switch (reply) {
+            .stale => {},
+            .applied => |size| self.observation.size = size,
+        }
     }
 
     /// 내 stream(§멀티 runtime demux)의 다음 화면 배치 하나를 소비해 원격 화면에 반영한다(§9/§10). **논블로킹** — 내 배치가
@@ -1257,8 +1270,104 @@ pub const RemoteRuntime = struct {
     }
 };
 
+const ResizeReply = union(enum) {
+    stale,
+    applied: terminal.Size,
+};
+
+fn parseResizeReply(
+    allocator: std.mem.Allocator,
+    payload: []const u8,
+) RemoteRuntime.ResizeError!ResizeReply {
+    var parsed = std.json.parseFromSlice(std.json.Value, allocator, payload, .{}) catch |err| return switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        else => error.ProtocolError,
+    };
+    defer parsed.deinit();
+    const root = switch (parsed.value) {
+        .object => |object| object,
+        else => return error.ProtocolError,
+    };
+    if (root.get("error")) |error_value| {
+        if (root.count() != 1) return error.ProtocolError;
+        const wire_error = switch (error_value) {
+            .string => |value| value,
+            else => return error.ProtocolError,
+        };
+        const code = protocol.ErrorCode.fromWireName(wire_error) orelse return error.ProtocolError;
+        return switch (code) {
+            .runtime_not_found => error.RuntimeNotFound,
+            .resource_exhausted => error.ResourceExhausted,
+            else => error.ResizeRejected,
+        };
+    }
+    if (root.count() != 1) return error.ProtocolError;
+    const result_value = root.get("result") orelse return error.ProtocolError;
+    const result = switch (result_value) {
+        .object => |object| object,
+        else => return error.ProtocolError,
+    };
+    if (result.get("stale")) |stale_value| {
+        if (result.count() != 1) return error.ProtocolError;
+        const stale = switch (stale_value) {
+            .bool => |value| value,
+            else => return error.ProtocolError,
+        };
+        if (!stale) return error.ProtocolError;
+        return .stale;
+    }
+    if (result.count() != 5) return error.ProtocolError;
+    const cols_raw = switch (result.get("cols") orelse return error.ProtocolError) {
+        .integer => |value| value,
+        else => return error.ProtocolError,
+    };
+    const rows_raw = switch (result.get("rows") orelse return error.ProtocolError) {
+        .integer => |value| value,
+        else => return error.ProtocolError,
+    };
+    switch (result.get("client_sequence") orelse return error.ProtocolError) {
+        .integer => |value| if (value < 0) return error.ProtocolError,
+        else => return error.ProtocolError,
+    }
+    switch (result.get("resize_generation") orelse return error.ProtocolError) {
+        .integer => |value| if (value < 0) return error.ProtocolError,
+        else => return error.ProtocolError,
+    }
+    switch (result.get("changed") orelse return error.ProtocolError) {
+        .bool => {},
+        else => return error.ProtocolError,
+    }
+    if (cols_raw < 0 or rows_raw < 0) return error.ProtocolError;
+    const cols = std.math.cast(u16, cols_raw) orelse return error.ProtocolError;
+    const rows = std.math.cast(u16, rows_raw) orelse return error.ProtocolError;
+    if (cols < 2 or rows < 1) return error.ProtocolError;
+    return .{ .applied = .{ .cols = cols, .rows = rows } };
+}
+
 fn shouldSendCoreCommand(runtime_core_command_v1: bool, command: core_command_wire.Command) bool {
     return runtime_core_command_v1 or command.isLegacyScroll();
+}
+
+test "remote runtime: resize reply preserves stale size and uses host-clamped applied size" {
+    try std.testing.expectEqual(
+        ResizeReply.stale,
+        try parseResizeReply(std.testing.allocator, "{\"result\":{\"stale\":true}}"),
+    );
+    try std.testing.expectEqual(
+        terminal.Size{ .cols = 2, .rows = 1 },
+        (try parseResizeReply(
+            std.testing.allocator,
+            "{\"result\":{\"cols\":2,\"rows\":1,\"client_sequence\":7,\"resize_generation\":3,\"changed\":true}}",
+        )).applied,
+    );
+    try std.testing.expectError(
+        error.ResourceExhausted,
+        parseResizeReply(std.testing.allocator, "{\"error\":\"resource_exhausted\"}"),
+    );
+    try std.testing.expectError(
+        error.ProtocolError,
+        parseResizeReply(std.testing.allocator, "{\"result\":{\"cols\":1,\"rows\":1,\"client_sequence\":7,\"resize_generation\":3,\"changed\":true}}"),
+    );
 }
 
 test "remote runtime: extended core commands require capability while legacy scroll remains compatible" {

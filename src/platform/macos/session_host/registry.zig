@@ -14,7 +14,9 @@
 //!     `resize_generation`을 올리고 `runtime.resized`를 broadcast한다. client가 0명이어도 마지막 검증 크기를 유지한다.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const subscription_identity = @import("subscription_identity.zig");
+const upgrade_limits = @import("upgrade_limits.zig");
 
 /// runtime 하나를 가리키는 opaque 128-bit 상관키(§4). wire는 big-endian 16바이트지만 registry 내부는 비교·해시가
 /// 쉬운 u128로 다룬다(server가 wire ↔ u128 변환). 의미를 비트에 인코딩하지 않고 재사용하지 않는다.
@@ -74,6 +76,21 @@ pub const ResizeOutcome = union(enum) {
     },
 };
 
+/// Backend 적용 전 registry mutation을 보류하는 owner-turn token. 생성 뒤 같은 single owner turn에서 backend를
+/// 적용하고 `commitPreparedResize`로 소비하므로, backend 실패는 canonical size/sequence/generation/ledger를 바꾸지 않는다.
+const PreparedResize = union(enum) {
+    stale,
+    ready: struct {
+        entry: *RuntimeEntry,
+        cols: u16,
+        rows: u16,
+        client_sequence: u64,
+        changed: bool,
+        cells_without_entry: usize,
+        new_cells: usize,
+    },
+};
+
 pub const RegistryError = error{
     RuntimeNotFound,
     DuplicateRuntime,
@@ -85,6 +102,8 @@ pub const RegistryError = error{
     /// membership generation을 더 올릴 수 없어 새 complete inventory authority를 만들 수 없다.
     MembershipGenerationExhausted,
     InvalidGridSize,
+    RuntimeLimitReached,
+    AggregateGridLimitReached,
     OutOfMemory,
 };
 
@@ -93,6 +112,17 @@ pub const RegistryError = error{
 pub const min_cols: u16 = 2;
 pub const min_rows: u16 = 1;
 pub const max_grid_cells: usize = 1024 * 1024;
+/// 하나의 same-UID client가 작은 runtime을 반복 spawn해 PTY/FD/heap을 무제한 점유하지 못하게 하는 daemon 전역 상한.
+pub const max_live_runtimes: usize = upgrade_limits.max_runtime_count;
+/// 개별 runtime 상한과 별개인 daemon 전역 canonical grid 원장 상한.
+pub const max_aggregate_grid_cells: usize = 4 * 1024 * 1024;
+
+pub const Limits = struct {
+    max_live_runtimes: usize = max_live_runtimes,
+    max_aggregate_grid_cells: usize = max_aggregate_grid_cells,
+};
+
+pub const GridSize = struct { cols: u16, rows: u16 };
 
 fn clampCols(c: u16) u16 {
     return if (c < min_cols) min_cols else c;
@@ -145,12 +175,24 @@ pub const RuntimeEntry = struct {
 pub const TerminalRuntimeRegistry = struct {
     allocator: std.mem.Allocator,
     entries: std.AutoHashMapUnmanaged(RuntimeId, *RuntimeEntry) = .empty,
+    /// `entries`에 publish된 canonical grid만 센다. pending backend allocation은 owner가 `canRegister`로 먼저 검증하며,
+    /// register 실패는 이 값을 바꾸지 않는다.
+    live_grid_cells: usize = 0,
+    limits: Limits = .{},
     /// 0은 wire의 "첫 page에서 generation 미지정" sentinel이라 실제 complete snapshot은 1부터 시작한다.
     membership_generation: u64 = 1,
     membership_generation_exhausted: bool = false,
 
     pub fn init(allocator: std.mem.Allocator) TerminalRuntimeRegistry {
         return .{ .allocator = allocator };
+    }
+
+    /// Large protocol-only fixtures may raise limits, but all registry operations still obey one internally consistent ledger.
+    pub fn initWithLimits(allocator: std.mem.Allocator, limits: Limits) TerminalRuntimeRegistry {
+        if (!builtin.is_test) @compileError("initWithLimits is test-only");
+        std.debug.assert(limits.max_live_runtimes > 0);
+        std.debug.assert(limits.max_aggregate_grid_cells > 0);
+        return .{ .allocator = allocator, .limits = limits };
     }
 
     pub fn deinit(self: *TerminalRuntimeRegistry) void {
@@ -167,6 +209,33 @@ pub const TerminalRuntimeRegistry = struct {
     /// 반환된 포인터는 안정 heap 슬롯이라 server가 `runtime`에 실 handle을 실을 수 있다.
     pub fn register(self: *TerminalRuntimeRegistry, id: RuntimeId, cols: u16, rows: u16) RegistryError!*RuntimeEntry {
         return self.registerExact(id, cols, rows, 0, null);
+    }
+
+    /// backend/PTY를 만들기 전에 daemon 전역 예산을 확인한다. 실제 publish 시 `registerExact`가 같은 조건을 다시
+    /// 확인하므로 이 함수는 allocation 방지 preflight이고 원장의 mutation 권위는 register 하나뿐이다.
+    pub fn canRegister(self: *const TerminalRuntimeRegistry, cols: u16, rows: u16) RegistryError!void {
+        if (!gridSizeAllowed(cols, rows)) return error.InvalidGridSize;
+        if (self.entries.count() >= self.limits.max_live_runtimes) return error.RuntimeLimitReached;
+        const cells = gridCells(cols, rows);
+        if (self.live_grid_cells > self.limits.max_aggregate_grid_cells or
+            cells > self.limits.max_aggregate_grid_cells - self.live_grid_cells)
+            return error.AggregateGridLimitReached;
+    }
+
+    /// Exec restore처럼 전량 publish하거나 전량 버리는 graph는 첫 surface/reader/PTY adoption allocation 전에 합계를
+    /// 한 번 검증한다. 개별 register도 같은 한도를 다시 확인해 mutation 권위를 이 registry에 유지한다.
+    pub fn canRegisterBatch(self: *const TerminalRuntimeRegistry, sizes: []const GridSize) RegistryError!void {
+        if (sizes.len > self.limits.max_live_runtimes -| self.entries.count())
+            return error.RuntimeLimitReached;
+        var added_cells: usize = 0;
+        for (sizes) |size| {
+            if (!gridSizeAllowed(size.cols, size.rows)) return error.InvalidGridSize;
+            added_cells = std.math.add(usize, added_cells, gridCells(size.cols, size.rows)) catch
+                return error.AggregateGridLimitReached;
+        }
+        if (self.live_grid_cells > self.limits.max_aggregate_grid_cells or
+            added_cells > self.limits.max_aggregate_grid_cells - self.live_grid_cells)
+            return error.AggregateGridLimitReached;
     }
 
     /// Exec-restore graph가 decoded resize generation과 opaque live handle을
@@ -192,7 +261,7 @@ pub const TerminalRuntimeRegistry = struct {
         runtime: ?*anyopaque,
     ) RegistryError!*RuntimeEntry {
         if (id == 0) return error.InvalidRuntimeId;
-        if (!gridSizeAllowed(cols, rows)) return error.InvalidGridSize;
+        try self.canRegister(cols, rows);
         if (self.membership_generation_exhausted or self.membership_generation == std.math.maxInt(u64))
             return error.MembershipGenerationExhausted;
         if (self.entries.contains(id)) return error.DuplicateRuntime;
@@ -206,6 +275,7 @@ pub const TerminalRuntimeRegistry = struct {
             .runtime = runtime,
         };
         self.entries.put(self.allocator, id, entry) catch return error.OutOfMemory;
+        self.live_grid_cells += gridCells(cols, rows);
         self.membership_generation += 1;
         return entry;
     }
@@ -213,6 +283,7 @@ pub const TerminalRuntimeRegistry = struct {
     /// runtime을 제거한다(terminate 후). 모든 구독은 이미 detach됐다고 가정한다 — 남은 observer/controller는 버려진다.
     pub fn unregister(self: *TerminalRuntimeRegistry, id: RuntimeId) void {
         if (self.entries.fetchRemove(id)) |kv| {
+            self.live_grid_cells -= gridCells(kv.value.cols, kv.value.rows);
             kv.value.observers.deinit(self.allocator);
             self.allocator.destroy(kv.value);
             if (self.membership_generation == std.math.maxInt(u64)) {
@@ -243,6 +314,10 @@ pub const TerminalRuntimeRegistry = struct {
 
     pub fn count(self: *const TerminalRuntimeRegistry) usize {
         return self.entries.count();
+    }
+
+    pub fn liveGridCells(self: *const TerminalRuntimeRegistry) usize {
+        return self.live_grid_cells;
     }
 
     /// Upgrade eligibility는 connection 수가 아니라 실제 runtime subscriptions가 0인지 판정한다. Controller와 observer를
@@ -324,14 +399,14 @@ pub const TerminalRuntimeRegistry = struct {
 
     /// controller가 요청한 resize를 판정한다(§9). stale sequence는 무시하고, 새 sequence면 clamp 후 크기 변화를
     /// 계산한다. 실제 크기가 바뀌면 `resize_generation`을 올린다. **실 core/PTY 적용은 server가 이 결과로 수행**한다.
-    fn resize(
+    fn prepareResize(
         self: *TerminalRuntimeRegistry,
         id: RuntimeId,
         stream: StreamId,
         cols: u16,
         rows: u16,
         client_sequence: u64,
-    ) RegistryError!ResizeOutcome {
+    ) RegistryError!PreparedResize {
         const entry = self.entries.get(id) orelse return error.RuntimeNotFound;
         if (entry.controller != stream) return error.NotController;
         if (entry.resize_seq_seen and client_sequence <= entry.controller_sequence) {
@@ -340,15 +415,57 @@ pub const TerminalRuntimeRegistry = struct {
         const new_cols = clampCols(cols);
         const new_rows = clampRows(rows);
         if (!gridSizeAllowed(new_cols, new_rows)) return error.InvalidGridSize;
+        const old_cells = gridCells(entry.cols, entry.rows);
+        const new_cells = gridCells(new_cols, new_rows);
+        const cells_without_entry = self.live_grid_cells - old_cells;
+        if (cells_without_entry > self.limits.max_aggregate_grid_cells or
+            new_cells > self.limits.max_aggregate_grid_cells - cells_without_entry)
+            return error.AggregateGridLimitReached;
+        return .{ .ready = .{
+            .entry = entry,
+            .cols = new_cols,
+            .rows = new_rows,
+            .client_sequence = client_sequence,
+            .changed = new_cols != entry.cols or new_rows != entry.rows,
+            .cells_without_entry = cells_without_entry,
+            .new_cells = new_cells,
+        } };
+    }
+
+    /// `prepareResize`와 같은 owner turn에서 backend 성공 뒤 호출한다. 외부 dispatch가 끼어들 수 없는 single-owner
+    /// 계약이므로 token의 entry는 여전히 canonical entry이며 이 단계에는 allocation/syscall/error가 없다.
+    fn commitPreparedResize(self: *TerminalRuntimeRegistry, prepared: PreparedResize) ResizeOutcome {
+        const ready = switch (prepared) {
+            .stale => return .stale,
+            .ready => |value| value,
+        };
+        const entry = ready.entry;
+        std.debug.assert(self.entries.get(entry.id) == entry);
         entry.resize_seq_seen = true;
-        entry.controller_sequence = client_sequence;
-        const changed = new_cols != entry.cols or new_rows != entry.rows;
-        if (changed) {
-            entry.cols = new_cols;
-            entry.rows = new_rows;
+        entry.controller_sequence = ready.client_sequence;
+        if (ready.changed) {
+            entry.cols = ready.cols;
+            entry.rows = ready.rows;
             entry.resize_generation += 1;
+            self.live_grid_cells = ready.cells_without_entry + ready.new_cells;
         }
-        return .{ .applied = .{ .cols = new_cols, .rows = new_rows, .resize_generation = entry.resize_generation, .changed = changed } };
+        return .{ .applied = .{
+            .cols = ready.cols,
+            .rows = ready.rows,
+            .resize_generation = entry.resize_generation,
+            .changed = ready.changed,
+        } };
+    }
+
+    fn resize(
+        self: *TerminalRuntimeRegistry,
+        id: RuntimeId,
+        stream: StreamId,
+        cols: u16,
+        rows: u16,
+        client_sequence: u64,
+    ) RegistryError!ResizeOutcome {
+        return self.commitPreparedResize(try self.prepareResize(id, stream, cols, rows, client_sequence));
     }
 
     pub fn attachSubscription(
@@ -384,6 +501,8 @@ pub const TerminalRuntimeRegistry = struct {
         return self.capabilitiesOf(id, subscription.value);
     }
 
+    /// Controller/sequence/budget prepare, fallible backend apply, infallible canonical commit을 한 API call에 가둔다.
+    /// Prepared token은 registry 밖으로 나가지 않아 복사 재commit이나 future owner interleaving을 만들 수 없다.
     pub fn resizeSubscription(
         self: *TerminalRuntimeRegistry,
         id: RuntimeId,
@@ -391,14 +510,26 @@ pub const TerminalRuntimeRegistry = struct {
         cols: u16,
         rows: u16,
         client_sequence: u64,
-    ) RegistryError!ResizeOutcome {
-        return self.resize(id, subscription.value, cols, rows, client_sequence);
+        apply_ctx: *anyopaque,
+        apply: *const fn (ctx: *anyopaque, runtime_id: RuntimeId, cols: u16, rows: u16) anyerror!void,
+    ) anyerror!ResizeOutcome {
+        const prepared = try self.prepareResize(id, subscription.value, cols, rows, client_sequence);
+        switch (prepared) {
+            .stale => {},
+            .ready => |ready| if (ready.changed)
+                try apply(apply_ctx, id, ready.cols, ready.rows),
+        }
+        return self.commitPreparedResize(prepared);
     }
 
     fn appendObserver(allocator: std.mem.Allocator, entry: *RuntimeEntry, stream: StreamId) RegistryError!void {
         entry.observers.append(allocator, stream) catch return error.OutOfMemory;
     }
 };
+
+fn gridCells(cols: u16, rows: u16) usize {
+    return @as(usize, clampCols(cols)) * @as(usize, clampRows(rows));
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 단위 테스트
@@ -445,6 +576,98 @@ test "registry: live grid cap rejects oversized register and resize before mutat
     try testing.expectEqual(exact_cols, entry.cols);
     try testing.expectEqual(exact_rows, entry.rows);
     try testing.expect(!entry.resize_seq_seen);
+}
+
+test "registry: daemon runtime count exact cap and cap plus one are transactional" {
+    var registry = TerminalRuntimeRegistry.init(testing.allocator);
+    defer registry.deinit();
+
+    var id: u128 = 1;
+    while (id <= max_live_runtimes) : (id += 1) {
+        _ = try registry.register(id, min_cols, min_rows);
+    }
+    try testing.expectEqual(max_live_runtimes, registry.count());
+    try testing.expectEqual(max_live_runtimes * min_cols * min_rows, registry.liveGridCells());
+
+    try testing.expectError(
+        error.RuntimeLimitReached,
+        registry.register(id, min_cols, min_rows),
+    );
+    try testing.expectEqual(max_live_runtimes, registry.count());
+    try testing.expectEqual(max_live_runtimes * min_cols * min_rows, registry.liveGridCells());
+
+    registry.unregister(1);
+    _ = try registry.register(id, min_cols, min_rows);
+    try testing.expectEqual(max_live_runtimes, registry.count());
+    try testing.expectEqual(max_live_runtimes * min_cols * min_rows, registry.liveGridCells());
+}
+
+test "registry: daemon aggregate grid exact cap resize rollback and release" {
+    var registry = TerminalRuntimeRegistry.init(testing.allocator);
+    defer registry.deinit();
+
+    const max_cols: u16 = 4096;
+    const max_rows: u16 = 256;
+    _ = try registry.register(1, max_cols, max_rows);
+    _ = try registry.register(2, max_cols, max_rows);
+    _ = try registry.register(3, max_cols, max_rows);
+    _ = try registry.register(4, max_cols - 1, max_rows);
+    _ = try registry.register(5, 254, 1);
+    const small = try registry.register(6, min_cols, min_rows);
+    _ = try registry.attach(6, 60, .controller);
+    try testing.expectEqual(max_aggregate_grid_cells, registry.liveGridCells());
+
+    try testing.expectError(
+        error.AggregateGridLimitReached,
+        registry.register(7, min_cols, min_rows),
+    );
+    try testing.expectError(
+        error.AggregateGridLimitReached,
+        registry.resize(6, 60, min_cols + 1, min_rows, 1),
+    );
+    try testing.expectEqual(min_cols, small.cols);
+    try testing.expectEqual(min_rows, small.rows);
+    try testing.expect(!small.resize_seq_seen);
+    try testing.expectEqual(@as(u64, 0), small.resize_generation);
+    try testing.expectEqual(max_aggregate_grid_cells, registry.liveGridCells());
+
+    registry.unregister(1);
+    try testing.expectEqual(max_aggregate_grid_cells - max_grid_cells, registry.liveGridCells());
+    const resized = try registry.resize(6, 60, min_cols + 1, min_rows, 1);
+    try testing.expect(resized.applied.changed);
+    try testing.expectEqual(
+        max_aggregate_grid_cells - max_grid_cells + 1,
+        registry.liveGridCells(),
+    );
+}
+
+test "registry: restore batch aggregate preflight is all or nothing" {
+    var registry = TerminalRuntimeRegistry.init(testing.allocator);
+    defer registry.deinit();
+    const exact = [_]GridSize{
+        .{ .cols = 4096, .rows = 256 },
+        .{ .cols = 4096, .rows = 256 },
+        .{ .cols = 4096, .rows = 256 },
+        .{ .cols = 4096, .rows = 256 },
+    };
+    try registry.canRegisterBatch(&exact);
+    try testing.expectEqual(@as(usize, 0), registry.count());
+    try testing.expectEqual(@as(usize, 0), registry.liveGridCells());
+
+    var cap_plus_one = [_]GridSize{
+        .{ .cols = 4096, .rows = 256 },
+        .{ .cols = 4096, .rows = 256 },
+        .{ .cols = 4096, .rows = 256 },
+        .{ .cols = 4095, .rows = 256 },
+        .{ .cols = 255, .rows = 1 },
+        .{ .cols = 2, .rows = 1 },
+    };
+    try testing.expectError(
+        error.AggregateGridLimitReached,
+        registry.canRegisterBatch(&cap_plus_one),
+    );
+    try testing.expectEqual(@as(usize, 0), registry.count());
+    try testing.expectEqual(@as(usize, 0), registry.liveGridCells());
 }
 
 test "registry: membership generation changes only after a published membership mutation" {

@@ -1682,6 +1682,23 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
     다른 connection의 terminate와 producer가 경쟁해 `RuntimeNotFound`를 받으면 shared transport를 닫지 않되 해당
     attachment/tracker를 ended→detach로 수렴시켜야 한다. delta의 일시적 null이나 resync 영구 retry로 stale lease가
     남지 않는 multi-client lifecycle fixture도 같은 제품 공개 gate다.
+    이 공개 gate는 다음 merge 가능한 순서로 닫는다.
+    - **T0b2a — daemon runtime resource ledger (구현):** `TerminalRuntimeRegistry`를 live runtime 수와 canonical grid
+      cell 합계의 SSOT로 둔다. 등록은 runtime 256개와 합계 4,194,304 cells를 mutation 전에 함께 preflight하고,
+      성공한 publish만 원장에 더한다. resize는 기존 runtime의 charge를 새 charge로 원자 교체하며 거부 시
+      size·sequence·generation·합계를 모두 그대로 둔다. unregister는 entry 제거와 같은 owner turn에서 정확히 한 번
+      반환한다. normal spawn, exec restore, teardown 모두 별도 counter를 만들지 않고 이 registry API를 통과한다.
+      실제 core resize 뒤 PTY ioctl처럼 backend가 부분 적용 후 실패할 수 있는 경우에는 rollback 성공을 가정하지 않고
+      해당 runtime을 fail-stop terminate해 core/PTY/FD와 registry charge를 전량 회수한다. client에는 성공을 가장하지
+      않으며 error response에서는 local observed size를 갱신하지 않는다.
+      exact/cap+1, repeated max, failed register/resize rollback, unregister 후 재사용 fixture가 Debug/ReleaseFast에서
+      green이어야 다음 multi-fd wiring으로 간다.
+    - **T0b2b — daemon poll owner wiring:** listener와 bounded `connection_turn.Client` 32개를 실제 daemon의 단일
+      poll owner에 연결하고 accept cap, one-turn fairness, cadence 재예약, upgrade admission/drain을 process fixture로
+      닫는다.
+    - **T0b2c — cross-connection lifecycle convergence:** 한 connection의 terminate가 다른 connection의
+      attachment/tracker를 ended→detach로 수렴시키고 stale controller lease나 무한 resync retry를 남기지 않는
+      multi-client process fixture를 닫는다.
 - **P5a1 — bounded admin accept foundation**: 현재 connection 하나를 EOF까지 독점하는 serial serve loop를 먼저
   single-owner multi-fd reactor로 바꾼다. P4 GUI slot을 유지한 채 bounded admin request slot 하나를 accept/dispatch하고
   partial read/write, cap, idle deadline, same-login-UID/other-UID 거부를 process test로 고정한다. public CLI/help는 아직

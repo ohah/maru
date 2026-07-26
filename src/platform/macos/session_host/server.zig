@@ -4374,6 +4374,57 @@ test "server: backend resize failure leaves canonical size sequence generation a
     try testing.expectEqual(@as(usize, 50 * 20), registry.liveGridCells());
 }
 
+test "server: changed resize is prepared without backend or canonical mutation" {
+    const allocator = testing.allocator;
+    var registry = reg.TerminalRuntimeRegistry.init(allocator);
+    defer registry.deinit();
+    const entry = try registry.register(0xAA, 100, 40);
+
+    var fake: FakeRuntimeOps = .{};
+    var conn = Connection.init(allocator, 1, &registry);
+    defer conn.deinit();
+    conn.runtime_ops = fake.ops();
+    {
+        const hello = try feedJson(
+            &conn,
+            .hello,
+            1,
+            "{\"protocol_min\":2,\"protocol_max\":2}",
+        );
+        if (hello.frame) |frame| frame.deinit(allocator);
+    }
+    {
+        const attach = try feedJson(
+            &conn,
+            .request,
+            2,
+            "{\"method\":\"runtime.attach\",\"params\":{\"runtime_id\":\"aa\",\"mode\":\"controller\"}}",
+        );
+        defer if (attach.frame) |frame| frame.deinit(allocator);
+    }
+
+    const wire = try framing.encodeFrame(
+        allocator,
+        .{ .kind = .request, .request_id = 3 },
+        "{\"method\":\"runtime.resize\",\"params\":{\"stream_id\":1,\"cols\":50,\"rows\":20,\"client_sequence\":7}}",
+    );
+    defer allocator.free(wire);
+    var parser = framing.FrameParser.init(allocator);
+    defer parser.deinit();
+    try parser.push(wire);
+    const frame = (try parser.next()).?;
+    defer frame.deinit(allocator);
+
+    var action = try conn.handleFrame(frame);
+    defer conn.discardPreparedResize(&action.resize_requested);
+    try testing.expect(action == .resize_requested);
+    try testing.expectEqual(@as(u16, 0), fake.resized_cols);
+    try testing.expectEqual(@as(u16, 100), entry.cols);
+    try testing.expectEqual(@as(u16, 40), entry.rows);
+    try testing.expect(!entry.resize_seq_seen);
+    try testing.expectEqual(@as(u64, 0), entry.resize_generation);
+}
+
 test "server: observer attach is denied input and resize" {
     const allocator = testing.allocator;
     var registry = reg.TerminalRuntimeRegistry.init(allocator);

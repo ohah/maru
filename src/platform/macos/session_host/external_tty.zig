@@ -57,6 +57,8 @@ const Ops = struct {
     context: *anyopaque,
     get_termios: *const fn (*anyopaque, c.fd_t) anyerror!posix.termios,
     get_winsize: *const fn (*anyopaque, c.fd_t) anyerror!posix.winsize,
+    block_signals: *const fn (*anyopaque, *posix.sigset_t) anyerror!void,
+    restore_signal_mask: *const fn (*anyopaque, posix.sigset_t) anyerror!void,
     make_pipe: *const fn (*anyopaque) anyerror![2]c.fd_t,
     install_signal: *const fn (
         *anyopaque,
@@ -91,6 +93,13 @@ pub const RawTty = struct {
         const window = ops.get_winsize(ops.context, fd) catch
             return error.WindowSizeUnavailable;
         if (window.col == 0 or window.row == 0) return error.InvalidWindowSize;
+
+        var previous_mask: posix.sigset_t = undefined;
+        ops.block_signals(ops.context, &previous_mask) catch
+            return error.SignalHandlerFailed;
+        var mask_blocked = true;
+        errdefer if (mask_blocked)
+            ops.restore_signal_mask(ops.context, previous_mask) catch {};
 
         const pipe = ops.make_pipe(ops.context) catch return error.SignalPipeFailed;
         var self: RawTty = .{
@@ -145,6 +154,12 @@ pub const RawTty = struct {
             return error.RawModeFailed;
         };
         self.active = true;
+        ops.restore_signal_mask(ops.context, previous_mask) catch {
+            _ = ops.set_termios(ops.context, fd, original) catch {};
+            self.active = false;
+            return error.SignalHandlerFailed;
+        };
+        mask_blocked = false;
         return self;
     }
 
@@ -154,6 +169,12 @@ pub const RawTty = struct {
         self.active = false;
 
         var failed = false;
+        var previous_mask: posix.sigset_t = undefined;
+        var mask_blocked = true;
+        self.ops.block_signals(self.ops.context, &previous_mask) catch {
+            failed = true;
+            mask_blocked = false;
+        };
         self.ops.set_termios(self.ops.context, self.fd, self.original) catch {
             failed = true;
         };
@@ -167,6 +188,10 @@ pub const RawTty = struct {
             .seq_cst,
         );
         self.closeWakePipe();
+        if (mask_blocked)
+            self.ops.restore_signal_mask(self.ops.context, previous_mask) catch {
+                failed = true;
+            };
         if (failed) return error.RestoreFailed;
     }
 
@@ -194,12 +219,9 @@ pub const RawTty = struct {
     }
 
     /// Restores local state and then preserves the caller-visible signal semantics.
-    pub fn restoreAndReraise(self: *RawTty, signal: posix.SIG) noreturn {
-        self.restore() catch {
-            c._exit(125);
-        };
+    pub fn restoreAndForward(self: *RawTty, signal: posix.SIG) RestoreError!void {
+        try self.restore();
         _ = c.kill(c.getpid(), signal);
-        c._exit(@intCast(128 + @intFromEnum(signal)));
     }
 
     fn restoreSignals(self: *RawTty) void {
@@ -273,6 +295,8 @@ const posix_ops: Ops = .{
     .context = &posix_context,
     .get_termios = posixGetTermios,
     .get_winsize = posixGetWinsize,
+    .block_signals = posixBlockSignals,
+    .restore_signal_mask = posixRestoreSignalMask,
     .make_pipe = posixMakePipe,
     .install_signal = posixInstallSignal,
     .set_termios = posixSetTermios,
@@ -287,6 +311,16 @@ fn posixGetWinsize(_: *anyopaque, fd: c.fd_t) !posix.winsize {
     var size: posix.winsize = undefined;
     if (c.ioctl(fd, c.T.IOCGWINSZ, &size) < 0) return error.IoctlFailed;
     return size;
+}
+
+fn posixBlockSignals(_: *anyopaque, previous: *posix.sigset_t) !void {
+    var set = posix.sigemptyset();
+    for (termination_signals) |signal| posix.sigaddset(&set, signal);
+    posix.sigprocmask(posix.SIG.BLOCK, &set, previous);
+}
+
+fn posixRestoreSignalMask(_: *anyopaque, previous: posix.sigset_t) !void {
+    posix.sigprocmask(posix.SIG.SETMASK, &previous, null);
 }
 
 fn posixMakePipe(_: *anyopaque) ![2]c.fd_t {
@@ -424,6 +458,8 @@ const FakeOps = struct {
             .context = self,
             .get_termios = fakeGetTermios,
             .get_winsize = fakeGetWinsize,
+            .block_signals = fakeBlockSignals,
+            .restore_signal_mask = fakeRestoreSignalMask,
             .make_pipe = fakeMakePipe,
             .install_signal = fakeInstallSignal,
             .set_termios = fakeSetTermios,
@@ -452,6 +488,16 @@ fn fakeGetWinsize(context: *anyopaque, _: c.fd_t) !posix.winsize {
     const self = fake(context);
     try self.hit();
     return self.window;
+}
+
+fn fakeBlockSignals(context: *anyopaque, previous: *posix.sigset_t) !void {
+    const self = fake(context);
+    try self.hit();
+    previous.* = std.mem.zeroes(posix.sigset_t);
+}
+
+fn fakeRestoreSignalMask(context: *anyopaque, _: posix.sigset_t) !void {
+    try fake(context).hit();
 }
 
 fn fakeMakePipe(context: *anyopaque) ![2]c.fd_t {
@@ -509,8 +555,9 @@ fn fakeInitialTermios() posix.termios {
 }
 
 test "raw TTY enter fail-index has zero mutation or exact rollback" {
-    // get termios, get winsize, pipe, four handlers, raw tcsetattr.
-    for (0..8) |fail_at| {
+    // get termios, get winsize, block mask, pipe, four handlers, raw tcsetattr,
+    // restore mask. Cleanup calls occur after the one-shot injected failure.
+    for (0..10) |fail_at| {
         const original = fakeInitialTermios();
         var backend: FakeOps = .{
             .original = original,
@@ -521,24 +568,29 @@ test "raw TTY enter fail-index has zero mutation or exact rollback" {
             switch (fail_at) {
                 0 => error.NotATerminal,
                 1 => error.WindowSizeUnavailable,
-                2 => error.SignalPipeFailed,
-                3...6 => error.SignalHandlerFailed,
-                7 => error.RawModeFailed,
+                2 => error.SignalHandlerFailed,
+                3 => error.SignalPipeFailed,
+                4...7 => error.SignalHandlerFailed,
+                8 => error.RawModeFailed,
+                9 => error.SignalHandlerFailed,
                 else => unreachable,
             },
             RawTty.enterWithOps(42, backend.ops()),
         );
-        try std.testing.expectEqual(@as(usize, 0), backend.raw_sets);
+        try std.testing.expectEqual(
+            @as(usize, if (fail_at == 9) 1 else 0),
+            backend.raw_sets,
+        );
         try std.testing.expectEqual(@as(usize, 0), backend.terminate_requests);
-        if (fail_at < 2) {
+        if (fail_at < 3) {
             try std.testing.expectEqual(@as(usize, 0), backend.close_count);
-        } else if (fail_at == 2) {
+        } else if (fail_at == 3) {
             try std.testing.expectEqual(@as(usize, 0), backend.close_count);
         } else {
             try std.testing.expectEqual(@as(usize, 2), backend.close_count);
             try std.testing.expectEqual(backend.installed, backend.restored);
         }
-        if (fail_at == 7) {
+        if (fail_at == 8 or fail_at == 9) {
             try std.testing.expectEqual(@as(usize, 1), backend.original_sets);
             try std.testing.expectEqualDeep(original, backend.current);
         }
@@ -624,7 +676,10 @@ fn runSignalRestoreCase(signal: posix.SIG) !void {
         }};
         while (true) {
             _ = posix.poll(&poll_fds, -1) catch c._exit(122);
-            if (owner.readSignal()) |received| owner.restoreAndReraise(received);
+            if (owner.readSignal()) |received| {
+                owner.restoreAndForward(received) catch c._exit(123);
+                c._exit(124);
+            }
         }
     }
 

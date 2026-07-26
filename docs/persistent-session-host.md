@@ -852,7 +852,9 @@ ssh -t workbox maru attach <runtime-id>
 1. stdin이 TTY인지 확인한 뒤 **어떤 terminal mutation보다 먼저** 원래 `termios` 전체와 현재
    `TIOCGWINSZ`를 읽는다. 둘 중 하나라도 실패하면 raw mode나 signal handler를 설치하지 않고 attach를 거부한다.
    최초 크기는 0이 아닌 `cols/rows`여야 하며 P5c2의 controller 첫 resize 입력이 된다.
-2. `HUP/INT/QUIT/TERM` handler와 nonblocking+CLOEXEC self-pipe를 설치한 뒤 raw mode를 마지막으로 적용한다.
+2. `HUP/INT/QUIT/TERM`을 setup/restore transaction 동안 signal mask로 막고, handler와
+   nonblocking+CLOEXEC self-pipe를 설치한 뒤 raw mode를 마지막으로 적용한다. transaction이 끝나기 전에 원래 mask를
+   복원하므로 그 사이 도착한 signal은 handler 설치 전 default action이나 handler 제거 뒤 닫힌 pipe와 경합하지 않는다.
    raw mode는 POSIX `cfmakeraw`와 같은 flag 집합, `VMIN=1`, `VTIME=0`을 사용하며 enter/restore 모두
    `TCSAFLUSH`로 경계 밖의 detach chord나 미처리 입력이 caller shell에 새지 않게 한다. handler는 signal 번호를
    self-pipe에 쓰는 것 외에 allocation·IPC·`tcsetattr`을 하지 않는다.
@@ -2117,7 +2119,8 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
     계약에 정의된 rollback 또는 commit 뒤 canonical EOF 상태 하나로 수렴해야 하며 중간 상태는 허용하지 않는다.
 - **P5c1 — raw TTY lifetime**: 외부 client의 transactional raw mode enter와 단일 idempotent restore owner를
   구현한다. 원래 termios+최초 `TIOCGWINSZ`를 mutation 전에 확보하고, 정상 detach·EOF·protocol/socket 오류와
-  `HUP/INT/QUIT/TERM` wake를 같은 restore 경로로 수렴시킨다. signal handler는 self-pipe write만 하고 일반 문맥이
+  `HUP/INT/QUIT/TERM` wake를 같은 restore 경로로 수렴시킨다. setup/restore는 해당 signal을 잠시 block해
+  handler·raw mode·pipe 경계의 race를 닫고 원래 mask를 복원한다. signal handler는 self-pipe write만 하고 일반 문맥이
   exact termios/handler 복원 뒤 원 signal을 재전달한다. pure fail-index와 실제 `openpty` child harness가
   mutation 전 실패 0, mutation 뒤 exact-once rollback, byte-for-byte termios 복원, signal exit status,
   fd/handler 회수와 runtime terminate request 0을 결정적으로 검증해야 구현 완료다. `SIGKILL`/host crash 복원은

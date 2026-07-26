@@ -308,6 +308,7 @@ pub const Slot = struct {
     read_partial_progress_ns: ?u64 = null,
     write_partial_started_ns: ?u64 = null,
     write_partial_progress_ns: ?u64 = null,
+    write_stall_observed: bool = false,
     in_flight_dispatch: usize = 0,
     attached_streams: usize = 0,
 
@@ -956,6 +957,14 @@ pub const Slot = struct {
         return self.write_partial_started_ns != null;
     }
 
+    pub fn writeStallObserved(self: *const Slot) bool {
+        return self.write_stall_observed;
+    }
+
+    pub fn noteWriteReady(self: *Slot) void {
+        self.write_stall_observed = false;
+    }
+
     pub fn trackerHasWrittenPrefix(
         self: *const Slot,
         key: ScreenTrackerKey,
@@ -1004,6 +1013,7 @@ pub const Slot = struct {
         };
         if (started.* == null) started.* = now_ns;
         if (progressed or progress.* == null) progress.* = now_ns;
+        if (direction == .write) self.write_stall_observed = !progressed;
     }
 
     pub fn clearPartial(self: *Slot, direction: PartialDirection) void {
@@ -1015,6 +1025,7 @@ pub const Slot = struct {
             .write => {
                 self.write_partial_started_ns = null;
                 self.write_partial_progress_ns = null;
+                self.write_stall_observed = false;
             },
         }
     }
@@ -1694,6 +1705,30 @@ test "purging a partially sent screen head remains fail-close only" {
     );
     try std.testing.expectEqual(ScreenState.valid, try slot.screenState(slow));
     try std.testing.expectEqualStrings("low", slot.firstPending().?.bytes);
+}
+
+test "write stall evidence requires no progress and clears on readiness or progress" {
+    var global: GlobalBudget = .{};
+    var slot = try Slot.init(
+        std.testing.allocator,
+        &global,
+        .{ .monotonic_id = 1, .slot_generation = 1 },
+    );
+    defer slot.deinit();
+
+    slot.notePartial(.write, 10, true);
+    try std.testing.expect(!slot.writeStallObserved());
+    slot.notePartial(.write, 11, false);
+    try std.testing.expect(slot.writeStallObserved());
+    slot.noteWriteReady();
+    try std.testing.expect(!slot.writeStallObserved());
+    slot.notePartial(.write, 12, false);
+    try std.testing.expect(slot.writeStallObserved());
+    slot.notePartial(.write, 13, true);
+    try std.testing.expect(!slot.writeStallObserved());
+    slot.notePartial(.write, 14, false);
+    slot.clearPartial(.write);
+    try std.testing.expect(!slot.writeStallObserved());
 }
 
 test "resync retry backoff is closed before one second and opens at the exact boundary" {

@@ -1669,7 +1669,6 @@ const FileTreePerfCounters = struct {
     projected_frames: usize = 0,
     thumb_quads: usize = 0,
     allocator_calls: usize = 0,
-    dock_layout_rebuilds: usize = 0,
 };
 
 /// OS 클립보드 1회성 동작 신호(input.right-click paste·menu). Zig가 우클릭/터미널 메뉴에서 세우고, Swift가 매 tick
@@ -6368,27 +6367,63 @@ pub const AppSession = struct {
     /// 잃는 경우를 막는다. `.session`(⌘Q)은 복구 기회가 없어 여전히 넓은 술어를 쓴다.
     fn termHasProtectedFilePanel(term: *Term) bool {
         const entry = term.file_entry orelse return false;
+        // `dirty_sync_pending`은 **한 번 물어본 뒤에는** 차단 사유가 아니다. 스냅샷을 요청해 두고 그것이
+        // 영영 안 오면(브릿지 죽음) 그 pane·워크스페이스가 영원히 안 닫히기 때문이다. 답이 왔다면
+        // `entry.dirty`가 서 있어 아래 술어가 정상적으로 막는다(code-review max).
+        if (entry.close_snapshot_requested and entry.dirty_sync_pending and !entry.dirty)
+            return entry.external_change or entry.conflict_reload_pending or entry.mutation_pending_id != 0;
         return filePanelEntryBlocksClose(entry.*);
     }
 
     /// `.pane`/`.tab` close가 Term을 파괴하기 전에, 그 범위 안의 **편집 가능한** 파일에 dirty 스냅샷을
-    /// 요청한다. 스냅샷이 돌아오면 `entry.dirty`가 서고 다음 close 시도는 위 술어에 걸려 확인 모달로 간다.
-    fn syncDirtyBeforeScopeClose(self: *AppSession, scope: CloseScope) bool {
+    /// 한 번 요청한다. 스냅샷이 돌아오면 `entry.dirty`가 서고 다음 close 시도는 좁은 술어에 걸려 확인
+    /// 모달로 간다.
+    ///
+    /// **once-only다.** 브릿지가 죽어 스냅샷이 영영 안 오면 두 번째 시도는 그냥 진행한다 — 안 그러면
+    /// 편집 가능 파일 하나가 그 pane·워크스페이스를 영원히 못 닫게 만든다(code-review max). 요청이
+    /// 실제로 나가지 않은 경우(surface 미발급 등)도 지연하지 않는다.
+    fn syncDirtyBeforeScopeClose(self: *AppSession, target: PendingClose, scope: CloseScope) bool {
         var requested = false;
-        const panes: []const *Pane = switch (scope) {
+        switch (scope) {
             .none, .term, .session => return false,
-            .pane => &.{self.activePane()},
-            .tab => |idx| self.tabs.items[idx].panes.items,
-        };
-        for (panes) |pane| {
-            for (pane.terms.items) |term| {
-                const entry = term.file_entry orelse continue;
-                if (!entry.mode.isEditable() or entry.dirty_sync_pending) continue;
-                self.markFilePanelDirtySyncPending(entry);
-                requested = true;
-            }
+            .pane => {
+                // close 대상은 활성 pane이 아닐 수 있다(사이드바에서 비활성 워크스페이스 닫기) —
+                // `closeTargetHasRunningJob`과 같은 대상 해소를 쓴다.
+                const pane = self.closeTargetPane(target) orelse return false;
+                requested = self.requestScopeCloseSnapshot(pane);
+            },
+            .tab => |idx| {
+                if (idx >= self.tabs.items.len) return false;
+                for (self.tabs.items[idx].panes.items) |pane| {
+                    if (self.requestScopeCloseSnapshot(pane)) requested = true;
+                }
+            },
         }
         return requested;
+    }
+
+    fn requestScopeCloseSnapshot(self: *AppSession, pane: *Pane) bool {
+        var requested = false;
+        for (pane.terms.items) |term| {
+            const entry = term.file_entry orelse continue;
+            if (!entry.mode.isEditable() or entry.close_snapshot_requested) continue;
+            entry.close_snapshot_requested = true;
+            if (self.markFilePanelDirtySyncPending(entry)) requested = true;
+        }
+        return requested;
+    }
+
+    /// close 대상 pane(활성 pane이 아닐 수 있다). `agent_term`은 그 Term이 사는 pane이다.
+    fn closeTargetPane(self: *AppSession, target: PendingClose) ?*Pane {
+        switch (target) {
+            .agent_term => |t| {
+                if (t.tab >= self.tabs.items.len) return null;
+                const tab = self.tabs.items[t.tab];
+                if (t.pane >= tab.panes.items.len) return null;
+                return tab.panes.items[t.pane];
+            },
+            else => return self.activePane(),
+        }
     }
 
     fn paneHasProtectedFilePanel(pane: *Pane) bool {
@@ -6507,7 +6542,7 @@ pub const AppSession = struct {
         }
         // 파괴 전에 편집 중 버퍼의 스냅샷을 먼저 받는다. 요청이 나갔으면 이번 close는 보류하고, 스냅샷이
         // 돌아와 dirty가 서면 다음 시도가 위 게이트에 걸려 확인 모달로 간다(§3.2 two-phase의 scope판).
-        if (self.syncDirtyBeforeScopeClose(scope)) return;
+        if (self.syncDirtyBeforeScopeClose(target, scope)) return;
         // 마지막(유일) 창에서 세션 전체를 닫는 인앱 제스처는 곧 앱 종료다 — 창 하나 닫기보다 파괴적이라(열린 모든
         // 탭·pane이 함께 소멸) Cmd+Q와 **동일하게** 실행 중 명령 유무와 무관하게 "maru를 종료할까요?" 종료 확인을 띄운다
         // (사용자 결정 2026-07). `is_last_window`는 host가 주입한다(리프는 형제 창을 모름) — false면(멀티 창의 비-마지막
@@ -7148,6 +7183,19 @@ pub const AppSession = struct {
         return self.hasProtectedFilePanelsForExitExcluding(null);
     }
 
+    /// 이 파일 하나를 닫는 것이 창 닫기가 될 때 쓰는 게이트. **다른 파일이 잃을 상태를 들고 있나**만 본다 —
+    /// `hasProtectedFilePanelsForExit`의 file-tree mutation 항목까지 보면, 이 close를 **일으킨 바로 그**
+    /// rename/delete 작업이 자기 자신을 막아 항상 거부된다(code-review max).
+    fn filePanelsBlockCloseExcluding(self: *const AppSession, exclude: *const dock_panel.Entry) bool {
+        if (!self.dock_initialized) return false;
+        var it = self.fileEntriesConst();
+        while (it.next()) |entry| {
+            if (entry == exclude) continue;
+            if (filePanelEntryNeedsDirtyProtection(entry.*)) return true;
+        }
+        return false;
+    }
+
     /// `exclude`는 **지금 닫는 중이라 이미 상태를 해소한** entry다. 그 entry 자신이 종료를 막으면
     /// "닫혔다고 보고했는데 창은 그대로"인 유령 상태가 되므로(2단계 close가 끝난 뒤라 잃을 게 없다)
     /// 게이트에서 뺀다. 그 밖의 파일이 막는 것은 그대로 막는다.
@@ -7229,34 +7277,40 @@ pub const AppSession = struct {
         if (dst.fileEntryCount() + unique > dock_panel.max_entries) return error.UnsupportedMove;
 
         // 2) 중복 경로 admission — **닫을 쪽을 여기서 정하고, 정할 수 없으면 모델을 건드리기 전에 거부한다.**
-        //    ⓐ 판정은 넓은 술어(`filePanelEntryNeedsDirtyProtection`)다. 이 경로는 `requestFilePanelClose`의
-        //       revision-pinned 2단계 스냅샷을 **거치지 않고** Term을 통째로 파괴하므로, 좁은 술어를 쓰면
-        //       아직 native dirty가 안 올라온 편집 중 버퍼를 조용히 잃는다(code-review max).
-        //    ⓑ 닫을 쪽이 자기 창의 마지막 Term이면 그 close는 창 닫기라 여기서 할 수 없다 — 반대쪽이
-        //       보호 상태가 아니면 반대쪽을 닫고, 그것도 안 되면 거부한다. 이 계산을 commit 루프 안에서
-        //       하면 "닫히지 않는 대상"을 매번 다시 골라 무한루프가 된다(code-review max).
+        //    ⓐ 거부 조건은 **양쪽 다 잃을 상태**(`filePanelEntryBlocksClose`)일 때다. 넓은 술어를 쓰면
+        //       손도 안 댄 편집 가능 파일(`.text`의 기본 mode가 source_edit)이 창 병합을 막는다(§4).
+        //    ⓑ 닫을 쪽이 그 창의 **마지막 Term이 되면** 그 close는 창 닫기라 병합 중에 할 수 없다.
+        //       판정은 스냅샷이 아니라 **이번 계획이 그 창에서 몇 개를 닫는지 누적**해서 한다 — 스냅샷으로
+        //       보면 같은 창의 두 번째 중복에서 pane이 비고 adoptTab이 빈 pane을 읽어 크래시한다(code-review max).
         const DoomedSide = struct { owner: *AppSession, entry: *dock_panel.Entry };
         var doomed_plan: [dock_panel.max_entries]DoomedSide = undefined;
         var doomed_len: usize = 0;
+        const src_terms = src.windowTermCount();
+        const dst_terms = dst.windowTermCount();
+        var src_planned: usize = 0;
+        var dst_planned: usize = 0;
         var dup_it = src.fileEntries();
         while (dup_it.next()) |src_entry| {
             const dup = dst.fileEntryForPath(src_entry.path) orelse continue;
-            const src_protected = filePanelEntryNeedsDirtyProtection(src_entry.*);
-            const dst_protected = filePanelEntryNeedsDirtyProtection(dup.*);
-            if (src_protected and dst_protected) return error.UnsupportedMove;
-            const prefer_src_doomed = !src_protected;
+            const src_blocks = filePanelEntryBlocksClose(src_entry.*);
+            const dst_blocks = filePanelEntryBlocksClose(dup.*);
+            if (src_blocks and dst_blocks) return error.UnsupportedMove;
+            const prefer_src_doomed = !src_blocks;
             const first: DoomedSide = if (prefer_src_doomed) .{ .owner = src, .entry = src_entry } else .{ .owner = dst, .entry = dup };
             const second: DoomedSide = if (prefer_src_doomed) .{ .owner = dst, .entry = dup } else .{ .owner = src, .entry = src_entry };
-            const chosen = if (!first.owner.fileTermIsOnlyTermInWindow(first.entry))
+            const first_survives = (if (first.owner == src) src_terms - src_planned else dst_terms - dst_planned) > 1;
+            const second_blocks = filePanelEntryBlocksClose(second.entry.*);
+            const second_survives = (if (second.owner == src) src_terms - src_planned else dst_terms - dst_planned) > 1;
+            const chosen = if (first_survives)
                 first
-            else if (!filePanelEntryNeedsDirtyProtection(second.entry.*) and
-                !second.owner.fileTermIsOnlyTermInWindow(second.entry))
+            else if (!second_blocks and second_survives)
                 second
             else
                 return error.UnsupportedMove;
             if (doomed_len >= doomed_plan.len) return error.UnsupportedMove;
-            doomed_plan[doomed_len] = .{ .owner = chosen.owner, .entry = chosen.entry };
+            doomed_plan[doomed_len] = chosen;
             doomed_len += 1;
+            if (chosen.owner == src) src_planned += 1 else dst_planned += 1;
         }
 
         // 3) destination 탐색기 후보를 만든다. 옮겨오는 파일이 destination의 recent/watch 집합에 없으면
@@ -7323,8 +7377,10 @@ pub const AppSession = struct {
                 pending.expected_surface_id == retired_surface
             else
                 false;
+            // 통지는 destroyTerm 하나만 낸다 — retire까지 통지하면 같은 surface가 두 번 닫힘으로 보고된다.
             var retired_focus = false;
-            owner.retireFilePanelSurface(entry, &retired_focus);
+            owner.noteRetiredFilePanelFocus(entry, &retired_focus);
+            owner.removeFilePanelQueuedActions(entry.surface_id);
             // admission이 "닫을 수 있는 쪽"만 골랐으므로 여기서는 성공한다.
             _ = owner.closeFileTermForEntry(entry);
             // 닫은 파일이 그 창의 입력 소유였으면 workspace로 되돌린다 — 안 하면 focus_owner가 파괴된
@@ -7487,11 +7543,20 @@ pub const AppSession = struct {
             for (src.tabs.items[idx].panes.items) |pane| {
                 for (pane.terms.items) |term| {
                     const entry = term.file_entry orelse continue;
-                    if (dst.fileEntryForPath(entry.path) != null) return error.UnsupportedMove;
+                    if (dst.fileEntryForPath(entry.path) != null) {
+                        // 거부는 조용하면 안 된다 — ABI는 move_failed로만 돌아가고 Swift는 그걸 그냥 흘린다.
+                        src.showNotice("대상 창에 같은 파일이 이미 열려 있어 워크스페이스를 옮기지 못했습니다.");
+                        return error.UnsupportedMove;
+                    }
                 }
             }
-            if (dst.fileEntryCount() + countTabFileEntries(src.tabs.items[idx]) > dock_panel.max_entries)
+            if (dst.fileEntryCount() + countTabFileEntries(src.tabs.items[idx]) > dock_panel.max_entries) {
+                src.showNotice("대상 창의 파일 탭이 너무 많아 워크스페이스를 옮기지 못했습니다.");
                 return error.UnsupportedMove;
+            }
+            // 옮겨가는 파일을 destination 탐색기·watch 집합에 등록한다 — 안 하면 그 파일의 외부 변경
+            // 감지가 죽고 최근 목록에도 안 뜬다(mergeFilePanelStateInto와 같은 계약, code-review max).
+            try dst.adoptMovedFileTermsIntoExplorer(src.tabs.items[idx], src);
         }
         // before(수술 전, 순수): 이동 서브트리 surface_id 수집 + trust kind. surface_id는 이동 중 불변이라 순서만 안정하면 된다.
         const moved = collectTabSurfaceIds(src.tabs.items[idx], out_ids);
@@ -10201,10 +10266,13 @@ pub const AppSession = struct {
         }
     }
 
-    fn markFilePanelDirtySyncPending(self: *AppSession, entry: *dock_panel.Entry) void {
-        if (!entry.kind.usesEditorBridge() or !entry.mode.isEditable() or entry.surface_id == 0) return;
+    /// 스냅샷 요청이 실제로 나갔으면 true. 호출자가 "요청했으니 기다린다"와 "보낼 대상이 없다"를 구분해야
+    /// 하는 자리(scope close 지연)가 있어 결과를 돌려준다.
+    fn markFilePanelDirtySyncPending(self: *AppSession, entry: *dock_panel.Entry) bool {
+        if (!entry.kind.usesEditorBridge() or !entry.mode.isEditable() or entry.surface_id == 0) return false;
         entry.dirty_sync_pending = true;
         self.queueFilePanelDirtySyncAction(entry.surface_id, 0);
+        return true;
     }
 
     fn markFilePanelCloseDirtySyncPending(self: *AppSession, entry: *dock_panel.Entry, request_id: u64) void {
@@ -10814,7 +10882,7 @@ pub const AppSession = struct {
         self.buildPreparedFileTreeRows(&candidate, &candidate_rows);
         self.commitFileTreeCandidate(&candidate, &candidate_rows);
         if (opened.previous_active_term) |prev| if (prev != opened.term) {
-            if (prev.file_entry) |prev_entry| self.markFilePanelDirtySyncPending(prev_entry);
+            if (prev.file_entry) |prev_entry| _ = self.markFilePanelDirtySyncPending(prev_entry);
         };
         const entry = opened.term.file_entry orelse return;
         // Creation was initiated from the tree: keep tree keyboard ownership while the new WebView is
@@ -10962,11 +11030,11 @@ pub const AppSession = struct {
                 self.noteRetiredFilePanelFocus(entry, &retired_focus);
                 // 새 kind의 뷰를 즉시 다시 만든다. 실패하면 surface_id가 0인 채로 남아 저장·mode 전환·닫기가
                 // 전부 SurfaceNotFound가 되는 좀비 탭이 되므로, 그때는 그 탭을 닫아 좀비를 안 남긴다.
+                // 실패는 첫 `try`(createWebTerm)에서만 난다 — 그 시점 옛 Term은 **아직 살아 있다**. 그러니
+                // 통지하거나 닫으려 들면 안 되고(살아 있는 surface를 닫혔다고 보고하게 된다), 사용자에게
+                // 알리고 옛 뷰를 그대로 둔다. 다음 열기/전환이 다시 시도한다(code-review max).
                 self.rebuildFileTermSurface(entry) catch {
-                    self.removeFilePanelQueuedActions(entry.surface_id);
-                    self.notifySurfaceClosed(entry.surface_id);
-                    entry.surface_id = 0;
-                    _ = self.closeFileTermForEntry(entry);
+                    self.showNotice("파일 뷰를 다시 만들 수 없어 이전 보기를 유지했습니다.");
                 };
             } else if (old_surface != 0) {
                 // 경로만 바뀐 신뢰 kind rename은 **아무 통지도 하지 않는다** — breadcrumb은 `entry.path`에서
@@ -11751,8 +11819,9 @@ pub const AppSession = struct {
                 // 열기 경로(`activateExistingFileTerm`)와 같은 계약이라 복원만 예외가 되면 안 된다.
                 if (pane.terms.items.len > 0) {
                     const leaving = pane.activeTerm();
-                    if (leaving != term) if (leaving.file_entry) |leaving_entry|
-                        self.markFilePanelDirtySyncPending(leaving_entry);
+                    if (leaving != term) if (leaving.file_entry) |leaving_entry| {
+                        _ = self.markFilePanelDirtySyncPending(leaving_entry);
+                    };
                 }
                 if (tab.active_pane != pane_index) self.focusPane(pane_index);
                 self.focusTerm(term_index);
@@ -12480,7 +12549,7 @@ pub const AppSession = struct {
     fn finishOpenFilePanel(self: *AppSession, opened: FileOpenResult) FilePanelOpenPathResult {
         // 떠나게 된 직전 활성 Term이 편집 중인 파일이었으면 dirty 스냅샷을 요청한다(§3.2 two-phase).
         if (opened.previous_active_term) |prev| if (prev != opened.term) {
-            if (prev.file_entry) |prev_entry| self.markFilePanelDirtySyncPending(prev_entry);
+            if (prev.file_entry) |prev_entry| _ = self.markFilePanelDirtySyncPending(prev_entry);
         };
         const active_entry = opened.term.file_entry orelse return .failed;
         self.requestDockEntryFocus(active_entry);
@@ -12905,12 +12974,15 @@ pub const AppSession = struct {
             .dock_pending => |entry_id| entry_id == entry.id,
             .workspace => false,
         };
+        // Term이 entry·path 소유를 회수하고 destroyTerm이 notifySurfaceClosed까지 부른다(FP16) — 옛
+        // `group.remove` + `free(path)` + 명시적 notify 삼중 쌍을 대체한다.
+        //
+        // **close를 먼저 시도한다.** 거부될 수 있는데 트랜잭션을 먼저 파기하면, CM6은 close lock이 걸린
+        // 채인데 unlock one-shot은 버려져 그 파일을 영영 편집할 수 없게 된다(code-review max).
+        if (!self.closeFileTermForEntry(entry)) return false;
         self.removeFilePanelQueuedActions(surface_id);
         if (self.pending_file_panel_close != null and self.pending_file_panel_close.?.surface_id == surface_id)
             self.clearFilePanelCloseWithoutUnlock();
-        // Term이 entry·path 소유를 회수하고 destroyTerm이 notifySurfaceClosed까지 부른다(FP16) — 옛
-        // `group.remove` + `free(path)` + 명시적 notify 삼중 쌍을 대체한다.
-        if (!self.closeFileTermForEntry(entry)) return false;
         // 입력 소유가 이 파일에 있었으면 workspace로 돌린다. 파일이 이제 pane 탭이라 "다음 도크 entry로 승계"라는
         // 옛 규칙은 성립하지 않는다 — pane의 active_term 승계는 closeFileTermForEntry가 이미 했고, 키 입력은
         // 그 pane(=workspace)으로 간다.
@@ -13925,6 +13997,50 @@ pub const AppSession = struct {
     /// pane의 마지막 Term이면 닫지 않고 false를 돌려준다. pane은 항상 Term ≥1이라는 모델 불변식
     /// (`session_model.Pane`)을 파일 경로가 깨면 안 되고, 그 경우의 cascade(빈 pane collapse·워크스페이스 닫기)는
     /// `executeClose`가 소유하는 별도 정책이다.
+    /// 창 간 이동으로 들어오는 파일들을 이 창의 탐색기 recent·watch 집합에 등록한다. 실패하면 아무것도
+    /// 바꾸지 않는다(후보 트리에 다 쓴 뒤 무실패 commit) — 호출자는 detach 전에 이걸 부른다.
+    fn adoptMovedFileTermsIntoExplorer(dst: *AppSession, tab: *Tab, src: *AppSession) !void {
+        var candidate = try dst.file_tree.clone();
+        defer candidate.deinit();
+        var extras: [dock_panel.max_entries]([]const u8) = undefined;
+        var extra_count: usize = 0;
+        var dst_it = dst.fileEntries();
+        while (dst_it.next()) |entry| if (std.fs.path.dirname(entry.path)) |parent| {
+            if (extra_count >= extras.len) break;
+            extras[extra_count] = parent;
+            extra_count += 1;
+        };
+        for (tab.panes.items) |pane| {
+            for (pane.terms.items) |term| {
+                const entry = term.file_entry orelse continue;
+                const parent = std.fs.path.dirname(entry.path) orelse continue;
+                // 양쪽이 inferred면 source가 파일을 열 때 정한 project root가 dirname보다 정확하다.
+                var inferred_root = parent;
+                if (candidate.rootMode() == .inferred and src.file_tree.rootMode() == .inferred) {
+                    var authority: ?[]const u8 = null;
+                    for (0..src.file_tree.rootCount()) |ri| {
+                        const root = src.file_tree.rootAt(ri).?;
+                        if (!file_tree.Tree.pathWithinRoot(entry.path, root)) continue;
+                        if (authority == null or root.len > authority.?.len) authority = root;
+                    }
+                    if (authority) |root| inferred_root = root;
+                }
+                try candidate.recordOpened(entry.path, inferred_root);
+                if (extra_count < extras.len) {
+                    extras[extra_count] = parent;
+                    extra_count += 1;
+                }
+            }
+        }
+        try candidate.resetWatchRequests(extras[0..extra_count]);
+        var rows: std.ArrayList(file_tree.Row) = .empty;
+        defer rows.deinit(dst.allocator);
+        try dst.prepareFileTreeRowStaging(&rows, countTabFileEntries(tab));
+        dst.buildPreparedFileTreeRows(&candidate, &rows);
+        dst.commitFileTreeCandidate(&candidate, &rows);
+        dst.file_tree_rows_dirty = true;
+    }
+
     fn countTabFileEntries(tab: *Tab) usize {
         var n: usize = 0;
         for (tab.panes.items) |pane| {
@@ -13949,15 +14065,13 @@ pub const AppSession = struct {
         return false;
     }
 
-    /// 그 파일 Term이 창에 하나뿐인가 — 닫으면 창 닫기가 되는 경우다. `closeFileTermForEntry`가
-    /// 종료 게이트에 막혀 실패할 수 있는 유일한 조건이라, 모델을 건드리기 전에 계획을 세우는 쪽에서 먼저 묻는다.
-    fn fileTermIsOnlyTermInWindow(self: *AppSession, entry: *const dock_panel.Entry) bool {
-        if (self.tabs.items.len != 1) return false;
-        const tab = self.tabs.items[0];
-        if (tab.panes.items.len != 1) return false;
-        const pane = tab.panes.items[0];
-        if (pane.terms.items.len != 1) return false;
-        return pane.terms.items[0].file_entry == entry;
+    /// 이 창의 전체 Term 수. 병합 계획이 "이만큼 닫으면 창이 빈다"를 누적으로 판정할 때 쓴다.
+    fn windowTermCount(self: *const AppSession) usize {
+        var n: usize = 0;
+        for (self.tabs.items) |tab| {
+            for (tab.panes.items) |pane| n += pane.terms.items.len;
+        }
+        return n;
     }
 
     /// 파일 entry를 든 Term을 닫는다. **true를 돌려줬으면 Term은 실제로 사라졌다** — 호출자는 반환 뒤
@@ -13974,10 +14088,21 @@ pub const AppSession = struct {
                     // 막히면 아무것도 안 한 채 false를 돌려준다. 자기 자신은 이미 2단계 close로 상태를
                     // 해소했으므로 게이트에서 뺀다.
                     if (pane.terms.items.len <= 1 and tab.panes.items.len <= 1 and self.tabs.items.len <= 1) {
-                        if (self.hasProtectedFilePanelsForExitExcluding(entry)) {
+                        // 이 Term이 창에 하나뿐이면 닫는 것이 곧 창을 닫는 것이다. **구조는 건드리지 않고
+                        // 종료 latch만 건다** — Term을 먼저 빼면 pane이 Term 0개가 되어 모델 불변식이 깨지고,
+                        // latch가 그 직후 `activeSurface()`(방금 free된 대표 surface)에 쓴다. closeTab이
+                        // 마지막 탭에 대해 하는 것과 같은 계약이다: 정리는 deinit이 한다.
+                        //
+                        // 아래 게이트를 **먼저** 통과했으므로 latch는 반드시 실효한다 — 그래서 true가
+                        // "닫혔다"는 뜻으로 정직하다(유령 성공이 아니다).
+                        if (self.filePanelsBlockCloseExcluding(entry)) {
                             self.showNotice("저장하지 않은 파일 탭을 먼저 저장하거나 닫아 주세요.");
                             return false;
                         }
+                        self.ended_seen = true;
+                        self.activeSurface().process_state = .exited;
+                        self.metal_dirty = true;
+                        return true;
                     }
                     // 정규 경로에 위임한다 — 직접 orderedRemove하면 배경 탭의 surface_ptrs 재바인딩과 active
                     // 시프트 보정, pane collapse, 마지막 탭의 종료 latch를 빠뜨린다(전부 closeTermAt이 소유).
@@ -44450,7 +44575,6 @@ test "file tree production hot paths emit bounded counter artifact" {
         const y = geometry.track_y + @as(f32, @floatFromInt(event % @as(usize, @intFromFloat(geometry.track_h))));
         session.dragFileTreeScrollbarTo(y);
     }
-    counters.dock_layout_rebuilds = 0; // FP16: 도크 레이아웃 rebuild 카운터가 있는 도크 chrome이 없다.
     session.finishPointerGesture();
 
     for (0..1000) |_| {
@@ -44467,7 +44591,6 @@ test "file tree production hot paths emit bounded counter artifact" {
     try std.testing.expectEqual(counters.projected_frames, counters.geometry_builds);
     try std.testing.expectEqual(counters.projected_frames, counters.thumb_quads);
     try std.testing.expectEqual(@as(usize, 0), counters.allocator_calls);
-    try std.testing.expectEqual(@as(usize, 0), counters.dock_layout_rebuilds);
 
     const report = try std.fmt.allocPrint(allocator,
         \\maru.file-explorer-perf.v1
@@ -44479,7 +44602,6 @@ test "file tree production hot paths emit bounded counter artifact" {
         \\geometry_builds={d}
         \\thumb_quads={d}
         \\allocator_calls={d}
-        \\dock_layout_rebuilds={d}
         \\
     , .{
         file_tree.max_materialized_nodes,
@@ -44490,7 +44612,6 @@ test "file tree production hot paths emit bounded counter artifact" {
         counters.geometry_builds,
         counters.thumb_quads,
         counters.allocator_calls,
-        counters.dock_layout_rebuilds,
     });
     defer allocator.free(report);
     try std.Io.Dir.cwd().createDirPath(session.io, "tests/artifacts/perf");
@@ -58707,4 +58828,88 @@ test "FP16 영속: 파일 Term이 pane file-term으로 왕복하고 브라우저
     try std.testing.expectEqual(dock_panel.Mode.source_edit, pane.terms.items[1].file_entry.?.mode);
     try std.testing.expectEqual(@as(usize, 2), pane.active_term);
     try std.testing.expectEqual(@as(usize, 2), session.fileEntryCount());
+}
+
+// ── FP16 닫기 계약 회귀 가드 ────────────────────────────────────────────────────────────────────
+// 이 세 테스트는 5·6차 code-review max가 잡은 **크래시·영구 차단** 계열의 재발 가드다. 셋 다 그 리뷰
+// 전에는 통과했을 코드가 없다(각각 UAF·무한루프·못 닫는 pane을 냈다).
+
+test "FP16 닫기: 창의 마지막 Term인 파일 탭은 구조를 파괴하지 않고 종료 latch만 건다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+
+    // pane을 [파일] 하나로 만든다(터미널을 닫아).
+    const opened = try session.openFileTermInActivePane("/tmp/fp16-last-term.md", .markdown);
+    session.assignDockSurfaceIds();
+    const sid = opened.term.file_entry.?.surface_id;
+    const pane = session.activePane();
+    while (pane.terms.items.len > 1) {
+        const victim = for (pane.terms.items, 0..) |t, i| {
+            if (t.file_entry == null) break i;
+        } else break;
+        session.closeTermAt(0, pane, victim);
+    }
+    try std.testing.expectEqual(@as(usize, 1), pane.terms.items.len);
+
+    try std.testing.expect(session.closeFilePanelSurfaceNow(sid));
+    // **구조는 그대로다** — Term을 빼면 pane이 Term 0개가 되어 모델 불변식이 깨지고, latch가 그 직후
+    // 해제된 대표 surface에 쓴다(5차 리뷰가 잡은 UAF). 정리는 deinit이 한다.
+    try std.testing.expectEqual(@as(usize, 1), session.activePane().terms.items.len);
+    try std.testing.expect(session.ended_seen); // 창이 닫힌다
+}
+
+test "FP16 닫기: 다른 파일이 종료를 막으면 마지막 Term close는 아무것도 안 바꾸고 거부한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+
+    // 워크스페이스 둘: 0번에 지킬 파일(dirty), 1번에 닫을 파일.
+    const guarded = try session.openFileTermInActivePane("/tmp/fp16-guard.md", .markdown);
+    session.assignDockSurfaceIds();
+    guarded.term.file_entry.?.dirty = true;
+    _ = try session.newTab();
+    const victim = try session.openFileTermInActivePane("/tmp/fp16-victim.md", .markdown);
+    session.assignDockSurfaceIds();
+    const victim_sid = victim.term.file_entry.?.surface_id;
+
+    // 창 전체에 Term이 둘 이상이라 마지막-Term 분기는 안 탄다 — 정상 close.
+    try std.testing.expect(session.closeFilePanelSurfaceNow(victim_sid));
+    try std.testing.expect(!session.ended_seen);
+    try std.testing.expect(session.fileEntryForPath("/tmp/fp16-guard.md") != null);
+}
+
+test "FP16 닫기: 파괴 전 스냅샷은 한 번만 요청하고, 답이 없어도 두 번째 시도를 막지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+
+    // `.text`의 기본 mode는 source_edit이다 — 손도 안 댄 이 탭 하나가 그 pane을 영영 못 닫게 하면 안 된다.
+    const opened = try session.openFileTermInActivePane("/tmp/fp16-clean.py", .text);
+    session.assignDockSurfaceIds();
+    const entry = opened.term.file_entry.?;
+    try std.testing.expectEqual(dock_panel.Mode.source_edit, entry.mode);
+    try std.testing.expect(!entry.close_snapshot_requested);
+
+    // 1차: 스냅샷을 실제로 요청하고 close를 보류한다(§3.2 two-phase의 scope판).
+    try std.testing.expect(session.syncDirtyBeforeScopeClose(.term_or_pane, .pane));
+    try std.testing.expect(entry.close_snapshot_requested);
+    try std.testing.expect(entry.dirty_sync_pending);
+
+    // 2차: once-only 래치 때문에 다시 요청하지 않는다.
+    try std.testing.expect(!session.syncDirtyBeforeScopeClose(.term_or_pane, .pane));
+
+    // 그리고 답이 안 왔어도 그 파일이 close를 막지 않는다 — 여기서 막으면 브릿지가 죽은 순간
+    // 그 pane·워크스페이스가 영원히 안 닫힌다(code-review max).
+    try std.testing.expect(!AppSession.termHasProtectedFilePanel(opened.term));
+
+    // 스냅샷이 **돌아와** dirty가 서면 다시 정상적으로 막는다.
+    entry.dirty = true;
+    try std.testing.expect(AppSession.termHasProtectedFilePanel(opened.term));
 }

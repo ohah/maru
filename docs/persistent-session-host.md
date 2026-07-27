@@ -2303,12 +2303,20 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
       - **P5c3c-1b — phase propagation + call/snapshot**:
         `attach_product_resolver.resolveProduct/revalidate/connectPinned`→`host_connect`→`Client` 호출 경계가
         `PhaseDeadline`을 명시적으로 전달하고 기존 backoff sleep을 deadline-aware poll로 교체한다.
-        `PhaseDeadline`은 phase kind와 `AbsoluteDeadline` 하나를 묶은 non-resettable wrapper이며 새 clock이 아니다.
+        중립 leaf `attach_phase_deadline.zig`가
+        `PhaseDeadline`을 소유한다. 이 타입은 phase kind와 `AbsoluteDeadline` 하나를 묶은
+        non-resettable wrapper이며 새 clock이 아니다. `src/cli/attach.zig`의 parser와 순수
+        `attach_resolver.zig`는 이 시간 타입을 알지 못하고, `client.zig`도 attach phase enum을 알지 못한 채
+        unwrap된 `AbsoluteDeadline`만 받는다.
         `resolve`, `connect_hello`, `attach_snapshot`, `status_takeover` 네 phase는 서로 독립된 5초 phase이며
         각 phase 안의 모든 read/write/poll만 phase 시작 때 한 번 계산한 absolute deadline 하나를 공유한다.
         `resolve` deadline은 모든 candidate probe와 완전증거 비교를 포함하며 candidate마다 다시 시작하지 않는다.
         `connect_hello` deadline은 `connectPinned` 진입 전에 시작해 그 내부 final revalidation, backoff,
-        connect와 hello 전체를 포함하고 backoff마다 다시 시작하지 않는다.
+        connect와 hello, 연결 뒤 pathname identity 재확인 전체를 포함하고 backoff마다 다시 시작하지 않는다.
+        final revalidation은 initial resolve용 새 phase를 만들지 않고 caller의 `connect_hello` deadline 아래에서
+        모든 candidate probe를 다시 수행한다. 각 retry는 이전 candidate fd를 정확히 닫은 뒤 fresh fd만 만들며
+        같은 absolute deadline을 `Client.connectUntil`에 전달한다. deadline-aware backoff도 남은 시간보다
+        오래 기다리지 않고 만료 뒤에는 sleep/probe/socket 생성이 모두 0이다.
         connect completion은 `SO_ERROR`까지, request는 write+response까지 같은 phase deadline에 포함된다.
       두 slice 모두 parser,
       pending stream/event/batch, next request ID와 capability는 기존 `Client` 필드 하나를 그대로 사용하며 별도 parser나
@@ -2317,6 +2325,14 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
       connection을 poison/close해 late response가 다음 request에 오귀속되지 않게 한다. connect completion 전 실패는
       candidate fd를 닫고 같은 phase deadline 안의 fresh fd로만 retry하며,
       established connection은 wire byte 0인 local allocation 실패에서만 재사용할 수 있다.
+      hello 성공 뒤 fd는 blocking으로 복원되어 있으므로 `callUntil`/`readSnapshotUntil`은 요청 frame과 필요한
+      storage를 먼저 staging하고 exact `F_GETFL`을 저장한 뒤 phase 범위에서만 `O_NONBLOCK`을 켜는
+      Client-owned I/O lease를 사용한다. lease 성공/아직 wire byte 0인 local allocation 실패는 saved flags를
+      byte-for-byte 복원한다. flag 복원 실패, wire prefix 수락 뒤의 모든 오류, response/snapshot byte 소비 뒤
+      allocation 실패는 connection을 poison/close한다. 이 lease는 P5c3c-2a의 영구 external pump mode
+      transaction이 아니며 fd/parser/queue의 새 owner를 만들지 않는다. `call`/`callUntil`은 하나의 private
+      response demux state machine을, `readSnapshot`/`readSnapshotUntil`은 하나의 batch/parser state machine을
+      공유한다.
       exact deadline, byte-drip,
       EINTR, EAGAIN, partial read/write, fd flag 보존, allocation fail-index를 pure
       connector state fixture, established socketpair와 injected clock으로 고정한다.

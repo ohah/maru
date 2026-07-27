@@ -23003,10 +23003,40 @@ pub const AppSession = struct {
     /// frame = 이 창의 픽셀(점) frame(Swift `window.frame`, 전역 스크린 좌표). null이면 win-* 키 생략(옛 파일 flat 동일)
     /// → 복원이 cascade 기본 위치. 있으면 재시작 시 그 위치·크기·모니터로 복원한다(M3f — §8A.8). frame은 AppKit
     /// NSWindow 영역이라 Swift가 읽어 ABI로 넘긴다(Zig는 창 픽셀 좌표를 모른다).
+    /// 열린 파일 목록을 workspace 파일에 실을 형태로 뽑는다. FP16에서 entry가 Term 소유가 된 뒤로
+    /// `DockPanel.persistedState`(그룹 순회)는 항상 빈 목록을 돌려주므로, 창구 순회가 유일한 출처다.
+    /// 도크 자체의 배치(side/size/collapsed/presented)는 여전히 `self.dock`이 든다.
+    fn persistFilePanelState(self: *AppSession, arena: std.mem.Allocator) !dock_panel.PersistedState {
+        const count = self.fileEntryCount();
+        if (count > dock_panel.max_entries) return error.InvalidPersistedState;
+        const entries = try arena.alloc(dock_panel.PersistedEntry, count);
+        const active = self.activeFileEntry();
+        var i: usize = 0;
+        var it = self.fileEntries();
+        while (it.next()) |entry| {
+            if (!entry.mode.allowedFor(entry.kind)) return error.InvalidPersistedState;
+            entries[i] = .{
+                .path = entry.path,
+                .kind = entry.kind,
+                .mode = entry.mode,
+                .active = entry == active,
+            };
+            i += 1;
+        }
+        return .{
+            .side = self.dock.side,
+            .size = self.dock.size,
+            .tree_size = self.dock.tree_size,
+            .collapsed = self.dock.collapsed,
+            .presented = self.dock.presented,
+            .entries = entries,
+        };
+    }
+
     pub fn captureWorkspaceWindow(self: *AppSession, arena: std.mem.Allocator, is_active: bool, frame: ?maru.session.workspace.Frame) !maru.session.workspace.Window {
         var tabs: std.ArrayList(maru.session.workspace.Tab) = .empty;
         for (self.tabs.items) |tab| try tabs.append(arena, try self.captureWorkspaceTab(arena, tab));
-        const dock = if (self.dock_initialized) try self.dock.persistedState(arena) else dock_panel.PersistedState{};
+        const dock = if (self.dock_initialized) try self.persistFilePanelState(arena) else dock_panel.PersistedState{};
         const explorer_roots: ?[]const []const u8 = if (self.file_tree_initialized and self.file_tree.rootMode() == .explicit) blk: {
             const roots = try arena.alloc([]const u8, self.file_tree.rootCount());
             for (roots, 0..) |*root, i| root.* = try arena.dupe(u8, self.file_tree.rootAt(i).?);

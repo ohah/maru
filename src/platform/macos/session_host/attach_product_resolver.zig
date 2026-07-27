@@ -12,6 +12,8 @@ const host_connect = @import("host_connect.zig");
 const host_manifest = @import("host_manifest.zig");
 const recovery_discovery = @import("recovery_discovery.zig");
 const remote_attachment = @import("remote_attachment.zig");
+const runtime_event_types = @import("runtime_event_types.zig");
+const runtime_event_wire = @import("runtime_event_wire.zig");
 const resolver = @import("attach_resolver.zig");
 const socket_server = @import("socket_server.zig");
 const attach_phase_deadline = @import("attach_phase_deadline.zig");
@@ -866,12 +868,21 @@ test "product resolver discovers and pins the one host that owns a live runtime"
     defer testing.allocator.free(controller_params);
     const controller_response = try long_client.call("runtime.attach", controller_params);
     defer testing.allocator.free(controller_response);
-    const controller_grant = try remote_attachment.decodeAttach(
+    var controller_decoded = try remote_attachment.decodeAttachResponse(
         testing.allocator,
         controller_response,
         runtime_id,
         .controller,
+        .{
+            .generation_schema = .granted_with_generation,
+            .metadata_support = long_client.metadata_support,
+        },
     );
+    defer controller_decoded.deinit();
+    const controller_grant = switch (controller_decoded) {
+        .accepted => |*accepted| accepted,
+        .wire_error => return error.TestUnexpectedResult,
+    };
     var old_attachment = remote_attachment.RemoteAttachment.init(
         testing.allocator,
         controller_grant.state,
@@ -898,12 +909,21 @@ test "product resolver discovers and pins the one host that owns a live runtime"
     defer testing.allocator.free(observer_params);
     const observer_response = try takeover_client.call("runtime.attach", observer_params);
     defer testing.allocator.free(observer_response);
-    const observer_grant = try remote_attachment.decodeAttach(
+    var observer_decoded = try remote_attachment.decodeAttachResponse(
         testing.allocator,
         observer_response,
         runtime_id,
         .observer,
+        .{
+            .generation_schema = .granted_with_generation,
+            .metadata_support = takeover_client.metadata_support,
+        },
     );
+    defer observer_decoded.deinit();
+    const observer_grant = switch (observer_decoded) {
+        .accepted => |*accepted| accepted,
+        .wire_error => return error.TestUnexpectedResult,
+    };
     var new_attachment = remote_attachment.RemoteAttachment.init(
         testing.allocator,
         observer_grant.state,
@@ -943,16 +963,47 @@ test "product resolver discovers and pins the one host that owns a live runtime"
     var revoked = false;
     var revoke_attempt: usize = 0;
     while (revoke_attempt < 50 and !revoked) : (revoke_attempt += 1) {
-        while (long_client.takeEventForStream(old_attachment.streamId())) |event| {
-            defer event.deinit(testing.allocator);
-            if (std.mem.indexOf(
-                u8,
-                event.payload,
-                "\"event\":\"controller.revoked\"",
-            ) != null) {
-                _ = try old_attachment.applyRevoked(event.payload);
-                revoked = true;
-                break;
+        while (try long_client.takeEventForStream(old_attachment.streamId())) |event| {
+            defer long_client.releaseEvent(event);
+            const classified = runtime_event_types.classifyEventView(
+                .{
+                    .runtime_id = old_attachment.state.runtime_id,
+                    .stream_id = old_attachment.state.stream_id,
+                },
+                .{
+                    .role = if (old_attachment.state.role == .controller)
+                        .controller
+                    else
+                        .observer,
+                    .generation = old_attachment.state.controller_generation,
+                },
+                .{
+                    .expected_major = long_client.wire_major,
+                    .metadata_support = long_client.metadata_support,
+                    .verdict = event.preflight orelse
+                        runtime_event_wire.preflightEvent(event.payload, .{}),
+                },
+                .{
+                    .major = event.header.major,
+                    .kind = event.header.kind,
+                    .stream_id = event.header.stream_id,
+                    .request_id = event.header.request_id,
+                    .flags = event.header.flags,
+                    .payload_len = event.header.payload_len,
+                    .payload = event.payload,
+                },
+            );
+            const validated = switch (classified) {
+                .accepted => |value| value,
+                .violation => return error.TestUnexpectedResult,
+            };
+            switch (validated) {
+                .revoked => |generation| {
+                    try old_attachment.applyValidatedRevoked(generation);
+                    revoked = true;
+                    break;
+                },
+                else => {},
             }
         }
         if (revoked) break;

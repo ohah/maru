@@ -248,6 +248,199 @@ test "session host client pump policy imports only std" {
     try std.testing.expect(containsForbiddenStdChild(forbidden_fake_std));
 }
 
+test "session host runtime event wire stays below framing and product ownership" {
+    const allocator = std.testing.allocator;
+    const event_source = try readZigFileZ(
+        allocator,
+        "src/platform/macos/session_host/runtime_event_wire.zig",
+    );
+    defer allocator.free(event_source);
+    const event_types_source = try readZigFileZ(
+        allocator,
+        "src/platform/macos/session_host/runtime_event_types.zig",
+    );
+    defer allocator.free(event_types_source);
+    const metadata_source = try readZigFileZ(
+        allocator,
+        "src/platform/macos/session_host/runtime_metadata_wire.zig",
+    );
+    defer allocator.free(metadata_source);
+
+    const forbidden = [_][]const u8{
+        "framing.zig",
+        "client.zig",
+        "client_pump.zig",
+        "client_external_pump.zig",
+        "external_inbox_ledger.zig",
+    };
+    for (forbidden) |name| {
+        try std.testing.expect(!joinedStringLiteralsContain(event_source, name));
+        try std.testing.expect(!joinedStringLiteralsContain(event_types_source, name));
+    }
+    // Owning metadata must consume the bounded Scanner preflight. Reintroducing a heap DOM parser
+    // here would make malformed/resource precedence depend on allocator state again.
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        metadata_source,
+        "parseFromSlice",
+    ) == null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        metadata_source,
+        "std.json.Value",
+    ) == null);
+
+    const client_source = try readZigFileZ(
+        allocator,
+        "src/platform/macos/session_host/client.zig",
+    );
+    defer allocator.free(client_source);
+    const runtime_source = try readZigFileZ(
+        allocator,
+        "src/platform/macos/session_host/remote_runtime.zig",
+    );
+    defer allocator.free(runtime_source);
+    const attachment_source = try readZigFileZ(
+        allocator,
+        "src/platform/macos/session_host/remote_attachment.zig",
+    );
+    defer allocator.free(attachment_source);
+    const external_attach_source = try readZigFileZ(
+        allocator,
+        "src/platform/macos/session_host/external_attach.zig",
+    );
+    defer allocator.free(external_attach_source);
+
+    try std.testing.expect(std.mem.indexOf(u8, client_source, "resize_wire.parseEvent") == null);
+    try std.testing.expect(std.mem.indexOf(u8, runtime_source, "resize_wire.parseEvent") == null);
+    try std.testing.expect(std.mem.indexOf(u8, attachment_source, "decodeRevoked") == null);
+    try std.testing.expect(
+        std.mem.indexOf(u8, runtime_source, "classifyAndMaterializeEvent(") != null,
+    );
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        runtime_source,
+        "extractU64Field(resp, \"\\\"metadata_revision\\\":\"",
+    ) == null);
+    try std.testing.expect(std.mem.indexOf(u8, metadata_source, "EnvelopeKind") == null);
+    try std.testing.expect(std.mem.indexOf(u8, metadata_source, "decodeSeed") == null);
+    try std.testing.expect(std.mem.indexOf(u8, attachment_source, "pub fn decodeAttach(") == null);
+    try std.testing.expect(
+        std.mem.indexOf(u8, attachment_source, "pub fn decodeAttachForCapabilities(") == null,
+    );
+    try std.testing.expect(
+        std.mem.indexOf(u8, attachment_source, "pub fn decodeFrozenV1ControllerAttach(") == null,
+    );
+
+    const attach_start = std.mem.indexOf(
+        u8,
+        external_attach_source,
+        "fn attachSnapshot",
+    ) orelse return error.TestUnexpectedResult;
+    const attach_tail = external_attach_source[attach_start..];
+    const attach_end = std.mem.indexOf(u8, attach_tail, "\nfn ") orelse attach_tail.len;
+    const attach_body = attach_tail[0..attach_end];
+    try std.testing.expect(std.mem.indexOf(u8, attach_body, "decodeAttachResponse(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, attach_body, "responseErrorExit(") == null);
+    try std.testing.expect(std.mem.indexOf(u8, attach_body, "decodeWireError(") == null);
+
+    const gui_attach_start = std.mem.indexOf(
+        u8,
+        runtime_source,
+        "fn attachAndAssemble",
+    ) orelse return error.TestUnexpectedResult;
+    const gui_attach_tail = runtime_source[gui_attach_start..];
+    const gui_attach_end = std.mem.indexOf(u8, gui_attach_tail, "\n    fn ") orelse
+        gui_attach_tail.len;
+    const gui_attach_body = gui_attach_tail[0..gui_attach_end];
+    try std.testing.expect(
+        std.mem.indexOf(u8, gui_attach_body, "decodeAttachResponse(") != null,
+    );
+    try std.testing.expect(
+        std.mem.indexOf(u8, gui_attach_body, "decodeWireError(") == null,
+    );
+    try std.testing.expect(
+        std.mem.indexOf(u8, gui_attach_body, "attachFailureCode(") == null,
+    );
+}
+
+test "validated metadata token construction and materialization stay in classifier product path" {
+    const allocator = std.testing.allocator;
+    var dir = try std.Io.Dir.cwd().openDir(std.testing.io, "src", .{ .iterate = true });
+    defer dir.close(std.testing.io);
+    var walker = try dir.walk(allocator);
+    defer walker.deinit();
+
+    var classifier_field_count: usize = 0;
+    var validated_type_count: usize = 0;
+    var private_materializer_count: usize = 0;
+    var product_classifier_definition_count: usize = 0;
+    var product_classifier_call_count: usize = 0;
+    while (try walker.next(std.testing.io)) |entry| {
+        if (entry.kind != .file or !std.mem.endsWith(u8, entry.basename, ".zig")) continue;
+        const path = try std.fmt.allocPrint(allocator, "src/{s}", .{entry.path});
+        defer allocator.free(path);
+        const source = try readZigFileZ(allocator, path);
+        defer allocator.free(source);
+
+        const is_types = std.mem.eql(
+            u8,
+            entry.path,
+            "platform/macos/session_host/runtime_event_types.zig",
+        );
+        const is_metadata_wire = std.mem.eql(
+            u8,
+            entry.path,
+            "platform/macos/session_host/runtime_metadata_wire.zig",
+        );
+        const is_remote_runtime = std.mem.eql(
+            u8,
+            entry.path,
+            "platform/macos/session_host/remote_runtime.zig",
+        );
+
+        const field_refs = std.mem.count(u8, source, "classifier_preflight");
+        if (field_refs != 0) {
+            try std.testing.expect(is_types);
+            classifier_field_count += field_refs;
+        }
+        const type_refs = std.mem.count(u8, source, "ValidatedMetadataView");
+        if (type_refs != 0) {
+            try std.testing.expect(is_types or is_metadata_wire);
+            validated_type_count += type_refs;
+        }
+        if (std.mem.indexOf(u8, source, "decodeMetadataEvent") != null)
+            try std.testing.expect(is_metadata_wire);
+
+        const private_materializer_refs = std.mem.count(
+            u8,
+            source,
+            "materializeValidatedEvent",
+        );
+        if (private_materializer_refs != 0) {
+            try std.testing.expect(is_metadata_wire);
+            private_materializer_count += private_materializer_refs;
+        }
+        const product_classifier_refs = std.mem.count(
+            u8,
+            source,
+            "classifyAndMaterializeEvent",
+        );
+        if (product_classifier_refs != 0) {
+            if (is_metadata_wire) {
+                product_classifier_definition_count += product_classifier_refs;
+            } else if (is_remote_runtime) {
+                product_classifier_call_count += product_classifier_refs;
+            } else return error.TestUnexpectedResult;
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 3), classifier_field_count);
+    try std.testing.expectEqual(@as(usize, 5), validated_type_count);
+    try std.testing.expectEqual(@as(usize, 2), private_materializer_count);
+    try std.testing.expectEqual(@as(usize, 1), product_classifier_definition_count);
+    try std.testing.expectEqual(@as(usize, 1), product_classifier_call_count);
+}
+
 fn containsForbiddenExternalBuiltin(source: [:0]const u8) bool {
     var tokenizer = std.zig.Tokenizer.init(source);
     while (true) {

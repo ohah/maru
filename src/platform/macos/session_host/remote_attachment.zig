@@ -3,6 +3,7 @@
 
 const std = @import("std");
 const protocol = @import("protocol.zig");
+const runtime_metadata_wire = @import("runtime_metadata_wire.zig");
 const client_mod = @import("client.zig");
 const external_inbox_ledger = @import("external_inbox_ledger.zig");
 const remote_screen = @import("remote_screen.zig");
@@ -247,17 +248,45 @@ pub const RemoteAttachment = struct {
         self.pending_batch_head = 0;
     }
 
-    pub fn applyRevoked(
+    /// Applies a revoke already bound to this attachment by `runtime_event_types`.
+    pub fn applyValidatedRevoked(
         self: *RemoteAttachment,
-        bytes: []const u8,
-    ) DecodeError!Revoked {
-        return decodeRevoked(self.allocator, bytes, &self.state);
+        successor_generation: u64,
+    ) error{InvalidAuthority}!void {
+        if (self.state.role != .controller) return error.InvalidAuthority;
+        const expected = std.math.add(u64, self.state.controller_generation, 1) catch
+            return error.InvalidAuthority;
+        if (successor_generation != expected) return error.InvalidAuthority;
+        self.state.role = .observer;
+        self.state.controller_generation = successor_generation;
     }
 };
 
 pub const AttachResult = struct {
     state: State,
     controller_busy: bool,
+    initial_metadata: runtime_metadata_wire.InitialMetadataSeed = .unsupported,
+
+    pub fn deinit(self: *AttachResult) void {
+        self.initial_metadata.deinit();
+        self.* = undefined;
+    }
+};
+
+pub const AttachDecodeProfile = runtime_metadata_wire.AttachDecodeProfile;
+pub const AttachDecodeError = runtime_metadata_wire.DecodeError;
+
+pub const AttachResponse = union(enum) {
+    wire_error: protocol.ErrorCode,
+    accepted: AttachResult,
+
+    pub fn deinit(self: *AttachResponse) void {
+        switch (self.*) {
+            .accepted => |*accepted| accepted.deinit(),
+            .wire_error => {},
+        }
+        self.* = undefined;
+    }
 };
 
 pub const Status = struct {
@@ -266,13 +295,46 @@ pub const Status = struct {
     controller: bool,
 };
 
-pub const Revoked = struct {
-    runtime_id: u128,
-    stream_id: u64,
-    controller_generation: u64,
-};
-
 pub const DecodeError = error{ OutOfMemory, Malformed };
+
+pub fn decodeAttachResponse(
+    allocator: std.mem.Allocator,
+    bytes: []const u8,
+    runtime_id: u128,
+    requested: Mode,
+    profile: AttachDecodeProfile,
+) AttachDecodeError!AttachResponse {
+    var envelope = try runtime_metadata_wire.decodeAttachEnvelope(allocator, bytes, profile);
+    defer envelope.deinit();
+    return switch (envelope) {
+        .wire_error => |code| .{ .wire_error = code },
+        .accepted => |*accepted| blk: {
+            const role: Role = if (accepted.input) .controller else .observer;
+            if (profile.generation_schema == .granted_with_generation and
+                accepted.controller_generation == 0 and
+                (role == .controller or accepted.controller_busy))
+                return error.Malformed;
+            switch (requested) {
+                .observer => if (role != .observer or accepted.controller_busy)
+                    return error.Malformed,
+                .controller => switch (role) {
+                    .controller => if (accepted.controller_busy) return error.Malformed,
+                    .observer => if (!accepted.controller_busy) return error.Malformed,
+                },
+            }
+            break :blk .{ .accepted = .{
+                .state = .{
+                    .runtime_id = runtime_id,
+                    .stream_id = accepted.stream_id,
+                    .role = role,
+                    .controller_generation = accepted.controller_generation,
+                },
+                .controller_busy = accepted.controller_busy,
+                .initial_metadata = accepted.initial_metadata.take(),
+            } };
+        },
+    };
+}
 
 /// Strict one-field response-envelope classification shared by attach/status/takeover consumers.
 /// `null` means an exact `result` envelope; unknown error names and extra fields are protocol
@@ -372,97 +434,6 @@ fn runtimeIdText(runtime_id: u128) [32]u8 {
     return text;
 }
 
-pub fn decodeAttach(
-    allocator: std.mem.Allocator,
-    bytes: []const u8,
-    runtime_id: u128,
-    requested: Mode,
-) DecodeError!AttachResult {
-    return decodeAttachForCapabilities(allocator, bytes, runtime_id, requested, true);
-}
-
-pub fn decodeAttachForCapabilities(
-    allocator: std.mem.Allocator,
-    bytes: []const u8,
-    runtime_id: u128,
-    requested: Mode,
-    peer_attach_generation: bool,
-) DecodeError!AttachResult {
-    var parsed = try parseObject(allocator, bytes);
-    defer parsed.deinit();
-    const root = parsed.value.object;
-    if (root.count() != 1) return error.Malformed;
-    const result = objectField(root, "result") orelse return error.Malformed;
-    const expected_fields: usize = if (peer_attach_generation) 6 else 5;
-    if (result.count() != expected_fields) return error.Malformed;
-    const stream_id = u64Field(result, "stream_id") orelse return error.Malformed;
-    const generation = if (peer_attach_generation)
-        u64Field(result, "controller_generation") orelse return error.Malformed
-    else
-        0;
-    const busy = boolField(result, "controller_busy") orelse return error.Malformed;
-    const metadata_revision = u64Field(result, "metadata_revision") orelse
-        return error.Malformed;
-    const metadata = result.get("metadata") orelse return error.Malformed;
-    switch (metadata) {
-        .null => if (metadata_revision != 0) return error.Malformed,
-        .object => if (metadata_revision == 0) return error.Malformed,
-        else => return error.Malformed,
-    }
-    if (stream_id == 0) return error.Malformed;
-    const granted = objectField(result, "granted") orelse return error.Malformed;
-    if (granted.count() != 3 or boolField(granted, "observe") != true)
-        return error.Malformed;
-    const input = boolField(granted, "input") orelse return error.Malformed;
-    const resize = boolField(granted, "resize") orelse return error.Malformed;
-    if (input != resize) return error.Malformed;
-    const role: Role = if (input) .controller else .observer;
-    // Generation zero is valid only for a pure observer on a runtime that has never had a
-    // controller. Controller acquisition and busy demotion both prove a controller transition.
-    if (peer_attach_generation and generation == 0 and (role == .controller or busy))
-        return error.Malformed;
-    switch (requested) {
-        .observer => if (role != .observer or busy) return error.Malformed,
-        .controller => switch (role) {
-            .controller => if (busy) return error.Malformed,
-            .observer => if (!busy) return error.Malformed,
-        },
-    }
-    return .{
-        .state = .{
-            .runtime_id = runtime_id,
-            .stream_id = stream_id,
-            .role = role,
-            .controller_generation = generation,
-        },
-        .controller_busy = busy,
-    };
-}
-
-/// Frozen MRSH v1 adapter의 attach body는 result/granted 없이 exact `{"stream_id":N}`이다. v1은 controller-only
-/// profile이고 compatibility fingerprint로 body 의미를 이미 pin했을 때만 caller가 이 decoder를 선택한다.
-pub fn decodeFrozenV1ControllerAttach(
-    allocator: std.mem.Allocator,
-    bytes: []const u8,
-    runtime_id: u128,
-) DecodeError!AttachResult {
-    var parsed = try parseObject(allocator, bytes);
-    defer parsed.deinit();
-    const root = parsed.value.object;
-    if (root.count() != 1) return error.Malformed;
-    const stream_id = u64Field(root, "stream_id") orelse return error.Malformed;
-    if (stream_id == 0) return error.Malformed;
-    return .{
-        .state = .{
-            .runtime_id = runtime_id,
-            .stream_id = stream_id,
-            .role = .controller,
-            .controller_generation = 0,
-        },
-        .controller_busy = false,
-    };
-}
-
 pub fn decodeStatus(
     allocator: std.mem.Allocator,
     bytes: []const u8,
@@ -515,38 +486,6 @@ pub fn decodeTakeover(
         return error.Malformed;
     state.role = .controller;
     state.controller_generation = generation;
-}
-
-pub fn decodeRevoked(
-    allocator: std.mem.Allocator,
-    bytes: []const u8,
-    state: *State,
-) DecodeError!Revoked {
-    if (state.role != .controller) return error.Malformed;
-    var parsed = try parseObject(allocator, bytes);
-    defer parsed.deinit();
-    const root = parsed.value.object;
-    if (root.count() != 2) return error.Malformed;
-    const event = stringField(root, "event") orelse return error.Malformed;
-    if (!std.mem.eql(u8, event, "controller.revoked")) return error.Malformed;
-    const data = objectField(root, "data") orelse return error.Malformed;
-    if (data.count() != 4) return error.Malformed;
-    const runtime_id = runtimeIdField(data, "runtime_id") orelse return error.Malformed;
-    const stream_id = u64Field(data, "stream_id") orelse return error.Malformed;
-    const generation = u64Field(data, "controller_generation") orelse return error.Malformed;
-    const reason = stringField(data, "reason") orelse return error.Malformed;
-    const successor = std.math.add(u64, state.controller_generation, 1) catch
-        return error.Malformed;
-    if (runtime_id != state.runtime_id or stream_id != state.stream_id or
-        generation != successor or !std.mem.eql(u8, reason, "takeover"))
-        return error.Malformed;
-    state.role = .observer;
-    state.controller_generation = generation;
-    return .{
-        .runtime_id = runtime_id,
-        .stream_id = stream_id,
-        .controller_generation = generation,
-    };
 }
 
 const ParsedObject = std.json.Parsed(std.json.Value);
@@ -620,62 +559,110 @@ fn runtimeIdField(object: std.json.ObjectMap, name: []const u8) ?u128 {
 const observer_attach =
     "{\"result\":{\"stream_id\":7,\"controller_generation\":3,\"granted\":{\"observe\":true,\"input\":false,\"resize\":false},\"controller_busy\":true,\"metadata_revision\":0,\"metadata\":null}}";
 
-test "remote attachment strictly decodes controller grant and busy demotion" {
-    const controller = try decodeAttach(
+fn decodeAcceptedAttachForTest(
+    bytes: []const u8,
+    runtime_id: u128,
+    requested: Mode,
+    profile: AttachDecodeProfile,
+) AttachDecodeError!AttachResult {
+    var decoded = try decodeAttachResponse(
         std.testing.allocator,
+        bytes,
+        runtime_id,
+        requested,
+        profile,
+    );
+    defer decoded.deinit();
+    return switch (decoded) {
+        .wire_error => error.Malformed,
+        .accepted => |*accepted| .{
+            .state = accepted.state,
+            .controller_busy = accepted.controller_busy,
+            .initial_metadata = accepted.initial_metadata.take(),
+        },
+    };
+}
+
+fn decodeCurrentAttachForTest(
+    bytes: []const u8,
+    runtime_id: u128,
+    requested: Mode,
+) AttachDecodeError!AttachResult {
+    return decodeAcceptedAttachForTest(bytes, runtime_id, requested, .{
+        .generation_schema = .granted_with_generation,
+        .metadata_support = .supported,
+    });
+}
+
+test "remote attachment strictly decodes controller grant and busy demotion" {
+    var controller = try decodeCurrentAttachForTest(
         "{\"result\":{\"stream_id\":7,\"controller_generation\":3,\"granted\":{\"observe\":true,\"input\":true,\"resize\":true},\"controller_busy\":false,\"metadata_revision\":0,\"metadata\":null}}",
         0xaa,
         .controller,
     );
+    defer controller.deinit();
     try std.testing.expectEqual(Role.controller, controller.state.role);
-    const observer = try decodeAttach(std.testing.allocator, observer_attach, 0xaa, .controller);
+    var observer = try decodeCurrentAttachForTest(observer_attach, 0xaa, .controller);
+    defer observer.deinit();
     try std.testing.expectEqual(Role.observer, observer.state.role);
     try std.testing.expect(observer.controller_busy);
     try std.testing.expectError(
         error.Malformed,
-        decodeAttach(std.testing.allocator, observer_attach, 0xaa, .observer),
+        decodeCurrentAttachForTest(observer_attach, 0xaa, .observer),
     );
-    const no_controller = try decodeAttach(
-        std.testing.allocator,
+    var no_controller = try decodeCurrentAttachForTest(
         "{\"result\":{\"stream_id\":8,\"controller_generation\":0,\"granted\":{\"observe\":true,\"input\":false,\"resize\":false},\"controller_busy\":false,\"metadata_revision\":0,\"metadata\":null}}",
         0xaa,
         .observer,
     );
+    defer no_controller.deinit();
     try std.testing.expectEqual(@as(u64, 0), no_controller.state.controller_generation);
 }
 
 test "remote attachment accepts exact pre-transfer same-major attach without inventing generation" {
     const legacy =
         "{\"result\":{\"stream_id\":7,\"granted\":{\"observe\":true,\"input\":false,\"resize\":false},\"controller_busy\":false,\"metadata_revision\":0,\"metadata\":null}}";
-    const accepted = try decodeAttachForCapabilities(
-        std.testing.allocator,
+    var accepted = try decodeAcceptedAttachForTest(
         legacy,
         0xaa,
         .observer,
-        false,
+        .{
+            .generation_schema = .granted_without_generation,
+            .metadata_support = .supported,
+        },
     );
+    defer accepted.deinit();
     try std.testing.expectEqual(Role.observer, accepted.state.role);
     try std.testing.expectEqual(@as(u64, 0), accepted.state.controller_generation);
     try std.testing.expectError(
         error.Malformed,
-        decodeAttach(std.testing.allocator, legacy, 0xaa, .observer),
+        decodeCurrentAttachForTest(legacy, 0xaa, .observer),
     );
 }
 
 test "remote attachment frozen v1 controller schema is isolated from current schema" {
-    const accepted = try decodeFrozenV1ControllerAttach(
-        std.testing.allocator,
+    var accepted = try decodeAcceptedAttachForTest(
         "{\"stream_id\":9}",
         0xaa,
+        .controller,
+        .{
+            .generation_schema = .frozen_controller_only,
+            .metadata_support = .unsupported,
+        },
     );
+    defer accepted.deinit();
     try std.testing.expectEqual(Role.controller, accepted.state.role);
     try std.testing.expectEqual(@as(u64, 9), accepted.state.stream_id);
     try std.testing.expectError(
         error.Malformed,
-        decodeFrozenV1ControllerAttach(
-            std.testing.allocator,
+        decodeAcceptedAttachForTest(
             "{\"stream_id\":9,\"granted\":{}}",
             0xaa,
+            .controller,
+            .{
+                .generation_schema = .frozen_controller_only,
+                .metadata_support = .unsupported,
+            },
         ),
     );
 }
@@ -711,12 +698,14 @@ test "remote attachment rejects malformed or authority-inconsistent grants" {
     };
     for (invalid) |bytes| try std.testing.expectError(
         error.Malformed,
-        decodeAttach(std.testing.allocator, bytes, 0xaa, .controller),
+        decodeCurrentAttachForTest(bytes, 0xaa, .controller),
     );
 }
 
 test "remote attachment status takeover and revoke are generation fenced" {
-    var state = (try decodeAttach(std.testing.allocator, observer_attach, 0xaa, .controller)).state;
+    var accepted = try decodeCurrentAttachForTest(observer_attach, 0xaa, .controller);
+    defer accepted.deinit();
+    var state = accepted.state;
     const status = try decodeStatus(
         std.testing.allocator,
         "{\"result\":{\"stream_id\":7,\"controller_generation\":3,\"controller\":false}}",
@@ -731,13 +720,10 @@ test "remote attachment status takeover and revoke are generation fenced" {
     );
     try std.testing.expectEqual(Role.controller, state.role);
     try std.testing.expectEqual(@as(u64, 4), state.controller_generation);
-    const revoked = try decodeRevoked(
-        std.testing.allocator,
-        "{\"event\":\"controller.revoked\",\"data\":{\"runtime_id\":\"000000000000000000000000000000aa\",\"stream_id\":7,\"controller_generation\":5,\"reason\":\"takeover\"}}",
-        &state,
-    );
-    try std.testing.expectEqual(@as(u64, 5), revoked.controller_generation);
-    try std.testing.expectEqual(Role.observer, state.role);
+    var attachment = RemoteAttachment.init(std.testing.allocator, state);
+    try attachment.applyValidatedRevoked(5);
+    try std.testing.expectEqual(@as(u64, 5), attachment.state.controller_generation);
+    try std.testing.expectEqual(Role.observer, attachment.state.role);
 }
 
 test "remote attachment rejects foreign and stale status transitions without mutation" {
@@ -844,41 +830,38 @@ test "remote attachment rejects generation gaps for takeover and revoke" {
             3,
         ),
     );
-    var controller = State{
+    const controller = State{
         .runtime_id = 0xaa,
         .stream_id = 7,
         .role = .controller,
         .controller_generation = 3,
     };
+    var controller_attachment = RemoteAttachment.init(std.testing.allocator, controller);
     try std.testing.expectError(
-        error.Malformed,
-        decodeRevoked(
-            std.testing.allocator,
-            "{\"event\":\"controller.revoked\",\"data\":{\"runtime_id\":\"000000000000000000000000000000aa\",\"stream_id\":7,\"controller_generation\":5,\"reason\":\"takeover\"}}",
-            &controller,
-        ),
+        error.InvalidAuthority,
+        controller_attachment.applyValidatedRevoked(5),
     );
 }
 
 test "remote attachment authority rejects mutation after busy demotion or revoke" {
-    var busy = RemoteAttachment.init(std.testing.allocator, (try decodeAttach(
-        std.testing.allocator,
+    var busy_result = try decodeCurrentAttachForTest(
         observer_attach,
         0xaa,
         .controller,
-    )).state);
+    );
+    defer busy_result.deinit();
+    var busy = RemoteAttachment.init(std.testing.allocator, busy_result.state);
     try std.testing.expect(!busy.allowsMutation());
 
-    var controller = RemoteAttachment.init(std.testing.allocator, (try decodeAttach(
-        std.testing.allocator,
+    var controller_result = try decodeCurrentAttachForTest(
         "{\"result\":{\"stream_id\":7,\"controller_generation\":3,\"granted\":{\"observe\":true,\"input\":true,\"resize\":true},\"controller_busy\":false,\"metadata_revision\":0,\"metadata\":null}}",
         0xaa,
         .controller,
-    )).state);
-    try std.testing.expect(controller.allowsMutation());
-    _ = try controller.applyRevoked(
-        "{\"event\":\"controller.revoked\",\"data\":{\"runtime_id\":\"000000000000000000000000000000aa\",\"stream_id\":7,\"controller_generation\":4,\"reason\":\"takeover\"}}",
     );
+    defer controller_result.deinit();
+    var controller = RemoteAttachment.init(std.testing.allocator, controller_result.state);
+    try std.testing.expect(controller.allowsMutation());
+    try controller.applyValidatedRevoked(4);
     try std.testing.expect(!controller.allowsMutation());
 }
 

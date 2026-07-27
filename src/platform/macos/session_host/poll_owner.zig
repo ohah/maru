@@ -376,10 +376,14 @@ pub const Owner = struct {
         })) return false;
         gate.reopen();
         self.syncClientCount();
-        std.log.scoped(.session_host).warn(
-            "repaired empty upgrade reactor accounting and resumed serving",
-            .{},
-        );
+        // This is an operator-visible recovery signal in the product. The Zig build runner
+        // treats expected warning output from a passing test as a warned/failed test step, so
+        // keep the production diagnostic without making the deterministic repair fixture noisy.
+        if (!@import("builtin").is_test)
+            std.log.scoped(.session_host).warn(
+                "repaired empty upgrade reactor accounting and resumed serving",
+                .{},
+            );
         return true;
     }
 

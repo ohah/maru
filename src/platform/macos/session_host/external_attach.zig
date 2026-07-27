@@ -14,14 +14,18 @@ const compatibility = @import("compatibility.zig");
 const framing = @import("framing.zig");
 const protocol = @import("protocol.zig");
 const remote_attachment = @import("remote_attachment.zig");
+const runtime_metadata_wire = @import("runtime_metadata_wire.zig");
+const screen_stream = @import("screen_stream.zig");
 const socket_server = @import("socket_server.zig");
 extern "c" fn usleep(usec: c_uint) c_int;
 
 pub const Prepared = struct {
     client: client_mod.Client,
     attachment: remote_attachment.RemoteAttachment,
+    initial_metadata: runtime_metadata_wire.InitialMetadataSeed,
 
     pub fn deinit(self: *Prepared) void {
+        self.initial_metadata.deinit();
         self.attachment.deinit();
         self.client.deinit();
         self.* = undefined;
@@ -105,27 +109,28 @@ fn prepareWithTransition(
         requested_mode,
         attach_phase,
     );
-    var attachment = switch (attach_stage) {
+    var attached = switch (attach_stage) {
         .attachment => |value| value,
         .failed => |code| return .{ .failed = code },
     };
-    var attachment_owned = true;
-    defer if (attachment_owned) attachment.deinit();
+    var attached_owned = true;
+    defer if (attached_owned) attached.deinit();
 
     if (request.intent == .take_over) {
-        const code = performTakeover(allocator, io, &client, &attachment);
+        const code = performTakeover(allocator, io, &client, &attached.attachment);
         if (code) |failed| return failClient(&client, failed);
     }
-    if (publishGate(&client, &attachment)) |failed|
+    if (publishGate(&client, &attached.attachment)) |failed|
         return failClient(&client, failed);
     transition(&client) catch |err|
         return failClient(&client, transitionExit(err));
 
-    attachment_owned = false;
+    attached_owned = false;
     client_owned = false;
     return .{ .prepared = .{
         .client = client,
-        .attachment = attachment,
+        .attachment = attached.attachment,
+        .initial_metadata = attached.initial_metadata,
     } };
 }
 
@@ -147,8 +152,19 @@ fn publishGate(
 }
 
 const AttachStage = union(enum) {
-    attachment: remote_attachment.RemoteAttachment,
+    attachment: Attached,
     failed: attach_cli.ExitCode,
+};
+
+const Attached = struct {
+    attachment: remote_attachment.RemoteAttachment,
+    initial_metadata: runtime_metadata_wire.InitialMetadataSeed,
+
+    fn deinit(self: *Attached) void {
+        self.initial_metadata.deinit();
+        self.attachment.deinit();
+        self.* = undefined;
+    }
 };
 
 fn attachSnapshot(
@@ -173,25 +189,35 @@ fn attachSnapshot(
         phase.absolute,
     ) catch |err| return failAttachStage(client, deadlineCallExit(err, .protocol));
     defer allocator.free(attach_response);
-    if (responseErrorExit(allocator, attach_response)) |code|
-        return failAttachStage(client, code);
-
     const profile = compatibility.profileForMajor(client.wire_major) orelse
         return failAttachStage(client, .unsupported);
-    const accepted = switch (profile.attach_schema) {
-        .frozen_controller_only => remote_attachment.decodeFrozenV1ControllerAttach(
-            allocator,
-            attach_response,
-            runtime_id,
-        ),
-        .granted_roles => remote_attachment.decodeAttachForCapabilities(
-            allocator,
-            attach_response,
-            runtime_id,
-            requested_mode,
-            client.attachment_capabilities.peer_attach_generation,
-        ),
-    } catch |err| return failAttachStage(client, decodeExit(err));
+    const generation_schema: runtime_metadata_wire.AttachGenerationSchema = switch (profile.attach_schema) {
+        .frozen_controller_only => .frozen_controller_only,
+        .granted_roles => if (client.attachment_capabilities.peer_attach_generation)
+            .granted_with_generation
+        else
+            .granted_without_generation,
+    };
+    var decoded = remote_attachment.decodeAttachResponse(
+        allocator,
+        attach_response,
+        runtime_id,
+        requested_mode,
+        .{
+            .generation_schema = generation_schema,
+            .metadata_support = client.metadata_support,
+        },
+    ) catch |err| return failAttachStage(client, decodeAttachExit(err));
+    defer decoded.deinit();
+    var accepted: remote_attachment.AttachResult = switch (decoded) {
+        .wire_error => |code| return failAttachStage(client, attach_cli.remoteExitCode(code)),
+        .accepted => |*value| .{
+            .state = value.state,
+            .controller_busy = value.controller_busy,
+            .initial_metadata = value.initial_metadata.take(),
+        },
+    };
+    defer accepted.deinit();
 
     var attachment = remote_attachment.RemoteAttachment.init(allocator, accepted.state);
     var owned = true;
@@ -212,7 +238,10 @@ fn attachSnapshot(
     if (phase.absolute.remainingNs() <= 0)
         return failAttachStage(client, .protocol);
     owned = false;
-    return .{ .attachment = attachment };
+    return .{ .attachment = .{
+        .attachment = attachment,
+        .initial_metadata = accepted.initial_metadata.take(),
+    } };
 }
 
 fn performTakeover(
@@ -297,6 +326,15 @@ fn decodeExit(err: remote_attachment.DecodeError) attach_cli.ExitCode {
     return switch (err) {
         error.OutOfMemory => .internal,
         error.Malformed => .protocol,
+    };
+}
+
+fn decodeAttachExit(err: remote_attachment.AttachDecodeError) attach_cli.ExitCode {
+    return switch (err) {
+        error.OutOfMemory => .internal,
+        error.Malformed => .protocol,
+        error.ResourceExhausted => .busy,
+        error.CapabilityViolation => .protocol,
     };
 }
 
@@ -464,6 +502,40 @@ const SnapshotStallPeer = struct {
     }
 };
 
+const SnapshotSuccessPeer = struct {
+    request_seen: bool = false,
+
+    fn run(
+        self: *SnapshotSuccessPeer,
+        fd: std.c.fd_t,
+        response: []const u8,
+        snapshot: []const u8,
+    ) void {
+        defer _ = std.c.close(fd);
+        var header_bytes: [protocol.header_size]u8 = undefined;
+        if (!readExact(fd, &header_bytes)) return;
+        const header = protocol.Header.decode(&header_bytes) catch return;
+        if (header.kind != .request or header.request_id != 1) return;
+        const payload = std.heap.page_allocator.alloc(u8, header.payload_len) catch return;
+        defer std.heap.page_allocator.free(payload);
+        if (!readExact(fd, payload)) return;
+        if (std.mem.indexOf(u8, payload, "\"method\":\"runtime.attach\"") == null) return;
+        self.request_seen = true;
+        socket_server.writeAll(fd, response) catch return;
+        const snapshot_frame = framing.encodeFrame(
+            std.heap.page_allocator,
+            .{
+                .kind = .snapshot_chunk,
+                .stream_id = 7,
+                .flags = protocol.Flags.end_stream,
+            },
+            snapshot,
+        ) catch return;
+        defer std.heap.page_allocator.free(snapshot_frame);
+        socket_server.writeAll(fd, snapshot_frame) catch return;
+    }
+};
+
 fn readExact(fd: std.c.fd_t, bytes: []u8) bool {
     var offset: usize = 0;
     while (offset < bytes.len) {
@@ -476,6 +548,133 @@ fn readExact(fd: std.c.fd_t, bytes: []u8) bool {
         return false;
     }
     return true;
+}
+
+test "external attach snapshot owns unsupported unavailable and current metadata seeds" {
+    const builtin = @import("builtin");
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    var snapshot: std.ArrayListUnmanaged(u8) = .empty;
+    defer snapshot.deinit(allocator);
+    const meta = try screen_stream.encodeScreenMeta(
+        allocator,
+        .{ .kind = .screen_meta, .generation = 1 },
+        .{ .cols = 1, .rows = 1, .cursor = .{} },
+    );
+    defer allocator.free(meta);
+    try screen_stream.appendRecord(&snapshot, allocator, meta);
+    var runs = [_]screen_stream.Run{.{ .grapheme = "x", .width = 1, .count = 1 }};
+    const row = try screen_stream.encodeRow(
+        allocator,
+        .{ .kind = .row, .generation = 1 },
+        .{ .row_index = 0, .runs = &runs },
+    );
+    defer allocator.free(row);
+    try screen_stream.appendRecord(&snapshot, allocator, row);
+
+    const cases = [_]struct {
+        support: runtime_metadata_wire.MetadataSupport,
+        body: []const u8,
+        expected: enum { unsupported, unavailable, current },
+    }{
+        .{
+            .support = .unsupported,
+            .body = "{\"result\":{\"stream_id\":7,\"controller_generation\":1,\"granted\":{\"observe\":true,\"input\":true,\"resize\":true},\"controller_busy\":false}}",
+            .expected = .unsupported,
+        },
+        .{
+            .support = .supported,
+            .body = "{\"result\":{\"stream_id\":7,\"controller_generation\":1,\"granted\":{\"observe\":true,\"input\":true,\"resize\":true},\"controller_busy\":false,\"metadata_revision\":0,\"metadata\":null}}",
+            .expected = .unavailable,
+        },
+        .{
+            .support = .supported,
+            .body =
+            \\{"result":{"stream_id":7,"controller_generation":1,"granted":{"observe":true,"input":true,"resize":true},"controller_busy":false,"metadata_revision":4,"metadata":{"cwd":"\/repo","window_title":"work","ssh_remote_dest":null,"semantic_state":0,"alt_active":false,"app_cursor_keys":false,"alternate_scroll":true,"observer_generation":1,"title_generation":2,"cols":80,"rows":24,"foreground_available":true,"foreground_pgid":7,"processes":[{"pid":7,"name":"z\u0073h"}]}}}
+            ,
+            .expected = .current,
+        },
+    };
+    for (cases) |case| {
+        var fds: [2]std.c.fd_t = undefined;
+        try std.testing.expectEqual(
+            @as(c_int, 0),
+            std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &fds),
+        );
+        const response = try framing.encodeFrame(
+            allocator,
+            .{ .kind = .response, .request_id = 1 },
+            case.body,
+        );
+        defer allocator.free(response);
+        var peer_state = SnapshotSuccessPeer{};
+        var peer = try std.Thread.spawn(.{}, SnapshotSuccessPeer.run, .{
+            &peer_state,
+            fds[1],
+            response,
+            snapshot.items,
+        });
+        var client: client_mod.Client = .{
+            .allocator = allocator,
+            .fd = fds[0],
+            .host_id = 1,
+            .parser = framing.FrameParser.init(allocator),
+            .attachment_capabilities = .{
+                .peer_attach_generation = true,
+                .negotiated_controller_transfer = true,
+            },
+            .metadata_support = case.support,
+        };
+        defer client.deinit();
+        const absolute = try @import("client_deadline.zig").AbsoluteDeadline.after(
+            std.testing.io,
+            std.time.ns_per_s,
+        );
+        var stage = attachSnapshot(
+            allocator,
+            std.testing.io,
+            &client,
+            0xaa,
+            .controller,
+            attach_phase_deadline.PhaseDeadline.fromAbsolute(.attach_snapshot, absolute),
+        );
+        peer.join();
+        try std.testing.expect(peer_state.request_seen);
+        switch (stage) {
+            .failed => return error.TestUnexpectedResult,
+            .attachment => |*attached| {
+                defer attached.deinit();
+                switch (case.expected) {
+                    .unsupported => try std.testing.expectEqual(
+                        runtime_metadata_wire.InitialMetadataSeed.unsupported,
+                        attached.initial_metadata,
+                    ),
+                    .unavailable => try std.testing.expectEqual(
+                        runtime_metadata_wire.InitialMetadataSeed.unavailable,
+                        attached.initial_metadata,
+                    ),
+                    .current => {
+                        try std.testing.expectEqualStrings(
+                            "/repo",
+                            attached.initial_metadata.current.cwd(),
+                        );
+                        try std.testing.expectEqualStrings(
+                            "zsh",
+                            attached.initial_metadata.current.foregroundProcesses()[0].slice(),
+                        );
+                        const backing = attached.initial_metadata.current.backing orelse
+                            return error.TestUnexpectedResult;
+                        const backing_start = @intFromPtr(backing.ptr);
+                        const response_start = @intFromPtr(response.ptr);
+                        try std.testing.expect(
+                            backing_start + backing.len <= response_start or
+                                response_start + response.len <= backing_start,
+                        );
+                    },
+                }
+            },
+        }
+    }
 }
 
 test "external attach snapshot timeout closes by EOF without detach compensation" {
@@ -509,6 +708,7 @@ test "external attach snapshot timeout closes by EOF without detach compensation
             .peer_attach_generation = true,
             .negotiated_controller_transfer = true,
         },
+        .metadata_support = .supported,
     };
     defer client.deinit();
     const absolute = try @import("client_deadline.zig").AbsoluteDeadline.after(
@@ -533,6 +733,74 @@ test "external attach snapshot timeout closes by EOF without detach compensation
     try std.testing.expect(peer_state.eof_seen);
     try std.testing.expectEqual(@as(usize, 0), peer_state.bytes_after_attach);
     try std.testing.expect(client.unusable);
+}
+
+test "external attach maps resource-exhausting metadata to busy and closes before snapshot" {
+    const builtin = @import("builtin");
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    var processes: std.Io.Writer.Allocating = .init(allocator);
+    defer processes.deinit();
+    for (0..runtime_metadata_wire.max_process_entries + 1) |index| {
+        if (index != 0) try processes.writer.writeByte(',');
+        try processes.writer.print("{{\"pid\":{d},\"name\":\"p\"}}", .{index});
+    }
+    const body = try std.fmt.allocPrint(
+        allocator,
+        "{{\"result\":{{\"stream_id\":7,\"controller_generation\":1,\"granted\":{{\"observe\":true,\"input\":true,\"resize\":true}},\"controller_busy\":false,\"metadata_revision\":1,\"metadata\":{{\"cwd\":\"/repo\",\"window_title\":\"work\",\"ssh_remote_dest\":null,\"semantic_state\":0,\"alt_active\":false,\"app_cursor_keys\":false,\"alternate_scroll\":true,\"observer_generation\":1,\"title_generation\":1,\"cols\":80,\"rows\":24,\"foreground_available\":true,\"foreground_pgid\":1,\"processes\":[{s}]}}}}}}",
+        .{processes.written()},
+    );
+    defer allocator.free(body);
+    const response = try framing.encodeFrame(
+        allocator,
+        .{ .kind = .response, .request_id = 1 },
+        body,
+    );
+    defer allocator.free(response);
+    var fds: [2]std.c.fd_t = undefined;
+    try std.testing.expectEqual(
+        @as(c_int, 0),
+        std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &fds),
+    );
+    socket_server.setNoSigPipe(fds[0]);
+    var peer_state = SnapshotStallPeer{};
+    var peer = try std.Thread.spawn(.{}, SnapshotStallPeer.run, .{
+        &peer_state,
+        fds[1],
+        response,
+    });
+    var client: client_mod.Client = .{
+        .allocator = allocator,
+        .fd = fds[0],
+        .host_id = 1,
+        .parser = framing.FrameParser.init(allocator),
+        .attachment_capabilities = .{
+            .peer_attach_generation = true,
+            .negotiated_controller_transfer = true,
+        },
+        .metadata_support = .supported,
+    };
+    defer client.deinit();
+    const absolute = try @import("client_deadline.zig").AbsoluteDeadline.after(
+        std.testing.io,
+        std.time.ns_per_s,
+    );
+    const stage = attachSnapshot(
+        allocator,
+        std.testing.io,
+        &client,
+        0xaa,
+        .controller,
+        attach_phase_deadline.PhaseDeadline.fromAbsolute(.attach_snapshot, absolute),
+    );
+    try std.testing.expectEqual(attach_cli.ExitCode.busy, stage.failed);
+    try std.testing.expectEqual(@as(u8, 6), @intFromEnum(stage.failed));
+    peer.join();
+    try std.testing.expect(peer_state.response_sent);
+    try std.testing.expect(peer_state.eof_seen);
+    try std.testing.expectEqual(@as(usize, 0), peer_state.bytes_after_attach);
+    try std.testing.expect(client.unusable);
+    try std.testing.expectEqual(@as(std.c.fd_t, -1), client.fd);
 }
 
 const TakeoverStallPeer = struct {

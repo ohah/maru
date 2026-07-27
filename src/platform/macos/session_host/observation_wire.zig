@@ -1,179 +1,70 @@
-//! runtime metadata JSON wire schema의 단일 validator.
+//! Thin compatibility facade over the runtime metadata wire SSOT.
 //!
-//! Client event queue와 RemoteRuntime consumer가 서로 다른 schema/range 규칙을 가지면, consumer가 거부할 malformed newer
-//! event가 정상 pending full-state를 밀어내거나 새 필드를 한쪽만 받아 영구 누락시킬 수 있다. 두 경로는 반드시 이 validator를
-//! 먼저 통과한다. 반환 revision 외 값 적용은 RemoteRuntime이 owned cache로 수행한다.
+//! Queue coalescing needs only a revision scalar. It must not carry a second schema/range/default
+//! implementation that can accept a value the owning GUI projection later rejects.
 
 const std = @import("std");
+const runtime_event_wire = @import("runtime_event_wire.zig");
+const runtime_metadata_wire = @import("runtime_metadata_wire.zig");
 
-pub fn eventRevision(allocator: std.mem.Allocator, payload: []const u8) error{OutOfMemory}!?u64 {
-    return revision(allocator, payload, false);
-}
+pub const ValidationError = error{
+    OutOfMemory,
+    ResourceExhausted,
+    CapabilityViolation,
+};
 
-pub fn payloadRevision(allocator: std.mem.Allocator, payload: []const u8) error{OutOfMemory}!?u64 {
-    return revision(allocator, payload, true);
-}
-
-fn revision(allocator: std.mem.Allocator, payload: []const u8, allow_response: bool) error{OutOfMemory}!?u64 {
-    var parsed = std.json.parseFromSlice(std.json.Value, allocator, payload, .{}) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        else => return null,
-    };
-    defer parsed.deinit();
-    const root = switch (parsed.value) {
-        .object => |o| o,
-        else => return null,
-    };
-    const container = if (allow_response and root.get("result") != null)
-        switch (root.get("result").?) {
-            .object => |o| o,
-            else => return null,
-        }
-    else blk: {
-        const event = switch (root.get("event") orelse return null) {
-            .string => |s| s,
-            else => return null,
-        };
-        if (!std.mem.eql(u8, event, "runtime.metadata")) return null;
-        break :blk root;
-    };
-
-    const metadata_revision: u64 = switch (container.get("metadata_revision") orelse return null) {
-        .integer => |n| if (n > 0) @intCast(n) else return null,
-        else => return null,
-    };
-    const metadata = switch (container.get("metadata") orelse return null) {
-        .object => |o| o,
-        else => return null,
-    };
-    if (!fieldIs(metadata, "cwd", .string) or
-        !fieldIs(metadata, "window_title", .string) or
-        !fieldIsStringOrNull(metadata, "ssh_remote_dest") or
-        !fieldIsNonNegative(metadata, "semantic_state") or
-        !fieldIs(metadata, "alt_active", .bool) or
-        !fieldIs(metadata, "app_cursor_keys", .bool) or
-        !fieldIs(metadata, "alternate_scroll", .bool) or
-        // mouse_tracking은 **optional**(호환): 이 필드 없이 보내는 구버전 host의 metadata를 통째로 거부하면 cwd·
-        // alt_active 등 나머지 관측까지 잃으므로, 없으면 통과시키고 consumer가 false로 폴백한다(타입이 있으면 bool 검증).
-        !fieldIsBoolOrAbsent(metadata, "mouse_tracking") or
-        // mouse_tracking_mode도 optional(구버전 host 호환) — 없으면 consumer가 bool에서 폴백한다(1003은 못 씀).
-        !fieldFitsUnsignedOrAbsent(metadata, "mouse_tracking_mode", 4) or
-        // bracketed_paste도 optional(구버전 host 호환) — host-backed 붙여넣기 bracketed 판정·인코딩 게이트 모드.
-        !fieldIsBoolOrAbsent(metadata, "bracketed_paste") or
-        // bell_count도 optional(구버전 host 호환) — 없으면 0으로 남아 원격 벨이 안 울린다(기존 동작).
-        !fieldFitsUnsignedOrAbsent(metadata, "bell_count", std.math.maxInt(u32)) or
-        // OSC 52 요청 seq·target도 optional(구버전 host 호환) — 없으면 0/빈 값이라 원격 클립보드가 비활성(기존 동작).
-        !fieldFitsUnsignedOrAbsent(metadata, "clipboard_write_seq", std.math.maxInt(u32)) or
-        !fieldFitsUnsignedOrAbsent(metadata, "clipboard_read_seq", std.math.maxInt(u32)) or
-        // target도 검증한다 — 빠뜨리면 손상된 최신 이벤트가 정상 대기 full-state를 밀어낼 수 있다(이 모듈의 불변식).
-        !fieldIsStringOrAbsent(metadata, "clipboard_read_target") or
-        // app_keypad·kitty_flags도 optional(구버전 host 호환) — host-backed 일반 key의 DECKPAM·kitty 인코딩 모드.
-        !fieldIsBoolOrAbsent(metadata, "app_keypad") or
-        !fieldFitsUnsignedOrAbsent(metadata, "kitty_flags", std.math.maxInt(u5)) or
-        !fieldIsNonNegative(metadata, "observer_generation") or
-        !fieldFitsUnsigned(metadata, "title_generation", std.math.maxInt(u32)) or
-        !fieldFitsUnsigned(metadata, "cols", std.math.maxInt(u16)) or
-        !fieldFitsUnsigned(metadata, "rows", std.math.maxInt(u16)) or
-        !fieldIs(metadata, "foreground_available", .bool) or
-        !fieldIsI32OrNull(metadata, "foreground_pgid"))
-        return null;
-    const processes = switch (metadata.get("processes") orelse return null) {
-        .array => |items| items,
-        else => return null,
-    };
-    for (processes.items) |item| {
-        const process = switch (item) {
-            .object => |o| o,
-            else => return null,
-        };
-        if (!fieldIsI32(process, "pid") or !fieldIs(process, "name", .string)) return null;
-    }
-    return metadata_revision;
-}
-
-const JsonKind = enum { string, bool };
-
-fn fieldIs(obj: std.json.ObjectMap, key: []const u8, comptime kind: JsonKind) bool {
-    const value = obj.get(key) orelse return false;
-    return switch (kind) {
-        .string => value == .string,
-        .bool => value == .bool,
+pub fn eventRevision(
+    allocator: std.mem.Allocator,
+    payload: []const u8,
+    support: runtime_metadata_wire.MetadataSupport,
+) ValidationError!?u64 {
+    _ = allocator;
+    return switch (runtime_event_wire.preflightEvent(payload, .{})) {
+        .accepted => |preflight| switch (preflight.event) {
+            .metadata => |metadata| if (support == .unsupported)
+                error.CapabilityViolation
+            else
+                metadata.revision,
+            else => null,
+        },
+        .resource_exhausted => error.ResourceExhausted,
+        .malformed, .unknown, .foreign => null,
     };
 }
 
-fn fieldIsBoolOrAbsent(obj: std.json.ObjectMap, key: []const u8) bool {
-    return switch (obj.get(key) orelse return true) {
-        .bool => true,
-        else => false,
-    };
-}
-
-/// 없거나 문자열이면 통과(구 host 호환 optional 문자열). 값이 있는데 문자열이 아니면 손상으로 본다.
-fn fieldIsStringOrAbsent(obj: std.json.ObjectMap, key: []const u8) bool {
-    return switch (obj.get(key) orelse return true) {
-        .string => true,
-        else => false,
-    };
-}
-
-fn fieldIsStringOrNull(obj: std.json.ObjectMap, key: []const u8) bool {
-    return switch (obj.get(key) orelse return false) {
-        .string, .null => true,
-        else => false,
-    };
-}
-
-fn fieldIsNonNegative(obj: std.json.ObjectMap, key: []const u8) bool {
-    return switch (obj.get(key) orelse return false) {
-        .integer => |n| n >= 0,
-        else => false,
-    };
-}
-
-fn fieldFitsUnsigned(obj: std.json.ObjectMap, key: []const u8, max: u64) bool {
-    return switch (obj.get(key) orelse return false) {
-        .integer => |n| n >= 0 and @as(u64, @intCast(n)) <= max,
-        else => false,
-    };
-}
-
-/// optional 정수 필드(구버전 host 호환) — 없으면 통과, 있으면 [0, max] 검증. kitty_flags(u5)처럼 구 host가 안 보내는 필드용.
-fn fieldFitsUnsignedOrAbsent(obj: std.json.ObjectMap, key: []const u8, max: u64) bool {
-    return switch (obj.get(key) orelse return true) {
-        .integer => |n| n >= 0 and @as(u64, @intCast(n)) <= max,
-        else => false,
-    };
-}
-
-fn fieldIsI32(obj: std.json.ObjectMap, key: []const u8) bool {
-    return switch (obj.get(key) orelse return false) {
-        .integer => |n| n >= std.math.minInt(i32) and n <= std.math.maxInt(i32),
-        else => false,
-    };
-}
-
-fn fieldIsI32OrNull(obj: std.json.ObjectMap, key: []const u8) bool {
-    return switch (obj.get(key) orelse return false) {
-        .integer => |n| n >= std.math.minInt(i32) and n <= std.math.maxInt(i32),
-        .null => true,
-        else => false,
-    };
-}
-
-test "observation wire rejects consumer-invalid bounds and accepts event/response containers" {
+test "observation wire delegates full-u64 schema and capability verdict to common leaf" {
     const allocator = std.testing.allocator;
     const metadata =
         \\{"cwd":"/repo","window_title":"work","ssh_remote_dest":null,"semantic_state":0,"alt_active":false,
-        \\"app_cursor_keys":false,"alternate_scroll":true,"observer_generation":1,"title_generation":1,"cols":80,"rows":24,
+        \\"app_cursor_keys":false,"alternate_scroll":true,"observer_generation":18446744073709551615,
+        \\"title_generation":1,"cols":80,"rows":24,"bell_count":18446744073709551615,
+        \\"clipboard_write_seq":18446744073709551615,"clipboard_read_seq":18446744073709551615,
         \\"foreground_available":false,"foreground_pgid":null,"processes":[]}
     ;
-    const event = try std.fmt.allocPrint(allocator, "{{\"event\":\"runtime.metadata\",\"metadata_revision\":2,\"metadata\":{s}}}", .{metadata});
+    const event = try std.fmt.allocPrint(
+        allocator,
+        "{{\"event\":\"runtime.metadata\",\"metadata_revision\":18446744073709551615,\"metadata\":{s}}}",
+        .{metadata},
+    );
     defer allocator.free(event);
-    try std.testing.expectEqual(@as(?u64, 2), try eventRevision(allocator, event));
-    const response = try std.fmt.allocPrint(allocator, "{{\"result\":{{\"metadata_revision\":3,\"metadata\":{s}}}}}", .{metadata});
-    defer allocator.free(response);
-    try std.testing.expectEqual(@as(?u64, 3), try payloadRevision(allocator, response));
-    const bad = try std.mem.replaceOwned(u8, allocator, event, "\"cols\":80", "\"cols\":-1");
-    defer allocator.free(bad);
-    try std.testing.expectEqual(@as(?u64, null), try eventRevision(allocator, bad));
+    try std.testing.expectEqual(
+        @as(?u64, std.math.maxInt(u64)),
+        try eventRevision(allocator, event, .supported),
+    );
+    try std.testing.expectError(
+        error.CapabilityViolation,
+        eventRevision(allocator, event, .unsupported),
+    );
+    const malformed = try std.mem.replaceOwned(
+        u8,
+        allocator,
+        event,
+        "\"cols\":80",
+        "\"cols\":-1",
+    );
+    defer allocator.free(malformed);
+    try std.testing.expectEqual(
+        @as(?u64, null),
+        try eventRevision(allocator, malformed, .supported),
+    );
 }

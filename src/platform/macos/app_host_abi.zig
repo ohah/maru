@@ -5581,7 +5581,7 @@ test "Metal key-down ABI: 터미널이 활성이면 Cmd+W가 파일 패널을 �
     // 상태 자체가 구조적으로 불가능해졌다. 남은 계약은 그 불변식이다 — 터미널이 활성이면 ⌘W는 파일
     // 패널을 건드리지 않고 터미널 cascade를 따른다.
     session.?.focusTerm(0);
-    try std.testing.expectEqual(@as(?u64, null), session.?.focusedDockSurface());.
+    try std.testing.expectEqual(@as(?u64, null), session.?.focusedDockSurface());
 
     const event: KeyEvent = .{
         .codepoint = 'w',

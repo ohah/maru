@@ -12792,10 +12792,11 @@ pub const AppSession = struct {
         // FP16: barrier가 그룹이 아니라 pending entry 자체를 대조한다. 옛 runtime_id 대조와 같은 강도로,
         // owner가 다른 파일을 가리키면 fail-close한다.
         if (owned_entry_id != pending.entry_id) return false;
-        // 옛 `.dock_group`은 **보이는** group에 묶여 있었다. 같은 강도를 유지하려면 그 entry가 지금 활성
-        // 워크스페이스에 있어야 한다 — 아니면 다른 워크스페이스로 전환한 뒤에도 보이지 않는 파일의
-        // barrier가 그 화면의 키·붙여넣기·닫기를 계속 삼킨다(code-review max).
-        if (self.activeTabHasFileEntry(pending.entry_id) == false) return false;
+        // 옛 `.dock_group`은 **보이는** group에 묶여 있었다. 같은 강도를 유지하려면 그 파일이 지금 실제로
+        // 보여야 한다 — 활성 워크스페이스에 있는 것만으로는 부족하다(같은 pane의 터미널 탭으로 옮겨간
+        // 뒤에도 barrier가 키를 삼킨다). 워크스페이스 전환·창 병합·pane 안 탭 전환을 한 규칙으로 덮는다.
+        const owner_entry = self.fileEntryForIdConst(pending.entry_id) orelse return false;
+        if (!self.fileSurfaceIsVisibleConst(owner_entry.surface_id)) return false;
         const entry = blk: {
             var it = self.fileEntriesConst();
             while (it.next()) |e| {
@@ -14064,6 +14065,28 @@ pub const AppSession = struct {
             }
         }
         return n;
+    }
+
+    /// `fileEntryForId`의 const 변형(순수 술어용).
+    fn fileEntryForIdConst(self: *const AppSession, entry_id: dock_panel.EntryId) ?*const dock_panel.Entry {
+        if (entry_id == 0) return null;
+        var it = self.fileEntriesConst();
+        while (it.next()) |entry| {
+            if (entry.id == entry_id) return entry;
+        }
+        return null;
+    }
+
+    /// `fileSurfaceIsVisible`의 const 변형.
+    fn fileSurfaceIsVisibleConst(self: *const AppSession, surface_id: u64) bool {
+        if (surface_id == 0 or self.tabs.items.len == 0) return false;
+        const tab = self.tabs.items[self.app_window.active_tab];
+        for (tab.panes.items) |pane| {
+            if (pane.terms.items.len == 0) continue;
+            const entry = pane.activeTerm().file_entry orelse continue;
+            if (entry.surface_id == surface_id) return true;
+        }
+        return false;
     }
 
     /// 그 EntryId가 **활성 워크스페이스**의 파일인가. publish 대기 barrier가 보이지 않는 파일을 가리킨 채
@@ -44983,10 +45006,12 @@ test "FP9 focus toggle: empty notice and workspace-dock round trip use one confi
     try std.testing.expect(session.workspace_focus_pending);
     try std.testing.expectEqual(@as(usize, 0), session.webSurfaceTransitionsCount());
 
+    // FP16 §3.4: 파일 focus가 곧 `.workspace`(활성 Term이 그 파일)다 — 토글은 workspace ↔ tree 왕복이 된다.
     _ = session.focusFilePanelSurface(sid);
+    try std.testing.expectEqual(@as(?u64, sid), session.focusedDockSurface());
     session.workspace_focus_pending = false;
     session.dispatchAppAction(.toggle_file_panel_focus);
-    try std.testing.expect(session.focus_owner == .workspace);
+    try std.testing.expect(session.focus_owner == .file_tree);
     // one-way compatibility action remains available but no longer owns the default chord.
     session.dispatchAppAction(.focus_file_tree);
     try std.testing.expect(session.focus_owner == .file_tree);
@@ -45178,22 +45203,24 @@ test "close_focused uses the actual Metal or WebView key source across a stale o
     try std.testing.expectEqual(initial_tabs, session.tabs.items.len);
     try std.testing.expectEqual(@as(usize, 2), session.fileEntryCount());
 
-    // TerminalView가 실제 key source면 stale dock_surface를 먼저 workspace로 정합해 Term만 닫는다.
+    // FP16 §3.4: 입력 소유가 활성 Term에서 파생되면서 "stale dock owner" 상태가 구조적으로 사라졌다.
+    // 남은 계약: Metal 키가 왔을 때 **활성 Term이 터미널이면** 그 터미널을 닫는다(파일은 안 건드린다).
     try session.newTermInActivePane();
     session.activePane().activeTerm().rt.terminated = true;
     session.activePane().activeTerm().surface.process_state = .exited;
     const terms_before = session.activePane().terms.items.len;
-    _ = session.focusFilePanelSurface(sid);
+    try std.testing.expect(session.activePane().activeTerm().file_entry == null); // 활성 = 터미널
+    try std.testing.expectEqual(@as(?u64, null), session.focusedDockSurface());
     _ = try session.handleMetalKeyEvent(.{ .key = .{ .char = 'w' }, .modifiers = .{ .command = true } });
     try std.testing.expectEqual(terms_before - 1, session.activePane().terms.items.len);
     try std.testing.expect(session.pending_file_panel_close == null);
     try std.testing.expectEqual(@as(usize, 0), session.file_panel_dirty_sync_actions_len);
     try std.testing.expectEqual(@as(usize, 2), session.fileEntryCount());
 
-    // browser Term도 native WebView source다. stale file owner보다 실제 browser surface가 이겨 Term cascade만 탄다.
+    // browser Term도 native WebView source다. FP16에서는 그 WebView가 키를 받으려면 **활성 Term**이어야
+    // 하므로(소유가 곧 활성 Term), 그 상태에서 app action이 Term cascade만 타는지가 남은 계약이다.
     const browser_sid = try session.appendWebTermInActivePane(.browser);
     const browser_terms_before = session.activePane().terms.items.len;
-    _ = session.focusFilePanelSurface(sid);
     try std.testing.expect(session.dispatchWebAppAction(browser_sid, .{ .key = .{ .char = 'w' }, .modifiers = .{ .command = true } }));
     try std.testing.expect(session.pending_confirm == .close);
     try std.testing.expect(session.focus_owner == .workspace);
@@ -45219,8 +45246,10 @@ test "close_focused uses the actual Metal or WebView key source across a stale o
             break;
         }
     } else return error.NoBrowserTerm;
+    // 보이지 않는 파일(브라우저가 활성)에 barrier를 걸어도 **입력을 삼키지 않는다** — FP16에서 barrier는
+    // 실제로 보이는 파일만 소유한다. 그래서 눈앞의 browser WebView가 낸 app action이 그대로 진행된다.
     session.requestDockEntryFocus(session.fileEntryAt(1).?);
-    try std.testing.expect(session.pendingDockEntryOwnsInput());
+    try std.testing.expect(!session.pendingDockEntryOwnsInput());
     try std.testing.expect(session.dispatchWebAppAction(browser_sid, .{ .key = .{ .char = 'w' }, .modifiers = .{ .command = true } }));
     try std.testing.expect(session.pending_confirm == .close);
     try std.testing.expect(session.focus_owner == .workspace);
@@ -45240,7 +45269,6 @@ test "close_focused uses the actual Metal or WebView key source across a stale o
     // 명시적으로 재바인딩한 close_term은 active browser capability에서만 허용되고 같은 workspace cascade를 탄다.
     const browser_close_term_sid = try session.appendWebTermInActivePane(.browser);
     const close_term_terms_before = session.activePane().terms.items.len;
-    _ = session.focusFilePanelSurface(sid);
     try std.testing.expect(session.dispatchWebAppAction(browser_close_term_sid, close_term_event));
     try std.testing.expect(session.pending_confirm == .close);
     try std.testing.expect(session.focus_owner == .workspace);
@@ -45301,8 +45329,14 @@ test "close_focused uses the actual Metal or WebView key source across a stale o
     session.focusWorkspaceInput();
     session.completeFilePanelSaveClose(save_sid, save_action.request_id, 2, true);
     try std.testing.expect(session.fileEntryForSurfaceId(save_sid) == null);
-    try std.testing.expect(session.focus_owner == .workspace);
-    try std.testing.expect(session.pending_dock_focus == null);
+    // FP16: 입력 소유가 활성 Term에서 파생되므로, 그 파일을 닫으면 pane이 승계한 **다음 파일**로 barrier가
+    // 다시 발급된다(터미널이 승계하면 workspace). 여기서는 다른 파일이 남아 있어 그쪽이 받는다.
+    if (session.activePane().activeTerm().file_entry) |successor| {
+        try std.testing.expectEqual(successor.id, session.pending_dock_focus.?.entry_id);
+    } else {
+        try std.testing.expect(session.focus_owner == .workspace);
+        try std.testing.expect(session.pending_dock_focus == null);
+    }
 }
 
 test "file tree bulk delete visits entries and action queues exactly once" {
@@ -45892,14 +45926,15 @@ test "file tree keyboard focus preserves identity navigates scrolls and restores
     _ = session.focusFilePanelSurface(sid);
     session.clearFileTreeSelection();
 
-    // 왕복 action은 dock surface에서 workspace로 돌아간다.
+    // 왕복 action은 파일(=workspace)과 tree 사이를 오간다(FP16에서 dock surface 축이 사라졌다).
     try std.testing.expect(!session.anyOverlayOpen());
     session.fileEntryForSurfaceId(sid).?.mode = .source_edit; // 라이브 백로그 → 편집은 소스 모드
     try std.testing.expectEqual(config_mod.keybinding.WebKeyRoute.web_editor, session.webKeyRoute(sid, .{ .key = .{ .char = 's' }, .modifiers = .{ .command = true } }));
     try std.testing.expectEqual(config_mod.keybinding.WebKeyRoute.app_action, session.webKeyRoute(sid, .{ .key = .{ .char = 'e' }, .modifiers = .{ .command = true, .shift = true } }));
+    // FP16 §3.4: 파일 focus가 곧 `.workspace`라, 그 상태에서의 왕복 토글은 tree로 간다.
     _ = try session.handleKeyEvent(.{ .key = .{ .char = 'e' }, .modifiers = .{ .command = true, .shift = true } });
-    try std.testing.expect(session.focus_owner == .workspace);
-    try std.testing.expect(session.takeWorkspaceFocusAction());
+    try std.testing.expect(session.focus_owner == .file_tree);
+    try std.testing.expect(session.takeFileTreeFocusAction());
 
     // 호환 one-way action은 dock surface를 Esc restore target으로 고정하고 Metal responder pull을 한 번만 낸다.
     _ = session.focusFilePanelSurface(sid);
@@ -58217,6 +58252,16 @@ test "FP9 merge remaps destination focus one-shots when dirty source replaces cl
     // remains drainable but cannot move the logical/native focus back from B.
     dst.queuePendingDockFocus(replacement);
     dst.file_panel_mode_pending = source_surface;
+    // 실제 클릭은 **보이는** 패널에만 온다 — B가 있는 워크스페이스로 먼저 돌아간다(FP16: focusFilePanelSurface는
+    // 워크스페이스를 넘지 않는다).
+    for (dst.tabs.items, 0..) |t, ti| {
+        for (t.panes.items) |pane| {
+            for (pane.terms.items) |term| {
+                const e = term.file_entry orelse continue;
+                if (e.surface_id == newer_surface) _ = dst.switchTab(ti);
+            }
+        }
+    }
     try std.testing.expect(dst.focusFilePanelSurface(newer_surface));
     try std.testing.expect(dst.pending_dock_focus == null);
     const mode_only = dst.takeFilePanelModeAction().?;

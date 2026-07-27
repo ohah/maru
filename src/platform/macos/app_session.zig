@@ -14709,7 +14709,11 @@ pub const AppSession = struct {
     }
 
     fn isBrowserTerm(term: *const Term) bool {
-        return term.kind == .web and term.web_panel_kind == .browser;
+        // **파일 entry 제외가 여기 있다**(FP16 §8). `.html`/`.pdf` 파일 Term은 격리 config를 쓰려고
+        // `web_panel_kind == .browser`를 갖게 되는데, 그렇다고 browser 기능(주소창 밴드·nav 단축키·URL 편집·
+        // 터미널 링크 착지)이 걸리면 로컬 HTML 파일 뷰가 브라우저처럼 동작한다. PR #1638이 판정 8곳을 이 함수
+        // 하나로 모아 둔 목적이 정확히 이 한 줄을 한 곳에만 넣기 위해서였다.
+        return term.kind == .web and term.file_entry == null and term.web_panel_kind == .browser;
     }
 
     /// 지금 **화면에 보이는** browser 패널의 surface_id(없으면 0). 각 pane의 **활성 Term만** 본다 — 숨은 Term 탭의

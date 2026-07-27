@@ -3534,8 +3534,11 @@ pub const AppSession = struct {
         self.queuePendingDockFocus(entry);
         // restore/window merge 뒤에도 typed ack 전 fail-close owner를 함께 재파생한다. token만 이관하고
         // workspace/옛 surface owner를 남기면 늦은 native publish 전 PTY·paste·close가 잘못 라우팅된다.
-        // group 자체가 필요한 소수 소비처(§10 B-1) — FP16b/B-3에서 group 개념과 함께 사라진다.
-        self.focus_owner = .{ .dock_group = (self.groupForFileEntryId(old.entry_id) orelse return).runtime_id };
+        //
+        // FP16: entry가 Term으로 옮겨가 `.dock_group`(그룹 runtime_id) 축이 가리킬 대상이 없다. surface가 이미
+        // 있는 상태이므로 `.dock_surface`로 재파생한다 — publish 대기 전용이던 `.dock_group`은 B-3에서 축과 함께
+        // 사라진다(§3.4).
+        self.focus_owner = .{ .dock_surface = entry.surface_id };
         self.workspace_focus_pending = false;
         self.file_tree_focus_pending = false;
         self.file_tree_restore_surface_pending = null;
@@ -12769,42 +12772,41 @@ pub const AppSession = struct {
             var candidate_rows: std.ArrayList(file_tree.Row) = .empty;
             defer candidate_rows.deinit(self.allocator);
             self.prepareFileTreeRowStaging(&candidate_rows, 1) catch return .failed;
-            const group = self.dock.focusedGroup();
             const kind = entryKindForOpenKind(open_kind);
-            const opened = self.dock.open(group, path, kind) catch return .failed;
+            const opened = self.openFileTermInActivePane(path, kind) catch return .failed;
             self.pinInitialFilePanelIdentity(opened, initial_identity);
             self.buildPreparedFileTreeRows(&candidate, &candidate_rows);
             self.commitFileTreeCandidate(&candidate, &candidate_rows);
             return self.finishOpenFilePanel(opened);
         }
-        const group = self.dock.focusedGroup();
         const kind = entryKindForOpenKind(open_kind);
-        const opened = self.dock.open(group, path, kind) catch return .failed;
+        const opened = self.openFileTermInActivePane(path, kind) catch return .failed;
         self.pinInitialFilePanelIdentity(opened, initial_identity);
         return self.finishOpenFilePanel(opened);
     }
 
     fn pinInitialFilePanelIdentity(
         self: *AppSession,
-        opened: dock_panel.DockPanel.OpenResult,
+        opened: FileOpenResult,
         identity: ?file_tree.Identity,
     ) void {
         _ = self;
-        if (!opened.created or !opened.group.entries.items[opened.index].kind.usesEditorBridge()) return;
+        const entry = opened.term.file_entry orelse return;
+        if (!opened.created or !entry.kind.usesEditorBridge()) return;
         const expected = identity orelse return;
-        const entry = &opened.group.entries.items[opened.index];
         entry.initial_file_identity_device = expected.device;
         entry.initial_file_identity_inode = expected.inode;
         entry.initial_file_identity_kind = expected.kind;
         entry.initial_file_identity_pending = true;
     }
 
-    fn finishOpenFilePanel(self: *AppSession, opened: dock_panel.DockPanel.OpenResult) FilePanelOpenPathResult {
+    fn finishOpenFilePanel(self: *AppSession, opened: FileOpenResult) FilePanelOpenPathResult {
         if (opened.created) self.invalidateDockDragGeometry(); // tab count/width snapshot invalidation barrier
-        if (opened.previous_active) |i| if (i < opened.group.entries.items.len and i != opened.index)
-            self.markFilePanelDirtySyncPending(&opened.group.entries.items[i]);
-        self.assignDockSurfaceIds(&self.dock);
-        const active_entry = &opened.group.entries.items[opened.index];
+        // 떠나게 된 직전 활성 Term이 편집 중인 파일이었으면 dirty 스냅샷을 요청한다(§3.2 two-phase).
+        if (opened.previous_active_term) |prev| if (prev != opened.term) {
+            if (prev.file_entry) |prev_entry| self.markFilePanelDirtySyncPending(prev_entry);
+        };
+        const active_entry = opened.term.file_entry orelse return .failed;
         self.requestDockEntryFocus(active_entry);
         self.dock.collapsed = false;
         if (self.surface_initialized) {
@@ -14102,11 +14104,112 @@ pub const AppSession = struct {
     // "지금 이 entry가 어느 group에 있나"가 정말 필요한 소비처(드래그·group focus)는 아래 `groupForFileEntryId`를
     // 쓴다. 그 함수는 FP16b/B-3에서 group 개념과 함께 **삭제 예정**이라 일부러 이름으로 드러내 둔다.
 
-    /// 창 전체에서 그 경로의 파일 entry. 경로 유일성은 group별이 아니라 **창 전체** 불변식이라 하나뿐이다(§1).
+    /// 창 전체에서 그 경로의 파일 Term. FP16에서 **Term이 곧 entry의 집**이므로 이건 저장 구조 누출이 아니라
+    /// 위치이자 identity다 — 이미 열린 파일을 다시 열 때 그 pane/탭으로 이동하려면 entry가 아니라 Term이 필요하다.
+    /// 파일 kind가 쓰는 WKWebView trust config. `PanelKind`는 **넓히지 않는다**(§1) — Swift가 trust를
+    /// `panelKind == 0` 매직 비교로 파생하므로 값을 더하면 파일 패널이 조용히 untrusted로 떨어진다.
+    /// 이 파생은 `collectWebSurfaces`의 도크 분기가 하던 것과 같다.
+    fn panelKindForEntryKind(kind: dock_panel.EntryKind) web_panel_layout.PanelKind {
+        return if (filePanelKindIsIsolated(kind)) .browser else .markdown;
+    }
+
+    const FileOpenResult = struct {
+        term: *Term,
+        created: bool,
+        /// 이 열기로 **떠나게 된** 같은 pane의 직전 활성 Term(없으면 null). 편집 중이던 파일이라면 호출자가
+        /// dirty-sync를 건다. 옛 `OpenResult.previous_active`(그룹 안 index)의 Term판이다.
+        previous_active_term: ?*Term,
+    };
+
+    /// 이미 열린 파일이면 그 Term으로 이동·활성화하고, 아니면 활성 pane에 새 파일 Term을 만든다.
+    /// 경로 유일성은 pane별이 아니라 **창 전체** 불변식이다(§1).
+    fn openFileTermInActivePane(
+        self: *AppSession,
+        path: []const u8,
+        kind: dock_panel.EntryKind,
+    ) !FileOpenResult {
+        if (self.fileTermForPath(path)) |existing| return self.activateExistingFileTerm(existing);
+
+        // 창당 상한. 옛 `DockPanel.open`이 모델 불변식으로 걸던 것을 열기 시점 검사로 옮겼다(§10 열린 질문 2번).
+        var count: usize = 0;
+        var it = self.fileEntries();
+        while (it.next()) |_| count += 1;
+        if (count >= dock_panel.max_entries) return error.TooManyEntries;
+
+        const pane = self.activePane();
+        const previous_active_term: ?*Term = if (pane.terms.items.len > 0) pane.activeTerm() else null;
+
+        const entry = try self.allocator.create(dock_panel.Entry);
+        errdefer self.allocator.destroy(entry);
+        const owned_path = try self.allocator.dupe(u8, path);
+        errdefer self.allocator.free(owned_path);
+        entry.* = .{
+            .id = try app_runtime.entry_ids.next(),
+            .path = owned_path,
+            .kind = kind,
+            .mode = dock_panel.Mode.defaultFor(kind),
+        };
+        const term = try self.createWebTerm(panelKindForEntryKind(kind));
+        // 이 시점 term.file_entry는 null이라 destroyTerm이 entry를 건드리지 않는다 — 위 errdefer가 소유를 지킨다.
+        errdefer self.destroyTerm(term);
+        try pane.terms.append(self.allocator, term);
+        // 소유권이 여기서 Term으로 넘어간다. 이후 실패 지점이 없으므로 위 errdefer들은 돌지 않는다.
+        term.file_entry = entry;
+        entry.surface_id = term.surfaceId();
+        self.focusTerm(pane.terms.items.len - 1);
+        return .{ .term = term, .created = true, .previous_active_term = previous_active_term };
+    }
+
+    /// 이미 열려 있는 파일 Term을 화면에 올린다 — 필요하면 워크스페이스·pane까지 건너간다(§1: 다른 pane을
+    /// target으로 열어도 원래 Term을 반환해 그쪽으로 focus).
+    fn activateExistingFileTerm(self: *AppSession, target: *Term) FileOpenResult {
+        for (self.tabs.items, 0..) |tab, tab_index| {
+            for (tab.panes.items, 0..) |pane, pane_index| {
+                for (pane.terms.items, 0..) |term, term_index| {
+                    if (term != target) continue;
+                    const previous_active_term: ?*Term =
+                        if (pane.terms.items.len > 0) pane.activeTerm() else null;
+                    if (self.app_window.active_tab != tab_index) _ = self.switchTab(tab_index);
+                    if (self.activeTab().active_pane != pane_index) self.focusPane(pane_index);
+                    self.focusTerm(term_index);
+                    return .{ .term = target, .created = false, .previous_active_term = previous_active_term };
+                }
+            }
+        }
+        // 트리 walk로 찾은 Term이 같은 tick에 사라질 수는 없다(메인 actor 전용).
+        return .{ .term = target, .created = false, .previous_active_term = null };
+    }
+
+    fn fileTermForPath(self: *AppSession, path: []const u8) ?*Term {
+        for (self.tabs.items) |tab| {
+            for (tab.panes.items) |pane| {
+                for (pane.terms.items) |term| {
+                    const entry = term.file_entry orelse continue;
+                    if (std.mem.eql(u8, entry.path, path)) return term;
+                }
+            }
+        }
+        return null;
+    }
+
+    /// 창 전체에서 그 `EntryId`의 파일 Term.
+    fn fileTermForId(self: *AppSession, entry_id: dock_panel.EntryId) ?*Term {
+        if (entry_id == 0) return null;
+        for (self.tabs.items) |tab| {
+            for (tab.panes.items) |pane| {
+                for (pane.terms.items) |term| {
+                    const entry = term.file_entry orelse continue;
+                    if (entry.id == entry_id) return term;
+                }
+            }
+        }
+        return null;
+    }
+
+    /// 창 전체에서 그 경로의 파일 entry. 경로 유일성은 pane별이 아니라 **창 전체** 불변식이다(§1).
     fn fileEntryForPath(self: *AppSession, path: []const u8) ?*dock_panel.Entry {
-        if (!self.dock_initialized) return null;
-        const location = self.dock.pathLocation(path) orelse return null;
-        return &location.group.entries.items[location.index];
+        const term = self.fileTermForPath(path) orelse return null;
+        return term.file_entry;
     }
 
     /// 창 전체에서 그 `EntryId`의 파일 entry.
@@ -14120,49 +14223,45 @@ pub const AppSession = struct {
         entry_id: dock_panel.EntryId,
         counters: ?*dock_panel.DockPanel.EntryLookupCounters,
     ) ?*dock_panel.Entry {
-        if (!self.dock_initialized) return null;
-        const location = self.dock.entryLocationCounted(entry_id, counters) orelse return null;
-        return &location.group.entries.items[location.index];
+        if (entry_id == 0) return null;
+        for (self.tabs.items) |tab| {
+            for (tab.panes.items) |pane| {
+                for (pane.terms.items) |term| {
+                    const entry = term.file_entry orelse continue;
+                    if (counters) |c| c.entry_visits += 1;
+                    if (entry.id == entry_id) return entry;
+                }
+            }
+        }
+        return null;
     }
 
-    /// **FP16b/B-3에서 삭제 예정**: entry가 속한 group. group 개념 자체가 필요한 소비처(드래그 payload·group
-    /// focus 승계)만 쓴다. 파일 entry의 내용이 필요할 뿐이면 위 `fileEntryForId`를 쓴다.
-    fn groupForFileEntryId(self: *AppSession, entry_id: dock_panel.EntryId) ?*dock_panel.DockGroup {
-        if (!self.dock_initialized) return null;
-        const location = self.dock.entryLocation(entry_id) orelse return null;
-        return location.group;
-    }
-
-    /// 창의 모든 파일 entry 순회. **호출처는 저장 위치를 몰라야 한다** — FP16b가 이 본문을 pane 트리 walk로
-    /// 바꿔도 소비처(파일 트리 마커·종료 보호 게이트·mutation 예약 등)는 그대로 남는다.
+    /// 창의 모든 파일 entry 순회. 호출처는 저장 위치를 모른다 — B-1이 이 창구를 만든 이유이고, FP16은 여기
+    /// 본문만 pane 트리 walk로 갈아끼웠다(호출처 32곳 무변경).
     const FileEntryIterator = struct {
         session: *AppSession,
-        group_index: usize = 0,
-        entry_index: usize = 0,
-        group_count: ?usize = null,
-        group: ?*dock_panel.DockGroup = null,
+        tab_index: usize = 0,
+        pane_index: usize = 0,
+        term_index: usize = 0,
 
         fn next(self: *FileEntryIterator) ?*dock_panel.Entry {
-            if (!self.session.dock_initialized) return null;
-            // `groupCount()`는 leaf 수 계산이고 `groupAt(i)`는 재귀 preorder 탐색이라, entry마다 다시 부르면
-            // tick당 스캔이 O(groups)에서 O(entries × 트리 노드)로 커진다(code-review max). 그룹 수는 한 번만
-            // 세고 현재 그룹 포인터는 캐시해, 대체하기 전 루프와 같은 "그룹당 한 번 조회"를 유지한다.
-            if (self.group_count == null) self.group_count = self.session.dock.groupCount();
-            while (self.group_index < self.group_count.?) {
-                if (self.group == null) self.group = self.session.dock.groupAt(self.group_index);
-                const group: *dock_panel.DockGroup = self.group orelse {
-                    self.group_index += 1;
-                    self.entry_index = 0;
+            while (self.tab_index < self.session.tabs.items.len) {
+                const tab = self.session.tabs.items[self.tab_index];
+                if (self.pane_index >= tab.panes.items.len) {
+                    self.tab_index += 1;
+                    self.pane_index = 0;
+                    self.term_index = 0;
                     continue;
-                };
-                if (self.entry_index < group.entries.items.len) {
-                    const entry = &group.entries.items[self.entry_index];
-                    self.entry_index += 1;
-                    return entry;
                 }
-                self.group_index += 1;
-                self.entry_index = 0;
-                self.group = null;
+                const pane = tab.panes.items[self.pane_index];
+                if (self.term_index >= pane.terms.items.len) {
+                    self.pane_index += 1;
+                    self.term_index = 0;
+                    continue;
+                }
+                const term = pane.terms.items[self.term_index];
+                self.term_index += 1;
+                if (term.file_entry) |entry| return entry;
             }
             return null;
         }
@@ -14172,36 +14271,31 @@ pub const AppSession = struct {
         return .{ .session = self };
     }
 
-    /// 읽기 전용 소비처(종료 보호 게이트·파일 트리 보호 판정 등)용 const 변형. `groupAtConst`가 존재하는 이유와
-    /// 같다 — 순수 술어가 `*AppSession`을 요구하지 않게 해 const 정합성을 지킨다.
+    /// 읽기 전용 소비처(종료 보호 게이트·파일 트리 보호 판정 등)용 const 변형.
     const FileEntryConstIterator = struct {
         session: *const AppSession,
-        group_index: usize = 0,
-        entry_index: usize = 0,
-        group_count: ?usize = null,
-        group: ?*const dock_panel.DockGroup = null,
+        tab_index: usize = 0,
+        pane_index: usize = 0,
+        term_index: usize = 0,
 
         fn next(self: *FileEntryConstIterator) ?*const dock_panel.Entry {
-            if (!self.session.dock_initialized) return null;
-            // `groupCount()`는 leaf 수 계산이고 `groupAtConst(i)`는 재귀 preorder 탐색이라, entry마다 다시 부르면
-            // tick당 스캔이 O(groups)에서 O(entries × 트리 노드)로 커진다(code-review max). 그룹 수는 한 번만
-            // 세고 현재 그룹 포인터는 캐시해, 대체하기 전 루프와 같은 "그룹당 한 번 조회"를 유지한다.
-            if (self.group_count == null) self.group_count = self.session.dock.groupCount();
-            while (self.group_index < self.group_count.?) {
-                if (self.group == null) self.group = self.session.dock.groupAtConst(self.group_index);
-                const group: *const dock_panel.DockGroup = self.group orelse {
-                    self.group_index += 1;
-                    self.entry_index = 0;
+            while (self.tab_index < self.session.tabs.items.len) {
+                const tab = self.session.tabs.items[self.tab_index];
+                if (self.pane_index >= tab.panes.items.len) {
+                    self.tab_index += 1;
+                    self.pane_index = 0;
+                    self.term_index = 0;
                     continue;
-                };
-                if (self.entry_index < group.entries.items.len) {
-                    const entry = &group.entries.items[self.entry_index];
-                    self.entry_index += 1;
-                    return entry;
                 }
-                self.group_index += 1;
-                self.entry_index = 0;
-                self.group = null;
+                const pane = tab.panes.items[self.pane_index];
+                if (self.term_index >= pane.terms.items.len) {
+                    self.pane_index += 1;
+                    self.term_index = 0;
+                    continue;
+                }
+                const term = pane.terms.items[self.term_index];
+                self.term_index += 1;
+                if (term.file_entry) |entry| return entry;
             }
             return null;
         }

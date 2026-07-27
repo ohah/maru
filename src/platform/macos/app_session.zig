@@ -10815,6 +10815,30 @@ pub const AppSession = struct {
     /// 경로가 **같은 teardown**을 쓰게 하는 단일 출처다. 이 정리를 빠뜨리면 `onAppSessionSurfaceClosed`가 안 돌아
     /// capability·pane grant가 없는 surface에 남고, `focus_owner`가 다음 tick에 파괴될 WKWebView를 계속 가리켜
     /// Esc/Enter가 죽은 surface로 포커스를 보낸다(code-review max).
+    /// kind가 바뀐 rename처럼 **뷰를 새로 만들어야** 하는 경우, 그 파일 Term의 web surface를 새 panel kind로
+    /// 다시 만든다. surface_id는 재사용하지 않으므로(§3) 새 id가 발급되고, entry 소유는 그대로 옮겨간다.
+    /// 실패하면 옛 Term이 그대로 남아 호출자가 본 상태가 변하지 않는다.
+    fn rebuildFileTermSurface(self: *AppSession, entry: *dock_panel.Entry) !void {
+        for (self.tabs.items, 0..) |tab, tab_index| {
+            for (tab.panes.items) |pane| {
+                for (pane.terms.items, 0..) |term, term_index| {
+                    if (term.file_entry != entry) continue;
+                    const replacement = try self.createWebTerm(panelKindForEntryKind(entry.kind));
+                    // 소유를 먼저 떼어 destroyTerm이 entry·path까지 해제하지 않게 한다.
+                    term.file_entry = null;
+                    self.destroyTerm(term);
+                    replacement.file_entry = entry;
+                    entry.surface_id = replacement.surfaceId();
+                    pane.terms.items[term_index] = replacement;
+                    // 대표 surface·leaf rect 재바인딩(닫힌 Term을 가리키던 stale 포인터 방지).
+                    self.refreshAfterReap(tab_index);
+                    self.metal_dirty = true;
+                    return;
+                }
+            }
+        }
+    }
+
     fn retireFilePanelSurface(self: *AppSession, entry: *dock_panel.Entry, retired_focus: *bool) void {
         const surface_id = entry.surface_id;
         if (surface_id == 0) return;
@@ -10873,6 +10897,9 @@ pub const AppSession = struct {
             const rebuild = kind_changed or filePanelKindIsIsolated(old_kind) or filePanelKindIsIsolated(entry.kind);
             if (old_surface != 0 and rebuild) {
                 self.retireFilePanelSurface(entry, &retired_focus);
+                // 새 kind의 뷰를 즉시 다시 만든다. 안 하면 surface_id가 0인 채로 남아 저장·mode 전환·닫기가
+                // 전부 SurfaceNotFound가 되는 좀비 탭이 된다(code-review max).
+                self.rebuildFileTermSurface(entry) catch {};
             } else if (old_surface != 0) {
                 // 경로만 바뀐 신뢰 kind rename은 **아무 통지도 하지 않는다** — breadcrumb은 `entry.path`에서
                 // 파생하는 Zig GPU chrome이고 read/write는 pathless라 shell이 경로를 모른다(§11.1 S3·S4).
@@ -56640,13 +56667,11 @@ test "FP6 file panel write atomically replaces only the pinned markdown and pres
     const link_path = try std.fmt.allocPrint(allocator, "{s}/link.md", .{root});
     defer allocator.free(link_path);
 
-    var session: AppSession = undefined;
+    // FP16: 파일 entry가 Term 소유라 도크만 초기화한 최소 하네스로는 만들 수 없다 — 실 세션이 필요하다.
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
     session.io = io;
-    // 부분 초기화 하니스: setFilePanelDirty가 fixed action queue를 정리하므로 길이 불변식도 명시한다.
-    session.file_panel_dirty_sync_actions_len = 0;
-    session.dock = try dock_panel.DockPanel.init(allocator, &app_runtime.entry_ids);
-    session.dock_initialized = true;
-    defer session.dock.deinit();
     _ = try session.openFileTermInActivePane(doc_path, .markdown);
     session.fileEntryAt(0).?.surface_id = 901;
     _ = try session.openFileTermInActivePane(html_path, .html);

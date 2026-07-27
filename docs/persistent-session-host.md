@@ -2285,7 +2285,7 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
   - **P5c3c — nonblocking single-owner event loop**: `external_pump_owner.zig`의 한 stack owner가 `RawTty`,
     단 하나의 `ExternalPumpStorage`(그 안의 `Client`+ledger), storage facade만 쓰는
     `RemoteAttachment` adapter, ANSI stdout queue, resize와 detach chord를 소유한다.
-    P5c3c는 다음 세 phase의 열여섯 merge slice를 순서대로 통과해야 하며 일부만으로 event loop 완료를 주장하지 않는다.
+    P5c3c는 다음 세 phase의 열여덟 merge slice를 순서대로 통과해야 하며 일부만으로 event loop 완료를 주장하지 않는다.
     - **P5c3c-1 — absolute-deadline transport**는 두 merge slice다.
       - **P5c3c-1a — deadline leaf + connect/hello**: `client_deadline.zig`가 `AbsoluteDeadline`과
         injected connector ops(monotonic clock, socket, connect, fcntl, poll, getsockopt `SO_ERROR`,
@@ -2434,7 +2434,7 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
         injected transition failure의 stable mapping·attachment EOF 정리 뒤 새 attach 성공을 검증한다. 별도 실
         socketpair fixture가 같은 `transitionExit→failClient` 경로의 후속 wire 0·즉시 EOF를 고정한다. correctness는
         debug assert에 기대지 않는다.
-      - **P5c3c-2b — bounded pump/demux**는 아래 세 subphase group, 총 열한 merge slice가 모두 green이어야
+      - **P5c3c-2b — bounded pump/demux**는 아래 세 subphase group, 총 열세 merge slice가 모두 green이어야
         완료다. `client_pump.zig`는
         poll/syscall/parser를 소유하지 않는 순수 turn policy만 둔다. event owner가 injected monotonic clock을 turn
         시작에 정확히 한 번 읽어 만든 `TurnInput{readable,writable,now_ns}`와
@@ -2539,8 +2539,8 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
           inherited adoption/dynamic physical cap/final product owner gate는 아직 계획 상태다.
 
         - **P5c3c-2b2 — Client external pump core**:
-          이 단계는 한 mega-PR이 아니라 아래 **아홉 merge slice**다. 앞 slice의 Debug/ReleaseFast/경계 gate가
-          green이기 전에는 다음 slice로 가지 않고, 아홉 개가 모두 끝나기 전에는 2b2 완료로 표시하지 않는다.
+          이 단계는 한 mega-PR이 아니라 아래 **열한 merge slice**다. 앞 slice의 Debug/ReleaseFast/경계 gate가
+          green이기 전에는 다음 slice로 가지 않고, 열한 개가 모두 끝나기 전에는 2b2 완료로 표시하지 않는다.
 
           - **2b2a — pure state/DTO + parser normalize + source boundary:** `client_pump.zig`는 JSON, fd,
             allocator, parser, ledger를 import하지 않고 다음 닫힌 타입만 소유한다.
@@ -2592,7 +2592,7 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
             보존한다. boundary test는 pure module의 std-only import와 future `ExternalPumpFacade` identifier의
             mechanics/final-owner allowlist를 tokenizer로 강제한다. Debug/ReleaseFast `test-session-host`,
             `check-boundaries`, 전체 `mise run check`를 통과했다. 이 문단의 artifact 범위는 2b2a에만 해당하며,
-            현재 전체 상태는 2b2a~b 완료, 2b2c~f3 계획이다.
+            현재 전체 상태는 2b2a~c1 완료, 2b2c2~f3 계획이다.
 
           - **2b2b — stable in-place storage scaffold:** token이 존재하기 전에
             caller가 `var out: ExternalPumpStorage = .{}`로 만든 **deinit-safe empty slot**의 최종 주소에서
@@ -2662,62 +2662,266 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
             `test-session-host`, ReleaseFast `check-boundaries`, 전체 `mise run check`가 green이다. 이 완료 표시는
             2b2b에만 해당하며 authority adoption은 2b2c 전까지 열리지 않는다.
 
-          - **2b2c — inherited all-or-none adoption + semantic transfer:** bind preflight는 mutation 없이
-            parser unread/cap, `pending_stream`, `partial_batch`, `pending_batches`, 별도 `pending_events`,
-            각 counter, item/byte checked sum, exact target stream/kind, request ID를 전수 검증한다.
-            inherited request ID는 `0→protocol terminal`, `1...maxInt(u64)-1→available(next)`,
-            `maxInt(u64)→last_available`로 seed한다. `last_available`은 아직 미소비 마지막 ID이며 실제 request
-            frame이 f1 queue에 infallible commit될 때만 `max_consumed`로 전이한다. 기존 queue가 도착 순서를 함께
-            보존하지 않으므로 첫 external turn은 **모든 inherited event를 screen/TX/input보다 먼저** authority
-            fence로 strict 소비한다. inherited와 이후 새 event는 다음 하나의 allowlist/action table을 공유한다.
+          - **P5c3c-2b2c — inherited all-or-none adoption + semantic transfer**는 실패 선형화가 다른 세
+            merge slice다. c1은 ledger transaction, c2는 Client inventory/authority/request-ID, c3은 event
+            classification/reduction만 소유한다. 세 slice가 모두 green이기 전에는 2b2c 완료나 active pump를
+            주장하지 않는다.
 
-            | event | strict 검사 | state/action | duplicate·stale |
-            | --- | --- | --- | --- |
-            | `controller.revoked` | own runtime/stream/controller generation exact | own screen/control을 규칙대로 cancel/drop한 뒤 terminal revoked | terminal 유지 |
-            | `snapshot.invalidated` | header의 own runtime/stream + exact `{"event":"snapshot.invalidated"}` | screen backlog 전부 release 후 host recovery | wire epoch가 없으므로 active host recovery 중 반복은 모두 같은 intent로 no-op·deadline 비갱신 |
-            | `runtime.resized` | own runtime/stream, nonzero size, nonwrapping generation | bounded latest resize slot에 coalesce | older/duplicate ignore, gap은 최신 full-state 보존 |
-            | `runtime.metadata` | own runtime/stream, strict bounded metadata | bounded latest metadata slot에 필드별 coalesce | superseded/duplicate ignore |
-            | `runtime.ended` | header의 own runtime/stream + exact `{"event":"runtime.ended"}` | screen/event backlog release 후 terminal ended | terminal 유지 |
+            - **2b2c1 — phase-aware ledger transaction:** `external_inbox_ledger.zig`는
+              아래 `PayloadSemantic = union(PayloadPhase)`의 **union tag 하나만** phase SSOT로 두고,
+              `OwnedPayload{allocator, allocation_ptr: ?[*]u8, logical_len}`를 slot의 **유일한 metadata/free SSOT**로
+              둔다. `logical_len == 0`은 반드시 `allocation_ptr=null`인 canonical non-owning empty라 allocator의
+              zero-size sentinel identity를 비교하거나 free하지 않는다. nonempty `allocation_ptr`은 allocator에 돌려줄
+              exact `allocation_ptr[0..logical_len]`이고 `logical_len>0`이다. ledger는 여유 capacity를 소유하지 않아
+              logical 18 MiB cap과 physical payload cap이 같다. slot은 별도 length를 저장하지 않고 ledger의
+              aggregate `charged_bytes/items`만 각 active payload에서 검증되는 accounting mirror로 유지한다.
 
-            foreign stream/runtime/generation, unknown/malformed event는 관대한 drop으로 빠지지 않고 protocol close다.
-            resize/metadata를 먼저 적용해도 화면 byte interleave를 추측하지 않으며, ended/revoked/invalidated가
-            lower mutation보다 항상 앞선다. 두 owner-facing latest slot은 `ExternalPumpStorage`가 소유하고
-            `takeOwnerEvent() -> none | resized(ResizeDto) | metadata(MetadataDto)`가 resize 우선의 고정 순서로
-            무할당 consume한다. 실제 app/TTY projection은 3b owner 책임이며 pump가 별도 remote state를 만들지 않는다.
-            다섯 valid event 각각을 inherited/fresh queue 양쪽에서 고정한다.
+              | phase | canonical `PayloadSemantic` payload |
+              | --- | --- |
+              | `frame` | `.frame(Header)` — nonzero negotiated major의 delta/snapshot chunk, request 0, nonzero stream, flags는 `0|end_stream` 중 하나, `payload_len=logical_len` |
+              | `partial` | `.partial(PartialSemantic{stream_id!=0,is_snapshot,1<=chunk_count<=16,recovery_intent})` |
+              | `completed` | `.completed(BatchSemantic{stream_id!=0,is_snapshot,recovery_intent})` |
+              | `lease` | `.lease(BatchSemantic{stream_id!=0,is_snapshot,recovery_intent})` |
 
-            `PreparedExternalAdoption`은 새 charged descriptor arrays와 source index map을 전부 allocation한 뒤
-            ledger capacity/slot plan을 preflight한다. commit 전 실패는 source Client ownership/counter가
-            byte-for-byte 불변이고 ledger active slot 0이다. commit은 allocation/error 없는 단계만 수행해 source
-            bytes를 빈 slice로 바꾸고 destination token sidecar로 옮긴 뒤 arrays/counters를 한 번 swap한다.
-            예기치 않은 invariant는 connection fail-stop과 canonical exact-once cleanup이며 부분 reusable state를
-            반환하지 않는다.
+              slot에는 별도 phase field를 두지 않고 union tag로만 phase를 파생한다. header의
+              길이·stream/request/flags가 canonical 조건과 다르면 `InvalidSemantic`이며 mutation 0이다.
+              target stream 및 `owned_client.wire_major`와의 exact 일치는 ledger가 추측하지 않고 c2 inventory가
+              검증한다. frame payload는
+              1 MiB 이하, partial/completed/lease payload는 16 MiB 이하이며 초과는 `InvalidSemantic`이다. slot에는
+              `RecoveryIntent = none | {origin=client|host,epoch>0}`만 저장해 partial→completed→lease 동안
+              유지한다. 2b2a의 full `RecoveryKey.expected_token_generation`은 lease borrow 시 현재 token
+              generation을 합성하므로 relabel 뒤 stale generation을 보존하지 않는다.
 
-            adoption commit 뒤에는 ledger가 `frame | partial | completed | lease` 모든 phase payload의 유일한
-            allocator/free 권위다. queue/partial/lease의 persistent descriptor에는
-            `ChargedPayloadRef{token,semantic_metadata}`만 남기며 bytes view를 저장하지 않는다. bytes는 매 사용 시
-            `ledger.borrow(token)`이 반환한 stack-local immutable view로만 접근하고 call을 넘겨 보존하지 않는다.
+              persistent queue/partial/lease는 metadata나 bytes view를 복제하지 않고 opaque
+              `Token{slot,generation}`만 저장한다. `borrow(token, expected_phase)`가 stack-local
+              `PayloadView{phase=@as(PayloadPhase,semantic),semantic,
+              bytes=if (allocation_ptr) |p| p[0..logical_len] else &.{}}`를 반환하며 phase는 union tag의 read-only
+              projection이고 view를 call 밖에 보존하지 않는다. canonical empty는 owner/range/alias/free 대상에서
+              제외한다.
 
-            | entrypoint/transition | 입력 권위 | 성공 결과 |
-            | --- | --- | --- |
-            | `reserveFrame(owned_payload: *[]u8)` | 새 parser outcome payload | `frame`; 성공 시 caller slice empty |
-            | `seed(phase,owned_payload: *[]u8)` | inherited frame/partial/completed | all-or-none adoption commit에서 지정 phase, caller empty |
-            | `reserveLease(owned_batch: *OwnedBatch)` | 기존 2b1 direct completed batch | `lease`; 성공 시 caller payload empty, GUI untracked는 사용하지 않음 |
-            | `frame→partial` / `frame→completed` | 단일 frame token | same token relabel |
-            | `partial+frame→partial|completed` | 두 token+nonalias replacement | dst가 replacement 권위, src inactive |
-            | `completed→lease` | attachment handoff | same token relabel |
-            | `release(any phase)` | exact active token | payload free/counter 차감/slot inactive |
+              `SeedSpec{semantic,logical_len}` 전부와 caller-owned exact payload inventory를 받은
+              caller가 final address에 둔 empty slot을 받는
+              `PreparedSeedPlan.initInPlace(out,allocator,ledger,specs,payloads)`는 exact-count private scratch를 소유하며
+              count/byte checked sum, free slots와 **각 commit generation**, ledger mutation epoch를 mutation 없이
+              계산한다. 각 `PlannedSeed`는 `SeedSpec` value를 scratch에 copy-own하므로 원본 specs lifetime은 init
+              반환 전에 끝나며 commit이 caller specs를 다시 borrow하지 않는다. scratch entry는 usable `Token`과
+              다른 module-private type이고 abort 뒤 외부 권위를 갖지 않는다. plan은 saved final address와 exact
+              ledger address, payload wrapper inventory의 exact pointer+count를 seal하고
+              `empty→prepared→committed_tombstone|aborted_tombstone` lifecycle을 갖는다.
+              bitwise copy/move의 deinit·commit은 scratch를 free/consume하지 않고 typed reject하므로 원본만
+              exact-once free한다. plan 내부 slice를 caller가 borrow/free/forge할 API는 없다.
+              `commitSeeds(plan,payloads,token_output)`는 canonical slot 선택/generation/spec을 ledger에서 전부
+              재계산하고 epoch, payload allocation identity/길이를 다시 검사한다. init은 copy 전에 ledger storage,
+              original specs/payload wrappers·allocations, 새 plan scratch와 기존 slot allocation의 pairwise
+              nonalias를 검사한다. commit은 original specs를 다시 읽지 않고 plan scratch의 copied specs,
+              payload wrapper 배열·각 nonempty allocation, token output, ledger storage와 기존 모든 slot
+              allocation의 nonempty byte range가 pairwise nonalias인지 재검사한다. exact length가 다르면
+              mutation 0이다. plan entry는 private opaque라 caller가
+              slot/generation을 forge/reorder하지 못하고 commit은 canonical circular free-slot scan을 다시 수행해
+              count/order/slot/spec/generation/total/next-generation을 모두 대조한다. 그 뒤 단일 owner thread에서
+              allocation/callback/error가 없는 linearization loop로 모든 slot을 활성화하면서 각 usable token을 같은 index의
+              token output entry에 전부 쓰고 각 source
+              `OwnedPayload`를 empty tombstone으로 바꾼다. generation exhaustion/cap/stale epoch/OOM은 첫 source
+              mutation 전에 끝나 ledger/source/output가 불변이다. 성공하면 exact-count output 전부가 초기화된다.
+              commit 전 예상 밖 mismatch도 mutation 0의 typed invariant이고 partial commit 경로는 존재하지
+              않는다. publish 뒤 plan scratch disposal free만 비재진입 callback으로 실행되며 결과를 바꾸지 않는다.
+              zero-count는 정상이며 init allocation 0, commit ledger/source/output/epoch mutation 0으로 plan만
+              committed tombstone이 된다.
 
-            `relabel(token, expected_phase, next_phase)`는 allocation·item/byte 변화 없이 표의 단일-token 전이만
-            수행한다. 기존 partial과 다음 frame을 합칠 때는
-            `mergeInto(dst,src,replacement)`가 두 token/phase/stream/kind와
-            `replacement.len == dst.len + src.len`, replacement가 두 source allocation과 alias하지 않음을 먼저
-            검증한다. 실패하면 두 slot과 caller-owned replacement가
-            불변이다. 성공은 old dst/src payload를 exact-once free하고 replacement 권위를 dst에 옮기며 byte
-            charge는 그대로, item만 1 감소시키는 infallible commit이다. exact cap에서도 reserve-new/release-old의
-            일시 이중 charge를 만들지 않는다. completed→attachment lease는 token value만 move하고 slot이 payload
-            allocator/free 권위를 계속 소유한다. fail-close/teardown은 어느 phase에서도 공통 `release`로 final zero를
-            만들며 2b1 `reserveLease` 회귀와 각 phase fail-index를 함께 고정한다.
+              기존 2b1의 public reserve→adopt 반쪽 상태는 제거하고
+              `reserveLease(batch_semantic:BatchSemantic,payload:*OwnedPayload)->Token` 하나가 `.lease` tag를
+              내부 파생하고 cap/semantic/generation/epoch와
+              payload wrapper/allocation 대 ledger inline storage·기존 모든 slot allocation의 full/partial
+              nonalias를 모두 검증한 뒤 slot activation과 ownership take+caller tombstone을 원자적으로 commit한다.
+              raw slot reservation은 외부에 노출하지 않는다.
+              새 권위를 만드는 reserveLease/nonzero seed/relabel/merge는 checked nonwrapping
+              `mutation_epoch`을 정확히 한 번 commit한다. zero-count seed만 위의 명시적 +0 예외다.
+              epoch가 max이면 `planning_disabled`를 latch하고 해당 권위 생성은 resource
+              exhaustion으로 source/slot/token을 바꾸지 않아 stale plan이 ABA로 다시 유효해지지 않는다.
+              release는 성공당 epoch를 saturating +1하고 첫 drain은 전체 operation당 한 번 saturating +1,
+              drain 재호출은 +0이다. 둘은 epoch budget과 무관하게 반드시 cleanup을 진행하며 epoch는 max에 saturate하고
+              `planning_disabled=true`를 유지한다. exhaustion은 기존 allocation의 exact-once 회수를 막지 않는다.
+              어떤 invariant failure도 sticky `invariant_failed=true,planning_disabled=true`를 먼저 latch하고 이후
+              plan/commit/reserveLease/relabel/merge를 모두 거부한다. release/drain만 허용하므로 invariant 전에
+              만든 SeedPlan이 commit되는 ABA 경로는 없다.
+              phase transition은 same token을 재사용하지 않고 아래 edge와 wire-end 조건만 허용한다.
+
+              | operation | allowed edge |
+              | --- | --- |
+              | `relabel` | `frame(end_stream=0)→partial`, `frame(end_stream=1)→completed`, `completed→lease` |
+              | `mergeInto` | `partial + frame(end_stream=0)→partial`, `partial + frame(end_stream=1)→completed` |
+              | `release` | exact current phase → inactive |
+
+              `relabel(token, expected_phase, next_phase, recovery_intent) -> new_token`이 frame→batch에서 checked
+              intent를 입력받아 stream/snapshot은 header에서, chunk_count는 1로 파생하고 batch→batch에서는 기존
+              intent와 exact 일치하는 값만 허용하며, 새 nonwrapping
+              generation을 commit해 pre-transition stale copy를 무효화한다. `release(token, expected_phase)`도 phase와 generation을
+              모두 검사한다.
+              `mergeInto(dst_partial,src_frame,replacement: *OwnedPayload,next_phase,expected_recovery_intent)`는 checked
+              `dst.logical_len + src.logical_len`과 `dst.chunk_count+1`, exact stream/snapshot/recovery intent,
+              src end_stream과 next phase의 일치, 두 source allocation과
+              replacement와 두 source 및 unrelated active slot allocation의 full/partial nonalias,
+              replacement logical bytes가 정확히 `dst || src`인지
+              **commit 전에** 비교한다. 실패 시 세 owner가 불변이다. 성공 시 새 generation의 dst token이
+              replacement allocation을 take하고 caller `replacement.*`를 canonical empty tombstone으로 만든 뒤
+              old dst/src allocation을 exact-once free하며 src slot을 inactive로 만들어
+              byte charge 불변/item 1 감소를 allocation 없이 commit한다. zero-length payload는 pointer alias가
+              없으므로 alias 검사에서 제외한다. ledger가 소유한 allocator/free callback은
+              비재진입 계약이며 seed commit에는 callback이 없고 merge는 두 old payload를 locals로 detach하고
+              slot/counter/generation을 먼저 무실패 commit한 뒤 exact free한다.
+
+              `drainAll()`은 시작 시 one-way `draining_or_drained` latch를 먼저 세우고 descriptor를 신뢰하지
+              않은 채 **모든 slot**을 직접 순회해 active 여부와 무관하게 non-null payload를
+              exact-once free하고 counters를 zero로 만든 뒤
+              phase/semantic/charge를 canonical clear한다. inactive-with-payload/semantic/charge,
+              active-without-payload/semantic, aggregate counter mismatch는 sticky invariant로 report하고
+              `DrainReport{drained_active_count,drained_bytes,had_sticky_invariant}`를 반환한다. known descriptor를
+              먼저 모두 release한 정상 경로에서 nonzero drained count는 storage가 token을 잃었다는 invariant다.
+              fail-close/teardown은 storage descriptor를 먼저 best-effort release한 다음
+              `drainAll`로 authoritative final-zero를 만들고 재진입은 free 0이다. latch 뒤 borrow와 모든
+              mutator는 typed `Drained`로 거부되고 drain 재호출만 zero report를 반환한다. 2b1 batch API는
+              atomic `reserveLease` typed wrapper로 유지하며 frame/partial/completed/lease 혼합, stale phase/token,
+              exact cap/cap+1, generation/epoch exhaustion, seed allocation fail-index, merge alias/wrong bytes와 descriptor 유실
+              teardown을 Debug/ReleaseFast에서 고정한다.
+
+              **구현 완료:** `external_inbox_ledger.zig`가 union-tag phase SSOT, exact owned payload,
+              final-address·ledger·wrapper-inventory-bound seed plan, all-or-none multi-seed commit, atomic
+              `reserveLease`, new-generation relabel/merge, sticky invariant와 authoritative all-slot drain을
+              구현했다. 기존 GUI `RemoteAttachment` consumer는 typed `borrowLease/releaseLease`로 이전했고
+              `ExternalPumpStorage.teardown`은 orphan charge도 drain한 뒤 `ledger_not_zero`로 관측한다. exact
+              18 MiB/4,096-item cap과 cap+1, zero/stale/copied/wrong-ledger plan, Header/chunk/recovery/phase,
+              epoch·generation 마지막 값, merge bytes/alias, counter·semantic·duplicate-owner corruption과 drain
+              재진입을 자동 검증한다. SSOT·유지보수·메모리 안전/실패 원자성 post-audit는 모두 BLOCK 0이며
+              Debug/ReleaseFast `test-session-host`, ReleaseFast `check-boundaries`, 전체 `mise run check`가 green이다.
+              이 완료 표시는 2b2c1에만 해당하고 c2의 Client inventory prepare와 c3 combined commit은 열지 않는다.
+
+            - **2b2c2 — neutral Client inventory + prepared screen/request/authority adoption:** `client.zig`가
+              ledger를 import하지 않는 `ExternalAdoptionInventory`와
+              `inspectExternalAdoption(target_stream)`, infallible `commitExternalAdoption(plan)`의 단일
+              private-field SSOT를 소유한다. 별도 `client_external_adoption.zig`가 Client inventory와 c1 ledger
+              plan을 조합한다. **c2는 source mutation·ledger commit·lifecycle live/recovery/terminal publish를
+              하지 않고** c3 event decision과 합칠 `PreparedExternalAdoption`만 만든다.
+              `client_external_pump.zig`의 최종 combined commit은 c3가 소유한다.
+              import 위상은 `client <- client_external_adoption <- client_external_pump`이며 역방향 import는
+              boundary test가 금지한다.
+
+              owner table은 다음과 같다.
+
+              | source | commit 뒤 sole owner |
+              | --- | --- |
+              | fd/parser/wire/capabilities/io_mode와 empty external TX capacity | `storage.owned_client`에 잔류 |
+              | `pending_batches[]` FIFO payload | ledger `completed` slot + storage token FIFO |
+              | `partial_batch` | ledger `partial` slot + storage optional token |
+              | `pending_stream[]` FIFO payload/header | ledger `frame` slot + storage token FIFO |
+              | `pending_events[]` | c3 prepared event transaction; screen ledger 밖 |
+              | 세 source/event ArrayList backing | commit에서 exact free 후 Client empty tombstone; retained capacity 0 |
+              | `next_request_id` | storage `RequestIdState`; Client scalar는 성공 commit에서 `0` retired sentinel |
+              | `pending_outbound`/external TX used items | adoption precondition상 null/0, capacity/saved flags만 Client 유지 |
+              | connection profile/strict-event bit | `storage.owned_client`에 잔류하고 inventory fingerprint에 포함 |
+
+              screen의 canonical consume order는 기존 Client가 증명 가능한
+              **completed `pending_batches` FIFO → existing `partial_batch` prefix와 이를 이어 받는
+              `pending_stream` FIFO → parser unread(d1)**다. partial과 pending frame의 stream/snapshot kind가
+              이어질 수 없거나 foreign stream/nonzero request/wrong flags인 조합은 mutation 없이 protocol
+              terminal이다. 세 container의 global 과거 arrival sequence를 새로 추측하지 않는다.
+
+              `partial_batch.bytes`는 capacity가 있는 `ArrayListUnmanaged`이므로 prepare가 logical len의 exact
+              replacement `OwnedPayload`를 stage한다. OOM이면 original pointer/len/cap/chunk count가 불변이고,
+              commit은 old ArrayList allocation을 deinit한 뒤 replacement만 ledger에 옮긴다. old+replacement
+              prepare peak는 checked physical artifact에 별도 기록한다. `PreparedExternalAdoption`은 inherited
+              item count와 정확히 같은 capacity의 persistent token arrays, commit 직후 free할 transient
+              `[]SourceRef`, c1 seed plan, partial
+              replacement와 Client inventory fingerprint를 소유한다. `adoption_metadata_bytes`는 target pointer
+              bits와 각 resident/prepare-peak `capacity * @sizeOf(entry)` checked sum을 분리하며 capacity 여유와
+              곱 overflow를 허용하지 않는다.
+
+              lifecycle은 `empty→prepared→committed_tombstone` 또는
+              `empty→prepared→aborted_tombstone`뿐이다. abort/deinit은 Client·ledger를 건드리지 않고 staged
+              allocation/DTO를 exact-once free하며 재호출은 no-op이다. final commit은 양쪽 fingerprint를 다시
+              검증하고 sealed no-fail capability를 만든 뒤 **ledger take → Client infallible disarm/ArrayList
+              backing free → storage token/authority/event publish** 순서로 한 owner-thread 구간에서 수행한다.
+              publish가 유일한 linearization point이며 이전 단계에는 callback/error가 없다. source allocator의
+              free는 재진입하지 않는 계약이고 모든 allocation은 prepare에서 끝낸다.
+
+              request ID는 prepare에서 `RequestIdState.fromNext(Client.next_request_id)`로 seed한다.
+              `0`은 protocol terminal, `1...max-1`은 `available`, `max`는 `last_available`이다. 성공 commit 뒤
+              storage state만 mutable SSOT이며 Client `0`은 어떤 request API에서도 사용하지 않는 retired
+              sentinel이다. `last_available`은 f1 queue infallible commit 때만 `max_consumed`가 된다.
+
+              `ExternalPumpState.active`는
+              `ActiveState{attachment: AttachmentAuthority, flow: AuthorityState}`를 payload로 갖는다.
+              `AttachmentAuthority{role,generation = untracked | tracked(u64)}`는 evidence와 negotiated capability로
+              한 번 seed되는 live role/generation SSOT다. tracked controller generation 0은 invalid, tracked
+              observer generation 0은 유효하며 legacy no-generation peer만 untracked다. immutable evidence는
+              이후 provenance일 뿐 갱신하지 않는다. 2b3은 `RemoteAttachment.state`를 두 번째 writer로 남기지
+              않고 `authoritySnapshot()/allowsMutation()` facade projection을 소비하도록 바꾼다.
+              `AuthorityState.initial_fence`는 final commit 직후 유일한 초기 flow다. d2가 inherited
+              parser/socket을 would-block+parser-empty까지 drain해 `authority_clear`를 commit하기 전에는
+              `takeOwnerEvent`, screen publish, input/TX/control/resize admission이 모두 0이다.
+
+              bind preflight는 parser unread의 resident cap/structural consistency만 검사하고 frame decode/offset은
+              d1에 남긴다. screen item/byte exact cap 초과는 prepared verdict input에만 기록한다. c3 event
+              precedence에서 terminal이 없을 때만 final commit이 screen backlog를 한 번에 drop하고 injected
+              `now_ns`의 checked 30초 deadline/epoch를 가진
+              `active.flow.client_recovery.control_wait`로 전환한다.
+
+            - **2b2c3 — inherited event staging + common classifier:** `ConnectionProfile.cli_attach` Client는
+              pre-raw 단계부터 strict event policy를 보존한다. malformed metadata/resize를 기존 GUI처럼 관대하게
+              drop하지 않고 즉시 protocol close하며, unknown이지만 structurally queued event는 아래 공통 classifier로
+              넘긴다. 이 policy bit은 hello profile에서 한 번 정해지고 external adoption이 추측하지 않는다.
+
+              `classifyEvent(identity,authority,frame)`는
+              `ValidatedEvent = revoked(successor_generation) | invalidated | resized(ResizeDto) |
+              metadata(OwnedMetadataDto) | ended`만 반환한다. header에는 runtime id가 없으므로 모든 event는 exact
+              stream으로 immutable stream→runtime evidence에 귀속하고, payload runtime id 대조는 revoked/resized에만
+              적용한다. revoke는 controller-only, tracked current generation의 checked `+1` exact successor이며
+              max overflow/untracked revoke는 protocol terminal이다. 2b2b의 네 필드
+              `AttachmentEvidence`는 immutable identity로 유지하고,
+              `PreparedAdoptionEvidence{identity:AttachmentEvidence,initial_metadata:OwnedMetadataDto}`가
+              attach-time metadata value와 revision을 함께 carry해 c3 latest metadata SSOT를 seed한다. resize는 baseline이
+              없으므로 첫 nonzero generation을 받고 이후 duplicate/older ignore, gap latest full-state accept다.
+              `ResizeDto{runtime_id,cols>0,rows>0,resize_generation>0}`는 allocation이 없다.
+              `OwnedMetadataDto{allocator,canonical_json:?[]u8,revision}`는 strict schema를 canonical JSON으로
+              encode한 exact one-backing ownership이고 zero bytes는 null이다. metadata cap은 기존 event payload
+              cap과 owner-event resident cap 중 작은 값이며 raw event+staged DTO prepare peak도
+              `adoption_metadata_bytes`에 포함한다. `deinit/take`가 exact-once 소유권을 옮긴다. 같은 nonzero
+              revision+같은 canonical bytes는 duplicate, 같은 revision+다른 bytes는 equivocation protocol
+              terminal, older는 ignore, newer는 latest full-state replace다. 모든 decode allocation은 prepare에서
+              stage한다.
+
+              모든 inherited event를 source mutation 없이 strict decode/stage한 뒤
+              `reduceInitialEvents`가 **어떤 malformed/foreign/equivocating event → protocol terminal**을 최우선으로,
+              valid action은 `ended > revoked > invalidated > resized > metadata` 순으로 하나의 commit plan으로
+              줄인다. ended/revoked는 screen/event backlog를 release하고 각각 runtime-ended/revoked terminal,
+              invalidated는 screen backlog를 release하고 injected `now_ns`/checked epoch/deadline의
+              `host_recovery.ack_unadmitted`, resize/metadata만 owner-facing latest slots에 coalesce한다.
+              terminal/invalidated가 있으면 lower DTO backing은 commit cleanup한다. event bytes는 screen ledger
+              밖에서 기존 event cap을 유지하며 source event array/counter는 commit에서 empty/0이 된다.
+
+              `takeOwnerEvent() -> none | resized(ResizeDto) | metadata(OwnedMetadataDto)`는 initial authority
+              fence가 clear된 뒤에만 resize 우선으로 무할당 consume한다. 실제 app/TTY projection은 3b 책임이다.
+              c3은 공통 classifier와 inherited reducer, c1+c2+event verdict의 최종 combined commit만
+              구현하며 **fresh RX action 실행은 d2, recovery 진행은 e, control/TX cancellation은 f2~f3**가 같은
+              classifier 결과를 소비해 완성한다. 다섯 valid event의 inherited fixture와 classifier fresh fixture,
+              terminal 조합 순열, stale/duplicate/gap, decode allocation fail-index에서 source/ledger 보존을
+              Debug/ReleaseFast로 고정한다.
+
+              final verdict precedence는
+              **event/screen malformed·foreign·equivocation·request-id 0 → ended → revoked → invalidated →
+              screen cap recovery → retryable OOM/resource exhaustion → adopted**다. stale plan/fingerprint,
+              alias·semantic mismatch는 invariant terminal이다. 결과는
+              `AdoptionResult = retryable_preserved(out_of_memory|resource_exhausted) | adopted |
+              recovery_committed | terminal_latched(ExternalPumpTerminal)`의 닫힌 union이다. retryable은 lifecycle
+              adopting, Client inventory와 ledger zero를 보존한다. adopted/recovery는 source
+              screen/event arrays/counters/request scalar를 empty/zero로 만들고 lifecycle live다. safe revoke처럼
+              host fd가 열린 terminal도 semantic reason을 latch하고 fd disposition `.owner_cleanup`으로 canonical
+              cleanup한 뒤 dead가 되며 partial reusable state를 반환하지 않는다.
+
+              adoption 뒤 teardown은 owner event backing→all token descriptors→ledger `drainAll`→Client fd/storage→
+              ledger `finish` 순서다. 기존 semantic terminal reason/fd disposition은 cleanup에서 덮어쓰지 않는다.
+              nonterminal explicit detach/shutdown은 별도 `CleanupResult`이고 정상 cleanup을 invariant terminal로
+              만들지 않는다. descriptor release 뒤 `drainAll.drained_active_count != 0`일 때만 orphan invariant를
+              sticky diagnostic으로 추가하되 최초 terminal reason은 보존한다.
 
           - **2b2d1 — RX provenance/parser:** parser는 read마다 sidecar entry를 만들지 않는다. connection에
             checked nonwrapping `rx_absolute_next`와 `buffer_start_absolute`, parser에 현재 frame의 단일
@@ -2952,7 +3156,7 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
         공유하고 leave가 남은 budget 중 최대 100 ms를 쓴다. signal/revoke/error cleanup은 active/latest와 detach를
         버리고 하나의 100 ms deadline 안에서 leave를 시도한 뒤 즉시 raw restore/signal forwarding으로 간다.
 
-    **P5c3c-1a~2a, 2b1과 2b2a~b는 구현 완료, 2b2c~3b는 계획 상태다.** 각 slice는 P5c3a~b의 Debug/ReleaseFast gate를 재실행하고 다음 slice가 실제
+    **P5c3c-1a~2a, 2b1과 2b2a~c1은 구현 완료, 2b2c2~3b는 계획 상태다.** 각 slice는 P5c3a~b의 Debug/ReleaseFast gate를 재실행하고 다음 slice가 실제
     consumer로 쓰지 않는 임시 public API는 만들지 않는다.
 
     raw 진입 전에도 기존 `SO_RCVTIMEO`/blocking `writeAll`을 deadline으로 간주하지 않는다. resolver 전체, selected

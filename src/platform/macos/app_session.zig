@@ -4007,7 +4007,7 @@ pub const AppSession = struct {
             const at = lr.leaf.active_term;
             if (at >= lr.leaf.terms.items.len) continue;
             const term = lr.leaf.terms.items[at];
-            if (term.kind == .web and term.web_panel_kind == .browser and term.surfaceId() == sid) {
+            if (isBrowserTerm(term) and term.surfaceId() == sid) {
                 return self.paneBar(lr.rect, lr.leaf);
             }
         }
@@ -6756,7 +6756,7 @@ pub const AppSession = struct {
     // 닫힐 scope에 browser web term이 있나 — 브라우저 탭 닫기는 실행 중 셸 명령이 없어도(web term=live_initialized=false라
     // termHasRunningJob=false) "닫을까요?" 확인을 띄운다(제보). running job과 병렬 게이트. markdown web term은 제외(browser만).
     fn termIsWebBrowser(term: *Term) bool {
-        return term.kind == .web and term.web_panel_kind == .browser;
+        return isBrowserTerm(term); // 판정은 isBrowserTerm 단일 출처(중복 정의 제거)
     }
     fn paneHasWebBrowser(pane: *Pane) bool {
         for (pane.terms.items) |t| if (termIsWebBrowser(t)) return true;
@@ -14213,7 +14213,7 @@ pub const AppSession = struct {
                     // 루프가 그 밴드에 배경 quad + URL 셀을 그린다(밴드 y = [bar_h, bar_h+addr_h]가 웹뷰 top과 정확히 abut).
                     // addr_h는 탭 바 높이(paneBarHeightPx) 재사용 — 단일 소스, 별도 상수 없음. markdown web Term은 주소창이
                     // 없어 top=bar_h 유지(byte-identical). bar_h==0(chrome_minimal)이면 addr_h도 0이라 밴드 없음(탭 바와 동조).
-                    const addr_h: u32 = if (term.web_panel_kind == .browser) bar_h else 0;
+                    const addr_h: u32 = if (isBrowserTerm(term)) bar_h else 0;
                     var inset: web_panel_layout.ChromeInset = .{ .top = bar_h + addr_h };
                     var seam_edges: u8 = 0;
                     if (seam > 0 and lr.rect.x > tr.x) {
@@ -14394,9 +14394,18 @@ pub const AppSession = struct {
         return if (isBrowserTerm(term)) term.surfaceId() else 0;
     }
 
-    /// 이 Term이 **browser 웹 패널**인가(markdown/HTML 파일 패널 web Term은 제외). browser 전용 기능
-    /// (nav 단축키·주소창·터미널 링크 착지)이 공유하는 단일 판정 — 인라인 복사가 늘면 `web_panel_kind`가
-    /// 늘어날 때 한 곳을 놓쳐 "안 보이는 WKWebView에 링크가 로드되는" 류의 버그가 난다(코드리뷰 지적).
+    /// 이 Term이 **browser 웹 패널**인가(파일 패널 web Term은 제외). browser 전용 기능(nav 단축키·주소창 밴드·
+    /// 터미널 링크 착지·닫기 확인)이 공유하는 **유일한 판정**이다. 인라인 복사가 늘면 `web_panel_kind`가 늘어날 때
+    /// 한 곳을 놓쳐 "안 보이는 WKWebView에 링크가 로드되는" 류의 버그가 난다(코드리뷰 지적) — 그래서 이 함수 밖에서
+    /// `web_panel_kind == .browser`를 직접 비교하지 않는다.
+    ///
+    /// **의도적 예외 하나**: WKWebView **trust config 파생**(control-plane §8.1)은 "browser 기능인가"가 아니라
+    /// "격리 config를 쓰는가"를 묻는 별개 질문이라 이 술어를 쓰지 않는다. 파일 패널의 `.html`/`.pdf`도 거기서는
+    /// untrusted가 맞다.
+    ///
+    /// **FP16 확장 지점**(docs/file-panel.md §8): 파일 entry가 `Term`으로 옮겨오면 `.html`/`.pdf` 파일 Term이
+    /// 격리 config 때문에 `web_panel_kind == .browser`를 갖게 된다. 그때 이 술어에 "파일 entry 없음" 조건을 더하면
+    /// 주소창·nav 단축키가 로컬 HTML 파일 뷰에 잘못 걸리는 것을 **한 곳에서** 막는다. 지금 통합해 두는 이유가 그것이다.
     fn isBrowserTerm(term: *const Term) bool {
         return term.kind == .web and term.web_panel_kind == .browser;
     }
@@ -19794,7 +19803,7 @@ pub const AppSession = struct {
                     const addr_at = lr.leaf.active_term;
                     if (addr_at < lr.leaf.terms.items.len) {
                         const addr_term = lr.leaf.terms.items[addr_at];
-                        if (addr_term.kind == .web and addr_term.web_panel_kind == .browser) {
+                        if (isBrowserTerm(addr_term)) {
                             const bar_h = pb.full.h; // 밴드 높이 = 탭 바 높이(7e-1b addr_bar_h와 동일 소스)
                             const band: maru.session.SplitRect = .{ .x = pb.full.x, .y = pb.full.y + bar_h, .w = pb.full.w, .h = bar_h };
                             if (layout_math.pointInRect(x_px, y_px, band)) {
@@ -22783,6 +22792,9 @@ pub const AppSession = struct {
                                         .browser => .browser,
                                     },
                                     .loading = false,
+                                    // **isBrowserTerm의 의도적 예외**(그 주석 참조): 여기서 묻는 건 "browser 기능인가"가 아니라
+                                    // "격리 config를 쓰는가"다. FP16에서 `.html`/`.pdf` 파일 Term도 여기서는 untrusted가 맞으므로
+                                    // 파일 entry 제외 조건을 **적용하지 않는다**.
                                     .trust = if (term.web_panel_kind == .browser) .untrusted else .trusted, // §8.1
                                 },
                             },
@@ -25528,7 +25540,7 @@ pub const AppSession = struct {
                     const addr_at = lr.leaf.active_term;
                     if (addr_at < lr.leaf.terms.items.len) {
                         const addr_term = lr.leaf.terms.items[addr_at];
-                        if (addr_term.kind == .web and addr_term.web_panel_kind == .browser) {
+                        if (isBrowserTerm(addr_term)) {
                             const addr_bar_h = pb.full.h; // == paneBarHeightPx()(paneBarRect .h) → addr_h=bar_h, inset과 동일 소스
                             const band_rect: maru.session.SplitRect = .{ .x = pb.full.x, .y = pb.full.y + addr_bar_h, .w = pb.full.w, .h = addr_bar_h };
                             // 밴드 배경 = 탭 바와 같은 chrome 배경(sidebarBg, window.opacity 반영) — 주소창이 하나의 밴드로 이어져 보이게(quad).
@@ -26381,7 +26393,7 @@ pub const AppSession = struct {
                 const at = lr.leaf.active_term;
                 if (at >= lr.leaf.terms.items.len) continue;
                 const term = lr.leaf.terms.items[at];
-                if (term.kind != .web or term.web_panel_kind != .browser) continue; // browser 활성 탭만 밴드가 있다
+                if (!isBrowserTerm(term)) continue; // browser 활성 탭만 밴드가 있다
                 const bar_h = pb.full.h; // 밴드 높이 = 탭 바 높이(①b·"1c"와 동일 소스)
                 const band: maru.session.SplitRect = .{ .x = pb.full.x, .y = pb.full.y + bar_h, .w = pb.full.w, .h = bar_h };
                 if (!layout_math.pointInRect(x_px, y_px, band)) continue;
@@ -59152,4 +59164,58 @@ test "host-backed 재접속: 첫 관측은 기준선만 잡고 지난 요청을 
     try std.testing.expect(session.takeBell());
     term.rt.observation.clipboard_read_seq = 6;
     try std.testing.expect(session.takeClipboardReadRequest());
+}
+
+// browser 전용 chrome(주소창 밴드)이 파일/markdown web Term에 걸리지 않는다는 것을 `isBrowserTerm` 한 곳으로
+// 고정한다. FP16이 파일 entry를 Term으로 옮기면 `.html`/`.pdf` 파일 Term이 격리 config 때문에
+// `web_panel_kind == .browser`를 갖게 되는데, 그때 이 술어에 조건 하나만 더하면 모든 소비처가 함께 고쳐진다
+// (docs/file-panel.md §8). 인라인 비교가 흩어져 있으면 그 확장에서 반드시 한 곳을 놓친다.
+test "browser 전용 판정은 isBrowserTerm 하나가 소유한다 — markdown web Term은 주소창 밴드가 없다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(1400, 900, 1000);
+
+    const pane = session.activePane();
+    try session.newWebTermInActivePane(.markdown);
+    const md = pane.activeTerm();
+    try std.testing.expect(md.kind == .web and md.web_panel_kind == .markdown);
+    try std.testing.expect(!AppSession.isBrowserTerm(md)); // 술어가 갈라낸다
+
+    try session.newWebTermInActivePane(.browser);
+    const browser = pane.activeTerm();
+    try std.testing.expect(AppSession.isBrowserTerm(browser));
+
+    // 소비처 검증: 주소창 밴드는 browser에만 top inset을 더한다(bar_h vs 2*bar_h).
+    const bar_h = session.paneBarHeightPx();
+    try std.testing.expect(bar_h > 0);
+
+    var surfaces: std.ArrayList(web_panel_layout.SurfaceLayout) = .empty;
+    defer surfaces.deinit(allocator);
+    try session.collectWebSurfaces(&surfaces);
+
+    var md_rect: ?web_panel_layout.Rect = null;
+    var browser_rect: ?web_panel_layout.Rect = null;
+    for (surfaces.items) |s| {
+        if (s.surface_id == md.surfaceId()) md_rect = s.content_rect;
+        if (s.surface_id == browser.surfaceId()) browser_rect = s.content_rect;
+    }
+    try std.testing.expect(md_rect != null and browser_rect != null);
+    // 같은 pane·같은 leaf라 밴드 유무만 차이 → browser 본문이 정확히 bar_h만큼 더 내려간다.
+    try std.testing.expectEqual(md_rect.?.y + bar_h, browser_rect.?.y);
+    try std.testing.expectEqual(md_rect.?.h - bar_h, browser_rect.?.h);
+
+    // 활성 browser 판정도 같은 술어를 공유한다(nav 단축키 게이트).
+    try std.testing.expectEqual(browser.surfaceId(), session.activeWebSurfaceId());
+    session.focusTerm(1); // markdown을 활성으로
+    try std.testing.expectEqual(@as(u64, 0), session.activeWebSurfaceId());
 }

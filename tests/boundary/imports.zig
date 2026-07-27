@@ -321,6 +321,145 @@ test "session host external pump facade callsites stay in the final owner bounda
     try std.testing.expect(containsFacadeAccess(forbidden_computed));
 }
 
+test "session host stable pump storage and Client transfer stay in mechanics boundary" {
+    const allocator = std.testing.allocator;
+    var dir = try std.Io.Dir.cwd().openDir(
+        std.testing.io,
+        "src",
+        .{ .iterate = true },
+    );
+    defer dir.close(std.testing.io);
+    var walker = try dir.walk(allocator);
+    defer walker.deinit();
+
+    while (try walker.next(std.testing.io)) |entry| {
+        if (entry.kind != .file or !std.mem.endsWith(u8, entry.basename, ".zig")) continue;
+        const mechanics_file = std.mem.eql(
+            u8,
+            entry.path,
+            "platform/macos/session_host/client_external_pump.zig",
+        );
+        const storage_type_allowed = mechanics_file or std.mem.eql(
+            u8,
+            entry.path,
+            "platform/macos/session_host/external_pump_owner.zig",
+        );
+        const transfer_allowed = mechanics_file or std.mem.eql(
+            u8,
+            entry.path,
+            "platform/macos/session_host/client.zig",
+        );
+        if (mechanics_file) continue;
+
+        const path = try std.fmt.allocPrint(allocator, "src/{s}", .{entry.path});
+        defer allocator.free(path);
+        const source = try readZigFileZ(allocator, path);
+        defer allocator.free(source);
+        if (!storage_type_allowed)
+            try std.testing.expect(!containsRestrictedName(source, "ExternalPumpStorage"));
+        if (!mechanics_file) {
+            try std.testing.expect(!containsRestrictedName(source, "owned_client"));
+            try std.testing.expect(!containsRestrictedName(source, "inbox_ledger"));
+        }
+        if (!transfer_allowed)
+            try std.testing.expect(!containsRestrictedName(source, "transferToExternalPump"));
+    }
+
+    const forbidden_storage: [:0]const u8 =
+        \\const storage: ExternalPumpStorage = .{};
+        \\const raw = &storage.inbox_ledger;
+    ;
+    try std.testing.expect(containsExactIdentifier(forbidden_storage, "ExternalPumpStorage"));
+    try std.testing.expect(containsExactIdentifier(forbidden_storage, "inbox_ledger"));
+    const forbidden_computed_storage: [:0]const u8 =
+        \\const raw = &@field(storage, "inbox_" ++ "ledger");
+        \\const copied = @field(module, "External" ++ "PumpStorage");
+    ;
+    try std.testing.expect(containsRestrictedName(
+        forbidden_computed_storage,
+        "inbox_ledger",
+    ));
+    try std.testing.expect(containsRestrictedName(
+        forbidden_computed_storage,
+        "ExternalPumpStorage",
+    ));
+    const forbidden_transfer: [:0]const u8 =
+        \\try client.transferToExternalPump(&slot, cap);
+        \\const transfer = @field(client, "transfer" ++ "ToExternalPump");
+    ;
+    try std.testing.expect(containsRestrictedName(
+        forbidden_transfer,
+        "transferToExternalPump",
+    ));
+}
+
+fn containsExactIdentifier(source: [:0]const u8, expected: []const u8) bool {
+    var tokenizer = std.zig.Tokenizer.init(source);
+    while (true) {
+        const token = tokenizer.next();
+        switch (token.tag) {
+            .eof => return false,
+            .identifier => if (std.mem.eql(
+                u8,
+                source[token.loc.start..token.loc.end],
+                expected,
+            )) return true,
+            else => {},
+        }
+    }
+}
+
+fn containsRestrictedName(source: [:0]const u8, expected: []const u8) bool {
+    return containsExactIdentifier(source, expected) or
+        joinedStringLiteralsEqual(source, expected);
+}
+
+fn joinedStringLiteralsEqual(source: [:0]const u8, expected: []const u8) bool {
+    var tokenizer = std.zig.Tokenizer.init(source);
+    var joined: [128]u8 = undefined;
+    var joined_len: usize = 0;
+    var have_literal = false;
+    var expect_literal = false;
+    while (true) {
+        const token = tokenizer.next();
+        switch (token.tag) {
+            .string_literal => {
+                if (!expect_literal) joined_len = 0;
+                const literal = source[token.loc.start + 1 .. token.loc.end - 1];
+                if (joined_len + literal.len > joined.len) {
+                    joined_len = 0;
+                    have_literal = false;
+                    expect_literal = false;
+                    continue;
+                }
+                @memcpy(joined[joined_len..][0..literal.len], literal);
+                joined_len += literal.len;
+                have_literal = true;
+                expect_literal = false;
+            },
+            .plus_plus => {
+                if (have_literal and !expect_literal) {
+                    expect_literal = true;
+                } else {
+                    joined_len = 0;
+                    have_literal = false;
+                    expect_literal = false;
+                }
+            },
+            .eof => return have_literal and !expect_literal and
+                std.mem.eql(u8, joined[0..joined_len], expected),
+            else => {
+                if (have_literal and !expect_literal and
+                    std.mem.eql(u8, joined[0..joined_len], expected))
+                    return true;
+                joined_len = 0;
+                have_literal = false;
+                expect_literal = false;
+            },
+        }
+    }
+}
+
 fn containsForbiddenStdChild(source: [:0]const u8) bool {
     if (!hasExactCanonicalStdImport(source)) return true;
     const allowed = [_][]const u8{ "math", "meta", "testing" };

@@ -60,6 +60,16 @@ pub const EnterExternalModeError = error{
     FlagFailed,
 };
 
+pub const ExternalPumpTransferError = error{
+    ConnectionClosed,
+    NotExternal,
+    DestinationOccupied,
+    AlreadyBound,
+    ResidentTooLarge,
+    MalformedParser,
+    OutOfMemory,
+};
+
 pub const EndpointFailure = enum { absent, denied, transient, other };
 
 pub fn classifyConnectErrno(err: posix.E) EndpointFailure {
@@ -345,6 +355,9 @@ pub const Client = struct {
     /// host가 `runtime.clipboard_write`로 OSC 52 write 텍스트를 넘길 수 있는가. 없으면 원격 클립보드가 비활성이다.
     runtime_clipboard_v1: bool = false,
     parser: framing.FrameParser,
+    // A Client may be transferred only once into the stable external-pump address. The moved-from
+    // value remains deinit-safe, but is not a second transport owner.
+    ownership: enum { standalone, external_pump, moved } = .standalone,
     // async full-state를 하나라도 수용하지 못하면 server subscription base는 이미 전진했을 수 있다. 그 뒤 같은 socket을
     // 계속 쓰면 어떤 shared stream이 누락됐는지 복구할 수 없으므로 connection 전체를 poison/close한다.
     unusable: bool = false,
@@ -625,6 +638,9 @@ pub const Client = struct {
     }
 
     pub fn deinit(self: *Client) void {
+        if (self.ownership == .moved) {
+            return;
+        }
         self.clearExternalModeStorage();
         if (self.fd >= 0) _ = c.close(self.fd);
         if (self.build_id) |build_id| self.allocator.free(build_id);
@@ -639,6 +655,42 @@ pub const Client = struct {
         if (self.partial_batch) |*partial| partial.bytes.deinit(self.allocator);
         self.parser.deinit();
         self.* = undefined;
+    }
+
+    /// Normalize all parser storage before publishing the Client at its final pump address, then
+    /// transfer ownership without returning a movable Client value. Every error happens before
+    /// the first ownership mutation, so callers can safely reuse or deinit `self`.
+    pub fn transferToExternalPump(
+        self: *Client,
+        out: *?Client,
+        resident_cap: usize,
+    ) ExternalPumpTransferError!void {
+        if (out.* != null) return error.DestinationOccupied;
+        if (self.ownership == .external_pump) return error.AlreadyBound;
+        if (self.ownership == .moved or self.unusable or self.fd < 0)
+            return error.ConnectionClosed;
+        if (self.io_mode != .external) return error.NotExternal;
+        self.parser.normalizeExact(resident_cap) catch |err| return switch (err) {
+            error.ResidentTooLarge => error.ResidentTooLarge,
+            error.MalformedState => error.MalformedParser,
+            error.OutOfMemory => error.OutOfMemory,
+        };
+
+        const allocator = self.allocator;
+        const expected_major = self.parser.expected_major;
+        out.* = self.*;
+        out.*.?.ownership = .external_pump;
+        // Rebuild from Client defaults rather than clearing today's field list one by one. A future
+        // owned field without a safe default then fails this construction at compile time instead
+        // of silently leaving an alias in the moved-from value.
+        self.* = .{
+            .allocator = allocator,
+            .fd = -1,
+            .host_id = 0,
+            .parser = framing.FrameParser.initForMajor(allocator, expected_major),
+            .ownership = .moved,
+            .unusable = true,
+        };
     }
 
     /// One-way pre-raw transition. Every allocation is staged before fd flags are touched and an
@@ -1954,7 +2006,7 @@ pub const Client = struct {
     }
 
     fn ensureUsable(self: *const Client) ClientError!void {
-        if (self.unusable) return error.ConnectionClosed;
+        if (self.ownership == .moved or self.unusable) return error.ConnectionClosed;
     }
 
     fn requireBlockingMode(self: *const Client) ClientError!void {

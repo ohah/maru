@@ -2535,8 +2535,8 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
           caller ownership 보존, failed-release terminal retain/retry와 release-before-drop charged cleanup을
           Debug/ReleaseFast `test-session-host` 및 전체
           `mise run check`로 검증했다. 따라서 ledger 완료 표시는 2b1에 해당하고 이어진 2b2a pure
-          state/parser/boundary까지 구현 완료했다. 2b2b~2b3의 stable storage/physical cap/final owner gate는
-          아직 계획 상태다.
+          state/parser/boundary와 2b2b stable storage/inline physical cap까지 구현 완료했다. 2b2c~2b3의
+          inherited adoption/dynamic physical cap/final product owner gate는 아직 계획 상태다.
 
         - **P5c3c-2b2 — Client external pump core**:
           이 단계는 한 mega-PR이 아니라 아래 **아홉 merge slice**다. 앞 slice의 Debug/ReleaseFast/경계 gate가
@@ -2591,25 +2591,76 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
             검사하고 unread exact buffer를 stage/commit하며 cap/OOM/malformed 실패에서 기존 pointer/cap/head/bytes를
             보존한다. boundary test는 pure module의 std-only import와 future `ExternalPumpFacade` identifier의
             mechanics/final-owner allowlist를 tokenizer로 강제한다. Debug/ReleaseFast `test-session-host`,
-            `check-boundaries`, 전체 `mise run check`를 통과했다. 이 완료 표시는 2b2a에만 해당하고 2b2b~f3은
-            아직 계획 상태다.
+            `check-boundaries`, 전체 `mise run check`를 통과했다. 이 문단의 artifact 범위는 2b2a에만 해당하며,
+            현재 전체 상태는 2b2a~b 완료, 2b2c~f3 계획이다.
 
           - **2b2b — stable in-place storage scaffold:** token이 존재하기 전에
-            `ExternalPumpStorage.initInPlace(out, source: *Client, AttachmentEvidence)`를 caller의 최종 주소에서
-            실행한다.
+            caller가 `var out: ExternalPumpStorage = .{}`로 만든 **deinit-safe empty slot**의 최종 주소에서
+            `ExternalPumpStorage.initInPlace(&out, source: *Client, AttachmentEvidence)`를 실행한다. undefined
+            destination은 API 입력이 아니며, `out`이 empty가 아니거나 `out`/`source` byte range가 겹치면 source를
+            관찰·normalize하기 전에 typed reject한다.
             storage는 `Client`, `ExternalInboxLedger`, runtime/stream/controller-generation evidence와 위 closed
-            states를 소유하고 saved self address를 ReleaseFast에서도 검사한다. 값 반환 factory, raw `*ledger`
-            export, bind 뒤 move/copy를 허용하지 않는다. init 시작에는 `constructing`, normalize 뒤에는
+            states를 소유하고 saved self address를 ReleaseFast에서도 **초기 empty-slot preflight인
+            `initInPlace`를 제외한 모든 public operation의 첫 owner-field dereference 전에** 검사한다. 값 반환
+            factory, raw `*Client`/`*ledger` export, bind 뒤 move/copy를
+            허용하지 않는다. `AttachmentEvidence{runtime_id, stream_id, initial_role,
+            initial_controller_generation}`는
+            runtime/stream nonzero만 검사하는 immutable attach-time provenance다. generation 0은 observer/no-current-
+            controller 결과에서 유효하며, live role/generation authority가 아니다. 2b2c의 current authority state가
+            semantic SSOT가 되고 2b3의 `RemoteAttachment`는 facade를 통해 그 authority만 투영하므로 두 mutable
+            generation을 만들지 않는다. 이 provenance는 2b3에서 임의 caller scalar가 아니라 consume할
+            `external_attach.Prepared.attachment.state`에서 한 번 checked derive한다. init 시작에는 `constructing`, normalize 뒤에는
             `adopting`, 2b2c의 원자 adoption commit 뒤에만 `active`가 되어 facade pump를 허용한다. 이 scaffold는
             아직 `external_attach.Prepared`나 실제
             `RemoteAttachment`를 consume/bind하지 않으며 그 product composition은 2b3에 남긴다. init/normalize
-            전 검증·allocation 실패는 `source_preserved`로 source를 byte-for-byte 재사용 가능하게 두고 destination만
-            정리한다. source field를 처음 move한 뒤 invariant/commit 실패는 `source_closed`로 source를 invalid
-            latch하고 destination이 canonical cleanup한다. 성공은 source를 invalid latch한 뒤 destination만
-            sole owner다. 이 닫힌 결과를 `InitFailure{reason, source_disposition =
-            preserved | consumed_and_closed}`로 반환해 fd/storage 이중 회수 0을 고정한다.
-            teardown order는 attachment lease가 없는 이 단계에서도 charged Client storage→Client fd/storage→
-            ledger final-zero이며 재진입은 `ExternalPumpState.terminal`이 wire 0으로 거부한다.
+            전 evidence/out/overlap/source-mode 검증과 모든 fallible staging은 source mutation 전에 끝낸다.
+            `Client.transferToExternalPump(final_client_slot, resident_cap)`가 parser normalize를 실행하며 cap/OOM/
+            malformed 실패에서는 source의 fd, parser pointer/cap/head/bytes, queue/request-ID/allocation identity를
+            그대로 보존한다. normalize 성공 뒤에는 fallible action 없이 즉시 final field로 소유권을 한 번에
+            commit하고 source를 fd `-1`, empty parser/queue/mode storage, `moved` latch인 deinit-safe tombstone으로
+            바꾼다. 따라서 normalize 성공과 source move 사이에는 분류되지 않은 실패점이 없다.
+            첫 move 뒤 invariant/commit 실패는 `source_closed`로 두고 destination이 canonical cleanup한다. 성공은
+            source tombstone 뒤 destination만 sole owner다. 반환형은
+            `InitResult = initialized | failed(InitFailure{reason, source_disposition =
+            preserved | consumed_and_closed})`인 닫힌 union이다. caller가 제공한 empty slot에서 evidence/source/
+            normalize가 실패한 preserved 경로는 destination을 `.empty`로 복원한다. overlap은 destination을 읽지
+            않고, already-nonempty reject는 기존 destination을 그대로 보존한다. consumed 실패만
+            `.dead(terminal reason)`으로 남겨 재진입 deinit-safe하게 한다. `Client`는 다른 owning Zig value와
+            마찬가지로 byte-copy alias를 만들지 않는 sole-owner 입력이며, production transfer 호출은 source
+            boundary가 허용한 이 mechanics leaf 하나뿐이다. 이미 final storage에 bind된 `.external_pump` Client는
+            `source_already_bound`로 거부해 두 번째 storage로 다시 옮길 수 없다.
+            storage lifecycle은 semantic `ExternalPumpState`와 별개인
+            `empty | constructing | adopting | live | tearing_down | dead`다. teardown은 field 접근 전 self-address를
+            검증하고 `tearing_down`을 먼저 commit한 뒤 Client pending/external-mode storage→Client fd/나머지
+            storage→ledger `finish()` 순서로 한 번만 수행한다. 2b2b는 ledger token을 만들지 않으므로 정상
+            `constructing/adopting` teardown의 ledger는 반드시 zero다. private corruption fixture에서 active charge가
+            발견돼도 Client cleanup은 끝까지 수행하고 `ledger_not_zero`를 typed 반환하며, 실제 charged payload
+            cleanup hook은 token을 만들기 시작하는 2b2c가 확장한다. 두 번째 teardown과
+            `ExternalPumpState.terminal` 재진입은 wire/syscall/free 0인 typed no-op이고, 다른 주소의 forged copy는
+            원본 Client/ledger를 건드리지 않고 `moved_storage`를 반환한다.
+            `client_external_pump.zig`는 `StorageFootprint{pointer_bits,
+            fixed_inline_storage_bytes=@sizeOf(ExternalPumpStorage),
+            ledger_inline_bytes=@sizeOf(ExternalInboxLedger),
+            preallocated_transport_descriptor_bytes=
+            client_external_mode.max_tx_frames*@sizeOf(ExternalTxFrame)}`를 compile-time artifact로 제공한다.
+            `fixed_inline_storage_bytes`는 padding을 포함한 scaffold 자체만 뜻하고 external-mode의 heap-backed
+            64-entry descriptor capacity는 마지막 별도 항목에 귀속한다. supported 64-bit target의 inline cap은
+            512 KiB이며 초과는 comptime/Debug/ReleaseFast test gate 실패다. dynamic descriptor/source-map과 product
+            backing은 계속 2b2c/2b3 artifact 소유다.
+
+            **구현 완료:** `client_external_pump.zig`의 `ExternalPumpStorage`가 caller-initialized empty slot에서
+            overlap/evidence/re-init을 preflight하고 `Client.transferToExternalPump`의 normalize→infallible whole-
+            object move로 final address의 sole ownership을 만든다. moved source는 Client defaults로 재구성한
+            fd `-1`/empty/moved tombstone이며, storage는 saved address와 별도 lifecycle로 adopting-before-active,
+            forged copy, post-move failure, exact-once teardown을 ReleaseFast에서도 typed 처리한다.
+            `StorageFootprint`와 512 KiB compile cap은 inline ledger/padding과 heap-backed TX descriptor logical bytes를
+            분리한다. cap/OOM/malformed source 보존, invalid evidence/live destination/overlap, injected post-move
+            cleanup, forged value copy, impossible active ledger, fd-number ABA teardown 재진입을 실제 Darwin
+            socketpair로 검증하며 dedicated test root를 기본 `test`와 `test-session-host`에 연결했다.
+            boundary test는 storage/raw owner field와 Client transfer identifier를 mechanics/final-owner exact
+            allowlist 밖에서 direct/computed 문자열로 접근하지 못하게 한다. Debug/ReleaseFast
+            `test-session-host`, ReleaseFast `check-boundaries`, 전체 `mise run check`가 green이다. 이 완료 표시는
+            2b2b에만 해당하며 authority adoption은 2b2c 전까지 열리지 않는다.
 
           - **2b2c — inherited all-or-none adoption + semantic transfer:** bind preflight는 mutation 없이
             parser unread/cap, `pending_stream`, `partial_batch`, `pending_batches`, 별도 `pending_events`,
@@ -2901,7 +2952,7 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
         공유하고 leave가 남은 budget 중 최대 100 ms를 쓴다. signal/revoke/error cleanup은 active/latest와 detach를
         버리고 하나의 100 ms deadline 안에서 leave를 시도한 뒤 즉시 raw restore/signal forwarding으로 간다.
 
-    **P5c3c-1a~2a, 2b1과 2b2a는 구현 완료, 2b2b~3b는 계획 상태다.** 각 slice는 P5c3a~b의 Debug/ReleaseFast gate를 재실행하고 다음 slice가 실제
+    **P5c3c-1a~2a, 2b1과 2b2a~b는 구현 완료, 2b2c~3b는 계획 상태다.** 각 slice는 P5c3a~b의 Debug/ReleaseFast gate를 재실행하고 다음 slice가 실제
     consumer로 쓰지 않는 임시 public API는 만들지 않는다.
 
     raw 진입 전에도 기존 `SO_RCVTIMEO`/blocking `writeAll`을 deadline으로 간주하지 않는다. resolver 전체, selected

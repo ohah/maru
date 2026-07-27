@@ -267,7 +267,10 @@ flowchart TD
 
 ### 5.0 FP16 포맷 결정 (목표 계약)
 
-파일 Term은 창 줄의 `dock-entry`/`dock-entry-v2`가 아니라 **pane 줄의 반복 키 `file-term="<term-index>:<kind>:<mode>:<path-byte-len>:<path>"`**로 저장한다.
+파일 Term은 창 줄의 `dock-entry`/`dock-entry-v2`가 아니라 **`pane` 줄의 반복 필드 `file-term="<term-index>:<kind>:<mode>:<path-byte-len>:<path>"`**로 저장한다.
+
+- **왜 `surface`처럼 새 line kind가 아닌가 — 이게 가장 중요한 제약이다.** 터미널은 `pane` 줄 뒤에 `surface` **줄**이 따라오는 구조지만(workspace.zig `writePane`→`writeSurface`), 파일 Term에 새 line kind를 추가하면 **옛 리더가 창 블록 중간의 미지 line kind에서 `BadLine`으로 파일 전체를 폴백**시킨다(§5.1). 필드는 forgiving하게 무시되지만 줄은 아니다. FP1이 dock entry를 창 줄의 **필드**로 넣은 이유가 정확히 이것이고, FP16도 같은 제약을 그대로 받는다. 그래서 파일 Term은 `pane` 줄에 필드로 붙인다.
+- **512 field cap과의 관계**: 한 줄은 최대 `max_line_fields`(512) 필드로 토큰화된다(workspace.zig:29). `pane` 줄의 기존 필드는 `surfaces`·`active-term`·`custom-name` 셋이므로, 창당 `max_entries`(256)를 유지하면 한 pane에 파일 Term이 전부 몰려도 259 필드로 cap 아래에 넉넉히 들어간다. 상한 유지가 이 포맷 제약과도 맞물린다(§10 열린 질문 2번 해소 근거).
 
 - **왜 터미널 Surface 레코드에 섞지 않는가**: [workspace-restore.md](workspace-restore.md)가 이미 근거를 적어 두었다 — "`workspace.Surface`에 kind 필드가 없어 web 패널을 표현할 수 없고, sentinel core를 일반 surface로 직렬화하면 **복원 시 셸로 오spawn**된다". 여기에 더해 Surface 레코드는 host-backed Term의 `runtime_host_id:runtime_id` identity를 들고(workspace.zig:78~83) 복원이 `restoreSpawn`으로 PTY를 붙인다. PTY 없는 Term을 그 레코드에 넣으면 `validateManifest`의 writable runtime owner 유일성 검증과 attach 경로에 kind 가드를 새로 심어야 하는데, 그 코드는 [영속 세션 호스트](persistent-session-host.md)가 동시에 쓰는 경로라 회귀 반경이 크다. 별도 키는 그 파서·validator·attach를 **한 줄도 건드리지 않는다**. 파일 Term은 PTY가 없으므로 host가 살릴 대상이 아니고 workspace 파일로만 복원된다 — "앱 종료 후 살아남는 것"과 "파일 탭 복원"은 서로 다른 메커니즘이다.
 - **인덱스 공간 = 런타임 인덱스가 아니라 "persisted 압축 인덱스"다(적대적 검증 정정).** 순진하게 런타임 Term 인덱스를 쓰면 **브라우저 Term이 섞인 pane에서 깨진다** — `captureWorkspaceTab`은 `term.kind == .web`인 Term을 **전부** 스킵하고(app_session.zig:23315), 브라우저는 FP16 이후로도 계속 미영속이기 때문이다. `[terminal, browser, file]` pane이면 file의 런타임 인덱스는 2지만 복원되는 Term은 2개(0·1)뿐이라, 아래 범위 검증이 실패해 **그 창 전체가 fail-close**된다.
@@ -410,13 +413,29 @@ FP11d의 nested table 행 추가는 `appendPrefixFrom/appendPrefixTo` source ran
 
 **순서 근거**: FP16c(수명)를 모델·chrome보다 뒤로 미루면 그 사이 슬라이스가 "전환하면 편집 내용이 날아가는" 상태로 머지된다. 그래서 b→c를 연속으로 두고, d 이후는 그 위에서 안전하게 쌓는다.
 
+#### FP16e 삭제/보존 경계 — "도크 뷰어 완전 제거"의 정확한 범위
+
+**도크의 뷰어(콘텐츠)는 완전히 제거하고, 도크라는 컨테이너는 탐색기 전용으로 남긴다.** 숨김·비활성·플래그 분기로 남기지 않는다([레거시 shim 금지](project-rules.md#구조와-파일-분리)의 "이주는 같은 변경에서 옛 경로를 통째 삭제"). 아래가 그 경계의 단일 출처다.
+
+| | 삭제 | 이관(소유자만 변경) | 보존 |
+|---|---|---|---|
+| **`dock_layout`** | `editor`·`tab_bar`·`header`·`content`·`tree_divider` rect, `Tab*`(`TabMetrics`/`tabRect`/`tabCloseRect`/`tabIndexAt`/`dockTabScroll`/`tabCellLayout`), `group*`(`groupGeometry`/`groupDivider*`), `treeSizePtForPointer`, `min_editor_cols`, `default_tab_cols` | `Header*`(`HeaderCellLayout`·`modesForKind`·`headerModeRect`/`headerModeAt`·`headerDirtyRect`/`headerConflictRect`) → 파일 Term 헤더 밴드(§3.1) | `workspace`·`terminal`·`dock`·`divider`·`tree`·`tree_header`·`tree_content` rect, `outerDividerHitRect`, `sizePtForPointer`, `compute`, `min_tree_cols` |
+| **`dock_panel`** | `DockGroup`·`DockTree`·`DockDropEdge`·`DockDropTarget`·`DropResult`·`commitEntryDrop`·`removeGroup`·`pruneEmptyGroups`, `EntryId`·`EntryIdAllocator`, `max_groups`, `Side`(right 고정) | `Entry`(경로·kind·mode·dirty·revision·pending) → `Term`(§10 FP16b) | `EntryKind`·`Mode`(+`defaultFor`/`allowedFor`/`usesEditorBridge`), `max_entries`(256) |
+| **`dock_drag.zig`** | **모듈 전체** | — | — |
+| **수명** | `assignDockSurfaceIds`·`enforceFilePanelLiveViewLimit`(LRU), config `file-panel.max-live-views` | — | §1 "surface 수명 == Term 수명" 불변식이 대체 |
+| **액션·팔릿** | `split_file_panel_horizontal`·`split_file_panel_vertical`·`close_file_panel_group`·`toggle_file_panel_dock_side`·`focus_file_tree` | — | `toggle_file_panel_focus`, `open_file_panel`, 트리 mutation 액션 4종 |
+| **포커스** | `FocusOwner.dock_surface`·`.dock_group` | — | `.workspace`·`.file_tree` |
+| **workspace 포맷** | `dock-entry`·`dock-entry-v2`·`dock-group-count`·`dock-focused-group`·`dock-node`, `dock-tree-size` | `dock-entry` → `file-term`(§5.0, 1회 마이그레이션) | `dock-size`·`dock-collapsed`·`dock-presented`·`dock-tree-roots`, `dock-side`(읽고 무시) |
+| **`file_tree.zig` 일체** | — | — | **전부 보존**(트리가 도크에 남는 유일한 콘텐츠) |
+
+즉 "도크 뷰어 제거"는 **WKWebView가 도크에서 0개가 된다**는 뜻이다 — 탐색기는 전부 GPU 셀 chrome이라 도크는 native 콘텐츠 뷰를 하나도 소유하지 않게 되고, 그래서 §4의 도크-aware 예외 둘(destroy 판정·presence 신호)이 제거된다.
+
 **해소된 질문**
 
 1. ~~evicted 파일 Term의 surface id 소유자~~ → **(C) 파일 Term은 eviction하지 않는다**로 확정(사용자 승인 2026-07-27). 근거·대안 기각 사유·대가는 §1 "web Term의 surface 수명 == Term 수명"이 단일 출처다. FP16b가 `EntryId`를, FP16e가 LRU와 `max_live_views` config를 제거한다.
 
-**열린 질문(FP16b 착수 전 사용자 확인 필요)**
-
-2. **`max_entries`(256)의 새 강제 지점 — (C) 확정으로 무게가 커졌다.** 현행은 `DockPanel` 모델 불변식이지만 pane/창의 Term 수에는 코드 상한이 **없다**(확인). eviction이 없어진 이상 이 상한이 **live WKWebView 수를 제한하는 유일한 장치**가 된다(파일 256개 열면 WKWebView 256개). FP16에서는 ⑴ 열기 시점 검사(창의 파일 Term이 상한이면 거부 + notice)와 ⑵ workspace reader의 입력 bound로 나눠 강제해야 한다. 확인이 필요한 것: 256을 그대로 둘지(브라우저 탭에는 상한이 없다는 점과의 정합), 아니면 실사용에 맞는 더 낮은 값으로 내릴지.
+2. ~~`max_entries`(256)의 값~~ → **256 유지**로 확정(사용자 승인 2026-07-27). eviction이 없어진 이상 이 상한이 **live WKWebView 수를 제한하는 유일한 장치**이지만, 값을 낮추는 대신 그대로 둔다 — ⑴ 브라우저 web Term에 상한이 없다는 점과 정합하고, ⑵ §5.0의 512 field cap 아래에 정확히 들어가는 값이며, ⑶ 실제 상한 필요성은 §12의 RSS 관측으로 판단할 문제이지 지금 추측으로 내릴 값이 아니다.
+   - **새 강제 지점 둘**(현행은 `DockPanel` 모델 불변식인데 Term 수에는 코드 상한이 **없다** — 확인): ⓐ **열기 시점** — 그 창의 파일 Term이 256이면 새로 열지 않고 notice로 거부한다(§6의 모든 진입점이 공유: 트리 클릭·터미널 링크·`⌘O`·CLI). ⓑ **workspace reader 입력 bound** — 손상·악의 입력이 창당 256을 넘기면 기존 규칙대로 그 창을 fail-closed 강등한다. 두 지점 모두 `dock_panel.max_entries` 상수를 그대로 참조해 값의 단일 출처를 유지한다.
 
 **의도적으로 하지 않는 것**: ⑴ 도크를 좌측 사이드바에 합치지 않는다(사이드바 스크롤 뷰포트·scissor·key-hint의 `backing_height` 가정 3곳을 건드리게 되고, 우측 유지가 그 비용을 안 낸다 — 2026-07-27 사용자 결정). ⑵ 파일 Term을 host-backed 세션 대상으로 만들지 않는다(§5.0). ⑶ 라이브 프리뷰(FP11)를 이 전환에서 되살리지 않는다(백로그 유지).
 

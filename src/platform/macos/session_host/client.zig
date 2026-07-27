@@ -306,7 +306,855 @@ pub const ConnectionProfile = enum {
             .cli_probe, .admin => false,
         };
     }
+
+    pub fn requiresStrictExternalEvents(self: ConnectionProfile) bool {
+        return self == .cli_attach;
+    }
 };
+
+pub const ExternalAdoptionInspectError = std.mem.Allocator.Error || error{
+    IneligibleProfile,
+    InvalidCompatibilityProvenance,
+    InvalidClientState,
+    InvalidCounter,
+    InvalidStream,
+    InvalidHeader,
+    InvalidPartial,
+    InvalidAllocator,
+    InvalidAlias,
+    InvalidRequestId,
+    InvalidScreenSemantic,
+    ArithmeticOverflow,
+};
+
+pub const ExternalAdoptionPreflightError = ExternalAdoptionInspectError || error{
+    InvalidPlan,
+    StaleInventory,
+};
+
+pub const ExternalAdoptionCommitError = error{
+    InvalidPlan,
+    StaleClient,
+};
+
+const ExternalArrayDescriptor = struct {
+    address: usize,
+    len: usize,
+    capacity: usize,
+};
+
+const ExternalBatchDescriptor = struct {
+    stream_id: u64,
+    is_snapshot: bool,
+    bytes_address: usize,
+    bytes_len: usize,
+    allocator: std.mem.Allocator,
+};
+
+const ExternalFrameDescriptor = struct {
+    header: protocol.Header,
+    payload_address: usize,
+    payload_len: usize,
+};
+
+const ExternalPartialDescriptor = struct {
+    stream_id: u64,
+    is_snapshot: bool,
+    bytes: ExternalArrayDescriptor,
+    chunk_count: usize,
+};
+
+const ClientOwnership = enum { standalone, external_pump, moved };
+
+const ExternalAdoptionSnapshot = struct {
+    allocator: std.mem.Allocator,
+    fd: c.fd_t,
+    host_id: u128,
+    build_id_address: usize,
+    build_id_present: bool,
+    upgrade_epoch: u64,
+    authority_generation: u64,
+    lifecycle_address: usize,
+    wire_major: u16,
+    screen_codec_version: u16,
+    attachment_capabilities: AttachmentCapabilities,
+    host_manifest_v1: bool,
+    host_exec_upgrade_v1: bool,
+    runtime_inventory_v1: bool,
+    admin_one_shot_v1: bool,
+    admin_runtime_end_v1: bool,
+    screen_viewport_scrolled_v1: bool,
+    async_scroll_to_bottom_v1: bool,
+    runtime_core_command_v1: bool,
+    runtime_selected_text_v1: bool,
+    notification_stream_auth_v1: bool,
+    runtime_link_at_v1: bool,
+    runtime_clipboard_v1: bool,
+    connection_profile: ConnectionProfile,
+    compatibility_profile: compatibility.Profile,
+    ownership: ClientOwnership,
+    unusable: bool,
+    next_request_id: u64,
+    parser_allocator: std.mem.Allocator,
+    parser_expected_major: u16,
+    parser: ExternalArrayDescriptor,
+    parser_head: usize,
+    pending_stream: ExternalArrayDescriptor,
+    pending_stream_bytes: usize,
+    pending_events: ExternalArrayDescriptor,
+    pending_event_bytes: usize,
+    pending_batches: ExternalArrayDescriptor,
+    pending_batch_bytes: usize,
+    partial: ?ExternalPartialDescriptor,
+    external_saved_flags: c_int,
+    external_tx: ExternalArrayDescriptor,
+    external_tx_bytes: usize,
+};
+
+/// Read-only, owned snapshot of the exact Client state that an external-pump adoption may consume.
+/// The payload bytes themselves stay Client-owned; the outer transaction exact-copies and compares
+/// them before this Client-local disarm capability is committed.
+pub const ExternalAdoptionInventory = struct {
+    allocator: std.mem.Allocator,
+    sealed_allocator: std.mem.Allocator,
+    allocator_ptr_addr: usize,
+    allocator_vtable_addr: usize,
+    client_address: usize,
+    target_stream: u64,
+    screen_source_count: usize,
+    screen_payload_bytes: usize,
+    event_count: usize,
+    event_payload_bytes: usize,
+    next_request_id: u64,
+    validation_scratch_peak_bytes: usize,
+    snapshot: ExternalAdoptionSnapshot,
+    batch_descriptors: []ExternalBatchDescriptor,
+    stream_descriptors: []ExternalFrameDescriptor,
+    event_descriptors: []ExternalFrameDescriptor,
+    build_id_copy: []u8,
+    lifecycle_copy: []u8,
+    cleanup_batch_descriptors: []ExternalBatchDescriptor,
+    cleanup_stream_descriptors: []ExternalFrameDescriptor,
+    cleanup_event_descriptors: []ExternalFrameDescriptor,
+    cleanup_build_id_copy: []u8,
+    cleanup_lifecycle_copy: []u8,
+    batch_descriptors_addr: usize,
+    batch_descriptors_len: usize,
+    stream_descriptors_addr: usize,
+    stream_descriptors_len: usize,
+    event_descriptors_addr: usize,
+    event_descriptors_len: usize,
+    build_id_copy_addr: usize,
+    build_id_copy_len: usize,
+    lifecycle_copy_addr: usize,
+    lifecycle_copy_len: usize,
+
+    pub fn deinit(self: *ExternalAdoptionInventory) void {
+        const allocator = self.canonicalCleanupAllocator() orelse return;
+        const batches = canonicalExternalSlice(
+            ExternalBatchDescriptor,
+            self.batch_descriptors,
+            self.cleanup_batch_descriptors,
+            self.batch_descriptors_addr,
+            self.batch_descriptors_len,
+        ) orelse return;
+        const stream = canonicalExternalSlice(
+            ExternalFrameDescriptor,
+            self.stream_descriptors,
+            self.cleanup_stream_descriptors,
+            self.stream_descriptors_addr,
+            self.stream_descriptors_len,
+        ) orelse return;
+        const events = canonicalExternalSlice(
+            ExternalFrameDescriptor,
+            self.event_descriptors,
+            self.cleanup_event_descriptors,
+            self.event_descriptors_addr,
+            self.event_descriptors_len,
+        ) orelse return;
+        const build_id = canonicalExternalSlice(
+            u8,
+            self.build_id_copy,
+            self.cleanup_build_id_copy,
+            self.build_id_copy_addr,
+            self.build_id_copy_len,
+        ) orelse return;
+        const lifecycle = canonicalExternalSlice(
+            u8,
+            self.lifecycle_copy,
+            self.cleanup_lifecycle_copy,
+            self.lifecycle_copy_addr,
+            self.lifecycle_copy_len,
+        ) orelse return;
+        allocator.free(batches);
+        allocator.free(stream);
+        allocator.free(events);
+        allocator.free(build_id);
+        allocator.free(lifecycle);
+        self.* = undefined;
+    }
+
+    fn hasSealedStorage(self: *const ExternalAdoptionInventory) bool {
+        return std.meta.eql(self.allocator, self.sealed_allocator) and
+            sameExternalSlice(ExternalBatchDescriptor, self.batch_descriptors, self.cleanup_batch_descriptors) and
+            sameExternalSlice(ExternalFrameDescriptor, self.stream_descriptors, self.cleanup_stream_descriptors) and
+            sameExternalSlice(ExternalFrameDescriptor, self.event_descriptors, self.cleanup_event_descriptors) and
+            sameExternalSlice(u8, self.build_id_copy, self.cleanup_build_id_copy) and
+            sameExternalSlice(u8, self.lifecycle_copy, self.cleanup_lifecycle_copy) and
+            self.batch_descriptors_len == self.batch_descriptors.len and
+            self.stream_descriptors_len == self.stream_descriptors.len and
+            self.event_descriptors_len == self.event_descriptors.len and
+            self.build_id_copy_len == self.build_id_copy.len and
+            self.lifecycle_copy_len == self.lifecycle_copy.len and
+            self.canonicalCleanupAllocator() != null;
+    }
+
+    fn canonicalCleanupAllocator(self: *const ExternalAdoptionInventory) ?std.mem.Allocator {
+        if (std.meta.eql(self.allocator, self.sealed_allocator))
+            return self.allocator;
+        if (externalAllocatorMatchesSeal(
+            self.allocator,
+            self.allocator_ptr_addr,
+            self.allocator_vtable_addr,
+        )) return self.allocator;
+        if (externalAllocatorMatchesSeal(
+            self.sealed_allocator,
+            self.allocator_ptr_addr,
+            self.allocator_vtable_addr,
+        )) return self.sealed_allocator;
+        return null;
+    }
+
+    pub fn metadataBytes(self: *const ExternalAdoptionInventory) error{ArithmeticOverflow}!usize {
+        var total: usize = 0;
+        inline for (.{
+            .{ self.batch_descriptors.len, @sizeOf(ExternalBatchDescriptor) },
+            .{ self.stream_descriptors.len, @sizeOf(ExternalFrameDescriptor) },
+            .{ self.event_descriptors.len, @sizeOf(ExternalFrameDescriptor) },
+        }) |entry| {
+            const bytes = std.math.mul(usize, entry[0], entry[1]) catch
+                return error.ArithmeticOverflow;
+            total = std.math.add(usize, total, bytes) catch
+                return error.ArithmeticOverflow;
+        }
+        total = std.math.add(usize, total, self.build_id_copy.len) catch
+            return error.ArithmeticOverflow;
+        total = std.math.add(usize, total, self.lifecycle_copy.len) catch
+            return error.ArithmeticOverflow;
+        return total;
+    }
+};
+
+pub const ExternalScreenSemantic = union(enum) {
+    completed: struct { stream_id: u64, is_snapshot: bool },
+    partial: struct { stream_id: u64, is_snapshot: bool, chunk_count: u8 },
+    frame: protocol.Header,
+};
+
+pub const ExternalScreenCopy = struct {
+    allocator: std.mem.Allocator,
+    semantic: ExternalScreenSemantic,
+    bytes: []u8,
+    view: []const u8,
+
+    pub fn deinit(self: *ExternalScreenCopy) void {
+        self.allocator.free(self.bytes);
+        self.bytes = &.{};
+        self.view = &.{};
+    }
+};
+
+pub const ExternalAdoptionPreview = struct {
+    screen_source_count: usize,
+    screen_payload_bytes: usize,
+    inventory_metadata_bytes: usize,
+    validation_scratch_peak_bytes: usize,
+};
+
+const ExternalDisarmLifecycle = enum { empty, prepared, sealed, committed, aborted };
+
+/// Address-bound Client-local capability. It owns only immutable descriptor snapshots; it never
+/// owns the Client payloads that the outer adoption transaction is preparing to transfer.
+pub const PreparedClientDisarm = struct {
+    saved_self_address: usize = 0,
+    client_address: usize = 0,
+    inventory: ?ExternalAdoptionInventory = null,
+    cleanup_inventory: ?ExternalAdoptionInventory = null,
+    lifecycle: ExternalDisarmLifecycle = .empty,
+
+    pub fn deinit(self: *PreparedClientDisarm) void {
+        if (self.saved_self_address != 0 and self.saved_self_address != @intFromPtr(self)) return;
+        if (self.inventory orelse self.cleanup_inventory) |inventory_value| {
+            var inventory = inventory_value;
+            inventory.deinit();
+        }
+        self.inventory = null;
+        self.cleanup_inventory = null;
+        self.lifecycle = .aborted;
+    }
+};
+
+fn externalOwnedSliceAddress(comptime T: type, slice: []const T) usize {
+    return if (slice.len == 0) 0 else @intFromPtr(slice.ptr);
+}
+
+fn canonicalExternalSlice(
+    comptime T: type,
+    primary: []T,
+    cleanup: []T,
+    sealed_addr: usize,
+    sealed_len: usize,
+) ?[]T {
+    if (sameExternalSlice(T, primary, cleanup)) return primary;
+    if (externalOwnedSliceAddress(T, primary) == sealed_addr and primary.len == sealed_len)
+        return primary;
+    if (externalOwnedSliceAddress(T, cleanup) == sealed_addr and cleanup.len == sealed_len)
+        return cleanup;
+    return null;
+}
+
+fn externalAllocatorMatchesSeal(
+    allocator: std.mem.Allocator,
+    ptr_addr: usize,
+    vtable_addr: usize,
+) bool {
+    return @intFromPtr(allocator.ptr) == ptr_addr and
+        @intFromPtr(allocator.vtable) == vtable_addr;
+}
+
+const ExternalValidatedAdoption = struct {
+    screen_source_count: usize,
+    screen_payload_bytes: usize,
+    event_payload_bytes: usize,
+};
+
+const ExternalRange = struct { start: usize, len: usize };
+
+fn externalRangeOfValue(value: anytype) ExternalRange {
+    return .{ .start = @intFromPtr(value), .len = @sizeOf(@TypeOf(value.*)) };
+}
+
+fn externalRangesOverlap(a: ExternalRange, b: ExternalRange) bool {
+    if (a.len == 0 or b.len == 0) return false;
+    const a_end = std.math.add(usize, a.start, a.len) catch return true;
+    const b_end = std.math.add(usize, b.start, b.len) catch return true;
+    return a.start < b_end and b.start < a_end;
+}
+
+fn externalRangeForSlice(bytes: []const u8, capacity: usize) ExternalAdoptionInspectError!?ExternalRange {
+    if (capacity == 0) return null;
+    return .{ .start = @intFromPtr(bytes.ptr), .len = capacity };
+}
+
+fn externalRangeForList(
+    list: anytype,
+    comptime Entry: type,
+) ExternalAdoptionInspectError!?ExternalRange {
+    if (list.capacity == 0) return null;
+    const bytes = std.math.mul(usize, list.capacity, @sizeOf(Entry)) catch
+        return error.ArithmeticOverflow;
+    return .{ .start = @intFromPtr(list.items.ptr), .len = bytes };
+}
+
+fn externalOwnerRangeCount(self: *const Client) ExternalAdoptionInspectError!usize {
+    var count: usize = 6;
+    inline for (.{
+        @as(usize, @intFromBool(self.build_id != null)),
+        @as(usize, @intFromBool(self.partial_batch != null)),
+        self.pending_batches.items.len,
+        self.pending_stream.items.len,
+        self.pending_events.items.len,
+    }) |part| count = std.math.add(usize, count, part) catch
+        return error.ArithmeticOverflow;
+    return count;
+}
+
+fn appendExternalRange(
+    ranges: []ExternalRange,
+    used: *usize,
+    range: ?ExternalRange,
+) void {
+    const present = range orelse return;
+    ranges[used.*] = present;
+    used.* += 1;
+}
+
+fn collectExternalOwnerRanges(
+    self: *const Client,
+) ExternalAdoptionInspectError![]ExternalRange {
+    const count = try externalOwnerRangeCount(self);
+    const ranges = try self.allocator.alloc(ExternalRange, count);
+    errdefer self.allocator.free(ranges);
+    var used: usize = 0;
+    if (self.build_id) |bytes|
+        appendExternalRange(ranges, &used, try externalRangeForSlice(bytes, bytes.len));
+    const fixed = [_]?ExternalRange{
+        try externalRangeForSlice(self.lifecycle, self.lifecycle.len),
+        try externalRangeForList(self.parser.buf, u8),
+        try externalRangeForList(self.pending_batches, StreamBatch),
+        try externalRangeForList(self.pending_stream, framing.Frame),
+        try externalRangeForList(self.pending_events, framing.Frame),
+        switch (self.io_mode) {
+            .blocking => null,
+            .external => |state| try externalRangeForList(
+                state.external_tx,
+                client_external_mode.ExternalTxFrame,
+            ),
+        },
+    };
+    for (fixed) |range| appendExternalRange(ranges, &used, range);
+    if (self.partial_batch) |partial|
+        appendExternalRange(ranges, &used, try externalRangeForSlice(
+            partial.bytes.items,
+            partial.bytes.capacity,
+        ));
+    for (self.pending_batches.items) |batch|
+        appendExternalRange(
+            ranges,
+            &used,
+            try externalRangeForSlice(batch.bytes, batch.bytes.len),
+        );
+    for (self.pending_stream.items) |frame|
+        appendExternalRange(
+            ranges,
+            &used,
+            try externalRangeForSlice(frame.payload, frame.payload.len),
+        );
+    for (self.pending_events.items) |frame|
+        appendExternalRange(
+            ranges,
+            &used,
+            try externalRangeForSlice(frame.payload, frame.payload.len),
+        );
+    return ranges[0..used];
+}
+
+fn externalRangeLessThan(comparisons: *usize, left: ExternalRange, right: ExternalRange) bool {
+    comparisons.* += 1;
+    return left.start < right.start;
+}
+
+fn validateExternalOwnerRangesAgainst(
+    self: *const Client,
+    target: ?ExternalRange,
+) ExternalAdoptionInspectError!usize {
+    const allocation_count = try externalOwnerRangeCount(self);
+    const ranges = try collectExternalOwnerRanges(self);
+    defer self.allocator.free(ranges.ptr[0..allocation_count]);
+    var comparisons: usize = 0;
+    std.mem.sort(ExternalRange, ranges, &comparisons, externalRangeLessThan);
+    const client_range = externalRangeOfValue(self);
+    for (ranges, 0..) |range, index| {
+        if (externalRangesOverlap(range, client_range) or
+            (target != null and externalRangesOverlap(range, target.?)))
+            return error.InvalidAlias;
+        if (index != 0 and externalRangesOverlap(ranges[index - 1], range))
+            return error.InvalidAlias;
+    }
+    return comparisons;
+}
+
+fn validateExternalOwnerRanges(self: *const Client) ExternalAdoptionInspectError!void {
+    _ = try validateExternalOwnerRangesAgainst(self, null);
+}
+
+fn externalSliceAddress(bytes: []const u8) usize {
+    return if (bytes.len == 0) 0 else @intFromPtr(bytes.ptr);
+}
+
+fn sameExternalSlice(comptime T: type, left: []const T, right: []const T) bool {
+    const left_address = if (left.len == 0) 0 else @intFromPtr(left.ptr);
+    const right_address = if (right.len == 0) 0 else @intFromPtr(right.ptr);
+    return left.len == right.len and left_address == right_address;
+}
+
+fn externalArrayDescriptor(list: anytype) ExternalArrayDescriptor {
+    return .{
+        .address = if (list.capacity == 0) 0 else @intFromPtr(list.items.ptr),
+        .len = list.items.len,
+        .capacity = list.capacity,
+    };
+}
+
+fn externalInventoryMetadataBytesForClient(
+    self: *const Client,
+) ExternalAdoptionInspectError!usize {
+    var total: usize = 0;
+    inline for (.{
+        .{ self.pending_batches.items.len, @sizeOf(ExternalBatchDescriptor) },
+        .{ self.pending_stream.items.len, @sizeOf(ExternalFrameDescriptor) },
+        .{ self.pending_events.items.len, @sizeOf(ExternalFrameDescriptor) },
+    }) |entry| {
+        const bytes = std.math.mul(usize, entry[0], entry[1]) catch
+            return error.ArithmeticOverflow;
+        total = std.math.add(usize, total, bytes) catch return error.ArithmeticOverflow;
+    }
+    total = std.math.add(usize, total, if (self.build_id) |bytes| bytes.len else 0) catch
+        return error.ArithmeticOverflow;
+    total = std.math.add(usize, total, self.lifecycle.len) catch
+        return error.ArithmeticOverflow;
+    return total;
+}
+
+fn externalBatchDescriptor(batch: StreamBatch) ExternalBatchDescriptor {
+    return .{
+        .stream_id = batch.stream_id,
+        .is_snapshot = batch.is_snapshot,
+        .bytes_address = externalSliceAddress(batch.bytes),
+        .bytes_len = batch.bytes.len,
+        .allocator = batch.allocator,
+    };
+}
+
+fn externalFrameDescriptor(frame: framing.Frame) ExternalFrameDescriptor {
+    return .{
+        .header = frame.header,
+        .payload_address = externalSliceAddress(frame.payload),
+        .payload_len = frame.payload.len,
+    };
+}
+
+fn compatibilityProfilesEqual(a: compatibility.Profile, b: compatibility.Profile) bool {
+    if (a.kind != b.kind or a.wire_major != b.wire_major or
+        a.screen_codec_version != b.screen_codec_version or
+        a.attach_schema != b.attach_schema)
+        return false;
+    if (a.required_fingerprint == null or b.required_fingerprint == null)
+        return a.required_fingerprint == null and b.required_fingerprint == null;
+    return std.mem.eql(u8, a.required_fingerprint.?, b.required_fingerprint.?);
+}
+
+fn validateExternalAdoptionClient(
+    self: *const Client,
+    target_stream: u64,
+    validate_owner_aliases: bool,
+) ExternalAdoptionInspectError!ExternalValidatedAdoption {
+    if (target_stream == 0) return error.InvalidStream;
+    if (self.ownership != .external_pump or self.unusable or self.fd < 0)
+        return error.InvalidClientState;
+    const connection_profile = self.connection_profile orelse return error.IneligibleProfile;
+    if (connection_profile != .cli_attach) return error.IneligibleProfile;
+    const selected = self.compatibility_profile orelse
+        return error.InvalidCompatibilityProvenance;
+    const expected = compatibility.profileForMajor(self.wire_major) orelse
+        return error.InvalidCompatibilityProvenance;
+    if (!compatibilityProfilesEqual(selected, expected) or
+        self.screen_codec_version != selected.screen_codec_version)
+        return error.InvalidCompatibilityProvenance;
+    try validateExternalAdoptionStructure(self);
+    if (!std.meta.eql(self.parser.allocator, self.allocator) or
+        self.parser.expected_major != self.wire_major or
+        self.parser.head > self.parser.buf.items.len)
+        return error.InvalidClientState;
+    if (self.next_request_id == 0) return error.InvalidRequestId;
+    if (self.pending_outbound != null) return error.InvalidClientState;
+    switch (self.io_mode) {
+        .blocking => return error.InvalidClientState,
+        .external => |state| if (state.external_tx.items.len != 0 or
+            state.external_tx_bytes != 0 or
+            state.external_tx.items.len > state.external_tx.capacity or
+            state.external_tx.capacity != client_external_mode.max_tx_frames)
+            return error.InvalidClientState,
+    }
+    if (validate_owner_aliases) try validateExternalOwnerRanges(self);
+
+    var screen_count: usize = 0;
+    var screen_bytes: usize = 0;
+    var batch_bytes: usize = 0;
+    for (self.pending_batches.items) |batch| {
+        if (!std.meta.eql(batch.allocator, self.allocator)) return error.InvalidAllocator;
+        if (batch.stream_id != target_stream) return error.InvalidStream;
+        if (batch.bytes.len > protocol.max_viewport_snapshot)
+            return error.InvalidScreenSemantic;
+        batch_bytes = std.math.add(usize, batch_bytes, batch.bytes.len) catch
+            return error.ArithmeticOverflow;
+        screen_bytes = std.math.add(usize, screen_bytes, batch.bytes.len) catch
+            return error.ArithmeticOverflow;
+        screen_count = std.math.add(usize, screen_count, 1) catch
+            return error.ArithmeticOverflow;
+    }
+    if (batch_bytes != self.pending_batch_bytes) return error.InvalidCounter;
+
+    const max_chunks = protocol.max_viewport_snapshot / protocol.max_binary_chunk;
+    var active_batch = false;
+    var active_snapshot = false;
+    var active_stream: u64 = 0;
+    var active_chunks: usize = 0;
+    var active_bytes: usize = 0;
+    if (self.partial_batch) |partial| {
+        if (partial.stream_id != target_stream) return error.InvalidStream;
+        if (partial.chunk_count == 0 or partial.chunk_count > max_chunks or
+            partial.bytes.items.len > protocol.max_viewport_snapshot)
+            return error.InvalidPartial;
+        active_batch = true;
+        active_snapshot = partial.is_snapshot;
+        active_stream = partial.stream_id;
+        active_chunks = partial.chunk_count;
+        active_bytes = partial.bytes.items.len;
+        screen_bytes = std.math.add(usize, screen_bytes, active_bytes) catch
+            return error.ArithmeticOverflow;
+        screen_count = std.math.add(usize, screen_count, 1) catch
+            return error.ArithmeticOverflow;
+    }
+
+    var stream_bytes: usize = 0;
+    for (self.pending_stream.items) |frame| {
+        if (frame.header.kind != .snapshot_chunk and frame.header.kind != .delta_chunk)
+            return error.InvalidHeader;
+        if (frame.header.major != self.wire_major or
+            frame.header.stream_id != target_stream or frame.header.request_id != 0 or
+            frame.header.flags & ~protocol.Flags.end_stream != 0 or
+            frame.header.payload_len != frame.payload.len or
+            frame.payload.len > protocol.max_binary_chunk)
+            return error.InvalidHeader;
+        const is_snapshot = frame.header.kind == .snapshot_chunk;
+        if (active_batch) {
+            if (frame.header.stream_id != active_stream or is_snapshot != active_snapshot)
+                return error.InvalidPartial;
+        } else {
+            active_batch = true;
+            active_stream = frame.header.stream_id;
+            active_snapshot = is_snapshot;
+            active_chunks = 0;
+            active_bytes = 0;
+        }
+        active_chunks = std.math.add(usize, active_chunks, 1) catch
+            return error.ArithmeticOverflow;
+        active_bytes = std.math.add(usize, active_bytes, frame.payload.len) catch
+            return error.ArithmeticOverflow;
+        if (active_chunks > max_chunks or active_bytes > protocol.max_viewport_snapshot)
+            return error.InvalidPartial;
+        stream_bytes = std.math.add(usize, stream_bytes, frame.payload.len) catch
+            return error.ArithmeticOverflow;
+        screen_bytes = std.math.add(usize, screen_bytes, frame.payload.len) catch
+            return error.ArithmeticOverflow;
+        screen_count = std.math.add(usize, screen_count, 1) catch
+            return error.ArithmeticOverflow;
+        if (frame.header.flags & protocol.Flags.end_stream != 0) active_batch = false;
+    }
+    if (stream_bytes != self.pending_stream_bytes) return error.InvalidCounter;
+
+    var event_bytes: usize = 0;
+    for (self.pending_events.items) |frame| {
+        if (frame.header.major != self.wire_major or frame.header.kind != .event or
+            frame.header.stream_id != target_stream or
+            frame.header.request_id != 0 or frame.header.flags != 0 or
+            frame.header.payload_len != frame.payload.len or
+            frame.payload.len > protocol.max_control_json)
+            return error.InvalidHeader;
+        event_bytes = std.math.add(usize, event_bytes, frame.payload.len) catch
+            return error.ArithmeticOverflow;
+    }
+    if (event_bytes != self.pending_event_bytes) return error.InvalidCounter;
+    return .{
+        .screen_source_count = screen_count,
+        .screen_payload_bytes = screen_bytes,
+        .event_payload_bytes = event_bytes,
+    };
+}
+
+fn validateExternalAdoptionStructure(self: *const Client) ExternalAdoptionInspectError!void {
+    if (self.parser.buf.items.len > self.parser.buf.capacity or
+        self.pending_batches.items.len > self.pending_batches.capacity or
+        self.pending_stream.items.len > self.pending_stream.capacity or
+        self.pending_events.items.len > self.pending_events.capacity or
+        self.pending_batches.items.len > protocol.max_client_screen_items or
+        self.pending_stream.items.len > protocol.max_client_screen_items or
+        self.pending_events.items.len > max_pending_event_count)
+        return error.InvalidClientState;
+    if (self.partial_batch) |partial|
+        if (partial.bytes.items.len > partial.bytes.capacity)
+            return error.InvalidClientState;
+}
+
+fn externalAdoptionSnapshot(self: *const Client) ExternalAdoptionSnapshot {
+    const external = self.io_mode.external;
+    return .{
+        .allocator = self.allocator,
+        .fd = self.fd,
+        .host_id = self.host_id,
+        .build_id_address = if (self.build_id) |bytes| externalSliceAddress(bytes) else 0,
+        .build_id_present = self.build_id != null,
+        .upgrade_epoch = self.upgrade_epoch,
+        .authority_generation = self.authority_generation,
+        .lifecycle_address = externalSliceAddress(self.lifecycle),
+        .wire_major = self.wire_major,
+        .screen_codec_version = self.screen_codec_version,
+        .attachment_capabilities = self.attachment_capabilities,
+        .host_manifest_v1 = self.host_manifest_v1,
+        .host_exec_upgrade_v1 = self.host_exec_upgrade_v1,
+        .runtime_inventory_v1 = self.runtime_inventory_v1,
+        .admin_one_shot_v1 = self.admin_one_shot_v1,
+        .admin_runtime_end_v1 = self.admin_runtime_end_v1,
+        .screen_viewport_scrolled_v1 = self.screen_viewport_scrolled_v1,
+        .async_scroll_to_bottom_v1 = self.async_scroll_to_bottom_v1,
+        .runtime_core_command_v1 = self.runtime_core_command_v1,
+        .runtime_selected_text_v1 = self.runtime_selected_text_v1,
+        .notification_stream_auth_v1 = self.notification_stream_auth_v1,
+        .runtime_link_at_v1 = self.runtime_link_at_v1,
+        .runtime_clipboard_v1 = self.runtime_clipboard_v1,
+        .connection_profile = self.connection_profile.?,
+        .compatibility_profile = self.compatibility_profile.?,
+        .ownership = self.ownership,
+        .unusable = self.unusable,
+        .next_request_id = self.next_request_id,
+        .parser_allocator = self.parser.allocator,
+        .parser_expected_major = self.parser.expected_major,
+        .parser = externalArrayDescriptor(self.parser.buf),
+        .parser_head = self.parser.head,
+        .pending_stream = externalArrayDescriptor(self.pending_stream),
+        .pending_stream_bytes = self.pending_stream_bytes,
+        .pending_events = externalArrayDescriptor(self.pending_events),
+        .pending_event_bytes = self.pending_event_bytes,
+        .pending_batches = externalArrayDescriptor(self.pending_batches),
+        .pending_batch_bytes = self.pending_batch_bytes,
+        .partial = if (self.partial_batch) |partial| .{
+            .stream_id = partial.stream_id,
+            .is_snapshot = partial.is_snapshot,
+            .bytes = externalArrayDescriptor(partial.bytes),
+            .chunk_count = partial.chunk_count,
+        } else null,
+        .external_saved_flags = external.saved_flags,
+        .external_tx = externalArrayDescriptor(external.external_tx),
+        .external_tx_bytes = external.external_tx_bytes,
+    };
+}
+
+fn externalInventoriesEqual(
+    a: *const ExternalAdoptionInventory,
+    b: *const ExternalAdoptionInventory,
+) bool {
+    return a.hasSealedStorage() and b.hasSealedStorage() and
+        std.meta.eql(a.allocator, b.allocator) and
+        a.client_address == b.client_address and
+        a.target_stream == b.target_stream and
+        a.screen_source_count == b.screen_source_count and
+        a.screen_payload_bytes == b.screen_payload_bytes and
+        a.event_count == b.event_count and
+        a.event_payload_bytes == b.event_payload_bytes and
+        a.next_request_id == b.next_request_id and
+        a.validation_scratch_peak_bytes == b.validation_scratch_peak_bytes and
+        std.meta.eql(a.snapshot, b.snapshot) and
+        externalDescriptorSlicesEqual(ExternalBatchDescriptor, a.batch_descriptors, b.batch_descriptors) and
+        externalDescriptorSlicesEqual(ExternalFrameDescriptor, a.stream_descriptors, b.stream_descriptors) and
+        externalDescriptorSlicesEqual(ExternalFrameDescriptor, a.event_descriptors, b.event_descriptors) and
+        std.mem.eql(u8, a.build_id_copy, b.build_id_copy) and
+        std.mem.eql(u8, a.lifecycle_copy, b.lifecycle_copy);
+}
+
+fn externalDescriptorSlicesEqual(
+    comptime T: type,
+    a: []const T,
+    b: []const T,
+) bool {
+    if (a.len != b.len) return false;
+    for (a, b) |left, right| if (!std.meta.eql(left, right)) return false;
+    return true;
+}
+
+fn externalInventoryMatchesClientExact(
+    inventory: *const ExternalAdoptionInventory,
+    self: *const Client,
+) bool {
+    const screen_count = std.math.add(
+        usize,
+        self.pending_batches.items.len,
+        self.pending_stream.items.len,
+    ) catch return false;
+    const expected_screen_count = std.math.add(
+        usize,
+        screen_count,
+        @as(usize, @intFromBool(self.partial_batch != null)),
+    ) catch return false;
+    const batch_and_stream_bytes = std.math.add(
+        usize,
+        self.pending_batch_bytes,
+        self.pending_stream_bytes,
+    ) catch return false;
+    const expected_screen_bytes = std.math.add(
+        usize,
+        batch_and_stream_bytes,
+        if (self.partial_batch) |partial| partial.bytes.items.len else 0,
+    ) catch return false;
+    const expected_scratch = std.math.mul(
+        usize,
+        externalOwnerRangeCount(self) catch return false,
+        @sizeOf(ExternalRange),
+    ) catch return false;
+    if (!inventory.hasSealedStorage() or
+        !std.meta.eql(inventory.allocator, self.allocator) or
+        inventory.client_address != @intFromPtr(self) or
+        inventory.target_stream == 0 or
+        inventory.screen_source_count != expected_screen_count or
+        inventory.screen_payload_bytes != expected_screen_bytes or
+        inventory.event_count != self.pending_events.items.len or
+        inventory.event_payload_bytes != self.pending_event_bytes or
+        inventory.next_request_id != self.next_request_id or
+        inventory.validation_scratch_peak_bytes != expected_scratch or
+        !std.meta.eql(inventory.snapshot, externalAdoptionSnapshot(self)))
+        return false;
+    if (!std.mem.eql(u8, inventory.build_id_copy, self.build_id orelse &.{}) or
+        !std.mem.eql(u8, inventory.lifecycle_copy, self.lifecycle) or
+        inventory.batch_descriptors.len != self.pending_batches.items.len or
+        inventory.stream_descriptors.len != self.pending_stream.items.len or
+        inventory.event_descriptors.len != self.pending_events.items.len)
+        return false;
+    for (inventory.batch_descriptors, self.pending_batches.items) |expected, actual|
+        if (!std.meta.eql(expected, externalBatchDescriptor(actual)) or
+            actual.stream_id != inventory.target_stream)
+            return false;
+    for (inventory.stream_descriptors, self.pending_stream.items) |expected, actual|
+        if (!std.meta.eql(expected, externalFrameDescriptor(actual)) or
+            actual.header.stream_id != inventory.target_stream)
+            return false;
+    for (inventory.event_descriptors, self.pending_events.items) |expected, actual|
+        if (!std.meta.eql(expected, externalFrameDescriptor(actual)) or
+            actual.header.stream_id != inventory.target_stream)
+            return false;
+    if (self.partial_batch) |partial|
+        if (partial.stream_id != inventory.target_stream) return false;
+    return true;
+}
+
+fn externalPlanRangeOverlapsClient(
+    self: *const Client,
+    out: *const PreparedClientDisarm,
+) ExternalAdoptionInspectError!bool {
+    const target = externalRangeOfValue(out);
+    if (externalRangesOverlap(target, externalRangeOfValue(self))) return true;
+    if (self.build_id) |bytes|
+        if (externalRangesOverlap(target, (try externalRangeForSlice(bytes, bytes.len)).?))
+            return true;
+    const fixed = [_]?ExternalRange{
+        try externalRangeForSlice(self.lifecycle, self.lifecycle.len),
+        try externalRangeForList(self.parser.buf, u8),
+        try externalRangeForList(self.pending_batches, StreamBatch),
+        try externalRangeForList(self.pending_stream, framing.Frame),
+        try externalRangeForList(self.pending_events, framing.Frame),
+        switch (self.io_mode) {
+            .blocking => null,
+            .external => |state| try externalRangeForList(
+                state.external_tx,
+                client_external_mode.ExternalTxFrame,
+            ),
+        },
+    };
+    for (fixed) |range| if (range) |present|
+        if (externalRangesOverlap(target, present)) return true;
+    if (self.partial_batch) |partial|
+        if (try externalRangeForSlice(partial.bytes.items, partial.bytes.capacity)) |range|
+            if (externalRangesOverlap(target, range)) return true;
+    for (self.pending_batches.items) |batch|
+        if (try externalRangeForSlice(batch.bytes, batch.bytes.len)) |range|
+            if (externalRangesOverlap(target, range)) return true;
+    for (self.pending_stream.items) |frame|
+        if (try externalRangeForSlice(frame.payload, frame.payload.len)) |range|
+            if (externalRangesOverlap(target, range)) return true;
+    for (self.pending_events.items) |frame|
+        if (try externalRangeForSlice(frame.payload, frame.payload.len)) |range|
+            if (externalRangesOverlap(target, range)) return true;
+    return false;
+}
 
 /// host와의 한 connection. `host_id`는 hello_ack로 받은 값이다(§4 stale handle 판정에 쓴다). `call`은 read-only
 /// command를 왕복한다.
@@ -369,7 +1217,7 @@ pub const Client = struct {
     parser: framing.FrameParser,
     // A Client may be transferred only once into the stable external-pump address. The moved-from
     // value remains deinit-safe, but is not a second transport owner.
-    ownership: enum { standalone, external_pump, moved } = .standalone,
+    ownership: ClientOwnership = .standalone,
     // async full-state를 하나라도 수용하지 못하면 server subscription base는 이미 전진했을 수 있다. 그 뒤 같은 socket을
     // 계속 쓰면 어떤 shared stream이 누락됐는지 복구할 수 없으므로 connection 전체를 poison/close한다.
     unusable: bool = false,
@@ -706,6 +1554,325 @@ pub const Client = struct {
             .ownership = .moved,
             .unusable = true,
         };
+    }
+
+    pub fn previewExternalAdoption(
+        self: *const Client,
+        target_stream: u64,
+    ) ExternalAdoptionInspectError!ExternalAdoptionPreview {
+        const validated = try validateExternalAdoptionClient(self, target_stream, false);
+        return .{
+            .screen_source_count = validated.screen_source_count,
+            .screen_payload_bytes = validated.screen_payload_bytes,
+            .inventory_metadata_bytes = try externalInventoryMetadataBytesForClient(self),
+            .validation_scratch_peak_bytes = std.math.mul(
+                usize,
+                try externalOwnerRangeCount(self),
+                @sizeOf(ExternalRange),
+            ) catch return error.ArithmeticOverflow,
+        };
+    }
+
+    pub fn inspectExternalAdoption(
+        self: *const Client,
+        target_stream: u64,
+    ) ExternalAdoptionInspectError!ExternalAdoptionInventory {
+        const validated = try validateExternalAdoptionClient(self, target_stream, true);
+        const allocator = self.allocator;
+        const batches = try allocator.alloc(
+            ExternalBatchDescriptor,
+            self.pending_batches.items.len,
+        );
+        errdefer allocator.free(batches);
+        const stream = try allocator.alloc(
+            ExternalFrameDescriptor,
+            self.pending_stream.items.len,
+        );
+        errdefer allocator.free(stream);
+        const events = try allocator.alloc(
+            ExternalFrameDescriptor,
+            self.pending_events.items.len,
+        );
+        errdefer allocator.free(events);
+        const build_id_copy = try allocator.dupe(u8, self.build_id orelse &.{});
+        errdefer allocator.free(build_id_copy);
+        const lifecycle_copy = try allocator.dupe(u8, self.lifecycle);
+        errdefer allocator.free(lifecycle_copy);
+
+        for (self.pending_batches.items, batches) |batch, *descriptor|
+            descriptor.* = externalBatchDescriptor(batch);
+        for (self.pending_stream.items, stream) |frame, *descriptor|
+            descriptor.* = externalFrameDescriptor(frame);
+        for (self.pending_events.items, events) |frame, *descriptor|
+            descriptor.* = externalFrameDescriptor(frame);
+
+        const inventory: ExternalAdoptionInventory = .{
+            .allocator = allocator,
+            .sealed_allocator = allocator,
+            .allocator_ptr_addr = @intFromPtr(allocator.ptr),
+            .allocator_vtable_addr = @intFromPtr(allocator.vtable),
+            .client_address = @intFromPtr(self),
+            .target_stream = target_stream,
+            .screen_source_count = validated.screen_source_count,
+            .screen_payload_bytes = validated.screen_payload_bytes,
+            .event_count = self.pending_events.items.len,
+            .event_payload_bytes = validated.event_payload_bytes,
+            .next_request_id = self.next_request_id,
+            .validation_scratch_peak_bytes = std.math.mul(
+                usize,
+                try externalOwnerRangeCount(self),
+                @sizeOf(ExternalRange),
+            ) catch return error.ArithmeticOverflow,
+            .snapshot = externalAdoptionSnapshot(self),
+            .batch_descriptors = batches,
+            .stream_descriptors = stream,
+            .event_descriptors = events,
+            .build_id_copy = build_id_copy,
+            .lifecycle_copy = lifecycle_copy,
+            .cleanup_batch_descriptors = batches,
+            .cleanup_stream_descriptors = stream,
+            .cleanup_event_descriptors = events,
+            .cleanup_build_id_copy = build_id_copy,
+            .cleanup_lifecycle_copy = lifecycle_copy,
+            .batch_descriptors_addr = externalOwnedSliceAddress(ExternalBatchDescriptor, batches),
+            .batch_descriptors_len = batches.len,
+            .stream_descriptors_addr = externalOwnedSliceAddress(ExternalFrameDescriptor, stream),
+            .stream_descriptors_len = stream.len,
+            .event_descriptors_addr = externalOwnedSliceAddress(ExternalFrameDescriptor, events),
+            .event_descriptors_len = events.len,
+            .build_id_copy_addr = externalOwnedSliceAddress(u8, build_id_copy),
+            .build_id_copy_len = build_id_copy.len,
+            .lifecycle_copy_addr = externalOwnedSliceAddress(u8, lifecycle_copy),
+            .lifecycle_copy_len = lifecycle_copy.len,
+        };
+        return inventory;
+    }
+
+    /// Validates every Client-owned allocation and proves that a caller-provided destination can
+    /// be initialized without overwriting any source backing. This must run before the caller
+    /// writes even the first byte of that destination.
+    pub fn preflightExternalAdoptionDestination(
+        self: *const Client,
+        destination: *const anyopaque,
+        destination_len: usize,
+    ) ExternalAdoptionInspectError!void {
+        try validateExternalAdoptionStructure(self);
+        _ = try validateExternalOwnerRangesAgainst(self, .{
+            .start = @intFromPtr(destination),
+            .len = destination_len,
+        });
+    }
+
+    pub fn preflightExternalAdoption(
+        self: *const Client,
+        expected: *const ExternalAdoptionInventory,
+        out: *PreparedClientDisarm,
+    ) ExternalAdoptionPreflightError!void {
+        if (out.lifecycle != .empty or out.inventory != null or out.cleanup_inventory != null)
+            return error.InvalidPlan;
+        if (externalRangesOverlap(
+            externalRangeOfValue(self),
+            externalRangeOfValue(out),
+        ) or try externalPlanRangeOverlapsClient(self, out))
+            return error.InvalidAlias;
+        if (expected.client_address != @intFromPtr(self)) return error.StaleInventory;
+
+        var current = try self.inspectExternalAdoption(expected.target_stream);
+        errdefer current.deinit();
+        if (!externalInventoriesEqual(expected, &current)) return error.StaleInventory;
+
+        out.* = .{
+            .saved_self_address = @intFromPtr(out),
+            .client_address = @intFromPtr(self),
+            .inventory = current,
+            .cleanup_inventory = current,
+            .lifecycle = .prepared,
+        };
+    }
+
+    pub fn stageExternalScreenCopies(
+        self: *const Client,
+        allocator: std.mem.Allocator,
+        expected: *const ExternalAdoptionInventory,
+        out: []ExternalScreenCopy,
+    ) ExternalAdoptionInspectError!void {
+        if (!externalInventoryMatchesClientExact(expected, self) or
+            out.len != expected.screen_source_count)
+            return error.InvalidClientState;
+        var initialized: usize = 0;
+        errdefer for (out[0..initialized]) |*copy| copy.deinit();
+
+        for (self.pending_batches.items) |batch| {
+            out[initialized] = .{
+                .allocator = allocator,
+                .semantic = .{ .completed = .{
+                    .stream_id = batch.stream_id,
+                    .is_snapshot = batch.is_snapshot,
+                } },
+                .bytes = try allocator.dupe(u8, batch.bytes),
+                .view = undefined,
+            };
+            out[initialized].view = out[initialized].bytes;
+            initialized += 1;
+        }
+        if (self.partial_batch) |partial| {
+            out[initialized] = .{
+                .allocator = allocator,
+                .semantic = .{ .partial = .{
+                    .stream_id = partial.stream_id,
+                    .is_snapshot = partial.is_snapshot,
+                    .chunk_count = std.math.cast(u8, partial.chunk_count) orelse
+                        return error.InvalidPartial,
+                } },
+                .bytes = try allocator.dupe(u8, partial.bytes.items),
+                .view = undefined,
+            };
+            out[initialized].view = out[initialized].bytes;
+            initialized += 1;
+        }
+        for (self.pending_stream.items) |frame| {
+            out[initialized] = .{
+                .allocator = allocator,
+                .semantic = .{ .frame = frame.header },
+                .bytes = try allocator.dupe(u8, frame.payload),
+                .view = undefined,
+            };
+            out[initialized].view = out[initialized].bytes;
+            initialized += 1;
+        }
+    }
+
+    pub fn externalScreenCopiesMatch(
+        self: *const Client,
+        expected: *const ExternalAdoptionInventory,
+        copies: []const ExternalScreenCopy,
+    ) bool {
+        if (!externalInventoryMatchesClientExact(expected, self) or
+            copies.len != expected.screen_source_count)
+            return false;
+        var index: usize = 0;
+        for (self.pending_batches.items) |batch| {
+            const copy = copies[index];
+            const semantic = switch (copy.semantic) {
+                .completed => |value| value.stream_id == batch.stream_id and
+                    value.is_snapshot == batch.is_snapshot,
+                else => false,
+            };
+            if (!semantic or !std.mem.eql(u8, copy.view, batch.bytes)) return false;
+            index += 1;
+        }
+        if (self.partial_batch) |partial| {
+            const copy = copies[index];
+            const semantic = switch (copy.semantic) {
+                .partial => |value| value.stream_id == partial.stream_id and
+                    value.is_snapshot == partial.is_snapshot and
+                    value.chunk_count == partial.chunk_count,
+                else => false,
+            };
+            if (!semantic or !std.mem.eql(u8, copy.view, partial.bytes.items)) return false;
+            index += 1;
+        }
+        for (self.pending_stream.items) |frame| {
+            const copy = copies[index];
+            const semantic = switch (copy.semantic) {
+                .frame => |header| std.meta.eql(header, frame.header),
+                else => false,
+            };
+            if (!semantic or !std.mem.eql(u8, copy.view, frame.payload)) return false;
+            index += 1;
+        }
+        return index == copies.len;
+    }
+
+    pub fn validateExternalAdoptionPlan(
+        self: *const Client,
+        plan: *const PreparedClientDisarm,
+    ) bool {
+        if ((plan.lifecycle != .prepared and plan.lifecycle != .sealed) or
+            plan.saved_self_address != @intFromPtr(plan) or
+            plan.client_address != @intFromPtr(self))
+            return false;
+        validateExternalAdoptionStructure(self) catch return false;
+        const inventory = &(plan.inventory orelse return false);
+        _ = validateExternalAdoptionClient(
+            self,
+            inventory.target_stream,
+            false,
+        ) catch return false;
+        if (externalPlanRangeOverlapsClient(self, plan) catch return false) return false;
+        // Inspect already proved the structural and pairwise-alias invariants. Exact descriptor
+        // equality below proves none of those owner ranges moved, resized, or changed identity, so
+        // final validation stays allocation-free.
+        return externalInventoryMatchesClientExact(inventory, self);
+    }
+
+    pub fn externalAdoptionDisarmMetadataBytes(
+        self: *const Client,
+        plan: *const PreparedClientDisarm,
+    ) error{ ArithmeticOverflow, InvalidPlan }!usize {
+        if (plan.client_address != @intFromPtr(self)) return error.InvalidPlan;
+        return (plan.inventory orelse return error.InvalidPlan).metadataBytes();
+    }
+
+    pub fn externalAdoptionDisarmMatchesInventory(
+        self: *const Client,
+        plan: *const PreparedClientDisarm,
+        inventory: *const ExternalAdoptionInventory,
+    ) bool {
+        if (plan.client_address != @intFromPtr(self)) return false;
+        return externalInventoriesEqual(
+            &(plan.inventory orelse return false),
+            inventory,
+        );
+    }
+
+    pub fn sealExternalAdoption(
+        self: *const Client,
+        plan: *PreparedClientDisarm,
+    ) ExternalAdoptionCommitError!void {
+        if (plan.lifecycle != .prepared) return error.StaleClient;
+        if (!self.validateExternalAdoptionPlan(plan)) return error.StaleClient;
+        plan.lifecycle = .sealed;
+    }
+
+    pub fn validateSealedExternalAdoptionPlan(
+        self: *const Client,
+        plan: *const PreparedClientDisarm,
+    ) bool {
+        return plan.lifecycle == .sealed and self.validateExternalAdoptionPlan(plan);
+    }
+
+    /// `sealExternalAdoption` is the final fallible boundary. This suffix performs no allocation,
+    /// user callback, or fallible operation.
+    pub fn commitExternalAdoption(
+        self: *Client,
+        plan: *PreparedClientDisarm,
+    ) void {
+        if (plan.lifecycle != .sealed or
+            plan.saved_self_address != @intFromPtr(plan) or
+            plan.client_address != @intFromPtr(self) or
+            plan.inventory == null)
+            @panic("invalid sealed external adoption plan");
+        plan.lifecycle = .committed;
+
+        for (self.pending_batches.items) |batch| batch.deinit();
+        self.pending_batches.deinit(self.allocator);
+        self.pending_batches = .empty;
+        self.pending_batch_bytes = 0;
+        if (self.partial_batch) |*partial| partial.bytes.deinit(self.allocator);
+        self.partial_batch = null;
+        for (self.pending_stream.items) |frame| frame.deinit(self.allocator);
+        self.pending_stream.deinit(self.allocator);
+        self.pending_stream = .empty;
+        self.pending_stream_bytes = 0;
+        for (self.pending_events.items) |frame| frame.deinit(self.allocator);
+        self.pending_events.deinit(self.allocator);
+        self.pending_events = .empty;
+        self.pending_event_bytes = 0;
+        self.next_request_id = 0;
+        plan.inventory.?.deinit();
+        plan.inventory = null;
+        plan.cleanup_inventory = null;
     }
 
     /// One-way pre-raw transition. Every allocation is staged before fd flags are touched and an
@@ -4427,6 +5594,316 @@ test "external mode preserves parser queues request id and capabilities on succe
     try checkExternalModePreservesClientState(.success);
     try checkExternalModePreservesClientState(.initial_get_failure);
     try checkExternalModePreservesClientState(.exact_rollback);
+}
+
+test "external adoption inventory seals exact client state and disarms owned queues" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    var fds: [2]c.fd_t = undefined;
+    try std.testing.expectEqual(
+        @as(c_int, 0),
+        c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds),
+    );
+    defer _ = c.close(fds[1]);
+    var client = makeConnectedTestClient(allocator, fds[0]);
+    defer client.deinit();
+    try client.enterExternalMode();
+    client.ownership = .external_pump;
+    client.connection_profile = .cli_attach;
+    client.compatibility_profile = compatibility.profileForMajor(protocol.version_major).?;
+    client.next_request_id = 91;
+
+    const batch_bytes = try allocator.dupe(u8, "batch");
+    try client.pending_batches.append(allocator, .{
+        .is_snapshot = false,
+        .stream_id = 7,
+        .bytes = batch_bytes,
+        .allocator = allocator,
+    });
+    client.pending_batch_bytes = batch_bytes.len;
+    const stream_bytes = try allocator.dupe(u8, "frame");
+    try client.pending_stream.append(allocator, .{
+        .header = .{
+            .kind = .delta_chunk,
+            .stream_id = 7,
+            .payload_len = @intCast(stream_bytes.len),
+            .flags = protocol.Flags.end_stream,
+        },
+        .payload = stream_bytes,
+    });
+    client.pending_stream_bytes = stream_bytes.len;
+    const event_bytes = try allocator.dupe(u8, "{}");
+    try client.pending_events.append(allocator, .{
+        .header = .{
+            .kind = .event,
+            .stream_id = 7,
+            .payload_len = @intCast(event_bytes.len),
+        },
+        .payload = event_bytes,
+    });
+    client.pending_event_bytes = event_bytes.len;
+
+    client.connection_profile = .gui;
+    try std.testing.expectError(error.IneligibleProfile, client.inspectExternalAdoption(7));
+    client.connection_profile = .cli_attach;
+    client.pending_batches.items[0].allocator = std.heap.page_allocator;
+    try std.testing.expectError(error.InvalidAllocator, client.inspectExternalAdoption(7));
+    client.pending_batches.items[0].allocator = allocator;
+    client.pending_batch_bytes += 1;
+    try std.testing.expectError(error.InvalidCounter, client.inspectExternalAdoption(7));
+    client.pending_batch_bytes -= 1;
+    const saved_event_payload = client.pending_events.items[0].payload;
+    client.pending_events.items[0].payload = client.pending_batches.items[0].bytes;
+    client.pending_events.items[0].header.payload_len =
+        @intCast(client.pending_batches.items[0].bytes.len);
+    client.pending_event_bytes = client.pending_batches.items[0].bytes.len;
+    try std.testing.expectError(error.InvalidAlias, client.inspectExternalAdoption(7));
+    client.pending_events.items[0].payload = saved_event_payload;
+    client.pending_events.items[0].header.payload_len = @intCast(saved_event_payload.len);
+    client.pending_event_bytes = saved_event_payload.len;
+    var invalid_partial_bytes: std.ArrayListUnmanaged(u8) = .empty;
+    try invalid_partial_bytes.appendSlice(allocator, "partial");
+    client.partial_batch = .{
+        .stream_id = 7,
+        .is_snapshot = false,
+        .bytes = invalid_partial_bytes,
+        .chunk_count = 0,
+    };
+    try std.testing.expectError(error.InvalidPartial, client.inspectExternalAdoption(7));
+    client.partial_batch.?.bytes.deinit(allocator);
+    client.partial_batch = null;
+    var valid_partial_bytes: std.ArrayListUnmanaged(u8) = .empty;
+    try valid_partial_bytes.appendSlice(allocator, "partial");
+    client.partial_batch = .{
+        .stream_id = 7,
+        .is_snapshot = false,
+        .bytes = valid_partial_bytes,
+        .chunk_count = 1,
+    };
+
+    var inventory = try client.inspectExternalAdoption(7);
+    defer inventory.deinit();
+    try std.testing.expectEqual(@as(usize, 3), inventory.screen_source_count);
+    try std.testing.expectEqual(@as(usize, 1), inventory.event_count);
+
+    var plan: PreparedClientDisarm = .{};
+    defer plan.deinit();
+    try client.preflightExternalAdoption(&inventory, &plan);
+    try std.testing.expect(client.validateExternalAdoptionPlan(&plan));
+    var copied = plan;
+    try std.testing.expect(!client.validateExternalAdoptionPlan(&copied));
+    try std.testing.expectError(error.StaleClient, client.sealExternalAdoption(&copied));
+    client.pending_batch_bytes += 1;
+    try std.testing.expect(!client.validateExternalAdoptionPlan(&plan));
+    client.pending_batch_bytes -= 1;
+    try std.testing.expect(client.validateExternalAdoptionPlan(&plan));
+    const batch_capacity = client.pending_batches.capacity;
+    client.pending_batches.capacity = client.pending_batches.items.len - 1;
+    try std.testing.expect(!client.validateExternalAdoptionPlan(&plan));
+    client.pending_batches.capacity = batch_capacity;
+    try std.testing.expect(client.validateExternalAdoptionPlan(&plan));
+    const io_mode = client.io_mode;
+    client.io_mode = .blocking;
+    try std.testing.expect(!client.validateExternalAdoptionPlan(&plan));
+    client.io_mode = io_mode;
+    client.pending_outbound = .{
+        .frame = try allocator.dupe(u8, "pending"),
+        .stream_id = 7,
+    };
+    try std.testing.expect(!client.validateExternalAdoptionPlan(&plan));
+    client.clearPendingOutbound();
+    try std.testing.expect(client.validateExternalAdoptionPlan(&plan));
+
+    const fd_before = client.fd;
+    const parser_address = @intFromPtr(&client.parser);
+    try client.sealExternalAdoption(&plan);
+    client.commitExternalAdoption(&plan);
+    try std.testing.expectEqual(fd_before, client.fd);
+    try std.testing.expectEqual(parser_address, @intFromPtr(&client.parser));
+    try std.testing.expectEqual(ConnectionProfile.cli_attach, client.connection_profile.?);
+    try std.testing.expectEqual(@as(u64, 0), client.next_request_id);
+    try std.testing.expectEqual(@as(usize, 0), client.pending_batches.capacity);
+    try std.testing.expectEqual(@as(usize, 0), client.pending_stream.capacity);
+    try std.testing.expectEqual(@as(usize, 0), client.pending_events.capacity);
+    try std.testing.expect(client.partial_batch == null);
+    try std.testing.expect(plan.inventory == null);
+}
+
+test "external adoption validates inherited stream batches across every boundary" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+
+    var bad_fds: [2]c.fd_t = undefined;
+    try std.testing.expectEqual(
+        @as(c_int, 0),
+        c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &bad_fds),
+    );
+    defer _ = c.close(bad_fds[1]);
+    var bad = makeConnectedTestClient(allocator, bad_fds[0]);
+    defer bad.deinit();
+    try bad.enterExternalMode();
+    bad.ownership = .external_pump;
+    bad.connection_profile = .cli_attach;
+    bad.compatibility_profile = compatibility.profileForMajor(protocol.version_major).?;
+    const bad_delta = try allocator.dupe(u8, "d");
+    try bad.pending_stream.append(allocator, .{
+        .header = .{
+            .kind = .delta_chunk,
+            .stream_id = 7,
+            .payload_len = 1,
+        },
+        .payload = bad_delta,
+    });
+    const bad_snapshot = try allocator.dupe(u8, "s");
+    try bad.pending_stream.append(allocator, .{
+        .header = .{
+            .kind = .snapshot_chunk,
+            .stream_id = 7,
+            .payload_len = 1,
+            .flags = protocol.Flags.end_stream,
+        },
+        .payload = bad_snapshot,
+    });
+    bad.pending_stream_bytes = 2;
+    try std.testing.expectError(error.InvalidPartial, bad.inspectExternalAdoption(7));
+
+    var good_fds: [2]c.fd_t = undefined;
+    try std.testing.expectEqual(
+        @as(c_int, 0),
+        c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &good_fds),
+    );
+    defer _ = c.close(good_fds[1]);
+    var good = makeConnectedTestClient(allocator, good_fds[0]);
+    defer good.deinit();
+    try good.enterExternalMode();
+    good.ownership = .external_pump;
+    good.connection_profile = .cli_attach;
+    good.compatibility_profile = compatibility.profileForMajor(protocol.version_major).?;
+    good.partial_batch = .{
+        .stream_id = 7,
+        .is_snapshot = false,
+        .bytes = .empty,
+        .chunk_count = 1,
+    };
+    try good.partial_batch.?.bytes.appendSlice(allocator, "prefix");
+    const continuation = try allocator.dupe(u8, "tail");
+    try good.pending_stream.append(allocator, .{
+        .header = .{
+            .kind = .delta_chunk,
+            .stream_id = 7,
+            .payload_len = @intCast(continuation.len),
+            .flags = protocol.Flags.end_stream,
+        },
+        .payload = continuation,
+    });
+    const next_batch = try allocator.dupe(u8, "next");
+    try good.pending_stream.append(allocator, .{
+        .header = .{
+            .kind = .snapshot_chunk,
+            .stream_id = 7,
+            .payload_len = @intCast(next_batch.len),
+            .flags = protocol.Flags.end_stream,
+        },
+        .payload = next_batch,
+    });
+    good.pending_stream_bytes = continuation.len + next_batch.len;
+    var inventory = try good.inspectExternalAdoption(7);
+    defer inventory.deinit();
+    try std.testing.expectEqual(@as(usize, 3), inventory.screen_source_count);
+}
+
+test "external adoption owner alias validation stays n log n at every queue cap" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    var fds: [2]c.fd_t = undefined;
+    try std.testing.expectEqual(
+        @as(c_int, 0),
+        c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds),
+    );
+    defer _ = c.close(fds[1]);
+    var client = makeConnectedTestClient(allocator, fds[0]);
+    defer client.deinit();
+    try client.enterExternalMode();
+    client.ownership = .external_pump;
+    client.connection_profile = .cli_attach;
+    client.compatibility_profile = compatibility.profileForMajor(protocol.version_major).?;
+
+    try client.pending_batches.ensureTotalCapacityPrecise(
+        allocator,
+        protocol.max_client_screen_items,
+    );
+    for (0..protocol.max_client_screen_items) |_| {
+        const payload = try allocator.dupe(u8, "b");
+        client.pending_batches.appendAssumeCapacity(.{
+            .is_snapshot = false,
+            .stream_id = 7,
+            .bytes = payload,
+            .allocator = allocator,
+        });
+    }
+    try client.pending_stream.ensureTotalCapacityPrecise(
+        allocator,
+        protocol.max_client_screen_items,
+    );
+    for (0..protocol.max_client_screen_items) |_| {
+        const payload = try allocator.dupe(u8, "s");
+        client.pending_stream.appendAssumeCapacity(.{
+            .header = .{
+                .kind = .snapshot_chunk,
+                .stream_id = 7,
+                .payload_len = 1,
+                .flags = protocol.Flags.end_stream,
+            },
+            .payload = payload,
+        });
+    }
+    try client.pending_events.ensureTotalCapacityPrecise(allocator, max_pending_event_count);
+    for (0..max_pending_event_count) |_| {
+        const payload = try allocator.dupe(u8, "e");
+        client.pending_events.appendAssumeCapacity(.{
+            .header = .{
+                .kind = .event,
+                .stream_id = 7,
+                .payload_len = 1,
+            },
+            .payload = payload,
+        });
+    }
+
+    const range_count = try externalOwnerRangeCount(&client);
+    const comparisons = try validateExternalOwnerRangesAgainst(&client, null);
+    try std.testing.expect(comparisons <= range_count * 64);
+}
+
+fn checkExternalAdoptionAllocation(allocator: std.mem.Allocator) !void {
+    if (builtin.os.tag != .macos) return;
+    var fds: [2]c.fd_t = undefined;
+    try std.testing.expectEqual(
+        @as(c_int, 0),
+        c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds),
+    );
+    defer _ = c.close(fds[1]);
+    var client = makeConnectedTestClient(allocator, fds[0]);
+    defer client.deinit();
+    try client.enterExternalMode();
+    client.ownership = .external_pump;
+    client.connection_profile = .cli_attach;
+    client.compatibility_profile = compatibility.profileForMajor(protocol.version_major).?;
+    var inventory = try client.inspectExternalAdoption(7);
+    defer inventory.deinit();
+    var plan: PreparedClientDisarm = .{};
+    defer plan.deinit();
+    try client.preflightExternalAdoption(&inventory, &plan);
+    try std.testing.expect(client.validateExternalAdoptionPlan(&plan));
+}
+
+test "external adoption prepare is reusable at every allocation failure" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        checkExternalAdoptionAllocation,
+        .{},
+    );
 }
 
 test "external mode failClosed reclaims queued frames exactly once" {

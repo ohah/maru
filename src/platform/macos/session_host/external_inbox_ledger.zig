@@ -134,7 +134,13 @@ const PlanLifecycle = enum {
 
 pub const PreparedSeedPlan = struct {
     allocator: std.mem.Allocator = std.heap.page_allocator,
+    sealed_allocator: std.mem.Allocator = std.heap.page_allocator,
     entries: []PlannedSeed = &.{},
+    cleanup_entries: []PlannedSeed = &.{},
+    entries_addr: usize = 0,
+    entries_len: usize = 0,
+    allocator_ptr_addr: usize = 0,
+    allocator_vtable_addr: usize = 0,
     saved_self_addr: usize = 0,
     ledger_addr: usize = 0,
     payload_wrappers_addr: usize = 0,
@@ -155,15 +161,11 @@ pub const PreparedSeedPlan = struct {
         if (out.lifecycle != .empty) return error.InvalidPlan;
         if (ledger.draining_or_drained) return error.Drained;
         if (ledger.invariant_failed or ledger.planning_disabled) return error.PlanningDisabled;
-        if (!ledger.hasValidAccounting()) {
-            ledger.invariant_failed = true;
-            ledger.planning_disabled = true;
-            return error.InvariantFailure;
-        }
-        if (ledger.mutation_epoch == std.math.maxInt(u64)) {
-            ledger.planning_disabled = true;
-            return error.EpochExhausted;
-        }
+        // Planning is a read-only transaction boundary. Sticky fail-close state belongs to the
+        // authority mutator/commit path; changing it here would make a rejected c2 prepare mutate
+        // the target ledger before the outer transaction has a verdict.
+        if (!ledger.hasValidAccounting()) return error.InvariantFailure;
+        if (ledger.mutation_epoch == std.math.maxInt(u64)) return error.EpochExhausted;
         if (specs.len != payloads.len) return error.InvalidPlan;
         if (specs.len > max_items - ledger.charged_items) return error.ItemCapExceeded;
         try validateInitAliases(ledger, specs, payloads);
@@ -218,7 +220,13 @@ pub const PreparedSeedPlan = struct {
 
         out.* = .{
             .allocator = allocator,
+            .sealed_allocator = allocator,
             .entries = entries,
+            .cleanup_entries = entries,
+            .entries_addr = if (entries.len == 0) 0 else @intFromPtr(entries.ptr),
+            .entries_len = entries.len,
+            .allocator_ptr_addr = @intFromPtr(allocator.ptr),
+            .allocator_vtable_addr = @intFromPtr(allocator.vtable),
             .saved_self_addr = @intFromPtr(out),
             .ledger_addr = @intFromPtr(ledger),
             .payload_wrappers_addr = if (payloads.len == 0) 0 else @intFromPtr(payloads.ptr),
@@ -233,24 +241,140 @@ pub const PreparedSeedPlan = struct {
 
     pub fn deinit(self: *PreparedSeedPlan) void {
         if (self.saved_self_addr != 0 and self.saved_self_addr != @intFromPtr(self)) return;
-        if (self.lifecycle == .prepared) {
-            self.allocator.free(self.entries);
-            self.entries = &.{};
-            self.lifecycle = .aborted;
-        }
+        if (self.isCommitted()) return;
+        const entries = self.canonicalCleanupEntries() orelse return;
+        const allocator = self.canonicalCleanupAllocator() orelse return;
+        allocator.free(entries);
+        self.entries = &.{};
+        self.cleanup_entries = &.{};
+        self.entries_addr = 0;
+        self.entries_len = 0;
+        self.lifecycle = .aborted;
+    }
+
+    /// Exact heap backing needed for `count` entries, without exposing `PlannedSeed`.
+    pub fn plannedMetadataBytes(count: usize) error{ArithmeticOverflow}!usize {
+        return std.math.mul(usize, count, @sizeOf(PlannedSeed)) catch
+            return error.ArithmeticOverflow;
+    }
+
+    /// True only for the ownership-free default state accepted by an outer discard plan.
+    pub fn isCanonicalEmpty(self: *const PreparedSeedPlan) bool {
+        return self.entries.len == 0 and
+            self.cleanup_entries.len == 0 and
+            self.entries_addr == 0 and
+            self.entries_len == 0 and
+            self.saved_self_addr == 0 and
+            self.ledger_addr == 0 and
+            self.payload_wrappers_addr == 0 and
+            self.expected_mutation_epoch == 0 and
+            self.expected_next_generation == 0 and
+            !self.expected_generation_exhausted and
+            self.expected_next_slot_hint == 0 and
+            self.total_bytes == 0 and
+            self.lifecycle == .empty;
+    }
+
+    pub fn isCommitted(self: *const PreparedSeedPlan) bool {
+        return self.lifecycle == .committed and
+            self.entries.len == 0 and
+            self.cleanup_entries.len == 0 and
+            self.entries_addr == 0 and
+            self.entries_len == 0;
+    }
+
+    /// Read-only validation of the stable ledger and payload-wrapper inventory captured at prepare.
+    pub fn validateBinding(
+        self: *const PreparedSeedPlan,
+        ledger: *const ExternalInboxLedger,
+        payload_wrappers: []const OwnedPayload,
+        count: usize,
+    ) bool {
+        if (!self.isStablePrepared() or self.ledger_addr != @intFromPtr(ledger))
+            return false;
+        if (self.entries.len != count or payload_wrappers.len != count) return false;
+        const wrappers_addr = if (payload_wrappers.len == 0)
+            0
+        else
+            @intFromPtr(payload_wrappers.ptr);
+        if (self.payload_wrappers_addr != wrappers_addr) return false;
+        for (self.entries, payload_wrappers) |entry, payload|
+            if (!std.meta.eql(entry.payload, fingerprint(payload))) return false;
+        return true;
     }
 
     fn finishCommit(self: *PreparedSeedPlan) void {
-        self.allocator.free(self.entries);
+        std.debug.assert(self.hasSealedEntries());
+        const entries = self.canonicalCleanupEntries() orelse unreachable;
+        const allocator = self.canonicalCleanupAllocator() orelse unreachable;
+        allocator.free(entries);
         self.entries = &.{};
+        self.cleanup_entries = &.{};
+        self.entries_addr = 0;
+        self.entries_len = 0;
         self.lifecycle = .committed;
     }
 
     fn isStablePrepared(self: *const PreparedSeedPlan) bool {
         return self.lifecycle == .prepared and
-            self.saved_self_addr == @intFromPtr(self);
+            self.saved_self_addr == @intFromPtr(self) and
+            self.hasSealedEntries();
+    }
+
+    fn hasSealedEntries(self: *const PreparedSeedPlan) bool {
+        const address = if (self.entries.len == 0) 0 else @intFromPtr(self.entries.ptr);
+        return std.meta.eql(self.allocator, self.sealed_allocator) and
+            self.entries_addr == address and
+            self.entries_len == self.entries.len and
+            sameSlice(PlannedSeed, self.entries, self.cleanup_entries) and
+            self.canonicalCleanupAllocator() != null;
+    }
+
+    fn canonicalCleanupEntries(self: *const PreparedSeedPlan) ?[]PlannedSeed {
+        if (sameSlice(PlannedSeed, self.entries, self.cleanup_entries))
+            return self.entries;
+        if (sliceAddress(PlannedSeed, self.entries) == self.entries_addr and
+            self.entries.len == self.entries_len)
+            return self.entries;
+        if (sliceAddress(PlannedSeed, self.cleanup_entries) == self.entries_addr and
+            self.cleanup_entries.len == self.entries_len)
+            return self.cleanup_entries;
+        return null;
+    }
+
+    fn canonicalCleanupAllocator(self: *const PreparedSeedPlan) ?std.mem.Allocator {
+        if (std.meta.eql(self.allocator, self.sealed_allocator))
+            return self.allocator;
+        if (allocatorMatchesSeal(
+            self.allocator,
+            self.allocator_ptr_addr,
+            self.allocator_vtable_addr,
+        )) return self.allocator;
+        if (allocatorMatchesSeal(
+            self.sealed_allocator,
+            self.allocator_ptr_addr,
+            self.allocator_vtable_addr,
+        )) return self.sealed_allocator;
+        return null;
     }
 };
+
+fn sliceAddress(comptime T: type, slice: []const T) usize {
+    return if (slice.len == 0) 0 else @intFromPtr(slice.ptr);
+}
+
+fn sameSlice(comptime T: type, a: []const T, b: []const T) bool {
+    return a.len == b.len and sliceAddress(T, a) == sliceAddress(T, b);
+}
+
+fn allocatorMatchesSeal(
+    allocator: std.mem.Allocator,
+    ptr_addr: usize,
+    vtable_addr: usize,
+) bool {
+    return @intFromPtr(allocator.ptr) == ptr_addr and
+        @intFromPtr(allocator.vtable) == vtable_addr;
+}
 
 pub const PlanError = std.mem.Allocator.Error || error{
     ArithmeticOverflow,
@@ -313,6 +437,22 @@ pub const DrainReport = struct {
     drained_active_count: usize,
     drained_bytes: usize,
     had_sticky_invariant: bool,
+};
+
+/// Immutable projection for outer transaction seals. Slot storage remains private; callers can
+/// prove a fresh target and exact aggregate accounting without gaining a second mutation path.
+pub const AccountingView = struct {
+    charged_bytes: usize,
+    charged_items: usize,
+    mutation_epoch: u64,
+    next_generation: u64,
+    next_slot_hint: usize,
+    generation_exhausted: bool,
+    planning_disabled: bool,
+    invariant_failed: bool,
+    draining_or_drained: bool,
+    valid: bool,
+    pristine_zero: bool,
 };
 
 const Slot = struct {
@@ -705,6 +845,23 @@ pub const ExternalInboxLedger = struct {
         }
     }
 
+    pub fn accountingView(self: *const ExternalInboxLedger) AccountingView {
+        const valid = self.hasValidAccounting();
+        return .{
+            .charged_bytes = self.charged_bytes,
+            .charged_items = self.charged_items,
+            .mutation_epoch = self.mutation_epoch,
+            .next_generation = self.next_generation,
+            .next_slot_hint = self.next_slot_hint,
+            .generation_exhausted = self.generation_exhausted,
+            .planning_disabled = self.planning_disabled,
+            .invariant_failed = self.invariant_failed,
+            .draining_or_drained = self.draining_or_drained,
+            .valid = valid,
+            .pristine_zero = valid and self.hasPristineZeroState(),
+        };
+    }
+
     fn ensureAuthorityMutation(self: *ExternalInboxLedger) error{
         EpochExhausted,
         InvariantFailure,
@@ -783,6 +940,21 @@ pub const ExternalInboxLedger = struct {
             }
         }
         return items == self.charged_items and bytes == self.charged_bytes;
+    }
+
+    fn hasPristineZeroState(self: *const ExternalInboxLedger) bool {
+        if (self.charged_bytes != 0 or self.charged_items != 0 or
+            self.next_slot_hint != 0 or self.next_generation != 1 or
+            self.generation_exhausted or self.mutation_epoch != 0 or
+            self.planning_disabled or self.invariant_failed or self.draining_or_drained)
+            return false;
+        for (self.slots) |slot| {
+            if (slot.active or slot.generation != 0 or
+                slot.payload.allocation_ptr != null or slot.payload.logical_len != 0 or
+                !std.meta.eql(slot.semantic, inactiveSemantic()))
+                return false;
+        }
+        return true;
     }
 
     fn resolveActive(self: *ExternalInboxLedger, token: Token) InvariantError!*Slot {
@@ -1175,6 +1347,152 @@ test "zero seed transaction rejects accounting corruption" {
     );
     try std.testing.expect(ledger.invariant_failed);
     _ = ledger.drainAll();
+}
+
+test "seed planning preflight preserves corrupt accounting byte for byte" {
+    const allocator = std.testing.allocator;
+    var ledger: ExternalInboxLedger = .{ .charged_items = 1 };
+    const before = ledger;
+    var plan: PreparedSeedPlan = .{};
+    defer plan.deinit();
+
+    try std.testing.expectError(
+        error.InvariantFailure,
+        PreparedSeedPlan.initInPlace(&plan, allocator, &ledger, &.{}, &.{}),
+    );
+    try std.testing.expectEqualSlices(
+        u8,
+        std.mem.asBytes(&before),
+        std.mem.asBytes(&ledger),
+    );
+    try std.testing.expectEqual(PlanLifecycle.empty, plan.lifecycle);
+}
+
+test "seed planning preflight preserves exhausted epoch byte for byte" {
+    const allocator = std.testing.allocator;
+    var ledger: ExternalInboxLedger = .{ .mutation_epoch = std.math.maxInt(u64) };
+    const before = ledger;
+    var plan: PreparedSeedPlan = .{};
+    defer plan.deinit();
+
+    try std.testing.expectError(
+        error.EpochExhausted,
+        PreparedSeedPlan.initInPlace(&plan, allocator, &ledger, &.{}, &.{}),
+    );
+    try std.testing.expectEqualSlices(
+        u8,
+        std.mem.asBytes(&before),
+        std.mem.asBytes(&ledger),
+    );
+    try std.testing.expectEqual(PlanLifecycle.empty, plan.lifecycle);
+}
+
+test "seed plan reports exact private metadata backing bytes" {
+    try std.testing.expectEqual(
+        2 * @sizeOf(PlannedSeed),
+        try PreparedSeedPlan.plannedMetadataBytes(2),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        try PreparedSeedPlan.plannedMetadataBytes(0),
+    );
+    try std.testing.expectError(
+        error.ArithmeticOverflow,
+        PreparedSeedPlan.plannedMetadataBytes(std.math.maxInt(usize)),
+    );
+}
+
+test "seed plan public projections preserve empty and binding opacity" {
+    const allocator = std.testing.allocator;
+    const empty: PreparedSeedPlan = .{};
+    try std.testing.expect(empty.isCanonicalEmpty());
+
+    var noncanonical_empty: PreparedSeedPlan = .{ .total_bytes = 1 };
+    try std.testing.expect(!noncanonical_empty.isCanonicalEmpty());
+    noncanonical_empty = .{ .saved_self_addr = 1 };
+    try std.testing.expect(!noncanonical_empty.isCanonicalEmpty());
+
+    var ledger: ExternalInboxLedger = .{};
+    var payloads = [_]OwnedPayload{try owned(allocator, "x")};
+    defer payloads[0].deinit();
+    const specs = [_]SeedSpec{.{
+        .semantic = .{ .completed = leaseSemantic(7, false) },
+        .logical_len = 1,
+    }};
+    var plan: PreparedSeedPlan = .{};
+    defer plan.deinit();
+    try PreparedSeedPlan.initInPlace(&plan, allocator, &ledger, &specs, &payloads);
+
+    try std.testing.expect(!plan.isCanonicalEmpty());
+    try std.testing.expect(plan.validateBinding(&ledger, &payloads, 1));
+    try std.testing.expect(!plan.validateBinding(&ledger, &payloads, 0));
+    try std.testing.expect(!plan.validateBinding(&ledger, &.{}, 1));
+    var copied_payloads = payloads;
+    try std.testing.expect(!plan.validateBinding(&ledger, &copied_payloads, 1));
+    var other_ledger: ExternalInboxLedger = .{};
+    try std.testing.expect(!plan.validateBinding(&other_ledger, &payloads, 1));
+    var copied = plan;
+    try std.testing.expect(!copied.validateBinding(&ledger, &payloads, 1));
+    const plan_allocator = plan.allocator;
+    plan.allocator = std.heap.page_allocator;
+    try std.testing.expect(!plan.validateBinding(&ledger, &payloads, 1));
+    var token_output: [1]Token = undefined;
+    try std.testing.expectError(
+        error.InvalidPlan,
+        ledger.commitSeeds(&plan, &payloads, &token_output),
+    );
+    plan.allocator = plan_allocator;
+    const entries_addr = plan.entries_addr;
+    plan.entries_addr = 0;
+    try std.testing.expect(!plan.validateBinding(&ledger, &payloads, 1));
+    plan.entries_addr = entries_addr;
+    try std.testing.expect(!plan.isCanonicalEmpty());
+    try std.testing.expect(plan.validateBinding(&ledger, &payloads, 1));
+}
+
+test "zero seed plan binding is stable but not canonical empty" {
+    const allocator = std.testing.allocator;
+    var ledger: ExternalInboxLedger = .{};
+    var plan: PreparedSeedPlan = .{};
+    defer plan.deinit();
+    try PreparedSeedPlan.initInPlace(&plan, allocator, &ledger, &.{}, &.{});
+
+    try std.testing.expect(!plan.isCanonicalEmpty());
+    try std.testing.expect(plan.validateBinding(&ledger, &.{}, 0));
+}
+
+test "accounting view is read only and distinguishes pristine from merely empty" {
+    const allocator = std.testing.allocator;
+    var ledger: ExternalInboxLedger = .{};
+    const pristine_before = ledger;
+    const pristine = ledger.accountingView();
+    try std.testing.expect(pristine.valid);
+    try std.testing.expect(pristine.pristine_zero);
+    try std.testing.expectEqualSlices(
+        u8,
+        std.mem.asBytes(&pristine_before),
+        std.mem.asBytes(&ledger),
+    );
+
+    var payload = OwnedPayload.empty(allocator);
+    const token = try ledger.reserveLease(leaseSemantic(7, false), &payload);
+    try ledger.releaseLease(token);
+    const merely_empty = ledger.accountingView();
+    try std.testing.expect(merely_empty.valid);
+    try std.testing.expect(!merely_empty.pristine_zero);
+    try std.testing.expectEqual(@as(usize, 0), merely_empty.charged_items);
+    try std.testing.expectEqual(@as(usize, 0), merely_empty.charged_bytes);
+
+    var corrupt: ExternalInboxLedger = .{ .charged_items = 1 };
+    const corrupt_before = corrupt;
+    const invalid = corrupt.accountingView();
+    try std.testing.expect(!invalid.valid);
+    try std.testing.expect(!invalid.pristine_zero);
+    try std.testing.expectEqualSlices(
+        u8,
+        std.mem.asBytes(&corrupt_before),
+        std.mem.asBytes(&corrupt),
+    );
 }
 
 test "seed output alias and wrong count preserve every owner" {

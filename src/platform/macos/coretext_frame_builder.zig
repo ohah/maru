@@ -775,54 +775,45 @@ pub fn buildPaneGripDrawList(
     };
 }
 
-/// FP3 파일 도크 크롬. 0행은 고정폭 우선 탭(접기 버튼은 titlebar 띠 우측 dock 토글로 이동), 1행은 breadcrumb와 모드 선택이다.
-/// 탭은 고정폭(default_tab_cols)이고 넘치면 scroll_cols만큼 가로 스크롤한다(session/dock_layout.tabCellLayout).
-pub fn buildFileDockChromeDrawList(
+/// FP16 파일 Term 헤더 밴드(pane 탭 바 **아래** 한 줄). `부모 / 파일` breadcrumb + kind별 모드 선택기
+/// (`읽기 | 소스`) + dirty ● + 외부변경 ! 를 셀로 그린다. 옛 도크 chrome 빌더의 1행을 그대로 물려받았고,
+/// 0행(도크 탭)은 pane 탭 바가 대신하므로 사라졌다. 배치 권위는 `dock_layout.headerCellLayout` 하나다 —
+/// 렌더·hit-test가 같은 cell 범위를 공유한다.
+pub fn buildFilePanelHeaderDrawList(
     allocator: std.mem.Allocator,
-    titles: []const []const u8,
-    active: ?usize,
-    hovered: ?usize,
-    active_path: []const u8,
-    active_kind: dock_panel.EntryKind,
-    active_mode: dock_panel.Mode,
-    active_dirty: bool,
-    active_external_change: bool,
+    path: []const u8,
+    kind: dock_panel.EntryKind,
+    mode: dock_panel.Mode,
+    dirty: bool,
+    external_change: bool,
     cols: u16,
-    scroll_cols: u32,
     fg: terminal.Color,
     active_fg: terminal.Color,
 ) !renderer.DrawList {
     var cells: std.ArrayList(renderer.DrawCell) = .empty;
     errdefer cells.deinit(allocator);
-    if (cols >= 1 and titles.len > 0) {
-        const tab_cols: u16 = cols;
-        for (titles, 0..) |title, i| {
-            // 스크롤아웃된 탭은 null → continue(좌측 잘림 이후에도 보이는 탭이 나오므로 break 불가).
-            const tab = dock_layout.tabCellLayout(tab_cols, titles.len, i, scroll_cols) orelse continue;
-            const style: terminal.Style = if (active != null and active.? == i) .{ .foreground = active_fg, .bold = true } else .{ .foreground = fg };
-            if (tab.title_end > tab.title_start)
-                _ = try appendEllipsizedTitle(allocator, &cells, title, 0, tab.title_start, tab.title_end, style, false, .head);
-            if ((active != null and active.? == i) or (hovered != null and hovered.? == i))
-                try cells.append(allocator, .{ .row = 0, .col = tab.close_col, .codepoint = 0x00D7, .width = 1, .style = style });
-        }
-        if (dock_layout.headerCellLayout(cols, active_dirty, active_external_change)) |header| {
+    if (cols >= 1) {
+        if (dock_layout.headerCellLayout(cols, dirty, external_change)) |header| {
             if (header.control_start > 1)
-                _ = try appendEllipsizedTitle(allocator, &cells, active_path, 1, 1, header.control_start, .{ .foreground = fg }, false, .head);
-            for (dock_layout.modesForKind(active_kind)) |descriptor| {
-                const range = dock_layout.headerModeCellRange(header, active_kind, descriptor.mode) orelse continue;
+                _ = try appendEllipsizedTitle(allocator, &cells, path, 0, 1, header.control_start, .{ .foreground = fg }, false, .head);
+            for (dock_layout.modesForKind(kind)) |descriptor| {
+                const range = dock_layout.headerModeCellRange(header, kind, descriptor.mode) orelse continue;
                 if (range.end > range.start + 1)
-                    _ = try appendEllipsizedTitle(allocator, &cells, descriptor.label, 1, range.start + 1, range.end, .{ .foreground = active_fg, .bold = active_mode == descriptor.mode }, false, .head);
+                    _ = try appendEllipsizedTitle(allocator, &cells, descriptor.label, 0, range.start + 1, range.end, .{
+                        .foreground = active_fg,
+                        .bold = descriptor.mode == mode,
+                    }, false, .head);
             }
             if (header.dirty_col) |col|
-                try cells.append(allocator, .{ .row = 1, .col = col, .codepoint = 0x25CF, .width = 1, .style = .{ .foreground = active_fg } }); // ●
+                try cells.append(allocator, .{ .row = 0, .col = col, .codepoint = 0x25CF, .width = 1, .style = .{ .foreground = active_fg } });
             if (header.conflict_col) |col|
-                try cells.append(allocator, .{ .row = 1, .col = col, .codepoint = '!', .width = 1, .style = .{ .foreground = active_fg, .bold = true } });
+                try cells.append(allocator, .{ .row = 0, .col = col, .codepoint = '!', .width = 1, .style = .{ .foreground = active_fg } });
         }
     }
     return .{
-        .size = .{ .cols = @max(cols, 1), .rows = 2 },
+        .size = .{ .cols = @max(cols, 1), .rows = 1 },
         .cursor = .{ .row = 0, .col = 0, .visible = false },
-        .dirty = .{ .start_row = 0, .end_row = 1 },
+        .dirty = .{ .start_row = 0, .end_row = 0 },
         .cells = try cells.toOwnedSlice(allocator),
         .overlays = try allocator.alloc(renderer.DrawOverlay, 0),
     };
@@ -2085,37 +2076,25 @@ test "long titles are ellipsized with U+2026 at the last cell; short titles are 
     }
 }
 
-test "file dock header draws source mode and dirty marker in the reserved control band" {
+test "file panel header draws source mode and dirty marker in the reserved control band" {
     const allocator = std.testing.allocator;
     const dim: terminal.Color = .{ .rgb = .{ .r = 0x70, .g = 0x70, .b = 0x70 } };
     const bright: terminal.Color = .{ .rgb = .{ .r = 0xFF, .g = 0xFF, .b = 0xFF } };
-    const titles = [_][]const u8{"doc.md"};
-    var dl = try buildFileDockChromeDrawList(
-        allocator,
-        &titles,
-        0,
-        null,
-        "/tmp/doc.md",
-        .markdown,
-        .source_edit,
-        true,
-        false,
-        48,
-        0,
-        dim,
-        bright,
-    );
+    var dl = try buildFilePanelHeaderDrawList(allocator, "/tmp/doc.md", .markdown, .source_edit, true, false, 48, dim, bright);
     defer dl.deinit(allocator);
+    try std.testing.expectEqual(@as(u16, 1), dl.size.rows);
     var saw_dirty = false;
-    var saw_close = false;
     var saw_mode_text = false;
+    var saw_path = false;
     for (dl.cells) |cell| {
-        if (cell.row == 0 and cell.codepoint == 0x00D7) saw_close = true;
-        if (cell.row != 1) continue;
+        try std.testing.expectEqual(@as(u16, 0), cell.row); // 밴드는 한 줄이다
         if (cell.codepoint == 0x25CF and cell.col == 46) saw_dirty = true;
-        if (cell.col >= 30 and cell.codepoint != 0x25CF) saw_mode_text = true;
+        if (cell.codepoint == '\u{c18c}') saw_mode_text = true; // "소스"의 첫 글자
+        if (cell.codepoint == 'd' or cell.codepoint == 'o') saw_path = true; // breadcrumb 텍스트
     }
-    try std.testing.expect(saw_dirty and saw_mode_text and saw_close);
+    try std.testing.expect(saw_dirty);
+    try std.testing.expect(saw_mode_text);
+    try std.testing.expect(saw_path);
 }
 
 test "file tree draw list clips to visible rows and marks active dirty conflicts" {

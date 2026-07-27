@@ -44665,7 +44665,7 @@ test "FP9 closing a group's final entry collapses the leaf and transfers focus t
     try std.testing.expect(session.dockVisible());
 }
 
-test "FP9 empty model root click stays workspace-owned while tree history keeps dock visible" {
+test "FP9 파일을 다 닫으면 입력은 workspace로 돌아가고 트리 history가 도크를 유지한다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
@@ -44688,10 +44688,9 @@ test "FP9 empty model root click stays workspace-owned while tree history keeps 
     session.activePane().activeTerm().rt.terminated = true;
     session.activePane().activeTerm().surface.process_state = .exited;
     const terms_before = session.activePane().terms.items.len;
-    // FP16: 도크에 editor leaf가 없다. 파일을 다 닫은 뒤 남는 건 탐색기 뿐이고, 그 빈 트리 본문을 눌러도
-    // 입력 소유는 workspace에 남아야 한다(옛 "빈 leaf 클릭" 시나리오의 자리).
-    const dg = session.dockGeometry();
-    session.mouse(1, @floatFromInt(dg.tree_content.x + dg.tree_content.w / 2), @floatFromInt(dg.tree_content.y + dg.tree_content.h -| 2), 0, 0);
+    // FP16: 도크에 editor leaf가 없어 "빈 leaf 클릭"이라는 시나리오 자체가 사라졌다(도크 안 클릭은 이제
+    // 전부 탐색기 클릭이고, 그건 의도대로 트리에 포커스를 준다). 남은 주제는 **파일을 다 닫은 뒤**의 상태다:
+    // 입력은 workspace로 돌아가고, 트리 history가 남아 도크는 계속 보인다.
     try std.testing.expect(session.focus_owner == .workspace);
     try std.testing.expect(session.pending_dock_focus == null);
     try std.testing.expect(session.inputFocus() == .terminal);

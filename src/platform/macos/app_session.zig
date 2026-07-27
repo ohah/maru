@@ -3830,6 +3830,35 @@ pub const AppSession = struct {
     /// pane 통째 드래그 손잡이), `label_cols`(grip 뒤 custom_name 라벨 폭, 이름 없으면 0), `tabs`(grip+라벨 뗀 탭
     /// 영역: barMetrics·탭 제목·활성 밴드). 좌측 세그먼트 = `[full.x, tabs.x)` = grip + 라벨. 모든 hit-test/렌더가 이
     /// 한 함수를 거쳐 "보이는 == 클릭되는"을 유지한다. 바가 없거나 cell 미상이면 null. 좁은 바(min_tab 미보장)면 grip 0.
+    /// pane 탭 바 **바로 아래** 한 줄 — browser 주소창 밴드와 파일 헤더 밴드가 공유하는 rect다.
+    /// `collectWebSurfaces`의 `inset.top = bar_h + addr_h`와 정확히 abut한다(밴드가 웹뷰를 덮지 않는다).
+    fn paneBandRect(bar: PaneBar) maru.session.SplitRect {
+        return .{ .x = bar.full.x, .y = bar.full.y + bar.full.h, .w = bar.full.w, .h = bar.full.h };
+    }
+
+    const FileHeaderBand = struct { band: maru.session.SplitRect, entry: *dock_panel.Entry };
+
+    /// leaf rect를 이미 든 호출자(렌더·hit-test 루프)가 아닌 곳에서 쓰는 조회판 — 활성 탭에서 그 pane의
+    /// leaf rect를 찾아 같은 밴드를 준다.
+    fn fileHeaderBandForPaneLookup(self: *AppSession, pane: *Pane) ?FileHeaderBand {
+        var leaf_rects: std.ArrayList(PaneTree.LeafRect) = .empty;
+        defer leaf_rects.deinit(self.allocator);
+        self.activeTabLeafRects(self.allocator, self.termRect(), &leaf_rects) catch return null;
+        for (leaf_rects.items) |lr| {
+            if (lr.leaf == pane) return self.fileHeaderBandForPane(pane, lr.rect);
+        }
+        return null;
+    }
+
+    /// 그 pane의 활성 Term이 파일이면 헤더 밴드 rect를 준다(아니면 null). 렌더와 hit-test의 단일 출처다.
+    fn fileHeaderBandForPane(self: *AppSession, pane: *Pane, rect: maru.session.SplitRect) ?FileHeaderBand {
+        if (pane.terms.items.len == 0) return null;
+        const entry = pane.activeTerm().file_entry orelse return null;
+        const bar = self.paneBar(rect, pane) orelse return null;
+        if (bar.full.h == 0) return null;
+        return .{ .band = paneBandRect(bar), .entry = entry };
+    }
+
     const PaneBar = struct { full: maru.session.SplitRect, tabs: maru.session.SplitRect, label_cols: u32, grip_cols: u32 };
     fn paneBar(self: *const AppSession, rect: maru.session.SplitRect, pane: *Pane) ?PaneBar {
         const full = self.paneBarRect(rect) orelse return null;
@@ -13593,6 +13622,15 @@ pub const AppSession = struct {
         return (self.fileEntryForSurfaceId(surface_id) orelse return null).mode;
     }
 
+    /// 헤더 밴드에서 mode를 고른다. 허용되지 않는 조합(§2.2 `Mode.allowedFor`)이나 무변화는 무동작이고,
+    /// 바뀌면 shell에 한 번 전달할 one-shot을 세운다(`takeFilePanelModeAction`).
+    fn setFilePanelMode(self: *AppSession, entry: *dock_panel.Entry, mode: dock_panel.Mode) void {
+        if (entry.mode == mode or !mode.allowedFor(entry.kind)) return;
+        entry.mode = mode;
+        self.file_panel_mode_pending = entry.surface_id;
+        self.file_tree_rows_dirty = true;
+    }
+
     pub fn takeFilePanelModeAction(self: *AppSession) ?struct { surface_id: u64, mode: dock_panel.Mode } {
         const surface_id = self.file_panel_mode_pending orelse return null;
         self.file_panel_mode_pending = null;
@@ -14132,7 +14170,9 @@ pub const AppSession = struct {
                     // 루프가 그 밴드에 배경 quad + URL 셀을 그린다(밴드 y = [bar_h, bar_h+addr_h]가 웹뷰 top과 정확히 abut).
                     // addr_h는 탭 바 높이(paneBarHeightPx) 재사용 — 단일 소스, 별도 상수 없음. markdown web Term은 주소창이
                     // 없어 top=bar_h 유지(byte-identical). bar_h==0(chrome_minimal)이면 addr_h도 0이라 밴드 없음(탭 바와 동조).
-                    const addr_h: u32 = if (isBrowserTerm(term)) bar_h else 0;
+                    // FP16d: 파일 Term도 탭 바 아래 헤더 밴드(breadcrumb + 모드 선택기)를 갖는다 — browser의
+                    // 주소창 밴드와 **같은 경로**로 top inset을 한 줄 더 내린다(§3.1).
+                    const addr_h: u32 = if (isBrowserTerm(term) or term.file_entry != null) bar_h else 0;
                     var inset: web_panel_layout.ChromeInset = .{ .top = bar_h + addr_h };
                     var seam_edges: u8 = 0;
                     if (seam > 0 and lr.rect.x > tr.x) {
@@ -19573,6 +19613,32 @@ pub const AppSession = struct {
                     //     세워 Swift가 goBack/goForward/reload를 실행하게 하고, URL 존이면 편집 진입(현재 nav URL 시드). 어느 쪽이든
                     //     클릭을 소비한다(탭 바보다 뒤·divider/pane 선택보다 앞 — 밴드 클릭이 아래 터미널/웹뷰로 새지 않게). **편집
                     //     중에도 버튼 클릭은 nav action**(편집 재진입은 URL 존 클릭만). 편집 중 URL 존 재클릭은 같은 대상 재진입 skip.
+                    // ①a-2) FP16d 파일 헤더 밴드 클릭 → 모드 선택기/충돌 표식. 렌더와 같은 rect·같은 cell 권위
+                    //       (`dock_layout.headerCellLayout`)를 써 보이는 구간과 눌리는 구간이 일치한다. 충돌 `!`을
+                    //       mode 토글보다 **먼저** 검사해, 표식을 누르면 편집 모드가 바뀌는 대신 disk reload 확인으로 간다.
+                    if (self.fileHeaderBandForPane(lr.leaf, lr.rect)) |band| {
+                        if (layout_math.pointInRect(x_px, y_px, band.band)) {
+                            _ = self.focusPaneByPtr(lr.leaf);
+                            const entry = band.entry;
+                            if (entry.external_change) {
+                                if (dock_layout.headerConflictRect(band.band, self.cell_width_px, entry.dirty)) |r| {
+                                    if (layout_math.pointInRect(x_px, y_px, r)) {
+                                        self.requestFileConflictReload(entry.surface_id);
+                                        self.drag_autoscroll = 0;
+                                        self.mouse_drag_selecting = false;
+                                        return;
+                                    }
+                                }
+                            }
+                            if (dock_layout.headerModeAt(band.band, self.cell_width_px, entry.kind, entry.dirty, entry.external_change, x_px, y_px)) |mode| {
+                                self.setFilePanelMode(entry, mode);
+                            }
+                            self.drag_autoscroll = 0;
+                            self.mouse_drag_selecting = false;
+                            self.metal_dirty = true;
+                            return;
+                        }
+                    }
                     const addr_at = lr.leaf.active_term;
                     if (addr_at < lr.leaf.terms.items.len) {
                         const addr_term = lr.leaf.terms.items[addr_at];
@@ -25297,6 +25363,29 @@ pub const AppSession = struct {
                     //     bar_h+addr_h로 늘려 WKWebView 본문을 이 밴드 아래로 내리므로([[active-surface-render-path-trap]]),
                     //     밴드는 chrome 영역이고 배경 quad가 터미널/웹뷰 콘텐츠를 덮지 않는다(밴드 = [full.y+bar_h, +2·bar_h]
                     //     = inset.top과 정확히 abut). markdown web/터미널 탭은 밴드 없음(skip). 편집·버튼은 7e-2/7e-3.
+                    // 1c-0) FP16d 파일 헤더 밴드 — 활성 탭이 파일 Term이면 같은 밴드 자리에 breadcrumb +
+                    //       모드 선택기를 그린다(§3.1). browser 주소창 밴드와 상호 배타다(둘 다 활성 탭 기준).
+                    if (self.fileHeaderBandForPane(lr.leaf, lr.rect)) |band| {
+                        self.appendBarBgQuad(band.band, self.chromeQuadBg(self.sidebarBg()));
+                        const cols: u16 = @intCast(@min(band.band.w / self.cell_width_px, @as(u32, std.math.maxInt(u16))));
+                        const header_dl = coretext_frame_builder.buildFilePanelHeaderDrawList(
+                            self.allocator,
+                            band.entry.path,
+                            band.entry.kind,
+                            band.entry.mode,
+                            band.entry.dirty,
+                            band.entry.external_change,
+                            cols,
+                            .{ .rgb = self.mutedForeground() },
+                            .{ .rgb = self.appearance.theme.sidebar_foreground },
+                        ) catch null;
+                        if (header_dl) |list| self.collectShaped(&collected, list, pane_frame_builder, .{ .pane = .{
+                            .origin_x = band.band.x,
+                            .origin_y = band.band.y + @as(u32, self.buildChromeTokens().space.tab_bar_pad_y_px),
+                            .colors = tabbar_colors,
+                        } });
+                    }
+
                     const addr_at = lr.leaf.active_term;
                     if (addr_at < lr.leaf.terms.items.len) {
                         const addr_term = lr.leaf.terms.items[addr_at];
@@ -45056,8 +45145,8 @@ test "FP3 파일 도크: right/bottom 기하·surface diff 소스·presence·hit
     try std.testing.expectEqual(@as(u8, 2), surfaces.items[2].seam_edges);
     const workspace_seam = session.dividerThicknessPx() + @max(@as(u32, 1), session.scale_milli / 1000);
     const workspace_web_chrome = web_panel_layout.contentRect(right.terminal, .{
-        // 파일 패널은 주소 밴드가 없다(브라우저만 2단) — pane 탭 바 한 줄만 뺀다.
-        .top = session.paneBarHeightPx(),
+        // FP16d: 파일 Term도 pane 탭 바 + 헤더 밴드 2단이다(브라우저의 주소창 밴드와 같은 경로·같은 높이).
+        .top = 2 * session.paneBarHeightPx(),
         .right = workspace_seam,
     });
     try std.testing.expectEqual(layout_math.insetRect(workspace_web_chrome, session.window_padding_px), surfaces.items[2].content_rect);
@@ -57111,7 +57200,9 @@ test "FP6 file panel header toggles markdown mode and drains one action" {
     const surface_id = entry.surface_id;
     try std.testing.expectEqual(dock_panel.Mode.read, entry.mode);
 
-    const control = dock_layout.headerModeRect(session.dockGeometry(), session.cell_width_px, .markdown, .source_edit, false, false).?;
+    // FP16d: 밴드는 도크가 아니라 파일 Term이 소유한다 — 활성 pane의 밴드 rect에서 모드 칸을 찾는다.
+    const band = session.fileHeaderBandForPaneLookup(session.activePane()).?;
+    const control = dock_layout.headerModeRect(band.band, session.cell_width_px, .markdown, .source_edit, false, false).?;
     session.mouse(
         1,
         @floatFromInt(control.x + control.w / 2),

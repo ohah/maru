@@ -196,55 +196,57 @@ pub fn headerCellLayout(cols: u16, dirty: bool, external_change: bool) ?HeaderCe
     };
 }
 
-pub fn headerControlRect(g: Geometry, cell_width_px: u32) ?Rect {
-    if (cell_width_px == 0 or g.header.w < cell_width_px * 6) return null;
-    const cols = @min(header_control_cols, g.header.w / cell_width_px);
+/// FP16: 헤더 밴드는 도크가 아니라 **파일 Term**이 소유한다. 그래서 이 함수군은 `Geometry` 대신 호출자가
+/// 계산한 밴드 rect를 받는다 — pane leaf에서 나온 rect든 옛 도크 rect든 배치 규칙은 하나다.
+pub fn headerControlRect(header: Rect, cell_width_px: u32) ?Rect {
+    if (cell_width_px == 0 or header.w < cell_width_px * 6) return null;
+    const cols = @min(header_control_cols, header.w / cell_width_px);
     const width = cols * cell_width_px;
-    return .{ .x = g.header.x + g.header.w - width, .y = g.header.y, .w = width, .h = g.header.h };
+    return .{ .x = header.x + header.w - width, .y = header.y, .w = width, .h = header.h };
 }
 
 /// 헤더 mode 선택지 한 칸의 rect(markdown `읽기|라이브|소스`·svg `읽기|소스`). 전체 control을 토글 버튼 하나로
 /// 취급하지 않고 보이는 구간과 클릭되는 구간이 같은 rect를 공유한다. 모드 선택기가 없는 kind(html·text)는 null.
-pub fn headerModeRect(g: Geometry, cell_width_px: u32, kind: dock_panel.EntryKind, mode: dock_panel.Mode, dirty: bool, external_change: bool) ?Rect {
+pub fn headerModeRect(header: Rect, cell_width_px: u32, kind: dock_panel.EntryKind, mode: dock_panel.Mode, dirty: bool, external_change: bool) ?Rect {
     if (modesForKind(kind).len == 0) return null;
-    const control = headerControlRect(g, cell_width_px) orelse return null;
-    const cols: u16 = @intCast(g.header.w / cell_width_px);
+    const control = headerControlRect(header, cell_width_px) orelse return null;
+    const cols: u16 = @intCast(header.w / cell_width_px);
     const layout = headerCellLayout(cols, dirty, external_change) orelse return null;
     const range = headerModeCellRange(layout, kind, mode) orelse return null;
     const start_col = range.start;
     const end_col = range.end;
     if (end_col <= start_col) return null;
-    return .{ .x = g.header.x + @as(u32, start_col) * cell_width_px, .y = control.y, .w = @as(u32, end_col - start_col) * cell_width_px, .h = control.h };
+    return .{ .x = header.x + @as(u32, start_col) * cell_width_px, .y = control.y, .w = @as(u32, end_col - start_col) * cell_width_px, .h = control.h };
 }
 
-pub fn headerModeAt(g: Geometry, cell_width_px: u32, kind: dock_panel.EntryKind, dirty: bool, external_change: bool, x_px: f64, y_px: f64) ?dock_panel.Mode {
+pub fn headerModeAt(header: Rect, cell_width_px: u32, kind: dock_panel.EntryKind, dirty: bool, external_change: bool, x_px: f64, y_px: f64) ?dock_panel.Mode {
     for (modesForKind(kind)) |descriptor| {
-        if (headerModeRect(g, cell_width_px, kind, descriptor.mode, dirty, external_change)) |r| if (layout_math.pointInRect(x_px, y_px, r)) return descriptor.mode;
+        if (headerModeRect(header, cell_width_px, kind, descriptor.mode, dirty, external_change)) |r| if (layout_math.pointInRect(x_px, y_px, r)) return descriptor.mode;
     }
     return null;
 }
 
 /// 헤더 draw-list의 external-change `!` 한 칸과 같은 rect. mode 토글의 넓은 control rect보다 먼저
 /// hit-test해, 충돌 표식을 누르면 편집 모드가 바뀌는 대신 명시적 disk reload 확인으로 라우팅한다.
-pub fn headerConflictRect(g: Geometry, cell_width_px: u32, dirty: bool) ?Rect {
+pub fn headerConflictRect(header: Rect, cell_width_px: u32, dirty: bool) ?Rect {
     if (cell_width_px == 0) return null;
-    const cols: u16 = @intCast(g.header.w / cell_width_px);
+    const cols: u16 = @intCast(header.w / cell_width_px);
     const layout = headerCellLayout(cols, dirty, true) orelse return null;
     const col = layout.conflict_col orelse return null;
     return .{
-        .x = g.header.x + @as(u32, col) * cell_width_px,
-        .y = g.header.y,
+        .x = header.x + @as(u32, col) * cell_width_px,
+        .y = header.y,
         .w = cell_width_px,
-        .h = g.header.h,
+        .h = header.h,
     };
 }
 
-pub fn headerDirtyRect(g: Geometry, cell_width_px: u32, external_change: bool) ?Rect {
+pub fn headerDirtyRect(header: Rect, cell_width_px: u32, external_change: bool) ?Rect {
     if (cell_width_px == 0) return null;
-    const cols: u16 = @intCast(g.header.w / cell_width_px);
+    const cols: u16 = @intCast(header.w / cell_width_px);
     const layout = headerCellLayout(cols, true, external_change) orelse return null;
     const col = layout.dirty_col orelse return null;
-    return .{ .x = g.header.x + @as(u32, col) * cell_width_px, .y = g.header.y, .w = cell_width_px, .h = g.header.h };
+    return .{ .x = header.x + @as(u32, col) * cell_width_px, .y = header.y, .w = cell_width_px, .h = header.h };
 }
 
 pub fn tabMetrics(g: Geometry, cell_width_px: u32, entry_count: usize) ?TabMetrics {
@@ -619,38 +621,39 @@ test "dock tab bar scrolls fixed-width tabs when they overflow" {
 
 test "dock header control rect is right-aligned and bounded on narrow docks" {
     const g = compute(.{ .backing_width_px = 1400, .backing_height_px = 900, .sidebar_width_px = 200, .titlebar_height_px = 40, .cell_width_px = 10, .cell_height_px = 20, .scale_milli = 1000, .divider_px = 2, .side = .right, .size_pt = 420, .visible = true });
-    const control = headerControlRect(g, 10).?;
-    try std.testing.expectEqual(g.header.x + g.header.w, control.x + control.w);
+    const header = g.header;
+    const control = headerControlRect(header, 10).?;
+    try std.testing.expectEqual(header.x + header.w, control.x + control.w);
     try std.testing.expectEqual(@as(u32, header_control_cols * 10), control.w);
-    const conflict = headerConflictRect(g, 10, false).?;
-    try std.testing.expectEqual(g.header.x + g.header.w - 20, conflict.x);
+    const conflict = headerConflictRect(header, 10, false).?;
+    try std.testing.expectEqual(header.x + header.w - 20, conflict.x);
     try std.testing.expectEqual(@as(u32, 10), conflict.w);
     try std.testing.expect(conflict.x >= control.x);
     // markdown 헤더는 읽기|소스 2모드다(라이브 백로그).
-    const read = headerModeRect(g, 10, .markdown, .read, false, false).?;
-    const edit = headerModeRect(g, 10, .markdown, .source_edit, false, false).?;
-    try std.testing.expectEqual(@as(?Rect, null), headerModeRect(g, 10, .markdown, .live_preview, false, false)); // 라이브 없음
+    const read = headerModeRect(header, 10, .markdown, .read, false, false).?;
+    const edit = headerModeRect(header, 10, .markdown, .source_edit, false, false).?;
+    try std.testing.expectEqual(@as(?Rect, null), headerModeRect(header, 10, .markdown, .live_preview, false, false)); // 라이브 없음
     try std.testing.expectEqual(control.x, read.x);
     try std.testing.expectEqual(read.x + read.w, edit.x);
     try std.testing.expectEqual(control.x + control.w, edit.x + edit.w);
-    try std.testing.expectEqual(@as(?dock_panel.Mode, .read), headerModeAt(g, 10, .markdown, false, false, @floatFromInt(read.x + 1), @floatFromInt(read.y + 1)));
-    try std.testing.expectEqual(@as(?dock_panel.Mode, .source_edit), headerModeAt(g, 10, .markdown, false, false, @floatFromInt(edit.x + 1), @floatFromInt(edit.y + 1)));
-    try std.testing.expectEqual(@as(?dock_panel.Mode, null), headerModeAt(g, 10, .html, false, false, @floatFromInt(edit.x + 1), @floatFromInt(edit.y + 1)));
+    try std.testing.expectEqual(@as(?dock_panel.Mode, .read), headerModeAt(header, 10, .markdown, false, false, @floatFromInt(read.x + 1), @floatFromInt(read.y + 1)));
+    try std.testing.expectEqual(@as(?dock_panel.Mode, .source_edit), headerModeAt(header, 10, .markdown, false, false, @floatFromInt(edit.x + 1), @floatFromInt(edit.y + 1)));
+    try std.testing.expectEqual(@as(?dock_panel.Mode, null), headerModeAt(header, 10, .html, false, false, @floatFromInt(edit.x + 1), @floatFromInt(edit.y + 1)));
 
     inline for (.{ false, true }) |dirty| inline for (.{ false, true }) |external| {
-        const read_mode = headerModeRect(g, 10, .markdown, .read, dirty, external).?;
-        const source = headerModeRect(g, 10, .markdown, .source_edit, dirty, external).?;
-        const cells = headerCellLayout(@intCast(g.header.w / 10), dirty, external).?;
-        try std.testing.expectEqual(g.header.x + @as(u32, cells.control_start) * 10, read_mode.x); // 첫 슬롯=control_start
+        const read_mode = headerModeRect(header, 10, .markdown, .read, dirty, external).?;
+        const source = headerModeRect(header, 10, .markdown, .source_edit, dirty, external).?;
+        const cells = headerCellLayout(@intCast(header.w / 10), dirty, external).?;
+        try std.testing.expectEqual(header.x + @as(u32, cells.control_start) * 10, read_mode.x); // 첫 슬롯=control_start
         try std.testing.expectEqual(read_mode.x + read_mode.w, source.x); // 인접
-        try std.testing.expectEqual(g.header.x + @as(u32, cells.mode_end) * 10, source.x + source.w); // 마지막=mode_end
+        try std.testing.expectEqual(header.x + @as(u32, cells.mode_end) * 10, source.x + source.w); // 마지막=mode_end
         if (dirty) {
-            const status = headerDirtyRect(g, 10, external).?;
-            try std.testing.expect(headerModeAt(g, 10, .markdown, dirty, external, @floatFromInt(status.x + 1), @floatFromInt(status.y + 1)) == null);
+            const status = headerDirtyRect(header, 10, external).?;
+            try std.testing.expect(headerModeAt(header, 10, .markdown, dirty, external, @floatFromInt(status.x + 1), @floatFromInt(status.y + 1)) == null);
         }
         if (external) {
-            const status = headerConflictRect(g, 10, dirty).?;
-            try std.testing.expect(headerModeAt(g, 10, .markdown, dirty, external, @floatFromInt(status.x + 1), @floatFromInt(status.y + 1)) == null);
+            const status = headerConflictRect(header, 10, dirty).?;
+            try std.testing.expect(headerModeAt(header, 10, .markdown, dirty, external, @floatFromInt(status.x + 1), @floatFromInt(status.y + 1)) == null);
         }
     };
 }

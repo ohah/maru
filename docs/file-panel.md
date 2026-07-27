@@ -194,7 +194,7 @@ flowchart TD
 
 ### 3.1 파일 헤더 밴드
 
-**FP16 배치**: 밴드는 도크가 아니라 **파일 Term이 소유**하고, browser Term의 읽기전용 주소창 밴드와 **같은 `ChromeInset.top = bar_h + band_h` 경로**로 pane 탭 바 바로 아래에 놓인다(app_session.zig:14216의 `addr_h` 분기를 kind별로 일반화). 밴드 rect가 곧 WKWebView 본문에서 비워지는 영역이라는 계약도 그대로다. 아래 셀 레이아웃 계약(`HeaderCellLayout`·mode span·status 우선순위)은 소유자만 바뀌고 내용은 유지한다.
+**FP16 배치**: 밴드는 도크가 아니라 **파일 Term이 소유**하고, browser Term의 읽기전용 주소창 밴드와 **같은 `ChromeInset.top = bar_h + band_h` 경로**로 pane 탭 바 바로 아래에 놓인다(구현: `addr_h` 분기가 `isBrowserTerm(term) or term.file_entry != null`로 일반화됐고, 밴드 rect는 `paneBandRect(PaneBar)` 하나가 준다 — 주소창 밴드와 **같은 자리**라 상호 배타다). 밴드 rect가 곧 WKWebView 본문에서 비워지는 영역이라는 계약도 그대로다. 아래 셀 레이아웃 계약(`HeaderCellLayout`·mode span·status 우선순위)은 소유자만 바뀌고 내용은 유지한다.
 
 파일 Term 탭 바 아래 밴드 = **`부모 / 파일` breadcrumb + 독립 `읽기 | 라이브 | 소스` 선택지 + dirty ●**(GPU 셀). 주소창이 아니다 — `←`/`→`(WebKit 백스택)는 단일 파일 문서에 무의미해서 없다("열었던 파일"은 트리의 열린 파일 하이라이트 + 최근 파일 섹션이 흡수 — §7). `header_mode_order = { read, live_preview, source_edit }`와 `modeSlot(mode)`가 시각 순서의 SSOT이고 ABI ordinal과 독립이다. `HeaderCellLayout`은 mode 영역 최소 6셀을 먼저 예약한 뒤 남는 2셀마다 conflict, dirty 순으로 status를 추가하며, 부족한 status는 tab/tree marker에만 남긴다. mode span은 1/3·2/3 cut으로 rect 세 개를 직접 저장하고 label render·selected background·hover·hit-test가 이를 공유한다. 전체 폭이 6셀 미만이면 mode/status 모두 숨기고 breadcrumb만 표시한다. Zig→웹 신호는 take/drain 패턴이고 ABI v132 값은 `0=read, 1=source-edit, 2=live-preview`다.
 
@@ -422,7 +422,7 @@ FP11d의 nested table 행 추가는 `appendPrefixFrom/appendPrefixTo` source ran
 | **FP16a — 문서** | 이 개정(§1 결정 뒤집기, §3.3·§3.4·§4·§5.0·§6·§7·§8 계약 갱신) + cross-doc 정합 | 이 PR |
 | **FP16b — 모델** | `dock_panel.Entry`의 소유자를 `DockGroup`→`Term`으로 이동(**`PanelKind`는 안 넓힌다** — §1). 창당 경로 유일성을 pane 트리 walk로 재구현. **`EntryId`/`EntryIdAllocator` 삭제**(§1 불변식으로 불필요해짐). **`== .browser` 판정 8곳을 `isBrowserTerm` 하나로 통합**(중복 정의 6759/14422 제거, 파일 entry 제외 조건 추가 — §8) | **통합 완료**(PR #1638), 제외 조건은 B-2b |
 | **FP16c — 수명(핵심)** | §4: `collectWebSurfaces` walk를 창 전 탭으로 확장, 비활성 워크스페이스는 zero rect + hidden. presence 게이트 동반 확장 | 대기 |
-| **FP16d — chrome** | §3.1 헤더 밴드를 파일 Term의 `ChromeInset.top`으로 이관. 탭 라벨·dirty·`X`는 pane 탭바 계약 재사용 | 대기 |
+| **FP16d — chrome ✅** | §3.1 헤더 밴드를 파일 Term의 `ChromeInset.top`으로 이관(2026-07-28). 밴드 rect는 browser 주소창 밴드와 같은 `paneBandRect` 한 줄, 배치 권위는 `dock_layout.headerCellLayout` 그대로(렌더=`buildFilePanelHeaderDrawList`·hit-test가 같은 cell 범위 공유). `headerControlRect`/`headerModeRect`/`headerModeAt`/`headerConflictRect`/`headerDirtyRect`는 `Geometry` 대신 **밴드 `Rect`**를 받는다. 탭 라벨·dirty·`X`는 pane 탭바 계약 재사용 | 완료 |
 | **FP16g — rename 재설계 ✅** | §1 불변식의 ⑵⑶⑷ 구현 — 신뢰 kind는 `entry.path`만 교체(무통지, S3·S4), html·pdf는 Term 같은 자리 재생성(S1), plan 키를 `EntryId`→expected path + `mutation_pending_id`로 전환(S2). **FP16b가 `EntryId`를 지우므로 b와 함께 가거나 b 직후여야 한다** | 대기 |
 | **FP16e — 도크 축소** | `dock_layout`을 트리 전용으로, `DockGroup`/`DockTree`/drop/`dock_drag.zig` 삭제, 팔릿 `Split/Close File Panel Group`·`Move File Panel Right/Bottom`·`focus_file_tree` 제거, ~~LRU·`file-panel.max-live-views` config 제거~~ **완료**(B-2a) | 대기 |
 | **FP16f — 영속·검증** | §5.0 포맷(`file-term` 키 + persisted 압축 인덱스 + placeholder 조건 + 1회 마이그레이션), 테스트 재작성, macOS 실행 확인 | 대기 |

@@ -4883,31 +4883,10 @@ pub const AppSession = struct {
         if (self.anyOverlayOpen()) return;
         const rect: maru.session.SplitRect = switch (self.focus_owner) {
             .workspace => if (self.inputFocus() == .terminal) active_workspace_body orelse return else return,
-            .dock_surface => |surface_id| blk: {
-                if (self.inputFocus() != .terminal) return;
-                const group = self.dock.groupForSurfaceId(surface_id) orelse return;
-                if (self.dockDragSessionConst()) |drag| {
-                    if (self.dockDragIsDragging() and drag.layout_generation == self.dock_layout_generation) {
-                        const parent = self.dockGeometry();
-                        for (self.dock_drag_leaves[0..self.dock_drag_leaves_len]) |leaf| if (leaf.group_id == group.runtime_id)
-                            break :blk dock_layout.groupGeometry(parent, leaf.rect).content;
-                        return;
-                    }
-                }
-                if (!self.refreshDockGroupLayout()) return;
-                const parent = self.dockGeometry();
-                for (self.dock_leaf_rects_scratch.items) |leaf| if (leaf.leaf == group)
-                    break :blk dock_layout.groupGeometry(parent, leaf.rect).content;
-                return;
-            },
-            .dock_group => |group_id| blk: {
-                if (self.inputFocus() != .dock_group or !self.pendingDockGroupOwnsInput()) return;
-                if (!self.refreshDockGroupLayout()) return;
-                const parent = self.dockGeometry();
-                for (self.dock_leaf_rects_scratch.items) |leaf| if (leaf.leaf.runtime_id == group_id)
-                    break :blk dock_layout.groupGeometry(parent, leaf.rect).content;
-                return;
-            },
+            // FP16: 파일 surface는 pane Term이라 focus border도 `.workspace`와 같은 `PaneGeometry.body`를
+            // 쓴다. 도크 group leaf rect를 가리키던 옛 두 축(.dock_surface·.dock_group)은 §3.4대로 사라진다 —
+            // 지금은 border를 그리지 않고, 축 자체 제거는 FocusOwner 정리 단계다.
+            .dock_surface, .dock_group => return,
             .file_tree => blk: {
                 if (self.inputFocus() != .file_tree) return;
                 break :blk self.dockGeometry().tree_content;
@@ -19558,25 +19537,6 @@ pub const AppSession = struct {
             }
             return;
         }
-        if (self.pointerGestureIs(.dock_group_divider) and self.dock_initialized and (kind == 2 or kind == 3)) {
-            const drag = self.pointer_gesture_owner.dock_group_divider;
-            if (kind == 2) {
-                const adjusted_x = if (drag.seg.direction == .horizontal) x_px + drag.offset_px else x_px;
-                const adjusted_y = if (drag.seg.direction == .vertical) y_px + drag.offset_px else y_px;
-                if (dock_layout.groupDividerRatio(drag.seg, adjusted_x, adjusted_y)) |ratio| {
-                    // 현재 divider capture는 유지하되, 이 ratio 변경 전에 시작된 dock-tab geometry snapshot만
-                    // 무효화한다. 구조 mutation은 invalidateDockDragGeometry가 divider 자체도 취소한다.
-                    self.cancelDockEntryDrag();
-                    self.advanceDockLayoutGeneration();
-                    drag.split.ratio = ratio;
-                    self.metal_dirty = true;
-                }
-            } else {
-                self.metal_dirty = true;
-                self.finishPointerGesture();
-            }
-            return;
-        }
         // divider 드래그가 진행 중이면 drag(2)/up(3)을 캡처한다(PR6) — drag는 마우스를 bounds 안 ratio로 매핑해
         // split.ratio를 live 변경(panel 재배치), up이 끝낸다. 새 down(1)은 아래 일반 처리로 흘려 새 드래그 시작.
         if (self.pointerGestureIs(.pane_divider) and (kind == 2 or kind == 3)) {
@@ -25368,28 +25328,6 @@ pub const AppSession = struct {
             if (self.dockVisible()) {
                 const dg = self.dockGeometry();
                 if (self.refreshDockGroupLayout()) {
-                    for (self.dock_leaf_rects_scratch.items) |leaf| {
-                        const group = leaf.leaf;
-                        const gg = dock_layout.groupGeometry(dg, leaf.rect);
-                        self.appendBarBgQuad(gg.tab_bar, self.chromeQuadBg(self.sidebarBg()));
-                        self.appendBarBgQuad(gg.header, self.chromeQuadBg(self.sidebarBg()));
-                        if (group.active) |active| if (active < group.entries.items.len) {
-                            const entry = group.entries.items[active];
-                            if (dock_layout.headerModeRect(gg, self.cell_width_px, entry.kind, entry.mode, entry.dirty, entry.external_change)) |mode_rect|
-                                self.appendBarBgQuad(mode_rect, self.chromeQuadBg(self.sidebarActiveBg()));
-                        };
-                        if (group.active) |active| if (dock_layout.tabRect(gg, self.cell_width_px, group.entries.items.len, active, group.tab_scroll_cols)) |r| {
-                            self.appendBarBgQuad(r, self.chromeQuadBg(self.sidebarActiveBg()));
-                            // Artifact처럼 활성 파일 탭의 **해당 세그먼트만** accent top strip을 갖는다. 옛 구현은
-                            // focused group 전체 위에 1px 중립선을 그려 어떤 파일이 활성인지 약했다.
-                            self.appendBarBgQuad(.{
-                                .x = r.x,
-                                .y = r.y,
-                                .w = r.w,
-                                .h = @min(@as(u32, 2), r.h),
-                            }, packOpaqueRgb(self.appearance.theme.accent));
-                        };
-                    }
                     for (self.dock_dividers_scratch.items) |seg| self.appendBarBgQuad(switch (seg.direction) {
                         .horizontal => .{ .x = seg.pos, .y = seg.bounds.y, .w = @min(@as(u32, 1), seg.bounds.x + seg.bounds.w -| seg.pos), .h = seg.bounds.h },
                         .vertical => .{ .x = seg.bounds.x, .y = seg.pos, .w = seg.bounds.w, .h = @min(@as(u32, 1), seg.bounds.y + seg.bounds.h -| seg.pos) },
@@ -25684,44 +25622,6 @@ pub const AppSession = struct {
                 // FP3 파일 도크 탭 제목+활성 파일 경로. 배경 quad와 같은 geometry origin에 2행을 배치한다.
                 if (self.dockVisible()) {
                     const dg = self.dockGeometry();
-                    if (self.refreshDockGroupLayout()) for (self.dock_leaf_rects_scratch.items) |leaf| {
-                        const group = leaf.leaf;
-                        const gg = dock_layout.groupGeometry(dg, leaf.rect);
-                        const cols = @min(gg.tab_bar.w / self.cell_width_px, @as(u32, std.math.maxInt(u16)));
-                        if (cols > 0) {
-                            var titles: std.ArrayList([]const u8) = .empty;
-                            defer titles.deinit(self.allocator);
-                            for (group.entries.items) |entry| titles.append(self.allocator, std.fs.path.basename(entry.path)) catch break;
-                            const active_path: []const u8 = if (group.active) |i| if (i < group.entries.items.len) group.entries.items[i].path else "" else "";
-                            const breadcrumb_owned = if (active_path.len > 0) fileDockBreadcrumbAlloc(self.allocator, active_path) catch null else null;
-                            defer if (breadcrumb_owned) |owned| self.allocator.free(owned);
-                            const display_path = breadcrumb_owned orelse active_path;
-                            const dock_fg: terminal.Color = .{ .rgb = self.mutedForeground() };
-                            const dock_active_fg: terminal.Color = .{ .rgb = self.appearance.theme.sidebar_foreground };
-                            const active_entry = if (group.active) |i| if (i < group.entries.items.len) &group.entries.items[i] else null else null;
-                            const hovered_index: ?usize = if (self.hovered_file_panel_tab) |hovered|
-                                if (hovered.group_id == group.runtime_id and hovered.tab < group.entries.items.len) hovered.tab else null
-                            else
-                                null;
-                            if (coretext_frame_builder.buildFileDockChromeDrawList(
-                                self.allocator,
-                                titles.items,
-                                group.active,
-                                hovered_index,
-                                display_path,
-                                if (active_entry) |entry| entry.kind else .markdown,
-                                if (active_entry) |entry| entry.mode else .read,
-                                if (active_entry) |entry| entry.dirty else false,
-                                if (active_entry) |entry| entry.external_change else false,
-                                @intCast(cols),
-                                group.tab_scroll_cols,
-                                dock_fg,
-                                dock_active_fg,
-                            )) |ddl| {
-                                self.collectShaped(&collected, ddl, pane_frame_builder, .{ .pane = .{ .origin_x = gg.tab_bar.x, .origin_y = gg.tab_bar.y, .colors = tabbar_colors } });
-                            } else |_| {}
-                        }
-                    };
                     if (dg.tree.w > 0 and self.cell_width_px > 0 and self.cell_height_px > 0) {
                         const tree_cols: u16 = @intCast(@min(dg.tree.w / self.cell_width_px, @as(u32, std.math.maxInt(u16))));
                         const tree_content_cols: u16 = @intCast(@min(dg.tree_content.w / self.cell_width_px, @as(u32, std.math.maxInt(u16))));

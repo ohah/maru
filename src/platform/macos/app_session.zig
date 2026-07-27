@@ -9749,10 +9749,8 @@ pub const AppSession = struct {
                     self.focusWorkspaceInput();
                     self.requestClose(.term_or_pane);
                 },
-                .dock_surface => |surface_id| if (self.dock.groupForSurfaceId(surface_id)) |group| {
-                    if (group.active) |active| {
-                        if (active < group.entries.items.len) self.requestFilePanelClose(group.entries.items[active].surface_id);
-                    }
+                .dock_surface => |surface_id| if (self.fileEntryForSurfaceId(surface_id)) |entry| {
+                    self.requestFilePanelClose(entry.surface_id);
                 } else {
                     self.focus_owner = .workspace;
                     self.workspace_focus_pending = false;
@@ -11940,23 +11938,19 @@ pub const AppSession = struct {
         self.metal_dirty = true;
     }
 
+    /// 복원 뒤 이 파일 surface를 화면에 올린다. FP16에서 "활성화"는 도크 그룹의 active index가 아니라
+    /// 그 파일 **Term이 있는 pane/워크스페이스로 이동**하는 것이다 — activateExistingFileTerm이 그 단일 출처다.
     fn activateFilePanelSurfaceForRestore(self: *AppSession, surface_id: u64) bool {
-        if (!self.dock_initialized or surface_id == 0) return false;
-        const group = self.dock.groupForSurfaceId(surface_id) orelse return false;
-        var target: ?usize = null;
-        for (group.entries.items, 0..) |entry, index| if (entry.surface_id == surface_id) {
-            target = index;
-            break;
+        if (surface_id == 0) return false;
+        const entry = self.fileEntryForSurfaceId(surface_id) orelse return false;
+        const term = self.fileTermForPath(entry.path) orelse return false;
+        const result = self.activateExistingFileTerm(term);
+        // 떠나게 된 직전 활성 Term이 편집 중인 파일이면 dirty 스냅샷을 요청한다(§3.2 two-phase).
+        if (result.previous_active_term) |prev| if (prev != term) {
+            if (prev.file_entry) |prev_entry| self.markFilePanelDirtySyncPending(prev_entry);
         };
-        const index = target orelse return false;
-        if (group.active != index) {
-            if (group.active) |old| if (old < group.entries.items.len)
-                self.markFilePanelDirtySyncPending(&group.entries.items[old]);
-            group.active = index;
-            self.file_tree_rows_dirty = true;
-        }
-        _ = self.dock.focusGroup(group);
         self.file_panel_mode_pending = surface_id;
+        self.file_tree_rows_dirty = true;
         return true;
     }
 
@@ -12747,13 +12741,11 @@ pub const AppSession = struct {
         const source = self.fileEntryForSurfaceId(surface_id) orelse return error.SurfaceNotFound;
         if (file_panel_bridge.isExplicitHttpLink(href)) return self.queueExternalLink(href, force_system);
         if (source.kind != .markdown) return error.WrongKind;
-        const source_group = self.dock.groupForSurfaceId(surface_id) orelse return error.SurfaceNotFound;
         const target = file_panel_bridge.resolveMarkdownFileLink(self.allocator, source.path, href) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.InvalidLink => return error.InvalidLink,
         };
         defer self.allocator.free(target);
-        _ = self.dock.focusGroup(source_group);
         if (self.openFilePanelPath(target) != .opened) return error.OpenFailed;
     }
 
@@ -12844,11 +12836,10 @@ pub const AppSession = struct {
     /// 소비하므로 Swift→Zig ABI가 이 경계를 되돌려 줘 split/close command가 눈앞의 그룹을 대상으로 삼는다.
     pub fn focusFilePanelSurface(self: *AppSession, surface_id: u64) bool {
         if (!self.dock_initialized) return false;
-        const group = self.dock.groupForSurfaceId(surface_id) orelse return false;
+        _ = self.fileEntryForSurfaceId(surface_id) orelse return false;
         // A direct native click is newer than a delayed surface-less drop focus. Cancel the token
         // before committing B so a retained Swift retry for A cannot steal firstResponder back.
         self.cancelPendingDockFocus();
-        if (!self.dock.focusGroup(group)) return false;
         self.focus_owner = .{ .dock_surface = surface_id };
         self.workspace_focus_pending = false;
         self.file_tree_focus_pending = false;
@@ -18596,9 +18587,8 @@ pub const AppSession = struct {
     fn webAppActionSource(self: *AppSession, surface_id: u64) ?WebAppActionSource {
         if (surface_id == 0) return null;
         if (self.dock_initialized) {
-            if (self.dock.groupForSurfaceId(surface_id)) |group| {
-                const active = group.active orelse return null;
-                if (active >= group.entries.items.len or group.entries.items[active].surface_id != surface_id) return null;
+            if (self.fileEntryForSurfaceId(surface_id)) |entry| {
+                if (entry.surface_id != surface_id) return null;
                 return .file_panel;
             }
         }

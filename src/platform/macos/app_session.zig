@@ -11493,8 +11493,7 @@ pub const AppSession = struct {
                 } else if (pending_owned) {
                     self.cancelPendingDockFocus();
                 }
-                const removed = group.remove(index) orelse unreachable;
-                self.allocator.free(removed.path);
+                if (self.fileEntryForId(entry.id)) |live| _ = self.closeFileTermForEntry(live); // Term이 entry·path 소유를 함께 회수한다(FP16)
             }
         }
         if (!removed_any) return stats;
@@ -13237,61 +13236,47 @@ pub const AppSession = struct {
     }
 
     fn closeFilePanelSurfaceNow(self: *AppSession, surface_id: u64) bool {
-        if (!self.dock_initialized or surface_id == 0) return false;
-        const group = self.dock.groupForSurfaceId(surface_id) orelse return false;
-        var index: ?usize = null;
-        for (group.entries.items, 0..) |entry, i| if (entry.surface_id == surface_id) {
-            index = i;
-            break;
+        if (surface_id == 0) return false;
+        const entry = self.fileEntryForSurfaceId(surface_id) orelse return false;
+        const owned_focus = switch (self.focus_owner) {
+            .dock_surface => |focused| focused == surface_id,
+            .file_tree => |owner| owner.restore_surface == surface_id,
+            .workspace, .dock_group => false,
         };
-        const remove_index = index orelse return false;
-        const removed_entry_id = group.entries.items[remove_index].id;
-        const removed_pending_focus = if (self.pending_dock_focus) |pending| pending.entry_id == removed_entry_id else false;
         self.invalidateDockDragGeometry();
-        const removed = group.remove(remove_index) orelse return false;
         self.hovered_file_panel_tab = null;
         self.removeFilePanelQueuedActions(surface_id);
         if (self.pending_file_panel_close != null and self.pending_file_panel_close.?.surface_id == surface_id)
             self.clearFilePanelCloseWithoutUnlock();
-        self.notifySurfaceClosed(surface_id);
-        self.allocator.free(removed.path);
-
-        const removed_owned_focus = switch (self.focus_owner) {
-            .dock_surface => |focused| focused == surface_id,
-            .dock_group => |group_id| group_id == group.runtime_id and removed_pending_focus,
-            .workspace, .file_tree => false,
-        };
-        const group_became_empty = group.entries.items.len == 0;
-        if (removed_owned_focus) _ = self.dock.focusGroup(group);
-        const pruned_empty_groups = if (group_became_empty) self.dock.pruneEmptyGroups() else 0;
-        if (removed_owned_focus and self.dock.entryCountTotal() == 0) {
-            // 최종 모델 root는 workspace wire를 위해 남지만 native file surface가 없으므로 보이지 않는 dock owner를
-            // 유지하지 않는다. 다음 Cmd+W와 PTY 입력은 즉시 눈앞의 workspace로 간다.
-            self.focusWorkspaceInput();
-            self.workspace_focus_pending = true;
-        } else if (removed_owned_focus) {
-            const successor = self.dock.focusedGroup();
-            if (successor.active) |active| {
-                const next = &successor.entries.items[active];
-                if (next.surface_id == 0) next.surface_id = self.surface_ids.next();
-                self.requestDockEntryFocus(next);
+        // Term이 entry·path 소유를 회수하고 destroyTerm이 notifySurfaceClosed까지 부른다(FP16) — 옛
+        // `group.remove` + `free(path)` + 명시적 notify 삼중 쌍을 대체한다.
+        if (!self.closeFileTermForEntry(entry)) return false;
+        // 입력 소유가 이 파일에 있었으면 workspace로 돌린다. 파일이 이제 pane 탭이라 "다음 도크 entry로 승계"라는
+        // 옛 규칙은 성립하지 않는다 — pane의 active_term 승계는 closeFileTermForEntry가 이미 했고, 키 입력은
+        // 그 pane(=workspace)으로 간다.
+        if (owned_focus) {
+            if (self.fileTreeFocused()) {
+                // tree는 project/recent history로 계속 조작할 수 있다. 사라진 WebView만 Esc restore capability에서 제거한다.
+                self.focus_owner = .{ .file_tree = .{ .restore_surface = null } };
+                self.file_tree_restore_surface_pending = null;
             } else {
-                // 추가 empty leaf는 prune됐으므로 이 분기는 손상 모델에서만 가능하다. terminal로 fail-safe한다.
                 self.focusWorkspaceInput();
                 self.workspace_focus_pending = true;
             }
-        } else if (pruned_empty_groups > 0) {
-            // background close가 layout을 접어도 input owner는 그대로다. generation은 remove 전 invalidate에서 이미 올랐다.
-            self.metal_dirty = true;
-        }
-        if (self.fileTreeFocused() and self.focus_owner.file_tree.restore_surface == surface_id) {
-            // tree는 project/recent history로 계속 조작할 수 있다. 사라진 WebView만 Esc restore capability에서 제거한다.
-            self.focus_owner = .{ .file_tree = .{ .restore_surface = null } };
-            self.file_tree_restore_surface_pending = null;
         }
         self.file_tree_rows_dirty = true;
         self.metal_dirty = true;
         return true;
+    }
+
+    /// surface_id로 파일 entry를 찾는다(창 전체).
+    fn fileEntryForSurfaceId(self: *AppSession, surface_id: u64) ?*dock_panel.Entry {
+        if (surface_id == 0) return null;
+        var it = self.fileEntries();
+        while (it.next()) |entry| {
+            if (entry.surface_id == surface_id) return entry;
+        }
+        return null;
     }
 
     fn filePanelCloseEntry(self: *AppSession, pending: PendingFilePanelClose) ?*dock_panel.Entry {
@@ -14203,6 +14188,36 @@ pub const AppSession = struct {
         // 목록은 더 이상 path를 소유하지 않는다(heap Entry로 이동) — 해제 없이 비운다.
         entries.items.clearRetainingCapacity();
         entries.active_index = null;
+    }
+
+    /// 파일 entry를 닫는다 = 그 파일 **Term을 닫는다**(FP16). entry의 소유가 Term이므로 `destroyTerm`이
+    /// entry·path까지 해제한다 — 옛 `group.remove` + `allocator.free(path)` 쌍을 대체한다.
+    ///
+    /// pane의 마지막 Term이면 닫지 않고 false를 돌려준다. pane은 항상 Term ≥1이라는 모델 불변식
+    /// (`session_model.Pane`)을 파일 경로가 깨면 안 되고, 그 경우의 cascade(빈 pane collapse·워크스페이스 닫기)는
+    /// `executeClose`가 소유하는 별도 정책이다.
+    fn closeFileTermForEntry(self: *AppSession, entry: *const dock_panel.Entry) bool {
+        for (self.tabs.items, 0..) |tab, tab_index| {
+            for (tab.panes.items) |pane| {
+                for (pane.terms.items, 0..) |term, term_index| {
+                    if (term.file_entry != entry) continue;
+                    if (pane.terms.items.len <= 1) return false;
+                    self.cancelPointerGestureForTermRemoval(tab_index, pane, term_index);
+                    _ = pane.terms.orderedRemove(term_index);
+                    self.destroyTerm(term);
+                    if (pane.active_term >= pane.terms.items.len)
+                        pane.active_term = pane.terms.items.len - 1;
+                    if (tab_index == self.app_window.active_tab) {
+                        self.surface_ptrs.items[tab_index] = self.activePane().activeTerm().surface;
+                        self.app_window.tabs = self.surface_ptrs.items;
+                        self.recomputeActivePaneRect();
+                    }
+                    self.metal_dirty = true;
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     fn panelKindForEntryKind(kind: dock_panel.EntryKind) web_panel_layout.PanelKind {

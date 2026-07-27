@@ -10,7 +10,6 @@ const terminal = maru.terminal;
 const layout_math = maru.session.layout_math; // b1: 순수 레이아웃 기하(grid·hit-test·drop-zone·pt→px)를 session L2로 분리
 const dock_layout = maru.session.dock_layout;
 const dock_panel = maru.session.dock_panel;
-const dock_drag = maru.session.dock_drag;
 const file_tree = maru.session.file_tree;
 const file_tree_navigation = maru.session.file_tree_navigation;
 const file_tree_mutation = maru.session.file_tree_mutation;
@@ -1623,11 +1622,6 @@ const DockAsyncToken = struct {
 
 const PendingDockFocus = DockAsyncToken;
 
-const DockTabGesture = union(enum) {
-    armed: dock_drag.Session,
-    dragging: dock_drag.Session,
-};
-
 const PointerGestureOwner = union(enum) {
     none,
     sidebar_tab: struct { index: usize },
@@ -1650,13 +1644,7 @@ const PointerGestureOwner = union(enum) {
         y: f64,
         drop_slot: ?usize = null,
     },
-    dock_tab: DockTabGesture,
     dock_outer_divider: struct { offset_px: f64 },
-    dock_group_divider: struct {
-        split: *dock_panel.DockTree.Split,
-        seg: dock_panel.DockTree.DividerSeg,
-        offset_px: f64,
-    },
     pane_divider: struct { split: *PaneTree.Split, seg: chrome.components.divider.Seg },
     sidebar_divider: struct { start_pt: u32 },
     scrollbar: struct { grab: f32 },
@@ -2550,17 +2538,8 @@ pub const AppSession = struct {
     /// outer divider와 동일하게 보존해 넓은 grab band에서도 첫 이동 점프를 막는다.
     // FP8: editor-group leaf/divider 기하 scratch. frame/mouse마다 같은 ArrayList capacity를 재사용해 split UI가
     // frame tick에 새 할당이나 FS I/O를 만들지 않는다.
-    dock_leaf_rects_scratch: std.ArrayList(dock_panel.DockTree.LeafRect) = .empty,
-    dock_dividers_scratch: std.ArrayList(dock_panel.DockTree.DividerSeg) = .empty,
     // FP9 파일 탭 drag는 terminal `tab_drag_*`와 typed 격리한다. snapshot은 max_groups 고정 배열이라
     // pointer move/up hot path에서 allocation·layout tree walk 없이 같은 preview/commit target을 소비한다.
-    dock_drag_dividers: [dock_panel.max_groups - 1]dock_panel.DockTree.DividerSeg = undefined,
-    dock_drag_dividers_len: usize = 0,
-    dock_drag_title_frame: ?renderer.RenderFrame = null,
-    dock_drag_title_cols: u16 = 0,
-    dock_drag_snapshot_id: u64 = 0,
-    dock_layout_generation: u64 = 1,
-    dock_layout_build_count: u64 = 0,
     // frame마다 clearRetainingCapacity로 재사용하는 최상위 overlay cell scratch. FP9 pointer/projected frame에서
     // local ArrayList의 반복 allocation을 없앤다.
     drag_overlay_cells_scratch: std.ArrayList(metal_frame.NativeMetalCell) = .empty,
@@ -2934,8 +2913,6 @@ pub const AppSession = struct {
         self.dock_initialized = true;
         // FP8 frame/mouse layout은 append-only scratch를 쓴다. group 상한만큼 init에서 한 번 예약해 frame tick에서
         // allocator를 호출하지 않는다(leaf=N, divider=N-1).
-        try self.dock_leaf_rects_scratch.ensureTotalCapacity(allocator, dock_panel.max_groups);
-        try self.dock_dividers_scratch.ensureTotalCapacity(allocator, dock_panel.max_groups - 1);
         try self.drag_overlay_cells_scratch.ensureTotalCapacity(allocator, 256);
         try self.gpu_quads.ensureTotalCapacity(allocator, 512);
         {
@@ -3185,16 +3162,6 @@ pub const AppSession = struct {
 
     fn finishPointerGesture(self: *AppSession) void {
         self.pointer_gesture_owner = .none;
-    }
-
-    fn advanceDockLayoutGeneration(self: *AppSession) void {
-        if (self.dock_layout_generation != std.math.maxInt(u64)) self.dock_layout_generation += 1;
-    }
-
-    /// Live divider resize는 해당 divider capture를 유지하면서, resize 전 geometry를 고정한 dock-tab drag만 끊는다.
-    fn invalidateDockTabSnapshot(self: *AppSession) void {
-        if (self.pointerGestureIs(.dock_tab)) self.finishPointerGesture();
-        self.advanceDockLayoutGeneration();
     }
 
     fn advanceDockAsyncEpoch(self: *AppSession) void {
@@ -4228,7 +4195,6 @@ pub const AppSession = struct {
         const effective_px = self.dockGeometry().dock_size_px;
         self.dock.size = dock_layout.sizePtForEffectiveWidth(effective_px, 0, self.scale_milli);
         if (self.dock.size == before) return;
-        self.invalidateDockTabSnapshot();
         for (self.tabs.items) |tab| self.resizeTabPanes(tab);
         self.recomputeActivePaneRect();
         self.last_resize_size = null;
@@ -7224,7 +7190,6 @@ pub const AppSession = struct {
     fn resetFilePanelTransientStateForDockReplacement(self: *AppSession) void {
         self.cancelPointerGesture();
         self.advanceDockAsyncEpoch();
-        if (self.dock_layout_generation != std.math.maxInt(u64)) self.dock_layout_generation += 1;
         if (self.pending_confirm == .file_panel_close) {
             self.pending_confirm = .none;
             self.chrome_host.confirm.dismiss();
@@ -29377,9 +29342,6 @@ pub const AppSession = struct {
             self.dock.deinit();
             self.dock_initialized = false;
         }
-        self.dock_leaf_rects_scratch.deinit(self.allocator);
-        self.dock_dividers_scratch.deinit(self.allocator);
-        if (self.dock_drag_title_frame) |*frame| frame.deinit(self.allocator);
         self.drag_overlay_cells_scratch.deinit(self.allocator);
         self.web_panel_prev.deinit(self.allocator); // Phase 4e-3: web surface diff prev 집합
         self.web_surface_transitions.deinit(self.allocator); // Phase 4e-3: web surface 전이 batch
@@ -44390,13 +44352,11 @@ test "file tree production hot paths emit bounded counter artifact" {
     var counting = std.testing.FailingAllocator.init(allocator, .{});
     session.allocator = counting.allocator();
     session.file_tree_perf_counters = &counters;
-    const pointer_layout_builds = session.dock_layout_build_count;
     for (0..1000) |event| {
         const y = geometry.track_y + @as(f32, @floatFromInt(event % @as(usize, @intFromFloat(geometry.track_h))));
         session.dragFileTreeScrollbarTo(y);
     }
-    counters.dock_layout_rebuilds = session.dock_layout_build_count - pointer_layout_builds;
-    try std.testing.expectEqual(pointer_layout_builds, session.dock_layout_build_count);
+    counters.dock_layout_rebuilds = 0; // FP16: 도크 레이아웃 rebuild 카운터가 있는 도크 chrome이 없다.
     session.finishPointerGesture();
 
     for (0..1000) |_| {

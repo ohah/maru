@@ -426,6 +426,15 @@ FP11d의 nested table 행 추가는 `appendPrefixFrom/appendPrefixTo` source ran
 
 **FP16e/f가 건드리는 테스트 실측**(적대적 검증에서 계수 — 초안의 "44개"는 `app_session.zig` 한 파일만 센 값이라 과소였다): `app_session.zig` 44(dock·file panel) + `dock_panel.zig` 28 + `dock_layout.zig` 13 + `dock_drag.zig` 5 + `workspace.zig` 8 = **약 98개**. 이 중 `dock_drag.zig` 5개는 모듈과 함께 삭제되고, `dock_panel`/`dock_layout`의 group·split·tab 기하 테스트는 pane 탭바 계약으로 이관되거나 삭제된다. `app_session.zig`의 파일 트리 테스트 18개는 트리가 남으므로 대체로 보존된다.
 
+**개념 분해 ≠ 머지 단위(2026-07-27, 적대적 검증으로 확정).** 위 표는 *무엇을 바꾸는가*의 분해이고, *어디서 끊어 머지하는가*는 다르다. b·c·d와 e의 기하 부분은 **어디서 끊어도 중간 상태가 깨지므로** 한 PR이어야 한다 — b만 머지하면 헤더 밴드가 없어 기능 퇴행이고, c 없이 머지하면 워크스페이스 전환이 미저장 편집을 날리며, e의 기하 없이 머지하면 트리 옆에 **빈 editor 컬럼**이 남는다(렌더가 `group.entries.items.len`·`group.active`를 직접 읽는다 — app_session.zig:25285). 의존 순서 자체는 위 표 그대로다.
+
+| 머지 단위 | 담는 개념 | 왜 이 경계인가 |
+|---|---|---|
+| **B-1** | — (선행 정리) | `PathLocation`/`EntryLocation`의 반환 타입에서 `DockGroup`을 제거해 `?*Entry`로 좁히고, 맥락 없이 전 entry를 순회하는 곳을 entry 순회 API로 라우팅한다. 실측상 그런 함수가 **22개 중 19개**(파일 트리 마커·보호 게이트·mutation 예약 등)라, 여기서 group을 감춰 두면 B-2가 **구현체만** 갈아끼운다. 동작 불변 |
+| **B-2** | b + c + d + e(기하·렌더) + g | 제품이 온전한 **최소 원자 단위**. 여기에 **workspace capture/restore 재배선**도 포함한다 — `persistedState`/`DockPanel.restore`가 도크 그룹을 전제하므로(app_session.zig:23299·23553) 재배선 없이 머지하면 **재시작 시 열린 파일 탭이 사라진다**. 포맷은 `dock-entry` 그대로 두고 읽고 쓰는 **대상만** Term으로 바꾼다 |
+| **B-3** | e(타입 삭제) | `DockGroup`·`DockTree`·`dock_drag.zig`·`EntryId` 삭제와 테스트 재작성. 이 시점엔 아무도 참조하지 않아 **기계적 diff**이고, 행동 변경(B-2)과 섞어 리뷰하면 "바뀐 곳"과 "지운 곳"을 구분할 수 없다 |
+| **B-4** | f | 포맷 전환(`file-term` 키 + 1회 마이그레이션). B-2가 왕복을 유지해 두므로 독립적으로 갈 수 있다 |
+
 **순서 근거**: FP16c(수명)를 모델·chrome보다 뒤로 미루면 그 사이 슬라이스가 "전환하면 편집 내용이 날아가는" 상태로 머지된다. 그래서 b→c를 연속으로 두고, d 이후는 그 위에서 안전하게 쌓는다.
 
 #### FP16e 삭제/보존 경계 — "도크 뷰어 완전 제거"의 정확한 범위

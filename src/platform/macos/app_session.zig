@@ -3319,8 +3319,8 @@ pub const AppSession = struct {
 
     fn cacheDockDragTitle(self: *AppSession, entry_id: dock_panel.EntryId) void {
         if (builtin.os.tag != .macos or self.cell_width_px == 0 or self.cell_height_px == 0) return;
-        const location = self.dock.entryLocation(entry_id) orelse return;
-        const title = std.fs.path.basename(location.group.entries.items[location.index].path);
+        const entry = self.fileEntryForId(entry_id) orelse return;
+        const title = std.fs.path.basename(entry.path);
         const cols: u16 = @intCast(std.math.clamp(title.len + 2, @as(usize, 8), @as(usize, 24)));
         self.dock_drag_title_cols = cols; // shaping 실패 fallback도 같은 단일 box 폭을 쓴다.
         const dl = coretext_frame_builder.buildFloatingTabTitleDrawList(
@@ -3532,14 +3532,14 @@ pub const AppSession = struct {
     }
 
     fn requeuePendingDockFocus(self: *AppSession, old: PendingDockFocus) void {
-        const location = self.dock.entryLocation(old.entry_id) orelse return;
-        const entry = &location.group.entries.items[location.index];
+        const entry = (self.fileEntryForId(old.entry_id) orelse return);
         const expected_surface_id = old.expected_surface_id orelse return;
         if (entry.surface_id != expected_surface_id or entry.editor_revision != old.request_or_entry_revision) return;
         self.queuePendingDockFocus(entry);
         // restore/window merge 뒤에도 typed ack 전 fail-close owner를 함께 재파생한다. token만 이관하고
         // workspace/옛 surface owner를 남기면 늦은 native publish 전 PTY·paste·close가 잘못 라우팅된다.
-        self.focus_owner = .{ .dock_group = location.group.runtime_id };
+        // group 자체가 필요한 소수 소비처(§10 B-1) — FP16b/B-3에서 group 개념과 함께 사라진다.
+        self.focus_owner = .{ .dock_group = (self.groupForFileEntryId(old.entry_id) orelse return).runtime_id };
         self.workspace_focus_pending = false;
         self.file_tree_focus_pending = false;
         self.file_tree_restore_surface_pending = null;
@@ -3565,8 +3565,7 @@ pub const AppSession = struct {
             self.metal_dirty = true;
             return;
         }
-        const location = self.dock.entryLocation(result.destination_active_entry_id) orelse return;
-        var entry = &location.group.entries.items[location.index];
+        var entry = (self.fileEntryForId(result.destination_active_entry_id) orelse return);
         if (entry.surface_id == 0) entry.surface_id = self.surface_ids.next();
         // live/surface-less 모두 typed transaction으로만 native focus를 요청하고 ack 전에는 dock_group에서 fail-close한다.
         self.requestDockEntryFocus(entry);
@@ -3589,8 +3588,7 @@ pub const AppSession = struct {
             .vertical => .bottom,
         } }) catch return;
         if (!result.changed) return;
-        const location = self.dock.entryLocation(result.destination_active_entry_id) orelse return;
-        var entry = &location.group.entries.items[location.index];
+        var entry = (self.fileEntryForId(result.destination_active_entry_id) orelse return);
         if (entry.surface_id == 0) entry.surface_id = self.surface_ids.next();
         self.requestDockEntryFocus(entry);
         self.touchFilePanelEntry(entry);
@@ -5456,10 +5454,8 @@ pub const AppSession = struct {
             }
         }.pred) != null) return true;
         if (!self.dock_initialized) return false;
-        for (0..self.dock.groupCount()) |group_index| {
-            const group = self.dock.groupAtConst(group_index).?;
-            for (group.entries.items) |entry| if (entry.surface_id == surface_id) return true;
-        }
+        var entry_it = self.fileEntries();
+        while (entry_it.next()) |entry| if (entry.surface_id == surface_id) return true;
         return false;
     }
 
@@ -7458,11 +7454,9 @@ pub const AppSession = struct {
     pub fn totalSurfaceCount(self: *AppSession) usize {
         var n: usize = 0;
         for (self.tabs.items) |tab| n += tabSurfaceCount(tab);
-        if (self.dock_initialized) for (0..self.dock.groupCount()) |group_index| {
-            const group = self.dock.groupAtConst(group_index).?;
-            for (group.entries.items) |entry| if (entry.surface_id != 0) {
-                n += 1;
-            };
+        var entry_it14 = self.fileEntriesConst();
+        while (entry_it14.next()) |entry| if (entry.surface_id != 0) {
+            n += 1;
         };
         return n;
     }
@@ -7470,13 +7464,11 @@ pub const AppSession = struct {
     fn appendDockSurfaceIds(self: *AppSession, out: []u64, start: usize) usize {
         var n = start;
         if (!self.dock_initialized) return n;
-        for (0..self.dock.groupCount()) |group_index| {
-            const group = self.dock.groupAtConst(group_index).?;
-            for (group.entries.items) |entry| if (entry.surface_id != 0) {
-                if (n < out.len) out[n] = entry.surface_id;
-                n += 1;
-            };
-        }
+        var entry_it2 = self.fileEntries();
+        while (entry_it2.next()) |entry| if (entry.surface_id != 0) {
+            if (n < out.len) out[n] = entry.surface_id;
+            n += 1;
+        };
         return @min(n, out.len);
     }
 
@@ -7496,10 +7488,8 @@ pub const AppSession = struct {
             self.file_tree_manual_recovery_unknown or
             self.file_tree_mutation_editor_locks_len != 0) return true;
         if (!self.dock_initialized) return false;
-        for (0..self.dock.groupCount()) |group_index| {
-            const group = self.dock.groupAtConst(group_index).?;
-            for (group.entries.items) |entry| if (filePanelEntryNeedsDirtyProtection(entry)) return true;
-        }
+        var entry_it3 = self.fileEntriesConst();
+        while (entry_it3.next()) |entry| if (filePanelEntryNeedsDirtyProtection(entry.*)) return true;
         return false;
     }
 
@@ -7513,10 +7503,8 @@ pub const AppSession = struct {
         if (self.pending_file_panel_close != null or self.file_panel_save_close_pending != null or
             self.file_panel_close_unlock_actions_len != 0) return true;
         if (!self.dock_initialized) return false;
-        for (0..self.dock.groupCount()) |group_index| {
-            const group = self.dock.groupAtConst(group_index).?;
-            for (group.entries.items) |entry| if (entry.dirty_sync_pending) return true;
-        }
+        var entry_it4 = self.fileEntriesConst();
+        while (entry_it4.next()) |entry| if (entry.dirty_sync_pending) return true;
         return false;
     }
 
@@ -10743,23 +10731,21 @@ pub const AppSession = struct {
             !std.unicode.utf8ValidateSlice(changed_path)) return;
         self.file_tree.invalidatePath(changed_path) catch {};
         const coarse = self.file_tree.containsRootPath(changed_path);
-        if (self.dock_initialized) for (0..self.dock.groupCount()) |group_index| {
-            const group = self.dock.groupAtConst(group_index).?;
-            for (group.entries.items) |*entry| {
-                if (!std.mem.eql(u8, entry.path, changed_path) and
-                    !(coarse and file_tree.Tree.pathWithinRoot(entry.path, changed_path))) continue;
-                if (entry.self_write_grace_ticks != 0) {
-                    if (!self.verifySelfWriteEvent(entry)) {
-                        entry.self_write_grace_ticks = 0;
-                        entry.self_write_verifications = 0;
-                        self.markExternalFileChange(entry);
-                    }
-                } else {
+        var entry_it15 = self.fileEntries();
+        while (entry_it15.next()) |entry| {
+            if (!std.mem.eql(u8, entry.path, changed_path) and
+                !(coarse and file_tree.Tree.pathWithinRoot(entry.path, changed_path))) continue;
+            if (entry.self_write_grace_ticks != 0) {
+                if (!self.verifySelfWriteEvent(entry)) {
+                    entry.self_write_grace_ticks = 0;
+                    entry.self_write_verifications = 0;
                     self.markExternalFileChange(entry);
                 }
-                if (!coarse) break;
+            } else {
+                self.markExternalFileChange(entry);
             }
-        };
+            if (!coarse) break;
+        }
     }
 
     pub fn takeFileTreeWatchRoot(self: *AppSession) ?[]u8 {
@@ -10964,13 +10950,11 @@ pub const AppSession = struct {
 
     fn ageFilePanelSelfWriteLatches(self: *AppSession) void {
         if (!self.dock_initialized) return;
-        for (0..self.dock.groupCount()) |group_index| {
-            const group = self.dock.groupAt(group_index).?;
-            for (group.entries.items) |*entry| if (entry.self_write_verifications == 0) {
-                entry.self_write_grace_ticks -|= 1;
-                if (entry.self_write_grace_ticks == 0) entry.self_write_hash = 0;
-            };
-        }
+        var entry_it5 = self.fileEntries();
+        while (entry_it5.next()) |entry| if (entry.self_write_verifications == 0) {
+            entry.self_write_grace_ticks -|= 1;
+            if (entry.self_write_grace_ticks == 0) entry.self_write_hash = 0;
+        };
     }
 
     fn rebuildFileTreeFromDock(self: *AppSession) !void {
@@ -10982,14 +10966,12 @@ pub const AppSession = struct {
         self.file_tree_rows.clearRetainingCapacity();
         self.file_tree_rows_dirty = true;
         self.file_tree_watch_reset_pending = true;
-        if (self.dock_initialized) for (0..self.dock.groupCount()) |group_index| {
-            const group = self.dock.groupAt(group_index).?;
-            for (group.entries.items) |entry| {
-                const root = try file_tree_backend.projectRootForFile(self.allocator, self.io, entry.path);
-                defer self.allocator.free(root);
-                try self.file_tree.recordOpened(entry.path, root);
-            }
-        };
+        var entry_it16 = self.fileEntries();
+        while (entry_it16.next()) |entry| {
+            const root = try file_tree_backend.projectRootForFile(self.allocator, self.io, entry.path);
+            defer self.allocator.free(root);
+            try self.file_tree.recordOpened(entry.path, root);
+        }
     }
 
     /// background scan 완료를 snapshot에 적용하고 다음 lazy scan을 제출한다. 호출부는 frame tick이지만 blocking
@@ -11273,28 +11255,26 @@ pub const AppSession = struct {
     fn prepareFileTreeRenameRemap(self: *AppSession, id: u64, old_path: []const u8, new_path: []const u8) !void {
         var plan = PendingRenameRemap{ .id = id };
         errdefer plan.deinit(self.allocator);
-        for (0..self.dock.groupCount()) |group_index| {
-            const group = self.dock.groupAt(group_index).?;
-            for (group.entries.items) |entry| {
-                const replacement = (try file_tree_mutation.remapPath(self.allocator, entry.path, old_path, new_path)) orelse continue;
-                const expected = try self.allocator.dupe(u8, entry.path);
-                const new_kind: ?dock_panel.EntryKind = if (file_panel_bridge.openKindForPath(replacement)) |k|
-                    entryKindForOpenKind(k)
-                else
-                    null;
-                plan.dock_items[plan.dock_len] = .{
-                    .entry_id = entry.id,
-                    .expected = expected,
-                    .replacement = replacement,
-                    .new_kind = new_kind,
-                };
-                plan.dock_len += 1;
-            }
+        var entry_it6 = self.fileEntries();
+        while (entry_it6.next()) |entry| {
+            const replacement = (try file_tree_mutation.remapPath(self.allocator, entry.path, old_path, new_path)) orelse continue;
+            const expected = try self.allocator.dupe(u8, entry.path);
+            const new_kind: ?dock_panel.EntryKind = if (file_panel_bridge.openKindForPath(replacement)) |k|
+                entryKindForOpenKind(k)
+            else
+                null;
+            plan.dock_items[plan.dock_len] = .{
+                .entry_id = entry.id,
+                .expected = expected,
+                .replacement = replacement,
+                .new_kind = new_kind,
+            };
+            plan.dock_len += 1;
         }
         // No supported open can enter while the mutation is in flight, so conflicts only need to be
         // rejected once at admission. Completion resolves the stable EntryId again so an unrelated
         // tab reorder or cross-group move cannot redirect the delayed rename acknowledgement.
-        for (plan.dock_items[0..plan.dock_len]) |item| if (self.dock.pathLocation(item.replacement) != null)
+        for (plan.dock_items[0..plan.dock_len]) |item| if (self.fileEntryForPath(item.replacement) != null)
             return error.PathConflict;
         for (0..self.file_tree.recentCount()) |index| {
             const recent = self.file_tree.recentAt(index).?;
@@ -11313,8 +11293,7 @@ pub const AppSession = struct {
         // Validate the exact admission snapshot before the first swap. Open is globally blocked while a
         // rename is in flight; unrelated close/reorder is tolerated because lookup is by expected path.
         for (plan.dock_items[0..plan.dock_len]) |item| {
-            const location = self.dock.entryLocation(item.entry_id) orelse return false;
-            const entry = location.group.entries.items[location.index];
+            const entry = (self.fileEntryForId(item.entry_id) orelse return false).*;
             if (!std.mem.eql(u8, entry.path, item.expected) or entry.mutation_pending_id != id) return false;
         }
         for (plan.recent_items[0..plan.recent_len]) |item| {
@@ -11326,8 +11305,7 @@ pub const AppSession = struct {
         for (plan.recent_items[0..plan.recent_len]) |item|
             std.debug.assert(self.file_tree.replaceRecentOwned(item.index, item.expected, item.replacement));
         for (plan.dock_items[0..plan.dock_len]) |item| {
-            const location = self.dock.entryLocation(item.entry_id) orelse unreachable;
-            const entry = &location.group.entries.items[location.index];
+            const entry = (self.fileEntryForId(item.entry_id) orelse unreachable);
             const old_surface = entry.surface_id;
             const old_owned = entry.path;
             entry.path = item.replacement;
@@ -11391,20 +11369,18 @@ pub const AppSession = struct {
     }
 
     fn fileTreePathProtectedNow(self: *const AppSession, path: []const u8, request_id: u64) bool {
-        for (0..self.dock.groupCount()) |group_index| {
-            const group = self.dock.groupAtConst(group_index).?;
-            for (group.entries.items) |entry| {
-                if (!file_tree_mutation.pathWithin(entry.path, path)) continue;
-                if (entry.mutation_pending_id != 0 and entry.mutation_pending_id != request_id) return true;
-                const editor_locked = if (entry.mode.isEditable()) blk: {
-                    for (self.file_tree_mutation_editor_locks[0..self.file_tree_mutation_editor_locks_len]) |lock| {
-                        if (lock.mutation_id == request_id and lock.surface_id == entry.surface_id and lock.acknowledged) break :blk true;
-                    }
-                    break :blk false;
-                } else true;
-                if (entry.dirty or entry.dirty_sync_pending or entry.external_change or
-                    entry.conflict_reload_pending or !editor_locked) return true;
-            }
+        var entry_it7 = self.fileEntriesConst();
+        while (entry_it7.next()) |entry| {
+            if (!file_tree_mutation.pathWithin(entry.path, path)) continue;
+            if (entry.mutation_pending_id != 0 and entry.mutation_pending_id != request_id) return true;
+            const editor_locked = if (entry.mode.isEditable()) blk: {
+                for (self.file_tree_mutation_editor_locks[0..self.file_tree_mutation_editor_locks_len]) |lock| {
+                    if (lock.mutation_id == request_id and lock.surface_id == entry.surface_id and lock.acknowledged) break :blk true;
+                }
+                break :blk false;
+            } else true;
+            if (entry.dirty or entry.dirty_sync_pending or entry.external_change or
+                entry.conflict_reload_pending or !editor_locked) return true;
         }
         return false;
     }
@@ -12230,21 +12206,19 @@ pub const AppSession = struct {
     fn fillFileTreeProtections(self: *const AppSession, out: []file_tree_mutation.Protection) usize {
         var n: usize = 0;
         if (!self.dock_initialized) return 0;
-        for (0..self.dock.groupCount()) |group_index| {
-            const group = self.dock.groupAtConst(group_index).?;
-            for (group.entries.items) |entry| {
-                if (n >= out.len) return n;
-                out[n] = .{
-                    .path = entry.path,
-                    .dirty = entry.dirty,
-                    // A native-clean source editor is not trusted yet: enqueueFileTreeEdit/delete reserve it,
-                    // acquire a request-scoped CM6 read-only lock and only submit after the matching snapshot.
-                    .dirty_sync_pending = entry.dirty_sync_pending or entry.mutation_pending_id != 0,
-                    .external_change = entry.external_change,
-                    .conflict_reload_pending = entry.conflict_reload_pending,
-                };
-                n += 1;
-            }
+        var entry_it8 = self.fileEntriesConst();
+        while (entry_it8.next()) |entry| {
+            if (n >= out.len) return n;
+            out[n] = .{
+                .path = entry.path,
+                .dirty = entry.dirty,
+                // A native-clean source editor is not trusted yet: enqueueFileTreeEdit/delete reserve it,
+                // acquire a request-scoped CM6 read-only lock and only submit after the matching snapshot.
+                .dirty_sync_pending = entry.dirty_sync_pending or entry.mutation_pending_id != 0,
+                .external_change = entry.external_change,
+                .conflict_reload_pending = entry.conflict_reload_pending,
+            };
+            n += 1;
         }
         return n;
     }
@@ -12256,11 +12230,9 @@ pub const AppSession = struct {
     fn fileTreeDirectoryAliasRisk(self: *const AppSession, target_path: []const u8, root: []const u8) bool {
         _ = target_path;
         _ = root;
-        for (0..self.dock.groupCount()) |group_index| {
-            const group = self.dock.groupAtConst(group_index).?;
-            for (group.entries.items) |entry| {
-                if (filePanelEntryNeedsDirtyProtection(entry)) return true;
-            }
+        var entry_it9 = self.fileEntriesConst();
+        while (entry_it9.next()) |entry| {
+            if (filePanelEntryNeedsDirtyProtection(entry.*)) return true;
         }
         return false;
     }
@@ -12268,29 +12240,25 @@ pub const AppSession = struct {
     fn reserveFileTreeMutation(self: *AppSession, request_id: u64, source: []const u8) bool {
         var reserved: [dock_panel.max_entries]*dock_panel.Entry = undefined;
         var n: usize = 0;
-        for (0..self.dock.groupCount()) |group_index| {
-            const group = self.dock.groupAt(group_index).?;
-            for (group.entries.items) |*entry| {
-                if (!file_tree_mutation.pathWithin(entry.path, source)) continue;
-                if (entry.mutation_pending_id != 0) {
-                    for (reserved[0..n]) |prior| prior.mutation_pending_id = 0;
-                    return false;
-                }
-                entry.mutation_pending_id = request_id;
-                reserved[n] = entry;
-                n += 1;
+        var entry_it10 = self.fileEntries();
+        while (entry_it10.next()) |entry| {
+            if (!file_tree_mutation.pathWithin(entry.path, source)) continue;
+            if (entry.mutation_pending_id != 0) {
+                for (reserved[0..n]) |prior| prior.mutation_pending_id = 0;
+                return false;
             }
+            entry.mutation_pending_id = request_id;
+            reserved[n] = entry;
+            n += 1;
         }
         return true;
     }
 
     fn clearFileTreeMutationReservation(self: *AppSession, request_id: u64) void {
         if (!self.dock_initialized or request_id == 0) return;
-        for (0..self.dock.groupCount()) |group_index| {
-            const group = self.dock.groupAt(group_index).?;
-            for (group.entries.items) |*entry| {
-                if (entry.mutation_pending_id == request_id) entry.mutation_pending_id = 0;
-            }
+        var entry_it11 = self.fileEntries();
+        while (entry_it11.next()) |entry| {
+            if (entry.mutation_pending_id == request_id) entry.mutation_pending_id = 0;
         }
     }
 
@@ -12349,13 +12317,11 @@ pub const AppSession = struct {
 
     fn beginFileTreeMutationEditorLocks(self: *AppSession, mutation_id: u64, source: []const u8) !bool {
         var needed: usize = 0;
-        for (0..self.dock.groupCount()) |group_index| {
-            const group = self.dock.groupAtConst(group_index).?;
-            for (group.entries.items) |entry| {
-                if (file_tree_mutation.pathWithin(entry.path, source) and entry.mode.isEditable()) {
-                    if (entry.surface_id == 0) return error.SurfaceMissing;
-                    needed += 1;
-                }
+        var entry_it12 = self.fileEntries();
+        while (entry_it12.next()) |entry| {
+            if (file_tree_mutation.pathWithin(entry.path, source) and entry.mode.isEditable()) {
+                if (entry.surface_id == 0) return error.SurfaceMissing;
+                needed += 1;
             }
         }
         if (needed == 0) return false;
@@ -12363,21 +12329,19 @@ pub const AppSession = struct {
             self.file_panel_dirty_sync_actions_len + needed > self.file_panel_dirty_sync_actions.len or
             self.file_panel_close_request_id + needed > max_file_panel_close_request_id) return error.Capacity;
 
-        for (0..self.dock.groupCount()) |group_index| {
-            const group = self.dock.groupAt(group_index).?;
-            for (group.entries.items) |*entry| {
-                if (!file_tree_mutation.pathWithin(entry.path, source) or !entry.mode.isEditable()) continue;
-                self.file_panel_close_request_id += 1;
-                const request_id = self.file_panel_close_request_id;
-                self.file_tree_mutation_editor_locks[self.file_tree_mutation_editor_locks_len] = .{
-                    .mutation_id = mutation_id,
-                    .surface_id = entry.surface_id,
-                    .request_id = request_id,
-                };
-                self.file_tree_mutation_editor_locks_len += 1;
-                entry.dirty_sync_pending = true;
-                self.queueFilePanelDirtySyncAction(entry.surface_id, request_id);
-            }
+        var entry_it13 = self.fileEntries();
+        while (entry_it13.next()) |entry| {
+            if (!file_tree_mutation.pathWithin(entry.path, source) or !entry.mode.isEditable()) continue;
+            self.file_panel_close_request_id += 1;
+            const request_id = self.file_panel_close_request_id;
+            self.file_tree_mutation_editor_locks[self.file_tree_mutation_editor_locks_len] = .{
+                .mutation_id = mutation_id,
+                .surface_id = entry.surface_id,
+                .request_id = request_id,
+            };
+            self.file_tree_mutation_editor_locks_len += 1;
+            entry.dirty_sync_pending = true;
+            self.queueFilePanelDirtySyncAction(entry.surface_id, request_id);
         }
         self.file_tree_rows_dirty = true;
         self.refreshFileTreeWatchRoots() catch {};
@@ -14139,11 +14103,112 @@ pub const AppSession = struct {
         return PaneTree.anyLeaf(self.activeTab().tree, paneHasWebTerm);
     }
 
-    fn dockHasLiveSurface(self: *const AppSession) bool {
-        if (!self.dock_initialized or self.dock.entryCountTotal() == 0) return false;
-        for (0..self.dock.groupCount()) |group_index| {
-            const group = self.dock.groupAtConst(group_index).?;
-            for (group.entries.items) |entry| if (entry.surface_id != 0) return true;
+    // ── 파일 entry 접근 (FP16b 선행 — docs/file-panel.md §10 B-1) ─────────────────────────────────
+    //
+    // 이 창에 **열린 파일 entry 집합**을 묻는 유일한 창구다. 지금 저장소는 `DockPanel`의 group 트리지만
+    // FP16b가 그 소유를 `Term`으로 옮긴다(§1). 그래서 여기 반환 타입에 `DockGroup`을 **절대 노출하지 않는다** —
+    // 노출하면 소유가 옮겨갈 때 호출처가 전부 바뀌고, 감춰 두면 아래 함수 본문만 pane 트리 walk로 갈아끼우면 된다.
+    //
+    // "지금 이 entry가 어느 group에 있나"가 정말 필요한 소비처(드래그·group focus)는 아래 `groupForFileEntryId`를
+    // 쓴다. 그 함수는 FP16b/B-3에서 group 개념과 함께 **삭제 예정**이라 일부러 이름으로 드러내 둔다.
+
+    /// 창 전체에서 그 경로의 파일 entry. 경로 유일성은 group별이 아니라 **창 전체** 불변식이라 하나뿐이다(§1).
+    fn fileEntryForPath(self: *AppSession, path: []const u8) ?*dock_panel.Entry {
+        if (!self.dock_initialized) return null;
+        const location = self.dock.pathLocation(path) orelse return null;
+        return &location.group.entries.items[location.index];
+    }
+
+    /// 창 전체에서 그 `EntryId`의 파일 entry.
+    fn fileEntryForId(self: *AppSession, entry_id: dock_panel.EntryId) ?*dock_panel.Entry {
+        return self.fileEntryForIdCounted(entry_id, null);
+    }
+
+    /// 방문 수를 계측하는 변형(성능 gate가 소비 — docs/performance-budget.md).
+    fn fileEntryForIdCounted(
+        self: *AppSession,
+        entry_id: dock_panel.EntryId,
+        counters: ?*dock_panel.DockPanel.EntryLookupCounters,
+    ) ?*dock_panel.Entry {
+        if (!self.dock_initialized) return null;
+        const location = self.dock.entryLocationCounted(entry_id, counters) orelse return null;
+        return &location.group.entries.items[location.index];
+    }
+
+    /// **FP16b/B-3에서 삭제 예정**: entry가 속한 group. group 개념 자체가 필요한 소비처(드래그 payload·group
+    /// focus 승계)만 쓴다. 파일 entry의 내용이 필요할 뿐이면 위 `fileEntryForId`를 쓴다.
+    fn groupForFileEntryId(self: *AppSession, entry_id: dock_panel.EntryId) ?*dock_panel.DockGroup {
+        if (!self.dock_initialized) return null;
+        const location = self.dock.entryLocation(entry_id) orelse return null;
+        return location.group;
+    }
+
+    /// 창의 모든 파일 entry 순회. **호출처는 저장 위치를 몰라야 한다** — FP16b가 이 본문을 pane 트리 walk로
+    /// 바꿔도 소비처(파일 트리 마커·종료 보호 게이트·mutation 예약 등)는 그대로 남는다.
+    const FileEntryIterator = struct {
+        session: *AppSession,
+        group_index: usize = 0,
+        entry_index: usize = 0,
+
+        fn next(self: *FileEntryIterator) ?*dock_panel.Entry {
+            if (!self.session.dock_initialized) return null;
+            while (self.group_index < self.session.dock.groupCount()) {
+                const group = self.session.dock.groupAt(self.group_index) orelse {
+                    self.group_index += 1;
+                    self.entry_index = 0;
+                    continue;
+                };
+                if (self.entry_index < group.entries.items.len) {
+                    const entry = &group.entries.items[self.entry_index];
+                    self.entry_index += 1;
+                    return entry;
+                }
+                self.group_index += 1;
+                self.entry_index = 0;
+            }
+            return null;
+        }
+    };
+
+    fn fileEntries(self: *AppSession) FileEntryIterator {
+        return .{ .session = self };
+    }
+
+    /// 읽기 전용 소비처(종료 보호 게이트·파일 트리 보호 판정 등)용 const 변형. `groupAtConst`가 존재하는 이유와
+    /// 같다 — 순수 술어가 `*AppSession`을 요구하지 않게 해 const 정합성을 지킨다.
+    const FileEntryConstIterator = struct {
+        session: *const AppSession,
+        group_index: usize = 0,
+        entry_index: usize = 0,
+
+        fn next(self: *FileEntryConstIterator) ?*const dock_panel.Entry {
+            if (!self.session.dock_initialized) return null;
+            while (self.group_index < self.session.dock.groupCount()) {
+                const group = self.session.dock.groupAtConst(self.group_index) orelse {
+                    self.group_index += 1;
+                    self.entry_index = 0;
+                    continue;
+                };
+                if (self.entry_index < group.entries.items.len) {
+                    const entry = &group.entries.items[self.entry_index];
+                    self.entry_index += 1;
+                    return entry;
+                }
+                self.group_index += 1;
+                self.entry_index = 0;
+            }
+            return null;
+        }
+    };
+
+    fn fileEntriesConst(self: *const AppSession) FileEntryConstIterator {
+        return .{ .session = self };
+    }
+
+    fn dockHasLiveSurface(self: *AppSession) bool {
+        var it = self.fileEntries();
+        while (it.next()) |entry| {
+            if (entry.surface_id != 0) return true;
         }
         return false;
     }
@@ -59218,4 +59283,73 @@ test "browser 전용 판정은 isBrowserTerm 하나가 소유한다 — markdown
     try std.testing.expectEqual(browser.surfaceId(), session.activeWebSurfaceId());
     session.focusTerm(1); // markdown을 활성으로
     try std.testing.expectEqual(@as(u64, 0), session.activeWebSurfaceId());
+}
+
+// FP16b 선행(§10 B-1): 파일 entry 조회 창구가 저장 구조(그룹 트리)를 감추는지 고정한다. FP16b가 소유를 `Term`으로
+// 옮길 때 이 테스트는 **그대로 통과해야 한다** — 통과하지 못하면 API가 저장 위치를 새고 있다는 뜻이다.
+// 다중 그룹으로 세팅하는 이유: 이터레이터가 그룹 경계를 넘는지(한 그룹만 보고 끝내지 않는지) 잡기 위해서다.
+test "FP16b B-1: 파일 entry 조회 API가 그룹 구조를 감춘다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(1400, 900, 1000);
+
+    const g0 = session.dock.singleGroup().?;
+    const a = try session.dock.open(g0, "/tmp/b1-a.md", .markdown);
+    const a_id = a.group.entries.items[a.index].id;
+    _ = try session.dock.open(g0, "/tmp/b1-b.md", .markdown);
+    // 두 번째 그룹을 만들어 이터레이터가 그룹 경계를 넘는지 검증한다.
+    session.splitFocusedDockGroup(.horizontal);
+    try std.testing.expect(session.dock.groupCount() >= 2);
+    const g1 = session.dock.groupAt(1).?;
+    const c = try session.dock.open(g1, "/tmp/b1-c.md", .markdown);
+    const c_id = c.group.entries.items[c.index].id;
+
+    // ① 이터레이터는 그룹과 무관하게 창의 전 entry를 준다.
+    var seen_a = false;
+    var seen_b = false;
+    var seen_c = false;
+    var count: usize = 0;
+    var it = session.fileEntries();
+    while (it.next()) |entry| {
+        count += 1;
+        if (std.mem.eql(u8, entry.path, "/tmp/b1-a.md")) seen_a = true;
+        if (std.mem.eql(u8, entry.path, "/tmp/b1-b.md")) seen_b = true;
+        if (std.mem.eql(u8, entry.path, "/tmp/b1-c.md")) seen_c = true;
+    }
+    try std.testing.expectEqual(session.dock.entryCountTotal(), count);
+    try std.testing.expect(seen_a and seen_b and seen_c);
+
+    // ② const 변형도 같은 집합을 본다(순수 술어용).
+    var const_count: usize = 0;
+    var cit = session.fileEntriesConst();
+    while (cit.next()) |_| const_count += 1;
+    try std.testing.expectEqual(count, const_count);
+
+    // ③ 경로·EntryId 조회는 그룹을 몰라도 정확한 entry를 준다 — 다른 그룹에 있는 c까지.
+    const by_path = session.fileEntryForPath("/tmp/b1-c.md").?;
+    try std.testing.expectEqualStrings("/tmp/b1-c.md", by_path.path);
+    const by_id = session.fileEntryForId(c_id).?;
+    try std.testing.expectEqual(by_path, by_id); // 같은 주소
+    const a_entry = session.fileEntryForId(a_id).?;
+    try std.testing.expectEqualStrings("/tmp/b1-a.md", a_entry.path);
+
+    // ④ 없는 키는 null(창 전체를 뒤진 뒤).
+    try std.testing.expect(session.fileEntryForPath("/tmp/b1-missing.md") == null);
+    try std.testing.expect(session.fileEntryForId(0) == null);
+
+    // ⑤ 반환은 포인터라 호출처가 그룹 인덱싱 없이 바로 변경할 수 있다(mutation 예약 경로가 이 형태를 쓴다).
+    // 검증도 그룹 인덱싱이 아니라 **같은 API 재조회**로 한다 — 내부 배치를 단언하면 이 테스트가 감추려는 바로 그
+    // 구조에 다시 의존하게 되고, FP16b가 소유를 Term으로 옮길 때 통과하지 못한다.
+    by_path.mutation_pending_id = 42;
+    try std.testing.expectEqual(@as(u64, 42), session.fileEntryForPath("/tmp/b1-c.md").?.mutation_pending_id);
 }

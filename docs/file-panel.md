@@ -426,13 +426,13 @@ FP11d의 nested table 행 추가는 `appendPrefixFrom/appendPrefixTo` source ran
 
 | 슬라이스 | 내용 | 상태 |
 |---|---|---|
-| **FP16a — 문서** | 이 개정(§1 결정 뒤집기, §3.3·§3.4·§4·§5.0·§6·§7·§8 계약 갱신) + cross-doc 정합 | 이 PR |
-| **FP16b — 모델** | `dock_panel.Entry`의 소유자를 `DockGroup`→`Term`으로 이동(**`PanelKind`는 안 넓힌다** — §1). 창당 경로 유일성을 pane 트리 walk로 재구현. **`EntryId`/`EntryIdAllocator` 삭제**(§1 불변식으로 불필요해짐). **`== .browser` 판정 8곳을 `isBrowserTerm` 하나로 통합**(중복 정의 6759/14422 제거, 파일 entry 제외 조건 추가 — §8) | **통합 완료**(PR #1638), 제외 조건은 B-2b |
-| **FP16c — 수명(핵심)** | §4: `collectWebSurfaces` walk를 창 전 탭으로 확장, 비활성 워크스페이스는 zero rect + hidden. presence 게이트 동반 확장 | 대기 |
+| **FP16a — 문서 ✅** | 이 개정(§1 결정 뒤집기, §3.3·§3.4·§4·§5.0·§6·§7·§8 계약 갱신) + cross-doc 정합 | 완료 |
+| **FP16b — 모델** | `dock_panel.Entry`의 소유자를 `DockGroup`→`Term`으로 이동(**`PanelKind`는 안 넓힌다** — §1). 창당 경로 유일성을 pane 트리 walk로 재구현. **`EntryId`/`EntryIdAllocator` 삭제**(§1 불변식으로 불필요해짐). **`== .browser` 판정 8곳을 `isBrowserTerm` 하나로 통합**(중복 정의 6759/14422 제거, 파일 entry 제외 조건 추가 — §8) | 완료(2026-07-27~28) |
+| **FP16c — 수명(핵심)** | §4: `collectWebSurfaces` walk를 창 전 탭으로 확장, 비활성 워크스페이스는 zero rect + hidden. presence 게이트 동반 확장 | 완료(2026-07-28) |
 | **FP16d — chrome ✅** | §3.1 헤더 밴드를 파일 Term의 `ChromeInset.top`으로 이관(2026-07-28). 밴드 rect는 browser 주소창 밴드와 같은 `paneBandRect` 한 줄, 배치 권위는 `dock_layout.headerCellLayout` 그대로(렌더=`buildFilePanelHeaderDrawList`·hit-test가 같은 cell 범위 공유). `headerControlRect`/`headerModeRect`/`headerModeAt`/`headerConflictRect`/`headerDirtyRect`는 `Geometry` 대신 **밴드 `Rect`**를 받는다. 탭 라벨·dirty·`X`는 pane 탭바 계약 재사용 | 완료 |
 | **FP16g — rename 재설계 ✅** | §1 불변식의 ⑵⑶⑷ 구현 — 신뢰 kind는 `entry.path`만 교체(무통지, S3·S4), html·pdf는 Term 같은 자리 재생성(S1), plan 키를 `EntryId`→expected path + `mutation_pending_id`로 전환(S2). **FP16b가 `EntryId`를 지우므로 b와 함께 가거나 b 직후여야 한다** | 대기 |
 | **FP16e — 도크 축소 ✅** | `dock_layout`을 트리 전용으로(2026-07-28), `DockGroup`/`DockTree`/drop/`dock_drag.zig` 삭제(2026-07-28 — `dock_panel.zig` 1581→406줄), 팔릿 액션 3개 삭제(완료). `DockPanel`은 이제 도크 배치 상태 + **평탄한 복원 목록**만 든다 — 파일 소유는 `Term.file_entry`다. | 완료 |
-| **FP16f — 영속·검증** | §5.0 포맷(`file-term` 키 + persisted 압축 인덱스 + placeholder 조건 + 1회 마이그레이션), 테스트 재작성, macOS 실행 확인 | 대기 |
+| **FP16f — 영속·검증** | §5.0 포맷(`file-term` 키 + persisted 압축 인덱스 + placeholder 조건 + 1회 마이그레이션), 테스트 재작성, macOS 실행 확인 | 구현 완료(2026-07-28) — macOS 컴파일·서명 green, **GUI 손 테스트 대기** |
 
 **FP16e/f가 건드리는 테스트 실측**(적대적 검증에서 계수 — 초안의 "44개"는 `app_session.zig` 한 파일만 센 값이라 과소였다): `app_session.zig` 44(dock·file panel) + `dock_panel.zig` 28 + `dock_layout.zig` 13 + `dock_drag.zig` 5 + `workspace.zig` 8 = **약 98개**. 이 중 `dock_drag.zig` 5개는 모듈과 함께 삭제되고, `dock_panel`/`dock_layout`의 group·split·tab 기하 테스트는 pane 탭바 계약으로 이관되거나 삭제된다. `app_session.zig`의 파일 트리 테스트 18개는 트리가 남으므로 대체로 보존된다.
 

@@ -6768,6 +6768,39 @@ pub const AppSession = struct {
         for (self.tabs.items) |t| if (tabHasWebBrowser(t)) return true;
         return false;
     }
+    /// 닫힐 scope 안에 **보호 상태의 파일 Term**(dirty·dirty-sync 대기·external conflict·mutation pending·
+    /// 편집 모드)이 있나. FP16 전에는 파일이 pane 트리 밖이라 일반 close cascade가 파일에 닿을 수 없었고
+    /// 보호는 `session` scope(⌘Q·창 닫기)에만 필요했다. 이제 파일이 pane 탭이므로 ⌘W·탭바 ✕·close_tab·
+    /// reap cascade가 전부 파일 Term을 파괴할 수 있어 **모든 scope**가 이 게이트를 지나야 한다 —
+    /// 안 그러면 미저장 버퍼가 프롬프트 없이 사라진다(code-review max).
+    fn scopeHasProtectedFilePanel(self: *AppSession, scope: CloseScope) bool {
+        return switch (scope) {
+            .none => false,
+            .term => termHasProtectedFilePanel(self.activePane().activeTerm()),
+            .pane => paneHasProtectedFilePanel(self.activePane()),
+            .tab => |idx| tabHasProtectedFilePanel(self.tabs.items[idx]),
+            .session => blk: {
+                for (self.tabs.items) |tab| if (tabHasProtectedFilePanel(tab)) break :blk true;
+                break :blk false;
+            },
+        };
+    }
+
+    fn termHasProtectedFilePanel(term: *Term) bool {
+        const entry = term.file_entry orelse return false;
+        return filePanelEntryNeedsDirtyProtection(entry.*);
+    }
+
+    fn paneHasProtectedFilePanel(pane: *Pane) bool {
+        for (pane.terms.items) |t| if (termHasProtectedFilePanel(t)) return true;
+        return false;
+    }
+
+    fn tabHasProtectedFilePanel(tab: *Tab) bool {
+        for (tab.panes.items) |pane| if (paneHasProtectedFilePanel(pane)) return true;
+        return false;
+    }
+
     fn scopeHasWebBrowser(self: *AppSession, scope: CloseScope) bool {
         return switch (scope) {
             .none => false,
@@ -6856,6 +6889,13 @@ pub const AppSession = struct {
     fn requestClose(self: *AppSession, target: PendingClose) void {
         const scope = self.resolveCloseScope(target); // cascade 단일 출처(판정·실행 공유). 아래 두 분기가 이 범위를 함께 쓴다.
         if (scope == .session and self.blockSessionExitForFilePanels()) return;
+        // FP16: 파일이 pane 탭이 되면서 term/pane/tab scope도 파일 Term을 파괴할 수 있다. 보호 상태 파일이 있으면
+        // 여기서 막고 사용자가 저장·닫기를 먼저 하게 한다 — 옛 session 전용 게이트만으로는 ⌘W 한 번에 미저장
+        // 버퍼가 사라진다(code-review max).
+        if (scope != .session and self.scopeHasProtectedFilePanel(scope)) {
+            self.showNotice("저장하지 않은 파일 탭을 먼저 저장하거나 닫아 주세요.");
+            return;
+        }
         // 마지막(유일) 창에서 세션 전체를 닫는 인앱 제스처는 곧 앱 종료다 — 창 하나 닫기보다 파괴적이라(열린 모든
         // 탭·pane이 함께 소멸) Cmd+Q와 **동일하게** 실행 중 명령 유무와 무관하게 "maru를 종료할까요?" 종료 확인을 띄운다
         // (사용자 결정 2026-07). `is_last_window`는 host가 주입한다(리프는 형제 창을 모름) — false면(멀티 창의 비-마지막
@@ -14085,9 +14125,15 @@ pub const AppSession = struct {
     /// 카운터가 아니라 매 tick 활성 탭 트리에서 계산**한 신호라 `collectWebSurfaces`(활성 탭만 walk)와 **정확히 같은 범위** —
     /// 창 간 이동(moveWorkspaceToSession=detach/adopt 포인터 relocate, destroy/create 없음)·재부모화·닫기 어느 경로에도
     /// 트리가 단일 출처로 자동 정합한다(옛 유지 카운터는 이동에서 원본 stuck-high·대상 stuck-0으로 드리프트했다). alloc-free 재귀.
+    /// 창의 **어느 탭에든** web Term이 있나. FP16c로 수집 범위가 창 전체가 됐으므로 presence 신호도 같은 범위여야
+    /// 한다 — 활성 탭만 보면 비활성 워크스페이스의 첫 web surface 생성 전이가 영영 미적용된다(FP3이 도크에서
+    /// 실측으로 겪은 것과 같은 결함).
     fn activeTabHasWebTerm(self: *AppSession) bool {
         if (!self.surface_initialized or self.tabs.items.len == 0) return false;
-        return PaneTree.anyLeaf(self.activeTab().tree, paneHasWebTerm);
+        for (self.tabs.items) |tab| {
+            if (PaneTree.anyLeaf(tab.tree, paneHasWebTerm)) return true;
+        }
+        return false;
     }
 
     // ── 파일 entry 접근 (FP16b 선행 — docs/file-panel.md §10 B-1) ─────────────────────────────────
@@ -14201,17 +14247,11 @@ pub const AppSession = struct {
             for (tab.panes.items) |pane| {
                 for (pane.terms.items, 0..) |term, term_index| {
                     if (term.file_entry != entry) continue;
-                    if (pane.terms.items.len <= 1) return false;
-                    self.cancelPointerGestureForTermRemoval(tab_index, pane, term_index);
-                    _ = pane.terms.orderedRemove(term_index);
-                    self.destroyTerm(term);
-                    if (pane.active_term >= pane.terms.items.len)
-                        pane.active_term = pane.terms.items.len - 1;
-                    if (tab_index == self.app_window.active_tab) {
-                        self.surface_ptrs.items[tab_index] = self.activePane().activeTerm().surface;
-                        self.app_window.tabs = self.surface_ptrs.items;
-                        self.recomputeActivePaneRect();
-                    }
+                    // **정규 경로에 위임한다.** 직접 orderedRemove하면 ⑴ 배경 탭의 surface_ptrs 재바인딩을
+                    // 빠뜨려 해제된 Surface 포인터가 남고(use-after-free), ⑵ active_term을 clamp만 해서 활성보다
+                    // 앞 탭을 지울 때 엉뚱한 탭이 올라오며, ⑶ 빈 pane collapse·마지막 pane의 워크스페이스 close
+                    // cascade가 통째로 빠진다. closeTermAt이 셋 다 단일 출처로 소유한다(code-review max).
+                    self.closeTermAt(tab_index, pane, term_index);
                     self.metal_dirty = true;
                     return true;
                 }
@@ -14537,6 +14577,29 @@ pub const AppSession = struct {
                         // WKWebView를 숨길 필요 없이 surfaceDiff의 reframe으로 라이브 추종할 수 있다.
                         .visible = i == lr.leaf.active_term,
                     });
+                }
+            }
+        }
+
+        // FP16c: 비활성 워크스페이스(탭)의 web Term도 집합에 남긴다 — zero rect + hidden. 집합에서 빠지면
+        // surfaceDiff가 destroyed를 내고 Swift가 WKWebView를 파괴해 **미저장 CM6 버퍼가 사라진다**. 도크 분기가
+        // 이미 쓰던 "존재는 유지, 가시성만 끔" 패턴을 워크스페이스 경로로 옮긴 것이다(§4). 적용 범위는 파일뿐
+        // 아니라 web Term 전체라, 브라우저가 전환 뒤 흰 페이지가 되던 결함도 함께 사라진다.
+        if (self.surface_initialized) {
+            for (self.tabs.items, 0..) |tab, ti| {
+                if (ti == self.app_window.active_tab) continue;
+                for (tab.panes.items) |pane| {
+                    for (pane.terms.items) |term| {
+                        if (term.kind != .web) continue;
+                        try out.append(self.allocator, .{
+                            .surface_id = term.surfaceId(),
+                            .panel_kind = term.web_panel_kind,
+                            .seam_edges = 0,
+                            .divider_grab_bands_pt = .{},
+                            .content_rect = .{ .x = 0, .y = 0, .w = 0, .h = 0 },
+                            .visible = false,
+                        });
+                    }
                 }
             }
         }
@@ -23879,7 +23942,9 @@ pub const AppSession = struct {
         // FP16 2-2r: 여기서 소유를 목록으로 옮긴다. 이후 단계(파일 트리·watcher·rows)는 dock 구조가 아니라
         // 이 목록을 소비하고, 실제 배치(어느 pane의 Term이 되나)는 탭이 생긴 뒤에 정한다.
         var restored_entries = try flattenRestoredDock(self.allocator, &new_dock);
-        errdefer restored_entries.deinit(self.allocator);
+        // 성공 경로에서도 backing buffer를 반납해야 한다 — 이관이 소유를 가져가도 ArrayList 자체는 남는다.
+        // 이관이 건너뛰어진 경우(탭 0개)엔 path 문자열까지 여기서 회수된다.
+        defer restored_entries.deinit(self.allocator);
         // capability validation can empty a leaf after DockPanel.restore already normalized the wire tree.
         // Publish/assign surface IDs only after applying the same empty-leaf invariant a second time.
         dropped += new_dock.pruneEmptyGroups();
@@ -29864,6 +29929,11 @@ pub const AppSession = struct {
                     // git_branch 캐시 + auto_title 캐시(Term-owned) 해제 — destroyTerm과 같은 규율(deinit은 surface 정리를
                     // config/appearance 해제 앞에 두려 teardown을 직접 풀어 써서 destroyTerm을 못 부르므로 여기서도 해제).
                     // custom_name·surface는 번들 deinit이 소유한다(M3a). destroyTerm의 Term-owned 필드 목록과 동기 유지할 것.
+                    if (term.file_entry) |entry| { // FP16: Term 소유 파일 entry — destroyTerm과 같은 목록(위 주석의 동기 규율)
+                        self.allocator.free(entry.path);
+                        self.allocator.destroy(entry);
+                        term.file_entry = null;
+                    }
                     if (term.git_branch) |b| self.allocator.free(b);
                     if (term.git_branch_cwd) |c| self.allocator.free(c);
                     term.auto_title.deinit(self.allocator);

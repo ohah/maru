@@ -13821,6 +13821,16 @@ pub const AppSession = struct {
         }
     };
 
+    /// 아직 `self.tabs`에 설치되지 않은 복원 pane이 이미 그 경로의 파일 Term을 들고 있나(마이그레이션 dedup).
+    fn restoredPaneHasPath(self: *AppSession, pane: *Pane, path: []const u8) bool {
+        _ = self;
+        for (pane.terms.items) |term| {
+            const entry = term.file_entry orelse continue;
+            if (std.mem.eql(u8, entry.path, path)) return true;
+        }
+        return false;
+    }
+
     /// 복원된 `DockPanel`의 평탄 목록에서 소유를 가져온다(panel은 비워진다). 와이어 파싱·검증·mode clamp는
     /// `DockPanel.restore`가 이미 했으므로 재구현하지 않고 결과만 가져온다 — 포맷 규칙의 단일 출처 유지.
     fn flattenRestoredDock(
@@ -13847,6 +13857,28 @@ pub const AppSession = struct {
         entries: *RestoredFileEntries,
         pane: *Pane,
     ) !void {
+        // §5.0 마이그레이션 규칙: 옛 `dock-entry`를 이어 붙이는 중에도 **창당 경로 유일성**을 강제한다.
+        // 이 시점 `self.tabs`는 아직 옛 것이지만 `pane`은 새로 만든 탭의 것이므로, 이미 배치된 새 탭들의
+        // 파일 Term을 기준으로 본다. 중복은 첫 번째(pane이 자기 `file-term`으로 들고 온 것)만 남긴다.
+        {
+            var i: usize = 0;
+            while (i < entries.items.items.len) {
+                const candidate = entries.items.items[i];
+                if (self.restoredPaneHasPath(pane, candidate.path)) {
+                    _ = entries.items.orderedRemove(i);
+                    self.allocator.free(candidate.path);
+                    if (entries.active_index) |ai| {
+                        if (ai == i) entries.active_index = null else if (ai > i) entries.active_index = ai - 1;
+                    }
+                    continue;
+                }
+                i += 1;
+            }
+        }
+        var had_file_terms = false;
+        for (pane.terms.items) |term| {
+            if (term.file_entry != null) had_file_terms = true;
+        }
         const count = entries.items.items.len;
         if (count == 0) return;
 
@@ -13876,8 +13908,10 @@ pub const AppSession = struct {
             pane.terms.appendAssumeCapacity(p.term);
         }
         // 호출자(applyWorkspaceWindow)가 이미 "비어 있지 않으면 하나는 활성"으로 정규화해 둔다.
+        // 단, 이 pane이 **이미 새 포맷(`file-term`)으로 자기 파일 탭을 들고 왔으면** 그 `active-term`이
+        // 권위다 — legacy `dock-entry` 마이그레이션은 **이어 붙이기**지 활성 전환이 아니다(§5.0).
         const active_index = entries.active_index orelse 0;
-        if (first_index + active_index < pane.terms.items.len) {
+        if (!had_file_terms and first_index + active_index < pane.terms.items.len) {
             pane.active_term = first_index + active_index;
         }
         // 목록은 더 이상 path를 소유하지 않는다(heap Entry로 이동) — 해제 없이 비운다.
@@ -23215,10 +23249,25 @@ pub const AppSession = struct {
         var panes: std.ArrayList(maru.session.workspace.Pane) = .empty;
         for (tab.panes.items) |pane| {
             var surfaces: std.ArrayList(maru.session.workspace.Surface) = .empty;
+            // FP16 §5.0: persisted 시퀀스는 **터미널 + 파일 Term**이다(브라우저는 계속 미영속). 파일 Term은
+            // `pane` 줄의 `file-term` 반복 필드로 나가고, 그 index가 이 시퀀스 안의 위치다.
+            var file_terms: std.ArrayList(maru.session.workspace.FileTerm) = .empty;
+            var persisted_index: usize = 0;
             for (pane.terms.items) |term| {
-                // 4e web Term은 sentinel core라 일반 surface로 직렬화하면 복원 시 셸로 오spawn된다 — capture서 스킵한다
-                // (workspace.Surface에 kind 필드가 없어 web 콘텐츠를 영속할 수 없다; Phase 5서 포맷에 kind 추가 전까지).
+                if (term.file_entry) |entry| {
+                    try file_terms.append(arena, .{
+                        .index = persisted_index,
+                        .kind = entry.kind,
+                        .mode = entry.mode,
+                        .path = try arena.dupe(u8, entry.path),
+                    });
+                    persisted_index += 1;
+                    continue;
+                }
+                // 4e web Term(브라우저)은 sentinel core라 일반 surface로 직렬화하면 복원 시 셸로 오spawn된다 —
+                // capture서 스킵한다(workspace.Surface에 kind 필드가 없어 web 콘텐츠를 영속할 수 없다).
                 if (term.kind == .web) continue;
+                persisted_index += 1;
                 self.refreshTermObservation(term, false, true);
                 const observed_size = if (term.rt.observation.size.cols > 0 and term.rt.observation.size.rows > 0)
                     term.rt.observation.size
@@ -23259,7 +23308,10 @@ pub const AppSession = struct {
             // 중단**한다 — 기본 셸 placeholder 1개를 넣어 그 pane이 기본 로그인 셸로 복원되게 한다(제목/cwd/command/
             // agent 전부 빈값 → restoreSpawn 기본 셸; 브라우저 콘텐츠는 어차피 미영속). 크기는 pane 첫 Term의 (sentinel여도
             // 유효한) core size에서 취한다.
-            if (surfaces.items.len == 0) {
+            // FP16 §5.0: 조건이 "PTY 목록이 비었나"가 아니라 "**persisted Term이 0인가**"다 — 파일 Term만 있는
+            // pane에 엉뚱한 셸 placeholder가 끼면 복원 때 안 열었던 터미널이 생긴다. 브라우저만 있는 pane은
+            // 여전히 persisted 0이라 placeholder를 받는다(현행 동작 유지).
+            if (surfaces.items.len == 0 and file_terms.items.len == 0) {
                 const c = &pane.terms.items[0].surface.core; // sentinel이어도 size 유효(1×1)
                 try surfaces.append(arena, .{
                     .custom_name = try arena.dupe(u8, ""),
@@ -23275,14 +23327,17 @@ pub const AppSession = struct {
             // 인덱스가 된다. buildWorkspacePane의 @min(active_term, terms.len-1)은 상한만 clamp하지 스킵 시프트는 remap
             // 안 하므로(그래서 [browser, termA, termB]서 termA 활성이면 복원 시 termB로 오포커스했다), 여기서 정확히 remap.
             // web-only pane(placeholder 1개)은 앞 터미널 0개라 0.
+            // FP16 §5.0: remap 기준이 "앞의 비-web Term 수"에서 "**앞의 persisted Term 수**"(터미널 + 파일)로
+            // 넓어진다. 활성이 브라우저면 다음 persisted Term을 가리키며, 이는 현행 web 활성 시 성질과 같다.
             var restored_active: usize = 0;
             for (pane.terms.items[0..pane.active_term]) |t| {
-                if (t.kind != .web) restored_active += 1;
+                if (t.file_entry != null or t.kind != .web) restored_active += 1;
             }
             try panes.append(arena, .{
                 .active_term = restored_active,
                 .custom_name = try arena.dupe(u8, pane.custom_name orelse ""), // pane 사용자 rename(없으면 "")
                 .surfaces = try surfaces.toOwnedSlice(arena),
+                .file_terms = try file_terms.toOwnedSlice(arena),
             });
         }
         var tree: std.ArrayList(maru.session.workspace.TreeNode) = .empty;
@@ -23741,14 +23796,83 @@ pub const AppSession = struct {
     // Model.buildTreeNode(self.allocator 대신 allocator 인자로 pure화). 단일 출처: src/session/session_model.zig.
 
     /// 모델 Pane → 완성된 *Pane. 첫 surface로 createPane(=1 Term)하고 나머지 surface를 Term으로 추가한다.
+    /// FP16 §5.0: pane은 **persisted 시퀀스**(터미널 surface + 파일 Term)를 index 순서대로 되살린다.
+    /// `file-term`의 index가 그 시퀀스 안의 자리이고, 나머지 자리를 `surfaces`가 순서대로 채운다.
+    /// pane은 항상 Term >= 1이어야 하므로(모델 불변식) 시퀀스가 비면 `EmptyPane`이다.
     fn buildWorkspacePane(self: *AppSession, m: maru.session.workspace.Pane) !*Pane {
-        if (m.surfaces.len == 0) return error.EmptyPane;
-        const pane = try self.createPaneFromSurface(m.surfaces[0]);
+        const total = m.surfaces.len + m.file_terms.len;
+        if (total == 0) return error.EmptyPane;
+
+        // pane 생성은 surface 하나가 필요하다. 터미널이 하나도 없는(파일 Term만인) pane은 첫 파일로 만든다.
+        var pane: *Pane = undefined;
+        var next_surface: usize = 0;
+        var seeded_file = false;
+        if (m.surfaces.len > 0) {
+            pane = try self.createPaneFromSurface(m.surfaces[0]);
+            next_surface = 1;
+        } else {
+            pane = try self.createPaneFromFileTerm(m.file_terms[0]);
+            seeded_file = true;
+        }
         errdefer self.destroyPane(pane);
-        pane.custom_name = try self.dupeCustomName(m.custom_name); // pane 사용자 rename 복원(errdefer destroyPane이 정리)
-        try pane.terms.ensureTotalCapacity(self.allocator, m.surfaces.len);
-        for (m.surfaces[1..]) |sm| pane.terms.appendAssumeCapacity(try self.createTermFromSurface(sm));
+        pane.custom_name = try self.dupeCustomName(m.custom_name); // pane 사용자 rename 복원(errdefer destroyPane가 free)
+        try pane.terms.ensureTotalCapacity(self.allocator, total);
+
+        // 시퀀스를 앞에서부터 채운다. 각 자리는 그 index를 요구하는 file-term이 있으면 파일 Term, 없으면
+        // 다음 터미널 surface다(검증 — index 중복 없음·[0,total) 전수 — 은 파서가 이미 했다). seed로 이미
+        // 만든 Term은 건너뛴다.
+        var slot: usize = 0;
+        var seed_file_used = !seeded_file;
+        while (slot < total) : (slot += 1) {
+            const file_index: ?usize = blk: {
+                for (m.file_terms, 0..) |ft, fi| if (ft.index == slot) break :blk fi;
+                break :blk null;
+            };
+            if (file_index) |fi| {
+                if (!seed_file_used) {
+                    seed_file_used = true; // seed가 곧 이 자리의 파일이다(터미널 0개인 pane)
+                    continue;
+                }
+                pane.terms.appendAssumeCapacity(try self.createFileTermFromModel(m.file_terms[fi]));
+                continue;
+            }
+            if (next_surface >= m.surfaces.len) continue; // seed로 쓴 surface 자리
+            pane.terms.appendAssumeCapacity(try self.createTermFromSurface(m.surfaces[next_surface]));
+            next_surface += 1;
+        }
         pane.active_term = @min(m.active_term, pane.terms.items.len - 1);
+        return pane;
+    }
+
+    /// 복원 모델의 파일 Term 하나를 라이브 web Term + entry로 되살린다. 소유는 라이브 열기와 같다 —
+    /// Term이 entry와 path를 든다(§1).
+    fn createFileTermFromModel(self: *AppSession, m: maru.session.workspace.FileTerm) !*Term {
+        const entry = try self.allocator.create(dock_panel.Entry);
+        errdefer self.allocator.destroy(entry);
+        const owned_path = try self.allocator.dupe(u8, m.path);
+        errdefer self.allocator.free(owned_path);
+        entry.* = .{
+            .id = try app_runtime.entry_ids.next(),
+            .path = owned_path,
+            .kind = m.kind,
+            .mode = m.mode,
+        };
+        const term = try self.createWebTerm(panelKindForEntryKind(m.kind));
+        // 이 시점 term.file_entry는 null이라 destroyTerm이 entry를 건드리지 않는다 — 위 errdefer가 소유를 지킨다.
+        errdefer self.destroyTerm(term);
+        term.file_entry = entry;
+        entry.surface_id = term.surfaceId();
+        return term;
+    }
+
+    /// 터미널 surface가 하나도 없는 pane(파일 Term만)의 pane 생성 seed.
+    fn createPaneFromFileTerm(self: *AppSession, m: maru.session.workspace.FileTerm) !*Pane {
+        const pane = try self.allocator.create(Pane);
+        errdefer self.allocator.destroy(pane);
+        pane.* = .{};
+        const term = try self.createFileTermFromModel(m);
+        errdefer self.destroyTerm(term);
+        try pane.terms.append(self.allocator, term);
         return pane;
     }
 
@@ -46176,7 +46300,11 @@ test "FP5 workspace restore prunes invalid file panel capabilities and degrades 
     var restored2 = captured2;
     restored2.dock = .{ .entries = &invalid_only };
     try session.applyWorkspaceWindow(restored2);
-    try std.testing.expectEqual(@as(usize, 0), session.fileEntryCount());
+    // B-4: 캡처가 파일 탭을 pane `file-term`으로 싣게 됐으므로, 이 창을 다시 적용하면 그 파일은 살아 돌아온다.
+    // 여기서 검증하는 건 **legacy `dock-entry` 경로**다 — 디렉터리를 가리키는 옛 entry는 버려지고(마이그레이션
+    // 입력이 0개가 되고), pane이 들고 온 파일만 남는다.
+    try std.testing.expectEqual(@as(usize, 1), session.fileEntryCount());
+    try std.testing.expectEqualStrings(valid_path, session.fileEntryAt(0).?.path);
 
     // 옛 다중 group 배치로 저장된 파일도(B-4 전까지 와이어는 그대로 읽는다) 평탄화돼 한 pane의 파일 탭이 된다.
     // 검증 대상이 "group 배치 보존"에서 "**유효 entry 집합과 활성 선택**"으로 바뀐 자리다.
@@ -58521,4 +58649,62 @@ test "FP16b B-1: 파일 entry 조회 API가 그룹 구조를 감춘다" {
     // 구조에 다시 의존하게 되고, FP16b가 소유를 Term으로 옮길 때 통과하지 못한다.
     by_path.mutation_pending_id = 42;
     try std.testing.expectEqual(@as(u64, 42), session.fileEntryForPath("/tmp/b1-c.md").?.mutation_pending_id);
+}
+
+// FP16 §5.0 왕복 게이트: 파일 Term이 `pane` 줄의 `file-term` 필드로 나갔다가 **같은 자리**로 돌아온다.
+// 브라우저가 섞인 pane에서 persisted 인덱스가 런타임 인덱스와 갈리는 것이 이 포맷의 핵심 제약이라, 그
+// 조합을 실제 세션으로 왕복시킨다.
+test "FP16 영속: 파일 Term이 pane file-term으로 왕복하고 브라우저는 자리를 비운다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+
+    // pane: [terminal, browser, alpha.md, beta.html] — persisted 시퀀스는 [terminal, alpha, beta]다.
+    _ = try session.newWebTermInActivePane(.browser);
+    _ = try session.openFileTermInActivePane("/tmp/fp16-persist-alpha.md", .markdown);
+    _ = try session.openFileTermInActivePane("/tmp/fp16-persist-beta.html", .html);
+    session.assignDockSurfaceIds();
+    session.fileEntryForPath("/tmp/fp16-persist-alpha.md").?.mode = .source_edit;
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const win = try session.captureWorkspaceWindow(arena.allocator(), false, null);
+    const pane_model = win.tabs[0].panes[0];
+    try std.testing.expectEqual(@as(usize, 2), pane_model.file_terms.len);
+    try std.testing.expectEqual(@as(usize, 1), pane_model.surfaces.len); // 터미널 하나만 PTY surface
+    // 브라우저는 미영속이라 자리를 차지하지 않는다 — alpha가 1, beta가 2다.
+    try std.testing.expectEqual(@as(usize, 1), pane_model.file_terms[0].index);
+    try std.testing.expectEqual(@as(usize, 2), pane_model.file_terms[1].index);
+    try std.testing.expectEqual(dock_panel.Mode.source_edit, pane_model.file_terms[0].mode);
+    // 활성(beta, 런타임 3)은 persisted 2로 remap된다.
+    try std.testing.expectEqual(@as(usize, 2), pane_model.active_term);
+
+    // 텍스트 왕복까지 태운다 — 필드 문법·self-delimiting 경로가 실제로 되돌아오는지가 요점이다.
+    const windows = [_]maru.session.workspace.Window{win};
+    const text = try maru.session.workspace.serialize(allocator, .{ .windows = &windows });
+    defer allocator.free(text);
+    try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, text, "file-term=\""));
+    try std.testing.expect(std.mem.indexOf(u8, text, "dock-entry=\"") == null);
+    var parsed = try maru.session.workspace.parse(allocator, text);
+    defer parsed.deinit();
+    const round = parsed.workspace.windows[0].tabs[0].panes[0];
+    try std.testing.expectEqual(@as(usize, 2), round.file_terms.len);
+    try std.testing.expectEqualStrings("/tmp/fp16-persist-alpha.md", round.file_terms[0].path);
+    try std.testing.expectEqualStrings("/tmp/fp16-persist-beta.html", round.file_terms[1].path);
+
+    // 복원: 파일 Term이 persisted 자리대로 되살아난다(터미널 0, alpha 1, beta 2).
+    // 라이브 편집 mode는 복원을 fail-close하므로(§3.2 종료 보호) 적용 전에 읽기로 되돌린다 — 텍스트에는
+    // 이미 source_edit이 실려 있어 왕복 검증에는 영향이 없다.
+    session.fileEntryForPath("/tmp/fp16-persist-alpha.md").?.mode = .read;
+    try session.applyWorkspaceWindow(parsed.workspace.windows[0]);
+    const pane = session.activePane();
+    try std.testing.expectEqual(@as(usize, 3), pane.terms.items.len);
+    try std.testing.expect(pane.terms.items[0].file_entry == null); // 터미널
+    try std.testing.expectEqualStrings("/tmp/fp16-persist-alpha.md", pane.terms.items[1].file_entry.?.path);
+    try std.testing.expectEqualStrings("/tmp/fp16-persist-beta.html", pane.terms.items[2].file_entry.?.path);
+    try std.testing.expectEqual(dock_panel.Mode.source_edit, pane.terms.items[1].file_entry.?.mode);
+    try std.testing.expectEqual(@as(usize, 2), pane.active_term);
+    try std.testing.expectEqual(@as(usize, 2), session.fileEntryCount());
 }

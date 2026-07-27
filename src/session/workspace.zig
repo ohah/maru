@@ -86,11 +86,27 @@ pub const Surface = struct {
 };
 
 /// split leaf 한 칸(panel) — 가로 탭으로 여러 Term을 들 수 있다(탭→pane 모델). active-term = 보이는 Term.
+/// FP16 파일 Term 레코드. `pane` 줄의 **반복 필드** `file-term`으로 저장한다 — 새 line kind를 만들면 옛
+/// 리더가 창 블록 중간의 미지 줄에서 `BadLine`으로 파일 전체를 폴백시키지만(§5.1), 필드는 forgiving하게
+/// 무시되기 때문이다(docs/file-panel.md §5.0).
+///
+/// `index`는 런타임 Term 인덱스가 아니라 **persisted 시퀀스**(터미널 + 파일 Term, 브라우저 제외) 안의
+/// 위치다. 브라우저 Term은 계속 미영속이라, 런타임 인덱스를 쓰면 `[terminal, browser, file]` pane에서
+/// 복원 Term이 2개뿐인데 index가 2라 그 창 전체가 fail-close된다.
+pub const FileTerm = struct {
+    index: usize,
+    kind: dock_panel.EntryKind,
+    mode: dock_panel.Mode,
+    path: []const u8,
+};
+
 pub const Pane = struct {
     active_term: usize = 0,
     // 사용자 지정 이름(rename). Pane은 자동 제목 출처가 없어 custom_name 하나뿐(""=없음). 탭바 좌측 라벨 세그먼트로 표시.
     custom_name: []const u8 = "",
     surfaces: []const Surface,
+    /// 이 pane의 파일 Term들(persisted index 순서는 무관 — 리더가 index로 재배치한다).
+    file_terms: []const FileTerm = &.{},
 };
 
 /// 한 워크스페이스(사이드바 탭) — pane split 트리 + 그 leaf들이 가리키는 pane 섹션들. active-pane = 포커스 panel.
@@ -295,14 +311,9 @@ fn writeWindow(w: *std.Io.Writer, win: Window) !void {
         }
         try w.writeByte('"');
     }
-    for (win.dock.entries) |entry| try writeDockEntry(w, entry);
-    if (win.dock.groups.len != 0) {
-        try w.print(" dock-group-count={d} dock-focused-group={d}", .{ win.dock.groups.len, win.dock.focused_group });
-        for (win.dock.tree) |node| try writeDockNode(w, node);
-        for (win.dock.groups, 0..) |group, group_index| {
-            for (group.entries) |entry| try writeDockEntryV2(w, group_index, entry);
-        }
-    }
+    // FP16 §5.0: 파일 목록은 창 줄이 아니라 각 `pane` 줄의 `file-term` 필드로 나간다. 창 줄에 남는 도크 키는
+    // **탐색기 것뿐**이다(dock-size·dock-tree-size·dock-collapsed·dock-presented·dock-tree-roots).
+    // 옛 `dock-entry`/`dock-entry-v2`/`dock-node`/`dock-group-*`는 **읽기만** 유지한다(1회 마이그레이션).
     try w.writeByte('\n');
     for (win.tabs) |tab| try writeTab(w, tab);
 }
@@ -385,30 +396,6 @@ fn validateDockTree(nodes: []const dock_panel.PersistedTreeNode, index: *usize, 
     }
 }
 
-fn writeDockEntry(w: *std.Io.Writer, entry: dock_panel.PersistedEntry) !void {
-    // 외부 quoted 값 안의 self-delimiting payload: kind:mode:active:path-byte-len:path. path를 마지막에 두고 길이를
-    // 앞에 써 `:`·공백·개행·따옴표가 들어간 macOS 파일명도 별도 delimiter escape 없이 정확히 왕복한다. 바깥
-    // writeEscaped가 workspace 라인 문법만 보호한다.
-    const mode = entry.mode.workspaceName();
-    try w.print(" dock-entry=\"{s}:{s}:{d}:{d}:", .{ @tagName(entry.kind), mode, @intFromBool(entry.active), entry.path.len });
-    try writeEscaped(w, entry.path);
-    try w.writeByte('"');
-}
-
-fn writeDockEntryV2(w: *std.Io.Writer, group_index: usize, entry: dock_panel.PersistedEntry) !void {
-    const mode = entry.mode.workspaceName();
-    try w.print(" dock-entry-v2=\"{d}:{s}:{s}:{d}:{d}:", .{ group_index, @tagName(entry.kind), mode, @intFromBool(entry.active), entry.path.len });
-    try writeEscaped(w, entry.path);
-    try w.writeByte('"');
-}
-
-fn writeDockNode(w: *std.Io.Writer, node: dock_panel.PersistedTreeNode) !void {
-    switch (node) {
-        .leaf => |group_index| try w.print(" dock-node=\"leaf:{d}\"", .{group_index}),
-        .split => |split| try w.print(" dock-node=\"split:{s}:{d}\"", .{ @tagName(split.direction), split.ratio_milli }),
-    }
-}
-
 fn writeTab(w: *std.Io.Writer, tab: Tab) !void {
     try w.print("tab panes={d} active-pane={d} custom-name=\"", .{ tab.panes.len, tab.active_pane });
     try writeEscaped(w, tab.custom_name);
@@ -448,8 +435,20 @@ fn writeTreeNode(w: *std.Io.Writer, node: TreeNode) !void {
 fn writePane(w: *std.Io.Writer, pane: Pane) !void {
     try w.print("pane surfaces={d} active-term={d} custom-name=\"", .{ pane.surfaces.len, pane.active_term });
     try writeEscaped(w, pane.custom_name);
-    try w.writeAll("\"\n");
+    try w.writeAll("\"");
+    // 파일 Term은 `surface` 줄이 아니라 이 줄의 반복 필드다(§5.0). `surfaces` 개수 필드는 **PTY surface 수**로
+    // 남는다 — 옛 리더가 그 수만큼 `surface` 줄을 읽는 계약이라 건드리면 하위호환이 깨진다.
+    for (pane.file_terms) |ft| try writeFileTerm(w, ft);
+    try w.writeAll("\n");
     for (pane.surfaces) |s| try writeSurface(w, s);
+}
+
+/// `file-term="<persisted-index>:<kind>:<mode>:<path-byte-len>:<path>"`. dock-entry와 같은 self-delimiting
+/// 규칙(길이를 앞에, path를 마지막에)이라 `:`·공백·따옴표가 든 macOS 파일명도 escape 없이 왕복한다.
+fn writeFileTerm(w: *std.Io.Writer, ft: FileTerm) !void {
+    try w.print(" file-term=\"{d}:{s}:{s}:{d}:", .{ ft.index, @tagName(ft.kind), ft.mode.workspaceName(), ft.path.len });
+    try writeEscaped(w, ft.path);
+    try w.writeByte('"');
 }
 
 fn writeSurface(w: *std.Io.Writer, s: Surface) !void {
@@ -892,10 +891,71 @@ fn parsePane(a: std.mem.Allocator, lines: *LineIter, limits: *ParseLimits) Parse
     const active_term = try f.getUint("active-term", usize, 0); // 스칼라(기본 0)
     const custom_name = try f.getQuoted(a, "custom-name", "");
 
+    // FP16 파일 Term(반복 필드). 인식 못 하는 kind/mode는 그 **entry만** 버린다 — 창 전체를 폴백시키지 않는다
+    // (dock-entry의 UnsupportedDockValue와 같은 관용). 개수 상한은 창당 파일 상한과 같다.
+    var file_terms: std.ArrayList(FileTerm) = .empty;
+    for (f.fields) |field| {
+        if (!std.mem.eql(u8, field.key, "file-term")) continue;
+        if (!field.is_quoted or file_terms.items.len >= max_dock_entries) return error.BadLine;
+        const encoded = try unescapeQuoted(a, field.raw);
+        const parsed = parseFileTerm(encoded) catch |err| switch (err) {
+            error.UnsupportedDockValue => continue,
+            error.BadLine => return error.BadLine,
+        };
+        try file_terms.append(a, parsed);
+    }
+
     var surfaces: std.ArrayList(Surface) = .empty;
     var i: usize = 0;
     while (i < surface_count) : (i += 1) try surfaces.append(a, try parseSurface(a, lines, limits));
-    return .{ .active_term = active_term, .custom_name = custom_name, .surfaces = try surfaces.toOwnedSlice(a) };
+    const pane: Pane = .{
+        .active_term = active_term,
+        .custom_name = custom_name,
+        .surfaces = try surfaces.toOwnedSlice(a),
+        .file_terms = try file_terms.toOwnedSlice(a),
+    };
+    try validatePaneFileTerms(pane);
+    return pane;
+}
+
+/// persisted 시퀀스 불변식: index 중복 없음 + 전체가 `[0, persisted_total)`을 빠짐없이 덮음 +
+/// `active-term < persisted_total`. 위반은 그 창을 기존 규칙대로 fail-closed 강등한다(§5.0).
+fn validatePaneFileTerms(pane: Pane) ParseError!void {
+    if (pane.file_terms.len == 0) return;
+    const total = pane.surfaces.len + pane.file_terms.len;
+    if (total > max_dock_entries + max_line_fields) return error.BadLine;
+    for (pane.file_terms, 0..) |ft, i| {
+        if (ft.index >= total) return error.BadLine;
+        for (pane.file_terms[0..i]) |prior| {
+            if (prior.index == ft.index) return error.BadLine;
+            if (std.mem.eql(u8, prior.path, ft.path)) return error.BadLine; // pane 안 경로 중복
+        }
+    }
+    if (pane.active_term >= total) return error.BadLine;
+}
+
+fn parseFileTerm(encoded: []const u8) DockEntryParseError!FileTerm {
+    var pos: usize = 0;
+    const index_raw = dockEntryPart(encoded, &pos) orelse return error.BadLine;
+    const index = std.fmt.parseInt(usize, index_raw, 10) catch return error.BadLine;
+    // kind:mode:len:path는 dock-entry와 같은 문법이라 그 파서를 그대로 쓴다(active 자리는 없다).
+    const kind_raw = dockEntryPart(encoded, &pos) orelse return error.BadLine;
+    const mode_raw = dockEntryPart(encoded, &pos) orelse return error.BadLine;
+    const path_len_raw = dockEntryPart(encoded, &pos) orelse return error.BadLine;
+    const path = encoded[pos..];
+    const kind = parseEntryKindName(kind_raw) orelse return error.UnsupportedDockValue;
+    const parsed_mode = dock_panel.Mode.parseWorkspaceName(mode_raw) orelse return error.UnsupportedDockValue;
+    const mode = if (parsed_mode.allowedFor(kind)) parsed_mode else dock_panel.Mode.defaultFor(kind);
+    const path_len = std.fmt.parseInt(usize, path_len_raw, 10) catch return error.BadLine;
+    if (path_len != path.len or path.len == 0) return error.BadLine;
+    return .{ .index = index, .kind = kind, .mode = mode, .path = path };
+}
+
+fn parseEntryKindName(raw: []const u8) ?dock_panel.EntryKind {
+    inline for (@typeInfo(dock_panel.EntryKind).@"enum".fields) |field| {
+        if (std.mem.eql(u8, raw, field.name)) return @field(dock_panel.EntryKind, field.name);
+    }
+    return null;
 }
 
 fn parseSurface(a: std.mem.Allocator, lines: *LineIter, limits: *ParseLimits) ParseError!Surface {
@@ -2328,45 +2388,6 @@ test "workspace Explorer v137: streaming decoded cap and allocation failure degr
     try std.testing.expect(failing.has_induced_failure);
 }
 
-test "workspace dock FP1: flat 반복 키가 path kind mode active를 왕복하고 트리 dirty는 쓰지 않는다" {
-    const dock_entries = [_]dock_panel.PersistedEntry{
-        .{ .path = "/Users/me/a:b \"한글\".md", .kind = .markdown, .mode = .source_edit, .active = true },
-        .{ .path = "/Users/me/line\nname.html", .kind = .html, .mode = .read, .active = false },
-    };
-    const windows = [_]Window{.{
-        .dock = .{ .side = .bottom, .size = 420, .tree_size = 188, .collapsed = true, .entries = &dock_entries },
-        .tabs = &.{},
-    }};
-    const text = try serialize(std.testing.allocator, .{ .windows = &windows });
-    defer std.testing.allocator.free(text);
-
-    try std.testing.expect(std.mem.indexOf(u8, text, "dock-side=bottom") != null);
-    try std.testing.expect(std.mem.indexOf(u8, text, "dock-size=420") != null);
-    try std.testing.expect(std.mem.indexOf(u8, text, "dock-tree-size=188") != null);
-    try std.testing.expect(std.mem.indexOf(u8, text, "dock-collapsed=1") != null);
-    try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, text, "dock-entry=\""));
-    try std.testing.expect(std.mem.indexOf(u8, text, "dirty") == null);
-
-    var parsed = try parse(std.testing.allocator, text);
-    defer parsed.deinit();
-    const dock = parsed.workspace.windows[0].dock;
-    try std.testing.expectEqual(dock_panel.Side.bottom, dock.side);
-    try std.testing.expectEqual(@as(u32, 420), dock.size);
-    try std.testing.expectEqual(@as(u32, 188), dock.tree_size);
-    try std.testing.expect(dock.collapsed);
-    try std.testing.expectEqual(@as(usize, 2), dock.entries.len);
-    try std.testing.expectEqualStrings(dock_entries[0].path, dock.entries[0].path);
-    try std.testing.expectEqual(dock_panel.EntryKind.markdown, dock.entries[0].kind);
-    try std.testing.expectEqual(dock_panel.Mode.source_edit, dock.entries[0].mode);
-    try std.testing.expect(dock.entries[0].active);
-    try std.testing.expectEqualStrings(dock_entries[1].path, dock.entries[1].path);
-    try std.testing.expect(!dock.entries[1].active);
-
-    const text2 = try serialize(std.testing.allocator, parsed.workspace);
-    defer std.testing.allocator.free(text2);
-    try std.testing.expectEqualStrings(text, text2);
-}
-
 test "workspace dock FP1: window 라인 flat 키는 legacy key reader가 skip 가능하고 손상 entry는 거부한다" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -2411,127 +2432,6 @@ test "workspace dock FP1: 미래 kind나 mode는 도크만 기본값으로 강�
     try std.testing.expectEqual(@as(usize, 0), parsed_mode.workspace.windows[0].dock.entries.len);
 }
 
-test "workspace dock FP1: 공유 entry 상한 256은 writer-reader 왕복하고 257은 writer가 거부한다" {
-    var path_storage: [max_dock_entries + 1][32]u8 = undefined;
-    var entries: [max_dock_entries + 1]dock_panel.PersistedEntry = undefined;
-    for (&entries, 0..) |*entry, i| {
-        const path = try std.fmt.bufPrint(&path_storage[i], "/tmp/{d}.md", .{i});
-        entry.* = .{ .path = path, .kind = .markdown, .active = i == 0 };
-    }
-
-    const valid_windows = [_]Window{.{ .dock = .{ .entries = entries[0..max_dock_entries] }, .tabs = &.{} }};
-    const text = try serialize(std.testing.allocator, .{ .windows = &valid_windows });
-    defer std.testing.allocator.free(text);
-    var parsed = try parse(std.testing.allocator, text);
-    defer parsed.deinit();
-    try std.testing.expectEqual(max_dock_entries, parsed.workspace.windows[0].dock.entries.len);
-
-    const invalid_windows = [_]Window{.{ .dock = .{ .entries = &entries }, .tabs = &.{} }};
-    try std.testing.expectError(error.InvalidDockState, serialize(std.testing.allocator, .{ .windows = &invalid_windows }));
-}
-
-test "workspace Explorer v137: max groups nodes entries and roots stay below legacy 512-field budget" {
-    var entry_paths: [max_dock_entries][32]u8 = undefined;
-    var entries: [max_dock_entries]dock_panel.PersistedEntry = undefined;
-    for (&entries, 0..) |*entry, i| {
-        entry.* = .{
-            .path = try std.fmt.bufPrint(&entry_paths[i], "/dock/{d}.md", .{i}),
-            .kind = .markdown,
-            .active = i % 4 == 0,
-        };
-    }
-    var groups: [max_dock_groups]dock_panel.PersistedGroup = undefined;
-    for (&groups, 0..) |*group, i| group.* = .{ .entries = entries[i * 4 .. i * 4 + 4] };
-    var nodes: [max_dock_groups * 2 - 1]dock_panel.PersistedTreeNode = undefined;
-    var node_index: usize = 0;
-    const Builder = struct {
-        fn append(out: []dock_panel.PersistedTreeNode, index: *usize, first: usize, count: usize) void {
-            if (count == 1) {
-                out[index.*] = .{ .leaf = first };
-                index.* += 1;
-                return;
-            }
-            out[index.*] = .{ .split = .{ .direction = .horizontal, .ratio_milli = 500 } };
-            index.* += 1;
-            append(out, index, first, 1);
-            append(out, index, first + 1, count - 1);
-        }
-    };
-    Builder.append(&nodes, &node_index, 0, max_dock_groups);
-    try std.testing.expectEqual(nodes.len, node_index);
-
-    var root_paths: [max_explorer_roots][32]u8 = undefined;
-    var roots: [max_explorer_roots][]const u8 = undefined;
-    for (&roots, 0..) |*root, i| root.* = try std.fmt.bufPrint(&root_paths[i], "/root/{d}", .{i});
-    const windows = [_]Window{.{
-        .dock = .{ .groups = &groups, .tree = &nodes },
-        .explorer = .{ .roots = &roots },
-        .tabs = &.{},
-    }};
-    const text = try serialize(std.testing.allocator, .{ .windows = &windows });
-    defer std.testing.allocator.free(text);
-    var lines = std.mem.splitScalar(u8, text, '\n');
-    _ = lines.next();
-    const window_line = lines.next().?;
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const fields = try LineFields.parse(arena.allocator(), window_line);
-    try std.testing.expect(fields.fields.len + 1 < 512); // +1 reserves the independently optional dock-presented field.
-    try std.testing.expectEqual(@as(usize, 127), std.mem.count(u8, window_line, "dock-node="));
-    try std.testing.expectEqual(@as(usize, 256), std.mem.count(u8, window_line, "dock-entry-v2="));
-    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, window_line, "dock-tree-roots="));
-    // Old key-addressed readers consume their known structural scalars and skip both Explorer fields.
-    try std.testing.expectEqual(@as(usize, 0), try fields.requireUint("tabs", usize));
-    try std.testing.expectEqual(@as(usize, 0), try fields.getUint("active-tab", usize, 0));
-    var parsed = try parse(std.testing.allocator, text);
-    defer parsed.deinit();
-    try std.testing.expectEqual(max_dock_groups, parsed.workspace.windows[0].dock.groups.len);
-    try std.testing.expectEqual(max_explorer_roots, parsed.workspace.windows[0].explorer.roots.?.len);
-}
-
-test "workspace dock FP8: nested group tree and focused group round-trip on one window line" {
-    const g0_entries = [_]dock_panel.PersistedEntry{.{ .path = "/tmp/a.md", .kind = .markdown, .active = true }};
-    const g1_entries = [_]dock_panel.PersistedEntry{.{ .path = "/tmp/b: x.html", .kind = .html, .active = true }};
-    const g2_entries = [_]dock_panel.PersistedEntry{};
-    const groups = [_]dock_panel.PersistedGroup{
-        .{ .entries = &g0_entries },
-        .{ .entries = &g1_entries },
-        .{ .entries = &g2_entries },
-    };
-    const dock_tree = [_]dock_panel.PersistedTreeNode{
-        .{ .split = .{ .direction = .horizontal, .ratio_milli = 400 } },
-        .{ .leaf = 0 },
-        .{ .split = .{ .direction = .vertical, .ratio_milli = 700 } },
-        .{ .leaf = 1 },
-        .{ .leaf = 2 },
-    };
-    const windows = [_]Window{.{
-        .dock = .{ .side = .bottom, .tree_size = 196, .groups = &groups, .tree = &dock_tree, .focused_group = 2 },
-        .tabs = &.{},
-    }};
-
-    const text = try serialize(std.testing.allocator, .{ .windows = &windows });
-    defer std.testing.allocator.free(text);
-    try std.testing.expect(std.mem.indexOf(u8, text, "dock-group-count=3 dock-focused-group=2") != null);
-    try std.testing.expectEqual(@as(usize, 5), std.mem.count(u8, text, "dock-node=\""));
-    try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, text, "dock-entry-v2=\""));
-    try std.testing.expect(std.mem.indexOf(u8, text, "dock-entry=\"") == null); // 다중 그룹은 legacy 표현과 섞지 않는다.
-
-    var parsed = try parse(std.testing.allocator, text);
-    defer parsed.deinit();
-    const dock = parsed.workspace.windows[0].dock;
-    try std.testing.expectEqual(@as(usize, 3), dock.groups.len);
-    try std.testing.expectEqual(@as(usize, 5), dock.tree.len);
-    try std.testing.expectEqual(@as(usize, 2), dock.focused_group);
-    try std.testing.expectEqual(@as(u32, 196), dock.tree_size);
-    try std.testing.expectEqualStrings("/tmp/b: x.html", dock.groups[1].entries[0].path);
-    try std.testing.expectEqual(@as(u16, 700), dock.tree[2].split.ratio_milli);
-
-    const text2 = try serialize(std.testing.allocator, parsed.workspace);
-    defer std.testing.allocator.free(text2);
-    try std.testing.expectEqualStrings(text, text2);
-}
-
 test "workspace dock FP8: malformed or future multi-group payload fails closed to dock only" {
     const duplicate_leaf = header ++ "\n" ++
         "window tabs=0 active-tab=0 dock-group-count=2 dock-focused-group=0 dock-node=\"split:horizontal:500\" dock-node=\"leaf:0\" dock-node=\"leaf:0\"\n";
@@ -2543,4 +2443,99 @@ test "workspace dock FP8: malformed or future multi-group payload fails closed t
     defer parsed.deinit();
     try std.testing.expectEqual(dock_panel.Side.right, parsed.workspace.windows[0].dock.side);
     try std.testing.expectEqual(@as(usize, 0), parsed.workspace.windows[0].dock.groups.len);
+}
+
+// ── FP16 §5.0: 파일 Term은 `pane` 줄의 `file-term` 반복 필드다 ──────────────────────────────────────
+// 창 줄에는 **탐색기 도크 키만** 남는다. 아래 세 테스트가 그 계약(왕복·자리 보존·구버전 관용)의 게이트다.
+
+test "workspace FP16: file-term이 pane 줄에서 왕복하고 창 줄엔 파일 키가 없다" {
+    const file_terms = [_]FileTerm{
+        .{ .index = 1, .kind = .markdown, .mode = .source_edit, .path = "/Users/me/a:b \"한글\".md" },
+        .{ .index = 2, .kind = .html, .mode = .read, .path = "/Users/me/line\nname.html" },
+    };
+    const surfaces = [_]Surface{.{ .custom_name = "", .title = "", .cwd = "", .command = "", .cols = 80, .rows = 24 }};
+    const panes = [_]Pane{.{ .active_term = 1, .surfaces = &surfaces, .file_terms = &file_terms }};
+    const tabs = [_]Tab{.{ .active_pane = 0, .panes = &panes, .tree = &.{.{ .leaf = 0 }} }};
+    const windows = [_]Window{.{
+        .dock = .{ .side = .bottom, .size = 420, .tree_size = 188, .collapsed = true },
+        .tabs = &tabs,
+    }};
+    const text = try serialize(std.testing.allocator, .{ .windows = &windows });
+    defer std.testing.allocator.free(text);
+
+    // 탐색기 도크 키는 남고, 파일 목록 키는 창 줄에서 사라졌다.
+    try std.testing.expect(std.mem.indexOf(u8, text, "dock-size=420") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "dock-tree-size=188") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "dock-entry=\"") == null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "dock-entry-v2=\"") == null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "dock-node=\"") == null);
+    try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, text, "file-term=\""));
+    // dirty는 런타임 상태라 영속하지 않는다.
+    try std.testing.expect(std.mem.indexOf(u8, text, "dirty") == null);
+
+    var parsed = try parse(std.testing.allocator, text);
+    defer parsed.deinit();
+    const pane = parsed.workspace.windows[0].tabs[0].panes[0];
+    try std.testing.expectEqual(@as(usize, 2), pane.file_terms.len);
+    try std.testing.expectEqual(@as(usize, 1), pane.file_terms[0].index);
+    try std.testing.expectEqual(dock_panel.EntryKind.markdown, pane.file_terms[0].kind);
+    try std.testing.expectEqual(dock_panel.Mode.source_edit, pane.file_terms[0].mode);
+    try std.testing.expectEqualStrings("/Users/me/a:b \"한글\".md", pane.file_terms[0].path);
+    try std.testing.expectEqualStrings("/Users/me/line\nname.html", pane.file_terms[1].path);
+    try std.testing.expectEqual(@as(usize, 1), pane.active_term);
+    // 창 줄의 탐색기 상태는 그대로 왕복한다.
+    try std.testing.expectEqual(@as(u32, 420), parsed.workspace.windows[0].dock.size);
+    try std.testing.expectEqual(@as(usize, 0), parsed.workspace.windows[0].dock.entries.len);
+}
+
+test "workspace FP16: persisted 인덱스가 중복·범위 밖이거나 active-term이 넘치면 그 창을 폴백한다" {
+    const bad_dup =
+        "maru.workspace.v1\nwindow tabs=1 active-tab=0\n" ++
+        "tab panes=1 active-pane=0 custom-name=\"\"\n" ++
+        "tree-node leaf pane=0\n" ++
+        "pane surfaces=1 active-term=0 custom-name=\"\" file-term=\"1:markdown:read:9:/tmp/a.md\" file-term=\"1:markdown:read:9:/tmp/b.md\"\n" ++
+        "surface custom-name=\"\" title=\"\" cwd=\"\" command=\"\" cols=80 rows=24\n";
+    try std.testing.expectError(error.BadLine, parse(std.testing.allocator, bad_dup));
+
+    const bad_range =
+        "maru.workspace.v1\nwindow tabs=1 active-tab=0\n" ++
+        "tab panes=1 active-pane=0 custom-name=\"\"\n" ++
+        "tree-node leaf pane=0\n" ++
+        "pane surfaces=1 active-term=0 custom-name=\"\" file-term=\"5:markdown:read:9:/tmp/a.md\"\n" ++
+        "surface custom-name=\"\" title=\"\" cwd=\"\" command=\"\" cols=80 rows=24\n";
+    try std.testing.expectError(error.BadLine, parse(std.testing.allocator, bad_range));
+
+    const bad_active =
+        "maru.workspace.v1\nwindow tabs=1 active-tab=0\n" ++
+        "tab panes=1 active-pane=0 custom-name=\"\"\n" ++
+        "tree-node leaf pane=0\n" ++
+        "pane surfaces=1 active-term=9 custom-name=\"\" file-term=\"1:markdown:read:9:/tmp/a.md\"\n" ++
+        "surface custom-name=\"\" title=\"\" cwd=\"\" command=\"\" cols=80 rows=24\n";
+    try std.testing.expectError(error.BadLine, parse(std.testing.allocator, bad_active));
+}
+
+test "workspace FP16: 모르는 kind의 file-term은 그 항목만 버리고 창은 살린다" {
+    const text =
+        "maru.workspace.v1\nwindow tabs=1 active-tab=0\n" ++
+        "tab panes=1 active-pane=0 custom-name=\"\"\n" ++
+        "tree-node leaf pane=0\n" ++
+        "pane surfaces=1 active-term=0 custom-name=\"\" file-term=\"1:hologram:read:9:/tmp/a.md\"\n" ++
+        "surface custom-name=\"\" title=\"\" cwd=\"\" command=\"\" cols=80 rows=24\n";
+    var parsed = try parse(std.testing.allocator, text);
+    defer parsed.deinit();
+    const pane = parsed.workspace.windows[0].tabs[0].panes[0];
+    try std.testing.expectEqual(@as(usize, 0), pane.file_terms.len); // 미지 kind는 그 항목만 버린다
+    try std.testing.expectEqual(@as(usize, 1), pane.surfaces.len); // 창·pane은 살아남는다
+}
+
+test "workspace FP16: 옛 dock-entry는 계속 읽어 1회 마이그레이션 입력이 된다" {
+    const legacy =
+        "maru.workspace.v1\n" ++
+        "window tabs=0 active-tab=0 dock-presented=1 dock-entry=\"markdown:read:1:9:/tmp/a.md\"\n";
+    var parsed = try parse(std.testing.allocator, legacy);
+    defer parsed.deinit();
+    const dock = parsed.workspace.windows[0].dock;
+    try std.testing.expectEqual(@as(usize, 1), dock.entries.len);
+    try std.testing.expectEqualStrings("/tmp/a.md", dock.entries[0].path);
+    try std.testing.expect(dock.entries[0].active);
 }

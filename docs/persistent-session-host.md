@@ -2803,6 +2803,9 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
               infallible `commitExternalAdoption(disarm: *PreparedClientDisarm)`의 단일 private-field SSOT를
               소유한다. preflight는 exact Client/fingerprint/final disarm-plan 주소를 봉인하며 mutation 0으로 실패할 수
               있고, commit은 같은 Client-local opaque plan만 받아 실패/할당/callback이 없다. composite
+              `ExternalAdoptionInventory`는 owning DTO라 Zig move-by-convention을 따르며 bitwise copy 뒤 두 값을
+              각각 `deinit`하는 사용은 지원하지 않는다. stale-copy/double-release 방어 주장은 final-address
+              `PreparedClientDisarm`과 composite plan에 한정한다.
               별도 `client_external_adoption.zig`는 Client inventory와 c1 ledger의 중립 sub-plan만 소유한다.
               pump-owned storage/evidence를 아는 outer `PreparedExternalAdoption`과 target seal은
               `client_external_pump.zig`가 소유해 import 역전을 만들지 않는다. **c2 product 경로는 source
@@ -2961,8 +2964,9 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
               prerequisite로 위 2b1 lease 계약을 allocator-aware `StreamBatch.deinit()`으로 갱신하고,
               `readStreamBatch`/내부 batch assembler의 caller allocator 인자를 제거해 모든 completed
               batch와 partial backing을 반드시 `Client.allocator`로만 만들게 한다. 반환 `StreamBatch`는 allocator
-              provenance를 private field로 carry하고 `deinit()`만이 해제를 수행한다. caller/fallback allocator로
-              `bytes`를 직접 free하는 API와 2b1 untracked cleanup을 모두 이 메서드로 교체한다. 이 변경 뒤에만 Client가
+              provenance를 ownership metadata로 carry한다. Zig의 공개 struct field는 기계적으로 접근 가능하지만 caller
+              계약은 batch 전체를 opaque owner로 취급해 `deinit()`으로만 해제하는 것이다. caller/fallback allocator로
+              `bytes`를 직접 free하던 제품 경로와 2b1 untracked cleanup을 모두 이 메서드로 교체한다. 이 변경 뒤에만 Client가
               pending 원본의 allocator provenance를
               fingerprint 없이 구조적으로 증명하고 c3 disarm이 `Client.allocator`로 exact free할 수 있다.
 
@@ -2999,6 +3003,9 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
 
               자동 검증은 다음을 모두 포함한다. 각 allocation fail index에서 Client fingerprint/모든 source bytes가
               byte-for-byte 불변이고 ledger reservation/charge가 0이며 staged wrapper/source map/token을 exact free한다.
+              public preflight/copy API는 source 구조를 먼저 검증하고 destination이 Client 본체·descriptor·payload 또는
+              inventory metadata와 겹치면 첫 read/write 전에 `InvalidAlias`로 거부한다. stale blocking mode와 null
+              provenance도 optional/union trap 없이 typed reject/false로 끝난다.
               final-address move, bitwise-copied plan, wrong Client/storage/ledger/evidence/wrapper base, prepare 뒤
               field mutation은 commit capability 생성을 거부한다. screen payload는 staged exact copy와 source를
               bytewise 재대조해 same-pointer byte mutation도 거부하며, event bytes는 c3 prepared DTO/raw copy와

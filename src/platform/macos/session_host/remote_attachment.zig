@@ -33,12 +33,11 @@ pub const AttachmentBatchLease = union(enum) {
 
     fn release(
         self: AttachmentBatchLease,
-        fallback_allocator: std.mem.Allocator,
         transport: AttachmentTransport,
     ) enum { ok, invariant_failure } {
         switch (self) {
             .untracked => |batch| {
-                fallback_allocator.free(batch.bytes);
+                batch.deinit();
                 return .ok;
             },
             .charged => |token| {
@@ -58,7 +57,6 @@ pub const AttachmentTransport = struct {
     context: *anyopaque,
     read_batch: *const fn (
         context: *anyopaque,
-        allocator: std.mem.Allocator,
         stream_id: u64,
     ) client_mod.ClientError!?AttachmentBatchLease,
     borrow_charged: ?*const fn (
@@ -120,23 +118,23 @@ pub const RemoteAttachment = struct {
     pub fn deinit(self: *RemoteAttachment) void {
         if (self.transport) |transport| {
             if (self.failed_release) |lease| {
-                if (lease.release(self.allocator, transport) == .invariant_failure) {
+                if (lease.release(transport) == .invariant_failure) {
                     transport.fail_closed(transport.context);
                 }
             }
             for (self.pending_batches.items[self.pending_batch_head..]) |lease| {
-                if (lease.release(self.allocator, transport) == .invariant_failure) {
+                if (lease.release(transport) == .invariant_failure) {
                     transport.fail_closed(transport.context);
                 }
             }
             transport.drop_stream(transport.context, self.state.stream_id);
         } else {
             if (self.failed_release) |lease| switch (lease) {
-                .untracked => |batch| self.allocator.free(batch.bytes),
+                .untracked => |batch| batch.deinit(),
                 .charged => {},
             };
             for (self.pending_batches.items[self.pending_batch_head..]) |lease| switch (lease) {
-                .untracked => |batch| self.allocator.free(batch.bytes),
+                .untracked => |batch| batch.deinit(),
                 .charged => {},
             };
         }
@@ -159,7 +157,7 @@ pub const RemoteAttachment = struct {
             transport.fail_closed(transport.context);
             return error.LedgerInvariant;
         }
-        if (try transport.read_batch(transport.context, self.allocator, self.state.stream_id)) |lease| {
+        if (try transport.read_batch(transport.context, self.state.stream_id)) |lease| {
             self.pending_batches.append(self.allocator, lease) catch {
                 const released = self.releaseOrRetain(lease, transport);
                 transport.fail_closed(transport.context);
@@ -224,7 +222,7 @@ pub const RemoteAttachment = struct {
         lease: AttachmentBatchLease,
         transport: AttachmentTransport,
     ) bool {
-        if (lease.release(self.allocator, transport) == .ok) return true;
+        if (lease.release(transport) == .ok) return true;
         if (self.failed_release == null) self.failed_release = lease;
         return false;
     }
@@ -891,7 +889,6 @@ const TestTransport = struct {
 
     fn read(
         context: *anyopaque,
-        _: std.mem.Allocator,
         _: u64,
     ) client_mod.ClientError!?AttachmentBatchLease {
         const self: *TestTransport = @ptrCast(@alignCast(context));
@@ -931,7 +928,6 @@ const ChargedTestTransport = struct {
 
     fn read(
         context: *anyopaque,
-        _: std.mem.Allocator,
         _: u64,
     ) client_mod.ClientError!?AttachmentBatchLease {
         const self: *ChargedTestTransport = @ptrCast(@alignCast(context));
@@ -1026,6 +1022,7 @@ test "remote attachment fail-closes when a consumed batch has no screen owner" {
             .is_snapshot = true,
             .stream_id = 7,
             .bytes = try std.testing.allocator.dupe(u8, "consumed"),
+            .allocator = std.testing.allocator,
         } },
     };
     var attachment = RemoteAttachment.init(std.testing.allocator, .{
@@ -1053,6 +1050,7 @@ test "remote attachment fail-closes when consumed batch queue admission runs out
             .is_snapshot = true,
             .stream_id = 7,
             .bytes = @constCast(&[_]u8{}),
+            .allocator = std.testing.allocator,
         } },
     };
     var failing = std.testing.FailingAllocator.init(
@@ -1082,6 +1080,7 @@ test "remote attachment fail-closes malformed consumed screen bytes" {
             .is_snapshot = true,
             .stream_id = 7,
             .bytes = try std.testing.allocator.dupe(u8, "not-a-screen-frame"),
+            .allocator = std.testing.allocator,
         } },
     };
     var attachment = RemoteAttachment.init(std.testing.allocator, .{

@@ -111,7 +111,7 @@ test "client screen assembler yields between split snapshot chunks and resumes b
     );
     defer allocator.free(first);
     try socket_server.writeAll(fds[1], first);
-    try testing.expect((try client.readStreamBatch(allocator, 7)) == null);
+    try testing.expect((try client.readStreamBatch(7)) == null);
     try testing.expect(client.partial_batch != null);
 
     const last = try framing.encodeFrame(
@@ -121,8 +121,8 @@ test "client screen assembler yields between split snapshot chunks and resumes b
     );
     defer allocator.free(last);
     try socket_server.writeAll(fds[1], last);
-    const batch = (try client.readStreamBatch(allocator, 7)).?;
-    defer allocator.free(batch.bytes);
+    const batch = (try client.readStreamBatch(7)).?;
+    defer batch.deinit();
     try testing.expect(batch.is_snapshot);
     try testing.expectEqualStrings("first-last", batch.bytes);
     try testing.expect(client.partial_batch == null);
@@ -184,8 +184,8 @@ test "client screen assembler poisons malformed async header and event interleav
         };
         defer allocator.free(malformed);
         try socket_server.writeAll(fds[1], malformed);
-        try testing.expectError(error.ProtocolError, client.readStreamBatch(allocator, 7));
-        try testing.expectError(error.ConnectionClosed, client.readStreamBatch(allocator, 7));
+        try testing.expectError(error.ProtocolError, client.readStreamBatch(7));
+        try testing.expectError(error.ConnectionClosed, client.readStreamBatch(7));
     }
 }
 
@@ -232,11 +232,17 @@ fn deadlineHelloError(err: client_deadline.Error) DeadlineClientError {
 
 /// `readStreamBatch`가 돌려주는 한 화면 stream 배치. `is_snapshot`이면 fresh full snapshot(화면 리셋), 아니면 delta 증분이다
 /// (§9 — host가 grid/alt 변화 시 delta 대신 snapshot을 push하므로 소비자는 둘 다 받는다). `bytes`는 `end_stream`까지 이은
-/// record 바이트(caller 소유), `stream_id`는 어느 runtime의 화면인지다(멀티 runtime 라우팅).
+/// record 바이트를 포함한 batch 전체가 caller 소유이며 반드시 `deinit()`한다. `stream_id`는 어느 runtime의 화면인지다
+/// (멀티 runtime 라우팅).
 pub const StreamBatch = struct {
     is_snapshot: bool,
     stream_id: u64,
     bytes: []u8,
+    allocator: std.mem.Allocator,
+
+    pub fn deinit(self: StreamBatch) void {
+        self.allocator.free(self.bytes);
+    }
 };
 
 pub const InventoryUnavailable = enum {
@@ -354,6 +360,12 @@ pub const Client = struct {
     runtime_link_at_v1: bool = false,
     /// host가 `runtime.clipboard_write`로 OSC 52 write 텍스트를 넘길 수 있는가. 없으면 원격 클립보드가 비활성이다.
     runtime_clipboard_v1: bool = false,
+    /// The hello profile is immutable connection policy. `null` exists only for manually
+    /// constructed fixtures and is rejected by external adoption instead of being guessed as GUI.
+    connection_profile: ?ConnectionProfile = null,
+    /// Set only after `finishHello` has verified the selected current/N-1 schema and any required
+    /// frozen fingerprint. External adoption must not infer this proof from `wire_major`.
+    compatibility_profile: ?compatibility.Profile = null,
     parser: framing.FrameParser,
     // A Client may be transferred only once into the stable external-pump address. The moved-from
     // value remains deinit-safe, but is not a second transport owner.
@@ -635,6 +647,9 @@ pub const Client = struct {
         );
         self.runtime_link_at_v1 = payloadHasCapability(ack.payload, "runtime_link_at_v1");
         self.runtime_clipboard_v1 = payloadHasCapability(ack.payload, "runtime_clipboard_v1");
+        // This is the sole proof publication point: all schema/fingerprint checks above succeeded.
+        self.connection_profile = connection_profile;
+        self.compatibility_profile = profile;
     }
 
     pub fn deinit(self: *Client) void {
@@ -650,7 +665,7 @@ pub const Client = struct {
         self.pending_stream.deinit(self.allocator);
         for (self.pending_events.items) |f| f.deinit(self.allocator);
         self.pending_events.deinit(self.allocator);
-        for (self.pending_batches.items) |b| self.allocator.free(b.bytes); // 미소비 demux 배치 회수(§9 멀티 runtime).
+        for (self.pending_batches.items) |b| b.deinit(); // 미소비 demux 배치 회수(§9 멀티 runtime).
         self.pending_batches.deinit(self.allocator);
         if (self.partial_batch) |*partial| partial.bytes.deinit(self.allocator);
         self.parser.deinit();
@@ -1189,14 +1204,14 @@ pub const Client = struct {
         try self.requireBlockingMode();
         var attempts: usize = 0;
         while (true) {
-            if (try self.readStreamBatchWithIo(self.allocator, stream_id, io)) |batch| {
+            if (try self.readStreamBatchWithIo(stream_id, io)) |batch| {
                 if (!batch.is_snapshot) {
-                    self.allocator.free(batch.bytes);
+                    batch.deinit();
                     self.invalidateConnection();
                     return error.ProtocolError;
                 }
                 if (deadlineExpired(io)) {
-                    self.allocator.free(batch.bytes);
+                    batch.deinit();
                     return error.DeadlineExceeded;
                 }
                 return batch.bytes;
@@ -1221,8 +1236,8 @@ pub const Client = struct {
     /// 것이면 버리지 않고 버퍼에 넣고 계속** 읽어 내 배치를 찾는다. 소켓이 idle이면(내 배치 없음) `null`(그 사이 읽힌 남의 배치는
     /// 버퍼에 남아 그 runtime의 pump가 소비). 예전엔 pumpDelta가 남의 배치를 free해 두 번째 이후 터미널 화면이 영구 유실됐다
     /// (code-review #1). delta/snapshot 둘 다 받아 `is_snapshot`으로 리셋/증분을 가른다. `call`이 버퍼한 frame을 소켓보다 먼저 쓴다.
-    pub fn readStreamBatch(self: *Client, allocator: std.mem.Allocator, want_stream_id: u64) ClientError!?StreamBatch {
-        return self.readStreamBatchWithIo(allocator, want_stream_id, .polling) catch |err| switch (err) {
+    pub fn readStreamBatch(self: *Client, want_stream_id: u64) ClientError!?StreamBatch {
+        return self.readStreamBatchWithIo(want_stream_id, .polling) catch |err| switch (err) {
             error.DeadlineExceeded => unreachable,
             else => |client_err| client_err,
         };
@@ -1230,7 +1245,6 @@ pub const Client = struct {
 
     fn readStreamBatchWithIo(
         self: *Client,
-        allocator: std.mem.Allocator,
         want_stream_id: u64,
         io: StreamIo,
     ) DeadlineClientError!?StreamBatch {
@@ -1241,7 +1255,7 @@ pub const Client = struct {
                 const owned = self.pending_batches.orderedRemove(i);
                 self.pending_batch_bytes -= owned.bytes.len;
                 if (deadlineExpired(io)) {
-                    allocator.free(owned.bytes);
+                    owned.deinit();
                     return error.DeadlineExceeded;
                 }
                 return owned;
@@ -1249,10 +1263,10 @@ pub const Client = struct {
         }
         // 2) 소켓에서 완성 배치를 읽는다. 내 것이면 반환, 남의 것이면 버퍼하고 계속(내 것/idle까지).
         while (true) {
-            const batch = (try self.readOneBatchWithIo(allocator, io)) orelse return null; // idle — 내 배치 없음.
+            const batch = (try self.readOneBatchWithIo(io)) orelse return null; // idle — 내 배치 없음.
             if (batch.stream_id == want_stream_id) {
                 if (deadlineExpired(io)) {
-                    allocator.free(batch.bytes);
+                    batch.deinit();
                     return error.DeadlineExceeded;
                 }
                 return batch;
@@ -1260,13 +1274,13 @@ pub const Client = struct {
             if (self.pending_batches.items.len >= protocol.max_client_screen_items or
                 self.screenInboxBytes() +| batch.bytes.len > protocol.max_client_screen_inbox)
             {
-                allocator.free(batch.bytes);
+                batch.deinit();
                 self.invalidateConnection();
                 return error.EventQueueFull;
             }
             // 남의 stream 배치 — 그 runtime pump가 소비하도록 버퍼. append 실패 시 이 배치 bytes를 회수(누수 방지).
             self.pending_batches.append(self.allocator, batch) catch {
-                allocator.free(batch.bytes);
+                batch.deinit();
                 self.invalidateConnection();
                 return error.OutOfMemory;
             };
@@ -1277,8 +1291,8 @@ pub const Client = struct {
     /// 소켓/`pending_stream`에서 완성 stream 배치 하나를 `end_stream`까지 읽어 돌려준다(stream_id 무관). **논블로킹**: 배치가
     /// 아직 없으면 `null`(recv timeout을 세션 종료로 오인 안 함, §9). host는 grid/alt 변화 시 delta 대신 fresh snapshot을 push한다
     /// (SnapshotRequired). demux는 상위 `readStreamBatch`가 한다 — 여기선 순수하게 "다음 배치 하나".
-    fn readOneBatch(self: *Client, allocator: std.mem.Allocator) ClientError!?StreamBatch {
-        return self.readOneBatchWithIo(allocator, .polling) catch |err| switch (err) {
+    fn readOneBatch(self: *Client) ClientError!?StreamBatch {
+        return self.readOneBatchWithIo(.polling) catch |err| switch (err) {
             error.DeadlineExceeded => unreachable,
             else => |client_err| client_err,
         };
@@ -1286,9 +1300,9 @@ pub const Client = struct {
 
     fn readOneBatchWithIo(
         self: *Client,
-        allocator: std.mem.Allocator,
         io: StreamIo,
     ) DeadlineClientError!?StreamBatch {
+        const allocator = self.allocator;
         var state = self.partial_batch orelse PartialBatch{
             .stream_id = 0,
             .is_snapshot = false,
@@ -1362,6 +1376,7 @@ pub const Client = struct {
                     .is_snapshot = state.is_snapshot,
                     .stream_id = state.stream_id,
                     .bytes = bytes,
+                    .allocator = allocator,
                 };
             }
         }
@@ -1375,7 +1390,7 @@ pub const Client = struct {
             if (self.pending_batches.items[i].stream_id == stream_id) {
                 const b = self.pending_batches.orderedRemove(i);
                 self.pending_batch_bytes -= b.bytes.len;
-                self.allocator.free(b.bytes);
+                b.deinit();
             } else i += 1;
         }
         if (self.partial_batch) |*partial| {
@@ -3441,8 +3456,8 @@ test "client event queue overflow poisons every runtime sharing the connection" 
     // Overflow frame은 stream 999였지만 어느 subscription base가 전진했는지 client가 증명할 수 없다. 기존 stream 1의
     // pending event도 적용하지 않고, stream 1/2 양쪽 pump와 input/RPC가 모두 동일 connection failure를 보게 한다.
     try std.testing.expect(client.takeEventForStream(1) == null);
-    try std.testing.expectError(error.ConnectionClosed, client.readStreamBatch(allocator, 1));
-    try std.testing.expectError(error.ConnectionClosed, client.readStreamBatch(allocator, 2));
+    try std.testing.expectError(error.ConnectionClosed, client.readStreamBatch(1));
+    try std.testing.expectError(error.ConnectionClosed, client.readStreamBatch(2));
     try std.testing.expectError(error.ConnectionClosed, client.sendInput(1, "x"));
     try std.testing.expectError(error.ConnectionClosed, client.call("host.info", null));
 }
@@ -4214,7 +4229,7 @@ test "external mode rejects every legacy socket entry without wire mutation" {
     try std.testing.expectError(error.ExternalMode, client.readSnapshotUntil(7, deadline));
     try std.testing.expectError(
         error.ExternalMode,
-        client.readStreamBatch(allocator, 7),
+        client.readStreamBatch(7),
     );
     try std.testing.expectError(error.ExternalMode, client.sendInput(7, "x"));
     try std.testing.expectError(error.ExternalMode, client.sendInputNonBlocking(7, "x"));
@@ -4327,6 +4342,8 @@ fn checkExternalModePreservesClientState(transition: PreservationTransition) !vo
     client.next_request_id = 91;
     client.host_manifest_v1 = true;
     client.attachment_capabilities.negotiated_controller_transfer = true;
+    client.connection_profile = .cli_attach;
+    client.compatibility_profile = compatibility.profileForMajor(protocol.version_major).?;
     const stream_payload = try allocator.dupe(u8, "stream");
     try client.pending_stream.append(allocator, .{
         .header = .{
@@ -4352,6 +4369,7 @@ fn checkExternalModePreservesClientState(transition: PreservationTransition) !vo
         .is_snapshot = false,
         .stream_id = 7,
         .bytes = batch_payload,
+        .allocator = allocator,
     });
     client.pending_batch_bytes = batch_payload.len;
     var partial_bytes: std.ArrayListUnmanaged(u8) = .empty;
@@ -4387,6 +4405,11 @@ fn checkExternalModePreservesClientState(transition: PreservationTransition) !vo
     try std.testing.expectEqual(@as(u64, 91), client.next_request_id);
     try std.testing.expect(client.host_manifest_v1);
     try std.testing.expect(client.attachment_capabilities.negotiated_controller_transfer);
+    try std.testing.expectEqual(ConnectionProfile.cli_attach, client.connection_profile.?);
+    try std.testing.expectEqual(
+        compatibility.AttachSchema.granted_roles,
+        client.compatibility_profile.?.attach_schema,
+    );
     try std.testing.expectEqual(stream_ptr, client.pending_stream.items[0].payload.ptr);
     try std.testing.expectEqual(event_ptr, client.pending_events.items[0].payload.ptr);
     try std.testing.expectEqual(batch_ptr, client.pending_batches.items[0].bytes.ptr);
@@ -4470,7 +4493,36 @@ fn checkFinishHelloAllocation(allocator: std.mem.Allocator) !void {
         client.parser.deinit();
         return err;
     };
+    try std.testing.expectEqual(ConnectionProfile.cli_attach, client.connection_profile.?);
+    try std.testing.expectEqual(profile.attach_schema, client.compatibility_profile.?.attach_schema);
     client.deinit();
+}
+
+test "finish hello publishes profile provenance only after every validation succeeds" {
+    var client = Client{
+        .allocator = std.testing.allocator,
+        .fd = -1,
+        .host_id = 0,
+        .parser = framing.FrameParser.init(std.testing.allocator),
+    };
+    defer client.parser.deinit();
+    const malformed_payload =
+        \\{"version":1,"host_id":"00000000000000000000000000000001"}
+    ;
+    const ack: framing.Frame = .{
+        .header = .{ .kind = .hello_ack, .payload_len = malformed_payload.len },
+        .payload = @constCast(malformed_payload),
+    };
+    try std.testing.expectError(
+        error.HandshakeFailed,
+        client.finishHello(
+            .cli_attach,
+            compatibility.profileForMajor(protocol.version_major).?,
+            ack,
+        ),
+    );
+    try std.testing.expect(client.connection_profile == null);
+    try std.testing.expect(client.compatibility_profile == null);
 }
 
 fn checkFullDeadlineHelloAllocation(allocator: std.mem.Allocator) !void {
@@ -4764,6 +4816,11 @@ test "client: absolute-deadline nonblocking connect and hello restore blocking m
         deadline,
     );
     defer client.deinit();
+    try testing.expectEqual(ConnectionProfile.cli_attach, client.connection_profile.?);
+    try testing.expectEqual(
+        compatibility.AttachSchema.granted_roles,
+        client.compatibility_profile.?.attach_schema,
+    );
 
     const flags = c.fcntl(client.fd, c.F.GETFL, @as(c_int, 0));
     try testing.expect(flags >= 0);
@@ -5323,11 +5380,11 @@ test "client: receives a delta_chunk stream reflecting input echoed onto the scr
     var found = false;
     var attempts: usize = 0;
     while (attempts < 100 and !found) : (attempts += 1) {
-        const batch = (client.readStreamBatch(allocator, stream_id) catch break) orelse {
+        const batch = (client.readStreamBatch(stream_id) catch break) orelse {
             _ = usleepMs(20);
             continue;
         };
-        defer allocator.free(batch.bytes);
+        defer batch.deinit();
         var rs = screen_stream.RecordStream{ .bytes = batch.bytes };
         while (try rs.next()) |rec| {
             const s = try screen_stream.RecordStream.split(rec);

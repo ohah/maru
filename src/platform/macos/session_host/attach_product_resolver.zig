@@ -957,9 +957,8 @@ test "product resolver discovers and pins the one host that owns a live runtime"
         }
         if (revoked) break;
         if (try long_client.readStreamBatch(
-            testing.allocator,
             old_attachment.streamId(),
-        )) |batch| testing.allocator.free(batch.bytes);
+        )) |batch| batch.deinit();
     }
     try testing.expect(revoked);
     try testing.expect(!old_attachment.allowsMutation());

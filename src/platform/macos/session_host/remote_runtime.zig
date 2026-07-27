@@ -34,11 +34,10 @@ pub const Notification = struct {
 
 fn attachmentReadBatch(
     context: *anyopaque,
-    allocator: std.mem.Allocator,
     stream_id: u64,
 ) client_mod.ClientError!?remote_attachment.AttachmentBatchLease {
     const client: *client_mod.Client = @ptrCast(@alignCast(context));
-    return if (try client.readStreamBatch(allocator, stream_id)) |batch|
+    return if (try client.readStreamBatch(stream_id)) |batch|
         .{ .untracked = batch }
     else
         null;
@@ -3358,8 +3357,8 @@ test "remote runtime: requestResync makes the host push a fresh snapshot (desync
     var saw_snapshot = false;
     var attempts: usize = 0;
     while (attempts < 150 and !saw_snapshot) : (attempts += 1) {
-        if (try rr.client.readStreamBatch(allocator, rr.attachment.streamId())) |batch| {
-            defer allocator.free(batch.bytes);
+        if (try rr.client.readStreamBatch(rr.attachment.streamId())) |batch| {
+            defer batch.deinit();
             if (batch.is_snapshot) saw_snapshot = true;
         } else _ = usleep(20 * 1000);
     }
@@ -3446,11 +3445,13 @@ test "remote runtime: typed ended event terminates only its stream pump" {
         .stream_id = 9,
         .is_snapshot = false,
         .bytes = try allocator.dupe(u8, "stale"),
+        .allocator = allocator,
     });
     try client.pending_batches.append(allocator, .{
         .stream_id = 10,
         .is_snapshot = false,
         .bytes = try allocator.dupe(u8, "sibling"),
+        .allocator = allocator,
     });
     client.pending_batch_bytes = "stale".len + "sibling".len;
     var rr: RemoteRuntime = undefined;

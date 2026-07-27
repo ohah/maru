@@ -4317,7 +4317,7 @@ pub const AppSession = struct {
         }
     }
 
-    fn focusTerm(self: *AppSession, term_index: usize) void {
+    pub fn focusTerm(self: *AppSession, term_index: usize) void {
         const pane = self.activePane();
         if (term_index >= pane.terms.items.len or pane.active_term == term_index) return;
         self.commitComposition(); // 새 Term으로 확정 바이트/preedit이 넘어가지 않게 target pin을 먼저 비운다.

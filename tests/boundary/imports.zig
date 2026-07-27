@@ -393,6 +393,52 @@ test "session host stable pump storage and Client transfer stay in mechanics bou
     ));
 }
 
+test "session host external adoption import direction and mechanics stay closed" {
+    const allocator = std.testing.allocator;
+    var dir = try std.Io.Dir.cwd().openDir(std.testing.io, "src", .{ .iterate = true });
+    defer dir.close(std.testing.io);
+    var walker = try dir.walk(allocator);
+    defer walker.deinit();
+
+    while (try walker.next(std.testing.io)) |entry| {
+        if (entry.kind != .file or !std.mem.endsWith(u8, entry.basename, ".zig")) continue;
+        const is_client = std.mem.eql(
+            u8,
+            entry.path,
+            "platform/macos/session_host/client.zig",
+        );
+        const is_adoption = std.mem.eql(
+            u8,
+            entry.path,
+            "platform/macos/session_host/client_external_adoption.zig",
+        );
+        const is_pump = std.mem.eql(
+            u8,
+            entry.path,
+            "platform/macos/session_host/client_external_pump.zig",
+        );
+        const path = try std.fmt.allocPrint(allocator, "src/{s}", .{entry.path});
+        defer allocator.free(path);
+        const source = try readZigFileZ(allocator, path);
+        defer allocator.free(source);
+
+        if (!is_pump)
+            try std.testing.expect(!joinedStringLiteralsContain(
+                source,
+                "client_external_adoption.zig",
+            ));
+        if (is_client or is_adoption)
+            try std.testing.expect(!joinedStringLiteralsContain(
+                source,
+                "client_external_pump.zig",
+            ));
+        if (!is_adoption and !is_pump)
+            try std.testing.expect(!containsRestrictedName(source, "PreparedScreenBacklog"));
+        if (!is_client and !is_adoption)
+            try std.testing.expect(!containsRestrictedName(source, "PreparedClientDisarm"));
+    }
+}
+
 fn containsExactIdentifier(source: [:0]const u8, expected: []const u8) bool {
     var tokenizer = std.zig.Tokenizer.init(source);
     while (true) {

@@ -9,7 +9,9 @@ const c = std.c;
 const posix = std.posix;
 const client_mod = @import("client.zig");
 const client_external_mode = @import("client_external_mode.zig");
+const client_external_adoption = @import("client_external_adoption.zig");
 const client_pump = @import("client_pump.zig");
+const compatibility = @import("compatibility.zig");
 const external_inbox_ledger = @import("external_inbox_ledger.zig");
 const framing = @import("framing.zig");
 const protocol = @import("protocol.zig");
@@ -26,6 +28,84 @@ pub const AttachmentEvidence = struct {
     stream_id: u64,
     initial_role: AttachmentRole,
     initial_controller_generation: u64,
+};
+
+pub const AuthorityGeneration = union(enum) {
+    untracked,
+    tracked: u64,
+};
+
+pub const PreparedAttachmentAuthority = struct {
+    role: AttachmentRole,
+    generation: AuthorityGeneration,
+};
+
+pub const RetryablePrepareReason = enum { out_of_memory };
+pub const TerminalPrepareReason = enum {
+    protocol,
+    resource,
+    internal_invariant,
+};
+
+pub const PrepareStatus = union(enum) {
+    prepared,
+    retryable_preserved: RetryablePrepareReason,
+    terminal: TerminalPrepareReason,
+};
+
+const AdoptionLifecycle = enum { empty, prepared, committed_tombstone, aborted_tombstone };
+
+/// Pump-owned, final-address seal. The neutral module owns only the screen backlog sub-plan; this
+/// object binds it to the exact storage, evidence, authority and pristine ledger that may publish
+/// it in c3.
+pub const PreparedExternalAdoption = struct {
+    saved_self_addr: usize = 0,
+    storage_addr: usize = 0,
+    client_addr: usize = 0,
+    ledger_addr: usize = 0,
+    evidence: AttachmentEvidence = .{
+        .runtime_id = 0,
+        .stream_id = 0,
+        .initial_role = .observer,
+        .initial_controller_generation = 0,
+    },
+    authority: ?PreparedAttachmentAuthority = null,
+    backlog: client_external_adoption.PreparedScreenBacklog = .{},
+    lifecycle: AdoptionLifecycle = .empty,
+
+    fn deinit(self: *PreparedExternalAdoption) void {
+        if (self.saved_self_addr != 0 and self.saved_self_addr != @intFromPtr(self)) return;
+        self.backlog.deinit();
+        self.authority = null;
+        self.lifecycle = .aborted_tombstone;
+    }
+
+    pub fn validate(
+        self: *const PreparedExternalAdoption,
+        storage: *const ExternalPumpStorage,
+    ) bool {
+        if (self.lifecycle != .prepared or
+            self.saved_self_addr != @intFromPtr(self) or
+            self.storage_addr != @intFromPtr(storage) or
+            storage.saved_self_addr != @intFromPtr(storage) or
+            storage.lifecycle != .adopting or
+            storage.semantic_state != .adopting or
+            storage.evidence_snapshot.runtime_id == 0 or
+            storage.evidence_snapshot.stream_id == 0 or
+            self.ledger_addr != @intFromPtr(&storage.inbox_ledger) or
+            !std.meta.eql(self.evidence, storage.evidence_snapshot))
+            return false;
+        const client = if (storage.owned_client) |*owned| owned else return false;
+        if (self.client_addr != @intFromPtr(client)) return false;
+        const view = storage.inbox_ledger.accountingView();
+        if (!view.valid or !view.pristine_zero) return false;
+        const expected_authority = prepareAuthority(client, storage.evidence_snapshot) catch
+            return false;
+        if (!std.meta.eql(self.authority orelse return false, expected_authority))
+            return false;
+        if (self.backlog.targetStream() != self.evidence.stream_id) return false;
+        return self.backlog.validate(client, &storage.inbox_ledger);
+    }
 };
 
 pub const SourceDisposition = enum {
@@ -101,6 +181,7 @@ pub const ExternalPumpStorage = struct {
     },
     owned_client: ?client_mod.Client = null,
     inbox_ledger: external_inbox_ledger.ExternalInboxLedger = .{},
+    prepared_adoption: PreparedExternalAdoption = .{},
 
     pub fn initInPlace(
         out: *ExternalPumpStorage,
@@ -126,6 +207,14 @@ pub const ExternalPumpStorage = struct {
         )) {
             return failed(.overlapping_storage, .preserved);
         }
+        source.preflightExternalAdoptionDestination(
+            out,
+            @sizeOf(ExternalPumpStorage),
+        ) catch |err| return switch (err) {
+            error.OutOfMemory => failed(.out_of_memory, .preserved),
+            error.InvalidAlias => failed(.overlapping_storage, .preserved),
+            else => failed(.invariant_failure, .preserved),
+        };
         if (out.lifecycle != .empty)
             return failed(.destination_not_empty, .preserved);
         if (evidence.runtime_id == 0 or evidence.stream_id == 0)
@@ -181,6 +270,51 @@ pub const ExternalPumpStorage = struct {
         };
     }
 
+    pub fn prepareAdoption(self: *ExternalPumpStorage) PrepareStatus {
+        if (self.saved_self_addr != @intFromPtr(self) or
+            self.lifecycle != .adopting or self.semantic_state != .adopting or
+            self.prepared_adoption.lifecycle != .empty)
+            return .{ .terminal = .internal_invariant };
+        const client = if (self.owned_client) |*owned| owned else return .{ .terminal = .internal_invariant };
+        if (self.evidence_snapshot.runtime_id == 0 or
+            self.evidence_snapshot.stream_id == 0)
+            return .{ .terminal = .protocol };
+        const ledger_view = self.inbox_ledger.accountingView();
+        if (!ledger_view.valid or !ledger_view.pristine_zero)
+            return .{ .terminal = .internal_invariant };
+        _ = client_external_adoption.preflightMetadata(
+            client,
+            self.evidence_snapshot.stream_id,
+        ) catch |err| return mapPrepareError(err);
+        client.preflightExternalAdoptionDestination(
+            &self.prepared_adoption,
+            @sizeOf(PreparedExternalAdoption),
+        ) catch |err| return mapPrepareError(err);
+        const authority = prepareAuthority(client, self.evidence_snapshot) catch |err|
+            return mapAuthorityError(err);
+
+        self.prepared_adoption = .{
+            .saved_self_addr = @intFromPtr(&self.prepared_adoption),
+            .storage_addr = @intFromPtr(self),
+            .client_addr = @intFromPtr(client),
+            .ledger_addr = @intFromPtr(&self.inbox_ledger),
+            .evidence = self.evidence_snapshot,
+            .authority = authority,
+        };
+        client_external_adoption.PreparedScreenBacklog.initInPlace(
+            &self.prepared_adoption.backlog,
+            client.allocator,
+            client,
+            &self.inbox_ledger,
+            self.evidence_snapshot.stream_id,
+        ) catch |err| {
+            self.prepared_adoption = .{};
+            return mapPrepareError(err);
+        };
+        self.prepared_adoption.lifecycle = .prepared;
+        return .prepared;
+    }
+
     pub fn teardown(self: *ExternalPumpStorage) TeardownResult {
         if (self.saved_self_addr != 0 and self.saved_self_addr != @intFromPtr(self))
             return .moved_storage;
@@ -204,6 +338,7 @@ pub const ExternalPumpStorage = struct {
             .reason = reason,
             .fd_disposition = .owner_cleanup,
         } };
+        self.prepared_adoption.deinit();
         if (self.owned_client) |*owned| owned.deinit();
         self.owned_client = null;
         const drain_report = self.inbox_ledger.drainAll();
@@ -215,6 +350,84 @@ pub const ExternalPumpStorage = struct {
         return if (ledger_result) |_| .cleaned else |_| .ledger_not_zero;
     }
 };
+
+const PrepareAuthorityError = error{ ProtocolAuthority, InvariantAuthority };
+
+fn prepareAuthority(
+    client: *const client_mod.Client,
+    evidence: AttachmentEvidence,
+) PrepareAuthorityError!PreparedAttachmentAuthority {
+    const selected = client.compatibility_profile orelse return error.InvariantAuthority;
+    return switch (selected.attach_schema) {
+        .frozen_controller_only => {
+            if (selected.kind != compatibility.Kind.previous or
+                evidence.initial_role != .controller or
+                evidence.initial_controller_generation != 0 or
+                client.attachment_capabilities.peer_attach_generation or
+                client.attachment_capabilities.negotiated_controller_transfer)
+                return error.ProtocolAuthority;
+            return .{ .role = .controller, .generation = .untracked };
+        },
+        .granted_roles => {
+            if (client.attachment_capabilities.peer_attach_generation !=
+                client.attachment_capabilities.negotiated_controller_transfer)
+                return error.InvariantAuthority;
+            if (!client.attachment_capabilities.peer_attach_generation) {
+                if (evidence.initial_role != .observer or
+                    evidence.initial_controller_generation != 0)
+                    return error.ProtocolAuthority;
+                return .{ .role = .observer, .generation = .untracked };
+            }
+            if (evidence.initial_role == .controller and
+                evidence.initial_controller_generation == 0)
+                return error.ProtocolAuthority;
+            return .{
+                .role = evidence.initial_role,
+                .generation = .{ .tracked = evidence.initial_controller_generation },
+            };
+        },
+    };
+}
+
+fn mapPrepareError(err: client_external_adoption.PrepareError) PrepareStatus {
+    return switch (err) {
+        error.OutOfMemory => .{ .retryable_preserved = .out_of_memory },
+        error.MetadataTooLarge => .{ .terminal = .resource },
+        error.InvalidStream,
+        error.InvalidHeader,
+        error.InvalidPartial,
+        error.InvalidRequestId,
+        error.InvalidScreenSemantic,
+        error.IneligibleProfile,
+        error.InvalidCompatibilityProvenance,
+        => .{ .terminal = .protocol },
+        error.InvalidClientState,
+        error.InvalidCounter,
+        error.InvalidAllocator,
+        error.InvalidAlias,
+        error.ArithmeticOverflow,
+        error.InvalidPlan,
+        error.StaleInventory,
+        error.ByteCapExceeded,
+        error.ItemCapExceeded,
+        error.GenerationExhausted,
+        error.EpochExhausted,
+        error.InvalidPayload,
+        error.InvalidSemantic,
+        error.InvariantFailure,
+        error.PlanningDisabled,
+        error.Drained,
+        error.InvalidAddress,
+        => .{ .terminal = .internal_invariant },
+    };
+}
+
+fn mapAuthorityError(err: PrepareAuthorityError) PrepareStatus {
+    return switch (err) {
+        error.ProtocolAuthority => .{ .terminal = .protocol },
+        error.InvariantAuthority => .{ .terminal = .internal_invariant },
+    };
+}
 
 pub const StorageFootprint = struct {
     pointer_bits: usize,
@@ -268,6 +481,12 @@ const TestClient = struct {
             .fd = fds[0],
             .host_id = 1,
             .parser = framing.FrameParser.init(allocator),
+            .connection_profile = .cli_attach,
+            .compatibility_profile = compatibility.profileForMajor(protocol.version_major).?,
+            .attachment_capabilities = .{
+                .peer_attach_generation = true,
+                .negotiated_controller_transfer = true,
+            },
         };
         errdefer {
             client.deinit();
@@ -309,6 +528,471 @@ test "external pump storage initializes only at its stable address and remains i
     try std.testing.expectEqual(TeardownResult.cleaned, storage.teardown());
     try std.testing.expect(c.fcntl(owned_fd, c.F.GETFD, @as(c_int, 0)) < 0);
     try std.testing.expectEqual(TeardownResult.already_dead, storage.teardown());
+}
+
+test "external pump prepares tracked authority and client ledger adoption without publishing live" {
+    var fixture = try TestClient.init();
+    defer fixture.deinitPeer();
+    const payload = try fixture.client.allocator.dupe(u8, "screen");
+    try fixture.client.pending_batches.append(fixture.client.allocator, .{
+        .is_snapshot = false,
+        .stream_id = 7,
+        .bytes = payload,
+        .allocator = fixture.client.allocator,
+    });
+    fixture.client.pending_batch_bytes = payload.len;
+    var storage: ExternalPumpStorage = .{};
+    try std.testing.expect(
+        ExternalPumpStorage.initInPlace(&storage, &fixture.client, valid_evidence) ==
+            .initialized,
+    );
+    defer _ = storage.teardown();
+    try std.testing.expect(storage.prepareAdoption() == .prepared);
+    try std.testing.expectEqual(StorageLifecycle.adopting, storage.lifecycle);
+    try std.testing.expect(storage.semantic_state == .adopting);
+    try std.testing.expect(storage.prepared_adoption.validate(&storage));
+    const authority = storage.prepared_adoption.authority.?;
+    try std.testing.expectEqual(AttachmentRole.controller, authority.role);
+    try std.testing.expectEqual(
+        @as(u64, 3),
+        authority.generation.tracked,
+    );
+    storage.prepared_adoption.backlog.inventory.?.target_stream = 8;
+    try std.testing.expect(!storage.prepared_adoption.validate(&storage));
+    storage.prepared_adoption.backlog.inventory.?.target_stream = 7;
+    try std.testing.expect(storage.prepared_adoption.validate(&storage));
+    storage.evidence_snapshot.runtime_id = 0;
+    try std.testing.expect(!storage.prepared_adoption.validate(&storage));
+    storage.evidence_snapshot.runtime_id = valid_evidence.runtime_id;
+    var wrong_storage: ExternalPumpStorage = .{};
+    try std.testing.expect(!storage.prepared_adoption.validate(&wrong_storage));
+    var copied_outer = storage.prepared_adoption;
+    try std.testing.expect(!copied_outer.validate(&storage));
+    var wrong_client = try TestClient.init();
+    defer wrong_client.deinitPeer();
+    defer wrong_client.client.deinit();
+    const client_addr = storage.prepared_adoption.client_addr;
+    storage.prepared_adoption.client_addr = @intFromPtr(&wrong_client.client);
+    try std.testing.expect(!storage.prepared_adoption.validate(&storage));
+    storage.prepared_adoption.client_addr = client_addr;
+    std.mem.swap(client_mod.Client, &storage.owned_client.?, &wrong_client.client);
+    try std.testing.expect(!storage.prepared_adoption.validate(&storage));
+    std.mem.swap(client_mod.Client, &storage.owned_client.?, &wrong_client.client);
+    const ledger_addr = storage.prepared_adoption.ledger_addr;
+    storage.prepared_adoption.ledger_addr = 0;
+    try std.testing.expect(!storage.prepared_adoption.validate(&storage));
+    storage.prepared_adoption.ledger_addr = ledger_addr;
+    const wrappers_addr = storage.prepared_adoption.backlog.transfer.?.wrappers_addr;
+    storage.prepared_adoption.backlog.transfer.?.wrappers_addr +=
+        @sizeOf(external_inbox_ledger.OwnedPayload);
+    try std.testing.expect(!storage.prepared_adoption.validate(&storage));
+    storage.prepared_adoption.backlog.transfer.?.wrappers_addr = wrappers_addr;
+    const original_wrappers = storage.prepared_adoption.backlog.transfer.?.wrappers;
+    const alternate_wrappers = try storage.owned_client.?.allocator.alloc(
+        external_inbox_ledger.OwnedPayload,
+        original_wrappers.len,
+    );
+    defer storage.owned_client.?.allocator.free(alternate_wrappers);
+    for (alternate_wrappers) |*wrapper|
+        wrapper.* = external_inbox_ledger.OwnedPayload.empty(storage.owned_client.?.allocator);
+    storage.prepared_adoption.backlog.transfer.?.wrappers = alternate_wrappers;
+    storage.prepared_adoption.backlog.transfer.?.wrappers_addr =
+        @intFromPtr(alternate_wrappers.ptr);
+    try std.testing.expect(!storage.prepared_adoption.validate(&storage));
+    storage.prepared_adoption.backlog.transfer.?.wrappers = original_wrappers;
+    storage.prepared_adoption.backlog.transfer.?.wrappers_addr = wrappers_addr;
+    storage.inbox_ledger.charged_items = 1;
+    try std.testing.expect(!storage.prepared_adoption.validate(&storage));
+    storage.inbox_ledger.charged_items = 0;
+    storage.lifecycle = .live;
+    try std.testing.expect(!storage.prepared_adoption.validate(&storage));
+    storage.lifecycle = .adopting;
+    const semantic_state = storage.semantic_state;
+    storage.semantic_state = .constructing;
+    try std.testing.expect(!storage.prepared_adoption.validate(&storage));
+    storage.semantic_state = semantic_state;
+    const owned_client = storage.owned_client;
+    storage.owned_client = null;
+    try std.testing.expect(!storage.prepared_adoption.validate(&storage));
+    storage.owned_client = owned_client;
+    try std.testing.expect(storage.prepared_adoption.validate(&storage));
+}
+
+test "external pump retryable allocation failure preserves the same storage for retry" {
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    var fixture = try TestClient.initWithAllocator(failing.allocator());
+    defer fixture.deinitPeer();
+    var storage: ExternalPumpStorage = .{};
+    try std.testing.expect(
+        ExternalPumpStorage.initInPlace(&storage, &fixture.client, valid_evidence) ==
+            .initialized,
+    );
+    defer _ = storage.teardown();
+
+    failing.fail_index = failing.alloc_index;
+    try std.testing.expect(storage.prepareAdoption() == .retryable_preserved);
+    try std.testing.expectEqual(StorageLifecycle.adopting, storage.lifecycle);
+    try std.testing.expectEqual(AdoptionLifecycle.empty, storage.prepared_adoption.lifecycle);
+    try std.testing.expect(storage.inbox_ledger.accountingView().pristine_zero);
+
+    failing.fail_index = std.math.maxInt(usize);
+    try std.testing.expect(storage.prepareAdoption() == .prepared);
+    try std.testing.expect(storage.prepared_adoption.validate(&storage));
+}
+
+test "external pump teardown ignores forged prepared lifecycle tombstones" {
+    var fixture = try TestClient.init();
+    defer fixture.deinitPeer();
+    const payload = try fixture.client.allocator.dupe(u8, "screen");
+    try fixture.client.pending_batches.append(fixture.client.allocator, .{
+        .is_snapshot = false,
+        .stream_id = 7,
+        .bytes = payload,
+        .allocator = fixture.client.allocator,
+    });
+    fixture.client.pending_batch_bytes = payload.len;
+    var storage: ExternalPumpStorage = .{};
+    try std.testing.expect(
+        ExternalPumpStorage.initInPlace(&storage, &fixture.client, valid_evidence) ==
+            .initialized,
+    );
+    try std.testing.expect(storage.prepareAdoption() == .prepared);
+    storage.prepared_adoption.lifecycle = .committed_tombstone;
+    storage.prepared_adoption.backlog.client_disarm.lifecycle = @enumFromInt(3);
+    try std.testing.expectEqual(TeardownResult.cleaned, storage.teardown());
+    try std.testing.expectEqual(TeardownResult.already_dead, storage.teardown());
+}
+
+test "external pump retries the same storage at every adoption allocation index" {
+    var fail_offset: usize = 0;
+    while (true) : (fail_offset += 1) {
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+        const allocator = failing.allocator();
+        var fixture = try TestClient.initWithAllocator(allocator);
+        defer fixture.deinitPeer();
+        try fixture.client.parser.push("parser");
+        const payload = try allocator.dupe(u8, "batch");
+        try fixture.client.pending_batches.append(allocator, .{
+            .is_snapshot = false,
+            .stream_id = 7,
+            .bytes = payload,
+            .allocator = allocator,
+        });
+        fixture.client.pending_batch_bytes = payload.len;
+        var partial_bytes: std.ArrayListUnmanaged(u8) = .empty;
+        try partial_bytes.appendSlice(allocator, "partial");
+        fixture.client.partial_batch = .{
+            .stream_id = 7,
+            .is_snapshot = false,
+            .bytes = partial_bytes,
+            .chunk_count = 1,
+        };
+        const stream_payload = try allocator.dupe(u8, "stream");
+        try fixture.client.pending_stream.append(allocator, .{
+            .header = .{
+                .kind = .delta_chunk,
+                .stream_id = 7,
+                .payload_len = @intCast(stream_payload.len),
+            },
+            .payload = stream_payload,
+        });
+        fixture.client.pending_stream_bytes = stream_payload.len;
+        const event_payload = try allocator.dupe(u8, "event");
+        try fixture.client.pending_events.append(allocator, .{
+            .header = .{
+                .kind = .event,
+                .stream_id = 7,
+                .payload_len = @intCast(event_payload.len),
+            },
+            .payload = event_payload,
+        });
+        fixture.client.pending_event_bytes = event_payload.len;
+        var storage: ExternalPumpStorage = .{};
+        try std.testing.expect(
+            ExternalPumpStorage.initInPlace(&storage, &fixture.client, valid_evidence) ==
+                .initialized,
+        );
+        defer _ = storage.teardown();
+        const batch_before = storage.owned_client.?.pending_batches.items[0];
+        const batch_list_ptr = storage.owned_client.?.pending_batches.items.ptr;
+        const batch_list_len = storage.owned_client.?.pending_batches.items.len;
+        const batch_list_cap = storage.owned_client.?.pending_batches.capacity;
+        const batch_counter = storage.owned_client.?.pending_batch_bytes;
+        const partial_before = storage.owned_client.?.partial_batch.?;
+        const stream_before = storage.owned_client.?.pending_stream.items[0];
+        const stream_list_ptr = storage.owned_client.?.pending_stream.items.ptr;
+        const stream_list_len = storage.owned_client.?.pending_stream.items.len;
+        const stream_list_cap = storage.owned_client.?.pending_stream.capacity;
+        const stream_counter = storage.owned_client.?.pending_stream_bytes;
+        const event_before = storage.owned_client.?.pending_events.items[0];
+        const event_list_ptr = storage.owned_client.?.pending_events.items.ptr;
+        const event_list_len = storage.owned_client.?.pending_events.items.len;
+        const event_list_cap = storage.owned_client.?.pending_events.capacity;
+        const event_counter = storage.owned_client.?.pending_event_bytes;
+        const parser_items = storage.owned_client.?.parser.buf.items;
+        const parser_cap = storage.owned_client.?.parser.buf.capacity;
+        const parser_head = storage.owned_client.?.parser.head;
+        const parser_major = storage.owned_client.?.parser.expected_major;
+
+        failing.fail_index = failing.alloc_index + fail_offset;
+        const first = storage.prepareAdoption();
+        if (!failing.has_induced_failure) {
+            try std.testing.expect(first == .prepared);
+            try std.testing.expect(storage.prepared_adoption.validate(&storage));
+            break;
+        }
+        try std.testing.expect(first == .retryable_preserved);
+        try std.testing.expectEqual(AdoptionLifecycle.empty, storage.prepared_adoption.lifecycle);
+        try std.testing.expect(storage.inbox_ledger.accountingView().pristine_zero);
+        try std.testing.expectEqual(@as(usize, 1), storage.owned_client.?.pending_batches.items.len);
+        try std.testing.expectEqualStrings(
+            "batch",
+            storage.owned_client.?.pending_batches.items[0].bytes,
+        );
+        try std.testing.expect(std.meta.eql(
+            batch_before,
+            storage.owned_client.?.pending_batches.items[0],
+        ));
+        try std.testing.expectEqual(batch_list_ptr, storage.owned_client.?.pending_batches.items.ptr);
+        try std.testing.expectEqual(batch_list_len, storage.owned_client.?.pending_batches.items.len);
+        try std.testing.expectEqual(batch_list_cap, storage.owned_client.?.pending_batches.capacity);
+        try std.testing.expectEqual(batch_counter, storage.owned_client.?.pending_batch_bytes);
+        try std.testing.expectEqualStrings(
+            "partial",
+            storage.owned_client.?.partial_batch.?.bytes.items,
+        );
+        try std.testing.expect(std.meta.eql(partial_before, storage.owned_client.?.partial_batch.?));
+        try std.testing.expectEqualStrings(
+            "stream",
+            storage.owned_client.?.pending_stream.items[0].payload,
+        );
+        try std.testing.expect(std.meta.eql(stream_before, storage.owned_client.?.pending_stream.items[0]));
+        try std.testing.expectEqual(stream_list_ptr, storage.owned_client.?.pending_stream.items.ptr);
+        try std.testing.expectEqual(stream_list_len, storage.owned_client.?.pending_stream.items.len);
+        try std.testing.expectEqual(stream_list_cap, storage.owned_client.?.pending_stream.capacity);
+        try std.testing.expectEqual(stream_counter, storage.owned_client.?.pending_stream_bytes);
+        try std.testing.expectEqualStrings(
+            "event",
+            storage.owned_client.?.pending_events.items[0].payload,
+        );
+        try std.testing.expect(std.meta.eql(event_before, storage.owned_client.?.pending_events.items[0]));
+        try std.testing.expectEqual(event_list_ptr, storage.owned_client.?.pending_events.items.ptr);
+        try std.testing.expectEqual(event_list_len, storage.owned_client.?.pending_events.items.len);
+        try std.testing.expectEqual(event_list_cap, storage.owned_client.?.pending_events.capacity);
+        try std.testing.expectEqual(event_counter, storage.owned_client.?.pending_event_bytes);
+        try std.testing.expectEqualStrings("parser", storage.owned_client.?.parser.buf.items);
+        try std.testing.expectEqual(parser_items.ptr, storage.owned_client.?.parser.buf.items.ptr);
+        try std.testing.expectEqual(parser_items.len, storage.owned_client.?.parser.buf.items.len);
+        try std.testing.expectEqual(parser_cap, storage.owned_client.?.parser.buf.capacity);
+        try std.testing.expectEqual(parser_head, storage.owned_client.?.parser.head);
+        try std.testing.expectEqual(parser_major, storage.owned_client.?.parser.expected_major);
+        _ = try client_external_adoption.preflightMetadata(&storage.owned_client.?, 7);
+
+        failing.fail_index = std.math.maxInt(usize);
+        try std.testing.expect(storage.prepareAdoption() == .prepared);
+        try std.testing.expect(storage.prepared_adoption.validate(&storage));
+        if (fail_offset > 128) return error.TestUnexpectedResult;
+    }
+}
+
+test "external pump authority seed permits only verified frozen untracked controller" {
+    var frozen = try TestClient.init();
+    defer frozen.deinitPeer();
+    frozen.client.wire_major = 1;
+    frozen.client.screen_codec_version = 1;
+    frozen.client.parser.expected_major = 1;
+    frozen.client.compatibility_profile = compatibility.profileForMajor(1).?;
+    frozen.client.attachment_capabilities = .{};
+    var frozen_storage: ExternalPumpStorage = .{};
+    try std.testing.expect(
+        ExternalPumpStorage.initInPlace(
+            &frozen_storage,
+            &frozen.client,
+            .{
+                .runtime_id = 0xaa,
+                .stream_id = 7,
+                .initial_role = .controller,
+                .initial_controller_generation = 0,
+            },
+        ) == .initialized,
+    );
+    defer _ = frozen_storage.teardown();
+    try std.testing.expect(frozen_storage.prepareAdoption() == .prepared);
+    try std.testing.expect(
+        frozen_storage.prepared_adoption.authority.?.generation == .untracked,
+    );
+
+    var wrong_fingerprint = try TestClient.init();
+    defer wrong_fingerprint.deinitPeer();
+    wrong_fingerprint.client.wire_major = 1;
+    wrong_fingerprint.client.screen_codec_version = 1;
+    wrong_fingerprint.client.parser.expected_major = 1;
+    wrong_fingerprint.client.compatibility_profile = compatibility.profileForMajor(1).?;
+    wrong_fingerprint.client.compatibility_profile.?.required_fingerprint = "wrong";
+    wrong_fingerprint.client.attachment_capabilities = .{};
+    var wrong_fingerprint_storage: ExternalPumpStorage = .{};
+    try std.testing.expect(
+        ExternalPumpStorage.initInPlace(
+            &wrong_fingerprint_storage,
+            &wrong_fingerprint.client,
+            .{
+                .runtime_id = 0xaa,
+                .stream_id = 7,
+                .initial_role = .controller,
+                .initial_controller_generation = 0,
+            },
+        ) == .initialized,
+    );
+    defer _ = wrong_fingerprint_storage.teardown();
+    switch (wrong_fingerprint_storage.prepareAdoption()) {
+        .terminal => |reason| try std.testing.expectEqual(
+            TerminalPrepareReason.protocol,
+            reason,
+        ),
+        else => return error.TestUnexpectedResult,
+    }
+
+    var current = try TestClient.init();
+    defer current.deinitPeer();
+    current.client.attachment_capabilities = .{};
+    var current_storage: ExternalPumpStorage = .{};
+    try std.testing.expect(
+        ExternalPumpStorage.initInPlace(
+            &current_storage,
+            &current.client,
+            .{
+                .runtime_id = 0xaa,
+                .stream_id = 7,
+                .initial_role = .controller,
+                .initial_controller_generation = 0,
+            },
+        ) == .initialized,
+    );
+    defer _ = current_storage.teardown();
+    try std.testing.expect(
+        current_storage.prepareAdoption() == .terminal,
+    );
+    try std.testing.expect(current_storage.prepared_adoption.authority == null);
+}
+
+test "external pump authority seed table preserves protocol and invariant classes" {
+    var fixture = try TestClient.init();
+    defer fixture.deinitPeer();
+    defer fixture.client.deinit();
+    const client = &fixture.client;
+    try std.testing.expectEqual(
+        TerminalPrepareReason.protocol,
+        mapAuthorityError(error.ProtocolAuthority).terminal,
+    );
+    try std.testing.expectEqual(
+        TerminalPrepareReason.internal_invariant,
+        mapAuthorityError(error.InvariantAuthority).terminal,
+    );
+
+    const current_profile = client.compatibility_profile.?;
+    client.compatibility_profile = compatibility.profileForMajor(1).?;
+    client.attachment_capabilities = .{};
+    var authority = try prepareAuthority(client, .{
+        .runtime_id = 1,
+        .stream_id = 7,
+        .initial_role = .controller,
+        .initial_controller_generation = 0,
+    });
+    try std.testing.expect(authority.generation == .untracked);
+    try std.testing.expectError(
+        error.ProtocolAuthority,
+        prepareAuthority(client, .{
+            .runtime_id = 1,
+            .stream_id = 7,
+            .initial_role = .observer,
+            .initial_controller_generation = 0,
+        }),
+    );
+    try std.testing.expectError(
+        error.ProtocolAuthority,
+        prepareAuthority(client, .{
+            .runtime_id = 1,
+            .stream_id = 7,
+            .initial_role = .controller,
+            .initial_controller_generation = 1,
+        }),
+    );
+    client.attachment_capabilities.peer_attach_generation = true;
+    try std.testing.expectError(
+        error.ProtocolAuthority,
+        prepareAuthority(client, .{
+            .runtime_id = 1,
+            .stream_id = 7,
+            .initial_role = .controller,
+            .initial_controller_generation = 0,
+        }),
+    );
+
+    client.compatibility_profile = current_profile;
+    client.attachment_capabilities = .{};
+    authority = try prepareAuthority(client, .{
+        .runtime_id = 1,
+        .stream_id = 7,
+        .initial_role = .observer,
+        .initial_controller_generation = 0,
+    });
+    try std.testing.expect(authority.generation == .untracked);
+    try std.testing.expectError(
+        error.ProtocolAuthority,
+        prepareAuthority(client, .{
+            .runtime_id = 1,
+            .stream_id = 7,
+            .initial_role = .controller,
+            .initial_controller_generation = 0,
+        }),
+    );
+
+    client.attachment_capabilities = .{
+        .peer_attach_generation = true,
+        .negotiated_controller_transfer = false,
+    };
+    try std.testing.expectError(
+        error.InvariantAuthority,
+        prepareAuthority(client, valid_evidence),
+    );
+    client.attachment_capabilities = .{
+        .peer_attach_generation = false,
+        .negotiated_controller_transfer = true,
+    };
+    try std.testing.expectError(
+        error.InvariantAuthority,
+        prepareAuthority(client, valid_evidence),
+    );
+
+    client.attachment_capabilities = .{
+        .peer_attach_generation = true,
+        .negotiated_controller_transfer = true,
+    };
+    try std.testing.expectError(
+        error.ProtocolAuthority,
+        prepareAuthority(client, .{
+            .runtime_id = 1,
+            .stream_id = 7,
+            .initial_role = .controller,
+            .initial_controller_generation = 0,
+        }),
+    );
+    authority = try prepareAuthority(client, .{
+        .runtime_id = 1,
+        .stream_id = 7,
+        .initial_role = .observer,
+        .initial_controller_generation = 0,
+    });
+    try std.testing.expectEqual(@as(u64, 0), authority.generation.tracked);
+    authority = try prepareAuthority(client, .{
+        .runtime_id = 1,
+        .stream_id = 7,
+        .initial_role = .observer,
+        .initial_controller_generation = 9,
+    });
+    try std.testing.expectEqual(@as(u64, 9), authority.generation.tracked);
+    authority = try prepareAuthority(client, valid_evidence);
+    try std.testing.expectEqual(@as(u64, 3), authority.generation.tracked);
 }
 
 test "external pump storage rejects transfer of its already-bound Client" {
@@ -507,6 +1191,35 @@ test "external pump storage rejects source overlap before reading destination st
     try std.testing.expectEqual(InitFailureReason.overlapping_storage, failure.reason);
     try std.testing.expectEqual(SourceDisposition.preserved, failure.source_disposition);
     try std.testing.expectEqual(fd, fixture.client.fd);
+}
+
+test "external pump storage rejects overlap with every source-owned backing before first write" {
+    const allocator = std.testing.allocator;
+    var fixture = try TestClient.init();
+    defer fixture.deinitPeer();
+    defer fixture.client.deinit();
+    var storage: ExternalPumpStorage = .{};
+    const original = try allocator.dupe(u8, "x");
+    try fixture.client.pending_batches.append(allocator, .{
+        .is_snapshot = false,
+        .stream_id = 7,
+        .bytes = original,
+        .allocator = allocator,
+    });
+    fixture.client.pending_batch_bytes = 1;
+    const storage_bytes = std.mem.asBytes(&storage);
+    fixture.client.pending_batches.items[0].bytes = storage_bytes[0..1];
+    const byte_before = storage_bytes[0];
+
+    const failure = ExternalPumpStorage.initInPlace(
+        &storage,
+        &fixture.client,
+        valid_evidence,
+    ).failed;
+    try std.testing.expectEqual(InitFailureReason.overlapping_storage, failure.reason);
+    try std.testing.expectEqual(SourceDisposition.preserved, failure.source_disposition);
+    try std.testing.expectEqual(byte_before, storage_bytes[0]);
+    fixture.client.pending_batches.items[0].bytes = original;
 }
 
 test "external pump storage post-move failure closes destination and tombstones source" {

@@ -20,6 +20,8 @@ const host_manifest = @import("host_manifest.zig");
 const short_endpoint = @import("short_endpoint.zig");
 const screen_stream = @import("screen_stream.zig");
 const owner_lease = @import("owner_lease.zig");
+const attach_phase_deadline = @import("attach_phase_deadline.zig");
+const client_deadline = @import("client_deadline.zig");
 
 // flock(2)은 std.c 미노출(macOS 전용). start lock 직렬화용. LOCK_EX=2·LOCK_NB=4(sys/file.h).
 extern "c" fn flock(fd: c_int, operation: c_int) c_int;
@@ -49,6 +51,7 @@ pub const FailureReason = enum {
     invalid_manifest,
     stale_manifest,
     out_of_memory,
+    deadline_exceeded,
     /// 그 `host_id`의 host **프로세스가 사라졌다**는 긍정적 증거가 있다(manifest도 legacy endpoint도 없음, 또는 manifest는
     /// 남았지만 endpoint 무응답 + owner lease 사망 = 재부팅·crash 뒤 stale manifest). 나머지 reason과 달리 "재시도하면
     /// 될 수도"가 아니라 **영구**다. 저장된 runtime을 종료 placeholder로 둘지 판정하는 caller가 이 구분에 의존한다 —
@@ -335,27 +338,129 @@ pub fn connectDiscoveredHostProfile(
     expected: host_manifest.Descriptor,
     connection_profile: client_mod.ConnectionProfile,
 ) Outcome {
+    return connectDiscoveredHostProfileWith(
+        allocator,
+        base_cache_dir,
+        expected,
+        connection_profile,
+        .blocking,
+    );
+}
+
+pub fn connectDiscoveredHostProfileUntil(
+    allocator: std.mem.Allocator,
+    base_cache_dir: []const u8,
+    expected: host_manifest.Descriptor,
+    connection_profile: client_mod.ConnectionProfile,
+    phase: attach_phase_deadline.PhaseDeadline,
+) Outcome {
+    if (phase.kind != .resolve and phase.kind != .connect_hello)
+        return .{ .failed = .invalid_endpoint };
+    if (phase.absolute.remainingNs() <= 0)
+        return .{ .failed = .deadline_exceeded };
+    return connectDiscoveredHostProfileWith(
+        allocator,
+        base_cache_dir,
+        expected,
+        connection_profile,
+        .{ .deadline = phase.absolute },
+    );
+}
+
+const DiscoveredConnectIo = union(enum) {
+    blocking,
+    deadline: client_deadline.AbsoluteDeadline,
+};
+
+fn connectDiscoveredHostProfileWith(
+    allocator: std.mem.Allocator,
+    base_cache_dir: []const u8,
+    expected: host_manifest.Descriptor,
+    connection_profile: client_mod.ConnectionProfile,
+    io: DiscoveredConnectIo,
+) Outcome {
     if (builtin.os.tag != .macos or expected.host_id == 0) return .{ .failed = .invalid_endpoint };
     var dir_buf: [512]u8 = undefined;
     const dir = discovery.sessionHostDirPath(&dir_buf, base_cache_dir) catch
         return .{ .failed = .invalid_endpoint };
-    var current = host_manifest.load(allocator, dir, expected.host_id) catch |err| return .{ .failed = switch (err) {
-        error.OutOfMemory => .out_of_memory,
-        error.ManifestNotFound => .host_gone,
-        else => .invalid_manifest,
-    } };
+    if (deadlineExpired(io)) return .{ .failed = .deadline_exceeded };
+    var current = host_manifest.load(allocator, dir, expected.host_id) catch |err|
+        return .{ .failed = manifestLoadFailure(io, err) };
     defer current.deinit();
+    if (deadlineExpired(io)) return .{ .failed = .deadline_exceeded };
     if (!host_manifest.descriptorEql(current.descriptor(), expected))
         return .{ .failed = .stale_manifest };
     const endpoint = allocator.dupeZ(u8, expected.endpoint) catch return .{ .failed = .out_of_memory };
     defer allocator.free(endpoint);
-    return connectExactWithBackoffKind(
-        allocator,
-        endpoint,
-        expected.protocol_major,
-        expected,
-        connection_profile,
-        .{ .connect_attempts = 10, .connect_delay_ms = 20 },
+    const outcome = switch (io) {
+        .blocking => connectExactWithBackoffKind(
+            allocator,
+            endpoint,
+            expected.protocol_major,
+            expected,
+            connection_profile,
+            .{ .connect_attempts = 10, .connect_delay_ms = 20 },
+        ),
+        .deadline => |deadline| connectExactWithBackoffKindUntil(
+            allocator,
+            endpoint,
+            expected.protocol_major,
+            expected,
+            connection_profile,
+            .{ .connect_attempts = 10, .connect_delay_ms = 20 },
+            deadline,
+            deadline_attempt_ops,
+            client_deadline.posix_ops,
+        ),
+    };
+    if (deadlineExpired(io)) {
+        var expired = outcome;
+        if (expired == .connected) expired.connected.deinit();
+        return .{ .failed = .deadline_exceeded };
+    }
+    return outcome;
+}
+
+fn deadlineExpired(io: DiscoveredConnectIo) bool {
+    return switch (io) {
+        .blocking => false,
+        .deadline => |deadline| deadline.remainingNs() <= 0,
+    };
+}
+
+fn manifestLoadFailure(io: DiscoveredConnectIo, err: anyerror) FailureReason {
+    // The synchronous filesystem bundle is not cancellable mid-syscall. Once it returns, phase
+    // expiry has priority over both success and failure classification.
+    if (deadlineExpired(io)) return .deadline_exceeded;
+    return switch (err) {
+        error.OutOfMemory => .out_of_memory,
+        error.ManifestNotFound => .host_gone,
+        else => .invalid_manifest,
+    };
+}
+
+test "host_connect manifest load failure after phase boundary is deadline first" {
+    const Clock = struct {
+        now_ns: i128 = 0,
+
+        fn now(context: *anyopaque) i128 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            return self.now_ns;
+        }
+    };
+    var clock = Clock{};
+    const deadline = client_deadline.AbsoluteDeadline.fromInjected(
+        .{ .context = &clock, .now_ns = Clock.now },
+        5,
+    );
+    clock.now_ns = deadline.expires_at_ns;
+    try testing.expectEqual(
+        FailureReason.deadline_exceeded,
+        manifestLoadFailure(.{ .deadline = deadline }, error.ManifestNotFound),
+    );
+    try testing.expectEqual(
+        FailureReason.deadline_exceeded,
+        manifestLoadFailure(.{ .deadline = deadline }, error.OutOfMemory),
     );
 }
 
@@ -488,6 +593,268 @@ fn connectExactWithBackoffKind(
         _ = usleep(opts.connect_delay_ms * 1000);
     }
     return .{ .failed = if (saw_transient) .transient_timeout else .startup_timeout };
+}
+
+fn connectExactWithBackoffKindUntil(
+    allocator: std.mem.Allocator,
+    endpoint: [:0]const u8,
+    major: u16,
+    expected: host_manifest.Descriptor,
+    connection_profile: client_mod.ConnectionProfile,
+    opts: Options,
+    deadline: client_deadline.AbsoluteDeadline,
+    attempt_ops: DeadlineAttemptOps,
+    wait_ops: client_deadline.Ops,
+) Outcome {
+    var attempts: usize = 0;
+    var saw_transient = false;
+    while (attempts < opts.connect_attempts) : (attempts += 1) {
+        if (deadline.remainingNs() <= 0) return .{ .failed = .deadline_exceeded };
+        const candidate = attempt_ops.connect(
+            attempt_ops.context,
+            allocator,
+            endpoint,
+            connection_profile,
+            major,
+            deadline,
+        );
+        switch (candidate) {
+            .connected => |client| {
+                const validated = validateExactClient(client, expected);
+                if (deadline.remainingNs() <= 0) {
+                    var expired = validated;
+                    if (expired == .connected) expired.connected.deinit();
+                    return .{ .failed = .deadline_exceeded };
+                }
+                return validated;
+            },
+            .absent => {},
+            .transient => {
+                saw_transient = true;
+            },
+            .failed => |reason| return .{ .failed = reason },
+        }
+        // No delay after the final failed attempt. The derived wake target cannot extend the
+        // caller's phase and EINTR does not restart this interval.
+        if (attempts + 1 >= opts.connect_attempts) break;
+        client_deadline.waitBackoffUntil(
+            wait_ops,
+            @as(i128, opts.connect_delay_ms) * std.time.ns_per_ms,
+            deadline,
+        ) catch |err| return .{ .failed = switch (err) {
+            error.Timeout => .deadline_exceeded,
+            else => .handshake_failed,
+        } };
+    }
+    return .{ .failed = if (saw_transient) .transient_timeout else .startup_timeout };
+}
+
+const DeadlineAttemptResult = union(enum) {
+    connected: client_mod.Client,
+    absent,
+    transient,
+    failed: FailureReason,
+};
+
+const DeadlineAttemptOps = struct {
+    context: *anyopaque,
+    connect: *const fn (
+        context: *anyopaque,
+        allocator: std.mem.Allocator,
+        endpoint: [:0]const u8,
+        connection_profile: client_mod.ConnectionProfile,
+        major: u16,
+        deadline: client_deadline.AbsoluteDeadline,
+    ) DeadlineAttemptResult,
+};
+
+const deadline_attempt_ops = DeadlineAttemptOps{
+    .context = @ptrFromInt(1),
+    .connect = deadlineConnectAttempt,
+};
+
+fn deadlineConnectAttempt(
+    _: *anyopaque,
+    allocator: std.mem.Allocator,
+    endpoint: [:0]const u8,
+    connection_profile: client_mod.ConnectionProfile,
+    major: u16,
+    deadline: client_deadline.AbsoluteDeadline,
+) DeadlineAttemptResult {
+    if (client_mod.Client.connectUntil(
+        allocator,
+        endpoint,
+        connection_profile,
+        major,
+        deadline,
+    )) |client| {
+        return .{ .connected = client };
+    } else |err| return switch (err) {
+        error.EndpointAbsent => .absent,
+        error.EndpointTransient => .transient,
+        error.EndpointDenied => .{ .failed = .endpoint_denied },
+        error.IncompatibleVersion => .{ .failed = .incompatible_version },
+        error.AdminBusy => .{ .failed = .resource_exhausted },
+        error.Unauthorized => .{ .failed = .unauthorized },
+        error.ProtocolError, error.EventQueueFull => .{ .failed = .protocol_error },
+        error.OutOfMemory => .{ .failed = .out_of_memory },
+        error.DeadlineExceeded => .{ .failed = .deadline_exceeded },
+        error.HandshakeFailed, error.ConnectionClosed, error.WriteFailed => .{
+            .failed = .handshake_failed,
+        },
+    };
+}
+
+test "host_connect deadline retry shares one expiry and never sleeps after final attempt" {
+    const Fixture = struct {
+        now_ns: i128 = 0,
+        attempt_count: usize = 0,
+        wait_count: usize = 0,
+        expiries: [3]i128 = @splat(0),
+
+        fn clock(context: *anyopaque) i128 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            return self.now_ns;
+        }
+
+        fn attempt(
+            context: *anyopaque,
+            _: std.mem.Allocator,
+            _: [:0]const u8,
+            _: client_mod.ConnectionProfile,
+            _: u16,
+            deadline: client_deadline.AbsoluteDeadline,
+        ) DeadlineAttemptResult {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.expiries[self.attempt_count] = deadline.expires_at_ns;
+            self.attempt_count += 1;
+            return if (self.attempt_count == 1) .absent else .transient;
+        }
+
+        fn wait(
+            context: *anyopaque,
+            _: c.fd_t,
+            _: client_deadline.WaitKind,
+            timeout_ms: c_int,
+        ) client_deadline.WaitOutcome {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.wait_count += 1;
+            self.now_ns += @as(i128, timeout_ms) * std.time.ns_per_ms;
+            return .timed_out;
+        }
+
+        fn waitOps(self: *@This()) client_deadline.Ops {
+            var result = client_deadline.posix_ops;
+            result.context = self;
+            result.wait = wait;
+            return result;
+        }
+    };
+    var fixture = Fixture{};
+    const deadline = client_deadline.AbsoluteDeadline.fromInjected(
+        .{ .context = &fixture, .now_ns = Fixture.clock },
+        100 * std.time.ns_per_ms,
+    );
+    const descriptor = host_manifest.Descriptor{
+        .host_id = 1,
+        .build_id = "build",
+        .protocol_major = protocol.version_major,
+        .screen_codec_version = screen_stream.codec_version,
+        .upgrade_epoch = 1,
+        .lifecycle = .ready,
+        .endpoint = "/tmp/not-opened",
+    };
+    const outcome = connectExactWithBackoffKindUntil(
+        testing.allocator,
+        "/tmp/not-opened",
+        protocol.version_major,
+        descriptor,
+        .cli_probe,
+        .{ .connect_attempts = 2, .connect_delay_ms = 20 },
+        deadline,
+        .{ .context = &fixture, .connect = Fixture.attempt },
+        fixture.waitOps(),
+    );
+    try testing.expectEqual(FailureReason.transient_timeout, outcome.failed);
+    try testing.expectEqual(@as(usize, 2), fixture.attempt_count);
+    try testing.expectEqual(@as(usize, 1), fixture.wait_count);
+    try testing.expectEqualSlices(i128, &.{ deadline.expires_at_ns, deadline.expires_at_ns }, fixture.expiries[0..2]);
+}
+
+test "host_connect deadline backoff expiry performs no later attempt" {
+    const Fixture = struct {
+        now_ns: i128 = 0,
+        attempt_count: usize = 0,
+        wait_count: usize = 0,
+
+        fn clock(context: *anyopaque) i128 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            return self.now_ns;
+        }
+
+        fn attempt(
+            context: *anyopaque,
+            _: std.mem.Allocator,
+            _: [:0]const u8,
+            _: client_mod.ConnectionProfile,
+            _: u16,
+            deadline: client_deadline.AbsoluteDeadline,
+        ) DeadlineAttemptResult {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            testing.expectEqual(@as(i128, 10 * std.time.ns_per_ms), deadline.expires_at_ns) catch
+                return .{ .failed = .protocol_error };
+            self.attempt_count += 1;
+            return .absent;
+        }
+
+        fn wait(
+            context: *anyopaque,
+            _: c.fd_t,
+            _: client_deadline.WaitKind,
+            timeout_ms: c_int,
+        ) client_deadline.WaitOutcome {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.wait_count += 1;
+            self.now_ns += @as(i128, timeout_ms) * std.time.ns_per_ms;
+            return .timed_out;
+        }
+
+        fn waitOps(self: *@This()) client_deadline.Ops {
+            var result = client_deadline.posix_ops;
+            result.context = self;
+            result.wait = wait;
+            return result;
+        }
+    };
+    var fixture = Fixture{};
+    const deadline = client_deadline.AbsoluteDeadline.fromInjected(
+        .{ .context = &fixture, .now_ns = Fixture.clock },
+        10 * std.time.ns_per_ms,
+    );
+    const descriptor = host_manifest.Descriptor{
+        .host_id = 1,
+        .build_id = "build",
+        .protocol_major = protocol.version_major,
+        .screen_codec_version = screen_stream.codec_version,
+        .upgrade_epoch = 1,
+        .lifecycle = .ready,
+        .endpoint = "/tmp/not-opened",
+    };
+    const outcome = connectExactWithBackoffKindUntil(
+        testing.allocator,
+        "/tmp/not-opened",
+        protocol.version_major,
+        descriptor,
+        .cli_probe,
+        .{ .connect_attempts = 3, .connect_delay_ms = 50 },
+        deadline,
+        .{ .context = &fixture, .connect = Fixture.attempt },
+        fixture.waitOps(),
+    );
+    try testing.expectEqual(FailureReason.deadline_exceeded, outcome.failed);
+    try testing.expectEqual(@as(usize, 1), fixture.attempt_count);
+    try testing.expectEqual(@as(usize, 1), fixture.wait_count);
+    try testing.expectEqual(deadline.expires_at_ns, fixture.now_ns);
 }
 
 const TryConnectResult = union(enum) {

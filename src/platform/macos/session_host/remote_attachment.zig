@@ -2,6 +2,7 @@
 //! Connection transport와 GUI Surface를 소유하지 않으며 strict host result/event를 attachment-local state로 접는다.
 
 const std = @import("std");
+const protocol = @import("protocol.zig");
 const client_mod = @import("client.zig");
 const remote_screen = @import("remote_screen.zig");
 const screen_assembler = @import("screen_assembler.zig");
@@ -128,6 +129,57 @@ pub const Revoked = struct {
 };
 
 pub const DecodeError = error{ OutOfMemory, Malformed };
+
+/// Strict one-field response-envelope classification shared by attach/status/takeover consumers.
+/// `null` means an exact `result` envelope; unknown error names and extra fields are protocol
+/// malformed instead of silently collapsing into a retryable class.
+pub fn decodeWireError(
+    allocator: std.mem.Allocator,
+    bytes: []const u8,
+) DecodeError!?protocol.ErrorCode {
+    var parsed = try parseObject(allocator, bytes);
+    defer parsed.deinit();
+    const root = parsed.value.object;
+    if (root.count() != 1) return error.Malformed;
+    if (root.get("result") != null) return null;
+    const value = root.get("error") orelse return error.Malformed;
+    const name = switch (value) {
+        .string => |text| text,
+        else => return error.Malformed,
+    };
+    const code = protocol.ErrorCode.fromWireName(name) orelse return error.Malformed;
+    return switch (code) {
+        .invalid_generation,
+        .resource_exhausted,
+        .unauthorized,
+        .runtime_not_found,
+        .invalid_request,
+        .internal,
+        => code,
+        else => error.Malformed,
+    };
+}
+
+test "remote attachment error envelope is exact and closed" {
+    const allocator = std.testing.allocator;
+    try std.testing.expectEqual(
+        protocol.ErrorCode.invalid_generation,
+        (try decodeWireError(allocator, "{\"error\":\"invalid_generation\"}")).?,
+    );
+    try std.testing.expect((try decodeWireError(allocator, "{\"result\":{}}")) == null);
+    try std.testing.expectError(
+        error.Malformed,
+        decodeWireError(allocator, "{\"error\":\"unknown\"}"),
+    );
+    try std.testing.expectError(
+        error.Malformed,
+        decodeWireError(allocator, "{\"error\":\"host_shutting_down\"}"),
+    );
+    try std.testing.expectError(
+        error.Malformed,
+        decodeWireError(allocator, "{\"error\":\"unauthorized\",\"extra\":1}"),
+    );
+}
 
 pub fn attachParams(
     allocator: std.mem.Allocator,

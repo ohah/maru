@@ -113,6 +113,12 @@ pub const client_deadline = if (builtin.os.tag == .macos)
     @import("session_host/client_deadline.zig")
 else
     struct {};
+// attach_phase_deadline(P5c3c-1b)는 public attach의 네 pre-raw phase label과 client_deadline의
+// non-resettable absolute deadline만 결합한다. parser/resolver와 Client transport는 phase enum을 모른다.
+pub const attach_phase_deadline = if (builtin.os.tag == .macos)
+    @import("session_host/attach_phase_deadline.zig")
+else
+    struct {};
 // external_tty(P5c1)는 공개 attach parser보다 먼저 local controlling TTY의 transactional raw/restore와
 // 종료 signal self-pipe 경계를 고정한다. host runtime을 소유하지 않으며 macOS 제품 CLI에서만 사용한다.
 pub const external_tty = if (builtin.os.tag == .macos)
@@ -125,6 +131,10 @@ else
     struct {};
 pub const external_ansi = if (builtin.os.tag == .macos)
     @import("session_host/external_ansi.zig")
+else
+    struct {};
+pub const external_attach = if (builtin.os.tag == .macos)
+    @import("session_host/external_attach.zig")
 else
     struct {};
 pub const remote_attachment = if (builtin.os.tag == .macos)

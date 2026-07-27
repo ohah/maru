@@ -44,6 +44,10 @@ pub const ClientError = error{
     OutOfMemory,
 };
 
+/// Only absolute-deadline APIs expose this extra error. Legacy blocking callers retain the closed
+/// `ClientError` switch, while the public attach phase owner can map an exact timeout by phase.
+pub const DeadlineClientError = ClientError || error{DeadlineExceeded};
+
 pub const EndpointFailure = enum { absent, denied, transient, other };
 
 pub fn classifyConnectErrno(err: posix.E) EndpointFailure {
@@ -171,14 +175,12 @@ fn endpointError(err: posix.E) ClientError {
     };
 }
 
-fn deadlineConnectError(err: client_deadline.Error) ClientError {
+fn deadlineConnectError(err: client_deadline.Error) DeadlineClientError {
     return switch (err) {
         error.EndpointAbsent => error.EndpointAbsent,
         error.EndpointDenied => error.EndpointDenied,
         error.EndpointTransient => error.EndpointTransient,
-        // connect/hello is the only bounded phase in P5c3c-1a. P5c3c-1b wraps this with
-        // a typed PhaseDeadline so the public CLI can map phase rather than transport detail.
-        error.Timeout => error.EndpointTransient,
+        error.Timeout => error.DeadlineExceeded,
         error.InvalidDeadline,
         error.ConnectFailed,
         error.Closed,
@@ -190,9 +192,9 @@ fn deadlineConnectError(err: client_deadline.Error) ClientError {
     };
 }
 
-fn deadlineHelloError(err: client_deadline.Error) ClientError {
+fn deadlineHelloError(err: client_deadline.Error) DeadlineClientError {
     return switch (err) {
-        error.Timeout => error.EndpointTransient,
+        error.Timeout => error.DeadlineExceeded,
         error.WriteFailed => error.WriteFailed,
         error.Closed, error.ReadFailed => error.ConnectionClosed,
         error.InvalidDeadline,
@@ -382,7 +384,7 @@ pub const Client = struct {
         connection_profile: ConnectionProfile,
         wire_major: u16,
         deadline: client_deadline.AbsoluteDeadline,
-    ) ClientError!Client {
+    ) DeadlineClientError!Client {
         return connectMajorUntilWithOps(
             allocator,
             socket_path,
@@ -479,7 +481,7 @@ pub const Client = struct {
         wire_major: u16,
         deadline: client_deadline.AbsoluteDeadline,
         ops: client_deadline.Ops,
-    ) ClientError!Client {
+    ) DeadlineClientError!Client {
         const profile = compatibility.profileForMajor(wire_major) orelse return error.IncompatibleVersion;
         const connected = client_deadline.connectUnixUntil(
             ops,
@@ -527,7 +529,7 @@ pub const Client = struct {
         defer ack.deinit(allocator);
         connected.restoreBlocking(ops) catch return error.ConnectionClosed;
         try self.finishHello(connection_profile, profile, ack);
-        if (deadline.remainingNs() <= 0) return error.EndpointTransient;
+        if (deadline.remainingNs() <= 0) return error.DeadlineExceeded;
         return self;
     }
 
@@ -624,63 +626,213 @@ pub const Client = struct {
         self.* = undefined;
     }
 
+    const RpcIo = union(enum) {
+        blocking,
+        deadline: struct {
+            absolute: client_deadline.AbsoluteDeadline,
+            ops: client_deadline.Ops,
+        },
+    };
+
     /// read-only command를 왕복한다. `params_json`은 JSON object 문자열(예: `{"runtime_id":"aa"}`) 또는 null. 반환
     /// payload는 host의 response JSON(owned — caller가 free). typed error 판정은 caller가 payload에서 한다(§10 error 매핑).
     pub fn call(self: *Client, method: []const u8, params_json: ?[]const u8) ClientError![]u8 {
+        return self.callWithIo(method, params_json, .blocking) catch |err| switch (err) {
+            error.DeadlineExceeded => unreachable,
+            else => |client_err| client_err,
+        };
+    }
+
+    /// Public attach pre-raw RPC. Request storage is complete before the fd enters a temporary
+    /// nonblocking lease; write, async demux and exact response share one absolute deadline.
+    pub fn callUntil(
+        self: *Client,
+        method: []const u8,
+        params_json: ?[]const u8,
+        deadline: client_deadline.AbsoluteDeadline,
+    ) DeadlineClientError![]u8 {
+        return self.callUntilWithOps(method, params_json, deadline, client_deadline.posix_ops);
+    }
+
+    fn callWithIo(
+        self: *Client,
+        method: []const u8,
+        params_json: ?[]const u8,
+        io: RpcIo,
+    ) DeadlineClientError![]u8 {
         try self.ensureUsable();
         // non-blocking input이 backpressure로 일부만 전송됐어도 뒤 request가 wire에서 추월하면 안 된다.
         try self.flushPendingOutboundBlocking();
-        const req = buildRequest(self.allocator, method, params_json) catch return error.OutOfMemory;
-        defer self.allocator.free(req);
-        const request_id = self.next_request_id;
-        self.next_request_id += 1;
-        const frame_bytes = framing.encodeFrame(
-            self.allocator,
-            .{ .kind = .request, .request_id = request_id, .major = self.wire_major },
-            req,
-        ) catch return error.OutOfMemory;
+        const frame_bytes = try self.buildRequestFrame(method, params_json);
         defer self.allocator.free(frame_bytes);
-        socket_server.writeAll(self.fd, frame_bytes) catch {
-            // request prefix가 이미 kernel에 들어갔을 수 있다. 이 connection은 frame 경계를 다시 찾을 수 없으므로
-            // 이후 RPC를 허용하지 않고 EOF로 모든 host-side attachment를 정리한다.
+        return self.callPreparedWithIo(self.next_request_id, frame_bytes, io);
+    }
+
+    fn callUntilWithOps(
+        self: *Client,
+        method: []const u8,
+        params_json: ?[]const u8,
+        deadline: client_deadline.AbsoluteDeadline,
+        ops: client_deadline.Ops,
+    ) DeadlineClientError![]u8 {
+        try self.ensureUsable();
+        // The pre-raw attach path never owns GUI's queued fire-and-forget frame. Blocking here
+        // would escape the phase budget and reordering it would violate the Client wire SSOT.
+        if (self.pending_outbound != null) {
             self.invalidateConnection();
             return error.WriteFailed;
+        }
+        const frame_bytes = try self.buildRequestFrame(method, params_json);
+        defer self.allocator.free(frame_bytes);
+
+        const saved_flags = ops.get_flags(ops.context, self.fd) orelse {
+            self.invalidateConnectionWithOps(ops);
+            return error.WriteFailed;
         };
+        const nonblocking: c_int = @bitCast(posix.O{ .NONBLOCK = true });
+        if (!ops.set_flags(ops.context, self.fd, saved_flags | nonblocking)) {
+            self.invalidateConnectionWithOps(ops);
+            return error.WriteFailed;
+        }
+        const payload = self.callPreparedWithIo(
+            self.next_request_id,
+            frame_bytes,
+            .{ .deadline = .{ .absolute = deadline, .ops = ops } },
+        ) catch |err| {
+            self.invalidateConnectionWithOps(ops);
+            return err;
+        };
+        if (!ops.set_flags(ops.context, self.fd, saved_flags)) {
+            self.allocator.free(payload);
+            self.invalidateConnectionWithOps(ops);
+            return error.ConnectionClosed;
+        }
+        if (deadline.remainingNs() <= 0) {
+            self.allocator.free(payload);
+            self.invalidateConnectionWithOps(ops);
+            return error.DeadlineExceeded;
+        }
+        return payload;
+    }
+
+    fn buildRequestFrame(
+        self: *Client,
+        method: []const u8,
+        params_json: ?[]const u8,
+    ) DeadlineClientError![]u8 {
+        const req = buildRequest(self.allocator, method, params_json) catch return error.OutOfMemory;
+        defer self.allocator.free(req);
+        return framing.encodeFrame(
+            self.allocator,
+            .{ .kind = .request, .request_id = self.next_request_id, .major = self.wire_major },
+            req,
+        ) catch return error.OutOfMemory;
+    }
+
+    fn callPreparedWithIo(
+        self: *Client,
+        request_id: u64,
+        frame_bytes: []const u8,
+        io: RpcIo,
+    ) DeadlineClientError![]u8 {
+        self.next_request_id += 1;
+        switch (io) {
+            .blocking => socket_server.writeAll(self.fd, frame_bytes) catch {
+                // request prefix가 이미 kernel에 들어갔을 수 있다. 이 connection은 frame 경계를 다시 찾을 수 없으므로
+                // 이후 RPC를 허용하지 않고 EOF로 모든 host-side attachment를 정리한다.
+                self.invalidateConnection();
+                return error.WriteFailed;
+            },
+            .deadline => |bounded| client_deadline.writeAllUntil(
+                bounded.ops,
+                self.fd,
+                frame_bytes,
+                bounded.absolute,
+            ) catch |err| return switch (err) {
+                error.Timeout => error.DeadlineExceeded,
+                error.WriteFailed, error.Closed => error.WriteFailed,
+                else => error.WriteFailed,
+            },
+        }
 
         // 응답을 기다리는 동안 host가 비동기로 push하는 stream frame(delta_chunk/snapshot_chunk)은 **버퍼에 쌓는다** — 드롭하면
         // 그 사이 화면 갱신이 유실된다(§9 delta는 증분이라 한 배치만 놓쳐도 desync). 다음 `readStreamBatch`가 이 버퍼부터 소비한다.
         while (true) {
-            const resp = try self.readFrame();
-            if (resp.header.kind == .delta_chunk or resp.header.kind == .snapshot_chunk) {
-                if (self.pending_stream.items.len >= protocol.max_client_screen_items or
-                    self.screenInboxBytes() +| resp.payload.len > protocol.max_client_screen_inbox)
-                {
-                    resp.deinit(self.allocator);
-                    self.invalidateConnection();
-                    return error.EventQueueFull;
-                }
-                self.pending_stream.append(self.allocator, resp) catch {
-                    resp.deinit(self.allocator);
-                    // frame은 socket에서 이미 소비됐다. 저장하지 못하면 다음 stream delta의 base가 끊기므로 fail-closed.
-                    self.invalidateConnection();
-                    return error.OutOfMemory;
-                };
-                self.pending_stream_bytes += resp.payload.len;
-                continue;
-            }
-            if (resp.header.kind == .event) {
-                try self.bufferEvent(resp);
-                continue;
-            }
+            const resp = switch (io) {
+                .blocking => try self.readFrame(),
+                .deadline => |bounded| try self.readFrameUntil(bounded.absolute, bounded.ops),
+            };
+            if (try self.bufferOutOfBandFrame(resp)) continue;
             // kind와 request_id를 함께 확인한다 — out-of-order frame을 이 call의 응답으로 오귀속하지 않는다.
             if (resp.header.kind != .response or resp.header.request_id != request_id) {
                 resp.deinit(self.allocator);
                 self.invalidateConnection();
                 return error.ProtocolError;
             }
+            if (rpcDeadlineExpired(io)) {
+                resp.deinit(self.allocator);
+                return error.DeadlineExceeded;
+            }
             // FrameParser already returned an owned payload. Transfer it directly so a committed
             // mutating response cannot be consumed and then lost to a second allocation failure.
             return resp.payload;
+        }
+    }
+
+    fn rpcDeadlineExpired(io: RpcIo) bool {
+        return switch (io) {
+            .blocking => false,
+            .deadline => |bounded| bounded.absolute.remainingNs() <= 0,
+        };
+    }
+
+    /// Buffer a frame that may legally interleave with an RPC response. Returning false transfers
+    /// ownership back to the caller, which must classify the response/control frame.
+    fn bufferOutOfBandFrame(self: *Client, frame: framing.Frame) ClientError!bool {
+        if (frame.header.kind == .delta_chunk or frame.header.kind == .snapshot_chunk) {
+            if (self.pending_stream.items.len >= protocol.max_client_screen_items or
+                self.screenInboxBytes() +| frame.payload.len > protocol.max_client_screen_inbox)
+            {
+                frame.deinit(self.allocator);
+                self.invalidateConnection();
+                return error.EventQueueFull;
+            }
+            self.pending_stream.append(self.allocator, frame) catch {
+                frame.deinit(self.allocator);
+                // The frame is already consumed from the socket. Losing it would break the next
+                // stream delta base, so the whole shared connection must fail closed.
+                self.invalidateConnection();
+                return error.OutOfMemory;
+            };
+            self.pending_stream_bytes += frame.payload.len;
+            return true;
+        }
+        if (frame.header.kind == .event) {
+            try self.bufferEvent(frame);
+            return true;
+        }
+        return false;
+    }
+
+    /// Drain only complete frames already resident in the parser; this never reads the socket.
+    /// Publication gates use it so a response coalesced with an authority revoke cannot publish
+    /// stale controller state.
+    pub fn refreshBufferedAuthorityEvidence(self: *Client) ClientError!void {
+        try self.ensureUsable();
+        while (self.parser.bufferState() == .complete_or_error) {
+            const maybe = self.parser.next() catch |err| {
+                self.invalidateConnection();
+                return switch (err) {
+                    error.OutOfMemory => error.OutOfMemory,
+                    else => error.ProtocolError,
+                };
+            };
+            const owned = maybe orelse continue;
+            const frame = try self.requireWireMajor(owned);
+            if (try self.bufferOutOfBandFrame(frame)) continue;
+            frame.deinit(self.allocator);
+            self.invalidateConnection();
+            return error.ProtocolError;
         }
     }
 
@@ -854,22 +1006,101 @@ pub const Client = struct {
     /// attach 직후 host가 보내는 `snapshot_chunk` stream을 `end_stream`까지 읽어 record 바이트를 이어 돌려준다(§10 attach
     /// 순서: response → snapshot_chunk*). 반환 바이트는 caller 소유(screen_stream.RecordStream으로 순회). **attach 응답을
     /// 받은 뒤 다음 request 전에 반드시 이걸로 stream을 비운다** — 안 그러면 leftover chunk가 다음 응답으로 오독된다.
+    const StreamIo = union(enum) {
+        polling,
+        deadline: struct {
+            absolute: client_deadline.AbsoluteDeadline,
+            ops: client_deadline.Ops,
+        },
+    };
+
     pub fn readSnapshot(self: *Client, stream_id: u64) ClientError![]u8 {
+        return self.readSnapshotWithIo(stream_id, .polling) catch |err| switch (err) {
+            error.DeadlineExceeded => unreachable,
+            else => |client_err| client_err,
+        };
+    }
+
+    pub fn readSnapshotUntil(
+        self: *Client,
+        stream_id: u64,
+        deadline: client_deadline.AbsoluteDeadline,
+    ) DeadlineClientError![]u8 {
+        return self.readSnapshotUntilWithOps(
+            stream_id,
+            deadline,
+            client_deadline.posix_ops,
+        );
+    }
+
+    fn readSnapshotUntilWithOps(
+        self: *Client,
+        stream_id: u64,
+        deadline: client_deadline.AbsoluteDeadline,
+        ops: client_deadline.Ops,
+    ) DeadlineClientError![]u8 {
+        try self.ensureUsable();
+        const saved_flags = ops.get_flags(ops.context, self.fd) orelse {
+            self.invalidateConnectionWithOps(ops);
+            return error.ConnectionClosed;
+        };
+        const nonblocking: c_int = @bitCast(posix.O{ .NONBLOCK = true });
+        if (!ops.set_flags(ops.context, self.fd, saved_flags | nonblocking)) {
+            self.invalidateConnectionWithOps(ops);
+            return error.ConnectionClosed;
+        }
+        const bytes = self.readSnapshotWithIo(
+            stream_id,
+            .{ .deadline = .{ .absolute = deadline, .ops = ops } },
+        ) catch |err| {
+            self.invalidateConnectionWithOps(ops);
+            return err;
+        };
+        if (!ops.set_flags(ops.context, self.fd, saved_flags)) {
+            self.allocator.free(bytes);
+            self.invalidateConnectionWithOps(ops);
+            return error.ConnectionClosed;
+        }
+        if (deadline.remainingNs() <= 0) {
+            self.allocator.free(bytes);
+            self.invalidateConnectionWithOps(ops);
+            return error.DeadlineExceeded;
+        }
+        return bytes;
+    }
+
+    fn readSnapshotWithIo(
+        self: *Client,
+        stream_id: u64,
+        io: StreamIo,
+    ) DeadlineClientError![]u8 {
         try self.ensureUsable();
         var attempts: usize = 0;
-        while (attempts < 250) : (attempts += 1) {
-            if (try self.readStreamBatch(self.allocator, stream_id)) |batch| {
+        while (true) {
+            if (try self.readStreamBatchWithIo(self.allocator, stream_id, io)) |batch| {
                 if (!batch.is_snapshot) {
                     self.allocator.free(batch.bytes);
                     self.invalidateConnection();
                     return error.ProtocolError;
                 }
+                if (deadlineExpired(io)) {
+                    self.allocator.free(batch.bytes);
+                    return error.DeadlineExceeded;
+                }
                 return batch.bytes;
             }
-            _ = usleepMs(20);
+            switch (io) {
+                .deadline => return error.DeadlineExceeded,
+                .polling => {
+                    if (attempts >= 249) {
+                        self.invalidateConnection();
+                        return error.ConnectionClosed;
+                    }
+                    attempts += 1;
+                    _ = usleepMs(20);
+                },
+            }
         }
-        self.invalidateConnection();
-        return error.ConnectionClosed;
     }
 
     /// `want_stream_id`의 다음 **화면 stream 배치**를 논블로킹으로 돌려준다(caller가 `bytes` free). 여러 원격 runtime이 이
@@ -879,19 +1110,41 @@ pub const Client = struct {
     /// 버퍼에 남아 그 runtime의 pump가 소비). 예전엔 pumpDelta가 남의 배치를 free해 두 번째 이후 터미널 화면이 영구 유실됐다
     /// (code-review #1). delta/snapshot 둘 다 받아 `is_snapshot`으로 리셋/증분을 가른다. `call`이 버퍼한 frame을 소켓보다 먼저 쓴다.
     pub fn readStreamBatch(self: *Client, allocator: std.mem.Allocator, want_stream_id: u64) ClientError!?StreamBatch {
+        return self.readStreamBatchWithIo(allocator, want_stream_id, .polling) catch |err| switch (err) {
+            error.DeadlineExceeded => unreachable,
+            else => |client_err| client_err,
+        };
+    }
+
+    fn readStreamBatchWithIo(
+        self: *Client,
+        allocator: std.mem.Allocator,
+        want_stream_id: u64,
+        io: StreamIo,
+    ) DeadlineClientError!?StreamBatch {
         try self.ensureUsable();
         // 1) 이 stream 앞으로 이미 버퍼된 배치(다른 runtime의 pump가 소켓을 비우며 넣어 둔 것)를 도착 순서대로 먼저 준다.
         for (self.pending_batches.items, 0..) |b, i| {
             if (b.stream_id == want_stream_id) {
                 const owned = self.pending_batches.orderedRemove(i);
                 self.pending_batch_bytes -= owned.bytes.len;
+                if (deadlineExpired(io)) {
+                    allocator.free(owned.bytes);
+                    return error.DeadlineExceeded;
+                }
                 return owned;
             }
         }
         // 2) 소켓에서 완성 배치를 읽는다. 내 것이면 반환, 남의 것이면 버퍼하고 계속(내 것/idle까지).
         while (true) {
-            const batch = (try self.readOneBatch(allocator)) orelse return null; // idle — 내 배치 없음.
-            if (batch.stream_id == want_stream_id) return batch;
+            const batch = (try self.readOneBatchWithIo(allocator, io)) orelse return null; // idle — 내 배치 없음.
+            if (batch.stream_id == want_stream_id) {
+                if (deadlineExpired(io)) {
+                    allocator.free(batch.bytes);
+                    return error.DeadlineExceeded;
+                }
+                return batch;
+            }
             if (self.pending_batches.items.len >= protocol.max_client_screen_items or
                 self.screenInboxBytes() +| batch.bytes.len > protocol.max_client_screen_inbox)
             {
@@ -913,6 +1166,17 @@ pub const Client = struct {
     /// 아직 없으면 `null`(recv timeout을 세션 종료로 오인 안 함, §9). host는 grid/alt 변화 시 delta 대신 fresh snapshot을 push한다
     /// (SnapshotRequired). demux는 상위 `readStreamBatch`가 한다 — 여기선 순수하게 "다음 배치 하나".
     fn readOneBatch(self: *Client, allocator: std.mem.Allocator) ClientError!?StreamBatch {
+        return self.readOneBatchWithIo(allocator, .polling) catch |err| switch (err) {
+            error.DeadlineExceeded => unreachable,
+            else => |client_err| client_err,
+        };
+    }
+
+    fn readOneBatchWithIo(
+        self: *Client,
+        allocator: std.mem.Allocator,
+        io: StreamIo,
+    ) DeadlineClientError!?StreamBatch {
         var state = self.partial_batch orelse PartialBatch{
             .stream_id = 0,
             .is_snapshot = false,
@@ -921,7 +1185,7 @@ pub const Client = struct {
         errdefer state.bytes.deinit(allocator);
         var started = state.stream_id != 0;
         while (true) {
-            const frame = (try self.nextStreamFrame(started)) orelse {
+            const frame = (try self.nextStreamFrameWithIo(started, io)) orelse {
                 if (started) {
                     self.partial_batch = state;
                     return null;
@@ -1204,38 +1468,85 @@ pub const Client = struct {
     /// 첫 frame과 continuation 모두 `pollReadable`로 논블로킹 확인하고, 데이터가 없으면 partial batch를 caller가 보존하도록
     /// `null`을 돌려준다. UI frame pump에서 socket timeout까지 기다리지 않는다.
     fn nextStreamFrame(self: *Client, _: bool) ClientError!?framing.Frame {
+        return self.nextStreamFrameWithIo(false, .polling) catch |err| switch (err) {
+            error.DeadlineExceeded => unreachable,
+            else => |client_err| client_err,
+        };
+    }
+
+    fn nextStreamFrameWithIo(
+        self: *Client,
+        _: bool,
+        io: StreamIo,
+    ) DeadlineClientError!?framing.Frame {
         try self.ensureUsable();
         if (self.pending_stream.items.len > 0) {
             const owned = self.pending_stream.orderedRemove(0);
             self.pending_stream_bytes -= owned.payload.len;
-            return try self.requireWireMajor(owned);
+            const frame = try self.requireWireMajor(owned);
+            if (deadlineExpired(io)) {
+                frame.deinit(self.allocator);
+                return error.DeadlineExceeded;
+            }
+            return frame;
         }
         var buf: [4096]u8 = undefined;
         while (true) {
-            if (self.parser.next() catch {
+            if (self.parser.next() catch |err| {
                 self.invalidateConnection();
-                return error.ProtocolError;
-            }) |frame|
-                return try self.requireWireMajor(frame);
+                return switch (err) {
+                    error.OutOfMemory => error.OutOfMemory,
+                    else => error.ProtocolError,
+                };
+            }) |owned| {
+                const frame = try self.requireWireMajor(owned);
+                if (deadlineExpired(io)) {
+                    frame.deinit(self.allocator);
+                    return error.DeadlineExceeded;
+                }
+                return frame;
+            }
             // Partial batches live across pump calls, so neither the first nor a continuation may
             // enter the socket's 5s blocking read timeout on the UI frame loop.
-            if (!pollReadable(self.fd)) return null;
-            const n = c.read(self.fd, &buf, buf.len);
-            if (n < 0) {
-                if (posix.errno(n) == .INTR) continue; // 시그널 인터럽트는 재시도.
-                if (posix.errno(n) == .AGAIN or posix.errno(n) == .TIMEDOUT) return null;
-                self.invalidateConnection();
-                return error.ConnectionClosed;
-            }
-            if (n == 0) {
-                self.invalidateConnection();
-                return error.ConnectionClosed;
-            }
-            self.parser.push(buf[0..@intCast(n)]) catch {
+            const count = switch (io) {
+                .polling => blk: {
+                    if (!pollReadable(self.fd)) return null;
+                    const n = c.read(self.fd, &buf, buf.len);
+                    if (n < 0) {
+                        if (posix.errno(n) == .INTR) continue; // 시그널 인터럽트는 재시도.
+                        if (posix.errno(n) == .AGAIN or posix.errno(n) == .TIMEDOUT) return null;
+                        self.invalidateConnection();
+                        return error.ConnectionClosed;
+                    }
+                    if (n == 0) {
+                        self.invalidateConnection();
+                        return error.ConnectionClosed;
+                    }
+                    break :blk @as(usize, @intCast(n));
+                },
+                .deadline => |bounded| client_deadline.readSomeUntil(
+                    bounded.ops,
+                    self.fd,
+                    &buf,
+                    bounded.absolute,
+                ) catch |err| return switch (err) {
+                    error.Timeout => error.DeadlineExceeded,
+                    error.Closed, error.ReadFailed => error.ConnectionClosed,
+                    else => error.ConnectionClosed,
+                },
+            };
+            self.parser.push(buf[0..count]) catch {
                 self.invalidateConnection();
                 return error.OutOfMemory;
             };
         }
+    }
+
+    fn deadlineExpired(io: StreamIo) bool {
+        return switch (io) {
+            .polling => false,
+            .deadline => |bounded| bounded.absolute.remainingNs() <= 0,
+        };
     }
 
     /// terminal input bytes를 attach된 `stream_id`로 보낸다(§9 `input_bytes` — 응답 없는 fire-and-forget). controller만
@@ -1547,17 +1858,17 @@ pub const Client = struct {
         self: *Client,
         deadline: client_deadline.AbsoluteDeadline,
         ops: client_deadline.Ops,
-    ) ClientError!framing.Frame {
+    ) DeadlineClientError!framing.Frame {
         var buf: [4096]u8 = undefined;
         while (true) {
-            if (deadline.remainingNs() <= 0) return error.EndpointTransient;
+            if (deadline.remainingNs() <= 0) return error.DeadlineExceeded;
             if (self.parser.next() catch |err| return switch (err) {
                 error.OutOfMemory => error.OutOfMemory,
                 else => error.ProtocolError,
             }) |frame| {
                 if (deadline.remainingNs() <= 0) {
                     frame.deinit(self.allocator);
-                    return error.EndpointTransient;
+                    return error.DeadlineExceeded;
                 }
                 return self.requireWireMajor(frame);
             }
@@ -1586,15 +1897,23 @@ pub const Client = struct {
     }
 
     fn invalidateConnection(self: *Client) void {
+        if (self.poisonAndTakeFd()) |fd| _ = c.close(fd);
+    }
+
+    fn invalidateConnectionWithOps(self: *Client, ops: client_deadline.Ops) void {
+        if (self.poisonAndTakeFd()) |fd| ops.close(ops.context, fd);
+    }
+
+    fn poisonAndTakeFd(self: *Client) ?c.fd_t {
         // pending frame은 connection 소유 메모리다. 이미 unusable이어도 deinit 전 명시 invalidate가 재진입할 수 있으므로
-        // 항상 회수 helper를 거친다.
+        // 항상 회수 helper를 거친다. fd를 먼저 Client에서 떼어낸 뒤 정확히 한 close strategy만 실행한다.
         self.clearPendingOutbound();
-        if (self.unusable) return;
+        if (self.unusable) return null;
         self.unusable = true;
-        if (self.fd >= 0) {
-            _ = c.close(self.fd);
-            self.fd = -1;
-        }
+        if (self.fd < 0) return null;
+        const fd = self.fd;
+        self.fd = -1;
+        return fd;
     }
 
     /// lifecycle cleanup frame조차 할당할 수 없는 경우 host가 EOF로 attachment를 정리하도록 shared connection을
@@ -1914,6 +2233,532 @@ test "client call poisons malformed event headers instead of buffering them" {
         try testing.expectError(error.ProtocolError, client.call("host.info", null));
         try testing.expectError(error.ConnectionClosed, client.call("host.info", null));
     }
+}
+
+fn deadlineCallPeer(fd: c.fd_t, response: []const u8, ok: *bool) void {
+    defer _ = c.close(fd);
+    var header_bytes: [protocol.header_size]u8 = undefined;
+    readExactFd(fd, &header_bytes) catch return;
+    const header = protocol.Header.decode(&header_bytes) catch return;
+    if (header.kind != .request or header.request_id != 1) return;
+    const payload = std.heap.page_allocator.alloc(u8, header.payload_len) catch return;
+    defer std.heap.page_allocator.free(payload);
+    readExactFd(fd, payload) catch return;
+    socket_server.writeAll(fd, response) catch return;
+    ok.* = true;
+}
+
+test "client deadline call restores blocking flags and uses the shared response demux" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    var fds: [2]c.fd_t = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds));
+    socket_server.setNoSigPipe(fds[0]);
+    const initial_flags = c.fcntl(fds[0], c.F.GETFL);
+    try std.testing.expect(initial_flags >= 0);
+    const response = try framing.encodeFrame(
+        allocator,
+        .{ .kind = .response, .request_id = 1 },
+        "{\"result\":{}}",
+    );
+    defer allocator.free(response);
+    var peer_ok = false;
+    var peer = try std.Thread.spawn(.{}, deadlineCallPeer, .{ fds[1], response, &peer_ok });
+    var client: Client = .{
+        .allocator = allocator,
+        .fd = fds[0],
+        .host_id = 1,
+        .parser = framing.FrameParser.init(allocator),
+    };
+    defer client.deinit();
+    const deadline = try client_deadline.AbsoluteDeadline.after(std.testing.io, std.time.ns_per_s);
+    const payload = try client.callUntil("runtime.get", "{}", deadline);
+    defer allocator.free(payload);
+    peer.join();
+    try std.testing.expect(peer_ok);
+    try std.testing.expectEqualStrings("{\"result\":{}}", payload);
+    try std.testing.expectEqual(initial_flags, c.fcntl(client.fd, c.F.GETFL));
+}
+
+test "client deadline call closes a blocking socket when response stalls" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    var fds: [2]c.fd_t = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds));
+    defer _ = c.close(fds[1]);
+    socket_server.setNoSigPipe(fds[0]);
+    var client: Client = .{
+        .allocator = allocator,
+        .fd = fds[0],
+        .host_id = 1,
+        .parser = framing.FrameParser.init(allocator),
+    };
+    defer client.deinit();
+    const deadline = try client_deadline.AbsoluteDeadline.after(
+        std.testing.io,
+        10 * std.time.ns_per_ms,
+    );
+    try std.testing.expectError(
+        error.DeadlineExceeded,
+        client.callUntil("runtime.get", "{}", deadline),
+    );
+    try std.testing.expect(client.unusable);
+    try std.testing.expectEqual(@as(c.fd_t, -1), client.fd);
+}
+
+test "client deadline snapshot reuses the existing stream assembler and restores flags" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    var fds: [2]c.fd_t = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds));
+    defer _ = c.close(fds[1]);
+    socket_server.setNoSigPipe(fds[0]);
+    const initial_flags = c.fcntl(fds[0], c.F.GETFL);
+    const frame = try framing.encodeFrame(
+        allocator,
+        .{
+            .kind = .snapshot_chunk,
+            .stream_id = 7,
+            .flags = protocol.Flags.end_stream,
+        },
+        "snapshot-records",
+    );
+    defer allocator.free(frame);
+    try socket_server.writeAll(fds[1], frame);
+    var client: Client = .{
+        .allocator = allocator,
+        .fd = fds[0],
+        .host_id = 1,
+        .parser = framing.FrameParser.init(allocator),
+    };
+    defer client.deinit();
+    const deadline = try client_deadline.AbsoluteDeadline.after(std.testing.io, std.time.ns_per_s);
+    const snapshot = try client.readSnapshotUntil(7, deadline);
+    defer allocator.free(snapshot);
+    try std.testing.expectEqualStrings("snapshot-records", snapshot);
+    try std.testing.expectEqual(initial_flags, c.fcntl(client.fd, c.F.GETFL));
+}
+
+test "client deadline call rejects restore-time boundary and restore failure" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    inline for (.{ false, true }) |fail_restore| {
+        var fds: [2]c.fd_t = undefined;
+        try std.testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds));
+        const response = try framing.encodeFrame(
+            allocator,
+            .{ .kind = .response, .request_id = 1 },
+            "{\"result\":{}}",
+        );
+        defer allocator.free(response);
+        var peer_ok = false;
+        var peer = try std.Thread.spawn(.{}, deadlineCallPeer, .{ fds[1], response, &peer_ok });
+        var fixture = ConnectedSocketFixture{
+            .fd = fds[0],
+            .fail_restore_flags = fail_restore,
+            .advance_on_restore_ns = if (fail_restore) 0 else 100,
+        };
+        var client: Client = .{
+            .allocator = allocator,
+            .fd = fds[0],
+            .host_id = 1,
+            .parser = framing.FrameParser.init(allocator),
+        };
+        defer client.deinit();
+        const deadline = client_deadline.AbsoluteDeadline.fromInjected(
+            .{ .context = &fixture, .now_ns = ConnectedSocketFixture.clock },
+            100,
+        );
+        if (fail_restore) {
+            try std.testing.expectError(
+                error.ConnectionClosed,
+                client.callUntilWithOps("runtime.get", "{}", deadline, fixture.ops()),
+            );
+        } else {
+            try std.testing.expectError(
+                error.DeadlineExceeded,
+                client.callUntilWithOps("runtime.get", "{}", deadline, fixture.ops()),
+            );
+        }
+        peer.join();
+        try std.testing.expect(peer_ok);
+        try std.testing.expect(client.unusable);
+        try std.testing.expectEqual(@as(c.fd_t, -1), client.fd);
+        try std.testing.expectEqual(@as(usize, 2), fixture.set_flags_calls);
+        try std.testing.expectEqual(@as(usize, 1), fixture.close_calls);
+    }
+}
+
+test "client deadline snapshot rejects restore-time boundary and closes" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    var fds: [2]c.fd_t = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds));
+    defer _ = c.close(fds[1]);
+    const frame = try framing.encodeFrame(
+        allocator,
+        .{
+            .kind = .snapshot_chunk,
+            .stream_id = 7,
+            .flags = protocol.Flags.end_stream,
+        },
+        "snapshot",
+    );
+    defer allocator.free(frame);
+    try socket_server.writeAll(fds[1], frame);
+    var fixture = ConnectedSocketFixture{
+        .fd = fds[0],
+        .advance_on_restore_ns = 100,
+    };
+    var client: Client = .{
+        .allocator = allocator,
+        .fd = fds[0],
+        .host_id = 1,
+        .parser = framing.FrameParser.init(allocator),
+    };
+    defer client.deinit();
+    const deadline = client_deadline.AbsoluteDeadline.fromInjected(
+        .{ .context = &fixture, .now_ns = ConnectedSocketFixture.clock },
+        100,
+    );
+    try std.testing.expectError(
+        error.DeadlineExceeded,
+        client.readSnapshotUntilWithOps(7, deadline, fixture.ops()),
+    );
+    try std.testing.expect(client.unusable);
+    try std.testing.expectEqual(@as(c.fd_t, -1), client.fd);
+    try std.testing.expectEqual(@as(usize, 1), fixture.close_calls);
+}
+
+test "client deadline call preserves offsets through EINTR EAGAIN and partial I/O" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    var fds: [2]c.fd_t = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds));
+    const response = try framing.encodeFrame(
+        allocator,
+        .{ .kind = .response, .request_id = 1 },
+        "{\"result\":{\"value\":\"partial-response\"}}",
+    );
+    defer allocator.free(response);
+    var peer_ok = false;
+    var peer = try std.Thread.spawn(.{}, deadlineCallPeer, .{ fds[1], response, &peer_ok });
+    var fixture = ConnectedSocketFixture{
+        .fd = fds[0],
+        .max_read = 2,
+        .max_write = 3,
+        .inject_write_interrupt_again = true,
+        .inject_read_interrupt_again = true,
+    };
+    var client: Client = .{
+        .allocator = allocator,
+        .fd = fds[0],
+        .host_id = 1,
+        .parser = framing.FrameParser.init(allocator),
+    };
+    defer client.deinit();
+    const deadline = try client_deadline.AbsoluteDeadline.after(std.testing.io, std.time.ns_per_s);
+    const payload = try client.callUntilWithOps(
+        "runtime.get",
+        "{\"runtime_id\":\"00000000000000000000000000000001\"}",
+        deadline,
+        fixture.ops(),
+    );
+    defer allocator.free(payload);
+    peer.join();
+    try std.testing.expect(peer_ok);
+    try std.testing.expectEqualStrings("{\"result\":{\"value\":\"partial-response\"}}", payload);
+    try std.testing.expect(fixture.write_calls > 3);
+    try std.testing.expect(fixture.read_calls > 3);
+}
+
+test "client deadline call preserves a coalesced response and first snapshot in one parser" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fds: [2]c.fd_t = undefined;
+    try testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds));
+    defer _ = c.close(fds[1]);
+    const response = try framing.encodeFrame(
+        allocator,
+        .{ .kind = .response, .request_id = 1 },
+        "{\"result\":{}}",
+    );
+    defer allocator.free(response);
+    const snapshot_frame = try framing.encodeFrame(
+        allocator,
+        .{
+            .kind = .snapshot_chunk,
+            .stream_id = 7,
+            .flags = protocol.Flags.end_stream,
+        },
+        "coalesced-snapshot",
+    );
+    defer allocator.free(snapshot_frame);
+    var coalesced = std.ArrayList(u8).empty;
+    defer coalesced.deinit(allocator);
+    try coalesced.appendSlice(allocator, response);
+    try coalesced.appendSlice(allocator, snapshot_frame);
+    try socket_server.writeAll(fds[1], coalesced.items);
+    var client: Client = .{
+        .allocator = allocator,
+        .fd = fds[0],
+        .host_id = 1,
+        .parser = framing.FrameParser.init(allocator),
+    };
+    defer client.deinit();
+    const deadline = try client_deadline.AbsoluteDeadline.after(testing.io, std.time.ns_per_s);
+    const payload = try client.callUntil("runtime.attach", "{}", deadline);
+    defer allocator.free(payload);
+    const snapshot = try client.readSnapshotUntil(7, deadline);
+    defer allocator.free(snapshot);
+    try testing.expectEqualStrings("coalesced-snapshot", snapshot);
+}
+
+test "client authority refresh drains a complete coalesced revoke without socket read" {
+    const allocator = testing.allocator;
+    var client: Client = .{
+        .allocator = allocator,
+        .fd = -1,
+        .host_id = 1,
+        .parser = framing.FrameParser.init(allocator),
+    };
+    defer client.deinit();
+    const encoded = try framing.encodeFrame(
+        allocator,
+        .{ .kind = .event, .stream_id = 7 },
+        "{\"event\":\"controller.revoked\",\"data\":{\"runtime_id\":\"000000000000000000000000000000aa\",\"stream_id\":7,\"controller_generation\":2,\"reason\":\"takeover\"}}",
+    );
+    defer allocator.free(encoded);
+    try client.parser.push(encoded);
+    try testing.expect(!client.hasBufferedControllerRevokeForStream(7));
+
+    try client.refreshBufferedAuthorityEvidence();
+
+    try testing.expectEqual(@as(usize, 0), client.parser.bufferedBytes());
+    try testing.expect(client.hasBufferedControllerRevokeForStream(7));
+}
+
+test "client deadline partial snapshot batch stalls fail closed" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fds: [2]c.fd_t = undefined;
+    try testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds));
+    defer _ = c.close(fds[1]);
+    const partial = try framing.encodeFrame(
+        allocator,
+        .{ .kind = .snapshot_chunk, .stream_id = 7 },
+        "partial",
+    );
+    defer allocator.free(partial);
+    try socket_server.writeAll(fds[1], partial);
+    var client: Client = .{
+        .allocator = allocator,
+        .fd = fds[0],
+        .host_id = 1,
+        .parser = framing.FrameParser.init(allocator),
+    };
+    defer client.deinit();
+    const deadline = try client_deadline.AbsoluteDeadline.after(
+        testing.io,
+        10 * std.time.ns_per_ms,
+    );
+    try testing.expectError(
+        error.DeadlineExceeded,
+        client.readSnapshotUntil(7, deadline),
+    );
+    try testing.expect(client.unusable);
+    try testing.expect(client.partial_batch == null);
+}
+
+test "client deadline byte drip never extends the absolute response budget" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fds: [2]c.fd_t = undefined;
+    try testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds));
+    defer _ = c.close(fds[1]);
+    const response = try framing.encodeFrame(
+        allocator,
+        .{ .kind = .response, .request_id = 1 },
+        "{\"result\":{}}",
+    );
+    defer allocator.free(response);
+    try socket_server.writeAll(fds[1], response);
+    var fixture = ConnectedSocketFixture{
+        .fd = fds[0],
+        .max_read = 1,
+        .advance_per_read_ns = 1,
+    };
+    var client: Client = .{
+        .allocator = allocator,
+        .fd = fds[0],
+        .host_id = 1,
+        .parser = framing.FrameParser.init(allocator),
+    };
+    defer client.deinit();
+    const deadline = client_deadline.AbsoluteDeadline.fromInjected(
+        .{ .context = &fixture, .now_ns = ConnectedSocketFixture.clock },
+        10,
+    );
+    try testing.expectError(
+        error.DeadlineExceeded,
+        client.callUntilWithOps("runtime.get", "{}", deadline, fixture.ops()),
+    );
+    try testing.expectEqual(@as(i128, 10), fixture.clock_now_ns);
+    try testing.expect(client.unusable);
+}
+
+test "client deadline request write stall on a blocking socket is bounded" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fds: [2]c.fd_t = undefined;
+    try testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds));
+    defer _ = c.close(fds[1]); // Peer intentionally never reads.
+    socket_server.setNoSigPipe(fds[0]);
+    var requested: c_int = 4096;
+    _ = c.setsockopt(fds[0], posix.SOL.SOCKET, posix.SO.SNDBUF, &requested, @sizeOf(c_int));
+    // Stay below the 256 KiB control-frame cap while exceeding the deliberately
+    // tiny socket send buffer, so this reaches transport backpressure.
+    const params = try allocator.alloc(u8, 128 * 1024);
+    defer allocator.free(params);
+    @memset(params, 'x');
+    var client: Client = .{
+        .allocator = allocator,
+        .fd = fds[0],
+        .host_id = 1,
+        .parser = framing.FrameParser.init(allocator),
+    };
+    defer client.deinit();
+    const deadline = try client_deadline.AbsoluteDeadline.after(
+        testing.io,
+        10 * std.time.ns_per_ms,
+    );
+    try testing.expectError(
+        error.DeadlineExceeded,
+        client.callUntil("runtime.get", params, deadline),
+    );
+    try testing.expect(client.unusable);
+}
+
+fn checkDeadlineCallAllocation(allocator: std.mem.Allocator) !void {
+    var fds: [2]c.fd_t = undefined;
+    try testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds));
+    setReadTimeoutMs(fds[1], 50);
+    const initial_flags = c.fcntl(fds[0], c.F.GETFL);
+    const response = try framing.encodeFrame(
+        testing.allocator,
+        .{ .kind = .response, .request_id = 1 },
+        "{\"result\":{}}",
+    );
+    defer testing.allocator.free(response);
+    var peer_ok = false;
+    var peer = try std.Thread.spawn(.{}, deadlineCallPeer, .{ fds[1], response, &peer_ok });
+    var client: Client = .{
+        .allocator = allocator,
+        .fd = fds[0],
+        .host_id = 1,
+        .parser = framing.FrameParser.init(allocator),
+    };
+    defer client.deinit();
+    const deadline = try client_deadline.AbsoluteDeadline.after(testing.io, std.time.ns_per_s);
+    const payload = client.callUntil("runtime.get", "{}", deadline) catch |err| {
+        peer.join();
+        if (err == error.OutOfMemory and !peer_ok) {
+            try testing.expect(!client.unusable);
+            try testing.expectEqual(initial_flags, c.fcntl(client.fd, c.F.GETFL));
+        } else if (err == error.OutOfMemory) {
+            try testing.expect(client.unusable);
+        }
+        return err;
+    };
+    allocator.free(payload);
+    peer.join();
+    try testing.expect(peer_ok);
+}
+
+test "client deadline call is leak-free and fail-closed at every allocation index" {
+    try testing.checkAllAllocationFailures(
+        testing.allocator,
+        checkDeadlineCallAllocation,
+        .{},
+    );
+}
+
+test "client deadline pre-wire allocation failure reuses the exact established connection" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fds: [2]c.fd_t = undefined;
+    try testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds));
+    const response = try framing.encodeFrame(
+        allocator,
+        .{ .kind = .response, .request_id = 1 },
+        "{\"result\":{\"reused\":true}}",
+    );
+    defer allocator.free(response);
+    var peer_ok = false;
+    var peer = try std.Thread.spawn(.{}, deadlineCallPeer, .{ fds[1], response, &peer_ok });
+    var failing = testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    var client: Client = .{
+        .allocator = failing.allocator(),
+        .fd = fds[0],
+        .host_id = 1,
+        .parser = framing.FrameParser.init(failing.allocator()),
+    };
+    defer client.deinit();
+    const first_deadline = try client_deadline.AbsoluteDeadline.after(testing.io, std.time.ns_per_s);
+    try testing.expectError(
+        error.OutOfMemory,
+        client.callUntil("runtime.get", "{}", first_deadline),
+    );
+    try testing.expect(!client.unusable);
+    try testing.expectEqual(@as(u64, 1), client.next_request_id);
+
+    // The allocator object stays identical for Client and FrameParser; only its one injected
+    // failure is disabled so the same parser/fd can prove a real second RPC succeeds.
+    failing.fail_index = std.math.maxInt(usize);
+    const second_deadline = try client_deadline.AbsoluteDeadline.after(testing.io, std.time.ns_per_s);
+    const payload = try client.callUntil("runtime.get", "{}", second_deadline);
+    defer failing.allocator().free(payload);
+    peer.join();
+    try testing.expect(peer_ok);
+    try testing.expectEqualStrings("{\"result\":{\"reused\":true}}", payload);
+}
+
+fn checkDeadlineSnapshotAllocation(allocator: std.mem.Allocator) !void {
+    var fds: [2]c.fd_t = undefined;
+    try testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds));
+    defer _ = c.close(fds[1]);
+    const frame = try framing.encodeFrame(
+        testing.allocator,
+        .{
+            .kind = .snapshot_chunk,
+            .stream_id = 7,
+            .flags = protocol.Flags.end_stream,
+        },
+        "snapshot-allocation",
+    );
+    defer testing.allocator.free(frame);
+    try socket_server.writeAll(fds[1], frame);
+    var client: Client = .{
+        .allocator = allocator,
+        .fd = fds[0],
+        .host_id = 1,
+        .parser = framing.FrameParser.init(allocator),
+    };
+    defer client.deinit();
+    const deadline = try client_deadline.AbsoluteDeadline.after(testing.io, std.time.ns_per_s);
+    const snapshot = client.readSnapshotUntil(7, deadline) catch |err| {
+        if (err == error.OutOfMemory) try testing.expect(client.unusable);
+        return err;
+    };
+    allocator.free(snapshot);
+}
+
+test "client deadline snapshot is leak-free and fail-closed at every allocation index" {
+    try testing.checkAllAllocationFailures(
+        testing.allocator,
+        checkDeadlineSnapshotAllocation,
+        .{},
+    );
 }
 
 test "client request write failure invalidates the connection before another call" {
@@ -2939,6 +3784,13 @@ const ConnectedSocketFixture = struct {
     close_calls: usize = 0,
     set_flags_calls: usize = 0,
     fail_restore_flags: bool = false,
+    clock_now_ns: i128 = 0,
+    advance_on_restore_ns: i128 = 0,
+    inject_write_interrupt_again: bool = false,
+    inject_read_interrupt_again: bool = false,
+    write_calls: usize = 0,
+    read_calls: usize = 0,
+    advance_per_read_ns: i128 = 0,
 
     fn ops(self: *ConnectedSocketFixture) client_deadline.Ops {
         var result = client_deadline.posix_ops;
@@ -2956,6 +3808,10 @@ const ConnectedSocketFixture = struct {
         return @ptrCast(@alignCast(ctx));
     }
 
+    fn clock(ctx: *anyopaque) i128 {
+        return cast(ctx).clock_now_ns;
+    }
+
     fn socket(ctx: *anyopaque) c.fd_t {
         return cast(ctx).fd;
     }
@@ -2966,6 +3822,10 @@ const ConnectedSocketFixture = struct {
 
     fn read(ctx: *anyopaque, fd: c.fd_t, dst: []u8) client_deadline.IoResult {
         const self = cast(ctx);
+        self.read_calls += 1;
+        self.clock_now_ns += self.advance_per_read_ns;
+        if (self.inject_read_interrupt_again and self.read_calls == 1) return .interrupted;
+        if (self.inject_read_interrupt_again and self.read_calls == 2) return .would_block;
         return client_deadline.posix_ops.read(
             client_deadline.posix_ops.context,
             fd,
@@ -2975,6 +3835,9 @@ const ConnectedSocketFixture = struct {
 
     fn write(ctx: *anyopaque, fd: c.fd_t, src: []const u8) client_deadline.IoResult {
         const self = cast(ctx);
+        self.write_calls += 1;
+        if (self.inject_write_interrupt_again and self.write_calls == 1) return .interrupted;
+        if (self.inject_write_interrupt_again and self.write_calls == 2) return .would_block;
         return client_deadline.posix_ops.write(
             client_deadline.posix_ops.context,
             fd,
@@ -2992,6 +3855,7 @@ const ConnectedSocketFixture = struct {
         const self = cast(ctx);
         self.set_flags_calls += 1;
         if (self.fail_restore_flags and self.set_flags_calls == 2) return false;
+        if (self.set_flags_calls == 2) self.clock_now_ns += self.advance_on_restore_ns;
         return client_deadline.posix_ops.set_flags(
             client_deadline.posix_ops.context,
             fd,
@@ -3198,7 +4062,7 @@ test "client: buffered complete hello ack cannot bypass an expired deadline" {
     defer testing.allocator.free(wire);
     try client.parser.push(wire);
     try testing.expectError(
-        error.EndpointTransient,
+        error.DeadlineExceeded,
         client.readFrameUntil(deadline, client_deadline.posix_ops),
     );
 }

@@ -3,6 +3,7 @@
 //! TTY syscalls, manifest enumeration, socket transport and process exit are platform/main adapters.
 
 const std = @import("std");
+const host_protocol = @import("../session/host_protocol.zig");
 
 pub const ExitCode = enum(u8) {
     success = 0,
@@ -63,31 +64,33 @@ pub const Resolution = union(enum) {
     failed: ExitCode,
 };
 
+pub const RemoteError = host_protocol.ErrorCode;
+
+/// Public attach owns the stable process-exit policy; platform adapters only decode the canonical
+/// typed wire error and delegate here.
+pub fn remoteExitCode(code: RemoteError) ExitCode {
+    return switch (code) {
+        .host_unavailable, .stale_host, .host_shutting_down => .host_unavailable,
+        .incompatible_version, .upgrade_unsupported => .unsupported,
+        .unauthorized => .denied,
+        .runtime_not_found => .runtime_not_found,
+        .controller_busy, .invalid_generation, .upgrade_busy, .resource_exhausted => .busy,
+        .internal => .internal,
+        .invalid_request,
+        .payload_too_large,
+        .queue_invalidated,
+        .attempt_conflict,
+        .invalid_target,
+        => .protocol,
+    };
+}
+
 pub fn requestsController(intent: Intent) bool {
     return intent == .default_controller;
 }
 
 pub fn requiresTransfer(intent: Intent) bool {
     return intent == .take_over;
-}
-
-pub const TakeoverResult = enum {
-    success,
-    unsupported,
-    stale,
-    busy,
-    unauthorized,
-    malformed,
-};
-
-pub fn takeoverExit(result: TakeoverResult) ?ExitCode {
-    return switch (result) {
-        .success => null,
-        .unsupported => .unsupported,
-        .stale, .busy => .busy,
-        .unauthorized => .denied,
-        .malformed => .protocol,
-    };
 }
 
 pub fn parse(args: []const []const u8) ParseError!Command {
@@ -259,11 +262,28 @@ test "attach intent requests controller only for default and transfer only for t
     try std.testing.expect(requiresTransfer(.take_over));
 }
 
-test "takeover result has no retry and deterministic exit mapping" {
-    try std.testing.expect(takeoverExit(.success) == null);
-    try std.testing.expectEqual(ExitCode.unsupported, takeoverExit(.unsupported).?);
-    try std.testing.expectEqual(ExitCode.busy, takeoverExit(.stale).?);
-    try std.testing.expectEqual(ExitCode.busy, takeoverExit(.busy).?);
-    try std.testing.expectEqual(ExitCode.denied, takeoverExit(.unauthorized).?);
-    try std.testing.expectEqual(ExitCode.protocol, takeoverExit(.malformed).?);
+test "attach maps every canonical remote error to one stable exit" {
+    const expected = [_]ExitCode{
+        .host_unavailable, // host_unavailable
+        .protocol, // invalid_request
+        .unsupported, // incompatible_version
+        .denied, // unauthorized
+        .runtime_not_found,
+        .host_unavailable, // stale_host
+        .busy, // controller_busy
+        .busy, // invalid_generation
+        .protocol, // payload_too_large
+        .protocol, // queue_invalidated
+        .host_unavailable, // host_shutting_down
+        .busy, // upgrade_busy
+        .protocol, // attempt_conflict
+        .unsupported, // upgrade_unsupported
+        .protocol, // invalid_target
+        .busy, // resource_exhausted
+        .internal,
+    };
+    inline for (std.meta.fields(RemoteError)) |field| {
+        const code: RemoteError = @enumFromInt(field.value);
+        try std.testing.expectEqual(expected[field.value], remoteExitCode(code));
+    }
 }

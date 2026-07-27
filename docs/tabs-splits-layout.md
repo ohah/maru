@@ -105,7 +105,9 @@ raw rect를 leaf rect로 나눈다. 각 leaf에서는 L4 `AppSession.paneGeometr
 hit-test·IME 후보창은 `.grid`를 공유하고, 실제 입력 영역을 표시하는 focus border는 `.body`를 공유해 padding을 border
 안쪽에 남긴다. WKWebView도 pane tab bar·browser address band·split seam 노출을 `web_panel_layout.contentRect`로 먼저
 제거한 본문에 같은 `layout_math.insetRect(window_padding_px)`를 적용한다. 파일 도크의 WKWebView도 그룹 tab/header를
-제거한 content rect에 같은 inset을 적용한다. 따라서 terminal grid와 웹 콘텐츠는 같은 수준의 여백을 갖되 tab/header와
+제거한 content rect에 같은 inset을 적용한다(**FP16 목표**: 파일이 워크스페이스 Term이 되면 도크는 탐색기 전용 GPU chrome이라
+WKWebView를 하나도 소유하지 않고, 파일 본문은 위의 web Term 경로 하나로 합쳐진다 — [file-panel.md](file-panel.md) §7).
+따라서 terminal grid와 웹 콘텐츠는 같은 수준의 여백을 갖되 tab/header와
 split·dock divider 자체는 padding 때문에 안쪽으로 밀리지 않는다. `paneBarRect`/`paneTermRect`는 `PaneGeometry`
 accessor일 뿐 bar/padding 산술을 복제하지 않는다. focus border의 상태·z-order·테마와 비-key/OOM fail-close 계약은
 [file-panel.md §3.4](file-panel.md#34-terminal파일-도크-입력-포커스-표시왕복)를 단일 출처로 둔다.
@@ -259,6 +261,9 @@ Node = leaf(Pane)
   [파일 패널 §3.3](file-panel.md#33-파일-탭-드래그도크-내부-분할)을 단일 출처로 둔다.
   단 현행 terminal 탭은 source pane 안에서 pointer x를 따라 live reorder하므로, 도크에 놓아도 cross-domain 이동은 0이지만
   도크로 나가기 전에 이미 보인 source 내부 순서는 유지한다. 즉 cross-domain drop의 no-op은 원래 순서로 rollback한다는 뜻이 아니다.
+  **FP16 목표**: 파일이 워크스페이스 Term이 되면 이 "도메인 경계" 자체가 소멸한다 — 파일 탭 드래그가 terminal 탭 드래그에
+  흡수돼 금지할 반대 도메인이 없어지고, 탐색기 도크는 콘텐츠 탭이 없어 drop target 후보에서 자연히 빠진다. terminal↔dock
+  outer divider가 크기 조절만 소유한다는 규칙은 그대로다. 단일 출처는 [파일 패널 §3.3](file-panel.md#33-파일-탭-드래그도크-내부-분할).
   **호버 커서(②)**: divider=↔/↕ resize, 사이드바 경계=↔, pane grip=✋ openHand(드래그 손잡이), 탭/"+"=손가락(pointingHand), 터미널=I-beam.
 
 ### Pane을 워크스페이스로 분리·합치기 (드래그, 구현됨)

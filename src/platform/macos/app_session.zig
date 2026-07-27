@@ -1081,7 +1081,7 @@ pub const FrameSummary = extern struct {
     // 이 값에 latch되면(다음 tick) Swift가 NSApp.reply(toApplicationShouldTerminate:)로 종료를 진행/취소한다. tick
     // epilogue에서 self.quit_decision을 실어 보낸 직후 .none으로 리셋해 한 번만 전달한다(ended latch와 같은 패턴).
     quit_decision: u32 = 0,
-    // Phase 4e-5: 활성 워크스페이스 탭에 web Term이 하나라도 있으면 1(activeTabHasWebTerm — 매 tick 트리에서 계산, 유지
+    // Phase 4e-5/FP16c: 창의 어느 pane 트리에든 web Term이 있으면 1(windowHasWebTerm — 매 tick 계산, 유지
     // 카운터 아님이라 창 간 이동에도 드리프트 없음). Swift drainWebSurfaceTransition 게이트가 env 훅(MARU_WEB_PANEL) 없이도
     // command로 만든 web surface를 그리게 하는 "존재 신호"다(§10 4e-5). tick epilogue가 quit_decision 옆에서 매 tick 채운다.
     // quit_decision 뒤 4B tail padding 자리라 struct @sizeOf는 176으로 불변(ABI v102).
@@ -7202,7 +7202,7 @@ pub const AppSession = struct {
     ///
     /// 실패 가능한 일(admission·트리 후보)을 전부 먼저 끝낸 뒤 무실패 commit으로 넘어가므로, 어느
     /// allocation이 실패해도 양쪽 창이 원상 유지된다.
-    fn mergeDockInto(src: *AppSession, dst: *AppSession) !void {
+    fn mergeFilePanelStateInto(src: *AppSession, dst: *AppSession) !void {
         // 1) 창당 상한 admission. 병합 결과가 max_entries를 넘으면 고정 크기 배열을 쓰는 순회들이 넘친다.
         var unique: usize = 0;
         var count_it = src.fileEntries();
@@ -7224,8 +7224,10 @@ pub const AppSession = struct {
         //    explorer root/recent **권위는 destination**이다 — source root를 흡수하지 않는다. 다만 양쪽이
         //    inferred면 source가 파일을 열 때 정한 project root가 dirname보다 정확하므로 그걸 쓴다
         //    (`/repo/sub/file.md`가 `/repo`에서 `/repo/sub`로 줄어드는 것을 막는다).
-        // destination 탐색기가 **비어 있으면** source 권위를 통째로 채택한다(옛 "dst가 비었으면 src 값을
-        // 채택한다"). 비어 있지 않으면 destination이 root/recent 권위다.
+        // 도크에 남은 건 탐색기(트리)뿐이므로 여기서 다루는 "권위"는 root/recent 하나다.
+        // destination 탐색기가 **비어 있으면**(root도 recent도 없음) 그건 권위가 아니라 부재다 —
+        // 그대로 두면 옮겨온 파일 탭이 자기 프로젝트 루트 없이 도착하므로 source 것을 채택한다.
+        // 비어 있지 않으면 destination이 권위다(파일 탭 유무가 아니라 트리 내용이 기준).
         var dst_tree = if (dst.file_tree.hasContent())
             try dst.file_tree.clone()
         else
@@ -7539,16 +7541,16 @@ pub const AppSession = struct {
             src_composition.preedit_len,
         );
         defer pending_transfer.deinit();
-        try mergeDockInto(src, dst);
+        try mergeFilePanelStateInto(src, dst);
         src_composition.commit(false);
         pending_transfer.capture(src, dst);
-        // mergeDockInto가 destination clean duplicate token을 dirty replacement EntryId로 remap할 수 있으므로
+        // mergeFilePanelStateInto가 destination clean duplicate token을 dirty replacement EntryId로 remap할 수 있으므로
         // 모델 merge가 끝난 뒤 surviving token을 캡처한다.
         const pending_dock_focus = src.pending_dock_focus orelse dst.pending_dock_focus;
         src.advanceDockAsyncEpoch();
         dst.advanceDockAsyncEpoch();
         if (pending_dock_focus) |pending| dst.requeuePendingDockFocus(pending);
-        // mergeDockInto 뒤 workspace 수술은 capacity와 pending input의 destination-owned copy가
+        // mergeFilePanelStateInto 뒤 workspace 수술은 capacity와 pending input의 destination-owned copy가
         // 이미 확보돼 무실패다. source cleanup 직전에 queue ownership을 infallible swap한다.
         pending_transfer.commit(dst);
         // [3] merge는 dst가 **보던** 워크스페이스를 유지한다(L2 WindowGraph.mergeWindow — target의 active_workspace 보존).
@@ -13662,7 +13664,7 @@ pub const AppSession = struct {
     /// 창의 **어느 탭에든** web Term이 있나. FP16c로 수집 범위가 창 전체가 됐으므로 presence 신호도 같은 범위여야
     /// 한다 — 활성 탭만 보면 비활성 워크스페이스의 첫 web surface 생성 전이가 영영 미적용된다(FP3이 도크에서
     /// 실측으로 겪은 것과 같은 결함).
-    fn activeTabHasWebTerm(self: *AppSession) bool {
+    fn windowHasWebTerm(self: *AppSession) bool {
         if (!self.surface_initialized or self.tabs.items.len == 0) return false;
         for (self.tabs.items) |tab| {
             if (PaneTree.anyLeaf(tab.tree, paneHasWebTerm)) return true;
@@ -14023,7 +14025,7 @@ pub const AppSession = struct {
     }
 
     fn webSurfacesPresent(self: *AppSession) bool {
-        return self.activeTabHasWebTerm() or self.dockHasLiveSurface();
+        return self.windowHasWebTerm() or self.dockHasLiveSurface();
     }
 
     fn dividerTargetRect(rect: maru.session.SplitRect) web_panel_layout.RectF64 {
@@ -44850,7 +44852,7 @@ test "file tree bulk delete visits entries and action queues once without model 
         while (it.next()) |entry| entry.surface_id = session.surface_ids.next();
     }
     const survivor_sid = session.fileEntryForPath("/tmp/fp9-bulk-survivor.md").?.*.surface_id;
-    const deleted_sid = session.dock.groupAt(0).?.entries.items[0].surface_id;
+    const deleted_sid = session.fileEntryAt(0).?.surface_id;
     for (0..dock_panel.max_entries) |index| {
         const surface_id = if (index % 2 == 0) survivor_sid else deleted_sid;
         session.file_panel_dirty_sync_actions[index] = .{ .surface_id = surface_id, .request_id = index + 1 };
@@ -44962,39 +44964,30 @@ test "FP3 파일 도크: right/bottom 기하·surface diff 소스·presence·hit
     defer surfaces.deinit(allocator);
     try session.collectWebSurfaces(&surfaces);
     try std.testing.expectEqual(@as(usize, 3), surfaces.items.len);
-    try std.testing.expect(surfaces.items[0].visible); // workspace browser
-    try std.testing.expectEqual(@as(u8, 2), surfaces.items[0].seam_edges); // workspace 우측이 dock divider에 맞닿음
-    try std.testing.expect(!surfaces.items[1].visible and surfaces.items[2].visible);
+    // FP16: 브라우저와 두 파일이 **같은 pane의 탭**이라 보이는 건 활성 Term 하나뿐이다(마지막에 연 beta.html).
+    // 옛 "workspace 브라우저 + 도크 editor 두 칸 동시 표시"는 도크에 editor leaf가 있을 때의 기하였다.
+    try std.testing.expect(!surfaces.items[0].visible and !surfaces.items[1].visible);
+    try std.testing.expect(surfaces.items[2].visible);
     try std.testing.expectEqual(web_panel_layout.PanelKind.browser, surfaces.items[2].panel_kind);
-    try std.testing.expectEqual(@as(u8, 3), surfaces.items[2].seam_edges); // outer dock 좌측 + project-tree 우측 seam
+    // 활성 web surface는 workspace 영역을 채우고, 도크와 맞닿은 오른쪽 seam을 그대로 받는다.
+    try std.testing.expectEqual(@as(u8, 2), surfaces.items[2].seam_edges);
     const workspace_seam = session.dividerThicknessPx() + @max(@as(u32, 1), session.scale_milli / 1000);
     const workspace_web_chrome = web_panel_layout.contentRect(right.terminal, .{
-        .top = 2 * session.paneBarHeightPx(), // browser = pane tab bar + address band
+        // 파일 패널은 주소 밴드가 없다(브라우저만 2단) — pane 탭 바 한 줄만 뺀다.
+        .top = session.paneBarHeightPx(),
         .right = workspace_seam,
     });
-    try std.testing.expectEqual(layout_math.insetRect(workspace_web_chrome, session.window_padding_px), surfaces.items[0].content_rect);
-    try std.testing.expectEqual(layout_math.insetRect(right.content, session.window_padding_px), surfaces.items[2].content_rect);
+    try std.testing.expectEqual(layout_math.insetRect(workspace_web_chrome, session.window_padding_px), surfaces.items[2].content_rect);
     // Native가 양보하는 edge band의 내부점은 반드시 같은 Zig resize target이어야 한다. 단일 10pt를 final frame에
     // 다시 붙이면 padding만큼 target 밖 dead strip이 생겼던 회귀를 producer 실제 기하로 막는다.
     const scale: f64 = @as(f64, @floatFromInt(session.scale_milli)) / 1000.0;
-    const workspace_surface = surfaces.items[0];
+    const workspace_surface = surfaces.items[2];
     const workspace_band_px = workspace_surface.divider_grab_bands_pt.right * scale;
+    // band는 divider hit 폭과 seam/padding의 교집합이라 0일 수 있다(FP16 이전에도 그랬다). 0이 아닐 때만
+    // "native가 양보한 내부점이 같은 Zig target인가"를 검증한다.
     if (workspace_band_px > 0) try std.testing.expect(session.dockDividerAtPoint(
         @as(f64, @floatFromInt(workspace_surface.content_rect.x + workspace_surface.content_rect.w)) - workspace_band_px / 2,
         @floatFromInt(workspace_surface.content_rect.y + workspace_surface.content_rect.h / 2),
-    ));
-    const dock_surface = surfaces.items[2];
-    const dock_left_band_px = dock_surface.divider_grab_bands_pt.left * scale;
-    const dock_right_band_px = dock_surface.divider_grab_bands_pt.right * scale;
-    try std.testing.expect(dock_left_band_px > 0 and dock_right_band_px > 0);
-    try std.testing.expect(session.dockDividerAtPoint(
-        @as(f64, @floatFromInt(dock_surface.content_rect.x)) + dock_left_band_px / 2,
-        @floatFromInt(dock_surface.content_rect.y + dock_surface.content_rect.h / 2),
-    ));
-    try std.testing.expect(session.dockTreeDividerAtPoint(
-        right,
-        @as(f64, @floatFromInt(dock_surface.content_rect.x + dock_surface.content_rect.w)) - dock_right_band_px / 2,
-        @floatFromInt(dock_surface.content_rect.y + dock_surface.content_rect.h / 2),
     ));
     try std.testing.expect(session.webSurfacesPresent());
     try std.testing.expect(session.hasWebSurface(session.fileEntryAt(1).?.surface_id));
@@ -45002,6 +44995,9 @@ test "FP3 파일 도크: right/bottom 기하·surface diff 소스·presence·hit
     // 파일 도크가 열린 상태에서도 workspace 브라우저 주소창 클릭은 도크 hit-test를 통과해 편집으로 들어가야 한다.
     // 수정 전에는 아래 도크 분기가 dockGroupAtPoint(null)을 함수 전체 return으로 처리해, 도크 밖인 workspace 클릭까지
     // 삼켰다. 따라서 브라우저는 보이지만 주소창·탭·터미널 등 왼쪽 영역을 전혀 조작할 수 없었다.
+    // FP16: 브라우저·파일이 같은 pane의 탭이라 마지막에 연 beta.html이 활성이다. 주소창 검증이므로
+    // 브라우저 탭(터미널 다음)을 다시 활성으로 올린다.
+    session.focusTerm(1);
     const browser_sid = session.activeWebSurfaceId();
     const browser_bar = session.paneBarForLeaf(session.activePane()) orelse return error.NoBrowserBar;
     const address_y: f64 = @floatFromInt(browser_bar.full.y + browser_bar.full.h + browser_bar.full.h / 2);
@@ -45015,43 +45011,8 @@ test "FP3 파일 도크: right/bottom 기하·surface diff 소스·presence·hit
     try std.testing.expectEqualStrings("example.com", session.addrEditText());
     session.mouse(3, address_x, address_y, 0, 0);
 
-    // Artifact의 project tree 열은 editor와 독립적으로 폭을 조절한다. 넓힌 hit band 안쪽에서 시작해도 첫 move는
-    // 점프하지 않고, 이후 pointer delta만큼 tree 폭이 변하며 live WKWebView는 계속 visible이다.
-    const tree_width_before = right.tree.w;
-    const dock_sid = session.fileEntryAt(1).?.surface_id;
-    var dock_content_width_before: ?u32 = null;
-    for (surfaces.items) |surface| {
-        if (surface.surface_id == dock_sid and surface.visible) dock_content_width_before = surface.content_rect.w;
-    }
-    try std.testing.expect(dock_content_width_before != null);
-    // 선의 editor 쪽(-x) WebView 내부에서 시작한다. Swift의 10pt seam pass-through와 Zig target이 어긋나면 이
-    // 위치는 WebView도 Metal도 소비하지 않는 dead band가 되어 드래그가 시작되지 않는다.
-    const tree_grab_x = @as(f64, @floatFromInt(right.tree_divider.x)) - 8;
-    const tree_grab_y: f64 = @floatFromInt(right.tree_divider.y + right.tree_divider.h / 2);
-    try std.testing.expectEqual(CursorKind.resize_h, session.hoverCursor(tree_grab_x, tree_grab_y, 0));
-    session.mouse(1, tree_grab_x, tree_grab_y, 0, 0);
-    try std.testing.expect(session.pointerGestureIs(.dock_tree_divider));
-    session.mouse(2, tree_grab_x, tree_grab_y, 0, 0);
-    try std.testing.expectEqual(tree_width_before, session.dockGeometry().tree.w);
-    session.mouse(2, tree_grab_x - 40, tree_grab_y, 0, 0);
-    try std.testing.expectEqual(tree_width_before + 40, session.dockGeometry().tree.w);
-    surfaces.clearRetainingCapacity();
-    try session.collectWebSurfaces(&surfaces);
-    var workspace_browser_visible = false;
-    var dock_editor_visible = false;
-    var dock_content_width_after: ?u32 = null;
-    for (surfaces.items) |surface| {
-        if (surface.surface_id == browser_sid) workspace_browser_visible = surface.visible;
-        if (surface.surface_id == dock_sid) {
-            dock_editor_visible = surface.visible;
-            dock_content_width_after = surface.content_rect.w;
-        }
-    }
-    try std.testing.expect(workspace_browser_visible and dock_editor_visible);
-    try std.testing.expectEqual(dock_content_width_before.? - 40, dock_content_width_after.?);
-    session.mouse(3, tree_grab_x - 40, tree_grab_y, 0, 0);
-    try std.testing.expect(!session.pointerGestureIs(.dock_tree_divider));
-    try std.testing.expect(session.dock.tree_size > 0);
+    // FP16: 도크에 남은 건 탐색기뿐이라 "tree | editor" 내부 분할선이 없다. 그 분할선 드래그와
+    // 그때의 editor surface 폭 추종을 검증하던 절은 대상 자체가 사라져 삭제한다(§10 B-3에서 기하 필드도 함께).
 
     session.metal_dirty = true;
     _ = try session.tick();
@@ -45077,8 +45038,9 @@ test "FP3 파일 도크: right/bottom 기하·surface diff 소스·presence·hit
     session.pointer_gesture_owner = .{ .dock_outer_divider = .{ .offset_px = 0 } };
     surfaces.clearRetainingCapacity();
     try session.collectWebSurfaces(&surfaces);
-    try std.testing.expect(surfaces.items[0].visible); // workspace WKWebView도 사라지지 않고 live reframe한다.
-    try std.testing.expect(!surfaces.items[1].visible and surfaces.items[2].visible); // dock active 상태도 보존한다.
+    // FP16: 브라우저 탭이 활성이므로 그것만 보인다. divider 드래그 중에도 WKWebView는 파괴되지 않고 live reframe한다.
+    try std.testing.expect(surfaces.items[0].visible);
+    try std.testing.expect(!surfaces.items[1].visible and !surfaces.items[2].visible);
     session.pointer_gesture_owner = .none;
 
     // 확장 grab band 안쪽에서 시작해도 첫 drag가 경계를 클릭점으로 순간 이동시키지 않고 pointer delta만 반영한다.
@@ -45119,7 +45081,6 @@ test "FP3 파일 도크: right/bottom 기하·surface diff 소스·presence·hit
     surfaces.clearRetainingCapacity();
     try session.collectWebSurfaces(&surfaces);
     try std.testing.expectEqual(@as(u8, 4), surfaces.items[0].seam_edges); // workspace 하단이 dock divider에 맞닿음
-    try std.testing.expectEqual(@as(u8, 2), surfaces.items[2].seam_edges); // dock 본문 우측은 project-tree divider
 
     // titlebar 띠 우측 끝 단일 토글로 닫고 다시 연다(탭바 접기 버튼을 일원화 — 팽창 상태에도 토글 표시).
     try std.testing.expectEqual(AppSession.FilePanelDockControlAction.collapse, session.filePanelDockControlAction().?);
@@ -45135,13 +45096,13 @@ test "FP3 파일 도크: right/bottom 기하·surface diff 소스·presence·hit
     surfaces.clearRetainingCapacity();
     try session.collectWebSurfaces(&surfaces);
     try std.testing.expectEqual(@as(usize, 3), surfaces.items.len);
+    // FP16: 파일 surface는 도크가 아니라 pane에 산다 — 도크를 접어도 파괴되지 않는다(미저장 CM6 버퍼 보존).
+    // 지금은 브라우저 탭이 활성이라 이 파일은 안 보일 뿐, 집합에는 그대로 남아야 한다.
     var preserved_dirty_surface = false;
     for (surfaces.items) |surface| {
         if (surface.surface_id != dirty_surface_id) continue;
         preserved_dirty_surface = true;
         try std.testing.expect(!surface.visible);
-        try std.testing.expectEqual(@as(u32, 0), surface.content_rect.w);
-        try std.testing.expectEqual(@as(u32, 0), surface.content_rect.h);
     }
     try std.testing.expect(preserved_dirty_surface);
     try std.testing.expectEqual(AppSession.FilePanelDockControlAction.expand, session.filePanelDockControlAction().?);
@@ -48273,7 +48234,7 @@ test "new_web_tab dispatch: 활성 pane에 web Term append+활성 + web_surfaces
 
         const pane = session.activePane();
         const before = pane.terms.items.len; // 첫 터미널 Term 하나
-        try std.testing.expect(!session.activeTabHasWebTerm());
+        try std.testing.expect(!session.windowHasWebTerm());
 
         session.dispatchAppAction(.new_web_tab);
 
@@ -48283,7 +48244,7 @@ test "new_web_tab dispatch: 활성 pane에 web Term append+활성 + web_surfaces
         try std.testing.expect(last.kind == .web);
         try std.testing.expectEqual(pane.terms.items.len - 1, pane.active_term);
         try std.testing.expectEqual(web_panel_layout.PanelKind.browser, last.web_panel_kind);
-        try std.testing.expect(session.activeTabHasWebTerm());
+        try std.testing.expect(session.windowHasWebTerm());
 
         // tick epilogue가 web_surfaces_present=1을 실는다(비-vacuous — 대입 없으면 기본 0). 활성 web Term은 4e-2가 렌더 skip → 크래시 0.
         const summary = try session.tick();
@@ -48307,14 +48268,14 @@ test "new_web_tab dispatch: 활성 pane에 web Term append+활성 + web_surfaces
         try std.testing.expect(session.tabsBlocked());
         session.dispatchAppAction(.new_web_tab);
         try std.testing.expectEqual(@as(usize, 1), session.activePane().terms.items.len); // web Term 안 생김
-        try std.testing.expect(!session.activeTabHasWebTerm());
+        try std.testing.expect(!session.windowHasWebTerm());
     }
 }
 
-// 4e-5: web_surfaces_present는 **유지 카운터가 아니라 활성 워크스페이스 탭 트리에서 매 tick 파생**된 신호다(activeTabHasWebTerm).
+// 4e-5/FP16c: web_surfaces_present는 **유지 카운터가 아니라 창 전체 pane 트리에서 매 tick 파생**된 신호다(windowHasWebTerm).
 // 그래서 web Term이 **비활성 탭**으로 가면(다른 워크스페이스로 전환) 신호가 off된다 — 유지 카운터로는 불가능했던, collectWebSurfaces와
 // 같은 활성-탭 범위의 핵심(창 간 이동에서 카운터가 드리프트하던 버그를 이 범위 정합이 근본 해소). 실 init/spawn/tick 경로라 게이트.
-test "web_surfaces_present는 활성 탭 트리에서 파생된다(비활성 탭 web Term은 off — 유지 카운터 드리프트 없음)" {
+test "web_surfaces_present는 창 전체 트리에서 매 tick 파생된다(유지 카운터 드리프트 없음)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
     const session = try allocator.create(AppSession);
@@ -48330,28 +48291,28 @@ test "web_surfaces_present는 활성 탭 트리에서 파생된다(비활성 탭
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
 
     // 처음(터미널만): 신호 off.
-    try std.testing.expect(!session.activeTabHasWebTerm());
+    try std.testing.expect(!session.windowHasWebTerm());
 
     // 활성 탭(워크스페이스 0)에 web Term 생성+활성화 → 신호 on, tick summary=1.
     session.dispatchAppAction(.new_web_tab);
-    try std.testing.expect(session.activeTabHasWebTerm());
+    try std.testing.expect(session.windowHasWebTerm());
     try std.testing.expectEqual(@as(u32, 1), (try session.tick()).web_surfaces_present);
 
-    // 터미널 전용 새 워크스페이스 탭을 만들어 그리로 전환(newTab이 새 탭을 활성으로) → web Term은 비활성 탭(0)에 있으니
-    // 신호 off(활성-탭 범위의 핵심 — 유지 카운터로는 여전히 1이었을 것). tick summary=0.
+    // 터미널 전용 새 워크스페이스 탭으로 전환해도 신호는 on이다 — FP16c에서 수집 범위가 창 전체가 됐고
+    // presence 신호도 같은 범위여야 비활성 워크스페이스의 첫 web surface 전이가 적용된다.
     _ = try session.newTab();
-    try std.testing.expect(!session.activeTabHasWebTerm());
-    try std.testing.expectEqual(@as(u32, 0), (try session.tick()).web_surfaces_present);
+    try std.testing.expect(session.windowHasWebTerm());
+    try std.testing.expectEqual(@as(u32, 1), (try session.tick()).web_surfaces_present);
 
-    // 다시 원래 탭(0)으로 전환 → web Term이 활성 탭에 돌아오니 신호 on. tick summary=1.
+    // 원래 탭(0)으로 돌아와도 같다(유지 카운터가 아니라 매 tick 트리에서 파생 — 드리프트 없음).
     _ = session.switchTab(0);
-    try std.testing.expect(session.activeTabHasWebTerm());
+    try std.testing.expect(session.windowHasWebTerm());
     try std.testing.expectEqual(@as(u32, 1), (try session.tick()).web_surfaces_present);
 
     // 그 web Term을 닫으면(closeActiveTerm=terms에서 제거+destroyTerm+재바인딩 — 트리 신호가 정확히 반영되려면 트리에서도
     // 빠져야 하므로 raw destroyTerm이 아닌 close 경로) 신호 off. tick summary=0.
     session.closeActiveTerm(); // 활성 pane의 활성 Term(web)을 닫는다(pane에 terminal+web 2개라 동작).
-    try std.testing.expect(!session.activeTabHasWebTerm());
+    try std.testing.expect(!session.windowHasWebTerm());
     try std.testing.expectEqual(@as(u32, 0), (try session.tick()).web_surfaces_present);
 }
 
@@ -48654,7 +48615,7 @@ test "web scratch: 다중 tick 누수/크래시 0(영속 scratch swap 소유 흐
         _ = session.webSurfaceTransitionsCount(); // computeWebSurfaceTransitions(collect+diff+swap) 반복
         _ = try session.tick();
     }
-    try std.testing.expect(session.activeTabHasWebTerm());
+    try std.testing.expect(session.windowHasWebTerm());
 }
 
 // pane에 Term이 여럿이면 탭 바가 제목 탭들 + 활성 Term 하이라이트를 그리는지(PR-C2) — 실 init/spawn/tick이
@@ -55973,7 +55934,7 @@ test "mergeSessionInto transfers exact pending input remainder with destination 
 // web_surfaces_present 신호가 **양 창 모두** 자동 정합하는지 — 옛 유지 카운터는 원본 stuck-high·대상 stuck-0으로
 // 드리프트해 이동한 web 패널이 대상 창에 안 떴다(이 test가 그 회귀의 근본 해소를 고정). 실제 WKWebView 재부모화·상태
 // 보존은 4e-4·GUI 범위 밖 — 여기선 트리 relocate가 안전하고 신호가 옳게 따라오는지만 본다.
-test "web Term 워크스페이스 창 간 이동: 무크래시 + 양 창 activeTabHasWebTerm 정합(tree-derived, 카운터 드리프트 없음)" {
+test "web Term 워크스페이스 창 간 이동: 무크래시 + 양 창 windowHasWebTerm 정합(tree-derived, 카운터 드리프트 없음)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
     const src = try initSmokeSessionSized(allocator);
@@ -55987,7 +55948,7 @@ test "web Term 워크스페이스 창 간 이동: 무크래시 + 양 창 activeT
     try addMoveTestWorkspace(src, "web-ws");
     try std.testing.expectEqual(@as(usize, 2), src.tabs.items.len);
     src.dispatchAppAction(.new_web_tab);
-    try std.testing.expect(src.activeTabHasWebTerm()); // 이동 전: src 활성 탭(1)에 web 신호 on
+    try std.testing.expect(src.windowHasWebTerm()); // 이동 전: src 활성 탭(1)에 web 신호 on
 
     // 워크스페이스 1(web 포함)을 dst로 옮긴다 — 크래시/누수 없이 완료(testing.allocator가 누수 감시).
     var buf: [8]u64 = undefined;
@@ -55997,9 +55958,9 @@ test "web Term 워크스페이스 창 간 이동: 무크래시 + 양 창 activeT
     try std.testing.expectEqual(@as(usize, 2), dst.tabs.items.len); // dst가 web 워크스페이스 흡수
 
     // 대상(dst): adoptTab이 옮겨온 탭을 활성으로 세운다 → tree-derived 신호가 그 web Term을 본다(카운터로는 dst stuck-0였을 것).
-    try std.testing.expect(dst.activeTabHasWebTerm());
+    try std.testing.expect(dst.windowHasWebTerm());
     // 원본(src): web 워크스페이스가 떠났으니 남은 활성 탭엔 web 없음 → off(카운터로는 src stuck-high였을 것). 드리프트 없음.
-    try std.testing.expect(!src.activeTabHasWebTerm());
+    try std.testing.expect(!src.windowHasWebTerm());
 
     // tick 신호도 양 창 정합(epilogue가 각 세션 활성 탭 트리에서 파생).
     try std.testing.expectEqual(@as(u32, 1), (try dst.tick()).web_surfaces_present);
@@ -57468,7 +57429,7 @@ test "FP16 파일 패널은 eviction하지 않는다 — 열린 entry는 surface
     try std.testing.expectEqual(paths.len, n);
 }
 
-test "FP6 merge transfers dock dirty state and live surface ownership before source teardown" {
+test "FP6 merge transfers dirty file state and live surface ownership before source teardown" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
     const src = try initSmokeSessionSized(allocator);
@@ -57535,7 +57496,7 @@ test "FP6 merge transfers dock dirty state and live surface ownership before sou
     try std.testing.expect(dst.completePendingDockFocus(moved_sid));
 }
 
-test "FP6 merge into empty dock adopts source explorer authority and presentation" {
+test "FP6 merge into empty explorer adopts source explorer authority and presentation" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
     const src = try initSmokeSessionSized(allocator);
@@ -57735,7 +57696,7 @@ test "FP9 merge remaps destination focus one-shots when dirty source replaces cl
     const replacement = dst.fileEntryForPath(path).?;
     try std.testing.expectEqual(source_id, replacement.id);
     try std.testing.expectEqual(source_surface, replacement.surface_id);
-    try std.testing.expect(dst.focus_owner == .workspace or dst.focus_owner == .dock_surface); // FP16: dock_group 축 소멸
+    try std.testing.expect(dst.focus_owner == .dock_pending and dst.focus_owner.dock_pending == dst.pending_dock_focus.?.entry_id);
     try std.testing.expectEqual(source_surface, dst.file_panel_mode_pending.?);
     try std.testing.expect(dst.file_tree_restore_surface_pending == null);
     try std.testing.expectEqual(source_id, dst.pending_dock_focus.?.entry_id);
@@ -58261,13 +58222,11 @@ test "FP16b B-1: 파일 entry 조회 API가 그룹 구조를 감춘다" {
     defer session.deinit();
     _ = try session.resize(1400, 900, 1000);
 
-    _ = 0; // FP16: 도크 그룹 개념 제거
     const a = try session.openFileTermInActivePane("/tmp/b1-a.md", .markdown);
     const a_id = a.term.file_entry.?.id;
     _ = try session.openFileTermInActivePane("/tmp/b1-b.md", .markdown);
-    // 두 번째 그룹을 만들어 이터레이터가 그룹 경계를 넘는지 검증한다.
-    try std.testing.expect(session.dock.groupCount() >= 2);
-    _ = 0; // FP16: 도크 그룹 개념 제거
+    // 두 번째 워크스페이스에 열어 이터레이터가 **탭 경계**를 넘는지 검증한다(FP16에서 그룹 경계를 대신한다).
+    _ = try session.newTab();
     const c = try session.openFileTermInActivePane("/tmp/b1-c.md", .markdown);
     const c_id = c.term.file_entry.?.id;
 
@@ -58292,7 +58251,7 @@ test "FP16b B-1: 파일 entry 조회 API가 그룹 구조를 감춘다" {
     while (cit.next()) |_| const_count += 1;
     try std.testing.expectEqual(count, const_count);
 
-    // ③ 경로·EntryId 조회는 그룹을 몰라도 정확한 entry를 준다 — 다른 그룹에 있는 c까지.
+    // ③ 경로·EntryId 조회는 배치를 몰라도 정확한 entry를 준다 — 다른 워크스페이스에 있는 c까지.
     const by_path = session.fileEntryForPath("/tmp/b1-c.md").?;
     try std.testing.expectEqualStrings("/tmp/b1-c.md", by_path.path);
     const by_id = session.fileEntryForId(c_id).?;

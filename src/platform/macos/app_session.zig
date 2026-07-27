@@ -6250,6 +6250,13 @@ pub const AppSession = struct {
             }
             term.rt.live_initialized = false;
         }
+        // 파일 entry(FP16 §1)는 Term 소유다 — 여기서 해제하지 않으면 탭을 닫을 때마다 path와 Entry가 샌다.
+        // 소유권 경계가 여기 하나뿐이라(생성은 파일 열기, 해제는 여기) 중간 상태가 없다.
+        if (term.file_entry) |entry| {
+            self.allocator.free(entry.path);
+            self.allocator.destroy(entry);
+            term.file_entry = null;
+        }
         // git 브랜치 캐시·auto_title(Term-owned)만 여기서 해제 — custom_name·surface는 번들 deinit이 소유한다(M3a §8A.1).
         if (term.git_branch) |b| self.allocator.free(b);
         if (term.git_branch_cwd) |c| self.allocator.free(c);

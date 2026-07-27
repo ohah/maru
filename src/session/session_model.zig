@@ -15,7 +15,8 @@ const split_tree = @import("split_tree.zig");
 const agent_observer = @import("agent_observer.zig");
 const agent_transcript_mod = @import("agent_transcript.zig");
 const workspace = @import("workspace.zig"); // OS-중립 직렬화 모델(session.workspace.v1) — TreeNode 변환용
-const control_surface = @import("control_surface.zig"); // SurfaceKind(terminal|web)·PanelKind 열거 재사용(web-panel.md §6 4e)
+const control_surface = @import("control_surface.zig");
+const dock_panel = @import("dock_panel.zig"); // FP16: 파일 entry 소유를 Term으로 옮긴다(§1). 의존은 workspace.zig 경유로 이미 존재. // SurfaceKind(terminal|web)·PanelKind 열거 재사용(web-panel.md §6 4e)
 
 const Surface = surface_mod.Surface;
 
@@ -53,6 +54,17 @@ pub fn Model(comptime Rt: type) type {
             /// 라벨(`webPanelLabel`)과 (후속) trust/WKWebView config 파생의 **단일 출처** — LiveSurface web arm에
             /// 중복 저장하지 않는다("중복 저장 없이"). 기본 `.markdown`이라 terminal Term은 byte-identical.
             web_panel_kind: PanelKind = .markdown,
+            /// 이 Term이 파일 패널이면 그 파일 entry(경로·kind·mode·dirty·revision·pending). FP16이 소유를
+            /// `DockGroup`에서 여기로 옮긴다 — Term이 곧 entry의 집이므로 "어느 탭에 어느 파일" 관계가 별도
+            /// 자료구조 없이 성립한다(docs/file-panel.md §1).
+            ///
+            /// **값이 아니라 포인터**인 이유: `Entry`는 필드 27개(대부분 u64)라 값으로 박으면 파일과 무관한
+            /// terminal Term까지 전부 그 비용을 내고, OS-중립 L2 모델이 파일 패널 필드를 통째로 알게 된다.
+            /// heap 포인터는 Term 이동·pane ArrayList 변형에도 안정적이라 비동기 ack가 들고 있기에도 낫다
+            /// (오늘의 `&group.entries.items[i]`는 append 한 번에 무효화된다).
+            ///
+            /// null이면 파일 패널이 아니다. `kind == .web`이어도 브라우저면 null이다.
+            file_entry: ?*dock_panel.Entry = null,
             /// 런타임 부착(PTY 세션·pump·생애 플래그) — generic `Rt`로 주입. platform이 `TermRuntime`을 넣는다.
             rt: Rt = .{},
             /// git 브랜치 표시 캐시(owned, cwd 파생). termGitBranch가 cwd가 바뀔 때만 재계산. destroyTerm이 해제.

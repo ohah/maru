@@ -7199,7 +7199,9 @@ pub const AppSession = struct {
     /// 창당 상한·경로 유일성 admission, destination 탐색기/watch 재구성, source-lifetime 래치 정리.
     ///
     /// 창당 경로 유일성(§1)은 여전히 지켜야 한다. 두 창에 같은 파일이 열려 있으면 병합 뒤 한 창에 같은 경로가
-    /// 두 Term으로 공존하므로, dirty 충돌은 거부하고 clean 중복은 **옮겨오는 쪽(source)**을 닫는다(§4).
+    /// 두 Term으로 공존하므로 한쪽을 닫는다. **양쪽 다** 잃을 상태를 들고 있으면 어느 내용을 살릴지 자동으로
+    /// 정하지 않고 병합 자체를 거부하고, 한쪽만 들고 있으면 그 편집을 보존하고 **깨끗한 쪽**을 닫는다.
+    /// 둘 다 깨끗하면 옮겨오는 쪽(source)을 닫아 destination 배치를 유지한다(§4).
     ///
     /// 실패 가능한 일(admission·트리 후보)을 전부 먼저 끝낸 뒤 무실패 commit으로 넘어가므로, 어느
     /// allocation이 실패해도 양쪽 창이 원상 유지된다.
@@ -7212,11 +7214,11 @@ pub const AppSession = struct {
         }
         if (dst.fileEntryCount() + unique > dock_panel.max_entries) return error.UnsupportedMove;
 
-        // 2) 중복 경로 admission — dirty가 하나라도 끼면 어느 내용을 살릴지 자동 결정하지 않는다.
+        // 2) 중복 경로 admission — 양쪽 다 잃을 상태면 거부한다.
         var dup_it = src.fileEntries();
         while (dup_it.next()) |src_entry| {
             const dup = dst.fileEntryForPath(src_entry.path) orelse continue;
-            if (filePanelEntryBlocksClose(src_entry.*) or filePanelEntryBlocksClose(dup.*))
+            if (filePanelEntryBlocksClose(src_entry.*) and filePanelEntryBlocksClose(dup.*))
                 return error.UnsupportedMove;
         }
 
@@ -7259,19 +7261,48 @@ pub const AppSession = struct {
         try dst.prepareFileTreeRowStaging(&dst_rows, unique);
 
         // ── 여기부터 무실패 commit ───────────────────────────────────────────────
-        // 4) clean 중복은 옮겨오는 쪽을 닫는다. source에서 닫으므로 destination은 자기 Term을 그대로 쓴다.
+        // 4) 중복 경로를 해소한다. 위 admission이 "양쪽 다 dirty"를 걸렀으므로, 여기서는 잃을 상태가 없는
+        //    쪽을 닫으면 된다(둘 다 깨끗하면 source). 매 회 순회를 다시 도는 이유는 close가 entry 컬렉션을
+        //    바꾸기 때문이다.
         while (true) {
+            var doomed_session: ?*AppSession = null;
             var doomed: ?*dock_panel.Entry = null;
             var it = src.fileEntries();
             while (it.next()) |src_entry| {
-                if (dst.fileEntryForPath(src_entry.path) == null) continue;
-                doomed = src_entry;
+                const dup = dst.fileEntryForPath(src_entry.path) orelse continue;
+                if (filePanelEntryBlocksClose(src_entry.*)) {
+                    doomed_session = dst;
+                    doomed = dup;
+                } else {
+                    doomed_session = src;
+                    doomed = src_entry;
+                }
                 break;
             }
             const entry = doomed orelse break;
+            const owner = doomed_session.?;
+            // destination 쪽을 닫을 때는 그 surface를 가리키던 destination one-shot을 **살아남는 쪽**으로
+            // 다시 겨눈다. 안 하면 병합 뒤 mode 갱신·typed focus가 방금 사라진 surface를 기다리며 멈춘다.
+            const survivor: ?*const dock_panel.Entry = if (owner == dst)
+                src.fileEntryForPath(entry.path)
+            else
+                null;
+            const retired_surface = entry.surface_id;
+            // 한 번 retire하면 removeFilePanelQueuedActions가 one-shot을 지우므로 **먼저** 읽어 둔다.
+            const had_mode_pending = dst.file_panel_mode_pending == retired_surface;
+            const had_restore_pending = dst.file_tree_restore_surface_pending == retired_surface;
+            const had_focus_pending = if (dst.pending_dock_focus) |pending|
+                pending.expected_surface_id == retired_surface
+            else
+                false;
             var retired_focus = false;
-            src.retireFilePanelSurface(entry, &retired_focus);
-            if (!src.closeFileTermForEntry(entry)) break; // 창의 마지막 Term이면 latch만 걸리고 구조는 남는다
+            owner.retireFilePanelSurface(entry, &retired_focus);
+            if (!owner.closeFileTermForEntry(entry)) break; // 창의 마지막 Term이면 latch만 걸리고 구조는 남는다
+            if (survivor) |replacement| {
+                if (had_mode_pending) dst.file_panel_mode_pending = replacement.surface_id;
+                if (had_restore_pending) dst.file_tree_restore_surface_pending = null;
+                if (had_focus_pending) dst.queuePendingDockFocus(replacement);
+            }
         }
         // 5) source 창 수명에 묶여 있던 래치를 비운다 — 그 큐는 source와 함께 사라지므로, 그대로 옮기면
         //    destination에서 완료해 줄 주체가 없어 reload가 영영 멈춘다.
@@ -7527,6 +7558,9 @@ pub const AppSession = struct {
             try dst.adoptTab(tab, true); // 전체 capacity 예약됨 → 내부 ensure는 no-op이고 이후 모델 수술은 무실패.
         }
         src.ended_seen = true; // §1.6 merge는 src를 항상 비우고 닫는다(실제 close는 M3d-2b)
+        // FP16: 파일 entry가 Term 소유라 **탭이 옮겨온 뒤에야** dst에서 조회된다. 그 전에 requeue하면
+        // 살아남은 token이 아직 dst에 없어 조용히 버려진다(typed focus 유실).
+        if (pending_dock_focus) |pending| dst.requeuePendingDockFocus(pending);
         // [3] dst 포커스 복원 + [4] 배치된 dst 사이드바 재빌드 1회. keep_active를 포인터로 재탐색(인덱스는 insert로 밀림).
         if (keep_active) |ka| {
             for (dst.tabs.items, 0..) |t, i| if (t == ka) {

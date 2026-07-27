@@ -7,7 +7,6 @@
 const std = @import("std");
 const c = std.c;
 const posix = std.posix;
-const client_deadline = @import("client_deadline.zig");
 const protocol = @import("protocol.zig");
 
 pub const max_tx_frames: usize = 64;
@@ -22,17 +21,10 @@ pub const ExternalTxFrame = struct {
     last_progress_at_ns: i128,
 };
 
-pub const InFlightControl = struct {
-    request_id: u64,
-    deadline: client_deadline.AbsoluteDeadline,
-};
-
 pub const State = struct {
     saved_flags: c_int,
     external_tx: std.ArrayListUnmanaged(ExternalTxFrame) = .empty,
     external_tx_bytes: usize = 0,
-    in_flight_control: ?InFlightControl = null,
-
     fn stage(allocator: std.mem.Allocator) error{OutOfMemory}!State {
         var result = State{ .saved_flags = 0 };
         result.external_tx.ensureTotalCapacityPrecise(allocator, max_tx_frames) catch

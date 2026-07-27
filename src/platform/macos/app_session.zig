@@ -3179,77 +3179,13 @@ pub const AppSession = struct {
                 self.dock_dividers_scratch.appendAssumeCapacity(divider);
             return self.dock_drag_leaves_len > 0;
         }
-        return self.rebuildDockGroupLayout();
-    }
-
-    fn rebuildDockGroupLayout(self: *AppSession) bool {
-        self.dock_leaf_rects_scratch.clearRetainingCapacity();
-        self.dock_dividers_scratch.clearRetainingCapacity();
-        if (!self.dockVisible()) return false;
-        self.dock_layout_build_count +|= 1;
-        const editor = self.dockGeometry().editor;
-        dock_panel.DockTree.layout(self.allocator, self.dock.tree, editor, &self.dock_leaf_rects_scratch) catch return false;
-        dock_panel.DockTree.layoutDividers(self.allocator, self.dock.tree, editor, &self.dock_dividers_scratch) catch return false;
-        return true;
+        return false; // FP16: 도크 editor 레이아웃이 없다(탐색기 전용)
     }
 
     const DockGroupHit = struct {
         group: *dock_panel.DockGroup,
         geometry: dock_layout.Geometry,
     };
-
-    fn dockGroupAtPoint(self: *AppSession, x_px: f64, y_px: f64) ?DockGroupHit {
-        if (!self.refreshDockGroupLayout()) return null;
-        const parent = self.dockGeometry();
-        for (self.dock_leaf_rects_scratch.items) |leaf| if (layout_math.pointInRect(x_px, y_px, leaf.rect)) return .{
-            .group = leaf.leaf,
-            .geometry = dock_layout.groupGeometry(parent, leaf.rect),
-        };
-        return null;
-    }
-
-    fn dockGroupDividerAtPoint(self: *AppSession, x_px: f64, y_px: f64) ?dock_panel.DockTree.DividerSeg {
-        if (!self.refreshDockGroupLayout()) return null;
-        const slop = self.dockDividerGrabBandPx();
-        if (slop == 0) return null;
-        // 중첩 경계가 교차하면 더 깊은 split(뒤에 append)이 좁은 실제 target이라 역순 우선한다.
-        var i = self.dock_dividers_scratch.items.len;
-        while (i > 0) {
-            i -= 1;
-            const seg = self.dock_dividers_scratch.items[i];
-            if (layout_math.pointInRect(x_px, y_px, dock_layout.groupDividerHitRect(seg, slop))) return seg;
-        }
-        return null;
-    }
-
-    fn snapshotDockDragGeometry(self: *AppSession, out: *[dock_panel.max_groups]dock_drag.Leaf) ?usize {
-        if (!self.rebuildDockGroupLayout()) return null;
-        const parent = self.dockGeometry();
-        var len: usize = 0;
-        for (self.dock_leaf_rects_scratch.items) |leaf| {
-            if (len >= out.len) return null;
-            const geometry = dock_layout.groupGeometry(parent, leaf.rect);
-            const metrics = dock_layout.tabMetrics(geometry, self.cell_width_px, leaf.leaf.entries.items.len);
-            const eff_scroll: u32 = if (metrics) |m|
-                if (dock_layout.dockTabScroll(m.tab_cols, leaf.leaf.entries.items.len, leaf.leaf.tab_scroll_cols)) |ts| ts.eff_scroll else 0
-            else
-                0;
-            out[len] = .{
-                .group_id = leaf.leaf.runtime_id,
-                .group = leaf.leaf,
-                .rect = leaf.rect,
-                .tab_bar = geometry.tab_bar,
-                .content = geometry.content,
-                .entry_count = leaf.leaf.entries.items.len,
-                .tab_width_px = if (metrics) |m| @as(u32, m.tab_width) * self.cell_width_px else dock_layout.default_tab_cols * self.cell_width_px,
-                .scroll_px = eff_scroll * self.cell_width_px,
-            };
-            len += 1;
-        }
-        self.dock_drag_dividers_len = self.dock_dividers_scratch.items.len;
-        @memcpy(self.dock_drag_dividers[0..self.dock_drag_dividers_len], self.dock_dividers_scratch.items);
-        return len;
-    }
 
     /// mouse-up stale barrier 전용. pointer move hot path는 mouse-down snapshot을 직접 소비하므로 layout pass가 0이다.
     fn currentDockDragFingerprint(self: *AppSession) ?u64 {
@@ -3283,27 +3219,6 @@ pub const AppSession = struct {
             .dock_tab => |gesture| std.meta.activeTag(gesture) == .dragging,
             else => false,
         };
-    }
-
-    fn armDockEntryDrag(self: *AppSession, group: *dock_panel.DockGroup, entry_id: dock_panel.EntryId, x_px: f64, y_px: f64) void {
-        const len = self.snapshotDockDragGeometry(&self.dock_drag_leaves) orelse {
-            return;
-        };
-        self.dock_drag_snapshot_id +%= 1;
-        if (self.dock_drag_snapshot_id == 0) self.dock_drag_snapshot_id = 1;
-        self.dock_drag_leaves_len = len;
-        self.beginPointerGesture(.{ .dock_tab = .{ .armed = .{
-            .entry_id = entry_id,
-            .source_group_id = group.runtime_id,
-            .down_x = x_px,
-            .down_y = y_px,
-            .pointer_x = x_px,
-            .pointer_y = y_px,
-            .snapshot_id = self.dock_drag_snapshot_id,
-            .layout_generation = self.dock_layout_generation,
-            .geometry_fingerprint = dock_drag.fingerprint(self.dock_drag_leaves[0..len]),
-        } } });
-        self.cacheDockDragTitle(entry_id);
     }
 
     fn cancelDockEntryDrag(self: *AppSession) void {
@@ -3542,35 +3457,6 @@ pub const AppSession = struct {
         self.workspace_focus_pending = false;
         self.file_tree_focus_pending = false;
         self.file_tree_restore_surface_pending = null;
-    }
-
-    fn commitDockEntryDrag(self: *AppSession) void {
-        const drag = (self.dockDragSessionConst() orelse return).*;
-        defer self.cancelDockEntryDrag();
-        if (!self.dockDragIsDragging()) {
-            self.activateDockEntryById(drag.entry_id);
-            return;
-        }
-        const target = drag.target orelse return;
-        if (drag.layout_generation != self.dock_layout_generation) return;
-        if ((self.currentDockDragFingerprint() orelse return) != drag.geometry_fingerprint) return;
-        const result = self.dock.commitEntryDrop(drag.entry_id, target.group_id, target.drop) catch return;
-        if (!result.changed) return;
-        self.advanceDockLayoutGeneration();
-        if (target.group_id == drag.source_group_id and target.drop == .tab_bar) {
-            // 같은 group reorder는 active EntryId와 기존 FocusOwner/native responder를 그대로 보존한다.
-            self.hovered_file_panel_tab = null;
-            self.file_tree_rows_dirty = true;
-            self.metal_dirty = true;
-            return;
-        }
-        var entry = (self.fileEntryForId(result.destination_active_entry_id) orelse return);
-        if (entry.surface_id == 0) entry.surface_id = self.surface_ids.next();
-        // live/surface-less 모두 typed transaction으로만 native focus를 요청하고 ack 전에는 dock_group에서 fail-close한다.
-        self.requestDockEntryFocus(entry);
-        self.hovered_file_panel_tab = null;
-        self.file_tree_rows_dirty = true;
-        self.metal_dirty = true;
     }
 
     fn splitFocusedDockGroup(self: *AppSession, direction: maru.session.SplitDirection) void {
@@ -12125,7 +12011,6 @@ pub const AppSession = struct {
             group.active = index;
             self.file_tree_rows_dirty = true;
         }
-        self.ensureActiveDockTabVisible(group); // 스크롤 밖 파일을 열면 그 탭이 보이게 따라간다
         _ = self.dock.focusGroup(group);
         self.file_panel_mode_pending = surface_id;
         return true;
@@ -14609,75 +14494,9 @@ pub const AppSession = struct {
             }
         }
 
-        // 도크 entry는 비활성이거나 도크 전체가 접혀도 집합에 남겨 WKWebView/JS 편집 상태를 보존한다.
-        // 접힌 도크는 기하가 없으므로 zero rect + hidden으로만 유지하고, 다시 펼칠 때 shown 전이가 최신 rect를 싣는다.
-        // 가시성을 surface 존재와 결합하면 collapse 한 tick이 destroy를 만들어 미저장 source-edit 버퍼를 잃는다.
-        if (self.dock_initialized) {
-            const has_layout = self.refreshDockGroupLayout();
-            const parent = self.dockGeometry();
-            var group_index: usize = 0;
-            while (group_index < self.dock.groupCount()) : (group_index += 1) {
-                const group = self.dock.groupAt(group_index) orelse continue;
-                const leaf_rect: web_panel_layout.Rect = if (has_layout)
-                    self.dock_leaf_rects_scratch.items[group_index].rect
-                else
-                    .{ .x = 0, .y = 0, .w = 0, .h = 0 };
-                const content_rect: web_panel_layout.Rect = if (has_layout)
-                    layout_math.insetRect(dock_layout.groupGeometry(parent, leaf_rect).content, self.window_padding_px)
-                else
-                    .{ .x = 0, .y = 0, .w = 0, .h = 0 };
-                var seam_edges: u8 = 0;
-                if (content_rect.w > 0 and content_rect.h > 0) {
-                    // Dock WKWebView의 넓은 native hit 영역 안에서도 outer/group/tree divider가 Metal view로 통과해야
-                    // 한다. 각 leaf가 실제로 맞닿는 경계만 표시해 일반 본문 클릭을 잃지 않는다.
-                    if (leaf_rect.x > parent.editor.x or self.dock.side == .right) seam_edges |= 1;
-                    // 우측 seam(project-tree divider)은 **의도적 유지**다. divider를 웹뷰 쪽에서 잡으려면 이 통과가
-                    // 필요하고, 그 대가로 웹뷰 오른쪽 ~grab band(스크롤바 마지막 폭)가 리사이즈에 먹힌다 — 문서 §5의
-                    // "WKWebView 위 divider grab" 알려진 트레이드오프이며, 시각 gap 없이 붙이는 쪽(A)을 택했다
-                    // (code-review max #3, 사용자 결정 2026-07-18). 스크롤바 정확 클릭을 살리려면 웹뷰를 grab band만큼
-                    // 들여 네이티브 gap을 두고 이 비트를 끄는 B안으로 전환한다.
-                    if (leaf_rect.x + leaf_rect.w < parent.editor.x + parent.editor.w or parent.tree_divider.w > 0) seam_edges |= 2;
-                    if (leaf_rect.y + leaf_rect.h < parent.editor.y + parent.editor.h) seam_edges |= 4;
-                }
-                var grab_bands: web_panel_layout.DividerGrabBandsPt = .{};
-                const hit_slop = self.dockDividerGrabBandPx();
-                if ((seam_edges & 1) != 0) {
-                    const target = if (leaf_rect.x > parent.editor.x)
-                        dock_layout.groupDividerHitRectAt(.horizontal, leaf_rect, leaf_rect.x, hit_slop)
-                    else
-                        dock_layout.outerDividerHitRect(parent, .right, hit_slop);
-                    grab_bands.left = self.dividerBandPt(content_rect, dividerTargetRect(target), .left);
-                }
-                if ((seam_edges & 2) != 0) {
-                    const target = if (leaf_rect.x + leaf_rect.w < parent.editor.x + parent.editor.w)
-                        dock_layout.groupDividerHitRectAt(.horizontal, leaf_rect, leaf_rect.x +| leaf_rect.w, hit_slop)
-                    else
-                        dock_layout.treeDividerHitRect(parent, hit_slop);
-                    grab_bands.right = self.dividerBandPt(content_rect, dividerTargetRect(target), .right);
-                }
-                if ((seam_edges & 4) != 0) {
-                    const target = dock_layout.groupDividerHitRectAt(.vertical, leaf_rect, leaf_rect.y +| leaf_rect.h, hit_slop);
-                    grab_bands.bottom = self.dividerBandPt(content_rect, dividerTargetRect(target), .bottom);
-                }
-                for (group.entries.items, 0..) |entry, i| {
-                    if (entry.surface_id == 0) continue;
-                    try out.append(self.allocator, .{
-                        .surface_id = entry.surface_id,
-                        .panel_kind = switch (entry.kind) {
-                            // text·svg·image는 markdown과 같은 신뢰 config(maru-app:// 스킴·bridge). shell URL의 `?lang=`·
-                            // `?kind=svg|image`가 편집기/프리뷰 모드를 고른다(§2.2·§2.3). image(FP14)는 readSelfImage로
-                            // 자기 바이너리를 읽어 panzoom 표시. html·pdf는 격리 loadFileURL browser config다(비신뢰, filePanelKind=2).
-                            .markdown, .text, .svg, .image => .markdown,
-                            .html, .pdf => .browser,
-                        },
-                        .seam_edges = seam_edges,
-                        .divider_grab_bands_pt = if (self.dividerThicknessPx() != 0) grab_bands else .{},
-                        .content_rect = content_rect,
-                        .visible = self.dockVisible() and group.active != null and group.active.? == i,
-                    });
-                }
-            }
-        }
+        // FP16: 도크는 **탐색기 전용**이라 WKWebView를 하나도 소유하지 않는다(트리는 전부 GPU 셀 chrome).
+        // 파일 surface는 위 pane walk가 낸다 — 옛 도크 분기와 그에 딸린 도크-aware destroy/presence 예외는 삭제했다.
+
         // Phase 7e-1a: 이번 tick 활성 탭 web surface 집합(out)에 없는 nav 상태 키를 제거한다 — surface 닫힘/이동/비활성
         // 탭 이동 시 소유 url 메모리가 세션 끝까지 새지 않게(id는 앱 전역 비재사용이라 stale 오인은 없으나 소유 자원은
         // 즉시 회수). 흔한 경우 stale 0이라 바깥 while은 1회(스캔서 못 찾으면 break). fetchRemove로 iterator 무효화 없이
@@ -19081,8 +18900,7 @@ pub const AppSession = struct {
             if (delta_x * self.tab_wheel_accum < 0) self.tab_wheel_accum = 0; // 방향 전환 시 잔여 버림(세로와 같은 규율)
             const cols = wheelDeltaToLines(&self.tab_wheel_accum, delta_x, precise, self.cell_width_px, self.scale_milli); // 셀 환산 범용 — 가로는 cell_width
             if (cols != 0) {
-                self.scrollTabBarAt(x_px, y_px, cols); // 커서 아래 터미널 pane 탭 바(있으면)
-                self.scrollDockTabBarAt(x_px, y_px, cols); // 커서 아래 도크 그룹 탭 바(있으면) — pane과 영역이 안 겹쳐 둘 중 하나만 매치
+                self.scrollTabBarAt(x_px, y_px, cols); // 커서 아래 터미널 pane 탭 바(있으면) // 커서 아래 도크 그룹 탭 바(있으면) — pane과 영역이 안 겹쳐 둘 중 하나만 매치
             }
         }
     }
@@ -19209,49 +19027,6 @@ pub const AppSession = struct {
             const mag: u32 = @intCast(@abs(cols));
             lr.leaf.tab_scroll_cols = if (cols > 0) eff -| mag else eff + mag; // cols>0(오른쪽 스와이프)→왼쪽 탭(감소), cols<0→오른쪽(증가, 렌더서 [0,max] clamp)
             self.metal_dirty = true;
-            return;
-        }
-    }
-
-    /// 가로 스와이프(delta_x→cols)를 커서 아래 도크 그룹의 탭 바 가로 스크롤로 바꾼다(scrollTabBarAt의 도크 대응).
-    /// 그 그룹이 탭 넘침(has_scroll)이 아니면 무동작. eff(=[0,max] clamp된 값) 기준이라 stale tab_scroll_cols가
-    /// 자동 정정된다. natural 방향은 터미널 탭 바와 동일(오른쪽 스와이프 cols>0 → 왼쪽 탭, scroll 감소).
-    fn scrollDockTabBarAt(self: *AppSession, x_px: f64, y_px: f64, cols: i32) void {
-        if (!self.refreshDockGroupLayout()) return;
-        const parent = self.dockGeometry();
-        for (self.dock_leaf_rects_scratch.items) |leaf| {
-            const geometry = dock_layout.groupGeometry(parent, leaf.rect);
-            if (!layout_math.pointInRect(x_px, y_px, geometry.tab_bar)) continue; // 커서가 이 그룹 탭 바일 때만
-            const group = leaf.leaf;
-            const metrics = dock_layout.tabMetrics(geometry, self.cell_width_px, group.entries.items.len) orelse return;
-            const ts = dock_layout.dockTabScroll(metrics.tab_cols, group.entries.items.len, group.tab_scroll_cols) orelse return;
-            if (!ts.has_scroll) return; // 탭이 안 넘침 — 가로 스크롤할 것 없음
-            const mag: u32 = @intCast(@abs(cols));
-            group.tab_scroll_cols = if (cols > 0) ts.eff_scroll -| mag else ts.eff_scroll + mag; // 렌더에서 [0,max] clamp
-            self.metal_dirty = true;
-            return;
-        }
-    }
-
-    /// 스크롤 밖 탭이 활성화되면(클릭·파일 열기) 그 탭이 보이게 tab_scroll_cols를 조정한다(ensureActiveTermVisible의
-    /// 도크 대응). 수동 스크롤을 되돌리지 않도록 렌더가 아니라 select 지점에서만 호출한다. 그룹 geometry가
-    /// 없거나(레이아웃 실패) 안 넘치면 무동작.
-    fn ensureActiveDockTabVisible(self: *AppSession, group: *dock_panel.DockGroup) void {
-        const active = group.active orelse return;
-        if (!self.refreshDockGroupLayout()) return;
-        const parent = self.dockGeometry();
-        for (self.dock_leaf_rects_scratch.items) |leaf| {
-            if (leaf.leaf != group) continue;
-            const geometry = dock_layout.groupGeometry(parent, leaf.rect);
-            const metrics = dock_layout.tabMetrics(geometry, self.cell_width_px, group.entries.items.len) orelse return;
-            const ts = dock_layout.dockTabScroll(metrics.tab_cols, group.entries.items.len, group.tab_scroll_cols) orelse return;
-            if (!ts.has_scroll) return; // 안 넘침 — 다 보임
-            const abs_start = @as(u32, @intCast(active)) * @as(u32, ts.tab_width);
-            if (abs_start < ts.eff_scroll) {
-                group.tab_scroll_cols = abs_start; // 좌단 잘림 → 좌단이 보이게
-            } else if (abs_start + ts.tab_width > ts.eff_scroll + metrics.tab_cols) {
-                group.tab_scroll_cols = abs_start + ts.tab_width - metrics.tab_cols; // 우단 잘림 → 우단이 보이게
-            }
             return;
         }
     }
@@ -19722,13 +19497,6 @@ pub const AppSession = struct {
             }
             return;
         }
-        // 파일 도크 탭 drag는 terminal tab/pane/sidebar/divider보다 먼저 자기 제스처를 캡처한다. snapshot 밖
-        // terminal/tree/outer-divider는 target=null이라 terminal↔dock 교차 이동 없이 up에서 취소된다.
-        if (self.pointerGestureIs(.dock_tab) and self.dock_initialized and (kind == 2 or kind == 3)) {
-            if (kind == 2) self.updateDockEntryDrag(x_px, y_px) else self.commitDockEntryDrag();
-            if (kind == 3) self.finishPointerGesture();
-            return;
-        }
         // Term 탭 드래그가 진행 중이면 drag(2)/up(3)을 캡처한다 — drag는 소스 pane 바 안에서 x로 타겟 탭을 잡아
         // live 재정렬(PR-E1: pane 내). up이 끝낸다. 새 down(1)은 아래 일반 처리로 흘려 새 드래그를 시작한다.
         if (self.pointerGestureIs(.terminal_tab) and (kind == 2 or kind == 3)) {
@@ -19924,70 +19692,6 @@ pub const AppSession = struct {
                     if (!self.file_tree.hasContent() and layout_math.pointInRect(x_px, y_px, dg.tree_content))
                         self.requestFilePanelPick();
                     return;
-                }
-                if (self.dockGroupDividerAtPoint(x_px, y_px)) |seg| {
-                    const offset_px = switch (seg.direction) {
-                        .horizontal => @as(f64, @floatFromInt(seg.pos)) - x_px,
-                        .vertical => @as(f64, @floatFromInt(seg.pos)) - y_px,
-                    };
-                    self.beginPointerGesture(.{ .dock_group_divider = .{ .split = seg.split, .seg = seg, .offset_px = offset_px } });
-                    self.mouse_drag_selecting = false;
-                    self.metal_dirty = true;
-                    return;
-                }
-                if (self.dockGroupAtPoint(x_px, y_px)) |hit| {
-                    const g = hit.geometry;
-                    const group = hit.group;
-                    if (dock_layout.tabCloseIndexAt(g, self.cell_width_px, group.entries.items.len, x_px, y_px, group.tab_scroll_cols)) |index| {
-                        if (index < group.entries.items.len) {
-                            const surface_id = group.entries.items[index].surface_id;
-                            if (surface_id != 0) {
-                                self.requestFilePanelClose(surface_id);
-                            } else if (group.remove(index)) |removed| {
-                                self.allocator.free(removed.path);
-                                self.hovered_file_panel_tab = null;
-                                self.normalizeEmptyDockGroups();
-                                self.file_tree_rows_dirty = true;
-                                self.refreshFileTreeWatchRoots() catch {};
-                                self.metal_dirty = true;
-                            }
-                        }
-                        return;
-                    }
-                    if (dock_layout.tabIndexAt(g, self.cell_width_px, group.entries.items.len, x_px, y_px, group.tab_scroll_cols)) |index| {
-                        if (index < group.entries.items.len) {
-                            self.armDockEntryDrag(group, group.entries.items[index].id, x_px, y_px);
-                            self.metal_dirty = true;
-                        }
-                        return;
-                    }
-                    if (layout_math.pointInRect(x_px, y_px, g.header)) {
-                        if (self.focusDockGroupActiveEntry(group)) |entry| {
-                            if (entry.external_change) if (dock_layout.headerConflictRect(g, self.cell_width_px, entry.dirty)) |conflict| {
-                                if (layout_math.pointInRect(x_px, y_px, conflict)) {
-                                    self.requestFileConflictReload(entry.surface_id);
-                                    return;
-                                }
-                            };
-                            if (dock_layout.headerModeAt(g, self.cell_width_px, entry.kind, entry.dirty, entry.external_change, x_px, y_px)) |requested_mode| {
-                                // headerModeAt는 modesForKind(kind)의 모드만 돌려주고 modesForKind ⊆ allowedFor(kind)라
-                                // requested_mode는 이미 kind에 허용된 모드다(§2.3). markdown·svg 모두 여기서 처리된다.
-                                if (entry.mode != requested_mode) {
-                                    self.markFilePanelDirtySyncPending(entry);
-                                    entry.mode = requested_mode;
-                                    self.file_panel_mode_pending = entry.surface_id;
-                                    self.metal_dirty = true;
-                                }
-                            }
-                        }
-                        return;
-                    }
-                    // 빈 group의 editor body와 native seam은 header와 같은 구조 focus funnel을 쓴다.
-                    // live WebView content는 AppKit이 직접 처리하므로 여기 도달하는 body click은 Metal 소유다.
-                    if (layout_math.pointInRect(x_px, y_px, g.content)) {
-                        _ = self.focusDockGroupActiveEntry(group);
-                        return;
-                    }
                 }
                 // tree header/빈 row, editor 본문의 WebView seam처럼 도크 안에서 Metal까지 내려온 클릭은 도크가 소비한다.
                 // 반대로 도크 밖(workspace)은 여기서 return하지 않고 아래 pane 주소창·탭·터미널 hit-test로 흘러야 한다.
@@ -22145,11 +21849,7 @@ pub const AppSession = struct {
         // pane에도 안 걸리면 null. 커서 종류(.link) 판정은 아래 탭 바 검사 뒤에서 이 값을 읽는다(밴드=탭 바보다 뒤 우선순위).
         self.setHoveredNavButton(self.navButtonHoverAt(x_px, y_px));
         self.setHoveredFileTreeRow(if (self.dockVisible()) self.fileTreeRowAt(x_px, y_px) else null);
-        var hovered_dock_tab: ?DockTabRef = null;
-        if (self.dockVisible()) if (self.dockGroupAtPoint(x_px, y_px)) |hit| {
-            if (dock_layout.tabIndexAt(hit.geometry, self.cell_width_px, hit.group.entries.items.len, x_px, y_px, hit.group.tab_scroll_cols)) |index|
-                hovered_dock_tab = .{ .group_id = hit.group.runtime_id, .tab = index };
-        };
+        const hovered_dock_tab: ?DockTabRef = null; // FP16: 도크에 파일 탭이 없다(탐색기 전용)
         self.setHoveredFilePanelTab(hovered_dock_tab);
         // 접힘 펼치기 토글(◧, 신호등 옆) 호버 — 접힘 시 사이드바 폭 0이라 아래 inSidebar(헤더 아이콘) 경로가 안 타고,
         // resize-edge가 x≈0을 잘못 잡을 수 있어 **먼저** 본다. 토글 위면 호버 배경을 켜고 pointingHand(클릭 가능).
@@ -22239,34 +21939,6 @@ pub const AppSession = struct {
                 self.setHoveredTab(null);
                 self.clearHoverUrlAnchor();
                 return if (self.fileTreeRowAt(x_px, y_px) != null) .link else .default;
-            }
-            if (self.dockGroupDividerAtPoint(x_px, y_px)) |seg| {
-                self.setHoveredTab(null);
-                self.clearHoverUrlAnchor();
-                return switch (seg.direction) {
-                    .horizontal => .resize_h,
-                    .vertical => .resize_v,
-                };
-            }
-            if (self.dockGroupAtPoint(x_px, y_px)) |hit| {
-                const group = hit.group;
-                const g = hit.geometry;
-                self.setHoveredTab(null);
-                self.clearHoverUrlAnchor();
-                if (dock_layout.tabIndexAt(g, self.cell_width_px, group.entries.items.len, x_px, y_px, group.tab_scroll_cols) != null) return .link;
-                if (layout_math.pointInRect(x_px, y_px, g.header)) {
-                    if (group.active) |index| if (index < group.entries.items.len and
-                        group.entries.items[index].external_change)
-                    {
-                        if (dock_layout.headerConflictRect(g, self.cell_width_px, group.entries.items[index].dirty)) |conflict|
-                            if (layout_math.pointInRect(x_px, y_px, conflict)) return .link;
-                    };
-                    if (group.active) |index| if (index < group.entries.items.len) {
-                        const entry = group.entries.items[index];
-                        if (dock_layout.headerModeAt(g, self.cell_width_px, entry.kind, entry.dirty, entry.external_change, x_px, y_px) != null) return .link;
-                    };
-                }
-                return .default;
             }
         }
         // 어느 pane의 탭 바 위면 호버 탭을 갱신(✕ 표시). 바 위면 URL/divider 아니므로 밑줄 해제하고 arrow.
@@ -45266,323 +44938,6 @@ test "FP9 focus toggle: empty notice and workspace-dock round trip use one confi
     try std.testing.expect(session.focus_owner == .file_tree);
 }
 
-test "FP9 dock tab drag: same-group reorder, dock-local split, and terminal-domain drop isolation" {
-    if (builtin.os.tag != .macos) return error.SkipZigTest;
-    const allocator = std.testing.allocator;
-    const session = try initSmokeSessionSized(allocator);
-    defer allocator.destroy(session);
-    defer session.deinit();
-    _ = try session.resize(1400, 900, 1000);
-    const group = session.dock.singleGroup().?;
-    _ = try session.dock.open(group, "/tmp/drag-title-abcdefghijklmnop.md", .markdown);
-    _ = try session.dock.open(group, "/tmp/b.md", .markdown);
-    session.assignDockSurfaceIds(&session.dock);
-    const a_id = group.entries.items[0].id;
-    const a_surface = group.entries.items[0].surface_id;
-    const b_id = group.entries.items[1].id;
-    // Baseline create를 drain한 뒤 preview/reorder/split의 FP9 귀속 transition만 계수한다.
-    try std.testing.expectEqual(@as(usize, 2), session.webSurfaceTransitionsCount());
-    try std.testing.expectEqual(@as(usize, 0), session.webSurfaceTransitionsCount());
-
-    try std.testing.expect(session.refreshDockGroupLayout());
-    const parent = session.dockGeometry();
-    var geometry = dock_layout.groupGeometry(parent, session.dock_leaf_rects_scratch.items[0].rect);
-    const first = dock_layout.tabRect(geometry, session.cell_width_px, 2, 0, 0).?;
-    // outer divider의 10pt WebView-side grab band를 피한 실제 tab chrome에서 시작한다.
-    const down_x: f64 = @floatFromInt(first.x + session.dockDividerGrabBandPx() + 2);
-    const down_y: f64 = @floatFromInt(first.y + first.h / 2);
-    try std.testing.expect(session.dockVisible());
-    try std.testing.expect(!session.anyOverlayOpen());
-    try std.testing.expect(session.dockGroupAtPoint(down_x, down_y) != null);
-    try std.testing.expect(!session.dockDividerAtPoint(down_x, down_y));
-    try std.testing.expect(!session.dockTreeDividerAtPoint(parent, down_x, down_y));
-    try std.testing.expect(session.fileTreeRowAt(down_x, down_y) == null);
-    try std.testing.expect(!layout_math.pointInRect(down_x, down_y, parent.tree));
-    try std.testing.expect(session.dockGroupDividerAtPoint(down_x, down_y) == null);
-    try std.testing.expectEqual(@as(?usize, null), dock_layout.tabCloseIndexAt(geometry, session.cell_width_px, 2, down_x, down_y, 0));
-    try std.testing.expectEqual(@as(?usize, 0), dock_layout.tabIndexAt(geometry, session.cell_width_px, 2, down_x, down_y, 0));
-    session.mouse(1, down_x, down_y, 0, 0);
-    try std.testing.expect(session.dockDragSessionConst() != null and !session.dockDragIsDragging());
-    try std.testing.expect(session.dock_drag_title_frame != null);
-    try std.testing.expectEqual(@as(u16, 24), session.dock_drag_title_cols);
-    try std.testing.expect(session.dock_drag_title_frame.?.draw_list.cells.len <= 24);
-    var cached_title_has_ink = false;
-    for (session.dock_drag_title_frame.?.draw_list.cells) |cell| cached_title_has_ink = cached_title_has_ink or cell.codepoint == 'd';
-    try std.testing.expect(cached_title_has_ink);
-    const cached_native = try metal_frame.buildNativeCellsFromGlyphQuads(
-        allocator,
-        session.dock_drag_title_frame.?.glyph_quad_frame,
-        session.dock_drag_title_frame.?.draw_list.cells,
-        .{ .default_fg = session.appearance.theme.foreground, .default_bg = session.appearance.theme.sidebar_active },
-    );
-    defer allocator.free(cached_native);
-    try std.testing.expect(cached_native.len <= 24);
-    for (cached_native) |cell| try std.testing.expectEqual(@as(u32, 0), cell.background);
-    try std.testing.expectEqual(@as(?usize, 1), group.active); // background tab mouse-down은 click activation 전이다.
-    try std.testing.expect(session.focus_owner == .workspace);
-    // 마지막 탭 우측 절반 = reorder-to-end(boundary=entry_count). 탭이 고정폭이라 좁은 도크에선 2탭이 넘쳐(오버플로우)
-    // 탭 바 폭 < 2*tab_width가 될 수 있어, first.x+tab_width*2는 바를 벗어난다. 항상 바 안쪽인 우측 끝 픽셀을 쓴다
-    // (스크롤 0이라 화면 좌표=절대 좌표 → tabBoundary가 마지막 탭 중점을 넘겨 boundary=2를 준다).
-    const after_last_x: f64 = @floatFromInt(geometry.tab_bar.x + geometry.tab_bar.w - 2);
-    session.window_padding_px = .{ .left = 9, .right = 13, .top = 5, .bottom = 7 };
-    const workspace_geometry = session.paneGeometry(session.termRect());
-    try std.testing.expect(workspace_geometry.body.x < workspace_geometry.grid.x);
-    try std.testing.expect(workspace_geometry.body.y < workspace_geometry.grid.y);
-    // padding 설정 변경은 보이는 WebView frame을 한 번 reframe한다. 이 정당한 layout 전이를 먼저 drain해야 아래
-    // drag-preview transition 0 불변식을 설정 변경과 섞지 않는다(숨은 entry는 다음 show 때 최신 rect를 받음).
-    try std.testing.expectEqual(@as(usize, 1), session.webSurfaceTransitionsCount());
-    try std.testing.expectEqual(@as(usize, 0), session.webSurfaceTransitionsCount());
-
-    // FP9-PERF: warm capacity 뒤 1,000회 pointer move/projected overlay는 allocator를 한 번도 부르지 않고,
-    // drop zone 1 + focus border 4의 geometry quad 상한을 지킨다. FS/lock/thread API는 이 순수 경로에 없다.
-    var counting = std.testing.FailingAllocator.init(allocator, .{});
-    session.allocator = counting.allocator();
-    var max_layer_one_quads: usize = 0;
-    var max_floating_box_quads: usize = 0;
-    for (0..1000) |_| {
-        session.updateDockEntryDrag(after_last_x, down_y);
-        session.dropQuadsByLayer(1);
-        session.drag_overlay_cells_scratch.clearRetainingCapacity();
-        session.appendDockDragOverlay(&session.drag_overlay_cells_scratch);
-        session.appendFocusOwnerBorder(&session.drag_overlay_cells_scratch, workspace_geometry.body);
-        var layer_one_quads: usize = 0;
-        var floating_box_quads: usize = 0;
-        for (session.gpu_quads.items) |quad| {
-            layer_one_quads += @intFromBool(quad.layer == 1);
-            floating_box_quads += @intFromBool(quad.layer == 1 and
-                quad.w == @as(f32, @floatFromInt(@as(u32, session.dock_drag_title_cols) * session.cell_width_px)) and
-                quad.h == @as(f32, @floatFromInt(session.cell_height_px)) and
-                quad.fill_color0 == session.chromeQuadBg(session.sidebarActiveBg()));
-        }
-        max_layer_one_quads = @max(max_layer_one_quads, layer_one_quads);
-        max_floating_box_quads = @max(max_floating_box_quads, floating_box_quads);
-        try std.testing.expectEqual(@as(usize, 1), floating_box_quads);
-    }
-    session.allocator = allocator;
-    try std.testing.expectEqual(@as(usize, 0), counting.allocations);
-    try std.testing.expect(!counting.has_induced_failure);
-    try std.testing.expectEqual(@as(usize, 1), max_floating_box_quads);
-    try std.testing.expect(max_layer_one_quads <= 6); // drop 1 + focus border 4 + floating box 1
-
-    session.mouse(2, after_last_x, down_y, 0, 0);
-    try std.testing.expect(session.dockDragIsDragging());
-    try std.testing.expect(session.dockDragTitlePaneFrame() != null);
-    const preview = session.dockDragSessionConst().?.target.?;
-    try std.testing.expectEqual(@as(usize, 0), session.webSurfaceTransitionsCount()); // preview는 native transition 0
-    session.mouse(3, after_last_x, down_y, 0, 0);
-    try std.testing.expect(session.dockDragSessionConst() == null);
-    try std.testing.expectEqual(b_id, group.entries.items[0].id);
-    try std.testing.expectEqual(a_id, group.entries.items[1].id);
-    try std.testing.expectEqual(@as(?usize, 0), group.active); // 기존 active B identity가 reorder 뒤 보존된다.
-    try std.testing.expect(session.focus_owner == .workspace);
-    try std.testing.expectEqual(a_surface, group.entries.items[1].surface_id); // WKWebView identity preserved
-    try std.testing.expectEqual(@as(u64, group.runtime_id), preview.group_id);
-    try std.testing.expectEqual(@as(usize, 0), session.webSurfaceTransitionsCount()); // 같은-group reorder 0
-
-    // reordered A tab을 같은 leaf의 왼쪽 X-zone에 drop하면 새 left group을 만들고 source leaf는 유지한다.
-    geometry = dock_layout.groupGeometry(parent, session.dock_leaf_rects_scratch.items[0].rect);
-    const a_tab = dock_layout.tabRect(geometry, session.cell_width_px, 2, 1, 0).?;
-    session.mouse(1, @floatFromInt(a_tab.x + session.dockDividerGrabBandPx() + 2), @floatFromInt(a_tab.y + a_tab.h / 2), 0, 0);
-    const split_x: f64 = @floatFromInt(geometry.content.x + 2);
-    const split_y: f64 = @floatFromInt(geometry.content.y + geometry.content.h / 2);
-    session.mouse(2, split_x, split_y, 0, 0);
-    try std.testing.expectEqual(dock_panel.DockDropEdge.left, session.dockDragSessionConst().?.target.?.drop.split);
-    session.mouse(3, split_x, split_y, 0, 0);
-    try std.testing.expectEqual(@as(usize, 2), session.dock.groupCount());
-    try std.testing.expectEqual(@as(usize, 1), group.entries.items.len);
-    try std.testing.expectEqual(b_id, group.entries.items[0].id);
-    try std.testing.expectEqual(a_surface, session.dock.entryLocation(a_id).?.group.entries.items[0].surface_id);
-    var split_reframe: usize = 0;
-    var split_show: usize = 0;
-    var split_hide: usize = 0;
-    var split_create: usize = 0;
-    var split_destroy: usize = 0;
-    const split_transition_count = session.webSurfaceTransitionsCount();
-    for (0..split_transition_count) |transition_index| switch (session.webSurfaceTransitionAt(transition_index).op) {
-        .reframe => split_reframe += 1,
-        .show => split_show += 1,
-        .hide => split_hide += 1,
-        .create => split_create += 1,
-        .destroy => split_destroy += 1,
-        .none => {},
-    };
-    try std.testing.expect(split_reframe <= 2);
-    try std.testing.expect(split_show <= 1);
-    try std.testing.expectEqual(@as(usize, 0), split_hide);
-    try std.testing.expectEqual(@as(usize, 0), split_create);
-    try std.testing.expectEqual(@as(usize, 0), split_destroy);
-
-    // live entry를 기존 다른 group의 tab bar로 이동하는 별도 transition artifact.
-    try std.testing.expect(session.refreshDockGroupLayout());
-    const live_b_location = session.dock.entryLocation(b_id).?;
-    const live_a_location = session.dock.entryLocation(a_id).?;
-    var live_b_geometry: ?dock_layout.Geometry = null;
-    var live_a_geometry: ?dock_layout.Geometry = null;
-    for (session.dock_leaf_rects_scratch.items) |leaf| {
-        const gg = dock_layout.groupGeometry(session.dockGeometry(), leaf.rect);
-        if (leaf.leaf == live_b_location.group) live_b_geometry = gg;
-        if (leaf.leaf == live_a_location.group) live_a_geometry = gg;
-    }
-    const live_b_tab = dock_layout.tabRect(live_b_geometry.?, session.cell_width_px, 1, 0, 0).?;
-    const live_destination_tab = live_a_geometry.?.tab_bar;
-    session.mouse(1, @floatFromInt(live_b_tab.x + session.dockDividerGrabBandPx() + 2), @floatFromInt(live_b_tab.y + live_b_tab.h / 2), 0, 0);
-    session.mouse(2, @floatFromInt(live_destination_tab.x + live_destination_tab.w / 2), @floatFromInt(live_destination_tab.y + live_destination_tab.h / 2), 0, 0);
-    session.mouse(3, @floatFromInt(live_destination_tab.x + live_destination_tab.w / 2), @floatFromInt(live_destination_tab.y + live_destination_tab.h / 2), 0, 0);
-    var move_reframe: usize = 0;
-    var move_show_hide: usize = 0;
-    var move_create: usize = 0;
-    var move_destroy: usize = 0;
-    const move_transition_count = session.webSurfaceTransitionsCount();
-    for (0..move_transition_count) |transition_index| switch (session.webSurfaceTransitionAt(transition_index).op) {
-        .reframe => move_reframe += 1,
-        .show, .hide => move_show_hide += 1,
-        .create => move_create += 1,
-        .destroy => move_destroy += 1,
-        .none => {},
-    };
-    try std.testing.expect(move_reframe <= 1);
-    try std.testing.expect(move_show_hide <= 2);
-    try std.testing.expectEqual(@as(usize, 0), move_create);
-    try std.testing.expectEqual(@as(usize, 0), move_destroy);
-
-    // 마지막 source entry 이동은 빈 leaf를 접었다. 다음 cross-domain/lazy artifact를 위해 현재 두 entry를
-    // content-bearing 두 leaf로 다시 나눈다(옛 empty split setup을 쓰지 않는다).
-    try std.testing.expectEqual(@as(usize, 1), session.dock.groupCount());
-    const combined = session.dock.entryLocation(a_id).?.group;
-    const setup_split = try session.dock.commitEntryDrop(a_id, combined.runtime_id, .{ .split = .left });
-    try std.testing.expect(setup_split.changed);
-    session.advanceDockLayoutGeneration();
-    _ = session.webSurfaceTransitionsCount();
-
-    // 새 active A tab을 terminal rect로 끌면 typed dock target이 null이고 model 순서/그룹 수가 그대로다.
-    const a_location = session.dock.entryLocation(a_id).?;
-    try std.testing.expect(session.refreshDockGroupLayout());
-    var a_geometry: ?dock_layout.Geometry = null;
-    for (session.dock_leaf_rects_scratch.items) |leaf| {
-        if (leaf.leaf == a_location.group) a_geometry = dock_layout.groupGeometry(session.dockGeometry(), leaf.rect);
-    }
-    const a_only = dock_layout.tabRect(a_geometry.?, session.cell_width_px, 1, 0, 0).?;
-    session.mouse(1, @floatFromInt(a_only.x + session.dockDividerGrabBandPx() + 2), @floatFromInt(a_only.y + a_only.h / 2), 0, 0);
-    const terminal_rect = session.termRect();
-    const terminal_x: f64 = @floatFromInt(terminal_rect.x + terminal_rect.w / 2);
-    const terminal_y: f64 = @floatFromInt(terminal_rect.y + terminal_rect.h / 2);
-    session.mouse(2, terminal_x, terminal_y, 0, 0);
-    try std.testing.expect(session.dockDragSessionConst().?.target == null);
-    session.mouse(3, terminal_x, terminal_y, 0, 0);
-    try std.testing.expectEqual(@as(usize, 2), session.dock.groupCount());
-    try std.testing.expect(session.dock.entryLocation(a_id) != null);
-    try std.testing.expect(session.dock.entryLocation(b_id) != null);
-
-    // 이미 evicted(surface_id=0)된 clean entry를 다른 group 탭 바로 옮기면 lazy create는 최대 1회이고
-    // native create/focus ack 전까지 Zig FocusOwner는 destination dock_group에서 fail-closed한다.
-    const b_location_before = session.dock.entryLocation(b_id).?;
-    b_location_before.group.entries.items[b_location_before.index].surface_id = 0;
-    _ = session.webSurfaceTransitionsCount(); // 기존 live surface의 eviction destroy를 baseline으로 drain.
-    try std.testing.expectEqual(@as(usize, 0), session.webSurfaceTransitionsCount());
-    try std.testing.expect(session.refreshDockGroupLayout());
-    var b_geometry: ?dock_layout.Geometry = null;
-    var destination_geometry: ?dock_layout.Geometry = null;
-    for (session.dock_leaf_rects_scratch.items) |leaf| {
-        const gg = dock_layout.groupGeometry(session.dockGeometry(), leaf.rect);
-        if (leaf.leaf == b_location_before.group) b_geometry = gg else destination_geometry = gg;
-    }
-    const b_tab = dock_layout.tabRect(
-        b_geometry.?,
-        session.cell_width_px,
-        b_location_before.group.entries.items.len,
-        b_location_before.index,
-        0,
-    ).?;
-    session.mouse(1, @floatFromInt(b_tab.x + session.dockDividerGrabBandPx() + 2), @floatFromInt(b_tab.y + b_tab.h / 2), 0, 0);
-    try std.testing.expectEqual(@as(u16, 8), session.dock_drag_title_cols);
-    const short_title_native = try metal_frame.buildNativeCellsFromGlyphQuads(
-        allocator,
-        session.dock_drag_title_frame.?.glyph_quad_frame,
-        session.dock_drag_title_frame.?.draw_list.cells,
-        .{ .default_fg = session.appearance.theme.foreground, .default_bg = session.appearance.theme.sidebar_active },
-    );
-    defer allocator.free(short_title_native);
-    try std.testing.expect(short_title_native.len <= 8);
-    for (short_title_native) |cell| try std.testing.expectEqual(@as(u32, 0), cell.background);
-    const destination_tab = destination_geometry.?.tab_bar;
-    session.mouse(2, @floatFromInt(destination_tab.x + destination_tab.w / 2), @floatFromInt(destination_tab.y + destination_tab.h / 2), 0, 0);
-    session.mouse(3, @floatFromInt(destination_tab.x + destination_tab.w / 2), @floatFromInt(destination_tab.y + destination_tab.h / 2), 0, 0);
-    const lazy_pending_group = session.dock.entryLocation(b_id).?.group;
-    try std.testing.expect(session.focus_owner == .dock_group and session.focus_owner.dock_group == lazy_pending_group.runtime_id);
-    var lazy_create: usize = 0;
-    var lazy_destroy: usize = 0;
-    const lazy_transition_count = session.webSurfaceTransitionsCount();
-    for (0..lazy_transition_count) |transition_index| switch (session.webSurfaceTransitionAt(transition_index).op) {
-        .create => lazy_create += 1,
-        .destroy => lazy_destroy += 1,
-        else => {},
-    };
-    try std.testing.expectEqual(@as(usize, 1), lazy_create);
-    try std.testing.expectEqual(@as(usize, 0), lazy_destroy);
-    const lazy_location = session.dock.entryLocation(b_id).?;
-    const lazy_entry = &lazy_location.group.entries.items[lazy_location.index];
-    const lazy_surface = lazy_entry.surface_id;
-    try std.testing.expect(lazy_surface != 0);
-    try std.testing.expect(session.pending_dock_focus != null);
-    try std.testing.expectEqual(b_id, session.pending_dock_focus.?.entry_id);
-    const terminal_input_before_lazy_ack = session.total_terminal_input_events;
-    const active_terminal_before_lazy_ack = session.activeSurface().id;
-    _ = try session.handleKeyEvent(.{ .key = .{ .char = 'x' } });
-    try std.testing.expectEqual(terminal_input_before_lazy_ack, session.total_terminal_input_events);
-    session.dispatchAppAction(.close_focused);
-    try std.testing.expect(session.dock.entryLocation(b_id) != null);
-    try std.testing.expectEqual(active_terminal_before_lazy_ack, session.activeSurface().id);
-    try std.testing.expect(session.completePendingDockFocus(lazy_surface));
-    try std.testing.expect(session.pending_dock_focus == null);
-    try std.testing.expect(session.focus_owner == .dock_surface and session.focus_owner.dock_surface == lazy_surface);
-
-    // A direct click on another already-live WKWebView is a newer intent than the delayed focus token.
-    // The ordinary native-focus path must cancel A before a late programmatic completion arrives.
-    const live_a = session.dock.entryLocation(a_id).?.group.entries.items[session.dock.entryLocation(a_id).?.index].surface_id;
-    // Focus retry와 mode refresh는 ABI에서도 독립 queue다. 아직 publish되지 않은 B focus action을
-    // Swift가 retained한 사이 A mode-only가 와도 B token/action identity는 덮이지 않는다.
-    session.queuePendingDockFocus(lazy_entry);
-    try std.testing.expectEqual(lazy_surface, session.takePendingDockFocusAction().?);
-    session.file_panel_mode_pending = live_a;
-    const independent_mode = session.takeFilePanelModeAction().?;
-    try std.testing.expectEqual(live_a, independent_mode.surface_id);
-    try std.testing.expect(session.pending_dock_focus != null);
-    try std.testing.expect(session.completePendingDockFocus(lazy_surface));
-
-    session.queuePendingDockFocus(lazy_entry);
-    try std.testing.expect(session.focusFilePanelSurface(live_a));
-    try std.testing.expect(session.pending_dock_focus == null);
-    try std.testing.expect(!session.completePendingDockFocus(lazy_surface));
-    try std.testing.expect(session.focus_owner == .dock_surface and session.focus_owner.dock_surface == live_a);
-
-    // A newer structural focus intent wins over a late native responder callback. Because the
-    // programmatic completion has a distinct ABI, clearing the token cannot turn the callback into
-    // an ordinary WKWebView click.
-    session.queuePendingDockFocus(lazy_entry);
-    session.focusFileTree();
-    try std.testing.expect(session.pending_dock_focus == null);
-    try std.testing.expect(!session.pending_dock_focus_action);
-    try std.testing.expect(!session.completePendingDockFocus(lazy_surface));
-    try std.testing.expect(session.focus_owner == .file_tree);
-
-    // Whole-model barriers make an otherwise matching token permanently stale.
-    session.queuePendingDockFocus(lazy_entry);
-    const old_epoch = session.pending_dock_focus.?.dock_async_epoch;
-    session.advanceDockAsyncEpoch();
-    try std.testing.expect(session.dock_async_epoch > old_epoch);
-    try std.testing.expect(!session.completePendingDockFocus(lazy_surface));
-
-    // backing이 한 픽셀만 바뀌어 terminal grid가 같아도 dock geometry generation은 올라가고 preview를 즉시 지운다.
-    const latest_a = session.dock.entryLocation(a_id).?;
-    session.armDockEntryDrag(latest_a.group, a_id, @floatFromInt(a_only.x + 20), @floatFromInt(a_only.y + 5));
-    session.updateDockEntryDrag(@floatFromInt(a_only.x + 40), @floatFromInt(a_only.y + 5));
-    try std.testing.expect(session.dockDragSessionConst() != null);
-    const generation_before_resize = session.dock_layout_generation;
-    _ = try session.resize(session.backing_width_px + 1, session.backing_height_px, session.scale_milli);
-    try std.testing.expect(session.dockDragSessionConst() == null);
-    try std.testing.expect(session.dock_layout_generation > generation_before_resize);
-}
-
 test "FP9 surface-less close successor blocks PTY and terminal close until native focus ack" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
@@ -45903,89 +45258,6 @@ test "close_focused uses the actual Metal or WebView key source across a stale o
     try std.testing.expect(session.pending_dock_focus == null);
 }
 
-test "FP9 performance artifact: 64 groups and 256 entries keep projected drag bounded" {
-    if (builtin.os.tag != .macos) return error.SkipZigTest;
-    const allocator = std.testing.allocator;
-    const session = try initSmokeSessionSized(allocator);
-    defer allocator.destroy(session);
-    defer session.deinit();
-
-    var group = session.dock.singleGroup().?;
-    var last_entry_id: dock_panel.EntryId = 0;
-    for (0..dock_panel.max_groups) |group_index| {
-        var first_entry: usize = 0;
-        if (group_index != 0) {
-            var seed_path_buf: [96]u8 = undefined;
-            const seed_path = try std.fmt.bufPrint(&seed_path_buf, "/tmp/fp9-perf-{d}-0.md", .{group_index});
-            const seed = try session.dock.open(group, seed_path, .markdown);
-            const seed_id = seed.group.entries.items[seed.index].id;
-            _ = try session.dock.commitEntryDrop(seed_id, group.runtime_id, .{ .split = .right });
-            group = session.dock.entryLocation(seed_id).?.group;
-            last_entry_id = seed_id;
-            first_entry = 1;
-        }
-        for (first_entry..4) |entry_index| {
-            var path_buf: [96]u8 = undefined;
-            const path = try std.fmt.bufPrint(&path_buf, "/tmp/fp9-perf-{d}-{d}.md", .{ group_index, entry_index });
-            const opened = try session.dock.open(group, path, .markdown);
-            last_entry_id = opened.group.entries.items[opened.index].id;
-        }
-    }
-    try std.testing.expectEqual(dock_panel.max_groups, session.dock.groupCount());
-    try std.testing.expectEqual(dock_panel.max_entries, session.dock.entryCountTotal());
-    _ = try session.resize(6400, 1200, 1000);
-
-    var entry_counters: dock_panel.DockPanel.EntryLookupCounters = .{};
-    try std.testing.expect(session.fileEntryForIdCounted(last_entry_id, &entry_counters) != null);
-    try std.testing.expect(entry_counters.entry_visits <= dock_panel.max_entries);
-
-    session.armDockEntryDrag(group, last_entry_id, 0, 0);
-    try std.testing.expect(session.dockDragSessionConst() != null);
-    var leaf_counters: dock_drag.ScanCounters = .{};
-    _ = dock_drag.targetAtCounted(session.dock_drag_leaves[0..session.dock_drag_leaves_len], -100, -100, &leaf_counters);
-    try std.testing.expect(leaf_counters.leaf_visits <= dock_panel.max_groups);
-    const layout_builds_after_arm = session.dock_layout_build_count;
-    const workspace_body = session.paneGeometry(session.termRect()).body;
-
-    var counting = std.testing.FailingAllocator.init(allocator, .{});
-    session.allocator = counting.allocator();
-    var max_geometry: usize = 0;
-    var total_geometry: usize = 0;
-    var total_entry_visits: usize = 0;
-    var max_entry_visits: usize = 0;
-    var total_leaf_visits: usize = 0;
-    var max_leaf_visits: usize = 0;
-    for (0..1000) |_| {
-        var event_entries: dock_panel.DockPanel.EntryLookupCounters = .{};
-        var event_leaves: dock_drag.ScanCounters = .{};
-        session.updateDockEntryDragCounted(-100, -100, &event_entries, &event_leaves);
-        total_entry_visits += event_entries.entry_visits;
-        max_entry_visits = @max(max_entry_visits, event_entries.entry_visits);
-        total_leaf_visits += event_leaves.leaf_visits;
-        max_leaf_visits = @max(max_leaf_visits, event_leaves.leaf_visits);
-        try std.testing.expect(session.refreshDockGroupLayout());
-        session.dropQuadsByLayer(1);
-        session.drag_overlay_cells_scratch.clearRetainingCapacity();
-        session.appendDockDragOverlay(&session.drag_overlay_cells_scratch);
-        session.appendFocusOwnerBorder(&session.drag_overlay_cells_scratch, workspace_body);
-        var layer_one_quads: usize = 0;
-        for (session.gpu_quads.items) |quad| layer_one_quads += @intFromBool(quad.layer == 1);
-        const geometry_count = layer_one_quads + session.drag_overlay_cells_scratch.items.len;
-        total_geometry += geometry_count;
-        max_geometry = @max(max_geometry, geometry_count);
-    }
-    session.allocator = allocator;
-    try std.testing.expectEqual(@as(usize, 0), counting.allocations);
-    try std.testing.expect(!counting.has_induced_failure);
-    try std.testing.expectEqual(layout_builds_after_arm, session.dock_layout_build_count);
-    try std.testing.expect(total_entry_visits <= 1000 * dock_panel.max_entries);
-    try std.testing.expect(max_entry_visits <= dock_panel.max_entries);
-    try std.testing.expect(total_leaf_visits <= 1000 * dock_panel.max_groups);
-    try std.testing.expect(max_leaf_visits <= dock_panel.max_groups);
-    try std.testing.expect(total_geometry <= 10_000);
-    try std.testing.expect(max_geometry <= 10);
-}
-
 test "file tree bulk delete visits entries and action queues once without model allocation" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
@@ -46060,28 +45332,6 @@ test "file tree bulk delete visits entries and action queues once without model 
     try std.testing.expectEqual(@as(usize, 1), session.dock.groupCount());
     try std.testing.expectEqual(survivor_sid, session.dock.singleGroup().?.entries.items[0].surface_id);
     try std.testing.expect(session.focus_owner == .workspace);
-}
-
-test "FP9 pointer gesture owner cancels a lost terminal mouse-up before dock arm and on blur" {
-    if (builtin.os.tag != .macos) return error.SkipZigTest;
-    const allocator = std.testing.allocator;
-    const session = try initSmokeSessionSized(allocator);
-    defer allocator.destroy(session);
-    defer session.deinit();
-    _ = try session.resize(1400, 900, 1000);
-    const group = session.dock.singleGroup().?;
-    const opened = try session.dock.open(group, "/tmp/fp9-owner.md", .markdown);
-
-    session.pointer_gesture_owner = .{ .terminal_tab = .{ .pane = session.activePane(), .index = 0 } };
-    session.armDockEntryDrag(group, opened.group.entries.items[opened.index].id, 10, 10);
-    try std.testing.expect(!session.pointerGestureIs(.terminal_tab));
-    try std.testing.expect(!session.pointerGestureIs(.terminal_tab));
-    try std.testing.expect(session.pointerGestureIs(.dock_tab));
-    try std.testing.expect(session.dockDragSessionConst() != null);
-
-    session.focusChanged(false);
-    try std.testing.expect(session.pointerGestureIs(.none));
-    try std.testing.expect(session.dockDragSessionConst() == null);
 }
 
 test "FP9 source teardown cancels index and implicit-surface pointer payloads before late events" {
@@ -46354,110 +45604,6 @@ test "FP3 파일 도크: right/bottom 기하·surface diff 소스·presence·hit
     try std.testing.expectEqual(session.dock.tree_size, win.dock.tree_size);
     try std.testing.expectEqual(@as(usize, 2), win.dock.entries.len);
     try std.testing.expect(win.dock.entries[1].active);
-}
-
-test "FP8 file panel groups render simultaneously drag divider persist tree and close dirty-safe" {
-    if (builtin.os.tag != .macos) return error.SkipZigTest;
-    const allocator = std.testing.allocator;
-    const session = try initSmokeSessionSized(allocator);
-    defer allocator.destroy(session);
-    defer session.deinit();
-
-    const first = session.dock.singleGroup().?;
-    _ = try session.dock.open(first, "/tmp/fp8-a.md", .markdown);
-    _ = try session.dock.open(first, "/tmp/fp8-b.html", .html);
-    session.assignDockSurfaceIds(&session.dock);
-    session.dispatchAppAction(.split_file_panel_horizontal);
-    try std.testing.expectEqual(@as(usize, 2), session.dock.groupCount());
-    const second = session.dock.focusedGroup();
-    try std.testing.expect(second != first);
-
-    try std.testing.expect(session.refreshDockGroupLayout());
-    try std.testing.expectEqual(@as(usize, 2), session.dock_leaf_rects_scratch.items.len);
-    try std.testing.expectEqual(@as(usize, 1), session.dock_dividers_scratch.items.len);
-    const parent = session.dockGeometry();
-    const left_g = dock_layout.groupGeometry(parent, session.dock_leaf_rects_scratch.items[0].rect);
-    const right_g = dock_layout.groupGeometry(parent, session.dock_leaf_rects_scratch.items[1].rect);
-    try std.testing.expectEqual(left_g.dock.x + left_g.dock.w, right_g.dock.x);
-    try std.testing.expectEqual(left_g.header.y + left_g.header.h, left_g.content.y);
-
-    var surfaces: std.ArrayList(web_panel_layout.SurfaceLayout) = .empty;
-    defer surfaces.deinit(allocator);
-    try session.collectWebSurfaces(&surfaces);
-    try std.testing.expectEqual(@as(usize, 2), surfaces.items.len);
-    try std.testing.expect(surfaces.items[0].visible and surfaces.items[1].visible);
-    try std.testing.expectEqual(layout_math.insetRect(left_g.content, session.window_padding_px), surfaces.items[0].content_rect);
-    try std.testing.expectEqual(layout_math.insetRect(right_g.content, session.window_padding_px), surfaces.items[1].content_rect);
-    try std.testing.expectEqual(@as(u8, 3), surfaces.items[0].seam_edges); // outer-left + internal-right divider
-    try std.testing.expectEqual(@as(u8, 3), surfaces.items[1].seam_edges); // internal-left + project-tree-right divider
-    const band_scale: f64 = @as(f64, @floatFromInt(session.scale_milli)) / 1000.0;
-    const left_surface = surfaces.items[0];
-    const right_surface = surfaces.items[1];
-    const internal_from_left_px = left_surface.divider_grab_bands_pt.right * band_scale;
-    const internal_from_right_px = right_surface.divider_grab_bands_pt.left * band_scale;
-    try std.testing.expect(internal_from_left_px > 0 and internal_from_right_px > 0);
-    try std.testing.expect(session.dockGroupDividerAtPoint(
-        @as(f64, @floatFromInt(left_surface.content_rect.x + left_surface.content_rect.w)) - internal_from_left_px / 2,
-        @floatFromInt(left_surface.content_rect.y + left_surface.content_rect.h / 2),
-    ) != null);
-    try std.testing.expect(session.dockGroupDividerAtPoint(
-        @as(f64, @floatFromInt(right_surface.content_rect.x)) + internal_from_right_px / 2,
-        @floatFromInt(right_surface.content_rect.y + right_surface.content_rect.h / 2),
-    ) != null);
-    const tree_band_px = right_surface.divider_grab_bands_pt.right * band_scale;
-    try std.testing.expect(tree_band_px > 0);
-    try std.testing.expect(session.dockTreeDividerAtPoint(
-        parent,
-        @as(f64, @floatFromInt(right_surface.content_rect.x + right_surface.content_rect.w)) - tree_band_px / 2,
-        @floatFromInt(right_surface.content_rect.y + right_surface.content_rect.h / 2),
-    ));
-    try std.testing.expect(session.focusFilePanelSurface(first.entries.items[0].surface_id));
-    try std.testing.expectEqual(first, session.dock.focusedGroup());
-    try std.testing.expect(session.focusFilePanelSurface(second.entries.items[0].surface_id));
-    try std.testing.expectEqual(second, session.dock.focusedGroup());
-
-    const divider = session.dock_dividers_scratch.items[0];
-    const y: f64 = @floatFromInt(divider.bounds.y + divider.bounds.h / 2);
-    const grab_x = @as(f64, @floatFromInt(divider.pos)) + 3;
-    session.mouse(1, grab_x, y, 0, 0);
-    try std.testing.expect(session.pointerGestureIs(.dock_group_divider));
-    session.mouse(2, grab_x, y, 0, 0);
-    try std.testing.expectApproxEqAbs(@as(f32, 0.5), divider.split.ratio, 0.01);
-    session.mouse(2, @as(f64, @floatFromInt(divider.bounds.x + divider.bounds.w * 3 / 4)) + 3, y, 0, 0);
-    try std.testing.expectApproxEqAbs(@as(f32, 0.75), divider.split.ratio, 0.01);
-    surfaces.clearRetainingCapacity();
-    try session.collectWebSurfaces(&surfaces);
-    for (surfaces.items) |surface| try std.testing.expect(surface.visible); // group divider도 live reframe, hide/show 깜빡임 없음.
-    session.mouse(3, @floatFromInt(divider.pos), y, 0, 0);
-    try std.testing.expect(!session.pointerGestureIs(.dock_group_divider));
-
-    var arena = std.heap.ArenaAllocator.init(allocator);
-    defer arena.deinit();
-    const win = try session.captureWorkspaceWindow(arena.allocator(), false, null);
-    try std.testing.expectEqual(@as(usize, 2), win.dock.groups.len);
-    try std.testing.expectEqual(@as(usize, 3), win.dock.tree.len);
-    try std.testing.expectEqual(@as(usize, 1), win.dock.focused_group);
-    try std.testing.expectEqual(@as(u16, 750), win.dock.tree[0].split.ratio_milli);
-
-    second.entries.items[0].dirty = true;
-    try std.testing.expect(session.refreshDockGroupLayout());
-    const close_divider = session.dock_dividers_scratch.items[0];
-    const close_y: f64 = @floatFromInt(close_divider.bounds.y + close_divider.bounds.h / 2);
-    const close_x = @as(f64, @floatFromInt(close_divider.pos)) + 3;
-    session.mouse(1, close_x, close_y, 0, 0);
-    try std.testing.expect(session.pointerGestureIs(.dock_group_divider));
-    session.dispatchAppAction(.close_file_panel_group);
-    try std.testing.expectEqual(@as(usize, 2), session.dock.groupCount());
-    try std.testing.expect(session.pointerGestureIs(.dock_group_divider)); // dirty rejection did not mutate the tree.
-    second.entries.items[0].dirty = false;
-    second.entries.items[0].mode = .read;
-    session.dispatchAppAction(.close_file_panel_group);
-    try std.testing.expectEqual(@as(usize, 1), session.dock.groupCount());
-    try std.testing.expect(session.pointerGestureIs(.none));
-    // The captured split was freed by removeGroup. Late AppKit drag/up must be inert, not dereference it.
-    session.mouse(2, close_x, close_y, 0, 0);
-    session.mouse(3, close_x, close_y, 0, 0);
-    try std.testing.expectEqual(first, session.dock.focusedGroup());
 }
 
 test "FP5 file panel routing: picker one-shot, md/html open, duplicate activation, and invalid targets" {

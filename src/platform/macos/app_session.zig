@@ -1652,7 +1652,6 @@ const PointerGestureOwner = union(enum) {
     },
     dock_tab: DockTabGesture,
     dock_outer_divider: struct { offset_px: f64 },
-    dock_tree_divider: struct { offset_px: f64 },
     dock_group_divider: struct {
         split: *dock_panel.DockTree.Split,
         seg: dock_panel.DockTree.DividerSeg,
@@ -4236,38 +4235,9 @@ pub const AppSession = struct {
         self.metal_dirty = true;
     }
 
-    fn dockTreeDividerAtPoint(self: *const AppSession, g: dock_layout.Geometry, x_px: f64, y_px: f64) bool {
-        if (!std.math.isFinite(x_px) or !std.math.isFinite(y_px) or !self.dockVisible()) return false;
-        // ABI edge별 divider grab 폭은 이 실제 target과 final WebView frame의 교집합에서만 계산된다. Zig target이
-        // 더 좁으면 WebView는 nil을 반환했지만 resize는 시작하지 않는 dead band가 되므로 이 rect가 권위다.
-        // geometry는 호출자가 이미 계산한 것을 받아 hover/mouse-down에서 이중 compute를 피한다.
-        const hit = dock_layout.treeDividerHitRect(g, self.dockDividerGrabBandPx());
-        return hit.w > 0 and layout_math.pointInRect(x_px, y_px, hit);
-    }
-
     fn dockDividerGrabBandPx(self: *const AppSession) u32 {
         if (self.dividerThicknessPx() == 0) return 0;
         return dock_layout.dividerGrabBandPx(self.scale_milli);
-    }
-
-    fn setDockTreeSizeFromPointer(self: *AppSession, x_px: f64) void {
-        if (!self.dock_initialized or self.scale_milli == 0) return;
-        const offset_px = switch (self.pointer_gesture_owner) {
-            .dock_tree_divider => |drag| drag.offset_px,
-            else => return,
-        };
-        const adjusted_x = x_px + offset_px;
-        const candidate = dock_layout.treeSizePtForPointer(self.dockGeometry(), adjusted_x, self.scale_milli) orelse return;
-        const before = self.dock.tree_size;
-        self.dock.tree_size = candidate;
-        // compute가 editor 28셀·tree 12셀 하한을 적용한 뒤의 실효 폭을 pt 권위값으로 되돌린다. min 경계는 내림해
-        // 12셀 하한에 정확히 도달하고(올림이면 분수 배율서 1px 더 넓게 멈춤), 그 외는 올림해 저장/복원 고정점.
-        const effective_px = self.dockGeometry().tree.w;
-        const min_tree_px = dock_layout.min_tree_cols * self.cell_width_px;
-        self.dock.tree_size = dock_layout.sizePtForEffectiveWidth(effective_px, min_tree_px, self.scale_milli);
-        if (self.dock.tree_size == before) return;
-        self.invalidateDockTabSnapshot();
-        self.metal_dirty = true;
     }
 
     /// 사이드바 접기/펼치기 토글 — 헤더 토글 아이콘·접힘 시 좌상단 펼치기 버튼이 부른다. 접으면 effective 폭이 0(카드·
@@ -19304,15 +19274,6 @@ pub const AppSession = struct {
             }
             return;
         }
-        if (self.pointerGestureIs(.dock_tree_divider) and (kind == 2 or kind == 3)) {
-            if (kind == 2) {
-                self.setDockTreeSizeFromPointer(x_px);
-            } else {
-                self.metal_dirty = true;
-                self.finishPointerGesture();
-            }
-            return;
-        }
         // divider 드래그가 진행 중이면 drag(2)/up(3)을 캡처한다(PR6) — drag는 마우스를 bounds 안 ratio로 매핑해
         // split.ratio를 live 변경(panel 재배치), up이 끝낸다. 새 down(1)은 아래 일반 처리로 흘려 새 드래그 시작.
         if (self.pointerGestureIs(.pane_divider) and (kind == 2 or kind == 3)) {
@@ -19405,12 +19366,6 @@ pub const AppSession = struct {
             }
             if (self.dockVisible()) {
                 const dg = self.dockGeometry();
-                if (self.dockTreeDividerAtPoint(dg, x_px, y_px)) {
-                    self.beginPointerGesture(.{ .dock_tree_divider = .{ .offset_px = @as(f64, @floatFromInt(dg.tree_divider.x)) - x_px } });
-                    self.mouse_drag_selecting = false;
-                    self.metal_dirty = true;
-                    return;
-                }
                 if (self.beginFileTreeScrollbarGesture(x_px, y_px)) return;
                 if (self.fileTreeRowAt(x_px, y_px)) |row_index| {
                     if (self.file_tree_rows.items[row_index] == .empty and layout_math.pointInRect(x_px, y_px, dg.tree_content)) {
@@ -21692,11 +21647,6 @@ pub const AppSession = struct {
         }
         if (self.dockVisible()) {
             const dg = self.dockGeometry();
-            if (self.dockTreeDividerAtPoint(dg, x_px, y_px)) {
-                self.setHoveredTab(null);
-                self.clearHoverUrlAnchor();
-                return .resize_h;
-            }
             if (layout_math.pointInRect(x_px, y_px, dg.tree)) {
                 self.setHoveredTab(null);
                 self.clearHoverUrlAnchor();
@@ -25194,7 +25144,6 @@ pub const AppSession = struct {
                             self.chromeQuadBg(if (active) self.sidebarActiveBg() else self.sidebarHoverBg()));
                     }
                 }
-                if (dg.tree_divider.w > 0) self.appendBarBgQuad(dg.tree_divider, self.dividerColor());
                 self.appendBarBgQuad(dg.divider, self.dividerColor());
             }
             // 접기/펴기 토글 배경 — 평소 투명(배경색과 동일), 호버 시에만 하이라이트(왼쪽 헤더 아이콘 동형). 사용자 피드백.
@@ -43771,7 +43720,8 @@ test "empty file dock launcher presents explorer and empty content requests the 
     try std.testing.expect(!session.takeFilePanelPickRequest());
     try std.testing.expect(session.dockVisible());
     const tree_content = session.dockGeometry().tree_content;
-    session.mouse(1, @floatFromInt(tree_content.x + 1), @floatFromInt(tree_content.y + 1), 0, 0);
+    // FP16: 트리가 도크 전체라 좌측 가장자리는 outer divider의 grab band와 겹친다 — 밴드 밖(가운데)을 누른다.
+    session.mouse(1, @floatFromInt(tree_content.x + tree_content.w / 2), @floatFromInt(tree_content.y + 1), 0, 0);
     try std.testing.expect(session.takeFilePanelPickRequest());
     try std.testing.expect(!session.takeFilePanelPickRequest());
 
@@ -45579,7 +45529,8 @@ test "file tree keyboard focus preserves identity navigates scrolls and restores
     const tree_rect = session.dockGeometry().tree_content;
     session.mouse(
         1,
-        @floatFromInt(tree_rect.x + 1),
+        // FP16: 트리 좌측 가장자리는 outer divider grab band와 겹친다 — 밴드 밖(가운데)을 누른다.
+        @floatFromInt(tree_rect.x + tree_rect.w / 2),
         @floatFromInt(tree_rect.y + @as(u32, @intCast(clicked_a - session.fileTreeEffectiveScroll())) * session.cell_height_px + 1),
         0,
         0,

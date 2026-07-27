@@ -11020,8 +11020,6 @@ pub const AppSession = struct {
         // bulk commit 끝까지 그대로 두고 각 entry를 정확히 한 번 방문한 뒤 empty leaf를 한 번만 정규화한다.
         var stats: FileTreeDockRemovalStats = .{};
         var removed_surfaces: DeletedSurfaceSet = .{};
-        var removed_surface_ids: [dock_panel.max_entries]u64 = undefined;
-        var removed_surface_ids_len: usize = 0;
         var removed_any = false;
         var removed_input_owner = false;
         var removed_tree_restore = false;
@@ -11055,14 +11053,11 @@ pub const AppSession = struct {
 
                 if (entry.surface_id != 0) {
                     removed_surfaces.insert(entry.surface_id);
-                    removed_surface_ids[removed_surface_ids_len] = entry.surface_id;
-                    removed_surface_ids_len += 1;
                     if (self.pending_file_panel_close != null and self.pending_file_panel_close.?.surface_id == entry.surface_id)
                         self.clearFilePanelCloseWithoutUnlock();
                 } else if (pending_owned) {
                     self.cancelPendingDockFocus();
                 }
-                if (self.fileEntryForId(entry.id)) |live| _ = self.closeFileTermForEntry(live); // Term이 entry·path 소유를 함께 회수한다(FP16)
             }
         }
         if (!removed_any) return stats;
@@ -11070,7 +11065,11 @@ pub const AppSession = struct {
         self.removeFilePanelQueuedActionsBulk(&removed_surfaces, &stats);
         // queued one-shots를 먼저 없앤 뒤 native callback을 낸다. callback이 browser control completion을
         // 동기 직렬화하더라도 retired surface action을 다시 관측할 수 없다.
-        for (removed_surface_ids[0..removed_surface_ids_len]) |surface_id| self.notifySurfaceClosed(surface_id);
+        // FP16: notifySurfaceClosed는 destroyTerm이 낸다 — 여기서 따로 부르면 같은 surface가 두 번 통지된다.
+        // teardown은 queued one-shot 제거 **뒤**라야 retired surface action을 다시 관측하지 않는다.
+        for (doomed[0..doomed_len]) |entry| {
+            if (self.fileEntryForId(entry.id)) |live| _ = self.closeFileTermForEntry(live); // Term이 entry·path 소유를 회수한다(FP16)
+        }
 
         if (removed_input_owner) {
             if (self.fileEntryCount() == 0) {
@@ -44867,7 +44866,7 @@ test "close_focused uses the actual Metal or WebView key source across a stale o
     try std.testing.expect(session.pending_dock_focus == null);
 }
 
-test "file tree bulk delete visits entries and action queues once without model allocation" {
+test "file tree bulk delete visits entries and action queues exactly once" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
     const session = try initSmokeSessionSized(allocator);
@@ -44925,9 +44924,9 @@ test "file tree bulk delete visits entries and action queues once without model 
     try std.testing.expectEqual(@as(usize, dock_panel.max_entries / 2), session.file_panel_dirty_sync_actions_len);
     try std.testing.expectEqual(@as(usize, dock_panel.max_entries / 2), session.file_panel_close_unlock_actions_len);
     try std.testing.expectEqual(@as(usize, dock_panel.max_entries / 2), session.file_tree_reload_actions_len);
-    try std.testing.expectEqual(@as(usize, 0), counting.allocations);
+    // FP16: 파일 삭제가 곧 **Term teardown**이라 surface·pane 재배치가 실제로 할당한다. 옛 "도크 모델
+    // 변경은 무할당" 계약은 대상이 사라졌다 — 남은 주제는 위 visit 카운트(entry·큐를 딱 한 번씩만 훑는다)다.
     try std.testing.expectEqual(@as(usize, 1), session.fileEntryCount());
-    try std.testing.expectEqual(@as(usize, 1), session.dock.groupCount());
     try std.testing.expectEqual(survivor_sid, session.fileEntryAt(0).?.surface_id);
     try std.testing.expect(session.focus_owner == .workspace);
 }

@@ -10,11 +10,8 @@ pub const default_right_pt: u32 = 420;
 pub const default_bottom_pt: u32 = 300;
 pub const min_right_pt: u32 = 240;
 pub const min_bottom_pt: u32 = 160;
-pub const default_tree_cols: u32 = 18;
-pub const min_tree_cols: u32 = 12;
 /// Artifact에서 Markdown 본문은 tree보다 우선하는 주 surface다. 12칸짜리 세로 띠까지 줄이던 기존 하한은
 /// 문서/편집기를 사실상 못 쓰게 하므로 28칸을 보장하고, 공간이 모자라면 tree를 먼저 숨긴다.
-pub const min_editor_cols: u32 = 28;
 /// Artifact의 editor tab처럼 파일 수가 적을 때 바 전체를 균등분할하지 않고 읽을 수 있는 고정폭 세그먼트를 쓴다.
 /// 탭이 많아 공간이 모자랄 때만 균등 축소한다(가로 스크롤은 후속).
 pub const default_tab_cols: u16 = 18;
@@ -215,7 +212,6 @@ pub const Input = struct {
     divider_px: u32,
     side: dock_panel.Side,
     size_pt: u32,
-    tree_size_pt: u32 = 0,
     visible: bool,
 };
 
@@ -259,7 +255,6 @@ pub fn compute(in: Input) Geometry {
                 dock_w,
                 in.cell_width_px,
                 scale,
-                in.tree_size_pt,
             );
         },
         .bottom => bottom: {
@@ -280,16 +275,14 @@ pub fn compute(in: Input) Geometry {
                 dock_h,
                 in.cell_width_px,
                 scale,
-                in.tree_size_pt,
             );
         },
     };
 }
 
-fn fromDock(workspace: Rect, terminal: Rect, dock: Rect, divider: Rect, chrome_h: u32, dock_size_px: u32, cell_width_px: u32, scale_milli: u32, tree_size_pt: u32) Geometry {
+fn fromDock(workspace: Rect, terminal: Rect, dock: Rect, divider: Rect, chrome_h: u32, dock_size_px: u32, cell_width_px: u32, scale_milli: u32) Geometry {
     _ = cell_width_px;
     _ = scale_milli;
-    _ = tree_size_pt; // FP16: 도크 안에서 트리 폭을 따로 잡지 않는다 — 도크 폭이 곧 트리 폭이다(B-4에서 포맷도 정리).
     // 탐색기 헤더("탐색기" 한 행)는 도크 최상단에 붙고, 그 아래가 스크롤되는 rows다.
     const tree_header_h = @min(chrome_h, dock.h);
     return .{

@@ -298,7 +298,6 @@ fn writeWindow(w: *std.Io.Writer, win: Window) !void {
     // 잃지 않고, 기본값은 생략돼 기존 파일 byte 고정점도 유지된다(file-panel.md §5).
     if (win.dock.side != .right) try w.print(" dock-side={s}", .{@tagName(win.dock.side)});
     if (win.dock.size != 0) try w.print(" dock-size={d}", .{win.dock.size});
-    if (win.dock.tree_size != 0) try w.print(" dock-tree-size={d}", .{win.dock.tree_size});
     if (win.dock.collapsed) try w.writeAll(" dock-collapsed=1");
     const explorer_has_roots = if (win.explorer.roots) |roots| roots.len != 0 else false;
     if (win.dock.presented and !dockStateHasEntries(win.dock) and !explorer_has_roots)
@@ -312,7 +311,7 @@ fn writeWindow(w: *std.Io.Writer, win: Window) !void {
         try w.writeByte('"');
     }
     // FP16 §5.0: 파일 목록은 창 줄이 아니라 각 `pane` 줄의 `file-term` 필드로 나간다. 창 줄에 남는 도크 키는
-    // **탐색기 것뿐**이다(dock-size·dock-tree-size·dock-collapsed·dock-presented·dock-tree-roots).
+    // **탐색기 것뿐**이다(dock-size·dock-collapsed·dock-presented·dock-tree-roots).
     // 옛 `dock-entry`/`dock-entry-v2`/`dock-node`/`dock-group-*`는 **읽기만** 유지한다(1회 마이그레이션).
     try w.writeByte('\n');
     for (win.tabs) |tab| try writeTab(w, tab);
@@ -566,7 +565,6 @@ fn parseWindow(a: std.mem.Allocator, lines: *LineIter, limits: *ParseLimits) Par
         break :blk .right;
     } else .right;
     const dock_size = try f.getUint("dock-size", u32, 0);
-    const dock_tree_size = try f.getUint("dock-tree-size", u32, 0);
     const dock_collapsed = (try f.getUint("dock-collapsed", u8, 0)) != 0;
     const dock_presented_requested = (try f.getUint("dock-presented", u8, 0)) != 0;
     const explorer_roots_field = f.find("dock-tree-roots");
@@ -620,7 +618,6 @@ fn parseWindow(a: std.mem.Allocator, lines: *LineIter, limits: *ParseLimits) Par
             const parsed_state: dock_panel.PersistedState = .{
                 .side = dock_side,
                 .size = dock_size,
-                .tree_size = dock_tree_size,
                 .collapsed = dock_collapsed,
                 .groups = groups,
                 .tree = try nodes.toOwnedSlice(a),
@@ -652,7 +649,6 @@ fn parseWindow(a: std.mem.Allocator, lines: *LineIter, limits: *ParseLimits) Par
         const parsed_state: dock_panel.PersistedState = .{
             .side = dock_side,
             .size = dock_size,
-            .tree_size = dock_tree_size,
             .collapsed = dock_collapsed,
             .entries = try dock_entries.toOwnedSlice(a),
         };
@@ -2271,7 +2267,6 @@ test "workspace dock FP1: 기본 상태는 키를 생략하고 옛 파일은 기
     const dock = parsed.workspace.windows[0].dock;
     try std.testing.expectEqual(dock_panel.Side.right, dock.side);
     try std.testing.expectEqual(@as(u32, 0), dock.size);
-    try std.testing.expectEqual(@as(u32, 0), dock.tree_size);
     try std.testing.expect(!dock.collapsed);
     try std.testing.expectEqual(@as(usize, 0), dock.entries.len);
 }
@@ -2457,7 +2452,7 @@ test "workspace FP16: file-term이 pane 줄에서 왕복하고 창 줄엔 파일
     const panes = [_]Pane{.{ .active_term = 1, .surfaces = &surfaces, .file_terms = &file_terms }};
     const tabs = [_]Tab{.{ .active_pane = 0, .panes = &panes, .tree = &.{.{ .leaf = 0 }} }};
     const windows = [_]Window{.{
-        .dock = .{ .side = .bottom, .size = 420, .tree_size = 188, .collapsed = true },
+        .dock = .{ .side = .bottom, .size = 420, .collapsed = true },
         .tabs = &tabs,
     }};
     const text = try serialize(std.testing.allocator, .{ .windows = &windows });
@@ -2465,7 +2460,6 @@ test "workspace FP16: file-term이 pane 줄에서 왕복하고 창 줄엔 파일
 
     // 탐색기 도크 키는 남고, 파일 목록 키는 창 줄에서 사라졌다.
     try std.testing.expect(std.mem.indexOf(u8, text, "dock-size=420") != null);
-    try std.testing.expect(std.mem.indexOf(u8, text, "dock-tree-size=188") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "dock-entry=\"") == null);
     try std.testing.expect(std.mem.indexOf(u8, text, "dock-entry-v2=\"") == null);
     try std.testing.expect(std.mem.indexOf(u8, text, "dock-node=\"") == null);

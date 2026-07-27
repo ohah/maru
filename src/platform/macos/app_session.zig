@@ -10716,24 +10716,32 @@ pub const AppSession = struct {
     }
 
     fn resetFileTreeWatchRootsFor(self: *const AppSession, tree: *file_tree.Tree, extra_open_path: ?[]const u8) !void {
-        return resetFileTreeWatchRootsForDock(tree, if (self.dock_initialized) &self.dock else null, extra_open_path);
+        // 라이브 경로: 창구 순회 결과를 고정 버퍼에 모아 슬라이스로 넘긴다(창당 max_entries 상한이 bound).
+        var buf: [dock_panel.max_entries]dock_panel.Entry = undefined;
+        var n: usize = 0;
+        var it = self.fileEntriesConst();
+        while (it.next()) |entry| {
+            if (n >= buf.len) break;
+            buf[n] = entry.*;
+            n += 1;
+        }
+        return resetFileTreeWatchRootsForEntries(tree, buf[0..n], extra_open_path);
     }
 
-    fn resetFileTreeWatchRootsForDock(
+    /// watcher union은 "표시 root ∪ 열린 파일의 부모"다(§7). 입력이 dock 구조일 이유가 없어 **entry 슬라이스**를
+    /// 받는다 — 복원 중에는 staged 목록이, 라이브에서는 창구 순회 결과가 들어온다(FP16 2-2r).
+    fn resetFileTreeWatchRootsForEntries(
         tree: *file_tree.Tree,
-        dock: ?*const dock_panel.DockPanel,
+        entries: []const dock_panel.Entry,
         extra_open_path: ?[]const u8,
     ) !void {
         var extras: [dock_panel.max_entries + 1][]const u8 = undefined;
         var count: usize = 0;
-        if (dock) |panel| for (0..panel.groupCount()) |group_index| {
-            const group = panel.groupAtConst(group_index).?;
-            for (group.entries.items) |entry| {
-                const parent = std.fs.path.dirname(entry.path) orelse continue;
-                extras[count] = parent;
-                count += 1;
-            }
-        };
+        for (entries) |entry| {
+            const parent = std.fs.path.dirname(entry.path) orelse continue;
+            extras[count] = parent;
+            count += 1;
+        }
         if (extra_open_path) |path| if (std.fs.path.dirname(path)) |parent| {
             extras[count] = parent;
             count += 1;
@@ -10741,19 +10749,21 @@ pub const AppSession = struct {
         try tree.resetWatchRequests(extras[0..count]);
     }
 
-    fn buildFileTreeRowsForDock(
+    /// 트리의 열림/활성/dirty 마커는 entry 집합만 있으면 만들 수 있다 — dock 구조가 입력일 이유가 없다(FP16 2-2r).
+    /// `active_index`는 복원 목록의 활성 entry(라이브에서는 활성 파일 Term)를 가리킨다.
+    fn buildFileTreeRowsForEntries(
         allocator: std.mem.Allocator,
-        dock: *const dock_panel.DockPanel,
+        entries: []const dock_panel.Entry,
+        active_index: ?usize,
         tree: *const file_tree.Tree,
         open_states: *std.ArrayList(file_tree.OpenState),
         rows: *std.ArrayList(file_tree.Row),
     ) !void {
-        try open_states.ensureTotalCapacity(allocator, dock.entryCountTotal());
-        for (0..dock.groupCount()) |group_index| {
-            const group = dock.groupAtConst(group_index).?;
-            for (group.entries.items, 0..) |entry, i| open_states.appendAssumeCapacity(.{
+        try open_states.ensureTotalCapacity(allocator, entries.len);
+        {
+            for (entries, 0..) |entry, i| open_states.appendAssumeCapacity(.{
                 .path = entry.path,
-                .active = group.active != null and group.active.? == i,
+                .active = active_index != null and active_index.? == i,
                 .dirty = entry.dirty,
                 .external_change = entry.external_change,
             });
@@ -23847,10 +23857,16 @@ pub const AppSession = struct {
         var dropped: usize = 0;
         const newly_ended_before = self.ended_placeholder_dropped_pending;
         dropped += self.pruneInvalidRestoredFilePanelEntries(&new_dock);
+        // FP16 2-2r: 여기서 소유를 목록으로 옮긴다. 이후 단계(파일 트리·watcher·rows)는 dock 구조가 아니라
+        // 이 목록을 소비하고, 실제 배치(어느 pane의 Term이 되나)는 탭이 생긴 뒤에 정한다.
+        var restored_entries = try flattenRestoredDock(self.allocator, &new_dock);
+        errdefer restored_entries.deinit(self.allocator);
         // capability validation can empty a leaf after DockPanel.restore already normalized the wire tree.
         // Publish/assign surface IDs only after applying the same empty-leaf invariant a second time.
         dropped += new_dock.pruneEmptyGroups();
-        self.assignDockSurfaceIds(&new_dock);
+        for (restored_entries.items.items) |*entry| {
+            if (entry.surface_id == 0) entry.surface_id = self.surface_ids.next();
+        }
 
         // Explorer roots, watcher union, projected rows, and backend lifetime are staged before the
         // first live tab/dock teardown. Missing or inaccessible persisted roots degrade only that root;
@@ -23858,9 +23874,8 @@ pub const AppSession = struct {
         var new_file_tree = file_tree.Tree.init(self.allocator);
         var new_file_tree_owned = true;
         errdefer if (new_file_tree_owned) new_file_tree.deinit();
-        for (0..new_dock.groupCount()) |group_index| {
-            const group = new_dock.groupAtConst(group_index).?;
-            for (group.entries.items) |entry| {
+        {
+            for (restored_entries.items.items) |entry| {
                 const root = try file_tree_backend.projectRootForFile(self.allocator, self.io, entry.path);
                 defer self.allocator.free(root);
                 try new_file_tree.recordOpened(entry.path, root);
@@ -23883,7 +23898,7 @@ pub const AppSession = struct {
             try new_file_tree.replaceExplicitRoots(canonical[0..validated_len]);
             for (validated[0..validated_len]) |root| _ = new_file_tree.pinRootIdentity(root.path, root.identity);
         }
-        try resetFileTreeWatchRootsForDock(&new_file_tree, &new_dock, null);
+        try resetFileTreeWatchRootsForEntries(&new_file_tree, restored_entries.items.items, null);
         var new_file_tree_backend = try file_tree_backend.Backend.init(self.allocator, self.io);
         var new_file_tree_backend_owned = true;
         errdefer if (new_file_tree_backend_owned) new_file_tree_backend.deinit();
@@ -23891,9 +23906,10 @@ pub const AppSession = struct {
         defer new_file_tree_open_states.deinit(self.allocator);
         var new_file_tree_rows: std.ArrayList(file_tree.Row) = .empty;
         defer new_file_tree_rows.deinit(self.allocator);
-        try buildFileTreeRowsForDock(
+        try buildFileTreeRowsForEntries(
             self.allocator,
-            &new_dock,
+            restored_entries.items.items,
+            restored_entries.active_index,
             &new_file_tree,
             &new_file_tree_open_states,
             &new_file_tree_rows,
@@ -23909,6 +23925,14 @@ pub const AppSession = struct {
         }
 
         // 2) swap이 실패하지 않게 컬렉션 capacity를 미리 잡는다(teardown 뒤 append가 무실패여야 half-state가 없다).
+        // FP16 2-2r: 탭이 다 생긴 지금이 배치 시점이다. staged 목록의 entry를 **활성 워크스페이스의 활성 pane**에
+        // 파일 Term으로 이관한다(§5.0 마이그레이션 규칙 — dock-entry는 창 레벨 키라 pane별 배치 정보가 없다).
+        // 아직 staged 구간이라 실패하면 errdefer가 새 탭과 목록을 함께 되돌린다.
+        if (restored_entries.items.items.len != 0 and new_tabs.items.len != 0) {
+            const target_tab = new_tabs.items[@min(win.active_tab, new_tabs.items.len - 1)];
+            const target_pane = target_tab.panes.items[@min(target_tab.active_pane, target_tab.panes.items.len - 1)];
+            try self.transferRestoredFileEntries(&restored_entries, target_pane);
+        }
         try self.tabs.ensureTotalCapacity(self.allocator, new_tabs.items.len);
         try self.surface_ptrs.ensureTotalCapacity(self.allocator, new_tabs.items.len);
 
@@ -45002,20 +45026,22 @@ test "workspace restore allocation failures preserve the complete live tab dock 
 
     const Harness = struct {
         fn prepare(session: *AppSession, backing_allocator: std.mem.Allocator, before_root: []const u8, before_path: []const u8) !void {
-            const opened = try session.dock.open(session.dock.singleGroup().?, before_path, .markdown);
-            opened.group.entries.items[opened.index].mode = .read;
-            session.assignDockSurfaceIds(&session.dock);
+            const opened = try session.openFileTermInActivePane(before_path, .markdown);
+            const entry = opened.term.file_entry.?;
+            entry.mode = .read;
             try session.file_tree.replaceExplicitRoots(&.{before_root});
-            try AppSession.buildFileTreeRowsForDock(
+            var staged: [1]dock_panel.Entry = .{entry.*};
+            try AppSession.buildFileTreeRowsForEntries(
                 backing_allocator,
-                &session.dock,
+                staged[0..],
+                0,
                 &session.file_tree,
                 &session.file_tree_open_states,
                 &session.file_tree_rows,
             );
             session.file_tree_rows_dirty = false;
             try session.file_tree.resetWatchRequests(&.{std.fs.path.dirname(before_path).?});
-            std.debug.assert(opened.group.entries.items[opened.index].surface_id != 0);
+            std.debug.assert(entry.surface_id != 0);
         }
 
         fn expectPreserved(

@@ -4,8 +4,55 @@
 const std = @import("std");
 const protocol = @import("protocol.zig");
 const client_mod = @import("client.zig");
+const external_inbox_ledger = @import("external_inbox_ledger.zig");
 const remote_screen = @import("remote_screen.zig");
 const screen_assembler = @import("screen_assembler.zig");
+
+pub const AttachmentBatchLease = union(enum) {
+    untracked: client_mod.StreamBatch,
+    charged: external_inbox_ledger.Token,
+
+    fn borrow(
+        self: AttachmentBatchLease,
+        transport: AttachmentTransport,
+    ) LeaseError!external_inbox_ledger.BatchView {
+        return switch (self) {
+            .untracked => |batch| .{
+                .is_snapshot = batch.is_snapshot,
+                .stream_id = batch.stream_id,
+                .bytes = batch.bytes,
+            },
+            .charged => |token| {
+                const borrow_charged = transport.borrow_charged orelse
+                    return error.LedgerInvariant;
+                return borrow_charged(transport.context, token) catch
+                    return error.LedgerInvariant;
+            },
+        };
+    }
+
+    fn release(
+        self: AttachmentBatchLease,
+        fallback_allocator: std.mem.Allocator,
+        transport: AttachmentTransport,
+    ) enum { ok, invariant_failure } {
+        switch (self) {
+            .untracked => |batch| {
+                fallback_allocator.free(batch.bytes);
+                return .ok;
+            },
+            .charged => |token| {
+                const release_charged = transport.release_charged orelse
+                    return .invariant_failure;
+                release_charged(transport.context, token) catch
+                    return .invariant_failure;
+                return .ok;
+            },
+        }
+    }
+};
+
+pub const LeaseError = error{LedgerInvariant};
 
 pub const AttachmentTransport = struct {
     context: *anyopaque,
@@ -13,7 +60,15 @@ pub const AttachmentTransport = struct {
         context: *anyopaque,
         allocator: std.mem.Allocator,
         stream_id: u64,
-    ) client_mod.ClientError!?client_mod.StreamBatch,
+    ) client_mod.ClientError!?AttachmentBatchLease,
+    borrow_charged: ?*const fn (
+        context: *anyopaque,
+        token: external_inbox_ledger.Token,
+    ) external_inbox_ledger.InvariantError!external_inbox_ledger.BatchView = null,
+    release_charged: ?*const fn (
+        context: *anyopaque,
+        token: external_inbox_ledger.Token,
+    ) external_inbox_ledger.InvariantError!void = null,
     drop_stream: *const fn (context: *anyopaque, stream_id: u64) void,
     fail_closed: *const fn (context: *anyopaque) void,
 };
@@ -36,7 +91,9 @@ pub const RemoteAttachment = struct {
     state: State,
     transport: ?AttachmentTransport = null,
     screen: ?remote_screen.RemoteScreen = null,
-    pending_batches: std.ArrayListUnmanaged(client_mod.StreamBatch) = .empty,
+    pending_batches: std.ArrayListUnmanaged(AttachmentBatchLease) = .empty,
+    pending_batch_head: usize = 0,
+    failed_release: ?AttachmentBatchLease = null,
 
     pub fn init(allocator: std.mem.Allocator, state: State) RemoteAttachment {
         return .{ .allocator = allocator, .state = state };
@@ -61,8 +118,28 @@ pub const RemoteAttachment = struct {
     }
 
     pub fn deinit(self: *RemoteAttachment) void {
-        if (self.transport) |transport| transport.drop_stream(transport.context, self.state.stream_id);
-        for (self.pending_batches.items) |batch| self.allocator.free(batch.bytes);
+        if (self.transport) |transport| {
+            if (self.failed_release) |lease| {
+                if (lease.release(self.allocator, transport) == .invariant_failure) {
+                    transport.fail_closed(transport.context);
+                }
+            }
+            for (self.pending_batches.items[self.pending_batch_head..]) |lease| {
+                if (lease.release(self.allocator, transport) == .invariant_failure) {
+                    transport.fail_closed(transport.context);
+                }
+            }
+            transport.drop_stream(transport.context, self.state.stream_id);
+        } else {
+            if (self.failed_release) |lease| switch (lease) {
+                .untracked => |batch| self.allocator.free(batch.bytes),
+                .charged => {},
+            };
+            for (self.pending_batches.items[self.pending_batch_head..]) |lease| switch (lease) {
+                .untracked => |batch| self.allocator.free(batch.bytes),
+                .charged => {},
+            };
+        }
         self.pending_batches.deinit(self.allocator);
         if (self.screen) |*screen| screen.deinit();
         self.* = undefined;
@@ -74,33 +151,102 @@ pub const RemoteAttachment = struct {
     pub fn pumpScreen(
         self: *RemoteAttachment,
         io: std.Io,
-    ) (client_mod.ClientError || screen_assembler.ApplyError)!bool {
+    ) (client_mod.ClientError || screen_assembler.ApplyError || LeaseError)!bool {
         const transport = self.transport orelse return error.ConnectionClosed;
-        if (try transport.read_batch(transport.context, self.allocator, self.state.stream_id)) |batch| {
-            self.pending_batches.append(self.allocator, batch) catch {
-                self.allocator.free(batch.bytes);
+        // A failed release is already a terminal ownership invariant. Never consume another
+        // transport batch and risk needing a second allocation-free recovery slot.
+        if (self.failed_release != null) {
+            transport.fail_closed(transport.context);
+            return error.LedgerInvariant;
+        }
+        if (try transport.read_batch(transport.context, self.allocator, self.state.stream_id)) |lease| {
+            self.pending_batches.append(self.allocator, lease) catch {
+                const released = self.releaseOrRetain(lease, transport);
                 transport.fail_closed(transport.context);
+                if (!released) return error.LedgerInvariant;
                 return error.OutOfMemory;
             };
         }
-        if (self.pending_batches.items.len == 0) return false;
-        const batch = self.pending_batches.orderedRemove(0);
-        defer self.allocator.free(batch.bytes);
-        const screen = &(self.screen orelse {
+        if (self.pending_batch_head == self.pending_batches.items.len) return false;
+        const lease = self.pending_batches.items[self.pending_batch_head];
+        self.pending_batch_head += 1;
+        const batch = lease.borrow(transport) catch {
+            _ = self.releaseOrRetain(lease, transport);
+            self.compactConsumedBatches();
             transport.fail_closed(transport.context);
+            return error.LedgerInvariant;
+        };
+        if (batch.stream_id != self.state.stream_id) {
+            const released = self.releaseOrRetain(lease, transport);
+            self.compactConsumedBatches();
+            transport.fail_closed(transport.context);
+            if (!released) return error.LedgerInvariant;
+            return error.LedgerInvariant;
+        }
+        const screen = &(self.screen orelse {
+            const released = self.releaseOrRetain(lease, transport);
+            self.compactConsumedBatches();
+            transport.fail_closed(transport.context);
+            if (!released) return error.LedgerInvariant;
             return error.ProtocolError;
         });
-        if (batch.is_snapshot)
+        if (batch.is_snapshot) {
             screen.applySnapshot(batch.bytes, io) catch |err| {
+                const released = self.releaseOrRetain(lease, transport);
+                self.compactConsumedBatches();
                 transport.fail_closed(transport.context);
-                return err;
-            }
-        else
-            screen.applyDelta(batch.bytes, io) catch |err| {
-                transport.fail_closed(transport.context);
+                if (!released) return error.LedgerInvariant;
                 return err;
             };
+        } else {
+            screen.applyDelta(batch.bytes, io) catch |err| {
+                const released = self.releaseOrRetain(lease, transport);
+                self.compactConsumedBatches();
+                transport.fail_closed(transport.context);
+                if (!released) return error.LedgerInvariant;
+                return err;
+            };
+        }
+        if (!self.releaseOrRetain(lease, transport)) {
+            self.compactConsumedBatches();
+            transport.fail_closed(transport.context);
+            return error.LedgerInvariant;
+        }
+        self.compactConsumedBatches();
         return true;
+    }
+
+    /// A callback invariant can fail after the transport already handed ownership to us. Keep the
+    /// one terminal lease in allocation-free storage so teardown can retry instead of losing the
+    /// only token capable of releasing the stable ledger slot.
+    fn releaseOrRetain(
+        self: *RemoteAttachment,
+        lease: AttachmentBatchLease,
+        transport: AttachmentTransport,
+    ) bool {
+        if (lease.release(self.allocator, transport) == .ok) return true;
+        if (self.failed_release == null) self.failed_release = lease;
+        return false;
+    }
+
+    /// Preserve FIFO without `orderedRemove(0)`'s quadratic drain. Consumed prefix copies carry no
+    /// ownership; compaction is amortized and only moves still-live leases.
+    fn compactConsumedBatches(self: *RemoteAttachment) void {
+        const len = self.pending_batches.items.len;
+        if (self.pending_batch_head == len) {
+            self.pending_batches.clearRetainingCapacity();
+            self.pending_batch_head = 0;
+            return;
+        }
+        if (self.pending_batch_head < len / 2) return;
+        const remaining = len - self.pending_batch_head;
+        std.mem.copyForwards(
+            AttachmentBatchLease,
+            self.pending_batches.items[0..remaining],
+            self.pending_batches.items[self.pending_batch_head..],
+        );
+        self.pending_batches.items.len = remaining;
+        self.pending_batch_head = 0;
     }
 
     pub fn applyRevoked(
@@ -739,7 +885,7 @@ test "remote attachment authority rejects mutation after busy demotion or revoke
 }
 
 const TestTransport = struct {
-    batch: ?client_mod.StreamBatch,
+    batch: ?AttachmentBatchLease,
     fail_closed_calls: usize = 0,
     drop_calls: usize = 0,
 
@@ -747,7 +893,7 @@ const TestTransport = struct {
         context: *anyopaque,
         _: std.mem.Allocator,
         _: u64,
-    ) client_mod.ClientError!?client_mod.StreamBatch {
+    ) client_mod.ClientError!?AttachmentBatchLease {
         const self: *TestTransport = @ptrCast(@alignCast(context));
         const batch = self.batch;
         self.batch = null;
@@ -774,13 +920,97 @@ const TestTransport = struct {
     }
 };
 
+const ChargedTestTransport = struct {
+    ledger: *external_inbox_ledger.ExternalInboxLedger,
+    batch: ?AttachmentBatchLease,
+    release_fails: bool = false,
+    drop_observed_zero: bool = false,
+    fail_closed_calls: usize = 0,
+    drop_calls: usize = 0,
+    release_calls: usize = 0,
+
+    fn read(
+        context: *anyopaque,
+        _: std.mem.Allocator,
+        _: u64,
+    ) client_mod.ClientError!?AttachmentBatchLease {
+        const self: *ChargedTestTransport = @ptrCast(@alignCast(context));
+        const batch = self.batch;
+        self.batch = null;
+        return batch;
+    }
+
+    fn borrow(
+        context: *anyopaque,
+        token: external_inbox_ledger.Token,
+    ) external_inbox_ledger.InvariantError!external_inbox_ledger.BatchView {
+        const self: *ChargedTestTransport = @ptrCast(@alignCast(context));
+        return self.ledger.borrowBatch(token);
+    }
+
+    fn release(
+        context: *anyopaque,
+        token: external_inbox_ledger.Token,
+    ) external_inbox_ledger.InvariantError!void {
+        const self: *ChargedTestTransport = @ptrCast(@alignCast(context));
+        self.release_calls += 1;
+        if (self.release_fails) return error.InvariantFailure;
+        return self.ledger.release(token);
+    }
+
+    fn drop(context: *anyopaque, _: u64) void {
+        const self: *ChargedTestTransport = @ptrCast(@alignCast(context));
+        self.drop_observed_zero =
+            self.ledger.charged_bytes == 0 and self.ledger.charged_items == 0;
+        self.drop_calls += 1;
+    }
+
+    fn failClosed(context: *anyopaque) void {
+        const self: *ChargedTestTransport = @ptrCast(@alignCast(context));
+        self.fail_closed_calls += 1;
+    }
+
+    fn interface(self: *ChargedTestTransport) AttachmentTransport {
+        return .{
+            .context = self,
+            .read_batch = read,
+            .borrow_charged = borrow,
+            .release_charged = release,
+            .drop_stream = drop,
+            .fail_closed = failClosed,
+        };
+    }
+};
+
+fn testSnapshot(allocator: std.mem.Allocator) ![]u8 {
+    const screen_stream = @import("screen_stream.zig");
+    var bytes: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer bytes.deinit(allocator);
+    const meta = try screen_stream.encodeScreenMeta(
+        allocator,
+        .{ .kind = .screen_meta, .generation = 1 },
+        .{ .cols = 1, .rows = 1 },
+    );
+    defer allocator.free(meta);
+    try screen_stream.appendRecord(&bytes, allocator, meta);
+    var runs = [_]screen_stream.Run{.{ .grapheme = " ", .width = 1, .count = 1 }};
+    const row = try screen_stream.encodeRow(
+        allocator,
+        .{ .kind = .row, .generation = 1 },
+        .{ .row_index = 0, .runs = &runs },
+    );
+    defer allocator.free(row);
+    try screen_stream.appendRecord(&bytes, allocator, row);
+    return bytes.toOwnedSlice(allocator);
+}
+
 test "remote attachment fail-closes when a consumed batch has no screen owner" {
     var transport = TestTransport{
-        .batch = .{
+        .batch = .{ .untracked = .{
             .is_snapshot = true,
             .stream_id = 7,
             .bytes = try std.testing.allocator.dupe(u8, "consumed"),
-        },
+        } },
     };
     var attachment = RemoteAttachment.init(std.testing.allocator, .{
         .runtime_id = 0xaa,
@@ -803,11 +1033,11 @@ test "remote attachment fail-closes when consumed batch queue admission runs out
     var transport = TestTransport{
         // Queue admission is the only allocation in this path. A zero-length payload keeps the
         // matching cleanup in the same failing allocator domain without adding setup allocation.
-        .batch = .{
+        .batch = .{ .untracked = .{
             .is_snapshot = true,
             .stream_id = 7,
             .bytes = @constCast(&[_]u8{}),
-        },
+        } },
     };
     var failing = std.testing.FailingAllocator.init(
         std.testing.allocator,
@@ -832,11 +1062,11 @@ test "remote attachment fail-closes when consumed batch queue admission runs out
 
 test "remote attachment fail-closes malformed consumed screen bytes" {
     var transport = TestTransport{
-        .batch = .{
+        .batch = .{ .untracked = .{
             .is_snapshot = true,
             .stream_id = 7,
             .bytes = try std.testing.allocator.dupe(u8, "not-a-screen-frame"),
-        },
+        } },
     };
     var attachment = RemoteAttachment.init(std.testing.allocator, .{
         .runtime_id = 0xaa,
@@ -853,4 +1083,195 @@ test "remote attachment fail-closes malformed consumed screen bytes" {
     );
     try std.testing.expectEqual(@as(usize, 1), transport.fail_closed_calls);
     try std.testing.expectEqual(@as(usize, 0), attachment.pending_batches.items.len);
+}
+
+test "remote attachment releases a charged batch after apply failure" {
+    const allocator = std.testing.allocator;
+    var ledger: external_inbox_ledger.ExternalInboxLedger = .{};
+    const token = try ledger.reserve("not-a-screen-frame".len);
+    try ledger.adoptBatch(
+        token,
+        allocator,
+        true,
+        7,
+        try allocator.dupe(u8, "not-a-screen-frame"),
+    );
+    var transport = ChargedTestTransport{
+        .ledger = &ledger,
+        .batch = .{ .charged = token },
+    };
+    var attachment = RemoteAttachment.init(allocator, .{
+        .runtime_id = 0xaa,
+        .stream_id = 7,
+        .role = .observer,
+        .controller_generation = 0,
+    });
+    try attachment.bindTransport(transport.interface());
+    try attachment.initScreen(2);
+    try std.testing.expectError(error.Truncated, attachment.pumpScreen(std.testing.io));
+    try std.testing.expectEqual(@as(usize, 1), transport.release_calls);
+    try std.testing.expectEqual(@as(usize, 1), transport.fail_closed_calls);
+    try std.testing.expectEqual(@as(usize, 0), ledger.charged_bytes);
+    try std.testing.expectEqual(@as(usize, 0), ledger.charged_items);
+    attachment.deinit();
+    try std.testing.expectEqual(@as(usize, 1), transport.drop_calls);
+    try ledger.finish();
+}
+
+test "remote attachment applies and releases a charged snapshot with an empty queue" {
+    const allocator = std.testing.allocator;
+    var ledger: external_inbox_ledger.ExternalInboxLedger = .{};
+    const snapshot = try testSnapshot(allocator);
+    const token = try ledger.reserve(snapshot.len);
+    try ledger.adoptBatch(token, allocator, true, 7, snapshot);
+    var transport = ChargedTestTransport{
+        .ledger = &ledger,
+        .batch = .{ .charged = token },
+    };
+    var attachment = RemoteAttachment.init(allocator, .{
+        .runtime_id = 0xaa,
+        .stream_id = 7,
+        .role = .observer,
+        .controller_generation = 0,
+    });
+    try attachment.bindTransport(transport.interface());
+    try attachment.initScreen(2);
+    try std.testing.expect(try attachment.pumpScreen(std.testing.io));
+    try std.testing.expectEqual(@as(usize, 1), transport.release_calls);
+    try std.testing.expectEqual(@as(usize, 0), transport.fail_closed_calls);
+    try std.testing.expectEqual(@as(usize, 0), attachment.pending_batches.items.len);
+    attachment.deinit();
+    try ledger.finish();
+}
+
+test "remote attachment reports ledger invariant when failure cleanup cannot release" {
+    const allocator = std.testing.allocator;
+    var ledger: external_inbox_ledger.ExternalInboxLedger = .{};
+    const token = try ledger.reserve(0);
+    try ledger.adoptBatch(token, allocator, true, 7, try allocator.alloc(u8, 0));
+    var transport = ChargedTestTransport{
+        .ledger = &ledger,
+        .batch = .{ .charged = token },
+        .release_fails = true,
+    };
+    var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    var attachment = RemoteAttachment.init(failing.allocator(), .{
+        .runtime_id = 0xaa,
+        .stream_id = 7,
+        .role = .observer,
+        .controller_generation = 0,
+    });
+    try attachment.bindTransport(transport.interface());
+    try std.testing.expectError(
+        error.LedgerInvariant,
+        attachment.pumpScreen(std.testing.io),
+    );
+    try std.testing.expectEqual(@as(usize, 1), transport.release_calls);
+    try std.testing.expectEqual(@as(usize, 1), transport.fail_closed_calls);
+    transport.release_fails = false;
+    attachment.deinit();
+    try ledger.finish();
+}
+
+test "remote attachment rejects a charged batch demuxed to a sibling stream" {
+    const allocator = std.testing.allocator;
+    var ledger: external_inbox_ledger.ExternalInboxLedger = .{};
+    const token = try ledger.reserve(0);
+    try ledger.adoptBatch(token, allocator, true, 8, try allocator.alloc(u8, 0));
+    var transport = ChargedTestTransport{
+        .ledger = &ledger,
+        .batch = .{ .charged = token },
+    };
+    var attachment = RemoteAttachment.init(allocator, .{
+        .runtime_id = 0xaa,
+        .stream_id = 7,
+        .role = .observer,
+        .controller_generation = 0,
+    });
+    try attachment.bindTransport(transport.interface());
+    try std.testing.expectError(
+        error.LedgerInvariant,
+        attachment.pumpScreen(std.testing.io),
+    );
+    try std.testing.expectEqual(@as(usize, 1), transport.release_calls);
+    try std.testing.expectEqual(@as(usize, 1), transport.fail_closed_calls);
+    try std.testing.expectEqual(@as(usize, 0), attachment.pending_batches.items.len);
+    attachment.deinit();
+    try ledger.finish();
+}
+
+test "remote attachment charged queue admission OOM releases through stable ledger" {
+    const allocator = std.testing.allocator;
+    var ledger: external_inbox_ledger.ExternalInboxLedger = .{};
+    const token = try ledger.reserve(0);
+    try ledger.adoptBatch(token, allocator, true, 7, try allocator.alloc(u8, 0));
+    var transport = ChargedTestTransport{
+        .ledger = &ledger,
+        .batch = .{ .charged = token },
+    };
+    var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    var attachment = RemoteAttachment.init(failing.allocator(), .{
+        .runtime_id = 0xaa,
+        .stream_id = 7,
+        .role = .observer,
+        .controller_generation = 0,
+    });
+    try attachment.bindTransport(transport.interface());
+    try std.testing.expectError(error.OutOfMemory, attachment.pumpScreen(std.testing.io));
+    try std.testing.expectEqual(@as(usize, 1), transport.release_calls);
+    try std.testing.expectEqual(@as(usize, 1), transport.fail_closed_calls);
+    attachment.deinit();
+    try ledger.finish();
+}
+
+test "remote attachment stale charged lease latches invariant without double release" {
+    const allocator = std.testing.allocator;
+    var ledger: external_inbox_ledger.ExternalInboxLedger = .{};
+    const token = try ledger.reserve(0);
+    try ledger.adoptBatch(token, allocator, true, 7, try allocator.alloc(u8, 0));
+    try ledger.release(token);
+    var transport = ChargedTestTransport{
+        .ledger = &ledger,
+        .batch = .{ .charged = token },
+    };
+    var attachment = RemoteAttachment.init(allocator, .{
+        .runtime_id = 0xaa,
+        .stream_id = 7,
+        .role = .observer,
+        .controller_generation = 0,
+    });
+    try attachment.bindTransport(transport.interface());
+    try std.testing.expectError(error.LedgerInvariant, attachment.pumpScreen(std.testing.io));
+    try std.testing.expectEqual(@as(usize, 1), transport.fail_closed_calls);
+    try std.testing.expectEqual(@as(usize, 0), ledger.charged_items);
+    attachment.deinit();
+    try std.testing.expectError(error.InvariantFailure, ledger.finish());
+}
+
+test "remote attachment deinit releases every queued charged lease before dropping stream" {
+    const allocator = std.testing.allocator;
+    var ledger: external_inbox_ledger.ExternalInboxLedger = .{};
+    var transport = ChargedTestTransport{
+        .ledger = &ledger,
+        .batch = null,
+    };
+    var attachment = RemoteAttachment.init(allocator, .{
+        .runtime_id = 0xaa,
+        .stream_id = 7,
+        .role = .observer,
+        .controller_generation = 0,
+    });
+    try attachment.bindTransport(transport.interface());
+    for (0..3) |i| {
+        const bytes = try std.fmt.allocPrint(allocator, "batch-{d}", .{i});
+        const token = try ledger.reserve(bytes.len);
+        try ledger.adoptBatch(token, allocator, i == 0, 7, bytes);
+        try attachment.pending_batches.append(allocator, .{ .charged = token });
+    }
+    attachment.deinit();
+    try std.testing.expectEqual(@as(usize, 3), transport.release_calls);
+    try std.testing.expectEqual(@as(usize, 1), transport.drop_calls);
+    try std.testing.expect(transport.drop_observed_zero);
+    try std.testing.expectEqual(@as(usize, 0), transport.fail_closed_calls);
+    try ledger.finish();
 }

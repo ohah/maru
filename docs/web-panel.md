@@ -25,9 +25,12 @@
 2. **WKWebView subview(들)**(중간): web Term마다 하나, **본문 rect**에만(§5). split이면 여러 개. **(4e-3 구현 완료)**:
    활성 워크스페이스 탭의 pane 트리를 walk해 **web Term마다** WKWebView(`MaruWebPanelView` 래퍼) 하나를 붙이고, 각 웹뷰를
    **자기 pane 본문 rect에 고정**한다(4c의 활성 pane 추종을 완전 제거 — 사용자 관찰 해소). 같은 pane의 활성 Term만 show·
-   비활성 탭 web Term은 hidden(상태 유지), 비활성 워크스페이스 탭의 web Term은 destroy(파일 패널은 워크스페이스 트리
-   밖 **전역 도크**라 이 규칙의 대상이 아니다 — [file-panel.md](file-panel.md) §4). Swift는 `webPanels[surface_id]`
+   비활성 탭 web Term은 hidden(상태 유지), 비활성 워크스페이스 탭의 web Term은 destroy. Swift는 `webPanels[surface_id]`
    dict로 batch 전이(create/destroy/reframe/hide/show)를 적용한다. Term 이동 시 재부모화는 후속(4e-4·§6).
+   **FP16 목표 변경(계획 — [file-panel.md](file-panel.md) §4가 단일 출처)**: 마지막 규칙("비활성 워크스페이스 탭의 web Term은
+   destroy")을 **"zero rect + hidden으로 보존"**으로 바꾼다. 파일 패널이 전역 도크에서 워크스페이스 Term으로 옮겨오면서
+   destroy가 곧 미저장 편집 유실이 되기 때문이며, 적용 범위는 파일뿐 아니라 **web Term 전체**(브라우저 포함)다. 그 결과
+   브라우저가 워크스페이스 전환 뒤 흰 페이지가 되던 현행 동작도 함께 사라진다. 현재 코드는 아직 destroy다.
 3. **모달 Metal 오버레이**(맨 위): command palette·find·confirm. `isOpaque=false`, 평소 clear(투명), 모달 열림 시에만 셀을 그린다.
 
 **모달 레이어 분리는 두 개의 선행 리팩터다**(Phase 4 선행, 가벼운 작업이 아님):
@@ -192,7 +195,7 @@ Phase 5 세 번째 슬라이스(신뢰 UI 경로)는 `maru-app://`를 안정적 
   **분해**: **7f-0(Zig: Swift-first web term 등록 ABI — 구현 완료, `create_adopted_web_term` v109·헤드리스: term 삽입·surface_id 발급)** · **7f-1(Swift: `WKUIDelegate.createWebViewWith` → 7f-0 ABI로 term 등록 + adopt init + drain `.create` 멱등[중복 WKWebView 생성 스킵=opener 링크 보존] + 새 탭 활성화 — 구현 완료, GUI 손 테스트 통과: ⌘+클릭·target=_blank·window.open이 새 브라우저 탭으로 열리고 리턴)** · **7f-2(팝업 정책 게이트 — 구현 완료, `popupTargetAllowed` v111: about/http/https/빈만 허용, javascript·file·data·blob·maru-app 거부, adversarial 헤드리스; Swift `createWebViewWith`가 팝업 생성 전 호출)**. **opener/OAuth 검증**: WebKit 계약(`createWebViewWith`에 넘어온 config=부모 복사본 → 그 config로 만든 webview라 `window.opener`·named window·`postMessage` 링크 성립·공유 데이터스토어 승계)으로 **구조적 보장** + 7f-1 GUI 손 테스트(window.open 팝업이 열림 = opener 링크 성립)로 검증. **자동 round-trip 스모크는 보류**: 무-네트워크 스모크 하니스에서 data:/about:blank 팝업의 same-origin(opaque origin) 제약으로 부모↔팝업 postMessage 왕복을 깔끔히 구성하기 어렵다 — 실 OAuth 로그인은 GUI 손 테스트로 확인. WKWebView 팝업 생성·opener·포커스는 스모크 밖이라 GUI 손 테스트로 검증(7e-2b/7e-3 동형; 스크린샷은 WKWebView 픽셀 못 잡음).
 
   **에이전트 제어와의 연결**: 팝업을 1급 surface(`surface_id`)로 adopt하는 것이 곧 **에이전트가 팝업까지 제어**할 수 있는 전제다 — host-mediated 브라우저 MCP가 각 surface(팝업 adopt 포함)를 `surface_id`로 주소지정한다. 프로토콜 결정·구현 완료 상태·남은 5f 재슬라이싱은 [control-plane.md](control-plane.md) §9.2~§9.5를 **단일 출처**로 따르며, 이 문단에서 진행 상태를 복제하지 않는다. §13의 host-mediated vs Web Inspector 분기도 같은 경계를 따른다.
-- **파일 패널(마크다운·HTML 뷰어/편집기 — 전역 도크)**: 로컬 `.md`/`.html`을 여는 파일 패널 — 창 레벨 전역 도크 슬롯(우측|하단), 파일 탭·헤더 밴드·파일 트리 = GPU chrome, 브리지 `file.read/write`, CodeMirror 6 편집 — 은 [file-panel.md](file-panel.md)를 단일 출처로 둔다(워크스페이스 pane 트리 밖이라 §2 destroy 규칙 비대상; §7 브리지 origin 격리·§4 포커스 불변식[도크 축 확장]과 상호작용). 웹 브라우저(`browser` kind)는 이 문서 그대로 워크스페이스 term이며, 전환 시 URL 기억·재로드 완화는 백로그([file-panel.md] §13).
+- **파일 패널(마크다운·HTML 뷰어/편집기)**: 로컬 `.md`/`.html`을 여는 파일 패널 — 파일 탭·헤더 밴드·파일 트리 = GPU chrome, 브리지 `file.read/write`, CodeMirror 6 편집 — 은 [file-panel.md](file-panel.md)를 단일 출처로 둔다(§7 브리지 origin 격리·§4 포커스 불변식과 상호작용). **현행(FP1~FP15)**은 창 레벨 전역 도크 슬롯(우측|하단)이라 워크스페이스 pane 트리 밖이고 §2 destroy 규칙의 비대상이다. **FP16 목표**는 파일을 워크스페이스 Term(`web_panel_kind = .file`)으로 옮기고 도크를 탐색기 전용으로 축소하는 것이며, 그 때 파일 패널은 §2 규칙의 **정상 대상이 되고 대신 그 규칙의 destroy가 hidden 보존으로 바뀐다**(§2 FP16 항목). 웹 브라우저(`browser` kind)는 이 문서 그대로 워크스페이스 term이고, 전환 시 흰 페이지가 되던 문제는 FP16 §4가 함께 해소한다(별도 URL 기억·재로드 백로그는 폐기).
 - **배경 정합**: 신뢰 Markdown 파일 패널의 **초기 paint**는 [file-panel.md](file-panel.md) §1 계약대로 생성 시 공개 API `underPageBackgroundColor`와 hash-pinned critical CSS를 함께 써 기본 흰 backing을 노출하지 않는다. 반면 터미널·chrome이 반투명(`window.opacity<1`)인 창에서 임의 browser/로컬 HTML 본문까지 투명화할지는 여전히 별도 결정이다. 그 경우에도 공개 API `underPageBackgroundColor`(macOS 12+)만 쓰고, `drawsBackground`는 비공개 KVC 키라 의존하지 않는다.
 - **테마/다크모드 동기화**: 터미널은 `viewDidChangeEffectiveAppearance`로 테마 교체. 웹 패널 콘텐츠(maru-app:// UI)가 maru 테마·다크/라이트를 따르도록 브리지로 CSS 변수/토큰 주입.
 - **⌘F 분기**: 포커스가 터미널이면 maru find(스크롤백), 웹 패널이면 페이지 내 find. 포커스 기준 라우팅 명시.

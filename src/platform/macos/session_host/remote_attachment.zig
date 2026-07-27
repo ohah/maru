@@ -945,7 +945,7 @@ const ChargedTestTransport = struct {
         token: external_inbox_ledger.Token,
     ) external_inbox_ledger.InvariantError!external_inbox_ledger.BatchView {
         const self: *ChargedTestTransport = @ptrCast(@alignCast(context));
-        return self.ledger.borrowBatch(token);
+        return self.ledger.borrowLease(token);
     }
 
     fn release(
@@ -955,7 +955,7 @@ const ChargedTestTransport = struct {
         const self: *ChargedTestTransport = @ptrCast(@alignCast(context));
         self.release_calls += 1;
         if (self.release_fails) return error.InvariantFailure;
-        return self.ledger.release(token);
+        return self.ledger.releaseLease(token);
     }
 
     fn drop(context: *anyopaque, _: u64) void {
@@ -981,6 +981,22 @@ const ChargedTestTransport = struct {
         };
     }
 };
+
+fn reserveChargedBatch(
+    ledger: *external_inbox_ledger.ExternalInboxLedger,
+    allocator: std.mem.Allocator,
+    is_snapshot: bool,
+    stream_id: u64,
+    bytes: []u8,
+) !external_inbox_ledger.Token {
+    var owned_bytes = bytes;
+    var payload = external_inbox_ledger.OwnedPayload.takeOwned(allocator, &owned_bytes);
+    errdefer payload.deinit();
+    return ledger.reserveLease(.{
+        .stream_id = stream_id,
+        .is_snapshot = is_snapshot,
+    }, &payload);
+}
 
 fn testSnapshot(allocator: std.mem.Allocator) ![]u8 {
     const screen_stream = @import("screen_stream.zig");
@@ -1088,9 +1104,8 @@ test "remote attachment fail-closes malformed consumed screen bytes" {
 test "remote attachment releases a charged batch after apply failure" {
     const allocator = std.testing.allocator;
     var ledger: external_inbox_ledger.ExternalInboxLedger = .{};
-    const token = try ledger.reserve("not-a-screen-frame".len);
-    try ledger.adoptBatch(
-        token,
+    const token = try reserveChargedBatch(
+        &ledger,
         allocator,
         true,
         7,
@@ -1122,8 +1137,7 @@ test "remote attachment applies and releases a charged snapshot with an empty qu
     const allocator = std.testing.allocator;
     var ledger: external_inbox_ledger.ExternalInboxLedger = .{};
     const snapshot = try testSnapshot(allocator);
-    const token = try ledger.reserve(snapshot.len);
-    try ledger.adoptBatch(token, allocator, true, 7, snapshot);
+    const token = try reserveChargedBatch(&ledger, allocator, true, 7, snapshot);
     var transport = ChargedTestTransport{
         .ledger = &ledger,
         .batch = .{ .charged = token },
@@ -1147,8 +1161,13 @@ test "remote attachment applies and releases a charged snapshot with an empty qu
 test "remote attachment reports ledger invariant when failure cleanup cannot release" {
     const allocator = std.testing.allocator;
     var ledger: external_inbox_ledger.ExternalInboxLedger = .{};
-    const token = try ledger.reserve(0);
-    try ledger.adoptBatch(token, allocator, true, 7, try allocator.alloc(u8, 0));
+    const token = try reserveChargedBatch(
+        &ledger,
+        allocator,
+        true,
+        7,
+        try allocator.alloc(u8, 0),
+    );
     var transport = ChargedTestTransport{
         .ledger = &ledger,
         .batch = .{ .charged = token },
@@ -1176,8 +1195,13 @@ test "remote attachment reports ledger invariant when failure cleanup cannot rel
 test "remote attachment rejects a charged batch demuxed to a sibling stream" {
     const allocator = std.testing.allocator;
     var ledger: external_inbox_ledger.ExternalInboxLedger = .{};
-    const token = try ledger.reserve(0);
-    try ledger.adoptBatch(token, allocator, true, 8, try allocator.alloc(u8, 0));
+    const token = try reserveChargedBatch(
+        &ledger,
+        allocator,
+        true,
+        8,
+        try allocator.alloc(u8, 0),
+    );
     var transport = ChargedTestTransport{
         .ledger = &ledger,
         .batch = .{ .charged = token },
@@ -1203,8 +1227,13 @@ test "remote attachment rejects a charged batch demuxed to a sibling stream" {
 test "remote attachment charged queue admission OOM releases through stable ledger" {
     const allocator = std.testing.allocator;
     var ledger: external_inbox_ledger.ExternalInboxLedger = .{};
-    const token = try ledger.reserve(0);
-    try ledger.adoptBatch(token, allocator, true, 7, try allocator.alloc(u8, 0));
+    const token = try reserveChargedBatch(
+        &ledger,
+        allocator,
+        true,
+        7,
+        try allocator.alloc(u8, 0),
+    );
     var transport = ChargedTestTransport{
         .ledger = &ledger,
         .batch = .{ .charged = token },
@@ -1227,9 +1256,14 @@ test "remote attachment charged queue admission OOM releases through stable ledg
 test "remote attachment stale charged lease latches invariant without double release" {
     const allocator = std.testing.allocator;
     var ledger: external_inbox_ledger.ExternalInboxLedger = .{};
-    const token = try ledger.reserve(0);
-    try ledger.adoptBatch(token, allocator, true, 7, try allocator.alloc(u8, 0));
-    try ledger.release(token);
+    const token = try reserveChargedBatch(
+        &ledger,
+        allocator,
+        true,
+        7,
+        try allocator.alloc(u8, 0),
+    );
+    try ledger.releaseLease(token);
     var transport = ChargedTestTransport{
         .ledger = &ledger,
         .batch = .{ .charged = token },
@@ -1264,8 +1298,7 @@ test "remote attachment deinit releases every queued charged lease before droppi
     try attachment.bindTransport(transport.interface());
     for (0..3) |i| {
         const bytes = try std.fmt.allocPrint(allocator, "batch-{d}", .{i});
-        const token = try ledger.reserve(bytes.len);
-        try ledger.adoptBatch(token, allocator, i == 0, 7, bytes);
+        const token = try reserveChargedBatch(&ledger, allocator, i == 0, 7, bytes);
         try attachment.pending_batches.append(allocator, .{ .charged = token });
     }
     attachment.deinit();

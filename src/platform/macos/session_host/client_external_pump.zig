@@ -206,8 +206,12 @@ pub const ExternalPumpStorage = struct {
         } };
         if (self.owned_client) |*owned| owned.deinit();
         self.owned_client = null;
+        const drain_report = self.inbox_ledger.drainAll();
         const ledger_result = self.inbox_ledger.finish();
         self.lifecycle = .dead;
+        if (drain_report.drained_active_count != 0 or
+            drain_report.had_sticky_invariant)
+            return .ledger_not_zero;
         return if (ledger_result) |_| .cleaned else |_| .ledger_not_zero;
     }
 };
@@ -535,7 +539,15 @@ test "external pump storage teardown reports impossible 2b2b ledger charge after
         ExternalPumpStorage.initInPlace(&storage, &fixture.client, valid_evidence) ==
             .initialized,
     );
-    _ = try storage.inbox_ledger.reserve(1);
+    var allocation = try std.testing.allocator.dupe(u8, "x");
+    var payload = external_inbox_ledger.OwnedPayload.takeOwned(
+        std.testing.allocator,
+        &allocation,
+    );
+    _ = try storage.inbox_ledger.reserveLease(.{
+        .stream_id = 1,
+        .is_snapshot = false,
+    }, &payload);
     try std.testing.expectEqual(TeardownResult.ledger_not_zero, storage.teardown());
     try std.testing.expect(c.fcntl(owned_fd, c.F.GETFD, @as(c_int, 0)) < 0);
     try std.testing.expectEqual(TeardownResult.already_dead, storage.teardown());

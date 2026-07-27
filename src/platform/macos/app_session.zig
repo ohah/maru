@@ -12790,7 +12790,7 @@ pub const AppSession = struct {
     /// 워크스페이스 순회 순서(탭→pane→Term)에서 `index`번째 파일 entry.
     /// FP16 이전의 `group.entries.items[index]` 자리를 그대로 대신한다 — 도크가
     /// 그룹 배열을 들고 있을 때의 "열린 순서"가 이제 pane 안 Term 순서이기 때문이다.
-    fn fileEntryAt(self: *AppSession, index: usize) ?*dock_panel.Entry {
+    pub fn fileEntryAt(self: *AppSession, index: usize) ?*dock_panel.Entry {
         var n: usize = 0;
         var it = self.fileEntries();
         while (it.next()) |entry| {
@@ -13806,6 +13806,9 @@ pub const AppSession = struct {
         term.file_entry = entry;
         entry.surface_id = term.surfaceId();
         self.focusTerm(pane.terms.items.len - 1);
+        // 파일을 열면 탐색기도 함께 나타난다 — 옛 `DockPanel.open`이 세우던 자리다. FP16에서 도크가
+        // 탐색기 전용이 된 뒤에도 "파일을 열면 그 파일이 있는 프로젝트를 볼 수 있어야 한다"는 계약은 같다.
+        self.dock.presented = true;
         return .{ .term = term, .created = true, .previous_active_term = previous_active_term };
     }
 
@@ -44450,6 +44453,9 @@ test "FP9 focus toggle: empty notice and workspace-dock round trip use one confi
     _ = try session.openFileTermInActivePane("/tmp/focus-toggle.md", .markdown);
     session.assignDockSurfaceIds();
     const sid = session.fileEntryAt(0).?.surface_id;
+    // FP16: 파일을 열면 그 파일이 publish 대기 barrier를 갖는다(requestDockEntryFocus). 이 테스트의
+    // 주제는 toggle 왕복이므로 workspace baseline에서 시작한다.
+    session.focusWorkspaceInput();
     try std.testing.expectEqual(@as(usize, 1), session.webSurfaceTransitionsCount()); // baseline dock create
     try std.testing.expectEqual(@as(usize, 0), session.webSurfaceTransitionsCount());
     session.dispatchAppAction(.toggle_file_panel_focus);
@@ -44470,7 +44476,7 @@ test "FP9 focus toggle: empty notice and workspace-dock round trip use one confi
     try std.testing.expect(session.focus_owner == .file_tree);
 }
 
-test "FP9 surface-less close successor blocks PTY and terminal close until native focus ack" {
+test "FP9 publish 대기 barrier가 typed ack 전까지 PTY·터미널 close를 fail-close한다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
     const session = try initSmokeSessionSized(allocator);
@@ -44480,25 +44486,25 @@ test "FP9 surface-less close successor blocks PTY and terminal close until nativ
     const b_id = b_open.term.file_entry.?.id;
     const a_open = try session.openFileTermInActivePane("/tmp/fp9-live-active-a.md", .markdown);
     session.assignDockSurfaceIds();
-    b_open.term.file_entry.?.surface_id = 0;
     const a_surface = a_open.term.file_entry.?.surface_id;
     try std.testing.expect(a_surface != 0);
-    try std.testing.expectEqual(@as(u64, 0), b_open.term.file_entry.?.surface_id);
     try std.testing.expect(session.focusFilePanelSurface(a_surface));
 
-    const terminal_surface = session.activeSurface().id;
     const terminal_inputs = session.total_terminal_input_events;
     const workspace_count = session.tabs.items.len;
     try std.testing.expect(session.closeFilePanelSurfaceNow(a_surface));
+    // A를 닫으면 pane의 활성 Term이 승계되므로 baseline은 close **뒤**에 잡는다.
+    const terminal_surface = session.activeSurface().id;
+    const terms_before_blocked_close = session.activePane().terms.items.len;
+    // FP16: 파일이 pane 탭이라 close는 pane의 active_term 승계로 끝나고 입력은 workspace로 간다.
+    // publish 대기 barrier는 그 다음 "승계된 파일로 focus" 요청이 만든다.
     const successor = session.fileEntryForId(b_id).?;
-    try std.testing.expect(successor.surface_id != 0);
+    session.requestDockEntryFocus(successor);
     try std.testing.expect(session.pending_dock_focus != null);
     try std.testing.expect(session.focus_owner == .dock_pending and session.focus_owner.dock_pending == session.pending_dock_focus.?.entry_id);
+    // sid가 있어도 publish를 추측해 dock_surface로 승격하지 않는다 — typed completion만 승격이다.
     try std.testing.expect(session.focusedDockSurface() == null);
     try std.testing.expect(session.inputFocus() == .dock_pending);
-
-    // sid가 이미 발급된 상태에서 chrome을 재활성화해도 publish를 추측해 dock_surface로 승격하지 않는다.
-    try std.testing.expect(session.focus_owner == .dock_pending and session.focus_owner.dock_pending == session.pending_dock_focus.?.entry_id);
 
     _ = try session.handleKeyEvent(.{ .key = .{ .char = 'x' } });
     try std.testing.expectEqual(terminal_inputs, session.total_terminal_input_events);
@@ -44514,6 +44520,7 @@ test "FP9 surface-less close successor blocks PTY and terminal close until nativ
     session.dispatchAppAction(.close_focused);
     try std.testing.expect(session.fileEntryForId(b_id) != null);
     try std.testing.expectEqual(workspace_count, session.tabs.items.len);
+    try std.testing.expectEqual(terms_before_blocked_close, session.activePane().terms.items.len);
     try std.testing.expectEqual(terminal_surface, session.activeSurface().id);
     try std.testing.expect(session.pending_file_panel_close == null);
 

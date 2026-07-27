@@ -5574,7 +5574,7 @@ test "Metal key-down ABI repairs stale dock focus before routing Cmd+W" {
     try std.testing.expectEqual(@as(c_int, @intFromEnum(Status.ok)), maru_macos_app_session_create(&config, &session));
     defer maru_macos_app_session_destroy(session);
     try std.testing.expectEqual(@as(u32, 1), maru_macos_app_session_open_file_panel_path(session, path.ptr, path.len));
-    const entry = &session.?.dock.singleGroup().?.entries.items[0];
+    const entry = session.?.fileEntryAt(0).?;
     entry.mode = .source_edit;
     entry.dirty = true;
     session.?.focus_owner = .{ .dock_surface = entry.surface_id }; // TerminalView가 실제 source인 stale logical owner.

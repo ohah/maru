@@ -7513,6 +7513,20 @@ pub const AppSession = struct {
         // 범위 게이트(code-review [1]): M3d-2a-i는 비-그룹·비-pinned 워크스페이스만. detach(비가역) **전에** 거부해 source
         // 불변(pinned/group 워크스페이스 이동은 M3d-2a-ii). 안 막으면 adoptTab의 부분 정규화가 pinned prefix·그룹 파티션을 깬다.
         if (!src.isMovableWorkspace(idx)) return error.UnsupportedMove;
+        // 창당 경로 유일성(§1)은 merge뿐 아니라 **워크스페이스 이동**에도 적용된다 — 이 워크스페이스가 든
+        // 파일이 destination에 이미 열려 있으면 이동 뒤 같은 경로가 두 Term으로 공존한다. detach(비가역)
+        // 전에 거부한다. 병합처럼 자동 해소하지 않는 이유는 여기서는 **한 워크스페이스만** 옮기는 것이라
+        // 어느 쪽을 닫아도 사용자가 고르지 않은 창이 바뀌기 때문이다(code-review max).
+        if (src != dst) {
+            for (src.tabs.items[idx].panes.items) |pane| {
+                for (pane.terms.items) |term| {
+                    const entry = term.file_entry orelse continue;
+                    if (dst.fileEntryForPath(entry.path) != null) return error.UnsupportedMove;
+                }
+            }
+            if (dst.fileEntryCount() + countTabFileEntries(src.tabs.items[idx]) > dock_panel.max_entries)
+                return error.UnsupportedMove;
+        }
         // before(수술 전, 순수): 이동 서브트리 surface_id 수집 + trust kind. surface_id는 이동 중 불변이라 순서만 안정하면 된다.
         const moved = collectTabSurfaceIds(src.tabs.items[idx], out_ids);
         const from_kind = src.windowKind();
@@ -13928,6 +13942,16 @@ pub const AppSession = struct {
     /// pane의 마지막 Term이면 닫지 않고 false를 돌려준다. pane은 항상 Term ≥1이라는 모델 불변식
     /// (`session_model.Pane`)을 파일 경로가 깨면 안 되고, 그 경우의 cascade(빈 pane collapse·워크스페이스 닫기)는
     /// `executeClose`가 소유하는 별도 정책이다.
+    fn countTabFileEntries(tab: *Tab) usize {
+        var n: usize = 0;
+        for (tab.panes.items) |pane| {
+            for (pane.terms.items) |term| {
+                if (term.file_entry != null) n += 1;
+            }
+        }
+        return n;
+    }
+
     /// 그 EntryId가 **활성 워크스페이스**의 파일인가. publish 대기 barrier가 보이지 않는 파일을 가리킨 채
     /// 입력을 삼키지 않게 하는 게이트다.
     fn activeTabHasFileEntry(self: *const AppSession, entry_id: dock_panel.EntryId) bool {

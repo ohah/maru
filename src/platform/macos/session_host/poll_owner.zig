@@ -1152,6 +1152,26 @@ fn pumpUntilLocalStreamOneSnapshot(owner: *Owner, fd: c.fd_t) !void {
     try testing.expect(saw_snapshot_end);
 }
 
+fn drainQueuedTestOutput(
+    owner: *Owner,
+    fd: c.fd_t,
+    admission: connection_slot.ReactorCore.Admission,
+) !void {
+    var buf: [4096]u8 = undefined;
+    for (0..1000) |_| {
+        _ = try owner.pollOnce(0);
+        while (true) {
+            const rc = c.recv(fd, &buf, buf.len, posix.MSG.DONTWAIT);
+            if (rc > 0) continue;
+            if (rc == 0) return error.TestUnexpectedResult;
+            if (posix.errno(rc) == .AGAIN) break;
+            return error.TestUnexpectedResult;
+        }
+        if ((try owner.reactor.get(admission)).pending_bytes == 0) return;
+    }
+    return error.TestUnexpectedResult;
+}
+
 fn admittedKeyExcept(
     owner: *Owner,
     excluded: ?connection_slot.ConnectionKey,
@@ -3266,6 +3286,14 @@ test "poll owner rejects a prepared transition after requester slot ABA reuse" {
     try testing.expectEqual(stale_requester.index, replacement.index);
     try testing.expect(!std.meta.eql(stale_key, replacement_key));
     try testing.expect(stale_subscription.value != replacement_subscription.value);
+    // The attach helper proves that the initial snapshot reached the peer, but a producer delta
+    // may already be queued behind it. Make the ABA assertion's empty-queue precondition explicit
+    // instead of depending on socket scheduling and expecting the stale control reply at the head.
+    try drainQueuedTestOutput(
+        &owner,
+        replacement.fd,
+        replacement_client.admission,
+    );
     try testing.expect(Owner.applyControllerTransition(
         &owner,
         replacement_client,

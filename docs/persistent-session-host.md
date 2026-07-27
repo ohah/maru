@@ -2467,13 +2467,12 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
           apply/free까지 끝내고 반환 시 `RemoteAttachment.pending_batches`가 다시 0이어야 한다. external adapter만
           `.charged`를 사용한다. `RemoteAttachment.pending_batches`는 lease를 소유하고 append OOM, screen 없음,
           decode/apply 실패, 정상 apply, drop/deinit 모두 공통
-          `lease.borrow(fallback_batch, transport.borrow_charged, transport.context)`로 immutable `StreamBatchView`를
+          `lease.borrow(transport)`로 immutable `StreamBatchView`를
           얻는다. `.untracked`는 자기 `StreamBatch`를, `.charged`는 slot/generation을 검증한 stable ledger slot이
           소유한 `is_snapshot/stream_id/bytes` view를 반환한다. borrow 실패는 invariant terminal이며 raw ledger/bytes
           owner pointer를 lease에 노출하지 않는다. release는
-          `lease.release(fallback_allocator, transport.release_charged, transport.context)
-          -> ok | invariant_failure` 하나를 호출한다. `.untracked`는
-          `RemoteAttachment.allocator`인 fallback으로 기존 bytes를 free하고, `.charged`는 fallback을 무시하고 stable
+          `lease.release(transport) -> ok | invariant_failure` 하나를 호출한다. `.untracked`는
+          stored allocator authority를 가진 `StreamBatch.deinit()`으로 해제하고, `.charged`는 stable
           slot의 allocator/free 권위만 쓴다. `pumpScreen` 중 invariant failure는 transport를 즉시 fail-close하고 typed
           error를 반환한다. void `RemoteAttachment.deinit` 중 failure는 ledger의 sticky `invariant_failed` latch를
           남기고 transport `fail_closed`를 호출한 뒤 나머지 lease/drop cleanup을 계속해 final owner gate가 실패를
@@ -2509,7 +2508,9 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
           charged descriptor arrays/source map capacity, state structs와 `RemoteScreen`까지 포함한 process RSS가
           아니다. artifact 소유는 non-vacuous하게 나눈다. 2b2b는 그 시점에 실재하는 inline state와 ledger slots의
           `@sizeOf`만 `fixed_storage_bytes`로 기록한다. 2b2c는 exact-capacity descriptor/source-map 각각의
-          `capacity * @sizeOf(entry)` checked sum과 teardown final zero를 `adoption_metadata_bytes`로 추가한다.
+          `capacity * @sizeOf(entry)` checked sum을
+          `adoption_metadata_resident_bytes`/`adoption_metadata_prepare_peak_bytes`로 분리하고 teardown에서 둘 다
+          final zero임을 검증한다.
           2b3은 실제 `RemoteAttachment`/`RemoteScreen` backing을 더한 `product_storage_bytes`를 기록한다.
           capacity 여유분을 암묵적으로 두지 않으며 곱셈 overflow/cap+1은 allocation 전에 거부한다.
           bind normalize는 **기존**
@@ -2797,13 +2798,35 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
 
             - **2b2c2 — neutral Client inventory + prepared screen/request/authority adoption:** `client.zig`가
               ledger를 import하지 않는 `ExternalAdoptionInventory`와
-              `inspectExternalAdoption(target_stream)`, infallible `commitExternalAdoption(plan)`의 단일
-              private-field SSOT를 소유한다. 별도 `client_external_adoption.zig`가 Client inventory와 c1 ledger
-              plan을 조합한다. **c2는 source mutation·ledger commit·lifecycle live/recovery/terminal publish를
-              하지 않고** c3 event decision과 합칠 `PreparedExternalAdoption`만 만든다.
+              `inspectExternalAdoption(target_stream)`, opaque `PreparedClientDisarm`,
+              `preflightExternalAdoption(expected_inventory, out: *PreparedClientDisarm)` 및
+              infallible `commitExternalAdoption(disarm: *PreparedClientDisarm)`의 단일 private-field SSOT를
+              소유한다. preflight는 exact Client/fingerprint/final disarm-plan 주소를 봉인하며 mutation 0으로 실패할 수
+              있고, commit은 같은 Client-local opaque plan만 받아 실패/할당/callback이 없다. composite
+              별도 `client_external_adoption.zig`는 Client inventory와 c1 ledger의 중립 sub-plan만 소유한다.
+              pump-owned storage/evidence를 아는 outer `PreparedExternalAdoption`과 target seal은
+              `client_external_pump.zig`가 소유해 import 역전을 만들지 않는다. **c2 product 경로는 source
+              mutation·ledger commit·Client disarm·lifecycle live/recovery/terminal publish를 하지 않고** c3
+              event decision과 합칠 준비 객체만 만든다. c3 final commit만 c1 ledger commit 뒤 sealed
+              `PreparedClientDisarm`을 소비한다.
               `client_external_pump.zig`의 최종 combined commit은 c3가 소유한다.
               import 위상은 `client <- client_external_adoption <- client_external_pump`이며 역방향 import는
               boundary test가 금지한다.
+
+              `ConnectionProfile`은 hello를 만들 때만 쓰는 인자가 아니라
+              `Client.connection_profile: ?ConnectionProfile = null`에 connect 시 한 번 저장되는 immutable SSOT다.
+              `null`은 수동 fixture/미초기화 상태라 external adoption이 mutation 없이 거부하며, non-null도 exact
+              `.cli_attach`만 admission한다. `.gui/.cli_probe/.admin`은 mutation 0으로 거부한다. strict-event 여부는
+              별도 bool로 복제하지 않고
+              `connection_profile.requiresStrictExternalEvents()`에서 파생한다. 모든 connect constructor와
+              `transferToExternalPump`가 이 값을 보존하고, 수동 fixture의 미지정 profile은 external adoption을
+              허용하지 않는다. c2는 profile 저장/transfer/fingerprint까지만 소유한다. c3가 이 enum을 소비해
+              `.cli_attach`의 pre-raw `bufferEvent`를 malformed metadata/resize silent drop이 없는 bounded strict raw
+              event queue로 바꾸고 classifier에 연결한다.
+              Client는 선택한 compatibility `attach_schema`와 required fingerprint 검증 성공 여부도 immutable
+              provenance로 저장한다. connect/`finishHello`만 이를 설정하고 `transferToExternalPump`와 inventory
+              fingerprint가 보존한다. manual/corrupt Client의 provenance null, schema-wire 불일치, required
+              fingerprint 미검증은 mutation 0으로 거부하며 `wire_major`에서 검증 성공을 재추측하지 않는다.
 
               owner table은 다음과 같다.
 
@@ -2814,10 +2837,10 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
               | `partial_batch` | ledger `partial` slot + storage optional token |
               | `pending_stream[]` FIFO payload/header | ledger `frame` slot + storage token FIFO |
               | `pending_events[]` | c3 prepared event transaction; screen ledger 밖 |
-              | 세 source/event ArrayList backing | commit에서 exact free 후 Client empty tombstone; retained capacity 0 |
+              | `pending_batches`/`partial_batch.bytes`/`pending_stream`/`pending_events` 네 ArrayList backing | commit에서 exact free 후 Client empty tombstone; retained capacity 0 |
               | `next_request_id` | storage `RequestIdState`; Client scalar는 성공 commit에서 `0` retired sentinel |
               | `pending_outbound`/external TX used items | adoption precondition상 null/0, capacity/saved flags만 Client 유지 |
-              | connection profile/strict-event bit | `storage.owned_client`에 잔류하고 inventory fingerprint에 포함 |
+              | immutable connection profile과 여기서 파생한 strict-event policy | `storage.owned_client`에 잔류하고 inventory fingerprint에 포함 |
 
               screen의 canonical consume order는 기존 Client가 증명 가능한
               **completed `pending_batches` FIFO → existing `partial_batch` prefix와 이를 이어 받는
@@ -2825,28 +2848,74 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
               이어질 수 없거나 foreign stream/nonzero request/wrong flags인 조합은 mutation 없이 protocol
               terminal이다. 세 container의 global 과거 arrival sequence를 새로 추측하지 않는다.
 
-              `partial_batch.bytes`는 capacity가 있는 `ArrayListUnmanaged`이므로 prepare가 logical len의 exact
-              replacement `OwnedPayload`를 stage한다. OOM이면 original pointer/len/cap/chunk count가 불변이고,
-              commit은 old ArrayList allocation을 deinit한 뒤 replacement만 ledger에 옮긴다. old+replacement
-              prepare peak는 checked physical artifact에 별도 기록한다. `PreparedExternalAdoption`은 inherited
-              item count와 정확히 같은 capacity의 persistent token arrays, commit 직후 free할 transient
-              `[]SourceRef`, c1 seed plan, partial
-              replacement와 Client inventory fingerprint를 소유한다. `adoption_metadata_bytes`는 target pointer
-              bits와 각 resident/prepare-peak `capacity * @sizeOf(entry)` checked sum을 분리하며 capacity 여유와
-              곱 overflow를 허용하지 않는다.
+              prepare는 `pending_batches`, `partial_batch`, `pending_stream`의 **모든 logical payload**를
+              `Client.allocator`로 exact-copy한 `OwnedPayload` replacement로 stage한다. 원본 storage를 owner인 척
+              감싸거나 prepare 중 tombstone하지 않는다. 이 단순한 copy-before-commit 규칙으로 c1의 exact-owner
+              wrapper 계약과 c2의 source-mutation-0 계약 사이에 borrowed-owner 틈을 만들지 않는다. OOM이면 모든 원본
+              pointer/len/cap/header/chunk count가 불변이다. c3 commit은 replacement를 ledger에 옮긴 뒤
+              `PreparedClientDisarm`으로 원본 payload와 네 ArrayList backing을 exact free한다. resident semantic
+              payload 18 MiB와 replacement 18 MiB가 동시에 사는 adoption payload peak는 기존 nonalias replacement
+              transient 상한으로 계측한다.
+
+              Client-private `PreparedClientDisarm`이 source ordinal과 원본 owner slot을 유일하게 해석한다.
+              external adapter의 `SourceRef`는 destination token order만 나타내는 중립 ordinal이며 Client field/index를
+              encode하거나 Client layout을 복제하지 않는다.
+
+              pump-owned outer `PreparedExternalAdoption`은 caller의 final address에서 `initInPlace`하고 이후
+              move/resize할 수 없다.
+              `.transfer` variant만 inherited screen item count와 정확히 같은 capacity의 stable
+              `[]OwnedPayload` wrapper backing과 persistent token arrays, commit 직후 free할 transient
+              `[]SourceRef`를 만들고 마지막으로 c1 seed plan을 같은 wrapper base address에 봉인한다.
+              transfer-null discard/recovery variant는 wrapper/token/source-ref/c1 plan이 모두 0이며 공통 Client
+              inventory fingerprint와 disarm만 소유한다.
+              `saved_self_addr`, exact source `Client` 주소, target `ExternalPumpStorage` 주소, ledger 주소,
+              attachment evidence 전체, wrapper inventory base 주소를 각각 봉인한다. attachment controller generation은
+              `Client.authority_generation`에서 추측하지 않고 storage의 immutable `AttachmentEvidence`만 사용한다.
+              abort/deinit 전까지 wrapper backing과 plan 주소는 불변이며, prepare와 commit은 같은 exclusive
+              owner-thread 구간에서 실행되어 source payload bytes 자체도 중간에 변경될 수 없다.
+              artifact는 `pointer_bits`를 별도 필드로 두고, `adoption_metadata_resident_bytes`와
+              `adoption_metadata_prepare_peak_bytes`는 각 backing의 `capacity * @sizeOf(entry)` checked byte sum만
+              기록한다. 동시 prepare peak의 allocation 전 hard cap이 `4 MiB`이며 resident도 그 이하임을 별도로
+              요구한다. capacity 여유와 곱 overflow를 허용하지 않고 두 byte 수치 각각 exact cap/cap+1을 검증한다.
+              payload replacement bytes는 metadata에 섞지 않고 위 18 MiB adoption payload peak에 별도로 기록한다.
+
+              `PreparedExternalAdoption.initInPlace(out, ...)`만 caller의 final address에
+              `PreparedScreenBacklog`을 직접 구성하고 payloadless `PrepareStatus`를 반환한다. 값 반환/대입/복사는
+              금지한다. `PrepareStatus`는 `.prepared`,
+              `.retryable_preserved(.out_of_memory)`, `.terminal(reason)`의 closed union이다.
+              allocator 실패만 retryable이다. deterministic metadata 4 MiB cap 초과는 resource terminal,
+              screen item/byte cap은 transfer-null bounded recovery, fresh-zero ledger의 generation/epoch exhaustion과
+              c1 invariant/invalid-address/alias/stale-plan 계열은 internal invariant terminal이다. 모든 실패는
+              source/Client/ledger mutation 0과 staged allocation exact cleanup을 보장한다. 그 밖의
+              malformed semantic/foreign stream/zero request ID는 protocol terminal로 매핑한다.
+              malformed/foreign-stream/counter·TX·parser invariant 실패는 source와 ledger를 바꾸지 않은
+              `.terminal`이며 c3가 더 이상 adoption commit을 시도하지 않고 owner cleanup으로 닫는다.
+              `PreparedScreenBacklog`는 공통 `PreparedClientDisarm`과 optional
+              `.transfer{seed_plan,source_ordinals,...}`를 갖는다. screen item/byte cap 초과는 c1 seed plan을 억지로
+              만들지 않고 transfer를 null로 준비한다. 이 경로도 fingerprint와 Client disarm은 미리 준비하되 ledger
+              token/wrapper는 0이다. c3는 event precedence를 결정한 뒤 정상 verdict+non-null transfer만 ledger로
+              옮기고, ended/revoked/invalidated/terminal 또는 cap recovery는 준비 당시 under-cap이었더라도 공통
+              disarm으로 backlog를 버린다.
+              under-cap transfer 준비 뒤 discard를 고르면 staged c1 plan을 먼저 abort해 replacement와
+              정리한다. exact 순서는 outer discard-abort가 `seed_plan.deinit` → 각 replacement
+              `OwnedPayload.deinit` → wrapper/token/source-ref backing free → 공통 Client disarm이다.
 
               lifecycle은 `empty→prepared→committed_tombstone` 또는
               `empty→prepared→aborted_tombstone`뿐이다. abort/deinit은 Client·ledger를 건드리지 않고 staged
               allocation/DTO를 exact-once free하며 재호출은 no-op이다. final commit은 양쪽 fingerprint를 다시
-              검증하고 sealed no-fail capability를 만든 뒤 **ledger take → Client infallible disarm/ArrayList
-              backing free → storage token/authority/event publish** 순서로 한 owner-thread 구간에서 수행한다.
-              publish가 유일한 linearization point이며 이전 단계에는 callback/error가 없다. source allocator의
-              free는 재진입하지 않는 계약이고 모든 allocation은 prepare에서 끝낸다.
+              검증하고 sealed Client capability를 만든 뒤 c3가 transfer verdict이면 먼저 fallible c1
+              `commitSeeds`를 호출한다. 실패는 source/Client와 replacement owner를 모두 보존하며 adoption을 publish하지
+              않는다. `commitSeeds` 성공 반환 뒤에는 **Client infallible disarm/ArrayList backing free → storage
+              token/authority/event publish**만 남는 no-error 구간이다. discard verdict는 ledger mutation 없이 같은
+              Client disarm부터 시작한다. publish가 유일한 외부 linearization point이며 이전 단계에는 user callback이나
+              추가 allocation이 없다. 이 구간의 allocator free는 허용하되 source allocator가 재진입하지 않는 계약이다.
 
               request ID는 prepare에서 `RequestIdState.fromNext(Client.next_request_id)`로 seed한다.
               `0`은 protocol terminal, `1...max-1`은 `available`, `max`는 `last_available`이다. 성공 commit 뒤
               storage state만 mutable SSOT이며 Client `0`은 어떤 request API에서도 사용하지 않는 retired
-              sentinel이다. `last_available`은 f1 queue infallible commit 때만 `max_consumed`가 된다.
+              sentinel이다. external mode 진입 뒤 기존 `Client` request API는 전부 `ExternalMode`로 거부되므로
+              overflow 가능한 기존 `next_request_id += 1` 경로에는 도달하지 않는다. `last_available`은 f1 queue
+              infallible commit 때만 `max_consumed`가 된다.
 
               `ExternalPumpState.active`는
               `ActiveState{attachment: AttachmentAuthority, flow: AuthorityState}`를 payload로 갖는다.
@@ -2855,15 +2924,83 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
               observer generation 0은 유효하며 legacy no-generation peer만 untracked다. immutable evidence는
               이후 provenance일 뿐 갱신하지 않는다. 2b3은 `RemoteAttachment.state`를 두 번째 writer로 남기지
               않고 `authoritySnapshot()/allowsMutation()` facade projection을 소비하도록 바꾼다.
+
+              authority seed 표는 닫혀 있다.
+
+              | cli_attach capability/evidence | seed |
+              | --- | --- |
+              | current `.granted_roles`, peer generation=false, negotiated=false, observer | `observer/untracked` |
+              | current `.granted_roles`, peer generation=false, controller | protocol terminal |
+              | verified frozen N-1 `.frozen_controller_only`, exact fingerprint, peer generation=false, controller generation 0 | `controller/untracked` |
+              | frozen N-1인데 observer/nonzero generation/fingerprint mismatch | protocol terminal |
+              | peer generation=true, negotiated=true, observer generation 0 또는 양수 | `observer/tracked(exact generation)` |
+              | peer generation=true, negotiated=true, controller generation 양수 | `controller/tracked(exact generation)` |
+              | peer/negotiated bit 불일치 또는 generation peer인데 negotiated=false | internal invariant terminal |
+              | tracked controller generation 0 | protocol terminal |
+
               `AuthorityState.initial_fence`는 final commit 직후 유일한 초기 flow다. d2가 inherited
               parser/socket을 would-block+parser-empty까지 drain해 `authority_clear`를 commit하기 전에는
               `takeOwnerEvent`, screen publish, input/TX/control/resize admission이 모두 0이다.
 
-              bind preflight는 parser unread의 resident cap/structural consistency만 검사하고 frame decode/offset은
-              d1에 남긴다. screen item/byte exact cap 초과는 prepared verdict input에만 기록한다. c3 event
+              bind preflight는 parser unread의 address/len/cap/head/expected-major와 resident cap/structural
+              consistency를 fingerprint에 봉인하되 parser unread를 c2 seed item/token count에는 포함하지 않는다.
+              frame decode/absolute offset과 ledger admission은 d1에 남긴다. partial `chunk_count: usize`는
+              `1...external_inbox_ledger.max_batch_chunks`를 먼저 검증하고 checked `u8` cast한다. 실패는 mutation 없는
+              protocol terminal이다.
+
+              prerequisite로 위 2b1 lease 계약을 allocator-aware `StreamBatch.deinit()`으로 갱신하고,
+              `readStreamBatch`/내부 batch assembler의 caller allocator 인자를 제거해 모든 completed
+              batch와 partial backing을 반드시 `Client.allocator`로만 만들게 한다. 반환 `StreamBatch`는 allocator
+              provenance를 private field로 carry하고 `deinit()`만이 해제를 수행한다. caller/fallback allocator로
+              `bytes`를 직접 free하는 API와 2b1 untracked cleanup을 모두 이 메서드로 교체한다. 이 변경 뒤에만 Client가
+              pending 원본의 allocator provenance를
+              fingerprint 없이 구조적으로 증명하고 c3 disarm이 `Client.allocator`로 exact free할 수 있다.
+
+              inventory는 payload length를 checked 재합산해 `pending_stream_bytes`,
+              `pending_event_bytes`, `pending_batch_bytes`와 exact equality를 요구한다. saturating helper나 저장된
+              counter만 cap 근거로 쓰지 않는다. fingerprint는 fd/ownership/unusable, next request ID, immutable
+              allocator identity, connection profile, compatibility attach schema/fingerprint-verification provenance,
+              모든 capability scalars, wire/screen codec major, host/build/lifecycle identity
+              owned bytes, parser ptr/len/cap/head/major, 네 ArrayList ptr/len/cap과 counters,
+              모든 screen/event element의 header·semantic·payload ptr/len, 각 pending batch allocator identity,
+              partial의 원래 `usize` chunk count를
+              field-by-field 포함한다. target stream이 아닌 completed/partial/frame은 protocol terminal이다.
+              모든 pending batch allocator는 inspect와 final preflight에서 `Client.allocator`와 exact equality여야
+              하며 mismatch는 mutation 없는 internal invariant terminal이다.
+              prepare와 final preflight는 zero-length를 제외한 모든 원본 owner range(screen/event payload,
+              partial capacity, 네 descriptor backing, parser/external-TX/build/lifecycle backing)의 checked end-address와
+              pairwise non-overlap을 검증하고 Client/storage/outer plan/disarm output range와의 overlap도 거부한다.
+              full/partial alias나 descriptor/parser overlap은 mutation 없는 invariant terminal이다.
+              TX precondition은 `pending_outbound == null`,
+              external `external_tx.items.len == 0`, `external_tx_bytes == 0`,
+              `external_tx.capacity == max_tx_frames`다. external TX backing pointer/capacity,
+              `saved_flags`, `io_mode`, parser fingerprint, connection profile까지 commit에서 재검증하며 불일치는
+              mutation 없는 protocol terminal이다. screen item/byte exact cap 초과는 prepared verdict input에만
+              기록한다. c3 event
               precedence에서 terminal이 없을 때만 final commit이 screen backlog를 한 번에 drop하고 injected
               `now_ns`의 checked 30초 deadline/epoch를 가진
               `active.flow.client_recovery.control_wait`로 전환한다.
+
+              final seal 직전 target storage도 `saved_self_addr == @intFromPtr(storage)`,
+              `lifecycle == .adopting`, `semantic_state == .adopting`, `owned_client` present 및 inventory의 exact
+              Client 주소, ledger exact 주소와 valid zero accounting, immutable evidence exact equality를 함께
+              재검증한다. 하나라도 drift하면 ledger/Client/storage mutation 없이 거부한다.
+
+              자동 검증은 다음을 모두 포함한다. 각 allocation fail index에서 Client fingerprint/모든 source bytes가
+              byte-for-byte 불변이고 ledger reservation/charge가 0이며 staged wrapper/source map/token을 exact free한다.
+              final-address move, bitwise-copied plan, wrong Client/storage/ledger/evidence/wrapper base, prepare 뒤
+              field mutation은 commit capability 생성을 거부한다. screen payload는 staged exact copy와 source를
+              bytewise 재대조해 same-pointer byte mutation도 거부하며, event bytes는 c3 prepared DTO/raw copy와
+              bytewise 재검증한다. exact metadata/payload/item cap과 cap+1,
+              zero/max request ID, partial chunk 0/16/17/`usize` max, foreign stream, counter mismatch, TX len/bytes/cap
+              mismatch, parser stale fingerprint, abort/deinit 재호출을 Debug/ReleaseFast에서 고정한다. c2는
+              storage lifecycle/semantic/client presence/ledger accounting/evidence drift와 authority seed 표 전 행,
+              sealed commit capability 생성/거부 외에 isolated Client-only commit fixture에서 네 backing/payload와
+              counters, request ID tombstone, exact free, copied/stale disarm 거부를 실행해 c2-owned no-fail commit을
+              비공백으로 검증한다. 이 fixture는 ledger/storage lifecycle/event publish를 하지 않는다. c3
+              combined-commit 테스트가
+              ledger를 replacement의 sole owner로 만들고 Client의 네 backing/payload가 빈 tombstone이며 token count가
+              inherited screen item count와 정확히 같고, teardown 뒤 ledger/metadata/payload가 최종 0임을 증명한다.
 
             - **2b2c3 — inherited event staging + common classifier:** `ConnectionProfile.cli_attach` Client는
               pre-raw 단계부터 strict event policy를 보존한다. malformed metadata/resize를 기존 GUI처럼 관대하게
@@ -2884,7 +3021,8 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
               `OwnedMetadataDto{allocator,canonical_json:?[]u8,revision}`는 strict schema를 canonical JSON으로
               encode한 exact one-backing ownership이고 zero bytes는 null이다. metadata cap은 기존 event payload
               cap과 owner-event resident cap 중 작은 값이며 raw event+staged DTO prepare peak도
-              `adoption_metadata_bytes`에 포함한다. `deinit/take`가 exact-once 소유권을 옮긴다. 같은 nonzero
+              `adoption_metadata_prepare_peak_bytes`에 포함한다. commit 뒤 retained owner-event/descriptor backing은
+              `adoption_metadata_resident_bytes`에만 포함한다. `deinit/take`가 exact-once 소유권을 옮긴다. 같은 nonzero
               revision+같은 canonical bytes는 duplicate, 같은 revision+다른 bytes는 equivocation protocol
               terminal, older는 ignore, newer는 latest full-state replace다. 모든 decode allocation은 prepare에서
               stage한다.

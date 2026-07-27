@@ -118,6 +118,10 @@ pub const Entry = struct {
     /// FP6 two-phase dirty mirror. source editor가 비활성/읽기 모드로 넘어갈 때 true로 세우고 shell의 강제
     /// setDirty snapshot ack에서만 내린다. ack 전에는 non-dirty라도 live view eviction 대상이 아니다.
     dirty_sync_pending: bool = false,
+    /// scope close(`.pane`/`.tab`)가 파괴 전 dirty 스냅샷을 **이미 한 번 요청했나**. 브릿지가 영영 답하지
+    /// 않아도 두 번째 시도는 그냥 진행하게 하는 once-only 래치다 — 없으면 편집 가능 파일이 든 pane이
+    /// 영원히 안 닫힌다(docs/file-panel.md §3.2).
+    close_snapshot_requested: bool = false,
     /// shell이 보고한 CM6 문서 revision. close request의 request_id/revision ack와 함께 stale clean/save 완료를 거부한다.
     editor_revision: u64 = 0,
     /// 같은 surface에서 WebContent document가 교체돼 revision clock이 0으로 돌아가도 이전 document의 ACK가 새

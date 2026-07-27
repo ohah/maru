@@ -3357,24 +3357,6 @@ pub const AppSession = struct {
         }
     }
 
-    fn activateDockEntryById(self: *AppSession, entry_id: dock_panel.EntryId) void {
-        const location = self.dock.entryLocation(entry_id) orelse return;
-        const group = location.group;
-        const index = location.index;
-        _ = self.dock.focusGroup(group);
-        if (group.active != index) {
-            if (group.active) |old| if (old < group.entries.items.len)
-                self.markFilePanelDirtySyncPending(&group.entries.items[old]);
-            group.active = index;
-        }
-        self.ensureActiveDockTabVisible(group); // 스크롤 밖 탭을 활성화하면 보이게 따라간다
-        const entry = &group.entries.items[index];
-        if (entry.surface_id == 0) entry.surface_id = self.surface_ids.next();
-        self.requestDockEntryFocus(entry);
-        self.file_tree_rows_dirty = true;
-        self.metal_dirty = true;
-    }
-
     /// Group chrome activation funnel. focused_group, active EntryId, logical FocusOwner, native typed
     /// transaction을 한 번에 갱신해 header mode/conflict/blank 경로가 서로 다른 대상을 남기지 않는다.
     fn focusDockGroupActiveEntry(self: *AppSession, group: *dock_panel.DockGroup) ?*dock_panel.Entry {
@@ -3433,8 +3415,10 @@ pub const AppSession = struct {
         // Programmatic focus는 surface_id 존재만으로 native WKWebView publish를 추측하지 않는다. typed
         // completion 전에는 group owner가 text/paste/terminal close를 fail-closed로 소비하고, 실제 WebView
         // primary-down 또는 completion만 dock_surface로 승격한다.
-        self.focus_owner = if (self.dock.entryLocation(entry.id)) |location|
-            .{ .dock_group = location.group.runtime_id }
+        // FP16: entry가 Term으로 옮겨가 group runtime_id를 파생할 대상이 없다. surface가 있으면 그걸로,
+        // 없으면 workspace로 — `.dock_group`은 §3.4대로 사라질 축이다.
+        self.focus_owner = if (entry.surface_id != 0)
+            .{ .dock_surface = entry.surface_id }
         else
             .workspace;
         self.workspace_focus_pending = false;
@@ -3457,63 +3441,6 @@ pub const AppSession = struct {
         self.workspace_focus_pending = false;
         self.file_tree_focus_pending = false;
         self.file_tree_restore_surface_pending = null;
-    }
-
-    fn splitFocusedDockGroup(self: *AppSession, direction: maru.session.SplitDirection) void {
-        if (!self.dock_initialized or self.dock.groupCount() >= dock_panel.max_groups) return;
-        const group = self.dock.focusedGroup();
-        const active = group.active orelse return;
-        if (active >= group.entries.items.len) return;
-        const entry_id = group.entries.items[active].id;
-        self.invalidateDockDragGeometry();
-        const result = self.dock.commitEntryDrop(entry_id, group.runtime_id, .{ .split = switch (direction) {
-            .horizontal => .right,
-            .vertical => .bottom,
-        } }) catch return;
-        if (!result.changed) return;
-        var entry = (self.fileEntryForId(result.destination_active_entry_id) orelse return);
-        if (entry.surface_id == 0) entry.surface_id = self.surface_ids.next();
-        self.requestDockEntryFocus(entry);
-        self.hovered_file_panel_tab = null;
-        self.file_tree_rows_dirty = true;
-        self.metal_dirty = true;
-    }
-
-    fn closeFocusedDockGroup(self: *AppSession) void {
-        if (!self.dock_initialized or self.dock.groupCount() <= 1) return;
-        const target = self.dock.focusedGroup();
-        for (target.entries.items) |entry| if (filePanelEntryNeedsDirtyProtection(entry)) return;
-        self.invalidateDockDragGeometry();
-        var removed_input_owner = false;
-        for (target.entries.items) |entry| if (entry.surface_id != 0) {
-            self.removeFilePanelQueuedActions(entry.surface_id);
-            self.notifySurfaceClosed(entry.surface_id);
-            if (self.pending_file_panel_close != null and self.pending_file_panel_close.?.surface_id == entry.surface_id)
-                self.clearFilePanelCloseWithoutUnlock();
-            removed_input_owner = removed_input_owner or switch (self.focus_owner) {
-                .dock_surface => |focused| focused == entry.surface_id,
-                .workspace, .dock_group, .file_tree => false,
-            };
-        };
-        removed_input_owner = removed_input_owner or switch (self.focus_owner) {
-            .dock_group => |group_id| group_id == target.runtime_id,
-            else => false,
-        };
-        self.hovered_file_panel_tab = null;
-        if (!self.dock.removeGroup(target)) return;
-        if (removed_input_owner) {
-            const successor = self.dock.focusedGroup();
-            if (successor.active) |active| {
-                const entry = &successor.entries.items[active];
-                if (entry.surface_id == 0) entry.surface_id = self.surface_ids.next();
-                self.requestDockEntryFocus(entry);
-            } else {
-                self.focus_owner = .{ .dock_group = successor.runtime_id };
-                self.workspace_focus_pending = true;
-            }
-        }
-        self.file_tree_rows_dirty = true;
-        self.metal_dirty = true;
     }
 
     /// 세로 폭이 좁은 창에서는 Artifact의 우측 column 대신 하단 band가 더 읽기 쉽다. 파일 도크의
@@ -6638,6 +6565,28 @@ pub const AppSession = struct {
     /// 보호는 `session` scope(⌘Q·창 닫기)에만 필요했다. 이제 파일이 pane 탭이므로 ⌘W·탭바 ✕·close_tab·
     /// reap cascade가 전부 파일 Term을 파괴할 수 있어 **모든 scope**가 이 게이트를 지나야 한다 —
     /// 안 그러면 미저장 버퍼가 프롬프트 없이 사라진다(code-review max).
+    /// 에이전트 행 ✕는 **활성과 다른 Term**을 닫을 수 있다 — `scopeHasProtectedFilePanel`의 .term/.pane 가지는
+    /// 활성 기준이라 그대로 쓰면 "워크스페이스 A의 dirty 파일 때문에 워크스페이스 B의 에이전트 행 ✕가 거부"된다.
+    /// `closeTargetHasRunningJob`이 같은 함정에 이미 인덱스 경로 override를 둔 것과 동형이다(code-review max).
+    fn closeTargetHasProtectedFilePanel(self: *AppSession, target: PendingClose, scope: CloseScope) bool {
+        if (target == .agent_term) {
+            const a = target.agent_term;
+            if (a.tab < self.tabs.items.len) {
+                const t = self.tabs.items[a.tab];
+                if (a.pane < t.panes.items.len) {
+                    const pane = t.panes.items[a.pane];
+                    switch (scope) {
+                        .term => if (a.term < pane.terms.items.len)
+                            return termHasProtectedFilePanel(pane.terms.items[a.term]),
+                        .pane => return paneHasProtectedFilePanel(pane),
+                        else => {},
+                    }
+                }
+            }
+        }
+        return self.scopeHasProtectedFilePanel(scope);
+    }
+
     fn scopeHasProtectedFilePanel(self: *AppSession, scope: CloseScope) bool {
         return switch (scope) {
             .none => false,
@@ -6653,7 +6602,7 @@ pub const AppSession = struct {
 
     fn termHasProtectedFilePanel(term: *Term) bool {
         const entry = term.file_entry orelse return false;
-        return filePanelEntryNeedsDirtyProtection(entry.*);
+        return filePanelEntryBlocksClose(entry.*);
     }
 
     fn paneHasProtectedFilePanel(pane: *Pane) bool {
@@ -6757,7 +6706,16 @@ pub const AppSession = struct {
         // FP16: 파일이 pane 탭이 되면서 term/pane/tab scope도 파일 Term을 파괴할 수 있다. 보호 상태 파일이 있으면
         // 여기서 막고 사용자가 저장·닫기를 먼저 하게 한다 — 옛 session 전용 게이트만으로는 ⌘W 한 번에 미저장
         // 버퍼가 사라진다(code-review max).
-        if (scope != .session and self.scopeHasProtectedFilePanel(scope)) {
+        // 파일 Term 하나를 닫는 것이면 **막지 말고** 2단계 close 파이프라인으로 보낸다 — 거기서 revision-pinned
+        // 스냅샷 sync와 저장/버리기/취소 확인이 일어난다. 이걸 안 하면 파일 탭이 영영 안 닫힌다(code-review max).
+        if (scope == .term and target != .agent_term) {
+            const term = self.activePane().activeTerm();
+            if (term.file_entry) |entry| if (entry.surface_id != 0) {
+                self.requestFilePanelClose(entry.surface_id);
+                return;
+            };
+        }
+        if (scope != .session and self.closeTargetHasProtectedFilePanel(target, scope)) {
             self.showNotice("저장하지 않은 파일 탭을 먼저 저장하거나 닫아 주세요.");
             return;
         }
@@ -7377,6 +7335,16 @@ pub const AppSession = struct {
             n += 1;
         };
         return @min(n, out.len);
+    }
+
+    /// **탭 하나를 닫을 때** 그 파일이 잃을 상태를 들고 있나. `filePanelEntryNeedsDirtyProtection`과 달리
+    /// `mode.isEditable()`을 보지 **않는다** — 그 조건은 "source-edit는 native dirty가 최신 CM6 revision보다
+    /// 늦을 수 있다"는 이유로 **⌘Q 종료** 게이트가 쓰는 것이고, 거기서는 복구 기회가 없어 보수적으로 막는 게 맞다.
+    /// 탭 닫기는 다르다 — `requestFilePanelClose`의 revision-pinned 2단계 스냅샷이 그 지연을 해소하므로,
+    /// mode만으로 막으면 **깨끗한 `.py`/`.json` 탭이 영원히 안 닫힌다**(.text의 기본 mode가 source_edit이다).
+    fn filePanelEntryBlocksClose(entry: dock_panel.Entry) bool {
+        return entry.dirty or entry.dirty_sync_pending or entry.external_change or
+            entry.conflict_reload_pending or entry.mutation_pending_id != 0;
     }
 
     fn filePanelEntryNeedsDirtyProtection(entry: dock_panel.Entry) bool {
@@ -9768,9 +9736,6 @@ pub const AppSession = struct {
                 self.newWebTermInActivePane(.browser) catch {};
             },
             .open_file_panel => self.requestFilePanelPick(),
-            .split_file_panel_horizontal => self.splitFocusedDockGroup(.horizontal),
-            .split_file_panel_vertical => self.splitFocusedDockGroup(.vertical),
-            .close_file_panel_group => self.closeFocusedDockGroup(),
             .toggle_file_panel_dock_side => self.toggleFilePanelDockSide(),
             .toggle_file_panel_focus => self.toggleFilePanelFocus(),
             .focus_file_tree => self.focusFileTree(),
@@ -14116,10 +14081,14 @@ pub const AppSession = struct {
             for (tab.panes.items) |pane| {
                 for (pane.terms.items, 0..) |term, term_index| {
                     if (term.file_entry != entry) continue;
-                    // **정규 경로에 위임한다.** 직접 orderedRemove하면 ⑴ 배경 탭의 surface_ptrs 재바인딩을
-                    // 빠뜨려 해제된 Surface 포인터가 남고(use-after-free), ⑵ active_term을 clamp만 해서 활성보다
-                    // 앞 탭을 지울 때 엉뚱한 탭이 올라오며, ⑶ 빈 pane collapse·마지막 pane의 워크스페이스 close
-                    // cascade가 통째로 빠진다. closeTermAt이 셋 다 단일 출처로 소유한다(code-review max).
+                    // **마지막 Term이면 거부한다.** closeTermAt은 빈 pane을 collapse하고 마지막 pane이면
+                    // closeTab→latchSessionClose까지 타는데, 그 경로는 Surface가 이미 해제된 뒤
+                    // `activeSurface()`를 역참조해 use-after-free를 낸다(closeAgentRow가 requestClose를
+                    // 거쳐야 하는 이유와 같은 함정 — code-review max). 세션을 접는 판단은 파일 close가 아니라
+                    // requestClose가 소유하는 별도 정책이므로 여기서는 손대지 않는다.
+                    if (pane.terms.items.len <= 1) return false;
+                    // Term ≥2가 보장된 뒤에는 정규 경로에 위임한다 — 직접 orderedRemove하면 배경 탭의
+                    // surface_ptrs 재바인딩과 active 시프트 보정을 빠뜨린다(둘 다 closeTermAt이 소유).
                     self.closeTermAt(tab_index, pane, term_index);
                     self.metal_dirty = true;
                     return true;
@@ -45545,7 +45514,6 @@ test "FP5 file panel routing: picker one-shot, md/html open, duplicate activatio
 
     _ = try session.dock.open(group, "/tmp/fp5-split-placeholder.md", .markdown);
     session.assignDockSurfaceIds(&session.dock);
-    session.dispatchAppAction(.split_file_panel_horizontal);
     try std.testing.expectEqual(@as(usize, 2), session.dock.groupCount());
     try std.testing.expect(session.dock.focusedGroup() != group); // 전역 focus가 다른 group이어도 source group으로 열어야 한다.
     try session.openFilePanelLink(md_surface_id, "two.html#preview", false);
@@ -58656,7 +58624,6 @@ test "FP16b B-1: 파일 entry 조회 API가 그룹 구조를 감춘다" {
     const a_id = a.group.entries.items[a.index].id;
     _ = try session.dock.open(g0, "/tmp/b1-b.md", .markdown);
     // 두 번째 그룹을 만들어 이터레이터가 그룹 경계를 넘는지 검증한다.
-    session.splitFocusedDockGroup(.horizontal);
     try std.testing.expect(session.dock.groupCount() >= 2);
     const g1 = session.dock.groupAt(1).?;
     const c = try session.dock.open(g1, "/tmp/b1-c.md", .markdown);

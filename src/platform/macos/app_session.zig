@@ -1276,6 +1276,10 @@ const DeletedSurfaceSet = struct {
     }
 };
 
+/// `fileEntryForIdCounted`의 방문 수 계측(성능 gate 소비 — docs/performance-budget.md).
+/// FP16 전에는 `DockPanel.EntryLookupCounters`였다 — 조회가 도크에서 Term 창구로 옮겨오며 함께 왔다.
+const EntryLookupCounters = struct { entry_visits: usize = 0 };
+
 const FileTreeDockRemovalStats = struct {
     entry_visits: usize = 0,
     dirty_sync_visits: usize = 0,
@@ -1464,7 +1468,6 @@ fn classifyAgentProcesses(processes: []const maru.pty.types.ForegroundProcessNam
 /// 호버 중인 per-pane 탭 참조(어느 Pane의 몇 번째 Term 탭). 호버 ✕ 닫기 대상·렌더에 쓴다. Pane은 heap-pin
 /// 이라 포인터가 안정이고, 닫기 등으로 Pane이 사라지면 호출자가 hovered_tab을 null로 비운다.
 const TabRef = struct { pane: *Pane, tab: usize };
-const DockTabRef = struct { group_id: u64, tab: usize };
 const ScrollRef = struct { pane: *Pane, right: bool }; // #5b: 호버 중인 가로 스크롤 버튼(어느 pane의 ‹=false/›=true)
 /// Phase 7e-4: 호버 중인 browser 주소창 nav 버튼(어느 web surface의 back/forward/reload 존). pane 포인터가 아니라
 /// surface_id로 잡는다 — 렌더 "1c"가 이 surface의 밴드를 그릴 때 자기 버튼 존만 하이라이트하게(TabRef가 pane로 잡는 것과
@@ -2412,7 +2415,6 @@ pub const AppSession = struct {
     // 갱신하고, 탭 바 렌더가 이 탭에 호버 ✕(닫기 아이콘)를 그린다. mouse down이 이 탭의 ✕ zone이면 그 Term을
     // 닫는다(사이드바 hovered_slot의 per-pane Term 버전). pane은 heap-pin이라 frame 사이 포인터가 안정.
     hovered_tab: ?TabRef = null,
-    hovered_file_panel_tab: ?DockTabRef = null,
     hovered_scroll: ?ScrollRef = null, // #5b: 호버 중인 ‹/› 스크롤 버튼 — 렌더가 밝게 칠해 클릭 가능 표시
     // Phase 7e-4: 마우스가 호버 중인 browser 주소창 nav 버튼(없으면 null). hoverCursor가 밴드 버튼 존이면 세우고(그 위면
     // pointingHand), 렌더 "1c"가 이 surface·이 버튼 존에 hover 배경 quad를 그려 클릭 영역(3칸)을 드러낸다("버튼이 작아
@@ -7199,7 +7201,6 @@ pub const AppSession = struct {
         self.file_panel_dirty_sync_actions_len = 0;
         self.file_panel_close_unlock_actions_len = 0;
         self.file_tree_reload_actions_len = 0;
-        self.hovered_file_panel_tab = null;
         self.clearFileTreeSelection();
         self.focus_owner = .workspace;
         self.workspace_focus_pending = true;
@@ -11179,7 +11180,6 @@ pub const AppSession = struct {
             self.focus_owner = .{ .file_tree = .{ .restore_surface = null } };
             self.file_tree_restore_surface_pending = null;
         }
-        self.hovered_file_panel_tab = null;
         self.file_tree_rows_dirty = true;
         self.metal_dirty = true;
         return stats;
@@ -12905,8 +12905,6 @@ pub const AppSession = struct {
             .dock_pending => |entry_id| entry_id == entry.id,
             .workspace => false,
         };
-
-        self.hovered_file_panel_tab = null;
         self.removeFilePanelQueuedActions(surface_id);
         if (self.pending_file_panel_close != null and self.pending_file_panel_close.?.surface_id == surface_id)
             self.clearFilePanelCloseWithoutUnlock();
@@ -13079,22 +13077,15 @@ pub const AppSession = struct {
     /// 반환은 **버린 entry 수**다. 호출자(applyWorkspaceWindow)가 이 값을 checkpoint 차단 판정에 쓴다 — 조용히 버리고
     /// apply를 성공으로 반환하면 다음 Quit이 버려진 도크를 파일에 커밋해 사용자가 배치를 영구히 잃는다.
     fn pruneInvalidRestoredFilePanelEntries(self: *AppSession, panel: *dock_panel.DockPanel) usize {
-        var dropped: usize = 0;
-        for (0..panel.groupCount()) |group_index| dropped += self.pruneInvalidRestoredFilePanelGroup(panel.groupAt(group_index).?);
-        return dropped;
-    }
-
-    /// 반환은 이 그룹에서 버린 entry 수(원래 개수 − 남은 개수 — 분기마다 세지 않아도 정확하다).
-    fn pruneInvalidRestoredFilePanelGroup(self: *AppSession, group: *dock_panel.DockGroup) usize {
-        const old_active = group.active;
-        const original_len = group.entries.items.len;
+        const old_active = panel.restored_active;
+        const original_len = panel.restored.items.len;
         var original_index: usize = 0;
         var current_index: usize = 0;
         var new_active: ?usize = null;
         while (original_index < original_len) : (original_index += 1) {
-            const entry = group.entries.items[current_index];
+            const entry = panel.restored.items[current_index];
             const open_kind = file_panel_bridge.openKindForPath(entry.path) orelse {
-                const removed = group.entries.orderedRemove(current_index);
+                const removed = panel.restored.orderedRemove(current_index);
                 self.allocator.free(removed.path);
                 continue;
             };
@@ -13107,15 +13098,15 @@ pub const AppSession = struct {
                     break :blk stat.kind == .file;
                 };
             if (!valid) {
-                const removed = group.entries.orderedRemove(current_index);
+                const removed = panel.restored.orderedRemove(current_index);
                 self.allocator.free(removed.path);
                 continue;
             }
             if (old_active == original_index) new_active = current_index;
             current_index += 1;
         }
-        group.active = if (group.entries.items.len == 0) null else new_active orelse 0;
-        return original_len - group.entries.items.len;
+        panel.restored_active = if (panel.restored.items.len == 0) null else new_active orelse 0;
+        return original_len - panel.restored.items.len;
     }
 
     /// FP3 시각 픽스처. `MARU_FILE_PANEL=/absolute/path.md|html`이면 창-로컬 도크에 한 번만
@@ -13830,26 +13821,19 @@ pub const AppSession = struct {
         }
     };
 
-    /// 복원된 `DockPanel`을 평탄화해 소유를 목록으로 옮긴다(그룹은 비워진다). 와이어 파싱·검증·mode clamp는
-    /// 기존 `DockPanel.restore`가 이미 했으므로 재구현하지 않고 결과만 가져온다 — 포맷 규칙의 단일 출처 유지.
+    /// 복원된 `DockPanel`의 평탄 목록에서 소유를 가져온다(panel은 비워진다). 와이어 파싱·검증·mode clamp는
+    /// `DockPanel.restore`가 이미 했으므로 재구현하지 않고 결과만 가져온다 — 포맷 규칙의 단일 출처 유지.
     fn flattenRestoredDock(
         gpa: std.mem.Allocator,
         panel: *dock_panel.DockPanel,
     ) !RestoredFileEntries {
         var out: RestoredFileEntries = .{};
         errdefer out.deinit(gpa);
-        try out.items.ensureTotalCapacity(gpa, panel.entryCountTotal());
-        const focused = panel.focusedGroup();
-        for (0..panel.groupCount()) |group_index| {
-            const group = panel.groupAt(group_index).?;
-            for (group.entries.items, 0..) |entry, i| {
-                if (group == focused and group.active != null and group.active.? == i)
-                    out.active_index = out.items.items.len;
-                out.items.appendAssumeCapacity(entry); // path 소유가 목록으로 이동
-            }
-            group.entries.clearRetainingCapacity(); // 그룹은 더 이상 소유하지 않는다(이중 해제 방지)
-            group.active = null;
-        }
+        try out.items.ensureTotalCapacity(gpa, panel.restoredCount());
+        for (panel.restored.items) |entry| out.items.appendAssumeCapacity(entry); // path 소유가 목록으로 이동
+        out.active_index = panel.restored_active;
+        panel.restored.clearRetainingCapacity(); // panel은 더 이상 소유하지 않는다(이중 해제 방지)
+        panel.restored_active = null;
         return out;
     }
 
@@ -14102,7 +14086,7 @@ pub const AppSession = struct {
     fn fileEntryForIdCounted(
         self: *AppSession,
         entry_id: dock_panel.EntryId,
-        counters: ?*dock_panel.DockPanel.EntryLookupCounters,
+        counters: ?*EntryLookupCounters,
     ) ?*dock_panel.Entry {
         if (entry_id == 0) return null;
         for (self.tabs.items) |tab| {
@@ -21685,8 +21669,6 @@ pub const AppSession = struct {
         // pane에도 안 걸리면 null. 커서 종류(.link) 판정은 아래 탭 바 검사 뒤에서 이 값을 읽는다(밴드=탭 바보다 뒤 우선순위).
         self.setHoveredNavButton(self.navButtonHoverAt(x_px, y_px));
         self.setHoveredFileTreeRow(if (self.dockVisible()) self.fileTreeRowAt(x_px, y_px) else null);
-        const hovered_dock_tab: ?DockTabRef = null; // FP16: 도크에 파일 탭이 없다(탐색기 전용)
-        self.setHoveredFilePanelTab(hovered_dock_tab);
         // 접힘 펼치기 토글(◧, 신호등 옆) 호버 — 접힘 시 사이드바 폭 0이라 아래 inSidebar(헤더 아이콘) 경로가 안 타고,
         // resize-edge가 x≈0을 잘못 잡을 수 있어 **먼저** 본다. 토글 위면 호버 배경을 켜고 pointingHand(클릭 가능).
         // 토글 밖이면 끄고 아래 일반 경로로 흐른다. mouse down hit-test(collapsedToggleRect)와 같은 rect로 일치.
@@ -23489,9 +23471,6 @@ pub const AppSession = struct {
         // 성공 경로에서도 backing buffer를 반납해야 한다 — 이관이 소유를 가져가도 ArrayList 자체는 남는다.
         // 이관이 건너뛰어진 경우(탭 0개)엔 path 문자열까지 여기서 회수된다.
         defer restored_entries.deinit(self.allocator);
-        // capability validation can empty a leaf after DockPanel.restore already normalized the wire tree.
-        // Publish/assign surface IDs only after applying the same empty-leaf invariant a second time.
-        dropped += new_dock.pruneEmptyGroups();
         for (restored_entries.items.items) |*entry| {
             if (entry.surface_id == 0) entry.surface_id = self.surface_ids.next();
         }
@@ -26152,14 +26131,6 @@ pub const AppSession = struct {
         self.metal_dirty = true;
     }
 
-    fn setHoveredFilePanelTab(self: *AppSession, next: ?DockTabRef) void {
-        const same = (self.hovered_file_panel_tab == null and next == null) or
-            (self.hovered_file_panel_tab != null and next != null and self.hovered_file_panel_tab.?.group_id == next.?.group_id and self.hovered_file_panel_tab.?.tab == next.?.tab);
-        if (same) return;
-        self.hovered_file_panel_tab = next;
-        self.metal_dirty = true;
-    }
-
     fn setHoveredFileTreeRow(self: *AppSession, row: ?usize) void {
         if (usizeOptEql(self.file_tree_hovered_row, row)) return;
         self.file_tree_hovered_row = row;
@@ -26214,7 +26185,6 @@ pub const AppSession = struct {
     fn clearAllHover(self: *AppSession) void {
         self.setHoveredSlot(null);
         self.setHoveredTab(null);
-        self.setHoveredFilePanelTab(null);
         self.setHoveredFileTreeRow(null);
         self.setHoveredNavButton(null); // Phase 7e-4: 밴드 nav 버튼 호버(모달/알림 패널 열림 시 stale 하이라이트 방지)
         self.setHoveredHeaderRegion(.none);
@@ -45764,8 +45734,7 @@ test "file tree keyboard focus preserves identity navigates scrolls and restores
     try std.testing.expect(session.closeFilePanelSurfaceNow(sid));
     try std.testing.expect(session.focus_owner == .file_tree);
     try std.testing.expect(session.dockVisible());
-    try std.testing.expectEqual(@as(usize, 1), session.dock.groupCount());
-    try std.testing.expect(session.dock.singleGroup().?.active == null);
+    try std.testing.expectEqual(@as(usize, 0), session.fileEntryCount());
     session.handleFileTreeDefaultKey(.{ .key = .escape });
     try std.testing.expect(session.focus_owner == .workspace);
     try std.testing.expect(session.takeWorkspaceFocusAction());
@@ -57611,7 +57580,6 @@ test "dock replacement clears file close hover focus and one-shot transients" {
     const sid = session.fileEntryAt(0).?.surface_id;
     session.fileEntryAt(0).?.mode = .source_edit;
     session.focus_owner = .{ .dock_surface = sid };
-    session.hovered_file_panel_tab = .{ .group_id = session.dock.singleGroup().?.runtime_id, .tab = 0 };
     session.queuePendingDockFocus(session.fileEntryAt(0).?);
     const old_dock_epoch = session.dock_async_epoch;
     session.requestFilePanelClose(sid);
@@ -57622,7 +57590,6 @@ test "dock replacement clears file close hover focus and one-shot transients" {
     try std.testing.expect(session.file_panel_save_close_pending == null);
     try std.testing.expectEqual(@as(usize, 0), session.file_panel_dirty_sync_actions_len);
     try std.testing.expectEqual(@as(usize, 0), session.file_panel_close_unlock_actions_len);
-    try std.testing.expect(session.hovered_file_panel_tab == null);
     try std.testing.expect(session.focus_owner == .workspace);
     try std.testing.expect(session.workspace_focus_pending);
     try std.testing.expect(session.pending_dock_focus == null);

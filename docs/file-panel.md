@@ -249,7 +249,9 @@ flowchart TD
 
 > 제목은 다른 문서 2곳이 앵커로 참조하므로 FP16e까지 유지한다. 내용은 아래 FP16 계약이 우선한다.
 
-**FP16 계약**: `FocusOwner`의 최종 구조 축은 `.workspace`(terminal·browser·파일 Term 공통)와 `.file_tree { restore_surface }` **둘**이다. `.dock_surface { surface_id }`는 파일이 pane 탭이 되면서 사라질 축이고(B-3), 그 사이 `.dock_group { runtime_id }`는 **`.dock_pending { EntryId }`로 대체됐다**(2026-07-28 구현).
+**FP16 계약**: `FocusOwner`의 최종 구조 축은 `.workspace`(terminal·browser·파일 Term 공통)와 `.file_tree { restore_surface }` **둘**이다. `.dock_surface { surface_id }`는 **제거됐다**(2026-07-28) — "어느 파일 WebView가 native focus인가"는 별도 축이 아니라 **활성 pane의 활성 Term**에서 파생된다(`focusedDockSurface()`). 파일이 워크스페이스 pane 탭이 된 뒤로 브라우저 Term과 같은 규칙이고, Swift도 옛 dock 전용 분기를 지워 `active_web_surface_id_any_kind`와 한 답을 쓴다. `.dock_group { runtime_id }`는 **`.dock_pending { EntryId }`로 대체됐다**(2026-07-28).
+
+**축이 사라지며 함께 사라진 결함 계열**: "logical owner만 stale하고 실제 키 소스는 Metal"이라는 상태가 **구조적으로 불가능**해졌다(소유가 곧 활성 Term이므로). 그 race를 방어하던 코드와 테스트도 함께 정리했다.
 
 **`.dock_pending`(publish 대기 barrier)** — entry는 있는데 그 WKWebView가 아직 native publish/typed ack 전인 짧은 구간의 fail-closed owner다. 옛 `.dock_group`이 "보이는 group"을 키로 들었던 자리를 **그 파일의 `EntryId`**가 대신한다. 규칙:
 - `requestDockEntryFocus`는 `surface_id`가 이미 있어도 `.dock_surface`로 **승격하지 않는다** — typed completion(`completePendingDockFocus`)이나 실제 WebView primary-down만 승격이다. 그 전까지 키·붙여넣기·터미널 close는 barrier가 fail-closed로 소비한다.

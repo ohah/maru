@@ -5552,7 +5552,7 @@ test "workspace preflight ABI rejects cross-window duplicate runtime owner befor
     try std.testing.expectEqualStrings("preflight-sentinel", session.?.restore_runtime_id);
 }
 
-test "Metal key-down ABI repairs stale dock focus before routing Cmd+W" {
+test "Metal key-down ABI: 터미널이 활성이면 Cmd+W가 파일 패널을 건드리지 않는다" {
     if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
@@ -5577,10 +5577,11 @@ test "Metal key-down ABI repairs stale dock focus before routing Cmd+W" {
     const entry = session.?.fileEntryAt(0).?;
     entry.mode = .source_edit;
     entry.dirty = true;
-    // FP16: 파일을 열면 그 파일 Term이 pane의 활성 탭이 된다. 이 테스트의 전제는 "Metal(터미널)이 실제
-    // 키 소스인데 logical owner만 stale하다"이므로, 터미널 Term을 다시 활성으로 되돌린다.
+    // FP16 §3.4: 입력 소유가 별도 축이 아니라 **활성 Term**에서 파생되면서, "logical owner만 stale"이라는
+    // 상태 자체가 구조적으로 불가능해졌다. 남은 계약은 그 불변식이다 — 터미널이 활성이면 ⌘W는 파일
+    // 패널을 건드리지 않고 터미널 cascade를 따른다.
     session.?.focusTerm(0);
-    session.?.focus_owner = .{ .dock_surface = entry.surface_id }; // TerminalView가 실제 source인 stale logical owner.
+    try std.testing.expectEqual(@as(?u64, null), session.?.focusedDockSurface());.
 
     const event: KeyEvent = .{
         .codepoint = 'w',

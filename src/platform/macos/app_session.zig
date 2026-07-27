@@ -11621,6 +11621,10 @@ pub const AppSession = struct {
         self.file_tree_focus_pending = false;
         if (owner.restore_surface) |surface_id| {
             if (self.activateFilePanelSurfaceForRestore(surface_id)) {
+                // 복원 대상은 트리로 들어가기 **전에** 이미 publish된 surface다(가시성으로 재확인) — 새 barrier가
+                // 아니라 곧바로 owner다. 다만 그 사이에 걸린 다른 파일의 pending은 취소해야 늦은 ack가
+                // 사용자가 되돌아온 이 surface에서 focus를 뺏지 않는다.
+                self.cancelPendingDockFocus();
                 self.focus_owner = .{ .dock_surface = surface_id };
                 self.file_tree_restore_surface_pending = surface_id;
                 self.workspace_focus_pending = false;
@@ -11636,17 +11640,27 @@ pub const AppSession = struct {
 
     /// 복원 뒤 이 파일 surface를 화면에 올린다. FP16에서 "활성화"는 도크 그룹의 active index가 아니라
     /// 그 파일 **Term이 있는 pane/워크스페이스로 이동**하는 것이다 — activateExistingFileTerm이 그 단일 출처다.
-    /// 트리에서 Esc로 빠져나올 때 **직전에 보고 있던** 파일 WebView로 입력을 되돌린다. 복원이지 열기가
-    /// 아니므로 탭·pane을 바꾸지 않는다 — 같은 경로의 Term이 다른 워크스페이스에 있다고 그리로 점프하면
-    /// 사용자가 보던 화면이 통째로 바뀐다(code-review max). 그 surface가 이미 안 보이면 복원 capability가
-    /// 만료된 것이라 실패로 돌려주고, 호출자가 workspace로 되돌린다.
+    /// 트리에서 Esc로 빠져나올 때 **직전에 보고 있던** 파일 WebView로 입력을 되돌린다. 그 사이 다른 파일을
+    /// 열었으면 그 pane의 탭을 되돌려야 하므로 pane 안 활성 탭까지는 바꾼다. 다만 **워크스페이스는 넘지
+    /// 않는다** — 같은 surface가 다른 탭에 있다고 그리로 점프하면 사용자가 보던 화면이 통째로 바뀐다
+    /// (code-review max). 활성 워크스페이스 밖이면 복원 capability가 만료된 것이라 실패로 돌려주고,
+    /// 호출자가 workspace로 되돌린다.
     fn activateFilePanelSurfaceForRestore(self: *AppSession, surface_id: u64) bool {
-        if (surface_id == 0) return false;
+        if (surface_id == 0 or self.tabs.items.len == 0) return false;
         if (self.fileEntryForSurfaceId(surface_id) == null) return false;
-        if (!self.fileSurfaceIsVisible(surface_id)) return false;
-        self.file_panel_mode_pending = surface_id;
-        self.file_tree_rows_dirty = true;
-        return true;
+        const tab = self.tabs.items[self.app_window.active_tab];
+        for (tab.panes.items, 0..) |pane, pane_index| {
+            for (pane.terms.items, 0..) |term, term_index| {
+                const entry = term.file_entry orelse continue;
+                if (entry.surface_id != surface_id) continue;
+                if (tab.active_pane != pane_index) self.focusPane(pane_index);
+                self.focusTerm(term_index);
+                self.file_panel_mode_pending = surface_id;
+                self.file_tree_rows_dirty = true;
+                return true;
+            }
+        }
+        return false;
     }
 
     pub fn takeFileTreeFocusAction(self: *AppSession) bool {
@@ -44772,7 +44786,14 @@ test "close_focused uses the actual Metal or WebView key source across a stale o
     try session.newTermInActivePane();
     session.activePane().activeTerm().rt.terminated = true;
     session.activePane().activeTerm().surface.process_state = .exited;
-    session.focusTerm(1); // [original terminal, browser, successor terminal] 중 browser를 다시 활성화한다.
+    // FP16: pane에 [terminal, 파일 2개, browser, successor terminal]이 함께 있다. 인덱스를 가정하지 않고
+    // browser surface로 되찾아 활성화한다.
+    for (session.activePane().terms.items, 0..) |t, ti| {
+        if (t.kind == .web and t.surfaceId() == browser_sid) {
+            session.focusTerm(ti);
+            break;
+        }
+    } else return error.NoBrowserTerm;
     session.requestDockEntryFocus(session.fileEntryAt(1).?);
     try std.testing.expect(session.pendingDockEntryOwnsInput());
     try std.testing.expect(session.dispatchWebAppAction(browser_sid, .{ .key = .{ .char = 'w' }, .modifiers = .{ .command = true } }));
@@ -45602,7 +45623,9 @@ test "file tree Enter opens existing or new B while Esc restores visible A" {
     const b_sid = session.fileEntryAt(1).?.surface_id;
     try std.testing.expectEqual(session.fileEntryAt(1).?.id, session.pending_dock_focus.?.entry_id);
     session.handleFileTreeDefaultKey(.{ .key = .escape });
-    try std.testing.expectEqual(session.fileEntryAt(0).?.id, session.pending_dock_focus.?.entry_id);
+    // 복원 대상 A는 이미 publish된 surface라 barrier 없이 곧바로 owner가 되고, B의 pending은 취소된다.
+    try std.testing.expect(session.pending_dock_focus == null);
+    try std.testing.expect(session.focus_owner == .dock_surface and session.focus_owner.dock_surface == a_sid);
     try std.testing.expectEqual(a_sid, session.takeFileTreeRestoreSurfaceAction().?);
     try std.testing.expectEqual(@as(?u64, a_sid), session.file_panel_mode_pending);
 
@@ -45614,7 +45637,8 @@ test "file tree Enter opens existing or new B while Esc restores visible A" {
     try std.testing.expectEqual(b_sid, session.fileEntryAt(1).?.surface_id);
     try std.testing.expectEqual(session.fileEntryAt(1).?.id, session.pending_dock_focus.?.entry_id);
     session.handleFileTreeDefaultKey(.{ .key = .escape });
-    try std.testing.expectEqual(session.fileEntryAt(0).?.id, session.pending_dock_focus.?.entry_id);
+    try std.testing.expect(session.pending_dock_focus == null);
+    try std.testing.expect(session.focus_owner == .dock_surface and session.focus_owner.dock_surface == a_sid);
     try std.testing.expectEqual(a_sid, session.takeFileTreeRestoreSurfaceAction().?);
 }
 

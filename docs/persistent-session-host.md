@@ -2285,7 +2285,7 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
   - **P5c3c — nonblocking single-owner event loop**: `external_pump_owner.zig`의 한 stack owner가 `RawTty`,
     단 하나의 `ExternalPumpStorage`(그 안의 `Client`+ledger), storage facade만 쓰는
     `RemoteAttachment` adapter, ANSI stdout queue, resize와 detach chord를 소유한다.
-    P5c3c는 다음 세 phase의 열여덟 merge slice를 순서대로 통과해야 하며 일부만으로 event loop 완료를 주장하지 않는다.
+    P5c3c는 다음 세 phase의 스물한 merge gate를 순서대로 통과해야 하며 일부만으로 event loop 완료를 주장하지 않는다.
     - **P5c3c-1 — absolute-deadline transport**는 두 merge slice다.
       - **P5c3c-1a — deadline leaf + connect/hello**: `client_deadline.zig`가 `AbsoluteDeadline`과
         injected connector ops(monotonic clock, socket, connect, fcntl, poll, getsockopt `SO_ERROR`,
@@ -2434,7 +2434,7 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
         injected transition failure의 stable mapping·attachment EOF 정리 뒤 새 attach 성공을 검증한다. 별도 실
         socketpair fixture가 같은 `transitionExit→failClient` 경로의 후속 wire 0·즉시 EOF를 고정한다. correctness는
         debug assert에 기대지 않는다.
-      - **P5c3c-2b — bounded pump/demux**는 아래 세 subphase group, 총 열세 merge slice가 모두 green이어야
+      - **P5c3c-2b — bounded pump/demux**는 아래 세 subphase group, 총 열여섯 merge gate가 모두 green이어야
         완료다. `client_pump.zig`는
         poll/syscall/parser를 소유하지 않는 순수 turn policy만 둔다. event owner가 injected monotonic clock을 turn
         시작에 정확히 한 번 읽어 만든 `TurnInput{readable,writable,now_ns}`와
@@ -2540,8 +2540,8 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
           inherited adoption/dynamic physical cap/final product owner gate는 아직 계획 상태다.
 
         - **P5c3c-2b2 — Client external pump core**:
-          이 단계는 한 mega-PR이 아니라 아래 **열한 merge slice**다. 앞 slice의 Debug/ReleaseFast/경계 gate가
-          green이기 전에는 다음 slice로 가지 않고, 열한 개가 모두 끝나기 전에는 2b2 완료로 표시하지 않는다.
+          이 단계는 한 mega-PR이 아니라 아래 **열네 merge gate**다. 앞 gate의 Debug/ReleaseFast/경계 검증이
+          green이기 전에는 다음 gate로 가지 않고, 열네 개가 모두 끝나기 전에는 2b2 완료로 표시하지 않는다.
 
           - **2b2a — pure state/DTO + parser normalize + source boundary:** `client_pump.zig`는 JSON, fd,
             allocator, parser, ledger를 import하지 않고 다음 닫힌 타입만 소유한다.
@@ -2576,13 +2576,14 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
             close는 idempotent syscall이라고 가정하지 않는다. storage가 fd를 먼저 take하고 closed latch를 commit한
             뒤 exact-once `close(taken_fd)`를 호출하며 재진입은 syscall 0이다.
             `client_external_pump.ExternalPumpFacade`는 opaque storage를 borrow하고
-            `pumpTurn`, `pollHint`, `admit`, `takeControlResponse`, `takeOwnerEvent`, `readCharged`, `borrowCharged`,
+            `pumpTurn`, `pollHint`, `admit`, `takeControlResponse`, `borrowOwnerEvent`, `finishOwnerEvent`,
+            `readCharged`, `borrowCharged`,
             `releaseCharged`, `markResyncApplied`, `dropStream`, `terminalize`만 제공한다. fd/parser/raw
             queue/ledger pointer는 export하지 않는다. 실제 mechanics는 `client_external_pump.zig` leaf에 두고
             facade는 thin forwarding만 한다. 각 method의 DTO/ownership은 해당 구현 slice에서 닫기 전에는 public으로
-            추가하지 않는다. `FrameParser.normalizeExact(resident_cap)`은 parser 자신의 allocator만 사용한다.
+            추가하지 않는다. `FrameParser.prepareNormalizeExact(out,resident_cap)`은 parser 자신의 allocator만 사용한다.
             `residentBytes > resident_cap`이면 allocation 0으로 거부한다. 그 외에는 unread exact allocation을 stage해
-            성공 시에만 old buffer를 교체하며 OOM/internal head·length 불일치는 기존 parser를 그대로 보존한다.
+            commit suffix에서만 old buffer를 교체하며 OOM/internal head·length 불일치는 기존 parser를 그대로 보존한다.
             이 failure table과 old+new transient `<= 2 * resident_cap`을 exact/cap+1/OOM 테스트로 고정한다.
 
             **구현 완료:** `client_pump.zig`가 OS/allocator/protocol import 없이 closed turn/state DTO,
@@ -2663,9 +2664,11 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
             `test-session-host`, ReleaseFast `check-boundaries`, 전체 `mise run check`가 green이다. 이 완료 표시는
             2b2b에만 해당하며 authority adoption은 2b2c 전까지 열리지 않는다.
 
-          - **P5c3c-2b2c — inherited all-or-none adoption + semantic transfer**는 실패 선형화가 다른 세
-            merge slice다. c1은 ledger transaction, c2는 Client inventory/authority/request-ID, c3은 event
-            classification/reduction만 소유한다. 세 slice가 모두 green이기 전에는 2b2c 완료나 active pump를
+          - **P5c3c-2b2c — inherited all-or-none adoption + semantic transfer**는 실패 선형화가 다른 세 stage,
+            총 여섯 merge gate다. c1은 ledger transaction, c2는 Client inventory/authority/request-ID,
+            c3a1은 common wire+attach/GUI/CLI decode migration, c3a2는 prepared normalize+paired evidence/Client
+            transfer, c3b는 event staging/reduction, c3c는 typed take/combined active publish를
+            소유한다. 여섯 gate가 모두 green이기 전에는 2b2c 완료나 active pump를
             주장하지 않는다.
 
             - **2b2c1 — phase-aware ledger transaction:** `external_inbox_ledger.zig`는
@@ -2860,9 +2863,9 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
               payload 18 MiB와 replacement 18 MiB가 동시에 사는 adoption payload peak는 기존 nonalias replacement
               transient 상한으로 계측한다.
 
-              Client-private `PreparedClientDisarm`이 source ordinal과 원본 owner slot을 유일하게 해석한다.
-              external adapter의 `SourceRef`는 destination token order만 나타내는 중립 ordinal이며 Client field/index를
-              encode하거나 Client layout을 복제하지 않는다.
+              c2 현재 구현의 Client-private `PreparedClientDisarm`만 source ordinal과 원본 owner slot을 해석한다.
+              c3는 token 배열 자체의 source order만 소비하므로 transient `SourceRef` backing을 제거하고
+              Client field/index나 Client layout을 external adapter에 노출하지 않는다.
 
               pump-owned `ExternalPumpStorage.prepareAdoption()`만 caller-owned storage 안의
               `PreparedExternalAdoption`과 nested `PreparedScreenBacklog`을 final address에서 직접 구성하며 이후
@@ -2883,10 +2886,12 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
               요구한다. capacity 여유와 곱 overflow를 허용하지 않고 두 byte 수치 각각 exact cap/cap+1을 검증한다.
               payload replacement bytes는 metadata에 섞지 않고 위 18 MiB adoption payload peak에 별도로 기록한다.
 
-              `ExternalPumpStorage.prepareAdoption()`만 caller의 final address에 embedded
+              c2 현재 `ExternalPumpStorage.prepareAdoption()`만 caller의 final address에 embedded
               `PreparedScreenBacklog`을 직접 구성하고 payloadless `PrepareStatus`를 반환한다. plan 값 반환/대입/복사는
-              금지한다. `PrepareStatus`는 `.prepared`,
+              금지한다. 이 c2 `PrepareStatus`는 `.prepared`,
               `.retryable_preserved(.out_of_memory)`, `.terminal(reason)`의 closed union이다.
+              c3가 `PreparedScreenBacklog`을 `PreparedClientAdoption`으로 바꾸면서 아래
+              `AdoptionPrepareStatus`로 원자적으로 교체한다.
               allocator 실패만 retryable이다. deterministic metadata 4 MiB cap 초과는 resource terminal,
               screen item/byte cap은 transfer-null bounded recovery, fresh-zero ledger의 generation/epoch exhaustion과
               c1 invariant/invalid-address/alias/stale-plan 계열은 internal invariant terminal이다. prepare의
@@ -2896,28 +2901,26 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
               구조 drift는 internal invariant terminal이다. 어느 `.terminal`도 source를 바꾸지 않으며, pristine
               ledger의 out-of-contract 동시 drift/corruption이 final c1 경계까지 침범한 경우에만 c1의 기존 sticky
               invariant semantics를 따른다. exclusive owner 제품 경로는 final validation 뒤 그런 drift를 허용하지
-              않는다. c3는 terminal 뒤 adoption commit을 시도하지 않고 owner cleanup으로 닫는다.
-              `PreparedScreenBacklog`는 공통 `PreparedClientDisarm`, nonoptional `seed_plan`, optional
-              `.transfer{source_ordinals,...}`와 semantic optional 밖의 cleanup mirror를 갖는다. screen item/byte cap 초과는 c1 seed plan을 억지로
-              만들지 않고 transfer를 null로 준비한다. 이 경로도 fingerprint와 Client disarm은 미리 준비하되 ledger
-              token/wrapper는 0이다. c3는 event precedence를 결정한 뒤 정상 verdict+non-null transfer만 ledger로
-              옮기고, ended/revoked/invalidated/terminal 또는 cap recovery는 준비 당시 under-cap이었더라도 공통
-              disarm으로 backlog를 버린다. semantic `transfer`/inventory optional tag나 lifecycle이 drift해도
-              cleanup mirror/nonoptional seed plan이 staged owner를 잃지 않는다.
-              under-cap transfer 준비 뒤 discard를 고르면 staged c1 plan을 먼저 abort해 replacement와
-              정리한다. exact 순서는 outer discard-abort가 `seed_plan.deinit` → 각 replacement
-              cleanup record 검증 → replacement와 wrapper/token/source-ref backing free → 공통 Client disarm이다.
+              않는다. c2 현재 terminal은 caller cleanup으로 닫힌다. c3에서는 terminal/recovery를 별도 prepared
+              plan으로 만들지 않고 같은 `prepareAdoption` owner call의 immediate no-fail suffix로 닫는다.
+              c2 현재 `PreparedScreenBacklog`는 공통 `PreparedClientDisarm`, nonoptional `seed_plan`, optional
+              `.transfer{source_ordinals,...}`와 semantic optional 밖의 cleanup mirror를 갖는다. c3 migration은
+              `source_ordinals` allocation을 제거한 뒤 타입을 `PreparedClientAdoption`으로 rename한다.
+              c2 현재 screen item/byte cap 초과는 transfer-null prepared discard를 만든다. c3 migration은 이를
+              allocation-backed prepared plan으로 유지하지 않고, Phase A가 recovery/terminal을 먼저 결정하면
+              screen replacement/c1 plan을 만들지 않은 채 같은 call에서 branch-specific discard를 즉시 commit한다.
+              adopted만 `PreparedClientAdoption`과 cleanup mirror를 만들며 그 이후 semantic tag/lifecycle drift에도
+              staged owner를 잃지 않는다.
 
-              lifecycle은 `empty→prepared→committed_tombstone` 또는
+              adopted lifecycle은 `empty→prepared→committed_tombstone` 또는
               `empty→prepared→aborted_tombstone`뿐이다. abort/deinit은 Client·ledger를 건드리지 않고 staged
               allocation/DTO를 exact-once free하며 재호출은 no-op이다. final commit은 양쪽 fingerprint를 다시
-              검증하고 sealed Client capability를 만든 뒤 c3가 transfer verdict이면 먼저 fallible
+              검증하고 sealed Client capability를 만든 뒤 먼저 fallible
               `commitScreenSeeds`를 호출한다. 이 neutral API는 sealed capability만 받고 c1 `commitSeeds`와 성공 직후
               local payload cleanup-authority tombstone을 한 경계로 묶는다. 실패는 source/Client와 replacement owner를
               보존하며 adoption을 publish하지 않고, ledger accounting corruption은 c1 sticky invariant 정책을
               그대로 따른다. `commitScreenSeeds` 성공 반환 뒤에는 **Client infallible disarm/ArrayList backing free → storage
-              token/authority/event publish**만 남는 no-error 구간이다. discard verdict는 ledger mutation 없이 같은
-              Client disarm부터 시작한다. publish가 유일한 외부 linearization point이며 이전 단계에는 user callback이나
+              token/authority/event publish**만 남는 no-error 구간이다. publish가 유일한 외부 linearization point이며 이전 단계에는 user callback이나
               추가 allocation이 없다. 이 구간의 allocator free는 허용하되 source allocator가 재진입하지 않는 계약이다.
               c2의 `commitScreenSeeds`는 token slice를 반환하지 않고 token/source-ordinal backing owner를
               `PreparedScreenBacklog`에 유지한다. c3는 transfer 내부를 직접 null/free하지 않고 final storage에
@@ -2953,7 +2956,7 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
 
               `AuthorityState.initial_fence`는 final commit 직후 유일한 초기 flow다. d2가 inherited
               parser/socket을 would-block+parser-empty까지 drain해 `authority_clear`를 commit하기 전에는
-              `takeOwnerEvent`, screen publish, input/TX/control/resize admission이 모두 0이다.
+              `borrowOwnerEvent`/ack, screen publish, input/TX/control/resize admission이 모두 0이다.
 
               bind preflight는 parser unread의 address/len/cap/head/expected-major와 resident cap/structural
               consistency를 fingerprint에 봉인하되 parser unread를 c2 seed item/token count에는 포함하지 않는다.
@@ -3008,8 +3011,8 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
               provenance도 optional/union trap 없이 typed reject/false로 끝난다.
               final-address move, bitwise-copied plan, wrong Client/storage/ledger/evidence/wrapper base, prepare 뒤
               field mutation은 commit capability 생성을 거부한다. screen payload는 staged exact copy와 source를
-              bytewise 재대조해 same-pointer byte mutation도 거부하며, event bytes는 c3 prepared DTO/raw copy와
-              bytewise 재검증한다. exact metadata/payload/item cap과 cap+1,
+              bytewise 재대조해 same-pointer byte mutation도 거부하며, event bytes는 c3 fingerprint/raw digest와
+              winner-only owning DTO로 재검증하고 raw payload를 복제하지 않는다. exact metadata/payload/item cap과 cap+1,
               zero/max request ID, partial chunk 0/16/17/`usize` max, foreign stream, counter mismatch, TX len/bytes/cap
               mismatch, parser stale fingerprint, abort/deinit 재호출을 Debug/ReleaseFast에서 고정한다. c2는
               storage lifecycle/semantic/client presence/ledger accounting/evidence drift와 authority seed 표 전 행,
@@ -3032,66 +3035,395 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
               optional-tag/lifecycle/allocator/wrapper drift, two-pass cleanup, seal→c1 commit→infallible Client commit과
               ledger sole-owner teardown을 Debug/ReleaseFast `test-session-host`, ReleaseFast `check-boundaries`,
               전체 `mise run check`, SSOT·유지보수·보안 적대적 감사로 검증했다. c3 event staging/reduction,
-              combined active publish와 typed token/source-ordinal take는 다음 slice이며 c2 완료 범위가 아니다.
+              combined active publish와 typed token take는 다음 slice이며 c2 완료 범위가 아니다.
 
-            - **2b2c3 — inherited event staging + common classifier:** `ConnectionProfile.cli_attach` Client는
-              pre-raw 단계부터 strict event policy를 보존한다. malformed metadata/resize를 기존 GUI처럼 관대하게
-              drop하지 않고 즉시 protocol close하며, unknown이지만 structurally queued event는 아래 공통 classifier로
-              넘긴다. 이 policy bit은 hello profile에서 한 번 정해지고 external adoption이 추측하지 않는다.
+            - **2b2c3 — inherited event staging + common classifier:** 이 완료명은 유지하되 구현과 merge gate는
+              **c3a1(common wire+product decode) → c3a2(paired transfer) →
+              c3b(single-inventory staging/reducer) → c3c(typed take/combined commit)**
+              네 PR로 나눈다. 네 gate가 모두 green이기 전에는 2b2c3 완료나 active pump를 주장하지 않는다.
 
-              `classifyEvent(identity,authority,frame)`는
-              `ValidatedEvent = revoked(successor_generation) | invalidated | resized(ResizeDto) |
-              metadata(OwnedMetadataDto) | ended`만 반환한다. header에는 runtime id가 없으므로 모든 event는 exact
-              stream으로 immutable stream→runtime evidence에 귀속하고, payload runtime id 대조는 revoked/resized에만
-              적용한다. revoke는 controller-only, tracked current generation의 checked `+1` exact successor이며
-              max overflow/untracked revoke는 protocol terminal이다. 2b2b의 네 필드
-              `AttachmentEvidence`는 immutable identity로 유지하고,
-              `PreparedAdoptionEvidence{identity:AttachmentEvidence,initial_metadata:OwnedMetadataDto}`가
-              attach-time metadata value와 revision을 함께 carry해 c3 latest metadata SSOT를 seed한다. resize는 baseline이
-              없으므로 첫 nonzero generation을 받고 이후 duplicate/older ignore, gap latest full-state accept다.
-              `ResizeDto{runtime_id,cols>0,rows>0,resize_generation>0}`는 allocation이 없다.
-              `OwnedMetadataDto{allocator,canonical_json:?[]u8,revision}`는 strict schema를 canonical JSON으로
-              encode한 exact one-backing ownership이고 zero bytes는 null이다. metadata cap은 기존 event payload
-              cap과 owner-event resident cap 중 작은 값이며 raw event+staged DTO prepare peak도
-              `adoption_metadata_prepare_peak_bytes`에 포함한다. commit 뒤 retained owner-event/descriptor backing은
-              `adoption_metadata_resident_bytes`에만 포함한다. `deinit/take`가 exact-once 소유권을 옮긴다. 같은 nonzero
-              revision+같은 canonical bytes는 duplicate, 같은 revision+다른 bytes는 equivocation protocol
-              terminal, older는 ignore, newer는 latest full-state replace다. 모든 decode allocation은 prepare에서
-              stage한다.
+              **c3a1 — common wire/product decode와 strict raw FIFO.** `runtime_metadata_wire.zig`가 attach result와
+              `runtime.metadata` event의 같은 metadata value를 한 번만 strict decode한다.
+              `InitialMetadataSeed = unsupported | unavailable | current(OwnedMetadataDto)`로 frozen N-1의
+              metadata field 부재, current host가 observation을 얻지 못했거나 stringify/OOM으로 반환한
+              revision 0/null, current nonzero revision/value를 구분한다. null/revision 0은 빈 metadata의
+              확정 관측이 아니므로 `unavailable`이며 GUI cache와 external owner 모두 cwd/destination/foreground를
+              empty로 투영하지 않는다. capability provenance(`unsupported`)와 관측 availability(`unavailable`)를
+              합치지 않는다.
+              `OwnedMetadataDto`는 revision과 정규화한 typed scalar/view를 가진다. cwd/title/destination/target은
+              한 exact byte backing을 가리키고 process는 최대 64개의
+              `ForegroundProcessName{bytes:[128]u8,len:u8}` fixed array로 normalize해 GUI와 external equality가
+              같은 truncate 없는 표현을 쓴다. materialize는 `[128]u8` 전체를 먼저 zero-fill하고 name bytes를
+              복사해 tail까지 canonical하게 만든다. semantic equality/hash는 그래도 `{pid,len,bytes[0..len]}`만
+              사용하며 tail을 읽지 않는다. 128 bytes를 넘는 UTF-8 process name은 resource exhausted다.
+              optional field는 기존 GUI fallback과 같은 값으로 normalize한다
+              (`mouse_tracking=false`, mode는 bool에서 `2|0`, 나머지는 false/0/empty). unknown metadata field는
+              same-major forward compatibility를 위해 semantic equality에서 제외하되 known field의 type/range는
+              strict하다. raw JSON/envelope byte equality나 parse-order stringify를 canonical equality로 쓰지 않는다.
+              `semanticEql`, `deinit`, in-place `take`만 공개하고 bitwise-copy 후 양쪽 deinit은 지원하지 않는다.
+              known field 범위 SSOT는 다음과 같고 server DTO/GUI projection/attach/event 모두 이를 따른다.
 
-              모든 inherited event를 source mutation 없이 strict decode/stage한 뒤
-              `reduceInitialEvents`가 **어떤 malformed/foreign/equivocating event → protocol terminal**을 최우선으로,
-              valid action은 `ended > revoked > invalidated > resized > metadata` 순으로 하나의 commit plan으로
-              줄인다. ended/revoked는 screen/event backlog를 release하고 각각 runtime-ended/revoked terminal,
-              invalidated는 screen backlog를 release하고 injected `now_ns`/checked epoch/deadline의
-              `host_recovery.ack_unadmitted`, resize/metadata만 owner-facing latest slots에 coalesce한다.
-              terminal/invalidated가 있으면 lower DTO backing은 commit cleanup한다. event bytes는 screen ledger
-              밖에서 기존 event cap을 유지하며 source event array/counter는 commit에서 empty/0이 된다.
+              | field group | normalized type/range |
+              | --- | --- |
+              | metadata_revision | nonzero `u64` for current DTO; 0 only with unavailable/null envelope |
+              | cwd, window_title, clipboard_read_target | UTF-8 string, aggregate backing cap 안 |
+              | process.name | UTF-8, 최대 128 bytes, fixed `ForegroundProcessName` |
+              | ssh_remote_dest | optional UTF-8 string |
+              | semantic_state | wire `u8`; known `0...command`, 그 밖의 u8은 `.unknown`으로 normalize |
+              | observer_generation | `u64` |
+              | bell_count, clipboard_write_seq, clipboard_read_seq | **full `u64`**; 기존 `observation_wire`의 u32 제한 제거 |
+              | title_generation | `u32` |
+              | cols, rows | `u16` |
+              | foreground_pgid, process.pid | optional/required `i32` |
+              | mouse_tracking_mode | `u8` 0...4 |
+              | kitty_flags | `u5` |
+              | 나머지 mode/availability flags | `bool`, optional field는 위 fallback 적용 |
 
-              `takeOwnerEvent() -> none | resized(ResizeDto) | metadata(OwnedMetadataDto)`는 initial authority
-              fence가 clear된 뒤에만 resize 우선으로 무할당 consume한다. 실제 app/TTY projection은 3b 책임이다.
-              c3은 공통 classifier와 inherited reducer, c1+c2+event verdict의 최종 combined commit만
-              구현하며 **fresh RX action 실행은 d2, recovery 진행은 e, control/TX cancellation은 f2~f3**가 같은
-              classifier 결과를 소비해 완성한다. 다섯 valid event의 inherited fixture와 classifier fresh fixture,
-              terminal 조합 순열, stale/duplicate/gap, decode allocation fail-index에서 source/ledger 보존을
-              Debug/ReleaseFast로 고정한다.
+              `foreground_available=false`이면 `foreground_pgid=null`과 processes empty로 canonicalize한다.
+              true이면 wire의 optional pgid와 최대 64 process를 보존한다. semantic equality와 GUI projection 모두
+              이 canonical form만 비교한다.
+              server의 metadata revision 증가는 wrapping `+% 1`을 제거하고 checked increment만 쓴다.
+              max에서 다음 observation이 필요하면 해당 subscription/connection을 resource terminal로 닫고 emit·state
+              mutation 0이며, 새 attach는 새 subscription baseline 1에서 다시 시작한다. max→변경과 재attach 1을
+              c3a1 server/client product fixture로 고정한다.
 
-              final verdict precedence는
-              **event/screen malformed·foreign·equivocation·request-id 0 → ended → revoked → invalidated →
-              screen cap recovery → retryable OOM/resource exhaustion → adopted**다. stale plan/fingerprint,
-              alias·semantic mismatch는 invariant terminal이다. 결과는
-              `AdoptionResult = retryable_preserved(out_of_memory|resource_exhausted) | adopted |
-              recovery_committed | terminal_latched(ExternalPumpTerminal)`의 닫힌 union이다. retryable은 lifecycle
-              adopting, Client inventory와 ledger zero를 보존한다. adopted/recovery는 source
-              screen/event arrays/counters/request scalar를 empty/zero로 만들고 lifecycle live다. safe revoke처럼
-              host fd가 열린 terminal도 semantic reason을 latch하고 fd disposition `.owner_cleanup`으로 canonical
-              cleanup한 뒤 dead가 되며 partial reusable state를 반환하지 않는다.
+              external pump는 `OwnerMetadataState = unsupported | unavailable |
+              current{dto:OwnedMetadataDto,pending:bool}`를 별도 owner slot의 persistent baseline SSOT로 둔다.
+              새 revision은 DTO를 replace하고 `pending=true`로 만든다.
+              `metadataState()`는 payload pointer 없이 `{availability,revision,pending}` scalar summary만 반환한다.
+              current DTO view는 아래 event lease로만 빌릴 수 있다.
+              storage는 nonzero monotonic `owner_event_borrow_generation`을 소유하고 `borrowOwnerEvent()`마다 checked
+              increment한 `OwnerEventLease{token:{borrow_generation,kind,revision_or_generation},view}`를 반환한다.
+              generation max에서는 새 view/lease를 만들지 않고 pending baseline을 canonical cleanup한 invariant
+              terminal로 닫는다. matching
+              `finishOwnerEvent(token,applied)` 전까지 pump/admit/다른 borrow 등 정상 mutating facade call을
+              `EventBorrowActive`로 거부한다. terminal/teardown은 예외로 lease generation을 먼저 revoke하고
+              baseline을 exact cleanup할 수 있으며 이후 late finish는 dead/stale typed reject이고 효과 0이다.
+              view는 lease 동안만 유효하다. `applied=true`일 때 exact
+              revision/generation의 pending bool만 false로 만들고 projection OOM/실패의 `applied=false`는 pending을
+              보존해 재시도한다. DTO를 move하지 않으므로 delivery 뒤에도 same-revision
+              exact semantic equality baseline이 남는다. unsupported/unavailable은 event가 아니며 initial fence
+              뒤에도 tag가 유지된다.
 
-              adoption 뒤 teardown은 owner event backing→all token descriptors→ledger `drainAll`→Client fd/storage→
-              ledger `finish` 순서다. 기존 semantic terminal reason/fd disposition은 cleanup에서 덮어쓰지 않는다.
-              nonterminal explicit detach/shutdown은 별도 `CleanupResult`이고 정상 cleanup을 invariant terminal로
-              만들지 않는다. descriptor release 뒤 `drainAll.drained_active_count != 0`일 때만 orphan invariant를
-              sticky diagnostic으로 추가하되 최초 terminal reason은 보존한다.
+              `remote_attachment.decodeAttachResponse(..., profile:AttachDecodeProfile{
+              attach_generation_schema,metadata_support})`는 hello/compatibility에서 seal한 profile을 명시 입력받아
+              JSON envelope를 한 번만 parse해
+              `wire_error(protocol.ErrorCode) | accepted(AttachResult)`를 반환하고 `AttachResult`에
+              `InitialMetadataSeed`를 소유권째 둔다. unsupported profile은 metadata 두 field의 exact absence만,
+              supported는 revision+metadata의 exact presence와 null/current 규칙만 허용해 current host의 누락을
+              frozen으로 오인하지 않는다. GUI/external call site는 기존
+              `decodeWireError`/`responseErrorExit` 선행 parse 뒤 success decoder 재호출을 제거한다.
+              `external_attach.Prepared`가 `Client`/`RemoteAttachment`와
+              함께 이를 보존하고 실패/deinit에서 exact cleanup한다. `PreparedAdoptionEvidence`는
+              immutable `AttachmentEvidence`와 이 seed를 소유하며
+              `ExternalPumpStorage.initInPlace(..., evidence: *PreparedAdoptionEvidence)`가 소비한다.
+              2b3은 attach response를 다시 parse하거나 fixture seed를 만들지 않고 `external_attach.Prepared`의
+              evidence를 이 consuming API에 넘기기만 한다.
+              owner-bearing `AttachResult`의 모든 call site는 explicit take/deinit해야 한다. GUI
+              `RemoteRuntime.attachAndAssemble`도 raw response를 `applyObservationJson`으로 재parse하지 않는다.
+              GUI는 decoded DTO view를 `RuntimeObservation.replace(view)`로 project/copy한 뒤 DTO를 deinit한다.
+              support provenance는 hello/compatibility adapter가 한 번 설정하는
+              `Client.metadata_support: MetadataSupport{unsupported,supported}`에 남기고 source seal에도 포함한다. 기존
+              observation availability에는 unsupported/unavailable 모두 `.unavailable`로 투영한다.
+              attach뿐 아니라 후속 `runtime.metadata`의 GUI 경로도 이 leaf를 사용한다.
+              기존 `observation_wire`는 envelope 분리 뒤 `runtime_metadata_wire`의 preflight/owned projection을
+              호출하는 thin facade로 축소하고, `Client.bufferEvent`의 GUI revision coalesce와
+              `RemoteRuntime.applyObservationJson`도 별도 metadata schema/range/default parser를 두지 않는다.
+
+              `runtime_event_wire.zig`는 framing/Client/ledger/pump를 import하지 않는 공통 leaf다.
+              `preflightEvent`는 `event_preflight_scratch_bytes = 8 KiB` fixed storage의
+              `std.heap.FixedBufferAllocator`+`std.json.Scanner`(depth 32)를 사용해 heap allocation 없이 exact
+              event name/schema/range와 정규화 semantic digest를 만든다. attach/event metadata decoder도 같은
+              depth 32, UTF-8/escape, integer lexical 규칙을 공유한다. root/data/metadata/process object의
+              admitted field cap 안의 **모든 duplicate key**(known/unknown 무관), scratch exhaustion과 depth 초과는
+              protocol malformed다.
+              `max_metadata_fields=64`, `max_process_entries=64`, `max_process_fields=8`을 actual wire 상수로 두고
+              scope별 fixed `KeyFingerprint{digest,raw_start,raw_end,decoded_len}` table로 duplicate를 판정한다.
+              raw span은 immutable payload slice의 offset이며 digest hit 때 Scanner가 지나간 두 key를 다시 streaming
+              unescape/exact compare할 수 있게 한다. attach response의 field/process cap 초과는
+              `DecodeError.resource_exhausted`로 즉시 분류해 기존 CLI `.busy` exit 6에 매핑한다.
+              inherited event preflight는 65번째 metadata/process entry 또는 9번째 process field에서
+              `resource_seen`을 기록하고 해당 event 나머지는 JSON syntax/depth/UTF-8만 bounded drain한다.
+              cap을 넘긴 event 안의 추가 semantic duplicate/type 검증은 주장하지 않고 그 event는 resource verdict다.
+              이후 FIFO event는 다시 full 검증하므로 다른 frame의 protocol malformed는 아래 global precedence에서
+              resource보다 앞선다. 어느 쪽도 OOM retry가 아니다.
+              GUI attach decode의 resource exhausted는 attach 실패+Client fail-close이며 기존 observation cache를
+              보존한다. 후속 GUI metadata event의 resource exhausted도 drop/coalesce하지 않고 connection
+              fail-close해 전진한 host revision을 stale cache로 정상 처리한 척하지 않는다. external CLI attach는 위
+              `.busy` exit 6을 쓴다. 세 경로의 fd/cache/exit disposition을 각각 제품 fixture로 고정한다.
+              Scanner의 partial string/number token은 payload slice 위에서 streaming unescape/hash하며 value 전체를
+              scratch에 복사하지 않는다. known string과 허용한 unknown scalar string은 각각
+              `protocol.max_control_json` 및 frame aggregate cap까지만 받을 수 있고 8 KiB scratch 소비와 무관하다.
+              forward-compatible unknown metadata field는 scalar string/number/bool/null만 허용하며 nested
+              object/array는 major/schema 갱신 없이는 protocol malformed다. 따라서 fixed scratch의 산술 상한은
+              depth stack+scope별 key fingerprint span table+두 UTF-16 escape state이고 유효 control-cap
+              cwd/title/escaped-string이 scratch exhaustion으로 오분류되지 않는다. 자동 gate는 envelope/key/quote
+              overhead를 checked 계산해 `payload_len == max_control_json`인 exact 최대 valid string과 그 cap+1,
+              그리고 8 KiB보다 크지만 frame cap 안인 escaped string을 생성한다.
+              key digest hit는 duplicate로 즉시 단정하지 않고 두 decoded key를 streaming exact compare한다. SHA-256
+              semantic digest도 metadata/reducer의 prefilter일 뿐이며 same-revision candidate는 known field를
+              `semanticEqlStream`으로 allocation 없이 exact replay 비교한 뒤에만 duplicate/equivocation을 정한다.
+              production SHA-256을 바꾸지 않되 test-only `DigestOps` seam으로 서로 다른 decoded key/semantic value에
+              같은 digest를 주입해 두 exact fallback이 실제 실행되는 비공허 테스트를 둔다.
+              이 leaf(또는 더 낮은 `runtime_event_types.zig`)가 primitive-only
+              `EventIdentity{runtime_id,stream_id}`, `EventAuthorityView{role,generation}`,
+              `EventFrameView{major,kind,stream_id,request_id,flags,payload}`를 소유한다. pump DTO는 이를 명시적으로
+              map하며 leaf가 `client_pump`를 import하지 않는다. fresh RX와 inherited FIFO 모두 exact header를 포함한
+              같은 `EventFrameView`를 classifier에 넘긴다.
+              allocation-free `classifyEventView(identity,authority,preflight,frame)`는 preflight와 frame을
+              재대조하고 `ValidatedEventView = revoked(successor_generation) | invalidated |
+              resized(resize_wire.Event) | metadata(BorrowedMetadataView) | ended`만 반환한다.
+              Phase B가 sealed winner ordinal 하나만
+              `materializeOwnedMetadata(allocator,preflight,frame) -> OwnedMetadataDto`로 만든다. GUI owning decode도
+              같은 schema/preflight leaf를 재사용하되 반환형을 Phase A와 억지로 합치지 않는다.
+              unknown event name은 strict `cli_attach`에서 protocol
+              terminal이며 capability 없는 future event를 조용히 ignore하지 않는다. payload에 runtime id가 없는
+              metadata/ended/invalidated는 exact header stream의 immutable stream→runtime evidence에 귀속한다.
+              revoked/resized의 payload runtime id와 revoked stream id는 evidence와 exact match해야 한다.
+              `metadata_support == unsupported`인 profile에서 `runtime.metadata` event가 하나라도 오면 capability
+              violation protocol terminal이며 `.unsupported` baseline/publish를 바꾸지 않고 connection을 닫는다.
+
+              `ConnectionProfile.cli_attach`의 `Client.bufferEvent`는 header/cap만 검사한 뒤 event를 arrival-order raw
+              FIFO로 보존한다. identity/authority/baseline이 아직 없으므로 여기서 별도 부분 semantic classifier를
+              만들지 않는다. GUI profile에만 기존 malformed drop, metadata/resize coalesce, ended supersession을
+              유지한다. CLI path는 malformed, same revision/generation, ended 앞의 event를 drop/reorder하지 않아
+              c3b가 모든 증거를 한 SSOT에서 판정한다. ingress queue cap을 넘으면 adoption 전에 connection-wide
+              `EventQueueFull`로 닫힌다. 아래 verdict precedence는 **이미 cap 안에 보존된 adoption inventory**에
+              한정하며 cap 뒤 terminal event를 위한 숨은 unbounded reserve를 주장하지 않는다.
+
+              **c3a2 — prepared normalize와 paired evidence/Client transfer.** storage final address 안의 empty slot을 받는
+              `Client.prepareExternalPumpTransfer(out:*PreparedExternalPumpTransfer,
+              destination:*?Client,resident_cap)`가 destination null을 seal하고
+              `FrameParser.prepareNormalizeExact(out.parser_replacement)`로 source parser를 건드리지 않은 exact
+              replacement를 stage하는 등 모든 fallible work를 끝낸다. token은 source/destination/out 주소에 bind해
+              in-place 구성하고 abort/deinit exact once이며 bitwise copy/value return은 금지한다.
+              `Client.commitExternalPumpTransfer(out:*PreparedExternalPumpTransfer,destination:*?Client)`은
+              old parser backing free/replacement swap과 Client optional-slot take를 포함하는 allocation/error 없는
+              move+tombstone이다. 모든 allocator, destination/address/alias/parser/evidence preflight를 두 source의 첫
+              **ownership mutation** 전에 끝낸 뒤 **Client commit transfer→seed take/tombstone은 하나의 no-fail
+              ownership suffix**다. suffix 전 실패는 Client/seed를 caller가 모두 보존하고, suffix 뒤 injected
+              failure는 storage가 둘을 함께 cleanup한다. Client만 moved/seed는 source-owned 또는 그 반대인
+              disposition은 존재하지 않는다.
+              paired token은 source Client address, evidence final address, exact runtime/stream/role/generation,
+              compatibility/attach decode profile와 `metadata_support`, seed tag/revision을 함께 seal한다.
+              current seed면 `OwnedMetadataDto` final address, allocator/backing base/len, backing raw bytes,
+              normalized scalar와 inline process `{pid,len,name}` 전체의 semantic digest도 bind하고 no-fail suffix 직전에
+              descriptor/range를 먼저 검사한 뒤 content를 재검증한다.
+              unsupported profile+unsupported seed, supported profile+unavailable/current seed만 유효하다.
+              다른 attach의 evidence swap, profile/tag mismatch, runtime/stream/role drift는 첫 ownership mutation 전에
+              typed terminal/preserved reject하며 Client와 seed owner를 caller에 그대로 둔다.
+
+              | init 지점 | Client owner | metadata seed owner | cleanup |
+              | --- | --- | --- | --- |
+              | preflight 실패/allocator OOM | caller | caller | caller가 기존 두 owner deinit |
+              | no-fail paired take 완료 | storage | storage | storage teardown |
+              | paired take 뒤 injected failure | storage가 close | storage가 deinit | source는 tombstone이라 재해제 0 |
+              | initialized | storage | storage | 이후 adoption/teardown |
+
+              아래 `client_pump.zig` DTO 변경은 c3a가 아니라 c3c merge gate에서만 적용한다.
+              `client_pump.zig`의 pure DTO는
+              `AttachmentAuthority{role,generation=untracked|tracked(u64)}`,
+              `ActiveState{attachment:AttachmentAuthority,flow:AuthorityState}`를 소유하고
+              `ExternalPumpState.active: ActiveState`로 바뀐다. `AuthorityState.initial_fence`가 c3c 직후 유일한
+              initial flow이며 d2의 RX would-block+parser-empty commit 전에는 owner event/screen/input/TX/control을
+              열지 않는다. `PreparedAttachmentAuthority`는 별도 live 타입이 아니라 이 pure authority의 prepared
+              wrapper/alias이고 immutable `AttachmentEvidence`는 provenance로만 남는다.
+
+              **c3b — single-inventory event staging/reducer.** allocation-free Phase A는 c2
+              `inspectExternalAdoption`/`PreparedClientDisarm`의 첫 allocation보다 먼저 raw Client source에서 실행한다.
+              `Client.foldExternalAdoptionSource(context,visitor)`는 Client private FIFO의 sole traversal API다.
+              Client가 각 item을 neutral `EventFrameView`로 만들어 caller-provided generic visitor에 arrival order로
+              넘기고 transport 구조만 담은 `ClientSourceSeal`을 반환한다. Client는 reducer verdict, attachment
+              authority, recovery policy를 import하지 않는다. pure `runtime_event_reducer`는 wire leaf만 import해
+              `{authority,metadata,resize}`와 closed `ReducerOutcome`을 전진시키고,
+              outer `client_external_adoption`이 seal/outcome/attachment evidence를 `PreparedSourceDecision`으로 합친다.
+              seal은 structural counts/counters, **raw `next_request_id: u64`**, ordered header+payload 전체를
+              domain-separated SHA-256으로 묶는다. request ID 0도 seal/revalidate할 수 있지만 typed state로
+              publish하지 않고 protocol terminal로만 commit한다. outer `client_external_adoption`만 nonzero raw 값을
+              `RequestIdState.fromNext`로 바꿔 `PreparedSourceDecision.request_state`에 둔다.
+              raw digest는 unknown metadata field를 포함한 모든 source byte를 bind하고, semantic digest는 정규화한
+              known metadata equality/reducer 전용이다. final revalidation은 둘을 혼용하지 않는다.
+              이 API는 c2 `ExternalAdoptionSnapshot`보다 약한 우회로가 아니다. parser unread bytes/head/tail/
+              expected-major와 backing 주소·len·capacity, build ID/lifecycle/profile/capability provenance,
+              fd/io-mode/ownership/unusable, pending outbound/external TX empty, 모든 array와 payload의 allocator
+              ptr/vtable·base/len/capacity, partial-batch 의미, counters와 cleanup mirror를 allocation 없이 검사하고
+              seal에 bind한다. c3의 위협 모델은 memory-safe Client API가 만든 owner와 **seal 이후** descriptor/content
+              ABA이며, arbitrary forged pointer/allocator나 process memory corruption을 탐지·복구한다고 주장하지 않는다.
+              각 descriptor는 range/len/cap/alias와 cleanup mirror를 먼저 검증한 뒤에만 payload를 dereference/hash한다.
+              adopted final validation도 descriptor/mirror 비교→range/alias 검증→payload hash 순서다. valid
+              allocation끼리의 alias/len/cap drift는 payload dereference 전에 invariant terminal이 되고,
+              allocation-backed adopted cleanup mirror로 각 실제 allocation을 exact once 정리한다.
+              adopted는 `PreparedClientAdoption`의 disarm suffix가 원본 owner를 정리하고, immediate recovery만
+              Client private infallible `commitExternalRecoveryDiscard`로 screen/event owner 집합을 clear/free한다.
+              adopted branch에서만 c2의 `PreparedScreenBacklog`를 `PreparedClientAdoption`으로 이름을 바로잡아
+              전체 Client inventory/disarm cleanup을 한 번 소유하고 `screen: PreparedScreenTransfer`,
+              `events: PreparedInitialEvents`를 같은 inventory/source seal에 bind한다. terminal/recovery branch는
+              allocation-backed inventory를 만들지 않으며 Phase A와 같은 exclusive owner call 안에서 callback,
+              yield, 외부 관측점 없이 즉시 no-fail commit한다. terminal은 exact reason으로 Client close, recovery는
+              `Client.commitExternalRecoveryDiscard(seal)`로 screen/event arrays/counters/request scalar를 no-fail
+              clear하면서 fd/parser/external-mode owner는 보존한다. inter-call ABA seam이 없으므로 stack seal은
+              commit 직전 scalar/content self-check에만 쓰고 cleanup mirror 역할을 주장하지 않는다. 같은 suffix가 sealed request state와 attachment
+              authority를 storage로 take하고 Client request scalar를 0으로 만든다. seal mismatch는 invariant terminal
+              close다.
+              event module은 Client private list나 `ExternalAdoptionInventory`를 다시 inspect하지 않는다.
+
+              adopted verdict만 final-address `PreparedExternalAdoption`의
+              `PreparedSourceDecision{source_seal,verdict,final_authority,raw_next_request_id,
+              request_state,metadata_winner,resize_winner}`와 nonoptional
+              `PreparedClientAdoption`/allocation-backed fingerprints/screen plan을 embed한다. prepare와 commit
+              사이 branch를 외부 scalar로 다시 고르지 않고 commit은 이 decision의 전 필드와 source seal을
+              재계산·대조한다.
+              c3 migration은 c2 outer `authority`와 nested `request_ids` publish owner를 제거한다.
+              `PreparedSourceDecision.final_authority/request_state`가 유일한 publish SSOT이고 Client inventory의
+              해당 값은 cleanup/revalidation fingerprint일 뿐 semantic owner가 아니다.
+
+              `PreparedInitialEvents`는 payload copy가 아니라 `ExternalEventFingerprint[]`(exact header, raw SHA-256,
+              semantic SHA-256, classified scalar), staged owning metadata winner, primary/cleanup mirror와 final-address
+              seal을 소유한다. `Client.stageExternalEventFingerprints`/`externalEventFingerprintsMatch`가 c2
+              screen-copy API와 같은 inventory/alias/final-address 계약으로 descriptor를 stage/revalidate한다.
+              raw payload 총 8 MiB를 복제하지 않으며 final stale 검사는 source payload를 다시 domain-separated
+              SHA-256해 raw digest와 대조한다. Phase A는 Client/source mutation과 heap allocation 없이 **모든**
+              preserved screen/event header·payload와 request ID를 검사하고 FIFO scratch
+              `{authority,metadata,resize}`를 전진시켜 최종 branch를 정한다. 첫 revoke 뒤 role은 observer이므로 두 번째
+              revoke는 protocol terminal이다. metadata는 initial seed부터 같은 revision+same semantic은 duplicate,
+              same revision+different semantic은 equivocation, older ignore, newer replace다. resize는 첫 nonzero
+              generation을 받고, same generation+same full state는 duplicate, same generation+different
+              runtime/cols/rows는 equivocation, older ignore, gap/newer full state는 replace다.
+              `resize_wire.Event`의 기존 `cols>=2`, `rows>0`, `generation>0` 범위를 그대로 재사용한다.
+
+              Phase A가 결정한 precedence는
+              **event/screen structural malformed·foreign·equivocation·`Client.next_request_id == 0` → ended → revoked → invalidated →
+              screen cap recovery → deterministic resource terminal → allocation OOM retry → adopted**다.
+              ended/revoked/invalidated branch는 불필요한 screen copy/ledger seed를 만들지 않는다. Phase B는 adopted
+              branch에 필요한 latest metadata backing과 screen plan만 할당하고 Phase A digest를 다시 대조한다.
+              따라서 앞 allocation OOM이 뒤 protocol/terminal verdict를 가리지 않는다. allocator OOM만
+              `retryable_preserved(.out_of_memory)`다. metadata/event fixed cap 초과는 같은 source로 재시도해도
+              성공하지 않으므로 `.resource_exhausted` terminal, screen ledger cap만 recovery다.
+
+              initial seed와 staged metadata의 branch별 ownership은 다음과 같다.
+
+              | verdict | metadata disposition |
+              | --- | --- |
+              | OOM retry | prepared evidence의 initial seed와 source 후보를 그대로 보존 |
+              | adopted | latest initial/event `current` DTO를 baseline slot으로 take하고 `pending=true`; `unsupported`/`unavailable`은 pending 없는 tag로 publish |
+              | ended/revoked/terminal | initial seed와 staged candidate를 모두 deinit |
+              | host invalidated/client screen-cap recovery | lower metadata·resize 후보를 버리고 owning backing을 deinit; support unsupported면 owner `.unsupported`, supported면 `.unavailable` publish |
+
+              duplicate/older metadata는 기존 pending을 지우지 않는다. consumer projection 실패는
+              `finishOwnerEvent(...,false)`로 pending을 보존하고 exact current revision의 successful finish만
+              pending을 false로 만든다.
+
+              `max_owner_event_backing_bytes = protocol.max_control_json`은 commit 뒤 owner metadata byte backing의
+              상한이고 resident footprint는 이를 `@sizeOf(OwnedMetadataDto)`(inline 64-process array 포함)와
+              checked-add한다. `max_owner_event_prepare_backing_bytes = 2 * protocol.max_control_json`은 already-owned
+              initial baseline과 staged latest candidate 두 backing의 상한이며 prepare footprint는
+              `2 * @sizeOf(OwnedMetadataDto)`를 checked-add한다. 여기에
+              `event_count * @sizeOf(ExternalEventFingerprint)`, source/event digest, Client inventory와 c2 screen
+              metadata를 checked-add한 전체가 기존 `max_adoption_metadata_bytes` 4 MiB 안에 들어야 한다.
+              raw `inventory.event_payload_bytes`는 복제하지 않지만 source resident/queue cap으로 별도 기록해
+              payload+metadata 총 메모리 peak artifact에 포함한다. process count/name/string의 exact backing size를
+              allocation 전에 계산하고 backing/inline/전체 footprint 각각의 cap/cap+1을 고정한다. prepare 후 같은 backing을 같은 길이로 event name,
+              runtime id, revision/generation, cols/rows만 바꾸어도 final allocation-free digest 재검증이 stale plan을
+              거부하며 ledger/active publish mutation은 0이고 Client는 canonical terminal cleanup된다.
+
+              reducer는 malformed/foreign/equivocation을 최우선 terminal로, valid action은
+              `ended > revoked > invalidated > resized+metadata`로 줄인다. resize와 metadata는 서로 하나를 버리는
+              precedence가 아니라 두 latest owner slot을 함께 보존한다. ended/revoked는 screen/event plan을 abort하고
+              각각 runtime-ended/revoked terminal, invalidated는 screen plan을 abort하고 c3c의 injected
+              `now_ns`로 `host_recovery.ack_unadmitted`를 seed한다. fresh RX는 d2, recovery 진행은 e,
+              control/TX cancellation은 f2~f3가 같은 classifier를 소비한다.
+
+              recovery branch는 다음처럼 닫혀 있다.
+
+              | Phase A verdict | storage publish | outbound 의미 |
+              | --- | --- | --- |
+              | host `snapshot.invalidated` | `.active{attachment=sealed,flow=.host_recovery.ack_unadmitted}` | f1/e가 response-free `stream_ack`을 admit |
+              | local screen ledger cap | `.active{attachment=sealed,flow=.client_recovery.control_wait}` | f1/e가 response-bearing `runtime.resync`을 admit |
+
+              pump owner는 reducer 밖에서 tagged
+              `PreparedRecovery = host{epoch,deadline_ns} | client{epoch,deadline_ns}`를 만든다. union tag가 origin,
+              commit mapping이 initial phase(`host→ack_unadmitted`, `client→control_wait`)의 유일한 prepared SSOT라
+              별도 origin/phase enum mirror를 저장하지 않는다. 최초 storage adoption은 recovery epoch 0에서 시작해
+              checked `+1`인 epoch 1을 준비하며, active 이후 e의 재진입만 현재 active epoch를 checked 증가시킨다.
+              deadline은 injected `now_ns + 30s` checked add다. 최초 adoption의 epoch는 항상 1이므로 c3 gate는
+              deadline overflow를 고정하고, max epoch는 e의 active re-entry gate가 소유한다. overflow는
+              ledger/active publish 0 뒤 Client canonical cleanup을 수행하는 deterministic invariant terminal이다.
+              commit은 산술 없이 tagged value를
+              기존 `AuthorityState.host_recovery/client_recovery`의 `RecoveryContext{epoch,deadline_ns}`로 투영하고
+              sealed nonzero `RequestIdState`를 Client clear와 같은 no-fail suffix에서 publish한다.
+              initial metadata/lower owner event 후보는 recovery에서 cleanup한다.
+
+              **c3c — typed take와 combined commit.** `CommittedScreenBacklog`이 final storage 안에서 exact token
+              slice를 소유한다. `SourceRef`/source-ordinal backing은 현재 consumer가 쓰지 않고 token 배열 자체가
+              source order이므로 c3에서 제거한다. destination address/empty/non-alias와 모든 sub-plan은 ledger mutation 전에 seal한다.
+              `PreparedClientAdoption.commitScreenSeedsInto(client,ledger,out)`는 ledger `commitSeeds`가 실패하기
+              전까지만 error를 반환하고, 성공 직후부터 token slice-header move/source tombstone만 수행하는 no-error
+              suffix다. raw transfer field를 외부에 노출하거나 caller가 직접 null/free하지 않는다.
+              `commitSeeds`의 `StalePlan/InvalidPlan/InvariantFailure/Drained/cap` 실패는 token/payload/charge mutation
+              전이어야 한다. outer commit은 이를 internal/resource terminal로 닫아 source Client를 fail-close하고,
+              metadata/event/screen plan을 exact deinit하며 ledger sticky state를 보존한 뒤 dead를 publish한다.
+              이 cleanup을 마친 결과가 `terminal_latched`이고 ledger success 뒤에만 오류 없는 suffix에 진입한다.
+
+              orchestration은 두 단계로 닫힌다.
+              c2의 현재 payloadless `PrepareStatus{prepared,retryable_preserved,terminal}`는 c3가 착륙할 때
+              아래 `AdoptionPrepareStatus`로 교체하며 두 union을 동시에 공개하지 않는다.
+              `ExternalPumpStorage.prepareAdoption(now_ns) -> AdoptionPrepareStatus`가 Phase A, recovery checked
+              context와 모든 allocation을 소유하고
+              `prepared_adopted | recovery_committed | terminal_latched |
+              retryable_preserved(.out_of_memory)`만 반환한다. non-adopted verdict는 같은 exclusive call 안에서
+              위 immediate no-fail suffix까지 끝내므로 prepared terminal/recovery 상태를 외부에 노출하지 않는다.
+              `ExternalPumpStorage.commitAdoption() -> CommitResult`는 allocation/OOM/clock read/checked arithmetic이 없고
+              오직 `prepared_adopted`에서 호출하며 `adopted | terminal_latched`만 반환한다. final seal은
+              storage/Client/ledger/evidence/initial seed/event raw content/authority/request ID,
+              every final address와 cleanup mirror를 allocation 없이 재검증한다. adopted path는
+              **ledger seed+typed token take(마지막 fallible precommit) → owner resize/metadata·authority·request
+              state take → `Client.commitExternalAdoption` → `semantic_state=.active{.flow=.initial_fence}`와
+              `lifecycle=.live`를 마지막 publish** 순서다. ledger 성공 뒤에는 allocation/callback/validation/error
+              return이 없다. prepare 내부 terminal/recovery는 ledger seed를 하지 않고 stack winner cleanup →
+              branch-specific Client disarm/close → semantic/lifecycle publish의 별도 no-fail suffix를 쓴다.
+              final seal/content mismatch도 ledger와 active semantic publish mutation은 0인 채 Client canonical
+              fail-close와 prepared-owner cleanup을 수행하고 `terminal_latched`가 된다. 따라서 이 경우
+              source mutation 0은 주장하지 않으며 테스트는 ledger/publish 0과 fd close·queue cleanup exact once를
+              각각 단언한다.
+
+              prepare의 retryable은 adopting, Client/evidence/source와
+              pristine ledger를 보존한다. adopted/recovery는 source screen/event arrays/counters/request scalar를
+              empty/zero로 만들고 lifecycle live다. semantic terminal은 최초 reason/fd disposition을 latch하고
+              canonical cleanup 뒤 dead가 되며 partial reusable state를 반환하지 않는다.
+              `borrowOwnerEvent() -> none | OwnerEventLease{token,resized(resize_wire.Event) |
+              metadata(BorrowedMetadataView)}`는 active+initial fence clear 뒤 pending resize 우선으로 무할당
+              borrow한다. `finishOwnerEvent(token,applied)`만 exact current pending bit을 조건부 clear하며 baseline
+              scalar/DTO는 보존한다. active 상태의 wrong/stale/double token은 invariant terminal이고,
+              terminal/teardown이 revoke한 lease의 late finish만 dead/stale typed no-op reject다. app/TTY projection은 3b다.
+
+              teardown은 **남은 owner metadata deinit → 각 retained token `ledger.releaseLease`(실패해도 전수 진행) →
+              token backing free → ledger `drainAll` → Client fd/storage cleanup → ledger `finish`** 순서다. 일부 owner
+              event/token이 이미 consume/release된 상태도 허용한다. stale/duplicate token, cleanup mirror drift,
+              orphan drain은 최초 semantic terminal reason을 덮지 않고 sticky invariant만 추가한다.
+
+              자동 gate는 (a) common wire 5종+unknown/foreign/malformed, injected digest collision의 decoded-key/
+              semantic exact fallback, exact control-cap envelope string·cap+1과 8 KiB 초과 escaped string,
+              frozen unsupported/current unavailable/current metadata의 실제 attach-response 세 경로,
+              unsupported profile metadata event의 publish 0/protocol close와 GUI attach/event resource fail-close·cache 보존,
+              metadata revision max의 emit 0/connection close/reattach 1, process-name tail poison semantic equality,
+              decoder/DTO/GUI projection 전체 allocation fail-index의 raw input·기존 cache 불변/owner 미발행/exact cleanup,
+              injected parse counter 1과 boundary gate의 GUI/external raw attach JSON 재parse call site 0,
+              paired transfer prepare OOM 보존·swapped evidence/profile-tag mismatch,
+              same-revision seed cwd/process/backing-pointer mutation의 caller 보존·destination null·free 0,
+              abort exact once·post-commit storage cleanup,
+              (b) CLI raw FIFO no-drop/no-reorder와 GUI attach/후속-event common DTO coalesce,
+              (c) staging source 불변+all allocation fail-index, zero request-ID raw seal/typed publish 0,
+              valid-owner descriptor/len/cap/alias ABA의 dereference 전 거부와 cleanup-mirror exact once,
+              (d) pure reducer pairwise precedence/FIFO authority/revision/generation과 initial epoch 1/deadline overflow,
+              (e) typed take abort/success/stale-copy/double-deinit/final-address와 verdict별 metadata cleanup,
+              (f) prepare의 immediate recovery/terminal 두 suffix와 prepared-adopted commit, sealed request/authority take,
+              recovery origin/phase/deadline publish, metadata/resize borrow lease 중 mutation 거부,
+              projection 실패→same revision 재borrow stale-token ABA, borrow generation max-1/max/double finish,
+              exact finish baseline 보존, metadataState payload pointer 0,
+              active lease teardown revoke·late finish 효과 0,
+              partial-consume teardown·ledger final-zero로 나눈다. fixture가 baseline을
+              직접 주입한 테스트만으로 c3a를 완료 처리하지 않으며 실제 `external_attach.attachSnapshot` 경로의
+              revision N baseline 뒤 N/same, N/different, N-1, N+1을 자동 검증한다.
 
           - **2b2d1 — RX provenance/parser:** parser는 read마다 sidecar entry를 만들지 않는다. connection에
             checked nonwrapping `rx_absolute_next`와 `buffer_start_absolute`, parser에 현재 frame의 단일

@@ -3141,7 +3141,6 @@ pub const AppSession = struct {
             .divider_px = self.dividerThicknessPx(),
             .side = if (self.dock_initialized) self.dock.side else .right,
             .size_pt = if (self.dock_initialized) self.dock.size else 0,
-            .tree_size_pt = if (self.dock_initialized) self.dock.tree_size else 0,
             .visible = self.dockVisible(),
         });
     }
@@ -23351,7 +23350,6 @@ pub const AppSession = struct {
         return .{
             .side = self.dock.side,
             .size = self.dock.size,
-            .tree_size = self.dock.tree_size,
             .collapsed = self.dock.collapsed,
             .presented = self.dock.presented,
             .entries = entries,
@@ -45589,7 +45587,6 @@ test "FP3 파일 도크: right/bottom 기하·surface diff 소스·presence·hit
     session.focusTerm(3); // [terminal, browser, alpha.md, beta.html]
     const win = try session.captureWorkspaceWindow(arena.allocator(), false, null);
     try std.testing.expectEqual(dock_panel.Side.bottom, win.dock.side);
-    try std.testing.expectEqual(session.dock.tree_size, win.dock.tree_size);
     try std.testing.expectEqual(@as(usize, 2), win.dock.entries.len);
     try std.testing.expect(win.dock.entries[1].active);
 }
@@ -46398,7 +46395,7 @@ test "FP5 workspace restore prunes invalid file panel capabilities and degrades 
         .{ .path = directory_path, .kind = .html },
     };
     var restored = captured;
-    restored.dock = .{ .tree_size = 207, .entries = &entries };
+    restored.dock = .{ .entries = &entries };
     try session.applyWorkspaceWindow(restored);
 
     // v144: 버린 entry 4개(kind 불일치·상대경로·미존재·디렉터리)를 신호로 남긴다. apply는 성공하므로 이 신호가
@@ -46410,7 +46407,6 @@ test "FP5 workspace restore prunes invalid file panel capabilities and degrades 
     try std.testing.expectEqual(dock_panel.EntryKind.markdown, session.fileEntryAt(0).?.kind);
     try std.testing.expectEqual(session.fileEntryAt(0).?.id, session.pending_dock_focus.?.entry_id); // invalid active entry 제거 → 첫 유효 entry
     try std.testing.expect(session.fileEntryAt(0).?.surface_id != 0);
-    try std.testing.expectEqual(@as(u32, 207), session.dock.tree_size);
 
     var arena2 = std.heap.ArenaAllocator.init(allocator);
     defer arena2.deinit();

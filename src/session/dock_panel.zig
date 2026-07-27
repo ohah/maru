@@ -193,9 +193,6 @@ pub const PersistedTreeNode = union(enum) {
 pub const PersistedState = struct {
     side: Side = .right,
     size: u32 = 0,
-    /// project tree 열 폭(pt). 0은 현재 폰트 기준 기본 18셀을 뜻한다. 실제 배치는 editor 최소 28셀·tree 최소
-    /// 12셀로 clamp하며, 창이 좁으면 tree를 숨긴다.
-    tree_size: u32 = 0,
     collapsed: bool = false,
     /// Explorer launcher로 한 번 열린 도크인지. content와 분리해 explicit-empty 도크도 재시작 뒤 유지한다.
     presented: bool = false,
@@ -216,8 +213,6 @@ pub const DockPanel = struct {
     entry_ids: *EntryIdAllocator,
     side: Side = .right,
     size: u32 = 0,
-    /// FP16: 도크 폭이 곧 트리 폭이라 배치에는 안 쓰인다. 옛 파일과의 왕복을 위해 값만 보존한다(B-4에서 정리).
-    tree_size: u32 = 0,
     collapsed: bool = false,
     presented: bool = false,
     /// `restore`가 채우는 복원 목록. 호출자가 Term으로 **이관하면 비운다**(path 소유도 함께 넘어간다).
@@ -250,7 +245,6 @@ pub const DockPanel = struct {
         errdefer panel.deinit();
         panel.side = state.side;
         panel.size = state.size;
-        panel.tree_size = state.tree_size;
         panel.collapsed = state.collapsed;
         panel.presented = state.presented;
 

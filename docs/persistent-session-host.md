@@ -2282,9 +2282,10 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
     우하단 local-width-independent placeholder, grapheme entry/aggregate cap+1, allocation fail-index 전수와
     lock 대칭을 Debug/ReleaseFast 테스트로 검증한다.
     이 단계는 stdout event loop에 연결하지 않으며 P5c3c~d 전에는 public attach 전체 완료로 표시하지 않는다.
-  - **P5c3c — nonblocking single-owner event loop**: `external_attach.zig`의 한 stack owner가 `RawTty`, 단 하나의
-    `Client`, 그 client를 borrow하는 `RemoteAttachment`, ANSI stdout queue, resize와 detach chord를 소유한다.
-    P5c3c는 다음 세 phase의 여섯 merge slice를 순서대로 통과해야 하며 일부만으로 event loop 완료를 주장하지 않는다.
+  - **P5c3c — nonblocking single-owner event loop**: `external_pump_owner.zig`의 한 stack owner가 `RawTty`,
+    단 하나의 `ExternalPumpStorage`(그 안의 `Client`+ledger), storage facade만 쓰는
+    `RemoteAttachment` adapter, ANSI stdout queue, resize와 detach chord를 소유한다.
+    P5c3c는 다음 세 phase의 열여섯 merge slice를 순서대로 통과해야 하며 일부만으로 event loop 완료를 주장하지 않는다.
     - **P5c3c-1 — absolute-deadline transport**는 두 merge slice다.
       - **P5c3c-1a — deadline leaf + connect/hello**: `client_deadline.zig`가 `AbsoluteDeadline`과
         injected connector ops(monotonic clock, socket, connect, fcntl, poll, getsockopt `SO_ERROR`,
@@ -2361,17 +2362,21 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
         `kind/stream_id/request_id`와 `activated_at_ns/last_progress_at_ns`를 가져 revoke/cleanup과 30초 absolute/
         10초 progress timeout을 별도 parallel metadata 없이 2b에서 판정할 수 있게 하며, 2a 자체는 frame
         admission·timeout을 실행하지 않는다.
-        2a의 empty `InFlightControl` shape는 `request_id`와 response `AbsoluteDeadline`만 가지며, 2b2가 실제
-        admission을 열 때 control kind/target authority/fully-sent state를 같은 구조에 확장한다.
+        2a의 empty `InFlightControl` shape는 mode 전환/cleanup fixture가 exact ownership을 검증하기 위한
+        **transitional placeholder**로 `request_id`와 response `AbsoluteDeadline`만 가진다. 2b2a가 이를
+        `ExternalModeState`에서 제거하고 semantic authority로 한 번 이관하며, 2b2f2가 실제 admission을 열 때
+        `ExternalPumpState.control` 하나에 control kind/target authority/fully-sent state를 추가한다.
         `ExternalModeState`는 saved fd
         flags, `ExternalTxFrame` descriptor table **정확히 64개 분량**을 선할당한 empty `external_tx`,
         `external_tx_bytes=0`, allocation 없는 inline `in_flight_control=null`을 소유한다. frame body는 2b
         admission 때만 할당하되 descriptor table 자체는
         전환 전에 전부 staging한다. RX는 기존 `FrameParser`와 pending stream/event/batch/partial batch가 계속
         유일한 storage라 새 raw RX queue나 선할당 buffer를 만들지 않는다. 2b의 stack poll/read scratch도
-        `Client` resident가 아니다. control response 5초 시계는 `InFlightControl`, logical screen stream의
-        30초/10초 시계는 기존 `PartialBatch`의 2b 확장, stdout blocked epoch는 3a ANSI queue가 각각 소유하며
-        `ExternalTxFrame` 옆의 parallel timing table은 만들지 않는다.
+        `Client` resident가 아니다. 2b2a 전까지의 transitional control response 5초 시계만
+        `InFlightControl`이 소유하고, 이관 뒤에는
+        `ExternalPumpState.control`이 소유한다. logical screen stream의 30초/10초 시계는 기존 `PartialBatch`의
+        2b 확장, stdout blocked epoch는 3a ANSI queue가 각각 소유하며 `ExternalTxFrame` 옆의 parallel timing
+        table은 만들지 않는다.
 
         전환 error는 `ConnectionClosed | AlreadyExternal | Busy | OutOfMemory | FlagFailed`의 닫힌 타입이다.
         검사 순서는 unusable→`ConnectionClosed`, 이미 external→`AlreadyExternal`, 기존 `pending_outbound != null`
@@ -2429,16 +2434,24 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
         injected transition failure의 stable mapping·attachment EOF 정리 뒤 새 attach 성공을 검증한다. 별도 실
         socketpair fixture가 같은 `transitionExit→failClient` 경로의 후속 wire 0·즉시 EOF를 고정한다. correctness는
         debug assert에 기대지 않는다.
-      - **P5c3c-2b — bounded pump/demux**는 아래 세 merge slice가 모두 green이어야 완료다. `client_pump.zig`는
+      - **P5c3c-2b — bounded pump/demux**는 아래 세 subphase group, 총 열한 merge slice가 모두 green이어야
+        완료다. `client_pump.zig`는
         poll/syscall/parser를 소유하지 않는 순수 turn policy만 둔다. event owner가 injected monotonic clock을 turn
         시작에 정확히 한 번 읽어 만든 `TurnInput{readable,writable,now_ns}`와
         `TurnResult{rx_bytes,rx_frames,tx_bytes,tx_frames,read_interest,write_interest,immediate_rx,
-        authority_clear,control_ready,terminal}`의 budget/priority 판정만 하고, 실제 fd/parser/demux/TX admission은
-        `Client.ExternalPumpFacade` 하나가 수행한다. Zig에는 package-private 접근 제어가 없으므로 이 nested type의
-        필요한 method만 `pub`으로 두되 `tests/boundary/imports.zig`의 source-boundary fixture와
-        `mise run check-boundaries`가 call site를 `client_pump.zig`, `external_attach.zig`와 해당 테스트로 제한한다.
-        facade는 opaque `*Client`를 borrow하고 fd/parser/queue field를
-        export하지 않는다. `would_block`은 정상 yield이고,
+        authority_clear,control_ready,terminal,next_deadline_ns: ?i128}`의 budget/priority 판정만 한다.
+        `null`은 active deadline 없음이고 모든 시각은 owner가 주입하는 같은 monotonic nanosecond domain이다.
+        실제 fd/parser/demux/TX admission은 top-level leaf
+        `client_external_pump.ExternalPumpFacade` 하나가 수행한다. `client.zig`는 이 leaf를 import하지 않고,
+        leaf가 `Client`와 stable `ExternalPumpStorage`를 소유/borrow하는 단방향 위상으로 import cycle과
+        `anyopaque` cast를 모두 피한다. `client_pump.zig`는
+        `decide(PolicyInput) -> PolicyDecision`만 제공하며 facade를 호출하지 않는다. `RemoteAttachment`도 facade를
+        알지 않고 neutral `AttachmentTransport` callback만 호출한다. Zig에는 package-private 접근 제어가 없으므로
+        `tests/boundary/imports.zig`의 source-boundary fixture와 `mise run check-boundaries`가 facade call site를
+        mechanics leaf인 `client_external_pump.zig`, final adapter owner인 `external_pump_owner.zig`와 해당 테스트로
+        제한한다. 이 목록이 facade allowlist의 단일 출처다.
+        facade는 final-address `ExternalPumpStorage` 하나만 opaque하게 borrow하고 fd/parser/queue/ledger field나
+        raw `Client`/ledger pointer를 export하지 않는다. `would_block`은 정상 yield이고,
         EOF/socket error, malformed/cap 회복 불가/OOM-after-consume, control·raw-frame·logical-batch deadline과
         request-ID exhaustion은 닫힌 `ExternalPumpTerminal`로 connection을 poison/close한 뒤 3b exit reason에
         매핑한다. revoke는 partial/fully-sent correlation이 있으면 같은 즉시 close terminal이고, 안전한 zero-prefix
@@ -2486,10 +2499,20 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
           `pending_stream + partial_batch + pending_batches + charged attachment leases` 전체가 connection당
           `18 MiB/4,096 item` 하나를 공유한다. event queue, `RemoteScreen`, parser capacity,
           `nextOutcome`이 만드는 단일 frame payload와 partial contiguous growth의 old allocation은 이 semantic ledger
-          밖이며 각각 기존 event cap, screen cap, 아래 physical/transient cap으로 별도 유계다. 따라서 analytic peak는
-          정상 pump peak는 semantic 18 MiB + parser `1 MiB+32` + decoded payload `1 MiB` +
+          밖이며 각각 기존 event cap, screen cap, 아래 physical/transient cap으로 별도 유계다. 따라서 **RX screen
+          subtotal**은 semantic 18 MiB + parser `1 MiB+32` + decoded payload `1 MiB` +
           `max_viewport_snapshot` 16 MiB의 allocator copy/remap transient +
-          completed control `protocol.max_control_json` 256 KiB다. bind normalize는 **기존**
+          completed control `protocol.max_control_json` 256 KiB다. connection **payload/transient subtotal**에는
+          이와 동시에 기존 coalesced event queue `protocol.max_client_queue` 8 MiB, TX
+          `protocol.max_binary_chunk+header_size` `1 MiB+32`, partial merge 동안 old partial+source와 동시에
+          살아 있는 nonalias replacement 최대 18 MiB가 추가된다. 이 수치는 fixed 4,096 ledger slots,
+          charged descriptor arrays/source map capacity, state structs와 `RemoteScreen`까지 포함한 process RSS가
+          아니다. artifact 소유는 non-vacuous하게 나눈다. 2b2b는 그 시점에 실재하는 inline state와 ledger slots의
+          `@sizeOf`만 `fixed_storage_bytes`로 기록한다. 2b2c는 exact-capacity descriptor/source-map 각각의
+          `capacity * @sizeOf(entry)` checked sum과 teardown final zero를 `adoption_metadata_bytes`로 추가한다.
+          2b3은 실제 `RemoteAttachment`/`RemoteScreen` backing을 더한 `product_storage_bytes`를 기록한다.
+          capacity 여유분을 암묵적으로 두지 않으며 곱셈 overflow/cap+1은 allocation 전에 거부한다.
+          bind normalize는 **기존**
           `residentBytes <= 1 MiB+32`를 allocation 전에 요구하고 초과면 새 allocation 없이 close한다. 허용 범위에서는
           old parser allocation과 new exact buffer가 동시에 살아 별도 `2 * (1 MiB+32)` bind transient가 된다.
           partial growth는 exact next length와 이 transient cap을 allocation 전에 검증하고 allocation 실패 시 old
@@ -2515,6 +2538,202 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
           storage/physical cap/final owner gate는 아직 계획 상태다.
 
         - **P5c3c-2b2 — Client external pump core**:
+          이 단계는 한 mega-PR이 아니라 아래 **아홉 merge slice**다. 앞 slice의 Debug/ReleaseFast/경계 gate가
+          green이기 전에는 다음 slice로 가지 않고, 아홉 개가 모두 끝나기 전에는 2b2 완료로 표시하지 않는다.
+
+          - **2b2a — pure state/DTO + parser normalize + source boundary:** `client_pump.zig`는 JSON, fd,
+            allocator, parser, ledger를 import하지 않고 다음 닫힌 타입만 소유한다.
+            `TurnInput{readable,writable,now_ns: i128}`, `TurnResult{rx_bytes,rx_frames,tx_bytes,tx_frames,
+            read_interest,write_interest,immediate_rx,authority_clear,control_ready,terminal,
+            next_deadline_ns: ?i128}`와 다음 합성 상태를 소유한다.
+            `ExternalPumpState = constructing | adopting | active(AuthorityState) |
+            terminal{reason,fd_disposition}`이고, `AuthorityState = valid |
+            control(InFlightControlState) | host_recovery(HostRecoveryPhase) |
+            client_recovery(ClientRecoveryPhase)`다. host/client phase는 각각 자기
+            `awaiting_snapshot{epoch,expected_token_generation}`과
+            `applied_pending{epoch,expected_token_generation}`을 가지므로 origin을 잃지 않는다. generic control과
+            recovery control을 동시에 표현하는 별도 bool/optional/enum 미러는 만들지 않는다.
+            parser/TX queue와 raw/TX clocks의 단일 소유자는 기존 `storage.client.io_mode.external`이고,
+            `ExternalPumpState`는 semantic authority/lifecycle만 소유한다. 기존 2a placeholder
+            `ExternalModeState.in_flight_control`은 2b2a에서 제거하고, 실제 control correlation은 2b2f2의
+            `ExternalPumpState.control` 한 곳에만 추가한다. 같은 control/transport 상태를 양쪽에 복제하지 않는다.
+            `RequestIdState = available(next: u64) | last_available | max_consumed`도 이 slice의 pure DTO로
+            정의해 adoption과 f1이 같은 타입을 쓴다.
+            `next_deadline_ns`는 active raw/logical/TX/control/recovery deadline의 minimum이고 owner는
+            poll timeout을 이 절대 시각과 외부 timeout 중 이른 값으로 설정한다. 이미 만료했으면 readiness 0인
+            turn을 즉시 호출한다. pump는 `TurnInput.now_ns`만 쓰며 `remainingNs()`로 clock을 다시 읽지 않는다.
+            `now_ns >= deadline` 판정은 readiness와 response/apply commit보다 먼저다.
+
+            `PumpOps`는 caller-owned scratch를 받는
+            `read(dst) -> read(n>0) | interrupted | would_block | eof | fatal`,
+            `write(src) -> written(n>0) | interrupted | would_block | fatal`,
+            `close(taken_fd) -> ok | fatal`만 노출해 per-read allocation을 금지하고 close도 deterministic하게
+            주입한다.
+            한 turn은 RX/TX 각각 `interrupted`를 최대 8회만 재시도하고 이후 interest를 유지한 채 yield해 owner가
+            fresh clock turn을 만들게 한다. 따라서 신호 폭주가 stale `now_ns`로 deadline을 무한 우회하지 못한다.
+            close는 idempotent syscall이라고 가정하지 않는다. storage가 fd를 먼저 take하고 closed latch를 commit한
+            뒤 exact-once `close(taken_fd)`를 호출하며 재진입은 syscall 0이다.
+            `client_external_pump.ExternalPumpFacade`는 opaque storage를 borrow하고
+            `pumpTurn`, `pollHint`, `admit`, `takeControlResponse`, `takeOwnerEvent`, `readCharged`, `borrowCharged`,
+            `releaseCharged`, `markResyncApplied`, `dropStream`, `terminalize`만 제공한다. fd/parser/raw
+            queue/ledger pointer는 export하지 않는다. 실제 mechanics는 `client_external_pump.zig` leaf에 두고
+            facade는 thin forwarding만 한다. 각 method의 DTO/ownership은 해당 구현 slice에서 닫기 전에는 public으로
+            추가하지 않는다. `FrameParser.normalizeExact(resident_cap)`은 parser 자신의 allocator만 사용한다.
+            `residentBytes > resident_cap`이면 allocation 0으로 거부한다. 그 외에는 unread exact allocation을 stage해
+            성공 시에만 old buffer를 교체하며 OOM/internal head·length 불일치는 기존 parser를 그대로 보존한다.
+            이 failure table과 old+new transient `<= 2 * resident_cap`을 exact/cap+1/OOM 테스트로 고정한다.
+
+          - **2b2b — stable in-place storage scaffold:** token이 존재하기 전에
+            `ExternalPumpStorage.initInPlace(out, source: *Client, AttachmentEvidence)`를 caller의 최종 주소에서
+            실행한다.
+            storage는 `Client`, `ExternalInboxLedger`, runtime/stream/controller-generation evidence와 위 closed
+            states를 소유하고 saved self address를 ReleaseFast에서도 검사한다. 값 반환 factory, raw `*ledger`
+            export, bind 뒤 move/copy를 허용하지 않는다. init 시작에는 `constructing`, normalize 뒤에는
+            `adopting`, 2b2c의 원자 adoption commit 뒤에만 `active`가 되어 facade pump를 허용한다. 이 scaffold는
+            아직 `external_attach.Prepared`나 실제
+            `RemoteAttachment`를 consume/bind하지 않으며 그 product composition은 2b3에 남긴다. init/normalize
+            전 검증·allocation 실패는 `source_preserved`로 source를 byte-for-byte 재사용 가능하게 두고 destination만
+            정리한다. source field를 처음 move한 뒤 invariant/commit 실패는 `source_closed`로 source를 invalid
+            latch하고 destination이 canonical cleanup한다. 성공은 source를 invalid latch한 뒤 destination만
+            sole owner다. 이 닫힌 결과를 `InitFailure{reason, source_disposition =
+            preserved | consumed_and_closed}`로 반환해 fd/storage 이중 회수 0을 고정한다.
+            teardown order는 attachment lease가 없는 이 단계에서도 charged Client storage→Client fd/storage→
+            ledger final-zero이며 재진입은 `ExternalPumpState.terminal`이 wire 0으로 거부한다.
+
+          - **2b2c — inherited all-or-none adoption + semantic transfer:** bind preflight는 mutation 없이
+            parser unread/cap, `pending_stream`, `partial_batch`, `pending_batches`, 별도 `pending_events`,
+            각 counter, item/byte checked sum, exact target stream/kind, request ID를 전수 검증한다.
+            inherited request ID는 `0→protocol terminal`, `1...maxInt(u64)-1→available(next)`,
+            `maxInt(u64)→last_available`로 seed한다. `last_available`은 아직 미소비 마지막 ID이며 실제 request
+            frame이 f1 queue에 infallible commit될 때만 `max_consumed`로 전이한다. 기존 queue가 도착 순서를 함께
+            보존하지 않으므로 첫 external turn은 **모든 inherited event를 screen/TX/input보다 먼저** authority
+            fence로 strict 소비한다. inherited와 이후 새 event는 다음 하나의 allowlist/action table을 공유한다.
+
+            | event | strict 검사 | state/action | duplicate·stale |
+            | --- | --- | --- | --- |
+            | `controller.revoked` | own runtime/stream/controller generation exact | own screen/control을 규칙대로 cancel/drop한 뒤 terminal revoked | terminal 유지 |
+            | `snapshot.invalidated` | header의 own runtime/stream + exact `{"event":"snapshot.invalidated"}` | screen backlog 전부 release 후 host recovery | wire epoch가 없으므로 active host recovery 중 반복은 모두 같은 intent로 no-op·deadline 비갱신 |
+            | `runtime.resized` | own runtime/stream, nonzero size, nonwrapping generation | bounded latest resize slot에 coalesce | older/duplicate ignore, gap은 최신 full-state 보존 |
+            | `runtime.metadata` | own runtime/stream, strict bounded metadata | bounded latest metadata slot에 필드별 coalesce | superseded/duplicate ignore |
+            | `runtime.ended` | header의 own runtime/stream + exact `{"event":"runtime.ended"}` | screen/event backlog release 후 terminal ended | terminal 유지 |
+
+            foreign stream/runtime/generation, unknown/malformed event는 관대한 drop으로 빠지지 않고 protocol close다.
+            resize/metadata를 먼저 적용해도 화면 byte interleave를 추측하지 않으며, ended/revoked/invalidated가
+            lower mutation보다 항상 앞선다. 두 owner-facing latest slot은 `ExternalPumpStorage`가 소유하고
+            `takeOwnerEvent() -> none | resized(ResizeDto) | metadata(MetadataDto)`가 resize 우선의 고정 순서로
+            무할당 consume한다. 실제 app/TTY projection은 3b owner 책임이며 pump가 별도 remote state를 만들지 않는다.
+            다섯 valid event 각각을 inherited/fresh queue 양쪽에서 고정한다.
+
+            `PreparedExternalAdoption`은 새 charged descriptor arrays와 source index map을 전부 allocation한 뒤
+            ledger capacity/slot plan을 preflight한다. commit 전 실패는 source Client ownership/counter가
+            byte-for-byte 불변이고 ledger active slot 0이다. commit은 allocation/error 없는 단계만 수행해 source
+            bytes를 빈 slice로 바꾸고 destination token sidecar로 옮긴 뒤 arrays/counters를 한 번 swap한다.
+            예기치 않은 invariant는 connection fail-stop과 canonical exact-once cleanup이며 부분 reusable state를
+            반환하지 않는다.
+
+            adoption commit 뒤에는 ledger가 `frame | partial | completed | lease` 모든 phase payload의 유일한
+            allocator/free 권위다. queue/partial/lease의 persistent descriptor에는
+            `ChargedPayloadRef{token,semantic_metadata}`만 남기며 bytes view를 저장하지 않는다. bytes는 매 사용 시
+            `ledger.borrow(token)`이 반환한 stack-local immutable view로만 접근하고 call을 넘겨 보존하지 않는다.
+
+            | entrypoint/transition | 입력 권위 | 성공 결과 |
+            | --- | --- | --- |
+            | `reserveFrame(owned_payload: *[]u8)` | 새 parser outcome payload | `frame`; 성공 시 caller slice empty |
+            | `seed(phase,owned_payload: *[]u8)` | inherited frame/partial/completed | all-or-none adoption commit에서 지정 phase, caller empty |
+            | `reserveLease(owned_batch: *OwnedBatch)` | 기존 2b1 direct completed batch | `lease`; 성공 시 caller payload empty, GUI untracked는 사용하지 않음 |
+            | `frame→partial` / `frame→completed` | 단일 frame token | same token relabel |
+            | `partial+frame→partial|completed` | 두 token+nonalias replacement | dst가 replacement 권위, src inactive |
+            | `completed→lease` | attachment handoff | same token relabel |
+            | `release(any phase)` | exact active token | payload free/counter 차감/slot inactive |
+
+            `relabel(token, expected_phase, next_phase)`는 allocation·item/byte 변화 없이 표의 단일-token 전이만
+            수행한다. 기존 partial과 다음 frame을 합칠 때는
+            `mergeInto(dst,src,replacement)`가 두 token/phase/stream/kind와
+            `replacement.len == dst.len + src.len`, replacement가 두 source allocation과 alias하지 않음을 먼저
+            검증한다. 실패하면 두 slot과 caller-owned replacement가
+            불변이다. 성공은 old dst/src payload를 exact-once free하고 replacement 권위를 dst에 옮기며 byte
+            charge는 그대로, item만 1 감소시키는 infallible commit이다. exact cap에서도 reserve-new/release-old의
+            일시 이중 charge를 만들지 않는다. completed→attachment lease는 token value만 move하고 slot이 payload
+            allocator/free 권위를 계속 소유한다. fail-close/teardown은 어느 phase에서도 공통 `release`로 final zero를
+            만들며 2b1 `reserveLease` 회귀와 각 phase fail-index를 함께 고정한다.
+
+          - **2b2d1 — RX provenance/parser:** parser는 read마다 sidecar entry를 만들지 않는다. connection에
+            checked nonwrapping `rx_absolute_next`와 `buffer_start_absolute`, parser에 현재 frame의 단일
+            `frame_start_absolute`/`frame_end_absolute`을 둔다. bind 당시 unread partial frame은 보수적으로
+            pre-bind start offset을 받고 compact/normalize 뒤에도 그 scalar를 보존한다. bind/compaction 때
+            `buffer_start_absolute = rx_absolute_next - bufferedBytes`를 checked 계산하고, buffered complete frame이
+            여러 개여도 parser consume offset으로 각 half-open range `[start,end)`를 복원한다.
+            client-local recovery response barrier는 response frame의 `frame_end_absolute`이고, 그래서 같은 socket
+            read 안이라도 그 뒤 header에서 시작한 snapshot은 fresh다. host recovery ACK barrier는 ACK가 fully
+            sent된 순간의 `rx_absolute_next` watermark이고, 이미 읽혔거나 시작된 frame은 stale다. 두 경로 모두
+            candidate의 `frame_start_absolute >= recovery_barrier_absolute`일 때만 fresh다.
+            1-byte drip도 O(1) metadata이고 각 header를 소비하기 직전의 absolute offset이 start가 되며, 다음
+            read까지 이어진 header/payload는 최초 start를 유지한다. counter overflow, parser internal offset 불일치,
+            start/end/barrier 역전은 allocation이나 lower mutation 없이 protocol terminal이다. response/ACK barrier
+            전에 header 1/31/32 byte 또는 payload 마지막 1 byte까지 시작된 snapshot은 barrier 뒤 완성돼도 candidate가
+            아니다. parser read 요청은 turn RX byte 잔여와 resident cap 잔여 중 작은 길이를 넘지 않는다.
+
+          - **2b2d2 — bounded demux + authority barrier:** buffered inherited events, parser outcomes, 새 socket
+            RX를 이 순서로 처리하고 authority/revoke/terminal을 판정한 뒤에만 TX write/admission을 허용한다.
+            `{readable=true,writable=true}`여도 첫 syscall은 read이며 queued input/control이 먼저 쓰이지 않는다.
+            `authority_clear`는 RX가 would-block까지 drain되고 parser가 **empty**일 때만 true다. parser incomplete이면
+            `immediate_rx=false`, `read_interest=true`, lower TX/input/control/semantic response publish 0이며 raw
+            deadline을 `next_deadline_ns`로 돌려준다. complete backlog 또는 64-frame/1 MiB cap 정지는
+            `immediate_rx=true,authority_clear=false`다.
+
+            foreign nonzero stream의 screen/event/
+            response, partial logical batch 중 event/response/다른 stream/다른 snapshot kind는 protocol close다.
+
+          - **2b2e — closed recovery + consumer commit:** recovery transition은 다음 충돌표를 따른다.
+
+            | 현재 | 입력 | 결과 |
+            | --- | --- | --- |
+            | `valid` | local overflow | `client_control_wait`, backlog drop, 30초 시작 |
+            | `valid` | host invalidated | `host_ack_unadmitted`, backlog drop, 30초 시작 |
+            | host recovery `ack_unadmitted|ack_queued|awaiting_snapshot|applied_pending` | duplicate invalidated 또는 local overflow | no-op, origin/epoch/deadline 불변 |
+            | client recovery `control_wait` 또는 offset-0 unsent control | host invalidated | local control cancel 후 host `ack_unadmitted`, 기존 deadline 유지 |
+            | client recovery partial/fully-sent control 또는 `awaiting_snapshot|applied_pending` | host invalidated | protocol terminal |
+            | client recovery 모든 phase | repeated local overflow | no-op, origin/epoch/deadline 불변 |
+            | host/client `applied_pending` | exact deadline 도달 | commit보다 먼저 timeout terminal |
+            | recovery 진입 | unrelated control offset 0 | atomic cancel 후 진입 |
+            | recovery 진입 | unrelated control partial/fully-sent/response-wait | protocol terminal |
+
+            candidate charged batch는
+            `RecoveryKey{origin,recovery_epoch,expected_token_generation}`을 handoff 전에 slot metadata에 함께
+            고정한다. `StreamBatchView.recovery_key: ?RecoveryKey`로 immutable key를 노출하고 normal snapshot/delta
+            및 GUI `.untracked`는 null이다. `AttachmentTransport`는
+            `mark_resync_applied(context,stream_id,key: RecoveryKey)->commit_pending|stale_invariant` callback을
+            제공한다. `RemoteAttachment`는 release 전에 `?RecoveryKey`를 값으로 복사한다. null이면 mark callback
+            0회 후 `applied`, some이면 release 성공 뒤 exact key로 callback을 정확히 1회 호출한다. 따라서 GUI
+            `.untracked`/normal batch는 mark를 호출하지 않는다. `pumpScreen` 반환도
+            `idle | applied | recovery_commit_pending | terminal`의 닫힌 enum으로 owner wake 필요를 전달한다.
+            facade/ledger import는 하지 않는다. `RemoteAttachment` 성공 경로는
+            **apply→lease release→`mark_resync_applied(context,stream_id,recovery_key)`** 순서다. release 실패면 기존
+            `failed_release` terminal slot에 retain하고 mark 0이다. mark exact match는 input gate를 바로 열지 않고
+            `awaiting_snapshot→applied_pending`만 기록한다. `commit_pending`을 받은 facade caller는 같은 owner
+            thread에서 새 monotonic clock을 읽고 **zero-readiness pump를 즉시 한 번 호출해야 하며**, 그 전까지
+            input/TX admission은 계속 0이다. callback에는 clock을 전달하지 않는다. 대신 storage가
+            `immediate_turn_required=true` latch를 세운다.
+            `pollHint() -> { immediate: bool, next_deadline_ns: ?i128 }`가 opaque storage에서 이를 무할당으로
+            읽고, owner는 poll 진입 전에 검사해 timeout 0을 택한다.
+            따라서 caller가 즉시 turn을 호출하지 못해도 기존 recovery 만료시각까지 잠들 수 없다. 이 fresh-clock
+            turn은 deadline→`applied_pending` commit→RX 순서로 실행한다. 같은 turn에 도착한 delta/invalidated/
+            revoke는 버리지 않고 각각 새 `valid`/host-recovery/terminal 경로로 분류한다. 따라서 오래 걸린 apply가
+            turn-start의 stale clock으로 30초 gate를 우회하지 않는다. callback 결과는
+            `commit_pending | stale_invariant`의 닫힌 enum이며 stale stream/epoch/token, apply/append/
+            drop/mark 실패와 deadline exact boundary는 clear 0·terminal이다.
+
+            GUI의 기존 `snapshot.invalidated` classifier, canonical `runtime.resync` request builder와
+            `stream_ack` builder는 공용 pure wire leaf로 추출해 GUI/external이 공유한다. `client_pump.zig`는
+            JSON/string vocabulary를 소유하지 않는다.
+
+          - **2b2f1 — TX queue + request ID:** 아래 TX cap/encoding/write clock과 nonwrapping
+            `RequestIdState = available(next) | last_available | max_consumed`를 facade에 연결한다. TX write는
+            2b2d2의 `authority_clear &&
+            !immediate_rx && terminal==null`일 때만 가능하다. safe revoke는 fd를 즉시 닫지 않더라도
+            `ExternalPumpState.terminal{fd_disposition=.owner_cleanup}`으로 latch해 모든 후속 facade 호출/admission을
+            wire 0으로 거부한다.
+
           TX resident는 connection당 `protocol.max_binary_chunk + protocol.header_size` bytes(`1 MiB+32`)와
           64 frame 두 cap을 동시에 적용한다. `external_tx_bytes`는 unsent suffix가 아니라 free 전까지 살아 있는
           `Σ frame.bytes.len`이고 partial write로 줄지 않는다. checked header+payload 길이와 byte/item cap을 allocation
@@ -2525,6 +2744,10 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
           resize/resync coalesce는 request ID를 예약하기 전 owner intent에서만 수행하고 input은 절대 coalesce/drop하지
           않는다. write error/HUP/deadline과 partial frame revoke는 connection fail-close다.
 
+          **2b2 공통 normative mechanics(새 slice 아님):** 아래 bind/adoption은 2b2a~c, RX provenance와
+          budget은 2b2d1~d2, recovery는 2b2e가 각각 구현·소유한다. f1은 위 TX queue/request-ID 문단만 구현하며
+          아래 규칙을 재구현하거나 자기 scope로 가져오지 않는다.
+
           external bind 전 `FrameParser` unread bytes를 compact한 exact allocation으로 교체해
           `residentBytes <= protocol.max_binary_chunk+header_size`를 증명한다. unread bytes 자체가 cap 초과,
           allocation 실패 또는 parser state 불일치는 bind 전 fail-close한다. 이후 RX는 `pushBounded`만 쓰고
@@ -2532,7 +2755,8 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
           semantic ledger 밖이고 `nextOutcome`이 복제한 payload 한 개만 위 transient headroom을 쓴다.
           inherited `pending_stream/pending_batches/partial_batch`는 실제 slice 길이와 기존 byte counter를 checked
           recompute해 일치 여부를 확인한 뒤 ledger에 seed한다. aggregate cap 초과는 dedicated external stream의
-          backlog를 drop하고 `needs_resync`로 전환하며 foreign stream/malformed counter는 protocol close다.
+          source payload를 ledger에 부분 seed하지 않고 한 commit에서 drop한 뒤 client recovery로 전환하며 foreign
+          stream/malformed counter는 protocol close다. `pending_events`와 request ID도 2b2c preflight에 포함한다.
 
           external connection은 정확히 한 attachment stream만 허용한다. foreign nonzero stream의 screen/event,
           partial logical batch 중 event/response/다른 stream/다른 snapshot kind, known-but-unexpected kind와
@@ -2540,17 +2764,18 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
           backlog를 release하고 response-bearing `runtime.resync` control RPC를 정확히 한 번 ordered admission한다.
           host가 `snapshot.invalidated`로 먼저 요청한 복구에만 fire-and-forget `stream_ack`을 사용하며 client-local
           cap/drop이나 inherited overflow에는 `stream_ack`을 쓰지 않는다. host-initiated 경로는 invalidated event
-          outcome sequence를 barrier로 `ack_unadmitted`에 진입해 backlog를 release하고 같은 30초 recovery deadline을
-          시작한다. stream ACK가 TX에 admission되면 `ack_queued`, frame이 **fully sent**된 뒤에만
+          수신 시 `ack_unadmitted`에 진입해 backlog를 release하고 같은 30초 recovery deadline을 시작한다.
+          stream ACK가 TX에 admission되면 `ack_queued`, frame이 **fully sent**된 뒤 그 순간의
+          `rx_absolute_next`를 `recovery_barrier_absolute`로 고정하고
           `awaiting_snapshot`으로 전이한다. ACK fully-sent 전 시작한 screen frame/partial은 release하고, 그 뒤 새로
           시작·완성된 snapshot만 recovery candidate다. ACK allocation OOM은 backlog를 이미 버린 뒤이므로 즉시
           resource terminal이고 TX cap-full은 gate를 닫은 채 bounded progress를 기다린다. 이후 snapshot handoff/apply와
           `mark_resync_applied` state+generation 검사, 30초 deadline-first 규칙은 client-local resync와 같다.
-          client-local resync entry에서는 current parser-outcome
-          sequence를 recovery barrier로 저장하고 기존 partial/pending screen을 전부 release한다. 그 뒤
+          client-local resync entry에서는 기존 partial/pending screen을 전부 release한다. 그 뒤
           `control_in_flight` 동안 response보다 먼저 시작한 snapshot/delta도 release하며 prior partial을 response 뒤
-          이어 붙이지 않는다. exact `runtime.resync` response outcome sequence보다 뒤에서 **새로 시작해 end까지 완성된**
-          snapshot만 recovery generation candidate다. response 뒤 같은 RX drain에서 완성된 candidate는 charge해
+          이어 붙이지 않는다. exact `runtime.resync` response의 `frame_end_absolute`을
+          `recovery_barrier_absolute`로 고정하고, 그 offset 이상에서 **새로 시작해 end까지 완성된** snapshot만
+          recovery candidate다. response 뒤 같은 RX drain에서 완성된 candidate는 charge해
           보존하되 semantic response apply가 `awaiting_snapshot`을 publish하기 전 attachment로 넘기지 않는다.
           resync entry에서 30초 non-resettable
           recovery deadline을 시작하고 5초 control response와 그 뒤 fresh snapshot apply가 같은 30초 안에 끝나야 한다.
@@ -2560,12 +2785,15 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
           소비·폐기한 뒤라 즉시 connection-wide `resource_exhausted` terminal로 close한다. allocator OOM의 영구성을
           추측하는 retry count/clock은 두지 않는다. `needs_resync` 동안 transport는 fresh snapshot charged lease만
           attachment에 반환하고 delta는 release한다. response 도착이나 snapshot handoff만으로 latch를 clear하지 않는다.
-          `RemoteAttachment.pumpScreen`이 snapshot apply에 성공한 뒤
-          `transport.mark_resync_applied(context, stream_id, lease_generation)`을 호출한다. 이 callback은 state가
-          정확히 `awaiting_snapshot`이고 stream/recovery generation이 모두 일치할 때만 latch/input gate를 clear한다.
-          `control_in_flight`의 early snapshot apply, append/apply/drop 실패, stale generation과 attachment deinit은
-          clear 0이며 recovery deadline `now >= expires_at`은 response/candidate/apply callback보다 먼저 close한다.
-          parser outcome sequence도 checked non-wrapping이며 exhaustion은 protocol terminal이다.
+          `RemoteAttachment.pumpScreen`이 recovery snapshot apply와 charged lease release에 모두 성공한 뒤에만
+          `transport.mark_resync_applied(context, stream_id, recovery_key)`를 호출한다.
+          이 callback은 state가 정확히 `awaiting_snapshot`이고 stream/recovery epoch/token generation이 모두
+          일치할 때 `applied_pending`만 기록하고 input gate는 유지한다. 다음 fresh-clock pump가 deadline-first로
+          latch/input gate를 clear한다. `control_in_flight`의 early snapshot apply, append/apply/release/drop 실패,
+          stale generation과 attachment deinit은 mark/clear 0이며 recovery deadline
+          `now >= expires_at`은 다음 commit에서 readiness보다 먼저 close한다.
+          `rx_absolute_next`, frame start/end와 recovery epoch는 모두 checked non-wrapping이며 exhaustion은
+          protocol terminal이다. parser outcome count는 turn의 64-frame budget일 뿐 freshness 권위가 아니다.
 
           raw parser가 bind 시 이미 incomplete이면 bind 시각을, 이후 empty→incomplete 첫 byte를 activation으로 삼아
           30초 absolute와 10초 received-byte progress를 `ExternalModeState`가 소유한다. complete frame/empty에서 clear하고
@@ -2578,10 +2806,12 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
           64개를 센다. buffered complete frame을 socket read보다 먼저 처리하고 budget 도달 시 새 read를 금지한다.
           parser에 complete backlog가 남거나 byte/frame cap에서 멈췄다면 `immediate_rx=true,
           authority_clear=false`로 다음 zero-time RX turn 전 TX/input/control publish를 전부 막는다. EAGAIN까지
-          drain된 turn만 authority-clear다. 따라서 benign/optional 64개 뒤 65번째 revoke와 같은 read의 response 뒤
+          drain되고 parser까지 empty인 turn만 authority-clear다. incomplete parser는 spin하지 않고 POLLIN/raw
+          deadline을 기다리되 authority-clear는 아니다. 따라서 benign/optional 64개 뒤 65번째 revoke와 같은 read의 response 뒤
           revoke가 lower mutation gate를 열지 못한다.
 
-          control admission은 `ControlKind`, target stream/controller generation, request ID, admission부터 시작한
+          - **2b2f2 — control correlation + response ownership:** control admission은 `ControlKind`, target
+          stream/controller generation, request ID, admission부터 시작한
           5초 `AbsoluteDeadline`, `tx_fully_sent=false`를 한 `InFlightControl`에 둔다. queue 대기+write+response가
           같은 5초를 쓰며 TX 10/30초보다 먼저 만료한 deadline이 terminal이다. response는 flags/stream ID 0,
           exact request ID, fully-sent 뒤에만 수락한다. early/unsolicited/wrong/duplicate response는 protocol close다.
@@ -2589,15 +2819,17 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
           `takeControlResponse`로 받아 strict semantic decode/apply한다. forced-first-resize처럼 response 자체가
           mutation barrier인 kind만 성공 apply 뒤 해당 input gate를 연다. `runtime.resync` response는
           `needs_resync: control_in_flight → awaiting_snapshot`으로만 전이하고 gate clear 0이며, 위
-          `mark_resync_applied`만 `valid`로 전이해 input을 다시 연다. decode 실패는 close다.
+          `mark_resync_applied`는 `applied_pending`까지만 전이한다. 그 다음 fresh-clock pump의
+          deadline-first commit만 `valid`로 전이해 input을 다시 연다. decode 실패는 close다.
           completed payload는 parser가 이미 적용한 `protocol.max_control_json` 한 개 cap을 그대로 소유하며 두 번째
           response를 받지 않는다. take, semantic failure, revoke, timeout/EOF와 owner cleanup은 같은 exact-once free
           helper를 사용한다.
-          response 수신 exact boundary도 deadline-first다. `next_request_id == maxInt(u64)`은 그 ID를 마지막 한 번
-          예약하고 exhausted를 latch하며, 다음 admission은 wire 0 `request_id_exhausted` terminal로 stale ID/0 wrap을
-          허용하지 않는다.
+          response 수신 exact boundary도 deadline-first다. `RequestIdState.last_available`은 `maxInt(u64)`을
+          마지막 한 번 예약하면서 `max_consumed`로 전이하고, 그 다음 admission은 wire 0
+          `request_id_exhausted` terminal로 stale ID/0 wrap을 허용하지 않는다.
 
-          strict `controller.revoked`는 runtime/stream/generation을 현재 attachment evidence와 대조한 뒤 offset 0인
+          - **2b2f3 — revoke + whole-turn integration:** strict `controller.revoked`는
+          runtime/stream/generation을 현재 attachment evidence와 대조한 뒤 offset 0인
           own-stream input/resize를 cancel한다. control은 `tx_fully_sent=false`이고 대응 TX frame offset이 0일 때만
           queue와 `InFlightControl`을 한 transaction으로 함께 cancel한다. control/input/resize 하나라도 partial이거나
           control이 fully-sent/response-waiting이면 framing·correlation을 되돌릴 수 없어 close한다. response를 완전히
@@ -2611,20 +2843,29 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
           partial TX cleanup과 allocation fail-index를 결정적으로 검증한다. host-origin recovery는 invalidated
           barrier→ACK cap-full retry/ACK OOM terminal→fully-sent, pre-ACK stale snapshot drop와 post-ACK fresh
           snapshot apply-clear를 별도 fixture로 고정한다.
+          동시에 readable+writable, response 뒤 같은 drain revoke, timer-only wake,
+          socketpair/fail-index/stress를 통과해야 하며 f1~f3가 모두 green이기 전에는 TX/control/turn 통합을
+          완료로 표시하지 않는다.
 
         - **P5c3c-2b3 — stable product binding**:
-          `ExternalPumpOwner.initInPlace(out: *ExternalPumpOwner, prepared: *Prepared)`만 `Prepared`를 consume한다.
-          성공 시 source를 invalid 상태로
-          만들고 `Client`, `RemoteAttachment`, `ExternalInboxLedger`, transport binding과 saved `self_addr`를 caller의
-          최종 stack 주소에 한 번 배치한다. bind 뒤 모든 public method는 `self_addr == @intFromPtr(self)`를
+          2b2b의 검증된 `ExternalPumpStorage` scaffold를 최종 member로 두고
+          `ExternalPumpOwner.initInPlace(out: *ExternalPumpOwner, prepared: *Prepared)`만 실제
+          `external_attach.Prepared`를 consume한다.
+          성공 시 source를 invalid 상태로 만들고 `ExternalPumpStorage`, `RemoteAttachment`, transport adapter와
+          saved `self_addr`를 caller의 최종 stack 주소에 한 번 배치한다. `Client`와
+          `ExternalInboxLedger`는 storage 안의 단일 소유권을 유지한다. bind 뒤 모든 public method는
+          `self_addr == @intFromPtr(self)`를
           ReleaseFast에서도 확인하고 moved/stale copy를 typed invariant failure로 거부한다. owner를 값으로 반환하는
           factory, bind된 `Client`/ledger pointer export와 copyable lease callback은 만들지 않는다.
-          init의 parser normalize/ledger adoption/transport bind 어느 단계가 실패해도 아직 bind하지 않은 source 또는
+          parser normalize와 inherited adoption 자체는 2b2a~c의 단일 출처를 호출하고 여기서 복제하지 않는다.
+          init의 product transport bind 어느 단계가 실패해도 아직 bind하지 않은 source 또는
           final owner 한쪽만 canonical cleanup하며 fd/storage를 이중 회수하지 않는다.
 
-          `AttachmentTransport.context`는 final owner 안의 stable external adapter를 가리키고 adapter가 stable
-          `*Client`와 `*ExternalInboxLedger`를 함께 borrow한다. 2b2의 private external read/drop/fail-closed facade만
-          호출한다. attachment가 charged lease를 가진 채 socket이 poison되어도 Client **object**와 ledger는
+          `AttachmentTransport.context`는 final owner 안의 stable external adapter를 가리킨다. adapter는 raw
+          `Client`나 ledger를 따로 borrow/export하지 않고 generic callback을
+          `ExternalPumpFacade`의 단일 opaque `*ExternalPumpStorage` borrow로 전달한다. read/borrow/release/
+          mark/drop/fail-closed가 모두 이 경계를 쓰며 `RemoteAttachment`에는 facade 타입을 노출하지 않는다.
+          attachment가 charged lease를 가진 채 socket이 poison되어도 storage 안의 Client **object**와 ledger는
           attachment cleanup까지 살아 있고 teardown은 attachment release/drop→Client storage/fd→ledger final-zero다.
           `ExternalPumpOwner`의 in-place product fixture가 실제 `external_attach.prepare` 결과를 consume해 initial
           inherited state를 adopt하고 one pump/control/teardown을 수행한다. moved owner, source 재사용, bind/append/

@@ -7407,209 +7407,23 @@ pub const AppSession = struct {
     /// 창 병합 전에 트리 밖 도크 모델을 대상 창으로 옮긴다. dst 활성/layout을 우선하되 dst가 비었으면 src 값을
     /// 채택한다. 같은 경로가 양쪽 dirty면 무경고 유실을 피하려 병합 자체를 거부하고, 한쪽만 dirty면 그 편집 surface를
     /// 보존한다. 모든 신규 path 복사를 먼저 끝낸 뒤 모델을 바꿔 OOM에서 양쪽이 불변이다.
+    /// 창 병합 시 **탐색기 상태만** 옮긴다. FP16에서 파일 entry는 Term 소유라 워크스페이스(탭)와 함께
+    /// 자동으로 이동한다 — 옛 entry 병합·중복 검사·용량 가드는 그래서 통째로 사라졌다(§4).
+    ///
+    /// 창당 경로 유일성은 여전히 지켜야 한다. 두 창에 같은 파일이 열려 있으면 병합 뒤 한 창에 같은 경로가
+    /// 두 Term으로 공존하므로, dirty 충돌은 거부하고 clean 중복은 옮겨온 쪽을 닫는다(§4 창 간 이동 규칙).
     fn mergeDockInto(src: *AppSession, dst: *AppSession) !void {
-        if (!src.dock_initialized or !dst.dock_initialized) return;
-        // merge는 두 dock model과 surface ownership을 바꾸는 수명 장벽이다. 검증 실패 여부와 무관하게 진행 중 gesture는
-        // 더 이상 안전하게 재검증할 수 없으므로 두 창 모두 즉시 취소한다.
-        src.cancelPointerGesture();
-        dst.cancelPointerGesture();
-        if (src.dock_layout_generation != std.math.maxInt(u64)) src.dock_layout_generation += 1;
-        if (dst.dock_layout_generation != std.math.maxInt(u64)) dst.dock_layout_generation += 1;
-        // EntryId는 app-global allocator 덕분에 정상 경로에서 충돌하지 않는다. 손상/잘못 주입된 모델은 path merge보다
-        // 먼저 거부해 destination의 async identity를 다른 source entry가 탈취하지 못하게 한다.
-        for (0..src.dock.groupCount()) |src_group_index| {
-            const src_group = src.dock.groupAt(src_group_index).?;
-            for (src_group.entries.items) |src_entry| for (0..dst.dock.groupCount()) |dst_group_index| {
-                const dst_group = dst.dock.groupAt(dst_group_index).?;
-                for (dst_group.entries.items) |dst_entry| if (src_entry.id == dst_entry.id) return error.UnsupportedMove;
-            };
+        // 1) 중복 경로 admission — dirty가 하나라도 끼면 어느 내용을 살릴지 자동 결정하지 않는다.
+        var src_it = src.fileEntries();
+        while (src_it.next()) |src_entry| {
+            const dup = dst.fileEntryForPath(src_entry.path) orelse continue;
+            if (filePanelEntryBlocksClose(src_entry.*) or filePanelEntryBlocksClose(dup.*))
+                return error.UnsupportedMove;
         }
-        const dg = dst.dock.focusedGroup();
-        var unique: usize = 0;
-        for (0..src.dock.groupCount()) |group_index| {
-            const sg = src.dock.groupAt(group_index).?;
-            for (sg.entries.items) |entry| {
-                if (dst.dock.pathLocation(entry.path)) |existing| {
-                    if (filePanelEntryNeedsDirtyProtection(entry) and
-                        filePanelEntryNeedsDirtyProtection(existing.group.entries.items[existing.index])) return error.UnsupportedMove;
-                    if (filePanelEntryNeedsDirtyProtection(entry) and entry.surface_id == 0) return error.UnsupportedMove;
-                } else unique += 1;
-            }
-        }
-        if (dst.fileEntryCount() + unique > dock_panel.max_entries) return error.UnsupportedMove;
-        try dg.entries.ensureUnusedCapacity(dst.allocator, unique);
-
-        // File-tab emptiness alone is not workspace emptiness: an explicit (including explicit-empty)
-        // explorer or recent history is destination authority and must survive a window merge.
-        const dst_was_empty = dst.fileEntryCount() == 0 and !dst.dock.presented and
-            dst.file_tree.rootMode() == .inferred and !dst.file_tree.hasContent();
-
-        var staged: std.ArrayList(dock_panel.Entry) = .empty;
-        defer {
-            for (staged.items) |entry| dst.allocator.free(entry.path);
-            staged.deinit(dst.allocator);
-        }
-        try staged.ensureTotalCapacity(dst.allocator, unique);
-        for (0..src.dock.groupCount()) |group_index| {
-            const sg = src.dock.groupAt(group_index).?;
-            for (sg.entries.items) |entry| if (dst.dock.pathLocation(entry.path) == null) {
-                var cloned = entry;
-                cloned.path = try dst.allocator.dupe(u8, entry.path);
-                // queued reload/hash action은 source backend 수명에 묶인다. conflict/dirty 자체는 보존하되 pending만 재시도 상태로.
-                cloned.dirty_sync_pending = entry.dirty_sync_pending or entry.mode.isEditable();
-                cloned.conflict_reload_pending = false;
-                cloned.conflict_reload_generation = 0;
-                cloned.self_write_grace_ticks = 0;
-                cloned.self_write_hash = 0;
-                cloned.self_write_verifications = 0;
-                staged.appendAssumeCapacity(cloned);
-            };
-        }
-
-        // Explorer authority participates in the same transaction as dock entry ownership. An empty
-        // destination adopts the source workspace roots/history; otherwise the destination keeps its
-        // root mode and folds transferred open files into its own recent/inferred model. All watcher
-        // and row allocations finish before either dock is mutated.
-        var src_tree_candidate = try src.file_tree.clone();
-        defer src_tree_candidate.deinit();
-        var dst_tree_candidate = if (dst_was_empty) try src.file_tree.clone() else try dst.file_tree.clone();
-        defer dst_tree_candidate.deinit();
-        if (!dst_was_empty) for (0..src.dock.groupCount()) |group_index| {
-            const sg = src.dock.groupAt(group_index).?;
-            for (sg.entries.items) |entry| {
-                const parent = std.fs.path.dirname(entry.path) orelse continue;
-                // In inferred mode the source tree already owns the project-root decision made by
-                // projectRootForFile when the file was opened. Replacing that authority with dirname
-                // here would shrink `/repo/sub/file.md` from `/repo` to `/repo/sub` after merge.
-                var inferred_root = parent;
-                if (dst_tree_candidate.rootMode() == .inferred and src.file_tree.rootMode() == .inferred) {
-                    var source_authority: ?[]const u8 = null;
-                    for (0..src.file_tree.rootCount()) |root_index| {
-                        const source_root = src.file_tree.rootAt(root_index).?;
-                        if (!file_tree.Tree.pathWithinRoot(entry.path, source_root)) continue;
-                        if (source_authority == null or source_root.len > source_authority.?.len) source_authority = source_root;
-                    }
-                    if (source_authority) |root| inferred_root = root;
-                }
-                try dst_tree_candidate.recordOpened(entry.path, inferred_root);
-            }
-        };
-        try src_tree_candidate.resetWatchRequests(&.{});
-        var dst_watch_extras: [dock_panel.max_entries * 2][]const u8 = undefined;
-        var dst_watch_count: usize = 0;
-        for (0..dst.dock.groupCount()) |group_index| {
-            const group = dst.dock.groupAtConst(group_index).?;
-            for (group.entries.items) |entry| if (std.fs.path.dirname(entry.path)) |parent| {
-                dst_watch_extras[dst_watch_count] = parent;
-                dst_watch_count += 1;
-            };
-        }
-        for (0..src.dock.groupCount()) |group_index| {
-            const group = src.dock.groupAtConst(group_index).?;
-            for (group.entries.items) |entry| if (std.fs.path.dirname(entry.path)) |parent| {
-                dst_watch_extras[dst_watch_count] = parent;
-                dst_watch_count += 1;
-            };
-        }
-        try dst_tree_candidate.resetWatchRequests(dst_watch_extras[0..dst_watch_count]);
-        var src_tree_rows: std.ArrayList(file_tree.Row) = .empty;
-        defer src_tree_rows.deinit(src.allocator);
-        var dst_tree_rows: std.ArrayList(file_tree.Row) = .empty;
-        defer dst_tree_rows.deinit(dst.allocator);
-        try src.prepareFileTreeRowStaging(&src_tree_rows, 0);
-        try dst.prepareFileTreeRowStaging(&dst_tree_rows, unique);
-
-        const target_was_empty = dg.entries.items.len == 0;
-        const src_focused = src.dock.focusedGroup();
-        const src_active_path: ?[]const u8 = if (src_focused.active) |i| if (i < src_focused.entries.items.len) src_focused.entries.items[i].path else null else null;
-        for (0..src.dock.groupCount()) |group_index| {
-            const sg = src.dock.groupAt(group_index).?;
-            for (sg.entries.items) |entry| if (dst.dock.pathLocation(entry.path)) |existing| {
-                if (filePanelEntryNeedsDirtyProtection(entry)) {
-                    const retired = existing.group.entries.items[existing.index];
-                    const old_surface_id = retired.surface_id;
-                    const owned_path = retired.path;
-                    var replacement = entry;
-                    replacement.path = owned_path;
-                    replacement.dirty_sync_pending = entry.dirty_sync_pending or entry.mode.isEditable();
-                    replacement.conflict_reload_pending = false;
-                    replacement.conflict_reload_generation = 0;
-                    replacement.self_write_grace_ticks = 0;
-                    replacement.self_write_hash = 0;
-                    replacement.self_write_verifications = 0;
-                    existing.group.entries.items[existing.index] = replacement;
-                    // Destination의 delayed-focus token이 clean duplicate를 가리켰다면 같은 path를 이어받은
-                    // dirty replacement identity로 원자적으로 재발급한다. 불완전/이미 stale token은 되살리지 않고
-                    // 취소한다. mergeSessionInto는 이 갱신 뒤 token을 캡처해 새 epoch로 requeue한다.
-                    if (dst.pending_dock_focus) |pending| if (pending.entry_id == retired.id) {
-                        if (pending.expected_surface_id == retired.surface_id and
-                            pending.dock_async_epoch == dst.dock_async_epoch and
-                            pending.request_or_entry_revision == retired.editor_revision)
-                        {
-                            dst.queuePendingDockFocus(&existing.group.entries.items[existing.index]);
-                            dst.file_panel_mode_pending = replacement.surface_id;
-                        } else {
-                            dst.cancelPendingDockFocus();
-                        }
-                    };
-                    // A dirty source wins over a clean destination duplicate. Any destination focus
-                    // identity pinned to the retired surface must follow the surviving replacement;
-                    // otherwise FocusOwner and AppKit firstResponder diverge after surfaceDiff destroys
-                    // the old WKWebView. The normal mode/focus one-shot reuses the destination adapter.
-                    if (old_surface_id != replacement.surface_id) {
-                        switch (dst.focus_owner) {
-                            .dock_surface => |focused| if (focused == old_surface_id) {
-                                _ = dst.dock.focusGroup(existing.group);
-                                dst.focus_owner = .{ .dock_surface = replacement.surface_id };
-                                dst.workspace_focus_pending = false;
-                                dst.file_panel_mode_pending = replacement.surface_id;
-                            },
-                            .file_tree => |owner| if (owner.restore_surface == old_surface_id) {
-                                dst.focus_owner = .{ .file_tree = .{ .restore_surface = replacement.surface_id } };
-                            },
-                            .workspace, .dock_group => {},
-                        }
-                        if (dst.file_tree_restore_surface_pending == old_surface_id)
-                            dst.file_tree_restore_surface_pending = replacement.surface_id;
-                        if (dst.file_panel_mode_pending == old_surface_id)
-                            dst.file_panel_mode_pending = replacement.surface_id;
-                    }
-                }
-            };
-        }
-        for (staged.items) |entry| dg.entries.appendAssumeCapacity(entry);
-        staged.clearRetainingCapacity(); // path 소유권이 dg로 이동했다.
-        if (target_was_empty) dg.active = if (src_active_path) |path| dg.findPath(path) else if (dg.entries.items.len > 0) 0 else null;
-        if (dst_was_empty) {
-            dst.dock.side = src.dock.side;
-            dst.dock.size = src.dock.size;
-            dst.dock.tree_size = src.dock.tree_size;
-            dst.dock.collapsed = src.dock.collapsed;
-            dst.dock.presented = src.dock.presented;
-        }
-        if (dst.fileEntryCount() > 0) dst.dock.presented = true;
-
-        for (0..src.dock.groupCount()) |group_index| {
-            const sg = src.dock.groupAt(group_index).?;
-            for (sg.entries.items) |entry| src.allocator.free(entry.path);
-            sg.entries.clearRetainingCapacity();
-            sg.active = null;
-        }
-        src.file_panel_mode_pending = null;
-        src.file_panel_dirty_sync_actions_len = 0;
-        src.file_tree_reload_actions_len = 0;
-        // 병합 뒤 destination의 dirty-sync 대기 entry를 목적지 큐에 다시 건다.
-        for (0..dst.dock.groupCount()) |group_index| {
-            const group = dst.dock.groupAt(group_index).?;
-            for (group.entries.items) |*entry| {
-                if (entry.dirty_sync_pending) dst.queueFilePanelDirtySyncAction(entry.surface_id, 0);
-            }
-        }
-        src.buildPreparedFileTreeRows(&src_tree_candidate, &src_tree_rows);
-        dst.buildPreparedFileTreeRows(&dst_tree_candidate, &dst_tree_rows);
-        src.commitFileTreeCandidate(&src_tree_candidate, &src_tree_rows);
-        dst.commitFileTreeCandidate(&dst_tree_candidate, &dst_tree_rows);
-        src.metal_dirty = true;
+        // 2) explorer/recent history는 **destination 권위**다 — 옛 구현도 source root를 흡수하지 않고
+        //    destination 것을 유지했다. 표시 의도(presented)만 OR로 합친다.
+        if (src.dock.presented) dst.dock.presented = true;
+        dst.file_tree_rows_dirty = true;
         dst.metal_dirty = true;
     }
 

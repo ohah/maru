@@ -319,7 +319,6 @@ pub fn main(init: std.process.Init) !void {
     var healthy_drained: u64 = healthy_initial.len;
     stage = "ready marker";
     try waitForMarker(
-        allocator,
         &healthy,
         healthy_stream,
         &healthy_screen,
@@ -377,7 +376,6 @@ pub fn main(init: std.process.Init) !void {
         const before_progress = healthy_progress_batches;
         while (healthy_progress_batches == before_progress) {
             _ = try pumpHealthy(
-                allocator,
                 &controller,
                 controller_stream,
                 &controller_screen,
@@ -385,7 +383,6 @@ pub fn main(init: std.process.Init) !void {
             );
             stage = "pressure healthy drain";
             if (try pumpHealthy(
-                allocator,
                 &healthy,
                 healthy_stream,
                 &healthy_screen,
@@ -419,14 +416,12 @@ pub fn main(init: std.process.Init) !void {
     var marker_at: u64 = 0;
     while (!marker_seen) {
         _ = try pumpHealthy(
-            allocator,
             &controller,
             controller_stream,
             &controller_screen,
             &controller_drained,
         );
         if (try pumpHealthy(
-            allocator,
             &healthy,
             healthy_stream,
             &healthy_screen,
@@ -443,14 +438,12 @@ pub fn main(init: std.process.Init) !void {
     }
     while (pressure_samples.items.len < pressure_sample_count_min) {
         _ = pumpHealthy(
-            allocator,
             &controller,
             controller_stream,
             &controller_screen,
             &controller_drained,
         ) catch {};
         _ = pumpHealthy(
-            allocator,
             &healthy,
             healthy_stream,
             &healthy_screen,
@@ -485,14 +478,12 @@ pub fn main(init: std.process.Init) !void {
     var child_report = marker_report;
     while (child_report.reaped_children == 0) {
         _ = pumpHealthy(
-            allocator,
             &controller,
             controller_stream,
             &controller_screen,
             &controller_drained,
         ) catch {};
         _ = pumpHealthy(
-            allocator,
             &healthy,
             healthy_stream,
             &healthy_screen,
@@ -737,7 +728,6 @@ fn attachRuntime(
 }
 
 fn pumpHealthy(
-    allocator: std.mem.Allocator,
     client: *session_host.client.Client,
     stream_id: u64,
     assembler: *session_host.screen_assembler.ScreenAssembler,
@@ -754,7 +744,6 @@ fn pumpHealthy(
 }
 
 fn waitForMarker(
-    allocator: std.mem.Allocator,
     client: *session_host.client.Client,
     stream_id: u64,
     assembler: *session_host.screen_assembler.ScreenAssembler,
@@ -765,7 +754,7 @@ fn waitForMarker(
 ) !void {
     while (monotonicNow(io) < deadline_ns) {
         if (screenContains(assembler, marker)) return;
-        _ = try pumpHealthy(allocator, client, stream_id, assembler, drained_bytes);
+        _ = try pumpHealthy(client, stream_id, assembler, drained_bytes);
         _ = usleep(2_000);
     }
     return error.MarkerTimeout;

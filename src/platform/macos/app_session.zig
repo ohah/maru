@@ -57273,10 +57273,12 @@ test "file panel exit protection gates window session quit and automatic termina
     try std.testing.expectEqual(QuitDecision.cancelled, session.quit_decision);
     try std.testing.expect(session.pending_confirm == .none);
 
+    // FP16: 파일 패널이 pane의 web Term이라 터미널이 다 죽어도 `allTabsTerminated`가 false다 — 창은
+    // dirty 여부와 무관하게 유지된다(옛 `file_panel_exit_held` 경로보다 강한 보호). 사용자에게 보이는
+    // 계약은 그대로다: 자동 종료가 일어나지 않는다.
     for (session.activePane().terms.items) |term| term.rt.terminated = true;
     session.total_output_events = 1;
     session.latchSessionEndOrHold(null, 999_999);
-    try std.testing.expect(session.file_panel_exit_held);
     try std.testing.expect(!session.ended_seen);
 
     session.fileEntryAt(0).?.mode = .read;

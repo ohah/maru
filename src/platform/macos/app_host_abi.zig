@@ -5577,6 +5577,9 @@ test "Metal key-down ABI repairs stale dock focus before routing Cmd+W" {
     const entry = session.?.fileEntryAt(0).?;
     entry.mode = .source_edit;
     entry.dirty = true;
+    // FP16: 파일을 열면 그 파일 Term이 pane의 활성 탭이 된다. 이 테스트의 전제는 "Metal(터미널)이 실제
+    // 키 소스인데 logical owner만 stale하다"이므로, 터미널 Term을 다시 활성으로 되돌린다.
+    session.?.focusTerm(0);
     session.?.focus_owner = .{ .dock_surface = entry.surface_id }; // TerminalView가 실제 source인 stale logical owner.
 
     const event: KeyEvent = .{

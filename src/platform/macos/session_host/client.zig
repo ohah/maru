@@ -4187,7 +4187,6 @@ test "external mode rejects every legacy socket entry without wire mutation" {
         .external => |state| {
             try std.testing.expectEqual(@as(usize, 0), state.external_tx.items.len);
             try std.testing.expectEqual(@as(usize, 0), state.external_tx_bytes);
-            try std.testing.expectEqual(@as(?client_external_mode.InFlightControl, null), state.in_flight_control);
         },
     }
 
@@ -4355,7 +4354,7 @@ test "external mode preserves parser queues request id and capabilities on succe
     try checkExternalModePreservesClientState(.exact_rollback);
 }
 
-test "external mode failClosed reclaims queued frames and control state exactly once" {
+test "external mode failClosed reclaims queued frames exactly once" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
     var fds: [2]c.fd_t = undefined;
@@ -4368,10 +4367,6 @@ test "external mode failClosed reclaims queued frames and control state exactly 
     defer client.deinit();
     var fixture = ConnectedSocketFixture{ .fd = fds[0] };
     try client.enterExternalModeWithOps(fixture.ops());
-    const deadline = client_deadline.AbsoluteDeadline.fromInjected(
-        .{ .context = &fixture, .now_ns = ConnectedSocketFixture.clock },
-        10,
-    );
     switch (client.io_mode) {
         .blocking => return error.TestUnexpectedResult,
         .external => |*state| {
@@ -4393,7 +4388,6 @@ test "external mode failClosed reclaims queued frames and control state exactly 
                 .last_progress_at_ns = 3,
             });
             state.external_tx_bytes = 11;
-            state.in_flight_control = .{ .request_id = 8, .deadline = deadline };
         },
     }
     client.failClosed();

@@ -32,6 +32,7 @@ pub const ParseError = error{
     OutOfMemory,
 };
 pub const EncodeError = error{ PayloadTooLarge, OutOfMemory };
+pub const NormalizeError = error{ ResidentTooLarge, MalformedState, OutOfMemory };
 
 /// 받은 바이트를 누적하다 완성된 frame을 하나씩 꺼내는 state machine. 소유는 caller(push/next/deinit).
 pub const FrameParser = struct {
@@ -131,6 +132,33 @@ pub const FrameParser = struct {
 
     pub fn residentBytes(self: *const FrameParser) usize {
         return self.buf.capacity;
+    }
+
+    /// Replace the parser backing allocation with an exact unread-byte allocation.
+    ///
+    /// The current resident cap is checked before allocating, so the temporary old+new peak is at
+    /// most twice `resident_cap`. Every failure preserves the original parser byte-for-byte.
+    pub fn normalizeExact(self: *FrameParser, resident_cap: usize) NormalizeError!void {
+        if (self.buf.capacity > resident_cap) return error.ResidentTooLarge;
+        if (self.head > self.buf.items.len or self.buf.items.len > self.buf.capacity)
+            return error.MalformedState;
+
+        const unread = self.buf.items[self.head..];
+        if (unread.len == 0) {
+            self.buf.deinit(self.allocator);
+            self.buf = .empty;
+            self.head = 0;
+            return;
+        }
+        const replacement = self.allocator.alloc(u8, unread.len) catch return error.OutOfMemory;
+        @memcpy(replacement, unread);
+
+        self.buf.deinit(self.allocator);
+        self.buf = .{
+            .items = replacement,
+            .capacity = replacement.len,
+        };
+        self.head = 0;
     }
 
     pub const BufferState = enum { empty, incomplete, complete_or_error };
@@ -421,4 +449,116 @@ test "framing: unknown flag bit on a required frame closes the connection" {
     var h = (protocol.Header{ .kind = .request, .flags = 0x4 }).encode(); // v1 미정의 비트, optional 아님
     try parser.push(&h);
     try std.testing.expectError(error.UnknownRequiredFrame, parser.next());
+}
+
+test "framing: normalizeExact compacts unread bytes to exact resident storage" {
+    const allocator = std.testing.allocator;
+    var parser = FrameParser.init(allocator);
+    defer parser.deinit();
+
+    const first = try encodeFrame(allocator, .{ .kind = .request, .request_id = 1 }, "first");
+    defer allocator.free(first);
+    const second = try encodeFrame(allocator, .{ .kind = .response, .request_id = 1 }, "second");
+    defer allocator.free(second);
+    try parser.push(first);
+    try parser.push(second);
+    const consumed = (try parser.next()).?;
+    defer consumed.deinit(allocator);
+    try std.testing.expect(parser.head > 0);
+    const unread_before = try allocator.dupe(u8, parser.buf.items[parser.head..]);
+    defer allocator.free(unread_before);
+
+    try parser.normalizeExact(protocol.max_binary_chunk + protocol.header_size);
+    try std.testing.expectEqual(@as(usize, 0), parser.head);
+    try std.testing.expectEqual(unread_before.len, parser.bufferedBytes());
+    try std.testing.expectEqual(unread_before.len, parser.residentBytes());
+    try std.testing.expectEqualSlices(u8, unread_before, parser.buf.items);
+}
+
+test "framing: normalizeExact cap and allocation failures preserve parser state" {
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    const allocator = failing.allocator();
+    var parser = FrameParser.init(allocator);
+    defer parser.deinit();
+
+    try parser.push("unread");
+    const original_ptr = parser.buf.items.ptr;
+    const original_capacity = parser.buf.capacity;
+    const original_head = parser.head;
+    try std.testing.expectError(
+        error.ResidentTooLarge,
+        parser.normalizeExact(original_capacity - 1),
+    );
+    try std.testing.expectEqual(original_ptr, parser.buf.items.ptr);
+    try std.testing.expectEqual(original_capacity, parser.buf.capacity);
+    try std.testing.expectEqual(original_head, parser.head);
+    try std.testing.expectEqualStrings("unread", parser.buf.items);
+
+    failing.fail_index = failing.alloc_index;
+    try std.testing.expectError(
+        error.OutOfMemory,
+        parser.normalizeExact(original_capacity),
+    );
+    try std.testing.expectEqual(original_ptr, parser.buf.items.ptr);
+    try std.testing.expectEqual(original_capacity, parser.buf.capacity);
+    try std.testing.expectEqual(original_head, parser.head);
+    try std.testing.expectEqualStrings("unread", parser.buf.items);
+}
+
+test "framing: normalizeExact rejects malformed head without mutation" {
+    const allocator = std.testing.allocator;
+    var parser = FrameParser.init(allocator);
+    try parser.push("abc");
+    parser.head = 4;
+    try std.testing.expectError(error.MalformedState, parser.normalizeExact(parser.residentBytes()));
+    try std.testing.expectEqual(@as(usize, 4), parser.head);
+    // Restore the intentionally corrupted test-only scalar so normal deinit can reclaim the buffer.
+    parser.head = 0;
+    parser.deinit();
+}
+
+test "framing: normalizeExact releases retained capacity when unread is empty" {
+    const allocator = std.testing.allocator;
+    var parser = FrameParser.init(allocator);
+    defer parser.deinit();
+    const encoded = try encodeFrame(allocator, .{ .kind = .request, .request_id = 1 }, "");
+    defer allocator.free(encoded);
+    try parser.push(encoded);
+    const frame = (try parser.next()).?;
+    frame.deinit(allocator);
+    try std.testing.expect(parser.residentBytes() > 0);
+
+    try parser.normalizeExact(parser.residentBytes());
+    try std.testing.expectEqual(@as(usize, 0), parser.bufferedBytes());
+    try std.testing.expectEqual(@as(usize, 0), parser.residentBytes());
+}
+
+test "framing: normalizeExact consumed-prefix OOM preserves prefix and unread bytes" {
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    const allocator = failing.allocator();
+    var parser = FrameParser.init(allocator);
+    defer parser.deinit();
+    const first = try encodeFrame(allocator, .{ .kind = .request, .request_id = 1 }, "one");
+    defer allocator.free(first);
+    const second = try encodeFrame(allocator, .{ .kind = .response, .request_id = 1 }, "two");
+    defer allocator.free(second);
+    try parser.push(first);
+    try parser.push(second);
+    const consumed = (try parser.next()).?;
+    consumed.deinit(allocator);
+    const original_ptr = parser.buf.items.ptr;
+    const original_capacity = parser.buf.capacity;
+    const original_head = parser.head;
+    const original_unread = try std.testing.allocator.dupe(u8, parser.buf.items[parser.head..]);
+    defer std.testing.allocator.free(original_unread);
+
+    failing.fail_index = failing.alloc_index;
+    try std.testing.expectError(
+        error.OutOfMemory,
+        parser.normalizeExact(original_capacity),
+    );
+    try std.testing.expectEqual(original_ptr, parser.buf.items.ptr);
+    try std.testing.expectEqual(original_capacity, parser.buf.capacity);
+    try std.testing.expectEqual(original_head, parser.head);
+    try std.testing.expectEqualSlices(u8, original_unread, parser.buf.items[parser.head..]);
 }

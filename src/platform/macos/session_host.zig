@@ -113,6 +113,8 @@ pub const client_deadline = if (builtin.os.tag == .macos)
     @import("session_host/client_deadline.zig")
 else
     struct {};
+// client_pump(P5c3c-2b2a)는 fd/parser/JSON/allocator를 모르는 순수 turn/state DTO다.
+pub const client_pump = @import("session_host/client_pump.zig");
 // attach_phase_deadline(P5c3c-1b)는 public attach의 네 pre-raw phase label과 client_deadline의
 // non-resettable absolute deadline만 결합한다. parser/resolver와 Client transport는 phase enum을 모른다.
 pub const attach_phase_deadline = if (builtin.os.tag == .macos)

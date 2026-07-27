@@ -2534,8 +2534,9 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
           out-of-order slot reuse, generation exhaustion, stale-copy/double-release, 조기 finish,
           caller ownership 보존, failed-release terminal retain/retry와 release-before-drop charged cleanup을
           Debug/ReleaseFast `test-session-host` 및 전체
-          `mise run check`로 검증했다. 따라서 이 완료 표시는 2b1에만 해당하며 2b2~2b3의 Client
-          storage/physical cap/final owner gate는 아직 계획 상태다.
+          `mise run check`로 검증했다. 따라서 ledger 완료 표시는 2b1에 해당하고 이어진 2b2a pure
+          state/parser/boundary까지 구현 완료했다. 2b2b~2b3의 stable storage/physical cap/final owner gate는
+          아직 계획 상태다.
 
         - **P5c3c-2b2 — Client external pump core**:
           이 단계는 한 mega-PR이 아니라 아래 **아홉 merge slice**다. 앞 slice의 Debug/ReleaseFast/경계 gate가
@@ -2582,6 +2583,16 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
             `residentBytes > resident_cap`이면 allocation 0으로 거부한다. 그 외에는 unread exact allocation을 stage해
             성공 시에만 old buffer를 교체하며 OOM/internal head·length 불일치는 기존 parser를 그대로 보존한다.
             이 failure table과 old+new transient `<= 2 * resident_cap`을 exact/cap+1/OOM 테스트로 고정한다.
+
+            **구현 완료:** `client_pump.zig`가 OS/allocator/protocol import 없이 closed turn/state DTO,
+            host/client origin-tagged recovery와 nonwrapping `RequestIdState`, deadline-first
+            `decide(PolicyInput)`을 소유한다. 2a transitional `in_flight_control`은 제거해 향후 f2 semantic control의
+            단일 자리를 비웠다. `FrameParser.normalizeExact`는 self allocator로 resident cap을 allocation 전에
+            검사하고 unread exact buffer를 stage/commit하며 cap/OOM/malformed 실패에서 기존 pointer/cap/head/bytes를
+            보존한다. boundary test는 pure module의 std-only import와 future `ExternalPumpFacade` identifier의
+            mechanics/final-owner allowlist를 tokenizer로 강제한다. Debug/ReleaseFast `test-session-host`,
+            `check-boundaries`, 전체 `mise run check`를 통과했다. 이 완료 표시는 2b2a에만 해당하고 2b2b~f3은
+            아직 계획 상태다.
 
           - **2b2b — stable in-place storage scaffold:** token이 존재하기 전에
             `ExternalPumpStorage.initInPlace(out, source: *Client, AttachmentEvidence)`를 caller의 최종 주소에서
@@ -2890,7 +2901,7 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
         공유하고 leave가 남은 budget 중 최대 100 ms를 쓴다. signal/revoke/error cleanup은 active/latest와 detach를
         버리고 하나의 100 ms deadline 안에서 leave를 시도한 뒤 즉시 raw restore/signal forwarding으로 간다.
 
-    **P5c3c-1a~2a와 2b1은 구현 완료, 2b2~3b는 계획 상태다.** 각 slice는 P5c3a~b의 Debug/ReleaseFast gate를 재실행하고 다음 slice가 실제
+    **P5c3c-1a~2a, 2b1과 2b2a는 구현 완료, 2b2b~3b는 계획 상태다.** 각 slice는 P5c3a~b의 Debug/ReleaseFast gate를 재실행하고 다음 slice가 실제
     consumer로 쓰지 않는 임시 public API는 만들지 않는다.
 
     raw 진입 전에도 기존 `SO_RCVTIMEO`/blocking `writeAll`을 deadline으로 간주하지 않는다. resolver 전체, selected

@@ -143,6 +143,361 @@ test "provider cleanup module remains absent" {
     );
 }
 
+test "session host client pump policy imports only std" {
+    const allocator = std.testing.allocator;
+    const source = try readZigFileZ(
+        allocator,
+        "src/platform/macos/session_host/client_pump.zig",
+    );
+    defer allocator.free(source);
+
+    var imports: usize = 0;
+    var import_builtins: usize = 0;
+    var tokenizer = std.zig.Tokenizer.init(source);
+    var saw_import = false;
+    var saw_paren = false;
+    while (true) {
+        const token = tokenizer.next();
+        switch (token.tag) {
+            .eof => break,
+            .builtin => {
+                saw_import = std.mem.eql(u8, source[token.loc.start..token.loc.end], "@import");
+                if (saw_import) import_builtins += 1;
+                saw_paren = false;
+            },
+            .l_paren => {
+                saw_paren = saw_import;
+            },
+            .string_literal => {
+                if (saw_import and saw_paren) {
+                    imports += 1;
+                    try std.testing.expectEqualStrings(
+                        "\"std\"",
+                        source[token.loc.start..token.loc.end],
+                    );
+                }
+                saw_import = false;
+                saw_paren = false;
+            },
+            else => {
+                if (saw_import and token.tag != .doc_comment) {
+                    saw_import = false;
+                    saw_paren = false;
+                }
+            },
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 1), import_builtins);
+    try std.testing.expectEqual(@as(usize, 1), imports);
+    try std.testing.expect(!containsForbiddenExternalBuiltin(source));
+    try std.testing.expect(!containsForbiddenPumpToken(source));
+    try std.testing.expect(!containsForbiddenStdChild(source));
+
+    const forbidden_fixture: [:0]const u8 =
+        \\const std = @import("std");
+        \\const Leaked = std.mem.Allocator;
+    ;
+    try std.testing.expect(containsForbiddenPumpToken(forbidden_fixture));
+    const forbidden_heap: [:0]const u8 =
+        \\const std = @import("std");
+        \\const allocator = std.heap.page_allocator;
+    ;
+    try std.testing.expect(containsForbiddenStdChild(forbidden_heap));
+    const forbidden_os: [:0]const u8 =
+        \\const std = @import("std");
+        \\const os = std.os;
+    ;
+    try std.testing.expect(containsForbiddenStdChild(forbidden_os));
+    const forbidden_fs: [:0]const u8 =
+        \\const std = @import("std");
+        \\const Handle = std.fs.File.Handle;
+    ;
+    try std.testing.expect(containsForbiddenStdChild(forbidden_fs));
+    const forbidden_c_import: [:0]const u8 =
+        \\const c = @cImport({ @cInclude("unistd.h"); });
+    ;
+    try std.testing.expect(containsForbiddenExternalBuiltin(forbidden_c_import));
+    const forbidden_import_alias: [:0]const u8 =
+        \\const system = @import("std");
+        \\const allocator = system.heap.page_allocator;
+    ;
+    try std.testing.expect(containsForbiddenStdChild(forbidden_import_alias));
+    const forbidden_bare_alias: [:0]const u8 =
+        \\const std = @import("std");
+        \\const system = std;
+    ;
+    try std.testing.expect(containsForbiddenStdChild(forbidden_bare_alias));
+    const forbidden_std_field: [:0]const u8 =
+        \\const std = @import("std");
+        \\const heap = @field(std, "heap");
+    ;
+    try std.testing.expect(containsForbiddenStdChild(forbidden_std_field));
+    const forbidden_extern: [:0]const u8 =
+        \\extern fn close(fd: i32) c_int;
+    ;
+    try std.testing.expect(containsForbiddenExternalBuiltin(forbidden_extern));
+    const forbidden_extern_builtin: [:0]const u8 =
+        \\const errno = @extern(*i32, .{ .name = "errno" });
+    ;
+    try std.testing.expect(containsForbiddenExternalBuiltin(forbidden_extern_builtin));
+    const forbidden_fake_std: [:0]const u8 =
+        \\const std = 1;
+        \\const system = @import("std");
+        \\const allocator = system.heap.page_allocator;
+    ;
+    try std.testing.expect(containsForbiddenStdChild(forbidden_fake_std));
+}
+
+fn containsForbiddenExternalBuiltin(source: [:0]const u8) bool {
+    var tokenizer = std.zig.Tokenizer.init(source);
+    while (true) {
+        const token = tokenizer.next();
+        switch (token.tag) {
+            .eof => return false,
+            .keyword_extern, .keyword_asm => return true,
+            .builtin => {
+                const builtin_name = source[token.loc.start..token.loc.end];
+                if (std.mem.eql(u8, builtin_name, "@cImport") or
+                    std.mem.eql(u8, builtin_name, "@cInclude") or
+                    std.mem.eql(u8, builtin_name, "@embedFile") or
+                    std.mem.eql(u8, builtin_name, "@extern"))
+                    return true;
+            },
+            else => {},
+        }
+    }
+}
+
+test "session host external pump facade callsites stay in the final owner boundary" {
+    const allocator = std.testing.allocator;
+    var dir = try std.Io.Dir.cwd().openDir(
+        std.testing.io,
+        "src",
+        .{ .iterate = true },
+    );
+    defer dir.close(std.testing.io);
+    var walker = try dir.walk(allocator);
+    defer walker.deinit();
+
+    while (try walker.next(std.testing.io)) |entry| {
+        if (entry.kind != .file or !std.mem.endsWith(u8, entry.basename, ".zig")) continue;
+        const allowed = std.mem.eql(
+            u8,
+            entry.path,
+            "platform/macos/session_host/client_external_pump.zig",
+        ) or std.mem.eql(
+            u8,
+            entry.path,
+            "platform/macos/session_host/external_pump_owner.zig",
+        );
+        if (allowed) continue;
+        const path = try std.fmt.allocPrint(
+            allocator,
+            "src/{s}",
+            .{entry.path},
+        );
+        defer allocator.free(path);
+        const source = try readZigFileZ(allocator, path);
+        defer allocator.free(source);
+        try std.testing.expect(!containsFacadeAccess(source));
+    }
+
+    const forbidden_identifier: [:0]const u8 =
+        \\const Leak = module.ExternalPumpFacade;
+    ;
+    try std.testing.expect(containsFacadeAccess(forbidden_identifier));
+    const forbidden_field: [:0]const u8 =
+        \\const Leak = @field(module, "ExternalPumpFacade");
+    ;
+    try std.testing.expect(containsFacadeAccess(forbidden_field));
+    const forbidden_import: [:0]const u8 =
+        \\const pump = @import("platform/macos/session_host/client_external_pump.zig");
+    ;
+    try std.testing.expect(containsFacadeAccess(forbidden_import));
+    const forbidden_computed: [:0]const u8 =
+        \\const pump = @import("platform/macos/session_host/" ++ "client_" ++ "external_" ++ "pump." ++ "zig");
+        \\const Leak = @field(pump, "External" ++ "Pump" ++ "Facade");
+    ;
+    try std.testing.expect(containsFacadeAccess(forbidden_computed));
+}
+
+fn containsForbiddenStdChild(source: [:0]const u8) bool {
+    if (!hasExactCanonicalStdImport(source)) return true;
+    const allowed = [_][]const u8{ "math", "meta", "testing" };
+    var tokenizer = std.zig.Tokenizer.init(source);
+    const AfterStd = enum { none, declaration, selector };
+    var after_std: AfterStd = .none;
+    var expect_child = false;
+    var previous_const = false;
+    var canonical_bindings: usize = 0;
+    while (true) {
+        const token = tokenizer.next();
+        if (after_std != .none) {
+            switch (after_std) {
+                .declaration => {
+                    if (token.tag != .equal) return true;
+                    canonical_bindings += 1;
+                },
+                .selector => {
+                    if (token.tag != .period) return true;
+                    expect_child = true;
+                },
+                .none => unreachable,
+            }
+            after_std = .none;
+            previous_const = false;
+            continue;
+        }
+        if (expect_child) {
+            if (token.tag != .identifier) return true;
+            const child = source[token.loc.start..token.loc.end];
+            var accepted = false;
+            for (allowed) |name| {
+                if (std.mem.eql(u8, child, name)) {
+                    accepted = true;
+                    break;
+                }
+            }
+            if (!accepted) return true;
+            expect_child = false;
+            previous_const = false;
+            continue;
+        }
+        switch (token.tag) {
+            .eof => return canonical_bindings != 1,
+            .keyword_const => {
+                previous_const = true;
+            },
+            .identifier => {
+                const identifier = source[token.loc.start..token.loc.end];
+                if (std.mem.eql(u8, identifier, "std")) {
+                    after_std = if (previous_const) .declaration else .selector;
+                }
+                previous_const = false;
+            },
+            else => {
+                previous_const = false;
+            },
+        }
+    }
+}
+
+fn hasExactCanonicalStdImport(source: [:0]const u8) bool {
+    var tokenizer = std.zig.Tokenizer.init(source);
+    var state: u4 = 0;
+    var matches: usize = 0;
+    while (true) {
+        const token = tokenizer.next();
+        if (token.tag == .eof) return matches == 1 and state == 0;
+        const text = source[token.loc.start..token.loc.end];
+        const matched = switch (state) {
+            0 => token.tag == .keyword_const,
+            1 => token.tag == .identifier and std.mem.eql(u8, text, "std"),
+            2 => token.tag == .equal,
+            3 => token.tag == .builtin and std.mem.eql(u8, text, "@import"),
+            4 => token.tag == .l_paren,
+            5 => token.tag == .string_literal and std.mem.eql(u8, text, "\"std\""),
+            6 => token.tag == .r_paren,
+            7 => token.tag == .semicolon,
+            else => unreachable,
+        };
+        if (matched) {
+            state += 1;
+            if (state == 8) {
+                matches += 1;
+                state = 0;
+            }
+        } else {
+            state = if (token.tag == .keyword_const) 1 else 0;
+        }
+    }
+}
+
+fn containsForbiddenPumpToken(source: [:0]const u8) bool {
+    const forbidden = [_][]const u8{
+        "posix",
+        "c",
+        "json",
+        "mem",
+        "Allocator",
+        "FrameParser",
+        "ExternalInboxLedger",
+    };
+    var tokenizer = std.zig.Tokenizer.init(source);
+    while (true) {
+        const token = tokenizer.next();
+        switch (token.tag) {
+            .eof => return false,
+            .identifier => {
+                const identifier = source[token.loc.start..token.loc.end];
+                for (forbidden) |name| {
+                    if (std.mem.eql(u8, identifier, name)) return true;
+                }
+            },
+            else => {},
+        }
+    }
+}
+
+fn containsFacadeAccess(source: [:0]const u8) bool {
+    var tokenizer = std.zig.Tokenizer.init(source);
+    var saw_client_external = false;
+    var saw_pump_file = false;
+    var saw_external_pump = false;
+    var saw_facade = false;
+    while (true) {
+        const token = tokenizer.next();
+        switch (token.tag) {
+            .eof => return (saw_client_external and saw_pump_file) or
+                (saw_external_pump and saw_facade) or
+                joinedStringLiteralsContain(source, "client_external_pump.zig") or
+                joinedStringLiteralsContain(source, "ExternalPumpFacade"),
+            .identifier => {
+                if (std.mem.eql(
+                    u8,
+                    source[token.loc.start..token.loc.end],
+                    "ExternalPumpFacade",
+                )) return true;
+            },
+            .string_literal => {
+                const literal = source[token.loc.start..token.loc.end];
+                saw_client_external = saw_client_external or
+                    std.mem.indexOf(u8, literal, "client_external_") != null;
+                saw_pump_file = saw_pump_file or
+                    std.mem.indexOf(u8, literal, "pump.zig") != null;
+                saw_external_pump = saw_external_pump or
+                    std.mem.indexOf(u8, literal, "ExternalPump") != null;
+                saw_facade = saw_facade or
+                    std.mem.indexOf(u8, literal, "Facade") != null;
+            },
+            else => {},
+        }
+    }
+}
+
+fn joinedStringLiteralsContain(source: [:0]const u8, needle: []const u8) bool {
+    var tokenizer = std.zig.Tokenizer.init(source);
+    var matched: usize = 0;
+    while (true) {
+        const token = tokenizer.next();
+        switch (token.tag) {
+            .eof => return false,
+            .string_literal => {
+                const literal = source[token.loc.start + 1 .. token.loc.end - 1];
+                for (literal) |byte| {
+                    if (byte == needle[matched]) {
+                        matched += 1;
+                        if (matched == needle.len) return true;
+                    } else {
+                        matched = if (byte == needle[0]) 1 else 0;
+                    }
+                }
+            },
+            else => {},
+        }
+    }
+}
+
 fn checkDirectory(
     allocator: std.mem.Allocator,
     rule: Rule,

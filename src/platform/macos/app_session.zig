@@ -45148,6 +45148,8 @@ test "FP3 파일 도크: right/bottom 기하·surface diff 소스·presence·hit
 
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
+    // 캡처가 "어느 파일이 활성인가"를 싣는지 보려면 파일 탭을 다시 활성으로 둔다(지금은 브라우저가 활성).
+    session.focusTerm(3); // [terminal, browser, alpha.md, beta.html]
     const win = try session.captureWorkspaceWindow(arena.allocator(), false, null);
     try std.testing.expectEqual(dock_panel.Side.bottom, win.dock.side);
     try std.testing.expectEqual(session.dock.tree_size, win.dock.tree_size);
@@ -45191,15 +45193,14 @@ test "FP5 file panel routing: picker one-shot, md/html open, duplicate activatio
     try std.testing.expectEqualStrings(md_path, session.filePanelEntryInfo(md_surface_id).?.path);
     try std.testing.expectEqual(dock_panel.EntryKind.markdown, session.filePanelEntryInfo(md_surface_id).?.kind);
 
-    _ = try session.openFileTermInActivePane("/tmp/fp5-split-placeholder.md", .markdown);
     session.assignDockSurfaceIds();
-    // FP16: source group 개념이 없어져, 링크는 source 파일이 있는 pane의 새 탭으로 열린다.
-    _ = 0; // (옛 group focus 대조 자리 — group으로 열어야 한다.
+    // FP16: source group 개념이 없어져, 링크는 source 파일이 있는 pane의 새 탭으로 열린다
+    // (옛 "다른 group이 focus여도 source group에 연다" 대조 자리).
     try session.openFilePanelLink(md_surface_id, "two.html#preview", false);
     try std.testing.expectEqual(@as(usize, 2), session.fileEntryCount());
     try std.testing.expectEqualStrings(html_path, session.fileEntryAt(1).?.path);
     try std.testing.expectEqual(session.fileEntryAt(1).?.id, session.pending_dock_focus.?.entry_id);
-    // text kind(§2.2): 로컬 텍스트 링크도 markdown과 같은 정책으로 source group 도크 탭에 연다.
+    // text kind(§2.2): 로컬 텍스트 링크도 markdown과 같은 정책으로 source 파일이 있는 pane에 연다.
     try session.openFilePanelLink(md_surface_id, "three.txt", false);
     try std.testing.expectEqual(@as(usize, 3), session.fileEntryCount());
     try std.testing.expectEqualStrings(text_path, session.fileEntryAt(2).?.path);

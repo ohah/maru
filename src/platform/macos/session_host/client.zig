@@ -646,6 +646,46 @@ fn externalRangeForSlice(bytes: []const u8, capacity: usize) ExternalAdoptionIns
     return .{ .start = @intFromPtr(bytes.ptr), .len = capacity };
 }
 
+fn externalRangeForTypedSlice(
+    comptime Entry: type,
+    entries: []const Entry,
+) ExternalAdoptionInspectError!?ExternalRange {
+    if (entries.len == 0) return null;
+    const bytes = std.math.mul(usize, entries.len, @sizeOf(Entry)) catch
+        return error.ArithmeticOverflow;
+    return .{ .start = @intFromPtr(entries.ptr), .len = bytes };
+}
+
+fn externalDestinationOverlapsInventory(
+    inventory: *const ExternalAdoptionInventory,
+    target: ExternalRange,
+) ExternalAdoptionInspectError!bool {
+    if (externalRangesOverlap(target, externalRangeOfValue(inventory))) return true;
+    inline for (.{
+        try externalRangeForTypedSlice(ExternalBatchDescriptor, inventory.batch_descriptors),
+        try externalRangeForTypedSlice(ExternalFrameDescriptor, inventory.stream_descriptors),
+        try externalRangeForTypedSlice(ExternalFrameDescriptor, inventory.event_descriptors),
+        try externalRangeForTypedSlice(u8, inventory.build_id_copy),
+        try externalRangeForTypedSlice(u8, inventory.lifecycle_copy),
+        try externalRangeForTypedSlice(
+            ExternalBatchDescriptor,
+            inventory.cleanup_batch_descriptors,
+        ),
+        try externalRangeForTypedSlice(
+            ExternalFrameDescriptor,
+            inventory.cleanup_stream_descriptors,
+        ),
+        try externalRangeForTypedSlice(
+            ExternalFrameDescriptor,
+            inventory.cleanup_event_descriptors,
+        ),
+        try externalRangeForTypedSlice(u8, inventory.cleanup_build_id_copy),
+        try externalRangeForTypedSlice(u8, inventory.cleanup_lifecycle_copy),
+    }) |range| if (range) |present|
+        if (externalRangesOverlap(target, present)) return true;
+    return false;
+}
+
 fn externalRangeForList(
     list: anytype,
     comptime Entry: type,
@@ -1668,13 +1708,21 @@ pub const Client = struct {
         expected: *const ExternalAdoptionInventory,
         out: *PreparedClientDisarm,
     ) ExternalAdoptionPreflightError!void {
-        if (out.lifecycle != .empty or out.inventory != null or out.cleanup_inventory != null)
-            return error.InvalidPlan;
+        // Validate every source descriptor before reading the caller-provided destination.
+        // The destination may alias Client-owned bytes, and malformed list lengths must not
+        // reach the range walker before the structural guard has proved them safe to iterate.
+        try validateExternalAdoptionStructure(self);
         if (externalRangesOverlap(
             externalRangeOfValue(self),
             externalRangeOfValue(out),
         ) or try externalPlanRangeOverlapsClient(self, out))
             return error.InvalidAlias;
+        if (try externalDestinationOverlapsInventory(
+            expected,
+            externalRangeOfValue(out),
+        )) return error.InvalidAlias;
+        if (out.lifecycle != .empty or out.inventory != null or out.cleanup_inventory != null)
+            return error.InvalidPlan;
         if (expected.client_address != @intFromPtr(self)) return error.StaleInventory;
 
         var current = try self.inspectExternalAdoption(expected.target_stream);
@@ -1696,6 +1744,17 @@ pub const Client = struct {
         expected: *const ExternalAdoptionInventory,
         out: []ExternalScreenCopy,
     ) ExternalAdoptionInspectError!void {
+        _ = try validateExternalAdoptionClient(self, expected.target_stream, false);
+        const out_bytes = std.math.mul(
+            usize,
+            out.len,
+            @sizeOf(ExternalScreenCopy),
+        ) catch return error.ArithmeticOverflow;
+        try self.preflightExternalAdoptionDestination(out.ptr, out_bytes);
+        if (try externalDestinationOverlapsInventory(expected, .{
+            .start = @intFromPtr(out.ptr),
+            .len = out_bytes,
+        })) return error.InvalidAlias;
         if (!externalInventoryMatchesClientExact(expected, self) or
             out.len != expected.screen_source_count)
             return error.InvalidClientState;
@@ -1747,6 +1806,11 @@ pub const Client = struct {
         expected: *const ExternalAdoptionInventory,
         copies: []const ExternalScreenCopy,
     ) bool {
+        _ = validateExternalAdoptionClient(
+            self,
+            expected.target_stream,
+            false,
+        ) catch return false;
         if (!externalInventoryMatchesClientExact(expected, self) or
             copies.len != expected.screen_source_count)
             return false;
@@ -2397,7 +2461,7 @@ pub const Client = struct {
         }
     }
 
-    /// `want_stream_id`의 다음 **화면 stream 배치**를 논블로킹으로 돌려준다(caller가 `bytes` free). 여러 원격 runtime이 이
+    /// `want_stream_id`의 다음 **화면 stream 배치**를 논블로킹으로 돌려준다(caller가 batch를 `deinit()`). 여러 원격 runtime이 이
     /// connection 하나를 공유하므로 소켓엔 여러 stream의 배치가 섞여 온다 — 이 함수가 **stream_id로 demux**한다: 버퍼(§멀티
     /// runtime `pending_batches`)에 내 배치가 있으면 그걸 먼저(도착 순서), 없으면 소켓에서 완성 배치를 읽되 **다른 stream의
     /// 것이면 버리지 않고 버퍼에 넣고 계속** 읽어 내 배치를 찾는다. 소켓이 idle이면(내 배치 없음) `null`(그 사이 읽힌 남의 배치는
@@ -5685,6 +5749,99 @@ test "external adoption inventory seals exact client state and disarms owned que
     defer inventory.deinit();
     try std.testing.expectEqual(@as(usize, 3), inventory.screen_source_count);
     try std.testing.expectEqual(@as(usize, 1), inventory.event_count);
+
+    var no_copies: [0]ExternalScreenCopy = .{};
+    {
+        const external_mode = client.io_mode;
+        client.io_mode = .blocking;
+        defer client.io_mode = external_mode;
+        try std.testing.expectError(
+            error.InvalidClientState,
+            client.stageExternalScreenCopies(allocator, &inventory, &no_copies),
+        );
+        try std.testing.expect(!client.externalScreenCopiesMatch(&inventory, &no_copies));
+    }
+    {
+        const profile = client.connection_profile;
+        client.connection_profile = null;
+        defer client.connection_profile = profile;
+        try std.testing.expectError(
+            error.IneligibleProfile,
+            client.stageExternalScreenCopies(allocator, &inventory, &no_copies),
+        );
+        try std.testing.expect(!client.externalScreenCopiesMatch(&inventory, &no_copies));
+    }
+    {
+        const alias_ptr: *ExternalScreenCopy = @ptrCast(@alignCast(
+            client.pending_batches.items.ptr,
+        ));
+        try std.testing.expectError(
+            error.InvalidAlias,
+            client.stageExternalScreenCopies(
+                allocator,
+                &inventory,
+                alias_ptr[0..1],
+            ),
+        );
+    }
+    {
+        const alias_ptr: *ExternalScreenCopy = @ptrCast(@alignCast(
+            inventory.batch_descriptors.ptr,
+        ));
+        try std.testing.expectError(
+            error.InvalidAlias,
+            client.stageExternalScreenCopies(
+                allocator,
+                &inventory,
+                alias_ptr[0..1],
+            ),
+        );
+    }
+
+    const aliased_plan: *PreparedClientDisarm = @ptrCast(@alignCast(&client));
+    try std.testing.expectError(
+        error.InvalidAlias,
+        client.preflightExternalAdoption(&inventory, aliased_plan),
+    );
+    {
+        const aliased_inventory_plan: *PreparedClientDisarm = @ptrCast(@alignCast(&inventory));
+        try std.testing.expectError(
+            error.InvalidAlias,
+            client.preflightExternalAdoption(&inventory, aliased_inventory_plan),
+        );
+    }
+    {
+        const aliased_descriptor_plan: *PreparedClientDisarm = @ptrCast(@alignCast(
+            inventory.batch_descriptors.ptr,
+        ));
+        try std.testing.expectError(
+            error.InvalidAlias,
+            client.preflightExternalAdoption(&inventory, aliased_descriptor_plan),
+        );
+    }
+    {
+        const primary_descriptors = inventory.batch_descriptors;
+        inventory.batch_descriptors = &.{};
+        defer inventory.batch_descriptors = primary_descriptors;
+        const aliased_cleanup_plan: *PreparedClientDisarm = @ptrCast(@alignCast(
+            inventory.cleanup_batch_descriptors.ptr,
+        ));
+        try std.testing.expectError(
+            error.InvalidAlias,
+            client.preflightExternalAdoption(&inventory, aliased_cleanup_plan),
+        );
+    }
+    {
+        const event_len = client.pending_events.items.len;
+        client.pending_events.items.len = client.pending_events.capacity + 1;
+        defer client.pending_events.items.len = event_len;
+        var malformed_source_plan: PreparedClientDisarm = .{};
+        defer malformed_source_plan.deinit();
+        try std.testing.expectError(
+            error.InvalidClientState,
+            client.preflightExternalAdoption(&inventory, &malformed_source_plan),
+        );
+    }
 
     var plan: PreparedClientDisarm = .{};
     defer plan.deinit();

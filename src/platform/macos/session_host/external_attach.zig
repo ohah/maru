@@ -39,6 +39,28 @@ pub fn prepare(
     base_cache_dir: []const u8,
     request: attach_cli.Request,
 ) Result {
+    return prepareWithTransition(
+        allocator,
+        io,
+        base_cache_dir,
+        request,
+        enterExternalMode,
+    );
+}
+
+const ModeTransition = *const fn (*client_mod.Client) client_mod.EnterExternalModeError!void;
+
+fn enterExternalMode(client: *client_mod.Client) client_mod.EnterExternalModeError!void {
+    return client.enterExternalMode();
+}
+
+fn prepareWithTransition(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    base_cache_dir: []const u8,
+    request: attach_cli.Request,
+    transition: ModeTransition,
+) Result {
     const resolve_phase = attach_phase_deadline.PhaseDeadline.start(io, .resolve) catch
         return .{ .failed = .internal };
     const resolved = attach_product_resolver.resolveProduct(
@@ -96,6 +118,8 @@ pub fn prepare(
     }
     if (publishGate(&client, &attachment)) |failed|
         return failClient(&client, failed);
+    transition(&client) catch |err|
+        return failClient(&client, transitionExit(err));
 
     attachment_owned = false;
     client_owned = false;
@@ -103,6 +127,10 @@ pub fn prepare(
         .client = client,
         .attachment = attachment,
     } };
+}
+
+fn failExternalModeTransition(_: *client_mod.Client) client_mod.EnterExternalModeError!void {
+    return error.FlagFailed;
 }
 
 /// Final publication depends only on authority evidence buffered on the live connection. Each
@@ -283,7 +311,15 @@ fn deadlineCallExit(
         error.EndpointDenied, error.Unauthorized => .denied,
         error.AdminBusy => .busy,
         error.IncompatibleVersion => .unsupported,
-        error.HandshakeFailed, error.ProtocolError, error.EventQueueFull => .protocol,
+        error.HandshakeFailed, error.ProtocolError, error.EventQueueFull, error.ExternalMode => .protocol,
+    };
+}
+
+fn transitionExit(err: client_mod.EnterExternalModeError) attach_cli.ExitCode {
+    return switch (err) {
+        error.Busy => .busy,
+        error.OutOfMemory, error.FlagFailed, error.AlreadyExternal => .internal,
+        error.ConnectionClosed => .protocol,
     };
 }
 
@@ -316,6 +352,45 @@ test "external attach maps exact takeover wire errors" {
         attach_cli.ExitCode.protocol,
         responseErrorExit(allocator, "{\"error\":\"unknown\"}").?,
     );
+}
+
+test "external attach maps mode transition failures without ambiguity" {
+    try std.testing.expectEqual(attach_cli.ExitCode.busy, transitionExit(error.Busy));
+    try std.testing.expectEqual(attach_cli.ExitCode.internal, transitionExit(error.OutOfMemory));
+    try std.testing.expectEqual(attach_cli.ExitCode.internal, transitionExit(error.FlagFailed));
+    try std.testing.expectEqual(attach_cli.ExitCode.internal, transitionExit(error.AlreadyExternal));
+    try std.testing.expectEqual(attach_cli.ExitCode.protocol, transitionExit(error.ConnectionClosed));
+}
+
+test "external attach transition failure closes without follow-up wire" {
+    const builtin = @import("builtin");
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const c = std.c;
+    const posix = std.posix;
+    var fds: [2]c.fd_t = undefined;
+    try std.testing.expectEqual(
+        @as(c_int, 0),
+        c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds),
+    );
+    defer _ = c.close(fds[1]);
+    var client: client_mod.Client = .{
+        .allocator = std.testing.allocator,
+        .fd = fds[0],
+        .host_id = 1,
+        .wire_major = protocol.version_major,
+        .parser = framing.FrameParser.init(std.testing.allocator),
+    };
+    const result = failClient(&client, transitionExit(error.FlagFailed));
+    defer client.deinit();
+    try std.testing.expectEqual(
+        attach_cli.ExitCode.internal,
+        switch (result) {
+            .failed => |code| code,
+            .prepared => return error.TestUnexpectedResult,
+        },
+    );
+    var byte: [1]u8 = undefined;
+    try std.testing.expectEqual(@as(isize, 0), c.read(fds[1], &byte, byte.len));
 }
 
 test "external publish does not reuse an expired prior phase budget" {
@@ -704,6 +779,32 @@ test "external attach product transaction resolves connects and assembles one li
     try std.testing.expectEqual(runtime_id, controller.attachment.state.runtime_id);
     try std.testing.expect(controller.attachment.screen != null);
     try std.testing.expect(controller.attachment.allowsMutation());
+    try std.testing.expectError(
+        error.ExternalMode,
+        controller.client.call("host.info", null),
+    );
+
+    const failed_transition = prepareWithTransition(
+        allocator,
+        std.testing.io,
+        base,
+        .{
+            .runtime_id = runtime_id,
+            .intent = .read_only,
+        },
+        failExternalModeTransition,
+    );
+    try std.testing.expectEqual(
+        attach_cli.ExitCode.internal,
+        switch (failed_transition) {
+            .failed => |code| code,
+            .prepared => |value| {
+                var unexpected = value;
+                unexpected.deinit();
+                return error.TestUnexpectedResult;
+            },
+        },
+    );
 
     const observer_result = prepare(allocator, std.testing.io, base, .{
         .runtime_id = runtime_id,
@@ -714,6 +815,10 @@ test "external attach product transaction resolves connects and assembles one li
         .failed => return error.TestUnexpectedResult,
     };
     try std.testing.expect(!observer.attachment.allowsMutation());
+    try std.testing.expectError(
+        error.ExternalMode,
+        observer.client.call("host.info", null),
+    );
     observer.deinit();
 
     const takeover_result = prepare(allocator, std.testing.io, base, .{
@@ -728,6 +833,10 @@ test "external attach product transaction resolves connects and assembles one li
     try std.testing.expect(
         takeover.attachment.state.controller_generation >
             controller.attachment.state.controller_generation,
+    );
+    try std.testing.expectError(
+        error.ExternalMode,
+        takeover.client.call("host.info", null),
     );
     takeover.deinit();
 

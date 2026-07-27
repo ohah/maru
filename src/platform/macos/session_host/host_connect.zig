@@ -696,7 +696,7 @@ fn deadlineConnectAttempt(
         error.IncompatibleVersion => .{ .failed = .incompatible_version },
         error.AdminBusy => .{ .failed = .resource_exhausted },
         error.Unauthorized => .{ .failed = .unauthorized },
-        error.ProtocolError, error.EventQueueFull => .{ .failed = .protocol_error },
+        error.ProtocolError, error.EventQueueFull, error.ExternalMode => .{ .failed = .protocol_error },
         error.OutOfMemory => .{ .failed = .out_of_memory },
         error.DeadlineExceeded => .{ .failed = .deadline_exceeded },
         error.HandshakeFailed, error.ConnectionClosed, error.WriteFailed => .{
@@ -876,7 +876,7 @@ fn connectFailure(err: client_mod.ClientError) TryConnectResult {
         => .{ .failed = .handshake_failed },
         error.AdminBusy => .{ .failed = .resource_exhausted },
         error.Unauthorized => .{ .failed = .unauthorized },
-        error.ProtocolError, error.EventQueueFull => .{ .failed = .protocol_error },
+        error.ProtocolError, error.EventQueueFull, error.ExternalMode => .{ .failed = .protocol_error },
         error.OutOfMemory => .{ .failed = .out_of_memory },
     };
 }

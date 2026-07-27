@@ -194,7 +194,12 @@ const ProductProbe = struct {
                 error.Unauthorized => .denied,
                 error.EndpointTransient, error.AdminBusy => .busy,
                 error.EndpointAbsent, error.ConnectionClosed, error.WriteFailed => .host_unavailable,
-                error.IncompatibleVersion, error.HandshakeFailed, error.ProtocolError, error.EventQueueFull => .protocol,
+                error.IncompatibleVersion,
+                error.HandshakeFailed,
+                error.ProtocolError,
+                error.EventQueueFull,
+                error.ExternalMode,
+                => .protocol,
                 error.EndpointDenied => .denied,
             };
         };

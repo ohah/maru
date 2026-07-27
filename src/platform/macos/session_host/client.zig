@@ -17,6 +17,7 @@ const compatibility = @import("compatibility.zig");
 const framing = @import("framing.zig");
 const socket_server = @import("socket_server.zig");
 const client_deadline = @import("client_deadline.zig");
+const client_external_mode = @import("client_external_mode.zig");
 const screen_stream = @import("screen_stream.zig");
 const observation_wire = @import("observation_wire.zig");
 const resize_wire = @import("resize_wire.zig");
@@ -41,12 +42,23 @@ pub const ClientError = error{
     /// async event queue의 count/byte cap을 넘었다. latest full-state를 조용히 버리면 host base가 이미 전진해 영구 stale이
     /// 되므로 connection/runtime을 fail-closed하고 재attach initial metadata로 복구한다.
     EventQueueFull,
+    /// This legacy blocking/GUI socket API is unavailable after the one-way external-pump
+    /// transition. The external owner must use the bounded pump API introduced for that mode.
+    ExternalMode,
     OutOfMemory,
 };
 
 /// Only absolute-deadline APIs expose this extra error. Legacy blocking callers retain the closed
 /// `ClientError` switch, while the public attach phase owner can map an exact timeout by phase.
 pub const DeadlineClientError = ClientError || error{DeadlineExceeded};
+
+pub const EnterExternalModeError = error{
+    ConnectionClosed,
+    AlreadyExternal,
+    Busy,
+    OutOfMemory,
+    FlagFailed,
+};
 
 pub const EndpointFailure = enum { absent, denied, transient, other };
 
@@ -356,6 +368,7 @@ pub const Client = struct {
     // frame**. offset은 이미 kernel이 수락한 prefix 뒤를 가리킨다. frame을 이 슬롯에 넣는 순간 payload/command는 caller
     // 관점에서 accepted이므로 재전송하지 않는다. 한 슬롯 + RemoteRuntime의 stream별 sticky intent로 메모리가 고정 상한이다.
     pending_outbound: ?PendingOutbound = null,
+    io_mode: client_external_mode.Mode = .blocking,
 
     const PendingOutbound = struct {
         frame: []u8,
@@ -412,6 +425,7 @@ pub const Client = struct {
     }
 
     pub fn requireAdminRuntimeEnd(self: *Client) ClientError!void {
+        try self.requireBlockingMode();
         if (self.admin_runtime_end_v1) return;
         self.failClosed();
         return error.IncompatibleVersion;
@@ -611,6 +625,7 @@ pub const Client = struct {
     }
 
     pub fn deinit(self: *Client) void {
+        self.clearExternalModeStorage();
         if (self.fd >= 0) _ = c.close(self.fd);
         if (self.build_id) |build_id| self.allocator.free(build_id);
         if (self.lifecycle.len != 0) self.allocator.free(self.lifecycle);
@@ -624,6 +639,47 @@ pub const Client = struct {
         if (self.partial_batch) |*partial| partial.bytes.deinit(self.allocator);
         self.parser.deinit();
         self.* = undefined;
+    }
+
+    /// One-way pre-raw transition. Every allocation is staged before fd flags are touched and an
+    /// unprovable rollback poisons the sole-owned connection instead of exposing split mode.
+    pub fn enterExternalMode(self: *Client) EnterExternalModeError!void {
+        return self.enterExternalModeWithOps(client_deadline.posix_ops);
+    }
+
+    fn enterExternalModeWithOps(
+        self: *Client,
+        ops: client_deadline.Ops,
+    ) EnterExternalModeError!void {
+        if (self.unusable) return error.ConnectionClosed;
+        if (self.io_mode == .external) return error.AlreadyExternal;
+        if (self.pending_outbound != null) return error.Busy;
+
+        const outcome = client_external_mode.transition(
+            self.allocator,
+            self.fd,
+            .{
+                .context = ops.context,
+                .get_flags = ops.get_flags,
+                .set_flags = ops.set_flags,
+            },
+        ) catch return error.OutOfMemory;
+        switch (outcome) {
+            .external => |state| self.io_mode = .{ .external = state },
+            .flag_failed => return error.FlagFailed,
+            .invalid_blocking_flags, .indeterminate => {
+                self.invalidateConnectionWithOps(ops);
+                return error.ConnectionClosed;
+            },
+        }
+    }
+
+    fn clearExternalModeStorage(self: *Client) void {
+        switch (self.io_mode) {
+            .blocking => {},
+            .external => |*state| state.deinit(self.allocator),
+        }
+        self.io_mode = .blocking;
     }
 
     const RpcIo = union(enum) {
@@ -660,7 +716,7 @@ pub const Client = struct {
         params_json: ?[]const u8,
         io: RpcIo,
     ) DeadlineClientError![]u8 {
-        try self.ensureUsable();
+        try self.requireBlockingMode();
         // non-blocking input이 backpressure로 일부만 전송됐어도 뒤 request가 wire에서 추월하면 안 된다.
         try self.flushPendingOutboundBlocking();
         const frame_bytes = try self.buildRequestFrame(method, params_json);
@@ -675,7 +731,7 @@ pub const Client = struct {
         deadline: client_deadline.AbsoluteDeadline,
         ops: client_deadline.Ops,
     ) DeadlineClientError![]u8 {
-        try self.ensureUsable();
+        try self.requireBlockingMode();
         // The pre-raw attach path never owns GUI's queued fire-and-forget frame. Blocking here
         // would escape the phase budget and reordering it would violate the Client wire SSOT.
         if (self.pending_outbound != null) {
@@ -818,7 +874,7 @@ pub const Client = struct {
     /// Publication gates use it so a response coalesced with an authority revoke cannot publish
     /// stale controller state.
     pub fn refreshBufferedAuthorityEvidence(self: *Client) ClientError!void {
-        try self.ensureUsable();
+        try self.requireBlockingMode();
         while (self.parser.bufferState() == .complete_or_error) {
             const maybe = self.parser.next() catch |err| {
                 self.invalidateConnection();
@@ -840,6 +896,7 @@ pub const Client = struct {
     /// 절대 반환하지 않고 typed unavailable로 강등한다. Recovery projection의 malformed response는 canonical exact
     /// manifest attach가 같은 adapter에서 계속 가능하도록 connection 전체를 poison하지 않는다.
     pub fn runtimeInventory(self: *Client) ClientError!RuntimeInventory {
+        try self.requireBlockingMode();
         var consumed: u8 = 0;
         return self.runtimeInventoryBounded(protocol.max_inventory_pages, &consumed);
     }
@@ -849,6 +906,7 @@ pub const Client = struct {
         max_pages: usize,
         consumed: *u8,
     ) ClientError!RuntimeInventory {
+        try self.requireBlockingMode();
         consumed.* = 0;
         if (!self.runtime_inventory_v1) return .{ .unavailable = .{ .reason = .unsupported, .page_count = 0 } };
         var ids: std.ArrayListUnmanaged(u128) = .empty;
@@ -955,6 +1013,7 @@ pub const Client = struct {
     };
 
     pub fn prepareUpgrade(self: *Client, request: upgrade_wire.PrepareRequest) ClientError!PrepareUpgradeOutcome {
+        try self.requireBlockingMode();
         if (!self.host_exec_upgrade_v1) return error.IncompatibleVersion;
         var out: std.Io.Writer.Allocating = .init(self.allocator);
         defer out.deinit();
@@ -988,6 +1047,7 @@ pub const Client = struct {
     }
 
     pub fn upgradeStatus(self: *Client, attempt_id: u128) ClientError!?upgrade_wire.AttemptReport {
+        try self.requireBlockingMode();
         var attempt_buf: [32]u8 = undefined;
         const attempt = std.fmt.bufPrint(&attempt_buf, "{x:0>32}", .{attempt_id}) catch
             return error.ProtocolError;
@@ -1039,7 +1099,7 @@ pub const Client = struct {
         deadline: client_deadline.AbsoluteDeadline,
         ops: client_deadline.Ops,
     ) DeadlineClientError![]u8 {
-        try self.ensureUsable();
+        try self.requireBlockingMode();
         const saved_flags = ops.get_flags(ops.context, self.fd) orelse {
             self.invalidateConnectionWithOps(ops);
             return error.ConnectionClosed;
@@ -1074,7 +1134,7 @@ pub const Client = struct {
         stream_id: u64,
         io: StreamIo,
     ) DeadlineClientError![]u8 {
-        try self.ensureUsable();
+        try self.requireBlockingMode();
         var attempts: usize = 0;
         while (true) {
             if (try self.readStreamBatchWithIo(self.allocator, stream_id, io)) |batch| {
@@ -1122,7 +1182,7 @@ pub const Client = struct {
         want_stream_id: u64,
         io: StreamIo,
     ) DeadlineClientError!?StreamBatch {
-        try self.ensureUsable();
+        try self.requireBlockingMode();
         // 1) 이 stream 앞으로 이미 버퍼된 배치(다른 runtime의 pump가 소켓을 비우며 넣어 둔 것)를 도착 순서대로 먼저 준다.
         for (self.pending_batches.items, 0..) |b, i| {
             if (b.stream_id == want_stream_id) {
@@ -1552,7 +1612,7 @@ pub const Client = struct {
     /// terminal input bytes를 attach된 `stream_id`로 보낸다(§9 `input_bytes` — 응답 없는 fire-and-forget). controller만
     /// 유효하고, host는 비controller/미attach stream의 input을 조용히 버린다. attach 응답의 stream_id를 그대로 쓴다.
     pub fn sendInput(self: *Client, stream_id: u64, bytes: []const u8) ClientError!void {
-        try self.ensureUsable();
+        try self.requireBlockingMode();
         // 앞 tick의 non-blocking frame부터 끝낸 뒤 새 blocking input을 쓴다. 같은 stream뿐 아니라 connection을 공유하는
         // 여러 runtime 사이에서도 실제 socket write 순서를 보존한다.
         try self.flushPendingOutboundBlocking();
@@ -1582,7 +1642,7 @@ pub const Client = struct {
     /// 소유권을 인수한 payload 바이트 수다. 기존 pending frame이 아직 막혀 있으면 0, 새 frame을 pending 슬롯에 넣었으면
     /// DONTWAIT flush가 0/partial/full 어느 경우든 그 payload 길이를 반환한다 — caller가 동일 입력을 재전송하지 않게 한다.
     pub fn sendInputNonBlocking(self: *Client, stream_id: u64, bytes: []const u8) ClientError!usize {
-        try self.ensureUsable();
+        try self.requireBlockingMode();
 
         // 기존 frame을 먼저 밀어 FIFO를 지킨다. 여전히 막혔으면 새 payload는 caller가 계속 소유한다.
         if (!(try self.pumpPendingOutput())) return 0;
@@ -1606,7 +1666,7 @@ pub const Client = struct {
     /// outbound 슬롯에 admission한다. true면 frame 소유권을 인수했고, false면 기존 frame이 backpressure로
     /// 남아 caller가 stream-local sticky intent를 유지해야 한다. 구 host에는 절대 동기 RPC fallback하지 않는다.
     pub fn sendScrollToBottomNonBlocking(self: *Client, stream_id: u64) ClientError!bool {
-        try self.ensureUsable();
+        try self.requireBlockingMode();
         if (!self.async_scroll_to_bottom_v1) return false;
         if (!(try self.pumpPendingOutput())) return false;
         const frame = framing.encodeFrame(
@@ -1623,7 +1683,7 @@ pub const Client = struct {
     /// Coalesced invalidation recovery control for the UI frame pump. It shares the one bounded
     /// pending outbound slot with input/core commands and never waits for a response.
     pub fn sendResyncNonBlocking(self: *Client, stream_id: u64) ClientError!bool {
-        try self.ensureUsable();
+        try self.requireBlockingMode();
         if (!(try self.pumpPendingOutput())) return false;
         const frame = framing.encodeFrame(
             self.allocator,
@@ -1639,7 +1699,7 @@ pub const Client = struct {
     /// host core command JSON을 응답 없는 stream frame으로 admission한다. true면 Client가 frame 소유권을
     /// 인수했고, false면 기존 outbound frame의 backpressure 때문에 caller가 bounded sticky queue에서 재시도해야 한다.
     pub fn sendCoreCommandNonBlocking(self: *Client, stream_id: u64, payload: []const u8) ClientError!bool {
-        try self.ensureUsable();
+        try self.requireBlockingMode();
         if (!self.runtime_core_command_v1) return false;
         if (!(try self.pumpPendingOutput())) return false;
         const frame = framing.encodeFrame(
@@ -1656,7 +1716,7 @@ pub const Client = struct {
     /// 이미 RemoteRuntime의 ordered input FIFO가 소유한 scroll barrier를 후속 blocking RPC보다 먼저 보낸다.
     /// `call`과 마찬가지로 기존 nonblocking frame을 먼저 끝내므로 connection wire 순서는 보존된다.
     pub fn sendScrollToBottom(self: *Client, stream_id: u64) ClientError!void {
-        try self.ensureUsable();
+        try self.requireBlockingMode();
         if (!self.async_scroll_to_bottom_v1) return;
         try self.flushPendingOutboundBlocking();
         const frame = framing.encodeFrame(
@@ -1674,7 +1734,7 @@ pub const Client = struct {
     /// RemoteRuntime의 ordered queue를 뒤따르는 blocking RPC 직전에 남은 core frame을 전량 보낸다. 응답은 없지만
     /// 기존 pending frame을 먼저 끝내므로 connection wire FIFO를 보존한다.
     pub fn sendCoreCommand(self: *Client, stream_id: u64, payload: []const u8) ClientError!void {
-        try self.ensureUsable();
+        try self.requireBlockingMode();
         if (!self.runtime_core_command_v1) return;
         try self.flushPendingOutboundBlocking();
         const frame = framing.encodeFrame(
@@ -1713,7 +1773,7 @@ pub const Client = struct {
     /// backpressure라 false이며, 다른 오류는 partial frame 뒤 framing 복구가 불가능하므로 connection을 닫는다. Darwin은
     /// MSG_DONTWAIT만으로 blocking socket의 send가 멈추는 동작이 보장되지 않아 helper가 호출 구간에 O_NONBLOCK도 함께 건다.
     pub fn pumpPendingOutput(self: *Client) ClientError!bool {
-        try self.ensureUsable();
+        try self.requireBlockingMode();
         while (self.pending_outbound) |*pending| {
             const remaining = pending.frame[pending.offset..];
             switch (try self.sendDontWait(remaining)) {
@@ -1736,7 +1796,8 @@ pub const Client = struct {
     /// Revoke may race a frame already admitted by a previous UI turn. A zero-byte frame can be
     /// removed without changing the wire; a partial frame cannot be truncated without corrupting
     /// framing and requires connection fail-close. Another stream's frame is unrelated and stays.
-    pub fn fenceRevokedStream(self: *Client, stream_id: u64) RevokeFence {
+    pub fn fenceRevokedStream(self: *Client, stream_id: u64) ClientError!RevokeFence {
+        try self.requireBlockingMode();
         const pending = self.pending_outbound orelse return .no_pending_stream_frame;
         if (pending.stream_id != stream_id) return .no_pending_stream_frame;
         if (pending.offset != 0) return .partial_frame_requires_close;
@@ -1896,6 +1957,11 @@ pub const Client = struct {
         if (self.unusable) return error.ConnectionClosed;
     }
 
+    fn requireBlockingMode(self: *const Client) ClientError!void {
+        try self.ensureUsable();
+        if (self.io_mode == .external) return error.ExternalMode;
+    }
+
     fn invalidateConnection(self: *Client) void {
         if (self.poisonAndTakeFd()) |fd| _ = c.close(fd);
     }
@@ -1908,6 +1974,7 @@ pub const Client = struct {
         // pending frame은 connection 소유 메모리다. 이미 unusable이어도 deinit 전 명시 invalidate가 재진입할 수 있으므로
         // 항상 회수 helper를 거친다. fd를 먼저 Client에서 떼어낸 뒤 정확히 한 close strategy만 실행한다.
         self.clearPendingOutbound();
+        self.clearExternalModeStorage();
         if (self.unusable) return null;
         self.unusable = true;
         if (self.fd < 0) return null;
@@ -2839,12 +2906,12 @@ test "client revoke fence cancels only zero-byte frame for the revoked stream" {
     defer client.deinit();
     try std.testing.expectEqual(
         Client.RevokeFence.no_pending_stream_frame,
-        client.fenceRevokedStream(8),
+        try client.fenceRevokedStream(8),
     );
     try std.testing.expect(client.pending_outbound != null);
     try std.testing.expectEqual(
         Client.RevokeFence.cancelled_before_write,
-        client.fenceRevokedStream(7),
+        try client.fenceRevokedStream(7),
     );
     try std.testing.expect(client.pending_outbound == null);
 
@@ -2855,7 +2922,7 @@ test "client revoke fence cancels only zero-byte frame for the revoked stream" {
     };
     try std.testing.expectEqual(
         Client.RevokeFence.partial_frame_requires_close,
-        client.fenceRevokedStream(7),
+        try client.fenceRevokedStream(7),
     );
     try std.testing.expect(client.pending_outbound != null);
 }
@@ -3782,7 +3849,10 @@ const ConnectedSocketFixture = struct {
     max_read: usize = 3,
     max_write: usize = 5,
     close_calls: usize = 0,
+    get_flags_calls: usize = 0,
     set_flags_calls: usize = 0,
+    fail_get_at_call: ?usize = null,
+    fail_first_set_after_mutation: bool = false,
     fail_restore_flags: bool = false,
     clock_now_ns: i128 = 0,
     advance_on_restore_ns: i128 = 0,
@@ -3800,6 +3870,7 @@ const ConnectedSocketFixture = struct {
         result.read = read;
         result.write = write;
         result.close = close;
+        result.get_flags = getFlags;
         result.set_flags = setFlags;
         return result;
     }
@@ -3851,9 +3922,27 @@ const ConnectedSocketFixture = struct {
         _ = c.close(fd);
     }
 
+    fn getFlags(ctx: *anyopaque, fd: c.fd_t) ?c_int {
+        const self = cast(ctx);
+        self.get_flags_calls += 1;
+        if (self.fail_get_at_call == self.get_flags_calls) return null;
+        return client_deadline.posix_ops.get_flags(
+            client_deadline.posix_ops.context,
+            fd,
+        );
+    }
+
     fn setFlags(ctx: *anyopaque, fd: c.fd_t, flags: c_int) bool {
         const self = cast(ctx);
         self.set_flags_calls += 1;
+        if (self.fail_first_set_after_mutation and self.set_flags_calls == 1) {
+            _ = client_deadline.posix_ops.set_flags(
+                client_deadline.posix_ops.context,
+                fd,
+                flags,
+            );
+            return false;
+        }
         if (self.fail_restore_flags and self.set_flags_calls == 2) return false;
         if (self.set_flags_calls == 2) self.clock_now_ns += self.advance_on_restore_ns;
         return client_deadline.posix_ops.set_flags(
@@ -3863,6 +3952,457 @@ const ConnectedSocketFixture = struct {
         );
     }
 };
+
+fn makeConnectedTestClient(
+    allocator: std.mem.Allocator,
+    fd: c.fd_t,
+) Client {
+    return .{
+        .allocator = allocator,
+        .fd = fd,
+        .host_id = 1,
+        .wire_major = protocol.version_major,
+        .parser = framing.FrameParser.init(allocator),
+    };
+}
+
+fn recvTimeout(fd: c.fd_t) !posix.timeval {
+    var value = std.mem.zeroes(posix.timeval);
+    var len: c.socklen_t = @sizeOf(posix.timeval);
+    if (c.getsockopt(
+        fd,
+        c.SOL.SOCKET,
+        c.SO.RCVTIMEO,
+        &value,
+        &len,
+    ) != 0 or len != @sizeOf(posix.timeval)) return error.UnexpectedSocketOption;
+    return value;
+}
+
+test "external mode prechecks perform no allocation or fd inspection" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+
+    var unusable = makeConnectedTestClient(std.testing.allocator, -1);
+    defer unusable.deinit();
+    unusable.unusable = true;
+    var unusable_fixture = ConnectedSocketFixture{ .fd = -1 };
+    try std.testing.expectError(
+        error.ConnectionClosed,
+        unusable.enterExternalModeWithOps(unusable_fixture.ops()),
+    );
+    try std.testing.expectEqual(@as(usize, 0), unusable_fixture.get_flags_calls);
+    try std.testing.expectEqual(@as(usize, 0), unusable_fixture.set_flags_calls);
+
+    var fds: [2]c.fd_t = undefined;
+    try std.testing.expectEqual(
+        @as(c_int, 0),
+        c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds),
+    );
+    defer _ = c.close(fds[1]);
+    var external = makeConnectedTestClient(std.testing.allocator, fds[0]);
+    defer external.deinit();
+    var external_fixture = ConnectedSocketFixture{ .fd = fds[0] };
+    try external.enterExternalModeWithOps(external_fixture.ops());
+    external_fixture.get_flags_calls = 0;
+    external_fixture.set_flags_calls = 0;
+    try std.testing.expectError(
+        error.AlreadyExternal,
+        external.enterExternalModeWithOps(external_fixture.ops()),
+    );
+    try std.testing.expectEqual(@as(usize, 0), external_fixture.get_flags_calls);
+    try std.testing.expectEqual(@as(usize, 0), external_fixture.set_flags_calls);
+
+    var failing = testing.FailingAllocator.init(std.testing.allocator, .{});
+    const allocator = failing.allocator();
+    var busy = makeConnectedTestClient(allocator, -1);
+    defer busy.deinit();
+    busy.pending_outbound = .{
+        .frame = try allocator.dupe(u8, "pending"),
+        .stream_id = 7,
+    };
+    failing.fail_index = failing.alloc_index;
+    var busy_fixture = ConnectedSocketFixture{ .fd = -1 };
+    try std.testing.expectError(
+        error.Busy,
+        busy.enterExternalModeWithOps(busy_fixture.ops()),
+    );
+    try std.testing.expect(!failing.has_induced_failure);
+    try std.testing.expectEqual(@as(usize, 0), busy_fixture.get_flags_calls);
+    try std.testing.expectEqual(@as(usize, 0), busy_fixture.set_flags_calls);
+    busy.pending_outbound.?.offset = 1;
+    try std.testing.expectError(
+        error.Busy,
+        busy.enterExternalModeWithOps(busy_fixture.ops()),
+    );
+    try std.testing.expect(!failing.has_induced_failure);
+}
+
+fn checkClientExternalModeAllocation(allocator: std.mem.Allocator) !void {
+    var fds: [2]c.fd_t = undefined;
+    try std.testing.expectEqual(
+        @as(c_int, 0),
+        c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds),
+    );
+    defer _ = c.close(fds[1]);
+    var client = makeConnectedTestClient(allocator, fds[0]);
+    defer client.deinit();
+    const flags_before = c.fcntl(fds[0], c.F.GETFL);
+    client.enterExternalMode() catch |err| {
+        try std.testing.expectEqual(flags_before, c.fcntl(fds[0], c.F.GETFL));
+        return err;
+    };
+}
+
+test "client external mode is reusable at every allocation failure" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        checkClientExternalModeAllocation,
+        .{},
+    );
+}
+
+test "external mode flag inspection failure is reusable and unexpected nonblocking closes" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var inspect_fds: [2]c.fd_t = undefined;
+    try std.testing.expectEqual(
+        @as(c_int, 0),
+        c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &inspect_fds),
+    );
+    defer _ = c.close(inspect_fds[1]);
+    var inspect_client = makeConnectedTestClient(std.testing.allocator, inspect_fds[0]);
+    defer inspect_client.deinit();
+    var inspect_fixture = ConnectedSocketFixture{
+        .fd = inspect_fds[0],
+        .fail_get_at_call = 1,
+    };
+    try std.testing.expectError(
+        error.FlagFailed,
+        inspect_client.enterExternalModeWithOps(inspect_fixture.ops()),
+    );
+    try std.testing.expect(!inspect_client.unusable);
+    try std.testing.expectEqual(@as(usize, 0), inspect_fixture.close_calls);
+    try std.testing.expectEqual(@as(usize, 0), inspect_fixture.set_flags_calls);
+
+    var nonblocking_fds: [2]c.fd_t = undefined;
+    try std.testing.expectEqual(
+        @as(c_int, 0),
+        c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &nonblocking_fds),
+    );
+    defer _ = c.close(nonblocking_fds[1]);
+    const before = c.fcntl(nonblocking_fds[0], c.F.GETFL);
+    try std.testing.expect(before >= 0);
+    try std.testing.expectEqual(
+        @as(c_int, 0),
+        c.fcntl(
+            nonblocking_fds[0],
+            c.F.SETFL,
+            before | @as(c_int, @bitCast(posix.O{ .NONBLOCK = true })),
+        ),
+    );
+    var nonblocking_client = makeConnectedTestClient(std.testing.allocator, nonblocking_fds[0]);
+    defer nonblocking_client.deinit();
+    var nonblocking_fixture = ConnectedSocketFixture{ .fd = nonblocking_fds[0] };
+    try std.testing.expectError(
+        error.ConnectionClosed,
+        nonblocking_client.enterExternalModeWithOps(nonblocking_fixture.ops()),
+    );
+    try std.testing.expect(nonblocking_client.unusable);
+    try std.testing.expectEqual(@as(usize, 1), nonblocking_fixture.close_calls);
+    try std.testing.expectEqual(@as(usize, 0), nonblocking_fixture.set_flags_calls);
+}
+
+test "external mode rejects every legacy socket entry without wire mutation" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fds: [2]c.fd_t = undefined;
+    try std.testing.expectEqual(
+        @as(c_int, 0),
+        c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds),
+    );
+    defer _ = c.close(fds[1]);
+    var failing = testing.FailingAllocator.init(std.testing.allocator, .{});
+    const allocator = failing.allocator();
+    var client = makeConnectedTestClient(allocator, fds[0]);
+    defer client.deinit();
+    client.runtime_inventory_v1 = true;
+    client.host_exec_upgrade_v1 = true;
+    client.async_scroll_to_bottom_v1 = true;
+    client.runtime_core_command_v1 = true;
+    var fixture = ConnectedSocketFixture{ .fd = fds[0] };
+    try client.enterExternalModeWithOps(fixture.ops());
+    failing.fail_index = failing.alloc_index;
+    fixture.get_flags_calls = 0;
+    fixture.set_flags_calls = 0;
+    const parser_len = client.parser.buf.items.len;
+    const next_request_id = client.next_request_id;
+    const capabilities = client.attachment_capabilities;
+    const deadline = client_deadline.AbsoluteDeadline.fromInjected(
+        .{ .context = &fixture, .now_ns = ConnectedSocketFixture.clock },
+        1_000_000,
+    );
+
+    try std.testing.expectError(error.ExternalMode, client.call("host.info", null));
+    try std.testing.expectError(error.ExternalMode, client.callUntil("host.info", null, deadline));
+    try std.testing.expectError(error.ExternalMode, client.requireAdminRuntimeEnd());
+    try std.testing.expectError(error.ExternalMode, client.refreshBufferedAuthorityEvidence());
+    try std.testing.expectError(error.ExternalMode, client.runtimeInventory());
+    var consumed: u8 = 99;
+    try std.testing.expectError(error.ExternalMode, client.runtimeInventoryBounded(1, &consumed));
+    try std.testing.expectEqual(@as(u8, 99), consumed);
+    try std.testing.expectError(error.ExternalMode, client.prepareUpgrade(.{
+        .attempt_id = 1,
+        .target_path = "/tmp/maru",
+        .target_build_id = "build",
+        .target_sha256 = [_]u8{0} ** 32,
+        .handoff_reader_min = 1,
+        .handoff_reader_max = 1,
+    }));
+    try std.testing.expectError(error.ExternalMode, client.upgradeStatus(1));
+    try std.testing.expectError(error.ExternalMode, client.readSnapshot(7));
+    try std.testing.expectError(error.ExternalMode, client.readSnapshotUntil(7, deadline));
+    try std.testing.expectError(
+        error.ExternalMode,
+        client.readStreamBatch(allocator, 7),
+    );
+    try std.testing.expectError(error.ExternalMode, client.sendInput(7, "x"));
+    try std.testing.expectError(error.ExternalMode, client.sendInputNonBlocking(7, "x"));
+    try std.testing.expectError(error.ExternalMode, client.sendScrollToBottomNonBlocking(7));
+    try std.testing.expectError(error.ExternalMode, client.sendResyncNonBlocking(7));
+    try std.testing.expectError(error.ExternalMode, client.sendCoreCommandNonBlocking(7, "{}"));
+    try std.testing.expectError(error.ExternalMode, client.sendScrollToBottom(7));
+    try std.testing.expectError(error.ExternalMode, client.sendCoreCommand(7, "{}"));
+    try std.testing.expectError(error.ExternalMode, client.pumpPendingOutput());
+    try std.testing.expectError(error.ExternalMode, client.fenceRevokedStream(7));
+    try std.testing.expect(!failing.has_induced_failure);
+    try std.testing.expectEqual(@as(usize, 0), fixture.get_flags_calls);
+    try std.testing.expectEqual(@as(usize, 0), fixture.set_flags_calls);
+    try std.testing.expectEqual(parser_len, client.parser.buf.items.len);
+    try std.testing.expectEqual(next_request_id, client.next_request_id);
+    try std.testing.expectEqual(capabilities, client.attachment_capabilities);
+    try std.testing.expectEqual(@as(usize, 0), client.pending_stream.items.len);
+    try std.testing.expectEqual(@as(usize, 0), client.pending_events.items.len);
+    try std.testing.expectEqual(@as(usize, 0), client.pending_batches.items.len);
+    switch (client.io_mode) {
+        .blocking => return error.TestUnexpectedResult,
+        .external => |state| {
+            try std.testing.expectEqual(@as(usize, 0), state.external_tx.items.len);
+            try std.testing.expectEqual(@as(usize, 0), state.external_tx_bytes);
+            try std.testing.expectEqual(@as(?client_external_mode.InFlightControl, null), state.in_flight_control);
+        },
+    }
+
+    const peer_flags = c.fcntl(fds[1], c.F.GETFL);
+    try std.testing.expect(peer_flags >= 0);
+    try std.testing.expectEqual(
+        @as(c_int, 0),
+        c.fcntl(fds[1], c.F.SETFL, peer_flags | @as(c_int, @bitCast(posix.O{ .NONBLOCK = true }))),
+    );
+    var byte: [1]u8 = undefined;
+    try std.testing.expectEqual(@as(isize, -1), c.read(fds[1], &byte, byte.len));
+}
+
+test "external mode real socket preserves flags and receive timeout then deinit yields EOF" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fds: [2]c.fd_t = undefined;
+    try std.testing.expectEqual(
+        @as(c_int, 0),
+        c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds),
+    );
+    defer _ = c.close(fds[1]);
+    setReadTimeoutMs(fds[0], 1234);
+    const flags_before = c.fcntl(fds[0], c.F.GETFL);
+    try std.testing.expect(flags_before >= 0);
+    const timeout_before = try recvTimeout(fds[0]);
+    var client = makeConnectedTestClient(std.testing.allocator, fds[0]);
+    try client.enterExternalMode();
+    const flags_after = c.fcntl(fds[0], c.F.GETFL);
+    const nonblocking: c_int = @bitCast(posix.O{ .NONBLOCK = true });
+    try std.testing.expectEqual(flags_before | nonblocking, flags_after);
+    const timeout_after = try recvTimeout(fds[0]);
+    try std.testing.expectEqualSlices(
+        u8,
+        std.mem.asBytes(&timeout_before),
+        std.mem.asBytes(&timeout_after),
+    );
+    client.deinit();
+    var byte: [1]u8 = undefined;
+    try std.testing.expectEqual(@as(isize, 0), c.read(fds[1], &byte, byte.len));
+}
+
+test "external mode indeterminate rollback closes exactly once" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fds: [2]c.fd_t = undefined;
+    try std.testing.expectEqual(
+        @as(c_int, 0),
+        c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds),
+    );
+    defer _ = c.close(fds[1]);
+    var client = makeConnectedTestClient(std.testing.allocator, fds[0]);
+    defer client.deinit();
+    var fixture = ConnectedSocketFixture{
+        .fd = fds[0],
+        .fail_first_set_after_mutation = true,
+        .fail_restore_flags = true,
+    };
+    try std.testing.expectError(
+        error.ConnectionClosed,
+        client.enterExternalModeWithOps(fixture.ops()),
+    );
+    try std.testing.expect(client.unusable);
+    try std.testing.expectEqual(@as(c.fd_t, -1), client.fd);
+    try std.testing.expectEqual(@as(usize, 1), fixture.close_calls);
+    try std.testing.expectError(
+        error.ConnectionClosed,
+        client.enterExternalModeWithOps(fixture.ops()),
+    );
+    try std.testing.expectEqual(@as(usize, 1), fixture.close_calls);
+    var byte: [1]u8 = undefined;
+    try std.testing.expectEqual(@as(isize, 0), c.read(fds[1], &byte, byte.len));
+}
+
+const PreservationTransition = enum { success, initial_get_failure, exact_rollback };
+
+fn checkExternalModePreservesClientState(transition: PreservationTransition) !void {
+    const allocator = std.testing.allocator;
+    var fds: [2]c.fd_t = undefined;
+    try std.testing.expectEqual(
+        @as(c_int, 0),
+        c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds),
+    );
+    defer _ = c.close(fds[1]);
+    var client = makeConnectedTestClient(allocator, fds[0]);
+    defer client.deinit();
+    try client.parser.push("MRSH-partial");
+    client.next_request_id = 91;
+    client.host_manifest_v1 = true;
+    client.attachment_capabilities.negotiated_controller_transfer = true;
+    const stream_payload = try allocator.dupe(u8, "stream");
+    try client.pending_stream.append(allocator, .{
+        .header = .{
+            .kind = .delta_chunk,
+            .stream_id = 7,
+            .payload_len = @intCast(stream_payload.len),
+        },
+        .payload = stream_payload,
+    });
+    client.pending_stream_bytes = stream_payload.len;
+    const event_payload = try allocator.dupe(u8, "event");
+    try client.pending_events.append(allocator, .{
+        .header = .{
+            .kind = .event,
+            .stream_id = 7,
+            .payload_len = @intCast(event_payload.len),
+        },
+        .payload = event_payload,
+    });
+    client.pending_event_bytes = event_payload.len;
+    const batch_payload = try allocator.dupe(u8, "batch");
+    try client.pending_batches.append(allocator, .{
+        .is_snapshot = false,
+        .stream_id = 7,
+        .bytes = batch_payload,
+    });
+    client.pending_batch_bytes = batch_payload.len;
+    var partial_bytes: std.ArrayListUnmanaged(u8) = .empty;
+    try partial_bytes.appendSlice(allocator, "partial-batch");
+    client.partial_batch = .{
+        .stream_id = 7,
+        .is_snapshot = false,
+        .bytes = partial_bytes,
+        .chunk_count = 3,
+    };
+
+    const parser_bytes = try allocator.dupe(u8, client.parser.buf.items);
+    defer allocator.free(parser_bytes);
+    const stream_ptr = client.pending_stream.items[0].payload.ptr;
+    const event_ptr = client.pending_events.items[0].payload.ptr;
+    const batch_ptr = client.pending_batches.items[0].bytes.ptr;
+    const partial_ptr = client.partial_batch.?.bytes.items.ptr;
+    var fixture = ConnectedSocketFixture{
+        .fd = fds[0],
+        .fail_get_at_call = if (transition == .initial_get_failure) 1 else null,
+        .fail_first_set_after_mutation = transition == .exact_rollback,
+    };
+    switch (transition) {
+        .success => try client.enterExternalModeWithOps(fixture.ops()),
+        .initial_get_failure, .exact_rollback => try std.testing.expectError(
+            error.FlagFailed,
+            client.enterExternalModeWithOps(fixture.ops()),
+        ),
+    }
+
+    try std.testing.expectEqualSlices(u8, parser_bytes, client.parser.buf.items);
+    try std.testing.expectEqual(@as(usize, 0), client.parser.head);
+    try std.testing.expectEqual(@as(u64, 91), client.next_request_id);
+    try std.testing.expect(client.host_manifest_v1);
+    try std.testing.expect(client.attachment_capabilities.negotiated_controller_transfer);
+    try std.testing.expectEqual(stream_ptr, client.pending_stream.items[0].payload.ptr);
+    try std.testing.expectEqual(event_ptr, client.pending_events.items[0].payload.ptr);
+    try std.testing.expectEqual(batch_ptr, client.pending_batches.items[0].bytes.ptr);
+    try std.testing.expectEqual(partial_ptr, client.partial_batch.?.bytes.items.ptr);
+    try std.testing.expectEqual(@as(usize, 3), client.partial_batch.?.chunk_count);
+    try std.testing.expect(!client.unusable);
+    switch (transition) {
+        .success => try std.testing.expect(client.io_mode == .external),
+        .initial_get_failure, .exact_rollback => try std.testing.expect(client.io_mode == .blocking),
+    }
+}
+
+test "external mode preserves parser queues request id and capabilities on success and rollback" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    try checkExternalModePreservesClientState(.success);
+    try checkExternalModePreservesClientState(.initial_get_failure);
+    try checkExternalModePreservesClientState(.exact_rollback);
+}
+
+test "external mode failClosed reclaims queued frames and control state exactly once" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    var fds: [2]c.fd_t = undefined;
+    try std.testing.expectEqual(
+        @as(c_int, 0),
+        c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds),
+    );
+    defer _ = c.close(fds[1]);
+    var client = makeConnectedTestClient(allocator, fds[0]);
+    defer client.deinit();
+    var fixture = ConnectedSocketFixture{ .fd = fds[0] };
+    try client.enterExternalModeWithOps(fixture.ops());
+    const deadline = client_deadline.AbsoluteDeadline.fromInjected(
+        .{ .context = &fixture, .now_ns = ConnectedSocketFixture.clock },
+        10,
+    );
+    switch (client.io_mode) {
+        .blocking => return error.TestUnexpectedResult,
+        .external => |*state| {
+            state.external_tx.appendAssumeCapacity(.{
+                .bytes = try allocator.dupe(u8, "zero"),
+                .kind = .input_bytes,
+                .stream_id = 7,
+                .request_id = 0,
+                .activated_at_ns = 1,
+                .last_progress_at_ns = 1,
+            });
+            state.external_tx.appendAssumeCapacity(.{
+                .bytes = try allocator.dupe(u8, "partial"),
+                .offset = 1,
+                .kind = .request,
+                .stream_id = 7,
+                .request_id = 8,
+                .activated_at_ns = 2,
+                .last_progress_at_ns = 3,
+            });
+            state.external_tx_bytes = 11;
+            state.in_flight_control = .{ .request_id = 8, .deadline = deadline };
+        },
+    }
+    client.failClosed();
+    client.failClosed();
+    try std.testing.expect(client.unusable);
+    try std.testing.expectEqual(@as(c.fd_t, -1), client.fd);
+    var byte: [1]u8 = undefined;
+    try std.testing.expectEqual(@as(isize, 0), c.read(fds[1], &byte, byte.len));
+}
 
 const full_hello_ack_payload =
     \\{"version":2,"host_id":"00000000000000000000000000000001","build_id":"build","lifecycle":"ready","upgrade_epoch":1,"screen_codec_version":2,"capabilities":["host_manifest_v1"]}

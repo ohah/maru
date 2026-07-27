@@ -621,7 +621,7 @@ pub const RemoteRuntime = struct {
                     };
                 };
                 self.discardQueuedMutations();
-                switch (self.client.fenceRevokedStream(self.attachment.streamId())) {
+                switch (try self.client.fenceRevokedStream(self.attachment.streamId())) {
                     .no_pending_stream_frame, .cancelled_before_write => {},
                     .partial_frame_requires_close => {
                         // A partial frame cannot be truncated without corrupting the shared wire.

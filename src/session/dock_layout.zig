@@ -35,19 +35,14 @@ pub const Geometry = struct {
     terminal: Rect,
     dock: Rect = .{ .x = 0, .y = 0, .w = 0, .h = 0 },
     divider: Rect = .{ .x = 0, .y = 0, .w = 0, .h = 0 },
-    /// 그룹 split tree가 차지하는 도크 좌측 영역. 우측 project tree와 독립이며 각 leaf가 자기 tab/header/content
-    /// chrome을 파생한다. 단일 그룹에서도 같은 함수를 써 렌더와 hit-test 좌표를 일치시킨다.
-    editor: Rect = .{ .x = 0, .y = 0, .w = 0, .h = 0 },
-    tab_bar: Rect = .{ .x = 0, .y = 0, .w = 0, .h = 0 },
-    header: Rect = .{ .x = 0, .y = 0, .w = 0, .h = 0 },
+    /// FP16: 도크에 남은 건 탐색기뿐이라 트리가 **도크 전체**다. 옛 `editor`/`tab_bar`/`header`/`content`
+    /// (그룹 split tree의 좌측 칼럼과 그 chrome)와 그 둘을 가르던 `tree_divider`는 대상이 사라져 없앴다 —
+    /// 파일 탭 바·헤더 밴드는 이제 워크스페이스 pane이 소유한다(§3.1).
     tree: Rect = .{ .x = 0, .y = 0, .w = 0, .h = 0 },
-    /// editor와 project tree 사이의 1px 시각 경계. hit target은 `treeDividerHitRect`가 별도로 넓힌다.
-    tree_divider: Rect = .{ .x = 0, .y = 0, .w = 0, .h = 0 },
     /// Artifact의 독립 탐색기 chrome. tree 전체 배경 안에서 제목 한 행과 실제 스크롤 rows를 분리해,
     /// 첫 project root가 제목처럼 보이거나 최근 파일에 밀리지 않게 한다.
     tree_header: Rect = .{ .x = 0, .y = 0, .w = 0, .h = 0 },
     tree_content: Rect = .{ .x = 0, .y = 0, .w = 0, .h = 0 },
-    content: Rect = .{ .x = 0, .y = 0, .w = 0, .h = 0 },
     dock_size_px: u32 = 0,
 };
 
@@ -71,46 +66,6 @@ pub const TabScroll = struct {
     eff_scroll: u32, // [0,max_scroll]로 clamp된 실제 스크롤(stale 요청값 자동 정정)
     max_scroll: u32, // 최대 스크롤(넘칠 때만 >0)
 };
-
-/// 도크 탭 바 가로 스크롤 메트릭의 단일 출처. 탭은 고정폭(default_tab_cols)이라 total>tab_cols면 넘쳐 스크롤한다.
-/// scroll_cols(요청값)를 [0,max]로 clamp하므로 창 크기·탭 수가 바뀌어 생긴 stale 값이 자동 정정된다(터미널
-/// barMetrics와 동형). 셀·탭 0이면 null(호출자가 탭 처리 건너뜀).
-pub fn dockTabScroll(tab_cols: u16, entry_count: usize, scroll_cols: u32) ?TabScroll {
-    if (tab_cols == 0 or entry_count == 0) return null;
-    const count: u32 = @intCast(@min(entry_count, std.math.maxInt(u16)));
-    const tab_width: u16 = default_tab_cols;
-    const total: u32 = count * @as(u32, tab_width);
-    const has_scroll = total > tab_cols;
-    const max_scroll: u32 = if (has_scroll) total - tab_cols else 0;
-    return .{
-        .tab_width = tab_width,
-        .has_scroll = has_scroll,
-        .eff_scroll = @min(scroll_cols, max_scroll),
-        .max_scroll = max_scroll,
-    };
-}
-
-/// cell-space 탭 레이아웃의 단일 출처. CoreText title/X와 px-space tabRect/tabCloseRect가 같은 결과를 쓴다. 탭은
-/// 고정폭이고 scroll_cols만큼 좌측으로 밀린다(넘칠 때만). 좌·우로 완전히 스크롤아웃된 탭은 null(호출자는 렌더에서
-/// continue, 히트테스트에서 miss). 부분 클립(좌단·우단 걸침)은 보이는 구간만 반환한다.
-pub fn tabCellLayout(tab_cols: u16, entry_count: usize, index: usize, scroll_cols: u32) ?TabCellLayout {
-    if (index >= entry_count) return null;
-    const ts = dockTabScroll(tab_cols, entry_count, scroll_cols) orelse return null;
-    const abs_start: u32 = @as(u32, @intCast(index)) * @as(u32, ts.tab_width);
-    // 화면 컬럼 = 절대 컬럼 - eff_scroll(saturating). 좌측 스크롤아웃은 0, 우측은 tab_cols clamp(tabbar.segCols와 동일).
-    const start_u32 = @min(abs_start -| ts.eff_scroll, @as(u32, tab_cols));
-    const end_u32 = @min((abs_start + ts.tab_width) -| ts.eff_scroll, @as(u32, tab_cols));
-    if (end_u32 <= start_u32) return null;
-    const start: u16 = @intCast(start_u32);
-    const end: u16 = @intCast(end_u32);
-    return .{
-        .start = start,
-        .end = end,
-        .title_start = @min(start +| 1, end),
-        .title_end = end -| 1,
-        .close_col = end - 1,
-    };
-}
 
 /// 헤더 우측의 읽기/소스 편집 토글+dirty 표시 영역. 경로는 이 rect 왼쪽까지만 그린다. 폭이 너무 좁으면
 /// 최소 6칸으로 줄여도 토글 hit target은 유지한다.
@@ -249,46 +204,6 @@ pub fn headerDirtyRect(header: Rect, cell_width_px: u32, external_change: bool) 
     return .{ .x = header.x + @as(u32, col) * cell_width_px, .y = header.y, .w = cell_width_px, .h = header.h };
 }
 
-pub fn tabMetrics(g: Geometry, cell_width_px: u32, entry_count: usize) ?TabMetrics {
-    if (cell_width_px == 0 or entry_count == 0 or g.tab_bar.w == 0) return null;
-    const cols: u16 = @intCast(@min(g.tab_bar.w / cell_width_px, @as(u32, std.math.maxInt(u16))));
-    if (cols < 1) return null;
-    const tab_cols = cols; // 접기 버튼은 titlebar 띠 우측 dock 토글로 일원화 — 탭바는 예약 없이 전폭.
-    const tab_width: u16 = default_tab_cols; // 고정폭 — 넘치면 축소 대신 가로 스크롤(dockTabScroll).
-    return .{ .cols = cols, .tab_cols = tab_cols, .tab_width = tab_width };
-}
-
-pub fn tabRect(g: Geometry, cell_width_px: u32, entry_count: usize, index: usize, scroll_cols: u32) ?Rect {
-    const m = tabMetrics(g, cell_width_px, entry_count) orelse return null;
-    const cell = tabCellLayout(m.tab_cols, entry_count, index, scroll_cols) orelse return null;
-    return .{ .x = g.tab_bar.x + @as(u32, cell.start) * cell_width_px, .y = g.tab_bar.y, .w = @as(u32, cell.end - cell.start) * cell_width_px, .h = g.tab_bar.h };
-}
-
-/// 탭 제목·hover·hit-test가 공유하는 닫기 영역. 한 칸 탭은 전체를 닫기 버튼으로 쓰고, 그보다 넓으면 우측
-/// 한 칸을 예약한다. tabRect 밖을 절대 벗어나지 않는다.
-pub fn tabCloseRect(g: Geometry, cell_width_px: u32, entry_count: usize, index: usize, scroll_cols: u32) ?Rect {
-    const m = tabMetrics(g, cell_width_px, entry_count) orelse return null;
-    const cell = tabCellLayout(m.tab_cols, entry_count, index, scroll_cols) orelse return null;
-    return .{ .x = g.tab_bar.x + @as(u32, cell.close_col) * cell_width_px, .y = g.tab_bar.y, .w = cell_width_px, .h = g.tab_bar.h };
-}
-
-pub fn tabCloseIndexAt(g: Geometry, cell_width_px: u32, entry_count: usize, x_px: f64, y_px: f64, scroll_cols: u32) ?usize {
-    const index = tabIndexAt(g, cell_width_px, entry_count, x_px, y_px, scroll_cols) orelse return null;
-    const r = tabCloseRect(g, cell_width_px, entry_count, index, scroll_cols) orelse return null;
-    return if (layout_math.pointInRect(x_px, y_px, r)) index else null;
-}
-
-pub fn tabIndexAt(g: Geometry, cell_width_px: u32, entry_count: usize, x_px: f64, y_px: f64, scroll_cols: u32) ?usize {
-    if (!layout_math.pointInRect(x_px, y_px, g.tab_bar)) return null;
-    const m = tabMetrics(g, cell_width_px, entry_count) orelse return null;
-    const ts = dockTabScroll(m.tab_cols, entry_count, scroll_cols) orelse return null;
-    const col: u32 = @intFromFloat((x_px - @as(f64, @floatFromInt(g.tab_bar.x))) / @as(f64, @floatFromInt(cell_width_px)));
-    if (col >= m.tab_cols) return null;
-    // 화면 컬럼 + eff_scroll = 절대 컬럼. 고정폭이므로 index = 절대 컬럼 / tab_width(tabCellLayout 역연산).
-    const index: usize = @intCast((col + ts.eff_scroll) / ts.tab_width);
-    return if (index < entry_count) index else null;
-}
-
 pub const Input = struct {
     backing_width_px: u32,
     backing_height_px: u32,
@@ -372,50 +287,21 @@ pub fn compute(in: Input) Geometry {
 }
 
 fn fromDock(workspace: Rect, terminal: Rect, dock: Rect, divider: Rect, chrome_h: u32, dock_size_px: u32, cell_width_px: u32, scale_milli: u32, tree_size_pt: u32) Geometry {
-    const tab_h = @min(chrome_h, dock.h);
-    const header_h = @min(chrome_h, dock.h -| tab_h);
-    const body_y = dock.y + tab_h + header_h;
-    const body_h = dock.h -| tab_h -| header_h;
-    const max_tree_w = dock.w -| min_editor_cols * cell_width_px;
-    const min_tree_w = min_tree_cols * cell_width_px;
-    const requested_tree_w = if (tree_size_pt == 0)
-        default_tree_cols * cell_width_px
-    else
-        layout_math.ptToPx(tree_size_pt, scale_milli);
-    const tree_w = if (max_tree_w < min_tree_w) 0 else std.math.clamp(requested_tree_w, min_tree_w, max_tree_w);
-    const content_w = dock.w -| tree_w;
-    // 탐색기(트리) 열은 에디터의 tab_bar+header 아래(body_y)가 아니라 **도크 최상단(dock.y)부터 전체 높이**로 둔다 —
-    // VSCode식으로 "탐색기" 헤더가 에디터 탭 바("파일명")·터미널과 같은 높이(띠 바로 아래)에 붙는다. 트리는 별도 열
-    // (x=dock.x+content_w)이라 에디터 chrome과 세로로 겹치지 않는다(사용자 피드백: 트리가 갭 없이 위로 올라와야).
+    _ = cell_width_px;
+    _ = scale_milli;
+    _ = tree_size_pt; // FP16: 도크 안에서 트리 폭을 따로 잡지 않는다 — 도크 폭이 곧 트리 폭이다(B-4에서 포맷도 정리).
+    // 탐색기 헤더("탐색기" 한 행)는 도크 최상단에 붙고, 그 아래가 스크롤되는 rows다.
     const tree_header_h = @min(chrome_h, dock.h);
     return .{
         .workspace = workspace,
         .terminal = terminal,
         .dock = dock,
         .divider = divider,
-        .editor = .{ .x = dock.x, .y = dock.y, .w = content_w, .h = dock.h },
-        // 단일 그룹의 기존 geometry도 FP8 editor 영역과 같게 둔다. 그래서 기존 single-group hit-test/테스트는
-        // byte-level 호출 형태를 유지하면서 project tree 위 빈 chrome을 잘못 클릭하지 않는다.
-        .tab_bar = .{ .x = dock.x, .y = dock.y, .w = content_w, .h = tab_h },
-        .header = .{ .x = dock.x, .y = dock.y + tab_h, .w = content_w, .h = header_h },
-        .tree = .{ .x = dock.x + content_w, .y = dock.y, .w = tree_w, .h = dock.h },
-        .tree_divider = .{ .x = dock.x + content_w, .y = dock.y, .w = @min(@as(u32, 1), tree_w), .h = dock.h },
-        .tree_header = .{ .x = dock.x + content_w, .y = dock.y, .w = tree_w, .h = tree_header_h },
-        .tree_content = .{ .x = dock.x + content_w, .y = dock.y + tree_header_h, .w = tree_w, .h = dock.h -| tree_header_h },
-        .content = .{ .x = dock.x, .y = body_y, .w = content_w, .h = body_h },
+        .tree = dock,
+        .tree_header = .{ .x = dock.x, .y = dock.y, .w = dock.w, .h = tree_header_h },
+        .tree_content = .{ .x = dock.x, .y = dock.y + tree_header_h, .w = dock.w, .h = dock.h -| tree_header_h },
         .dock_size_px = dock_size_px,
     };
-}
-
-/// 탐색기 열의 실제 1px 경계를 양쪽으로 넓힌 마우스 target. tree가 좁은 창에서 숨겨졌으면 빈 rect다.
-pub fn treeDividerHitRect(g: Geometry, hit_slop: u32) Rect {
-    if (g.tree_divider.w == 0 or g.tree_divider.h == 0) return .{ .x = 0, .y = 0, .w = 0, .h = 0 };
-    // 확장은 editor(WKWebView) 쪽만 넓힌다 — 그쪽은 WKWebView가 클릭을 삼켜 seam 통과 없이는 divider를 못 잡으므로.
-    // 탐색기(우측)는 네이티브 rows라 hit_slop만큼 넓히면 좌측에 붙은 파일명 첫 셀이 리사이즈에 가려 안 열린다
-    // → 우측은 divider 선(1px)까지만 잡고, 그 뒤 셀은 fileTreeRowAt으로 넘긴다.
-    const start = @max(g.dock.x, g.tree_divider.x -| hit_slop);
-    const end = @min(g.dock.x + g.dock.w, g.tree_divider.x +| g.tree_divider.w);
-    return .{ .x = start, .y = g.tree_divider.y, .w = end -| start, .h = g.tree_divider.h };
 }
 
 /// terminal↔dock 외곽 divider의 실제 mouse target. render 선보다 넓은 영역과 bottom 쪽 비대칭 정책을
@@ -437,14 +323,6 @@ pub fn outerDividerHitRect(g: Geometry, side: dock_panel.Side, hit_slop: u32) Re
     };
 }
 
-/// 탐색기 폭은 도크 side와 무관하게 항상 도크 오른쪽 경계에서 잰다. 포인터→pt 변환은 `sizePtForPointer` 단일
-/// 출처를 재사용해 outer-dock resize와 rounding·센티널·clamp 규약이 갈리지 않게 한다(측정 시점 두 곳 중복 제거).
-/// min/max clamp는 `compute`가 editor/tree 가독성 하한과 함께 단일 적용하므로, 호출자는 후보를 저장한 뒤 계산된
-/// 실효 폭을 다시 권위값으로 삼는다.
-pub fn treeSizePtForPointer(g: Geometry, x_px: f64, scale_milli: u32) ?u32 {
-    return sizePtForPointer(g, .right, x_px, 0, scale_milli);
-}
-
 /// clamp된 실효 backing-px 폭을 다시 영속 pt로 되돌린다. **내부·max 경계는 올림** — 내림하면 1.5x처럼 px/pt가
 /// 나누어떨어지지 않는 배율에서 `compute -> 저장 -> compute`마다 최대 1px씩 줄고, 올림값이 max를 1px 넘어도 다음
 /// compute의 같은 max clamp가 원래 실효 폭을 복원하므로 고정점이다. 단 **min 경계(width==min_px)** 만은 올림이
@@ -455,55 +333,6 @@ pub fn sizePtForEffectiveWidth(width_px: u32, min_px: u32, scale_milli: u32) u32
     const num = @as(u64, width_px) * 1000;
     const rounded = if (min_px != 0 and width_px <= min_px) num / scale else (num + (scale - 1)) / scale;
     return @intCast(@min(rounded, std.math.maxInt(u32)));
-}
-
-/// 한 DockTree leaf rect의 그룹별 chrome. global project tree 폭은 이미 `Geometry.editor`에서 빠졌으므로
-/// leaf 전체 폭을 tab/header/content가 공유한다. 이 함수 결과를 기존 tab/header hit-test에 그대로 넘긴다.
-pub fn groupGeometry(parent: Geometry, leaf: Rect) Geometry {
-    const tab_h = @min(parent.tab_bar.h, leaf.h);
-    const header_h = @min(parent.header.h, leaf.h -| tab_h);
-    return .{
-        .workspace = parent.workspace,
-        .terminal = parent.terminal,
-        .dock = leaf,
-        .editor = leaf,
-        .tab_bar = .{ .x = leaf.x, .y = leaf.y, .w = leaf.w, .h = tab_h },
-        .header = .{ .x = leaf.x, .y = leaf.y + tab_h, .w = leaf.w, .h = header_h },
-        .content = .{ .x = leaf.x, .y = leaf.y + tab_h + header_h, .w = leaf.w, .h = leaf.h -| tab_h -| header_h },
-        .dock_size_px = parent.dock_size_px,
-    };
-}
-
-/// 1px 경계선을 포인터로 잡기 쉽게 양쪽 hit_slop만큼 확장한다. 실제 divider draw는 pos 한 줄이고 hit rect만
-/// 넓다. bounds 밖으로는 saturating clamp해 인접 도크/terminal 입력을 훔치지 않는다.
-pub fn groupDividerHitRect(seg: dock_panel.DockTree.DividerSeg, hit_slop: u32) Rect {
-    return groupDividerHitRectAt(seg.direction, seg.bounds, seg.pos, hit_slop);
-}
-
-/// leaf edge projection이 pointer-bearing `DividerSeg`를 만들지 않고도 실제 group divider target과 같은 기하를
-/// 소비하게 하는 값 전용 코어. `groupDividerHitRect`와 WebView pass-through가 공유한다.
-pub fn groupDividerHitRectAt(direction: @import("split_tree.zig").SplitDirection, bounds: Rect, pos: u32, hit_slop: u32) Rect {
-    return switch (direction) {
-        .horizontal => blk: {
-            const start = @max(bounds.x, pos -| hit_slop);
-            const end = @min(bounds.x + bounds.w, pos +| hit_slop +| 1);
-            break :blk .{ .x = start, .y = bounds.y, .w = end -| start, .h = bounds.h };
-        },
-        .vertical => blk: {
-            const start = @max(bounds.y, pos -| hit_slop);
-            const end = @min(bounds.y + bounds.h, pos +| hit_slop +| 1);
-            break :blk .{ .x = bounds.x, .y = start, .w = bounds.w, .h = end -| start };
-        },
-    };
-}
-
-pub fn groupDividerRatio(seg: dock_panel.DockTree.DividerSeg, x_px: f64, y_px: f64) ?f32 {
-    if (!std.math.isFinite(x_px) or !std.math.isFinite(y_px)) return null;
-    const raw: f64 = switch (seg.direction) {
-        .horizontal => if (seg.bounds.w == 0) return null else (x_px - @as(f64, @floatFromInt(seg.bounds.x))) / @as(f64, @floatFromInt(seg.bounds.w)),
-        .vertical => if (seg.bounds.h == 0) return null else (y_px - @as(f64, @floatFromInt(seg.bounds.y))) / @as(f64, @floatFromInt(seg.bounds.h)),
-    };
-    return @floatCast(@import("split_tree.zig").clampRatio(@floatCast(raw)));
 }
 
 pub fn sizePtForPointer(g: Geometry, side: dock_panel.Side, x_px: f64, y_px: f64, scale_milli: u32) ?u32 {
@@ -526,9 +355,8 @@ test "right and bottom dock geometry share terminal and chrome boundaries" {
     try std.testing.expectEqual(Rect{ .x = 240, .y = 40, .w = 1360, .h = 960 }, right.workspace);
     try std.testing.expectEqual(@as(u32, 600), right.dock.w);
     try std.testing.expectEqual(right.divider.x + right.divider.w, right.dock.x);
-    try std.testing.expectEqual(right.tab_bar.y + right.tab_bar.h, right.header.y);
-    try std.testing.expectEqual(right.header.y + right.header.h, right.content.y);
-    try std.testing.expectEqual(@as(u32, 2 * 20), right.tab_bar.h + right.header.h);
+    // FP16: 도크 = 트리 전체. 옛 editor 칼럼과 그 chrome(tab_bar/header/content)은 없다.
+    try std.testing.expectEqual(right.dock, right.tree);
     try std.testing.expectEqual(right.tree.y + right.tree_header.h, right.tree_content.y);
     try std.testing.expectEqual(right.tree.h, right.tree_header.h + right.tree_content.h);
 
@@ -560,68 +388,9 @@ test "resize pointer maps backing pixels to persisted points and rejects non-fin
     try std.testing.expectEqual(@as(?u32, null), sizePtForPointer(g, .right, std.math.nan(f64), 0, 2000));
 }
 
-test "dock tab metrics use the full tab bar and share render hit rects" {
-    const g = compute(.{ .backing_width_px = 1400, .backing_height_px = 900, .sidebar_width_px = 200, .titlebar_height_px = 40, .cell_width_px = 10, .cell_height_px = 20, .scale_milli = 1000, .divider_px = 2, .side = .right, .size_pt = 420, .visible = true });
-    const second = tabRect(g, 10, 3, 1, 0).?;
-    try std.testing.expectEqual(@as(?usize, 1), tabIndexAt(g, 10, 3, @floatFromInt(second.x + 1), @floatFromInt(second.y + 1), 0));
-    // 접기 버튼은 탭바에서 제거(titlebar 띠 dock 토글로 일원화) — 우측 끝도 탭 영역이다. 탭은 고정폭(스크롤 0)이라
-    // 단일 탭은 default_tab_cols 폭을 그대로 갖는다.
-    const one = tabRect(g, 10, 1, 0, 0).?;
-    try std.testing.expectEqual(@as(u32, default_tab_cols * 10), one.w);
-    try std.testing.expectEqual(@as(?usize, null), tabIndexAt(g, 10, 1, @floatFromInt(one.x + one.w + 1), @floatFromInt(one.y + 1), 0));
-}
-
-test "dock close rect sits at the visible right edge and clips on overflow" {
-    // 넉넉한 탭 바(40칸): 탭은 고정폭(18칸)이라 안 잘리고, close는 탭의 우측 끝 칸(col 17)에 온다.
-    const wide = Geometry{
-        .terminal = .{ .x = 0, .y = 0, .w = 0, .h = 0 },
-        .tab_bar = .{ .x = 100, .y = 20, .w = 400, .h = 18 },
-    };
-    const normal = tabCloseRect(wide, 10, 2, 0, 0).?;
-    try std.testing.expectEqual(Rect{ .x = 270, .y = 20, .w = 10, .h = 18 }, normal); // 100 + 17*10
-    try std.testing.expectEqual(@as(?usize, 0), tabCloseIndexAt(wide, 10, 2, 275, 25, 0));
-    try std.testing.expectEqual(@as(?usize, null), tabCloseIndexAt(wide, 10, 2, 105, 25, 0)); // 제목 영역 — close 아님
-
-    // 좁은 탭 바(2칸): 고정폭 탭이 넘쳐 스크롤한다. scroll 0이면 탭 0이 [0,2)로 잘리고 close는 보이는 우측 끝(col 1).
-    // 탭 1은 완전히 스크롤아웃(col 18~)이라 안 보인다.
-    const narrow = Geometry{
-        .terminal = .{ .x = 0, .y = 0, .w = 0, .h = 0 },
-        .tab_bar = .{ .x = 4, .y = 8, .w = 20, .h = 18 },
-    };
-    const clipped = tabCloseRect(narrow, 10, 2, 0, 0).?;
-    try std.testing.expectEqual(Rect{ .x = 14, .y = 8, .w = 10, .h = 18 }, clipped); // 4 + 1*10
-    try std.testing.expectEqual(@as(?usize, 0), tabCloseIndexAt(narrow, 10, 2, 15, 9, 0));
-    try std.testing.expectEqual(@as(?Rect, null), tabCloseRect(narrow, 10, 2, 1, 0)); // 탭 1은 스크롤아웃
-}
-
-test "dock tab bar scrolls fixed-width tabs when they overflow" {
-    // 탭 바 30칸, 탭 3개 × 18칸 = 54칸 → 넘침. dockTabScroll이 has_scroll + max_scroll=24를 보고한다.
-    const g = Geometry{
-        .terminal = .{ .x = 0, .y = 0, .w = 0, .h = 0 },
-        .tab_bar = .{ .x = 0, .y = 0, .w = 300, .h = 18 },
-    };
-    const ts = dockTabScroll(30, 3, 0).?;
-    try std.testing.expect(ts.has_scroll);
-    try std.testing.expectEqual(@as(u32, 24), ts.max_scroll); // 54 - 30
-    try std.testing.expectEqual(@as(u16, default_tab_cols), ts.tab_width);
-
-    // scroll 0: 탭 0은 [0,18) 온전, 탭 2는 [36,54)라 우측이 [36,30)로 완전 스크롤아웃.
-    try std.testing.expect(tabCellLayout(30, 3, 0, 0) != null);
-    try std.testing.expectEqual(@as(?TabCellLayout, null), tabCellLayout(30, 3, 2, 0));
-
-    // scroll 24(max): 탭 2가 우측 끝에 오고, 탭 0이 [−24..−6)→완전 스크롤아웃, tabIndexAt도 좌측 miss.
-    const tail = tabCellLayout(30, 3, 2, 24).?;
-    try std.testing.expectEqual(@as(u16, 30), tail.end); // 우단이 탭 바 끝에 붙는다
-    try std.testing.expectEqual(@as(?usize, 2), tabIndexAt(g, 10, 3, 295, 9, 24)); // 우측 끝 클릭 → 탭 2
-    try std.testing.expectEqual(@as(?TabCellLayout, null), tabCellLayout(30, 3, 0, 24));
-
-    // 요청 스크롤이 max를 넘으면 clamp(stale 자동 정정).
-    try std.testing.expectEqual(@as(u32, 24), dockTabScroll(30, 3, 1000).?.eff_scroll);
-}
-
-test "dock header control rect is right-aligned and bounded on narrow docks" {
-    const g = compute(.{ .backing_width_px = 1400, .backing_height_px = 900, .sidebar_width_px = 200, .titlebar_height_px = 40, .cell_width_px = 10, .cell_height_px = 20, .scale_milli = 1000, .divider_px = 2, .side = .right, .size_pt = 420, .visible = true });
-    const header = g.header;
+test "파일 헤더 밴드 control rect는 우측 정렬되고 좁은 밴드에서도 경계 안이다" {
+    // FP16: 헤더 밴드는 파일 Term 소유라 도크 기하와 무관하다 — 밴드 rect를 직접 준다(pane이 계산한 값).
+    const header: Rect = .{ .x = 400, .y = 60, .w = 600, .h = 20 };
     const control = headerControlRect(header, 10).?;
     try std.testing.expectEqual(header.x + header.w, control.x + control.w);
     try std.testing.expectEqual(@as(u32, header_control_cols * 10), control.w);
@@ -658,7 +427,7 @@ test "dock header control rect is right-aligned and bounded on narrow docks" {
     };
 }
 
-test "dock header mode slots split per kind (markdown thirds, svg halves) before status" {
+test "헤더 mode 슬롯은 kind별로 나뉜다 (markdown thirds, svg halves) before status" {
     const bare = headerCellLayout(6, true, true).?;
     try std.testing.expectEqual(@as(u16, 6), bare.mode_end);
     try std.testing.expectEqual(@as(?u16, null), bare.conflict_col);
@@ -691,85 +460,6 @@ test "dock header mode slots split per kind (markdown thirds, svg halves) before
     // html·text는 mode 선택기가 없다.
     try std.testing.expectEqual(@as(usize, 0), modesForKind(.html).len);
     try std.testing.expectEqual(@as(usize, 0), modesForKind(.text).len);
-}
-
-test "dock group geometry gives every split leaf its own tab header and content" {
-    const parent = compute(.{ .backing_width_px = 1400, .backing_height_px = 900, .sidebar_width_px = 200, .titlebar_height_px = 40, .cell_width_px = 10, .cell_height_px = 20, .scale_milli = 1000, .divider_px = 2, .side = .right, .size_pt = 420, .visible = true });
-    try std.testing.expectEqual(parent.content.w, parent.editor.w);
-    try std.testing.expectEqual(parent.dock.h, parent.editor.h);
-    const left = groupGeometry(parent, .{ .x = parent.editor.x, .y = parent.editor.y, .w = parent.editor.w / 2, .h = parent.editor.h });
-    try std.testing.expectEqual(left.dock.w, left.tab_bar.w);
-    try std.testing.expectEqual(left.tab_bar.y + left.tab_bar.h, left.header.y);
-    try std.testing.expectEqual(left.header.y + left.header.h, left.content.y);
-    try std.testing.expectEqual(left.dock.h, left.tab_bar.h + left.header.h + left.content.h);
-}
-
-test "narrow right dock preserves a readable editor and hides an unusable tree sliver" {
-    const narrow = compute(.{ .backing_width_px = 1000, .backing_height_px = 800, .sidebar_width_px = 160, .titlebar_height_px = 40, .cell_width_px = 10, .cell_height_px = 20, .scale_milli = 1000, .divider_px = 2, .side = .right, .size_pt = 330, .visible = true });
-    try std.testing.expect(narrow.editor.w >= min_editor_cols * 10);
-    try std.testing.expectEqual(@as(u32, 0), narrow.tree.w);
-
-    const artifact_width = compute(.{ .backing_width_px = 1600, .backing_height_px = 900, .sidebar_width_px = 200, .titlebar_height_px = 40, .cell_width_px = 10, .cell_height_px = 20, .scale_milli = 1000, .divider_px = 2, .side = .right, .size_pt = 500, .visible = true });
-    try std.testing.expectEqual(default_tree_cols * 10, artifact_width.tree.w);
-    try std.testing.expect(artifact_width.editor.w > artifact_width.tree.w);
-
-    const resized = compute(.{ .backing_width_px = 1600, .backing_height_px = 900, .sidebar_width_px = 200, .titlebar_height_px = 40, .cell_width_px = 10, .cell_height_px = 20, .scale_milli = 1000, .divider_px = 2, .side = .right, .size_pt = 500, .tree_size_pt = 150, .visible = true });
-    try std.testing.expectEqual(@as(u32, 150), resized.tree.w);
-    try std.testing.expectEqual(resized.tree.x, resized.tree_divider.x);
-    // hit target은 editor(좌) 쪽으로만 hit_slop 넓히고 tree(우) 쪽은 divider 선(1px)까지만 — 파일명 첫 셀 보존.
-    try std.testing.expectEqual(Rect{ .x = resized.tree.x - 5, .y = resized.tree.y, .w = 6, .h = resized.tree.h }, treeDividerHitRect(resized, 5));
-    try std.testing.expectEqual(@as(u32, 150), treeSizePtForPointer(resized, @floatFromInt(resized.tree.x), 1000).?);
-
-    const too_wide = compute(.{ .backing_width_px = 1600, .backing_height_px = 900, .sidebar_width_px = 200, .titlebar_height_px = 40, .cell_width_px = 10, .cell_height_px = 20, .scale_milli = 1000, .divider_px = 2, .side = .right, .size_pt = 500, .tree_size_pt = 9999, .visible = true });
-    try std.testing.expectEqual(min_editor_cols * 10, too_wide.editor.w);
-    const too_narrow = compute(.{ .backing_width_px = 1600, .backing_height_px = 900, .sidebar_width_px = 200, .titlebar_height_px = 40, .cell_width_px = 10, .cell_height_px = 20, .scale_milli = 1000, .divider_px = 2, .side = .right, .size_pt = 500, .tree_size_pt = 1, .visible = true });
-    try std.testing.expectEqual(min_tree_cols * 10, too_narrow.tree.w);
-
-    // 1.5x에서 max clamp된 470px은 313.33pt다. 313pt로 내리면 다음 frame에 469px로 줄지만, 314pt 올림은
-    // 다시 같은 max 470px로 clamp되어 저장/복원 고정점을 만든다.
-    const scaled_max = compute(.{ .backing_width_px = 1600, .backing_height_px = 900, .sidebar_width_px = 200, .titlebar_height_px = 40, .cell_width_px = 10, .cell_height_px = 20, .scale_milli = 1500, .divider_px = 2, .side = .right, .size_pt = 500, .tree_size_pt = 9999, .visible = true });
-    const stable_pt = sizePtForEffectiveWidth(scaled_max.tree.w, 0, 1500);
-    const scaled_restored = compute(.{ .backing_width_px = 1600, .backing_height_px = 900, .sidebar_width_px = 200, .titlebar_height_px = 40, .cell_width_px = 10, .cell_height_px = 20, .scale_milli = 1500, .divider_px = 2, .side = .right, .size_pt = 500, .tree_size_pt = stable_pt, .visible = true });
-    try std.testing.expectEqual(@as(u32, 470), scaled_max.tree.w);
-    try std.testing.expectEqual(@as(u32, 314), stable_pt);
-    try std.testing.expectEqual(scaled_max.tree.w, scaled_restored.tree.w);
-}
-
-test "tree resize reaches its floor and never snaps back to the default sentinel" {
-    // 1.25x·셀폭 7: min tree = 12*7 = 84px, 84*1000/1250 = 67.2로 px/pt가 안 나누어떨어진다.
-    const base = Input{ .backing_width_px = 1600, .backing_height_px = 900, .sidebar_width_px = 200, .titlebar_height_px = 40, .cell_width_px = 7, .cell_height_px = 14, .scale_milli = 1250, .divider_px = 2, .side = .right, .size_pt = 600, .visible = true };
-    const g = compute(base);
-    const min_tree_px = min_tree_cols * base.cell_width_px;
-
-    // #1: 포인터가 도크 오른쪽 경계 밖(raw<=0)이어도 pt는 센티널 0이 아니라 ≥1.
-    const past_edge = treeSizePtForPointer(g, @floatFromInt(g.dock.x + g.dock.w + 30), base.scale_milli).?;
-    try std.testing.expect(past_edge >= 1);
-    var at_min = base;
-    at_min.tree_size_pt = past_edge;
-    // 기본 18칸으로 튀지 않고 정확히 12칸 하한.
-    try std.testing.expectEqual(min_tree_px, compute(at_min).tree.w);
-
-    // #4: min 실효 폭 → 영속 pt(내림) → 다시 compute가 정확히 min을 복원(1px 더 넓게 멈추지 않음, 고정점).
-    const stable = sizePtForEffectiveWidth(min_tree_px, min_tree_px, base.scale_milli);
-    var restored = base;
-    restored.tree_size_pt = stable;
-    try std.testing.expectEqual(min_tree_px, compute(restored).tree.w);
-    // 올림(min 무시)이었다면 85px로 벌어져 하한을 못 밟는다 — 내림 분기가 실제로 갈리는지 대비 확인.
-    try std.testing.expect(sizePtForEffectiveWidth(min_tree_px, 0, base.scale_milli) > stable);
-}
-
-test "dock group divider hit target and pointer ratio share split bounds" {
-    var split: dock_panel.DockTree.Split = undefined;
-    const horizontal = dock_panel.DockTree.DividerSeg{
-        .split = &split,
-        .direction = .horizontal,
-        .bounds = .{ .x = 100, .y = 40, .w = 600, .h = 400 },
-        .pos = 340,
-    };
-    try std.testing.expectEqual(Rect{ .x = 335, .y = 40, .w = 11, .h = 400 }, groupDividerHitRect(horizontal, 5));
-    try std.testing.expectApproxEqAbs(@as(f32, 0.5), groupDividerRatio(horizontal, 400, 100).?, 0.0001);
-    try std.testing.expectApproxEqAbs(@as(f32, 0.05), groupDividerRatio(horizontal, -1000, 100).?, 0.0001);
-    try std.testing.expectEqual(@as(?f32, null), groupDividerRatio(horizontal, std.math.nan(f64), 0));
 }
 
 test "dock divider grab band rounds logical points up at fractional backing scales" {

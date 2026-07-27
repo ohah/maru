@@ -743,8 +743,8 @@ fn pumpHealthy(
     assembler: *session_host.screen_assembler.ScreenAssembler,
     drained_bytes: *u64,
 ) !bool {
-    const batch = (try client.readStreamBatch(allocator, stream_id)) orelse return false;
-    defer allocator.free(batch.bytes);
+    const batch = (try client.readStreamBatch(stream_id)) orelse return false;
+    defer batch.deinit();
     drained_bytes.* += batch.bytes.len;
     if (batch.is_snapshot)
         try assembler.applySnapshot(batch.bytes)

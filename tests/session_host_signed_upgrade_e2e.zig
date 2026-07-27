@@ -223,7 +223,6 @@ fn run(
     defer allocator.free(initial);
     try screen_before.applySnapshot(initial);
     try waitForMarker(
-        allocator,
         &before,
         stream_before,
         &screen_before,
@@ -232,7 +231,7 @@ fn run(
     try waitForProcessName(runtime_pid_before, "cat");
     const marker_before = "MARU_SIGNED_UPGRADE_BEFORE";
     try before.sendInput(stream_before, marker_before ++ "\r");
-    try waitForMarker(allocator, &before, stream_before, &screen_before, marker_before);
+    try waitForMarker(&before, stream_before, &screen_before, marker_before);
     try detachRuntime(allocator, &before, stream_before);
     before.deinit();
     before_open = false;
@@ -293,7 +292,7 @@ fn run(
 
     const marker_after = "MARU_SIGNED_UPGRADE_AFTER";
     try after.sendInput(stream_after, marker_after ++ "\r");
-    try waitForMarker(allocator, &after, stream_after, &screen_after, marker_after);
+    try waitForMarker(&after, stream_after, &screen_after, marker_after);
     try detachRuntime(allocator, &after, stream_after);
     try terminateRuntime(allocator, &after, &runtime_id);
 
@@ -376,7 +375,6 @@ fn terminateRuntime(
 }
 
 fn waitForMarker(
-    allocator: std.mem.Allocator,
     client: *session_host.client.Client,
     stream_id: u64,
     assembler: *session_host.screen_assembler.ScreenAssembler,
@@ -385,8 +383,8 @@ fn waitForMarker(
     var attempt: usize = 0;
     while (attempt < marker_attempts) : (attempt += 1) {
         if (screenContains(assembler, marker)) return;
-        if (try client.readStreamBatch(allocator, stream_id)) |batch| {
-            defer allocator.free(batch.bytes);
+        if (try client.readStreamBatch(stream_id)) |batch| {
+            defer batch.deinit();
             if (batch.is_snapshot)
                 try assembler.applySnapshot(batch.bytes)
             else

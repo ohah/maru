@@ -14109,6 +14109,92 @@ pub const AppSession = struct {
     /// 파일 kind가 쓰는 WKWebView trust config. `PanelKind`는 **넓히지 않는다**(§1) — Swift가 trust를
     /// `panelKind == 0` 매직 비교로 파생하므로 값을 더하면 파일 패널이 조용히 untrusted로 떨어진다.
     /// 이 파생은 `collectWebSurfaces`의 도크 분기가 하던 것과 같다.
+    /// 복원이 만든 파일 entry의 **staged 소유 목록**(FP16 2-2r). `applyWorkspaceWindow`의 원자성 계약상
+    /// entry 집합은 파일 트리·watcher union 구성의 **입력**인데, 붙일 Term은 탭 빌드 뒤에야 생긴다. 그래서
+    /// "집합"과 "배치"를 떼어 이 목록이 집합을 들고, 탭이 생긴 뒤 Term으로 **이관**한다.
+    ///
+    /// 소유권 경계는 이관 한 지점뿐이다 — 그 전엔 이 목록이 `path`를 소유하고 실패 시 `deinit`이 해제하며,
+    /// 그 뒤엔 Term이 소유하고 `destroyTerm`이 해제한다. 중간 상태가 없다.
+    const RestoredFileEntries = struct {
+        items: std.ArrayList(dock_panel.Entry) = .empty,
+        /// 복원 당시 활성이던 entry의 평탄화 index(없으면 null). 이관 뒤 그 Term을 활성 탭으로 만든다.
+        active_index: ?usize = null,
+
+        fn deinit(self: *RestoredFileEntries, gpa: std.mem.Allocator) void {
+            for (self.items.items) |entry| gpa.free(entry.path);
+            self.items.deinit(gpa);
+        }
+    };
+
+    /// 복원된 `DockPanel`을 평탄화해 소유를 목록으로 옮긴다(그룹은 비워진다). 와이어 파싱·검증·mode clamp는
+    /// 기존 `DockPanel.restore`가 이미 했으므로 재구현하지 않고 결과만 가져온다 — 포맷 규칙의 단일 출처 유지.
+    fn flattenRestoredDock(
+        gpa: std.mem.Allocator,
+        panel: *dock_panel.DockPanel,
+    ) !RestoredFileEntries {
+        var out: RestoredFileEntries = .{};
+        errdefer out.deinit(gpa);
+        try out.items.ensureTotalCapacity(gpa, panel.entryCountTotal());
+        const focused = panel.focusedGroup();
+        for (0..panel.groupCount()) |group_index| {
+            const group = panel.groupAt(group_index).?;
+            for (group.entries.items, 0..) |entry, i| {
+                if (group == focused and group.active != null and group.active.? == i)
+                    out.active_index = out.items.items.len;
+                out.items.appendAssumeCapacity(entry); // path 소유가 목록으로 이동
+            }
+            group.entries.clearRetainingCapacity(); // 그룹은 더 이상 소유하지 않는다(이중 해제 방지)
+            group.active = null;
+        }
+        return out;
+    }
+
+    /// staged 목록의 entry들을 대상 pane에 파일 Term으로 **이관**한다. 실패 지점이 없어야 부분 이관이 안 남으므로
+    /// Term 생성과 capacity 예약을 먼저 끝내고 마지막에 무실패로 붙인다(기존 swap 구간과 같은 규율).
+    /// staged 목록의 entry들을 대상 pane에 파일 Term으로 **이관**한다. 부분 이관이 남으면 안 되므로
+    /// **할 수 있는 실패를 모두 앞에서 끝낸다** — Term·heap Entry 생성과 capacity 예약을 마친 뒤, 마지막 루프는
+    /// 실패 지점이 하나도 없다(기존 swap 구간의 "teardown 뒤 append는 무실패" 규율과 같다).
+    fn transferRestoredFileEntries(
+        self: *AppSession,
+        entries: *RestoredFileEntries,
+        pane: *Pane,
+    ) !void {
+        const count = entries.items.items.len;
+        if (count == 0) return;
+
+        const Pending = struct { term: *Term, heap: *dock_panel.Entry };
+        var pending: std.ArrayList(Pending) = .empty;
+        defer pending.deinit(self.allocator);
+        try pending.ensureTotalCapacity(self.allocator, count);
+        errdefer for (pending.items) |p| {
+            self.destroyTerm(p.term); // term.file_entry는 아직 null이라 heap을 건드리지 않는다
+            self.allocator.destroy(p.heap);
+        };
+        try pane.terms.ensureUnusedCapacity(self.allocator, count);
+
+        for (entries.items.items) |entry| {
+            const heap = try self.allocator.create(dock_panel.Entry);
+            errdefer self.allocator.destroy(heap);
+            const term = try self.createWebTerm(panelKindForEntryKind(entry.kind));
+            heap.* = entry; // path 소유가 목록에서 heap Entry로 이동
+            pending.appendAssumeCapacity(.{ .term = term, .heap = heap });
+        }
+
+        // ── 여기부터 무실패 ──
+        const first_index = pane.terms.items.len;
+        for (pending.items) |p| {
+            p.heap.surface_id = p.term.surfaceId();
+            p.term.file_entry = p.heap;
+            pane.terms.appendAssumeCapacity(p.term);
+        }
+        if (entries.active_index) |i| if (first_index + i < pane.terms.items.len) {
+            pane.active_term = first_index + i;
+        };
+        // 목록은 더 이상 path를 소유하지 않는다(heap Entry로 이동) — 해제 없이 비운다.
+        entries.items.clearRetainingCapacity();
+        entries.active_index = null;
+    }
+
     fn panelKindForEntryKind(kind: dock_panel.EntryKind) web_panel_layout.PanelKind {
         return if (filePanelKindIsIsolated(kind)) .browser else .markdown;
     }

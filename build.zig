@@ -1733,6 +1733,28 @@ pub fn build(b: *std.Build) void {
 
     const session_host_step = b.step("test-session-host", "MRSH protocol/framing codec unit tests (session host)");
     session_host_step.dependOn(&run_session_host_tests.step);
+    if (target.result.os.tag == .macos) {
+        // The stable external-pump storage is intentionally not re-exported by the session_host
+        // barrel: only the future final owner may import its raw mechanics. Compile its inline TDD
+        // suite as a dedicated root while keeping it in both default and focused host gates.
+        const external_pump_storage_tests = b.addTest(.{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(
+                    "src/platform/macos/session_host/client_external_pump.zig",
+                ),
+                .target = target,
+                .optimize = optimize,
+                .link_libc = true,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+        });
+        const run_external_pump_storage_tests = b.addRunArtifact(
+            external_pump_storage_tests,
+        );
+        run_external_pump_storage_tests.setCwd(b.path("."));
+        test_step.dependOn(&run_external_pump_storage_tests.step);
+        session_host_step.dependOn(&run_external_pump_storage_tests.step);
+    }
 
     // Opt-in external oracle: validates committed goldens against system libvterm.
     // Intentionally NOT wired into the default `test` step or `mise run check` so

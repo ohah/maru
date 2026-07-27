@@ -80,7 +80,7 @@
 **입력·reconcile 순서**:
 1. **명시적 입력 → Zig 활성**: `MaruWebPanelView.hitTest`가 overlay/seam을 제외한 실제 primary-down에서만 `webPanelPrimaryDown`을 호출한다. file panel은 `focus_file_panel_surface`, workspace browser는 `activate_surface` 뒤 `focus_workspace_input`을 호출한다. 이미 firstResponder인 같은 WebView 재클릭도 새 intent로 전달된다. programmatic/accessibility focus와 매 tick 관측은 이 권한이 없다.
    - **"실제"의 기준은 `super.hitTest`가 non-nil인 것**이다. `hitTest`는 이벤트 수신이 아니라 **조회** 함수라, AppKit이 목적지를 찾는 동안 이 패널의 frame **밖** 좌표로도, 숨긴 패널에도 호출한다. 이벤트 타입만 보고 통지하면 **탭 바 클릭이 web surface를 활성화해 터미널 탭을 눌러도 브라우저로 되튄다**(Phase 7 손 테스트 재발 → `MARU_DEBUG` 로그에서 클릭마다 `activate_surface`가 찍혀 확정). 결과가 nil이면 이 패널도 그 자손도 그 클릭을 받지 않으므로 통지하지 않는다 — drop-zone 드래그 중 `isHidden` 패널도 이 기준으로 함께 걸러진다.
-2. **typed dock completion → Zig 활성**: surface publish를 기다리는 file dock은 `.dock_group`에서 text/paste를 fail-close하고, `PendingDockFocus`의 EntryId/surface/epoch/revision 검증과 native firstResponder 성공 뒤에만 `.dock_surface`로 승격한다.
+2. **typed dock completion → Zig 활성**: surface publish를 기다리는 파일 Term은 `.dock_pending`(FP16 — 옛 `.dock_group`)에서 text/paste를 fail-close하고, `PendingDockFocus`의 EntryId/surface/epoch/revision 검증과 native firstResponder 성공 뒤에만 `.dock_surface`로 승격한다.
 3. **Zig 활성 → firstResponder**: 매 tick `reconcileWebFocus`는 `focused_dock_surface`와 `active_web_surface_id_any_kind`만 읽어 해당 webview 또는 터미널 뷰로 맞춘다. firstResponder 관측으로 `activate_surface`, `focus_workspace_input`, Swift file-focus 상태를 갱신하지 않는다.
 
 **이 하나가 흩어진 것을 대체(subsume)한다**:

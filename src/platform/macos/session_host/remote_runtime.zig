@@ -36,9 +36,12 @@ fn attachmentReadBatch(
     context: *anyopaque,
     allocator: std.mem.Allocator,
     stream_id: u64,
-) client_mod.ClientError!?client_mod.StreamBatch {
+) client_mod.ClientError!?remote_attachment.AttachmentBatchLease {
     const client: *client_mod.Client = @ptrCast(@alignCast(context));
-    return client.readStreamBatch(allocator, stream_id);
+    return if (try client.readStreamBatch(allocator, stream_id)) |batch|
+        .{ .untracked = batch }
+    else
+        null;
 }
 
 fn attachmentDropStream(context: *anyopaque, stream_id: u64) void {
@@ -580,7 +583,9 @@ pub const RemoteRuntime = struct {
     /// 보낸다). host가 grid/alt 변화 시 delta 대신 fresh snapshot을 push하므로 둘 다 처리한다(is_snapshot이면 리셋, 아니면 증분).
     pub const PumpResult = enum { idle, metadata, screen, ended };
 
-    pub fn pumpDelta(self: *RemoteRuntime) (client_mod.ClientError || screen_assembler.ApplyError)!PumpResult {
+    pub fn pumpDelta(
+        self: *RemoteRuntime,
+    ) (client_mod.ClientError || screen_assembler.ApplyError || remote_attachment.LeaseError)!PumpResult {
         // Revoke/ended events fence mutation. Consume already-buffered authority events before
         // advancing any input/control that was accepted on a previous UI turn.
         var events = try self.drainObservationEvents();

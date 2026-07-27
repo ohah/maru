@@ -2499,8 +2499,20 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
           이 slice는 `RemoteAttachment`/GUI adapter를 실제 consumer로 바꾸고 multi-runtime demux, snapshot/delta,
           apply/OOM fail-close, revoke-before-mutation, deinit/drop과 `RemoteRuntime.pumpDelta` nonblocking 회귀를
           Debug/ReleaseFast로 재실행한다. external ledger/token은 pure exact/cap+1, generation exhaustion,
-          stale-copy/double-release, Client 선종료 뒤 release, ledger 조기종료 거부 fixture로 고정하되 아직 product
+          stale-copy/double-release, failed-release retain/retry, ledger 조기종료 거부 fixture로 고정하되 아직 product
           attachment에 bind하지 않는다.
+
+          **구현 완료:** `external_inbox_ledger.zig`가 18 MiB/4,096-item exact cap, inline
+          slot/generation, charged payload allocator/free 권위와 sticky invariant를 소유한다.
+          `RemoteAttachment`는 tagged lease의 공통 borrow/release만 거쳐 GUI `.untracked`와
+          external `.charged`를 소비하며 append OOM, screen 부재, malformed apply, sibling stream
+          demux, 정상/실패 cleanup과 deinit/drop을 fail-close한다. GUI adapter는 계속 `.untracked`만
+          만들고 external ledger는 아직 Client/product attachment에 bind하지 않는다. exact cap,
+          out-of-order slot reuse, generation exhaustion, stale-copy/double-release, 조기 finish,
+          caller ownership 보존, failed-release terminal retain/retry와 release-before-drop charged cleanup을
+          Debug/ReleaseFast `test-session-host` 및 전체
+          `mise run check`로 검증했다. 따라서 이 완료 표시는 2b1에만 해당하며 2b2~2b3의 Client
+          storage/physical cap/final owner gate는 아직 계획 상태다.
 
         - **P5c3c-2b2 — Client external pump core**:
           TX resident는 connection당 `protocol.max_binary_chunk + protocol.header_size` bytes(`1 MiB+32`)와
@@ -2637,7 +2649,7 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
         공유하고 leave가 남은 budget 중 최대 100 ms를 쓴다. signal/revoke/error cleanup은 active/latest와 detach를
         버리고 하나의 100 ms deadline 안에서 leave를 시도한 뒤 즉시 raw restore/signal forwarding으로 간다.
 
-    **P5c3c-1a~2a는 구현 완료, 2b~3b는 계획 상태다.** 각 slice는 P5c3a~b의 Debug/ReleaseFast gate를 재실행하고 다음 slice가 실제
+    **P5c3c-1a~2a와 2b1은 구현 완료, 2b2~3b는 계획 상태다.** 각 slice는 P5c3a~b의 Debug/ReleaseFast gate를 재실행하고 다음 slice가 실제
     consumer로 쓰지 않는 임시 public API는 만들지 않는다.
 
     raw 진입 전에도 기존 `SO_RCVTIMEO`/blocking `writeAll`을 deadline으로 간주하지 않는다. resolver 전체, selected

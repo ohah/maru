@@ -11226,6 +11226,23 @@ pub const AppSession = struct {
         self.pending_rename_remap = plan;
     }
 
+    /// 파일 entry가 들고 있던 live surface를 정리한다. rename 재생성과 "비지원 확장자로 바뀌어 entry를 접는"
+    /// 경로가 **같은 teardown**을 쓰게 하는 단일 출처다. 이 정리를 빠뜨리면 `onAppSessionSurfaceClosed`가 안 돌아
+    /// capability·pane grant가 없는 surface에 남고, `focus_owner`가 다음 tick에 파괴될 WKWebView를 계속 가리켜
+    /// Esc/Enter가 죽은 surface로 포커스를 보낸다(code-review max).
+    fn retireFilePanelSurface(self: *AppSession, entry: *dock_panel.Entry, retired_focus: *bool) void {
+        const surface_id = entry.surface_id;
+        if (surface_id == 0) return;
+        retired_focus.* = retired_focus.* or switch (self.focus_owner) {
+            .dock_surface => |owner_id| owner_id == surface_id,
+            .file_tree => |owner| owner.restore_surface == surface_id,
+            .workspace, .dock_group => false,
+        };
+        self.removeFilePanelQueuedActions(surface_id);
+        self.notifySurfaceClosed(surface_id);
+        entry.surface_id = 0;
+    }
+
     fn applyFileTreeRename(self: *AppSession, id: u64, new_path: []const u8) bool {
         const plan = if (self.pending_rename_remap) |*pending| pending else return false;
         if (plan.id != id) return false;
@@ -11252,34 +11269,44 @@ pub const AppSession = struct {
             const old_surface = entry.surface_id;
             const old_owned = entry.path;
             const old_kind = entry.kind;
-            const old_dir = std.fs.path.dirname(old_owned) orelse "";
-            const new_dir = std.fs.path.dirname(item.replacement) orelse "";
-            const same_dir = std.mem.eql(u8, old_dir, new_dir);
             entry.path = item.replacement;
             self.allocator.free(old_owned);
-            if (item.new_kind) |kind| if (entry.kind != kind) {
-                entry.kind = kind;
-                entry.mode = dock_panel.Mode.defaultFor(kind);
-            };
-            // FP16 §1 ⑵⑶: WKWebView를 다시 세워야 하는가는 **trust config가 바뀌는가**로 판정한다.
-            // `WKWebViewConfiguration`은 init 시점 고정이라(MaruAppHost.swift:2843~2868) 신뢰↔격리 전환은
-            // 재생성이 불가피하고, 격리(html·pdf)는 핀 URL이 loadFileURL에 박혀 있어 같은 kind끼리도 다시 세워야 한다.
-            // 신뢰 kind끼리는 경로가 뷰에 안 박혀 있으므로(shell이 file_panel_entry로 surface_id 조회) surface를 유지한다.
-            const rebuild = filePanelKindIsIsolated(old_kind) or filePanelKindIsIsolated(entry.kind);
+            const new_kind = item.new_kind orelse entry.kind;
+            const kind_changed = new_kind != entry.kind;
+            if (kind_changed) {
+                entry.kind = new_kind;
+                entry.mode = dock_panel.Mode.defaultFor(new_kind);
+            }
+            // 뷰를 다시 세워야 하는 조건은 **둘**이다(FP16 §1 ⑵⑶).
+            //  ⓐ trust config 전환 — `WKWebViewConfiguration`이 init 시점 고정이라(MaruAppHost.swift:2843~2868)
+            //     신뢰↔격리는 재생성 말고 방법이 없다. 격리(html·pdf)는 핀 URL이 init에 캐시된 `let`이라 같은
+            //     kind끼리도 지금은 재생성한다(핀만 갱신하는 무손실 경로는 §13 백로그).
+            //  ⓑ **kind 변경** — shell의 뷰어는 생성 시점 `?lang=`/`?kind=` 힌트로 정해지고 `entry.mode`도
+            //     되밀 채널이 없다. kind만 바꾸고 뷰를 두면 `.md`→`.png`에서 markdown shell이 PNG 바이트를
+            //     텍스트로 그리고, 더 나쁘게는 mode가 non-editable로 리셋된 채 CM6가 살아 있어 이후 삭제/rename이
+            //     편집기 잠금·dirty 스냅샷을 건너뛴다(code-review max). 그래서 kind가 바뀌면 반드시 재생성한다.
+            const rebuild = kind_changed or filePanelKindIsIsolated(old_kind) or filePanelKindIsIsolated(entry.kind);
             if (old_surface != 0 and rebuild) {
-                retired_focus = retired_focus or switch (self.focus_owner) {
-                    .dock_surface => |surface_id| surface_id == old_surface,
-                    .file_tree => |owner| owner.restore_surface == old_surface,
-                    .workspace, .dock_group => false,
-                };
-                self.removeFilePanelQueuedActions(old_surface);
-                self.notifySurfaceClosed(old_surface);
-                entry.surface_id = 0;
-            } else if (old_surface != 0 and !same_dir) {
-                // 같은 디렉터리 rename은 통지조차 필요 없다 — breadcrumb은 `entry.path`에서 파생하는 Zig GPU
-                // chrome이고 read/write는 pathless라 shell이 경로를 모른다. 다른 디렉터리로 옮기면 `readAsset`이
-                // 상대 asset을 부모 기준으로 다시 풀어야 하므로 기존 외부변경 reload 배관을 재사용한다(§11.1 S4).
-                self.queueFileTreeReload(old_surface, false);
+                self.retireFilePanelSurface(entry, &retired_focus);
+            } else if (old_surface != 0) {
+                // 경로만 바뀐 신뢰 kind rename은 **아무 통지도 하지 않는다** — breadcrumb은 `entry.path`에서
+                // 파생하는 Zig GPU chrome이고 read/write는 pathless라 shell이 경로를 모른다(§11.1 S3·S4).
+                // 상대 asset도 깨지지 않는다: 트리 rename은 이름만 바꾸므로 파일과 그 형제 asset이 **함께**
+                // 움직인다(디렉터리 rename이면 하위 트리가 통째로). 그래서 옛 `!same_dir` reload 분기는 제거했다
+                // — 디렉터리 rename에서 하위 entry 전부를 헛되이 재로드시키던 결함이었다(code-review max).
+                //
+                // 다만 rename은 FSEvents에 새 경로의 file-level 이벤트로 잡히고, `fileTreeChanged`가 그걸
+                // 외부 변경으로 보고 reload를 걸어 무손실 계약을 깨뜨린다. 저장이 쓰는 self-write grace latch를
+                // 같은 목적으로 무장해 그 echo를 우리 이벤트로 소비한다.
+                if (entry.disk_content_hash_valid) {
+                    entry.self_write_grace_ticks = @intCast(@min(self.ticksForMs(2_000), std.math.maxInt(u16)));
+                    entry.self_write_hash = entry.disk_content_hash; // rename은 내용을 안 바꾼다 — 해시가 그대로다.
+                    entry.self_write_verifications = 0;
+                } else {
+                    // 아직 내용을 읽은 적이 없어 대조 기준선이 없다(예: readSelfImage 경로). echo를 우리 것으로
+                    // 증명할 수 없으므로 억제하지 않고 기존 외부변경 reload에 맡긴다(안전 쪽).
+                    self.queueFileTreeReload(old_surface, false);
+                }
             }
         }
         // A supported file renamed to an unsupported extension remains on disk and selected in the
@@ -11292,6 +11319,11 @@ pub const AppSession = struct {
                 index -= 1;
                 const entry = &group.entries.items[index];
                 if (!file_tree_mutation.pathWithin(entry.path, new_path) or file_panel_bridge.openKindForPath(entry.path) != null) continue;
+                // 위 루프가 신뢰 kind rename에서 surface를 **유지**하게 된 뒤로, 여기 도달하는 entry가 live
+                // surface를 들고 있을 수 있다(예: `notes.md` → `notes.docx` — kind는 그대로라 재생성 대상이 아닌데
+                // 확장자가 비지원이라 접힌다). teardown 없이 지우면 capability·pane grant가 새고 focus가 죽은
+                // surface를 가리킨다(code-review max).
+                self.retireFilePanelSurface(entry, &retired_focus);
                 if (group.remove(index)) |removed| self.allocator.free(removed.path);
             }
         }

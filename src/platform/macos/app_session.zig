@@ -11231,9 +11231,13 @@ pub const AppSession = struct {
         if (plan.id != id) return false;
         // Validate the exact admission snapshot before the first swap. Open is globally blocked while a
         // rename is in flight; unrelated close/reorder is tolerated because lookup is by expected path.
+        //
+        // **키는 expected path + `mutation_pending_id` 스탬프다(FP16 §1 ⑷).** 정합성을 지는 건 원래부터 이 쌍이었고
+        // `EntryId`는 빠른 핸들일 뿐이었다 — close 후 같은 경로 재오픈이라는 aliasing 시나리오도 새 entry에는
+        // 스탬프가 없어 fail-close된다(스파이크 §11.1 S2). 소유가 Term으로 옮겨가도 이 키는 그대로 성립한다.
         for (plan.dock_items[0..plan.dock_len]) |item| {
-            const entry = (self.fileEntryForId(item.entry_id) orelse return false).*;
-            if (!std.mem.eql(u8, entry.path, item.expected) or entry.mutation_pending_id != id) return false;
+            const entry = self.fileEntryForPath(item.expected) orelse return false;
+            if (entry.mutation_pending_id != id) return false;
         }
         for (plan.recent_items[0..plan.recent_len]) |item| {
             const current = self.file_tree.recentAt(item.index) orelse return false;
@@ -11244,16 +11248,25 @@ pub const AppSession = struct {
         for (plan.recent_items[0..plan.recent_len]) |item|
             std.debug.assert(self.file_tree.replaceRecentOwned(item.index, item.expected, item.replacement));
         for (plan.dock_items[0..plan.dock_len]) |item| {
-            const entry = (self.fileEntryForId(item.entry_id) orelse unreachable);
+            const entry = self.fileEntryForPath(item.expected) orelse unreachable;
             const old_surface = entry.surface_id;
             const old_owned = entry.path;
+            const old_kind = entry.kind;
+            const old_dir = std.fs.path.dirname(old_owned) orelse "";
+            const new_dir = std.fs.path.dirname(item.replacement) orelse "";
+            const same_dir = std.mem.eql(u8, old_dir, new_dir);
             entry.path = item.replacement;
             self.allocator.free(old_owned);
             if (item.new_kind) |kind| if (entry.kind != kind) {
                 entry.kind = kind;
                 entry.mode = dock_panel.Mode.defaultFor(kind);
             };
-            if (old_surface != 0) {
+            // FP16 §1 ⑵⑶: WKWebView를 다시 세워야 하는가는 **trust config가 바뀌는가**로 판정한다.
+            // `WKWebViewConfiguration`은 init 시점 고정이라(MaruAppHost.swift:2843~2868) 신뢰↔격리 전환은
+            // 재생성이 불가피하고, 격리(html·pdf)는 핀 URL이 loadFileURL에 박혀 있어 같은 kind끼리도 다시 세워야 한다.
+            // 신뢰 kind끼리는 경로가 뷰에 안 박혀 있으므로(shell이 file_panel_entry로 surface_id 조회) surface를 유지한다.
+            const rebuild = filePanelKindIsIsolated(old_kind) or filePanelKindIsIsolated(entry.kind);
+            if (old_surface != 0 and rebuild) {
                 retired_focus = retired_focus or switch (self.focus_owner) {
                     .dock_surface => |surface_id| surface_id == old_surface,
                     .file_tree => |owner| owner.restore_surface == old_surface,
@@ -11262,6 +11275,11 @@ pub const AppSession = struct {
                 self.removeFilePanelQueuedActions(old_surface);
                 self.notifySurfaceClosed(old_surface);
                 entry.surface_id = 0;
+            } else if (old_surface != 0 and !same_dir) {
+                // 같은 디렉터리 rename은 통지조차 필요 없다 — breadcrumb은 `entry.path`에서 파생하는 Zig GPU
+                // chrome이고 read/write는 pathless라 shell이 경로를 모른다. 다른 디렉터리로 옮기면 `readAsset`이
+                // 상대 asset을 부모 기준으로 다시 풀어야 하므로 기존 외부변경 reload 배관을 재사용한다(§11.1 S4).
+                self.queueFileTreeReload(old_surface, false);
             }
         }
         // A supported file renamed to an unsupported extension remains on disk and selected in the
@@ -14404,6 +14422,16 @@ pub const AppSession = struct {
     /// **FP16 확장 지점**(docs/file-panel.md §8): 파일 entry가 `Term`으로 옮겨오면 `.html`/`.pdf` 파일 Term이
     /// 격리 config 때문에 `web_panel_kind == .browser`를 갖게 된다. 그때 이 술어에 "파일 entry 없음" 조건을 더하면
     /// 주소창·nav 단축키가 로컬 HTML 파일 뷰에 잘못 걸리는 것을 **한 곳에서** 막는다. 지금 통합해 두는 이유가 그것이다.
+    /// 이 파일 kind가 **격리 config**(filePanelKind=2, `loadFileURL`)를 쓰는가. 신뢰 shell(=1)과 갈리는
+    /// 유일한 축이며 Swift의 `WKWebViewConfiguration` 선택과 같은 판정이다(app_host_abi.zig `file_panel_entry`).
+    /// rename이 뷰를 다시 세워야 하는지도 이 값으로 정한다(FP16 §1 ⑶).
+    fn filePanelKindIsIsolated(kind: dock_panel.EntryKind) bool {
+        return switch (kind) {
+            .html, .pdf => true,
+            .markdown, .text, .svg, .image => false,
+        };
+    }
+
     fn isBrowserTerm(term: *const Term) bool {
         return term.kind == .web and term.web_panel_kind == .browser;
     }
@@ -46631,10 +46659,13 @@ test "file tree mutations create rename protect dirty and use a visible staged T
         session.updateFileTreeMutations();
         std.Io.sleep(io, std.Io.Duration.fromMilliseconds(1), .awake) catch {};
     }
-    session.assignOneVisibleDockSurfaceId();
-    const renamed_location = session.dock.pathLocation(renamed).?;
-    const renamed_sid = renamed_location.group.entries.items[renamed_location.index].surface_id;
-    try std.testing.expect(renamed_sid != 0 and renamed_sid != created_sid);
+    // FP16 §1 ⑵: `.md` → `.md` 같은 디렉터리 rename은 **surface를 교체하지 않는다**. 경로가 WKWebView에 박혀
+    // 있지 않고(shell이 file_panel_entry로 surface_id 조회) breadcrumb은 Zig chrome이며 read/write가 pathless라
+    // 재생성할 이유가 없다(스파이크 §11.1 S3·S4). 옛 계약은 항상 새 id를 발급했고 recreate 펌프가 필요했다.
+    const renamed_entry = session.fileEntryForPath(renamed).?;
+    const renamed_sid = renamed_entry.surface_id;
+    try std.testing.expectEqual(created_sid, renamed_sid);
+    try std.testing.expect(renamed_sid != 0);
     try std.testing.expect(session.dock.pathLocation(created) == null);
 
     // Dirty state blocks both file and containing-directory destructive operations before Trash handoff.

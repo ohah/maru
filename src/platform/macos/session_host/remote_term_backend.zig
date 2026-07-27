@@ -368,10 +368,11 @@ pub const RemoteTermBackend = struct {
             .parser = framing.FrameParser.init(allocator),
         };
         defer client.deinit();
-        const ended = framing.Frame{
+        var ended = client_mod.BufferedEvent{
             .header = .{ .kind = .event, .stream_id = 7 },
-            .payload = try allocator.dupe(u8, "{\"reason\":\"natural\",\"event\":\"runtime.ended\"}"),
+            .payload = try allocator.dupe(u8, "{\"event\":\"runtime.ended\"}"),
         };
+        ended.header.payload_len = @intCast(ended.payload.len);
         try client.pending_events.append(allocator, ended);
         client.pending_event_bytes = ended.payload.len;
 

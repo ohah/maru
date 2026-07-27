@@ -17,7 +17,8 @@ const term_backend = maru.app.term_runtime_backend;
 const client_mod = @import("client.zig");
 const protocol = @import("protocol.zig");
 const screen_assembler = @import("screen_assembler.zig");
-const observation_wire = @import("observation_wire.zig");
+const runtime_event_wire = @import("runtime_event_wire.zig");
+const runtime_metadata_wire = @import("runtime_metadata_wire.zig");
 const resize_wire = @import("resize_wire.zig");
 const core_command_wire = @import("core_command_wire.zig");
 const remote_attachment = @import("remote_attachment.zig");
@@ -62,6 +63,43 @@ fn attachmentTransport(client: *client_mod.Client) remote_attachment.AttachmentT
     };
 }
 
+fn metadataDtoMatchesObservation(
+    dto: *const runtime_metadata_wire.OwnedMetadataDto,
+    view: term_backend.RuntimeObservationView,
+) bool {
+    if (view.availability != .current or
+        dto.revision != view.revision or
+        dto.observer_generation != view.observer_generation or
+        dto.title_generation != view.title_generation or
+        dto.cols != view.size.cols or dto.rows != view.size.rows or
+        @intFromEnum(dto.semantic_state) != @intFromEnum(view.semantic_state) or
+        dto.alt_active != view.alt_active or
+        dto.app_cursor_keys != view.app_cursor_keys or
+        dto.app_keypad != view.app_keypad or
+        dto.kitty_flags != view.kitty_flags or
+        dto.alternate_scroll != view.alternate_scroll or
+        dto.mouse_tracking != view.mouse_tracking or
+        dto.mouse_tracking_mode != view.mouse_tracking_mode or
+        dto.bracketed_paste != view.bracketed_paste or
+        dto.bell_count != view.bell_count or
+        dto.clipboard_write_seq != view.clipboard_write_seq or
+        dto.clipboard_read_seq != view.clipboard_read_seq or
+        dto.foreground_available != view.foreground_available or
+        dto.foreground_pgid != view.foreground_pgid or
+        !std.mem.eql(u8, dto.cwd(), view.cwd) or
+        !std.mem.eql(u8, dto.windowTitle(), view.window_title) or
+        !std.mem.eql(u8, dto.clipboardReadTarget(), view.clipboard_read_target) or
+        ((dto.sshRemoteDest() == null) != (view.ssh_remote_dest == null)) or
+        dto.process_count != view.foreground_processes.len)
+        return false;
+    if (dto.sshRemoteDest()) |dest|
+        if (!std.mem.eql(u8, dest, view.ssh_remote_dest.?)) return false;
+    for (dto.foregroundProcesses(), view.foreground_processes) |a, b| {
+        if (a.pid != b.pid or !std.mem.eql(u8, a.slice(), b.slice())) return false;
+    }
+    return true;
+}
+
 /// 한 원격 runtime. self-referential(`surface.remote`가 attachment screen을 가리킴)이라 **in-place `spawn`**을 쓴다
 /// (caller가 `var rr: RemoteRuntime = undefined; try rr.spawn(...)`). spawn 후 이 값을 이동하면 안 된다.
 pub const RemoteRuntime = struct {
@@ -72,6 +110,7 @@ pub const RemoteRuntime = struct {
     attachment: remote_attachment.RemoteAttachment,
     resize_seq: u64, // 단조 증가 client_sequence — registry가 이하 sequence를 stale로 거부하므로 매 resize마다 올린다.
     resize_generation: u64,
+    resize_baseline_present: bool,
     // blocking `SurfaceRuntime.writeInput`의 key bytes와 그 사이 core command를 한 시간축으로 보존한다.
     // control.barrier는 그 명령보다 먼저 host에 도착해야 하는 direct_input byte prefix 끝이다.
     direct_input: std.ArrayListUnmanaged(u8),
@@ -117,6 +156,7 @@ pub const RemoteRuntime = struct {
         self.io = io;
         self.resize_seq = 0;
         self.resize_generation = 0;
+        self.resize_baseline_present = false;
         self.direct_input = .empty;
         self.direct_input_offset = 0;
         self.pending_controls = .empty;
@@ -163,6 +203,7 @@ pub const RemoteRuntime = struct {
         self.io = io;
         self.resize_seq = 0;
         self.resize_generation = 0;
+        self.resize_baseline_present = false;
         self.direct_input = .empty;
         self.direct_input_offset = 0;
         self.pending_controls = .empty;
@@ -173,29 +214,6 @@ pub const RemoteRuntime = struct {
         self.runtime_id_hex = runtime_id_hex;
         // terminate errdefer 없음(pre-existing runtime을 attach 실패로 죽이지 않는다).
         try self.attachAndAssemble(surface_id, size);
-    }
-
-    /// stream_id 없는 attach 응답의 error envelope를 읽어 **영구 실패**와 **일시 실패**를 가른다. §7 접속 실패 행렬에서
-    /// "manifest엔 있으나 runtime이 없음"은 파일 손상이 아니라 ended 상태이므로 caller가 그 Term만 종료 placeholder로
-    /// 둘 수 있어야 하는데, 전부 `AttachFailed`로 접으면 그 판정이 불가능하다. 반대로 runtime이 **살아 있을 수 있는**
-    /// 코드(`controller_busy`·`unauthorized`·`queue_invalidated`·미지 코드)를 영구로 오분류하면 살아 있는 세션을
-    /// placeholder로 굳혀 사용자가 잃으므로, 확실한 둘만 승격하고 나머지는 `AttachFailed`를 유지한다(fail-closed).
-    /// envelope를 못 읽는 경우(비JSON·error 키 없음)도 단정하지 않고 `AttachFailed`다.
-    fn attachFailureCode(
-        allocator: std.mem.Allocator,
-        resp: []const u8,
-    ) error{ OutOfMemory, UnknownWireError }!?protocol.ErrorCode {
-        const obj = decodeStrictObject(allocator, resp) catch |err| return switch (err) {
-            error.OutOfMemory => error.OutOfMemory,
-            else => null,
-        };
-        defer obj.deinit();
-        // A success object can be parsed by this shallow decoder too (notably frozen v1's
-        // `{"stream_id":N}`), so exact-envelope checks apply only when an error key exists.
-        const code = obj.string("error") orelse return null;
-        if (obj.fields.len != 1 or obj.hasUnknownKey(&.{"error"}))
-            return error.UnknownWireError;
-        return protocol.ErrorCode.fromWireName(code) orelse error.UnknownWireError;
     }
 
     /// spawn/attachExisting 공통(§10 attach 순서): controller attach(stream_id) → 첫 snapshot 조립 → 원격-backed Surface.
@@ -212,55 +230,59 @@ pub const RemoteRuntime = struct {
             return err;
         };
         defer self.allocator.free(attach_resp);
-        const remote_failure = attachFailureCode(self.allocator, attach_resp) catch |err| {
-            // OOM cannot distinguish a committed success from an error envelope, while an unknown
-            // wire error means same-major schema drift. Neither has a trustworthy stream-local
-            // rollback target, so poison the shared connection.
-            self.client.failClosed();
-            return err;
-        };
-        if (remote_failure) |code| return switch (code) {
-            .runtime_not_found => error.RuntimeNotFound,
-            .stale_host => error.StaleHostHandle,
-            else => error.AttachFailed,
-        };
         const runtime_id = std.fmt.parseInt(u128, &self.runtime_id_hex, 16) catch
             return error.AttachFailed;
-        const accepted = (if (self.client.wire_major == 1)
-            remote_attachment.decodeFrozenV1ControllerAttach(
-                self.allocator,
-                attach_resp,
-                runtime_id,
-            )
-        else
-            remote_attachment.decodeAttachForCapabilities(
-                self.allocator,
-                attach_resp,
-                runtime_id,
-                .controller,
-                self.client.attachment_capabilities.peer_attach_generation,
-            )) catch |err| switch (err) {
+        const compatibility_profile = self.client.compatibility_profile orelse {
+            self.client.failClosed();
+            return error.AttachFailed;
+        };
+        const generation_schema: runtime_metadata_wire.AttachGenerationSchema = switch (compatibility_profile.attach_schema) {
+            .frozen_controller_only => .frozen_controller_only,
+            .granted_roles => if (self.client.attachment_capabilities.peer_attach_generation)
+                .granted_with_generation
+            else
+                .granted_without_generation,
+        };
+        var decoded = remote_attachment.decodeAttachResponse(
+            self.allocator,
+            attach_resp,
+            runtime_id,
+            .controller,
+            .{
+                .generation_schema = generation_schema,
+                .metadata_support = self.client.metadata_support,
+            },
+        ) catch |err| switch (err) {
             error.OutOfMemory => {
-                // Same unknown-commit boundary as error-envelope parsing: strict decode OOM
-                // cannot recover a trustworthy stream id for targeted detach.
                 self.client.failClosed();
                 return error.OutOfMemory;
             },
-            error.Malformed => {
-                // role/capability를 추측한 채 shared connection을 계속 쓰면 observer가 controller처럼 mutation을
-                // enqueue할 수 있으므로 strict grant 실패는 connection 전체를 poison한다.
+            error.Malformed, error.ResourceExhausted, error.CapabilityViolation => {
                 self.client.failClosed();
                 return error.AttachFailed;
             },
         };
+        defer decoded.deinit();
+        const accepted = switch (decoded) {
+            .wire_error => |code| return switch (code) {
+                .runtime_not_found => error.RuntimeNotFound,
+                .stale_host => error.StaleHostHandle,
+                else => error.AttachFailed,
+            },
+            .accepted => |*value| value,
+        };
+        switch (accepted.initial_metadata) {
+            .current => |*dto| _ = self.applyMetadataDto(dto) catch |err| {
+                self.client.failClosed();
+                return err;
+            },
+            .unsupported, .unavailable => {},
+        }
         self.attachment = .init(self.allocator, accepted.state);
         self.attachment.bindTransport(attachmentTransport(self.client)) catch {
             self.client.failClosed();
             return error.AttachFailed;
         };
-        // 새 host는 attach response에 current full metadata를 싣는다. 구 host/누락은 attach 자체를 깨지 않고 unavailable로
-        // 남겨 GUI가 empty와 혼동하지 않게 한다.
-        _ = self.applyObservationJson(attach_resp) catch {};
         // attach RPC가 controller lease를 잡은 뒤 snapshot/화면 조립이 실패하면 caller에는 아직 완성된
         // RemoteRuntime이 없어 detachClientSide를 부를 수 없다. 이 구간에서 반드시 lease와 demux 큐를 되돌린다.
         errdefer {
@@ -548,6 +570,29 @@ pub const RemoteRuntime = struct {
         SequenceExhausted,
     };
 
+    /// RPC replies and async events are two transports for the same host-authoritative full
+    /// state. Keep their revision/equivocation rule here so delivery order cannot change whether
+    /// an equal-generation size conflict is accepted.
+    fn applyResizeFullState(
+        self: *RemoteRuntime,
+        size: terminal.Size,
+        generation: u64,
+    ) client_mod.ClientError!bool {
+        if (!self.resize_baseline_present or generation > self.resize_generation) {
+            self.resize_generation = generation;
+            self.observation.size = size;
+            self.resize_baseline_present = true;
+            return true;
+        }
+        if (generation == self.resize_generation and
+            !std.meta.eql(size, self.observation.size))
+        {
+            self.client.failClosed();
+            return error.ProtocolError;
+        }
+        return false;
+    }
+
     pub fn resize(self: *RemoteRuntime, cols: u16, rows: u16) ResizeError!void {
         // Observer viewport follows the controller's canonical runtime size; local window changes
         // are acknowledged as a no-op instead of becoming an infinite GUI retry.
@@ -566,10 +611,10 @@ pub const RemoteRuntime = struct {
         switch (reply) {
             .stale => {},
             .applied => |applied| {
-                if (applied.resize_generation >= self.resize_generation) {
-                    self.resize_generation = applied.resize_generation;
-                    self.observation.size = applied.size;
-                }
+                _ = try self.applyResizeFullState(
+                    applied.size,
+                    applied.resize_generation,
+                );
             },
         }
     }
@@ -614,59 +659,87 @@ pub const RemoteRuntime = struct {
 
     fn drainObservationEvents(self: *RemoteRuntime) client_mod.ClientError!EventDrain {
         var result: EventDrain = .{};
-        while (self.client.takeEventForStream(self.attachment.streamId())) |frame| {
-            defer frame.deinit(self.allocator);
-            if (std.mem.indexOf(u8, frame.payload, "\"event\":\"controller.revoked\"") != null) {
-                _ = self.attachment.applyRevoked(frame.payload) catch |err| {
-                    self.client.failClosed();
-                    return switch (err) {
-                        error.OutOfMemory => error.OutOfMemory,
-                        error.Malformed => error.ProtocolError,
-                    };
-                };
-                self.discardQueuedMutations();
-                switch (try self.client.fenceRevokedStream(self.attachment.streamId())) {
-                    .no_pending_stream_frame, .cancelled_before_write => {},
-                    .partial_frame_requires_close => {
-                        // A partial frame cannot be truncated without corrupting the shared wire.
-                        // The host generation fence decides the documented old/new-controller
-                        // linearization; this exceptional case must close sibling streams too.
-                        self.client.failClosed();
-                        return error.ConnectionClosed;
+        while (try self.client.takeEventForStream(self.attachment.streamId())) |frame| {
+            defer self.client.releaseEvent(frame);
+            const verdict = frame.preflight orelse
+                runtime_event_wire.preflightEvent(frame.payload, .{});
+            const classification = runtime_metadata_wire.classifyAndMaterializeEvent(
+                self.allocator,
+                .{
+                    .runtime_id = self.attachment.state.runtime_id,
+                    .stream_id = self.attachment.state.stream_id,
+                },
+                .{
+                    .role = switch (self.attachment.state.role) {
+                        .observer => .observer,
+                        .controller => .controller,
                     },
-                }
-                result.metadata = true;
-                continue;
-            }
-            if (isRuntimeEndedEvent(frame.payload)) {
-                result.ended = true;
-                continue;
-            }
-            if (isSnapshotInvalidatedEvent(frame.payload)) {
-                // Latch before releasing the event. The next frame-pump turn admits one bounded,
-                // response-free stream ack; socket backpressure leaves the latch set for retry.
-                self.resync_needed = true;
-                continue;
-            }
-            if (std.mem.indexOf(
-                u8,
-                frame.payload,
-                "\"event\":\"runtime.resized\"",
-            ) != null) {
-                const applied = applyResizeEvent(
-                    self.allocator,
-                    frame.payload,
-                    self.runtime_id_hex,
-                    &self.resize_generation,
-                    &self.observation.size,
-                ) catch |err| {
-                    if (err == error.ProtocolError) self.client.failClosed();
-                    return err;
+                    .generation = self.attachment.state.controller_generation,
+                },
+                .{
+                    .expected_major = self.client.wire_major,
+                    .metadata_support = self.client.metadata_support,
+                    .verdict = verdict,
+                },
+                .{
+                    .major = frame.header.major,
+                    .kind = frame.header.kind,
+                    .stream_id = frame.header.stream_id,
+                    .request_id = frame.header.request_id,
+                    .flags = frame.header.flags,
+                    .payload_len = frame.header.payload_len,
+                    .payload = frame.payload,
+                },
+            ) catch |err| {
+                self.client.failClosed();
+                return switch (err) {
+                    error.OutOfMemory => error.OutOfMemory,
+                    else => error.ProtocolError,
                 };
-                result.metadata = applied or result.metadata;
-                continue;
+            };
+            const event = switch (classification) {
+                .accepted => |accepted| accepted,
+                .violation => {
+                    self.client.failClosed();
+                    return error.ProtocolError;
+                },
+            };
+            switch (event) {
+                .revoked => |generation| {
+                    self.attachment.applyValidatedRevoked(generation) catch {
+                        self.client.failClosed();
+                        return error.ProtocolError;
+                    };
+                    self.discardQueuedMutations();
+                    switch (try self.client.fenceRevokedStream(self.attachment.streamId())) {
+                        .no_pending_stream_frame, .cancelled_before_write => {},
+                        .partial_frame_requires_close => {
+                            self.client.failClosed();
+                            return error.ConnectionClosed;
+                        },
+                    }
+                    result.metadata = true;
+                },
+                .invalidated => {
+                    // Latch before releasing the event. The next frame-pump turn admits one
+                    // bounded response-free stream ack; backpressure leaves it set for retry.
+                    self.resync_needed = true;
+                },
+                .resized => |resized| {
+                    const size: terminal.Size = .{ .cols = resized.cols, .rows = resized.rows };
+                    if (try self.applyResizeFullState(size, resized.resize_generation))
+                        result.metadata = true;
+                },
+                .metadata => |metadata| {
+                    var dto = metadata;
+                    defer dto.deinit();
+                    result.metadata = (self.applyMetadataDto(&dto) catch |err| {
+                        self.client.failClosed();
+                        return err;
+                    }) or result.metadata;
+                },
+                .ended => result.ended = true,
             }
-            result.metadata = (try self.applyObservationJson(frame.payload)) or result.metadata;
         }
         if (result.ended) self.client.dropBufferedStream(self.attachment.streamId());
         return result;
@@ -681,176 +754,55 @@ pub const RemoteRuntime = struct {
         if (accepted) self.resync_needed = false;
     }
 
-    /// attach response(`result.metadata`)와 후속 event(`metadata`)가 공유하는 parser. event는 full-state이므로 현재보다 큰
-    /// revision만 owned cache로 원자 교체한다. duplicate/stale revision은 무시하고, 손상 JSON은 기존 cache를 보존한다.
-    fn applyObservationJson(self: *RemoteRuntime, payload: []const u8) error{OutOfMemory}!bool {
-        const wire_revision = (try observation_wire.payloadRevision(self.allocator, payload)) orelse return false;
-        var parsed = std.json.parseFromSlice(std.json.Value, self.allocator, payload, .{}) catch return false;
-        defer parsed.deinit();
-        const root = switch (parsed.value) {
-            .object => |o| o,
-            else => return false,
-        };
-        if (root.get("result") == null) {
-            const event = jsonString(root.get("event") orelse return false) orelse return false;
-            if (!std.mem.eql(u8, event, "runtime.metadata")) return false;
+    fn applyMetadataDto(
+        self: *RemoteRuntime,
+        dto: *const runtime_metadata_wire.OwnedMetadataDto,
+    ) error{ OutOfMemory, ProtocolError }!bool {
+        if (dto.revision < self.observation.revision) return false;
+        if (dto.revision == self.observation.revision) {
+            // A revision is a semantic version, not merely an ordering hint. Accepting different
+            // cwd/SSH data under the same revision would let the synchronous SSH barrier return
+            // success while retaining a stale destination.
+            if (!metadataDtoMatchesObservation(dto, self.observation.view()))
+                return error.ProtocolError;
+            return false;
         }
-        const container = if (root.get("result")) |result| switch (result) {
-            .object => |o| o,
-            else => root,
-        } else root;
-        const revision = jsonU64(container.get("metadata_revision") orelse return false) orelse return false;
-        if (revision != wire_revision) return false;
-        if (revision == 0 or revision <= self.observation.revision) return false;
-        const metadata = switch (container.get("metadata") orelse return false) {
-            .object => |o| o,
-            else => return false,
-        };
-        const cwd = jsonString(metadata.get("cwd") orelse return false) orelse return false;
-        const title = jsonString(metadata.get("window_title") orelse return false) orelse return false;
-        const ssh_dest: ?[]const u8 = if (metadata.get("ssh_remote_dest")) |v| switch (v) {
-            .null => null,
-            .string => |s| s,
-            else => return false,
-        } else null;
-        const semantic_raw = jsonU64(metadata.get("semantic_state") orelse return false) orelse return false;
-        const semantic: terminal.SemanticPrompt = if (semantic_raw <= @intFromEnum(terminal.SemanticPrompt.command))
-            @enumFromInt(@as(u8, @intCast(semantic_raw)))
-        else
-            .unknown;
-        const alt_active = jsonBool(metadata.get("alt_active") orelse return false) orelse return false;
-        const app_cursor_keys = jsonBool(metadata.get("app_cursor_keys") orelse return false) orelse return false;
-        const alternate_scroll = jsonBool(metadata.get("alternate_scroll") orelse return false) orelse return false;
-        // mouse_tracking은 optional(구버전 host 호환) — 없으면 false. host-backed 마우스 리포트 게이트(휠 리포트 vs 스크롤백)용.
-        const mouse_tracking = if (metadata.get("mouse_tracking")) |v| (jsonBool(v) orelse return false) else false;
-        // 모드는 optional — 없으면(구 host) bool에서 폴백한다. 폴백 값은 `normal`(클릭 리포팅)로 보수적으로 잡아
-        // motion(any)을 추측 전송하지 않는다: 1000만 켠 앱에 motion을 쏟으면 PTY 부하와 오작동이 된다.
-        const bell_count: u64 = if (metadata.get("bell_count")) |v| (jsonU64(v) orelse return false) else 0;
-        const clipboard_write_seq: u64 = if (metadata.get("clipboard_write_seq")) |v| (jsonU64(v) orelse return false) else 0;
-        const clipboard_read_seq: u64 = if (metadata.get("clipboard_read_seq")) |v| (jsonU64(v) orelse return false) else 0;
-        const clipboard_read_target: []const u8 = if (metadata.get("clipboard_read_target")) |v| (jsonString(v) orelse return false) else "";
-        const mouse_tracking_mode: u8 = if (metadata.get("mouse_tracking_mode")) |v|
-            (if (jsonU64(v)) |n| @intCast(@min(n, 4)) else return false)
-        else if (mouse_tracking) 2 else 0;
-        // bracketed_paste도 optional(구버전 host 호환) — 없으면 false. host-backed 붙여넣기 게이트/인코딩용.
-        const bracketed_paste = if (metadata.get("bracketed_paste")) |v| (jsonBool(v) orelse return false) else false;
-        // app_keypad·kitty_flags도 optional(구버전 host 호환) — host-backed 일반 key의 DECKPAM(numpad)·kitty keyboard
-        // 인코딩 parity용. 없으면 기본값(numeric·legacy)이라 구 host 재접속에도 안전하다.
-        const app_keypad = if (metadata.get("app_keypad")) |v| (jsonBool(v) orelse return false) else false;
-        const kitty_flags: u5 = if (metadata.get("kitty_flags")) |v| blk: {
-            const n = jsonU64(v) orelse return false;
-            if (n > std.math.maxInt(u5)) return false; // kitty flag 스택 최상단은 5비트 — 범위 밖은 malformed.
-            break :blk @intCast(n);
-        } else 0;
-        const observer_generation = jsonU64(metadata.get("observer_generation") orelse return false) orelse return false;
-        const title_generation_u64 = jsonU64(metadata.get("title_generation") orelse return false) orelse return false;
-        if (title_generation_u64 > std.math.maxInt(u32)) return false;
-        const cols_u64 = jsonU64(metadata.get("cols") orelse return false) orelse return false;
-        const rows_u64 = jsonU64(metadata.get("rows") orelse return false) orelse return false;
-        if (cols_u64 > std.math.maxInt(u16) or rows_u64 > std.math.maxInt(u16)) return false;
-        const foreground_available = jsonBool(metadata.get("foreground_available") orelse return false) orelse return false;
-        const foreground_pgid: ?i32 = if (metadata.get("foreground_pgid")) |v| switch (v) {
-            .null => null,
-            .integer => |n| if (n >= std.math.minInt(i32) and n <= std.math.maxInt(i32)) @intCast(n) else return false,
-            else => return false,
-        } else null;
-
-        var processes: [64]maru.pty.types.ForegroundProcessName = undefined;
-        var process_count: usize = 0;
-        if (metadata.get("processes")) |pv| switch (pv) {
-            .array => |arr| {
-                for (arr.items) |item| {
-                    if (process_count >= processes.len) break;
-                    const obj = switch (item) {
-                        .object => |o| o,
-                        else => return false,
-                    };
-                    const pid_raw = switch (obj.get("pid") orelse return false) {
-                        .integer => |n| n,
-                        else => return false,
-                    };
-                    if (pid_raw < std.math.minInt(i32) or pid_raw > std.math.maxInt(i32)) return false;
-                    const name = jsonString(obj.get("name") orelse return false) orelse return false;
-                    const len = @min(name.len, processes[process_count].bytes.len);
-                    processes[process_count] = .{ .pid = @intCast(pid_raw), .len = @intCast(len), .bytes = undefined };
-                    @memcpy(processes[process_count].bytes[0..len], name[0..len]);
-                    process_count += 1;
-                }
-            },
-            else => return false,
-        };
-
+        var processes: [runtime_metadata_wire.max_process_entries]maru.pty.types.ForegroundProcessName =
+            undefined;
+        for (dto.foregroundProcesses(), 0..) |process, index| {
+            processes[index] = .{
+                .pid = process.pid,
+                .len = process.len,
+                .bytes = process.bytes,
+            };
+        }
         try self.observation.replace(self.allocator, .{
             .availability = .current,
-            .revision = revision,
-            .observer_generation = observer_generation,
-            .title_generation = @intCast(title_generation_u64),
-            .size = .{ .cols = @intCast(cols_u64), .rows = @intCast(rows_u64) },
-            .cwd = cwd,
-            .window_title = title,
-            .ssh_remote_dest = ssh_dest,
-            .semantic_state = semantic,
-            .alt_active = alt_active,
-            .app_cursor_keys = app_cursor_keys,
-            .app_keypad = app_keypad,
-            .kitty_flags = kitty_flags,
-            .alternate_scroll = alternate_scroll,
-            .mouse_tracking = mouse_tracking,
-            .mouse_tracking_mode = mouse_tracking_mode,
-            .bell_count = bell_count,
-            .clipboard_write_seq = clipboard_write_seq,
-            .clipboard_read_seq = clipboard_read_seq,
-            .clipboard_read_target = clipboard_read_target,
-            .bracketed_paste = bracketed_paste,
-            .foreground_available = foreground_available,
-            .foreground_pgid = foreground_pgid,
-            .foreground_processes = processes[0..process_count],
+            .revision = dto.revision,
+            .observer_generation = dto.observer_generation,
+            .title_generation = dto.title_generation,
+            .size = .{ .cols = dto.cols, .rows = dto.rows },
+            .cwd = dto.cwd(),
+            .window_title = dto.windowTitle(),
+            .ssh_remote_dest = dto.sshRemoteDest(),
+            .semantic_state = @enumFromInt(@intFromEnum(dto.semantic_state)),
+            .alt_active = dto.alt_active,
+            .app_cursor_keys = dto.app_cursor_keys,
+            .app_keypad = dto.app_keypad,
+            .kitty_flags = dto.kitty_flags,
+            .alternate_scroll = dto.alternate_scroll,
+            .mouse_tracking = dto.mouse_tracking,
+            .mouse_tracking_mode = dto.mouse_tracking_mode,
+            .bell_count = dto.bell_count,
+            .clipboard_write_seq = dto.clipboard_write_seq,
+            .clipboard_read_seq = dto.clipboard_read_seq,
+            .clipboard_read_target = dto.clipboardReadTarget(),
+            .bracketed_paste = dto.bracketed_paste,
+            .foreground_available = dto.foreground_available,
+            .foreground_pgid = dto.foreground_pgid,
+            .foreground_processes = processes[0..dto.process_count],
         });
         return true;
-    }
-
-    fn jsonU64(value: std.json.Value) ?u64 {
-        return switch (value) {
-            .integer => |n| if (n >= 0) @intCast(n) else null,
-            else => null,
-        };
-    }
-
-    fn jsonString(value: std.json.Value) ?[]const u8 {
-        return switch (value) {
-            .string => |s| s,
-            else => null,
-        };
-    }
-
-    fn jsonBool(value: std.json.Value) ?bool {
-        return switch (value) {
-            .bool => |b| b,
-            else => null,
-        };
-    }
-
-    fn isSnapshotInvalidatedEvent(payload: []const u8) bool {
-        // The host owns one canonical allocation-free encoding. Exact matching prevents an
-        // allocator failure while classifying the recovery notice from silently losing intent.
-        return std.mem.eql(u8, payload, "{\"event\":\"snapshot.invalidated\"}");
-    }
-
-    fn isRuntimeEndedEvent(payload: []const u8) bool {
-        if (std.mem.eql(u8, payload, "{\"event\":\"runtime.ended\"}")) return true;
-        var parsed = std.json.parseFromSlice(
-            std.json.Value,
-            std.heap.page_allocator,
-            payload,
-            .{},
-        ) catch return false;
-        defer parsed.deinit();
-        const root = switch (parsed.value) {
-            .object => |value| value,
-            else => return false,
-        };
-        const event = jsonString(root.get("event") orelse return false) orelse return false;
-        return std.mem.eql(u8, event, "runtime.ended");
     }
 
     /// host runtime을 종료한다(client-side 자원은 남긴다 — 회수는 `deinit`). `TermRuntimeBackend.close_and_detach`/`close`가
@@ -878,12 +830,41 @@ pub const RemoteRuntime = struct {
         const before = self.observation.revision;
         const resp = try self.callOrdered("runtime.observation", params);
         defer self.allocator.free(resp);
-        const revision = client_mod.extractU64Field(resp, "\"metadata_revision\":") orelse return error.ProtocolError;
-        if (revision < before) return error.ProtocolError;
-        const changed = try self.applyObservationJson(resp);
-        if (revision > before and !changed) return error.ProtocolError;
-        if (self.observation.availability != .current or self.observation.revision != revision)
+        var seed = runtime_metadata_wire.decodeObservationEnvelope(
+            self.allocator,
+            resp,
+        ) catch |err| {
+            self.client.failClosed();
+            return switch (err) {
+                error.OutOfMemory => error.OutOfMemory,
+                error.Malformed, error.ResourceExhausted, error.CapabilityViolation => error.ProtocolError,
+            };
+        };
+        defer seed.deinit();
+        const dto = switch (seed) {
+            .current => |*current| current,
+            .unsupported, .unavailable => {
+                self.client.failClosed();
+                return error.ProtocolError;
+            },
+        };
+        const revision = dto.revision;
+        if (revision < before) {
+            self.client.failClosed();
             return error.ProtocolError;
+        }
+        const changed = self.applyMetadataDto(dto) catch |err| {
+            self.client.failClosed();
+            return err;
+        };
+        if (revision > before and !changed) {
+            self.client.failClosed();
+            return error.ProtocolError;
+        }
+        if (self.observation.availability != .current or self.observation.revision != revision) {
+            self.client.failClosed();
+            return error.ProtocolError;
+        }
     }
 
     /// host에 뷰포트 선택 span을 보내 host의 `extractSelection`(로컬과 같은 함수)으로 뽑은 텍스트를 받는다(§6b 원격 선택 복사).
@@ -1486,28 +1467,6 @@ const ResizeReply = union(enum) {
     },
 };
 
-fn applyResizeEvent(
-    allocator: std.mem.Allocator,
-    payload: []const u8,
-    runtime_id_hex: [32]u8,
-    generation: *u64,
-    size: *terminal.Size,
-) error{ OutOfMemory, ProtocolError }!bool {
-    const resized = resize_wire.parseEvent(allocator, payload) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        error.Invalid => return error.ProtocolError,
-    };
-    var expected_id: [32]u8 = undefined;
-    _ = std.fmt.bufPrint(&expected_id, "{x:0>32}", .{resized.runtime_id}) catch
-        return error.ProtocolError;
-    if (!std.mem.eql(u8, &expected_id, &runtime_id_hex))
-        return error.ProtocolError;
-    if (resized.resize_generation <= generation.*) return false;
-    generation.* = resized.resize_generation;
-    size.* = .{ .cols = resized.cols, .rows = resized.rows };
-    return true;
-}
-
 fn parseResizeReply(
     allocator: std.mem.Allocator,
     payload: []const u8,
@@ -1621,57 +1580,6 @@ test "remote runtime: resize reply preserves stale size and uses host-clamped ap
     );
 }
 
-test "remote runtime applies resize gaps, ignores duplicates, and rejects foreign or malformed state" {
-    const runtime_id: [32]u8 = "000000000000000000000000000000aa".*;
-    var generation: u64 = 0;
-    var size: terminal.Size = .{ .cols = 80, .rows = 24 };
-    const generation4 =
-        \\{"event":"runtime.resized","data":{"runtime_id":"000000000000000000000000000000aa","cols":100,"rows":30,"resize_generation":4,"reason":"controller"}}
-    ;
-    const generation9 =
-        \\{"event":"runtime.resized","data":{"runtime_id":"000000000000000000000000000000aa","cols":120,"rows":40,"resize_generation":9,"reason":"controller"}}
-    ;
-    try std.testing.expect(try applyResizeEvent(
-        std.testing.allocator,
-        generation4,
-        runtime_id,
-        &generation,
-        &size,
-    ));
-    try std.testing.expect(!try applyResizeEvent(
-        std.testing.allocator,
-        generation4,
-        runtime_id,
-        &generation,
-        &size,
-    ));
-    try std.testing.expect(try applyResizeEvent(
-        std.testing.allocator,
-        generation9,
-        runtime_id,
-        &generation,
-        &size,
-    ));
-    try std.testing.expectEqual(@as(u64, 9), generation);
-    try std.testing.expectEqual(terminal.Size{ .cols = 120, .rows = 40 }, size);
-    try std.testing.expectError(error.ProtocolError, applyResizeEvent(
-        std.testing.allocator,
-        \\{"event":"runtime.resized","data":{"runtime_id":"000000000000000000000000000000bb","cols":140,"rows":50,"resize_generation":10,"reason":"controller"}}
-    ,
-        runtime_id,
-        &generation,
-        &size,
-    ));
-    try std.testing.expectError(error.ProtocolError, applyResizeEvent(
-        std.testing.allocator,
-        "{\"event\":\"runtime.resized\"}",
-        runtime_id,
-        &generation,
-        &size,
-    ));
-    try std.testing.expectEqual(@as(u64, 9), generation);
-}
-
 test "remote runtime fails the shared connection on an immediately consumed foreign resize" {
     const allocator = std.testing.allocator;
     var client = client_mod.Client{
@@ -1681,7 +1589,7 @@ test "remote runtime fails the shared connection on an immediately consumed fore
         .parser = framing.FrameParser.init(allocator),
     };
     defer client.deinit();
-    const foreign = framing.Frame{
+    var foreign = client_mod.BufferedEvent{
         .header = .{ .kind = .event, .stream_id = 7 },
         .payload = try allocator.dupe(
             u8,
@@ -1689,6 +1597,7 @@ test "remote runtime fails the shared connection on an immediately consumed fore
             ,
         ),
     };
+    foreign.header.payload_len = @intCast(foreign.payload.len);
     try client.pending_events.append(allocator, foreign);
     client.pending_event_bytes = foreign.payload.len;
 
@@ -1698,6 +1607,7 @@ test "remote runtime fails the shared connection on an immediately consumed fore
     runtime.attachment = .init(testing.allocator, .{ .runtime_id = 1, .stream_id = 7, .role = .controller, .controller_generation = 1 });
     runtime.runtime_id_hex = "000000000000000000000000000000aa".*;
     runtime.resize_generation = 0;
+    runtime.resize_baseline_present = false;
     runtime.observation = .{};
     defer runtime.observation.deinit(allocator);
     try std.testing.expectError(error.ProtocolError, runtime.drainObservationEvents());
@@ -1978,100 +1888,547 @@ test "remote runtime: spawn wire preserves extended SpawnRequest fields" {
     try std.testing.expect(std.mem.indexOf(u8, json, "\"max_scrollback\"") == null); // host decoder와 다른 내부 필드명 누출 금지.
 }
 
-// 마우스 트래킹 **모드**는 host-backed motion 리포팅(DECSET 1003)의 판정 근거다. 예전 관측은 bool뿐이라 1003을
-// 가를 수 없었고 그래서 원격 세션에서 motion이 통째로 빠졌다. 모드를 싣는 새 host는 그 값을 그대로 쓰고, 모드가
-// 없는 구 host는 **여기서 한 번만** `.normal`로 보수적 폴백한다 — motion을 추측 전송하면 1000만 켠 앱이 오작동한다.
-// (폴백이 이 파싱 지점 하나여야 소비자[app_session]가 중복 판정하지 않는다.)
-test "remote runtime: 관측의 마우스 트래킹 모드는 그대로, 없는 구 host는 normal로 폴백한다" {
-    const allocator = std.testing.allocator;
-    const parse = struct {
-        fn run(a: std.mem.Allocator, extra: []const u8) !u8 {
-            var rr: RemoteRuntime = undefined;
-            rr.allocator = a;
-            rr.observation = .{};
-            defer rr.observation.deinit(a);
-            const json = try std.fmt.allocPrint(a,
-                \\{{"event":"runtime.metadata","metadata_revision":2,"metadata":{{"cwd":"/r","window_title":"w","ssh_remote_dest":null,
-                \\"semantic_state":3,"alt_active":false,"app_cursor_keys":false,"alternate_scroll":true,"mouse_tracking":true,{s}
-                \\"observer_generation":1,"title_generation":1,"cols":80,"rows":24,"foreground_available":false,"foreground_pgid":null,"processes":[]}}}}
-            , .{extra});
-            defer a.free(json);
-            if (!try rr.applyObservationJson(json)) return error.TestUnexpectedResult;
-            return rr.observation.mouse_tracking_mode;
-        }
-    }.run;
-
-    // 새 host: 실은 모드를 그대로 반영한다(any=1003이어야 motion이 나간다).
-    try std.testing.expectEqual(@as(u8, 4), try parse(allocator, "\"mouse_tracking_mode\":4,"));
-    try std.testing.expectEqual(@as(u8, 2), try parse(allocator, "\"mouse_tracking_mode\":2,"));
-    // 구 host: 모드 필드가 없으면 bool(true)에서 normal(2)로 폴백 — any로 승격하지 않는다.
-    try std.testing.expectEqual(@as(u8, 2), try parse(allocator, ""));
+fn seedMetadataTestObservation(
+    observation: *term_backend.RuntimeObservation,
+    allocator: std.mem.Allocator,
+) !void {
+    var process: maru.pty.types.ForegroundProcessName = .{
+        .pid = 55,
+        .len = "claude".len,
+    };
+    @memcpy(process.bytes[0.."claude".len], "claude");
+    try observation.replace(allocator, .{
+        .availability = .current,
+        .revision = 2,
+        .observer_generation = 9,
+        .title_generation = 4,
+        .size = .{ .cols = 120, .rows = 40 },
+        .cwd = "/safe",
+        .window_title = "work",
+        .ssh_remote_dest = "safe-host",
+        .semantic_state = .command,
+        .alt_active = true,
+        .app_cursor_keys = true,
+        .foreground_available = true,
+        .foreground_pgid = 55,
+        .foreground_processes = &.{process},
+    });
 }
 
-test "remote runtime: metadata parser applies only newer coherent full-state revisions" {
+fn expectGuiMetadataProjectionFailurePreservesCache(
+    payload: []const u8,
+    support: runtime_metadata_wire.MetadataSupport,
+    expected: enum { malformed_drop, fail_closed },
+) !void {
     const allocator = std.testing.allocator;
+    var fds: [2]c.fd_t = undefined;
+    try std.testing.expectEqual(
+        @as(c_int, 0),
+        c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds),
+    );
+    defer _ = c.close(fds[1]);
+    var client: client_mod.Client = .{
+        .allocator = allocator,
+        .fd = fds[0],
+        .host_id = 1,
+        .parser = @import("framing.zig").FrameParser.init(allocator),
+        .metadata_support = .supported,
+    };
+    defer client.deinit();
     var rr: RemoteRuntime = undefined;
+    rr.client = &client;
     rr.allocator = allocator;
+    rr.attachment = .init(allocator, .{
+        .runtime_id = 0xaa,
+        .stream_id = 7,
+        .role = .controller,
+        .controller_generation = 1,
+    });
+    defer rr.attachment.deinit();
     rr.observation = .{};
     defer rr.observation.deinit(allocator);
 
-    const rev2 =
-        \\{"event":"runtime.metadata","metadata_revision":2,"metadata":{"cwd":"/repo","window_title":"work","ssh_remote_dest":"host",
-        \\"semantic_state":3,"alt_active":true,"app_cursor_keys":true,"alternate_scroll":true,"mouse_tracking":true,"bracketed_paste":true,"app_keypad":true,"kitty_flags":5,"observer_generation":9,"title_generation":4,"cols":120,"rows":40,
-        \\"foreground_available":true,"foreground_pgid":55,"processes":[{"pid":55,"name":"claude"}]}}
-    ;
-    try std.testing.expect(try rr.applyObservationJson(rev2));
-    try std.testing.expectEqual(term_backend.ObservationAvailability.current, rr.observation.availability);
+    try seedMetadataTestObservation(&rr.observation, allocator);
+    client.metadata_support = support;
+    const event_wire = try framing.encodeFrame(
+        allocator,
+        .{
+            .major = protocol.version_major,
+            .kind = .event,
+            .stream_id = 7,
+        },
+        payload,
+    );
+    defer allocator.free(event_wire);
+    const response_wire = try framing.encodeFrame(
+        allocator,
+        .{
+            .major = protocol.version_major,
+            .kind = .response,
+            .request_id = client.next_request_id,
+        },
+        "{\"result\":{}}",
+    );
+    defer allocator.free(response_wire);
+    const request_wire = try framing.encodeFrame(
+        allocator,
+        .{
+            .major = protocol.version_major,
+            .kind = .request,
+            .request_id = client.next_request_id,
+        },
+        "{\"method\":\"host.info\",\"params\":{}}",
+    );
+    defer allocator.free(request_wire);
+    try socket_server.writeAll(fds[1], event_wire);
+    try socket_server.writeAll(fds[1], response_wire);
+
+    switch (expected) {
+        .malformed_drop => {
+            const response = try client.call("host.info", "{}");
+            defer allocator.free(response);
+            try std.testing.expectEqualStrings("{\"result\":{}}", response);
+            try std.testing.expect(!client.unusable);
+            try std.testing.expect(client.fd >= 0);
+        },
+        .fail_closed => {
+            try std.testing.expectError(error.ProtocolError, client.call("host.info", "{}"));
+            try std.testing.expect(client.unusable);
+            try std.testing.expectEqual(@as(c.fd_t, -1), client.fd);
+        },
+    }
+    try std.testing.expectEqual(@as(usize, 0), client.pending_events.items.len);
+    try std.testing.expectEqual(@as(usize, 0), client.pending_event_bytes);
     try std.testing.expectEqual(@as(u64, 2), rr.observation.revision);
-    try std.testing.expectEqualStrings("/repo", rr.observation.cwd.items);
-    try std.testing.expectEqualStrings("host", rr.observation.ssh_remote_dest.items);
+    try std.testing.expectEqualStrings("/safe", rr.observation.cwd.items);
+    try std.testing.expectEqualStrings("work", rr.observation.window_title.items);
+    try std.testing.expectEqualStrings("safe-host", rr.observation.ssh_remote_dest.items);
     try std.testing.expectEqual(terminal.SemanticPrompt.command, rr.observation.semantic_state);
     try std.testing.expect(rr.observation.alt_active);
-    try std.testing.expect(rr.observation.mouse_tracking); // host-backed 마우스 리포트 게이트용(§입력 패리티)
-    try std.testing.expect(rr.observation.bracketed_paste); // host-backed 붙여넣기 bracketed 게이트/인코딩용(§입력 패리티)
-    try std.testing.expect(rr.observation.app_keypad); // host-backed 일반 key DECKPAM(numpad) 인코딩 모드(§입력 패리티)
-    try std.testing.expectEqual(@as(u5, 5), rr.observation.kitty_flags); // host-backed 일반 key kitty keyboard flag(§입력 패리티)
-    try std.testing.expectEqual(@as(?i32, 55), rr.observation.foreground_pgid);
+    try std.testing.expect(rr.observation.app_cursor_keys);
     try std.testing.expectEqual(@as(u16, 120), rr.observation.size.cols);
-    try std.testing.expectEqualStrings("claude", rr.observation.foreground_processes.items[0].slice());
-
-    const stale =
-        \\{"event":"runtime.metadata","metadata_revision":1,"metadata":{"cwd":"/stale","window_title":"old","ssh_remote_dest":null,
-        \\"semantic_state":0,"alt_active":false,"app_cursor_keys":false,"alternate_scroll":true,"observer_generation":1,"title_generation":1,"cols":80,"rows":24,
-        \\"foreground_available":false,"foreground_pgid":null,"processes":[]}}
-    ;
-    try std.testing.expect(!try rr.applyObservationJson(stale));
-    try std.testing.expectEqualStrings("/repo", rr.observation.cwd.items);
-
-    // malformed newer event is atomic: revision과 일부 문자열 어느 것도 바뀌지 않는다.
-    try std.testing.expect(!try rr.applyObservationJson(
-        "{\"metadata_revision\":3,\"metadata\":{\"cwd\":\"/partial\"}}",
-    ));
-    try std.testing.expectEqual(@as(u64, 2), rr.observation.revision);
-    try std.testing.expectEqualStrings("/repo", rr.observation.cwd.items);
+    try std.testing.expectEqual(@as(u16, 40), rr.observation.size.rows);
+    try std.testing.expectEqual(@as(?i32, 55), rr.observation.foreground_pgid);
+    try std.testing.expectEqual(@as(usize, 1), rr.observation.foreground_processes.items.len);
+    try std.testing.expectEqualStrings(
+        "claude",
+        rr.observation.foreground_processes.items[0].slice(),
+    );
+    if (expected == .fail_closed) {
+        // stream close는 client가 peer 방향 kernel send buffer에 이미 넣은 request를 폐기하지 않는다. 그
+        // request를 정확히 전부 읽은 뒤에야 EOF가 보여야 하므로, 첫 read==0을 요구하면 올바른 fail-close도
+        // 실패로 오판한다. 반대 방향 response는 Client parser가 소유하다가 connection teardown에서 버린다.
+        var drained: [256]u8 = undefined;
+        var drained_len: usize = 0;
+        while (true) {
+            const n = c.read(
+                fds[1],
+                drained[drained_len..].ptr,
+                drained.len - drained_len,
+            );
+            try std.testing.expect(n >= 0);
+            if (n == 0) break;
+            drained_len += @intCast(n);
+            try std.testing.expect(drained_len <= drained.len);
+        }
+        try std.testing.expectEqualSlices(u8, request_wire, drained[0..drained_len]);
+    }
 }
 
-test "remote runtime: mouse_tracking is optional — 구버전 host metadata(필드 없음)는 적용되고 false로 폴백한다" {
+test "remote runtime: GUI metadata ingress drops malformed and fail-closes resource or capability" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
+
+    var processes: std.Io.Writer.Allocating = .init(allocator);
+    defer processes.deinit();
+    for (0..runtime_metadata_wire.max_process_entries + 1) |index| {
+        if (index != 0) try processes.writer.writeByte(',');
+        try processes.writer.print("{{\"pid\":{d},\"name\":\"p\"}}", .{index});
+    }
+    const attack = try std.fmt.allocPrint(
+        allocator,
+        "{{\"event\":\"runtime.metadata\",\"metadata_revision\":3,\"metadata\":{{\"cwd\":\"/attacker\",\"window_title\":\"bad\",\"ssh_remote_dest\":null,\"semantic_state\":0,\"alt_active\":false,\"app_cursor_keys\":false,\"alternate_scroll\":true,\"observer_generation\":1,\"title_generation\":1,\"cols\":80,\"rows\":24,\"foreground_available\":true,\"foreground_pgid\":1,\"processes\":[{s}]}}}}",
+        .{processes.written()},
+    );
+    defer allocator.free(attack);
+    const malformed =
+        "{\"event\":\"runtime.metadata\",\"metadata_revision\":3,\"metadata\":{\"cwd\":\"/partial\"}}";
+    const valid =
+        \\{"event":"runtime.metadata","metadata_revision":3,"metadata":{"cwd":"/attacker","window_title":"bad","ssh_remote_dest":null,"semantic_state":0,"alt_active":false,"app_cursor_keys":false,"alternate_scroll":true,"observer_generation":1,"title_generation":1,"cols":80,"rows":24,"foreground_available":false,"foreground_pgid":null,"processes":[]}}
+    ;
+    try expectGuiMetadataProjectionFailurePreservesCache(
+        malformed,
+        .supported,
+        .malformed_drop,
+    );
+    // A syntactically malformed envelope has no trusted event identity. GUI malformed-drop
+    // precedence therefore applies before capability enforcement; a valid metadata envelope on
+    // the same unsupported profile is still a capability violation below.
+    try expectGuiMetadataProjectionFailurePreservesCache(
+        malformed,
+        .unsupported,
+        .malformed_drop,
+    );
+    try expectGuiMetadataProjectionFailurePreservesCache(attack, .supported, .fail_closed);
+    try expectGuiMetadataProjectionFailurePreservesCache(valid, .unsupported, .fail_closed);
+}
+
+test "remote runtime: actual GUI attach resource failure closes and preserves existing cache" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    var processes: std.Io.Writer.Allocating = .init(allocator);
+    defer processes.deinit();
+    for (0..runtime_metadata_wire.max_process_entries + 1) |index| {
+        if (index != 0) try processes.writer.writeByte(',');
+        try processes.writer.print("{{\"pid\":{d},\"name\":\"p\"}}", .{index});
+    }
+    const body = try std.fmt.allocPrint(
+        allocator,
+        "{{\"result\":{{\"stream_id\":7,\"controller_generation\":1,\"granted\":{{\"observe\":true,\"input\":true,\"resize\":true}},\"controller_busy\":false,\"metadata_revision\":3,\"metadata\":{{\"cwd\":\"/attacker\",\"window_title\":\"bad\",\"ssh_remote_dest\":null,\"semantic_state\":0,\"alt_active\":false,\"app_cursor_keys\":false,\"alternate_scroll\":true,\"observer_generation\":1,\"title_generation\":1,\"cols\":80,\"rows\":24,\"foreground_available\":true,\"foreground_pgid\":1,\"processes\":[{s}]}}}}}}",
+        .{processes.written()},
+    );
+    defer allocator.free(body);
+    const response = try framing.encodeFrame(
+        allocator,
+        .{ .kind = .response, .request_id = 1 },
+        body,
+    );
+    defer allocator.free(response);
+    const AttachPeer = struct {
+        fn run(fd: c.fd_t, wire: []const u8, eof_seen: *bool) void {
+            defer _ = c.close(fd);
+            const peer_allocator = std.heap.page_allocator;
+            const request = readPeerFrame(fd, peer_allocator) catch return;
+            defer peer_allocator.free(request.payload);
+            if (request.header.kind != .request or
+                std.mem.indexOf(u8, request.payload, "\"method\":\"runtime.attach\"") == null)
+                return;
+            socket_server.writeAll(fd, wire) catch return;
+            var poll_fd = posix.pollfd{ .fd = fd, .events = c.POLL.IN, .revents = 0 };
+            if (c.poll(@ptrCast(&poll_fd), 1, 1_000) <= 0) return;
+            var byte: [1]u8 = undefined;
+            eof_seen.* = c.read(fd, &byte, byte.len) == 0;
+        }
+    };
+    var fds: [2]c.fd_t = undefined;
+    try std.testing.expectEqual(
+        @as(c_int, 0),
+        c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds),
+    );
+    var eof_seen = false;
+    var peer = try std.Thread.spawn(.{}, AttachPeer.run, .{
+        fds[1],
+        response,
+        &eof_seen,
+    });
+    var client: client_mod.Client = .{
+        .allocator = allocator,
+        .fd = fds[0],
+        .host_id = 1,
+        .parser = framing.FrameParser.init(allocator),
+        .attachment_capabilities = .{ .peer_attach_generation = true },
+        .metadata_support = .supported,
+        .compatibility_profile = @import("compatibility.zig").profileForMajor(
+            protocol.version_major,
+        ).?,
+    };
+    defer client.deinit();
     var rr: RemoteRuntime = undefined;
+    rr.client = &client;
     rr.allocator = allocator;
+    rr.io = std.testing.io;
+    rr.runtime_id_hex = "000000000000000000000000000000aa".*;
+    rr.observation = .{};
+    defer rr.observation.deinit(allocator);
+    try rr.observation.replace(allocator, .{
+        .availability = .current,
+        .revision = 2,
+        .cwd = "/safe",
+        .window_title = "work",
+        .ssh_remote_dest = "safe-host",
+        .size = .{ .cols = 120, .rows = 40 },
+    });
+    try std.testing.expectError(
+        error.AttachFailed,
+        rr.attachAndAssemble(1, .{ .cols = 80, .rows = 24 }),
+    );
+    peer.join();
+    try std.testing.expect(eof_seen);
+    try std.testing.expect(client.unusable);
+    try std.testing.expectEqual(@as(u64, 2), rr.observation.revision);
+    try std.testing.expectEqualStrings("/safe", rr.observation.cwd.items);
+    try std.testing.expectEqualStrings("work", rr.observation.window_title.items);
+    try std.testing.expectEqualStrings("safe-host", rr.observation.ssh_remote_dest.items);
+}
+
+test "remote runtime: actual GUI metadata event is atomic across every projection allocation failure" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const payload =
+        \\{"event":"runtime.metadata","metadata_revision":3,"metadata":{"cwd":"/next/repo","window_title":"next work","ssh_remote_dest":"next-host","semantic_state":2,"alt_active":true,"app_cursor_keys":true,"alternate_scroll":false,"observer_generation":10,"title_generation":5,"cols":132,"rows":43,"foreground_available":true,"foreground_pgid":77,"processes":[{"pid":77,"name":"codex"}]}}
+    ;
+    const event_wire = try framing.encodeFrame(
+        allocator,
+        .{
+            .major = protocol.version_major,
+            .kind = .event,
+            .stream_id = 7,
+        },
+        payload,
+    );
+    defer allocator.free(event_wire);
+    const response_wire = try framing.encodeFrame(
+        allocator,
+        .{
+            .major = protocol.version_major,
+            .kind = .response,
+            .request_id = 1,
+        },
+        "{\"result\":{}}",
+    );
+    defer allocator.free(response_wire);
+    const ParseCounter = struct {
+        fn note(context: *anyopaque) void {
+            const count: *usize = @ptrCast(@alignCast(context));
+            count.* += 1;
+        }
+    };
+
+    var saw_success = false;
+    for (0..16) |fail_index| {
+        var fds: [2]c.fd_t = undefined;
+        try std.testing.expectEqual(
+            @as(c_int, 0),
+            c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds),
+        );
+        defer _ = c.close(fds[1]);
+        var parse_count: usize = 0;
+        var client: client_mod.Client = .{
+            .allocator = allocator,
+            .fd = fds[0],
+            .host_id = 1,
+            .parser = framing.FrameParser.init(allocator),
+            .metadata_support = .supported,
+            .event_parse_observer = .{
+                .context = &parse_count,
+                .on_parse = ParseCounter.note,
+            },
+        };
+        defer client.deinit();
+        var rr: RemoteRuntime = undefined;
+        rr.client = &client;
+        rr.attachment = .init(allocator, .{
+            .runtime_id = 0xaa,
+            .stream_id = 7,
+            .role = .controller,
+            .controller_generation = 1,
+        });
+        defer rr.attachment.deinit();
+        rr.observation = .{};
+        try rr.observation.replace(allocator, .{
+            .availability = .current,
+            .revision = 2,
+            .cwd = "/safe",
+            .window_title = "work",
+            .ssh_remote_dest = "safe-host",
+            .size = .{ .cols = 120, .rows = 40 },
+        });
+
+        try socket_server.writeAll(fds[1], event_wire);
+        try socket_server.writeAll(fds[1], response_wire);
+        const response = try client.call("host.info", "{}");
+        defer allocator.free(response);
+        try std.testing.expectEqual(@as(usize, 1), parse_count);
+        try std.testing.expectEqual(@as(usize, 1), client.pending_events.items.len);
+
+        var failing = std.testing.FailingAllocator.init(
+            allocator,
+            .{ .fail_index = fail_index },
+        );
+        rr.allocator = failing.allocator();
+        defer rr.observation.deinit(rr.allocator);
+        const drained = rr.drainObservationEvents();
+        if (drained) |result| {
+            try std.testing.expectEqual(@as(usize, 1), parse_count);
+            try std.testing.expect(result.metadata);
+            try std.testing.expectEqual(@as(u64, 3), rr.observation.revision);
+            try std.testing.expectEqualStrings("/next/repo", rr.observation.cwd.items);
+            try std.testing.expect(!client.unusable);
+            try std.testing.expect(!failing.has_induced_failure);
+            saw_success = true;
+            break;
+        } else |err| {
+            try std.testing.expectEqual(@as(usize, 1), parse_count);
+            try std.testing.expectEqual(error.OutOfMemory, err);
+            try std.testing.expect(failing.has_induced_failure);
+            try std.testing.expect(client.unusable);
+            try std.testing.expectEqual(@as(u64, 2), rr.observation.revision);
+            try std.testing.expectEqualStrings("/safe", rr.observation.cwd.items);
+            try std.testing.expectEqualStrings("work", rr.observation.window_title.items);
+            try std.testing.expectEqualStrings(
+                "safe-host",
+                rr.observation.ssh_remote_dest.items,
+            );
+            try std.testing.expectEqual(@as(usize, 0), client.pending_events.items.len);
+        }
+    }
+    try std.testing.expect(saw_success);
+}
+
+const ObservationBarrierOutcome = enum { current, fail_closed };
+
+fn expectObservationBarrierDisposition(
+    response_payload: []const u8,
+    outcome: ObservationBarrierOutcome,
+) !void {
+    const allocator = std.testing.allocator;
+    var fds: [2]c.fd_t = undefined;
+    try std.testing.expectEqual(
+        @as(c_int, 0),
+        c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds),
+    );
+    defer _ = c.close(fds[1]);
+    var client: client_mod.Client = .{
+        .allocator = allocator,
+        .fd = fds[0],
+        .host_id = 1,
+        .parser = framing.FrameParser.init(allocator),
+        .metadata_support = .supported,
+    };
+    defer client.deinit();
+    var rr: RemoteRuntime = undefined;
+    rr.client = &client;
+    rr.allocator = allocator;
+    rr.attachment = .init(allocator, .{
+        .runtime_id = 0xaa,
+        .stream_id = 7,
+        .role = .controller,
+        .controller_generation = 1,
+    });
+    defer rr.attachment.deinit();
+    rr.direct_input = .empty;
+    defer rr.direct_input.deinit(allocator);
+    rr.direct_input_offset = 0;
+    rr.pending_controls = .empty;
+    defer rr.pending_controls.deinit(allocator);
     rr.observation = .{};
     defer rr.observation.deinit(allocator);
 
-    // mouse_tracking 필드가 없는(구버전 host) metadata — 통째로 거부되지 않고 적용되며, 나머지 관측은 살고
-    // mouse_tracking만 false로 폴백한다(호환 계약, observation_wire.fieldIsBoolOrAbsent). host-backed 마우스 리포트는
-    // 그 host에선 pre-fix 동작(스크롤백 폴백)을 유지한다.
-    const legacy =
-        \\{"event":"runtime.metadata","metadata_revision":1,"metadata":{"cwd":"/legacy","window_title":"w","ssh_remote_dest":null,
-        \\"semantic_state":0,"alt_active":false,"app_cursor_keys":false,"alternate_scroll":true,"observer_generation":1,"title_generation":1,"cols":80,"rows":24,
-        \\"foreground_available":false,"foreground_pgid":null,"processes":[]}}
+    try seedMetadataTestObservation(&rr.observation, allocator);
+
+    const response = try framing.encodeFrame(
+        allocator,
+        .{ .kind = .response, .request_id = 1 },
+        response_payload,
+    );
+    defer allocator.free(response);
+    try socket_server.writeAll(fds[1], response);
+
+    switch (outcome) {
+        .current => try rr.refreshObservation(),
+        .fail_closed => try std.testing.expectError(
+            error.ProtocolError,
+            rr.refreshObservation(),
+        ),
+    }
+    const request = try readPeerFrame(fds[1], allocator);
+    defer allocator.free(request.payload);
+    try std.testing.expectEqual(protocol.Kind.request, request.header.kind);
+    try std.testing.expectEqual(@as(u64, 1), request.header.request_id);
+    try std.testing.expect(
+        std.mem.indexOf(u8, request.payload, "\"method\":\"runtime.observation\"") != null,
+    );
+    try std.testing.expect(
+        std.mem.indexOf(u8, request.payload, "\"stream_id\":7") != null,
+    );
+
+    switch (outcome) {
+        .current => {
+            try std.testing.expect(!client.unusable);
+            try std.testing.expectEqual(fds[0], client.fd);
+            try std.testing.expectEqual(term_backend.ObservationAvailability.current, rr.observation.availability);
+            try std.testing.expectEqual(@as(u64, 3), rr.observation.revision);
+            try std.testing.expectEqualStrings("/fresh", rr.observation.cwd.items);
+            try std.testing.expectEqualStrings("fresh-title", rr.observation.window_title.items);
+            try std.testing.expectEqualStrings("fresh-host", rr.observation.ssh_remote_dest.items);
+            try std.testing.expectEqual(terminal.SemanticPrompt.input, rr.observation.semantic_state);
+            try std.testing.expect(!rr.observation.alt_active);
+            try std.testing.expect(!rr.observation.app_cursor_keys);
+            try std.testing.expectEqual(@as(u16, 90), rr.observation.size.cols);
+            try std.testing.expectEqual(@as(u16, 30), rr.observation.size.rows);
+            try std.testing.expectEqual(@as(?i32, 77), rr.observation.foreground_pgid);
+            try std.testing.expectEqual(@as(usize, 1), rr.observation.foreground_processes.items.len);
+            try std.testing.expectEqualStrings(
+                "zsh",
+                rr.observation.foreground_processes.items[0].slice(),
+            );
+        },
+        .fail_closed => {
+            try std.testing.expect(client.unusable);
+            try std.testing.expectEqual(@as(c.fd_t, -1), client.fd);
+            try std.testing.expectEqual(@as(u64, 2), rr.observation.revision);
+            try std.testing.expectEqualStrings("/safe", rr.observation.cwd.items);
+            try std.testing.expectEqualStrings("work", rr.observation.window_title.items);
+            try std.testing.expectEqualStrings("safe-host", rr.observation.ssh_remote_dest.items);
+            try std.testing.expectEqual(terminal.SemanticPrompt.command, rr.observation.semantic_state);
+            try std.testing.expect(rr.observation.alt_active);
+            try std.testing.expect(rr.observation.app_cursor_keys);
+            try std.testing.expectEqual(@as(u16, 120), rr.observation.size.cols);
+            try std.testing.expectEqual(@as(u16, 40), rr.observation.size.rows);
+            try std.testing.expectEqual(@as(?i32, 55), rr.observation.foreground_pgid);
+            try std.testing.expectEqual(@as(usize, 1), rr.observation.foreground_processes.items.len);
+            try std.testing.expectEqualStrings(
+                "claude",
+                rr.observation.foreground_processes.items[0].slice(),
+            );
+            var byte: [1]u8 = undefined;
+            try std.testing.expectEqual(@as(isize, 0), c.read(fds[1], &byte, byte.len));
+        },
+    }
+}
+
+test "remote runtime: observation barrier projects current and fail-closes malformed or resource metadata" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const current =
+        \\{"result":{"metadata_revision":3,"metadata":{"cwd":"/fresh","window_title":"fresh-title","ssh_remote_dest":"fresh-host","semantic_state":2,"alt_active":false,"app_cursor_keys":false,"alternate_scroll":true,"observer_generation":10,"title_generation":5,"cols":90,"rows":30,"foreground_available":true,"foreground_pgid":77,"processes":[{"pid":77,"name":"zsh"}]}}}
     ;
-    try std.testing.expect(try rr.applyObservationJson(legacy));
-    try std.testing.expectEqualStrings("/legacy", rr.observation.cwd.items);
-    try std.testing.expect(!rr.observation.mouse_tracking); // 필드 없음 → false 폴백
-    try std.testing.expect(!rr.observation.bracketed_paste); // bracketed_paste도 optional — 필드 없음 → false 폴백
-    try std.testing.expect(!rr.observation.app_keypad); // app_keypad도 optional — 필드 없음 → false(numeric) 폴백
-    try std.testing.expectEqual(@as(u5, 0), rr.observation.kitty_flags); // kitty_flags도 optional — 필드 없음 → 0(legacy) 폴백
+    try expectObservationBarrierDisposition(current, .current);
+    const escaped_revision = try std.mem.replaceOwned(
+        u8,
+        allocator,
+        current,
+        "metadata_revision",
+        "metadata_\\u0072evision",
+    );
+    defer allocator.free(escaped_revision);
+    try expectObservationBarrierDisposition(escaped_revision, .current);
+
+    const malformed =
+        "{\"result\":{\"metadata_revision\":3,\"metadata\":{\"cwd\":\"/partial\"}}}";
+    try expectObservationBarrierDisposition(malformed, .fail_closed);
+    try expectObservationBarrierDisposition(
+        "{\"result\":{\"metadata_revision\":184467440737095516150,\"metadata\":null}}",
+        .fail_closed,
+    );
+    const same_revision_equivocation =
+        \\{"result":{"metadata_revision":2,"metadata":{"cwd":"/safe","window_title":"work","ssh_remote_dest":"attacker-host","semantic_state":3,"alt_active":true,"app_cursor_keys":true,"alternate_scroll":true,"observer_generation":9,"title_generation":4,"cols":120,"rows":40,"foreground_available":true,"foreground_pgid":55,"processes":[{"pid":55,"name":"claude"}]}}}
+    ;
+    try expectObservationBarrierDisposition(same_revision_equivocation, .fail_closed);
+
+    var processes: std.Io.Writer.Allocating = .init(allocator);
+    defer processes.deinit();
+    for (0..runtime_metadata_wire.max_process_entries + 1) |index| {
+        if (index != 0) try processes.writer.writeByte(',');
+        try processes.writer.print("{{\"pid\":{d},\"name\":\"p\"}}", .{index});
+    }
+    const resource = try std.fmt.allocPrint(
+        allocator,
+        "{{\"result\":{{\"metadata_revision\":3,\"metadata\":{{\"cwd\":\"/attacker\",\"window_title\":\"bad\",\"ssh_remote_dest\":null,\"semantic_state\":0,\"alt_active\":false,\"app_cursor_keys\":false,\"alternate_scroll\":true,\"observer_generation\":1,\"title_generation\":1,\"cols\":80,\"rows\":24,\"foreground_available\":true,\"foreground_pgid\":1,\"processes\":[{s}]}}}}}}",
+        .{processes.written()},
+    );
+    defer allocator.free(resource);
+    try expectObservationBarrierDisposition(resource, .fail_closed);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2155,6 +2512,169 @@ const PreviousAttachPeer = struct {
     }
 };
 
+const CurrentMetadataAttachPeer = struct {
+    fn run(
+        fd: c.fd_t,
+        attach_body: []const u8,
+        snapshot: []const u8,
+        event_body: []const u8,
+        ok: *bool,
+    ) void {
+        defer _ = c.close(fd);
+        const allocator = std.heap.page_allocator;
+        const attach = readPeerFrame(fd, allocator) catch return;
+        defer allocator.free(attach.payload);
+        if (attach.header.kind != .request or
+            std.mem.indexOf(u8, attach.payload, "\"method\":\"runtime.attach\"") == null)
+            return;
+        const attach_response = framing.encodeFrame(
+            allocator,
+            .{ .kind = .response, .request_id = attach.header.request_id },
+            attach_body,
+        ) catch return;
+        defer allocator.free(attach_response);
+        socket_server.writeAll(fd, attach_response) catch return;
+        const snapshot_frame = framing.encodeFrame(
+            allocator,
+            .{
+                .kind = .snapshot_chunk,
+                .stream_id = 7,
+                .flags = protocol.Flags.end_stream,
+            },
+            snapshot,
+        ) catch return;
+        defer allocator.free(snapshot_frame);
+        socket_server.writeAll(fd, snapshot_frame) catch return;
+
+        const barrier = readPeerFrame(fd, allocator) catch return;
+        defer allocator.free(barrier.payload);
+        if (barrier.header.kind != .request or
+            std.mem.indexOf(u8, barrier.payload, "\"method\":\"host.info\"") == null)
+            return;
+        const event = framing.encodeFrame(
+            allocator,
+            .{ .kind = .event, .stream_id = 7 },
+            event_body,
+        ) catch return;
+        defer allocator.free(event);
+        socket_server.writeAll(fd, event) catch return;
+        const barrier_response = framing.encodeFrame(
+            allocator,
+            .{ .kind = .response, .request_id = barrier.header.request_id },
+            "{\"result\":{}}",
+        ) catch return;
+        defer allocator.free(barrier_response);
+        socket_server.writeAll(fd, barrier_response) catch return;
+        ok.* = true;
+    }
+};
+
+const ResizeOrderingPeer = struct {
+    fn sendResizeResponse(
+        fd: c.fd_t,
+        allocator: std.mem.Allocator,
+        request_id: u64,
+        cols: u16,
+    ) !void {
+        var body_buf: [160]u8 = undefined;
+        const body = try std.fmt.bufPrint(
+            &body_buf,
+            "{{\"result\":{{\"cols\":{d},\"rows\":40,\"client_sequence\":1,\"resize_generation\":5,\"changed\":true}}}}",
+            .{cols},
+        );
+        const response = try framing.encodeFrame(
+            allocator,
+            .{ .kind = .response, .request_id = request_id },
+            body,
+        );
+        defer allocator.free(response);
+        try socket_server.writeAll(fd, response);
+    }
+
+    fn sendResizeEventAndBarrier(
+        fd: c.fd_t,
+        allocator: std.mem.Allocator,
+        request_id: u64,
+        cols: u16,
+    ) !void {
+        var body_buf: [256]u8 = undefined;
+        const body = try std.fmt.bufPrint(
+            &body_buf,
+            "{{\"event\":\"runtime.resized\",\"data\":{{\"runtime_id\":\"000000000000000000000000000000aa\",\"cols\":{d},\"rows\":40,\"resize_generation\":5,\"reason\":\"controller\"}}}}",
+            .{cols},
+        );
+        const event = try framing.encodeFrame(
+            allocator,
+            .{ .kind = .event, .stream_id = 7 },
+            body,
+        );
+        defer allocator.free(event);
+        try socket_server.writeAll(fd, event);
+        const response = try framing.encodeFrame(
+            allocator,
+            .{ .kind = .response, .request_id = request_id },
+            "{\"result\":{}}",
+        );
+        defer allocator.free(response);
+        try socket_server.writeAll(fd, response);
+    }
+
+    fn run(
+        fd: c.fd_t,
+        attach_body: []const u8,
+        snapshot: []const u8,
+        event_first: bool,
+        ok: *bool,
+    ) void {
+        defer _ = c.close(fd);
+        const allocator = std.heap.page_allocator;
+        const attach = readPeerFrame(fd, allocator) catch return;
+        defer allocator.free(attach.payload);
+        const attach_response = framing.encodeFrame(
+            allocator,
+            .{ .kind = .response, .request_id = attach.header.request_id },
+            attach_body,
+        ) catch return;
+        defer allocator.free(attach_response);
+        socket_server.writeAll(fd, attach_response) catch return;
+        const snapshot_frame = framing.encodeFrame(
+            allocator,
+            .{
+                .kind = .snapshot_chunk,
+                .stream_id = 7,
+                .flags = protocol.Flags.end_stream,
+            },
+            snapshot,
+        ) catch return;
+        defer allocator.free(snapshot_frame);
+        socket_server.writeAll(fd, snapshot_frame) catch return;
+
+        const first = readPeerFrame(fd, allocator) catch return;
+        defer allocator.free(first.payload);
+        if (event_first) {
+            if (std.mem.indexOf(u8, first.payload, "\"method\":\"host.info\"") == null)
+                return;
+            sendResizeEventAndBarrier(fd, allocator, first.header.request_id, 100) catch return;
+        } else {
+            if (std.mem.indexOf(u8, first.payload, "\"method\":\"runtime.resize\"") == null)
+                return;
+            sendResizeResponse(fd, allocator, first.header.request_id, 100) catch return;
+        }
+        const second = readPeerFrame(fd, allocator) catch return;
+        defer allocator.free(second.payload);
+        if (event_first) {
+            if (std.mem.indexOf(u8, second.payload, "\"method\":\"runtime.resize\"") == null)
+                return;
+            sendResizeResponse(fd, allocator, second.header.request_id, 101) catch return;
+        } else {
+            if (std.mem.indexOf(u8, second.payload, "\"method\":\"host.info\"") == null)
+                return;
+            sendResizeEventAndBarrier(fd, allocator, second.header.request_id, 101) catch return;
+        }
+        ok.* = true;
+    }
+};
+
 test "remote runtime attaches through N-1 MRSH and normalizes frozen v1 screen records" {
     const allocator = std.testing.allocator;
     var stream: std.ArrayListUnmanaged(u8) = .empty;
@@ -2186,6 +2706,7 @@ test "remote runtime attaches through N-1 MRSH and normalizes frozen v1 screen r
         .wire_major = 1,
         .screen_codec_version = 1,
         .parser = framing.FrameParser.initForMajor(allocator, 1),
+        .compatibility_profile = @import("compatibility.zig").profileForMajor(1).?,
     };
     defer client.deinit();
     var rr: RemoteRuntime = undefined;
@@ -2199,32 +2720,247 @@ test "remote runtime attaches through N-1 MRSH and normalizes frozen v1 screen r
     try std.testing.expect(peer_ok);
 }
 
-test "remote runtime preserves only exact known attach error envelopes" {
-    try testing.expectEqual(
-        protocol.ErrorCode.runtime_not_found,
-        (try RemoteRuntime.attachFailureCode(
-            testing.allocator,
-            "{\"error\":\"runtime_not_found\"}",
-        )).?,
+test "remote runtime actual attach seed and event path share revision and semantic rules" {
+    const allocator = std.testing.allocator;
+    var snapshot: std.ArrayListUnmanaged(u8) = .empty;
+    defer snapshot.deinit(allocator);
+    const meta = try screen_stream.encodeScreenMeta(
+        allocator,
+        .{ .kind = .screen_meta, .generation = 1 },
+        .{ .cols = 1, .rows = 1, .cursor = .{} },
     );
-    try testing.expect((try RemoteRuntime.attachFailureCode(
-        testing.allocator,
-        "{\"stream_id\":9}",
-    )) == null);
-    try testing.expectError(
-        error.UnknownWireError,
-        RemoteRuntime.attachFailureCode(
-            testing.allocator,
-            "{\"error\":\"future_error\"}",
-        ),
+    defer allocator.free(meta);
+    try screen_stream.appendRecord(&snapshot, allocator, meta);
+    var runs = [_]screen_stream.Run{.{ .grapheme = "x", .width = 1, .count = 1 }};
+    const row = try screen_stream.encodeRow(
+        allocator,
+        .{ .kind = .row, .generation = 1 },
+        .{ .row_index = 0, .runs = &runs },
     );
-    try testing.expectError(
-        error.UnknownWireError,
-        RemoteRuntime.attachFailureCode(
-            testing.allocator,
-            "{\"error\":\"runtime_not_found\",\"result\":1}",
-        ),
+    defer allocator.free(row);
+    try screen_stream.appendRecord(&snapshot, allocator, row);
+
+    const attach_body =
+        \\{"result":{"stream_id":7,"controller_generation":1,"granted":{"observe":true,"input":true,"resize":true},"controller_busy":false,"metadata_revision":4,"metadata":{"cwd":"/base","window_title":"base","ssh_remote_dest":"base-host","semantic_state":0,"alt_active":false,"app_cursor_keys":false,"alternate_scroll":true,"observer_generation":1,"title_generation":1,"cols":80,"rows":24,"foreground_available":false,"foreground_pgid":null,"processes":[]}}}
+    ;
+    const cases = [_]struct {
+        event: []const u8,
+        outcome: enum { unchanged, newer, conflict, sealed_revision_mutation, sealed_header_mutation },
+    }{
+        .{
+            .event =
+            \\{"event":"runtime.metadata","metadata_revision":4,"metadata":{"cwd":"/base","window_title":"base","ssh_remote_dest":"base-host","semantic_state":0,"alt_active":false,"app_cursor_keys":false,"alternate_scroll":true,"observer_generation":1,"title_generation":1,"cols":80,"rows":24,"foreground_available":false,"foreground_pgid":null,"processes":[]}}
+            ,
+            .outcome = .unchanged,
+        },
+        .{
+            .event =
+            \\{"event":"runtime.metadata","metadata_revision":3,"metadata":{"cwd":"/stale","window_title":"stale","ssh_remote_dest":null,"semantic_state":0,"alt_active":false,"app_cursor_keys":false,"alternate_scroll":true,"observer_generation":1,"title_generation":1,"cols":80,"rows":24,"foreground_available":false,"foreground_pgid":null,"processes":[]}}
+            ,
+            .outcome = .unchanged,
+        },
+        .{
+            .event =
+            \\{"event":"runtime.metadata","metadata_revision":5,"metadata":{"cwd":"/new","window_title":"new","ssh_remote_dest":"new-host","semantic_state":0,"alt_active":false,"app_cursor_keys":false,"alternate_scroll":true,"observer_generation":2,"title_generation":2,"cols":90,"rows":30,"foreground_available":false,"foreground_pgid":null,"processes":[]}}
+            ,
+            .outcome = .newer,
+        },
+        .{
+            .event =
+            \\{"event":"runtime.metadata","metadata_revision":4,"metadata":{"cwd":"/evil","window_title":"base","ssh_remote_dest":"evil-host","semantic_state":0,"alt_active":false,"app_cursor_keys":false,"alternate_scroll":true,"observer_generation":1,"title_generation":1,"cols":80,"rows":24,"foreground_available":false,"foreground_pgid":null,"processes":[]}}
+            ,
+            .outcome = .conflict,
+        },
+        .{
+            .event =
+            \\{"event":"runtime.metadata","metadata_revision":5,"metadata":{"cwd":"/new","window_title":"new","ssh_remote_dest":"new-host","semantic_state":0,"alt_active":false,"app_cursor_keys":false,"alternate_scroll":true,"observer_generation":2,"title_generation":2,"cols":90,"rows":30,"foreground_available":false,"foreground_pgid":null,"processes":[]}}
+            ,
+            .outcome = .sealed_revision_mutation,
+        },
+        .{
+            .event =
+            \\{"event":"runtime.metadata","metadata_revision":5,"metadata":{"cwd":"/new","window_title":"new","ssh_remote_dest":"new-host","semantic_state":0,"alt_active":false,"app_cursor_keys":false,"alternate_scroll":true,"observer_generation":2,"title_generation":2,"cols":90,"rows":30,"foreground_available":false,"foreground_pgid":null,"processes":[]}}
+            ,
+            .outcome = .sealed_header_mutation,
+        },
+    };
+    for (cases) |case| {
+        var fds: [2]c.fd_t = undefined;
+        try std.testing.expectEqual(
+            @as(c_int, 0),
+            c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds),
+        );
+        var peer_ok = false;
+        var peer = try std.Thread.spawn(.{}, CurrentMetadataAttachPeer.run, .{
+            fds[1],
+            attach_body,
+            snapshot.items,
+            case.event,
+            &peer_ok,
+        });
+        var client: client_mod.Client = .{
+            .allocator = allocator,
+            .fd = fds[0],
+            .host_id = 1,
+            .parser = framing.FrameParser.init(allocator),
+            .attachment_capabilities = .{ .peer_attach_generation = true },
+            .metadata_support = .supported,
+            .compatibility_profile = @import("compatibility.zig").profileForMajor(
+                protocol.version_major,
+            ).?,
+        };
+        defer client.deinit();
+        var rr: RemoteRuntime = undefined;
+        try rr.attachExisting(
+            &client,
+            allocator,
+            std.testing.io,
+            77,
+            "000000000000000000000000000000aa".*,
+            .{ .cols = 1, .rows = 1 },
+        );
+        try std.testing.expectEqual(@as(u64, 4), rr.observation.revision);
+        try std.testing.expectEqualStrings("/base", rr.observation.cwd.items);
+        const barrier = try client.call("host.info", "{}");
+        allocator.free(barrier);
+        peer.join();
+        try std.testing.expect(peer_ok);
+        switch (case.outcome) {
+            .sealed_revision_mutation => switch (client.pending_events.items[0].preflight.?) {
+                .accepted => |*accepted| switch (accepted.event) {
+                    .metadata => |*metadata| metadata.revision = std.math.maxInt(u64),
+                    else => unreachable,
+                },
+                else => unreachable,
+            },
+            .sealed_header_mutation => client.pending_events.items[0].header.stream_id = 8,
+            else => {},
+        }
+        switch (case.outcome) {
+            .unchanged => {
+                const result = try rr.drainObservationEvents();
+                try std.testing.expect(!result.metadata);
+                try std.testing.expectEqual(@as(u64, 4), rr.observation.revision);
+                try std.testing.expectEqualStrings("/base", rr.observation.cwd.items);
+                try std.testing.expect(!client.unusable);
+            },
+            .newer => {
+                const result = try rr.drainObservationEvents();
+                try std.testing.expect(result.metadata);
+                try std.testing.expectEqual(@as(u64, 5), rr.observation.revision);
+                try std.testing.expectEqualStrings("/new", rr.observation.cwd.items);
+                try std.testing.expectEqualStrings(
+                    "new-host",
+                    rr.observation.ssh_remote_dest.items,
+                );
+                try std.testing.expect(!client.unusable);
+            },
+            .conflict => {
+                try std.testing.expectError(error.ProtocolError, rr.drainObservationEvents());
+                try std.testing.expect(client.unusable);
+                try std.testing.expectEqual(@as(u64, 4), rr.observation.revision);
+                try std.testing.expectEqualStrings("/base", rr.observation.cwd.items);
+                try std.testing.expectEqualStrings(
+                    "base-host",
+                    rr.observation.ssh_remote_dest.items,
+                );
+            },
+            .sealed_revision_mutation, .sealed_header_mutation => {
+                try std.testing.expectError(error.ProtocolError, rr.drainObservationEvents());
+                try std.testing.expect(client.unusable);
+                try std.testing.expectEqual(@as(u64, 4), rr.observation.revision);
+                try std.testing.expectEqualStrings("/base", rr.observation.cwd.items);
+                try std.testing.expectEqualStrings(
+                    "base-host",
+                    rr.observation.ssh_remote_dest.items,
+                );
+            },
+        }
+        if (!client.unusable) client.failClosed();
+        rr.detachClientSide();
+    }
+}
+
+test "remote runtime actual resize response and event reject equal-generation conflict in both orders" {
+    const allocator = std.testing.allocator;
+    var snapshot: std.ArrayListUnmanaged(u8) = .empty;
+    defer snapshot.deinit(allocator);
+    const meta = try screen_stream.encodeScreenMeta(
+        allocator,
+        .{ .kind = .screen_meta, .generation = 1 },
+        .{ .cols = 1, .rows = 1, .cursor = .{} },
     );
+    defer allocator.free(meta);
+    try screen_stream.appendRecord(&snapshot, allocator, meta);
+    var runs = [_]screen_stream.Run{.{ .grapheme = "x", .width = 1, .count = 1 }};
+    const row = try screen_stream.encodeRow(
+        allocator,
+        .{ .kind = .row, .generation = 1 },
+        .{ .row_index = 0, .runs = &runs },
+    );
+    defer allocator.free(row);
+    try screen_stream.appendRecord(&snapshot, allocator, row);
+    const attach_body =
+        \\{"result":{"stream_id":7,"controller_generation":1,"granted":{"observe":true,"input":true,"resize":true},"controller_busy":false,"metadata_revision":1,"metadata":{"cwd":"/base","window_title":"base","ssh_remote_dest":null,"semantic_state":0,"alt_active":false,"app_cursor_keys":false,"alternate_scroll":true,"observer_generation":1,"title_generation":1,"cols":80,"rows":24,"foreground_available":false,"foreground_pgid":null,"processes":[]}}}
+    ;
+
+    for ([_]bool{ false, true }) |event_first| {
+        var fds: [2]c.fd_t = undefined;
+        try std.testing.expectEqual(
+            @as(c_int, 0),
+            c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds),
+        );
+        var peer_ok = false;
+        var peer = try std.Thread.spawn(.{}, ResizeOrderingPeer.run, .{
+            fds[1],
+            attach_body,
+            snapshot.items,
+            event_first,
+            &peer_ok,
+        });
+        var client: client_mod.Client = .{
+            .allocator = allocator,
+            .fd = fds[0],
+            .host_id = 1,
+            .parser = framing.FrameParser.init(allocator),
+            .attachment_capabilities = .{ .peer_attach_generation = true },
+            .metadata_support = .supported,
+            .compatibility_profile = @import("compatibility.zig").profileForMajor(
+                protocol.version_major,
+            ).?,
+        };
+        defer client.deinit();
+        var rr: RemoteRuntime = undefined;
+        try rr.attachExisting(
+            &client,
+            allocator,
+            std.testing.io,
+            77,
+            "000000000000000000000000000000aa".*,
+            .{ .cols = 1, .rows = 1 },
+        );
+        if (event_first) {
+            const barrier = try client.call("host.info", "{}");
+            allocator.free(barrier);
+            const applied = try rr.drainObservationEvents();
+            try std.testing.expect(applied.metadata);
+            try std.testing.expectError(error.ProtocolError, rr.resize(101, 40));
+        } else {
+            try rr.resize(100, 40);
+            const barrier = try client.call("host.info", "{}");
+            allocator.free(barrier);
+            try std.testing.expectError(error.ProtocolError, rr.drainObservationEvents());
+        }
+        peer.join();
+        try std.testing.expect(peer_ok);
+        try std.testing.expect(client.unusable);
+        try std.testing.expectEqual(@as(u64, 5), rr.resize_generation);
+        try std.testing.expectEqual(
+            terminal.Size{ .cols = 100, .rows = 40 },
+            rr.observation.size,
+        );
+        rr.detachClientSide();
+    }
 }
 
 test "remote runtime observer locally consumes input and sends no resize mutation" {
@@ -2254,13 +2990,14 @@ test "remote runtime revoke demotes authority and cancels queued mutation before
         },
     };
     defer client.deinit();
-    const event = framing.Frame{
+    var event = client_mod.BufferedEvent{
         .header = .{ .kind = .event, .stream_id = 7 },
         .payload = try allocator.dupe(
             u8,
             "{\"event\":\"controller.revoked\",\"data\":{\"runtime_id\":\"000000000000000000000000000000aa\",\"stream_id\":7,\"controller_generation\":4,\"reason\":\"takeover\"}}",
         ),
     };
+    event.header.payload_len = @intCast(event.payload.len);
     try client.pending_events.append(allocator, event);
     client.pending_event_bytes = event.payload.len;
 
@@ -2305,13 +3042,14 @@ test "own buffered revoke suppresses newly arriving input before role cache catc
         .parser = framing.FrameParser.init(allocator),
     };
     defer client.deinit();
-    const revoke = framing.Frame{
+    var revoke = client_mod.BufferedEvent{
         .header = .{ .kind = .event, .stream_id = 7 },
         .payload = try allocator.dupe(
             u8,
             "{\"event\":\"controller.revoked\",\"data\":{\"runtime_id\":\"000000000000000000000000000000aa\",\"stream_id\":7,\"controller_generation\":4,\"reason\":\"takeover\"}}",
         ),
     };
+    revoke.header.payload_len = @intCast(revoke.payload.len);
     try client.pending_events.append(allocator, revoke);
     client.pending_event_bytes = revoke.payload.len;
 
@@ -2355,13 +3093,14 @@ test "sibling runtime cannot flush a stream whose buffered revoke is not consume
         },
     };
     defer client.deinit();
-    const revoke = framing.Frame{
+    var revoke = client_mod.BufferedEvent{
         .header = .{ .kind = .event, .stream_id = 8 },
         .payload = try allocator.dupe(
             u8,
             "{\"event\":\"controller.revoked\",\"data\":{\"runtime_id\":\"000000000000000000000000000000bb\",\"stream_id\":8,\"controller_generation\":4,\"reason\":\"takeover\"}}",
         ),
     };
+    revoke.header.payload_len = @intCast(revoke.payload.len);
     try client.pending_events.append(allocator, revoke);
     client.pending_event_bytes = revoke.payload.len;
 
@@ -3392,10 +4131,11 @@ test "remote runtime: snapshot.invalidated latches one nonblocking resync ack" {
         .parser = framing.FrameParser.init(allocator),
     };
     defer client.deinit();
-    const event = framing.Frame{
+    var event = client_mod.BufferedEvent{
         .header = .{ .kind = .event, .stream_id = 9 },
         .payload = try allocator.dupe(u8, "{\"event\":\"snapshot.invalidated\"}"),
     };
+    event.header.payload_len = @intCast(event.payload.len);
     try client.pending_events.append(allocator, event);
     client.pending_event_bytes = event.payload.len;
     var rr: RemoteRuntime = undefined;
@@ -3430,14 +4170,16 @@ test "remote runtime: typed ended event terminates only its stream pump" {
         .parser = framing.FrameParser.init(allocator),
     };
     defer client.deinit();
-    const ended = framing.Frame{
+    var ended = client_mod.BufferedEvent{
         .header = .{ .kind = .event, .stream_id = 9 },
         .payload = try allocator.dupe(u8, "{\"event\":\"runtime.ended\"}"),
     };
-    const sibling = framing.Frame{
+    ended.header.payload_len = @intCast(ended.payload.len);
+    var sibling = client_mod.BufferedEvent{
         .header = .{ .kind = .event, .stream_id = 10 },
         .payload = try allocator.dupe(u8, "{\"event\":\"runtime.ended\"}"),
     };
+    sibling.header.payload_len = @intCast(sibling.payload.len);
     try client.pending_events.append(allocator, ended);
     try client.pending_events.append(allocator, sibling);
     client.pending_event_bytes = ended.payload.len + sibling.payload.len;
@@ -3497,10 +4239,11 @@ test "remote runtime: resync intent survives occupied outbound slot and emits on
         ),
         .stream_id = 3,
     };
-    const event = framing.Frame{
+    var event = client_mod.BufferedEvent{
         .header = .{ .kind = .event, .stream_id = 9 },
         .payload = try allocator.dupe(u8, "{\"event\":\"snapshot.invalidated\"}"),
     };
+    event.header.payload_len = @intCast(event.payload.len);
     try client.pending_events.append(allocator, event);
     client.pending_event_bytes = event.payload.len;
     var rr: RemoteRuntime = undefined;

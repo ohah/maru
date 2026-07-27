@@ -608,6 +608,12 @@ pub const Client = struct {
                 },
             }
         };
+        // Producer validation/revision terminals happen without an inbound peer frame. The
+        // Connection marks itself closed after rolling back its projection; mirror that terminal
+        // into the readiness owner immediately so poll_owner destroys the fd and all attachment
+        // authority instead of treating `null` as an idle cadence forever.
+        if (self.connection.isClosed())
+            return self.beginClose(.resource_exhausted);
         if (maybe_output) |*output| {
             switch (self.tryAdoptSubscriptionTurn(stream, output.takeFrames())) {
                 .admitted => output.commit(&self.connection),
@@ -2247,6 +2253,127 @@ test "subscription pressure emits one control notice and recovers with an atomic
     try testing.expectEqual(@as(usize, 0), reactor.budget.shared_bytes);
     try testing.expectEqual(@as(usize, 0), reactor.budget.prepared_base_bytes);
     try testing.expectEqual(@as(usize, 0), reactor.budget.prepared_reclaim_bytes);
+}
+
+test "periodic producer terminals immediately close readiness ownership and release attachment" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const testing = std.testing;
+    const modes = [_]enum { invalid_observation, encoded_overflow, revision_exhaustion }{
+        .invalid_observation,
+        .encoded_overflow,
+        .revision_exhaustion,
+    };
+    for (modes) |mode| {
+        var fds: [2]c_int = undefined;
+        var sibling_fds: [2]c_int = undefined;
+        try testing.expectEqual(
+            @as(c_int, 0),
+            c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds),
+        );
+        try testing.expectEqual(
+            @as(c_int, 0),
+            c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &sibling_fds),
+        );
+        var registry_value = registry.TerminalRuntimeRegistry.init(testing.allocator);
+        defer registry_value.deinit();
+        _ = try registry_value.register(0xAA, 80, 24);
+        _ = try registry_value.register(0xBB, 80, 24);
+        var subscriptions = subscription_identity.Table.init(testing.allocator);
+        defer subscriptions.deinit();
+        const reactor = try slot_mod.ReactorCore.create(testing.allocator);
+        defer reactor.destroy();
+        var runtime_ops: server.FakeRuntimeOps = .{};
+        var sibling_ops: server.FakeRuntimeOps = .{};
+        const client = try Client.create(
+            testing.allocator,
+            fds[0],
+            reactor,
+            90,
+            &registry_value,
+            &subscriptions,
+            .{ .runtime_ops = runtime_ops.ops() },
+        );
+        var client_alive = true;
+        defer if (client_alive) client.destroy();
+        const sibling = try Client.create(
+            testing.allocator,
+            sibling_fds[0],
+            reactor,
+            91,
+            &registry_value,
+            &subscriptions,
+            .{ .runtime_ops = sibling_ops.ops() },
+        );
+        var sibling_alive = true;
+        defer if (sibling_alive) sibling.destroy();
+        try sendTestFrame(
+            fds[1],
+            .hello,
+            1,
+            "{\"protocol_min\":2,\"protocol_max\":2,\"client_kind\":\"gui\",\"capabilities\":[\"runtime_metadata_v1\"]}",
+        );
+        client.readReady(1);
+        try sendTestFrame(
+            fds[1],
+            .request,
+            2,
+            "{\"method\":\"runtime.attach\",\"params\":{\"runtime_id\":\"aa\",\"mode\":\"controller\"}}",
+        );
+        client.readReady(2);
+        try sendTestFrame(
+            sibling_fds[1],
+            .hello,
+            1,
+            "{\"protocol_min\":2,\"protocol_max\":2,\"client_kind\":\"gui\"}",
+        );
+        sibling.readReady(1);
+        try sendTestFrame(
+            sibling_fds[1],
+            .request,
+            2,
+            "{\"method\":\"runtime.attach\",\"params\":{\"runtime_id\":\"bb\",\"mode\":\"controller\"}}",
+        );
+        sibling.readReady(2);
+        const slot = try reactor.get(client.admission);
+        try slot.consumeWritten(slot.pending_bytes);
+        const sibling_slot = try reactor.get(sibling.admission);
+        try sibling_slot.consumeWritten(sibling_slot.pending_bytes);
+        runtime_ops.observation_urgent = true;
+        switch (mode) {
+            .invalid_observation => runtime_ops.observation_invalid = .mouse_mode,
+            .encoded_overflow => runtime_ops.observation_invalid = .encoded_escape_expansion,
+            .revision_exhaustion => {
+                runtime_ops.observation_version = 1;
+                client.connection.attachments.getPtr(1).?.observation_revision =
+                    std.math.maxInt(u64);
+            },
+        }
+        _ = client.beginProducerSweep(10);
+        client.tick(10);
+        try testing.expect(client.isClosing());
+        sibling.tick(10);
+        try testing.expect(!sibling.isClosing());
+        try testing.expectEqual(@as(usize, 2), subscriptions.count());
+
+        client.destroy();
+        client_alive = false;
+        try testing.expectEqual(@as(usize, 1), subscriptions.count());
+        try sendTestFrame(sibling_fds[1], .ping, 3, "still-alive");
+        sibling.readReady(11);
+        try testing.expect(!sibling.isClosing());
+        sibling.destroy();
+        sibling_alive = false;
+        try testing.expectEqual(@as(usize, 0), subscriptions.count());
+        try testing.expectEqual(@as(usize, 0), reactor.budget.resident_bytes);
+        try testing.expectEqual(@as(usize, 0), reactor.budget.shared_bytes);
+        try testing.expectEqual(@as(usize, 0), reactor.budget.prepared_base_bytes);
+        try testing.expectEqual(@as(usize, 0), reactor.budget.prepared_reclaim_bytes);
+        var byte: [1]u8 = undefined;
+        try testing.expectEqual(@as(isize, 0), c.recv(fds[1], &byte, byte.len, 0));
+        try testing.expectEqual(@as(isize, 0), c.recv(sibling_fds[1], &byte, byte.len, 0));
+        _ = c.close(fds[1]);
+        _ = c.close(sibling_fds[1]);
+    }
 }
 
 test "partial observer in a mixed controller connection is not a fail-close victim" {

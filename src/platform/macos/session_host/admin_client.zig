@@ -613,9 +613,18 @@ test "product read CLI connects to an existing daemon without spawning and emits
     const product_z = try allocator.dupeZ(u8, product_exe);
     defer allocator.free(product_z);
     const pid_bits: u128 = @intCast(c.getpid());
-    const host_id = (pid_bits << 64) | 0xC11A2;
-    var xdg_buf: [192]u8 = undefined;
-    const xdg = try std.fmt.bufPrintZ(&xdg_buf, "/tmp/maru-admin-cli-{d}", .{c.getpid()});
+    // 실패로 남은 /tmp fixture와 PID가 재사용돼도 다음 run이 과거 hosts/socket을 자기 것으로 오인하지 않게
+    // 경로와 host id가 같은 per-run nonce를 공유한다. PID 단독 격리는 장시간 반복/CI worker에서 충분하지 않다.
+    var nonce_raw: u64 = 0;
+    std.c.arc4random_buf(std.mem.asBytes(&nonce_raw).ptr, @sizeOf(u64));
+    const nonce = (nonce_raw & (std.math.maxInt(u64) >> 1)) | 1;
+    const host_id = (pid_bits << 64) | nonce;
+    var xdg_buf: [224]u8 = undefined;
+    const xdg = try std.fmt.bufPrintZ(
+        &xdg_buf,
+        "/tmp/maru-admin-cli-{d}-{x}",
+        .{ c.getpid(), nonce },
+    );
     _ = c.mkdir(xdg.ptr, 0o700);
     var base_buf: [256]u8 = undefined;
     const base = try std.fmt.bufPrintZ(&base_buf, "{s}/maru", .{xdg});

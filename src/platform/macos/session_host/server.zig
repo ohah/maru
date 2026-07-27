@@ -22,6 +22,7 @@ const host_identity = @import("host_identity.zig");
 const upgrade_wire = @import("upgrade_wire.zig");
 const connection_slot = @import("connection_slot.zig");
 const subscription_identity = @import("subscription_identity.zig");
+const runtime_metadata_wire = @import("runtime_metadata_wire.zig");
 
 pub const HostStatus = struct {
     manifest_capable: bool = false,
@@ -135,6 +136,36 @@ pub const RuntimeObservation = struct {
         self.* = undefined;
     }
 };
+
+fn observationWireValid(observation: RuntimeObservation) bool {
+    if (observation.mouse_tracking_mode > 4 or
+        observation.processes.len > runtime_metadata_wire.max_process_entries or
+        !std.unicode.utf8ValidateSlice(observation.cwd) or
+        !std.unicode.utf8ValidateSlice(observation.window_title) or
+        !std.unicode.utf8ValidateSlice(observation.clipboard_read_target))
+        return false;
+    if (observation.ssh_remote_dest) |dest|
+        if (!std.unicode.utf8ValidateSlice(dest)) return false;
+    if (!observation.foreground_available and
+        (observation.foreground_pgid != null or observation.processes.len != 0))
+        return false;
+    var aggregate: usize = 0;
+    const strings = [_][]const u8{
+        observation.cwd,
+        observation.window_title,
+        observation.ssh_remote_dest orelse "",
+        observation.clipboard_read_target,
+    };
+    for (strings) |value|
+        aggregate = std.math.add(usize, aggregate, value.len) catch return false;
+    if (aggregate > protocol.max_control_json) return false;
+    for (observation.processes) |process| {
+        if (process.name.len > 128 or !std.unicode.utf8ValidateSlice(process.name))
+            return false;
+        aggregate = std.math.add(usize, aggregate, process.name.len) catch return false;
+    }
+    return aggregate <= protocol.max_control_json;
+}
 
 /// host의 실 runtime 소유(spawn/terminate)를 dispatch가 위임하는 vtable(`runtime.PtyIo` 선례, layering-and-portability.md
 /// §3.1). server.zig는 이 계약만 알아 codec 순수성을 지키고, host 측 `runtime_manager`(app `InProcessTermBackend` 재사용)가
@@ -582,6 +613,12 @@ pub const Connection = struct {
 
     pub fn handshakeComplete(self: *const Connection) bool {
         return self.state != .pre_hello;
+    }
+
+    /// Readiness owner projection for producer-side terminals that do not have a peer request to
+    /// return an error on (invalid observation, encoded payload overflow, revision exhaustion).
+    pub fn isClosed(self: *const Connection) bool {
+        return self.state == .closed;
     }
 
     pub fn attachmentCount(self: *const Connection) usize {
@@ -1125,11 +1162,21 @@ pub const Connection = struct {
             else => return self.replyError(request_id, .internal),
         };
         defer observation.deinit(self.allocator);
+        if (!observationWireValid(observation)) {
+            self.state = .closed;
+            return .close;
+        }
         const canonical = self.stringify(observation) catch return error.OutOfMemory;
         var canonical_owned = true;
         defer if (canonical_owned) self.allocator.free(canonical);
         const changed = if (sub.observation_base) |old| !std.mem.eql(u8, old, canonical) else true;
-        const revision = if (changed) sub.observation_revision +% 1 else sub.observation_revision;
+        const revision = if (changed)
+            std.math.add(u64, sub.observation_revision, 1) catch {
+                self.state = .closed;
+                return .close;
+            }
+        else
+            sub.observation_revision;
         const body = try self.stringify(.{ .result = .{
             .metadata_revision = revision,
             .metadata = observation,
@@ -1175,6 +1222,10 @@ pub const Connection = struct {
             else => return self.replyError(request_id, .internal),
         };
         defer observation.deinit(self.allocator);
+        if (!observationWireValid(observation)) {
+            self.state = .closed;
+            return .close;
+        }
         const canonical = self.stringify(observation) catch return error.OutOfMemory;
         var canonical_owned = true;
         defer if (canonical_owned) self.allocator.free(canonical);
@@ -1183,7 +1234,10 @@ pub const Connection = struct {
         else
             true;
         const revision = if (changed)
-            sub.observation_revision +% 1
+            std.math.add(u64, sub.observation_revision, 1) catch {
+                self.state = .closed;
+                return .close;
+            }
         else
             sub.observation_revision;
         const body = try self.stringify(.{ .result = .{
@@ -1510,6 +1564,11 @@ pub const Connection = struct {
         if (self.runtime_metadata_v1) if (self.runtime_ops) |ops| {
             initial_observation = ops.observation(ops.ctx, id.?, self.allocator) catch null;
             if (initial_observation) |obs| {
+                if (!observationWireValid(obs)) {
+                    self.rollbackAttach(stream);
+                    self.state = .closed;
+                    return .close;
+                }
                 const canonical = self.stringify(obs) catch null;
                 if (canonical) |bytes| {
                     if (self.attachments.getPtr(stream)) |sub| {
@@ -1541,18 +1600,27 @@ pub const Connection = struct {
             self.rollbackAttach(stream);
             return self.replyError(request_id, .internal);
         };
-        const body = try self.stringify(.{ .result = .{
-            .stream_id = stream,
-            .controller_generation = controller_generation,
-            .granted = .{
-                .observe = reg.Capability.has(outcome.granted, reg.Capability.observe),
-                .input = reg.Capability.has(outcome.granted, reg.Capability.input),
-                .resize = reg.Capability.has(outcome.granted, reg.Capability.resize),
-            },
-            .controller_busy = outcome.controller_busy,
-            .metadata_revision = metadata_revision,
-            .metadata = initial_observation,
-        } });
+        const granted = .{
+            .observe = reg.Capability.has(outcome.granted, reg.Capability.observe),
+            .input = reg.Capability.has(outcome.granted, reg.Capability.input),
+            .resize = reg.Capability.has(outcome.granted, reg.Capability.resize),
+        };
+        const body = if (self.runtime_metadata_v1)
+            try self.stringify(.{ .result = .{
+                .stream_id = stream,
+                .controller_generation = controller_generation,
+                .granted = granted,
+                .controller_busy = outcome.controller_busy,
+                .metadata_revision = metadata_revision,
+                .metadata = initial_observation,
+            } })
+        else
+            try self.stringify(.{ .result = .{
+                .stream_id = stream,
+                .controller_generation = controller_generation,
+                .granted = granted,
+                .controller_busy = outcome.controller_busy,
+            } });
         defer self.allocator.free(body);
         const reply_frame = self.encode(.response, request_id, 0, body) catch |e| switch (e) {
             error.OutOfMemory => return error.OutOfMemory,
@@ -1562,7 +1630,11 @@ pub const Connection = struct {
                     prepared_transferred = true;
                 }
                 self.rollbackAttach(stream);
-                return self.replyError(request_id, .payload_too_large);
+                // RuntimeOps produced a semantically valid-looking observation that cannot fit
+                // the negotiated control frame after JSON escaping/envelope overhead. This is a
+                // producer contract violation, not a peer request error.
+                self.state = .closed;
+                return .close;
             },
         };
         var reply_transferred = false;
@@ -2310,6 +2382,11 @@ pub const Connection = struct {
             if (maybe_observation) |obs_value| {
                 var obs = obs_value;
                 defer obs.deinit(self.allocator);
+                if (!observationWireValid(obs)) {
+                    self.state = .closed;
+                    output.rollback(self);
+                    return null;
+                }
                 const current = try self.stringify(obs);
                 var current_owned = true;
                 errdefer if (current_owned) self.allocator.free(current);
@@ -2318,7 +2395,17 @@ pub const Connection = struct {
                 else
                     true;
                 if (changed) {
-                    const next_revision = sub.observation_revision +% 1;
+                    const next_revision = std.math.add(
+                        u64,
+                        sub.observation_revision,
+                        1,
+                    ) catch {
+                        self.state = .closed;
+                        self.allocator.free(current);
+                        current_owned = false;
+                        output.rollback(self);
+                        return null;
+                    };
                     const event_body = try self.stringify(.{
                         .event = "runtime.metadata",
                         .metadata_revision = next_revision,
@@ -2331,7 +2418,16 @@ pub const Connection = struct {
                         stream,
                         0,
                         event_body,
-                    ) catch return error.OutOfMemory;
+                    ) catch |err| switch (err) {
+                        error.OutOfMemory => return error.OutOfMemory,
+                        error.PayloadTooLarge => {
+                            self.state = .closed;
+                            self.allocator.free(current);
+                            current_owned = false;
+                            output.rollback(self);
+                            return null;
+                        },
+                    };
                     list.append(self.allocator, frame) catch {
                         self.allocator.free(frame);
                         return error.OutOfMemory;
@@ -3917,6 +4013,18 @@ test "server: hex128 parse rejects malformed runtime ids" {
 /// dispatch가 실 runtime 소유를 위임하는 계약(RuntimeOps)을 검증하는 fake. spawn/terminate에 더해 write_input/resize도
 /// 기록해 input capability 라우팅과 resize 적용이 controller에게만 위임되는지 본다.
 pub const FakeRuntimeOps = struct {
+    const InvalidObservation = enum {
+        none,
+        process_name_too_long,
+        process_count,
+        aggregate_strings,
+        encoded_escape_expansion,
+        encoded_escape_fits,
+        invalid_utf8,
+        foreground_inconsistent,
+        mouse_mode,
+    };
+
     /// 벨·OSC 52가 core에 대기 중인 상황을 흉내낸다(실 pending 조회는 runtime_manager smoke).
     observation_urgent: bool = false,
     spawn_count: usize = 0,
@@ -3966,6 +4074,7 @@ pub const FakeRuntimeOps = struct {
     last_find_cur: u32 = 0,
     last_find_scroll: bool = false,
     observation_version: u8 = 0,
+    observation_invalid: InvalidObservation = .none,
     snapshot_len: ?usize = null,
     new_base_len: ?usize = null,
     delta_send_len: ?usize = null,
@@ -4165,14 +4274,60 @@ pub const FakeRuntimeOps = struct {
             self.observation_fail_count -= 1;
             return error.TransientObservationUnavailable;
         }
-        const cwd = try allocator.dupe(u8, if (self.observation_version == 0) "/tmp/project" else "/tmp/project-next");
+        const cwd = if (self.observation_invalid == .aggregate_strings or
+            self.observation_invalid == .encoded_escape_expansion or
+            self.observation_invalid == .encoded_escape_fits)
+        blk: {
+            const len = switch (self.observation_invalid) {
+                .aggregate_strings => protocol.max_control_json,
+                .encoded_escape_expansion => protocol.max_control_json / 6 + 512,
+                .encoded_escape_fits => protocol.max_control_json / 6 - 512,
+                else => unreachable,
+            };
+            const value = try allocator.alloc(u8, len);
+            @memset(value, 'x');
+            if (self.observation_invalid == .encoded_escape_expansion or
+                self.observation_invalid == .encoded_escape_fits)
+                @memset(value, 0x01);
+            break :blk value;
+        } else try allocator.dupe(
+            u8,
+            if (self.observation_version == 0) "/tmp/project" else "/tmp/project-next",
+        );
         errdefer allocator.free(cwd);
         const title = try allocator.dupe(u8, "project");
         errdefer allocator.free(title);
         const dest = try allocator.dupe(u8, "workbox");
         errdefer allocator.free(dest);
-        const processes = try allocator.alloc(RuntimeObservation.Process, 0);
-        errdefer allocator.free(processes);
+        const clipboard_read_target = try allocator.dupe(u8, "");
+        errdefer allocator.free(clipboard_read_target);
+        const process_count: usize = switch (self.observation_invalid) {
+            .process_count => runtime_metadata_wire.max_process_entries + 1,
+            .process_name_too_long, .invalid_utf8 => 1,
+            else => 0,
+        };
+        const processes = try allocator.alloc(
+            RuntimeObservation.Process,
+            process_count,
+        );
+        var initialized_processes: usize = 0;
+        errdefer {
+            for (processes[0..initialized_processes]) |process| allocator.free(process.name);
+            allocator.free(processes);
+        }
+        while (initialized_processes < processes.len) : (initialized_processes += 1) {
+            const name_len: usize = if (self.observation_invalid == .process_name_too_long)
+                129
+            else
+                1;
+            const name = try allocator.alloc(u8, name_len);
+            @memset(name, 'p');
+            if (self.observation_invalid == .invalid_utf8) name[0] = 0xff;
+            processes[initialized_processes] = .{
+                .pid = @intCast(initialized_processes + 1),
+                .name = name,
+            };
+        }
         return .{
             .cwd = cwd,
             .window_title = title,
@@ -4184,17 +4339,17 @@ pub const FakeRuntimeOps = struct {
             .kitty_flags = 0,
             .alternate_scroll = true,
             .mouse_tracking = false,
-            .mouse_tracking_mode = 0,
+            .mouse_tracking_mode = if (self.observation_invalid == .mouse_mode) 5 else 0,
             .bracketed_paste = false,
             .bell_count = 0,
             .clipboard_write_seq = 0,
             .clipboard_read_seq = 0,
-            .clipboard_read_target = "",
+            .clipboard_read_target = clipboard_read_target,
             .observer_generation = 7,
             .title_generation = 3,
             .cols = 80,
             .rows = 24,
-            .foreground_available = true,
+            .foreground_available = self.observation_invalid != .foreground_inconsistent,
             .foreground_pgid = 42,
             .processes = processes,
         };
@@ -4562,6 +4717,7 @@ test "server: attach streams the runtime snapshot as snapshot_chunk frames after
     var registry = reg.TerminalRuntimeRegistry.init(allocator);
     defer registry.deinit();
     _ = try registry.register(0xAA, 80, 24);
+    _ = try registry.register(0xBB, 80, 24);
 
     var fake: FakeRuntimeOps = .{};
     var conn = Connection.init(allocator, 1, &registry);
@@ -4589,6 +4745,80 @@ test "server: attach streams the runtime snapshot as snapshot_chunk frames after
     try testing.expect(protocol.Flags.hasEndStream(frames[1].header.flags));
     try testing.expectEqual(@as(u64, 1), frames[1].header.stream_id);
     try testing.expectEqualStrings("SNAPSHOT-BYTES", frames[1].payload);
+}
+
+test "server: every invalid RuntimeOps metadata class closes before attach wire publication" {
+    const cases = [_]FakeRuntimeOps.InvalidObservation{
+        .process_name_too_long,
+        .process_count,
+        .aggregate_strings,
+        .encoded_escape_expansion,
+        .invalid_utf8,
+        .foreground_inconsistent,
+        .mouse_mode,
+    };
+    for (cases) |invalid| {
+        const allocator = testing.allocator;
+        var registry = reg.TerminalRuntimeRegistry.init(allocator);
+        defer registry.deinit();
+        _ = try registry.register(0xAA, 80, 24);
+        var fake: FakeRuntimeOps = .{ .observation_invalid = invalid };
+        var conn = Connection.init(allocator, 1, &registry);
+        defer conn.deinit();
+        conn.runtime_ops = fake.ops();
+        {
+            const hello = try feedJson(
+                &conn,
+                .hello,
+                1,
+                "{\"protocol_min\":2,\"protocol_max\":2,\"capabilities\":[\"runtime_metadata_v1\"]}",
+            );
+            defer if (hello.frame) |frame| frame.deinit(allocator);
+        }
+        const attach = try feedJson(
+            &conn,
+            .request,
+            2,
+            "{\"method\":\"runtime.attach\",\"params\":{\"runtime_id\":\"aa\",\"mode\":\"observer\"}}",
+        );
+        try testing.expectEqualStrings("close", attach.action);
+        try testing.expect(attach.frame == null);
+        try testing.expectEqual(Connection.State.closed, conn.state);
+        try testing.expectEqual(@as(usize, 0), conn.attachmentCount());
+    }
+}
+
+test "server: JSON escape expansion below the encoded control cap still publishes attach" {
+    const allocator = testing.allocator;
+    var registry = reg.TerminalRuntimeRegistry.init(allocator);
+    defer registry.deinit();
+    _ = try registry.register(0xAA, 80, 24);
+    var fake: FakeRuntimeOps = .{ .observation_invalid = .encoded_escape_fits };
+    var conn = Connection.init(allocator, 1, &registry);
+    defer conn.deinit();
+    conn.runtime_ops = fake.ops();
+    {
+        const hello = try feedJson(
+            &conn,
+            .hello,
+            1,
+            "{\"protocol_min\":2,\"protocol_max\":2,\"capabilities\":[\"runtime_metadata_v1\"]}",
+        );
+        defer if (hello.frame) |frame| frame.deinit(allocator);
+    }
+    const frames = try feedExpectFrames(
+        &conn,
+        .request,
+        2,
+        "{\"method\":\"runtime.attach\",\"params\":{\"runtime_id\":\"aa\",\"mode\":\"observer\"}}",
+    );
+    defer {
+        for (frames) |frame| frame.deinit(allocator);
+        allocator.free(frames);
+    }
+    try testing.expectEqual(@as(usize, 2), frames.len);
+    try testing.expect(frames[0].payload.len <= protocol.max_control_json);
+    try testing.expectEqual(protocol.Kind.snapshot_chunk, frames[1].header.kind);
 }
 
 test "server: initial attach accepts exact viewport snapshot cap and rejects cap plus one before chunking" {
@@ -4783,6 +5013,48 @@ test "server: runtime metadata changes emit one full-state event and unchanged p
     }
 }
 
+test "server: periodic metadata JSON escape expansion closes before event publication" {
+    const allocator = testing.allocator;
+    var registry = reg.TerminalRuntimeRegistry.init(allocator);
+    defer registry.deinit();
+    _ = try registry.register(0xAA, 80, 24);
+    var fake: FakeRuntimeOps = .{};
+    var conn = Connection.init(allocator, 1, &registry);
+    defer conn.deinit();
+    conn.runtime_ops = fake.ops();
+    {
+        const hello = try feedJson(
+            &conn,
+            .hello,
+            1,
+            "{\"protocol_min\":2,\"protocol_max\":2,\"capabilities\":[\"runtime_metadata_v1\"]}",
+        );
+        if (hello.frame) |frame| frame.deinit(allocator);
+        const frames = try feedExpectFrames(
+            &conn,
+            .request,
+            2,
+            "{\"method\":\"runtime.attach\",\"params\":{\"runtime_id\":\"aa\",\"mode\":\"observer\"}}",
+        );
+        defer {
+            for (frames) |frame| frame.deinit(allocator);
+            allocator.free(frames);
+        }
+    }
+    const before_revision = conn.attachments.get(1).?.observation_revision;
+    fake.observation_invalid = .encoded_escape_expansion;
+    conn.attachments.getPtr(1).?.observation_ticks = 5;
+    try testing.expectEqual(
+        @as(?CollectedOutput, null),
+        try conn.collectOutputForLocalStream(1),
+    );
+    try testing.expectEqual(Connection.State.closed, conn.state);
+    try testing.expectEqual(
+        before_revision,
+        conn.attachments.get(1).?.observation_revision,
+    );
+}
+
 test "server: runtime metadata requires hello capability and fresh observation shares the event revision base" {
     const allocator = testing.allocator;
     var registry = reg.TerminalRuntimeRegistry.init(allocator);
@@ -4804,7 +5076,8 @@ test "server: runtime metadata requires hello capability and fresh observation s
             for (frames) |f| f.deinit(allocator);
             allocator.free(frames);
         }
-        try testing.expect(std.mem.indexOf(u8, frames[0].payload, "\"metadata_revision\":0") != null);
+        try testing.expect(std.mem.indexOf(u8, frames[0].payload, "\"metadata_revision\"") == null);
+        try testing.expect(std.mem.indexOf(u8, frames[0].payload, "\"metadata\"") == null);
     }
     legacy_fake.observation_version = 1;
     for (0..5) |_| {
@@ -4847,6 +5120,224 @@ test "server: runtime metadata requires hello capability and fresh observation s
         }
         try testing.expectEqual(@as(usize, 1), frames.len); // barrier state와 같아 metadata event 중복 없음.
     }
+}
+
+test "server: metadata revision exhaustion closes without emit or base mutation and reattach restarts at one" {
+    const allocator = testing.allocator;
+    var registry = reg.TerminalRuntimeRegistry.init(allocator);
+    defer registry.deinit();
+    _ = try registry.register(0xAA, 80, 24);
+    _ = try registry.register(0xBB, 80, 24);
+
+    var fake: FakeRuntimeOps = .{};
+    var exhausted = Connection.init(allocator, 1, &registry);
+    defer exhausted.deinit();
+    exhausted.runtime_ops = fake.ops();
+    {
+        const hello = try feedJson(
+            &exhausted,
+            .hello,
+            1,
+            "{\"protocol_min\":2,\"protocol_max\":2,\"capabilities\":[\"runtime_metadata_v1\"]}",
+        );
+        defer if (hello.frame) |frame| frame.deinit(allocator);
+    }
+    {
+        const frames = try feedExpectFrames(
+            &exhausted,
+            .request,
+            2,
+            "{\"method\":\"runtime.attach\",\"params\":{\"runtime_id\":\"aa\",\"mode\":\"observer\"}}",
+        );
+        defer {
+            for (frames) |frame| frame.deinit(allocator);
+            allocator.free(frames);
+        }
+    }
+    const sub = exhausted.attachments.getPtr(1).?;
+    const old_base = try allocator.dupe(u8, sub.observation_base.?);
+    defer allocator.free(old_base);
+    sub.observation_revision = std.math.maxInt(u64);
+    fake.observation_version = 1;
+    sub.observation_ticks = 4;
+
+    try testing.expect((try exhausted.collectOutputForLocalStream(1)) == null);
+    try testing.expectEqual(Connection.State.closed, exhausted.state);
+    try testing.expectEqual(std.math.maxInt(u64), sub.observation_revision);
+    try testing.expectEqualStrings(old_base, sub.observation_base.?);
+
+    var fresh_fake: FakeRuntimeOps = .{};
+    var fresh = Connection.init(allocator, 2, &registry);
+    defer fresh.deinit();
+    fresh.runtime_ops = fresh_fake.ops();
+    {
+        const hello = try feedJson(
+            &fresh,
+            .hello,
+            1,
+            "{\"protocol_min\":2,\"protocol_max\":2,\"capabilities\":[\"runtime_metadata_v1\"]}",
+        );
+        defer if (hello.frame) |frame| frame.deinit(allocator);
+    }
+    const frames = try feedExpectFrames(
+        &fresh,
+        .request,
+        2,
+        "{\"method\":\"runtime.attach\",\"params\":{\"runtime_id\":\"bb\",\"mode\":\"observer\"}}",
+    );
+    defer {
+        for (frames) |frame| frame.deinit(allocator);
+        allocator.free(frames);
+    }
+    try testing.expect(std.mem.indexOf(u8, frames[0].payload, "\"metadata_revision\":1") != null);
+    try testing.expectEqual(@as(u64, 1), fresh.attachments.get(1).?.observation_revision);
+}
+
+test "server: direct and prepared metadata barriers fail-close revision exhaustion before reply" {
+    const AcceptBudget = struct {
+        prepare_calls: usize = 0,
+        rollback_calls: usize = 0,
+        commit_calls: usize = 0,
+
+        fn prepare(
+            context: *anyopaque,
+            _: subscription_identity.LocalStreamId,
+            _: usize,
+        ) ?connection_slot.BaseReservation {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.prepare_calls += 1;
+            return .{
+                .tracker = .{
+                    .owner = .{ .monotonic_id = 1, .slot_generation = 1 },
+                    .index = 0,
+                    .generation = 1,
+                },
+                .generation = 1,
+            };
+        }
+        fn commit(
+            context: *anyopaque,
+            _: connection_slot.BaseReservation,
+            _: usize,
+        ) void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.commit_calls += 1;
+        }
+        fn rollback(context: *anyopaque, _: connection_slot.BaseReservation) void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.rollback_calls += 1;
+        }
+        fn release(_: *anyopaque, _: subscription_identity.LocalStreamId) void {}
+    };
+
+    const allocator = testing.allocator;
+    var registry = reg.TerminalRuntimeRegistry.init(allocator);
+    defer registry.deinit();
+    _ = try registry.register(0xAA, 80, 24);
+    _ = try registry.register(0xBB, 80, 24);
+
+    var direct_fake: FakeRuntimeOps = .{};
+    var direct = Connection.init(allocator, 1, &registry);
+    defer direct.deinit();
+    direct.runtime_ops = direct_fake.ops();
+    {
+        const hello = try feedJson(
+            &direct,
+            .hello,
+            1,
+            "{\"protocol_min\":2,\"protocol_max\":2,\"capabilities\":[\"runtime_metadata_v1\"]}",
+        );
+        defer if (hello.frame) |frame| frame.deinit(allocator);
+        const frames = try feedExpectFrames(
+            &direct,
+            .request,
+            2,
+            "{\"method\":\"runtime.attach\",\"params\":{\"runtime_id\":\"aa\",\"mode\":\"observer\"}}",
+        );
+        defer {
+            for (frames) |frame| frame.deinit(allocator);
+            allocator.free(frames);
+        }
+    }
+    const direct_sub = direct.attachments.getPtr(1).?;
+    const direct_base = try allocator.dupe(u8, direct_sub.observation_base.?);
+    defer allocator.free(direct_base);
+    direct_sub.observation_revision = std.math.maxInt(u64);
+    const unchanged = try feedJson(
+        &direct,
+        .request,
+        3,
+        "{\"method\":\"runtime.observation\",\"params\":{\"stream_id\":1}}",
+    );
+    defer if (unchanged.frame) |frame| frame.deinit(allocator);
+    try testing.expectEqualStrings("reply", unchanged.action);
+    try testing.expect(std.mem.indexOf(
+        u8,
+        unchanged.frame.?.payload,
+        "\"metadata_revision\":18446744073709551615",
+    ) != null);
+    try testing.expectEqual(Connection.State.ready, direct.state);
+    direct_fake.observation_version = 1;
+    const direct_result = try feedJson(
+        &direct,
+        .request,
+        4,
+        "{\"method\":\"runtime.observation\",\"params\":{\"stream_id\":1}}",
+    );
+    try testing.expectEqualStrings("close", direct_result.action);
+    try testing.expect(direct_result.frame == null);
+    try testing.expectEqual(std.math.maxInt(u64), direct_sub.observation_revision);
+    try testing.expectEqualStrings(direct_base, direct_sub.observation_base.?);
+
+    var prepared_fake: FakeRuntimeOps = .{};
+    var prepared = Connection.init(allocator, 2, &registry);
+    defer prepared.deinit();
+    prepared.runtime_ops = prepared_fake.ops();
+    {
+        const hello = try feedJson(
+            &prepared,
+            .hello,
+            1,
+            "{\"protocol_min\":2,\"protocol_max\":2,\"capabilities\":[\"runtime_metadata_v1\"]}",
+        );
+        defer if (hello.frame) |frame| frame.deinit(allocator);
+        const frames = try feedExpectFrames(
+            &prepared,
+            .request,
+            2,
+            "{\"method\":\"runtime.attach\",\"params\":{\"runtime_id\":\"bb\",\"mode\":\"observer\"}}",
+        );
+        defer {
+            for (frames) |frame| frame.deinit(allocator);
+            allocator.free(frames);
+        }
+    }
+    const prepared_sub = prepared.attachments.getPtr(1).?;
+    const prepared_base = try allocator.dupe(u8, prepared_sub.observation_base.?);
+    defer allocator.free(prepared_base);
+    prepared_sub.observation_revision = std.math.maxInt(u64);
+    prepared_fake.observation_version = 1;
+    var budget: AcceptBudget = .{};
+    prepared.projection_budget = .{
+        .ctx = &budget,
+        .prepare = AcceptBudget.prepare,
+        .commit = AcceptBudget.commit,
+        .rollback = AcceptBudget.rollback,
+        .release = AcceptBudget.release,
+    };
+    const prepared_result = try feedJson(
+        &prepared,
+        .request,
+        3,
+        "{\"method\":\"runtime.observation\",\"params\":{\"stream_id\":1}}",
+    );
+    try testing.expectEqualStrings("close", prepared_result.action);
+    try testing.expect(prepared_result.frame == null);
+    try testing.expectEqual(@as(usize, 1), budget.prepare_calls);
+    try testing.expectEqual(@as(usize, 1), budget.rollback_calls);
+    try testing.expectEqual(@as(usize, 0), budget.commit_calls);
+    try testing.expectEqual(std.math.maxInt(u64), prepared_sub.observation_revision);
+    try testing.expectEqualStrings(prepared_base, prepared_sub.observation_base.?);
 }
 
 test "server: 벨·OSC 52가 대기 중이면 관측 주기를 기다리지 않고 즉시 push한다" {

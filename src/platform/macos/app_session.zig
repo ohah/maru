@@ -3247,11 +3247,8 @@ pub const AppSession = struct {
         self.queuePendingDockFocus(entry);
         // restore/window merge 뒤에도 typed ack 전 fail-close owner를 함께 재파생한다. token만 이관하고
         // workspace/옛 surface owner를 남기면 늦은 native publish 전 PTY·paste·close가 잘못 라우팅된다.
-        //
-        // FP16: entry가 Term으로 옮겨가 `.dock_pending`(그룹 runtime_id) 축이 가리킬 대상이 없다. surface가 이미
-        // 있는 상태이므로 `.dock_surface`로 재파생한다 — publish 대기 전용이던 `.dock_pending`은 B-3에서 축과 함께
-        // 사라진다(§3.4).
-        self.focus_owner = .{ .dock_surface = entry.surface_id };
+        // 아직 ack 전이므로 `.dock_surface`(승격)가 아니라 barrier 그대로 재파생한다.
+        self.focus_owner = .{ .dock_pending = entry.id };
         self.workspace_focus_pending = false;
         self.file_tree_focus_pending = false;
         self.file_tree_restore_surface_pending = null;
@@ -7227,7 +7224,12 @@ pub const AppSession = struct {
         //    explorer root/recent **권위는 destination**이다 — source root를 흡수하지 않는다. 다만 양쪽이
         //    inferred면 source가 파일을 열 때 정한 project root가 dirname보다 정확하므로 그걸 쓴다
         //    (`/repo/sub/file.md`가 `/repo`에서 `/repo/sub`로 줄어드는 것을 막는다).
-        var dst_tree = try dst.file_tree.clone();
+        // destination 탐색기가 **비어 있으면** source 권위를 통째로 채택한다(옛 "dst가 비었으면 src 값을
+        // 채택한다"). 비어 있지 않으면 destination이 root/recent 권위다.
+        var dst_tree = if (dst.file_tree.hasContent())
+            try dst.file_tree.clone()
+        else
+            try src.file_tree.clone();
         defer dst_tree.deinit(); // commit은 후보를 빈 Tree로 되돌려 준다(단일 출처 commitFileTreeCandidate)
         var watch_extras: [dock_panel.max_entries][]const u8 = undefined;
         var watch_count: usize = 0;

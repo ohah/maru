@@ -2356,17 +2356,77 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
       `ErrorCode` decode와 OS-neutral attach exit mapping을 단일 출처로 유지하며 Debug/ReleaseFast
       `test-session-host`와 전체 `mise run check`를 통과했다.
     - **P5c3c-2 — blocking→pump**는 두 merge slice다.
-      - **P5c3c-2a — mode transaction**: 같은 `Client`에 단일 mode gate를 두고 RX/TX storage를 먼저 staging한 뒤
-        saved `F_GETFL`을 기록하고 단 하나의 `F_SETFL(saved_flags | O_NONBLOCK)`을 마지막 atomic commit으로 둔다.
-        `SO_RCVTIMEO`는 nonblocking poll mode에서 사용되지 않으므로 읽거나 변경하지 않는다. allocation/fcntl 실패는
-        flags, parser/pending/outbound/mode 무변경이며 성공 뒤 모든 blocking API는 I/O 전에 typed reject한다.
-        모든 blocking primitive는 `requireBlockingMode()` 하나를 통과하며 leaf별 임의 guard를 두지 않는다.
-        전환은 기존 `pending_outbound`가 null일 때만 허용하고 offset 0/partial 모두 typed busy로 거부한다.
-        external mode는 GUI용 `pending_outbound`을 재사용하지 않고 mode-exclusive bounded `external_tx`와
-        단일 in-flight response correlation만 새로 소유한다. `sendDontWait`의 일시적 flag 토글은 blocking mode에서만
-        허용하고 external mode는 transition이 commit한 영구 `O_NONBLOCK`만 사용한다. GUI용 legacy
-        `call`/`readSnapshot`/`readStreamBatch`/`pumpPendingOutput`/`sendInput`/scroll/core-command/resize/detach를
-        포함한 모든 public socket I/O API도 같은 blocking-mode chokepoint에서 typed reject한다.
+      - **P5c3c-2a — mode transaction**: 같은 `Client`에 `.blocking | .external(ExternalModeState)` 단일 mode
+        gate를 둔다. 2a가 storage shape만 고정하는 `ExternalTxFrame`은 owned wire `bytes`, 전송 `offset`, canonical header에서 복사한
+        `kind/stream_id/request_id`와 `activated_at_ns/last_progress_at_ns`를 가져 revoke/cleanup과 30초 absolute/
+        10초 progress timeout, zero-byte head replacement의 blocked epoch 상속을 별도 parallel metadata 없이
+        2b에서 판정할 수 있게 하며, 2a 자체는 frame admission·replacement·timeout을 실행하지 않는다.
+        `InFlightControl`은 `request_id`와 response `AbsoluteDeadline`만 가진다. `ExternalModeState`는 saved fd
+        flags, `ExternalTxFrame` descriptor table **정확히 64개 분량**을 선할당한 empty `external_tx`,
+        `external_tx_bytes=0`, allocation 없는 inline `in_flight_control=null`을 소유한다. frame body는 2b
+        admission 때만 할당하되 descriptor table 자체는
+        전환 전에 전부 staging한다. RX는 기존 `FrameParser`와 pending stream/event/batch/partial batch가 계속
+        유일한 storage라 새 raw RX queue나 선할당 buffer를 만들지 않는다. 2b의 stack poll/read scratch도
+        `Client` resident가 아니다. control response 5초 시계는 `InFlightControl`, logical screen stream의
+        30초/10초 시계는 기존 `PartialBatch`의 2b 확장, stdout blocked epoch는 3a ANSI queue가 각각 소유하며
+        `ExternalTxFrame` 옆의 parallel timing table은 만들지 않는다.
+
+        전환 error는 `ConnectionClosed | AlreadyExternal | Busy | OutOfMemory | FlagFailed`의 닫힌 타입이다.
+        검사 순서는 unusable→`ConnectionClosed`, 이미 external→`AlreadyExternal`, 기존 `pending_outbound != null`
+        (offset 0/partial 모두)→`Busy`이며 이 세 분기는 allocation/`F_GETFL`/`F_SETFL` 0이다. 그 뒤
+        `ExternalModeState`를 완전히 staging하고 `F_GETFL`로 blocking flags를 기록한다. initial `F_GETFL` 실패는
+        fd를 변경하지 않았으므로 staged storage만 회수하고 `FlagFailed`로 같은 blocking client를 반환한다.
+        blocking mode인데 이미 `O_NONBLOCK`인 fd는 staged table을 회수하고, 소유권 밖 flag mutation이라
+        reusable하다고 추측하지 않고 connection을 poison/close해 `ConnectionClosed`를 반환한다.
+        `SO_RCVTIMEO`는 nonblocking poll mode에서 사용되지 않으므로 읽거나 변경하지 않는다.
+
+        kernel flag 전환은 `F_SETFL(saved_flags | O_NONBLOCK)` 한 번으로 시도하고 바로 `F_GETFL`로 unrelated bit까지
+        exact target인지 확인한다. set 실패도 `F_GETFL`로 실제 flags를 확인한다. set 실패 뒤 actual이 exact
+        saved flags면 staged table을 회수하고 rollback syscall 없이 `FlagFailed`를 반환한다. verification read가
+        실패하거나 원 flags가 아니거나 성공 뒤
+        target verification이 실패하면 saved flags rollback과 두 번째 `F_GETFL` 검증을 시도한다. exact rollback이
+        증명되면 staged storage를 회수하고 `FlagFailed`로 blocking client를 그대로 반환한다. rollback syscall 또는
+        검증이 실패해 원 flags를 증명할 수 없으면 staged storage를 회수하고 connection을 exact once poison/close해
+        `ConnectionClosed`로 끝낸다. 따라서 mutate-then-fail adapter도 nonblocking fd를 `.blocking` mode로 돌려주지
+        않는다. target flags가 검증된 뒤에는 allocation, syscall, callback, error 분기가 없고
+        `self.mode = .external(staged)`의 infallible move만 수행한다. 이 transition은 외부 event loop가 시작되기 전
+        단일 thread/owner에서만 호출되고 fcntl adapter는 재진입/callback하지 않는 계약이라, kernel flag commit과
+        mode store 사이 상태를 다른 action이 관찰할 수 없다.
+
+        성공 뒤 모든 legacy socket I/O는 가장 바깥 public entry에서 `requireBlockingMode()` 하나를 먼저 통과하고
+        wire, allocation, capability no-op, queue mutation 전에 `ExternalMode`로 typed reject한다. 전수 목록은
+        admin runtime-end capability gate, `call/callUntil`, runtime inventory, prepare-upgrade/upgrade-status, `readSnapshot/readSnapshotUntil`,
+        `readStreamBatch`, blocking/nonblocking input, scroll-to-bottom/resync/core-command, `pumpPendingOutput`이며
+        resize/detach/notification/link/clipboard 같은 higher adapter RPC도 이 공통 call/input leaf를 통과한다.
+        pre-raw parser drain인 `refreshBufferedAuthorityEvidence`와 GUI `pending_outbound` 전용
+        `fenceRevokedStream`도 blocking-only로 reject한다. external pump는 2b의 공통 private demux와
+        `external_tx` metadata 기반 revoke fence를 사용한다. parser/socket을 진행하지 않는
+        `dropBufferedStream`, `takeEventForStream`, buffered-revoke query와 `failClosed/deinit`만 허용한다.
+        `sendDontWait`의 일시적 flag 토글은 blocking mode에서만 허용하고 external mode는 transition이 commit한
+        영구 `O_NONBLOCK`만 사용한다.
+
+        `external_attach.prepare`는 모든 pre-raw phase와 own-stream revoke publish gate가 성공한 뒤 이 transaction을
+        실제 호출하고 external-mode `Prepared`만 반환한다. transition error→CLI exit은
+        `Busy→busy(6)`, `OutOfMemory|FlagFailed|AlreadyExternal→internal(1)`,
+        `ConnectionClosed→protocol(8)`의 stable mapping 하나로 고정한다. legacy API의 `ExternalMode`도 기존
+        exhaustive error switch에서 protocol로 분류한다. 전환 실패는 raw/ANSI mutation과 후속 wire 0,
+        attachment teardown 뒤 socket EOF로 끝난다. `poisonAndTakeFd`와 `deinit`은 external TX의 모든 owned frame,
+        descriptor storage와 in-flight correlation을 exact once 회수한 뒤 fd를 close하며, close 전에 saved blocking
+        flags를 복원하지 않는다. `Client`는 fd를 export/dup하지 않는 sole owner이고 오류 복구는 close뿐이기 때문이다.
+        failClosed 반복 뒤 deinit도 free/close exact once다.
+
+        TDD gate는 offset 0/partial pending의 pre-allocation `Busy`, 전체 allocation fail-index, initial `F_GETFL`
+        실패, unrelated flag bit exact 보존, mutate-then-fail, target verification 실패, rollback/rollback-verification
+        실패의 poison+close, poisoned/double transition syscall 0을 injected allocator/fcntl/close ops로 고정한다.
+        parser partial bytes, pending stream/event/batch/partial batch, request ID/capabilities가 성공/모든 rollback에서
+        byte-for-byte 유지되는지와 public socket I/O 전수의 external-mode `ExternalMode`·wire/allocation/mutation 0,
+        external TX/in-flight가 empty/zero-prefix/partial-prefix인 poison/deinit exact-once를 Debug/ReleaseFast에서
+        검증한다. 실제 Darwin socketpair는 transition 전후 `F_GETFL`에서 unrelated bit를 보존하고
+        `O_NONBLOCK`만 추가하는지, `SO_RCVTIMEO` bytes가 불변인지, external mode의 모든 legacy API가 peer wire 0으로
+        reject된 뒤 deinit EOF인지 고정한다. 기존 제품 `external_attach.prepare` fixture는 반환 client가 external인지와
+        injected transition failure의 stable mapping·attachment EOF 정리 뒤 새 attach 성공을 검증한다. 별도 실
+        socketpair fixture가 같은 `transitionExit→failClient` 경로의 후속 wire 0·즉시 EOF를 고정한다. correctness는
+        debug assert에 기대지 않는다.
       - **P5c3c-2b — bounded pump/demux**: `client_pump.zig`는 turn policy만 소유하고 parser, pending stream/event/batch,
         request ID/capability와 wire queue의 SSOT는 계속 `Client` 하나다. TX resident는 connection당
         `protocol.max_binary_chunk + protocol.header_size` bytes(`1 MiB + 32`)/64 frame이며 두 조건을 모두 적용한다.
@@ -2390,6 +2450,9 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
         10초 completed-chunk progress deadline을 시작하고 `end_stream`에서만 clear한다. complete non-end chunk 뒤
         stall이나 10초 미만 chunk drip도 absolute deadline을 연장하지 않으며 timeout은 connection fail-close다.
         no-end stall과 complete-chunk drip fixture를 이 slice에서 고정한다.
+        2a의 `ExternalModeState`는 self-pointer를 갖지 않아 `Prepared`의 by-value 이동까지 안전하다. 2b의
+        `AttachmentTransport.context=*Client`와 ledger callback은 integrated stack owner의 최종 주소로 이동한 뒤에만
+        bind하고, bind 뒤 owner를 다시 move/copy하지 않는 non-movable barrier를 둔다.
       전환 직전 parser partial/pending frame과 request ID/capability가 byte-for-byte 보존되는 fixture를 둔다.
     - **P5c3c-3 — raw TTY loop/cleanup**은 두 merge slice다.
       - **P5c3c-3a — tty output/chord primitives**: dedicated tty output open/identity transaction과 detach chord,
@@ -2409,7 +2472,7 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
         공유하고 leave가 남은 budget 중 최대 100 ms를 쓴다. signal/revoke/error cleanup은 active/latest와 detach를
         버리고 하나의 100 ms deadline 안에서 leave를 시도한 뒤 즉시 raw restore/signal forwarding으로 간다.
 
-    **P5c3c-1a~1b는 구현 완료, 2a~3b는 계획 상태다.** 각 slice는 P5c3a~b의 Debug/ReleaseFast gate를 재실행하고 다음 slice가 실제
+    **P5c3c-1a~2a는 구현 완료, 2b~3b는 계획 상태다.** 각 slice는 P5c3a~b의 Debug/ReleaseFast gate를 재실행하고 다음 slice가 실제
     consumer로 쓰지 않는 임시 public API는 만들지 않는다.
 
     raw 진입 전에도 기존 `SO_RCVTIMEO`/blocking `writeAll`을 deadline으로 간주하지 않는다. resolver 전체, selected
@@ -2423,8 +2486,9 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
     delta/event, pending stream/batch, next request ID와 negotiated capability가 그대로 보존되고 fd/parser reader는
     계속 하나다. 이 mode의 `AttachmentTransport` 구현은 nonblocking socket, 기존 incremental parser, request-id response
     correlation, 단일 in-flight control RPC, bounded TX frame+offset, RX turn byte/frame budget와 response/event/screen
-    demux를 제공한다. mode 전환은 allocation/mutation 실패 시 blocking 상태를 보존하는 transaction이며 성공 뒤 blocking
-    API 호출을 typed reject한다. stdin은 남은 64 KiB input admission만 읽고 queue가 차면 POLLIN interest를 끈다.
+    demux를 제공한다. mode 전환은 pre-kernel allocation/inspection 실패와 exact-proven rollback에서만 blocking 상태를
+    보존하고, kernel mutation 뒤 원 flags를 증명할 수 없으면 fail-close한다. 성공 뒤 blocking API 호출을 typed
+    reject한다. stdin은 남은 64 KiB input admission만 읽고 queue가 차면 POLLIN interest를 끈다.
 
     inherited stdout open-file-description에 `O_NONBLOCK`을 설정하지 않는다. raw 진입 전에 `ttyname_r(stdout)`의
     canonical slave path를 얻고 `O_WRONLY|O_NOCTTY|O_CLOEXEC|O_NONBLOCK|O_NOFOLLOW`의 새 open-file-description으로

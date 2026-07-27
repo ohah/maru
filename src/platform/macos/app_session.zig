@@ -13764,9 +13764,12 @@ pub const AppSession = struct {
             p.term.file_entry = p.heap;
             pane.terms.appendAssumeCapacity(p.term);
         }
-        if (entries.active_index) |i| if (first_index + i < pane.terms.items.len) {
-            pane.active_term = first_index + i;
-        };
+        // 영속된 활성 entry가 검증에서 버려졌으면 **첫 유효 entry**가 활성이다(옛 DockPanel.restore의 clamp와
+        // 같은 규칙) — 파일이 하나라도 복원됐는데 활성이 없는 상태는 만들지 않는다.
+        const active_index = entries.active_index orelse 0;
+        if (first_index + active_index < pane.terms.items.len) {
+            pane.active_term = first_index + active_index;
+        }
         // 목록은 더 이상 path를 소유하지 않는다(heap Entry로 이동) — 해제 없이 비운다.
         entries.items.clearRetainingCapacity();
         entries.active_index = null;
@@ -23434,6 +23437,10 @@ pub const AppSession = struct {
         // pinned=1·멤버=0 desync)을 **마커 기준 canonical**로 흡수한 뒤(멤버 pinned := enclosing 마커 pinned) stablePartition이
         // 고정 그룹을 **통째** 프리픽스로 모은다(정규화 누락 시 마커만 앞으로 가 그룹 shred가 실패 모드). 여긴 드래그 없는
         // 시작/재적용 경로라 게이트(sidebar_drag_preview==null)는 자명히 통과한다.
+        // 복원된 활성 파일에 publish 대기 barrier를 건다. `resetFilePanelTransientStateForDockReplacement`가
+        // 위에서 transient를 전부 지우므로 **커밋 뒤**여야 한다 — 라이브 열기와 같은 계약이라, typed ack
+        // 전까지 PTY·paste·close가 새 WKWebView 대신 터미널로 잘못 라우팅되지 않는다.
+        if (self.activeFileEntry()) |restored_active| self.requestDockEntryFocus(restored_active);
         self.normalizePinnedFromGroups();
         self.stablePartitionPinned();
         self.floatLocalPinsAllGroups(); // 복원 로컬 pin 재float(GL §13.4 배선 (3) — 복원 특례도 항상 stablePartitionPinned 뒤, local-pinned 영속 반영)
@@ -45982,10 +45989,9 @@ test "FP5 workspace restore prunes invalid file panel capabilities and degrades 
     restored2.dock = .{ .entries = &invalid_only };
     try session.applyWorkspaceWindow(restored2);
     try std.testing.expectEqual(@as(usize, 0), session.fileEntryCount());
-    try std.testing.expect(session.dock.singleGroup().?.active == null);
 
-    // L2 restore 때는 nonempty였지만 capability pruning이 focused middle leaf를 비우는 경우에도 publish 전에
-    // 그 leaf를 접고 preorder 오른쪽 content group으로 focus를 넘긴다.
+    // 옛 다중 group 배치로 저장된 파일도(B-4 전까지 와이어는 그대로 읽는다) 평탄화돼 한 pane의 파일 탭이 된다.
+    // 검증 대상이 "group 배치 보존"에서 "**유효 entry 집합과 활성 선택**"으로 바뀐 자리다.
     const left_entries = [_]dock_panel.PersistedEntry{.{ .path = valid_path, .kind = .markdown, .active = true }};
     const invalid_middle_entries = [_]dock_panel.PersistedEntry{.{ .path = missing_path, .kind = .html, .active = true }};
     const right_entries = [_]dock_panel.PersistedEntry{.{ .path = valid_right_path, .kind = .markdown, .active = true }};
@@ -46004,11 +46010,17 @@ test "FP5 workspace restore prunes invalid file panel capabilities and degrades 
     var restored3 = captured2;
     restored3.dock = .{ .groups = &groups, .tree = &tree, .focused_group = 1 };
     try session.applyWorkspaceWindow(restored3);
-    try std.testing.expectEqual(@as(usize, 2), session.dock.groupCount());
-    try std.testing.expectEqualStrings(valid_right_path, session.dock.focusedGroup().entries.items[0].path);
-    var persisted = try session.dock.persistedState(allocator);
-    defer dock_panel.freePersistedState(allocator, &persisted);
-    try std.testing.expectEqual(@as(usize, 2), persisted.groups.len);
+    // 중간 group의 유일한 entry는 미존재 파일이라 버려지고, 좌·우 group의 파일 둘만 살아 preorder로 남는다.
+    try std.testing.expectEqual(@as(usize, 2), session.fileEntryCount());
+    try std.testing.expectEqualStrings(valid_path, session.fileEntryAt(0).?.path);
+    try std.testing.expectEqualStrings(valid_right_path, session.fileEntryAt(1).?.path);
+    // 영속된 활성(focused group 1)이 통째로 버려졌으므로 첫 유효 entry가 활성이 된다.
+    try std.testing.expectEqual(session.fileEntryAt(0).?.id, session.pending_dock_focus.?.entry_id);
+    var arena3 = std.heap.ArenaAllocator.init(allocator);
+    defer arena3.deinit();
+    const persisted = try session.persistFilePanelState(arena3.allocator());
+    try std.testing.expectEqual(@as(usize, 2), persisted.entries.len);
+    try std.testing.expect(persisted.entries[0].active);
 }
 
 test "FP9 restore barrier rejects a live protected dock before model replacement" {

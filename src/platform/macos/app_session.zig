@@ -12744,8 +12744,12 @@ pub const AppSession = struct {
         const owned_focus = switch (self.focus_owner) {
             .dock_surface => |focused| focused == surface_id,
             .file_tree => |owner| owner.restore_surface == surface_id,
-            .workspace, .dock_pending => false,
+            // publish 대기 barrier도 입력 소유다 — 그 파일을 닫으면 barrier가 가리킬 대상이 사라지므로
+            // 아래에서 승계 대상으로 다시 발급해야 한다(안 하면 입력이 죽은 owner에 묶인다).
+            .dock_pending => |entry_id| entry_id == entry.id,
+            .workspace => false,
         };
+
         self.hovered_file_panel_tab = null;
         self.removeFilePanelQueuedActions(surface_id);
         if (self.pending_file_panel_close != null and self.pending_file_panel_close.?.surface_id == surface_id)
@@ -12761,6 +12765,10 @@ pub const AppSession = struct {
                 // tree는 project/recent history로 계속 조작할 수 있다. 사라진 WebView만 Esc restore capability에서 제거한다.
                 self.focus_owner = .{ .file_tree = .{ .restore_surface = null } };
                 self.file_tree_restore_surface_pending = null;
+            } else if (self.activeFileEntry()) |successor| {
+                // 승계 Term이 또 다른 파일이면 그 파일로 typed focus를 다시 발급한다(옛 "다음 도크 entry로
+                // 승계"와 같은 사용자 경험). 승계가 터미널이면 workspace로 간다.
+                self.requestDockEntryFocus(successor);
             } else {
                 self.focusWorkspaceInput();
                 self.workspace_focus_pending = true;

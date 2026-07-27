@@ -233,7 +233,8 @@ fn deadlineHelloError(err: client_deadline.Error) DeadlineClientError {
 /// `readStreamBatch`가 돌려주는 한 화면 stream 배치. `is_snapshot`이면 fresh full snapshot(화면 리셋), 아니면 delta 증분이다
 /// (§9 — host가 grid/alt 변화 시 delta 대신 snapshot을 push하므로 소비자는 둘 다 받는다). `bytes`는 `end_stream`까지 이은
 /// record 바이트를 포함한 batch 전체가 caller 소유이며 반드시 `deinit()`한다. `stream_id`는 어느 runtime의 화면인지다
-/// (멀티 runtime 라우팅).
+/// (멀티 runtime 라우팅). owning value이므로 Zig move-by-convention을 따르며 bitwise copy한 두 값을 각각
+/// `deinit()`하는 사용은 지원하지 않는다.
 pub const StreamBatch = struct {
     is_snapshot: bool,
     stream_id: u64,
@@ -413,7 +414,8 @@ const ExternalAdoptionSnapshot = struct {
 
 /// Read-only, owned snapshot of the exact Client state that an external-pump adoption may consume.
 /// The payload bytes themselves stay Client-owned; the outer transaction exact-copies and compares
-/// them before this Client-local disarm capability is committed.
+/// them before this Client-local disarm capability is committed. This is a move-by-convention owning
+/// value: bitwise-copying it and deinitializing both copies is unsupported.
 pub const ExternalAdoptionInventory = struct {
     allocator: std.mem.Allocator,
     sealed_allocator: std.mem.Allocator,

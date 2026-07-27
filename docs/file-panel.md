@@ -429,7 +429,7 @@ FP11d의 nested table 행 추가는 `appendPrefixFrom/appendPrefixTo` source ran
 | **FP16c — 수명(핵심)** | §4: `collectWebSurfaces` walk를 창 전 탭으로 확장, 비활성 워크스페이스는 zero rect + hidden. presence 게이트 동반 확장 | 대기 |
 | **FP16d — chrome ✅** | §3.1 헤더 밴드를 파일 Term의 `ChromeInset.top`으로 이관(2026-07-28). 밴드 rect는 browser 주소창 밴드와 같은 `paneBandRect` 한 줄, 배치 권위는 `dock_layout.headerCellLayout` 그대로(렌더=`buildFilePanelHeaderDrawList`·hit-test가 같은 cell 범위 공유). `headerControlRect`/`headerModeRect`/`headerModeAt`/`headerConflictRect`/`headerDirtyRect`는 `Geometry` 대신 **밴드 `Rect`**를 받는다. 탭 라벨·dirty·`X`는 pane 탭바 계약 재사용 | 완료 |
 | **FP16g — rename 재설계 ✅** | §1 불변식의 ⑵⑶⑷ 구현 — 신뢰 kind는 `entry.path`만 교체(무통지, S3·S4), html·pdf는 Term 같은 자리 재생성(S1), plan 키를 `EntryId`→expected path + `mutation_pending_id`로 전환(S2). **FP16b가 `EntryId`를 지우므로 b와 함께 가거나 b 직후여야 한다** | 대기 |
-| **FP16e — 도크 축소** | `dock_layout`을 트리 전용으로, `DockGroup`/`DockTree`/drop/`dock_drag.zig` 삭제, 팔릿 `Split/Close File Panel Group`·`Move File Panel Right/Bottom`·`focus_file_tree` 제거, ~~LRU·`file-panel.max-live-views` config 제거~~ **완료**(B-2a) | 대기 |
+| **FP16e — 도크 축소 ✅** | `dock_layout`을 트리 전용으로(2026-07-28), `DockGroup`/`DockTree`/drop/`dock_drag.zig` 삭제(2026-07-28 — `dock_panel.zig` 1581→406줄), 팔릿 액션 3개 삭제(완료). `DockPanel`은 이제 도크 배치 상태 + **평탄한 복원 목록**만 든다 — 파일 소유는 `Term.file_entry`다. | 완료 |
 | **FP16f — 영속·검증** | §5.0 포맷(`file-term` 키 + persisted 압축 인덱스 + placeholder 조건 + 1회 마이그레이션), 테스트 재작성, macOS 실행 확인 | 대기 |
 
 **FP16e/f가 건드리는 테스트 실측**(적대적 검증에서 계수 — 초안의 "44개"는 `app_session.zig` 한 파일만 센 값이라 과소였다): `app_session.zig` 44(dock·file panel) + `dock_panel.zig` 28 + `dock_layout.zig` 13 + `dock_drag.zig` 5 + `workspace.zig` 8 = **약 98개**. 이 중 `dock_drag.zig` 5개는 모듈과 함께 삭제되고, `dock_panel`/`dock_layout`의 group·split·tab 기하 테스트는 pane 탭바 계약으로 이관되거나 삭제된다. `app_session.zig`의 파일 트리 테스트 18개는 트리가 남으므로 대체로 보존된다.
@@ -453,8 +453,8 @@ FP11d의 nested table 행 추가는 `appendPrefixFrom/appendPrefixTo` source ran
 | | 삭제 | 이관(소유자만 변경) | 보존 |
 |---|---|---|---|
 | **`dock_layout` ✅(2026-07-28 완료)** | `editor`·`tab_bar`·`header`·`content`·`tree_divider` rect, `Tab*`(`TabMetrics`/`tabRect`/`tabCloseRect`/`tabIndexAt`/`dockTabScroll`/`tabCellLayout`), `group*`(`groupGeometry`/`groupDivider*`), `treeSizePtForPointer`, `min_editor_cols`, `default_tab_cols` | `Header*`(`HeaderCellLayout`·`modesForKind`·`headerModeRect`/`headerModeAt`·`headerDirtyRect`/`headerConflictRect`) → 파일 Term 헤더 밴드(§3.1) | `workspace`·`terminal`·`dock`·`divider`·`tree`·`tree_header`·`tree_content` rect, `outerDividerHitRect`, `sizePtForPointer`, `compute`, `min_tree_cols` |
-| **`dock_panel`** | `DockGroup`·`DockTree`·`DockDropEdge`·`DockDropTarget`·`DropResult`·`commitEntryDrop`·`removeGroup`·`pruneEmptyGroups`, `EntryId`·`EntryIdAllocator`, `max_groups`, `Side`(right 고정) | `Entry`(경로·kind·mode·dirty·revision·pending) → `Term`(§10 FP16b) | `EntryKind`·`Mode`(+`defaultFor`/`allowedFor`/`usesEditorBridge`), `max_entries`(256) |
-| **`dock_drag.zig`** | **모듈 전체** | — | — |
+| **`dock_panel` ✅(2026-07-28 완료)** | `DockGroup`·`DockTree`·`DockDropEdge`·`DockDropTarget`·`DropResult`·`commitEntryDrop`·`removeGroup`·`pruneEmptyGroups`, `EntryId`·`EntryIdAllocator`, `max_groups`, `Side`(right 고정) | `Entry`(경로·kind·mode·dirty·revision·pending) → `Term`(§10 FP16b) | `EntryKind`·`Mode`(+`defaultFor`/`allowedFor`/`usesEditorBridge`), `max_entries`(256) |
+| **`dock_drag.zig` ✅(2026-07-28 삭제)** | **모듈 전체** | — | — |
 | **수명** | `assignDockSurfaceIds`·`enforceFilePanelLiveViewLimit`(LRU), config `file-panel.max-live-views`, `EntryId`/`EntryIdAllocator` | rename 경로 → §1 ⑵⑶⑷대로 재구현(FP16g) | §1 불변식("`Term`의 surface는 교체되지 않는다")이 이 전부를 대체 |
 | **액션·팔릿** | `split_file_panel_horizontal`·`split_file_panel_vertical`·`close_file_panel_group`·`toggle_file_panel_dock_side`·`focus_file_tree` | — | `toggle_file_panel_focus`, `open_file_panel`, 트리 mutation 액션 4종 |
 | **포커스** | `FocusOwner.dock_surface`·`.dock_group` | — | `.workspace`·`.file_tree` |

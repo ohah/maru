@@ -5480,8 +5480,16 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         // FP16 §3.4: 파일 패널이 워크스페이스 pane 탭이 된 뒤로 "어느 파일 WebView가 focus인가"는 아래
         // `active_web_surface_id_any_kind`(활성 pane의 활성 Term)와 같은 답이다. 옛 dock 전용 분기는
         // 도크가 워크스페이스 밖에 있던 시절의 것이라 제거했다 — 두 경로가 갈리면 stale focus가 난다.
+        // native liveness는 여전히 필요하다 — Zig가 돌려준 id의 WKWebView가 아직 안 붙었거나 숨겨진
+        // 프레임에도 그대로 기록하면 그 프레임의 focus 판정이 실제 뷰 상태와 어긋난다(옛 dock 분기가
+        // 하던 검사를 유지한다).
         let focusedFileId = maru_macos_app_session_focused_dock_surface(session)
-        surface.focusedFilePanelSurfaceId = focusedFileId == 0 ? nil : focusedFileId
+        if focusedFileId != 0, let panel = surface.webPanels[focusedFileId],
+           panel.superview != nil, !panel.isHidden {
+            surface.focusedFilePanelSurfaceId = focusedFileId
+        } else {
+            surface.focusedFilePanelSurfaceId = nil
+        }
         surface.filePanelFocusOverridden = false
 
         // firstResponder = Zig가 승인한 활성 pane/dock surface.

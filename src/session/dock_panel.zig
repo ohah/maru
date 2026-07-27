@@ -158,8 +158,6 @@ pub const Entry = struct {
     mutation_pending_id: u64 = 0,
     /// FP3 runtime handle. workspace.v1에는 저장하지 않고 복원/재소환 때 앱 전역 allocator에서 새 id를 발급한다.
     surface_id: u64 = 0,
-    /// FP6 live-view LRU clock. workspace에는 저장하지 않는 런타임 값이며 값이 작을수록 오래 안 본 entry다.
-    last_seen: u64 = 0,
 };
 
 /// workspace.v1에 들어가는 entry 부분집합. dirty는 파일 내용이 아니라 휘발성 편집 상태라 의도적으로 빠진다.

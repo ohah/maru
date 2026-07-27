@@ -2293,6 +2293,13 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
         state fixture가 `EINPROGRESS → poll → SO_ERROR` 성공/실패, EINTR/EAGAIN, fd flag rollback과 close를
         결정적으로 검증한다. real AF_UNIX listener fixture는 실제 nonblocking connect/hello를 고정하고,
         socketpair는 established I/O byte-drip/partial read-write에만 쓴다.
+        **구현 완료:** leaf는 injected monotonic/syscall ops와 `CLOEXEC`·`SO_NOSIGPIPE`·saved `F_GETFL`
+        복원을 소유하고, `Client.connectUntil`은 resolved descriptor의 explicit wire major를 받아 기존
+        `FrameParser`와 in-place `finishHello` 하나만 재사용한다. poll millisecond 올림, immediate connect,
+        `SO_ERROR`, 최종 read/write와 이미 buffered ACK의 모든 성공 경계에서 nanosecond deadline을 다시 확인한다.
+        pure exact-boundary/EINTR/EAGAIN/partial-offset fixture, 실제 nonblocking socketpair partial I/O와 peer-close
+        SIGPIPE 생존, malformed ACK·partial EOF candidate exact close, 전체 hello allocation fail-index, forked 제품
+        host AF_UNIX connect/hello→blocking flag 복원→legacy `host.info`를 Debug/ReleaseFast로 고정했다.
       - **P5c3c-1b — phase propagation + call/snapshot**:
         `attach_product_resolver.resolveProduct/revalidate/connectPinned`→`host_connect`→`Client` 호출 경계가
         `PhaseDeadline`을 명시적으로 전달하고 기존 backoff sleep을 deadline-aware poll로 교체한다.
@@ -2367,7 +2374,7 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
         공유하고 leave가 남은 budget 중 최대 100 ms를 쓴다. signal/revoke/error cleanup은 active/latest와 detach를
         버리고 하나의 100 ms deadline 안에서 leave를 시도한 뒤 즉시 raw restore/signal forwarding으로 간다.
 
-    **P5c3c-1a~3b는 모두 계획 상태다.** 각 slice는 P5c3a~b의 Debug/ReleaseFast gate를 재실행하고 다음 slice가 실제
+    **P5c3c-1a는 구현 완료, 1b~3b는 계획 상태다.** 각 slice는 P5c3a~b의 Debug/ReleaseFast gate를 재실행하고 다음 slice가 실제
     consumer로 쓰지 않는 임시 public API는 만들지 않는다.
 
     raw 진입 전에도 기존 `SO_RCVTIMEO`/blocking `writeAll`을 deadline으로 간주하지 않는다. resolver 전체, selected

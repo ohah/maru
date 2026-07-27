@@ -107,6 +107,12 @@ pub const client = if (builtin.os.tag == .macos)
     @import("session_host/client.zig")
 else
     struct {};
+// client_deadline(P5c3c-1a)는 nonblocking connect/read/write의 absolute deadline과 syscall
+// injection만 소유한다. protocol parser와 hello/capability 상태의 SSOT는 계속 client.zig 하나다.
+pub const client_deadline = if (builtin.os.tag == .macos)
+    @import("session_host/client_deadline.zig")
+else
+    struct {};
 // external_tty(P5c1)는 공개 attach parser보다 먼저 local controlling TTY의 transactional raw/restore와
 // 종료 signal self-pipe 경계를 고정한다. host runtime을 소유하지 않으며 macOS 제품 CLI에서만 사용한다.
 pub const external_tty = if (builtin.os.tag == .macos)

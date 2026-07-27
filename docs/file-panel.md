@@ -25,15 +25,24 @@
 - **Markdown 모드 = 읽기 | 소스 (라이브 프리뷰는 백로그, 2026-07-22 사용자 결정)**: 새 `.md` entry는 **읽기**가 기본이다. **라이브 프리뷰(FP11)는 atomic iframe(블록별 격리 렌더)의 로드 실패·플리커·성능 이슈로 백로그로 옮기고, 헤더 mode 선택기는 `읽기 | 소스`만 노출한다**(`dock_layout.modesForKind`·`Mode.defaultFor/allowedFor` SSOT). 저장된 `live-preview` markdown entry는 복원 시 `parseDockEntry`가 `defaultFor`(읽기)로 조용히 clamp한다(포맷 하위호환 유지). 라이브 재도입 시 이 세 곳에 `.live_preview`를 되돌린다. 읽기는 문서 전체의 격리 렌더로 **mermaid(격리 `<img>`·시스템 light/dark 테마)와 코드펜스 문법 하이라이트(`--maru-syntax-*` 터미널 팔레트)를 지원**하고, 소스는 CM6 생 Markdown이다. 라이브의 **FP11 목표 계약**은 같은 CM6 buffer 위에서 caret·selection과 관계된 최소 문법 토큰만 원문으로 드러내고 나머지 텍스트 표현을 유지하는 Obsidian형 source-first projection이다. 라이브↔소스는 하나의 `EditorView`·history·revision을 공유해 토글로 undo/selection/dirty를 잃지 않는다. 읽기는 FP11g 기능 동등성 증거가 쌓이기 전까지 유지하고, 소스는 renderer/worker 장애·모호한 문법·대형 블록을 복구하는 영구 escape hatch다. `.html`은 읽기 전용이다. 구버전 reader용 adapter나 workspace format bump는 추가하지 않는다(unknown mode를 만난 현행 fail-closed 동작 수용).
 - **저장은 명시적 `⌘S`만**: 라이브·소스 모두 현재 CM6 `Text` snapshot을 기존 pathless atomic write로 저장한다. write 완료 시 현재 문서가 그 snapshot과 내용상 같을 때만 native dirty를 내린다. 따라서 저장 중 재편집은 dirty를 유지하고, 편집 뒤 undo로 snapshot과 같은 내용에 돌아오면 revision이 더 높아도 clean이다. revision은 저장 identity가 아니라 stale dirty report를 거부하는 단조 clock이다. 실패·external conflict에서는 buffer와 dirty를 유지한다. focus-loss/autosave는 하지 않는다. `⌘F`는 Markdown 편집 WebView가 first responder일 때 새 package 없는 Maru CM6 search extension이 담당하며, `⌘A/C/V/X/Z/⇧Z/S`와 텍스트 탐색 키도 WebKit에 양보한다. ABI v132 typed `WebKeyRoute`가 app action·explicit unbind 소비·web editor·일반 pass-through를 구분하고 명시적인 사용자 rebind/unbind·global shortcut·modal owner의 기존 우선순위를 유지한다.
 - **write 스코프 = 열린 파일만**(§3). **트리 루트 = git repo 루트 우선**(§7).
-- **불변식(2차 적대적 검증으로 한정 정정): 파일 Term의 surface는 *eviction으로는* 해제하지 않는다.** 파일 Term마다 WKWebView 1개이고 비활성이면 hidden(상태 유지 — Swift hide=isHidden만)이다. 그래서 LRU eviction(`max_live_views`)을 제거한다(사용자 승인 2026-07-27).
-  - **초안의 "surface 수명 == Term 수명"은 과했다 — rename이 반례다.** 파일 rename은 `entry.path`를 바꾼 뒤 `notifySurfaceClosed(old_surface)` + `entry.surface_id = 0`으로 **surface를 은퇴시킨다**(app_session.zig:11347). eviction과 무관한 경로이므로, eviction을 없애도 "Term이 사는 동안 surface가 그대로"는 성립하지 않는다.
-  - **따라서 `EntryId` 삭제도 철회한다(초안 정정).** `dock_panel.zig:93` 주석이 불안정 원인을 **둘** 적어 두었다 — "path는 **rename으로**, surface_id는 LRU eviction/recreate로 바뀔 수 있어 … 키로 쓸 수 없다". 나는 eviction만 없애고 rename을 놓쳤다. rename이 path와 surface_id를 동시에 무효화하므로 비동기 ack·조회의 안정 키는 **여전히 필요**하다. 그 키를 `EntryId`로 둘지 §13의 `TermId`로 승격할지는 아래 열린 질문이다.
-  - **재설계 여지(FP16b에서 확인할 것)**: 신뢰 kind(markdown·text·svg·image)는 shell URL에 경로가 박혀 있지 않다 — Swift `pinnedFileHTMLURL`은 `filePanelKind == 2`(html·pdf)에서만 세팅되고(MaruAppHost.swift:2849), 신뢰 shell은 `maru-app://app`을 로드한 뒤 경로를 `file_panel_entry` 브리지로 **surface_id로 조회**한다. 그래서 신뢰 kind는 rename 시 surface를 유지한 채 브리지 re-pin + 기존 §7 2-phase reload를 재사용하는 설계가 가능하고, 그러면 `.html`/`.pdf`(loadFileURL 디렉터리 스코프라 재생성 불가피)만 예외가 된다. 이 방향을 택하면 surface 교체 기계의 적용 범위가 크게 줄어든다.
-  - **SSOT 근거가 결정 이유다.** `surface_id`의 앱 전역 비재사용은 편의가 아니라 SSOT 장치다 — 별도 generation 필드를 두지 않으려고 "id 자체가 generation token"(§7)이 되게 만든 선택이다. 그 규칙의 따름정리로 **surface보다 오래 사는 것은 surface_id를 identity로 쓸 수 없고**, 도크가 `EntryId`를 만든 이유가 정확히 그것이다(dock_panel.zig:93 주석: "surface_id는 LRU eviction/recreate로 바뀔 수 있어 … 키로 쓸 수 없다"). eviction을 없애면 그 전제가 사라져 **파일 Term도 id 하나로 충분**해지고 `term.surfaceId()`가 유일한 정답으로 남는다.
-  - **다만 (C)의 비용 논거는 약해졌다(정직한 재평가).** (C)를 택한 이유 중 하나가 "surface 교체 기계(=(B)의 레지스트리 수술)를 안 만들어도 된다"였는데, rename이 그 기계를 **어차피 요구한다**. 남는 (C)의 이득은 ⑴ 교체를 겪는 경로가 eviction+rename 둘에서 rename 하나로 줄고, ⑵ 그 하나는 사용자가 명시적으로 일으키는 드문 이벤트라 추론·테스트가 쉽다는 것이다. 아래 열린 질문 3번에서 재확인한다.
-  - **eviction을 유지했을 때의 대안이 둘 다 나빴다.** ⑴ Entry가 webview id를 따로 소유하면 sentinel id·entry id가 공존해 **`term.surfaceId()`가 파일 Term에서 오답**이 되고, `activeWebSurfaceId`·`hasWebSurface`·포커스·사이드바 등 호출처가 각자 예외를 알아야 한다(게이트 누락 계열 위험). ⑵ 재소환마다 sentinel surface를 새 id로 교체하면 id는 하나지만 `LiveSurfaceRegistry`·`surface_ptrs` 재바인딩을 건드린다. 도크가 ⑴처럼 보이는 건 **도크 entry의 surface_id가 레지스트리 없는 순수 토큰**(`surface_ids.next()`만)이라 가능했던 것이고, 실제 `Surface`를 들어야 하는 Term에는 그 수법이 통하지 않는다(app_session.zig:6298 `live_registry.create`).
-  - **새 예외를 만드는 게 아니라 예외를 없애는 것이다.** 브라우저 web Term은 지금도 eviction 대상이 아니다 — `max_live_views` 소비처 두 곳(`assignDockSurfaceIds`·`enforceFilePanelLiveViewLimit`)이 모두 `dock_initialized` 가드에 `dock_panel.Entry`만 훑는다. FP16은 파일을 브라우저와 **같은 규칙**으로 맞춘다.
-  - **대가(명시 수용)**: 열린 파일 수 = live WKWebView 수다. 상한이 사라지므로 §12에 리스크로 남기고, 상한 복원은 §13 후속 이니셔티브(`TermId` 승격)가 선행 조건이다. `file-panel.max-live-views` config는 소비처가 0이 되므로 **죽은 필드로 남기지 않고 제거**한다(loader는 알 수 없는 key를 forgiving 무시 + diagnostic이라 기존 config 파일은 깨지지 않는다 — loader.zig:252).
+- **불변식(스파이크 6건으로 확정): `Term`의 surface는 교체되지 않는다.** 이건 파일 전용 규칙이 아니라 **터미널 Term이 이미 지키고 있던 규칙**이다 — `Term.surface`는 생성 시 한 번만 assign되고(app_session.zig:6156·6303) 프로덕션 경로 어디서도 재대입되지 않는다. FP16은 파일 Term을 그 규칙 **안으로** 들여놓는다. 파일 Term마다 WKWebView 1개이고 비활성이면 hidden(상태 유지 — Swift hide=isHidden만)이다.
+  - **네 조각으로 성립한다**: ⑴ **eviction 없음**(LRU·`max_live_views` 제거 — 사용자 승인 2026-07-27). ⑵ **신뢰 kind(markdown·text·svg·image) rename은 surface를 유지**하고 `entry.path`만 갈아끼운다(§11.1 S3·S4). ⑶ **trust config(`filePanelKind` 1↔2)가 바뀌는 rename만 Term을 같은 자리에 재생성**한다 — `WKWebViewConfiguration`은 init 시점 고정이라(MaruAppHost.swift:2843~2868) 신뢰↔격리 전환은 뷰 재생성이 불가피하다. surface **교체**가 아니라 Term **교체**이므로 불변식을 깨지 않는다(§11.1 S1). ⑷ rename plan은 `EntryId`가 아니라 **expected path + `mutation_pending_id` 스탬프**로 키잉한다(§11.1 S2).
+  - **따름정리 — identity 개념이 하나로 준다.** `surface`가 교체되지 않으므로 **`surface_id`가 곧 그 Term의 이름**이다. 그래서 `EntryId`/`EntryIdAllocator`를 **삭제**하고, 초안이 §13 후속으로 제안했던 `TermId` 승격은 **불필요**해진다. 남는 식별자는 `surface_id`(인스턴스 = Term) 하나이고, `path`는 identity가 아니라 rename으로 바뀌는 **속성**이다.
+  - **`EntryId`가 load-bearing이 아님은 실측으로 확인했다**: FP16이 드래그와 dock focus 축을 지우면 소비처 8곳 중 7곳(3322·3429·3446·3525·3535·3568·3592·13042)이 함께 사라지고 rename remap(11316·11329)만 남는데, 그 정합성은 이미 `entry.path == expected AND entry.mutation_pending_id == id` **쌍**이 지고 있다. close 후 같은 경로 재오픈이라는 aliasing 시나리오도 스탬프가 fail-close시킨다(S2).
+  - **rename 시 사용자가 잃는 것(정확한 범위).** 원인은 "새 파일을 연다"가 아니다 — rename은 atomic no-replace라 **내용·inode가 동일**하다. 잃는 것은 ⓐ **top-level 재네비게이션**(문서를 다시 세움 → 스크롤·JS/form·PDF 페이지 상태 초기화, 뷰는 그대로라 깜빡임 없음)과 ⓑ **WKWebView 재생성**(NSView 제거·추가 → ⓐ + 시각적 깜빡임)에서 나온다.
+
+    | rename 유형 | 필요한 동작 | 잃는 것 |
+    |---|---|---|
+    | 신뢰 kind, **같은 디렉터리** | 없음 — `entry.path`만 교체 | **없음** |
+    | 신뢰 kind, **다른 디렉터리로 이동** | reload | 스크롤 (상대 asset을 부모 디렉터리 기준으로 다시 풀어야 함 — 불가피) |
+    | `filePanelKind` 유지(html↔pdf 등) | 재네비게이션 | 스크롤·JS/form·PDF 페이지 |
+    | `filePanelKind` 1↔2 전환(`.md`↔`.html` 등) | **Term 재생성** | 위 + 짧은 탭 깜빡임 (config가 init 고정이라 불가피) |
+
+    가장 흔한 경우(열린 `.md` 이름 바꾸기)가 무손실인 이유는 breadcrumb이 `entry.path`에서 파생하는 **Zig GPU chrome**이고 `maru.file.read/write`가 **pathless**라 shell에 통지할 것조차 없기 때문이다(웹 shell이 핀 경로를 쓰는 곳은 상대 asset을 푸는 `readAsset`뿐이다). 편집 buffer는 어느 경우에도 안전하다 — §7이 dirty·conflict entry의 rename을 차단해 clean만 rename되기 때문이다.
+  - **SSOT 근거가 결정 이유다.** `surface_id`의 앱 전역 비재사용은 편의가 아니라 SSOT 장치다 — 별도 generation 필드를 두지 않으려고 "id 자체가 generation token"이 되게 만든 선택이고(외부 control-plane 클라이언트가 id를 들고 시간을 건너오므로 stale selector가 **다른** surface로 리다이렉트되면 안 된다 — [control-plane.md](control-plane.md) §3), 그 따름정리로 **surface보다 오래 사는 것은 surface_id를 키로 쓸 수 없다**. 도크가 `EntryId`를 만든 이유가 정확히 그것이다(dock_panel.zig:93). FP16은 그 전제 자체를 없애 — 파일 Term의 surface가 Term보다 먼저 죽지 않게 만들어 — 별도 키의 필요를 소거한다.
+  - **`surface_id`를 안정화하는 방향은 기각했다.** wire 계약은 원래 `{surface_id, generation}` 쌍이고 generation은 "id를 유지한 채 런타임만 갈리는 경로"를 위해 남겨둔 자리라(control-plane §3) 오늘은 degenerate하다(`surface_generation`에 `surface_id`를 그대로 넣는다 — app_session.zig:13332). 그 자리를 실제로 살리려면 **모든** 비교 지점이 쌍을 검사해야 하고 한 곳만 빠뜨려도 stale 메시지가 live surface에 먹힌다. 비교 지점은 많고(ABI·브리지·mermaid helper·외부 클라이언트) 장수 엔티티는 적으므로, 비재사용을 유지해 "빠뜨릴 검사 자체를 없애는" 현행이 옳다.
+  - **새 예외를 만드는 게 아니라 예외를 없애는 것이다.** 브라우저 web Term은 지금도 eviction 대상이 아니다 — `max_live_views` 소비처 두 곳(`assignDockSurfaceIds`·`enforceFilePanelLiveViewLimit`)이 모두 `dock_initialized` 가드에 `dock_panel.Entry`만 훑는다. FP16은 파일을 브라우저·터미널과 **같은 규칙**으로 맞춘다.
+  - **대가(명시 수용)**: 열린 파일 수 = live WKWebView 수다. 상한이 사라지므로 §12에 최대 리스크로 남기고, 상한 복원은 §13이 다룬다. `file-panel.max-live-views` config는 소비처가 0이 되므로 **죽은 필드로 남기지 않고 제거**한다(loader는 알 수 없는 key를 forgiving 무시 + diagnostic이라 기존 config 파일은 안 깨진다 — loader.zig:252).
   - destroy 경로의 `browser.closed` push는 파일 Term에서 미발행한다(§4 destroy 판정과 같은 `web_panel_kind`-aware 분기). 이 분기는 eviction과 무관하게 유지된다.
 - **Markdown 초기 paint 무백색 계약(macOS 12+)**: 신뢰 Markdown WKWebView는 생성 직후·뷰 계층 삽입 전에 공개 API `underPageBackgroundColor`를 `NSColor.textBackgroundColor`로 설정하고, `index.html`과 `render.html`은 외부 `app.css`보다 앞에 동일한 `Canvas` critical 배경을 인라인한다. 인라인 허용 방식은 origin별로 다르다(FP12b, §2.3): **render origin은 정확한 critical style SHA-256(`sha256-Xeh9es1AoJEyNnawqxMjG30+czqjDUSJ+JDkbXALfVg=`) 하나만 핀**하고, **app(신뢰 shell) origin은 CM6 `syntaxHighlighting` StyleModule 때문에 `style-src 'self' 'unsafe-inline'`**이라 이 critical style도 unsafe-inline으로 함께 허용된다. 이 두 층은 **WKWebView 삽입→첫 document paint**와 **외부 CSS 적용 전 첫 paint**의 기본 흰 배경만 없애며, 렌더 완료까지 콘텐츠를 숨기는 계약은 아니다. 임의 웹페이지의 자체 배경을 존중해야 하는 browser/로컬 HTML에는 적용하지 않는다. 앱 floor인 macOS 11에서는 `underPageBackgroundColor`가 없어 critical CSS만 적용되며 pre-document backing은 §13의 명시적 잔여다. 12+ 적용 뒤에도 partial DOM 플리커가 계측되면 별도 loading cover를 `viewerReady`에서 제거하되 실패·timeout 해제까지 함께 설계한다. 첫 cold start만 느리면 prewarm, reload 연속성까지 필요하면 snapshot/double-buffer를 각각 별도 성능 슬라이스로 다룬다.
 
@@ -408,9 +417,10 @@ FP11d의 nested table 행 추가는 `appendPrefixFrom/appendPrefixTo` source ran
 | 슬라이스 | 내용 | 상태 |
 |---|---|---|
 | **FP16a — 문서** | 이 개정(§1 결정 뒤집기, §3.3·§3.4·§4·§5.0·§6·§7·§8 계약 갱신) + cross-doc 정합 | 이 PR |
-| **FP16b — 모델** | `dock_panel.Entry`의 소유자를 `DockGroup`→`Term`으로 이동(**`PanelKind`는 안 넓힌다** — §1). 창당 경로 유일성을 pane 트리 walk로 재구현. **`EntryId`는 유지**(rename이 path·surface_id를 둘 다 무효화 — §1). **`== .browser` 판정 8곳을 `isBrowserTerm` 하나로 통합**(중복 정의 6759/14422 제거, 파일 entry 제외 조건 추가 — §8). **rename의 surface 교체 경로를 Term에 맞게 재구현**(신뢰 kind는 surface 유지 재설계 검토 — §1) | 대기 |
+| **FP16b — 모델** | `dock_panel.Entry`의 소유자를 `DockGroup`→`Term`으로 이동(**`PanelKind`는 안 넓힌다** — §1). 창당 경로 유일성을 pane 트리 walk로 재구현. **`EntryId`/`EntryIdAllocator` 삭제**(§1 불변식으로 불필요해짐). **`== .browser` 판정 8곳을 `isBrowserTerm` 하나로 통합**(중복 정의 6759/14422 제거, 파일 entry 제외 조건 추가 — §8) | 대기 |
 | **FP16c — 수명(핵심)** | §4: `collectWebSurfaces` walk를 창 전 탭으로 확장, 비활성 워크스페이스는 zero rect + hidden. presence 게이트 동반 확장 | 대기 |
 | **FP16d — chrome** | §3.1 헤더 밴드를 파일 Term의 `ChromeInset.top`으로 이관. 탭 라벨·dirty·`X`는 pane 탭바 계약 재사용 | 대기 |
+| **FP16g — rename 재설계** | §1 불변식의 ⑵⑶⑷ 구현 — 신뢰 kind는 `entry.path`만 교체(무통지, S3·S4), html·pdf는 Term 같은 자리 재생성(S1), plan 키를 `EntryId`→expected path + `mutation_pending_id`로 전환(S2). **FP16b가 `EntryId`를 지우므로 b와 함께 가거나 b 직후여야 한다** | 대기 |
 | **FP16e — 도크 축소** | `dock_layout`을 트리 전용으로, `DockGroup`/`DockTree`/drop/`dock_drag.zig` 삭제, 팔릿 `Split/Close File Panel Group`·`Move File Panel Right/Bottom`·`focus_file_tree` 제거, **LRU(`assignDockSurfaceIds`·`enforceFilePanelLiveViewLimit`)와 `file-panel.max-live-views` config 제거**(§1) | 대기 |
 | **FP16f — 영속·검증** | §5.0 포맷(`file-term` 키 + persisted 압축 인덱스 + placeholder 조건 + 1회 마이그레이션), 테스트 재작성, macOS 실행 확인 | 대기 |
 
@@ -427,7 +437,7 @@ FP11d의 nested table 행 추가는 `appendPrefixFrom/appendPrefixTo` source ran
 | **`dock_layout`** | `editor`·`tab_bar`·`header`·`content`·`tree_divider` rect, `Tab*`(`TabMetrics`/`tabRect`/`tabCloseRect`/`tabIndexAt`/`dockTabScroll`/`tabCellLayout`), `group*`(`groupGeometry`/`groupDivider*`), `treeSizePtForPointer`, `min_editor_cols`, `default_tab_cols` | `Header*`(`HeaderCellLayout`·`modesForKind`·`headerModeRect`/`headerModeAt`·`headerDirtyRect`/`headerConflictRect`) → 파일 Term 헤더 밴드(§3.1) | `workspace`·`terminal`·`dock`·`divider`·`tree`·`tree_header`·`tree_content` rect, `outerDividerHitRect`, `sizePtForPointer`, `compute`, `min_tree_cols` |
 | **`dock_panel`** | `DockGroup`·`DockTree`·`DockDropEdge`·`DockDropTarget`·`DropResult`·`commitEntryDrop`·`removeGroup`·`pruneEmptyGroups`, `EntryId`·`EntryIdAllocator`, `max_groups`, `Side`(right 고정) | `Entry`(경로·kind·mode·dirty·revision·pending) → `Term`(§10 FP16b) | `EntryKind`·`Mode`(+`defaultFor`/`allowedFor`/`usesEditorBridge`), `max_entries`(256) |
 | **`dock_drag.zig`** | **모듈 전체** | — | — |
-| **수명** | `assignDockSurfaceIds`·`enforceFilePanelLiveViewLimit`(LRU), config `file-panel.max-live-views` | rename의 surface 교체 경로 → Term 기준으로 재구현(§1·열린 질문 3번) | `EntryId`(안정 키 — rename이 path·surface_id를 무효화) |
+| **수명** | `assignDockSurfaceIds`·`enforceFilePanelLiveViewLimit`(LRU), config `file-panel.max-live-views`, `EntryId`/`EntryIdAllocator` | rename 경로 → §1 ⑵⑶⑷대로 재구현(FP16g) | §1 불변식("`Term`의 surface는 교체되지 않는다")이 이 전부를 대체 |
 | **액션·팔릿** | `split_file_panel_horizontal`·`split_file_panel_vertical`·`close_file_panel_group`·`toggle_file_panel_dock_side`·`focus_file_tree` | — | `toggle_file_panel_focus`, `open_file_panel`, 트리 mutation 액션 4종 |
 | **포커스** | `FocusOwner.dock_surface`·`.dock_group` | — | `.workspace`·`.file_tree` |
 | **workspace 포맷** | `dock-entry`·`dock-entry-v2`·`dock-group-count`·`dock-focused-group`·`dock-node`, `dock-tree-size` | `dock-entry` → `file-term`(§5.0, 1회 마이그레이션) | `dock-size`·`dock-collapsed`·`dock-presented`·`dock-tree-roots`, `dock-side`(읽고 무시) |
@@ -435,12 +445,10 @@ FP11d의 nested table 행 추가는 `appendPrefixFrom/appendPrefixTo` source ran
 
 즉 "도크 뷰어 제거"는 **WKWebView가 도크에서 0개가 된다**는 뜻이다 — 탐색기는 전부 GPU 셀 chrome이라 도크는 native 콘텐츠 뷰를 하나도 소유하지 않게 되고, 그래서 §4의 도크-aware 예외 둘(destroy 판정·presence 신호)이 제거된다.
 
-**열린 질문(2차 적대적 검증에서 새로 생김 — FP16b 착수 전 확인 필요)**
-
-3. **rename이 surface 교체를 강제하므로 (C)를 재확인해야 한다.** 위 §1대로 rename은 eviction과 무관하게 surface를 은퇴시킨다(app_session.zig:11347). 그래서 "surface 교체 기계"는 FP16에서 **어차피 만들어야 한다**. 선택지: **(가) 현행 유지** — rename만 교체를 겪고 eviction은 계속 없음(현 확정안, 교체 경로 1개). **(나) eviction 복원** — 기계가 이미 있으니 `max_live_views`를 되살려 메모리 상한을 회복(교체 경로 2개, §12 최대 리스크 해소). **(다) 신뢰 kind rename 무교체 재설계** — 신뢰 kind는 브리지 re-pin으로 surface를 유지하고 `.html`/`.pdf`만 교체(교체 경로가 가장 좁아지고 §12는 그대로 남음). **권장은 (다)+(가)** — 교체 표면을 최소로 줄이고 메모리 상한은 §13 후속 이니셔티브가 `TermId`와 함께 제대로 해결한다. 단 (나)를 택하면 §12 리스크가 지금 사라지므로 트레이드오프가 분명해 사용자 결정이 필요하다.
-4. **안정 키를 `EntryId`로 둘지 `TermId`로 승격할지.** 3번의 결론과 무관하게 안정 키는 필요하다(§1). FP16 범위에서 `EntryId`를 그대로 두면 "Term 하나에 Term 식별자 + EntryId"가 공존해 §13이 지적한 중복이 남는다. `TermId` 승격을 FP16으로 당길지, §13 후속으로 미룰지 확인이 필요하다.
-
 **해소된 질문**
+
+3. ~~rename이 surface 교체를 강제하므로 (C)를 재확인해야 한다~~ → **(다)+(가) 확정**(스파이크 S1~S4, 2026-07-27). 신뢰 kind는 surface를 유지하고(S3·S4) html·pdf만 Term을 재생성한다(S1). 그 결과 surface **교체** 경로가 0이 되어 §1 불변식이 예외 없이 선다. eviction 복원은 하지 않는다(§13).
+4. ~~안정 키를 `EntryId`로 둘지 `TermId`로 승격할지~~ → **둘 다 불필요**. `surface_id`가 곧 Term의 이름이 되므로 `EntryId`를 삭제하고 `TermId`는 만들지 않는다. rename plan은 expected path + `mutation_pending_id`로 키잉한다(S2).
 
 1. ~~evicted 파일 Term의 surface id 소유자~~ → **(C) 파일 Term은 eviction하지 않는다**로 확정(사용자 승인 2026-07-27). 근거·대안 기각 사유·대가는 §1이 단일 출처다. FP16e가 LRU와 `max_live_views` config를 제거한다. **단 2차 적대적 검증에서 rename이 eviction과 무관하게 surface를 교체한다는 반례가 나와, 이 결정의 비용 논거와 `EntryId` 삭제 계획은 위 열린 질문 3·4번으로 다시 열렸다**(결정 자체는 유지).
 
@@ -461,6 +469,15 @@ FP11d의 nested table 행 추가는 `appendPrefixFrom/appendPrefixTo` source ran
 | **P2** | §4: 워크스페이스 전환이 실제로 web surface를 파괴하는가 | **red 재현** — tab0의 browser Term을 두고 tab1로 전환하니 `수집됨=false, destroyed=1`. 문서가 주장한 결함이 실행으로 확정됐다 |
 | **P3** | §4 수술이 실제로 되는가 + 회귀는 없는가 | **green** — 비활성 탭 walk를 더해 zero rect + `visible=false`로 남기니 `수집됨=true, destroyed=0, hidden=1, rect=0x0`. **기존 전체 스위트 통과**(fix 있으면 exit 0, 없으면 exit 1로 red→green 대비 확인). 수술이 `activeTabLeafRects` 아래 ~20줄로 끝난다는 것도 확인 |
 | **P4** | §1: `PanelKind`에 `.file`을 더해도 되는가 | **불가 판정** — Swift가 `let trusted = (panelKind == 0)` 매직 비교로 trust를 파생해(MaruAppHost.swift:2868) 값을 더하면 파일 패널이 조용히 untrusted로 떨어진다. 계획을 "`PanelKind` 2값 유지 + 파일 여부는 entry 유무"로 정정했고, 부수로 `== .browser` 판정 **8곳**(중복 정의 2개 포함)을 발견해 통합 작업을 FP16b에 넣었다 |
+
+**3차 — 불변식 확정 스파이크(2026-07-27)**
+
+| | 검증한 전제 | 결과 |
+|---|---|---|
+| **S1** | trust 전환 rename을 "Term 같은 자리 재생성"으로 표현할 수 있는가 | **통과** — `[terminal, web, terminal]`에서 가운데를 교체하니 탭 순서·`active_term` 보존, 전이가 `destroyed=1 + created=1`(reframe 오인 없음), 새 id > 옛 id. `surface_ptrs` 재바인딩은 **기존 `focusTerm()` chokepoint가 처리** — 새 기계 0 |
+| **S2** | rename plan을 `EntryId` 대신 path로 키잉해도 안전한가 | **통과** — 이론적 약점("close 후 같은 경로 재오픈 → aliasing")을 실제로 재현했더니 `mutation_pending_id` 스탬프가 fail-close시킨다(재오픈 entry는 `path 일치=true, mutation_pending_id=0`). 정합성은 이미 `path == expected AND stamp == id` 쌍이 지고 있어 `EntryId`는 빠른 핸들일 뿐이다 |
+| **S3** | 신뢰 kind가 surface 교체 없이 re-pin되는가 | **통과** — `entry.path`·`entry.kind`만 바꾸니 **같은 `surface_id`**로 ABI가 새 경로를 반환하고 `filePanelLanguage`도 새 확장자에서 재파생(`.md`→`.txt` → `plain`). 재생성이 불가피한 조건은 `filePanelKind`(trust config) 변경으로 확정 |
+| **S4** | re-pin 흐름이 기존 배관만으로 완결되는가 | **통과** — 외부변경 reload 큐가 **`surface_id`만** 키로 쓴다(경로 무관). `entry.path` 교체 → 기존 `queueFileTreeReload` → 기존 ABI drain → shell이 `file_panel_entry`로 새 경로 수신까지 이어지고 web surface 집합은 불변. **새 ABI·새 Swift 기계 0** |
 
 **2차 적대적 검증에서 추가한 스파이크·발견**
 
@@ -508,30 +525,20 @@ FP9 구현 PR은 기능명 하나로 묶어 통과 처리하지 않고 아래 in
 - [text-field-editor.md] 이니셔티브와 시퀀싱은 별개 사용자 결정(양쪽 대기).
 - **(FP16) live WKWebView 상한이 사라진다 — 명시 수용한 최대 리스크** — 전 워크스페이스의 web Term이 hidden으로 살아남는데(§4) LRU도 제거하므로(§1), **열린 파일 수 = live WKWebView 수**다. 브라우저 web Term이 이미 같은 상태라 새 예외는 아니지만, 문서 뷰어는 브라우저 탭보다 많이 열어 두는 사용 패턴이라 총량이 커질 수 있다. 완화는 두 갈래다 — 단기는 §10 열린 질문 2번(열기 시점 개수 상한), 장기는 §13 후속 이니셔티브(`TermId` 승격 후 eviction 복원). [performance-budget.md](performance-budget.md)에 WKWebView RSS 예산이 없다는 §1의 한계가 여기서 가장 크게 작용하므로, FP16f 손 테스트에서 파일 다수 열기 시 실제 RSS를 관측해 기록한다.
 - **(FP16) walk 범위 확장의 tick 비용** — `collectWebSurfaces`가 활성 탭 트리에서 창 전 탭 트리로 넓어진다. 탭 수는 사이드바 카드 수라 작지만 hot path이므로, presence 게이트를 같은 범위로 넓히면서 web Term 0개 창에서 조기 종료가 유지되는지 계측한다(§4).
-- **(FP16) rename이 파일 Term의 surface를 교체한다** — eviction을 없애도 이 경로는 남는다(§1). 지금은 도크 entry(레지스트리 없는 순수 토큰)를 교체하는 일이지만 FP16에서는 **레지스트리-backed Term surface**를 교체하는 일이 되므로, `surface_ptrs`/`activeSurface()` 재바인딩과 [빈 세션 resign 크래시](window-surface-mobility.md) 계열 반경에 들어간다. 열린 질문 3번의 (다)안(신뢰 kind 무교체)을 택하면 이 표면이 `.html`/`.pdf`로 좁아진다.
+- **(FP16) trust 전환 rename은 Term 재생성을 거친다** — `.md`↔`.html`처럼 `filePanelKind`가 1↔2로 바뀌는 rename은 `WKWebViewConfiguration`이 init 고정이라 뷰를 새로 만들어야 한다(§1). surface **교체**는 아니지만(불변식 유지) Term을 제거·삽입하는 경로라 탭 순서·활성·포커스 승계를 정확히 해야 한다. S1이 모델 수준에서는 통과했고 기존 `focusTerm()` chokepoint를 재사용하지만, 실제 NSView 제거·추가의 시각적 결과는 헤드리스 밖이라 GUI 손 테스트 항목이다.
 - **(FP16) 워크스페이스 전환이 이제 파일 편집 상태에 관여한다** — 초판이 도크로 회피했던 결합이 되돌아온다. 전환·창 이동·병합 경로마다 "이 web Term이 집합에서 빠지는가"를 확인하는 것이 FP16의 체크리스트이며, 위 **"활성 pane/트리 기준 판정의 도크 적용"** 항목의 FP16판 대응물이다(그 항목은 도크를 트리 기준 판정에서 **빼는** 문제였고, 이쪽은 워크스페이스 Term을 활성-탭 기준 판정에서 **넓히는** 문제라 방향이 반대다).
 
 ## 13. 후속(비목표)
 
-### 후속 이니셔티브 — `TermId` 승격과 surface 수명 분리 (등록 2026-07-27, 사용자 승인)
+### 후속 이니셔티브 — live WKWebView 상한 복원 (등록 2026-07-27, 사용자 승인)
 
-**FP16의 (C) 결정이 남긴 유일한 빚을 갚는 별도 이니셔티브다.** FP16 자체의 선행 조건은 아니고, FP16 완료 후 독립적으로 다룬다. 이 문서가 소유자이나 규모가 커지면 별도 단일 출처 문서로 분리한다.
+**초안의 `TermId` 승격 이니셔티브는 폐기했다.** 스파이크 S1~S4로 §1 불변식("`Term`의 surface는 교체되지 않는다")이 예외 없이 서면서 `surface_id`가 곧 Term의 이름이 됐고, `EntryId`는 FP16b가 삭제하며 `TermId`는 만들 필요가 없어졌다. identity 개념이 하나로 줄었으므로 "두 계층을 분리한다"는 원래 목표가 소멸했다.
 
-**문제**: 현재 `surface_id`는 두 가지를 겸한다 — ⑴ **인스턴스** identity(PTY·WKWebView 실체), ⑵ **Term 트리** identity(`surface_ptrs`·`activeSurface()`·포커스 라우팅의 키). 터미널 Term은 둘의 수명이 같아 겸해도 무해했다. web Term에서 처음 갈라졌고(sentinel = 렌더도 PTY도 없는데 오직 id 때문에 존재), 파일 eviction을 넣으려는 순간 완전히 깨진다 — 그래서 FP16이 eviction을 포기했다.
+**남는 후속은 하나다 — 메모리 상한.** FP16은 열린 파일 수만큼 live WKWebView를 유지한다(§12 최대 리스크). 상한이 실제로 필요하다는 증거(§12의 RSS 관측)가 나오면 eviction을 다시 도입한다.
 
-**목표 구조**:
+**단 그때 치를 대가를 미리 적어 둔다**: eviction은 "Term은 살아 있는데 surface는 죽는" 상태를 되살리므로 §1 불변식을 깬다. 그러면 다시 ⑴ surface보다 오래 사는 Term을 가리킬 안정 키(`EntryId` 부활 또는 `TermId` 승격)와 ⑵ 그 키를 소비하는 비동기 경로 전수 감사가 필요하다. 즉 **메모리 상한과 identity 단일화는 맞바꾸는 관계**이며, 지금은 후자를 택했다. 재도입 시 그 트레이드오프를 다시 사용자 결정으로 올린다.
 
-- **`TermId`를 1급으로 승격** — FP16b가 삭제하는 도크 `EntryId`의 개념을 Term 일반으로 올린다(안정·비재사용). 트리 identity·비동기 ack·drag가 이걸 키로 쓴다.
-- **`surface_id`의 의미를 "살아 있는 인스턴스 하나"로 좁힌다** — 불안정·비재사용이며 자기 자신이 generation token이라는 성질(§7)은 그대로 유지한다.
-- **sentinel surface 삭제** — 존재 이유가 "`Term.surface`가 non-optional이라서"뿐이므로, `Term.surface`가 부재를 표현할 수 있게 되면 sentinel은 사라진다. `LiveSurface` union의 web arm이 "live view 없음"을 표현하는 형태가 자연스러운 후보다.
-- **그 위에서 eviction 복원** — 파일뿐 아니라 **브라우저에도** 적용한다. 지금 브라우저에 eviction이 없는 것은 정책 결정이 아니라 같은 구조 제약의 결과다.
-
-**규모와 위험**: `Term.surface`는 auto-deref(`term.surface.core` 등)로 광범위하게 쓰이고, `surface_ptrs`/`activeSurface()` 계약은 [window-surface-mobility.md](window-surface-mobility.md) §8A.1이 소유한다. [빈 세션 resign 크래시](window-surface-mobility.md) 계열과 같은 반경이라 진입점 전수 audit이 필요하다. FP16에 끼워 넣지 않고 분리한 이유가 이것이다.
-
-**착수 조건**: FP16f 완료 + §12의 RSS 관측 결과. 실제로 상한이 필요하다는 증거가 나오면 우선순위를 올린다.
-
-**2차 적대적 검증이 근거를 강화했다**: 초안은 이 이니셔티브를 "(C)가 남긴 빚"으로만 봤는데, rename이 eviction과 무관하게 surface를 교체한다는 사실(§1)이 드러나면서 **eviction을 안 하더라도 안정 identity가 필요**해졌다. 즉 `TermId` 승격은 메모리 상한 복원을 위한 선택 사항이 아니라, 파일 Term이 rename을 겪는 한 **언젠가는 필요한 구조**다. FP16에서 `EntryId`를 그대로 두는 것은 그때까지의 명시적 임시 상태다(§10 열린 질문 4번).
-
+**착수 조건**: FP16f 완료 + §12의 RSS 관측 결과.
 
 - ~~**"pane에 열기"**~~ — FP16이 이것을 기본으로 승격해 해소(§1·§6).
 - ~~**"브라우저 탭을 도크로 보내기"**~~ — FP16으로 도크에 콘텐츠 탭이 없어져 목적 소멸. 남는 확장점은 새 `web_panel_kind` 추가다(§1).

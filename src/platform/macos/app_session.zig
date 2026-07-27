@@ -1580,7 +1580,8 @@ const FileTreeMutationEditorLock = struct {
 };
 const PendingRenameRemap = struct {
     const DockItem = struct {
-        entry_id: dock_panel.EntryId,
+        // 키는 `expected` 경로 + entry의 `mutation_pending_id` 스탬프다(FP16 §1 ⑷). EntryId는 이 plan의 키가
+        // 아니므로 들지 않는다 — 들면 "안정 키가 여기 있다"는 오해를 남긴다.
         expected: []u8,
         replacement: []u8,
         new_kind: ?dock_panel.EntryKind,
@@ -3425,7 +3426,7 @@ pub const AppSession = struct {
         if (self.dockDragSession()) |initial_drag| {
             // mouse-down 때 고정한 leaf snapshot만 순회한다. resize/split/open/close/restore 같은 기하 변경 경로는
             // drag를 즉시 취소하고, mouse-up은 fingerprint를 한 번 더 대조해 누락된 stale 변화도 fail-close한다.
-            if (initial_drag.layout_generation != self.dock_layout_generation or self.dock.entryLocationCounted(initial_drag.entry_id, entry_counters) == null) {
+            if (initial_drag.layout_generation != self.dock_layout_generation or self.fileEntryForIdCounted(initial_drag.entry_id, entry_counters) == null) {
                 self.cancelDockEntryDrag();
                 return;
             }
@@ -7714,8 +7715,7 @@ pub const AppSession = struct {
         src.file_panel_mode_pending = null;
         src.file_panel_dirty_sync_actions_len = 0;
         src.file_tree_reload_actions_len = 0;
-        // last_seen은 session-local clock이라 원값을 섞으면 작은 generation의 source entry가 즉시 LRU가 된다.
-        // 병합 뒤 destination의 dirty-sync 대기 entry를 목적지 큐에 다시 건다(LRU 제거로 last_seen 재기록은 불필요).
+        // 병합 뒤 destination의 dirty-sync 대기 entry를 목적지 큐에 다시 건다.
         for (0..dst.dock.groupCount()) |group_index| {
             const group = dst.dock.groupAt(group_index).?;
             for (group.entries.items) |*entry| {
@@ -11203,7 +11203,6 @@ pub const AppSession = struct {
             else
                 null;
             plan.dock_items[plan.dock_len] = .{
-                .entry_id = entry.id,
                 .expected = expected,
                 .replacement = replacement,
                 .new_kind = new_kind,
@@ -11211,8 +11210,9 @@ pub const AppSession = struct {
             plan.dock_len += 1;
         }
         // No supported open can enter while the mutation is in flight, so conflicts only need to be
-        // rejected once at admission. Completion resolves the stable EntryId again so an unrelated
-        // tab reorder or cross-group move cannot redirect the delayed rename acknowledgement.
+        // rejected once at admission. Completion re-resolves each item by its **expected path** and
+        // re-checks the `mutation_pending_id` stamp, so an unrelated close/reorder — or a close followed
+        // by a reopen of the same path — cannot redirect the delayed rename acknowledgement (FP16 §1 ⑷).
         for (plan.dock_items[0..plan.dock_len]) |item| if (self.fileEntryForPath(item.replacement) != null)
             return error.PathConflict;
         for (0..self.file_tree.recentCount()) |index| {
@@ -14132,11 +14132,18 @@ pub const AppSession = struct {
         session: *AppSession,
         group_index: usize = 0,
         entry_index: usize = 0,
+        group_count: ?usize = null,
+        group: ?*dock_panel.DockGroup = null,
 
         fn next(self: *FileEntryIterator) ?*dock_panel.Entry {
             if (!self.session.dock_initialized) return null;
-            while (self.group_index < self.session.dock.groupCount()) {
-                const group = self.session.dock.groupAt(self.group_index) orelse {
+            // `groupCount()`는 leaf 수 계산이고 `groupAt(i)`는 재귀 preorder 탐색이라, entry마다 다시 부르면
+            // tick당 스캔이 O(groups)에서 O(entries × 트리 노드)로 커진다(code-review max). 그룹 수는 한 번만
+            // 세고 현재 그룹 포인터는 캐시해, 대체하기 전 루프와 같은 "그룹당 한 번 조회"를 유지한다.
+            if (self.group_count == null) self.group_count = self.session.dock.groupCount();
+            while (self.group_index < self.group_count.?) {
+                if (self.group == null) self.group = self.session.dock.groupAt(self.group_index);
+                const group: *dock_panel.DockGroup = self.group orelse {
                     self.group_index += 1;
                     self.entry_index = 0;
                     continue;
@@ -14148,6 +14155,7 @@ pub const AppSession = struct {
                 }
                 self.group_index += 1;
                 self.entry_index = 0;
+                self.group = null;
             }
             return null;
         }
@@ -14163,11 +14171,18 @@ pub const AppSession = struct {
         session: *const AppSession,
         group_index: usize = 0,
         entry_index: usize = 0,
+        group_count: ?usize = null,
+        group: ?*const dock_panel.DockGroup = null,
 
         fn next(self: *FileEntryConstIterator) ?*const dock_panel.Entry {
             if (!self.session.dock_initialized) return null;
-            while (self.group_index < self.session.dock.groupCount()) {
-                const group = self.session.dock.groupAtConst(self.group_index) orelse {
+            // `groupCount()`는 leaf 수 계산이고 `groupAtConst(i)`는 재귀 preorder 탐색이라, entry마다 다시 부르면
+            // tick당 스캔이 O(groups)에서 O(entries × 트리 노드)로 커진다(code-review max). 그룹 수는 한 번만
+            // 세고 현재 그룹 포인터는 캐시해, 대체하기 전 루프와 같은 "그룹당 한 번 조회"를 유지한다.
+            if (self.group_count == null) self.group_count = self.session.dock.groupCount();
+            while (self.group_index < self.group_count.?) {
+                if (self.group == null) self.group = self.session.dock.groupAtConst(self.group_index);
+                const group: *const dock_panel.DockGroup = self.group orelse {
                     self.group_index += 1;
                     self.entry_index = 0;
                     continue;
@@ -14179,6 +14194,7 @@ pub const AppSession = struct {
                 }
                 self.group_index += 1;
                 self.entry_index = 0;
+                self.group = null;
             }
             return null;
         }
@@ -14454,10 +14470,26 @@ pub const AppSession = struct {
     /// **FP16 확장 지점**(docs/file-panel.md §8): 파일 entry가 `Term`으로 옮겨오면 `.html`/`.pdf` 파일 Term이
     /// 격리 config 때문에 `web_panel_kind == .browser`를 갖게 된다. 그때 이 술어에 "파일 entry 없음" 조건을 더하면
     /// 주소창·nav 단축키가 로컬 HTML 파일 뷰에 잘못 걸리는 것을 **한 곳에서** 막는다. 지금 통합해 두는 이유가 그것이다.
+    /// 이 Term이 **browser 웹 패널**인가(파일 패널 web Term은 제외). browser 전용 기능(nav 단축키·주소창 밴드·
+    /// 터미널 링크 착지·닫기 확인)이 공유하는 **유일한 판정**이다. 인라인 복사가 늘면 `web_panel_kind`가 늘어날 때
+    /// 한 곳을 놓쳐 "안 보이는 WKWebView에 링크가 로드되는" 류의 버그가 난다(코드리뷰 지적) — 그래서 이 함수 밖에서
+    /// `web_panel_kind == .browser`를 직접 비교하지 않는다.
+    ///
+    /// **의도적 예외 하나**: WKWebView **trust config 파생**(control-plane §8.1)은 "browser 기능인가"가 아니라
+    /// "격리 config를 쓰는가"를 묻는 별개 질문이라 이 술어를 쓰지 않는다. 파일 패널의 `.html`/`.pdf`도 거기서는
+    /// untrusted가 맞다.
+    ///
+    /// **FP16 확장 지점**(docs/file-panel.md §8): 파일 entry가 `Term`으로 옮겨오면 `.html`/`.pdf` 파일 Term이
+    /// 격리 config 때문에 `web_panel_kind == .browser`를 갖게 된다. 그때 이 술어에 "파일 entry 없음" 조건을 더하면
+    /// 주소창·nav 단축키가 로컬 HTML 파일 뷰에 잘못 걸리는 것을 **한 곳에서** 막는다. 지금 통합해 두는 이유가 그것이다.
     /// 이 파일 kind가 **격리 config**(filePanelKind=2, `loadFileURL`)를 쓰는가. 신뢰 shell(=1)과 갈리는
     /// 유일한 축이며 Swift의 `WKWebViewConfiguration` 선택과 같은 판정이다(app_host_abi.zig `file_panel_entry`).
     /// rename이 뷰를 다시 세워야 하는지도 이 값으로 정한다(FP16 §1 ⑶).
     fn filePanelKindIsIsolated(kind: dock_panel.EntryKind) bool {
+        // 같은 분할이 세 곳에 있다: 여기, `maru_macos_app_session_file_panel_entry`(app_host_abi.zig, 1/2 반환),
+        // `collectWebSurfaces`(.markdown/.browser 매핑). 셋 다 exhaustive switch라 **새 EntryKind를 더하면**
+        // 컴파일러가 세 곳을 모두 잡아 준다. 반대로 **기존 kind의 소속만 한 곳에서 바꾸면** 컴파일은 통과한 채
+        // trust config와 재생성 판정이 갈라지므로, 이 분할을 옮길 때는 세 곳을 함께 고친다(code-review max).
         return switch (kind) {
             .html, .pdf => true,
             .markdown, .text, .svg, .image => false,
@@ -14797,7 +14829,7 @@ pub const AppSession = struct {
     /// (Swift가 batch를 적용한다는 전제) 다음 tick이 무변경이면 batch가 빈다(§10 "diff 있을 때만 sync"). 원자성: cur
     /// 수집·marshal 중 OOM이면 transitions를 비우고 prev도 **안 전진**해 다음 tick이 같은 상태로 재시도한다(부분 적용 없음).
     fn computeWebSurfaceTransitions(self: *AppSession) void {
-        self.web_surface_transitions.clearRetainingCapacity(); // config reload로 상한이 낮아진 경우도 다음 tick에 LRU 해제.
+        self.web_surface_transitions.clearRetainingCapacity(); // FP16에서 LRU를 제거했으므로 상한에 의한 해제는 없다(§1 불변식).
 
         // 영속 scratch 재사용(매 tick fresh 할당 회피). collect 실패(OOM/미초기화)면 batch 빔·prev 불변(재시도) —
         // scratch에 남은 부분 데이터는 다음 tick clearRetainingCapacity가 리셋하므로 무해.
@@ -45597,7 +45629,7 @@ test "FP9 performance artifact: 64 groups and 256 entries keep projected drag bo
     _ = try session.resize(6400, 1200, 1000);
 
     var entry_counters: dock_panel.DockPanel.EntryLookupCounters = .{};
-    try std.testing.expect(session.dock.entryLocationCounted(last_entry_id, &entry_counters) != null);
+    try std.testing.expect(session.fileEntryForIdCounted(last_entry_id, &entry_counters) != null);
     try std.testing.expect(entry_counters.entry_visits <= dock_panel.max_entries);
 
     session.armDockEntryDrag(group, last_entry_id, 0, 0);

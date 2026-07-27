@@ -143,10 +143,11 @@ pub fn connectUnixUntil(
     if (!ops.set_flags(ops.context, fd, saved_flags | nonblocking)) return error.FlagFailed;
     if (!ops.set_nosigpipe(ops.context, fd)) return error.SocketOptionFailed;
 
-    switch (ops.connect(ops.context, fd, path)) {
+    const connect_result = ops.connect(ops.context, fd, path);
+    if (deadline.remainingNs() <= 0) return error.Timeout;
+    switch (connect_result) {
         .outcome => |outcome| {
             if (outcome == .connected) {
-                if (deadline.remainingNs() <= 0) return error.Timeout;
                 return .{ .fd = fd, .saved_flags = saved_flags };
             }
         },
@@ -158,20 +159,20 @@ pub fn connectUnixUntil(
 
     while (true) {
         const timeout_ms = try deadline.pollTimeoutMs();
-        switch (ops.wait(ops.context, fd, .writable, timeout_ms)) {
+        const wait_result = ops.wait(ops.context, fd, .writable, timeout_ms);
+        if (deadline.remainingNs() <= 0) return error.Timeout;
+        switch (wait_result) {
             .interrupted => continue,
             .timed_out => return error.Timeout,
             .failed => return error.ConnectFailed,
             .ready => {},
         }
-        // poll timeout is rounded up to milliseconds. Readiness at or after the nanosecond
-        // boundary must not turn that rounding into extra phase budget.
+        const socket_error_result = ops.socket_error(ops.context, fd);
         if (deadline.remainingNs() <= 0) return error.Timeout;
-        const socket_error_value = switch (ops.socket_error(ops.context, fd)) {
+        const socket_error_value = switch (socket_error_result) {
             .value => |value| value,
             .failed => return error.ConnectFailed,
         };
-        if (deadline.remainingNs() <= 0) return error.Timeout;
         if (socket_error_value == 0) return .{ .fd = fd, .saved_flags = saved_flags };
         const socket_error: posix.E = @enumFromInt(socket_error_value);
         return switch (classifyConnectErrno(socket_error)) {
@@ -192,11 +193,12 @@ pub fn writeAllUntil(
     var offset: usize = 0;
     while (offset < bytes.len) {
         if (deadline.remainingNs() <= 0) return error.Timeout;
-        switch (ops.write(ops.context, fd, bytes[offset..])) {
+        const write_result = ops.write(ops.context, fd, bytes[offset..]);
+        if (deadline.remainingNs() <= 0) return error.Timeout;
+        switch (write_result) {
             .count => |count| {
                 if (count == 0 or count > bytes.len - offset) return error.WriteFailed;
                 offset += count;
-                if (deadline.remainingNs() <= 0) return error.Timeout;
             },
             .interrupted => continue,
             .would_block => try waitUntil(ops, fd, .writable, deadline),
@@ -213,16 +215,48 @@ pub fn readSomeUntil(
 ) Error!usize {
     while (true) {
         if (deadline.remainingNs() <= 0) return error.Timeout;
-        switch (ops.read(ops.context, fd, dst)) {
+        const read_result = ops.read(ops.context, fd, dst);
+        if (deadline.remainingNs() <= 0) return error.Timeout;
+        switch (read_result) {
             .count => |count| {
                 if (count == 0 or count > dst.len) return error.ReadFailed;
-                if (deadline.remainingNs() <= 0) return error.Timeout;
                 return count;
             },
             .interrupted => continue,
             .would_block => try waitUntil(ops, fd, .readable, deadline),
             .eof => return error.Closed,
             .failed => return error.ReadFailed,
+        }
+    }
+}
+
+/// Waits for a retry interval without manufacturing a new phase budget. `wake_at` is derived once,
+/// so repeated EINTR cannot restart the delay. Reaching the parent phase boundary is always a
+/// timeout; waking earlier after the requested delay is success.
+pub fn waitBackoffUntil(
+    ops: Ops,
+    delay_ns: i128,
+    deadline: AbsoluteDeadline,
+) Error!void {
+    if (delay_ns < 0) return error.InvalidDeadline;
+    const started = deadline.nowNs();
+    if (started >= deadline.expires_at_ns) return error.Timeout;
+    const requested = std.math.add(i128, started, delay_ns) catch std.math.maxInt(i128);
+    const wake_at = @min(requested, deadline.expires_at_ns);
+    while (true) {
+        const now = deadline.nowNs();
+        if (now >= deadline.expires_at_ns) return error.Timeout;
+        if (now >= wake_at) return;
+        const remaining = wake_at - now;
+        const rounded = std.math.divCeil(i128, remaining, std.time.ns_per_ms) catch
+            return error.InvalidDeadline;
+        const timeout_ms: c_int = @intCast(@min(rounded, std.math.maxInt(c_int)));
+        const wait_result = ops.wait(ops.context, -1, .readable, timeout_ms);
+        if (deadline.nowNs() >= deadline.expires_at_ns) return error.Timeout;
+        switch (wait_result) {
+            .interrupted => continue,
+            .ready, .timed_out => {},
+            .failed => return error.ConnectFailed,
         }
     }
 }
@@ -235,7 +269,9 @@ fn waitUntil(
 ) Error!void {
     while (true) {
         const timeout_ms = try deadline.pollTimeoutMs();
-        switch (ops.wait(ops.context, fd, kind, timeout_ms)) {
+        const wait_result = ops.wait(ops.context, fd, kind, timeout_ms);
+        if (deadline.remainingNs() <= 0) return error.Timeout;
+        switch (wait_result) {
             .ready => return,
             .interrupted => continue,
             .timed_out => return error.Timeout,
@@ -409,6 +445,7 @@ const Fake = struct {
     nosigpipe_ok: bool = true,
     advance_ns_per_wait: i128 = 0,
     advance_ns_per_connect: i128 = 0,
+    advance_ns_per_socket_error: i128 = 0,
     advance_ns_per_read: i128 = 0,
     advance_ns_per_write: i128 = 0,
     write_lengths: [8]usize = @splat(0),
@@ -481,7 +518,9 @@ const Fake = struct {
         return result;
     }
     fn fakeSocketError(ctx: *anyopaque, _: c.fd_t) SocketErrorResult {
-        return cast(ctx).socket_error_result;
+        const self = cast(ctx);
+        self.now_ns += self.advance_ns_per_socket_error;
+        return self.socket_error_result;
     }
     fn fakeRead(ctx: *anyopaque, _: c.fd_t, _: []u8) IoResult {
         const self = cast(ctx);
@@ -578,6 +617,49 @@ test "deadline connector closes exact fd on timeout denial and SO_ERROR" {
         ),
     );
     try std.testing.expectEqual(@as(usize, 1), immediate_at_boundary.closed);
+
+    var denied_at_boundary = Fake{
+        .connect_result = .denied,
+        .advance_ns_per_connect = 100,
+    };
+    try std.testing.expectError(
+        error.Timeout,
+        connectUnixUntil(
+            denied_at_boundary.ops(),
+            "socket",
+            denied_at_boundary.deadline(100),
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 1), denied_at_boundary.closed);
+
+    var poll_failure_at_boundary = Fake{
+        .waits = &.{.failed},
+        .advance_ns_per_wait = 100,
+    };
+    try std.testing.expectError(
+        error.Timeout,
+        connectUnixUntil(
+            poll_failure_at_boundary.ops(),
+            "socket",
+            poll_failure_at_boundary.deadline(100),
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 1), poll_failure_at_boundary.closed);
+
+    var socket_error_failure_at_boundary = Fake{
+        .waits = &.{.ready},
+        .socket_error_result = .failed,
+        .advance_ns_per_socket_error = 100,
+    };
+    try std.testing.expectError(
+        error.Timeout,
+        connectUnixUntil(
+            socket_error_failure_at_boundary.ops(),
+            "socket",
+            socket_error_failure_at_boundary.deadline(100),
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 1), socket_error_failure_at_boundary.closed);
 }
 
 test "deadline connector closes on every pre-connect fd option failure" {
@@ -684,6 +766,26 @@ test "deadline established I/O preserves partial offsets and absolute timeout" {
             final_read_at_boundary.deadline(100),
         ),
     );
+}
+
+test "deadline backoff does not restart after EINTR or cross the phase boundary" {
+    var interrupted = Fake{
+        .waits = &.{ .interrupted, .timed_out },
+        .advance_ns_per_wait = 3,
+    };
+    try waitBackoffUntil(interrupted.ops(), 5, interrupted.deadline(100));
+    try std.testing.expectEqual(@as(usize, 2), interrupted.wait_index);
+    try std.testing.expectEqual(@as(i128, 6), interrupted.now_ns);
+
+    var capped = Fake{
+        .waits = &.{.timed_out},
+        .advance_ns_per_wait = 5,
+    };
+    try std.testing.expectError(
+        error.Timeout,
+        waitBackoffUntil(capped.ops(), 100, capped.deadline(5)),
+    );
+    try std.testing.expectEqual(@as(usize, 1), capped.wait_index);
 }
 
 const LimitedSocketOps = struct {

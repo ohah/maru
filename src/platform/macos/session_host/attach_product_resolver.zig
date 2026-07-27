@@ -14,6 +14,7 @@ const recovery_discovery = @import("recovery_discovery.zig");
 const remote_attachment = @import("remote_attachment.zig");
 const resolver = @import("attach_resolver.zig");
 const socket_server = @import("socket_server.zig");
+const attach_phase_deadline = @import("attach_phase_deadline.zig");
 extern "c" fn usleep(usec: c_uint) c_int;
 
 fn runTestSocketProxy(listener: c.fd_t, upstream_path: [:0]const u8) noreturn {
@@ -140,6 +141,8 @@ pub const Connected = union(enum) {
 const ProductProbe = struct {
     allocator: std.mem.Allocator,
     base_cache_dir: []const u8,
+    phase: attach_phase_deadline.PhaseDeadline,
+    expired_latched: bool = false,
 
     fn call(
         context: *anyopaque,
@@ -147,15 +150,24 @@ const ProductProbe = struct {
         runtime_id: u128,
     ) attach_cli.Probe {
         const self: *ProductProbe = @ptrCast(@alignCast(context));
-        const outcome = host_connect.connectDiscoveredHostProfile(
+        if (self.phase.absolute.remainingNs() <= 0) {
+            self.expired_latched = true;
+            return .host_unavailable;
+        }
+        const outcome = host_connect.connectDiscoveredHostProfileUntil(
             self.allocator,
             self.base_cache_dir,
             descriptor,
             .cli_probe,
+            self.phase,
         );
         var client = switch (outcome) {
             .connected => |value| value,
-            .failed => |reason| return connectFailure(reason),
+            .failed => |reason| {
+                if (reason == .deadline_exceeded or self.phase.absolute.remainingNs() <= 0)
+                    self.expired_latched = true;
+                return connectFailure(reason);
+            },
         };
         defer client.deinit();
         var runtime_text: [32]u8 = undefined;
@@ -167,16 +179,32 @@ const ProductProbe = struct {
             "{{\"runtime_id\":\"{s}\"}}",
             .{&runtime_text},
         ) catch return .out_of_memory;
-        const response = client.call("runtime.get", params) catch |err| return switch (err) {
-            error.OutOfMemory => .out_of_memory,
-            error.Unauthorized => .denied,
-            error.EndpointTransient, error.AdminBusy => .busy,
-            error.EndpointAbsent, error.ConnectionClosed, error.WriteFailed => .host_unavailable,
-            error.IncompatibleVersion, error.HandshakeFailed, error.ProtocolError, error.EventQueueFull => .protocol,
-            error.EndpointDenied => .denied,
+        const response = client.callUntil(
+            "runtime.get",
+            params,
+            self.phase.absolute,
+        ) catch |err| {
+            if (self.phase.absolute.remainingNs() <= 0) {
+                self.expired_latched = true;
+                return .host_unavailable;
+            }
+            return switch (err) {
+                error.DeadlineExceeded => .host_unavailable,
+                error.OutOfMemory => .out_of_memory,
+                error.Unauthorized => .denied,
+                error.EndpointTransient, error.AdminBusy => .busy,
+                error.EndpointAbsent, error.ConnectionClosed, error.WriteFailed => .host_unavailable,
+                error.IncompatibleVersion, error.HandshakeFailed, error.ProtocolError, error.EventQueueFull => .protocol,
+                error.EndpointDenied => .denied,
+            };
         };
         defer self.allocator.free(response);
-        return decodeMembership(self.allocator, response, runtime_id);
+        const decoded = decodeMembership(self.allocator, response, runtime_id);
+        if (self.phase.absolute.remainingNs() <= 0) {
+            self.expired_latched = true;
+            return .host_unavailable;
+        }
+        return decoded;
     }
 
     fn ops(self: *ProductProbe) resolver.ProbeOps {
@@ -190,15 +218,19 @@ pub fn resolveProduct(
     allocator: std.mem.Allocator,
     base_cache_dir: []const u8,
     runtime_id: u128,
+    phase: attach_phase_deadline.PhaseDeadline,
 ) ProductResult {
-    if (builtin.os.tag != .macos or runtime_id == 0)
+    if (builtin.os.tag != .macos or runtime_id == 0 or phase.kind != .resolve and phase.kind != .connect_hello)
         return .{ .failed = .denied };
+    if (phase.absolute.remainingNs() <= 0) return .{ .failed = .host_unavailable };
     var session_buf: [512]u8 = undefined;
     const session_dir = discovery.sessionHostDirPath(&session_buf, base_cache_dir) catch
         return .{ .failed = .host_unavailable };
     const registry_absent = registryRootAbsent(session_dir);
+    if (phase.absolute.remainingNs() <= 0) return .{ .failed = .host_unavailable };
     var found = recovery_discovery.discover(allocator, session_dir);
     defer found.deinit(allocator);
+    if (phase.absolute.remainingNs() <= 0) return .{ .failed = .host_unavailable };
     const entries = switch (found) {
         .unavailable => |reason| return .{ .failed = switch (reason) {
             .out_of_memory => .internal,
@@ -207,8 +239,14 @@ pub fn resolveProduct(
         } },
         .complete => |items| items,
     };
-    var probe = ProductProbe{ .allocator = allocator, .base_cache_dir = base_cache_dir };
+    var probe = ProductProbe{
+        .allocator = allocator,
+        .base_cache_dir = base_cache_dir,
+        .phase = phase,
+    };
     const reduced = resolver.resolve(entries, runtime_id, probe.ops());
+    if (probe.expired_latched or phase.absolute.remainingNs() <= 0)
+        return .{ .failed = .host_unavailable };
     const selected_index = switch (reduced) {
         .failed => |code| return .{ .failed = code },
         .selected_index => |index| index,
@@ -217,13 +255,21 @@ pub fn resolveProduct(
         .candidate => |candidate| candidate.manifest.descriptor(),
         .unavailable => return .{ .failed = .denied },
     };
-    const identity = switch (observeSocket(descriptor.endpoint)) {
+    if (phase.absolute.remainingNs() <= 0) return .{ .failed = .host_unavailable };
+    const observed = observeSocket(descriptor.endpoint);
+    if (phase.absolute.remainingNs() <= 0) return .{ .failed = .host_unavailable };
+    const identity = switch (observed) {
         .identity => |value| value,
         .absent => return .{ .failed = .host_unavailable },
         .denied => return .{ .failed = .denied },
     };
     const owned = ResolvedHostDescriptor.init(allocator, runtime_id, descriptor, identity) catch
         return .{ .failed = .internal };
+    if (phase.absolute.remainingNs() <= 0) {
+        var expired = owned;
+        expired.deinit();
+        return .{ .failed = .host_unavailable };
+    }
     return .{ .selected = owned };
 }
 
@@ -232,8 +278,10 @@ pub fn revalidateProduct(
     allocator: std.mem.Allocator,
     base_cache_dir: []const u8,
     pinned: *const ResolvedHostDescriptor,
+    phase: attach_phase_deadline.PhaseDeadline,
 ) ?attach_cli.ExitCode {
-    const fresh_result = resolveProduct(allocator, base_cache_dir, pinned.runtime_id);
+    if (phase.kind != .connect_hello) return .internal;
+    const fresh_result = resolveProduct(allocator, base_cache_dir, pinned.runtime_id, phase);
     var fresh = switch (fresh_result) {
         .selected => |value| value,
         .failed => |code| return code,
@@ -261,23 +309,27 @@ pub fn connectPinned(
     base_cache_dir: []const u8,
     pinned: *const ResolvedHostDescriptor,
     intent: attach_cli.Intent,
+    phase: attach_phase_deadline.PhaseDeadline,
 ) Connected {
+    if (phase.kind != .connect_hello or phase.absolute.remainingNs() <= 0)
+        return .{ .failed = .host_unavailable };
     const profile = compatibility.profileForMajor(pinned.protocol_major) orelse
         return .{ .failed = .unsupported };
     // Frozen v1's only attach schema grants controller unconditionally. Letting observer/takeover
     // intents reach that decoder would silently elevate them.
     if (profile.attach_schema == .frozen_controller_only and intent != .default_controller)
         return .{ .failed = .unsupported };
-    if (revalidateProduct(allocator, base_cache_dir, pinned)) |code|
+    if (revalidateProduct(allocator, base_cache_dir, pinned, phase)) |code|
         return .{ .failed = code };
     // This is the long-lived public-attach connection, not a discovery probe. No stream exists
     // until the caller constructs and binds RemoteAttachment, so advertising transfer here cannot
     // deliver a revoke before a consumer exists; it only negotiates the schema used after attach.
-    const outcome = host_connect.connectDiscoveredHostProfile(
+    const outcome = host_connect.connectDiscoveredHostProfileUntil(
         allocator,
         base_cache_dir,
         pinned.descriptor(),
         .cli_attach,
+        phase,
     );
     var client = switch (outcome) {
         .connected => |value| value,
@@ -293,7 +345,16 @@ pub fn connectPinned(
         client.deinit();
         return .{ .failed = .unsupported };
     }
-    const after = switch (observeSocket(pinned.endpoint)) {
+    if (phase.absolute.remainingNs() <= 0) {
+        client.deinit();
+        return .{ .failed = .host_unavailable };
+    }
+    const observed_after = observeSocket(pinned.endpoint);
+    if (phase.absolute.remainingNs() <= 0) {
+        client.deinit();
+        return .{ .failed = .host_unavailable };
+    }
+    const after = switch (observed_after) {
         .identity => |value| value,
         .absent => {
             client.deinit();
@@ -301,12 +362,19 @@ pub fn connectPinned(
         },
         .denied => {
             client.deinit();
-            return .{ .failed = .denied };
+            return .{ .failed = if (phase.absolute.remainingNs() <= 0)
+                .host_unavailable
+            else
+                .denied };
         },
     };
     if (!after.eql(pinned.socket_identity)) {
         client.deinit();
         return .{ .failed = .denied };
+    }
+    if (phase.absolute.remainingNs() <= 0) {
+        client.deinit();
+        return .{ .failed = .host_unavailable };
     }
     return .{ .client = client };
 }
@@ -347,7 +415,7 @@ fn connectFailure(reason: host_connect.FailureReason) attach_cli.Probe {
         .out_of_memory => .out_of_memory,
         .endpoint_denied, .invalid_endpoint, .invalid_manifest, .stale_manifest => .denied,
         .incompatible_version, .handshake_failed, .protocol_error => .protocol,
-        .startup_timeout => .host_unavailable,
+        .startup_timeout, .deadline_exceeded => .host_unavailable,
         .resource_exhausted, .transient_timeout => .busy,
         .unauthorized => .denied,
         .host_gone, .launch_failed => .host_unavailable,
@@ -423,6 +491,36 @@ fn jsonU64(value: std.json.Value) ?u64 {
         },
         else => null,
     };
+}
+
+fn testPhase(kind: attach_phase_deadline.Kind) !attach_phase_deadline.PhaseDeadline {
+    return attach_phase_deadline.PhaseDeadline.start(std.testing.io, kind);
+}
+
+test "product resolver rejects expired and wrong phases before discovery or connect" {
+    const Clock = struct {
+        now: i128 = 10,
+
+        fn read(context: *anyopaque) i128 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            return self.now;
+        }
+    };
+    var clock = Clock{};
+    const absolute = @import("client_deadline.zig").AbsoluteDeadline.fromInjected(
+        .{ .context = &clock, .now_ns = Clock.read },
+        10,
+    );
+    const expired = attach_phase_deadline.PhaseDeadline.fromAbsolute(.resolve, absolute);
+    try std.testing.expectEqual(
+        attach_cli.ExitCode.host_unavailable,
+        resolveProduct(std.testing.allocator, "/definitely/not/read", 1, expired).failed,
+    );
+    const wrong = attach_phase_deadline.PhaseDeadline.fromAbsolute(.attach_snapshot, absolute);
+    try std.testing.expectEqual(
+        attach_cli.ExitCode.denied,
+        resolveProduct(std.testing.allocator, "/definitely/not/read", 1, wrong).failed,
+    );
 }
 
 test "resolved host descriptor owns discovery strings and pins socket identity" {
@@ -504,7 +602,7 @@ test "frozen previous host rejects observer intents before reconnect" {
     );
     defer pinned.deinit();
     inline for (.{ attach_cli.Intent.read_only, attach_cli.Intent.take_over }) |intent| {
-        const result = connectPinned(std.testing.allocator, "/tmp", &pinned, intent);
+        const result = connectPinned(std.testing.allocator, "/tmp", &pinned, intent, try testPhase(.connect_hello));
         try std.testing.expectEqual(attach_cli.ExitCode.unsupported, result.failed);
     }
 }
@@ -553,7 +651,7 @@ test "product resolver discovers and pins the one host that owns a live runtime"
         .{c.getpid()},
     ) catch return error.SkipZigTest;
     _ = c.mkdir(base.ptr, 0o700);
-    const no_host = resolveProduct(testing.allocator, base, 1);
+    const no_host = resolveProduct(testing.allocator, base, 1, try testPhase(.resolve));
     try testing.expectEqual(attach_cli.ExitCode.host_unavailable, no_host.failed);
     var session_buf: [256]u8 = undefined;
     const session_dir = try discovery.sessionHostDirPath(&session_buf, base);
@@ -657,7 +755,7 @@ test "product resolver discovers and pins the one host that owns a live runtime"
         }
         if (blocker.* == null) return error.TestUnexpectedResult;
     }
-    const incomplete = resolveProduct(testing.allocator, base, runtime_id);
+    const incomplete = resolveProduct(testing.allocator, base, runtime_id, try testPhase(.resolve));
     try testing.expectEqual(attach_cli.ExitCode.protocol, incomplete.failed);
     for (&blockers) |*blocker| {
         if (blocker.*) |*client| client.deinit();
@@ -669,14 +767,14 @@ test "product resolver discovers and pins the one host that owns a live runtime"
     second_live = false;
     host_manifest.removeEmptyHostDirectories(session_dir, second_host_id);
 
-    const resolved = resolveProduct(testing.allocator, base, runtime_id);
+    const resolved = resolveProduct(testing.allocator, base, runtime_id, try testPhase(.resolve));
     var pinned = switch (resolved) {
         .selected => |value| value,
         .failed => return error.TestUnexpectedResult,
     };
     defer pinned.deinit();
     try testing.expectEqual(host_id, pinned.host_id);
-    try testing.expect(revalidateProduct(testing.allocator, base, &pinned) == null);
+    try testing.expect(revalidateProduct(testing.allocator, base, &pinned, try testPhase(.connect_hello)) == null);
 
     // Replace only the pathname socket object while the original daemon and manifest remain live.
     // The pinned positive result must not follow the path to a different inode.
@@ -732,7 +830,7 @@ test "product resolver discovers and pins the one host that owns a live runtime"
     try testing.expect(!replacement_identity.eql(pinned.socket_identity));
     try testing.expectEqual(
         attach_cli.ExitCode.denied,
-        revalidateProduct(testing.allocator, base, &pinned).?,
+        revalidateProduct(testing.allocator, base, &pinned, try testPhase(.connect_hello)).?,
     );
     _ = c.kill(proxy_child, posix.SIG.TERM);
     var proxy_status: c_int = undefined;
@@ -743,9 +841,9 @@ test "product resolver discovers and pins the one host that owns a live runtime"
     try testing.expectEqual(@as(c_int, 0), c.unlink(endpoint.ptr));
     try testing.expectEqual(@as(c_int, 0), c.rename(old_endpoint.ptr, endpoint.ptr));
     original_restored = true;
-    try testing.expect(revalidateProduct(testing.allocator, base, &pinned) == null);
+    try testing.expect(revalidateProduct(testing.allocator, base, &pinned, try testPhase(.connect_hello)) == null);
 
-    const attached = connectPinned(testing.allocator, base, &pinned, .default_controller);
+    const attached = connectPinned(testing.allocator, base, &pinned, .default_controller, try testPhase(.connect_hello));
     var long_client = switch (attached) {
         .client => |value| value,
         .failed => return error.TestUnexpectedResult,
@@ -780,6 +878,7 @@ test "product resolver discovers and pins the one host that owns a live runtime"
         base,
         &pinned,
         .take_over,
+        try testPhase(.connect_hello),
     );
     var takeover_client = switch (takeover_connection) {
         .client => |value| value,
@@ -864,7 +963,7 @@ test "product resolver discovers and pins the one host that owns a live runtime"
         old_attachment.state.controller_generation,
     );
 
-    var missing = resolveProduct(testing.allocator, base, runtime_id + 1);
+    var missing = resolveProduct(testing.allocator, base, runtime_id + 1, try testPhase(.resolve));
     switch (missing) {
         .failed => |code| try testing.expectEqual(attach_cli.ExitCode.runtime_not_found, code),
         .selected => |*unexpected| {
@@ -887,13 +986,14 @@ test "product resolver discovers and pins the one host that owns a live runtime"
     testing.allocator.free(terminated);
     try testing.expectEqual(
         attach_cli.ExitCode.runtime_not_found,
-        revalidateProduct(testing.allocator, base, &pinned).?,
+        revalidateProduct(testing.allocator, base, &pinned, try testPhase(.connect_hello)).?,
     );
     const stale_connect = connectPinned(
         testing.allocator,
         base,
         &pinned,
         .default_controller,
+        try testPhase(.connect_hello),
     );
     try testing.expectEqual(attach_cli.ExitCode.runtime_not_found, stale_connect.failed);
 
@@ -901,13 +1001,13 @@ test "product resolver discovers and pins the one host that owns a live runtime"
     try testing.expectEqual(@as(c_int, 0), c.unlink(endpoint.ptr));
     try testing.expectEqual(
         attach_cli.ExitCode.host_unavailable,
-        revalidateProduct(testing.allocator, base, &pinned).?,
+        revalidateProduct(testing.allocator, base, &pinned, try testPhase(.connect_hello)).?,
     );
     var manifest_buf: [832]u8 = undefined;
     const manifest_path = try host_manifest.manifestPathIn(&manifest_buf, session_dir, host_id);
     try testing.expectEqual(@as(c_int, 0), c.unlink(manifest_path.ptr));
     try testing.expectEqual(
         attach_cli.ExitCode.denied,
-        revalidateProduct(testing.allocator, base, &pinned).?,
+        revalidateProduct(testing.allocator, base, &pinned, try testPhase(.connect_hello)).?,
     );
 }

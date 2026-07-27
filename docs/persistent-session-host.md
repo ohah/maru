@@ -2310,6 +2310,12 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
         unwrap된 `AbsoluteDeadline`만 받는다.
         `resolve`, `connect_hello`, `attach_snapshot`, `status_takeover` 네 phase는 서로 독립된 5초 phase이며
         각 phase 안의 모든 read/write/poll만 phase 시작 때 한 번 계산한 absolute deadline 하나를 공유한다.
+        phase 성공은 마지막 syscall뿐 아니라 semantic decode와 staged state publish 직전에도 같은 deadline이
+        남아 있을 때만 commit한다. 정확한 경계에서 완성된 I/O나 decode도 timeout이다.
+        manifest discovery의 `readdir`/`fstatat` 같은 동기 filesystem syscall 자체를 중간 선점하지는 않는다.
+        discovery/manifest-load 같은 동기 묶음의 진입·완료 뒤와 결과 publish 직전에 만료를 검사해, 이미 시작한
+        묶음은 끝낼 수 있지만 만료 뒤 다음 network candidate probe/socket 생성과 성공 publish는 0으로 고정한다.
+        cancellable filesystem worker는 이 pre-raw 단일-owner 범위에 추가하지 않는다.
         `resolve` deadline은 모든 candidate probe와 완전증거 비교를 포함하며 candidate마다 다시 시작하지 않는다.
         `connect_hello` deadline은 `connectPinned` 진입 전에 시작해 그 내부 final revalidation, backoff,
         connect와 hello, 연결 뒤 pathname identity 재확인 전체를 포함하고 backoff마다 다시 시작하지 않는다.
@@ -2336,6 +2342,19 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
       exact deadline, byte-drip,
       EINTR, EAGAIN, partial read/write, fd flag 보존, allocation fail-index를 pure
       connector state fixture, established socketpair와 injected clock으로 고정한다.
+      **구현 완료:** `attach_phase_deadline.zig`의 non-resettable phase wrapper를 실제
+      `external_attach.prepare` consumer가 resolve→pinned connect/hello→attach/snapshot→optional
+      status/takeover 경계에서 새로 만들고, 각 내부 retry·RPC·snapshot에는 해당 phase의 absolute deadline
+      하나만 전달한다. `Client.call/callUntil`과 `readSnapshot/readSnapshotUntil`은 각각 하나의
+      parser/demux/assembler를 공유하며 phase-local `O_NONBLOCK` lease의 exact flag 복원과 실패 시
+      canonical poison/close를 사용한다. manifest-load 실패를 포함한 동기 filesystem 묶음 완료, connect/poll/
+      `SO_ERROR`, read/write, semantic decode와 publish의 exact boundary는 deadline-first다.
+      retry 만료 뒤 attempt/sleep 0, coalesced response+snapshot, partial batch와 byte drip/write stall,
+      EINTR/EAGAIN/restore failure, call/snapshot allocation fail-index, 네 phase 독립성, attach/takeover
+      timeout 뒤 EOF·후속 wire 0, parser에 coalesced된 own-stream revoke의 authority publish 전 선소비를
+      pure/injected fixture, socketpair와 실제 제품 host transaction으로 고정했다. canonical
+      `ErrorCode` decode와 OS-neutral attach exit mapping을 단일 출처로 유지하며 Debug/ReleaseFast
+      `test-session-host`와 전체 `mise run check`를 통과했다.
     - **P5c3c-2 — blocking→pump**는 두 merge slice다.
       - **P5c3c-2a — mode transaction**: 같은 `Client`에 단일 mode gate를 두고 RX/TX storage를 먼저 staging한 뒤
         saved `F_GETFL`을 기록하고 단 하나의 `F_SETFL(saved_flags | O_NONBLOCK)`을 마지막 atomic commit으로 둔다.
@@ -2390,7 +2409,7 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
         공유하고 leave가 남은 budget 중 최대 100 ms를 쓴다. signal/revoke/error cleanup은 active/latest와 detach를
         버리고 하나의 100 ms deadline 안에서 leave를 시도한 뒤 즉시 raw restore/signal forwarding으로 간다.
 
-    **P5c3c-1a는 구현 완료, 1b~3b는 계획 상태다.** 각 slice는 P5c3a~b의 Debug/ReleaseFast gate를 재실행하고 다음 slice가 실제
+    **P5c3c-1a~1b는 구현 완료, 2a~3b는 계획 상태다.** 각 slice는 P5c3a~b의 Debug/ReleaseFast gate를 재실행하고 다음 slice가 실제
     consumer로 쓰지 않는 임시 public API는 만들지 않는다.
 
     raw 진입 전에도 기존 `SO_RCVTIMEO`/blocking `writeAll`을 deadline으로 간주하지 않는다. resolver 전체, selected

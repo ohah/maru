@@ -16,6 +16,7 @@ const protocol = @import("protocol.zig");
 const compatibility = @import("compatibility.zig");
 const framing = @import("framing.zig");
 const socket_server = @import("socket_server.zig");
+const client_deadline = @import("client_deadline.zig");
 const screen_stream = @import("screen_stream.zig");
 const observation_wire = @import("observation_wire.zig");
 const resize_wire = @import("resize_wire.zig");
@@ -167,6 +168,41 @@ fn endpointError(err: posix.E) ClientError {
         .absent => error.EndpointAbsent,
         .denied, .other => error.EndpointDenied,
         .transient => error.EndpointTransient,
+    };
+}
+
+fn deadlineConnectError(err: client_deadline.Error) ClientError {
+    return switch (err) {
+        error.EndpointAbsent => error.EndpointAbsent,
+        error.EndpointDenied => error.EndpointDenied,
+        error.EndpointTransient => error.EndpointTransient,
+        // connect/hello is the only bounded phase in P5c3c-1a. P5c3c-1b wraps this with
+        // a typed PhaseDeadline so the public CLI can map phase rather than transport detail.
+        error.Timeout => error.EndpointTransient,
+        error.InvalidDeadline,
+        error.ConnectFailed,
+        error.Closed,
+        error.ReadFailed,
+        error.WriteFailed,
+        error.FlagFailed,
+        error.SocketOptionFailed,
+        => error.HandshakeFailed,
+    };
+}
+
+fn deadlineHelloError(err: client_deadline.Error) ClientError {
+    return switch (err) {
+        error.Timeout => error.EndpointTransient,
+        error.WriteFailed => error.WriteFailed,
+        error.Closed, error.ReadFailed => error.ConnectionClosed,
+        error.InvalidDeadline,
+        error.EndpointAbsent,
+        error.EndpointDenied,
+        error.EndpointTransient,
+        error.ConnectFailed,
+        error.FlagFailed,
+        error.SocketOptionFailed,
+        => error.HandshakeFailed,
     };
 }
 
@@ -338,6 +374,25 @@ pub const Client = struct {
         return connectMajor(allocator, socket_path, profile, protocol.version_major);
     }
 
+    /// P5c3c external attach transport. The caller creates one absolute deadline at phase entry;
+    /// connect readiness and the complete hello exchange consume that same non-resettable budget.
+    pub fn connectUntil(
+        allocator: std.mem.Allocator,
+        socket_path: [:0]const u8,
+        connection_profile: ConnectionProfile,
+        wire_major: u16,
+        deadline: client_deadline.AbsoluteDeadline,
+    ) ClientError!Client {
+        return connectMajorUntilWithOps(
+            allocator,
+            socket_path,
+            connection_profile,
+            wire_major,
+            deadline,
+            client_deadline.posix_ops,
+        );
+    }
+
     pub fn connectAdmin(
         allocator: std.mem.Allocator,
         socket_path: [:0]const u8,
@@ -374,6 +429,7 @@ pub const Client = struct {
         const fd = c.socket(posix.AF.UNIX, posix.SOCK.STREAM, 0);
         if (fd < 0) return endpointError(posix.errno(fd));
         errdefer _ = c.close(fd);
+        socket_server.setCloseOnExec(fd) catch return error.HandshakeFailed;
         // host가 죽은 socket에 write하면 SIGPIPE로 **프로세스가 죽는다** — EPIPE로 바꿔 catchable하게 한다(server accept 경로와 대칭).
         socket_server.setNoSigPipe(fd);
         // host가 연결만 받고(backlog) 응답하지 않으면 read가 영원히 막힌다 — recv timeout으로 ConnectionClosed로 빠져나온다.
@@ -412,13 +468,91 @@ pub const Client = struct {
         // hello_ack 수신.
         const ack = try self.readFrame();
         defer ack.deinit(allocator);
+        try self.finishHello(connection_profile, profile, ack);
+        return self;
+    }
+
+    fn connectMajorUntilWithOps(
+        allocator: std.mem.Allocator,
+        socket_path: [:0]const u8,
+        connection_profile: ConnectionProfile,
+        wire_major: u16,
+        deadline: client_deadline.AbsoluteDeadline,
+        ops: client_deadline.Ops,
+    ) ClientError!Client {
+        const profile = compatibility.profileForMajor(wire_major) orelse return error.IncompatibleVersion;
+        const connected = client_deadline.connectUnixUntil(
+            ops,
+            socket_path,
+            deadline,
+        ) catch |err| return deadlineConnectError(err);
+        var fd_transferred = false;
+        errdefer if (!fd_transferred)
+            ops.close(
+                ops.context,
+                connected.fd,
+            );
+
+        var self = Client{
+            .allocator = allocator,
+            .fd = connected.fd,
+            .host_id = 0,
+            .wire_major = wire_major,
+            .parser = framing.FrameParser.initForMajor(allocator, wire_major),
+        };
+        fd_transferred = true;
+        errdefer self.deinitHandshakeAttempt(ops);
+
+        const hello = buildHelloMajorFeatures(
+            allocator,
+            connection_profile.wireKind(),
+            wire_major,
+            connection_profile.advertisesControllerTransfer(),
+        ) catch return error.OutOfMemory;
+        defer allocator.free(hello);
+        const hello_frame = framing.encodeFrame(
+            allocator,
+            .{ .kind = .hello, .request_id = 0, .major = wire_major },
+            hello,
+        ) catch return error.OutOfMemory;
+        defer allocator.free(hello_frame);
+        client_deadline.writeAllUntil(
+            ops,
+            connected.fd,
+            hello_frame,
+            deadline,
+        ) catch |err| return deadlineHelloError(err);
+
+        const ack = try self.readFrameUntil(deadline, ops);
+        defer ack.deinit(allocator);
+        connected.restoreBlocking(ops) catch return error.ConnectionClosed;
+        try self.finishHello(connection_profile, profile, ack);
+        if (deadline.remainingNs() <= 0) return error.EndpointTransient;
+        return self;
+    }
+
+    fn deinitHandshakeAttempt(self: *Client, ops: client_deadline.Ops) void {
+        // The injected connector owns close observability until a successful Client is returned.
+        ops.close(ops.context, self.fd);
+        self.fd = -1;
+        // Reuse the one Client destructor so future hello-owned fields cannot create a second,
+        // incomplete cleanup inventory in this transport seam.
+        self.deinit();
+    }
+
+    fn finishHello(
+        self: *Client,
+        connection_profile: ConnectionProfile,
+        profile: compatibility.Profile,
+        ack: framing.Frame,
+    ) ClientError!void {
         if (ack.header.kind != .hello_ack) return error.HandshakeFailed;
         if (std.mem.indexOf(u8, ack.payload, "incompatible_version") != null) return error.IncompatibleVersion;
         if (std.mem.indexOf(u8, ack.payload, "\"error\":\"resource_exhausted\"") != null)
             return error.AdminBusy;
         if (std.mem.indexOf(u8, ack.payload, "\"error\":\"unauthorized\"") != null)
             return error.Unauthorized;
-        if (parseSelectedVersion(ack.payload) != wire_major) return error.HandshakeFailed;
+        if (parseSelectedVersion(ack.payload) != self.wire_major) return error.HandshakeFailed;
         // 과거 개발 중 같은 MRSH v1 아래 screen body 의미가 여러 번 바뀌었다. build identity가 없는 untagged v1을
         // current body로 추측하면 structurally-valid silent misrender가 가능하므로, frozen release가 명시한
         // capability가 있는 직전 major만 연다. current major는 major bump 자체가 screen v2 경계다.
@@ -472,7 +606,6 @@ pub const Client = struct {
         );
         self.runtime_link_at_v1 = payloadHasCapability(ack.payload, "runtime_link_at_v1");
         self.runtime_clipboard_v1 = payloadHasCapability(ack.payload, "runtime_clipboard_v1");
-        return self;
     }
 
     pub fn deinit(self: *Client) void {
@@ -1404,6 +1537,37 @@ pub const Client = struct {
                 self.invalidateConnection();
                 return error.OutOfMemory;
             };
+        }
+    }
+
+    /// Handshake-only incremental read. The socket remains nonblocking and every retry consumes
+    /// the caller's one absolute phase deadline; unlike `readFrame`, this never creates a fresh
+    /// timeout or mutates the established-client poison state.
+    fn readFrameUntil(
+        self: *Client,
+        deadline: client_deadline.AbsoluteDeadline,
+        ops: client_deadline.Ops,
+    ) ClientError!framing.Frame {
+        var buf: [4096]u8 = undefined;
+        while (true) {
+            if (deadline.remainingNs() <= 0) return error.EndpointTransient;
+            if (self.parser.next() catch |err| return switch (err) {
+                error.OutOfMemory => error.OutOfMemory,
+                else => error.ProtocolError,
+            }) |frame| {
+                if (deadline.remainingNs() <= 0) {
+                    frame.deinit(self.allocator);
+                    return error.EndpointTransient;
+                }
+                return self.requireWireMajor(frame);
+            }
+            const n = client_deadline.readSomeUntil(
+                ops,
+                self.fd,
+                &buf,
+                deadline,
+            ) catch |err| return deadlineHelloError(err);
+            self.parser.push(buf[0..n]) catch return error.OutOfMemory;
         }
     }
 
@@ -2768,6 +2932,277 @@ fn payloadHasCapability(payload: []const u8, wanted: []const u8) bool {
 const testing = std.testing;
 const daemon = @import("daemon.zig");
 
+const ConnectedSocketFixture = struct {
+    fd: c.fd_t,
+    max_read: usize = 3,
+    max_write: usize = 5,
+    close_calls: usize = 0,
+    set_flags_calls: usize = 0,
+    fail_restore_flags: bool = false,
+
+    fn ops(self: *ConnectedSocketFixture) client_deadline.Ops {
+        var result = client_deadline.posix_ops;
+        result.context = self;
+        result.socket = socket;
+        result.connect = connect;
+        result.read = read;
+        result.write = write;
+        result.close = close;
+        result.set_flags = setFlags;
+        return result;
+    }
+
+    fn cast(ctx: *anyopaque) *ConnectedSocketFixture {
+        return @ptrCast(@alignCast(ctx));
+    }
+
+    fn socket(ctx: *anyopaque) c.fd_t {
+        return cast(ctx).fd;
+    }
+
+    fn connect(_: *anyopaque, _: c.fd_t, _: [:0]const u8) client_deadline.ConnectResult {
+        return .{ .outcome = .connected };
+    }
+
+    fn read(ctx: *anyopaque, fd: c.fd_t, dst: []u8) client_deadline.IoResult {
+        const self = cast(ctx);
+        return client_deadline.posix_ops.read(
+            client_deadline.posix_ops.context,
+            fd,
+            dst[0..@min(dst.len, self.max_read)],
+        );
+    }
+
+    fn write(ctx: *anyopaque, fd: c.fd_t, src: []const u8) client_deadline.IoResult {
+        const self = cast(ctx);
+        return client_deadline.posix_ops.write(
+            client_deadline.posix_ops.context,
+            fd,
+            src[0..@min(src.len, self.max_write)],
+        );
+    }
+
+    fn close(ctx: *anyopaque, fd: c.fd_t) void {
+        const self = cast(ctx);
+        self.close_calls += 1;
+        _ = c.close(fd);
+    }
+
+    fn setFlags(ctx: *anyopaque, fd: c.fd_t, flags: c_int) bool {
+        const self = cast(ctx);
+        self.set_flags_calls += 1;
+        if (self.fail_restore_flags and self.set_flags_calls == 2) return false;
+        return client_deadline.posix_ops.set_flags(
+            client_deadline.posix_ops.context,
+            fd,
+            flags,
+        );
+    }
+};
+
+const full_hello_ack_payload =
+    \\{"version":2,"host_id":"00000000000000000000000000000001","build_id":"build","lifecycle":"ready","upgrade_epoch":1,"screen_codec_version":2,"capabilities":["host_manifest_v1"]}
+;
+
+fn checkFinishHelloAllocation(allocator: std.mem.Allocator) !void {
+    var client = Client{
+        .allocator = allocator,
+        .fd = -1,
+        .host_id = 0,
+        .parser = framing.FrameParser.init(allocator),
+    };
+    const ack: framing.Frame = .{
+        .header = .{ .kind = .hello_ack, .payload_len = full_hello_ack_payload.len },
+        .payload = @constCast(full_hello_ack_payload),
+    };
+    const profile = compatibility.profileForMajor(protocol.version_major).?;
+    client.finishHello(.cli_attach, profile, ack) catch |err| {
+        client.parser.deinit();
+        return err;
+    };
+    client.deinit();
+}
+
+fn checkFullDeadlineHelloAllocation(allocator: std.mem.Allocator) !void {
+    var fds: [2]c.fd_t = undefined;
+    try testing.expectEqual(
+        @as(c_int, 0),
+        c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds),
+    );
+    var client_fd_open = true;
+    defer {
+        if (client_fd_open) _ = c.close(fds[0]);
+    }
+    defer _ = c.close(fds[1]);
+    const ack_wire = try framing.encodeFrame(
+        testing.allocator,
+        .{ .kind = .hello_ack },
+        full_hello_ack_payload,
+    );
+    defer testing.allocator.free(ack_wire);
+    try socket_server.writeAll(fds[1], ack_wire);
+
+    var fixture = ConnectedSocketFixture{ .fd = fds[0] };
+    const deadline = try client_deadline.AbsoluteDeadline.after(
+        testing.io,
+        5 * std.time.ns_per_s,
+    );
+    var client = Client.connectMajorUntilWithOps(
+        allocator,
+        "socket",
+        .cli_attach,
+        protocol.version_major,
+        deadline,
+        fixture.ops(),
+    ) catch |err| {
+        // Once connectMajorUntilWithOps obtains the fd, every error path owns and closes it.
+        client_fd_open = false;
+        try testing.expectEqual(@as(usize, 1), fixture.close_calls);
+        try testing.expect(c.fcntl(fds[0], c.F.GETFD, @as(c_int, 0)) < 0);
+        return err;
+    };
+    client_fd_open = false;
+    try testing.expectEqual(@as(usize, 0), fixture.close_calls);
+    client.deinit();
+}
+
+test "client: hello capability allocation is leak-free at every fail index" {
+    try testing.checkAllAllocationFailures(
+        testing.allocator,
+        checkFinishHelloAllocation,
+        .{},
+    );
+}
+
+test "client: complete deadline hello is leak-free at every allocation fail index" {
+    try testing.checkAllAllocationFailures(
+        testing.allocator,
+        checkFullDeadlineHelloAllocation,
+        .{},
+    );
+}
+
+test "client: malformed and partial EOF hello close the deadline candidate fd" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const Scenario = enum { malformed, partial_eof };
+    inline for (std.meta.tags(Scenario)) |scenario| {
+        var fds: [2]c.fd_t = undefined;
+        try testing.expectEqual(
+            @as(c_int, 0),
+            c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds),
+        );
+        defer _ = c.close(fds[1]);
+        const wire = switch (scenario) {
+            .malformed => try framing.encodeFrame(
+                testing.allocator,
+                .{ .kind = .hello_ack },
+                "{}",
+            ),
+            .partial_eof => try framing.encodeFrame(
+                testing.allocator,
+                .{ .kind = .hello_ack },
+                full_hello_ack_payload,
+            ),
+        };
+        defer testing.allocator.free(wire);
+        const sent = if (scenario == .malformed) wire.len else protocol.header_size + 3;
+        try socket_server.writeAll(fds[1], wire[0..sent]);
+        if (scenario == .partial_eof) _ = c.shutdown(fds[1], c.SHUT.RDWR);
+
+        var fixture = ConnectedSocketFixture{ .fd = fds[0] };
+        const deadline = try client_deadline.AbsoluteDeadline.after(
+            testing.io,
+            5 * std.time.ns_per_s,
+        );
+        const result = Client.connectMajorUntilWithOps(
+            testing.allocator,
+            "socket",
+            .cli_attach,
+            protocol.version_major,
+            deadline,
+            fixture.ops(),
+        );
+        switch (scenario) {
+            .malformed => try testing.expectError(error.HandshakeFailed, result),
+            .partial_eof => try testing.expectError(error.ConnectionClosed, result),
+        }
+        try testing.expectEqual(@as(usize, 1), fixture.close_calls);
+        try testing.expect(c.fcntl(fds[0], c.F.GETFD, @as(c_int, 0)) < 0);
+    }
+}
+
+test "client: blocking flag restore failure closes candidate exactly once" {
+    var fds: [2]c.fd_t = undefined;
+    try testing.expectEqual(
+        @as(c_int, 0),
+        c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds),
+    );
+    defer _ = c.close(fds[1]);
+    const wire = try framing.encodeFrame(
+        testing.allocator,
+        .{ .kind = .hello_ack },
+        full_hello_ack_payload,
+    );
+    defer testing.allocator.free(wire);
+    try socket_server.writeAll(fds[1], wire);
+    var fixture = ConnectedSocketFixture{
+        .fd = fds[0],
+        .fail_restore_flags = true,
+    };
+    const deadline = try client_deadline.AbsoluteDeadline.after(
+        testing.io,
+        5 * std.time.ns_per_s,
+    );
+    try testing.expectError(
+        error.ConnectionClosed,
+        Client.connectMajorUntilWithOps(
+            testing.allocator,
+            "socket",
+            .cli_attach,
+            protocol.version_major,
+            deadline,
+            fixture.ops(),
+        ),
+    );
+    try testing.expectEqual(@as(usize, 2), fixture.set_flags_calls);
+    try testing.expectEqual(@as(usize, 1), fixture.close_calls);
+    try testing.expect(c.fcntl(fds[0], c.F.GETFD, @as(c_int, 0)) < 0);
+}
+
+test "client: buffered complete hello ack cannot bypass an expired deadline" {
+    const ClockState = struct {
+        now_ns: i128,
+
+        fn now(ctx: *anyopaque) i128 {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            return self.now_ns;
+        }
+    };
+    var clock = ClockState{ .now_ns = 10 };
+    const deadline = client_deadline.AbsoluteDeadline.fromInjected(
+        .{ .context = &clock, .now_ns = ClockState.now },
+        10,
+    );
+    var client = Client{
+        .allocator = testing.allocator,
+        .fd = -1,
+        .host_id = 0,
+        .parser = framing.FrameParser.init(testing.allocator),
+    };
+    defer client.deinit();
+    const wire = try framing.encodeFrame(
+        testing.allocator,
+        .{ .kind = .hello_ack },
+        full_hello_ack_payload,
+    );
+    defer testing.allocator.free(wire);
+    try client.parser.push(wire);
+    try testing.expectError(
+        error.EndpointTransient,
+        client.readFrameUntil(deadline, client_deadline.posix_ops),
+    );
+}
+
 test "client: hello/request JSON build and host_id parse are server-symmetric (pure)" {
     const allocator = testing.allocator;
     const hello = try buildHello(allocator, "gui");
@@ -2837,7 +3272,7 @@ test "client: hello/request JSON build and host_id parse are server-symmetric (p
     try testing.expect(legacy_client.attachment_capabilities.negotiated_controller_transfer);
 }
 
-test "client: connects to a forked host, agrees on host_id, and calls host.info" {
+test "client: absolute-deadline nonblocking connect and hello restore blocking mode" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = testing.allocator;
 
@@ -2861,21 +3296,31 @@ test "client: connects to a forked host, agrees on host_id, and calls host.info"
         _ = c.rmdir(dir_path.ptr);
     }
 
-    // host가 bind할 때까지 재시도 connect.
-    var client: Client = blk: {
-        var attempts: usize = 0;
-        while (attempts < 150) : (attempts += 1) {
-            if (Client.connect(allocator, socket_path, .cli_attach)) |cl| {
-                break :blk cl;
-            } else |_| {
-                _ = usleepMs(20);
-            }
-        }
-        try testing.expect(false); // host가 3초 안에 안 떴다.
-        return;
-    };
+    // Readiness polling is test setup only. The product connect itself gets one absolute budget
+    // covering nonblocking connect completion, hello write, and the complete hello_ack read.
+    var attempts: usize = 0;
+    while (attempts < 150 and c.access(socket_path.ptr, c.F_OK) != 0) : (attempts += 1)
+        _ = usleepMs(20);
+    try testing.expect(c.access(socket_path.ptr, c.F_OK) == 0);
+    const deadline = try client_deadline.AbsoluteDeadline.after(
+        testing.io,
+        5 * std.time.ns_per_s,
+    );
+    var client = try Client.connectUntil(
+        allocator,
+        socket_path,
+        .cli_attach,
+        protocol.version_major,
+        deadline,
+    );
     defer client.deinit();
 
+    const flags = c.fcntl(client.fd, c.F.GETFL, @as(c_int, 0));
+    try testing.expect(flags >= 0);
+    const nonblocking: c_int = @bitCast(posix.O{ .NONBLOCK = true });
+    try testing.expectEqual(@as(c_int, 0), flags & nonblocking);
+    const descriptor_flags = c.fcntl(client.fd, c.F.GETFD, @as(c_int, 0));
+    try testing.expect(descriptor_flags >= 0 and descriptor_flags & c.FD_CLOEXEC != 0);
     try testing.expect(client.host_id != 0); // hello_ack에서 host_id를 받았다.
     try testing.expect(client.screen_viewport_scrolled_v1);
     try testing.expect(client.async_scroll_to_bottom_v1);

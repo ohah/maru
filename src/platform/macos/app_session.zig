@@ -2641,7 +2641,6 @@ pub const AppSession = struct {
     /// host_id는 재사용되지 않는 128비트 식별자라 판정이 세션 중에 뒤집히지 않는다(같은 창의 Term들은 거의 항상
     /// 같은 host를 가리키므로 슬롯 하나로 충분하다).
     restore_gone_host_id: u128 = 0,
-    file_panel_seen_generation: u64 = 0,
     debug_file_panel_opened: bool = false,
     // Phase 4e-3: web surface diff의 prev(직전 tick이 낸 layout **집합** 전체). computeWebSurfaceTransitions가 매 tick
     // 활성 워크스페이스 탭 pane 트리를 walk해 web Term 집합(cur)을 만들고 이 prev와 4a surfaceDiff한 뒤 cur로 전진시킨다
@@ -3455,8 +3454,6 @@ pub const AppSession = struct {
         self.ensureActiveDockTabVisible(group); // 스크롤 밖 탭을 활성화하면 보이게 따라간다
         const entry = &group.entries.items[index];
         if (entry.surface_id == 0) entry.surface_id = self.surface_ids.next();
-        self.touchFilePanelEntry(entry);
-        self.enforceFilePanelLiveViewLimit();
         self.requestDockEntryFocus(entry);
         self.file_tree_rows_dirty = true;
         self.metal_dirty = true;
@@ -3480,8 +3477,6 @@ pub const AppSession = struct {
         }
         const entry = &group.entries.items[index];
         if (entry.surface_id == 0) entry.surface_id = self.surface_ids.next();
-        self.touchFilePanelEntry(entry);
-        self.enforceFilePanelLiveViewLimit();
         self.requestDockEntryFocus(entry);
         self.file_tree_rows_dirty = true;
         self.metal_dirty = true;
@@ -3569,8 +3564,6 @@ pub const AppSession = struct {
         if (entry.surface_id == 0) entry.surface_id = self.surface_ids.next();
         // live/surface-less 모두 typed transaction으로만 native focus를 요청하고 ack 전에는 dock_group에서 fail-close한다.
         self.requestDockEntryFocus(entry);
-        self.touchFilePanelEntry(entry);
-        self.enforceFilePanelLiveViewLimit();
         self.hovered_file_panel_tab = null;
         self.file_tree_rows_dirty = true;
         self.metal_dirty = true;
@@ -3591,8 +3584,6 @@ pub const AppSession = struct {
         var entry = (self.fileEntryForId(result.destination_active_entry_id) orelse return);
         if (entry.surface_id == 0) entry.surface_id = self.surface_ids.next();
         self.requestDockEntryFocus(entry);
-        self.touchFilePanelEntry(entry);
-        self.enforceFilePanelLiveViewLimit();
         self.hovered_file_panel_tab = null;
         self.file_tree_rows_dirty = true;
         self.metal_dirty = true;
@@ -7724,19 +7715,13 @@ pub const AppSession = struct {
         src.file_panel_dirty_sync_actions_len = 0;
         src.file_tree_reload_actions_len = 0;
         // last_seen은 session-local clock이라 원값을 섞으면 작은 generation의 source entry가 즉시 LRU가 된다.
-        // 병합 뒤 destination group preorder로 한 clock에 재기록하고 각 active를 마지막에 touch한다.
+        // 병합 뒤 destination의 dirty-sync 대기 entry를 목적지 큐에 다시 건다(LRU 제거로 last_seen 재기록은 불필요).
         for (0..dst.dock.groupCount()) |group_index| {
             const group = dst.dock.groupAt(group_index).?;
             for (group.entries.items) |*entry| {
-                dst.touchFilePanelEntry(entry);
                 if (entry.dirty_sync_pending) dst.queueFilePanelDirtySyncAction(entry.surface_id, 0);
             }
         }
-        for (0..dst.dock.groupCount()) |group_index| {
-            const group = dst.dock.groupAt(group_index).?;
-            if (group.active) |i| if (i < group.entries.items.len) dst.touchFilePanelEntry(&group.entries.items[i]);
-        }
-        dst.enforceFilePanelLiveViewLimit();
         src.buildPreparedFileTreeRows(&src_tree_candidate, &src_tree_rows);
         dst.buildPreparedFileTreeRows(&dst_tree_candidate, &dst_tree_rows);
         src.commitFileTreeCandidate(&src_tree_candidate, &src_tree_rows);
@@ -10542,28 +10527,14 @@ pub const AppSession = struct {
         self.debug_web_term_opened = true;
     }
 
+    /// 창의 모든 파일 entry에 surface id를 발급한다. **상한이 없다** — FP16의 §1 불변식("파일 Term의 surface는
+    /// eviction으로 해제하지 않는다")대로 LRU를 제거했으므로, entry는 만들어질 때 id를 받고 닫힐 때까지 유지한다.
+    /// 0은 미할당 sentinel이라 이미 받은 entry는 건너뛴다(재발급 금지 — id는 앱 전역 비재사용).
     fn assignDockSurfaceIds(self: *AppSession, panel: *dock_panel.DockPanel) void {
-        const limit: usize = @intCast(@max(self.loaded_config.config.file_panel.max_live_views, 1));
-        var live: usize = 0;
-        for (0..panel.groupCount()) |group_index| {
-            const group = panel.groupAt(group_index).?;
-            if (group.active) |active| if (active < group.entries.items.len) {
-                const entry = &group.entries.items[active];
-                if (entry.surface_id == 0) entry.surface_id = self.surface_ids.next();
-                self.touchFilePanelEntry(entry);
-            };
-            for (group.entries.items) |entry| if (entry.surface_id != 0) {
-                live += 1;
-            };
-        }
         for (0..panel.groupCount()) |group_index| {
             const group = panel.groupAt(group_index).?;
             for (group.entries.items) |*entry| {
-                if (live >= limit) return;
-                if (entry.surface_id == 0) {
-                    entry.surface_id = self.surface_ids.next();
-                    live += 1;
-                }
+                if (entry.surface_id == 0) entry.surface_id = self.surface_ids.next();
             }
         }
     }
@@ -10579,42 +10550,12 @@ pub const AppSession = struct {
             const entry = &group.entries.items[active];
             if (entry.surface_id != 0 or entry.mutation_pending_id != 0) continue;
             entry.surface_id = self.surface_ids.next();
-            self.touchFilePanelEntry(entry);
             self.file_panel_mode_pending = entry.surface_id;
             if (group == self.dock.focusedGroup() and self.focus_owner == .file_tree and
                 self.focus_owner.file_tree.restore_surface == null)
                 self.focus_owner.file_tree.restore_surface = entry.surface_id;
             self.metal_dirty = true;
             return;
-        }
-    }
-
-    fn touchFilePanelEntry(self: *AppSession, entry: *dock_panel.Entry) void {
-        self.file_panel_seen_generation +%= 1;
-        if (self.file_panel_seen_generation == 0) self.file_panel_seen_generation = 1;
-        entry.last_seen = self.file_panel_seen_generation;
-    }
-
-    fn enforceFilePanelLiveViewLimit(self: *AppSession) void {
-        if (!self.dock_initialized) return;
-        const limit: usize = @intCast(@max(self.loaded_config.config.file_panel.max_live_views, 1));
-        while (true) {
-            var live: usize = 0;
-            var candidate: ?*dock_panel.Entry = null;
-            for (0..self.dock.groupCount()) |group_index| {
-                const group = self.dock.groupAt(group_index).?;
-                for (group.entries.items, 0..) |*entry, i| {
-                    if (entry.surface_id == 0) continue;
-                    live += 1;
-                    const close_reserved = if (self.pending_file_panel_close) |pending| pending.surface_id == entry.surface_id else false;
-                    if (entry.dirty or entry.dirty_sync_pending or entry.external_change or
-                        entry.conflict_reload_pending or entry.mutation_pending_id != 0 or close_reserved or group.active == i) continue;
-                    if (candidate == null or entry.last_seen < candidate.?.last_seen) candidate = entry;
-                }
-            }
-            if (live <= limit) return;
-            const evicted = candidate orelse return; // dirty/active는 상한보다 많아도 절대 해제하지 않는다.
-            evicted.surface_id = 0;
         }
     }
 
@@ -11241,9 +11182,7 @@ pub const AppSession = struct {
         const entry = &opened.group.entries.items[opened.index];
         if (entry.surface_id == 0) {
             entry.surface_id = self.surface_ids.next();
-            self.touchFilePanelEntry(entry);
         }
-        self.enforceFilePanelLiveViewLimit();
         // Creation was initiated from the tree: keep tree keyboard ownership while the new WebView is
         // created, so subsequent arrows/F2 do not unexpectedly type into CM6.
         self.focus_owner = .{ .file_tree = .{ .restore_surface = entry.surface_id } };
@@ -11353,7 +11292,6 @@ pub const AppSession = struct {
             self.focus_owner = .{ .file_tree = .{ .restore_surface = restore_surface } };
             self.file_tree_focus_pending = true;
         }
-        self.enforceFilePanelLiveViewLimit();
         plan.committed = true;
         plan.deinit(self.allocator);
         self.pending_rename_remap = null;
@@ -11509,7 +11447,6 @@ pub const AppSession = struct {
                 if (successor.active) |active| {
                     const entry = &successor.entries.items[active];
                     if (entry.surface_id == 0) entry.surface_id = self.surface_ids.next();
-                    self.touchFilePanelEntry(entry);
                     self.requestDockEntryFocus(entry);
                 } else {
                     self.focusWorkspaceInput();
@@ -12086,8 +12023,6 @@ pub const AppSession = struct {
         }
         self.ensureActiveDockTabVisible(group); // 스크롤 밖 파일을 열면 그 탭이 보이게 따라간다
         _ = self.dock.focusGroup(group);
-        self.touchFilePanelEntry(&group.entries.items[index]);
-        self.enforceFilePanelLiveViewLimit();
         self.file_panel_mode_pending = surface_id;
         return true;
     }
@@ -12812,7 +12747,6 @@ pub const AppSession = struct {
         if (opened.previous_active) |i| if (i < opened.group.entries.items.len and i != opened.index)
             self.markFilePanelDirtySyncPending(&opened.group.entries.items[i]);
         self.assignDockSurfaceIds(&self.dock);
-        self.enforceFilePanelLiveViewLimit();
         const active_entry = &opened.group.entries.items[opened.index];
         self.requestDockEntryFocus(active_entry);
         self.dock.collapsed = false;
@@ -13271,7 +13205,6 @@ pub const AppSession = struct {
             if (successor.active) |active| {
                 const next = &successor.entries.items[active];
                 if (next.surface_id == 0) next.surface_id = self.surface_ids.next();
-                self.touchFilePanelEntry(next);
                 self.requestDockEntryFocus(next);
             } else {
                 // 추가 empty leaf는 prune됐으므로 이 분기는 손상 모델에서만 가능하다. terminal로 fail-safe한다.
@@ -14804,8 +14737,7 @@ pub const AppSession = struct {
     /// (Swift가 batch를 적용한다는 전제) 다음 tick이 무변경이면 batch가 빈다(§10 "diff 있을 때만 sync"). 원자성: cur
     /// 수집·marshal 중 OOM이면 transitions를 비우고 prev도 **안 전진**해 다음 tick이 같은 상태로 재시도한다(부분 적용 없음).
     fn computeWebSurfaceTransitions(self: *AppSession) void {
-        self.web_surface_transitions.clearRetainingCapacity();
-        self.enforceFilePanelLiveViewLimit(); // config reload로 상한이 낮아진 경우도 다음 tick에 LRU 해제.
+        self.web_surface_transitions.clearRetainingCapacity(); // config reload로 상한이 낮아진 경우도 다음 tick에 LRU 해제.
 
         // 영속 scratch 재사용(매 tick fresh 할당 회피). collect 실패(OOM/미초기화)면 batch 빔·prev 불변(재시도) —
         // scratch에 남은 부분 데이터는 다음 tick clearRetainingCapacity가 리셋하므로 무해.
@@ -58419,83 +58351,51 @@ test "file panel focus supersedes a queued workspace first-responder action" {
     try std.testing.expectEqual(sid, session.focus_owner.dock_surface);
 }
 
-test "FP6 file panel live view LRU protects dirty entries and recreates with a fresh surface id" {
+test "FP16 파일 패널은 eviction하지 않는다 — 열린 entry는 surface를 잃지 않는다" {
+    // FP16 §1 불변식: LRU를 제거했으므로 non-dirty·비활성 entry도 surface_id를 유지한다. 옛 FP6 테스트는
+    // "non-dirty가 회수된다"를 고정했는데, 그 정책 자체가 사라져 반대 방향으로 다시 쓴다(docs/file-panel.md §1).
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try initSmokeSessionSized(allocator);
-    defer allocator.destroy(session);
-    defer session.deinit();
-    session.loaded_config.config.file_panel.max_live_views = 2;
-
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "a.md", .data = "a" });
-    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "b.md", .data = "b" });
-    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "c.md", .data = "c" });
+    const io = std.Io.Threaded.global_single_threaded.io();
     var root_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const root = root_buf[0..try tmp.dir.realPath(std.testing.io, &root_buf)];
-    const a = try std.fmt.allocPrint(allocator, "{s}/a.md", .{root});
-    defer allocator.free(a);
-    const b = try std.fmt.allocPrint(allocator, "{s}/b.md", .{root});
-    defer allocator.free(b);
-    const c = try std.fmt.allocPrint(allocator, "{s}/c.md", .{root});
-    defer allocator.free(c);
+    const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(io, allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(1400, 900, 1000);
 
-    try std.testing.expectEqual(AppSession.FilePanelOpenPathResult.opened, session.openFilePanelPath(a));
-    const group = session.dock.singleGroup().?;
-    group.entries.items[group.findPath(a).?].mode = .source_edit; // 라이브 백로그: 편집/dirty·snapshot 경로는 소스 모드
-    const a_sid = group.entries.items[group.findPath(a).?].surface_id;
-    try session.setFilePanelDirty(a_sid, true);
-    try std.testing.expectEqual(AppSession.FilePanelOpenPathResult.opened, session.openFilePanelPath(b));
-    group.entries.items[group.findPath(b).?].mode = .source_edit;
-    const b_sid = group.entries.items[group.findPath(b).?].surface_id;
-    try std.testing.expectEqual(AppSession.FilePanelOpenPathResult.opened, session.openFilePanelPath(c));
-    // 편집(소스) 모드라 clean B를 떠날 때 eviction 전에 exact editor snapshot을 요청한다. 그 snapshot을 ack한 뒤
-    // 기존 non-dirty LRU 정책이 B를 회수할 수 있다.
-    try std.testing.expectEqual(b_sid, session.takeFilePanelDirtySyncAction().?);
-    try session.setFilePanelDirty(b_sid, false);
-    session.enforceFilePanelLiveViewLimit();
-    try std.testing.expectEqual(a_sid, group.entries.items[group.findPath(a).?].surface_id); // dirty 보호
-    try std.testing.expectEqual(@as(u64, 0), group.entries.items[group.findPath(b).?].surface_id); // non-dirty LRU
-    group.entries.items[group.findPath(c).?].mode = .source_edit; // 편집 경로(snapshot-on-leave)
-    const c_sid = group.entries.items[group.findPath(c).?].surface_id;
-    try std.testing.expect(c_sid != 0);
+    // 파일 여러 개를 연다 — 옛 상한(기본 8)을 넘겨도 아무도 회수되지 않아야 한다.
+    var paths: [12][]u8 = undefined;
+    var opened: usize = 0;
+    defer for (paths[0..opened]) |p| allocator.free(p);
+    while (opened < paths.len) : (opened += 1) {
+        var name_buf: [32]u8 = undefined;
+        const name = try std.fmt.bufPrint(&name_buf, "lru-{d}.md", .{opened});
+        try tmp.dir.writeFile(io, .{ .sub_path = name, .data = "# x" });
+        paths[opened] = try std.fs.path.join(allocator, &.{ root, name });
+        try std.testing.expectEqual(AppSession.FilePanelOpenPathResult.opened, session.openFilePanelPath(paths[opened]));
+    }
 
-    try std.testing.expectEqual(AppSession.FilePanelOpenPathResult.opened, session.openFilePanelPath(b));
-    group.entries.items[group.findPath(b).?].mode = .source_edit; // 재생성 B도 편집 모드
-    const recreated = group.entries.items[group.findPath(b).?].surface_id;
-    try std.testing.expect(recreated != 0 and recreated != b_sid); // 앱 전역 id 비재사용
-    try std.testing.expectEqual(a_sid, group.entries.items[group.findPath(a).?].surface_id); // 재선택 뒤에도 dirty 보호
-    // B를 다시 열며 떠난 C도 편집 모드라 snapshot을 요구한다. 실제 adapter처럼 ack하고 LRU를 다시 적용한다.
-    try std.testing.expectEqual(c_sid, session.takeFilePanelDirtySyncAction().?);
-    try session.setFilePanelDirty(c_sid, false);
-    session.enforceFilePanelLiveViewLimit();
-
-    // source editor를 떠나는 순간에는 async setDirty snapshot ack 전까지 pending이 fail-closed 보호한다.
-    try session.setFilePanelDirty(a_sid, false);
-    try std.testing.expectEqual(AppSession.FilePanelOpenPathResult.opened, session.openFilePanelPath(a));
-    // Recreated B also starts live and requests a snapshot when focus returns to A. Retire that independent
-    // transition before exercising A's source-edit snapshot below so the assertion observes only A's action.
-    try std.testing.expectEqual(recreated, session.takeFilePanelDirtySyncAction().?);
-    try session.setFilePanelDirty(recreated, false);
-    const a_entry = &group.entries.items[group.findPath(a).?];
-    a_entry.mode = .source_edit;
-    a_entry.dirty_sync_pending = false;
-    try std.testing.expectEqual(AppSession.FilePanelOpenPathResult.opened, session.openFilePanelPath(c));
-    try std.testing.expect(a_entry.dirty_sync_pending);
-    // 실제 adapter가 drain할 이전 surface 전용 action이 있어야 한다. action 전달 자체나 JS 전송 실패는 ack가
-    // 아니므로 pending을 해제하지 않고, 성공한 setDirty만 아래에서 보호를 끝낸다.
-    try std.testing.expectEqual(a_sid, session.takeFilePanelDirtySyncAction().?);
-    try std.testing.expect(session.takeFilePanelDirtySyncAction() == null);
-    try std.testing.expect(a_entry.dirty_sync_pending);
-    try std.testing.expectEqual(a_sid, a_entry.surface_id);
-    try std.testing.expectEqual(@as(u64, 0), group.entries.items[group.findPath(b).?].surface_id);
-
-    // shell의 clean snapshot ack 뒤에는 다시 일반 non-dirty LRU 후보가 된다.
-    try session.setFilePanelDirty(a_sid, false);
-    try std.testing.expect(!a_entry.dirty_sync_pending);
-    try std.testing.expectEqual(AppSession.FilePanelOpenPathResult.opened, session.openFilePanelPath(b));
-    try std.testing.expectEqual(@as(u64, 0), a_entry.surface_id);
+    // 전 entry가 surface_id를 갖고 있고 서로 다르다(비재사용).
+    var seen: [12]u64 = undefined;
+    var n: usize = 0;
+    var it = session.fileEntries();
+    while (it.next()) |entry| {
+        try std.testing.expect(entry.surface_id != 0); // 회수 0
+        for (seen[0..n]) |prior| try std.testing.expect(prior != entry.surface_id);
+        seen[n] = entry.surface_id;
+        n += 1;
+    }
+    try std.testing.expectEqual(paths.len, n);
 }
 
 test "FP6 merge transfers dock dirty state and live surface ownership before source teardown" {

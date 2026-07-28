@@ -100,7 +100,7 @@ pub const Tokens = struct {
 ```zig
 pub const Px = struct { x: i32, y: i32 };
 pub const Rect = struct { x: i32, y: i32, w: u32, h: u32 };  // 픽셀
-pub const Layer = enum { sidebar, pane_chrome_bg, pane_overlay, modal };  // replace()의 슬롯/Z에 매핑
+pub const Layer = enum { sidebar, pane_overlay, modal };  // replace()의 슬롯/Z에 매핑
 pub const Sides = packed struct { top: bool=false, right: bool=false, bottom: bool=false, left: bool=false };
 
 pub const Op = union(enum) {

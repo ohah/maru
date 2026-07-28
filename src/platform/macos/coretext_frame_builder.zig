@@ -7,6 +7,7 @@ const terminal = maru.terminal;
 const tabbar = maru.chrome.components.tabbar; // C4b-4: 탭 셀 경계 단일 소스(제목·✕가 hit-test·밴드와 같은 분할)
 const sidebar_component = maru.chrome.components.sidebar; // 활동 시각 표기 폭(relative_age_cols) 단일 출처
 const text_field = maru.chrome.components.text_field; // 주소창 편집 밴드 단일 레이아웃 소스(fieldLayout — docs/text-field-editor.md §3)
+const grapheme = maru.grapheme; // NFD(분해형) 한글 → 완성형 조합(chrome 셀 텍스트는 클러스터 shaping이 없다)
 const file_tree_icon = maru.chrome.file_tree_icon;
 const dock_layout = maru.session.dock_layout;
 const dock_panel = maru.session.dock_panel;
@@ -275,7 +276,7 @@ fn decodeTitleCp(bytes: []const u8, i: usize) struct { cp: u21, advance: usize }
 fn appendEllipsizedTitle(
     allocator: std.mem.Allocator,
     cells: *std.ArrayList(renderer.DrawCell),
-    title: []const u8,
+    raw_title: []const u8,
     row: u16,
     start_col: u16,
     end_col: u16,
@@ -284,6 +285,18 @@ fn appendEllipsizedTitle(
     anchor: TitleAnchor,
 ) !u16 {
     if (end_col <= start_col) return start_col;
+    // **NFD 한글은 여기서 완성형으로 합친다.** macOS 파일시스템은 이름을 NFD(초성·중성·종성 자모, U+1100~U+11FF)로
+    // 주는데, 이 함수는 codepoint 하나당 셀 하나를 내므로(shaping 없음) 자모가 셀마다 흩어져 "ㅅㅡㅋㅡ린ㅅㅑㅅ"처럼
+    // 보인다(사용자 제보 — 파일 트리). 터미널 그리드는 클러스터 저장 + CoreText run shaping이 있어 같은 바이트가
+    // 제대로 그려지지만 chrome 셀 경로에는 그게 없다 — 그래서 표시 직전 NFC 조합이 chrome 쪽 대응이다
+    // (docs/grapheme-clustering.md). 파일 경로·identity는 이 함수에 안 들어오므로 **표시만** 바뀐다.
+    // 조합 실패(OOM)면 원본을 그대로 그린다 — 자모로 보여도 글자가 사라지진 않는다.
+    const composed: ?[]u8 = if (grapheme.hasConjoiningJamo(raw_title))
+        (grapheme.composeHangul(allocator, raw_title) catch null)
+    else
+        null; // ASCII·완성형(대부분)은 무할당 경로
+    defer if (composed) |c| allocator.free(c);
+    const title = composed orelse raw_title;
     const avail: usize = end_col - start_col;
     const total = titleDisplayWidth(title, widen_icons);
 
@@ -2142,6 +2155,67 @@ test "file tree draw list clips to visible rows and marks active dirty conflicts
     }
     try std.testing.expect(saw_rename_r);
     try std.testing.expect(!saw_old_o);
+}
+
+test "chrome 제목은 NFD 한글을 완성형으로 합쳐 그린다(파일 트리 이름이 자모로 흩어지지 않는다)" {
+    // 회귀(사용자 제보): macOS 파일시스템이 주는 NFD 이름을 그대로 셀에 깔아 파일 트리 한글이 "ㅅㅡㅋㅡ린ㅅㅑㅅ"처럼
+    // 자모로 흩어져 보였다. chrome 셀 경로는 codepoint 1개 = 셀 1개라 shaping이 없으므로 표시 직전 NFC로 합친다.
+    const allocator = std.testing.allocator;
+    const dim: terminal.Color = .{ .rgb = .{ .r = 0x70, .g = 0x70, .b = 0x70 } };
+    const bright: terminal.Color = .{ .rgb = .{ .r = 0xEE, .g = 0xEE, .b = 0xEE } };
+    // NFD "한글.md" — ㅎ+ㅏ+ㄴ / ㄱ+ㅡ+ㄹ (U+1100~U+11FF conjoining 자모).
+    const nfd_name = "\u{1112}\u{1161}\u{11AB}\u{1100}\u{1173}\u{11AF}.md";
+    const rows = [_]file_tree.Row{.{
+        .file = .{
+            .path = "/tmp/nfd.md", // 경로는 원본 바이트 그대로(조합은 표시 전용) — 여기선 라벨만 본다
+            .label = nfd_name,
+            .depth = 1,
+            .supported = true,
+            .open = false,
+            .active = false,
+            .dirty = false,
+            .external_change = false,
+            .symlink = false,
+        },
+    }};
+    var dl = try buildFileTreeDrawList(allocator, &rows, null, 0, 1, 40, dim, bright, null);
+    defer dl.deinit(allocator);
+    var saw_han = false; // 완성형 '한' U+D55C
+    var saw_geul = false; // 완성형 '글' U+AE00
+    var saw_jamo = false; // conjoining 자모가 하나라도 남으면 실패(옛 동작)
+    for (dl.cells) |cell| {
+        if (cell.codepoint == 0xD55C) saw_han = true;
+        if (cell.codepoint == 0xAE00) saw_geul = true;
+        if (cell.codepoint >= 0x1100 and cell.codepoint <= 0x11FF) saw_jamo = true;
+    }
+    try std.testing.expect(saw_han);
+    try std.testing.expect(saw_geul);
+    try std.testing.expect(!saw_jamo); // ★ 옛 코드: 자모 6개가 각자 셀을 차지했다
+    // 완성형은 EAW wide라 2칸씩 — 폭 계산도 조합 결과 기준이어야 잘림 위치가 맞는다.
+    for (dl.cells) |cell| if (cell.codepoint == 0xD55C or cell.codepoint == 0xAE00) {
+        try std.testing.expectEqual(@as(u16, 2), cell.width);
+    };
+
+    // 이미 완성형인 이름은 무변(무할당 fast path) — 같은 셀 결과가 나온다.
+    const nfc_rows = [_]file_tree.Row{.{ .file = .{
+        .path = "/tmp/nfc.md",
+        .label = "한글.md",
+        .depth = 1,
+        .supported = true,
+        .open = false,
+        .active = false,
+        .dirty = false,
+        .external_change = false,
+        .symlink = false,
+    } }};
+    var nfc_dl = try buildFileTreeDrawList(allocator, &nfc_rows, null, 0, 1, 40, dim, bright, null);
+    defer nfc_dl.deinit(allocator);
+    try std.testing.expectEqual(dl.cells.len, nfc_dl.cells.len);
+    for (dl.cells, nfc_dl.cells) |a, b| {
+        try std.testing.expectEqual(a.codepoint, b.codepoint);
+        try std.testing.expectEqual(a.col, b.col);
+        try std.testing.expectEqual(a.width, b.width);
+    }
 }
 
 test "file tree focused selection applies its theme contrast color to every row glyph" {

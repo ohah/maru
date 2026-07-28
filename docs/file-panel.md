@@ -332,6 +332,33 @@ FP10부터 flat/v2의 `<mode>` 닫힌 목록은 `read|live-preview|source-edit`�
 
 ## 7. 파일 트리 (도크 영역 내)
 
+### 7.0 활성 터미널 cwd 따라가기 (ET-CWD, 2026-07-28 사용자 요청)
+
+활성 터미널의 작업 디렉터리가 바뀌면 탐색기가 **그 자리를 펼쳐 보여준다**(reveal). 사용자 요청은 "탐색기가 활성 터미널 베이스 경로를 따라가면 좋겠다"였고, 구현 모델은 **root 교체가 아니라 reveal**이다.
+
+**왜 root를 갈지 않는가.** `replaceExplicitRoots`는 주석 그대로 *"기존 expanded snapshot은 root 변경의 correctness 권위가 아니므로 버리고 새 lazy scan을 예약한다"* — 즉 root 교체는 **접힘·펼침 상태를 통째로 버리고** `root_generation`을 올리며 watcher를 재등록한다. cwd는 `cd` 한 번에 바뀌는 값이라, 그걸 root에 묶으면:
+
+| 문제 | 내용 |
+| --- | --- |
+| 상태 소실 | `cd`마다 트리가 접히고 재스캔 + watcher 재등록(debounce 200ms) — 디렉터리를 오가는 작업에서 트리가 계속 깜빡인다 |
+| 대상 모호 | 도크는 **창 전역**인데 cwd는 **Term별**이다. split이 셋이면 cwd가 셋이고, pane 포커스만 옮겨도 트리가 갈린다 |
+| 비-로컬 cwd | OSC 7을 안 쏘는 셸은 관측이 비고, `maru ssh` 원격 세션은 **로컬에 없는 경로**를 준다 |
+| 원치 않은 스캔 | `cd ~`·`cd /` 한 번에 홈·루트 전체가 root가 된다 |
+| 영속 충돌 | `explicit` root는 `dock-tree-roots`로 저장된다 — 따라가기가 그걸 덮으면 재시작 시 **고른 적 없는 root**가 복원된다 |
+
+reveal은 이 다섯을 전부 피한다: root·접힘·watcher·영속을 **하나도 건드리지 않고** 해당 경로의 ancestor만 펼친다.
+
+**정책(4가지)**
+
+1. **어느 cwd인가** — 활성 워크스페이스 → 활성 pane → 활성 Term의 관측 cwd. 그 Term이 파일·브라우저라 cwd가 없으면 **직전 값을 유지**한다(비우지 않는다 — 문서를 보다 터미널로 돌아왔을 때 트리가 리셋되면 안 된다).
+2. **언제 reveal하나** — cwd가 **변할 때만**, 그리고 도크가 보일 때만. 같은 값이 다시 관측되면 무동작이다(관측은 폴링이라 매 tick 같은 값이 온다).
+3. **root 밖이면 아무것도 하지 않는다** — 자동으로 root를 추가하지 않는다(위 표의 "원치 않은 스캔"·"영속 충돌"이 그대로 돌아온다). 사용자가 명시적으로 폴더를 열면 기존 `inferred` 경로가 root를 잡는다.
+4. **스크롤은 필요할 때만 뺏는다** — 대상 행이 이미 보이면 스크롤을 건드리지 않는다. 뷰포트 밖일 때만 그 행이 보이도록 최소한으로 맞춘다.
+
+**메커니즘은 새로 만들지 않는다.** 트리에는 이미 Zed형 auto-reveal(`reveal_path` + `continueReveal`)이 있고 파일을 열 때 그 경로를 쓴다 — 보이는 ancestor를 순서대로 펼치며 안 읽은 폴더만 lazy scan하고, 대상에 도달하거나 없으면 intent를 끝내 무한 재시도를 막는다. cwd 따라가기는 **그 intent에 디렉터리 경로를 넣는 것**이 전부다(디렉터리가 대상이면 그 폴더 자체까지 펼친다).
+
+**남는 것(이 슬라이스 밖)**: root 밖 cwd에 대한 "이 폴더를 루트로 추가" 어포던스, 끄기 위한 config 키. 둘 다 실사용 근거가 생기면 한다(measure-first) — 지금은 reveal이 비파괴적이라 끌 이유가 약하다.
+
 **탐색기 열기와 root 권위(Explorer UX 보강 구현 완료, ABI v137)**: 빈 도크 launcher는 `DockPanel.presented=true, collapsed=false`만 만들며 picker를 열지 않는다. `file_tree.Tree.mode`는 `inferred | explicit`이다. inferred에서는 `openFilePanelPath`가 파일의 git root(없으면 부모)를 합류시키고, explicit에서는 root 밖 파일을 열어도 recent MRU만 갱신한다. context menu의 `폴더 열기…`는 선택 directory 하나로 explicit root snapshot을 교체하고, `작업공간에 폴더 추가…`는 현재 보이는 root를 보존해 explicit으로 전환하며, root row의 `작업공간에서 폴더 제거`는 마지막 root도 제거해 explicit-empty를 유지한다. 이 open/add/remove UX는 VS Code workspace·multi-root workspace를 clean-room 행동 기준으로 삼고, 기존 Zed 기준은 scan/sort/exclusion/lazy expansion에만 유지한다.
 
 root picker callback은 path를 소유한 bounded backend request만 제출한다. worker는 `.`/`..`·trailing slash를 정리한 절대 UTF-8 path를 directory fd로 열고 `realpath`와 device/inode/kind를 얻어 symlink/case/Unicode alias를 canonical target 하나로 합친다. 모델/wire/watch/mutation root는 이 canonical path와 pinned identity를 공유하고 commit 직전 descriptor-relative/no-follow 재검증을 거친다. 2차 검증이 연 no-follow directory descriptor는 결과에 retained capability로 남아 main actor의 fallible staging을 통과한 뒤 **no-fail publish 직전에 그 exact root의 첫 scan job으로 소유권이 이전**되며, 첫 scan은 path를 다시 열지 않는다. 첫 scan 뒤 materialized file row 활성화는 pinned root identity부터 parent component까지 descriptor-relative/no-follow로 다시 열고, 최종 leaf를 `O_NONBLOCK|O_NOFOLLOW` regular-file fd로 연 뒤 같은 fd의 identity가 row snapshot과 일치할 때만 승인한다. 이 leaf capability는 Markdown/HTML 도크 commit 또는 비지원 파일 external-open one-shot admission이 끝날 때까지 유지한다. 새 Markdown entry는 row identity를 transient initial-hydration token으로도 보존하고, bridge read가 path를 `O_NOFOLLOW`로 연 같은 fd의 identity를 대조해 교체됐으면 bytes를 commit하지 않는다. symlink/FIFO/device/socket/directory row, identity 없는 row, stale root/leaf는 fail-closed한다. HTML `loadFileURL`과 비지원 파일 `NSWorkspace.open`은 공개 API가 pathname만 받아 admission 뒤 동일 UID가 다시 namespace를 바꾸는 경쟁을 원자적으로 막을 수 없으므로, 해당 **admission 이후 race는 명시적 위협 경계 밖**이다. main actor는 commit 직전에 **현재 live dock entry/recent 집합**으로 projected rows와 safety watcher union을 다시 fallible staging한 뒤 root/rows/watch를 한 번에 swap하고, old tree는 row swap 뒤 해제한다. 그래서 validation 중 open/close가 바뀌어도 stale entry snapshot을 publish하지 않는다. merge/restore/rename은 root pending을 포함한 `fileTreeNamespaceMutationBusy`로 거부한다. `Tree.root_generation`은 성공 publish 뒤에만 증가하고 context target과 scrollbar drag가 이를 snapshot한다. scan completion은 기존 backend generation retirement로 거부한다. picker request는 request id와 expected root generation을 함께 가져 cancel/invalid/cap/OOM/stale completion이 root/watch/rows/selection/presented와 열린 entry를 바꾸지 않게 한다. namespace mutation이 waiting/inflight/trash rollback/manual recovery 중이면 picker 진입과 replace/add/remove commit을 busy로 거부하고, root validation/publish가 pending인 동안에는 create/rename/delete/merge/restore를 거부한다. root completion은 tick당 최대 하나만 apply하며 frame tick의 blocking path lookup/read는 0이다. 완료 result의 descriptor close처럼 비차단 수명 정리 syscall은 main actor에서 수행할 수 있다.

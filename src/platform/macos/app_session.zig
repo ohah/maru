@@ -2553,6 +2553,11 @@ pub const AppSession = struct {
     file_tree_entry_inputs: std.ArrayList(file_tree.EntryInput) = .empty,
     file_tree_open_states: std.ArrayList(file_tree.OpenState) = .empty,
     file_tree_scroll_rows: usize = 0,
+    /// ET-CWD: 마지막으로 따라간 활성 터미널 cwd(owned, ""=아직 없음). 관측은 폴링이라 매 tick 같은 값이
+    /// 오므로 **변화 시에만** reveal을 건다(docs/file-panel.md §7.0 정책 2).
+    file_tree_followed_cwd: ?[]u8 = null,
+    /// 이번 tick에 reveal을 새로 건 경로(rows 재투영 뒤 그 행을 뷰포트에 넣을 때만 쓴다). 소유는 위 필드.
+    file_tree_follow_scroll_pending: bool = false,
     file_tree_scrollbar_idle_ticks: u32 = default_scrollbar_visible_ticks + default_scrollbar_fade_ticks,
     file_tree_scrollbar_last_rows: usize = 0,
     file_tree_scrollbar_hovered: bool = false,
@@ -10653,6 +10658,58 @@ pub const AppSession = struct {
 
     /// background scan 완료를 snapshot에 적용하고 다음 lazy scan을 제출한다. 호출부는 frame tick이지만 blocking
     /// path lookup/read는 worker에만 있고, main actor는 queue/snapshot 작업과 result descriptor close만 수행한다.
+    /// ET-CWD(docs/file-panel.md §7.0): 활성 터미널 cwd가 **바뀌면** 탐색기에서 그 자리를 펼친다(reveal).
+    /// root를 갈지 않으므로 접힘 상태·watcher·영속이 그대로다 — 그 판단의 근거는 §7.0의 기각 표에 있다.
+    ///
+    /// 정책 넷을 여기서 전부 집행한다: 도크가 보일 때만 / 활성 pane·활성 Term의 cwd만 / cwd가 없으면 직전
+    /// 값 유지 / 변화 시에만(관측은 폴링이라 같은 값이 매 tick 온다). root 밖 경로는 `revealDirectory`가 무시한다.
+    fn followActiveTerminalCwd(self: *AppSession) void {
+        if (!self.dockVisible()) return;
+        if (self.tabs.items.len == 0) return;
+        const term = self.activePane().activeTerm();
+        // 파일·브라우저 탭은 cwd가 없다 → **직전 값 유지**(문서를 보다 터미널로 돌아왔을 때 리셋되면 안 된다).
+        if (term.rt.observation.availability == .unavailable) return;
+        const cwd = term.rt.observation.cwd.items;
+        if (cwd.len == 0) return;
+        if (self.file_tree_followed_cwd) |prev| if (std.mem.eql(u8, prev, cwd)) return;
+        const owned = self.allocator.dupe(u8, cwd) catch return;
+        if (self.file_tree_followed_cwd) |prev| self.allocator.free(prev);
+        self.file_tree_followed_cwd = owned;
+        self.file_tree.revealDirectory(owned) catch return;
+        // reveal이 실제로 걸렸을 때만(= root 안) 행을 뷰포트에 넣는다. root 밖이면 intent가 안 서므로 무동작.
+        if (self.file_tree.revealTarget() != null) {
+            self.file_tree_rows_dirty = true;
+            self.file_tree_follow_scroll_pending = true;
+        }
+    }
+
+    /// reveal 대상 행을 뷰포트 안으로 **최소한만** 민다(§7.0 정책 4 — 이미 보이면 스크롤을 안 뺏는다).
+    fn scrollFileTreeToFollowedCwd(self: *AppSession) void {
+        if (!self.file_tree_follow_scroll_pending) return;
+        const target = self.file_tree_followed_cwd orelse {
+            self.file_tree_follow_scroll_pending = false;
+            return;
+        };
+        if (self.cell_height_px == 0) return; // 렌더 전 — 다음 tick에 다시 본다(pending 유지)
+        const visible_rows: usize = self.dockGeometry().tree_content.h / self.cell_height_px;
+        if (visible_rows == 0) return;
+        const row_index = blk: {
+            for (self.file_tree_rows.items, 0..) |row, i| {
+                const path = maru.session.file_tree.rowPath(row) orelse continue;
+                if (std.mem.eql(u8, path, target)) break :blk i;
+            }
+            break :blk null;
+        } orelse return; // 아직 그 행이 안 보인다(lazy scan 진행 중) — pending 유지, 다음 재투영에서 다시 본다
+        self.file_tree_follow_scroll_pending = false;
+        const first = self.file_tree_scroll_rows;
+        const last = first + visible_rows - 1;
+        if (row_index < first) {
+            self.file_tree_scroll_rows = row_index;
+        } else if (row_index > last) {
+            self.file_tree_scroll_rows = row_index + 1 - visible_rows;
+        }
+    }
+
     fn updateFileTree(self: *AppSession) !void {
         if (!self.file_tree_initialized) return;
         var changed = false;
@@ -10854,6 +10911,8 @@ pub const AppSession = struct {
             submitted += 1;
         }
 
+        self.followActiveTerminalCwd();
+
         if (changed) self.file_tree_rows_dirty = true;
         if (self.file_tree_rows_dirty) {
             try self.projectFileTreeOpenStates();
@@ -10866,6 +10925,7 @@ pub const AppSession = struct {
                 self.file_tree_rows.items.len -| @as(usize, visible_rows),
             );
             self.file_tree_hovered_row = null;
+            self.scrollFileTreeToFollowedCwd(); // ET-CWD: 재투영된 행 기준으로 뷰포트 보정(§7.0 정책 4)
             self.advanceFileTreeProjectionGeneration();
             self.file_tree_rows_dirty = false;
             self.metal_dirty = true;
@@ -29709,6 +29769,10 @@ pub const AppSession = struct {
             self.file_tree_rows.deinit(self.allocator);
             self.file_tree_entry_inputs.deinit(self.allocator);
             self.file_tree_open_states.deinit(self.allocator);
+            if (self.file_tree_followed_cwd) |p| { // ET-CWD: 마지막으로 따라간 cwd(owned)
+                self.allocator.free(p);
+                self.file_tree_followed_cwd = null;
+            }
             self.file_tree_initialized = false;
         }
         for (self.file_tree_trash_queue[0..self.file_tree_trash_queue_len]) |pending| {

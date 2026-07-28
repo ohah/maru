@@ -4196,8 +4196,8 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
         공유하고 leave가 남은 budget 중 최대 100 ms를 쓴다. signal/revoke/error cleanup은 active/latest와 detach를
         버리고 하나의 100 ms deadline 안에서 leave를 시도한 뒤 즉시 raw restore/signal forwarding으로 간다.
 
-    **P5c3c-1a~2a, 2b1, 2b2a~c2와 2b2c3-c3a1~c3c-2a는 구현 완료다.
-    c3c-2b1~3b, 2b2d1~f3, P5c3c-2b3와 P5c3c-3a~3b는 계획 상태다.**
+    **P5c3c-1a~2a, 2b1, 2b2a~c2와 2b2c3-c3a1~c3c-2b1은 구현 완료다.
+    c3c-2b2~3b, 2b2d1~f3, P5c3c-2b3와 P5c3c-3a~3b는 계획 상태다.**
     2b2c3 전체는 c3c 전체가 green이 아니므로 아직 계획 상태다. 각 slice는 P5c3a~b의 Debug/ReleaseFast gate를 재실행하고 다음 slice가 실제
     consumer로 쓰지 않는 임시 public API는 만들지 않는다.
 

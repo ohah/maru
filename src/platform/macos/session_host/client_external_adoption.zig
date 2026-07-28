@@ -11,6 +11,7 @@ const client_mod = @import("client.zig");
 const compatibility = @import("compatibility.zig");
 const external_adoption_limits = @import("external_adoption_limits.zig");
 const ledger_mod = @import("external_inbox_ledger.zig");
+const owner_seal = @import("external_owner_seal.zig");
 const framing = @import("framing.zig");
 const protocol = @import("protocol.zig");
 const request_id_state = @import("request_id_state.zig");
@@ -34,6 +35,264 @@ pub const PreparedTransfer = struct {
     cleanup_wrappers: []ledger_mod.OwnedPayload = &.{},
     cleanup_tokens: []ledger_mod.Token = &.{},
     cleanup_transferred_count: usize = 0,
+};
+
+const CommittedTakeLifecycle = enum {
+    empty,
+    prepared,
+    committed_tombstone,
+    aborted_tombstone,
+};
+
+const CommittedScreenLifecycle = enum {
+    empty,
+    committed,
+    cleaned_tombstone,
+};
+
+const ScreenBackingAuthority = struct {
+    allocator: std.mem.Allocator = std.heap.page_allocator,
+    transfer: PreparedTransfer = .{},
+};
+
+const ScreenBackingSeal = struct {
+    authority_addr: usize,
+    storage_addr: usize,
+    allocator_ptr_addr: usize,
+    allocator_vtable_addr: usize,
+    copies_addr: usize,
+    copies_len: usize,
+    cleanup_copies_addr: usize,
+    cleanup_copies_len: usize,
+    wrappers_addr: usize,
+    wrappers_len: usize,
+    cleanup_wrappers_addr: usize,
+    cleanup_wrappers_len: usize,
+    tokens_addr: usize,
+    tokens_len: usize,
+    cleanup_tokens_addr: usize,
+    cleanup_tokens_len: usize,
+    digest: owner_seal.Digest,
+};
+
+const ScreenCanonicalAuthority = struct {
+    owner_addr: usize = 0,
+    storage_addr: usize = 0,
+    allocator_ptr_addr: usize = 0,
+    allocator_vtable_addr: usize = 0,
+    copies_addr: usize = 0,
+    copies_len: usize = 0,
+    cleanup_copies_addr: usize = 0,
+    cleanup_copies_len: usize = 0,
+    wrappers_addr: usize = 0,
+    wrappers_len: usize = 0,
+    cleanup_wrappers_addr: usize = 0,
+    cleanup_wrappers_len: usize = 0,
+    tokens_addr: usize = 0,
+    tokens_len: usize = 0,
+    cleanup_tokens_addr: usize = 0,
+    cleanup_tokens_len: usize = 0,
+    digest: owner_seal.Digest = [_]u8{0} ** 32,
+};
+
+const LedgerFinishedPermit = struct {
+    ledger_addr: usize,
+};
+
+/// Address-bound permission to retag one committed seed plan into its persistent destination.
+/// Preparation is fallible and runs before the ledger barrier; `commitIntoNoFail` only moves
+/// already-sealed headers after `commitSeeds` succeeds.
+pub const PreparedCommittedScreenTake = struct {
+    saved_self_addr: usize = 0,
+    source_addr: usize = 0,
+    destination_addr: usize = 0,
+    client_addr: usize = 0,
+    ledger_addr: usize = 0,
+    storage_addr: usize = 0,
+    target_stream: u64 = 0,
+    tokens_addr: usize = 0,
+    tokens_len: usize = 0,
+    lifecycle: CommittedTakeLifecycle = .empty,
+
+    pub fn validate(
+        self: *const PreparedCommittedScreenTake,
+        source: *const PreparedScreenBacklog,
+        destination: *const CommittedScreenBacklog,
+        client: *const client_mod.Client,
+        ledger: *const ledger_mod.ExternalInboxLedger,
+        stable_parent: *const anyopaque,
+    ) bool {
+        const self_addr = @intFromPtr(self);
+        const destination_addr = @intFromPtr(destination);
+        if (rangesOverlap(
+            self_addr,
+            @sizeOf(PreparedCommittedScreenTake),
+            @intFromPtr(source),
+            @sizeOf(PreparedScreenBacklog),
+        ) or rangesOverlap(
+            self_addr,
+            @sizeOf(PreparedCommittedScreenTake),
+            destination_addr,
+            @sizeOf(CommittedScreenBacklog),
+        ) or rangesOverlap(
+            self_addr,
+            @sizeOf(PreparedCommittedScreenTake),
+            @intFromPtr(client),
+            @sizeOf(client_mod.Client),
+        ) or rangesOverlap(
+            self_addr,
+            @sizeOf(PreparedCommittedScreenTake),
+            @intFromPtr(ledger),
+            @sizeOf(ledger_mod.ExternalInboxLedger),
+        ) or rangesOverlap(
+            destination_addr,
+            @sizeOf(CommittedScreenBacklog),
+            @intFromPtr(source),
+            @sizeOf(PreparedScreenBacklog),
+        ) or rangesOverlap(
+            destination_addr,
+            @sizeOf(CommittedScreenBacklog),
+            @intFromPtr(client),
+            @sizeOf(client_mod.Client),
+        ) or rangesOverlap(
+            destination_addr,
+            @sizeOf(CommittedScreenBacklog),
+            @intFromPtr(ledger),
+            @sizeOf(ledger_mod.ExternalInboxLedger),
+        ) or rangeOverlapsPreparedBacking(
+            self_addr,
+            @sizeOf(PreparedCommittedScreenTake),
+            source,
+        ) or rangeOverlapsPreparedBacking(
+            destination_addr,
+            @sizeOf(CommittedScreenBacklog),
+            source,
+        ))
+            return false;
+        if (self.lifecycle != .prepared or
+            self.saved_self_addr != @intFromPtr(self) or
+            self.source_addr != @intFromPtr(source) or
+            self.destination_addr != @intFromPtr(destination) or
+            self.client_addr != @intFromPtr(client) or
+            self.ledger_addr != @intFromPtr(ledger) or
+            self.storage_addr != @intFromPtr(stable_parent) or
+            !destination.isEmpty() or
+            !source.validate(client, ledger) or
+            source.targetStream() != self.target_stream)
+            return false;
+        const transfer = source.transfer orelse return false;
+        return self.tokens_addr == sliceAddress(ledger_mod.Token, transfer.tokens) and
+            self.tokens_len == transfer.tokens.len;
+    }
+
+    pub fn abort(self: *PreparedCommittedScreenTake) void {
+        if (self.saved_self_addr != 0 and
+            self.saved_self_addr != @intFromPtr(self))
+            return;
+        self.* = .{ .lifecycle = .aborted_tombstone };
+    }
+};
+
+/// Persistent owner of the exact token/backing headers produced by `PreparedScreenBacklog`.
+/// Ledger lease release is deliberately deferred to c3c-3; this b1 type only proves the
+/// final-address take and exact post-ledger backing cleanup.
+pub const CommittedScreenBacklog = struct {
+    saved_self_addr: usize = 0,
+    source_addr: usize = 0,
+    ledger_addr: usize = 0,
+    storage_addr: usize = 0,
+    target_stream: u64 = 0,
+    tokens_addr: usize = 0,
+    tokens_len: usize = 0,
+    retained_count: usize = 0,
+    released: std.StaticBitSet(ledger_mod.max_items) =
+        std.StaticBitSet(ledger_mod.max_items).initEmpty(),
+    primary: ScreenBackingAuthority = .{},
+    cleanup: ScreenBackingAuthority = .{},
+    primary_seal: ?ScreenBackingSeal = null,
+    cleanup_seal: ?ScreenBackingSeal = null,
+    canonical: ScreenCanonicalAuthority = .{},
+    lifecycle: CommittedScreenLifecycle = .empty,
+
+    pub fn isEmpty(self: *const CommittedScreenBacklog) bool {
+        return std.meta.eql(self.*, CommittedScreenBacklog{});
+    }
+
+    /// Generic storage teardown must not interpret or skip a corrupted committed owner.
+    /// The typed cleanup path owns validation/fallback and is the only transition out of this tag.
+    pub fn requiresTypedCleanup(self: *const CommittedScreenBacklog) bool {
+        return !self.isEmpty() and
+            !std.meta.eql(
+                self.*,
+                CommittedScreenBacklog{ .lifecycle = .cleaned_tombstone },
+            );
+    }
+
+    pub fn isCommitted(
+        self: *const CommittedScreenBacklog,
+        stable_parent: *const anyopaque,
+    ) bool {
+        if (self.lifecycle != .committed) return false;
+        const transfer = self.primary.transfer;
+        return self.saved_self_addr == @intFromPtr(self) and
+            self.ledger_addr != 0 and self.target_stream != 0 and
+            self.storage_addr == @intFromPtr(stable_parent) and
+            self.tokens_addr == sliceAddress(ledger_mod.Token, transfer.tokens) and
+            self.tokens_len == transfer.tokens.len and
+            self.retained_count == self.tokens_len and
+            self.retained_count <= ledger_mod.max_items and
+            self.released.count() == 0 and
+            screenCanonicalAuthorityValid(self, &self.canonical) and
+            screenBackingSealMatches(
+                self.primary_seal orelse return false,
+                &self.primary,
+                self.storage_addr,
+            ) and screenBackingMatchesCanonical(
+            &self.primary,
+            &self.canonical,
+        ) and
+            screenBackingSealMatches(
+                self.cleanup_seal orelse return false,
+                &self.cleanup,
+                self.storage_addr,
+            ) and screenBackingMatchesCanonical(
+            &self.cleanup,
+            &self.canonical,
+        );
+    }
+
+    /// Private b1 cleanup seam. The permit can only be minted by this file's fixture after it has
+    /// drained and finished the ledger; c3c-3 replaces it with the aggregate teardown permit.
+    fn deinitAfterLedgerFinished(
+        self: *CommittedScreenBacklog,
+        permit: LedgerFinishedPermit,
+    ) void {
+        if (self.lifecycle == .empty or self.lifecycle == .cleaned_tombstone) return;
+        if (self.saved_self_addr != @intFromPtr(self)) return;
+        if (permit.ledger_addr != self.ledger_addr) return;
+        const canonical_valid =
+            screenCanonicalAuthorityValid(self, &self.canonical);
+        const cleanup_valid = canonical_valid and if (self.cleanup_seal) |seal|
+            screenBackingSealMatches(seal, &self.cleanup, self.storage_addr) and
+                screenBackingMatchesCanonical(&self.cleanup, &self.canonical)
+        else
+            false;
+        const primary_valid = canonical_valid and if (self.primary_seal) |seal|
+            screenBackingSealMatches(seal, &self.primary, self.storage_addr) and
+                screenBackingMatchesCanonical(&self.primary, &self.canonical)
+        else
+            false;
+        const authority: ?ScreenBackingAuthority = if (cleanup_valid)
+            self.cleanup
+        else if (primary_valid)
+            self.primary
+        else
+            null;
+        // Re-entrant allocator callbacks must observe a spent owner before the first free.
+        self.* = .{ .lifecycle = .cleaned_tombstone };
+        var owned = authority orelse return;
+        deinitScreenBackingAuthority(&owned);
+    }
 };
 
 pub const PrepareError = client_mod.ExternalAdoptionInspectError ||
@@ -315,6 +574,125 @@ pub const PreparedScreenBacklog = struct {
         return if (self.inventory) |inventory| inventory.target_stream else null;
     }
 
+    pub fn prepareCommittedTake(
+        self: *PreparedScreenBacklog,
+        out: *PreparedCommittedScreenTake,
+        destination: *CommittedScreenBacklog,
+        client: *const client_mod.Client,
+        ledger: *const ledger_mod.ExternalInboxLedger,
+        stable_parent: *const anyopaque,
+    ) error{InvalidAddress}!void {
+        // Prove all structural and nested-backing ranges before reading either caller-provided
+        // destination. A forged `out` may itself point at the final byte of a token allocation.
+        if (rangesOverlap(
+            @intFromPtr(out),
+            @sizeOf(PreparedCommittedScreenTake),
+            @intFromPtr(self),
+            @sizeOf(PreparedScreenBacklog),
+        ) or rangesOverlap(
+            @intFromPtr(out),
+            @sizeOf(PreparedCommittedScreenTake),
+            @intFromPtr(destination),
+            @sizeOf(CommittedScreenBacklog),
+        ) or rangesOverlap(
+            @intFromPtr(out),
+            @sizeOf(PreparedCommittedScreenTake),
+            @intFromPtr(client),
+            @sizeOf(client_mod.Client),
+        ) or rangesOverlap(
+            @intFromPtr(out),
+            @sizeOf(PreparedCommittedScreenTake),
+            @intFromPtr(ledger),
+            @sizeOf(ledger_mod.ExternalInboxLedger),
+        ) or rangeOverlapsPreparedBacking(
+            @intFromPtr(out),
+            @sizeOf(PreparedCommittedScreenTake),
+            self,
+        ) or rangesOverlap(
+            @intFromPtr(destination),
+            @sizeOf(CommittedScreenBacklog),
+            @intFromPtr(self),
+            @sizeOf(PreparedScreenBacklog),
+        ) or rangeOverlapsPreparedBacking(
+            @intFromPtr(destination),
+            @sizeOf(CommittedScreenBacklog),
+            self,
+        ) or rangesOverlap(
+            @intFromPtr(destination),
+            @sizeOf(CommittedScreenBacklog),
+            @intFromPtr(client),
+            @sizeOf(client_mod.Client),
+        ) or rangesOverlap(
+            @intFromPtr(destination),
+            @sizeOf(CommittedScreenBacklog),
+            @intFromPtr(ledger),
+            @sizeOf(ledger_mod.ExternalInboxLedger),
+        ))
+            return error.InvalidAddress;
+        if (!std.meta.eql(out.*, PreparedCommittedScreenTake{}) or
+            !self.validate(client, ledger) or
+            !destination.isEmpty())
+            return error.InvalidAddress;
+        const transfer = self.transfer orelse return error.InvalidAddress;
+        out.* = .{
+            .saved_self_addr = @intFromPtr(out),
+            .source_addr = @intFromPtr(self),
+            .destination_addr = @intFromPtr(destination),
+            .client_addr = @intFromPtr(client),
+            .ledger_addr = @intFromPtr(ledger),
+            .storage_addr = @intFromPtr(stable_parent),
+            .target_stream = self.targetStream() orelse return error.InvalidAddress,
+            .tokens_addr = sliceAddress(ledger_mod.Token, transfer.tokens),
+            .tokens_len = transfer.tokens.len,
+            .lifecycle = .prepared,
+        };
+        if (!out.validate(self, destination, client, ledger, stable_parent)) {
+            out.* = .{ .lifecycle = .aborted_tombstone };
+            return error.InvalidAddress;
+        }
+    }
+
+    /// No allocation, callback, validation or error return is permitted here. The outer final
+    /// seal revalidates `take` immediately before the ledger barrier.
+    pub fn commitIntoNoFail(
+        self: *PreparedScreenBacklog,
+        take: *PreparedCommittedScreenTake,
+        destination: *CommittedScreenBacklog,
+    ) void {
+        const target_stream = take.target_stream;
+        const retained_count = take.tokens_len;
+        const primary = screenBackingAuthorityFromPrepared(self);
+        const cleanup = primary;
+        destination.* = .{
+            .saved_self_addr = @intFromPtr(destination),
+            .source_addr = @intFromPtr(self),
+            .ledger_addr = take.ledger_addr,
+            .storage_addr = take.storage_addr,
+            .target_stream = target_stream,
+            .tokens_addr = take.tokens_addr,
+            .tokens_len = take.tokens_len,
+            .retained_count = retained_count,
+            .primary = primary,
+            .cleanup = cleanup,
+            .lifecycle = .committed,
+        };
+        destination.primary_seal = sealScreenBackingAuthority(
+            &destination.primary,
+            take.storage_addr,
+        );
+        destination.cleanup_seal = sealScreenBackingAuthority(
+            &destination.cleanup,
+            take.storage_addr,
+        );
+        destination.canonical = screenCanonicalAuthority(
+            destination,
+            &destination.primary,
+        );
+        self.transfer = null;
+        self.cleanup_transfer = null;
+        take.* = .{ .lifecycle = .committed_tombstone };
+    }
+
     /// Linearizes c1 seed ownership into the ledger and immediately tombstones every local payload
     /// descriptor. After success, abort cleanup owns metadata only; payload bytes belong solely to
     /// the ledger. Errors preserve the source Client and prepared plan; the ledger retains c1's
@@ -420,6 +798,311 @@ pub const PreparedScreenBacklog = struct {
         return null;
     }
 };
+
+fn screenBackingAuthorityFromPrepared(
+    source: *const PreparedScreenBacklog,
+) ScreenBackingAuthority {
+    return .{
+        .allocator = source.allocator,
+        .transfer = source.transfer.?,
+    };
+}
+
+fn sealScreenBackingAuthority(
+    authority: *const ScreenBackingAuthority,
+    storage_addr: usize,
+) ScreenBackingSeal {
+    const transfer = authority.transfer;
+    var transcript = owner_seal.Writer.init("maru.screen-owner.backing.v1");
+    transcript.writeUsize(storage_addr);
+    transcript.writeUsize(@intFromPtr(authority.allocator.ptr));
+    transcript.writeUsize(@intFromPtr(authority.allocator.vtable));
+    transcript.writeUsize(sliceAddress(client_mod.ExternalScreenCopy, transfer.copies));
+    transcript.writeUsize(transfer.copies.len);
+    transcript.writeUsize(sliceAddress(
+        client_mod.ExternalScreenCopy,
+        transfer.cleanup_copies,
+    ));
+    transcript.writeUsize(transfer.cleanup_copies.len);
+    transcript.writeUsize(sliceAddress(ledger_mod.OwnedPayload, transfer.wrappers));
+    transcript.writeUsize(transfer.wrappers.len);
+    transcript.writeUsize(sliceAddress(
+        ledger_mod.OwnedPayload,
+        transfer.cleanup_wrappers,
+    ));
+    transcript.writeUsize(transfer.cleanup_wrappers.len);
+    transcript.writeUsize(sliceAddress(ledger_mod.Token, transfer.tokens));
+    transcript.writeUsize(transfer.tokens.len);
+    transcript.writeUsize(sliceAddress(ledger_mod.Token, transfer.cleanup_tokens));
+    transcript.writeUsize(transfer.cleanup_tokens.len);
+    return .{
+        .authority_addr = @intFromPtr(authority),
+        .storage_addr = storage_addr,
+        .allocator_ptr_addr = @intFromPtr(authority.allocator.ptr),
+        .allocator_vtable_addr = @intFromPtr(authority.allocator.vtable),
+        .copies_addr = sliceAddress(client_mod.ExternalScreenCopy, transfer.copies),
+        .copies_len = transfer.copies.len,
+        .cleanup_copies_addr = sliceAddress(
+            client_mod.ExternalScreenCopy,
+            transfer.cleanup_copies,
+        ),
+        .cleanup_copies_len = transfer.cleanup_copies.len,
+        .wrappers_addr = sliceAddress(ledger_mod.OwnedPayload, transfer.wrappers),
+        .wrappers_len = transfer.wrappers.len,
+        .cleanup_wrappers_addr = sliceAddress(
+            ledger_mod.OwnedPayload,
+            transfer.cleanup_wrappers,
+        ),
+        .cleanup_wrappers_len = transfer.cleanup_wrappers.len,
+        .tokens_addr = sliceAddress(ledger_mod.Token, transfer.tokens),
+        .tokens_len = transfer.tokens.len,
+        .cleanup_tokens_addr = sliceAddress(ledger_mod.Token, transfer.cleanup_tokens),
+        .cleanup_tokens_len = transfer.cleanup_tokens.len,
+        .digest = transcript.finish(),
+    };
+}
+
+fn screenBackingSealMatches(
+    seal: ScreenBackingSeal,
+    authority: *const ScreenBackingAuthority,
+    storage_addr: usize,
+) bool {
+    if (seal.authority_addr != @intFromPtr(authority) or
+        seal.storage_addr != storage_addr) return false;
+    const actual = sealScreenBackingAuthority(authority, storage_addr);
+    return std.meta.eql(seal, actual);
+}
+
+fn screenCanonicalAuthority(
+    owner: *const CommittedScreenBacklog,
+    authority: *const ScreenBackingAuthority,
+) ScreenCanonicalAuthority {
+    const transfer = authority.transfer;
+    var result = ScreenCanonicalAuthority{
+        .owner_addr = @intFromPtr(owner),
+        .storage_addr = owner.storage_addr,
+        .allocator_ptr_addr = @intFromPtr(authority.allocator.ptr),
+        .allocator_vtable_addr = @intFromPtr(authority.allocator.vtable),
+        .copies_addr = sliceAddress(client_mod.ExternalScreenCopy, transfer.copies),
+        .copies_len = transfer.copies.len,
+        .cleanup_copies_addr = sliceAddress(
+            client_mod.ExternalScreenCopy,
+            transfer.cleanup_copies,
+        ),
+        .cleanup_copies_len = transfer.cleanup_copies.len,
+        .wrappers_addr = sliceAddress(ledger_mod.OwnedPayload, transfer.wrappers),
+        .wrappers_len = transfer.wrappers.len,
+        .cleanup_wrappers_addr = sliceAddress(
+            ledger_mod.OwnedPayload,
+            transfer.cleanup_wrappers,
+        ),
+        .cleanup_wrappers_len = transfer.cleanup_wrappers.len,
+        .tokens_addr = sliceAddress(ledger_mod.Token, transfer.tokens),
+        .tokens_len = transfer.tokens.len,
+        .cleanup_tokens_addr = sliceAddress(
+            ledger_mod.Token,
+            transfer.cleanup_tokens,
+        ),
+        .cleanup_tokens_len = transfer.cleanup_tokens.len,
+    };
+    result.digest = screenCanonicalAuthorityDigest(result);
+    return result;
+}
+
+fn screenCanonicalAuthorityDigest(
+    authority: ScreenCanonicalAuthority,
+) owner_seal.Digest {
+    var transcript = owner_seal.Writer.init("maru.screen-owner.canonical.v1");
+    transcript.writeUsize(authority.owner_addr);
+    transcript.writeUsize(authority.storage_addr);
+    transcript.writeUsize(authority.allocator_ptr_addr);
+    transcript.writeUsize(authority.allocator_vtable_addr);
+    transcript.writeUsize(authority.copies_addr);
+    transcript.writeUsize(authority.copies_len);
+    transcript.writeUsize(authority.cleanup_copies_addr);
+    transcript.writeUsize(authority.cleanup_copies_len);
+    transcript.writeUsize(authority.wrappers_addr);
+    transcript.writeUsize(authority.wrappers_len);
+    transcript.writeUsize(authority.cleanup_wrappers_addr);
+    transcript.writeUsize(authority.cleanup_wrappers_len);
+    transcript.writeUsize(authority.tokens_addr);
+    transcript.writeUsize(authority.tokens_len);
+    transcript.writeUsize(authority.cleanup_tokens_addr);
+    transcript.writeUsize(authority.cleanup_tokens_len);
+    return transcript.finish();
+}
+
+fn screenCanonicalAuthorityValid(
+    owner: *const CommittedScreenBacklog,
+    authority: *const ScreenCanonicalAuthority,
+) bool {
+    return authority.owner_addr == @intFromPtr(owner) and
+        authority.storage_addr == owner.storage_addr and
+        authority.storage_addr != 0 and
+        std.mem.eql(
+            u8,
+            &authority.digest,
+            &screenCanonicalAuthorityDigest(authority.*),
+        );
+}
+
+fn screenBackingMatchesCanonical(
+    authority: *const ScreenBackingAuthority,
+    canonical: *const ScreenCanonicalAuthority,
+) bool {
+    const transfer = authority.transfer;
+    return canonical.allocator_ptr_addr == @intFromPtr(authority.allocator.ptr) and
+        canonical.allocator_vtable_addr == @intFromPtr(authority.allocator.vtable) and
+        canonical.copies_addr ==
+            sliceAddress(client_mod.ExternalScreenCopy, transfer.copies) and
+        canonical.copies_len == transfer.copies.len and
+        canonical.cleanup_copies_addr ==
+            sliceAddress(client_mod.ExternalScreenCopy, transfer.cleanup_copies) and
+        canonical.cleanup_copies_len == transfer.cleanup_copies.len and
+        canonical.wrappers_addr ==
+            sliceAddress(ledger_mod.OwnedPayload, transfer.wrappers) and
+        canonical.wrappers_len == transfer.wrappers.len and
+        canonical.cleanup_wrappers_addr ==
+            sliceAddress(ledger_mod.OwnedPayload, transfer.cleanup_wrappers) and
+        canonical.cleanup_wrappers_len == transfer.cleanup_wrappers.len and
+        canonical.tokens_addr == sliceAddress(ledger_mod.Token, transfer.tokens) and
+        canonical.tokens_len == transfer.tokens.len and
+        canonical.cleanup_tokens_addr ==
+            sliceAddress(ledger_mod.Token, transfer.cleanup_tokens) and
+        canonical.cleanup_tokens_len == transfer.cleanup_tokens.len;
+}
+
+fn deinitScreenBackingAuthority(authority: *ScreenBackingAuthority) void {
+    const transfer = authority.transfer;
+    const copies = canonicalSlice(
+        client_mod.ExternalScreenCopy,
+        transfer.copies,
+        transfer.cleanup_copies,
+        transfer.copies_addr,
+        transfer.copies_len,
+    ) orelse return;
+    const wrappers = canonicalSlice(
+        ledger_mod.OwnedPayload,
+        transfer.wrappers,
+        transfer.cleanup_wrappers,
+        transfer.wrappers_addr,
+        transfer.wrappers_len,
+    ) orelse return;
+    const tokens = canonicalSlice(
+        ledger_mod.Token,
+        transfer.tokens,
+        transfer.cleanup_tokens,
+        transfer.tokens_addr,
+        transfer.tokens_len,
+    ) orelse return;
+    const allocator = authority.allocator;
+    authority.* = .{};
+    // Payload bytes are ledger-owned after commitSeeds. Only the three container allocations move.
+    allocator.free(tokens);
+    allocator.free(wrappers);
+    allocator.free(copies);
+}
+
+fn rangeOverlapsPreparedBacking(
+    destination_addr: usize,
+    destination_len: usize,
+    source: *const PreparedScreenBacklog,
+) bool {
+    const transfer = source.transfer orelse return false;
+    const copies_bytes = std.math.mul(
+        usize,
+        transfer.copies.len,
+        @sizeOf(client_mod.ExternalScreenCopy),
+    ) catch return true;
+    const wrappers_bytes = std.math.mul(
+        usize,
+        transfer.wrappers.len,
+        @sizeOf(ledger_mod.OwnedPayload),
+    ) catch return true;
+    const tokens_bytes = std.math.mul(
+        usize,
+        transfer.tokens.len,
+        @sizeOf(ledger_mod.Token),
+    ) catch return true;
+    if (rangesOverlap(
+        destination_addr,
+        destination_len,
+        sliceAddress(client_mod.ExternalScreenCopy, transfer.copies),
+        copies_bytes,
+    ) or rangesOverlap(
+        destination_addr,
+        destination_len,
+        sliceAddress(ledger_mod.OwnedPayload, transfer.wrappers),
+        wrappers_bytes,
+    ) or rangesOverlap(
+        destination_addr,
+        destination_len,
+        sliceAddress(ledger_mod.Token, transfer.tokens),
+        tokens_bytes,
+    )) return true;
+    for (transfer.copies) |copy| {
+        if (rangesOverlap(
+            destination_addr,
+            destination_len,
+            sliceAddress(u8, copy.view),
+            copy.view.len,
+        )) return true;
+    }
+    if (source.inventory) |*inventory|
+        if (destinationOverlapsInventory(
+            destination_addr,
+            destination_len,
+            inventory,
+        )) return true;
+    if (source.cleanup_inventory) |*inventory|
+        if (destinationOverlapsInventory(
+            destination_addr,
+            destination_len,
+            inventory,
+        )) return true;
+    if (source.client_disarm.inventory) |*inventory|
+        if (destinationOverlapsInventory(
+            destination_addr,
+            destination_len,
+            inventory,
+        )) return true;
+    if (source.client_disarm.cleanup_inventory) |*inventory|
+        if (destinationOverlapsInventory(
+            destination_addr,
+            destination_len,
+            inventory,
+        )) return true;
+    return false;
+}
+
+fn destinationOverlapsInventory(
+    destination_addr: usize,
+    destination_len: usize,
+    inventory: *const client_mod.ExternalAdoptionInventory,
+) bool {
+    return sliceOverlaps(destination_addr, destination_len, inventory.batch_descriptors) or
+        sliceOverlaps(destination_addr, destination_len, inventory.cleanup_batch_descriptors) or
+        sliceOverlaps(destination_addr, destination_len, inventory.stream_descriptors) or
+        sliceOverlaps(destination_addr, destination_len, inventory.cleanup_stream_descriptors) or
+        sliceOverlaps(destination_addr, destination_len, inventory.event_descriptors) or
+        sliceOverlaps(destination_addr, destination_len, inventory.cleanup_event_descriptors) or
+        sliceOverlaps(destination_addr, destination_len, inventory.build_id_copy) or
+        sliceOverlaps(destination_addr, destination_len, inventory.cleanup_build_id_copy) or
+        sliceOverlaps(destination_addr, destination_len, inventory.lifecycle_copy) or
+        sliceOverlaps(destination_addr, destination_len, inventory.cleanup_lifecycle_copy);
+}
+
+fn sliceOverlaps(destination_addr: usize, destination_len: usize, slice: anytype) bool {
+    const Slice = @TypeOf(slice);
+    const T = std.meta.Child(Slice);
+    const byte_len = std.math.mul(usize, slice.len, @sizeOf(T)) catch return true;
+    return rangesOverlap(
+        destination_addr,
+        destination_len,
+        sliceAddress(T, slice),
+        byte_len,
+    );
+}
 
 fn canonicalSlice(
     comptime T: type,
@@ -556,6 +1239,83 @@ fn makePreparedClient(allocator: std.mem.Allocator) !struct {
     source.ownership = .external_pump;
     return .{ .client = source, .peer_fd = fds[1] };
 }
+
+const ReentrantScreenCleanupAllocator = struct {
+    parent: std.mem.Allocator,
+    owner: ?*CommittedScreenBacklog = null,
+    permit: LedgerFinishedPermit = .{ .ledger_addr = 0 },
+    free_calls: usize = 0,
+    observed_tombstone: bool = true,
+
+    fn allocator(self: *ReentrantScreenCleanupAllocator) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &.{
+            .alloc = alloc,
+            .resize = resize,
+            .remap = remap,
+            .free = free,
+        } };
+    }
+
+    fn alloc(
+        context: *anyopaque,
+        len: usize,
+        alignment: std.mem.Alignment,
+        ret_addr: usize,
+    ) ?[*]u8 {
+        const self: *ReentrantScreenCleanupAllocator = @ptrCast(@alignCast(context));
+        return self.parent.vtable.alloc(self.parent.ptr, len, alignment, ret_addr);
+    }
+
+    fn resize(
+        context: *anyopaque,
+        memory: []u8,
+        alignment: std.mem.Alignment,
+        new_len: usize,
+        ret_addr: usize,
+    ) bool {
+        const self: *ReentrantScreenCleanupAllocator = @ptrCast(@alignCast(context));
+        return self.parent.vtable.resize(
+            self.parent.ptr,
+            memory,
+            alignment,
+            new_len,
+            ret_addr,
+        );
+    }
+
+    fn remap(
+        context: *anyopaque,
+        memory: []u8,
+        alignment: std.mem.Alignment,
+        new_len: usize,
+        ret_addr: usize,
+    ) ?[*]u8 {
+        const self: *ReentrantScreenCleanupAllocator = @ptrCast(@alignCast(context));
+        return self.parent.vtable.remap(
+            self.parent.ptr,
+            memory,
+            alignment,
+            new_len,
+            ret_addr,
+        );
+    }
+
+    fn free(
+        context: *anyopaque,
+        memory: []u8,
+        alignment: std.mem.Alignment,
+        ret_addr: usize,
+    ) void {
+        const self: *ReentrantScreenCleanupAllocator = @ptrCast(@alignCast(context));
+        self.free_calls += 1;
+        if (self.owner) |owner| {
+            self.observed_tombstone =
+                self.observed_tombstone and owner.lifecycle == .cleaned_tombstone;
+            owner.deinitAfterLedgerFinished(self.permit);
+        }
+        self.parent.vtable.free(self.parent.ptr, memory, alignment, ret_addr);
+    }
+};
 
 test "prepared external adoption binds final address and exact screen seed" {
     var fixture = try makePreparedClient(std.testing.allocator);
@@ -733,6 +1493,326 @@ test "prepared external adoption transfers payload cleanup authority to the ledg
     const report = ledger.drainAll();
     try std.testing.expectEqual(@as(usize, 1), report.drained_active_count);
     try ledger.finish();
+}
+
+test "c3c-2b1 committed screen destination is final-address bound and moves without callbacks" {
+    var counting = ReentrantScreenCleanupAllocator{ .parent = std.testing.allocator };
+    const allocator = counting.allocator();
+    var fixture = try makePreparedClient(allocator);
+    defer _ = c.close(fixture.peer_fd);
+    defer fixture.client.deinit();
+    const payload = try allocator.dupe(u8, "screen");
+    try fixture.client.pending_batches.append(allocator, .{
+        .is_snapshot = false,
+        .stream_id = 7,
+        .bytes = payload,
+        .allocator = allocator,
+    });
+    fixture.client.pending_batch_bytes = payload.len;
+    var ledger: ledger_mod.ExternalInboxLedger = .{};
+    var prepared: PreparedScreenBacklog = .{};
+    var committed: CommittedScreenBacklog = .{};
+    var take: PreparedCommittedScreenTake = .{};
+    var stable_parent: u8 = 0;
+    try PreparedScreenBacklog.initInPlace(
+        &prepared,
+        allocator,
+        &fixture.client,
+        &ledger,
+        7,
+    );
+    committed.storage_addr = @intFromPtr(&stable_parent);
+    try std.testing.expectError(
+        error.InvalidAddress,
+        prepared.prepareCommittedTake(
+            &take,
+            &committed,
+            &fixture.client,
+            &ledger,
+            &stable_parent,
+        ),
+    );
+    try std.testing.expectEqual(
+        @intFromPtr(&stable_parent),
+        committed.storage_addr,
+    );
+    committed = .{};
+    const transfer = prepared.transfer.?;
+    const aliased_out: *PreparedCommittedScreenTake =
+        @ptrCast(@alignCast(transfer.tokens.ptr));
+    try std.testing.expectError(
+        error.InvalidAddress,
+        prepared.prepareCommittedTake(
+            aliased_out,
+            &committed,
+            &fixture.client,
+            &ledger,
+            &stable_parent,
+        ),
+    );
+    var aborted_take: PreparedCommittedScreenTake = .{};
+    try prepared.prepareCommittedTake(
+        &aborted_take,
+        &committed,
+        &fixture.client,
+        &ledger,
+        &stable_parent,
+    );
+    aborted_take.abort();
+    try std.testing.expect(!aborted_take.validate(
+        &prepared,
+        &committed,
+        &fixture.client,
+        &ledger,
+        &stable_parent,
+    ));
+    try std.testing.expect(committed.isEmpty());
+    try prepared.prepareCommittedTake(
+        &take,
+        &committed,
+        &fixture.client,
+        &ledger,
+        &stable_parent,
+    );
+    const aliased_destination: *CommittedScreenBacklog =
+        @ptrCast(@alignCast(payload.ptr));
+    var alias_take: PreparedCommittedScreenTake = .{};
+    try std.testing.expectError(
+        error.InvalidAddress,
+        prepared.prepareCommittedTake(
+            &alias_take,
+            aliased_destination,
+            &fixture.client,
+            &ledger,
+            &stable_parent,
+        ),
+    );
+    var moved_destination = committed;
+    try std.testing.expect(!take.validate(
+        &prepared,
+        &moved_destination,
+        &fixture.client,
+        &ledger,
+        &stable_parent,
+    ));
+    try std.testing.expect(take.validate(
+        &prepared,
+        &committed,
+        &fixture.client,
+        &ledger,
+        &stable_parent,
+    ));
+    inline for (.{
+        @intFromPtr(&prepared),
+        @intFromPtr(&fixture.client),
+        @intFromPtr(&ledger),
+    }) |alias_addr| {
+        var forged_take = take;
+        forged_take.saved_self_addr = @intFromPtr(&forged_take);
+        forged_take.destination_addr = alias_addr;
+        const structural_alias: *const CommittedScreenBacklog =
+            @ptrFromInt(alias_addr);
+        try std.testing.expect(!forged_take.validate(
+            &prepared,
+            structural_alias,
+            &fixture.client,
+            &ledger,
+            &stable_parent,
+        ));
+    }
+    take.target_stream += 1;
+    try std.testing.expect(!take.validate(
+        &prepared,
+        &committed,
+        &fixture.client,
+        &ledger,
+        &stable_parent,
+    ));
+    take.target_stream -= 1;
+
+    try fixture.client.sealExternalAdoption(&prepared.client_disarm);
+    const inventory_addr = @intFromPtr(&prepared.inventory.?);
+    const disarm_addr = @intFromPtr(&prepared.client_disarm);
+    const request_ids_before = prepared.request_ids;
+    const resident_before = prepared.adoption_metadata_resident_bytes;
+    const peak_before = prepared.adoption_metadata_prepare_peak_bytes;
+    const target_before = prepared.targetStream();
+    try prepared.commitScreenSeeds(&fixture.client, &ledger);
+    const ledger_token = prepared.transfer.?.tokens[0];
+    const deallocations_before_take = counting.free_calls;
+    prepared.commitIntoNoFail(&take, &committed);
+    try std.testing.expectEqual(deallocations_before_take, counting.free_calls);
+    try std.testing.expectEqual(@as(usize, 1), committed.retained_count);
+    try std.testing.expectEqual(@as(u64, 7), committed.target_stream);
+    try std.testing.expectEqual(Lifecycle.committed, prepared.lifecycle);
+    try std.testing.expect(prepared.transfer == null);
+    try std.testing.expect(prepared.cleanup_transfer == null);
+    try std.testing.expectEqual(inventory_addr, @intFromPtr(&prepared.inventory.?));
+    try std.testing.expectEqual(disarm_addr, @intFromPtr(&prepared.client_disarm));
+    try std.testing.expect(std.meta.eql(request_ids_before, prepared.request_ids));
+    try std.testing.expectEqual(
+        resident_before,
+        prepared.adoption_metadata_resident_bytes,
+    );
+    try std.testing.expectEqual(
+        peak_before,
+        prepared.adoption_metadata_prepare_peak_bytes,
+    );
+    try std.testing.expectEqual(target_before, prepared.targetStream());
+    try std.testing.expect(fixture.client.validateSealedExternalAdoptionPlan(
+        &prepared.client_disarm,
+    ));
+    var client_take: client_mod.ExternalAdoptionTake = .{};
+    defer client_take.deinit();
+    try fixture.client.prepareExternalAdoptionTake(
+        &prepared.client_disarm,
+        &prepared.inventory,
+        &prepared.cleanup_inventory,
+        &client_take,
+    );
+    try std.testing.expect(client_take.validate(
+        &fixture.client,
+        &prepared.client_disarm,
+        &prepared.inventory,
+        &prepared.cleanup_inventory,
+    ));
+    try std.testing.expectEqualStrings(
+        "screen",
+        (try ledger.borrow(ledger_token, .completed)).bytes,
+    );
+    try std.testing.expect(committed.isCommitted(&stable_parent));
+    var wrong_parent: u8 = 0;
+    try std.testing.expect(!committed.isCommitted(&wrong_parent));
+    try std.testing.expect(!take.validate(
+        &prepared,
+        &committed,
+        &fixture.client,
+        &ledger,
+        &stable_parent,
+    ));
+    var moved_committed = committed;
+    try std.testing.expect(!moved_committed.isCommitted(&stable_parent));
+
+    _ = ledger.drainAll();
+    try ledger.finish();
+    const permit = LedgerFinishedPermit{ .ledger_addr = @intFromPtr(&ledger) };
+    counting.owner = &committed;
+    counting.permit = permit;
+    const frees_before_owner_cleanup = counting.free_calls;
+    committed.deinitAfterLedgerFinished(.{ .ledger_addr = @intFromPtr(&ledger) + 1 });
+    try std.testing.expect(committed.isCommitted(&stable_parent));
+    try std.testing.expectEqual(frees_before_owner_cleanup, counting.free_calls);
+    // Poison the preferred mirror. Cleanup must select the independently sealed primary.
+    committed.cleanup.transfer.tokens = &.{};
+    committed.deinitAfterLedgerFinished(permit);
+    committed.deinitAfterLedgerFinished(permit);
+    try std.testing.expect(counting.free_calls > deallocations_before_take);
+    try std.testing.expect(counting.observed_tombstone);
+    try std.testing.expect(!committed.isCommitted(&stable_parent));
+    prepared.deinit();
+}
+
+test "c3c-2b1 screen cleanup rejects forged mirror and injected digest collision" {
+    const Scenario = enum {
+        forged_cleanup,
+        forged_cleanup_primary_poison,
+        forged_primary_cleanup_poison,
+        digest_collision,
+    };
+    inline for ([_]Scenario{
+        .forged_cleanup,
+        .forged_cleanup_primary_poison,
+        .forged_primary_cleanup_poison,
+        .digest_collision,
+    }) |scenario| {
+        var counting = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+        const allocator = counting.allocator();
+        const copies = try allocator.alloc(client_mod.ExternalScreenCopy, 1);
+        const wrappers = try allocator.alloc(ledger_mod.OwnedPayload, 1);
+        const tokens = try allocator.alloc(ledger_mod.Token, 1);
+        copies[0] = .{
+            .allocator = allocator,
+            .semantic = .{ .completed = .{ .stream_id = 7, .is_snapshot = false } },
+            .bytes = &.{},
+            .view = &.{},
+        };
+        wrappers[0] = ledger_mod.OwnedPayload.empty(allocator);
+        tokens[0] = .{ .slot = 0, .generation = 1 };
+        const transfer = PreparedTransfer{
+            .copies = copies,
+            .wrappers = wrappers,
+            .tokens = tokens,
+            .copies_addr = @intFromPtr(copies.ptr),
+            .copies_len = copies.len,
+            .wrappers_addr = @intFromPtr(wrappers.ptr),
+            .wrappers_len = wrappers.len,
+            .tokens_addr = @intFromPtr(tokens.ptr),
+            .tokens_len = tokens.len,
+            .cleanup_copies = copies,
+            .cleanup_wrappers = wrappers,
+            .cleanup_tokens = tokens,
+        };
+        var stable_parent: u8 = 0;
+        var owner = CommittedScreenBacklog{
+            .ledger_addr = 1,
+            .storage_addr = @intFromPtr(&stable_parent),
+            .primary = .{ .allocator = allocator, .transfer = transfer },
+            .cleanup = .{ .allocator = allocator, .transfer = transfer },
+            .lifecycle = .committed,
+        };
+        owner.saved_self_addr = @intFromPtr(&owner);
+        owner.primary_seal = sealScreenBackingAuthority(
+            &owner.primary,
+            owner.storage_addr,
+        );
+        owner.cleanup_seal = sealScreenBackingAuthority(
+            &owner.cleanup,
+            owner.storage_addr,
+        );
+        owner.canonical = screenCanonicalAuthority(&owner, &owner.primary);
+        switch (scenario) {
+            .forged_cleanup, .forged_cleanup_primary_poison => {
+                owner.cleanup.transfer.tokens = &.{};
+                owner.cleanup.transfer.cleanup_tokens = &.{};
+                owner.cleanup_seal = sealScreenBackingAuthority(
+                    &owner.cleanup,
+                    owner.storage_addr,
+                );
+                if (scenario == .forged_cleanup_primary_poison)
+                    owner.primary_seal.?.tokens_len += 1;
+            },
+            .forged_primary_cleanup_poison => {
+                owner.primary.transfer.tokens = &.{};
+                owner.primary.transfer.cleanup_tokens = &.{};
+                owner.primary_seal = sealScreenBackingAuthority(
+                    &owner.primary,
+                    owner.storage_addr,
+                );
+                owner.cleanup_seal.?.tokens_len += 1;
+            },
+            .digest_collision => {
+                // Model an injected digest collision by forcing digest equality after changing
+                // the canonical scalar. Candidate-vs-canonical scalar equality must still reject
+                // both frees even when the digest gate is assumed to have accepted the forgery.
+                owner.canonical.tokens_len += 1;
+                owner.canonical.digest =
+                    screenCanonicalAuthorityDigest(owner.canonical);
+            },
+        }
+        const frees_before = counting.deallocations;
+        owner.deinitAfterLedgerFinished(.{ .ledger_addr = 1 });
+        const expected_frees: usize = if (scenario == .forged_cleanup) 3 else 0;
+        try std.testing.expectEqual(
+            frees_before + expected_frees,
+            counting.deallocations,
+        );
+        try std.testing.expect(!owner.requiresTypedCleanup());
+        if (expected_frees == 0) {
+            allocator.free(tokens);
+            allocator.free(wrappers);
+            allocator.free(copies);
+        }
+    }
 }
 
 test "prepared external adoption uses a typed transfer-null recovery above item cap" {

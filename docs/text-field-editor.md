@@ -37,7 +37,7 @@
 ### 2.3 적대 검증이 남긴 두 개의 벽 (new/extend와 무관하게 동일)
 
 1. **IME × 중간 caret**: 현재 Swift `NSTextInputClient`가 `selectedRange()`=항상 빈 `NSRange`, `insertText`/`setMarkedText`가 `replacementRange`를 **무시**, `markedRange()`=**location 항상 0**(length만 조합 길이)([MaruAppHost.swift])이라, 중간 caret에서 조합하면 preedit가 끝에 그려지고 끝에 확정된다. 선택 대체(선택 후 조합)는 미지원. → §7에서 v1/후속 분리.
-2. **그려진 caret이 L4에서 나옴 + 말줄임 예약 규약 불일치**: 편집 밴드는 coretext `buildPaneAddressBarDrawList`가 그리고 caret 열은 `appendEllipsizedTitle`(제목 말줄임, L4, `.tail` 앵커)에서 나온다. **폭 함수는 이미 일치**한다 — `titleCellWidth = @max(1, width.cellWidth)`([coretext_frame_builder.zig])이고 주소창은 `widen_icons=false`라 `displayCols`와 같은 값. 진짜 문제는 (a) 기존 경로가 **끝-caret 전용**이라 mid-string caret을 못 놓고, (b) hit-test가 순진하게 `overlay_input.tailWindow`로 역산하면 **"…" 1칸 예약 규약이 서로 달라**(coretext는 함수 **내부** 예약, tailWindow는 **호출자** 예산 — coretext 주석이 *"단일 함수화는 계층 침범"* 이라 공유를 금지) 말줄임 경계에서 드리프트한다. → §3에서 **필드 전용 새 순수 레이아웃 함수**로 해결.
+2. **그려진 caret이 L4에서 나옴 + 말줄임 예약 규약 불일치**: 편집 밴드는 coretext `buildPaneAddressBarDrawList`가 그리고 caret 열은 `appendEllipsizedTitle`(제목 말줄임, L4, `.tail` 앵커)에서 나온다. **폭 함수는 이미 일치**한다 — `text_layout.clusterCols = @max(1, width.cellWidth)`([src/chrome/text_layout.zig])이고 주소창은 `widen_icons=false`라 `displayCols`와 같은 값. 진짜 문제는 (a) 기존 경로가 **끝-caret 전용**이라 mid-string caret을 못 놓고, (b) hit-test가 순진하게 `overlay_input.tailWindow`로 역산하면 **"…" 1칸 예약 규약이 서로 달라**(coretext는 함수 **내부** 예약, tailWindow는 **호출자** 예산 — coretext 주석이 *"단일 함수화는 계층 침범"* 이라 공유를 금지) 말줄임 경계에서 드리프트한다. → §3에서 **필드 전용 새 순수 레이아웃 함수**로 해결.
 
 ### 2.4 상호작용·경계 베이스
 

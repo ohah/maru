@@ -6,8 +6,8 @@ const renderer = maru.renderer;
 const terminal = maru.terminal;
 const tabbar = maru.chrome.components.tabbar; // C4b-4: 탭 셀 경계 단일 소스(제목·✕가 hit-test·밴드와 같은 분할)
 const sidebar_component = maru.chrome.components.sidebar; // 활동 시각 표기 폭(relative_age_cols) 단일 출처
+const text_layout = maru.chrome.text_layout; // chrome 텍스트 셀 배치(분절·폭·말줄임) 단일 출처 — docs/layering-and-portability.md §7.9 CT-OWN
 const text_field = maru.chrome.components.text_field; // 주소창 편집 밴드 단일 레이아웃 소스(fieldLayout — docs/text-field-editor.md §3)
-const grapheme = maru.grapheme; // NFD(분해형) 한글 → 완성형 조합(chrome 셀 텍스트는 클러스터 shaping이 없다)
 const file_tree_icon = maru.chrome.file_tree_icon;
 const dock_layout = maru.session.dock_layout;
 const dock_panel = maru.session.dock_panel;
@@ -207,65 +207,24 @@ pub const sidebar_close_glyph: u21 = 0x2715;
 /// 이모지라 외형(빨간 핀)이 cell fg와 무관하다(스타일 색은 영향 없음). 옛 설계는 이름 prefix("📌 ")로 선두에 박았다.
 pub const sidebar_pin_glyph: u21 = 0x1F4CC;
 
-/// 말줄임 표시 glyph(U+2026 HORIZONTAL ELLIPSIS, 1칸). 제목이 칸을 넘으면 마지막 칸을 이걸로 바꾼다.
-pub const title_ellipsis_glyph: u21 = 0x2026;
-
-/// title의 디스플레이 폭(칸 합) — wide glyph는 2, 나머지 1. 깨진 UTF-8 바이트는 U+FFFD(1칸). 말줄임 필요 판정용.
-/// pub: pane 라벨 세그먼트 폭(paneLabelCols)도 이 단일 출처로 폭을 잰다(렌더 ellipsize와 같은 셈법이라 라벨
-/// 칸 예약과 실제 글리프가 어긋나지 않는다).
-/// 카드 보조줄(branch/folder)에 maru가 의도적으로 박은 아이콘은 **렌더 폭 2칸**으로 친다 — 단 `widen_icons`=true일
-/// 때만. advance(cellWidth)는 1이지만 1칸(~8px)에 다운스케일하면 octocat·폴더 실루엣이 뭉개져 안 보였다(사용자 피드백).
-/// 에이전트 gutter 아이콘(별도 셀 width 2)과 같은 ~16px로 통일. **opt-in인 이유**: 이 폭 함수는 pane 탭 제목·pane
-/// 라벨·OSC 0/2 터미널 제목·rename 편집기까지 공유하는데, 등록 10개(0xF0001~A)가 Nerd Fonts v3 MDI(Plane-15 PUA로
-/// 이전)와 겹쳐 — 그 제목/이름에 우연히 그 글리프가 와도 폭을 2칸으로 키우면 탭 텍스트가 어긋나고 rename caret 예약
-/// (renameDisplayWidth는 1칸 셈)과 틀어진다. 그래서 maru가 아이콘을 박는 카드 보조줄만 widen=true, 나머지(터미널/
-/// 사용자 텍스트)는 false(1칸). 아이콘이 아니거나 widen=false면 cellWidth 그대로(EAW 2칸·일반 1칸).
-/// **cluster 폭**이다(코드포인트 폭이 아니다) — `cp`는 cluster의 base다. 이어지는 자모(NFD 한글 V·T)·결합 문자는
-/// 폭 0으로 base에 흡수되므로(docs/grapheme-clustering.md §4.3 `grapheme.clusterWidth`) 여기 안 들어온다.
-/// `@max(1, …)`는 **base가 없는 비정상 cluster**(문자열이 결합 문자로 시작)만 위한 보정이다 — 폭 0 셀을 그대로
-/// 두면 여러 셀이 같은 col에 겹쳐 쌓인다. 정상 텍스트에서는 이 clamp가 걸리지 않는다.
-fn titleCellWidth(cp: u21, widen_icons: bool) u16 {
-    if (widen_icons and renderer.icon_glyph.isRegisteredIcon(cp)) return 2;
-    return @max(1, terminal.width.cellWidth(cp));
+/// 카드 보조줄(branch/folder)에 maru가 의도적으로 박은 아이콘을 **렌더 폭 2칸**으로 치는 규칙 —
+/// `text_layout`(L3)이 renderer를 import할 수 없어(경계 가드) predicate로 주입한다. advance(cellWidth)는 1이지만
+/// 1칸(~8px)에 다운스케일하면 octocat·폴더 실루엣이 뭉개져 안 보였다(사용자 피드백) — 에이전트 gutter 아이콘
+/// (별도 셀 width 2)과 같은 ~16px로 통일. `isRegisteredIcon`이 u32를 받아 얇게 감싼다.
+fn wideIconGlyph(cp: u21) bool {
+    return renderer.icon_glyph.isRegisteredIcon(cp);
 }
 
-/// title의 표시 칸 폭. `widen_icons`면 카드 보조줄에 박힌 등록 maru 아이콘을 2칸으로 친다(titleCellWidth 참고 —
-/// 카드만 true, 탭·OSC·라벨 제목은 false).
-///
-/// **cluster 단위로 센다** — `appendEllipsizedTitle`이 cluster 하나당 셀 하나를 내므로(§3.1a CG1), 여기서
-/// 코드포인트로 세면 NFD 이름에서 말줄임 예약이 실제 렌더보다 커져 제목이 일찍 잘린다. 방출과 폭 셈법은
-/// 같은 단위여야 한다.
-pub fn titleDisplayWidth(title: []const u8, widen_icons: bool) usize {
-    var total: usize = 0;
-    var i: usize = 0;
-    while (i < title.len) {
-        const base = decodeTitleCp(title, i);
-        total += titleCellWidth(base.cp, widen_icons);
-        i = @max(grapheme.clusterEnd(title, i), i + base.advance); // 경계가 안 늘면 최소 base만큼 전진(무한루프 방지)
-    }
-    return total;
+/// 폭 판정 주입값. `widen_icons`=false(터미널·사용자 텍스트)면 확대 없음 — 등록 10개(0xF0001~A)가 Nerd Fonts v3
+/// MDI(Plane-15 PUA)와 겹쳐, 제목/이름에 우연히 그 글리프가 와도 2칸으로 키우면 탭 텍스트와 rename caret 예약이
+/// 틀어지기 때문이다. 그래서 maru가 아이콘을 직접 박는 카드 보조줄만 true.
+fn wideIconPredicate(widen_icons: bool) ?text_layout.WideIconFn {
+    return if (widen_icons) &wideIconGlyph else null;
 }
 
-/// 제목 잘림 앵커. `head`=선두 고정 — 넘치면 **뒤**를 "…"로 자른다(이름 앞부분을 보여주는 읽기 전용 제목의 기본).
-/// `tail`=말미 고정 — 넘치면 **앞**을 "…"로 자르고 문자열 **끝**을 보존한다. 인라인 rename 편집기처럼 caret가 항상
-/// 문자열 끝에 있는 단일 줄 입력에 쓴다: 세그먼트보다 긴 이름을 칠 때 head면 caret(끝)과 방금 친 글자가 오른쪽으로
-/// 잘려 안 보였다(사용자 제보) — tail은 입력창이 caret를 따라 가로 스크롤하는 것과 같은 효과로 끝을 늘 보여준다.
-/// 베이스: 단일 줄 텍스트 필드가 caret를 시야에 유지(scroll-to-caret)하는 건 사실상 모든 GUI 입력창의 공통 관례다.
-pub const TitleAnchor = enum { head, tail };
-
-/// UTF-8 한 글자 디코드(깨진 바이트는 U+FFFD·advance 1). appendEllipsizedTitle의 head/tail 경로가 공유해 폭 셈법이 일치한다.
-fn decodeTitleCp(bytes: []const u8, i: usize) struct { cp: u21, advance: usize } {
-    const seq_len = std.unicode.utf8ByteSequenceLength(bytes[i]) catch return .{ .cp = 0xFFFD, .advance = 1 };
-    const len: usize = seq_len;
-    if (i + len <= bytes.len) {
-        if (std.unicode.utf8Decode(bytes[i .. i + len])) |d| {
-            return .{ .cp = d, .advance = len };
-        } else |_| {}
-    }
-    return .{ .cp = 0xFFFD, .advance = 1 };
-}
-
-/// title을 [start_col, end_col) 칸에 row행 DrawCell로 깐다. `anchor`가 정하는 방향으로 넘침을 처리한다:
+/// title을 [start_col, end_col) 칸에 row행 DrawCell로 깐다. **배치(분절·폭·말줄임·앵커)는 chrome
+/// `text_layout.plan`이 하고 여기는 그 결과를 CoreText용 셀·풀로 옮기기만 한다**(docs/layering-and-portability.md
+/// §7.9 CT-OWN — 텍스트 의미는 OS-중립 계층 소유, platform은 방출 어댑터).
 /// - `.head`(기본): 좌→우로 깔고 다 안 들어가면 **하드 컷 대신 마지막 칸을 "…"(U+2026)로** 바꿔 잘렸음을 표시(선두 고정).
 /// - `.tail`: 넘치면 **선두**에 "…"를 두고 문자열 **끝**이 보이도록 앞 글자를 버린다(말미 고정 — rename 편집기의 caret 유지).
 /// end_col<=start_col이면 무동작. 깨진 UTF-8 U+FFFD, wide 2칸. 사이드바 제목·pane 탭 바 제목·pane 라벨·rename 편집기가
@@ -280,108 +239,55 @@ fn appendEllipsizedTitle(
     start_col: u16,
     end_col: u16,
     style: terminal.Style,
-    widen_icons: bool, // 카드 보조줄(branch/folder)만 true — 등록 maru 아이콘을 2칸 렌더(titleCellWidth)
-    anchor: TitleAnchor,
+    widen_icons: bool, // 카드 보조줄(branch/folder)만 true — 등록 maru 아이콘을 2칸 렌더(wideIconPredicate)
+    anchor: text_layout.Anchor,
 ) !u16 {
-    if (end_col <= start_col) return start_col;
-    const avail: usize = end_col - start_col;
-    const total = titleDisplayWidth(title, widen_icons);
-
-    // tail 앵커 + 넘침: 선두에 "…"(자리가 있으면 1칸)를 두고 문자열 **끝**이 보이도록 앞 글자를 버린다. rename 편집기가
-    // 세그먼트보다 긴 이름을 칠 때 caret(문자열 끝)를 따라가, 방금 친 글자가 오른쪽으로 사라지지 않게 한다(가로 스크롤 효과).
-    if (anchor == .tail and total > avail) {
-        const lead: u16 = if (avail >= 2) 1 else 0; // "…" 자리 — 폭이 1칸뿐이면 생략하고 tail만 그린다(최소한 caret은 보이게)
-        const tail_cols: usize = avail - lead;
-        // 앞에서부터 **cluster를** 버려 남은(=뒤쪽) 표시폭이 tail_cols 이하가 되게 한다(EAW 폭 반영, titleDisplayWidth와
-        // 같은 셈법). codepoint 단위로 버리면 cluster 중간에서 잘려 결합 문자만 남은 셀이 생긴다.
-        // 참고: chrome-neutral `overlay_input.tailWindow`가 같은 "앞을 버려 tail을 폭 안에" 알고리즘의 text-op 판이다. 둘은
-        // 계층(platform coretext ↔ chrome neutral)과 폭 함수(titleCellWidth[widen_icons] ↔ width.cellWidth)가 달라 코드를
-        // 공유하지 않는다 — EAW/경계 규칙을 고칠 땐 두 곳을 함께 본다(의도적 분리, 단일 함수화는 계층 침범).
-        var drop_i: usize = 0;
-        var rem: usize = total;
-        while (drop_i < title.len and rem > tail_cols) {
-            const d = decodeTitleCp(title, drop_i);
-            rem -= titleCellWidth(d.cp, widen_icons);
-            drop_i = @max(grapheme.clusterEnd(title, drop_i), drop_i + d.advance);
-        }
-        var col: u16 = start_col;
-        if (lead == 1) {
-            try cells.append(allocator, .{ .row = row, .col = col, .codepoint = title_ellipsis_glyph, .width = 1, .style = style });
-            col += 1;
-        }
-        var i: usize = drop_i;
-        while (i < title.len) {
-            const c = try appendCluster(allocator, cells, pool, title, i, row, col, end_col, style, widen_icons);
-            if (c.col == col) break; // 안전장치 — rem<=tail_cols라 보통 tail 전체가 들어간다
-            col = c.col;
-            i = c.next;
-        }
-        return col;
-    }
-
-    // head 앵커(기본) 또는 넘치지 않음: 선두 고정 — 넘치면 마지막 칸을 "…"로.
-    const fits = total <= avail;
-    const text_end: u16 = if (fits) end_col else end_col - 1; // 말줄임이면 마지막 1칸을 "…"에 남긴다
-    var col: u16 = start_col;
-    var i: usize = 0;
-    while (i < title.len) {
-        const c = try appendCluster(allocator, cells, pool, title, i, row, col, text_end, style, widen_icons);
-        if (c.col == col) break; // 텍스트 한도를 넘으면(말줄임 자리 직전) 멈춘다
-        col = c.col;
-        i = c.next;
-    }
-    if (!fits and col < end_col) {
-        try cells.append(allocator, .{ .row = row, .col = col, .codepoint = title_ellipsis_glyph, .width = 1, .style = style });
-        col += 1;
-    }
-    return col;
+    var layout = text_layout.plan(title, start_col, end_col, anchor, wideIconPredicate(widen_icons));
+    while (layout.next()) |item| switch (item) {
+        .ellipsis => |col| try cells.append(allocator, .{ .row = row, .col = col, .codepoint = text_layout.ellipsis_glyph, .width = 1, .style = style }),
+        .cluster => |c| try appendCluster(allocator, cells, pool, title, c, row, style),
+    };
+    return layout.endCol();
 }
 
-/// `title[i..]`의 grapheme cluster **하나**를 셀 하나로 방출한다(docs/grapheme-clustering.md §3.1a CG1).
+/// `text_layout`이 잡아 준 grapheme cluster **하나**를 셀 하나로 방출한다(docs/grapheme-clustering.md §3.1a CG1).
 /// base 코드포인트는 셀에, 나머지(NFD 한글 V·T, 결합 악센트, VS16 같은 GB9 Extend)는 `pool`에 실어
 /// `grapheme_offset/count`로 가리킨다 — 터미널 `buildDrawList`가 `snapshot.graphemes`로 하는 것과 같은 모양이고,
 /// 셰이퍼가 base 뒤에 풀을 붙여 CoreText로 한 글리프를 만든다. 정규화는 하지 않는다(원본 코드포인트 그대로).
-/// 폭이 `limit_col`을 넘으면 **아무것도 안 내고** 들어온 col을 그대로 돌려준다(호출자가 그걸로 중단을 판단한다).
+/// 분절·폭·한도 판정은 여기 없다 — cluster의 바이트 범위와 열·폭은 계획이 이미 정했다.
 fn appendCluster(
     allocator: std.mem.Allocator,
     cells: *std.ArrayList(renderer.DrawCell),
     pool: *std.ArrayList(u32),
     title: []const u8,
-    i: usize,
+    cluster: text_layout.Cluster,
     row: u16,
-    col: u16,
-    limit_col: u16,
     style: terminal.Style,
-    widen_icons: bool,
-) !struct { col: u16, next: usize } {
-    const base = decodeTitleCp(title, i);
-    const w: u16 = titleCellWidth(base.cp, widen_icons); // cluster 폭 = base 폭(V/T·mark는 0폭 흡수)
-    if (col + w > limit_col) return .{ .col = col, .next = i };
-    // cluster 경계가 base보다 앞서지 않게 clamp — 손상 UTF-8에서도 진행이 보장된다(무한루프 방지).
-    const end = @max(grapheme.clusterEnd(title, i), i + base.advance);
+) !void {
+    const base = text_layout.decodeCodepoint(title, cluster.start);
+    const end = cluster.end;
     const offset: u32 = @intCast(pool.items.len);
-    var j = i + base.advance;
+    var j = cluster.start + base.advance;
     // extra 개수는 **상한이 없다** — GB9가 결합 문자 런을 통째로 한 cluster로 삼키므로(Zalgo 텍스트·상한 없는
     // 주소창 URL) 65535를 넘을 수 있다. `grapheme_count`가 u16이라 그대로 @intCast하면 프레임 빌드 중 트랩으로
     // 앱이 죽는다 — 여기서 잘라 **열화 렌더**로 끝낸다(code-review max). 잘린 extra는 pool에도 안 남긴다(카운트와
     // 풀 내용이 어긋나면 셰이퍼가 남의 cluster를 이어 붙인다).
     const max_extra = @as(usize, std.math.maxInt(u16));
     while (j < end and j < title.len) {
-        const extra = decodeTitleCp(title, j);
+        const extra = text_layout.decodeCodepoint(title, j);
         if (pool.items.len - offset >= max_extra) break;
         try pool.append(allocator, @as(u32, extra.cp));
         j += extra.advance;
     }
     try cells.append(allocator, .{
         .row = row,
-        .col = col,
+        .col = cluster.col,
         .codepoint = base.cp,
         .grapheme_offset = offset,
         .grapheme_count = @intCast(pool.items.len - offset),
-        .width = @intCast(@min(w, 2)),
+        .width = @intCast(@min(cluster.cols, 2)),
         .style = style,
     });
-    return .{ .col = col + w, .next = end };
 }
 
 /// 주소창 **편집 밴드**를 `text_field.fieldLayout`(L3 단일 레이아웃 소스, docs/text-field-editor.md §3)로 셀 방출한다.
@@ -390,7 +296,7 @@ fn appendCluster(
 /// theme.cursor, 글자=caret_text=theme.background)으로 다시 그려 **글자가 또렷이 보이면서**(불투명 블록은 글자를 가려 제보됨)
 /// 터미널 커서와 같은 룩이 된다. 끝(칸에 글자 없음)이면 반전 공백=솔리드 블록. blink는 후속(§6 — 정적 셀이라 여기선 항상
 /// 표시). caret 열이 hit-test(caretAtColumn)와 같은 fieldLayout 소스라 그려진 caret과 클릭 caret이 안 어긋난다(§2.3 벽②).
-/// fieldLayout의 폭 규약(displayCols=Σ max(1,cellWidth))이 titleCellWidth(widen=false)와 같아, 읽기전용
+/// fieldLayout의 폭 규약(displayCols=Σ max(1,cellWidth))이 text_layout.clusterCols(아이콘 확대 없음)과 같아, 읽기전용
 /// (appendEllipsizedTitle .head)과 편집 사이 열 점프가 없다(§3.2 전환 일치). codepoint당 셀(폭 max(1,cellWidth)).
 fn emitEditBand(
     allocator: std.mem.Allocator,
@@ -409,14 +315,14 @@ fn emitEditBand(
     var caret_drawn = false; // caret 칸에 글자가 있어 반전으로 그렸는가(끝이면 아래서 반전 공백)
 
     if (lay.lead_ellipsis) // 선두 "…"(앞이 스크롤로 잘렸음)
-        try cells.append(allocator, .{ .row = 0, .col = nav_end, .codepoint = title_ellipsis_glyph, .width = 1, .style = style });
+        try cells.append(allocator, .{ .row = 0, .col = nav_end, .codepoint = text_layout.ellipsis_glyph, .width = 1, .style = style });
 
     for (lay.runs) |run| {
         var col: i32 = run.start_col; // 밴드 열(스크롤되면 nav_end 왼쪽=음수 — 클립됨)
         var i: usize = 0;
         while (i < run.text.len) {
-            const d = decodeTitleCp(run.text, i);
-            const w: i32 = titleCellWidth(d.cp, false); // fieldLayout displayCols와 같은 규약 = Σ max(1,cellWidth)
+            const d = text_layout.decodeCodepoint(run.text, i);
+            const w: i32 = text_layout.clusterCols(d.cp, null); // fieldLayout displayCols와 같은 규약 = Σ max(1,cellWidth)
             if (col >= content_lo and col + w <= content_hi) {
                 const is_caret = (col == caret_bc); // 이 칸이 caret이면 반전색으로(글자 그대로 보이되 커서색 반전)
                 if (is_caret) caret_drawn = true;
@@ -429,7 +335,7 @@ fn emitEditBand(
     }
 
     if (lay.tail_ellipsis) // 말미 "…"(뒤에 콘텐츠 더 있음)
-        try cells.append(allocator, .{ .row = 0, .col = cols - 1, .codepoint = title_ellipsis_glyph, .width = 1, .style = style });
+        try cells.append(allocator, .{ .row = 0, .col = cols - 1, .codepoint = text_layout.ellipsis_glyph, .width = 1, .style = style });
 
     // caret이 끝(칸에 글자 없음)이면 반전 공백 = 솔리드 블록(터미널 끝 커서와 동일). 밴드 안일 때만.
     if (!caret_drawn and caret_bc >= nav_end and caret_bc < cols)
@@ -591,7 +497,7 @@ pub fn buildSidebarDrawList(
             const end_col: u16 = if (j == 0 and draw_pin) @min(pin_col, age_limit) else age_limit;
             // rename 중인 슬롯의 **이름줄(j==0)만** tail 앵커 — 긴 이름을 칠 때 선두를 "…"로 자르고 끝(caret)을 보여준다(탭·pane과 같은 규칙).
             // 보조줄(브랜치·경로·상태)은 rename 중 숨겨지므로 j>0은 늘 head다(편집 중엔 이름줄만 남는다).
-            const line_anchor: TitleAnchor = if (j == 0 and editing_row != null and editing_row.? == i) .tail else .head;
+            const line_anchor: text_layout.Anchor = if (j == 0 and editing_row != null and editing_row.? == i) .tail else .head;
             _ = try appendEllipsizedTitle(allocator, &cells, &pool, lines[j], row, text_col, end_col, row_style, line_widen[j], line_anchor);
             max_row = @max(max_row, row);
         }
@@ -713,7 +619,7 @@ pub fn buildPaneLabelDrawList(
     label: []const u8,
     cols: u16,
     fg: terminal.Color,
-    anchor: TitleAnchor,
+    anchor: text_layout.Anchor,
 ) !renderer.DrawList {
     var cells: std.ArrayList(renderer.DrawCell) = .empty;
     errdefer cells.deinit(allocator);
@@ -1097,7 +1003,7 @@ pub fn buildPaneTabBarDrawList(
             const tab_style: terminal.Style = if (active_tab != null and active_tab.? == tab_index) .{ .foreground = active_fg, .bold = true } else style;
             // 좌측 1칸 패딩 뒤에 제목. title_end(✕ 앞)를 넘으면 하드 컷이 아니라 "…"로 말줄임(사이드바와 같은 규칙).
             // rename 중인 탭이면 tail 앵커 — 넘칠 때 선두를 "…"로 자르고 이름 끝(caret)을 세그먼트 안에 유지한다(긴 이름 입력 가시성).
-            const tab_anchor: TitleAnchor = if (editing_tab != null and editing_tab.? == tab_index) .tail else .head;
+            const tab_anchor: text_layout.Anchor = if (editing_tab != null and editing_tab.? == tab_index) .tail else .head;
             _ = try appendEllipsizedTitle(allocator, &cells, &pool, title, 0, @intCast(start + 1), @intCast(title_end), tab_style, false, tab_anchor); // pane 탭 제목(터미널 OSC) — widen 안 함
             if (is_close) { // 호버 탭 우측 안쪽에 ✕ glyph 1개(xInTabCloseZone과 같은 col=seg_end-2).
                 try cells.append(allocator, .{
@@ -1616,7 +1522,7 @@ test "buildSidebarDrawList agent icon: centered at col 0 independent of lines; t
 }
 
 // 카드 줄 안에 인라인으로 박힌 maru 아이콘(브랜치줄 octocat 0xF0009·폴더줄 0xF000A)은 **width 2(~16px)**로
-// 렌더돼 작은 셀에서도 실루엣이 또렷하다(titleCellWidth). width-1(~8px)이면 octocat이 동그란 링처럼 뭉개졌다
+// 렌더돼 작은 셀에서도 실루엣이 또렷하다(wideIconPredicate). width-1(~8px)이면 octocat이 동그란 링처럼 뭉개졌다
 // (사용자 피드백 "깃 아이콘이 너무 작다"). 아이콘이 2칸을 차지하므로 뒤따르는 텍스트가 그만큼 밀린다 — 회귀 방지.
 test "buildSidebarDrawList inline icons (octocat·folder PUA) render width 2 and offset following text" {
     const allocator = std.testing.allocator;
@@ -1657,18 +1563,18 @@ test "buildSidebarDrawList inline icons (octocat·folder PUA) render width 2 and
     try std.testing.expect(path_text_at3);
 }
 
-// titleDisplayWidth는 **등록된** maru 아이콘 PUA만 2칸으로 친다(렌더 폭과 일치해야 말줄임 예약 칸이 안 어긋난다).
+// 폭 predicate(wideIconPredicate)는 **등록된** maru 아이콘 PUA만 2칸으로 친다(렌더 폭과 일치해야 말줄임 예약 칸이 안 어긋난다).
 // 미등록 범위 codepoint(Nerd Fonts v3가 Plane-15 PUA로 옮긴 MDI 등)는 신뢰 불가 OSC 0/2 제목에 와도 1칸 유지.
-test "titleDisplayWidth counts only registered maru icon PUA as width 2" {
+test "wideIconPredicate widens only registered maru icon PUA to width 2" {
     // widen=true(카드 보조줄): 등록 아이콘 2칸.
-    try std.testing.expectEqual(@as(usize, 2), titleDisplayWidth("\u{F0009}", true)); // octocat(등록)
-    try std.testing.expectEqual(@as(usize, 2), titleDisplayWidth("\u{F000A}", true)); // folder(등록)
-    try std.testing.expectEqual(@as(usize, 1), titleDisplayWidth("\u{F0050}", true)); // 미등록 범위 — 1칸(registered-only)
-    try std.testing.expectEqual(@as(usize, 6), titleDisplayWidth("\u{F0009} abc", true)); // 2 + 공백 + abc(3)
-    try std.testing.expectEqual(@as(usize, 3), titleDisplayWidth("abc", true)); // 일반 텍스트 회귀
+    try std.testing.expectEqual(@as(usize, 2), text_layout.displayCols("\u{F0009}", wideIconPredicate(true))); // octocat(등록)
+    try std.testing.expectEqual(@as(usize, 2), text_layout.displayCols("\u{F000A}", wideIconPredicate(true))); // folder(등록)
+    try std.testing.expectEqual(@as(usize, 1), text_layout.displayCols("\u{F0050}", wideIconPredicate(true))); // 미등록 범위 — 1칸(registered-only)
+    try std.testing.expectEqual(@as(usize, 6), text_layout.displayCols("\u{F0009} abc", wideIconPredicate(true))); // 2 + 공백 + abc(3)
+    try std.testing.expectEqual(@as(usize, 3), text_layout.displayCols("abc", wideIconPredicate(true))); // 일반 텍스트 회귀
     // widen=false(탭·OSC·라벨 제목): 등록 아이콘도 1칸 — 터미널 제목이 Nerd Fonts MDI와 겹쳐도 안 어긋남.
-    try std.testing.expectEqual(@as(usize, 1), titleDisplayWidth("\u{F0009}", false)); // octocat이지만 1칸
-    try std.testing.expectEqual(@as(usize, 5), titleDisplayWidth("\u{F0009} abc", false)); // 1 + 공백 + abc(3)
+    try std.testing.expectEqual(@as(usize, 1), text_layout.displayCols("\u{F0009}", null)); // octocat이지만 1칸
+    try std.testing.expectEqual(@as(usize, 5), text_layout.displayCols("\u{F0009} abc", null)); // 1 + 공백 + abc(3)
 }
 
 // 두 생성물 동기 가드: C 셰이핑 게이트 icon_codepoints.h(maru_is_registered_icon_cp)와 Zig 등록 집합
@@ -1793,7 +1699,7 @@ test "buildPaneLabelDrawList: 이름을 [1,cols-1)에 깔고 좌패딩·우간�
     defer ell.deinit(allocator);
     var has_ellipsis = false;
     for (ell.cells) |c| {
-        if (c.codepoint == title_ellipsis_glyph) has_ellipsis = true;
+        if (c.codepoint == text_layout.ellipsis_glyph) has_ellipsis = true;
     }
     try std.testing.expect(has_ellipsis);
 }
@@ -1843,7 +1749,7 @@ test "buildPaneAddressBarDrawList: 밴드 좌측에 nav 버튼 3개 + URL을 [na
     defer long.deinit(allocator);
     var has_ellipsis = false;
     for (long.cells) |c| {
-        if (c.codepoint == title_ellipsis_glyph) has_ellipsis = true;
+        if (c.codepoint == text_layout.ellipsis_glyph) has_ellipsis = true;
     }
     try std.testing.expect(has_ellipsis);
 }
@@ -1920,7 +1826,7 @@ test "buildPaneAddressBarDrawList: 긴 편집 URL은 fieldLayout 가로 스크�
     defer dl.deinit(allocator);
     var lead_ellipsis: ?renderer.DrawCell = null;
     for (dl.cells) |c| {
-        if (c.codepoint == title_ellipsis_glyph) lead_ellipsis = c;
+        if (c.codepoint == text_layout.ellipsis_glyph) lead_ellipsis = c;
         try std.testing.expect(!(c.style.background == .rgb and c.codepoint == ' ')); // 이 테스트는 caret 색 .default라 rgb 반전 셀 없음(lead "…"만 확인)
     }
     try std.testing.expect(lead_ellipsis != null); // 선두 "…"(앞이 스크롤로 잘림)
@@ -1943,7 +1849,7 @@ test "buildPaneLabelDrawList tail 앵커: 넘치면 선두를 …로 자르고 �
             last_col = c.col;
             last_cp = c.codepoint;
         }
-        if (c.col == 1 and c.codepoint == title_ellipsis_glyph) lead_ellipsis = true; // 선두 "…"는 좌패딩(col0) 뒤 col1
+        if (c.col == 1 and c.codepoint == text_layout.ellipsis_glyph) lead_ellipsis = true; // 선두 "…"는 좌패딩(col0) 뒤 col1
     }
     try std.testing.expectEqual(@as(u21, '|'), last_cp); // 문자열 끝(caret)이 보존됨 — head였다면 잘렸을 것
     try std.testing.expect(lead_ellipsis); // 앞이 잘렸다는 선두 "…"
@@ -1975,7 +1881,7 @@ test "buildPaneLabelDrawList tail 앵커: 정확한 열 배치(선두 … + 우�
         at[c.col] = c.codepoint;
     }
     try std.testing.expectEqual(@as(?u21, null), at[0]); // 좌패딩
-    try std.testing.expectEqual(@as(?u21, title_ellipsis_glyph), at[1]); // 선두 "…"
+    try std.testing.expectEqual(@as(?u21, text_layout.ellipsis_glyph), at[1]); // 선두 "…"
     try std.testing.expectEqual(@as(?u21, 'g'), at[2]); // 앞 6글자("abcdef")를 버린 tail
     try std.testing.expectEqual(@as(?u21, 'h'), at[3]);
     try std.testing.expectEqual(@as(?u21, 'i'), at[4]);
@@ -1989,7 +1895,7 @@ test "buildPaneLabelDrawList tail 앵커: 정확한 열 배치(선두 … + 우�
     var fits_has_ellipsis = false;
     var fits_min_col: u16 = 999;
     for (fits.cells) |c| {
-        if (c.codepoint == title_ellipsis_glyph) fits_has_ellipsis = true;
+        if (c.codepoint == text_layout.ellipsis_glyph) fits_has_ellipsis = true;
         if (c.col < fits_min_col) fits_min_col = c.col;
     }
     try std.testing.expect(!fits_has_ellipsis); // 안 넘치면 말줄임 없음
@@ -2021,7 +1927,7 @@ test "buildPaneLabelDrawList tail 앵커: 한글(EAW 2칸)은 온전한 글자 �
             hangul_w2 = true;
         }
     }
-    try std.testing.expectEqual(@as(?u21, title_ellipsis_glyph), at[1]); // 선두 "…"
+    try std.testing.expectEqual(@as(?u21, text_layout.ellipsis_glyph), at[1]); // 선두 "…"
     try std.testing.expect(hangul_w2); // 온전한 한글(width 2)이 tail에 남았다
     try std.testing.expectEqual(@as(?u21, '|'), at[6]); // caret은 우측 끝(col6)
     // tail 시작(col2)은 한글 '라'(온전한 글자) — 앞 3자("가나다")를 폭 단위로 버려 반쪽이 안 생겼다.
@@ -2169,9 +2075,9 @@ test "long titles are ellipsized with U+2026 at the last cell; short titles are 
         var dl = try buildSidebarDrawList(allocator, &titles, &[_][]const u8{}, &[_][]const u8{}, &[_][]const u8{}, &[_]u21{}, &[_]bool{}, 5, .default, &.{}, &.{}, null, null, .default, null);
         defer dl.deinit(allocator);
         try std.testing.expectEqual(@as(usize, 4), dl.cells.len);
-        try std.testing.expectEqual(title_ellipsis_glyph, dl.cells[3].codepoint); // 마지막 = …(col 3, col 4는 우측 패딩)
+        try std.testing.expectEqual(text_layout.ellipsis_glyph, dl.cells[3].codepoint); // 마지막 = …(col 3, col 4는 우측 패딩)
         try std.testing.expectEqual(@as(u16, 3), dl.cells[3].col);
-        for (dl.cells[0..3]) |c| try std.testing.expect(c.codepoint != title_ellipsis_glyph); // 앞은 글자
+        for (dl.cells[0..3]) |c| try std.testing.expect(c.codepoint != text_layout.ellipsis_glyph); // 앞은 글자
     }
     // 텍스트 폭(cols-1=4)에 딱 맞으면 말줄임 없음.
     {
@@ -2179,7 +2085,7 @@ test "long titles are ellipsized with U+2026 at the last cell; short titles are 
         var dl = try buildSidebarDrawList(allocator, &titles, &[_][]const u8{}, &[_][]const u8{}, &[_][]const u8{}, &[_]u21{}, &[_]bool{}, 5, .default, &.{}, &.{}, null, null, .default, null);
         defer dl.deinit(allocator);
         try std.testing.expectEqual(@as(usize, 4), dl.cells.len);
-        for (dl.cells) |c| try std.testing.expect(c.codepoint != title_ellipsis_glyph);
+        for (dl.cells) |c| try std.testing.expect(c.codepoint != text_layout.ellipsis_glyph);
     }
     // pane 탭 바: 긴 제목도 세그먼트 한도에서 … . cols=11 → 탭 영역 8, 2탭 → tab_w=4, 탭 0 제목 칸 [1,4) = 3칸.
     {
@@ -2188,7 +2094,7 @@ test "long titles are ellipsized with U+2026 at the last cell; short titles are 
         defer dl.deinit(allocator);
         var saw_ellipsis = false;
         for (dl.cells) |c| {
-            if (c.codepoint == title_ellipsis_glyph) {
+            if (c.codepoint == text_layout.ellipsis_glyph) {
                 saw_ellipsis = true;
                 try std.testing.expectEqual(@as(u16, 3), c.col); // 탭 0 [1,4)의 마지막 칸
             }
@@ -2387,10 +2293,10 @@ test "chrome 제목은 NFD를 grapheme cluster 셀로 낸다(한글 자모·라�
     try std.testing.expectEqual(@as(usize, 0), stray_accent_cells);
 
     // ── 폭 셈법도 cluster 단위 — 말줄임 예약이 방출과 같은 단위여야 제목이 일찍 잘리지 않는다.
-    try std.testing.expectEqual(@as(usize, 7), titleDisplayWidth(nfd_hangul, false)); // 한(2)+글(2)+".md"(3)
-    try std.testing.expectEqual(@as(usize, 7), titleDisplayWidth(nfd_latin, false)); // "cafe"(4)+".md"(3)
+    try std.testing.expectEqual(@as(usize, 7), text_layout.displayCols(nfd_hangul, null)); // 한(2)+글(2)+".md"(3)
+    try std.testing.expectEqual(@as(usize, 7), text_layout.displayCols(nfd_latin, null)); // "cafe"(4)+".md"(3)
     // 완성형과 같은 폭이어야 한다(같은 글자니까) — NFD/NFC가 레이아웃에서 동치.
-    try std.testing.expectEqual(titleDisplayWidth("한글.md", false), titleDisplayWidth(nfd_hangul, false));
+    try std.testing.expectEqual(text_layout.displayCols("한글.md", null), text_layout.displayCols(nfd_hangul, null));
 }
 
 test "chrome DrawList 빌더는 할당 실패 지점 어디서든 새지 않는다(pool·cells 소유권 교차)" {
@@ -2701,7 +2607,7 @@ test "buildSidebarDrawList: pinned long name is ellipsized before the pin" {
     defer dl.deinit(allocator);
     var has_ellipsis = false;
     for (dl.cells) |c| {
-        if (c.codepoint == title_ellipsis_glyph) has_ellipsis = true;
+        if (c.codepoint == text_layout.ellipsis_glyph) has_ellipsis = true;
         // 핀(col 9, cols-3) 외 모든 글자/말줄임 셀은 핀 왼쪽(col<9)에 — 겹침 없음.
         if (c.codepoint != sidebar_pin_glyph) try std.testing.expect(c.col < 9);
     }
@@ -2780,14 +2686,14 @@ test "buildFloatingTabDrawList fills a one-row box with the title" {
     try std.testing.expectEqual(@as(usize, 5), narrow.cells.len); // col 0..4 (좌패딩 + a,b,c + …)
     // 마지막 셀(우측 끝 col 4)이 "…"(U+2026)다 — 잘렸음을 표시. 박스 bg는 유지된다.
     const last = narrow.cells[narrow.cells.len - 1];
-    try std.testing.expectEqual(title_ellipsis_glyph, last.codepoint);
+    try std.testing.expectEqual(text_layout.ellipsis_glyph, last.codepoint);
     try std.testing.expectEqual(@as(u16, 4), last.col);
     try std.testing.expectEqual(bg, last.style.background);
     // 딱 맞는 제목은 "…" 없이 박스를 채운다(좌패딩 + 'o','k' + 남은 bg 5칸 = 8).
     var exact = try buildFloatingTabDrawList(allocator, "ok", 8, fg, bg);
     defer exact.deinit(allocator);
     try std.testing.expectEqual(@as(usize, 8), exact.cells.len);
-    for (exact.cells) |c| try std.testing.expect(c.codepoint != title_ellipsis_glyph);
+    for (exact.cells) |c| try std.testing.expect(c.codepoint != text_layout.ellipsis_glyph);
 }
 
 test "buildFloatingTabTitleDrawList emits glyph-only transparent title cells" {
@@ -2798,7 +2704,7 @@ test "buildFloatingTabTitleDrawList emits glyph-only transparent title cells" {
     try std.testing.expectEqual(@as(u16, 24), dl.size.cols);
     try std.testing.expect(dl.cells.len <= 23);
     try std.testing.expectEqual(@as(u16, 1), dl.cells[0].col);
-    try std.testing.expectEqual(title_ellipsis_glyph, dl.cells[dl.cells.len - 1].codepoint);
+    try std.testing.expectEqual(text_layout.ellipsis_glyph, dl.cells[dl.cells.len - 1].codepoint);
     for (dl.cells) |cell| {
         try std.testing.expectEqual(terminal.Color.default, cell.style.background);
         try std.testing.expect(cell.codepoint != ' ');

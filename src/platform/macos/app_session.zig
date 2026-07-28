@@ -3479,7 +3479,7 @@ pub const AppSession = struct {
 
     /// pane 라벨 세그먼트(탭 바 좌측)가 차지할 컬럼 수. custom_name(사용자 rename)이 없으면 0(세그먼트 없음 —
     /// 탭이 바 전체 사용, 기존 동작). 있으면 좌패딩+이름폭+간격을 [3, max]로, 단 탭 영역 최소(min_tab_cols)는
-    /// 남게 상한을 둔다 — 라벨이 바를 다 먹어 탭이 사라지지 않게. 폭은 렌더 ellipsize와 같은 titleDisplayWidth로
+    /// 남게 상한을 둔다 — 라벨이 바를 다 먹어 탭이 사라지지 않게. 폭은 렌더 ellipsize와 같은 chrome.text_layout.displayCols로
     /// 잰다(예약 칸 == 실제 글리프). 단일 출처: docs/tabs-splits-layout.md "Pane 이름 표시 자리".
     /// 이름 표시폭(name_width 칸)으로부터 라벨 세그먼트 컬럼 수를 산출하는 코어 — 좌패딩+이름+간격을 [3, max]로,
     /// 탭 영역 최소(min_tab_cols)는 남기고 좁은 바면 0(라벨 생략). custom_name(paneLabelCols)·rename 편집 텍스트
@@ -3501,7 +3501,7 @@ pub const AppSession = struct {
     fn paneLabelCols(pane: *const Pane, bar_cols: u32) u32 {
         const name = app.pickLabel(pane.custom_name, "");
         if (name.len == 0) return 0;
-        return paneLabelColsForWidth(coretext_frame_builder.titleDisplayWidth(name, false), bar_cols); // pane 라벨(사용자 텍스트) — 아이콘 widen 안 함
+        return paneLabelColsForWidth(chrome.text_layout.displayCols(name, null), bar_cols); // pane 라벨(사용자 텍스트) — 아이콘 widen 안 함
     }
 
     /// rename 중인 대상 판정(렌더가 편집 텍스트로 라벨을 대체할 때 쓴다). 라이브 포인터 동일성 비교.
@@ -3548,7 +3548,7 @@ pub const AppSession = struct {
     /// rename 편집 텍스트의 표시폭(칸) = query(EAW) + preedit(EAW) + caret 1칸. paneBar가 편집 중 라벨 폭을 이걸로
     /// 잡아, 이름이 비어도(편집 시작) 세그먼트가 떠 caret이 보인다.
     fn renameDisplayWidth(self: *const AppSession) usize {
-        return self.renameQueryCols() + coretext_frame_builder.titleDisplayWidth(self.rename_input.preedit.items, false) + 1;
+        return self.renameQueryCols() + chrome.text_layout.displayCols(self.rename_input.preedit.items, null) + 1;
     }
 
     /// rename 편집 텍스트(query)의 표시 칸 수 — **방출자와 같은 단위**여야 한다.
@@ -3557,12 +3557,12 @@ pub const AppSession = struct {
     /// CG1 이후 **grapheme cluster 하나 = 셀 하나**인데, 여기서 `overlay_input.displayCols`(코드포인트당
     /// Σ max(1,cellWidth))를 쓰면 NFD 이름에서 두 모델이 갈라진다 — macOS FS가 주는 '한'(U+1112 U+1161 U+11AB)이
     /// 렌더는 2칸인데 displayCols는 4칸으로 세, caret과 IME 후보창이 글자에서 ~2배 오른쪽으로 떠 버린다
-    /// (code-review max). 그래서 방출자 자신의 폭 함수(`titleDisplayWidth`)를 단일 출처로 쓴다.
+    /// (code-review max). 그래서 방출과 같은 폭 함수(`chrome.text_layout.displayCols`)를 단일 출처로 쓴다.
     ///
     /// `overlay_input.displayCols`는 폐기 대상이 아니다 — find·palette·context menu·모달은 `placeText`(오버레이
     /// raster)가 **코드포인트 단위로** 그리므로 그쪽 폭 모델과 짝이 맞다. 두 폭 함수는 각자의 방출자를 따라간다.
     fn renameQueryCols(self: *const AppSession) u32 {
-        return @intCast(coretext_frame_builder.titleDisplayWidth(self.rename_input.query.items, false));
+        return @intCast(chrome.text_layout.displayCols(self.rename_input.query.items, null));
     }
 
     /// 활성 탭의 leaf 중 pane==찾는 pane인 것의 PaneBar(rename caret 위치 계산용). 못 찾으면 null.
@@ -25849,7 +25849,7 @@ pub const AppSession = struct {
                         } else app.pickLabel(lr.leaf.custom_name, "");
                         const label_fg: terminal.Color = .{ .rgb = self.appearance.theme.sidebar_foreground }; // 밝은 전경(muted 비활성 탭과 구분)
                         // rename 중이면 tail 앵커 — 긴 이름을 칠 때 라벨 세그먼트가 caret(문자열 끝)를 따라가 방금 친 글자가 안 잘린다.
-                        const label_anchor: coretext_frame_builder.TitleAnchor = if (renaming_pane) .tail else .head;
+                        const label_anchor: chrome.text_layout.Anchor = if (renaming_pane) .tail else .head;
                         if (coretext_frame_builder.buildPaneLabelDrawList(self.allocator, name, @intCast(pb.label_cols), label_fg, label_anchor)) |ldl| {
                             if (pane_running) recolorAgentFlagCells(ldl.cells, paneAgentKind(lr.leaf)); // ● → 브랜드색(pane 단일 kind)
                             self.collectShaped(&collected, ldl, pane_frame_builder, .{ .pane = .{ .origin_x = pb.full.x + pb.grip_cols * self.cell_width_px, .origin_y = text_origin_y, .colors = tabbar_colors } });
@@ -28495,7 +28495,7 @@ pub const AppSession = struct {
                 // 브랜치줄 prefix = GitHub octocat(0xF0009). 예전 git-branch(0xF0001)는 얇은 선+링 3개라 카드 셀 크기
                 // (~8~12px)로 area-average 다운스케일되면 내부 구조가 뭉개져 ├(U+251C)처럼 보였다(사용자 피드백). octocat은
                 // 꽉 찬 단색 실루엣이라 작은 크기에서도 외곽이 살아 GitHub 마크로 읽힌다(icon_glyph fillCoverage 경로 동일).
-                // 폭은 titleCellWidth가 PUA를 **2칸(~16px)** 렌더해 width-1(~8px)일 때 동그란 링처럼 뭉개지던 걸 키웠다 —
+                // 폭은 wideIconPredicate가 PUA를 **2칸(~16px)** 렌더해 width-1(~8px)일 때 동그란 링처럼 뭉개지던 걸 키웠다 —
                 // 폴더줄(0xF000A)·에이전트 gutter 아이콘과 같은 크기로 통일(사용자 피드백 "깃 아이콘이 너무 작다").
                 // 각 보조줄은 **비어있지 않을 때만** indent를 붙인다(빈 줄은 그대로 "" — 카드 줄 수 계산 정합).
                 try branch_lines.append(self.allocator, if (show_branch) (if (branch) |b| try std.fmt.allocPrint(self.allocator, "{s}\u{F0009} {s}", .{ indent, b }) else try self.allocator.dupe(u8, "")) else try self.allocator.dupe(u8, ""));
@@ -29330,7 +29330,7 @@ pub const AppSession = struct {
             const view = std.unicode.Utf8View.init(run.text) catch continue; // 잘못된 UTF-8 run은 건너뜀
             var it = view.iterator();
             while (it.nextCodepoint()) |c| {
-                // 세팅 리셋 ↺(icon_glyph PUA 0xF000B)만 **2칸(~16px)** 으로 그린다 — 사이드바/카드 아이콘(titleCellWidth
+                // 세팅 리셋 ↺(icon_glyph PUA 0xF000B)만 **2칸(~16px)** 으로 그린다 — 사이드바/카드 아이콘(text_layout.clusterCols
                 // widen)과 같은 취지로, width-1(~8px)이면 coverage 실루엣이 뭉개져 작다(사용자 요청). 등록 아이콘 **전체**를
                 // 넓히면 사용자 config 값(font.family·env·keybind 등)에 그 PUA(Nerd Fonts MDI 겹침 U+F0001~)가 들어올 때
                 // displayCols(=1칸) 기반 caret/truncate와 어긋나므로, 리셋 어포던스 cp 하나로 한정한다(리뷰).
@@ -33945,12 +33945,12 @@ test "rename caret 폭은 방출자와 같은 cluster 단위다(NFD 이름에서
     try session.rename_input.query.appendSlice(allocator, nfd);
 
     // 방출자(appendEllipsizedTitle)가 쓰는 폭 = 음절당 2칸.
-    const emitted_cols = coretext_frame_builder.titleDisplayWidth(nfd, false);
+    const emitted_cols = chrome.text_layout.displayCols(nfd, null);
     try std.testing.expectEqual(@as(usize, 4), emitted_cols); // 한(2) + 글(2)
     try std.testing.expectEqual(@as(u32, @intCast(emitted_cols)), session.renameQueryCols()); // ★ 같은 단위
     // 완성형과도 같아야 한다(같은 글자니까) — NFD/NFC가 caret 좌표에서 동치.
     try std.testing.expectEqual(
-        coretext_frame_builder.titleDisplayWidth("한글", false),
+        chrome.text_layout.displayCols("한글", null),
         @as(usize, session.renameQueryCols()),
     );
     // ★ 옛 코드(코드포인트 단위)는 **8칸**을 냈다 — 자모 6개 각각 max(1,cellWidth)로 (2+1+1)+(2+1+1). 실측 확인.

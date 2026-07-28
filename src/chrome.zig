@@ -14,6 +14,7 @@ pub const input = @import("chrome/input.zig");
 pub const state = @import("chrome/state.zig");
 pub const host = @import("chrome/host.zig");
 pub const file_tree_icon = @import("chrome/file_tree_icon.zig");
+pub const text_layout = @import("chrome/text_layout.zig"); // 텍스트 셀 배치(분절·폭·말줄임) 단일 출처 — docs/layering-and-portability.md §7.9
 
 pub const ChromeHost = host.ChromeHost;
 pub const ChromeState = state.ChromeState;

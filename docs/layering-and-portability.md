@@ -160,6 +160,18 @@ flowchart TD
 - **renderer-strategy.md 자기모순 정정**: WebGPU-통일 표 vs Ghostty 3-backend 인용 — §4의 백엔드/호스트 2층 구분으로 정리.
 - **모달 px 클리핑 인프라(`MetalFrame.modal_clip`, ABI v84) — 적용 보류**: 모달 오버레이를 px 사각으로 scissor 클리핑하는 인프라(chrome `draw.Op.clip` → `OverlayRaster.clip_rect` → `PaneFrame.clip_rect` → `MetalFrame.modal_clip_*` → Swift `maru_metal_renderer.m` `setScissorRect`)는 머지됐다. 단 **이 clip을 내는 컴포넌트가 아직 없어**(`modal_clip_w==0`) 기존 렌더는 완전 무변이다. **한계(정직)**: 오버레이 **텍스트**는 `placeText`가 `@divTrunc`로 셀 행에 스냅하고 viewport(`rows`) 밖이면 자동 skip하므로, clip은 텍스트엔 사실상 불필요하고 **배경 quad(rich 모달, px 렌더)에만 실효**다 — 즉 텍스트의 픽셀-부드러운 스크롤/클리핑은 셀 그리드 구조상 불가능하고, clip은 "행 단위 부분 카드 + 배경" 정리용이다. 첫 실사용 후보(알림 패널 행 단위 스크롤[`docs/notifications.md` §6], 긴 설정 목록·command palette의 부분 행 클리핑)가 생기면 그때 적용한다. 진짜 px 부드러운 스크롤은 텍스트 렌더를 셀 그리드→px 기반으로 바꾸는 근본 작업이라 별도 대형 과제다.
 
+## 7.9 chrome 텍스트의 셀 배치는 chrome이 소유한다 (CT-OWN, 2026-07-28)
+
+**규칙**: 문자열을 셀 열로 놓는 일 — grapheme cluster 분절, 셀 폭(EAW + 아이콘 폭 규칙), 말줄임 예약, 앵커별 앞/뒤 버리기 — 는 **chrome(L3)이 소유**한다. platform 어댑터는 그 결과(배치된 cluster의 열·바이트 범위)를 자기 셀 타입으로 **옮기는 일만** 한다.
+
+**왜**: 이 로직이 `platform/macos/coretext_frame_builder.appendEllipsizedTitle`에 있었고, `src/chrome/` 안에서 그 함수를 참조하는 곳은 **0건**이었다. 즉 제목·rename·탭 라벨의 텍스트 의미가 통째로 macOS 코드에 갇혀 있었다 — Linux/Windows/web 백엔드가 오면 **분절·폭·말줄임·cluster 그룹핑을 백엔드마다 재구현**해야 한다(§2의 "OS-중립 코드를 platform에 가두지 않는다"에 정면으로 어긋난다). NFD 한글 cluster 지원(CG1, [grapheme-clustering.md](grapheme-clustering.md) §3.1a)이 그 안에서 구현되며 이 위상 문제가 드러났다.
+
+**부수 효과 — 의도적 중복이 해소된다.** `overlay_input.tailWindow`(chrome 중립)와 platform의 tail 앵커 버리기는 *같은 알고리즘*인데 주석이 «계층(platform coretext ↔ chrome neutral)과 폭 함수가 달라 코드를 공유하지 않는다 — 의도적 분리, 단일 함수화는 계층 침범»이라고 분리를 정당화했다. **그 분리를 만든 전제가 이 규칙으로 사라진다**: 배치가 chrome에 있고 폭 함수를 주입받으면 두 경로가 같은 구현을 쓸 수 있다(합치는 것은 후속 — 지금은 전제만 제거).
+
+**경계 처리 — 폭 판정은 주입한다.** chrome은 renderer를 import할 수 없으므로(§8 가드), 등록 아이콘을 2칸으로 치는 규칙(`renderer.icon_glyph.isRegisteredIcon`)은 **predicate로 받는다**. 폭 정책의 나머지(EAW·cluster base가 폭을 정한다·base 없는 비정상 cluster는 1칸 보정)는 chrome이 가진다.
+
+**적용 상태**: 제목 계열(사이드바 카드·파일 트리 행·탭 제목·pane 라벨·도크 헤더·rename 편집기·주소창 읽기전용 URL)이 이 배치를 쓴다. 아직 자기 루프를 도는 두 곳은 [grapheme-clustering.md](grapheme-clustering.md) §3.1b 가드의 부채 목록이 들고 있다(오버레이 raster 텍스트·편집 밴드) — 그 둘을 이 배치로 옮기는 것이 남은 수렴 작업이다.
+
 ## 8. neutrality 가드 + topological note
 
 - **가드 테스트**(B) ✅: `NativeMetalCell`·`MetalFrame`·CoreText/CoreGraphics/AppKit/Metal 타입명이 중립 레이어(**terminal·renderer·session·chrome**)에 **식별자로 등장하면 빌드 실패**(`tests/boundary/imports.zig`의 `scanForbiddenIdentifiers` — `std.zig.Tokenizer`로 .identifier 토큰만 검사해 중립 계약을 설명하는 주석·문자열 속 "Metal"/"CoreText" 언급은 오탐 0). cross-layer `@import` 금지(1차)에 더한 **2차 re-export 가드**(import이 막혀도 타입명이 새는 경로 차단). `app`은 의도적 혼합 레이어(runtime+중립 모델)라 비범위 — 컨벤션으로 다룬다. = [renderer-strategy.md] WebGPU 조건 1("중립 frame만 소비함을 테스트로 증명")의 실제 충족.

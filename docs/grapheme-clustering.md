@@ -97,15 +97,15 @@
 
 **그 대응은 제거하고 chrome도 cluster 모델로 통일한다.** 이유는 세 가지다.
 
-1. **NFC 조합은 한글 절반짜리 해법이었다.** 합쳐지는 건 현대 한글 11,172자뿐이라, 같은 원인(코드포인트 1개 = 셀 1개)에서 나오는 **NFD 라틴 악센트**가 그대로 깨진다 — macOS가 `café.md`를 `cafe`+U+0301로 주면 chrome은 악센트를 **자기 칸**에 그려 `cafe´.md`가 된다(`titleCellWidth`의 `@max(1, cellWidth(cp))`가 0폭을 1칸으로 올린다). 옛한글(첫가끝)도 NFC 대상이 아니라 남는다 — **단, cluster 모델도 옛한글을 다 닫지는 못한다**: `hangulClass`가 U+1100–U+11FF만 분류해 Hangul Jamo Extended-A/B를 쓰는 첫가끝은 여전히 자모별 셀이다(§7). 증상마다 조합기를 하나씩 더 붙이는 건 [필수 프로젝트 규칙](project-rules.md)의 "구조가 원인이면 구조를 바꾼다"에 어긋난다.
+1. **NFC 조합은 한글 절반짜리 해법이었다.** 합쳐지는 건 현대 한글 11,172자뿐이라, 같은 원인(코드포인트 1개 = 셀 1개)에서 나오는 **NFD 라틴 악센트**가 그대로 깨진다 — macOS가 `café.md`를 `cafe`+U+0301로 주면 chrome은 악센트를 **자기 칸**에 그려 `cafe´.md`가 된다(`text_layout.clusterCols`의 `@max(1, cellWidth(cp))`가 0폭을 1칸으로 올린다). 옛한글(첫가끝)도 NFC 대상이 아니라 남는다 — **단, cluster 모델도 옛한글을 다 닫지는 못한다**: `hangulClass`가 U+1100–U+11FF만 분류해 Hangul Jamo Extended-A/B를 쓰는 첫가끝은 여전히 자모별 셀이다(§7). 증상마다 조합기를 하나씩 더 붙이는 건 [필수 프로젝트 규칙](project-rules.md)의 "구조가 원인이면 구조를 바꾼다"에 어긋난다.
 2. **파이프는 이미 공용이고 cluster를 지원한다.** `DrawCell.grapheme_offset/count`·`DrawList.grapheme_pool`·셰이퍼 ABI(`coretext_shaper.zig`가 `list.grapheme_pool`을 그대로 ObjC에 넘긴다)는 터미널과 chrome이 **같은 구조체·같은 셰이퍼**를 쓴다. 빠진 건 오직 **chrome 쪽 생산자** — 아무도 풀을 안 채웠을 뿐이다. 즉 이건 새 인프라가 아니라 **안 쓰던 기능을 켜는 일**이다.
 3. **dual-path보다 균일 모델**(HG3b가 `Cell.combining` 그림자를 없앨 때 세운 것과 같은 근거 — [architecture.md](architecture.md) 메모리 전략 "성급한 최적화 금지").
 
-**메커니즘.** chrome 제목 방출 단일 출처 `coretext_frame_builder.appendEllipsizedTitle`이 문자열을 codepoint가 아니라 **cluster 단위**로 순회한다(`grapheme.clusterEnd`).
+**메커니즘.** chrome 텍스트 배치 단일 출처 **`src/chrome/text_layout.zig`(L3, OS-중립)**가 문자열을 codepoint가 아니라 **cluster 단위**로 순회한다(`grapheme.clusterEnd`). platform 방출자(`coretext_frame_builder.appendEllipsizedTitle`)는 그 계획(`text_layout.plan` → `Item.cluster`/`Item.ellipsis`)을 자기 셀·풀로 옮기기만 한다 — 분절·폭·말줄임·앵커는 chrome이 소유한다([layering-and-portability.md §7.9 CT-OWN](layering-and-portability.md)). 처음에는 이 로직이 통째로 platform에 있었고 `src/chrome/`에서 참조하는 곳이 0건이었다(텍스트 의미가 macOS 코드에 갇혀, 백엔드가 늘면 재구현해야 했다).
 
 - 셀 하나 = cluster 하나. `codepoint`에는 base를, 나머지 코드포인트는 그 DrawList의 `grapheme_pool`에 실어 `grapheme_offset/count`로 가리킨다 — 터미널의 `buildDrawList`가 `snapshot.graphemes`로 하는 것과 **같은 모양**이다.
-- 폭은 `grapheme.clusterWidth(base)`(§4.3과 같은 정책 — base가 정하고 V/T·mark는 0폭 흡수). base 없이 결합 문자로 시작하는 비정상 cluster만 1칸으로 보정한다(0폭 셀이 겹쳐 쌓이지 않게).
-- 말줄임 예약(`titleDisplayWidth`)과 `.tail` 앵커의 앞-버리기도 같은 cluster 순회를 쓴다 — **방출과 폭 계산이 같은 단위**여야 잘림 위치가 안 어긋나고, cluster 중간에서 잘려 결합 문자만 남는 일이 없다.
+- 폭은 `text_layout.clusterCols(base, wide_icon)`(§4.3과 같은 정책 — base가 정하고 V/T·mark는 0폭 흡수). base 없이 결합 문자로 시작하는 비정상 cluster만 1칸으로 보정한다(0폭 셀이 겹쳐 쌓이지 않게). **아이콘 확대 규칙만 주입**이다 — chrome은 경계상 `renderer`를 import할 수 없어(등록 아이콘 판정은 `renderer.icon_glyph.isRegisteredIcon`) platform이 predicate로 넘긴다.
+- 말줄임 예약(`text_layout.displayCols`)과 `.tail` 앵커의 앞-버리기도 같은 cluster 순회를 쓴다 — **방출과 폭 계산이 같은 단위**여야 잘림 위치가 안 어긋나고, cluster 중간에서 잘려 결합 문자만 남는 일이 없다.
 - 조합 결과가 아니라 **원본 코드포인트를 그대로** 싣는다(정규화 없음). CoreText가 base 뒤에 풀을 붙여 셰이핑한다 — NFD '한'이 완성형 '한'과 같은 글리프가 되는 것은 `test-macos-coretext-smoke`가 이미 고정해 둔 사실이다.
 
 **적용 범위.** `grapheme.extendsCluster`가 구현하는 **GB6/7/8(한글 L·V·T) + GB9(Extend·ZWJ)**까지다. 이모지 ZWJ 시퀀스(GB11)·국기 RI 쌍(GB12/13)은 이 판정에 없으므로 chrome에서 **종전대로 코드포인트별 셀**이다(동작 변화 0). 터미널이 그 둘을 mode 2027로 게이팅하는 것과 대칭이며, chrome 라벨에서 그것들이 문제가 됐다는 근거가 아직 없다(§7 — measure-first).
@@ -236,13 +236,13 @@ cluster 분절은 코어 print 경로 `writeCodepoint`(`screen.zig`) **단일 �
   | **옛한글 Extended-A/B**(U+A960–U+A97C, U+D7B0–U+D7FB) | `hangulClass`가 U+1100–U+11FF만 분류한다(§7) |
 
   VS16(U+FE0F)은 `isCombiningMark`에 들어 있어 **묶인다**.
-- chrome 텍스트 방출 경로가 늘어날 때: cluster 순회는 `appendEllipsizedTitle` 한 곳에 있다. 셀을 직접 `append`하는 새 경로를 만들면 그 경로만 조용히 codepoint 단위로 되돌아간다 — **이 규율은 `tests/boundary/chrome_text_clusters.zig`가 강제한다**(§3.1b).
+- chrome 텍스트 방출 경로가 늘어날 때: cluster 순회는 `chrome/text_layout.zig` 한 곳에 있고 platform 방출자는 거기 위임한다. 셀을 직접 `append`하는 새 경로를 만들면 그 경로만 조용히 codepoint 단위로 되돌아간다 — **이 규율은 `tests/boundary/chrome_text_clusters.zig`가 강제한다**(§3.1b).
 
 ### 3.1b 규율을 구조로: cluster 경계 가드
 
-"새 chrome 텍스트는 `appendEllipsizedTitle`을 거쳐라"는 리뷰 규칙만으로는 지켜지지 않는다 — 규칙을 어긴 그 PR에서 아무도 못 알아채는 것이 이 계열 버그의 특징이었다(NFD는 한글·악센트 이름이 있어야만 드러난다). 그래서 import 경계(`tests/boundary/imports.zig`)와 **같은 결의 소스 스캔**으로 빌드를 실패시킨다.
+"새 chrome 텍스트는 cluster 경로(`text_layout.plan` → `appendEllipsizedTitle`)를 거쳐라"는 리뷰 규칙만으로는 지켜지지 않는다 — 규칙을 어긴 그 PR에서 아무도 못 알아채는 것이 이 계열 버그의 특징이었다(NFD는 한글·악센트 이름이 있어야만 드러난다). 그래서 import 경계(`tests/boundary/imports.zig`)와 **같은 결의 소스 스캔**으로 빌드를 실패시킨다.
 
-**규칙**: 셀을 만드는 함수는 (a) cluster 경로(`appendEllipsizedTitle`/`appendCluster`)에 위임하거나, (b) 문자열을 직접 디코드하지 않거나, (c) allowlist에 **이유와 함께** 등재돼야 한다. 여기에 두 검사가 더 붙는다.
+**규칙**: 셀을 만드는 함수는 (a) cluster 경로(`text_layout.plan`/`appendEllipsizedTitle`/`appendCluster`)에 위임하거나, (b) 문자열을 직접 디코드하지 않거나, (c) allowlist에 **이유와 함께** 등재돼야 한다. 여기에 두 검사가 더 붙는다.
 
 | 검사 | 무엇을 막는가 |
 | --- | --- |
@@ -254,7 +254,7 @@ cluster 분절은 코어 print 경로 `writeCodepoint`(`screen.zig`) **단일 �
 
 - allowlist는 **면제 목록이 아니라 부채 목록**이다. 등재 항목이 더 이상 규칙 대상이 아니면(= cluster로 옮겼거나 함수가 사라짐) 가드가 "등재를 지우라"고 실패한다 — 목록이 실제와 어긋나 거짓말하는 것을 막는다.
 
-등재 중 `appendCluster`(cluster 방출 본체)를 뺀 **넷이 곧 남은 부채**다.
+등재 중 `appendCluster`(계획을 셀·풀로 옮기는 방출 어댑터)를 뺀 **넷이 곧 남은 부채**다.
 
 | 등재 | 왜 아직 codepoint 단위인가 |
 | --- | --- |
@@ -263,4 +263,6 @@ cluster 분절은 코어 print 경로 `writeCodepoint`(`screen.zig`) **단일 �
 | `placeText`(chrome 오버레이·모달·세팅·팔레트·알림 텍스트) | DrawCell이 아니라 오버레이 raster 그리드(cp/fg/width 배열)에 직접 쓰는 별도 표현이라 CG1과 방식이 다르다 |
 | `drawCells`(IME preedit 오버레이, `terminal/preedit.zig`) | 확정 전 텍스트를 base snapshot 위 scratch에 임시 렌더 — 셀 저장이 아니라 표시 전용이고, 주 타깃 한글 IME가 완성형 marked text를 보내 실사용 증상이 없다(§4.7의 "의도된 한계") |
 
-앞의 둘은 같은 caret 열 모델이라 **한 슬라이스로 묶어** 옮기는 것이 맞다.
+앞의 둘은 같은 caret 열 모델이라 **한 슬라이스로 묶어** 옮기는 것이 맞다. 분절·폭이 이제 OS-중립(`chrome/text_layout.zig`)이라 그 슬라이스는 platform을 거치지 않고 L3 안에서 끝난다 — CT-OWN 추출이 열어 준 길이다.
+
+가드는 **분절(L3)과 방출(L4) 양쪽**을 각각 확인한다: `chrome/text_layout.zig`에 `grapheme.clusterEnd(`가 남아 있는지, `coretext_frame_builder.zig`가 `text_layout.plan(`에 위임하며 `.grapheme_offset`/`.grapheme_pool`을 싣는지. 한쪽만 보면 "계획은 cluster인데 어댑터가 base만 그린다"(또는 그 반대)를 놓친다.

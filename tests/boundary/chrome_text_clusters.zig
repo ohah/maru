@@ -5,11 +5,12 @@ const std = @import("std");
 // 왜 필요한가: chrome은 터미널과 달리 셀을 매 프레임 문자열에서 새로 만든다. 그 방출 루프가 문자열을
 // **codepoint 단위**로 돌면 NFD(macOS 파일시스템 기본)가 자모·결합 문자로 흩어져 그려진다 — 파일 트리
 // 한글이 "ㅅㅡㅋㅡ리ㄴㅅㅑㅅ"으로, `café.md`가 `cafe´.md`로 보이던 실제 제보가 그것이다. CG1이 방출을
-// cluster 단위(`grapheme.clusterEnd`)로 바꿔 고쳤지만, **그 규율은 `appendEllipsizedTitle` 한 함수 안에만
-// 있다.** 셀을 직접 만드는 새 경로를 누가 추가하면 그 경로만 조용히 codepoint 단위로 되돌아간다 —
+// cluster 단위(`grapheme.clusterEnd`)로 바꿔 고쳤고, 그 배치 규율은 이제 **chrome `text_layout`(L3, OS-중립)**이
+// 소유한다(docs/layering-and-portability.md §7.9 CT-OWN — platform은 계획을 셀로 옮기는 어댑터).
+// **그래도 규율은 그 한 경로 안에만 있다.** 셀을 직접 만드는 새 경로를 누가 추가하면 그 경로만 조용히 codepoint 단위로 되돌아간다 —
 // 리뷰에서 눈으로 잡는 규칙은 그 순간을 놓친다(NFD 증상은 한글·악센트 이름이 화면에 있어야만 드러난다).
 //
-// **규칙**: 셀을 만드는 함수는 (a) cluster 경로(`appendEllipsizedTitle`/`appendCluster`)에 위임하거나,
+// **규칙**: 셀을 만드는 함수는 (a) cluster 경로(`text_layout.plan`/`appendEllipsizedTitle`/`appendCluster`)에 위임하거나,
 // (b) 문자열을 직접 디코드하지 않거나, (c) allowlist에 **이유와 함께** 등재돼야 한다. 여기에 더해
 // **문자열 → 코드포인트 슬라이스 변환기**(`[]const u8` → `[]u21`)도 같은 규칙을 받는다.
 //
@@ -43,7 +44,7 @@ const decode_signals = [_][]const u8{
     "utf8ByteSequenceLength(",
     "nextCodepoint()",
     "nextCodepointSlice()",
-    "decodeTitleCp(",
+    "decodeCodepoint(",
 };
 
 /// **디코드를 헬퍼로 빼는 우회**를 그 헬퍼 쪽에서 막는다: `[]const u8`을 받아 코드포인트 슬라이스를 돌려주는
@@ -56,7 +57,7 @@ const decode_signals = [_][]const u8{
 const codepoint_slice_returns = [_][]const u8{ "![]u21", "[]u21 {", "![]u32", "[]u32 {" };
 
 /// cluster 경로 위임 신호 — 이게 있으면 그 함수는 방출을 cluster-aware 헬퍼에 맡긴 것이다.
-const delegation_signals = [_][]const u8{ "appendEllipsizedTitle(", "appendCluster(" };
+const delegation_signals = [_][]const u8{ "text_layout.plan(", "appendEllipsizedTitle(", "appendCluster(" };
 
 const Allowed = struct {
     /// `src/` 기준 상대 경로.
@@ -73,7 +74,7 @@ const allowlist = [_]Allowed{
     .{
         .file = "platform/macos/coretext_frame_builder.zig",
         .function = "appendCluster",
-        .reason = "cluster 방출 본체 — base는 셀에, 나머지는 grapheme_pool에(CG1의 구현 그 자체).",
+        .reason = "cluster 방출 어댑터 — text_layout이 잡아 준 바이트 범위에서 base는 셀에, 나머지는 grapheme_pool에(CG1 방출부 그 자체).",
     },
     .{
         .file = "platform/macos/coretext_frame_builder.zig",
@@ -110,7 +111,7 @@ fn indentOf(line: []const u8) usize {
     return n;
 }
 
-/// 주석(`//` 이후)을 잘라 낸 코드 부분. 주석에 적힌 `.codepoint = `·`decodeTitleCp(`를 진짜 신호로 세던
+/// 주석(`//` 이후)을 잘라 낸 코드 부분. 주석에 적힌 `.codepoint = `·`decodeCodepoint(`를 진짜 신호로 세던
 /// 오탐을 없앤다(문자열 리터럴 안의 `//`까지 가리진 않지만, 이 코드베이스에서 그 조합은 나오지 않는다).
 fn codePart(line: []const u8) []const u8 {
     const cut = std.mem.indexOf(u8, line, "//") orelse return line;
@@ -249,7 +250,7 @@ fn scanFile(
             } else {
                 try violations.append(allocator, .{ .text = try std.fmt.allocPrint(
                     allocator,
-                    "src/{s}:{d}: `{s}`가 {s}. chrome 텍스트는 appendEllipsizedTitle(cluster 경로)에 위임해야 합니다 — " ++
+                    "src/{s}:{d}: `{s}`가 {s}. chrome 텍스트는 cluster 경로(chrome/text_layout.plan → appendEllipsizedTitle)에 위임해야 합니다 — " ++
                         "불가피하면 tests/boundary/chrome_text_clusters.zig의 allowlist에 이유와 함께 등재하세요(docs/grapheme-clustering.md §3.1b).",
                     .{
                         rel_path,
@@ -327,10 +328,16 @@ test "chrome 셀을 만드는 함수는 cluster 경로에 위임하거나 이유
 test "cluster 경로 자체가 사라지지 않았는가 (CG1 회귀 가드)" {
     // 위 스캔은 "codepoint 단위 방출이 새로 생겼는가"를 본다. 이 테스트는 반대 방향 — **cluster 방출이
     // 통째로 사라지는** 회귀(예: 리팩터로 appendCluster를 되돌림)를 잡는다. 둘이 같이 있어야 규율이 닫힌다.
+    // 분절(L3 chrome)과 방출(L4 platform)이 나뉘었으므로(§7.9 CT-OWN) 양쪽을 각각 본다 — 한쪽만 보면
+    // "계획은 cluster인데 어댑터가 base만 그린다"(또는 그 반대)를 놓친다.
     const allocator = std.testing.allocator;
+    const layout_source = try readSource(allocator, "src/chrome/text_layout.zig");
+    defer allocator.free(layout_source);
+    try std.testing.expect(std.mem.indexOf(u8, layout_source, "grapheme.clusterEnd(") != null); // 분절이 cluster 경계로
+
     const source = try readSource(allocator, "src/platform/macos/coretext_frame_builder.zig");
     defer allocator.free(source);
-    try std.testing.expect(std.mem.indexOf(u8, source, "grapheme.clusterEnd(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, source, "text_layout.plan(") != null); // 방출이 중립 계획에 위임
     try std.testing.expect(std.mem.indexOf(u8, source, ".grapheme_offset = offset") != null);
     try std.testing.expect(std.mem.indexOf(u8, source, ".grapheme_pool = owned_pool") != null);
 }

@@ -4,10 +4,11 @@
 //! authority. Tokens contain no pointer, so stale copies can only be rejected by this ledger.
 
 const std = @import("std");
+const limits = @import("external_inbox_limits.zig");
 const protocol = @import("protocol.zig");
 
-pub const max_bytes: usize = protocol.max_client_screen_inbox;
-pub const max_items: usize = protocol.max_client_screen_items;
+pub const max_bytes: usize = limits.max_bytes;
+pub const max_items: usize = limits.max_items;
 pub const max_batch_bytes: usize = protocol.max_viewport_snapshot;
 pub const max_batch_chunks: usize =
     protocol.max_viewport_snapshot / protocol.max_binary_chunk;

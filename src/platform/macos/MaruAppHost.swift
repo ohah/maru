@@ -2788,18 +2788,25 @@ final class MaruWebPanelView: NSView {
         gestureActive = false;
         gesturePinching = false;
       }, { passive: false });
-      var dragging = false, lastX = 0, lastY = 0;
+      // `dragMoved`: 이 클릭이 **드래그였는지**. 브라우저는 짧은 간격의 두 번째 클릭을 드래그로 끝내도
+      // `dblclick`을 쏘므로, 그대로 두면 드래그를 마칠 때 맞춤↔100% 토글이 걸린다 — 큰 이미지(fitScale<1)에서만
+      // 배율이 실제로 바뀌어 "드래그 끝에 확대되거나 축소되는" 증상으로 보였다(사용자 제보: 큰 이미지·클릭 드래그
+      // 한정). 작은 이미지는 fitScale=1이라 토글해도 변화가 없어 증상이 안 보였다.
+      var dragging = false, dragMoved = false, lastX = 0, lastY = 0;
       window.addEventListener("mousedown", function (e) {
-        dragging = true; lastX = e.clientX; lastY = e.clientY;
+        dragging = true; dragMoved = false; lastX = e.clientX; lastY = e.clientY;
         document.body.style.cursor = "grabbing"; e.preventDefault();
       });
       window.addEventListener("mousemove", function (e) {
         if (!dragging) return;
-        tx += e.clientX - lastX; ty += e.clientY - lastY;
+        var dx = e.clientX - lastX, dy = e.clientY - lastY;
+        if (Math.abs(dx) + Math.abs(dy) > 2) dragMoved = true; // 손떨림(±2px)은 클릭으로 본다
+        tx += dx; ty += dy;
         lastX = e.clientX; lastY = e.clientY; apply();
       });
       window.addEventListener("mouseup", function () { dragging = false; document.body.style.cursor = ""; });
       window.addEventListener("dblclick", function (e) {
+        if (dragMoved) return; // 드래그로 끝난 클릭 — 토글하지 않는다(다음 mousedown이 플래그를 리셋)
         if (Math.abs(scale - fitScale) < 0.001) zoomAt(1 / fitScale, e.clientX, e.clientY);
         else fit();
       });

@@ -1265,7 +1265,7 @@ export function bootShell(document: Document, targetWindow: Window): void {
   // §2.3: ⌘+/− 폰트 줌을 읽기 프리뷰에도 반영한다(사용자 결정 2026-07-23). native가 `maru:file-zoom`으로 현재
   // 배율(현재 폰트/base)을 주면 render iframe에 `setZoom`으로 전달해 iframe이 `documentElement.zoom`으로 페이지
   // 줌한다(cross-origin이라 shell이 iframe DOM을 직접 못 건드림). iframe이 아직 준비 전이면 최신 배율을 캐시해
-  // renderer-ready에서 다시 보낸다. 편집기(#editor)는 native가 `--maru-editor-font-size`(pt)로 직접 스케일한다.
+  // renderer-ready에서 다시 보낸다. 편집기(#editor)는 native가 `--maru-editor-font-size`(**px** — CoreText의 AppKit 포인트와 논리 픽셀이 1:1이라, CSS `pt`(1/72in)를 쓰면 터미널보다 33% 커진다)로 직접 스케일한다.
   let previewZoom = 1;
   const sendPreviewZoom = () => {
     frame.contentWindow?.postMessage(

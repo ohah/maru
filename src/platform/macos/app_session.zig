@@ -23530,6 +23530,16 @@ pub const AppSession = struct {
             for (pane.terms.items[0..pane.active_term]) |t| {
                 if (t.file_entry != null or t.kind != .web) restored_active += 1;
             }
+            // **범위로 clamp한다.** "활성이 브라우저면 다음 persisted Term을 가리킨다"는 **다음이 있을 때만** 참이다 —
+            // 활성 브라우저가 pane의 **마지막** Term이면 위 카운트가 persisted_total과 같아져 `active-term`이 한 칸
+            // 넘친다. 그러면 저장 파일이 §5.0 불변식(`active-term < persisted_total`)을 스스로 위반하고,
+            // 같은 pane에 파일 Term이 하나라도 있으면 reader의 `validatePaneFileTerms`가 그 창을 **fail-close로
+            // 강등해 파일 탭이 통째로 사라진다**(사용자 제보 "파일 유지 안 됨"의 재현 경로:
+            // [터미널, 파일, 브라우저(활성·마지막)] → 저장 active-term=2 = persisted_total → 복원 시 창 폐기).
+            // 파일 Term이 없던 pane에서 이 값이 여태 무해했던 건 그 검증이 `file_terms.len == 0`에서 조기 반환하고
+            // buildWorkspacePane이 상한만 clamp했기 때문이다 — 즉 파일 Term 도입(FP16)이 잠재 결함을 깨운 자리다.
+            const persisted_total = surfaces.items.len + file_terms.items.len;
+            if (persisted_total > 0 and restored_active >= persisted_total) restored_active = persisted_total - 1;
             try panes.append(arena, .{
                 .active_term = restored_active,
                 .custom_name = try arena.dupe(u8, pane.custom_name orelse ""), // pane 사용자 rename(없으면 "")
@@ -48962,6 +48972,62 @@ test "windowTitle: 활성 web Term은 kind 라벨(Browser)을 반환(sentinel �
     session.dispatchAppAction(.new_web_tab); // web(browser) Term 활성화
     try std.testing.expect(session.activePane().activeTerm().kind == .web);
     try std.testing.expectEqualStrings("Browser", session.windowTitle());
+}
+
+// FP16f 회귀(사용자 손 테스트 제보 "파일이 유지 안 된다"): 활성 탭이 **비영속 브라우저이고 pane의 마지막**이면
+// remap 카운트가 persisted_total과 같아져 `active-term`이 한 칸 넘쳤다. 파일 Term이 섞인 pane에서는 reader의
+// validatePaneFileTerms가 그 조건을 BadLine으로 보고 **그 창을 fail-close 강등**해 열려 있던 파일 탭이 통째로
+// 사라진다(파일 Term이 없던 pane에선 그 검증이 조기 반환하고 buildWorkspacePane이 상한만 clamp해 무해했다 —
+// 파일 Term 도입이 잠재 결함을 깨운 자리다). capture가 범위 안으로 clamp하는지 고정한다.
+test "captureWorkspaceTab: 활성 브라우저가 마지막 탭이어도 active-term은 persisted 범위 안이다 (FP16f)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const io = std.Io.Threaded.global_single_threaded.io();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+
+    // pane = [터미널, 파일, 브라우저(활성·마지막)]
+    try tmp.dir.writeFile(io, .{ .sub_path = "keep.md", .data = "# keep" });
+    const path = try std.fs.path.join(allocator, &.{ root, "keep.md" });
+    defer allocator.free(path);
+    try std.testing.expectEqual(AppSession.FilePanelOpenPathResult.opened, session.openFilePanelPath(path));
+    session.dispatchAppAction(.new_web_tab);
+    const pane = session.activePane();
+    try std.testing.expectEqual(@as(usize, 3), pane.terms.items.len);
+    try std.testing.expectEqual(@as(usize, 2), pane.active_term); // 브라우저가 활성·마지막
+    try std.testing.expect(pane.terms.items[2].file_entry == null and pane.terms.items[2].kind == .web);
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const wtab = try session.captureWorkspaceTab(arena.allocator(), session.activeTab());
+    const wp = wtab.panes[0];
+    const persisted_total = wp.surfaces.len + wp.file_terms.len;
+    try std.testing.expectEqual(@as(usize, 1), wp.file_terms.len); // 파일은 실린다
+    try std.testing.expect(persisted_total > 0);
+    // ★ 옛 코드: active_term == persisted_total(범위 밖) → 복원 시 그 창 폐기(파일 탭 소멸).
+    try std.testing.expect(wp.active_term < persisted_total);
+
+    // 직렬화 → 파싱 왕복이 폴백 없이 통과해야 한다(이게 곧 "파일이 유지된다"의 정의다).
+    const tabs_slice = try arena.allocator().dupe(maru.session.workspace.Tab, &.{wtab});
+    const wins = try arena.allocator().dupe(maru.session.workspace.Window, &.{.{
+        .active_tab = 0,
+        .active = true,
+        .frame = null,
+        .tabs = tabs_slice,
+        .dock = .{},
+        .explorer = .{ .roots = null },
+    }});
+    const text = try maru.session.workspace.serialize(allocator, .{ .windows = wins });
+    defer allocator.free(text);
+    var parsed = try maru.session.workspace.parse(allocator, text);
+    defer parsed.deinit();
+    try std.testing.expectEqual(@as(usize, 1), parsed.workspace.windows.len);
+    try std.testing.expectEqual(@as(usize, 1), parsed.workspace.windows[0].tabs[0].panes[0].file_terms.len);
 }
 
 // [4e review 3] captureWorkspaceTab: web Term은 capture서 스킵(복원 시 셸 오spawn 방지)하고, web-only pane은 기본 셸

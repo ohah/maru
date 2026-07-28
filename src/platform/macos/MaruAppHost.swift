@@ -7896,9 +7896,10 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             "js", "mjs", "cjs", "jsx", "ts", "mts", "cts", "tsx", // text: javascript/typescript
             "py", "css", "scss", "sass", "less", "xml", "yaml", "yml", // text: python·css·xml·yaml
             "png", "jpg", "jpeg", "gif", "bmp", "ico", "webp", "avif", "heic", "heif", "tif", "tiff", // image(FP14)
+            "mp4", "mov", "m4v", "mp3", "m4a", "aac", "wav", "aiff", "aif", "flac", // media(FP15 — OS 코덱 allowlist)
             "pdf", // pdf(FP15)
         ].compactMap { UTType(filenameExtension: $0) }
-        panel.message = "도크에서 열 파일을 고르세요 (Markdown·HTML·SVG·텍스트/코드·이미지·PDF)"
+        panel.message = "도크에서 열 파일을 고르세요 (Markdown·HTML·SVG·텍스트/코드·이미지·미디어·PDF)"
         guard panel.runModal() == .OK, let path = panel.url?.path else { return }
         let bytes = Array(path.utf8)
         let result = bytes.withUnsafeBufferPointer { p in

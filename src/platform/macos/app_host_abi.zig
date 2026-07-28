@@ -1152,9 +1152,10 @@ pub export fn maru_macos_app_session_file_panel_entry(
     // image(FP14)는 신뢰 shell에서 readSelfImage로 자기 바이너리를 base64로 읽어 panzoom `<img>`로 표시한다.
     return switch (info.kind) {
         .markdown, .text, .svg, .image => 1,
-        // html·pdf는 격리 loadFileURL(2). Swift가 filePanelPath를 loadFileURL(_:allowingReadAccessTo:)로
-        // 로드하고 WebKit이 HTML/PDF를 네이티브 렌더한다(§2.2). 신뢰 shell URL·bridge를 쓰지 않는다.
-        .html, .pdf => 2,
+        // html·media·pdf는 격리 loadFileURL(2). Swift가 filePanelPath를 loadFileURL(_:allowingReadAccessTo:)로
+        // 로드하고 WebKit이 HTML/PDF/미디어를 네이티브 렌더한다(§2.2) — media는 WebKit **media document**(래퍼 없음,
+        // FP15)라 Swift 분기가 pdf와 같다. 신뢰 shell URL·bridge를 쓰지 않는다.
+        .html, .media, .pdf => 2,
     };
 }
 

@@ -779,6 +779,8 @@ fn parseDockEntry(encoded: []const u8) DockEntryParseError!dock_panel.PersistedE
         .svg
     else if (std.mem.eql(u8, kind_raw, "image"))
         .image
+    else if (std.mem.eql(u8, kind_raw, "media"))
+        .media
     else if (std.mem.eql(u8, kind_raw, "pdf"))
         .pdf
     else
@@ -2649,6 +2651,27 @@ test "workspace WP-P: 잘못된 browser-term은 record만 버리거나 창을 �
         "pane surfaces=1 active-term=0 custom-name=\"\" active-browser=2 browser-term=\"0:20:https://example.com/\"\n" ++
         "surface custom-name=\"\" title=\"\" cwd=\"\" command=\"\" cols=80 rows=24\n";
     try std.testing.expectError(error.BadLine, parse(a, bad_active));
+}
+
+test "workspace FP15: media file-term이 read 모드로 왕복한다" {
+    // media는 격리 loadFileURL(WebKit media document) read 뷰라 mode가 항상 read다. wire 이름은 EntryKind
+    // 태그명(`media`)이고, 옛 Maru가 이 줄을 읽으면 모르는 kind로 **그 항목만** 버린다(창은 산다 — 아래 테스트).
+    const file_terms = [_]FileTerm{.{ .index = 1, .kind = .media, .mode = .read, .path = "/Users/me/영상 clip.mp4" }};
+    const surfaces = [_]Surface{.{ .custom_name = "", .title = "", .cwd = "", .command = "", .cols = 80, .rows = 24 }};
+    const panes = [_]Pane{.{ .active_term = 1, .surfaces = &surfaces, .file_terms = &file_terms }};
+    const tabs = [_]Tab{.{ .active_pane = 0, .panes = &panes, .tree = &.{.{ .leaf = 0 }} }};
+    const windows = [_]Window{.{ .tabs = &tabs }};
+    const text = try serialize(std.testing.allocator, .{ .windows = &windows });
+    defer std.testing.allocator.free(text);
+    try std.testing.expect(std.mem.indexOf(u8, text, "media") != null);
+
+    var parsed = try parse(std.testing.allocator, text);
+    defer parsed.deinit();
+    const pane = parsed.workspace.windows[0].tabs[0].panes[0];
+    try std.testing.expectEqual(@as(usize, 1), pane.file_terms.len);
+    try std.testing.expectEqual(dock_panel.EntryKind.media, pane.file_terms[0].kind);
+    try std.testing.expectEqual(dock_panel.Mode.read, pane.file_terms[0].mode);
+    try std.testing.expectEqualStrings("/Users/me/영상 clip.mp4", pane.file_terms[0].path);
 }
 
 test "workspace FP16: 모르는 kind의 file-term은 그 항목만 버리고 창은 살린다" {

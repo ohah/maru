@@ -3360,6 +3360,23 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
               frozen digest, absent/empty·item boundary·domain·len/cap 분리를 unit/boundary fixture로 고정한다.
               이 leaf는 Client/protocol/schema field order를 알지 못하며 `ClientSourceSealSchema.v1` adapter와
               field allowlist는 후속 source-seal 슬라이스 책임이다.
+              **Source seal adapter 구현:** `ExternalSourceSealEncoder`가 Client source schema의 scalar,
+              allocator identity, profile/capability provenance, `attach_instance_id`, parser와 queue descriptor/
+              counter/content, partial state, external mode를 explicit field order로 transcript에 기록한다.
+              `ClientSourceSeal`은 borrowed pointer 없이 Client address/target/raw request/count/digest만 보존하고
+              `externalSourceSealMatches`가 같은 alias proof 뒤 exact 재계산한다. Client의 40개 field name/order
+              allowlist가 변경되면 compile error이며 새 field를 schema에 포함하거나 명시적으로 eligibility-only로
+              결정해야 한다. `event_parse_observer`와 strict CLI `BufferedEvent.preflight/admission_seal`은 exact
+              null, `pending_outbound`는 eligibility에서 exact null, `attach_instance_id`는 nonzero를 강제한다.
+              `BufferedEvent` 자체도 4개 field name/order allowlist로 drift를 막는다. Encoder는
+              batch→stream→event의 exact Client item 주소와 ordinal을 자체 one-shot closed state로 검사해 caller가
+              section/item을 건너뛰거나 재정렬·중복·교체하거나 완료 seal을 재사용할 수 없다. 현재 test adapter의
+              canonical-test mode는 동일 encoder에서 process 주소와 fd만 고정 nonzero token으로 치환하고 모든
+              나머지 fully-populated descriptor/scalar/content를 그대로 기록한 frozen adapter digest를 제공한다.
+              production은 raw process identity를 계속 bind하며 canonical digest를 runtime 권위로 사용하지 않는다.
+              현재 test adapter의 queue 순회는 다음
+              `foldExternalAdoptionSource`에서 reducer step과 같은 Client-owned loop로 흡수하며, 별도 public traversal
+              또는 c3b 완료를 뜻하지 않는다.
               c3b는 pure reducer → Client fold/source seal → outer decision → adopted-only fingerprint/metadata
               materialization 순서로 착륙한다. 이는 PR 분할일 뿐 완료 조건 분할이 아니며, c3b 동안 Client mutation,
               storage publish, terminal/recovery commit은 하지 않고 c3c combined commit에 남긴다. 기존
@@ -3415,8 +3432,9 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
               malformed list shape, outer↔Client, outer↔outer, outer↔nested를 descriptor order fixture로 고정한다.
               이 Phase A 검증은 c2의 allocation/sort 기반
               `PreparedExternalOwnerRangeProof`를 대체하지 않는다. 후자는 c3c destination/final no-callback
-              ownership suffix proof로 남는다. parser unread bytes/head/tail/
-              expected-major와 backing 주소·len·capacity, build ID/lifecycle/profile/capability provenance,
+              ownership suffix proof로 남는다. parser의 full resident backing bytes와 head/
+              expected-major를 bind하며 unread tail은 `buf.len/head`에서 유도한다. backing 주소·len·capacity,
+              build ID/lifecycle/profile/capability provenance,
               fd/io-mode/ownership/unusable, `attach_instance_id`, pending outbound/external TX empty, 모든 array와
               payload의 allocator ptr/vtable·base/len/capacity, partial-batch 의미와 counters를 allocation 없이
               검사하고 seal에 bind한다. Zig slice인 build ID/lifecycle/frame payload에는 독립 capacity SSOT가 없으므로
@@ -3425,7 +3443,9 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
               만든 owner의 seal 이후 **final-state
               descriptor/content drift와 stale plan**이다. A→B→A mutate-restore 이력 또는 allocator가 같은
               주소·길이·byte를 재사용한 사실까지 탐지한다고 주장하지 않으며, arbitrary forged pointer/allocator나
-              process memory corruption도 탐지·복구 범위 밖이다.
+              process memory corruption도 탐지·복구 범위 밖이다. SHA-256 source seal은 이 process-local
+              revalidation에서 collision/second-preimage resistance를 신뢰 경계로 두며, 의도적으로 주입된
+              hash collision이나 암호학적 붕괴를 탐지한다고 주장하지 않는다.
               각 descriptor는 range/len/cap/alias와 cleanup mirror를 먼저 검증한 뒤에만 payload를 dereference/hash한다.
               adopted final validation도 descriptor/mirror 비교→range/alias 검증→payload hash 순서다. valid
               allocation끼리의 alias/len/cap drift는 payload dereference 전에 invariant terminal이 되고,

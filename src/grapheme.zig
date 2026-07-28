@@ -179,6 +179,20 @@ pub fn composeHangul(arena: std.mem.Allocator, bytes: []const u8) ![]u8 {
     return out.toOwnedSlice(arena);
 }
 
+/// `bytes`에 conjoining 자모(NFD 한글)가 하나라도 있는가 — `composeHangul`을 부르기 전 **무할당 사전 검사**다.
+/// chrome 셀 텍스트(파일 트리 행·사이드바 카드 줄·탭 제목)는 매 프레임 다시 만들어지는데, 이름은 압도적으로
+/// ASCII거나 이미 완성형이라 그때마다 조합 버퍼를 뜨는 건 낭비다. UTF-8에서 U+1100~U+11FF는 전부 3바이트
+/// `E1 84..87 xx`라 lead 바이트만 훑어도 후보를 가려낼 수 있다(경계에서 잘린 바이트는 후보로만 잡히고,
+/// 실제 조합은 `composeHangul`의 codepoint 디코딩이 판단한다 — false positive는 무해, false negative는 없다).
+pub fn hasConjoiningJamo(bytes: []const u8) bool {
+    var i: usize = 0;
+    while (i + 1 < bytes.len) : (i += 1) {
+        // U+1100(E1 84 80) ~ U+11FF(E1 87 BF): 두 번째 바이트가 0x84~0x87이면 conjoining 블록.
+        if (bytes[i] == 0xE1 and bytes[i + 1] >= 0x84 and bytes[i + 1] <= 0x87) return true;
+    }
+    return false;
+}
+
 fn appendCp(arena: std.mem.Allocator, out: *std.ArrayList(u8), cp: u21) !void {
     var buf: [4]u8 = undefined;
     const n = std.unicode.utf8Encode(cp, &buf) catch return; // 인코딩 불가(비정상)면 건너뛴다
@@ -259,6 +273,22 @@ test "composeHangul: NFD conjoining 자모를 완성형 NFC로 조합(완성형�
         defer a.free(r);
         try std.testing.expectEqualStrings("\u{1161}\u{1100}", r);
     }
+}
+
+test "hasConjoiningJamo: composeHangul 호출 전 무할당 사전 검사(false negative 없음)" {
+    // chrome 셀 텍스트는 매 프레임 다시 만들어지므로 ASCII·완성형 이름에서 조합 버퍼를 뜨지 않게 하는 게이트다.
+    // **false negative가 없어야** 한다 — 자모가 있는데 false를 내면 그 이름이 자모로 흩어져 그려진다.
+    try std.testing.expect(!hasConjoiningJamo("")); // 빈 문자열
+    try std.testing.expect(!hasConjoiningJamo("README.md")); // ASCII
+    try std.testing.expect(!hasConjoiningJamo("한글.md")); // 완성형(U+AC00~ = EA~ED lead) — 조합 불요
+    try std.testing.expect(!hasConjoiningJamo("スクリーン.png")); // 비-한글 다국어
+    try std.testing.expect(hasConjoiningJamo("\u{1100}\u{1161}")); // NFD "가"
+    try std.testing.expect(hasConjoiningJamo("a\u{11AB}b")); // 종성 단독(U+11AB) — 블록 끝쪽도 잡는다
+    try std.testing.expect(hasConjoiningJamo("\u{1112}\u{1161}\u{11AB}.md")); // NFD 파일명
+    // 경계: U+1100(E1 84 80) 직전/직후 블록은 안 잡는다 — U+10FF(E1 83 BF)·U+1200(E1 88 80).
+    try std.testing.expect(!hasConjoiningJamo("\u{10FF}"));
+    try std.testing.expect(!hasConjoiningJamo("\u{1200}"));
+    // 실제 조합 판정은 composeHangul이 codepoint로 하므로, 여기 false positive는 무해하다(무변 dupe).
 }
 
 test "hangulClass: 현대 자모·완성형 음절을 L/V/T/LV/LVT로 분류" {

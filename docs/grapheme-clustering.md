@@ -91,6 +91,24 @@
 
 → 정규화가 아니라 **grapheme cluster로 묶어서 저장·셰이핑**하는 정공법으로 간다.
 
+### 3.1a 예외: **chrome 셀 텍스트**는 표시 직전 NFC로 합친다
+
+§3.1의 "정규화하지 않는다"는 **터미널 그리드**(애플리케이션이 소유한 화면)에 대한 규칙이다. chrome(사이드바 카드·파일 트리 행·탭 제목·pane 라벨)은 사정이 반대다.
+
+| | 터미널 그리드 | chrome 셀 텍스트 |
+| --- | --- | --- |
+| 내용의 주인 | 셸·vim·tmux (코드포인트 개수·커서 위치를 앱과 합의) | Maru 자신(파일명·cwd·브랜치를 **읽어서 보여줄 뿐**) |
+| cluster 저장 | 있음(`grapheme_id` + store, §3.2) | 없음 — `DrawCell.codepoint`는 **u21 하나** |
+| 셰이핑 | CoreText run shaping(cluster 통째로) | 없음 — codepoint 1개 = 셀 1개 |
+| NFD 한글 결과 | 음절로 합성됨(정상) | **자모가 셀마다 흩어짐** |
+
+그래서 chrome은 셀을 만들기 직전에 `grapheme.composeHangul`로 conjoining 자모를 완성형으로 합친다(`coretext_frame_builder.appendEllipsizedTitle` — 사이드바·파일 트리·탭·rename 편집기가 공유하는 제목 방출 단일 출처). §3.1의 두 반대 근거가 여기서는 성립하지 않는다.
+
+- **"앱과 코드포인트 개수를 합의해야 한다"** — chrome 텍스트에는 그런 상대가 없다. 조합은 **표시 전용**이고, 파일 경로·identity·rename 커밋 값은 원본 바이트를 그대로 쓴다(조합된 문자열은 셀을 만든 뒤 버려진다).
+- **"옛한글은 NFC로도 안 합쳐진다"** — 여전히 맞다. 그건 chrome에서 **남는 한계**다(§9). 현대 한글 11,172자가 파일명의 사실상 전부라 실사용 증상은 사라지고, 근본 해결(chrome 셀의 cluster 지원)은 별개 슬라이스다.
+
+무할당 fast path를 둔다: `grapheme.hasConjoiningJamo`가 UTF-8 lead 바이트(`E1 84..87`)만 훑어 후보가 없으면 조합 버퍼를 뜨지 않는다 — chrome 제목은 매 프레임 다시 만들어지고 이름은 대부분 ASCII·완성형이다.
+
 ### 3.2 정공법: cluster를 셀에 다중 코드포인트로 저장한다 (Ghostty식 모델, clean-room)
 
 Maru는 이미 셰이핑 엔진(CoreText)을 갖췄다. 막힌 곳은 **셀이 base + combining 1개만 담아** 초성+중성+종성(3개 이상)을 못 담는 저장 모델이다. 따라서:
@@ -201,4 +219,5 @@ cluster 분절은 코어 print 경로 `writeCodepoint`(`screen.zig`) **단일 �
 - ZWJ 이모지 시퀀스(GB11)·국기(RI 쌍)·skin-tone은 mode 2027에서 한 셀(폭 2)로 묶여 정확하다(HG-후속 `emojiClusterExtends` 통합). 남은 것(현재 안 함 — 동작 영향 없음): (1) `isExtendedPictographic`의 완전한 Extended_Pictographic 속성표 — 현재 큐레이션 범위가 RI·skin-tone을 과포함하나 `emojiClusterExtends`에서 각자 분기가 먼저 처리해 **무해**하므로, 출력이 바뀌는 실사용 근거가 없으면 도입하지 않는다, (2) mode 2027을 안 켠 환경의 ZWJ 폭 정책(현재 비-2027은 컴포넌트별 폭 — 앱과 합의 없이 묶지 않음, 의도된 정책).
 - IME preedit는 codepoint 단위 렌더다(위 §4 preedit 항목) — 주 타깃 한글 IME가 완성형 marked text를 보내 정상이고, NFD/combining marked text는 조합 중 표시에 한해 미지원(확정 후 PTY 경로가 정상 cluster화). cluster 인지 복제는 그런 IME가 실제로 쓰이는 근거가 생기면 검토한다.
 - 다중 glyph로 셰이핑되는 cluster의 atlas 키잉·배치 정책은 실제 CoreText 결과를 보고 확정한다(현재 base+glyph_id 기준 — NFD 음절·이모지는 합성 후 단일/소수 glyph라 실사용 충돌 없음).
-- 정규화(NFC/NFD) 자체는 도입하지 않는다(§3.1). 만약 외부 요구로 입력 정규화가 필요해지면 전략 수정이므로 [PR 체크리스트](pr-checklist.md) 절차에 따라 사용자와 먼저 논의한다.
+- **터미널 그리드**에는 정규화(NFC/NFD)를 도입하지 않는다(§3.1). 만약 외부 요구로 입력 정규화가 필요해지면 전략 수정이므로 [PR 체크리스트](pr-checklist.md) 절차에 따라 사용자와 먼저 논의한다. **chrome 셀 텍스트는 예외**로 표시 직전 NFC 조합을 한다(§3.1a — cluster 저장·셰이핑이 없는 층이라 근거가 반대다).
+- chrome 셀 텍스트의 남은 한계(§3.1a): **옛한글(첫가끝) 조합은 NFC로 안 합쳐져** 파일명에 옛한글이 있으면 여전히 자모로 흩어진다. 근본 해결은 chrome `DrawCell`에 cluster(다중 코드포인트)를 실어 CoreText로 셰이핑하는 것 — 터미널이 HG2a~HG3에서 한 일을 chrome 경로에도 하는 별개 슬라이스다. 현대 한글이 파일명의 사실상 전부라 실사용 증상이 없어 대기 상태로 둔다(measure-first).

@@ -3700,6 +3700,30 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
               **c3c — typed take와 combined commit.** `CommittedScreenBacklog`이 final storage 안에서 exact token
               slice를 소유한다. `SourceRef`/source-ordinal backing은 현재 consumer가 쓰지 않고 token 배열 자체가
               source order이므로 c3에서 제거한다. destination address/empty/non-alias와 모든 sub-plan은 ledger mutation 전에 seal한다.
+              c3c는 다음 세 merge slice로 닫는다. 앞 slice의 final-address owner와 검증 API는 뒤 slice가 그대로
+              소비하며 같은 plan을 다시 parse/materialize하지 않는다.
+              - **c3c-1 — aggregate composition:** 기존 `PreparedScreenBacklog`, sealed
+                `PreparedSourceDecision`, `external_event_materialization.Prepared`를
+                `PreparedExternalAdoption` 한 final address에 embed한다. evidence의 initial seed/authority에서 fold
+                input을 한 번 만들고 source fold→decision→metadata materialization→screen plan 순서로 준비한다.
+                aggregate 전체 destination non-alias를 첫 write 전에 증명하고 `.adoption_preparing` 동안
+                allocator callback의 prepare/teardown 재진입을 busy로 거부한다. 각 fallible sub-plan 준비 뒤와
+                outer publish 전에 full decision/source와 모든 준비된 nested owner를 다시 검증한다. screen
+                `MetadataFootprint`와 metadata `PreparedMetadataFootprint`의 resident/prepare peak를 checked-add해
+                `external_adoption_limits.max_metadata_bytes` exact cap을 한 곳에서 적용한다. aggregate result도
+                storage/client/ledger/evidence 주소, decision과 두 sub-plan에 seal되고 caller scalar로 받지 않는다.
+                non-adopted verdict의 immediate suffix, ledger seed mutation, Client disarm/take와 active publish는
+                아직 하지 않는다. 대신 lossless decision을 같은 final-address plan의 `.non_adopted` branch에
+                보존하고 public `deferred_non_adopted`는 payload를 복제하지 않는다. 이 slice의 public 결과는
+                adopted plan prepared, deferred non-adopted plan, reentrant `busy` 또는 기존 typed
+                terminal/retryable이며 c3c 전체 완료를 뜻하지 않는다.
+              - **c3c-2 — typed take와 combined commit:** 마지막 fallible `ledger.commitSeeds` 뒤 token/header move,
+                metadata initial/event take, resize/authority/request state take, Client disarm과 마지막 live publish를
+                no-fail suffix로 닫는다. non-adopted recovery/terminal immediate suffix도 이 slice에서 기존
+                `PrepareStatus`를 `AdoptionPrepareStatus`로 교체하며 함께 연다.
+              - **c3c-3 — owner event lease와 teardown:** `OwnerMetadataState`, resize/metadata borrow/finish generation,
+                projection retry와 terminal revoke, partial-consume teardown·ledger final-zero를 닫는다.
+
               `PreparedClientAdoption.commitScreenSeedsInto(client,ledger,out)`는 ledger `commitSeeds`가 실패하기
               전까지만 error를 반환하고, 성공 직후부터 token slice-header move/source tombstone만 수행하는 no-error
               suffix다. raw transfer field를 외부에 노출하거나 caller가 직접 null/free하지 않는다.
@@ -4033,8 +4057,9 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
         공유하고 leave가 남은 budget 중 최대 100 ms를 쓴다. signal/revoke/error cleanup은 active/latest와 detach를
         버리고 하나의 100 ms deadline 안에서 leave를 시도한 뒤 즉시 raw restore/signal forwarding으로 간다.
 
-    **P5c3c-1a~2a, 2b1, 2b2a~c2와 2b2c3-c3a1~a2는 구현 완료, c3b~3b는 계획 상태다.**
-    2b2c3 전체는 c3b~c까지 green이 아니므로 아직 계획 상태다. 각 slice는 P5c3a~b의 Debug/ReleaseFast gate를 재실행하고 다음 slice가 실제
+    **P5c3c-1a~2a, 2b1, 2b2a~c2와 2b2c3-c3a1~c3b는 구현 완료다.
+    c3c-1은 이 branch의 검증·병합 대상이고 c3c-2~3b는 계획 상태다.**
+    2b2c3 전체는 c3c 전체가 green이 아니므로 아직 계획 상태다. 각 slice는 P5c3a~b의 Debug/ReleaseFast gate를 재실행하고 다음 slice가 실제
     consumer로 쓰지 않는 임시 public API는 만들지 않는다.
 
     raw 진입 전에도 기존 `SO_RCVTIMEO`/blocking `writeAll`을 deadline으로 간주하지 않는다. resolver 전체, selected

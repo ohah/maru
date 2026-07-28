@@ -9,12 +9,14 @@ const c = std.c;
 const posix = std.posix;
 const client_mod = @import("client.zig");
 const compatibility = @import("compatibility.zig");
+const external_adoption_limits = @import("external_adoption_limits.zig");
 const ledger_mod = @import("external_inbox_ledger.zig");
 const framing = @import("framing.zig");
 const protocol = @import("protocol.zig");
 const request_id_state = @import("request_id_state.zig");
 
-pub const max_adoption_metadata_bytes: usize = 4 * 1024 * 1024;
+pub const max_adoption_metadata_bytes: usize =
+    external_adoption_limits.max_metadata_bytes;
 
 pub const Lifecycle = enum { empty, prepared, committed, aborted };
 pub const SourceRef = struct { ordinal: u32 };

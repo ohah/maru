@@ -436,6 +436,16 @@ test "validated metadata token construction and materialization stay in classifi
             entry.path,
             "platform/macos/session_host/remote_runtime.zig",
         );
+        const is_client = std.mem.eql(
+            u8,
+            entry.path,
+            "platform/macos/session_host/client.zig",
+        );
+        const is_external_event_materialization = std.mem.eql(
+            u8,
+            entry.path,
+            "platform/macos/session_host/external_event_materialization.zig",
+        );
 
         const field_refs = std.mem.count(u8, source, "classifier_preflight");
         if (field_refs != 0) {
@@ -449,6 +459,31 @@ test "validated metadata token construction and materialization stay in classifi
         }
         if (std.mem.indexOf(u8, source, "decodeMetadataEvent") != null)
             try std.testing.expect(is_metadata_wire);
+
+        const exact_event_materializer_refs = std.mem.count(
+            u8,
+            source,
+            "materializeExactEventMetadata",
+        );
+        if (exact_event_materializer_refs != 0)
+            try std.testing.expect(is_metadata_wire or is_client);
+
+        inline for (.{
+            "sealOwnedMetadataDto",
+            "validateOwnedMetadataDescriptor",
+            "validateOwnedMetadataSeal",
+        }) |owned_seal_api| {
+            if (std.mem.indexOf(u8, source, owned_seal_api) != null)
+                try std.testing.expect(
+                    is_metadata_wire or is_external_event_materialization,
+                );
+        }
+        if (std.mem.indexOf(
+            u8,
+            source,
+            "ownedMetadataSemanticEqlEvent",
+        ) != null)
+            try std.testing.expect(is_metadata_wire or is_client);
 
         const private_materializer_refs = std.mem.count(
             u8,
@@ -746,6 +781,32 @@ test "session host external source decision stays outside pump and owning materi
         source,
         "std.mem.Allocator",
     ));
+}
+
+test "session host prepared metadata mechanics stay inside their final-address owner" {
+    const allocator = std.testing.allocator;
+    var dir = try std.Io.Dir.cwd().openDir(std.testing.io, "src", .{ .iterate = true });
+    defer dir.close(std.testing.io);
+    var walker = try dir.walk(allocator);
+    defer walker.deinit();
+
+    while (try walker.next(std.testing.io)) |entry| {
+        if (entry.kind != .file or !std.mem.endsWith(u8, entry.basename, ".zig")) continue;
+        const is_owner = std.mem.eql(
+            u8,
+            entry.path,
+            "platform/macos/session_host/external_event_materialization.zig",
+        );
+        const path = try std.fmt.allocPrint(allocator, "src/{s}", .{entry.path});
+        defer allocator.free(path);
+        const source = try readZigFileZ(allocator, path);
+        defer allocator.free(source);
+        if (!is_owner)
+            try std.testing.expect(!containsRestrictedName(
+                source,
+                "PreparedOwnedMetadata",
+            ));
+    }
 }
 
 fn containsExactIdentifier(source: [:0]const u8, expected: []const u8) bool {

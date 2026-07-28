@@ -3448,8 +3448,9 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
               state, tagged metadata/resize winner coherence, screen-cap recovery와 derived decision matcher가
               `external_source_decision.zig`에 구현되었다. exact/cap+1, request zero/max, terminal/action
               precedence, current/event metadata forgery, resize proof, revoked authority, fold/decision cross-swap을
-              fixture로 고정한다. 아직 event fingerprint/owning metadata materialization 또는 c3c publish를
-              만들지 않으므로 c3b 전체 완료를 뜻하지 않는다.
+              fixture로 고정한다. event winner의 wire/Client materialization primitive와 final-address prepared
+              metadata owner도 구현됐지만 기존 screen plan과의 aggregate 4 MiB consumer 배선, c3c paired
+              take/publish는 아직 없으므로 c3b 전체 완료를 뜻하지 않는다.
               seal은 structural counts/counters, **raw `next_request_id: u64`**, ordered header+payload 전체를
               domain-separated SHA-256으로 묶는다. request ID 0도 seal/revalidate할 수 있지만 typed state로
               publish하지 않고 protocol terminal decision으로만 준비한다. outer
@@ -3510,8 +3511,9 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
               c3c adopted commit은 `PreparedClientAdoption`의 disarm suffix가 원본 owner를 정리하고, recovery
               commit만 Client private infallible `commitExternalRecoveryDiscard`로 screen/event owner 집합을 clear/free한다.
               adopted branch에서만 c2의 `PreparedScreenBacklog`를 `PreparedClientAdoption`으로 이름을 바로잡아
-              전체 Client inventory/disarm cleanup을 한 번 소유하고 `screen: PreparedScreenTransfer`,
-              `events: PreparedInitialEvents`를 같은 inventory/source seal에 bind한다. terminal/recovery decision은
+              전체 Client inventory/disarm cleanup을 한 번 소유하고 screen transfer와 아래 단일 metadata winner
+              owner를 같은 source decision에 bind한다. FIFO 전체 event fingerprint/owner 배열은 만들지 않는다.
+              terminal/recovery decision은
               allocation-backed inventory를 만들지 않는다. c3c commit은 exclusive owner call 안에서 callback,
               yield, 외부 관측점 없이 즉시 no-fail suffix를 실행한다. terminal은 exact reason으로 Client close, recovery는
               `Client.commitExternalRecoveryDiscard(seal)`로 screen/event arrays/counters/request scalar를 no-fail
@@ -3558,7 +3560,7 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
               public adapter는 macOS `Client`와 scratch를 받아 live re-fold를 검증하고, 그 뒤의 private pure
               derivation만 sealed fold를 exhaustive verdict로 바꾼다. 후속 adopted-only
               materialization이 final-address `PreparedExternalAdoption`에 nonoptional
-              `PreparedClientAdoption`/allocation-backed fingerprints/screen plan과 이 decision을 embed한다.
+              `PreparedClientAdoption`/screen plan, 단일 `PreparedMetadata` winner와 이 decision을 embed한다.
               public `decide(client,input,fold,scratch)`는 먼저
               `Client.externalAdoptionFoldResultMatches`로 live source 전체를 재검증하고 실패하면
               `inconsistent_fold`만 반환한다. raw fold-only 판정은 private trusted leaf다. prepare와 commit 사이
@@ -3568,20 +3570,41 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
               revoked/adopted `verdict.LiveState.authority`와 top-level `request_state`가 유일한 publish SSOT이고
               Client inventory의 해당 값은 cleanup/revalidation fingerprint일 뿐 semantic owner가 아니다.
 
-              `PreparedInitialEvents`는 payload copy가 아니라 `ExternalEventFingerprint[]`(exact header, raw SHA-256,
-              semantic SHA-256, classified scalar), staged owning metadata winner, primary/cleanup mirror와 final-address
-              seal을 소유한다. `Client.stageExternalEventFingerprints`/`externalEventFingerprintsMatch`가 c2
-              screen-copy API와 같은 inventory/alias/final-address 계약으로 descriptor를 stage/revalidate한다.
-              Phase A metadata/resize winner는 owning view가 아니라
+              **Adopted metadata winner materialization.** 전체 `ExternalEventFingerprint[]`,
+              `PreparedInitialEvents`, 별도 `CandidateToken`은 만들지 않는다. closed fold가 이미 FIFO 전체를
+              seal/reduce했고 `MetadataCandidate` 하나가 event ordinal, raw·semantic digest와 exact preflight를
+              보존하므로 배열은 중복이며, fold 뒤 전체 fingerprint staging은 금지한 두 번째 semantic traversal이
+              된다. `unsupported`/`unavailable` winner는 tag만 보존하고 allocation 0, `initial` winner는 기존
+              `PreparedAdoptionEvidence.seed`의 full binding seal만 보존해 복제/take 0, `event` winner만 exact
+              Client FIFO ordinal에서 `OwnedMetadataDto` 한 개를 materialize한다.
+
+              `runtime_metadata_wire`는 Client/decision을 import하지 않고 raw digest, metadata event tag,
+              span/process 구조와 backing/resident footprint를 재검증하는 wire→owning DTO SSOT를 유지한다.
+              `Client.materializeExternalMetadataEvent`는 decision 타입을 import하지 않고
+              `{expected_fold,event MetadataCandidate}` primitive를 받는다. allocation 전에
+              `externalAdoptionFoldResultMatches`, adopted outcome의 exact winner, ordinal<count, exact
+              header/payload/preflight를 재결합한 뒤 wire의 lexical parser를 다시 실행하고 exact preflight
+              equality를 요구하는 좁은 owning materializer를 호출한다. 이 entrypoint는 live authority classifier를
+              대체하지 않으며 boundary gate가 Client 한 곳 외의 제품 호출을 금지한다.
+              allocation 뒤 같은 full fold matcher를 다시 실행하고 drift면 새 DTO를 즉시 deinit해
+              `StaleSource`로 닫는다. 이는 staging용 두 번째 semantic traversal이 아니라 기존 final
+              revalidation이며 raw payload 총 8 MiB를 복제하지 않는다.
+
+              outer `external_event_materialization.zig`의 final-address `Prepared` wrapper 안 `PreparedMetadata`는
+              `unsupported | unavailable | initial(InitialMetadataBindingSeal) |
+              event(PreparedOwnedMetadata)` closed union이다. wrapper 주소와 nested event owner 주소를 모두
+              seal해 union 복사가 final-address capability를 다시 만들지 못하게 한다. `PreparedOwnedMetadata`만 allocator seal,
+              logical/cleanup mirror, DTO seal과 lifecycle을 소유한다. OOM은 partial owner를 정리한 뒤
+              `decisionMatches`가 unchanged일 때만 `retryable_preserved(.out_of_memory)`, drift면
+              `terminal(.inconsistent_source)`, schema/backing/resident cap 초과는 deterministic
+              `terminal(.resource_exhausted)`다. allocation 성공 뒤 matcher 실패도 DTO cleanup과 terminal이며
+              Client/evidence/storage publish mutation은 0이다. initial seed take와 event DTO take는 c3c paired
+              commit만 수행한다.
+
               source seal은 `attach_instance_id`를 bind하고 `event_parse_observer == null`을 eligibility로
               강제한다. raw `next_request_id == 0`은 descriptor/alias/preflight 및 FIFO semantic scan을 생략시키지
               않으며, full scan 뒤 outer decision에서 terminal protocol 결과로만 준비한다.
-              `stageExternalEventFingerprints`는 별도 traversal이 아니라 같은 closed fold의 private wrapper다.
-              `CandidateToken{event_ordinal,raw_digest,semantic_digest,exact_preflight}`이고 source seal의 lifetime
-              안에서만 유효하다. Phase B의 Client private materialize API만 exact ordinal/header/payload/digest를
-              다시 확인한 뒤 owning DTO를 만들 수 있다.
-              raw payload 총 8 MiB를 복제하지 않으며 final stale 검사는 source payload를 다시 domain-separated
-              SHA-256해 raw digest와 대조한다. Phase A는 Client/source mutation과 heap allocation 없이 **모든**
+              Phase A는 Client/source mutation과 heap allocation 없이 **모든**
               preserved screen/event header·payload와 request ID를 검사하고 FIFO scratch
               `{authority,metadata,resize}`를 전진시켜 최종 branch를 정한다. 첫 revoke 뒤 role은 observer이므로 두 번째
               revoke는 protocol terminal이다. metadata는 initial seed부터 같은 revision+same semantic은 duplicate,
@@ -3626,11 +3649,16 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
               checked-add한다. `max_owner_event_prepare_backing_bytes = 2 * protocol.max_control_json`은 already-owned
               initial baseline과 staged latest candidate 두 backing의 상한이며 prepare footprint는
               `2 * @sizeOf(OwnedMetadataDto)`를 checked-add한다. 여기에
-              `event_count * @sizeOf(ExternalEventFingerprint)`, source/event digest, Client inventory와 c2 screen
-              metadata를 checked-add한 전체가 기존 `max_adoption_metadata_bytes` 4 MiB 안에 들어야 한다.
+              source/event digest, Client inventory와 c2 screen metadata를 checked-add한 전체가
+              `external_adoption_limits.max_metadata_bytes` 4 MiB 안에 들어야 한다.
+              이번 slice는 `PreparedMetadataFootprint{resident_delta,prepare_peak_delta}`를 exact winner와 initial
+              baseline seal에서 계산·재검증한다. 기존 screen footprint와 checked-add해 aggregate
+              exact cap/cap+1/overflow를 판정하고 그 결과를 `PreparedExternalAdoption`에 embed·revalidate하는 것은
+              후속 c3c wrapper gate가 소유한다.
               raw `inventory.event_payload_bytes`는 복제하지 않지만 source resident/queue cap으로 별도 기록해
-              payload+metadata 총 메모리 peak artifact에 포함한다. process count/name/string의 exact backing size를
-              allocation 전에 계산하고 backing/inline/전체 footprint 각각의 cap/cap+1을 고정한다. prepare 후 같은 backing을 같은 길이로 event name,
+              payload+metadata 총 메모리 peak artifact에 포함한다. process count/name/string의 exact backing size는
+              allocation 전에 계산한다. backing/inline/전체 footprint 각각의 cap/cap+1 fixture는 c3c aggregate
+              wrapper gate에서 함께 고정한다. prepare 후 같은 backing을 같은 길이로 event name,
               runtime id, revision/generation, cols/rows만 바꾸어도 final allocation-free digest 재검증이 stale plan을
               거부하며 ledger/active publish mutation은 0이고 Client는 canonical terminal cleanup된다.
 
@@ -3645,7 +3673,9 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
               address/len/capacity를 sealed cleanup descriptor로 보존한다. primary 또는 cleanup mirror 하나가
               오염되면 sealed descriptor와 일치하는 다른 하나만 쓰며, 둘이 같은 forged valid slice를 가리켜도
               sealed descriptor와 불일치하면 free 0이다. canonical allocation은 exact once만 free하고 stale
-              copy/moved token/double deinit은 효과 0이다.
+              copy/moved token/double deinit은 효과 0이다. `PreparedOwnedMetadata` mechanics는 boundary gate로
+              owner module 밖 직접 참조를 금지한다. owner canonical descriptor, 두 DTO와 두 seal을 함께 일관되게
+              재작성하는 arbitrary process-memory corruption은 위 c3 위협 모델의 복구 범위 밖이다.
 
               recovery branch의 c3b decision과 c3c storage publish mapping은 다음처럼 닫혀 있다.
 

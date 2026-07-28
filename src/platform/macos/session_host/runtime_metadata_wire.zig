@@ -27,6 +27,11 @@ pub const DecodeError = error{
 pub const AttachGenerationSchema = runtime_event_wire.AttachGenerationSchema;
 pub const AttachDecodeProfile = runtime_event_wire.AttachDecodeProfile;
 
+pub const MaterializationFootprint = struct {
+    backing_bytes: usize,
+    resident_bytes: usize,
+};
+
 pub const AttachScalars = struct {
     stream_id: u64,
     controller_generation: u64,
@@ -66,6 +71,7 @@ pub const Process = struct {
         return self.bytes[0..self.len];
     }
 };
+pub const max_process_name_bytes: usize = @sizeOf(@TypeOf((Process{}).bytes));
 
 pub const OwnedMetadataDto = struct {
     allocator: std.mem.Allocator,
@@ -208,6 +214,15 @@ pub fn metadataSeedSemanticEqlEvent(
         .current => |*value| value,
         else => return false,
     };
+    return ownedMetadataSemanticEqlEvent(dto, event_payload, event_preflight);
+}
+
+pub fn ownedMetadataSemanticEqlEvent(
+    dto: *const OwnedMetadataDto,
+    event_payload: []const u8,
+    event_preflight: runtime_event_wire.EventPreflight,
+) bool {
+    if (!validateCurrentMetadataStructure(dto)) return false;
     if (!std.mem.eql(
         u8,
         &runtime_event_wire.payloadDigest(event_payload),
@@ -303,6 +318,65 @@ pub const MetadataSeedSeal = struct {
 };
 
 pub const MetadataSeedSealError = error{Malformed};
+
+/// Address-bound ownership/content seal for a standalone metadata DTO. Unlike
+/// `MetadataSeedSeal`, this does not invent a temporary seed union merely to bind the DTO.
+pub const OwnedMetadataSeal = struct {
+    dto_addr: usize,
+    allocator_ptr_addr: usize,
+    allocator_vtable_addr: usize,
+    backing_present: bool,
+    backing_addr: usize,
+    backing_len: usize,
+    revision: u64,
+    raw_digest: runtime_event_wire.Digest,
+    semantic_digest: runtime_event_wire.Digest,
+};
+
+pub const OwnedMetadataSealError = error{Malformed};
+
+pub fn sealOwnedMetadataDto(
+    dto: *const OwnedMetadataDto,
+) OwnedMetadataSealError!OwnedMetadataSeal {
+    if (!validateCurrentMetadataStructure(dto)) return error.Malformed;
+    const backing = dto.backing orelse &.{};
+    return .{
+        .dto_addr = @intFromPtr(dto),
+        .allocator_ptr_addr = @intFromPtr(dto.allocator.ptr),
+        .allocator_vtable_addr = @intFromPtr(dto.allocator.vtable),
+        .backing_present = dto.backing != null,
+        .backing_addr = if (dto.backing) |bytes| @intFromPtr(bytes.ptr) else 0,
+        .backing_len = backing.len,
+        .revision = dto.revision,
+        .raw_digest = runtime_event_wire.payloadDigest(backing),
+        .semantic_digest = metadataSemanticDigest(dto, backing),
+    };
+}
+
+/// Cleanup selection must not read a possibly forged backing. Content hashing is deliberately
+/// reserved for `validateOwnedMetadataSeal` after this descriptor-only check succeeds.
+pub fn validateOwnedMetadataDescriptor(
+    seal: OwnedMetadataSeal,
+    dto: *const OwnedMetadataDto,
+) bool {
+    return seal.dto_addr == @intFromPtr(dto) and
+        seal.allocator_ptr_addr == @intFromPtr(dto.allocator.ptr) and
+        seal.allocator_vtable_addr == @intFromPtr(dto.allocator.vtable) and
+        seal.backing_present == (dto.backing != null) and
+        seal.backing_addr == (if (dto.backing) |bytes| @intFromPtr(bytes.ptr) else 0) and
+        seal.backing_len == (if (dto.backing) |bytes| bytes.len else 0) and
+        seal.revision == dto.revision and
+        validateCurrentMetadataStructure(dto);
+}
+
+pub fn validateOwnedMetadataSeal(
+    seal: OwnedMetadataSeal,
+    dto: *const OwnedMetadataDto,
+) bool {
+    if (!validateOwnedMetadataDescriptor(seal, dto)) return false;
+    const actual = sealOwnedMetadataDto(dto) catch return false;
+    return std.meta.eql(seal, actual);
+}
 
 pub fn sealMetadataSeed(seed: *const InitialMetadataSeed) MetadataSeedSealError!MetadataSeedSeal {
     return switch (seed.*) {
@@ -687,9 +761,97 @@ fn materializeValidatedEvent(
     );
 }
 
-/// Product classification owns metadata immediately inside this module. Callers cannot feed a
-/// constructible `ValidatedMetadataView` to an owning decoder: the only public owning entrypoint
-/// first runs the header/identity/authority/capability classifier and consumes its lexical result.
+pub fn preflightEventMaterialization(
+    payload: []const u8,
+    preflight: runtime_event_wire.EventPreflight,
+) DecodeError!MaterializationFootprint {
+    const actual_digest = runtime_event_wire.payloadDigest(payload);
+    if (!std.mem.eql(u8, &actual_digest, &preflight.raw_digest))
+        return error.Malformed;
+    const metadata = switch (preflight.event) {
+        .metadata => |metadata| metadata,
+        else => return error.Malformed,
+    };
+    if (metadata.process_count > max_process_entries)
+        return error.ResourceExhausted;
+    var backing_bytes: usize = 0;
+    const fixed = [_]runtime_event_wire.StringSpan{
+        metadata.cwd,
+        metadata.window_title,
+        metadata.clipboard_read_target,
+    };
+    for (fixed) |span| {
+        if (!runtime_event_wire.validateStringSpan(payload, span))
+            return error.Malformed;
+        backing_bytes = std.math.add(
+            usize,
+            backing_bytes,
+            span.decoded_len,
+        ) catch return error.ResourceExhausted;
+    }
+    if (metadata.ssh_remote_dest) |span| {
+        if (!runtime_event_wire.validateStringSpan(payload, span))
+            return error.Malformed;
+        backing_bytes = std.math.add(
+            usize,
+            backing_bytes,
+            span.decoded_len,
+        ) catch return error.ResourceExhausted;
+    }
+    for (metadata.foregroundProcesses()) |process| {
+        if (process.name.decoded_len > max_process_name_bytes)
+            return error.ResourceExhausted;
+        if (!runtime_event_wire.validateStringSpan(payload, process.name))
+            return error.Malformed;
+    }
+    if (backing_bytes > protocol.max_control_json)
+        return error.ResourceExhausted;
+    const resident_bytes = std.math.add(
+        usize,
+        @sizeOf(OwnedMetadataDto),
+        backing_bytes,
+    ) catch return error.ResourceExhausted;
+    return .{
+        .backing_bytes = backing_bytes,
+        .resident_bytes = resident_bytes,
+    };
+}
+
+/// Re-runs the lexical event parser before allocating so callers cannot combine an authentic
+/// payload digest with caller-forged scalar fields in a constructible `EventPreflight`.
+pub fn materializeExactEventMetadata(
+    allocator: std.mem.Allocator,
+    payload: []const u8,
+    expected_identity: runtime_event_wire.ExpectedIdentity,
+    expected_preflight: runtime_event_wire.EventPreflight,
+) DecodeError!OwnedMetadataDto {
+    const actual = switch (runtime_event_wire.preflightEvent(
+        payload,
+        expected_identity,
+    )) {
+        .accepted => |accepted| accepted,
+        else => return error.Malformed,
+    };
+    if (!runtime_event_wire.eventPreflightEql(actual, expected_preflight))
+        return error.Malformed;
+    _ = try preflightEventMaterialization(payload, actual);
+    const metadata = switch (actual.event) {
+        .metadata => |metadata| metadata,
+        else => return error.Malformed,
+    };
+    return materializePreflight(
+        allocator,
+        payload,
+        metadata,
+        actual.raw_digest,
+    );
+}
+
+/// Product classification owns metadata immediately inside this module. General runtime event
+/// consumers cannot feed a constructible `ValidatedMetadataView` to an owning decoder. The narrow
+/// external-adoption entrypoint above re-runs the lexical parser and requires exact preflight
+/// equality; this classifier remains the only public owning entrypoint that applies live runtime
+/// authority and capability policy.
 pub const ClassifiedOwnedEvent = union(enum) {
     revoked: u64,
     invalidated,
@@ -1078,14 +1240,20 @@ test "event preflight materialization decodes escapes with one exact owning allo
         \\"foreground_available":true,"foreground_pgid":7,
         \\"processes":[{"pid":7,"name":"z\u0073h"}]}}
     ;
-    const metadata = switch (runtime_event_wire.preflightEvent(payload, .{})) {
-        .accepted => |accepted| switch (accepted.event) {
-            .metadata => |value| value,
-            else => return error.TestUnexpectedResult,
-        },
+    const accepted = switch (runtime_event_wire.preflightEvent(payload, .{})) {
+        .accepted => |accepted| accepted,
+        else => return error.TestUnexpectedResult,
+    };
+    const metadata = switch (accepted.event) {
+        .metadata => |value| value,
         else => return error.TestUnexpectedResult,
     };
     const source_digest = runtime_event_wire.payloadDigest(payload);
+    const footprint = try preflightEventMaterialization(payload, accepted);
+    try std.testing.expectEqual(
+        @sizeOf(OwnedMetadataDto) + footprint.backing_bytes,
+        footprint.resident_bytes,
+    );
 
     var failing = std.testing.FailingAllocator.init(
         std.testing.allocator,
@@ -1119,6 +1287,21 @@ test "event preflight materialization decodes escapes with one exact owning allo
     try std.testing.expectEqual(@as(u8, 1), dto.process_count);
     try std.testing.expectEqualStrings("zsh", dto.processes[0].slice());
     try std.testing.expect(std.mem.allEqual(u8, dto.processes[0].bytes[3..], 0));
+
+    var public_dto = try materializeExactEventMetadata(
+        std.testing.allocator,
+        payload,
+        .{},
+        accepted,
+    );
+    defer public_dto.deinit();
+    try std.testing.expect(OwnedMetadataDto.semanticEql(&dto, &public_dto));
+    var stale = accepted;
+    stale.raw_digest[0] ^= 1;
+    try std.testing.expectError(
+        error.Malformed,
+        preflightEventMaterialization(payload, stale),
+    );
 
     var mutated = payload.*;
     mutated[

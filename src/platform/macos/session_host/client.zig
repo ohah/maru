@@ -1191,6 +1191,13 @@ pub const ExternalAdoptionFoldError = ExternalSourceSealError || error{
     InvalidInitialBinding,
 };
 
+pub const ExternalMetadataMaterializeError =
+    runtime_metadata_wire.DecodeError || error{
+        InvalidAllocator,
+        InvalidCandidate,
+        StaleSource,
+    };
+
 const ExternalSourceSealEncoding = enum {
     process_identity,
     canonical_test,
@@ -3072,6 +3079,135 @@ pub const Client = struct {
             runtime_event_reducer.outcomeEql(actual.outcome, expected.outcome);
     }
 
+    pub fn materializeExternalMetadataEvent(
+        self: *const Client,
+        allocator: std.mem.Allocator,
+        input: ExternalAdoptionFoldInput,
+        expected_fold: ExternalAdoptionFoldResult,
+        candidate: runtime_event_reducer.MetadataCandidate,
+        scratch: *ExternalSourceOwnerRangeScratch,
+    ) ExternalMetadataMaterializeError!runtime_metadata_wire.OwnedMetadataDto {
+        if (!std.meta.eql(allocator, self.allocator))
+            return error.InvalidAllocator;
+        if (!self.externalAdoptionFoldResultMatches(input, expected_fold, scratch))
+            return error.StaleSource;
+        const state = switch (expected_fold.outcome) {
+            .adopted => |state| state,
+            else => return error.InvalidCandidate,
+        };
+        const expected_candidate = state.metadata orelse
+            return error.InvalidCandidate;
+        if (!runtime_event_reducer.metadataCandidateEql(
+            candidate,
+            expected_candidate,
+        )) return error.InvalidCandidate;
+        const ordinal = switch (candidate.origin) {
+            .initial => return error.InvalidCandidate,
+            .event => |ordinal| ordinal,
+        };
+        if (ordinal >= self.pending_events.items.len or
+            ordinal >= expected_fold.source_seal.event_count)
+            return error.InvalidCandidate;
+        const frame = self.pending_events.items[ordinal];
+        if (frame.preflight != null or frame.admission_seal != null or
+            frame.header.major != self.wire_major or
+            frame.header.kind != .event or
+            frame.header.stream_id != input.identity.stream_id or
+            frame.header.request_id != 0 or frame.header.flags != 0 or
+            frame.header.payload_len != frame.payload.len or
+            frame.payload.len > protocol.max_control_json)
+            return error.InvalidCandidate;
+        const accepted = switch (runtime_event_wire.preflightEvent(
+            frame.payload,
+            .{
+                .runtime_id = input.identity.runtime_id,
+                .stream_id = input.identity.stream_id,
+            },
+        )) {
+            .accepted => |accepted| accepted,
+            else => return error.InvalidCandidate,
+        };
+        const proof = switch (candidate.proof) {
+            .initial => return error.InvalidCandidate,
+            .event => |proof| proof,
+        };
+        if (!runtime_event_wire.eventPreflightEql(accepted, proof))
+            return error.InvalidCandidate;
+        _ = try runtime_metadata_wire.preflightEventMaterialization(
+            frame.payload,
+            accepted,
+        );
+        var dto = try runtime_metadata_wire.materializeExactEventMetadata(
+            allocator,
+            frame.payload,
+            .{
+                .runtime_id = input.identity.runtime_id,
+                .stream_id = input.identity.stream_id,
+            },
+            accepted,
+        );
+        errdefer dto.deinit();
+        if (!self.externalAdoptionFoldResultMatches(input, expected_fold, scratch))
+            return error.StaleSource;
+        return dto;
+    }
+
+    pub fn externalMetadataDtoMatchesEventCandidate(
+        self: *const Client,
+        input: ExternalAdoptionFoldInput,
+        expected_fold: ExternalAdoptionFoldResult,
+        candidate: runtime_event_reducer.MetadataCandidate,
+        dto: *const runtime_metadata_wire.OwnedMetadataDto,
+        scratch: *ExternalSourceOwnerRangeScratch,
+    ) bool {
+        if (!self.externalAdoptionFoldResultMatches(input, expected_fold, scratch))
+            return false;
+        const state = switch (expected_fold.outcome) {
+            .adopted => |state| state,
+            else => return false,
+        };
+        if (!runtime_event_reducer.metadataCandidateEql(
+            candidate,
+            state.metadata orelse return false,
+        )) return false;
+        const ordinal = switch (candidate.origin) {
+            .initial => return false,
+            .event => |ordinal| ordinal,
+        };
+        if (ordinal >= self.pending_events.items.len or
+            ordinal >= expected_fold.source_seal.event_count)
+            return false;
+        const frame = self.pending_events.items[ordinal];
+        if (frame.preflight != null or frame.admission_seal != null or
+            frame.header.major != self.wire_major or
+            frame.header.kind != .event or
+            frame.header.stream_id != input.identity.stream_id or
+            frame.header.request_id != 0 or frame.header.flags != 0 or
+            frame.header.payload_len != frame.payload.len or
+            frame.payload.len > protocol.max_control_json)
+            return false;
+        const accepted = switch (runtime_event_wire.preflightEvent(
+            frame.payload,
+            .{
+                .runtime_id = input.identity.runtime_id,
+                .stream_id = input.identity.stream_id,
+            },
+        )) {
+            .accepted => |accepted| accepted,
+            else => return false,
+        };
+        const proof = switch (candidate.proof) {
+            .initial => return false,
+            .event => |proof| proof,
+        };
+        return runtime_event_wire.eventPreflightEql(accepted, proof) and
+            runtime_metadata_wire.ownedMetadataSemanticEqlEvent(
+                dto,
+                frame.payload,
+                accepted,
+            );
+    }
+
     pub fn previewExternalAdoption(
         self: *const Client,
         target_stream: u64,
@@ -3185,6 +3321,27 @@ pub const Client = struct {
             .start = @intFromPtr(destination),
             .len = destination_len,
         });
+    }
+
+    /// Allocation-free destination proof for c3b preparation. The source scratch is already part
+    /// of the fold contract, so using it avoids an allocator callback before scalar winners.
+    pub fn preflightExternalAdoptionDestinationWithScratch(
+        self: *const Client,
+        destination: *const anyopaque,
+        destination_len: usize,
+        scratch: *ExternalSourceOwnerRangeScratch,
+    ) ExternalSourceSealError!void {
+        const destination_range = (checkedExternalRange(
+            @intFromPtr(destination),
+            destination_len,
+        ) catch |err| return narrowExternalSourceSealError(err)) orelse return;
+        const stats = validateExternalSourceOwnerRanges(self, scratch) catch |err|
+            return narrowExternalSourceSealError(err);
+        if (externalRangesOverlap(externalRangeOfValue(self), destination_range))
+            return error.InvalidAlias;
+        for (scratch.ranges[0..stats.total_ranges]) |range|
+            if (externalRangesOverlap(range, destination_range))
+                return error.InvalidAlias;
     }
 
     /// Performs the final whole-owner proof for the paired Client/evidence move.
@@ -8996,6 +9153,36 @@ test "external source fold keeps seed tags and scans terminal FIFO tails" {
         &scratch,
     );
     try std.testing.expect(same_events.outcome == .adopted);
+    const event_candidate = same_events.outcome.adopted.metadata.?;
+    var materialized = try client.materializeExternalMetadataEvent(
+        allocator,
+        .{
+            .identity = identity,
+            .authority = authority,
+            .initial_metadata = .unavailable,
+        },
+        same_events,
+        event_candidate,
+        &scratch,
+    );
+    defer materialized.deinit();
+    try std.testing.expectEqualStrings("/repo", materialized.cwd());
+    var wrong_candidate = event_candidate;
+    wrong_candidate.origin = .{ .event = wrong_candidate.origin.event + 1 };
+    try std.testing.expectError(
+        error.InvalidCandidate,
+        client.materializeExternalMetadataEvent(
+            allocator,
+            .{
+                .identity = identity,
+                .authority = authority,
+                .initial_metadata = .unavailable,
+            },
+            same_events,
+            wrong_candidate,
+            &scratch,
+        ),
+    );
     client.pending_events.items[1].preflight = .unknown;
     const contaminated = try client.foldExternalAdoptionSource(
         .{

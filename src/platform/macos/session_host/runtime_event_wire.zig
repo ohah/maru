@@ -133,26 +133,30 @@ pub fn decodeStringExact(
     destination: []u8,
 ) DecodeStringError!void {
     if (destination.len != span.decoded_len) return error.LengthMismatch;
+    if (!validateStringSpan(payload, span)) return error.InvalidSpan;
     if (isSyntheticEmpty(span)) {
-        if (!std.mem.eql(u8, &span.digest, &sha(""))) return error.InvalidSpan;
         return;
     }
 
-    var iterator = JsonStringIterator.init(payload, span) orelse return error.InvalidSpan;
+    var iterator = JsonStringIterator.init(payload, span) orelse unreachable;
+    for (destination) |*byte| byte.* = iterator.next() orelse unreachable;
+}
+
+pub fn validateStringSpan(payload: []const u8, span: StringSpan) bool {
+    if (isSyntheticEmpty(span))
+        return std.mem.eql(u8, &span.digest, &sha(""));
+    var iterator = JsonStringIterator.init(payload, span) orelse return false;
     var hasher = Sha256.init(.{});
     var decoded_len: usize = 0;
     while (iterator.next()) |byte| {
         hasher.update(&.{byte});
-        decoded_len = std.math.add(usize, decoded_len, 1) catch return error.InvalidSpan;
-        if (decoded_len > span.decoded_len) return error.InvalidSpan;
+        decoded_len = std.math.add(usize, decoded_len, 1) catch return false;
+        if (decoded_len > span.decoded_len) return false;
     }
-    if (decoded_len != span.decoded_len) return error.InvalidSpan;
+    if (decoded_len != span.decoded_len) return false;
     var digest: Digest = undefined;
     hasher.final(&digest);
-    if (!std.mem.eql(u8, &digest, &span.digest)) return error.InvalidSpan;
-
-    iterator = JsonStringIterator.init(payload, span) orelse unreachable;
-    for (destination) |*byte| byte.* = iterator.next() orelse unreachable;
+    return std.mem.eql(u8, &digest, &span.digest);
 }
 
 /// Compares one validated JSON string span with already-decoded owned bytes without allocating.

@@ -124,6 +124,14 @@ pub const external_source_decision = if (builtin.os.tag == .macos)
     @import("session_host/external_source_decision.zig")
 else
     struct {};
+// external_event_materialization(P5c3c-2b2c3-c3b)는 decision이 고른 metadata winner
+// 하나만 final-address owner로 준비한다. 실제 take/publish는 후속 c3c paired commit 책임이다.
+pub const external_event_materialization = if (builtin.os.tag == .macos)
+    @import("session_host/external_event_materialization.zig")
+else
+    struct {};
+pub const external_adoption_limits =
+    @import("session_host/external_adoption_limits.zig");
 // client_source_transcript(P5c3c-2b2c3-c3b)는 Client/protocol 의미를 모르는 std-only
 // domain-separated byte encoder다. schema field order는 후속 Client adapter가 명시적으로 소유한다.
 pub const client_source_transcript = @import("session_host/client_source_transcript.zig");

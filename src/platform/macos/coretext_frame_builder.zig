@@ -338,7 +338,7 @@ fn appendEllipsizedTitle(
 }
 
 /// `title[i..]`의 grapheme cluster **하나**를 셀 하나로 방출한다(docs/grapheme-clustering.md §3.1a CG1).
-/// base 코드포인트는 셀에, 나머지(NFD 한글 V·T, 결합 악센트, VS16·skin-tone 같은 Extend)는 `pool`에 실어
+/// base 코드포인트는 셀에, 나머지(NFD 한글 V·T, 결합 악센트, VS16 같은 GB9 Extend)는 `pool`에 실어
 /// `grapheme_offset/count`로 가리킨다 — 터미널 `buildDrawList`가 `snapshot.graphemes`로 하는 것과 같은 모양이고,
 /// 셰이퍼가 base 뒤에 풀을 붙여 CoreText로 한 글리프를 만든다. 정규화는 하지 않는다(원본 코드포인트 그대로).
 /// 폭이 `limit_col`을 넘으면 **아무것도 안 내고** 들어온 col을 그대로 돌려준다(호출자가 그걸로 중단을 판단한다).
@@ -361,8 +361,14 @@ fn appendCluster(
     const end = @max(grapheme.clusterEnd(title, i), i + base.advance);
     const offset: u32 = @intCast(pool.items.len);
     var j = i + base.advance;
+    // extra 개수는 **상한이 없다** — GB9가 결합 문자 런을 통째로 한 cluster로 삼키므로(Zalgo 텍스트·상한 없는
+    // 주소창 URL) 65535를 넘을 수 있다. `grapheme_count`가 u16이라 그대로 @intCast하면 프레임 빌드 중 트랩으로
+    // 앱이 죽는다 — 여기서 잘라 **열화 렌더**로 끝낸다(code-review max). 잘린 extra는 pool에도 안 남긴다(카운트와
+    // 풀 내용이 어긋나면 셰이퍼가 남의 cluster를 이어 붙인다).
+    const max_extra = @as(usize, std.math.maxInt(u16));
     while (j < end and j < title.len) {
         const extra = decodeTitleCp(title, j);
+        if (pool.items.len - offset >= max_extra) break;
         try pool.append(allocator, @as(u32, extra.cp));
         j += extra.advance;
     }
@@ -653,12 +659,16 @@ pub fn buildSidebarDrawList(
         }
     }
 
+    // pool을 **먼저** 떼어 낸다: 리터럴 안에서 마지막에 평가하면 cells 소유권이 이미 넘어간 뒤라
+    // `errdefer cells.deinit`이 no-op이 되고, pool 할당 실패 시 cells 슬라이스가 샌다(code-review max).
+    const owned_pool = try pool.toOwnedSlice(allocator);
+    errdefer allocator.free(owned_pool);
     return .{
         .size = .{ .cols = cols, .rows = max_row + 1 },
         .cursor = .{ .row = 0, .col = 0, .visible = false },
         .dirty = .{ .start_row = 0, .end_row = max_row },
         .cells = try cells.toOwnedSlice(allocator),
-        .grapheme_pool = try pool.toOwnedSlice(allocator),
+        .grapheme_pool = owned_pool,
         .overlays = try allocator.alloc(renderer.DrawOverlay, 0),
     };
 }
@@ -713,12 +723,16 @@ pub fn buildPaneLabelDrawList(
         // [1, cols-1): col 0 = 좌측 패딩, 마지막 칸 = 탭과의 간격. 그 사이에 이름(말줄임 — rename 중이면 tail 앵커로 caret 유지).
         _ = try appendEllipsizedTitle(allocator, &cells, &pool, label, 0, 1, cols - 1, .{ .foreground = fg }, false, anchor); // pane 라벨(터미널 텍스트) — 아이콘 widen 안 함
     }
+    // pool을 **먼저** 떼어 낸다: 리터럴 안에서 마지막에 평가하면 cells 소유권이 이미 넘어간 뒤라
+    // `errdefer cells.deinit`이 no-op이 되고, pool 할당 실패 시 cells 슬라이스가 샌다(code-review max).
+    const owned_pool = try pool.toOwnedSlice(allocator);
+    errdefer allocator.free(owned_pool);
     return .{
         .size = .{ .cols = cols, .rows = 1 },
         .cursor = .{ .row = 0, .col = 0, .visible = false },
         .dirty = .{ .start_row = 0, .end_row = 0 },
         .cells = try cells.toOwnedSlice(allocator),
-        .grapheme_pool = try pool.toOwnedSlice(allocator),
+        .grapheme_pool = owned_pool,
         .overlays = try allocator.alloc(renderer.DrawOverlay, 0),
     };
 }
@@ -788,12 +802,16 @@ pub fn buildPaneAddressBarDrawList(
             }
         }
     }
+    // pool을 **먼저** 떼어 낸다: 리터럴 안에서 마지막에 평가하면 cells 소유권이 이미 넘어간 뒤라
+    // `errdefer cells.deinit`이 no-op이 되고, pool 할당 실패 시 cells 슬라이스가 샌다(code-review max).
+    const owned_pool = try pool.toOwnedSlice(allocator);
+    errdefer allocator.free(owned_pool);
     return .{
         .size = .{ .cols = cols, .rows = 1 },
         .cursor = .{ .row = 0, .col = 0, .visible = false }, // caret은 emitEditBand가 반전 블록 셀로 그림(DrawList 커서 아님)
         .dirty = .{ .start_row = 0, .end_row = 0 },
         .cells = try cells.toOwnedSlice(allocator),
-        .grapheme_pool = try pool.toOwnedSlice(allocator),
+        .grapheme_pool = owned_pool,
         .overlays = try allocator.alloc(renderer.DrawOverlay, 0),
     };
 }
@@ -815,12 +833,16 @@ pub fn buildPaneGripDrawList(
         const c = cols / 2; // 글리프를 grip 영역 중앙 칸에 — 양쪽 패딩
         _ = try appendEllipsizedTitle(allocator, &cells, &pool, "\u{283F}", 0, c, c + 1, .{ .foreground = fg }, false, .head); // braille(아이콘 아님)
     }
+    // pool을 **먼저** 떼어 낸다: 리터럴 안에서 마지막에 평가하면 cells 소유권이 이미 넘어간 뒤라
+    // `errdefer cells.deinit`이 no-op이 되고, pool 할당 실패 시 cells 슬라이스가 샌다(code-review max).
+    const owned_pool = try pool.toOwnedSlice(allocator);
+    errdefer allocator.free(owned_pool);
     return .{
         .size = .{ .cols = cols, .rows = 1 },
         .cursor = .{ .row = 0, .col = 0, .visible = false },
         .dirty = .{ .start_row = 0, .end_row = 0 },
         .cells = try cells.toOwnedSlice(allocator),
-        .grapheme_pool = try pool.toOwnedSlice(allocator),
+        .grapheme_pool = owned_pool,
         .overlays = try allocator.alloc(renderer.DrawOverlay, 0),
     };
 }
@@ -862,12 +884,16 @@ pub fn buildFilePanelHeaderDrawList(
                 try cells.append(allocator, .{ .row = 0, .col = col, .codepoint = '!', .width = 1, .style = .{ .foreground = active_fg } });
         }
     }
+    // pool을 **먼저** 떼어 낸다: 리터럴 안에서 마지막에 평가하면 cells 소유권이 이미 넘어간 뒤라
+    // `errdefer cells.deinit`이 no-op이 되고, pool 할당 실패 시 cells 슬라이스가 샌다(code-review max).
+    const owned_pool = try pool.toOwnedSlice(allocator);
+    errdefer allocator.free(owned_pool);
     return .{
         .size = .{ .cols = @max(cols, 1), .rows = 1 },
         .cursor = .{ .row = 0, .col = 0, .visible = false },
         .dirty = .{ .start_row = 0, .end_row = 0 },
         .cells = try cells.toOwnedSlice(allocator),
-        .grapheme_pool = try pool.toOwnedSlice(allocator),
+        .grapheme_pool = owned_pool,
         .overlays = try allocator.alloc(renderer.DrawOverlay, 0),
     };
 }
@@ -888,12 +914,16 @@ pub fn buildFileTreeHeaderDrawList(
     errdefer pool.deinit(allocator);
     if (cols > file_tree_inset_cols)
         _ = try appendEllipsizedTitle(allocator, &cells, &pool, "탐색기", 0, file_tree_inset_cols, cols, .{ .foreground = fg, .bold = true }, false, .head);
+    // pool을 **먼저** 떼어 낸다: 리터럴 안에서 마지막에 평가하면 cells 소유권이 이미 넘어간 뒤라
+    // `errdefer cells.deinit`이 no-op이 되고, pool 할당 실패 시 cells 슬라이스가 샌다(code-review max).
+    const owned_pool = try pool.toOwnedSlice(allocator);
+    errdefer allocator.free(owned_pool);
     return .{
         .size = .{ .cols = @max(cols, 1), .rows = 1 },
         .cursor = .{ .row = 0, .col = 0, .visible = false },
         .dirty = .{ .start_row = 0, .end_row = 0 },
         .cells = try cells.toOwnedSlice(allocator),
-        .grapheme_pool = try pool.toOwnedSlice(allocator),
+        .grapheme_pool = owned_pool,
         .overlays = try allocator.alloc(renderer.DrawOverlay, 0),
     };
 }
@@ -993,12 +1023,16 @@ pub fn buildFileTreeDrawList(
         if (conflict and cols >= 4)
             try cells.append(allocator, .{ .row = r, .col = cols - 4, .codepoint = '!', .width = 1, .style = .{ .foreground = if (selected) selection.?.foreground else active_fg, .bold = true } });
     }
+    // pool을 **먼저** 떼어 낸다: 리터럴 안에서 마지막에 평가하면 cells 소유권이 이미 넘어간 뒤라
+    // `errdefer cells.deinit`이 no-op이 되고, pool 할당 실패 시 cells 슬라이스가 샌다(code-review max).
+    const owned_pool = try pool.toOwnedSlice(allocator);
+    errdefer allocator.free(owned_pool);
     return .{
         .size = .{ .cols = @max(cols, 1), .rows = @max(visible_rows, 1) },
         .cursor = .{ .row = 0, .col = 0, .visible = false },
         .dirty = .{ .start_row = 0, .end_row = visible_rows -| 1 },
         .cells = try cells.toOwnedSlice(allocator),
-        .grapheme_pool = try pool.toOwnedSlice(allocator),
+        .grapheme_pool = owned_pool,
         .overlays = try allocator.alloc(renderer.DrawOverlay, 0),
     };
 }
@@ -1097,12 +1131,16 @@ pub fn buildPaneTabBarDrawList(
         try cells.append(allocator, .{ .row = 0, .col = plus_start + 1, .codepoint = '+', .width = 1, .style = style });
     }
 
+    // pool을 **먼저** 떼어 낸다: 리터럴 안에서 마지막에 평가하면 cells 소유권이 이미 넘어간 뒤라
+    // `errdefer cells.deinit`이 no-op이 되고, pool 할당 실패 시 cells 슬라이스가 샌다(code-review max).
+    const owned_pool = try pool.toOwnedSlice(allocator);
+    errdefer allocator.free(owned_pool);
     return .{
         .size = .{ .cols = @max(cols, 1), .rows = 1 },
         .cursor = .{ .row = 0, .col = 0, .visible = false },
         .dirty = .{ .start_row = 0, .end_row = 0 },
         .cells = try cells.toOwnedSlice(allocator),
-        .grapheme_pool = try pool.toOwnedSlice(allocator),
+        .grapheme_pool = owned_pool,
         .overlays = try allocator.alloc(renderer.DrawOverlay, 0),
     };
 }
@@ -1135,12 +1173,16 @@ pub fn buildFloatingTabDrawList(
         try cells.append(allocator, .{ .row = 0, .col = col, .codepoint = ' ', .width = 1, .style = style });
     }
 
+    // pool을 **먼저** 떼어 낸다: 리터럴 안에서 마지막에 평가하면 cells 소유권이 이미 넘어간 뒤라
+    // `errdefer cells.deinit`이 no-op이 되고, pool 할당 실패 시 cells 슬라이스가 샌다(code-review max).
+    const owned_pool = try pool.toOwnedSlice(allocator);
+    errdefer allocator.free(owned_pool);
     return .{
         .size = .{ .cols = @max(cols, 1), .rows = 1 },
         .cursor = .{ .row = 0, .col = 0, .visible = false },
         .dirty = .{ .start_row = 0, .end_row = 0 },
         .cells = try cells.toOwnedSlice(allocator),
-        .grapheme_pool = try pool.toOwnedSlice(allocator),
+        .grapheme_pool = owned_pool,
         .overlays = try allocator.alloc(renderer.DrawOverlay, 0),
     };
 }
@@ -1163,12 +1205,16 @@ pub fn buildFloatingTabTitleDrawList(
     const overlays = try allocator.alloc(renderer.DrawOverlay, 0);
     errdefer allocator.free(overlays);
     const owned_cells = try cells.toOwnedSlice(allocator);
+    // pool을 **먼저** 떼어 낸다: 리터럴 안에서 마지막에 평가하면 cells 소유권이 이미 넘어간 뒤라
+    // `errdefer cells.deinit`이 no-op이 되고, pool 할당 실패 시 cells 슬라이스가 샌다(code-review max).
+    const owned_pool = try pool.toOwnedSlice(allocator);
+    errdefer allocator.free(owned_pool);
     return .{
         .size = .{ .cols = @max(cols, 1), .rows = 1 },
         .cursor = .{ .row = 0, .col = 0, .visible = false },
         .dirty = .{ .start_row = 0, .end_row = 0 },
         .cells = owned_cells,
-        .grapheme_pool = try pool.toOwnedSlice(allocator),
+        .grapheme_pool = owned_pool,
         .overlays = overlays,
     };
 }
@@ -1215,12 +1261,16 @@ pub fn buildStickyCommandDrawList(
         try cells.append(allocator, .{ .row = 0, .col = col, .codepoint = ' ', .width = 1, .style = style });
     }
 
+    // pool을 **먼저** 떼어 낸다: 리터럴 안에서 마지막에 평가하면 cells 소유권이 이미 넘어간 뒤라
+    // `errdefer cells.deinit`이 no-op이 되고, pool 할당 실패 시 cells 슬라이스가 샌다(code-review max).
+    const owned_pool = try pool.toOwnedSlice(allocator);
+    errdefer allocator.free(owned_pool);
     return .{
         .size = .{ .cols = @max(cols, 1), .rows = 1 },
         .cursor = .{ .row = 0, .col = 0, .visible = false },
         .dirty = .{ .start_row = 0, .end_row = 0 },
         .cells = try cells.toOwnedSlice(allocator),
-        .grapheme_pool = try pool.toOwnedSlice(allocator),
+        .grapheme_pool = owned_pool,
         .overlays = try allocator.alloc(renderer.DrawOverlay, 0),
     };
 }
@@ -2293,6 +2343,35 @@ test "chrome 제목은 NFD를 grapheme cluster 셀로 낸다(한글 자모·라�
     try std.testing.expectEqual(@as(usize, 7), titleDisplayWidth(nfd_latin, false)); // "cafe"(4)+".md"(3)
     // 완성형과 같은 폭이어야 한다(같은 글자니까) — NFD/NFC가 레이아웃에서 동치.
     try std.testing.expectEqual(titleDisplayWidth("한글.md", false), titleDisplayWidth(nfd_hangul, false));
+}
+
+test "chrome DrawList 빌더는 할당 실패 지점 어디서든 새지 않는다(pool·cells 소유권 교차)" {
+    // 회귀(code-review max): CG1이 `.grapheme_pool = try pool.toOwnedSlice(allocator)`를 반환 리터럴 **안**에
+    // 넣으면서, cells 소유권이 이미 넘어간 뒤에 실패할 수 있는 fallible 필드가 생겼다. 그 시점의
+    // `errdefer cells.deinit`은 비워진 리스트에 대고 도는 no-op이라 owned cells 슬라이스가 통째로 샜다
+    // (메모리 압박 중이면 매 프레임 반복). 지금은 pool을 리터럴 **앞**에서 떼어 errdefer로 덮는다.
+    //
+    // 할당 실패를 지점마다 주입해 "어느 단계에서 실패해도 누수 0"을 고정한다 — 위 순서 규칙이 깨지면 여기서 잡힌다.
+    const Case = struct {
+        fn run(allocator: std.mem.Allocator) !void {
+            const dim: terminal.Color = .{ .rgb = .{ .r = 0x70, .g = 0x70, .b = 0x70 } };
+            // 라벨에 NFD 한글을 넣어 **pool이 실제로 할당되게** 한다(빈 pool이면 이 회귀 경로가 안 열린다).
+            const rows = [_]file_tree.Row{.{ .file = .{
+                .path = "/tmp/nfd.md",
+                .label = "\u{1112}\u{1161}\u{11AB}\u{1100}\u{1173}\u{11AF}.md",
+                .depth = 1,
+                .supported = true,
+                .open = false,
+                .active = false,
+                .dirty = false,
+                .external_change = false,
+                .symlink = false,
+            } }};
+            var dl = try buildFileTreeDrawList(allocator, &rows, null, 0, 1, 40, dim, dim, null);
+            dl.deinit(allocator);
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Case.run, .{});
 }
 
 test "file tree focused selection applies its theme contrast color to every row glyph" {

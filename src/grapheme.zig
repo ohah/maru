@@ -22,8 +22,11 @@ const width = @import("width.zig"); // EAW 셀 폭·combining 판정을 단일 �
 /// 아래 GB6/GB7/GB8 cluster 규칙의 입력으로 쓴다.
 pub const JamoClass = enum { none, L, V, T, LV, LVT };
 
-/// 코드포인트의 Hangul_Syllable_Type을 범위로 판정한다. 현대 자모뿐 아니라 옛한글·filler까지
-/// conjoining 블록 전체를 포함해, 첫가끝(옛한글)도 같은 cluster 규칙을 타게 한다.
+/// 코드포인트의 Hangul_Syllable_Type을 범위로 판정한다. **conjoining 블록 U+1100–U+11FF 전체**(현대 자모 +
+/// 그 블록 안의 옛 자모 + filler)와 완성형 음절을 덮는다. **Hangul Jamo Extended-A(U+A960–U+A97C)·
+/// Extended-B(U+D7B0–U+D7FB)는 아직 포함하지 않는다** — UAX#29는 그것들도 L/V/T로 지정하므로 그 자모를 쓰는
+/// 첫가끝 옛한글은 현재 자모별로 분절된다(docs/grapheme-clustering.md §7). 범위를 넓히면 터미널 셀 점유·폭이
+/// 함께 바뀌어(EAW·wcwidth 합의) `isConjoiningJamo`와 oracle까지 같이 손봐야 하므로 별도 슬라이스로 둔다.
 pub fn hangulClass(cp: u21) JamoClass {
     return switch (cp) {
         // conjoining 자모(NFD). U+1100~1112(현대 초성) + 옛 초성 + U+115F(초성 filler) 등.
@@ -86,16 +89,31 @@ pub fn isConjoiningJamo(cp: u21) bool {
 /// `start >= len`이면 len. 손상 UTF-8은 1바이트를 한 cluster로 본다(width.displayCols의 바이트 폴백과 정합).
 pub fn clusterEnd(bytes: []const u8, start: usize) usize {
     if (start >= bytes.len) return bytes.len;
-    const rest = bytes[start..];
-    var it = (std.unicode.Utf8View.init(rest) catch return start + 1).iterator();
-    var prev = it.nextCodepoint() orelse return bytes.len;
-    var end_in_rest = it.i; // 첫 코드포인트 끝
-    while (it.nextCodepoint()) |cp| {
-        if (!extendsCluster(prev, cp)) break; // 이 cp는 다음 cluster 시작 — 소비 안 함(idx가 앞에 머묾)
-        prev = cp;
-        end_in_rest = it.i;
+    // **앞으로 한 글자씩만 디코드한다.** 예전엔 `Utf8View.init(bytes[start..])`로 남은 슬라이스 **전체**를 먼저
+    // 검증했는데, 그러면 (1) cluster 하나를 재는 비용이 O(남은 길이)라 문자열을 훑으면 O(n²)가 되고
+    // (chrome 제목은 매 프레임 훑는다 — 상한 없는 주소창 URL에서 프레임이 초 단위로 멈췄다), (2) 뒤쪽 어딘가의
+    // 손상 바이트 하나가 **모든** start에서 init을 실패시켜 문자열 전체가 1바이트 cluster로 무너졌다
+    // (라벨 하나에 잡음 바이트가 섞이면 NFD 한글이 통째로 자모로 흩어짐 — code-review max).
+    // 지금은 손상이 **그 자리에서만** 1바이트 cluster가 된다(아래 decodeOne의 null 분기).
+    const first = decodeOne(bytes, start) orelse return start + 1; // 손상 UTF-8 = 1바이트 cluster
+    var prev = first.cp;
+    var i = start + first.len;
+    while (i < bytes.len) {
+        const next = decodeOne(bytes, i) orelse break; // 손상 바이트는 다음 cluster 시작으로 넘긴다
+        if (!extendsCluster(prev, next.cp)) break; // 이 cp는 다음 cluster 시작 — 소비 안 함
+        prev = next.cp;
+        i += next.len;
     }
-    return start + end_in_rest;
+    return i;
+}
+
+/// `bytes[i]`에서 시작하는 UTF-8 한 글자(손상이면 null — 호출자가 1바이트로 넘긴다). 슬라이스 전체를 검증하지
+/// 않는 것이 요점이다(위 clusterEnd 주석의 O(n²)·전역 실패 회귀).
+fn decodeOne(bytes: []const u8, i: usize) ?struct { cp: u21, len: usize } {
+    const len: usize = std.unicode.utf8ByteSequenceLength(bytes[i]) catch return null;
+    if (i + len > bytes.len) return null;
+    const cp = std.unicode.utf8Decode(bytes[i .. i + len]) catch return null;
+    return .{ .cp = cp, .len = len };
 }
 
 /// `bytes`에서 `i`(cluster 경계) **직전**의 cluster 경계 바이트 오프셋. `i==0`이면 0. `i`에서 끝나는 cluster의 시작.
@@ -219,6 +237,35 @@ test "clusterEnd/prevBoundary/snapToBoundary: 바이트 슬라이스 grapheme �
     try expectEqual(@as(usize, 1), snapToBoundary(s, 2));
     try expectEqual(@as(usize, 1), snapToBoundary(s, 3));
     try expectEqual(@as(usize, 4), snapToBoundary(s, 4)); // 경계는 그대로
+}
+
+test "clusterEnd: 손상 UTF-8은 그 자리에서만 1바이트 cluster다(뒤쪽 잡음이 앞 cluster를 무너뜨리지 않음)" {
+    // 회귀(code-review max): 예전 구현은 `Utf8View.init(bytes[start..])`로 **남은 슬라이스 전체**를 검증해서,
+    // 뒤쪽 어딘가의 잡음 바이트 하나가 모든 start에서 init을 실패시켰다 → 문자열 전체가 1바이트 cluster로
+    // 무너져 NFD 한글 라벨이 통째로 자모로 흩어졌다(비-UTF-8 프로그램의 OSC 2 제목에서 실제로 발생 가능).
+    const nfd_han = "\u{1112}\u{1161}\u{11AB}"; // NFD '한'
+    const noisy = nfd_han ++ "\xE9" ++ nfd_han; // 가운데 Latin-1 잔여 바이트
+    try expectEqual(nfd_han.len, clusterEnd(noisy, 0)); // ★ 앞 음절은 여전히 한 cluster
+    try expectEqual(nfd_han.len + 1, clusterEnd(noisy, nfd_han.len)); // 손상 바이트 = 1바이트 cluster
+    try expectEqual(noisy.len, clusterEnd(noisy, nfd_han.len + 1)); // ★ 뒤 음절도 온전히 한 cluster
+    // 잘린 시퀀스(선두 바이트만 있고 뒤가 없음)도 1바이트로 넘긴다 — 진행이 보장돼야 호출자가 무한루프에 안 빠진다.
+    const truncated = "\xE1\x84"; // U+1112의 앞 2바이트만
+    try expectEqual(@as(usize, 1), clusterEnd(truncated, 0));
+}
+
+test "clusterEnd: 문자열 순회가 선형이다(cluster마다 남은 슬라이스를 재검증하지 않는다)" {
+    // 회귀(code-review max): 예전 구현은 cluster 하나를 재는 데 O(남은 길이)를 써서 문자열 순회가 O(n²)였다.
+    // chrome 제목은 매 프레임 이 순회를 돌고(titleDisplayWidth), 주소창 URL은 길이 상한이 없어 큰 data: URI에서
+    // 프레임이 초 단위로 멈췄다. 여기선 **총 디코드 횟수**를 길이에 비례하게 유지하는지를 순회 횟수로 고정한다
+    // (시간 측정은 기계마다 달라 불안정하므로 쓰지 않는다).
+    const n = 4096;
+    var buf: [n]u8 = undefined;
+    @memset(&buf, 'a');
+    var steps: usize = 0;
+    var i: usize = 0;
+    while (i < buf.len) : (steps += 1) i = clusterEnd(&buf, i);
+    try expectEqual(@as(usize, n), steps); // ASCII n글자 = cluster n개(각 1바이트)
+    // O(n²)였다면 아래 순회가 4096×4096/2 ≈ 8.4M 바이트 검증을 했다. 지금은 각 호출이 1~2글자만 본다.
 }
 
 test "composeHangul: NFD conjoining 자모를 완성형 NFC로 조합(완성형·비-한글 무변)" {

@@ -657,6 +657,11 @@ test "product resolver discovers and pins the one host that owns a live runtime"
         "/tmp/maru-attach-resolver-{d}",
         .{c.getpid()},
     ) catch return error.SkipZigTest;
+    // The path is only unique per pid, and pids are reused. A previous run that ended before its
+    // cleanup — or whose `rmdir` failed because the tree was not empty — leaves a populated
+    // `session-host/hosts` behind, and `registryRootAbsent` then reports the registry as present.
+    // That flips the assertion below from `host_unavailable` to `denied`. Start from bare ground.
+    std.Io.Dir.cwd().deleteTree(testing.io, base) catch {};
     _ = c.mkdir(base.ptr, 0o700);
     const no_host = resolveProduct(testing.allocator, base, 1, try testPhase(.resolve));
     try testing.expectEqual(attach_cli.ExitCode.host_unavailable, no_host.failed);
@@ -682,8 +687,9 @@ test "product resolver discovers and pins the one host that owns a live runtime"
         var status: c_int = undefined;
         _ = c.waitpid(child, &status, 0);
         host_manifest.removeEmptyHostDirectories(session_dir, host_id);
-        _ = c.rmdir(session_dir.ptr);
-        _ = c.rmdir(base.ptr);
+        // `rmdir` only removes empty directories, so any file the hosts left behind (owner.lock,
+        // rollback-current, host.v1.json) used to strand the whole tree for the next pid to trip on.
+        std.Io.Dir.cwd().deleteTree(testing.io, base) catch {};
     }
 
     var owner_client = blk: {

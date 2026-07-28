@@ -224,4 +224,23 @@ cluster 분절은 코어 print 경로 `writeCodepoint`(`screen.zig`) **단일 �
 - 다중 glyph로 셰이핑되는 cluster의 atlas 키잉·배치 정책은 실제 CoreText 결과를 보고 확정한다(현재 base+glyph_id 기준 — NFD 음절·이모지는 합성 후 단일/소수 glyph라 실사용 충돌 없음).
 - 정규화(NFC/NFD)는 **어느 층에도** 도입하지 않는다(§3.1·§3.1a). 터미널은 앱과의 코드포인트 합의 때문에, chrome은 cluster 모델(CG1)로 통일해 정규화가 필요 없어졌기 때문이다. 만약 외부 요구로 입력 정규화가 필요해지면 전략 수정이므로 [PR 체크리스트](pr-checklist.md) 절차에 따라 사용자와 먼저 논의한다.
 - chrome cluster(§3.1a CG1)의 남은 범위: **이모지 ZWJ 시퀀스(GB11)·국기 RI 쌍(GB12/13)은 chrome에서 코드포인트별 셀**이다(`extendsCluster` 범위 밖). 터미널은 mode 2027 게이트 뒤에서 이 둘을 묶지만 chrome은 합의 상대가 없어 게이트 자체가 없으므로, 넣는다면 무조건 켜는 형태가 된다 — 라벨에서 실제로 문제가 됐다는 근거가 생기면 그때 한다(measure-first). 참고로 skin-tone·VS16은 GB9(Extend)라 **이미 묶인다**.
-- chrome 텍스트 방출 경로가 늘어날 때: cluster 순회는 `appendEllipsizedTitle` 한 곳에 있다. 셀을 직접 `append`하는 새 경로를 만들면 그 경로만 조용히 codepoint 단위로 되돌아간다 — 새 chrome 텍스트는 이 함수를 거치게 한다.
+- chrome 텍스트 방출 경로가 늘어날 때: cluster 순회는 `appendEllipsizedTitle` 한 곳에 있다. 셀을 직접 `append`하는 새 경로를 만들면 그 경로만 조용히 codepoint 단위로 되돌아간다 — **이 규율은 `tests/boundary/chrome_text_clusters.zig`가 강제한다**(§3.1b).
+
+### 3.1b 규율을 구조로: cluster 경계 가드
+
+"새 chrome 텍스트는 `appendEllipsizedTitle`을 거쳐라"는 리뷰 규칙만으로는 지켜지지 않는다 — 규칙을 어긴 그 PR에서 아무도 못 알아채는 것이 이 계열 버그의 특징이었다(NFD는 한글·악센트 이름이 있어야만 드러난다). 그래서 import 경계(`tests/boundary/imports.zig`)와 **같은 결의 소스 스캔**으로 빌드를 실패시킨다.
+
+**규칙**: *셀을 만드는 함수*가 UTF-8을 코드포인트로 디코드하면, 그 함수는 가드의 allowlist에 **이유와 함께** 등재돼야 한다.
+
+- "셀을 만든다"의 신호는 `.codepoint = `(DrawCell 리터럴)와 `cp[idx] = `(오버레이 raster 그리드)다. 셀을 안 만드는 디코더(설정 파싱·transcript·PTY 처리)는 자동으로 범위 밖이라, 무관한 편집이 이 가드를 깨우지 않는다.
+- allowlist는 **면제 목록이 아니라 부채 목록**이다. 등재 항목이 더 이상 규칙 대상이 아니면(= cluster로 옮겼거나 함수가 사라짐) 가드가 "등재를 지우라"고 실패한다 — 목록이 실제와 어긋나 거짓말하는 것을 막는다.
+
+현재 등재된 세 항목이 곧 남은 부채다.
+
+| 등재 | 왜 아직 codepoint 단위인가 |
+| --- | --- |
+| `emitEditBand`(주소창 편집 밴드) | caret 열이 `text_field.fieldLayout`(Σ max(1,cellWidth))과 1:1이라 cluster화하려면 L3 레이아웃까지 함께 바꿔야 한다. IME 조합은 입력 경계 `composeHangul`이 덮는다(§4.7) |
+| `buildSidebarHeaderDrawList`(사이드바 검색 밴드) | 위와 같은 caret 열 모델 — 함께 옮겨야 한다 |
+| `placeText`(chrome 오버레이·모달·세팅·팔레트·알림 텍스트) | DrawCell이 아니라 오버레이 raster 그리드(cp/fg/width 배열)에 직접 쓰는 별도 표현이라 CG1과 방식이 다르다 |
+
+(`buildSidebarDrawList`도 등재돼 있지만 성격이 다르다 — 활동 시각 `now`·`5m`만 직접 방출하고 그 producer가 ASCII만 내므로 cluster가 생길 수 없다. 카드 본문 줄은 `appendEllipsizedTitle`을 거친다.)

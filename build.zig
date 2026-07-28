@@ -1431,8 +1431,21 @@ pub fn build(b: *std.Build) void {
     const run_boundary_tests = b.addRunArtifact(boundary_tests);
     run_boundary_tests.setCwd(b.path("."));
 
+    // chrome 셀 텍스트의 grapheme cluster 규율(CG1) — 셀을 만드는 함수가 문자열을 codepoint 단위로 디코드하면
+    // NFD가 자모로 흩어진다(docs/grapheme-clustering.md §3.1a). import 경계와 같은 결의 소스 스캔이라 같은 step에 건다.
+    const chrome_text_boundary_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/boundary/chrome_text_clusters.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_chrome_text_boundary_tests = b.addRunArtifact(chrome_text_boundary_tests);
+    run_chrome_text_boundary_tests.setCwd(b.path("."));
+
     const boundary_step = b.step("check-boundaries", "Check facade import boundaries");
     boundary_step.dependOn(&run_boundary_tests.step);
+    boundary_step.dependOn(&run_chrome_text_boundary_tests.step);
 
     // config 문서 → 실제 키 드리프트 가드. schema.zig의 doc-drift 가드가 "스키마 키가 표에 있는가"(정방향)를 막는 반면,
     // 이쪽은 "문서가 광고하는 키가 실재하는가"(역방향)를 막는다 — 문서만 보고 config에 적었는데 조용히 무시되던

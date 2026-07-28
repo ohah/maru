@@ -23622,10 +23622,12 @@ pub const AppSession = struct {
             // 중단**한다 — 기본 셸 placeholder 1개를 넣어 그 pane이 기본 로그인 셸로 복원되게 한다(제목/cwd/command/
             // agent 전부 빈값 → restoreSpawn 기본 셸; 브라우저 콘텐츠는 어차피 미영속). 크기는 pane 첫 Term의 (sentinel여도
             // 유효한) core size에서 취한다.
-            // FP16 §5.0: 조건이 "PTY 목록이 비었나"가 아니라 "**persisted Term이 0인가**"다 — 파일 Term만 있는
-            // pane에 엉뚱한 셸 placeholder가 끼면 복원 때 안 열었던 터미널이 생긴다. 브라우저만 있는 pane은
-            // 여전히 persisted 0이라 placeholder를 받는다(현행 동작 유지).
-            if (surfaces.items.len == 0 and file_terms.items.len == 0) {
+            // FP16 §5.0: 조건이 "PTY 목록이 비었나"가 아니라 "**복원할 Term이 0인가**"다 — 파일 Term만 있는
+            // pane에 엉뚱한 셸 placeholder가 끼면 복원 때 안 열었던 터미널이 생긴다.
+            // WP-P: URL 있는 브라우저도 이제 복원되므로 **같은 이유로** 세어야 한다(docs/workspace-restore.md
+            // §WP-P). 안 그러면 브라우저만 있던 pane이 브라우저 + 안 열었던 셸 탭으로 되살아난다.
+            // URL 없는 브라우저만 있는 pane은 여전히 복원할 것이 0이라 종전대로 placeholder를 받는다.
+            if (surfaces.items.len == 0 and file_terms.items.len == 0 and browser_terms.items.len == 0) {
                 const c = &pane.terms.items[0].surface.core; // sentinel이어도 size 유효(1×1)
                 try surfaces.append(arena, .{
                     .custom_name = try arena.dupe(u8, ""),
@@ -49129,6 +49131,46 @@ test "windowTitle: 활성 web Term은 kind 라벨(Browser)을 반환(sentinel �
     session.dispatchAppAction(.new_web_tab); // web(browser) Term 활성화
     try std.testing.expect(session.activePane().activeTerm().kind == .web);
     try std.testing.expectEqualStrings("Browser", session.windowTitle());
+}
+
+// WP-P 회귀: URL 있는 브라우저만 있는 pane이 셸 placeholder까지 받으면 복원 때 **안 열었던 터미널 탭**이 생긴다
+// (FP16 §5.0이 파일 Term에 대해 막아 둔 것과 같은 결함이 브라우저에서 재발). placeholder 조건이 "복원할 Term이
+// 0인가"를 세는지 고정한다 — 문서(§WP-P)는 이미 그렇게 적혀 있었고 코드만 안 따라온 자리였다.
+test "captureWorkspaceTab: URL 있는 브라우저만 있는 pane은 셸 placeholder를 안 받는다 (WP-P)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+
+    // pane = [브라우저] 만 남긴다(터미널 닫기).
+    session.dispatchAppAction(.new_web_tab);
+    const pane = session.activePane();
+    try std.testing.expectEqual(@as(usize, 2), pane.terms.items.len);
+    session.focusTerm(0);
+    session.closeActiveTerm();
+    try std.testing.expectEqual(@as(usize, 1), pane.terms.items.len);
+    try std.testing.expect(pane.terms.items[0].kind == .web);
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    // (a) URL 관측이 없으면 복원할 것이 0 → 종전대로 placeholder 1개(빈 pane 복원 중단 방지).
+    {
+        const wtab = try session.captureWorkspaceTab(arena.allocator(), session.activeTab());
+        const wp = wtab.panes[0];
+        try std.testing.expectEqual(@as(usize, 0), wp.browser_terms.len);
+        try std.testing.expectEqual(@as(usize, 1), wp.surfaces.len); // placeholder
+    }
+
+    // (b) URL이 관측되면 그 브라우저가 복원되므로 placeholder가 **없어야** 한다.
+    session.setWebNavState(pane.terms.items[0].surfaceId(), false, false, "https://example.com/");
+    {
+        const wtab = try session.captureWorkspaceTab(arena.allocator(), session.activeTab());
+        const wp = wtab.panes[0];
+        try std.testing.expectEqual(@as(usize, 1), wp.browser_terms.len);
+        try std.testing.expectEqual(@as(usize, 0), wp.surfaces.len); // ★ 옛 코드: 안 열었던 셸 탭이 하나 생겼다
+    }
 }
 
 // FP16f 회귀(사용자 손 테스트 제보 "파일이 유지 안 된다"): 활성 탭이 **비영속 브라우저이고 pane의 마지막**이면

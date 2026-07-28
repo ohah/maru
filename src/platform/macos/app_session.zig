@@ -49750,6 +49750,8 @@ test "collector agentInfoWire: blocked는 별도 wire 값" {
 }
 
 test "collector agentInfoWire: none→null, claude/codex × running/idle/unknown 매핑(내부→wire 격리)" {
+    // 실 세션 하네스(initSmokeSessionSized)는 PTY·macOS 경로를 쓴다 — 비-macOS에서는 건너뛴다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
     try std.testing.expect(agentInfoWire(.none, .running) == null); // none이면 state 무관 null(wire 생략)
     try std.testing.expect(agentInfoWire(.none, .idle) == null);
 
@@ -56878,6 +56880,8 @@ test "M3d-2a-i 결함[3] mergeSessionInto: dst 활성 워크스페이스 보존(
 }
 
 test "FP4 file panel read: surface-pinned markdown and bounded relative asset" {
+    // 실 세션 하네스(initSmokeSessionSized)는 PTY·macOS 경로를 쓴다 — 비-macOS에서는 건너뛴다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
     const io = std.testing.io;
     const allocator = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
@@ -56911,6 +56915,8 @@ test "FP4 file panel read: surface-pinned markdown and bounded relative asset" {
 }
 
 test "FP4 file panel read: exact 8 MiB is allowed and limit plus one is rejected" {
+    // 실 세션 하네스(initSmokeSessionSized)는 PTY·macOS 경로를 쓴다 — 비-macOS에서는 건너뛴다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
     const io = std.testing.io;
     const allocator = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
@@ -56977,6 +56983,8 @@ test "FP4 file panel read: FIFOs are rejected without blocking" {
 }
 
 test "FP4 file panel readAsset: symlink escape and html surfaces are denied" {
+    // 실 세션 하네스(initSmokeSessionSized)는 PTY·macOS 경로를 쓴다 — 비-macOS에서는 건너뛴다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
     const io = std.testing.io;
     const allocator = std.testing.allocator;
     var root_tmp = std.testing.tmpDir(.{});
@@ -57016,6 +57024,8 @@ test "FP4 file panel readAsset: symlink escape and html surfaces are denied" {
 }
 
 test "FP14 readSelfImage: reads own image bytes, denies non-image kinds and symlink escape" {
+    // 실 세션 하네스(initSmokeSessionSized)는 PTY·macOS 경로를 쓴다 — 비-macOS에서는 건너뛴다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
     const io = std.testing.io;
     const allocator = std.testing.allocator;
     var root_tmp = std.testing.tmpDir(.{});
@@ -57065,6 +57075,8 @@ test "FP14 readSelfImage: reads own image bytes, denies non-image kinds and syml
 }
 
 test "FP4 file panel readAsset: replaced lexical parent symlink is denied" {
+    // 실 세션 하네스(initSmokeSessionSized)는 PTY·macOS 경로를 쓴다 — 비-macOS에서는 건너뛴다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
     const io = std.testing.io;
     const allocator = std.testing.allocator;
     var root_tmp = std.testing.tmpDir(.{});
@@ -57098,6 +57110,8 @@ test "FP4 file panel readAsset: replaced lexical parent symlink is denied" {
 }
 
 test "FP6 file panel write atomically replaces only the pinned markdown and preserves dirty until shell ack" {
+    // 실 세션 하네스(initSmokeSessionSized)는 PTY·macOS 경로를 쓴다 — 비-macOS에서는 건너뛴다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
     const io = std.testing.io;
     const allocator = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});

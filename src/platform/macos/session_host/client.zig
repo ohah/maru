@@ -20,6 +20,7 @@ const framing = @import("framing.zig");
 const socket_server = @import("socket_server.zig");
 const client_deadline = @import("client_deadline.zig");
 const client_external_mode = @import("client_external_mode.zig");
+const client_source_transcript = @import("client_source_transcript.zig");
 const screen_stream = @import("screen_stream.zig");
 const observation_wire = @import("observation_wire.zig");
 const resize_wire = @import("resize_wire.zig");
@@ -292,6 +293,21 @@ pub const BufferedEvent = struct {
         return runtime_event_wire.eventPreflightEql(seal_value.preflight, accepted);
     }
 };
+
+const buffered_event_source_schema_field_allowlist = [_][]const u8{
+    "header",
+    "payload",
+    "preflight",
+    "admission_seal",
+};
+comptime {
+    const fields = std.meta.fields(BufferedEvent);
+    if (fields.len != buffered_event_source_schema_field_allowlist.len)
+        @compileError("update ClientSourceSealSchema.v1 for every BufferedEvent field change");
+    for (fields, buffered_event_source_schema_field_allowlist) |field, expected|
+        if (!std.mem.eql(u8, field.name, expected))
+            @compileError("BufferedEvent field order drifted from ClientSourceSealSchema.v1");
+}
 
 pub const InventoryUnavailable = enum {
     unsupported,
@@ -1081,6 +1097,438 @@ fn validateExternalSourceOwnerRanges(
     };
 }
 
+const ExternalSourceSealError = client_source_transcript.Error || error{
+    IneligibleProfile,
+    InvalidCompatibilityProvenance,
+    InvalidClientState,
+    InvalidCounter,
+    InvalidStream,
+    InvalidHeader,
+    InvalidPartial,
+    InvalidAllocator,
+    InvalidAlias,
+    InvalidRequestId,
+    InvalidScreenSemantic,
+    ArithmeticOverflow,
+};
+
+fn narrowExternalSourceSealError(
+    err: ExternalAdoptionInspectError,
+) ExternalSourceSealError {
+    return switch (err) {
+        // Source sealing is allocation-free today. If a future validation leaf accidentally
+        // exposes allocation failure through the broad legacy inspect error set, fail closed
+        // instead of turning that maintenance drift into a runtime trap.
+        error.OutOfMemory => error.InvalidClientState,
+        else => |source_err| source_err,
+    };
+}
+
+const ClientSourceSeal = struct {
+    client_address: usize,
+    target_stream: u64,
+    attach_instance_id: u64,
+    raw_next_request_id: u64,
+    screen_source_count: usize,
+    screen_payload_bytes: usize,
+    event_count: usize,
+    event_payload_bytes: usize,
+    digest: client_source_transcript.Digest,
+};
+
+const ExternalSourceSealEncoding = enum {
+    process_identity,
+    canonical_test,
+
+    fn address(self: ExternalSourceSealEncoding, actual: usize, token: usize) usize {
+        return switch (self) {
+            .process_identity => actual,
+            .canonical_test => if (actual == 0) 0 else token,
+        };
+    }
+
+    fn fd(self: ExternalSourceSealEncoding, actual: c.fd_t) i32 {
+        return switch (self) {
+            .process_identity => @intCast(actual),
+            .canonical_test => 42,
+        };
+    }
+};
+
+const ExternalSourceSealEncoder = struct {
+    writer: client_source_transcript.Writer,
+    encoding: ExternalSourceSealEncoding,
+    client_address: usize,
+    target_stream: u64,
+    attach_instance_id: u64,
+    raw_next_request_id: u64,
+    screen_source_count: usize,
+    screen_payload_bytes: usize,
+    event_payload_bytes: usize,
+    batch_count: usize,
+    stream_count: usize,
+    event_count: usize,
+    next_batch: usize = 0,
+    next_stream: usize = 0,
+    next_event: usize = 0,
+    finished: bool = false,
+
+    fn init(
+        self: *ExternalSourceSealEncoder,
+        client: *const Client,
+        target_stream: u64,
+        validated: ExternalValidatedAdoption,
+        encoding: ExternalSourceSealEncoding,
+    ) ExternalSourceSealError!void {
+        var writer = client_source_transcript.Writer.init(.client_source_v1);
+        try writer.writeUsize(encoding.address(@intFromPtr(client), 0x1000));
+        writer.writeU64(target_stream);
+        try writeSourceAllocator(&writer, client.allocator, encoding, 0x1100);
+        writer.writeI32(encoding.fd(client.fd));
+        writer.writeU128(client.host_id);
+
+        writer.writePresence(client.build_id != null);
+        if (client.build_id) |build_id| {
+            try writer.writeAddressLenCapacity(
+                encoding.address(@intFromPtr(build_id.ptr), 0x1200),
+                build_id.len,
+                build_id.len,
+                1,
+            );
+            try writer.writeBytes(build_id);
+        }
+        writer.writeU64(client.upgrade_epoch);
+        writer.writeU64(client.authority_generation);
+        try writer.writeAddressLenCapacity(
+            encoding.address(externalSliceAddress(client.lifecycle), 0x1300),
+            client.lifecycle.len,
+            client.lifecycle.len,
+            1,
+        );
+        try writer.writeBytes(client.lifecycle);
+
+        writer.writeBool(client.host_manifest_v1);
+        writer.writeBool(client.host_exec_upgrade_v1);
+        writer.writeBool(client.runtime_inventory_v1);
+        writer.writeBool(client.attachment_capabilities.peer_attach_generation);
+        writer.writeBool(client.attachment_capabilities.negotiated_controller_transfer);
+        writer.writeTag(@intFromEnum(client.metadata_support));
+        writer.writeBool(client.admin_one_shot_v1);
+        writer.writeBool(client.admin_runtime_end_v1);
+        writer.writeU16(client.wire_major);
+        writer.writeU16(client.screen_codec_version);
+        writer.writeBool(client.screen_viewport_scrolled_v1);
+        writer.writeBool(client.async_scroll_to_bottom_v1);
+        writer.writeBool(client.runtime_core_command_v1);
+        writer.writeBool(client.runtime_selected_text_v1);
+        writer.writeBool(client.notification_stream_auth_v1);
+        writer.writeBool(client.runtime_link_at_v1);
+        writer.writeBool(client.runtime_clipboard_v1);
+        writer.writeTag(@intFromEnum(client.connection_profile.?));
+        try writeSourceCompatibilityProfile(&writer, client.compatibility_profile.?);
+        writer.writeU64(client.attach_instance_id);
+        writer.writeTag(@intFromEnum(client.ownership));
+        writer.writeBool(client.unusable);
+        writer.writeU64(client.next_request_id);
+
+        try writeSourceAllocator(&writer, client.parser.allocator, encoding, 0x1400);
+        writer.writeU16(client.parser.expected_major);
+        try writeSourceArrayDescriptor(
+            &writer,
+            externalArrayDescriptor(client.parser.buf),
+            @sizeOf(u8),
+            encoding,
+            0x1500,
+        );
+        try writer.writeUsize(client.parser.head);
+        try writer.writeBytes(client.parser.buf.items);
+
+        try writeSourceArrayDescriptor(
+            &writer,
+            externalArrayDescriptor(client.pending_batches),
+            @sizeOf(StreamBatch),
+            encoding,
+            0x1600,
+        );
+        try writer.writeUsize(client.pending_batch_bytes);
+        try writeSourceArrayDescriptor(
+            &writer,
+            externalArrayDescriptor(client.pending_stream),
+            @sizeOf(framing.Frame),
+            encoding,
+            0x1700,
+        );
+        try writer.writeUsize(client.pending_stream_bytes);
+        try writeSourceArrayDescriptor(
+            &writer,
+            externalArrayDescriptor(client.pending_events),
+            @sizeOf(BufferedEvent),
+            encoding,
+            0x1800,
+        );
+        try writer.writeUsize(client.pending_event_bytes);
+
+        writer.writePresence(client.partial_batch != null);
+        if (client.partial_batch) |partial| {
+            writer.writeU64(partial.stream_id);
+            writer.writeBool(partial.is_snapshot);
+            try writeSourceArrayDescriptor(
+                &writer,
+                externalArrayDescriptor(partial.bytes),
+                @sizeOf(u8),
+                encoding,
+                0x1900,
+            );
+            try writer.writeUsize(partial.chunk_count);
+            try writer.writeBytes(partial.bytes.items);
+        }
+
+        const external = client.io_mode.external;
+        writer.writeTag(1);
+        writer.writeI32(external.saved_flags);
+        try writeSourceArrayDescriptor(
+            &writer,
+            externalArrayDescriptor(external.external_tx),
+            @sizeOf(client_external_mode.ExternalTxFrame),
+            encoding,
+            0x1a00,
+        );
+        try writer.writeUsize(external.external_tx_bytes);
+
+        try writer.writeUsize(validated.screen_source_count);
+        try writer.writeUsize(validated.screen_payload_bytes);
+        try writer.writeUsize(client.pending_events.items.len);
+        try writer.writeUsize(validated.event_payload_bytes);
+        try writer.writeUsize(client.pending_batches.items.len);
+        try writer.writeUsize(client.pending_stream.items.len);
+        try writer.writeUsize(client.pending_events.items.len);
+
+        self.* = .{
+            .writer = writer,
+            .encoding = encoding,
+            .client_address = @intFromPtr(client),
+            .target_stream = target_stream,
+            .attach_instance_id = client.attach_instance_id,
+            .raw_next_request_id = client.next_request_id,
+            .screen_source_count = validated.screen_source_count,
+            .screen_payload_bytes = validated.screen_payload_bytes,
+            .event_payload_bytes = validated.event_payload_bytes,
+            .batch_count = client.pending_batches.items.len,
+            .stream_count = client.pending_stream.items.len,
+            .event_count = client.pending_events.items.len,
+        };
+    }
+
+    fn writeBatch(
+        self: *ExternalSourceSealEncoder,
+        client: *const Client,
+        ordinal: usize,
+        batch: *const StreamBatch,
+    ) ExternalSourceSealError!void {
+        if (self.finished) return error.InvalidClientState;
+        if (@intFromPtr(client) != self.client_address or
+            ordinal != self.next_batch or ordinal >= self.batch_count or
+            batch != &client.pending_batches.items[ordinal] or
+            self.next_stream != 0 or self.next_event != 0)
+            return error.InvalidClientState;
+        try self.writer.writeUsize(ordinal);
+        self.writer.writeU64(batch.stream_id);
+        self.writer.writeBool(batch.is_snapshot);
+        const token_base = 0x2000 + ordinal * 0x10;
+        try writeSourceAllocator(
+            &self.writer,
+            batch.allocator,
+            self.encoding,
+            token_base,
+        );
+        try self.writer.writeAddressLenCapacity(
+            self.encoding.address(externalSliceAddress(batch.bytes), token_base + 2),
+            batch.bytes.len,
+            batch.bytes.len,
+            1,
+        );
+        try self.writer.writeBytes(batch.bytes);
+        self.next_batch += 1;
+    }
+
+    fn writeStream(
+        self: *ExternalSourceSealEncoder,
+        client: *const Client,
+        ordinal: usize,
+        frame: *const framing.Frame,
+    ) ExternalSourceSealError!void {
+        if (self.finished) return error.InvalidClientState;
+        if (@intFromPtr(client) != self.client_address or
+            self.next_batch != self.batch_count or ordinal != self.next_stream or
+            ordinal >= self.stream_count or
+            frame != &client.pending_stream.items[ordinal] or self.next_event != 0)
+            return error.InvalidClientState;
+        try self.writer.writeUsize(ordinal);
+        try writeSourceFrame(
+            &self.writer,
+            frame.header,
+            frame.payload,
+            self.encoding,
+            0x4000 + ordinal,
+        );
+        self.next_stream += 1;
+    }
+
+    fn writeEvent(
+        self: *ExternalSourceSealEncoder,
+        client: *const Client,
+        ordinal: usize,
+        frame: *const BufferedEvent,
+    ) ExternalSourceSealError!void {
+        if (self.finished) return error.InvalidClientState;
+        if (@intFromPtr(client) != self.client_address or
+            self.next_batch != self.batch_count or
+            self.next_stream != self.stream_count or ordinal != self.next_event or
+            ordinal >= self.event_count or
+            frame != &client.pending_events.items[ordinal])
+            return error.InvalidClientState;
+        try self.writer.writeUsize(ordinal);
+        try writeSourceFrame(
+            &self.writer,
+            frame.header,
+            frame.payload,
+            self.encoding,
+            0x6000 + ordinal,
+        );
+        self.next_event += 1;
+    }
+
+    fn finish(
+        self: *ExternalSourceSealEncoder,
+    ) ExternalSourceSealError!ClientSourceSeal {
+        if (self.finished) return error.InvalidClientState;
+        if (self.next_batch != self.batch_count or
+            self.next_stream != self.stream_count or
+            self.next_event != self.event_count)
+            return error.InvalidClientState;
+        self.finished = true;
+        return .{
+            .client_address = self.client_address,
+            .target_stream = self.target_stream,
+            .attach_instance_id = self.attach_instance_id,
+            .raw_next_request_id = self.raw_next_request_id,
+            .screen_source_count = self.screen_source_count,
+            .screen_payload_bytes = self.screen_payload_bytes,
+            .event_count = self.event_count,
+            .event_payload_bytes = self.event_payload_bytes,
+            .digest = self.writer.finish(),
+        };
+    }
+};
+
+fn writeSourceAllocator(
+    writer: *client_source_transcript.Writer,
+    allocator: std.mem.Allocator,
+    encoding: ExternalSourceSealEncoding,
+    token_base: usize,
+) client_source_transcript.Error!void {
+    try writer.writeUsize(encoding.address(@intFromPtr(allocator.ptr), token_base));
+    try writer.writeUsize(encoding.address(@intFromPtr(allocator.vtable), token_base + 1));
+}
+
+fn writeSourceArrayDescriptor(
+    writer: *client_source_transcript.Writer,
+    descriptor: ExternalArrayDescriptor,
+    element_size: usize,
+    encoding: ExternalSourceSealEncoding,
+    token: usize,
+) client_source_transcript.Error!void {
+    try writer.writeAddressLenCapacity(
+        encoding.address(descriptor.address, token),
+        descriptor.len,
+        descriptor.capacity,
+        element_size,
+    );
+}
+
+fn writeSourceCompatibilityProfile(
+    writer: *client_source_transcript.Writer,
+    profile: compatibility.Profile,
+) client_source_transcript.Error!void {
+    writer.writeTag(@intFromEnum(profile.kind));
+    writer.writeU16(profile.wire_major);
+    writer.writeU16(profile.screen_codec_version);
+    writer.writePresence(profile.required_fingerprint != null);
+    if (profile.required_fingerprint) |fingerprint|
+        try writer.writeBytes(fingerprint);
+    writer.writeTag(@intFromEnum(profile.attach_schema));
+}
+
+fn writeSourceFrame(
+    writer: *client_source_transcript.Writer,
+    header: protocol.Header,
+    payload: []const u8,
+    encoding: ExternalSourceSealEncoding,
+    token: usize,
+) client_source_transcript.Error!void {
+    writer.writeU16(header.major);
+    writer.writeU16(@intFromEnum(header.kind));
+    writer.writeU32(header.flags);
+    writer.writeU64(header.request_id);
+    writer.writeU64(header.stream_id);
+    writer.writeU32(header.payload_len);
+    try writer.writeAddressLenCapacity(
+        encoding.address(externalSliceAddress(payload), token),
+        payload.len,
+        payload.len,
+        1,
+    );
+    try writer.writeBytes(payload);
+}
+
+fn encodeExternalSourceForTest(
+    client: *const Client,
+    target_stream: u64,
+    scratch: *ExternalSourceOwnerRangeScratch,
+) ExternalSourceSealError!ClientSourceSeal {
+    return encodeExternalSourceWithEncodingForTest(
+        client,
+        target_stream,
+        scratch,
+        .process_identity,
+    );
+}
+
+fn encodeExternalSourceWithEncodingForTest(
+    client: *const Client,
+    target_stream: u64,
+    scratch: *ExternalSourceOwnerRangeScratch,
+    encoding: ExternalSourceSealEncoding,
+) ExternalSourceSealError!ClientSourceSeal {
+    validateExternalAdoptionSourceEligibility(client, target_stream, .allow_zero) catch |err|
+        return narrowExternalSourceSealError(err);
+    if (client.event_parse_observer != null or client.attach_instance_id == 0)
+        return error.InvalidClientState;
+    _ = validateExternalSourceOwnerRanges(client, scratch) catch |err|
+        return narrowExternalSourceSealError(err);
+    const validated = validateExternalAdoptionSourceQueues(client, target_stream) catch |err|
+        return narrowExternalSourceSealError(err);
+    var encoder: ExternalSourceSealEncoder = undefined;
+    try encoder.init(client, target_stream, validated, encoding);
+    for (client.pending_batches.items, 0..) |*batch, ordinal|
+        try encoder.writeBatch(client, ordinal, batch);
+    for (client.pending_stream.items, 0..) |*frame, ordinal|
+        try encoder.writeStream(client, ordinal, frame);
+    for (client.pending_events.items, 0..) |*frame, ordinal|
+        try encoder.writeEvent(client, ordinal, frame);
+    return encoder.finish();
+}
+
+fn externalSourceSealMatches(
+    client: *const Client,
+    target_stream: u64,
+    expected: ClientSourceSeal,
+    scratch: *ExternalSourceOwnerRangeScratch,
+) bool {
+    const actual = encodeExternalSourceForTest(client, target_stream, scratch) catch return false;
+    return std.meta.eql(expected, actual);
+}
+
 const ExternalOwnerRangeProofLifecycle = enum { empty, prepared, aborted };
 
 /// Retains the last whole-Client alias-proof scratch allocation across the paired ownership take.
@@ -1375,6 +1823,8 @@ fn validateExternalAdoptionSourceQueues(
 
     var event_bytes: usize = 0;
     for (self.pending_events.items) |frame| {
+        if (frame.preflight != null or frame.admission_seal != null)
+            return error.InvalidClientState;
         if (frame.header.major != self.wire_major or frame.header.kind != .event or
             frame.header.stream_id != target_stream or
             frame.header.request_id != 0 or frame.header.flags != 0 or
@@ -4009,6 +4459,57 @@ pub const Client = struct {
         self.invalidateConnection();
     }
 };
+
+const client_source_schema_field_allowlist = [_][]const u8{
+    "allocator",
+    "fd",
+    "host_id",
+    "build_id",
+    "upgrade_epoch",
+    "authority_generation",
+    "lifecycle",
+    "host_manifest_v1",
+    "host_exec_upgrade_v1",
+    "runtime_inventory_v1",
+    "attachment_capabilities",
+    "metadata_support",
+    "event_parse_observer",
+    "admin_one_shot_v1",
+    "admin_runtime_end_v1",
+    "wire_major",
+    "screen_codec_version",
+    "screen_viewport_scrolled_v1",
+    "async_scroll_to_bottom_v1",
+    "runtime_core_command_v1",
+    "runtime_selected_text_v1",
+    "notification_stream_auth_v1",
+    "runtime_link_at_v1",
+    "runtime_clipboard_v1",
+    "connection_profile",
+    "compatibility_profile",
+    "attach_instance_id",
+    "parser",
+    "ownership",
+    "unusable",
+    "next_request_id",
+    "pending_stream",
+    "pending_stream_bytes",
+    "pending_events",
+    "pending_event_bytes",
+    "pending_batches",
+    "pending_batch_bytes",
+    "partial_batch",
+    "pending_outbound",
+    "io_mode",
+};
+comptime {
+    const fields = std.meta.fields(Client);
+    if (fields.len != client_source_schema_field_allowlist.len)
+        @compileError("update ClientSourceSealSchema.v1 for every Client field change");
+    for (fields, client_source_schema_field_allowlist) |field, expected|
+        if (!std.mem.eql(u8, field.name, expected))
+            @compileError("Client field order drifted from ClientSourceSealSchema.v1");
+}
 
 test "admin client without one-shot capability closes before sending any request" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
@@ -7511,6 +8012,295 @@ test "external adoption owner alias validation stays n log n at every queue cap"
         @as(usize, 147_584),
         max_external_owner_range_scratch_bytes,
     );
+}
+
+test "client source seal binds explicit schema descriptors and ordered payload bytes" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    var fds: [2]c.fd_t = undefined;
+    try std.testing.expectEqual(
+        @as(c_int, 0),
+        c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds),
+    );
+    defer _ = c.close(fds[1]);
+    var client = makeConnectedTestClient(allocator, fds[0]);
+    defer client.deinit();
+    try client.enterExternalMode();
+    client.ownership = .external_pump;
+    client.connection_profile = .cli_attach;
+    client.compatibility_profile = compatibility.profileForMajor(protocol.version_major).?;
+    client.attach_instance_id = 77;
+    client.next_request_id = 0;
+    client.build_id = try allocator.dupe(u8, "build");
+    client.lifecycle = try allocator.dupe(u8, "running");
+    try client.parser.buf.appendSlice(allocator, "parser");
+
+    const batch_payload = try allocator.dupe(u8, "batch");
+    try client.pending_batches.append(allocator, .{
+        .is_snapshot = false,
+        .stream_id = 7,
+        .bytes = batch_payload,
+        .allocator = allocator,
+    });
+    const second_batch_payload = try allocator.dupe(u8, "batch-two");
+    try client.pending_batches.append(allocator, .{
+        .is_snapshot = true,
+        .stream_id = 7,
+        .bytes = second_batch_payload,
+        .allocator = allocator,
+    });
+    client.pending_batch_bytes = batch_payload.len + second_batch_payload.len;
+    var partial_bytes: std.ArrayListUnmanaged(u8) = .empty;
+    try partial_bytes.appendSlice(allocator, "partial");
+    client.partial_batch = .{
+        .stream_id = 7,
+        .is_snapshot = false,
+        .bytes = partial_bytes,
+        .chunk_count = 1,
+    };
+    const stream_payload = try allocator.dupe(u8, "stream");
+    try client.pending_stream.append(allocator, .{
+        .header = .{
+            .kind = .delta_chunk,
+            .stream_id = 7,
+            .payload_len = @intCast(stream_payload.len),
+            .flags = protocol.Flags.end_stream,
+        },
+        .payload = stream_payload,
+    });
+    client.pending_stream_bytes = stream_payload.len;
+    const event_payload = try allocator.dupe(u8, "{}");
+    try client.pending_events.append(allocator, .{
+        .header = .{
+            .kind = .event,
+            .stream_id = 7,
+            .payload_len = @intCast(event_payload.len),
+        },
+        .payload = event_payload,
+    });
+    client.pending_event_bytes = event_payload.len;
+
+    var scratch: ExternalSourceOwnerRangeScratch = .{};
+    const seal = try encodeExternalSourceForTest(&client, 7, &scratch);
+    const repeated = try encodeExternalSourceForTest(&client, 7, &scratch);
+    const canonical = try encodeExternalSourceWithEncodingForTest(
+        &client,
+        7,
+        &scratch,
+        .canonical_test,
+    );
+    const frozen_canonical_digest =
+        "\x25\xb8\x0b\x8e\x68\xe0\x28\x49\xac\x66\xf5\x37\x59\xac\xfe\x2c" ++
+        "\x46\xb9\x0d\xe6\xd0\x96\x6f\x6f\x01\xff\x81\xa6\x1c\x7c\x27\x21";
+    try std.testing.expectEqualSlices(
+        u8,
+        frozen_canonical_digest,
+        &canonical.digest,
+    );
+    try std.testing.expect(std.meta.eql(seal, repeated));
+    try std.testing.expectEqual(@as(u64, 77), seal.attach_instance_id);
+    try std.testing.expectEqual(@as(u64, 0), seal.raw_next_request_id);
+    try std.testing.expectEqual(@as(usize, 4), seal.screen_source_count);
+    try std.testing.expectEqual(@as(usize, 1), seal.event_count);
+    try std.testing.expect(externalSourceSealMatches(&client, 7, seal, &scratch));
+
+    const validated = try validateExternalAdoptionSourceQueues(&client, 7);
+    var encoder: ExternalSourceSealEncoder = undefined;
+    try encoder.init(&client, 7, validated, .process_identity);
+    try std.testing.expectError(error.InvalidClientState, encoder.finish());
+    try std.testing.expectError(
+        error.InvalidClientState,
+        encoder.writeStream(&client, 0, &client.pending_stream.items[0]),
+    );
+    try std.testing.expectError(
+        error.InvalidClientState,
+        encoder.writeBatch(&client, 1, &client.pending_batches.items[0]),
+    );
+    var foreign_batch = client.pending_batches.items[0];
+    try std.testing.expectError(
+        error.InvalidClientState,
+        encoder.writeBatch(&client, 0, &foreign_batch),
+    );
+    var other_client = client;
+    try std.testing.expectError(
+        error.InvalidClientState,
+        encoder.writeBatch(&other_client, 0, &client.pending_batches.items[0]),
+    );
+    try encoder.writeBatch(&client, 0, &client.pending_batches.items[0]);
+    try std.testing.expectError(
+        error.InvalidClientState,
+        encoder.writeBatch(&client, 0, &client.pending_batches.items[0]),
+    );
+    try std.testing.expectError(
+        error.InvalidClientState,
+        encoder.writeStream(&client, 0, &client.pending_stream.items[0]),
+    );
+    try encoder.writeBatch(&client, 1, &client.pending_batches.items[1]);
+    try encoder.writeStream(&client, 0, &client.pending_stream.items[0]);
+    try encoder.writeEvent(&client, 0, &client.pending_events.items[0]);
+    _ = try encoder.finish();
+    try std.testing.expectError(error.InvalidClientState, encoder.finish());
+    try std.testing.expectError(
+        error.InvalidClientState,
+        encoder.writeEvent(&client, 1, &client.pending_events.items[0]),
+    );
+
+    client.attach_instance_id = 78;
+    try std.testing.expect(!externalSourceSealMatches(&client, 7, seal, &scratch));
+    client.attach_instance_id = 77;
+    const saved_allocator = client.allocator;
+    client.allocator = std.heap.page_allocator;
+    try std.testing.expect(!externalSourceSealMatches(&client, 7, seal, &scratch));
+    client.allocator = saved_allocator;
+    const saved_fd = client.fd;
+    client.fd = fds[1];
+    try std.testing.expect(!externalSourceSealMatches(&client, 7, seal, &scratch));
+    client.fd = saved_fd;
+    client.host_id ^= 1;
+    try std.testing.expect(!externalSourceSealMatches(&client, 7, seal, &scratch));
+    client.host_id ^= 1;
+    client.upgrade_epoch += 1;
+    try std.testing.expect(!externalSourceSealMatches(&client, 7, seal, &scratch));
+    client.upgrade_epoch -= 1;
+    client.authority_generation += 1;
+    try std.testing.expect(!externalSourceSealMatches(&client, 7, seal, &scratch));
+    client.authority_generation -= 1;
+    client.host_manifest_v1 = !client.host_manifest_v1;
+    try std.testing.expect(!externalSourceSealMatches(&client, 7, seal, &scratch));
+    client.host_manifest_v1 = !client.host_manifest_v1;
+    client.attachment_capabilities.peer_attach_generation =
+        !client.attachment_capabilities.peer_attach_generation;
+    try std.testing.expect(!externalSourceSealMatches(&client, 7, seal, &scratch));
+    client.attachment_capabilities.peer_attach_generation =
+        !client.attachment_capabilities.peer_attach_generation;
+    const saved_metadata_support = client.metadata_support;
+    client.metadata_support = if (saved_metadata_support == .supported)
+        .unsupported
+    else
+        .supported;
+    try std.testing.expect(!externalSourceSealMatches(&client, 7, seal, &scratch));
+    client.metadata_support = saved_metadata_support;
+    client.connection_profile = .cli_probe;
+    try std.testing.expect(!externalSourceSealMatches(&client, 7, seal, &scratch));
+    client.connection_profile = .cli_attach;
+    const saved_compatibility = client.compatibility_profile.?;
+    client.compatibility_profile.?.screen_codec_version +%= 1;
+    try std.testing.expect(!externalSourceSealMatches(&client, 7, seal, &scratch));
+    client.compatibility_profile = saved_compatibility;
+    client.ownership = .standalone;
+    try std.testing.expect(!externalSourceSealMatches(&client, 7, seal, &scratch));
+    client.ownership = .external_pump;
+    client.unusable = true;
+    try std.testing.expect(!externalSourceSealMatches(&client, 7, seal, &scratch));
+    client.unusable = false;
+    client.build_id.?[0] ^= 1;
+    try std.testing.expect(!externalSourceSealMatches(&client, 7, seal, &scratch));
+    client.build_id.?[0] ^= 1;
+    client.lifecycle[0] ^= 1;
+    try std.testing.expect(!externalSourceSealMatches(&client, 7, seal, &scratch));
+    client.lifecycle[0] ^= 1;
+    client.parser.buf.items[0] ^= 1;
+    try std.testing.expect(!externalSourceSealMatches(&client, 7, seal, &scratch));
+    client.parser.buf.items[0] ^= 1;
+    const saved_parser_allocator = client.parser.allocator;
+    client.parser.allocator = std.heap.page_allocator;
+    try std.testing.expect(!externalSourceSealMatches(&client, 7, seal, &scratch));
+    client.parser.allocator = saved_parser_allocator;
+    client.parser.expected_major +%= 1;
+    try std.testing.expect(!externalSourceSealMatches(&client, 7, seal, &scratch));
+    client.parser.expected_major -%= 1;
+    client.parser.head = 1;
+    try std.testing.expect(!externalSourceSealMatches(&client, 7, seal, &scratch));
+    client.parser.head = 0;
+    client.pending_batches.items[0].is_snapshot = true;
+    try std.testing.expect(!externalSourceSealMatches(&client, 7, seal, &scratch));
+    client.pending_batches.items[0].is_snapshot = false;
+    client.pending_batches.items[0].allocator = std.heap.page_allocator;
+    try std.testing.expect(!externalSourceSealMatches(&client, 7, seal, &scratch));
+    client.pending_batches.items[0].allocator = allocator;
+    client.pending_batches.items[0].bytes[0] ^= 1;
+    try std.testing.expect(!externalSourceSealMatches(&client, 7, seal, &scratch));
+    client.pending_batches.items[0].bytes[0] ^= 1;
+    std.mem.swap(
+        StreamBatch,
+        &client.pending_batches.items[0],
+        &client.pending_batches.items[1],
+    );
+    try std.testing.expect(!externalSourceSealMatches(&client, 7, seal, &scratch));
+    std.mem.swap(
+        StreamBatch,
+        &client.pending_batches.items[0],
+        &client.pending_batches.items[1],
+    );
+    client.pending_stream.items[0].header.flags = 0;
+    try std.testing.expect(!externalSourceSealMatches(&client, 7, seal, &scratch));
+    client.pending_stream.items[0].header.flags = protocol.Flags.end_stream;
+    client.pending_batch_bytes += 1;
+    try std.testing.expect(!externalSourceSealMatches(&client, 7, seal, &scratch));
+    client.pending_batch_bytes -= 1;
+    client.pending_stream_bytes += 1;
+    try std.testing.expect(!externalSourceSealMatches(&client, 7, seal, &scratch));
+    client.pending_stream_bytes -= 1;
+    client.partial_batch.?.chunk_count = 2;
+    try std.testing.expect(!externalSourceSealMatches(&client, 7, seal, &scratch));
+    client.partial_batch.?.chunk_count = 1;
+    client.partial_batch.?.bytes.items[0] ^= 1;
+    try std.testing.expect(!externalSourceSealMatches(&client, 7, seal, &scratch));
+    client.partial_batch.?.bytes.items[0] ^= 1;
+    client.pending_events.items[0].payload[0] ^= 1;
+    try std.testing.expect(!externalSourceSealMatches(&client, 7, seal, &scratch));
+    client.pending_events.items[0].payload[0] ^= 1;
+    client.pending_events.items[0].preflight = .unknown;
+    try std.testing.expect(!externalSourceSealMatches(&client, 7, seal, &scratch));
+    client.pending_events.items[0].preflight = null;
+    const accepted = switch (runtime_event_wire.preflightEvent(
+        "{\"event\":\"runtime.ended\"}",
+        .{},
+    )) {
+        .accepted => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    client.pending_events.items[0].admission_seal = BufferedEvent.seal(
+        client.pending_events.items[0].header,
+        client.pending_events.items[0].payload,
+        accepted,
+    );
+    try std.testing.expect(!externalSourceSealMatches(&client, 7, seal, &scratch));
+    client.pending_events.items[0].admission_seal = null;
+    client.pending_event_bytes += 1;
+    try std.testing.expect(!externalSourceSealMatches(&client, 7, seal, &scratch));
+    client.pending_event_bytes -= 1;
+    client.io_mode.external.saved_flags ^= 1;
+    try std.testing.expect(!externalSourceSealMatches(&client, 7, seal, &scratch));
+    client.io_mode.external.saved_flags ^= 1;
+    client.next_request_id = 1;
+    try std.testing.expect(!externalSourceSealMatches(&client, 7, seal, &scratch));
+    client.next_request_id = 0;
+    try std.testing.expect(externalSourceSealMatches(&client, 7, seal, &scratch));
+
+    client.attach_instance_id = 0;
+    try std.testing.expectError(
+        error.InvalidClientState,
+        encodeExternalSourceForTest(&client, 7, &scratch),
+    );
+    client.attach_instance_id = 77;
+    var parse_calls: usize = 0;
+    const Observer = struct {
+        fn onParse(context: *anyopaque) void {
+            const calls: *usize = @ptrCast(@alignCast(context));
+            calls.* += 1;
+        }
+    };
+    client.event_parse_observer = .{
+        .context = &parse_calls,
+        .on_parse = Observer.onParse,
+    };
+    try std.testing.expectError(
+        error.InvalidClientState,
+        encodeExternalSourceForTest(&client, 7, &scratch),
+    );
+    try std.testing.expectEqual(@as(usize, 0), parse_calls);
+    client.event_parse_observer = null;
 }
 
 fn checkExternalAdoptionAllocation(allocator: std.mem.Allocator) !void {

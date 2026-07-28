@@ -67,12 +67,6 @@ pub fn extendsCluster(prev: u21, next: u21) bool {
     };
 }
 
-/// grapheme cluster의 터미널 셀 폭. base(첫 코드포인트)가 폭을 정하고, 이어지는 자모·combining·
-/// ZWJ는 0폭으로 흡수된다 — 그래서 NFD '한'(초성 base가 wide)도 완성형 '한'과 같은 2칸이 된다.
-pub fn clusterWidth(base: u21) u2 {
-    return width.cellWidth(base);
-}
-
 /// NFD conjoining 자모(U+1100~U+11FF: 초성 L·중성 V·종성 T)인가. 완성형 음절(U+AC00~)·일반
 /// 문자·ZWJ는 제외한다. print 경로의 cluster 흡수는 이 범위의 글자만 대상으로 한다 — combining
 /// mark(폭 0)는 이미 별도 경로가 처리하고, ZWJ(GB9)·완성형은 각자 제 셀을 차지해야 하므로, NFD
@@ -361,13 +355,6 @@ test "NFD 한글 시퀀스가 boundary 함수만으로 음절 2개로 분절된�
         if (!extendsCluster(seq[i - 1], seq[i])) clusters += 1;
     }
     try expectEqual(@as(usize, 2), clusters);
-}
-
-test "clusterWidth: 한글 음절은 2칸, ASCII는 1칸 (base가 폭을 정한다)" {
-    // base(초성/완성형)가 폭을 정하고 후속 자모는 0폭 흡수 → NFD '한'도 완성형과 같은 2칸.
-    try expectEqual(@as(u2, 2), clusterWidth(0x1112)); // ㅎ 초성 = NFD 음절 base
-    try expectEqual(@as(u2, 2), clusterWidth(0xAC00)); // 가 (완성형)
-    try expectEqual(@as(u2, 1), clusterWidth('a'));
 }
 
 test "isConjoiningJamo: NFD 자모만 true, 완성형·ZWJ·일반문자는 false" {

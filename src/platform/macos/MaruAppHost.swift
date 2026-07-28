@@ -2725,7 +2725,7 @@ final class MaruWebPanelView: NSView {
         "will-change:transform;user-select:none;-webkit-user-drag:none;}";
       document.head.appendChild(css);
       var scale = 1, tx = 0, ty = 0, fitScale = 1;
-      var gestureActive = false, gestureScale = 1, gestureX = 0, gestureY = 0;
+      var gestureActive = false, gesturePinching = false, gestureScale = 1, gestureBase = 1, gestureX = 0, gestureY = 0;
       function apply() { img.style.transform = "translate(" + tx + "px," + ty + "px) scale(" + scale + ")"; }
       function fit() {
         var vw = document.documentElement.clientWidth, vh = document.documentElement.clientHeight;
@@ -2762,17 +2762,32 @@ final class MaruWebPanelView: NSView {
       // 처리해 휠 줌과 배율·앵커가 일관된다(pdf·미디어는 스크립트가 no-op이라 네이티브 확대를 그대로 쓴다).
       window.addEventListener("gesturestart", function (e) {
         e.preventDefault();
-        gestureActive = true;
+        gesturePinching = false; // 아직 핀치로 확정하지 않는다 — 두 손가락 스크롤에도 이 이벤트가 온다
         gestureScale = scale;
         gestureX = typeof e.clientX === "number" ? e.clientX : document.documentElement.clientWidth / 2;
         gestureY = typeof e.clientY === "number" ? e.clientY : document.documentElement.clientHeight / 2;
       }, { passive: false });
+      // **데드존**: 두 손가락 스크롤에도 핀치 인식기가 붙어 `gesturechange`가 오고, 특히 손가락을 뗄 때
+      // 간격이 미세하게 변하며 scale이 1에서 살짝 벗어난다. 그걸 그대로 적용하면 "드래그를 끝낼 때 확대/축소되는"
+      // 증상이 된다(사용자 제보). 그래서 배율이 5%를 넘게 벌어진 뒤에야 핀치로 확정하고, 그때부터만 줌한다.
       window.addEventListener("gesturechange", function (e) {
         e.preventDefault();
-        var target = gestureScale * (typeof e.scale === "number" && e.scale > 0 ? e.scale : 1);
+        var raw = typeof e.scale === "number" && e.scale > 0 ? e.scale : 1;
+        if (!gesturePinching) {
+          if (Math.abs(raw - 1) < 0.05) return; // 스크롤에 딸려 온 미세 변화 — 무시
+          gesturePinching = true;
+          gestureActive = true;   // 이 시점부터 wheel을 무시해 핀치와 이중 적용되지 않게 한다
+          gestureScale = scale;   // 확정 순간을 기준으로 다시 잡아 첫 프레임이 튀지 않게 한다
+          gestureBase = raw;
+        }
+        var target = gestureScale * (raw / gestureBase);
         if (scale > 0) zoomAt(target / scale, gestureX, gestureY);
       }, { passive: false });
-      window.addEventListener("gestureend", function (e) { e.preventDefault(); gestureActive = false; }, { passive: false });
+      window.addEventListener("gestureend", function (e) {
+        e.preventDefault();
+        gestureActive = false;
+        gesturePinching = false;
+      }, { passive: false });
       var dragging = false, lastX = 0, lastY = 0;
       window.addEventListener("mousedown", function (e) {
         dragging = true; lastX = e.clientX; lastY = e.clientY;

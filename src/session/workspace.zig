@@ -100,6 +100,20 @@ pub const FileTerm = struct {
     path: []const u8,
 };
 
+/// WP-P 브라우저 Term 레코드. `pane` 줄의 반복 필드 `browser-term`으로 **현재 URL 하나만** 저장한다
+/// (히스토리는 복원하지 않는다 — docs/workspace-restore.md §WP-P).
+///
+/// `insert_after`는 `FileTerm.index`와 **다른 축**이다: persisted 시퀀스 안의 자리가 아니라 "이 브라우저 앞에
+/// 있는 persisted(터미널+파일) Term 수"다. 브라우저를 시퀀스에 합류시켜 인덱스를 재번호하면, 그 파일을 읽는
+/// **구버전 Maru가 창을 통째로 폴백한다** — 구버전은 `browser-term`을 모르는 필드로 건너뛰므로
+/// `total = surfaces + file_terms`로 계산하는데 재번호된 file-term index가 그 total을 넘어 범위 검사에 걸린다.
+/// 즉 브라우저를 얻는 대가로 downgrade 시 **파일 탭까지** 잃는다. insert_after는 기존 인덱스 값을 하나도
+/// 바꾸지 않으므로 구버전은 브라우저만 잃는다.
+pub const BrowserTerm = struct {
+    insert_after: usize,
+    url: []const u8,
+};
+
 pub const Pane = struct {
     active_term: usize = 0,
     // 사용자 지정 이름(rename). Pane은 자동 제목 출처가 없어 custom_name 하나뿐(""=없음). 탭바 좌측 라벨 세그먼트로 표시.
@@ -107,6 +121,11 @@ pub const Pane = struct {
     surfaces: []const Surface,
     /// 이 pane의 파일 Term들(persisted index 순서는 무관 — 리더가 index로 재배치한다).
     file_terms: []const FileTerm = &.{},
+    /// 이 pane의 브라우저 Term들(등장 순서 = 같은 insert_after 안에서의 상대 순서). WP-P.
+    browser_terms: []const BrowserTerm = &.{},
+    /// 활성 탭이 브라우저면 그 record 인덱스(`browser_terms` 안 위치). null=활성이 브라우저 아님.
+    /// 구버전 리더는 이 필드를 무시하고 `active_term`(비-브라우저 공간)을 쓰므로 포커스만 이웃으로 떨어진다.
+    active_browser: ?usize = null,
 };
 
 /// 한 워크스페이스(사이드바 탭) — pane split 트리 + 그 leaf들이 가리키는 pane 섹션들. active-pane = 포커스 panel.
@@ -438,6 +457,8 @@ fn writePane(w: *std.Io.Writer, pane: Pane) !void {
     // 파일 Term은 `surface` 줄이 아니라 이 줄의 반복 필드다(§5.0). `surfaces` 개수 필드는 **PTY surface 수**로
     // 남는다 — 옛 리더가 그 수만큼 `surface` 줄을 읽는 계약이라 건드리면 하위호환이 깨진다.
     for (pane.file_terms) |ft| try writeFileTerm(w, ft);
+    for (pane.browser_terms) |bt| try writeBrowserTerm(w, bt);
+    if (pane.active_browser) |ab| try w.print(" active-browser={d}", .{ab});
     try w.writeAll("\n");
     for (pane.surfaces) |s| try writeSurface(w, s);
 }
@@ -447,6 +468,14 @@ fn writePane(w: *std.Io.Writer, pane: Pane) !void {
 fn writeFileTerm(w: *std.Io.Writer, ft: FileTerm) !void {
     try w.print(" file-term=\"{d}:{s}:{s}:{d}:", .{ ft.index, @tagName(ft.kind), ft.mode.workspaceName(), ft.path.len });
     try writeEscaped(w, ft.path);
+    try w.writeByte('"');
+}
+
+/// `browser-term="<insert-after>:<url-byte-len>:<url>"`. file-term과 같은 self-delimiting 모양이라 URL 안의
+/// 특수문자·따옴표가 필드 경계를 깨지 않는다(WP-P).
+fn writeBrowserTerm(w: *std.Io.Writer, bt: BrowserTerm) !void {
+    try w.print(" browser-term=\"{d}:{d}:", .{ bt.insert_after, bt.url.len });
+    try writeEscaped(w, bt.url);
     try w.writeByte('"');
 }
 
@@ -901,6 +930,24 @@ fn parsePane(a: std.mem.Allocator, lines: *LineIter, limits: *ParseLimits) Parse
         try file_terms.append(a, parsed);
     }
 
+    // WP-P 브라우저 Term(반복 필드). URL만 담고 인덱스 공간을 안 건드리므로 검증도 file-term과 분리된다 —
+    // `insert_after`는 "앞의 persisted Term 수"라 [0, persisted_total] **닫힌** 구간이 유효하다(끝에 붙는 경우 포함).
+    var browser_terms: std.ArrayList(BrowserTerm) = .empty;
+    for (f.fields) |field| {
+        if (!std.mem.eql(u8, field.key, "browser-term")) continue;
+        if (!field.is_quoted or browser_terms.items.len >= max_dock_entries) return error.BadLine;
+        const encoded = try unescapeQuoted(a, field.raw);
+        const parsed = parseBrowserTerm(encoded) catch |err| switch (err) {
+            error.UnsupportedDockValue => continue, // 빈 URL 등 — 그 record만 버린다(창은 살린다)
+            error.BadLine => return error.BadLine,
+        };
+        try browser_terms.append(a, parsed);
+    }
+    const active_browser: ?usize = if (f.find("active-browser") != null)
+        try f.getUint("active-browser", usize, 0)
+    else
+        null;
+
     var surfaces: std.ArrayList(Surface) = .empty;
     var i: usize = 0;
     while (i < surface_count) : (i += 1) try surfaces.append(a, try parseSurface(a, lines, limits));
@@ -909,9 +956,41 @@ fn parsePane(a: std.mem.Allocator, lines: *LineIter, limits: *ParseLimits) Parse
         .custom_name = custom_name,
         .surfaces = try surfaces.toOwnedSlice(a),
         .file_terms = try file_terms.toOwnedSlice(a),
+        .browser_terms = try browser_terms.toOwnedSlice(a),
+        .active_browser = active_browser,
     };
     try validatePaneFileTerms(pane);
+    try validatePaneBrowserTerms(pane);
     return pane;
+}
+
+/// WP-P 불변식: `insert_after <= persisted_total`(끝에 붙기 허용), `active-browser < browser_terms.len`.
+/// 위반은 그 창을 fail-closed 강등한다(file-term과 같은 규율).
+fn validatePaneBrowserTerms(pane: Pane) ParseError!void {
+    if (pane.browser_terms.len == 0) {
+        if (pane.active_browser != null) return error.BadLine; // 활성 브라우저를 가리키는데 record가 없다
+        return;
+    }
+    const persisted_total = pane.surfaces.len + pane.file_terms.len;
+    for (pane.browser_terms) |bt| {
+        if (bt.insert_after > persisted_total) return error.BadLine;
+        if (bt.url.len == 0) return error.BadLine;
+    }
+    if (pane.active_browser) |ab| if (ab >= pane.browser_terms.len) return error.BadLine;
+}
+
+/// `browser-term="<insert-after>:<url-byte-len>:<url>"`. file-term과 같은 self-delimiting 파싱.
+fn parseBrowserTerm(encoded: []const u8) DockEntryParseError!BrowserTerm {
+    var pos: usize = 0;
+    const after_raw = dockEntryPart(encoded, &pos) orelse return error.BadLine;
+    const insert_after = std.fmt.parseInt(usize, after_raw, 10) catch return error.BadLine;
+    const len_raw = dockEntryPart(encoded, &pos) orelse return error.BadLine;
+    const url_len = std.fmt.parseInt(usize, len_raw, 10) catch return error.BadLine;
+    if (pos + url_len != encoded.len) return error.BadLine; // self-delimiting: 남는 바이트가 정확히 URL
+    const url = encoded[pos..];
+    if (url.len == 0) return error.UnsupportedDockValue;
+    if (!std.unicode.utf8ValidateSlice(url)) return error.BadLine;
+    return .{ .insert_after = insert_after, .url = url };
 }
 
 /// persisted 시퀀스 불변식: index 중복 없음 + 전체가 `[0, persisted_total)`을 빠짐없이 덮음 +
@@ -2506,6 +2585,70 @@ test "workspace FP16: persisted 인덱스가 중복·범위 밖이거나 active-
         "pane surfaces=1 active-term=9 custom-name=\"\" file-term=\"1:markdown:read:9:/tmp/a.md\"\n" ++
         "surface custom-name=\"\" title=\"\" cwd=\"\" command=\"\" cols=80 rows=24\n";
     try std.testing.expectError(error.BadLine, parse(std.testing.allocator, bad_active));
+}
+
+test "workspace WP-P: browser-term URL이 왕복하고 인덱스 공간을 안 건드린다" {
+    // WP-P 핵심 계약: 브라우저는 **URL만** 저장하고 `insert_after`(앞의 persisted Term 수)를 쓴다 — file-term
+    // 인덱스를 재번호하지 않으므로 구버전 리더가 브라우저만 잃고 창은 살린다. 그 성질을 왕복으로 고정한다.
+    const a = std.testing.allocator;
+    const text =
+        "maru.workspace.v1\nwindow tabs=1 active-tab=0\n" ++
+        "tab panes=1 active-pane=0 custom-name=\"\"\n" ++
+        "tree-node leaf pane=0\n" ++
+        "pane surfaces=1 active-term=0 custom-name=\"\" file-term=\"1:markdown:read:9:/tmp/a.md\" " ++
+        "browser-term=\"1:20:https://example.com/\" active-browser=0\n" ++
+        "surface custom-name=\"\" title=\"\" cwd=\"\" command=\"\" cols=80 rows=24\n";
+    var parsed = try parse(a, text);
+    defer parsed.deinit();
+    const pane = parsed.workspace.windows[0].tabs[0].panes[0];
+    try std.testing.expectEqual(@as(usize, 1), pane.file_terms.len); // 파일 인덱스는 그대로 1
+    try std.testing.expectEqual(@as(usize, 1), pane.file_terms[0].index);
+    try std.testing.expectEqual(@as(usize, 1), pane.browser_terms.len);
+    try std.testing.expectEqual(@as(usize, 1), pane.browser_terms[0].insert_after);
+    try std.testing.expectEqualStrings("https://example.com/", pane.browser_terms[0].url);
+    try std.testing.expectEqual(@as(?usize, 0), pane.active_browser);
+
+    // 다시 직렬화 → 같은 값이 나오고 재파싱도 통과한다(byte 고정점이 아니라 값 왕복을 본다).
+    const out = try serialize(a, parsed.workspace);
+    defer a.free(out);
+    try std.testing.expect(std.mem.indexOf(u8, out, "browser-term=\"1:20:https://example.com/\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "active-browser=0") != null);
+    var again = try parse(a, out);
+    defer again.deinit();
+    try std.testing.expectEqual(@as(usize, 1), again.workspace.windows[0].tabs[0].panes[0].browser_terms.len);
+}
+
+test "workspace WP-P: 잘못된 browser-term은 record만 버리거나 창을 폴백한다" {
+    const a = std.testing.allocator;
+    // 빈 URL = 복원할 값 없음 → 그 record만 버린다(창은 살린다). file-term의 UnsupportedDockValue와 같은 관용.
+    const empty_url =
+        "maru.workspace.v1\nwindow tabs=1 active-tab=0\n" ++
+        "tab panes=1 active-pane=0 custom-name=\"\"\n" ++
+        "tree-node leaf pane=0\n" ++
+        "pane surfaces=1 active-term=0 custom-name=\"\" browser-term=\"0:0:\"\n" ++
+        "surface custom-name=\"\" title=\"\" cwd=\"\" command=\"\" cols=80 rows=24\n";
+    var kept = try parse(a, empty_url);
+    defer kept.deinit();
+    try std.testing.expectEqual(@as(usize, 0), kept.workspace.windows[0].tabs[0].panes[0].browser_terms.len);
+    try std.testing.expectEqual(@as(usize, 1), kept.workspace.windows[0].tabs[0].panes[0].surfaces.len); // 창 보존
+
+    // insert_after가 persisted_total(1)을 넘으면 자리를 만들 수 없다 → 그 창 fail-close.
+    const out_of_range =
+        "maru.workspace.v1\nwindow tabs=1 active-tab=0\n" ++
+        "tab panes=1 active-pane=0 custom-name=\"\"\n" ++
+        "tree-node leaf pane=0\n" ++
+        "pane surfaces=1 active-term=0 custom-name=\"\" browser-term=\"5:20:https://example.com/\"\n" ++
+        "surface custom-name=\"\" title=\"\" cwd=\"\" command=\"\" cols=80 rows=24\n";
+    try std.testing.expectError(error.BadLine, parse(a, out_of_range));
+
+    // active-browser가 record 수를 넘으면 폴백(가리킬 대상이 없다).
+    const bad_active =
+        "maru.workspace.v1\nwindow tabs=1 active-tab=0\n" ++
+        "tab panes=1 active-pane=0 custom-name=\"\"\n" ++
+        "tree-node leaf pane=0\n" ++
+        "pane surfaces=1 active-term=0 custom-name=\"\" active-browser=2 browser-term=\"0:20:https://example.com/\"\n" ++
+        "surface custom-name=\"\" title=\"\" cwd=\"\" command=\"\" cols=80 rows=24\n";
+    try std.testing.expectError(error.BadLine, parse(a, bad_active));
 }
 
 test "workspace FP16: 모르는 kind의 file-term은 그 항목만 버리고 창은 살린다" {

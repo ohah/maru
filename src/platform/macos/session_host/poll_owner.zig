@@ -3043,7 +3043,9 @@ test "poll owner keeps committed controller after partial revocation write and o
         c.send(old_client.fd, revocation.bytes.ptr, 1, 0),
     );
     try old_slot.consumeWritten(1);
-    var partial: [2]u8 = undefined;
+    // SOCK_STREAM may coalesce this byte with data already made readable by the preceding poll.
+    // Bound recv itself to the exact prefix under test instead of asserting a packet boundary.
+    var partial: [1]u8 = undefined;
     try testing.expectEqual(@as(isize, 1), c.recv(old.fd, &partial, partial.len, 0));
     try testing.expectEqual(first_revocation_byte, partial[0]);
     _ = c.shutdown(old.fd, c.SHUT.RDWR);

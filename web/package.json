@@ -29,7 +29,6 @@
     "@codemirror/view": "6.43.6",
     "dompurify": "3.4.12",
     "mermaid": "11.16.0",
-    "panzoom": "^9.4.4",
     "rehype-katex": "7.0.1",
     "rehype-prism-plus": "2.0.2",
     "rehype-sanitize": "6.0.0",

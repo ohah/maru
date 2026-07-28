@@ -13939,26 +13939,6 @@ pub const AppSession = struct {
         return self.readOpenedFile(gpa, file);
     }
 
-    /// FP14: 이미지 패널이 **자기 자신의 파일** 바이너리를 읽어 mime와 함께 돌려준다(readSelfImage bridge). 경로 인자가
-    /// 없어 readAsset의 상대경로 traversal이 필요 없고, 자기 entry.path의 부모를 pin한 뒤 no-follow로 basename만 연다
-    /// (심링크·`..` 탈출 불가). image kind만 허용(다른 kind는 자기 바이너리 노출 이유 없음). bytes는 gpa 소유.
-    pub fn readFilePanelSelfImage(
-        self: *AppSession,
-        gpa: std.mem.Allocator,
-        surface_id: u64,
-    ) FilePanelReadError!maru.session.control_bridge.SelfImage {
-        if (!self.dock_initialized) return error.SurfaceNotFound;
-        const entry = self.fileEntryForSurfaceId(surface_id) orelse return error.SurfaceNotFound;
-        if (entry.kind != .image) return error.WrongKind;
-
-        const pinned = openPinnedFilePanelParent(self.io, entry.path) catch return error.OutsideRoot;
-        defer pinned.dir.close(self.io);
-        const file = try openFilePanelRead(pinned.dir, std.fs.path.basename(entry.path), false);
-        defer file.close(self.io);
-        const bytes = try self.readOpenedFile(gpa, file);
-        return .{ .mime = file_panel_bridge.mimeForPath(entry.path), .bytes = bytes };
-    }
-
     /// backing px·좌상단 rect를 pt·좌하단(WKWebView frame·컨테이너 좌표)으로 변환한다(4a 순수 함수 소비). 컨테이너
     /// content view의 backing 높이(backing_height_px)를 y-flip 기준으로 쓴다(§3 — OS 타이틀바 포함 전체 창이 아니라
     /// pane rect가 사는 그 좌표 공간의 높이).
@@ -14713,8 +14693,10 @@ pub const AppSession = struct {
         // 컴파일러가 세 곳을 모두 잡아 준다. 반대로 **기존 kind의 소속만 한 곳에서 바꾸면** 컴파일은 통과한 채
         // trust config와 재생성 판정이 갈라지므로, 이 분할을 옮길 때는 세 곳을 함께 고친다(code-review max).
         return switch (kind) {
-            .html, .media, .pdf => true,
-            .markdown, .text, .svg, .image => false,
+            // FP14b: image도 격리 loadFileURL(WebKit image document + 주입 뷰어 스크립트) — 신뢰 shell로
+            // 바이트를 옮기던 readSelfImage 경로를 걷어냈다(§2.2 "왜 FP14의 신뢰 shell을 걷어냈나").
+            .html, .image, .media, .pdf => true,
+            .markdown, .text, .svg => false,
         };
     }
 
@@ -57332,57 +57314,6 @@ test "FP4 file panel readAsset: symlink escape and html surfaces are denied" {
     try std.testing.expectError(error.OutsideRoot, session.readFilePanelAsset(allocator, 801, "escape-dir/secret.png"));
     try std.testing.expectError(error.WrongKind, session.readFilePanel(allocator, 802, 1));
     try std.testing.expectError(error.WrongKind, session.readFilePanelAsset(allocator, 802, "escape.png"));
-}
-
-test "FP14 readSelfImage: reads own image bytes, denies non-image kinds and symlink escape" {
-    // 실 세션 하네스(initSmokeSessionSized)는 PTY·macOS 경로를 쓴다 — 비-macOS에서는 건너뛴다.
-    if (builtin.os.tag != .macos) return error.SkipZigTest;
-    const io = std.testing.io;
-    const allocator = std.testing.allocator;
-    var root_tmp = std.testing.tmpDir(.{});
-    defer root_tmp.cleanup();
-    var outside_tmp = std.testing.tmpDir(.{});
-    defer outside_tmp.cleanup();
-    const png_bytes = [_]u8{ 0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a };
-    try root_tmp.dir.writeFile(io, .{ .sub_path = "pic.png", .data = &png_bytes });
-    try root_tmp.dir.writeFile(io, .{ .sub_path = "doc.md", .data = "# doc" });
-    try outside_tmp.dir.writeFile(io, .{ .sub_path = "secret.png", .data = "SECRET" });
-    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const root = root_buf[0..try root_tmp.dir.realPath(io, &root_buf)];
-    var secret_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const secret = secret_buf[0..try outside_tmp.dir.realPathFile(io, "secret.png", &secret_buf)];
-    try root_tmp.dir.symLink(io, secret, "escape.png", .{}); // basename이 심링크인 image entry
-
-    const png_path = try std.fmt.allocPrint(allocator, "{s}/pic.png", .{root});
-    defer allocator.free(png_path);
-    const md_path = try std.fmt.allocPrint(allocator, "{s}/doc.md", .{root});
-    defer allocator.free(md_path);
-    const escape_path = try std.fmt.allocPrint(allocator, "{s}/escape.png", .{root});
-    defer allocator.free(escape_path);
-
-    // FP16: 파일 entry가 Term 소유라 도크만 초기화한 최소 하네스로는 만들 수 없다 — 실 세션이 필요하다.
-    const session = try initSmokeSessionSized(allocator);
-    defer allocator.destroy(session);
-    defer session.deinit();
-    session.io = io;
-    _ = try session.openFileTermInActivePane(png_path, .image);
-    session.fileEntryAt(0).?.surface_id = 901;
-    _ = try session.openFileTermInActivePane(md_path, .markdown);
-    session.fileEntryAt(1).?.surface_id = 902;
-    _ = try session.openFileTermInActivePane(escape_path, .image);
-    session.fileEntryAt(2).?.surface_id = 903;
-
-    // 자기 image 파일 바이트+mime을 돌려준다(경로 인자 없음).
-    const image = try session.readFilePanelSelfImage(allocator, 901);
-    defer allocator.free(image.bytes);
-    try std.testing.expectEqualSlices(u8, &png_bytes, image.bytes);
-    try std.testing.expectEqualStrings("image/png", image.mime);
-    // non-image kind(markdown)는 자기 바이너리를 못 뽑는다.
-    try std.testing.expectError(error.WrongKind, session.readFilePanelSelfImage(allocator, 902));
-    // basename이 심링크면 NOFOLLOW로 탈출 거부.
-    try std.testing.expectError(error.OutsideRoot, session.readFilePanelSelfImage(allocator, 903));
-    // 없는 surface는 SurfaceNotFound.
-    try std.testing.expectError(error.SurfaceNotFound, session.readFilePanelSelfImage(allocator, 999));
 }
 
 test "FP4 file panel readAsset: replaced lexical parent symlink is denied" {

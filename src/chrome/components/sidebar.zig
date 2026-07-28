@@ -221,6 +221,37 @@ pub fn agentAt(rows: []const Row, row_index: usize) ?struct { tab: usize, pane: 
     };
 }
 
+/// 카드 `index`에 딸린 **에이전트 목록까지 포함한 span의 끝**(반열림 `[index, end)`). 카드 뒤에 이어지는
+/// `agent_toggle`/`agent` row가 끝나는 지점이다 — 목록은 그 워크스페이스의 부속이라 활성 밴드·배경 tint·좌측
+/// accent 막대가 전부 이 범위를 한 덩어리로 쓴다(카드에서 끊기면 "어디까지가 이 워크스페이스인지"가 안 보인다).
+/// 카드가 아닌 row나 범위 밖이면 자기 자신 하나(`index+1`)로 포화한다.
+pub fn cardSpanEnd(rows: []const Row, index: usize) usize {
+    var end = index + 1;
+    while (end < rows.len) : (end += 1) switch (rows[end]) {
+        .agent_toggle, .agent => {},
+        else => break,
+    };
+    return end;
+}
+
+/// `[from, to)` row 구간의 **슬롯 상대 rect**(x=0, w=사이드바 폭, y=앞선 row 높이 누적, h=구간 높이 합).
+/// 밴드(`bandFillSpan`)·platform의 per-card 배경 tint·좌측 accent 막대·드래그 고스트가 **모두 이 함수 하나**를
+/// 쓴다 — 예전엔 chrome이 `rowTop`+`rowHeight` 누적으로, platform이 같은 누적을 따로 계산해 두 벌을 들고 있었고,
+/// 한쪽 인셋만 바꾸면 막대가 밴드 안쪽에 떠 보이는 드리프트가 실제로 났다(docs/sidebar-agent-list.md §3.2).
+/// `from >= rows.len`(목록 아래 "새 워크스페이스" 행)이면 **기본 1줄 카드 높이**로 둔다(옛 고정 slot_h 자리).
+/// 절대 y가 필요한 호출자(platform)는 여기에 사이드바 헤더 높이를 더한다 — 헤더 시프트는 그쪽 단일 책임이다.
+pub fn spanRect(rows: []const Row, from: usize, to: usize, w: u32, m: Metrics) draw.Rect {
+    const top: i64 = rowTop(rows, from, 0, m, 0); // 슬롯 상대(헤더·스크롤 제외), ≥0
+    var h: u32 = 0;
+    if (from >= rows.len) {
+        h = cardHeight(1, m);
+    } else {
+        var i = from;
+        while (i < to and i < rows.len) : (i += 1) h +|= rowHeight(rows[i], m);
+    }
+    return .{ .x = 0, .y = @intCast(top), .w = w, .h = h };
+}
+
 /// row 인덱스의 화면 상단 y(backing px) — 옛 slotTop의 가변판(고정 `index*slot_h` 대신 앞 row 높이 누적).
 /// header + Σ(rows[0..index] 높이) − scroll. index≥rows.len이면 전체 콘텐츠 하단(모든 row 합) 기준. i64라 음수(위로 밀림) 안전.
 pub fn rowTop(rows: []const Row, index: usize, header_height_px: u32, m: Metrics, scroll_offset_px: u32) i64 {
@@ -376,14 +407,9 @@ pub fn view(rows: []const Row, hovered_slot: ?usize, drop_slot: ?usize, p: props
     };
     if (active_idx) |ai| {
         // 활성 밴드는 **카드 + 그 아래 에이전트 목록 전체**를 덮는다 — 목록은 그 워크스페이스에 딸린 부속이라
-        // 카드만 칠하면 "어디까지가 이 워크스페이스인지"가 안 보인다(사용자 피드백). 카드 뒤에 이어지는
-        // agent_toggle/agent row가 끝나는 지점까지 한 덩어리로 낸다.
-        var span_end = ai + 1;
-        while (span_end < rows.len) : (span_end += 1) switch (rows[span_end]) {
-            .agent_toggle, .agent => {},
-            else => break,
-        };
-        try out.append(arena, bandFillSpan(rows, ai, span_end, w, m, .tab_active_bg, p.shape)); // 카드+목록 배경 밴드
+        // 카드만 칠하면 "어디까지가 이 워크스페이스인지"가 안 보인다(사용자 피드백). 범위는 `cardSpanEnd`가
+        // 단일 출처로 준다(platform의 per-card tint·accent 막대도 같은 함수를 쓴다 — 두 벌 누적 금지).
+        try out.append(arena, bandFillSpan(rows, ai, cardSpanEnd(rows, ai), w, m, .tab_active_bg, p.shape)); // 카드+목록 배경 밴드
         // 좌측 accent 막대는 여기서 내지 않는다 — 막대색이 카드별(우클릭 "바: …", tab.accent_color)이라 role 기반
         // chrome op으로 임의 RGB를 실을 수 없어, 배경 tint와 같은 이유로 **platform이 카드별 GpuQuad로 직접 그린다**
         // (app_session rebuildSidebar의 per-tab accent 루프 — 활성=기본 앰버/지정색, 비활성=지정 시에만). 카드 폭 inset과
@@ -432,23 +458,15 @@ fn bandFill(rows: []const Row, row: usize, w: u32, m: Metrics, role: tokens.Colo
 }
 
 /// `[from, to)` **여러 row를 한 덩어리로** 덮는 밴드. 활성 워크스페이스가 카드 + 에이전트 목록을 함께 칠할 때 쓴다
-/// (단일 row는 `bandFill`이 to=from+1로 위임). row→y는 앞선 row 높이 누적(rowTop의 헤더·스크롤 제외분).
+/// (단일 row는 `bandFill`이 to=from+1로 위임).
+///
+/// 기하는 `spanRect` 하나에서 나온다 — **밴드 = 행 전체**(인셋 없음). 예전엔 사방 `card_gap`(rich 8px)을 들여
+/// "떠 있는 카드"로 그렸는데, 클릭 판정(`slotAt`)은 행 전체(사이드바 폭 × 행 높이)라 밴드 밖 8px 띠를 눌러도
+/// 카드가 눌렸다 — "보이는 곳 = 눌리는 곳"이 깨져 호버 하이라이트가 무엇을 가리키는지 어긋나 보인다(사용자
+/// 제보 → 결정 2026-07-28: **밴드를 클릭 행에 맞춘다**). `card_gap_px`는 이제 카드 **텍스트 좌측 들여쓰기**
+/// 전용 토큰이다. platform(rebuildSidebar의 per-card tint·accent 막대·드래그 고스트)도 같은 `spanRect`를 부른다.
 fn bandFillSpan(rows: []const Row, from: usize, to: usize, w: u32, m: Metrics, role: tokens.ColorRole, shape: props.ShapeTokens) draw.Op {
-    const top: i64 = rowTop(rows, from, 0, m, 0); // 슬롯 상대(헤더·스크롤 제외), ≥0
-    // 목록 아래 행(새 워크스페이스)은 카드가 아니므로 **기본 1줄 카드 높이**로 둔다(옛 고정 slot_h 자리).
-    var rh: u32 = 0;
-    if (from >= rows.len) {
-        rh = cardHeight(1, m);
-    } else {
-        var i = from;
-        while (i < to and i < rows.len) : (i += 1) rh +|= rowHeight(rows[i], m);
-    }
-    // 밴드 = **행 전체**(인셋 없음). 예전엔 사방 `card_gap`(rich 8px)을 들여 "떠 있는 카드"로 그렸는데, 클릭
-    // 판정(`slotAt`)은 행 전체(사이드바 폭 × 행 높이)라 밴드 밖 8px 띠를 눌러도 카드가 눌렸다 — "보이는 곳 =
-    // 눌리는 곳"이 깨져 호버 하이라이트가 무엇을 가리키는지 어긋나 보인다(사용자 제보 → 결정 2026-07-28:
-    // **밴드를 클릭 행에 맞춘다**). `card_gap_px`는 이제 카드 **텍스트 좌측 들여쓰기** 전용 토큰이다.
-    // platform(rebuildSidebar의 per-card tint·accent 막대·드래그 고스트)도 같은 rect를 써야 하므로 여기가 단일 출처다.
-    return quadOp(.{ .x = 0, .y = @intCast(top), .w = w, .h = rh }, role, shape);
+    return quadOp(spanRect(rows, from, to, w, m), role, shape);
 }
 
 /// 목록 행(토글·에이전트) **호버 밴드** op = 행에서 사방 `list_pad_v/2`만 들인 rect. 카드 밴드(행 전체)와 달리
@@ -828,6 +846,47 @@ test "sidebar 가변 높이: rowHeight·rowTop·contentHeight(혼합 누적 + �
     const empty = [_]Row{};
     try std.testing.expectEqual(@as(i64, 20), rowTop(&empty, 0, 20, testMetrics(40, 16), 0));
     try std.testing.expectEqual(@as(u32, 0), contentHeight(&empty, testMetrics(40, 16)));
+}
+
+test "sidebar cardSpanEnd·spanRect: 카드+목록 span 기하가 chrome 단일 출처다(platform이 재계산하지 않는다)" {
+    // 이 두 함수는 chrome 밴드(bandFillSpan)와 platform(per-card 배경 tint·좌측 accent 막대·드래그 고스트)이
+    // **함께** 쓰는 유일한 기하 소스다. 예전엔 같은 누적이 두 벌이라 한쪽 인셋만 바꾸면 막대가 밴드 안쪽에 떠
+    // 보였다(docs/sidebar-agent-list.md §3.2). 여기서 값을 고정해 두 소비자가 갈라지지 못하게 한다.
+    const m = testMetrics(40, 16);
+    const card = Row{ .card = .{ .tab = 0, .label = "c", .active = false } };
+    const hdr = Row{ .group_header = .{ .collapsed = false, .label = "g", .member_count = 0, .tab = 0 } };
+    const toggle = Row{ .agent_toggle = .{ .tab = 0, .count = 2, .collapsed = false } };
+    const agent = Row{ .agent = .{ .tab = 0, .pane = 0, .term = 0, .lines = 2 } };
+    // [카드0, 토글, 에이전트, 카드3, 헤더4] — 카드0의 span은 목록 둘을 삼키고 카드3에서 멈춘다.
+    const rows = [_]Row{ card, toggle, agent, card, hdr };
+    try std.testing.expectEqual(@as(usize, 3), cardSpanEnd(&rows, 0)); // 카드 + 목록 2행
+    try std.testing.expectEqual(@as(usize, 4), cardSpanEnd(&rows, 3)); // 뒤가 헤더 → 자기 하나
+    try std.testing.expectEqual(@as(usize, 5), cardSpanEnd(&rows, 4)); // 헤더도 자기 하나(목록 안 딸림)
+    try std.testing.expectEqual(@as(usize, 3), cardSpanEnd(&rows, 2)); // 목록 행 자신도 자기 하나
+    try std.testing.expectEqual(@as(usize, 6), cardSpanEnd(&rows, 5)); // 범위 밖(새 워크스페이스 행) → index+1
+
+    // spanRect: x=0·w=전폭·y=앞선 row 높이 누적·h=구간 높이 합(인셋 없음 = 클릭 행과 같은 구간).
+    const span0 = spanRect(&rows, 0, cardSpanEnd(&rows, 0), 120, m);
+    try std.testing.expectEqual(@as(i32, 0), span0.x);
+    try std.testing.expectEqual(@as(u32, 120), span0.w);
+    try std.testing.expectEqual(@as(i32, 0), span0.y);
+    // 카드(40) + 토글(1줄) + 에이전트(2줄) — testMetrics는 여백 0·스텝=줄높이라 각 40·80.
+    try std.testing.expectEqual(rowHeight(card, m) + rowHeight(toggle, m) + rowHeight(agent, m), span0.h);
+    // 밴드 op(bandFillSpan)이 같은 rect를 쓴다 — 두 경로가 같은 값임을 직접 고정한다.
+    const op = bandFillSpan(&rows, 0, cardSpanEnd(&rows, 0), 120, m, .tab_active_bg, .{});
+    try std.testing.expectEqual(span0.x, op.quad.rect.x);
+    try std.testing.expectEqual(span0.y, op.quad.rect.y);
+    try std.testing.expectEqual(span0.w, op.quad.rect.w);
+    try std.testing.expectEqual(span0.h, op.quad.rect.h);
+    // 카드3의 span y = 앞선 세 row 높이 합(rowTop과 같은 누적).
+    const span3 = spanRect(&rows, 3, cardSpanEnd(&rows, 3), 120, m);
+    try std.testing.expectEqual(@as(i32, @intCast(span0.h)), span3.y);
+    try std.testing.expectEqual(rowHeight(card, m), span3.h);
+    // 범위 밖(목록 아래 "새 워크스페이스" 행)은 기본 1줄 카드 높이 — 드롭 밴드가 여기 그려진다.
+    const past = spanRect(&rows, rows.len, rows.len + 1, 120, m);
+    try std.testing.expectEqual(cardHeight(1, m), past.h);
+    // y는 콘텐츠 하단(rowTop의 past-end 값 — contentHeight와 달리 아래 여백을 안 더한다).
+    try std.testing.expectEqual(@as(i32, @intCast(rowTop(&rows, rows.len, 0, m, 0))), past.y);
 }
 
 test "sidebar 목록 행 호버 밴드: 글자 블록을 덮고 클릭 행과 같은 크기다(사방 card_gap 인셋으로 쪼그라들지 않음)" {

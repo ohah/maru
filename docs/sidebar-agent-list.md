@@ -164,8 +164,23 @@ walk-up해 캐시하므로 비활성 Term을 함께 읽어도 비용이 늘지 �
 어긋나 보이지 않는다. 목록 행 밴드가 글자를 반드시 덮는 근거: 행 높이 = 글자 블록 + 위아래 여백(≥`list_pad_v`)
 이므로 `list_pad_v/2` 인셋으로는 글자 블록을 침범할 수 없다(`listRowBandV`).
 
-**platform도 같은 rect를 쓴다.** per-card 배경 tint·좌측 accent 막대·드래그 고스트 밴드는 chrome 밴드와 겹쳐
-그려지므로 `bandFillSpan`의 rect(=행)를 그대로 따라간다 — 한쪽만 인셋을 바꾸면 막대가 밴드 안쪽에 떠 보인다.
+### 3.3 span 기하는 chrome 함수 하나에서만 나온다
+
+밴드와 **겹쳐** 그려지는 것들 — per-card 배경 tint, 좌측 accent 막대, 드래그 고스트 밴드/삽입선, nest 타깃
+하이라이트 — 은 색이 카드별 RGB라 chrome op(role 기반)으로 실을 수 없어 platform이 직접 그린다. 그렇다고
+**기하까지 platform이 다시 계산하면 반드시 드리프트한다**: 실제로 밴드 인셋을 바꿨을 때 platform 쪽 `card_gap`
+산술이 남아 막대만 밴드 안쪽에 떠 보였다.
+
+그래서 span 기하는 chrome의 두 함수가 단일 출처다.
+
+| 함수 | 답하는 질문 |
+| --- | --- |
+| `cardSpanEnd(rows, index)` | 이 카드의 span은 어디서 끝나나(뒤따르는 `agent_toggle`/`agent` row까지) |
+| `spanRect(rows, from, to, w, m)` | 그 구간의 rect는 무엇인가(x=0·w=사이드바 폭·y=앞선 row 높이 누적·h=구간 합) |
+
+`bandFillSpan`은 `spanRect` 결과를 그대로 quad로 만들고, platform(`rebuildSidebar`)은 같은 두 함수를 불러
+**헤더 높이와 색만** 더한다(스크롤은 `sidebarScrollClipQuad`가 뺀다). platform에는 이제 row 높이 누적 루프가
+없다 — 밴드 rect를 바꾸면 겹쳐 그려지는 것들이 자동으로 따라온다.
 
 ## 4. 접기 상태
 

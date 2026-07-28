@@ -18,6 +18,7 @@ const external_inbox_ledger = @import("external_inbox_ledger.zig");
 const external_source_decision = @import("external_source_decision.zig");
 const framing = @import("framing.zig");
 const protocol = @import("protocol.zig");
+const resize_wire = @import("resize_wire.zig");
 const runtime_metadata_wire = @import("runtime_metadata_wire.zig");
 
 pub const AttachmentRole = enum {
@@ -261,6 +262,95 @@ pub const PreparedAttachmentAuthority = struct {
     generation: AuthorityGeneration,
 };
 
+pub const OwnerResizeState = union(enum) {
+    none,
+    pending: resize_wire.Event,
+};
+
+pub const OwnerAuthorityFlow = enum {
+    initial_fence,
+    clear,
+};
+
+pub const OwnerAuthorityState = union(enum) {
+    empty,
+    current: struct {
+        role: AttachmentRole,
+        generation: AuthorityGeneration,
+        flow: OwnerAuthorityFlow,
+    },
+};
+
+const OwnerScalarTakeLifecycle = enum {
+    empty,
+    prepared,
+    committed_tombstone,
+    aborted_tombstone,
+};
+
+pub const PreparedOwnerScalarTake = struct {
+    saved_self_addr: usize = 0,
+    prepared_addr: usize = 0,
+    storage_addr: usize = 0,
+    resize_addr: usize = 0,
+    authority_addr: usize = 0,
+    request_addr: usize = 0,
+    resize: OwnerResizeState = .none,
+    authority: OwnerAuthorityState = .empty,
+    request_ids: client_pump.RequestIdState = .{ .available = 1 },
+    lifecycle: OwnerScalarTakeLifecycle = .empty,
+
+    pub fn validate(
+        self: *const PreparedOwnerScalarTake,
+        storage: *const ExternalPumpStorage,
+    ) bool {
+        if (self.lifecycle != .prepared or
+            self.saved_self_addr != @intFromPtr(self) or
+            self.prepared_addr != @intFromPtr(&storage.prepared_adoption) or
+            self.storage_addr != @intFromPtr(storage) or
+            self.resize_addr != @intFromPtr(&storage.owner_resize) or
+            self.authority_addr != @intFromPtr(&storage.owner_authority) or
+            self.request_addr != @intFromPtr(&storage.owner_request_ids) or
+            storage.owner_authority != .empty or
+            storage.owner_request_ids != null or
+            !storage.prepared_adoption.validate(storage))
+            return false;
+        const decision = storage.prepared_adoption.source_decision orelse return false;
+        const live = switch (decision.verdict) {
+            .adopted => |adopted| adopted,
+            else => return false,
+        };
+        const expected_resize = if (live.resize) |candidate|
+            OwnerResizeState{ .pending = candidate.event }
+        else
+            .none;
+        const expected_authority = OwnerAuthorityState{ .current = .{
+            .role = switch (live.authority.role) {
+                .observer => .observer,
+                .controller => .controller,
+            },
+            .generation = switch (live.authority.generation) {
+                .untracked => .untracked,
+                .tracked => |generation| .{ .tracked = generation },
+            },
+            .flow = .initial_fence,
+        } };
+        return std.meta.eql(self.resize, expected_resize) and
+            std.meta.eql(self.authority, expected_authority) and
+            std.meta.eql(
+                self.request_ids,
+                decision.request_state orelse return false,
+            );
+    }
+
+    pub fn abort(self: *PreparedOwnerScalarTake) void {
+        if (self.saved_self_addr != 0 and
+            self.saved_self_addr != @intFromPtr(self))
+            return;
+        self.* = .{ .lifecycle = .aborted_tombstone };
+    }
+};
+
 pub const RetryablePrepareReason = enum { out_of_memory };
 pub const TerminalPrepareReason = enum {
     protocol,
@@ -492,6 +582,7 @@ pub const TeardownResult = enum {
     moved_storage,
     busy,
     ledger_not_zero,
+    committed_owners_require_typed_cleanup,
 };
 
 pub const AccessError = error{
@@ -539,6 +630,11 @@ pub const ExternalPumpStorage = struct {
     client_transfer: client_mod.PreparedExternalPumpTransfer = .{},
     inbox_ledger: external_inbox_ledger.ExternalInboxLedger = .{},
     prepared_adoption: PreparedExternalAdoption = .{},
+    committed_screen: client_external_adoption.CommittedScreenBacklog = .{},
+    owner_metadata: external_event_materialization.OwnerMetadataState = .{},
+    owner_resize: OwnerResizeState = .none,
+    owner_authority: OwnerAuthorityState = .empty,
+    owner_request_ids: ?client_pump.RequestIdState = null,
 
     pub fn initInPlace(
         out: *ExternalPumpStorage,
@@ -884,6 +980,67 @@ pub const ExternalPumpStorage = struct {
         return .prepared;
     }
 
+    pub fn prepareOwnerScalarTake(
+        self: *ExternalPumpStorage,
+        out: *PreparedOwnerScalarTake,
+    ) error{InvalidOwnerTake}!void {
+        if (!std.meta.eql(out.*, PreparedOwnerScalarTake{}) or
+            rangesOverlap(
+                @intFromPtr(out),
+                @sizeOf(PreparedOwnerScalarTake),
+                @intFromPtr(self),
+                @sizeOf(ExternalPumpStorage),
+            ) or
+            self.owner_authority != .empty or self.owner_request_ids != null or
+            !self.prepared_adoption.validate(self))
+            return error.InvalidOwnerTake;
+        const decision = self.prepared_adoption.source_decision orelse
+            return error.InvalidOwnerTake;
+        const live = switch (decision.verdict) {
+            .adopted => |adopted| adopted,
+            else => return error.InvalidOwnerTake,
+        };
+        out.* = .{
+            .saved_self_addr = @intFromPtr(out),
+            .prepared_addr = @intFromPtr(&self.prepared_adoption),
+            .storage_addr = @intFromPtr(self),
+            .resize_addr = @intFromPtr(&self.owner_resize),
+            .authority_addr = @intFromPtr(&self.owner_authority),
+            .request_addr = @intFromPtr(&self.owner_request_ids),
+            .resize = if (live.resize) |candidate|
+                .{ .pending = candidate.event }
+            else
+                .none,
+            .authority = .{ .current = .{
+                .role = switch (live.authority.role) {
+                    .observer => .observer,
+                    .controller => .controller,
+                },
+                .generation = switch (live.authority.generation) {
+                    .untracked => .untracked,
+                    .tracked => |generation| .{ .tracked = generation },
+                },
+                .flow = .initial_fence,
+            } },
+            .request_ids = decision.request_state orelse return error.InvalidOwnerTake,
+            .lifecycle = .prepared,
+        };
+        if (!out.validate(self)) {
+            out.* = .{ .lifecycle = .aborted_tombstone };
+            return error.InvalidOwnerTake;
+        }
+    }
+
+    pub fn commitOwnerScalarTakeNoFail(
+        self: *ExternalPumpStorage,
+        take: *PreparedOwnerScalarTake,
+    ) void {
+        self.owner_resize = take.resize;
+        self.owner_authority = take.authority;
+        self.owner_request_ids = take.request_ids;
+        take.* = .{ .lifecycle = .committed_tombstone };
+    }
+
     fn resetPreparedAdoption(self: *ExternalPumpStorage) void {
         self.prepared_adoption.deinit();
         self.prepared_adoption = .{};
@@ -913,6 +1070,12 @@ pub const ExternalPumpStorage = struct {
         self: *ExternalPumpStorage,
         reason: client_pump.TerminalReason,
     ) TeardownResult {
+        // b1 deliberately has no aggregate cleanup scratch yet. Refuse before publishing teardown
+        // state when a committed owner exists; current variants may own heap backing, and c3c-3
+        // supplies the typed cleanup for every tag.
+        if (self.committed_screen.requiresTypedCleanup() or
+            self.owner_metadata.requiresTypedCleanup())
+            return .committed_owners_require_typed_cleanup;
         self.lifecycle = .tearing_down;
         self.semantic_state = .{ .terminal = .{
             .reason = reason,
@@ -924,6 +1087,9 @@ pub const ExternalPumpStorage = struct {
         if (self.owned_evidence) |*owned| owned.deinit();
         self.owned_evidence = null;
         self.client_transfer.deinit();
+        self.owner_resize = .none;
+        self.owner_authority = .empty;
+        self.owner_request_ids = null;
         const drain_report = self.inbox_ledger.drainAll();
         const ledger_result = self.inbox_ledger.finish();
         self.lifecycle = .dead;
@@ -1823,6 +1989,11 @@ test "external pump storage initializes only at its stable address and remains i
             .initialized,
     );
     try std.testing.expectEqual(StorageLifecycle.adopting, storage.lifecycle);
+    try std.testing.expect(storage.committed_screen.isEmpty());
+    try std.testing.expect(storage.owner_metadata.isEmpty());
+    try std.testing.expect(storage.owner_resize == .none);
+    try std.testing.expect(storage.owner_authority == .empty);
+    try std.testing.expect(storage.owner_request_ids == null);
     try std.testing.expectError(error.NotActive, storage.requireActive());
     try std.testing.expectEqual(@as(c.fd_t, -1), fixture.client.fd);
     fixture.client.deinit(); // moved-from cleanup must not close/free the destination owner.
@@ -2078,6 +2249,34 @@ test "external pump prepares tracked authority and client ledger adoption withou
         @as(u64, 3),
         authority.generation.tracked,
     );
+    var aborted_scalar_take: PreparedOwnerScalarTake = .{};
+    try storage.prepareOwnerScalarTake(&aborted_scalar_take);
+    try std.testing.expect(aborted_scalar_take.validate(&storage));
+    aborted_scalar_take.abort();
+    try std.testing.expect(!aborted_scalar_take.validate(&storage));
+    try std.testing.expect(storage.owner_authority == .empty);
+    try std.testing.expect(storage.owner_request_ids == null);
+    var scalar_take: PreparedOwnerScalarTake = .{};
+    try storage.prepareOwnerScalarTake(&scalar_take);
+    try std.testing.expect(scalar_take.validate(&storage));
+    var moved_scalar_take = scalar_take;
+    try std.testing.expect(!moved_scalar_take.validate(&storage));
+    storage.commitOwnerScalarTakeNoFail(&scalar_take);
+    try std.testing.expect(storage.owner_authority == .current);
+    try std.testing.expectEqual(
+        AttachmentRole.controller,
+        storage.owner_authority.current.role,
+    );
+    try std.testing.expectEqual(
+        OwnerAuthorityFlow.initial_fence,
+        storage.owner_authority.current.flow,
+    );
+    try std.testing.expectEqual(
+        @as(u64, 3),
+        storage.owner_authority.current.generation.tracked,
+    );
+    try std.testing.expect(storage.owner_request_ids != null);
+    try std.testing.expect(!scalar_take.validate(&storage));
     storage.prepared_adoption.backlog.inventory.?.target_stream = 8;
     try std.testing.expect(!storage.prepared_adoption.validate(&storage));
     storage.prepared_adoption.backlog.inventory.?.target_stream = 7;
@@ -2152,6 +2351,150 @@ test "external pump prepares tracked authority and client ledger adoption withou
     try std.testing.expect(!storage.prepared_adoption.validate(&storage));
     storage.prepared_adoption.metadata.saved_self_addr = metadata_addr;
     try std.testing.expect(storage.prepared_adoption.validate(&storage));
+}
+
+test "c3c-2b1 scalar owners reset on ordinary teardown" {
+    var fixture = try TestClient.init();
+    defer fixture.deinitPeer();
+    var storage: ExternalPumpStorage = .{};
+    try std.testing.expect(
+        initTestStorage(&storage, &fixture.client, valid_evidence) ==
+            .initialized,
+    );
+    try std.testing.expect(storage.prepareAdoption() == .prepared);
+    var take: PreparedOwnerScalarTake = .{};
+    try storage.prepareOwnerScalarTake(&take);
+    const stale = take;
+    storage.commitOwnerScalarTakeNoFail(&take);
+
+    try std.testing.expect(storage.owner_resize == .none);
+    try std.testing.expect(storage.owner_authority == .current);
+    try std.testing.expect(storage.owner_request_ids != null);
+    try std.testing.expect(!take.validate(&storage));
+    var moved_stale = stale;
+    try std.testing.expect(!moved_stale.validate(&storage));
+
+    try std.testing.expectEqual(TeardownResult.cleaned, storage.teardown());
+    try std.testing.expect(storage.owner_resize == .none);
+    try std.testing.expect(storage.owner_authority == .empty);
+    try std.testing.expect(storage.owner_request_ids == null);
+    try std.testing.expectEqual(TeardownResult.already_dead, storage.teardown());
+}
+
+test "c3c-2b1 scalar take derives pending resize from the adopted decision" {
+    var fixture = try TestClient.init();
+    defer fixture.deinitPeer();
+    try appendTestEvent(&fixture.client,
+        \\{"event":"runtime.resized","data":{"runtime_id":"000000000000000000000000000000aa","cols":132,"rows":43,"resize_generation":9,"reason":"controller"}}
+    );
+    var storage: ExternalPumpStorage = .{};
+    try std.testing.expect(
+        initTestStorage(&storage, &fixture.client, valid_evidence) ==
+            .initialized,
+    );
+    defer _ = storage.teardown();
+    try std.testing.expect(storage.prepareAdoption() == .prepared);
+    var take: PreparedOwnerScalarTake = .{};
+    try storage.prepareOwnerScalarTake(&take);
+    try std.testing.expect(take.resize == .pending);
+    try std.testing.expectEqual(@as(u16, 132), take.resize.pending.cols);
+    try std.testing.expectEqual(@as(u16, 43), take.resize.pending.rows);
+    try std.testing.expectEqual(@as(u64, 9), take.resize.pending.resize_generation);
+    storage.commitOwnerScalarTakeNoFail(&take);
+    try std.testing.expect(storage.owner_resize == .pending);
+    try std.testing.expectEqual(
+        @as(u64, 9),
+        storage.owner_resize.pending.resize_generation,
+    );
+}
+
+test "c3c-2b1 pending resize scalar is cleared without damaging ownership" {
+    var fixture = try TestClient.init();
+    defer fixture.deinitPeer();
+    var storage: ExternalPumpStorage = .{};
+    try std.testing.expect(
+        initTestStorage(&storage, &fixture.client, valid_evidence) ==
+            .initialized,
+    );
+    storage.owner_resize = .{ .pending = .{
+        .runtime_id = valid_evidence.runtime_id,
+        .cols = 132,
+        .rows = 43,
+        .resize_generation = 9,
+    } };
+    storage.owner_authority = .{ .current = .{
+        .role = .controller,
+        .generation = .{ .tracked = 3 },
+        .flow = .initial_fence,
+    } };
+    storage.owner_request_ids = .{ .available = 7 };
+
+    try std.testing.expectEqual(TeardownResult.cleaned, storage.teardown());
+    try std.testing.expect(storage.owner_resize == .none);
+    try std.testing.expect(storage.owner_authority == .empty);
+    try std.testing.expect(storage.owner_request_ids == null);
+}
+
+test "c3c-2b1 generic teardown preserves committed owner lifecycle" {
+    var fixture = try TestClient.init();
+    defer fixture.deinitPeer();
+    const owned_fd = fixture.client.fd;
+    var storage: ExternalPumpStorage = .{};
+    try std.testing.expect(
+        initTestStorage(&storage, &fixture.client, valid_evidence) ==
+            .initialized,
+    );
+    storage.owner_metadata = .{
+        .saved_self_addr = @intFromPtr(&storage.owner_metadata),
+        .storage_addr = @intFromPtr(&storage),
+        .source_addr = @intFromPtr(&storage.prepared_adoption),
+        .metadata = .unsupported,
+        .lifecycle = .committed,
+    };
+    const lifecycle_before = storage.lifecycle;
+    const semantic_before = storage.semantic_state;
+
+    try std.testing.expectEqual(
+        TeardownResult.committed_owners_require_typed_cleanup,
+        storage.teardown(),
+    );
+    try std.testing.expectEqual(lifecycle_before, storage.lifecycle);
+    try std.testing.expect(std.meta.eql(semantic_before, storage.semantic_state));
+    try std.testing.expect(storage.owner_metadata.isCommitted());
+    try std.testing.expect(c.fcntl(owned_fd, c.F.GETFD, @as(c_int, 0)) >= 0);
+
+    storage.owner_metadata.deinitCommitted();
+    try std.testing.expectEqual(TeardownResult.cleaned, storage.teardown());
+}
+
+test "c3c-2b1 generic teardown fails closed on partial owner descriptors" {
+    var fixture = try TestClient.init();
+    defer fixture.deinitPeer();
+    var storage: ExternalPumpStorage = .{};
+    try std.testing.expect(
+        initTestStorage(&storage, &fixture.client, valid_evidence) ==
+            .initialized,
+    );
+    storage.committed_screen.storage_addr = @intFromPtr(&storage);
+    try std.testing.expect(!storage.committed_screen.isEmpty());
+    try std.testing.expect(storage.committed_screen.requiresTypedCleanup());
+    try std.testing.expectEqual(
+        TeardownResult.committed_owners_require_typed_cleanup,
+        storage.teardown(),
+    );
+    try std.testing.expectEqual(StorageLifecycle.adopting, storage.lifecycle);
+    storage.committed_screen = .{};
+
+    storage.owner_metadata.storage_addr = @intFromPtr(&storage);
+    try std.testing.expect(!storage.owner_metadata.isEmpty());
+    try std.testing.expect(storage.owner_metadata.requiresTypedCleanup());
+    try std.testing.expectEqual(
+        TeardownResult.committed_owners_require_typed_cleanup,
+        storage.teardown(),
+    );
+    try std.testing.expectEqual(StorageLifecycle.adopting, storage.lifecycle);
+    storage.owner_metadata = .{};
+    try std.testing.expectEqual(TeardownResult.cleaned, storage.teardown());
 }
 
 test "external adoption preparation rejects reentry and teardown from allocator callbacks" {

@@ -393,6 +393,11 @@ const InitOptions = struct {
 
 pub const max_fixed_inline_storage_bytes: usize = 512 * 1024;
 
+// `initInPlace` is thread-confined, but an allocator callback may synchronously re-enter it on the
+// same thread before destination alias proof is allowed to read `out`. Keep that earliest latch
+// out-of-band so hostile `out` aliases are not dereferenced or mutated before the proof.
+threadlocal var initializing_storage_addr: usize = 0;
+
 pub const ExternalPumpStorage = struct {
     lifecycle: StorageLifecycle = .empty,
     saved_self_addr: usize = 0,
@@ -443,33 +448,46 @@ pub const ExternalPumpStorage = struct {
         )) {
             return failed(.overlapping_storage, .preserved);
         }
+        const out_addr = @intFromPtr(out);
+        if (initializing_storage_addr != 0)
+            return failed(.destination_not_empty, .preserved);
+        initializing_storage_addr = out_addr;
+        defer initializing_storage_addr = 0;
         source.preflightExternalAdoptionDestination(
             evidence,
             @sizeOf(PreparedAdoptionEvidence),
-        ) catch |err| return switch (err) {
-            error.OutOfMemory => failed(.out_of_memory, .preserved),
-            else => failed(.overlapping_storage, .preserved),
+        ) catch |err| {
+            return switch (err) {
+                error.OutOfMemory => failed(.out_of_memory, .preserved),
+                else => failed(.overlapping_storage, .preserved),
+            };
         };
-        const evidence_seed_seal = evidence.seed_seal orelse
+        const evidence_seed_seal = evidence.seed_seal orelse {
             return failed(.invalid_evidence, .preserved);
+        };
         if (evidence_seed_seal.backing_len != 0 and rangesOverlap(
             @intFromPtr(out),
             @sizeOf(ExternalPumpStorage),
             evidence_seed_seal.backing_addr,
             evidence_seed_seal.backing_len,
-        )) return failed(.overlapping_storage, .preserved);
+        )) {
+            return failed(.overlapping_storage, .preserved);
+        }
         source.preflightExternalAdoptionDestination(
             out,
             @sizeOf(ExternalPumpStorage),
-        ) catch |err| return switch (err) {
-            error.OutOfMemory => failed(.out_of_memory, .preserved),
-            error.InvalidAlias => failed(.overlapping_storage, .preserved),
-            else => failed(.invariant_failure, .preserved),
+        ) catch |err| {
+            return switch (err) {
+                error.OutOfMemory => failed(.out_of_memory, .preserved),
+                error.InvalidAlias => failed(.overlapping_storage, .preserved),
+                else => failed(.invariant_failure, .preserved),
+            };
         };
         if (out.lifecycle != .empty)
             return failed(.destination_not_empty, .preserved);
-        if (!evidence.validate(source))
+        if (!evidence.validate(source)) {
             return failed(.invalid_evidence, .preserved);
+        }
 
         out.* = .{
             .lifecycle = .constructing,
@@ -508,18 +526,13 @@ pub const ExternalPumpStorage = struct {
             out.* = .{};
             return failed(.invalid_evidence, .preserved);
         }
-        source.preflightExternalAdoptionDestination(
+        var owner_proof: client_mod.PreparedExternalOwnerRangeProof = .{};
+        var owner_proof_live = false;
+        defer if (owner_proof_live) owner_proof.deinit();
+        source.prepareExternalOwnerRangeProof(
+            &owner_proof,
             out,
             @sizeOf(ExternalPumpStorage),
-        ) catch |err| {
-            out.client_transfer.deinit();
-            out.* = .{};
-            return switch (err) {
-                error.OutOfMemory => failed(.out_of_memory, .preserved),
-                else => failed(.invariant_failure, .preserved),
-            };
-        };
-        source.preflightExternalAdoptionDestination(
             evidence,
             @sizeOf(PreparedAdoptionEvidence),
         ) catch |err| {
@@ -530,11 +543,20 @@ pub const ExternalPumpStorage = struct {
                 else => failed(.invariant_failure, .preserved),
             };
         };
+        owner_proof_live = true;
         if (out.lifecycle != .constructing or out.saved_self_addr != @intFromPtr(out)) {
             out.client_transfer.deinit();
+            out.* = .{};
             return failed(.invariant_failure, .preserved);
         }
-        if (!out.client_transfer.validate(source, &out.owned_client) or
+        if (!owner_proof.validate(
+            source,
+            out,
+            @sizeOf(ExternalPumpStorage),
+            evidence,
+            @sizeOf(PreparedAdoptionEvidence),
+        ) or
+            !out.client_transfer.validate(source, &out.owned_client) or
             !evidence.validate(source))
         {
             out.client_transfer.deinit();
@@ -555,6 +577,15 @@ pub const ExternalPumpStorage = struct {
         evidence.moveInto(&out.owned_evidence.?, &out.owned_client.?);
         out.lifecycle = .normalizing;
         out.semantic_state = .constructing;
+        // The final owner-range proof deliberately frees only after both owners moved and the
+        // source became a tombstone. Its allocator callback therefore cannot mutate a live source
+        // descriptor between validation and the paired take. Public re-entry sees `.normalizing`.
+        owner_proof.deinit();
+        owner_proof_live = false;
+        if (out.lifecycle != .normalizing or out.saved_self_addr != @intFromPtr(out)) {
+            _ = out.closeOwned(.invariant_failure);
+            return failed(.invariant_failure, .consumed_and_closed);
+        }
         if (options.failpoint == .after_paired_take) {
             _ = out.closeOwned(.invariant_failure);
             return failed(.invariant_failure, .consumed_and_closed);
@@ -637,12 +668,12 @@ pub const ExternalPumpStorage = struct {
         if (self.saved_self_addr != 0 and self.saved_self_addr != @intFromPtr(self))
             return .moved_storage;
         return switch (self.lifecycle) {
-            .empty, .dead, .tearing_down => .already_dead,
+            .empty, .dead => .already_dead,
             // Both windows are only observable from inside an in-flight `initInPlace`: every init
             // failure path restores `.empty` and success moves past them. Tearing down here would
             // hand the re-entrant caller a `cleaned` result that the still-running transaction then
             // overwrites, so the transaction stays the sole owner and the caller retries.
-            .constructing, .normalizing => .busy,
+            .constructing, .normalizing, .tearing_down => .busy,
             .adopting, .live => self.closeOwned(.invariant_failure),
         };
     }
@@ -825,6 +856,149 @@ const TestClient = struct {
     fn deinitPeer(self: *TestClient) void {
         if (self.peer_fd >= 0) _ = c.close(self.peer_fd);
         self.peer_fd = -1;
+    }
+};
+
+const AllocatorCallbackProbe = struct {
+    const Mode = enum {
+        idle,
+        init_reentry,
+        different_init_reentry,
+        proof_alloc_mode_drift,
+        proof_alloc_profile_drift,
+        proof_free_mutation,
+        teardown_reentry,
+    };
+
+    parent: std.mem.Allocator,
+    mode: Mode = .idle,
+    fired: bool = false,
+    storage: ?*ExternalPumpStorage = null,
+    source: ?*client_mod.Client = null,
+    evidence: ?*PreparedAdoptionEvidence = null,
+    nested_storage: ?*ExternalPumpStorage = null,
+    nested_source: ?*client_mod.Client = null,
+    nested_evidence: ?*PreparedAdoptionEvidence = null,
+    nested_init_reason: ?InitFailureReason = null,
+    nested_teardown: ?TeardownResult = null,
+    source_was_tombstoned_at_proof_free: bool = false,
+    saved_io_mode: ?client_external_mode.Mode = null,
+    saved_connection_profile: ?client_mod.ConnectionProfile = null,
+    saved_compatibility_profile: ?compatibility.Profile = null,
+
+    fn allocator(self: *AllocatorCallbackProbe) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &.{
+            .alloc = alloc,
+            .resize = resize,
+            .remap = remap,
+            .free = free,
+        } };
+    }
+
+    fn alloc(
+        context: *anyopaque,
+        len: usize,
+        alignment: std.mem.Alignment,
+        ret_addr: usize,
+    ) ?[*]u8 {
+        const self: *AllocatorCallbackProbe = @ptrCast(@alignCast(context));
+        if ((self.mode == .init_reentry or self.mode == .different_init_reentry) and
+            !self.fired)
+        {
+            self.fired = true;
+            const result = ExternalPumpStorage.initInPlace(
+                if (self.mode == .init_reentry) self.storage.? else self.nested_storage.?,
+                if (self.mode == .init_reentry) self.source.? else self.nested_source.?,
+                if (self.mode == .init_reentry) self.evidence.? else self.nested_evidence.?,
+            );
+            self.nested_init_reason = switch (result) {
+                .initialized => null,
+                .failed => |failure| failure.reason,
+            };
+        } else if (self.mode == .proof_alloc_mode_drift and !self.fired and
+            self.storage.?.client_transfer.lifecycle == .prepared)
+        {
+            self.fired = true;
+            self.saved_io_mode = self.source.?.io_mode;
+            self.source.?.io_mode = .blocking;
+        } else if (self.mode == .proof_alloc_profile_drift and !self.fired and
+            self.storage.?.client_transfer.lifecycle == .prepared)
+        {
+            self.fired = true;
+            self.saved_connection_profile = self.source.?.connection_profile;
+            self.saved_compatibility_profile = self.source.?.compatibility_profile;
+            self.source.?.connection_profile = null;
+            self.source.?.compatibility_profile = null;
+        }
+        return self.parent.vtable.alloc(
+            self.parent.ptr,
+            len,
+            alignment,
+            ret_addr,
+        );
+    }
+
+    fn resize(
+        context: *anyopaque,
+        memory: []u8,
+        alignment: std.mem.Alignment,
+        new_len: usize,
+        ret_addr: usize,
+    ) bool {
+        const self: *AllocatorCallbackProbe = @ptrCast(@alignCast(context));
+        return self.parent.vtable.resize(
+            self.parent.ptr,
+            memory,
+            alignment,
+            new_len,
+            ret_addr,
+        );
+    }
+
+    fn remap(
+        context: *anyopaque,
+        memory: []u8,
+        alignment: std.mem.Alignment,
+        new_len: usize,
+        ret_addr: usize,
+    ) ?[*]u8 {
+        const self: *AllocatorCallbackProbe = @ptrCast(@alignCast(context));
+        return self.parent.vtable.remap(
+            self.parent.ptr,
+            memory,
+            alignment,
+            new_len,
+            ret_addr,
+        );
+    }
+
+    fn free(
+        context: *anyopaque,
+        memory: []u8,
+        alignment: std.mem.Alignment,
+        ret_addr: usize,
+    ) void {
+        const self: *AllocatorCallbackProbe = @ptrCast(@alignCast(context));
+        if (!self.fired and self.mode == .proof_free_mutation and
+            self.storage.?.lifecycle == .normalizing)
+        {
+            self.fired = true;
+            self.source_was_tombstoned_at_proof_free = self.source.?.fd == -1;
+            // This is the mutation that used to fit between final proof and Client move. It now
+            // touches only the moved-from tombstone; the destination owner is already independent.
+            self.source.?.pending_event_bytes = std.math.maxInt(usize);
+        } else if (!self.fired and self.mode == .teardown_reentry and
+            self.storage.?.lifecycle == .tearing_down)
+        {
+            self.fired = true;
+            self.nested_teardown = self.storage.?.teardown();
+        }
+        self.parent.vtable.free(
+            self.parent.ptr,
+            memory,
+            alignment,
+            ret_addr,
+        );
     }
 };
 
@@ -1352,6 +1526,204 @@ test "external pump refuses re-entrant teardown while a transaction owns the sto
 
     // A refusal is not a tombstone: the transaction still reaches its own terminal states.
     storage.lifecycle = .empty;
+    try std.testing.expectEqual(TeardownResult.already_dead, storage.teardown());
+}
+
+test "external pump init allocator callback sees the in-flight latch before allocating again" {
+    var probe = AllocatorCallbackProbe{ .parent = std.testing.allocator };
+    var fixture = try TestClient.initWithAllocator(probe.allocator());
+    defer fixture.deinitPeer();
+    defer fixture.client.deinit();
+    var seed: runtime_metadata_wire.InitialMetadataSeed = .unsupported;
+    var evidence: PreparedAdoptionEvidence = .{};
+    defer evidence.deinit();
+    try sealAttachEvidence(&evidence, 91, &fixture.client, valid_evidence, &seed);
+    var storage: ExternalPumpStorage = .{};
+    probe.storage = &storage;
+    probe.source = &fixture.client;
+    probe.evidence = &evidence;
+    probe.mode = .init_reentry;
+
+    try std.testing.expect(
+        ExternalPumpStorage.initInPlace(&storage, &fixture.client, &evidence) ==
+            .initialized,
+    );
+    try std.testing.expect(probe.fired);
+    try std.testing.expectEqual(
+        InitFailureReason.destination_not_empty,
+        probe.nested_init_reason.?,
+    );
+    try std.testing.expectEqual(StorageLifecycle.adopting, storage.lifecycle);
+    try std.testing.expectEqual(TeardownResult.cleaned, storage.teardown());
+}
+
+test "external pump init latch rejects a different nested destination too" {
+    var probe = AllocatorCallbackProbe{ .parent = std.testing.allocator };
+    var outer_fixture = try TestClient.initWithAllocator(probe.allocator());
+    defer outer_fixture.deinitPeer();
+    defer outer_fixture.client.deinit();
+    var nested_fixture = try TestClient.initWithAllocator(probe.allocator());
+    defer nested_fixture.deinitPeer();
+    defer nested_fixture.client.deinit();
+    var outer_seed: runtime_metadata_wire.InitialMetadataSeed = .unsupported;
+    var nested_seed: runtime_metadata_wire.InitialMetadataSeed = .unsupported;
+    var outer_evidence: PreparedAdoptionEvidence = .{};
+    defer outer_evidence.deinit();
+    var nested_evidence: PreparedAdoptionEvidence = .{};
+    defer nested_evidence.deinit();
+    try sealAttachEvidence(
+        &outer_evidence,
+        94,
+        &outer_fixture.client,
+        valid_evidence,
+        &outer_seed,
+    );
+    try sealAttachEvidence(
+        &nested_evidence,
+        95,
+        &nested_fixture.client,
+        valid_evidence,
+        &nested_seed,
+    );
+    var outer_storage: ExternalPumpStorage = .{};
+    var nested_storage: ExternalPumpStorage = .{};
+    probe.storage = &outer_storage;
+    probe.source = &outer_fixture.client;
+    probe.evidence = &outer_evidence;
+    probe.nested_storage = &nested_storage;
+    probe.nested_source = &nested_fixture.client;
+    probe.nested_evidence = &nested_evidence;
+    probe.mode = .different_init_reentry;
+
+    try std.testing.expect(
+        ExternalPumpStorage.initInPlace(
+            &outer_storage,
+            &outer_fixture.client,
+            &outer_evidence,
+        ) == .initialized,
+    );
+    try std.testing.expectEqual(
+        InitFailureReason.destination_not_empty,
+        probe.nested_init_reason.?,
+    );
+    try std.testing.expectEqual(StorageLifecycle.empty, nested_storage.lifecycle);
+    try std.testing.expect(nested_evidence.validate(&nested_fixture.client));
+    try std.testing.expect(nested_fixture.client.fd >= 0);
+    try std.testing.expectEqual(TeardownResult.cleaned, outer_storage.teardown());
+}
+
+test "external pump proof allocation mode drift is a preserved typed failure" {
+    var probe = AllocatorCallbackProbe{ .parent = std.testing.allocator };
+    var fixture = try TestClient.initWithAllocator(probe.allocator());
+    defer fixture.deinitPeer();
+    defer fixture.client.deinit();
+    const source_fd = fixture.client.fd;
+    var seed: runtime_metadata_wire.InitialMetadataSeed = .unsupported;
+    var evidence: PreparedAdoptionEvidence = .{};
+    defer evidence.deinit();
+    try sealAttachEvidence(&evidence, 96, &fixture.client, valid_evidence, &seed);
+    var storage: ExternalPumpStorage = .{};
+    probe.storage = &storage;
+    probe.source = &fixture.client;
+    probe.evidence = &evidence;
+    probe.mode = .proof_alloc_mode_drift;
+
+    const result = ExternalPumpStorage.initInPlace(
+        &storage,
+        &fixture.client,
+        &evidence,
+    ).failed;
+    try std.testing.expect(probe.fired);
+    try std.testing.expectEqual(InitFailureReason.invariant_failure, result.reason);
+    try std.testing.expectEqual(SourceDisposition.preserved, result.source_disposition);
+    try std.testing.expectEqual(StorageLifecycle.empty, storage.lifecycle);
+    try std.testing.expectEqual(source_fd, fixture.client.fd);
+    fixture.client.io_mode = probe.saved_io_mode.?;
+    probe.saved_io_mode = null;
+}
+
+test "external pump proof allocation profile drift is a preserved typed failure" {
+    var probe = AllocatorCallbackProbe{ .parent = std.testing.allocator };
+    var fixture = try TestClient.initWithAllocator(probe.allocator());
+    defer fixture.deinitPeer();
+    defer fixture.client.deinit();
+    const source_fd = fixture.client.fd;
+    var seed: runtime_metadata_wire.InitialMetadataSeed = .unsupported;
+    var evidence: PreparedAdoptionEvidence = .{};
+    defer evidence.deinit();
+    try sealAttachEvidence(&evidence, 97, &fixture.client, valid_evidence, &seed);
+    var storage: ExternalPumpStorage = .{};
+    probe.storage = &storage;
+    probe.source = &fixture.client;
+    probe.evidence = &evidence;
+    probe.mode = .proof_alloc_profile_drift;
+
+    const result = ExternalPumpStorage.initInPlace(
+        &storage,
+        &fixture.client,
+        &evidence,
+    ).failed;
+    try std.testing.expect(probe.fired);
+    try std.testing.expectEqual(InitFailureReason.invariant_failure, result.reason);
+    try std.testing.expectEqual(SourceDisposition.preserved, result.source_disposition);
+    try std.testing.expectEqual(StorageLifecycle.empty, storage.lifecycle);
+    try std.testing.expectEqual(source_fd, fixture.client.fd);
+    fixture.client.connection_profile = probe.saved_connection_profile;
+    fixture.client.compatibility_profile = probe.saved_compatibility_profile;
+    probe.saved_connection_profile = null;
+    probe.saved_compatibility_profile = null;
+}
+
+test "external pump retains final owner proof until the source is a tombstone" {
+    var probe = AllocatorCallbackProbe{ .parent = std.testing.allocator };
+    var fixture = try TestClient.initWithAllocator(probe.allocator());
+    defer fixture.deinitPeer();
+    defer fixture.client.deinit();
+    var seed: runtime_metadata_wire.InitialMetadataSeed = .unsupported;
+    var evidence: PreparedAdoptionEvidence = .{};
+    defer evidence.deinit();
+    try sealAttachEvidence(&evidence, 92, &fixture.client, valid_evidence, &seed);
+    var storage: ExternalPumpStorage = .{};
+    probe.storage = &storage;
+    probe.source = &fixture.client;
+    probe.evidence = &evidence;
+    probe.mode = .proof_free_mutation;
+
+    try std.testing.expect(
+        ExternalPumpStorage.initInPlace(&storage, &fixture.client, &evidence) ==
+            .initialized,
+    );
+    try std.testing.expect(probe.fired);
+    try std.testing.expect(probe.source_was_tombstoned_at_proof_free);
+    try std.testing.expectEqual(std.math.maxInt(usize), fixture.client.pending_event_bytes);
+    try std.testing.expectEqual(@as(usize, 0), storage.owned_client.?.pending_event_bytes);
+    try std.testing.expectEqual(TeardownResult.cleaned, storage.teardown());
+}
+
+test "external pump teardown allocator callback observes busy until cleanup completes" {
+    var probe = AllocatorCallbackProbe{ .parent = std.testing.allocator };
+    var fixture = try TestClient.initWithAllocator(probe.allocator());
+    defer fixture.deinitPeer();
+    defer fixture.client.deinit();
+    var seed: runtime_metadata_wire.InitialMetadataSeed = .unsupported;
+    var evidence: PreparedAdoptionEvidence = .{};
+    defer evidence.deinit();
+    try sealAttachEvidence(&evidence, 93, &fixture.client, valid_evidence, &seed);
+    var storage: ExternalPumpStorage = .{};
+    try std.testing.expect(
+        ExternalPumpStorage.initInPlace(&storage, &fixture.client, &evidence) ==
+            .initialized,
+    );
+    probe.storage = &storage;
+    probe.source = &fixture.client;
+    probe.evidence = &evidence;
+    probe.mode = .teardown_reentry;
+    probe.fired = false;
+
+    try std.testing.expectEqual(TeardownResult.cleaned, storage.teardown());
+    try std.testing.expect(probe.fired);
+    try std.testing.expectEqual(TeardownResult.busy, probe.nested_teardown.?);
+    try std.testing.expectEqual(StorageLifecycle.dead, storage.lifecycle);
     try std.testing.expectEqual(TeardownResult.already_dead, storage.teardown());
 }
 

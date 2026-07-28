@@ -76,48 +76,6 @@ body {
   color: color-mix(in srgb, CanvasText 65%, Canvas);
 }
 
-/* FP14 image 프리뷰(render iframe): readSelfImage 데이터 URL을 panzoom `<img>`로 표시한다. #app을 전체 뷰포트
-   컨테이너(overflow hidden)로 만들어 panzoom이 이미지를 그 안에서만 팬/줌하게 한다. 배경은 **흰색이 아니라 테마
-   파생 체커**(CanvasText/Canvas mix)라 다크 모드·다크 스크린샷에서도 자연스럽고 투명 이미지를 구분한다(사용자
-   요청 "흰 배경 싫음", 2026-07-22). touch-action:none으로 트랙패드 핀치/팬을 panzoom이 소유한다. */
-#app:has(.maru-image-preview) {
-  position: fixed;
-  inset: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  overflow: hidden;
-  box-sizing: border-box;
-  margin: 0;
-  padding: 0;
-  max-width: none;
-  min-height: 0;
-  touch-action: none;
-  background-color: Canvas;
-  background-image:
-    linear-gradient(45deg, color-mix(in srgb, CanvasText 8%, Canvas) 25%, transparent 25%),
-    linear-gradient(-45deg, color-mix(in srgb, CanvasText 8%, Canvas) 25%, transparent 25%),
-    linear-gradient(45deg, transparent 75%, color-mix(in srgb, CanvasText 8%, Canvas) 75%),
-    linear-gradient(-45deg, transparent 75%, color-mix(in srgb, CanvasText 8%, Canvas) 75%);
-  background-size: 20px 20px;
-  background-position:
-    0 0,
-    0 10px,
-    10px -10px,
-    -10px 0;
-}
-.maru-image-preview {
-  max-width: 100%;
-  max-height: 100vh;
-  object-fit: contain;
-  cursor: grab;
-  user-select: none;
-  -webkit-user-select: none;
-}
-.maru-image-preview:active {
-  cursor: grabbing;
-}
-
 /* 라이브 프리뷰 atomic mermaid 다이어그램(격리 <img> data URL). 위젯 폭에 맞춰 비율 유지 축소한다. render iframe이
    높이를 측정하므로 height:auto로 자연 높이를 유지한다(내부 <style>는 이미지 문서 안에서 적용). */
 .maru-atomic-svg {

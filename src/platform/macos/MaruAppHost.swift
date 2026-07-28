@@ -1016,7 +1016,6 @@ final class MaruBridgeHandler: NSObject, WKScriptMessageHandlerWithReply {
           beginDocument: function (documentId) { return window.maru.request("maru.file.beginDocument", { document_id: documentId }); },
           read: function (editorEpoch) { return window.maru.request("maru.file.read", { editor_epoch: editorEpoch }); },
           readAsset: function (path) { return window.maru.request("maru.file.readAsset", { path: path }); },
-          readSelfImage: function () { return window.maru.request("maru.file.readSelfImage"); },
           write: function (editorEpoch, content) { return window.maru.request("maru.file.write", { editor_epoch: editorEpoch, content: content }); },
           setDirty: function (dirty, editorEpoch, revision, requestId) {
             return window.maru.request("maru.file.setDirty", { dirty: dirty, editor_epoch: editorEpoch, revision: revision, request_id: requestId });
@@ -1107,8 +1106,6 @@ final class MaruBridgeHandler: NSObject, WKScriptMessageHandlerWithReply {
           } else if (request.method === "livePreviewReady" &&
                      Number.isSafeInteger(request.editor_epoch) && request.editor_epoch > 0) {
             promise = window.maru.file.livePreviewReady(request.editor_epoch);
-          } else if (request.method === "readSelfImage") {
-            promise = window.maru.file.readSelfImage();
           } else {
             node.textContent = JSON.stringify({ error: "invalid request" });
             finish(node);
@@ -2703,6 +2700,76 @@ final class FilePanelEditingSmokeProbe {
 
 @MainActor
 final class MaruWebPanelView: NSView {
+    // FP14b: WebKit이 만든 **이미지 문서**에 얹는 뷰어 조작(휠 줌·드래그 팬·더블클릭 맞춤/100% 토글·테마 체커 배경).
+    // 이미지가 격리 loadFileURL로 옮겨 가며(복사 0·8 MiB 상한 없음) 잃은 커스텀 UX를 여기서 되살린다 —
+    // FP14가 격리 초기안을 기각했던 이유가 "흰 배경·상단 정렬·팬줌 없음"이었으므로 그 셋이 이 스크립트의 계약이다.
+    //
+    // 자가 게이트: `document.contentType`이 image/* 가 아니면 즉시 반환한다. 같은 config를 pdf·미디어·로컬 HTML이
+    // 공유하므로 이 한 줄이 그 문서들을 무영향으로 남긴다(새 ABI 힌트 불필요). 브리지·메시지 핸들러는 쓰지 않는다.
+    // 색은 문서 CSS 변수가 없어 시스템 외관(prefers-color-scheme)에서 파생한다 — 터미널 테마 주입은 후속.
+    static let imageDocumentViewerScript = """
+    (function () {
+      if (!String(document.contentType || "").startsWith("image/")) return;
+      var img = document.images && document.images[0];
+      if (!img) return;
+      var dark = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches;
+      var a = dark ? "#2a2a2e" : "#f2f2f4", b = dark ? "#232327" : "#e6e6ea";
+      var css = document.createElement("style");
+      css.textContent =
+        "html,body{margin:0;height:100%;overflow:hidden;background-color:" + a + ";" +
+        "background-image:linear-gradient(45deg," + b + " 25%,transparent 25%,transparent 75%," + b + " 75%)," +
+        "linear-gradient(45deg," + b + " 25%,transparent 25%,transparent 75%," + b + " 75%);" +
+        "background-size:16px 16px;background-position:0 0,8px 8px;}" +
+        "body{display:flex;align-items:center;justify-content:center;}" +
+        "img{max-width:none!important;max-height:none!important;transform-origin:0 0;" +
+        "will-change:transform;user-select:none;-webkit-user-drag:none;}";
+      document.head.appendChild(css);
+      var scale = 1, tx = 0, ty = 0, fitScale = 1;
+      function apply() { img.style.transform = "translate(" + tx + "px," + ty + "px) scale(" + scale + ")"; }
+      function fit() {
+        var vw = document.documentElement.clientWidth, vh = document.documentElement.clientHeight;
+        var iw = img.naturalWidth || img.width, ih = img.naturalHeight || img.height;
+        if (!iw || !ih) return;
+        fitScale = Math.min(1, Math.min(vw / iw, vh / ih));
+        scale = fitScale;
+        tx = (vw - iw * scale) / 2;
+        ty = (vh - ih * scale) / 2;
+        apply();
+      }
+      function zoomAt(factor, cx, cy) {
+        var next = Math.max(fitScale * 0.2, Math.min(40, scale * factor));
+        if (next === scale) return;
+        tx = cx - (cx - tx) * (next / scale);
+        ty = cy - (cy - ty) * (next / scale);
+        scale = next;
+        apply();
+      }
+      window.addEventListener("wheel", function (e) {
+        e.preventDefault();
+        if (e.ctrlKey || e.metaKey || Math.abs(e.deltaY) > Math.abs(e.deltaX)) {
+          zoomAt(Math.exp(-e.deltaY / 300), e.clientX, e.clientY);
+        } else { tx -= e.deltaX; ty -= e.deltaY; apply(); }
+      }, { passive: false });
+      var dragging = false, lastX = 0, lastY = 0;
+      window.addEventListener("mousedown", function (e) {
+        dragging = true; lastX = e.clientX; lastY = e.clientY;
+        document.body.style.cursor = "grabbing"; e.preventDefault();
+      });
+      window.addEventListener("mousemove", function (e) {
+        if (!dragging) return;
+        tx += e.clientX - lastX; ty += e.clientY - lastY;
+        lastX = e.clientX; lastY = e.clientY; apply();
+      });
+      window.addEventListener("mouseup", function () { dragging = false; document.body.style.cursor = ""; });
+      window.addEventListener("dblclick", function (e) {
+        if (Math.abs(scale - fitScale) < 0.001) zoomAt(1 / fitScale, e.clientX, e.clientY);
+        else fit();
+      });
+      window.addEventListener("resize", fit);
+      if (img.complete) fit(); else img.addEventListener("load", fit);
+    })();
+    """
+
     let webView: WKWebView
     // Zig 전이(surface_id)와 매칭해 create/destroy/reframe이 옳은 웹뷰를 대상으로 하게 한다(§6 안정 키).
     let surfaceId: UInt64
@@ -2851,6 +2918,16 @@ final class MaruWebPanelView: NSView {
         // browser(1)=비신뢰엔 스킴 핸들러를 **애초에 등록하지 않는다**(origin 위장 탈취 1차 차단, §7 ④). 핸들러는
         // WKWebView 생성 **전에** config에 심어야 하므로 여기서 결정한다.
         let config = WKWebViewConfiguration()
+        if filePanelKind == 2 {
+            // FP14b: 격리 파일 문서(image/pdf/media/로컬 HTML) 중 **이미지 문서에만** 뷰어 조작을 얹는다.
+            // 스크립트가 스스로 `document.contentType`을 보고 이미지가 아니면 no-op이라 새 ABI 힌트가 없다.
+            // 브리지·메시지 핸들러를 쓰지 않는 순수 표시 조작이라 §8.1(c)(메시지 핸들러 0)를 유지한다.
+            config.userContentController.addUserScript(WKUserScript(
+                source: Self.imageDocumentViewerScript,
+                injectionTime: .atDocumentEnd,
+                forMainFrameOnly: true,
+                in: .page))
+        }
         if filePanelKind != 2 {
             config.userContentController.addUserScript(WKUserScript(
                 source: BrowserResultTransferRegistry.boundedPageBootstrapScript,
@@ -2885,6 +2962,10 @@ final class MaruWebPanelView: NSView {
             appURL = Self.trustedShellURL(document: 1, language: filePanelLanguage, shellKind: filePanelShellKind) // query는 origin을 바꾸지 않는다.
         }
         self.webView = WKWebView(frame: NSRect(origin: .zero, size: frameRect.size), configuration: config)
+        if filePanelKind == 2 {
+            // 격리 파일 문서(image/pdf/media)는 네이티브 뷰어라 확대를 OS에 맡긴다(기본값이 false라 명시 활성화).
+            self.webView.allowsMagnification = true
+        }
         if filePanelKind == 1, #available(macOS 12.0, *) {
             // 빈 WKWebView가 view hierarchy에 들어간 뒤 첫 document paint가 오기 전에도 Markdown의
             // CSS Canvas와 같은 light/dark semantic 배경을 보여 기본 흰 backing frame을 노출하지 않는다.

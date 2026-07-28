@@ -1147,21 +1147,20 @@ pub export fn maru_macos_app_session_file_panel_entry(
     const info = app_session.filePanelEntryInfo(surface_id) orelse return 0;
     if (out_path) |p| p.* = info.path.ptr;
     if (out_len) |p| p.* = info.path.len;
-    // text·svg·image는 markdown과 같은 신뢰 config(1)로 태우고, 소스 CM6 언어·svg/image 프리뷰 선택은
-    // file_panel_language의 `?lang=`과 file_panel_shell_kind의 `?kind=svg|image` 힌트가 맡는다(§2.2·§2.3).
-    // image(FP14)는 신뢰 shell에서 readSelfImage로 자기 바이너리를 base64로 읽어 panzoom `<img>`로 표시한다.
+    // text·svg는 markdown과 같은 신뢰 config(1)로 태우고, 소스 CM6 언어·svg 프리뷰 선택은 file_panel_language의
+    // `?lang=`과 file_panel_shell_kind의 `?kind=svg` 힌트가 맡는다(§2.2·§2.3).
     return switch (info.kind) {
-        .markdown, .text, .svg, .image => 1,
-        // html·media·pdf는 격리 loadFileURL(2). Swift가 filePanelPath를 loadFileURL(_:allowingReadAccessTo:)로
-        // 로드하고 WebKit이 HTML/PDF/미디어를 네이티브 렌더한다(§2.2) — media는 WebKit **media document**(래퍼 없음,
-        // FP15)라 Swift 분기가 pdf와 같다. 신뢰 shell URL·bridge를 쓰지 않는다.
-        .html, .media, .pdf => 2,
+        .markdown, .text, .svg => 1,
+        // html·image·media·pdf는 격리 loadFileURL(2). Swift가 filePanelPath를 loadFileURL(_:allowingReadAccessTo:)로
+        // 로드하고 WebKit이 HTML/PDF/이미지/미디어를 네이티브 렌더한다(§2.2) — image(FP14b)·media(FP15)는 WebKit이
+        // 만드는 image/media document이고 커스텀 UX(줌·팬·체커)는 주입 스크립트가 얹는다. 신뢰 shell URL·bridge를 안 쓴다.
+        .html, .image, .media, .pdf => 2,
     };
 }
 
-/// 신뢰 shell surface의 shell-kind 힌트(§2.3). svg면 "svg"·image면 "image"를 out에 쓰고 1을 반환한다(Swift가
-/// shell URL에 `?kind=svg|image` 추가 → bootShell이 svg=read 프리뷰+xml 소스, image=readSelfImage panzoom 프리뷰로
-/// 동작). markdown/text/html/pdf이거나 도크 아니면 0(out 비움).
+/// 신뢰 shell surface의 shell-kind 힌트(§2.3). svg면 "svg"를 out에 쓰고 1을 반환한다(Swift가 shell URL에
+/// `?kind=svg`를 추가 → bootShell이 read 프리뷰 + xml 소스 두 모드로 동작). 그 밖의 kind이거나 도크가 아니면
+/// 0(out 비움) — image는 FP14b에서 격리 문서로 옮겨가 신뢰 shell 힌트가 없다.
 pub export fn maru_macos_app_session_file_panel_shell_kind(
     session: ?*AppSession,
     surface_id: u64,
@@ -1174,8 +1173,7 @@ pub export fn maru_macos_app_session_file_panel_shell_kind(
     const info = app_session.filePanelEntryInfo(surface_id) orelse return 0;
     const token = switch (info.kind) {
         .svg => "svg",
-        .image => "image",
-        else => return 0,
+        else => return 0, // FP14b: image는 격리 문서라 신뢰 shell 힌트가 없다.
     };
     if (out_ptr) |p| p.* = token.ptr;
     if (out_len) |p| p.* = token.len;
@@ -2321,11 +2319,6 @@ const FileBridgeContext = struct {
         return self.session.readFilePanelAsset(gpa, self.surface_id, path);
     }
 
-    fn readSelfImage(raw: *anyopaque, gpa: std.mem.Allocator) anyerror!maru.session.control_bridge.SelfImage {
-        const self: *FileBridgeContext = @ptrCast(@alignCast(raw));
-        return self.session.readFilePanelSelfImage(gpa, self.surface_id);
-    }
-
     fn write(raw: *anyopaque, editor_epoch: u64, content: []const u8) anyerror!void {
         const self: *FileBridgeContext = @ptrCast(@alignCast(raw));
         self.session.writeFilePanel(self.surface_id, editor_epoch, content) catch |err| {
@@ -2401,7 +2394,6 @@ pub export fn maru_macos_app_session_bridge_dispatch(
         .begin_document_fn = FileBridgeContext.beginDocument,
         .read_fn = FileBridgeContext.read,
         .read_asset_fn = FileBridgeContext.readAsset,
-        .read_self_image_fn = FileBridgeContext.readSelfImage,
         .write_fn = FileBridgeContext.write,
         .set_dirty_fn = FileBridgeContext.setDirty,
         .resolve_external_change_fn = FileBridgeContext.resolveExternalChange,

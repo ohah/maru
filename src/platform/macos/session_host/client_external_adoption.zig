@@ -19,25 +19,20 @@ pub const max_adoption_metadata_bytes: usize =
     external_adoption_limits.max_metadata_bytes;
 
 pub const Lifecycle = enum { empty, prepared, committed, aborted };
-pub const SourceRef = struct { ordinal: u32 };
 
 pub const PreparedTransfer = struct {
     copies: []client_mod.ExternalScreenCopy = &.{},
     wrappers: []ledger_mod.OwnedPayload = &.{},
     tokens: []ledger_mod.Token = &.{},
-    source_ordinals: []SourceRef = &.{},
     copies_addr: usize = 0,
     copies_len: usize = 0,
     wrappers_addr: usize = 0,
     wrappers_len: usize = 0,
     tokens_addr: usize = 0,
     tokens_len: usize = 0,
-    source_ordinals_addr: usize = 0,
-    source_ordinals_len: usize = 0,
     cleanup_copies: []client_mod.ExternalScreenCopy = &.{},
     cleanup_wrappers: []ledger_mod.OwnedPayload = &.{},
     cleanup_tokens: []ledger_mod.Token = &.{},
-    cleanup_source_ordinals: []SourceRef = &.{},
     cleanup_transferred_count: usize = 0,
 };
 
@@ -214,16 +209,6 @@ pub const PreparedScreenBacklog = struct {
         transfer.tokens_addr = sliceAddress(ledger_mod.Token, transfer.tokens);
         transfer.tokens_len = transfer.tokens.len;
         transfer.cleanup_tokens = transfer.tokens;
-        transfer.source_ordinals = try allocator.alloc(
-            SourceRef,
-            inventory.screen_source_count,
-        );
-        transfer.source_ordinals_addr = sliceAddress(SourceRef, transfer.source_ordinals);
-        transfer.source_ordinals_len = transfer.source_ordinals.len;
-        transfer.cleanup_source_ordinals = transfer.source_ordinals;
-        for (transfer.source_ordinals, 0..) |*source, ordinal|
-            source.* = .{ .ordinal = std.math.cast(u32, ordinal) orelse
-                return error.ArithmeticOverflow };
 
         for (transfer.copies, transfer.wrappers, specs) |*copy, *wrapper, *spec| {
             wrapper.* = ledger_mod.OwnedPayload.takeOwned(copy.allocator, &copy.bytes);
@@ -295,7 +280,6 @@ pub const PreparedScreenBacklog = struct {
         if (transfer.copies.len != inventory.screen_source_count or
             transfer.wrappers.len != inventory.screen_source_count or
             transfer.tokens.len != inventory.screen_source_count or
-            transfer.source_ordinals.len != inventory.screen_source_count or
             transfer.copies_addr !=
                 sliceAddress(client_mod.ExternalScreenCopy, transfer.copies) or
             transfer.copies_len != transfer.copies.len or
@@ -304,13 +288,9 @@ pub const PreparedScreenBacklog = struct {
             transfer.wrappers_len != transfer.wrappers.len or
             transfer.tokens_addr != sliceAddress(ledger_mod.Token, transfer.tokens) or
             transfer.tokens_len != transfer.tokens.len or
-            transfer.source_ordinals_addr !=
-                sliceAddress(SourceRef, transfer.source_ordinals) or
-            transfer.source_ordinals_len != transfer.source_ordinals.len or
             !sameSlice(client_mod.ExternalScreenCopy, transfer.copies, transfer.cleanup_copies) or
             !sameSlice(ledger_mod.OwnedPayload, transfer.wrappers, transfer.cleanup_wrappers) or
             !sameSlice(ledger_mod.Token, transfer.tokens, transfer.cleanup_tokens) or
-            !sameSlice(SourceRef, transfer.source_ordinals, transfer.cleanup_source_ordinals) or
             transfer.cleanup_transferred_count != transfer.copies.len or
             !self.seed_plan.validateBinding(
                 ledger,
@@ -318,15 +298,14 @@ pub const PreparedScreenBacklog = struct {
                 inventory.screen_source_count,
             ))
             return false;
-        for (transfer.copies, transfer.wrappers, transfer.source_ordinals, 0..) |
+        for (transfer.copies, transfer.wrappers, 0..) |
             copy,
             wrapper,
-            source,
             ordinal,
         | {
             if (!sameSlice(u8, copy.bytes, copy.view) or
                 !sameSlice(u8, copy.view, wrapper.bytes()) or
-                source.ordinal != ordinal)
+                ordinal >= inventory.screen_source_count)
                 return false;
         }
         return client.externalScreenCopiesMatch(inventory, transfer.copies);
@@ -395,13 +374,6 @@ pub const PreparedScreenBacklog = struct {
                 cleanup.tokens_addr,
                 cleanup.tokens_len,
             ) orelse return;
-            const source_ordinals = canonicalSlice(
-                SourceRef,
-                transfer.source_ordinals,
-                cleanup.cleanup_source_ordinals,
-                cleanup.source_ordinals_addr,
-                cleanup.source_ordinals_len,
-            ) orelse return;
             for (copies, 0..) |copy, index| {
                 _ = cleanupPayload(
                     copy,
@@ -415,7 +387,6 @@ pub const PreparedScreenBacklog = struct {
                 ) orelse unreachable);
             }
             allocator.free(tokens);
-            allocator.free(source_ordinals);
             allocator.free(wrappers);
             allocator.free(copies);
         }
@@ -518,7 +489,6 @@ fn metadataFootprint(
         @sizeOf(client_mod.ExternalScreenCopy),
         @sizeOf(ledger_mod.OwnedPayload),
         @sizeOf(ledger_mod.Token),
-        @sizeOf(SourceRef),
     }) |size| {
         const bytes = std.math.mul(usize, count, size) catch return error.MetadataTooLarge;
         resident = std.math.add(usize, resident, bytes) catch return error.MetadataTooLarge;
@@ -701,7 +671,6 @@ test "prepared external adoption cleanup uses sealed owners after persistent fie
     prepared.transfer.?.copies = &.{};
     prepared.transfer.?.wrappers = &.{};
     prepared.transfer.?.tokens = &.{};
-    prepared.transfer.?.source_ordinals = &.{};
     prepared.transfer.?.cleanup_wrappers[0].allocator = std.heap.page_allocator;
     prepared.transfer.?.cleanup_wrappers[0].allocation_ptr = null;
     prepared.transfer.?.cleanup_wrappers[0].logical_len = std.math.maxInt(usize);
@@ -1035,7 +1004,6 @@ test "adoption metadata has exact resident and prepare peak cap" {
         @sizeOf(ledger_mod.Token) +
         @sizeOf(client_mod.ExternalScreenCopy) +
         @sizeOf(ledger_mod.SeedSpec) +
-        @sizeOf(SourceRef) +
         (try ledger_mod.PreparedSeedPlan.plannedMetadataBytes(1));
     const exact_count = max_adoption_metadata_bytes / per_item_peak;
     const exact = try metadataFootprint(exact_count, 0, 0, 0);

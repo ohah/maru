@@ -299,6 +299,7 @@ pub const PreparedExternalAdoption = struct {
     },
     source_decision: ?external_source_decision.PreparedSourceDecision = null,
     metadata: external_event_materialization.Prepared = .{},
+    client_take: client_mod.ExternalAdoptionTake = .{},
     aggregate_resident_bytes: usize = 0,
     aggregate_prepare_peak_bytes: usize = 0,
     backlog: client_external_adoption.PreparedScreenBacklog = .{},
@@ -308,6 +309,7 @@ pub const PreparedExternalAdoption = struct {
     fn deinit(self: *PreparedExternalAdoption) void {
         if (self.saved_self_addr != 0 and self.saved_self_addr != @intFromPtr(self)) return;
         self.metadata.deinit();
+        self.client_take.deinit();
         self.backlog.deinit();
         self.source_decision = null;
         self.aggregate_resident_bytes = 0;
@@ -320,20 +322,28 @@ pub const PreparedExternalAdoption = struct {
         self: *const PreparedExternalAdoption,
         storage: *const ExternalPumpStorage,
     ) bool {
-        return self.validateForStorageLifecycle(storage, .adopting);
+        return self.validateForStorageLifecycle(storage, .adopting, true);
     }
 
     fn validateWhilePreparing(
         self: *const PreparedExternalAdoption,
         storage: *const ExternalPumpStorage,
     ) bool {
-        return self.validateForStorageLifecycle(storage, .adoption_preparing);
+        return self.validateForStorageLifecycle(storage, .adoption_preparing, true);
+    }
+
+    fn validateWhilePreparingBeforeTake(
+        self: *const PreparedExternalAdoption,
+        storage: *const ExternalPumpStorage,
+    ) bool {
+        return self.validateForStorageLifecycle(storage, .adoption_preparing, false);
     }
 
     fn validateForStorageLifecycle(
         self: *const PreparedExternalAdoption,
         storage: *const ExternalPumpStorage,
         expected_storage_lifecycle: StorageLifecycle,
+        require_take: bool,
     ) bool {
         if (self.lifecycle != .prepared or
             self.saved_self_addr != @intFromPtr(self) or
@@ -376,6 +386,7 @@ pub const PreparedExternalAdoption = struct {
                     self.backlog,
                     client_external_adoption.PreparedScreenBacklog{},
                 ) and
+                std.meta.eql(self.client_take, client_mod.ExternalAdoptionTake{}) and
                 self.aggregate_resident_bytes == 0 and
                 self.aggregate_prepare_peak_bytes == 0;
         if (self.branch != .adopted) return false;
@@ -387,6 +398,18 @@ pub const PreparedExternalAdoption = struct {
         ) orelse return false;
         if (self.backlog.targetStream() != self.evidence.stream_id) return false;
         if (!self.backlog.validate(client, &storage.inbox_ledger)) return false;
+        if (require_take) {
+            if (!self.client_take.validate(
+                client,
+                &self.backlog.client_disarm,
+                &self.backlog.inventory,
+                &self.backlog.cleanup_inventory,
+            ))
+                return false;
+        } else if (!std.meta.eql(
+            self.client_take,
+            client_mod.ExternalAdoptionTake{},
+        )) return false;
         const aggregate = aggregateAdoptionFootprint(
             .{
                 .resident = self.backlog.adoption_metadata_resident_bytes,
@@ -824,10 +847,35 @@ pub const ExternalPumpStorage = struct {
             self.resetPreparedAdoption();
             return .{ .terminal = .resource };
         };
+        client.sealExternalAdoption(
+            &self.prepared_adoption.backlog.client_disarm,
+        ) catch {
+            self.resetPreparedAdoption();
+            return .{ .terminal = .internal_invariant };
+        };
         self.prepared_adoption.aggregate_resident_bytes = aggregate.resident;
         self.prepared_adoption.aggregate_prepare_peak_bytes =
             aggregate.prepare_peak;
         self.prepared_adoption.lifecycle = .prepared;
+        client.prepareExternalAdoptionTake(
+            &self.prepared_adoption.backlog.client_disarm,
+            &self.prepared_adoption.backlog.inventory,
+            &self.prepared_adoption.backlog.cleanup_inventory,
+            &self.prepared_adoption.client_take,
+        ) catch |err| {
+            const source_unchanged =
+                self.prepared_adoption.validateWhilePreparingBeforeTake(self);
+            self.resetPreparedAdoption();
+            return switch (err) {
+                error.OutOfMemory => if (source_unchanged)
+                    .{ .retryable_preserved = .out_of_memory }
+                else
+                    .{ .terminal = .internal_invariant },
+                error.InvalidPlan, error.StaleClient => .{
+                    .terminal = .internal_invariant,
+                },
+            };
+        };
         if (!self.prepared_adoption.validateWhilePreparing(self)) {
             self.resetPreparedAdoption();
             return .{ .terminal = .internal_invariant };
@@ -1080,6 +1128,7 @@ const AllocatorCallbackProbe = struct {
         prepare_teardown,
         cross_prepare_reentry,
         prepare_cleanup_teardown,
+        take_alloc_oom_drift,
         teardown_reentry,
     };
 
@@ -1159,6 +1208,14 @@ const AllocatorCallbackProbe = struct {
             const payload = self.source.?.pending_events.items[0].payload;
             self.saved_event_byte = payload[0];
             payload[0] ^= 1;
+        } else if (!self.fired and self.mode == .take_alloc_oom_drift and
+            self.storage.?.lifecycle == .adoption_preparing and
+            self.storage.?.prepared_adoption.backlog.lifecycle == .prepared and
+            self.storage.?.prepared_adoption.client_take.saved_self_address == 0)
+        {
+            self.fired = true;
+            self.source.?.pending_event_bytes +%= 1;
+            return null;
         } else if (self.mode == .proof_alloc_mode_drift and !self.fired and
             self.storage.?.client_transfer.lifecycle == .prepared)
         {
@@ -2441,6 +2498,35 @@ test "external pump retryable allocation failure preserves the same storage for 
     failing.fail_index = std.math.maxInt(usize);
     try std.testing.expect(storage.prepareAdoption() == .prepared);
     try std.testing.expect(storage.prepared_adoption.validate(&storage));
+}
+
+test "external take proof OOM with allocator callback drift is terminal" {
+    var probe = AllocatorCallbackProbe{ .parent = std.testing.allocator };
+    var fixture = try TestClient.initWithAllocator(probe.allocator());
+    defer fixture.deinitPeer();
+    var storage: ExternalPumpStorage = .{};
+    try std.testing.expect(
+        initTestStorage(&storage, &fixture.client, valid_evidence) ==
+            .initialized,
+    );
+    defer _ = storage.teardown();
+    probe.storage = &storage;
+    probe.source = &storage.owned_client.?;
+    probe.mode = .take_alloc_oom_drift;
+
+    const result = storage.prepareAdoption();
+    try std.testing.expect(result == .terminal);
+    try std.testing.expectEqual(
+        TerminalPrepareReason.internal_invariant,
+        result.terminal,
+    );
+    try std.testing.expect(probe.fired);
+    try std.testing.expectEqual(StorageLifecycle.adopting, storage.lifecycle);
+    try std.testing.expectEqual(
+        AdoptionLifecycle.empty,
+        storage.prepared_adoption.lifecycle,
+    );
+    try std.testing.expect(storage.inbox_ledger.accountingView().pristine_zero);
 }
 
 test "external pump teardown ignores forged prepared lifecycle tombstones" {

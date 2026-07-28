@@ -118,6 +118,12 @@ pub const client_pump = @import("session_host/client_pump.zig");
 // runtime_event_reducer(P5c3c-2b2c3-c3b)는 이미 common wire/classifier를 통과한 inherited
 // event FIFO를 allocation/ownership 없이 fold한다. Client·ledger·pump lifecycle은 import하지 않는다.
 pub const runtime_event_reducer = @import("session_host/runtime_event_reducer.zig");
+// client_external_source_decision(P5c3c-2b2c3-c3b)는 sealed fold를 allocation 없이
+// terminal/action/recovery/adopted 중 하나로 닫는다. owning materialization과 pump publish는 소유하지 않는다.
+pub const external_source_decision = if (builtin.os.tag == .macos)
+    @import("session_host/external_source_decision.zig")
+else
+    struct {};
 // client_source_transcript(P5c3c-2b2c3-c3b)는 Client/protocol 의미를 모르는 std-only
 // domain-separated byte encoder다. schema field order는 후속 Client adapter가 명시적으로 소유한다.
 pub const client_source_transcript = @import("session_host/client_source_transcript.zig");

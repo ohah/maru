@@ -83,6 +83,83 @@ pub const Outcome = union(enum) {
     adopted: ReducedState,
 };
 
+pub fn outcomeEql(a: Outcome, b: Outcome) bool {
+    if (std.meta.activeTag(a) != std.meta.activeTag(b)) return false;
+    return switch (a) {
+        .terminal => |reason| std.meta.eql(reason, b.terminal),
+        .ended => true,
+        .revoked => |state| reducedStateEql(state, b.revoked),
+        .invalidated => |state| reducedStateEql(state, b.invalidated),
+        .adopted => |state| reducedStateEql(state, b.adopted),
+    };
+}
+
+pub fn reducedStateEql(a: ReducedState, b: ReducedState) bool {
+    if (!std.meta.eql(a.authority, b.authority) or
+        ((a.metadata == null) != (b.metadata == null)) or
+        ((a.resize == null) != (b.resize == null)))
+        return false;
+    if (a.metadata) |candidate|
+        if (!metadataCandidateEql(candidate, b.metadata.?)) return false;
+    if (a.resize) |candidate|
+        if (!resizeCandidateEql(candidate, b.resize.?)) return false;
+    return true;
+}
+
+pub fn metadataCandidateEql(a: MetadataCandidate, b: MetadataCandidate) bool {
+    if (!std.meta.eql(a.origin, b.origin) or
+        !std.mem.eql(u8, &a.raw_digest, &b.raw_digest) or
+        std.meta.activeTag(a.semantic_digest) !=
+            std.meta.activeTag(b.semantic_digest) or
+        std.meta.activeTag(a.proof) != std.meta.activeTag(b.proof))
+        return false;
+    switch (a.semantic_digest) {
+        .initial_seed => |digest| if (!std.mem.eql(
+            u8,
+            &digest,
+            &b.semantic_digest.initial_seed,
+        )) return false,
+        .event => |digest| if (!std.mem.eql(
+            u8,
+            &digest,
+            &b.semantic_digest.event,
+        )) return false,
+    }
+    return switch (a.proof) {
+        .initial => |proof| std.meta.eql(proof, b.proof.initial),
+        .event => |preflight| runtime_event_wire.eventPreflightEql(
+            preflight,
+            b.proof.event,
+        ),
+    };
+}
+
+pub fn resizeCandidateEql(a: ResizeCandidate, b: ResizeCandidate) bool {
+    return a.ordinal == b.ordinal and
+        std.mem.eql(u8, &a.raw_digest, &b.raw_digest) and
+        std.mem.eql(u8, &a.semantic_digest, &b.semantic_digest) and
+        runtime_event_wire.eventPreflightEql(a.preflight, b.preflight) and
+        std.meta.eql(a.event, b.event);
+}
+
+pub fn resizeCandidateIsCoherent(candidate: ResizeCandidate) bool {
+    const event = switch (candidate.preflight.event) {
+        .resized => |event| event,
+        else => return false,
+    };
+    return std.meta.eql(candidate.event, event) and
+        std.mem.eql(
+            u8,
+            &candidate.raw_digest,
+            &candidate.preflight.raw_digest,
+        ) and
+        std.mem.eql(
+            u8,
+            &candidate.semantic_digest,
+            &resizeSemanticDigest(event),
+        );
+}
+
 pub const InitialMetadataSeed = struct {
     revision: u64,
     raw_digest: runtime_event_wire.Digest,
@@ -816,4 +893,30 @@ test "reducer rejects a caller ordinal that is not its exact next item" {
         else => return error.TestUnexpectedResult,
     };
     try std.testing.expect(reason == .ordinal_mismatch);
+}
+
+test "resize candidate coherence rejects proof and digest swaps" {
+    const payload =
+        "{\"event\":\"runtime.resized\",\"data\":{\"runtime_id\":" ++
+        "\"000000000000000000000000000000aa\",\"cols\":120,\"rows\":40," ++
+        "\"resize_generation\":9,\"reason\":\"controller\"}}";
+    const state = switch (reduce(
+        &.{payload},
+        .{ .role = .observer, .generation = .untracked },
+    )) {
+        .adopted => |state| state,
+        else => return error.TestUnexpectedResult,
+    };
+    const candidate = state.resize.?;
+    try std.testing.expect(resizeCandidateIsCoherent(candidate));
+
+    var raw_swap = candidate;
+    raw_swap.raw_digest[0] ^= 1;
+    try std.testing.expect(!resizeCandidateIsCoherent(raw_swap));
+    var semantic_swap = candidate;
+    semantic_swap.semantic_digest[0] ^= 1;
+    try std.testing.expect(!resizeCandidateIsCoherent(semantic_swap));
+    var event_swap = candidate;
+    event_swap.event.cols += 1;
+    try std.testing.expect(!resizeCandidateIsCoherent(event_swap));
 }

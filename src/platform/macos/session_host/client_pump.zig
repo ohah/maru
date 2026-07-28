@@ -50,57 +50,7 @@ pub const TurnResult = struct {
     next_deadline_ns: ?i128 = null,
 };
 
-pub const RequestIdState = union(enum) {
-    available: u64,
-    last_available,
-    max_consumed,
-
-    pub const SeedError = error{InvalidZero};
-    pub const PrepareError = error{ Exhausted, InvalidState };
-    pub const CommitError = error{ StaleState, InvalidPrepared };
-
-    pub const Prepared = struct {
-        expected: RequestIdState,
-        id: u64,
-        next: RequestIdState,
-    };
-
-    pub fn fromNext(next: u64) SeedError!RequestIdState {
-        if (next == 0) return error.InvalidZero;
-        if (next == std.math.maxInt(u64)) return .last_available;
-        return .{ .available = next };
-    }
-
-    /// Compute a non-mutating reservation. Encoding/allocation may fail without consuming the ID.
-    pub fn prepare(self: RequestIdState) PrepareError!Prepared {
-        return switch (self) {
-            .available => |next| blk: {
-                if (next == 0 or next >= std.math.maxInt(u64)) return error.InvalidState;
-                const following: RequestIdState = if (next == std.math.maxInt(u64) - 1)
-                    .last_available
-                else
-                    .{ .available = next + 1 };
-                break :blk .{ .expected = self, .id = next, .next = following };
-            },
-            .last_available => blk: {
-                break :blk .{
-                    .expected = self,
-                    .id = std.math.maxInt(u64),
-                    .next = .max_consumed,
-                };
-            },
-            .max_consumed => error.Exhausted,
-        };
-    }
-
-    /// Commit only after the caller's queue admission has become infallible.
-    pub fn commit(self: *RequestIdState, prepared: Prepared) CommitError!void {
-        if (!std.meta.eql(self.*, prepared.expected)) return error.StaleState;
-        const canonical = self.prepare() catch return error.InvalidPrepared;
-        if (!std.meta.eql(canonical, prepared)) return error.InvalidPrepared;
-        self.* = prepared.next;
-    }
-};
+pub const RequestIdState = @import("request_id_state.zig").State;
 
 pub const RecoveryOrigin = enum {
     host,

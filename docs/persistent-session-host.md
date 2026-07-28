@@ -3406,8 +3406,8 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
               `untracked`를 0으로 정규화하지 않으며 generation-bearing revoke는 exact successor를 증명할 수 없으므로
               protocol terminal이다. tracked revoke만 checked `generation+1`을 요구하고 성공 뒤
               `tracked(successor)` observer로 전진한다. 따라서 reducer `ReducedState.authority`가 그대로
-              `PreparedSourceDecision.final_authority`의 semantic SSOT가 되고 outer가 attachment evidence에서
-              generation provenance를 재구성하지 않는다.
+              `PreparedSourceDecision.verdict.revoked/adopted.LiveState.authority`의 semantic SSOT가 되고 outer가
+              attachment evidence에서 generation provenance를 재구성하지 않는다.
 
               fold는 Client 내부 final stack address에서 `Accumulator.initInPlace` 또는
               `initWithMetadataInPlace`를 실행한다. private concrete `FoldMetadataSources`만 metadata equality
@@ -3436,19 +3436,25 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
               Client는 reducer의 전진 mechanics만 import하고 terminal/recovery verdict를 해석하지 않는다. pure
               `runtime_event_reducer`는 wire leaf만 import해 `{authority,metadata,resize}`와 closed
               `ReducerOutcome`을 전진시키고,
-              outer `client_external_adoption`이 seal/outcome/attachment evidence를 `PreparedSourceDecision`으로 합친다.
+              outer `external_source_decision` adapter가 seal/outcome/attachment evidence를
+              `PreparedSourceDecision`으로 합친다.
               **Closed source fold 구현:** 위 exact input/result와 tagged authority, internally initialized
               address-bound reducer, fixed metadata resolver, initial seed descriptor/content + scratch/Client owner
               cross-alias gate, screen structural terminal 누적, single ordered event loop와 counter finalize가
               `Client.foldExternalAdoptionSource`에 구현되었다. 기존 standalone source encoder와 같은 canonical
               digest, unsupported/unavailable/current seed, initial↔event/event↔event equality·equivocation, stale
               seed, cache contamination/counter mismatch, terminal tail hashing, allocation callback 0을 fixture로
-              고정한다. 이 구현은 아직 outer `PreparedSourceDecision`, event fingerprint/owning metadata
-              materialization 또는 c3c publish를 만들지 않으므로 c3b 전체 완료를 뜻하지 않는다.
+              고정한다. **Outer source decision 구현:** live re-fold validation, closed precedence, typed request
+              state, tagged metadata/resize winner coherence, screen-cap recovery와 derived decision matcher가
+              `external_source_decision.zig`에 구현되었다. exact/cap+1, request zero/max, terminal/action
+              precedence, current/event metadata forgery, resize proof, revoked authority, fold/decision cross-swap을
+              fixture로 고정한다. 아직 event fingerprint/owning metadata materialization 또는 c3c publish를
+              만들지 않으므로 c3b 전체 완료를 뜻하지 않는다.
               seal은 structural counts/counters, **raw `next_request_id: u64`**, ordered header+payload 전체를
               domain-separated SHA-256으로 묶는다. request ID 0도 seal/revalidate할 수 있지만 typed state로
-              publish하지 않고 protocol terminal decision으로만 준비한다. outer `client_external_adoption`만 nonzero raw 값을
-              `RequestIdState.fromNext`로 바꿔 `PreparedSourceDecision.request_state`에 둔다.
+              publish하지 않고 protocol terminal decision으로만 준비한다. outer
+              `external_source_decision`만 nonzero raw 값을 `request_id_state.State.fromNext`로 바꿔
+              `PreparedSourceDecision.request_state`에 둔다.
               digest transcript는 NUL을 포함한 exact ASCII domain
               `maru.session-host.client-source.v1\0`, `maru.session-host.event-raw.v1\0`,
               `maru.session-host.event-semantic.v1\0`,
@@ -3516,15 +3522,51 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
               모두 c3c 책임이다.
               event module은 Client private list나 `ExternalAdoptionInventory`를 다시 inspect하지 않는다.
 
-              adopted verdict만 final-address `PreparedExternalAdoption`의
-              `PreparedSourceDecision{source_seal,verdict,final_authority,raw_next_request_id,
-              request_state,metadata_winner,resize_winner}`와 nonoptional
-              `PreparedClientAdoption`/allocation-backed fingerprints/screen plan을 embed한다. prepare와 commit
-              사이 branch를 외부 scalar로 다시 고르지 않고 commit은 이 decision의 전 필드와 source seal을
-              재계산·대조한다.
+              allocation-free macOS validation adapter `external_source_decision.zig`는
+              `PreparedSourceDecision{fold,raw_next_request_id,request_state,verdict}`를 만든다. `fold`는
+              `ExternalAdoptionFoldResult` 전체를 값으로 embed해 binding/source/outcome provenance를 다시
+              펼치거나 복제하지 않는다. `verdict`는 closed union
+              `terminal(TerminalReason) | ended | revoked(LiveState) | host_recovery |
+              client_recovery | adopted(LiveState)`이고, `LiveState{authority,metadata,resize}`는 실제 reducer
+              state를 보존할 revoked/adopted branch에만 존재한다. terminal/ended/recovery branch에 무의미한
+              optional publish field를 두지 않는다. `TerminalReason`은
+              `fold(runtime_event_reducer.TerminalReason) | request_id_zero | inconsistent_fold`,
+              `MetadataWinner`는 `unsupported | unavailable | initial(MetadataCandidate) |
+              event(MetadataCandidate)`의 tagged union이다.
+              `raw_next_request_id`는 언제나 `fold.source_seal.raw_next_request_id`와 같고, 0이면
+              `request_state=null`, 그 외에는 pure `request_id_state.State.fromNext`의 exact 결과다.
+              기존 `client_pump.RequestIdState`는 pure `request_id_state.zig` leaf를 re-export하고
+              adoption/decision adapter는 pump를 import하지 않는다.
+
+              decision은 별도 initial metadata 입력을 받지 않는다. `fold.binding_seal.initial_metadata`와
+              reducer candidate의 origin/proof/revision/raw·semantic digest를 대조해 winner를 만든다.
+              public live re-fold가 full `MetadataSeedSeal` authenticity를 먼저 검증한다. 그 뒤 winner projection은
+              current seal의 tag/seed address/revision/raw·semantic digest와 candidate를 대조한다. unsupported
+              tag에 metadata candidate가 있거나, current tag에 initial candidate가 없거나 이 semantic projection이
+              다르거나, initial/event origin과 proof tag가 어긋나면 `inconsistent_fold` terminal이다.
+              unavailable/current baseline 뒤의 newer event metadata는 허용한다. error를 반환하거나 owning DTO를
+              만들지 않는다.
+              exact precedence는 **fold terminal → request ID 0 → ended → revoked → invalidated host recovery →
+              structurally valid screen exact cap 초과 client recovery → deterministic fold inconsistency →
+              adopted**다. screen cap은 source seal의 count/bytes와 pure
+              `external_inbox_limits.max_items/max_bytes`를 직접 비교하며 caller bool을 신뢰하지 않는다.
+              invalidated는 cap보다 먼저 host recovery이고 structural screen terminal은 cap recovery로
+              downgrade하지 않는다.
+
+              이 decision adapter slice는 allocation과 Client/storage/ledger mutation, owning
+              DTO/fingerprint/screen plan, recovery epoch/deadline, pump lifecycle/publish를 만들지 않는다.
+              public adapter는 macOS `Client`와 scratch를 받아 live re-fold를 검증하고, 그 뒤의 private pure
+              derivation만 sealed fold를 exhaustive verdict로 바꾼다. 후속 adopted-only
+              materialization이 final-address `PreparedExternalAdoption`에 nonoptional
+              `PreparedClientAdoption`/allocation-backed fingerprints/screen plan과 이 decision을 embed한다.
+              public `decide(client,input,fold,scratch)`는 먼저
+              `Client.externalAdoptionFoldResultMatches`로 live source 전체를 재검증하고 실패하면
+              `inconsistent_fold`만 반환한다. raw fold-only 판정은 private trusted leaf다. prepare와 commit 사이
+              branch를 외부 scalar로 다시 고르지 않고 materialization 전과 commit 직전에는
+              `decisionMatches`로 embedded fold와 모든 파생 verdict/request/live-state를 함께 재검증한다.
               c3 migration은 c2 outer `authority`와 nested `request_ids` publish owner를 제거한다.
-              `PreparedSourceDecision.final_authority/request_state`가 유일한 publish SSOT이고 Client inventory의
-              해당 값은 cleanup/revalidation fingerprint일 뿐 semantic owner가 아니다.
+              revoked/adopted `verdict.LiveState.authority`와 top-level `request_state`가 유일한 publish SSOT이고
+              Client inventory의 해당 값은 cleanup/revalidation fingerprint일 뿐 semantic owner가 아니다.
 
               `PreparedInitialEvents`는 payload copy가 아니라 `ExternalEventFingerprint[]`(exact header, raw SHA-256,
               semantic SHA-256, classified scalar), staged owning metadata winner, primary/cleanup mirror와 final-address

@@ -8,11 +8,11 @@ const std = @import("std");
 const c = std.c;
 const posix = std.posix;
 const client_mod = @import("client.zig");
-const client_pump = @import("client_pump.zig");
 const compatibility = @import("compatibility.zig");
 const ledger_mod = @import("external_inbox_ledger.zig");
 const framing = @import("framing.zig");
 const protocol = @import("protocol.zig");
+const request_id_state = @import("request_id_state.zig");
 
 pub const max_adoption_metadata_bytes: usize = 4 * 1024 * 1024;
 
@@ -93,7 +93,7 @@ pub const PreparedScreenBacklog = struct {
     transfer: ?PreparedTransfer = null,
     cleanup_transfer: ?PreparedTransfer = null,
     seed_plan: ledger_mod.PreparedSeedPlan = .{},
-    request_ids: client_pump.RequestIdState = .{ .available = 1 },
+    request_ids: request_id_state.State = .{ .available = 1 },
     adoption_metadata_resident_bytes: usize = 0,
     adoption_metadata_prepare_peak_bytes: usize = 0,
 
@@ -149,7 +149,7 @@ pub const PreparedScreenBacklog = struct {
         out.inventory = try client.inspectExternalAdoption(target_stream);
         out.cleanup_inventory = out.inventory;
         const inventory = &out.inventory.?;
-        out.request_ids = client_pump.RequestIdState.fromNext(inventory.next_request_id) catch
+        out.request_ids = request_id_state.State.fromNext(inventory.next_request_id) catch
             return error.InvalidClientState;
         try client.preflightExternalAdoption(inventory, &out.client_disarm);
         const inventory_metadata = inventory.metadataBytes() catch
@@ -285,7 +285,7 @@ pub const PreparedScreenBacklog = struct {
         if (self.adoption_metadata_resident_bytes != metadata.resident or
             self.adoption_metadata_prepare_peak_bytes != metadata.prepare_peak)
             return false;
-        const expected_request_ids = client_pump.RequestIdState.fromNext(
+        const expected_request_ids = request_id_state.State.fromNext(
             inventory.next_request_id,
         ) catch return false;
         if (!std.meta.eql(self.request_ids, expected_request_ids)) return false;

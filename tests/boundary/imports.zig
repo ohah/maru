@@ -171,9 +171,14 @@ test "session host client pump policy imports only std" {
             .string_literal => {
                 if (saw_import and saw_paren) {
                     imports += 1;
-                    try std.testing.expectEqualStrings(
-                        "\"std\"",
-                        source[token.loc.start..token.loc.end],
+                    const literal = source[token.loc.start..token.loc.end];
+                    try std.testing.expect(
+                        std.mem.eql(u8, literal, "\"std\"") or
+                            std.mem.eql(
+                                u8,
+                                literal,
+                                "\"request_id_state.zig\"",
+                            ),
                     );
                 }
                 saw_import = false;
@@ -187,8 +192,8 @@ test "session host client pump policy imports only std" {
             },
         }
     }
-    try std.testing.expectEqual(@as(usize, 1), import_builtins);
-    try std.testing.expectEqual(@as(usize, 1), imports);
+    try std.testing.expectEqual(@as(usize, 2), import_builtins);
+    try std.testing.expectEqual(@as(usize, 2), imports);
     try std.testing.expect(!containsForbiddenExternalBuiltin(source));
     try std.testing.expect(!containsForbiddenPumpToken(source));
     try std.testing.expect(!containsForbiddenStdChild(source));
@@ -711,6 +716,36 @@ test "session host external adoption import direction and mechanics stay closed"
         if (!is_client and !is_adoption)
             try std.testing.expect(!containsRestrictedName(source, "PreparedClientDisarm"));
     }
+}
+
+test "session host external source decision stays outside pump and owning materialization" {
+    const allocator = std.testing.allocator;
+    const source = try readZigFileZ(
+        allocator,
+        "src/platform/macos/session_host/external_source_decision.zig",
+    );
+    defer allocator.free(source);
+
+    try std.testing.expect(!joinedStringLiteralsContain(
+        source,
+        "client_external_pump.zig",
+    ));
+    try std.testing.expect(!joinedStringLiteralsContain(
+        source,
+        "client_external_adoption.zig",
+    ));
+    try std.testing.expect(!joinedStringLiteralsContain(
+        source,
+        "runtime_metadata_wire.zig",
+    ));
+    try std.testing.expect(!joinedStringLiteralsContain(
+        source,
+        "external_inbox_ledger.zig",
+    ));
+    try std.testing.expect(!joinedStringLiteralsContain(
+        source,
+        "std.mem.Allocator",
+    ));
 }
 
 fn containsExactIdentifier(source: [:0]const u8, expected: []const u8) bool {

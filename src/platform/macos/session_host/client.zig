@@ -3067,7 +3067,9 @@ pub const Client = struct {
         scratch: *ExternalSourceOwnerRangeScratch,
     ) bool {
         const actual = self.foldExternalAdoptionSource(input, scratch) catch return false;
-        return std.meta.eql(actual, expected);
+        return std.meta.eql(actual.binding_seal, expected.binding_seal) and
+            std.meta.eql(actual.source_seal, expected.source_seal) and
+            runtime_event_reducer.outcomeEql(actual.outcome, expected.outcome);
     }
 
     pub fn previewExternalAdoption(

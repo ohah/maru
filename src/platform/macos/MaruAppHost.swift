@@ -2700,111 +2700,23 @@ final class FilePanelEditingSmokeProbe {
 
 @MainActor
 final class MaruWebPanelView: NSView {
-    // FP14b: WebKit이 만든 **이미지 문서**에 얹는 뷰어 조작(휠 줌·드래그 팬·더블클릭 맞춤/100% 토글·테마 체커 배경).
-    // 이미지가 격리 loadFileURL로 옮겨 가며(복사 0·8 MiB 상한 없음) 잃은 커스텀 UX를 여기서 되살린다 —
-    // FP14가 격리 초기안을 기각했던 이유가 "흰 배경·상단 정렬·팬줌 없음"이었으므로 그 셋이 이 스크립트의 계약이다.
-    //
-    // 자가 게이트: `document.contentType`이 image/* 가 아니면 즉시 반환한다. 같은 config를 pdf·미디어·로컬 HTML이
-    // 공유하므로 이 한 줄이 그 문서들을 무영향으로 남긴다(새 ABI 힌트 불필요). 브리지·메시지 핸들러는 쓰지 않는다.
-    // 색은 문서 CSS 변수가 없어 시스템 외관(prefers-color-scheme)에서 파생한다 — 터미널 테마 주입은 후속.
+    // FP14b(실험 — WebKit 위임): 이미지 문서에 **표시 조작을 얹지 않는다**. 팬/줌은 WebKit ImageDocument가
+    // 이미 갖고 있고(뷰포트보다 큰 이미지의 맞춤↔실제크기 클릭 토글 + 스크롤) 핀치는 `allowsMagnification`이
+    // 처리한다. 우리 JS로 그 위에 팬/줌을 다시 구현하니 네이티브 토글과 충돌해 "드래그를 끝낼 때 확대/축소되는"
+    // 증상이 남았다(제보 3회) — 내장 동작은 C++ 레이어라 `preventDefault`로 막히지 않는다.
+    // 그래서 주입은 **투명 이미지용 체커 배경 CSS 하나**로 줄인다. 자가 게이트(document.contentType)는 그대로다.
     static let imageDocumentViewerScript = """
     (function () {
       if (!String(document.contentType || "").startsWith("image/")) return;
-      var img = document.images && document.images[0];
-      if (!img) return;
       var dark = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches;
       var a = dark ? "#2a2a2e" : "#f2f2f4", b = dark ? "#232327" : "#e6e6ea";
       var css = document.createElement("style");
       css.textContent =
-        "html,body{margin:0;height:100%;overflow:hidden;background-color:" + a + ";" +
+        "html,body{background-color:" + a + ";" +
         "background-image:linear-gradient(45deg," + b + " 25%,transparent 25%,transparent 75%," + b + " 75%)," +
         "linear-gradient(45deg," + b + " 25%,transparent 25%,transparent 75%," + b + " 75%);" +
-        "background-size:16px 16px;background-position:0 0,8px 8px;}" +
-        "body{display:flex;align-items:center;justify-content:center;}" +
-        "img{max-width:none!important;max-height:none!important;transform-origin:0 0;" +
-        "will-change:transform;user-select:none;-webkit-user-drag:none;}";
+        "background-size:16px 16px;background-position:0 0,8px 8px;}";
       document.head.appendChild(css);
-      var scale = 1, tx = 0, ty = 0, fitScale = 1;
-      var gestureActive = false, gesturePinching = false, gestureScale = 1, gestureBase = 1, gestureX = 0, gestureY = 0;
-      function apply() { img.style.transform = "translate(" + tx + "px," + ty + "px) scale(" + scale + ")"; }
-      function fit() {
-        var vw = document.documentElement.clientWidth, vh = document.documentElement.clientHeight;
-        var iw = img.naturalWidth || img.width, ih = img.naturalHeight || img.height;
-        if (!iw || !ih) return;
-        fitScale = Math.min(1, Math.min(vw / iw, vh / ih));
-        scale = fitScale;
-        tx = (vw - iw * scale) / 2;
-        ty = (vh - ih * scale) / 2;
-        apply();
-      }
-      function zoomAt(factor, cx, cy) {
-        var next = Math.max(fitScale * 0.2, Math.min(40, scale * factor));
-        if (next === scale) return;
-        tx = cx - (cx - tx) * (next / scale);
-        ty = cy - (cy - ty) * (next / scale);
-        scale = next;
-        apply();
-      }
-      // 스크롤=팬, ⌘/Ctrl+스크롤=줌(macOS 미리보기·Safari 관례). **세로 휠을 줌으로 쓰지 않는다** —
-      // 트랙패드 두 손가락 스크롤도 wheel로 오므로 축 크기로 줌/팬을 가르면 대각선으로 밀 때 프레임마다
-      // 둘이 번갈아 걸려 "이동과 확대가 같이 되는" 증상이 된다(사용자 제보). 줌은 핀치(gesture)와 수식키가 소유한다.
-      // 핀치 진행 중(gestureActive)에는 wheel을 무시한다 — 일부 경로가 핀치를 ctrl+wheel로도 합성해 보내면
-      // 제스처 핸들러와 이중 적용되기 때문이다.
-      window.addEventListener("wheel", function (e) {
-        e.preventDefault();
-        if (gestureActive) return;
-        if (e.ctrlKey || e.metaKey) zoomAt(Math.exp(-e.deltaY / 300), e.clientX, e.clientY);
-        else { tx -= e.deltaX; ty -= e.deltaY; apply(); }
-      }, { passive: false });
-      // 트랙패드 핀치: WebKit이 쏘는 비표준 gesture 이벤트(`event.scale` = 제스처 시작 대비 배율)를 직접 받는다.
-      // 네이티브 확대(allowsMagnification)에 맡기지 않는 이유는 위 wheel 핸들러가 `preventDefault`로 macOS가
-      // 핀치를 합성해 보내는 ctrl+wheel까지 삼켜 그 경로가 서지 않기 때문이다 — 여기서 우리가 같은 transform으로
-      // 처리해 휠 줌과 배율·앵커가 일관된다(pdf·미디어는 스크립트가 no-op이라 네이티브 확대를 그대로 쓴다).
-      window.addEventListener("gesturestart", function (e) {
-        e.preventDefault();
-        gesturePinching = false; // 아직 핀치로 확정하지 않는다 — 두 손가락 스크롤에도 이 이벤트가 온다
-        gestureScale = scale;
-        gestureX = typeof e.clientX === "number" ? e.clientX : document.documentElement.clientWidth / 2;
-        gestureY = typeof e.clientY === "number" ? e.clientY : document.documentElement.clientHeight / 2;
-      }, { passive: false });
-      // **데드존**: 두 손가락 스크롤에도 핀치 인식기가 붙어 `gesturechange`가 오고, 특히 손가락을 뗄 때
-      // 간격이 미세하게 변하며 scale이 1에서 살짝 벗어난다. 그걸 그대로 적용하면 "드래그를 끝낼 때 확대/축소되는"
-      // 증상이 된다(사용자 제보). 그래서 배율이 5%를 넘게 벌어진 뒤에야 핀치로 확정하고, 그때부터만 줌한다.
-      window.addEventListener("gesturechange", function (e) {
-        e.preventDefault();
-        var raw = typeof e.scale === "number" && e.scale > 0 ? e.scale : 1;
-        if (!gesturePinching) {
-          if (Math.abs(raw - 1) < 0.05) return; // 스크롤에 딸려 온 미세 변화 — 무시
-          gesturePinching = true;
-          gestureActive = true;   // 이 시점부터 wheel을 무시해 핀치와 이중 적용되지 않게 한다
-          gestureScale = scale;   // 확정 순간을 기준으로 다시 잡아 첫 프레임이 튀지 않게 한다
-          gestureBase = raw;
-        }
-        var target = gestureScale * (raw / gestureBase);
-        if (scale > 0) zoomAt(target / scale, gestureX, gestureY);
-      }, { passive: false });
-      window.addEventListener("gestureend", function (e) {
-        e.preventDefault();
-        gestureActive = false;
-        gesturePinching = false;
-      }, { passive: false });
-      var dragging = false, lastX = 0, lastY = 0;
-      window.addEventListener("mousedown", function (e) {
-        dragging = true; lastX = e.clientX; lastY = e.clientY;
-        document.body.style.cursor = "grabbing"; e.preventDefault();
-      });
-      window.addEventListener("mousemove", function (e) {
-        if (!dragging) return;
-        tx += e.clientX - lastX; ty += e.clientY - lastY;
-        lastX = e.clientX; lastY = e.clientY; apply();
-      });
-      window.addEventListener("mouseup", function () { dragging = false; document.body.style.cursor = ""; });
-      window.addEventListener("dblclick", function (e) {
-        if (Math.abs(scale - fitScale) < 0.001) zoomAt(1 / fitScale, e.clientX, e.clientY);
-        else fit();
-      });
-      window.addEventListener("resize", fit);
-      if (img.complete) fit(); else img.addEventListener("load", fit);
     })();
     """
 

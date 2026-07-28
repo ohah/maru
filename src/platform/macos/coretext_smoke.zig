@@ -6,6 +6,7 @@ const terminal = maru.terminal;
 const coretext_probe = @import("coretext_probe.zig");
 const coretext_raster = @import("coretext_raster.zig");
 const coretext_shaper = @import("coretext_shaper.zig");
+const coretext_frame_builder = @import("coretext_frame_builder.zig"); // chrome 셀 텍스트 생산자(CG1 cluster 방출) — 실-CoreText 합성 확인용
 const coretext_bridge = @import("coretext_smoke_bridge.zig");
 // shape/raster native bridge 시그니처는 coretext_smoke_bridge.zig가 단일 출처로 소유한다.
 // Metal smoke와 같은 선언을 공유해 ABI 드리프트를 한 곳에서만 관리한다.
@@ -780,6 +781,59 @@ test "CoreText draw-list shaper composes an NFD Hangul cluster identically to it
     const nfc = try Probe.glyphAtCol0(allocator, shaper, "\u{D55C}"); // 완성형 한
 
     // 같은 음절로 합성됐다 — 풀이 종성까지 온전히 CoreText에 전달됐다는 증거(아니면 '하'로 달라짐).
+    try std.testing.expectEqual(nfc.font_id, nfd.font_id);
+    try std.testing.expectEqual(nfc.glyph_id, nfd.glyph_id);
+    try std.testing.expect(nfd.glyph_id != 0); // notdef가 아니라 실제 음절 글리프
+}
+
+test "CoreText draw-list shaper composes an NFD Hangul chrome label identically to its precomposed form (CG1)" {
+    // 회귀 고정(CG1 — docs/grapheme-clustering.md §3.1a): chrome 셀 텍스트(파일 트리 행·사이드바 카드·탭 제목)도
+    // 터미널과 **같은 cluster 모델**을 쓴다. 위 HG3a 테스트가 터미널 DrawList로 증명한 것을 chrome DrawList로
+    // 증명한다 — 같은 셰이퍼·같은 풀이므로, chrome 생산자가 cluster를 제대로 싣는지만이 변수다.
+    //
+    // 왜 중요한가: chrome은 codepoint 1개 = 셀 1개라 NFD 파일명이 자모로 흩어져 보였다(사용자 제보). 유닛 테스트는
+    // DrawCell/풀 구조만 보므로, "CoreText가 실제로 한 음절 글리프로 합성하는가"는 이 실-CoreText 경로에서만 닫힌다.
+    const allocator = std.testing.allocator;
+    const appearance = try config.resolveAppearance(.{});
+    const shaper = coretext_shaper.CoreTextDrawListShaper{
+        .appearance = appearance,
+        .shape_draw_list = maru_macos_coretext_shape_draw_list,
+    };
+    const dim: terminal.Color = .{ .rgb = .{ .r = 0x70, .g = 0x70, .b = 0x70 } };
+
+    // 파일 트리 행 라벨을 chrome이 그리는 그대로 DrawList로 만들고, 첫 글자 글리프를 뽑는다.
+    const Probe = struct {
+        fn labelGlyph(a: std.mem.Allocator, sh: coretext_shaper.CoreTextDrawListShaper, fg: terminal.Color, label: []const u8) !struct { font_id: renderer.FontId, glyph_id: renderer.GlyphId } {
+            const rows = [_]maru.session.file_tree.Row{.{ .file = .{
+                .path = "/tmp/probe.md",
+                .label = label,
+                .depth = 0,
+                .supported = true,
+                .open = false,
+                .active = false,
+                .dirty = false,
+                .external_change = false,
+                .symlink = false,
+            } }};
+            var dl = try coretext_frame_builder.buildFileTreeDrawList(a, &rows, null, 0, 1, 40, fg, fg, null);
+            defer dl.deinit(a);
+            var fr = renderer.FontIdentityRegistry.init(a);
+            defer fr.deinit();
+            var shaped = try sh.shape(a, dl, &fr);
+            defer shaped.deinit(a);
+            // 행 앞머리는 마커·아이콘이라 라벨 첫 글자는 그 뒤에 온다 — 한글 음절(또는 완성형)만 골라 첫 개를 쓴다.
+            for (shaped.runs.glyphs) |g| {
+                const cp = g.codepoint;
+                if (cp == 0x1112 or cp == 0xD55C) return .{ .font_id = g.font_id, .glyph_id = g.glyph_id };
+            }
+            return error.NoHangulGlyph;
+        }
+    };
+
+    const nfd = try Probe.labelGlyph(allocator, shaper, dim, "\u{1112}\u{1161}\u{11AB}.md"); // NFD 한.md
+    const nfc = try Probe.labelGlyph(allocator, shaper, dim, "\u{D55C}.md"); // 완성형 한.md
+
+    // 같은 음절 글리프 ⇒ 같은 래스터 픽셀. 풀이 중성·종성을 못 넘겼다면 '하' 또는 초성 단독으로 달라진다.
     try std.testing.expectEqual(nfc.font_id, nfd.font_id);
     try std.testing.expectEqual(nfc.glyph_id, nfd.glyph_id);
     try std.testing.expect(nfd.glyph_id != 0); // notdef가 아니라 실제 음절 글리프

@@ -26805,7 +26805,10 @@ pub const AppSession = struct {
         const slot_h = self.sidebar_slot_height_px;
         const card_tk = self.buildChromeTokens();
         const bar_w = card_tk.space.accent_bar_width_px;
-        const gap: f32 = @floatFromInt(card_tk.space.card_gap_px);
+        // 카드 rect = **행 전체**(chrome `bandFillSpan`이 단일 출처 — 사방 card_gap 인셋 폐기). 클릭 판정(slotAt)이
+        // 행 전체라 인셋 밴드는 "보이는 곳 ≠ 눌리는 곳"이었다(사용자 결정 2026-07-28). 여기 per-card tint·accent
+        // 막대·드래그 고스트도 같은 rect를 써야 밴드와 어긋나지 않으므로 인셋 없이 슬롯 좌표를 그대로 쓴다.
+        const sidebar_w_f: f32 = @floatFromInt(self.sidebar_width_px);
         const default_accent = packOpaqueRgb(card_tk.palette.get(.accent_bar)); // 기본(지정 없음) 활성 카드 accent(테마-구동)
         // SG5-2: 지금 순회 중인 카드가 속한 그룹의 공통 색(위 그룹 헤더에서 얻음). projectRows가 헤더를 소속 카드보다
         // 먼저 내므로(§6·연속 파티션), 헤더 row를 지날 때 갱신해 두면 이후 카드 막대에 그 색을 실을 수 있다(위치 파생
@@ -26860,7 +26863,7 @@ pub const AppSession = struct {
             // 차지). scroll=0으로 넘겨 sidebarScrollClipQuad가 뺀다(이중 차감 방지). 헤더 row는 위에서 continue라 여긴
             // 카드만 — 카드만이면 rowTop==i*slot_h+header라 동작 보존. card_h도 rowHeight로(카드=slot_h).
             const slot_abs_y: f32 = @floatFromInt(chrome.components.sidebar.rowTop(rows, i, self.sidebar_header_height_px, self.sidebarMetrics(), 0));
-            const card_top = slot_abs_y + gap; // 카드 rect = 슬롯 사방 card_gap inset(chrome bandFill과 동일)
+            const card_top = slot_abs_y; // 카드 rect = 슬롯(행) 그대로 — chrome bandFill과 동일
             // 카드 높이에 **그 카드에 딸린 에이전트 목록 행**을 더한다 — 배경 tint·좌측 accent 막대가 밴드
             // (chrome bandFillSpan이 카드+목록을 한 덩어리로 덮는다)와 같은 범위를 써야 목록 옆에서 막대가 끊기지
             // 않는다(사용자 피드백). 목록은 그 카드의 부속이므로 소속 표시가 거기서 멈추면 안 된다.
@@ -26872,10 +26875,9 @@ pub const AppSession = struct {
                     else => break,
                 };
             }
-            const card_h = @as(f32, @floatFromInt(span_px)) - 2.0 * gap;
+            const card_h: f32 = @floatFromInt(span_px);
             // ① 배경 tint — **밴드 없는 idle 슬롯에만** 오버레이 quad. 활성/호버/드롭 슬롯은 lowerSidebar가 밴드 색에
-            // tint를 blend하므로 여기서 또 그리면 이중 tint(code-review). 카드 rect(gap inset)·둥근 모서리를 밴드와 맞춰
-            // rich에서 카드 모양대로 보이게(전폭 직사각 bleed 방지) — tui(gap=0·radius=0)면 전폭·직각(기존 동일).
+            // tint를 blend하므로 여기서 또 그리면 이중 tint(code-review). 카드 rect(=행)·둥근 모서리를 밴드와 맞춘다.
             // straight-alpha(셰이더 rgb*=a) — premultipliedRgba면 이중 premultiply로 밴드 blend 경로보다 흐려진다.
             const is_hovered = if (self.hovered_slot) |hs| hs == i else false;
             const is_drop = if (drop_slot) |ds| ds == i else false;
@@ -26885,9 +26887,9 @@ pub const AppSession = struct {
                     const c = packStraightRgbU32(tab.background_color, tab_bg_tint_alpha);
                     const r: f32 = if (sr.clipped) 0 else @floatFromInt(card_tk.space.corner_radius_px); // 헤더에 걸려 잘리면 라운드 죽임(밴드와 동일)
                     self.gpu_quads.append(self.allocator, .{
-                        .x = gap,
+                        .x = 0,
                         .y = sr.y,
-                        .w = @as(f32, @floatFromInt(self.sidebar_width_px)) - 2.0 * gap,
+                        .w = sidebar_w_f,
                         .h = sr.h,
                         .corner_radii = .{ r, r, r, r },
                         .border_widths = .{ 0, 0, 0, 0 },
@@ -26902,7 +26904,7 @@ pub const AppSession = struct {
             // ② 좌측 accent 막대(불투명, 직각 strip). 색 층 우선순위: 개별 지정색(tab.accent_color) > 그룹 공통 색
             // (current_group_color, SG5-2 — 소속 카드 공통 막대, 브라우저 탭 그룹식으로 활성·비활성 모두) > 활성만 기본
             // accent(테마-구동) > 없음(비활성 무색 카드는 막대 없음). 개별 accent가 그룹 색보다 위 = 개별 지정이 더 명시적
-            // (design 지침). 막대는 카드 좌단(x=gap)·카드 높이. solid 직각 quad라 appendSolidQuad 재사용(divider 등과 동일 헬퍼).
+            // (design 지침). 막대는 카드 좌단(x=0 — 밴드가 행 전체라 행 왼쪽 끝)·카드 높이. solid 직각 quad라 appendSolidQuad 재사용(divider 등과 동일 헬퍼).
             if (bar_w > 0) {
                 const word: u32 = if (tab.accent_color != 0)
                     packStraightRgbU32(tab.accent_color, 0xFF)
@@ -26910,7 +26912,7 @@ pub const AppSession = struct {
                     packStraightRgbU32(current_group_color, 0xFF)
                 else if (orig == self.app_window.active_tab) default_accent else continue;
                 if (self.sidebarScrollClipQuad(card_top, card_h)) |sr| {
-                    self.appendSolidQuad(gap, sr.y, @floatFromInt(bar_w), sr.h, word, 0);
+                    self.appendSolidQuad(0, sr.y, @floatFromInt(bar_w), sr.h, word, 0);
                 }
             }
         };
@@ -26941,7 +26943,7 @@ pub const AppSession = struct {
                     @floatFromInt(@as(u32, ghost_depth - 1) * @as(u32, card_tk.space.group_indent_px))
                 else
                     0;
-                const w_full: f32 = @as(f32, @floatFromInt(self.sidebar_width_px)) - 2.0 * gap - indent_px;
+                const w_full: f32 = sidebar_w_f - indent_px; // 카드 rect와 같은 도메인(행 전체 — card_gap 인셋 폐기)
                 // ⑴ nest: 타깃 그룹 하이라이트 — 부모 그룹(고스트를 담는 그룹)의 rows [parent_row, ghost_lo)에 은은한 배경 tint로
                 //    "이 그룹 안으로 들어간다"를 보인다. parent_row = 고스트 위로 스캔해 depth==ghost_depth-1인 첫 group_header
                 //    (= 타깃 그룹 마커). 못 찾으면(방어) 하이라이트 생략. 밴드는 부모 그룹 상단부터 고스트 아래까지 감싼다.
@@ -26963,13 +26965,13 @@ pub const AppSession = struct {
                     if (pr < dp.ghost_lo) {
                         const parent_top: f32 = @floatFromInt(chrome.components.sidebar.rowTop(rows, pr, self.sidebar_header_height_px, self.sidebarMetrics(), 0));
                         const hl_h: f32 = (top_abs + @as(f32, @floatFromInt(band_h))) - parent_top;
-                        if (self.sidebarScrollClipQuad(parent_top + gap, hl_h - 2.0 * gap)) |sr| {
+                        if (self.sidebarScrollClipQuad(parent_top, hl_h)) |sr| {
                             const rr: f32 = if (sr.clipped) 0 else @floatFromInt(card_tk.space.corner_radius_px);
                             const hl_fill = packRgbAlpha(card_tk.palette.get(.accent_bar), 0x22); // 타깃 그룹 accent tint(≈13%)
                             self.gpu_quads.append(self.allocator, .{
-                                .x = gap,
+                                .x = 0,
                                 .y = sr.y,
-                                .w = @as(f32, @floatFromInt(self.sidebar_width_px)) - 2.0 * gap,
+                                .w = sidebar_w_f,
                                 .h = sr.h,
                                 .corner_radii = .{ rr, rr, rr, rr },
                                 .border_widths = .{ 0, 0, 0, 0 },
@@ -26984,11 +26986,11 @@ pub const AppSession = struct {
                 }
                 // ⑵ 형제(is_sibling)는 밴드를 생략하고 삽입선만 낸다. nest·card는 반투명 고스트 밴드(nest는 indent_px만큼 들여씀).
                 if (!is_sibling) {
-                    if (self.sidebarScrollClipQuad(top_abs + gap, @as(f32, @floatFromInt(band_h)) - 2.0 * gap)) |sr| {
+                    if (self.sidebarScrollClipQuad(top_abs, @floatFromInt(band_h))) |sr| {
                         const rr: f32 = if (sr.clipped) 0 else @floatFromInt(card_tk.space.corner_radius_px);
                         const ghost_fill = packRgbAlpha(self.appearance.theme.sidebar_foreground, 0x30); // ≈19% 반투명
                         self.gpu_quads.append(self.allocator, .{
-                            .x = gap + indent_px,
+                            .x = indent_px,
                             .y = sr.y,
                             .w = w_full,
                             .h = sr.h,
@@ -27006,7 +27008,7 @@ pub const AppSession = struct {
                 // accent로 스크린샷 가독성 확보 — 브라우저/VSCode 드래그 삽입선 관례). 두께 ≥2px. nest는 indent_px만큼 들여씀(형제=전폭).
                 const line_thick: f32 = @floatFromInt(@max(@as(u32, 2), card_tk.border.line_thickness_px));
                 if (self.sidebarScrollClipQuad(top_abs, line_thick)) |sr| {
-                    self.appendSolidQuad(gap + indent_px, sr.y, w_full, sr.h, packOpaqueRgb(card_tk.palette.get(.accent_bar)), 0);
+                    self.appendSolidQuad(indent_px, sr.y, w_full, sr.h, packOpaqueRgb(card_tk.palette.get(.accent_bar)), 0);
                 }
             }
         }
@@ -32387,15 +32389,14 @@ test "그룹핀 리뷰 #6: accent 막대 current_group_color가 핀 경계에서
     session.tabs.items[3].group_color = blue;
     session.rebuildSidebar() catch {};
 
-    // 표시 rows: [hPG, c t0, c t1, c t2, hUG, c t3, c t4]. 좌측 accent 막대(layer0·x=gap·w=bar_w) 색을 센다.
+    // 표시 rows: [hPG, c t0, c t1, c t2, hUG, c t3, c t4]. 좌측 accent 막대(layer0·**x=0**(행 좌단)·w=bar_w) 색을 센다.
     const tk = session.buildChromeTokens();
-    const gap_f: f32 = @floatFromInt(tk.space.card_gap_px);
     const bar_w = tk.space.accent_bar_width_px;
     try std.testing.expect(bar_w > 0); // rich accent 막대 존재(전제)
     const red_word = packStraightRgbU32(red, 0xFF);
     var red_accents: usize = 0;
     for (session.gpu_quads.items) |q| {
-        if (q.layer == 0 and q.fill_color0 == red_word and q.w == @as(f32, @floatFromInt(bar_w)) and q.x == gap_f) red_accents += 1;
+        if (q.layer == 0 and q.fill_color0 == red_word and q.w == @as(f32, @floatFromInt(bar_w)) and q.x == 0) red_accents += 1;
     }
     // ★ RED accent = PG 마커 카드+멤버 카드 = 2개뿐. 옛 버그면 비고정 top카드 t2가 색을 상속해 3개.
     try std.testing.expectEqual(@as(usize, 2), red_accents);

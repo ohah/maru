@@ -82,8 +82,8 @@ pub const Spacing = struct {
     // 이라 chrome이 아니라 platform(app_session rebuildSidebar per-tab accent 루프)이 이 폭으로 직접 GpuQuad를 그린다.
     // chrome은 이 값으로 카드 텍스트 좌측 여백만 예약한다(buildSidebarTitleDrawList indent — 막대 위 정합·단일 출처).
     accent_bar_width_px: u16 = 0,
-    // U2: 사이드바 카드 사이 여백(px). 밴드/막대를 슬롯 안쪽 사방으로 이만큼 줄여 워크스페이스가 카드처럼 떨어져 보인다.
-    // tui=0(슬롯 꽉 — 기존과 동일), rich>0.
+    // U2: 사이드바 카드 **텍스트 좌측 여백**(px) — accent 막대 폭과 더해 텍스트 시작 col을 정한다. 밴드·막대 기하는
+    // 이제 행 전체라 이 값을 쓰지 않는다(docs/sidebar-agent-list.md §3.2 — 클릭 판정 정합). tui=0, rich>0.
     card_gap_px: u16 = 0,
     // SG3: 사이드바 그룹 안 카드(depth 1)의 좌측 들여쓰기(px) — 그룹 헤더 아래 카드가 소속을 시각적으로 보이게 살짝
     // 안으로. hit-test·view가 공유하는 단일 값(§5.4)이라 여기 한 곳에서만 정의한다. platform buildSidebarTitleDrawList가
@@ -182,7 +182,10 @@ pub const Tokens = struct {
         // U1: 사이드바 카드 좌측 accent 막대 3px. tui=0(막대 없음). 막대색은 카드별(우클릭 "바: …")이라 platform이
         // 이 폭으로 직접 그리고(활성=기본 앰버·지정 카드=지정색), chrome은 카드 텍스트 좌측 여백만 이 폭으로 예약한다.
         tk.space.accent_bar_width_px = 3;
-        // U2: 카드 사이 여백 8px(슬롯 안쪽 사방 패딩) — 워크스페이스가 "떠 있는 카드"로 또렷이 분리(Warp식 넉넉한 행 여백). 4→8(사이드바 폴리시).
+        // U2: 카드 **텍스트 좌측 들여쓰기** 8px(accent 막대 폭과 함께 텍스트 시작 col을 정한다).
+        // **밴드 인셋이 아니다** — 예전엔 이 값으로 밴드까지 사방 인셋해 "떠 있는 카드"로 분리했으나, 클릭
+        // 판정(slotAt)이 행 전체라 밴드 밖 8px을 눌러도 카드가 눌렸다. 사용자 결정(2026-07-28)으로 밴드는
+        // 행 전체가 됐고(docs/sidebar-agent-list.md §3.2), 이 토큰은 텍스트 여백만 든다.
         tk.space.card_gap_px = 8;
         // SG3: 그룹 안 카드 들여쓰기 16px(≈2ch) — 헤더 아래 카드가 소속을 시각적으로 보이게(브라우저 탭 그룹/VSCode 폴더 관례). docs/sidebar-groups.md §5.
         tk.space.group_indent_px = 16;

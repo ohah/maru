@@ -174,6 +174,23 @@ pub fn listRowHeight(lines: u8, m: Metrics, last: bool) u32 {
     return blockHeight(lines, m) +| m.list_pad_v +| below;
 }
 
+/// 목록 행(토글·에이전트) **호버 밴드가 행 안에서 차지하는 세로 구간**(행 상단 기준 offset·높이) =
+/// 행 높이에서 위아래 `list_pad_v/2`만 들인 값. 즉 **밴드 ≈ 클릭되는 행**이다.
+///
+/// **베이스/결정**: 밴드를 `card_gap`만큼 들여 만들지 **않는다**. `card_gap`(rich=8px 고정)은 *카드끼리* 떨어뜨리는
+/// 간격이라 84px 카드에선 티가 안 나지만, 목록 행은 높이가 글자 블록 + `list_pad_v`(≈cell×0.25)뿐이라 위아래에서
+/// 그만큼 빼면 밴드가 글자보다 **작아진다** — 실측(cell 18px)에서 1줄 토글 행 26px 중 20px이 인셋으로 날아가 6px
+/// 띠만 남았고, 그 띠가 글자 한가운데를 가로질러 "호버 하이라이트"가 아니라 밑줄처럼 보였다(사용자 제보).
+///
+/// 들이는 양을 `list_pad_v/2`로 **작게** 두는 두 번째 이유: 호버 하이라이트는 "지금 누르면 이게 눌린다"는 표시라
+/// **클릭 판정(`slotAt`)이 쓰는 행 전체**와 눈에 띄게 달라선 안 된다(밴드는 작은데 그 밖을 눌러도 반응하면 어긋난
+/// 것으로 읽힌다 — 사용자 제보). 그래도 0으로 두지 않는 건 위아래 행 밴드가 맞닿으면 어느 행을 가리키는지 흐려지기
+/// 때문이다. 행 높이 = 글자 블록 + 위아래 여백(≥`list_pad_v`)이므로 이 인셋이면 **글자 블록은 항상 밴드 안**이다.
+pub fn listRowBandV(row_h: u32, m: Metrics) struct { top: u32, h: u32 } {
+    const gap = m.list_pad_v / 2;
+    return .{ .top = gap, .h = row_h -| 2 *| gap };
+}
+
 /// row 하나의 세로 높이(px). 카드=줄 수에서 계산, 그룹 헤더=header_row_h(얇은 한 줄). 가변 누적의 단위.
 pub fn rowHeight(row: Row, m: Metrics) u32 {
     return switch (row) {
@@ -388,14 +405,13 @@ pub fn view(rows: []const Row, hovered_slot: ?usize, drop_slot: ?usize, p: props
                 // 하위 행을 호버해도 색 변화가 없다). 활성보다 한 단계 밝은 전용 role로 오버레이한다.
                 .agent_toggle, .agent => .row_hover_bg,
             };
-            // 목록 행 호버 밴드는 **행 안쪽으로 들여** 그린다. 행 높이를 꽉 채우면 위아래 행과 맞닿아 답답하고,
-            // 어느 행을 가리키는지도 덜 또렷하다(사용자 피드백). 카드 호버는 카드가 이미 card_gap으로 떨어져 있어
-            // 그대로 둔다.
-            const row_inset: u16 = switch (rows[hs]) {
-                .agent_toggle, .agent => @intCast(@min(m.list_pad_v / 2, @as(u32, std.math.maxInt(u16)))),
-                else => 0,
-            };
-            try out.append(arena, bandFillInset(rows, hs, hs + 1, w, m, hover_role, p.shape, row_inset));
+            // 카드·헤더 호버 밴드는 **행 전체**(bandFill = 클릭 판정 구간과 동일). 목록 행만 사방 `list_pad_v/2`
+            // 한 겹 들여 "카드에 딸린 부속"으로 보이게 하고 활성 밴드 위 위아래 행과 맞닿지 않게 한다
+            // (사용자 피드백). 인셋이 얕아 클릭 영역과 어긋나 보이지 않는다 — docs/sidebar-agent-list.md §3.2.
+            switch (rows[hs]) {
+                .agent_toggle, .agent => try out.append(arena, listRowHoverBand(rows, hs, w, m, hover_role, p.shape)),
+                .card, .group_header => try out.append(arena, bandFill(rows, hs, w, m, hover_role, p.shape)),
+            }
         }
     }
 
@@ -418,11 +434,6 @@ fn bandFill(rows: []const Row, row: usize, w: u32, m: Metrics, role: tokens.Colo
 /// `[from, to)` **여러 row를 한 덩어리로** 덮는 밴드. 활성 워크스페이스가 카드 + 에이전트 목록을 함께 칠할 때 쓴다
 /// (단일 row는 `bandFill`이 to=from+1로 위임). row→y는 앞선 row 높이 누적(rowTop의 헤더·스크롤 제외분).
 fn bandFillSpan(rows: []const Row, from: usize, to: usize, w: u32, m: Metrics, role: tokens.ColorRole, shape: props.ShapeTokens) draw.Op {
-    return bandFillInset(rows, from, to, w, m, role, shape, 0);
-}
-
-/// `bandFillSpan` + 사방 추가 인셋(px). 목록 행 호버처럼 밴드가 행을 꽉 채우면 답답한 자리에서 쓴다.
-fn bandFillInset(rows: []const Row, from: usize, to: usize, w: u32, m: Metrics, role: tokens.ColorRole, shape: props.ShapeTokens, extra: u16) draw.Op {
     const top: i64 = rowTop(rows, from, 0, m, 0); // 슬롯 상대(헤더·스크롤 제외), ≥0
     // 목록 아래 행(새 워크스페이스)은 카드가 아니므로 **기본 1줄 카드 높이**로 둔다(옛 고정 slot_h 자리).
     var rh: u32 = 0;
@@ -432,14 +443,31 @@ fn bandFillInset(rows: []const Row, from: usize, to: usize, w: u32, m: Metrics, 
         var i = from;
         while (i < to and i < rows.len) : (i += 1) rh +|= rowHeight(rows[i], m);
     }
-    // U2: 슬롯 rect에서 사방 card_gap을 inset(content rect)으로 빼 카드 사이 여백을 둔다(선언적 패딩 — 좌표 산술 대신).
-    // tui(gap=0)면 inset 0이라 슬롯 꽉(기존과 동일).
-    const slot = draw.Rect{ .x = 0, .y = @intCast(top), .w = w, .h = rh };
-    const g: u16 = shape.card_gap_px +| extra;
-    const card = slot.inset(.{ .left = g, .right = g, .top = g, .bottom = g });
+    // 밴드 = **행 전체**(인셋 없음). 예전엔 사방 `card_gap`(rich 8px)을 들여 "떠 있는 카드"로 그렸는데, 클릭
+    // 판정(`slotAt`)은 행 전체(사이드바 폭 × 행 높이)라 밴드 밖 8px 띠를 눌러도 카드가 눌렸다 — "보이는 곳 =
+    // 눌리는 곳"이 깨져 호버 하이라이트가 무엇을 가리키는지 어긋나 보인다(사용자 제보 → 결정 2026-07-28:
+    // **밴드를 클릭 행에 맞춘다**). `card_gap_px`는 이제 카드 **텍스트 좌측 들여쓰기** 전용 토큰이다.
+    // platform(rebuildSidebar의 per-card tint·accent 막대·드래그 고스트)도 같은 rect를 써야 하므로 여기가 단일 출처다.
+    return quadOp(.{ .x = 0, .y = @intCast(top), .w = w, .h = rh }, role, shape);
+}
+
+/// 목록 행(토글·에이전트) **호버 밴드** op = 행에서 사방 `list_pad_v/2`만 들인 rect. 카드 밴드(행 전체)와 달리
+/// 한 겹 들이는 건 "목록 행은 카드에 딸린 부속"이라는 위계와, 활성 밴드 위에 놓일 때 위아래 행과 맞닿지 않게
+/// 하려는 것이다(사용자 피드백). `card_gap`은 쓰지 않는다 — 행이 얕아 그만큼 들이면 밴드가 글자보다 작아지고
+/// 클릭 영역과도 크게 어긋난다(`listRowBandV` 주석의 6px 띠 회귀).
+fn listRowHoverBand(rows: []const Row, row: usize, w: u32, m: Metrics, role: tokens.ColorRole, shape: props.ShapeTokens) draw.Op {
+    const top: i64 = rowTop(rows, row, 0, m, 0); // 슬롯 상대(헤더·스크롤 제외), ≥0
+    const v = listRowBandV(rowHeight(rows[row], m), m);
+    const g: u16 = @intCast(@min(m.list_pad_v / 2, @as(u32, std.math.maxInt(u16))));
+    const band = draw.Rect{ .x = 0, .y = @intCast(top + @as(i64, v.top)), .w = w, .h = v.h };
+    return quadOp(band.inset(.{ .left = g, .right = g }), role, shape);
+}
+
+/// 밴드 rect + role → quad op(둥근 모서리는 shape 토큰). tui(r=0)면 lowerSidebar가 셀 밴드로, rich(r>0)면 GPU
+/// quad(둥근)로 lower한다 — 같은 op, 토큰만 다름.
+fn quadOp(rect: draw.Rect, role: tokens.ColorRole, shape: props.ShapeTokens) draw.Op {
     const r = shape.corner_radius_px;
-    // tui(r=0)면 lowerSidebar가 셀 밴드로, rich(r>0)면 GPU quad(둥근)로 lower한다 — 같은 op, 토큰만 다름.
-    return .{ .quad = .{ .rect = card, .fill_role = role, .corner_radii = .{ r, r, r, r } } };
+    return .{ .quad = .{ .rect = rect, .fill_role = role, .corner_radii = .{ r, r, r, r } } };
 }
 
 // ── 테스트 ──────────────────────────────────────────────────────────────────────
@@ -597,17 +625,22 @@ test "sidebar view: 활성·호버·+ 밴드 fill(우선순위·좌표·role)" {
     try std.testing.expectEqual(@as(u16, 8), out.items[0].quad.corner_radii[0]);
 
     // 좌측 accent 막대는 chrome이 내지 않는다(카드별 색이라 platform이 GpuQuad로 직접 — app_session per-tab accent 루프).
-    // card_gap>0이면 카드(밴드)만 슬롯 안쪽 사방 패딩으로 낸다 — 카드 사이 여백. 카드 높이=card1_h, gap=4.
+    // **카드 밴드 = 행 전체**다(사용자 결정 2026-07-28 — 클릭 판정 slotAt이 행 전체라 밴드를 거기 맞춘다).
+    // card_gap은 밴드 기하에 **안 들어간다**(텍스트 좌측 들여쓰기 전용) — 옛 사방 인셋이면 밴드 밖 gap 띠를
+    // 눌러도 카드가 눌려 "보이는 곳 ≠ 눌리는 곳"이었다.
     out.clearRetainingCapacity();
     var card_p = p;
     card_p.shape = .{ .corner_radius_px = 8, .card_gap_px = 4 };
     try view(&rows, null, null, card_p, arena, &out);
     try std.testing.expectEqual(@as(usize, 1), out.items.len); // 활성 카드 밴드만(막대 op 없음)
     const card = out.items[0].quad.rect;
-    try std.testing.expectEqual(@as(i32, 4), card.x); // 좌 패딩(gap)
-    try std.testing.expectEqual(@as(u32, 120 - 8), card.w); // w - 2×gap
-    try std.testing.expectEqual(pad_top + @as(i32, @intCast(card1_h + 4)), card.y); // 카드1 y + gap
-    try std.testing.expectEqual(card1_h - 8, card.h); // 카드 높이 - 2×gap
+    try std.testing.expectEqual(@as(i32, 0), card.x); // ★ 행 좌단(옛: gap=4)
+    try std.testing.expectEqual(@as(u32, 120), card.w); // ★ 사이드바 전폭(옛: w-2×gap)
+    try std.testing.expectEqual(pad_top + @as(i32, @intCast(card1_h)), card.y); // ★ 행 상단(옛: +gap)
+    try std.testing.expectEqual(card1_h, card.h); // ★ 행 높이 그대로(옛: -2×gap)
+    // 밴드 = 클릭 판정(slotAt) 행과 정확히 같은 구간이다 — 밴드 안 어디든 그 카드가 눌린다.
+    try std.testing.expectEqual(@as(?usize, 1), slotAt(@floatFromInt(card.y), 0, &rows, Metrics.init(16, 20), 0));
+    try std.testing.expectEqual(@as(?usize, 1), slotAt(@floatFromInt(card.y + @as(i32, @intCast(card.h)) - 1), 0, &rows, Metrics.init(16, 20), 0));
 }
 
 test "sidebar view: group_header 밴드 정책 — 무색=밴드 없음(화살표만)·색 있음=tint 밴드·hover 유지(SG5-2/보더라인 제거)" {
@@ -795,4 +828,80 @@ test "sidebar 가변 높이: rowHeight·rowTop·contentHeight(혼합 누적 + �
     const empty = [_]Row{};
     try std.testing.expectEqual(@as(i64, 20), rowTop(&empty, 0, 20, testMetrics(40, 16), 0));
     try std.testing.expectEqual(@as(u32, 0), contentHeight(&empty, testMetrics(40, 16)));
+}
+
+test "sidebar 목록 행 호버 밴드: 글자 블록을 덮고 클릭 행과 같은 크기다(사방 card_gap 인셋으로 쪼그라들지 않음)" {
+    // 회귀(사용자 제보 2건): 목록 행 호버 밴드를 행 높이에서 **사방 card_gap(+list_pad_v/2)** 인셋으로 만들었더니
+    // (1) 행이 얕은 1줄 토글("N agents")에서 밴드가 글자보다 작아져 글자 한가운데를 가로지르는 6px 띠가 됐고
+    // (2) 그 띠 바깥을 눌러도 행이 눌려 "클릭 영역과 호버 표시 크기가 다르다"가 됐다.
+    // 실측 재현값(cell 18px, rich card_gap 8px): 행 26px − 인셋 2×10px = 6px < 글자 18px.
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const cell: u32 = 18;
+    const m = Metrics.init(cell, 20);
+    const p = props.ChromeProps{
+        .metrics = .{
+            .cell_width_px = 9,
+            .cell_height_px = cell,
+            .sidebar_width_px = 220,
+            .sidebar_slot_height_px = 40,
+            .sidebar_header_row_h_px = 20,
+            .backing_width_px = 800,
+            .backing_height_px = 600,
+        },
+        .shape = .{ .corner_radius_px = 8, .card_gap_px = 8 }, // rich — 회귀가 났던 토큰 조합
+    };
+    const rows = [_]Row{
+        .{ .card = .{ .tab = 0, .label = "ws", .active = true, .lines = 3 } },
+        .{ .agent_toggle = .{ .tab = 0, .count = 1, .collapsed = false } },
+        .{ .agent = .{ .tab = 0, .pane = 0, .term = 0, .lines = 3, .last = true } },
+    };
+
+    // 각 목록 행을 호버 → 마지막 op이 그 행의 호버 밴드(앞은 활성 카드+목록 span 밴드).
+    for ([_]struct { row: usize, lines: u8 }{ .{ .row = 1, .lines = 1 }, .{ .row = 2, .lines = 3 } }) |c| {
+        var out: std.ArrayList(draw.Op) = .empty;
+        try view(&rows, c.row, null, p, arena, &out);
+        const band = out.items[out.items.len - 1].quad;
+        try std.testing.expect(band.fill_role == .row_hover_bg);
+
+        const row_top = rowTop(&rows, c.row, 0, m, 0);
+        const row_h = rowHeight(rows[c.row], m);
+        const block = blockHeight(c.lines, m);
+        // platform(fillSidebarGlyphPyTop)이 글자 블록을 놓는 자리 — 밴드는 이 블록을 **완전히** 덮어야 한다.
+        const glyph_top = row_top + @as(i64, (row_h -| block) / 2);
+        const glyph_bot = glyph_top + @as(i64, block);
+        const band_top: i64 = band.rect.y;
+        const band_bot: i64 = band_top + @as(i64, band.rect.h);
+        try std.testing.expect(band_top <= glyph_top); // ★ 옛 코드: band_top > glyph_top(글자 위가 밖)
+        try std.testing.expect(band_bot >= glyph_bot); // ★ 옛 코드: band_bot < glyph_bot(글자 아래가 밖)
+        // 그래도 행을 넘지는 않는다 — 위아래 행 밴드와 맞닿으면 어느 행을 가리키는지 흐려진다.
+        try std.testing.expect(band_top >= row_top);
+        try std.testing.expect(band_bot <= row_top + @as(i64, row_h));
+        // ★ 클릭 판정(slotAt이 쓰는 행 전체)과 **거의 같은 크기** — 밴드 밖을 눌러도 반응하는 어긋남이 보이지
+        //   않으려면 차이가 얕은 인셋(위아래 list_pad_v/2)에 머물러야 한다. 옛 코드는 26px 행에 6px 밴드였다.
+        try std.testing.expectEqual(row_h -| 2 * (m.list_pad_v / 2), band.rect.h);
+        // 그 행 안 어디를 눌러도 hit-test가 이 행을 준다(밴드가 대표하는 영역 = 실제로 눌리는 영역).
+        // rowTop은 content_pad_v를 포함하고 slotAt은 같은 양을 되빼므로 둘은 같은 화면 y 도메인이다(header=0·scroll=0).
+        const probe_top: f64 = @floatFromInt(row_top + 1);
+        const probe_bot: f64 = @floatFromInt(row_top + @as(i64, row_h) - 1);
+        try std.testing.expectEqual(@as(?usize, c.row), slotAt(probe_top, 0, &rows, m, 0));
+        try std.testing.expectEqual(@as(?usize, c.row), slotAt(probe_bot, 0, &rows, m, 0));
+        // 가로는 카드 밴드(행 전체)보다 한 겹 들어간다(목록 행은 카드의 부속이라는 시각 위계) — 다만 card_gap이
+        // 아니라 얕은 list_pad_v/2라 클릭 영역과 크게 어긋나지 않는다.
+        try std.testing.expectEqual(@as(i32, @intCast(m.list_pad_v / 2)), band.rect.x);
+        try std.testing.expectEqual(220 - 2 * (m.list_pad_v / 2), band.rect.w);
+    }
+
+    // listRowBandV 단위: 밴드는 행에서 위아래 얕은 인셋만 뺀 값이고(클릭 행과 정합), 글자 블록은 항상 그 안이다
+    // (마지막 행처럼 아래 여백이 card_pad_v로 커지는 경우 포함).
+    const toggle_h = listRowHeight(1, m, false);
+    const v = listRowBandV(toggle_h, m);
+    try std.testing.expect(v.h >= blockHeight(1, m)); // ★ 6px 띠 회귀 가드
+    try std.testing.expectEqual(toggle_h -| 2 * (m.list_pad_v / 2), v.h);
+    try std.testing.expect(v.top + v.h <= toggle_h);
+    const last_h = listRowHeight(3, m, true);
+    const v_last = listRowBandV(last_h, m);
+    try std.testing.expect(v_last.h >= blockHeight(3, m));
+    try std.testing.expect(v_last.top + v_last.h <= last_h);
 }

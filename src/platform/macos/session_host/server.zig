@@ -2813,14 +2813,6 @@ fn intFieldU64(obj: std.json.ObjectMap, key: []const u8) ?u64 {
     };
 }
 
-/// signed i64 필드(§6a core_command arg — scroll delta는 음수 가능). std.json integer가 그대로 i64다.
-fn intFieldI64(obj: std.json.ObjectMap, key: []const u8) ?i64 {
-    return switch (obj.get(key) orelse return null) {
-        .integer => |n| n,
-        else => null,
-    };
-}
-
 /// bool 필드(§6b block 선택). 없거나 타입 다르면 false.
 fn boolField(obj: std.json.ObjectMap, key: []const u8) bool {
     return switch (obj.get(key) orelse return false) {

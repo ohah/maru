@@ -942,11 +942,6 @@ fn intField(v: ?std.json.Value) ?i64 {
         else => null,
     }) else null;
 }
-fn clampU32(v: i64) u32 {
-    if (v < 0) return 0;
-    if (v > std.math.maxInt(u32)) return std.math.maxInt(u32);
-    return @intCast(v);
-}
 
 // ══ screenshot(5f-1) chunk 재조립(L2 순수, §9.5.7) ═══════════════════════════════════════════════════════════
 

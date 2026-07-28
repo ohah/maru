@@ -53,15 +53,6 @@ fn occurrences(comptime groups: []const Group, comptime wanted: []const u8) usiz
     return count;
 }
 
-fn dispositionIn(comptime groups: []const Group, comptime wanted: []const u8) ?Disposition {
-    inline for (groups) |group| {
-        inline for (group.fields) |name| {
-            if (std.mem.eql(u8, name, wanted)) return group.disposition;
-        }
-    }
-    return null;
-}
-
 /// Compile-time exhaustive field classifier. A field addition, stale name, or duplicate classification stops the build.
 pub fn validate(comptime T: type, comptime type_name: []const u8, comptime groups: []const Group) void {
     const info = @typeInfo(T);
@@ -691,46 +682,6 @@ pub const runtime_manager_groups = [_]Group{
         .why = "the self-referential manager graph is rebuilt in place from serialized host and runtime records; bell, clipboard, and fixture-only diagnostic counters restart at zero",
     },
 };
-
-/// U1 codec과 U2 quiesce가 U0 inventory를 별도 복사하지 않고 소비하는 단일 조회점이다. 지원 owner type이
-/// 아니면 null이며, 지원 type의 미분류 field도 null이다(위 comptime validate가 후자를 build failure로 만든다).
-pub fn dispositionOf(comptime T: type, comptime field_name: []const u8) ?Disposition {
-    if (T == TerminalCore) return dispositionIn(&terminal_core_groups, field_name);
-    if (T == Screen) return dispositionIn(&screen_groups, field_name);
-    if (T == Scrollback) return dispositionIn(&scrollback_groups, field_name);
-    if (T == ScrollbackPage) return dispositionIn(&scrollback_page_groups, field_name);
-    if (T == RowDesc) return dispositionIn(&row_desc_groups, field_name);
-    if (T == KittyImageStorage) return dispositionIn(&kitty_image_storage_groups, field_name);
-    if (T == KittyImage) return dispositionIn(&kitty_image_groups, field_name);
-    if (T == StoredPlacement) return dispositionIn(&stored_placement_groups, field_name);
-    if (T == KittyGraphicsCommand) return dispositionIn(&kitty_graphics_command_groups, field_name);
-    if (T == Style) return dispositionIn(&style_groups, field_name);
-    if (T == Cell) return dispositionIn(&cell_groups, field_name);
-    // `maru.pty.PtySession` is the real macOS owner only on macOS. Linux CI
-    // intentionally sees the portability stub, whose fields are not an exec
-    // handoff contract and therefore must not be classified as if it were the
-    // Darwin implementation.
-    if (builtin.os.tag == .macos and T == PtySession)
-        return dispositionIn(&pty_session_groups, field_name);
-    if (T == PtyReader) return dispositionIn(&pty_reader_groups, field_name);
-    if (T == PtyEventQueue) return dispositionIn(&pty_event_queue_groups, field_name);
-    if (T == PtyWriteQueue) return dispositionIn(&pty_write_queue_groups, field_name);
-    if (T == CoreCommandQueue) return dispositionIn(&core_command_queue_groups, field_name);
-    if (T == LivePtySession) return dispositionIn(&live_pty_session_groups, field_name);
-    if (T == RuntimeEntry) return dispositionIn(&runtime_entry_groups, field_name);
-    if (T == TerminalRuntimeRegistry) return dispositionIn(&terminal_runtime_registry_groups, field_name);
-    if (builtin.os.tag == .macos and T == RuntimeManager)
-        return dispositionIn(&runtime_manager_groups, field_name);
-    if (builtin.os.tag == .macos and T == SocketServer)
-        return dispositionIn(&socket_server_groups, field_name);
-    if (T == Surface) return dispositionIn(&surface_groups, field_name);
-    if (T == LiveSurfaceTerminal) return dispositionIn(&live_surface_terminal_groups, field_name);
-    if (T == LiveRegistryEntry) return dispositionIn(&live_registry_entry_groups, field_name);
-    if (T == LiveRegistry) return dispositionIn(&live_registry_groups, field_name);
-    if (T == SurfaceRuntimeLink) return dispositionIn(&surface_runtime_link_groups, field_name);
-    if (T == SurfaceRuntime) return dispositionIn(&surface_runtime_groups, field_name);
-    return null;
-}
 
 comptime {
     // TerminalCore alone has many fields; exhaustive name×rule duplicate checks intentionally exceed Zig's small default.

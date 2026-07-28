@@ -7266,24 +7266,6 @@ fn parseStringFieldAlloc(
     };
 }
 
-fn responseState(payload: []const u8, expected: []const u8) bool {
-    var parsed = std.json.parseFromSlice(std.json.Value, std.heap.page_allocator, payload, .{}) catch return false;
-    defer parsed.deinit();
-    const root = switch (parsed.value) {
-        .object => |value| value,
-        else => return false,
-    };
-    const result = switch (root.get("result") orelse return false) {
-        .object => |value| value,
-        else => return false,
-    };
-    const state = switch (result.get("state") orelse return false) {
-        .string => |value| value,
-        else => return false,
-    };
-    return std.mem.eql(u8, state, expected);
-}
-
 const PrepareResponse = union(enum) {
     accepted,
     completed: upgrade_wire.AttemptReport,

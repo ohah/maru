@@ -13907,11 +13907,12 @@ pub const AppSession = struct {
         return false;
     }
 
-    /// Phase 4e-5: 활성 워크스페이스 탭에 web Term이 하나라도 있으면 true(FrameSummary.web_surfaces_present 원천). **유지
-    /// 카운터가 아니라 매 tick 활성 탭 트리에서 계산**한 신호라 `collectWebSurfaces`(활성 탭만 walk)와 **정확히 같은 범위** —
-    /// 창 간 이동(moveWorkspaceToSession=detach/adopt 포인터 relocate, destroy/create 없음)·재부모화·닫기 어느 경로에도
-    /// 트리가 단일 출처로 자동 정합한다(옛 유지 카운터는 이동에서 원본 stuck-high·대상 stuck-0으로 드리프트했다). alloc-free 재귀.
-    /// 창의 **어느 탭에든** web Term이 있나. FP16c로 수집 범위가 창 전체가 됐으므로 presence 신호도 같은 범위여야
+    /// 창의 **어느 탭에든** web Term이 있나(FrameSummary.web_surfaces_present 원천). **유지 카운터가 아니라 매 tick
+    /// 트리에서 계산**한 신호라 창 간 이동(moveWorkspaceToSession=detach/adopt 포인터 relocate, destroy/create 없음)·
+    /// 재부모화·닫기 어느 경로에도 트리가 단일 출처로 자동 정합한다(옛 유지 카운터는 이동에서 원본 stuck-high·대상
+    /// stuck-0으로 드리프트했다). alloc-free 재귀.
+    ///
+    /// FP16c로 `collectWebSurfaces` 수집 범위가 창 전체가 됐으므로 presence 신호도 같은 범위여야
     /// 한다 — 활성 탭만 보면 비활성 워크스페이스의 첫 web surface 생성 전이가 영영 미적용된다(FP3이 도크에서
     /// 실측으로 겪은 것과 같은 결함).
     fn windowHasWebTerm(self: *AppSession) bool {
@@ -13924,9 +13925,9 @@ pub const AppSession = struct {
 
     // ── 파일 entry 접근 (FP16b 선행 — docs/file-panel.md §10 B-1) ─────────────────────────────────
     //
-    // 이 창에 **열린 파일 entry 집합**을 묻는 유일한 창구다. 지금 저장소는 `DockPanel`의 group 트리지만
-    // FP16b가 그 소유를 `Term`으로 옮긴다(§1). 그래서 여기 반환 타입에 `DockGroup`을 **절대 노출하지 않는다** —
-    // 노출하면 소유가 옮겨갈 때 호출처가 전부 바뀌고, 감춰 두면 아래 함수 본문만 pane 트리 walk로 갈아끼우면 된다.
+    // 이 창에 **열린 파일 entry 집합**을 묻는 유일한 창구다. 저장소는 이제 `Term.file_entry`다(FP16b 완료) —
+    // 이 창구가 `DockGroup`을 반환 타입에 노출하지 않았기 때문에, 소유가 옮겨갈 때 호출처를 하나도 안 고치고
+    // 아래 함수 본문만 pane 트리 walk로 갈아끼울 수 있었다(감추기의 값을 실제로 회수한 자리다).
     //
     // "지금 이 entry가 어느 group에 있나"가 정말 필요한 소비처(드래그·group focus)는 아래 `groupForFileEntryId`를
     // 쓴다. 그 함수는 FP16b/B-3에서 group 개념과 함께 **삭제 예정**이라 일부러 이름으로 드러내 둔다.
@@ -14439,8 +14440,10 @@ pub const AppSession = struct {
 
     /// Phase 4e-3: 활성 워크스페이스 탭의 pane 트리를 walk해 이번 tick의 web Term 집합(cur)을 만든다(§6). 각 web Term은
     /// **자기 pane leaf rect**에서 탭 바(top inset)를 뺀 본문 rect(4a `contentRect`, §5 탭 바 노출)에 고정되고, visible은
-    /// **자기 pane의 활성 Term인가**다(4c의 활성 pane 추종을 완전 제거 — 각 웹뷰가 제 pane에 붙박인다). 비활성 워크스페이스
-    /// 탭은 walk 대상이 아니라 그 탭의 web Term은 집합 밖(→ destroy). OOM/미초기화면 error(호출자가 prev 불변 유지).
+    /// **자기 pane의 활성 Term인가**다(4c의 활성 pane 추종을 완전 제거 — 각 웹뷰가 제 pane에 붙박인다). **비활성 워크스페이스 탭의 web Term도
+    /// 집합에 남는다** — zero rect + `visible=false`로(FP16c, 아래 두 번째 루프). 집합에서 빠지면 surfaceDiff가
+    /// destroyed를 내고 Swift가 WKWebView를 파괴해 미저장 CM6 버퍼가 사라지기 때문이다(docs/file-panel.md §4).
+    /// OOM/미초기화면 error(호출자가 prev 불변 유지).
     fn collectWebSurfaces(self: *AppSession, out: *std.ArrayList(web_panel_layout.SurfaceLayout)) !void {
         if (self.surface_initialized and self.tabs.items.len > 0) {
             self.web_leaf_rects_scratch.clearRetainingCapacity(); // 영속 scratch 재사용(hot path 재할당 회피, layout이 append만 함)

@@ -6,9 +6,15 @@ const dock_panel = @import("dock_panel.zig");
 const layout_math = @import("layout_math.zig");
 const Rect = @import("split_tree.zig").Rect;
 
-pub const default_right_pt: u32 = 420;
+/// FP16: 도크가 **탐색기 전용**이 되면서 폭 기준이 바뀐다. 420/240pt는 editor(문서 본문) + tree를 함께
+/// 담던 시절의 값이라 트리만 있는 지금은 화면을 절반 가까이 먹는다. 좌측 사이드바(카드 목록)와 같은
+/// 성격의 목록 열이므로 그쪽 기본값에 맞춘다 — `theme.SidebarConfig.width_pt` 기본 180pt와 같은 값이다
+/// (레이어가 달라 상수를 공유하진 못하고 값만 맞춘다, 그 필드 주석과 같은 규율).
+/// 하한도 "문서를 담아야 한다"는 근거가 사라져 사이드바 하한(120pt)과 같은 자리로 내린다.
+pub const default_right_pt: u32 = 180;
+pub const min_right_pt: u32 = 120;
+/// bottom은 가로 띠라 성격이 다르다(폭이 아니라 높이). 트리 행이 몇 줄은 보여야 하므로 그대로 둔다.
 pub const default_bottom_pt: u32 = 300;
-pub const min_right_pt: u32 = 240;
 pub const min_bottom_pt: u32 = 160;
 /// Artifact에서 Markdown 본문은 tree보다 우선하는 주 surface다. 12칸짜리 세로 띠까지 줄이던 기존 하한은
 /// 문서/편집기를 사실상 못 쓰게 하므로 28칸을 보장하고, 공간이 모자라면 tree를 먼저 숨긴다.

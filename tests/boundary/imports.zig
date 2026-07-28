@@ -143,6 +143,202 @@ test "provider cleanup module remains absent" {
     );
 }
 
+test "session host unchecked adoption leaves stay behind the aggregate permit boundary" {
+    const allocator = std.testing.allocator;
+    const root = "src/platform/macos/session_host";
+    const Leaf = struct {
+        prefix: []const u8,
+        suffix: []const u8,
+        owner_file: []const u8,
+    };
+    const leaves = [_]Leaf{
+        .{
+            .prefix = "commitExternalAdoption",
+            .suffix = "TakeUnchecked(",
+            .owner_file = "client.zig",
+        },
+        .{
+            .prefix = "commitInto",
+            .suffix = "Unchecked(",
+            .owner_file = "client_external_adoption.zig",
+        },
+        .{
+            .prefix = "commitOwnerMetadata",
+            .suffix = "TakeUnchecked(",
+            .owner_file = "external_event_materialization.zig",
+        },
+    };
+    var dir = try std.Io.Dir.cwd().openDir(std.testing.io, root, .{ .iterate = true });
+    defer dir.close(std.testing.io);
+    for (leaves) |leaf| {
+        const needle = try std.fmt.allocPrint(
+            allocator,
+            "{s}{s}",
+            .{ leaf.prefix, leaf.suffix },
+        );
+        defer allocator.free(needle);
+        var aggregate_calls: usize = 0;
+        var walker = try dir.walk(allocator);
+        defer walker.deinit();
+        while (try walker.next(std.testing.io)) |entry| {
+            if (entry.kind != .file or
+                !std.mem.endsWith(u8, entry.basename, ".zig"))
+                continue;
+            const path = try std.fmt.allocPrint(
+                allocator,
+                "{s}/{s}",
+                .{ root, entry.path },
+            );
+            defer allocator.free(path);
+            const source = try readZigFileZ(allocator, path);
+            defer allocator.free(source);
+            const count = countOccurrences(source, needle);
+            if (std.mem.eql(u8, entry.path, "client_external_pump.zig")) {
+                aggregate_calls += count;
+            } else if (!std.mem.eql(u8, entry.path, leaf.owner_file) and
+                count != 0)
+            {
+                std.debug.print(
+                    "unchecked adoption leaf boundary violation: {s} contains {s}\n",
+                    .{ path, needle },
+                );
+                return error.TestUnexpectedResult;
+            }
+        }
+        try std.testing.expectEqual(@as(usize, 1), aggregate_calls);
+    }
+}
+
+test "session host aggregate screen cleanup has one owner and one caller" {
+    const allocator = std.testing.allocator;
+    const root = "src/platform/macos/session_host";
+    const seams = [_][]const u8{
+        "moveIntoAggregateCleanupSnapshot",
+        "abandonAggregateCleanup",
+        "prepareAggregateCleanup",
+        "finishAggregateCleanup",
+    };
+    for (seams) |seam| {
+        const definition_needle = try std.fmt.allocPrint(
+            allocator,
+            "pub fn {s}(",
+            .{seam},
+        );
+        defer allocator.free(definition_needle);
+        const call_needle = try std.fmt.allocPrint(
+            allocator,
+            ".{s}(",
+            .{seam},
+        );
+        defer allocator.free(call_needle);
+        var owner_definitions: usize = 0;
+        var aggregate_calls: usize = 0;
+        var dir = try std.Io.Dir.cwd().openDir(std.testing.io, root, .{ .iterate = true });
+        defer dir.close(std.testing.io);
+        var walker = try dir.walk(allocator);
+        defer walker.deinit();
+        while (try walker.next(std.testing.io)) |entry| {
+            if (entry.kind != .file or
+                !std.mem.endsWith(u8, entry.basename, ".zig"))
+                continue;
+            const path = try std.fmt.allocPrint(
+                allocator,
+                "{s}/{s}",
+                .{ root, entry.path },
+            );
+            defer allocator.free(path);
+            const source = try readZigFileZ(allocator, path);
+            defer allocator.free(source);
+            if (std.mem.eql(u8, entry.path, "client_external_adoption.zig")) {
+                owner_definitions += countOccurrences(source, definition_needle);
+            } else if (std.mem.eql(u8, entry.path, "client_external_pump.zig")) {
+                aggregate_calls += countOccurrences(source, call_needle);
+            } else if (countOccurrences(source, call_needle) != 0 or
+                countOccurrences(source, definition_needle) != 0)
+            {
+                std.debug.print(
+                    "aggregate screen cleanup boundary violation: {s}\n",
+                    .{path},
+                );
+                return error.TestUnexpectedResult;
+            }
+        }
+        try std.testing.expectEqual(@as(usize, 1), owner_definitions);
+        try std.testing.expectEqual(@as(usize, 1), aggregate_calls);
+    }
+}
+
+test "session host aggregate screen cleanup has no public shortcut" {
+    const allocator = std.testing.allocator;
+    const source = try readZigFileZ(
+        allocator,
+        "src/platform/macos/session_host/client_external_adoption.zig",
+    );
+    defer allocator.free(source);
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        countOccurrences(source, "pub fn deinitForAggregate("),
+    );
+}
+
+test "session host deferred seed retirement has one ledger owner and one adoption caller" {
+    const allocator = std.testing.allocator;
+    const root = "src/platform/macos/session_host";
+    const definition_needle = "pub fn commitSeedsDeferredRetirement(";
+    const call_needle = ".commitSeedsDeferredRetirement(";
+    var definitions: usize = 0;
+    var ledger_calls: usize = 0;
+    var adoption_calls: usize = 0;
+    var dir = try std.Io.Dir.cwd().openDir(std.testing.io, root, .{ .iterate = true });
+    defer dir.close(std.testing.io);
+    var walker = try dir.walk(allocator);
+    defer walker.deinit();
+    while (try walker.next(std.testing.io)) |entry| {
+        if (entry.kind != .file or
+            !std.mem.endsWith(u8, entry.basename, ".zig"))
+            continue;
+        const path = try std.fmt.allocPrint(
+            allocator,
+            "{s}/{s}",
+            .{ root, entry.path },
+        );
+        defer allocator.free(path);
+        const source = try readZigFileZ(allocator, path);
+        defer allocator.free(source);
+        if (std.mem.eql(u8, entry.path, "external_inbox_ledger.zig")) {
+            definitions += countOccurrences(source, definition_needle);
+            ledger_calls += countOccurrences(source, call_needle);
+        } else if (std.mem.eql(
+            u8,
+            entry.path,
+            "client_external_adoption.zig",
+        )) {
+            adoption_calls += countOccurrences(source, call_needle);
+        } else if (countOccurrences(source, definition_needle) != 0 or
+            countOccurrences(source, call_needle) != 0)
+        {
+            std.debug.print(
+                "deferred seed retirement boundary violation: {s}\n",
+                .{path},
+            );
+            return error.TestUnexpectedResult;
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 1), definitions);
+    try std.testing.expectEqual(@as(usize, 1), ledger_calls);
+    try std.testing.expectEqual(@as(usize, 1), adoption_calls);
+}
+
+fn countOccurrences(haystack: []const u8, needle: []const u8) usize {
+    var count: usize = 0;
+    var offset: usize = 0;
+    while (std.mem.indexOfPos(u8, haystack, offset, needle)) |found| {
+        count += 1;
+        offset = found + needle.len;
+    }
+    return count;
+}
+
 test "session host client pump policy imports only std" {
     const allocator = std.testing.allocator;
     const source = try readZigFileZ(

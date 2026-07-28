@@ -37,6 +37,35 @@ pub const PreparedTransfer = struct {
     cleanup_transferred_count: usize = 0,
 };
 
+const AggregateCleanupLifecycle = enum {
+    empty,
+    prepared,
+    consumed,
+};
+
+/// Callback-free, fixed-capacity snapshot of every descriptor later used by aggregate screen
+/// cleanup. Preparing this value is the last point at which cleanup may inspect shared heap
+/// descriptor elements; finishing it uses only these stack-owned headers.
+pub const PreparedAggregateScreenCleanup = struct {
+    allocator: std.mem.Allocator = std.heap.page_allocator,
+    copies: []client_mod.ExternalScreenCopy = &.{},
+    wrappers: []ledger_mod.OwnedPayload = &.{},
+    tokens: []ledger_mod.Token = &.{},
+    payloads: [ledger_mod.max_items][]u8 = [_][]u8{&.{}} ** ledger_mod.max_items,
+    payload_count: usize = 0,
+    has_transfer: bool = false,
+    committed_cleanup: bool = false,
+    lifecycle: AggregateCleanupLifecycle = .empty,
+
+    fn isEmpty(self: *const PreparedAggregateScreenCleanup) bool {
+        return self.lifecycle == .empty;
+    }
+};
+
+fn preparedTransfersEqual(a: PreparedTransfer, b: PreparedTransfer) bool {
+    return std.meta.eql(a, b);
+}
+
 const CommittedTakeLifecycle = enum {
     empty,
     prepared,
@@ -53,6 +82,11 @@ const CommittedScreenLifecycle = enum {
 const ScreenBackingAuthority = struct {
     allocator: std.mem.Allocator = std.heap.page_allocator,
     transfer: PreparedTransfer = .{},
+};
+
+const ScreenCleanupAuthority = struct {
+    allocator: std.mem.Allocator,
+    transfer: PreparedTransfer,
 };
 
 const ScreenBackingSeal = struct {
@@ -100,7 +134,7 @@ const LedgerFinishedPermit = struct {
 };
 
 /// Address-bound permission to retag one committed seed plan into its persistent destination.
-/// Preparation is fallible and runs before the ledger barrier; `commitIntoNoFail` only moves
+/// Preparation is fallible and runs before the ledger barrier; `commitIntoUnchecked` only moves
 /// already-sealed headers after `commitSeeds` succeeds.
 pub const PreparedCommittedScreenTake = struct {
     saved_self_addr: usize = 0,
@@ -112,7 +146,13 @@ pub const PreparedCommittedScreenTake = struct {
     target_stream: u64 = 0,
     tokens_addr: usize = 0,
     tokens_len: usize = 0,
+    allocator: std.mem.Allocator = std.heap.page_allocator,
+    commit_transfer: PreparedTransfer = .{},
     lifecycle: CommittedTakeLifecycle = .empty,
+
+    pub fn isEmpty(self: *const PreparedCommittedScreenTake) bool {
+        return self.lifecycle == .empty;
+    }
 
     pub fn validate(
         self: *const PreparedCommittedScreenTake,
@@ -182,7 +222,110 @@ pub const PreparedCommittedScreenTake = struct {
             return false;
         const transfer = source.transfer orelse return false;
         return self.tokens_addr == sliceAddress(ledger_mod.Token, transfer.tokens) and
-            self.tokens_len == transfer.tokens.len;
+            self.tokens_len == transfer.tokens.len and
+            std.meta.eql(self.allocator, source.allocator) and
+            preparedTransfersEqual(self.commit_transfer, transfer);
+    }
+
+    /// Proves only the outer allocation descriptors captured by the independent take.
+    ///
+    /// This check intentionally does not iterate `transfer.copies`: the caller uses it as the
+    /// memory-safety gate before any aggregate cross-owner proof may dereference that slice.
+    /// Full semantic validation still happens later when minting the commit permit.
+    pub fn validateOuterTransferDescriptors(
+        self: *const PreparedCommittedScreenTake,
+        source: *const PreparedScreenBacklog,
+    ) bool {
+        if (self.lifecycle != .prepared or
+            self.saved_self_addr != @intFromPtr(self) or
+            self.source_addr != @intFromPtr(source) or
+            source.lifecycle != .prepared or
+            source.saved_self_address != @intFromPtr(source) or
+            !std.meta.eql(self.allocator, source.allocator) or
+            !std.meta.eql(self.allocator, source.cleanup_allocator) or
+            source.allocator_ptr_addr != @intFromPtr(self.allocator.ptr) or
+            source.allocator_vtable_addr != @intFromPtr(self.allocator.vtable))
+            return false;
+        const transfer = source.transfer orelse return false;
+        const cleanup_transfer = source.cleanup_transfer orelse return false;
+        if (!preparedTransfersEqual(self.commit_transfer, transfer) or
+            !preparedTransfersEqual(self.commit_transfer, cleanup_transfer) or
+            transfer.copies.len > ledger_mod.max_items or
+            transfer.wrappers.len != transfer.copies.len or
+            transfer.tokens.len != transfer.copies.len or
+            transfer.copies_addr !=
+                sliceAddress(client_mod.ExternalScreenCopy, transfer.copies) or
+            transfer.copies_len != transfer.copies.len or
+            transfer.wrappers_addr !=
+                sliceAddress(ledger_mod.OwnedPayload, transfer.wrappers) or
+            transfer.wrappers_len != transfer.wrappers.len or
+            transfer.tokens_addr != sliceAddress(ledger_mod.Token, transfer.tokens) or
+            transfer.tokens_len != transfer.tokens.len or
+            !sameSlice(
+                client_mod.ExternalScreenCopy,
+                transfer.copies,
+                transfer.cleanup_copies,
+            ) or
+            !sameSlice(
+                ledger_mod.OwnedPayload,
+                transfer.wrappers,
+                transfer.cleanup_wrappers,
+            ) or
+            !sameSlice(
+                ledger_mod.Token,
+                transfer.tokens,
+                transfer.cleanup_tokens,
+            ) or
+            transfer.cleanup_transferred_count != transfer.copies.len)
+            return false;
+        const copies_bytes = std.math.mul(
+            usize,
+            transfer.copies.len,
+            @sizeOf(client_mod.ExternalScreenCopy),
+        ) catch return false;
+        const wrappers_bytes = std.math.mul(
+            usize,
+            transfer.wrappers.len,
+            @sizeOf(ledger_mod.OwnedPayload),
+        ) catch return false;
+        const tokens_bytes = std.math.mul(
+            usize,
+            transfer.tokens.len,
+            @sizeOf(ledger_mod.Token),
+        ) catch return false;
+        return !rangesOverlap(
+            transfer.copies_addr,
+            copies_bytes,
+            transfer.wrappers_addr,
+            wrappers_bytes,
+        ) and !rangesOverlap(
+            transfer.copies_addr,
+            copies_bytes,
+            transfer.tokens_addr,
+            tokens_bytes,
+        ) and !rangesOverlap(
+            transfer.wrappers_addr,
+            wrappers_bytes,
+            transfer.tokens_addr,
+            tokens_bytes,
+        );
+    }
+
+    /// Returns the third, independently captured cleanup authority without inspecting any nested
+    /// screen element. Aggregate teardown uses this copy to avoid treating two fields inside one
+    /// corrupted transfer as independent votes.
+    fn cleanupAuthority(
+        self: *const PreparedCommittedScreenTake,
+        source: *const PreparedScreenBacklog,
+    ) ?ScreenCleanupAuthority {
+        if (self.lifecycle != .prepared or
+            self.saved_self_addr != @intFromPtr(self) or
+            self.source_addr != @intFromPtr(source))
+            return null;
+        return .{
+            .allocator = self.allocator,
+            .transfer = self.commit_transfer,
+        };
     }
 
     pub fn abort(self: *PreparedCommittedScreenTake) void {
@@ -190,6 +333,10 @@ pub const PreparedCommittedScreenTake = struct {
             self.saved_self_addr != @intFromPtr(self))
             return;
         self.* = .{ .lifecycle = .aborted_tombstone };
+    }
+
+    pub fn lifecycleCode(self: *const PreparedCommittedScreenTake) u8 {
+        return @intFromEnum(self.lifecycle);
     }
 };
 
@@ -574,6 +721,14 @@ pub const PreparedScreenBacklog = struct {
         return if (self.inventory) |inventory| inventory.target_stream else null;
     }
 
+    pub fn overlapsOwnedBacking(
+        self: *const PreparedScreenBacklog,
+        address: usize,
+        len: usize,
+    ) bool {
+        return rangeOverlapsPreparedBacking(address, len, self);
+    }
+
     pub fn prepareCommittedTake(
         self: *PreparedScreenBacklog,
         out: *PreparedCommittedScreenTake,
@@ -629,7 +784,7 @@ pub const PreparedScreenBacklog = struct {
             @sizeOf(ledger_mod.ExternalInboxLedger),
         ))
             return error.InvalidAddress;
-        if (!std.meta.eql(out.*, PreparedCommittedScreenTake{}) or
+        if (!out.isEmpty() or
             !self.validate(client, ledger) or
             !destination.isEmpty())
             return error.InvalidAddress;
@@ -644,6 +799,8 @@ pub const PreparedScreenBacklog = struct {
             .target_stream = self.targetStream() orelse return error.InvalidAddress,
             .tokens_addr = sliceAddress(ledger_mod.Token, transfer.tokens),
             .tokens_len = transfer.tokens.len,
+            .allocator = self.allocator,
+            .commit_transfer = transfer,
             .lifecycle = .prepared,
         };
         if (!out.validate(self, destination, client, ledger, stable_parent)) {
@@ -653,15 +810,19 @@ pub const PreparedScreenBacklog = struct {
     }
 
     /// No allocation, callback, validation or error return is permitted here. The outer final
-    /// seal revalidates `take` immediately before the ledger barrier.
-    pub fn commitIntoNoFail(
+    /// seal revalidates `take` immediately before the ledger barrier. The public visibility exists
+    /// only for the permit-consuming pump aggregate; it is not an independently safe commit API.
+    pub fn commitIntoUnchecked(
         self: *PreparedScreenBacklog,
         take: *PreparedCommittedScreenTake,
         destination: *CommittedScreenBacklog,
     ) void {
         const target_stream = take.target_stream;
         const retained_count = take.tokens_len;
-        const primary = screenBackingAuthorityFromPrepared(self);
+        const primary = ScreenBackingAuthority{
+            .allocator = take.allocator,
+            .transfer = take.commit_transfer,
+        };
         const cleanup = primary;
         destination.* = .{
             .saved_self_addr = @intFromPtr(destination),
@@ -703,15 +864,17 @@ pub const PreparedScreenBacklog = struct {
         self: *PreparedScreenBacklog,
         client: *const client_mod.Client,
         ledger: *ledger_mod.ExternalInboxLedger,
+        retirement: *ledger_mod.PreparedSeedRetirement,
     ) ledger_mod.CommitError!void {
         if (!self.validate(client, ledger) or
             !client.validateSealedExternalAdoptionPlan(&self.client_disarm))
             return error.InvalidPlan;
         const transfer = if (self.transfer) |*value| value else return error.InvalidPlan;
-        try ledger.commitSeeds(
+        try ledger.commitSeedsDeferredRetirement(
             &self.seed_plan,
             transfer.wrappers,
             transfer.tokens,
+            retirement,
         );
         for (transfer.copies) |*copy| {
             copy.bytes = &.{};
@@ -724,49 +887,213 @@ pub const PreparedScreenBacklog = struct {
     }
 
     pub fn deinit(self: *PreparedScreenBacklog) void {
-        if (self.saved_self_address != 0 and self.saved_self_address != @intFromPtr(self)) return;
-        const committed_cleanup = self.seed_plan.isCommitted();
-        if (self.transfer orelse self.cleanup_transfer) |transfer_value| {
-            const transfer = transfer_value;
-            const cleanup = transfer;
-            self.seed_plan.deinit();
-            const allocator = self.canonicalCleanupAllocator() orelse return;
-            const copies = canonicalSlice(
+        var cleanup: PreparedAggregateScreenCleanup = .{};
+        if (self.prepareCleanupPlan(null, null, &cleanup))
+            self.finishCleanupPlan(&cleanup)
+        else
+            self.abandonPreparedCleanup();
+    }
+
+    /// Owner-local fixture helper. Product aggregate cleanup must use the gated snapshot,
+    /// prepare, and finish seams so sibling callbacks cannot precede descriptor freezing.
+    fn deinitForAggregate(
+        self: *PreparedScreenBacklog,
+        take: *const PreparedCommittedScreenTake,
+        client_allocator: std.mem.Allocator,
+    ) void {
+        var cleanup: PreparedAggregateScreenCleanup = .{};
+        if (self.prepareCleanupPlan(
+            take.cleanupAuthority(self),
+            client_allocator,
+            &cleanup,
+        ))
+            self.finishCleanupPlan(&cleanup)
+        else
+            self.abandonPreparedCleanup();
+    }
+
+    /// Freezes all nested payload and container descriptors without allocation or callback. The
+    /// aggregate must call this before cleaning any sibling owner that can invoke an allocator.
+    pub fn prepareAggregateCleanup(
+        self: *PreparedScreenBacklog,
+        take: *const PreparedCommittedScreenTake,
+        client_allocator: std.mem.Allocator,
+        out: *PreparedAggregateScreenCleanup,
+    ) bool {
+        return self.prepareCleanupPlan(
+            take.cleanupAuthority(self),
+            client_allocator,
+            out,
+        );
+    }
+
+    /// Consumes a previously frozen cleanup plan. No descriptor inside the shared copy/wrapper
+    /// allocations is read after this function begins.
+    pub fn finishAggregateCleanup(
+        self: *PreparedScreenBacklog,
+        cleanup: *PreparedAggregateScreenCleanup,
+    ) void {
+        self.finishCleanupPlan(cleanup);
+    }
+
+    /// Moves every screen cleanup authority into stack-owned snapshots before the aggregate runs
+    /// its first allocator callback. The original fields are tombstoned first, so callbacks that
+    /// retain the pump address cannot rewrite the evidence later consumed by cleanup.
+    pub fn moveIntoAggregateCleanupSnapshot(
+        self: *PreparedScreenBacklog,
+        take: *PreparedCommittedScreenTake,
+        out_backlog: *PreparedScreenBacklog,
+        out_take: *PreparedCommittedScreenTake,
+    ) bool {
+        if (self.saved_self_address != @intFromPtr(self) or
+            !std.meta.eql(out_backlog.*, PreparedScreenBacklog{}) or
+            !out_take.isEmpty())
+            return false;
+        const source_addr = @intFromPtr(self);
+        const seed_addr = @intFromPtr(&self.seed_plan);
+        const disarm_addr = @intFromPtr(&self.client_disarm);
+        out_backlog.* = self.*;
+        out_take.* = take.*;
+        self.* = .{ .lifecycle = .aborted };
+        take.* = .{ .lifecycle = .aborted_tombstone };
+
+        out_backlog.saved_self_address = @intFromPtr(out_backlog);
+        if (out_backlog.seed_plan.saved_self_addr == seed_addr)
+            out_backlog.seed_plan.saved_self_addr =
+                @intFromPtr(&out_backlog.seed_plan);
+        if (out_backlog.client_disarm.saved_self_address == disarm_addr)
+            out_backlog.client_disarm.saved_self_address =
+                @intFromPtr(&out_backlog.client_disarm);
+        if (out_take.saved_self_addr != 0)
+            out_take.saved_self_addr = @intFromPtr(out_take);
+        if (out_take.source_addr == source_addr)
+            out_take.source_addr = @intFromPtr(out_backlog);
+        return true;
+    }
+
+    /// Corruption-only fallback when an address-bound snapshot cannot be formed. No allocator is
+    /// called and the untrusted graph is deliberately abandoned before another owner can callback.
+    pub fn abandonAggregateCleanup(
+        self: *PreparedScreenBacklog,
+        take: *PreparedCommittedScreenTake,
+    ) void {
+        self.* = .{ .lifecycle = .aborted };
+        take.* = .{ .lifecycle = .aborted_tombstone };
+    }
+
+    fn prepareCleanupPlan(
+        self: *PreparedScreenBacklog,
+        maybe_authority: ?ScreenCleanupAuthority,
+        client_allocator: ?std.mem.Allocator,
+        out: *PreparedAggregateScreenCleanup,
+    ) bool {
+        if (!out.isEmpty() or
+            (self.saved_self_address != 0 and
+                self.saved_self_address != @intFromPtr(self)))
+            return false;
+        var prepared: PreparedAggregateScreenCleanup = .{
+            .committed_cleanup = self.seed_plan.isCommitted(),
+            .lifecycle = .prepared,
+        };
+        if (self.transfer != null or self.cleanup_transfer != null) {
+            const authority_transfer = if (maybe_authority) |authority|
+                authority.transfer
+            else
+                null;
+            const allow_single_incomplete = self.lifecycle != .prepared and
+                self.cleanup_transfer == null and maybe_authority == null;
+            prepared.allocator = self.canonicalCleanupAllocator(
+                maybe_authority,
+                client_allocator,
+            ) orelse {
+                if (allow_single_incomplete) {
+                    out.* = prepared;
+                    return true;
+                }
+                return false;
+            };
+            prepared.copies = canonicalTransferSlice(
                 client_mod.ExternalScreenCopy,
-                transfer.copies,
-                cleanup.cleanup_copies,
-                cleanup.copies_addr,
-                cleanup.copies_len,
-            ) orelse return;
-            const wrappers = canonicalSlice(
+                "copies",
+                "cleanup_copies",
+                "copies_addr",
+                "copies_len",
+                self.transfer,
+                self.cleanup_transfer,
+                authority_transfer,
+                allow_single_incomplete,
+            ) orelse {
+                if (allow_single_incomplete) {
+                    out.* = prepared;
+                    return true;
+                }
+                return false;
+            };
+            prepared.wrappers = canonicalTransferSlice(
                 ledger_mod.OwnedPayload,
-                transfer.wrappers,
-                cleanup.cleanup_wrappers,
-                cleanup.wrappers_addr,
-                cleanup.wrappers_len,
-            ) orelse return;
-            const tokens = canonicalSlice(
+                "wrappers",
+                "cleanup_wrappers",
+                "wrappers_addr",
+                "wrappers_len",
+                self.transfer,
+                self.cleanup_transfer,
+                authority_transfer,
+                allow_single_incomplete,
+            ) orelse {
+                if (allow_single_incomplete) {
+                    out.* = prepared;
+                    return true;
+                }
+                return false;
+            };
+            prepared.tokens = canonicalTransferSlice(
                 ledger_mod.Token,
-                transfer.tokens,
-                cleanup.cleanup_tokens,
-                cleanup.tokens_addr,
-                cleanup.tokens_len,
-            ) orelse return;
-            for (copies, 0..) |copy, index| {
-                _ = cleanupPayload(
+                "tokens",
+                "cleanup_tokens",
+                "tokens_addr",
+                "tokens_len",
+                self.transfer,
+                self.cleanup_transfer,
+                authority_transfer,
+                allow_single_incomplete,
+            ) orelse {
+                if (allow_single_incomplete) {
+                    out.* = prepared;
+                    return true;
+                }
+                return false;
+            };
+            if (prepared.copies.len > prepared.payloads.len) return false;
+            for (prepared.copies, 0..) |copy, index| {
+                prepared.payloads[index] = cleanupPayload(
                     copy,
-                    if (index < wrappers.len) wrappers[index] else null,
-                ) orelse return;
+                    if (index < prepared.wrappers.len)
+                        prepared.wrappers[index]
+                    else
+                        null,
+                ) orelse return false;
             }
-            for (copies, 0..) |copy, index| {
-                allocator.free(cleanupPayload(
-                    copy,
-                    if (index < wrappers.len) wrappers[index] else null,
-                ) orelse unreachable);
-            }
-            allocator.free(tokens);
-            allocator.free(wrappers);
-            allocator.free(copies);
+            prepared.payload_count = prepared.copies.len;
+            prepared.has_transfer = true;
+        }
+        out.* = prepared;
+        return true;
+    }
+
+    fn finishCleanupPlan(
+        self: *PreparedScreenBacklog,
+        cleanup: *PreparedAggregateScreenCleanup,
+    ) void {
+        if (cleanup.lifecycle != .prepared) return;
+        const committed_cleanup = cleanup.committed_cleanup;
+        if (cleanup.has_transfer) {
+            // From this callback onward cleanup must not inspect copies/wrappers elements again.
+            self.seed_plan.deinit();
+            for (cleanup.payloads[0..cleanup.payload_count]) |payload|
+                cleanup.allocator.free(payload);
+            cleanup.allocator.free(cleanup.tokens);
+            cleanup.allocator.free(cleanup.wrappers);
+            cleanup.allocator.free(cleanup.copies);
         }
         self.client_disarm.deinit();
         if (self.inventory orelse self.cleanup_inventory) |inventory_value| {
@@ -780,21 +1107,51 @@ pub const PreparedScreenBacklog = struct {
         self.lifecycle = if (committed_cleanup) .committed else .aborted;
         self.adoption_metadata_resident_bytes = 0;
         self.adoption_metadata_prepare_peak_bytes = 0;
+        cleanup.* = .{ .lifecycle = .consumed };
     }
 
-    fn canonicalCleanupAllocator(self: *const PreparedScreenBacklog) ?std.mem.Allocator {
-        if (std.meta.eql(self.allocator, self.cleanup_allocator))
-            return self.allocator;
-        if (allocatorMatchesSeal(
+    fn abandonPreparedCleanup(self: *PreparedScreenBacklog) void {
+        self.inventory = null;
+        self.cleanup_inventory = null;
+        self.transfer = null;
+        self.cleanup_transfer = null;
+        self.lifecycle = .aborted;
+        self.adoption_metadata_resident_bytes = 0;
+        self.adoption_metadata_prepare_peak_bytes = 0;
+    }
+
+    fn canonicalCleanupAllocator(
+        self: *const PreparedScreenBacklog,
+        maybe_authority: ?ScreenCleanupAuthority,
+        client_allocator: ?std.mem.Allocator,
+    ) ?std.mem.Allocator {
+        const backlog_candidate = if (allocatorMatchesSeal(
             self.allocator,
             self.allocator_ptr_addr,
             self.allocator_vtable_addr,
-        )) return self.allocator;
-        if (allocatorMatchesSeal(
+        ))
+            self.allocator
+        else if (allocatorMatchesSeal(
             self.cleanup_allocator,
             self.allocator_ptr_addr,
             self.allocator_vtable_addr,
-        )) return self.cleanup_allocator;
+        ))
+            self.cleanup_allocator
+        else
+            null;
+        const take_candidate = if (maybe_authority) |authority|
+            authority.allocator
+        else
+            null;
+        if (majorityAllocator(
+            backlog_candidate,
+            take_candidate,
+            client_allocator,
+        )) |allocator| return allocator;
+        // During fallible standalone construction no aggregate/take exists yet. The address-bound
+        // allocator seal is then the only available authority and is sufficient for rollback.
+        if (maybe_authority == null and client_allocator == null)
+            return backlog_candidate;
         return null;
     }
 };
@@ -1111,11 +1468,151 @@ fn canonicalSlice(
     sealed_addr: usize,
     sealed_len: usize,
 ) ?[]T {
-    if (sameSlice(T, primary, cleanup)) return primary;
     if (sliceAddress(T, primary) == sealed_addr and primary.len == sealed_len)
         return primary;
     if (sliceAddress(T, cleanup) == sealed_addr and cleanup.len == sealed_len)
         return cleanup;
+    return null;
+}
+
+fn SliceAuthority(comptime T: type) type {
+    return struct {
+        primary: []T,
+        cleanup: []T,
+        sealed_addr: usize,
+        sealed_len: usize,
+    };
+}
+
+const SliceDescriptor = struct {
+    addr: usize,
+    len: usize,
+};
+
+fn canonicalTransferSlice(
+    comptime T: type,
+    comptime primary_field: []const u8,
+    comptime cleanup_field: []const u8,
+    comptime addr_field: []const u8,
+    comptime len_field: []const u8,
+    primary_transfer: ?PreparedTransfer,
+    cleanup_transfer: ?PreparedTransfer,
+    take_transfer: ?PreparedTransfer,
+    allow_single_incomplete: bool,
+) ?[]T {
+    const authorities = [3]?SliceAuthority(T){
+        transferSliceAuthority(
+            T,
+            primary_transfer,
+            primary_field,
+            cleanup_field,
+            addr_field,
+            len_field,
+        ),
+        transferSliceAuthority(
+            T,
+            cleanup_transfer,
+            primary_field,
+            cleanup_field,
+            addr_field,
+            len_field,
+        ),
+        transferSliceAuthority(
+            T,
+            take_transfer,
+            primary_field,
+            cleanup_field,
+            addr_field,
+            len_field,
+        ),
+    };
+    if (allow_single_incomplete) {
+        const authority = authorities[0] orelse return null;
+        const descriptor = sliceAuthorityVote(T, authority) orelse return null;
+        return sliceMatchingDescriptor(T, authority, descriptor);
+    }
+    const descriptor = majoritySliceDescriptor(T, authorities) orelse return null;
+    for (authorities) |maybe_authority| {
+        const authority = maybe_authority orelse continue;
+        if (sliceMatchingDescriptor(T, authority, descriptor)) |slice|
+            return slice;
+    }
+    return null;
+}
+
+fn transferSliceAuthority(
+    comptime T: type,
+    transfer: ?PreparedTransfer,
+    comptime primary_field: []const u8,
+    comptime cleanup_field: []const u8,
+    comptime addr_field: []const u8,
+    comptime len_field: []const u8,
+) ?SliceAuthority(T) {
+    const value = transfer orelse return null;
+    return .{
+        .primary = @field(value, primary_field),
+        .cleanup = @field(value, cleanup_field),
+        .sealed_addr = @field(value, addr_field),
+        .sealed_len = @field(value, len_field),
+    };
+}
+
+fn sliceAuthorityVote(
+    comptime T: type,
+    authority: SliceAuthority(T),
+) ?SliceDescriptor {
+    const descriptor = SliceDescriptor{
+        .addr = if (authority.sealed_len == 0) 0 else authority.sealed_addr,
+        .len = authority.sealed_len,
+    };
+    if (sliceMatchingDescriptor(T, authority, descriptor) == null) return null;
+    return descriptor;
+}
+
+fn majoritySliceDescriptor(
+    comptime T: type,
+    authorities: [3]?SliceAuthority(T),
+) ?SliceDescriptor {
+    const first = if (authorities[0]) |authority|
+        sliceAuthorityVote(T, authority)
+    else
+        null;
+    const second = if (authorities[1]) |authority|
+        sliceAuthorityVote(T, authority)
+    else
+        null;
+    const third = if (authorities[2]) |authority|
+        sliceAuthorityVote(T, authority)
+    else
+        null;
+    if (first != null and second != null and
+        std.meta.eql(first.?, second.?))
+        return first;
+    if (first != null and third != null and
+        std.meta.eql(first.?, third.?))
+        return first;
+    if (second != null and third != null and
+        std.meta.eql(second.?, third.?))
+        return second;
+    return null;
+}
+
+fn sliceMatchingDescriptor(
+    comptime T: type,
+    authority: SliceAuthority(T),
+    descriptor: SliceDescriptor,
+) ?[]T {
+    if (descriptor.len == 0) {
+        if (authority.primary.len == 0) return authority.primary;
+        if (authority.cleanup.len == 0) return authority.cleanup;
+        return null;
+    }
+    if (sliceAddress(T, authority.primary) == descriptor.addr and
+        authority.primary.len == descriptor.len)
+        return authority.primary;
+    if (sliceAddress(T, authority.cleanup) == descriptor.addr and
+        authority.cleanup.len == descriptor.len)
+        return authority.cleanup;
     return null;
 }
 
@@ -1142,6 +1639,23 @@ fn allocatorMatchesSeal(
 ) bool {
     return @intFromPtr(allocator.ptr) == ptr_addr and
         @intFromPtr(allocator.vtable) == vtable_addr;
+}
+
+fn majorityAllocator(
+    first: ?std.mem.Allocator,
+    second: ?std.mem.Allocator,
+    third: ?std.mem.Allocator,
+) ?std.mem.Allocator {
+    if (first != null and second != null and
+        std.meta.eql(first.?, second.?))
+        return first;
+    if (first != null and third != null and
+        std.meta.eql(first.?, third.?))
+        return first;
+    if (second != null and third != null and
+        std.meta.eql(second.?, third.?))
+        return second;
+    return null;
 }
 
 fn ledgerSemantic(source: client_mod.ExternalScreenSemantic) ledger_mod.PayloadSemantic {
@@ -1342,6 +1856,16 @@ test "prepared external adoption binds final address and exact screen seed" {
         &prepared_ledger,
         7,
     );
+    var committed_destination: CommittedScreenBacklog = .{};
+    var cleanup_take: PreparedCommittedScreenTake = .{};
+    var stable_parent: u8 = 0;
+    try prepared.prepareCommittedTake(
+        &cleanup_take,
+        &committed_destination,
+        &fixture.client,
+        &prepared_ledger,
+        &stable_parent,
+    );
     try std.testing.expectEqual(Lifecycle.prepared, prepared.lifecycle);
     try std.testing.expect(prepared.transfer != null);
     try std.testing.expectEqual(@as(usize, 1), prepared.transfer.?.wrappers.len);
@@ -1400,7 +1924,7 @@ test "prepared external adoption binds final address and exact screen seed" {
     prepared.cleanup_transfer.?.cleanup_wrappers = &.{};
     prepared.cleanup_transfer.?.wrappers_addr = 0;
     prepared.cleanup_transfer.?.wrappers_len = 0;
-    prepared.deinit();
+    prepared.deinitForAggregate(&cleanup_take, std.testing.allocator);
     prepared.deinit();
     try std.testing.expectEqual(Lifecycle.aborted, prepared.lifecycle);
 }
@@ -1427,6 +1951,16 @@ test "prepared external adoption cleanup uses sealed owners after persistent fie
         &prepared_ledger,
         7,
     );
+    var committed_destination: CommittedScreenBacklog = .{};
+    var cleanup_take: PreparedCommittedScreenTake = .{};
+    var stable_parent: u8 = 0;
+    try prepared.prepareCommittedTake(
+        &cleanup_take,
+        &committed_destination,
+        &fixture.client,
+        &prepared_ledger,
+        &stable_parent,
+    );
 
     prepared.transfer.?.copies = &.{};
     prepared.transfer.?.wrappers = &.{};
@@ -1445,7 +1979,7 @@ test "prepared external adoption cleanup uses sealed owners after persistent fie
     prepared.client_disarm.inventory = null;
     prepared.cleanup_transfer.?.cleanup_transferred_count = std.math.maxInt(usize);
     try std.testing.expect(!prepared.validate(&fixture.client, &prepared_ledger));
-    prepared.deinit();
+    prepared.deinitForAggregate(&cleanup_take, allocator);
     prepared.deinit();
     try std.testing.expectEqual(Lifecycle.aborted, prepared.lifecycle);
 }
@@ -1473,13 +2007,24 @@ test "prepared external adoption transfers payload cleanup authority to the ledg
         7,
     );
 
+    var seed_retirement: ledger_mod.PreparedSeedRetirement = .{};
     try std.testing.expectError(
         error.InvalidPlan,
-        prepared.commitScreenSeeds(&fixture.client, &ledger),
+        prepared.commitScreenSeeds(
+            &fixture.client,
+            &ledger,
+            &seed_retirement,
+        ),
     );
+    try std.testing.expect(seed_retirement.isEmpty());
     try std.testing.expect(ledger.accountingView().pristine_zero);
     try fixture.client.sealExternalAdoption(&prepared.client_disarm);
-    try prepared.commitScreenSeeds(&fixture.client, &ledger);
+    try prepared.commitScreenSeeds(
+        &fixture.client,
+        &ledger,
+        &seed_retirement,
+    );
+    seed_retirement.retire();
     const token = prepared.transfer.?.tokens[0];
     fixture.client.commitExternalAdoption(&prepared.client_disarm);
     const borrowed = try ledger.borrow(token, .completed);
@@ -1637,11 +2182,17 @@ test "c3c-2b1 committed screen destination is final-address bound and moves with
     const resident_before = prepared.adoption_metadata_resident_bytes;
     const peak_before = prepared.adoption_metadata_prepare_peak_bytes;
     const target_before = prepared.targetStream();
-    try prepared.commitScreenSeeds(&fixture.client, &ledger);
+    var seed_retirement: ledger_mod.PreparedSeedRetirement = .{};
+    try prepared.commitScreenSeeds(
+        &fixture.client,
+        &ledger,
+        &seed_retirement,
+    );
     const ledger_token = prepared.transfer.?.tokens[0];
     const deallocations_before_take = counting.free_calls;
-    prepared.commitIntoNoFail(&take, &committed);
+    prepared.commitIntoUnchecked(&take, &committed);
     try std.testing.expectEqual(deallocations_before_take, counting.free_calls);
+    seed_retirement.retire();
     try std.testing.expectEqual(@as(usize, 1), committed.retained_count);
     try std.testing.expectEqual(@as(u64, 7), committed.target_stream);
     try std.testing.expectEqual(Lifecycle.committed, prepared.lifecycle);

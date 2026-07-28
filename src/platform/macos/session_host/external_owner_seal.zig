@@ -38,6 +38,12 @@ pub const Writer = struct {
         self.hasher.update(&bytes);
     }
 
+    pub fn writeU128(self: *Writer, value: u128) void {
+        var bytes: [16]u8 = undefined;
+        std.mem.writeInt(u128, &bytes, value, .little);
+        self.hasher.update(&bytes);
+    }
+
     pub fn writeUsize(self: *Writer, value: usize) void {
         if (@bitSizeOf(usize) == 64) {
             self.writeU64(@intCast(value));
@@ -46,6 +52,11 @@ pub const Writer = struct {
             std.mem.writeInt(u32, &bytes, @intCast(value), .little);
             self.hasher.update(&bytes);
         }
+    }
+
+    pub fn writeBytes(self: *Writer, value: []const u8) void {
+        self.writeUsize(value.len);
+        self.hasher.update(value);
     }
 
     pub fn finish(self: *Writer) Digest {

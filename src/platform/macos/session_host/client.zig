@@ -742,7 +742,7 @@ comptime {
 /// Final-address owner prepared before the ledger commit barrier.
 ///
 /// `.prepared` contains only non-owning mirrors of the Client queues and sealed disarm inventory.
-/// `commitExternalAdoptionTakeNoFail` changes the tag and tombstones the source headers without
+/// `commitExternalAdoptionTakeUnchecked` changes the tag and tombstones the source headers without
 /// allocating or freeing. Only `.committed` cleanup owns and releases the captured allocations.
 pub const ExternalAdoptionTake = struct {
     saved_self_address: usize = 0,
@@ -773,6 +773,10 @@ pub const ExternalAdoptionTake = struct {
     inventory_backing_seal: [32]u8 = [_]u8{0} ** 32,
     cleanup_inventory_backing_seal: [32]u8 = [_]u8{0} ** 32,
     lifecycle: ExternalAdoptionTakeLifecycle = .empty,
+
+    pub fn isEmpty(self: *const ExternalAdoptionTake) bool {
+        return self.lifecycle == .empty;
+    }
 
     pub fn validate(
         self: *const ExternalAdoptionTake,
@@ -871,6 +875,14 @@ pub const ExternalAdoptionTake = struct {
     pub fn isCommitted(self: *const ExternalAdoptionTake) bool {
         return self.lifecycle == .committed and
             self.saved_self_address == @intFromPtr(self);
+    }
+
+    pub fn requiresTypedCleanup(self: *const ExternalAdoptionTake) bool {
+        return self.lifecycle == .committed;
+    }
+
+    pub fn lifecycleCode(self: *const ExternalAdoptionTake) u8 {
+        return @intFromEnum(self.lifecycle);
     }
 
     pub fn deinit(self: *ExternalAdoptionTake) void {
@@ -4425,21 +4437,19 @@ pub const Client = struct {
     }
 
     /// Final no-callback suffix after the ledger accepted every screen seed. All heap owners move
-    /// by header; cleanup is deferred to the committed take owner.
-    pub fn commitExternalAdoptionTakeNoFail(
+    /// by header; cleanup is deferred to the committed take owner. This is public only across the
+    /// session-host module boundary and must be called by `ExternalPumpStorage` after it consumes
+    /// an `AdoptedCommitPermit`; ordinary callers use the checked preparation/validation APIs.
+    pub fn commitExternalAdoptionTakeUnchecked(
         self: *Client,
         plan: *PreparedClientDisarm,
         mirror_owner: *?ExternalAdoptionInventory,
         mirror_cleanup_owner: *?ExternalAdoptionInventory,
         take: *ExternalAdoptionTake,
     ) void {
-        if (!take.validate(
-            self,
-            plan,
-            mirror_owner,
-            mirror_cleanup_owner,
-        ))
-            @panic("invalid sealed external adoption take");
+        // The aggregate commit permit validates every descriptor immediately before the ledger
+        // barrier. Re-validating here would leave a panic branch after payload ownership has
+        // already moved to the ledger, where rollback is no longer possible.
         take.lifecycle = .committed;
         self.pending_batches = .empty;
         self.pending_batch_bytes = 0;
@@ -9313,7 +9323,7 @@ test "external adoption typed take moves queue owners without allocator callback
     ));
 
     const free_calls_before_commit = counting.free_calls;
-    client.commitExternalAdoptionTakeNoFail(
+    client.commitExternalAdoptionTakeUnchecked(
         &plan,
         &mirror_owner,
         &mirror_cleanup_owner,
@@ -9530,7 +9540,7 @@ test "external adoption cleanup scratch freezes every descriptor past old chunk 
         &mirror_cleanup_owner,
         &take,
     );
-    client.commitExternalAdoptionTakeNoFail(
+    client.commitExternalAdoptionTakeUnchecked(
         &plan,
         &mirror_owner,
         &mirror_cleanup_owner,
@@ -9583,7 +9593,7 @@ test "external adoption cleanup scratch aliases fail closed before memcpy" {
             &mirror_cleanup_owner,
             &take,
         );
-        client.commitExternalAdoptionTakeNoFail(
+        client.commitExternalAdoptionTakeUnchecked(
             &plan,
             &mirror_owner,
             &mirror_cleanup_owner,

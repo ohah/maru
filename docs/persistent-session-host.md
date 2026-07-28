@@ -3352,6 +3352,14 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
               `validateExternalAdoptionSourceEligibility` → 새 descriptor-first alias gate →
               `validateExternalAdoptionSourceQueues` 두 subleaf를 조합한다. 이 전제 슬라이스는 그 alias gate나 source
               seal/fold 완료를 뜻하지 않는다.
+              **Transcript primitive 구현:** std-only `client_source_transcript.Writer`는 네 v1 domain의 trailing
+              NUL, 고정 폭 little-endian 정수, bool/presence/tag, `u64` length-prefixed bytes와 canonical
+              `{address,len,capacity}`를 SHA-256 transcript로 고정한다. impossible descriptor와 `usize→u64`
+              overflow는 typed error이며 caller가 넘긴 element size로 `capacity*element_size`와 range end도 checked
+              검증하고 empty storage address는 0으로 canonicalize한다. exact byte transcript와
+              frozen digest, absent/empty·item boundary·domain·len/cap 분리를 unit/boundary fixture로 고정한다.
+              이 leaf는 Client/protocol/schema field order를 알지 못하며 `ClientSourceSealSchema.v1` adapter와
+              field allowlist는 후속 source-seal 슬라이스 책임이다.
               c3b는 pure reducer → Client fold/source seal → outer decision → adopted-only fingerprint/metadata
               materialization 순서로 착륙한다. 이는 PR 분할일 뿐 완료 조건 분할이 아니며, c3b 동안 Client mutation,
               storage publish, terminal/recovery commit은 하지 않고 c3c combined commit에 남긴다. 기존

@@ -118,6 +118,9 @@ pub const client_pump = @import("session_host/client_pump.zig");
 // runtime_event_reducer(P5c3c-2b2c3-c3b)는 이미 common wire/classifier를 통과한 inherited
 // event FIFO를 allocation/ownership 없이 fold한다. Client·ledger·pump lifecycle은 import하지 않는다.
 pub const runtime_event_reducer = @import("session_host/runtime_event_reducer.zig");
+// client_source_transcript(P5c3c-2b2c3-c3b)는 Client/protocol 의미를 모르는 std-only
+// domain-separated byte encoder다. schema field order는 후속 Client adapter가 명시적으로 소유한다.
+pub const client_source_transcript = @import("session_host/client_source_transcript.zig");
 // attach_phase_deadline(P5c3c-1b)는 public attach의 네 pre-raw phase label과 client_deadline의
 // non-resettable absolute deadline만 결합한다. parser/resolver와 Client transport는 phase enum을 모른다.
 pub const attach_phase_deadline = if (builtin.os.tag == .macos)

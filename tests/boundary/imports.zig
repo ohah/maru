@@ -370,6 +370,33 @@ test "session host runtime event wire stays below framing and product ownership"
     );
 }
 
+test "session host source transcript encoder imports only std" {
+    const allocator = std.testing.allocator;
+    const source = try readZigFileZ(
+        allocator,
+        "src/platform/macos/session_host/client_source_transcript.zig",
+    );
+    defer allocator.free(source);
+
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        std.mem.count(u8, source, "@import("),
+    );
+    try std.testing.expect(
+        std.mem.indexOf(u8, source, "@import(\"std\")") != null,
+    );
+    inline for (.{
+        "client.zig",
+        "protocol.zig",
+        "framing.zig",
+        "runtime_event_wire.zig",
+        "runtime_event_types.zig",
+        "runtime_event_reducer.zig",
+    }) |forbidden| {
+        try std.testing.expect(!joinedStringLiteralsContain(source, forbidden));
+    }
+}
+
 test "validated metadata token construction and materialization stay in classifier product path" {
     const allocator = std.testing.allocator;
     var dir = try std.Io.Dir.cwd().openDir(std.testing.io, "src", .{ .iterate = true });

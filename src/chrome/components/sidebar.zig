@@ -648,7 +648,7 @@ test "sidebar view: 활성·호버·+ 밴드 fill(우선순위·좌표·role)" {
     // 눌러도 카드가 눌려 "보이는 곳 ≠ 눌리는 곳"이었다.
     out.clearRetainingCapacity();
     var card_p = p;
-    card_p.shape = .{ .corner_radius_px = 8, .card_gap_px = 4 };
+    card_p.shape = .{ .corner_radius_px = 8 };
     try view(&rows, null, null, card_p, arena, &out);
     try std.testing.expectEqual(@as(usize, 1), out.items.len); // 활성 카드 밴드만(막대 op 없음)
     const card = out.items[0].quad.rect;
@@ -909,7 +909,7 @@ test "sidebar 목록 행 호버 밴드: 글자 블록을 덮고 클릭 행과 �
             .backing_width_px = 800,
             .backing_height_px = 600,
         },
-        .shape = .{ .corner_radius_px = 8, .card_gap_px = 8 }, // rich — 회귀가 났던 토큰 조합
+        .shape = .{ .corner_radius_px = 8 }, // rich — 회귀가 났던 토큰 조합(card_gap은 밴드 기하에서 폐기됨)
     };
     const rows = [_]Row{
         .{ .card = .{ .tab = 0, .label = "ws", .active = true, .lines = 3 } },

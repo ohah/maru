@@ -3543,7 +3543,21 @@ pub const AppSession = struct {
     /// rename 편집 텍스트의 표시폭(칸) = query(EAW) + preedit(EAW) + caret 1칸. paneBar가 편집 중 라벨 폭을 이걸로
     /// 잡아, 이름이 비어도(편집 시작) 세그먼트가 떠 caret이 보인다.
     fn renameDisplayWidth(self: *const AppSession) usize {
-        return self.rename_input.queryCols() + chrome.components.overlay_input.displayCols(self.rename_input.preedit.items) + 1;
+        return self.renameQueryCols() + coretext_frame_builder.titleDisplayWidth(self.rename_input.preedit.items, false) + 1;
+    }
+
+    /// rename 편집 텍스트(query)의 표시 칸 수 — **방출자와 같은 단위**여야 한다.
+    ///
+    /// rename 편집기는 `appendEllipsizedTitle`이 그린다(사이드바 카드 이름줄·파일 트리 행·pane 탭·라벨). 그 방출은
+    /// CG1 이후 **grapheme cluster 하나 = 셀 하나**인데, 여기서 `overlay_input.displayCols`(코드포인트당
+    /// Σ max(1,cellWidth))를 쓰면 NFD 이름에서 두 모델이 갈라진다 — macOS FS가 주는 '한'(U+1112 U+1161 U+11AB)이
+    /// 렌더는 2칸인데 displayCols는 4칸으로 세, caret과 IME 후보창이 글자에서 ~2배 오른쪽으로 떠 버린다
+    /// (code-review max). 그래서 방출자 자신의 폭 함수(`titleDisplayWidth`)를 단일 출처로 쓴다.
+    ///
+    /// `overlay_input.displayCols`는 폐기 대상이 아니다 — find·palette·context menu·모달은 `placeText`(오버레이
+    /// raster)가 **코드포인트 단위로** 그리므로 그쪽 폭 모델과 짝이 맞다. 두 폭 함수는 각자의 방출자를 따라간다.
+    fn renameQueryCols(self: *const AppSession) u32 {
+        return @intCast(coretext_frame_builder.titleDisplayWidth(self.rename_input.query.items, false));
     }
 
     /// 활성 탭의 leaf 중 pane==찾는 pane인 것의 PaneBar(rename caret 위치 계산용). 못 찾으면 null.
@@ -3637,7 +3651,7 @@ pub const AppSession = struct {
         const cw = self.cell_width_px;
         const ch = self.cell_height_px;
         if (cw == 0 or ch == 0) return null;
-        const qcols: u32 = self.rename_input.queryCols();
+        const qcols: u32 = self.renameQueryCols(); // 방출자(appendEllipsizedTitle)와 같은 cluster 단위
         switch (target) {
             .workspace => |tab| {
                 const idx = for (self.tabs.items, 0..) |t, i| {
@@ -7979,13 +7993,12 @@ pub const AppSession = struct {
         // 한다 — 카드 높이만 더하면 목록이 있는 워크스페이스에서 보정이 모자라 그룹 탈출 판정이 어긋난다(code-review max).
         var y_esc = y_px;
         if (self.displaySlotOf(origin)) |os| if (os < raw_row) {
-            var lifted: u32 = chrome.components.sidebar.rowHeight(rows[os], self.sidebarMetrics());
-            var k = os + 1;
-            while (k < rows.len) : (k += 1) switch (rows[k]) {
-                .agent_toggle, .agent => lifted +|= chrome.components.sidebar.rowHeight(rows[k], self.sidebarMetrics()),
-                else => break,
-            };
-            y_esc = y_px + @as(f64, @floatFromInt(lifted));
+            // 들리는 높이 = 카드 span 높이. **누적을 여기서 다시 굴리지 않는다** — 밴드·tint·accent 막대가 쓰는
+            // `cardSpanEnd`+`spanRect`와 같은 함수를 부른다(docs/sidebar-agent-list.md §3.3). 예전엔 이 자리에
+            // 같은 while 누적 사본이 남아 있어, span 소속 규칙이 바뀌면 렌더는 따라오는데 이 보정만 안 따라와
+            // 그룹 탈출 판정이 어긋났다(code-review max — 같은 계열 회귀를 이미 한 번 겪은 자리다).
+            const span = chrome.components.sidebar.spanRect(rows, os, chrome.components.sidebar.cardSpanEnd(rows, os), self.sidebar_width_px, self.sidebarMetrics());
+            y_esc = y_px + @as(f64, @floatFromInt(span.h));
         };
         // y_esc가 y_px와 같으면(드래그 업/동일 슬롯 — os >= raw_row라 보정이 없음) dragTargetSlot 결과도 raw_row와 동일하므로
         // 재계산을 건너뛰고 재사용한다(code-review 효율 — 드래그 다운일 때만 재계산). 부동소수 == 비교라도 보정을 안 한 경로면
@@ -28831,7 +28844,7 @@ pub const AppSession = struct {
         return .{
             .metrics = self.buildCellMetrics(),
             // C4b: 박스 모양 토큰을 tokens.space에서(단일 출처). tui=0(직각·셀 밴드), rich>0(둥근 GPU quad).
-            .shape = .{ .corner_radius_px = tk.space.corner_radius_px, .border_width_px = tk.space.border_width_px, .modal_padding_px = tk.space.modal_padding_px, .card_gap_px = tk.space.card_gap_px },
+            .shape = .{ .corner_radius_px = tk.space.corner_radius_px, .border_width_px = tk.space.border_width_px, .modal_padding_px = tk.space.modal_padding_px },
             // 활성 pane rect(셀 그리드 영역) — find 오버레이가 활성 pane 우상단에 붙도록(findLayout 단일 출처).
             // palette는 안 쓴다(창 중앙 유지). active_pane_rect는 recomputeActivePaneRect가 포커스·resize마다 갱신.
             .active_pane = .{ .x = self.active_pane_rect.x, .y = self.active_pane_rect.y, .w = self.active_pane_rect.w, .h = self.active_pane_rect.h },
@@ -33742,6 +33755,41 @@ test "code-review #1: 그룹 헤더 우클릭(context_menu_target=.group) 중 �
     try std.testing.expect(session.context_menu_target == null);
 }
 
+test "rename caret 폭은 방출자와 같은 cluster 단위다(NFD 이름에서 IME 후보창이 안 뜬다)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    // 회귀(code-review max): CG1이 방출을 cluster 단위로 바꿨는데 caret 폭 산출만 코드포인트 단위
+    // (`overlay_input.displayCols`)로 남아 있었다. macOS FS가 주는 NFD '한'(U+1112 U+1161 U+11AB)은
+    // **렌더 2칸 / 옛 폭 계산 4칸**이라, 한글 파일을 rename하면 caret과 IME 후보창이 글자에서 ~2배
+    // 오른쪽으로 떠 버렸다(5음절이면 10칸). 두 모델이 같은 단위인지를 여기서 고정한다.
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    const nfd = "\u{1112}\u{1161}\u{11AB}\u{1100}\u{1173}\u{11AF}"; // NFD "한글"
+    session.rename_input.query.clearRetainingCapacity();
+    try session.rename_input.query.appendSlice(allocator, nfd);
+
+    // 방출자(appendEllipsizedTitle)가 쓰는 폭 = 음절당 2칸.
+    const emitted_cols = coretext_frame_builder.titleDisplayWidth(nfd, false);
+    try std.testing.expectEqual(@as(usize, 4), emitted_cols); // 한(2) + 글(2)
+    try std.testing.expectEqual(@as(u32, @intCast(emitted_cols)), session.renameQueryCols()); // ★ 같은 단위
+    // 완성형과도 같아야 한다(같은 글자니까) — NFD/NFC가 caret 좌표에서 동치.
+    try std.testing.expectEqual(
+        coretext_frame_builder.titleDisplayWidth("한글", false),
+        @as(usize, session.renameQueryCols()),
+    );
+    // ★ 옛 코드(코드포인트 단위)는 **8칸**을 냈다 — 자모 6개 각각 max(1,cellWidth)로 (2+1+1)+(2+1+1). 실측 확인.
+    try std.testing.expect(chrome.components.overlay_input.displayCols(nfd) != session.renameQueryCols());
+}
+
 test "code-review #5: 그룹 rename 캐럿이 사이드바 indent_cols를 반영(헤더 삼각/이름과 정렬)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
@@ -33766,7 +33814,7 @@ test "code-review #5: 그룹 rename 캐럿이 사이드바 indent_cols를 반영
     const sp = session.buildChromeTokens().space;
     const indent_cols: u32 = (sp.card_gap_px + sp.accent_bar_width_px + cw - 1) / cw;
     try std.testing.expect(indent_cols > 0); // rich = accent_bar+card_gap>0 — 0이면 이 회귀를 못 잡으므로 전제 확인
-    const qcols: u32 = session.rename_input.queryCols();
+    const qcols: u32 = session.renameQueryCols();
     const rect = session.renameCaretRect() orelse return error.NoCaret;
     // depth1(hindent=0): caret_col = indent_cols + 2(삼각+공백) + qcols. 옛 코드는 indent_cols가 빠져(=2+qcols)
     // 캐럿·IME 후보창이 indent_cols칸 왼쪽으로 어긋났다(code-review #5). buildSidebarTitleDrawList의 전역 shift와 정합.

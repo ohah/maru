@@ -97,7 +97,7 @@
 
 **그 대응은 제거하고 chrome도 cluster 모델로 통일한다.** 이유는 세 가지다.
 
-1. **NFC 조합은 한글 절반짜리 해법이었다.** 합쳐지는 건 현대 한글 11,172자뿐이라, 같은 원인(코드포인트 1개 = 셀 1개)에서 나오는 **NFD 라틴 악센트**가 그대로 깨진다 — macOS가 `café.md`를 `cafe`+U+0301로 주면 chrome은 악센트를 **자기 칸**에 그려 `cafe´.md`가 된다(`titleCellWidth`의 `@max(1, cellWidth(cp))`가 0폭을 1칸으로 올린다). 옛한글도 남는다. 증상마다 조합기를 하나씩 더 붙이는 건 [필수 프로젝트 규칙](project-rules.md)의 "구조가 원인이면 구조를 바꾼다"에 어긋난다.
+1. **NFC 조합은 한글 절반짜리 해법이었다.** 합쳐지는 건 현대 한글 11,172자뿐이라, 같은 원인(코드포인트 1개 = 셀 1개)에서 나오는 **NFD 라틴 악센트**가 그대로 깨진다 — macOS가 `café.md`를 `cafe`+U+0301로 주면 chrome은 악센트를 **자기 칸**에 그려 `cafe´.md`가 된다(`titleCellWidth`의 `@max(1, cellWidth(cp))`가 0폭을 1칸으로 올린다). 옛한글(첫가끝)도 NFC 대상이 아니라 남는다 — **단, cluster 모델도 옛한글을 다 닫지는 못한다**: `hangulClass`가 U+1100–U+11FF만 분류해 Hangul Jamo Extended-A/B를 쓰는 첫가끝은 여전히 자모별 셀이다(§7). 증상마다 조합기를 하나씩 더 붙이는 건 [필수 프로젝트 규칙](project-rules.md)의 "구조가 원인이면 구조를 바꾼다"에 어긋난다.
 2. **파이프는 이미 공용이고 cluster를 지원한다.** `DrawCell.grapheme_offset/count`·`DrawList.grapheme_pool`·셰이퍼 ABI(`coretext_shaper.zig`가 `list.grapheme_pool`을 그대로 ObjC에 넘긴다)는 터미널과 chrome이 **같은 구조체·같은 셰이퍼**를 쓴다. 빠진 건 오직 **chrome 쪽 생산자** — 아무도 풀을 안 채웠을 뿐이다. 즉 이건 새 인프라가 아니라 **안 쓰던 기능을 켜는 일**이다.
 3. **dual-path보다 균일 모델**(HG3b가 `Cell.combining` 그림자를 없앨 때 세운 것과 같은 근거 — [architecture.md](architecture.md) 메모리 전략 "성급한 최적화 금지").
 
@@ -223,7 +223,19 @@ cluster 분절은 코어 print 경로 `writeCodepoint`(`screen.zig`) **단일 �
 - IME preedit는 codepoint 단위 렌더다(위 §4 preedit 항목) — 주 타깃 한글 IME가 완성형 marked text를 보내 정상이고, NFD/combining marked text는 조합 중 표시에 한해 미지원(확정 후 PTY 경로가 정상 cluster화). cluster 인지 복제는 그런 IME가 실제로 쓰이는 근거가 생기면 검토한다.
 - 다중 glyph로 셰이핑되는 cluster의 atlas 키잉·배치 정책은 실제 CoreText 결과를 보고 확정한다(현재 base+glyph_id 기준 — NFD 음절·이모지는 합성 후 단일/소수 glyph라 실사용 충돌 없음).
 - 정규화(NFC/NFD)는 **어느 층에도** 도입하지 않는다(§3.1·§3.1a). 터미널은 앱과의 코드포인트 합의 때문에, chrome은 cluster 모델(CG1)로 통일해 정규화가 필요 없어졌기 때문이다. 만약 외부 요구로 입력 정규화가 필요해지면 전략 수정이므로 [PR 체크리스트](pr-checklist.md) 절차에 따라 사용자와 먼저 논의한다.
-- chrome cluster(§3.1a CG1)의 남은 범위: **이모지 ZWJ 시퀀스(GB11)·국기 RI 쌍(GB12/13)은 chrome에서 코드포인트별 셀**이다(`extendsCluster` 범위 밖). 터미널은 mode 2027 게이트 뒤에서 이 둘을 묶지만 chrome은 합의 상대가 없어 게이트 자체가 없으므로, 넣는다면 무조건 켜는 형태가 된다 — 라벨에서 실제로 문제가 됐다는 근거가 생기면 그때 한다(measure-first). 참고로 skin-tone·VS16은 GB9(Extend)라 **이미 묶인다**.
+- **옛한글 Extended-A/B는 `hangulClass` 밖이다.** UAX#29는 U+A960–U+A97C를 L, U+D7B0–U+D7C6을 V, U+D7CB–U+D7FB를 T로 지정하지만 `hangulClass`는 U+1100–U+11FF만 본다 — 그래서 그 자모를 쓰는 첫가끝 옛한글은 터미널·chrome 양쪽에서 자모별 셀이다(같은 파일의 `hangulClass` 주석이 "옛한글·filler까지 conjoining 블록 전체"라고 과장돼 있던 것을 정정했다). 범위를 넓히는 것 자체는 명세를 따르는 일이지만 **터미널 셀 점유·폭이 함께 바뀌므로**(EAW·wcwidth 합의 대상) 독립 슬라이스로 다룬다: `hangulClass` 범위 추가 + `isConjoiningJamo`(print 경로 0폭 흡수 판정) 동기화 + oracle 케이스. 실사용 근거(옛한글 파일명·문서)가 생기면 착수한다(measure-first).
+- chrome cluster(§3.1a CG1)의 남은 범위: **이모지 ZWJ 시퀀스(GB11)·국기 RI 쌍(GB12/13)은 chrome에서 코드포인트별 셀**이다(`extendsCluster` 범위 밖). 터미널은 mode 2027 게이트 뒤에서 이 둘을 묶지만 chrome은 합의 상대가 없어 게이트 자체가 없으므로, 넣는다면 무조건 켜는 형태가 된다 — 라벨에서 실제로 문제가 됐다는 근거가 생기면 그때 한다(measure-first).
+
+  **`extendsCluster`가 실제로 묶는 것은 GB6/7/8(U+1100–U+11FF 자모)과 GB9(`isExtendOrZwj` = ZWJ + `width.isCombiningMark`)뿐이다.** 그래서 chrome에서 다음 셋은 **아직 코드포인트별 셀**이다 — 문서가 넓게 적혀 있으면 다음 사람이 엉뚱한 곳을 뒤지므로 정확히 열거한다(code-review max에서 실제로 두 항목이 과장돼 있었다).
+
+  | 아직 안 묶이는 것 | 이유 |
+  | --- | --- |
+  | 이모지 ZWJ 시퀀스(GB11) | `extendsCluster`에 GB11이 없다(ZWJ 자체는 붙지만 그 뒤 그림문자가 안 붙는다) |
+  | 국기 RI 쌍(GB12/13) | 같은 이유 |
+  | **skin-tone 수정자(U+1F3FB–U+1F3FF)** | `width.isCombiningMark`에 이모지 modifier 블록이 없어 GB9 Extend로 안 잡힌다. `clusterEnd("👍🏽")`은 base만 반환한다(실측) — 사이드바·트리에서 base 이모지 + 맨 스와치 셀로 그려진다 |
+  | **옛한글 Extended-A/B**(U+A960–U+A97C, U+D7B0–U+D7FB) | `hangulClass`가 U+1100–U+11FF만 분류한다(§7) |
+
+  VS16(U+FE0F)은 `isCombiningMark`에 들어 있어 **묶인다**.
 - chrome 텍스트 방출 경로가 늘어날 때: cluster 순회는 `appendEllipsizedTitle` 한 곳에 있다. 셀을 직접 `append`하는 새 경로를 만들면 그 경로만 조용히 codepoint 단위로 되돌아간다 — **이 규율은 `tests/boundary/chrome_text_clusters.zig`가 강제한다**(§3.1b).
 
 ### 3.1b 규율을 구조로: cluster 경계 가드

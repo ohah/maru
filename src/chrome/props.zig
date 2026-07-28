@@ -37,10 +37,9 @@ pub const ShapeTokens = struct {
     // C4b 모달: 배경 박스가 텍스트보다 큰 안쪽 여백(px). view가 폭 상한을 이 값의 2배만큼 줄여(텍스트 폭 양보)
     // platform lowering의 ±pad 확장 후에도 박스가 터미널 영역 안에 들도록 한다(box geometry 단일 출처=view).
     modal_padding_px: u16 = 0,
-    // U2: 사이드바 카드 **텍스트 좌측 여백**(px). bandFill은 이 값을 안 쓴다 — 밴드는 클릭 판정과 같은 행 전체다
-    // (docs/sidebar-agent-list.md §3.2). tui=0.
-    // (좌측 accent 막대 폭은 카드별 색이라 chrome이 아니라 platform이 tokens.space.accent_bar_width_px로 직접 그린다 — props에 없음.)
-    card_gap_px: u16 = 0,
+    // NOTE: `card_gap_px`는 여기 없다. 밴드 인셋이 폐기되면서(docs/sidebar-agent-list.md §3.2 — 밴드=클릭 행)
+    // chrome 쪽 소비처가 0이 됐고, 남은 용도(카드 텍스트 좌측 들여쓰기)는 platform이 `tokens.space.card_gap_px`를
+    // 직접 읽는다. 값을 props로 계속 실어 나르면 "여길 바꾸면 카드 간격이 바뀐다"는 거짓 seam이 남는다.
 };
 
 /// 활성 pane(분할 leaf)의 backing px 사각형 — 사이드바·탭 바·window padding을 뺀 셀 그리드 영역(platform

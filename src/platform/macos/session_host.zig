@@ -139,6 +139,10 @@ pub const external_attach = if (builtin.os.tag == .macos)
     @import("session_host/external_attach.zig")
 else
     struct {};
+pub const external_attach_evidence = if (builtin.os.tag == .macos)
+    @import("session_host/external_attach_evidence.zig")
+else
+    struct {};
 pub const remote_attachment = if (builtin.os.tag == .macos)
     @import("session_host/remote_attachment.zig")
 else

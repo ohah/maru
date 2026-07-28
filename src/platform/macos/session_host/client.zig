@@ -457,10 +457,12 @@ const ExternalAdoptionSnapshot = struct {
     fd: c.fd_t,
     host_id: u128,
     build_id_address: usize,
+    build_id_len: usize,
     build_id_present: bool,
     upgrade_epoch: u64,
     authority_generation: u64,
     lifecycle_address: usize,
+    lifecycle_len: usize,
     wire_major: u16,
     screen_codec_version: u16,
     attachment_capabilities: AttachmentCapabilities,
@@ -865,6 +867,17 @@ fn collectExternalOwnerRanges(
     const count = try externalOwnerRangeCount(self);
     const ranges = try self.allocator.alloc(ExternalRange, count);
     errdefer self.allocator.free(ranges);
+    const used = try fillExternalOwnerRanges(self, ranges);
+    return ranges[0..used];
+}
+
+fn fillExternalOwnerRanges(
+    self: *const Client,
+    ranges: []ExternalRange,
+) ExternalAdoptionInspectError!usize {
+    const count = try externalOwnerRangeCount(self);
+    if (ranges.len < count) return error.InvalidClientState;
+    @memset(ranges, .{ .start = 0, .len = 0 });
     var used: usize = 0;
     if (self.build_id) |bytes|
         appendExternalRange(ranges, &used, try externalRangeForSlice(bytes, bytes.len));
@@ -906,7 +919,8 @@ fn collectExternalOwnerRanges(
             &used,
             try externalRangeForSlice(frame.payload, frame.payload.len),
         );
-    return ranges[0..used];
+    if (used > count) return error.InvalidClientState;
+    return used;
 }
 
 fn externalRangeLessThan(comparisons: *usize, left: ExternalRange, right: ExternalRange) bool {
@@ -937,6 +951,107 @@ fn validateExternalOwnerRangesAgainst(
 fn validateExternalOwnerRanges(self: *const Client) ExternalAdoptionInspectError!void {
     _ = try validateExternalOwnerRangesAgainst(self, null);
 }
+
+const ExternalOwnerRangeProofLifecycle = enum { empty, prepared, aborted };
+
+/// Retains the last whole-Client alias-proof scratch allocation across the paired ownership take.
+///
+/// Preparing this token performs the final allocator callback. Validation after preparation is
+/// allocation-free, and deinit is intentionally delayed until the source Client has become a
+/// tombstone. This closes the otherwise unavoidable `free` callback window between the last
+/// owner-range proof and the no-callback ownership suffix.
+pub const PreparedExternalOwnerRangeProof = struct {
+    saved_self_addr: usize = 0,
+    client_addr: usize = 0,
+    allocator: std.mem.Allocator = std.heap.page_allocator,
+    cleanup_allocator: std.mem.Allocator = std.heap.page_allocator,
+    allocator_ptr_addr: usize = 0,
+    allocator_vtable_addr: usize = 0,
+    snapshot: ?ExternalAdoptionSnapshot = null,
+    first_target: ExternalRange = .{ .start = 0, .len = 0 },
+    second_target: ExternalRange = .{ .start = 0, .len = 0 },
+    ranges: []ExternalRange = &.{},
+    cleanup_ranges: []ExternalRange = &.{},
+    ranges_addr: usize = 0,
+    ranges_len: usize = 0,
+    lifecycle: ExternalOwnerRangeProofLifecycle = .empty,
+
+    pub fn deinit(self: *PreparedExternalOwnerRangeProof) void {
+        if (self.lifecycle != .prepared or
+            self.saved_self_addr != @intFromPtr(self))
+            return;
+        const allocator = if (externalAllocatorMatchesSeal(
+            self.allocator,
+            self.allocator_ptr_addr,
+            self.allocator_vtable_addr,
+        ))
+            self.allocator
+        else if (externalAllocatorMatchesSeal(
+            self.cleanup_allocator,
+            self.allocator_ptr_addr,
+            self.allocator_vtable_addr,
+        ))
+            self.cleanup_allocator
+        else
+            return;
+        const ranges = if (externalOwnedSliceAddress(ExternalRange, self.ranges) ==
+            self.ranges_addr and self.ranges.len == self.ranges_len)
+            self.ranges
+        else if (externalOwnedSliceAddress(ExternalRange, self.cleanup_ranges) ==
+            self.ranges_addr and self.cleanup_ranges.len == self.ranges_len)
+            self.cleanup_ranges
+        else
+            return;
+        allocator.free(ranges);
+        self.ranges = &.{};
+        self.cleanup_ranges = &.{};
+        self.snapshot = null;
+        self.lifecycle = .aborted;
+    }
+
+    pub fn validate(
+        self: *PreparedExternalOwnerRangeProof,
+        client: *const Client,
+        first_target_ptr: *const anyopaque,
+        first_target_len: usize,
+        second_target_ptr: *const anyopaque,
+        second_target_len: usize,
+    ) bool {
+        if (self.lifecycle != .prepared or
+            self.saved_self_addr != @intFromPtr(self) or
+            self.client_addr != @intFromPtr(client) or
+            !std.meta.eql(self.allocator, client.allocator) or
+            !std.meta.eql(self.cleanup_allocator, client.allocator) or
+            self.first_target.start != @intFromPtr(first_target_ptr) or
+            self.first_target.len != first_target_len or
+            self.second_target.start != @intFromPtr(second_target_ptr) or
+            self.second_target.len != second_target_len or
+            self.ranges_addr != externalOwnedSliceAddress(
+                ExternalRange,
+                self.ranges,
+            ) or
+            self.ranges_len != self.ranges.len or
+            !sameExternalSlice(ExternalRange, self.ranges, self.cleanup_ranges) or
+            !std.meta.eql(
+                self.snapshot orelse return false,
+                externalAdoptionSnapshotForProof(client) orelse return false,
+            ))
+            return false;
+        _ = fillExternalOwnerRanges(client, self.ranges) catch return false;
+        var comparisons: usize = 0;
+        std.mem.sort(ExternalRange, self.ranges, &comparisons, externalRangeLessThan);
+        const client_range = externalRangeOfValue(client);
+        for (self.ranges, 0..) |range, index| {
+            if (externalRangesOverlap(range, client_range) or
+                externalRangesOverlap(range, self.first_target) or
+                externalRangesOverlap(range, self.second_target))
+                return false;
+            if (index != 0 and externalRangesOverlap(self.ranges[index - 1], range))
+                return false;
+        }
+        return true;
+    }
+};
 
 fn externalSliceAddress(bytes: []const u8) usize {
     return if (bytes.len == 0) 0 else @intFromPtr(bytes.ptr);
@@ -1154,10 +1269,12 @@ fn externalAdoptionSnapshot(self: *const Client) ExternalAdoptionSnapshot {
         .fd = self.fd,
         .host_id = self.host_id,
         .build_id_address = if (self.build_id) |bytes| externalSliceAddress(bytes) else 0,
+        .build_id_len = if (self.build_id) |bytes| bytes.len else 0,
         .build_id_present = self.build_id != null,
         .upgrade_epoch = self.upgrade_epoch,
         .authority_generation = self.authority_generation,
         .lifecycle_address = externalSliceAddress(self.lifecycle),
+        .lifecycle_len = self.lifecycle.len,
         .wire_major = self.wire_major,
         .screen_codec_version = self.screen_codec_version,
         .attachment_capabilities = self.attachment_capabilities,
@@ -1199,6 +1316,16 @@ fn externalAdoptionSnapshot(self: *const Client) ExternalAdoptionSnapshot {
         .external_tx = externalArrayDescriptor(external.external_tx),
         .external_tx_bytes = external.external_tx_bytes,
     };
+}
+
+fn externalAdoptionSnapshotForProof(self: *const Client) ?ExternalAdoptionSnapshot {
+    switch (self.io_mode) {
+        .blocking => return null,
+        .external => {},
+    }
+    if (self.connection_profile == null or self.compatibility_profile == null)
+        return null;
+    return externalAdoptionSnapshot(self);
 }
 
 fn externalInventoriesEqual(
@@ -1954,6 +2081,60 @@ pub const Client = struct {
             .start = @intFromPtr(destination),
             .len = destination_len,
         });
+    }
+
+    /// Performs the final whole-owner proof for the paired Client/evidence move.
+    ///
+    /// Unlike `preflightExternalAdoptionDestination`, this retains its scratch allocation. The
+    /// caller must validate it immediately before the no-callback ownership suffix and deinit it
+    /// only after the source Client has been tombstoned.
+    pub fn prepareExternalOwnerRangeProof(
+        self: *const Client,
+        out: *PreparedExternalOwnerRangeProof,
+        first_target: *const anyopaque,
+        first_target_len: usize,
+        second_target: *const anyopaque,
+        second_target_len: usize,
+    ) ExternalAdoptionInspectError!void {
+        if (out.lifecycle != .empty or
+            externalRangesOverlap(externalRangeOfValue(out), externalRangeOfValue(self)))
+            return error.InvalidAlias;
+        const allocator = self.allocator;
+        const count = try externalOwnerRangeCount(self);
+        const snapshot = externalAdoptionSnapshotForProof(self) orelse
+            return error.InvalidClientState;
+        const ranges = try allocator.alloc(ExternalRange, count);
+        errdefer allocator.free(ranges);
+        out.* = .{
+            .saved_self_addr = @intFromPtr(out),
+            .client_addr = @intFromPtr(self),
+            .allocator = allocator,
+            .cleanup_allocator = allocator,
+            .allocator_ptr_addr = @intFromPtr(allocator.ptr),
+            .allocator_vtable_addr = @intFromPtr(allocator.vtable),
+            .snapshot = snapshot,
+            .first_target = .{
+                .start = @intFromPtr(first_target),
+                .len = first_target_len,
+            },
+            .second_target = .{
+                .start = @intFromPtr(second_target),
+                .len = second_target_len,
+            },
+            .ranges = ranges,
+            .cleanup_ranges = ranges,
+            .ranges_addr = externalOwnedSliceAddress(ExternalRange, ranges),
+            .ranges_len = ranges.len,
+            .lifecycle = .prepared,
+        };
+        errdefer out.* = .{};
+        if (!out.validate(
+            self,
+            first_target,
+            first_target_len,
+            second_target,
+            second_target_len,
+        )) return error.InvalidAlias;
     }
 
     pub fn preflightExternalAdoption(
@@ -6035,6 +6216,53 @@ fn makeConnectedTestClient(
     };
 }
 
+const ProofForgedAllocator = struct {
+    free_calls: usize = 0,
+
+    fn allocator(self: *ProofForgedAllocator) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &.{
+            .alloc = alloc,
+            .resize = resize,
+            .remap = remap,
+            .free = free,
+        } };
+    }
+
+    fn alloc(_: *anyopaque, _: usize, _: std.mem.Alignment, _: usize) ?[*]u8 {
+        return null;
+    }
+
+    fn resize(
+        _: *anyopaque,
+        _: []u8,
+        _: std.mem.Alignment,
+        _: usize,
+        _: usize,
+    ) bool {
+        return false;
+    }
+
+    fn remap(
+        _: *anyopaque,
+        _: []u8,
+        _: std.mem.Alignment,
+        _: usize,
+        _: usize,
+    ) ?[*]u8 {
+        return null;
+    }
+
+    fn free(
+        context: *anyopaque,
+        _: []u8,
+        _: std.mem.Alignment,
+        _: usize,
+    ) void {
+        const self: *ProofForgedAllocator = @ptrCast(@alignCast(context));
+        self.free_calls += 1;
+    }
+};
+
 fn recvTimeout(fd: c.fd_t) !posix.timeval {
     var value = std.mem.zeroes(posix.timeval);
     var len: c.socklen_t = @sizeOf(posix.timeval);
@@ -6046,6 +6274,78 @@ fn recvTimeout(fd: c.fd_t) !posix.timeval {
         &len,
     ) != 0 or len != @sizeOf(posix.timeval)) return error.UnexpectedSocketOption;
     return value;
+}
+
+test "external owner proof cleanup trusts only sealed allocator and range mirrors" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fds: [2]c.fd_t = undefined;
+    try std.testing.expectEqual(
+        @as(c_int, 0),
+        c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds),
+    );
+    defer _ = c.close(fds[1]);
+    var client = makeConnectedTestClient(std.testing.allocator, fds[0]);
+    defer client.deinit();
+    try client.enterExternalMode();
+    client.connection_profile = .cli_attach;
+    client.compatibility_profile = compatibility.profileForMajor(protocol.version_major).?;
+    var first_target: u8 = 0;
+    var second_target: u8 = 0;
+
+    var allocator_proof: PreparedExternalOwnerRangeProof = .{};
+    try client.prepareExternalOwnerRangeProof(
+        &allocator_proof,
+        &first_target,
+        @sizeOf(u8),
+        &second_target,
+        @sizeOf(u8),
+    );
+    const canonical_allocator = allocator_proof.allocator;
+    var forged_allocator = ProofForgedAllocator{};
+    allocator_proof.allocator = forged_allocator.allocator();
+    allocator_proof.cleanup_allocator = allocator_proof.allocator;
+    allocator_proof.deinit();
+    try std.testing.expectEqual(@as(usize, 0), forged_allocator.free_calls);
+    try std.testing.expectEqual(
+        ExternalOwnerRangeProofLifecycle.prepared,
+        allocator_proof.lifecycle,
+    );
+    allocator_proof.cleanup_allocator = canonical_allocator;
+    allocator_proof.deinit();
+    try std.testing.expectEqual(
+        ExternalOwnerRangeProofLifecycle.aborted,
+        allocator_proof.lifecycle,
+    );
+    allocator_proof.deinit();
+
+    var range_proof: PreparedExternalOwnerRangeProof = .{};
+    try client.prepareExternalOwnerRangeProof(
+        &range_proof,
+        &first_target,
+        @sizeOf(u8),
+        &second_target,
+        @sizeOf(u8),
+    );
+    const canonical_ranges = range_proof.ranges;
+    const forged_ranges = try std.testing.allocator.alloc(
+        ExternalRange,
+        canonical_ranges.len,
+    );
+    defer std.testing.allocator.free(forged_ranges);
+    range_proof.ranges = forged_ranges;
+    range_proof.cleanup_ranges = forged_ranges;
+    range_proof.deinit();
+    try std.testing.expectEqual(
+        ExternalOwnerRangeProofLifecycle.prepared,
+        range_proof.lifecycle,
+    );
+    range_proof.cleanup_ranges = canonical_ranges;
+    range_proof.deinit();
+    try std.testing.expectEqual(
+        ExternalOwnerRangeProofLifecycle.aborted,
+        range_proof.lifecycle,
+    );
+    range_proof.deinit();
 }
 
 test "external mode prechecks perform no allocation or fd inspection" {

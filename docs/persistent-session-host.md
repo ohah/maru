@@ -3214,7 +3214,8 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
               이어지는 evidence take까지가 allocation/error/callback 없는 paired suffix다. 두 owner가 storage에
               들어가면 `.normalizing`을 publish하고 `finishExternalPumpTransfer`가 old parser backing
               free/replacement swap을 수행한다. allocator callback 중 public teardown은 `busy`를 반환해 partial
-              cleanup을 시작하지 않는다.
+              cleanup을 시작하지 않는다. `.tearing_down`도 cleanup이 끝난 상태가 아니므로 재진입 teardown은
+              `already_dead`가 아니라 `busy`다.
               모든 allocator, destination/address/alias/parser/evidence preflight를 두 source의 첫
               **ownership mutation** 전에 끝낸 뒤 **Client commit transfer→seed take/tombstone은 하나의 no-fail
               ownership suffix**다. suffix 전 실패는 Client/seed를 caller가 모두 보존하고, suffix 뒤 injected
@@ -3243,6 +3244,20 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
               current seed면 `OwnedMetadataDto` final address, allocator/backing base/len, backing raw bytes,
               normalized scalar와 inline process `{pid,len,name}` 전체의 semantic digest도 bind하고 no-fail suffix 직전에
               descriptor/range를 먼저 검사한 뒤 content를 재검증한다.
+              마지막 whole-Client alias proof는 `PreparedExternalOwnerRangeProof`가 scratch allocation을 소유한 채
+              allocation-free로 descriptor/range를 다시 검사한다. allocation callback이 `io_mode` tag나
+              connection/compatibility optional provenance를 바꾸어도 proof용 safe snapshot이 tag/presence를 먼저
+              검사해 typed failure로 닫고 inactive union payload나 null optional을 꺼내지 않는다.
+              이 scratch의 `free`는 Client와 evidence가 모두
+              storage로 이동하고 source가 tombstone이 된 뒤 `.normalizing`에서만 실행한다. 따라서 “마지막 검증
+              성공→scratch free callback→paired take” 사이에 callback이 source descriptor를 바꾸는 창은 없다.
+              proof cleanup도 primary/cleanup allocator가 서로 같다는 사실이나 두 range descriptor가 서로 같다는
+              사실을 provenance로 쓰지 않는다. 준비 시 봉인한 allocator ptr/vtable과 backing addr/len에 실제로
+              일치하는 mirror만 free하며, 양쪽을 같은 forged 값으로 바꾸면 free 없이 거부된다.
+              같은 이유로 `ExternalPumpStorage.initInPlace`는 destination을 alias proof 전에 읽거나 쓰지 않는
+              thread-local init latch를 첫 allocator 호출 전에 게시한다. allocator callback에서 시작한 모든 중첩
+              storage 초기화는 주소가 같거나 달라도 `destination_not_empty/preserved`로 거부하므로
+              A→B→A가 활성 ancestor A를 우회할 수 없고 allocation 재귀로 들어가지 않는다.
               `PreparedAdoptionEvidence`는 logical seed와 별도로 같은 원래 backing을 가리키는 private
               `cleanup_seed` mirror를 가지며 deinit/abort는 mirror만 해제하고 logical seed를 tombstone으로 만든다.
               Zig field visibility의 한계는 boundary restricted-name gate로 보완해 mechanics 밖 cleanup mirror 접근 0을
@@ -3276,8 +3291,8 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
               재검증하고 즉시 no-callback paired suffix에 들어간다. 구 `transferToExternalPump` 단독 move,
               그 leaf였던 `FrameParser.normalizeExact`, raw `AttachmentEvidence` init은 c3a2에서 제거하고 boundary
               gate로 우회 callsite 0을 고정한다. gate 대상은 transfer 3단계 전부(`prepare`/`commit`/`finish`)와 그
-              아래 parser 3단계, 그리고 `owned_evidence`/cleanup mirror 이름이다 — 오용이 typed error가 아니라
-              `@panic`인 leaf는 컴파일러가 새 caller를 막아주지 못하기 때문이다.
+              아래 parser 3단계, final whole-owner proof, 그리고 `owned_evidence`/cleanup mirror 이름이다 —
+              오용이 typed error가 아니라 `@panic`인 leaf는 컴파일러가 새 caller를 막아주지 못하기 때문이다.
               whole-owner alias proof OOM은 occupied/invalid destination보다 먼저 반환한다. 안전한 destination
               dereference 자체가 그 proof에 의존하므로 이 precedence를 fixture로 고정한다.
 

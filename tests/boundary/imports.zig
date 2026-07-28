@@ -587,6 +587,14 @@ test "session host stable pump storage and Client transfer stay in mechanics bou
             // All three stages are gated, not just the two that move ownership: calling `finish`
             // out of order panics instead of returning a typed error.
             try std.testing.expect(!containsRestrictedName(source, "finishExternalPumpTransfer"));
+            try std.testing.expect(!containsRestrictedName(
+                source,
+                "PreparedExternalOwnerRangeProof",
+            ));
+            try std.testing.expect(!containsRestrictedName(
+                source,
+                "prepareExternalOwnerRangeProof",
+            ));
         }
         if (!framing_file and !transfer_allowed) {
             // The staged parser swap is a mechanics-only leaf for the same reason: its misuse paths

@@ -3702,7 +3702,7 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
               **c3c — typed take와 combined commit.** `CommittedScreenBacklog`이 final storage 안에서 exact token
               slice를 소유한다. `SourceRef`/source-ordinal backing은 현재 consumer가 쓰지 않고 token 배열 자체가
               source order이므로 c3에서 제거한다. destination address/empty/non-alias와 모든 sub-plan은 ledger mutation 전에 seal한다.
-              c3c는 다음 세 merge slice로 닫는다. 앞 slice의 final-address owner와 검증 API는 뒤 slice가 그대로
+              c3c는 다음 세 phase group, 총 일곱 merge slice로 닫는다. 앞 slice의 final-address owner와 검증 API는 뒤 slice가 그대로
               소비하며 같은 plan을 다시 parse/materialize하지 않는다.
               - **c3c-1 — aggregate composition:** 기존 `PreparedScreenBacklog`, sealed
                 `PreparedSourceDecision`, `external_event_materialization.Prepared`를
@@ -3719,9 +3719,12 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
                 보존하고 public `deferred_non_adopted`는 payload를 복제하지 않는다. 이 slice의 public 결과는
                 adopted plan prepared, deferred non-adopted plan, reentrant `busy` 또는 기존 typed
                 terminal/retryable이며 c3c 전체 완료를 뜻하지 않는다.
-              - **c3c-2 — typed take와 combined commit:** 두 merge gate로 닫는다. 현재
+              - **c3c-2 — typed take와 combined commit:** 네 merge gate로 닫는다. 현재
                 `Client.commitExternalAdoption`은 pending queue와 duplicated inventory를 `deinit`해 allocator
                 `free` callback을 실행하므로 ledger 성공 뒤 no-callback suffix의 consumer로 쓰지 않는다.
+                c3c-2b는 한 PR에 destination owner·ledger commit·recovery suffix를 함께 넣지 않고 아래
+                b1→b2→b3 순서로 각각 red→green을 남긴다. 다만 외부에 두 prepare status union을 동시에 공개하지
+                않는다는 원자 전환 계약은 b3까지 유지한다.
                 - **c3c-2a — no-callback typed take owner:** final `PreparedExternalAdoption` 안의 기존
                   `PreparedScreenBacklog`이 prepared wrapper/token/seed-plan backing과 canonical cleanup mirror를
                   계속 소유하고, 그 옆 `ExternalAdoptionTake`가 Client pending batch/partial/stream/event의 원본
@@ -3750,15 +3753,74 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
                   0이므로 이 gate에서 제거한다. ledger mutation, take 실행, `CommittedScreenBacklog` retag와 active
                   publish는 아직 하지 않으며 typed take primitive의 abort/success/stale-copy/exact cleanup과
                   outer adopted-plan 배선만 자동 검증한다.
-                - **c3c-2b — combined commit와 immediate suffix:** adopted final seal 뒤
-                  `ledger.commitSeeds`가 마지막 fallible precommit이다. 성공 직후 typed screen token/header,
-                  metadata initial/event, resize/authority/request state와 Client owner를 no-callback take하고
-                  `semantic_state=.active{.flow=.initial_fence}`·`lifecycle=.live`를 마지막 publish한다.
-                  ledger 실패와 final-seal drift는 ledger/active publish 0인 terminal cleanup으로 닫는다.
-                  non-adopted recovery/terminal immediate suffix도 이 gate에서 기존 `PrepareStatus`를
-                  `AdoptionPrepareStatus`로 교체하며 함께 연다.
-              - **c3c-3 — owner event lease와 teardown:** `OwnerMetadataState`, resize/metadata borrow/finish generation,
-                projection retry와 terminal revoke, partial-consume teardown·ledger final-zero를 닫는다.
+                - **c3c-2b1 — typed destination owners:** final-address
+                  `CommittedScreenBacklog`과 `OwnerMetadataState`의 persistent storage form을 추가한다.
+                  둘은 transient `PreparedExternalAdoption` 안이 아니라 `ExternalPumpStorage`의 sibling
+                  `committed_screen`, `owner_metadata` field이고, 같은 storage의 `owner_resize`,
+                  `owner_authority`, `owner_request_ids`와 함께 commit 뒤에도 살아 있는 단일 destination이다.
+                  각 owner는 storage 주소와 자기 final address를 seal하고 prepared owner·Client·ledger·다른
+                  destination과 exact range non-alias여야 한다.
+                  screen destination은 retained token slice header, allocator/seal과 target stream을 소유하고,
+                  ledger 주소, retained count와 `released` 4,096-bit set을 함께 bind한다. token은 원래 ordinal을
+                  유지하고 release 성공 때 해당 bit와 retained count를 함께 commit하므로 out-of-order release도
+                  표현하며 compaction이나 token scalar tombstone을 별도 SSOT로 만들지 않는다.
+                  metadata destination은 `unsupported | unavailable |
+                  current{dto:OwnedMetadataDto,pending:bool}`를 소유한다. initial seed와 materialized event 양쪽은
+                  callback 없는 take primitive로 같은 destination에 들어가고 source는 tombstone된다. b1의
+                  독립 fixture만 prevalidated source에 이 primitive를 실행하며 aggregate product path는 prepared
+                  source를 그대로 보존한다. 실제 aggregate take는 b2의 ledger 성공 뒤 no-fail suffix에서만 실행한다.
+                  `current.pending`은 initial/event origin 모두 `true`다. initial attach metadata도 external
+                  consumer에 아직 projection되지 않았기 때문이다.
+                  `OwnerResizeState = none | pending(resize_wire.Event)`,
+                  `OwnerAuthorityState{role,generation,flow:initial_fence|clear}`와
+                  `client_pump.RequestIdState`가 나머지 persistent slot의 단일 출처다. active semantic state도
+                  별도 bool mirror 없이 `OwnerAuthorityState.flow`와 같은 `initial_fence`를 가리킨다.
+                  resize, authority, request state는 no-fail scalar take를 갖는다. 이 gate는
+                  ledger commit, Client take, active/live publish와 public event borrow를 실행하지 않는다.
+                  destination moved/stale copy, source/destination alias와 abort를 고정한다. take suffix 자체는
+                  allocation/allocator callback 0이며, 별도 committed cleanup fixture는 heap-backed token/DTO를
+                  allocator callback 횟수까지 포함해 exact once free하는지 검증한다.
+                  screen과 metadata owner는 각각 saved-self/lifecycle, primary와 independent cleanup mirror,
+                  allocator identity, backing address/length와 domain-versioned content seal을 가진다. cleanup은
+                  backing seal을 먼저 검증한 뒤에만 nested descriptor/content를 dereference하고, primary가
+                  불일치하면 seal-valid independent mirror만 쓴다. committed-only cleanup API 외 generic deinit은
+                  fail-stop한다. injected digest collision에서도 scalar/semantic equality가 다르면 free하지 않는다.
+                - **c3c-2b2 — adopted combined commit:** adopted final seal 뒤
+                  `ledger.commitSeeds`가 마지막 fallible precommit이다. 성공 직후 c3c-2b1의 typed screen
+                  token/header, metadata initial/event, resize/authority/request state와 Client owner를 no-callback
+                  take하고 `semantic_state=.active{.flow=.initial_fence}`·`lifecycle=.live`를 마지막 publish한다.
+                  ledger 성공 뒤에는 validation/error return/allocation/callback이 없다. ledger 실패와 final-seal
+                  drift는 ledger/active publish 0인 terminal cleanup으로 닫는다. `commitAdoption()`은 이 gate에서
+                  정상 진입에 `adopted | terminal_latched`, allocator callback 재진입과 이미 끝난 owner에는
+                  각각 mutation 0의 `transaction_busy | dead`를 반환한다. b2 final seal은 c3c-2a Client take뿐 아니라 b1의
+                  모든 destination final address, nested take validity와 cleanup mirror를 함께 bind한다. seal
+                  mismatch/stale copy/모든 final-address drift는 ledger mutation 0으로 terminal cleanup되고,
+                  seal 성공 뒤 호출되는 no-fail take 순서를 독립 fixture로 전수 고정해 post-ledger panic 가능한
+                  분기를 남기지 않는다. final seal은 모든 destination pair, destination↔storage/ledger/Client/
+                  prepared owner와 header↔child payload의 exact range non-alias까지 commitSeeds 직전에 한 번에
+                  검증한다. 이후 각 take는 추가 검사나 failure branch가 없는 `void`, allocation/callback 0 move이고
+                  exclusive storage operation lease 때문에 source/destination을 중간에 바꿀 public entry가 없다.
+                - **c3c-2b3 — non-adopted immediate suffix:** ended/revoked/host-recovery/client-recovery/terminal
+                  verdict를 같은 prepare call 안에서 checked context 준비 뒤 no-fail suffix로 commit한다.
+                  기존 `PrepareStatus`를 `AdoptionPrepareStatus`로 원자 교체하고
+                  `prepared_adopted | recovery_committed | terminal_latched |
+                  retryable_preserved(.out_of_memory | .transaction_busy)`만 공개한다. allocator callback이나
+                  same-thread 다른 storage가 이미 prepare 중인 재진입은 `.transaction_busy`이며 source/ledger/
+                  prepared owner/lifecycle mutation 0으로 보존한다. 외부에 deferred non-adopted plan이나 별도
+                  `busy` top-level tag를 남기지 않는다. prepare/commit/teardown은 storage별 monotonic operation
+                  generation과 process-thread exclusive lease를 공유한다. allocator callback에서 재진입한
+                  prepare/commit/teardown/event facade는 `.transaction_busy` 또는 method별 typed busy/dead를
+                  반환하고 outer operation이나 최초 terminal reason을 바꾸지 않는다.
+                  non-adopted suffix도 callback-free라고 주장하지 않는다. verdict와 recovery/terminal semantic,
+                  admission-closed lifecycle을 먼저 commit-visible latch한 뒤 cleanup descriptor를 caller scratch에
+                  freeze하고, 그 다음 stack winner/Client allocator·close callback을 실행하며 마지막에 live/dead
+                  lifecycle을 publish한다. callback은 중간 latch를 보더라도 새 admission이나 두 번째 cleanup을
+                  시작할 수 없다.
+              - **c3c-3 — owner event lease와 teardown:** 두 merge gate로 닫는다.
+                - **c3c-3a — owner event lease:** c3c-2b1의 `OwnerMetadataState`에 resize/metadata
+                  borrow/finish generation, projection retry와 terminal revoke를 연결한다.
+                - **c3c-3b — partial-consume teardown:** retained token 일부가 이미 release됐거나 owner event
+                  lease가 revoke된 모든 상태에서 exact cleanup과 ledger final-zero를 닫는다.
 
               `PreparedClientAdoption.commitScreenSeedsInto(client,ledger,out)`는 ledger `commitSeeds`가 실패하기
               전까지만 error를 반환하고, 성공 직후부터 token slice-header move/source tombstone만 수행하는 no-error
@@ -3785,22 +3847,28 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
               unsupported/unavailable은 event가 아니며 initial fence 뒤에도 tag가 유지된다.
 
               orchestration은 두 단계로 닫힌다.
-              c2의 현재 payloadless `PrepareStatus{prepared,retryable_preserved,terminal}`는 c3가 착륙할 때
+              c2의 현재 payloadless
+              `PrepareStatus{prepared,deferred_non_adopted,busy,retryable_preserved,terminal}`는 c3가 착륙할 때
               아래 `AdoptionPrepareStatus`로 교체하며 두 union을 동시에 공개하지 않는다.
               `ExternalPumpStorage.prepareAdoption(now_ns) -> AdoptionPrepareStatus`가 Phase A, recovery checked
               context와 모든 allocation을 소유하고
               `prepared_adopted | recovery_committed | terminal_latched |
-              retryable_preserved(.out_of_memory)`만 반환한다. non-adopted verdict는 같은 exclusive call 안에서
+              retryable_preserved(.out_of_memory | .transaction_busy)`만 반환한다. non-adopted verdict는 같은 exclusive call 안에서
               위 immediate no-fail suffix까지 끝내므로 prepared terminal/recovery 상태를 외부에 노출하지 않는다.
-              `ExternalPumpStorage.commitAdoption() -> CommitResult`는 allocation/OOM/clock read/checked arithmetic이 없고
-              오직 `prepared_adopted`에서 호출하며 `adopted | terminal_latched`만 반환한다. final seal은
+              `ExternalPumpStorage.commitAdoption(cleanup_scratch) -> CommitResult`는
+              allocation/OOM/clock read/checked arithmetic이 없고
+              오직 `prepared_adopted`에서 호출하며 정상 진입은 `adopted | terminal_latched`, 재진입/종료 owner는
+              `transaction_busy | dead`만 반환한다. final seal은
               storage/Client/ledger/evidence/initial seed/event raw content/authority/request ID,
               every final address와 cleanup mirror를 allocation 없이 재검증한다. adopted path는
               **ledger seed+typed token take(마지막 fallible precommit) → owner resize/metadata·authority·request
-              state take → `Client.commitExternalAdoption` → `semantic_state=.active{.flow=.initial_fence}`와
+              state take → `Client.commitExternalAdoptionTakeNoFail` → `semantic_state=.active{.flow=.initial_fence}`와
               `lifecycle=.live`를 마지막 publish** 순서다. ledger 성공 뒤에는 allocation/callback/validation/error
               return이 없다. prepare 내부 terminal/recovery는 ledger seed를 하지 않고 stack winner cleanup →
               branch-specific Client disarm/close → semantic/lifecycle publish의 별도 no-fail suffix를 쓴다.
+              final-seal failure cleanup과 b3 immediate cleanup도 teardown과 같은 aggregate scratch
+              non-alias/backing-first proof를 첫 callback 전에 실행하고, proof 실패는 ledger/active publish 0의
+              terminal latch로 끝난다.
               final seal/content mismatch도 ledger와 active semantic publish mutation은 0인 채 Client canonical
               fail-close와 prepared-owner cleanup을 수행하고 `terminal_latched`가 된다. 따라서 이 경우
               source mutation 0은 주장하지 않으며 테스트는 ledger/publish 0과 fd close·queue cleanup exact once를
@@ -3816,8 +3884,36 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
               scalar/DTO는 보존한다. active 상태의 wrong/stale/double token은 invariant terminal이고,
               terminal/teardown이 revoke한 lease의 late finish만 dead/stale typed no-op reject다. app/TTY projection은 3b다.
 
-              teardown은 **남은 owner metadata deinit → 각 retained token `ledger.releaseLease`(실패해도 전수 진행) →
-              token backing free → ledger `drainAll` → Client fd/storage cleanup → ledger `finish`** 순서다. 일부 owner
+              c3c component gate의 `ExternalPumpStorage.teardown(cleanup_scratch)`는 caller-owned
+              `ExternalPumpCleanupScratch`를 명시적으로 받는다. 이 aggregate scratch는 c3c-2a의
+              `ExternalAdoptionCleanupScratch`, metadata cleanup descriptor와 최대 4,096개의 retained token/release
+              identity를 포함하고 compile-time `1 MiB` 이하다. P5c3c-2b3 전의 c3c-2b1~3b와
+              2b2d1~f3 모든 component/turn fixture owner가 이를 호출 전체보다 오래 사는 외부 member로 소유하고,
+              P5c3c-2b3의 final `ExternalPumpOwner`가 같은 scratch를 persistent member로 두어 제품 teardown에
+              전달한다. scratch를 `ExternalPumpStorage`에 inline으로 넣어 fixed-storage cap을 우회하거나 teardown
+              stack에 숨기지 않는다. scratch 전체는 storage/ledger/all destinations/prepared+committed token
+              arrays/metadata DTO backing/Client graph와 모든 cleanup callback이 해제할 backing에서 non-overlap이고
+              독립 lifetime임을 첫 callback 전에 증명한다.
+
+              teardown은 먼저 exclusive operation lease를 획득하고 `lifecycle=.tearing_down`과 event-lease revoke를
+              publish해 모든 재진입 facade call을 allocation/callback/mutation 0의 typed busy/dead 결과로 닫는다.
+              이어 metadata descriptor, retained token identity와 backing headers, Client committed take cleanup을
+              aggregate scratch에 전부 freeze하고 모든 pairwise alias/backing-first seal을 검증한다. 첫 allocator
+              callback 뒤에는 destination/token/metadata/Client heap backing을 다시 읽지 않는다.
+              ledger도 allocation-free `beginOwnerTeardown(out_permit)`로 address-bound
+              `OwnerTeardownPermit{ledger_addr,operation_generation}`를 먼저 publish한다. 이 순간부터 기존
+              `commitSeeds/reserve/transition/releaseLease/drainAll/finish`는 모두 typed busy/dead이고 mutation 0이며,
+              teardown만 permit을 받는 `releaseLeaseForTeardown`, `drainAllForTeardown`,
+              `finishForTeardown`을 순서대로 호출할 수 있다. permit은 aggregate scratch 안의 final address에 seal되고
+              복사·stale generation·다른 ledger 사용을 거부한다. allocator callback에는 ledger나 permit pointer를
+              전달하지 않으며 public facade도 raw ledger를 export하지 않는다. 첫/중간/마지막 release와 drain의
+              allocator callback이 ordinary ledger/storage API를 재호출해도 busy/dead·mutation 0인지 고정한다.
+              **frozen retained token 전수 `ledger.releaseLeaseForTeardown`(실패해도 계속) → residual/orphan
+              `ledger.drainAllForTeardown` → callback 없는 `ledger.finishForTeardown` 판정 → frozen owner metadata cleanup → Client
+              `deinitCommitted(client_scratch)` → token/wrapper/inventory backing free → dead publish** 순서다.
+              release/drain allocator callback의 재진입은 이미 tearing-down latch라 효과 0이고, release 실패의
+              orphan payload 권위는 token backing을 free하기 전에 ledger가 계속 소유한다. prepared/uncommitted
+              token에는 releaseLease를 호출하지 않는다. 일부 owner
               event/token이 이미 consume/release된 상태도 허용한다. stale/duplicate token, cleanup mirror drift,
               orphan drain은 최초 semantic terminal reason을 덮지 않고 sticky invariant만 추가한다.
 
@@ -4054,8 +4150,12 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
           2b2b의 검증된 `ExternalPumpStorage` scaffold를 최종 member로 두고
           `ExternalPumpOwner.initInPlace(out: *ExternalPumpOwner, prepared: *Prepared)`만 실제
           `external_attach.Prepared`를 consume한다.
-          성공 시 source를 invalid 상태로 만들고 `ExternalPumpStorage`, `RemoteAttachment`, transport adapter와
-          saved `self_addr`를 caller의 최종 stack 주소에 한 번 배치한다. `Client`와
+          성공 시 source를 invalid 상태로 만들고 `ExternalPumpStorage`, `RemoteAttachment`, transport adapter,
+          `cleanup_scratch: ExternalPumpCleanupScratch`와 saved `self_addr`를 caller의 최종 stack 주소에 한 번
+          배치한다. scratch range는 exact owner range 안의 sealed offset에 containment되고
+          storage/attachment/adapter/다른 sibling field와 range non-alias이며 owner lifetime 전체보다
+          짧지 않음을 init seal과 every-public-method final-address 검증에 포함한다. `commitAdoption`과 teardown은
+          이 member만 storage에 전달하고 caller 임시 scratch를 받지 않는다. `Client`와
           `ExternalInboxLedger`는 storage 안의 단일 소유권을 유지한다. bind 뒤 모든 public method는
           `self_addr == @intFromPtr(self)`를
           ReleaseFast에서도 확인하고 moved/stale copy를 typed invariant failure로 거부한다. owner를 값으로 반환하는
@@ -4069,7 +4169,10 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
           `ExternalPumpFacade`의 단일 opaque `*ExternalPumpStorage` borrow로 전달한다. read/borrow/release/
           mark/drop/fail-closed가 모두 이 경계를 쓰며 `RemoteAttachment`에는 facade 타입을 노출하지 않는다.
           attachment가 charged lease를 가진 채 socket이 poison되어도 storage 안의 Client **object**와 ledger는
-          attachment cleanup까지 살아 있고 teardown은 attachment release/drop→Client storage/fd→ledger final-zero다.
+          attachment cleanup까지 살아 있다. product teardown은 attachment가 가진 lease/drop을 먼저 storage
+          release 경계로 반환한 뒤, 위 aggregate-scratch 단일 출처의 **ledger release/drain/finish → metadata →
+          Client committed cleanup → descriptor backing free** 순서를 그대로 호출한다. Client storage/fd를 ledger
+          final-zero보다 먼저 종료하는 별도 product 순서를 만들지 않는다.
           `ExternalPumpOwner`의 in-place product fixture가 실제 `external_attach.prepare` 결과를 consume해 initial
           inherited state를 adopt하고 one pump/control/teardown을 수행한다. moved owner, source 재사용, bind/append/
           apply OOM, timeout/revoke 중 fail-close, attachment-held lease 상태의 Client 선종료 시도를 Debug/ReleaseFast에서
@@ -4094,7 +4197,7 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
         버리고 하나의 100 ms deadline 안에서 leave를 시도한 뒤 즉시 raw restore/signal forwarding으로 간다.
 
     **P5c3c-1a~2a, 2b1, 2b2a~c2와 2b2c3-c3a1~c3c-2a는 구현 완료다.
-    c3c-2b~3b는 계획 상태다.**
+    c3c-2b1~3b, 2b2d1~f3, P5c3c-2b3와 P5c3c-3a~3b는 계획 상태다.**
     2b2c3 전체는 c3c 전체가 green이 아니므로 아직 계획 상태다. 각 slice는 P5c3a~b의 Debug/ReleaseFast gate를 재실행하고 다음 slice가 실제
     consumer로 쓰지 않는 임시 public API는 만들지 않는다.
 

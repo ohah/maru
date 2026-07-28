@@ -1119,11 +1119,21 @@ fn compatibilityProfilesEqual(a: compatibility.Profile, b: compatibility.Profile
     return std.mem.eql(u8, a.required_fingerprint.?, b.required_fingerprint.?);
 }
 
-fn validateExternalAdoptionClient(
+const ExternalRequestIdPolicy = enum {
+    require_nonzero,
+    allow_zero,
+};
+
+const ExternalAdoptionValidationOptions = struct {
+    owner_aliases: enum { skip, validate } = .skip,
+    request_id: ExternalRequestIdPolicy = .require_nonzero,
+};
+
+fn validateExternalAdoptionSourceEligibility(
     self: *const Client,
     target_stream: u64,
-    validate_owner_aliases: bool,
-) ExternalAdoptionInspectError!ExternalValidatedAdoption {
+    request_id_policy: ExternalRequestIdPolicy,
+) ExternalAdoptionInspectError!void {
     if (target_stream == 0) return error.InvalidStream;
     if (self.ownership != .external_pump or self.unusable or self.fd < 0)
         return error.InvalidClientState;
@@ -1141,7 +1151,8 @@ fn validateExternalAdoptionClient(
         self.parser.expected_major != self.wire_major or
         self.parser.head > self.parser.buf.items.len)
         return error.InvalidClientState;
-    if (self.next_request_id == 0) return error.InvalidRequestId;
+    if (request_id_policy == .require_nonzero and self.next_request_id == 0)
+        return error.InvalidRequestId;
     if (self.pending_outbound != null) return error.InvalidClientState;
     switch (self.io_mode) {
         .blocking => return error.InvalidClientState,
@@ -1151,8 +1162,12 @@ fn validateExternalAdoptionClient(
             state.external_tx.capacity != client_external_mode.max_tx_frames)
             return error.InvalidClientState,
     }
-    if (validate_owner_aliases) try validateExternalOwnerRanges(self);
+}
 
+fn validateExternalAdoptionSourceQueues(
+    self: *const Client,
+    target_stream: u64,
+) ExternalAdoptionInspectError!ExternalValidatedAdoption {
     var screen_count: usize = 0;
     var screen_bytes: usize = 0;
     var batch_bytes: usize = 0;
@@ -1246,6 +1261,31 @@ fn validateExternalAdoptionClient(
         .screen_payload_bytes = screen_bytes,
         .event_payload_bytes = event_bytes,
     };
+}
+
+/// Validates source eligibility and queue semantics without allocating, invoking callbacks, or
+/// mutating `self`. Callers that can receive aliased owners must run their descriptor-first alias
+/// gate between `validateExternalAdoptionSourceEligibility` and
+/// `validateExternalAdoptionSourceQueues` instead.
+fn preflightExternalAdoptionSource(
+    self: *const Client,
+    target_stream: u64,
+    request_id_policy: ExternalRequestIdPolicy,
+) ExternalAdoptionInspectError!ExternalValidatedAdoption {
+    try validateExternalAdoptionSourceEligibility(self, target_stream, request_id_policy);
+    return validateExternalAdoptionSourceQueues(self, target_stream);
+}
+
+fn validateExternalAdoptionClient(
+    self: *const Client,
+    target_stream: u64,
+    options: ExternalAdoptionValidationOptions,
+) ExternalAdoptionInspectError!ExternalValidatedAdoption {
+    if (options.owner_aliases == .skip)
+        return preflightExternalAdoptionSource(self, target_stream, options.request_id);
+    try validateExternalAdoptionSourceEligibility(self, target_stream, options.request_id);
+    try validateExternalOwnerRanges(self);
+    return validateExternalAdoptionSourceQueues(self, target_stream);
 }
 
 fn validateExternalAdoptionStructure(self: *const Client) ExternalAdoptionInspectError!void {
@@ -1980,7 +2020,11 @@ pub const Client = struct {
         self: *const Client,
         target_stream: u64,
     ) ExternalAdoptionInspectError!ExternalAdoptionPreview {
-        const validated = try validateExternalAdoptionClient(self, target_stream, false);
+        const validated = try validateExternalAdoptionClient(
+            self,
+            target_stream,
+            .{},
+        );
         return .{
             .screen_source_count = validated.screen_source_count,
             .screen_payload_bytes = validated.screen_payload_bytes,
@@ -1997,7 +2041,11 @@ pub const Client = struct {
         self: *const Client,
         target_stream: u64,
     ) ExternalAdoptionInspectError!ExternalAdoptionInventory {
-        const validated = try validateExternalAdoptionClient(self, target_stream, true);
+        const validated = try validateExternalAdoptionClient(
+            self,
+            target_stream,
+            .{ .owner_aliases = .validate },
+        );
         const allocator = self.allocator;
         const batches = try allocator.alloc(
             ExternalBatchDescriptor,
@@ -2178,7 +2226,11 @@ pub const Client = struct {
         expected: *const ExternalAdoptionInventory,
         out: []ExternalScreenCopy,
     ) ExternalAdoptionInspectError!void {
-        _ = try validateExternalAdoptionClient(self, expected.target_stream, false);
+        _ = try validateExternalAdoptionClient(
+            self,
+            expected.target_stream,
+            .{},
+        );
         const out_bytes = std.math.mul(
             usize,
             out.len,
@@ -2243,7 +2295,7 @@ pub const Client = struct {
         _ = validateExternalAdoptionClient(
             self,
             expected.target_stream,
-            false,
+            .{},
         ) catch return false;
         if (!externalInventoryMatchesClientExact(expected, self) or
             copies.len != expected.screen_source_count)
@@ -2295,7 +2347,7 @@ pub const Client = struct {
         _ = validateExternalAdoptionClient(
             self,
             inventory.target_stream,
-            false,
+            .{},
         ) catch return false;
         if (externalPlanRangeOverlapsClient(self, plan) catch return false) return false;
         // Inspect already proved the structural and pairwise-alias invariants. Exact descriptor
@@ -6791,9 +6843,11 @@ test "external adoption inventory seals exact client state and disarms owned que
     client.pending_events.items[0].payload = client.pending_batches.items[0].bytes;
     client.pending_events.items[0].header.payload_len =
         @intCast(client.pending_batches.items[0].bytes.len);
+    client.pending_events.items[0].header.kind = .response;
     client.pending_event_bytes = client.pending_batches.items[0].bytes.len;
     try std.testing.expectError(error.InvalidAlias, client.inspectExternalAdoption(7));
     client.pending_events.items[0].payload = saved_event_payload;
+    client.pending_events.items[0].header.kind = .event;
     client.pending_events.items[0].header.payload_len = @intCast(saved_event_payload.len);
     client.pending_event_bytes = saved_event_payload.len;
     var invalid_partial_bytes: std.ArrayListUnmanaged(u8) = .empty;
@@ -6965,6 +7019,70 @@ test "external adoption inventory seals exact client state and disarms owned que
     try std.testing.expectEqual(@as(usize, 0), client.pending_events.capacity);
     try std.testing.expect(client.partial_batch == null);
     try std.testing.expect(plan.inventory == null);
+}
+
+test "external adoption source preflight is allocation-free and scans past raw request zero" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    var fds: [2]c.fd_t = undefined;
+    try std.testing.expectEqual(
+        @as(c_int, 0),
+        c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds),
+    );
+    defer _ = c.close(fds[1]);
+    var client = makeConnectedTestClient(allocator, fds[0]);
+    defer client.deinit();
+    try client.enterExternalMode();
+    client.ownership = .external_pump;
+    client.connection_profile = .cli_attach;
+    client.compatibility_profile = compatibility.profileForMajor(protocol.version_major).?;
+    client.next_request_id = 0;
+
+    const before = externalAdoptionSnapshot(&client);
+    try std.testing.expectError(error.InvalidRequestId, client.previewExternalAdoption(7));
+    try std.testing.expectError(
+        error.InvalidRequestId,
+        preflightExternalAdoptionSource(&client, 7, .require_nonzero),
+    );
+    const validated = try preflightExternalAdoptionSource(&client, 7, .allow_zero);
+    try std.testing.expectEqual(@as(usize, 0), validated.screen_source_count);
+    try std.testing.expect(std.meta.eql(before, externalAdoptionSnapshot(&client)));
+
+    client.pending_event_bytes = 1;
+    try std.testing.expectError(
+        error.InvalidCounter,
+        preflightExternalAdoptionSource(&client, 7, .allow_zero),
+    );
+    client.pending_event_bytes = 0;
+
+    const malformed_payload = try allocator.dupe(u8, "{}");
+    try client.pending_events.append(allocator, .{
+        .header = .{
+            .kind = .response,
+            .stream_id = 7,
+            .payload_len = @intCast(malformed_payload.len),
+        },
+        .payload = malformed_payload,
+    });
+    client.pending_event_bytes = malformed_payload.len;
+    try std.testing.expectError(
+        error.InvalidHeader,
+        preflightExternalAdoptionSource(&client, 7, .allow_zero),
+    );
+    client.pending_events.items[0].header.kind = .event;
+
+    var failing = testing.FailingAllocator.init(allocator, .{});
+    failing.fail_index = failing.alloc_index;
+    const original_allocator = client.allocator;
+    const original_parser_allocator = client.parser.allocator;
+    client.allocator = failing.allocator();
+    client.parser.allocator = failing.allocator();
+    defer {
+        client.allocator = original_allocator;
+        client.parser.allocator = original_parser_allocator;
+    }
+    _ = try preflightExternalAdoptionSource(&client, 7, .allow_zero);
+    try std.testing.expect(!failing.has_induced_failure);
 }
 
 test "external adoption validates inherited stream batches across every boundary" {

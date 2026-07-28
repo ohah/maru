@@ -308,7 +308,7 @@ flowchart TD
   - **잃는 것**: 브라우저 Term을 사이에 둔 탭 순서는 복원 시 압축된다(`[term, browser, file]` → `[term, file]`). 브라우저가 미영속인 이상 피할 수 없고, 현행 `active_term` remap이 이미 같은 압축을 받아들이고 있다.
 - **web-only placeholder 조건도 함께 넓힌다(적대적 검증 정정)**: 현행 `if (surfaces.items.len == 0)`(app_session.zig:23356)은 **PTY 목록만** 보므로, 파일 Term만 있는 pane에 **엉뚱한 셸 placeholder가 삽입**된다. 조건을 "**persisted Term(= `surfaces` + 그 pane의 `file-term`) 수가 0**"으로 바꾼다. 브라우저 Term만 있는 pane은 여전히 persisted 0이라 placeholder를 받는다(현행 동작 유지).
 - **창 줄에서 제거**: `dock-entry`·`dock-entry-v2`·`dock-group-count`·`dock-focused-group`·`dock-node`. **남기는 도크 키는 탐색기 것뿐**이다 — `dock-size`·`dock-collapsed`·`dock-presented`·`dock-tree-roots`. (`dock-tree-size`는 도크 폭이 곧 트리 폭이 되며 함께 사라졌다.) `dock-side`는 §1대로 reader가 읽고 무시한다(옛 파일이 `bottom`이어도 우측으로 연다).
-- **구버전 파일 1회 마이그레이션**: 옛 `dock-entry`/`dock-entry-v2`를 만나면 버리지 않고 그 창의 **활성 워크스페이스 활성 pane** 끝에 파일 Term으로 이어 붙인다. 순서는 group preorder → group 내 index. 도크 group 배치 자체는 복원하지 않는다(도크 split은 폐기됐고 대응하는 pane 배치를 추측하지 않는다). 창당 경로 유일성은 이어 붙이는 중에도 강제해 중복은 첫 번째만 남긴다. 다음 저장부터는 새 키만 쓴다.
+- **~~구버전 파일 1회 마이그레이션~~ → 제거(2026-07-29 사용자 결정)**: FP16f는 옛 `dock-entry`/`dock-entry-v2`/`dock-node`/`dock-group-*`를 읽어 파일 Term으로 이어 붙였다. 그 경로를 **파서·검증·DTO까지 통째로 지웠다** — 쓰기는 FP16f부터 이미 멈췄고, 한 번만 실행하면 새 포맷으로 다시 저장되므로 읽기 경로를 무기한 들고 갈 이유가 없다(§13 "옛 포맷 읽기 경로 제거 조건"이 미정인 채 굳는 것도 막는다). 그 키가 남은 아주 오래된 파일은 **unknown field 관용으로 조용히 무시**된다 — 창·탭·터미널·탐색기 상태는 정상 복원되고 그때 열려 있던 파일 탭만 안 살아난다. 되살리려면 그 파일들을 다시 열면 된다.
 - **downgrade 한계가 커진다**: 구버전 Maru는 `file-term`을 모르므로 열린 파일 Term **전체**가 사라진 채 저장된다. 기존 §5 마지막 항목의 "명시 수용" 범위는 유지하되(파일 내용은 disk가 SSOT라 손실은 탭 배치 한정), 손실 대상이 "그 창의 도크 metadata"에서 "그 창의 열린 파일 탭 전체"로 넓어짐을 명시한다.
 
 아래 5.1은 현행(FP1~FP15) 포맷 계약이며, 위 5.0이 대체하는 부분은 폐기 기록이다.
@@ -493,7 +493,7 @@ FP11d의 nested table 행 추가는 `appendPrefixFrom/appendPrefixTo` source ran
 | **수명** | `assignDockSurfaceIds`·`enforceFilePanelLiveViewLimit`(LRU), config `file-panel.max-live-views`, `EntryId`/`EntryIdAllocator` | rename 경로 → §1 ⑵⑶⑷대로 재구현(FP16g) | §1 불변식("`Term`의 surface는 교체되지 않는다")이 이 전부를 대체 |
 | **액션·팔릿** | `split_file_panel_horizontal`·`split_file_panel_vertical`·`close_file_panel_group`·`toggle_file_panel_dock_side`·`focus_file_tree` | — | `toggle_file_panel_focus`, `open_file_panel`, 트리 mutation 액션 4종 |
 | **포커스 ✅(2026-07-28 완료)** | `FocusOwner.dock_surface`·`.dock_group` 삭제(`.dock_pending { EntryId }`는 publish 대기 barrier로 남는다 — §3.4) | — | `.workspace`·`.file_tree` |
-| **workspace 포맷** | `dock-entry`·`dock-entry-v2`·`dock-group-count`·`dock-focused-group`·`dock-node`, `dock-tree-size` | `dock-entry` → `file-term`(§5.0, 1회 마이그레이션) | `dock-size`·`dock-collapsed`·`dock-presented`·`dock-tree-roots`, `dock-side`(읽고 무시) |
+| **workspace 포맷** | `dock-entry`·`dock-entry-v2`·`dock-group-count`·`dock-focused-group`·`dock-node`, `dock-tree-size` — **읽기 경로까지 제거 완료(2026-07-29)**, 남은 키는 unknown field로 무시 | `dock-entry` → `file-term`(§5.0; 1회 마이그레이션은 2026-07-29에 종료) | `dock-size`·`dock-collapsed`·`dock-presented`·`dock-tree-roots`·`dock-side` |
 | **`file_tree.zig` 일체** | — | — | **전부 보존**(트리가 도크에 남는 유일한 콘텐츠) |
 
 즉 "도크 뷰어 제거"는 **WKWebView가 도크에서 0개가 된다**는 뜻이다 — 탐색기는 전부 GPU 셀 chrome이라 도크는 native 콘텐츠 뷰를 하나도 소유하지 않게 되고, 그래서 §4의 도크-aware 예외 둘(destroy 판정·presence 신호)이 제거된다.

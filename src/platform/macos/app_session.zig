@@ -46683,36 +46683,12 @@ test "FP5 workspace restore prunes invalid file panel capabilities and degrades 
     try std.testing.expectEqual(@as(usize, 1), session.fileEntryCount());
     try std.testing.expectEqualStrings(valid_path, session.fileEntryAt(0).?.path);
 
-    // 옛 다중 group 배치로 저장된 파일도(B-4 전까지 와이어는 그대로 읽는다) 평탄화돼 한 pane의 파일 탭이 된다.
-    // 검증 대상이 "group 배치 보존"에서 "**유효 entry 집합과 활성 선택**"으로 바뀐 자리다.
-    const left_entries = [_]dock_panel.PersistedEntry{.{ .path = valid_path, .kind = .markdown, .active = true }};
-    const invalid_middle_entries = [_]dock_panel.PersistedEntry{.{ .path = missing_path, .kind = .html, .active = true }};
-    const right_entries = [_]dock_panel.PersistedEntry{.{ .path = valid_right_path, .kind = .markdown, .active = true }};
-    const groups = [_]dock_panel.PersistedGroup{
-        .{ .entries = &left_entries },
-        .{ .entries = &invalid_middle_entries },
-        .{ .entries = &right_entries },
-    };
-    const tree = [_]dock_panel.PersistedTreeNode{
-        .{ .split = .{ .direction = .horizontal, .ratio_milli = 500 } },
-        .{ .leaf = 0 },
-        .{ .split = .{ .direction = .vertical, .ratio_milli = 500 } },
-        .{ .leaf = 1 },
-        .{ .leaf = 2 },
-    };
-    var restored3 = captured2;
-    restored3.dock = .{ .groups = &groups, .tree = &tree, .focused_group = 1 };
-    try session.applyWorkspaceWindow(restored3);
-    // 중간 group의 유일한 entry는 미존재 파일이라 버려지고, 좌·우 group의 파일 둘만 살아 preorder로 남는다.
-    try std.testing.expectEqual(@as(usize, 2), session.fileEntryCount());
-    try std.testing.expectEqualStrings(valid_path, session.fileEntryAt(0).?.path);
-    try std.testing.expectEqualStrings(valid_right_path, session.fileEntryAt(1).?.path);
-    // 영속된 활성(focused group 1)이 통째로 버려졌으므로 첫 유효 entry가 활성이 된다.
-    try std.testing.expectEqual(session.fileEntryAt(0).?.id, session.pending_dock_focus.?.entry_id);
+    // 옛 다중 group 와이어를 읽던 경로는 2026-07-29에 제거했다(그 포맷 파서와 함께) — 여기서는 pane이 들고 온
+    // 파일만 남는다는 것까지가 검증 범위다. 아래 capture는 그 상태가 새 포맷으로 다시 나가는지를 본다.
     var arena3 = std.heap.ArenaAllocator.init(allocator);
     defer arena3.deinit();
     const persisted = try session.persistFilePanelState(arena3.allocator());
-    try std.testing.expectEqual(@as(usize, 2), persisted.entries.len);
+    try std.testing.expectEqual(@as(usize, 1), persisted.entries.len);
     try std.testing.expect(persisted.entries[0].active);
 }
 

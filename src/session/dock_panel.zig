@@ -12,8 +12,6 @@ pub const max_entries: usize = 256;
 
 /// 한 창 도크의 editor group 상한. 분할 UI는 보통 한 자릿수지만 workspace 입력이 빈 leaf를 무한히 만들지
 /// 못하게 모델과 reader가 같은 bound를 쓴다. 64 groups면 preorder node도 최대 127개로 고정된다.
-pub const max_groups: usize = 64;
-
 /// 콘텐츠 종류는 WebKit 구성 선택에 쓰이는 L2 정책 값이다. 브라우저 탭을 도크로 보내는 후속 확장은 이 닫힌 목록에
 /// 새 값을 더하되, 트리·탭 소유 모델은 그대로 재사용한다(docs/file-panel.md §1·§2.2). `text`는 markdown과 같은
 /// 신뢰 shell·`maru.file.read/write` 브리지를 쓰지만 라이브 프리뷰·mode 선택기·링크가 없는 소스 전용 편집기다(FP12).
@@ -174,24 +172,6 @@ pub const PersistedEntry = struct {
     active: bool = false,
 };
 
-pub const PersistedGroup = struct {
-    entries: []const PersistedEntry = &.{},
-};
-
-/// FP8 다중 그룹 split tree의 preorder DTO. terminal pane tree와 같은 full-binary/self-delimiting 규칙을 쓰되
-/// leaf는 `PersistedState.groups` 인덱스를 가리킨다. ratio는 결정적 텍스트 왕복을 위해 천분율로 저장한다.
-pub const PersistedTreeNode = union(enum) {
-    leaf: usize,
-    split: Split,
-
-    pub const Split = struct {
-        direction: split_tree.SplitDirection,
-        ratio_milli: u16,
-    };
-};
-
-/// 단일 그룹은 기존 `entries`만 써 byte-compatible하게 유지한다. FP8 다중 그룹만 `groups/tree/focused_group`을
-/// 채운다. 두 표현을 동시에 허용하지 않아 reader/writer가 어느 트리를 복원할지 모호해지지 않게 한다.
 pub const PersistedState = struct {
     side: Side = .right,
     size: u32 = 0,
@@ -199,9 +179,6 @@ pub const PersistedState = struct {
     /// Explorer launcher로 한 번 열린 도크인지. content와 분리해 explicit-empty 도크도 재시작 뒤 유지한다.
     presented: bool = false,
     entries: []const PersistedEntry = &.{},
-    groups: []const PersistedGroup = &.{},
-    tree: []const PersistedTreeNode = &.{},
-    focused_group: usize = 0,
 };
 
 /// FP16: 도크는 **탐색기 전용**이라 그룹 트리도 파일 소유도 없다. 남은 것은 도크 자신의 배치 상태와,
@@ -237,12 +214,11 @@ pub const DockPanel = struct {
         return self.restored.items.len;
     }
 
-    /// 와이어 상태에서 도크 배치와 **평탄한 복원 목록**을 만든다. 옛 다중 group 배치(`groups`/`tree`)도
-    /// 계속 읽되 preorder로 평탄화한다 — FP16에는 그 배치를 담을 그릇이 없고, 파일은 활성 워크스페이스의
-    /// 활성 pane에 이어 붙는다(docs/file-panel.md §5.0 마이그레이션 규칙).
+    /// 와이어 상태에서 도크 배치와 **평탄한 복원 목록**을 만든다. 옛 다중 group 배치(`groups`/`tree`)를 읽던
+    /// 경로는 그 포맷 파서와 함께 제거했다(2026-07-29) — 지금 `entries`는 capture 쪽에서만 채워지고, 복원되는
+    /// 파일 목록은 pane 줄의 `file-term`이 든다(docs/file-panel.md §5.0).
     pub fn restore(allocator: std.mem.Allocator, entry_ids: *EntryIdAllocator, state: PersistedState) !DockPanel {
-        if (state.entries.len > max_entries or state.groups.len > max_groups) return error.InvalidPersistedState;
-        if (state.groups.len != 0 and state.entries.len != 0) return error.InvalidPersistedState;
+        if (state.entries.len > max_entries) return error.InvalidPersistedState;
         var panel = try DockPanel.init(allocator, entry_ids);
         errdefer panel.deinit();
         panel.side = state.side;
@@ -250,33 +226,12 @@ pub const DockPanel = struct {
         panel.collapsed = state.collapsed;
         panel.presented = state.presented;
 
-        if (state.groups.len != 0) {
-            if (state.tree.len != state.groups.len * 2 - 1 or state.focused_group >= state.groups.len)
-                return error.InvalidPersistedState;
-            // tree는 배치 정보라 FP16에서 쓸 데가 없지만, 손상된 파일을 조용히 받아들이지 않도록 형태는 검증한다.
-            var node_index: usize = 0;
-            const seen = try allocator.alloc(bool, state.groups.len);
-            defer allocator.free(seen);
-            @memset(seen, false);
-            try validateRestoredTree(state.tree, &node_index, seen);
-            if (node_index != state.tree.len) return error.InvalidPersistedState;
-            for (seen) |value| if (!value) return error.InvalidPersistedState;
-
-            for (state.groups, 0..) |persisted_group, group_index| {
-                const group_is_focused = group_index == state.focused_group;
-                try panel.appendRestored(persisted_group.entries, group_is_focused);
-            }
-            return panel;
-        }
-
-        if (state.tree.len != 0) return error.InvalidPersistedState;
-        try panel.appendRestored(state.entries, true);
+        try panel.appendRestored(state.entries);
         return panel;
     }
 
-    /// 한 group(또는 단일 목록)의 entry를 복원 목록 끝에 잇는다. 경로 중복·허용되지 않는 mode·빈 경로는
-    /// 와이어 오류다. `active_owner`는 이 묶음의 active가 **창 전체 활성**을 뜻하는지다(옛 focused group).
-    fn appendRestored(self: *DockPanel, entries: []const PersistedEntry, active_owner: bool) !void {
+    /// 복원 목록에 entry를 잇는다. 경로 중복·허용되지 않는 mode·빈 경로는 와이어 오류다.
+    fn appendRestored(self: *DockPanel, entries: []const PersistedEntry) !void {
         for (entries) |entry| {
             if (entry.path.len == 0 or !entry.mode.allowedFor(entry.kind)) return error.InvalidPersistedState;
             for (self.restored.items) |existing| {
@@ -291,25 +246,7 @@ pub const DockPanel = struct {
                 .kind = entry.kind,
                 .mode = entry.mode,
             });
-            if (entry.active and active_owner) self.restored_active = self.restored.items.len - 1;
-        }
-    }
-
-    fn validateRestoredTree(nodes: []const PersistedTreeNode, index: *usize, seen: []bool) !void {
-        if (index.* >= nodes.len) return error.InvalidPersistedState;
-        const node = nodes[index.*];
-        index.* += 1;
-        switch (node) {
-            .leaf => |group_index| {
-                if (group_index >= seen.len or seen[group_index]) return error.InvalidPersistedState;
-                seen[group_index] = true;
-            },
-            .split => |persisted_split| {
-                if (persisted_split.ratio_milli < 50 or persisted_split.ratio_milli > 950)
-                    return error.InvalidPersistedState;
-                try validateRestoredTree(nodes, index, seen);
-                try validateRestoredTree(nodes, index, seen);
-            },
+            if (entry.active) self.restored_active = self.restored.items.len - 1;
         }
     }
 };
@@ -351,28 +288,6 @@ test "entry id allocator: monotonic nonzero and exhaustion fails closed" {
     ids.next_id = std.math.maxInt(EntryId);
     try std.testing.expectError(error.EntryIdExhausted, ids.next());
     try std.testing.expectEqual(std.math.maxInt(EntryId), ids.next_id);
-}
-
-test "dock panel: multi-group restore rejects duplicate path and duplicate leaf" {
-    var entry_ids: EntryIdAllocator = .{};
-    const a_entries = [_]PersistedEntry{.{ .path = "/tmp/a.md", .kind = .markdown, .active = true }};
-    const b_entries = [_]PersistedEntry{.{ .path = "/tmp/a.md", .kind = .markdown, .active = true }};
-    const groups = [_]PersistedGroup{ .{ .entries = &a_entries }, .{ .entries = &b_entries } };
-    const tree = [_]PersistedTreeNode{
-        .{ .split = .{ .direction = .horizontal, .ratio_milli = 500 } },
-        .{ .leaf = 0 },
-        .{ .leaf = 1 },
-    };
-    try std.testing.expectError(error.InvalidPersistedState, DockPanel.restore(std.testing.allocator, &entry_ids, .{ .groups = &groups, .tree = &tree }));
-
-    const distinct_b = [_]PersistedEntry{.{ .path = "/tmp/b.md", .kind = .markdown, .active = true }};
-    const distinct_groups = [_]PersistedGroup{ .{ .entries = &a_entries }, .{ .entries = &distinct_b } };
-    const duplicate_leaf = [_]PersistedTreeNode{
-        .{ .split = .{ .direction = .horizontal, .ratio_milli = 500 } },
-        .{ .leaf = 0 },
-        .{ .leaf = 0 },
-    };
-    try std.testing.expectError(error.InvalidPersistedState, DockPanel.restore(std.testing.allocator, &entry_ids, .{ .groups = &distinct_groups, .tree = &duplicate_leaf }));
 }
 
 test "dock mode policy keeps HTML read-only and both Markdown editors dirty-capable" {

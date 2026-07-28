@@ -783,19 +783,27 @@ fn externalRangesOverlap(a: ExternalRange, b: ExternalRange) bool {
     return a.start < b_end and b.start < a_end;
 }
 
+fn checkedExternalRange(
+    start: usize,
+    len: usize,
+) ExternalAdoptionInspectError!?ExternalRange {
+    if (len == 0) return null;
+    if (start == 0) return error.InvalidAlias;
+    _ = std.math.add(usize, start, len) catch return error.ArithmeticOverflow;
+    return .{ .start = start, .len = len };
+}
+
 fn externalRangeForSlice(bytes: []const u8, capacity: usize) ExternalAdoptionInspectError!?ExternalRange {
-    if (capacity == 0) return null;
-    return .{ .start = @intFromPtr(bytes.ptr), .len = capacity };
+    return checkedExternalRange(@intFromPtr(bytes.ptr), capacity);
 }
 
 fn externalRangeForTypedSlice(
     comptime Entry: type,
     entries: []const Entry,
 ) ExternalAdoptionInspectError!?ExternalRange {
-    if (entries.len == 0) return null;
     const bytes = std.math.mul(usize, entries.len, @sizeOf(Entry)) catch
         return error.ArithmeticOverflow;
-    return .{ .start = @intFromPtr(entries.ptr), .len = bytes };
+    return checkedExternalRange(@intFromPtr(entries.ptr), bytes);
 }
 
 fn externalDestinationOverlapsInventory(
@@ -832,10 +840,9 @@ fn externalRangeForList(
     list: anytype,
     comptime Entry: type,
 ) ExternalAdoptionInspectError!?ExternalRange {
-    if (list.capacity == 0) return null;
     const bytes = std.math.mul(usize, list.capacity, @sizeOf(Entry)) catch
         return error.ArithmeticOverflow;
-    return .{ .start = @intFromPtr(list.items.ptr), .len = bytes };
+    return checkedExternalRange(@intFromPtr(list.items.ptr), bytes);
 }
 
 fn externalOwnerRangeCount(self: *const Client) ExternalAdoptionInspectError!usize {
@@ -851,14 +858,111 @@ fn externalOwnerRangeCount(self: *const Client) ExternalAdoptionInspectError!usi
     return count;
 }
 
+const max_external_owner_range_count =
+    6 + 1 + 1 +
+    protocol.max_client_screen_items +
+    protocol.max_client_screen_items +
+    max_pending_event_count;
+const max_external_owner_range_scratch_bytes =
+    max_external_owner_range_count * @sizeOf(ExternalRange);
+const max_external_outer_owner_range_count = 7;
+
+const ExternalSourceOwnerRangeScratch = struct {
+    ranges: [max_external_owner_range_count]ExternalRange = undefined,
+};
+comptime {
+    if (@sizeOf(ExternalSourceOwnerRangeScratch) !=
+        max_external_owner_range_scratch_bytes or
+        @sizeOf(ExternalSourceOwnerRangeScratch) > 160 * 1024)
+        @compileError("source owner-range scratch exceeds the c3b fixed-buffer budget");
+}
+
 fn appendExternalRange(
     ranges: []ExternalRange,
     used: *usize,
     range: ?ExternalRange,
-) void {
+) ExternalAdoptionInspectError!void {
     const present = range orelse return;
+    if (used.* >= ranges.len) return error.InvalidClientState;
     ranges[used.*] = present;
     used.* += 1;
+}
+
+fn fillExternalOuterOwnerRanges(
+    self: *const Client,
+    ranges: []ExternalRange,
+) ExternalAdoptionInspectError!usize {
+    var used: usize = 0;
+    if (self.build_id) |bytes|
+        try appendExternalRange(ranges, &used, try externalRangeForSlice(bytes, bytes.len));
+    const fixed = [_]?ExternalRange{
+        try externalRangeForSlice(self.lifecycle, self.lifecycle.len),
+        try externalRangeForList(self.parser.buf, u8),
+        try externalRangeForList(self.pending_batches, StreamBatch),
+        try externalRangeForList(self.pending_stream, framing.Frame),
+        try externalRangeForList(self.pending_events, BufferedEvent),
+        switch (self.io_mode) {
+            .blocking => null,
+            .external => |state| try externalRangeForList(
+                state.external_tx,
+                client_external_mode.ExternalTxFrame,
+            ),
+        },
+    };
+    for (fixed) |range| try appendExternalRange(ranges, &used, range);
+    if (used > ranges.len) return error.InvalidClientState;
+    return used;
+}
+
+fn appendExternalNestedOwnerRanges(
+    self: *const Client,
+    ranges: []ExternalRange,
+    used: *usize,
+) ExternalAdoptionInspectError!void {
+    const count = try externalNestedOwnerRangeCount(self);
+    for (0..count) |index|
+        try appendExternalRange(ranges, used, try externalNestedOwnerRangeAt(self, index));
+    if (used.* > ranges.len) return error.InvalidClientState;
+}
+
+fn externalNestedOwnerRangeCount(
+    self: *const Client,
+) ExternalAdoptionInspectError!usize {
+    var count: usize = @intFromBool(self.partial_batch != null);
+    inline for (.{
+        self.pending_batches.items.len,
+        self.pending_stream.items.len,
+        self.pending_events.items.len,
+    }) |part| count = std.math.add(usize, count, part) catch
+        return error.ArithmeticOverflow;
+    return count;
+}
+
+fn externalNestedOwnerRangeAt(
+    self: *const Client,
+    ordinal: usize,
+) ExternalAdoptionInspectError!?ExternalRange {
+    var index = ordinal;
+    if (self.partial_batch) |partial| {
+        if (index == 0)
+            return externalRangeForSlice(partial.bytes.items, partial.bytes.capacity);
+        index -= 1;
+    }
+    if (index < self.pending_batches.items.len) {
+        const batch = self.pending_batches.items[index];
+        return externalRangeForSlice(batch.bytes, batch.bytes.len);
+    }
+    index -= self.pending_batches.items.len;
+    if (index < self.pending_stream.items.len) {
+        const frame = self.pending_stream.items[index];
+        return externalRangeForSlice(frame.payload, frame.payload.len);
+    }
+    index -= self.pending_stream.items.len;
+    if (index < self.pending_events.items.len) {
+        const frame = self.pending_events.items[index];
+        return externalRangeForSlice(frame.payload, frame.payload.len);
+    }
+    return error.InvalidClientState;
 }
 
 fn collectExternalOwnerRanges(
@@ -878,47 +982,8 @@ fn fillExternalOwnerRanges(
     const count = try externalOwnerRangeCount(self);
     if (ranges.len < count) return error.InvalidClientState;
     @memset(ranges, .{ .start = 0, .len = 0 });
-    var used: usize = 0;
-    if (self.build_id) |bytes|
-        appendExternalRange(ranges, &used, try externalRangeForSlice(bytes, bytes.len));
-    const fixed = [_]?ExternalRange{
-        try externalRangeForSlice(self.lifecycle, self.lifecycle.len),
-        try externalRangeForList(self.parser.buf, u8),
-        try externalRangeForList(self.pending_batches, StreamBatch),
-        try externalRangeForList(self.pending_stream, framing.Frame),
-        try externalRangeForList(self.pending_events, BufferedEvent),
-        switch (self.io_mode) {
-            .blocking => null,
-            .external => |state| try externalRangeForList(
-                state.external_tx,
-                client_external_mode.ExternalTxFrame,
-            ),
-        },
-    };
-    for (fixed) |range| appendExternalRange(ranges, &used, range);
-    if (self.partial_batch) |partial|
-        appendExternalRange(ranges, &used, try externalRangeForSlice(
-            partial.bytes.items,
-            partial.bytes.capacity,
-        ));
-    for (self.pending_batches.items) |batch|
-        appendExternalRange(
-            ranges,
-            &used,
-            try externalRangeForSlice(batch.bytes, batch.bytes.len),
-        );
-    for (self.pending_stream.items) |frame|
-        appendExternalRange(
-            ranges,
-            &used,
-            try externalRangeForSlice(frame.payload, frame.payload.len),
-        );
-    for (self.pending_events.items) |frame|
-        appendExternalRange(
-            ranges,
-            &used,
-            try externalRangeForSlice(frame.payload, frame.payload.len),
-        );
+    var used = try fillExternalOuterOwnerRanges(self, ranges);
+    try appendExternalNestedOwnerRanges(self, ranges, &used);
     if (used > count) return error.InvalidClientState;
     return used;
 }
@@ -950,6 +1015,70 @@ fn validateExternalOwnerRangesAgainst(
 
 fn validateExternalOwnerRanges(self: *const Client) ExternalAdoptionInspectError!void {
     _ = try validateExternalOwnerRangesAgainst(self, null);
+}
+
+const ExternalSourceOwnerRangeProofStats = struct {
+    outer_ranges: usize,
+    total_ranges: usize,
+    comparisons: usize,
+};
+
+fn validateExternalRangeSet(
+    ranges: []ExternalRange,
+    client_range: ExternalRange,
+    forbidden: ?ExternalRange,
+    comparisons: *usize,
+) ExternalAdoptionInspectError!void {
+    std.mem.sort(ExternalRange, ranges, comparisons, externalRangeLessThan);
+    for (ranges, 0..) |range, index| {
+        if (externalRangesOverlap(range, client_range) or
+            (forbidden != null and externalRangesOverlap(range, forbidden.?)))
+            return error.InvalidAlias;
+        if (index != 0 and externalRangesOverlap(ranges[index - 1], range))
+            return error.InvalidAlias;
+    }
+}
+
+/// Allocation/callback-free c3 source proof. The first sort validates every outer backing before
+/// any list element is read; only then may the second pass enumerate nested payload owners.
+fn validateExternalSourceOwnerRanges(
+    self: *const Client,
+    scratch: *ExternalSourceOwnerRangeScratch,
+) ExternalAdoptionInspectError!ExternalSourceOwnerRangeProofStats {
+    try validateExternalAdoptionStructure(self);
+    const client_range = externalRangeOfValue(self);
+    const scratch_range = externalRangeOfValue(scratch);
+    if (externalRangesOverlap(scratch_range, client_range)) return error.InvalidAlias;
+
+    var outer_scratch: [max_external_outer_owner_range_count]ExternalRange = undefined;
+    const outer_count = try fillExternalOuterOwnerRanges(self, &outer_scratch);
+    var comparisons: usize = 0;
+    try validateExternalRangeSet(
+        outer_scratch[0..outer_count],
+        client_range,
+        scratch_range,
+        &comparisons,
+    );
+
+    const nested_count = try externalNestedOwnerRangeCount(self);
+    for (0..nested_count) |index| {
+        const range = (try externalNestedOwnerRangeAt(self, index)) orelse continue;
+        if (externalRangesOverlap(range, scratch_range)) return error.InvalidAlias;
+    }
+
+    var total_count = try fillExternalOuterOwnerRanges(self, &scratch.ranges);
+    try appendExternalNestedOwnerRanges(self, &scratch.ranges, &total_count);
+    try validateExternalRangeSet(
+        scratch.ranges[0..total_count],
+        client_range,
+        null,
+        &comparisons,
+    );
+    return .{
+        .outer_ranges = outer_count,
+        .total_ranges = total_count,
+        .comparisons = comparisons,
+    };
 }
 
 const ExternalOwnerRangeProofLifecycle = enum { empty, prepared, aborted };
@@ -7082,6 +7211,8 @@ test "external adoption source preflight is allocation-free and scans past raw r
         client.parser.allocator = original_parser_allocator;
     }
     _ = try preflightExternalAdoptionSource(&client, 7, .allow_zero);
+    var source_scratch: ExternalSourceOwnerRangeScratch = .{};
+    _ = try validateExternalSourceOwnerRanges(&client, &source_scratch);
     try std.testing.expect(!failing.has_induced_failure);
 }
 
@@ -7168,6 +7299,132 @@ test "external adoption validates inherited stream batches across every boundary
     try std.testing.expectEqual(@as(usize, 3), inventory.screen_source_count);
 }
 
+test "external source owner proof rejects outer and nested aliases in descriptor order" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    var fds: [2]c.fd_t = undefined;
+    try std.testing.expectEqual(
+        @as(c_int, 0),
+        c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds),
+    );
+    defer _ = c.close(fds[1]);
+    var client = makeConnectedTestClient(allocator, fds[0]);
+    defer client.deinit();
+    try client.enterExternalMode();
+    client.lifecycle = try allocator.dupe(u8, "running");
+    client.ownership = .external_pump;
+    client.connection_profile = .cli_attach;
+    client.compatibility_profile = compatibility.profileForMajor(protocol.version_major).?;
+    var source_scratch: ExternalSourceOwnerRangeScratch = .{};
+    try std.testing.expectError(error.InvalidAlias, checkedExternalRange(0, 1));
+    try std.testing.expect(!@typeInfo([]u8).pointer.is_allowzero);
+    try std.testing.expect(!@typeInfo([]BufferedEvent).pointer.is_allowzero);
+
+    {
+        const saved = client.parser.buf;
+        client.parser.buf.items = client.lifecycle;
+        client.parser.buf.capacity = client.lifecycle.len;
+        defer client.parser.buf = saved;
+        try std.testing.expectError(
+            error.InvalidAlias,
+            validateExternalSourceOwnerRanges(&client, &source_scratch),
+        );
+    }
+    {
+        const saved = client.pending_events;
+        const forged: [*]BufferedEvent = @ptrCast(@alignCast(&client));
+        client.pending_events.items = forged[0..1];
+        client.pending_events.capacity = 1;
+        defer client.pending_events = saved;
+        try std.testing.expectError(
+            error.InvalidAlias,
+            validateExternalSourceOwnerRanges(&client, &source_scratch),
+        );
+    }
+    {
+        const saved_len = client.pending_events.items.len;
+        client.pending_events.items.len = client.pending_events.capacity + 1;
+        defer client.pending_events.items.len = saved_len;
+        try std.testing.expectError(
+            error.InvalidClientState,
+            validateExternalSourceOwnerRanges(&client, &source_scratch),
+        );
+    }
+
+    const payload = try allocator.dupe(u8, "{}");
+    try client.pending_events.append(allocator, .{
+        .header = .{
+            .kind = .event,
+            .stream_id = 7,
+            .payload_len = @intCast(payload.len),
+        },
+        .payload = payload,
+    });
+    client.pending_events.items[0].payload = client.lifecycle;
+    try std.testing.expectError(
+        error.InvalidAlias,
+        validateExternalSourceOwnerRanges(&client, &source_scratch),
+    );
+    client.pending_events.items[0].payload = payload;
+
+    const second_payload = try allocator.dupe(u8, "[]");
+    try client.pending_events.append(allocator, .{
+        .header = .{
+            .kind = .event,
+            .stream_id = 7,
+            .payload_len = @intCast(second_payload.len),
+        },
+        .payload = second_payload,
+    });
+    client.pending_events.items[1].payload = payload;
+    try std.testing.expectError(
+        error.InvalidAlias,
+        validateExternalSourceOwnerRanges(&client, &source_scratch),
+    );
+    client.pending_events.items[1].payload = second_payload;
+
+    const client_before_scratch_alias = externalAdoptionSnapshot(&client);
+    const client_aliased_scratch: *ExternalSourceOwnerRangeScratch =
+        @ptrCast(@alignCast(&client));
+    try std.testing.expectError(
+        error.InvalidAlias,
+        validateExternalSourceOwnerRanges(&client, client_aliased_scratch),
+    );
+    try std.testing.expect(std.meta.eql(
+        client_before_scratch_alias,
+        externalAdoptionSnapshot(&client),
+    ));
+
+    const nested_aliased_scratch = try allocator.create(ExternalSourceOwnerRangeScratch);
+    defer allocator.destroy(nested_aliased_scratch);
+    @memset(std.mem.asBytes(nested_aliased_scratch), 0x5a);
+    {
+        const saved_lifecycle = client.lifecycle;
+        client.lifecycle = std.mem.asBytes(nested_aliased_scratch);
+        defer client.lifecycle = saved_lifecycle;
+        try std.testing.expectError(
+            error.InvalidAlias,
+            validateExternalSourceOwnerRanges(&client, nested_aliased_scratch),
+        );
+        try std.testing.expect(std.mem.allEqual(
+            u8,
+            std.mem.asBytes(nested_aliased_scratch),
+            0x5a,
+        ));
+    }
+    client.pending_events.items[0].payload = std.mem.asBytes(nested_aliased_scratch);
+    try std.testing.expectError(
+        error.InvalidAlias,
+        validateExternalSourceOwnerRanges(&client, nested_aliased_scratch),
+    );
+    try std.testing.expect(std.mem.allEqual(
+        u8,
+        std.mem.asBytes(nested_aliased_scratch),
+        0x5a,
+    ));
+    client.pending_events.items[0].payload = payload;
+}
+
 test "external adoption owner alias validation stays n log n at every queue cap" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
@@ -7183,6 +7440,16 @@ test "external adoption owner alias validation stays n log n at every queue cap"
     client.ownership = .external_pump;
     client.connection_profile = .cli_attach;
     client.compatibility_profile = compatibility.profileForMajor(protocol.version_major).?;
+    client.build_id = try allocator.dupe(u8, "build");
+    client.lifecycle = try allocator.dupe(u8, "running");
+    try client.parser.buf.append(allocator, 0);
+    client.partial_batch = .{
+        .stream_id = 7,
+        .is_snapshot = false,
+        .bytes = .empty,
+        .chunk_count = 1,
+    };
+    try client.partial_batch.?.bytes.append(allocator, 0);
 
     try client.pending_batches.ensureTotalCapacityPrecise(
         allocator,
@@ -7229,6 +7496,21 @@ test "external adoption owner alias validation stays n log n at every queue cap"
     const range_count = try externalOwnerRangeCount(&client);
     const comparisons = try validateExternalOwnerRangesAgainst(&client, null);
     try std.testing.expect(comparisons <= range_count * 64);
+    var source_scratch: ExternalSourceOwnerRangeScratch = .{};
+    const source_stats = try validateExternalSourceOwnerRanges(&client, &source_scratch);
+    try std.testing.expectEqual(range_count, source_stats.total_ranges);
+    try std.testing.expectEqual(
+        max_external_owner_range_count,
+        source_stats.total_ranges,
+    );
+    try std.testing.expect(
+        source_stats.comparisons <=
+            (source_stats.outer_ranges + source_stats.total_ranges) * 64,
+    );
+    try std.testing.expectEqual(
+        @as(usize, 147_584),
+        max_external_owner_range_scratch_bytes,
+    );
 }
 
 fn checkExternalAdoptionAllocation(allocator: std.mem.Allocator) !void {

@@ -65,6 +65,11 @@ pub fn Model(comptime Rt: type) type {
             ///
             /// null이면 파일 패널이 아니다. `kind == .web`이어도 브라우저면 null이다.
             file_entry: ?*dock_panel.Entry = null,
+            /// WP-P: 복원된 브라우저 Term이 **자기 WKWebView가 생긴 뒤** 로드할 URL(owned, 소비하면 null).
+            /// 복원 즉시 navigate할 수 없기 때문에 Term이 들고 있는다 — WKWebView는 `computeWebSurfaceTransitions`가
+            /// `created`를 내고 Swift가 붙인 뒤에야 존재한다(docs/workspace-restore.md §WP-P). 주소창 commit이 쓰는
+            /// 단일 슬롯은 복원(여러 개 동시)을 담을 수 없어 소유를 Term으로 둔다.
+            pending_url: ?[]u8 = null,
             /// 런타임 부착(PTY 세션·pump·생애 플래그) — generic `Rt`로 주입. platform이 `TermRuntime`을 넣는다.
             rt: Rt = .{},
             /// git 브랜치 표시 캐시(owned, cwd 파생). termGitBranch가 cwd가 바뀔 때만 재계산. destroyTerm이 해제.

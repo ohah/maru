@@ -5787,6 +5787,10 @@ pub const AppSession = struct {
         // Phase 7e-2a: 이 Term(web browser)을 주소창 편집 중이면 편집·관련 pending을 정리한다(stale surface_id 방지 —
         // remove가 슬롯을 해제하기 전에 surface_id로 판정). 비-web·비대상이면 무동작(surface_id 불일치 = no-op).
         self.dropAddrEditIfSurface(term.surfaceId());
+        if (term.pending_url) |u| { // WP-P: 아직 로드 못 한 복원 URL(owned) 회수
+            self.allocator.free(u);
+            term.pending_url = null;
+        }
         if (term.kind == .web or term.rt.ended_placeholder) {
             // 4e-1 web Term: PTY·reader·라우팅 없음(sentinel surface). detach/closeAndDetach 없이 registry.remove만
             // 부른다 — union web arm deinit(custom_name 해제 + sentinel surface.deinit + 슬롯 해제)이 소유를 정리한다.
@@ -14944,10 +14948,46 @@ pub const AppSession = struct {
 
     /// commit이 세운 navigate 신호를 drain(1회성). url은 세션 소유 버퍼(addr_navigate_url_buf) 슬라이스라 drain 시 유효
     /// (다음 commit까지 — 7e-2b ABI getter가 즉시 out으로 복사). null=이번 tick 로드할 것 없음.
-    pub fn takeWebAddrNavigate(self: *AppSession) ?struct { surface_id: u64, url: []const u8 } {
+    ///
+    /// **WP-P**: 주소창 commit이 없으면 복원된 브라우저의 `pending_url`을 **tick당 하나** 흘려보낸다(같은 ABI·같은
+    /// Swift 경로 재사용 — 복원 전용 배관을 새로 만들지 않는다). 아직 WKWebView가 없는 Term은 건너뛴다(다음 tick에
+    /// 다시 본다) — 그래야 `created` 전에 navigate가 나가 유실되지 않는다. 사용자 입력(commit)이 항상 우선이다.
+    pub const WebNavigateRequest = struct { surface_id: u64, url: []const u8 };
+
+    pub fn takeWebAddrNavigate(self: *AppSession) ?WebNavigateRequest {
         if (self.addr_navigate_pending) |sid| {
             self.addr_navigate_pending = null;
             return .{ .surface_id = sid, .url = self.addr_navigate_url_buf[0..self.addr_navigate_url_len] };
+        }
+        return self.takeRestoredBrowserNavigate();
+    }
+
+    /// 복원된 브라우저 하나의 `pending_url`을 소비해 navigate 신호로 바꾼다(WP-P). URL을 세션 버퍼로 옮겨 담아
+    /// 반환 슬라이스 수명을 주소창 경로와 **같게** 맞춘다(호출자가 즉시 복사한다는 계약 공유).
+    fn takeRestoredBrowserNavigate(self: *AppSession) ?WebNavigateRequest {
+        for (self.tabs.items) |tab| {
+            for (tab.panes.items) |pane| {
+                for (pane.terms.items) |term| {
+                    const url = term.pending_url orelse continue;
+                    if (url.len == 0 or url.len > addr_nav_url_cap) { // 방어: 저장 경로가 이미 걸렀지만 소비는 여기 단일 지점
+                        self.allocator.free(url);
+                        term.pending_url = null;
+                        continue;
+                    }
+                    // WKWebView가 아직 없으면(created 전) 다음 tick에 다시 본다 — 지금 보내면 Swift가 버린다.
+                    // `web_panel_prev`는 **직전 tick에 Swift로 나간 집합**이므로 여기 있으면 created가 이미 나갔다.
+                    const present = blk: {
+                        for (self.web_panel_prev.items) |p| if (p.surface_id == term.surfaceId()) break :blk true;
+                        break :blk false;
+                    };
+                    if (!present) continue;
+                    @memcpy(self.addr_navigate_url_buf[0..url.len], url);
+                    self.addr_navigate_url_len = url.len;
+                    self.allocator.free(url);
+                    term.pending_url = null;
+                    return .{ .surface_id = term.surfaceId(), .url = self.addr_navigate_url_buf[0..self.addr_navigate_url_len] };
+                }
+            }
         }
         return null;
     }
@@ -23449,8 +23489,13 @@ pub const AppSession = struct {
             // FP16 §5.0: persisted 시퀀스는 **터미널 + 파일 Term**이다(브라우저는 계속 미영속). 파일 Term은
             // `pane` 줄의 `file-term` 반복 필드로 나가고, 그 index가 이 시퀀스 안의 위치다.
             var file_terms: std.ArrayList(maru.session.workspace.FileTerm) = .empty;
+            // WP-P: 브라우저는 **현재 URL만** 싣는다. `insert_after`는 persisted 시퀀스 안 자리가 아니라 "앞의
+            // persisted Term 수"라 기존 인덱스 값을 하나도 바꾸지 않는다 — 구버전 리더가 창을 폴백하지 않는 이유다
+            // (docs/workspace-restore.md §WP-P).
+            var browser_terms: std.ArrayList(maru.session.workspace.BrowserTerm) = .empty;
+            var active_browser: ?usize = null;
             var persisted_index: usize = 0;
-            for (pane.terms.items) |term| {
+            for (pane.terms.items, 0..) |term, term_i| {
                 if (term.file_entry) |entry| {
                     try file_terms.append(arena, .{
                         .index = persisted_index,
@@ -23461,9 +23506,21 @@ pub const AppSession = struct {
                     persisted_index += 1;
                     continue;
                 }
-                // 4e web Term(브라우저)은 sentinel core라 일반 surface로 직렬화하면 복원 시 셸로 오spawn된다 —
-                // capture서 스킵한다(workspace.Surface에 kind 필드가 없어 web 콘텐츠를 영속할 수 없다).
-                if (term.kind == .web) continue;
+                if (term.kind == .web) {
+                    // 브라우저: 관측된 현재 URL을 싣는다. URL이 없거나(아직 아무것도 안 띄운 빈 패널) 주소창
+                    // navigate 상한을 넘으면(큰 data: URI — 한 줄 길이·512 필드 cap 위협) **저장하지 않는다**.
+                    if (self.webNavState(term.surfaceId())) |nav| {
+                        if (nav.url.len > 0 and nav.url.len <= addr_nav_url_cap) {
+                            if (pane.active_term == term_i) active_browser = browser_terms.items.len;
+                            try browser_terms.append(arena, .{
+                                .insert_after = persisted_index,
+                                .url = try arena.dupe(u8, nav.url),
+                            });
+                        }
+                    }
+                    // 브라우저는 persisted 시퀀스에 안 든다(인덱스 불변).
+                    continue;
+                }
                 persisted_index += 1;
                 self.refreshTermObservation(term, false, true);
                 const observed_size = if (term.rt.observation.size.cols > 0 and term.rt.observation.size.rows > 0)
@@ -23545,6 +23602,8 @@ pub const AppSession = struct {
                 .custom_name = try arena.dupe(u8, pane.custom_name orelse ""), // pane 사용자 rename(없으면 "")
                 .surfaces = try surfaces.toOwnedSlice(arena),
                 .file_terms = try file_terms.toOwnedSlice(arena),
+                .browser_terms = try browser_terms.toOwnedSlice(arena),
+                .active_browser = active_browser,
             });
         }
         var tree: std.ArrayList(maru.session.workspace.TreeNode) = .empty;
@@ -24048,6 +24107,35 @@ pub const AppSession = struct {
             next_surface += 1;
         }
         pane.active_term = @min(m.active_term, pane.terms.items.len - 1);
+
+        // WP-P: 브라우저 Term을 `insert_after`(앞의 persisted Term 수) 자리에 끼워 넣는다. 뒤에서부터 삽입해야
+        // 앞 record의 자리 계산이 안 밀린다(같은 insert_after가 여럿이면 등장 순서를 유지한다 — 뒤 record가 더
+        // 뒤에 오도록 역순으로 넣는다). URL은 Term에 pending으로 달고, surface가 생성된 tick에 navigate로 나간다.
+        if (m.browser_terms.len > 0) {
+            var bi = m.browser_terms.len;
+            while (bi > 0) {
+                bi -= 1;
+                const bt = m.browser_terms[bi];
+                const at = @min(bt.insert_after, pane.terms.items.len);
+                const term = self.createWebTerm(.browser) catch continue; // 실패한 record만 버린다(창은 살린다)
+                term.pending_url = self.allocator.dupe(u8, bt.url) catch null;
+                pane.terms.insert(self.allocator, at, term) catch {
+                    self.destroyTerm(term);
+                    continue;
+                };
+                // 활성 record면 그 자리를 활성 탭으로. 아니면 삽입으로 밀린 활성 인덱스를 보정한다.
+                if (m.active_browser) |ab| {
+                    if (ab == bi) {
+                        pane.active_term = at;
+                    } else if (at <= pane.active_term) {
+                        pane.active_term += 1;
+                    }
+                } else if (at <= pane.active_term) {
+                    pane.active_term += 1;
+                }
+            }
+            pane.active_term = @min(pane.active_term, pane.terms.items.len - 1);
+        }
         return pane;
     }
 
@@ -38101,6 +38189,11 @@ test "AddrEdit 흐름: enter→append→commit(navigate)·cancel·teardown 정�
     session.addr_navigate_url_len = 0;
     session.addr_focus_restore_pending = null;
     session.web_nav_action_pending = null; // dropAddrEditIfSurface가 읽음(teardown 정리 대상 일치 검사) — undefined read 방지
+    // WP-P: takeWebAddrNavigate가 commit 슬롯이 비면 복원 브라우저 pending_url을 찾아 **탭 트리를 walk**한다 —
+    // 이 최소 init에서 tabs/web_panel_prev를 안 채우면 undefined read(0xaa deref)다. 빈 목록으로 명시 초기화한다
+    // (같은 계열 함정을 이미 겪은 자리라 주석으로 남긴다 — [[devsession-undefined-test-field-trap]]).
+    session.tabs = .empty;
+    session.web_panel_prev = .empty;
 
     // 1) 편집 진입: 현재 URL 시드 + focus-pull pending(1회성).
     session.enterAddrEdit(42, "https://old.example/");

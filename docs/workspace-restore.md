@@ -33,9 +33,33 @@ Maru가 저장하는 것은 다시 시작하기 위한 **설명서**다.
   web Term(인앱 브라우저/마크다운 패널) — 아래 절
 ```
 
-**web Term(4e)은 저장하지 않는다.** `workspace.Surface`에 kind 필드가 없어 web 패널을 표현할 수 없고(포맷에 kind 추가는 Phase 5), sentinel core를 일반 surface로 직렬화하면 복원 시 셸로 오spawn되므로 `captureWorkspaceTab`이 web Term을 **스킵**한다. 한 pane이 web Term만 가진 경우(모든 terminal Term을 닫음) surfaces가 비면 복원이 `error.EmptyPane`으로 전체를 중단하므로, 그 pane엔 **기본 셸 placeholder 하나**를 넣어 기본 로그인 셸로 복원한다(브라우저 콘텐츠·URL은 어차피 미영속). web 콘텐츠 영속은 Phase 5(콘텐츠·브리지)와 함께 포맷에 kind를 더해 다룬다. **구현 완료(2026-07-20, ABI v137)**: Explorer UX 보강은 기존 window line에 열린 빈 도크용 `dock-presented=1`과 explicit root의 단일 length-framed `dock-tree-roots` field를 추가했다. root field가 없으면 inferred이고 `0:` payload는 explicit-empty다. 유효한 `0:`만으로는 도크 표시를 파생하지 않지만, 손상된 root field는 explicit-empty로 강등하면서 field 존재가 나타낸 표시 의도를 보존하며 terminal과 dock entry를 폐기하지 않는다. 복원은 root를 canonical/no-follow identity로 검증하고 missing/invalid root만 버린 뒤 rows와 safety watcher를 함께 stage하며, root validation이 pending이면 restore를 거부한다. 전체 apply의 fail-index OOM 검증은 기존 tab/dock/root/rows/watch를 원자적으로 보존한다(상세 단일 출처=[file-panel.md](file-panel.md) §5·§7). Markdown entry mode와 dirty content 미영속 계약은 그대로다.
+**web Term(4e)은 원칙적으로 저장하지 않는다**(예외 둘: 파일 Term은 §FP16, 브라우저 URL은 §WP-P — 아래). `workspace.Surface`에 kind 필드가 없어 web 패널을 표현할 수 없고(포맷에 kind 추가는 Phase 5), sentinel core를 일반 surface로 직렬화하면 복원 시 셸로 오spawn되므로 `captureWorkspaceTab`이 web Term을 **스킵**한다. 한 pane이 web Term만 가진 경우(모든 terminal Term을 닫음) surfaces가 비면 복원이 `error.EmptyPane`으로 전체를 중단하므로, 그 pane엔 **기본 셸 placeholder 하나**를 넣어 기본 로그인 셸로 복원한다(브라우저 콘텐츠·URL은 어차피 미영속). web 콘텐츠 영속은 Phase 5(콘텐츠·브리지)와 함께 포맷에 kind를 더해 다룬다. **구현 완료(2026-07-20, ABI v137)**: Explorer UX 보강은 기존 window line에 열린 빈 도크용 `dock-presented=1`과 explicit root의 단일 length-framed `dock-tree-roots` field를 추가했다. root field가 없으면 inferred이고 `0:` payload는 explicit-empty다. 유효한 `0:`만으로는 도크 표시를 파생하지 않지만, 손상된 root field는 explicit-empty로 강등하면서 field 존재가 나타낸 표시 의도를 보존하며 terminal과 dock entry를 폐기하지 않는다. 복원은 root를 canonical/no-follow identity로 검증하고 missing/invalid root만 버린 뒤 rows와 safety watcher를 함께 stage하며, root validation이 pending이면 restore를 거부한다. 전체 apply의 fail-index OOM 검증은 기존 tab/dock/root/rows/watch를 원자적으로 보존한다(상세 단일 출처=[file-panel.md](file-panel.md) §5·§7). Markdown entry mode와 dirty content 미영속 계약은 그대로다.
 
 **FP16 목표(계획 — [file-panel.md](file-panel.md) §5.0이 단일 출처)**: 파일 패널이 전역 도크에서 워크스페이스 Term으로 옮겨오면 "web Term은 저장하지 않는다"는 위 규칙에 예외가 하나 생긴다 — **파일 Term은 저장한다**(현재 `dock-entry`로 저장되던 것을 잃지 않기 위해). 단 위 문단이 밝힌 이유("`workspace.Surface`에 kind 필드가 없고, sentinel core를 일반 surface로 직렬화하면 복원 시 셸로 오spawn된다") 때문에 **`Surface` 레코드에 넣지 않고** pane 줄의 별도 반복 키 `file-term=`으로 저장한다. 그래서 `captureWorkspaceTab`의 web Term 스킵과 `restoreSpawn`의 PTY attach 경로, host-backed identity(`runtime_host_id:runtime_id`) 검증은 **한 줄도 바뀌지 않는다**. 브라우저 web Term은 계속 미영속이다(URL 영속은 별도 보안 판단 필요). 그 결과 FP16에서 **두 곳이 "비-web"에서 "persisted(터미널 + 파일)" 기준으로 넓어져야 한다** — ⑴ `active_term` remap(현행: 앞의 비-web Term 수), ⑵ web-only 셸 placeholder 조건(현행: `surfaces.items.len == 0`, PTY 목록만 본다). ⑵를 안 넓히면 **파일 Term만 있는 pane에 엉뚱한 셸 placeholder가 삽입**되고, ⑴을 안 넓히면 복원 활성 탭이 어긋난다. 브라우저 Term만 있는 pane은 여전히 persisted 0이라 placeholder를 받는다(현행 동작 유지).
+
+## 브라우저 Term URL 영속 (WP-P)
+
+**결정(2026-07-28 사용자 승인)**: 브라우저 web Term은 **현재 URL 하나만** 저장하고 재시작 시 그 URL을 자동 로드한다. 히스토리(뒤로/앞으로)는 복원하지 않는다 — 스톡 WKWebView에서 세션 복원은 `interactionState`(macOS 12+) **바이너리 blob**이 필요하고, 그건 OS 버전에 묶인 값이라 사람이 읽는 텍스트 포맷에 담을 것이 아니다(사용자가 히스토리 미복원을 명시 수용).
+
+### 포맷 — 인덱스 공간을 **건드리지 않는다**
+
+`pane` 줄의 반복 필드 `browser-term="<insert-after>:<url-byte-len>:<url>"`. `insert-after`는 그 브라우저 **앞에 있는 persisted(터미널+파일) Term 수**다.
+
+**왜 `file-term`처럼 persisted 시퀀스에 합류시키지 않는가 — 이게 이 절의 핵심 제약이다.** 브라우저를 시퀀스에 넣으면 인덱스가 재번호되고, 그 파일을 **구버전 Maru가 읽으면 창이 통째로 폴백한다**: 구버전은 `browser-term`을 모르는 필드로 건너뛰므로 `total = surfaces + file-term`으로 계산하는데, 재번호된 `file-term` 인덱스가 그 total을 넘어 `validatePaneFileTerms`의 범위 검사에 걸린다([file-panel.md](file-panel.md) §5.0). 즉 브라우저를 추가하는 대가로 **downgrade 시 파일 탭까지** 잃는다. `insert-after`는 기존 인덱스 값을 하나도 바꾸지 않으므로 구버전은 브라우저만 잃고 나머지는 그대로 복원한다(§5 downgrade 계약의 기존 범위 유지).
+
+- **URL이 없거나 상한을 넘으면 그 브라우저는 저장하지 않는다.** 아직 아무것도 안 띄운 빈 패널은 복원할 값이 없고(빈 탭만 남아 무의미), 큰 `data:` URI는 한 줄 길이·512 필드 cap을 위협한다. 상한은 주소창 navigate가 쓰는 `addr_nav_url_cap`을 그대로 공유한다(별도 상수 금지 — 같은 값이 두 곳에 생기면 갈린다).
+- **활성 탭이 브라우저면** 추가 필드 `active-browser="<record-index>"`로 몇 번째 `browser-term`이 활성인지 적는다. 구버전은 이 필드를 무시하고 `active-term`(비-브라우저 공간·clamp된 값)을 쓰므로 포커스만 이웃으로 떨어진다.
+- **placeholder 조건**: "persisted Term 수 0"의 정의에 브라우저 record를 **포함한다**. URL 있는 브라우저만 있는 pane은 이제 복원할 것이 있으므로 셸 placeholder를 받지 않는다(URL 없는 브라우저만 있으면 종전대로 placeholder).
+
+### 복원 시 로드 시점
+
+브라우저 Term의 WKWebView는 복원 즉시 존재하지 않는다 — `computeWebSurfaceTransitions`가 `created`를 내고 Swift가 붙인 **뒤**에야 navigate할 수 있다. 그래서 복원은 URL을 **Term에 pending으로 달아 두고**, 그 surface가 생성된 tick에 기존 주소창 navigate 경로(`takeWebAddrNavigate` 계열)로 흘려보낸다. 주소창 commit이 쓰는 단일 슬롯은 복원(여러 개 동시)에 못 쓰므로, pending은 **Term이 소유**하고 tick당 하나씩 빠진다.
+
+### 남는 한계
+
+- 스크롤 위치·폼 입력·로그인 세션 이후 상태는 복원하지 않는다(URL 재요청이므로 서버가 주는 대로).
+- **시작 시 네트워크 요청이 나간다**(사용자 승인). 사용자가 직접 열어 둔 탭이므로 복원이 자연스럽고, 안 하면 빈 탭만 남아 의미가 없다는 판단이다.
+- 브라우저가 여럿이면 tick당 하나씩 로드된다(동시 N개 로드로 시작 프레임을 굶기지 않게).
 
 ## 영속 session host와의 관계 (부분 구현)
 

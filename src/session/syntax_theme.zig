@@ -133,7 +133,10 @@ pub fn writeCssVarsJs(colors: SyntaxColors, selection: color.Rgb, font_family: [
     {
         const chunk = std.fmt.bufPrint(
             out[w..],
-            "s.setProperty('--maru-editor-font-size','{d}pt');",
+            // **단위는 `px`다.** CoreText가 터미널을 그릴 때 쓰는 AppKit 포인트는 논리 픽셀 1과 같지만,
+            // CSS `pt`는 1/72인치라 `1pt = 1.333px`다. 같은 숫자를 `pt`로 주입하면 편집기 글자가 터미널보다
+            // 33% 크게 그려진다(사용자 제보 2026-07-28). `app.css`의 폴백이 `13px`인 것도 원래 의도가 px임을 보인다.
+            "s.setProperty('--maru-editor-font-size','{d}px');",
             .{font_size_pt},
         ) catch return null;
         w += chunk.len;
@@ -196,7 +199,7 @@ test "writeCssVarsJs emits all vars as hex and fails closed on small buffer" {
     // 편집기 선택 색·폰트도 함께 주입된다(터미널 테마·폰트 일치).
     try testing.expect(std.mem.indexOf(u8, js, "--maru-editor-selection','#334455'") != null);
     try testing.expect(std.mem.indexOf(u8, js, "--maru-editor-font-family','\"JetBrains Mono\", ui-monospace, monospace'") != null);
-    try testing.expect(std.mem.indexOf(u8, js, "--maru-editor-font-size','14pt'") != null);
+    try testing.expect(std.mem.indexOf(u8, js, "--maru-editor-font-size','14px'") != null);
     // 11 syntax + selection + font-family + font-size = 14개 setProperty.
     var count: usize = 0;
     var it = std.mem.splitSequence(u8, js, "setProperty");
@@ -208,5 +211,5 @@ test "writeCssVarsJs emits all vars as hex and fails closed on small buffer" {
     var buf2: [1024]u8 = undefined;
     const js2 = writeCssVarsJs(c, theme.selection, "Evil'; drop", 14, &buf2).?;
     try testing.expect(std.mem.indexOf(u8, js2, "--maru-editor-font-family") == null);
-    try testing.expect(std.mem.indexOf(u8, js2, "--maru-editor-font-size','14pt'") != null);
+    try testing.expect(std.mem.indexOf(u8, js2, "--maru-editor-font-size','14px'") != null);
 }

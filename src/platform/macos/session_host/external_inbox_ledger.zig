@@ -23,6 +23,38 @@ pub const Token = struct {
     generation: u64,
 };
 
+const SeedRetirementLifecycle = enum {
+    empty,
+    prepared,
+    retired_tombstone,
+};
+
+/// Deferred cleanup for the allocation that held a committed seed plan.
+///
+/// The ledger publishes ownership and tombstones `PreparedSeedPlan` without invoking the
+/// allocator. An outer aggregate may then finish its callback-free publication suffix before
+/// retiring this stack-bound handle.
+pub const PreparedSeedRetirement = struct {
+    saved_self_addr: usize = 0,
+    allocator: std.mem.Allocator = std.heap.page_allocator,
+    entries: []PlannedSeed = &.{},
+    lifecycle: SeedRetirementLifecycle = .empty,
+
+    pub fn isEmpty(self: *const PreparedSeedRetirement) bool {
+        return self.lifecycle == .empty;
+    }
+
+    pub fn retire(self: *PreparedSeedRetirement) void {
+        if (self.lifecycle != .prepared or
+            self.saved_self_addr != @intFromPtr(self))
+            return;
+        const allocator = self.allocator;
+        const entries = self.entries;
+        self.* = .{ .lifecycle = .retired_tombstone };
+        if (entries.len != 0) allocator.free(entries);
+    }
+};
+
 pub const PayloadPhase = enum {
     frame,
     partial,
@@ -304,16 +336,25 @@ pub const PreparedSeedPlan = struct {
         return true;
     }
 
-    fn finishCommit(self: *PreparedSeedPlan) void {
+    fn finishCommitDeferred(
+        self: *PreparedSeedPlan,
+        retirement: *PreparedSeedRetirement,
+    ) void {
         std.debug.assert(self.hasSealedEntries());
+        std.debug.assert(retirement.isEmpty());
         const entries = self.canonicalCleanupEntries() orelse unreachable;
         const allocator = self.canonicalCleanupAllocator() orelse unreachable;
-        allocator.free(entries);
         self.entries = &.{};
         self.cleanup_entries = &.{};
         self.entries_addr = 0;
         self.entries_len = 0;
         self.lifecycle = .committed;
+        retirement.* = .{
+            .saved_self_addr = @intFromPtr(retirement),
+            .allocator = allocator,
+            .entries = entries,
+            .lifecycle = .prepared,
+        };
     }
 
     fn isStablePrepared(self: *const PreparedSeedPlan) bool {
@@ -521,6 +562,27 @@ pub const ExternalInboxLedger = struct {
         payloads: []OwnedPayload,
         token_output: []Token,
     ) CommitError!void {
+        var retirement: PreparedSeedRetirement = .{};
+        try self.commitSeedsDeferredRetirement(
+            plan,
+            payloads,
+            token_output,
+            &retirement,
+        );
+        retirement.retire();
+    }
+
+    /// Same ledger transaction as `commitSeeds`, but deliberately performs no allocator callback
+    /// on success. The caller must retire `retirement` only after its unchecked publication suffix
+    /// has tombstoned every source graph.
+    pub fn commitSeedsDeferredRetirement(
+        self: *ExternalInboxLedger,
+        plan: *PreparedSeedPlan,
+        payloads: []OwnedPayload,
+        token_output: []Token,
+        retirement: *PreparedSeedRetirement,
+    ) CommitError!void {
+        if (!retirement.isEmpty()) return error.InvalidPlan;
         if (!plan.isStablePrepared() or plan.ledger_addr != @intFromPtr(self))
             return error.InvalidPlan;
         if (plan.entries.len != payloads.len or token_output.len != payloads.len)
@@ -537,7 +599,7 @@ pub const ExternalInboxLedger = struct {
                 return error.InvariantFailure;
             }
             if (self.mutation_epoch != plan.expected_mutation_epoch) return error.StalePlan;
-            plan.finishCommit();
+            plan.finishCommitDeferred(retirement);
             return;
         }
         try self.ensureAuthorityMutation();
@@ -588,7 +650,7 @@ pub const ExternalInboxLedger = struct {
         self.generation_exhausted = generation_exhausted;
         self.next_slot_hint = next_hint;
         self.commitSeedMutation();
-        plan.finishCommit();
+        plan.finishCommitDeferred(retirement);
     }
 
     pub fn borrow(

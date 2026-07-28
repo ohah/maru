@@ -376,6 +376,17 @@ const OwnerMetadataTakeKind = enum {
     event,
 };
 
+const OwnerMetadataCommitPayload = union(enum) {
+    unsupported,
+    unavailable,
+    current: struct {
+        logical: runtime_metadata_wire.OwnedMetadataDto,
+        cleanup: runtime_metadata_wire.OwnedMetadataDto,
+        logical_seal: runtime_metadata_wire.OwnedMetadataSeal,
+        cleanup_seal: runtime_metadata_wire.OwnedMetadataSeal,
+    },
+};
+
 pub const PreparedOwnerMetadataTake = struct {
     saved_self_addr: usize = 0,
     storage_addr: usize = 0,
@@ -386,6 +397,7 @@ pub const PreparedOwnerMetadataTake = struct {
     kind: OwnerMetadataTakeKind = .unavailable,
     primary_seal: ?runtime_metadata_wire.OwnedMetadataSeal = null,
     cleanup_seal: ?runtime_metadata_wire.OwnedMetadataSeal = null,
+    commit_payload: OwnerMetadataCommitPayload = .unavailable,
     lifecycle: Lifecycle = .empty,
 
     pub fn validate(
@@ -410,9 +422,11 @@ pub const PreparedOwnerMetadataTake = struct {
             return false;
         return switch (self.kind) {
             .unsupported => prepared.metadata == .unsupported and
-                initial.* == .unsupported and cleanup.* == .unsupported,
+                initial.* == .unsupported and cleanup.* == .unsupported and
+                self.commit_payload == .unsupported,
             .unavailable => prepared.metadata == .unavailable and
-                initial.* == .unavailable and cleanup.* == .unavailable,
+                initial.* == .unavailable and cleanup.* == .unavailable and
+                self.commit_payload == .unavailable,
             .initial => switch (prepared.metadata) {
                 .initial => |binding| switch (binding) {
                     .current => |current| current.seed_address == @intFromPtr(initial) and
@@ -423,7 +437,7 @@ pub const PreparedOwnerMetadataTake = struct {
                         self,
                         initial,
                         cleanup,
-                    ),
+                    ) and ownerMetadataCommitPayloadMatches(self),
                     .unsupported, .unavailable => false,
                 },
                 else => false,
@@ -433,7 +447,8 @@ pub const PreparedOwnerMetadataTake = struct {
                     self.primary_seal != null and
                     self.cleanup_seal != null and
                     std.meta.eql(self.primary_seal.?, event.logical_seal.?) and
-                    std.meta.eql(self.cleanup_seal.?, event.cleanup_seal.?),
+                    std.meta.eql(self.cleanup_seal.?, event.cleanup_seal.?) and
+                    ownerMetadataCommitPayloadMatches(self),
                 else => false,
             },
         };
@@ -445,7 +460,41 @@ pub const PreparedOwnerMetadataTake = struct {
             return;
         self.* = .{ .lifecycle = .aborted_tombstone };
     }
+
+    pub fn lifecycleCode(self: *const PreparedOwnerMetadataTake) u8 {
+        return @intFromEnum(self.lifecycle);
+    }
 };
+
+fn ownerMetadataCommitPayloadMatches(
+    take: *const PreparedOwnerMetadataTake,
+) bool {
+    const current = switch (take.commit_payload) {
+        .current => |*value| value,
+        .unsupported, .unavailable => return false,
+    };
+    const primary = take.primary_seal orelse return false;
+    const cleanup = take.cleanup_seal orelse return false;
+    return std.meta.eql(
+        rebindOwnedSeal(primary, &current.logical),
+        current.logical_seal,
+    ) and std.meta.eql(
+        rebindOwnedSeal(cleanup, &current.cleanup),
+        current.cleanup_seal,
+    ) and
+        runtime_metadata_wire.validateOwnedMetadataSeal(
+            current.logical_seal,
+            &current.logical,
+        ) and
+        runtime_metadata_wire.validateOwnedMetadataSeal(
+            current.cleanup_seal,
+            &current.cleanup,
+        ) and
+        runtime_metadata_wire.OwnedMetadataDto.semanticEql(
+            &current.logical,
+            &current.cleanup,
+        );
+}
 
 pub fn prepareOwnerMetadataTake(
     out: *PreparedOwnerMetadataTake,
@@ -541,13 +590,44 @@ pub fn prepareOwnerMetadataTake(
             };
             out.primary_seal = primary;
             out.cleanup_seal = mirror;
+            out.commit_payload = .{ .current = .{
+                .logical = switch (initial.*) {
+                    .current => |dto| dto,
+                    else => return error.InvalidOwnerTake,
+                },
+                .cleanup = switch (cleanup.*) {
+                    .current => |dto| dto,
+                    else => return error.InvalidOwnerTake,
+                },
+                .logical_seal = primary,
+                .cleanup_seal = mirror,
+            } };
         },
         .event => |*event| {
             if (!event.validate()) return error.InvalidOwnerTake;
             out.primary_seal = event.logical_seal;
             out.cleanup_seal = event.cleanup_seal;
+            out.commit_payload = .{ .current = .{
+                .logical = event.logical orelse return error.InvalidOwnerTake,
+                .cleanup = event.cleanup orelse return error.InvalidOwnerTake,
+                .logical_seal = event.logical_seal orelse
+                    return error.InvalidOwnerTake,
+                .cleanup_seal = event.cleanup_seal orelse
+                    return error.InvalidOwnerTake,
+            } };
         },
-        .unsupported, .unavailable => {},
+        .unsupported => out.commit_payload = .unsupported,
+        .unavailable => out.commit_payload = .unavailable,
+    }
+    if (out.commit_payload == .current) {
+        out.commit_payload.current.logical_seal = rebindOwnedSeal(
+            out.primary_seal orelse return error.InvalidOwnerTake,
+            &out.commit_payload.current.logical,
+        );
+        out.commit_payload.current.cleanup_seal = rebindOwnedSeal(
+            out.cleanup_seal orelse return error.InvalidOwnerTake,
+            &out.commit_payload.current.cleanup,
+        );
     }
     if (!out.validate(prepared, initial, cleanup, destination, storage_addr)) {
         out.* = .{ .lifecycle = .aborted_tombstone };
@@ -555,9 +635,26 @@ pub fn prepareOwnerMetadataTake(
     }
 }
 
+pub fn preparedMetadataOverlapsOwnedBacking(
+    prepared: *const Prepared,
+    initial: *const runtime_metadata_wire.InitialMetadataSeed,
+    cleanup: *const runtime_metadata_wire.InitialMetadataSeed,
+    address: usize,
+    len: usize,
+) bool {
+    return rangeOverlapsMetadataBacking(
+        address,
+        len,
+        prepared,
+        initial,
+        cleanup,
+    );
+}
+
 /// The outer aggregate seal revalidates the plan before the ledger barrier. This suffix only moves
-/// sealed descriptors and rewrites their address-bound DTO seals for the final destination.
-pub fn commitOwnerMetadataTakeNoFail(
+/// sealed descriptors and rewrites their address-bound DTO seals for the final destination. Its
+/// public visibility is solely the module seam used by the permit-consuming pump aggregate.
+pub fn commitOwnerMetadataTakeUnchecked(
     take: *PreparedOwnerMetadataTake,
     prepared: *Prepared,
     initial: *runtime_metadata_wire.InitialMetadataSeed,
@@ -568,59 +665,42 @@ pub fn commitOwnerMetadataTakeNoFail(
     destination.storage_addr = take.storage_addr;
     destination.source_addr = @intFromPtr(prepared);
     destination.lifecycle = .committed;
-    switch (take.kind) {
+    switch (take.commit_payload) {
         .unsupported => destination.metadata = .unsupported,
         .unavailable => destination.metadata = .unavailable,
-        .initial => {
-            const moved = initial.take().current;
+        .current => |payload| {
+            // The permit proved the exact source tag and payload mirrors before the ledger
+            // barrier. From here on only fixed header tombstones and already-captured values are
+            // used, so a malformed optional cannot introduce a post-ledger trap.
+            initial.* = .unavailable;
             cleanup.* = .unavailable;
             destination.metadata = .{ .current = .{
-                .logical = moved,
-                .cleanup = moved,
-                .logical_seal = take.primary_seal.?,
-                .cleanup_seal = take.cleanup_seal.?,
+                .logical = payload.logical,
+                .cleanup = payload.cleanup,
+                .logical_seal = payload.logical_seal,
+                .cleanup_seal = payload.cleanup_seal,
                 .owner_seal = undefined,
                 .cleanup_owner_seal = undefined,
                 .pending = true,
             } };
             destination.metadata.current.logical_seal = rebindOwnedSeal(
-                take.primary_seal.?,
+                payload.logical_seal,
                 &destination.metadata.current.logical,
             );
             destination.metadata.current.cleanup_seal = rebindOwnedSeal(
-                take.cleanup_seal.?,
+                payload.cleanup_seal,
                 &destination.metadata.current.cleanup,
             );
             bindOwnerMetadataAuthority(destination);
         },
-        .event => {
-            const event = &prepared.metadata.event;
-            const moved = event.logical.?.take();
-            event.cleanup = null;
-            event.logical = null;
-            event.logical_seal = null;
-            event.cleanup_seal = null;
-            event.candidate = null;
-            event.lifecycle = .committed_tombstone;
-            destination.metadata = .{ .current = .{
-                .logical = moved,
-                .cleanup = moved,
-                .logical_seal = take.primary_seal.?,
-                .cleanup_seal = take.cleanup_seal.?,
-                .owner_seal = undefined,
-                .cleanup_owner_seal = undefined,
-                .pending = true,
-            } };
-            destination.metadata.current.logical_seal = rebindOwnedSeal(
-                take.primary_seal.?,
-                &destination.metadata.current.logical,
-            );
-            destination.metadata.current.cleanup_seal = rebindOwnedSeal(
-                take.cleanup_seal.?,
-                &destination.metadata.current.cleanup,
-            );
-            bindOwnerMetadataAuthority(destination);
-        },
+    }
+    if (take.kind == .event) {
+        prepared.metadata.event.cleanup = null;
+        prepared.metadata.event.logical = null;
+        prepared.metadata.event.logical_seal = null;
+        prepared.metadata.event.cleanup_seal = null;
+        prepared.metadata.event.candidate = null;
+        prepared.metadata.event.lifecycle = .committed_tombstone;
     }
     prepared.metadata = .unavailable;
     prepared.prepared_footprint = .{
@@ -1700,7 +1780,7 @@ test "c3c-2b1 metadata destination takes unsupported without allocation" {
         &owner,
         @intFromPtr(&prepared),
     ));
-    commitOwnerMetadataTakeNoFail(
+    commitOwnerMetadataTakeUnchecked(
         &take,
         &prepared,
         &initial,
@@ -1731,7 +1811,7 @@ test "c3c-2b1 metadata destination preserves unavailable as a committed tag" {
         &owner,
         @intFromPtr(&prepared),
     );
-    commitOwnerMetadataTakeNoFail(
+    commitOwnerMetadataTakeUnchecked(
         &take,
         &prepared,
         &initial,
@@ -1782,7 +1862,7 @@ test "c3c-2b1 metadata destination takes initial DTO and frees its mirror exactl
     ));
     // The prepared suffix remains valid with the very next allocation forced to fail.
     counting.fail_index = counting.alloc_index;
-    commitOwnerMetadataTakeNoFail(
+    commitOwnerMetadataTakeUnchecked(
         &take,
         &prepared,
         &initial,
@@ -1845,7 +1925,7 @@ test "c3c-2b1 metadata cleanup uses backing authority before forged pointer cont
             &owner,
             @intFromPtr(&prepared),
         );
-        commitOwnerMetadataTakeNoFail(
+        commitOwnerMetadataTakeUnchecked(
             &take,
             &prepared,
             &initial,
@@ -1924,7 +2004,7 @@ test "c3c-2b1 metadata cleanup tombstones before allocator reentry" {
         &owner,
         @intFromPtr(&prepared),
     );
-    commitOwnerMetadataTakeNoFail(&take, &prepared, &initial, &cleanup, &owner);
+    commitOwnerMetadataTakeUnchecked(&take, &prepared, &initial, &cleanup, &owner);
     reentrant.owner = &owner;
     owner.deinitCommitted();
     try std.testing.expectEqual(@as(usize, 1), reentrant.free_calls);
@@ -2077,7 +2157,7 @@ test "c3c-2b1 metadata owner binds the storage parent address" {
         &owner,
         @intFromPtr(&parent_b),
     ));
-    commitOwnerMetadataTakeNoFail(&take, &prepared, &initial, &cleanup, &owner);
+    commitOwnerMetadataTakeUnchecked(&take, &prepared, &initial, &cleanup, &owner);
     const original = owner.metadata.current.logical;
     owner.storage_addr = @intFromPtr(&parent_b);
     const frees_before = counting.deallocations;
@@ -2128,7 +2208,7 @@ test "c3c-2b1 metadata destination takes materialized event into the same persis
         &owner,
         @intFromPtr(&prepared),
     ));
-    commitOwnerMetadataTakeNoFail(
+    commitOwnerMetadataTakeUnchecked(
         &take,
         &prepared,
         &initial,

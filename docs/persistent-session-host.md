@@ -3736,7 +3736,7 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
                   따라서 두 independent inspect backing의 seal 값도 각각 다르다. 각 inventory 내부의 primary/cleanup header는 같은 backing의
                   주소 복구용일 뿐 nested descriptor mirror로 간주하지 않는다. destination empty/non-alias, exact
                   Client inventory와 aggregate final seal을 검증하며 commit 전에는 source만 owner다.
-                  `commitExternalAdoptionTakeNoFail`은 slice/header를 take owner로 move한 뒤 Client와 disarm plan을
+                  `commitExternalAdoptionTakeUnchecked`는 slice/header를 take owner로 move한 뒤 Client와 disarm plan을
                   tombstone할 뿐 free/deinit/allocator callback을 실행하지 않는다. committed cleanup은 두
                   inventory를 모두 canonicalize하고 cleanup seal에 맞는 inventory에서만 child payload 주소·allocator를
                   읽는다. 이후 batch/stream/event descriptor 전부와 partial을 allocator callback 전에
@@ -3817,6 +3817,48 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
                   metadata optional `.?` unwrap은 post-ledger 경로에 둘 수 없다. 실제 고정 순서는
                   **ledger seed → screen destination → metadata destination → scalar destination →
                   Client cleanup take → prepared shell tombstone → semantic active → lifecycle live**다.
+
+                  Wire로 만들 수 없는 in-process descriptor corruption 때문에 서로 다른 owner graph가 같은
+                  nonempty backing을 가리키면 어느 cleanup mirror도 free 권위로 신뢰하지 않는다. 이 경우
+                  `commitAdoption()`은 ledger mutation/allocator callback 0으로 두 prepared graph를 quarantine하고
+                  canonical Client만 정리한 뒤 process-wide `cross_owner_quarantine` poison latch를 세운다.
+                  product external-pump process는 `ExternalPumpStorage` stack owner 하나만 허용하므로 latch 뒤 새
+                  init은 `process_quarantined`, 기존 owner의 prepare/commit은
+                  `internal_invariant`/`terminal_latched`로 fail-stop하고 두 번째 quarantine
+                  owner를 만들지 않는다. 따라서 process lifetime 유실 상한은 screen payload 18 MiB, aggregate
+                  adoption metadata 4 MiB와 initial metadata 256 KiB를 합친 compile-time
+                  `max_cross_owner_quarantine_bytes` 한 건이다. 이 slice의 module-local diagnostic API는
+                  latched/event count/상한을 노출하며, 제품 notice/공통 observability facade 투영은 c3c-3에서
+                  닫는다. 테스트는 latch 뒤 새 storage 거부와 수동 test-only 회수 전 module status를 먼저 검증한다.
+                  이는 정상 wire/allocator failure의 cleanup 대체 경로가 아니라, arbitrary/double free보다 process
+                  격리를 우선하는 corruption-only fail-stop 예외다.
+
+                  **c3c-2b2 구현 완료:** `ExternalPumpStorage.client_cleanup_take`가 Client queue/inventory cleanup의
+                  final-address sibling이고, `PreparedExternalAdoption`은 `screen_take`·`metadata_take`·
+                  `scalar_take`·`final_seal`을 가진다. `PreparedAdoptionFinalSeal`은 storage/plan/Client/
+                  ledger/evidence, operation generation, 네 take와 persistent destination의 주소·lifecycle 및
+                  leaf digest를 bind한다. commit 직전 fixed `ExternalSourceOwnerRangeScratch`와 screen/metadata
+                  backing proof가 모든 destination/take header를 교차 검사하고, 성공한 검증만 stack-bound
+                  `AdoptedCommitPermit`을 만든다. `commitAdoption()`은 `ledger.commitSeeds` 뒤 private
+                  `commitAdoptionUnchecked`가 위 순서대로 permit을 한 번 소비하며, Client와 metadata leaf는 이
+                  구간에서 재검증·optional unwrap·panic branch를 갖지 않는다. final-seal/leaf drift와 실제
+                  stale/invalid/planning-disabled/drained/invariant ledger precondition drift는 active publication 없이
+                  `terminal_latched`로 닫히고, cleanup callback 재진입은 `transaction_busy`/`busy`다.
+                  nonempty ledger seed plan의 entries allocation은 ledger mutation 때 free하지 않고 stack-bound
+                  `PreparedSeedRetirement`로 take한다. 여덟 publication phase가 끝나 `lifecycle=.live`가 된 뒤에만
+                  이를 retire하므로 ledger 선형화부터 source graph tombstone과 active publication까지 allocator
+                  callback은 0이고, deferred API는 ledger owner 한 곳과 adoption caller 한 곳으로 boundary gate한다.
+                  cleanup은 screen primary/independent cleanup/take의 세 descriptor authority 중 2-of-3
+                  `{addr,len}` 합의만 순회·free하고, allocator는 backlog seal/take/canonical Client 세 authority의
+                  2-of-3 합의만 호출한다. 첫 allocator callback 전에 backlog/take 전체를 stack snapshot으로 move하고
+                  원본을 tombstone한 다음, 합의된 container slice와 각 copy/wrapper의 payload descriptor를
+                  `max_items` 고정-capacity stack cleanup plan에 deep-freeze한다. 따라서 metadata cleanup callback은
+                  이후 screen 투표뿐 아니라 공유 heap 안의 nested payload descriptor도 바꿀 수 없고, 실제 free
+                  단계는 heap descriptor element를 다시 읽지 않는다. aggregate snapshot/prepare/finish/abandon
+                  cleanup seam은 owner module 정의 한 곳과 pump caller 한 곳으로 source-boundary gate가 고정한다.
+                  fixed recorder fixture가 여덟 commit phase와 ledger 이후 publication 완료 전
+                  allocator callback 0 및 live publication 뒤 retirement callback을 고정하며, Debug/ReleaseFast
+                  `test-session-host`와 전체 gate는 이 slice PR의 검증 기록을 단일 출처로 둔다.
                 - **c3c-2b3 — non-adopted immediate suffix:** ended/revoked/host-recovery/client-recovery/terminal
                   verdict를 같은 prepare call 안에서 checked context 준비 뒤 no-fail suffix로 commit한다.
                   기존 `PrepareStatus`를 `AdoptionPrepareStatus`로 원자 교체하고
@@ -3879,7 +3921,7 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
               storage/Client/ledger/evidence/initial seed/event raw content/authority/request ID,
               every final address와 cleanup mirror를 allocation 없이 재검증한다. adopted path는
               **ledger seed+typed token take(마지막 fallible precommit) → owner resize/metadata·authority·request
-              state take → `Client.commitExternalAdoptionTakeNoFail` → `semantic_state=.active{.flow=.initial_fence}`와
+              state take → `Client.commitExternalAdoptionTakeUnchecked` → `semantic_state=.active{.flow=.initial_fence}`와
               `lifecycle=.live`를 마지막 publish** 순서다. ledger 성공 뒤에는 allocation/callback/validation/error
               return이 없다. prepare 내부 terminal/recovery는 ledger seed를 하지 않고 stack winner cleanup →
               branch-specific Client disarm/close → semantic/lifecycle publish의 별도 no-fail suffix를 쓴다.
@@ -4213,8 +4255,8 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
         공유하고 leave가 남은 budget 중 최대 100 ms를 쓴다. signal/revoke/error cleanup은 active/latest와 detach를
         버리고 하나의 100 ms deadline 안에서 leave를 시도한 뒤 즉시 raw restore/signal forwarding으로 간다.
 
-    **P5c3c-1a~2a, 2b1, 2b2a~c2와 2b2c3-c3a1~c3c-2b1은 구현 완료다.
-    c3c-2b2~3b, 2b2d1~f3, P5c3c-2b3와 P5c3c-3a~3b는 계획 상태다.**
+    **P5c3c-1a~2a, 2b1, 2b2a~c2와 2b2c3-c3a1~c3c-2b2는 구현 완료다.
+    c3c-2b3~3b, 2b2d1~f3, P5c3c-2b3와 P5c3c-3a~3b는 계획 상태다.**
     2b2c3 전체는 c3c 전체가 green이 아니므로 아직 계획 상태다. 각 slice는 P5c3a~b의 Debug/ReleaseFast gate를 재실행하고 다음 slice가 실제
     consumer로 쓰지 않는 임시 public API는 만들지 않는다.
 

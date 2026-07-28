@@ -54,11 +54,19 @@ pub const ResizeCandidate = struct {
 
 pub const TerminalReason = union(enum) {
     source: runtime_event_types.Violation,
+    transport: TransportViolation,
     metadata_equivocation,
     resize_equivocation,
     stale_metadata_candidate,
     ordinal_exhausted,
+    ordinal_mismatch,
     moved_accumulator,
+};
+
+pub const TransportViolation = enum {
+    screen_structure,
+    event_cache_contamination,
+    event_counter_mismatch,
 };
 
 pub const ReducedState = struct {
@@ -105,7 +113,7 @@ pub const FrameInput = struct {
 pub const Accumulator = struct {
     saved_self_addr: usize = 0,
     state: ReducedState = .{
-        .authority = .{ .role = .observer, .generation = 0 },
+        .authority = .{ .role = .observer, .generation = .untracked },
     },
     first_terminal: ?TerminalReason = null,
     next_ordinal: u32 = 0,
@@ -146,7 +154,7 @@ pub const Accumulator = struct {
     /// Classifies and records one FIFO item. `compare_metadata` must rebind the current candidate
     /// to the sealed initial DTO or exact event ordinal and borrows source bytes only during the
     /// callback.
-    pub fn step(
+    pub fn stepAt(
         self: *Accumulator,
         context: anytype,
         comptime compare_metadata: fn (
@@ -155,6 +163,7 @@ pub const Accumulator = struct {
             []const u8,
             runtime_event_wire.EventPreflight,
         ) MetadataComparison,
+        expected_ordinal: u32,
         input: FrameInput,
     ) void {
         if (self.saved_self_addr != @intFromPtr(self)) {
@@ -162,6 +171,10 @@ pub const Accumulator = struct {
             return;
         }
         const ordinal = self.next_ordinal;
+        if (expected_ordinal != ordinal) {
+            self.recordTerminal(.ordinal_mismatch);
+            return;
+        }
         self.next_ordinal = std.math.add(u32, ordinal, 1) catch {
             self.recordTerminal(.ordinal_exhausted);
             return;
@@ -181,7 +194,7 @@ pub const Accumulator = struct {
                     self.saw_revoked = true;
                     self.state.authority = .{
                         .role = .observer,
-                        .generation = generation,
+                        .generation = .{ .tracked = generation },
                     };
                 },
                 .resized => |value| self.reduceResize(
@@ -211,8 +224,24 @@ pub const Accumulator = struct {
         return .{ .adopted = self.state };
     }
 
+    pub fn recordTransportViolation(
+        self: *Accumulator,
+        violation: TransportViolation,
+    ) void {
+        if (self.saved_self_addr != @intFromPtr(self)) {
+            self.recordTerminal(.moved_accumulator);
+            return;
+        }
+        self.recordTerminal(.{ .transport = violation });
+    }
+
     fn recordTerminal(self: *Accumulator, reason: TerminalReason) void {
-        if (self.first_terminal == null) self.first_terminal = reason;
+        if (self.first_terminal) |current| {
+            if (terminalRank(reason) < terminalRank(current))
+                self.first_terminal = reason;
+            return;
+        }
+        self.first_terminal = reason;
     }
 
     fn reduceResize(
@@ -287,6 +316,23 @@ pub const Accumulator = struct {
         self.state.metadata = next;
     }
 };
+
+fn terminalRank(reason: TerminalReason) u8 {
+    return switch (reason) {
+        .transport => |value| switch (value) {
+            .screen_structure => 1,
+            .event_cache_contamination, .event_counter_mismatch => 0,
+        },
+        .source,
+        .metadata_equivocation,
+        .resize_equivocation,
+        .stale_metadata_candidate,
+        .ordinal_exhausted,
+        .ordinal_mismatch,
+        .moved_accumulator,
+        => 0,
+    };
+}
 
 fn resizeCandidate(
     ordinal: u32,
@@ -427,12 +473,13 @@ fn reduce(payloads: []const []const u8, authority: Authority) Outcome {
     var reducer: Accumulator = .{};
     Accumulator.initInPlace(&reducer, authority);
     const sources = TestSources{ .payloads = payloads };
-    for (payloads) |payload| reducer.step(&sources, TestSources.compare, testInput(payload));
+    for (payloads, 0..) |payload, ordinal|
+        reducer.stepAt(&sources, TestSources.compare, @intCast(ordinal), testInput(payload));
     return reducer.finalize();
 }
 
 test "reducer inspects the whole FIFO before terminal precedence" {
-    const authority: Authority = .{ .role = .controller, .generation = 3 };
+    const authority: Authority = .{ .role = .controller, .generation = .{ .tracked = 3 } };
     const ended = "{\"event\":\"runtime.ended\"}";
     const invalidated = "{\"event\":\"snapshot.invalidated\"}";
     const malformed = "{\"event\":";
@@ -452,7 +499,7 @@ test "reducer inspects the whole FIFO before terminal precedence" {
 }
 
 test "reducer keeps the first exact top-priority violation after a full scan" {
-    const authority: Authority = .{ .role = .observer, .generation = 0 };
+    const authority: Authority = .{ .role = .observer, .generation = .untracked };
     const malformed = "{\"event\":";
     const unknown = "{\"event\":\"future.event\"}";
     const resource = "{\"event\":\"runtime.metadata\",\"metadata_revision\":1,\"metadata\":";
@@ -483,7 +530,7 @@ test "reducer keeps the first exact top-priority violation after a full scan" {
 }
 
 test "reducer binds metadata candidates without exposing payloads" {
-    const authority: Authority = .{ .role = .observer, .generation = 3 };
+    const authority: Authority = .{ .role = .observer, .generation = .{ .tracked = 3 } };
     const revision_n = metadataPayload(7, "/one");
     const revision_n_same = metadataPayload(7, "/one");
     const revision_n_other = metadataPayload(7, "/two");
@@ -547,12 +594,12 @@ test "reducer compares an initial metadata seed with FIFO events" {
         };
         Accumulator.initWithMetadataInPlace(
             &reducer,
-            .{ .role = .observer, .generation = 0 },
+            .{ .role = .observer, .generation = .untracked },
             seed,
             &sources,
             TestSources.validateInitial,
         );
-        reducer.step(&sources, TestSources.compare, testInput(case.payload));
+        reducer.stepAt(&sources, TestSources.compare, 0, testInput(case.payload));
         try std.testing.expectEqual(case.terminal, reducer.finalize() == .terminal);
     }
 }
@@ -595,13 +642,18 @@ test "reducer validates initial metadata before no-event older and newer branche
         var reducer: Accumulator = .{};
         Accumulator.initWithMetadataInPlace(
             &reducer,
-            .{ .role = .observer, .generation = 0 },
+            .{ .role = .observer, .generation = .untracked },
             seed,
             &sources,
             TestSources.validateInitial,
         );
-        for (case.payloads) |payload|
-            reducer.step(&sources, TestSources.compare, testInput(payload));
+        for (case.payloads, 0..) |payload, ordinal|
+            reducer.stepAt(
+                &sources,
+                TestSources.compare,
+                @intCast(ordinal),
+                testInput(payload),
+            );
         const state = switch (reducer.finalize()) {
             .adopted => |value| value,
             else => return error.TestUnexpectedResult,
@@ -617,7 +669,7 @@ test "reducer validates initial metadata before no-event older and newer branche
     var invalid: Accumulator = .{};
     Accumulator.initWithMetadataInPlace(
         &invalid,
-        .{ .role = .observer, .generation = 0 },
+        .{ .role = .observer, .generation = .untracked },
         seed,
         &invalid_sources,
         TestSources.validateInitial,
@@ -631,11 +683,14 @@ test "reducer rejects stale resolved metadata and moved accumulator" {
     const different = metadataPayload(7, "/two");
     const payloads = [_][]const u8{ first, same };
     var reducer: Accumulator = .{};
-    Accumulator.initInPlace(&reducer, .{ .role = .observer, .generation = 3 });
+    Accumulator.initInPlace(
+        &reducer,
+        .{ .role = .observer, .generation = .{ .tracked = 3 } },
+    );
     var sources = TestSources{ .payloads = &payloads };
-    reducer.step(&sources, TestSources.compare, testInput(first));
+    reducer.stepAt(&sources, TestSources.compare, 0, testInput(first));
     sources.payloads = &.{different};
-    reducer.step(&sources, TestSources.compare, testInput(same));
+    reducer.stepAt(&sources, TestSources.compare, 1, testInput(same));
     try std.testing.expect(reducer.finalize() == .terminal);
 
     const moved = reducer;
@@ -658,7 +713,7 @@ test "reducer applies resize generation and revoke FIFO authority" {
     const resize_payloads = [_][]const u8{ resize_n, resize_n_other };
     try std.testing.expect(reduce(
         &resize_payloads,
-        .{ .role = .observer, .generation = 3 },
+        .{ .role = .observer, .generation = .{ .tracked = 3 } },
     ) == .terminal);
 
     const revoked =
@@ -668,7 +723,7 @@ test "reducer applies resize generation and revoke FIFO authority" {
     const revoke_payloads = [_][]const u8{ revoked, revoked };
     const reason = switch (reduce(
         &revoke_payloads,
-        .{ .role = .controller, .generation = 3 },
+        .{ .role = .controller, .generation = .{ .tracked = 3 } },
     )) {
         .terminal => |value| value,
         else => return error.TestUnexpectedResult,
@@ -697,7 +752,7 @@ test "reducer keeps exact resize duplicates and latest full state" {
     const payloads = [_][]const u8{ resize_9, resize_9, resize_10, resize_9 };
     const state = switch (reduce(
         &payloads,
-        .{ .role = .observer, .generation = 0 },
+        .{ .role = .observer, .generation = .untracked },
     )) {
         .adopted => |value| value,
         else => return error.TestUnexpectedResult,
@@ -714,8 +769,8 @@ test "reducer classifies frame request IDs with its current authority" {
     const payloads = [_][]const u8{ended};
     const sources = TestSources{ .payloads = &payloads };
     var reducer: Accumulator = .{};
-    Accumulator.initInPlace(&reducer, .{ .role = .observer, .generation = 0 });
-    reducer.step(&sources, TestSources.compare, frame);
+    Accumulator.initInPlace(&reducer, .{ .role = .observer, .generation = .untracked });
+    reducer.stepAt(&sources, TestSources.compare, 0, frame);
     const reason = switch (reducer.finalize()) {
         .terminal => |value| value,
         else => return error.TestUnexpectedResult,
@@ -734,15 +789,31 @@ test "reducer classifies frame request IDs with its current authority" {
 
 test "reducer ordinal issuance is address-bound and checked" {
     var reducer: Accumulator = .{};
-    Accumulator.initInPlace(&reducer, .{ .role = .observer, .generation = 0 });
+    Accumulator.initInPlace(&reducer, .{ .role = .observer, .generation = .untracked });
     reducer.next_ordinal = std.math.maxInt(u32);
     const ended = "{\"event\":\"runtime.ended\"}";
     const payloads = [_][]const u8{ended};
     const sources = TestSources{ .payloads = &payloads };
-    reducer.step(&sources, TestSources.compare, testInput(ended));
+    reducer.stepAt(&sources, TestSources.compare, std.math.maxInt(u32), testInput(ended));
     const reason = switch (reducer.finalize()) {
         .terminal => |value| value,
         else => return error.TestUnexpectedResult,
     };
     try std.testing.expect(reason == .ordinal_exhausted);
+}
+
+test "reducer rejects a caller ordinal that is not its exact next item" {
+    var reducer: Accumulator = .{};
+    Accumulator.initInPlace(
+        &reducer,
+        .{ .role = .observer, .generation = .untracked },
+    );
+    const payload = "{\"event\":\"runtime.ended\"}";
+    const sources = TestSources{ .payloads = &.{payload} };
+    reducer.stepAt(&sources, TestSources.compare, 1, testInput(payload));
+    const reason = switch (reducer.finalize()) {
+        .terminal => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expect(reason == .ordinal_mismatch);
 }

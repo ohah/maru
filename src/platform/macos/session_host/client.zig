@@ -14,6 +14,8 @@ const c = std.c;
 const posix = std.posix;
 const protocol = @import("protocol.zig");
 const compatibility = @import("compatibility.zig");
+const runtime_event_reducer = @import("runtime_event_reducer.zig");
+const runtime_event_types = @import("runtime_event_types.zig");
 const runtime_event_wire = @import("runtime_event_wire.zig");
 const runtime_metadata_wire = @import("runtime_metadata_wire.zig");
 const framing = @import("framing.zig");
@@ -26,6 +28,10 @@ const observation_wire = @import("observation_wire.zig");
 const resize_wire = @import("resize_wire.zig");
 const upgrade_wire = @import("upgrade_wire.zig");
 const max_pending_event_count: usize = 4 * 256;
+comptime {
+    if (max_pending_event_count > std.math.maxInt(u32))
+        @compileError("external adoption event ordinal exceeds reducer u32 domain");
+}
 
 pub const ClientError = error{
     EndpointAbsent,
@@ -786,6 +792,11 @@ const ExternalValidatedAdoption = struct {
     event_payload_bytes: usize,
 };
 
+const ExternalValidatedScreenSource = struct {
+    screen_source_count: usize,
+    screen_payload_bytes: usize,
+};
+
 const ExternalRange = struct { start: usize, len: usize };
 
 fn externalRangeOfValue(value: anytype) ExternalRange {
@@ -883,7 +894,7 @@ const max_external_owner_range_scratch_bytes =
     max_external_owner_range_count * @sizeOf(ExternalRange);
 const max_external_outer_owner_range_count = 7;
 
-const ExternalSourceOwnerRangeScratch = struct {
+pub const ExternalSourceOwnerRangeScratch = struct {
     ranges: [max_external_owner_range_count]ExternalRange = undefined,
 };
 comptime {
@@ -1097,7 +1108,7 @@ fn validateExternalSourceOwnerRanges(
     };
 }
 
-const ExternalSourceSealError = client_source_transcript.Error || error{
+pub const ExternalSourceSealError = client_source_transcript.Error || error{
     IneligibleProfile,
     InvalidCompatibilityProvenance,
     InvalidClientState,
@@ -1124,7 +1135,7 @@ fn narrowExternalSourceSealError(
     };
 }
 
-const ClientSourceSeal = struct {
+pub const ClientSourceSeal = struct {
     client_address: usize,
     target_stream: u64,
     attach_instance_id: u64,
@@ -1134,6 +1145,50 @@ const ClientSourceSeal = struct {
     event_count: usize,
     event_payload_bytes: usize,
     digest: client_source_transcript.Digest,
+};
+
+pub const InitialMetadataBinding = union(enum) {
+    unsupported,
+    unavailable,
+    current: struct {
+        seed: *const runtime_metadata_wire.InitialMetadataSeed,
+        seal: runtime_metadata_wire.MetadataSeedSeal,
+    },
+};
+
+pub const ExternalAdoptionFoldInput = struct {
+    identity: runtime_event_types.EventIdentity,
+    authority: FoldAuthority,
+    initial_metadata: InitialMetadataBinding,
+};
+
+pub const FoldAuthority = runtime_event_reducer.Authority;
+
+pub const InitialMetadataBindingSeal = union(enum) {
+    unsupported,
+    unavailable,
+    current: struct {
+        seed_address: usize,
+        seal: runtime_metadata_wire.MetadataSeedSeal,
+    },
+};
+
+pub const ExternalAdoptionFoldBindingSeal = struct {
+    client_address: usize,
+    attach_instance_id: u64,
+    identity: runtime_event_types.EventIdentity,
+    initial_authority: FoldAuthority,
+    initial_metadata: InitialMetadataBindingSeal,
+};
+
+pub const ExternalAdoptionFoldResult = struct {
+    binding_seal: ExternalAdoptionFoldBindingSeal,
+    source_seal: ClientSourceSeal,
+    outcome: runtime_event_reducer.Outcome,
+};
+
+pub const ExternalAdoptionFoldError = ExternalSourceSealError || error{
+    InvalidInitialBinding,
 };
 
 const ExternalSourceSealEncoding = enum {
@@ -1529,6 +1584,376 @@ fn externalSourceSealMatches(
     return std.meta.eql(expected, actual);
 }
 
+const FoldMetadataSources = struct {
+    client: *const Client,
+    identity: runtime_event_types.EventIdentity,
+    initial: ?struct {
+        seed: *const runtime_metadata_wire.InitialMetadataSeed,
+        seal: runtime_metadata_wire.MetadataSeedSeal,
+    } = null,
+    current_ordinal: u32 = 0,
+
+    fn validateInitial(
+        self: *const FoldMetadataSources,
+        expected: runtime_event_reducer.InitialMetadataSeed,
+    ) bool {
+        const initial = self.initial orelse return false;
+        return runtime_metadata_wire.validateMetadataSeedSeal(
+            initial.seal,
+            initial.seed,
+        ) and initial.seal.tag == .current and
+            expected.revision == initial.seal.revision and
+            std.mem.eql(u8, &expected.raw_digest, &initial.seal.raw_digest) and
+            std.mem.eql(
+                u8,
+                &expected.semantic_digest,
+                &initial.seal.semantic_digest,
+            );
+    }
+
+    fn compareMetadata(
+        self: *const FoldMetadataSources,
+        current: runtime_event_reducer.MetadataCandidate,
+        next_payload: []const u8,
+        next_preflight: runtime_event_wire.EventPreflight,
+    ) runtime_event_reducer.MetadataComparison {
+        return switch (current.origin) {
+            .initial => {
+                const initial = self.initial orelse return .stale;
+                if (!runtime_metadata_wire.metadataSeedSemanticEqlEvent(
+                    initial.seed,
+                    initial.seal,
+                    next_payload,
+                    next_preflight,
+                )) return .different;
+                return .equal;
+            },
+            .event => |ordinal| {
+                if (ordinal >= self.current_ordinal or
+                    ordinal >= self.client.pending_events.items.len)
+                    return .stale;
+                const frame = self.client.pending_events.items[ordinal];
+                if (frame.preflight != null or frame.admission_seal != null or
+                    frame.header.major != self.client.wire_major or
+                    frame.header.kind != .event or
+                    frame.header.stream_id != self.identity.stream_id or
+                    frame.header.request_id != 0 or frame.header.flags != 0 or
+                    frame.header.payload_len != frame.payload.len or
+                    frame.payload.len > protocol.max_control_json)
+                    return .stale;
+                const rebound = switch (runtime_event_wire.preflightEvent(
+                    frame.payload,
+                    .{
+                        .runtime_id = self.identity.runtime_id,
+                        .stream_id = self.identity.stream_id,
+                    },
+                )) {
+                    .accepted => |value| value,
+                    else => return .stale,
+                };
+                const proof = switch (current.proof) {
+                    .event => |value| value,
+                    .initial => return .stale,
+                };
+                if (!runtime_event_wire.eventPreflightEql(rebound, proof) or
+                    !std.mem.eql(u8, &rebound.raw_digest, &current.raw_digest))
+                    return .stale;
+                const current_view = switch (rebound.event) {
+                    .metadata => |value| value,
+                    else => return .stale,
+                };
+                const next_view = switch (next_preflight.event) {
+                    .metadata => |value| value,
+                    else => return .stale,
+                };
+                return if (runtime_event_wire.metadataSemanticEqlExact(
+                    frame.payload,
+                    &current_view,
+                    next_payload,
+                    &next_view,
+                )) .equal else .different;
+            },
+        };
+    }
+};
+
+fn sourceRangeOverlapsProvenOwners(
+    scratch: *const ExternalSourceOwnerRangeScratch,
+    range_count: usize,
+    target: ExternalRange,
+) bool {
+    for (scratch.ranges[0..range_count]) |range|
+        if (externalRangesOverlap(target, range)) return true;
+    return false;
+}
+
+fn validateFoldInputBeforeScratch(
+    client: *const Client,
+    input: ExternalAdoptionFoldInput,
+    scratch: *ExternalSourceOwnerRangeScratch,
+) ExternalAdoptionFoldError!FoldMetadataSources {
+    if (input.identity.runtime_id == 0 or input.identity.stream_id == 0)
+        return error.InvalidInitialBinding;
+    const profile = client.compatibility_profile orelse
+        return error.InvalidCompatibilityProvenance;
+    switch (profile.attach_schema) {
+        .frozen_controller_only => if (input.authority.role != .controller or
+            input.authority.generation != .untracked)
+            return error.InvalidInitialBinding,
+        .granted_roles => if (client.attachment_capabilities.peer_attach_generation) {
+            const generation = switch (input.authority.generation) {
+                .untracked => return error.InvalidInitialBinding,
+                .tracked => |value| value,
+            };
+            if (input.authority.role == .controller and generation == 0)
+                return error.InvalidInitialBinding;
+        } else if (input.authority.role != .observer or
+            input.authority.generation != .untracked)
+            return error.InvalidInitialBinding,
+    }
+
+    var sources = FoldMetadataSources{
+        .client = client,
+        .identity = input.identity,
+    };
+    switch (input.initial_metadata) {
+        .unsupported => if (client.metadata_support != .unsupported)
+            return error.InvalidInitialBinding,
+        .unavailable => if (client.metadata_support != .supported)
+            return error.InvalidInitialBinding,
+        .current => |current| {
+            if (client.metadata_support != .supported)
+                return error.InvalidInitialBinding;
+            const seed_range = externalRangeOfValue(current.seed);
+            const scratch_range = externalRangeOfValue(scratch);
+            if (externalRangesOverlap(seed_range, scratch_range) or
+                externalRangesOverlap(seed_range, externalRangeOfValue(client)))
+                return error.InvalidAlias;
+            // Do not dereference `current.seed` until every nested Client owner has been
+            // enumerated and proven disjoint below. The seal itself is scalar evidence.
+            if (current.seal.seed_addr != @intFromPtr(current.seed) or
+                current.seal.tag != .current)
+                return error.InvalidInitialBinding;
+            if (current.seal.backing_len != 0) {
+                const backing = checkedExternalRange(
+                    current.seal.backing_addr,
+                    current.seal.backing_len,
+                ) catch |err| return narrowExternalSourceSealError(err);
+                if (backing == null or
+                    externalRangesOverlap(backing.?, scratch_range) or
+                    externalRangesOverlap(
+                        backing.?,
+                        externalRangeOfValue(client),
+                    ))
+                    return error.InvalidAlias;
+            }
+            sources.initial = .{
+                .seed = current.seed,
+                .seal = current.seal,
+            };
+        },
+    }
+    return sources;
+}
+
+fn validateFoldInitialAgainstProvenOwners(
+    sources: FoldMetadataSources,
+    scratch: *const ExternalSourceOwnerRangeScratch,
+    range_count: usize,
+) ExternalAdoptionFoldError!void {
+    const initial = sources.initial orelse return;
+    const seed_range = externalRangeOfValue(initial.seed);
+    if (sourceRangeOverlapsProvenOwners(scratch, range_count, seed_range))
+        return error.InvalidAlias;
+    if (initial.seal.backing_len != 0) {
+        const backing = checkedExternalRange(
+            initial.seal.backing_addr,
+            initial.seal.backing_len,
+        ) catch |err| return narrowExternalSourceSealError(err);
+        if (backing == null or
+            sourceRangeOverlapsProvenOwners(scratch, range_count, backing.?))
+            return error.InvalidAlias;
+    }
+}
+
+fn foldBindingSeal(
+    client: *const Client,
+    input: ExternalAdoptionFoldInput,
+    sources: FoldMetadataSources,
+) ExternalAdoptionFoldBindingSeal {
+    return .{
+        .client_address = @intFromPtr(client),
+        .attach_instance_id = client.attach_instance_id,
+        .identity = input.identity,
+        .initial_authority = input.authority,
+        .initial_metadata = if (sources.initial) |initial|
+            .{ .current = .{
+                .seed_address = @intFromPtr(initial.seed),
+                .seal = initial.seal,
+            } }
+        else switch (input.initial_metadata) {
+            .unsupported => .unsupported,
+            .unavailable => .unavailable,
+            .current => unreachable,
+        },
+    };
+}
+
+fn eventFrameView(frame: BufferedEvent) runtime_event_types.EventFrameView {
+    return .{
+        .major = frame.header.major,
+        .kind = frame.header.kind,
+        .stream_id = frame.header.stream_id,
+        .request_id = frame.header.request_id,
+        .flags = frame.header.flags,
+        .payload_len = frame.header.payload_len,
+        .payload = frame.payload,
+    };
+}
+
+fn rawExternalScreenMetrics(
+    client: *const Client,
+) ExternalSourceSealError!ExternalValidatedScreenSource {
+    var count = std.math.add(
+        usize,
+        client.pending_batches.items.len,
+        client.pending_stream.items.len,
+    ) catch return error.ArithmeticOverflow;
+    var bytes: usize = 0;
+    for (client.pending_batches.items) |batch|
+        bytes = std.math.add(usize, bytes, batch.bytes.len) catch
+            return error.ArithmeticOverflow;
+    for (client.pending_stream.items) |frame|
+        bytes = std.math.add(usize, bytes, frame.payload.len) catch
+            return error.ArithmeticOverflow;
+    if (client.partial_batch) |partial| {
+        count = std.math.add(usize, count, 1) catch
+            return error.ArithmeticOverflow;
+        bytes = std.math.add(usize, bytes, partial.bytes.items.len) catch
+            return error.ArithmeticOverflow;
+    }
+    return .{
+        .screen_source_count = count,
+        .screen_payload_bytes = bytes,
+    };
+}
+
+fn foldExternalAdoptionSourceWithEncoding(
+    client: *const Client,
+    input: ExternalAdoptionFoldInput,
+    scratch: *ExternalSourceOwnerRangeScratch,
+    encoding: ExternalSourceSealEncoding,
+) ExternalAdoptionFoldError!ExternalAdoptionFoldResult {
+    validateExternalAdoptionSourceEligibility(
+        client,
+        input.identity.stream_id,
+        .allow_zero,
+    ) catch |err| return narrowExternalSourceSealError(err);
+    if (client.event_parse_observer != null or client.attach_instance_id == 0)
+        return error.InvalidClientState;
+    var sources = try validateFoldInputBeforeScratch(client, input, scratch);
+    const source_stats = validateExternalSourceOwnerRanges(client, scratch) catch |err|
+        return narrowExternalSourceSealError(err);
+    try validateFoldInitialAgainstProvenOwners(
+        sources,
+        scratch,
+        source_stats.total_ranges,
+    );
+    if (sources.initial) |initial|
+        if (!runtime_metadata_wire.validateMetadataSeedSeal(
+            initial.seal,
+            initial.seed,
+        ))
+            return error.InvalidInitialBinding;
+
+    const screen = try rawExternalScreenMetrics(client);
+    const screen_structure_valid = if (validateExternalAdoptionScreenSourceQueues(
+        client,
+        input.identity.stream_id,
+    )) |_| true else |_| false;
+    const claimed = ExternalValidatedAdoption{
+        .screen_source_count = screen.screen_source_count,
+        .screen_payload_bytes = screen.screen_payload_bytes,
+        .event_payload_bytes = client.pending_event_bytes,
+    };
+    var encoder: ExternalSourceSealEncoder = undefined;
+    try encoder.init(client, input.identity.stream_id, claimed, encoding);
+    var reducer: runtime_event_reducer.Accumulator = .{};
+    if (sources.initial) |initial| {
+        const seed = runtime_event_reducer.InitialMetadataSeed{
+            .revision = initial.seal.revision,
+            .raw_digest = initial.seal.raw_digest,
+            .semantic_digest = initial.seal.semantic_digest,
+        };
+        runtime_event_reducer.Accumulator.initWithMetadataInPlace(
+            &reducer,
+            input.authority,
+            seed,
+            &sources,
+            FoldMetadataSources.validateInitial,
+        );
+    } else {
+        runtime_event_reducer.Accumulator.initInPlace(
+            &reducer,
+            input.authority,
+        );
+    }
+    if (!screen_structure_valid)
+        reducer.recordTransportViolation(.screen_structure);
+
+    for (client.pending_batches.items, 0..) |*batch, ordinal|
+        try encoder.writeBatch(client, ordinal, batch);
+    for (client.pending_stream.items, 0..) |*frame, ordinal|
+        try encoder.writeStream(client, ordinal, frame);
+
+    var event_bytes: usize = 0;
+    var event_counter_overflow = false;
+    for (client.pending_events.items, 0..) |*frame, ordinal| {
+        const event_ordinal = std.math.cast(u32, ordinal) orelse
+            return error.InvalidCounter;
+        try encoder.writeEvent(client, ordinal, frame);
+        if (frame.preflight != null or frame.admission_seal != null)
+            reducer.recordTransportViolation(.event_cache_contamination);
+        const verdict = runtime_event_wire.preflightEvent(
+            frame.payload,
+            .{
+                .runtime_id = input.identity.runtime_id,
+                .stream_id = input.identity.stream_id,
+            },
+        );
+        sources.current_ordinal = event_ordinal;
+        reducer.stepAt(
+            &sources,
+            FoldMetadataSources.compareMetadata,
+            event_ordinal,
+            .{
+                .identity = input.identity,
+                .preflight = .{
+                    .expected_major = client.wire_major,
+                    .metadata_support = client.metadata_support,
+                    .verdict = verdict,
+                },
+                .frame = eventFrameView(frame.*),
+            },
+        );
+        event_bytes = std.math.add(
+            usize,
+            event_bytes,
+            frame.payload.len,
+        ) catch blk: {
+            event_counter_overflow = true;
+            break :blk event_bytes;
+        };
+    }
+    if (event_counter_overflow or event_bytes != client.pending_event_bytes)
+        reducer.recordTransportViolation(.event_counter_mismatch);
+    return .{
+        .binding_seal = foldBindingSeal(client, input, sources),
+        .source_seal = try encoder.finish(),
+        .outcome = reducer.finalize(),
+    };
+}
+
 const ExternalOwnerRangeProofLifecycle = enum { empty, prepared, aborted };
 
 /// Retains the last whole-Client alias-proof scratch allocation across the paired ownership take.
@@ -1745,6 +2170,22 @@ fn validateExternalAdoptionSourceQueues(
     self: *const Client,
     target_stream: u64,
 ) ExternalAdoptionInspectError!ExternalValidatedAdoption {
+    const screen = try validateExternalAdoptionScreenSourceQueues(self, target_stream);
+    const event_payload_bytes = try validateExternalAdoptionEventSourceQueues(
+        self,
+        target_stream,
+    );
+    return .{
+        .screen_source_count = screen.screen_source_count,
+        .screen_payload_bytes = screen.screen_payload_bytes,
+        .event_payload_bytes = event_payload_bytes,
+    };
+}
+
+fn validateExternalAdoptionScreenSourceQueues(
+    self: *const Client,
+    target_stream: u64,
+) ExternalAdoptionInspectError!ExternalValidatedScreenSource {
     var screen_count: usize = 0;
     var screen_bytes: usize = 0;
     var batch_bytes: usize = 0;
@@ -1821,6 +2262,16 @@ fn validateExternalAdoptionSourceQueues(
     }
     if (stream_bytes != self.pending_stream_bytes) return error.InvalidCounter;
 
+    return .{
+        .screen_source_count = screen_count,
+        .screen_payload_bytes = screen_bytes,
+    };
+}
+
+fn validateExternalAdoptionEventSourceQueues(
+    self: *const Client,
+    target_stream: u64,
+) ExternalAdoptionInspectError!usize {
     var event_bytes: usize = 0;
     for (self.pending_events.items) |frame| {
         if (frame.preflight != null or frame.admission_seal != null)
@@ -1835,11 +2286,7 @@ fn validateExternalAdoptionSourceQueues(
             return error.ArithmeticOverflow;
     }
     if (event_bytes != self.pending_event_bytes) return error.InvalidCounter;
-    return .{
-        .screen_source_count = screen_count,
-        .screen_payload_bytes = screen_bytes,
-        .event_payload_bytes = event_bytes,
-    };
+    return event_bytes;
 }
 
 /// Validates source eligibility and queue semantics without allocating, invoking callbacks, or
@@ -2593,6 +3040,34 @@ pub const Client = struct {
         prepared.source_addr = 0;
         prepared.profile = null;
         prepared.lifecycle = .committed;
+    }
+
+    /// Allocation-free P5c3 Phase A fold. The reducer and source encoder are initialized inside
+    /// this call and share the one ordered semantic traversal of `pending_events`.
+    pub fn foldExternalAdoptionSource(
+        self: *const Client,
+        input: ExternalAdoptionFoldInput,
+        scratch: *ExternalSourceOwnerRangeScratch,
+    ) ExternalAdoptionFoldError!ExternalAdoptionFoldResult {
+        return foldExternalAdoptionSourceWithEncoding(
+            self,
+            input,
+            scratch,
+            .process_identity,
+        );
+    }
+
+    /// Re-folds the live source and verifies that a retained result belongs to this exact
+    /// Client/attach/identity/authority/initial-metadata binding. Callers must reject a false
+    /// result before pairing an older fold outcome with a later adoption transaction.
+    pub fn externalAdoptionFoldResultMatches(
+        self: *const Client,
+        input: ExternalAdoptionFoldInput,
+        expected: ExternalAdoptionFoldResult,
+        scratch: *ExternalSourceOwnerRangeScratch,
+    ) bool {
+        const actual = self.foldExternalAdoptionSource(input, scratch) catch return false;
+        return std.meta.eql(actual, expected);
     }
 
     pub fn previewExternalAdoption(
@@ -8097,6 +8572,22 @@ test "client source seal binds explicit schema descriptors and ordered payload b
         frozen_canonical_digest,
         &canonical.digest,
     );
+    const folded = try foldExternalAdoptionSourceWithEncoding(
+        &client,
+        .{
+            .identity = .{ .runtime_id = 0xaa, .stream_id = 7 },
+            .authority = .{ .role = .observer, .generation = .untracked },
+            .initial_metadata = .unsupported,
+        },
+        &scratch,
+        .canonical_test,
+    );
+    try std.testing.expectEqualSlices(
+        u8,
+        &canonical.digest,
+        &folded.source_seal.digest,
+    );
+    try std.testing.expect(folded.outcome == .terminal);
     try std.testing.expect(std.meta.eql(seal, repeated));
     try std.testing.expectEqual(@as(u64, 77), seal.attach_instance_id);
     try std.testing.expectEqual(@as(u64, 0), seal.raw_next_request_id);
@@ -8301,6 +8792,481 @@ test "client source seal binds explicit schema descriptors and ordered payload b
     );
     try std.testing.expectEqual(@as(usize, 0), parse_calls);
     client.event_parse_observer = null;
+}
+
+test "external source fold keeps seed tags and scans terminal FIFO tails" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    var fds: [2]c.fd_t = undefined;
+    try std.testing.expectEqual(
+        @as(c_int, 0),
+        c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds),
+    );
+    defer _ = c.close(fds[1]);
+    var client = makeConnectedTestClient(allocator, fds[0]);
+    defer client.deinit();
+    try client.enterExternalMode();
+    client.ownership = .external_pump;
+    client.connection_profile = .cli_attach;
+    client.compatibility_profile = compatibility.profileForMajor(protocol.version_major).?;
+    client.attach_instance_id = 91;
+    client.next_request_id = 0;
+
+    const identity = runtime_event_types.EventIdentity{
+        .runtime_id = 0xaa,
+        .stream_id = 7,
+    };
+    const authority = runtime_event_reducer.Authority{
+        .role = .observer,
+        .generation = .untracked,
+    };
+    var scratch: ExternalSourceOwnerRangeScratch = .{};
+    const unsupported = try client.foldExternalAdoptionSource(
+        .{
+            .identity = identity,
+            .authority = authority,
+            .initial_metadata = .unsupported,
+        },
+        &scratch,
+    );
+    const source_snapshot = externalAdoptionSnapshot(&client);
+    _ = try client.foldExternalAdoptionSource(
+        .{
+            .identity = identity,
+            .authority = authority,
+            .initial_metadata = .unsupported,
+        },
+        &scratch,
+    );
+    try std.testing.expect(std.meta.eql(
+        source_snapshot,
+        externalAdoptionSnapshot(&client),
+    ));
+    try std.testing.expect(unsupported.outcome == .adopted);
+    try std.testing.expectEqual(@as(u64, 0), unsupported.source_seal.raw_next_request_id);
+    try std.testing.expect(client.externalAdoptionFoldResultMatches(
+        .{
+            .identity = identity,
+            .authority = authority,
+            .initial_metadata = .unsupported,
+        },
+        unsupported,
+        &scratch,
+    ));
+    try std.testing.expect(!client.externalAdoptionFoldResultMatches(
+        .{
+            .identity = .{
+                .runtime_id = identity.runtime_id + 1,
+                .stream_id = identity.stream_id,
+            },
+            .authority = authority,
+            .initial_metadata = .unsupported,
+        },
+        unsupported,
+        &scratch,
+    ));
+
+    client.metadata_support = .supported;
+    const unavailable = try client.foldExternalAdoptionSource(
+        .{
+            .identity = identity,
+            .authority = authority,
+            .initial_metadata = .unavailable,
+        },
+        &scratch,
+    );
+    try std.testing.expect(unavailable.outcome == .adopted);
+
+    var seed = try runtime_metadata_wire.testingCurrentSeed(allocator);
+    defer seed.deinit();
+    const seed_seal = try runtime_metadata_wire.sealMetadataSeed(&seed);
+    const current = try client.foldExternalAdoptionSource(
+        .{
+            .identity = identity,
+            .authority = authority,
+            .initial_metadata = .{ .current = .{
+                .seed = &seed,
+                .seal = seed_seal,
+            } },
+        },
+        &scratch,
+    );
+    const current_state = switch (current.outcome) {
+        .adopted => |state| state,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expect(current_state.metadata != null);
+
+    var failing = std.testing.FailingAllocator.init(
+        allocator,
+        .{ .fail_index = 0 },
+    );
+    const saved_allocator = client.allocator;
+    const saved_parser_allocator = client.parser.allocator;
+    client.allocator = failing.allocator();
+    client.parser.allocator = failing.allocator();
+    _ = try client.foldExternalAdoptionSource(
+        .{
+            .identity = identity,
+            .authority = authority,
+            .initial_metadata = .{ .current = .{
+                .seed = &seed,
+                .seal = seed_seal,
+            } },
+        },
+        &scratch,
+    );
+    try std.testing.expect(!failing.has_induced_failure);
+    client.allocator = saved_allocator;
+    client.parser.allocator = saved_parser_allocator;
+
+    const metadata_payload_text =
+        "{\"event\":\"runtime.metadata\",\"metadata_revision\":2,\"metadata\":{\"cwd\":\"/repo\",\"window_title\":\"work\",\"ssh_remote_dest\":\"host\",\"semantic_state\":0,\"alt_active\":false,\"app_cursor_keys\":false,\"alternate_scroll\":true,\"observer_generation\":1,\"title_generation\":2,\"cols\":80,\"rows\":24,\"foreground_available\":true,\"foreground_pgid\":7,\"processes\":[{\"pid\":7,\"name\":\"zsh\"}]}}";
+    const metadata_payload = try allocator.dupe(u8, metadata_payload_text);
+    try client.pending_events.append(allocator, .{
+        .header = .{
+            .kind = .event,
+            .stream_id = identity.stream_id,
+            .payload_len = @intCast(metadata_payload.len),
+        },
+        .payload = metadata_payload,
+    });
+    client.pending_event_bytes = metadata_payload.len;
+    const same_initial = try client.foldExternalAdoptionSource(
+        .{
+            .identity = identity,
+            .authority = authority,
+            .initial_metadata = .{ .current = .{
+                .seed = &seed,
+                .seal = seed_seal,
+            } },
+        },
+        &scratch,
+    );
+    try std.testing.expect(same_initial.outcome == .adopted);
+    metadata_payload[std.mem.indexOf(u8, metadata_payload, "/repo").? + 1] = 'R';
+    try std.testing.expect(!client.externalAdoptionFoldResultMatches(
+        .{
+            .identity = identity,
+            .authority = authority,
+            .initial_metadata = .{ .current = .{
+                .seed = &seed,
+                .seal = seed_seal,
+            } },
+        },
+        same_initial,
+        &scratch,
+    ));
+    const different_initial = try client.foldExternalAdoptionSource(
+        .{
+            .identity = identity,
+            .authority = authority,
+            .initial_metadata = .{ .current = .{
+                .seed = &seed,
+                .seal = seed_seal,
+            } },
+        },
+        &scratch,
+    );
+    const different_reason = switch (different_initial.outcome) {
+        .terminal => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expect(different_reason == .metadata_equivocation);
+    metadata_payload[std.mem.indexOf(u8, metadata_payload, "/Repo").? + 1] = 'r';
+
+    const second_metadata_payload = try allocator.dupe(u8, metadata_payload_text);
+    try client.pending_events.append(allocator, .{
+        .header = .{
+            .kind = .event,
+            .stream_id = identity.stream_id,
+            .payload_len = @intCast(second_metadata_payload.len),
+        },
+        .payload = second_metadata_payload,
+    });
+    client.pending_event_bytes += second_metadata_payload.len;
+    const same_events = try client.foldExternalAdoptionSource(
+        .{
+            .identity = identity,
+            .authority = authority,
+            .initial_metadata = .unavailable,
+        },
+        &scratch,
+    );
+    try std.testing.expect(same_events.outcome == .adopted);
+    client.pending_events.items[1].preflight = .unknown;
+    const contaminated = try client.foldExternalAdoptionSource(
+        .{
+            .identity = identity,
+            .authority = authority,
+            .initial_metadata = .unavailable,
+        },
+        &scratch,
+    );
+    const contaminated_reason = switch (contaminated.outcome) {
+        .terminal => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expect(contaminated_reason == .transport);
+    try std.testing.expect(
+        contaminated_reason.transport == .event_cache_contamination,
+    );
+    client.pending_events.items[1].preflight = null;
+    second_metadata_payload[
+        std.mem.indexOf(u8, second_metadata_payload, "/repo").? + 1
+    ] = 'R';
+    const different_events = try client.foldExternalAdoptionSource(
+        .{
+            .identity = identity,
+            .authority = authority,
+            .initial_metadata = .unavailable,
+        },
+        &scratch,
+    );
+    const event_reason = switch (different_events.outcome) {
+        .terminal => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expect(event_reason == .metadata_equivocation);
+    second_metadata_payload[
+        std.mem.indexOf(u8, second_metadata_payload, "/Repo").? + 1
+    ] = 'r';
+    client.pending_event_bytes += 1;
+    const counter_mismatch = try client.foldExternalAdoptionSource(
+        .{
+            .identity = identity,
+            .authority = authority,
+            .initial_metadata = .unavailable,
+        },
+        &scratch,
+    );
+    const counter_reason = switch (counter_mismatch.outcome) {
+        .terminal => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expect(counter_reason == .transport);
+    try std.testing.expect(
+        counter_reason.transport == .event_counter_mismatch,
+    );
+    client.pending_event_bytes -= 1;
+
+    client.pending_events.items.len = 0;
+    client.pending_event_bytes = 0;
+    allocator.free(metadata_payload);
+    allocator.free(second_metadata_payload);
+
+    seed.current.revision += 1;
+    try std.testing.expectError(
+        error.InvalidInitialBinding,
+        client.foldExternalAdoptionSource(
+            .{
+                .identity = identity,
+                .authority = authority,
+                .initial_metadata = .{ .current = .{
+                    .seed = &seed,
+                    .seal = seed_seal,
+                } },
+            },
+            &scratch,
+        ),
+    );
+    seed.current.revision -= 1;
+
+    const seed_backing = seed.current.backing.?;
+    const aliased_scratch: *ExternalSourceOwnerRangeScratch =
+        @ptrCast(@alignCast(seed_backing.ptr));
+    try std.testing.expectError(
+        error.InvalidAlias,
+        client.foldExternalAdoptionSource(
+            .{
+                .identity = identity,
+                .authority = authority,
+                .initial_metadata = .{ .current = .{
+                    .seed = &seed,
+                    .seal = seed_seal,
+                } },
+            },
+            aliased_scratch,
+        ),
+    );
+
+    const ended_payload = try allocator.dupe(u8, "{\"event\":\"runtime.ended\"}");
+    try client.pending_events.append(allocator, .{
+        .header = .{
+            .kind = .event,
+            .stream_id = identity.stream_id,
+            .payload_len = @intCast(ended_payload.len),
+        },
+        .payload = ended_payload,
+    });
+    const malformed_payload = try allocator.dupe(u8, "{");
+    try client.pending_events.append(allocator, .{
+        .header = .{
+            .kind = .event,
+            .stream_id = identity.stream_id,
+            .payload_len = @intCast(malformed_payload.len),
+        },
+        .payload = malformed_payload,
+    });
+    client.pending_event_bytes = ended_payload.len + malformed_payload.len;
+    client.pending_batch_bytes += 1;
+    const terminal = try client.foldExternalAdoptionSource(
+        .{
+            .identity = identity,
+            .authority = authority,
+            .initial_metadata = .unavailable,
+        },
+        &scratch,
+    );
+    const reason = switch (terminal.outcome) {
+        .terminal => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expect(reason == .source);
+    try std.testing.expect(reason.source == .malformed);
+    client.pending_batch_bytes -= 1;
+    const original_digest = terminal.source_seal.digest;
+    malformed_payload[0] = '[';
+    const mutated = try client.foldExternalAdoptionSource(
+        .{
+            .identity = identity,
+            .authority = authority,
+            .initial_metadata = .unavailable,
+        },
+        &scratch,
+    );
+    try std.testing.expect(!std.mem.eql(
+        u8,
+        &original_digest,
+        &mutated.source_seal.digest,
+    ));
+}
+
+test "external source fold rejects a metadata seed inside Client event backing before dereference" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    var fds: [2]c.fd_t = undefined;
+    try std.testing.expectEqual(
+        @as(c_int, 0),
+        c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds),
+    );
+    defer _ = c.close(fds[1]);
+    var client = makeConnectedTestClient(allocator, fds[0]);
+    defer client.deinit();
+    try client.enterExternalMode();
+    client.ownership = .external_pump;
+    client.connection_profile = .cli_attach;
+    client.compatibility_profile = compatibility.profileForMajor(protocol.version_major).?;
+    client.attach_instance_id = 92;
+    client.metadata_support = .supported;
+
+    var valid_seed = try runtime_metadata_wire.testingCurrentSeed(allocator);
+    defer valid_seed.deinit();
+    var forged_seal = try runtime_metadata_wire.sealMetadataSeed(&valid_seed);
+    const hostile_payload = try allocator.alignedAlloc(
+        u8,
+        .of(runtime_metadata_wire.InitialMetadataSeed),
+        @sizeOf(runtime_metadata_wire.InitialMetadataSeed),
+    );
+    defer allocator.free(hostile_payload);
+    @memset(hostile_payload, 0xa5);
+    const hostile_seed: *const runtime_metadata_wire.InitialMetadataSeed =
+        @ptrCast(hostile_payload.ptr);
+    forged_seal.seed_addr = @intFromPtr(hostile_seed);
+    try client.pending_events.append(allocator, .{
+        .header = .{
+            .kind = .event,
+            .stream_id = 7,
+            .payload_len = @intCast(hostile_payload.len),
+        },
+        .payload = hostile_payload,
+    });
+    client.pending_event_bytes = hostile_payload.len;
+    defer {
+        client.pending_events.items.len = 0;
+        client.pending_event_bytes = 0;
+    }
+
+    var scratch: ExternalSourceOwnerRangeScratch = .{};
+    try std.testing.expectError(
+        error.InvalidAlias,
+        client.foldExternalAdoptionSource(
+            .{
+                .identity = .{ .runtime_id = 0xaa, .stream_id = 7 },
+                .authority = .{
+                    .role = .observer,
+                    .generation = .untracked,
+                },
+                .initial_metadata = .{ .current = .{
+                    .seed = hostile_seed,
+                    .seal = forged_seal,
+                } },
+            },
+            &scratch,
+        ),
+    );
+}
+
+test "external source fold seals and traverses the exact maximum event FIFO" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    var fds: [2]c.fd_t = undefined;
+    try std.testing.expectEqual(
+        @as(c_int, 0),
+        c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds),
+    );
+    defer _ = c.close(fds[1]);
+    var client = makeConnectedTestClient(allocator, fds[0]);
+    defer client.deinit();
+    try client.enterExternalMode();
+    client.ownership = .external_pump;
+    client.connection_profile = .cli_attach;
+    client.compatibility_profile = compatibility.profileForMajor(protocol.version_major).?;
+    client.attach_instance_id = 93;
+
+    const payload_text = "{\"event\":\"runtime.ended\"}";
+    try client.pending_events.ensureTotalCapacityPrecise(
+        allocator,
+        max_pending_event_count,
+    );
+    for (0..max_pending_event_count) |_| {
+        const payload = try allocator.dupe(u8, payload_text);
+        try client.pending_events.append(allocator, .{
+            .header = .{
+                .kind = .event,
+                .stream_id = 7,
+                .payload_len = @intCast(payload.len),
+            },
+            .payload = payload,
+        });
+        client.pending_event_bytes += payload.len;
+    }
+
+    var scratch: ExternalSourceOwnerRangeScratch = .{};
+    const input = ExternalAdoptionFoldInput{
+        .identity = .{ .runtime_id = 0xaa, .stream_id = 7 },
+        .authority = .{ .role = .observer, .generation = .untracked },
+        .initial_metadata = .unsupported,
+    };
+    const first = try client.foldExternalAdoptionSource(input, &scratch);
+    try std.testing.expect(first.outcome == .ended);
+    try std.testing.expectEqual(
+        @as(usize, max_pending_event_count),
+        first.source_seal.event_count,
+    );
+    client.pending_events.items[max_pending_event_count - 1].payload[0] = '[';
+    const mutated = try client.foldExternalAdoptionSource(input, &scratch);
+    const mutated_reason = switch (mutated.outcome) {
+        .terminal => |reason| reason,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expect(mutated_reason == .source);
+    try std.testing.expect(mutated_reason.source == .malformed);
+    try std.testing.expect(!std.mem.eql(
+        u8,
+        &first.source_seal.digest,
+        &mutated.source_seal.digest,
+    ));
 }
 
 fn checkExternalAdoptionAllocation(allocator: std.mem.Allocator) !void {

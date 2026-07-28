@@ -23,6 +23,11 @@ const resize_wire = @import("resize_wire.zig");
 const core_command_wire = @import("core_command_wire.zig");
 const remote_attachment = @import("remote_attachment.zig");
 
+const EventGenerationTracking = enum {
+    untracked,
+    tracked,
+};
+
 /// host에서 가져온 대기 OSC 9/777 데스크톱 알림 한 건(§6.32). title/body는 owned(caller가 deinit).
 pub const Notification = struct {
     title: []u8,
@@ -108,6 +113,7 @@ pub const RemoteRuntime = struct {
     io: std.Io,
     runtime_id_hex: [32]u8, // host 발급 runtime_id(hex) — terminate에 되먹인다.
     attachment: remote_attachment.RemoteAttachment,
+    event_generation_tracking: EventGenerationTracking,
     resize_seq: u64, // 단조 증가 client_sequence — registry가 이하 sequence를 stale로 거부하므로 매 resize마다 올린다.
     resize_generation: u64,
     resize_baseline_present: bool,
@@ -279,6 +285,10 @@ pub const RemoteRuntime = struct {
             .unsupported, .unavailable => {},
         }
         self.attachment = .init(self.allocator, accepted.state);
+        self.event_generation_tracking = switch (generation_schema) {
+            .frozen_controller_only, .granted_without_generation => .untracked,
+            .granted_with_generation => .tracked,
+        };
         self.attachment.bindTransport(attachmentTransport(self.client)) catch {
             self.client.failClosed();
             return error.AttachFailed;
@@ -674,7 +684,12 @@ pub const RemoteRuntime = struct {
                         .observer => .observer,
                         .controller => .controller,
                     },
-                    .generation = self.attachment.state.controller_generation,
+                    .generation = switch (self.event_generation_tracking) {
+                        .untracked => .untracked,
+                        .tracked => .{
+                            .tracked = self.attachment.state.controller_generation,
+                        },
+                    },
                 },
                 .{
                     .expected_major = self.client.wire_major,
@@ -1605,6 +1620,7 @@ test "remote runtime fails the shared connection on an immediately consumed fore
     runtime.client = &client;
     runtime.allocator = allocator;
     runtime.attachment = .init(testing.allocator, .{ .runtime_id = 1, .stream_id = 7, .role = .controller, .controller_generation = 1 });
+    runtime.event_generation_tracking = .tracked;
     runtime.runtime_id_hex = "000000000000000000000000000000aa".*;
     runtime.resize_generation = 0;
     runtime.resize_baseline_present = false;
@@ -2971,6 +2987,7 @@ test "remote runtime observer locally consumes input and sends no resize mutatio
         .role = .observer,
         .controller_generation = 3,
     });
+    runtime.event_generation_tracking = .tracked;
     defer runtime.attachment.deinit();
     try testing.expectError(error.Unauthorized, runtime.sendInput("x"));
     try testing.expectError(error.Unauthorized, runtime.sendInputNonBlocking("paste"));
@@ -3010,6 +3027,7 @@ test "remote runtime revoke demotes authority and cancels queued mutation before
         .role = .controller,
         .controller_generation = 3,
     });
+    runtime.event_generation_tracking = .tracked;
     defer runtime.attachment.deinit();
     runtime.direct_input = .empty;
     defer runtime.direct_input.deinit(allocator);
@@ -3031,6 +3049,44 @@ test "remote runtime revoke demotes authority and cancels queued mutation before
     try testing.expectEqual(@as(usize, 0), runtime.pending_controls.items.len);
     try testing.expect(client.pending_outbound == null);
     try testing.expect(!client.unusable);
+}
+
+test "remote runtime rejects revoke when attach generation is untracked" {
+    const allocator = testing.allocator;
+    var client: client_mod.Client = .{
+        .allocator = allocator,
+        .fd = -1,
+        .host_id = 1,
+        .parser = framing.FrameParser.init(allocator),
+    };
+    defer client.deinit();
+    var event = client_mod.BufferedEvent{
+        .header = .{ .kind = .event, .stream_id = 7 },
+        .payload = try allocator.dupe(
+            u8,
+            "{\"event\":\"controller.revoked\",\"data\":{\"runtime_id\":\"000000000000000000000000000000aa\",\"stream_id\":7,\"controller_generation\":4,\"reason\":\"takeover\"}}",
+        ),
+    };
+    event.header.payload_len = @intCast(event.payload.len);
+    try client.pending_events.append(allocator, event);
+    client.pending_event_bytes = event.payload.len;
+
+    var runtime: RemoteRuntime = undefined;
+    runtime.client = &client;
+    runtime.allocator = allocator;
+    runtime.attachment = .init(allocator, .{
+        .runtime_id = 0xaa,
+        .stream_id = 7,
+        .role = .controller,
+        .controller_generation = 0,
+    });
+    defer runtime.attachment.deinit();
+    runtime.event_generation_tracking = .untracked;
+    runtime.observation = .{};
+
+    try testing.expectError(error.ProtocolError, runtime.drainObservationEvents());
+    try testing.expect(client.unusable);
+    try testing.expectEqual(remote_attachment.Role.controller, runtime.attachment.state.role);
 }
 
 test "own buffered revoke suppresses newly arriving input before role cache catches up" {
@@ -3062,6 +3118,7 @@ test "own buffered revoke suppresses newly arriving input before role cache catc
         .role = .controller,
         .controller_generation = 3,
     });
+    runtime.event_generation_tracking = .tracked;
     defer runtime.attachment.deinit();
     runtime.direct_input = .empty;
     defer runtime.direct_input.deinit(allocator);

@@ -255,7 +255,7 @@ test "clusterEnd: 손상 UTF-8은 그 자리에서만 1바이트 cluster다(뒤�
 
 test "clusterEnd: 문자열 순회가 선형이다(cluster마다 남은 슬라이스를 재검증하지 않는다)" {
     // 회귀(code-review max): 예전 구현은 cluster 하나를 재는 데 O(남은 길이)를 써서 문자열 순회가 O(n²)였다.
-    // chrome 제목은 매 프레임 이 순회를 돌고(titleDisplayWidth), 주소창 URL은 길이 상한이 없어 큰 data: URI에서
+    // chrome 제목은 매 프레임 이 순회를 돌고(chrome/text_layout.displayCols), 주소창 URL은 길이 상한이 없어 큰 data: URI에서
     // 프레임이 초 단위로 멈췄다. 여기선 **총 디코드 횟수**를 길이에 비례하게 유지하는지를 순회 횟수로 고정한다
     // (시간 측정은 기계마다 달라 불안정하므로 쓰지 않는다).
     const n = 4096;

@@ -348,7 +348,7 @@ Term(가로 탭)뿐 아니라 **Pane 통째**를 사이드바(워크스페이스
   편집 중 라벨/탭 세그먼트가 이름보다 좁으면 **말미 고정(tail 앵커)** 으로 전환해 선두를 "…"로 자르고 **끝(caret)** 을
   보여준다 — 단일 줄 입력창이 caret를 따라 가로 스크롤하는 것과 같다. 이렇게 안 하면 세그먼트를 채우는 순간 caret과 방금
   친 글자가 오른쪽으로 잘려 무엇을 입력 중인지 안 보였다(사용자 제보). 잘림 규칙 단일 출처는 `coretext_frame_builder.appendEllipsizedTitle`
-  의 `TitleAnchor`(head=읽기용·tail=편집용)이고, platform이 rename 중인 대상에만 tail을 넘긴다: Term 탭(`buildPaneTabBarDrawList`의
+  의 `text_layout.Anchor`(head=읽기용·tail=편집용)이고, platform이 rename 중인 대상에만 tail을 넘긴다: Term 탭(`buildPaneTabBarDrawList`의
   `editing_tab`)·pane 라벨(`buildPaneLabelDrawList`의 `anchor`)·워크스페이스 카드/그룹 헤더(`buildSidebarDrawList`의 `editing_row` — 그
   슬롯 **이름줄만**). 네 계층이 같은 함수·같은 규칙을 공유한다(사이드바 검색창은 헤더 전용 인라인 렌더라 이 패밀리 밖 — 별도).
 - **트리거(세 가지 모두)**: ① **키보드 액션 + 커맨드 팔릿** — `rename_workspace`/`rename_pane`/`rename_term`(활성 대상

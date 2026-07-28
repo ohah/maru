@@ -16,7 +16,7 @@ const gp = @import("glyph_pixels.zig");
 const data = @import("icon_coverage_data.zig");
 
 /// cp가 **등록된**(coverage 데이터가 있는) maru 아이콘인지 — 합성 게이트의 단일 술어. `synthesizeGlyph`·
-/// `renderer.isSynthesizedCodepoint`·카드/제목 렌더 폭(`titleCellWidth`)이 이걸 쓴다. 미등록 PUA(Nerd Fonts v3가
+/// `renderer.isSynthesizedCodepoint`·카드/제목 렌더 폭(`chrome/text_layout.clusterCols`에 주입되는 predicate)이 이걸 쓴다. 미등록 PUA(Nerd Fonts v3가
 /// Plane-15로 옮긴 MDI 등)는 false → 폰트로 폴백. C 게이트(`maru_is_registered_icon_cp`, 생성 헤더)와 동일 집합.
 pub fn isRegisteredIcon(cp: u32) bool {
     return coverageFor(cp) != null;

@@ -15,6 +15,7 @@ const compatibility = @import("compatibility.zig");
 const external_inbox_ledger = @import("external_inbox_ledger.zig");
 const framing = @import("framing.zig");
 const protocol = @import("protocol.zig");
+const runtime_metadata_wire = @import("runtime_metadata_wire.zig");
 
 pub const AttachmentRole = enum {
     observer,
@@ -29,6 +30,223 @@ pub const AttachmentEvidence = struct {
     initial_role: AttachmentRole,
     initial_controller_generation: u64,
 };
+
+const EvidenceLifecycle = enum { empty, prepared, committed_tombstone, aborted_tombstone };
+
+/// Address-bound owner of one attach's metadata seed, paired with the Client it belongs to.
+///
+/// `seed` and `cleanup_seed` deliberately describe the **same** allocation. `seed` is the logical
+/// value callers read; `cleanup_seed` is the private mirror `deinit` frees from. Keeping both lets a
+/// poisoned logical descriptor be rejected without ever dereferencing or freeing it, while the
+/// canonical backing is still reclaimed exactly once. They are not redundant — deleting either one
+/// breaks the poisoned-descriptor recovery this type exists to provide. Zig has no private fields,
+/// so `tests/boundary/imports.zig` is what keeps the mirror out of non-mechanics code.
+pub const PreparedAdoptionEvidence = struct {
+    saved_self_addr: usize = 0,
+    attach_instance_id: u64 = 0,
+    sealed_attach_instance_id: u64 = 0,
+    source_client_addr: usize = 0,
+    attachment: AttachmentEvidence = .{
+        .runtime_id = 0,
+        .stream_id = 0,
+        .initial_role = .observer,
+        .initial_controller_generation = 0,
+    },
+    sealed_attachment: AttachmentEvidence = .{
+        .runtime_id = 0,
+        .stream_id = 0,
+        .initial_role = .observer,
+        .initial_controller_generation = 0,
+    },
+    client_profile: ?client_mod.ExternalTransferProfile = null,
+    seed: runtime_metadata_wire.InitialMetadataSeed = .unavailable,
+    cleanup_seed: runtime_metadata_wire.InitialMetadataSeed = .unavailable,
+    seed_seal: ?runtime_metadata_wire.MetadataSeedSeal = null,
+    cleanup_seed_seal: ?runtime_metadata_wire.MetadataSeedSeal = null,
+    lifecycle: EvidenceLifecycle = .empty,
+
+    pub fn initFromAttachPartsInPlace(
+        out: *PreparedAdoptionEvidence,
+        attach_instance_id: u64,
+        source: *client_mod.Client,
+        attachment: AttachmentEvidence,
+        seed: *runtime_metadata_wire.InitialMetadataSeed,
+    ) error{ InvalidAlias, InvalidEvidence, OutOfMemory }!void {
+        if (rangesOverlap(
+            @intFromPtr(out),
+            @sizeOf(PreparedAdoptionEvidence),
+            @intFromPtr(source),
+            @sizeOf(client_mod.Client),
+        ) or rangesOverlap(
+            @intFromPtr(out),
+            @sizeOf(PreparedAdoptionEvidence),
+            @intFromPtr(seed),
+            @sizeOf(runtime_metadata_wire.InitialMetadataSeed),
+        ) or rangesOverlap(
+            @intFromPtr(seed),
+            @sizeOf(runtime_metadata_wire.InitialMetadataSeed),
+            @intFromPtr(source),
+            @sizeOf(client_mod.Client),
+        )) return error.InvalidAlias;
+        source.preflightExternalAdoptionDestination(
+            out,
+            @sizeOf(PreparedAdoptionEvidence),
+        ) catch |err| return switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+            else => error.InvalidAlias,
+        };
+        source.preflightExternalAdoptionDestination(
+            seed,
+            @sizeOf(runtime_metadata_wire.InitialMetadataSeed),
+        ) catch |err| return switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+            else => error.InvalidAlias,
+        };
+        const source_seal = runtime_metadata_wire.sealMetadataSeed(seed) catch
+            return error.InvalidEvidence;
+        if (source_seal.backing_len != 0 and rangesOverlap(
+            @intFromPtr(out),
+            @sizeOf(PreparedAdoptionEvidence),
+            source_seal.backing_addr,
+            source_seal.backing_len,
+        )) return error.InvalidAlias;
+        if (source_seal.backing_len != 0 and rangesOverlap(
+            @intFromPtr(seed),
+            @sizeOf(runtime_metadata_wire.InitialMetadataSeed),
+            source_seal.backing_addr,
+            source_seal.backing_len,
+        )) return error.InvalidAlias;
+        if (source_seal.tag == .current and source_seal.backing_len != 0) {
+            source.preflightExternalAdoptionDestination(
+                @ptrFromInt(source_seal.backing_addr),
+                source_seal.backing_len,
+            ) catch |err| return switch (err) {
+                error.OutOfMemory => error.OutOfMemory,
+                else => error.InvalidAlias,
+            };
+        }
+        if (!std.meta.eql(out.*, PreparedAdoptionEvidence{}) or
+            attach_instance_id == 0 or attachment.runtime_id == 0 or
+            attachment.stream_id == 0 or
+            attach_instance_id != source.attach_instance_id)
+            return error.InvalidEvidence;
+        const profile = source.externalTransferProfile() orelse
+            return error.InvalidEvidence;
+        _ = prepareAuthority(source, attachment) catch return error.InvalidEvidence;
+        if (!metadataTagMatches(profile.metadata_support, source_seal.tag))
+            return error.InvalidEvidence;
+
+        const taken = seed.take();
+        out.* = .{
+            .saved_self_addr = @intFromPtr(out),
+            .attach_instance_id = attach_instance_id,
+            .sealed_attach_instance_id = attach_instance_id,
+            .source_client_addr = @intFromPtr(source),
+            .attachment = attachment,
+            .sealed_attachment = attachment,
+            .client_profile = profile,
+            .seed = taken,
+            .cleanup_seed = taken,
+            .lifecycle = .prepared,
+        };
+        out.seed_seal = runtime_metadata_wire.sealMetadataSeed(&out.seed) catch
+            @panic("prevalidated metadata seed became malformed during no-fail take");
+        out.cleanup_seed_seal = runtime_metadata_wire.sealMetadataSeed(&out.cleanup_seed) catch
+            @panic("prevalidated cleanup seed became malformed during no-fail take");
+    }
+
+    pub fn validate(
+        self: *const PreparedAdoptionEvidence,
+        source: *const client_mod.Client,
+    ) bool {
+        if (self.lifecycle != .prepared or
+            self.saved_self_addr != @intFromPtr(self) or
+            self.attach_instance_id == 0 or
+            self.attach_instance_id != self.sealed_attach_instance_id or
+            self.attach_instance_id != source.attach_instance_id or
+            self.source_client_addr != @intFromPtr(source) or
+            self.attachment.runtime_id == 0 or
+            self.attachment.stream_id == 0 or
+            !std.meta.eql(self.attachment, self.sealed_attachment) or
+            !std.meta.eql(
+                self.client_profile orelse return false,
+                source.externalTransferProfile() orelse return false,
+            ) or
+            !runtime_metadata_wire.validateMetadataSeedSeal(
+                self.seed_seal orelse return false,
+                &self.seed,
+            ) or
+            !runtime_metadata_wire.validateMetadataSeedSeal(
+                self.cleanup_seed_seal orelse return false,
+                &self.cleanup_seed,
+            ) or
+            !metadataTagMatches(
+                (self.client_profile orelse return false).metadata_support,
+                (self.seed_seal orelse return false).tag,
+            ))
+            return false;
+        _ = prepareAuthority(source, self.attachment) catch return false;
+        return true;
+    }
+
+    pub fn deinit(self: *PreparedAdoptionEvidence) void {
+        if (self.saved_self_addr != 0 and self.saved_self_addr != @intFromPtr(self)) return;
+        if (self.lifecycle == .prepared) {
+            if (seedMatchesSeal(self.cleanup_seed_seal, &self.cleanup_seed)) {
+                self.cleanup_seed.deinit();
+            } else if (seedMatchesSeal(self.seed_seal, &self.seed)) {
+                self.seed.deinit();
+            }
+        }
+        self.seed = .unavailable;
+        self.cleanup_seed = .unavailable;
+        self.seed_seal = null;
+        self.cleanup_seed_seal = null;
+        self.lifecycle = .aborted_tombstone;
+    }
+
+    fn moveInto(
+        self: *PreparedAdoptionEvidence,
+        destination: *PreparedAdoptionEvidence,
+        new_source: *const client_mod.Client,
+    ) void {
+        if (destination.lifecycle != .empty or self.lifecycle != .prepared)
+            @panic("invalid prepared adoption evidence move");
+        destination.* = self.*;
+        destination.saved_self_addr = @intFromPtr(destination);
+        destination.source_client_addr = @intFromPtr(new_source);
+        destination.seed_seal = runtime_metadata_wire.sealMetadataSeed(&destination.seed) catch
+            @panic("validated metadata seed became malformed during no-fail move");
+        destination.cleanup_seed_seal = runtime_metadata_wire.sealMetadataSeed(
+            &destination.cleanup_seed,
+        ) catch @panic("validated cleanup seed became malformed during no-fail move");
+        self.seed = .unavailable;
+        self.cleanup_seed = .unavailable;
+        self.seed_seal = null;
+        self.cleanup_seed_seal = null;
+        self.lifecycle = .committed_tombstone;
+    }
+};
+
+fn seedMatchesSeal(
+    seal: ?runtime_metadata_wire.MetadataSeedSeal,
+    seed: *const runtime_metadata_wire.InitialMetadataSeed,
+) bool {
+    return if (seal) |value|
+        runtime_metadata_wire.validateMetadataSeedDescriptor(value, seed)
+    else
+        false;
+}
+
+fn metadataTagMatches(
+    support: runtime_metadata_wire.MetadataSupport,
+    tag: runtime_metadata_wire.MetadataSeedTag,
+) bool {
+    return switch (support) {
+        .unsupported => tag == .unsupported,
+        .supported => tag == .unavailable or tag == .current,
+    };
+}
 
 pub const AuthorityGeneration = union(enum) {
     untracked,
@@ -53,7 +271,7 @@ pub const PrepareStatus = union(enum) {
     terminal: TerminalPrepareReason,
 };
 
-const AdoptionLifecycle = enum { empty, prepared, committed_tombstone, aborted_tombstone };
+const AdoptionLifecycle = EvidenceLifecycle;
 
 /// Pump-owned, final-address seal. The neutral module owns only the screen backlog sub-plan; this
 /// object binds it to the exact storage, evidence, authority and pristine ledger that may publish
@@ -96,6 +314,10 @@ pub const PreparedExternalAdoption = struct {
             !std.meta.eql(self.evidence, storage.evidence_snapshot))
             return false;
         const client = if (storage.owned_client) |*owned| owned else return false;
+        const owned_evidence = if (storage.owned_evidence) |*owned| owned else return false;
+        if (!owned_evidence.validate(client) or
+            !std.meta.eql(owned_evidence.attachment, storage.evidence_snapshot))
+            return false;
         if (self.client_addr != @intFromPtr(client)) return false;
         const view = storage.inbox_ledger.accountingView();
         if (!view.valid or !view.pristine_zero) return false;
@@ -139,6 +361,7 @@ pub const InitResult = union(enum) {
 pub const StorageLifecycle = enum {
     empty,
     constructing,
+    normalizing,
     adopting,
     live,
     tearing_down,
@@ -149,6 +372,7 @@ pub const TeardownResult = enum {
     cleaned,
     already_dead,
     moved_storage,
+    busy,
     ledger_not_zero,
 };
 
@@ -162,7 +386,7 @@ pub const AccessError = error{
 const InitOptions = struct {
     failpoint: enum {
         none,
-        after_client_move,
+        after_paired_take,
     } = .none,
     resident_cap: usize = protocol.max_binary_chunk + protocol.header_size,
 };
@@ -180,13 +404,20 @@ pub const ExternalPumpStorage = struct {
         .initial_controller_generation = 0,
     },
     owned_client: ?client_mod.Client = null,
+    /// Temporary seed owner. c3c replaces this with the final `OwnerMetadataState`; until then it is
+    /// the only thing that owns the metadata seed after the paired take, so teardown must free it.
+    owned_evidence: ?PreparedAdoptionEvidence = null,
+    /// Staging token for the Client move. It is meaningful only inside `initInPlace`: after
+    /// `finishExternalPumpTransfer` it is a spent `.committed` record whose source address has been
+    /// cleared, and nothing may read it as a description of live state.
+    client_transfer: client_mod.PreparedExternalPumpTransfer = .{},
     inbox_ledger: external_inbox_ledger.ExternalInboxLedger = .{},
     prepared_adoption: PreparedExternalAdoption = .{},
 
     pub fn initInPlace(
         out: *ExternalPumpStorage,
         source: *client_mod.Client,
-        evidence: AttachmentEvidence,
+        evidence: *PreparedAdoptionEvidence,
     ) InitResult {
         return initInPlaceWithOptions(out, source, evidence, .{});
     }
@@ -194,7 +425,7 @@ pub const ExternalPumpStorage = struct {
     fn initInPlaceWithOptions(
         out: *ExternalPumpStorage,
         source: *client_mod.Client,
-        evidence: AttachmentEvidence,
+        evidence: *PreparedAdoptionEvidence,
         options: InitOptions,
     ) InitResult {
         // Pointer arithmetic and overlap rejection happen before interpreting destination fields:
@@ -204,9 +435,29 @@ pub const ExternalPumpStorage = struct {
             @sizeOf(ExternalPumpStorage),
             @intFromPtr(source),
             @sizeOf(client_mod.Client),
+        ) or rangesOverlap(
+            @intFromPtr(out),
+            @sizeOf(ExternalPumpStorage),
+            @intFromPtr(evidence),
+            @sizeOf(PreparedAdoptionEvidence),
         )) {
             return failed(.overlapping_storage, .preserved);
         }
+        source.preflightExternalAdoptionDestination(
+            evidence,
+            @sizeOf(PreparedAdoptionEvidence),
+        ) catch |err| return switch (err) {
+            error.OutOfMemory => failed(.out_of_memory, .preserved),
+            else => failed(.overlapping_storage, .preserved),
+        };
+        const evidence_seed_seal = evidence.seed_seal orelse
+            return failed(.invalid_evidence, .preserved);
+        if (evidence_seed_seal.backing_len != 0 and rangesOverlap(
+            @intFromPtr(out),
+            @sizeOf(ExternalPumpStorage),
+            evidence_seed_seal.backing_addr,
+            evidence_seed_seal.backing_len,
+        )) return failed(.overlapping_storage, .preserved);
         source.preflightExternalAdoptionDestination(
             out,
             @sizeOf(ExternalPumpStorage),
@@ -217,20 +468,22 @@ pub const ExternalPumpStorage = struct {
         };
         if (out.lifecycle != .empty)
             return failed(.destination_not_empty, .preserved);
-        if (evidence.runtime_id == 0 or evidence.stream_id == 0)
+        if (!evidence.validate(source))
             return failed(.invalid_evidence, .preserved);
 
         out.* = .{
             .lifecycle = .constructing,
             .saved_self_addr = @intFromPtr(out),
             .semantic_state = .constructing,
-            .evidence_snapshot = evidence,
+            .evidence_snapshot = evidence.attachment,
         };
 
-        source.transferToExternalPump(
+        source.prepareExternalPumpTransfer(
+            &out.client_transfer,
             &out.owned_client,
             options.resident_cap,
         ) catch |err| {
+            out.client_transfer.deinit();
             out.* = .{};
             return switch (err) {
                 error.ConnectionClosed => failed(.connection_closed, .preserved),
@@ -242,15 +495,76 @@ pub const ExternalPumpStorage = struct {
                 error.OutOfMemory => failed(.out_of_memory, .preserved),
             };
         };
+        // The allocations above run arbitrary allocator code. Re-prove that this transaction still
+        // owns the destination before trusting any field it published.
+        if (out.lifecycle != .constructing or out.saved_self_addr != @intFromPtr(out)) {
+            out.client_transfer.deinit();
+            return failed(.invariant_failure, .preserved);
+        }
+        if (!out.client_transfer.validate(source, &out.owned_client) or
+            !evidence.validate(source))
+        {
+            out.client_transfer.deinit();
+            out.* = .{};
+            return failed(.invalid_evidence, .preserved);
+        }
+        source.preflightExternalAdoptionDestination(
+            out,
+            @sizeOf(ExternalPumpStorage),
+        ) catch |err| {
+            out.client_transfer.deinit();
+            out.* = .{};
+            return switch (err) {
+                error.OutOfMemory => failed(.out_of_memory, .preserved),
+                else => failed(.invariant_failure, .preserved),
+            };
+        };
+        source.preflightExternalAdoptionDestination(
+            evidence,
+            @sizeOf(PreparedAdoptionEvidence),
+        ) catch |err| {
+            out.client_transfer.deinit();
+            out.* = .{};
+            return switch (err) {
+                error.OutOfMemory => failed(.out_of_memory, .preserved),
+                else => failed(.invariant_failure, .preserved),
+            };
+        };
+        if (out.lifecycle != .constructing or out.saved_self_addr != @intFromPtr(out)) {
+            out.client_transfer.deinit();
+            return failed(.invariant_failure, .preserved);
+        }
+        if (!out.client_transfer.validate(source, &out.owned_client) or
+            !evidence.validate(source))
+        {
+            out.client_transfer.deinit();
+            out.* = .{};
+            return failed(.invalid_evidence, .preserved);
+        }
 
-        // transferToExternalPump has no fallible operation after parser normalization. At this
-        // point the source is a deinit-safe tombstone and this exact address is the sole owner.
-        out.lifecycle = .adopting;
-        out.semantic_state = .adopting;
-        if (options.failpoint == .after_client_move) {
+        // No allocation, callback or error is permitted between these two ownership takes.
+        source.commitExternalPumpTransfer(
+            &out.client_transfer,
+            &out.owned_client,
+        ) catch {
+            out.client_transfer.deinit();
+            out.* = .{};
+            return failed(.invalid_evidence, .preserved);
+        };
+        out.owned_evidence = .{};
+        evidence.moveInto(&out.owned_evidence.?, &out.owned_client.?);
+        out.lifecycle = .normalizing;
+        out.semantic_state = .constructing;
+        if (options.failpoint == .after_paired_take) {
             _ = out.closeOwned(.invariant_failure);
             return failed(.invariant_failure, .consumed_and_closed);
         }
+        client_mod.Client.finishExternalPumpTransfer(
+            &out.client_transfer,
+            &out.owned_client,
+        );
+        out.lifecycle = .adopting;
+        out.semantic_state = .adopting;
         return .initialized;
     }
 
@@ -260,7 +574,7 @@ pub const ExternalPumpStorage = struct {
         try self.requireAddress();
         return switch (self.lifecycle) {
             .empty => error.Empty,
-            .adopting, .constructing => error.NotActive,
+            .adopting, .constructing, .normalizing => error.NotActive,
             .live => switch (self.semantic_state) {
                 .active => {},
                 .terminal => error.Terminal,
@@ -276,6 +590,10 @@ pub const ExternalPumpStorage = struct {
             self.prepared_adoption.lifecycle != .empty)
             return .{ .terminal = .internal_invariant };
         const client = if (self.owned_client) |*owned| owned else return .{ .terminal = .internal_invariant };
+        const owned_evidence = if (self.owned_evidence) |*owned| owned else return .{ .terminal = .internal_invariant };
+        if (!owned_evidence.validate(client) or
+            !std.meta.eql(owned_evidence.attachment, self.evidence_snapshot))
+            return .{ .terminal = .internal_invariant };
         if (self.evidence_snapshot.runtime_id == 0 or
             self.evidence_snapshot.stream_id == 0)
             return .{ .terminal = .protocol };
@@ -320,7 +638,12 @@ pub const ExternalPumpStorage = struct {
             return .moved_storage;
         return switch (self.lifecycle) {
             .empty, .dead, .tearing_down => .already_dead,
-            .constructing, .adopting, .live => self.closeOwned(.invariant_failure),
+            // Both windows are only observable from inside an in-flight `initInPlace`: every init
+            // failure path restores `.empty` and success moves past them. Tearing down here would
+            // hand the re-entrant caller a `cleaned` result that the still-running transaction then
+            // overwrites, so the transaction stays the sole owner and the caller retries.
+            .constructing, .normalizing => .busy,
+            .adopting, .live => self.closeOwned(.invariant_failure),
         };
     }
 
@@ -341,6 +664,9 @@ pub const ExternalPumpStorage = struct {
         self.prepared_adoption.deinit();
         if (self.owned_client) |*owned| owned.deinit();
         self.owned_client = null;
+        if (self.owned_evidence) |*owned| owned.deinit();
+        self.owned_evidence = null;
+        self.client_transfer.deinit();
         const drain_report = self.inbox_ledger.drainAll();
         const ledger_result = self.inbox_ledger.finish();
         self.lifecycle = .dead;
@@ -509,6 +835,485 @@ const valid_evidence: AttachmentEvidence = .{
     .initial_controller_generation = 3,
 };
 
+/// Test-only bridge: production evidence always comes from a `Prepared` whose Client already
+/// carries the same `attach_instance_id`, so fixtures must seal both halves too.
+fn sealAttachEvidence(
+    out: *PreparedAdoptionEvidence,
+    attach_instance_id: u64,
+    source: *client_mod.Client,
+    attachment: AttachmentEvidence,
+    seed: *runtime_metadata_wire.InitialMetadataSeed,
+) error{ InvalidAlias, InvalidEvidence, OutOfMemory }!void {
+    source.attach_instance_id = attach_instance_id;
+    return PreparedAdoptionEvidence.initFromAttachPartsInPlace(
+        out,
+        attach_instance_id,
+        source,
+        attachment,
+        seed,
+    );
+}
+
+fn initTestStorage(
+    out: *ExternalPumpStorage,
+    source: *client_mod.Client,
+    attachment: AttachmentEvidence,
+) InitResult {
+    return initTestStorageWithOptions(out, source, attachment, .{});
+}
+
+fn initTestStorageWithOptions(
+    out: *ExternalPumpStorage,
+    source: *client_mod.Client,
+    attachment: AttachmentEvidence,
+    options: InitOptions,
+) InitResult {
+    var seed: runtime_metadata_wire.InitialMetadataSeed = switch (source.metadata_support) {
+        .unsupported => .unsupported,
+        .supported => .unavailable,
+    };
+    defer seed.deinit();
+    var evidence: PreparedAdoptionEvidence = .{};
+    defer evidence.deinit();
+    sealAttachEvidence(
+        &evidence,
+        1,
+        source,
+        attachment,
+        &seed,
+    ) catch |err| return failed(
+        if (err == error.OutOfMemory) .out_of_memory else .invalid_evidence,
+        .preserved,
+    );
+    return ExternalPumpStorage.initInPlaceWithOptions(
+        out,
+        source,
+        &evidence,
+        options,
+    );
+}
+
+fn currentMetadataSeed(
+    allocator: std.mem.Allocator,
+) !runtime_metadata_wire.InitialMetadataSeed {
+    return runtime_metadata_wire.testingCurrentSeed(allocator);
+}
+
+test "prepared adoption evidence enforces metadata support tag matrix before ownership mutation" {
+    var fixture = try TestClient.init();
+    defer fixture.deinitPeer();
+    defer fixture.client.deinit();
+
+    var unsupported: runtime_metadata_wire.InitialMetadataSeed = .unsupported;
+    var first: PreparedAdoptionEvidence = .{};
+    defer first.deinit();
+    try sealAttachEvidence(
+        &first,
+        1,
+        &fixture.client,
+        valid_evidence,
+        &unsupported,
+    );
+    try std.testing.expect(unsupported == .unavailable);
+    try std.testing.expect(first.validate(&fixture.client));
+    first.attach_instance_id = 99;
+    try std.testing.expect(!first.validate(&fixture.client));
+    first.attach_instance_id = first.sealed_attach_instance_id;
+    first.attachment.runtime_id += 1;
+    try std.testing.expect(!first.validate(&fixture.client));
+    first.attachment = first.sealed_attachment;
+    try std.testing.expect(first.validate(&fixture.client));
+    first.deinit();
+
+    fixture.client.connection_profile = .gui;
+    var gui_seed: runtime_metadata_wire.InitialMetadataSeed = .unsupported;
+    var gui_evidence: PreparedAdoptionEvidence = .{};
+    try std.testing.expectError(
+        error.InvalidEvidence,
+        sealAttachEvidence(
+            &gui_evidence,
+            2,
+            &fixture.client,
+            valid_evidence,
+            &gui_seed,
+        ),
+    );
+    fixture.client.connection_profile = .cli_attach;
+
+    var unavailable: runtime_metadata_wire.InitialMetadataSeed = .unavailable;
+    var invalid_unsupported: PreparedAdoptionEvidence = .{};
+    try std.testing.expectError(
+        error.InvalidEvidence,
+        sealAttachEvidence(
+            &invalid_unsupported,
+            2,
+            &fixture.client,
+            valid_evidence,
+            &unavailable,
+        ),
+    );
+    try std.testing.expect(unavailable == .unavailable);
+
+    fixture.client.metadata_support = .supported;
+    var invalid_supported_seed: runtime_metadata_wire.InitialMetadataSeed = .unsupported;
+    var invalid_supported: PreparedAdoptionEvidence = .{};
+    try std.testing.expectError(
+        error.InvalidEvidence,
+        sealAttachEvidence(
+            &invalid_supported,
+            3,
+            &fixture.client,
+            valid_evidence,
+            &invalid_supported_seed,
+        ),
+    );
+    try std.testing.expect(invalid_supported_seed == .unsupported);
+
+    var supported_unavailable: runtime_metadata_wire.InitialMetadataSeed = .unavailable;
+    var second: PreparedAdoptionEvidence = .{};
+    defer second.deinit();
+    try sealAttachEvidence(
+        &second,
+        4,
+        &fixture.client,
+        valid_evidence,
+        &supported_unavailable,
+    );
+    try std.testing.expect(second.validate(&fixture.client));
+}
+
+test "paired transfer rejects current seed drift and canonical cleanup survives pointer poison" {
+    const allocator = std.testing.allocator;
+    var fixture = try TestClient.init();
+    defer fixture.deinitPeer();
+    defer fixture.client.deinit();
+    fixture.client.metadata_support = .supported;
+
+    var seed = try currentMetadataSeed(allocator);
+    defer seed.deinit();
+    var evidence: PreparedAdoptionEvidence = .{};
+    defer evidence.deinit();
+    try sealAttachEvidence(
+        &evidence,
+        9,
+        &fixture.client,
+        valid_evidence,
+        &seed,
+    );
+    const canonical_backing = evidence.cleanup_seed.current.backing.?;
+    const poisoned = try allocator.dupe(u8, canonical_backing);
+    evidence.seed.current.backing = poisoned;
+    var storage: ExternalPumpStorage = .{};
+    const failure = ExternalPumpStorage.initInPlace(
+        &storage,
+        &fixture.client,
+        &evidence,
+    ).failed;
+    try std.testing.expectEqual(InitFailureReason.invalid_evidence, failure.reason);
+    try std.testing.expectEqual(SourceDisposition.preserved, failure.source_disposition);
+    try std.testing.expectEqual(StorageLifecycle.empty, storage.lifecycle);
+    try std.testing.expect(fixture.client.fd >= 0);
+    evidence.deinit(); // frees canonical backing, never the poisoned descriptor.
+    allocator.free(poisoned);
+}
+
+test "prepared evidence content drift rejects commit but descriptor cleanup remains exact" {
+    var fixture = try TestClient.init();
+    defer fixture.deinitPeer();
+    defer fixture.client.deinit();
+    fixture.client.metadata_support = .supported;
+    var seed = try currentMetadataSeed(std.testing.allocator);
+    defer seed.deinit();
+    var evidence: PreparedAdoptionEvidence = .{};
+    defer evidence.deinit();
+    try sealAttachEvidence(
+        &evidence,
+        13,
+        &fixture.client,
+        valid_evidence,
+        &seed,
+    );
+    evidence.seed.current.backing.?[0] = 'X'; // cleanup mirror shares the canonical owner bytes.
+    try std.testing.expect(!evidence.validate(&fixture.client));
+    var storage: ExternalPumpStorage = .{};
+    const failure = ExternalPumpStorage.initInPlace(
+        &storage,
+        &fixture.client,
+        &evidence,
+    ).failed;
+    try std.testing.expectEqual(InitFailureReason.invalid_evidence, failure.reason);
+    try std.testing.expectEqual(StorageLifecycle.empty, storage.lifecycle);
+    evidence.deinit(); // descriptor-only cleanup still frees the mutated canonical allocation.
+}
+
+test "prepared evidence rejects unmapped logical backing before content dereference" {
+    var fixture = try TestClient.init();
+    defer fixture.deinitPeer();
+    defer fixture.client.deinit();
+    fixture.client.metadata_support = .supported;
+    var seed = try currentMetadataSeed(std.testing.allocator);
+    defer seed.deinit();
+    var evidence: PreparedAdoptionEvidence = .{};
+    defer evidence.deinit();
+    try sealAttachEvidence(
+        &evidence,
+        14,
+        &fixture.client,
+        valid_evidence,
+        &seed,
+    );
+    const len = evidence.seed.current.backing.?.len;
+    const poison: [*]u8 = @ptrFromInt(0x1000);
+    evidence.seed.current.backing = poison[0..len];
+    try std.testing.expect(!evidence.validate(&fixture.client));
+    evidence.deinit(); // cleanup mirror still owns and frees the canonical mapped backing.
+}
+
+test "prepared evidence rejects metadata backing that aliases the source seed owner" {
+    var fixture = try TestClient.init();
+    defer fixture.deinitPeer();
+    defer fixture.client.deinit();
+    fixture.client.metadata_support = .supported;
+    var seed = try currentMetadataSeed(std.testing.allocator);
+    defer seed.deinit();
+    const original = seed.current.backing.?;
+    const seed_bytes: [*]u8 = @ptrCast(&seed);
+    seed.current.backing = seed_bytes[0..original.len];
+    var evidence: PreparedAdoptionEvidence = .{};
+    try std.testing.expectError(
+        error.InvalidAlias,
+        sealAttachEvidence(
+            &evidence,
+            15,
+            &fixture.client,
+            valid_evidence,
+            &seed,
+        ),
+    );
+    seed.current.backing = original;
+}
+
+test "paired transfer rejects storage overlap with evidence before destination dereference" {
+    var fixture = try TestClient.init();
+    defer fixture.deinitPeer();
+    defer fixture.client.deinit();
+    var seed: runtime_metadata_wire.InitialMetadataSeed = .unsupported;
+    var evidence: PreparedAdoptionEvidence = .{};
+    defer evidence.deinit();
+    try sealAttachEvidence(
+        &evidence,
+        10,
+        &fixture.client,
+        valid_evidence,
+        &seed,
+    );
+    const overlapping: *ExternalPumpStorage = @ptrCast(@alignCast(&evidence));
+    const failure = ExternalPumpStorage.initInPlace(
+        overlapping,
+        &fixture.client,
+        &evidence,
+    ).failed;
+    try std.testing.expectEqual(InitFailureReason.overlapping_storage, failure.reason);
+    try std.testing.expect(evidence.validate(&fixture.client));
+    try std.testing.expect(fixture.client.fd >= 0);
+}
+
+test "paired transfer owns current seed with Client and post-pair failure cleans both" {
+    const allocator = std.testing.allocator;
+    var fixture = try TestClient.init();
+    defer fixture.deinitPeer();
+    fixture.client.metadata_support = .supported;
+    const owned_fd = fixture.client.fd;
+    var seed = try currentMetadataSeed(allocator);
+    defer seed.deinit();
+    var evidence: PreparedAdoptionEvidence = .{};
+    defer evidence.deinit();
+    try sealAttachEvidence(
+        &evidence,
+        11,
+        &fixture.client,
+        valid_evidence,
+        &seed,
+    );
+    var storage: ExternalPumpStorage = .{};
+    const result = ExternalPumpStorage.initInPlaceWithOptions(
+        &storage,
+        &fixture.client,
+        &evidence,
+        .{ .failpoint = .after_paired_take },
+    ).failed;
+    try std.testing.expectEqual(SourceDisposition.consumed_and_closed, result.source_disposition);
+    try std.testing.expectEqual(StorageLifecycle.dead, storage.lifecycle);
+    try std.testing.expectEqual(@as(c.fd_t, -1), fixture.client.fd);
+    try std.testing.expect(evidence.lifecycle == .committed_tombstone);
+    try std.testing.expect(c.fcntl(owned_fd, c.F.GETFD, @as(c_int, 0)) < 0);
+    fixture.client.deinit();
+    evidence.deinit();
+    try std.testing.expectEqual(TeardownResult.already_dead, storage.teardown());
+}
+
+test "paired transfer publishes current seed only inside stable storage" {
+    var fixture = try TestClient.init();
+    defer fixture.deinitPeer();
+    fixture.client.metadata_support = .supported;
+    var seed = try currentMetadataSeed(std.testing.allocator);
+    defer seed.deinit();
+    var evidence: PreparedAdoptionEvidence = .{};
+    defer evidence.deinit();
+    try sealAttachEvidence(
+        &evidence,
+        12,
+        &fixture.client,
+        valid_evidence,
+        &seed,
+    );
+    var storage: ExternalPumpStorage = .{};
+    try std.testing.expect(
+        ExternalPumpStorage.initInPlace(
+            &storage,
+            &fixture.client,
+            &evidence,
+        ) == .initialized,
+    );
+    defer _ = storage.teardown();
+    try std.testing.expectEqual(@as(c.fd_t, -1), fixture.client.fd);
+    try std.testing.expect(evidence.lifecycle == .committed_tombstone);
+    const owned = &storage.owned_evidence.?.seed.current;
+    try std.testing.expectEqualStrings("/repo", owned.cwd());
+    try std.testing.expectEqualStrings("zsh", owned.foregroundProcesses()[0].slice());
+    try std.testing.expect(storage.owned_evidence.?.validate(&storage.owned_client.?));
+}
+
+test "prepared Client transfer binds token destination profile and parser content" {
+    var fixture = try TestClient.init();
+    defer fixture.deinitPeer();
+    defer fixture.client.deinit();
+    try fixture.client.parser.push("pending");
+    const fd = fixture.client.fd;
+    const parser_ptr = fixture.client.parser.buf.items.ptr;
+    var slot: ?client_mod.Client = null;
+    var other_slot: ?client_mod.Client = null;
+    var transfer: client_mod.PreparedExternalPumpTransfer = .{};
+    defer transfer.deinit();
+    try fixture.client.prepareExternalPumpTransfer(
+        &transfer,
+        &slot,
+        fixture.client.parser.residentBytes(),
+    );
+    try std.testing.expect(transfer.validate(&fixture.client, &slot));
+    try std.testing.expect(!transfer.validate(&fixture.client, &other_slot));
+    var copied = transfer;
+    defer copied.deinit();
+    try std.testing.expect(!copied.validate(&fixture.client, &slot));
+
+    fixture.client.metadata_support = .supported;
+    try std.testing.expect(!transfer.validate(&fixture.client, &slot));
+    try std.testing.expectError(
+        error.StaleTransfer,
+        fixture.client.commitExternalPumpTransfer(&transfer, &slot),
+    );
+    try std.testing.expect(slot == null);
+    try std.testing.expectEqual(fd, fixture.client.fd);
+    fixture.client.metadata_support = .unsupported;
+    fixture.client.parser.buf.items[0] = 'P';
+    try std.testing.expect(!transfer.validate(&fixture.client, &slot));
+    fixture.client.parser.buf.items[0] = 'p';
+    try std.testing.expect(transfer.validate(&fixture.client, &slot));
+
+    slot = client_mod.Client{
+        .allocator = std.testing.allocator,
+        .fd = -1,
+        .host_id = 0,
+        .parser = framing.FrameParser.init(std.testing.allocator),
+    };
+    try std.testing.expect(!transfer.validate(&fixture.client, &slot));
+    slot.?.deinit();
+    slot = null;
+    try std.testing.expectEqual(fd, fixture.client.fd);
+    try std.testing.expectEqual(parser_ptr, fixture.client.parser.buf.items.ptr);
+}
+
+fn checkPairedTransferAllocationFailure(allocator: std.mem.Allocator) !void {
+    var fixture = try TestClient.initWithAllocator(allocator);
+    defer fixture.deinitPeer();
+    defer fixture.client.deinit();
+    fixture.client.metadata_support = .supported;
+    try fixture.client.parser.push("pending");
+    const fd = fixture.client.fd;
+    var seed = try currentMetadataSeed(allocator);
+    defer seed.deinit();
+    var evidence: PreparedAdoptionEvidence = .{};
+    defer evidence.deinit();
+    sealAttachEvidence(
+        &evidence,
+        21,
+        &fixture.client,
+        valid_evidence,
+        &seed,
+    ) catch |err| {
+        try std.testing.expectEqual(@as(c.fd_t, fd), fixture.client.fd);
+        try std.testing.expect(std.meta.eql(evidence, PreparedAdoptionEvidence{}));
+        return err;
+    };
+    var storage: ExternalPumpStorage = .{};
+    const result = ExternalPumpStorage.initInPlace(
+        &storage,
+        &fixture.client,
+        &evidence,
+    );
+    switch (result) {
+        .initialized => {
+            try std.testing.expectEqual(@as(c.fd_t, -1), fixture.client.fd);
+            try std.testing.expect(evidence.lifecycle == .committed_tombstone);
+            try std.testing.expectEqual(TeardownResult.cleaned, storage.teardown());
+        },
+        .failed => |failure| {
+            try std.testing.expectEqual(InitFailureReason.out_of_memory, failure.reason);
+            try std.testing.expectEqual(SourceDisposition.preserved, failure.source_disposition);
+            try std.testing.expectEqual(StorageLifecycle.empty, storage.lifecycle);
+            try std.testing.expectEqual(fd, fixture.client.fd);
+            try std.testing.expect(evidence.validate(&fixture.client));
+            return error.OutOfMemory;
+        },
+    }
+}
+
+test "paired transfer preserves both owners at every allocation fail index" {
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        checkPairedTransferAllocationFailure,
+        .{},
+    );
+}
+
+test "owner-range OOM precedes occupied destination dereference" {
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    var fixture = try TestClient.initWithAllocator(failing.allocator());
+    defer fixture.deinitPeer();
+    defer fixture.client.deinit();
+    var seed: runtime_metadata_wire.InitialMetadataSeed = .unsupported;
+    var evidence: PreparedAdoptionEvidence = .{};
+    defer evidence.deinit();
+    try sealAttachEvidence(
+        &evidence,
+        22,
+        &fixture.client,
+        valid_evidence,
+        &seed,
+    );
+    var occupied: ExternalPumpStorage = .{ .lifecycle = .dead };
+    failing.fail_index = failing.alloc_index;
+    const failure = ExternalPumpStorage.initInPlace(
+        &occupied,
+        &fixture.client,
+        &evidence,
+    ).failed;
+    try std.testing.expectEqual(InitFailureReason.out_of_memory, failure.reason);
+    try std.testing.expectEqual(StorageLifecycle.dead, occupied.lifecycle);
+    try std.testing.expect(evidence.validate(&fixture.client));
+    try std.testing.expect(fixture.client.fd >= 0);
+}
+
 test "external pump storage initializes only at its stable address and remains inactive" {
     var fixture = try TestClient.init();
     defer fixture.deinitPeer();
@@ -516,7 +1321,7 @@ test "external pump storage initializes only at its stable address and remains i
     var storage: ExternalPumpStorage = .{};
 
     try std.testing.expect(
-        ExternalPumpStorage.initInPlace(&storage, &fixture.client, valid_evidence) ==
+        initTestStorage(&storage, &fixture.client, valid_evidence) ==
             .initialized,
     );
     try std.testing.expectEqual(StorageLifecycle.adopting, storage.lifecycle);
@@ -527,6 +1332,26 @@ test "external pump storage initializes only at its stable address and remains i
     try std.testing.expect(c.fcntl(owned_fd, c.F.GETFD, @as(c_int, 0)) >= 0);
     try std.testing.expectEqual(TeardownResult.cleaned, storage.teardown());
     try std.testing.expect(c.fcntl(owned_fd, c.F.GETFD, @as(c_int, 0)) < 0);
+    try std.testing.expectEqual(TeardownResult.already_dead, storage.teardown());
+}
+
+test "external pump refuses re-entrant teardown while a transaction owns the storage" {
+    // Both in-flight windows must answer `busy`. Tearing down here would report `cleaned` to the
+    // re-entrant caller while the still-running `initInPlace` goes on to publish `.adopting` over
+    // the `.dead` it just wrote — a storage that two owners each believe they hold.
+    var storage: ExternalPumpStorage = .{};
+    storage.saved_self_addr = @intFromPtr(&storage);
+
+    storage.lifecycle = .constructing;
+    try std.testing.expectEqual(TeardownResult.busy, storage.teardown());
+    try std.testing.expectEqual(StorageLifecycle.constructing, storage.lifecycle);
+
+    storage.lifecycle = .normalizing;
+    try std.testing.expectEqual(TeardownResult.busy, storage.teardown());
+    try std.testing.expectEqual(StorageLifecycle.normalizing, storage.lifecycle);
+
+    // A refusal is not a tombstone: the transaction still reaches its own terminal states.
+    storage.lifecycle = .empty;
     try std.testing.expectEqual(TeardownResult.already_dead, storage.teardown());
 }
 
@@ -543,7 +1368,7 @@ test "external pump prepares tracked authority and client ledger adoption withou
     fixture.client.pending_batch_bytes = payload.len;
     var storage: ExternalPumpStorage = .{};
     try std.testing.expect(
-        ExternalPumpStorage.initInPlace(&storage, &fixture.client, valid_evidence) ==
+        initTestStorage(&storage, &fixture.client, valid_evidence) ==
             .initialized,
     );
     defer _ = storage.teardown();
@@ -624,7 +1449,7 @@ test "external pump retryable allocation failure preserves the same storage for 
     defer fixture.deinitPeer();
     var storage: ExternalPumpStorage = .{};
     try std.testing.expect(
-        ExternalPumpStorage.initInPlace(&storage, &fixture.client, valid_evidence) ==
+        initTestStorage(&storage, &fixture.client, valid_evidence) ==
             .initialized,
     );
     defer _ = storage.teardown();
@@ -653,7 +1478,7 @@ test "external pump teardown ignores forged prepared lifecycle tombstones" {
     fixture.client.pending_batch_bytes = payload.len;
     var storage: ExternalPumpStorage = .{};
     try std.testing.expect(
-        ExternalPumpStorage.initInPlace(&storage, &fixture.client, valid_evidence) ==
+        initTestStorage(&storage, &fixture.client, valid_evidence) ==
             .initialized,
     );
     try std.testing.expect(storage.prepareAdoption() == .prepared);
@@ -709,7 +1534,7 @@ test "external pump retries the same storage at every adoption allocation index"
         fixture.client.pending_event_bytes = event_payload.len;
         var storage: ExternalPumpStorage = .{};
         try std.testing.expect(
-            ExternalPumpStorage.initInPlace(&storage, &fixture.client, valid_evidence) ==
+            initTestStorage(&storage, &fixture.client, valid_evidence) ==
                 .initialized,
         );
         defer _ = storage.teardown();
@@ -805,7 +1630,7 @@ test "external pump authority seed permits only verified frozen untracked contro
     frozen.client.attachment_capabilities = .{};
     var frozen_storage: ExternalPumpStorage = .{};
     try std.testing.expect(
-        ExternalPumpStorage.initInPlace(
+        initTestStorage(
             &frozen_storage,
             &frozen.client,
             .{
@@ -824,6 +1649,7 @@ test "external pump authority seed permits only verified frozen untracked contro
 
     var wrong_fingerprint = try TestClient.init();
     defer wrong_fingerprint.deinitPeer();
+    defer wrong_fingerprint.client.deinit();
     wrong_fingerprint.client.wire_major = 1;
     wrong_fingerprint.client.screen_codec_version = 1;
     wrong_fingerprint.client.parser.expected_major = 1;
@@ -831,48 +1657,40 @@ test "external pump authority seed permits only verified frozen untracked contro
     wrong_fingerprint.client.compatibility_profile.?.required_fingerprint = "wrong";
     wrong_fingerprint.client.attachment_capabilities = .{};
     var wrong_fingerprint_storage: ExternalPumpStorage = .{};
-    try std.testing.expect(
-        ExternalPumpStorage.initInPlace(
-            &wrong_fingerprint_storage,
-            &wrong_fingerprint.client,
-            .{
-                .runtime_id = 0xaa,
-                .stream_id = 7,
-                .initial_role = .controller,
-                .initial_controller_generation = 0,
-            },
-        ) == .initialized,
+    const wrong_fingerprint_failure = initTestStorage(
+        &wrong_fingerprint_storage,
+        &wrong_fingerprint.client,
+        .{
+            .runtime_id = 0xaa,
+            .stream_id = 7,
+            .initial_role = .controller,
+            .initial_controller_generation = 0,
+        },
+    ).failed;
+    try std.testing.expectEqual(
+        InitFailureReason.invalid_evidence,
+        wrong_fingerprint_failure.reason,
     );
-    defer _ = wrong_fingerprint_storage.teardown();
-    switch (wrong_fingerprint_storage.prepareAdoption()) {
-        .terminal => |reason| try std.testing.expectEqual(
-            TerminalPrepareReason.protocol,
-            reason,
-        ),
-        else => return error.TestUnexpectedResult,
-    }
 
     var current = try TestClient.init();
     defer current.deinitPeer();
+    defer current.client.deinit();
     current.client.attachment_capabilities = .{};
     var current_storage: ExternalPumpStorage = .{};
-    try std.testing.expect(
-        ExternalPumpStorage.initInPlace(
-            &current_storage,
-            &current.client,
-            .{
-                .runtime_id = 0xaa,
-                .stream_id = 7,
-                .initial_role = .controller,
-                .initial_controller_generation = 0,
-            },
-        ) == .initialized,
+    const current_failure = initTestStorage(
+        &current_storage,
+        &current.client,
+        .{
+            .runtime_id = 0xaa,
+            .stream_id = 7,
+            .initial_role = .controller,
+            .initial_controller_generation = 0,
+        },
+    ).failed;
+    try std.testing.expectEqual(
+        InitFailureReason.invalid_evidence,
+        current_failure.reason,
     );
-    defer _ = current_storage.teardown();
-    try std.testing.expect(
-        current_storage.prepareAdoption() == .terminal,
-    );
-    try std.testing.expect(current_storage.prepared_adoption.authority == null);
 }
 
 test "external pump authority seed table preserves protocol and invariant classes" {
@@ -1000,14 +1818,17 @@ test "external pump storage rejects transfer of its already-bound Client" {
     defer fixture.deinitPeer();
     var storage: ExternalPumpStorage = .{};
     try std.testing.expect(
-        ExternalPumpStorage.initInPlace(&storage, &fixture.client, valid_evidence) ==
+        initTestStorage(&storage, &fixture.client, valid_evidence) ==
             .initialized,
     );
     const owned_fd = storage.owned_client.?.fd;
     var second_slot: ?client_mod.Client = null;
+    var second_transfer: client_mod.PreparedExternalPumpTransfer = .{};
+    defer second_transfer.deinit();
     try std.testing.expectError(
         error.AlreadyBound,
-        storage.owned_client.?.transferToExternalPump(
+        storage.owned_client.?.prepareExternalPumpTransfer(
+            &second_transfer,
             &second_slot,
             protocol.max_binary_chunk + protocol.header_size,
         ),
@@ -1017,7 +1838,7 @@ test "external pump storage rejects transfer of its already-bound Client" {
     try std.testing.expectEqual(StorageLifecycle.adopting, storage.lifecycle);
 
     var second_storage: ExternalPumpStorage = .{};
-    const failure = ExternalPumpStorage.initInPlace(
+    const failure = initTestStorage(
         &second_storage,
         &storage.owned_client.?,
         valid_evidence,
@@ -1036,7 +1857,7 @@ test "external pump storage preflight failures preserve source and leave destina
     const fd = fixture.client.fd;
     var storage: ExternalPumpStorage = .{};
 
-    const invalid = ExternalPumpStorage.initInPlace(
+    const invalid = initTestStorage(
         &storage,
         &fixture.client,
         .{
@@ -1052,7 +1873,7 @@ test "external pump storage preflight failures preserve source and leave destina
     try std.testing.expectEqual(StorageLifecycle.empty, storage.lifecycle);
 
     storage.lifecycle = .adopting;
-    const occupied = ExternalPumpStorage.initInPlace(
+    const occupied = initTestStorage(
         &storage,
         &fixture.client,
         valid_evidence,
@@ -1074,10 +1895,16 @@ test "external pump storage rejects blocking and closed sources without ownershi
         .fd = fds[0],
         .host_id = 1,
         .parser = framing.FrameParser.init(std.testing.allocator),
+        .connection_profile = .cli_attach,
+        .compatibility_profile = compatibility.profileForMajor(protocol.version_major).?,
+        .attachment_capabilities = .{
+            .peer_attach_generation = true,
+            .negotiated_controller_transfer = true,
+        },
     };
     defer blocking.deinit();
     var storage: ExternalPumpStorage = .{};
-    const blocking_failure = ExternalPumpStorage.initInPlace(
+    const blocking_failure = initTestStorage(
         &storage,
         &blocking,
         valid_evidence,
@@ -1091,7 +1918,7 @@ test "external pump storage rejects blocking and closed sources without ownershi
     defer closed.deinitPeer();
     defer closed.client.deinit();
     closed.client.failClosed();
-    const closed_failure = ExternalPumpStorage.initInPlace(
+    const closed_failure = initTestStorage(
         &storage,
         &closed.client,
         valid_evidence,
@@ -1110,11 +1937,11 @@ test "external pump storage live reinit preserves both existing and candidate ow
     const second_fd = second.client.fd;
     var storage: ExternalPumpStorage = .{};
     try std.testing.expect(
-        ExternalPumpStorage.initInPlace(&storage, &first.client, valid_evidence) ==
+        initTestStorage(&storage, &first.client, valid_evidence) ==
             .initialized,
     );
 
-    const failure = ExternalPumpStorage.initInPlace(
+    const failure = initTestStorage(
         &storage,
         &second.client,
         valid_evidence,
@@ -1150,7 +1977,7 @@ test "external pump storage normalize failures preserve every observable source 
         var storage: ExternalPumpStorage = .{};
         if (scenario == .oom) failing.fail_index = failing.alloc_index;
         const resident_cap = if (scenario == .cap) cap - 1 else cap;
-        const failure = ExternalPumpStorage.initInPlaceWithOptions(
+        const failure = initTestStorageWithOptions(
             &storage,
             &fixture.client,
             valid_evidence,
@@ -1183,7 +2010,7 @@ test "external pump storage rejects source overlap before reading destination st
     defer fixture.client.deinit();
     const fd = fixture.client.fd;
     const overlapping: *ExternalPumpStorage = @ptrCast(@alignCast(&fixture.client));
-    const failure = ExternalPumpStorage.initInPlace(
+    const failure = initTestStorage(
         overlapping,
         &fixture.client,
         valid_evidence,
@@ -1211,7 +2038,7 @@ test "external pump storage rejects overlap with every source-owned backing befo
     fixture.client.pending_batches.items[0].bytes = storage_bytes[0..1];
     const byte_before = storage_bytes[0];
 
-    const failure = ExternalPumpStorage.initInPlace(
+    const failure = initTestStorage(
         &storage,
         &fixture.client,
         valid_evidence,
@@ -1228,11 +2055,11 @@ test "external pump storage post-move failure closes destination and tombstones 
     const owned_fd = fixture.client.fd;
     var storage: ExternalPumpStorage = .{};
 
-    const result = ExternalPumpStorage.initInPlaceWithOptions(
+    const result = initTestStorageWithOptions(
         &storage,
         &fixture.client,
         valid_evidence,
-        .{ .failpoint = .after_client_move },
+        .{ .failpoint = .after_paired_take },
     ).failed;
     try std.testing.expectEqual(InitFailureReason.invariant_failure, result.reason);
     try std.testing.expectEqual(SourceDisposition.consumed_and_closed, result.source_disposition);
@@ -1249,7 +2076,7 @@ test "external pump storage teardown reports impossible 2b2b ledger charge after
     const owned_fd = fixture.client.fd;
     var storage: ExternalPumpStorage = .{};
     try std.testing.expect(
-        ExternalPumpStorage.initInPlace(&storage, &fixture.client, valid_evidence) ==
+        initTestStorage(&storage, &fixture.client, valid_evidence) ==
             .initialized,
     );
     var allocation = try std.testing.allocator.dupe(u8, "x");
@@ -1272,7 +2099,7 @@ test "external pump storage teardown reentry cannot close a reused descriptor nu
     const old_fd = fixture.client.fd;
     var storage: ExternalPumpStorage = .{};
     try std.testing.expect(
-        ExternalPumpStorage.initInPlace(&storage, &fixture.client, valid_evidence) ==
+        initTestStorage(&storage, &fixture.client, valid_evidence) ==
             .initialized,
     );
     try std.testing.expectEqual(TeardownResult.cleaned, storage.teardown());
@@ -1288,7 +2115,7 @@ test "external pump storage forged value copy cannot clean the original owner" {
     defer fixture.deinitPeer();
     var storage: ExternalPumpStorage = .{};
     try std.testing.expect(
-        ExternalPumpStorage.initInPlace(&storage, &fixture.client, valid_evidence) ==
+        initTestStorage(&storage, &fixture.client, valid_evidence) ==
             .initialized,
     );
     var forged = storage;

@@ -19,7 +19,10 @@ const screen_stream = @import("screen_stream.zig");
 const socket_server = @import("socket_server.zig");
 extern "c" fn usleep(usec: c_uint) c_int;
 
+var next_attach_instance_id: std.atomic.Value(u64) = .init(1);
+
 pub const Prepared = struct {
+    attach_instance_id: u64,
     client: client_mod.Client,
     attachment: remote_attachment.RemoteAttachment,
     initial_metadata: runtime_metadata_wire.InitialMetadataSeed,
@@ -124,14 +127,51 @@ fn prepareWithTransition(
         return failClient(&client, failed);
     transition(&client) catch |err|
         return failClient(&client, transitionExit(err));
+    const attach_instance_id = allocateAttachInstanceId() orelse
+        return failClient(&client, .internal);
 
+    // Seal the same provenance on both halves. `Prepared.attach_instance_id` is the consumable
+    // token; the Client copy is the identity adoption evidence cross-checks against.
+    client.attach_instance_id = attach_instance_id;
     attached_owned = false;
     client_owned = false;
     return .{ .prepared = .{
+        .attach_instance_id = attach_instance_id,
         .client = client,
         .attachment = attached.attachment,
         .initial_metadata = attached.initial_metadata,
     } };
+}
+
+fn allocateAttachInstanceId() ?u64 {
+    return allocateAttachInstanceIdFrom(&next_attach_instance_id);
+}
+
+fn allocateAttachInstanceIdFrom(counter: *std.atomic.Value(u64)) ?u64 {
+    var current = counter.load(.monotonic);
+    while (current != std.math.maxInt(u64)) {
+        if (counter.cmpxchgWeak(
+            current,
+            current + 1,
+            .monotonic,
+            .monotonic,
+        )) |observed| {
+            current = observed;
+        } else {
+            return current;
+        }
+    }
+    return null;
+}
+
+test "external attach instance provenance is monotonic and exhaustion never wraps" {
+    var counter: std.atomic.Value(u64) = .init(std.math.maxInt(u64) - 1);
+    try std.testing.expectEqual(
+        std.math.maxInt(u64) - 1,
+        allocateAttachInstanceIdFrom(&counter).?,
+    );
+    try std.testing.expect(allocateAttachInstanceIdFrom(&counter) == null);
+    try std.testing.expectEqual(std.math.maxInt(u64), counter.load(.monotonic));
 }
 
 fn failExternalModeTransition(_: *client_mod.Client) client_mod.EnterExternalModeError!void {
@@ -1044,6 +1084,7 @@ test "external attach product transaction resolves connects and assembles one li
         .failed => return error.TestUnexpectedResult,
     };
     defer controller.deinit();
+    try std.testing.expect(controller.attach_instance_id != 0);
     try std.testing.expectEqual(runtime_id, controller.attachment.state.runtime_id);
     try std.testing.expect(controller.attachment.screen != null);
     try std.testing.expect(controller.attachment.allowsMutation());
@@ -1082,6 +1123,9 @@ test "external attach product transaction resolves connects and assembles one li
         .prepared => |value| value,
         .failed => return error.TestUnexpectedResult,
     };
+    try std.testing.expect(observer.attach_instance_id != 0);
+    try std.testing.expect(observer.attach_instance_id != controller.attach_instance_id);
+    const observer_instance_id = observer.attach_instance_id;
     try std.testing.expect(!observer.attachment.allowsMutation());
     try std.testing.expectError(
         error.ExternalMode,
@@ -1097,6 +1141,9 @@ test "external attach product transaction resolves connects and assembles one li
         .prepared => |value| value,
         .failed => return error.TestUnexpectedResult,
     };
+    try std.testing.expect(takeover.attach_instance_id != 0);
+    try std.testing.expect(takeover.attach_instance_id != controller.attach_instance_id);
+    try std.testing.expect(takeover.attach_instance_id != observer_instance_id);
     try std.testing.expect(takeover.attachment.allowsMutation());
     try std.testing.expect(
         takeover.attachment.state.controller_generation >

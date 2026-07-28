@@ -4,6 +4,7 @@
 //! view를 소비하며 metadata 필드의 type/range/default를 다시 구현하지 않는다.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const protocol = @import("protocol.zig");
 const resize_wire = @import("resize_wire.zig");
 const runtime_event_types = @import("runtime_event_types.zig");
@@ -190,6 +191,206 @@ pub const InitialMetadataSeed = union(enum) {
     }
 };
 
+pub const MetadataSeedTag = enum { unsupported, unavailable, current };
+
+/// Non-owning, address-bound descriptor/content seal used by the paired external-pump transfer.
+/// Range validation always precedes content hashing, so malformed DTO fields are never sliced.
+pub const MetadataSeedSeal = struct {
+    seed_addr: usize,
+    tag: MetadataSeedTag,
+    dto_addr: usize,
+    allocator_ptr_addr: usize,
+    allocator_vtable_addr: usize,
+    backing_present: bool,
+    backing_addr: usize,
+    backing_len: usize,
+    revision: u64,
+    raw_digest: runtime_event_wire.Digest,
+    semantic_digest: runtime_event_wire.Digest,
+};
+
+pub const MetadataSeedSealError = error{Malformed};
+
+pub fn sealMetadataSeed(seed: *const InitialMetadataSeed) MetadataSeedSealError!MetadataSeedSeal {
+    return switch (seed.*) {
+        .unsupported => scalarSeedSeal(seed, .unsupported),
+        .unavailable => scalarSeedSeal(seed, .unavailable),
+        .current => |*dto| try sealCurrentMetadata(seed, dto),
+    };
+}
+
+pub fn validateMetadataSeedSeal(
+    seal: MetadataSeedSeal,
+    seed: *const InitialMetadataSeed,
+) bool {
+    if (!validateMetadataSeedDescriptor(seal, seed)) return false;
+    const current = sealMetadataSeed(seed) catch return false;
+    return std.meta.eql(seal, current);
+}
+
+/// Descriptor-only ownership check. It never reads backing content and is therefore safe for
+/// cleanup selection after a logical seed's pointer or bytes have drifted.
+pub fn validateMetadataSeedDescriptor(
+    seal: MetadataSeedSeal,
+    seed: *const InitialMetadataSeed,
+) bool {
+    if (seal.seed_addr != @intFromPtr(seed)) return false;
+    return switch (seed.*) {
+        .unsupported => seal.tag == .unsupported and scalarDescriptorIsCanonical(seal),
+        .unavailable => seal.tag == .unavailable and scalarDescriptorIsCanonical(seal),
+        .current => |*dto| seal.tag == .current and
+            seal.dto_addr == @intFromPtr(dto) and
+            seal.allocator_ptr_addr == @intFromPtr(dto.allocator.ptr) and
+            seal.allocator_vtable_addr == @intFromPtr(dto.allocator.vtable) and
+            seal.backing_present == (dto.backing != null) and
+            seal.backing_addr == (if (dto.backing) |bytes| @intFromPtr(bytes.ptr) else 0) and
+            seal.backing_len == (if (dto.backing) |bytes| bytes.len else 0) and
+            seal.revision == dto.revision and
+            validateCurrentMetadataStructure(dto),
+    };
+}
+
+fn scalarDescriptorIsCanonical(seal: MetadataSeedSeal) bool {
+    return seal.dto_addr == 0 and seal.allocator_ptr_addr == 0 and
+        seal.allocator_vtable_addr == 0 and !seal.backing_present and
+        seal.backing_addr == 0 and seal.backing_len == 0 and seal.revision == 0;
+}
+
+fn scalarSeedSeal(
+    seed: *const InitialMetadataSeed,
+    tag: MetadataSeedTag,
+) MetadataSeedSeal {
+    const digest = runtime_event_wire.payloadDigest(@tagName(tag));
+    return .{
+        .seed_addr = @intFromPtr(seed),
+        .tag = tag,
+        .dto_addr = 0,
+        .allocator_ptr_addr = 0,
+        .allocator_vtable_addr = 0,
+        .backing_present = false,
+        .backing_addr = 0,
+        .backing_len = 0,
+        .revision = 0,
+        .raw_digest = digest,
+        .semantic_digest = digest,
+    };
+}
+
+fn sealCurrentMetadata(
+    seed: *const InitialMetadataSeed,
+    dto: *const OwnedMetadataDto,
+) MetadataSeedSealError!MetadataSeedSeal {
+    if (!validateCurrentMetadataStructure(dto)) return error.Malformed;
+    const backing = dto.backing orelse &.{};
+    return .{
+        .seed_addr = @intFromPtr(seed),
+        .tag = .current,
+        .dto_addr = @intFromPtr(dto),
+        .allocator_ptr_addr = @intFromPtr(dto.allocator.ptr),
+        .allocator_vtable_addr = @intFromPtr(dto.allocator.vtable),
+        .backing_present = dto.backing != null,
+        .backing_addr = if (dto.backing) |bytes| @intFromPtr(bytes.ptr) else 0,
+        .backing_len = backing.len,
+        .revision = dto.revision,
+        .raw_digest = runtime_event_wire.payloadDigest(backing),
+        .semantic_digest = metadataSemanticDigest(dto, backing),
+    };
+}
+
+fn validateCurrentMetadataStructure(dto: *const OwnedMetadataDto) bool {
+    if (dto.revision == 0 or dto.process_count > dto.processes.len) return false;
+    const backing_len = if (dto.backing) |backing| backing.len else 0;
+    var offset: usize = 0;
+    if (!rangeIsCanonical(dto.cwd_range, &offset, backing_len)) return false;
+    if (!rangeIsCanonical(dto.title_range, &offset, backing_len)) return false;
+    if (dto.ssh_range) |range| {
+        if (!rangeIsCanonical(range, &offset, backing_len)) return false;
+    }
+    if (!rangeIsCanonical(dto.clipboard_target_range, &offset, backing_len)) return false;
+    if (offset != backing_len) return false;
+    if (dto.backing == null and backing_len != 0) return false;
+    if (!dto.foreground_available and
+        (dto.foreground_pgid != null or dto.process_count != 0))
+        return false;
+    for (dto.processes[0..dto.process_count]) |process| {
+        if (process.len > process.bytes.len) return false;
+    }
+    return true;
+}
+
+fn rangeIsCanonical(range: OwnedMetadataDto.Range, offset: *usize, backing_len: usize) bool {
+    if (range.start != offset.*) return false;
+    const end = std.math.add(usize, range.start, range.len) catch return false;
+    if (end > backing_len) return false;
+    offset.* = end;
+    return true;
+}
+
+fn metadataSemanticDigest(
+    dto: *const OwnedMetadataDto,
+    backing: []const u8,
+) runtime_event_wire.Digest {
+    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    hasher.update("maru.metadata-seed.v1");
+    hashInt(&hasher, u64, dto.revision);
+    hashInt(&hasher, u64, dto.observer_generation);
+    hashInt(&hasher, u32, dto.title_generation);
+    hashInt(&hasher, u16, dto.cols);
+    hashInt(&hasher, u16, dto.rows);
+    hashInt(&hasher, u8, @intFromEnum(dto.semantic_state));
+    hashBool(&hasher, dto.alt_active);
+    hashBool(&hasher, dto.app_cursor_keys);
+    hashBool(&hasher, dto.app_keypad);
+    hashInt(&hasher, u8, dto.kitty_flags);
+    hashBool(&hasher, dto.alternate_scroll);
+    hashBool(&hasher, dto.mouse_tracking);
+    hashInt(&hasher, u8, dto.mouse_tracking_mode);
+    hashBool(&hasher, dto.bracketed_paste);
+    hashInt(&hasher, u64, dto.bell_count);
+    hashInt(&hasher, u64, dto.clipboard_write_seq);
+    hashInt(&hasher, u64, dto.clipboard_read_seq);
+    hashBool(&hasher, dto.foreground_available);
+    hashBool(&hasher, dto.foreground_pgid != null);
+    if (dto.foreground_pgid) |pgid| hashInt(&hasher, i32, pgid);
+    hashRange(&hasher, dto.cwd_range, backing);
+    hashRange(&hasher, dto.title_range, backing);
+    hashBool(&hasher, dto.ssh_range != null);
+    if (dto.ssh_range) |range| hashRange(&hasher, range, backing);
+    hashRange(&hasher, dto.clipboard_target_range, backing);
+    hashInt(&hasher, u8, dto.process_count);
+    for (dto.processes[0..dto.process_count]) |process| {
+        hashInt(&hasher, i32, process.pid);
+        hashInt(&hasher, u8, process.len);
+        hasher.update(process.bytes[0..process.len]);
+    }
+    var digest: runtime_event_wire.Digest = undefined;
+    hasher.final(&digest);
+    return digest;
+}
+
+fn hashRange(
+    hasher: *std.crypto.hash.sha2.Sha256,
+    range: OwnedMetadataDto.Range,
+    backing: []const u8,
+) void {
+    hashInt(hasher, usize, range.len);
+    hasher.update(backing[range.start..][0..range.len]);
+}
+
+fn hashBool(hasher: *std.crypto.hash.sha2.Sha256, value: bool) void {
+    hashInt(hasher, u8, @intFromBool(value));
+}
+
+fn hashInt(
+    hasher: *std.crypto.hash.sha2.Sha256,
+    comptime T: type,
+    value: T,
+) void {
+    var bytes: [@sizeOf(T)]u8 = undefined;
+    std.mem.writeInt(T, &bytes, value, .little);
+    hasher.update(&bytes);
+}
+
 /// Decode the complete attach response exactly once. Role/request policy is intentionally left to
 /// `remote_attachment`; this neutral leaf owns only the sealed wire schema and metadata seed.
 pub fn decodeAttachEnvelope(
@@ -248,6 +449,18 @@ pub fn decodeMetadataEvent(
         .resource_exhausted => error.ResourceExhausted,
         .malformed, .unknown, .foreign => error.Malformed,
     };
+}
+
+/// Test-only owning fixture factory. Product callers must enter through attach/event classifiers.
+pub fn testingCurrentSeed(
+    allocator: std.mem.Allocator,
+) DecodeError!InitialMetadataSeed {
+    if (!builtin.is_test) @compileError("testingCurrentSeed is test-only");
+    return decodeMetadataEvent(
+        allocator,
+        "{\"event\":\"runtime.metadata\",\"metadata_revision\":2,\"metadata\":{\"cwd\":\"/repo\",\"window_title\":\"work\",\"ssh_remote_dest\":\"host\",\"semantic_state\":0,\"alt_active\":false,\"app_cursor_keys\":false,\"alternate_scroll\":true,\"observer_generation\":1,\"title_generation\":2,\"cols\":80,\"rows\":24,\"foreground_available\":true,\"foreground_pgid\":7,\"processes\":[{\"pid\":7,\"name\":\"zsh\"}]}}",
+        .supported,
+    );
 }
 
 pub fn decodeObservationEnvelope(
@@ -476,6 +689,75 @@ test "runtime metadata wire owns current metadata event projection" {
     try std.testing.expectEqualStrings("/repo", dto.cwd());
     try std.testing.expectEqualStrings("zsh", dto.foregroundProcesses()[0].slice());
     for (dto.foregroundProcesses()[0].bytes[3..]) |byte| try std.testing.expectEqual(@as(u8, 0), byte);
+}
+
+test "runtime metadata seal inventory covers every OwnedMetadataDto field" {
+    // The three seal functions (descriptor, structure, semantic digest) enumerate these fields by
+    // hand. A new field — especially a second heap slice — would otherwise slip past the seal and
+    // desynchronise the exact-once cleanup mirror without any compile error. This list is the
+    // reminder: extend the seal, then extend this list.
+    const expected = [_][]const u8{
+        "allocator",              "backing",
+        "revision",               "observer_generation",
+        "title_generation",       "cols",
+        "rows",                   "semantic_state",
+        "alt_active",             "app_cursor_keys",
+        "app_keypad",             "kitty_flags",
+        "alternate_scroll",       "mouse_tracking",
+        "mouse_tracking_mode",    "bracketed_paste",
+        "bell_count",             "clipboard_write_seq",
+        "clipboard_read_seq",     "foreground_available",
+        "foreground_pgid",        "cwd_range",
+        "title_range",            "ssh_range",
+        "clipboard_target_range", "processes",
+        "process_count",
+    };
+    const fields = @typeInfo(OwnedMetadataDto).@"struct".fields;
+    try std.testing.expectEqual(expected.len, fields.len);
+    inline for (fields, expected) |field, name|
+        try std.testing.expectEqualStrings(name, field.name);
+}
+
+test "runtime metadata transfer seal binds address descriptor raw bytes scalars and processes" {
+    const allocator = std.testing.allocator;
+    var seed = try decodeMetadataEvent(
+        allocator,
+        "{\"event\":\"runtime.metadata\",\"metadata_revision\":2,\"metadata\":{\"cwd\":\"/repo\",\"window_title\":\"work\",\"ssh_remote_dest\":null,\"semantic_state\":0,\"alt_active\":false,\"app_cursor_keys\":false,\"alternate_scroll\":true,\"observer_generation\":1,\"title_generation\":2,\"cols\":80,\"rows\":24,\"foreground_available\":true,\"foreground_pgid\":7,\"processes\":[{\"pid\":7,\"name\":\"zsh\"}]}}",
+        .supported,
+    );
+    defer seed.deinit();
+    const seal = try sealMetadataSeed(&seed);
+    try std.testing.expect(validateMetadataSeedSeal(seal, &seed));
+
+    seed.current.backing.?[0] = 'X';
+    try std.testing.expect(!validateMetadataSeedSeal(seal, &seed));
+    seed.current.backing.?[0] = '/';
+    seed.current.cols += 1;
+    try std.testing.expect(!validateMetadataSeedSeal(seal, &seed));
+    seed.current.cols -= 1;
+    seed.current.processes[0].bytes[0] = 'Z';
+    try std.testing.expect(!validateMetadataSeedSeal(seal, &seed));
+    seed.current.processes[0].bytes[0] = 'z';
+    try std.testing.expect(validateMetadataSeedSeal(seal, &seed));
+
+    var copied = seed;
+    try std.testing.expect(!validateMetadataSeedSeal(seal, &copied));
+    copied = .unavailable; // the original seed remains the sole owner.
+    seed.current.revision = 0;
+    try std.testing.expectError(error.Malformed, sealMetadataSeed(&seed));
+    seed.current.revision = 2;
+}
+
+test "runtime metadata transfer seal keeps unsupported unavailable and null backing distinct" {
+    var unsupported: InitialMetadataSeed = .unsupported;
+    var unavailable: InitialMetadataSeed = .unavailable;
+    const unsupported_seal = try sealMetadataSeed(&unsupported);
+    const unavailable_seal = try sealMetadataSeed(&unavailable);
+    try std.testing.expectEqual(MetadataSeedTag.unsupported, unsupported_seal.tag);
+    try std.testing.expectEqual(MetadataSeedTag.unavailable, unavailable_seal.tag);
+    try std.testing.expect(!std.meta.eql(unsupported_seal, unavailable_seal));
+    try std.testing.expect(validateMetadataSeedSeal(unsupported_seal, &unsupported));
+    try std.testing.expect(validateMetadataSeedSeal(unavailable_seal, &unavailable));
 }
 
 test "runtime metadata wire decodes attach error and accepted envelope exactly once" {

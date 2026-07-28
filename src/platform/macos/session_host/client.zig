@@ -360,6 +360,44 @@ pub const ConnectionProfile = enum {
     }
 };
 
+pub const ExternalTransferProfile = struct {
+    wire_major: u16,
+    connection_profile: ConnectionProfile,
+    compatibility_kind: compatibility.Kind,
+    screen_codec_version: u16,
+    attach_schema: compatibility.AttachSchema,
+    fingerprint_present: bool,
+    fingerprint_digest: runtime_event_wire.Digest,
+    attachment_capabilities: AttachmentCapabilities,
+    metadata_support: runtime_metadata_wire.MetadataSupport,
+};
+
+test "external transfer profile field inventory seals every compatibility input" {
+    const expected = [_][]const u8{
+        "wire_major",
+        "connection_profile",
+        "compatibility_kind",
+        "screen_codec_version",
+        "attach_schema",
+        "fingerprint_present",
+        "fingerprint_digest",
+        "attachment_capabilities",
+        "metadata_support",
+    };
+    const fields = @typeInfo(ExternalTransferProfile).@"struct".fields;
+    try testing.expectEqual(expected.len, fields.len);
+    inline for (fields, expected) |field, name|
+        try testing.expectEqualStrings(name, field.name);
+    try testing.expectEqual(
+        @as(usize, 2),
+        @typeInfo(AttachmentCapabilities).@"struct".fields.len,
+    );
+    try testing.expectEqual(
+        @as(usize, 5),
+        @typeInfo(compatibility.Profile).@"struct".fields.len,
+    );
+}
+
 pub const ExternalAdoptionInspectError = std.mem.Allocator.Error || error{
     IneligibleProfile,
     InvalidCompatibilityProvenance,
@@ -641,6 +679,58 @@ pub const PreparedClientDisarm = struct {
         self.inventory = null;
         self.cleanup_inventory = null;
         self.lifecycle = .aborted;
+    }
+};
+
+const ExternalPumpTransferLifecycle = enum {
+    empty,
+    prepared,
+    owners_moved,
+    committed,
+    aborted,
+};
+
+/// Address-bound capability for moving one Client into one final optional slot.
+///
+/// Parser normalization is staged in separate storage; preparation never mutates either owner.
+/// The token is intentionally not returnable by value and validates its three bound addresses.
+pub const PreparedExternalPumpTransfer = struct {
+    saved_self_addr: usize = 0,
+    source_addr: usize = 0,
+    destination_addr: usize = 0,
+    fd: c.fd_t = -1,
+    host_id: u128 = 0,
+    allocator_ptr_addr: usize = 0,
+    allocator_vtable_addr: usize = 0,
+    profile: ?ExternalTransferProfile = null,
+    parser_replacement: framing.PreparedNormalizeExact = .{},
+    lifecycle: ExternalPumpTransferLifecycle = .empty,
+
+    pub fn deinit(self: *PreparedExternalPumpTransfer) void {
+        if (self.saved_self_addr != 0 and self.saved_self_addr != @intFromPtr(self)) return;
+        self.parser_replacement.deinit();
+        self.lifecycle = .aborted;
+    }
+
+    pub fn validate(
+        self: *const PreparedExternalPumpTransfer,
+        source: *const Client,
+        destination: *const ?Client,
+    ) bool {
+        return self.lifecycle == .prepared and
+            self.saved_self_addr == @intFromPtr(self) and
+            self.source_addr == @intFromPtr(source) and
+            self.destination_addr == @intFromPtr(destination) and
+            destination.* == null and
+            self.fd == source.fd and
+            self.host_id == source.host_id and
+            self.allocator_ptr_addr == @intFromPtr(source.allocator.ptr) and
+            self.allocator_vtable_addr == @intFromPtr(source.allocator.vtable) and
+            std.meta.eql(self.profile orelse return false, source.externalTransferProfile() orelse return false) and
+            source.ownership == .standalone and
+            !source.unusable and source.fd >= 0 and
+            source.io_mode == .external and
+            self.parser_replacement.validate(&source.parser);
     }
 };
 
@@ -1312,6 +1402,11 @@ pub const Client = struct {
     /// Set only after `finishHello` has verified the selected current/N-1 schema and any required
     /// frozen fingerprint. External adoption must not infer this proof from `wire_major`.
     compatibility_profile: ?compatibility.Profile = null,
+    /// Process-local provenance of the one external attach that published this Client. Adoption
+    /// evidence seals the same value, so two semantically identical attaches cannot be swapped even
+    /// when the second `Prepared` reuses the first one's address. `0` means "not published by
+    /// `external_attach.prepare`" and is rejected by external adoption rather than trusted.
+    attach_instance_id: u64 = 0,
     parser: framing.FrameParser,
     // A Client may be transferred only once into the stable external-pump address. The moved-from
     // value remains deinit-safe, but is not a second transport owner.
@@ -1623,32 +1718,105 @@ pub const Client = struct {
         self.* = undefined;
     }
 
-    /// Normalize all parser storage before publishing the Client at its final pump address, then
-    /// transfer ownership without returning a movable Client value. Every error happens before
-    /// the first ownership mutation, so callers can safely reuse or deinit `self`.
-    pub fn transferToExternalPump(
+    pub fn externalTransferProfile(self: *const Client) ?ExternalTransferProfile {
+        const connection_profile = self.connection_profile orelse return null;
+        if (connection_profile != .cli_attach) return null;
+        const selected = self.compatibility_profile orelse return null;
+        const canonical = compatibility.profileForMajor(self.wire_major) orelse return null;
+        // One rule, one implementation: `validateExternalAdoptionClient` decides the same
+        // "selected profile is the canonical profile for this major" question, so a future
+        // `compatibility.Profile` field must not be honoured by one path and ignored by the other.
+        if (self.screen_codec_version != canonical.screen_codec_version or
+            !compatibilityProfilesEqual(selected, canonical))
+            return null;
+        const fingerprint = selected.required_fingerprint orelse "";
+        return .{
+            .wire_major = self.wire_major,
+            .connection_profile = connection_profile,
+            .compatibility_kind = selected.kind,
+            .screen_codec_version = selected.screen_codec_version,
+            .attach_schema = selected.attach_schema,
+            .fingerprint_present = selected.required_fingerprint != null,
+            .fingerprint_digest = runtime_event_wire.payloadDigest(fingerprint),
+            .attachment_capabilities = self.attachment_capabilities,
+            .metadata_support = self.metadata_support,
+        };
+    }
+
+    /// Complete every fallible operation without mutating the source Client or destination slot.
+    pub fn prepareExternalPumpTransfer(
         self: *Client,
-        out: *?Client,
+        out: *PreparedExternalPumpTransfer,
+        destination: *?Client,
         resident_cap: usize,
     ) ExternalPumpTransferError!void {
-        if (out.* != null) return error.DestinationOccupied;
+        const source_range = externalRangeOfValue(self);
+        const out_range = externalRangeOfValue(out);
+        const destination_range = externalRangeOfValue(destination);
+        if (externalRangesOverlap(source_range, out_range) or
+            externalRangesOverlap(source_range, destination_range) or
+            externalRangesOverlap(out_range, destination_range))
+            return error.MalformedParser;
+        self.preflightExternalAdoptionDestination(
+            out,
+            @sizeOf(PreparedExternalPumpTransfer),
+        ) catch |err| return switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+            else => error.MalformedParser,
+        };
+        self.preflightExternalAdoptionDestination(
+            destination,
+            @sizeOf(?Client),
+        ) catch |err| return switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+            else => error.MalformedParser,
+        };
+        if (out.lifecycle != .empty or
+            out.saved_self_addr != 0 or
+            out.parser_replacement.saved_self_addr != 0)
+            return error.MalformedParser;
+        if (destination.* != null) return error.DestinationOccupied;
         if (self.ownership == .external_pump) return error.AlreadyBound;
         if (self.ownership == .moved or self.unusable or self.fd < 0)
             return error.ConnectionClosed;
         if (self.io_mode != .external) return error.NotExternal;
-        self.parser.normalizeExact(resident_cap) catch |err| return switch (err) {
+        const profile = self.externalTransferProfile() orelse return error.MalformedParser;
+        self.parser.prepareNormalizeExact(
+            &out.parser_replacement,
+            resident_cap,
+        ) catch |err| return switch (err) {
             error.ResidentTooLarge => error.ResidentTooLarge,
             error.MalformedState => error.MalformedParser,
             error.OutOfMemory => error.OutOfMemory,
         };
+        out.saved_self_addr = @intFromPtr(out);
+        out.source_addr = @intFromPtr(self);
+        out.destination_addr = @intFromPtr(destination);
+        out.fd = self.fd;
+        out.host_id = self.host_id;
+        out.allocator_ptr_addr = @intFromPtr(self.allocator.ptr);
+        out.allocator_vtable_addr = @intFromPtr(self.allocator.vtable);
+        out.profile = profile;
+        out.lifecycle = .prepared;
+    }
 
+    /// Typed public entry to the no-callback Client ownership move. Parser cleanup is deliberately
+    /// deferred until the paired metadata owner has also moved into storage.
+    pub fn commitExternalPumpTransfer(
+        self: *Client,
+        prepared: *PreparedExternalPumpTransfer,
+        destination: *?Client,
+    ) error{StaleTransfer}!void {
+        if (!prepared.validate(self, destination)) return error.StaleTransfer;
         const allocator = self.allocator;
         const expected_major = self.parser.expected_major;
-        out.* = self.*;
-        out.*.?.ownership = .external_pump;
-        // Rebuild from Client defaults rather than clearing today's field list one by one. A future
-        // owned field without a safe default then fails this construction at compile time instead
-        // of silently leaving an alias in the moved-from value.
+        destination.* = self.*;
+        destination.*.?.ownership = .external_pump;
+        self.parser.rebindPreparedNormalizeExact(
+            &prepared.parser_replacement,
+            &destination.*.?.parser,
+        );
+        // Rebuild from Client defaults so any future owned field must opt into the tombstone.
         self.* = .{
             .allocator = allocator,
             .fd = -1,
@@ -1657,6 +1825,28 @@ pub const Client = struct {
             .ownership = .moved,
             .unusable = true,
         };
+        prepared.lifecycle = .owners_moved;
+    }
+
+    /// Runs only after Client and metadata evidence are both owned by final storage. The allocator
+    /// free callback for the old parser backing is intentionally outside the paired-take suffix.
+    pub fn finishExternalPumpTransfer(
+        prepared: *PreparedExternalPumpTransfer,
+        destination: *?Client,
+    ) void {
+        if (prepared.lifecycle != .owners_moved or
+            prepared.saved_self_addr != @intFromPtr(prepared) or
+            prepared.destination_addr != @intFromPtr(destination) or
+            destination.* == null)
+            @panic("invalid external pump transfer finish");
+        destination.*.?.parser.commitPreparedNormalizeExact(
+            &prepared.parser_replacement,
+        );
+        // The source Client is a tombstone its caller may already have reused. Drop the staging
+        // copies so nothing downstream can mistake this spent token for a description of it.
+        prepared.source_addr = 0;
+        prepared.profile = null;
+        prepared.lifecycle = .committed;
     }
 
     pub fn previewExternalAdoption(

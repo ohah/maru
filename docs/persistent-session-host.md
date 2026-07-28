@@ -2594,15 +2594,19 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
             보존한다. boundary test는 pure module의 std-only import와 future `ExternalPumpFacade` identifier의
             mechanics/final-owner allowlist를 tokenizer로 강제한다. Debug/ReleaseFast `test-session-host`,
             `check-boundaries`, 전체 `mise run check`를 통과했다. 이 문단의 artifact 범위는 2b2a에만 해당하며,
-            현재 전체 상태는 2b2a~c2와 2b2c3-c3a1 완료, c3a2~f3 계획이다.
+            현재 전체 상태는 2b2a~c2와 2b2c3-c3a1~a2 완료, c3b~f3 계획이다.
 
           - **2b2b — stable in-place storage scaffold:** token이 존재하기 전에
             caller가 `var out: ExternalPumpStorage = .{}`로 만든 **deinit-safe empty slot**의 최종 주소에서
-            `ExternalPumpStorage.initInPlace(&out, source: *Client, AttachmentEvidence)`를 실행한다. undefined
+            c3a2 이후의 현재 API는
+            `ExternalPumpStorage.initInPlace(&out, source: *Client, evidence:*PreparedAdoptionEvidence)`를 실행한다. undefined
             destination은 API 입력이 아니며, `out`이 empty가 아니거나 `out`/`source` byte range가 겹치면 source를
             관찰·normalize하기 전에 typed reject한다.
             storage는 `Client`, `ExternalInboxLedger`, runtime/stream/controller-generation evidence와 위 closed
-            states를 소유하고 saved self address를 ReleaseFast에서도 **초기 empty-slot preflight인
+            states를 소유한다. 여기에 두 transient 슬롯이 붙는다 — c3c의 `OwnerMetadataState` 전까지 paired suffix
+            직후 유일한 seed owner인 `owned_evidence`, 그리고 `initInPlace` 안에서만 의미가 있는 Client move staging
+            토큰 `client_transfer`다. 후자는 `finishExternalPumpTransfer`가 source address와 profile 사본을 지운
+            `committed` 기록으로 남으므로 live state의 서술로 읽어서는 안 된다. storage는 saved self address를 ReleaseFast에서도 **초기 empty-slot preflight인
             `initInPlace`를 제외한 모든 public operation의 첫 owner-field dereference 전에** 검사한다. 값 반환
             factory, raw `*Client`/`*ledger` export, bind 뒤 move/copy를
             허용하지 않는다. `AttachmentEvidence{runtime_id, stream_id, initial_role,
@@ -2616,11 +2620,13 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
             아직 `external_attach.Prepared`나 실제
             `RemoteAttachment`를 consume/bind하지 않으며 그 product composition은 2b3에 남긴다. init/normalize
             전 evidence/out/overlap/source-mode 검증과 모든 fallible staging은 source mutation 전에 끝낸다.
-            `Client.transferToExternalPump(final_client_slot, resident_cap)`가 parser normalize를 실행하며 cap/OOM/
+            c3a2의 `Client.prepareExternalPumpTransfer`가 parser replacement를 source 무변경으로 준비하며 cap/OOM/
             malformed 실패에서는 source의 fd, parser pointer/cap/head/bytes, queue/request-ID/allocation identity를
-            그대로 보존한다. normalize 성공 뒤에는 fallible action 없이 즉시 final field로 소유권을 한 번에
-            commit하고 source를 fd `-1`, empty parser/queue/mode storage, `moved` latch인 deinit-safe tombstone으로
-            바꾼다. 따라서 normalize 성공과 source move 사이에는 분류되지 않은 실패점이 없다.
+            그대로 보존한다. combined final preflight 뒤 Client와 metadata evidence를 callback 없이 차례로 final
+            storage에 take하고 source를 fd `-1`, empty parser/queue/mode storage, `moved` latch인 deinit-safe
+            tombstone으로 바꾼다. 두 owner가 storage에 들어간 뒤 lifecycle을 `normalizing`으로 바꾸고
+            `finishExternalPumpTransfer`가 old parser backing을 free/replacement swap한다. allocator callback 재진입의
+            public teardown은 이 짧은 상태에서 `busy`라 caller가 retry하며 partial owner cleanup을 시작하지 않는다.
             첫 move 뒤 invariant/commit 실패는 `source_closed`로 두고 destination이 canonical cleanup한다. 성공은
             source tombstone 뒤 destination만 sole owner다. 반환형은
             `InitResult = initialized | failed(InitFailure{reason, source_disposition =
@@ -2632,10 +2638,16 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
             boundary가 허용한 이 mechanics leaf 하나뿐이다. 이미 final storage에 bind된 `.external_pump` Client는
             `source_already_bound`로 거부해 두 번째 storage로 다시 옮길 수 없다.
             storage lifecycle은 semantic `ExternalPumpState`와 별개인
-            `empty | constructing | adopting | live | tearing_down | dead`다. teardown은 field 접근 전 self-address를
+            `empty | constructing | normalizing | adopting | live | tearing_down | dead`다. teardown은 field 접근 전 self-address를
             검증하고 `tearing_down`을 먼저 commit한 뒤 Client pending/external-mode storage→Client fd/나머지
-            storage→ledger `finish()` 순서로 한 번만 수행한다. 2b2b는 ledger token을 만들지 않으므로 정상
-            `constructing/adopting` teardown의 ledger는 반드시 zero다. private corruption fixture에서 active charge가
+            storage→ledger `finish()` 순서로 한 번만 수행한다.
+            `constructing`과 `normalizing`은 진행 중인 `initInPlace` 트랜잭션 안에서만 관측되는 상태다(모든 실패
+            경로가 `empty`를 복구하고 성공은 두 상태를 지나친다). 이 두 창의 teardown은 정리를 시작하지 않고
+            `busy`를 반환해 caller가 retry하게 한다 — 여기서 정리하면 재진입 caller는 `cleaned`를 받는데 아직
+            살아 있는 트랜잭션이 그 `dead` 위에 `adopting`을 덮어써, 한 storage를 두 owner가 각자 소유했다고
+            믿는 상태가 만들어진다. 트랜잭션 자신도 allocator callback을 부른 뒤에는 자기 lifecycle과
+            saved address를 재검사한 뒤에야 published field를 신뢰한다. 2b2b는 ledger token을 만들지 않으므로 정상
+            `adopting` teardown의 ledger는 반드시 zero다. private corruption fixture에서 active charge가
             발견돼도 Client cleanup은 끝까지 수행하고 `ledger_not_zero`를 typed 반환하며, 실제 charged payload
             cleanup hook은 token을 만들기 시작하는 2b2c가 확장한다. 두 번째 teardown과
             `ExternalPumpState.terminal` 재진입은 wire/syscall/free 0인 typed no-op이고, 다른 주소의 forged copy는
@@ -2651,8 +2663,8 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
             backing은 계속 2b2c/2b3 artifact 소유다.
 
             **구현 완료:** `client_external_pump.zig`의 `ExternalPumpStorage`가 caller-initialized empty slot에서
-            overlap/evidence/re-init을 preflight하고 `Client.transferToExternalPump`의 normalize→infallible whole-
-            object move로 final address의 sole ownership을 만든다. moved source는 Client defaults로 재구성한
+            overlap/evidence/re-init을 preflight하고 prepared Client+evidence paired take 뒤 parser finish로 final
+            address의 sole ownership을 만든다. moved source는 Client defaults로 재구성한
             fd `-1`/empty/moved tombstone이며, storage는 saved address와 별도 lifecycle로 adopting-before-active,
             forged copy, post-move failure, exact-once teardown을 ReleaseFast에서도 typed 처리한다.
             `StorageFootprint`와 512 KiB compile cap은 inline ledger/padding과 heap-backed TX descriptor logical bytes를
@@ -2825,12 +2837,12 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
               `.cli_attach`만 admission한다. `.gui/.cli_probe/.admin`은 mutation 0으로 거부한다. strict-event 여부는
               별도 bool로 복제하지 않고
               `connection_profile.requiresStrictExternalEvents()`에서 파생한다. 모든 connect constructor와
-              `transferToExternalPump`가 이 값을 보존하고, 수동 fixture의 미지정 profile은 external adoption을
+              `prepareExternalPumpTransfer`가 이 값을 봉인하고, 수동 fixture의 미지정 profile은 external adoption을
               허용하지 않는다. c2는 profile 저장/transfer/fingerprint까지만 소유한다. c3가 이 enum을 소비해
               `.cli_attach`의 pre-raw `bufferEvent`를 malformed metadata/resize silent drop이 없는 bounded strict raw
               event queue로 바꾸고 classifier에 연결한다.
               Client는 선택한 compatibility `attach_schema`와 required fingerprint 검증 성공 여부도 immutable
-              provenance로 저장한다. connect/`finishHello`만 이를 설정하고 `transferToExternalPump`와 inventory
+              provenance로 저장한다. connect/`finishHello`만 이를 설정하고 prepared transfer와 inventory
               fingerprint가 보존한다. manual/corrupt Client의 provenance null, schema-wire 불일치, required
               fingerprint 미검증은 mutation 0으로 거부하며 `wire_major`에서 검증 성공을 재추측하지 않는다.
 
@@ -3198,31 +3210,112 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
               replacement를 stage하는 등 모든 fallible work를 끝낸다. token은 source/destination/out 주소에 bind해
               in-place 구성하고 abort/deinit exact once이며 bitwise copy/value return은 금지한다.
               `Client.commitExternalPumpTransfer(out:*PreparedExternalPumpTransfer,destination:*?Client)`은
-              old parser backing free/replacement swap과 Client optional-slot take를 포함하는 allocation/error 없는
-              move+tombstone이다. 모든 allocator, destination/address/alias/parser/evidence preflight를 두 source의 첫
+              Client optional-slot take와 source tombstone만 수행하며 stale token은 typed preserved reject한다.
+              이어지는 evidence take까지가 allocation/error/callback 없는 paired suffix다. 두 owner가 storage에
+              들어가면 `.normalizing`을 publish하고 `finishExternalPumpTransfer`가 old parser backing
+              free/replacement swap을 수행한다. allocator callback 중 public teardown은 `busy`를 반환해 partial
+              cleanup을 시작하지 않는다.
+              모든 allocator, destination/address/alias/parser/evidence preflight를 두 source의 첫
               **ownership mutation** 전에 끝낸 뒤 **Client commit transfer→seed take/tombstone은 하나의 no-fail
               ownership suffix**다. suffix 전 실패는 Client/seed를 caller가 모두 보존하고, suffix 뒤 injected
               failure는 storage가 둘을 함께 cleanup한다. Client만 moved/seed는 source-owned 또는 그 반대인
               disposition은 존재하지 않는다.
               paired token은 source Client address, evidence final address, exact runtime/stream/role/generation,
               compatibility/attach decode profile와 `metadata_support`, seed tag/revision을 함께 seal한다.
+              의미가 같은 두 attach도 바꿔 끼울 수 없도록 `external_attach.prepare`가 process-local 단조
+              `attach_instance_id`를 발급해 **`Prepared`와 그 안의 `Client` 양쪽에 같은 값을 봉인**한다.
+              final-address `external_attach_evidence.prepareInPlace(out, prepared)`는 그 한 Prepared에서 **seed만
+              take하고** client는 주소로, attachment는 값으로 `PreparedAdoptionEvidence`에 봉인한다. Client와
+              `RemoteAttachment` owner는 이 시점에 caller의 `Prepared`에 남으며, 실제 Client 이동은
+              `ExternalPumpStorage.initInPlace` 안의 paired suffix에서 일어난다. evidence의 `validate`는 봉인한 ID를
+              **`Client.attach_instance_id`와 대조**하므로, 버려진 `Prepared`의 주소를 다음 attach가 재사용해도
+              (같은 runtime/stream/role/profile이어도) 옛 evidence는 거부된다. 주소 동등성만으로는 이 둘을 구분할 수
+              없기 때문에 ID는 장식이 아니라 이 검사의 유일한 판별자다. seed 추출은 one-shot이다 —
+              `prepareInPlace`가 성공하면 `Prepared.attach_instance_id`를 0으로 지워, 두 번째 추출이 ID 대조에서
+              거부된다(`take()`가 남기는 `.unavailable`은 metadata 지원 Client에게 정상값이라 그 자체로는 소비 표식이
+              될 수 없다). raw
+              `initFromAttachPartsInPlace`는 mechanics와 이 adapter 밖 callsite 0을 boundary가 강제한다. 이 ID는 wire identity나
+              재접속 가능한 runtime identity가 아니라 한 attach 결과의 provenance다. counter exhaustion은 새
+              `Prepared`를 publish하지 않고 connection을 닫는다. prepare와 commit 사이에는 caller callback이나
+              Client/parser mutation API를 호출하지 않는 lexical no-callback 구간을 두며, commit 직전 descriptor와
+              content를 다시 검사한다. 따라서 이 gate가 보장하는 것은 commit 시점 drift/stale/swap 거부와
+              exclusive suffix이고, hash만으로 관찰 불가능한 mutate→원복 이력을 검출한다고 주장하지 않는다.
               current seed면 `OwnedMetadataDto` final address, allocator/backing base/len, backing raw bytes,
               normalized scalar와 inline process `{pid,len,name}` 전체의 semantic digest도 bind하고 no-fail suffix 직전에
               descriptor/range를 먼저 검사한 뒤 content를 재검증한다.
+              `PreparedAdoptionEvidence`는 logical seed와 별도로 같은 원래 backing을 가리키는 private
+              `cleanup_seed` mirror를 가지며 deinit/abort는 mirror만 해제하고 logical seed를 tombstone으로 만든다.
+              Zig field visibility의 한계는 boundary restricted-name gate로 보완해 mechanics 밖 cleanup mirror 접근 0을
+              고정한다.
+              따라서 prepare 뒤 logical seed의 allocator/backing descriptor가 오염되어도 이를 역참조하거나 그
+              포인터를 free하지 않고 reject할 수 있으며, caller가 evidence를 deinit하면 준비 시점의 canonical
+              backing만 exact once 회수한다. content/scalar drift도 같은 preserved reject를 따르며 staged parser
+              replacement만 별도로 회수한다.
               unsupported profile+unsupported seed, supported profile+unavailable/current seed만 유효하다.
+              여기서 metadata profile은 wire major가 아니라 `Client.metadata_support`이며 compatibility profile,
+              connection profile, attach capability/fingerprint도 별도 provenance로 함께 봉인한다.
               다른 attach의 evidence swap, profile/tag mismatch, runtime/stream/role drift는 첫 ownership mutation 전에
               typed terminal/preserved reject하며 Client와 seed owner를 caller에 그대로 둔다.
               c3a2가 `PreparedAdoptionEvidence`를 도입해 immutable `AttachmentEvidence`와 seed를 함께 소유하고,
               `ExternalPumpStorage.initInPlace(..., evidence:*PreparedAdoptionEvidence)`가 이를 소비한다.
+              c3c의 최종 `OwnerMetadataState`가 생기기 전까지 `ExternalPumpStorage.owned_evidence:
+              ?PreparedAdoptionEvidence`가 paired suffix 직후의 유일한 seed owner다. teardown은 Client를 먼저
+              close하고 evidence seed를 deinit한 뒤 ledger final-zero를 검사한다.
               2b3은 attach response를 다시 parse하거나 fixture seed를 만들지 않고
               `external_attach.Prepared`에서 만든 evidence를 이 consuming API에 넘기기만 한다.
+              c3a2 mechanics에서는 `external_attach.Prepared`가 by-value publication을 마친 final owner 주소에서만
+              evidence를 in-place 생성한다. `RemoteAttachment` owner는 c3a2 paired take 대상이 아니며 caller에
+              남는다. 성공/실패 뒤 `Prepared.deinit`은 tombstone Client/seed에 효과 0이고 attachment만 exact once
+              정리한다. 실제 Prepared→storage 제품 조합은 2b3 owner gate에서 닫는다.
+
+              prepare 실패 우선순위는 raw fixed-range overlap(어떤 destination/source field도 dereference하기 전) →
+              allocationful whole-owner alias proof → token/evidence lifecycle·saved address·destination null →
+              Client/seed descriptor·allocator·range →
+              identity/profile/tag/authority → resident resource cap → parser replacement OOM이다. commit entry도
+              address/lifecycle → destination null → descriptor/range/alias → backing content → scalar/profile 순으로
+              재검증하고 즉시 no-callback paired suffix에 들어간다. 구 `transferToExternalPump` 단독 move,
+              그 leaf였던 `FrameParser.normalizeExact`, raw `AttachmentEvidence` init은 c3a2에서 제거하고 boundary
+              gate로 우회 callsite 0을 고정한다. gate 대상은 transfer 3단계 전부(`prepare`/`commit`/`finish`)와 그
+              아래 parser 3단계, 그리고 `owned_evidence`/cleanup mirror 이름이다 — 오용이 typed error가 아니라
+              `@panic`인 leaf는 컴파일러가 새 caller를 막아주지 못하기 때문이다.
+              whole-owner alias proof OOM은 occupied/invalid destination보다 먼저 반환한다. 안전한 destination
+              dereference 자체가 그 proof에 의존하므로 이 precedence를 fixture로 고정한다.
 
               | init 지점 | Client owner | metadata seed owner | cleanup |
               | --- | --- | --- | --- |
-              | preflight 실패/allocator OOM | caller | caller | caller가 기존 두 owner deinit |
+              | preflight 실패/allocator OOM | caller | caller evidence | caller가 기존 두 owner deinit |
               | no-fail paired take 완료 | storage | storage | storage teardown |
               | paired take 뒤 injected failure | storage가 close | storage가 deinit | source는 tombstone이라 재해제 0 |
               | initialized | storage | storage | 이후 adoption/teardown |
+
+              c3a2 감사에서 확인했으나 이 슬라이스에 넣지 않은 것들이다. 각각 횡단 변경이라 paired transfer
+              리뷰와 섞으면 회귀 범위가 흐려진다.
+
+              - `rangesOverlap`이 session_host 안에 여섯 벌 있고 zero-length 의미가 두 갈래다(`false` 반환 vs
+                가드 없음). 그래서 지금은 호출부가 `backing_len != 0`을 수동으로 선행시킨다. 공용 leaf로 통합할 때
+                이 수동 가드를 함께 걷어내야 하며, 영향 범위가 hostile-alias 거부 경로라 통합 자체를 별도 슬라이스로
+                둔다.
+              - `prepareExternalPumpTransfer`의 `MalformedParser`가 범위 겹침, alias 실패, 비-pristine 토큰,
+                ineligible profile까지 흡수한다. 진단이 "파서가 깨졌다"로 읽히므로 2b3의 exit code 매핑 전에
+                public error set을 쪼갠다.
+              - `initInPlace`의 preserved 실패 정리 블록이 여섯 번 반복된다. c3b/c3c가 preflight 소유 owner를
+                늘리면 한 곳만 빠뜨려도 그 경로에서만 새므로, owner 목록이 확정되는 c3c에서 단일 cleanup으로 접는다.
+
+              위 표와 별도로 `RemoteAttachment`는 네 행 모두 caller owner이며 c3a2 storage teardown 대상이 아니다.
+
+              **c3a2 구현 완료:** `FrameParser.PreparedNormalizeExact`와
+              `Client.PreparedExternalPumpTransfer`가 source 무변경 replacement/whole-owner preflight, address-bound
+              token, typed stale reject와 paired take 뒤 parser finish를 구현한다.
+              `runtime_metadata_wire.MetadataSeedSeal`은 descriptor-first/content-second 검증을, pump의
+              `PreparedAdoptionEvidence`는 logical+canonical cleanup mirror와 exact profile/tag/authority seal을
+              소유한다. `external_attach_evidence.prepareInPlace`는 같은 `external_attach.Prepared`의
+              instance/client/attachment/seed만 in-place evidence로 만들며 동일 semantic의 다른 attach Client와
+              교차 검증되지 않는다. storage는 Client+seed take 사이 allocator callback 0, `.normalizing` 재진입
+              `busy`, post-pair failpoint 동시 cleanup을 보장한다. retained-empty/partial parser, cap/OOM/malformed,
+              moved/wrong token·destination/profile/parser drift, metadata tag 3행, raw/scalar/process/pointer/content
+              drift, unmapped descriptor의 content dereference 0, seed/parser/self/storage alias, cross-attach swap,
+              whole transaction allocation fail-index, occupied+OOM precedence와 FD/seed exact cleanup을
+              Debug/ReleaseFast 및 boundary fixture로 고정한다.
 
               아래 `client_pump.zig` DTO 변경은 c3a가 아니라 c3c merge gate에서만 적용한다.
               `client_pump.zig`의 pure DTO는
@@ -3434,7 +3527,8 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
               이 gate는 `PreparedAdoptionEvidence`, reducer, active storage, owner-event lease를 참조하지 않으며 seed owner는
               `external_attach.Prepared`에 남고 active pump는 닫혀 있어야 한다.
               **c3a2**는 paired transfer prepare OOM 보존·swapped evidence/profile-tag mismatch,
-              same-revision seed cwd/process/backing-pointer mutation의 caller 보존·destination null·free 0,
+              same-revision seed cwd/process/backing-pointer mutation의 caller evidence 보존·destination null·
+              ownership suffix 전 canonical source free 0,
               abort exact once·post-commit storage cleanup으로 닫는다.
               **c3b**는 strict CLI의 unknown/unsupported metadata event terminal commit,
               staging source 불변+all allocation fail-index, zero request-ID raw seal/typed publish 0,
@@ -3683,8 +3777,8 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
         공유하고 leave가 남은 budget 중 최대 100 ms를 쓴다. signal/revoke/error cleanup은 active/latest와 detach를
         버리고 하나의 100 ms deadline 안에서 leave를 시도한 뒤 즉시 raw restore/signal forwarding으로 간다.
 
-    **P5c3c-1a~2a, 2b1, 2b2a~c2와 2b2c3-c3a1은 구현 완료, c3a2~3b는 계획 상태다.**
-    2b2c3 전체는 c3a2~c까지 green이 아니므로 아직 계획 상태다. 각 slice는 P5c3a~b의 Debug/ReleaseFast gate를 재실행하고 다음 slice가 실제
+    **P5c3c-1a~2a, 2b1, 2b2a~c2와 2b2c3-c3a1~a2는 구현 완료, c3b~3b는 계획 상태다.**
+    2b2c3 전체는 c3b~c까지 green이 아니므로 아직 계획 상태다. 각 slice는 P5c3a~b의 Debug/ReleaseFast gate를 재실행하고 다음 slice가 실제
     consumer로 쓰지 않는 임시 public API는 만들지 않는다.
 
     raw 진입 전에도 기존 `SO_RCVTIMEO`/blocking `writeAll`을 deadline으로 간주하지 않는다. resolver 전체, selected

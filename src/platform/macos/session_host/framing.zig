@@ -34,6 +34,152 @@ pub const ParseError = error{
 pub const EncodeError = error{ PayloadTooLarge, OutOfMemory };
 pub const NormalizeError = error{ ResidentTooLarge, MalformedState, OutOfMemory };
 
+const NormalizeLifecycle = enum { empty, prepared, committed, aborted };
+
+/// Address-bound replacement staged without mutating its source parser.
+///
+/// The caller must keep this value at its final address. `validate` compares both the parser
+/// descriptor and the unread bytes, so a stale or bitwise-copied token cannot authorize a swap.
+pub const PreparedNormalizeExact = struct {
+    saved_self_addr: usize = 0,
+    source_addr: usize = 0,
+    allocator_ptr_addr: usize = 0,
+    allocator_vtable_addr: usize = 0,
+    source_items_addr: usize = 0,
+    source_items_len: usize = 0,
+    source_capacity: usize = 0,
+    source_head: usize = 0,
+    expected_major: u16 = 0,
+    replacement_addr: usize = 0,
+    replacement_len: usize = 0,
+    replacement: ?[]u8 = null,
+    normalize_primary_allocator: ?std.mem.Allocator = null,
+    normalize_cleanup_allocator: ?std.mem.Allocator = null,
+    cleanup_replacement: ?[]u8 = null,
+    lifecycle: NormalizeLifecycle = .empty,
+
+    pub fn deinit(self: *PreparedNormalizeExact) void {
+        if (self.saved_self_addr != 0 and self.saved_self_addr != @intFromPtr(self)) return;
+        if (self.lifecycle == .prepared) {
+            const replacement = canonicalReplacement(self);
+            const allocator = canonicalAllocator(self);
+            if (replacement) |bytes| {
+                if (allocator) |owner| owner.free(bytes);
+            }
+        }
+        self.replacement = null;
+        self.normalize_primary_allocator = null;
+        self.normalize_cleanup_allocator = null;
+        self.cleanup_replacement = null;
+        self.lifecycle = .aborted;
+    }
+
+    pub fn validate(
+        self: *const PreparedNormalizeExact,
+        source: *const FrameParser,
+    ) bool {
+        if (self.lifecycle != .prepared or
+            self.saved_self_addr != @intFromPtr(self) or
+            self.source_addr != @intFromPtr(source) or
+            self.allocator_ptr_addr != @intFromPtr(source.allocator.ptr) or
+            self.allocator_vtable_addr != @intFromPtr(source.allocator.vtable) or
+            self.source_items_addr != backingAddress(source.buf.items, source.buf.capacity) or
+            self.source_items_len != source.buf.items.len or
+            self.source_capacity != source.buf.capacity or
+            self.source_head != source.head or
+            self.expected_major != source.expected_major or
+            !optionalAllocatorMatches(
+                self.normalize_primary_allocator,
+                self.allocator_ptr_addr,
+                self.allocator_vtable_addr,
+            ) or
+            !allocatorMatches(
+                self.normalize_cleanup_allocator orelse return false,
+                self.allocator_ptr_addr,
+                self.allocator_vtable_addr,
+            ) or
+            !optionalSliceMatchesSeal(
+                self.replacement,
+                self.replacement_addr,
+                self.replacement_len,
+            ) or
+            !optionalSliceMatchesSeal(
+                self.cleanup_replacement,
+                self.replacement_addr,
+                self.replacement_len,
+            ) or
+            source.head > source.buf.items.len or
+            source.buf.items.len > source.buf.capacity)
+            return false;
+        const unread = source.buf.items[source.head..];
+        return if (self.replacement) |replacement|
+            replacement.len == unread.len and std.mem.eql(u8, replacement, unread)
+        else
+            unread.len == 0;
+    }
+};
+
+fn allocatorMatches(allocator: std.mem.Allocator, ptr_addr: usize, vtable_addr: usize) bool {
+    return @intFromPtr(allocator.ptr) == ptr_addr and
+        @intFromPtr(allocator.vtable) == vtable_addr;
+}
+
+fn optionalAllocatorMatches(
+    allocator: ?std.mem.Allocator,
+    ptr_addr: usize,
+    vtable_addr: usize,
+) bool {
+    return if (allocator) |value| allocatorMatches(value, ptr_addr, vtable_addr) else false;
+}
+
+fn optionalSliceMatchesSeal(slice: ?[]const u8, addr: usize, len: usize) bool {
+    if (len == 0) return slice == null and addr == 0;
+    return if (slice) |bytes| @intFromPtr(bytes.ptr) == addr and bytes.len == len else false;
+}
+
+fn canonicalAllocator(prepared: *const PreparedNormalizeExact) ?std.mem.Allocator {
+    if (optionalAllocatorMatches(
+        prepared.normalize_cleanup_allocator,
+        prepared.allocator_ptr_addr,
+        prepared.allocator_vtable_addr,
+    )) return prepared.normalize_cleanup_allocator;
+    if (optionalAllocatorMatches(
+        prepared.normalize_primary_allocator,
+        prepared.allocator_ptr_addr,
+        prepared.allocator_vtable_addr,
+    )) return prepared.normalize_primary_allocator;
+    return null;
+}
+
+fn canonicalReplacement(prepared: *const PreparedNormalizeExact) ?[]u8 {
+    if (optionalSliceMatchesSeal(
+        prepared.cleanup_replacement,
+        prepared.replacement_addr,
+        prepared.replacement_len,
+    )) return prepared.cleanup_replacement;
+    if (optionalSliceMatchesSeal(
+        prepared.replacement,
+        prepared.replacement_addr,
+        prepared.replacement_len,
+    )) return prepared.replacement;
+    return null;
+}
+
+fn sliceAddress(bytes: []const u8) usize {
+    return if (bytes.len == 0) 0 else @intFromPtr(bytes.ptr);
+}
+
+fn backingAddress(bytes: []const u8, capacity: usize) usize {
+    return if (capacity == 0) 0 else @intFromPtr(bytes.ptr);
+}
+
+fn rangesOverlap(a_start: usize, a_len: usize, b_start: usize, b_len: usize) bool {
+    if (a_len == 0 or b_len == 0) return false;
+    const a_end = std.math.add(usize, a_start, a_len) catch return true;
+    const b_end = std.math.add(usize, b_start, b_len) catch return true;
+    return a_start < b_end and b_start < a_end;
+}
+
 /// 받은 바이트를 누적하다 완성된 frame을 하나씩 꺼내는 state machine. 소유는 caller(push/next/deinit).
 pub const FrameParser = struct {
     allocator: std.mem.Allocator,
@@ -134,31 +280,91 @@ pub const FrameParser = struct {
         return self.buf.capacity;
     }
 
-    /// Replace the parser backing allocation with an exact unread-byte allocation.
-    ///
-    /// The current resident cap is checked before allocating, so the temporary old+new peak is at
-    /// most twice `resident_cap`. Every failure preserves the original parser byte-for-byte.
-    pub fn normalizeExact(self: *FrameParser, resident_cap: usize) NormalizeError!void {
+    /// Stage exact unread storage while preserving the source parser byte-for-byte on every
+    /// failure. `out` must be pristine and remain at this address until commit or deinit.
+    pub fn prepareNormalizeExact(
+        self: *const FrameParser,
+        out: *PreparedNormalizeExact,
+        resident_cap: usize,
+    ) NormalizeError!void {
         if (self.buf.capacity > resident_cap) return error.ResidentTooLarge;
         if (self.head > self.buf.items.len or self.buf.items.len > self.buf.capacity)
             return error.MalformedState;
-
+        if (rangesOverlap(
+            @intFromPtr(self),
+            @sizeOf(FrameParser),
+            backingAddress(self.buf.items, self.buf.capacity),
+            self.buf.capacity,
+        )) return error.MalformedState;
+        if (rangesOverlap(
+            @intFromPtr(out),
+            @sizeOf(PreparedNormalizeExact),
+            @intFromPtr(self),
+            @sizeOf(FrameParser),
+        ) or rangesOverlap(
+            @intFromPtr(out),
+            @sizeOf(PreparedNormalizeExact),
+            backingAddress(self.buf.items, self.buf.capacity),
+            self.buf.capacity,
+        )) return error.MalformedState;
+        if (out.lifecycle != .empty or out.replacement != null or
+            out.normalize_primary_allocator != null or out.normalize_cleanup_allocator != null or
+            out.cleanup_replacement != null)
+            return error.MalformedState;
         const unread = self.buf.items[self.head..];
-        if (unread.len == 0) {
-            self.buf.deinit(self.allocator);
-            self.buf = .empty;
-            self.head = 0;
-            return;
-        }
-        const replacement = self.allocator.alloc(u8, unread.len) catch return error.OutOfMemory;
-        @memcpy(replacement, unread);
+        const replacement = if (unread.len == 0)
+            null
+        else
+            self.allocator.dupe(u8, unread) catch return error.OutOfMemory;
+        out.* = .{
+            .saved_self_addr = @intFromPtr(out),
+            .source_addr = @intFromPtr(self),
+            .allocator_ptr_addr = @intFromPtr(self.allocator.ptr),
+            .allocator_vtable_addr = @intFromPtr(self.allocator.vtable),
+            .source_items_addr = backingAddress(self.buf.items, self.buf.capacity),
+            .source_items_len = self.buf.items.len,
+            .source_capacity = self.buf.capacity,
+            .source_head = self.head,
+            .expected_major = self.expected_major,
+            .replacement_addr = if (replacement) |bytes| @intFromPtr(bytes.ptr) else 0,
+            .replacement_len = if (replacement) |bytes| bytes.len else 0,
+            .replacement = replacement,
+            .normalize_primary_allocator = self.allocator,
+            .normalize_cleanup_allocator = self.allocator,
+            .cleanup_replacement = replacement,
+            .lifecycle = .prepared,
+        };
+    }
 
+    /// No-fail ownership suffix. Callers must validate immediately before entering the suffix.
+    pub fn commitPreparedNormalizeExact(
+        self: *FrameParser,
+        prepared: *PreparedNormalizeExact,
+    ) void {
+        if (!prepared.validate(self)) @panic("invalid prepared parser normalization");
         self.buf.deinit(self.allocator);
-        self.buf = .{
+        self.buf = if (prepared.cleanup_replacement) |replacement| .{
             .items = replacement,
             .capacity = replacement.len,
-        };
+        } else .empty;
         self.head = 0;
+        prepared.replacement = null;
+        prepared.normalize_primary_allocator = null;
+        prepared.normalize_cleanup_allocator = null;
+        prepared.cleanup_replacement = null;
+        prepared.lifecycle = .committed;
+    }
+
+    /// Rebind a validated token after its parser value is moved byte-for-byte to final storage.
+    /// No allocation or allocator callback occurs here.
+    pub fn rebindPreparedNormalizeExact(
+        self: *const FrameParser,
+        prepared: *PreparedNormalizeExact,
+        destination: *const FrameParser,
+    ) void {
+        if (!prepared.validate(self)) @panic("invalid parser normalization rebind");
+        prepared.source_addr = @intFromPtr(destination);
+        if (!prepared.validate(destination)) @panic("parser normalization move changed state");
     }
 
     pub const BufferState = enum { empty, incomplete, complete_or_error };
@@ -451,114 +657,155 @@ test "framing: unknown flag bit on a required frame closes the connection" {
     try std.testing.expectError(error.UnknownRequiredFrame, parser.next());
 }
 
-test "framing: normalizeExact compacts unread bytes to exact resident storage" {
+test "framing: prepared normalize preserves source until no-fail commit" {
+    const allocator = std.testing.allocator;
+    var parser = FrameParser.initForMajor(allocator, 7);
+    defer parser.deinit();
+    try parser.push("deadunread");
+    parser.head = 4;
+
+    const source_addr = sliceAddress(parser.buf.items);
+    const source_capacity = parser.buf.capacity;
+    var prepared: PreparedNormalizeExact = .{};
+    defer prepared.deinit();
+    try parser.prepareNormalizeExact(&prepared, source_capacity);
+
+    try std.testing.expectEqual(source_addr, sliceAddress(parser.buf.items));
+    try std.testing.expectEqual(@as(usize, 4), parser.head);
+    try std.testing.expect(prepared.validate(&parser));
+    parser.commitPreparedNormalizeExact(&prepared);
+    try std.testing.expectEqualStrings("unread", parser.buf.items);
+    try std.testing.expectEqual(@as(usize, 0), parser.head);
+    try std.testing.expectEqual(parser.buf.items.len, parser.buf.capacity);
+    try std.testing.expectEqual(@as(u16, 7), parser.expected_major);
+}
+
+test "framing: prepared normalize releases retained capacity when unread is empty" {
     const allocator = std.testing.allocator;
     var parser = FrameParser.init(allocator);
     defer parser.deinit();
+    try parser.push("consumed");
+    parser.head = parser.buf.items.len;
+    try std.testing.expect(parser.buf.capacity > 0);
 
-    const first = try encodeFrame(allocator, .{ .kind = .request, .request_id = 1 }, "first");
-    defer allocator.free(first);
-    const second = try encodeFrame(allocator, .{ .kind = .response, .request_id = 1 }, "second");
-    defer allocator.free(second);
-    try parser.push(first);
-    try parser.push(second);
-    const consumed = (try parser.next()).?;
-    defer consumed.deinit(allocator);
-    try std.testing.expect(parser.head > 0);
-    const unread_before = try allocator.dupe(u8, parser.buf.items[parser.head..]);
-    defer allocator.free(unread_before);
+    var prepared: PreparedNormalizeExact = .{};
+    defer prepared.deinit();
+    try parser.prepareNormalizeExact(&prepared, parser.residentBytes());
+    // An empty unread window stages no replacement allocation at all.
+    try std.testing.expect(prepared.replacement == null);
+    try std.testing.expect(prepared.validate(&parser));
 
-    try parser.normalizeExact(protocol.max_binary_chunk + protocol.header_size);
+    parser.commitPreparedNormalizeExact(&prepared);
+    try std.testing.expectEqual(@as(usize, 0), parser.buf.capacity);
+    try std.testing.expectEqual(@as(usize, 0), parser.buf.items.len);
     try std.testing.expectEqual(@as(usize, 0), parser.head);
-    try std.testing.expectEqual(unread_before.len, parser.bufferedBytes());
-    try std.testing.expectEqual(unread_before.len, parser.residentBytes());
-    try std.testing.expectEqualSlices(u8, unread_before, parser.buf.items);
 }
 
-test "framing: normalizeExact cap and allocation failures preserve parser state" {
-    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
-    const allocator = failing.allocator();
+test "framing: prepared normalize rejects malformed head without mutation" {
+    var parser = FrameParser.init(std.testing.allocator);
+    defer parser.deinit();
+    try parser.push("pending");
+    const original_head = parser.head;
+    const original_addr = sliceAddress(parser.buf.items);
+    parser.head = parser.buf.items.len + 1;
+
+    var prepared: PreparedNormalizeExact = .{};
+    defer prepared.deinit();
+    try std.testing.expectError(
+        error.MalformedState,
+        parser.prepareNormalizeExact(&prepared, parser.residentBytes()),
+    );
+    try std.testing.expectEqual(NormalizeLifecycle.empty, prepared.lifecycle);
+    try std.testing.expectEqual(original_addr, sliceAddress(parser.buf.items));
+    parser.head = original_head;
+}
+
+test "framing: prepared normalize rejects moved token and stale source content" {
+    var parser = FrameParser.init(std.testing.allocator);
+    defer parser.deinit();
+    try parser.push("pending");
+
+    var prepared: PreparedNormalizeExact = .{};
+    defer prepared.deinit();
+    try parser.prepareNormalizeExact(&prepared, parser.residentBytes());
+    var copied = prepared;
+    defer copied.deinit();
+    try std.testing.expect(!copied.validate(&parser));
+
+    parser.buf.items[0] = 'P';
+    try std.testing.expect(!prepared.validate(&parser));
+    parser.buf.items[0] = 'p';
+    try std.testing.expect(prepared.validate(&parser));
+}
+
+test "framing: prepared normalize cleanup mirror ignores poisoned replacement descriptor" {
+    const allocator = std.testing.allocator;
     var parser = FrameParser.init(allocator);
     defer parser.deinit();
+    try parser.push("pending");
+    var prepared: PreparedNormalizeExact = .{};
+    defer prepared.deinit();
+    try parser.prepareNormalizeExact(&prepared, parser.residentBytes());
+    const poisoned = try allocator.dupe(u8, "poison!");
+    prepared.replacement = poisoned;
+    try std.testing.expect(!prepared.validate(&parser));
+    prepared.deinit(); // canonical replacement is freed; poisoned bytes are not treated as owned.
+    allocator.free(poisoned);
+}
 
-    try parser.push("unread");
-    const original_ptr = parser.buf.items.ptr;
-    const original_capacity = parser.buf.capacity;
-    const original_head = parser.head;
+test "framing: prepared normalize primary mirror recovers cleanup descriptor drift" {
+    const allocator = std.testing.allocator;
+    var parser = FrameParser.init(allocator);
+    defer parser.deinit();
+    try parser.push("pending");
+    var prepared: PreparedNormalizeExact = .{};
+    defer prepared.deinit();
+    try parser.prepareNormalizeExact(&prepared, parser.residentBytes());
+    const poisoned = try allocator.dupe(u8, "poison!");
+    prepared.cleanup_replacement = poisoned;
+    try std.testing.expect(!prepared.validate(&parser));
+    prepared.deinit(); // primary descriptor still identifies the canonical replacement.
+    allocator.free(poisoned);
+}
+
+test "framing: prepared normalize OOM and cap failure preserve source and destination" {
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    var parser = FrameParser.init(failing.allocator());
+    defer parser.deinit();
+    try parser.push("12345678");
+    const before = parser.bufferedBytes();
+    const before_addr = sliceAddress(parser.buf.items);
+
+    var prepared: PreparedNormalizeExact = .{};
+    defer prepared.deinit();
     try std.testing.expectError(
         error.ResidentTooLarge,
-        parser.normalizeExact(original_capacity - 1),
+        parser.prepareNormalizeExact(&prepared, parser.residentBytes() - 1),
     );
-    try std.testing.expectEqual(original_ptr, parser.buf.items.ptr);
-    try std.testing.expectEqual(original_capacity, parser.buf.capacity);
-    try std.testing.expectEqual(original_head, parser.head);
-    try std.testing.expectEqualStrings("unread", parser.buf.items);
-
+    try std.testing.expectEqual(NormalizeLifecycle.empty, prepared.lifecycle);
     failing.fail_index = failing.alloc_index;
     try std.testing.expectError(
         error.OutOfMemory,
-        parser.normalizeExact(original_capacity),
+        parser.prepareNormalizeExact(&prepared, parser.residentBytes()),
     );
-    try std.testing.expectEqual(original_ptr, parser.buf.items.ptr);
-    try std.testing.expectEqual(original_capacity, parser.buf.capacity);
-    try std.testing.expectEqual(original_head, parser.head);
-    try std.testing.expectEqualStrings("unread", parser.buf.items);
+    try std.testing.expectEqual(NormalizeLifecycle.empty, prepared.lifecycle);
+    try std.testing.expectEqual(before, parser.bufferedBytes());
+    try std.testing.expectEqual(before_addr, sliceAddress(parser.buf.items));
 }
 
-test "framing: normalizeExact rejects malformed head without mutation" {
-    const allocator = std.testing.allocator;
-    var parser = FrameParser.init(allocator);
-    try parser.push("abc");
-    parser.head = 4;
-    try std.testing.expectError(error.MalformedState, parser.normalizeExact(parser.residentBytes()));
-    try std.testing.expectEqual(@as(usize, 4), parser.head);
-    // Restore the intentionally corrupted test-only scalar so normal deinit can reclaim the buffer.
-    parser.head = 0;
+test "framing: prepared normalize rejects parser backing that aliases its owner" {
+    var parser = FrameParser.init(std.testing.allocator);
+    const self_bytes: [*]u8 = @ptrCast(&parser);
+    parser.buf = .{
+        .items = self_bytes[0..1],
+        .capacity = @sizeOf(FrameParser),
+    };
+    var prepared: PreparedNormalizeExact = .{};
+    defer prepared.deinit();
+    try std.testing.expectError(
+        error.MalformedState,
+        parser.prepareNormalizeExact(&prepared, @sizeOf(FrameParser)),
+    );
+    parser.buf = .empty; // the forged stack alias was never owned.
     parser.deinit();
-}
-
-test "framing: normalizeExact releases retained capacity when unread is empty" {
-    const allocator = std.testing.allocator;
-    var parser = FrameParser.init(allocator);
-    defer parser.deinit();
-    const encoded = try encodeFrame(allocator, .{ .kind = .request, .request_id = 1 }, "");
-    defer allocator.free(encoded);
-    try parser.push(encoded);
-    const frame = (try parser.next()).?;
-    frame.deinit(allocator);
-    try std.testing.expect(parser.residentBytes() > 0);
-
-    try parser.normalizeExact(parser.residentBytes());
-    try std.testing.expectEqual(@as(usize, 0), parser.bufferedBytes());
-    try std.testing.expectEqual(@as(usize, 0), parser.residentBytes());
-}
-
-test "framing: normalizeExact consumed-prefix OOM preserves prefix and unread bytes" {
-    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
-    const allocator = failing.allocator();
-    var parser = FrameParser.init(allocator);
-    defer parser.deinit();
-    const first = try encodeFrame(allocator, .{ .kind = .request, .request_id = 1 }, "one");
-    defer allocator.free(first);
-    const second = try encodeFrame(allocator, .{ .kind = .response, .request_id = 1 }, "two");
-    defer allocator.free(second);
-    try parser.push(first);
-    try parser.push(second);
-    const consumed = (try parser.next()).?;
-    consumed.deinit(allocator);
-    const original_ptr = parser.buf.items.ptr;
-    const original_capacity = parser.buf.capacity;
-    const original_head = parser.head;
-    const original_unread = try std.testing.allocator.dupe(u8, parser.buf.items[parser.head..]);
-    defer std.testing.allocator.free(original_unread);
-
-    failing.fail_index = failing.alloc_index;
-    try std.testing.expectError(
-        error.OutOfMemory,
-        parser.normalizeExact(original_capacity),
-    );
-    try std.testing.expectEqual(original_ptr, parser.buf.items.ptr);
-    try std.testing.expectEqual(original_capacity, parser.buf.capacity);
-    try std.testing.expectEqual(original_head, parser.head);
-    try std.testing.expectEqualSlices(u8, original_unread, parser.buf.items[parser.head..]);
 }

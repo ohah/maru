@@ -482,6 +482,10 @@ test "session host external pump facade callsites stay in the final owner bounda
             u8,
             entry.path,
             "platform/macos/session_host/external_pump_owner.zig",
+        ) or std.mem.eql(
+            u8,
+            entry.path,
+            "platform/macos/session_host/external_attach_evidence.zig",
         );
         if (allowed) continue;
         const path = try std.fmt.allocPrint(
@@ -532,6 +536,11 @@ test "session host stable pump storage and Client transfer stay in mechanics bou
             entry.path,
             "platform/macos/session_host/client_external_pump.zig",
         );
+        const framing_file = std.mem.eql(
+            u8,
+            entry.path,
+            "platform/macos/session_host/framing.zig",
+        );
         const storage_type_allowed = mechanics_file or std.mem.eql(
             u8,
             entry.path,
@@ -542,20 +551,51 @@ test "session host stable pump storage and Client transfer stay in mechanics bou
             entry.path,
             "platform/macos/session_host/client.zig",
         );
-        if (mechanics_file) continue;
-
         const path = try std.fmt.allocPrint(allocator, "src/{s}", .{entry.path});
         defer allocator.free(path);
         const source = try readZigFileZ(allocator, path);
         defer allocator.free(source);
+        try std.testing.expect(!containsRestrictedName(source, "transferToExternalPump"));
+        if (containsRestrictedName(source, "initFromAttachPartsInPlace")) {
+            try std.testing.expect(mechanics_file or std.mem.eql(
+                u8,
+                entry.path,
+                "platform/macos/session_host/external_attach_evidence.zig",
+            ));
+        }
+        if (!mechanics_file) {
+            try std.testing.expect(!containsRestrictedName(source, "cleanup_seed"));
+            try std.testing.expect(!containsRestrictedName(source, "cleanup_seed_seal"));
+        }
+        if (!framing_file) {
+            try std.testing.expect(!containsRestrictedName(source, "cleanup_replacement"));
+            try std.testing.expect(!containsRestrictedName(source, "normalize_cleanup_allocator"));
+        }
+        if (mechanics_file) continue;
         if (!storage_type_allowed)
             try std.testing.expect(!containsRestrictedName(source, "ExternalPumpStorage"));
         if (!mechanics_file) {
             try std.testing.expect(!containsRestrictedName(source, "owned_client"));
             try std.testing.expect(!containsRestrictedName(source, "inbox_ledger"));
+            // The paired suffix's only seed owner until c3c. Raw access outside mechanics could
+            // free the seed behind the cleanup mirror's back.
+            try std.testing.expect(!containsRestrictedName(source, "owned_evidence"));
         }
-        if (!transfer_allowed)
-            try std.testing.expect(!containsRestrictedName(source, "transferToExternalPump"));
+        if (!transfer_allowed) {
+            try std.testing.expect(!containsRestrictedName(source, "prepareExternalPumpTransfer"));
+            try std.testing.expect(!containsRestrictedName(source, "commitExternalPumpTransfer"));
+            // All three stages are gated, not just the two that move ownership: calling `finish`
+            // out of order panics instead of returning a typed error.
+            try std.testing.expect(!containsRestrictedName(source, "finishExternalPumpTransfer"));
+        }
+        if (!framing_file and !transfer_allowed) {
+            // The staged parser swap is a mechanics-only leaf for the same reason: its misuse paths
+            // are `@panic`, so the compiler cannot keep a new caller honest. `client.zig` owns the
+            // three transfer stages that drive it.
+            try std.testing.expect(!containsRestrictedName(source, "prepareNormalizeExact"));
+            try std.testing.expect(!containsRestrictedName(source, "commitPreparedNormalizeExact"));
+            try std.testing.expect(!containsRestrictedName(source, "rebindPreparedNormalizeExact"));
+        }
     }
 
     const forbidden_storage: [:0]const u8 =

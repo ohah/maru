@@ -28,10 +28,6 @@ pub fn keyIsSensitive(key: []const u8) bool {
     return false;
 }
 
-fn isKeyChar(c: u8) bool {
-    return std.ascii.isAlphanumeric(c) or c == '_' or c == '-';
-}
-
 /// 선두 '-'를 제거한 key(0.16엔 mem.trimLeft 없음).
 fn stripDashes(s: []const u8) []const u8 {
     var key = s;
@@ -71,11 +67,6 @@ fn tokenHasInlineSensitive(tok: []const u8) bool {
         if (key.len > 0 and keyIsSensitive(key)) return true;
     }
     return false;
-}
-
-/// 하위호환 별칭(할당 한정) — 새 코드는 hasSensitiveContent를 쓴다.
-pub fn hasSensitiveAssignment(text: []const u8) bool {
-    return hasSensitiveContent(text);
 }
 
 pub const FixtureError = error{SensitiveContent};

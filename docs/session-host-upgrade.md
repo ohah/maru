@@ -430,6 +430,11 @@ absolute identity만** 기록하고 target의 page layout을 새로 만든다. s
 - 제품 command/capability는 추가하지 않는다.
 - U0 종료 때 side-by-side drain 대비 실제 사용자 가치, state 크기/시간 예산, codec 장기 유지비를 다시 검토한다.
   U0 통과만으로 U1 착수나 제품 migration 가능성을 승인하지 않는다.
+- **소비 방식(실제 계약)**: U1 codec은 `handoff_inventory`의 **group 테이블을 직접 순회**한다
+  (`handoff_codec`이 `inventory.terminal_core_groups`를 comptime으로 돈다). 한때 `dispositionOf(T, field)`라는
+  per-field 조회점을 두고 "U1·U2가 이걸로 소비한다"고 적어 뒀지만 **어느 소비자도 쓰지 않았고**(도입 시점부터
+  호출 0), 주석만 사실과 어긋난 채 남아 있어 제거했다(2026-07-28). 새 소비자도 테이블 순회를 쓴다 — per-field
+  조회가 정말 필요해지면 그때 실제 호출자와 함께 되살린다(미리 두지 않는다).
 
 ### U1 — 순수 handoff codec
 

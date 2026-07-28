@@ -312,14 +312,6 @@ pub const DockPanel = struct {
     }
 };
 
-pub fn freePersistedState(allocator: std.mem.Allocator, state: *PersistedState) void {
-    if (state.entries.len > 0) allocator.free(state.entries);
-    for (state.groups) |group| if (group.entries.len > 0) allocator.free(group.entries);
-    if (state.groups.len > 0) allocator.free(state.groups);
-    if (state.tree.len > 0) allocator.free(state.tree);
-    state.* = .{};
-}
-
 test "EntryKind/Mode policy: markdown, html, text (FP12 §2.2)" {
     // 신뢰 편집 브리지 kind: markdown+text만. html은 격리 read-only.
     try std.testing.expect(EntryKind.markdown.usesEditorBridge());

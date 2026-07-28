@@ -355,99 +355,6 @@ pub fn parseCodexTail(allocator: std.mem.Allocator, tail: []const u8, out: *Owne
     }
 }
 
-/// codex 세션 파일 후보 하나 — `sessions` 루트 기준 상대 경로(`YYYY/MM/DD/rollout-….jsonl`)와 mtime.
-pub const CodexCandidate = struct {
-    path: [max_name_bytes]u8 = undefined,
-    path_len: usize = 0,
-    mtime_ns: i96 = 0,
-
-    pub fn slice(self: *const CodexCandidate) []const u8 {
-        return self.path[0..self.path_len];
-    }
-};
-
-/// codex `sessions` 루트를 훑어 최근 파일을 **mtime 내림차순**으로 최대 `out.len`개 모은다.
-///
-/// **왜 날짜 디렉터리만 최근 것으로 자르지 않는가**: resume은 옛 파일에 append하므로(양쪽 CLI 실측) 며칠 전
-/// 디렉터리의 파일이 방금 갱신될 수 있다. 날짜로 자르면 그 세션을 영영 놓친다. 대신 stat만 전수로 돌리고
-/// (실측 232개 ≈ 1ms) **파일을 여는 건 상위 후보 몇 개로 제한**한다 — 여는 쪽이 진짜 비용이다(전량 파싱 82ms).
-///
-/// 반환값은 채워진 개수. 실패는 0(계약 1).
-pub fn collectCodexCandidates(io: std.Io, root: std.Io.Dir, out: []CodexCandidate) usize {
-    var n: usize = 0;
-    var years = root.iterate();
-    while ((years.next(io) catch return n)) |y| {
-        if (y.kind != .directory) continue;
-        var ydir = root.openDir(io, y.name, .{}) catch continue;
-        defer ydir.close(io);
-        var months = ydir.iterate();
-        while ((months.next(io) catch break)) |mo| {
-            if (mo.kind != .directory) continue;
-            var mdir = ydir.openDir(io, mo.name, .{}) catch continue;
-            defer mdir.close(io);
-            var days = mdir.iterate();
-            while ((days.next(io) catch break)) |d| {
-                if (d.kind != .directory) continue;
-                var ddir = mdir.openDir(io, d.name, .{}) catch continue;
-                defer ddir.close(io);
-                var files = ddir.iterate();
-                while ((files.next(io) catch break)) |f| {
-                    if (f.kind != .file) continue;
-                    if (!std.mem.endsWith(u8, f.name, ".jsonl")) continue;
-                    const st = ddir.statFile(io, f.name, .{}) catch continue;
-                    const ns = st.mtime.nanoseconds;
-                    // 이미 out이 찼고 가장 오래된 후보보다도 낡았으면 볼 필요가 없다.
-                    if (n == out.len and ns <= out[n - 1].mtime_ns) continue;
-                    var cand: CodexCandidate = .{ .mtime_ns = ns };
-                    const written = std.fmt.bufPrint(&cand.path, "{s}/{s}/{s}/{s}", .{ y.name, mo.name, d.name, f.name }) catch continue;
-                    cand.path_len = written.len;
-                    // 삽입 정렬(out은 작다 — 상위 몇 개만 든다).
-                    var i: usize = @min(n, out.len - 1);
-                    while (i > 0 and out[i - 1].mtime_ns < ns) : (i -= 1) out[i] = out[i - 1];
-                    out[i] = cand;
-                    if (n < out.len) n += 1;
-                }
-            }
-        }
-    }
-    return n;
-}
-
-/// 디렉터리의 **직속** `.jsonl` 중 mtime이 가장 최근인 것. 하위 디렉터리로 내려가지 않으므로 claude 서브에이전트
-/// 기록이 자동으로 배제된다(계약 3 — 실측: 직속 54개 ↔ 하위 포함 1805개).
-///
-/// `exclude`에 든 이름은 건너뛴다 — 같은 cwd의 다른 Term이 이미 그 파일을 매핑했다는 뜻이다.
-///
-/// 이름을 `name_buf`에 쓰고 반환한다. 열 수 없거나 후보가 없으면 null(계약 1).
-pub fn latestSessionFile(io: std.Io, dir: std.Io.Dir, name_buf: []u8, exclude: []const []const u8) ?struct { name: []const u8, mtime_ns: i96 } {
-    var it = dir.iterate();
-    var best_ns: i96 = 0;
-    var best_len: usize = 0;
-    while ((it.next(io) catch return null)) |entry| {
-        if (entry.kind != .file) continue;
-        if (!std.mem.endsWith(u8, entry.name, ".jsonl")) continue;
-        if (entry.name.len > name_buf.len) continue;
-        // 같은 작업 디렉터리에서 에이전트를 둘 이상 돌리면 후보 디렉터리가 같아 **둘 다 전역 최신 파일**을 문다.
-        // 이미 다른 Term이 든 파일은 건너뛰어 각자 자기 세션에 앉게 한다(code-review max).
-        var taken = false;
-        for (exclude) |x| {
-            if (std.mem.eql(u8, x, entry.name)) {
-                taken = true;
-                break;
-            }
-        }
-        if (taken) continue;
-        const st = dir.statFile(io, entry.name, .{}) catch continue;
-        const ns = st.mtime.nanoseconds;
-        if (best_len != 0 and ns <= best_ns) continue;
-        @memcpy(name_buf[0..entry.name.len], entry.name);
-        best_len = entry.name.len;
-        best_ns = ns;
-    }
-    if (best_len == 0) return null;
-    return .{ .name = name_buf[0..best_len], .mtime_ns = best_ns };
-}
-
 /// codex 날짜 계층에서 **파일명이 `suffix`로 끝나는** 파일을 찾는다(`rollout-<ts>-<thread_id>.jsonl`).
 ///
 /// 신원(`CODEX_THREAD_ID`)을 아는 경우의 경로다 — 후보를 열어 `session_meta`를 파싱할 필요도, mtime을 비교할
@@ -479,18 +386,6 @@ pub fn findCodexByThreadId(io: std.Io, root: std.Io.Dir, suffix: []const u8, out
         }
     }
     return null;
-}
-
-/// 파일 **앞** `buf.len` 바이트. `session_meta`가 첫 레코드라 신원 확인은 이만큼이면 된다.
-pub fn readHead(io: std.Io, dir: std.Io.Dir, name: []const u8, buf: []u8) []const u8 {
-    const file = dir.openFile(io, name, .{}) catch return "";
-    defer file.close(io);
-    const size = (file.stat(io) catch return "").size;
-    // 파일이 buf보다 짧을 수 있으므로 **실제 크기로 자른다** — 통째로 요청하면 짧은 읽기가 EndOfStream이 된다.
-    const want: usize = @intCast(@min(size, buf.len));
-    if (want == 0) return "";
-    const n = file.readPositionalAll(io, buf[0..want], 0) catch return "";
-    return buf[0..n];
 }
 
 /// 파일 **끝** `buf.len` 바이트. 첫 줄은 중간에서 잘렸을 수 있으므로 버린다(부분 JSON을 파싱하면 잡음이 된다).

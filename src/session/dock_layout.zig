@@ -16,11 +16,6 @@ pub const min_right_pt: u32 = 120;
 /// bottom은 가로 띠라 성격이 다르다(폭이 아니라 높이). 트리 행이 몇 줄은 보여야 하므로 그대로 둔다.
 pub const default_bottom_pt: u32 = 300;
 pub const min_bottom_pt: u32 = 160;
-/// Artifact에서 Markdown 본문은 tree보다 우선하는 주 surface다. 12칸짜리 세로 띠까지 줄이던 기존 하한은
-/// 문서/편집기를 사실상 못 쓰게 하므로 28칸을 보장하고, 공간이 모자라면 tree를 먼저 숨긴다.
-/// Artifact의 editor tab처럼 파일 수가 적을 때 바 전체를 균등분할하지 않고 읽을 수 있는 고정폭 세그먼트를 쓴다.
-/// 탭이 많아 공간이 모자랄 때만 균등 축소한다(가로 스크롤은 후속).
-pub const default_tab_cols: u16 = 18;
 /// dock Zig divider target을 넓히는 최대 logical-point 폭. native에는 이 값을 그대로 내리지 않고,
 /// `AppSession.collectWebSurfaces`가 최종 padded frame과 이 target의 edge별 교집합만 ABI로 전달한다.
 pub const divider_grab_band_pt: u32 = 10;
@@ -47,27 +42,6 @@ pub const Geometry = struct {
     tree_header: Rect = .{ .x = 0, .y = 0, .w = 0, .h = 0 },
     tree_content: Rect = .{ .x = 0, .y = 0, .w = 0, .h = 0 },
     dock_size_px: u32 = 0,
-};
-
-pub const TabMetrics = struct {
-    cols: u16,
-    tab_cols: u16,
-    tab_width: u16,
-};
-
-pub const TabCellLayout = struct {
-    start: u16,
-    end: u16,
-    title_start: u16,
-    title_end: u16,
-    close_col: u16,
-};
-
-pub const TabScroll = struct {
-    tab_width: u16, // 탭 하나의 고정 폭(default_tab_cols)
-    has_scroll: bool, // 전체 탭 폭 > tab_cols(넘침)
-    eff_scroll: u32, // [0,max_scroll]로 clamp된 실제 스크롤(stale 요청값 자동 정정)
-    max_scroll: u32, // 최대 스크롤(넘칠 때만 >0)
 };
 
 /// 헤더 우측의 읽기/소스 편집 토글+dirty 표시 영역. 경로는 이 rect 왼쪽까지만 그린다. 폭이 너무 좁으면

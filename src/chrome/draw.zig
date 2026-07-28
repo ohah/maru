@@ -50,7 +50,7 @@ pub const Sides = struct {
 
 /// 합성 레이어/Z-순서. platform 백엔드가 layer별로 replace()의 슬롯(사이드바·pane chrome·overlay·모달)에
 /// 라우팅한다. 같은 layer 안에서는 ops 순서가 Z(뒤가 위).
-pub const Layer = enum { sidebar, pane_chrome_bg, pane_overlay, modal };
+pub const Layer = enum { sidebar, pane_overlay, modal };
 
 /// 텍스트 한 조각(스타일 변화 단위). 멀티-run은 한 줄 안의 스타일 구간들.
 pub const Run = struct { text: []const u8, bold: bool = false };

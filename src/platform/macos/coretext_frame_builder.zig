@@ -1093,38 +1093,6 @@ pub fn buildFloatingTabDrawList(
     };
 }
 
-/// Dock drag 전용 floating title. 배경 박스는 AppSession의 단일 GpuQuad가 소유하므로 여기서는 실제 제목
-/// glyph만 만든다. 좌측 1-cell padding은 col offset으로 표현하고 공백 채움/명시 background를 만들지 않아
-/// 제목 길이가 Metal background geometry 수를 늘리지 않는다.
-pub fn buildFloatingTabTitleDrawList(
-    allocator: std.mem.Allocator,
-    title: []const u8,
-    cols: u16,
-    fg: terminal.Color,
-) !renderer.DrawList {
-    var cells: std.ArrayList(renderer.DrawCell) = .empty;
-    errdefer cells.deinit(allocator);
-    var pool: std.ArrayList(u32) = .empty; // cluster 본체(NFD 자모·결합 문자) — DrawList.grapheme_pool로 넘어간다
-    errdefer pool.deinit(allocator);
-    const style: terminal.Style = .{ .foreground = fg };
-    if (cols > 1) _ = try appendEllipsizedTitle(allocator, &cells, &pool, title, 0, 1, cols, style, false, .head);
-    const overlays = try allocator.alloc(renderer.DrawOverlay, 0);
-    errdefer allocator.free(overlays);
-    const owned_cells = try cells.toOwnedSlice(allocator);
-    // pool을 **먼저** 떼어 낸다: 리터럴 안에서 마지막에 평가하면 cells 소유권이 이미 넘어간 뒤라
-    // `errdefer cells.deinit`이 no-op이 되고, pool 할당 실패 시 cells 슬라이스가 샌다(code-review max).
-    const owned_pool = try pool.toOwnedSlice(allocator);
-    errdefer allocator.free(owned_pool);
-    return .{
-        .size = .{ .cols = @max(cols, 1), .rows = 1 },
-        .cursor = .{ .row = 0, .col = 0, .visible = false },
-        .dirty = .{ .start_row = 0, .end_row = 0 },
-        .cells = owned_cells,
-        .grapheme_pool = owned_pool,
-        .overlays = overlays,
-    };
-}
-
 /// sticky command 배너 한 줄 DrawList — `[✓/✗ 종료상태] 명령줄 텍스트`를 불투명 배너 bg 위에 깐다(스크롤된 콘텐츠를
 /// 덮어 배너로 보이게 — buildFloatingTabDrawList의 솔리드 박스와 동형). exit==null이면(명령 실행 중) 글리프 없이 명령줄만.
 /// ok_fg=성공(초록)·err_fg=실패(빨강)로 ✓(U+2713)/✗(U+2717)만 색을 달리하고 텍스트는 fg. cols가 좁으면 텍스트는 "…"로 줄인다.
@@ -2694,21 +2662,6 @@ test "buildFloatingTabDrawList fills a one-row box with the title" {
     defer exact.deinit(allocator);
     try std.testing.expectEqual(@as(usize, 8), exact.cells.len);
     for (exact.cells) |c| try std.testing.expect(c.codepoint != text_layout.ellipsis_glyph);
-}
-
-test "buildFloatingTabTitleDrawList emits glyph-only transparent title cells" {
-    const allocator = std.testing.allocator;
-    const fg: terminal.Color = .{ .rgb = .{ .r = 0xEE, .g = 0xEE, .b = 0xEE } };
-    var dl = try buildFloatingTabTitleDrawList(allocator, "abcdefghijklmnopqrstuvwx", 24, fg);
-    defer dl.deinit(allocator);
-    try std.testing.expectEqual(@as(u16, 24), dl.size.cols);
-    try std.testing.expect(dl.cells.len <= 23);
-    try std.testing.expectEqual(@as(u16, 1), dl.cells[0].col);
-    try std.testing.expectEqual(text_layout.ellipsis_glyph, dl.cells[dl.cells.len - 1].codepoint);
-    for (dl.cells) |cell| {
-        try std.testing.expectEqual(terminal.Color.default, cell.style.background);
-        try std.testing.expect(cell.codepoint != ' ');
-    }
 }
 
 test "buildFromDrawList shapes a synthesized sidebar draw list into glyph cells (shared atlas seam)" {

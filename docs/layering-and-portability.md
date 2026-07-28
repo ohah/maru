@@ -172,6 +172,29 @@ flowchart TD
 
 **적용 상태**: 제목 계열(사이드바 카드·파일 트리 행·탭 제목·pane 라벨·도크 헤더·rename 편집기·주소창 읽기전용 URL)이 이 배치를 쓴다. 아직 자기 루프를 도는 두 곳은 [grapheme-clustering.md](grapheme-clustering.md) §3.1b 가드의 부채 목록이 들고 있다(오버레이 raster 텍스트·편집 밴드) — 그 둘을 이 배치로 옮기는 것이 남은 수렴 작업이다.
 
+### 7.9.1 `tailWindow` 통합 순서 — 전제는 사라졌지만 벽이 둘 남았다
+
+위 "부수 효과"가 없앤 것은 **계층 침범이라는 전제 하나**다. 실제로 `overlay_input.tailWindow`와 `text_layout.plan`의 tail 분기를 한 구현으로 합치려면 아래 둘을 먼저 넘어야 한다 — 순서를 건너뛰면 "레이아웃은 2칸이라 보는데 렌더는 4칸을 깐다"로 caret이 어긋난다.
+
+**벽 ① 폭 셈법의 단위가 다르다.**
+
+| | 단위 | NFD "한"(U+1112 U+1161 U+11AB) |
+| --- | --- | --- |
+| `overlay_input.displayCols` | **codepoint**당 `max(1, cellWidth)` | 2+1+1 = 4칸 |
+| `text_layout.displayCols` | **cluster**당 base 폭 | 2칸 |
+
+알고리즘("앞을 버려 뒤를 폭 안에")은 같아도 세는 단위가 달라 그대로는 한 함수가 못 된다. 폭 모드를 인자로 받는 dual-mode 함수는 **중립 모듈 안에 dual-path를 다시 들이는 것**이라 채택하지 않는다(§3.1a가 dual-path보다 균일 모델을 택한 근거와 같다).
+
+**벽 ② 오버레이 raster 그리드가 cluster를 표현하지 못한다.** `tailWindow`의 소비처(find·palette·사이드바 검색)는 `app_session.placeText`가 그리는데, 그 그리드는 `cp: []u21` — **셀당 코드포인트 하나**다. `DrawCell.grapheme_offset/count` + `DrawList.grapheme_pool` 같은 자리가 없어 cluster를 담을 수 없다. 지금 어긋나 보이지 않는 이유는 레이아웃과 렌더가 **같은 방식으로 틀려** 일관되기 때문이다.
+
+**따라서 순서는 이렇다.**
+
+1. 오버레이 raster 그리드에 cluster 표현을 추가한다(`placeText`: `[]u21` → base + 풀). 이것이 선행 조건이다.
+2. `overlay_input`의 폭·tail 계산을 cluster 단위로 전환한다(caret 열 모델이 함께 바뀐다).
+3. 그때 `tailWindow`를 `text_layout`의 tail 계산으로 대체한다 — 여기서 비로소 통합이다.
+
+1·2는 §3.1b 부채 목록의 `placeText`·`emitEditBand`·`buildSidebarHeaderDrawList`와 **같은 caret 열 모델**을 건드리므로 사실상 한 덩어리다. caret·선택·마우스 편집으로 그 모델을 어차피 다시 짜는 [text-field-editor.md](text-field-editor.md) 이니셔티브와 **묶어서** 하는 것이 맞다(먼저 옮기면 그때 또 건드린다). CT-OWN이 준 이득은 그 덩어리가 **platform을 거치지 않고 L3 안에서 끝난다**는 점이다.
+
 ## 8. neutrality 가드 + topological note
 
 - **가드 테스트**(B) ✅: `NativeMetalCell`·`MetalFrame`·CoreText/CoreGraphics/AppKit/Metal 타입명이 중립 레이어(**terminal·renderer·session·chrome**)에 **식별자로 등장하면 빌드 실패**(`tests/boundary/imports.zig`의 `scanForbiddenIdentifiers` — `std.zig.Tokenizer`로 .identifier 토큰만 검사해 중립 계약을 설명하는 주석·문자열 속 "Metal"/"CoreText" 언급은 오탐 0). cross-layer `@import` 금지(1차)에 더한 **2차 re-export 가드**(import이 막혀도 타입명이 새는 경로 차단). `app`은 의도적 혼합 레이어(runtime+중립 모델)라 비범위 — 컨벤션으로 다룬다. = [renderer-strategy.md] WebGPU 조건 1("중립 frame만 소비함을 테스트로 증명")의 실제 충족.

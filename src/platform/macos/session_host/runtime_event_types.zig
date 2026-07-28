@@ -17,6 +17,11 @@ pub const Role = enum {
     controller,
 };
 
+pub const EventGeneration = union(enum) {
+    untracked,
+    tracked: u64,
+};
+
 /// Immutable stream-to-runtime evidence established by a successful attach.
 pub const EventIdentity = struct {
     runtime_id: u128,
@@ -26,7 +31,7 @@ pub const EventIdentity = struct {
 /// Attachment-local authority at the event's classification point.
 pub const EventAuthorityView = struct {
     role: Role,
-    generation: u64,
+    generation: EventGeneration,
 };
 
 /// Exact header plus borrowed payload. `payload_len` is retained separately so a caller cannot
@@ -189,7 +194,11 @@ fn classifyRevoked(
     if (authority.role != .controller)
         return violation(.{ .authority = .revoked_observer });
 
-    const successor = std.math.add(u64, authority.generation, 1) catch
+    const current = switch (authority.generation) {
+        .untracked => return violation(.{ .authority = .revoked_generation }),
+        .tracked => |value| value,
+    };
+    const successor = std.math.add(u64, current, 1) catch
         return violation(.{ .authority = .revoked_generation });
     if (event.controller_generation != successor)
         return violation(.{ .authority = .revoked_generation });
@@ -212,7 +221,7 @@ const test_identity: EventIdentity = .{
 };
 const test_authority: EventAuthorityView = .{
     .role = .controller,
-    .generation = 3,
+    .generation = .{ .tracked = 3 },
 };
 
 fn testFrame(payload: []const u8) EventFrameView {
@@ -279,7 +288,7 @@ test "classifier accepts the common event set and binds revoke authority exactly
         .ended,
     );
     try expectAcceptedTag(
-        classifyEventView(test_identity, .{ .role = .observer, .generation = 3 }, testPreflight(resized, .supported), testFrame(resized)),
+        classifyEventView(test_identity, .{ .role = .observer, .generation = .{ .tracked = 3 } }, testPreflight(resized, .supported), testFrame(resized)),
         .resized,
     );
     const revoked_result = classifyEventView(
@@ -450,7 +459,7 @@ test "classifier verifies event payload identity and revoke authority" {
     const observer = try expectViolation(
         classifyEventView(
             test_identity,
-            .{ .role = .observer, .generation = 3 },
+            .{ .role = .observer, .generation = .{ .tracked = 3 } },
             testPreflight(revoked, .supported),
             testFrame(revoked),
         ),
@@ -461,13 +470,33 @@ test "classifier verifies event payload identity and revoke authority" {
     const generation = try expectViolation(
         classifyEventView(
             test_identity,
-            .{ .role = .controller, .generation = 2 },
+            .{ .role = .controller, .generation = .{ .tracked = 2 } },
             testPreflight(revoked, .supported),
             testFrame(revoked),
         ),
         .authority,
     );
     try std.testing.expectEqual(AuthorityViolation.revoked_generation, generation.authority);
+}
+
+test "classifier never invents a revoke successor for untracked authority" {
+    const payload =
+        "{\"event\":\"controller.revoked\",\"data\":{\"runtime_id\":" ++
+        "\"000000000000000000000000000000aa\",\"stream_id\":7," ++
+        "\"controller_generation\":1,\"reason\":\"takeover\"}}";
+    const result = try expectViolation(
+        classifyEventView(
+            test_identity,
+            .{ .role = .controller, .generation = .untracked },
+            testPreflight(payload, .supported),
+            testFrame(payload),
+        ),
+        .authority,
+    );
+    try std.testing.expectEqual(
+        AuthorityViolation.revoked_generation,
+        result.authority,
+    );
 }
 
 test "classifier preserves wire and capability violations as typed outcomes" {

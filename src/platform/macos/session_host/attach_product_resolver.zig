@@ -981,7 +981,9 @@ test "product resolver discovers and pins the one host that owns a live runtime"
                         .controller
                     else
                         .observer,
-                    .generation = old_attachment.state.controller_generation,
+                    .generation = .{
+                        .tracked = old_attachment.state.controller_generation,
+                    },
                 },
                 .{
                     .expected_major = long_client.wire_major,

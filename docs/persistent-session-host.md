@@ -3382,18 +3382,69 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
               storage publish, terminal/recovery commit은 하지 않고 c3c combined commit에 남긴다. 기존
               `ExternalAdoptionInventory`/`PreparedClientDisarm`은 source seal에 bind된 cleanup backing일 뿐
               semantic SSOT가 아니며, event module이나 outer decision이 이를 재순회·재계산해 verdict를 만들지 않는다.
-              `Client.foldExternalAdoptionSource(accumulator,initial_binding)`는 Client private FIFO의 sole traversal
-              API다. generic caller visitor/callback을 받지 않고 Client 내부 fixed adapter가
-              `runtime_event_reducer.Accumulator.step`을 직접 호출한다. fold 전체는 Client owner thread에
-              confined되며 callback/reentrant mutation 창을 만들지 않는다. Client는 reducer의 전진 mechanics만
-              import하고 terminal/recovery verdict를 해석하거나 별도 ordinal SSOT를 만들지 않는다.
+              exact API는 `Client.foldExternalAdoptionSource(input,scratch)
+              ExternalAdoptionFoldError!ExternalAdoptionFoldResult`다. caller-owned/preseeded `Accumulator`나 generic
+              visitor/function pointer는 받지 않는다. `ExternalAdoptionFoldInput`은
+              `{identity:EventIdentity,authority:FoldAuthority,initial_metadata:InitialMetadataBinding}`이고,
+              `InitialMetadataBinding`은 `unsupported | unavailable |
+              current{seed:*const runtime_metadata_wire.InitialMetadataSeed,seal:MetadataSeedSeal}`의 closed union이다.
+              unsupported는 Client metadata unsupported, unavailable/current는 supported profile에만 허용하고
+              current seed는 Phase A에서 take/deinit하지 않는다. `ExternalAdoptionFoldResult{
+              binding_seal:ExternalAdoptionFoldBindingSeal,source_seal:ClientSourceSeal,
+              outcome:runtime_event_reducer.Outcome}`은 Client 주소/attach instance, identity, tagged initial
+              authority, initial metadata tag와 current seed 주소 및 full `MetadataSeedSeal`을 source
+              snapshot/ordered semantic traversal과 한 값으로 묶으며 borrowed pointer/slice를 갖지 않는다.
+              retained 결과를 transaction에 결합하기 전
+              `Client.externalAdoptionFoldResultMatches(input,expected,scratch)`로 live source를 다시 fold해
+              binding/source seal/outcome 전체를 exact 비교한다. 다른 runtime/stream/authority/seed에서 얻은
+              결과를 교차 결합하거나 FIFO payload/counter가 바뀌면 false다.
+              malformed/foreign/resource event는 error 조기 반환이 아니라 `Outcome.terminal`이고, typed fold error는
+              entry/descriptor/initial-binding 불변식만 나타낸다. outer decision/materialization 타입은 이 API가
+              import하거나 만들지 않는다.
+
+              `FoldAuthority.generation`은 `untracked | tracked(u64)`를 보존한다. frozen N-1 controller의
+              `untracked`를 0으로 정규화하지 않으며 generation-bearing revoke는 exact successor를 증명할 수 없으므로
+              protocol terminal이다. tracked revoke만 checked `generation+1`을 요구하고 성공 뒤
+              `tracked(successor)` observer로 전진한다. 따라서 reducer `ReducedState.authority`가 그대로
+              `PreparedSourceDecision.final_authority`의 semantic SSOT가 되고 outer가 attachment evidence에서
+              generation provenance를 재구성하지 않는다.
+
+              fold는 Client 내부 final stack address에서 `Accumulator.initInPlace` 또는
+              `initWithMetadataInPlace`를 실행한다. private concrete `FoldMetadataSources`만 metadata equality
+              mechanics를 제공하며 allocator, Client mutation method, caller callback을 보유하지 않는다. initial
+              origin은 `metadataSeedSemanticEqlEvent`, event origin은 현재 event보다 작은 exact ordinal의
+              header/payload/raw digest/preflight/semantic digest를 source FIFO에 재결합한 뒤
+              `metadataSemanticEqlExact`를 호출한다. 이 read-only ordinal lookup은 ordered semantic traversal을
+              추가로 실행하는 것이 아니며 borrowed payload/view는 comparator 호출 밖으로 escape하지 않는다.
+
+              lexical order는
+              **eligibility → initial seed/scratch/Client owner cross-alias descriptor gate →
+              descriptor-first Client alias proof → screen batch/stream structural scan →
+              encoder/reducer init → batch encode → stream encode → 단 하나의 ordered event loop
+              (`writeEvent` → loop-local `preflightEvent` → `Accumulator.stepAt(exact ordinal)`) →
+              event counter finalize → encoder finish → reducer finalize**로 고정한다. 기존
+              `validateExternalAdoptionSourceQueues`는 c2 compatibility 경로용으로 남지만 fold는 event 조기-return을
+              피하려고 이를 호출하지 않는다. event loop가 header/counter violation을 accumulator에 기록한 뒤에도
+              마지막 FIFO item까지 raw seal/preflight/step을 계속한다. 저장된 strict CLI
+              `BufferedEvent.preflight/admission_seal`은 계속 exact null이고, reducer proof는 identity를 포함해
+              새로 만든 loop-local 값이다. reducer의 ordinal은 `stepAt(expected_ordinal)`이 exact next를 검사하는
+              유일한 semantic ordinal SSOT이며 encoder도 같은 checked `u32`를 기록한다. compile-time
+              `max_pending_event_count <= maxInt(u32)` gate를 둔다.
+
               여기서 FIFO는 `pending_events` 내부 arrival order만 뜻한다. screen batch/stream은 별도 category-fixed
               structural scan/cap 대상이고 서로 다른 세 배열 사이의 원래 도착 순서를 복원한다고 주장하지 않는다.
-              Client가 각 event를 neutral `EventFrameView`로 만들어 fixed reducer adapter에 arrival order로
-              넘기고 transport 구조만 담은 `ClientSourceSeal`을 반환한다. Client는 reducer verdict, attachment
-              authority, recovery policy를 import하지 않는다. pure `runtime_event_reducer`는 wire leaf만 import해
-              `{authority,metadata,resize}`와 closed `ReducerOutcome`을 전진시키고,
+              Client는 reducer의 전진 mechanics만 import하고 terminal/recovery verdict를 해석하지 않는다. pure
+              `runtime_event_reducer`는 wire leaf만 import해 `{authority,metadata,resize}`와 closed
+              `ReducerOutcome`을 전진시키고,
               outer `client_external_adoption`이 seal/outcome/attachment evidence를 `PreparedSourceDecision`으로 합친다.
+              **Closed source fold 구현:** 위 exact input/result와 tagged authority, internally initialized
+              address-bound reducer, fixed metadata resolver, initial seed descriptor/content + scratch/Client owner
+              cross-alias gate, screen structural terminal 누적, single ordered event loop와 counter finalize가
+              `Client.foldExternalAdoptionSource`에 구현되었다. 기존 standalone source encoder와 같은 canonical
+              digest, unsupported/unavailable/current seed, initial↔event/event↔event equality·equivocation, stale
+              seed, cache contamination/counter mismatch, terminal tail hashing, allocation callback 0을 fixture로
+              고정한다. 이 구현은 아직 outer `PreparedSourceDecision`, event fingerprint/owning metadata
+              materialization 또는 c3c publish를 만들지 않으므로 c3b 전체 완료를 뜻하지 않는다.
               seal은 structural counts/counters, **raw `next_request_id: u64`**, ordered header+payload 전체를
               domain-separated SHA-256으로 묶는다. request ID 0도 seal/revalidate할 수 있지만 typed state로
               publish하지 않고 protocol terminal decision으로만 준비한다. outer `client_external_adoption`만 nonzero raw 값을

@@ -3343,15 +3343,28 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
 
               **c3b — single-inventory event staging/reducer.** allocation-free Phase A는 c2
               `inspectExternalAdoption`/`PreparedClientDisarm`의 첫 allocation보다 먼저 raw Client source에서 실행한다.
+              **전제 슬라이스 구현:** `preflightExternalAdoptionSource`는 기존 preview/inspect/stage/final matcher가
+              공유하던 semantic 검증을 allocation/callback/mutation 없는 private leaf로 분리하고,
+              `ExternalRequestIdPolicy`로 기존 nonzero 계약과 후속 raw-zero seal 계약을 구분한다. raw-zero 정책도
+              queue/header/counter 검사를 끝까지 수행하며, 기존 public 경로는 계속 nonzero를 요구한다. 기존 c2
+              `.skip` compatibility 경로는 이 composed leaf를 그대로 쓰되 memory-safe Client state를 전제로 한다.
+              c3 fold는 composed leaf를 부르지 않고
+              `validateExternalAdoptionSourceEligibility` → 새 descriptor-first alias gate →
+              `validateExternalAdoptionSourceQueues` 두 subleaf를 조합한다. 이 전제 슬라이스는 그 alias gate나 source
+              seal/fold 완료를 뜻하지 않는다.
               c3b는 pure reducer → Client fold/source seal → outer decision → adopted-only fingerprint/metadata
               materialization 순서로 착륙한다. 이는 PR 분할일 뿐 완료 조건 분할이 아니며, c3b 동안 Client mutation,
               storage publish, terminal/recovery commit은 하지 않고 c3c combined commit에 남긴다. 기존
               `ExternalAdoptionInventory`/`PreparedClientDisarm`은 source seal에 bind된 cleanup backing일 뿐
               semantic SSOT가 아니며, event module이나 outer decision이 이를 재순회·재계산해 verdict를 만들지 않는다.
-              `Client.foldExternalAdoptionSource(context,visitor)`는 Client private FIFO의 sole traversal API다.
+              `Client.foldExternalAdoptionSource(accumulator,initial_binding)`는 Client private FIFO의 sole traversal
+              API다. generic caller visitor/callback을 받지 않고 Client 내부 fixed adapter가
+              `runtime_event_reducer.Accumulator.step`을 직접 호출한다. fold 전체는 Client owner thread에
+              confined되며 callback/reentrant mutation 창을 만들지 않는다. Client는 reducer의 전진 mechanics만
+              import하고 terminal/recovery verdict를 해석하거나 별도 ordinal SSOT를 만들지 않는다.
               여기서 FIFO는 `pending_events` 내부 arrival order만 뜻한다. screen batch/stream은 별도 category-fixed
               structural scan/cap 대상이고 서로 다른 세 배열 사이의 원래 도착 순서를 복원한다고 주장하지 않는다.
-              Client가 각 event를 neutral `EventFrameView`로 만들어 caller-provided generic visitor에 arrival order로
+              Client가 각 event를 neutral `EventFrameView`로 만들어 fixed reducer adapter에 arrival order로
               넘기고 transport 구조만 담은 `ClientSourceSeal`을 반환한다. Client는 reducer verdict, attachment
               authority, recovery policy를 import하지 않는다. pure `runtime_event_reducer`는 wire leaf만 import해
               `{authority,metadata,resize}`와 closed `ReducerOutcome`을 전진시키고,
@@ -3377,11 +3390,22 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
               않는다. cross-origin equality는 sealed `OwnedMetadataDto`와 exact event view를 allocation 없이
               field/string/process 단위로 비교하는 `metadataSeedSemanticEqlEvent`만 사용한다. final revalidation은
               raw/semantic 또는 두 semantic origin을 혼용하지 않는다.
-              이 API는 c2 `ExternalAdoptionSnapshot`보다 약한 우회로가 아니다. parser unread bytes/head/tail/
+              이 API는 c2 `ExternalAdoptionSnapshot`보다 약한 우회로가 아니다. content를 읽기 전에
+              allocation-free two-pass owner-range 검증을 수행한다. 첫 pass는 Client와 build/lifecycle/parser/
+              pending 배열/external TX의 outer backing 전부를 검사하고, 둘째 pass는 검증된 descriptor 배열에서
+              partial/batch/stream/event payload backing을 열거해 모든 outer/nested owner의 비중첩을 증명한다.
+              최대 9,224 owner에서 무조건 O(n²) pairwise를 사용하지 않는다. 구현 전 max-cap fixture로 별도
+              source-preflight 시간/comparison 예산을 고정하고, 그 예산을 만족하는 bounded allocation-free
+              알고리즘을 merge gate로 삼는다. 이 Phase A 검증은 allocator callback을 만들지 않으며 c2의 allocation/sort 기반
+              `PreparedExternalOwnerRangeProof`를 대체하지 않는다. 후자는 c3c destination/final no-callback
+              ownership suffix proof로 남는다. parser unread bytes/head/tail/
               expected-major와 backing 주소·len·capacity, build ID/lifecycle/profile/capability provenance,
-              fd/io-mode/ownership/unusable, pending outbound/external TX empty, 모든 array와 payload의 allocator
-              ptr/vtable·base/len/capacity, partial-batch 의미, counters와 cleanup mirror를 allocation 없이 검사하고
-              seal에 bind한다. c3의 위협 모델은 memory-safe Client API가 만든 owner의 seal 이후 **final-state
+              fd/io-mode/ownership/unusable, `attach_instance_id`, pending outbound/external TX empty, 모든 array와
+              payload의 allocator ptr/vtable·base/len/capacity, partial-batch 의미와 counters를 allocation 없이
+              검사하고 seal에 bind한다. Zig slice인 build ID/lifecycle/frame payload에는 독립 capacity SSOT가 없으므로
+              canonical capacity=len으로 encode한다. cleanup mirror는 raw Client Phase A의 입력이 아니며 adopted-only
+              inventory materialization 이후 같은 source seal에 bind한다. c3의 위협 모델은 memory-safe Client API가
+              만든 owner의 seal 이후 **final-state
               descriptor/content drift와 stale plan**이다. A→B→A mutate-restore 이력 또는 allocator가 같은
               주소·길이·byte를 재사용한 사실까지 탐지한다고 주장하지 않으며, arbitrary forged pointer/allocator나
               process memory corruption도 탐지·복구 범위 밖이다.
@@ -3419,6 +3443,10 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
               seal을 소유한다. `Client.stageExternalEventFingerprints`/`externalEventFingerprintsMatch`가 c2
               screen-copy API와 같은 inventory/alias/final-address 계약으로 descriptor를 stage/revalidate한다.
               Phase A metadata/resize winner는 owning view가 아니라
+              source seal은 `attach_instance_id`를 bind하고 `event_parse_observer == null`을 eligibility로
+              강제한다. raw `next_request_id == 0`은 descriptor/alias/preflight 및 FIFO semantic scan을 생략시키지
+              않으며, full scan 뒤 outer decision에서 terminal protocol 결과로만 준비한다.
+              `stageExternalEventFingerprints`는 별도 traversal이 아니라 같은 closed fold의 private wrapper다.
               `CandidateToken{event_ordinal,raw_digest,semantic_digest,exact_preflight}`이고 source seal의 lifetime
               안에서만 유효하다. Phase B의 Client private materialize API만 exact ordinal/header/payload/digest를
               다시 확인한 뒤 owning DTO를 만들 수 있다.

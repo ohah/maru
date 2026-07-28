@@ -220,30 +220,28 @@ pub const title_ellipsis_glyph: u21 = 0x2026;
 /// 이전)와 겹쳐 — 그 제목/이름에 우연히 그 글리프가 와도 폭을 2칸으로 키우면 탭 텍스트가 어긋나고 rename caret 예약
 /// (renameDisplayWidth는 1칸 셈)과 틀어진다. 그래서 maru가 아이콘을 박는 카드 보조줄만 widen=true, 나머지(터미널/
 /// 사용자 텍스트)는 false(1칸). 아이콘이 아니거나 widen=false면 cellWidth 그대로(EAW 2칸·일반 1칸).
+/// **cluster 폭**이다(코드포인트 폭이 아니다) — `cp`는 cluster의 base다. 이어지는 자모(NFD 한글 V·T)·결합 문자는
+/// 폭 0으로 base에 흡수되므로(docs/grapheme-clustering.md §4.3 `grapheme.clusterWidth`) 여기 안 들어온다.
+/// `@max(1, …)`는 **base가 없는 비정상 cluster**(문자열이 결합 문자로 시작)만 위한 보정이다 — 폭 0 셀을 그대로
+/// 두면 여러 셀이 같은 col에 겹쳐 쌓인다. 정상 텍스트에서는 이 clamp가 걸리지 않는다.
 fn titleCellWidth(cp: u21, widen_icons: bool) u16 {
     if (widen_icons and renderer.icon_glyph.isRegisteredIcon(cp)) return 2;
     return @max(1, terminal.width.cellWidth(cp));
 }
 
 /// title의 표시 칸 폭. `widen_icons`면 카드 보조줄에 박힌 등록 maru 아이콘을 2칸으로 친다(titleCellWidth 참고 —
-/// 카드만 true, 탭·OSC·라벨 제목은 false). appendEllipsizedTitle의 말줄임 예약과 렌더가 같은 폭을 봐야 한다.
+/// 카드만 true, 탭·OSC·라벨 제목은 false).
+///
+/// **cluster 단위로 센다** — `appendEllipsizedTitle`이 cluster 하나당 셀 하나를 내므로(§3.1a CG1), 여기서
+/// 코드포인트로 세면 NFD 이름에서 말줄임 예약이 실제 렌더보다 커져 제목이 일찍 잘린다. 방출과 폭 셈법은
+/// 같은 단위여야 한다.
 pub fn titleDisplayWidth(title: []const u8, widen_icons: bool) usize {
     var total: usize = 0;
     var i: usize = 0;
     while (i < title.len) {
-        var cp: u21 = 0xFFFD;
-        var advance: usize = 1;
-        if (std.unicode.utf8ByteSequenceLength(title[i])) |seq_len| {
-            const len: usize = seq_len;
-            if (i + len <= title.len) {
-                if (std.unicode.utf8Decode(title[i .. i + len])) |d| {
-                    cp = d;
-                    advance = len;
-                } else |_| {}
-            }
-        } else |_| {}
-        i += advance;
-        total += titleCellWidth(cp, widen_icons);
+        const base = decodeTitleCp(title, i);
+        total += titleCellWidth(base.cp, widen_icons);
+        i = @max(grapheme.clusterEnd(title, i), i + base.advance); // 경계가 안 늘면 최소 base만큼 전진(무한루프 방지)
     }
     return total;
 }
@@ -276,7 +274,8 @@ fn decodeTitleCp(bytes: []const u8, i: usize) struct { cp: u21, advance: usize }
 fn appendEllipsizedTitle(
     allocator: std.mem.Allocator,
     cells: *std.ArrayList(renderer.DrawCell),
-    raw_title: []const u8,
+    pool: *std.ArrayList(u32), // grapheme cluster 본체(base 뒤 코드포인트) — 호출자가 DrawList.grapheme_pool로 넘긴다
+    title: []const u8,
     row: u16,
     start_col: u16,
     end_col: u16,
@@ -285,18 +284,6 @@ fn appendEllipsizedTitle(
     anchor: TitleAnchor,
 ) !u16 {
     if (end_col <= start_col) return start_col;
-    // **NFD 한글은 여기서 완성형으로 합친다.** macOS 파일시스템은 이름을 NFD(초성·중성·종성 자모, U+1100~U+11FF)로
-    // 주는데, 이 함수는 codepoint 하나당 셀 하나를 내므로(shaping 없음) 자모가 셀마다 흩어져 "ㅅㅡㅋㅡ린ㅅㅑㅅ"처럼
-    // 보인다(사용자 제보 — 파일 트리). 터미널 그리드는 클러스터 저장 + CoreText run shaping이 있어 같은 바이트가
-    // 제대로 그려지지만 chrome 셀 경로에는 그게 없다 — 그래서 표시 직전 NFC 조합이 chrome 쪽 대응이다
-    // (docs/grapheme-clustering.md). 파일 경로·identity는 이 함수에 안 들어오므로 **표시만** 바뀐다.
-    // 조합 실패(OOM)면 원본을 그대로 그린다 — 자모로 보여도 글자가 사라지진 않는다.
-    const composed: ?[]u8 = if (grapheme.hasConjoiningJamo(raw_title))
-        (grapheme.composeHangul(allocator, raw_title) catch null)
-    else
-        null; // ASCII·완성형(대부분)은 무할당 경로
-    defer if (composed) |c| allocator.free(c);
-    const title = composed orelse raw_title;
     const avail: usize = end_col - start_col;
     const total = titleDisplayWidth(title, widen_icons);
 
@@ -305,7 +292,8 @@ fn appendEllipsizedTitle(
     if (anchor == .tail and total > avail) {
         const lead: u16 = if (avail >= 2) 1 else 0; // "…" 자리 — 폭이 1칸뿐이면 생략하고 tail만 그린다(최소한 caret은 보이게)
         const tail_cols: usize = avail - lead;
-        // 앞에서부터 codepoint를 버려 남은(=뒤쪽) 표시폭이 tail_cols 이하가 되게 한다(EAW 폭 반영, titleDisplayWidth와 같은 셈법).
+        // 앞에서부터 **cluster를** 버려 남은(=뒤쪽) 표시폭이 tail_cols 이하가 되게 한다(EAW 폭 반영, titleDisplayWidth와
+        // 같은 셈법). codepoint 단위로 버리면 cluster 중간에서 잘려 결합 문자만 남은 셀이 생긴다.
         // 참고: chrome-neutral `overlay_input.tailWindow`가 같은 "앞을 버려 tail을 폭 안에" 알고리즘의 text-op 판이다. 둘은
         // 계층(platform coretext ↔ chrome neutral)과 폭 함수(titleCellWidth[widen_icons] ↔ width.cellWidth)가 달라 코드를
         // 공유하지 않는다 — EAW/경계 규칙을 고칠 땐 두 곳을 함께 본다(의도적 분리, 단일 함수화는 계층 침범).
@@ -314,7 +302,7 @@ fn appendEllipsizedTitle(
         while (drop_i < title.len and rem > tail_cols) {
             const d = decodeTitleCp(title, drop_i);
             rem -= titleCellWidth(d.cp, widen_icons);
-            drop_i += d.advance;
+            drop_i = @max(grapheme.clusterEnd(title, drop_i), drop_i + d.advance);
         }
         var col: u16 = start_col;
         if (lead == 1) {
@@ -323,12 +311,10 @@ fn appendEllipsizedTitle(
         }
         var i: usize = drop_i;
         while (i < title.len) {
-            const d = decodeTitleCp(title, i);
-            const w: u16 = titleCellWidth(d.cp, widen_icons);
-            if (col + w > end_col) break; // 안전장치 — rem<=tail_cols라 보통 tail 전체가 들어간다
-            try cells.append(allocator, .{ .row = row, .col = col, .codepoint = d.cp, .width = @intCast(@min(w, 2)), .style = style });
-            col += w;
-            i += d.advance;
+            const c = try appendCluster(allocator, cells, pool, title, i, row, col, end_col, style, widen_icons);
+            if (c.col == col) break; // 안전장치 — rem<=tail_cols라 보통 tail 전체가 들어간다
+            col = c.col;
+            i = c.next;
         }
         return col;
     }
@@ -339,18 +325,57 @@ fn appendEllipsizedTitle(
     var col: u16 = start_col;
     var i: usize = 0;
     while (i < title.len) {
-        const d = decodeTitleCp(title, i);
-        const w: u16 = titleCellWidth(d.cp, widen_icons); // 카드 보조줄이면 등록 maru 아이콘 2칸 렌더
-        if (col + w > text_end) break; // 텍스트 한도를 넘으면(말줄임 자리 직전) 멈춘다
-        try cells.append(allocator, .{ .row = row, .col = col, .codepoint = d.cp, .width = @intCast(@min(w, 2)), .style = style });
-        col += w;
-        i += d.advance;
+        const c = try appendCluster(allocator, cells, pool, title, i, row, col, text_end, style, widen_icons);
+        if (c.col == col) break; // 텍스트 한도를 넘으면(말줄임 자리 직전) 멈춘다
+        col = c.col;
+        i = c.next;
     }
     if (!fits and col < end_col) {
         try cells.append(allocator, .{ .row = row, .col = col, .codepoint = title_ellipsis_glyph, .width = 1, .style = style });
         col += 1;
     }
     return col;
+}
+
+/// `title[i..]`의 grapheme cluster **하나**를 셀 하나로 방출한다(docs/grapheme-clustering.md §3.1a CG1).
+/// base 코드포인트는 셀에, 나머지(NFD 한글 V·T, 결합 악센트, VS16·skin-tone 같은 Extend)는 `pool`에 실어
+/// `grapheme_offset/count`로 가리킨다 — 터미널 `buildDrawList`가 `snapshot.graphemes`로 하는 것과 같은 모양이고,
+/// 셰이퍼가 base 뒤에 풀을 붙여 CoreText로 한 글리프를 만든다. 정규화는 하지 않는다(원본 코드포인트 그대로).
+/// 폭이 `limit_col`을 넘으면 **아무것도 안 내고** 들어온 col을 그대로 돌려준다(호출자가 그걸로 중단을 판단한다).
+fn appendCluster(
+    allocator: std.mem.Allocator,
+    cells: *std.ArrayList(renderer.DrawCell),
+    pool: *std.ArrayList(u32),
+    title: []const u8,
+    i: usize,
+    row: u16,
+    col: u16,
+    limit_col: u16,
+    style: terminal.Style,
+    widen_icons: bool,
+) !struct { col: u16, next: usize } {
+    const base = decodeTitleCp(title, i);
+    const w: u16 = titleCellWidth(base.cp, widen_icons); // cluster 폭 = base 폭(V/T·mark는 0폭 흡수)
+    if (col + w > limit_col) return .{ .col = col, .next = i };
+    // cluster 경계가 base보다 앞서지 않게 clamp — 손상 UTF-8에서도 진행이 보장된다(무한루프 방지).
+    const end = @max(grapheme.clusterEnd(title, i), i + base.advance);
+    const offset: u32 = @intCast(pool.items.len);
+    var j = i + base.advance;
+    while (j < end and j < title.len) {
+        const extra = decodeTitleCp(title, j);
+        try pool.append(allocator, @as(u32, extra.cp));
+        j += extra.advance;
+    }
+    try cells.append(allocator, .{
+        .row = row,
+        .col = col,
+        .codepoint = base.cp,
+        .grapheme_offset = offset,
+        .grapheme_count = @intCast(pool.items.len - offset),
+        .width = @intCast(@min(w, 2)),
+        .style = style,
+    });
+    return .{ .col = col + w, .next = end };
 }
 
 /// 주소창 **편집 밴드**를 `text_field.fieldLayout`(L3 단일 레이아웃 소스, docs/text-field-editor.md §3)로 셀 방출한다.
@@ -479,6 +504,8 @@ pub fn buildSidebarDrawList(
 ) !renderer.DrawList {
     var cells: std.ArrayList(renderer.DrawCell) = .empty;
     errdefer cells.deinit(allocator);
+    var pool: std.ArrayList(u32) = .empty; // cluster 본체(NFD 자모·결합 문자) — DrawList.grapheme_pool로 넘어간다
+    errdefer pool.deinit(allocator);
 
     const style: terminal.Style = .{ .foreground = fg };
     const icon_cols: u16 = 3; // 에이전트 아이콘 자리(아이콘 2칸 + 간격 1칸) — 왼쪽 독립 gutter
@@ -559,7 +586,7 @@ pub fn buildSidebarDrawList(
             // rename 중인 슬롯의 **이름줄(j==0)만** tail 앵커 — 긴 이름을 칠 때 선두를 "…"로 자르고 끝(caret)을 보여준다(탭·pane과 같은 규칙).
             // 보조줄(브랜치·경로·상태)은 rename 중 숨겨지므로 j>0은 늘 head다(편집 중엔 이름줄만 남는다).
             const line_anchor: TitleAnchor = if (j == 0 and editing_row != null and editing_row.? == i) .tail else .head;
-            _ = try appendEllipsizedTitle(allocator, &cells, lines[j], row, text_col, end_col, row_style, line_widen[j], line_anchor);
+            _ = try appendEllipsizedTitle(allocator, &cells, &pool, lines[j], row, text_col, end_col, row_style, line_widen[j], line_anchor);
             max_row = @max(max_row, row);
         }
         // 핀 글리프: 이름줄(name_row, n줄 블록 중앙) 우측. 컬러 이모지라 style.fg와 무관(빨간 핀 고정).
@@ -631,6 +658,7 @@ pub fn buildSidebarDrawList(
         .cursor = .{ .row = 0, .col = 0, .visible = false },
         .dirty = .{ .start_row = 0, .end_row = max_row },
         .cells = try cells.toOwnedSlice(allocator),
+        .grapheme_pool = try pool.toOwnedSlice(allocator),
         .overlays = try allocator.alloc(renderer.DrawOverlay, 0),
     };
 }
@@ -679,15 +707,18 @@ pub fn buildPaneLabelDrawList(
 ) !renderer.DrawList {
     var cells: std.ArrayList(renderer.DrawCell) = .empty;
     errdefer cells.deinit(allocator);
+    var pool: std.ArrayList(u32) = .empty; // cluster 본체(NFD 자모·결합 문자) — DrawList.grapheme_pool로 넘어간다
+    errdefer pool.deinit(allocator);
     if (cols >= 3) {
         // [1, cols-1): col 0 = 좌측 패딩, 마지막 칸 = 탭과의 간격. 그 사이에 이름(말줄임 — rename 중이면 tail 앵커로 caret 유지).
-        _ = try appendEllipsizedTitle(allocator, &cells, label, 0, 1, cols - 1, .{ .foreground = fg }, false, anchor); // pane 라벨(터미널 텍스트) — 아이콘 widen 안 함
+        _ = try appendEllipsizedTitle(allocator, &cells, &pool, label, 0, 1, cols - 1, .{ .foreground = fg }, false, anchor); // pane 라벨(터미널 텍스트) — 아이콘 widen 안 함
     }
     return .{
         .size = .{ .cols = cols, .rows = 1 },
         .cursor = .{ .row = 0, .col = 0, .visible = false },
         .dirty = .{ .start_row = 0, .end_row = 0 },
         .cells = try cells.toOwnedSlice(allocator),
+        .grapheme_pool = try pool.toOwnedSlice(allocator),
         .overlays = try allocator.alloc(renderer.DrawOverlay, 0),
     };
 }
@@ -725,6 +756,8 @@ pub fn buildPaneAddressBarDrawList(
 ) !renderer.DrawList {
     var cells: std.ArrayList(renderer.DrawCell) = .empty;
     errdefer cells.deinit(allocator);
+    var pool: std.ArrayList(u32) = .empty; // cluster 본체(NFD 자모·결합 문자) — DrawList.grapheme_pool로 넘어간다
+    errdefer pool.deinit(allocator);
     if (cols >= 3) {
         // Phase 7e-3: 밴드 좌측 nav 버튼 존 [0, nav_end). 각 버튼 존 가운데 칸(i*nav_button_w + nav_button_w/2)에 글리프.
         // hit-test(navButtonAt)는 x_px를 nav_button_w로 나눠 같은 존을 판정하므로, 존 가운데 글리프는 늘 그 버튼 히트박스 안이다.
@@ -751,7 +784,7 @@ pub fn buildPaneAddressBarDrawList(
                 // 같은 소스라 드리프트 0(§2.3 벽②, chrome-strategy §5.4 MUST). 읽기전용 URL은 아래 appendEllipsizedTitle(.head).
                 try emitEditBand(allocator, &cells, lay, nav_end, cols, .{ .foreground = fg }, caret_color, caret_text);
             } else {
-                _ = try appendEllipsizedTitle(allocator, &cells, url, 0, nav_end, cols - 1, .{ .foreground = fg }, false, .head); // 읽기전용 URL(head 앵커로 scheme·host 보존)
+                _ = try appendEllipsizedTitle(allocator, &cells, &pool, url, 0, nav_end, cols - 1, .{ .foreground = fg }, false, .head); // 읽기전용 URL(head 앵커로 scheme·host 보존)
             }
         }
     }
@@ -760,6 +793,7 @@ pub fn buildPaneAddressBarDrawList(
         .cursor = .{ .row = 0, .col = 0, .visible = false }, // caret은 emitEditBand가 반전 블록 셀로 그림(DrawList 커서 아님)
         .dirty = .{ .start_row = 0, .end_row = 0 },
         .cells = try cells.toOwnedSlice(allocator),
+        .grapheme_pool = try pool.toOwnedSlice(allocator),
         .overlays = try allocator.alloc(renderer.DrawOverlay, 0),
     };
 }
@@ -775,15 +809,18 @@ pub fn buildPaneGripDrawList(
 ) !renderer.DrawList {
     var cells: std.ArrayList(renderer.DrawCell) = .empty;
     errdefer cells.deinit(allocator);
+    var pool: std.ArrayList(u32) = .empty; // cluster 본체(NFD 자모·결합 문자) — DrawList.grapheme_pool로 넘어간다
+    errdefer pool.deinit(allocator);
     if (cols >= 1) {
         const c = cols / 2; // 글리프를 grip 영역 중앙 칸에 — 양쪽 패딩
-        _ = try appendEllipsizedTitle(allocator, &cells, "\u{283F}", 0, c, c + 1, .{ .foreground = fg }, false, .head); // braille(아이콘 아님)
+        _ = try appendEllipsizedTitle(allocator, &cells, &pool, "\u{283F}", 0, c, c + 1, .{ .foreground = fg }, false, .head); // braille(아이콘 아님)
     }
     return .{
         .size = .{ .cols = cols, .rows = 1 },
         .cursor = .{ .row = 0, .col = 0, .visible = false },
         .dirty = .{ .start_row = 0, .end_row = 0 },
         .cells = try cells.toOwnedSlice(allocator),
+        .grapheme_pool = try pool.toOwnedSlice(allocator),
         .overlays = try allocator.alloc(renderer.DrawOverlay, 0),
     };
 }
@@ -805,14 +842,16 @@ pub fn buildFilePanelHeaderDrawList(
 ) !renderer.DrawList {
     var cells: std.ArrayList(renderer.DrawCell) = .empty;
     errdefer cells.deinit(allocator);
+    var pool: std.ArrayList(u32) = .empty; // cluster 본체(NFD 자모·결합 문자) — DrawList.grapheme_pool로 넘어간다
+    errdefer pool.deinit(allocator);
     if (cols >= 1) {
         if (dock_layout.headerCellLayout(cols, dirty, external_change)) |header| {
             if (header.control_start > 1)
-                _ = try appendEllipsizedTitle(allocator, &cells, path, 0, 1, header.control_start, .{ .foreground = fg }, false, .head);
+                _ = try appendEllipsizedTitle(allocator, &cells, &pool, path, 0, 1, header.control_start, .{ .foreground = fg }, false, .head);
             for (dock_layout.modesForKind(kind)) |descriptor| {
                 const range = dock_layout.headerModeCellRange(header, kind, descriptor.mode) orelse continue;
                 if (range.end > range.start + 1)
-                    _ = try appendEllipsizedTitle(allocator, &cells, descriptor.label, 0, range.start + 1, range.end, .{
+                    _ = try appendEllipsizedTitle(allocator, &cells, &pool, descriptor.label, 0, range.start + 1, range.end, .{
                         .foreground = active_fg,
                         .bold = descriptor.mode == mode,
                     }, false, .head);
@@ -828,6 +867,7 @@ pub fn buildFilePanelHeaderDrawList(
         .cursor = .{ .row = 0, .col = 0, .visible = false },
         .dirty = .{ .start_row = 0, .end_row = 0 },
         .cells = try cells.toOwnedSlice(allocator),
+        .grapheme_pool = try pool.toOwnedSlice(allocator),
         .overlays = try allocator.alloc(renderer.DrawOverlay, 0),
     };
 }
@@ -844,13 +884,16 @@ pub fn buildFileTreeHeaderDrawList(
 ) !renderer.DrawList {
     var cells: std.ArrayList(renderer.DrawCell) = .empty;
     errdefer cells.deinit(allocator);
+    var pool: std.ArrayList(u32) = .empty; // cluster 본체(NFD 자모·결합 문자) — DrawList.grapheme_pool로 넘어간다
+    errdefer pool.deinit(allocator);
     if (cols > file_tree_inset_cols)
-        _ = try appendEllipsizedTitle(allocator, &cells, "탐색기", 0, file_tree_inset_cols, cols, .{ .foreground = fg, .bold = true }, false, .head);
+        _ = try appendEllipsizedTitle(allocator, &cells, &pool, "탐색기", 0, file_tree_inset_cols, cols, .{ .foreground = fg, .bold = true }, false, .head);
     return .{
         .size = .{ .cols = @max(cols, 1), .rows = 1 },
         .cursor = .{ .row = 0, .col = 0, .visible = false },
         .dirty = .{ .start_row = 0, .end_row = 0 },
         .cells = try cells.toOwnedSlice(allocator),
+        .grapheme_pool = try pool.toOwnedSlice(allocator),
         .overlays = try allocator.alloc(renderer.DrawOverlay, 0),
     };
 }
@@ -876,6 +919,8 @@ pub fn buildFileTreeDrawList(
 ) !renderer.DrawList {
     var cells: std.ArrayList(renderer.DrawCell) = .empty;
     errdefer cells.deinit(allocator);
+    var pool: std.ArrayList(u32) = .empty; // cluster 본체(NFD 자모·결합 문자) — DrawList.grapheme_pool로 넘어간다
+    errdefer pool.deinit(allocator);
     const count = @min(@as(usize, visible_rows), rows.len -| @min(scroll_rows, rows.len));
     for (rows[@min(scroll_rows, rows.len)..][0..count], 0..) |row, screen_row| {
         const r: u16 = @intCast(screen_row);
@@ -942,7 +987,7 @@ pub fn buildFileTreeDrawList(
             try cells.append(allocator, .{ .row = r, .col = icon_col, .codepoint = cp, .width = 1, .style = style });
         const label_col = if (icon != null) icon_col +| 2 else icon_col;
         if (label_col < end)
-            _ = try appendEllipsizedTitle(allocator, &cells, label, r, label_col, end, style, false, .head);
+            _ = try appendEllipsizedTitle(allocator, &cells, &pool, label, r, label_col, end, style, false, .head);
         if (dirty and cols >= 2)
             try cells.append(allocator, .{ .row = r, .col = cols - 2, .codepoint = 0x25CF, .width = 1, .style = .{ .foreground = if (selected) selection.?.foreground else active_fg } });
         if (conflict and cols >= 4)
@@ -953,6 +998,7 @@ pub fn buildFileTreeDrawList(
         .cursor = .{ .row = 0, .col = 0, .visible = false },
         .dirty = .{ .start_row = 0, .end_row = visible_rows -| 1 },
         .cells = try cells.toOwnedSlice(allocator),
+        .grapheme_pool = try pool.toOwnedSlice(allocator),
         .overlays = try allocator.alloc(renderer.DrawOverlay, 0),
     };
 }
@@ -984,6 +1030,8 @@ pub fn buildPaneTabBarDrawList(
 ) !renderer.DrawList {
     var cells: std.ArrayList(renderer.DrawCell) = .empty;
     errdefer cells.deinit(allocator);
+    var pool: std.ArrayList(u32) = .empty; // cluster 본체(NFD 자모·결합 문자) — DrawList.grapheme_pool로 넘어간다
+    errdefer pool.deinit(allocator);
 
     const style: terminal.Style = .{ .foreground = fg };
     // 탭은 "+" 버튼 zone을 뺀 영역(tab_cols)에만 깐다. 우측 [tab_cols, cols)는 "+"(새 Term) 버튼.
@@ -1016,7 +1064,7 @@ pub fn buildPaneTabBarDrawList(
             // 좌측 1칸 패딩 뒤에 제목. title_end(✕ 앞)를 넘으면 하드 컷이 아니라 "…"로 말줄임(사이드바와 같은 규칙).
             // rename 중인 탭이면 tail 앵커 — 넘칠 때 선두를 "…"로 자르고 이름 끝(caret)을 세그먼트 안에 유지한다(긴 이름 입력 가시성).
             const tab_anchor: TitleAnchor = if (editing_tab != null and editing_tab.? == tab_index) .tail else .head;
-            _ = try appendEllipsizedTitle(allocator, &cells, title, 0, @intCast(start + 1), @intCast(title_end), tab_style, false, tab_anchor); // pane 탭 제목(터미널 OSC) — widen 안 함
+            _ = try appendEllipsizedTitle(allocator, &cells, &pool, title, 0, @intCast(start + 1), @intCast(title_end), tab_style, false, tab_anchor); // pane 탭 제목(터미널 OSC) — widen 안 함
             if (is_close) { // 호버 탭 우측 안쪽에 ✕ glyph 1개(xInTabCloseZone과 같은 col=seg_end-2).
                 try cells.append(allocator, .{
                     .row = 0,
@@ -1054,6 +1102,7 @@ pub fn buildPaneTabBarDrawList(
         .cursor = .{ .row = 0, .col = 0, .visible = false },
         .dirty = .{ .start_row = 0, .end_row = 0 },
         .cells = try cells.toOwnedSlice(allocator),
+        .grapheme_pool = try pool.toOwnedSlice(allocator),
         .overlays = try allocator.alloc(renderer.DrawOverlay, 0),
     };
 }
@@ -1071,6 +1120,8 @@ pub fn buildFloatingTabDrawList(
 ) !renderer.DrawList {
     var cells: std.ArrayList(renderer.DrawCell) = .empty;
     errdefer cells.deinit(allocator);
+    var pool: std.ArrayList(u32) = .empty; // cluster 본체(NFD 자모·결합 문자) — DrawList.grapheme_pool로 넘어간다
+    errdefer pool.deinit(allocator);
     const style: terminal.Style = .{ .foreground = fg, .background = bg };
 
     var col: u16 = 0;
@@ -1079,7 +1130,7 @@ pub fn buildFloatingTabDrawList(
         col = 1;
     }
     // 제목을 col 1..cols에 깔고(넘치면 "…"), 다음 빈 col을 받아 그 뒤를 bg로 채운다.
-    col = try appendEllipsizedTitle(allocator, &cells, title, 0, col, cols, style, false, .head); // 제목(터미널 텍스트) — widen 안 함
+    col = try appendEllipsizedTitle(allocator, &cells, &pool, title, 0, col, cols, style, false, .head); // 제목(터미널 텍스트) — widen 안 함
     while (col < cols) : (col += 1) { // 남은 col = bg 공백(솔리드 박스 마감)
         try cells.append(allocator, .{ .row = 0, .col = col, .codepoint = ' ', .width = 1, .style = style });
     }
@@ -1089,6 +1140,7 @@ pub fn buildFloatingTabDrawList(
         .cursor = .{ .row = 0, .col = 0, .visible = false },
         .dirty = .{ .start_row = 0, .end_row = 0 },
         .cells = try cells.toOwnedSlice(allocator),
+        .grapheme_pool = try pool.toOwnedSlice(allocator),
         .overlays = try allocator.alloc(renderer.DrawOverlay, 0),
     };
 }
@@ -1104,8 +1156,10 @@ pub fn buildFloatingTabTitleDrawList(
 ) !renderer.DrawList {
     var cells: std.ArrayList(renderer.DrawCell) = .empty;
     errdefer cells.deinit(allocator);
+    var pool: std.ArrayList(u32) = .empty; // cluster 본체(NFD 자모·결합 문자) — DrawList.grapheme_pool로 넘어간다
+    errdefer pool.deinit(allocator);
     const style: terminal.Style = .{ .foreground = fg };
-    if (cols > 1) _ = try appendEllipsizedTitle(allocator, &cells, title, 0, 1, cols, style, false, .head);
+    if (cols > 1) _ = try appendEllipsizedTitle(allocator, &cells, &pool, title, 0, 1, cols, style, false, .head);
     const overlays = try allocator.alloc(renderer.DrawOverlay, 0);
     errdefer allocator.free(overlays);
     const owned_cells = try cells.toOwnedSlice(allocator);
@@ -1114,6 +1168,7 @@ pub fn buildFloatingTabTitleDrawList(
         .cursor = .{ .row = 0, .col = 0, .visible = false },
         .dirty = .{ .start_row = 0, .end_row = 0 },
         .cells = owned_cells,
+        .grapheme_pool = try pool.toOwnedSlice(allocator),
         .overlays = overlays,
     };
 }
@@ -1133,6 +1188,8 @@ pub fn buildStickyCommandDrawList(
 ) !renderer.DrawList {
     var cells: std.ArrayList(renderer.DrawCell) = .empty;
     errdefer cells.deinit(allocator);
+    var pool: std.ArrayList(u32) = .empty; // cluster 본체(NFD 자모·결합 문자) — DrawList.grapheme_pool로 넘어간다
+    errdefer pool.deinit(allocator);
     const style: terminal.Style = .{ .foreground = fg, .background = bg };
 
     var col: u16 = 0;
@@ -1153,7 +1210,7 @@ pub fn buildStickyCommandDrawList(
         }
     }
     // 명령줄 텍스트(넘치면 "…")를 col..cols에 깔고, 남은 col을 bg 공백으로 채워 솔리드 배너로 마감.
-    col = try appendEllipsizedTitle(allocator, &cells, text, 0, col, cols, style, false, .head); // 명령줄 텍스트 — widen 안 함
+    col = try appendEllipsizedTitle(allocator, &cells, &pool, text, 0, col, cols, style, false, .head); // 명령줄 텍스트 — widen 안 함
     while (col < cols) : (col += 1) {
         try cells.append(allocator, .{ .row = 0, .col = col, .codepoint = ' ', .width = 1, .style = style });
     }
@@ -1163,6 +1220,7 @@ pub fn buildStickyCommandDrawList(
         .cursor = .{ .row = 0, .col = 0, .visible = false },
         .dirty = .{ .start_row = 0, .end_row = 0 },
         .cells = try cells.toOwnedSlice(allocator),
+        .grapheme_pool = try pool.toOwnedSlice(allocator),
         .overlays = try allocator.alloc(renderer.DrawOverlay, 0),
     };
 }
@@ -2157,18 +2215,20 @@ test "file tree draw list clips to visible rows and marks active dirty conflicts
     try std.testing.expect(!saw_old_o);
 }
 
-test "chrome 제목은 NFD 한글을 완성형으로 합쳐 그린다(파일 트리 이름이 자모로 흩어지지 않는다)" {
-    // 회귀(사용자 제보): macOS 파일시스템이 주는 NFD 이름을 그대로 셀에 깔아 파일 트리 한글이 "ㅅㅡㅋㅡ린ㅅㅑㅅ"처럼
-    // 자모로 흩어져 보였다. chrome 셀 경로는 codepoint 1개 = 셀 1개라 shaping이 없으므로 표시 직전 NFC로 합친다.
+test "chrome 제목은 NFD를 grapheme cluster 셀로 낸다(한글 자모·라틴 악센트가 흩어지지 않는다)" {
+    // 회귀(사용자 제보): macOS 파일시스템이 주는 NFD 이름을 codepoint마다 셀 하나로 깔아 파일 트리 한글이
+    // "ㅅㅡㅋㅡ린ㅅㅑㅅ"처럼 자모로 흩어졌다. 이제 chrome도 터미널과 같은 cluster 모델을 쓴다(§3.1a CG1):
+    // 셀 하나 = cluster 하나, base는 codepoint에·나머지는 DrawList.grapheme_pool에 실어 CoreText가 합성한다.
     const allocator = std.testing.allocator;
     const dim: terminal.Color = .{ .rgb = .{ .r = 0x70, .g = 0x70, .b = 0x70 } };
     const bright: terminal.Color = .{ .rgb = .{ .r = 0xEE, .g = 0xEE, .b = 0xEE } };
-    // NFD "한글.md" — ㅎ+ㅏ+ㄴ / ㄱ+ㅡ+ㄹ (U+1100~U+11FF conjoining 자모).
-    const nfd_name = "\u{1112}\u{1161}\u{11AB}\u{1100}\u{1173}\u{11AF}.md";
+
+    // ── NFD 한글 "한글.md" — ㅎ+ㅏ+ㄴ / ㄱ+ㅡ+ㄹ (U+1100~U+11FF conjoining 자모)
+    const nfd_hangul = "\u{1112}\u{1161}\u{11AB}\u{1100}\u{1173}\u{11AF}.md";
     const rows = [_]file_tree.Row{.{
         .file = .{
-            .path = "/tmp/nfd.md", // 경로는 원본 바이트 그대로(조합은 표시 전용) — 여기선 라벨만 본다
-            .label = nfd_name,
+            .path = "/tmp/nfd.md", // 경로는 원본 바이트 그대로(cluster화는 셀을 만들 때만) — 여기선 라벨만 본다
+            .label = nfd_hangul,
             .depth = 1,
             .supported = true,
             .open = false,
@@ -2180,26 +2240,32 @@ test "chrome 제목은 NFD 한글을 완성형으로 합쳐 그린다(파일 트
     }};
     var dl = try buildFileTreeDrawList(allocator, &rows, null, 0, 1, 40, dim, bright, null);
     defer dl.deinit(allocator);
-    var saw_han = false; // 완성형 '한' U+D55C
-    var saw_geul = false; // 완성형 '글' U+AE00
-    var saw_jamo = false; // conjoining 자모가 하나라도 남으면 실패(옛 동작)
-    for (dl.cells) |cell| {
-        if (cell.codepoint == 0xD55C) saw_han = true;
-        if (cell.codepoint == 0xAE00) saw_geul = true;
-        if (cell.codepoint >= 0x1100 and cell.codepoint <= 0x11FF) saw_jamo = true;
-    }
-    try std.testing.expect(saw_han);
-    try std.testing.expect(saw_geul);
-    try std.testing.expect(!saw_jamo); // ★ 옛 코드: 자모 6개가 각자 셀을 차지했다
-    // 완성형은 EAW wide라 2칸씩 — 폭 계산도 조합 결과 기준이어야 잘림 위치가 맞는다.
-    for (dl.cells) |cell| if (cell.codepoint == 0xD55C or cell.codepoint == 0xAE00) {
-        try std.testing.expectEqual(@as(u16, 2), cell.width);
-    };
 
-    // 이미 완성형인 이름은 무변(무할당 fast path) — 같은 셀 결과가 나온다.
-    const nfc_rows = [_]file_tree.Row{.{ .file = .{
-        .path = "/tmp/nfc.md",
-        .label = "한글.md",
+    // 음절 base(초성)는 셀 하나로 나오고, 중성·종성은 **셀이 아니라 풀**에 실린다.
+    var syllables: usize = 0;
+    var stray_jamo_cells: usize = 0;
+    for (dl.cells) |cell| {
+        if (cell.codepoint == 0x1112 or cell.codepoint == 0x1100) { // ㅎ·ㄱ 초성 = cluster base
+            syllables += 1;
+            try std.testing.expectEqual(@as(u16, 2), cell.grapheme_count); // 중성+종성 2개가 풀에
+            try std.testing.expectEqual(@as(u2, 2), cell.width); // 폭은 base가 정한다(자모는 0폭 흡수)
+            const extra = dl.grapheme_pool[cell.grapheme_offset..][0..cell.grapheme_count];
+            if (cell.codepoint == 0x1112) {
+                try std.testing.expectEqual(@as(u32, 0x1161), extra[0]); // ㅏ
+                try std.testing.expectEqual(@as(u32, 0x11AB), extra[1]); // ㄴ
+            }
+        } else if (cell.codepoint >= 0x1100 and cell.codepoint <= 0x11FF) {
+            stray_jamo_cells += 1; // ★ 옛 동작: 중성·종성이 각자 셀을 차지했다
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 2), syllables); // 한·글
+    try std.testing.expectEqual(@as(usize, 0), stray_jamo_cells);
+
+    // ── NFD 라틴 악센트 "café.md" — e + U+0301(결합 악센트). NFC 조합으로는 못 고치던 같은 계열이다.
+    const nfd_latin = "caf\u{0065}\u{0301}.md";
+    const latin_rows = [_]file_tree.Row{.{ .file = .{
+        .path = "/tmp/cafe.md",
+        .label = nfd_latin,
         .depth = 1,
         .supported = true,
         .open = false,
@@ -2208,14 +2274,25 @@ test "chrome 제목은 NFD 한글을 완성형으로 합쳐 그린다(파일 트
         .external_change = false,
         .symlink = false,
     } }};
-    var nfc_dl = try buildFileTreeDrawList(allocator, &nfc_rows, null, 0, 1, 40, dim, bright, null);
-    defer nfc_dl.deinit(allocator);
-    try std.testing.expectEqual(dl.cells.len, nfc_dl.cells.len);
-    for (dl.cells, nfc_dl.cells) |a, b| {
-        try std.testing.expectEqual(a.codepoint, b.codepoint);
-        try std.testing.expectEqual(a.col, b.col);
-        try std.testing.expectEqual(a.width, b.width);
+    var latin_dl = try buildFileTreeDrawList(allocator, &latin_rows, null, 0, 1, 40, dim, bright, null);
+    defer latin_dl.deinit(allocator);
+    var saw_e_with_accent = false;
+    var stray_accent_cells: usize = 0;
+    for (latin_dl.cells) |cell| {
+        if (cell.codepoint == 'e' and cell.grapheme_count == 1) {
+            saw_e_with_accent = latin_dl.grapheme_pool[cell.grapheme_offset] == 0x0301;
+            try std.testing.expectEqual(@as(u2, 1), cell.width); // base가 1칸 — 악센트가 칸을 더 먹지 않는다
+        }
+        if (cell.codepoint == 0x0301) stray_accent_cells += 1; // ★ 옛 동작: 악센트가 자기 칸을 차지해 "cafe´"
     }
+    try std.testing.expect(saw_e_with_accent);
+    try std.testing.expectEqual(@as(usize, 0), stray_accent_cells);
+
+    // ── 폭 셈법도 cluster 단위 — 말줄임 예약이 방출과 같은 단위여야 제목이 일찍 잘리지 않는다.
+    try std.testing.expectEqual(@as(usize, 7), titleDisplayWidth(nfd_hangul, false)); // 한(2)+글(2)+".md"(3)
+    try std.testing.expectEqual(@as(usize, 7), titleDisplayWidth(nfd_latin, false)); // "cafe"(4)+".md"(3)
+    // 완성형과 같은 폭이어야 한다(같은 글자니까) — NFD/NFC가 레이아웃에서 동치.
+    try std.testing.expectEqual(titleDisplayWidth("한글.md", false), titleDisplayWidth(nfd_hangul, false));
 }
 
 test "file tree focused selection applies its theme contrast color to every row glyph" {

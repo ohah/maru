@@ -242,17 +242,25 @@ cluster 분절은 코어 print 경로 `writeCodepoint`(`screen.zig`) **단일 �
 
 "새 chrome 텍스트는 `appendEllipsizedTitle`을 거쳐라"는 리뷰 규칙만으로는 지켜지지 않는다 — 규칙을 어긴 그 PR에서 아무도 못 알아채는 것이 이 계열 버그의 특징이었다(NFD는 한글·악센트 이름이 있어야만 드러난다). 그래서 import 경계(`tests/boundary/imports.zig`)와 **같은 결의 소스 스캔**으로 빌드를 실패시킨다.
 
-**규칙**: *셀을 만드는 함수*가 UTF-8을 코드포인트로 디코드하면, 그 함수는 가드의 allowlist에 **이유와 함께** 등재돼야 한다.
+**규칙**: 셀을 만드는 함수는 (a) cluster 경로(`appendEllipsizedTitle`/`appendCluster`)에 위임하거나, (b) 문자열을 직접 디코드하지 않거나, (c) allowlist에 **이유와 함께** 등재돼야 한다. 여기에 두 검사가 더 붙는다.
 
-- "셀을 만든다"의 신호는 `.codepoint = `(DrawCell 리터럴)와 `cp[idx] = `(오버레이 raster 그리드)다. 셀을 안 만드는 디코더(설정 파싱·transcript·PTY 처리)는 자동으로 범위 밖이라, 무관한 편집이 이 가드를 깨우지 않는다.
+| 검사 | 무엇을 막는가 |
+| --- | --- |
+| 셀 방출 + 직접 디코드 | 새 chrome 텍스트 경로가 codepoint 단위로 셀을 까는 것 |
+| `[]const u8` → `[]u21`/`[]u32` **변환 헬퍼** | 디코드를 헬퍼로 빼서 방출 함수의 신호를 지우는 **우회**(방출 쪽에선 안 보이므로 재료 쪽에서 막는다) |
+| `&pool` 전달 ↔ `.grapheme_pool` 탑재 **짝** | 풀을 채우고도 DrawList에 안 실어 셰이퍼가 base만 그리는 것(중성·종성 소멸 — CG1 이전보다 나쁘다) |
+
+신호는 **철자가 아니라 타입**을 축으로 잡는다: 셀 방출은 `.codepoint = `(DrawCell 리터럴)와 `: []u21`(오버레이 raster 그리드를 받는 시그니처)이다. 처음엔 `cp[idx] = `처럼 특정 함수의 지역변수 철자를 신호로 썼는데, 변수명만 바꿔도 커버리지가 조용히 사라졌다(code-review max). 셀을 안 만드는 디코더(설정 파싱·transcript·PTY 처리)는 자동으로 범위 밖이라 무관한 편집이 이 가드를 깨우지 않고, 스캔 대상은 **`src/` 전체 재귀**다(파일 목록을 고정하면 새 파일이 사각지대가 된다).
+
 - allowlist는 **면제 목록이 아니라 부채 목록**이다. 등재 항목이 더 이상 규칙 대상이 아니면(= cluster로 옮겼거나 함수가 사라짐) 가드가 "등재를 지우라"고 실패한다 — 목록이 실제와 어긋나 거짓말하는 것을 막는다.
 
-현재 등재된 세 항목이 곧 남은 부채다.
+등재 중 `appendCluster`(cluster 방출 본체)를 뺀 **넷이 곧 남은 부채**다.
 
 | 등재 | 왜 아직 codepoint 단위인가 |
 | --- | --- |
 | `emitEditBand`(주소창 편집 밴드) | caret 열이 `text_field.fieldLayout`(Σ max(1,cellWidth))과 1:1이라 cluster화하려면 L3 레이아웃까지 함께 바꿔야 한다. IME 조합은 입력 경계 `composeHangul`이 덮는다(§4.7) |
 | `buildSidebarHeaderDrawList`(사이드바 검색 밴드) | 위와 같은 caret 열 모델 — 함께 옮겨야 한다 |
 | `placeText`(chrome 오버레이·모달·세팅·팔레트·알림 텍스트) | DrawCell이 아니라 오버레이 raster 그리드(cp/fg/width 배열)에 직접 쓰는 별도 표현이라 CG1과 방식이 다르다 |
+| `drawCells`(IME preedit 오버레이, `terminal/preedit.zig`) | 확정 전 텍스트를 base snapshot 위 scratch에 임시 렌더 — 셀 저장이 아니라 표시 전용이고, 주 타깃 한글 IME가 완성형 marked text를 보내 실사용 증상이 없다(§4.7의 "의도된 한계") |
 
-(`buildSidebarDrawList`도 등재돼 있지만 성격이 다르다 — 활동 시각 `now`·`5m`만 직접 방출하고 그 producer가 ASCII만 내므로 cluster가 생길 수 없다. 카드 본문 줄은 `appendEllipsizedTitle`을 거친다.)
+앞의 둘은 같은 caret 열 모델이라 **한 슬라이스로 묶어** 옮기는 것이 맞다.

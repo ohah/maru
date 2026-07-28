@@ -191,6 +191,99 @@ pub const InitialMetadataSeed = union(enum) {
     }
 };
 
+/// Allocation-free bridge from the canonical owning attach seed to one classified metadata event.
+///
+/// The seal is rebound before any DTO backing is borrowed. The event preflight is likewise rebound
+/// to its exact raw payload, then every normalized scalar and decoded string/process byte is
+/// compared. This is the c3b reducer's initial-baseline equality callback; it does not materialize
+/// a second DTO.
+pub fn metadataSeedSemanticEqlEvent(
+    seed: *const InitialMetadataSeed,
+    seal: MetadataSeedSeal,
+    event_payload: []const u8,
+    event_preflight: runtime_event_wire.EventPreflight,
+) bool {
+    if (!validateMetadataSeedSeal(seal, seed) or seal.tag != .current) return false;
+    const dto = switch (seed.*) {
+        .current => |*value| value,
+        else => return false,
+    };
+    if (!std.mem.eql(
+        u8,
+        &runtime_event_wire.payloadDigest(event_payload),
+        &event_preflight.raw_digest,
+    )) return false;
+    const event = switch (event_preflight.event) {
+        .metadata => |value| value,
+        else => return false,
+    };
+    if (dto.revision != event.revision or
+        dto.observer_generation != event.observer_generation or
+        dto.title_generation != event.title_generation or
+        dto.cols != event.cols or dto.rows != event.rows or
+        dto.semantic_state != event.semantic_state or
+        dto.alt_active != event.alt_active or
+        dto.app_cursor_keys != event.app_cursor_keys or
+        dto.app_keypad != event.app_keypad or
+        dto.kitty_flags != event.kitty_flags or
+        dto.alternate_scroll != event.alternate_scroll or
+        dto.mouse_tracking != event.mouse_tracking or
+        dto.mouse_tracking_mode != event.mouse_tracking_mode or
+        dto.bracketed_paste != event.bracketed_paste or
+        dto.bell_count != event.bell_count or
+        dto.clipboard_write_seq != event.clipboard_write_seq or
+        dto.clipboard_read_seq != event.clipboard_read_seq or
+        dto.foreground_available != event.foreground_available or
+        dto.foreground_pgid != event.foreground_pgid or
+        dto.process_count != event.process_count or
+        !runtime_event_wire.decodedStringSpanEqualsBytes(
+            event_payload,
+            event.cwd,
+            dto.cwd(),
+        ) or
+        !runtime_event_wire.decodedStringSpanEqualsBytes(
+            event_payload,
+            event.window_title,
+            dto.windowTitle(),
+        ) or
+        !optionalSpanEqualsBytes(
+            event_payload,
+            event.ssh_remote_dest,
+            dto.sshRemoteDest(),
+        ) or
+        !runtime_event_wire.decodedStringSpanEqualsBytes(
+            event_payload,
+            event.clipboard_read_target,
+            dto.clipboardReadTarget(),
+        ))
+        return false;
+    for (dto.foregroundProcesses(), event.foregroundProcesses()) |owned, borrowed| {
+        if (owned.pid != borrowed.pid or
+            !runtime_event_wire.decodedStringSpanEqualsBytes(
+                event_payload,
+                borrowed.name,
+                owned.slice(),
+            ))
+            return false;
+    }
+    return true;
+}
+
+fn optionalSpanEqualsBytes(
+    payload: []const u8,
+    span: ?runtime_event_wire.StringSpan,
+    bytes: ?[]const u8,
+) bool {
+    if ((span == null) != (bytes == null)) return false;
+    if (span) |value|
+        return runtime_event_wire.decodedStringSpanEqualsBytes(
+            payload,
+            value,
+            bytes.?,
+        );
+    return true;
+}
+
 pub const MetadataSeedTag = enum { unsupported, unavailable, current };
 
 /// Non-owning, address-bound descriptor/content seal used by the paired external-pump transfer.
@@ -1046,6 +1139,86 @@ test "event preflight materialization decodes escapes with one exact owning allo
         ),
     );
     try std.testing.expect(!source_seal_allocator.has_induced_failure);
+}
+
+test "sealed owning metadata seed compares with an exact event view without allocation" {
+    const payload =
+        \\{"event":"runtime.metadata","metadata_revision":9,"metadata":{"cwd":"\/repo\u002Fsrc",
+        \\"window_title":"한글\nwork","ssh_remote_dest":"host\u003A22","semantic_state":0,
+        \\"alt_active":false,"app_cursor_keys":false,"alternate_scroll":true,
+        \\"observer_generation":4,"title_generation":2,"cols":80,"rows":24,
+        \\"foreground_available":true,"foreground_pgid":7,
+        \\"processes":[{"pid":7,"name":"z\u0073h"}]}}
+    ;
+    var seed = try decodeMetadataEvent(std.testing.allocator, payload, .supported);
+    defer seed.deinit();
+    const seal = try sealMetadataSeed(&seed);
+    const preflight = switch (runtime_event_wire.preflightEvent(payload, .{})) {
+        .accepted => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    const view = switch (preflight.event) {
+        .metadata => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqual(seed.current.revision, view.revision);
+    try std.testing.expect(runtime_event_wire.decodedStringSpanEqualsBytes(
+        payload,
+        view.cwd,
+        seed.current.cwd(),
+    ));
+    try std.testing.expect(runtime_event_wire.decodedStringSpanEqualsBytes(
+        payload,
+        view.window_title,
+        seed.current.windowTitle(),
+    ));
+    try std.testing.expect(optionalSpanEqualsBytes(
+        payload,
+        view.ssh_remote_dest,
+        seed.current.sshRemoteDest(),
+    ));
+    try std.testing.expect(runtime_event_wire.decodedStringSpanEqualsBytes(
+        payload,
+        view.clipboard_read_target,
+        seed.current.clipboardReadTarget(),
+    ));
+    try std.testing.expect(metadataSeedSemanticEqlEvent(
+        &seed,
+        seal,
+        payload,
+        preflight,
+    ));
+
+    const different =
+        \\{"event":"runtime.metadata","metadata_revision":9,"metadata":{"cwd":"/different",
+        \\"window_title":"한글\nwork","ssh_remote_dest":"host:22","semantic_state":0,
+        \\"alt_active":false,"app_cursor_keys":false,"alternate_scroll":true,
+        \\"observer_generation":4,"title_generation":2,"cols":80,"rows":24,
+        \\"foreground_available":true,"foreground_pgid":7,
+        \\"processes":[{"pid":7,"name":"zsh"}]}}
+    ;
+    const different_preflight = switch (runtime_event_wire.preflightEvent(
+        different,
+        .{},
+    )) {
+        .accepted => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expect(!metadataSeedSemanticEqlEvent(
+        &seed,
+        seal,
+        different,
+        different_preflight,
+    ));
+
+    var stale = payload.*;
+    stale[std.mem.indexOf(u8, &stale, "repo").?] = 'x';
+    try std.testing.expect(!metadataSeedSemanticEqlEvent(
+        &seed,
+        seal,
+        &stale,
+        preflight,
+    ));
 }
 
 test "owned metadata semantic equality ignores poisoned process tail only" {

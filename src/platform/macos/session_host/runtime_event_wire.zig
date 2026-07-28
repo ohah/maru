@@ -155,6 +155,16 @@ pub fn decodeStringExact(
     for (destination) |*byte| byte.* = iterator.next() orelse unreachable;
 }
 
+/// Compares one validated JSON string span with already-decoded owned bytes without allocating.
+pub fn decodedStringSpanEqualsBytes(
+    payload: []const u8,
+    span: StringSpan,
+    expected: []const u8,
+) bool {
+    if (span.decoded_len == 0) return expected.len == 0;
+    return spanEquals(payload, span, expected);
+}
+
 pub const ProcessView = struct {
     pid: i32,
     name: StringSpan,

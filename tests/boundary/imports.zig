@@ -260,6 +260,11 @@ test "session host runtime event wire stays below framing and product ownership"
         "src/platform/macos/session_host/runtime_event_types.zig",
     );
     defer allocator.free(event_types_source);
+    const event_reducer_source = try readZigFileZ(
+        allocator,
+        "src/platform/macos/session_host/runtime_event_reducer.zig",
+    );
+    defer allocator.free(event_reducer_source);
     const metadata_source = try readZigFileZ(
         allocator,
         "src/platform/macos/session_host/runtime_metadata_wire.zig",
@@ -276,6 +281,7 @@ test "session host runtime event wire stays below framing and product ownership"
     for (forbidden) |name| {
         try std.testing.expect(!joinedStringLiteralsContain(event_source, name));
         try std.testing.expect(!joinedStringLiteralsContain(event_types_source, name));
+        try std.testing.expect(!joinedStringLiteralsContain(event_reducer_source, name));
     }
     // Owning metadata must consume the bounded Scanner preflight. Reintroducing a heap DOM parser
     // here would make malformed/resource precedence depend on allocator state again.

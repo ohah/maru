@@ -3343,40 +3343,65 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
 
               **c3b — single-inventory event staging/reducer.** allocation-free Phase A는 c2
               `inspectExternalAdoption`/`PreparedClientDisarm`의 첫 allocation보다 먼저 raw Client source에서 실행한다.
+              c3b는 pure reducer → Client fold/source seal → outer decision → adopted-only fingerprint/metadata
+              materialization 순서로 착륙한다. 이는 PR 분할일 뿐 완료 조건 분할이 아니며, c3b 동안 Client mutation,
+              storage publish, terminal/recovery commit은 하지 않고 c3c combined commit에 남긴다. 기존
+              `ExternalAdoptionInventory`/`PreparedClientDisarm`은 source seal에 bind된 cleanup backing일 뿐
+              semantic SSOT가 아니며, event module이나 outer decision이 이를 재순회·재계산해 verdict를 만들지 않는다.
               `Client.foldExternalAdoptionSource(context,visitor)`는 Client private FIFO의 sole traversal API다.
-              Client가 각 item을 neutral `EventFrameView`로 만들어 caller-provided generic visitor에 arrival order로
+              여기서 FIFO는 `pending_events` 내부 arrival order만 뜻한다. screen batch/stream은 별도 category-fixed
+              structural scan/cap 대상이고 서로 다른 세 배열 사이의 원래 도착 순서를 복원한다고 주장하지 않는다.
+              Client가 각 event를 neutral `EventFrameView`로 만들어 caller-provided generic visitor에 arrival order로
               넘기고 transport 구조만 담은 `ClientSourceSeal`을 반환한다. Client는 reducer verdict, attachment
               authority, recovery policy를 import하지 않는다. pure `runtime_event_reducer`는 wire leaf만 import해
               `{authority,metadata,resize}`와 closed `ReducerOutcome`을 전진시키고,
               outer `client_external_adoption`이 seal/outcome/attachment evidence를 `PreparedSourceDecision`으로 합친다.
               seal은 structural counts/counters, **raw `next_request_id: u64`**, ordered header+payload 전체를
               domain-separated SHA-256으로 묶는다. request ID 0도 seal/revalidate할 수 있지만 typed state로
-              publish하지 않고 protocol terminal로만 commit한다. outer `client_external_adoption`만 nonzero raw 값을
+              publish하지 않고 protocol terminal decision으로만 준비한다. outer `client_external_adoption`만 nonzero raw 값을
               `RequestIdState.fromNext`로 바꿔 `PreparedSourceDecision.request_state`에 둔다.
+              digest transcript는 NUL을 포함한 exact ASCII domain
+              `maru.session-host.client-source.v1\0`, `maru.session-host.event-raw.v1\0`,
+              `maru.session-host.event-semantic.v1\0`,
+              `maru.session-host.resize-semantic.v1\0` 중 하나로 시작한다. 정수는 고정 폭 little-endian, bool은
+              `u8` 0/1, enum/union/optional은 `u8` tag/presence 뒤 payload, byte string/array는 `u64`
+              length/count 뒤 payload다. source는 `ClientSourceSealSchema.v1` 선언 순서의 scalar와 각 array의
+              `{address:u64,len:u64,capacity:u64}`를 기록한다. event는 FIFO ordinal, canonical protocol header의
+              각 field, payload length, payload를 frame마다 독립적으로 기록하고 semantic transcript도 tag와 모든
+              normalized known field를 length-prefix한다. 단순 `header || payload` 연결은 금지하며 schema 변경에는
+              새 domain version이 필요하다.
               raw digest는 unknown metadata field를 포함한 모든 source byte를 bind하고, semantic digest는 정규화한
-              known metadata equality/reducer 전용이다. final revalidation은 둘을 혼용하지 않는다.
+              known metadata equality/reducer 전용이다. initial owning seed와 event preflight의 기존 semantic
+              transcript는 domain/encoding이 다르므로 `MetadataSemanticDigest =
+              initial_seed(Digest) | event(Digest)`로 origin을 타입에 보존하며 cross-origin digest를 직접 비교하지
+              않는다. cross-origin equality는 sealed `OwnedMetadataDto`와 exact event view를 allocation 없이
+              field/string/process 단위로 비교하는 `metadataSeedSemanticEqlEvent`만 사용한다. final revalidation은
+              raw/semantic 또는 두 semantic origin을 혼용하지 않는다.
               이 API는 c2 `ExternalAdoptionSnapshot`보다 약한 우회로가 아니다. parser unread bytes/head/tail/
               expected-major와 backing 주소·len·capacity, build ID/lifecycle/profile/capability provenance,
               fd/io-mode/ownership/unusable, pending outbound/external TX empty, 모든 array와 payload의 allocator
               ptr/vtable·base/len/capacity, partial-batch 의미, counters와 cleanup mirror를 allocation 없이 검사하고
-              seal에 bind한다. c3의 위협 모델은 memory-safe Client API가 만든 owner와 **seal 이후** descriptor/content
-              ABA이며, arbitrary forged pointer/allocator나 process memory corruption을 탐지·복구한다고 주장하지 않는다.
+              seal에 bind한다. c3의 위협 모델은 memory-safe Client API가 만든 owner의 seal 이후 **final-state
+              descriptor/content drift와 stale plan**이다. A→B→A mutate-restore 이력 또는 allocator가 같은
+              주소·길이·byte를 재사용한 사실까지 탐지한다고 주장하지 않으며, arbitrary forged pointer/allocator나
+              process memory corruption도 탐지·복구 범위 밖이다.
               각 descriptor는 range/len/cap/alias와 cleanup mirror를 먼저 검증한 뒤에만 payload를 dereference/hash한다.
               adopted final validation도 descriptor/mirror 비교→range/alias 검증→payload hash 순서다. valid
               allocation끼리의 alias/len/cap drift는 payload dereference 전에 invariant terminal이 되고,
               allocation-backed adopted cleanup mirror로 각 실제 allocation을 exact once 정리한다.
-              adopted는 `PreparedClientAdoption`의 disarm suffix가 원본 owner를 정리하고, immediate recovery만
-              Client private infallible `commitExternalRecoveryDiscard`로 screen/event owner 집합을 clear/free한다.
+              c3c adopted commit은 `PreparedClientAdoption`의 disarm suffix가 원본 owner를 정리하고, recovery
+              commit만 Client private infallible `commitExternalRecoveryDiscard`로 screen/event owner 집합을 clear/free한다.
               adopted branch에서만 c2의 `PreparedScreenBacklog`를 `PreparedClientAdoption`으로 이름을 바로잡아
               전체 Client inventory/disarm cleanup을 한 번 소유하고 `screen: PreparedScreenTransfer`,
-              `events: PreparedInitialEvents`를 같은 inventory/source seal에 bind한다. terminal/recovery branch는
-              allocation-backed inventory를 만들지 않으며 Phase A와 같은 exclusive owner call 안에서 callback,
-              yield, 외부 관측점 없이 즉시 no-fail commit한다. terminal은 exact reason으로 Client close, recovery는
+              `events: PreparedInitialEvents`를 같은 inventory/source seal에 bind한다. terminal/recovery decision은
+              allocation-backed inventory를 만들지 않는다. c3c commit은 exclusive owner call 안에서 callback,
+              yield, 외부 관측점 없이 즉시 no-fail suffix를 실행한다. terminal은 exact reason으로 Client close, recovery는
               `Client.commitExternalRecoveryDiscard(seal)`로 screen/event arrays/counters/request scalar를 no-fail
               clear하면서 fd/parser/external-mode owner는 보존한다. inter-call ABA seam이 없으므로 stack seal은
               commit 직전 scalar/content self-check에만 쓰고 cleanup mirror 역할을 주장하지 않는다. 같은 suffix가 sealed request state와 attachment
               authority를 storage로 take하고 Client request scalar를 0으로 만든다. seal mismatch는 invariant terminal
-              close다.
+              close다. c3b의 sealed request/authority는 준비물이고 실제 take, Client scalar 0, storage publish는
+              모두 c3c 책임이다.
               event module은 Client private list나 `ExternalAdoptionInventory`를 다시 inspect하지 않는다.
 
               adopted verdict만 final-address `PreparedExternalAdoption`의
@@ -3393,6 +3418,10 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
               semantic SHA-256, classified scalar), staged owning metadata winner, primary/cleanup mirror와 final-address
               seal을 소유한다. `Client.stageExternalEventFingerprints`/`externalEventFingerprintsMatch`가 c2
               screen-copy API와 같은 inventory/alias/final-address 계약으로 descriptor를 stage/revalidate한다.
+              Phase A metadata/resize winner는 owning view가 아니라
+              `CandidateToken{event_ordinal,raw_digest,semantic_digest,exact_preflight}`이고 source seal의 lifetime
+              안에서만 유효하다. Phase B의 Client private materialize API만 exact ordinal/header/payload/digest를
+              다시 확인한 뒤 owning DTO를 만들 수 있다.
               raw payload 총 8 MiB를 복제하지 않으며 final stale 검사는 source payload를 다시 domain-separated
               SHA-256해 raw digest와 대조한다. Phase A는 Client/source mutation과 heap allocation 없이 **모든**
               preserved screen/event header·payload와 request ID를 검사하고 FIFO scratch
@@ -3403,14 +3432,23 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
               runtime/cols/rows는 equivocation, older ignore, gap/newer full state는 replace다.
               `resize_wire.Event`의 기존 `cols>=2`, `rows>0`, `generation>0` 범위를 그대로 재사용한다.
 
-              Phase A가 결정한 precedence는
+              reducer `step`은 terminal을 조기 반환하지 않고 structural violation과 lower action을 closed
+              accumulator에 함께 기록하며, `finalize`가 FIFO 전체를 본 뒤 exact reason과 아래 precedence를
+              결정한다. 따라서 앞선 ended/revoked/invalidated/resource action이 뒤의 malformed/foreign/
+              equivocation을 가릴 수 없다. Phase A가 결정한 precedence는
               **event/screen structural malformed·foreign·equivocation·`Client.next_request_id == 0` → ended → revoked → invalidated →
               screen cap recovery → deterministic resource terminal → allocation OOM retry → adopted**다.
               ended/revoked/invalidated branch는 불필요한 screen copy/ledger seed를 만들지 않는다. Phase B는 adopted
               branch에 필요한 latest metadata backing과 screen plan만 할당하고 Phase A digest를 다시 대조한다.
-              따라서 앞 allocation OOM이 뒤 protocol/terminal verdict를 가리지 않는다. allocator OOM만
+              Phase B에 들어갈 때 storage는 `.adoption_preparing` lifecycle과 thread-confined, address-independent
+              latch를 함께 publish한다. allocator callback의 same/cross-storage `prepareAdoption`, teardown, 정상
+              mutating facade 재진입은 모두 typed `busy`이며 source/ledger/evidence/prepared owner를 읽거나
+              정리하지 않는다. allocation 실패는 partial owner를 canonical cleanup한 뒤 allocation-free source
+              seal을 다시 검증한다. unchanged일 때만
               `retryable_preserved(.out_of_memory)`다. metadata/event fixed cap 초과는 같은 source로 재시도해도
               성공하지 않으므로 `.resource_exhausted` terminal, screen ledger cap만 recovery다.
+              allocator callback이 request ID/profile/header/payload/descriptor/len/cap/alias를 바꾸고 OOM을
+              반환했다면 OOM retry가 아니라 재검증이 고른 structural/protocol/invariant terminal decision이다.
 
               initial seed와 staged metadata의 branch별 ownership은 다음과 같다.
 
@@ -3445,9 +3483,15 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
               `now_ns`로 `host_recovery.ack_unadmitted`를 seed한다. fresh RX는 d2, recovery 진행은 e,
               control/TX cancellation은 f2~f3가 같은 classifier를 소비한다.
 
-              recovery branch는 다음처럼 닫혀 있다.
+              allocation-backed fingerprint/metadata cleanup은 준비 시점 allocator ptr/vtable과 canonical backing
+              address/len/capacity를 sealed cleanup descriptor로 보존한다. primary 또는 cleanup mirror 하나가
+              오염되면 sealed descriptor와 일치하는 다른 하나만 쓰며, 둘이 같은 forged valid slice를 가리켜도
+              sealed descriptor와 불일치하면 free 0이다. canonical allocation은 exact once만 free하고 stale
+              copy/moved token/double deinit은 효과 0이다.
 
-              | Phase A verdict | storage publish | outbound 의미 |
+              recovery branch의 c3b decision과 c3c storage publish mapping은 다음처럼 닫혀 있다.
+
+              | Phase A verdict | c3b 준비물 / c3c storage publish | outbound 의미 |
               | --- | --- | --- |
               | host `snapshot.invalidated` | `.active{attachment=sealed,flow=.host_recovery.ack_unadmitted}` | f1/e가 response-free `stream_ack`을 admit |
               | local screen ledger cap | `.active{attachment=sealed,flow=.client_recovery.control_wait}` | f1/e가 response-bearing `runtime.resync`을 admit |
@@ -3459,8 +3503,8 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
               checked `+1`인 epoch 1을 준비하며, active 이후 e의 재진입만 현재 active epoch를 checked 증가시킨다.
               deadline은 injected `now_ns + 30s` checked add다. 최초 adoption의 epoch는 항상 1이므로 c3 gate는
               deadline overflow를 고정하고, max epoch는 e의 active re-entry gate가 소유한다. overflow는
-              ledger/active publish 0 뒤 Client canonical cleanup을 수행하는 deterministic invariant terminal이다.
-              commit은 산술 없이 tagged value를
+              c3b에서 Client/ledger/active publish mutation 0인 deterministic invariant terminal decision이며
+              c3c가 Client canonical cleanup을 수행한다. commit은 산술 없이 tagged value를
               기존 `AuthorityState.host_recovery/client_recovery`의 `RecoveryContext{epoch,deadline_ns}`로 투영하고
               sealed nonzero `RequestIdState`를 Client clear와 같은 no-fail suffix에서 publish한다.
               initial metadata/lower owner event 후보는 recovery에서 cleanup한다.
@@ -3545,10 +3589,19 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
               same-revision seed cwd/process/backing-pointer mutation의 caller evidence 보존·destination null·
               ownership suffix 전 canonical source free 0,
               abort exact once·post-commit storage cleanup으로 닫는다.
-              **c3b**는 strict CLI의 unknown/unsupported metadata event terminal commit,
+              **c3b**는 strict CLI의 unknown/unsupported metadata event terminal decision/exact reason,
               staging source 불변+all allocation fail-index, zero request-ID raw seal/typed publish 0,
-              valid-owner descriptor/len/cap/alias ABA의 dereference 전 거부와 cleanup-mirror exact once,
+              valid-owner descriptor/len/cap/alias final-state drift의 dereference 전 거부와 cleanup-mirror exact once,
               pure reducer pairwise precedence/FIFO authority/revision/generation과 initial epoch 1/deadline overflow로 닫는다.
+              reducer 표는 metadata `N same→N different`, `N+1→N different`, resize `G same→G different`,
+              revoke→revoke, invalidated→malformed/equivocation, ended→malformed, resource-cap→malformed와 각
+              역순을 포함한다. event frame request ID는 0이어야 하며 Client `next_request_id=0`과 later malformed가
+              함께 있으면 FIFO 전체 structural/equivocation reason이 request-id-zero보다 앞선다.
+              `next_request_id=maxInt(u64)`는 typed `last_available` 준비까지 검증하되 consume/Client scalar clear는
+              c3c exact-once suffix에서만 한다. digest fixture는 frame/count/field 경계, raw/semantic/source
+              교차 domain, empty/zero/null을 구별한다. cleanup fixture는 primary-only/cleanup-only/both-same
+              poison, stale copy, move, double deinit과 전 allocation fail-index를, callback fixture는 same/cross
+              storage 재진입과 변조 후 OOM terminal 우선순위를 Debug/ReleaseFast에서 고정한다.
               **c3c**는 typed take abort/success/stale-copy/double-deinit/final-address와 verdict별 metadata cleanup,
               prepare의 immediate recovery/terminal 두 suffix와 prepared-adopted commit, sealed request/authority take,
               recovery origin/phase/deadline publish, metadata/resize borrow lease 중 mutation 거부,

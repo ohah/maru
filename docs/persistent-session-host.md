@@ -3789,6 +3789,13 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
                   `ledger.commitSeeds`가 마지막 fallible precommit이다. 성공 직후 c3c-2b1의 typed screen
                   token/header, metadata initial/event, resize/authority/request state와 Client owner를 no-callback
                   take하고 `semantic_state=.active{.flow=.initial_fence}`·`lifecycle=.live`를 마지막 publish한다.
+                  Client cleanup owner는 transient `PreparedExternalAdoption` 안에 남기지 않고
+                  `ExternalPumpStorage.client_cleanup_take: Client.ExternalAdoptionTake` sibling의 처음부터 정해진
+                  final address에 prepare한다. `PreparedExternalAdoption`에는
+                  `screen_take`, `metadata_take`, `scalar_take`와 aggregate `final_seal`만 두며 성공 뒤
+                  `committed_tombstone` shell이 된다. committed Client take를 suffix 뒤 값으로 move하거나
+                  scratch 없는 generic `deinit`으로 정리하지 않는다. c3 aggregate teardown만
+                  `client_cleanup_take.deinitCommitted(ExternalAdoptionCleanupScratch)`를 호출한다.
                   ledger 성공 뒤에는 validation/error return/allocation/callback이 없다. ledger 실패와 final-seal
                   drift는 ledger/active publish 0인 terminal cleanup으로 닫는다. `commitAdoption()`은 이 gate에서
                   정상 진입에 `adopted | terminal_latched`, allocator callback 재진입과 이미 끝난 owner에는
@@ -3800,6 +3807,16 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
                   prepared owner와 header↔child payload의 exact range non-alias까지 commitSeeds 직전에 한 번에
                   검증한다. 이후 각 take는 추가 검사나 failure branch가 없는 `void`, allocation/callback 0 move이고
                   exclusive storage operation lease 때문에 source/destination을 중간에 바꿀 public entry가 없다.
+                  aggregate seal은 leaf cleanup/content seal을 복제해 세 번째 cleanup SSOT를 만들지 않는다.
+                  대신 domain/version, operation generation, storage/plan/Client/ledger/evidence, 네 take와 다섯
+                  destination의 exact address/lifecycle 및 leaf seal digest를 bind하고, commit 직전 explicit
+                  leaf validator와 checked all-pair alias proof가 nested backing/scalar equality를 권위로 다시
+                  확인한다. 검증 성공은 storage address·operation generation·final-seal digest에 묶인
+                  `AdoptedCommitPermit`을 만들며, ledger 뒤 suffix는 이 permit을 소비하는 별도 unchecked
+                  mechanics만 호출한다. 내부에서 다시 `validate`하거나 `@panic`하는 checked Client wrapper와
+                  metadata optional `.?` unwrap은 post-ledger 경로에 둘 수 없다. 실제 고정 순서는
+                  **ledger seed → screen destination → metadata destination → scalar destination →
+                  Client cleanup take → prepared shell tombstone → semantic active → lifecycle live**다.
                 - **c3c-2b3 — non-adopted immediate suffix:** ended/revoked/host-recovery/client-recovery/terminal
                   verdict를 같은 prepare call 안에서 checked context 준비 뒤 no-fail suffix로 commit한다.
                   기존 `PrepareStatus`를 `AdoptionPrepareStatus`로 원자 교체하고

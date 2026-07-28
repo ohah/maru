@@ -72,7 +72,7 @@ pub const header_modes = [_]HeaderModeDescriptor{
 pub fn modesForKind(kind: dock_panel.EntryKind) []const HeaderModeDescriptor {
     return switch (kind) {
         .markdown, .svg => &header_modes,
-        .html, .text, .image, .pdf => &.{},
+        .html, .text, .image, .media, .pdf => &.{},
     };
 }
 

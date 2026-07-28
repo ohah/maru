@@ -10942,6 +10942,7 @@ pub const AppSession = struct {
             .text => .text,
             .svg => .svg,
             .image => .image,
+            .media => .media,
             .pdf => .pdf,
         };
     }
@@ -12757,8 +12758,8 @@ pub const AppSession = struct {
         return switch (entry.kind) {
             .text => file_panel_bridge.textLanguageForPath(entry.path),
             .svg => .xml,
-            // markdown은 기존 shell URL, html·image·pdf는 격리 loadFileURL이라 언어가 없다.
-            .markdown, .html, .image, .pdf => null,
+            // markdown은 기존 shell URL, html·image·media·pdf는 격리 loadFileURL이라 언어가 없다.
+            .markdown, .html, .image, .media, .pdf => null,
         };
     }
 
@@ -14712,7 +14713,7 @@ pub const AppSession = struct {
         // 컴파일러가 세 곳을 모두 잡아 준다. 반대로 **기존 kind의 소속만 한 곳에서 바꾸면** 컴파일은 통과한 채
         // trust config와 재생성 판정이 갈라지므로, 이 분할을 옮길 때는 세 곳을 함께 고친다(code-review max).
         return switch (kind) {
-            .html, .pdf => true,
+            .html, .media, .pdf => true,
             .markdown, .text, .svg, .image => false,
         };
     }

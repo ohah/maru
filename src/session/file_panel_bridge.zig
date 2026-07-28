@@ -13,7 +13,7 @@ pub const max_file_bytes: usize = 8 * 1024 * 1024;
 /// 서로 다른 파일 집합을 열지 않게 한다(docs/file-panel.md §2.2·§6). **정책(FP12, 사용자 결정 2026-07-22)**:
 /// VSCode처럼 `.md`/`.html`과 알려진 바이너리를 뺀 **나머지는 전부 `text`로 연다**. 알려진 확장자는 문법
 /// 하이라이트, 그 외 text는 plain 편집이다. image·media·pdf는 FP14~FP15에서 바이너리 집합의 일부를 자기 kind로 뺀다.
-pub const OpenKind = enum { markdown, html, text, svg, image, pdf };
+pub const OpenKind = enum { markdown, html, text, svg, image, media, pdf };
 
 /// `text` kind의 CM6 하이라이트 언어. `wireName`은 shell URL `?lang=` 힌트와 web `source-language.ts` 언어 선택의
 /// wire 값(§2.2). 색은 theme 책임이고 여기서는 문법 선택만 정한다. `plain`은 문법 없이 편집만(색은 CanvasText).
@@ -108,14 +108,14 @@ pub fn textLanguageForPath(path: []const u8) TextLanguage {
 fn isBinaryExtension(ext: []const u8) bool {
     const eq = std.ascii.eqlIgnoreCase;
     const bin = [_][]const u8{
-        // 이미지(FP14 image kind 예정)
+        // 이미지(FP14)
         ".png",  ".jpg",  ".jpeg",   ".gif",     ".bmp",   ".ico",   ".webp",  ".tif",     ".tiff",
         ".heic", ".heif", ".avif",   ".icns",
-        // 비디오(FP15 media kind 예정) — `.ts`는 TypeScript라 제외
+        // 비디오(FP15) — allowlist(mediaExtension) 밖만 여기서 외부 앱으로. `.ts`는 TypeScript라 제외
            ".mp4",   ".mov",   ".m4v",   ".webm",    ".mkv",
         ".avi",  ".wmv",  ".flv",    ".mpg",     ".mpeg",  ".3gp",   ".3g2",   ".ogv",     ".m2ts",
         ".mts",
-        // 오디오(FP15)
+        // 오디오(FP15) — allowlist 밖만 외부 앱
          ".mp3",  ".wav",    ".aac",     ".flac",  ".ogg",   ".oga",   ".m4a",     ".opus",
         ".wma",  ".aiff", ".aif",    ".mid",     ".midi",
         // 문서(pdf=FP15)
@@ -150,14 +150,37 @@ fn imageExtension(ext: []const u8) bool {
     return false;
 }
 
+/// OS 미디어 스택(AVFoundation/VideoToolbox)이 **확실히** 재생하는 컨테이너만 인앱으로 연다(FP15 — §2.2 코덱 정책).
+/// 여기 없는 미디어 확장자(`.webm`·`.mkv`·`.avi`·`.wmv`·`.flv`·`.ogv`·`.ogg`·`.opus`·`.wma`·`.mpg`·`.m2ts`·`.mid` 등)는
+/// `isBinaryExtension`으로 떨어져 **외부 앱 폴백**이 된다 — 지금도 그 동작이라 변화가 없다.
+///
+/// **왜 확장자 사전 판정인가**: 격리 패널(filePanelKind=2)은 메시지 핸들러가 0이라(§8.1(c)) JS가 `MediaError`를 잡아도
+/// 네이티브로 보고할 채널이 없고, `<video>` wrapper를 쓰려면 read scope(=미디어 파일의 부모 디렉터리)인 **사용자 폴더에
+/// wrapper 파일을 써야** 한다. 그래서 초안의 wrapper+MediaError 계획을 폐기하고 이 순수 판정으로 대체했다(문서 §2.2).
+/// 지원 컨테이너 안의 미지원 코덱(AV1-in-MP4 등)은 인앱에서 빈 플레이어가 되는 v1 한계다(§13).
+fn mediaExtension(ext: []const u8) bool {
+    const eq = std.ascii.eqlIgnoreCase;
+    const media = [_][]const u8{
+        // 비디오: H.264/HEVC + AAC 조합이 하드웨어 디코딩되는 QuickTime/MPEG-4 계열만.
+        ".mp4",  ".mov",  ".m4v",
+        // 오디오: WebKit이 media document로 재생하는 OS 기본 포맷.
+        ".mp3",  ".m4a",  ".aac",
+        ".wav",  ".aiff", ".aif",
+        ".flac",
+    };
+    for (media) |candidate| if (eq(ext, candidate)) return true;
+    return false;
+}
+
 pub fn openKindForPath(path: []const u8) ?OpenKind {
     const ext = std.fs.path.extension(path);
     if (std.ascii.eqlIgnoreCase(ext, ".md")) return .markdown;
     if (std.ascii.eqlIgnoreCase(ext, ".html")) return .html;
     if (std.ascii.eqlIgnoreCase(ext, ".svg")) return .svg; // FP13: read 프리뷰 + xml 소스 편집.
     if (imageExtension(ext)) return .image; // FP14: 격리 loadFileURL 네이티브 렌더(§2.2).
+    if (mediaExtension(ext)) return .media; // FP15: WebKit media document(격리 loadFileURL, OS 코덱만 — §2.2).
     if (std.ascii.eqlIgnoreCase(ext, ".pdf")) return .pdf; // FP15: WebKit 내장 PDF loadFileURL(§2.2).
-    if (isBinaryExtension(ext)) return null; // 외부 앱(비디오·오디오·아카이브 등 — media는 후속 FP15).
+    if (isBinaryExtension(ext)) return null; // 외부 앱(미지원 코덱 컨테이너·아카이브·실행 파일 등).
     return .text; // VSCode식: 나머지는 전부 텍스트로 연다.
 }
 
@@ -394,9 +417,17 @@ test "openKindForPath: md, html, binary-blocked, everything-else-is-text (VSCode
     try testing.expectEqual(OpenKind.image, openKindForPath("/tmp/anim.gif").?);
     try testing.expectEqual(OpenKind.image, openKindForPath("/tmp/shot.webp").?);
     try testing.expectEqual(OpenKind.pdf, openKindForPath("/tmp/doc.PDF").?);
-    // 아직 kind가 없는 바이너리(비디오·오디오·아카이브)는 null=외부 앱(media는 후속 FP15).
+    // FP15 media: OS 코덱 allowlist 안의 컨테이너만 자기 kind(격리 media document).
+    try testing.expectEqual(OpenKind.media, openKindForPath("/tmp/clip.MP4").?);
+    try testing.expectEqual(OpenKind.media, openKindForPath("/tmp/clip.mov").?);
+    try testing.expectEqual(OpenKind.media, openKindForPath("/tmp/song.m4a").?);
+    try testing.expectEqual(OpenKind.media, openKindForPath("/tmp/song.FLAC").?);
+    // allowlist 밖 미디어는 종전처럼 null=외부 앱(WebM 불안정·AV1/MKV/Ogg 미지원 — §2.2 코덱 정책).
+    try testing.expect(openKindForPath("/tmp/clip.webm") == null);
+    try testing.expect(openKindForPath("/tmp/clip.mkv") == null);
+    try testing.expect(openKindForPath("/tmp/song.ogg") == null);
+    try testing.expect(openKindForPath("/tmp/song.opus") == null);
     try testing.expect(openKindForPath("/tmp/archive.zip") == null);
-    try testing.expect(openKindForPath("/tmp/clip.MP4") == null);
     try testing.expect(openKindForPath("/tmp/icon.icns") == null); // 이미지지만 WebKit 비신뢰 렌더 → 외부 앱.
     // 나머지는 전부 text — 알려진 확장자, 미지의 확장자, 확장자 없는 파일 모두.
     try testing.expectEqual(OpenKind.text, openKindForPath("/tmp/config.JSON").?);

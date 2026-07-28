@@ -23,6 +23,7 @@ pub const EntryKind = enum {
     text,
     svg,
     image,
+    media,
     pdf,
 
     /// 신뢰 shell에서 CM6를 마운트하고 `maru.file.read/write` 브리지로 편집하는 kind인지. read/write·dirty·저장·
@@ -33,8 +34,9 @@ pub const EntryKind = enum {
         return switch (self) {
             .markdown, .text, .svg => true,
             // image(FP14)는 신뢰 shell이지만 CM6 편집기가 없다(readSelfImage로 자기 바이너리만 읽어 panzoom read
-            // 프리뷰). html·pdf는 격리 loadFileURL. 셋 다 CM6 편집기·editor_epoch 문서 흐름을 쓰지 않는다(§2.2).
-            .html, .image, .pdf => false,
+            // 프리뷰). html·media·pdf는 격리 loadFileURL(media는 WebKit media document — FP15). 넷 다 CM6 편집기·
+            // editor_epoch 문서 흐름을 쓰지 않는다(§2.2).
+            .html, .image, .media, .pdf => false,
         };
     }
 };
@@ -53,8 +55,8 @@ pub const Mode = enum(u32) {
         return switch (kind) {
             // 라이브 프리뷰는 백로그(2026-07-22)라 markdown도 읽기로 시작한다. 라이브 재도입 시 .live_preview로 되돌린다.
             .markdown => .read,
-            // html·pdf=격리 loadFileURL, image=신뢰 뷰어+readSelfImage(FP14) — 셋 다 read 뷰 전용(편집·모드 없음).
-            .html, .image, .pdf => .read,
+            // html·media·pdf=격리 loadFileURL, image=신뢰 뷰어+readSelfImage(FP14) — 넷 다 read 뷰 전용(편집·모드 없음).
+            .html, .image, .media, .pdf => .read,
             .text => .source_edit,
             .svg => .read, // 이미지 미리보기가 먼저(VSCode SVG 프리뷰 관례).
         };
@@ -64,7 +66,7 @@ pub const Mode = enum(u32) {
         return switch (kind) {
             // markdown은 읽기|소스만(라이브 백로그). 저장된 live-preview entry는 복원 시 parseDockEntry가 defaultFor로 clamp한다.
             .markdown => self == .read or self == .source_edit,
-            .html, .image, .pdf => self == .read, // read 뷰 전용(편집·모드 없음).
+            .html, .image, .media, .pdf => self == .read, // read 뷰 전용(편집·모드 없음).
             .text => self == .source_edit,
             .svg => self == .read or self == .source_edit, // 라이브 없음.
         };
@@ -324,12 +326,15 @@ test "EntryKind/Mode policy: markdown, html, text (FP12 §2.2)" {
     try std.testing.expectEqual(Mode.source_edit, Mode.defaultFor(.text));
     try std.testing.expectEqual(Mode.read, Mode.defaultFor(.image)); // FP14: read 뷰 전용.
     try std.testing.expectEqual(Mode.read, Mode.defaultFor(.pdf)); // FP15: read 뷰 전용.
+    try std.testing.expectEqual(Mode.read, Mode.defaultFor(.media)); // FP15 media: read 뷰 전용(모드 선택기 없음).
+    // media는 격리 loadFileURL(WebKit media document)이라 CM6 편집 브리지를 쓰지 않는다.
+    try std.testing.expect(!EntryKind.media.usesEditorBridge());
 
     // 허용 모드: markdown=읽기|소스(라이브 백로그), html=read만, text=source_edit만, image/pdf=read만(격리 loadFileURL).
     try std.testing.expect(Mode.read.allowedFor(.markdown) and Mode.source_edit.allowedFor(.markdown) and !Mode.live_preview.allowedFor(.markdown));
     try std.testing.expect(Mode.read.allowedFor(.html) and !Mode.source_edit.allowedFor(.html) and !Mode.live_preview.allowedFor(.html));
     try std.testing.expect(Mode.source_edit.allowedFor(.text) and !Mode.read.allowedFor(.text) and !Mode.live_preview.allowedFor(.text));
-    inline for (.{ EntryKind.image, EntryKind.pdf }) |kind| {
+    inline for (.{ EntryKind.image, EntryKind.media, EntryKind.pdf }) |kind| {
         try std.testing.expect(Mode.read.allowedFor(kind) and !Mode.source_edit.allowedFor(kind) and !Mode.live_preview.allowedFor(kind));
     }
 

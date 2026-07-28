@@ -2725,6 +2725,7 @@ final class MaruWebPanelView: NSView {
         "will-change:transform;user-select:none;-webkit-user-drag:none;}";
       document.head.appendChild(css);
       var scale = 1, tx = 0, ty = 0, fitScale = 1;
+      var gestureActive = false, gestureScale = 1, gestureX = 0, gestureY = 0;
       function apply() { img.style.transform = "translate(" + tx + "px," + ty + "px) scale(" + scale + ")"; }
       function fit() {
         var vw = document.documentElement.clientWidth, vh = document.documentElement.clientHeight;
@@ -2744,19 +2745,24 @@ final class MaruWebPanelView: NSView {
         scale = next;
         apply();
       }
+      // 스크롤=팬, ⌘/Ctrl+스크롤=줌(macOS 미리보기·Safari 관례). **세로 휠을 줌으로 쓰지 않는다** —
+      // 트랙패드 두 손가락 스크롤도 wheel로 오므로 축 크기로 줌/팬을 가르면 대각선으로 밀 때 프레임마다
+      // 둘이 번갈아 걸려 "이동과 확대가 같이 되는" 증상이 된다(사용자 제보). 줌은 핀치(gesture)와 수식키가 소유한다.
+      // 핀치 진행 중(gestureActive)에는 wheel을 무시한다 — 일부 경로가 핀치를 ctrl+wheel로도 합성해 보내면
+      // 제스처 핸들러와 이중 적용되기 때문이다.
       window.addEventListener("wheel", function (e) {
         e.preventDefault();
-        if (e.ctrlKey || e.metaKey || Math.abs(e.deltaY) > Math.abs(e.deltaX)) {
-          zoomAt(Math.exp(-e.deltaY / 300), e.clientX, e.clientY);
-        } else { tx -= e.deltaX; ty -= e.deltaY; apply(); }
+        if (gestureActive) return;
+        if (e.ctrlKey || e.metaKey) zoomAt(Math.exp(-e.deltaY / 300), e.clientX, e.clientY);
+        else { tx -= e.deltaX; ty -= e.deltaY; apply(); }
       }, { passive: false });
       // 트랙패드 핀치: WebKit이 쏘는 비표준 gesture 이벤트(`event.scale` = 제스처 시작 대비 배율)를 직접 받는다.
       // 네이티브 확대(allowsMagnification)에 맡기지 않는 이유는 위 wheel 핸들러가 `preventDefault`로 macOS가
       // 핀치를 합성해 보내는 ctrl+wheel까지 삼켜 그 경로가 서지 않기 때문이다 — 여기서 우리가 같은 transform으로
       // 처리해 휠 줌과 배율·앵커가 일관된다(pdf·미디어는 스크립트가 no-op이라 네이티브 확대를 그대로 쓴다).
-      var gestureScale = 1, gestureX = 0, gestureY = 0;
       window.addEventListener("gesturestart", function (e) {
         e.preventDefault();
+        gestureActive = true;
         gestureScale = scale;
         gestureX = typeof e.clientX === "number" ? e.clientX : document.documentElement.clientWidth / 2;
         gestureY = typeof e.clientY === "number" ? e.clientY : document.documentElement.clientHeight / 2;
@@ -2766,7 +2772,7 @@ final class MaruWebPanelView: NSView {
         var target = gestureScale * (typeof e.scale === "number" && e.scale > 0 ? e.scale : 1);
         if (scale > 0) zoomAt(target / scale, gestureX, gestureY);
       }, { passive: false });
-      window.addEventListener("gestureend", function (e) { e.preventDefault(); }, { passive: false });
+      window.addEventListener("gestureend", function (e) { e.preventDefault(); gestureActive = false; }, { passive: false });
       var dragging = false, lastX = 0, lastY = 0;
       window.addEventListener("mousedown", function (e) {
         dragging = true; lastX = e.clientX; lastY = e.clientY;

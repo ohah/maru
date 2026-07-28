@@ -470,7 +470,7 @@ Phase 5 첫 슬라이스. **실 WKWebView 실행 없이**(=5d) `browser.*`의 **
 
 **출력**: wire는 구조화 JSON(role/name/ref/children), CLI는 compact 들여쓰기 텍스트(`button "로그인" [ref=e1]`)로 렌더. agent-browser처럼 **상호작용 요소·접근성 이름 위주로 토큰 절약**이 목적(raw HTML/DOM 덤프 아님).
 
-**한계(bounded 전송 미배선 — 2026-07-15)**: snapshot 결과는 현재 **inline 전용**(op 완료→`serializeSnapshotResult`, executeScript/screenshot 같은 프레임 가드·chunk-transfer 미배선). 그래서 role 있는 요소가 매우 많은 대형 페이지의 **기본 full snapshot**(interactive_only=false)은 결과가 `default_max_frame`(1 MiB)을 넘겨 CLI Framer가 `payload_too_large`로 **연결을 깰 수 있다**(executeScript는 §9.5.8 가드+chunk로 이미 방어, snapshot은 미배선). **완화(현재)**: `--interactive`/`--max-depth`/`--selector`로 트리 축소. **정식 수정**: 아래 "큰 browser 결과 통일" 후속에서 메서드별 크기 핵(가드 band-aid) 대신 **bounded-result transfer(§9.5.8)로 통일** — 사용자 결정 2026-07-15(틀어막기 대신 원칙적 통일).
+**~~한계(bounded 전송 미배선 — 2026-07-15)~~ → 해소(§9.5.10 구현 완료)**: snapshot·console은 이제 executeScript·screenshot과 **같은 bounded-result transfer**를 탄다(inline ≤ 예약 크기, 초과분은 `browser.snapshotChunk`/`browser.consoleChunk` 스트림). 코드 근거: `app_host_abi`의 transfer 예약(`snapshot_max_result_bytes`·`console_max_result_bytes`)과 `serializeResultChunkForRequest`, CLI의 `snapshot_chunk_method`·`console_chunk_method`. console의 512 KiB **wire 절단도 사라졌다** — 서버 버퍼 cap(500 entries)은 메모리 상한일 뿐 전량 반환한다. 아래 문단의 "완화(현재)"는 그 시절 우회 기록이다.
 
 **슬라이싱**: **snapshot-0**(이 설계, 완료)→**snapshot-1**(`browser.snapshot` L2 params/result 직렬화 + Swift accname DOM walk JS + op 배선 + 헤드리스 유닛[params·result 트리 형태·필터] + 실앱 손 테스트[google.com role/name/ref] — **완료·머지**)→**snapshot-2**(ref 기반 act: click/type/scroll params `ref` 대안[selector와 배타] + Swift actScript가 `[data-maru-ref]`로 해소 + 유닛[ref|selector 배타·미지정·arg emit·dispatch] — **완료**).
 
@@ -554,7 +554,7 @@ Phase 5 첫 슬라이스. **실 WKWebView 실행 없이**(=5d) `browser.*`의 **
 
 **슬라이싱**: **console-0**(이 설계)→**console-1**(L2 `browser.console` params `{id,clear?}`/arg/result 직렬화 + `BrowserMethod.console` op_kind 17 + app_host_abi assert/wire-name/lifecycle + CLI `console --surface [--clear]` + 렌더 + 헤드리스 유닛[params·arg·result embed/malformed·CLI parse/build/render])→**console-2**(Swift: document-start override user script + `MaruWebPanelView.consoleBuffer` + throttled proactive drain + lazy-enable + pull 실행[drainBrowserOps case 17] + 스모크[fixture 페이지 `console.log`/`console.error`→drain→`browser.console` pull이 `[log]`/`[error]` 항목 회수 단언]).
 
-**9.5.10 — 큰 browser 결과 통일 (snapshot·console을 bounded-result transfer로, 설계 확정 2026-07-15)**.
+**9.5.10 — 큰 browser 결과 통일 (snapshot·console을 bounded-result transfer로, 설계 확정 2026-07-15 · **구현 완료**)**.
 
 **동기**: 결과가 큰 browser 메서드를 **하나의 대용량 전송 메커니즘**으로 일관시킨다. 현재 executeScript(§9.5.8)·screenshot(§9.5.7)은 inline ≤512 KiB·초과 chunk-stream의 bounded-result transfer를 쓰지만, snapshot(op_kind 16)·console(op_kind 17)은 `complete_browser_op`로 **inline 전용 문자열** 완료라 대형 결과가 `default_max_frame`(1 MiB)을 넘겨 **CLI Framer가 payload_too_large로 연결을 깬다**(snapshot 무방비=§9.5.4 잠재 결함, console은 512 KiB 절단으로 임시 방어). 이 둘을 executeScript와 같은 transfer에 태워 메서드별 크기 핵을 제거하고 대형 결과를 **에러/절단 아니라 실제 chunk로 전달**한다.
 

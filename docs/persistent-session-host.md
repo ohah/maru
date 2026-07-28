@@ -3402,9 +3402,18 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
               allocation-free two-pass owner-range 검증을 수행한다. 첫 pass는 Client와 build/lifecycle/parser/
               pending 배열/external TX의 outer backing 전부를 검사하고, 둘째 pass는 검증된 descriptor 배열에서
               partial/batch/stream/event payload backing을 열거해 모든 outer/nested owner의 비중첩을 증명한다.
-              최대 9,224 owner에서 무조건 O(n²) pairwise를 사용하지 않는다. 구현 전 max-cap fixture로 별도
-              source-preflight 시간/comparison 예산을 고정하고, 그 예산을 만족하는 bounded allocation-free
-              알고리즘을 merge gate로 삼는다. 이 Phase A 검증은 allocator callback을 만들지 않으며 c2의 allocation/sort 기반
+              **Source alias proof 구현:** `validateExternalSourceOwnerRanges`는 compile-time 최대 9,224 range를
+              담는 caller-owned `ExternalSourceOwnerRangeScratch`(147,584-byte fixed buffer)를 받는다. 함수 frame에
+              이 버퍼를 숨겨 작은 worker stack을 소진하지 않으며 후속 fold owner가 lifetime/placement를 명시한다.
+              쓰기 전 scratch↔Client를 검사하고, 7-range local outer scratch로 scratch↔outer와 outer 상호
+              비중첩을 먼저 증명한다. 그 뒤 nested descriptor를 읽기만 하는 pre-scan으로 scratch↔nested를
+              검증한 뒤에야 caller scratch에 처음 기록한다. 따라서 hostile scratch alias도 source를 덮어쓰기 전에
+              typed reject한다. outer만 모아 첫 sort/overlap 검사를 끝낸 뒤에만 nested
+              descriptor를 읽어 전체를 다시 sort하며, 두 sort 합계 comparison은
+              `(outer_ranges + total_ranges) * 64` 이하로 고정한다. scratch type이 160 KiB를 넘으면 compile error다.
+              따라서 무조건 O(n²) pairwise나 allocator callback 없이 deterministic O(n log n)으로 동작하며,
+              malformed list shape, outer↔Client, outer↔outer, outer↔nested를 descriptor order fixture로 고정한다.
+              이 Phase A 검증은 c2의 allocation/sort 기반
               `PreparedExternalOwnerRangeProof`를 대체하지 않는다. 후자는 c3c destination/final no-callback
               ownership suffix proof로 남는다. parser unread bytes/head/tail/
               expected-major와 backing 주소·len·capacity, build ID/lifecycle/profile/capability provenance,

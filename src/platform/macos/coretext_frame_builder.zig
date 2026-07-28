@@ -2265,6 +2265,54 @@ test "file tree draw list clips to visible rows and marks active dirty conflicts
     try std.testing.expect(!saw_old_o);
 }
 
+test "파일 트리 rename 편집 텍스트도 cluster로 그린다(NFD는 음절·호환 자모는 낱자)" {
+    // 사용자 제보: 파일명 변경 시 한글이 "ㅎㅏㄴㄱㅡㄹ"로 보인다. rename 표시가 cluster 경로를 타는지, 그리고
+    // **어떤 입력 형태가 그 화면을 만드는지**를 여기서 갈라 둔다 — 진단의 단일 출처다.
+    //   · NFD conjoining 자모(U+1100~, macOS IME/파일시스템) → 음절로 합쳐진다(CG1 경로)
+    //   · **호환 자모**(U+3131~, 조합 없이 커밋된 낱자) → cluster 규칙 대상이 아니라 낱자 그대로다
+    // 즉 제보 화면이 낱자라면 그건 렌더가 아니라 **입력이 조합되지 않은 것**이다.
+    const allocator = std.testing.allocator;
+    const dim: terminal.Color = .{ .rgb = .{ .r = 0x70, .g = 0x70, .b = 0x70 } };
+    const rows = [_]file_tree.Row{.{ .file = .{
+        .path = "/tmp/old.md",
+        .label = "old.md",
+        .depth = 1,
+        .supported = true,
+        .open = false,
+        .active = false,
+        .dirty = false,
+        .external_change = false,
+        .symlink = false,
+    } }};
+
+    // ① NFD conjoining "한글" + caret — rename 편집 텍스트가 그대로 cluster화된다.
+    var nfd = try buildFileTreeDrawList(allocator, &rows, .{
+        .identity = .{ .kind = .file, .path = "/tmp/old.md" },
+        .text = "\u{1112}\u{1161}\u{11AB}\u{1100}\u{1173}\u{11AF}|",
+    }, 0, 1, 40, dim, dim, null);
+    defer nfd.deinit(allocator);
+    var nfd_syllables: usize = 0;
+    var nfd_stray: usize = 0;
+    for (nfd.cells) |c| {
+        if (c.codepoint == 0x1112 or c.codepoint == 0x1100) nfd_syllables += 1; // cluster base
+        if (c.codepoint >= 0x1160 and c.codepoint <= 0x11FF) nfd_stray += 1; // 중성·종성이 셀을 차지하면 안 된다
+    }
+    try std.testing.expectEqual(@as(usize, 2), nfd_syllables);
+    try std.testing.expectEqual(@as(usize, 0), nfd_stray);
+
+    // ② 호환 자모 "ㅎㅏㄴㄱㅡㄹ" — UAX#29 cluster 규칙 밖이라 6칸 낱자로 그려진다(렌더는 정상 동작).
+    var compat = try buildFileTreeDrawList(allocator, &rows, .{
+        .identity = .{ .kind = .file, .path = "/tmp/old.md" },
+        .text = "\u{314E}\u{314F}\u{3134}\u{3131}\u{3161}\u{3139}|",
+    }, 0, 1, 40, dim, dim, null);
+    defer compat.deinit(allocator);
+    var compat_letters: usize = 0;
+    for (compat.cells) |c| {
+        if (c.codepoint >= 0x3131 and c.codepoint <= 0x3163) compat_letters += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 6), compat_letters); // 조합되지 않은 입력은 렌더가 합쳐 줄 수 없다
+}
+
 test "chrome 제목은 NFD를 grapheme cluster 셀로 낸다(한글 자모·라틴 악센트가 흩어지지 않는다)" {
     // 회귀(사용자 제보): macOS 파일시스템이 주는 NFD 이름을 codepoint마다 셀 하나로 깔아 파일 트리 한글이
     // "ㅅㅡㅋㅡ린ㅅㅑㅅ"처럼 자모로 흩어졌다. 이제 chrome도 터미널과 같은 cluster 모델을 쓴다(§3.1a CG1):

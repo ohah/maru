@@ -2576,7 +2576,7 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
             close는 idempotent syscall이라고 가정하지 않는다. storage가 fd를 먼저 take하고 closed latch를 commit한
             뒤 exact-once `close(taken_fd)`를 호출하며 재진입은 syscall 0이다.
             `client_external_pump.ExternalPumpFacade`는 opaque storage를 borrow하고
-            `pumpTurn`, `pollHint`, `admit`, `takeControlResponse`, `borrowOwnerEvent`, `finishOwnerEvent`,
+            `pumpTurn`, `pollHint`, `admit`, `takeControlResponse`, `metadataState`,
             `readCharged`, `borrowCharged`,
             `releaseCharged`, `markResyncApplied`, `dropStream`, `terminalize`만 제공한다. fd/parser/raw
             queue/ledger pointer는 export하지 않는다. 실제 mechanics는 `client_external_pump.zig` leaf에 두고
@@ -2969,7 +2969,7 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
 
               `AuthorityState.initial_fence`는 final commit 직후 유일한 초기 flow다. d2가 inherited
               parser/socket을 would-block+parser-empty까지 drain해 `authority_clear`를 commit하기 전에는
-              `borrowOwnerEvent`/ack, screen publish, input/TX/control/resize admission이 모두 0이다.
+              `projectOwnerEventInternal` callback, screen publish, input/TX/control/resize admission이 모두 0이다.
 
               bind preflight는 parser unread의 address/len/cap/head/expected-major와 resident cap/structural
               consistency를 fingerprint에 봉인하되 parser unread를 c2 seed item/token count에는 포함하지 않는다.
@@ -3642,8 +3642,8 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
               | host invalidated/client screen-cap recovery | lower metadata·resize 후보를 버리고 owning backing을 deinit; support unsupported면 owner `.unsupported`, supported면 `.unavailable` publish |
 
               duplicate/older metadata는 기존 pending을 지우지 않는다. consumer projection 실패는
-              `finishOwnerEvent(...,false)`로 pending을 보존하고 exact current revision의 successful finish만
-              pending을 false로 만든다.
+              `projectOwnerEventInternal` callback의 `retry_preserved`로 pending을 보존하고 exact current
+              revision/generation의 successful `applied`만 pending을 false로 만든다.
 
               `max_owner_event_backing_bytes = protocol.max_control_json`은 commit 뒤 owner metadata byte backing의
               상한이고 resident footprint는 이를 `@sizeOf(OwnedMetadataDto)`(inline 64-process array 포함)와
@@ -3770,11 +3770,14 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
                   source를 그대로 보존한다. 실제 aggregate take는 b2의 ledger 성공 뒤 no-fail suffix에서만 실행한다.
                   `current.pending`은 initial/event origin 모두 `true`다. initial attach metadata도 external
                   consumer에 아직 projection되지 않았기 때문이다.
-                  `OwnerResizeState = none | pending(resize_wire.Event)`,
+                  현재 c3c-2b의 `OwnerResizeState = none | pending(resize_wire.Event)`는 c3c-3b에서
+                  `none | current{event:resize_wire.Event,pending:bool}`로 원자 교체하며 두 타입을 동시에
+                  공개하지 않는다.
                   `OwnerAuthorityState{role,generation,flow:initial_fence|clear}`와
                   `client_pump.RequestIdState`가 나머지 persistent slot의 단일 출처다. active semantic state도
                   별도 bool mirror 없이 `OwnerAuthorityState.flow`와 같은 `initial_fence`를 가리킨다.
-                  resize, authority, request state는 no-fail scalar take를 갖는다. 이 gate는
+                  c3c-3b 이후 resize scalar take는 `.current{pending=true}`를 publish하고 applied 뒤에도
+                  event/generation baseline을 보존한다. resize, authority, request state는 no-fail scalar take를 갖는다. 이 gate는
                   ledger commit, Client take, active/live publish와 public event borrow를 실행하지 않는다.
                   destination moved/stale copy, source/destination alias와 abort를 고정한다. take suffix 자체는
                   allocation/allocator callback 0이며, 별도 committed cleanup fixture는 heap-backed token/DTO를
@@ -3911,11 +3914,18 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
                   | recovery deadline checked-add overflow 또는 generation/scratch invariant | `terminal_latched` | `.terminal{reason=invariant_failure,fd_disposition=owner_cleanup}` / `.dead` 또는 untrusted graph quarantine | ledger/active publish 0 | publish 0 |
                   | allocation OOM 뒤 source seal unchanged | `retryable_preserved(.out_of_memory)` | `.adopting` 보존 | fd/source/evidence/ledger mutation 0 | publish 0, scratch mutation 0 |
                   | process-thread operation lease conflict | `retryable_preserved(.transaction_busy)` | 전 상태 byte-for-byte 보존 | mutation 0 | publish 0, scratch mutation 0 |
-              - **c3c-3 — owner event lease와 teardown:** 두 merge gate로 닫는다.
-                - **c3c-3a — owner event lease:** c3c-2b1의 `OwnerMetadataState`에 resize/metadata
-                  borrow/finish generation, projection retry와 terminal revoke를 연결한다.
-                - **c3c-3b — partial-consume teardown:** retained token 일부가 이미 release됐거나 owner event
-                  lease가 revoke된 모든 상태에서 exact cleanup과 ledger final-zero를 닫는다.
+              - **c3c-3 — teardown과 callback-scoped owner event projection:** 두 merge gate를 의존 순서대로 닫는다.
+                - **c3c-3a — partial-consume aggregate teardown foundation:** retained token 일부가 이미
+                  release된 adopted/recovery owner에서 exact cleanup과 ledger final-zero를 먼저 닫는다.
+                  event generation exhaustion·invalid permit·active projection revoke가 요구하는 canonical
+                  terminal cleanup foundation은 이 gate 없이는 구현하지 않는다.
+                - **c3c-3b — callback-scoped owner event projection:** c3c-2b1의 metadata/resize baseline에
+                  projection generation, retry와 terminal revoke를 연결한다. raw borrowed view와 public
+                  `finishOwnerEvent` token은 반환하지 않고
+                  `projectOwnerEventInternal(projector, cleanup_scratch)` callback 범위 안에서만 검증된 view를
+                  빌려 준다. component API의 caller-owned scratch는 generation exhaustion/post-callback drift를
+                  같은 call 안에서 c3c-3a teardown으로 닫는 데 쓰며, 후속 final owner/facade가 persistent sibling
+                  scratch를 내부 전달한다.
 
               `PreparedClientAdoption.commitScreenSeedsInto(client,ledger,out)`는 ledger `commitSeeds`가 실패하기
               전까지만 error를 반환하고, 성공 직후부터 token slice-header move/source tombstone만 수행하는 no-error
@@ -3929,18 +3939,137 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
               current{dto:OwnedMetadataDto,pending:bool}`를 별도 owner slot의 persistent baseline SSOT로 둔다.
               새 revision은 DTO를 replace하고 `pending=true`로 만든다.
               `metadataState()`는 payload pointer 없이 `{availability,revision,pending}` scalar summary만 반환한다.
-              current DTO view는 아래 event lease로만 빌릴 수 있다.
-              storage는 nonzero monotonic `owner_event_borrow_generation`을 소유하고 `borrowOwnerEvent()`마다 checked
-              increment한 `OwnerEventLease{token:{borrow_generation,kind,revision_or_generation},view}`를 반환한다.
-              generation max에서는 새 view/lease를 만들지 않고 pending baseline을 canonical cleanup한 invariant
-              terminal로 닫는다. matching `finishOwnerEvent(token,applied)` 전까지 pump/admit/다른 borrow 등 정상
-              mutating facade call을 `EventBorrowActive`로 거부한다. terminal/teardown은 예외로 lease generation을
-              먼저 revoke하고 baseline을 exact cleanup할 수 있으며 이후 late finish는 dead/stale typed reject이고
-              효과 0이다. view는 lease 동안만 유효하다. `applied=true`일 때 exact revision/generation의 pending
-              bool만 false로 만들고 projection OOM/실패의 `applied=false`는 pending을 보존해 재시도한다.
-              DTO를 move하지 않으므로 delivery 뒤에도 same-revision exact semantic equality baseline이 남는다.
+              current DTO view는 아래 callback-scoped projection으로만 빌릴 수 있다.
+              `OwnerMetadataState.isCommitted()`는 current authority/seal validity와 `pending`을 분리해,
+              `pending=false`인 delivered baseline도 정상 committed owner로 인정한다.
+              resize도 `none | current{event:resize_wire.Event,pending:bool}`를 persistent baseline SSOT로 두며
+              applied 뒤 event/generation을 지우지 않는다.
+
+              storage는 exact external Client의 nonzero process-unique `attach_instance_id`를 no-fail take한
+              immutable `owner_incarnation`과 monotonic
+              `owner_event_projection_generation`을 소유한다.
+              `projectOwnerEventInternal(projector, cleanup_scratch)`은 pending
+              resize를 metadata보다 먼저 고르고 checked increment한 private
+              `OwnerEventPermit{storage_addr,owner_incarnation,projection_generation,kind,key}`를 final-address와
+              digest에 bind한 뒤, operation lease를 유지한 같은 call stack에서 projector를 호출한다.
+              projector에는 `resized(resize_wire.Event)` 값 또는 검증된 `metadata(BorrowedMetadataView)`만
+              전달하며 token, DTO pointer, allocator, owner/backing address·capacity는 전달하지 않는다.
+              callback 반환은 `applied | retry_preserved`뿐이다. exact permit과 owner seal을 callback 뒤
+              allocation 없이 다시 검증하고 `applied`면 matching baseline의 pending만 false,
+              `retry_preserved`면 pending을 그대로 둔다. DTO/event baseline을 move하지 않으므로 delivery 뒤에도
+              same revision/generation exact semantic equality가 남는다.
+
+              projection 전체가 process-thread exclusive operation lease 안에 있으므로 callback이
+              prepare/commit/pump/admit/다른 projection/teardown/terminal facade를 재진입하면 typed
+              `transaction_busy`와 mutation 0이다. private reviewed adapter는 raw view를 callback 밖으로
+              저장·반환하지 않으며 backing cleanup은 callback 반환 뒤에만 가능하다. generation max에서는 새
+              view/callback을 만들지 않고 c3c-3a aggregate
+              teardown으로 invariant terminal을 canonical cleanup한다. max-1에서 max generation projection은
+              정상 허용하고 그 다음 projection만 exhaustion이다. callback이 storage/owner header를 직접
+              변조했거나 permit/owner seal이 맞지 않으면 view를 다시 읽지 않고 c3c-3a terminal teardown으로 닫는다.
               unsupported/unavailable은 event가 아니며 initial fence 뒤에도 tag가 유지된다.
 
+              initial fence clear는 c3c-3b가 추측하거나 public bool setter로 만들지 않는다. d2가 inherited
+              parser/socket을 would-block+parser-empty까지 drain하고 sealed authority-clear permit을 commit하는
+              유일한 제품 경로다. c3c-3b의 component fixture는 실제 adopted/recovery owner를 만든 뒤 test-only
+              sealed permit seam으로 같은 전이만 실행한다. 새 live metadata/resize event admission과 old DTO
+              replacement도 d2 책임이며, c3c-3b는 c3c commit에서 물려받은 pending baseline의 projection만 닫는다.
+
+              metadata scalar SSOT는 `external_event_materialization.zig`의 closed
+              `MetadataStateSummary`이며 pump/facade는 이를 재해석하지 않고 그대로 감싼다.
+
+              ```zig
+              pub const MetadataStateSummary = union(enum) {
+                  unsupported,
+                  unavailable,
+                  current: struct { revision: u64, pending: bool },
+              };
+              pub const MetadataStateResult = union(enum) {
+                  state: MetadataStateSummary,
+                  transaction_busy,
+                  moved,
+                  not_active,
+                  dead,
+              };
+              pub fn metadataState(
+                  self: *const ExternalPumpStorage,
+              ) MetadataStateResult;
+              ```
+
+              `metadataState`는 allocation/callback 0이고 initial fence에서도 summary를 반환한다. moved 검사를
+              먼저, operation lease 충돌을 그 다음, lifecycle/semantic active 여부를 그 뒤 판정하며 DTO pointer,
+              allocator와 backing address/capacity를 결과에 넣지 않는다.
+
+              c3c-3b component mechanics의 exact closed type은 다음과 같다. 이 타입과
+              `projectOwnerEventInternal`은 cross-file adapter가 호출할 수 있는 internal `pub`이지만 public
+              `ExternalPumpFacade`/barrel에는 export하지 않는다. d2는 별도
+              `external_owner_projection.zig`의 유한한 reviewed adapter만 추가하고,
+              boundary gate는 그 adapter 밖에서 `BorrowedMetadataView`, `OwnerEventView`,
+              `OwnerEventProjector` 식별자의 import/저장/반환을 금지한다.
+
+              ```zig
+              pub const BorrowedMetadataView = struct {
+                  revision: u64,
+                  observer_generation: u64,
+                  title_generation: u32,
+                  cols: u16,
+                  rows: u16,
+                  semantic_state: runtime_metadata_wire.SemanticPrompt,
+                  alt_active: bool,
+                  app_cursor_keys: bool,
+                  app_keypad: bool,
+                  kitty_flags: u5,
+                  alternate_scroll: bool,
+                  mouse_tracking: bool,
+                  mouse_tracking_mode: u8,
+                  bracketed_paste: bool,
+                  bell_count: u64,
+                  clipboard_write_seq: u64,
+                  clipboard_read_seq: u64,
+                  foreground_available: bool,
+                  foreground_pgid: ?i32,
+                  cwd: []const u8,
+                  window_title: []const u8,
+                  ssh_remote_dest: ?[]const u8,
+                  clipboard_read_target: []const u8,
+                  processes: []const runtime_metadata_wire.Process,
+              };
+              pub const OwnerEventView = union(enum) {
+                  resized: resize_wire.Event,
+                  metadata: BorrowedMetadataView,
+              };
+              pub const ProjectionDecision = enum { applied, retry_preserved };
+              pub const OwnerEventProjector = struct {
+                  context: *anyopaque,
+                  project: *const fn (*anyopaque, OwnerEventView) ProjectionDecision,
+              };
+              pub const ProjectOwnerEventResult = enum {
+                  applied,
+                  retry_preserved,
+                  none,
+                  fenced,
+                  transaction_busy,
+                  moved,
+                  not_active,
+                  dead,
+                  terminal_latched,
+              };
+              pub fn projectOwnerEventInternal(
+                  self: *ExternalPumpStorage,
+                  projector: OwnerEventProjector,
+                  cleanup_scratch: *ExternalPumpCleanupScratch,
+              ) ProjectOwnerEventResult;
+              ```
+
+              borrowed slice는 필연적으로 backing pointer+length를 담지만 raw `OwnerMetadataState`/
+              `OwnedMetadataDto` pointer, allocator, capacity와 cleanup mirror는 노출하지 않는다. view와 nested
+              slice/process view는 callback 반환까지만 유효하고 reviewed adapter는 이를 context/global/반환값에
+              저장하지 않는다. Zig lifetime만으로 non-escape를 증명한다고 주장하지 않고, facade/barrel 비공개,
+              유한 callsite boundary scan과 adapter test를 함께 완료 gate로 둔다. storage/facade는 owner-thread
+              confined이며 다른 thread로 pointer/view를 넘기는 것은 지원하지 않는다. projector는 정확히 한 번
+              호출되며 trap/panic은 recoverable result가 아닌 process-fatal contract violation이다.
+              `owner_incarnation`은 Client/evidence가 검증한 `attach_instance_id`를 copy+seal하되 Client scalar는
+              보존해 기존 Client/evidence seal을 깨지 않는다.
               orchestration은 두 단계로 닫힌다.
               c3c-2b3에서 payloadless
               `PrepareStatus{prepared,deferred_non_adopted,busy,retryable_preserved,terminal}`를 제거하고
@@ -3975,11 +4104,33 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
               pristine ledger를 보존한다. adopted/recovery는 source screen/event arrays/counters/request scalar를
               empty/zero로 만들고 lifecycle live다. semantic terminal은 최초 reason/fd disposition을 latch하고
               canonical cleanup 뒤 dead가 되며 partial reusable state를 반환하지 않는다.
-              `borrowOwnerEvent() -> none | OwnerEventLease{token,resized(resize_wire.Event) |
-              metadata(BorrowedMetadataView)}`는 active+initial fence clear 뒤 pending resize 우선으로 무할당
-              borrow한다. `finishOwnerEvent(token,applied)`만 exact current pending bit을 조건부 clear하며 baseline
-              scalar/DTO는 보존한다. active 상태의 wrong/stale/double token은 invariant terminal이고,
-              terminal/teardown이 revoke한 lease의 late finish만 dead/stale typed no-op reject다. app/TTY projection은 3b다.
+              public `metadataState`와 private projection mechanics의 result oracle은 다음과 같다.
+
+              | API/상태 | 결과 | mutation |
+              | --- | --- | --- |
+              | `metadataState()`, live 또는 initial fence | `state(unsupported | unavailable | current{revision,pending})` | 0 |
+              | `metadataState()`, operation callback 재진입 | `transaction_busy` | 0 |
+              | `metadataState()`, moved/not-active/dead | `moved | not_active | dead` | 0 |
+              | `projectOwnerEventInternal`, live지만 initial fence | `fenced` | 0 |
+              | `projectOwnerEventInternal`, pending 없음 | `none` | 0 |
+              | `projectOwnerEventInternal`, operation lease 충돌 | `transaction_busy` | 0 |
+              | `projectOwnerEventInternal`, scratch moved/non-ready/alias | `terminal_latched` | projector callback 0, bounded quarantine; untrusted scratch 미접근 |
+              | metadata/resize owner seal invalid, callback 전 | `terminal_latched` | projector callback 0, valid scratch로 c3c-3a aggregate cleanup |
+              | resize와 metadata 모두 pending | resize projector 결과 | resize priority; metadata baseline/pending mutation 0 |
+              | projector `applied` + exact post-callback seal | `applied` | matching pending만 false |
+              | projector `retry_preserved` + exact post-callback seal | `retry_preserved` | pending 보존 |
+              | callback 뒤 permit/owner/storage seal drift | `terminal_latched` | callback decision보다 우선; drift된 view/owner 재독 0, valid scratch면 aggregate cleanup, scratch도 drift면 bounded quarantine |
+              | generation exhaustion | `terminal_latched` | view/callback 0, c3c-3a aggregate cleanup 뒤 dead |
+              | projector trap/panic | process-fatal, typed result 없음 | 지원하지 않는 projector contract violation |
+              | moved/not-active/dead | `moved | not_active | dead` | 0 |
+
+              `projectOwnerEventInternal(projector, cleanup_scratch)`은 active+initial fence clear 뒤 pending
+              resize 우선으로 projector를 호출한다. scratch는 final-address `.ready`이고 storage/owner/backing과
+              독립이어야 하며 projection callback 뒤 terminal cleanup이 필요할 때만 `.frozen`으로 소비한다.
+              public token/finish API가 없으므로 copied-token, cross-storage token,
+              stale/double finish와 late finish surface 자체를 만들지 않는다. 내부 permit은 storage final address,
+              nonreused incarnation, projection generation, kind/key와 final address를 모두 seal하며 callback
+              전후 검증에만 쓰고 반환 전에 tombstone한다. app/TTY projector 배선은 d2다.
 
               c3c component gate의 `ExternalPumpStorage.teardown(cleanup_scratch)`는 caller-owned
               `ExternalPumpCleanupScratch`를 명시적으로 받는다. 이 aggregate scratch는 c3c-2a의
@@ -3992,13 +4143,56 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
               arrays/metadata DTO backing/Client graph와 모든 cleanup callback이 해제할 backing에서 non-overlap이고
               독립 lifetime임을 첫 callback 전에 증명한다.
 
-              teardown은 먼저 exclusive operation lease를 획득하고 `lifecycle=.tearing_down`과 event-lease revoke를
-              publish해 모든 재진입 facade call을 allocation/callback/mutation 0의 typed busy/dead 결과로 닫는다.
+              c3c-3a는 기존 `TeardownResult`를 아래 closed enum으로 원자 교체한다. 옛
+              `ledger_not_zero`는 cleanup 완료 여부와 invariant를 섞었으므로 `cleaned_with_invariant`로,
+              `committed_owners_require_typed_cleanup`는 aggregate teardown 착륙과 함께 제거한다.
+              같은 gate에서 scratch lifecycle은 `empty | ready | frozen | poisoned`로 원자 교체한다.
+              `.frozen`은 validated cleanup suffix 내부에서만 보이고 성공/cleanup-complete invariant 뒤 `.ready`로
+              돌아간다. `.poisoned`는 신뢰 가능한 scratch 자체의 authority drift를 기록하는 비가역 상태이며
+              재초기화·재사용하지 않는다.
+
+              ```zig
+              pub const TeardownResult = enum {
+                  cleaned,
+                  cleaned_with_invariant,
+                  already_dead,
+                  moved_storage,
+                  transaction_busy,
+                  quarantined,
+              };
+              pub fn teardown(
+                  self: *ExternalPumpStorage,
+                  cleanup_scratch: *ExternalPumpCleanupScratch,
+              ) TeardownResult;
+              ```
+
+              | 진입 상태/검증 | 결과 | 최종 상태와 scratch |
+              | --- | --- | --- |
+              | moved storage | `moved_storage` | mutation 0, scratch 미접근 |
+              | process-thread operation lease 충돌 또는 constructing/normalizing/adoption_preparing/tearing_down | `transaction_busy` | mutation 0, scratch 미변경 |
+              | empty/dead | `already_dead` | mutation 0, scratch 미변경 |
+              | adopting/live + final-address `.ready` scratch + 모든 seal/alias valid + ledger final-zero | `cleaned` | 최초 terminal reason 보존 또는 없으면 invariant owner-cleanup reason, `.dead`, scratch `.ready` |
+              | 위 cleanup은 완료했지만 stale/duplicate release·orphan drain·sticky ledger invariant | `cleaned_with_invariant` | `.dead`, 최초 reason 보존, scratch `.ready` |
+              | `owner_teardown_generation == maxInt(u64)` | `quarantined` | callback 0, bounded quarantine, `.dead`, valid scratch `.poisoned` |
+              | scratch moved/non-ready/storage·owner·backing alias 또는 cleanup/permit authority가 첫 callback 전에 invalid | `quarantined` | callback 0, bounded quarantine, `.dead`; 신뢰 가능한 scratch만 `.poisoned`, untrusted scratch는 미접근 |
+              | 첫 callback 뒤 frozen local cleanup의 개별 release 실패 | `cleaned_with_invariant` | 남은 cleanup 계속, double free/close 0, `.dead`, scratch `.ready` |
+
+              c3c-3a는 projection permit 타입/필드를 미리 만들지 않고 **permit이 없는 adopted/recovery owner의
+              aggregate teardown**만 완료한다. c3c-3b가 private permit을 추가하면서 같은 teardown precommit에
+              allocation-free revoke/permit tombstone과 callback 재진입 fixture를 확장한다. 따라서 active
+              projection revoke 완료 주장은 3b에만 속하고, 3a PR은 미래 필드를 추측하지 않는다.
+
+              teardown은 먼저 exclusive operation lease를 획득하고 `lifecycle=.tearing_down`을 publish해 모든
+              재진입 facade call을 allocation/callback/mutation 0의 typed busy/dead 결과로 닫는다. c3c-3b 이후에는
+              같은 precommit에서 active projection permit revoke를 함께 publish한다.
               이어 metadata descriptor, retained token identity와 backing headers, Client committed take cleanup을
               aggregate scratch에 전부 freeze하고 모든 pairwise alias/backing-first seal을 검증한다. 첫 allocator
               callback 뒤에는 destination/token/metadata/Client heap backing을 다시 읽지 않는다.
               ledger도 allocation-free `beginOwnerTeardown(out_permit)`로 address-bound
-              `OwnerTeardownPermit{ledger_addr,operation_generation}`를 먼저 publish한다. 이 순간부터 기존
+              `OwnerTeardownPermit{ledger_addr,owner_teardown_generation}`를 먼저 publish한다.
+              `owner_teardown_generation`은 adopted prepare/commit의 `operation_generation`과 별개인 storage
+              nonzero monotonic scalar다. teardown preflight와 scratch proof 뒤 checked increment하며 max에서는
+              permit/callback을 만들지 않고 위 `quarantined`로 닫는다. 이 순간부터 기존
               `commitSeeds/reserve/transition/releaseLease/drainAll/finish`는 모두 typed busy/dead이고 mutation 0이며,
               teardown만 permit을 받는 `releaseLeaseForTeardown`, `drainAllForTeardown`,
               `finishForTeardown`을 순서대로 호출할 수 있다. permit은 aggregate scratch 안의 final address에 seal되고
@@ -4045,11 +4239,11 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
               storage 재진입과 변조 후 OOM terminal 우선순위를 Debug/ReleaseFast에서 고정한다.
               **c3c**는 typed take abort/success/stale-copy/double-deinit/final-address와 verdict별 metadata cleanup,
               prepare의 immediate recovery/terminal 두 suffix와 prepared-adopted commit, sealed request/authority take,
-              recovery origin/phase/deadline publish, metadata/resize borrow lease 중 mutation 거부,
-              projection 실패→same revision 재borrow stale-token ABA, borrow generation max-1/max/double finish,
-              exact finish baseline 보존, metadataState payload pointer 0,
-              active lease teardown revoke·late finish 효과 0,
-              partial-consume teardown·ledger final-zero로 나눈다. fixture가 baseline을
+              recovery origin/phase/deadline publish, partial-consume aggregate teardown·ledger final-zero,
+              callback-scoped metadata/resize projection 중 mutation 거부,
+              projection 실패→same revision 재시도, projection generation max-1/max/exhaustion,
+              exact applied baseline 보존, metadataState payload pointer 0,
+              callback teardown/terminal 재진입 busy·callback 반환 뒤 revoke/cleanup으로 나눈다. fixture가 baseline을
               직접 주입한 테스트만으로 c3a를 완료 처리하지 않으며 실제 `external_attach.attachSnapshot` 경로의
               revision N baseline 뒤 N/same, N/different, N-1, N+1을 자동 검증한다.
 

@@ -21,7 +21,7 @@ const pressure_sample_count_min: usize = 20;
 const pressure_sample_count_max: usize = 4096;
 const post_drain_sample_count: usize = 10;
 const sample_target_interval_ms: u64 = 20;
-const pressure_sample_gap_max_ms: u64 = 100;
+const pressure_sample_gap_max_ms: u64 = 125;
 const settle_sample_gap_max_ms: u64 = 250;
 const pressure_sample_gap_max_ns: u64 =
     pressure_sample_gap_max_ms * std.time.ns_per_ms;
@@ -593,7 +593,7 @@ fn goodArtifact() Artifact {
         .baseline_reset_ack = true,
         .healthy_marker_matches_nonce = true,
         .sample_target_interval_ms = 20,
-        .pressure_sample_gap_max_ms = 100,
+        .pressure_sample_gap_max_ms = 125,
         .settle_sample_gap_max_ms = 250,
         .baseline_samples = &baseline_fixture,
         .pressure_samples = &pressure_fixture,
@@ -746,7 +746,7 @@ test "run peak includes post-drain and post delta saturates below baseline" {
     try validateArtifact(testing.allocator, artifact);
 }
 
-test "timestamp reversal and pressure gap over 100ms fail" {
+test "timestamp reversal and pressure gap allow runner jitter to 125ms" {
     var reversed = pressure_fixture;
     reversed[5].monotonic_ns = reversed[4].monotonic_ns;
     var artifact = goodArtifact();
@@ -757,12 +757,22 @@ test "timestamp reversal and pressure gap over 100ms fail" {
     );
 
     var delayed = pressure_fixture;
-    for (delayed[5..]) |*sample| sample.monotonic_ns += 91_000_000;
-    artifact = goodArtifact();
-    artifact.pressure_samples = &delayed;
+    for (delayed[5..]) |*sample| sample.monotonic_ns += 115_000_000;
+    try validateSamples(
+        goodArtifact(),
+        &delayed,
+        pressure_sample_gap_max_ns,
+    );
+
+    var too_delayed = pressure_fixture;
+    for (too_delayed[5..]) |*sample| sample.monotonic_ns += 116_000_000;
     try testing.expectError(
         error.InvalidSampleInterval,
-        validateArtifact(testing.allocator, artifact),
+        validateSamples(
+            goodArtifact(),
+            &too_delayed,
+            pressure_sample_gap_max_ns,
+        ),
     );
 
     artifact = goodArtifact();

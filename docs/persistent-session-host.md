@@ -2043,9 +2043,10 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
       - 모든 시간은 monotonic ns이며 `stall_at < controller_input_at < healthy_marker_at`이어야 한다. warm baseline은
         runtime/세 attach/초기 snapshot drain 뒤 목표 20 ms 간격 10회 `ri_resident_size`의 median이다. pressure
         구간은 최소 20회, post-drain은 모든 client/runtime ledger 회수 뒤 목표 20 ms 간격 10회 샘플링한다.
-        scheduler 지연을 고려한 실제 인접 sample gap 상한은 pressure 구간 100 ms, baseline/post settle 구간
-        250 ms다. peak를 포착하는 pressure 상한은 좁게 유지하고, GitHub macOS runner가 idle settle 중 약 180 ms
-        deschedule된 실측 때문에 baseline/post만 별도 상한을 쓴다. stall과 healthy marker 사이 sample도 최소
+        scheduler 지연을 고려한 실제 인접 sample gap 상한은 pressure 구간 125 ms, baseline/post settle 구간
+        250 ms다. peak를 포착하는 pressure 상한은 좁게 유지하되 GitHub macOS runner에서 유효한 run이
+        102.876 ms와 105.912 ms로 반복 deschedule된 실측을 포함한다. baseline/post는 idle settle 중 약 180 ms
+        deschedule된 실측 때문에 별도 상한을 쓴다. stall과 healthy marker 사이 sample도 최소
         한 개 있어야 한다. pressure peak는 pressure raw max, run peak는 baseline/pressure/post raw 전체 max,
         post-drain은 post raw median이며 even-count median은 정렬된 중앙 두 값의 overflow-safe floor average다.
         validator가 summary를 다시 계산한다. 전체 deadline은 30,000 ms다.

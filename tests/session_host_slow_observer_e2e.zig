@@ -610,7 +610,7 @@ pub fn main(init: std.process.Init) !void {
         .baseline_reset_ack = true,
         .healthy_marker_matches_nonce = marker_seen,
         .sample_target_interval_ms = 20,
-        .pressure_sample_gap_max_ms = 100,
+        .pressure_sample_gap_max_ms = 125,
         .settle_sample_gap_max_ms = 250,
         .baseline_samples = &baseline_samples,
         .pressure_samples = pressure_samples.items,

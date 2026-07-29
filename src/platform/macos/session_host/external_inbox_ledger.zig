@@ -1115,6 +1115,32 @@ pub const FrozenScreenTokenPlan = struct {
         out.* = staged;
     }
 
+    /// Extends the already validated owner inventory without allocating or touching the ledger.
+    /// Teardown aggregates use this to combine committed-screen and live-owner token authorities
+    /// before the ledger performs its single all-owner freeze.
+    pub fn appendRetainedTokens(
+        self: *FrozenScreenTokenPlan,
+        tokens: []const Token,
+    ) OwnerTeardownError!void {
+        if (!self.isValid()) return error.InvalidPermit;
+        const next_len = std.math.add(usize, self.len, tokens.len) catch
+            return error.InvariantFailure;
+        if (next_len > max_items) return error.InvariantFailure;
+        for (tokens, 0..) |token, index| {
+            if (@as(usize, token.slot) >= max_items or token.generation == 0)
+                return error.InvariantFailure;
+            for (self.tokens[0..self.len]) |existing|
+                if (existing.slot == token.slot) return error.InvariantFailure;
+            for (tokens[0..index]) |earlier|
+                if (earlier.slot == token.slot) return error.InvariantFailure;
+        }
+        for (tokens, self.len..) |token, index| {
+            self.tokens[index] = token;
+            self.dispositions[index] = .retained;
+        }
+        self.len = next_len;
+    }
+
     fn isValid(self: *const FrozenScreenTokenPlan) bool {
         if (self.saved_self_addr != @intFromPtr(self) or self.len > max_items)
             return false;
@@ -8154,6 +8180,42 @@ test "screen teardown token plan rejects tail bits and same-slot ABA" {
         ),
     );
     try std.testing.expectEqual(@as(usize, 0), aba_plan.saved_self_addr);
+}
+
+test "screen teardown token plan appends live owners atomically" {
+    var plan: FrozenScreenTokenPlan = .{};
+    var released = std.StaticBitSet(max_items).initEmpty();
+    released.set(1);
+    try plan.initInPlace(
+        &.{
+            .{ .slot = 1, .generation = 10 },
+            .{ .slot = 2, .generation = 20 },
+        },
+        released,
+    );
+    try plan.appendRetainedTokens(&.{
+        .{ .slot = 3, .generation = 30 },
+        .{ .slot = 4, .generation = 40 },
+    });
+    try std.testing.expectEqual(@as(usize, 4), plan.len);
+    try std.testing.expect(plan.isValid());
+
+    const before = plan;
+    try std.testing.expectError(
+        error.InvariantFailure,
+        plan.appendRetainedTokens(&.{
+            .{ .slot = 2, .generation = 99 },
+        }),
+    );
+    try std.testing.expectEqualDeep(before, plan);
+    try std.testing.expectError(
+        error.InvariantFailure,
+        plan.appendRetainedTokens(&.{
+            .{ .slot = 5, .generation = 1 },
+            .{ .slot = 5, .generation = 2 },
+        }),
+    );
+    try std.testing.expectEqualDeep(before, plan);
 }
 
 test "owner teardown freezes all payloads before cleanup and closes ordinary APIs" {

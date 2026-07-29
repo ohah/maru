@@ -95,8 +95,8 @@ var app_instance_lease_slot: LeaseSlot = .{};
 // 여기서는 ABI 표면으로 re-export만 한다.
 pub const EventKind = session_mod.EventKind;
 
-test "ABI v148 app instance lease result values match the C header" {
-    try std.testing.expectEqual(@as(u32, 148), abi_version);
+test "ABI v149 app instance lease result values match the C header" {
+    try std.testing.expectEqual(@as(u32, 149), abi_version);
     try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_ACQUIRED), @intFromEnum(AppInstanceLeaseResult.acquired));
     try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_HELD), @intFromEnum(AppInstanceLeaseResult.held));
     try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_UNSAFE), @intFromEnum(AppInstanceLeaseResult.unsafe));
@@ -1219,6 +1219,15 @@ pub export fn maru_macos_app_session_file_panel_mode(session: ?*AppSession, surf
     const app_session = session orelse return -1;
     const mode = app_session.filePanelMode(surface_id) orelse return -1;
     return @intCast(@intFromEnum(mode));
+}
+
+/// 파일 패널 mode를 설정한다(헤더 mode 선택기 클릭과 같은 경로). 1=적용/이미 그 mode, 0=없는 surface이거나
+/// 그 kind가 허용하지 않는 mode. v149.
+pub export fn maru_macos_app_session_set_file_panel_mode(session: ?*AppSession, surface_id: u64, raw_mode: u32) u32 {
+    const app_session = session orelse return 0;
+    if (raw_mode > @intFromEnum(maru.session.dock_panel.Mode.source_edit)) return 0;
+    const mode: maru.session.dock_panel.Mode = @enumFromInt(raw_mode);
+    return if (app_session.setFilePanelModeBySurface(surface_id, mode)) 1 else 0;
 }
 
 // explicit file WKWebView primary-down을 FP8 DockPanel.focused_group/FocusOwner에 반영한다. 1=승인, 0=stale/아님. (v124)

@@ -183,7 +183,8 @@ fn navButtonAt(x_px: f64, band_x: u32, cw: u32) ?NavButton {
 // 별도 물리 CAMetalLayer로 분리, 두 drawable을 한 command buffer에 present + 단일 commit으로 전이 원자성). host↔renderer
 // draw 계약 변경이라 버전을 올린다. **MetalFrame/세션 struct·export 시그니처는 불변**(overlay_layer는 Zig가 아니라
 // Swift가 소유한 CAMetalLayer라 struct offset·layout test는 그대로 green). 렌더러 분할·컨테이너 재편은 Swift/ObjC 레이어.
-pub const abi_version: u32 = 149;
+pub const abi_version: u32 = 150;
+// 150: 파일 패널 리치 편집 모드(raw 2)를 추가한다 — markdown 전용 문서모델 WYSIWYG(docs/file-panel.md §2.5).
 // 149: 파일 패널 mode를 surface_id로 설정하는 export를 추가한다(헤더 클릭과 같은 경로·같은 pending action).
 // 148: 라이브 프리뷰 폐기 — file panel mode 2(live-preview)와 앱 전역 live-preview worker budget ABI를 제거하고
 //      `maru.file.livePreviewReady`를 `maru.file.rendererReady`로 개명한다. app origin CSP는 worker-src 'none'.
@@ -45269,13 +45270,16 @@ test "file panel mode toggle: keyboard action walks the same modes the header of
     const entry = session.fileEntryAt(0).?;
     try std.testing.expectEqual(dock_panel.Mode.read, entry.mode);
 
+    // 헤더가 보여 주는 순서 그대로 순환한다: 읽기 → 리치 → 소스 → 읽기.
     session.dispatchAppAction(.toggle_file_panel_mode);
-    try std.testing.expectEqual(dock_panel.Mode.source_edit, entry.mode);
+    try std.testing.expectEqual(dock_panel.Mode.rich, entry.mode);
     // 헤더 클릭과 같은 경로라 Swift가 drain할 pending action도 똑같이 선다.
     const action = session.takeFilePanelModeAction().?;
     try std.testing.expectEqual(entry.surface_id, action.surface_id);
-    try std.testing.expectEqual(dock_panel.Mode.source_edit, action.mode);
+    try std.testing.expectEqual(dock_panel.Mode.rich, action.mode);
 
+    session.dispatchAppAction(.toggle_file_panel_mode);
+    try std.testing.expectEqual(dock_panel.Mode.source_edit, entry.mode);
     session.dispatchAppAction(.toggle_file_panel_mode);
     try std.testing.expectEqual(dock_panel.Mode.read, entry.mode);
 

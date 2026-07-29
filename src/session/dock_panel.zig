@@ -50,6 +50,8 @@ pub const legacy_live_preview_mode_name = "live-preview";
 pub const Mode = enum(u32) {
     read = 0,
     source_edit = 1,
+    /// 툴바를 가진 문서모델 WYSIWYG 편집(§2.5). markdown 전용이며 소스를 대체하지 않는다.
+    rich = 2,
 
     /// 새 entry의 시작 모드는 kind 정책에서 한 번만 정한다. 복원 entry는 workspace에 저장된 mode를 그대로
     /// 덮어쓰므로 이 기본값과 독립이고, HTML은 실행 가능한 문서라 계속 read-only로 시작한다.
@@ -65,21 +67,22 @@ pub const Mode = enum(u32) {
 
     pub fn allowedFor(self: Mode, kind: EntryKind) bool {
         return switch (kind) {
-            .markdown => self == .read or self == .source_edit,
+            .markdown => self == .read or self == .rich or self == .source_edit,
             .html, .image, .media, .pdf => self == .read, // read 뷰 전용(편집·모드 없음).
             .text => self == .source_edit,
-            .svg => self == .read or self == .source_edit,
+            .svg => self == .read or self == .source_edit, // 리치는 markdown 전용이다.
         };
     }
 
     pub fn isEditable(self: Mode) bool {
-        return self == .source_edit;
+        return self == .source_edit or self == .rich;
     }
 
     pub fn workspaceName(self: Mode) []const u8 {
         return switch (self) {
             .read => "read",
             .source_edit => "source-edit",
+            .rich => "rich",
         };
     }
 
@@ -269,7 +272,9 @@ test "EntryKind/Mode policy: markdown, html, text (FP12 §2.2)" {
     try std.testing.expect(!EntryKind.media.usesEditorBridge());
 
     // 허용 모드: markdown=읽기|소스, html=read만, text=source_edit만, image/pdf=read만(격리 loadFileURL).
-    try std.testing.expect(Mode.read.allowedFor(.markdown) and Mode.source_edit.allowedFor(.markdown));
+    try std.testing.expect(Mode.read.allowedFor(.markdown) and Mode.rich.allowedFor(.markdown) and Mode.source_edit.allowedFor(.markdown));
+    // 리치는 markdown 전용이다 — svg·text는 문서모델로 다룰 대상이 아니다.
+    try std.testing.expect(!Mode.rich.allowedFor(.svg) and !Mode.rich.allowedFor(.text) and !Mode.rich.allowedFor(.html));
     try std.testing.expect(Mode.read.allowedFor(.html) and !Mode.source_edit.allowedFor(.html));
     try std.testing.expect(Mode.source_edit.allowedFor(.text) and !Mode.read.allowedFor(.text));
     inline for (.{ EntryKind.image, EntryKind.media, EntryKind.pdf }) |kind| {
@@ -300,6 +305,8 @@ test "dock mode policy keeps HTML read-only and the Markdown source editor dirty
     try std.testing.expect(!Mode.source_edit.allowedFor(.html));
     try std.testing.expect(!Mode.read.isEditable());
     try std.testing.expect(Mode.source_edit.isEditable());
+    try std.testing.expect(Mode.rich.isEditable()); // 리치도 dirty/save 수명을 소비한다.
+    try std.testing.expectEqual(@as(u32, 2), @intFromEnum(Mode.rich));
     inline for (std.enums.values(Mode)) |mode| {
         try std.testing.expectEqual(mode, Mode.parseWorkspaceName(mode.workspaceName()).?);
     }

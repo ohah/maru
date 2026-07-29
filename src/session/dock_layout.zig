@@ -60,8 +60,15 @@ pub const HeaderModeDescriptor = struct {
     label: []const u8,
 };
 
-/// ABI ordinal과 독립인 헤더 시각 순서와 label의 단일 출처. markdown·svg 모두 `읽기|소스`를 노출한다.
+/// ABI ordinal과 독립인 헤더 시각 순서와 label의 단일 출처. markdown은 `읽기|리치|소스`, svg는 `읽기|소스`다.
 /// kind가 늘어나면 여기 모드 리스트만 더한다 — layout/render/hit-test는 `modesForKind`를 순회한다.
+pub const markdown_header_modes = [_]HeaderModeDescriptor{
+    .{ .mode = .read, .label = "읽기" },
+    .{ .mode = .rich, .label = "리치" },
+    .{ .mode = .source_edit, .label = "소스" },
+};
+
+/// svg는 문서모델로 다룰 대상이 아니라 리치가 없다(§2.5) — 프리뷰와 XML 소스 둘뿐이다.
 pub const header_modes = [_]HeaderModeDescriptor{
     .{ .mode = .read, .label = "읽기" },
     .{ .mode = .source_edit, .label = "소스" },
@@ -70,7 +77,8 @@ pub const header_modes = [_]HeaderModeDescriptor{
 /// 이 kind가 헤더에 노출하는 mode 선택지(순서=시각 순서). 빈 슬라이스면 mode 선택기가 없다(html·text·image·pdf).
 pub fn modesForKind(kind: dock_panel.EntryKind) []const HeaderModeDescriptor {
     return switch (kind) {
-        .markdown, .svg => &header_modes,
+        .markdown => &markdown_header_modes,
+        .svg => &header_modes,
         .html, .text, .image, .media, .pdf => &.{},
     };
 }
@@ -370,22 +378,27 @@ test "파일 헤더 밴드 control rect는 우측 정렬되고 좁은 밴드에�
     try std.testing.expectEqual(header.x + header.w - 20, conflict.x);
     try std.testing.expectEqual(@as(u32, 10), conflict.w);
     try std.testing.expect(conflict.x >= control.x);
-    // markdown 헤더는 읽기|소스 2모드다(라이브 백로그).
+    // markdown 헤더는 읽기|리치|소스 3모드다(§2.5). 세 슬롯이 control rect를 빈틈없이 채워야 한다.
     const read = headerModeRect(header, 10, .markdown, .read, false, false).?;
+    const rich = headerModeRect(header, 10, .markdown, .rich, false, false).?;
     const edit = headerModeRect(header, 10, .markdown, .source_edit, false, false).?;
     try std.testing.expectEqual(control.x, read.x);
-    try std.testing.expectEqual(read.x + read.w, edit.x);
+    try std.testing.expectEqual(read.x + read.w, rich.x);
+    try std.testing.expectEqual(rich.x + rich.w, edit.x);
     try std.testing.expectEqual(control.x + control.w, edit.x + edit.w);
     try std.testing.expectEqual(@as(?dock_panel.Mode, .read), headerModeAt(header, 10, .markdown, false, false, @floatFromInt(read.x + 1), @floatFromInt(read.y + 1)));
+    try std.testing.expectEqual(@as(?dock_panel.Mode, .rich), headerModeAt(header, 10, .markdown, false, false, @floatFromInt(rich.x + 1), @floatFromInt(rich.y + 1)));
     try std.testing.expectEqual(@as(?dock_panel.Mode, .source_edit), headerModeAt(header, 10, .markdown, false, false, @floatFromInt(edit.x + 1), @floatFromInt(edit.y + 1)));
     try std.testing.expectEqual(@as(?dock_panel.Mode, null), headerModeAt(header, 10, .html, false, false, @floatFromInt(edit.x + 1), @floatFromInt(edit.y + 1)));
 
     inline for (.{ false, true }) |dirty| inline for (.{ false, true }) |external| {
         const read_mode = headerModeRect(header, 10, .markdown, .read, dirty, external).?;
+        const rich_mode = headerModeRect(header, 10, .markdown, .rich, dirty, external).?;
         const source = headerModeRect(header, 10, .markdown, .source_edit, dirty, external).?;
         const cells = headerCellLayout(@intCast(header.w / 10), dirty, external).?;
         try std.testing.expectEqual(header.x + @as(u32, cells.control_start) * 10, read_mode.x); // 첫 슬롯=control_start
-        try std.testing.expectEqual(read_mode.x + read_mode.w, source.x); // 인접
+        try std.testing.expectEqual(read_mode.x + read_mode.w, rich_mode.x); // 인접
+        try std.testing.expectEqual(rich_mode.x + rich_mode.w, source.x); // 인접
         try std.testing.expectEqual(header.x + @as(u32, cells.mode_end) * 10, source.x + source.w); // 마지막=mode_end
         if (dirty) {
             const status = headerDirtyRect(header, 10, external).?;

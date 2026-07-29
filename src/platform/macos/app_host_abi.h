@@ -8,7 +8,7 @@
 /* 이 header는 실제 앱 동작을 구현하지 않고 Swift/Zig 사이의 약속만 고정한다.
    Swift가 AppKit object나 Swift struct layout을 바로 넘기면 Zig 쪽에서 안전하게
    해석할 수 없으므로, 제품 host가 시작되기 전에 fixed-width C record만 허용한다. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 149u
+#define MARU_MACOS_APP_HOST_ABI_VERSION 150u
 #define MARU_APP_INSTANCE_LEASE_ACQUIRED 0u
 #define MARU_APP_INSTANCE_LEASE_HELD 1u
 #define MARU_APP_INSTANCE_LEASE_UNSAFE 2u
@@ -16,6 +16,7 @@
 #define MARU_APP_INSTANCE_LEASE_INVALID_PATH 4u
 #define MARU_FILE_PANEL_MODE_READ 0u
 #define MARU_FILE_PANEL_MODE_SOURCE_EDIT 1u
+#define MARU_FILE_PANEL_MODE_RICH 2u
 #define MARU_FILE_TREE_ROOT_PICK_NONE 0u
 #define MARU_FILE_TREE_ROOT_PICK_REPLACE 1u
 #define MARU_FILE_TREE_ROOT_PICK_ADD 2u
@@ -861,7 +862,7 @@ uint32_t maru_macos_app_session_file_panel_shell_kind(
     const uint8_t **out_ptr,
     size_t *out_len
 );
-/* 도크 entry의 mode(0=read, 1=source-edit). 도크가 아니면 -1. v132. */
+/* 도크 entry의 mode(0=read, 1=source-edit, 2=rich). 도크가 아니면 -1. v132. */
 int32_t maru_macos_app_session_file_panel_mode(MaruAppHostSession *session, uint64_t surface_id);
 
 /* 파일 패널 mode를 설정한다(헤더 mode 선택기 클릭과 같은 경로). 1=적용, 0=없는 surface/불허 mode. v149. */
@@ -900,7 +901,7 @@ uint64_t maru_macos_app_session_take_file_tree_restore_surface_action(MaruAppHos
    explorer root)를 1회 drain한다. 0이 아니면 복원 모델이 저장 파일을 표현하지 못하므로 호출자가 이번 실행의
    checkpoint를 막아 마지막 완전본을 보존한다. v144. */
 uint32_t maru_macos_app_session_take_workspace_restore_dropped(MaruAppHostSession *session);
-/* GPU 헤더 토글이 바꾼 mode를 1회 drain한다. 반환 -1=없음, 0=read, 1=source-edit. v132. */
+/* GPU 헤더 토글이 바꾼 mode를 1회 drain한다. 반환 -1=없음, 0=read, 1=source-edit, 2=rich. v132. */
 int32_t maru_macos_app_session_take_file_panel_mode_action(MaruAppHostSession *session, uint64_t *surface_id_out);
 /* PendingDockFocus의 native firstResponder action을 mode refresh와 독립적으로 drain한다. 0=없음. v131. */
 uint64_t maru_macos_app_session_take_pending_dock_focus_action(MaruAppHostSession *session);

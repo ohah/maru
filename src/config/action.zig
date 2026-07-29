@@ -23,6 +23,8 @@ pub const Action = union(enum) {
     // workspace terminal/browser pane과 파일 도크(tree 포함) 사이를 왕복한다. 기본 Cmd+Shift+E이며 command
     // catalog/settings에 노출되어 사용자 rebind/unbind가 가능하다.
     toggle_file_panel_focus,
+    /// 활성 파일 Term의 표시 모드를 읽기↔소스로 토글한다. 헤더 밴드의 mode 선택기 클릭과 같은 경로다.
+    toggle_file_panel_mode,
     // project tree에 transient keyboard focus를 주고 Metal view를 first responder로 만든다. one-way 호환 action이라
     // 남기되 기본 chord는 FP9의 toggle_file_panel_focus로 이전한다.
     focus_file_tree,
@@ -167,6 +169,7 @@ pub fn parseAction(value: []const u8) ?Action {
     if (std.mem.eql(u8, value, "open_file_panel")) return .open_file_panel;
     if (std.mem.eql(u8, value, "toggle_file_panel_dock_side")) return .toggle_file_panel_dock_side;
     if (std.mem.eql(u8, value, "toggle_file_panel_focus")) return .toggle_file_panel_focus;
+    if (std.mem.eql(u8, value, "toggle_file_panel_mode")) return .toggle_file_panel_mode;
     if (std.mem.eql(u8, value, "focus_file_tree")) return .focus_file_tree;
     if (std.mem.eql(u8, value, "new_file")) return .new_file;
     if (std.mem.eql(u8, value, "new_directory")) return .new_directory;

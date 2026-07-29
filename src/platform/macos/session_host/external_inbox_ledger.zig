@@ -14,8 +14,7 @@ const protocol = @import("protocol.zig");
 pub const max_bytes: usize = limits.max_bytes;
 pub const max_items: usize = limits.max_items;
 pub const max_batch_bytes: usize = protocol.max_viewport_snapshot;
-pub const max_batch_chunks: usize =
-    protocol.max_viewport_snapshot / protocol.max_binary_chunk;
+pub const max_batch_chunks: usize = protocol.max_screen_batch_chunks;
 
 comptime {
     if (max_items > @as(usize, std.math.maxInt(u16)) + 1)

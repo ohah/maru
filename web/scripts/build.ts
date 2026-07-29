@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { copyFile, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { emitZntcBundle } from "./zntc-bundle";
@@ -36,7 +36,23 @@ for (const page of ["index.html", "render.html"]) {
   const html = sourceHtml.replace("</body>", `  ${scriptTag}\n  </body>`);
   await writeFile(join(dist, page), html);
 }
-await copyFile(join(root, "src", "app.css"), join(dist, "app.css"));
+// Tailwind는 빌드타임 CSS다 — 런타임 권한이 필요 없고(§2.1c) 실제로 쓰인 유틸리티만 나온다.
+// 입력은 계속 src/app.css 하나이며 그 안에서 `@import "tailwindcss"`와 `@theme`을 선언한다.
+const tailwind = Bun.spawnSync(
+  [
+    "bunx",
+    "@tailwindcss/cli",
+    "-i",
+    join(root, "src", "app.css"),
+    "-o",
+    join(dist, "app.css"),
+    "--minify",
+  ],
+  { cwd: root },
+);
+if (tailwind.exitCode !== 0) {
+  throw new Error(`tailwind build failed: ${new TextDecoder().decode(tailwind.stderr)}`);
+}
 await writeFile(join(dist, "THIRD_PARTY_NOTICES.txt"), await buildRuntimeNotices(root));
 await writeFile(
   join(dist, "integrity.json"),

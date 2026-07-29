@@ -27,6 +27,9 @@ export async function emitZntcBundle(
     format: "esm",
     platform: "browser",
     target: ["safari16"],
+    // React 19의 automatic runtime — 컴포넌트마다 `import React`를 쓰지 않는다(docs/file-panel.md §2.1).
+    jsx: "automatic",
+    jsxImportSource: "react",
     jobs: 1,
     conditions,
     outdir,

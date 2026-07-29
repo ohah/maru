@@ -114,7 +114,7 @@ RSS는 Maru 앱 프로세스와 해당 WebContent process를 분리해서 재고
 
 ## 파일 탐색기 scrollbar/icon 예산
 
-이 절은 [파일 패널 §7](file-panel.md#7-파일-트리-도크-영역-내)의 후속 PR 2 hot path를 소유한다. `app_session.zig`의 제품 glue를 직접 호출하는 macOS 테스트가 16,384 materialized row와 1,000회 pointer/frame을 실행하고 `tests/artifacts/perf/file-explorer.txt`에 실제 증가 지점이 있는 구조 counter만 남긴다. warm capacity 뒤 `FailingAllocator`의 실제 allocation 횟수와 기존 `dock_layout_build_count` delta를 함께 단언한다. 숫자 0으로만 초기화되는 가짜 lock/FS·MIME/worker/CoreText counter는 두지 않는다. 이 부재 계약은 filesystem/MIME API를 import하지 않는 중립 classifier/geometry 모듈 경계와 코드 검토가 맡으며, artifact가 자동 증명한다고 주장하지 않는다.
+이 절은 [파일 탐색기 §3](file-explorer.md#3-렌더--스크롤바아이콘)의 hot path를 소유한다. `app_session.zig`의 제품 glue를 직접 호출하는 macOS 테스트가 16,384 materialized row와 1,000회 pointer/frame을 실행하고 `tests/artifacts/perf/file-explorer.txt`에 실제 증가 지점이 있는 구조 counter만 남긴다. warm capacity 뒤 `FailingAllocator`의 실제 allocation 횟수와 기존 `dock_layout_build_count` delta를 함께 단언한다. 숫자 0으로만 초기화되는 가짜 lock/FS·MIME/worker/CoreText counter는 두지 않는다. 이 부재 계약은 filesystem/MIME API를 import하지 않는 중립 classifier/geometry 모듈 경계와 코드 검토가 맡으며, artifact가 자동 증명한다고 주장하지 않는다.
 
 | 경로 | hard gate | 실패 조건·구현 제약 |
 | --- | --- | --- |

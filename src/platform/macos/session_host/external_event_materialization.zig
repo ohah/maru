@@ -288,6 +288,17 @@ pub const OwnerMetadata = union(enum) {
     current: OwnerMetadataCurrent,
 };
 
+/// Pointer-free scalar projection of the persistent metadata baseline. Callers that need payload
+/// bytes must use the callback-scoped owner projection instead of widening this summary.
+pub const MetadataStateSummary = union(enum) {
+    unsupported,
+    unavailable,
+    current: struct {
+        revision: u64,
+        pending: bool,
+    },
+};
+
 pub const MetadataCleanupSelection = enum {
     none,
     logical,
@@ -380,6 +391,22 @@ pub const OwnerMetadataState = struct {
                     current.cleanup_seal,
                     &current.cleanup,
                 ),
+        };
+    }
+
+    pub fn metadataStateSummary(
+        self: *const OwnerMetadataState,
+        stable_parent: *const anyopaque,
+    ) ?MetadataStateSummary {
+        if (self.storage_addr != @intFromPtr(stable_parent) or !self.isCommitted())
+            return null;
+        return switch (self.metadata) {
+            .unsupported => .unsupported,
+            .unavailable => .unavailable,
+            .current => |current| .{ .current = .{
+                .revision = current.logical.revision,
+                .pending = current.pending,
+            } },
         };
     }
 
@@ -2431,6 +2458,32 @@ test "c3c-2b1 metadata destination takes materialized event into the same persis
     const frees_before = counting.deallocations;
     owner.deinitCommitted();
     try std.testing.expectEqual(frees_before + 1, counting.deallocations);
+}
+
+test "c3c-3b metadata summary is pointer free and fails closed on parent drift" {
+    var parent: u8 = 0;
+    var owner = OwnerMetadataState{
+        .storage_addr = @intFromPtr(&parent),
+        .source_addr = 1,
+        .metadata = .unsupported,
+        .lifecycle = .committed,
+    };
+    owner.saved_self_addr = @intFromPtr(&owner);
+
+    try std.testing.expectEqual(
+        MetadataStateSummary.unsupported,
+        owner.metadataStateSummary(&parent).?,
+    );
+    owner.metadata = .unavailable;
+    try std.testing.expectEqual(
+        MetadataStateSummary.unavailable,
+        owner.metadataStateSummary(&parent).?,
+    );
+
+    var wrong_parent: u8 = 0;
+    try std.testing.expect(owner.metadataStateSummary(&wrong_parent) == null);
+    owner.saved_self_addr +%= 1;
+    try std.testing.expect(owner.metadataStateSummary(&parent) == null);
 }
 
 fn testMetadataCandidate() !runtime_event_reducer.MetadataCandidate {

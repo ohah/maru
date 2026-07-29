@@ -448,6 +448,29 @@ pub const CommittedScreenBacklog = struct {
         );
     }
 
+    /// Deep, process-local snapshot of every backing descriptor element that typed teardown may
+    /// consume. Payload bytes remain ledger-owned and are deliberately represented by address and
+    /// length only; projection must detect authority drift without reading terminal output again.
+    pub fn projectionAuthorityDigest(
+        self: *const CommittedScreenBacklog,
+        stable_parent: *const anyopaque,
+    ) ?owner_seal.Digest {
+        if (!self.isCommitted(stable_parent)) return null;
+        var writer = owner_seal.Writer.init("maru.screen-owner.projection.v1");
+        writer.writeUsize(self.saved_self_addr);
+        writer.writeUsize(self.source_addr);
+        writer.writeUsize(self.ledger_addr);
+        writer.writeUsize(self.storage_addr);
+        writer.writeU64(self.target_stream);
+        writer.writeUsize(self.tokens_addr);
+        writer.writeUsize(self.tokens_len);
+        writer.writeUsize(self.retained_count);
+        for (self.released.masks) |mask| writer.writeUsize(mask);
+        writeProjectionTransfer(&writer, self.primary.transfer);
+        writeProjectionTransfer(&writer, self.cleanup.transfer);
+        return writer.finish();
+    }
+
     pub fn prepareFrozenCleanup(
         self: *const CommittedScreenBacklog,
         stable_parent: *const anyopaque,
@@ -607,6 +630,55 @@ pub const CommittedScreenBacklog = struct {
         _ = finishFrozenCleanup(&frozen);
     }
 };
+
+fn writeProjectionTransfer(
+    writer: *owner_seal.Writer,
+    transfer: PreparedTransfer,
+) void {
+    inline for (.{ transfer.copies, transfer.cleanup_copies }) |copies| {
+        writer.writeUsize(sliceAddress(client_mod.ExternalScreenCopy, copies));
+        writer.writeUsize(copies.len);
+        for (copies) |copy| {
+            writer.writeUsize(@intFromPtr(copy.allocator.ptr));
+            writer.writeUsize(@intFromPtr(copy.allocator.vtable));
+            writer.writeU8(@intFromEnum(copy.semantic));
+            switch (copy.semantic) {
+                .completed => |value| {
+                    writer.writeU64(value.stream_id);
+                    writer.writeBool(value.is_snapshot);
+                },
+                .partial => |value| {
+                    writer.writeU64(value.stream_id);
+                    writer.writeBool(value.is_snapshot);
+                    writer.writeU8(value.chunk_count);
+                },
+                .frame => |header| writer.writeBytes(&header.encode()),
+            }
+            writer.writeUsize(if (copy.bytes.len == 0) 0 else @intFromPtr(copy.bytes.ptr));
+            writer.writeUsize(copy.bytes.len);
+            writer.writeUsize(if (copy.view.len == 0) 0 else @intFromPtr(copy.view.ptr));
+            writer.writeUsize(copy.view.len);
+        }
+    }
+    inline for (.{ transfer.wrappers, transfer.cleanup_wrappers }) |wrappers| {
+        writer.writeUsize(sliceAddress(ledger_mod.OwnedPayload, wrappers));
+        writer.writeUsize(wrappers.len);
+        for (wrappers) |wrapper| {
+            writer.writeUsize(@intFromPtr(wrapper.allocator.ptr));
+            writer.writeUsize(@intFromPtr(wrapper.allocator.vtable));
+            writer.writeUsize(if (wrapper.allocation_ptr) |ptr| @intFromPtr(ptr) else 0);
+            writer.writeUsize(wrapper.logical_len);
+        }
+    }
+    inline for (.{ transfer.tokens, transfer.cleanup_tokens }) |tokens| {
+        writer.writeUsize(sliceAddress(ledger_mod.Token, tokens));
+        writer.writeUsize(tokens.len);
+        for (tokens) |token| {
+            writer.writeU16(token.slot);
+            writer.writeU64(token.generation);
+        }
+    }
+}
 
 pub fn finishFrozenCleanup(
     frozen: *FrozenCommittedScreenCleanup,

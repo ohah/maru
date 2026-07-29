@@ -23,6 +23,7 @@ const external_source_decision = @import("external_source_decision.zig");
 const framing = @import("framing.zig");
 const protocol = @import("protocol.zig");
 const resize_wire = @import("resize_wire.zig");
+const runtime_event_wire = @import("runtime_event_wire.zig");
 const runtime_metadata_wire = @import("runtime_metadata_wire.zig");
 
 pub const AttachmentRole = enum {
@@ -279,10 +280,129 @@ pub const PreparedAttachmentAuthority = struct {
     generation: AuthorityGeneration,
 };
 
+const owner_resize_seal_domain: u64 = 0x4d_41_52_55_4f_52_53_31;
+const owner_resize_seal_version: u16 = 1;
+
+const OwnerResizeSeal = struct {
+    domain: u64,
+    version: u16,
+    current_addr: usize,
+    storage_addr: usize,
+    runtime_id: u128,
+    generation: u64,
+    cols: u16,
+    rows: u16,
+    pending: bool,
+    digest: external_owner_seal.Digest,
+};
+
+const OwnerResizeCurrent = struct {
+    event: resize_wire.Event,
+    pending: bool,
+    seal: OwnerResizeSeal,
+};
+
 pub const OwnerResizeState = union(enum) {
     none,
-    pending: resize_wire.Event,
+    current: OwnerResizeCurrent,
 };
+
+fn ownerResizeDigest(seal: OwnerResizeSeal) external_owner_seal.Digest {
+    var writer = external_owner_seal.Writer.init("MARUORS1");
+    writer.writeU64(seal.domain);
+    writer.writeU16(seal.version);
+    writer.writeUsize(seal.current_addr);
+    writer.writeUsize(seal.storage_addr);
+    writer.writeU128(seal.runtime_id);
+    writer.writeU64(seal.generation);
+    writer.writeU16(seal.cols);
+    writer.writeU16(seal.rows);
+    writer.writeBool(seal.pending);
+    return writer.finish();
+}
+
+fn bindOwnerResize(storage: *ExternalPumpStorage, event: resize_wire.Event) void {
+    storage.owner_resize = .{ .current = .{
+        .event = event,
+        .pending = true,
+        .seal = undefined,
+    } };
+    const current = &storage.owner_resize.current;
+    current.seal = .{
+        .domain = owner_resize_seal_domain,
+        .version = owner_resize_seal_version,
+        .current_addr = @intFromPtr(&storage.owner_resize.current),
+        .storage_addr = @intFromPtr(storage),
+        .runtime_id = event.runtime_id,
+        .generation = event.resize_generation,
+        .cols = event.cols,
+        .rows = event.rows,
+        .pending = true,
+        .digest = undefined,
+    };
+    current.seal.digest = ownerResizeDigest(current.seal);
+}
+
+fn ownerResizeValid(storage: *const ExternalPumpStorage) bool {
+    return switch (storage.owner_resize) {
+        .none => true,
+        .current => |*current| blk: {
+            const seal = current.seal;
+            break :blk seal.domain == owner_resize_seal_domain and
+                seal.version == owner_resize_seal_version and
+                seal.current_addr == @intFromPtr(current) and
+                seal.storage_addr == @intFromPtr(storage) and
+                seal.runtime_id == current.event.runtime_id and
+                seal.generation == current.event.resize_generation and
+                seal.cols == current.event.cols and seal.rows == current.event.rows and
+                seal.pending == current.pending and
+                std.mem.eql(u8, &seal.digest, &ownerResizeDigest(seal));
+        },
+    };
+}
+
+const owner_incarnation_seal_domain: u64 = 0x4d_41_52_55_4f_49_4e_31;
+const owner_incarnation_seal_version: u16 = 1;
+
+const OwnerIncarnationSeal = struct {
+    domain: u64 = 0,
+    version: u16 = 0,
+    storage_addr: usize = 0,
+    owner_incarnation: u64 = 0,
+    digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+};
+
+fn ownerIncarnationDigest(seal: OwnerIncarnationSeal) external_owner_seal.Digest {
+    var writer = external_owner_seal.Writer.init("MARUOIN1");
+    writer.writeU64(seal.domain);
+    writer.writeU16(seal.version);
+    writer.writeUsize(seal.storage_addr);
+    writer.writeU64(seal.owner_incarnation);
+    return writer.finish();
+}
+
+fn bindOwnerIncarnation(storage: *ExternalPumpStorage, incarnation: u64) void {
+    std.debug.assert(incarnation != 0);
+    storage.owner_incarnation = incarnation;
+    storage.owner_incarnation_seal = .{
+        .domain = owner_incarnation_seal_domain,
+        .version = owner_incarnation_seal_version,
+        .storage_addr = @intFromPtr(storage),
+        .owner_incarnation = incarnation,
+    };
+    storage.owner_incarnation_seal.digest =
+        ownerIncarnationDigest(storage.owner_incarnation_seal);
+}
+
+fn ownerIncarnationValid(storage: *const ExternalPumpStorage) bool {
+    const seal = storage.owner_incarnation_seal;
+    return storage.owner_incarnation != 0 and
+        seal.domain == owner_incarnation_seal_domain and
+        seal.version == owner_incarnation_seal_version and
+        seal.storage_addr == @intFromPtr(storage) and
+        seal.owner_incarnation == storage.owner_incarnation and
+        std.mem.eql(u8, &seal.digest, &ownerIncarnationDigest(seal));
+}
 
 pub const OwnerAuthorityFlow = enum {
     initial_fence,
@@ -298,6 +418,64 @@ pub const OwnerAuthorityState = union(enum) {
     },
 };
 
+const OwnerAuthoritySeal = struct {
+    storage_addr: usize = 0,
+    owner_incarnation: u64 = 0,
+    role: AttachmentRole = .observer,
+    generation_tracked: bool = false,
+    generation: u64 = 0,
+    flow: OwnerAuthorityFlow = .initial_fence,
+    digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+};
+
+fn ownerAuthoritySealDigest(seal: OwnerAuthoritySeal) external_owner_seal.Digest {
+    var writer = external_owner_seal.Writer.init("MARUOAS1");
+    writer.writeUsize(seal.storage_addr);
+    writer.writeU64(seal.owner_incarnation);
+    writer.writeU8(@intFromEnum(seal.role));
+    writer.writeBool(seal.generation_tracked);
+    writer.writeU64(seal.generation);
+    writer.writeU8(@intFromEnum(seal.flow));
+    return writer.finish();
+}
+
+fn bindOwnerAuthority(storage: *ExternalPumpStorage) void {
+    const authority = storage.owner_authority.current;
+    const tracked = authority.generation == .tracked;
+    const generation = switch (authority.generation) {
+        .untracked => 0,
+        .tracked => |value| value,
+    };
+    storage.owner_authority_seal = .{
+        .storage_addr = @intFromPtr(storage),
+        .owner_incarnation = storage.owner_incarnation,
+        .role = authority.role,
+        .generation_tracked = tracked,
+        .generation = generation,
+        .flow = authority.flow,
+    };
+    storage.owner_authority_seal.digest =
+        ownerAuthoritySealDigest(storage.owner_authority_seal);
+}
+
+fn ownerAuthorityValid(storage: *const ExternalPumpStorage) bool {
+    const authority = switch (storage.owner_authority) {
+        .current => |authority| authority,
+        .empty => return false,
+    };
+    const seal = storage.owner_authority_seal;
+    const generation = switch (authority.generation) {
+        .untracked => 0,
+        .tracked => |value| value,
+    };
+    return seal.storage_addr == @intFromPtr(storage) and
+        seal.owner_incarnation == storage.owner_incarnation and
+        seal.role == authority.role and
+        seal.generation_tracked == (authority.generation == .tracked) and
+        seal.generation == generation and seal.flow == authority.flow and
+        std.mem.eql(u8, &seal.digest, &ownerAuthoritySealDigest(seal));
+}
+
 const OwnerScalarTakeLifecycle = enum {
     empty,
     prepared,
@@ -312,7 +490,7 @@ pub const PreparedOwnerScalarTake = struct {
     resize_addr: usize = 0,
     authority_addr: usize = 0,
     request_addr: usize = 0,
-    resize: OwnerResizeState = .none,
+    resize: ?resize_wire.Event = null,
     authority: OwnerAuthorityState = .empty,
     request_ids: client_pump.RequestIdState = .{ .available = 1 },
     lifecycle: OwnerScalarTakeLifecycle = .empty,
@@ -337,10 +515,7 @@ pub const PreparedOwnerScalarTake = struct {
             .adopted => |adopted| adopted,
             else => return false,
         };
-        const expected_resize = if (live.resize) |candidate|
-            OwnerResizeState{ .pending = candidate.event }
-        else
-            .none;
+        const expected_resize = if (live.resize) |candidate| candidate.event else null;
         const expected_authority = OwnerAuthorityState{ .current = .{
             .role = switch (live.authority.role) {
                 .observer => .observer,
@@ -786,6 +961,241 @@ pub const TeardownResult = enum {
     quarantined,
 };
 
+pub const MetadataStateResult = union(enum) {
+    state: external_event_materialization.MetadataStateSummary,
+    transaction_busy,
+    moved,
+    not_active,
+    dead,
+    invalid_owner,
+};
+
+const BorrowedMetadataView = struct {
+    revision: u64,
+    observer_generation: u64,
+    title_generation: u32,
+    cols: u16,
+    rows: u16,
+    semantic_state: runtime_metadata_wire.SemanticPrompt,
+    alt_active: bool,
+    app_cursor_keys: bool,
+    app_keypad: bool,
+    kitty_flags: u5,
+    alternate_scroll: bool,
+    mouse_tracking: bool,
+    mouse_tracking_mode: u8,
+    bracketed_paste: bool,
+    bell_count: u64,
+    clipboard_write_seq: u64,
+    clipboard_read_seq: u64,
+    foreground_available: bool,
+    foreground_pgid: ?i32,
+    cwd: []const u8,
+    window_title: []const u8,
+    ssh_remote_dest: ?[]const u8,
+    clipboard_read_target: []const u8,
+    processes: []const runtime_metadata_wire.Process,
+};
+
+const OwnerEventView = union(enum) {
+    resized: resize_wire.Event,
+    metadata: BorrowedMetadataView,
+};
+
+const ProjectionDecision = enum { applied, retry_preserved };
+
+const OwnerEventProjector = struct {
+    context: *anyopaque,
+    context_len: usize,
+    project: *const fn (*anyopaque, OwnerEventView) ProjectionDecision,
+};
+
+const ProjectOwnerEventResult = enum {
+    applied,
+    retry_preserved,
+    none,
+    fenced,
+    transaction_busy,
+    moved,
+    not_active,
+    dead,
+    terminal_latched,
+};
+
+const OwnerEventKind = enum { resized, metadata };
+
+const OwnerEventKey = union(OwnerEventKind) {
+    resized: struct {
+        generation: u64,
+        cols: u16,
+        rows: u16,
+    },
+    metadata: struct {
+        revision: u64,
+        raw_digest: runtime_event_wire.Digest,
+        semantic_digest: runtime_event_wire.Digest,
+    },
+};
+
+const OwnerEventPermitLifecycle = enum { empty, prepared, consumed_tombstone };
+
+const OwnerEventPermit = struct {
+    saved_self_addr: usize = 0,
+    storage_addr: usize = 0,
+    owner_incarnation: u64 = 0,
+    projection_generation: u64 = 0,
+    key: OwnerEventKey = .{ .resized = .{ .generation = 0, .cols = 0, .rows = 0 } },
+    digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    lifecycle: OwnerEventPermitLifecycle = .empty,
+};
+
+fn ownerEventPermitDigest(permit: OwnerEventPermit) external_owner_seal.Digest {
+    var writer = external_owner_seal.Writer.init("MARUOEP1");
+    writer.writeUsize(permit.saved_self_addr);
+    writer.writeUsize(permit.storage_addr);
+    writer.writeU64(permit.owner_incarnation);
+    writer.writeU64(permit.projection_generation);
+    switch (permit.key) {
+        .resized => |key| {
+            writer.writeU8(0);
+            writer.writeU64(key.generation);
+            writer.writeU16(key.cols);
+            writer.writeU16(key.rows);
+        },
+        .metadata => |key| {
+            writer.writeU8(1);
+            writer.writeU64(key.revision);
+            writer.writeBytes(&key.raw_digest);
+            writer.writeBytes(&key.semantic_digest);
+        },
+    }
+    return writer.finish();
+}
+
+fn prepareOwnerEventPermit(
+    storage: *const ExternalPumpStorage,
+    key: OwnerEventKey,
+    next_generation: u64,
+    out: *OwnerEventPermit,
+) bool {
+    if (!std.meta.eql(out.*, OwnerEventPermit{}) or next_generation == 0)
+        return false;
+    out.* = .{
+        .saved_self_addr = @intFromPtr(out),
+        .storage_addr = @intFromPtr(storage),
+        .owner_incarnation = storage.owner_incarnation,
+        .projection_generation = next_generation,
+        .key = key,
+        .lifecycle = .prepared,
+    };
+    out.digest = ownerEventPermitDigest(out.*);
+    return true;
+}
+
+fn ownerEventPermitValid(
+    storage: *const ExternalPumpStorage,
+    key: OwnerEventKey,
+    permit: *const OwnerEventPermit,
+) bool {
+    return permit.lifecycle == .prepared and
+        permit.saved_self_addr == @intFromPtr(permit) and
+        permit.storage_addr == @intFromPtr(storage) and
+        permit.owner_incarnation == storage.owner_incarnation and
+        permit.projection_generation == storage.owner_event_projection_generation and
+        std.meta.eql(permit.key, key) and
+        std.mem.eql(u8, &permit.digest, &ownerEventPermitDigest(permit.*));
+}
+
+fn consumeOwnerEventPermit(permit: *OwnerEventPermit) void {
+    permit.* = .{ .lifecycle = .consumed_tombstone };
+}
+
+const SelectedOwnerEvent = struct {
+    key: OwnerEventKey,
+    view: OwnerEventView,
+};
+
+const projection_test = if (builtin.is_test) struct {
+    const Lifecycle = enum { empty, prepared, consumed_tombstone };
+    const InitialFenceClearResult = enum { cleared, invalid };
+    const PreparedInitialFenceClear = struct {
+        storage_addr: usize = 0,
+        owner_incarnation: u64 = 0,
+        authority_generation: u64 = 0,
+        final_addr: usize = 0,
+        digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+        lifecycle: Lifecycle = .empty,
+    };
+
+    fn digest(permit: PreparedInitialFenceClear) external_owner_seal.Digest {
+        var writer = external_owner_seal.Writer.init("MARUIFC1");
+        writer.writeUsize(permit.storage_addr);
+        writer.writeU64(permit.owner_incarnation);
+        writer.writeU64(permit.authority_generation);
+        writer.writeUsize(permit.final_addr);
+        return writer.finish();
+    }
+
+    fn prepare(
+        storage: *const ExternalPumpStorage,
+        out: *PreparedInitialFenceClear,
+    ) bool {
+        if (!ownerIncarnationValid(storage) or !ownerAuthorityValid(storage))
+            return false;
+        const authority = switch (storage.owner_authority) {
+            .current => |authority| authority,
+            .empty => return false,
+        };
+        if (!std.meta.eql(out.*, PreparedInitialFenceClear{}) or
+            authority.flow != .initial_fence)
+            return false;
+        const generation = switch (authority.generation) {
+            .untracked => 0,
+            .tracked => |generation| generation,
+        };
+        out.* = .{
+            .storage_addr = @intFromPtr(storage),
+            .owner_incarnation = storage.owner_incarnation,
+            .authority_generation = generation,
+            .final_addr = @intFromPtr(out),
+            .lifecycle = .prepared,
+        };
+        out.digest = digest(out.*);
+        return true;
+    }
+
+    fn commit(
+        storage: *ExternalPumpStorage,
+        permit: *PreparedInitialFenceClear,
+    ) InitialFenceClearResult {
+        if (active_external_operation_addr != 0) return .invalid;
+        active_external_operation_addr = @intFromPtr(storage);
+        defer active_external_operation_addr = 0;
+        if (!ownerIncarnationValid(storage) or !ownerAuthorityValid(storage))
+            return .invalid;
+        const authority = switch (storage.owner_authority) {
+            .current => |*authority| authority,
+            .empty => return .invalid,
+        };
+        const generation = switch (authority.generation) {
+            .untracked => 0,
+            .tracked => |generation| generation,
+        };
+        if (permit.lifecycle != .prepared or
+            permit.final_addr != @intFromPtr(permit) or
+            permit.storage_addr != @intFromPtr(storage) or
+            permit.owner_incarnation != storage.owner_incarnation or
+            permit.authority_generation != generation or
+            !std.mem.eql(u8, &permit.digest, &digest(permit.*)) or
+            authority.flow != .initial_fence)
+            return .invalid;
+        authority.flow = .clear;
+        bindOwnerAuthority(storage);
+        permit.* = .{ .lifecycle = .consumed_tombstone };
+        return .cleared;
+    }
+} else struct {};
+
 const UncommittedCloseResult = enum {
     cleaned,
     cleaned_with_invariant,
@@ -858,6 +1268,7 @@ const ExternalPumpCleanupScratchLifecycle = enum {
     frozen,
     poisoned,
 };
+const ExternalPumpRangeScratchKind = enum { source, teardown };
 
 /// Persistent caller-owned cleanup authority shared by prepare and its immediate suffix.
 ///
@@ -868,6 +1279,7 @@ pub const ExternalPumpCleanupScratch = struct {
     saved_self_addr: usize = 0,
     lifecycle: ExternalPumpCleanupScratchLifecycle = .empty,
     client: client_mod.ExternalAdoptionCleanupScratch = undefined,
+    range_scratch_kind: ExternalPumpRangeScratchKind = .source,
     range_scratch: union {
         source: client_mod.ExternalSourceOwnerRangeScratch,
         teardown: external_owner_range.Scratch,
@@ -890,6 +1302,7 @@ pub const ExternalPumpCleanupScratch = struct {
         if (out.lifecycle != .empty or out.saved_self_addr != 0) return false;
         out.saved_self_addr = @intFromPtr(out);
         out.lifecycle = .ready;
+        out.range_scratch_kind = .source;
         out.range_scratch.source = .{};
         out.recovery_discard = .{};
         out.ledger_permit = .{};
@@ -910,6 +1323,7 @@ pub const ExternalPumpCleanupScratch = struct {
     fn isReady(self: *const ExternalPumpCleanupScratch) bool {
         return self.saved_self_addr == @intFromPtr(self) and
             self.lifecycle == .ready and
+            self.range_scratch_kind == .source and
             self.recovery_discard.isEmpty() and
             self.ledger_permit.saved_self_addr == 0 and
             self.ledger_prepared.saved_self_addr == 0 and
@@ -926,6 +1340,7 @@ pub const ExternalPumpCleanupScratch = struct {
 
     fn resetReady(self: *ExternalPumpCleanupScratch) void {
         self.saved_self_addr = @intFromPtr(self);
+        self.range_scratch_kind = .source;
         self.range_scratch.source = .{};
         self.recovery_discard = .{};
         self.ledger_permit = .{};
@@ -1002,7 +1417,11 @@ pub const ExternalPumpStorage = struct {
     owner_metadata: external_event_materialization.OwnerMetadataState = .{},
     owner_resize: OwnerResizeState = .none,
     owner_authority: OwnerAuthorityState = .empty,
+    owner_authority_seal: OwnerAuthoritySeal = .{},
     owner_request_ids: ?client_pump.RequestIdState = null,
+    owner_incarnation: u64 = 0,
+    owner_incarnation_seal: OwnerIncarnationSeal = .{},
+    owner_event_projection_generation: u64 = 0,
     operation_generation: u64 = 0,
     owner_teardown_generation: u64 = 0,
 
@@ -1219,6 +1638,350 @@ pub const ExternalPumpStorage = struct {
             },
             .tearing_down, .dead => error.Terminal,
         };
+    }
+
+    /// Pointer-free metadata query. Invalid committed authority stays distinguishable from ordinary
+    /// lifecycle states; this read-only operation never attempts cleanup without caller scratch.
+    pub fn metadataState(self: *const ExternalPumpStorage) MetadataStateResult {
+        if (self.saved_self_addr != 0 and self.saved_self_addr != @intFromPtr(self))
+            return .moved;
+        if (active_external_operation_addr != 0)
+            return .transaction_busy;
+        active_external_operation_addr = @intFromPtr(self);
+        defer active_external_operation_addr = 0;
+        switch (self.lifecycle) {
+            .empty, .constructing, .normalizing, .adopting, .adoption_preparing => return .not_active,
+            .tearing_down, .dead => return .dead,
+            .live => {},
+        }
+        switch (self.semantic_state) {
+            .active => {},
+            .terminal => return .dead,
+            else => return .not_active,
+        }
+        const summary = self.owner_metadata.metadataStateSummary(self) orelse
+            return .invalid_owner;
+        return .{ .state = summary };
+    }
+
+    fn projectOwnerEventInternal(
+        self: *ExternalPumpStorage,
+        projector: OwnerEventProjector,
+        cleanup_scratch: *ExternalPumpCleanupScratch,
+    ) ProjectOwnerEventResult {
+        if (self.saved_self_addr != 0 and self.saved_self_addr != @intFromPtr(self))
+            return .moved;
+        if (active_external_operation_addr != 0)
+            return .transaction_busy;
+        switch (self.lifecycle) {
+            .empty, .constructing, .normalizing, .adopting, .adoption_preparing => return .not_active,
+            .tearing_down, .dead => return .dead,
+            .live => {},
+        }
+        switch (self.semantic_state) {
+            .active => {},
+            .terminal => return .dead,
+            else => return .not_active,
+        }
+        active_external_operation_addr = @intFromPtr(self);
+        defer active_external_operation_addr = 0;
+        if (!ownerIncarnationValid(self) or !ownerAuthorityValid(self))
+            return self.quarantineProjection(cleanup_scratch, false);
+        const authority = self.owner_authority.current;
+        if (authority.flow == .initial_fence) return .fenced;
+        if (cleanupScratchOverlapsStorage(self, cleanup_scratch) or
+            !cleanup_scratch.isReady())
+            return self.quarantineProjection(cleanup_scratch, false);
+
+        const metadata_summary = self.owner_metadata.metadataStateSummary(self) orelse
+            return self.quarantineProjection(cleanup_scratch, true);
+        if (!ownerResizeValid(self) or !self.inbox_ledger.accountingView().valid)
+            return self.quarantineProjection(cleanup_scratch, true);
+        if (!self.projectionScratchDisjoint(cleanup_scratch))
+            return self.quarantineProjection(cleanup_scratch, false);
+        if (self.owner_event_projection_generation == std.math.maxInt(u64)) {
+            switch (self.teardownUnderHeldOperationLease(cleanup_scratch)) {
+                .cleaned, .cleaned_with_invariant, .already_dead, .quarantined => {},
+                .moved_storage, .transaction_busy => {
+                    _ = self.quarantineOwnerTeardown(cleanup_scratch, true);
+                },
+            }
+            return .terminal_latched;
+        }
+        const next_generation = self.owner_event_projection_generation + 1;
+
+        const selected: SelectedOwnerEvent = switch (self.owner_resize) {
+            .current => |current| if (current.pending)
+                .{
+                    .key = .{ .resized = .{
+                        .generation = current.event.resize_generation,
+                        .cols = current.event.cols,
+                        .rows = current.event.rows,
+                    } },
+                    .view = .{ .resized = current.event },
+                }
+            else
+                self.selectMetadataEvent(metadata_summary) orelse return .none,
+            .none => self.selectMetadataEvent(metadata_summary) orelse return .none,
+        };
+
+        var permit: OwnerEventPermit = .{};
+        if (!prepareOwnerEventPermit(self, selected.key, next_generation, &permit))
+            return self.quarantineProjection(cleanup_scratch, true);
+        defer if (permit.lifecycle == .prepared) consumeOwnerEventPermit(&permit);
+        if (!self.projectorContextDisjoint(projector, cleanup_scratch, &permit))
+            return self.finishProjectionWithTrustedTeardown(cleanup_scratch, &permit);
+
+        const ledger_authority = self.inbox_ledger.projectionAuthorityDigest();
+        const screen_authority =
+            self.committed_screen.projectionAuthorityDigest(self) orelse
+            return self.quarantineProjection(cleanup_scratch, true);
+        const take_authority =
+            self.client_cleanup_take.projectionAuthorityDigest() orelse
+            return self.quarantineProjection(cleanup_scratch, true);
+        const operation_generation = self.operation_generation;
+        const teardown_generation = self.owner_teardown_generation;
+        // Exact-copy the complete outer Client before traversing any owned backing. The post
+        // callback path must compare this descriptor-only snapshot first; otherwise a forged list
+        // pointer could be dereferenced while trying to compute the deep digest that detects it.
+        const client_outer_authority = self.owned_client;
+        const client_authority = if (self.owned_client) |*client|
+            client.projectionAuthorityDigest()
+        else
+            null;
+        const evidence_authority = self.owned_evidence;
+        self.owner_event_projection_generation = next_generation;
+        const decision = projector.project(projector.context, selected.view);
+
+        if (!cleanup_scratch.isReady())
+            return self.quarantineProjection(cleanup_scratch, false);
+        const semantic_active = switch (self.semantic_state) {
+            .active => true,
+            else => false,
+        };
+        if (self.saved_self_addr != @intFromPtr(self) or self.lifecycle != .live or
+            !semantic_active or !ownerIncarnationValid(self) or
+            !ownerAuthorityValid(self) or
+            self.operation_generation != operation_generation or
+            self.owner_teardown_generation != teardown_generation)
+            return self.quarantineProjection(cleanup_scratch, true);
+        const post_ledger_authority = self.inbox_ledger.projectionAuthorityDigest();
+        const post_screen_authority =
+            self.committed_screen.projectionAuthorityDigest(self) orelse
+            return self.quarantineProjection(cleanup_scratch, true);
+        const post_take_authority =
+            self.client_cleanup_take.projectionAuthorityDigest() orelse
+            return self.quarantineProjection(cleanup_scratch, true);
+        if (!std.mem.eql(
+            u8,
+            &ledger_authority,
+            &post_ledger_authority,
+        ) or !std.mem.eql(u8, &screen_authority, &post_screen_authority) or
+            !std.mem.eql(u8, &take_authority, &post_take_authority) or
+            !std.meta.eql(client_outer_authority, self.owned_client) or
+            !std.meta.eql(evidence_authority, self.owned_evidence))
+            return self.quarantineProjection(cleanup_scratch, true);
+        // The shallow equality above is the descriptor-first memory-safety gate. Only now may the
+        // deep transcript traverse list elements through those exact pre-callback pointers.
+        const post_client_authority = if (self.owned_client) |*client|
+            client.projectionAuthorityDigest()
+        else
+            null;
+        if (!std.meta.eql(client_authority, post_client_authority))
+            return self.quarantineProjection(cleanup_scratch, true);
+        const post_summary = self.owner_metadata.metadataStateSummary(self) orelse
+            return self.quarantineProjection(cleanup_scratch, true);
+        if (!ownerResizeValid(self) or !self.selectedEventStillMatches(selected, post_summary))
+            return self.quarantineProjection(cleanup_scratch, true);
+        if (!ownerEventPermitValid(self, selected.key, &permit))
+            return self.finishProjectionWithTrustedTeardown(cleanup_scratch, &permit);
+
+        consumeOwnerEventPermit(&permit);
+        switch (decision) {
+            .retry_preserved => return .retry_preserved,
+            .applied => {
+                switch (selected.key) {
+                    .resized => {
+                        self.owner_resize.current.pending = false;
+                        self.resealOwnerResize();
+                    },
+                    .metadata => self.owner_metadata.metadata.current.pending = false,
+                }
+                return .applied;
+            },
+        }
+    }
+
+    fn selectMetadataEvent(
+        self: *ExternalPumpStorage,
+        summary: external_event_materialization.MetadataStateSummary,
+    ) ?SelectedOwnerEvent {
+        const scalar = switch (summary) {
+            .unsupported, .unavailable => return null,
+            .current => |current| current,
+        };
+        if (!scalar.pending) return null;
+        const current = &self.owner_metadata.metadata.current;
+        const dto = &current.logical;
+        return .{
+            .key = .{ .metadata = .{
+                .revision = scalar.revision,
+                .raw_digest = current.logical_seal.raw_digest,
+                .semantic_digest = current.logical_seal.semantic_digest,
+            } },
+            .view = .{ .metadata = .{
+                .revision = dto.revision,
+                .observer_generation = dto.observer_generation,
+                .title_generation = dto.title_generation,
+                .cols = dto.cols,
+                .rows = dto.rows,
+                .semantic_state = dto.semantic_state,
+                .alt_active = dto.alt_active,
+                .app_cursor_keys = dto.app_cursor_keys,
+                .app_keypad = dto.app_keypad,
+                .kitty_flags = dto.kitty_flags,
+                .alternate_scroll = dto.alternate_scroll,
+                .mouse_tracking = dto.mouse_tracking,
+                .mouse_tracking_mode = dto.mouse_tracking_mode,
+                .bracketed_paste = dto.bracketed_paste,
+                .bell_count = dto.bell_count,
+                .clipboard_write_seq = dto.clipboard_write_seq,
+                .clipboard_read_seq = dto.clipboard_read_seq,
+                .foreground_available = dto.foreground_available,
+                .foreground_pgid = dto.foreground_pgid,
+                .cwd = dto.cwd(),
+                .window_title = dto.windowTitle(),
+                .ssh_remote_dest = dto.sshRemoteDest(),
+                .clipboard_read_target = dto.clipboardReadTarget(),
+                .processes = dto.foregroundProcesses(),
+            } },
+        };
+    }
+
+    fn projectorContextDisjoint(
+        self: *const ExternalPumpStorage,
+        projector: OwnerEventProjector,
+        cleanup_scratch: *const ExternalPumpCleanupScratch,
+        permit: *const OwnerEventPermit,
+    ) bool {
+        const context_addr = @intFromPtr(projector.context);
+        if (context_addr == 0 or projector.context_len == 0)
+            return false;
+        _ = std.math.add(usize, context_addr, projector.context_len) catch return false;
+        if (rangesOverlap(context_addr, projector.context_len, @intFromPtr(self), @sizeOf(ExternalPumpStorage)) or
+            rangesOverlap(context_addr, projector.context_len, @intFromPtr(cleanup_scratch), @sizeOf(ExternalPumpCleanupScratch)) or
+            rangesOverlap(context_addr, projector.context_len, @intFromPtr(permit), @sizeOf(OwnerEventPermit)))
+            return false;
+        if (self.owner_metadata.metadata == .current) {
+            const current = &self.owner_metadata.metadata.current;
+            if (current.logical.backing) |backing|
+                if (rangesOverlap(
+                    context_addr,
+                    projector.context_len,
+                    @intFromPtr(backing.ptr),
+                    backing.len,
+                )) return false;
+            if (current.cleanup.backing) |backing|
+                if (rangesOverlap(
+                    context_addr,
+                    projector.context_len,
+                    @intFromPtr(backing.ptr),
+                    backing.len,
+                )) return false;
+        }
+        return true;
+    }
+
+    fn projectionScratchDisjoint(
+        self: *const ExternalPumpStorage,
+        cleanup_scratch: *const ExternalPumpCleanupScratch,
+    ) bool {
+        const scratch_addr = @intFromPtr(cleanup_scratch);
+        const scratch_len = @sizeOf(ExternalPumpCleanupScratch);
+        if (self.inbox_ledger.overlapsOwnedRange(scratch_addr, scratch_len))
+            return false;
+        if (self.owner_metadata.metadata == .current) {
+            const current = &self.owner_metadata.metadata.current;
+            if (current.logical.backing) |backing|
+                if (rangesOverlap(
+                    scratch_addr,
+                    scratch_len,
+                    @intFromPtr(backing.ptr),
+                    backing.len,
+                )) return false;
+            if (current.cleanup.backing) |backing|
+                if (rangesOverlap(
+                    scratch_addr,
+                    scratch_len,
+                    @intFromPtr(backing.ptr),
+                    backing.len,
+                )) return false;
+        }
+        if (self.owned_client) |*owned| {
+            var source_ranges: client_mod.ExternalSourceOwnerRangeScratch = .{};
+            owned.preflightExternalAdoptionDestinationWithScratch(
+                @constCast(cleanup_scratch),
+                scratch_len,
+                &source_ranges,
+            ) catch return false;
+        }
+        return true;
+    }
+
+    fn selectedEventStillMatches(
+        self: *const ExternalPumpStorage,
+        selected: SelectedOwnerEvent,
+        metadata_summary: external_event_materialization.MetadataStateSummary,
+    ) bool {
+        return switch (selected.key) {
+            .resized => |key| self.owner_resize == .current and
+                self.owner_resize.current.pending and
+                self.owner_resize.current.event.resize_generation == key.generation and
+                self.owner_resize.current.event.cols == key.cols and
+                self.owner_resize.current.event.rows == key.rows,
+            .metadata => |key| metadata_summary == .current and
+                metadata_summary.current.pending and
+                metadata_summary.current.revision == key.revision and
+                std.mem.eql(
+                    u8,
+                    &self.owner_metadata.metadata.current.logical_seal.raw_digest,
+                    &key.raw_digest,
+                ) and std.mem.eql(
+                u8,
+                &self.owner_metadata.metadata.current.logical_seal.semantic_digest,
+                &key.semantic_digest,
+            ),
+        };
+    }
+
+    fn resealOwnerResize(self: *ExternalPumpStorage) void {
+        const current = &self.owner_resize.current;
+        current.seal.pending = current.pending;
+        current.seal.digest = ownerResizeDigest(current.seal);
+    }
+
+    fn finishProjectionWithTrustedTeardown(
+        self: *ExternalPumpStorage,
+        cleanup_scratch: *ExternalPumpCleanupScratch,
+        permit: *OwnerEventPermit,
+    ) ProjectOwnerEventResult {
+        consumeOwnerEventPermit(permit);
+        switch (self.teardownUnderHeldOperationLease(cleanup_scratch)) {
+            .cleaned, .cleaned_with_invariant, .already_dead, .quarantined => {},
+            .moved_storage, .transaction_busy => {
+                _ = self.quarantineOwnerTeardown(cleanup_scratch, true);
+            },
+        }
+        return .terminal_latched;
+    }
+
+    fn quarantineProjection(
+        self: *ExternalPumpStorage,
+        cleanup_scratch: *ExternalPumpCleanupScratch,
+        scratch_trusted: bool,
+    ) ProjectOwnerEventResult {
+        _ = self.quarantineOwnerTeardown(cleanup_scratch, scratch_trusted);
+        return .terminal_latched;
     }
 
     /// The sole product entry point for partial screen consumption. The process-thread lease
@@ -1654,6 +2417,7 @@ pub const ExternalPumpStorage = struct {
         const ledger_snapshot = self.inbox_ledger;
         var evidence: PreparedAdoptionEvidence = .{};
         const owned_evidence = if (self.owned_evidence) |*owned| owned else return self.finishImmediateTerminal(.invariant_failure, cleanup_scratch);
+        const owner_incarnation = owned_evidence.attach_instance_id;
         owned_evidence.moveInto(&evidence, client);
         self.owned_evidence = null;
         var frozen_client = client.*;
@@ -1731,6 +2495,9 @@ pub const ExternalPumpStorage = struct {
             .flow = .initial_fence,
         } };
         self.owner_request_ids = request_state;
+        bindOwnerIncarnation(self, owner_incarnation);
+        bindOwnerAuthority(self);
+        self.owner_event_projection_generation = 0;
         self.lifecycle = .live;
         cleanup_scratch.resetReady();
         return .recovery_committed;
@@ -1796,6 +2563,9 @@ pub const ExternalPumpStorage = struct {
         self.owner_resize = .none;
         self.owner_authority = .empty;
         self.owner_request_ids = null;
+        self.owner_incarnation = 0;
+        self.owner_incarnation_seal = .{};
+        self.owner_event_projection_generation = 0;
         self.semantic_state = .{ .terminal = .{
             .reason = reason,
             .fd_disposition = .owner_cleanup,
@@ -1836,6 +2606,9 @@ pub const ExternalPumpStorage = struct {
         self.owner_resize = .none;
         self.owner_authority = .empty;
         self.owner_request_ids = null;
+        self.owner_incarnation = 0;
+        self.owner_incarnation_seal = .{};
+        self.owner_event_projection_generation = 0;
         self.lifecycle = .dead;
         releaseActiveStorage(@intFromPtr(self));
         return .terminal_latched;
@@ -1885,10 +2658,7 @@ pub const ExternalPumpStorage = struct {
             .resize_addr = @intFromPtr(&self.owner_resize),
             .authority_addr = @intFromPtr(&self.owner_authority),
             .request_addr = @intFromPtr(&self.owner_request_ids),
-            .resize = if (live.resize) |candidate|
-                .{ .pending = candidate.event }
-            else
-                .none,
+            .resize = if (live.resize) |candidate| candidate.event else null,
             .authority = .{ .current = .{
                 .role = switch (live.authority.role) {
                     .observer => .observer,
@@ -2020,7 +2790,11 @@ pub const ExternalPumpStorage = struct {
             !self.owner_metadata.isEmpty() or
             self.owner_resize != .none or
             self.owner_authority != .empty or
-            self.owner_request_ids != null)
+            !std.meta.eql(self.owner_authority_seal, OwnerAuthoritySeal{}) or
+            self.owner_request_ids != null or
+            self.owner_incarnation != 0 or
+            !std.meta.eql(self.owner_incarnation_seal, OwnerIncarnationSeal{}) or
+            self.owner_event_projection_generation != 0)
             return false;
         const client = if (self.owned_client) |*owned| owned else return false;
         const evidence = if (self.owned_evidence) |*owned| owned else return false;
@@ -2113,7 +2887,10 @@ pub const ExternalPumpStorage = struct {
         self: *ExternalPumpStorage,
         take: *PreparedOwnerScalarTake,
     ) void {
-        self.owner_resize = take.resize;
+        if (take.resize) |event|
+            bindOwnerResize(self, event)
+        else
+            self.owner_resize = .none;
         self.owner_authority = take.authority;
         self.owner_request_ids = take.request_ids;
         take.* = .{ .lifecycle = .committed_tombstone };
@@ -2255,7 +3032,10 @@ pub const ExternalPumpStorage = struct {
             &self.owner_metadata,
         );
         recorder.record(.metadata_destination);
+        bindOwnerIncarnation(self, evidence.attach_instance_id);
         self.commitOwnerScalarTakeUnchecked(&plan.scalar_take);
+        bindOwnerAuthority(self);
+        self.owner_event_projection_generation = 0;
         recorder.record(.scalar_destination);
         client_mod.commitExternalAdoptionTakeUnchecked(
             client,
@@ -2368,6 +3148,24 @@ pub const ExternalPumpStorage = struct {
             .constructing, .normalizing, .adoption_preparing, .tearing_down => return .transaction_busy,
             .adopting, .live => {},
         }
+        active_external_operation_addr = @intFromPtr(self);
+        defer active_external_operation_addr = 0;
+        return self.teardownUnderHeldOperationLease(cleanup_scratch);
+    }
+
+    fn teardownUnderHeldOperationLease(
+        self: *ExternalPumpStorage,
+        cleanup_scratch: *ExternalPumpCleanupScratch,
+    ) TeardownResult {
+        if (active_external_operation_addr != @intFromPtr(self))
+            return .transaction_busy;
+        if (self.saved_self_addr != @intFromPtr(self))
+            return .moved_storage;
+        switch (self.lifecycle) {
+            .adopting, .live => {},
+            .empty, .dead => return .already_dead,
+            else => return .transaction_busy,
+        }
         if (cleanupScratchOverlapsStorage(self, cleanup_scratch))
             return self.quarantineOwnerTeardown(cleanup_scratch, false);
         if (!cleanup_scratch.isReady())
@@ -2375,13 +3173,6 @@ pub const ExternalPumpStorage = struct {
         if (self.owner_teardown_generation == std.math.maxInt(u64))
             return self.quarantineOwnerTeardown(cleanup_scratch, true);
         const next_generation = self.owner_teardown_generation + 1;
-
-        // Seal the aggregate operation before minting the ledger permit or publishing any other
-        // prepared product. Allocator-free prepare code can still be entered re-entrantly through
-        // hostile test hooks in sibling owners; the process-wide lease is the authority that makes
-        // the complete permit graph single-generation rather than merely well-formed per object.
-        active_external_operation_addr = @intFromPtr(self);
-        defer active_external_operation_addr = 0;
 
         // Before adoption commit, every allocation still belongs to the prepared graph rather
         // than the committed screen/metadata/take owners. Keep that graph on its established
@@ -2496,7 +3287,11 @@ pub const ExternalPumpStorage = struct {
         self.client_transfer = .{};
         self.owner_resize = .none;
         self.owner_authority = .empty;
+        self.owner_authority_seal = .{};
         self.owner_request_ids = null;
+        self.owner_incarnation = 0;
+        self.owner_incarnation_seal = .{};
+        self.owner_event_projection_generation = 0;
         cleanup_scratch.lifecycle = .frozen;
 
         var local_ledger = cleanup_scratch.ledger_frozen;
@@ -2562,7 +3357,11 @@ pub const ExternalPumpStorage = struct {
         self.client_cleanup_take = .{ .lifecycle = .aborted };
         self.owner_resize = .none;
         self.owner_authority = .empty;
+        self.owner_authority_seal = .{};
         self.owner_request_ids = null;
+        self.owner_incarnation = 0;
+        self.owner_incarnation_seal = .{};
+        self.owner_event_projection_generation = 0;
         self.operation_generation = operation_generation;
         self.owner_teardown_generation = next_generation;
         self.semantic_state = terminal_state;
@@ -2577,6 +3376,7 @@ pub const ExternalPumpStorage = struct {
         cleanup_scratch: *ExternalPumpCleanupScratch,
     ) bool {
         var source_ranges = cleanup_scratch.range_scratch.source;
+        cleanup_scratch.range_scratch_kind = .teardown;
         cleanup_scratch.range_scratch = .{ .teardown = .{} };
         const ranges = &cleanup_scratch.range_scratch.teardown;
         if (self.owned_client) |*owned|
@@ -2637,6 +3437,9 @@ pub const ExternalPumpStorage = struct {
         _ = cross_owner_quarantine_events.fetchAdd(1, .acq_rel);
         if (scratch_trusted)
             cleanup_scratch.lifecycle = .poisoned;
+        self.owner_incarnation = 0;
+        self.owner_incarnation_seal = .{};
+        self.owner_event_projection_generation = 0;
         releaseActiveStorage(@intFromPtr(self));
         return .quarantined;
     }
@@ -2970,16 +3773,13 @@ fn adoptionFinalSealDigest(
         writer.writeBytes(&seal.raw_digest);
         writer.writeBytes(&seal.semantic_digest);
     } else writer.writeBool(false);
-    switch (plan.scalar_take.resize) {
-        .none => writer.writeU8(0),
-        .pending => |resize| {
-            writer.writeU8(1);
-            writer.writeU128(resize.runtime_id);
-            writer.writeU16(resize.cols);
-            writer.writeU16(resize.rows);
-            writer.writeU64(resize.resize_generation);
-        },
-    }
+    if (plan.scalar_take.resize) |resize| {
+        writer.writeU8(1);
+        writer.writeU128(resize.runtime_id);
+        writer.writeU16(resize.cols);
+        writer.writeU16(resize.rows);
+        writer.writeU64(resize.resize_generation);
+    } else writer.writeU8(0);
     switch (plan.scalar_take.authority) {
         .empty => writer.writeU8(0),
         .current => |authority| {
@@ -4816,12 +5616,15 @@ test "c3c-2b2 final permit rejects bound address and leaf drift before ledger mu
                 .owner_request_ids_addr +%= 1,
             .committed_screen_lifecycle => storage.committed_screen.lifecycle = .cleaned_tombstone,
             .owner_metadata_lifecycle => storage.owner_metadata.lifecycle = .cleaned_tombstone,
-            .owner_resize_lifecycle => storage.owner_resize = .{ .pending = .{
-                .runtime_id = valid_evidence.runtime_id,
-                .cols = 80,
-                .rows = 24,
-                .resize_generation = 1,
-            } },
+            .owner_resize_lifecycle => {
+                bindOwnerResize(&storage, .{
+                    .runtime_id = valid_evidence.runtime_id,
+                    .cols = 80,
+                    .rows = 24,
+                    .resize_generation = 1,
+                });
+                storage.owner_resize.current.seal.pending = false;
+            },
             .owner_authority_lifecycle => storage.owner_authority = .{ .current = .{
                 .role = .controller,
                 .generation = .{ .tracked = 3 },
@@ -5383,6 +6186,10 @@ test "c3c-2b2 prepared scalar take aborts on ordinary teardown" {
 test "c3c-2b2 prepared scalar take derives pending resize from the adopted decision" {
     var fixture = try TestClient.init();
     defer fixture.deinitPeer();
+    fixture.client.metadata_support = .supported;
+    try appendTestEvent(&fixture.client,
+        \\{"event":"runtime.metadata","metadata_revision":2,"metadata":{"cwd":"/repo","window_title":"work","ssh_remote_dest":null,"semantic_state":0,"alt_active":false,"app_cursor_keys":false,"alternate_scroll":true,"observer_generation":1,"title_generation":1,"cols":80,"rows":24,"foreground_available":false,"foreground_pgid":null,"processes":[]}}
+    );
     try appendTestEvent(&fixture.client,
         \\{"event":"runtime.resized","data":{"runtime_id":"000000000000000000000000000000aa","cols":132,"rows":43,"resize_generation":9,"reason":"controller"}}
     );
@@ -5394,11 +6201,967 @@ test "c3c-2b2 prepared scalar take derives pending resize from the adopted decis
     defer _ = teardownForTest(&storage);
     try std.testing.expect(prepareAdoptionForTest(&storage) == .prepared_adopted);
     const take = &storage.prepared_adoption.scalar_take;
-    try std.testing.expect(take.resize == .pending);
-    try std.testing.expectEqual(@as(u16, 132), take.resize.pending.cols);
-    try std.testing.expectEqual(@as(u16, 43), take.resize.pending.rows);
-    try std.testing.expectEqual(@as(u64, 9), take.resize.pending.resize_generation);
+    const resize = take.resize orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u16, 132), resize.cols);
+    try std.testing.expectEqual(@as(u16, 43), resize.rows);
+    try std.testing.expectEqual(@as(u64, 9), resize.resize_generation);
     try std.testing.expect(storage.owner_resize == .none);
+    try std.testing.expect(storage.commitAdoption() == .adopted);
+    try std.testing.expect(storage.owner_resize == .current);
+    try std.testing.expect(ownerResizeValid(&storage));
+    try std.testing.expect(storage.owner_resize.current.pending);
+    try std.testing.expectEqual(@as(u16, 132), storage.owner_resize.current.event.cols);
+}
+
+test "c3c-3b adopted owner seals incarnation and metadata query fails closed" {
+    var fixture = try TestClient.init();
+    defer fixture.deinitPeer();
+    var storage: ExternalPumpStorage = .{};
+    try std.testing.expect(
+        initTestStorage(&storage, &fixture.client, valid_evidence) ==
+            .initialized,
+    );
+    defer _ = teardownForTest(&storage);
+    try std.testing.expect(prepareAdoptionForTest(&storage) == .prepared_adopted);
+    try std.testing.expect(storage.commitAdoption() == .adopted);
+    try std.testing.expect(ownerIncarnationValid(&storage));
+    try std.testing.expect(storage.owner_event_projection_generation == 0);
+    try std.testing.expect(storage.metadataState() == .state);
+
+    active_external_operation_addr = @intFromPtr(&storage);
+    try std.testing.expect(storage.metadataState() == .transaction_busy);
+    active_external_operation_addr = 0;
+
+    const metadata_addr = storage.owner_metadata.saved_self_addr;
+    storage.owner_metadata.saved_self_addr +%= 1;
+    try std.testing.expect(storage.metadataState() == .invalid_owner);
+    storage.owner_metadata.saved_self_addr = metadata_addr;
+}
+
+test "c3c-3b resize projection retries then clears only the matching pending baseline" {
+    const ProjectionProbe = struct {
+        calls: usize = 0,
+        decision: ProjectionDecision = .retry_preserved,
+        last_resize: ?resize_wire.Event = null,
+
+        fn project(raw: *anyopaque, view: OwnerEventView) ProjectionDecision {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.calls += 1;
+            self.last_resize = switch (view) {
+                .resized => |event| event,
+                .metadata => null,
+            };
+            return self.decision;
+        }
+    };
+
+    var fixture = try TestClient.init();
+    defer fixture.deinitPeer();
+    fixture.client.metadata_support = .supported;
+    try appendTestEvent(&fixture.client,
+        \\{"event":"runtime.metadata","metadata_revision":2,"metadata":{"cwd":"/repo","window_title":"work","ssh_remote_dest":null,"semantic_state":0,"alt_active":false,"app_cursor_keys":false,"alternate_scroll":true,"observer_generation":1,"title_generation":1,"cols":80,"rows":24,"foreground_available":false,"foreground_pgid":null,"processes":[]}}
+    );
+    try appendTestEvent(&fixture.client,
+        \\{"event":"runtime.resized","data":{"runtime_id":"000000000000000000000000000000aa","cols":132,"rows":43,"resize_generation":9,"reason":"controller"}}
+    );
+    var storage: ExternalPumpStorage = .{};
+    try std.testing.expect(
+        initTestStorage(&storage, &fixture.client, valid_evidence) ==
+            .initialized,
+    );
+    defer _ = teardownForTest(&storage);
+    try std.testing.expect(prepareAdoptionForTest(&storage) == .prepared_adopted);
+    try std.testing.expect(storage.commitAdoption() == .adopted);
+
+    var fence: projection_test.PreparedInitialFenceClear = .{};
+    try std.testing.expect(projection_test.prepare(&storage, &fence));
+    try std.testing.expect(projection_test.commit(&storage, &fence) == .cleared);
+
+    var cleanup_scratch: ExternalPumpCleanupScratch = .{};
+    try std.testing.expect(ExternalPumpCleanupScratch.initInPlace(&cleanup_scratch));
+    var probe = ProjectionProbe{};
+    const projector = OwnerEventProjector{
+        .context = &probe,
+        .context_len = @sizeOf(ProjectionProbe),
+        .project = ProjectionProbe.project,
+    };
+    try std.testing.expect(
+        storage.projectOwnerEventInternal(projector, &cleanup_scratch) ==
+            .retry_preserved,
+    );
+    try std.testing.expectEqual(@as(usize, 1), probe.calls);
+    try std.testing.expect(storage.owner_resize.current.pending);
+    try std.testing.expectEqual(@as(u64, 1), storage.owner_event_projection_generation);
+
+    probe.decision = .applied;
+    try std.testing.expect(
+        storage.projectOwnerEventInternal(projector, &cleanup_scratch) ==
+            .applied,
+    );
+    try std.testing.expectEqual(@as(usize, 2), probe.calls);
+    try std.testing.expect(!storage.owner_resize.current.pending);
+    try std.testing.expect(ownerResizeValid(&storage));
+    try std.testing.expectEqual(@as(u64, 2), storage.owner_event_projection_generation);
+    try std.testing.expect(storage.owner_metadata.metadata.current.pending);
+    try std.testing.expect(
+        storage.projectOwnerEventInternal(projector, &cleanup_scratch) ==
+            .applied,
+    );
+    try std.testing.expectEqual(@as(usize, 3), probe.calls);
+    try std.testing.expect(probe.last_resize == null);
+    try std.testing.expect(!storage.owner_metadata.metadata.current.pending);
+    try std.testing.expect(
+        storage.projectOwnerEventInternal(projector, &cleanup_scratch) == .none,
+    );
+}
+
+test "c3c-3b metadata projection borrows logical DTO only for the callback" {
+    const ProjectionProbe = struct {
+        calls: usize = 0,
+        saw_revision: u64 = 0,
+        saw_cwd: bool = false,
+
+        fn project(raw: *anyopaque, view: OwnerEventView) ProjectionDecision {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.calls += 1;
+            switch (view) {
+                .resized => {},
+                .metadata => |metadata| {
+                    self.saw_revision = metadata.revision;
+                    self.saw_cwd = std.mem.eql(u8, metadata.cwd, "/repo");
+                },
+            }
+            return .applied;
+        }
+    };
+    const event_json =
+        \\{"event":"runtime.metadata","metadata_revision":2,"metadata":{"cwd":"/repo","window_title":"work","ssh_remote_dest":null,"semantic_state":0,"alt_active":false,"app_cursor_keys":false,"alternate_scroll":true,"observer_generation":1,"title_generation":1,"cols":80,"rows":24,"foreground_available":false,"foreground_pgid":null,"processes":[]}}
+    ;
+    var fixture = try TestClient.init();
+    defer fixture.deinitPeer();
+    fixture.client.metadata_support = .supported;
+    try appendTestEvent(&fixture.client, event_json);
+    var storage: ExternalPumpStorage = .{};
+    try std.testing.expect(
+        initTestStorage(&storage, &fixture.client, valid_evidence) ==
+            .initialized,
+    );
+    defer _ = teardownForTest(&storage);
+    try std.testing.expect(prepareAdoptionForTest(&storage) == .prepared_adopted);
+    try std.testing.expect(storage.commitAdoption() == .adopted);
+    var fence: projection_test.PreparedInitialFenceClear = .{};
+    try std.testing.expect(projection_test.prepare(&storage, &fence));
+    try std.testing.expect(projection_test.commit(&storage, &fence) == .cleared);
+    var cleanup_scratch: ExternalPumpCleanupScratch = .{};
+    try std.testing.expect(ExternalPumpCleanupScratch.initInPlace(&cleanup_scratch));
+    var probe = ProjectionProbe{};
+    try std.testing.expect(
+        storage.projectOwnerEventInternal(.{
+            .context = &probe,
+            .context_len = @sizeOf(ProjectionProbe),
+            .project = ProjectionProbe.project,
+        }, &cleanup_scratch) == .applied,
+    );
+    try std.testing.expectEqual(@as(usize, 1), probe.calls);
+    try std.testing.expectEqual(@as(u64, 2), probe.saw_revision);
+    try std.testing.expect(probe.saw_cwd);
+    try std.testing.expect(!storage.owner_metadata.metadata.current.pending);
+    const summary = storage.owner_metadata.metadataStateSummary(&storage).?;
+    try std.testing.expect(summary == .current);
+    try std.testing.expect(!summary.current.pending);
+}
+
+test "c3c-3b projection generation exhaustion closes the valid owner under the held lease" {
+    const Probe = struct {
+        calls: usize = 0,
+        fn project(raw: *anyopaque, _: OwnerEventView) ProjectionDecision {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.calls += 1;
+            return .applied;
+        }
+    };
+    var fixture = try TestClient.init();
+    defer fixture.deinitPeer();
+    try appendTestEvent(&fixture.client,
+        \\{"event":"runtime.resized","data":{"runtime_id":"000000000000000000000000000000aa","cols":132,"rows":43,"resize_generation":9,"reason":"controller"}}
+    );
+    var storage: ExternalPumpStorage = .{};
+    try std.testing.expect(
+        initTestStorage(&storage, &fixture.client, valid_evidence) ==
+            .initialized,
+    );
+    try std.testing.expect(prepareAdoptionForTest(&storage) == .prepared_adopted);
+    try std.testing.expect(storage.commitAdoption() == .adopted);
+    var fence: projection_test.PreparedInitialFenceClear = .{};
+    try std.testing.expect(projection_test.prepare(&storage, &fence));
+    try std.testing.expect(projection_test.commit(&storage, &fence) == .cleared);
+    storage.owner_event_projection_generation = std.math.maxInt(u64) - 1;
+    var cleanup_scratch: ExternalPumpCleanupScratch = .{};
+    try std.testing.expect(ExternalPumpCleanupScratch.initInPlace(&cleanup_scratch));
+    var probe = Probe{};
+    try std.testing.expect(
+        storage.projectOwnerEventInternal(.{
+            .context = &probe,
+            .context_len = @sizeOf(Probe),
+            .project = Probe.project,
+        }, &cleanup_scratch) == .applied,
+    );
+    try std.testing.expectEqual(@as(usize, 1), probe.calls);
+    try std.testing.expectEqual(
+        std.math.maxInt(u64),
+        storage.owner_event_projection_generation,
+    );
+    try std.testing.expect(
+        storage.projectOwnerEventInternal(.{
+            .context = &probe,
+            .context_len = @sizeOf(Probe),
+            .project = Probe.project,
+        }, &cleanup_scratch) == .terminal_latched,
+    );
+    try std.testing.expectEqual(@as(usize, 1), probe.calls);
+    try std.testing.expectEqual(StorageLifecycle.dead, storage.lifecycle);
+    try std.testing.expect(storage.owner_incarnation == 0);
+    try std.testing.expect(cleanup_scratch.isReady());
+    const accounting = storage.inbox_ledger.accountingView();
+    try std.testing.expect(accounting.valid);
+    try std.testing.expectEqual(@as(usize, 0), accounting.charged_bytes);
+    try std.testing.expectEqual(@as(usize, 0), accounting.charged_items);
+    try std.testing.expectEqual(@as(usize, 0), accounting.retired_bytes);
+    try std.testing.expectEqual(@as(usize, 0), accounting.retired_items);
+}
+
+test "c3c-3b raw initial fence drift cannot authorize a projection" {
+    const Probe = struct {
+        calls: usize = 0,
+        fn project(raw: *anyopaque, _: OwnerEventView) ProjectionDecision {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.calls += 1;
+            return .applied;
+        }
+    };
+    resetCrossOwnerQuarantineForTest();
+    defer resetCrossOwnerQuarantineForTest();
+    var fixture = try TestClient.initWithAllocator(std.heap.c_allocator);
+    defer fixture.deinitPeer();
+    var storage: ExternalPumpStorage = .{};
+    try std.testing.expect(
+        initTestStorage(&storage, &fixture.client, valid_evidence) ==
+            .initialized,
+    );
+    try std.testing.expect(prepareAdoptionForTest(&storage) == .prepared_adopted);
+    try std.testing.expect(storage.commitAdoption() == .adopted);
+    storage.owner_authority.current.flow = .clear;
+    var cleanup_scratch: ExternalPumpCleanupScratch = .{};
+    try std.testing.expect(ExternalPumpCleanupScratch.initInPlace(&cleanup_scratch));
+    var probe = Probe{};
+    try std.testing.expect(
+        storage.projectOwnerEventInternal(.{
+            .context = &probe,
+            .context_len = @sizeOf(Probe),
+            .project = Probe.project,
+        }, &cleanup_scratch) == .terminal_latched,
+    );
+    try std.testing.expectEqual(@as(usize, 0), probe.calls);
+    try std.testing.expectEqual(StorageLifecycle.dead, storage.lifecycle);
+    try std.testing.expect(crossOwnerQuarantineStatus().latched);
+    if (storage.owned_client) |*owned| owned.deinit();
+    storage.owned_client = null;
+    if (storage.owned_evidence) |*owned| owned.deinit();
+    storage.owned_evidence = null;
+}
+
+test "c3c-3b projector context cannot alias storage authority" {
+    const Probe = struct {
+        var calls: usize = 0;
+        fn project(_: *anyopaque, _: OwnerEventView) ProjectionDecision {
+            calls += 1;
+            return .applied;
+        }
+    };
+    Probe.calls = 0;
+    var fixture = try TestClient.init();
+    defer fixture.deinitPeer();
+    try appendTestEvent(&fixture.client,
+        \\{"event":"runtime.resized","data":{"runtime_id":"000000000000000000000000000000aa","cols":132,"rows":43,"resize_generation":9,"reason":"controller"}}
+    );
+    var storage: ExternalPumpStorage = .{};
+    try std.testing.expect(
+        initTestStorage(&storage, &fixture.client, valid_evidence) ==
+            .initialized,
+    );
+    try std.testing.expect(prepareAdoptionForTest(&storage) == .prepared_adopted);
+    try std.testing.expect(storage.commitAdoption() == .adopted);
+    var fence: projection_test.PreparedInitialFenceClear = .{};
+    try std.testing.expect(projection_test.prepare(&storage, &fence));
+    try std.testing.expect(projection_test.commit(&storage, &fence) == .cleared);
+    var cleanup_scratch: ExternalPumpCleanupScratch = .{};
+    try std.testing.expect(ExternalPumpCleanupScratch.initInPlace(&cleanup_scratch));
+    try std.testing.expect(
+        storage.projectOwnerEventInternal(.{
+            .context = &storage,
+            .context_len = @sizeOf(ExternalPumpStorage),
+            .project = Probe.project,
+        }, &cleanup_scratch) == .terminal_latched,
+    );
+    try std.testing.expectEqual(@as(usize, 0), Probe.calls);
+    try std.testing.expectEqual(StorageLifecycle.dead, storage.lifecycle);
+    try std.testing.expect(cleanup_scratch.isReady());
+}
+
+test "c3c-3b projector context rejects partial storage overlap and range overflow" {
+    const Probe = struct {
+        var calls: usize = 0;
+        fn project(_: *anyopaque, _: OwnerEventView) ProjectionDecision {
+            calls += 1;
+            return .applied;
+        }
+    };
+    const ContextCase = enum { partial_storage, overflow };
+    inline for (std.enums.values(ContextCase)) |context_case| {
+        Probe.calls = 0;
+        var fixture = try TestClient.init();
+        defer fixture.deinitPeer();
+        try appendTestEvent(&fixture.client,
+            \\{"event":"runtime.resized","data":{"runtime_id":"000000000000000000000000000000aa","cols":132,"rows":43,"resize_generation":9,"reason":"controller"}}
+        );
+        var storage: ExternalPumpStorage = .{};
+        try std.testing.expect(
+            initTestStorage(&storage, &fixture.client, valid_evidence) ==
+                .initialized,
+        );
+        try std.testing.expect(prepareAdoptionForTest(&storage) == .prepared_adopted);
+        try std.testing.expect(storage.commitAdoption() == .adopted);
+        var fence: projection_test.PreparedInitialFenceClear = .{};
+        try std.testing.expect(projection_test.prepare(&storage, &fence));
+        try std.testing.expect(projection_test.commit(&storage, &fence) == .cleared);
+        var cleanup_scratch: ExternalPumpCleanupScratch = .{};
+        try std.testing.expect(ExternalPumpCleanupScratch.initInPlace(&cleanup_scratch));
+        const context_addr: usize = switch (context_case) {
+            .partial_storage => @intFromPtr(&storage) + 1,
+            .overflow => std.math.maxInt(usize) - 7,
+        };
+        try std.testing.expect(
+            storage.projectOwnerEventInternal(.{
+                .context = @ptrFromInt(context_addr),
+                .context_len = 16,
+                .project = Probe.project,
+            }, &cleanup_scratch) == .terminal_latched,
+        );
+        try std.testing.expectEqual(@as(usize, 0), Probe.calls);
+        try std.testing.expectEqual(StorageLifecycle.dead, storage.lifecycle);
+        try std.testing.expect(cleanup_scratch.isReady());
+    }
+}
+
+test "c3c-3b projection rejects exact and partial scratch storage alias before header read" {
+    const Probe = struct {
+        var calls: usize = 0;
+        fn project(_: *anyopaque, _: OwnerEventView) ProjectionDecision {
+            calls += 1;
+            return .applied;
+        }
+    };
+    inline for (.{ @as(usize, 0), @alignOf(ExternalPumpCleanupScratch) }) |offset| {
+        resetCrossOwnerQuarantineForTest();
+        defer resetCrossOwnerQuarantineForTest();
+        Probe.calls = 0;
+        var fixture = try TestClient.initWithAllocator(std.heap.c_allocator);
+        defer fixture.deinitPeer();
+        try appendTestEvent(&fixture.client,
+            \\{"event":"runtime.resized","data":{"runtime_id":"000000000000000000000000000000aa","cols":132,"rows":43,"resize_generation":9,"reason":"controller"}}
+        );
+        var storage: ExternalPumpStorage = .{};
+        try std.testing.expect(
+            initTestStorage(&storage, &fixture.client, valid_evidence) ==
+                .initialized,
+        );
+        try std.testing.expect(prepareAdoptionForTest(&storage) == .prepared_adopted);
+        try std.testing.expect(storage.commitAdoption() == .adopted);
+        var fence: projection_test.PreparedInitialFenceClear = .{};
+        try std.testing.expect(projection_test.prepare(&storage, &fence));
+        try std.testing.expect(projection_test.commit(&storage, &fence) == .cleared);
+        var context: u8 = 0;
+        const aliased_scratch: *ExternalPumpCleanupScratch =
+            @ptrFromInt(@intFromPtr(&storage) + offset);
+        try std.testing.expect(
+            storage.projectOwnerEventInternal(.{
+                .context = &context,
+                .context_len = @sizeOf(u8),
+                .project = Probe.project,
+            }, aliased_scratch) == .terminal_latched,
+        );
+        try std.testing.expectEqual(@as(usize, 0), Probe.calls);
+        try std.testing.expectEqual(StorageLifecycle.dead, storage.lifecycle);
+        try std.testing.expect(crossOwnerQuarantineStatus().latched);
+        if (storage.owned_client) |*owned| owned.deinit();
+        storage.owned_client = null;
+        if (storage.owned_evidence) |*owned| owned.deinit();
+        storage.owned_evidence = null;
+    }
+}
+
+test "c3c-3b projection callback reentry stays transaction busy" {
+    const Probe = struct {
+        storage: *ExternalPumpStorage,
+        scratch: *ExternalPumpCleanupScratch,
+        metadata_result: ?std.meta.Tag(MetadataStateResult) = null,
+        teardown_result: ?TeardownResult = null,
+        projection_result: ?ProjectOwnerEventResult = null,
+
+        fn nestedProject(_: *anyopaque, _: OwnerEventView) ProjectionDecision {
+            return .applied;
+        }
+
+        fn project(raw: *anyopaque, _: OwnerEventView) ProjectionDecision {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.metadata_result = std.meta.activeTag(self.storage.metadataState());
+            self.teardown_result = self.storage.teardown(self.scratch);
+            self.projection_result = self.storage.projectOwnerEventInternal(.{
+                .context = self,
+                .context_len = @sizeOf(@This()),
+                .project = nestedProject,
+            }, self.scratch);
+            return .retry_preserved;
+        }
+    };
+    var fixture = try TestClient.init();
+    defer fixture.deinitPeer();
+    try appendTestEvent(&fixture.client,
+        \\{"event":"runtime.resized","data":{"runtime_id":"000000000000000000000000000000aa","cols":132,"rows":43,"resize_generation":9,"reason":"controller"}}
+    );
+    var storage: ExternalPumpStorage = .{};
+    try std.testing.expect(
+        initTestStorage(&storage, &fixture.client, valid_evidence) ==
+            .initialized,
+    );
+    defer _ = teardownForTest(&storage);
+    try std.testing.expect(prepareAdoptionForTest(&storage) == .prepared_adopted);
+    try std.testing.expect(storage.commitAdoption() == .adopted);
+    var fence: projection_test.PreparedInitialFenceClear = .{};
+    try std.testing.expect(projection_test.prepare(&storage, &fence));
+    try std.testing.expect(projection_test.commit(&storage, &fence) == .cleared);
+    var cleanup_scratch: ExternalPumpCleanupScratch = .{};
+    try std.testing.expect(ExternalPumpCleanupScratch.initInPlace(&cleanup_scratch));
+    var probe = Probe{ .storage = &storage, .scratch = &cleanup_scratch };
+    try std.testing.expect(
+        storage.projectOwnerEventInternal(.{
+            .context = &probe,
+            .context_len = @sizeOf(Probe),
+            .project = Probe.project,
+        }, &cleanup_scratch) == .retry_preserved,
+    );
+    try std.testing.expect(
+        probe.metadata_result.? == .transaction_busy,
+    );
+    try std.testing.expect(probe.teardown_result.? == .transaction_busy);
+    try std.testing.expect(probe.projection_result.? == .transaction_busy);
+    try std.testing.expect(storage.owner_resize.current.pending);
+}
+
+test "c3c-3b unread scratch work arrays are overwritten before teardown reads them" {
+    const Probe = struct {
+        scratch: *ExternalPumpCleanupScratch,
+
+        fn project(raw: *anyopaque, _: OwnerEventView) ProjectionDecision {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            @memset(std.mem.asBytes(&self.scratch.range_scratch.source), 0xa5);
+            @memset(std.mem.asBytes(&self.scratch.client.batches), 0x5a);
+            @memset(std.mem.asBytes(&self.scratch.client.stream), 0x5a);
+            @memset(std.mem.asBytes(&self.scratch.client.events), 0x5a);
+            return .applied;
+        }
+    };
+    var fixture = try TestClient.init();
+    defer fixture.deinitPeer();
+    try appendTestEvent(&fixture.client,
+        \\{"event":"runtime.resized","data":{"runtime_id":"000000000000000000000000000000aa","cols":132,"rows":43,"resize_generation":9,"reason":"controller"}}
+    );
+    var storage: ExternalPumpStorage = .{};
+    try std.testing.expect(
+        initTestStorage(&storage, &fixture.client, valid_evidence) ==
+            .initialized,
+    );
+    try std.testing.expect(prepareAdoptionForTest(&storage) == .prepared_adopted);
+    try std.testing.expect(storage.commitAdoption() == .adopted);
+    var fence: projection_test.PreparedInitialFenceClear = .{};
+    try std.testing.expect(projection_test.prepare(&storage, &fence));
+    try std.testing.expect(projection_test.commit(&storage, &fence) == .cleared);
+    var cleanup_scratch: ExternalPumpCleanupScratch = .{};
+    try std.testing.expect(ExternalPumpCleanupScratch.initInPlace(&cleanup_scratch));
+    var probe = Probe{ .scratch = &cleanup_scratch };
+    try std.testing.expect(
+        storage.projectOwnerEventInternal(.{
+            .context = &probe,
+            .context_len = @sizeOf(Probe),
+            .project = Probe.project,
+        }, &cleanup_scratch) == .applied,
+    );
+    try std.testing.expectEqual(
+        TeardownResult.cleaned,
+        storage.teardown(&cleanup_scratch),
+    );
+    try std.testing.expect(cleanup_scratch.isReady());
+}
+
+test "c3c-3b meaningful scratch header drift is quarantined without reading work arrays" {
+    const Probe = struct {
+        scratch: *ExternalPumpCleanupScratch,
+
+        fn project(raw: *anyopaque, _: OwnerEventView) ProjectionDecision {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.scratch.saved_self_addr +%= 1;
+            @memset(std.mem.asBytes(&self.scratch.client.batches), 0xa5);
+            return .applied;
+        }
+    };
+    resetCrossOwnerQuarantineForTest();
+    defer resetCrossOwnerQuarantineForTest();
+    var fixture = try TestClient.initWithAllocator(std.heap.c_allocator);
+    defer fixture.deinitPeer();
+    try appendTestEvent(&fixture.client,
+        \\{"event":"runtime.resized","data":{"runtime_id":"000000000000000000000000000000aa","cols":132,"rows":43,"resize_generation":9,"reason":"controller"}}
+    );
+    var storage: ExternalPumpStorage = .{};
+    try std.testing.expect(
+        initTestStorage(&storage, &fixture.client, valid_evidence) ==
+            .initialized,
+    );
+    try std.testing.expect(prepareAdoptionForTest(&storage) == .prepared_adopted);
+    try std.testing.expect(storage.commitAdoption() == .adopted);
+    var fence: projection_test.PreparedInitialFenceClear = .{};
+    try std.testing.expect(projection_test.prepare(&storage, &fence));
+    try std.testing.expect(projection_test.commit(&storage, &fence) == .cleared);
+    var cleanup_scratch: ExternalPumpCleanupScratch = .{};
+    try std.testing.expect(ExternalPumpCleanupScratch.initInPlace(&cleanup_scratch));
+    var probe = Probe{ .scratch = &cleanup_scratch };
+    try std.testing.expect(
+        storage.projectOwnerEventInternal(.{
+            .context = &probe,
+            .context_len = @sizeOf(Probe),
+            .project = Probe.project,
+        }, &cleanup_scratch) == .terminal_latched,
+    );
+    try std.testing.expectEqual(StorageLifecycle.dead, storage.lifecycle);
+    try std.testing.expect(crossOwnerQuarantineStatus().latched);
+    try std.testing.expect(
+        cleanup_scratch.saved_self_addr != @intFromPtr(&cleanup_scratch),
+    );
+    if (storage.owned_client) |*owned| owned.deinit();
+    storage.owned_client = null;
+    if (storage.owned_evidence) |*owned| owned.deinit();
+    storage.owned_evidence = null;
+}
+
+test "c3c-3b scratch and forged owner drift quarantines before owner dereference" {
+    const Probe = struct {
+        storage: *ExternalPumpStorage,
+        scratch: *ExternalPumpCleanupScratch,
+
+        fn project(raw: *anyopaque, _: OwnerEventView) ProjectionDecision {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.scratch.saved_self_addr +%= 1;
+            const client = if (self.storage.owned_client) |*owned|
+                owned
+            else
+                unreachable;
+            client.pending_batches.items.ptr = @ptrFromInt(0x1000);
+            client.pending_batches.items.len = 1;
+            client.pending_batches.capacity = 1;
+            return .applied;
+        }
+    };
+    resetCrossOwnerQuarantineForTest();
+    defer resetCrossOwnerQuarantineForTest();
+    var fixture = try TestClient.initWithAllocator(std.heap.c_allocator);
+    defer fixture.deinitPeer();
+    try appendTestEvent(&fixture.client,
+        \\{"event":"runtime.resized","data":{"runtime_id":"000000000000000000000000000000aa","cols":132,"rows":43,"resize_generation":9,"reason":"controller"}}
+    );
+    var storage: ExternalPumpStorage = .{};
+    try std.testing.expect(
+        initTestStorage(&storage, &fixture.client, valid_evidence) ==
+            .initialized,
+    );
+    try std.testing.expect(prepareAdoptionForTest(&storage) == .prepared_adopted);
+    try std.testing.expect(storage.commitAdoption() == .adopted);
+    var fence: projection_test.PreparedInitialFenceClear = .{};
+    try std.testing.expect(projection_test.prepare(&storage, &fence));
+    try std.testing.expect(projection_test.commit(&storage, &fence) == .cleared);
+    var cleanup_scratch: ExternalPumpCleanupScratch = .{};
+    try std.testing.expect(ExternalPumpCleanupScratch.initInPlace(&cleanup_scratch));
+    var probe = Probe{ .storage = &storage, .scratch = &cleanup_scratch };
+    try std.testing.expect(
+        storage.projectOwnerEventInternal(.{
+            .context = &probe,
+            .context_len = @sizeOf(Probe),
+            .project = Probe.project,
+        }, &cleanup_scratch) == .terminal_latched,
+    );
+    try std.testing.expectEqual(StorageLifecycle.dead, storage.lifecycle);
+    try std.testing.expect(crossOwnerQuarantineStatus().latched);
+    try std.testing.expect(
+        cleanup_scratch.saved_self_addr != @intFromPtr(&cleanup_scratch),
+    );
+    storage.owned_client = null;
+    if (storage.owned_evidence) |*owned| owned.deinit();
+    storage.owned_evidence = null;
+}
+
+test "c3c-3b projection quarantines deep screen token drift for either callback decision" {
+    const Probe = struct {
+        storage: *ExternalPumpStorage,
+        decision: ProjectionDecision,
+
+        fn project(raw: *anyopaque, _: OwnerEventView) ProjectionDecision {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            const tokens = self.storage.committed_screen.primary.transfer.tokens;
+            tokens[0].generation +%= 1;
+            return self.decision;
+        }
+    };
+    inline for (.{ ProjectionDecision.applied, ProjectionDecision.retry_preserved }) |decision| {
+        resetCrossOwnerQuarantineForTest();
+        defer resetCrossOwnerQuarantineForTest();
+        var fixture = try TestClient.initWithAllocator(std.heap.c_allocator);
+        defer fixture.deinitPeer();
+        const payload = try fixture.client.allocator.dupe(u8, "screen");
+        try fixture.client.pending_batches.append(fixture.client.allocator, .{
+            .is_snapshot = false,
+            .stream_id = valid_evidence.stream_id,
+            .bytes = payload,
+            .allocator = fixture.client.allocator,
+        });
+        fixture.client.pending_batch_bytes = payload.len;
+        try appendTestEvent(&fixture.client,
+            \\{"event":"runtime.resized","data":{"runtime_id":"000000000000000000000000000000aa","cols":132,"rows":43,"resize_generation":9,"reason":"controller"}}
+        );
+        var storage: ExternalPumpStorage = .{};
+        try std.testing.expect(
+            initTestStorage(&storage, &fixture.client, valid_evidence) ==
+                .initialized,
+        );
+        try std.testing.expect(prepareAdoptionForTest(&storage) == .prepared_adopted);
+        try std.testing.expect(storage.commitAdoption() == .adopted);
+        try std.testing.expect(storage.committed_screen.primary.transfer.tokens.len != 0);
+        var fence: projection_test.PreparedInitialFenceClear = .{};
+        try std.testing.expect(projection_test.prepare(&storage, &fence));
+        try std.testing.expect(projection_test.commit(&storage, &fence) == .cleared);
+        var cleanup_scratch: ExternalPumpCleanupScratch = .{};
+        try std.testing.expect(ExternalPumpCleanupScratch.initInPlace(&cleanup_scratch));
+        var probe = Probe{ .storage = &storage, .decision = decision };
+        try std.testing.expect(
+            storage.projectOwnerEventInternal(.{
+                .context = &probe,
+                .context_len = @sizeOf(Probe),
+                .project = Probe.project,
+            }, &cleanup_scratch) == .terminal_latched,
+        );
+        try std.testing.expectEqual(StorageLifecycle.dead, storage.lifecycle);
+        try std.testing.expect(crossOwnerQuarantineStatus().latched);
+        if (storage.owned_client) |*owned| owned.deinit();
+        storage.owned_client = null;
+        if (storage.owned_evidence) |*owned| owned.deinit();
+        storage.owned_evidence = null;
+    }
+}
+
+test "c3c-3b projection quarantines adoption inventory backing element drift" {
+    const Probe = struct {
+        storage: *ExternalPumpStorage,
+
+        fn project(raw: *anyopaque, _: OwnerEventView) ProjectionDecision {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.storage.client_cleanup_take.plan_inventory.?
+                .batch_descriptors[0].stream_id +%= 1;
+            return .retry_preserved;
+        }
+    };
+    resetCrossOwnerQuarantineForTest();
+    defer resetCrossOwnerQuarantineForTest();
+    var fixture = try TestClient.initWithAllocator(std.heap.c_allocator);
+    defer fixture.deinitPeer();
+    const payload = try fixture.client.allocator.dupe(u8, "screen");
+    try fixture.client.pending_batches.append(fixture.client.allocator, .{
+        .is_snapshot = false,
+        .stream_id = valid_evidence.stream_id,
+        .bytes = payload,
+        .allocator = fixture.client.allocator,
+    });
+    fixture.client.pending_batch_bytes = payload.len;
+    try appendTestEvent(&fixture.client,
+        \\{"event":"runtime.resized","data":{"runtime_id":"000000000000000000000000000000aa","cols":132,"rows":43,"resize_generation":9,"reason":"controller"}}
+    );
+    var storage: ExternalPumpStorage = .{};
+    try std.testing.expect(
+        initTestStorage(&storage, &fixture.client, valid_evidence) ==
+            .initialized,
+    );
+    try std.testing.expect(prepareAdoptionForTest(&storage) == .prepared_adopted);
+    try std.testing.expect(storage.commitAdoption() == .adopted);
+    var fence: projection_test.PreparedInitialFenceClear = .{};
+    try std.testing.expect(projection_test.prepare(&storage, &fence));
+    try std.testing.expect(projection_test.commit(&storage, &fence) == .cleared);
+    var cleanup_scratch: ExternalPumpCleanupScratch = .{};
+    try std.testing.expect(ExternalPumpCleanupScratch.initInPlace(&cleanup_scratch));
+    var probe = Probe{ .storage = &storage };
+    try std.testing.expect(
+        storage.projectOwnerEventInternal(.{
+            .context = &probe,
+            .context_len = @sizeOf(Probe),
+            .project = Probe.project,
+        }, &cleanup_scratch) == .terminal_latched,
+    );
+    try std.testing.expectEqual(StorageLifecycle.dead, storage.lifecycle);
+    try std.testing.expect(crossOwnerQuarantineStatus().latched);
+    if (storage.owned_client) |*owned| owned.deinit();
+    storage.owned_client = null;
+    if (storage.owned_evidence) |*owned| owned.deinit();
+    storage.owned_evidence = null;
+}
+
+test "c3c-3b projection permit generation drift cannot authorize callback result" {
+    const Probe = struct {
+        storage: *ExternalPumpStorage,
+
+        fn project(raw: *anyopaque, _: OwnerEventView) ProjectionDecision {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.storage.owner_event_projection_generation +%= 1;
+            return .applied;
+        }
+    };
+    var fixture = try TestClient.init();
+    defer fixture.deinitPeer();
+    try appendTestEvent(&fixture.client,
+        \\{"event":"runtime.resized","data":{"runtime_id":"000000000000000000000000000000aa","cols":132,"rows":43,"resize_generation":9,"reason":"controller"}}
+    );
+    var storage: ExternalPumpStorage = .{};
+    try std.testing.expect(
+        initTestStorage(&storage, &fixture.client, valid_evidence) ==
+            .initialized,
+    );
+    try std.testing.expect(prepareAdoptionForTest(&storage) == .prepared_adopted);
+    try std.testing.expect(storage.commitAdoption() == .adopted);
+    var fence: projection_test.PreparedInitialFenceClear = .{};
+    try std.testing.expect(projection_test.prepare(&storage, &fence));
+    try std.testing.expect(projection_test.commit(&storage, &fence) == .cleared);
+    var cleanup_scratch: ExternalPumpCleanupScratch = .{};
+    try std.testing.expect(ExternalPumpCleanupScratch.initInPlace(&cleanup_scratch));
+    var probe = Probe{ .storage = &storage };
+    try std.testing.expect(
+        storage.projectOwnerEventInternal(.{
+            .context = &probe,
+            .context_len = @sizeOf(Probe),
+            .project = Probe.project,
+        }, &cleanup_scratch) == .terminal_latched,
+    );
+    try std.testing.expectEqual(StorageLifecycle.dead, storage.lifecycle);
+    try std.testing.expect(cleanup_scratch.isReady());
+}
+
+test "c3c-3b projection rejects forged Client list descriptor before dereference" {
+    const Probe = struct {
+        storage: *ExternalPumpStorage,
+
+        fn project(raw: *anyopaque, _: OwnerEventView) ProjectionDecision {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            const client = if (self.storage.owned_client) |*owned|
+                owned
+            else
+                unreachable;
+            client.pending_batches.items.ptr = @ptrFromInt(0x1000);
+            client.pending_batches.items.len = 1;
+            client.pending_batches.capacity = 1;
+            return .applied;
+        }
+    };
+    resetCrossOwnerQuarantineForTest();
+    defer resetCrossOwnerQuarantineForTest();
+    var fixture = try TestClient.initWithAllocator(std.heap.c_allocator);
+    defer fixture.deinitPeer();
+    try appendTestEvent(&fixture.client,
+        \\{"event":"runtime.resized","data":{"runtime_id":"000000000000000000000000000000aa","cols":132,"rows":43,"resize_generation":9,"reason":"controller"}}
+    );
+    var storage: ExternalPumpStorage = .{};
+    try std.testing.expect(
+        initTestStorage(&storage, &fixture.client, valid_evidence) ==
+            .initialized,
+    );
+    try std.testing.expect(prepareAdoptionForTest(&storage) == .prepared_adopted);
+    try std.testing.expect(storage.commitAdoption() == .adopted);
+    var fence: projection_test.PreparedInitialFenceClear = .{};
+    try std.testing.expect(projection_test.prepare(&storage, &fence));
+    try std.testing.expect(projection_test.commit(&storage, &fence) == .cleared);
+    var cleanup_scratch: ExternalPumpCleanupScratch = .{};
+    try std.testing.expect(ExternalPumpCleanupScratch.initInPlace(&cleanup_scratch));
+    var probe = Probe{ .storage = &storage };
+    try std.testing.expect(
+        storage.projectOwnerEventInternal(.{
+            .context = &probe,
+            .context_len = @sizeOf(Probe),
+            .project = Probe.project,
+        }, &cleanup_scratch) == .terminal_latched,
+    );
+    try std.testing.expectEqual(StorageLifecycle.dead, storage.lifecycle);
+    try std.testing.expect(crossOwnerQuarantineStatus().latched);
+    // The forged graph is intentionally quarantined and must not be traversed by fixture cleanup.
+    storage.owned_client = null;
+    if (storage.owned_evidence) |*owned| owned.deinit();
+    storage.owned_evidence = null;
+}
+
+test "c3c-3b projection rejects independent owner scalar drift after callback" {
+    const Mutation = enum { lifecycle, semantic, incarnation, resize_pending };
+    const Probe = struct {
+        storage: *ExternalPumpStorage,
+        mutation: Mutation,
+
+        fn project(raw: *anyopaque, _: OwnerEventView) ProjectionDecision {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            switch (self.mutation) {
+                .lifecycle => self.storage.lifecycle = .adopting,
+                .semantic => self.storage.semantic_state = .adopting,
+                .incarnation => self.storage.owner_incarnation +%= 1,
+                .resize_pending => self.storage.owner_resize.current.pending = false,
+            }
+            return .retry_preserved;
+        }
+    };
+    inline for (std.enums.values(Mutation)) |mutation| {
+        resetCrossOwnerQuarantineForTest();
+        defer resetCrossOwnerQuarantineForTest();
+        var fixture = try TestClient.initWithAllocator(std.heap.c_allocator);
+        defer fixture.deinitPeer();
+        try appendTestEvent(&fixture.client,
+            \\{"event":"runtime.resized","data":{"runtime_id":"000000000000000000000000000000aa","cols":132,"rows":43,"resize_generation":9,"reason":"controller"}}
+        );
+        var storage: ExternalPumpStorage = .{};
+        try std.testing.expect(
+            initTestStorage(&storage, &fixture.client, valid_evidence) ==
+                .initialized,
+        );
+        try std.testing.expect(prepareAdoptionForTest(&storage) == .prepared_adopted);
+        try std.testing.expect(storage.commitAdoption() == .adopted);
+        var fence: projection_test.PreparedInitialFenceClear = .{};
+        try std.testing.expect(projection_test.prepare(&storage, &fence));
+        try std.testing.expect(projection_test.commit(&storage, &fence) == .cleared);
+        var cleanup_scratch: ExternalPumpCleanupScratch = .{};
+        try std.testing.expect(ExternalPumpCleanupScratch.initInPlace(&cleanup_scratch));
+        var probe = Probe{ .storage = &storage, .mutation = mutation };
+        try std.testing.expect(
+            storage.projectOwnerEventInternal(.{
+                .context = &probe,
+                .context_len = @sizeOf(Probe),
+                .project = Probe.project,
+            }, &cleanup_scratch) == .terminal_latched,
+        );
+        try std.testing.expectEqual(StorageLifecycle.dead, storage.lifecycle);
+        try std.testing.expect(crossOwnerQuarantineStatus().latched);
+        if (storage.owned_client) |*owned| owned.deinit();
+        storage.owned_client = null;
+        if (storage.owned_evidence) |*owned| owned.deinit();
+        storage.owned_evidence = null;
+    }
+}
+
+test "c3c-3b projection rejects metadata seal drift after callback" {
+    const Probe = struct {
+        storage: *ExternalPumpStorage,
+
+        fn project(raw: *anyopaque, _: OwnerEventView) ProjectionDecision {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.storage.owner_metadata.metadata.current.logical_seal
+                .raw_digest[0] ^= 0xff;
+            return .applied;
+        }
+    };
+    resetCrossOwnerQuarantineForTest();
+    defer resetCrossOwnerQuarantineForTest();
+    var fixture = try TestClient.initWithAllocator(std.heap.c_allocator);
+    defer fixture.deinitPeer();
+    fixture.client.metadata_support = .supported;
+    try appendTestEvent(&fixture.client,
+        \\{"event":"runtime.metadata","metadata_revision":2,"metadata":{"cwd":"/repo","window_title":"work","ssh_remote_dest":null,"semantic_state":0,"alt_active":false,"app_cursor_keys":false,"alternate_scroll":true,"observer_generation":1,"title_generation":1,"cols":80,"rows":24,"foreground_available":false,"foreground_pgid":null,"processes":[]}}
+    );
+    var storage: ExternalPumpStorage = .{};
+    try std.testing.expect(
+        initTestStorage(&storage, &fixture.client, valid_evidence) ==
+            .initialized,
+    );
+    try std.testing.expect(prepareAdoptionForTest(&storage) == .prepared_adopted);
+    try std.testing.expect(storage.commitAdoption() == .adopted);
+    var fence: projection_test.PreparedInitialFenceClear = .{};
+    try std.testing.expect(projection_test.prepare(&storage, &fence));
+    try std.testing.expect(projection_test.commit(&storage, &fence) == .cleared);
+    var cleanup_scratch: ExternalPumpCleanupScratch = .{};
+    try std.testing.expect(ExternalPumpCleanupScratch.initInPlace(&cleanup_scratch));
+    var probe = Probe{ .storage = &storage };
+    try std.testing.expect(
+        storage.projectOwnerEventInternal(.{
+            .context = &probe,
+            .context_len = @sizeOf(Probe),
+            .project = Probe.project,
+        }, &cleanup_scratch) == .terminal_latched,
+    );
+    try std.testing.expectEqual(StorageLifecycle.dead, storage.lifecycle);
+    try std.testing.expect(crossOwnerQuarantineStatus().latched);
+    if (storage.owned_client) |*owned| owned.deinit();
+    storage.owned_client = null;
+    if (storage.owned_evidence) |*owned| owned.deinit();
+    storage.owned_evidence = null;
+}
+
+test "c3c-3b projection rejects deep ledger slot drift after callback" {
+    const Probe = struct {
+        storage: *ExternalPumpStorage,
+
+        fn project(raw: *anyopaque, _: OwnerEventView) ProjectionDecision {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            _ = external_inbox_ledger.projection_test
+                .driftFirstActiveGeneration(&self.storage.inbox_ledger);
+            return .retry_preserved;
+        }
+    };
+    resetCrossOwnerQuarantineForTest();
+    defer resetCrossOwnerQuarantineForTest();
+    var fixture = try TestClient.initWithAllocator(std.heap.c_allocator);
+    defer fixture.deinitPeer();
+    const payload = try fixture.client.allocator.dupe(u8, "screen");
+    try fixture.client.pending_batches.append(fixture.client.allocator, .{
+        .is_snapshot = false,
+        .stream_id = valid_evidence.stream_id,
+        .bytes = payload,
+        .allocator = fixture.client.allocator,
+    });
+    fixture.client.pending_batch_bytes = payload.len;
+    try appendTestEvent(&fixture.client,
+        \\{"event":"runtime.resized","data":{"runtime_id":"000000000000000000000000000000aa","cols":132,"rows":43,"resize_generation":9,"reason":"controller"}}
+    );
+    var storage: ExternalPumpStorage = .{};
+    try std.testing.expect(
+        initTestStorage(&storage, &fixture.client, valid_evidence) ==
+            .initialized,
+    );
+    try std.testing.expect(prepareAdoptionForTest(&storage) == .prepared_adopted);
+    try std.testing.expect(storage.commitAdoption() == .adopted);
+    var fence: projection_test.PreparedInitialFenceClear = .{};
+    try std.testing.expect(projection_test.prepare(&storage, &fence));
+    try std.testing.expect(projection_test.commit(&storage, &fence) == .cleared);
+    var cleanup_scratch: ExternalPumpCleanupScratch = .{};
+    try std.testing.expect(ExternalPumpCleanupScratch.initInPlace(&cleanup_scratch));
+    var probe = Probe{ .storage = &storage };
+    try std.testing.expect(
+        storage.projectOwnerEventInternal(.{
+            .context = &probe,
+            .context_len = @sizeOf(Probe),
+            .project = Probe.project,
+        }, &cleanup_scratch) == .terminal_latched,
+    );
+    try std.testing.expectEqual(StorageLifecycle.dead, storage.lifecycle);
+    try std.testing.expect(crossOwnerQuarantineStatus().latched);
+    if (storage.owned_client) |*owned| owned.deinit();
+    storage.owned_client = null;
+    if (storage.owned_evidence) |*owned| owned.deinit();
+    storage.owned_evidence = null;
 }
 
 test "c3c-2b1 pending resize scalar is cleared without damaging ownership" {
@@ -5409,12 +7172,12 @@ test "c3c-2b1 pending resize scalar is cleared without damaging ownership" {
         initTestStorage(&storage, &fixture.client, valid_evidence) ==
             .initialized,
     );
-    storage.owner_resize = .{ .pending = .{
+    bindOwnerResize(&storage, .{
         .runtime_id = valid_evidence.runtime_id,
         .cols = 132,
         .rows = 43,
         .resize_generation = 9,
-    } };
+    });
     storage.owner_authority = .{ .current = .{
         .role = .controller,
         .generation = .{ .tracked = 3 },

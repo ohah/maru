@@ -21,6 +21,7 @@ const runtime_metadata_wire = @import("runtime_metadata_wire.zig");
 const framing = @import("framing.zig");
 const frozen_cleanup_guard = @import("frozen_cleanup_guard.zig");
 const owner_range = @import("external_owner_range.zig");
+const owner_seal = @import("external_owner_seal.zig");
 const socket_server = @import("socket_server.zig");
 const client_deadline = @import("client_deadline.zig");
 const client_external_mode = @import("client_external_mode.zig");
@@ -970,6 +971,47 @@ pub const ExternalAdoptionTake = struct {
 
     pub fn lifecycleCode(self: *const ExternalAdoptionTake) u8 {
         return @intFromEnum(self.lifecycle);
+    }
+
+    /// Deep snapshot of the committed cleanup graph. Canonicalization is the memory-safety gate:
+    /// only sealed list/inventory storage is traversed, and owned payload bytes are never read.
+    pub fn projectionAuthorityDigest(self: *const ExternalAdoptionTake) ?owner_seal.Digest {
+        if (!self.isCommitted()) return null;
+        const batches = canonicalExternalList(
+            StreamBatch,
+            self.pending_batches,
+            self.cleanup_pending_batches,
+            self.pending_batches_seal,
+        ) orelse return null;
+        const stream = canonicalExternalList(
+            framing.Frame,
+            self.pending_stream,
+            self.cleanup_pending_stream,
+            self.pending_stream_seal,
+        ) orelse return null;
+        const events = canonicalExternalList(
+            BufferedEvent,
+            self.pending_events,
+            self.cleanup_pending_events,
+            self.pending_events_seal,
+        ) orelse return null;
+        const primary = canonicalExternalInventory(
+            self.plan_inventory orelse return null,
+        ) orelse return null;
+        const mirror = canonicalExternalInventory(
+            self.cleanup_plan_inventory orelse return null,
+        ) orelse return null;
+        var writer = owner_seal.Writer.init("maru.client-take.projection.v1");
+        writer.writeUsize(self.saved_self_address);
+        writer.writeUsize(self.client_address);
+        writer.writeUsize(self.allocator_ptr_addr);
+        writer.writeUsize(self.allocator_vtable_addr);
+        writeProjectionBatches(&writer, batches);
+        writeProjectionFrames(&writer, stream);
+        writeProjectionEvents(&writer, events);
+        writeProjectionInventory(&writer, &primary);
+        writeProjectionInventory(&writer, &mirror);
+        return writer.finish();
     }
 
     pub fn prepareFrozenCleanup(
@@ -2894,6 +2936,70 @@ fn externalInventoryCleanupSeal(
     return digest;
 }
 
+fn writeProjectionBatches(
+    writer: *owner_seal.Writer,
+    batches: std.ArrayListUnmanaged(StreamBatch),
+) void {
+    writer.writeUsize(if (batches.capacity == 0) 0 else @intFromPtr(batches.items.ptr));
+    writer.writeUsize(batches.items.len);
+    writer.writeUsize(batches.capacity);
+    for (batches.items) |batch| {
+        writer.writeBool(batch.is_snapshot);
+        writer.writeU64(batch.stream_id);
+        writer.writeUsize(if (batch.bytes.len == 0) 0 else @intFromPtr(batch.bytes.ptr));
+        writer.writeUsize(batch.bytes.len);
+        writer.writeUsize(@intFromPtr(batch.allocator.ptr));
+        writer.writeUsize(@intFromPtr(batch.allocator.vtable));
+    }
+}
+
+fn writeProjectionFrames(
+    writer: *owner_seal.Writer,
+    frames: std.ArrayListUnmanaged(framing.Frame),
+) void {
+    writer.writeUsize(if (frames.capacity == 0) 0 else @intFromPtr(frames.items.ptr));
+    writer.writeUsize(frames.items.len);
+    writer.writeUsize(frames.capacity);
+    for (frames.items) |frame| {
+        writer.writeBytes(&frame.header.encode());
+        writer.writeUsize(if (frame.payload.len == 0) 0 else @intFromPtr(frame.payload.ptr));
+        writer.writeUsize(frame.payload.len);
+    }
+}
+
+fn writeProjectionEvents(
+    writer: *owner_seal.Writer,
+    events: std.ArrayListUnmanaged(BufferedEvent),
+) void {
+    writer.writeUsize(if (events.capacity == 0) 0 else @intFromPtr(events.items.ptr));
+    writer.writeUsize(events.items.len);
+    writer.writeUsize(events.capacity);
+    for (events.items) |event| {
+        writer.writeBytes(&event.header.encode());
+        writer.writeUsize(if (event.payload.len == 0) 0 else @intFromPtr(event.payload.ptr));
+        writer.writeUsize(event.payload.len);
+        writer.writeBool(event.preflight != null);
+        writer.writeBool(event.admission_seal != null);
+    }
+}
+
+fn writeProjectionInventory(
+    writer: *owner_seal.Writer,
+    inventory: *const ExternalAdoptionInventory,
+) void {
+    writer.writeUsize(@intFromPtr(inventory.allocator.ptr));
+    writer.writeUsize(@intFromPtr(inventory.allocator.vtable));
+    writer.writeUsize(inventory.client_address);
+    writer.writeU64(inventory.target_stream);
+    writer.writeUsize(inventory.screen_source_count);
+    writer.writeUsize(inventory.screen_payload_bytes);
+    writer.writeUsize(inventory.event_count);
+    writer.writeUsize(inventory.event_payload_bytes);
+    writer.writeU64(inventory.next_request_id);
+    const cleanup = externalInventoryCleanupSeal(inventory);
+    writer.writeBytes(&cleanup);
+}
+
 fn externalInventoryBackingSealMatches(
     inventory: *const ExternalAdoptionInventory,
     expected: [32]u8,
@@ -3955,6 +4061,63 @@ pub const Client = struct {
         if (self.partial_batch) |*partial| partial.bytes.deinit(self.allocator);
         self.parser.deinit();
         self.* = undefined;
+    }
+
+    /// Deep snapshot of the descriptors and descriptor elements consumed by `deinit`. This is
+    /// process-local authority evidence; payload contents are intentionally excluded.
+    pub fn projectionAuthorityDigest(self: *const Client) owner_seal.Digest {
+        var writer = owner_seal.Writer.init("maru.client-owner.projection.v1");
+        writer.writeUsize(@intFromPtr(self));
+        writer.writeUsize(@intFromPtr(self.allocator.ptr));
+        writer.writeUsize(@intFromPtr(self.allocator.vtable));
+        writer.writeU64(@bitCast(@as(i64, self.fd)));
+        writer.writeU128(self.host_id);
+        writer.writeUsize(if (self.build_id) |bytes|
+            if (bytes.len == 0) 0 else @intFromPtr(bytes.ptr)
+        else
+            0);
+        writer.writeUsize(if (self.build_id) |bytes| bytes.len else 0);
+        writer.writeUsize(if (self.lifecycle.len == 0) 0 else @intFromPtr(self.lifecycle.ptr));
+        writer.writeUsize(self.lifecycle.len);
+        writer.writeU8(@intFromEnum(self.ownership));
+        writer.writeBool(self.unusable);
+        writer.writeU64(self.next_request_id);
+        writer.writeUsize(if (self.parser.buf.capacity == 0)
+            0
+        else
+            @intFromPtr(self.parser.buf.items.ptr));
+        writer.writeUsize(self.parser.buf.items.len);
+        writer.writeUsize(self.parser.buf.capacity);
+        writer.writeUsize(self.parser.head);
+        writeProjectionBatches(&writer, self.pending_batches);
+        writeProjectionFrames(&writer, self.pending_stream);
+        writeProjectionEvents(&writer, self.pending_events);
+        writer.writeUsize(self.pending_batch_bytes);
+        writer.writeUsize(self.pending_stream_bytes);
+        writer.writeUsize(self.pending_event_bytes);
+        if (self.partial_batch) |partial| {
+            writer.writeBool(true);
+            writer.writeU64(partial.stream_id);
+            writer.writeBool(partial.is_snapshot);
+            writer.writeUsize(if (partial.bytes.capacity == 0)
+                0
+            else
+                @intFromPtr(partial.bytes.items.ptr));
+            writer.writeUsize(partial.bytes.items.len);
+            writer.writeUsize(partial.bytes.capacity);
+            writer.writeUsize(partial.chunk_count);
+        } else writer.writeBool(false);
+        if (self.pending_outbound) |outbound| {
+            writer.writeBool(true);
+            writer.writeUsize(if (outbound.frame.len == 0)
+                0
+            else
+                @intFromPtr(outbound.frame.ptr));
+            writer.writeUsize(outbound.frame.len);
+            writer.writeU64(outbound.stream_id);
+            writer.writeUsize(outbound.offset);
+        } else writer.writeBool(false);
+        return writer.finish();
     }
 
     pub fn externalTransferProfile(self: *const Client) ?ExternalTransferProfile {

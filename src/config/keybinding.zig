@@ -250,6 +250,9 @@ pub const default_app_bindings = [_]AppBinding{
     .{ .chord = .{ .modifiers = .{ .command = true, .option = true }, .key = .{ .char = 'T' } }, .action = .new_web_tab }, // Cmd+Option+T: 활성 pane에 새 브라우저 Term(⌘T=new_term의 web 버전, ⌥로 구분)
     .{ .chord = .{ .modifiers = .{ .command = true }, .key = .{ .char = 'O' } }, .action = .open_file_panel }, // Cmd+O: Markdown/HTML을 현재 창 도크에 열기(macOS Open 관례)
     .{ .chord = .{ .modifiers = .{ .command = true, .shift = true }, .key = .{ .char = 'E' } }, .action = .toggle_file_panel_focus }, // Cmd+Shift+E: workspace pane <-> file dock focus
+    // Cmd+E: 파일 패널 읽기 <-> 소스. 라이브 프리뷰 폐기로 markdown이 읽기로 시작하게 되면서, 이 chord가
+    // 없으면 편집에 들어가는 유일한 길이 헤더 mode 선택기 마우스 클릭뿐이다.
+    .{ .chord = .{ .modifiers = .{ .command = true }, .key = .{ .char = 'E' } }, .action = .toggle_file_panel_mode },
     .{ .chord = .{ .modifiers = .{ .command = true }, .key = .{ .char = 'W' } }, .action = .close_focused }, // Cmd+W: 파일 도크 focus면 파일 탭, 아니면 Term cascade
     // split(pane) 순환: ⌘]=다음, ⌘[=이전(활성 워크스페이스 안에서 wrap, 분할 없으면 무동작). shift 없는 대괄호라
     // char는 ]/[ 그대로다(브레이스 }/{ 는 shift일 때만). 워크스페이스 ⌘⇧]/⌘⇧[ · Term ⌘⌥]/⌘⌥[ 와 modifier로

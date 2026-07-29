@@ -9610,6 +9610,7 @@ pub const AppSession = struct {
             .open_file_panel => self.requestFilePanelPick(),
             .toggle_file_panel_dock_side => self.toggleFilePanelDockSide(),
             .toggle_file_panel_focus => self.toggleFilePanelFocus(),
+            .toggle_file_panel_mode => self.toggleActiveFilePanelMode(),
             .focus_file_tree => self.focusFileTree(),
             .new_file => self.startFileTreeEdit(.create_file),
             .new_directory => self.startFileTreeEdit(.create_directory),
@@ -11851,6 +11852,29 @@ pub const AppSession = struct {
     /// FP9 왕복 포커스 action. 구조 포커스의 단일 출처인 `FocusOwner`만 바꾸고 AppKit에는 기존 pending
     /// one-shot으로 responder 전이를 요청한다. 빈 도크에서 picker를 암묵적으로 열지 않아 단축키 재바인딩도
     /// 예측 가능하게 유지한다.
+    /// 활성 파일 Term의 표시 모드를 그 kind가 허용하는 다음 모드로 넘긴다(읽기 ↔ 소스). 헤더 mode 선택기
+    /// 클릭과 같은 `setFilePanelMode` 경로를 써서 pending action·web 통지가 동일하게 흐른다. 모드가 하나뿐인
+    /// kind(text·image·media·pdf)와 파일이 아닌 Term은 무동작이다.
+    fn toggleActiveFilePanelMode(self: *AppSession) void {
+        const pane = self.activePane();
+        if (pane.terms.items.len == 0) return;
+        const entry = pane.activeTerm().file_entry orelse {
+            self.showNotice("파일 탭에서만 쓸 수 있습니다.");
+            return;
+        };
+        const modes = dock_layout.modesForKind(entry.kind);
+        if (modes.len < 2) return; // 선택지가 없으면 조용히 무동작(알림이 오히려 방해다).
+        var next = modes[0].mode;
+        for (modes, 0..) |descriptor, i| {
+            if (descriptor.mode == entry.mode) {
+                next = modes[(i + 1) % modes.len].mode;
+                break;
+            }
+        }
+        self.setFilePanelMode(entry, next);
+        self.metal_dirty = true;
+    }
+
     fn toggleFilePanelFocus(self: *AppSession) void {
         switch (self.focus_owner) {
             .workspace => {
@@ -45223,6 +45247,46 @@ test "workspace restore allocation failures preserve the complete live tab dock 
     }
     try std.testing.expect(saw_rollback);
     try std.testing.expect(saw_commit);
+}
+
+test "file panel mode toggle: keyboard action walks the same modes the header offers" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    _ = try session.resize(1400, 900, 1000);
+
+    // 파일이 아닌 Term에서는 안내만 하고 아무 것도 바꾸지 않는다.
+    session.dispatchAppAction(.toggle_file_panel_mode);
+    try std.testing.expect(session.chrome_host.notice.open);
+    session.chrome_host.notice.dismiss();
+
+    // markdown은 읽기로 시작한다(라이브 프리뷰 폐기 — docs/file-panel.md §1). 키보드 경로가 없으면 편집에
+    // 들어가는 유일한 길이 헤더 mode 선택기 마우스 클릭뿐이므로, 이 왕복이 제품 계약이다.
+    _ = try session.openFileTermInActivePane("/tmp/mode-toggle.md", .markdown);
+    session.assignDockSurfaceIds();
+    const entry = session.fileEntryAt(0).?;
+    try std.testing.expectEqual(dock_panel.Mode.read, entry.mode);
+
+    session.dispatchAppAction(.toggle_file_panel_mode);
+    try std.testing.expectEqual(dock_panel.Mode.source_edit, entry.mode);
+    // 헤더 클릭과 같은 경로라 Swift가 drain할 pending action도 똑같이 선다.
+    const action = session.takeFilePanelModeAction().?;
+    try std.testing.expectEqual(entry.surface_id, action.surface_id);
+    try std.testing.expectEqual(dock_panel.Mode.source_edit, action.mode);
+
+    session.dispatchAppAction(.toggle_file_panel_mode);
+    try std.testing.expectEqual(dock_panel.Mode.read, entry.mode);
+
+    // 모드가 하나뿐인 kind(text)는 무동작이고 알림도 띄우지 않는다 — 토글할 선택지 자체가 없다.
+    _ = try session.openFileTermInActivePane("/tmp/mode-toggle.py", .text);
+    session.assignDockSurfaceIds();
+    const text_entry = session.fileEntryAt(1).?;
+    try std.testing.expectEqual(dock_panel.Mode.source_edit, text_entry.mode);
+    session.dispatchAppAction(.toggle_file_panel_mode);
+    try std.testing.expectEqual(dock_panel.Mode.source_edit, text_entry.mode);
+    try std.testing.expect(!session.chrome_host.notice.open);
 }
 
 test "FP9 focus toggle: empty notice and workspace-dock round trip use one configurable action" {

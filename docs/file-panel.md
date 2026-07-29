@@ -21,8 +21,8 @@
 - **웹 브라우저(⌘⌥T)는 현행 워크스페이스 term 유지 — FP16으로 파일과 같은 자리가 된다.** 브라우징의 용례(터미널 옆 미리보기·팝업/OAuth[7f]·에이전트 제어)가 워크스페이스 맥락이라는 판단은 그대로이고, 출하·손테스트 완료된 7e/7f/4e-4/4g를 재작업하지 않는다. **부수 효과**: FP16의 §4 hidden-보존이 web Term 일반에 적용되므로 "워크스페이스 전환 시 브라우저가 흰 페이지가 된다"는 현행 결함이 함께 해소된다 — §13에 백로그로 두었던 **URL 기억·재로드 얕은 수정은 불필요**해진다(파괴가 없으면 재로드할 것도 없다). 이 항목은 §13에서 제거한다.
 - **외부 링크 대상은 설정으로 선택한다.** Markdown/HTML 파일 패널에서 사용자가 직접 누른 명시적 `http(s)://` 링크는 `file-panel.external-link-target = in-app | system`(기본 `in-app`)에 따른다. `in-app`은 클릭한 파일 패널과 같은 창의 새 browser Term으로 열고 `system`은 macOS 기본 브라우저로 연다. `⌘⇧`+클릭은 설정과 무관하게 이번 한 번만 시스템 브라우저를 강제한다. **터미널 화면**의 링크는 이 설정이 아니라 `input.link-open-target`이 정한다(그쪽은 **열려 있는** browser 패널 재사용을 우선하고, 기본 `auto`는 패널이 없으면 새 탭을 만들지 않는다 — [링크 감지](link-detection.md) §링크를 어디에 여는가). Markdown의 같은 문서 fragment는 WebView 안에 남고 로컬 `.md`/`.html`은 source group의 도크 탭으로 연다. script/meta redirect와 `javascript:`·`data:`·`file:`·protocol-relative·percent-encoded scheme은 이 외부 열기 경계에 들어오지 않는다.
 - **Term 배관은 kind-무관으로 설계**(`web_panel_kind`가 kind를 든다) — 파일·브라우저가 같은 pane 트리에 살게 되면서 "브라우저 탭을 도크로 보내기"(§13)는 목적을 잃는다. 대신 남는 확장점은 **새 web kind 추가**(diff 뷰어·에디터 surface 등)이며, 새 kind는 `web_panel_kind` 하나만 넓히고 pane 탭·헤더·수명 계약을 그대로 물려받는다. WKWebView 신뢰 config는 계속 kind에서 파생하며 "레이아웃 재사용 ≠ trust 재사용"은 유지한다.
-- **편집기 = CodeMirror 6** (control-plane §13 열린 질문 해소 — 사용자 결정). 근거: 마크다운이 SSOT(항상 텍스트, 왕복 손실 0), 한글 IME 조합이 WebKit 네이티브 IME 위에서 가장 안정, sanitize 파이프와 렌더 공유. 문서모델 기반(왕복 손실·조합 엣지)은 기각. **프론트엔드 = vanilla TS**(프레임워크 없음 — B로 웹앱 최소화), **렌더 = remark/unified로 확정(FP2 실측)** + Mermaid·KaTeX MathML·Prism 리치 렌더 — 스택·근거·보안 배치는 §2.1.
-- **Markdown 모드 = 읽기 | 소스 (라이브 프리뷰 폐기, 2026-07-29 사용자 결정)**: 새 `.md` entry는 **읽기**가 기본이고, 헤더 mode 선택기는 `읽기 | 소스`만 노출한다(`dock_layout.modesForKind`·`Mode.defaultFor/allowedFor` SSOT). **라이브 프리뷰(FP10·FP11)는 백로그가 아니라 폐기다** — atomic iframe(블록별 격리 렌더)의 로드 실패·플리커·성능 이슈로 2026-07-22에 제품 mode에서 뺐고, 되살리지 않기로 확정해 projection·atomic·worker 구현을 코드에서 걷어냈다(이력은 Git이 소유 — §10). 근거는 셋이다: ⑴ 읽기·소스 두 모드로 사용자 요구가 충족된다, ⑵ 노출되지 않는 projection 계층이 web 소스의 다수와 required CI 게이트를 계속 점유해 유지비만 냈다, ⑶ 편집 중 렌더를 보여 주는 대안으로 문서모델 기반 리치 편집기를 얹는 방향도 함께 기각한다(마크다운 SSOT의 왕복 손실 0과 CM6 위 한글 IME 조합 안정성이 그 대가보다 크다 — 이 문서 아래 편집기 결정과 같은 근거). 저장된 `live-preview` markdown entry는 복원 시 `parseDockEntry`가 `defaultFor`(읽기)로 조용히 clamp한다(포맷 하위호환 유지). 읽기는 문서 전체의 격리 렌더로 **mermaid(격리 `<img>`·시스템 light/dark 테마)와 코드펜스 문법 하이라이트(`--maru-syntax-*` 터미널 팔레트)를 지원**하고, 소스는 CM6 생 Markdown이다. 읽기↔소스 토글은 하나의 `EditorView`·history·revision을 공유해 전환으로 undo/selection/dirty를 잃지 않는다. 소스는 renderer 장애·모호한 문법·대형 블록을 복구하는 영구 escape hatch다. `.html`은 읽기 전용이다. 구버전 reader용 adapter나 workspace format bump는 추가하지 않는다(unknown mode를 만난 현행 fail-closed 동작 수용).
+- **소스 편집기 = CodeMirror 6, 리치 편집기 = 문서모델(2026-07-29 개정)**. 소스 모드는 계속 CM6다 — 마크다운이 SSOT(항상 텍스트, 왕복 손실 0), 한글 IME 조합이 WebKit 네이티브 IME 위에서 가장 안정, sanitize 파이프와 렌더 공유. **초판은 문서모델 기반을 전면 기각했으나, 리치 모드를 별도 셋째 모드로 병존시키는 형태로 한정 채택한다**(사용자 결정). 뒤집은 것은 "문서모델을 쓰지 않는다"이지 "마크다운이 SSOT다"가 아니다 — 디스크의 진실은 여전히 마크다운 텍스트이고, 리치는 그 위에 얹는 **편집 수단 하나**다. **대가를 명시 수용한다**: ⑴ 문서모델 ↔ 마크다운 왕복은 원문 서식을 정규화하므로 사용자가 건드리지 않은 줄도 저장 시 바뀔 수 있다(공백·목록 번호 스타일·원시 HTML). ⑵ 문서모델 편집기는 조합 중 DOM을 재작성해 한글 IME와 부딪히는 계열이다. **완화는 소스 모드 존치다** — 왕복 손실이 곤란한 문서는 소스로 편집하면 손실이 0이고, 리치에서 이상이 보이면 같은 파일을 소스로 열어 원문을 그대로 고칠 수 있다. 그래서 리치는 소스를 **대체하지 않는다**. **프론트엔드 = vanilla TS**(프레임워크 없음 — B로 웹앱 최소화), **렌더 = remark/unified로 확정(FP2 실측)** + Mermaid·KaTeX MathML·Prism 리치 렌더 — 스택·근거·보안 배치는 §2.1.
+- **Markdown 모드 = 읽기 | 리치 | 소스 (2026-07-29 사용자 결정)**: 새 `.md` entry는 **읽기**가 기본이고, 헤더 mode 선택기는 세 모드를 노출한다(`dock_layout.modesForKind`·`Mode.defaultFor/allowedFor` SSOT). **읽기**는 렌더 결과를 보는 화면, **리치**는 툴바를 가진 WYSIWYG 편집(위 편집기 결정), **소스**는 생 Markdown 편집이자 왕복 손실 0의 escape hatch다. **라이브 프리뷰(FP10·FP11)는 백로그가 아니라 폐기다** — atomic iframe(블록별 격리 렌더)의 로드 실패·플리커·성능 이슈로 2026-07-22에 제품 mode에서 뺐고, 되살리지 않기로 확정해 projection·atomic·worker 구현을 코드에서 걷어냈다(이력은 Git이 소유 — §10). 근거는 셋이다: ⑴ 읽기·소스 두 모드로 사용자 요구가 충족된다, ⑵ 노출되지 않는 projection 계층이 web 소스의 다수와 required CI 게이트를 계속 점유해 유지비만 냈다, ⑶ "편집 중 렌더를 본다"는 요구 자체는 유효하며, 그건 **리치 모드**가 별도로 답한다. **라이브 프리뷰와 리치는 다른 것이다** — 라이브는 같은 CM6 buffer 위에 렌더를 겹쳐 원문과 렌더가 한 화면에 섞이는 방식이고(그 겹침이 곧 복잡도였다), 리치는 원문을 감춘 별도 문서모델 편집기다. 폐기한 것은 겹치는 방식이지 렌더된 편집 화면이 아니다. 저장된 `live-preview` markdown entry는 복원 시 `parseDockEntry`가 `defaultFor`(읽기)로 조용히 clamp한다(포맷 하위호환 유지). 읽기는 문서 전체의 격리 렌더로 **mermaid(격리 `<img>`·시스템 light/dark 테마)와 코드펜스 문법 하이라이트(`--maru-syntax-*` 터미널 팔레트)를 지원**하고, 소스는 CM6 생 Markdown이다. 읽기↔소스 토글은 하나의 `EditorView`·history·revision을 공유해 전환으로 undo/selection/dirty를 잃지 않는다. 소스는 renderer 장애·모호한 문법·대형 블록을 복구하는 영구 escape hatch다. `.html`은 읽기 전용이다. 구버전 reader용 adapter나 workspace format bump는 추가하지 않는다(unknown mode를 만난 현행 fail-closed 동작 수용).
 - **저장은 명시적 `⌘S`만**: 소스 모드가 현재 CM6 `Text` snapshot을 기존 pathless atomic write로 저장한다. write 완료 시 현재 문서가 그 snapshot과 내용상 같을 때만 native dirty를 내린다. 따라서 저장 중 재편집은 dirty를 유지하고, 편집 뒤 undo로 snapshot과 같은 내용에 돌아오면 revision이 더 높아도 clean이다. revision은 저장 identity가 아니라 stale dirty report를 거부하는 단조 clock이다. 실패·external conflict에서는 buffer와 dirty를 유지한다. focus-loss/autosave는 하지 않는다. `⌘F`는 Markdown 편집 WebView가 first responder일 때 새 package 없는 Maru CM6 search extension이 담당하며, `⌘A/C/V/X/Z/⇧Z/S`와 텍스트 탐색 키도 WebKit에 양보한다. ABI v132 typed `WebKeyRoute`가 app action·explicit unbind 소비·web editor·일반 pass-through를 구분하고 명시적인 사용자 rebind/unbind·global shortcut·modal owner의 기존 우선순위를 유지한다.
 - **write 스코프 = 열린 파일만**(§3). **트리 루트 = git repo 루트 우선**(§7).
 - **불변식(스파이크 6건으로 확정): `Term`의 surface는 교체되지 않는다.** 이건 파일 전용 규칙이 아니라 **터미널 Term이 이미 지키고 있던 규칙**이다 — `Term.surface`는 생성 시 한 번만 assign되고(app_session.zig:6156·6303) 프로덕션 경로 어디서도 재대입되지 않는다. FP16은 파일 Term을 그 규칙 **안으로** 들여놓는다. 파일 Term마다 WKWebView 1개이고 비활성이면 hidden(상태 유지 — Swift hide=isHidden만)이다.
@@ -53,15 +53,15 @@
 
 **kind는 확장자 나열이 아니라 "콘텐츠를 어떻게 다루느냐(신뢰 경계 + 전송 방식)"로 정의한다(FP12 결정, 2026-07-22 사용자 승인 — 범위 A+B+C+D 전부).** 새 값을 더해도 기존 두 컨텍스트(신뢰 shell / 격리 loadFileURL)와 전송 채널을 재사용하고 WKWebView 닫힌 열거를 넓히지 않는다(§1 아키텍처 B).
 
-| 파일 | 콘텐츠 뷰 | 읽기 | 소스 |
-|---|---|---|---|
-| `.md` | 신뢰 shell + bridge-free renderer | 문서 전체 새니타이즈 렌더(Mermaid·KaTeX·코드펜스 하이라이트 포함) | CM6 생 Markdown |
-| `.html` | browser config(비신뢰 격리) | `loadFileURL(_:allowingReadAccessTo: 파일 디렉터리)` — WebKit 표준 API로 읽기 범위를 그 디렉터리에 한정 | 불가(후속 §13) |
-| **`text`**(FP12) | **신뢰 shell + CM6**(render origin 미사용) | 불가 | **CM6 생 텍스트 + 확장자별 언어 하이라이트**(§2.2). `.md`/`.html`·바이너리 제외 **모든 파일**이 text(VSCode식) |
-| **`svg`**(FP13) | 소스=신뢰 shell + CM6 / 프리뷰=**격리 render origin + sanitize→`data:`** | sanitize된 SVG 격리 렌더 | CM6 생 XML |
-| **`image`**(FP14→FP14b) | browser config(비신뢰 격리) — WebKit **image document** + 주입 뷰어 스크립트 | `loadFileURL` 직접(복사 0) → 주입 스크립트가 휠 줌·드래그 팬·테마 체커 배경 | 불가 |
-| **`media`**(FP15) | browser config(비신뢰 격리) — WebKit **media document**(래퍼 없음) | `loadFileURL` 디스크 스트리밍(range) | 불가 |
-| **`pdf`**(FP15) | browser config(비신뢰 격리, WebKit 내장 PDF) | `loadFileURL(_:allowingReadAccessTo: 파일 디렉터리)` | 불가 |
+| 파일 | 콘텐츠 뷰 | 읽기 | 리치 | 소스 |
+|---|---|---|---|---|
+| `.md` | 신뢰 shell + bridge-free renderer | 문서 전체 새니타이즈 렌더(Mermaid·KaTeX·코드펜스 하이라이트 포함) | 툴바 + 문서모델 WYSIWYG(§2.5) | CM6 생 Markdown |
+| `.html` | browser config(비신뢰 격리) | `loadFileURL(_:allowingReadAccessTo: 파일 디렉터리)` — WebKit 표준 API로 읽기 범위를 그 디렉터리에 한정 | 불가 | 불가(후속 §13) |
+| **`text`**(FP12) | **신뢰 shell + CM6**(render origin 미사용) | 불가 | 불가 | **CM6 생 텍스트 + 확장자별 언어 하이라이트**(§2.2). `.md`/`.html`·바이너리 제외 **모든 파일**이 text(VSCode식) |
+| **`svg`**(FP13) | 소스=신뢰 shell + CM6 / 프리뷰=**격리 render origin + sanitize→`data:`** | sanitize된 SVG 격리 렌더 | 불가 | CM6 생 XML |
+| **`image`**(FP14→FP14b) | browser config(비신뢰 격리) — WebKit **image document** + 주입 뷰어 스크립트 | `loadFileURL` 직접(복사 0) → 주입 스크립트가 휠 줌·드래그 팬·테마 체커 배경 | 불가 | 불가 |
+| **`media`**(FP15) | browser config(비신뢰 격리) — WebKit **media document**(래퍼 없음) | `loadFileURL` 디스크 스트리밍(range) | 불가 | 불가 |
+| **`pdf`**(FP15) | browser config(비신뢰 격리, WebKit 내장 PDF) | `loadFileURL(_:allowingReadAccessTo: 파일 디렉터리)` | 불가 | 불가 |
 
 - `.html`은 살아있는 스크립트라 신뢰 shell/markdown renderer에 인라인 렌더할 수 없다. 신뢰 CSP의 `frame-src` 예외는 정확히 `maru-app://render`인 번들 renderer 한 곳뿐이며 임의 문서·`file:` iframe은 허용하지 않는다([web-panel.md] §7). 도크 안에서도 `.html`은 browser config(도크 전용 ephemeral store) WKWebView로 격리 렌더한다.
 - 현행 스킴 화이트리스트는 http/https만(`resolveNavUrl`·`popupTargetAllowed` — file: 거부)이므로 **도크의 .html 열기 경로만** `loadFileURL`을 쓴다. 주소창 네비게이션의 file: 거부는 불변.
@@ -73,7 +73,7 @@
 
 아키텍처 B로 WKWebView 웹앱의 일은 최소다(트리·탭·도크 chrome = 네이티브 Zig+GPU). 그래서:
 
-- **프론트엔드 = vanilla TS(프레임워크 없음).** 웹앱의 일은 새니타이즈 HTML 표시(읽기) + CM6 마운트(소스) + 브리지 모드/테마 신호 수신 + dirty 보고다. Markdown 파생 HTML은 신뢰 shell에 삽입하지 않고 bridge-free renderer origin이 소유하며, 그 안의 Mermaid 펜스만 shell이 native helper로 중계한다(§2.4). `viewer.ts`는 shell composition facade와 mutation queue/guard snapshot 전달을 맡고, Markdown→HTML 파생은 `markdown.ts`, Mermaid sanitize·config는 `rich-render.ts`, helper wire는 `mermaid-helper.ts`·`mermaid-fence.ts`, 렌더 capability 타입은 `renderer-capability.ts`, 편집 모드·revision clock은 `file-panel-state.ts`가 소유한다. **라이브 프리뷰 폐기(§1)로 projection·atomic worker·intent dispatcher 모듈은 전부 삭제했다** — 남은 웹 모듈은 읽기·소스 두 모드만 지탱한다. CM6는 프레임워크가 아니라 **DOM 마운트 에디터 라이브러리**라 이 결정과 직교한다.
+- **프론트엔드 = vanilla TS(프레임워크 없음).** 웹앱의 일은 새니타이즈 HTML 표시(읽기) + CM6 마운트(소스) + 문서모델 편집기 마운트(리치, §2.5) + 브리지 모드/테마 신호 수신 + dirty 보고다. Markdown 파생 HTML은 신뢰 shell에 삽입하지 않고 bridge-free renderer origin이 소유하며, 그 안의 Mermaid 펜스만 shell이 native helper로 중계한다(§2.4). `viewer.ts`는 shell composition facade와 mutation queue/guard snapshot 전달을 맡고, Markdown→HTML 파생은 `markdown.ts`, Mermaid sanitize·config는 `rich-render.ts`, helper wire는 `mermaid-helper.ts`·`mermaid-fence.ts`, 렌더 capability 타입은 `renderer-capability.ts`, 편집 모드·revision clock은 `file-panel-state.ts`, 리치 편집기와 툴바는 `rich-editor.ts`가 소유한다. **라이브 프리뷰 폐기(§1)로 projection·atomic worker·intent dispatcher 모듈은 전부 삭제했다** — 남은 웹 모듈은 읽기·소스 두 모드만 지탱한다. CM6는 프레임워크가 아니라 **DOM 마운트 에디터 라이브러리**라 이 결정과 직교한다.
 - **렌더러 = remark/unified 확정(FP2)**. 실측으로 ⑴ raw HTML을 `remarkRehype` 경계에서 폐기, ⑵ `rehype-sanitize` AST allowlist, ⑶ unist 문자 offset→renderer-owned `data-maru-source-start/end`, ⑷ GFM·KaTeX MathML-only·Prism을 한 pipeline에서 보존하고 adversarial fixture를 통과했다. markdown-it의 block line 범위보다 후속 주석 앵커의 문자 offset hedge가 강하고 별도 DOM sanitizer가 불필요해 remark를 택했다.
 - **리치 렌더 기능**(각 = 라이브러리 + 보안 배치):
 
@@ -112,7 +112,7 @@ VSCode가 여는 유형 대부분을 도크로 흡수하되, 새 렌더 경로�
   - **인앱 allowlist(`mediaExtension`, `file_panel_bridge.zig` 단일 출처)**: 비디오 `.mp4`·`.mov`·`.m4v`, 오디오 `.mp3`·`.m4a`·`.aac`·`.wav`·`.aiff`·`.aif`·`.flac`. 그 밖의 미디어 확장자(`.webm`·`.mkv`·`.avi`·`.wmv`·`.flv`·`.ogv`·`.ogg`·`.opus`·`.wma`·`.mpg`·`.m2ts`·`.mid` 등)는 `openKindForPath`가 **null**을 줘 기존 바이너리와 같은 외부 앱 폴백이 된다(동작 변화 0 — 지금도 외부 앱이다).
   - **왜 JS `MediaError` 감지가 아닌가(초안 정정, 2026-07-28)**: 초안은 `<video>`/`<audio>` **wrapper HTML**을 띄우고 `MediaError`를 잡아 폴백하려 했다. 격리 패널에서는 둘 다 성립하지 않는다 — ⑴ **보고 채널이 없다**: `filePanelKind == 2`는 메시지 핸들러를 0으로 유지하고(§8.1(c)) 로컬 파일에는 browser-control script도 주입하지 않으므로, JS가 오류를 잡아도 네이티브로 전달할 길이 없다. ⑵ **wrapper를 둘 자리가 없다**: `loadFileURL(_:allowingReadAccessTo:)`의 read scope는 **미디어 파일의 부모 디렉터리**(=사용자 폴더)이고 로드하는 문서는 그 scope 안에 있어야 한다 — wrapper를 쓰려면 사용자 폴더에 파일을 만들어야 한다. 그래서 v1은 **확장자 사전 판정 + WebKit media document 직접 로드**로 간다(pdf와 같은 경로라 **Swift 변경 0**).
   - **남는 한계**: 지원 컨테이너 안의 미지원 코덱(예: AV1-in-MP4)은 인앱에서 빈 플레이어가 된다 — 런타임 감지·폴백은 §13 백로그(보고 채널이 생기면).
-- **모드**: `markdown`은 `read`(기본)|`source_edit`(**라이브 프리뷰 폐기** — §1), `text`는 `source_edit` 단일 모드(읽기 없음), `svg`는 `read`(프리뷰 기본)|`source_edit`, `image`/`media`/`pdf`는 모드 없는 `read` 뷰다. `Mode.defaultFor`/`allowedFor`(`dock_panel.zig`)와 `dock_layout.modesForKind`가 kind별 유일 출처이고 `.html`의 read-only 계약을 그대로 확장한다.
+- **모드**: `markdown`은 `read`(기본)|`rich`|`source_edit`(§1), `text`는 `source_edit` 단일 모드(읽기 없음), `svg`는 `read`(프리뷰 기본)|`source_edit`, `image`/`media`/`pdf`는 모드 없는 `read` 뷰다. `Mode.defaultFor`/`allowedFor`(`dock_panel.zig`)와 `dock_layout.modesForKind`가 kind별 유일 출처이고 `.html`의 read-only 계약을 그대로 확장한다.
 - **하이라이트(text/code)**: `textLanguageForPath`(basename→확장자 순)가 `TextLanguage`를 정하고 wire 이름을 shell URL `?lang=`으로 실으면 web `source-language.ts`가 문법을 골라 마운트한다. **전용 `@codemirror/lang-*`**(json·javascript(js/ts/jsx/tsx)·python·css·xml(svg 포함)·yaml)과 **`@codemirror/legacy-modes` StreamLanguage**(toml·ini/properties·shell·sql·rust·go·c·cpp·java·csharp·kotlin·swift·ruby·lua·dockerfile·perl·r·powershell·groovy·scala·haskell·clojure·dart)를 쓴다. 그 외 확장자는 `plain`(색 없음, 편집 가능). 편집기는 `indentUnit(2 spaces)`·`indentOnInput`·`bracketMatching`·`closeBrackets`·`indentWithTab`으로 Enter 자동 들여쓰기·Tab 들여쓰기를 제공한다. 하이라이트 색은 theme 책임(§1)이라 `HighlightStyle`이 Lezer 태그(keyword/string/number/comment…)를 `--maru-syntax-*` CSS custom property에만 매핑한다. **색 소스는 Maru 터미널 색상 테마다(사용자 결정 2026-07-22)** — 시스템 light/dark가 아니라 `theme.palette`(ANSI 16색)+fg/bg에서 각 syntax 역할 색을 파생해 네이티브가 shell에 주입한다(FP12b, §2.3). 폴백(주입 실패·주입 전)은 `app.css`의 `--maru-syntax-*` light/dark 기본값이다. CM6 언어 패키지는 exact name/version/license를 `third-party-licenses.md`에 기록한다(FP12 완료).
 - **`max_file_bytes`(8 MiB) 유지 근거**: ⑴ 브리지가 통짜 전송이라(스트리밍 없음) 내용이 Zig 버퍼·ABI 복사·JS 문자열·CM6 문서로 여러 번 뜨고 프레임 틱 blocking을 유발한다([performance-budget.md]), ⑵ write 보안 모델의 "피해 반경 = 그 파일 1개"가 bounded read 위에서 성립한다(§3·§12), ⑶ 초장문 single-line(minified/거대 JSON) 편집 실용성. 초과 파일은 외부 앱으로 폴백하고, **대형 파일 read-only 스트리밍 뷰는 §13 백로그**다.
 
@@ -172,11 +172,32 @@ flowchart TD
 - codec의 단일 출처는 DOM/AppKit 비의존 Zig `src/session/mermaid_protocol.zig`이다. parent Swift는 Zig가 encode한 opaque request bytes를 그대로 pipe에 쓰고 stdout raw bytes를 Zig streaming decoder에 돌려주며 payload를 해석하지 않는다. helper Swift도 같은 Zig static library의 decode/encode ABI를 호출하므로 별도 serializer·raw enum을 갖지 않는다. **FP11f 현재 wire**는 4-byte big-endian payload length 뒤 `magic[4]="MRU1"`, `version:u16be=2`, `tag:u8`, tag별 payload 순서다. `Hello=0 { helper_instance:u64be, nonce:u64be }`, `HelloAck=1`은 두 값을 그대로 echo한다. handshake가 성공하기 전 Request는 받지 않는다. v2 `Request=2 { helper_instance, job_id, editor_epoch, document_revision, projection_generation, widget_id, widget_generation, renderer_instance, fence_id: 각각 u64be; source_hash:[32]u8; source_len:u32be; source_utf8 }`이고 `Result=3`은 같은 identity/hash 뒤 `status:u8 { ok=0, render_error=1 }`, `body_len:u32be`, body를 둔다. v1 adapter/fallback은 두지 않으며 version mismatch는 현행처럼 helper instance 전체를 실패 처리한다. hash는 source UTF-8 bytes의 SHA-256이다. `ok` body만 sanitized SVG이며 ≤512 KiB, `render_error` body는 반드시 0이다. request frame≤40 KiB, result frame≤513 KiB이며 선언 길이가 cap을 넘거나 tag/version/status가 닫힌 목록 밖이거나 identity/hash/내부 길이가 다르거나 UTF-8/trailing bytes가 있으면 helper instance 전체를 실패 처리한다. decoder는 1-byte partial read·연속 frame을 지원하되 retained input≤513 KiB+4다. stdout은 이 frame 전용이고 stderr는 64 KiB ring으로만 진단에 보존한다.
 - read/source는 같은 CM6 `savedDocument: Text`, `DocumentRevision`, 직렬 mutation queue와 close lock을 쓴다. 일반 입력의 dirty 판정은 `Text.eq(savedDocument)`로 전체 문자열 할당 없이 수행하고, full source 문자열화는 명시적 save·close snapshot·읽기 전환처럼 문서 전체가 실제 소비되는 cold path에서만 허용한다. 읽기↔소스 전환은 editor를 파괴하지 않고, 읽기로 전환해도 hidden editor buffer를 유지하며 읽기 iframe에는 그 buffer snapshot을 렌더한다.
 
+### 2.5 리치 편집 모드 (WYSIWYG)
+
+**리치는 원문을 감춘 문서모델 편집기다.** 화면에 보이는 것이 곧 렌더된 결과이고, `**굵게**` 같은 마크다운 기호는
+보이지 않는다. 상단에 툴바를 두어 블록·인라인 서식을 버튼으로 적용한다. 편집 엔진은 신뢰 shell 안에서 도는
+문서모델 라이브러리(ProseMirror 계열)이며, 읽기 프리뷰처럼 격리 render origin으로 보내지 않는다 — 편집 대상은
+사용자 자신의 문서이고 이미 CM6가 같은 신뢰 경계에서 편집을 맡고 있다.
+
+- **디스크의 진실은 언제나 마크다운 텍스트다.** 리치는 파일을 열 때 마크다운을 문서모델로 파싱하고, 저장할 때 다시
+  마크다운으로 직렬화한다. 따라서 **리치로 저장하면 원문이 정규화될 수 있다** — 사용자가 건드리지 않은 줄의 공백,
+  목록 번호 스타일, 원시 HTML 블록이 대상이다. 이 손실은 숨기지 않고 계약으로 명시한다.
+- **손실이 곤란하면 소스로 편집한다.** 소스 모드는 CM6가 텍스트를 그대로 다루므로 왕복 손실이 0이다. 리치에서
+  이상한 결과가 보이면 같은 파일을 소스로 열어 원문을 직접 고칠 수 있다. 그래서 리치는 소스를 대체하지 않는다(§1).
+- **모드 전환은 저장 상태를 기준으로 한다.** dirty인 상태로 리치↔소스를 오가면 두 편집기의 문서 표현이 서로
+  달라 어느 쪽이 최신인지 모호해진다. 전환 시점의 내용을 마크다운 텍스트 한 벌로 만들어 상대 편집기에 넘기고,
+  그 텍스트가 이후의 유일한 기준이 된다. 전환만으로 디스크에 쓰지는 않는다(저장은 계속 명시적 `⌘S`다).
+- **툴바 구성(v1)**: 본문·제목 1~3, 굵게·기울임·취소선, 불릿·번호·체크 목록, 인용, 링크. 각 버튼은 문서모델
+  명령 하나에 대응하며 현재 selection에 토글로 적용한다. 이미지·표·코드블록 삽입은 후속이다(§13).
+- **한글 IME는 이 모드의 최대 위험이다.** 문서모델 편집기는 조합 중 DOM을 재작성하는 계열이라 WebKit 네이티브
+  IME와 부딪힐 수 있다. 조합 중 문서 재작성을 미루는 것이 최소 요구이며, 실제 조합 동작은 헤드리스로 재현되지
+  않으므로 GUI 손 테스트를 완료 조건에 포함한다.
+
 ### 3.1 파일 헤더 밴드
 
 **FP16 배치**: 밴드는 도크가 아니라 **파일 Term이 소유**하고, browser Term의 읽기전용 주소창 밴드와 **같은 `ChromeInset.top = bar_h + band_h` 경로**로 pane 탭 바 바로 아래에 놓인다(구현: `addr_h` 분기가 `isBrowserTerm(term) or term.file_entry != null`로 일반화됐고, 밴드 rect는 `paneBandRect(PaneBar)` 하나가 준다 — 주소창 밴드와 **같은 자리**라 상호 배타다). 밴드 rect가 곧 WKWebView 본문에서 비워지는 영역이라는 계약도 그대로다. 아래 셀 레이아웃 계약(`HeaderCellLayout`·mode span·status 우선순위)은 소유자만 바뀌고 내용은 유지한다.
 
-파일 Term 탭 바 아래 밴드 = **`부모 / 파일` breadcrumb + 독립 `읽기 | 소스` 선택지 + dirty ●**(GPU 셀). 주소창이 아니다 — `←`/`→`(WebKit 백스택)는 단일 파일 문서에 무의미해서 없다("열었던 파일"은 트리의 열린 파일 하이라이트 + 최근 파일 섹션이 흡수 — §7). `header_mode_order = { read, live_preview, source_edit }`와 `modeSlot(mode)`가 시각 순서의 SSOT이고 ABI ordinal과 독립이다. `HeaderCellLayout`은 mode 영역 최소 6셀을 먼저 예약한 뒤 남는 2셀마다 conflict, dirty 순으로 status를 추가하며, 부족한 status는 tab/tree marker에만 남긴다. mode span은 1/3·2/3 cut으로 rect 세 개를 직접 저장하고 label render·selected background·hover·hit-test가 이를 공유한다. 전체 폭이 6셀 미만이면 mode/status 모두 숨기고 breadcrumb만 표시한다. Zig→웹 신호는 take/drain 패턴이고 ABI v132 값은 `0=read, 1=source-edit, 2=live-preview`다.
+파일 Term 탭 바 아래 밴드 = **`부모 / 파일` breadcrumb + 독립 `읽기 | 리치 | 소스` 선택지 + dirty ●**(GPU 셀). 주소창이 아니다 — `←`/`→`(WebKit 백스택)는 단일 파일 문서에 무의미해서 없다("열었던 파일"은 트리의 열린 파일 하이라이트 + 최근 파일 섹션이 흡수 — §7). `header_mode_order = { read, live_preview, source_edit }`와 `modeSlot(mode)`가 시각 순서의 SSOT이고 ABI ordinal과 독립이다. `HeaderCellLayout`은 mode 영역 최소 6셀을 먼저 예약한 뒤 남는 2셀마다 conflict, dirty 순으로 status를 추가하며, 부족한 status는 tab/tree marker에만 남긴다. mode span은 1/3·2/3 cut으로 rect 세 개를 직접 저장하고 label render·selected background·hover·hit-test가 이를 공유한다. 전체 폭이 6셀 미만이면 mode/status 모두 숨기고 breadcrumb만 표시한다. Zig→웹 신호는 take/drain 패턴이고 ABI v132 값은 `0=read, 1=source-edit, 2=live-preview`다.
 
 ### 3.2 파일 탭 닫기와 dirty 보호
 
@@ -268,7 +289,7 @@ flowchart TD
 
 **FP8 다중 그룹 wire(레거시 리더 전용 — writer는 더 이상 이 키를 내지 않는다)**: 단일 그룹은 기존 `dock-entry`만 방출해 byte 고정점을 유지했다. 다중 그룹일 때만 `dock-group-count`·`dock-focused-group`, preorder 반복 `dock-node="leaf:<group>"|"split:<horizontal|vertical>:<ratio-milli>"`, 반복 `dock-entry-v2="<group>:<kind>:<mode>:<active>:<path-byte-len>:<path>"`를 같은 window 줄에 쓴다. 옛 reader는 새 키를 skip해 도크만 빈 상태로 복원하고 terminal/windows는 보존한다. 새 reader는 group 64·node 127·entry 256 상한, full-binary preorder, leaf 1회 참조, ratio 50..950, 도크 전역 path 유일성, 그룹별 active 0/1을 검증한다. 미래 kind/mode/side/direction은 도크만 기본 상태로 강등한다.
 
-flat/v2의 `<mode>` 닫힌 목록은 `read|source-edit`다. `Mode.allowedFor(kind)`가 kind별 허용 mode를 정하고(`markdown`=둘, `html`=`read`만) open·rename kind 전이·serialize·parse·ABI가 이 함수를 공유한다. **폐기된 `live-preview`는 reader 전용 하위호환으로만 남는다** — 라이브 프리뷰를 쓰던 시절 저장된 entry를 만나면 `parseDockEntry`가 `defaultFor`(읽기)로 조용히 clamp한다. 이 clamp가 없으면 그 창의 도크 전체가 빈 상태로 강등되므로(아래 forward-compat 규칙) 옛 workspace 파일을 여는 사용자가 탭을 잃는다. writer는 이 값을 다시 쓰지 않는다. reader는 그 밖의 invalid kind/mode 조합이나 미래 mode 하나를 만나면 현행 forward-compat 규칙대로 **그 창의 도크 전체를 빈 상태로 강등**하고 terminal/windows를 보존한다. 기존 read/source byte 고정점은 바꾸지 않는다.
+flat/v2의 `<mode>` 닫힌 목록은 `read|rich|source-edit`다. `Mode.allowedFor(kind)`가 kind별 허용 mode를 정하고(`markdown`=둘, `html`=`read`만) open·rename kind 전이·serialize·parse·ABI가 이 함수를 공유한다. **폐기된 `live-preview`는 reader 전용 하위호환으로만 남는다** — 라이브 프리뷰를 쓰던 시절 저장된 entry를 만나면 `parseDockEntry`가 `defaultFor`(읽기)로 조용히 clamp한다. 이 clamp가 없으면 그 창의 도크 전체가 빈 상태로 강등되므로(아래 forward-compat 규칙) 옛 workspace 파일을 여는 사용자가 탭을 잃는다. writer는 이 값을 다시 쓰지 않는다. reader는 그 밖의 invalid kind/mode 조합이나 미래 mode 하나를 만나면 현행 forward-compat 규칙대로 **그 창의 도크 전체를 빈 상태로 강등**하고 terminal/windows를 보존한다. 기존 read/source byte 고정점은 바꾸지 않는다.
 
 **명시 수용한 downgrade 한계**: 사용자 결정대로 구버전용 adapter를 제공하지 않는다. 현재 mode 목록을 모르는 구버전 Maru로 workspace를 열고 다시 저장하면 그 창의 도크 metadata가 사라질 수 있다. 파일 내용은 workspace에 없고 disk가 SSOT라 영향은 탭/group/mode 배치에 한정되지만 되돌릴 수 없는 downgrade write다. 앱 업데이트 뒤 구버전으로 롤백하는 workflow는 지원 범위 밖이며, 이 한계를 제거하려면 별도 포맷/backup 결정이 필요하다.
 
@@ -327,6 +348,7 @@ control-plane §12 Phase 7 행 대응: 7a·7b ⊂ FP2, 7c ⊂ FP4+FP6, **7d는 m
 | FP12~FP15 | 2026-07-22~28 | text/code·svg·image·media·pdf 다중 kind | §2.2 |
 | FP16 | 2026-07-27~29 | 파일 entry를 도크에서 워크스페이스 `Term`으로 이관, 도크는 탐색기 전용 | §1·§3·§4·§5 |
 | FP17 | 2026-07-29 | 라이브 프리뷰 폐기 — projection·atomic·worker 제거, Mermaid 파이프라인은 읽기 프리뷰용으로 존치 | §1·§2.4 |
+| FP18 | 2026-07-29~ | 리치 편집 모드(툴바 + 문서모델 WYSIWYG)를 셋째 모드로 추가 | §1·§2.5 |
 
 **의도적으로 하지 않은 것**: ⑴ 도크를 좌측 사이드바에 합치지 않는다(사이드바 스크롤 뷰포트·scissor·key-hint의 `backing_height` 가정 3곳을 건드리게 되고, 우측 유지가 그 비용을 안 낸다 — 2026-07-27 사용자 결정). ⑵ 파일 Term을 host-backed 세션 대상으로 만들지 않는다(§5.0). ⑶ 라이브 프리뷰를 되살리지 않는다(폐기 확정 — §1). 편집 화면에 렌더를 겹치는 방향 전체가 비목표이며, 문서모델 기반 리치 편집기로 대체하는 우회로도 같은 결정에 포함된다.
 

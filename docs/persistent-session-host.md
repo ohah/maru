@@ -5895,9 +5895,11 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
                 no-fail suffix가 ledger disposition을 즉시 소비해 partial/response owner, token FIFO와 기존
                 event/metadata owner를 publish하고 source/scratch를 tombstone한다.
                 d2b3b intent handle과 별도 heap-pinned sibling `PreparedRxAggregate`가 live batch, retirement,
-                disposition과 192 KiB aggregate scratch를 소유하며 두 handle의 storage/turn generation을 함께
-                봉인한다. core는 처음부터 product-compilable module-private 단일 구현이며, 이 gate 시점의
-                callsite만 test-only다.
+                disposition과 두 one-shot commit permit을 소유하며 두 handle의 storage/turn generation을 함께
+                봉인한다. 기존 ledger의 `max_live_commit_scratch_bytes=192 KiB`는
+                batch+retirement+disposition 합의 유일한 예산 SSOT이고 별도 192 KiB byte backing을 추가하지
+                않는다. aggregate wrapper 전체 heap allocation은 256 KiB 상한을 별도로 지킨다. core는 처음부터
+                `client_external_pump.zig` module-private 단일 구현이며, 이 gate 시점의 callsite만 test-only다.
                 export와 제품 writer callsite는 boundary상 0이다. 최종 검증 뒤에는 allocation, callback, `try`, checked overflow,
                 disposition 재해석이 0이다. retirement callback은 모든 authority publish/tombstone 뒤 local
                 plan으로만 실행하며 첫 callback 이후 storage/scratch/FIFO를 다시 읽지 않는다. traversal과 product
@@ -5932,6 +5934,12 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
               const PreparedRxIntent = union(enum) {
                   empty,
                   classified: ClassifiedIntentOwner,
+                  screen_staging: struct {
+                      transfer_owner_addr: usize,
+                      transfer_index: u8,
+                      neutral_output_addr: usize,
+                      digest: external_owner_seal.Digest,
+                  },
                   screen_mutation: struct {
                       batch_addr: usize,
                       mutation_index: u8,
@@ -5972,6 +5980,242 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
                   lifecycle: enum { empty, allocated, ready, destroying, destroyed, poisoned },
                   digest: external_owner_seal.Digest,
               };
+
+              // Concrete intent/scratch는 계속 external_rx_intent.zig private다.
+              const PreparedIntentCommit = struct {
+                  saved_self_addr: usize,
+                  scratch_addr: usize,
+                  handle_addr: usize,
+                  aggregate_addr: usize,
+                  storage_addr: usize,
+                  turn_generation: u64,
+                  intent_count: u8,
+                  finalized_parser_generation: u64,
+                  finalized_end_absolute: u64,
+                  terminal_free: bool,
+                  slot_plan_addr: usize,
+                  slot_plan_len: usize,
+                  slot_plan_digest: external_owner_seal.Digest,
+                  destination_write_plan_addr: usize,
+                  destination_write_plan_len: usize,
+                  destination_write_plan_digest: external_owner_seal.Digest,
+                  lifecycle: enum { empty, prepared, consumed, aborted, poisoned },
+                  digest: external_owner_seal.Digest,
+              };
+
+              const MovedIntentPayload = struct {
+                  saved_self_addr: usize,
+                  source_intent_addr: usize,
+                  aggregate_addr: usize,
+                  allocator: std.mem.Allocator,
+                  allocation_addr: usize,
+                  allocation_len: usize,
+                  content_digest: external_owner_seal.Digest,
+                  lifecycle: enum { empty, owned, moved, aborted, poisoned },
+                  digest: external_owner_seal.Digest,
+              };
+
+              // external_owner_cleanup.zig leaf가 소유하며 pump/intent/ledger 타입을 import하지 않는다.
+              const FrozenOwnerCleanupDescriptor = struct {
+                  allocator: std.mem.Allocator,
+                  allocation_addr: usize,
+                  allocation_len: usize,
+                  content_digest: external_owner_seal.Digest,
+                  digest: external_owner_seal.Digest,
+              };
+
+              const ScreenTransferOwner = struct {
+                  saved_self_addr: usize,
+                  aggregate_addr: usize,
+                  intent_index: u8,
+                  neutral: MovedIntentPayload,
+                  ledger_payload: external_inbox_ledger.OwnedPayload,
+                  batch_addr: usize,
+                  mutation_index: u8,
+                  lifecycle: enum {
+                      empty,
+                      neutral_owned,
+                      ledger_owned,
+                      batch_owned,
+                      aborted,
+                      poisoned,
+                  },
+                  digest: external_owner_seal.Digest,
+              };
+
+              const StagedScreenMutationProof = struct {
+                  aggregate_addr: usize,
+                  transfer_owner_addr: usize,
+                  transfer_digest: external_owner_seal.Digest,
+                  batch_addr: usize,
+                  mutation_index: u8,
+                  digest: external_owner_seal.Digest,
+              };
+
+              const FrozenLiveBatchAbort = struct {
+                  saved_self_addr: usize,
+                  batch_addr: usize,
+                  cleanup: [external_inbox_ledger.max_live_cleanup_owners]
+                      FrozenOwnerCleanupDescriptor,
+                  cleanup_count: u16,
+                  lifecycle: enum { empty, prepared, consumed, aborted },
+                  digest: external_owner_seal.Digest,
+              };
+
+              const FrozenIntentAbort = struct {
+                  saved_self_addr: usize,
+                  scratch_addr: usize,
+                  cleanup: [64]FrozenOwnerCleanupDescriptor,
+                  cleanup_count: u16,
+                  lifecycle: enum { empty, prepared, consumed, aborted, poisoned },
+                  digest: external_owner_seal.Digest,
+              };
+
+              const FrozenDestinationWrite = struct {
+                  saved_self_addr: usize,
+                  aggregate_addr: usize,
+                  intent_index: u8,
+                  mutation_index: ?u8,
+                  destination_kind: enum { partial, fifo, response, event, metadata, cleanup_only },
+                  destination_addr: usize,
+                  expected_old_lifecycle: u8,
+                  expected_old_digest: external_owner_seal.Digest,
+                  prepared_value_addr: usize,
+                  prepared_value_len: usize,
+                  prepared_value_digest: external_owner_seal.Digest,
+                  lifecycle: enum { empty, prepared, consumed, aborted },
+                  digest: external_owner_seal.Digest,
+              };
+
+              // Concrete ledger simulation은 계속 external_inbox_ledger.zig private다.
+              const PreparedLiveCommit = struct {
+                  saved_self_addr: usize,
+                  ledger_addr: usize,
+                  batch_addr: usize,
+                  aggregate_addr: usize,
+                  storage_addr: usize,
+                  turn_generation: u64,
+                  retirement_addr: usize,
+                  dispositions_addr: usize,
+                  mutation_count: u8,
+                  final_partial_count: u8,
+                  final_completed_count: u8,
+                  private_simulation: LiveSimulation,
+                  simulation_digest: external_owner_seal.Digest,
+                  disposition_digest: external_owner_seal.Digest,
+                  retirement_digest: external_owner_seal.Digest,
+                  lifecycle: enum { empty, prepared, consumed, aborted },
+                  digest: external_owner_seal.Digest,
+              };
+
+              const PreparedRxAggregateHandle = struct {
+                  saved_self_addr: usize,
+                  aggregate_addr: usize,
+                  allocation_addr: usize,
+                  allocation_len: usize,
+                  allocator: std.mem.Allocator,
+                  cleanup_allocator: ?std.mem.Allocator,
+                  lifecycle: enum { empty, allocated, ready, destroying, destroyed, poisoned },
+                  digest: external_owner_seal.Digest,
+              };
+
+              const PreparedRxAggregate = struct {
+                  saved_self_addr: usize,
+                  storage_addr: usize,
+                  turn_generation: u64,
+                  intent_handle_addr: usize,
+                  intent_commit: PreparedIntentCommit,
+                  live_batch: external_inbox_ledger.PreparedLiveBatch,
+                  live_commit: external_inbox_ledger.PreparedLiveCommit,
+                  retirement: external_inbox_ledger.PreparedLiveRetirement,
+                  dispositions: [external_inbox_ledger.max_live_mutations]
+                      external_inbox_ledger.LiveCommitDisposition,
+                  mutation_to_intent: [external_inbox_ledger.max_live_mutations]u8,
+                  screen_transfers: [64]ScreenTransferOwner,
+                  neutral_payloads: [64]MovedIntentPayload,
+                  event_plans: [64]PreparedEventDestination,
+                  metadata_replacement: PreparedOwnerMetadataReplacement,
+                  response_plan: PreparedResponseDestination,
+                  destination_writes: [64]FrozenDestinationWrite,
+                  cross_owner_cleanup: FrozenAggregateCleanup,
+                  completed_fifo_count: u8,
+                  response_intent_index: ?u8,
+                  lifecycle: enum {
+                      allocated,
+                      ready,
+                      preparing,
+                      finalized,
+                      committing,
+                      committed,
+                      aborted,
+                      poisoned,
+                      destroying,
+                  },
+                  digest: external_owner_seal.Digest,
+              };
+
+              // Owner-module capability seams. Concrete scratch/simulation은 반환하지 않는다.
+              fn prepareIntentCommit(
+                  handle: *ExternalRxIntentHandle,
+                  aggregate_addr: usize,
+                  slot_plan: []const IntentDestinationPlan,
+                  destination_writes: []const FrozenDestinationWrite,
+                  out: *PreparedIntentCommit,
+              ) IntentCommitError!void;
+              fn consumePreparedIntentCommitUnchecked(
+                  handle: *ExternalRxIntentHandle,
+                  permit: *PreparedIntentCommit,
+                  neutral_outputs: *[64]MovedIntentPayload,
+              ) void;
+              fn prepareIntentAbort(
+                  handle: *ExternalRxIntentHandle,
+                  out: *FrozenIntentAbort,
+              ) IntentAbortError!void;
+              fn commitIntentAbortUnchecked(
+                  handle: *ExternalRxIntentHandle,
+                  abort_permit: *FrozenIntentAbort,
+              ) void;
+
+              fn prepareLiveCommit(
+                  ledger: *external_inbox_ledger.ExternalInboxLedger,
+                  batch: *external_inbox_ledger.PreparedLiveBatch,
+                  aggregate_addr: usize,
+                  storage_addr: usize,
+                  turn_generation: u64,
+                  retirement: *external_inbox_ledger.PreparedLiveRetirement,
+                  dispositions: *[external_inbox_ledger.max_live_mutations]
+                      external_inbox_ledger.LiveCommitDisposition,
+                  out: *external_inbox_ledger.PreparedLiveCommit,
+              ) external_inbox_ledger.CommitLiveError!void;
+              fn prepareLiveBatchAbort(
+                  batch: *external_inbox_ledger.PreparedLiveBatch,
+                  out: *FrozenLiveBatchAbort,
+              ) external_inbox_ledger.CommitLiveError!void;
+              fn commitLiveBatchAbortUnchecked(
+                  batch: *external_inbox_ledger.PreparedLiveBatch,
+                  out: *FrozenLiveBatchAbort,
+              ) void;
+              fn moveScreenToNeutral(
+                  handle: *ExternalRxIntentHandle,
+                  intent_index: u8,
+                  aggregate_addr: usize,
+                  out: *MovedIntentPayload,
+              ) IntentCommitError!void;
+              fn bindScreenMutationScalar(
+                  handle: *ExternalRxIntentHandle,
+                  intent_index: u8,
+                  proof: StagedScreenMutationProof,
+              ) IntentCommitError!void;
+
+              // Pump-private transfer helpers; external_rx_intent.zig에서는 보이지 않는다.
+              fn takeForLedger(
+                  transfer: *ScreenTransferOwner,
+              ) IntentCommitError!*external_inbox_ledger.OwnedPayload;
+              fn markScreenBatchOwned(
+                  transfer: *ScreenTransferOwner,
+                  batch_addr: usize,
+                  mutation_index: u8,
+              ) IntentCommitError!StagedScreenMutationProof;
 
               const AuthorityView = struct {
                   storage_addr: usize,
@@ -6110,6 +6354,227 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
 
               d2b3c의 ledger batch/retirement/disposition은 별도 caller-owned `PreparedRxAggregate` sibling handle이
               처음 소유한다. d2b3b scratch에 canonical-empty ledger region을 미리 넣지 않는다.
+
+              d2b3c의 모듈/권한 경계는 다음으로 고정한다.
+
+              1. `external_inbox_ledger.zig`만 ledger simulation과 disposition 생성을 소유한다.
+                 `prepareLiveCommit`은 모든 allocation과 checked simulation을 끝내고 exact disposition,
+                 retirement capacity, final partial/completed root 수를 final-address `PreparedLiveCommit`에
+                 봉인하지만 ledger를 변경하지 않는다. `consumePreparedLiveCommitUnchecked`는 같은 permit을
+                 exact once `.consumed`로 tombstone하고 이미 봉인된 disposition을 재계산하지 않은 채 기존
+                 unchecked ledger leaf만 실행한다. 이 leaf는 allocation/callback/error/checked arithmetic 0이며
+                 `client_external_pump.zig`의 aggregate callsite 하나만 boundary상 허용한다. permit은 private
+                 `LiveSimulation` 값과 exact aggregate/storage/turn, batch/retirement/disposition final address,
+                 canonical tail·epoch·accounting digest를 실제로 보유·봉인한다. count/digest만 저장하고 consume 때
+                 simulation이나 disposition을 재구성하는 형태는 금지한다.
+                 ledger permit은 `final_partial_count`/`final_completed_count`, canonical-empty retirement의
+                 exact address/digest와 expected cleanup count/bytes를 함께 봉인한다. checked preview/validation의
+                 유일한 by-value local `LiveSimulation`은 64 KiB compile-time stack cap을 갖고, unchecked consume은
+                 permit 안 simulation을 pointer로 읽어 추가 copy 0이다. 기존 legacy
+                 `commitPreparedLiveBatch`는 별도 permit/fake aggregate identity를 만들지 않고 같은 checked
+                 simulation→preview→ledger leaf를 한 번만 실행한다.
+              2. `external_rx_intent.zig`만 concrete scratch와 classified owner를 소유한다.
+                 `prepareIntentCommit`은 finalized whole-turn intent count, terminal-free seal,
+                 slot index→classification→exact destination plan과 payload cleanup authority를
+                 `PreparedIntentCommit`에 봉인한다. permit은 aggregate final address와 slot/write-plan backing의
+                 exact address/length/content digest를 보유한다. `consumePreparedIntentCommitUnchecked`만
+                 event/response payload를 aggregate의 canonical-empty `neutral_payloads` inline slots로 move하고
+                 모든 source slot을 `.committed`로 tombstone할 수 있다. screen payload는 아래의
+                 prepare-time staging에서 이미 ledger batch의 단독 owner가 되므로 이 leaf가 다시 move하지 않는다.
+                 raw `scratch_addr` cast, concrete slot borrow, header 재분류는 다른 모듈에서 0이다.
+              3. `client_external_pump.zig`의 private aggregate core만 두 opaque permit과 persistent destination
+                 plan을 조합한다. ledger/intent 모듈의 simulation·classification을 복제하지 않고,
+                 destination preflight와 mutation-index↔intent-index bijection만 소유한다.
+
+              `MovedIntentPayload`는 final-address/source-intent/aggregate와 allocator descriptor,
+              allocation addr/len/content seal을 가진
+              `external_rx_intent.zig` 소유의 neutral move value다. ledger/event/pump destination 타입을 import하지
+              않는다. aggregate의 64 inline neutral slots는 prepare/finalize 동안 전부 canonical empty이고 permit이
+              exact backing address와 empty-tail digest를 봉인한다. no-fail suffix에서 intent leaf가 event/response
+              source를 neutral slot으로 exact move+tombstone한 직후, pump가 `FrozenDestinationWrite`의 이미 준비된
+              target value로 neutral descriptor를 move한다. intent leaf는 persistent destination을 publish하지
+              않는다. 두 substep은 aggregate `.committing` joint authority 아래 연속 실행되며 그 사이
+              allocation/callback/error/validation은 0이고, 마지막 destination write가 neutral slot을 canonical
+              empty로 tombstone한다. intent leaf에 callback/function pointer나 pump destination pointer를 넘기지
+              않는다.
+
+              screen intent의 prepare-time staging은 다음 exact 순서 하나만 허용한다.
+
+              1. classified owner와 aggregate의 pristine final-address `ScreenTransferOwner`를 전검증한다.
+              2. intent leaf `moveScreenToNeutral`에는 pump type이 아니라 exact
+                 `&transfer.neutral: *MovedIntentPayload`만 넘긴다. leaf가 payload를 그 neutral owner로 move하고
+                 source slot을
+                 `.screen_staging` tombstone한다.
+              3. pump `takeForLedger`가 같은 transfer owner 안의 canonical-empty `ledger_payload` field로
+                 descriptor를 exact move하고 neutral field를 tombstone한다. by-value 임시 owner나 cleanup mirror는
+                 만들지 않는다.
+              4. pump는 `&transfer.ledger_payload` exact pointer를 기존 `prepareLiveAdmission`/
+                 `prepareLiveMerge`에 넘긴다. 실패하면 nonempty ledger_payload를 transfer owner만 cleanup하고,
+                 성공하면 field가 canonical empty이며 batch만 payload의 단독 owner다.
+              5. pump가 transfer를 `.batch_owned`로 먼저 봉인하고 intent module에는 ledger/pump 타입이나 포인터가
+                 아니라 neutral `StagedScreenMutationProof` scalar 값만 전달한다. intent leaf
+                 `bindScreenMutationScalar`가 proof seal과 source staging address를 검증한 뒤 source slot을
+                 `.screen_mutation{batch_addr,mutation_index}`로 봉인한다.
+
+              `external_rx_intent.zig`는 `ScreenTransferOwner`나 `OwnedPayload`를 import하지 않는다.
+              `moveScreenToNeutral`은 neutral output final address를 source `.screen_staging` seal에 묶고,
+              pump-private `takeForLedger`와 `markScreenBatchOwned`가 transfer의
+              neutral→ledger_owned→batch_owned lifecycle을 독점한다.
+              `takeForLedger`는 exact `&transfer.ledger_payload`만 반환하고 allocation/callback은 0이다.
+              `bindScreenMutationScalar`는 batch-owned proof를 source slot에 묶는 callback/allocation 0 leaf이며
+              실패하면 source `.screen_staging`과 pump transfer `.batch_owned`를 보존해 aggregate abort가 batch
+              owner 하나만 회수한다. source `.screen_staging`은 ownership mirror를 두지 않고 neutral
+              output/transfer final address와 seal만 보존한다. 실제 cleanup owner SSOT는 pump
+              `ScreenTransferOwner.lifecycle`과 batch seal이다. aggregate final preflight가 source
+              staging/transfer proof pair를 함께 검증하므로 한쪽만 전이된 상태를 commit하지 않는다.
+
+              단계 2 이후의 failure/reentry에서는 source intent가 payload cleanup authority를 되찾지 않는다.
+              ledger가 take하기 전이면 `ScreenTransferOwner`, take한 뒤이면 `PreparedLiveBatch`만 단독 owner이며
+              aggregate abort freeze가 해당 현재 tag 하나만 cleanup plan에 넣는다. ledger prepare 실패는 transfer
+              owner의 `ledger_owned` payload를 abort plan에 freeze하고 source slot/transfer를 `.aborted`로
+              tombstone한다. 성공 직후 `.screen_mutation` 봉인 전에는 source가 `.screen_staging`이고 transfer가
+              `.batch_owned`이며 batch만 cleanup owner다. scalar proof 검증이
+              실패해도 이 tag를 유지한 채 aggregate abort가 batch owner를 회수한다.
+              `.screen_staging`을 turn 밖에 남기거나 intent와 batch 양쪽에 cleanup mirror를 동시에 두는 상태는
+              invariant terminal이다.
+
+              aggregate finalization은 scratch 전체를 한 번에 닫는다. `intent_count` 전부가 destination plan에
+              exact once 포함되고 `terminal_free=true`이며 final parser generation/end watermark가 scratch와
+              일치해야 한다. subset/incremental commit API는 두지 않는다. 각 screen mutation은 정확히 한 intent
+              index를 가지며 각 ledger mutation index도 정확히 한 screen intent에 대응한다. disposition의
+              `.superseded_tombstone`은 consumer root를 만들지 않고 해당 intent만 committed tombstone한다.
+              `.final_live(.partial)`은 전체 aggregate에서 최대 1개이고 `LivePartialBatch` 하나에 대응한다.
+              `.final_live(.completed)`는 mutation index 오름차순으로 token-only `LiveScreenBacklog` tail에
+              append하며 기존 잔여 용량을 넘지 않는다. unused tail은 canonical `.unused`여야 한다. duplicate
+              mutation/intent index, duplicate token, intermediate token publish, final root 누락은 ledger mutation
+              전에 거부한다.
+
+              event intent는 d2b3c에서 이미 검증된 event/metadata prepared value를 새
+              `prepareOwnerMetadataReplacement` leaf에 전달하되 decoder/materializer를 aggregate suffix에서
+              호출하지 않는다. 이 leaf는 current destination과 staged replacement의 final address, authority/
+              revision, logical+cleanup mirror, old-owner frozen cleanup을
+              `PreparedOwnerMetadataReplacement`에 봉인하고 destination을 변경하지 않는다. incoming revision은
+              기존 `runtime_event_reducer` SSOT를 그대로 따른다. older는 cleanup-only committed tombstone,
+              same revision+same semantic은 duplicate cleanup-only committed tombstone,
+              same revision+different semantic만 equivocation terminal, newer만 replacement를 준비한다.
+              `commitOwnerMetadataReplacementUnchecked`만 no-fail suffix에서 old destination을 tombstone하고
+              replacement를 publish한다. prepare 단계의 old-owner descriptor는 non-owning cleanup candidate이며
+              trusted abort에서는 permit만 aborted tombstone하고 free 0, current destination은 그대로 유지한다.
+              successful suffix에서 current destination을 tombstone하는 동일 선형화점에만 candidate를 owning
+              frozen retirement로 승격한다. 그 뒤 old owner cleanup이 aggregate의
+              `FrozenAggregateCleanup`에 포함된다.
+              materialized DTO는 destination owner이고 원본 event wire payload는 persistent owner가 아니다.
+              metadata와 다른 event를 포함해 성공 시 원본 wire payload는 neutral slot에서 frozen retirement
+              cleanup으로 move되고 destination write 뒤 exact once 회수한다.
+              response intent는 aggregate당 최대 1개이며
+              `PendingResponseOwner.none`에서만 publish한다. 기존 `.pending`/`.terminal`과 duplicate response는
+              precommit terminal이고 기존 owner를 replace하지 않는다. candidate와 payload는
+              `ClassifiedIntentOwner.classification`과 intent permit의 exact move가 유일한 SSOT다.
+
+              `FrozenDestinationWrite`는 partial/FIFO slot, response, event/metadata 각각의 exact destination
+              kind/address, expected old lifecycle/digest, aggregate-owned typed prepared-value backing의 exact
+              address/length/content digest, mutation-index↔intent-index를 보유한다. finalization 뒤 backing은
+              움직이지 않으며 최종 preflight가 이 배열과 backing을 함께 봉인한다. suffix는 disposition tag switch,
+              capacity 계산, optional unwrap, decoder 호출 없이 presealed destination kind의 fixed writer를 index
+              오름차순 실행한다.
+
+              abort/teardown도 owner module capability를 조합한다. ledger의
+              `prepareLiveBatchAbort`는 exact batch payload cleanup을 aggregate-local `FrozenLiveBatchAbort` output에
+              freeze하고, intent의 `prepareIntentAbort`는 classified/neutral 전 payload cleanup을
+              `FrozenIntentAbort` output에 freeze한다. 공용 leaf `external_owner_cleanup.zig`의
+              `FrozenOwnerCleanupDescriptor`만 공유하고 owner permit은 각각 자기 inline descriptor 배열과
+              final address/digest를 봉인하므로 intent/ledger가 pump aggregate 타입을 import하지 않는다.
+              pump가 두 owner permit의 descriptor를 transfer/event/metadata/response owner와 합쳐 pairwise alias를
+              최종 검증한 뒤
+              `commitLiveBatchAbortUnchecked`와 `commitIntentAbortUnchecked`가 callback 없이 각 source를 전부
+              tombstone한다. 그 뒤에만 pump가 embedded cleanup graph를 callback-hidden stack-local
+              `FrozenAggregateCleanup` 값으로 복사하고 aggregate/handles/reservations을 tombstone한다. 첫 callback
+              이후에는 이 local 값만 읽으며 embedded plan과 owner graph는 재독하지 않는다. canonical prepared
+              teardown도 같은 freeze/tombstone API만 사용한다.
+              ledger-only permit prepare 뒤 aggregate finalization 전 실패는
+              `abortPreparedLiveCommit`이 exact permit/output seal을 검증하고 disposition을 canonical unused,
+              permit을 `.aborted`로 tombstone한다. batch payload ownership은 그대로이므로 이어지는
+              `prepareLiveBatchAbort`만 cleanup authority를 freeze한다. consumed/aborted permit은
+              `resetPreparedLiveCommit`만 canonical empty로 되돌릴 수 있고 prepared/copied/drift permit reset은
+              0이다.
+
+              cleanup descriptor count SSOT는
+              `external_inbox_ledger.max_live_cleanup_owners(128) + intent(64) + transfer(64) +
+              neutral(64) + metadata old/new(2) = 322`다. `FrozenAggregateCleanup`은 payload 자체가 아니라
+              allocator/address/length/content seal만 inline 보유하고, `cleanup_count <= 322`와 checked total bytes를
+              봉인한다. callback-hidden by-value local의 별도 compile-time stack 상한은 256 KiB이며
+              `@sizeOf(FrozenAggregateCleanup) <= max_rx_aggregate_cleanup_local_bytes`를 Debug/ReleaseFast 모두
+              강제한다. 이 local은 기존 `max_external_pump_callback_local_bytes=768 KiB` aggregate callback budget
+              산식에도 포함되어야 하고, 두 budget 중 하나라도 넘으면 compile error다.
+
+              | 현재 tag | 유일 cleanup owner | aggregate abort local plan |
+              | --- | --- | --- |
+              | `.classified` | intent slot | `FrozenIntentAbort`에 포함 |
+              | `.screen_staging` + neutral nonempty | `ScreenTransferOwner.neutral` | transfer cleanup에 포함 |
+              | `.screen_staging` + ledger_payload nonempty | `ScreenTransferOwner.ledger_payload` | transfer cleanup에 포함 |
+              | `.screen_staging` + transfer `.batch_owned` | `PreparedLiveBatch` | `FrozenLiveBatchAbort`에 포함 |
+              | `.screen_mutation` | `PreparedLiveBatch` | `FrozenLiveBatchAbort`에 포함, intent cleanup에는 미포함 |
+              | event/response intent consume 전 | intent slot | `FrozenIntentAbort`에 포함 |
+              | event/response neutral move 뒤 | aggregate neutral slot | destination write 또는 aggregate cleanup에 포함 |
+              | metadata staged replacement | replacement plan | new DTO cleanup에 포함 |
+              | metadata current + precommit replacement permit | persistent current owner; old descriptor는 non-owning | abort 시 old free 0, staged new만 cleanup |
+              | metadata current replaced 뒤 | frozen retirement | old DTO cleanup에 포함 |
+              | committed screen/response destination | persistent owner/ledger | aggregate abort plan에 미포함 |
+
+              `PreparedRxAggregateHandle`은 attachment당 하나이며 storage에
+              `aggregate_scratch_reservation` `{storage_addr,handle_addr,generation,lifecycle,digest}`를 둔다.
+              create/bind/reset/destroy는 d2b3b intent handle과 같은 final-address·allocator mirror·callback 후
+              authority 재검증 규칙을 사용한다. aggregate allocation은 256 KiB 이하이고 stack instantiate/copy는
+              제품 코드 0이다. intent와 aggregate reservation은 같은 storage/turn generation을 봉인하며 서로와
+              storage/Client/parser/ledger/모든 payload range에 disjoint해야 한다. ready aggregate만 turn prepare를
+              시작하고 committed/aborted만 무할당 reset할 수 있다. busy/finalized aggregate는 canonical
+              attachment teardown이 먼저 전체 cross-owner cleanup plan을 freeze한 뒤 abort/destroy한다.
+
+              aggregate prepare 실패/OOM/terminal abort는 ledger batch, intent owner, event/metadata/response
+              prepared owner의 cleanup authority를 **모두 callback 전에** 하나의 local plan으로 freeze한다.
+              그 뒤 두 permit, aggregate, intent slots, destination staging을 전부 `.aborted` 또는 `.poisoned`로
+              tombstone하고 첫 cleanup callback을 실행한다. `abortPreparedLiveBatch`와 intent abort를 callback이
+              끼는 두 독립 순차 호출로 조합하지 않는다. alias/drift로 전체 graph의 cleanup authority를 증명하지
+              못하면 arbitrary free 0 bounded quarantine과 storage invariant terminal로 수렴한다.
+
+              successful no-fail suffix의 순서는 고정한다.
+
+              1. 모든 allocator/decoder/ledger callback 종료
+              2. storage/turn, 두 handle/permit, intent 전체, batch/disposition, destination capacity와
+                 terminal-free finalization 최종 검증
+              3. aggregate를 `.committing`으로 먼저 tombstone
+              4. `consumePreparedLiveCommitUnchecked`가 ledger permit을 `.consumed`로 만들고 ledger mutation
+              5. `consumePreparedIntentCommitUnchecked`가 intent permit을 `.consumed`로 만들고 source intent를
+                 tombstone하며 event/response payload를 aggregate neutral slots로 move
+              6. pump-private unchecked write leaf가 disposition 재해석 없이 partial/FIFO 및 prepared
+                 event/metadata/response owner를 publish하고
+                 neutral slots를 canonical empty로 tombstone한 뒤 aggregate `.committed`
+              7. consumer-visible graph 완성 뒤 frozen retirement callback 실행
+              8. 첫 callback 이후 storage/ledger/intent/aggregate/FIFO/disposition 재독 0
+
+              trusted logical abort/terminal은 두 reservation을 유지한 채 callback-hidden cleanup 뒤 reset 또는
+              canonical destroy할 수 있다. 반면 descriptor/alias drift의 poisoned graph는 held operation lease
+              안에서 intent와 aggregate reservation을 함께 `.poisoned_tombstone`으로 끊고 storage를 dead로
+              만든다. untrusted allocation/payload는 이후 dereference/free/destroy하지 않으며 반복 teardown은
+              `already_dead`다. poison graph의 유일한 owner는 storage quarantine latch이고 두 reservation이 같은
+              bytes를 중복 계상하지 않는다.
+
+              aggregate allocation의 poison 상한은 256 KiB다. transfer된 raw frame payload는 d2b3b의 1 MiB
+              payload 상한에 이미 포함되므로 중복 가산하지 않는다. metadata replacement는 기존 current 최대
+              4 MiB와 별도로 staged replacement 최대 `external_adoption_limits.max_metadata_bytes` 4 MiB를 동시에
+              소유할 수 있다. 기존 cross-owner 상한은 current 4 MiB를 이미 포함하므로 d2b3c가 새로 더하는 값은
+              aggregate 262,144 bytes + staged metadata 4,194,304 bytes, 합계 4,456,448 bytes다. reservation
+              quarantine latch는 같은 attachment의 반복 실패를 exact once 계상한다.
+
+              d2b3c component gate는 ledger permit prepare 뒤 ledger/intent/destination drift, copied/moved/
+              wrong-handle/wrong-ledger/wrong-turn permit, double consume, aggregate allocation fail-index와
+              callback 재진입, prepared 상태 teardown을 모두 고정한다. boundary gate는
+              `simulateLiveBatch`/disposition 재구현 0, raw scratch address dereference 0, unchecked ledger consume
+              exact-one aggregate callsite, product writer/export 0을 검사한다.
+              cleanup gate는 descriptor/byte count exact cap과 cap+1, `.classified→.screen_staging(neutral)→
+              .screen_staging(ledger_payload)`, ledger prepare 실패/성공, `.screen_mutation`, intent→neutral 직후,
+              destination write 직후 각각에서 abort/teardown을 실행해 source+destination final-zero와 cleanup
+              exact-one을 Debug/ReleaseFast로 고정한다.
 
               `PendingResponseOwner.pending.owner_digest`는 source의 storage/turn/parser generation,
               frame/range/pair seal/payload/allocator proof, candidate와 current authority generation을 모두

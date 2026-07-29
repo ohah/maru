@@ -744,6 +744,13 @@ const PreparedLiveBatchLifecycle = enum {
     aborted,
 };
 
+const PreparedLiveCommitLifecycle = enum {
+    empty,
+    prepared,
+    consumed,
+    aborted,
+};
+
 pub const PreparedLiveBatch = struct {
     saved_self_addr: usize = 0,
     ledger_addr: usize = 0,
@@ -780,9 +787,34 @@ pub const PreparedLiveBatch = struct {
     digest: owner_seal.Digest = [_]u8{0} ** 32,
 };
 
+pub const PreparedLiveCommit = struct {
+    saved_self_addr: usize = 0,
+    ledger_addr: usize = 0,
+    batch_addr: usize = 0,
+    retirement_addr: usize = 0,
+    dispositions_addr: usize = 0,
+    aggregate_addr: usize = 0,
+    storage_addr: usize = 0,
+    turn_generation: u64 = 0,
+    mutation_count: u8 = 0,
+    final_partial_count: u8 = 0,
+    final_completed_count: u8 = 0,
+    expected_cleanup_count: usize = 0,
+    expected_cleanup_bytes: usize = 0,
+    simulation: LiveSimulation = .{},
+    simulation_digest: owner_seal.Digest = [_]u8{0} ** 32,
+    dispositions_digest: owner_seal.Digest = [_]u8{0} ** 32,
+    retirement_digest: owner_seal.Digest = [_]u8{0} ** 32,
+    lifecycle: PreparedLiveCommitLifecycle = .empty,
+    digest: owner_seal.Digest = [_]u8{0} ** 32,
+};
+
 /// Stack scratch budgets keep the bounded batch protocol reviewable as its sealed state grows.
 pub const max_live_batch_scratch_bytes: usize = 128 * 1024;
 pub const max_live_commit_scratch_bytes: usize = 192 * 1024;
+pub const max_live_commit_permit_bytes: usize = 64 * 1024;
+pub const max_live_aggregate_scratch_bytes: usize = 256 * 1024;
+pub const max_live_commit_local_bytes: usize = 64 * 1024;
 
 comptime {
     if (@sizeOf(PreparedLiveBatch) > max_live_batch_scratch_bytes)
@@ -792,6 +824,16 @@ comptime {
         @sizeOf([max_live_mutations]LiveCommitDisposition) >
         max_live_commit_scratch_bytes)
         @compileError("aggregate live commit exceeded its stack scratch budget");
+    if (@sizeOf(PreparedLiveCommit) > max_live_commit_permit_bytes)
+        @compileError("prepared live commit permit exceeded its heap scratch budget");
+    if (@sizeOf(PreparedLiveBatch) +
+        @sizeOf(PreparedLiveRetirement) +
+        @sizeOf([max_live_mutations]LiveCommitDisposition) +
+        @sizeOf(PreparedLiveCommit) >
+        max_live_aggregate_scratch_bytes)
+        @compileError("aggregate live commit state exceeded its heap scratch budget");
+    if (@sizeOf(LiveSimulation) > max_live_commit_local_bytes)
+        @compileError("live commit simulation exceeded its stack-local budget");
 }
 
 pub const PrepareLiveError = std.mem.Allocator.Error || error{
@@ -833,6 +875,11 @@ pub const AbortLiveResult = enum {
     aborted,
     ignored_untrusted,
     quarantined,
+};
+
+pub const AbortLiveCommitResult = enum {
+    aborted,
+    ignored_untrusted,
 };
 
 fn frozenCleanupDigest(plan: FrozenPayloadCleanup) owner_seal.Digest {
@@ -2002,6 +2049,48 @@ fn liveSimulationDigest(
     return writer.finish();
 }
 
+fn liveDispositionsDigest(
+    dispositions: *const [max_live_mutations]LiveCommitDisposition,
+) owner_seal.Digest {
+    var writer = owner_seal.Writer.init("MARULDP1");
+    for (dispositions) |disposition| {
+        writer.writeU8(@intFromEnum(std.meta.activeTag(disposition)));
+        switch (disposition) {
+            .final_live => |root| {
+                writer.writeU16(root.token.slot);
+                writer.writeU64(root.token.generation);
+                writer.writeU8(@intFromEnum(root.phase));
+            },
+            .unused, .superseded_tombstone => {},
+        }
+    }
+    return writer.finish();
+}
+
+fn preparedLiveCommitDigest(
+    permit: *const PreparedLiveCommit,
+) owner_seal.Digest {
+    var writer = owner_seal.Writer.init("MARULCP1");
+    writer.writeUsize(permit.saved_self_addr);
+    writer.writeUsize(permit.ledger_addr);
+    writer.writeUsize(permit.batch_addr);
+    writer.writeUsize(permit.retirement_addr);
+    writer.writeUsize(permit.dispositions_addr);
+    writer.writeUsize(permit.aggregate_addr);
+    writer.writeUsize(permit.storage_addr);
+    writer.writeU64(permit.turn_generation);
+    writer.writeU8(permit.mutation_count);
+    writer.writeU8(permit.final_partial_count);
+    writer.writeU8(permit.final_completed_count);
+    writer.writeUsize(permit.expected_cleanup_count);
+    writer.writeUsize(permit.expected_cleanup_bytes);
+    writer.writeBytes(&permit.simulation_digest);
+    writer.writeBytes(&permit.dispositions_digest);
+    writer.writeBytes(&permit.retirement_digest);
+    writer.writeU8(@intFromEnum(permit.lifecycle));
+    return writer.finish();
+}
+
 fn liveAccountingDigest(
     ledger: *const ExternalInboxLedger,
 ) owner_seal.Digest {
@@ -2426,16 +2515,21 @@ fn validateLiveCommitAliases(
     batch: *const PreparedLiveBatch,
     retirement: *const PreparedLiveRetirement,
     dispositions: *const [max_live_mutations]LiveCommitDisposition,
+    permit: ?*const PreparedLiveCommit,
 ) error{InvalidAlias}!void {
     const fixed = [_]ByteRange{
         rangeOfValue(ledger),
         rangeOfValue(batch),
         rangeOfValue(retirement),
         rangeOfValue(dispositions),
+        if (permit) |value| rangeOfValue(value) else .{ .start = 0, .end = 0 },
     };
-    for (fixed, 0..) |range, index|
+    const fixed_count: usize = if (permit == null) fixed.len - 1 else fixed.len;
+    for (fixed[0..fixed_count], 0..) |range, index|
         for (fixed[0..index]) |prior|
             if (rangesOverlap(range, prior)) return error.InvalidAlias;
+    for (fixed[1..fixed_count]) |range|
+        if (rangeOverlapsActive(range, ledger)) return error.InvalidAlias;
     var owned_ranges: [max_live_mutations * 3]ByteRange =
         [_]ByteRange{.{ .start = 0, .end = 0 }} ** (max_live_mutations * 3);
     var count: usize = 0;
@@ -3151,12 +3245,14 @@ pub const ExternalInboxLedger = struct {
         batch.digest = batchDigest(batch);
     }
 
-    pub fn commitPreparedLiveBatch(
+    fn validatePreparedLiveCommitInputs(
         self: *ExternalInboxLedger,
         batch: *PreparedLiveBatch,
         retirement: *PreparedLiveRetirement,
         dispositions: *[max_live_mutations]LiveCommitDisposition,
-    ) CommitLiveError!u8 {
+        require_empty_dispositions: bool,
+        permit: ?*const PreparedLiveCommit,
+    ) CommitLiveError!LiveSimulation {
         if (batch.saved_self_addr != @intFromPtr(batch) or
             batch.ledger_addr != @intFromPtr(self) or
             batch.lifecycle != .prepared)
@@ -3172,8 +3268,9 @@ pub const ExternalInboxLedger = struct {
             return error.InvalidPlan;
         if (!isCanonicalEmptyLiveRetirement(retirement))
             return error.InvalidPlan;
-        for (dispositions) |disposition|
-            if (disposition != .unused) return error.InvalidPlan;
+        if (require_empty_dispositions)
+            for (dispositions) |disposition|
+                if (disposition != .unused) return error.InvalidPlan;
         if (self.teardown_active) return error.TeardownActive;
         if (self.draining_or_drained) return error.Drained;
         if (!batch.cleanup_only and
@@ -3196,7 +3293,13 @@ pub const ExternalInboxLedger = struct {
             if (!fingerprintMatches(sealed, replacement))
                 return error.StalePlan;
         }
-        try validateLiveCommitAliases(self, batch, retirement, dispositions);
+        try validateLiveCommitAliases(
+            self,
+            batch,
+            retirement,
+            dispositions,
+            permit,
+        );
         const simulation = simulateLiveBatch(
             self,
             batch,
@@ -3222,23 +3325,306 @@ pub const ExternalInboxLedger = struct {
                 &liveMutationDigest(batch, index),
             )) return error.StalePlan;
         }
-        return self.commitPreparedLiveBatchUnchecked(
+        return simulation;
+    }
+
+    const LiveDispositionCounts = struct {
+        partial: u8 = 0,
+        completed: u8 = 0,
+
+        fn total(self: LiveDispositionCounts) u8 {
+            return self.partial + self.completed;
+        }
+    };
+
+    fn previewLiveDispositions(
+        batch: *const PreparedLiveBatch,
+        simulation: *const LiveSimulation,
+        dispositions: *[max_live_mutations]LiveCommitDisposition,
+    ) LiveDispositionCounts {
+        var counts: LiveDispositionCounts = .{};
+        for (0..batch.mutation_count) |index| {
+            if (simulation.nodes[index].live) {
+                const root: FinalLiveRoot = switch (std.meta.activeTag(
+                    simulation.nodes[index].semantic,
+                )) {
+                    .partial => blk: {
+                        counts.partial += 1;
+                        break :blk .{
+                            .token = simulation.nodes[index].token,
+                            .phase = .partial,
+                        };
+                    },
+                    .completed => blk: {
+                        counts.completed += 1;
+                        break :blk .{
+                            .token = simulation.nodes[index].token,
+                            .phase = .completed,
+                        };
+                    },
+                    else => unreachable,
+                };
+                dispositions[index] = .{ .final_live = root };
+            } else {
+                dispositions[index] = .superseded_tombstone;
+            }
+        }
+        for (batch.mutation_count..max_live_mutations) |index|
+            dispositions[index] = .unused;
+        return counts;
+    }
+
+    fn countLiveDispositions(
+        mutation_count: u8,
+        dispositions: *const [max_live_mutations]LiveCommitDisposition,
+    ) CommitLiveError!LiveDispositionCounts {
+        var counts: LiveDispositionCounts = .{};
+        for (dispositions[0..mutation_count]) |disposition| {
+            switch (disposition) {
+                .final_live => |root| switch (root.phase) {
+                    .partial => counts.partial += 1,
+                    .completed => counts.completed += 1,
+                },
+                .superseded_tombstone => {},
+                .unused => return error.InvalidPlan,
+            }
+        }
+        for (dispositions[mutation_count..]) |disposition|
+            if (disposition != .unused) return error.InvalidPlan;
+        return counts;
+    }
+
+    pub fn prepareLiveCommit(
+        self: *ExternalInboxLedger,
+        batch: *PreparedLiveBatch,
+        retirement: *PreparedLiveRetirement,
+        dispositions: *[max_live_mutations]LiveCommitDisposition,
+        aggregate_addr: usize,
+        storage_addr: usize,
+        turn_generation: u64,
+        permit: *PreparedLiveCommit,
+    ) CommitLiveError!void {
+        if (aggregate_addr == 0 or storage_addr == 0 or turn_generation == 0)
+            return error.InvalidPlan;
+        const simulation = try self.validatePreparedLiveCommitInputs(
             batch,
             retirement,
             dispositions,
-            simulation,
+            true,
+            permit,
+        );
+        if (!std.meta.eql(permit.*, PreparedLiveCommit{}))
+            return error.InvalidPlan;
+        const counts = previewLiveDispositions(
+            batch,
+            &simulation,
+            dispositions,
+        );
+        permit.* = .{
+            .saved_self_addr = @intFromPtr(permit),
+            .ledger_addr = @intFromPtr(self),
+            .batch_addr = @intFromPtr(batch),
+            .retirement_addr = @intFromPtr(retirement),
+            .dispositions_addr = @intFromPtr(dispositions),
+            .aggregate_addr = aggregate_addr,
+            .storage_addr = storage_addr,
+            .turn_generation = turn_generation,
+            .mutation_count = batch.mutation_count,
+            .final_partial_count = counts.partial,
+            .final_completed_count = counts.completed,
+            .expected_cleanup_count = simulation.cleanup_count,
+            .expected_cleanup_bytes = simulation.cleanup_bytes,
+            .simulation = simulation,
+            .simulation_digest = liveSimulationDigest(&simulation, batch.mutation_count),
+            .dispositions_digest = liveDispositionsDigest(dispositions),
+            .retirement_digest = liveRetirementDigest(retirement),
+            .lifecycle = .prepared,
+        };
+        permit.digest = preparedLiveCommitDigest(permit);
+    }
+
+    fn validatePreparedLiveCommitPermit(
+        self: *ExternalInboxLedger,
+        batch: *const PreparedLiveBatch,
+        retirement: *const PreparedLiveRetirement,
+        dispositions: *const [max_live_mutations]LiveCommitDisposition,
+        permit: *const PreparedLiveCommit,
+        aggregate_addr: usize,
+        storage_addr: usize,
+        turn_generation: u64,
+    ) CommitLiveError!void {
+        const current = try self.validatePreparedLiveCommitInputs(
+            @constCast(batch),
+            @constCast(retirement),
+            @constCast(dispositions),
+            false,
+            permit,
+        );
+        if (permit.saved_self_addr != @intFromPtr(permit) or
+            permit.ledger_addr != @intFromPtr(self) or
+            permit.batch_addr != @intFromPtr(batch) or
+            permit.retirement_addr != @intFromPtr(retirement) or
+            permit.dispositions_addr != @intFromPtr(dispositions) or
+            permit.aggregate_addr != aggregate_addr or
+            permit.storage_addr != storage_addr or
+            permit.turn_generation != turn_generation or
+            permit.lifecycle != .prepared)
+            return error.InvalidPlan;
+        if (!std.mem.eql(
+            u8,
+            &permit.digest,
+            &preparedLiveCommitDigest(permit),
+        )) return error.StalePlan;
+        if (!std.mem.eql(
+            u8,
+            &permit.simulation_digest,
+            &liveSimulationDigest(&permit.simulation, permit.mutation_count),
+        )) return error.StalePlan;
+        if (!std.mem.eql(
+            u8,
+            &permit.dispositions_digest,
+            &liveDispositionsDigest(dispositions),
+        )) return error.StalePlan;
+        if (!std.mem.eql(
+            u8,
+            &permit.retirement_digest,
+            &liveRetirementDigest(retirement),
+        )) return error.StalePlan;
+        const counts = try countLiveDispositions(
+            permit.mutation_count,
+            dispositions,
+        );
+        if (permit.final_partial_count != counts.partial or
+            permit.final_completed_count != counts.completed)
+            return error.StalePlan;
+        if (permit.mutation_count != batch.mutation_count or
+            permit.expected_cleanup_count != current.cleanup_count or
+            permit.expected_cleanup_bytes != current.cleanup_bytes or
+            !std.mem.eql(
+                u8,
+                &permit.simulation_digest,
+                &liveSimulationDigest(&current, batch.mutation_count),
+            ))
+            return error.StalePlan;
+    }
+
+    fn consumePreparedLiveCommitChecked(
+        self: *ExternalInboxLedger,
+        batch: *PreparedLiveBatch,
+        retirement: *PreparedLiveRetirement,
+        dispositions: *[max_live_mutations]LiveCommitDisposition,
+        permit: *PreparedLiveCommit,
+        aggregate_addr: usize,
+        storage_addr: usize,
+        turn_generation: u64,
+    ) CommitLiveError!void {
+        try self.validatePreparedLiveCommitPermit(
+            batch,
+            retirement,
+            dispositions,
+            permit,
+            aggregate_addr,
+            storage_addr,
+            turn_generation,
+        );
+        self.consumePreparedLiveCommitUnchecked(
+            batch,
+            retirement,
+            dispositions,
+            permit,
         );
     }
 
-    /// Exact-one callback-free mutation leaf. All hostile validation and every fallible branch
-    /// end in `commitPreparedLiveBatch` before this function is entered.
+    pub fn commitPreparedLiveBatch(
+        self: *ExternalInboxLedger,
+        batch: *PreparedLiveBatch,
+        retirement: *PreparedLiveRetirement,
+        dispositions: *[max_live_mutations]LiveCommitDisposition,
+    ) CommitLiveError!u8 {
+        const simulation = try self.validatePreparedLiveCommitInputs(
+            batch,
+            retirement,
+            dispositions,
+            true,
+            null,
+        );
+        const counts = previewLiveDispositions(
+            batch,
+            &simulation,
+            dispositions,
+        );
+        self.commitPreparedLiveBatchUnchecked(
+            batch,
+            retirement,
+            dispositions,
+            &simulation,
+        );
+        return counts.total();
+    }
+
+    pub fn consumePreparedLiveCommitUnchecked(
+        self: *ExternalInboxLedger,
+        batch: *PreparedLiveBatch,
+        retirement: *PreparedLiveRetirement,
+        dispositions: *[max_live_mutations]LiveCommitDisposition,
+        permit: *PreparedLiveCommit,
+    ) void {
+        permit.lifecycle = .consumed;
+        permit.digest = preparedLiveCommitDigest(permit);
+        self.commitPreparedLiveBatchUnchecked(
+            batch,
+            retirement,
+            dispositions,
+            &permit.simulation,
+        );
+    }
+
+    pub fn abortPreparedLiveCommit(
+        self: *ExternalInboxLedger,
+        batch: *PreparedLiveBatch,
+        retirement: *PreparedLiveRetirement,
+        dispositions: *[max_live_mutations]LiveCommitDisposition,
+        permit: *PreparedLiveCommit,
+    ) AbortLiveCommitResult {
+        self.validatePreparedLiveCommitPermit(
+            batch,
+            retirement,
+            dispositions,
+            permit,
+            permit.aggregate_addr,
+            permit.storage_addr,
+            permit.turn_generation,
+        ) catch return .ignored_untrusted;
+        for (dispositions) |*disposition| disposition.* = .unused;
+        permit.lifecycle = .aborted;
+        permit.dispositions_digest = liveDispositionsDigest(dispositions);
+        permit.digest = preparedLiveCommitDigest(permit);
+        return .aborted;
+    }
+
+    pub fn resetPreparedLiveCommit(permit: *PreparedLiveCommit) bool {
+        if (permit.saved_self_addr != @intFromPtr(permit) or
+            (permit.lifecycle != .aborted and permit.lifecycle != .consumed) or
+            !std.mem.eql(
+                u8,
+                &permit.digest,
+                &preparedLiveCommitDigest(permit),
+            ))
+            return false;
+        permit.* = .{};
+        return true;
+    }
+
+    /// Callback-free mutation leaf. All hostile validation and every fallible branch end in
+    /// either the legacy checked entrypoint or the sealed aggregate permit validator before this
+    /// function is entered.
     fn commitPreparedLiveBatchUnchecked(
         self: *ExternalInboxLedger,
         batch: *PreparedLiveBatch,
         retirement: *PreparedLiveRetirement,
         dispositions: *[max_live_mutations]LiveCommitDisposition,
-        simulation: LiveSimulation,
-    ) u8 {
+        simulation: *const LiveSimulation,
+    ) void {
         retirement.saved_self_addr = @intFromPtr(retirement);
         for (0..batch.mutation_count) |index| {
             switch (batch.mutations[index]) {
@@ -3334,35 +3720,19 @@ pub const ExternalInboxLedger = struct {
             }
         }
 
-        var final_count: u8 = 0;
         for (0..batch.mutation_count) |index| {
-            if (simulation.nodes[index].live) {
-                const phase = switch (std.meta.activeTag(
-                    simulation.nodes[index].semantic,
-                )) {
-                    .partial => FinalLiveRoot{
-                        .token = simulation.nodes[index].token,
-                        .phase = .partial,
-                    },
-                    .completed => FinalLiveRoot{
-                        .token = simulation.nodes[index].token,
-                        .phase = .completed,
-                    },
-                    else => unreachable,
-                };
-                dispositions[index] = .{ .final_live = phase };
-                final_count += 1;
-                const live_slot = &self.slots[simulation.nodes[index].token.slot];
-                appendPublishedReplacementUnchecked(
-                    retirement,
-                    &live_slot.payload,
-                );
-            } else {
-                dispositions[index] = .superseded_tombstone;
+            switch (dispositions[index]) {
+                .final_live => |root| {
+                    const live_slot = &self.slots[root.token.slot];
+                    appendPublishedReplacementUnchecked(
+                        retirement,
+                        &live_slot.payload,
+                    );
+                },
+                .superseded_tombstone => {},
+                .unused => unreachable,
             }
         }
-        for (batch.mutation_count..max_live_mutations) |index|
-            dispositions[index] = .unused;
         if (retirement.cleanup_count == 0) {
             retirement.* = .{ .lifecycle = .retired };
         } else {
@@ -3370,7 +3740,6 @@ pub const ExternalInboxLedger = struct {
             retirement.digest = liveRetirementDigest(retirement);
         }
         batch.* = .{ .lifecycle = .committed };
-        return final_count;
     }
 
     pub fn abortPreparedLiveBatch(
@@ -6386,6 +6755,424 @@ test "live batch binds external identity and publishes one partial root atomical
         root.token,
         .partial,
     );
+    try ledger.finish();
+}
+
+test "live commit permit previews without mutation and consumes exact once" {
+    const allocator = std.testing.allocator;
+    var ledger: ExternalInboxLedger = .{};
+    const identity = external_rx_types.RxIdentity{
+        .attach_instance_id = 5101,
+        .destination_slot_addr = 0x510100,
+    };
+    var batch: PreparedLiveBatch = .{};
+    try ledger.beginLiveBatch(&batch, allocator, identity);
+    var payload = try owned(allocator, "preview");
+    _ = try ledger.prepareLiveAdmission(
+        &batch,
+        .{ .completed = .{
+            .stream_id = 71,
+            .is_snapshot = false,
+            .provenance = .{ .external = .{
+                .start_absolute = 900,
+                .span = protocol.header_size + "preview".len,
+            } },
+        } },
+        &payload,
+    );
+    try ledger.finishLiveBatch(&batch);
+    const epoch_before = ledger.mutation_epoch;
+    const charged_before = ledger.charged_bytes;
+    var retirement = PreparedLiveRetirement.init(allocator);
+    var dispositions =
+        [_]LiveCommitDisposition{.unused} ** max_live_mutations;
+    var permit: PreparedLiveCommit = .{};
+    const ledger_before = ledger;
+    try ledger.prepareLiveCommit(
+        &batch,
+        &retirement,
+        &dispositions,
+        0xA661,
+        0x5702,
+        41,
+        &permit,
+    );
+    try std.testing.expect(std.meta.eql(ledger_before, ledger));
+    try std.testing.expectEqual(@as(u8, 0), permit.final_partial_count);
+    try std.testing.expectEqual(@as(u8, 1), permit.final_completed_count);
+    try std.testing.expectEqual(epoch_before, ledger.mutation_epoch);
+    try std.testing.expectEqual(charged_before, ledger.charged_bytes);
+    try std.testing.expectEqual(.prepared, batch.lifecycle);
+    try std.testing.expectEqual(.prepared, permit.lifecycle);
+    try std.testing.expectEqual(.completed, dispositions[0].final_live.phase);
+
+    try ledger.consumePreparedLiveCommitChecked(
+        &batch,
+        &retirement,
+        &dispositions,
+        &permit,
+        0xA661,
+        0x5702,
+        41,
+    );
+    try std.testing.expectEqual(.consumed, permit.lifecycle);
+    try std.testing.expectError(
+        error.InvalidPlan,
+        ledger.consumePreparedLiveCommitChecked(
+            &batch,
+            &retirement,
+            &dispositions,
+            &permit,
+            0xA661,
+            0x5702,
+            41,
+        ),
+    );
+    const root = dispositions[0].final_live;
+    try std.testing.expect(ExternalInboxLedger.resetPreparedLiveCommit(&permit));
+    try std.testing.expectEqual(RetireLiveResult.already_retired, retirement.retire());
+    try releaseExternalLiveForTest(
+        &ledger,
+        allocator,
+        identity,
+        root.token,
+        .completed,
+    );
+    try ledger.finish();
+}
+
+test "live commit permit rejects copied moved and authority drift before mutation" {
+    const allocator = std.testing.allocator;
+    var ledger: ExternalInboxLedger = .{};
+    const identity = external_rx_types.RxIdentity{
+        .attach_instance_id = 5102,
+        .destination_slot_addr = 0x510200,
+    };
+    var batch: PreparedLiveBatch = .{};
+    try ledger.beginLiveBatch(&batch, allocator, identity);
+    var payload = try owned(allocator, "drift");
+    _ = try ledger.prepareLiveAdmission(
+        &batch,
+        .{ .completed = .{
+            .stream_id = 72,
+            .is_snapshot = false,
+            .provenance = .{ .external = .{
+                .start_absolute = 1000,
+                .span = protocol.header_size + "drift".len,
+            } },
+        } },
+        &payload,
+    );
+    try ledger.finishLiveBatch(&batch);
+    var retirement = PreparedLiveRetirement.init(allocator);
+    var dispositions =
+        [_]LiveCommitDisposition{.unused} ** max_live_mutations;
+    var permit: PreparedLiveCommit = .{};
+    _ = try ledger.prepareLiveCommit(
+        &batch,
+        &retirement,
+        &dispositions,
+        0xA662,
+        0x5703,
+        42,
+        &permit,
+    );
+    const epoch_before = ledger.mutation_epoch;
+    var copied = permit;
+    try std.testing.expectError(
+        error.InvalidPlan,
+        ledger.consumePreparedLiveCommitChecked(
+            &batch,
+            &retirement,
+            &dispositions,
+            &copied,
+            0xA662,
+            0x5703,
+            42,
+        ),
+    );
+    try std.testing.expectEqual(epoch_before, ledger.mutation_epoch);
+    try std.testing.expectEqual(.prepared, batch.lifecycle);
+
+    permit.simulation.charged_bytes += 1;
+    try std.testing.expectError(
+        error.StalePlan,
+        ledger.consumePreparedLiveCommitChecked(
+            &batch,
+            &retirement,
+            &dispositions,
+            &permit,
+            0xA662,
+            0x5703,
+            42,
+        ),
+    );
+    permit.simulation.charged_bytes -= 1;
+    try std.testing.expectEqual(epoch_before, ledger.mutation_epoch);
+    try std.testing.expectEqual(.prepared, permit.lifecycle);
+
+    dispositions[0].final_live.token.generation += 1;
+    try std.testing.expectError(
+        error.StalePlan,
+        ledger.consumePreparedLiveCommitChecked(
+            &batch,
+            &retirement,
+            &dispositions,
+            &permit,
+            0xA662,
+            0x5703,
+            42,
+        ),
+    );
+    dispositions[0].final_live.token.generation -= 1;
+    try std.testing.expectEqual(epoch_before, ledger.mutation_epoch);
+
+    ledger.mutation_epoch += 1;
+    try std.testing.expectError(
+        error.StalePlan,
+        ledger.consumePreparedLiveCommitChecked(
+            &batch,
+            &retirement,
+            &dispositions,
+            &permit,
+            0xA662,
+            0x5703,
+            42,
+        ),
+    );
+    ledger.mutation_epoch -= 1;
+    try std.testing.expectEqual(epoch_before, ledger.mutation_epoch);
+
+    try std.testing.expectError(
+        error.InvalidPlan,
+        ledger.consumePreparedLiveCommitChecked(
+            &batch,
+            &retirement,
+            &dispositions,
+            &permit,
+            0xA662,
+            0x5703,
+            43,
+        ),
+    );
+    try std.testing.expectEqual(epoch_before, ledger.mutation_epoch);
+    try std.testing.expectEqual(.prepared, batch.lifecycle);
+    try std.testing.expectEqual(
+        AbortLiveCommitResult.aborted,
+        ledger.abortPreparedLiveCommit(
+            &batch,
+            &retirement,
+            &dispositions,
+            &permit,
+        ),
+    );
+    for (dispositions) |disposition|
+        try std.testing.expectEqual(LiveCommitDisposition.unused, disposition);
+    try std.testing.expect(ExternalInboxLedger.resetPreparedLiveCommit(&permit));
+    try std.testing.expect(std.meta.eql(permit, PreparedLiveCommit{}));
+    _ = ledger.abortPreparedLiveBatch(&batch);
+}
+
+test "live commit abort rejects hostile drift without partial mutation" {
+    const allocator = std.testing.allocator;
+    var ledger: ExternalInboxLedger = .{};
+    const identity = external_rx_types.RxIdentity{
+        .attach_instance_id = 5103,
+        .destination_slot_addr = 0x510300,
+    };
+    var batch: PreparedLiveBatch = .{};
+    try ledger.beginLiveBatch(&batch, allocator, identity);
+    var payload = try owned(allocator, "abort-drift");
+    _ = try ledger.prepareLiveAdmission(
+        &batch,
+        .{ .completed = .{
+            .stream_id = 73,
+            .is_snapshot = false,
+            .provenance = .{ .external = .{
+                .start_absolute = 1100,
+                .span = protocol.header_size + "abort-drift".len,
+            } },
+        } },
+        &payload,
+    );
+    try ledger.finishLiveBatch(&batch);
+    var retirement = PreparedLiveRetirement.init(allocator);
+    var dispositions =
+        [_]LiveCommitDisposition{.unused} ** max_live_mutations;
+    var permit: PreparedLiveCommit = .{};
+    try ledger.prepareLiveCommit(
+        &batch,
+        &retirement,
+        &dispositions,
+        0xA663,
+        0x5704,
+        43,
+        &permit,
+    );
+
+    const Unchanged = struct {
+        fn expect(
+            expected_ledger: ExternalInboxLedger,
+            expected_batch: PreparedLiveBatch,
+            expected_retirement: PreparedLiveRetirement,
+            expected_dispositions: [max_live_mutations]LiveCommitDisposition,
+            expected_permit: PreparedLiveCommit,
+            actual_ledger: *const ExternalInboxLedger,
+            actual_batch: *const PreparedLiveBatch,
+            actual_retirement: *const PreparedLiveRetirement,
+            actual_dispositions: *const [max_live_mutations]LiveCommitDisposition,
+            actual_permit: *const PreparedLiveCommit,
+        ) !void {
+            try std.testing.expect(std.meta.eql(expected_ledger, actual_ledger.*));
+            try std.testing.expect(std.meta.eql(expected_batch, actual_batch.*));
+            try std.testing.expect(std.meta.eql(expected_retirement, actual_retirement.*));
+            try std.testing.expect(std.meta.eql(expected_dispositions, actual_dispositions.*));
+            try std.testing.expect(std.meta.eql(expected_permit, actual_permit.*));
+        }
+    };
+
+    batch.digest[0] ^= 1;
+    const drifted_ledger = ledger;
+    const drifted_batch = batch;
+    const drifted_retirement = retirement;
+    const drifted_dispositions = dispositions;
+    const drifted_permit = permit;
+    try std.testing.expectEqual(
+        AbortLiveCommitResult.ignored_untrusted,
+        ledger.abortPreparedLiveCommit(
+            &batch,
+            &retirement,
+            &dispositions,
+            &permit,
+        ),
+    );
+    try Unchanged.expect(
+        drifted_ledger,
+        drifted_batch,
+        drifted_retirement,
+        drifted_dispositions,
+        drifted_permit,
+        &ledger,
+        &batch,
+        &retirement,
+        &dispositions,
+        &permit,
+    );
+    batch.digest[0] ^= 1;
+
+    retirement.saved_self_addr +%= 1;
+    const retirement_drift = retirement;
+    try std.testing.expectEqual(
+        AbortLiveCommitResult.ignored_untrusted,
+        ledger.abortPreparedLiveCommit(
+            &batch,
+            &retirement,
+            &dispositions,
+            &permit,
+        ),
+    );
+    try std.testing.expect(std.meta.eql(retirement_drift, retirement));
+    try std.testing.expectEqual(.prepared, permit.lifecycle);
+    retirement.saved_self_addr -%= 1;
+
+    var copied = permit;
+    try std.testing.expectEqual(
+        AbortLiveCommitResult.ignored_untrusted,
+        ledger.abortPreparedLiveCommit(
+            &batch,
+            &retirement,
+            &dispositions,
+            &copied,
+        ),
+    );
+    try std.testing.expect(std.meta.eql(copied, permit));
+    try std.testing.expectEqual(.prepared, permit.lifecycle);
+
+    permit.aggregate_addr +%= 1;
+    const aggregate_drift = permit;
+    try std.testing.expectEqual(
+        AbortLiveCommitResult.ignored_untrusted,
+        ledger.abortPreparedLiveCommit(
+            &batch,
+            &retirement,
+            &dispositions,
+            &permit,
+        ),
+    );
+    try std.testing.expect(std.meta.eql(aggregate_drift, permit));
+    permit.aggregate_addr -%= 1;
+
+    try std.testing.expectEqual(
+        AbortLiveCommitResult.aborted,
+        ledger.abortPreparedLiveCommit(
+            &batch,
+            &retirement,
+            &dispositions,
+            &permit,
+        ),
+    );
+    _ = ledger.abortPreparedLiveBatch(&batch);
+}
+
+test "live commit permit rejects active payload alias before output write" {
+    const allocator = std.testing.allocator;
+    var ledger: ExternalInboxLedger = .{};
+    var aliased_permit: PreparedLiveCommit align(@alignOf(PreparedLiveCommit)) = .{};
+    ledger.slots[0] = .{
+        .active = true,
+        .generation = 1,
+        .semantic = try storeSemantic(.{ .completed = .{
+            .stream_id = 700,
+            .is_snapshot = false,
+        } }),
+        .payload = .{
+            .allocator = allocator,
+            .allocation_ptr = @ptrCast(&aliased_permit),
+            .logical_len = @sizeOf(PreparedLiveCommit),
+        },
+    };
+    ledger.charged_bytes = @sizeOf(PreparedLiveCommit);
+    ledger.charged_items = 1;
+    ledger.next_generation = 2;
+    ledger.next_slot_hint = 1;
+
+    var batch: PreparedLiveBatch = .{};
+    try ledger.beginLiveBatch(&batch, allocator, null);
+    var payload = try owned(allocator, "new");
+    _ = try ledger.prepareLiveAdmission(
+        &batch,
+        .{ .completed = .{
+            .stream_id = 701,
+            .is_snapshot = false,
+        } },
+        &payload,
+    );
+    try ledger.finishLiveBatch(&batch);
+    var retirement = PreparedLiveRetirement.init(allocator);
+    var dispositions =
+        [_]LiveCommitDisposition{.unused} ** max_live_mutations;
+    try std.testing.expectError(
+        error.InvalidAlias,
+        ledger.prepareLiveCommit(
+            &batch,
+            &retirement,
+            &dispositions,
+            0xA663,
+            0x5704,
+            44,
+            &aliased_permit,
+        ),
+    );
+    try std.testing.expect(std.meta.eql(
+        aliased_permit,
+        PreparedLiveCommit{},
+    ));
+    for (dispositions) |disposition|
+        try std.testing.expectEqual(LiveCommitDisposition.unused, disposition);
+    _ = ledger.abortPreparedLiveBatch(&batch);
+    ledger.slots[0] = .{ .generation = 1 };
+    ledger.charged_bytes = 0;
+    ledger.charged_items = 0;
     try ledger.finish();
 }
 

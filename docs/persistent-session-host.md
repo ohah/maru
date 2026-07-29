@@ -2899,12 +2899,11 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
               요구한다. capacity 여유와 곱 overflow를 허용하지 않고 두 byte 수치 각각 exact cap/cap+1을 검증한다.
               payload replacement bytes는 metadata에 섞지 않고 위 18 MiB adoption payload peak에 별도로 기록한다.
 
-              현재 `ExternalPumpStorage.prepareAdoption()`만 caller의 final address에 embedded
-              `PreparedScreenBacklog`을 직접 구성하고 payloadless `PrepareStatus`를 반환한다. plan 값 반환/대입/복사는
-              금지한다. c3c-1을 반영한 현재 `PrepareStatus`는 `.prepared`, `.deferred_non_adopted`, `.busy`,
-              `.retryable_preserved(.out_of_memory)`, `.terminal(reason)`의 closed union이다.
-              c3가 `PreparedScreenBacklog`을 `PreparedClientAdoption`으로 바꾸면서 아래
-              `AdoptionPrepareStatus`로 원자적으로 교체한다.
+              현재 `ExternalPumpStorage.prepareAdoption(now_ns, cleanup_scratch)`는 caller의 final address에
+              embedded `PreparedScreenBacklog`을 직접 구성하고 payloadless `AdoptionPrepareStatus`를 반환한다.
+              plan 값 반환/대입/복사는 금지한다. c3c-2b3에서 옛 `PrepareStatus`는 제거됐으며
+              `.prepared_adopted`, `.recovery_committed`, `.terminal_latched`,
+              `.retryable_preserved(.out_of_memory | .transaction_busy)`만 공개한다.
               allocator 실패만 retryable이다. deterministic metadata 4 MiB cap 초과는 resource terminal,
               screen item/byte cap은 transfer-null bounded recovery, fresh-zero ledger의 generation/epoch exhaustion과
               c1 invariant/invalid-address/alias/stale-plan 계열은 internal invariant terminal이다. prepare의
@@ -3866,15 +3865,52 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
                   retryable_preserved(.out_of_memory | .transaction_busy)`만 공개한다. allocator callback이나
                   same-thread 다른 storage가 이미 prepare 중인 재진입은 `.transaction_busy`이며 source/ledger/
                   prepared owner/lifecycle mutation 0으로 보존한다. 외부에 deferred non-adopted plan이나 별도
-                  `busy` top-level tag를 남기지 않는다. prepare/commit/teardown은 storage별 monotonic operation
-                  generation과 process-thread exclusive lease를 공유한다. allocator callback에서 재진입한
+                  `busy` top-level tag를 남기지 않는다. prepare/commit/teardown은 process-thread exclusive
+                  lease를 공유한다. c3c-2b3의 adopted prepare는 storage별 monotonic transaction generation을
+                  mint하고 그 뒤 commit은 같은 generation을 final seal/permit으로 소비한다. 현재 legacy teardown은
+                  lease만 공유하며, c3c-3 aggregate teardown이 별도 monotonic teardown generation을 mint해
+                  `OwnerTeardownPermit`에 bind한다. allocator callback에서 재진입한
                   prepare/commit/teardown/event facade는 `.transaction_busy` 또는 method별 typed busy/dead를
                   반환하고 outer operation이나 최초 terminal reason을 바꾸지 않는다.
+                  `prepareAdoption(now_ns, cleanup_scratch)`는 caller가 호출 전체보다 오래 사는
+                  `ExternalPumpCleanupScratch`의 final address를 명시적으로 전달받는다. component fixture owner는
+                  이를 persistent sibling member로 소유하고, 후속 final `ExternalPumpOwner`도 같은 member를
+                  내부 전달한다. storage inline scratch나 prepare stack 임시는 허용하지 않는다.
+                  exact signature의 시각은 `now_ns: i128`, scratch는
+                  `cleanup_scratch: *ExternalPumpCleanupScratch`다. scratch는 `initInPlace`가 final address에
+                  bind한 `.ready`에서만 public operation에 들어가며, owner가 이동한 copy·non-ready·storage/
+                  Client/ledger/owner backing과 alias된 scratch는 internal-invariant terminal과 bounded quarantine로
+                  fail-stop하고 allocator callback을 실행하지 않는다. operation lease conflict와 unchanged-source
+                  OOM retry는 scratch byte/lifecycle mutation 0이다. adopted prepare는 scratch를 `.ready`로
+                  보존해 후속 c3c-3 teardown이 같은 persistent member를 재사용한다. recovery/terminal/final-seal
+                  cleanup은 첫 callback 전에 `.frozen`으로 바꾸고 frozen descriptor만 소비한 뒤 반환 전에
+                  `.ready`로 초기화하므로 같은 owner의 후속 teardown이 재사용할 수 있다.
                   non-adopted suffix도 callback-free라고 주장하지 않는다. verdict와 recovery/terminal semantic,
                   admission-closed lifecycle을 먼저 commit-visible latch한 뒤 cleanup descriptor를 caller scratch에
-                  freeze하고, 그 다음 stack winner/Client allocator·close callback을 실행하며 마지막에 live/dead
-                  lifecycle을 publish한다. callback은 중간 latch를 보더라도 새 admission이나 두 번째 cleanup을
-                  시작할 수 없다.
+                  freeze한다. 첫 callback 전 evidence·Client·transfer의 후속 소비 authority는 callback에서 주소를
+                  알 수 없는 stack-local owner로 move하고 storage 쪽 descriptor는 tombstone한다. callback 뒤에는
+                  storage의 mutable owner graph를 다시 읽지 않고 local owner만 cleanup/복원하며, callback이 직접
+                  바꿀 수 있는 storage scalar·ledger header·semantic을 sealed local 값으로 다시 덮어쓴 뒤 마지막에
+                  live/dead lifecycle을 publish한다. callback은 중간 latch를 보더라도 새 admission이나 두 번째
+                  cleanup을 시작할 수 없고, storage 주소를 보유해 직접 필드를 바꿔도 손상된 transport나 cleanup
+                  descriptor를 최종 상태로 밀어 넣을 수 없다.
+
+                  c3c-2b3의 public 결과와 최종 owner 상태는 다음 표가 단일 oracle이다.
+
+                  | Phase A verdict | `AdoptionPrepareStatus` | semantic/final lifecycle | fd/ledger | owner publish와 metadata |
+                  | --- | --- | --- | --- | --- |
+                  | adopted | `prepared_adopted` | `.adopting` 유지, 외부 combined commit 대기 | fd 보존, ledger pristine | publish 0, prepared owner만 sealed |
+                  | host invalidated | `recovery_committed` | `.active.host_recovery.ack_unadmitted{epoch=1,deadline_ns=now_ns+30s}` / `.live` | fd·parser·external mode 보존, ledger seed/charge 0 | sealed attachment authority와 nonzero request state를 storage로 take, Client request=0, resize none, metadata는 support별 unsupported/unavailable |
+                  | local screen cap | `recovery_committed` | `.active.client_recovery.control_wait{epoch=1,deadline_ns=now_ns+30s}` / `.live` | host recovery와 같음 | host recovery와 같음 |
+                  | ended | `terminal_latched` | `.terminal{reason=runtime_ended,fd_disposition=owner_cleanup}` / `.dead` | Client canonical close, ledger seed/charge 0 | authority/request/resize publish 0, initial/staged metadata cleanup |
+                  | revoked | `terminal_latched` | `.terminal{reason=revoked,fd_disposition=owner_cleanup}` / `.dead` | ended와 같음 | ended와 같음 |
+                  | reducer source/transport/equivocation terminal | `terminal_latched` | `.terminal{reason=protocol_error,fd_disposition=owner_cleanup}` / `.dead` | canonical close, ledger seed/charge 0 | publish 0, metadata cleanup |
+                  | stale metadata/ordinal/moved-accumulator 또는 inconsistent fold | `terminal_latched` | `.terminal{reason=invariant_failure,fd_disposition=owner_cleanup}` / `.dead` | canonical close, ledger seed/charge 0 | publish 0, metadata cleanup |
+                  | request ID zero | `terminal_latched` | `.terminal{reason=request_id_exhausted,fd_disposition=owner_cleanup}` / `.dead` | canonical close, ledger seed/charge 0 | publish 0, metadata cleanup |
+                  | deterministic metadata/resource cap | `terminal_latched` | `.terminal{reason=resource_exhausted,fd_disposition=owner_cleanup}` / `.dead` | canonical close, ledger seed/charge 0 | publish 0, metadata cleanup |
+                  | recovery deadline checked-add overflow 또는 generation/scratch invariant | `terminal_latched` | `.terminal{reason=invariant_failure,fd_disposition=owner_cleanup}` / `.dead` 또는 untrusted graph quarantine | ledger/active publish 0 | publish 0 |
+                  | allocation OOM 뒤 source seal unchanged | `retryable_preserved(.out_of_memory)` | `.adopting` 보존 | fd/source/evidence/ledger mutation 0 | publish 0, scratch mutation 0 |
+                  | process-thread operation lease conflict | `retryable_preserved(.transaction_busy)` | 전 상태 byte-for-byte 보존 | mutation 0 | publish 0, scratch mutation 0 |
               - **c3c-3 — owner event lease와 teardown:** 두 merge gate로 닫는다.
                 - **c3c-3a — owner event lease:** c3c-2b1의 `OwnerMetadataState`에 resize/metadata
                   borrow/finish generation, projection retry와 terminal revoke를 연결한다.
@@ -3906,15 +3942,15 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
               unsupported/unavailable은 event가 아니며 initial fence 뒤에도 tag가 유지된다.
 
               orchestration은 두 단계로 닫힌다.
-              c2의 현재 payloadless
-              `PrepareStatus{prepared,deferred_non_adopted,busy,retryable_preserved,terminal}`는 c3가 착륙할 때
-              아래 `AdoptionPrepareStatus`로 교체하며 두 union을 동시에 공개하지 않는다.
-              `ExternalPumpStorage.prepareAdoption(now_ns) -> AdoptionPrepareStatus`가 Phase A, recovery checked
-              context와 모든 allocation을 소유하고
+              c3c-2b3에서 payloadless
+              `PrepareStatus{prepared,deferred_non_adopted,busy,retryable_preserved,terminal}`를 제거하고
+              아래 `AdoptionPrepareStatus`로 원자 교체했으며 두 union은 동시에 공개하지 않는다.
+              `ExternalPumpStorage.prepareAdoption(now_ns, cleanup_scratch) -> AdoptionPrepareStatus`가 Phase A,
+              recovery checked context와 모든 allocation을 소유하고
               `prepared_adopted | recovery_committed | terminal_latched |
               retryable_preserved(.out_of_memory | .transaction_busy)`만 반환한다. non-adopted verdict는 같은 exclusive call 안에서
               위 immediate no-fail suffix까지 끝내므로 prepared terminal/recovery 상태를 외부에 노출하지 않는다.
-              `ExternalPumpStorage.commitAdoption(cleanup_scratch) -> CommitResult`는
+              현재 adopted 전용 `ExternalPumpStorage.commitAdoption() -> CommitResult`는
               allocation/OOM/clock read/checked arithmetic이 없고
               오직 `prepared_adopted`에서 호출하며 정상 진입은 `adopted | terminal_latched`, 재진입/종료 owner는
               `transaction_busy | dead`만 반환한다. final seal은
@@ -3923,11 +3959,13 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
               **ledger seed+typed token take(마지막 fallible precommit) → owner resize/metadata·authority·request
               state take → `Client.commitExternalAdoptionTakeUnchecked` → `semantic_state=.active{.flow=.initial_fence}`와
               `lifecycle=.live`를 마지막 publish** 순서다. ledger 성공 뒤에는 allocation/callback/validation/error
-              return이 없다. prepare 내부 terminal/recovery는 ledger seed를 하지 않고 stack winner cleanup →
-              branch-specific Client disarm/close → semantic/lifecycle publish의 별도 no-fail suffix를 쓴다.
-              final-seal failure cleanup과 b3 immediate cleanup도 teardown과 같은 aggregate scratch
-              non-alias/backing-first proof를 첫 callback 전에 실행하고, proof 실패는 ledger/active publish 0의
-              terminal latch로 끝난다.
+              return이 없다. prepare 내부 terminal/recovery는 ledger seed를 하지 않고 semantic/admission-closed
+              latch를 먼저 publish → 모든 후속 owner를 callback-hidden local로 move하고 storage tombstone →
+              stack winner/branch-specific Client cleanup → sealed scalar·owner 복원 →
+              `live`/`dead` lifecycle을 마지막 publish하는 별도 no-fail suffix를 쓴다.
+              b3 immediate cleanup은 caller scratch의 aggregate non-alias/backing-first proof를 첫 callback 전에
+              실행한다. adopted final-seal failure는 c3c-2b2의 기존 deep-frozen cleanup을 유지하고, c3c-3에서
+              public teardown과 함께 같은 `ExternalPumpCleanupScratch` signature로 통합한다.
               final seal/content mismatch도 ledger와 active semantic publish mutation은 0인 채 Client canonical
               fail-close와 prepared-owner cleanup을 수행하고 `terminal_latched`가 된다. 따라서 이 경우
               source mutation 0은 주장하지 않으며 테스트는 ledger/publish 0과 fd close·queue cleanup exact once를
@@ -4255,8 +4293,8 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
         공유하고 leave가 남은 budget 중 최대 100 ms를 쓴다. signal/revoke/error cleanup은 active/latest와 detach를
         버리고 하나의 100 ms deadline 안에서 leave를 시도한 뒤 즉시 raw restore/signal forwarding으로 간다.
 
-    **P5c3c-1a~2a, 2b1, 2b2a~c2와 2b2c3-c3a1~c3c-2b2는 구현 완료다.
-    c3c-2b3~3b, 2b2d1~f3, P5c3c-2b3와 P5c3c-3a~3b는 계획 상태다.**
+    **P5c3c-1a~2a, 2b1, 2b2a~c2와 2b2c3-c3a1~c3c-2b3는 구현 완료다.
+    c3c-3a~3b, 2b2d1~f3, P5c3c-2b3와 P5c3c-3a~3b는 계획 상태다.**
     2b2c3 전체는 c3c 전체가 green이 아니므로 아직 계획 상태다. 각 slice는 P5c3a~b의 Debug/ReleaseFast gate를 재실행하고 다음 slice가 실제
     consumer로 쓰지 않는 임시 public API는 만들지 않는다.
 

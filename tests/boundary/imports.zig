@@ -150,6 +150,7 @@ test "session host unchecked adoption leaves stay behind the aggregate permit bo
         prefix: []const u8,
         suffix: []const u8,
         owner_file: []const u8,
+        aggregate_calls: usize = 1,
     };
     const leaves = [_]Leaf{
         .{
@@ -166,6 +167,11 @@ test "session host unchecked adoption leaves stay behind the aggregate permit bo
             .prefix = "commitOwnerMetadata",
             .suffix = "TakeUnchecked(",
             .owner_file = "external_event_materialization.zig",
+        },
+        .{
+            .prefix = "commitExternalRecoveryDiscard",
+            .suffix = "Unchecked(",
+            .owner_file = "client.zig",
         },
     };
     var dir = try std.Io.Dir.cwd().openDir(std.testing.io, root, .{ .iterate = true });
@@ -205,7 +211,7 @@ test "session host unchecked adoption leaves stay behind the aggregate permit bo
                 return error.TestUnexpectedResult;
             }
         }
-        try std.testing.expectEqual(@as(usize, 1), aggregate_calls);
+        try std.testing.expectEqual(leaf.aggregate_calls, aggregate_calls);
     }
 }
 

@@ -5912,6 +5912,84 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
                 개방한다. response 제품 publish도 이 gate에서 개방하되 pending owner가 즉시 inherited blocker로
                 RX를 멈추고 teardown만 허용한다. response exact take/correlation은 2b2f2에서 개방한다.
 
+                제품 adapter는 아래 순서를 하나의 `ExternalPumpStorage` whole-turn lease 안에서만 실행한다.
+                각 단계는 앞 단계가 만든 copyable DTO를 권위로 재사용하지 않고, 다음 mutation 직전에 final-address
+                owner와 parser seal을 다시 검증한다.
+
+                1. **진입·inherited 우선순위:** final-address caller-owned scratch 전체를 lease scratch range로
+                   봉인하고 `snapshotInheritedRxBlockersUnderHeldLease`를 정확히 한 번 만든다. 기존
+                   `committed_screen`·metadata·resize owner 또는 pending response가 남으면 snapshot을 consume한
+                   뒤 `client_pump.decide`에 `inherited_blocker=true`만 전달한다. completed `live_screen`만 남으면
+                   이 gate의 head-only product writer가 정확히 한 항목을 처리하고 즉시 scheduling으로 돌아가며,
+                   같은 turn에 parser를 진행하지 않는다. 어느 경우든 inherited work가 있었던 turn에는 socket
+                   read, intent/aggregate allocation, 새 ledger admission과 TX/control mutation이 모두 0이다.
+                   d2b3d는 기존 `committed_screen` consumer/projector를 대신 실행하거나 그 owner를 live FIFO로
+                   옮기지 않는다.
+                   `live_partial`은 consumer가 비워야 하는 blocker가 아니라 다음 screen chunk가 이어받아야 하는
+                   sealed continuation prerequisite다. blocker snapshot은 이를 `live_partial_pending`과 completed
+                   `live_screen_pending`으로 분리한다. `hasExistingConsumerBlocker`는 committed/metadata/resize/
+                   response만, `hasLiveScreenWork`는 completed FIFO만, `hasPartialContinuation`은 partial만
+                   반환하며 generic `hasBlocker`는 scheduling용으로 앞의 두 종류만 합친다.
+                   partial이 있으면 parser traversal을 허용하되 첫 accepted screen outcome이 exact same
+                   stream/kind/recovery provenance의 연속 chunk가 아니면 기존 partial을 보존한 채 whole turn
+                   terminal이다.
+                2. **제품 parser 권위:** blocker가 없을 때만 `owned_client`의 external-mode state,
+                   `FrameParser`, parser allocator, exact attachment identity와 storage/lease/intent reservation을
+                   한 `external_rx_intent.AuthorityView`로 봉인한다. test probe가 제공하던 synthetic
+                   generation·identity·빈 forbidden range를 제품 경로에서 허용하지 않는다. forbidden inventory는
+                   `Client`, parser backing, external mode state, pending stream/event/batch/partial/outbound,
+                   `ExternalPumpStorage`, lease, turn scratch, intent scratch/aggregate와 활성 ledger owner range 전체다.
+                   `client_external_mode.parserReadiness`와 `nextOutcomeWithRange`만 parser 해석 SSOT로 쓴다.
+                3. **bounded traversal:** resident parser에서 최대 64개의 complete/error outcome만 순서대로 꺼낸다.
+                   `.incomplete`는 새 persistent owner를 만들지 않고 parser-resident byte 상태로 남긴 채 정상
+                   scheduling으로 끝낸다. screen frame의 `end_stream` 부재가 partial owner를 만들고, 후속 compatible
+                   screen frame이 같은 aggregate 또는 다음 turn에서 그 ledger root를 연장·완료한다. 64개를
+                   성공적으로 stage한 뒤 parser가 다시
+                   `complete_or_error`면 현재 aggregate를 한 번 commit하고 `rx_budget_exhausted=true`로 즉시 다음
+                   turn을 예약한다. 65번째 outcome은 이번 turn에 parse/classify/consume하지 않는다.
+                4. **terminal dominance:** protocol/resource/invariant terminal은 앞에서 stage한 event, screen,
+                   partial, response와 FIFO retirement를 모두 abort한 뒤에만 terminal scheduling을 반환한다.
+                   parser가 frame payload를 이미 ownership-move한 경우에도 canonical intent/aggregate abort가
+                   exact-once cleanup을 소유한다. 같은 turn의 response 뒤 snapshot/revoke/error도 끝까지
+                   분류하므로 response가 중간에 있었다는 이유만으로 조기 commit하지 않는다.
+                5. **단일 commit:** non-terminal stop에서만 aggregate를 한 번 finalize/commit한다. event와 screen의
+                   wire 순서는 intent index와 destination write plan이 보존하고, completed screen은 token만
+                   `live_screen` FIFO에 publish한다. partial은 ledger token 하나와 parser range/generation을
+                   `live_partial` 하나에, response는 request ID·payload·source generation을
+                   `pending_response` 하나에 publish한다. 기존 owner가 nonempty거나 generation/cap 계산이
+                   실패하면 source/parser/FIFO를 일부 소비하지 않고 whole turn을 abort한다.
+                6. **live consume:** d2b3d의 제품 screen consumer는 FIFO head 하나를 immutable borrow해 caller
+                   callback에 적용시키고, 성공 결과와 storage/lease/owner seal을 다시 검증한 뒤에만
+                   callback-free suffix로 head clear→head/len/generation 갱신→ledger token release를 수행한다.
+                   callback 실패·재진입·owner drift는 FIFO와 ledger를 그대로 보존한다. 한 turn의 live consume은
+                   inherited blocker 처리이므로 새 parser traversal과 섞지 않는다. partial은 다음 compatible
+                   screen chunk가 같은 stream/range 연속성을 만족할 때 aggregate 안에서만 연장·완료하고,
+                   불연속·중복·cap+1은 commit 전 terminal이다. 여기서 `cap+1 pre-consume`은
+                   `nextOutcomeWithRange`가 wire bytes를 parser에서 검증·ownership-move하기 전이라는 뜻이 아니라,
+                   persistent destination/FIFO/ledger disposition을 publish하거나 기존 live owner를 retire하기
+                   전이라는 뜻이다. parser에서 이미 꺼낸 payload는 whole-turn intent/aggregate abort graph가
+                   exact once 회수한다. 65번째 scheduling budget만 parser byte consume 전 그대로 남긴다.
+                7. **response barrier·반환:** response publish 직후 같은 owner projection이 다음 turn의
+                   `response_correlation_pending` blocker가 된다. d2b3d public facade에는 response take API가
+                   없으며 teardown만 payload를 회수할 수 있다. 모든 반환 경로는 intent/aggregate reservation을
+                   committed/aborted/tombstone 중 하나로 닫고 whole-turn lease를 정확히 한 번 release한다.
+
+                d2b3d는 socket read와 TX/control permit이 없는 **buffered-only temporary**
+                `pumpRxTurn` facade를 연다. `RxOps`는 이 gate에서 live-screen apply callback과 관측 counter만
+                포함하고 read/write syscall callback은 포함하지 않는다. d2c가 같은 facade에 socket read를
+                연결하고 d2d가 authority permit preparation을 연결하며, f3에서 RX-only facade를 제거하거나
+                file-private test adapter로 내린다. 따라서 d2b3d의 exact-one 제품 callsite는 실제 `Client`
+                parser backing을 구동하지만 fd를 읽거나 TX/control state를 바꾸지 않는다.
+
+                d2b3d 완료 증거는 제품 `pumpRxTurn` exact-one callsite와 다음 자동 gate다. inherited owner가 있을
+                때 allocation/parser/socket mutation 0, completed screen 1·64·65, FIFO callback 실패 보존과 성공
+                exact-one ledger release, partial incomplete→continued→completed 및 불연속 terminal, response
+                publish→다음 turn RX 0, event/screen 1·64 wire-order, event/screen/response 뒤 late protocol terminal
+                전체 abort, 모든 allocation fail-index, copied/moved/stale lease·scratch·parser·owner와 callback
+                재진입, Debug/ReleaseFast `test-session-host`, boundary scan과 전체 `mise run check`를 포함한다.
+                socketpair 제품 fixture는 실제 `Client` parser backing에 frame을 넣어 public facade만 호출하며
+                test-only create/stage/finalize/commit helper를 직접 호출하지 않는다.
+
               ```zig
               const ClassifiedIntentOwner = struct {
                   saved_self_addr: usize,

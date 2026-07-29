@@ -27,13 +27,14 @@
 > authority barrier 순으로 진행한다. 네 단계 전체의 Debug/ReleaseFast component, 실제 socketpair
 > syscall-order 및 payload/ledger final-zero가 green이기 전에는 2b2d2 완료로 표시하지 않는다.
 > d1 helper와 `client_pump.decide` unit fixture만으로 d2 product 경로를 구현했다고 간주하지 않는다.
-> d2b는 d2b1(policy/readiness/whole-turn lease/O(1) inherited snapshot),
+> d2b는 d2b1(policy/readiness/whole-turn lease/O(1) inherited snapshot, 구현 완료),
 > d2b2(compact provenance/all-or-none ledger live batch), d2b3(persistent owners/intent scratch/buffered
 > traversal/terminal-dominant aggregate commit)의 세 merge slice다. 세 slice 전체가 green이기 전에는 d2b 완료로
 > 표시하지 않는다. 단건 prepared mutation을 순차 commit하거나 기존 callback-owning `mergeInto`를 d2에서 직접
 > 호출한 증거는 aggregate atomicity 증명이 아니다.
-> d2b1은 terminal/deadline 우선 blocker 표, parser readiness 1/31/32와 64/65, stale/copy/cross-turn
-> snapshot 및 committed/live screen summary lifecycle을 검증한다. d2b2는 compact range exact/cap/cap+1,
+> d2b1은 terminal/deadline 우선 blocker 표, parser readiness 1/31/32, stale/copy/cross-turn
+> snapshot 및 committed screen/metadata summary lifecycle을 검증한다. 64/65의 실제 미소비 traversal과
+> live screen summary는 persistent owner가 생기는 d2b3 gate가 검증한다. d2b2는 compact range exact/cap/cap+1,
 > old-end continuation과 overflow, ledger identity A→B→A 거부, provenance의 validate/relabel/merge/view/digest
 > migration, 1/2/64 mutation fail-index all-or-none, legacy merge/release wrapper와 final-root disposition replay를
 > 검증한다. d2b3은 1/64 completed screen의 token-only FIFO, cap+1 pre-consume 거부, partial/response exact-one

@@ -410,6 +410,33 @@ pub const OwnerMetadataState = struct {
         };
     }
 
+    /// O(1) scheduler summary: validate address-bound owner headers without hashing or reading the
+    /// metadata backing. Payload consumers still use `metadataStateSummary`/projection validation.
+    pub fn pendingStateSummary(
+        self: *const OwnerMetadataState,
+        stable_parent: *const anyopaque,
+    ) ?MetadataStateSummary {
+        if (self.lifecycle != .committed or
+            self.saved_self_addr != @intFromPtr(self) or
+            self.storage_addr != @intFromPtr(stable_parent) or
+            self.source_addr == 0)
+            return null;
+        return switch (self.metadata) {
+            .unsupported => .unsupported,
+            .unavailable => .unavailable,
+            .current => |*current| if (ownerMetadataAuthorityPairValid(
+                self,
+                current,
+            ))
+                .{ .current = .{
+                    .revision = current.logical.revision,
+                    .pending = current.pending,
+                } }
+            else
+                null,
+        };
+    }
+
     pub fn deinitCommitted(self: *OwnerMetadataState) void {
         if (self.lifecycle == .empty or self.lifecycle == .cleaned_tombstone)
             return;

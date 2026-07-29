@@ -5213,6 +5213,8 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
               const ExternalWholeTurnLease = struct {
                   saved_self_addr: usize,
                   storage_addr: usize,
+                  scratch_addr: usize,
+                  scratch_len: usize,
                   operation_generation: u64,
                   lifecycle: enum { empty, acquired, released, aborted },
                   digest: external_owner_seal.Digest,
@@ -5225,6 +5227,18 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
                   retained_count: usize,
                   committed: bool,
                   generation: u64,
+                  digest: external_owner_seal.Digest,
+              };
+
+              const MetadataPendingSummarySeal = struct {
+                  metadata_owner_addr: usize,
+                  storage_addr: usize,
+                  owner_incarnation: u64,
+                  revision: u64,
+                  pending: bool,
+                  supported: bool,
+                  generation: u64,
+                  lifecycle: enum { empty, bound, tombstone },
                   digest: external_owner_seal.Digest,
               };
 
@@ -5257,7 +5271,7 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
               fn releaseWholeTurnLease(
                   self: *ExternalPumpStorage,
                   lease: *ExternalWholeTurnLease,
-              ) void;
+              ) enum { released, aborted_terminal, ignored_untrusted };
               fn snapshotInheritedRxBlockersUnderHeldLease(
                   self: *const ExternalPumpStorage,
                   lease: *const ExternalWholeTurnLease,
@@ -5632,18 +5646,29 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
 
               `ExternalWholeTurnLease`는 d2b1에서 조기 도입한다. 기존 process-thread
               `active_external_operation_addr`의 typed final-address 표현이며, acquire가
-              `operation_generation`을 checked 증가시킨 뒤 storage/scratch와 함께 seal한다. blocker snapshot은
+              `operation_generation`을 checked 증가시킨 뒤 lease와 겹치지 않는 storage/scratch의 정확한
+              address·length까지 함께 seal한다. blocker snapshot은
               acquired lease 아래에서만 만들고 parser 첫 readiness/outcome 직전에 exact once
               `validateAndConsumeInheritedSnapshot`으로 재검증한다. 이 검증은 storage/lease/operation generation,
-              owner incarnation, screen pending summary seal, metadata scalar seal, resize seal, authority seal과
+              owner incarnation, screen pending summary seal, `MetadataPendingSummarySeal`, resize seal, authority seal과
               generation, live screen FIFO seal/head/len을 다시 비교한다. copied/moved/stale/double/cross-storage/cross-turn snapshot은
               parser/socket/ledger mutation 0으로 terminal이다. blocker=true snapshot도 consumer wake 관측값일 뿐
               owner clear/release permit이 아니다.
+              process-thread에는 canonical lease final address와 generation을 별도 private authority로 보존한다.
+              copied/cross-storage/double release는 이를 해제하지 않는다. descriptor가 온전한 canonical lease에서
+              turn 중 terminal로 전환됐으면 기존 terminal reason/disposition을 보존하고 lease를 released tombstone으로
+              소비한다. canonical lease 자체가 손상됐으면 outer release는 손상 판정 뒤 lease를 다시 읽지 않고
+              storage를 invariant-terminal로 봉인한 뒤 thread-local reservation을 해제해 canonical teardown을
+              가능하게 한다. descriptor가 온전해도 storage saved-self/lifecycle이 drift했거나 semantic tag가
+              active/terminal이 아니면 private canonical storage address와 acquire 시 증명한 `.live`를 복원하고
+              lease를 aborted tombstone으로 소비한 뒤
+              같은 invariant-terminal cleanup 경로를 연다. scratch는 storage뿐 아니라 ledger, committed screen, metadata, Client/take의 모든
+              owned backing과 disjoint해야 하며 snapshot 같은 turn output은 봉인된 scratch의 checked subrange여야 한다.
 
               committed screen hot path는 token/backing 4,096개를 매 turn 순회하지 않는다.
               `ScreenPendingSummarySeal`은 committed publish와 `consumeScreenRetained`의 no-callback suffix에서만
-              generation을 증가시켜 reseal하며 `retained_count != 0`을 O(1)로 증명한다. metadata는 기존 sealed
-              `current.pending`, resize는 `OwnerResizeSeal.pending`, authority는 `OwnerAuthoritySeal`의 generation과
+              generation을 증가시켜 reseal하며 `retained_count != 0`을 O(1)로 증명한다. metadata는
+              `MetadataPendingSummarySeal`, resize는 `OwnerResizeSeal.pending`, authority는 `OwnerAuthoritySeal`의 generation과
               flow를 각각 held-lease private leaf로 검증한다. raw owner field를 generic public peek로 노출하거나
               기존 consumer/projector 대신 d2가 retire하는 경로는 없다.
               summary는 storage 초기화와 모든 prepare/failpoint에서 canonical empty다. adopted backlog commit 때
@@ -5652,6 +5677,17 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
               teardown/typed cleanup이 시작되면 기존 generation을 다시 유효하게 만들지 않는 canonical tombstone으로
               전이한다. cleanup 실패도 이전 committed seal을 남기지 않는다. `CommittedScreenBacklog`의 lifecycle과
               summary lifecycle이 어긋나면 inherited snapshot 생성 자체가 terminal이다.
+              metadata pending seal도 같은 no-fail adoption suffix에서 bind하고 기존 metadata projector의
+              callback-free consume suffix에서만 generation을 증가시킨다. payload backing은 복제하거나 매 turn
+              hash하지 않으며 revision/pending/support scalar만 O(1)로 재검증한다.
+
+              **d2b1 구현 완료:** pure policy는 terminal/deadline을 inherited blocker보다 먼저 판정하고 blocker가
+              있으면 parser/socket/lower-authority mutation 없이 `inherited_work_ready`만 반환한다.
+              `parserReadiness`는 sealed provenance의 empty·1/31-byte partial·32-byte header·payload 완성/오류를
+              consume/allocation 없이 분류한다. final-address whole-turn lease, copied/moved/stale/double snapshot
+              거부, screen/metadata O(1) pending seal의 adoption·consume·teardown lifecycle을
+              Debug/ReleaseFast `test-session-host`가 고정한다. d2b2·d2b3가 남아 있으므로 d2b 전체는 여전히
+              계획 상태다.
 
               `LivePartialBatch`는 `ExternalPumpStorage`의 persistent single owner이며 turn scratch에 저장하지 않는다.
               완성된 live screen batch는 adoption 전용 backing에 억지로 append하지 않는다.
@@ -5992,7 +6028,7 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
               ) client_pump.TurnResult;
               ```
 
-              acquire 실패는 pristine lease out을 `.aborted` tombstone으로 만들고 global lease를 보존하지 않는다.
+              acquire 실패는 pristine lease out의 `.empty`를 mutation 없이 보존하고 global lease를 잡지 않는다.
               성공 lease는 outer defer의 `releaseWholeTurnLease` 하나만 `.released`로 전이하며 copied/moved/double
               release는 storage/global lease mutation 0이다.
 

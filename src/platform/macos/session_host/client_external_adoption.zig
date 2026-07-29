@@ -946,7 +946,18 @@ pub const PreparedScreenBacklog = struct {
         out_take: *PreparedCommittedScreenTake,
     ) bool {
         if (self.saved_self_address != @intFromPtr(self) or
-            !std.meta.eql(out_backlog.*, PreparedScreenBacklog{}) or
+            out_backlog.saved_self_address != 0 or
+            out_backlog.lifecycle != .empty or
+            out_backlog.inventory != null or
+            out_backlog.cleanup_inventory != null or
+            out_backlog.transfer != null or
+            out_backlog.cleanup_transfer != null or
+            out_backlog.client_disarm.saved_self_address != 0 or
+            out_backlog.client_disarm.inventory != null or
+            out_backlog.client_disarm.cleanup_inventory != null or
+            out_backlog.seed_plan.saved_self_addr != 0 or
+            out_backlog.seed_plan.entries.len != 0 or
+            out_backlog.seed_plan.cleanup_entries.len != 0 or
             !out_take.isEmpty())
             return false;
         const source_addr = @intFromPtr(self);

@@ -730,6 +730,7 @@ pub const ExternalAdoptionCleanupScratch = struct {
         undefined,
     events: [max_pending_event_count]ExternalFrameDescriptor =
         undefined,
+    partial: ?ExternalPartialDescriptor = null,
 };
 
 pub const max_external_adoption_cleanup_scratch_bytes: usize = 512 * 1024;
@@ -738,6 +739,34 @@ comptime {
         max_external_adoption_cleanup_scratch_bytes)
         @compileError("external adoption cleanup scratch exceeds 512 KiB");
 }
+
+const ExternalRecoveryDiscardLifecycle = enum {
+    empty,
+    prepared,
+    consumed_tombstone,
+};
+
+/// Final-address, allocation-free authority for dropping inherited screen/event queues while
+/// preserving the connection, parser, and external-mode transport.
+pub const ExternalRecoveryDiscardSeal = struct {
+    saved_self_addr: usize = 0,
+    client_addr: usize = 0,
+    scratch_addr: usize = 0,
+    allocator: std.mem.Allocator = std.heap.page_allocator,
+    batches: std.ArrayListUnmanaged(StreamBatch) = .empty,
+    stream: std.ArrayListUnmanaged(framing.Frame) = .empty,
+    events: std.ArrayListUnmanaged(BufferedEvent) = .empty,
+    partial: ?ExternalAdoptionTakenPartial = null,
+    pending_batch_bytes: usize = 0,
+    pending_stream_bytes: usize = 0,
+    pending_event_bytes: usize = 0,
+    next_request_id: u64 = 0,
+    lifecycle: ExternalRecoveryDiscardLifecycle = .empty,
+
+    pub fn isEmpty(self: *const ExternalRecoveryDiscardSeal) bool {
+        return self.lifecycle == .empty;
+    }
+};
 
 /// Final-address owner prepared before the ledger commit barrier.
 ///
@@ -3681,6 +3710,216 @@ pub const Client = struct {
             .attachment_capabilities = self.attachment_capabilities,
             .metadata_support = self.metadata_support,
         };
+    }
+
+    /// Freezes every inherited queue payload into caller-owned fixed scratch without allocating,
+    /// invoking callbacks, or mutating the Client.
+    pub fn prepareExternalRecoveryDiscard(
+        self: *const Client,
+        target_stream: u64,
+        cleanup_scratch: *ExternalAdoptionCleanupScratch,
+        source_scratch: *ExternalSourceOwnerRangeScratch,
+        out: *ExternalRecoveryDiscardSeal,
+    ) ExternalSourceSealError!void {
+        if (!out.isEmpty() or
+            externalRangesOverlap(
+                externalRangeOfValue(out),
+                externalRangeOfValue(cleanup_scratch),
+            ))
+            return error.InvalidAlias;
+        try self.preflightExternalAdoptionDestinationWithScratch(
+            cleanup_scratch,
+            @sizeOf(ExternalAdoptionCleanupScratch),
+            source_scratch,
+        );
+        try self.preflightExternalAdoptionDestinationWithScratch(
+            out,
+            @sizeOf(ExternalRecoveryDiscardSeal),
+            source_scratch,
+        );
+        _ = validateExternalAdoptionClient(
+            self,
+            target_stream,
+            .{
+                .owner_aliases = .skip,
+                .request_id = .allow_zero,
+            },
+        ) catch |err| return narrowExternalSourceSealError(err);
+        if (self.pending_batches.items.len > cleanup_scratch.batches.len or
+            self.pending_stream.items.len > cleanup_scratch.stream.len or
+            self.pending_events.items.len > cleanup_scratch.events.len)
+            return error.InvalidClientState;
+
+        for (self.pending_batches.items, 0..) |batch, index| {
+            cleanup_scratch.batches[index] = .{
+                .stream_id = batch.stream_id,
+                .is_snapshot = batch.is_snapshot,
+                .bytes_address = externalSliceAddress(batch.bytes),
+                .bytes_len = batch.bytes.len,
+                .allocator = batch.allocator,
+            };
+        }
+        for (self.pending_stream.items, 0..) |frame, index| {
+            cleanup_scratch.stream[index] = .{
+                .header = frame.header,
+                .payload_address = externalSliceAddress(frame.payload),
+                .payload_len = frame.payload.len,
+            };
+        }
+        for (self.pending_events.items, 0..) |frame, index| {
+            cleanup_scratch.events[index] = .{
+                .header = frame.header,
+                .payload_address = externalSliceAddress(frame.payload),
+                .payload_len = frame.payload.len,
+            };
+        }
+        cleanup_scratch.partial = if (self.partial_batch) |partial| .{
+            .stream_id = partial.stream_id,
+            .is_snapshot = partial.is_snapshot,
+            .bytes = externalArrayDescriptor(partial.bytes),
+            .chunk_count = partial.chunk_count,
+        } else null;
+        out.* = .{
+            .saved_self_addr = @intFromPtr(out),
+            .client_addr = @intFromPtr(self),
+            .scratch_addr = @intFromPtr(cleanup_scratch),
+            .allocator = self.allocator,
+            .batches = self.pending_batches,
+            .stream = self.pending_stream,
+            .events = self.pending_events,
+            .partial = if (self.partial_batch) |partial| .{
+                .stream_id = partial.stream_id,
+                .is_snapshot = partial.is_snapshot,
+                .bytes = partial.bytes,
+                .chunk_count = partial.chunk_count,
+            } else null,
+            .pending_batch_bytes = self.pending_batch_bytes,
+            .pending_stream_bytes = self.pending_stream_bytes,
+            .pending_event_bytes = self.pending_event_bytes,
+            .next_request_id = self.next_request_id,
+            .lifecycle = .prepared,
+        };
+    }
+
+    pub fn validateExternalRecoveryDiscard(
+        self: *const Client,
+        seal: *const ExternalRecoveryDiscardSeal,
+        cleanup_scratch: *const ExternalAdoptionCleanupScratch,
+    ) bool {
+        if (seal.lifecycle != .prepared or
+            seal.saved_self_addr != @intFromPtr(seal) or
+            seal.client_addr != @intFromPtr(self) or
+            seal.scratch_addr != @intFromPtr(cleanup_scratch) or
+            !std.meta.eql(seal.allocator, self.allocator) or
+            !std.meta.eql(seal.batches, self.pending_batches) or
+            !std.meta.eql(seal.stream, self.pending_stream) or
+            !std.meta.eql(seal.events, self.pending_events) or
+            seal.pending_batch_bytes != self.pending_batch_bytes or
+            seal.pending_stream_bytes != self.pending_stream_bytes or
+            seal.pending_event_bytes != self.pending_event_bytes or
+            seal.next_request_id != self.next_request_id or
+            self.pending_batches.items.len > cleanup_scratch.batches.len or
+            self.pending_stream.items.len > cleanup_scratch.stream.len or
+            self.pending_events.items.len > cleanup_scratch.events.len)
+            return false;
+        if (!std.meta.eql(seal.partial, if (self.partial_batch) |partial|
+            ExternalAdoptionTakenPartial{
+                .stream_id = partial.stream_id,
+                .is_snapshot = partial.is_snapshot,
+                .bytes = partial.bytes,
+                .chunk_count = partial.chunk_count,
+            }
+        else
+            null) or
+            !std.meta.eql(cleanup_scratch.partial, if (self.partial_batch) |partial|
+                ExternalPartialDescriptor{
+                    .stream_id = partial.stream_id,
+                    .is_snapshot = partial.is_snapshot,
+                    .bytes = externalArrayDescriptor(partial.bytes),
+                    .chunk_count = partial.chunk_count,
+                }
+            else
+                null))
+            return false;
+        for (self.pending_batches.items, 0..) |batch, index| {
+            if (!std.meta.eql(cleanup_scratch.batches[index], ExternalBatchDescriptor{
+                .stream_id = batch.stream_id,
+                .is_snapshot = batch.is_snapshot,
+                .bytes_address = externalSliceAddress(batch.bytes),
+                .bytes_len = batch.bytes.len,
+                .allocator = batch.allocator,
+            })) return false;
+        }
+        for (self.pending_stream.items, 0..) |frame, index| {
+            if (!std.meta.eql(cleanup_scratch.stream[index], ExternalFrameDescriptor{
+                .header = frame.header,
+                .payload_address = externalSliceAddress(frame.payload),
+                .payload_len = frame.payload.len,
+            })) return false;
+        }
+        for (self.pending_events.items, 0..) |frame, index| {
+            if (!std.meta.eql(cleanup_scratch.events[index], ExternalFrameDescriptor{
+                .header = frame.header,
+                .payload_address = externalSliceAddress(frame.payload),
+                .payload_len = frame.payload.len,
+            })) return false;
+        }
+        return true;
+    }
+
+    /// Requires a successful adjacent `validateExternalRecoveryDiscard`. This suffix tombstones
+    /// every mutable queue header before the first allocator callback and never rereads an element.
+    pub fn commitExternalRecoveryDiscardUnchecked(
+        self: *Client,
+        seal: *ExternalRecoveryDiscardSeal,
+        cleanup_scratch: *ExternalAdoptionCleanupScratch,
+    ) void {
+        // Copy every payload descriptor before the first allocator callback. Callbacks may know
+        // and mutate the caller-owned scratch address; the suffix therefore never rereads that
+        // memory after cleanup begins.
+        const frozen = cleanup_scratch.*;
+        const allocator = seal.allocator;
+        var batches = seal.batches;
+        var stream = seal.stream;
+        var events = seal.events;
+        const partial = frozen.partial;
+        const batch_count = batches.items.len;
+        const stream_count = stream.items.len;
+        const event_count = events.items.len;
+        seal.* = .{ .lifecycle = .consumed_tombstone };
+        self.pending_batches = .empty;
+        self.pending_stream = .empty;
+        self.pending_events = .empty;
+        self.partial_batch = null;
+        self.pending_batch_bytes = 0;
+        self.pending_stream_bytes = 0;
+        self.pending_event_bytes = 0;
+        self.next_request_id = 0;
+
+        for (frozen.batches[0..batch_count]) |descriptor|
+            descriptor.allocator.free(externalOwnedBytes(
+                descriptor.bytes_address,
+                descriptor.bytes_len,
+            ));
+        for (frozen.stream[0..stream_count]) |descriptor|
+            allocator.free(externalOwnedBytes(
+                descriptor.payload_address,
+                descriptor.payload_len,
+            ));
+        for (frozen.events[0..event_count]) |descriptor|
+            allocator.free(externalOwnedBytes(
+                descriptor.payload_address,
+                descriptor.payload_len,
+            ));
+        if (partial) |descriptor|
+            allocator.free(externalOwnedBytes(
+                descriptor.bytes.address,
+                descriptor.bytes.capacity,
+            ));
+        batches.deinit(allocator);
+        stream.deinit(allocator);
+        events.deinit(allocator);
+        cleanup_scratch.partial = null;
     }
 
     /// Complete every fallible operation without mutating the source Client or destination slot.
@@ -9500,6 +9739,113 @@ fn appendExternalTakeQueueFixture(
         });
         client.pending_event_bytes += payload.len;
     }
+}
+
+test "external recovery discard freezes queues and preserves transport owners" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var counting = FreeCountingAllocator{ .parent = std.testing.allocator };
+    const allocator = counting.allocator();
+    var fds: [2]c.fd_t = undefined;
+    try std.testing.expectEqual(
+        @as(c_int, 0),
+        c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds),
+    );
+    defer _ = c.close(fds[1]);
+    var client = makeConnectedTestClient(allocator, fds[0]);
+    defer client.deinit();
+    try client.enterExternalMode();
+    client.ownership = .external_pump;
+    client.connection_profile = .cli_attach;
+    client.compatibility_profile = compatibility.profileForMajor(protocol.version_major).?;
+    client.next_request_id = 91;
+
+    const batch_bytes = try allocator.dupe(u8, "batch");
+    try client.pending_batches.append(allocator, .{
+        .is_snapshot = false,
+        .stream_id = 7,
+        .bytes = batch_bytes,
+        .allocator = allocator,
+    });
+    client.pending_batch_bytes = batch_bytes.len;
+    const second_batch_bytes = try allocator.dupe(u8, "batch-2");
+    try client.pending_batches.append(allocator, .{
+        .is_snapshot = false,
+        .stream_id = 7,
+        .bytes = second_batch_bytes,
+        .allocator = allocator,
+    });
+    client.pending_batch_bytes += second_batch_bytes.len;
+    const stream_bytes = try allocator.dupe(u8, "frame");
+    try client.pending_stream.append(allocator, .{
+        .header = .{
+            .kind = .delta_chunk,
+            .stream_id = 7,
+            .payload_len = @intCast(stream_bytes.len),
+            .flags = protocol.Flags.end_stream,
+        },
+        .payload = stream_bytes,
+    });
+    client.pending_stream_bytes = stream_bytes.len;
+    const event_bytes = try allocator.dupe(u8, "{}");
+    try client.pending_events.append(allocator, .{
+        .header = .{
+            .kind = .event,
+            .stream_id = 7,
+            .payload_len = @intCast(event_bytes.len),
+        },
+        .payload = event_bytes,
+    });
+    client.pending_event_bytes = event_bytes.len;
+    var partial_bytes: std.ArrayListUnmanaged(u8) = .empty;
+    try partial_bytes.appendSlice(allocator, "partial");
+    client.partial_batch = .{
+        .stream_id = 7,
+        .is_snapshot = false,
+        .bytes = partial_bytes,
+        .chunk_count = 1,
+    };
+
+    const fd_before = client.fd;
+    const parser_before = client.parser.buf.items.ptr;
+    var cleanup_scratch: ExternalAdoptionCleanupScratch = undefined;
+    var source_scratch: ExternalSourceOwnerRangeScratch = .{};
+    var seal: ExternalRecoveryDiscardSeal = .{};
+    try client.prepareExternalRecoveryDiscard(
+        7,
+        &cleanup_scratch,
+        &source_scratch,
+        &seal,
+    );
+    counting.mutate_on_free_a = &cleanup_scratch.batches[1].bytes_address;
+    counting.mutate_on_free_b = &cleanup_scratch.stream[0].payload_address;
+    counting.mutate_allocator_on_free_a = &cleanup_scratch.batches[1].allocator;
+    counting.mutation_allocator = std.heap.page_allocator;
+    counting.mutation_value = 1;
+    try std.testing.expect(client.validateExternalRecoveryDiscard(
+        &seal,
+        &cleanup_scratch,
+    ));
+    client.commitExternalRecoveryDiscardUnchecked(
+        &seal,
+        &cleanup_scratch,
+    );
+    try std.testing.expect(counting.mutation_fired);
+
+    try std.testing.expectEqual(fd_before, client.fd);
+    try std.testing.expectEqual(parser_before, client.parser.buf.items.ptr);
+    try std.testing.expect(client.io_mode == .external);
+    try std.testing.expectEqual(@as(usize, 0), client.pending_batches.capacity);
+    try std.testing.expectEqual(@as(usize, 0), client.pending_stream.capacity);
+    try std.testing.expectEqual(@as(usize, 0), client.pending_events.capacity);
+    try std.testing.expect(client.partial_batch == null);
+    try std.testing.expectEqual(@as(usize, 0), client.pending_batch_bytes);
+    try std.testing.expectEqual(@as(usize, 0), client.pending_stream_bytes);
+    try std.testing.expectEqual(@as(usize, 0), client.pending_event_bytes);
+    try std.testing.expectEqual(@as(u64, 0), client.next_request_id);
+    try std.testing.expect(!client.validateExternalRecoveryDiscard(
+        &seal,
+        &cleanup_scratch,
+    ));
 }
 
 test "external adoption cleanup scratch freezes every descriptor past old chunk boundaries" {

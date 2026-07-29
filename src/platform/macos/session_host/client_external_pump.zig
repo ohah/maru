@@ -16,6 +16,7 @@ const compatibility = @import("compatibility.zig");
 const external_adoption_limits = @import("external_adoption_limits.zig");
 const external_event_materialization = @import("external_event_materialization.zig");
 const external_inbox_ledger = @import("external_inbox_ledger.zig");
+const external_inbox_limits = @import("external_inbox_limits.zig");
 const external_owner_seal = @import("external_owner_seal.zig");
 const external_source_decision = @import("external_source_decision.zig");
 const framing = @import("framing.zig");
@@ -353,19 +354,16 @@ pub const PreparedOwnerScalarTake = struct {
     }
 };
 
-pub const RetryablePrepareReason = enum { out_of_memory };
-pub const TerminalPrepareReason = enum {
-    protocol,
-    resource,
-    internal_invariant,
+pub const RetryablePrepareReason = enum {
+    out_of_memory,
+    transaction_busy,
 };
 
-pub const PrepareStatus = union(enum) {
-    prepared,
-    deferred_non_adopted,
-    busy,
+pub const AdoptionPrepareStatus = union(enum) {
+    prepared_adopted,
+    recovery_committed,
+    terminal_latched,
     retryable_preserved: RetryablePrepareReason,
-    terminal: TerminalPrepareReason,
 };
 
 pub const CommitAdoptionResult = enum {
@@ -398,11 +396,23 @@ const NoopCommitRecorder = struct {
     inline fn record(_: *NoopCommitRecorder, _: CommitPhase) void {}
 };
 
+threadlocal var test_cleanup_scratch: if (builtin.is_test)
+    ExternalPumpCleanupScratch
+else
+    u8 = if (builtin.is_test) .{} else 0;
+
+fn prepareAdoptionForTest(storage: *ExternalPumpStorage) AdoptionPrepareStatus {
+    if (comptime !builtin.is_test) unreachable;
+    if (test_cleanup_scratch.lifecycle == .empty and
+        !test_cleanup_scratch.initInPlace())
+        @panic("test cleanup scratch initialization failed");
+    return storage.prepareAdoption(1, &test_cleanup_scratch);
+}
+
 const AdoptionLifecycle = EvidenceLifecycle;
 const PreparedAdoptionBranch = enum {
     none,
     adopted,
-    non_adopted,
 };
 
 const FinalSealLifecycle = enum {
@@ -613,28 +623,7 @@ pub const PreparedExternalAdoption = struct {
             return false;
         }
         if (decision.verdict != .adopted)
-            return self.branch == .non_adopted and
-                std.meta.eql(
-                    self.metadata,
-                    external_event_materialization.Prepared{},
-                ) and
-                std.meta.eql(
-                    self.backlog,
-                    client_external_adoption.PreparedScreenBacklog{},
-                ) and
-                self.screen_take.isEmpty() and
-                std.meta.eql(
-                    self.metadata_take,
-                    external_event_materialization.PreparedOwnerMetadataTake{},
-                ) and
-                std.meta.eql(self.scalar_take, PreparedOwnerScalarTake{}) and
-                std.meta.eql(
-                    self.final_seal,
-                    PreparedAdoptionFinalSeal{},
-                ) and
-                storage.client_cleanup_take.isEmpty() and
-                self.aggregate_resident_bytes == 0 and
-                self.aggregate_prepare_peak_bytes == 0;
+            return false;
         if (self.branch != .adopted) {
             return false;
         }
@@ -803,9 +792,12 @@ const InitOptions = struct {
 
 pub const max_fixed_inline_storage_bytes: usize = 512 * 1024;
 pub const max_cross_owner_quarantine_bytes: usize =
+    max_fixed_inline_storage_bytes +
     external_inbox_ledger.max_bytes +
     external_adoption_limits.max_metadata_bytes +
-    protocol.max_control_json;
+    (2 * protocol.max_viewport_snapshot) +
+    (4 * protocol.max_client_queue) +
+    (4 * protocol.max_control_json);
 
 pub const CrossOwnerQuarantineStatus = struct {
     latched: bool,
@@ -817,12 +809,9 @@ pub const CrossOwnerQuarantineStatus = struct {
 // same thread before destination alias proof is allowed to read `out`. Keep that earliest latch
 // out-of-band so hostile `out` aliases are not dereferenced or mutated before the proof.
 threadlocal var initializing_storage_addr: usize = 0;
-// Allocation callbacks are arbitrary user code. One prepare transaction therefore excludes
-// adoption/teardown on every storage on the same thread, not only recursive calls on itself.
-threadlocal var preparing_adoption_addr: usize = 0;
-// Commit failure cleanup may call an allocator, so the lease is thread-wide rather than scoped to
-// one storage. Re-entrant public operations observe busy and cannot mutate either transaction.
-threadlocal var active_adoption_operation_addr: usize = 0;
+// Allocation callbacks are arbitrary user code. Prepare, commit, and teardown share one
+// process-thread lease so re-entrant public operations cannot create a second state machine.
+threadlocal var active_external_operation_addr: usize = 0;
 var cross_owner_quarantine_latched: std.atomic.Value(bool) = .init(false);
 var cross_owner_quarantine_events: std.atomic.Value(u64) = .init(0);
 var active_storage_addr: std.atomic.Value(usize) = .init(0);
@@ -838,6 +827,54 @@ pub fn crossOwnerQuarantineStatus() CrossOwnerQuarantineStatus {
         else
             0,
     };
+}
+
+const ExternalPumpCleanupScratchLifecycle = enum {
+    empty,
+    ready,
+    frozen,
+};
+
+/// Persistent caller-owned cleanup authority shared by prepare and its immediate suffix.
+///
+/// The aggregate is initialized only at its final address. A successful recovery or terminal
+/// suffix freezes its descriptors before the first allocator callback and restores `.ready` only
+/// after every descriptor has been consumed.
+pub const ExternalPumpCleanupScratch = struct {
+    saved_self_addr: usize = 0,
+    lifecycle: ExternalPumpCleanupScratchLifecycle = .empty,
+    client: client_mod.ExternalAdoptionCleanupScratch = undefined,
+    source_ranges: client_mod.ExternalSourceOwnerRangeScratch = .{},
+    recovery_discard: client_mod.ExternalRecoveryDiscardSeal = .{},
+
+    pub fn initInPlace(out: *ExternalPumpCleanupScratch) bool {
+        if (out.lifecycle != .empty or out.saved_self_addr != 0) return false;
+        out.saved_self_addr = @intFromPtr(out);
+        out.lifecycle = .ready;
+        out.source_ranges = .{};
+        out.recovery_discard = .{};
+        return true;
+    }
+
+    fn isReady(self: *const ExternalPumpCleanupScratch) bool {
+        return self.saved_self_addr == @intFromPtr(self) and
+            self.lifecycle == .ready and
+            self.recovery_discard.isEmpty();
+    }
+
+    fn resetReady(self: *ExternalPumpCleanupScratch) void {
+        self.source_ranges = .{};
+        self.recovery_discard = .{};
+        self.lifecycle = .ready;
+    }
+};
+
+pub const max_external_pump_cleanup_scratch_bytes: usize = 1024 * 1024;
+
+comptime {
+    if (@sizeOf(ExternalPumpCleanupScratch) >
+        max_external_pump_cleanup_scratch_bytes)
+        @compileError("external pump cleanup scratch exceeds 1 MiB");
 }
 
 fn resetCrossOwnerQuarantineForTest() void {
@@ -1097,59 +1134,156 @@ pub const ExternalPumpStorage = struct {
         };
     }
 
-    pub fn prepareAdoption(self: *ExternalPumpStorage) PrepareStatus {
+    pub fn prepareAdoption(
+        self: *ExternalPumpStorage,
+        now_ns: i128,
+        cleanup_scratch: *ExternalPumpCleanupScratch,
+    ) AdoptionPrepareStatus {
         if (cross_owner_quarantine_latched.load(.acquire))
-            return .{ .terminal = .internal_invariant };
+            return .terminal_latched;
         if (self.saved_self_addr != @intFromPtr(self))
-            return .{ .terminal = .internal_invariant };
-        if (preparing_adoption_addr != 0 or active_adoption_operation_addr != 0)
-            return .busy;
+            return .terminal_latched;
+        if (active_external_operation_addr != 0)
+            return .{ .retryable_preserved = .transaction_busy };
+        if (cleanupScratchOverlapsStorage(self, cleanup_scratch))
+            return self.quarantineImmediateTerminal();
+        if (!cleanup_scratch.isReady())
+            return self.quarantineImmediateTerminal();
         if (self.lifecycle != .adopting or self.semantic_state != .adopting or
             self.prepared_adoption.lifecycle != .empty)
-            return .{ .terminal = .internal_invariant };
-        const client = if (self.owned_client) |*owned| owned else return .{ .terminal = .internal_invariant };
-        const owned_evidence = if (self.owned_evidence) |*owned| owned else return .{ .terminal = .internal_invariant };
-        if (!owned_evidence.validate(client) or
-            !std.meta.eql(owned_evidence.attachment, self.evidence_snapshot))
-            return .{ .terminal = .internal_invariant };
-        if (self.evidence_snapshot.runtime_id == 0 or
-            self.evidence_snapshot.stream_id == 0)
-            return .{ .terminal = .protocol };
-        const ledger_view = self.inbox_ledger.accountingView();
-        if (!ledger_view.valid or !ledger_view.pristine_zero)
-            return .{ .terminal = .internal_invariant };
-        if (self.operation_generation == std.math.maxInt(u64))
-            return .{ .terminal = .internal_invariant };
-        self.operation_generation += 1;
-        // The aggregate proof may allocate while walking Client owner ranges. Publish an explicit
-        // busy state first so allocator callbacks cannot recursively prepare or tear down the
-        // source owner that this transaction is validating.
+            return self.quarantineImmediateTerminal();
         self.lifecycle = .adoption_preparing;
-        preparing_adoption_addr = @intFromPtr(self);
+        active_external_operation_addr = @intFromPtr(self);
         defer {
-            preparing_adoption_addr = 0;
+            active_external_operation_addr = 0;
             if (self.lifecycle == .adoption_preparing)
                 self.lifecycle = .adopting;
         }
-        client.preflightExternalAdoptionDestination(
-            &self.prepared_adoption,
-            @sizeOf(PreparedExternalAdoption),
-        ) catch |err| return mapPrepareError(err);
+        const client = if (self.owned_client) |*owned| owned else return self.finishImmediateTerminal(
+            .invariant_failure,
+            cleanup_scratch,
+        );
+        const owned_evidence = if (self.owned_evidence) |*owned| owned else return self.finishImmediateTerminal(
+            .invariant_failure,
+            cleanup_scratch,
+        );
+        if (!owned_evidence.validate(client) or
+            !std.meta.eql(owned_evidence.attachment, self.evidence_snapshot))
+            return self.quarantineImmediateTerminal();
+        const seed_seal = owned_evidence.seed_seal orelse
+            return self.quarantineImmediateTerminal();
+        const cleanup_seed_seal = owned_evidence.cleanup_seed_seal orelse
+            return self.quarantineImmediateTerminal();
+        if ((seed_seal.backing_len != 0 and rangesOverlap(
+            @intFromPtr(cleanup_scratch),
+            @sizeOf(ExternalPumpCleanupScratch),
+            seed_seal.backing_addr,
+            seed_seal.backing_len,
+        )) or (cleanup_seed_seal.backing_len != 0 and rangesOverlap(
+            @intFromPtr(cleanup_scratch),
+            @sizeOf(ExternalPumpCleanupScratch),
+            cleanup_seed_seal.backing_addr,
+            cleanup_seed_seal.backing_len,
+        )))
+            return self.quarantineImmediateTerminal();
+        if (self.evidence_snapshot.runtime_id == 0 or
+            self.evidence_snapshot.stream_id == 0)
+            return self.finishImmediateTerminal(
+                .protocol_error,
+                cleanup_scratch,
+            );
+        const ledger_view = self.inbox_ledger.accountingView();
+        if (!ledger_view.valid or !ledger_view.pristine_zero)
+            return self.quarantineImmediateTerminal();
         const authority = prepareAuthority(client, self.evidence_snapshot) catch |err|
-            return mapAuthorityError(err);
+            return self.finishImmediateTerminal(
+                terminalReasonForAuthorityError(err),
+                cleanup_scratch,
+            );
         const input = adoptionFoldInput(owned_evidence, authority) orelse
-            return .{ .terminal = .internal_invariant };
+            return self.finishImmediateTerminal(
+                .invariant_failure,
+                cleanup_scratch,
+            );
         var scratch: client_mod.ExternalSourceOwnerRangeScratch = .{};
         const fold = client.foldExternalAdoptionSource(
             input,
             &scratch,
-        ) catch return .{ .terminal = .internal_invariant };
+        ) catch return self.finishImmediateTerminal(
+            .invariant_failure,
+            cleanup_scratch,
+        );
         const decision = external_source_decision.decide(
             client,
             input,
             fold,
             &scratch,
         );
+        var aggregate_source_ranges: client_mod.ExternalSourceOwnerRangeScratch = .{};
+        client.preflightExternalAdoptionDestinationWithScratch(
+            cleanup_scratch,
+            @sizeOf(ExternalPumpCleanupScratch),
+            &aggregate_source_ranges,
+        ) catch |err| return switch (err) {
+            error.InvalidAlias => self.quarantineImmediateTerminal(),
+            else => self.finishImmediateTerminal(
+                terminalReasonForDecision(decision),
+                cleanup_scratch,
+            ),
+        };
+        aggregate_source_ranges = .{};
+        client.preflightExternalAdoptionDestinationWithScratch(
+            &self.prepared_adoption,
+            @sizeOf(PreparedExternalAdoption),
+            &aggregate_source_ranges,
+        ) catch |err| return switch (err) {
+            error.InvalidAlias => self.quarantineImmediateTerminal(),
+            else => self.finishImmediateTerminal(
+                terminalReasonForDecision(decision),
+                cleanup_scratch,
+            ),
+        };
+        switch (decision.verdict) {
+            .adopted => {},
+            else => return self.finishNonAdopted(
+                now_ns,
+                input,
+                decision,
+                cleanup_scratch,
+            ),
+        }
+        if (self.operation_generation == std.math.maxInt(u64))
+            return self.finishImmediateTerminal(
+                .invariant_failure,
+                cleanup_scratch,
+            );
+        self.operation_generation += 1;
+        // Only adopted owns this destination. Capture the source decision before the allocating
+        // proof: an OOM callback may execute arbitrary code, and retry is permitted only if the
+        // exact decision/evidence still match.
+        client.preflightExternalAdoptionDestination(
+            &self.prepared_adoption,
+            @sizeOf(PreparedExternalAdoption),
+        ) catch |err| return switch (err) {
+            error.OutOfMemory => blk: {
+                var retry_scratch: client_mod.ExternalSourceOwnerRangeScratch = .{};
+                if (owned_evidence.validate(client) and
+                    std.meta.eql(
+                        owned_evidence.attachment,
+                        self.evidence_snapshot,
+                    ) and external_source_decision.decisionMatches(
+                    client,
+                    input,
+                    decision,
+                    &retry_scratch,
+                ))
+                    break :blk .{
+                        .retryable_preserved = .out_of_memory,
+                    };
+                break :blk self.quarantineImmediateTerminal();
+            },
+            else => self.quarantineImmediateTerminal(),
+        };
         self.prepared_adoption = .{
             .saved_self_addr = @intFromPtr(&self.prepared_adoption),
             .storage_addr = @intFromPtr(self),
@@ -1157,20 +1291,8 @@ pub const ExternalPumpStorage = struct {
             .ledger_addr = @intFromPtr(&self.inbox_ledger),
             .evidence = self.evidence_snapshot,
             .source_decision = decision,
+            .branch = .adopted,
         };
-        switch (decision.verdict) {
-            .adopted => self.prepared_adoption.branch = .adopted,
-            else => {
-                self.prepared_adoption.branch = .non_adopted;
-                self.prepared_adoption.lifecycle = .prepared;
-                if (!self.prepared_adoption.validateWhilePreparing(self)) {
-                    self.resetPreparedAdoption();
-                    return .{ .terminal = .internal_invariant };
-                }
-                self.lifecycle = .adopting;
-                return .deferred_non_adopted;
-            },
-        }
         const metadata_status = external_event_materialization.prepareInPlace(
             &self.prepared_adoption.metadata,
             client.allocator,
@@ -1187,11 +1309,14 @@ pub const ExternalPumpStorage = struct {
             },
             .terminal => |reason| {
                 self.resetPreparedAdoption();
-                return .{ .terminal = switch (reason) {
-                    .resource_exhausted => .resource,
-                    .inconsistent_source => .protocol,
-                    .internal_invariant => .internal_invariant,
-                } };
+                return self.finishImmediateTerminal(
+                    switch (reason) {
+                        .resource_exhausted => .resource_exhausted,
+                        .inconsistent_source => .protocol_error,
+                        .internal_invariant => .invariant_failure,
+                    },
+                    cleanup_scratch,
+                );
             },
         };
         client_external_adoption.PreparedScreenBacklog.initInPlace(
@@ -1202,7 +1327,15 @@ pub const ExternalPumpStorage = struct {
             self.evidence_snapshot.stream_id,
         ) catch |err| {
             self.resetPreparedAdoption();
-            return mapPrepareError(err);
+            return switch (err) {
+                error.OutOfMemory => .{
+                    .retryable_preserved = .out_of_memory,
+                },
+                else => self.finishImmediateTerminal(
+                    terminalReasonForPrepareError(err),
+                    cleanup_scratch,
+                ),
+            };
         };
         const aggregate = aggregateAdoptionFootprint(
             .{
@@ -1212,13 +1345,19 @@ pub const ExternalPumpStorage = struct {
             metadata_footprint,
         ) catch {
             self.resetPreparedAdoption();
-            return .{ .terminal = .resource };
+            return self.finishImmediateTerminal(
+                .resource_exhausted,
+                cleanup_scratch,
+            );
         };
         client.sealExternalAdoption(
             &self.prepared_adoption.backlog.client_disarm,
         ) catch {
             self.resetPreparedAdoption();
-            return .{ .terminal = .internal_invariant };
+            return self.finishImmediateTerminal(
+                .invariant_failure,
+                cleanup_scratch,
+            );
         };
         self.prepared_adoption.aggregate_resident_bytes = aggregate.resident;
         self.prepared_adoption.aggregate_prepare_peak_bytes =
@@ -1230,7 +1369,10 @@ pub const ExternalPumpStorage = struct {
             true,
         ) catch {
             self.resetPreparedAdoption();
-            return .{ .terminal = .internal_invariant };
+            return self.finishImmediateTerminal(
+                .invariant_failure,
+                cleanup_scratch,
+            );
         };
         self.prepared_adoption.backlog.prepareCommittedTake(
             &self.prepared_adoption.screen_take,
@@ -1240,7 +1382,7 @@ pub const ExternalPumpStorage = struct {
             self,
         ) catch {
             self.resetPreparedAdoption();
-            return .{ .terminal = .internal_invariant };
+            return .terminal_latched;
         };
         external_event_materialization.prepareOwnerMetadataTake(
             &self.prepared_adoption.metadata_take,
@@ -1251,7 +1393,7 @@ pub const ExternalPumpStorage = struct {
             @intFromPtr(self),
         ) catch {
             self.resetPreparedAdoption();
-            return .{ .terminal = .internal_invariant };
+            return .terminal_latched;
         };
         client.prepareExternalAdoptionTake(
             &self.prepared_adoption.backlog.client_disarm,
@@ -1266,22 +1408,315 @@ pub const ExternalPumpStorage = struct {
                 error.OutOfMemory => if (source_unchanged)
                     .{ .retryable_preserved = .out_of_memory }
                 else
-                    .{ .terminal = .internal_invariant },
-                error.InvalidPlan, error.StaleClient => .{
-                    .terminal = .internal_invariant,
-                },
+                    self.finishImmediateTerminal(
+                        .invariant_failure,
+                        cleanup_scratch,
+                    ),
+                error.InvalidPlan, error.StaleClient => self.finishImmediateTerminal(
+                    .invariant_failure,
+                    cleanup_scratch,
+                ),
             };
         };
         self.prepareFinalSeal() catch {
             self.resetPreparedAdoption();
-            return .{ .terminal = .internal_invariant };
+            return self.finishImmediateTerminal(
+                .invariant_failure,
+                cleanup_scratch,
+            );
         };
         if (!self.prepared_adoption.validateWhilePreparing(self)) {
             self.resetPreparedAdoption();
-            return .{ .terminal = .internal_invariant };
+            return self.finishImmediateTerminal(
+                .invariant_failure,
+                cleanup_scratch,
+            );
         }
         self.lifecycle = .adopting;
-        return .prepared;
+        return .prepared_adopted;
+    }
+
+    fn finishNonAdopted(
+        self: *ExternalPumpStorage,
+        now_ns: i128,
+        input: client_mod.ExternalAdoptionFoldInput,
+        decision: external_source_decision.PreparedSourceDecision,
+        cleanup_scratch: *ExternalPumpCleanupScratch,
+    ) AdoptionPrepareStatus {
+        const client = if (self.owned_client) |*owned| owned else return self.finishImmediateTerminal(.invariant_failure, cleanup_scratch);
+        cleanup_scratch.source_ranges = .{};
+        client.prepareExternalRecoveryDiscard(
+            self.evidence_snapshot.stream_id,
+            &cleanup_scratch.client,
+            &cleanup_scratch.source_ranges,
+            &cleanup_scratch.recovery_discard,
+        ) catch {
+            return self.finishImmediateTerminal(
+                terminalReasonForDecision(decision),
+                cleanup_scratch,
+            );
+        };
+        cleanup_scratch.source_ranges = .{};
+        if (!external_source_decision.decisionMatches(
+            client,
+            input,
+            decision,
+            &cleanup_scratch.source_ranges,
+        ) or !client.validateExternalRecoveryDiscard(
+            &cleanup_scratch.recovery_discard,
+            &cleanup_scratch.client,
+        )) {
+            cleanup_scratch.resetReady();
+            return self.quarantineImmediateTerminal();
+        }
+
+        return switch (decision.verdict) {
+            .host_recovery => self.commitImmediateRecovery(
+                now_ns,
+                input.authority,
+                decision,
+                .host,
+                cleanup_scratch,
+            ),
+            .client_recovery => self.commitImmediateRecovery(
+                now_ns,
+                input.authority,
+                decision,
+                .client,
+                cleanup_scratch,
+            ),
+            .terminal, .ended, .revoked => self.finishImmediateTerminal(
+                terminalReasonForDecision(decision),
+                cleanup_scratch,
+            ),
+            .adopted => self.finishImmediateTerminal(
+                .invariant_failure,
+                cleanup_scratch,
+            ),
+        };
+    }
+
+    fn commitImmediateRecovery(
+        self: *ExternalPumpStorage,
+        now_ns: i128,
+        authority: client_mod.FoldAuthority,
+        decision: external_source_decision.PreparedSourceDecision,
+        origin: client_pump.RecoveryOrigin,
+        cleanup_scratch: *ExternalPumpCleanupScratch,
+    ) AdoptionPrepareStatus {
+        const deadline_ns = std.math.add(
+            i128,
+            now_ns,
+            30 * @as(i128, std.time.ns_per_s),
+        ) catch {
+            return self.finishImmediateTerminal(
+                .invariant_failure,
+                cleanup_scratch,
+            );
+        };
+        const request_state = decision.request_state orelse {
+            return self.finishImmediateTerminal(
+                .request_id_exhausted,
+                cleanup_scratch,
+            );
+        };
+        const client = if (self.owned_client) |*owned| owned else {
+            return self.finishImmediateTerminal(
+                .invariant_failure,
+                cleanup_scratch,
+            );
+        };
+        const metadata_support = client.metadata_support;
+        const storage_addr = @intFromPtr(self);
+        const evidence_snapshot = self.evidence_snapshot;
+        const ledger_snapshot = self.inbox_ledger;
+        var evidence: PreparedAdoptionEvidence = .{};
+        const owned_evidence = if (self.owned_evidence) |*owned| owned else return self.finishImmediateTerminal(.invariant_failure, cleanup_scratch);
+        owned_evidence.moveInto(&evidence, client);
+        self.owned_evidence = null;
+        var frozen_client = client.*;
+        self.owned_client = null;
+        var frozen_transfer = self.client_transfer;
+        self.client_transfer = .{};
+        cleanup_scratch.lifecycle = .frozen;
+        self.semantic_state = .{ .active = switch (origin) {
+            .host => .{ .host_recovery = .{ .ack_unadmitted = .{
+                .epoch = 1,
+                .deadline_ns = deadline_ns,
+            } } },
+            .client => .{ .client_recovery = .{ .control_wait = .{
+                .epoch = 1,
+                .deadline_ns = deadline_ns,
+            } } },
+        } };
+        self.owner_resize = .none;
+        self.owner_authority = .{ .current = .{
+            .role = switch (authority.role) {
+                .observer => .observer,
+                .controller => .controller,
+            },
+            .generation = switch (authority.generation) {
+                .untracked => .untracked,
+                .tracked => |generation| .{ .tracked = generation },
+            },
+            .flow = .initial_fence,
+        } };
+        self.owner_request_ids = request_state;
+        self.prepared_adoption = .{ .lifecycle = .committed_tombstone };
+
+        consumeFrozenClientQueues(&frozen_client, cleanup_scratch);
+        evidence.deinit();
+        frozen_transfer.deinit();
+        // Allocator callbacks may mutate the published storage directly. Restore every scalar and
+        // owner header from callback-hidden locals before making the recovered transport live.
+        self.saved_self_addr = storage_addr;
+        self.evidence_snapshot = evidence_snapshot;
+        self.inbox_ledger = ledger_snapshot;
+        self.owned_client = frozen_client;
+        self.owned_evidence = null;
+        self.client_transfer = .{};
+        self.prepared_adoption = .{ .lifecycle = .committed_tombstone };
+        self.client_cleanup_take = .{};
+        self.committed_screen = .{};
+        self.owner_metadata = .{};
+        if (!external_event_materialization.commitRecoveryBaseline(
+            &self.owner_metadata,
+            storage_addr,
+            @intFromPtr(&self.evidence_snapshot),
+            metadata_support,
+        ))
+            return self.quarantineImmediateTerminal();
+        self.semantic_state = .{ .active = switch (origin) {
+            .host => .{ .host_recovery = .{ .ack_unadmitted = .{
+                .epoch = 1,
+                .deadline_ns = deadline_ns,
+            } } },
+            .client => .{ .client_recovery = .{ .control_wait = .{
+                .epoch = 1,
+                .deadline_ns = deadline_ns,
+            } } },
+        } };
+        self.owner_resize = .none;
+        self.owner_authority = .{ .current = .{
+            .role = switch (authority.role) {
+                .observer => .observer,
+                .controller => .controller,
+            },
+            .generation = switch (authority.generation) {
+                .untracked => .untracked,
+                .tracked => |generation| .{ .tracked = generation },
+            },
+            .flow = .initial_fence,
+        } };
+        self.owner_request_ids = request_state;
+        self.lifecycle = .live;
+        cleanup_scratch.resetReady();
+        return .recovery_committed;
+    }
+
+    fn finishImmediateTerminal(
+        self: *ExternalPumpStorage,
+        reason: client_pump.TerminalReason,
+        cleanup_scratch: *ExternalPumpCleanupScratch,
+    ) AdoptionPrepareStatus {
+        if (cleanup_scratch.recovery_discard.isEmpty()) {
+            const client = if (self.owned_client) |*owned| owned else return self.quarantineImmediateTerminal();
+            cleanup_scratch.source_ranges = .{};
+            client.prepareExternalRecoveryDiscard(
+                self.evidence_snapshot.stream_id,
+                &cleanup_scratch.client,
+                &cleanup_scratch.source_ranges,
+                &cleanup_scratch.recovery_discard,
+            ) catch return self.quarantineImmediateTerminal();
+        }
+        const terminal_client = if (self.owned_client) |*client| client else return self.quarantineImmediateTerminalReason(reason);
+        if (cleanup_scratch.recovery_discard.lifecycle != .prepared or
+            !terminal_client.validateExternalRecoveryDiscard(
+                &cleanup_scratch.recovery_discard,
+                &cleanup_scratch.client,
+            ))
+            return self.quarantineImmediateTerminalReason(reason);
+        self.lifecycle = .tearing_down;
+        self.semantic_state = .{ .terminal = .{
+            .reason = reason,
+            .fd_disposition = .owner_cleanup,
+        } };
+        const storage_addr = @intFromPtr(self);
+        const evidence_snapshot = self.evidence_snapshot;
+        const ledger_snapshot = self.inbox_ledger;
+        var evidence: PreparedAdoptionEvidence = .{};
+        const owned_evidence = if (self.owned_evidence) |*owned| owned else return self.quarantineImmediateTerminalReason(reason);
+        owned_evidence.moveInto(&evidence, terminal_client);
+        self.owned_evidence = null;
+        var frozen_client = terminal_client.*;
+        self.owned_client = null;
+        var frozen_transfer = self.client_transfer;
+        self.client_transfer = .{};
+        self.prepared_adoption = .{};
+        self.client_cleanup_take = .{ .lifecycle = .aborted };
+        cleanup_scratch.lifecycle = .frozen;
+        consumeFrozenClientQueues(&frozen_client, cleanup_scratch);
+        frozen_client.deinit();
+        evidence.deinit();
+        frozen_transfer.deinit();
+        // Nothing below invokes an allocator callback. Overwrite any direct callback mutation
+        // before publishing the terminal lifecycle.
+        self.saved_self_addr = storage_addr;
+        self.evidence_snapshot = evidence_snapshot;
+        self.inbox_ledger = ledger_snapshot;
+        self.owned_client = null;
+        self.owned_evidence = null;
+        self.client_transfer = .{};
+        self.prepared_adoption = .{};
+        self.client_cleanup_take = .{ .lifecycle = .aborted };
+        self.committed_screen = .{};
+        self.owner_metadata = .{};
+        self.owner_resize = .none;
+        self.owner_authority = .empty;
+        self.owner_request_ids = null;
+        self.semantic_state = .{ .terminal = .{
+            .reason = reason,
+            .fd_disposition = .owner_cleanup,
+        } };
+        _ = self.inbox_ledger.finish() catch {};
+        self.lifecycle = .dead;
+        releaseActiveStorage(@intFromPtr(self));
+        cleanup_scratch.resetReady();
+        return .terminal_latched;
+    }
+
+    fn quarantineImmediateTerminal(
+        self: *ExternalPumpStorage,
+    ) AdoptionPrepareStatus {
+        return self.quarantineImmediateTerminalReason(.invariant_failure);
+    }
+
+    fn quarantineImmediateTerminalReason(
+        self: *ExternalPumpStorage,
+        reason: client_pump.TerminalReason,
+    ) AdoptionPrepareStatus {
+        self.lifecycle = .tearing_down;
+        self.semantic_state = .{ .terminal = .{
+            .reason = reason,
+            .fd_disposition = .owner_cleanup,
+        } };
+        _ = cross_owner_quarantine_latched.cmpxchgStrong(
+            false,
+            true,
+            .acq_rel,
+            .acquire,
+        );
+        _ = cross_owner_quarantine_events.fetchAdd(1, .acq_rel);
+        self.prepared_adoption = .{ .lifecycle = .aborted_tombstone };
+        self.client_cleanup_take = .{ .lifecycle = .aborted };
+        self.owned_client = null;
+        self.owned_evidence = null;
+        self.owner_resize = .none;
+        self.owner_authority = .empty;
+        self.owner_request_ids = null;
+        self.lifecycle = .dead;
+        releaseActiveStorage(@intFromPtr(self));
+        return .terminal_latched;
     }
 
     pub fn prepareOwnerScalarTake(
@@ -1574,8 +2009,7 @@ pub const ExternalPumpStorage = struct {
         comptime Recorder: type,
         recorder: *Recorder,
     ) CommitAdoptionResult {
-        if (active_adoption_operation_addr != 0 or
-            preparing_adoption_addr != 0)
+        if (active_external_operation_addr != 0)
             return .transaction_busy;
         if (self.saved_self_addr != @intFromPtr(self) or
             self.lifecycle == .empty or self.lifecycle == .dead or
@@ -1584,8 +2018,8 @@ pub const ExternalPumpStorage = struct {
         if (self.lifecycle != .adopting or self.semantic_state != .adopting)
             return self.latchCommitTerminal();
 
-        active_adoption_operation_addr = @intFromPtr(self);
-        defer active_adoption_operation_addr = 0;
+        active_external_operation_addr = @intFromPtr(self);
+        defer active_external_operation_addr = 0;
         if (cross_owner_quarantine_latched.load(.acquire))
             return self.latchCommitTerminal();
         const client = if (self.owned_client) |*owned| owned else return self.latchCommitTerminal();
@@ -1801,8 +2235,10 @@ pub const ExternalPumpStorage = struct {
     pub fn teardown(self: *ExternalPumpStorage) TeardownResult {
         if (self.saved_self_addr != 0 and self.saved_self_addr != @intFromPtr(self))
             return .moved_storage;
-        if (preparing_adoption_addr != 0 or active_adoption_operation_addr != 0)
+        if (active_external_operation_addr != 0)
             return .busy;
+        active_external_operation_addr = @intFromPtr(self);
+        defer active_external_operation_addr = 0;
         return switch (self.lifecycle) {
             .empty, .dead => .already_dead,
             // Both windows are only observable from inside an in-flight `initInPlace`: every init
@@ -1826,8 +2262,12 @@ pub const ExternalPumpStorage = struct {
         // b1 deliberately has no aggregate cleanup scratch yet. Refuse before publishing teardown
         // state when a committed owner exists; current variants may own heap backing, and c3c-3
         // supplies the typed cleanup for every tag.
+        const metadata_is_allocation_free_baseline =
+            self.owner_metadata.isCommitted() and
+            self.owner_metadata.metadata != .current;
         if (self.committed_screen.requiresTypedCleanup() or
-            self.owner_metadata.requiresTypedCleanup() or
+            (self.owner_metadata.requiresTypedCleanup() and
+                !metadata_is_allocation_free_baseline) or
             self.client_cleanup_take.requiresTypedCleanup())
             return .committed_owners_require_typed_cleanup;
         self.lifecycle = .tearing_down;
@@ -1839,6 +2279,8 @@ pub const ExternalPumpStorage = struct {
             owned.allocator
         else
             null);
+        if (metadata_is_allocation_free_baseline)
+            self.owner_metadata.deinitCommitted();
         if (self.owned_client) |*owned| owned.deinit();
         self.owned_client = null;
         if (self.owned_evidence) |*owned| owned.deinit();
@@ -1857,6 +2299,38 @@ pub const ExternalPumpStorage = struct {
         return if (ledger_result) |_| .cleaned else |_| .ledger_not_zero;
     }
 };
+
+fn cleanupScratchOverlapsStorage(
+    storage: *const ExternalPumpStorage,
+    cleanup_scratch: *const ExternalPumpCleanupScratch,
+) bool {
+    return cleanupScratchRangeOverlapsStorage(
+        @intFromPtr(storage),
+        @intFromPtr(cleanup_scratch),
+    );
+}
+
+fn cleanupScratchRangeOverlapsStorage(
+    storage_addr: usize,
+    cleanup_scratch_addr: usize,
+) bool {
+    return rangesOverlap(
+        cleanup_scratch_addr,
+        @sizeOf(ExternalPumpCleanupScratch),
+        storage_addr,
+        @sizeOf(ExternalPumpStorage),
+    );
+}
+
+fn consumeFrozenClientQueues(
+    client: *client_mod.Client,
+    cleanup_scratch: *ExternalPumpCleanupScratch,
+) void {
+    client.commitExternalRecoveryDiscardUnchecked(
+        &cleanup_scratch.recovery_discard,
+        &cleanup_scratch.client,
+    );
+}
 
 const PrepareAuthorityError = error{ ProtocolAuthority, InvariantAuthority };
 
@@ -1927,10 +2401,38 @@ fn adoptionFoldInput(
     };
 }
 
-fn mapPrepareError(err: client_external_adoption.PrepareError) PrepareStatus {
+fn terminalReasonForDecision(
+    decision: external_source_decision.PreparedSourceDecision,
+) client_pump.TerminalReason {
+    return switch (decision.verdict) {
+        .ended => .runtime_ended,
+        .revoked => .revoked,
+        .host_recovery, .client_recovery, .adopted => .invariant_failure,
+        .terminal => |reason| switch (reason) {
+            .request_id_zero => .request_id_exhausted,
+            .inconsistent_fold => .invariant_failure,
+            .fold => |fold_reason| switch (fold_reason) {
+                .source,
+                .transport,
+                .metadata_equivocation,
+                .resize_equivocation,
+                => .protocol_error,
+                .stale_metadata_candidate,
+                .ordinal_exhausted,
+                .ordinal_mismatch,
+                .moved_accumulator,
+                => .invariant_failure,
+            },
+        },
+    };
+}
+
+fn terminalReasonForPrepareError(
+    err: client_external_adoption.PrepareError,
+) client_pump.TerminalReason {
     return switch (err) {
-        error.OutOfMemory => .{ .retryable_preserved = .out_of_memory },
-        error.MetadataTooLarge => .{ .terminal = .resource },
+        error.OutOfMemory => .invariant_failure,
+        error.MetadataTooLarge => .resource_exhausted,
         error.InvalidStream,
         error.InvalidHeader,
         error.InvalidPartial,
@@ -1938,7 +2440,7 @@ fn mapPrepareError(err: client_external_adoption.PrepareError) PrepareStatus {
         error.InvalidScreenSemantic,
         error.IneligibleProfile,
         error.InvalidCompatibilityProvenance,
-        => .{ .terminal = .protocol },
+        => .protocol_error,
         error.InvalidClientState,
         error.InvalidCounter,
         error.InvalidAllocator,
@@ -1956,14 +2458,16 @@ fn mapPrepareError(err: client_external_adoption.PrepareError) PrepareStatus {
         error.PlanningDisabled,
         error.Drained,
         error.InvalidAddress,
-        => .{ .terminal = .internal_invariant },
+        => .invariant_failure,
     };
 }
 
-fn mapAuthorityError(err: PrepareAuthorityError) PrepareStatus {
+fn terminalReasonForAuthorityError(
+    err: PrepareAuthorityError,
+) client_pump.TerminalReason {
     return switch (err) {
-        error.ProtocolAuthority => .{ .terminal = .protocol },
-        error.InvariantAuthority => .{ .terminal = .internal_invariant },
+        error.ProtocolAuthority => .protocol_error,
+        error.InvariantAuthority => .invariant_failure,
     };
 }
 
@@ -2516,11 +3020,13 @@ const AllocatorCallbackProbe = struct {
         prepare_teardown,
         cross_prepare_reentry,
         prepare_cleanup_teardown,
+        prepare_preflight_oom_drift,
         take_alloc_oom_drift,
         teardown_reentry,
         commit_cleanup_reentry,
         cleanup_authority_drift,
         cleanup_nested_descriptor_drift,
+        suffix_storage_drift,
     };
 
     parent: std.mem.Allocator,
@@ -2535,7 +3041,7 @@ const AllocatorCallbackProbe = struct {
     nested_evidence: ?*PreparedAdoptionEvidence = null,
     nested_init_reason: ?InitFailureReason = null,
     nested_teardown: ?TeardownResult = null,
-    nested_prepare_tag: ?std.meta.Tag(PrepareStatus) = null,
+    nested_prepare_tag: ?std.meta.Tag(AdoptionPrepareStatus) = null,
     nested_commit: ?CommitAdoptionResult = null,
     saved_event_byte: ?u8 = null,
     source_was_tombstoned_at_proof_free: bool = false,
@@ -2587,9 +3093,9 @@ const AllocatorCallbackProbe = struct {
             {
                 self.nested_prepare_tag = std.meta.activeTag(
                     if (self.mode == .prepare_reentry)
-                        self.storage.?.prepareAdoption()
+                        prepareAdoptionForTest(self.storage.?)
                     else
-                        self.nested_storage.?.prepareAdoption(),
+                        prepareAdoptionForTest(self.nested_storage.?),
                 );
                 if (self.mode == .cross_prepare_reentry)
                     self.nested_teardown = self.nested_storage.?.teardown();
@@ -2604,6 +3110,13 @@ const AllocatorCallbackProbe = struct {
             const payload = self.source.?.pending_events.items[0].payload;
             self.saved_event_byte = payload[0];
             payload[0] ^= 1;
+        } else if (!self.fired and self.mode == .prepare_preflight_oom_drift and
+            self.storage.?.lifecycle == .adoption_preparing and
+            self.storage.?.prepared_adoption.lifecycle == .empty)
+        {
+            self.fired = true;
+            self.source.?.pending_event_bytes +%= 1;
+            return null;
         } else if (!self.fired and self.mode == .take_alloc_oom_drift and
             self.storage.?.lifecycle == .adoption_preparing and
             self.storage.?.prepared_adoption.backlog.lifecycle == .prepared and
@@ -2733,6 +3246,17 @@ const AllocatorCallbackProbe = struct {
             self.screen_copies.?[0].view = foreign;
             self.screen_wrappers.?[0].allocation_ptr = foreign.ptr;
             self.screen_wrappers.?[0].logical_len = foreign.len;
+        } else if (!self.fired and self.mode == .suffix_storage_drift and
+            (self.storage.?.lifecycle == .adoption_preparing or
+                self.storage.?.lifecycle == .tearing_down))
+        {
+            self.fired = true;
+            self.storage.?.saved_self_addr = 0;
+            self.storage.?.evidence_snapshot.runtime_id = 0;
+            self.storage.?.semantic_state = .constructing;
+            self.storage.?.owner_authority = .empty;
+            self.storage.?.owner_request_ids = null;
+            self.storage.?.inbox_ledger.charged_items = 1;
         }
         self.parent.vtable.free(
             self.parent.ptr,
@@ -3509,9 +4033,8 @@ test "external pump prepares tracked authority and client ledger adoption withou
     var storage: ExternalPumpStorage = .{};
     const init_result = initTestStorage(&storage, &fixture.client, valid_evidence);
     try std.testing.expect(init_result == .initialized);
-    defer _ = storage.teardown();
-    const prepare_result = storage.prepareAdoption();
-    try std.testing.expect(prepare_result == .prepared);
+    const prepare_result = prepareAdoptionForTest(&storage);
+    try std.testing.expect(prepare_result == .prepared_adopted);
     try std.testing.expectEqual(StorageLifecycle.adopting, storage.lifecycle);
     try std.testing.expect(storage.semantic_state == .adopting);
     const prepared_valid = storage.prepared_adoption.validate(&storage);
@@ -3561,11 +4084,12 @@ test "external pump prepares tracked authority and client ledger adoption withou
     try std.testing.expect(!storage.prepared_adoption.validate(&storage));
     storage.prepared_adoption.backlog.transfer.?.wrappers_addr = wrappers_addr;
     const original_wrappers = storage.prepared_adoption.backlog.transfer.?.wrappers;
-    const alternate_wrappers = try storage.owned_client.?.allocator.alloc(
+    const client_allocator = storage.owned_client.?.allocator;
+    const alternate_wrappers = try client_allocator.alloc(
         external_inbox_ledger.OwnedPayload,
         original_wrappers.len,
     );
-    defer storage.owned_client.?.allocator.free(alternate_wrappers);
+    defer client_allocator.free(alternate_wrappers);
     for (alternate_wrappers) |*wrapper|
         wrapper.* = external_inbox_ledger.OwnedPayload.empty(storage.owned_client.?.allocator);
     storage.prepared_adoption.backlog.transfer.?.wrappers = alternate_wrappers;
@@ -3602,6 +4126,7 @@ test "external pump prepares tracked authority and client ledger adoption withou
     try std.testing.expect(!storage.prepared_adoption.validate(&storage));
     storage.prepared_adoption.metadata.saved_self_addr = metadata_addr;
     try std.testing.expect(storage.prepared_adoption.validate(&storage));
+    try std.testing.expectEqual(TeardownResult.cleaned, storage.teardown());
 }
 
 test "c3c-2b2 combined commit publishes adopted state only after every owner take" {
@@ -3612,7 +4137,7 @@ test "c3c-2b2 combined commit publishes adopted state only after every owner tak
         initTestStorage(&storage, &fixture.client, valid_evidence) ==
             .initialized,
     );
-    try std.testing.expect(storage.prepareAdoption() == .prepared);
+    try std.testing.expect(prepareAdoptionForTest(&storage) == .prepared_adopted);
     try std.testing.expect(storage.committed_screen.isEmpty());
     try std.testing.expect(storage.owner_metadata.isEmpty());
     try std.testing.expect(storage.owner_authority == .empty);
@@ -3677,7 +4202,7 @@ test "c3c-2b2 final permit drift terminalizes before ledger mutation" {
         initTestStorage(&storage, &fixture.client, valid_evidence) ==
             .initialized,
     );
-    try std.testing.expect(storage.prepareAdoption() == .prepared);
+    try std.testing.expect(prepareAdoptionForTest(&storage) == .prepared_adopted);
     const before = storage.inbox_ledger.accountingView();
     storage.prepared_adoption.final_seal.operation_generation +%= 1;
 
@@ -3706,7 +4231,7 @@ test "c3c-2b2 adopted commit permit is final-address bound and linear" {
             .initialized,
     );
     defer _ = storage.teardown();
-    try std.testing.expect(storage.prepareAdoption() == .prepared);
+    try std.testing.expect(prepareAdoptionForTest(&storage) == .prepared_adopted);
     var permit: AdoptedCommitPermit = .{};
     try std.testing.expect(storage.mintAdoptedCommitPermit(&permit));
     try std.testing.expect(permit.validate(&storage));
@@ -3733,7 +4258,7 @@ test "c3c-2b2 nonempty post-ledger suffix defers allocator callback until public
         initTestStorage(&storage, &fixture.client, valid_evidence) ==
             .initialized,
     );
-    try std.testing.expect(storage.prepareAdoption() == .prepared);
+    try std.testing.expect(prepareAdoptionForTest(&storage) == .prepared_adopted);
     const callbacks_before_commit = probe.callback_count;
     var recorder = TestCommitRecorder{
         .storage = &storage,
@@ -3788,7 +4313,7 @@ test "c3c-2b2 final permit rejects bound address and leaf drift before ledger mu
             initTestStorage(&storage, &fixture.client, valid_evidence) ==
                 .initialized,
         );
-        try std.testing.expect(storage.prepareAdoption() == .prepared);
+        try std.testing.expect(prepareAdoptionForTest(&storage) == .prepared_adopted);
         const before = storage.inbox_ledger.accountingView();
         switch (scenario) {
             .storage_addr => storage.prepared_adoption.final_seal.storage_addr +%= 1,
@@ -3850,7 +4375,7 @@ test "c3c-2b2 digest equality cannot authorize scalar semantic drift" {
         initTestStorage(&storage, &fixture.client, valid_evidence) ==
             .initialized,
     );
-    try std.testing.expect(storage.prepareAdoption() == .prepared);
+    try std.testing.expect(prepareAdoptionForTest(&storage) == .prepared_adopted);
     const before = storage.inbox_ledger.accountingView();
     storage.prepared_adoption.scalar_take.request_ids = .max_consumed;
     // Re-seal the attacker-controlled aggregate transcript. The leaf validator, not digest
@@ -3886,7 +4411,7 @@ test "c3c-2b2 cross-owner screen payload alias terminalizes without double free"
         initTestStorage(&storage, &fixture.client, valid_evidence) ==
             .initialized,
     );
-    try std.testing.expect(storage.prepareAdoption() == .prepared);
+    try std.testing.expect(prepareAdoptionForTest(&storage) == .prepared_adopted);
 
     const transfer = storage.prepared_adoption.backlog.transfer.?;
     const abandoned_payload = transfer.copies[0].bytes;
@@ -3967,7 +4492,7 @@ test "c3c-2b2 invalid outer screen descriptors fail before nested dereference" {
             initTestStorage(&storage, &fixture.client, valid_evidence) ==
                 .initialized,
         );
-        try std.testing.expect(storage.prepareAdoption() == .prepared);
+        try std.testing.expect(prepareAdoptionForTest(&storage) == .prepared_adopted);
         const before = storage.inbox_ledger.accountingView();
         const transfer = &storage.prepared_adoption.backlog.transfer.?;
         switch (scenario) {
@@ -4021,7 +4546,7 @@ test "c3c-2b2 screen cleanup ignores correlated foreign descriptor mirrors" {
             initTestStorage(&storage, &fixture.client, valid_evidence) ==
                 .initialized,
         );
-        try std.testing.expect(storage.prepareAdoption() == .prepared);
+        try std.testing.expect(prepareAdoptionForTest(&storage) == .prepared_adopted);
         const primary = &storage.prepared_adoption.backlog.transfer.?;
         const independent = &storage.prepared_adoption.backlog.cleanup_transfer.?;
         switch (scenario) {
@@ -4138,7 +4663,7 @@ test "c3c-2b2 screen cleanup requires majority allocator authority" {
             initTestStorage(&storage, &fixture.client, valid_evidence) ==
                 .initialized,
         );
-        try std.testing.expect(storage.prepareAdoption() == .prepared);
+        try std.testing.expect(prepareAdoptionForTest(&storage) == .prepared_adopted);
         const backlog = &storage.prepared_adoption.backlog;
         switch (scenario) {
             .primary => backlog.allocator = std.heap.page_allocator,
@@ -4182,7 +4707,7 @@ test "c3c-2b2 ledger precondition drift terminalizes before ledger call and publ
             initTestStorage(&storage, &fixture.client, valid_evidence) ==
                 .initialized,
         );
-        try std.testing.expect(storage.prepareAdoption() == .prepared);
+        try std.testing.expect(prepareAdoptionForTest(&storage) == .prepared_adopted);
         var recorder = LedgerPreconditionDriftRecorder{ .scenario = scenario };
         try std.testing.expectEqual(
             CommitAdoptionResult.terminal_latched,
@@ -4219,7 +4744,7 @@ test "c3c-2b2 terminal cleanup rejects allocator callback reentry" {
         initTestStorage(&storage, &fixture.client, valid_evidence) ==
             .initialized,
     );
-    try std.testing.expect(storage.prepareAdoption() == .prepared);
+    try std.testing.expect(prepareAdoptionForTest(&storage) == .prepared_adopted);
     probe.storage = &storage;
     probe.mode = .commit_cleanup_reentry;
     probe.fired = false;
@@ -4268,7 +4793,7 @@ test "c3c-2b2 cleanup freezes screen authority before first allocator callback" 
         initTestStorage(&storage, &fixture.client, valid_evidence) ==
             .initialized,
     );
-    try std.testing.expect(storage.prepareAdoption() == .prepared);
+    try std.testing.expect(prepareAdoptionForTest(&storage) == .prepared_adopted);
     probe.storage = &storage;
     probe.mode = .cleanup_authority_drift;
     probe.fired = false;
@@ -4308,7 +4833,7 @@ test "c3c-2b2 cleanup deep freezes nested screen descriptors before allocator ca
         initTestStorage(&storage, &fixture.client, valid_evidence) ==
             .initialized,
     );
-    try std.testing.expect(storage.prepareAdoption() == .prepared);
+    try std.testing.expect(prepareAdoptionForTest(&storage) == .prepared_adopted);
     probe.storage = &storage;
     probe.screen_copies = storage.prepared_adoption.backlog.transfer.?.copies;
     probe.screen_wrappers = storage.prepared_adoption.backlog.transfer.?.wrappers;
@@ -4336,7 +4861,7 @@ test "c3c-2b2 corrupted committed cleanup tag fails closed without generic deini
         initTestStorage(&storage, &fixture.client, valid_evidence) ==
             .initialized,
     );
-    try std.testing.expect(storage.prepareAdoption() == .prepared);
+    try std.testing.expect(prepareAdoptionForTest(&storage) == .prepared_adopted);
     storage.client_cleanup_take.lifecycle = .committed;
     storage.client_cleanup_take.saved_self_address +%= 1;
 
@@ -4362,7 +4887,7 @@ test "c3c-2b2 prepared scalar take aborts on ordinary teardown" {
         initTestStorage(&storage, &fixture.client, valid_evidence) ==
             .initialized,
     );
-    try std.testing.expect(storage.prepareAdoption() == .prepared);
+    try std.testing.expect(prepareAdoptionForTest(&storage) == .prepared_adopted);
     try std.testing.expect(storage.prepared_adoption.scalar_take.validate(&storage));
     try std.testing.expect(storage.owner_resize == .none);
     try std.testing.expect(storage.owner_authority == .empty);
@@ -4387,7 +4912,7 @@ test "c3c-2b2 prepared scalar take derives pending resize from the adopted decis
             .initialized,
     );
     defer _ = storage.teardown();
-    try std.testing.expect(storage.prepareAdoption() == .prepared);
+    try std.testing.expect(prepareAdoptionForTest(&storage) == .prepared_adopted);
     const take = &storage.prepared_adoption.scalar_take;
     try std.testing.expect(take.resize == .pending);
     try std.testing.expectEqual(@as(u16, 132), take.resize.pending.cols);
@@ -4423,7 +4948,7 @@ test "c3c-2b1 pending resize scalar is cleared without damaging ownership" {
     try std.testing.expect(storage.owner_request_ids == null);
 }
 
-test "c3c-2b1 generic teardown preserves committed owner lifecycle" {
+test "recovery baseline metadata teardown is allocation-free and canonical" {
     var fixture = try TestClient.init();
     defer fixture.deinitPeer();
     const owned_fd = fixture.client.fd;
@@ -4432,27 +4957,20 @@ test "c3c-2b1 generic teardown preserves committed owner lifecycle" {
         initTestStorage(&storage, &fixture.client, valid_evidence) ==
             .initialized,
     );
-    storage.owner_metadata = .{
-        .saved_self_addr = @intFromPtr(&storage.owner_metadata),
-        .storage_addr = @intFromPtr(&storage),
-        .source_addr = @intFromPtr(&storage.prepared_adoption),
-        .metadata = .unsupported,
-        .lifecycle = .committed,
-    };
-    const lifecycle_before = storage.lifecycle;
-    const semantic_before = storage.semantic_state;
-
-    try std.testing.expectEqual(
-        TeardownResult.committed_owners_require_typed_cleanup,
-        storage.teardown(),
-    );
-    try std.testing.expectEqual(lifecycle_before, storage.lifecycle);
-    try std.testing.expect(std.meta.eql(semantic_before, storage.semantic_state));
-    try std.testing.expect(storage.owner_metadata.isCommitted());
-    try std.testing.expect(c.fcntl(owned_fd, c.F.GETFD, @as(c_int, 0)) >= 0);
-
-    storage.owner_metadata.deinitCommitted();
+    try std.testing.expect(external_event_materialization.commitRecoveryBaseline(
+        &storage.owner_metadata,
+        @intFromPtr(&storage),
+        @intFromPtr(&storage.owned_evidence.?),
+        .unsupported,
+    ));
     try std.testing.expectEqual(TeardownResult.cleaned, storage.teardown());
+    try std.testing.expectEqual(
+        external_event_materialization.OwnerMetadataState{
+            .lifecycle = .cleaned_tombstone,
+        },
+        storage.owner_metadata,
+    );
+    try std.testing.expect(c.fcntl(owned_fd, c.F.GETFD, @as(c_int, 0)) < 0);
 }
 
 test "c3c-2b1 generic teardown fails closed on partial owner descriptors" {
@@ -4499,11 +5017,11 @@ test "external adoption preparation rejects reentry and teardown from allocator 
         probe.storage = &storage;
         probe.mode = mode;
 
-        try std.testing.expect(storage.prepareAdoption() == .prepared);
+        try std.testing.expect(prepareAdoptionForTest(&storage) == .prepared_adopted);
         try std.testing.expect(probe.fired);
         switch (mode) {
             .prepare_reentry => try std.testing.expectEqual(
-                std.meta.Tag(PrepareStatus).busy,
+                std.meta.Tag(AdoptionPrepareStatus).retryable_preserved,
                 probe.nested_prepare_tag.?,
             ),
             .prepare_teardown => try std.testing.expectEqual(
@@ -4539,10 +5057,10 @@ test "external adoption latch rejects cross-storage prepare and teardown" {
     probe.nested_storage = &nested_storage;
     probe.mode = .cross_prepare_reentry;
 
-    try std.testing.expect(outer_storage.prepareAdoption() == .prepared);
+    try std.testing.expect(prepareAdoptionForTest(&outer_storage) == .prepared_adopted);
     try std.testing.expect(probe.fired);
     try std.testing.expectEqual(
-        std.meta.Tag(PrepareStatus).busy,
+        std.meta.Tag(AdoptionPrepareStatus).retryable_preserved,
         probe.nested_prepare_tag.?,
     );
     try std.testing.expectEqual(TeardownResult.busy, probe.nested_teardown.?);
@@ -4552,7 +5070,7 @@ test "external adoption latch rejects cross-storage prepare and teardown" {
         nested_storage.prepared_adoption.lifecycle,
     );
     try std.testing.expect(nested_storage.inbox_ledger.accountingView().pristine_zero);
-    try std.testing.expect(nested_storage.prepareAdoption() == .prepared);
+    try std.testing.expect(prepareAdoptionForTest(&nested_storage) == .prepared_adopted);
     try std.testing.expect(nested_storage.prepared_adoption.validate(&nested_storage));
 }
 
@@ -4575,18 +5093,19 @@ test "external adoption cleanup keeps teardown busy through allocator free callb
     probe.source = &storage.owned_client.?;
     probe.mode = .prepare_cleanup_teardown;
 
-    const result = storage.prepareAdoption();
-    try std.testing.expect(result == .terminal);
+    const result = prepareAdoptionForTest(&storage);
+    try std.testing.expect(result == .terminal_latched);
     try std.testing.expect(probe.fired);
     try std.testing.expectEqual(TeardownResult.busy, probe.nested_teardown.?);
-    try std.testing.expectEqual(StorageLifecycle.adopting, storage.lifecycle);
+    try std.testing.expectEqual(StorageLifecycle.dead, storage.lifecycle);
     try std.testing.expectEqual(AdoptionLifecycle.empty, storage.prepared_adoption.lifecycle);
-    storage.owned_client.?.pending_events.items[0].payload[0] =
-        probe.saved_event_byte.?;
+    try std.testing.expect(storage.owned_client == null);
 }
 
 test "external adoption proves the whole aggregate destination before writing it" {
-    var fixture = try TestClient.init();
+    resetCrossOwnerQuarantineForTest();
+    defer resetCrossOwnerQuarantineForTest();
+    var fixture = try TestClient.initWithAllocator(std.heap.c_allocator);
     defer fixture.deinitPeer();
     const original_payload = try fixture.client.allocator.dupe(u8, "event");
     try fixture.client.pending_events.append(fixture.client.allocator, .{
@@ -4605,38 +5124,45 @@ test "external adoption proves the whole aggregate destination before writing it
     );
     defer _ = storage.teardown();
 
-    const outer_before = storage.prepared_adoption;
     storage.owned_client.?.pending_events.items[0].payload =
         std.mem.asBytes(&storage.prepared_adoption)[0..original_payload.len];
-    const result = storage.prepareAdoption();
-    try std.testing.expect(result == .terminal);
-    try std.testing.expectEqual(
-        TerminalPrepareReason.internal_invariant,
-        result.terminal,
-    );
-    try std.testing.expect(std.meta.eql(outer_before, storage.prepared_adoption));
-    try std.testing.expectEqual(StorageLifecycle.adopting, storage.lifecycle);
-
-    storage.owned_client.?.pending_events.items[0].payload = original_payload;
+    const result = prepareAdoptionForTest(&storage);
+    try std.testing.expect(result == .terminal_latched);
+    try std.testing.expectEqual(StorageLifecycle.dead, storage.lifecycle);
+    try std.testing.expect(crossOwnerQuarantineStatus().latched);
 }
 
-test "external adoption preserves non-adopted decisions without false terminal mapping" {
+test "external adoption commits every non-adopted decision before returning" {
     const Case = struct {
         payload: []const u8,
-        verdict: std.meta.Tag(external_source_decision.Verdict),
+        status: std.meta.Tag(AdoptionPrepareStatus),
+        lifecycle: StorageLifecycle,
+        terminal_reason: ?client_pump.TerminalReason,
     };
     const cases = [_]Case{
         .{
             .payload = "{\"event\":\"snapshot.invalidated\"}",
-            .verdict = .host_recovery,
+            .status = .recovery_committed,
+            .lifecycle = .live,
+            .terminal_reason = null,
         },
         .{
             .payload = "{\"event\":\"runtime.ended\"}",
-            .verdict = .ended,
+            .status = .terminal_latched,
+            .lifecycle = .dead,
+            .terminal_reason = .runtime_ended,
+        },
+        .{
+            .payload = "{\"event\":\"controller.revoked\",\"data\":{\"runtime_id\":\"000000000000000000000000000000aa\",\"stream_id\":7,\"controller_generation\":4,\"reason\":\"takeover\"}}",
+            .status = .terminal_latched,
+            .lifecycle = .dead,
+            .terminal_reason = .revoked,
         },
         .{
             .payload = "event",
-            .verdict = .terminal,
+            .status = .terminal_latched,
+            .lifecycle = .dead,
+            .terminal_reason = .protocol_error,
         },
     };
     for (cases) |case| {
@@ -4659,19 +5185,318 @@ test "external adoption preserves non-adopted decisions without false terminal m
         );
         defer _ = storage.teardown();
 
-        try std.testing.expect(storage.prepareAdoption() == .deferred_non_adopted);
-        try std.testing.expect(storage.prepared_adoption.validate(&storage));
-        try std.testing.expectEqual(
-            case.verdict,
-            std.meta.activeTag(
-                storage.prepared_adoption.source_decision.?.verdict,
-            ),
-        );
-        try std.testing.expectEqual(
-            PreparedAdoptionBranch.non_adopted,
-            storage.prepared_adoption.branch,
+        const result = prepareAdoptionForTest(&storage);
+        try std.testing.expectEqual(case.status, std.meta.activeTag(result));
+        try std.testing.expectEqual(case.lifecycle, storage.lifecycle);
+        if (case.terminal_reason) |reason| {
+            try std.testing.expectEqual(reason, storage.semantic_state.terminal.reason);
+        } else {
+            const recovery = storage.semantic_state.active.host_recovery.ack_unadmitted;
+            try std.testing.expectEqual(@as(u64, 1), recovery.epoch);
+            try std.testing.expectEqual(
+                @as(i128, 1) + 30 * @as(i128, std.time.ns_per_s),
+                recovery.deadline_ns,
+            );
+            try std.testing.expect(storage.owner_authority == .current);
+            try std.testing.expect(storage.owner_request_ids != null);
+            try std.testing.expect(storage.owner_resize == .none);
+            try std.testing.expect(storage.owner_metadata.isCommitted());
+            try std.testing.expect(storage.owned_client != null);
+            try std.testing.expect(storage.owned_client.?.io_mode == .external);
+            try std.testing.expectEqual(
+                @as(usize, 0),
+                storage.owned_client.?.pending_events.items.len,
+            );
+            try std.testing.expectEqual(
+                @as(u64, 0),
+                storage.owned_client.?.next_request_id,
+            );
+            try std.testing.expect(
+                storage.inbox_ledger.accountingView().pristine_zero,
+            );
+            try std.testing.expectEqual(
+                TeardownResult.cleaned,
+                storage.teardown(),
+            );
+        }
+        try std.testing.expect(
+            storage.prepared_adoption.lifecycle == .committed_tombstone or
+                storage.prepared_adoption.lifecycle == .empty or
+                storage.prepared_adoption.lifecycle == .aborted_tombstone,
         );
     }
+}
+
+test "recovery suffix restores callback-mutated storage before live publish" {
+    var probe = AllocatorCallbackProbe{ .parent = std.testing.allocator };
+    var fixture = try TestClient.initWithAllocator(probe.allocator());
+    defer fixture.deinitPeer();
+    try appendTestEvent(&fixture.client, "{\"event\":\"snapshot.invalidated\"}");
+    var storage: ExternalPumpStorage = .{};
+    try std.testing.expect(
+        initTestStorage(&storage, &fixture.client, valid_evidence) ==
+            .initialized,
+    );
+    defer _ = storage.teardown();
+    probe.storage = &storage;
+    probe.mode = .suffix_storage_drift;
+    var cleanup_scratch: ExternalPumpCleanupScratch = .{};
+    try std.testing.expect(cleanup_scratch.initInPlace());
+
+    try std.testing.expect(
+        storage.prepareAdoption(7, &cleanup_scratch) == .recovery_committed,
+    );
+    try std.testing.expect(probe.fired);
+    try std.testing.expectEqual(@intFromPtr(&storage), storage.saved_self_addr);
+    try std.testing.expectEqual(valid_evidence, storage.evidence_snapshot);
+    try std.testing.expect(storage.inbox_ledger.accountingView().pristine_zero);
+    try std.testing.expectEqual(StorageLifecycle.live, storage.lifecycle);
+    try std.testing.expect(
+        storage.semantic_state == .active and
+            storage.semantic_state.active == .host_recovery,
+    );
+    try std.testing.expect(storage.owner_authority == .current);
+    try std.testing.expect(storage.owner_request_ids != null);
+    try std.testing.expect(storage.owned_client != null);
+    try std.testing.expectEqual(TeardownResult.cleaned, storage.teardown());
+}
+
+test "terminal suffix restores callback-mutated storage before dead publish" {
+    var probe = AllocatorCallbackProbe{ .parent = std.testing.allocator };
+    var fixture = try TestClient.initWithAllocator(probe.allocator());
+    defer fixture.deinitPeer();
+    try appendTestEvent(&fixture.client, "{\"event\":\"runtime.ended\"}");
+    var storage: ExternalPumpStorage = .{};
+    try std.testing.expect(
+        initTestStorage(&storage, &fixture.client, valid_evidence) ==
+            .initialized,
+    );
+    probe.storage = &storage;
+    probe.mode = .suffix_storage_drift;
+    var cleanup_scratch: ExternalPumpCleanupScratch = .{};
+    try std.testing.expect(cleanup_scratch.initInPlace());
+
+    try std.testing.expect(
+        storage.prepareAdoption(7, &cleanup_scratch) == .terminal_latched,
+    );
+    try std.testing.expect(probe.fired);
+    try std.testing.expectEqual(@intFromPtr(&storage), storage.saved_self_addr);
+    try std.testing.expectEqual(valid_evidence, storage.evidence_snapshot);
+    try std.testing.expectEqual(StorageLifecycle.dead, storage.lifecycle);
+    try std.testing.expectEqual(
+        client_pump.TerminalReason.runtime_ended,
+        storage.semantic_state.terminal.reason,
+    );
+    try std.testing.expect(storage.owned_client == null);
+    try std.testing.expect(storage.owned_evidence == null);
+    try std.testing.expectEqual(TeardownResult.already_dead, storage.teardown());
+}
+
+test "external recovery deadline overflow terminalizes before live publication" {
+    var fixture = try TestClient.init();
+    defer fixture.deinitPeer();
+    try appendTestEvent(&fixture.client, "{\"event\":\"snapshot.invalidated\"}");
+    var storage: ExternalPumpStorage = .{};
+    try std.testing.expect(
+        initTestStorage(&storage, &fixture.client, valid_evidence) ==
+            .initialized,
+    );
+    defer _ = storage.teardown();
+    var cleanup_scratch: ExternalPumpCleanupScratch = .{};
+    try std.testing.expect(cleanup_scratch.initInPlace());
+
+    try std.testing.expect(
+        storage.prepareAdoption(
+            std.math.maxInt(i128),
+            &cleanup_scratch,
+        ) == .terminal_latched,
+    );
+    try std.testing.expectEqual(StorageLifecycle.dead, storage.lifecycle);
+    try std.testing.expectEqual(
+        client_pump.TerminalReason.invariant_failure,
+        storage.semantic_state.terminal.reason,
+    );
+    try std.testing.expect(storage.inbox_ledger.accountingView().pristine_zero);
+    try std.testing.expect(cleanup_scratch.isReady());
+}
+
+test "external zero request id terminalizes with exact public reason" {
+    var fixture = try TestClient.init();
+    defer fixture.deinitPeer();
+    fixture.client.next_request_id = 0;
+    var storage: ExternalPumpStorage = .{};
+    try std.testing.expect(
+        initTestStorage(&storage, &fixture.client, valid_evidence) ==
+            .initialized,
+    );
+    defer _ = storage.teardown();
+    var cleanup_scratch: ExternalPumpCleanupScratch = .{};
+    try std.testing.expect(cleanup_scratch.initInPlace());
+
+    try std.testing.expect(
+        storage.prepareAdoption(1, &cleanup_scratch) == .terminal_latched,
+    );
+    try std.testing.expectEqual(StorageLifecycle.dead, storage.lifecycle);
+    try std.testing.expectEqual(
+        client_pump.TerminalReason.request_id_exhausted,
+        storage.semantic_state.terminal.reason,
+    );
+    try std.testing.expect(storage.inbox_ledger.accountingView().pristine_zero);
+}
+
+test "external local screen item cap commits client recovery" {
+    var fixture = try TestClient.init();
+    defer fixture.deinitPeer();
+    const batch_count = external_inbox_limits.max_items / 2 + 1;
+    const stream_count = external_inbox_limits.max_items + 1 - batch_count;
+    var index: usize = 0;
+    while (index < batch_count) : (index += 1) {
+        const payload = try fixture.client.allocator.dupe(u8, "s");
+        try fixture.client.pending_batches.append(fixture.client.allocator, .{
+            .is_snapshot = false,
+            .stream_id = valid_evidence.stream_id,
+            .bytes = payload,
+            .allocator = fixture.client.allocator,
+        });
+        fixture.client.pending_batch_bytes += payload.len;
+    }
+    index = 0;
+    while (index < stream_count) : (index += 1) {
+        const payload = try fixture.client.allocator.dupe(u8, "s");
+        try fixture.client.pending_stream.append(fixture.client.allocator, .{
+            .header = .{
+                .kind = .delta_chunk,
+                .stream_id = valid_evidence.stream_id,
+                .payload_len = @intCast(payload.len),
+                .flags = protocol.Flags.end_stream,
+            },
+            .payload = payload,
+        });
+        fixture.client.pending_stream_bytes += payload.len;
+    }
+    var storage: ExternalPumpStorage = .{};
+    try std.testing.expect(
+        initTestStorage(&storage, &fixture.client, valid_evidence) ==
+            .initialized,
+    );
+    defer _ = storage.teardown();
+    var cleanup_scratch: ExternalPumpCleanupScratch = .{};
+    try std.testing.expect(cleanup_scratch.initInPlace());
+
+    try std.testing.expect(
+        storage.prepareAdoption(9, &cleanup_scratch) == .recovery_committed,
+    );
+    const recovery = storage.semantic_state.active.client_recovery.control_wait;
+    try std.testing.expectEqual(@as(u64, 1), recovery.epoch);
+    try std.testing.expectEqual(
+        @as(i128, 9) + 30 * @as(i128, std.time.ns_per_s),
+        recovery.deadline_ns,
+    );
+    try std.testing.expectEqual(StorageLifecycle.live, storage.lifecycle);
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        storage.owned_client.?.pending_batches.items.len,
+    );
+    try std.testing.expect(storage.inbox_ledger.accountingView().pristine_zero);
+    try std.testing.expectEqual(TeardownResult.cleaned, storage.teardown());
+}
+
+test "external adoption rejects moved cleanup scratch with bounded quarantine" {
+    resetCrossOwnerQuarantineForTest();
+    defer resetCrossOwnerQuarantineForTest();
+    var fixture = try TestClient.initWithAllocator(std.heap.c_allocator);
+    defer fixture.deinitPeer();
+    var storage: ExternalPumpStorage = .{};
+    try std.testing.expect(
+        initTestStorage(&storage, &fixture.client, valid_evidence) ==
+            .initialized,
+    );
+    var original: ExternalPumpCleanupScratch = .{};
+    try std.testing.expect(original.initInPlace());
+    var moved = original;
+
+    try std.testing.expect(
+        storage.prepareAdoption(1, &moved) == .terminal_latched,
+    );
+    try std.testing.expectEqual(StorageLifecycle.dead, storage.lifecycle);
+    try std.testing.expect(crossOwnerQuarantineStatus().latched);
+    try std.testing.expectEqual(
+        max_cross_owner_quarantine_bytes,
+        crossOwnerQuarantineStatus().leaked_bytes_upper_bound,
+    );
+}
+
+test "external cleanup scratch rejects exact and partial storage aliases" {
+    const storage_addr: usize = 0x100000;
+    const storage_len = @sizeOf(ExternalPumpStorage);
+    const scratch_len = @sizeOf(ExternalPumpCleanupScratch);
+    try std.testing.expect(cleanupScratchRangeOverlapsStorage(
+        storage_addr,
+        storage_addr,
+    ));
+    try std.testing.expect(cleanupScratchRangeOverlapsStorage(
+        storage_addr,
+        storage_addr + storage_len - 1,
+    ));
+    try std.testing.expect(cleanupScratchRangeOverlapsStorage(
+        storage_addr,
+        storage_addr - scratch_len + 1,
+    ));
+    try std.testing.expect(!cleanupScratchRangeOverlapsStorage(
+        storage_addr,
+        storage_addr + storage_len,
+    ));
+    try std.testing.expect(!cleanupScratchRangeOverlapsStorage(
+        storage_addr,
+        storage_addr - scratch_len,
+    ));
+}
+
+test "terminal discard validation drift quarantines without allocator callbacks" {
+    resetCrossOwnerQuarantineForTest();
+    defer resetCrossOwnerQuarantineForTest();
+    var probe = AllocatorCallbackProbe{ .parent = std.heap.c_allocator };
+    var fixture = try TestClient.initWithAllocator(probe.allocator());
+    defer fixture.deinitPeer();
+    const payload = try fixture.client.allocator.dupe(u8, "screen");
+    try fixture.client.pending_batches.append(fixture.client.allocator, .{
+        .is_snapshot = false,
+        .stream_id = valid_evidence.stream_id,
+        .bytes = payload,
+        .allocator = fixture.client.allocator,
+    });
+    fixture.client.pending_batch_bytes = payload.len;
+    var storage: ExternalPumpStorage = .{};
+    try std.testing.expect(
+        initTestStorage(&storage, &fixture.client, valid_evidence) ==
+            .initialized,
+    );
+    const owned_fd = storage.owned_client.?.fd;
+    var cleanup_scratch: ExternalPumpCleanupScratch = .{};
+    try std.testing.expect(cleanup_scratch.initInPlace());
+    cleanup_scratch.source_ranges = .{};
+    try storage.owned_client.?.prepareExternalRecoveryDiscard(
+        valid_evidence.stream_id,
+        &cleanup_scratch.client,
+        &cleanup_scratch.source_ranges,
+        &cleanup_scratch.recovery_discard,
+    );
+    storage.owned_client.?.pending_batch_bytes += 1;
+    const callbacks_before = probe.callback_count;
+
+    try std.testing.expect(
+        storage.finishImmediateTerminal(.revoked, &cleanup_scratch) ==
+            .terminal_latched,
+    );
+    try std.testing.expectEqual(callbacks_before, probe.callback_count);
+    try std.testing.expectEqual(StorageLifecycle.dead, storage.lifecycle);
+    try std.testing.expectEqual(
+        client_pump.TerminalReason.revoked,
+        storage.semantic_state.terminal.reason,
+    );
+    try std.testing.expect(crossOwnerQuarantineStatus().latched);
+    try std.testing.expect(storage.inbox_ledger.accountingView().pristine_zero);
+    _ = c.close(owned_fd);
 }
 
 test "external pump composes an event metadata winner with the screen footprint" {
@@ -4706,7 +5531,7 @@ test "external pump composes an event metadata winner with the screen footprint"
             .initialized,
     );
     defer _ = storage.teardown();
-    try std.testing.expect(storage.prepareAdoption() == .prepared);
+    try std.testing.expect(prepareAdoptionForTest(&storage) == .prepared_adopted);
     try std.testing.expect(storage.prepared_adoption.validate(&storage));
     const metadata_footprint = switch (storage.prepared_adoption.metadata.metadata) {
         .event => |*owned| owned.footprint,
@@ -4738,7 +5563,7 @@ test "external adoption enforces the aggregate cap across metadata and screen ow
         initTestStorage(&baseline_storage, &baseline.client, valid_evidence) ==
             .initialized,
     );
-    try std.testing.expect(baseline_storage.prepareAdoption() == .prepared);
+    try std.testing.expect(prepareAdoptionForTest(&baseline_storage) == .prepared_adopted);
     const metadata_peak = switch (baseline_storage.prepared_adoption.metadata.metadata) {
         .event => |*owned| owned.footprint.prepare_peak_delta,
         else => return error.TestUnexpectedResult,
@@ -4772,7 +5597,7 @@ test "external adoption enforces the aggregate cap across metadata and screen ow
             .initialized,
     );
     defer _ = exact_storage.teardown();
-    try std.testing.expect(exact_storage.prepareAdoption() == .prepared);
+    try std.testing.expect(prepareAdoptionForTest(&exact_storage) == .prepared_adopted);
     const exact_max = @max(
         exact_storage.prepared_adoption.aggregate_resident_bytes,
         exact_storage.prepared_adoption.aggregate_prepare_peak_bytes,
@@ -4794,19 +5619,16 @@ test "external adoption enforces the aggregate cap across metadata and screen ow
             .initialized,
     );
     defer _ = over_storage.teardown();
-    const over_result = over_storage.prepareAdoption();
-    try std.testing.expect(over_result == .terminal);
-    try std.testing.expectEqual(TerminalPrepareReason.resource, over_result.terminal);
+    const over_result = prepareAdoptionForTest(&over_storage);
+    try std.testing.expect(over_result == .terminal_latched);
     try std.testing.expectEqual(AdoptionLifecycle.empty, over_storage.prepared_adoption.lifecycle);
     try std.testing.expect(over_storage.inbox_ledger.accountingView().pristine_zero);
+    try std.testing.expectEqual(StorageLifecycle.dead, over_storage.lifecycle);
     try std.testing.expectEqual(
-        exact_padding + 1,
-        over_storage.owned_client.?.build_id.?.len,
+        client_pump.TerminalReason.resource_exhausted,
+        over_storage.semantic_state.terminal.reason,
     );
-    try std.testing.expectEqualStrings(
-        event_json,
-        over_storage.owned_client.?.pending_events.items[0].payload,
-    );
+    try std.testing.expect(over_storage.owned_client == null);
 }
 
 test "external pump retryable allocation failure preserves the same storage for retry" {
@@ -4821,18 +5643,20 @@ test "external pump retryable allocation failure preserves the same storage for 
     defer _ = storage.teardown();
 
     failing.fail_index = failing.alloc_index;
-    try std.testing.expect(storage.prepareAdoption() == .retryable_preserved);
+    try std.testing.expect(prepareAdoptionForTest(&storage) == .retryable_preserved);
     try std.testing.expectEqual(StorageLifecycle.adopting, storage.lifecycle);
     try std.testing.expectEqual(AdoptionLifecycle.empty, storage.prepared_adoption.lifecycle);
     try std.testing.expect(storage.inbox_ledger.accountingView().pristine_zero);
 
     failing.fail_index = std.math.maxInt(usize);
-    try std.testing.expect(storage.prepareAdoption() == .prepared);
+    try std.testing.expect(prepareAdoptionForTest(&storage) == .prepared_adopted);
     try std.testing.expect(storage.prepared_adoption.validate(&storage));
 }
 
 test "external take proof OOM with allocator callback drift is terminal" {
-    var probe = AllocatorCallbackProbe{ .parent = std.testing.allocator };
+    resetCrossOwnerQuarantineForTest();
+    defer resetCrossOwnerQuarantineForTest();
+    var probe = AllocatorCallbackProbe{ .parent = std.heap.c_allocator };
     var fixture = try TestClient.initWithAllocator(probe.allocator());
     defer fixture.deinitPeer();
     var storage: ExternalPumpStorage = .{};
@@ -4845,18 +5669,72 @@ test "external take proof OOM with allocator callback drift is terminal" {
     probe.source = &storage.owned_client.?;
     probe.mode = .take_alloc_oom_drift;
 
-    const result = storage.prepareAdoption();
-    try std.testing.expect(result == .terminal);
-    try std.testing.expectEqual(
-        TerminalPrepareReason.internal_invariant,
-        result.terminal,
-    );
+    const result = prepareAdoptionForTest(&storage);
+    try std.testing.expect(result == .terminal_latched);
     try std.testing.expect(probe.fired);
-    try std.testing.expectEqual(StorageLifecycle.adopting, storage.lifecycle);
+    try std.testing.expectEqual(StorageLifecycle.dead, storage.lifecycle);
     try std.testing.expectEqual(
-        AdoptionLifecycle.empty,
+        AdoptionLifecycle.aborted_tombstone,
         storage.prepared_adoption.lifecycle,
     );
+    try std.testing.expect(storage.inbox_ledger.accountingView().pristine_zero);
+}
+
+test "adopted destination preflight OOM revalidates source before retry" {
+    resetCrossOwnerQuarantineForTest();
+    defer resetCrossOwnerQuarantineForTest();
+    var probe = AllocatorCallbackProbe{ .parent = std.heap.c_allocator };
+    var fixture = try TestClient.initWithAllocator(probe.allocator());
+    defer fixture.deinitPeer();
+    var storage: ExternalPumpStorage = .{};
+    try std.testing.expect(
+        initTestStorage(&storage, &fixture.client, valid_evidence) ==
+            .initialized,
+    );
+    probe.storage = &storage;
+    probe.source = &storage.owned_client.?;
+    probe.mode = .prepare_preflight_oom_drift;
+
+    try std.testing.expect(
+        prepareAdoptionForTest(&storage) == .terminal_latched,
+    );
+    try std.testing.expect(probe.fired);
+    try std.testing.expectEqual(StorageLifecycle.dead, storage.lifecycle);
+    try std.testing.expect(crossOwnerQuarantineStatus().latched);
+    try std.testing.expect(storage.inbox_ledger.accountingView().pristine_zero);
+}
+
+test "non-adopted terminal skips adopted destination allocating preflight" {
+    resetCrossOwnerQuarantineForTest();
+    defer resetCrossOwnerQuarantineForTest();
+    var probe = AllocatorCallbackProbe{ .parent = std.heap.c_allocator };
+    var fixture = try TestClient.initWithAllocator(probe.allocator());
+    defer fixture.deinitPeer();
+    const payload = try fixture.client.allocator.dupe(u8, "{}");
+    try fixture.client.pending_events.append(fixture.client.allocator, .{
+        .header = .{
+            .kind = .event,
+            .stream_id = valid_evidence.stream_id,
+            .payload_len = @intCast(payload.len),
+        },
+        .payload = payload,
+    });
+    fixture.client.pending_event_bytes = payload.len;
+    var storage: ExternalPumpStorage = .{};
+    try std.testing.expect(
+        initTestStorage(&storage, &fixture.client, valid_evidence) ==
+            .initialized,
+    );
+    probe.storage = &storage;
+    probe.source = &storage.owned_client.?;
+    probe.mode = .prepare_preflight_oom_drift;
+
+    try std.testing.expect(
+        prepareAdoptionForTest(&storage) == .terminal_latched,
+    );
+    try std.testing.expect(!probe.fired);
+    try std.testing.expectEqual(StorageLifecycle.dead, storage.lifecycle);
+    try std.testing.expect(!crossOwnerQuarantineStatus().latched);
     try std.testing.expect(storage.inbox_ledger.accountingView().pristine_zero);
 }
 
@@ -4876,7 +5754,7 @@ test "external pump teardown ignores forged prepared lifecycle tombstones" {
         initTestStorage(&storage, &fixture.client, valid_evidence) ==
             .initialized,
     );
-    try std.testing.expect(storage.prepareAdoption() == .prepared);
+    try std.testing.expect(prepareAdoptionForTest(&storage) == .prepared_adopted);
     storage.prepared_adoption.lifecycle = .committed_tombstone;
     storage.prepared_adoption.backlog.client_disarm.lifecycle = @enumFromInt(3);
     try std.testing.expectEqual(TeardownResult.cleaned, storage.teardown());
@@ -4959,9 +5837,9 @@ test "external pump retries the same storage at every adoption allocation index"
         const parser_major = storage.owned_client.?.parser.expected_major;
 
         failing.fail_index = failing.alloc_index + fail_offset;
-        const first = storage.prepareAdoption();
+        const first = prepareAdoptionForTest(&storage);
         if (!failing.has_induced_failure) {
-            try std.testing.expect(first == .prepared);
+            try std.testing.expect(first == .prepared_adopted);
             try std.testing.expect(storage.prepared_adoption.validate(&storage));
             break;
         }
@@ -5013,7 +5891,7 @@ test "external pump retries the same storage at every adoption allocation index"
         _ = try client_external_adoption.preflightMetadata(&storage.owned_client.?, 7);
 
         failing.fail_index = std.math.maxInt(usize);
-        try std.testing.expect(storage.prepareAdoption() == .prepared);
+        try std.testing.expect(prepareAdoptionForTest(&storage) == .prepared_adopted);
         try std.testing.expect(storage.prepared_adoption.validate(&storage));
         if (fail_offset > 128) return error.TestUnexpectedResult;
     }
@@ -5041,7 +5919,7 @@ test "external pump authority seed permits only verified frozen untracked contro
         ) == .initialized,
     );
     defer _ = frozen_storage.teardown();
-    try std.testing.expect(frozen_storage.prepareAdoption() == .prepared);
+    try std.testing.expect(prepareAdoptionForTest(&frozen_storage) == .prepared_adopted);
     try std.testing.expect(
         frozen_storage.prepared_adoption.source_decision.?.verdict.adopted
             .authority.generation == .untracked,
@@ -5099,12 +5977,12 @@ test "external pump authority seed table preserves protocol and invariant classe
     defer fixture.client.deinit();
     const client = &fixture.client;
     try std.testing.expectEqual(
-        TerminalPrepareReason.protocol,
-        mapAuthorityError(error.ProtocolAuthority).terminal,
+        client_pump.TerminalReason.protocol_error,
+        terminalReasonForAuthorityError(error.ProtocolAuthority),
     );
     try std.testing.expectEqual(
-        TerminalPrepareReason.internal_invariant,
-        mapAuthorityError(error.InvariantAuthority).terminal,
+        client_pump.TerminalReason.invariant_failure,
+        terminalReasonForAuthorityError(error.InvariantAuthority),
     );
 
     const current_profile = client.compatibility_profile.?;

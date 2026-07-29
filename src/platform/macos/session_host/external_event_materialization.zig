@@ -369,6 +369,30 @@ pub const OwnerMetadataState = struct {
     }
 };
 
+/// Publishes the allocation-free metadata baseline used by immediate recovery. Keeping this
+/// constructor beside validation/cleanup prevents the pump from duplicating owner lifecycle
+/// fields when the state grows new lease metadata.
+pub fn commitRecoveryBaseline(
+    destination: *OwnerMetadataState,
+    storage_addr: usize,
+    source_addr: usize,
+    support: runtime_metadata_wire.MetadataSupport,
+) bool {
+    if (!destination.isEmpty() or storage_addr == 0 or source_addr == 0)
+        return false;
+    destination.* = .{
+        .saved_self_addr = @intFromPtr(destination),
+        .storage_addr = storage_addr,
+        .source_addr = source_addr,
+        .metadata = switch (support) {
+            .unsupported => .unsupported,
+            .supported => .unavailable,
+        },
+        .lifecycle = .committed,
+    };
+    return destination.isCommitted();
+}
+
 const OwnerMetadataTakeKind = enum {
     unsupported,
     unavailable,

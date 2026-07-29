@@ -1090,15 +1090,24 @@ pub fn build(b: *std.Build) void {
         const macos_app_smoke_step = b.step("macos-app-smoke", "Run the macOS Swift app host app shell smoke");
         const macos_app_smoke_fixture = b.addSystemCommand(&.{
             "sh", "-eu", "-c",
+            // 스모크 전용 HOME을 매번 비운다. 사용자 HOME을 쓰면 실제 workspace가 복원되면서 그 창에
+            // 저장돼 있던 파일 패널이 함께 열리고, probe가 스모크 대상이 아닌 패널을 보게 되어 결과가
+            // 실행마다 달라진다(실제로 파일 패널 단언이 전부 pending으로 떨어졌다). 사용자 데이터를
+            // 건드리지 않기 위해서도 격리가 맞다.
             "mkdir -p zig-out/maru-macos-app; " ++
+                "rm -rf zig-out/maru-macos-app/home; mkdir -p zig-out/maru-macos-app/home; " ++
                 "cp tests/fixtures/file-panel/fp4-viewer.md zig-out/maru-macos-app/markdown-preview.md; " ++
                 "cp tests/fixtures/file-panel/fixture.svg zig-out/maru-macos-app/fixture.svg",
         });
         macos_app_smoke_fixture.setCwd(b.path("."));
         const macos_app_smoke = b.addSystemCommand(&.{"./zig-out/Maru.app/Contents/MacOS/maru-macos-app"});
         macos_app_smoke.setCwd(b.path("."));
-        macos_app_smoke.setEnvironmentVariable("MARU_MACOS_APP_SMOKE_MS", "15000");
+        // 읽기 모드에서 Mermaid helper cold 왕복(최대 5초)을 기다린 뒤 소스 모드로 전환해 편집·저장까지 가므로
+        // 예산을 넉넉히 준다. 15초는 cold helper가 느린 러너에서 편집 단계를 잘라 false-fail을 낸다.
+        macos_app_smoke.setEnvironmentVariable("MARU_MACOS_APP_SMOKE_MS", "30000");
         macos_app_smoke.setEnvironmentVariable("MARU_FILE_PANEL_EDIT_SMOKE", "1");
+        macos_app_smoke.setEnvironmentVariable("HOME", b.pathFromRoot("zig-out/maru-macos-app/home"));
+        macos_app_smoke.setEnvironmentVariable("CFFIXED_USER_HOME", b.pathFromRoot("zig-out/maru-macos-app/home"));
         macos_app_smoke.setEnvironmentVariable("MARU_FILE_PANEL", b.pathFromRoot("zig-out/maru-macos-app/markdown-preview.md"));
         // 5c-2c: bare 실행파일(비-번들)은 Bundle.main.resourceURL/web가 없으므로, maru-app:// resolve 정책 C-ABI 링크를
         // 소스 asset root로 검증하게 override를 준다(스킴 핸들러 정책은 root 무관하게 그 아래로 샌드박스). docs/web-panel.md §7.1 ⑤.

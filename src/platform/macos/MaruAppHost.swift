@@ -2423,7 +2423,7 @@ final class FilePanelEditingSmokeProbe {
         JSON.stringify({
           editor: document.querySelector('.cm-content')?.textContent?.includes('FP4 viewer fixture') === true,
           previewImages: document.querySelectorAll('iframe').length,
-          mermaidRequest: document.getElementById('viewer-status')?.dataset.mermaidRequestState || 'pending',
+          mermaidRequest: document.getElementById('viewer-status')?.dataset.mermaidRequest || 'pending',
           editorEpoch: Number(document.getElementById('viewer-status')?.dataset.editorEpoch || '0'),
           // §2.3 터미널 테마 syntax 색이 실제 문서에 주입됐는지. inline style만 읽으므로 app.css의 :root 폴백은
           // 잡히지 않는다 — 값이 있으면 native `applySyntaxThemeStyle`이 실제로 도달했다는 뜻이다.

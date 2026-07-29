@@ -934,7 +934,7 @@ pub fn build(b: *std.Build) void {
             "sh", "-eu", "-c",
             // set -e로 어느 단계든 실패하면 즉시 멈춘다. 폰트가 없는 clean checkout에서 glob이
             // 빈 채 cp가 조용히 실패하지 않도록, 번들 전에 .ttf 존재를 명시적으로 확인하고 명확한
-            // 에러를 낸다. 번들은 매 실행 새로 만들어지므로 stale resource는 생기지 않는다.
+            // 에러를 낸다.
             "ttfs=$(ls assets/fonts/*/*.ttf 2>/dev/null) || true; " ++
                 "[ -n \"$ttfs\" ] || { echo 'error: no .ttf under assets/fonts/*/ (font assets missing)' >&2; exit 1; }; " ++
                 // 기본 폰트(JetBrains Mono)는 항상 있어야 한다(config 기본값 theme.zig). 누락이면 self-contained 보장이 깨진다.
@@ -987,6 +987,14 @@ pub fn build(b: *std.Build) void {
         macos_app_bundle.setCwd(b.path("."));
         macos_app_bundle.step.dependOn(&macos_app_compile.step);
         macos_app_bundle.step.dependOn(&macos_mermaid_helper_bundle.step);
+        // web/dist·폰트 같은 입력은 zig build가 추적하는 인자가 아니라, side effect를 선언하지 않으면
+        // "인자가 그대로다"라는 이유로 이 스텝이 통째로 스킵된다. 그러면 web을 고치고 앱을 빌드해도 번들 안
+        // Resources/web은 옛 bundle.js로 남아, 제품이 조용히 구버전 웹앱을 실행한다(실제로 겪었다).
+        macos_app_bundle.has_side_effects = true;
+        // `macos-app-build`는 이름 그대로 **실행 가능한** 앱을 만들어야 한다. 컴파일만 걸어 두면 이 step이
+        // 성공해도 zig-out/Maru.app은 옛 번들 그대로라, 그걸 열어 본 사람은 자기 변경이 사라졌다고 여긴다
+        // (실제로 겪었다 — web을 고치고 이 step을 돌린 뒤 구버전 웹앱이 뜨는 앱을 열었다).
+        macos_app_build_step.dependOn(&macos_app_bundle.step);
         macos_app_bundle.step.dependOn(&file_panel_web_build.step);
         macos_app_bundle.step.dependOn(b.getInstallStep()); // zig-out/bin/maru(CLI) 빌드·설치 보장 — 번들 cp의 선행조건
 

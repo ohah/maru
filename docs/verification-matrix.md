@@ -27,6 +27,21 @@
 > authority barrier 순으로 진행한다. 네 단계 전체의 Debug/ReleaseFast component, 실제 socketpair
 > syscall-order 및 payload/ledger final-zero가 green이기 전에는 2b2d2 완료로 표시하지 않는다.
 > d1 helper와 `client_pump.decide` unit fixture만으로 d2 product 경로를 구현했다고 간주하지 않는다.
+> d2b는 d2b1(policy/readiness/whole-turn lease/O(1) inherited snapshot),
+> d2b2(compact provenance/all-or-none ledger live batch), d2b3(persistent owners/intent scratch/buffered
+> traversal/terminal-dominant aggregate commit)의 세 merge slice다. 세 slice 전체가 green이기 전에는 d2b 완료로
+> 표시하지 않는다. 단건 prepared mutation을 순차 commit하거나 기존 callback-owning `mergeInto`를 d2에서 직접
+> 호출한 증거는 aggregate atomicity 증명이 아니다.
+> d2b1은 terminal/deadline 우선 blocker 표, parser readiness 1/31/32와 64/65, stale/copy/cross-turn
+> snapshot 및 committed/live screen summary lifecycle을 검증한다. d2b2는 compact range exact/cap/cap+1,
+> old-end continuation과 overflow, ledger identity A→B→A 거부, provenance의 validate/relabel/merge/view/digest
+> migration, 1/2/64 mutation fail-index all-or-none, legacy merge/release wrapper와 final-root disposition replay를
+> 검증한다. d2b3은 1/64 completed screen의 token-only FIFO, cap+1 pre-consume 거부, partial/response exact-one
+> owner, late terminal 전체 abort, callback-free FIFO advance/tombstone 선행, aggregate retirement callback
+> 재진입과 count/byte cap을 검증한다. storage teardown은 live token을 별도 release하지 않고 기존 canonical
+> screen/metadata/client/evidence/ledger freeze graph에 partial/response/live-screen owner를 함께 넣어 모든 owner
+> tombstone 뒤 frozen local cleanup만 실행하는지와 final-zero를 검증한다.
+> full `RxRange`를 4,096 slot에 저장하는 구현이나 `ExternalPumpStorage` 512 KiB inline cap 증가는 허용하지 않는다.
 >
 > c3b 행의 `descriptor/len/cap/alias ABA`는 최종 상태 drift/stale-plan 검출을 뜻한다. A→B→A
 > mutate-restore 이력이나 동일 주소·길이·byte allocator 재사용 검출을 주장하지 않는다. c3b는 판정과 준비물까지만

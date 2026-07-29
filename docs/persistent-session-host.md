@@ -2714,6 +2714,10 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
               | `completed` | `.completed(BatchSemantic{stream_id!=0,is_snapshot,recovery_intent})` |
               | `lease` | `.lease(BatchSemantic{stream_id!=0,is_snapshot,recovery_intent})` |
 
+              d2b2는 이 union/tag를 바꾸지 않고 `PartialSemantic`/`BatchSemantic`에
+              `StoredRxBatchProvenance`를 추가한다. c1 seed/adopted/GUI 값은 기본 `.untracked`라 기존 phase와
+              recovery 의미가 그대로이고, external live admission만 compact `.external`을 요구한다.
+
               slot에는 별도 phase field를 두지 않고 union tag로만 phase를 파생한다. header의
               길이·stream/request/flags가 canonical 조건과 다르면 `InvalidSemantic`이며 mutation 0이다.
               target stream 및 `owned_client.wire_major`와의 exact 일치는 ledger가 추측하지 않고 c2 inventory가
@@ -2797,9 +2801,11 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
               replacement allocation을 take하고 caller `replacement.*`를 canonical empty tombstone으로 만든 뒤
               old dst/src allocation을 exact-once free하며 src slot을 inactive로 만들어
               byte charge 불변/item 1 감소를 allocation 없이 commit한다. zero-length payload는 pointer alias가
-              없으므로 alias 검사에서 제외한다. ledger가 소유한 allocator/free callback은
-              비재진입 계약이며 seed commit에는 callback이 없고 merge는 두 old payload를 locals로 detach하고
-              slot/counter/generation을 먼저 무실패 commit한 뒤 exact free한다.
+              없으므로 alias 검사에서 제외한다. d2b2 이후 이 public API는 아래 `PreparedLiveBatch`의
+              single-operation compatibility wrapper다. 같은 checked batch commit leaf가 old dst/src authority를
+              `PreparedLiveRetirement`으로 detach하고 slot/counter/generation을 먼저 무실패 commit한 뒤 wrapper가
+              retirement를 exact once 실행한다. 별도 legacy unchecked writer나 allocator callback-owning mutation
+              leaf는 남기지 않는다.
 
               `drainAll()`은 시작 시 one-way `draining_or_drained` latch를 먼저 세우고 descriptor를 신뢰하지
               않은 채 **모든 slot**을 직접 순회해 active 여부와 무관하게 non-null payload를
@@ -5155,7 +5161,13 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
               storage seal과 ledger `PartialSemantic.provenance`를 검증한 뒤 최소 `ValidatedPartialView` 값을 만들며,
               production classifier callsite는 이 validator 직후 exact one으로 제한한다.
 
-            - **d2b — buffered-only bounded turn:** socket callback을 호출하지 않는다. sealed inherited blocker가
+            - **d2b — buffered-only bounded turn:** 이 gate는 구현·리뷰 크기를 제한하되 완료 범위를 줄이지 않는
+              세 merge slice로 닫는다. **d2b1**은 pure policy, parser readiness, whole-turn lease와 O(1)
+              inherited blocker snapshot, **d2b2**는 compact provenance와 all-or-none ledger live batch,
+              **d2b3**은 persistent partial/response owner, caller-owned intent scratch, buffered traversal과
+              terminal-dominant aggregate commit이다. d2b1~3 전체가 green이기 전에는 d2b 완료로 표시하지 않는다.
+
+              socket callback을 호출하지 않는다. sealed inherited blocker가
               있으면 기존 consumer/projector wake만 반환하고 parser outcome도 처리하지 않는다. blocker가 없을 때
               parser의 이미 complete한 known/optional frame을 처리한다. known과 optional skipped outcome은 각각
               하나의 공통 RX work budget을 소비하며 turn당 최대 64개다. 64번째 뒤 complete
@@ -5164,18 +5176,98 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
               complete parser backlog는 처리한다. adoption 중 revoke/ended/invalidated는 c3 reducer가 이미
               terminal/recovery authority로 접었으므로 d2가 raw inherited event로 다시 해석하지 않는다.
 
+              terminal/deadline 판정은 inherited blocker보다 먼저다. 이미 terminal이거나
+              `now_ns >= minimumDeadline`이면 `inherited_work_ready=false`인 terminal 결과를 반환한다. 그 외
+              inherited blocker가 하나라도 있으면 `inherited_work_ready=true`, `immediate_rx=false`,
+              `read_interest=false`, `authority_clear=false`, parser outcome/socket/ledger/TX mutation 0이다.
+              authority owner는 blocker bool이 아니다. `owner_authority`와 generation seal은 snapshot validity에
+              반드시 포함하지만 `initial_fence`는 RX traversal을 막지 않는다. 대신 d2d/f3 authority permit 생성이
+              flow `.clear` 전에는 실패한다. 이 구분으로 아직 initial-fence consumer가 없는 d2b가 영구 정지하지
+              않으면서도 lower mutation authority를 조기 부여하지 않는다.
+
+              d1은 raw parser storage를 노출하지 않고 다음 mutation-0 readiness leaf를 제공한다.
+
+              ```zig
+              const RxParserReadiness = enum {
+                  empty,
+                  incomplete,
+                  complete_or_error,
+              };
+
+              pub fn parserReadiness(
+                  state: *const client_external_mode.State,
+                  parser: *const framing.FrameParser,
+              ) client_external_mode.RxParseError!RxParserReadiness;
+              ```
+
+              이 leaf는 parser/provenance seal, buffered absolute count, header 1/31/32-byte와 payload length/cap을
+              검증한다. complete known/optional frame뿐 아니라 complete required-unknown, malformed header,
+              major/cap 오류도 `.complete_or_error`다. incomplete은 consume/range 0이며 64번째 outcome 뒤 이
+              leaf만 호출해 65번째를 소비하지 않고 backlog를 판정한다. invalid descriptor/seal/counter는 typed
+              error이고 outer turn이 invariant/protocol terminal로 접는다.
+
               d2b가 추가하는 persistent/turn-local authority의 normative shape는 다음과 같다. 실제 field type은
               기존 owner seal/ledger token을 재사용하되 address, generation, lifecycle과 digest를 생략하지 않는다.
 
               ```zig
-              const InheritedRxBlockerSnapshot = struct {
+              const ExternalWholeTurnLease = struct {
+                  saved_self_addr: usize,
                   storage_addr: usize,
+                  operation_generation: u64,
+                  lifecycle: enum { empty, acquired, released, aborted },
+                  digest: external_owner_seal.Digest,
+              };
+
+              const ScreenPendingSummarySeal = struct {
+                  screen_owner_addr: usize,
+                  storage_addr: usize,
+                  owner_incarnation: u64,
+                  retained_count: usize,
+                  committed: bool,
+                  generation: u64,
+                  digest: external_owner_seal.Digest,
+              };
+
+              const InheritedRxBlockerSnapshot = struct {
+                  saved_self_addr: usize,
+                  storage_addr: usize,
+                  lease_addr: usize,
+                  operation_generation: u64,
                   committed_screen_pending: bool,
+                  live_screen_pending: bool,
                   metadata_projection_pending: bool,
                   resize_projection_pending: bool,
+                  response_correlation_pending: bool,
                   authority_generation: AuthorityGeneration,
+                  generation: u64,
+                  lifecycle: enum { empty, prepared, consumed, aborted },
                   owner_digest: external_owner_seal.Digest,
               };
+
+              fn acquireWholeTurnLease(
+                  self: *ExternalPumpStorage,
+                  out: *ExternalWholeTurnLease,
+                  scratch_addr: usize,
+                  scratch_len: usize,
+              ) AccessError!void;
+              fn validateWholeTurnLease(
+                  self: *const ExternalPumpStorage,
+                  lease: *const ExternalWholeTurnLease,
+              ) bool;
+              fn releaseWholeTurnLease(
+                  self: *ExternalPumpStorage,
+                  lease: *ExternalWholeTurnLease,
+              ) void;
+              fn snapshotInheritedRxBlockersUnderHeldLease(
+                  self: *const ExternalPumpStorage,
+                  lease: *const ExternalWholeTurnLease,
+                  out: *InheritedRxBlockerSnapshot,
+              ) AccessError!void;
+              fn validateAndConsumeInheritedSnapshot(
+                  self: *const ExternalPumpStorage,
+                  lease: *const ExternalWholeTurnLease,
+                  snapshot: *InheritedRxBlockerSnapshot,
+              ) AccessError!bool;
 
               const LivePartialBatch = union(enum) {
                   none,
@@ -5185,6 +5277,17 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
                       owner_digest: external_owner_seal.Digest,
                   },
                   terminal,
+              };
+
+              const LiveScreenBacklog = struct {
+                  saved_self_addr: usize,
+                  storage_addr: usize,
+                  tokens: [64]external_inbox_ledger.Token,
+                  head: u8,
+                  len: u8,
+                  generation: u64,
+                  lifecycle: enum { empty, active, terminal, cleaned_tombstone },
+                  owner_digest: external_owner_seal.Digest,
               };
 
               const LivePartialSnapshot = struct {
@@ -5212,10 +5315,63 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
                   terminal,
               };
 
+              const PreparedLiveOwnerTeardown = struct {
+                  saved_self_addr: usize,
+                  storage_addr: usize,
+                  known_ledger_tokens: [65]external_inbox_ledger.Token,
+                  known_token_count: u8,
+                  partial_owner_digest: external_owner_seal.Digest,
+                  screen_owner_digest: external_owner_seal.Digest,
+                  response_owner_digest: external_owner_seal.Digest,
+                  lifecycle: enum { empty, prepared, frozen, aborted },
+                  digest: external_owner_seal.Digest,
+              };
+
+              const FrozenClassifiedIntentCleanup = struct {
+                  allocator: std.mem.Allocator,
+                  addr: usize,
+                  len: usize,
+                  payload_digest: external_owner_seal.Digest,
+                  cleanup_digest: external_owner_seal.Digest,
+              };
+
+              const FrozenLiveOwnerCleanup = struct {
+                  saved_self_addr: usize,
+                  response_cleanup: ?FrozenClassifiedIntentCleanup,
+                  lifecycle: enum { empty, frozen, cleaned_tombstone, quarantined },
+                  digest: external_owner_seal.Digest,
+              };
+
+              // Normative additions to the existing canonical teardown scratch.
+              const ExternalPumpCleanupScratch = struct {
+                  live_prepared: PreparedLiveOwnerTeardown,
+                  live_frozen: FrozenLiveOwnerCleanup,
+              };
+
               // All declarations below live in external_inbox_ledger.zig.
-              pub const RxBatchProvenance = union(enum) {
+              // One external pump has one attach identity; storing it once avoids copying a
+              // 32-byte RxRange into all 4,096 inline slots.
+              pub const CompactExternalRange = struct {
+                  start_absolute: u64,
+                  span: u32,
+              };
+
+              pub const StoredRxBatchProvenance = union(enum) {
+                  untracked,
+                  external: CompactExternalRange,
+              };
+
+              pub const ObservedRxBatchProvenance = union(enum) {
                   untracked,
                   external: external_rx_types.RxRange,
+              };
+
+              pub const LedgerExternalIdentitySeal = struct {
+                  ledger_addr: usize = 0,
+                  identity: ?external_rx_types.RxIdentity = null,
+                  generation: u64 = 0,
+                  lifecycle: enum { empty, bound, drained_tombstone } = .empty,
+                  digest: owner_seal.Digest = [_]u8{0} ** 32,
               };
 
               pub const PartialSemantic = struct {
@@ -5223,24 +5379,82 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
                   is_snapshot: bool,
                   chunk_count: u8,
                   recovery_intent: RecoveryIntent = .none,
-                  provenance: RxBatchProvenance = .untracked,
+                  provenance: StoredRxBatchProvenance = .untracked,
               };
 
               pub const BatchSemantic = struct {
                   stream_id: u64,
                   is_snapshot: bool,
                   recovery_intent: RecoveryIntent = .none,
-                  provenance: RxBatchProvenance = .untracked,
+                  provenance: StoredRxBatchProvenance = .untracked,
               };
 
-              // PayloadSemantic.frame remains protocol.Header without batch provenance.
-              // partial uses PartialSemantic; completed/lease share BatchSemantic.
+              pub const ObservedPartialSemantic = struct {
+                  stream_id: u64,
+                  is_snapshot: bool,
+                  chunk_count: u8,
+                  recovery_intent: RecoveryIntent = .none,
+                  provenance: ObservedRxBatchProvenance = .untracked,
+              };
+
+              pub const ObservedBatchSemantic = struct {
+                  stream_id: u64,
+                  is_snapshot: bool,
+                  recovery_intent: RecoveryIntent = .none,
+                  provenance: ObservedRxBatchProvenance = .untracked,
+              };
+
+              pub const PayloadSemantic = union(PayloadPhase) {
+                  frame: protocol.Header,
+                  partial: PartialSemantic,
+                  completed: BatchSemantic,
+                  lease: BatchSemantic,
+              };
+
+              pub const ObservedPayloadSemantic = union(PayloadPhase) {
+                  frame: protocol.Header,
+                  partial: ObservedPartialSemantic,
+                  completed: ObservedBatchSemantic,
+                  lease: ObservedBatchSemantic,
+              };
+
+              pub const PayloadView = struct {
+                  phase: PayloadPhase,
+                  semantic: ObservedPayloadSemantic,
+                  bytes: []const u8,
+              };
+
+              pub const BatchView = struct {
+                  is_snapshot: bool,
+                  stream_id: u64,
+                  provenance: ObservedRxBatchProvenance,
+                  bytes: []const u8,
+              };
+
+              // Sole persistent SSOT for external identity. There is no parallel raw
+              // identity/generation/lifecycle scalar in ExternalInboxLedger.
+              pub const ExternalInboxLedger = struct {
+                  // Existing fields are unchanged except for this sealed field and the
+                  // StoredRxBatchProvenance additions in slot semantics.
+                  external_identity_seal: LedgerExternalIdentitySeal = .{},
+              };
+
+              // PayloadSemantic.frame remains protocol.Header. partial uses
+              // PartialSemantic; completed/lease share BatchSemantic. Public PayloadView
+              // uses ObservedPayloadSemantic and BatchView carries observed provenance;
+              // both expand through the ledger-bound external identity.
               // First external chunk fixes start; continuation preserves identity/start and
               // replaces only end_absolute with its checked range end.
+
+              pub const LiveTokenRef = union(enum) {
+                  existing: Token,
+                  planned: u8,
+              };
 
               const PreparedLiveAdmission = struct {
                   saved_self_addr: usize,
                   ledger_addr: usize,
+                  batch_addr: usize,
                   semantic: PayloadSemantic,
                   owned_payload: OwnedPayload,
                   expected_accounting_digest: owner_seal.Digest,
@@ -5252,25 +5466,61 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
               const PreparedLiveMerge = struct {
                   saved_self_addr: usize,
                   ledger_addr: usize,
-                  destination_token: Token,
+                  batch_addr: usize,
+                  destination: LiveTokenRef,
                   expected_destination_generation: u64,
                   next_semantic: PayloadSemantic,
-                  source_payload: OwnedPayload,
-                  replacement_payload: OwnedPayload,
+                  source: PreparedLiveMergeSource,
+                  replacement: PreparedLiveReplacement,
                   expected_accounting_digest: owner_seal.Digest,
                   expected_destination_digest: owner_seal.Digest,
                   lifecycle: enum { empty, prepared, committed, aborted },
                   digest: owner_seal.Digest,
               };
 
+              const PreparedLiveMergeSource = union(enum) {
+                  owned: OwnedPayload,
+                  existing: LiveTokenRef,
+              };
+
+              const PreparedLiveReplacement = union(enum) {
+                  coalesced,
+                  prebuilt: OwnedPayload,
+              };
+
+              const PreparedLiveRelease = struct {
+                  saved_self_addr: usize,
+                  ledger_addr: usize,
+                  batch_addr: usize,
+                  token: LiveTokenRef,
+                  expected_phase: PayloadPhase,
+                  expected_token_generation: u64,
+                  expected_accounting_digest: owner_seal.Digest,
+                  expected_token_digest: owner_seal.Digest,
+                  lifecycle: enum { empty, prepared, committed, aborted },
+                  digest: owner_seal.Digest,
+              };
+
+              pub const FinalLiveRoot = struct {
+                  token: Token,
+                  phase: enum { partial, completed },
+              };
+
+              pub const LiveCommitDisposition = union(enum) {
+                  unused,
+                  final_live: FinalLiveRoot,
+                  superseded_tombstone,
+              };
+
               pub const PreparedLiveRetirement = struct {
                   saved_self_addr: usize,
-                  old_destination: OwnedPayload,
-                  incoming_source: OwnedPayload,
-                  old_cleanup: FrozenPayloadCleanup,
-                  incoming_cleanup: FrozenPayloadCleanup,
-                  published_replacement_addr: usize,
-                  published_replacement_len: usize,
+                  cleanup_owners: [128]OwnedPayload,
+                  cleanup_plans: [128]FrozenPayloadCleanup,
+                  cleanup_count: u8,
+                  cleanup_bytes: usize,
+                  published_replacements: [64]FrozenPayloadRange,
+                  replacement_count: u8,
+                  replacement_bytes: usize,
                   lifecycle: enum { empty, prepared, retired, quarantined },
                   digest: owner_seal.Digest,
 
@@ -5285,47 +5535,176 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
                   digest: owner_seal.Digest,
               };
 
+              const FrozenPayloadRange = struct {
+                  addr: usize,
+                  len: usize,
+              };
+
               pub const PreparedLiveMutation = union(enum) {
                   empty,
                   admission: PreparedLiveAdmission,
                   merge: PreparedLiveMerge,
+                  release: PreparedLiveRelease,
                   committed,
                   aborted,
               };
 
+              pub const PreparedLiveBatch = struct {
+                  saved_self_addr: usize,
+                  ledger_addr: usize,
+                  allocator: std.mem.Allocator,
+                  sealed_allocator: std.mem.Allocator,
+                  expected_mutation_epoch: u64,
+                  expected_accounting_digest: owner_seal.Digest,
+                  expected_external_identity: ?external_rx_types.RxIdentity,
+                  mutations: [64]PreparedLiveMutation,
+                  mutation_count: u8,
+                  coalesced_replacements: [64]OwnedPayload,
+                  replacement_count: u8,
+                  replacement_bytes: usize,
+                  accepted_source_bytes: usize,
+                  expected_next_generation: u64,
+                  expected_generation_exhausted: bool,
+                  expected_next_slot_hint: usize,
+                  expected_charged_bytes: usize,
+                  expected_charged_items: usize,
+                  lifecycle: enum { empty, preparing, prepared, committed, aborted },
+                  digest: owner_seal.Digest,
+              };
+
+              pub fn beginLiveBatch(
+                  self: *ExternalInboxLedger,
+                  out: *PreparedLiveBatch,
+                  allocator: std.mem.Allocator,
+                  external_identity: ?external_rx_types.RxIdentity,
+              ) PrepareLiveError!void;
+
               pub fn prepareLiveAdmission(
                   self: *ExternalInboxLedger,
-                  out: *PreparedLiveMutation,
+                  batch: *PreparedLiveBatch,
                   semantic: PayloadSemantic,
                   payload: *OwnedPayload,
-              ) PrepareLiveError!void;
+              ) PrepareLiveError!LiveTokenRef;
               pub fn prepareLiveMerge(
                   self: *ExternalInboxLedger,
-                  out: *PreparedLiveMutation,
-                  destination: Token,
+                  batch: *PreparedLiveBatch,
+                  destination: LiveTokenRef,
                   next_semantic: PayloadSemantic,
-                  source_payload: *OwnedPayload,
+                  source: *PreparedLiveMergeSource,
+                  replacement: *PreparedLiveReplacement,
               ) PrepareLiveError!void;
-              pub fn commitPreparedLiveMutation(
+              pub fn prepareLiveRelease(
                   self: *ExternalInboxLedger,
-                  prepared: *PreparedLiveMutation,
+                  batch: *PreparedLiveBatch,
+                  token: LiveTokenRef,
+                  expected_phase: PayloadPhase,
+              ) PrepareLiveError!void;
+              pub fn finishLiveBatch(
+                  self: *ExternalInboxLedger,
+                  batch: *PreparedLiveBatch,
+              ) PrepareLiveError!void;
+              pub fn commitPreparedLiveBatch(
+                  self: *ExternalInboxLedger,
+                  batch: *PreparedLiveBatch,
                   retirement: *PreparedLiveRetirement,
-              ) CommitLiveError!Token;
-              pub fn abortPreparedLiveMutation(
+                  dispositions: *[64]LiveCommitDisposition,
+              ) CommitLiveError!u8;
+              fn commitPreparedLegacyMerge(
                   self: *ExternalInboxLedger,
-                  prepared: *PreparedLiveMutation,
+                  batch: *PreparedLiveBatch,
+                  retirement: *PreparedLiveRetirement,
+                  token_out: *Token,
+              ) CommitLiveError!void;
+              fn commitPreparedLegacyRelease(
+                  self: *ExternalInboxLedger,
+                  batch: *PreparedLiveBatch,
+                  retirement: *PreparedLiveRetirement,
+              ) CommitLiveError!void;
+              pub fn abortPreparedLiveBatch(
+                  self: *ExternalInboxLedger,
+                  batch: *PreparedLiveBatch,
               ) AbortLiveResult;
               pub fn partialSnapshot(
                   self: *const ExternalInboxLedger,
                   token: Token,
-              ) InvariantError!PartialSemantic;
+              ) InvariantError!ObservedPartialSemantic;
               ```
 
+              `ExternalWholeTurnLease`는 d2b1에서 조기 도입한다. 기존 process-thread
+              `active_external_operation_addr`의 typed final-address 표현이며, acquire가
+              `operation_generation`을 checked 증가시킨 뒤 storage/scratch와 함께 seal한다. blocker snapshot은
+              acquired lease 아래에서만 만들고 parser 첫 readiness/outcome 직전에 exact once
+              `validateAndConsumeInheritedSnapshot`으로 재검증한다. 이 검증은 storage/lease/operation generation,
+              owner incarnation, screen pending summary seal, metadata scalar seal, resize seal, authority seal과
+              generation, live screen FIFO seal/head/len을 다시 비교한다. copied/moved/stale/double/cross-storage/cross-turn snapshot은
+              parser/socket/ledger mutation 0으로 terminal이다. blocker=true snapshot도 consumer wake 관측값일 뿐
+              owner clear/release permit이 아니다.
+
+              committed screen hot path는 token/backing 4,096개를 매 turn 순회하지 않는다.
+              `ScreenPendingSummarySeal`은 committed publish와 `consumeScreenRetained`의 no-callback suffix에서만
+              generation을 증가시켜 reseal하며 `retained_count != 0`을 O(1)로 증명한다. metadata는 기존 sealed
+              `current.pending`, resize는 `OwnerResizeSeal.pending`, authority는 `OwnerAuthoritySeal`의 generation과
+              flow를 각각 held-lease private leaf로 검증한다. raw owner field를 generic public peek로 노출하거나
+              기존 consumer/projector 대신 d2가 retire하는 경로는 없다.
+              summary는 storage 초기화와 모든 prepare/failpoint에서 canonical empty다. adopted backlog commit 때
+              exact owner incarnation/count로 bind하고, retained token을 하나 소비할 때마다 count를 줄여 reseal하며
+              마지막 token 뒤에는 pending=false를 봉인한다. owner가 moved/quarantined/terminal이 되거나
+              teardown/typed cleanup이 시작되면 기존 generation을 다시 유효하게 만들지 않는 canonical tombstone으로
+              전이한다. cleanup 실패도 이전 committed seal을 남기지 않는다. `CommittedScreenBacklog`의 lifecycle과
+              summary lifecycle이 어긋나면 inherited snapshot 생성 자체가 terminal이다.
+
               `LivePartialBatch`는 `ExternalPumpStorage`의 persistent single owner이며 turn scratch에 저장하지 않는다.
+              완성된 live screen batch는 adoption 전용 backing에 억지로 append하지 않는다.
+              `LiveScreenBacklog`은 같은 storage 안의 **token-only FIFO**이고 payload/semantic/range/allocator를
+              복제하지 않는다. ledger slot이 유일한 payload SSOT이며 이 FIFO는 한 buffered turn에서 완성될 수 있는
+              최대 64개 token만 가진다. inherited `CommittedScreenBacklog`을 먼저 소비한 뒤 live FIFO를 소비한다.
+              둘 중 하나라도 pending이면 다음 RX turn은 blocker다. consumer는 head token 하나를 처리할 때도
+              callback-owning release 뒤 FIFO를 갱신하는 순차 API를 쓰지 않는다. held owner lease에서 token/phase/FIFO seal을 전검증하고
+              `prepareLiveRelease`로 ledger release를 준비한다. callback-free ledger commit과
+              FIFO head/len/generation reseal(마지막이면 canonical empty tombstone)을 **같은 no-fail suffix**에서
+              끝낸 뒤 aggregate retirement를 full tombstone하고 frozen cleanup callback을 실행한다. callback 이후
+              FIFO/token array를 다시 읽지 않으며 live consumer가 legacy callback-owning `release()`를 직접 부르는
+              callsite는 boundary gate상 0이다. exact cap의 64번째 완성은 허용하고
+              cap+1은 parser outcome을 소비하기 전에 blocker/resource terminal로 판정한다. copied/stale token,
+              non-completed phase, duplicate slot/generation, ring ABA와 head/len overflow는 projection 0 terminal이다.
+              **storage teardown은 위 단건 consume 경로와 다르며 별도 live batch release를 실행하지 않는다.**
+              기존 `ExternalPumpStorage.teardownUnderHeldOperationLease`의 canonical aggregate graph에 세 live
+              owner를 편입한다. prepare 단계가 `LivePartialBatch`의 최대 1개와 `LiveScreenBacklog`의 최대 64개
+              token을 `PreparedLiveOwnerTeardown.known_ledger_tokens`에 freeze하고, 기존 screen token plan과
+              합쳐 ledger `prepareFreezeAllForOwnerTeardown`의 known-owner 집합으로 검증한다. ledger 전체
+              freeze가 이 payload cleanup을 독점하므로 token별 `prepareLiveRelease`/legacy `release`와 이중 실행하지
+              않는다. `PendingResponseOwner`의 ledger 밖 `ClassifiedIntentOwner` payload는 exact descriptor/content/
+              allocator mirror를 `FrozenLiveOwnerCleanup.response_cleanup`에 별도로 준비한다.
+              `ExternalPumpCleanupScratch`의 기존 screen/metadata/client/evidence/ledger plan과 새
+              `live_prepared/live_frozen`, storage와 모든 payload range를 aggregate range proof에서 pairwise
+              disjoint 검증한다. 실패하면 어떤 owner/ledger도 바꾸지 않고 기존 quarantine policy로 수렴한다.
+              callback-free freeze suffix는 기존 owner와 ledger를 먼저 freeze하면서 `LivePartialBatch=terminal`,
+              `PendingResponseOwner=terminal`, `LiveScreenBacklog=cleaned_tombstone`을 함께 publish하고
+              `live_prepared→frozen`으로 만든다. 그 뒤 cleanup scratch 전체를 tombstone하고 stack-local로 옮긴
+              기존 frozen plans와 `live_frozen`만 실행한다. 첫 allocator callback 이후 storage owner,
+              cleanup scratch 또는 FIFO/ledger token array를 다시 읽지 않는다. 따라서 live FIFO 독립 retirement가
+              아직 동결되지 않은 metadata/client/evidence/partial/response owner에 재진입하는 창은 없다.
+              이는 두 번째 payload queue가 아니라 bounded token owner이며, `CommittedScreenBacklog`의 immutable
+              adoption backing을 재할당하거나 수명을 섞지 않기 위해 분리한다.
               stream/kind/chunk count의 SSOT는 오직 ledger slot의 `PayloadSemantic.partial`이고
-              RX identity/start/end의 SSOT도 ledger slot의 `RxBatchProvenance`다. `LivePartialBatch`는 token과
+              RX identity의 SSOT는 ledger당 하나인 sealed `external_identity`, start/span의 SSOT는 slot의
+              `StoredRxBatchProvenance`다. full `RxRange`를 4,096개 inline slot마다 저장하면 실제
+              `ExternalPumpStorage`가 512 KiB compile-time budget을 넘으므로 예산을 올리지 않는다. external
+              batch span은 `max_viewport_snapshot + max_screen_batch_chunks * header_size` 이하임을 checked
+              검증해 `u32`에 저장하고, `end = start + span`을 checked 복원한다. identity가 다른 live admission은
+              mutation 0 terminal이다. `partialSnapshot`/completed/lease view만 sealed ledger identity와 compact
+              range를 결합해 `ObservedRxBatchProvenance.external(RxRange)`을 반환한다. adopted/GUI seed는
+              `.untracked`이며 ledger identity를 만들거나 external freshness 판정에 사용할 수 없다.
+              ledger의 `LedgerExternalIdentitySeal`은 처음 성공한 external live batch commit이 exact identity와
+              checked generation으로 bind한다. 이후 external prepare/commit은 같은 identity만 허용하고
+              `.untracked` seed/relabel/merge/release는 이를 만들거나 바꾸지 않는다. identity는 active external
+              slot 수가 0이 되어도 ledger 수명 동안 유지되어 A→B→A 재결합을 금지하며, `drainAll`/teardown만
+              generation을 전진시킨 `drained_tombstone`으로 canonical reset한다. ledger accounting digest,
+              mutation epoch seal, `projectionAuthorityDigest`, prepared batch digest가 identity/lifecycle/generation을
+              모두 포함한다.
+              `LivePartialBatch`는 token과
               owner generation만 소유한다. classifier용 `LivePartialSnapshot`은 owner seal을 검증한 뒤
-              `partialSnapshot(token)`이 seal 검증 뒤 값으로 반환한 `PartialSemantic` snapshot으로 만든다.
+              `partialSnapshot(token)`이 seal 검증 뒤 값으로 반환한 `ObservedPartialSemantic` snapshot으로 만든다.
               assembling owner에서 stale token, non-partial phase나 ledger invariant failure는 no-partial로 접지 않고
               protocol/invariant terminal이다.
               `PendingResponseOwner`도 `ExternalPumpStorage`의 max-one persistent owner다. d2 nonterminal FIFO
@@ -5343,32 +5722,167 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
               payload/token exact once cleanup을 수행한다. 최대 chunk 수와 byte cap은 기존
               `external_inbox_ledger.max_batch_chunks/max_batch_bytes`를 그대로 사용한다.
               `external_inbox_ledger.PreparedLiveMutation`은 admission의 source payload/final reservation 또는
-              merge의 destination token/source/replacement/next phase를 상호 배타적으로 소유한다. prepare는 ledger
-              mutation 0이다. public checked commit은 mutation 전 모든 token/accounting/owner seal을 typed
-              검증하고 exact-one private unchecked no-fail leaf를 즉시 호출한다. abort는 payload/token exact once
+              merge의 destination reference/source/replacement/next phase, release의 token/expected phase를
+              상호 배타적으로 소유한다. live RX merge는 `.owned` source와 `.coalesced` replacement를 쓰고,
+              legacy `mergeInto(dst,src,replacement,...)` wrapper는 `.existing(src)`와
+              `.prebuilt(replacement)`를 쓴다. 두 경로는 같은 validation과 private commit mutation variant를
+              사용한다. `release(token,phase)`도 `prepareLiveRelease` 하나짜리 batch wrapper이며 별도 writer가 아니다.
+              d2는 `beginLiveBatch`에 non-null current RX identity를 전달한다. null은 legacy `.untracked`
+              merge/release wrapper만 허용하며 external provenance를 가진 token을 참조하거나 새 external
+              semantic을 준비하면 mutation 0으로 거부한다.
+              `PreparedLiveBatch` 하나가 최대 64개 mutation의 virtual slot/generation/item/byte/provenance 상태를
+              FIFO로 시뮬레이션한다. `LiveTokenRef.planned`로 같은 turn의 first→continuation→end가 아직 publish되지
+              않은 결과를 참조하며, 두 admission이 같은 slot/generation을 예약하지 않는다. 모든 prepare와
+              cumulative replacement allocation은 ledger mutation 0이고, `finishLiveBatch`가 전체 token/alias/cap,
+              final accounting, owner/content digest와 external identity를 봉인한다.
+              replacement는 최종 live destination마다 정확히 한 번만 만들고 중간에 supersede/release될 virtual
+              destination에는 만들지 않는다. checked `replacement_bytes` 합은
+              `external_inbox_ledger.max_bytes` 이하, accepted incoming owner 합은
+              `protocol.max_binary_chunk + protocol.header_size` 이하이며 allocation 전에 계산한다.
+              retirement `cleanup_bytes`는 checked
+              `old_active_bytes + accepted_source_bytes <= external_inbox_ledger.max_bytes +
+              protocol.max_binary_chunk + protocol.header_size`로 제한한다. count cap과 byte cap을 모두
+              batch/retirement digest에 봉인하고 cap+1/overflow는 allocation·ledger mutation 0이다. abort와
+              quarantine도 같은 count/byte 상한을 넘는 owner를 만들지 않는다.
+
+              compact continuation의 canonical 계산은 다음 하나뿐이다. 기존 stored range에서
+              `old_end = checkedAdd(batch.start_absolute,batch.span)`을 계산하고, incoming identity가 sealed ledger
+              identity와 같고 `incoming.start_absolute == old_end`, `incoming.end_absolute > old_end`인지 확인한다.
+              그 뒤 `new_span = checkedSub(incoming.end_absolute,batch.start_absolute)`을 구해 batch byte cap과
+              `u32` exact cast를 통과한 값만 저장한다. incoming start를 **batch start와 비교하지 않는다**.
+              `finishLiveBatch`와 checked aggregate commit은 existing/planned chain 각각에 이 계산을 처음부터
+              반복하여, prepare 뒤 range/span/identity drift나 checked-add/sub overflow가 있으면 mutation 0으로
+              거부한다.
+
+              public checked batch commit은 mutation 전에 64개 전체를 재검증한다. 실패 가능한 분기는 여기서 끝나며
+              exact-one private unchecked leaf는 모든 slot/semantic/token/accounting을 callback/error 없는 단일
+              suffix로 FIFO publish한다. commit 시작 뒤 실패 branch와 부분 publish는 0이다. late terminal,
+              revoke, malformed frame 또는 prepare/OOM이면 batch 전체를 abort해 ledger/partial/pending consumer
+              publish 0과 source exact cleanup을 보장한다. abort는 payload/token exact once
               cleanup이며 copied/moved/stale/double/cross-ledger token을 typed 거부한다.
+              commit output은 mutation index와 같은 index의 `[64]LiveCommitDisposition`이다. 사용하지 않은 tail은
+              `.unused`, 같은 virtual chain에서 뒤 mutation으로 대체된 admission/merge/release 결과는
+              `.superseded_tombstone`, 최종 live root만 `.final_live({token,phase})`다. 중간 token은 ledger에서도 stale
+              generation/tombstone이고 outer로 usable token이 절대 새지 않는다. outer aggregate는 모든
+              `.final_live`의 sealed phase를 재-borrow 없이 사용해 정확히 한 번 partial이면
+              `LivePartialBatch`, completed이면 `LiveScreenBacklog`의 persistent owner에
+              옮기고 해당 disposition을 `.superseded_tombstone`으로 소비한다. reset/return은 final-live 0,
+              unused tail canonical, 모든 mutation committed/aborted tombstone을 요구한다. copied output,
+              prior-chain token replay, 두 disposition이 같은 slot/generation을 publish하는 경우와 final root
+              누락은 owner publish 0 terminal이다.
               checked commit은 pristine final-address `PreparedLiveRetirement`도 함께 검증한다. private unchecked
               merge leaf는 replacement를 ledger에 move하고 old destination/incoming source cleanup authority를
               retirement handle로 move해 callback-free로 반환한다. outer aggregate가 ledger semantic/token,
-              `LivePartialBatch`와 owner seal을 같은 no-fail suffix에서 모두 publish한 뒤에만 retirement를
+              `LivePartialBatch`/`LiveScreenBacklog`와 owner seal을 같은 no-fail suffix에서 모두 publish한 뒤에만 retirement를
               tombstone-first exact once 실행한다. allocator callback은 중간 ledger/partial 상태를 관측할 수 없다.
-              caller는 두 payload를 `OwnedPayload.empty(allocator)`로 채우는 `PreparedLiveRetirement.init`을
-              사용한다. admission commit 성공은 퇴역 payload가 없으므로 handle을 즉시 payload 없는 `.retired`
-              tombstone으로 만들고, merge 성공만 `.prepared`를 반환한다. 정상 outer return 시 retirement
-              lifecycle은 두 branch 모두 `.retired`이며 검증 drift terminal 경로만 `.quarantined`다.
+              `finishLiveBatch`는 각 최종 destination마다 replacement를 최대 하나만 만들며 중간 cumulative
+              replacement를 반복 할당하지 않는다. old destination과 모든 incoming source cleanup owner/plan은
+              최대 128개 aggregate retirement에, 최종 ledger로 move할 coalesced replacement는 최대 64개
+              `published_replacements`에 봉인한다. admission-only 또는 실제 cleanup 0 batch처럼 퇴역 payload가 없으면 handle을
+              즉시 payload 없는 `.retired` tombstone으로 만들고, cleanup이 있으면 `.prepared`를 반환한다.
+              release는 detached ledger payload 하나를 cleanup owner/plan에 추가하므로 nonempty release는
+              반드시 `.prepared` retirement를 반환한다.
+              정상 outer return 시 lifecycle은 둘 다 `.retired`이며 검증 drift terminal 경로만 `.quarantined`다.
               checked commit은 old destination, incoming source, replacement/live ledger backing의 checked
               addr/len이 pairwise disjoint이고 각 allocator/primary/cleanup descriptor와 content digest가
-              canonical인지 mutation 전에 검증한다. retire 진입은 두 `FrozenPayloadCleanup`과 replacement range,
-              retirement digest/lifecycle을 재검증하고 두 cleanup descriptor를 fixed stack-local plan으로 복사한다.
+              canonical인지 mutation 전에 검증한다. retire 진입은 `cleanup_count`개의
+              `FrozenPayloadCleanup`과 `replacement_count`개의 replacement range,
+              retirement digest/lifecycle을 재검증하고 `cleanup_count`개의 cleanup descriptor를 fixed stack-local
+              plan으로 복사한다.
               그 뒤 primary/mirror fields를 포함한 handle 전체를 먼저 `.retired` tombstone으로 만든 후 local plan만
               순서대로 free하며 callback 사이에 handle을 다시 읽지 않는다. 첫 callback 재진입/handle 변조는 두 번째
               free target을 바꾸지 못한다. alias/digest/descriptor drift면 arbitrary free/재시도를 하지 않고 handle을
-              `.quarantined`로 tombstone해 두 bounded payload를 leak하고 outer storage를 terminal로 latch한다.
-              d2 screen admission은 `RxBatchProvenance.external`을 필수로 저장한다. first chunk는 exact frame
-              `RxRange`를 쓰고 continuation은 identity와 `start_absolute` equality를 검증한 뒤
-              `end_absolute`만 새 range의 end로 checked 확장한다. completed/lease view와 recovery key는 같은 slot
-              generation에 봉인된 full first-start→last-end range를 노출한다. adopted/GUI seed는
-              `.untracked`이며 external freshness 판정에 사용할 수 없다.
+              `.quarantined`로 tombstone해 byte/count cap 안의 bounded cleanup owners를 leak하고 outer storage를
+              terminal로 latch한다.
+              기존 `mergeInto`와 callback-owning `release`는 새 batch prepare→checked commit→retire의
+              compatibility wrapper로만 남겨 mutation leaf를 공유한다. 새 unchecked writer를 병렬로 두지 않으며
+              boundary gate가 private unchecked batch commit exact-one definition, checked aggregate caller
+              exact-one과 d2에서 legacy writer call 0을 고정한다.
+              legacy merge wrapper는 one-mutation preflight에서 disposition 0이 exact final merge root이고 tail이
+              unused임을 미리 봉인한다. 공용 private commit suffix가 fresh token을 `token_out`에 쓰고 내부
+              disposition을 tombstone한 뒤에만 반환하므로 commit 후 fallible switch가 없다. legacy release는
+              disposition 0이 superseded이고 final root 0, tail unused임을 preflight하고 같은 suffix에서 disposition을
+              전부 tombstone한다. 두 wrapper 모두 그 뒤 retirement만 실행하며 generic d2 output을 외부에 노출하지
+              않는다.
+              d2 screen admission은 `StoredRxBatchProvenance.external`을 필수로 저장한다. first chunk는 exact frame
+              range의 start/span을 쓰고 continuation은 위 old-end equality를 검증한 뒤 span만 first start에서 새
+              range end까지 checked 확장한다. completed/lease view와 recovery key는 같은 slot generation에
+              봉인된 full first-start→last-end `RxRange`를 노출한다.
+              d2b2는 provenance field만 추가하고 끝나지 않는다. `validateSemantic`,
+              `relabeledSemantic`, merge/release propagation, `projectionAuthorityDigest` transcript,
+              `PayloadView`/batch view/`borrowLease`의 observed expansion, seed/adoption fixture의
+              `.untracked` default와 모든 existing literal을 함께 migration한다. stored compact provenance가
+              public view로 그대로 새거나, relabel/merge에서 사라지거나, authority digest 밖에 놓이는 callsite는
+              boundary gate가 0개임을 검사한다.
+
+              d2b3는 d2d에서 필요하던 payload owner/scratch를 조기 도입한다. parser가 만든 pair는 classifier 뒤
+              즉시 다음 owner로 move되며 과거 valid pair를 다시 borrow할 copyable API는 없다.
+
+              ```zig
+              const ClassifiedIntentOwner = struct {
+                  saved_self_addr: usize,
+                  storage_addr: usize,
+                  turn_generation: u64,
+                  parser_generation: u64,
+                  frame: framing.Frame,
+                  range: external_rx_types.RxRange,
+                  pair_seal: client_external_mode.ExternalRxFrameSeal,
+                  payload_addr: usize,
+                  payload_len: usize,
+                  payload_digest: external_owner_seal.Digest,
+                  semantic_proof_digest: external_owner_seal.Digest,
+                  allocator: std.mem.Allocator,
+                  cleanup_payload: ?[]u8,
+                  cleanup_digest: external_owner_seal.Digest,
+              };
+
+              const PreparedRxIntent = union(enum) {
+                  empty,
+                  classified: ClassifiedIntentOwner,
+                  screen_mutation: struct {
+                      batch_addr: usize,
+                      mutation_index: u8,
+                  },
+                  event: struct {
+                      source: ClassifiedIntentOwner,
+                      validated: runtime_event_types.ValidatedEventView,
+                  },
+                  response: struct {
+                      source: ClassifiedIntentOwner,
+                      candidate: ResponseCandidate,
+                  },
+                  committed,
+                  aborted,
+              };
+
+              const ExternalRxIntentScratch = struct {
+                  saved_self_addr: usize,
+                  storage_addr: usize,
+                  turn_generation: u64,
+                  parser_generation_at_start: u64,
+                  intents: [64]PreparedRxIntent,
+                  intent_count: u8,
+                  live_batch: external_inbox_ledger.PreparedLiveBatch,
+                  retirement: external_inbox_ledger.PreparedLiveRetirement,
+                  lifecycle: enum { empty, ready, busy, spent },
+                  digest: external_owner_seal.Digest,
+              };
+              ```
+
+              scratch는 caller가 heap-pinned final address에 `initInPlace`하며 storage/Client/parser/ledger와 모든
+              live payload range에 disjoint해야 한다. 각 owner seal은 storage address, whole-turn
+              `operation_generation`, parser generation, exact frame header/range/pair seal, payload
+              addr/len/content, allocator primary/cleanup mirror를 묶는다. classifier 진입은 move-owned d1 outcome
+              exact once이고 성공 즉시 source outcome을 tombstone한다. copied/replayed old pair,
+              same-attach old range, parser generation drift/ABA, cross-turn/cross-storage owner는 decoder/ledger
+              publish 0 terminal이다. `resetForNextTurn`은 spent와 모든 intent/live-batch/retirement tombstone을
+              확인한 뒤에만 ready로 돌아간다.
+
+              `PendingResponseOwner.pending.owner_digest`는 source의 storage/turn/parser generation,
+              frame/range/pair seal/payload/allocator proof, candidate와 current authority generation을 모두
+              포함한다. raw source/candidate borrow·deinit은 owner module 밖 callsite 0이고 f2의 sealed
+              take/abort만 허용한다. duplicate pending, stale/copy/double/cross-generation take는 response
+              publish 0 terminal이다.
 
             - **d2c — injected nonblocking read/admit:** mechanics는 d1의 `maxReadable`,
               `prepareAdmit→commitPreparedAdmit|abortPreparedAdmit`, `nextOutcomeWithRange`만 사용하며
@@ -5431,34 +5945,6 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
               escape하지 않는다.
 
               ```zig
-              const ClassifiedIntentOwner = struct {
-                  frame: framing.Frame,
-                  range: external_rx_types.RxRange,
-                  payload_addr: usize,
-                  payload_len: usize,
-                  payload_digest: external_owner_seal.Digest,
-                  semantic_proof_digest: external_owner_seal.Digest,
-                  allocator: std.mem.Allocator,
-                  cleanup_payload: ?[]u8,
-                  cleanup_digest: external_owner_seal.Digest,
-              };
-
-              const PreparedRxIntent = union(enum) {
-                  empty,
-                  classified: ClassifiedIntentOwner,
-                  screen_mutation: external_inbox_ledger.PreparedLiveMutation,
-                  event: struct {
-                      source: ClassifiedIntentOwner,
-                      validated: runtime_event_types.ValidatedEventView,
-                  },
-                  response: struct {
-                      source: ClassifiedIntentOwner,
-                      candidate: ResponseCandidate,
-                  },
-                  committed,
-                  aborted,
-              };
-
               const PreparedAuthorityPermit = struct {
                   saved_self_addr: usize,
                   storage_addr: usize,
@@ -5470,38 +5956,15 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
                   digest: external_owner_seal.Digest,
               };
 
-              const ExternalWholeTurnLease = struct {
-                  saved_self_addr: usize,
-                  storage_addr: usize,
-                  operation_generation: u64,
-                  lifecycle: enum { empty, acquired, released, aborted },
-                  digest: external_owner_seal.Digest,
-              };
-
               const ExternalRxTurnScratch = struct {
                   saved_self_addr: usize,
                   read_buffer: [1024 * 1024]u8,
-                  intents: [64]PreparedRxIntent,
-                  intent_count: u8,
+                  rx: ExternalRxIntentScratch,
                   drain: RxDrainEvidence,
                   permit: PreparedAuthorityPermit,
                   lifecycle: enum { empty, ready, busy, spent },
                   digest: external_owner_seal.Digest,
               };
-
-              fn acquireWholeTurnLease(
-                  self: *ExternalPumpStorage,
-                  out: *ExternalWholeTurnLease,
-                  scratch: *ExternalRxTurnScratch,
-              ) AccessError!void;
-              fn validateWholeTurnLease(
-                  self: *const ExternalPumpStorage,
-                  lease: *const ExternalWholeTurnLease,
-              ) bool;
-              fn releaseWholeTurnLease(
-                  self: *ExternalPumpStorage,
-                  lease: *ExternalWholeTurnLease,
-              ) void;
 
               // Private exact-one leaf. Caller already owns the storage operation lease.
               fn prepareRxTurn(
@@ -5625,26 +6088,55 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
             - inherited blocker+parser backlog+kernel readable+writable에서 consumer/projector wake 이외
               parser/read/write/admission 0을 검증한다. common work budget 64/cap+1과 blocker 해소 뒤 zero-time
               continuation도 고정한다.
+            - terminal/deadline×inherited×parser empty/incomplete/complete×budget decision table과
+              stale/copy/cross-turn/cross-storage inherited false snapshot, snapshot 뒤 owner generation drift를
+              검증한다. invalid snapshot은 parser readiness/outcome과 socket syscall 0이다. screen pending
+              summary는 1/4,096 retained에서 O(1) counter가 같고 consume 뒤 reseal되며 init/adopt/last-consume/
+              quarantine/teardown lifecycle과 live FIFO head/len seal drift를 함께 고정한다.
             - drain evidence와 authority permit의 stale/double/cross-storage/cross-generation 사용,
               turn/public-method 재진입, allocation fail-index와 payload exact-once move/free를 검증한다.
               fixture-only pure policy와 실제 socketpair 제품 경로를 별도로 표시한다.
             - partial first/continuation/end 뒤 ledger lease가 first-start→last-end `RxRange`를 보존하는지,
               barrier 직전/이후 1-byte 경계와 identity/token generation drift를 검증한다. adopted `.untracked`
-              provenance는 external freshness에 사용할 수 없다.
+              provenance는 external freshness에 사용할 수 없다. compact start/span max/cap+1, checked end
+              overflow, incoming-start!=old-end, 다른 ledger identity와 A→B→A replay도 mutation 0이다.
+              validate/relabel/merge/view/authority digest 전 경로에서 provenance가 보존되는지 고정한다.
+              `ExternalPumpStorage` 512 KiB inline budget과
+              slot semantic size가 Debug/ReleaseFast compile-time gate를 유지한다.
             - response candidate가 d2 return 뒤 f2 take 전 payload/content/allocator mutation, copy/double/stale
               request/authority generation을 만나면 f2 publish 0으로 terminal인지 검증한다.
             - send 직전 permit digest/generation drift, 첫 TX syscall 시 lifecycle=`consumed`, partial/EAGAIN/error 뒤
               double consume/retry 0과 permit 경계 reentry를 syscall-order oracle로 검증한다.
             - 64 intent 각 슬롯의 cleanup fail-index, d2 permit abort 중 reentry, scratch reset 뒤 prior view 사용과
               temporary d2 adapter의 f3 retirement boundary를 검증한다.
+            - 1/2/64 live mutation의 prepare/allocation/aggregate-final-validation fail-index 전수에서 ledger,
+              `LivePartialBatch`, `PendingResponseOwner` consumer publish 0과 source final-zero를 검증한다.
+              first→continuation→end와 두 batch 뒤 late malformed/revoke도 전체 abort이고, 성공만 FIFO exact
+              token/generation/accounting을 한 no-fail suffix로 publish한다. 1/64 completed screen은 token-only
+              live FIFO로 들어가고 cap+1은 parser outcome pre-consume 거부, inherited adoption backlog가 있으면
+              그 FIFO보다 먼저 소비된다. 1/64 FIFO consume/teardown에서 첫 allocator callback이
+              head/len/token/digest를 변조하거나 same/cross-storage reentry·unrelated sibling token 주입을 해도
+              callback 전에 FIFO가 이미 advance/tombstone인지 검증한다. teardown fixture는 동시에 nonempty
+              partial/response/metadata/client/evidence owner를 두고 첫 live cleanup callback에서 전부 변조·재진입해도
+              aggregate callback-free freeze가 선행됐으며 ledger/owner final-zero 또는 pre-freeze quarantine만
+              가능한지 검증한다. live token은 canonical ledger freeze가 한 번만 cleanup하고 별도 release count는
+              0이어야 한다.
             - prepared live merge의 destination token/accounting drift에서 기존 partial payload/range 불변,
               source/replacement exact cleanup과 deferred retirement callback의 post-publication 관측만 허용됨을
               검증한다.
-            - retirement의 old==incoming, old/incoming==published replacement exact·partial alias를 mutation/free 0
-              terminal로 거부하고, 첫 allocator callback이 handle/두 번째 descriptor를 변조하거나 retire로
-              재진입해도 frozen 두 번째 target과 exact-once free가 유지되는지 검증한다. descriptor/digest drift는
+            - mutation-index disposition은 unused tail, superseded intermediate와 final roots를 전수 비교하고,
+              intermediate token replay/duplicate final root/reset 전 미소비 final root를 publish 0으로 거부한다.
+              legacy `mergeInto`/`release` wrapper도 같은 live mutation leaf와 epoch/accounting 결과를 내는지
+              boundary/product fixture로 고정한다. merge token output과 release의 no-final-root가 private
+              no-fail suffix에서 publish되고 commit 뒤 fallible disposition 판정이 없는지도 고정한다.
+            - retirement의 cleanup owner 상호간 또는 published replacement와의 exact·partial alias를 mutation/free 0
+              terminal로 거부하고, 첫 allocator callback이 handle/후속 descriptor를 변조하거나 retire로
+              재진입해도 frozen 후속 target 전부와 exact-once free가 유지되는지 검증한다. descriptor/digest drift는
               free/retry 0의 bounded quarantine인지도 고정한다. `FrozenPayloadCleanup`은 module-private이고
               free/deinit method가 없으며 `PreparedLiveRetirement.retire`만 consume하도록 boundary scan한다.
+              replacement aggregate는 exact `external_inbox_ledger.max_bytes`, cleanup aggregate는 exact
+              `external_inbox_ledger.max_bytes + protocol.max_binary_chunk + protocol.header_size`와 각각 cap+1/
+              checked overflow를 allocation 전 검증하며 abort/quarantine에서도 count/byte high-water를 기록한다.
             - 이전 turn pending response 뒤 다음 immediate turn 첫 frame revoke면 f2 take 0, response canonical
               drop과 TX/control publish 0인지, permit consume 뒤 첫 TX callback이 authority/parser를 drift시키면
               두 번째 syscall/consume 0인지 검증한다.

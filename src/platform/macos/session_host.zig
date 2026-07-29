@@ -130,6 +130,10 @@ test "client barrel exposes only the supported facade" {
         !@hasDecl(client.Client, "commitExternalRecoveryDiscard" ++ "Unchecked"),
     );
     try @import("std").testing.expect(!@hasDecl(@This(), "external_event_materialization"));
+    try @import("std").testing.expect(!@hasDecl(@This(), "BorrowedMetadataView"));
+    try @import("std").testing.expect(!@hasDecl(@This(), "OwnerEventView"));
+    try @import("std").testing.expect(!@hasDecl(@This(), "OwnerEventProjector"));
+    try @import("std").testing.expect(!@hasDecl(@This(), "projectOwnerEventInternal"));
 }
 // client_deadline(P5c3c-1a)는 nonblocking connect/read/write의 absolute deadline과 syscall
 // injection만 소유한다. protocol parser와 hello/capability 상태의 SSOT는 계속 client.zig 하나다.

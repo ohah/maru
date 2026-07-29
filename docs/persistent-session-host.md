@@ -3994,8 +3994,9 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
               ```
 
               이 leaf의 precondition은 ReleaseFast에서도 branch로 확인한
-              `active_external_operation_addr == @intFromPtr(self)`, final storage address, `.live/.active`,
-              ready·non-overlap scratch, fully valid aggregate owner authority다. debug assert만으로 전제를 대신하지
+              `active_external_operation_addr == @intFromPtr(self)`, final storage address,
+              `.adopting` 또는 `.live/.active`, ready·non-overlap scratch다. committed projection caller는 추가로
+              fully valid aggregate owner authority를 증명한다. debug assert만으로 전제를 대신하지
               않는다. 정상 결과는 `cleaned | cleaned_with_invariant`, 내부 teardown generation/permit 준비가
               예상과 달리 실패하면 `quarantined`뿐이며 `moved_storage | transaction_busy | already_dead`는 이
               leaf에서 만들지 않는다. projection은 세 결과를 모두 `terminal_latched`로 감싸고 storage
@@ -4045,15 +4046,15 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
               먼저, operation lease 충돌을 그 다음, lifecycle/semantic active 여부를 그 뒤 판정하며 DTO pointer,
               allocator와 backing address/capacity를 결과에 넣지 않는다.
 
-              c3c-3b component mechanics의 exact closed type은 다음과 같다. 이 타입과
-              `projectOwnerEventInternal`은 cross-file adapter가 호출할 수 있는 internal `pub`이지만 public
-              `ExternalPumpFacade`/barrel에는 export하지 않는다. d2는 별도
-              `external_owner_projection.zig`의 유한한 reviewed adapter만 추가하고,
-              boundary gate는 그 adapter 밖에서 `BorrowedMetadataView`, `OwnerEventView`,
-              `OwnerEventProjector` 식별자의 import/저장/반환을 금지한다.
+              c3c-3b component mechanics의 exact closed type은 다음과 같다. c3c-3b에서는 이 타입과
+              `projectOwnerEventInternal`을 module-private으로 두어 제품 direct caller를 만들지 않는다. d2가 별도
+              `external_owner_projection.zig`의 유한한 reviewed adapter를 추가할 때만 cross-file internal
+              `pub`으로 승격하며, public `ExternalPumpFacade`/barrel에는 export하지 않는다. c3c-3b boundary gate는
+              exact protected identifier의 mechanics 밖 사용과 barrel re-export를 막는다. adapter의 non-escape와
+              reflection 우회 검증은 존재하지 않는 adapter를 추측하지 않고 d2 gate에서 추가한다.
 
               ```zig
-              pub const BorrowedMetadataView = struct {
+              const BorrowedMetadataView = struct {
                   revision: u64,
                   observer_generation: u64,
                   title_generation: u32,
@@ -4079,17 +4080,17 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
                   clipboard_read_target: []const u8,
                   processes: []const runtime_metadata_wire.Process,
               };
-              pub const OwnerEventView = union(enum) {
+              const OwnerEventView = union(enum) {
                   resized: resize_wire.Event,
                   metadata: BorrowedMetadataView,
               };
-              pub const ProjectionDecision = enum { applied, retry_preserved };
-              pub const OwnerEventProjector = struct {
+              const ProjectionDecision = enum { applied, retry_preserved };
+              const OwnerEventProjector = struct {
                   context: *anyopaque,
                   context_len: usize,
                   project: *const fn (*anyopaque, OwnerEventView) ProjectionDecision,
               };
-              pub const ProjectOwnerEventResult = enum {
+              const ProjectOwnerEventResult = enum {
                   applied,
                   retry_preserved,
                   none,
@@ -4100,7 +4101,7 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
                   dead,
                   terminal_latched,
               };
-              pub fn projectOwnerEventInternal(
+              fn projectOwnerEventInternal(
                   self: *ExternalPumpStorage,
                   projector: OwnerEventProjector,
                   cleanup_scratch: *ExternalPumpCleanupScratch,
@@ -4115,12 +4116,17 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
               overlap하지 않아야 한다. permit을 final address에 만든 뒤 overflow-safe disjoint proof를 끝내고
               callback을 호출한다. `context`의 integer address도 nonzero여야 한다. overflow나 overlap은 callback
               전에 terminal로 닫고 context payload를 읽지 않는다.
-              제품 projector 생성과 호출은 exact
+              제품 projector 생성과 호출은 d2의 exact
               `external_owner_projection.zig` adapter 하나에 봉인한다. Zig lifetime만으로 non-escape를 증명한다고
               주장하지 않고, facade/barrel 비공개, direct-import exact allowlist, `@field`와 joined-string alias를
-              포함한 유한 callsite boundary scan과 adapter test를 함께 완료 gate로 둔다. storage/facade는 owner-thread
+              포함한 유한 callsite boundary scan과 adapter test를 **d2 완료 gate**로 둔다. storage/facade는 owner-thread
               confined이며 다른 thread로 pointer/view를 넘기는 것은 지원하지 않는다. projector는 정확히 한 번
               호출되며 trap/panic은 recoverable result가 아닌 process-fatal contract violation이다.
+              d2가 이 mechanics를 실제 event cadence에 배선하기 전에는 4,096-slot ledger와 최대
+              screen/take/Client descriptor inventory를 채운 ReleaseFast
+              pre+callback+post projection latency/CPU, 100-owner cadence artifact와 named budget을
+              `performance-budget.md`에 고정한다. 측정 없는 제품 callsite 승격은 금지하며, budget을 넘으면
+              mutation epoch에 bind한 cached digest 또는 event coalescing으로 common path를 줄인 뒤 adapter를 연다.
               `owner_incarnation`은 Client/evidence가 검증한 `attach_instance_id`를 copy+seal하되 Client scalar는
               보존해 기존 Client/evidence seal을 깨지 않는다.
 
@@ -4137,7 +4143,7 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
                   version: u16,
                   current_addr: usize,
                   storage_addr: usize,
-                  runtime_id: u64,
+                  runtime_id: u128,
                   generation: u64,
                   cols: u16,
                   rows: u16,
@@ -4177,7 +4183,11 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
 
               storage의 exact fields는 `owner_incarnation: u64`,
               `owner_incarnation_seal: OwnerIncarnationSeal`,
-              `owner_event_projection_generation: u64`다. resize/incarnation seal domain/version은 각각
+              `owner_authority_seal: OwnerAuthoritySeal`,
+              `owner_event_projection_generation: u64`다. `OwnerAuthoritySeal`은 storage final address,
+              owner incarnation, role, tracked 여부+generation, `initial_fence|clear` flow를 `MARUOAS1` digest로
+              bind한다. fence 판정 전과 callback 뒤에 검증하며 test/product clear commit은 flow 변경과 seal
+              재생성을 같은 operation lease에서 원자 수행한다. resize/incarnation seal domain/version은 각각
               `MARUORS1`/1, `MARUOIN1`/1이다. `mintOwnerResizeSeal(storage,current)`,
               `ownerResizeSealValid(storage,current)`, `mintOwnerIncarnationSeal(storage)`,
               `ownerIncarnationSealValid(storage)` private leaf가 위 exact fields 전체로 digest를 만들고 검증한다.
@@ -4272,10 +4282,26 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
               scratch address와 header만 읽되 header mutation과 payload/ownership graph 접근은 0이다.
               두 경우 모두 corrupted owner/ledger/backing descriptor를 재독·free·finish하지 않아 그 allocation은
               bounded leak로 격리되고 exact cleanup/ledger final-zero를 주장하지 않는다.
+              callback 전후 aggregate 비교는 outer struct의 shallow copy가 아니다.
+              ledger slot/accounting 전체, committed screen의 primary/cleanup copy·wrapper·token element,
+              Client committed take의 canonical list element와 양쪽 inventory descriptor backing,
+              owned Client가 teardown에서 소비하는 parser/list/partial/outbound descriptor를 각각
+              domain-separated process-local deep authority digest로 묶는다. payload byte 자체는 ledger/owner의
+              주소·길이 authority로만 표현하고 다시 읽지 않는다. canonical seal과 길이 상한을 먼저 통과한
+              backing만 순회하며, element 하나가 callback 중 바뀌어도 `applied`/`retry_preserved` 결정을
+              publish하지 않고 bounded quarantine한다.
+              `ExternalPumpCleanupScratch.client`의 descriptor arrays와 `range_scratch`의 unused ranges는 `.ready`
+              상태에서 intentionally undefined이며 teardown prepare가 count/tag authority를 publish하기 전에
+              전부 덮어쓴다. projection seal은 이 unread region을 해석·hash하지 않는다. callback이 이 바이트만
+              바꿔도 이후 prepare가 overwrite-before-read를 지키는 한 authority drift가 아니며, hostile test는
+              poisoning 뒤 canonical teardown이 같은 결과인지로 이 전제를 고정한다. saved address/lifecycle과
+              recovery/ledger/screen/metadata/take prepared/frozen descriptor처럼 `.ready`에서 의미가 있는 field의
+              drift만 scratch authority drift로 quarantine한다.
               public `metadataState`와 private projection mechanics의 result oracle은 다음과 같다.
               projection의 mutation-free 판정 우선순위는
-              **moved → operation lease conflict → lifecycle/semantic active → initial fence →
-              scratch address/ready/overlap → owner/incarnation/descriptor·content seal validity →
+              **moved → operation lease conflict → lifecycle/semantic active →
+              owner incarnation·authority seal validity → initial fence → scratch address/ready →
+              metadata·resize·ledger descriptor/content validity → scratch aggregate backing overlap →
               generation exhaustion →
               pending selection → projector context range → callback**이다. 앞 단계가 실패하면 뒤 단계의
               pointer/payload/scratch는 읽지 않는다. generation exhaustion은 valid scratch와 owner authority가
@@ -4297,7 +4323,7 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
               | projector `retry_preserved` + exact post-callback seal | `retry_preserved` | pending 보존 |
               | callback 뒤 permit만 drift, owner/storage/scratch valid | `terminal_latched` | callback decision보다 우선; held-lease aggregate cleanup |
               | callback 뒤 owner/storage/content seal drift | `terminal_latched` | drift된 view/owner 재독 0, terminal tombstone + bounded quarantine; exact cleanup 주장 안 함 |
-              | callback 뒤 scratch drift | `terminal_latched` | scratch payload 미접근, terminal tombstone + bounded quarantine |
+              | callback 뒤 meaningful ready-state scratch authority drift | `terminal_latched` | scratch payload 미접근, terminal tombstone + bounded quarantine; overwrite-before-read work array 변화는 제외 |
               | generation exhaustion | `terminal_latched` | view/callback 0, c3c-3a aggregate cleanup 뒤 dead |
               | projector trap/panic | process-fatal, typed result 없음 | 지원하지 않는 projector contract violation |
               | moved/not-active/dead | `moved | not_active | dead` | 0 |
@@ -4314,23 +4340,25 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
 
               c3c-3b hostile component gate는 최소 다음을 서로 독립 fixture로 고정한다.
 
-              - callback이 storage saved address/lifecycle/semantic/generation/incarnation, metadata logical·cleanup
-                descriptor/seal/backing byte, resize event/pending을 각각 또는 조합으로 변조해도 callback 1회 뒤
-                decision이 publish되지 않고 invalid view 재독 0 + bounded quarantine이다.
-              - callback이 permit만 변조한 경우에는 owner/storage/scratch validity를 별도로 증명해 held-lease
-                canonical cleanup과 ledger final-zero를 단언한다. scratch 단독 또는 owner와 scratch 동시 변조는
-                scratch payload 미접근과 bounded quarantine만 단언한다.
-              - callback 안에서 same/cross-storage prepare, commit, pump, projection, `metadataState`, teardown,
-                terminal facade 재진입은 모두 `transaction_busy`와 mutation 0이다.
+              - callback이 storage lifecycle/semantic/projection generation/incarnation, metadata/resize seal과
+                deep ledger/screen/take/Client descriptor authority를 변조해도 callback 1회 뒤 decision이
+                publish되지 않고 bounded quarantine 또는, cleanup authority가 valid한 generation/key 불일치이면
+                held-lease canonical cleanup이다.
+              - meaningful scratch header 단독 또는 owner와 scratch 동시 변조는 scratch payload 미접근과 bounded
+                quarantine만 단언한다. intentionally undefined work array 변화는 overwrite-before-read teardown
+                성공으로 별도 고정한다.
+              - callback 안에서 현재 노출된 `metadataState`, projection, teardown 재진입은 `transaction_busy`와
+                mutation 0이다. d2가 prepare/commit/pump/terminal adapter를 노출하면 그 재진입 matrix는 d2
+                gate에서 추가한다.
               - max-1→max projection은 성공하고 그 다음 call은 callback 0 + terminal이다. `retry_preserved`도
                 generation 하나를 소비하며 callback의 generation drift는 callback decision보다 우선한다.
               - resize+metadata 동시 pending은 resize 하나만 고르고 applied/retry는 matching pending만 바꾼다.
-              - scratch와 storage/owner/backing/projector context의 exact/partial overlap, projector context와
-                stack-local permit의 exact/partial overlap, context range overflow,
-                logical-invalid+cleanup-valid mirror 조합을 각각 검증한다.
-              - boundary negative fixture는 direct import, alias, `@field`, joined string, facade/barrel re-export와
-                adapter의 borrowed slice field/global/return 저장을 차단한다. escaped slice를 callback 뒤 실제
-                dereference하는 UB 테스트는 non-escape 증거로 사용하지 않는다.
+              - scratch와 storage/projector context overlap 및 context range overflow를 component에서 검증한다.
+                backing/stack-local permit overlap은 address-disjoint construction과 range helper unit으로 고정한다.
+              - c3c-3b boundary negative fixture는 exact protected identifier의 mechanics 밖 사용과 barrel
+                re-export를 차단한다. joined-string/`@field` reflection과 adapter의 borrowed slice
+                field/global/return 저장 차단은 adapter가 실제 생기는 d2 gate에서 compile-fail fixture로 추가한다.
+                escaped slice를 callback 뒤 실제 dereference하는 UB 테스트는 non-escape 증거로 사용하지 않는다.
 
               c3c component gate의 `ExternalPumpStorage.teardown(cleanup_scratch)`는 caller-owned
               `ExternalPumpCleanupScratch`를 명시적으로 받는다. 이 aggregate scratch는 c3c-2a의
@@ -4852,9 +4880,9 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
         공유하고 leave가 남은 budget 중 최대 100 ms를 쓴다. signal/revoke/error cleanup은 active/latest와 detach를
         버리고 하나의 100 ms deadline 안에서 leave를 시도한 뒤 즉시 raw restore/signal forwarding으로 간다.
 
-    **P5c3c-1a~2a, 2b1, 2b2a~c2와 2b2c3-c3a1~c3c-3a는 구현 완료다.
-    c3c-3b, 2b2d1~f3, P5c3c-2b3와 P5c3c-3a~3b는 계획 상태다.**
-    2b2c3 전체는 c3c 전체가 green이 아니므로 아직 계획 상태다. 각 slice는 P5c3a~b의 Debug/ReleaseFast gate를 재실행하고 다음 slice가 실제
+    **P5c3c-1a~2a, 2b1, 2b2a~c2와 2b2c3-c3a1~c3c-3b는 구현 완료다.
+    2b2d1~f3, P5c3c-2b3와 P5c3c-3a~3b는 계획 상태다.**
+    2b2c3 전체는 후속 통합 gate가 green이 아니므로 아직 계획 상태다. 각 slice는 P5c3a~b의 Debug/ReleaseFast gate를 재실행하고 다음 slice가 실제
     consumer로 쓰지 않는 임시 public API는 만들지 않는다.
 
     raw 진입 전에도 기존 `SO_RCVTIMEO`/blocking `writeAll`을 deadline으로 간주하지 않는다. resolver 전체, selected

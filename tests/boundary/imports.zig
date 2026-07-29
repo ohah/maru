@@ -1,5 +1,52 @@
 const std = @import("std");
 
+test "session host owner projection capability stays in its reviewed mechanics file" {
+    const allocator = std.testing.allocator;
+    var dir = try std.Io.Dir.cwd().openDir(std.testing.io, "src", .{ .iterate = true });
+    defer dir.close(std.testing.io);
+    var walker = try dir.walk(allocator);
+    defer walker.deinit();
+    const protected = [_][]const u8{
+        "BorrowedMetadataView",
+        "OwnerEventView",
+        "OwnerEventProjector",
+        "projectOwnerEventInternal",
+    };
+    while (try walker.next(std.testing.io)) |entry| {
+        if (entry.kind != .file or !std.mem.endsWith(u8, entry.path, ".zig"))
+            continue;
+        if (std.mem.eql(
+            u8,
+            entry.path,
+            "platform/macos/session_host/client_external_pump.zig",
+        ))
+            continue;
+        const is_barrel =
+            std.mem.eql(u8, entry.path, "platform/macos/session_host.zig");
+        const path = try std.fmt.allocPrint(allocator, "src/{s}", .{entry.path});
+        defer allocator.free(path);
+        const source = try readZigFileZ(allocator, path);
+        defer allocator.free(source);
+        var tokenizer = std.zig.Tokenizer.init(source);
+        var protected_counts = [_]usize{0} ** protected.len;
+        while (true) {
+            const token = tokenizer.next();
+            if (token.tag == .eof) break;
+            if (token.tag != .identifier and token.tag != .string_literal) continue;
+            const spelling = source[token.loc.start..token.loc.end];
+            for (protected, 0..) |name, index| {
+                if (std.mem.indexOf(u8, spelling, name) != null) {
+                    if (!is_barrel) return error.TestUnexpectedResult;
+                    protected_counts[index] += 1;
+                }
+            }
+        }
+        if (is_barrel)
+            for (protected_counts) |count|
+                try std.testing.expectEqual(@as(usize, 1), count);
+    }
+}
+
 // 이 테스트는 docs/implementation-plan.md의 facade import 경계를 강제한다.
 // Maru 아키텍처 전체는 TerminalCore가 PTY/platform/renderer를 모른다는 전제 위에
 // 서 있다(clean-room VT 코어를 교체 가능하고 headless로 테스트 가능하게 유지하기

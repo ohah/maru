@@ -4,8 +4,10 @@
 //! authority. Tokens contain no pointer, so stale copies can only be rejected by this ledger.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const frozen_cleanup_guard = @import("frozen_cleanup_guard.zig");
 const limits = @import("external_inbox_limits.zig");
+const owner_seal = @import("external_owner_seal.zig");
 const owner_range = @import("external_owner_range.zig");
 const protocol = @import("protocol.zig");
 
@@ -69,6 +71,20 @@ pub const RecoveryIntent = union(enum) {
     host: u64,
     client: u64,
 };
+
+fn writeRecoveryIntent(writer: *owner_seal.Writer, intent: RecoveryIntent) void {
+    switch (intent) {
+        .none => writer.writeU8(0),
+        .host => |epoch| {
+            writer.writeU8(1);
+            writer.writeU64(epoch);
+        },
+        .client => |epoch| {
+            writer.writeU8(2);
+            writer.writeU64(epoch);
+        },
+    }
+}
 
 pub const BatchSemantic = struct {
     stream_id: u64,
@@ -1435,6 +1451,66 @@ pub const ExternalInboxLedger = struct {
         };
     }
 
+    /// Read-only alias preflight for an aggregate owner operation. It deliberately exposes only a
+    /// boolean so callers cannot recover payload addresses from the ledger.
+    pub fn overlapsOwnedRange(self: *const ExternalInboxLedger, addr: usize, len: usize) bool {
+        const range = ByteRange{
+            .start = addr,
+            .end = std.math.add(usize, addr, len) catch return true,
+        };
+        return rangesOverlap(range, rangeOfValue(self)) or rangeOverlapsActive(range, self);
+    }
+
+    /// Allocation-free drift seal for callback-scoped aggregate validation. It hashes descriptors
+    /// and allocator authority only; payload bytes remain owned and are never dereferenced.
+    pub fn projectionAuthorityDigest(self: *const ExternalInboxLedger) owner_seal.Digest {
+        var writer = owner_seal.Writer.init("MARULPA1");
+        writer.writeUsize(@intFromPtr(self));
+        writer.writeUsize(self.charged_bytes);
+        writer.writeUsize(self.charged_items);
+        writer.writeUsize(self.retired_bytes);
+        writer.writeUsize(self.retired_items);
+        writer.writeUsize(self.next_slot_hint);
+        writer.writeU64(self.next_generation);
+        writer.writeBool(self.generation_exhausted);
+        writer.writeU64(self.mutation_epoch);
+        writer.writeBool(self.planning_disabled);
+        writer.writeBool(self.invariant_failed);
+        writer.writeBool(self.draining_or_drained);
+        writer.writeBool(self.teardown_active);
+        for (&self.slots) |*slot| {
+            writer.writeBool(slot.active);
+            writer.writeBool(slot.retired);
+            writer.writeU64(slot.generation);
+            writer.writeU8(@intFromEnum(std.meta.activeTag(slot.semantic)));
+            switch (slot.semantic) {
+                .frame => |header| {
+                    const encoded = header.encode();
+                    writer.writeBytes(&encoded);
+                },
+                .partial => |semantic| {
+                    writer.writeU64(semantic.stream_id);
+                    writer.writeBool(semantic.is_snapshot);
+                    writer.writeU8(semantic.chunk_count);
+                    writeRecoveryIntent(&writer, semantic.recovery_intent);
+                },
+                .completed, .lease => |semantic| {
+                    writer.writeU64(semantic.stream_id);
+                    writer.writeBool(semantic.is_snapshot);
+                    writeRecoveryIntent(&writer, semantic.recovery_intent);
+                },
+            }
+            writer.writeUsize(@intFromPtr(slot.payload.allocator.ptr));
+            writer.writeUsize(@intFromPtr(slot.payload.allocator.vtable));
+            writer.writeUsize(if (slot.payload.allocation_ptr) |ptr|
+                @intFromPtr(ptr)
+            else
+                0);
+            writer.writeUsize(slot.payload.logical_len);
+        }
+        return writer.finish();
+    }
+
     fn ensureAuthorityMutation(self: *ExternalInboxLedger) error{
         EpochExhausted,
         InvariantFailure,
@@ -1570,6 +1646,18 @@ pub const ExternalInboxLedger = struct {
         return error.InvariantFailure;
     }
 };
+
+pub const projection_test = if (builtin.is_test) struct {
+    /// Test-only hostile callback seam. Product code cannot name ledger slots directly.
+    pub fn driftFirstActiveGeneration(ledger: *ExternalInboxLedger) bool {
+        for (&ledger.slots) |*slot| {
+            if (!slot.active) continue;
+            slot.generation +%= 1;
+            return true;
+        }
+        return false;
+    }
+} else struct {};
 
 fn permitError(
     ledger: *const ExternalInboxLedger,

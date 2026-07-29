@@ -17,10 +17,11 @@
   소스는 CM6가 줄 번호를 직접 준다. 리치는 문서모델이라 원문 줄과의 대응이 끊겨 역매핑을 새로 만들어야 한다.
 - **트리거는 컨텍스트 메뉴다.** 선택 후 우클릭하면 "선택 영역을 에이전트에 보내기"가 뜬다. 부동 툴바·드래그&드롭은
   후속(§7)이며, 컨텍스트 메뉴가 먼저인 이유는 기존 chrome 메뉴 인프라를 그대로 쓰기 때문이다.
-- **메뉴는 native가 그린다.** z-order가 터미널 Metal < WKWebView < 투명 Metal 오버레이라 오버레이 메뉴는 웹뷰
-  위에 뜬다([web-panel.md] §2). 다만 웹뷰가 firstResponder일 때 우클릭은 웹뷰가 먼저 받으므로, **web이 우클릭을
-  가로채 좌표와 선택을 브리지로 올리고 native가 그 좌표에 메뉴를 연다.** web이 자체 DOM 메뉴를 그리지 않는 이유는
-  ⑴ 대상 목록(에이전트 세션)이 native 상태이고, ⑵ 메뉴 룩이 나머지 chrome과 갈라지기 때문이다.
+- **메뉴는 web이 그린다(2026-07-29 정정).** 초판은 native 오버레이로 두었으나, 웹뷰 안에서 시작한 선택이
+  웹뷰 안 좌표에 띄우는 메뉴를 native가 그리면 좌표 변환·firstResponder 라우팅·스크롤 추종을 새로 풀어야 하고
+  그 셋 다 헤드리스로 검증되지 않는다. web에서 그리면 전부 DOM 기본 동작이다. 초판이 든 근거 둘은 약했다 —
+  대상 목록은 브리지로 내려주면 되고([file-panel.md] §2.1a의 경계 기준대로) **문서 콘텐츠 위에 뜨는 UI는 web이
+  맞다**. chrome 영역에 뜨는 메뉴(사이드바 카드 등)는 계속 Zig가 그린다.
 - **페이로드는 경로 참조 + 인용 둘 다다.** `@경로:시작-끝` 한 줄과 그 아래 인용 블록을 함께 보낸다. 참조만 보내면
   에이전트가 파일을 다시 읽어야 하고(느리고, 저장 안 된 편집은 못 봄), 인용만 보내면 "어느 파일 어디"가 사라진다.
 - **주입은 붙여넣기 경로를 쓴다(직접 입력이 아니다).** `pasteText` 계열이 소유한 bracketed paste 판정을 그대로
@@ -101,13 +102,17 @@
 | 층 | 책임 |
 |---|---|
 | render iframe | 선택 → `data-maru-source-*`로 줄 범위 산출 → shell에 postMessage |
-| 신뢰 shell(`viewer.ts`) | 모드별 선택 수집 통합, 우클릭 좌표와 함께 브리지 호출 |
+| 신뢰 shell(web) | 모드별 선택 수집, 컨텍스트 메뉴 렌더·키보드 내비게이션·바깥 클릭 닫기, 대상 선택 |
 | 브리지(Zig `control_bridge`) | 신뢰 shell·현재 document epoch 검증 |
-| `AppSession`(Zig) | 경로 파생, 후보 목록, 메뉴 열기, 페이로드 조립, 상한·bracketed 판정, 주입 |
-| Swift | 오버레이 메뉴 렌더와 클릭 라우팅(기존 chrome 메뉴 인프라) |
+| `AppSession`(Zig) | **후보 목록 제공**, 경로 파생, 페이로드 조립, 상한·bracketed 판정, 주입 |
 
-새 브리지 메서드는 하나다 — `maru.file.requestSelectionAction({ editor_epoch, start_line, end_line, text, x, y })`.
-web은 이 요청만 하고 결과에 관여하지 않는다(fire-and-forget). 메뉴 취소도 native가 소유한다.
+브리지 메서드는 둘이다.
+
+- `maru.file.agentTargets({ editor_epoch })` → `[{ surface_id, label, kind, last_used }]`. 후보 판별·정렬·라벨은
+  전부 native가 만든다 — web은 받은 목록을 그리기만 한다.
+- `maru.file.sendSelection({ editor_epoch, surface_id, start_line, end_line, text })` → `{ ok }`. **경로는 인자에
+  없다** — native가 그 Term에 핀된 값에서 파생한다. surface_id는 직전 `agentTargets`가 준 값만 유효하며 native가
+  현재 창의 Term 집합에 대조한다(web이 임의 surface를 지정할 수 없다는 §1 정책이 여기서 강제된다).
 
 ## 7. 고르지 않은 대안과 근거
 
@@ -130,8 +135,8 @@ web은 이 요청만 하고 결과에 관여하지 않는다(fire-and-forget). �
   리치 모드에서 메뉴 요청이 나가지 않음.
 - **스모크(macos)**: 실제 파일 패널에서 선택 후 브리지 요청이 나가고, 대상 터미널의 PTY에 **개행 없이** 페이로드가
   도달하는지. 개행 부재는 이 기능의 안전 계약이라 자동 게이트로 고정한다.
-- **손 테스트**: 웹뷰 위 오버레이 메뉴의 좌표·클릭 라우팅(firstResponder가 웹뷰인 상태), 실제 에이전트 CLI가
-  붙여넣은 인용을 한 덩어리로 받는지.
+- **손 테스트**: 실제 에이전트 CLI가 붙여넣은 인용을 한 덩어리로 받는지(bracketed paste 실동작). 메뉴 자체는
+  web이라 헤드리스로 검증된다.
 
 ## 9. 후속(비목표)
 

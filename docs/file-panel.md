@@ -73,7 +73,28 @@
 
 아키텍처 B로 WKWebView 웹앱의 일은 최소다(트리·탭·도크 chrome = 네이티브 Zig+GPU). 그래서:
 
-- **프론트엔드 = vanilla TS(프레임워크 없음).** 웹앱의 일은 새니타이즈 HTML 표시(읽기) + CM6 마운트(소스) + 문서모델 편집기 마운트(리치, §2.5) + 브리지 모드/테마 신호 수신 + dirty 보고다. Markdown 파생 HTML은 신뢰 shell에 삽입하지 않고 bridge-free renderer origin이 소유하며, 그 안의 Mermaid 펜스만 shell이 native helper로 중계한다(§2.4). `viewer.ts`는 shell composition facade와 mutation queue/guard snapshot 전달을 맡고, Markdown→HTML 파생은 `markdown.ts`, Mermaid sanitize·config는 `rich-render.ts`, helper wire는 `mermaid-helper.ts`·`mermaid-fence.ts`, 렌더 capability 타입은 `renderer-capability.ts`, 편집 모드·revision clock은 `file-panel-state.ts`, 리치 편집기와 툴바는 `rich-editor.ts`가 소유한다. **라이브 프리뷰 폐기(§1)로 projection·atomic worker·intent dispatcher 모듈은 전부 삭제했다** — 남은 웹 모듈은 읽기·소스 두 모드만 지탱한다. CM6는 프레임워크가 아니라 **DOM 마운트 에디터 라이브러리**라 이 결정과 직교한다.
+- **프론트엔드 = React + Tailwind + shadcn/ui (2026-07-29 개정, 사용자 결정).** 웹앱의 일은 새니타이즈 HTML 표시(읽기) + CM6 마운트(소스) + 문서모델 편집기 마운트(리치, §2.5) + 브리지 모드/테마 신호 수신 + dirty 보고다. Markdown 파생 HTML은 신뢰 shell에 삽입하지 않고 bridge-free renderer origin이 소유하며, 그 안의 Mermaid 펜스만 shell이 native helper로 중계한다(§2.4). `viewer.ts`는 shell composition facade와 mutation queue/guard snapshot 전달을 맡고, Markdown→HTML 파생은 `markdown.ts`, Mermaid sanitize·config는 `rich-render.ts`, helper wire는 `mermaid-helper.ts`·`mermaid-fence.ts`, 렌더 capability 타입은 `renderer-capability.ts`, 편집 모드·revision clock은 `file-panel-state.ts`, 리치 편집기와 툴바는 `rich-editor.ts`가 소유한다. **라이브 프리뷰 폐기(§1)로 projection·atomic worker·intent dispatcher 모듈은 전부 삭제했다** — 남은 웹 모듈은 읽기·소스 두 모드만 지탱한다. CM6는 프레임워크가 아니라 **DOM 마운트 에디터 라이브러리**라 이 결정과 직교한다.
+- **프레임워크 도입의 범위와 뒤집지 않는 것(§2.1a).** 초판은 "프레임워크 없음"이었고 그 근거는 아키텍처 B —
+  "웹앱의 일을 최소화한다"였다. **아키텍처 B 자체는 그대로다**: 탭·헤더 밴드·파일 트리·pane chrome은 계속 Zig+GPU가
+  그리고, WKWebView는 문서 콘텐츠만 소유한다. 바뀌는 것은 **그 콘텐츠 영역 안에서 web이 이미 그리던 UI를 무엇으로
+  만드느냐**뿐이다.
+  - **왜 뒤집는가**: 콘텐츠 영역 안에서 시작한 상호작용(선택→컨텍스트 메뉴, 리치 툴바, 앞으로의 다이얼로그)을
+    native 오버레이로 처리하려면 웹뷰 좌표 변환·firstResponder 라우팅·스크롤 추종을 매번 새로 풀어야 한다. 그 셋은
+    헤드리스로 검증되지 않아 손 테스트에만 의존한다. 같은 UI를 web에서 그리면 위치·스크롤·클릭이 전부 DOM의 기본
+    동작으로 해결된다. 컨텍스트 메뉴처럼 포커스 트랩·키보드 내비게이션·바깥 클릭 닫기가 필요한 컴포넌트를 직접
+    짜는 비용도 매번 든다.
+  - **경계는 그대로 판별한다**: "이 UI가 문서 콘텐츠 위에 뜨는가"가 기준이다. 그렇다면 web, 창 전체나 chrome
+    영역에 뜨면(알림 센터·설정·닫기 확인) 계속 Zig chrome이다.
+  - **CM6·문서모델 편집기는 React와 직교한다.** 둘 다 DOM 마운트 라이브러리라 React 트리 안의 한 노드에 그대로
+    붙는다. 편집기를 React 컴포넌트로 다시 쓰지 않는다.
+- **테마 색의 단일 출처는 여전히 native다(§2.1b).** Tailwind를 도입해도 색·폰트 값은 계속 `--maru-syntax-*`·
+  `--maru-editor-*`가 소유하고, Tailwind 테마는 그 CSS 변수를 **참조만** 한다(`colors: { syntax: { keyword:
+  "var(--maru-syntax-keyword)" } }` 형태). Tailwind 기본 팔레트를 그대로 쓰면 터미널 테마를 바꿨을 때 그 부분만
+  안 따라오는 이중 체계가 된다 — 실제로 리치 본문에 터미널 폰트를 잘못 물려 한글이 깨진 전례가 있다(§2.5).
+- **CSP·번들 영향(§2.1c).** app origin은 CM6 StyleModule 때문에 이미 `style-src 'self' 'unsafe-inline'`이라
+  팝오버 위치 계산의 인라인 style이 통과한다(§1 무백색 계약과 같은 근거). Tailwind 출력은 빌드타임 CSS 파일이라
+  새 권한이 필요 없다. 번들은 커지므로 **web bundle 3 MiB를 예산으로 둔다** — 넘으면 그 PR에서 근거를 대거나
+  코드 분할을 한다. 로컬 스킴 로드라 네트워크 비용은 없지만 파싱 시간은 첫 paint에 들어간다.
 - **렌더러 = remark/unified 확정(FP2)**. 실측으로 ⑴ raw HTML을 `remarkRehype` 경계에서 폐기, ⑵ `rehype-sanitize` AST allowlist, ⑶ unist 문자 offset→renderer-owned `data-maru-source-start/end`, ⑷ GFM·KaTeX MathML-only·Prism을 한 pipeline에서 보존하고 adversarial fixture를 통과했다. markdown-it의 block line 범위보다 후속 주석 앵커의 문자 offset hedge가 강하고 별도 DOM sanitizer가 불필요해 remark를 택했다.
 - **리치 렌더 기능**(각 = 라이브러리 + 보안 배치):
 

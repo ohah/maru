@@ -618,6 +618,13 @@ test "session host unchecked teardown authority cannot escape anywhere in src" {
             },
             .pump_references = 2,
         },
+        .{
+            .name = "consumePreparedLiveCommitUnchecked",
+            .owner_suffixes = &.{"platform/macos/session_host/external_inbox_ledger.zig"},
+            // The ledger-first d2b3c slice publishes the capability before the
+            // aggregate core opens its sole product callsite.
+            .pump_references = 0,
+        },
     };
     var unchecked_declarations: usize = 0;
     var inventory_dir = try std.Io.Dir.cwd().openDir(
@@ -656,7 +663,7 @@ test "session host unchecked teardown authority cannot escape anywhere in src" {
             }
         }
     }
-    try std.testing.expectEqual(@as(usize, 10), unchecked_declarations);
+    try std.testing.expectEqual(@as(usize, 11), unchecked_declarations);
     for (symbols) |symbol| {
         var pump_references: usize = 0;
         var dir = try std.Io.Dir.cwd().openDir(std.testing.io, "src", .{ .iterate = true });
@@ -820,7 +827,7 @@ test "session host deferred seed retirement has one ledger owner and one adoptio
     try std.testing.expectEqual(@as(usize, 1), adoption_calls);
 }
 
-test "session host live batch unchecked mutation has one checked ledger caller" {
+test "session host live batch unchecked mutation stays behind two ledger entrypoints" {
     const allocator = std.testing.allocator;
     const root = "src/platform/macos/session_host";
     const definition_needle = "fn commitPreparedLiveBatchUnchecked(";
@@ -913,7 +920,56 @@ test "session host live batch unchecked mutation has one checked ledger caller" 
         }
     }
     try std.testing.expectEqual(@as(usize, 1), definitions);
-    try std.testing.expectEqual(@as(usize, 1), calls);
+    // The legacy checked API and the sealed-permit unchecked consume each converge
+    // on the same mutation leaf. No caller outside this owner module may bypass
+    // either entrypoint.
+    try std.testing.expectEqual(@as(usize, 2), calls);
+}
+
+test "session host live commit permit keeps checked consume ledger-private" {
+    const allocator = std.testing.allocator;
+    const root = "src/platform/macos/session_host";
+    const checked_needle = "consumePreparedLiveCommitChecked(";
+    const unchecked_needle = "consumePreparedLiveCommitUnchecked(";
+    var checked_outside_ledger: usize = 0;
+    var unchecked_definitions: usize = 0;
+    var unchecked_pump_calls: usize = 0;
+    var dir = try std.Io.Dir.cwd().openDir(std.testing.io, root, .{ .iterate = true });
+    defer dir.close(std.testing.io);
+    var walker = try dir.walk(allocator);
+    defer walker.deinit();
+    while (try walker.next(std.testing.io)) |entry| {
+        if (entry.kind != .file or
+            !std.mem.endsWith(u8, entry.basename, ".zig"))
+            continue;
+        const path = try std.fmt.allocPrint(
+            allocator,
+            "{s}/{s}",
+            .{ root, entry.path },
+        );
+        defer allocator.free(path);
+        const source = try readZigFileZ(allocator, path);
+        defer allocator.free(source);
+        if (std.mem.eql(u8, entry.path, "external_inbox_ledger.zig")) {
+            unchecked_definitions += countOccurrences(
+                source,
+                "pub fn consumePreparedLiveCommitUnchecked(",
+            );
+        } else {
+            checked_outside_ledger += countOccurrences(source, checked_needle);
+            if (std.mem.eql(u8, entry.path, "client_external_pump.zig"))
+                unchecked_pump_calls += countOccurrences(source, unchecked_needle)
+            else
+                try std.testing.expectEqual(
+                    @as(usize, 0),
+                    countOccurrences(source, unchecked_needle),
+                );
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), checked_outside_ledger);
+    try std.testing.expectEqual(@as(usize, 1), unchecked_definitions);
+    // d2b3c opens this exact-one product callsite; the ledger-only first slice keeps it at zero.
+    try std.testing.expect(unchecked_pump_calls <= 1);
 }
 
 fn countOccurrences(haystack: []const u8, needle: []const u8) usize {

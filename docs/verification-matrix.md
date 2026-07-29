@@ -95,6 +95,42 @@
 > poison quarantine exact-once,
 > Debug/ReleaseFast `test-session-host`와 function-local test-only boundary다. 제품 move/publish/stack scratch는
 > 계속 0이며 d2b3d에서만 열린다.
+> d2b3c는 현재 ledger `commitPreparedLiveBatch`를 outer aggregate에서 직접 호출하지 않는다. ledger 모듈이
+> allocation/check/simulation/disposition을 끝내고 ledger mutation 0인 final-address `PreparedLiveCommit`을
+> 만들며, exact-one aggregate callsite만 callback/error-free unchecked consume을 호출한다. intent 모듈도
+> concrete scratch를 노출하지 않고 finalized whole-turn slot→destination과 exact payload move를
+> `PreparedIntentCommit`으로 봉인한다. pump-private heap-pinned `PreparedRxAggregate`는 두 permit,
+> batch/retirement/disposition과 destination plan만 결합한다. 기존 192 KiB ledger commit 예산을 재사용하고
+> 별도 byte backing은 두지 않으며 wrapper allocation 상한은 256 KiB다. screen payload는 prepare-time
+> `.screen_staging`에서 neutral move value→ledger batch로 exact move해 batch만 단독 소유하고,
+> `PreparedIntentCommit`은 `.screen_mutation` slot과 event/response payload move를 봉인한다. permit은 실제
+> private simulation 및 plan/output backing final address를 보유하므로 consume 때 재구성하지 않는다.
+> aggregate는 attachment당 하나의 storage reservation을 가지며 trusted path는
+> ready→preparing→finalized→committing→committed 또는 aborted→destroying lifecycle을 따르고 poisoned는
+> reservation tombstone 뒤 destroy 금지 terminal이다. 전체 intent bijection, partial 최대 1,
+> completed FIFO capacity/order, response 최대 1+기존 pending 충돌, metadata merge/retirement를 ledger mutation
+> 전에 봉인한다. prepare/terminal/teardown 실패는 모든 cross-owner cleanup을 callback 전에 freeze하고 전부
+> tombstone한 뒤 callback을 실행한다. 성공 suffix는 aggregate committing tombstone→ledger permit
+> consume+mutation→intent permit consume+source tombstone+aggregate neutral slot move→sealed persistent
+> owner write+neutral empty→aggregate committed→retirement 순서이며 첫 callback 뒤 authority 재독은 0이다.
+> metadata current replacement는 별도 prepared replacement permit과 old-owner frozen cleanup을 쓰며 기존
+> reducer의 older ignore, same+same cleanup-only, same+different terminal, newer replace를 그대로 따른다.
+> poison은 두 reservation을 같은 held lease에서 poisoned tombstone하고 이후 destroy하지
+> 않는다. 추가 quarantine 가산은 aggregate 262,144 + staged metadata 4,194,304 =
+> 4,456,448 bytes이고 raw frame payload와 기존 current metadata는 기존 상한과 중복 계상하지 않는다.
+> cross-owner frozen cleanup descriptor 상한은 ledger 128+intent 64+transfer 64+neutral 64+metadata 2=322이고
+> callback-hidden local은 256 KiB compile-time stack cap 및 기존 aggregate callback-local 768 KiB cap에 동시에
+> 포함한다. count/byte cap+1과 screen staging 각 선형화점, ledger prepare 실패/성공, intent neutral move 직후,
+> destination write 직후 abort/teardown의 exact-one cleanup을 Debug/ReleaseFast로 고정한다.
+> ledger `PreparedLiveCommit`은 phase별 final count, retirement output seal, simulation/disposition digest를
+> 보유하고 prepare가 ledger mutation 0으로 preview한다. checked prepare/consume의 `LiveSimulation` local은
+> 64 KiB cap, unchecked consume은 pointer read로 추가 copy 0이다. checked consume은 ledger-private이고
+> module-public unchecked seam은 pump exact-one callsite 외 0이다. prepared permit abort는 dispositions unused와
+> permit aborted를 먼저 만들고, consumed/aborted만 canonical reset할 수 있다. abort도 checked consume과 같은
+> sealed batch/ledger/disposition validator를 통과해야 하므로 drift된 graph에서는 output/permit을 포함한 mutation
+> 0이다. 아직 남은 screen transfer·intent permit·aggregate reservation/core는 whole-graph alias preflight,
+> staging/mutation abort와 pump exact-one caller를 같은 변경에서 원자적으로 닫는다. 이 결합 없이 중간 staging
+> owner나 scalar proof API만 먼저 공개하지 않는다.
 > full `RxRange`를 4,096 slot에 저장하는 구현이나 `ExternalPumpStorage` 512 KiB inline cap 증가는 허용하지 않는다.
 >
 > c3b 행의 `descriptor/len/cap/alias ABA`는 최종 상태 drift/stale-plan 검출을 뜻한다. A→B→A

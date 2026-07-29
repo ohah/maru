@@ -1064,7 +1064,12 @@ pub const RemoteRuntime = struct {
     /// `out_spans`는 먼저 비운다. 검색어는 임의 텍스트라 hex로 실어 escape를 피한다(상한 256 char).
     /// §6c 검색 결과. `count`=전체 매치 수, `cur`=현재 매치(cur_index)의 뷰포트 span(안 보이면 null). 보이는 **비현재** 매치는
     /// `out_spans`에 채운다(하이라이트용).
-    pub const FindResult = struct { count: usize, cur: ?terminal.SelectionSpan };
+    /// `voff`=host가 이 span들을 계산한 기준 view_offset. client는 자기 화면(delta로 조립한 projection)의
+    /// view_offset과 같을 때만 span을 그린다 — scroll=true 요청이 host 화면을 옮긴 직후의 응답은 client가 아직
+    /// 그 스크롤 delta를 못 받은 화면과 좌표계가 어긋나기 때문이다. host가 이 필드를 안 보내면(앱보다 오래 사는
+    /// 구 host 데몬) null이고, 그 연결에서는 종전대로 즉시 적용한다 — 새 필드가 없다는 사실 자체가 구 host의
+    /// 유일한 신호라 별도 capability 비트를 두지 않는다(find 응답은 count/cur도 같은 관대한 파싱 규율이다).
+    pub const FindResult = struct { count: usize, cur: ?terminal.SelectionSpan, voff: ?u64 };
 
     pub fn find(self: *RemoteRuntime, query: []const u8, cur_index: u32, scroll: bool, out_spans: *std.ArrayList(terminal.SelectionSpan)) client_mod.ClientError!FindResult {
         if (scroll and !self.mutationAllowed()) return error.Unauthorized;
@@ -1083,7 +1088,7 @@ pub const RemoteRuntime = struct {
         const count = client_mod.extractU64Field(resp, "\"count\":") orelse 0;
         const cur = parseFirstSpan(resp, "\"cur\":[");
         parseSpansInto(resp, out_spans, self.allocator);
-        return .{ .count = @intCast(count), .cur = cur };
+        return .{ .count = @intCast(count), .cur = cur, .voff = client_mod.extractU64Field(resp, "\"voff\":") };
     }
 
     /// 단어/줄 선택(§6b-2): host가 콘텐츠를 아는 자기 core로 경계를 계산하게 하고(`selectWordAt`/`selectLineAt`) 결과 뷰포트

@@ -572,6 +572,16 @@ const default_scrollbar_fade_ticks: u32 = ticksForMsAtRate(scrollbar_fade_ms, co
 /// 갱신을 기대하는 게 정상). 완전 스크롤(view_offset>=rows)이면 라이브 행이 안 보여 tearing도 없다. (2) view_offset은
 /// 활성 surface만 본다 — 비활성 split이 sync hold 중 프로그램적으로 스크롤되면 이 게이트가 강제 투영하진 못한다(활성이
 /// dirty해질 때까지). 기존 게이트도 활성 한정이라 회귀가 아닌 선존 범위 한계(드문 경로).
+/// §6c host-backed 검색: host가 돌려준 매치 span을 **지금 화면에** 그려도 되는지. host는 자기 core의 현재
+/// view_offset 기준으로 span을 계산하는데(runtime_manager.findOp), scroll=true 요청이 그 직전에 host 화면을
+/// 옮겼으면 client는 그 스크롤을 아직 delta로 못 받았다 — 두 좌표계가 다른 상태로 합성하면 엉뚱한 줄이
+/// 하이라이트된다(사용자에겐 "이전 하이라이트가 남는" 증상). 그래서 두 view_offset이 같을 때만 적용한다.
+/// `host_voff`가 null이면 앱보다 오래 사는 구 host 데몬이라 대조할 근거가 없다 — 종전 동작(즉시 적용)으로 둔다.
+fn remoteFindSpansApplicable(host_voff: ?u64, client_voff: usize) bool {
+    const v = host_voff orelse return true;
+    return v == client_voff;
+}
+
 fn shouldProjectFrame(
     metal_dirty: bool,
     sync_active: bool,
@@ -2079,6 +2089,10 @@ pub const AppSession = struct {
     // 시에만 host에 재검색(refreshRemoteFind)해 뷰포트 매치 span을 여기 캐시하고, tick은 이걸 find_view_spans에 복사만 한다.
     // remote_find_dirty는 검색어 변화(recomputeFind) 트리거. in-process는 이 둘을 안 쓴다(find_matches/find_view_spans 그대로).
     remote_find_spans: std.ArrayList(terminal.SelectionSpan) = .empty,
+    // host 응답 수신 버퍼. 표시 버퍼(remote_find_spans)와 분리해 둔다 — host가 span을 계산한 view_offset이 client
+    // 화면과 어긋나면(스크롤 delta 미도착) 응답을 버리고 기존 표시를 유지해야 하기 때문. 승격은 swap이라 무할당이고,
+    // 다음 응답이 이 버퍼의 capacity를 재사용한다.
+    remote_find_pending: std.ArrayList(terminal.SelectionSpan) = .empty,
     remote_find_dirty: bool = false,
     // §6c-2 host-backed 검색 네비: 현재 매치(chrome_host.find.current)의 뷰포트 span 캐시(host가 계산·반환). scroll_pending은
     // ⌘G 네비 시 다음 refreshRemoteFind가 host를 현재 매치로 스크롤하게 하는 one-shot 플래그.
@@ -17769,8 +17783,17 @@ pub const AppSession = struct {
                 // §6c-2: 현재 매치 인덱스와 scroll_pending(⌘G 네비면 host가 그 매치로 스크롤)을 함께 보내고, 현재 매치 span을 캐시.
                 const do_scroll = self.remote_find_scroll_pending;
                 self.remote_find_scroll_pending = false;
-                if (rb.findFor(surface.id, self.chrome_host.find.input.query.items, @intCast(self.chrome_host.find.current), do_scroll, &self.remote_find_spans)) |res| {
-                    self.chrome_host.find.setMatchCount(res.count);
+                // 응답은 **pending**으로 먼저 받는다 — 아래 view_offset 대조에서 어긋나면 기존(현재 화면과 정합한)
+                // 하이라이트를 그대로 둬야 하므로, 수신 버퍼가 곧 표시 버퍼면 안 된다.
+                if (rb.findFor(surface.id, self.chrome_host.find.input.query.items, @intCast(self.chrome_host.find.current), do_scroll, &self.remote_find_pending)) |res| {
+                    self.chrome_host.find.setMatchCount(res.count); // 카운터는 좌표계와 무관 — 즉시 최신으로
+                    // host가 span을 계산한 view_offset과 client 화면(delta로 조립한 projection)의 view_offset이 다르면,
+                    // 그 스크롤 delta가 아직 안 온 것이다. 지금 그리면 좌표계가 다른 화면에 하이라이트를 찍는다(= 이전
+                    // 하이라이트가 남아 보이는 증상). 그 delta가 도착하는 tick은 output_events>0이라 여기로 다시 오므로
+                    // 표시를 미루기만 하면 정합 상태로 수렴한다 — 별도 재시도 타이머나 dirty 재설정이 필요 없다
+                    // (host가 실제로 스크롤했다면 scroll_state delta가 반드시 뒤따른다: screen_snapshot.computeDelta).
+                    if (!remoteFindSpansApplicable(res.voff, scrollStateOf(surface).view_offset)) return;
+                    std.mem.swap(std.ArrayList(terminal.SelectionSpan), &self.remote_find_spans, &self.remote_find_pending);
                     self.remote_find_current = res.cur;
                     return;
                 }
@@ -17784,14 +17807,9 @@ pub const AppSession = struct {
     /// 현재(네비게이션) 매치를 뷰포트로 스크롤한다 — 없으면 무동작. 검색·네비게이션 후 호출(scrollToAbs가
     /// 매치를 세로 중앙쯤에 둬 Find 오버레이(활성 pane 상단 한 줄)에 안 가린다). 현재 인덱스는 chrome_host.find.current.
     fn scrollToCurrentMatch(self: *AppSession) void {
-        // §6c-2 host-backed: 스크롤백 매치로의 스크롤은 host가 소유한 view를 움직여야 한다(placeholder는 미렌더). 다음 tick의
-        // refreshRemoteFind가 scroll=true로 host를 현재 매치로 스크롤하도록 표시만 한다(one-shot). in-process면 기존 경로.
-        if (is_macos and self.activeSurface().remote != null) {
-            self.remote_find_scroll_pending = true;
-            self.remote_find_dirty = true;
-            return;
-        }
-        find_ops.scrollToCurrentMatch(self); // 본문 분리: app_session/find.zig(E1)
+        // 본문 분리: app_session/find.zig(E1). host-backed 분기도 그쪽 단일 출처에 있다 — 여기 두면 그룹 내부에서
+        // free 함수로 직접 부르는 recomputeFind가 우회한다(원격 증분 검색이 스크롤을 요청하지 않던 원인).
+        find_ops.scrollToCurrentMatch(self);
     }
 
     /// 현재 활성 탭의 surface. 모든 입력/IME/스크롤/마우스/렌더 경로가 이 seam을 거친다 —
@@ -29818,6 +29836,7 @@ pub const AppSession = struct {
         self.find_matches.deinit(self.allocator);
         self.find_view_spans.deinit(self.allocator);
         self.remote_find_spans.deinit(self.allocator); // §6c host-backed 검색 캐시
+        self.remote_find_pending.deinit(self.allocator); // 같은 캐시의 수신 버퍼(view_offset 대조 후 swap 승격)
         if (self.workspace_buffer) |b| self.allocator.free(b);
         if (self.sidebar_config_buffer) |b| self.allocator.free(b);
         inline for (pending_writeback_lists) |n| @field(self, n).deinit(self.allocator); // config write-back pending registry(단일 출처)
@@ -59215,4 +59234,53 @@ test "FP16 닫기: 파괴 전 스냅샷은 한 번만 요청하고, 답이 없�
     // 스냅샷이 **돌아와** dirty가 서면 다시 정상적으로 막는다.
     entry.dirty = true;
     try std.testing.expect(AppSession.termHasProtectedFilePanel(opened.term));
+}
+
+// §6c host-backed 검색 회귀 가드. 원격에서만 증분 검색(타이핑)이 매치로 스크롤되지 않던 결함 — find.zig의
+// recomputeFind가 그룹 내부에서 free 함수 scrollToCurrentMatch를 직접 불러, app_session facade에만 있던 원격
+// 분기를 우회했다. 분기를 find.zig 단일 출처로 옮겼으므로 두 경로(타이핑·Enter) 모두 host 스크롤을 요청해야 한다.
+test "host-backed find: 증분 검색과 네비가 둘 다 host 스크롤을 요청한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 6,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(800, 600, 1000);
+
+    var fake = FakeLinkScreen{ .snap = .{ .size = .{ .cols = 40, .rows = 6 } } };
+    const surface = session.activeSurface();
+    surface.remote = .{ .ctx = &fake, .vtable = &FakeLinkScreen.vtable };
+    defer surface.remote = null;
+
+    session.dispatchAppAction(.toggle_find);
+    for ("MARUFIND") |c| _ = try session.handleKeyEvent(.{ .key = .{ .char = c }, .modifiers = .{} });
+
+    // 타이핑(증분 검색): 재검색과 "첫 매치로 스크롤"이 둘 다 host에 요청된다 — in-process와 같은 동작.
+    try std.testing.expect(session.remote_find_dirty);
+    try std.testing.expect(session.remote_find_scroll_pending);
+
+    // Enter(네비)도 같은 단일 출처를 거친다.
+    session.remote_find_scroll_pending = false;
+    _ = try session.handleKeyEvent(.{ .key = .enter, .modifiers = .{} });
+    try std.testing.expect(session.remote_find_scroll_pending);
+}
+
+// host 응답 span을 언제 그려도 되는지의 정책. host는 scroll 직후 **스크롤된 화면 기준**으로 span을 계산해
+// 응답하는데(runtime_manager.findOp), client는 그 스크롤 delta를 아직 못 받았을 수 있다. 두 좌표계를 합성하면
+// 엉뚱한 줄이 하이라이트된다 — 사용자가 본 "이전 하이라이트가 남는" 증상의 정체다.
+test "host-backed find: span은 client 화면과 view_offset이 맞을 때만 적용한다" {
+    // 정합 — 적용한다.
+    try std.testing.expect(remoteFindSpansApplicable(120, 120));
+    // 어긋남(host가 스크롤했고 그 delta가 아직 client에 없다) — 적용하지 않는다(이전 하이라이트 유지).
+    try std.testing.expect(!remoteFindSpansApplicable(120, 0));
+    try std.testing.expect(!remoteFindSpansApplicable(0, 120));
+    // 구 host 데몬은 이 값을 안 보낸다 — 대조 근거가 없으므로 종전대로 즉시 적용한다.
+    try std.testing.expect(remoteFindSpansApplicable(null, 120));
 }

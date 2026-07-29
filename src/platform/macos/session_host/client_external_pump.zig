@@ -3793,6 +3793,8 @@ pub const ExternalPumpStorage = struct {
         const storage_addr = @intFromPtr(self);
         const evidence_snapshot = self.evidence_snapshot;
         const operation_generation = self.operation_generation;
+        const external_identity_teardown_generation =
+            cleanup_scratch.ledger_prepared.terminal_external_identity_seal.generation;
         self.semantic_state = terminal_state;
         self.owner_teardown_generation = next_generation;
 
@@ -3889,7 +3891,10 @@ pub const ExternalPumpStorage = struct {
         self.owned_client = null;
         self.owned_evidence = null;
         self.client_transfer = .{};
-        self.inbox_ledger.restoreFinishedOwnerTeardownUnchecked(next_generation);
+        self.inbox_ledger.restoreFinishedOwnerTeardownUnchecked(
+            next_generation,
+            external_identity_teardown_generation,
+        );
         self.prepared_adoption = .{ .lifecycle = .committed_tombstone };
         self.committed_screen = .{ .lifecycle = .cleaned_tombstone };
         self.screen_pending_summary = .{ .lifecycle = .tombstone };

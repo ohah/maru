@@ -21,6 +21,7 @@ pub const AttachmentBatchLease = union(enum) {
             .untracked => |batch| .{
                 .is_snapshot = batch.is_snapshot,
                 .stream_id = batch.stream_id,
+                .provenance = .untracked,
                 .bytes = batch.bytes,
             },
             .charged => |token| {

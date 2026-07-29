@@ -10,15 +10,21 @@ const limits = @import("external_inbox_limits.zig");
 const owner_seal = @import("external_owner_seal.zig");
 const owner_range = @import("external_owner_range.zig");
 const protocol = @import("protocol.zig");
+const external_rx_types = @import("external_rx_types.zig");
 
 pub const max_bytes: usize = limits.max_bytes;
 pub const max_items: usize = limits.max_items;
 pub const max_batch_bytes: usize = protocol.max_viewport_snapshot;
 pub const max_batch_chunks: usize = protocol.max_screen_batch_chunks;
+pub const max_stored_external_span: usize =
+    protocol.max_viewport_snapshot +
+    protocol.max_screen_batch_chunks * protocol.header_size;
 
 comptime {
     if (max_items > @as(usize, std.math.maxInt(u16)) + 1)
         @compileError("external inbox token slot cannot represent max_items");
+    if (max_stored_external_span > std.math.maxInt(u32))
+        @compileError("compact external RX span cannot represent the protocol batch cap");
 }
 
 pub const Token = struct {
@@ -58,7 +64,7 @@ pub const PreparedSeedRetirement = struct {
     }
 };
 
-pub const PayloadPhase = enum {
+pub const PayloadPhase = enum(u2) {
     frame,
     partial,
     completed,
@@ -69,6 +75,40 @@ pub const RecoveryIntent = union(enum) {
     none,
     host: u64,
     client: u64,
+};
+
+pub const CompactExternalRange = struct {
+    start_absolute: u64,
+    span: u32,
+};
+
+const StoredRxBatchProvenanceTag = enum(u1) {
+    untracked,
+    external,
+};
+
+pub const StoredRxBatchProvenance = union(StoredRxBatchProvenanceTag) {
+    untracked,
+    external: CompactExternalRange,
+};
+
+pub const ObservedRxBatchProvenance = union(enum) {
+    untracked,
+    external: external_rx_types.RxRange,
+};
+
+const LedgerExternalIdentityLifecycle = enum {
+    empty,
+    bound,
+    drained_tombstone,
+};
+
+pub const LedgerExternalIdentitySeal = struct {
+    ledger_addr: usize = 0,
+    identity: ?external_rx_types.RxIdentity = null,
+    generation: u64 = 0,
+    lifecycle: LedgerExternalIdentityLifecycle = .empty,
+    digest: owner_seal.Digest = [_]u8{0} ** 32,
 };
 
 fn writeRecoveryIntent(writer: *owner_seal.Writer, intent: RecoveryIntent) void {
@@ -85,10 +125,84 @@ fn writeRecoveryIntent(writer: *owner_seal.Writer, intent: RecoveryIntent) void 
     }
 }
 
+fn validateRxIdentity(
+    identity: external_rx_types.RxIdentity,
+) error{InvalidSemantic}!void {
+    if (identity.attach_instance_id == 0 or identity.destination_slot_addr == 0)
+        return error.InvalidSemantic;
+}
+
+fn validateCompactExternalRange(
+    range: CompactExternalRange,
+) error{InvalidSemantic}!void {
+    if (range.span == 0) return error.InvalidSemantic;
+    if (@as(usize, range.span) > max_stored_external_span)
+        return error.InvalidSemantic;
+    _ = std.math.add(u64, range.start_absolute, range.span) catch
+        return error.InvalidSemantic;
+}
+
+fn writeStoredProvenance(
+    writer: *owner_seal.Writer,
+    provenance: StoredRxBatchProvenance,
+) void {
+    switch (provenance) {
+        .untracked => writer.writeU8(0),
+        .external => |range| {
+            writer.writeU8(1);
+            writer.writeU64(range.start_absolute);
+            writer.writeU64(range.span);
+        },
+    }
+}
+
+fn externalIdentityDigest(
+    ledger_addr: usize,
+    identity: ?external_rx_types.RxIdentity,
+    generation: u64,
+    lifecycle: LedgerExternalIdentityLifecycle,
+) owner_seal.Digest {
+    var writer = owner_seal.Writer.init("MARULEI1");
+    writer.writeUsize(ledger_addr);
+    if (identity) |value| {
+        writer.writeBool(true);
+        writer.writeU64(value.attach_instance_id);
+        writer.writeUsize(value.destination_slot_addr);
+    } else {
+        writer.writeBool(false);
+    }
+    writer.writeU64(generation);
+    writer.writeU8(@intFromEnum(lifecycle));
+    return writer.finish();
+}
+
+fn makeExternalIdentitySeal(
+    ledger: *const ExternalInboxLedger,
+    identity: external_rx_types.RxIdentity,
+    generation: u64,
+    lifecycle: LedgerExternalIdentityLifecycle,
+) LedgerExternalIdentitySeal {
+    const ledger_addr = @intFromPtr(ledger);
+    return .{
+        .ledger_addr = ledger_addr,
+        .identity = identity,
+        .generation = generation,
+        .lifecycle = lifecycle,
+        .digest = externalIdentityDigest(ledger_addr, identity, generation, lifecycle),
+    };
+}
+
+fn isCanonicalEmptyIdentitySeal(seal: LedgerExternalIdentitySeal) bool {
+    return seal.ledger_addr == 0 and seal.identity == null and seal.generation == 0 and
+        seal.lifecycle == .empty and
+        std.mem.allEqual(u8, &seal.digest, 0);
+}
+
 pub const BatchSemantic = struct {
     stream_id: u64,
     is_snapshot: bool,
     recovery_intent: RecoveryIntent = .none,
+    provenance: StoredRxBatchProvenance = .untracked,
 };
 
 pub const PartialSemantic = struct {
@@ -96,6 +210,22 @@ pub const PartialSemantic = struct {
     is_snapshot: bool,
     chunk_count: u8,
     recovery_intent: RecoveryIntent = .none,
+    provenance: StoredRxBatchProvenance = .untracked,
+};
+
+pub const ObservedBatchSemantic = struct {
+    stream_id: u64,
+    is_snapshot: bool,
+    recovery_intent: RecoveryIntent = .none,
+    provenance: ObservedRxBatchProvenance = .untracked,
+};
+
+pub const ObservedPartialSemantic = struct {
+    stream_id: u64,
+    is_snapshot: bool,
+    chunk_count: u8,
+    recovery_intent: RecoveryIntent = .none,
+    provenance: ObservedRxBatchProvenance = .untracked,
 };
 
 pub const PayloadSemantic = union(PayloadPhase) {
@@ -103,6 +233,13 @@ pub const PayloadSemantic = union(PayloadPhase) {
     partial: PartialSemantic,
     completed: BatchSemantic,
     lease: BatchSemantic,
+};
+
+pub const ObservedPayloadSemantic = union(PayloadPhase) {
+    frame: protocol.Header,
+    partial: ObservedPartialSemantic,
+    completed: ObservedBatchSemantic,
+    lease: ObservedBatchSemantic,
 };
 
 pub const OwnedPayload = struct {
@@ -133,6 +270,11 @@ pub const OwnedPayload = struct {
         return &.{};
     }
 
+    fn mutableBytes(self: *OwnedPayload) []u8 {
+        if (self.allocation_ptr) |ptr| return ptr[0..self.logical_len];
+        return @constCast(&.{});
+    }
+
     pub fn deinit(self: *OwnedPayload) void {
         if (self.allocation_ptr) |ptr| self.allocator.free(ptr[0..self.logical_len]);
         self.* = .{ .allocator = self.allocator };
@@ -147,13 +289,14 @@ pub const OwnedPayload = struct {
 
 pub const PayloadView = struct {
     phase: PayloadPhase,
-    semantic: PayloadSemantic,
+    semantic: ObservedPayloadSemantic,
     bytes: []const u8,
 };
 
 pub const BatchView = struct {
     is_snapshot: bool,
     stream_id: u64,
+    provenance: ObservedRxBatchProvenance,
     bytes: []const u8,
 };
 
@@ -166,6 +309,7 @@ const PayloadFingerprint = struct {
     allocator: std.mem.Allocator,
     address: usize,
     logical_len: usize,
+    content_digest: owner_seal.Digest = [_]u8{0} ** 32,
 };
 
 const PlannedSeed = struct {
@@ -419,6 +563,398 @@ pub const PreparedSeedPlan = struct {
     }
 };
 
+pub const max_live_mutations: usize = 64;
+pub const max_live_cleanup_owners: usize = max_live_mutations * 2;
+
+pub const LiveTokenRef = union(enum) {
+    existing: Token,
+    planned: u8,
+};
+
+const LiveMutationLifecycle = enum {
+    empty,
+    prepared,
+    committed,
+    aborted,
+};
+
+const PreparedLiveAdmission = struct {
+    saved_self_addr: usize = 0,
+    ledger_addr: usize = 0,
+    batch_addr: usize = 0,
+    semantic: PayloadSemantic = .{ .lease = .{
+        .stream_id = 0,
+        .is_snapshot = false,
+    } },
+    owned_payload: OwnedPayload = .{ .allocator = std.heap.page_allocator },
+    payload_fingerprint: PayloadFingerprint = .{
+        .allocator = std.heap.page_allocator,
+        .address = 0,
+        .logical_len = 0,
+    },
+    reserved_token: ?Token = null,
+    lifecycle: LiveMutationLifecycle = .empty,
+    digest: owner_seal.Digest = [_]u8{0} ** 32,
+};
+
+pub const PreparedLiveMergeSource = union(enum) {
+    owned: OwnedPayload,
+    existing: LiveTokenRef,
+};
+
+pub const PreparedLiveReplacement = union(enum) {
+    coalesced,
+    prebuilt: OwnedPayload,
+};
+
+const PreparedLiveMerge = struct {
+    saved_self_addr: usize = 0,
+    ledger_addr: usize = 0,
+    batch_addr: usize = 0,
+    destination: LiveTokenRef = .{ .planned = 0 },
+    expected_destination_generation: u64 = 0,
+    next_semantic: PayloadSemantic = .{ .lease = .{
+        .stream_id = 0,
+        .is_snapshot = false,
+    } },
+    source: PreparedLiveMergeSource = .{ .owned = .{
+        .allocator = std.heap.page_allocator,
+    } },
+    source_fingerprint: PayloadFingerprint = .{
+        .allocator = std.heap.page_allocator,
+        .address = 0,
+        .logical_len = 0,
+    },
+    incoming_range: ?external_rx_types.RxRange = null,
+    expected_source_digest: owner_seal.Digest = [_]u8{0} ** 32,
+    replacement: PreparedLiveReplacement = .coalesced,
+    replacement_fingerprint: PayloadFingerprint = .{
+        .allocator = std.heap.page_allocator,
+        .address = 0,
+        .logical_len = 0,
+    },
+    coalesced_replacement_index: ?u8 = null,
+    expected_accounting_digest: owner_seal.Digest = [_]u8{0} ** 32,
+    expected_destination_digest: owner_seal.Digest = [_]u8{0} ** 32,
+    expected_destination_fingerprint: PayloadFingerprint = .{
+        .allocator = std.heap.page_allocator,
+        .address = 0,
+        .logical_len = 0,
+    },
+    result_token: ?Token = null,
+    lifecycle: LiveMutationLifecycle = .empty,
+    digest: owner_seal.Digest = [_]u8{0} ** 32,
+};
+
+const PreparedLiveRelease = struct {
+    saved_self_addr: usize = 0,
+    ledger_addr: usize = 0,
+    batch_addr: usize = 0,
+    token: LiveTokenRef = .{ .planned = 0 },
+    expected_phase: PayloadPhase = .frame,
+    expected_token_generation: u64 = 0,
+    expected_accounting_digest: owner_seal.Digest = [_]u8{0} ** 32,
+    expected_token_digest: owner_seal.Digest = [_]u8{0} ** 32,
+    expected_token_fingerprint: PayloadFingerprint = .{
+        .allocator = std.heap.page_allocator,
+        .address = 0,
+        .logical_len = 0,
+    },
+    lifecycle: LiveMutationLifecycle = .empty,
+    digest: owner_seal.Digest = [_]u8{0} ** 32,
+};
+
+pub const FinalLiveRoot = struct {
+    token: Token,
+    phase: enum { partial, completed },
+};
+
+pub const LiveCommitDisposition = union(enum) {
+    unused,
+    final_live: FinalLiveRoot,
+    superseded_tombstone,
+};
+
+const FrozenPayloadCleanup = struct {
+    allocator: std.mem.Allocator = std.heap.page_allocator,
+    addr: usize = 0,
+    len: usize = 0,
+    content_digest: owner_seal.Digest = [_]u8{0} ** 32,
+    digest: owner_seal.Digest = [_]u8{0} ** 32,
+};
+
+const FrozenPayloadRange = struct {
+    addr: usize = 0,
+    len: usize = 0,
+};
+
+const LiveRetirementLifecycle = enum {
+    empty,
+    prepared,
+    retired,
+    quarantined,
+};
+
+pub const RetireLiveResult = enum {
+    retired,
+    already_retired,
+    quarantined,
+};
+
+pub const PreparedLiveRetirement = struct {
+    saved_self_addr: usize = 0,
+    cleanup_owners: [max_live_cleanup_owners]OwnedPayload =
+        [_]OwnedPayload{.{ .allocator = std.heap.page_allocator }} **
+        max_live_cleanup_owners,
+    cleanup_plans: [max_live_cleanup_owners]FrozenPayloadCleanup =
+        [_]FrozenPayloadCleanup{.{}} ** max_live_cleanup_owners,
+    cleanup_count: u8 = 0,
+    cleanup_bytes: usize = 0,
+    published_replacements: [max_live_mutations]FrozenPayloadRange =
+        [_]FrozenPayloadRange{.{}} ** max_live_mutations,
+    replacement_count: u8 = 0,
+    replacement_bytes: usize = 0,
+    lifecycle: LiveRetirementLifecycle = .empty,
+    digest: owner_seal.Digest = [_]u8{0} ** 32,
+
+    pub fn init(allocator: std.mem.Allocator) PreparedLiveRetirement {
+        _ = allocator;
+        return .{};
+    }
+
+    pub fn retire(self: *PreparedLiveRetirement) RetireLiveResult {
+        return retireLivePayloads(self);
+    }
+};
+
+pub const PreparedLiveMutation = union(enum) {
+    empty,
+    admission: PreparedLiveAdmission,
+    merge: PreparedLiveMerge,
+    release: PreparedLiveRelease,
+    committed,
+    aborted,
+};
+
+const PreparedLiveBatchLifecycle = enum {
+    empty,
+    preparing,
+    prepared,
+    committed,
+    aborted,
+};
+
+pub const PreparedLiveBatch = struct {
+    saved_self_addr: usize = 0,
+    ledger_addr: usize = 0,
+    allocator: std.mem.Allocator = std.heap.page_allocator,
+    sealed_allocator: std.mem.Allocator = std.heap.page_allocator,
+    expected_mutation_epoch: u64 = 0,
+    expected_accounting_digest: owner_seal.Digest = [_]u8{0} ** 32,
+    expected_external_identity: ?external_rx_types.RxIdentity = null,
+    cleanup_only: bool = false,
+    mutations: [max_live_mutations]PreparedLiveMutation =
+        [_]PreparedLiveMutation{.empty} ** max_live_mutations,
+    mutation_count: u8 = 0,
+    coalesced_replacements: [max_live_mutations]OwnedPayload =
+        [_]OwnedPayload{.{ .allocator = std.heap.page_allocator }} **
+        max_live_mutations,
+    coalesced_replacement_fingerprints: [max_live_mutations]PayloadFingerprint =
+        [_]PayloadFingerprint{.{
+            .allocator = std.heap.page_allocator,
+            .address = 0,
+            .logical_len = 0,
+        }} ** max_live_mutations,
+    replacement_count: u8 = 0,
+    replacement_bytes: usize = 0,
+    accepted_source_bytes: usize = 0,
+    working_simulation: LiveSimulation = .{},
+    working_simulation_digest: owner_seal.Digest = [_]u8{0} ** 32,
+    progress_digest: owner_seal.Digest = [_]u8{0} ** 32,
+    expected_next_generation: u64 = 0,
+    expected_generation_exhausted: bool = false,
+    expected_next_slot_hint: usize = 0,
+    expected_charged_bytes: usize = 0,
+    expected_charged_items: usize = 0,
+    lifecycle: PreparedLiveBatchLifecycle = .empty,
+    digest: owner_seal.Digest = [_]u8{0} ** 32,
+};
+
+/// Stack scratch budgets keep the bounded batch protocol reviewable as its sealed state grows.
+pub const max_live_batch_scratch_bytes: usize = 128 * 1024;
+pub const max_live_commit_scratch_bytes: usize = 192 * 1024;
+
+comptime {
+    if (@sizeOf(PreparedLiveBatch) > max_live_batch_scratch_bytes)
+        @compileError("prepared live batch exceeded its stack scratch budget");
+    if (@sizeOf(PreparedLiveBatch) +
+        @sizeOf(PreparedLiveRetirement) +
+        @sizeOf([max_live_mutations]LiveCommitDisposition) >
+        max_live_commit_scratch_bytes)
+        @compileError("aggregate live commit exceeded its stack scratch budget");
+}
+
+pub const PrepareLiveError = std.mem.Allocator.Error || error{
+    ArithmeticOverflow,
+    ByteCapExceeded,
+    ItemCapExceeded,
+    GenerationExhausted,
+    EpochExhausted,
+    InvalidAlias,
+    InvalidPayload,
+    InvalidPlan,
+    InvalidSemantic,
+    InvalidTransition,
+    InvariantFailure,
+    PlanningDisabled,
+    StalePlan,
+    Drained,
+    TeardownActive,
+};
+
+pub const CommitLiveError = error{
+    ByteCapExceeded,
+    ItemCapExceeded,
+    GenerationExhausted,
+    EpochExhausted,
+    InvalidAlias,
+    InvalidPayload,
+    InvalidPlan,
+    InvalidSemantic,
+    InvalidTransition,
+    InvariantFailure,
+    PlanningDisabled,
+    StalePlan,
+    Drained,
+    TeardownActive,
+};
+
+pub const AbortLiveResult = enum {
+    aborted,
+    ignored_untrusted,
+    quarantined,
+};
+
+fn frozenCleanupDigest(plan: FrozenPayloadCleanup) owner_seal.Digest {
+    var writer = owner_seal.Writer.init("MARULFC1");
+    writer.writeUsize(@intFromPtr(plan.allocator.ptr));
+    writer.writeUsize(@intFromPtr(plan.allocator.vtable));
+    writer.writeUsize(plan.addr);
+    writer.writeUsize(plan.len);
+    writer.writeBytes(&plan.content_digest);
+    return writer.finish();
+}
+
+fn liveRetirementDigest(
+    retirement: *const PreparedLiveRetirement,
+) owner_seal.Digest {
+    var writer = owner_seal.Writer.init("MARULRT1");
+    writer.writeUsize(@intFromPtr(retirement));
+    writer.writeU8(retirement.cleanup_count);
+    writer.writeUsize(retirement.cleanup_bytes);
+    writer.writeU8(retirement.replacement_count);
+    writer.writeUsize(retirement.replacement_bytes);
+    writer.writeU8(@intFromEnum(retirement.lifecycle));
+    for (retirement.cleanup_plans[0..retirement.cleanup_count]) |plan| {
+        writer.writeUsize(@intFromPtr(plan.allocator.ptr));
+        writer.writeUsize(@intFromPtr(plan.allocator.vtable));
+        writer.writeUsize(plan.addr);
+        writer.writeUsize(plan.len);
+        writer.writeBytes(&plan.digest);
+    }
+    for (retirement.published_replacements[0..retirement.replacement_count]) |range| {
+        writer.writeUsize(range.addr);
+        writer.writeUsize(range.len);
+    }
+    return writer.finish();
+}
+
+fn quarantineRetirement(
+    retirement: *PreparedLiveRetirement,
+) RetireLiveResult {
+    retirement.* = .{ .lifecycle = .quarantined };
+    return .quarantined;
+}
+
+fn isCanonicalEmptyLiveRetirement(
+    retirement: *const PreparedLiveRetirement,
+) bool {
+    if (retirement.saved_self_addr != 0 or
+        retirement.cleanup_count != 0 or retirement.cleanup_bytes != 0 or
+        retirement.replacement_count != 0 or retirement.replacement_bytes != 0 or
+        retirement.lifecycle != .empty or
+        !std.mem.eql(
+            u8,
+            &retirement.digest,
+            &([_]u8{0} ** 32),
+        ))
+        return false;
+    for (retirement.cleanup_owners) |owner| {
+        if (owner.allocation_ptr != null or owner.logical_len != 0) return false;
+    }
+    for (retirement.cleanup_plans) |plan| {
+        if (plan.addr != 0 or plan.len != 0 or
+            !std.mem.eql(u8, &plan.content_digest, &([_]u8{0} ** 32)) or
+            !std.mem.eql(u8, &plan.digest, &([_]u8{0} ** 32)))
+            return false;
+    }
+    for (retirement.published_replacements) |range|
+        if (range.addr != 0 or range.len != 0) return false;
+    return true;
+}
+
+fn retireLivePayloads(
+    retirement: *PreparedLiveRetirement,
+) RetireLiveResult {
+    if (retirement.lifecycle == .retired) return .already_retired;
+    if (retirement.saved_self_addr != @intFromPtr(retirement) or
+        retirement.lifecycle != .prepared or
+        retirement.cleanup_count > max_live_cleanup_owners or
+        retirement.replacement_count > max_live_mutations)
+        return quarantineRetirement(retirement);
+    if (!std.mem.eql(
+        u8,
+        &retirement.digest,
+        &liveRetirementDigest(retirement),
+    )) return quarantineRetirement(retirement);
+    var observed_bytes: usize = 0;
+    for (retirement.cleanup_owners[0..retirement.cleanup_count], 0..) |owner, index| {
+        const plan = retirement.cleanup_plans[index];
+        if (!fingerprintMatches(.{
+            .allocator = plan.allocator,
+            .address = plan.addr,
+            .logical_len = plan.len,
+            .content_digest = plan.content_digest,
+        }, owner) or !std.mem.eql(
+            u8,
+            &plan.digest,
+            &frozenCleanupDigest(plan),
+        )) return quarantineRetirement(retirement);
+        observed_bytes = std.math.add(usize, observed_bytes, plan.len) catch
+            return quarantineRetirement(retirement);
+        const range = rangeOfPayload(&owner);
+        for (retirement.cleanup_owners[0..index]) |prior|
+            if (rangesOverlap(range, rangeOfPayload(&prior)))
+                return quarantineRetirement(retirement);
+        for (retirement.published_replacements[0..retirement.replacement_count]) |published| {
+            const published_range = ByteRange{
+                .start = published.addr,
+                .end = std.math.add(usize, published.addr, published.len) catch
+                    return quarantineRetirement(retirement),
+            };
+            if (rangesOverlap(range, published_range))
+                return quarantineRetirement(retirement);
+        }
+    }
+    if (observed_bytes != retirement.cleanup_bytes)
+        return quarantineRetirement(retirement);
+    var local = retirement.cleanup_owners;
+    const count = retirement.cleanup_count;
+    retirement.* = .{ .lifecycle = .retired };
+    for (local[0..count]) |*payload| payload.deinit();
+    return .retired;
+}
+
 fn sliceAddress(comptime T: type, slice: []const T) usize {
     return if (slice.len == 0) 0 else @intFromPtr(slice.ptr);
 }
@@ -613,6 +1149,7 @@ pub const PreparedLedgerTeardown = struct {
     expected_charged_bytes: usize = 0,
     expected_retired_items: usize = 0,
     expected_retired_bytes: usize = 0,
+    terminal_external_identity_seal: LedgerExternalIdentitySeal = .{},
     summary: LedgerTeardownSummary = .{},
     lifecycle: PreparedLedgerTeardownLifecycle = .empty,
 };
@@ -706,19 +1243,1358 @@ const Slot = struct {
     active: bool = false,
     retired: bool = false,
     generation: u64 = 0,
-    semantic: PayloadSemantic = inactiveSemantic(),
+    semantic: StoredPayloadSemantic = inactiveSemantic(),
     payload: OwnedPayload = .{ .allocator = std.heap.page_allocator },
 };
 
-fn inactiveSemantic() PayloadSemantic {
+const StoredRecoveryTag = enum(u2) {
+    none,
+    host,
+    client,
+};
+
+const StoredBatchSemantic = struct {
+    stream_id: u64,
+    provenance_start_absolute: u64,
+    recovery_epoch: u64,
+    provenance_span: u32,
+    chunk_count: u8,
+    is_snapshot: bool,
+    provenance_external: bool,
+    recovery_tag: StoredRecoveryTag,
+};
+
+const StoredPayloadSemantic = union(PayloadPhase) {
+    frame: protocol.Header,
+    partial: StoredBatchSemantic,
+    completed: StoredBatchSemantic,
+    lease: StoredBatchSemantic,
+};
+
+comptime {
+    if (@sizeOf(StoredPayloadSemantic) > 64)
+        @compileError("stored external inbox semantic exceeded the 64-byte slot budget");
+}
+
+fn inactiveSemantic() StoredPayloadSemantic {
     return .{ .lease = .{
         .stream_id = 0,
+        .provenance_start_absolute = 0,
+        .recovery_epoch = 0,
+        .provenance_span = 0,
+        .chunk_count = 0,
         .is_snapshot = false,
+        .provenance_external = false,
+        .recovery_tag = .none,
     } };
+}
+
+const LiveVirtualNode = struct {
+    live: bool = false,
+    token: Token = .{ .slot = 0, .generation = 0 },
+    semantic: PayloadSemantic = .{ .lease = .{
+        .stream_id = 0,
+        .is_snapshot = false,
+    } },
+    logical_len: usize = 0,
+    payload_fingerprint: PayloadFingerprint = .{
+        .allocator = std.heap.page_allocator,
+        .address = 0,
+        .logical_len = 0,
+    },
+};
+
+const LiveSimulation = struct {
+    nodes: [max_live_mutations]LiveVirtualNode =
+        [_]LiveVirtualNode{.{}} ** max_live_mutations,
+    charged_bytes: usize = 0,
+    charged_items: usize = 0,
+    next_generation: u64 = 1,
+    generation_exhausted: bool = false,
+    next_slot_hint: usize = 0,
+    accepted_source_bytes: usize = 0,
+    cleanup_count: usize = 0,
+    cleanup_bytes: usize = 0,
+    cleared_slots: std.StaticBitSet(max_items) =
+        std.StaticBitSet(max_items).initEmpty(),
+    occupied_slots: std.StaticBitSet(max_items) =
+        std.StaticBitSet(max_items).initEmpty(),
+};
+
+fn pureSlot(
+    ledger: *const ExternalInboxLedger,
+    token: Token,
+) error{InvariantFailure}!struct {
+    semantic: PayloadSemantic,
+    logical_len: usize,
+    payload_fingerprint: PayloadFingerprint,
+} {
+    if (@as(usize, token.slot) >= max_items) return error.InvariantFailure;
+    const slot = &ledger.slots[token.slot];
+    if (!slot.active or slot.generation != token.generation)
+        return error.InvariantFailure;
+    validatePayload(&slot.payload, slot.payload.logical_len) catch
+        return error.InvariantFailure;
+    const semantic = loadSemantic(slot.semantic);
+    validateSemantic(semantic, slot.payload.logical_len) catch
+        return error.InvariantFailure;
+    return .{
+        .semantic = semantic,
+        .logical_len = slot.payload.logical_len,
+        .payload_fingerprint = fingerprint(slot.payload),
+    };
+}
+
+fn resolveVirtualRef(
+    ledger: *const ExternalInboxLedger,
+    batch: *const PreparedLiveBatch,
+    simulation: *const LiveSimulation,
+    before_index: usize,
+    ref: LiveTokenRef,
+) error{ InvalidPlan, InvariantFailure }!LiveVirtualNode {
+    return switch (ref) {
+        .planned => |planned| blk: {
+            if (@as(usize, planned) >= before_index) return error.InvalidPlan;
+            const node = simulation.nodes[planned];
+            if (!node.live) return error.InvalidPlan;
+            break :blk node;
+        },
+        .existing => |token| blk: {
+            if (@as(usize, token.slot) >= max_items or
+                simulation.cleared_slots.isSet(token.slot))
+                return error.InvalidPlan;
+            for (simulation.nodes[0..before_index]) |node| {
+                if (node.token.slot != token.slot) continue;
+                // Any earlier mutation of the same slot invalidates the pre-batch token,
+                // including a release that left no live result.
+                return error.InvalidPlan;
+            }
+            const inspected = try pureSlot(ledger, token);
+            _ = batch;
+            break :blk .{
+                .live = true,
+                .token = token,
+                .semantic = inspected.semantic,
+                .logical_len = inspected.logical_len,
+                .payload_fingerprint = inspected.payload_fingerprint,
+            };
+        },
+    };
+}
+
+fn validateVirtualRefDescriptor(
+    ledger: *const ExternalInboxLedger,
+    simulation: *const LiveSimulation,
+    before_index: usize,
+    ref: LiveTokenRef,
+    expected: PayloadFingerprint,
+) error{ InvalidPlan, StalePlan }!void {
+    switch (ref) {
+        .existing => |token| {
+            if (@as(usize, token.slot) >= max_items or
+                simulation.cleared_slots.isSet(token.slot))
+                return error.InvalidPlan;
+            const slot = &ledger.slots[token.slot];
+            if (!slot.active or slot.generation != token.generation)
+                return error.StalePlan;
+            if (!payloadDescriptorMatches(expected, slot.payload))
+                return error.StalePlan;
+        },
+        .planned => |planned| {
+            if (@as(usize, planned) >= before_index)
+                return error.InvalidPlan;
+            const node = simulation.nodes[planned];
+            if (!node.live or
+                !std.meta.eql(node.payload_fingerprint, expected))
+                return error.StalePlan;
+        },
+    }
+}
+
+fn virtualSlotFree(
+    ledger: *const ExternalInboxLedger,
+    simulation: *const LiveSimulation,
+    before_index: usize,
+    slot_index: usize,
+) bool {
+    _ = ledger;
+    _ = before_index;
+    return !simulation.occupied_slots.isSet(slot_index);
+}
+
+fn findVirtualFreeSlot(
+    ledger: *const ExternalInboxLedger,
+    simulation: *const LiveSimulation,
+    before_index: usize,
+    hint: usize,
+) ?usize {
+    for (0..max_items) |offset| {
+        const index = (hint + offset) % max_items;
+        if (virtualSlotFree(ledger, simulation, before_index, index)) return index;
+    }
+    return null;
+}
+
+fn advanceVirtualGeneration(
+    next_generation: *u64,
+    exhausted: *bool,
+) error{GenerationExhausted}!u64 {
+    return takePlannedGeneration(next_generation, exhausted);
+}
+
+fn batchSemanticForPhase(
+    semantic: PayloadSemantic,
+) error{InvalidSemantic}!struct {
+    stream_id: u64,
+    is_snapshot: bool,
+    recovery_intent: RecoveryIntent,
+    provenance: StoredRxBatchProvenance,
+    chunk_count: u8,
+} {
+    return switch (semantic) {
+        .partial => |value| .{
+            .stream_id = value.stream_id,
+            .is_snapshot = value.is_snapshot,
+            .recovery_intent = value.recovery_intent,
+            .provenance = value.provenance,
+            .chunk_count = value.chunk_count,
+        },
+        .completed => |value| .{
+            .stream_id = value.stream_id,
+            .is_snapshot = value.is_snapshot,
+            .recovery_intent = value.recovery_intent,
+            .provenance = value.provenance,
+            .chunk_count = 0,
+        },
+        else => error.InvalidSemantic,
+    };
+}
+
+fn validateExternalSemanticForBatch(
+    batch: *const PreparedLiveBatch,
+    semantic: PayloadSemantic,
+) error{InvalidSemantic}!void {
+    const expected_identity = batch.expected_external_identity;
+    const value = try batchSemanticForPhase(semantic);
+    switch (value.provenance) {
+        .untracked => if (expected_identity != null) return error.InvalidSemantic,
+        .external => |range| {
+            if (expected_identity == null) return error.InvalidSemantic;
+            try validateCompactExternalRange(range);
+        },
+    }
+}
+
+fn validateContinuation(
+    identity: external_rx_types.RxIdentity,
+    previous: StoredRxBatchProvenance,
+    next: StoredRxBatchProvenance,
+    incoming: external_rx_types.RxRange,
+    source_payload_len: usize,
+) error{InvalidSemantic}!void {
+    if (!std.meta.eql(incoming.identity, identity))
+        return error.InvalidSemantic;
+    const old = switch (previous) {
+        .external => |value| value,
+        .untracked => return error.InvalidSemantic,
+    };
+    const new = switch (next) {
+        .external => |value| value,
+        .untracked => return error.InvalidSemantic,
+    };
+    try validateCompactExternalRange(old);
+    try validateCompactExternalRange(new);
+    const old_end = std.math.add(u64, old.start_absolute, old.span) catch
+        return error.InvalidSemantic;
+    if (incoming.start_absolute != old_end or
+        incoming.end_absolute <= incoming.start_absolute or
+        new.start_absolute != old.start_absolute or new.span <= old.span)
+        return error.InvalidSemantic;
+    const incoming_span = std.math.add(
+        usize,
+        protocol.header_size,
+        source_payload_len,
+    ) catch return error.InvalidSemantic;
+    const observed_incoming_span = std.math.sub(
+        u64,
+        incoming.end_absolute,
+        incoming.start_absolute,
+    ) catch return error.InvalidSemantic;
+    if (observed_incoming_span != incoming_span)
+        return error.InvalidSemantic;
+    const new_span = std.math.sub(
+        u64,
+        incoming.end_absolute,
+        old.start_absolute,
+    ) catch return error.InvalidSemantic;
+    if (new_span != new.span) return error.InvalidSemantic;
+}
+
+fn simulateLiveBatchFrom(
+    ledger: *const ExternalInboxLedger,
+    batch: *const PreparedLiveBatch,
+    start: usize,
+    count: usize,
+    initial: ?LiveSimulation,
+) PrepareLiveError!LiveSimulation {
+    if (start > count or count > max_live_mutations)
+        return error.InvalidPlan;
+    var simulation: LiveSimulation = initial orelse .{
+        .charged_bytes = ledger.charged_bytes,
+        .charged_items = ledger.charged_items,
+        .next_generation = ledger.next_generation,
+        .generation_exhausted = ledger.generation_exhausted,
+        .next_slot_hint = ledger.next_slot_hint,
+    };
+    if (initial == null)
+        for (ledger.slots, 0..) |slot, slot_index|
+            if (slot.active or slot.retired)
+                simulation.occupied_slots.set(slot_index);
+    for (batch.mutations[start..count], start..) |mutation, index| {
+        switch (mutation) {
+            .admission => |admission| {
+                if (admission.saved_self_addr !=
+                    @intFromPtr(&batch.mutations[index]) or
+                    admission.ledger_addr != @intFromPtr(ledger) or
+                    admission.batch_addr != @intFromPtr(batch) or
+                    admission.lifecycle != .prepared)
+                    return error.InvalidPlan;
+                try validateSemantic(admission.semantic, admission.owned_payload.logical_len);
+                try validateExternalSemanticForBatch(batch, admission.semantic);
+                if (batch.expected_external_identity != null) {
+                    const observed = try batchSemanticForPhase(admission.semantic);
+                    const compact = observed.provenance.external;
+                    const exact_span = std.math.add(
+                        usize,
+                        protocol.header_size,
+                        admission.owned_payload.logical_len,
+                    ) catch return error.InvalidSemantic;
+                    if (compact.span != exact_span) return error.InvalidSemantic;
+                }
+                try validatePayload(
+                    &admission.owned_payload,
+                    admission.owned_payload.logical_len,
+                );
+                if (!fingerprintMatches(
+                    admission.payload_fingerprint,
+                    admission.owned_payload,
+                )) return error.StalePlan;
+                const slot = findVirtualFreeSlot(
+                    ledger,
+                    &simulation,
+                    index,
+                    simulation.next_slot_hint,
+                ) orelse return error.ItemCapExceeded;
+                const generation = try advanceVirtualGeneration(
+                    &simulation.next_generation,
+                    &simulation.generation_exhausted,
+                );
+                const token = Token{ .slot = @intCast(slot), .generation = generation };
+                if (admission.reserved_token == null or
+                    !std.meta.eql(admission.reserved_token.?, token))
+                    return error.InvalidPlan;
+                simulation.next_slot_hint = (slot + 1) % max_items;
+                simulation.cleared_slots.unset(slot);
+                simulation.occupied_slots.set(slot);
+                simulation.charged_bytes = std.math.add(
+                    usize,
+                    simulation.charged_bytes,
+                    admission.owned_payload.logical_len,
+                ) catch return error.ByteCapExceeded;
+                simulation.charged_items = std.math.add(
+                    usize,
+                    simulation.charged_items,
+                    1,
+                ) catch return error.ItemCapExceeded;
+                simulation.nodes[index] = .{
+                    .live = true,
+                    .token = token,
+                    .semantic = admission.semantic,
+                    .logical_len = admission.owned_payload.logical_len,
+                    .payload_fingerprint = admission.payload_fingerprint,
+                };
+            },
+            .merge => |merge| {
+                if (merge.saved_self_addr !=
+                    @intFromPtr(&batch.mutations[index]) or
+                    merge.ledger_addr != @intFromPtr(ledger) or
+                    merge.batch_addr != @intFromPtr(batch) or
+                    merge.lifecycle != .prepared)
+                    return error.InvalidPlan;
+                try validateVirtualRefDescriptor(
+                    ledger,
+                    &simulation,
+                    index,
+                    merge.destination,
+                    merge.expected_destination_fingerprint,
+                );
+                const destination = try resolveVirtualRef(
+                    ledger,
+                    batch,
+                    &simulation,
+                    index,
+                    merge.destination,
+                );
+                if (!std.mem.eql(
+                    u8,
+                    &merge.expected_destination_digest,
+                    &liveNodeDigest(destination),
+                )) return error.StalePlan;
+                if (std.meta.activeTag(destination.semantic) != .partial)
+                    return error.InvalidTransition;
+                const destination_batch = destination.semantic.partial;
+                const source_len: usize = switch (merge.source) {
+                    .owned => |source| blk: {
+                        try validatePayload(&source, source.logical_len);
+                        if (!fingerprintMatches(merge.source_fingerprint, source))
+                            return error.StalePlan;
+                        simulation.accepted_source_bytes = std.math.add(
+                            usize,
+                            simulation.accepted_source_bytes,
+                            source.logical_len,
+                        ) catch return error.ArithmeticOverflow;
+                        break :blk source.logical_len;
+                    },
+                    .existing => |source_ref| blk: {
+                        try validateVirtualRefDescriptor(
+                            ledger,
+                            &simulation,
+                            index,
+                            source_ref,
+                            merge.source_fingerprint,
+                        );
+                        const source = try resolveVirtualRef(
+                            ledger,
+                            batch,
+                            &simulation,
+                            index,
+                            source_ref,
+                        );
+                        if (!std.mem.eql(
+                            u8,
+                            &merge.expected_source_digest,
+                            &liveNodeDigest(source),
+                        )) return error.StalePlan;
+                        if (source.token.slot == destination.token.slot or
+                            std.meta.activeTag(source.semantic) != .frame)
+                            return error.InvalidTransition;
+                        if (rangesOverlap(
+                            rangeOfPayload(&ledger.slots[destination.token.slot].payload),
+                            rangeOfPayload(&ledger.slots[source.token.slot].payload),
+                        )) return error.InvariantFailure;
+                        const header = source.semantic.frame;
+                        if (header.stream_id != destination_batch.stream_id or
+                            (header.kind == .snapshot_chunk) != destination_batch.is_snapshot)
+                            return error.InvalidSemantic;
+                        simulation.nodes[index] = source;
+                        simulation.nodes[index].live = false;
+                        simulation.cleared_slots.set(source.token.slot);
+                        simulation.occupied_slots.unset(source.token.slot);
+                        break :blk source.logical_len;
+                    },
+                };
+                const next_len = std.math.add(
+                    usize,
+                    destination.logical_len,
+                    source_len,
+                ) catch return error.ByteCapExceeded;
+                if (next_len > max_batch_bytes) return error.ByteCapExceeded;
+                try validateSemantic(merge.next_semantic, next_len);
+                try validateExternalSemanticForBatch(batch, merge.next_semantic);
+                const next_batch = try batchSemanticForPhase(merge.next_semantic);
+                if (next_batch.stream_id != destination_batch.stream_id or
+                    next_batch.is_snapshot != destination_batch.is_snapshot or
+                    !std.meta.eql(
+                        next_batch.recovery_intent,
+                        destination_batch.recovery_intent,
+                    ))
+                    return error.InvalidSemantic;
+                if (batch.expected_external_identity) |identity| {
+                    try validateContinuation(
+                        identity,
+                        destination_batch.provenance,
+                        next_batch.provenance,
+                        merge.incoming_range orelse return error.InvalidSemantic,
+                        source_len,
+                    );
+                } else if (merge.incoming_range != null or
+                    destination_batch.provenance != .untracked or
+                    next_batch.provenance != .untracked)
+                    return error.InvalidSemantic;
+                if (std.meta.activeTag(merge.next_semantic) == .partial) {
+                    if (next_batch.chunk_count != destination_batch.chunk_count + 1 or
+                        next_batch.chunk_count > max_batch_chunks)
+                        return error.InvalidSemantic;
+                }
+                switch (merge.replacement) {
+                    .coalesced => {},
+                    .prebuilt => |replacement| {
+                        try validatePayload(&replacement, next_len);
+                        if (!fingerprintMatches(
+                            merge.replacement_fingerprint,
+                            replacement,
+                        )) return error.StalePlan;
+                    },
+                }
+                const generation = try advanceVirtualGeneration(
+                    &simulation.next_generation,
+                    &simulation.generation_exhausted,
+                );
+                const result = Token{
+                    .slot = destination.token.slot,
+                    .generation = generation,
+                };
+                if (merge.expected_destination_generation !=
+                    destination.token.generation or merge.result_token == null or
+                    !std.meta.eql(merge.result_token.?, result))
+                    return error.InvalidPlan;
+                for (simulation.nodes[0..index]) |*prior| {
+                    if (prior.live and
+                        prior.token.slot == destination.token.slot and
+                        prior.token.generation == destination.token.generation)
+                        prior.live = false;
+                    switch (merge.source) {
+                        .existing => |source_ref| {
+                            const source_token = switch (source_ref) {
+                                .existing => |value| value,
+                                .planned => |planned| simulation.nodes[planned].token,
+                            };
+                            if (prior.live and std.meta.eql(prior.token, source_token))
+                                prior.live = false;
+                        },
+                        .owned => {},
+                    }
+                }
+                simulation.nodes[index] = .{
+                    .live = true,
+                    .token = result,
+                    .semantic = merge.next_semantic,
+                    .logical_len = next_len,
+                    .payload_fingerprint = switch (merge.replacement) {
+                        .prebuilt => merge.replacement_fingerprint,
+                        .coalesced => destination.payload_fingerprint,
+                    },
+                };
+                simulation.cleared_slots.unset(result.slot);
+                simulation.occupied_slots.set(result.slot);
+                simulation.cleanup_count = std.math.add(
+                    usize,
+                    simulation.cleanup_count,
+                    if (merge.source == .owned) 2 else 2,
+                ) catch return error.ArithmeticOverflow;
+                simulation.cleanup_bytes = std.math.add(
+                    usize,
+                    simulation.cleanup_bytes,
+                    next_len,
+                ) catch return error.ArithmeticOverflow;
+                switch (merge.source) {
+                    .owned => {
+                        simulation.charged_bytes = std.math.add(
+                            usize,
+                            simulation.charged_bytes,
+                            source_len,
+                        ) catch return error.ByteCapExceeded;
+                    },
+                    .existing => {
+                        if (simulation.charged_items == 0)
+                            return error.InvariantFailure;
+                        simulation.charged_items -= 1;
+                    },
+                }
+            },
+            .release => |release| {
+                if (release.saved_self_addr !=
+                    @intFromPtr(&batch.mutations[index]) or
+                    release.ledger_addr != @intFromPtr(ledger) or
+                    release.batch_addr != @intFromPtr(batch) or
+                    release.lifecycle != .prepared)
+                    return error.InvalidPlan;
+                try validateVirtualRefDescriptor(
+                    ledger,
+                    &simulation,
+                    index,
+                    release.token,
+                    release.expected_token_fingerprint,
+                );
+                const target = try resolveVirtualRef(
+                    ledger,
+                    batch,
+                    &simulation,
+                    index,
+                    release.token,
+                );
+                if (!std.mem.eql(
+                    u8,
+                    &release.expected_token_digest,
+                    &liveNodeDigest(target),
+                )) return error.StalePlan;
+                if (std.meta.activeTag(target.semantic) != release.expected_phase or
+                    target.token.generation != release.expected_token_generation)
+                    return error.InvalidTransition;
+                if (rangeOverlapsActiveExceptSlot(
+                    rangeOfPayload(&ledger.slots[target.token.slot].payload),
+                    ledger,
+                    target.token.slot,
+                )) return error.InvariantFailure;
+                for (simulation.nodes[0..index]) |*prior| {
+                    if (prior.live and std.meta.eql(prior.token, target.token))
+                        prior.live = false;
+                }
+                simulation.nodes[index] = .{
+                    .live = false,
+                    .token = target.token,
+                    .semantic = target.semantic,
+                    .logical_len = target.logical_len,
+                };
+                if (simulation.charged_items == 0 or
+                    simulation.charged_bytes < target.logical_len)
+                    return error.InvariantFailure;
+                simulation.charged_items -= 1;
+                simulation.charged_bytes -= target.logical_len;
+                simulation.next_slot_hint = target.token.slot;
+                simulation.cleared_slots.set(target.token.slot);
+                simulation.occupied_slots.unset(target.token.slot);
+                simulation.cleanup_count += 1;
+                simulation.cleanup_bytes = std.math.add(
+                    usize,
+                    simulation.cleanup_bytes,
+                    target.logical_len,
+                ) catch return error.ArithmeticOverflow;
+            },
+            else => return error.InvalidPlan,
+        }
+        if (simulation.charged_items + ledger.retired_items > max_items)
+            return error.ItemCapExceeded;
+        const resident = std.math.add(
+            usize,
+            simulation.charged_bytes,
+            ledger.retired_bytes,
+        ) catch return error.ByteCapExceeded;
+        if (resident > max_bytes) return error.ByteCapExceeded;
+    }
+    if (simulation.accepted_source_bytes >
+        protocol.max_binary_chunk + protocol.header_size)
+        return error.ByteCapExceeded;
+    if (simulation.cleanup_count > max_live_cleanup_owners)
+        return error.ItemCapExceeded;
+    if (simulation.cleanup_bytes >
+        max_bytes + protocol.max_binary_chunk + protocol.header_size)
+        return error.ByteCapExceeded;
+    return simulation;
+}
+
+fn simulateLiveBatch(
+    ledger: *const ExternalInboxLedger,
+    batch: *const PreparedLiveBatch,
+    count: usize,
+) PrepareLiveError!LiveSimulation {
+    return simulateLiveBatchFrom(ledger, batch, 0, count, null);
+}
+
+fn writePayloadSemantic(
+    writer: *owner_seal.Writer,
+    semantic: PayloadSemantic,
+) void {
+    writer.writeU8(@intFromEnum(std.meta.activeTag(semantic)));
+    switch (semantic) {
+        .frame => |header| {
+            const encoded = header.encode();
+            writer.writeBytes(&encoded);
+        },
+        .partial => |value| {
+            writer.writeU64(value.stream_id);
+            writer.writeBool(value.is_snapshot);
+            writer.writeU8(value.chunk_count);
+            writeRecoveryIntent(writer, value.recovery_intent);
+            writeStoredProvenance(writer, value.provenance);
+        },
+        .completed, .lease => |value| {
+            writer.writeU64(value.stream_id);
+            writer.writeBool(value.is_snapshot);
+            writeRecoveryIntent(writer, value.recovery_intent);
+            writeStoredProvenance(writer, value.provenance);
+        },
+    }
+}
+
+fn writeTokenRef(writer: *owner_seal.Writer, ref: LiveTokenRef) void {
+    switch (ref) {
+        .existing => |token| {
+            writer.writeU8(0);
+            writer.writeU64(token.slot);
+            writer.writeU64(token.generation);
+        },
+        .planned => |index| {
+            writer.writeU8(1);
+            writer.writeU8(index);
+        },
+    }
+}
+
+fn writePayloadFingerprint(
+    writer: *owner_seal.Writer,
+    value: PayloadFingerprint,
+) void {
+    writer.writeUsize(@intFromPtr(value.allocator.ptr));
+    writer.writeUsize(@intFromPtr(value.allocator.vtable));
+    writer.writeUsize(value.address);
+    writer.writeUsize(value.logical_len);
+    writer.writeBytes(&value.content_digest);
+}
+
+fn liveNodeDigest(node: LiveVirtualNode) owner_seal.Digest {
+    var writer = owner_seal.Writer.init("MARULND1");
+    writer.writeBool(node.live);
+    writer.writeU64(node.token.slot);
+    writer.writeU64(node.token.generation);
+    writePayloadSemantic(&writer, node.semantic);
+    writer.writeUsize(node.logical_len);
+    writePayloadFingerprint(&writer, node.payload_fingerprint);
+    return writer.finish();
+}
+
+fn liveSimulationDigest(
+    simulation: *const LiveSimulation,
+    node_count: usize,
+) owner_seal.Digest {
+    var writer = owner_seal.Writer.init("MARULSM1");
+    writer.writeUsize(simulation.charged_bytes);
+    writer.writeUsize(simulation.charged_items);
+    writer.writeU64(simulation.next_generation);
+    writer.writeBool(simulation.generation_exhausted);
+    writer.writeUsize(simulation.next_slot_hint);
+    writer.writeUsize(simulation.accepted_source_bytes);
+    writer.writeUsize(simulation.cleanup_count);
+    writer.writeUsize(simulation.cleanup_bytes);
+    writer.writeUsize(node_count);
+    for (simulation.nodes[0..node_count]) |node|
+        writer.writeBytes(&liveNodeDigest(node));
+    for (0..max_items) |slot| {
+        writer.writeBool(simulation.cleared_slots.isSet(slot));
+        writer.writeBool(simulation.occupied_slots.isSet(slot));
+    }
+    return writer.finish();
+}
+
+fn liveAccountingDigest(
+    ledger: *const ExternalInboxLedger,
+) owner_seal.Digest {
+    var writer = owner_seal.Writer.init("MARULAC1");
+    writer.writeUsize(@intFromPtr(ledger));
+    writer.writeUsize(ledger.charged_bytes);
+    writer.writeUsize(ledger.charged_items);
+    writer.writeUsize(ledger.retired_bytes);
+    writer.writeUsize(ledger.retired_items);
+    writer.writeUsize(ledger.next_slot_hint);
+    writer.writeU64(ledger.next_generation);
+    writer.writeBool(ledger.generation_exhausted);
+    writer.writeU64(ledger.mutation_epoch);
+    writer.writeBool(ledger.planning_disabled);
+    writer.writeBool(ledger.invariant_failed);
+    writer.writeBool(ledger.draining_or_drained);
+    writer.writeBool(ledger.teardown_active);
+    writer.writeBytes(&ledger.external_identity_seal.digest);
+    return writer.finish();
+}
+
+fn liveMutationDigest(
+    batch: *const PreparedLiveBatch,
+    index: usize,
+) owner_seal.Digest {
+    var writer = owner_seal.Writer.init("MARULMU1");
+    writer.writeUsize(@intFromPtr(batch));
+    writer.writeUsize(index);
+    switch (batch.mutations[index]) {
+        .admission => |value| {
+            writer.writeU8(1);
+            writer.writeUsize(value.saved_self_addr);
+            writer.writeUsize(value.ledger_addr);
+            writer.writeUsize(value.batch_addr);
+            writePayloadSemantic(&writer, value.semantic);
+            writePayloadFingerprint(&writer, value.payload_fingerprint);
+            if (value.reserved_token) |token| {
+                writer.writeBool(true);
+                writer.writeU64(token.slot);
+                writer.writeU64(token.generation);
+            } else writer.writeBool(false);
+            writer.writeU8(@intFromEnum(value.lifecycle));
+        },
+        .merge => |value| {
+            writer.writeU8(2);
+            writer.writeUsize(value.saved_self_addr);
+            writer.writeUsize(value.ledger_addr);
+            writer.writeUsize(value.batch_addr);
+            writeTokenRef(&writer, value.destination);
+            writer.writeU64(value.expected_destination_generation);
+            writePayloadSemantic(&writer, value.next_semantic);
+            switch (value.source) {
+                .owned => {
+                    writer.writeU8(0);
+                    writePayloadFingerprint(&writer, value.source_fingerprint);
+                },
+                .existing => |ref| {
+                    writer.writeU8(1);
+                    writeTokenRef(&writer, ref);
+                },
+            }
+            if (value.incoming_range) |range| {
+                writer.writeBool(true);
+                writer.writeU64(range.identity.attach_instance_id);
+                writer.writeUsize(range.identity.destination_slot_addr);
+                writer.writeU64(range.start_absolute);
+                writer.writeU64(range.end_absolute);
+            } else writer.writeBool(false);
+            writer.writeBytes(&value.expected_source_digest);
+            switch (value.replacement) {
+                .coalesced => writer.writeU8(0),
+                .prebuilt => {
+                    writer.writeU8(1);
+                    writePayloadFingerprint(&writer, value.replacement_fingerprint);
+                },
+            }
+            if (value.coalesced_replacement_index) |replacement_index| {
+                writer.writeBool(true);
+                writer.writeU8(replacement_index);
+            } else writer.writeBool(false);
+            writer.writeBytes(&value.expected_accounting_digest);
+            writer.writeBytes(&value.expected_destination_digest);
+            writePayloadFingerprint(
+                &writer,
+                value.expected_destination_fingerprint,
+            );
+            if (value.result_token) |token| {
+                writer.writeBool(true);
+                writer.writeU64(token.slot);
+                writer.writeU64(token.generation);
+            } else writer.writeBool(false);
+            writer.writeU8(@intFromEnum(value.lifecycle));
+        },
+        .release => |value| {
+            writer.writeU8(3);
+            writer.writeUsize(value.saved_self_addr);
+            writer.writeUsize(value.ledger_addr);
+            writer.writeUsize(value.batch_addr);
+            writeTokenRef(&writer, value.token);
+            writer.writeU8(@intFromEnum(value.expected_phase));
+            writer.writeU64(value.expected_token_generation);
+            writer.writeBytes(&value.expected_accounting_digest);
+            writer.writeBytes(&value.expected_token_digest);
+            writePayloadFingerprint(&writer, value.expected_token_fingerprint);
+            writer.writeU8(@intFromEnum(value.lifecycle));
+        },
+        else => writer.writeU8(0),
+    }
+    return writer.finish();
+}
+
+fn appendRefBytes(
+    ledger: *const ExternalInboxLedger,
+    batch: *const PreparedLiveBatch,
+    ref: LiveTokenRef,
+    before_index: usize,
+    output: []u8,
+    cursor: *usize,
+) error{ InvalidPlan, InvalidPayload, InvariantFailure }!void {
+    switch (ref) {
+        .existing => |token| {
+            const inspected = try pureSlot(ledger, token);
+            const slot = &ledger.slots[token.slot];
+            const end = std.math.add(usize, cursor.*, inspected.logical_len) catch
+                return error.InvalidPayload;
+            if (end > output.len) return error.InvalidPayload;
+            @memcpy(output[cursor.*..end], slot.payload.bytes());
+            cursor.* = end;
+        },
+        .planned => |planned| {
+            const index: usize = planned;
+            if (index >= before_index) return error.InvalidPlan;
+            switch (batch.mutations[index]) {
+                .admission => |admission| {
+                    const bytes = admission.owned_payload.bytes();
+                    const end = std.math.add(usize, cursor.*, bytes.len) catch
+                        return error.InvalidPayload;
+                    if (end > output.len) return error.InvalidPayload;
+                    @memcpy(output[cursor.*..end], bytes);
+                    cursor.* = end;
+                },
+                .merge => |merge| {
+                    try appendRefBytes(
+                        ledger,
+                        batch,
+                        merge.destination,
+                        index,
+                        output,
+                        cursor,
+                    );
+                    switch (merge.source) {
+                        .owned => |source| {
+                            const bytes = source.bytes();
+                            const end = std.math.add(usize, cursor.*, bytes.len) catch
+                                return error.InvalidPayload;
+                            if (end > output.len) return error.InvalidPayload;
+                            @memcpy(output[cursor.*..end], bytes);
+                            cursor.* = end;
+                        },
+                        .existing => |source_ref| try appendRefBytes(
+                            ledger,
+                            batch,
+                            source_ref,
+                            index,
+                            output,
+                            cursor,
+                        ),
+                    }
+                },
+                else => return error.InvalidPlan,
+            }
+        },
+    }
+}
+
+fn matchRefBytes(
+    ledger: *const ExternalInboxLedger,
+    batch: *const PreparedLiveBatch,
+    ref: LiveTokenRef,
+    before_index: usize,
+    expected: []const u8,
+    cursor: *usize,
+) error{ InvalidPlan, InvalidPayload, InvariantFailure }!void {
+    switch (ref) {
+        .existing => |token| {
+            const inspected = try pureSlot(ledger, token);
+            const bytes = ledger.slots[token.slot].payload.bytes();
+            const end = std.math.add(usize, cursor.*, inspected.logical_len) catch
+                return error.InvalidPayload;
+            if (end > expected.len or
+                !std.mem.eql(u8, expected[cursor.*..end], bytes))
+                return error.InvalidPayload;
+            cursor.* = end;
+        },
+        .planned => |planned| {
+            const index: usize = planned;
+            if (index >= before_index) return error.InvalidPlan;
+            switch (batch.mutations[index]) {
+                .admission => |admission| {
+                    const bytes = admission.owned_payload.bytes();
+                    const end = std.math.add(usize, cursor.*, bytes.len) catch
+                        return error.InvalidPayload;
+                    if (end > expected.len or
+                        !std.mem.eql(u8, expected[cursor.*..end], bytes))
+                        return error.InvalidPayload;
+                    cursor.* = end;
+                },
+                .merge => |merge| {
+                    try matchRefBytes(
+                        ledger,
+                        batch,
+                        merge.destination,
+                        index,
+                        expected,
+                        cursor,
+                    );
+                    switch (merge.source) {
+                        .owned => |source| {
+                            const bytes = source.bytes();
+                            const end = std.math.add(usize, cursor.*, bytes.len) catch
+                                return error.InvalidPayload;
+                            if (end > expected.len or
+                                !std.mem.eql(u8, expected[cursor.*..end], bytes))
+                                return error.InvalidPayload;
+                            cursor.* = end;
+                        },
+                        .existing => |source_ref| try matchRefBytes(
+                            ledger,
+                            batch,
+                            source_ref,
+                            index,
+                            expected,
+                            cursor,
+                        ),
+                    }
+                },
+                else => return error.InvalidPlan,
+            }
+        },
+    }
+}
+
+fn batchDigest(
+    batch: *const PreparedLiveBatch,
+) owner_seal.Digest {
+    var writer = owner_seal.Writer.init("MARULBT1");
+    writer.writeUsize(batch.saved_self_addr);
+    writer.writeUsize(batch.ledger_addr);
+    writer.writeUsize(@intFromPtr(batch.allocator.ptr));
+    writer.writeUsize(@intFromPtr(batch.allocator.vtable));
+    writer.writeUsize(@intFromPtr(batch.sealed_allocator.ptr));
+    writer.writeUsize(@intFromPtr(batch.sealed_allocator.vtable));
+    writer.writeU64(batch.expected_mutation_epoch);
+    writer.writeBytes(&batch.expected_accounting_digest);
+    if (batch.expected_external_identity) |identity| {
+        writer.writeBool(true);
+        writer.writeU64(identity.attach_instance_id);
+        writer.writeUsize(identity.destination_slot_addr);
+    } else writer.writeBool(false);
+    writer.writeBool(batch.cleanup_only);
+    writer.writeU8(batch.mutation_count);
+    writer.writeU8(batch.replacement_count);
+    writer.writeUsize(batch.replacement_bytes);
+    writer.writeBytes(&batch.working_simulation_digest);
+    writer.writeUsize(batch.accepted_source_bytes);
+    writer.writeU64(batch.expected_next_generation);
+    writer.writeBool(batch.expected_generation_exhausted);
+    writer.writeUsize(batch.expected_next_slot_hint);
+    writer.writeUsize(batch.expected_charged_bytes);
+    writer.writeUsize(batch.expected_charged_items);
+    writer.writeU8(@intFromEnum(batch.lifecycle));
+    for (0..batch.mutation_count) |index|
+        writer.writeBytes(&liveMutationDigest(batch, index));
+    for (batch.coalesced_replacement_fingerprints[0..batch.replacement_count]) |sealed|
+        writePayloadFingerprint(&writer, sealed);
+    return writer.finish();
+}
+
+fn liveProgressDigest(
+    batch: *const PreparedLiveBatch,
+) owner_seal.Digest {
+    var writer = owner_seal.Writer.init("MARULPG1");
+    writer.writeUsize(@intFromPtr(batch));
+    writer.writeUsize(batch.saved_self_addr);
+    writer.writeUsize(batch.ledger_addr);
+    writer.writeUsize(@intFromPtr(batch.allocator.ptr));
+    writer.writeUsize(@intFromPtr(batch.allocator.vtable));
+    writer.writeU8(batch.mutation_count);
+    writer.writeU8(batch.replacement_count);
+    writer.writeUsize(batch.replacement_bytes);
+    writer.writeBytes(&batch.working_simulation_digest);
+    for (0..batch.mutation_count) |index|
+        writer.writeBytes(&liveMutationDigest(batch, index));
+    for (batch.coalesced_replacement_fingerprints[0..batch.replacement_count]) |sealed|
+        writePayloadFingerprint(&writer, sealed);
+    return writer.finish();
+}
+
+fn mapPrepareToCommitLive(err: PrepareLiveError) CommitLiveError {
+    return switch (err) {
+        error.OutOfMemory => error.InvalidPlan,
+        error.ArithmeticOverflow => error.InvalidPayload,
+        error.ByteCapExceeded => error.ByteCapExceeded,
+        error.ItemCapExceeded => error.ItemCapExceeded,
+        error.GenerationExhausted => error.GenerationExhausted,
+        error.EpochExhausted => error.EpochExhausted,
+        error.InvalidAlias => error.InvalidAlias,
+        error.InvalidPayload => error.InvalidPayload,
+        error.InvalidPlan => error.InvalidPlan,
+        error.InvalidSemantic => error.InvalidSemantic,
+        error.InvalidTransition => error.InvalidTransition,
+        error.InvariantFailure => error.InvariantFailure,
+        error.PlanningDisabled => error.PlanningDisabled,
+        error.StalePlan => error.StalePlan,
+        error.Drained => error.Drained,
+        error.TeardownActive => error.TeardownActive,
+    };
+}
+
+fn mapPrepareToTransition(err: PrepareLiveError) TransitionError {
+    return switch (err) {
+        error.OutOfMemory, error.ArithmeticOverflow => error.InvalidPayload,
+        error.ByteCapExceeded => error.InvalidPayload,
+        error.ItemCapExceeded => error.InvalidTransition,
+        error.GenerationExhausted => error.GenerationExhausted,
+        error.EpochExhausted => error.EpochExhausted,
+        error.InvalidAlias => error.InvalidAlias,
+        error.InvalidPayload => error.InvalidPayload,
+        error.InvalidPlan, error.StalePlan => error.InvalidTransition,
+        error.InvalidSemantic => error.InvalidSemantic,
+        error.InvalidTransition => error.InvalidTransition,
+        error.InvariantFailure => error.InvariantFailure,
+        error.PlanningDisabled => error.PlanningDisabled,
+        error.Drained => error.Drained,
+        error.TeardownActive => error.TeardownActive,
+    };
+}
+
+fn mapCommitToTransition(err: CommitLiveError) TransitionError {
+    return switch (err) {
+        error.ByteCapExceeded => error.InvalidPayload,
+        error.ItemCapExceeded => error.InvalidTransition,
+        error.GenerationExhausted => error.GenerationExhausted,
+        error.EpochExhausted => error.EpochExhausted,
+        error.InvalidAlias => error.InvalidAlias,
+        error.InvalidPayload => error.InvalidPayload,
+        error.InvalidPlan, error.StalePlan => error.InvalidTransition,
+        error.InvalidSemantic => error.InvalidSemantic,
+        error.InvalidTransition => error.InvalidTransition,
+        error.InvariantFailure => error.InvariantFailure,
+        error.PlanningDisabled => error.PlanningDisabled,
+        error.Drained => error.Drained,
+        error.TeardownActive => error.TeardownActive,
+    };
+}
+
+fn mapPrepareToInvariant(err: PrepareLiveError) InvariantError {
+    return switch (err) {
+        error.Drained => error.Drained,
+        error.TeardownActive => error.TeardownActive,
+        else => error.InvariantFailure,
+    };
+}
+
+fn mapCommitToInvariant(err: CommitLiveError) InvariantError {
+    return switch (err) {
+        error.Drained => error.Drained,
+        error.TeardownActive => error.TeardownActive,
+        else => error.InvariantFailure,
+    };
+}
+
+fn liveTokenAtCommit(
+    batch: *const PreparedLiveBatch,
+    ref: LiveTokenRef,
+) Token {
+    return switch (ref) {
+        .existing => |token| token,
+        .planned => |planned| switch (batch.mutations[planned]) {
+            .admission => |value| value.reserved_token.?,
+            .merge => |value| value.result_token.?,
+            else => unreachable,
+        },
+    };
+}
+
+fn appendLiveRetirementUnchecked(
+    retirement: *PreparedLiveRetirement,
+    payload: OwnedPayload,
+) void {
+    const index: usize = retirement.cleanup_count;
+    std.debug.assert(index < max_live_cleanup_owners);
+    retirement.cleanup_owners[index] = payload;
+    retirement.cleanup_plans[index] = .{
+        .allocator = payload.allocator,
+        .addr = if (payload.allocation_ptr) |ptr| @intFromPtr(ptr) else 0,
+        .len = payload.logical_len,
+        .content_digest = fingerprint(payload).content_digest,
+    };
+    retirement.cleanup_plans[index].digest =
+        frozenCleanupDigest(retirement.cleanup_plans[index]);
+    retirement.cleanup_count += 1;
+    retirement.cleanup_bytes += payload.logical_len;
+}
+
+fn appendPublishedReplacementUnchecked(
+    retirement: *PreparedLiveRetirement,
+    payload: *const OwnedPayload,
+) void {
+    const index: usize = retirement.replacement_count;
+    std.debug.assert(index < max_live_mutations);
+    retirement.published_replacements[index] = .{
+        .addr = if (payload.allocation_ptr) |ptr| @intFromPtr(ptr) else 0,
+        .len = payload.logical_len,
+    };
+    retirement.replacement_count += 1;
+    retirement.replacement_bytes += payload.logical_len;
+}
+
+fn validateLiveCommitAliases(
+    ledger: *const ExternalInboxLedger,
+    batch: *const PreparedLiveBatch,
+    retirement: *const PreparedLiveRetirement,
+    dispositions: *const [max_live_mutations]LiveCommitDisposition,
+) error{InvalidAlias}!void {
+    const fixed = [_]ByteRange{
+        rangeOfValue(ledger),
+        rangeOfValue(batch),
+        rangeOfValue(retirement),
+        rangeOfValue(dispositions),
+    };
+    for (fixed, 0..) |range, index|
+        for (fixed[0..index]) |prior|
+            if (rangesOverlap(range, prior)) return error.InvalidAlias;
+    var owned_ranges: [max_live_mutations * 3]ByteRange =
+        [_]ByteRange{.{ .start = 0, .end = 0 }} ** (max_live_mutations * 3);
+    var count: usize = 0;
+    for (batch.mutations[0..batch.mutation_count]) |*mutation| {
+        switch (mutation.*) {
+            .admission => |*admission| {
+                owned_ranges[count] = rangeOfPayload(&admission.owned_payload);
+                count += 1;
+            },
+            .merge => |*merge| {
+                switch (merge.source) {
+                    .owned => |*source| {
+                        owned_ranges[count] = rangeOfPayload(source);
+                        count += 1;
+                    },
+                    .existing => {},
+                }
+                switch (merge.replacement) {
+                    .prebuilt => |*replacement| {
+                        owned_ranges[count] = rangeOfPayload(replacement);
+                        count += 1;
+                    },
+                    .coalesced => {},
+                }
+            },
+            else => {},
+        }
+    }
+    for (batch.coalesced_replacements[0..batch.replacement_count]) |*replacement| {
+        owned_ranges[count] = rangeOfPayload(replacement);
+        count += 1;
+    }
+    for (owned_ranges[0..count], 0..) |range, index| {
+        for (fixed) |fixed_range|
+            if (rangesOverlap(range, fixed_range)) return error.InvalidAlias;
+        if (rangeOverlapsActive(range, ledger)) return error.InvalidAlias;
+        for (owned_ranges[0..index]) |prior|
+            if (rangesOverlap(range, prior)) return error.InvalidAlias;
+    }
+}
+
+fn validateIncomingLiveOwners(
+    ledger: *const ExternalInboxLedger,
+    batch: *const PreparedLiveBatch,
+    source: *const PreparedLiveMergeSource,
+    replacement: *const PreparedLiveReplacement,
+) error{InvalidAlias}!void {
+    var ranges: [4]ByteRange = [_]ByteRange{.{ .start = 0, .end = 0 }} ** 4;
+    var count: usize = 0;
+    switch (source.*) {
+        .owned => |*payload| {
+            ranges[count] = rangeOfValue(payload);
+            count += 1;
+            ranges[count] = rangeOfPayload(payload);
+            count += 1;
+        },
+        .existing => {},
+    }
+    switch (replacement.*) {
+        .prebuilt => |*payload| {
+            ranges[count] = rangeOfValue(payload);
+            count += 1;
+            ranges[count] = rangeOfPayload(payload);
+            count += 1;
+        },
+        .coalesced => {},
+    }
+    for (ranges[0..count], 0..) |range, index| {
+        if (rangesOverlap(range, rangeOfValue(ledger)) or
+            rangesOverlap(range, rangeOfValue(batch)) or
+            rangeOverlapsActive(range, ledger))
+            return error.InvalidAlias;
+        for (ranges[0..index]) |prior|
+            if (rangesOverlap(range, prior)) return error.InvalidAlias;
+    }
+}
+
+fn batchOwnedAbortValid(
+    ledger: *const ExternalInboxLedger,
+    batch: *const PreparedLiveBatch,
+) bool {
+    if (batch.mutation_count > max_live_mutations or
+        batch.replacement_count > max_live_mutations or
+        !hasCanonicalLiveBatchTails(batch))
+        return false;
+    if (batch.lifecycle == .preparing and
+        !std.mem.eql(
+            u8,
+            &batch.progress_digest,
+            &liveProgressDigest(batch),
+        ))
+        return false;
+    if (batch.lifecycle == .prepared and
+        !std.mem.eql(u8, &batch.digest, &batchDigest(batch)))
+        return false;
+    var ranges: [max_live_mutations * 3]ByteRange =
+        [_]ByteRange{.{ .start = 0, .end = 0 }} ** (max_live_mutations * 3);
+    var count: usize = 0;
+    for (batch.mutations[0..batch.mutation_count], 0..) |*mutation, index| {
+        const sealed_digest = switch (mutation.*) {
+            .admission => |admission| blk: {
+                if (!fingerprintMatches(
+                    admission.payload_fingerprint,
+                    admission.owned_payload,
+                )) return false;
+                ranges[count] = rangeOfPayload(&admission.owned_payload);
+                count += 1;
+                break :blk admission.digest;
+            },
+            .merge => |merge| blk: {
+                switch (merge.source) {
+                    .owned => |*source| {
+                        if (!fingerprintMatches(merge.source_fingerprint, source.*))
+                            return false;
+                        ranges[count] = rangeOfPayload(source);
+                        count += 1;
+                    },
+                    .existing => {},
+                }
+                switch (merge.replacement) {
+                    .prebuilt => |*replacement| {
+                        if (!fingerprintMatches(
+                            merge.replacement_fingerprint,
+                            replacement.*,
+                        )) return false;
+                        ranges[count] = rangeOfPayload(replacement);
+                        count += 1;
+                    },
+                    .coalesced => {},
+                }
+                break :blk merge.digest;
+            },
+            .release => |release| release.digest,
+            else => return false,
+        };
+        if (!std.mem.eql(
+            u8,
+            &sealed_digest,
+            &liveMutationDigest(batch, index),
+        )) return false;
+    }
+    for (
+        batch.coalesced_replacements[0..batch.replacement_count],
+        batch.coalesced_replacement_fingerprints[0..batch.replacement_count],
+    ) |*replacement, sealed| {
+        if (!fingerprintMatches(sealed, replacement.*)) return false;
+        ranges[count] = rangeOfPayload(replacement);
+        count += 1;
+    }
+    for (ranges[0..count], 0..) |range, index| {
+        if (rangesOverlap(range, rangeOfValue(ledger)) or
+            rangesOverlap(range, rangeOfValue(batch)) or
+            rangeOverlapsActive(range, ledger))
+            return false;
+        for (ranges[0..index]) |prior|
+            if (rangesOverlap(range, prior)) return false;
+    }
+    return true;
+}
+
+fn hasCanonicalLiveBatchTails(batch: *const PreparedLiveBatch) bool {
+    if (batch.mutation_count > max_live_mutations or
+        batch.replacement_count > max_live_mutations)
+        return false;
+    for (batch.mutations[batch.mutation_count..]) |mutation| {
+        switch (mutation) {
+            .empty => {},
+            else => return false,
+        }
+    }
+    for (
+        batch.coalesced_replacements[batch.replacement_count..],
+        batch.coalesced_replacement_fingerprints[batch.replacement_count..],
+    ) |replacement, sealed| {
+        if (replacement.allocation_ptr != null or replacement.logical_len != 0 or
+            sealed.address != 0 or sealed.logical_len != 0 or
+            !std.mem.allEqual(u8, &sealed.content_digest, 0))
+            return false;
+    }
+    return true;
 }
 
 pub const ExternalInboxLedger = struct {
     slots: [max_items]Slot = [_]Slot{.{}} ** max_items,
+    external_identity_seal: LedgerExternalIdentitySeal = .{},
     charged_bytes: usize = 0,
     charged_items: usize = 0,
     retired_bytes: usize = 0,
@@ -732,6 +2608,831 @@ pub const ExternalInboxLedger = struct {
     draining_or_drained: bool = false,
     teardown_active: bool = false,
     owner_teardown_generation: u64 = 0,
+
+    pub fn beginLiveBatch(
+        self: *ExternalInboxLedger,
+        out: *PreparedLiveBatch,
+        allocator: std.mem.Allocator,
+        external_identity: ?external_rx_types.RxIdentity,
+    ) PrepareLiveError!void {
+        if (out.lifecycle != .empty or out.saved_self_addr != 0)
+            return error.InvalidPlan;
+        if (rangesOverlap(rangeOfValue(out), rangeOfValue(self)) or
+            rangeOverlapsActive(rangeOfValue(out), self))
+            return error.InvalidAlias;
+        if (self.teardown_active) return error.TeardownActive;
+        if (self.draining_or_drained) return error.Drained;
+        if (self.invariant_failed or self.planning_disabled)
+            return error.PlanningDisabled;
+        if (!self.hasValidAccounting()) return error.InvariantFailure;
+        if (self.mutation_epoch == std.math.maxInt(u64))
+            return error.EpochExhausted;
+        if (external_identity) |identity|
+            try self.validateExternalIdentityForLivePrepare(identity);
+        out.* = .{
+            .saved_self_addr = @intFromPtr(out),
+            .ledger_addr = @intFromPtr(self),
+            .allocator = allocator,
+            .sealed_allocator = allocator,
+            .expected_mutation_epoch = self.mutation_epoch,
+            .expected_accounting_digest = liveAccountingDigest(self),
+            .expected_external_identity = external_identity,
+            .expected_next_generation = self.next_generation,
+            .expected_generation_exhausted = self.generation_exhausted,
+            .expected_next_slot_hint = self.next_slot_hint,
+            .expected_charged_bytes = self.charged_bytes,
+            .expected_charged_items = self.charged_items,
+            .lifecycle = .preparing,
+        };
+        out.working_simulation = simulateLiveBatch(self, out, 0) catch
+            unreachable;
+        out.working_simulation_digest =
+            liveSimulationDigest(&out.working_simulation, 0);
+        out.progress_digest = liveProgressDigest(out);
+    }
+
+    fn beginLiveCleanupBatch(
+        self: *ExternalInboxLedger,
+        out: *PreparedLiveBatch,
+    ) PrepareLiveError!void {
+        if (out.lifecycle != .empty or out.saved_self_addr != 0)
+            return error.InvalidPlan;
+        if (rangesOverlap(rangeOfValue(out), rangeOfValue(self)) or
+            rangeOverlapsActive(rangeOfValue(out), self))
+            return error.InvalidAlias;
+        if (self.teardown_active) return error.TeardownActive;
+        if (self.draining_or_drained) return error.Drained;
+        out.* = .{
+            .saved_self_addr = @intFromPtr(out),
+            .ledger_addr = @intFromPtr(self),
+            .allocator = std.heap.page_allocator,
+            .sealed_allocator = std.heap.page_allocator,
+            .expected_mutation_epoch = self.mutation_epoch,
+            .expected_accounting_digest = liveAccountingDigest(self),
+            .cleanup_only = true,
+            .expected_next_generation = self.next_generation,
+            .expected_generation_exhausted = self.generation_exhausted,
+            .expected_next_slot_hint = self.next_slot_hint,
+            .expected_charged_bytes = self.charged_bytes,
+            .expected_charged_items = self.charged_items,
+            .lifecycle = .preparing,
+        };
+        out.working_simulation = simulateLiveBatch(self, out, 0) catch
+            unreachable;
+        out.working_simulation_digest =
+            liveSimulationDigest(&out.working_simulation, 0);
+        out.progress_digest = liveProgressDigest(out);
+    }
+
+    pub fn prepareLiveAdmission(
+        self: *ExternalInboxLedger,
+        batch: *PreparedLiveBatch,
+        semantic: PayloadSemantic,
+        payload: *OwnedPayload,
+    ) PrepareLiveError!LiveTokenRef {
+        try self.requirePreparingLiveBatch(batch);
+        if (batch.mutation_count >= max_live_mutations) return error.ItemCapExceeded;
+        try validatePayload(payload, payload.logical_len);
+        try validateSemantic(semantic, payload.logical_len);
+        try validateExternalSemanticForBatch(batch, semantic);
+        if (rangesOverlap(rangeOfValue(payload), rangeOfPayload(payload)) or
+            rangeOverlapsLedgerOrActive(rangeOfValue(payload), self) or
+            rangeOverlapsLedgerOrActive(rangeOfPayload(payload), self) or
+            rangesOverlap(rangeOfValue(payload), rangeOfValue(batch)) or
+            rangesOverlap(rangeOfPayload(payload), rangeOfValue(batch)))
+            return error.InvalidAlias;
+        const prior = batch.working_simulation;
+        const slot = findVirtualFreeSlot(
+            self,
+            &prior,
+            batch.mutation_count,
+            prior.next_slot_hint,
+        ) orelse return error.ItemCapExceeded;
+        var next_generation = prior.next_generation;
+        var generation_exhausted = prior.generation_exhausted;
+        const generation = try advanceVirtualGeneration(
+            &next_generation,
+            &generation_exhausted,
+        );
+        const token = Token{ .slot = @intCast(slot), .generation = generation };
+        const index: usize = batch.mutation_count;
+        batch.mutations[index] = .{ .admission = .{
+            .saved_self_addr = @intFromPtr(&batch.mutations[index]),
+            .ledger_addr = @intFromPtr(self),
+            .batch_addr = @intFromPtr(batch),
+            .semantic = semantic,
+            .owned_payload = payload.*,
+            .payload_fingerprint = fingerprint(payload.*),
+            .reserved_token = token,
+            .lifecycle = .prepared,
+        } };
+        const next_simulation = simulateLiveBatchFrom(
+            self,
+            batch,
+            index,
+            index + 1,
+            prior,
+        ) catch |err| {
+            batch.mutations[index] = .empty;
+            return err;
+        };
+        switch (batch.mutations[index]) {
+            .admission => |*admission| {
+                admission.owned_payload = payload.take();
+                admission.payload_fingerprint = fingerprint(admission.owned_payload);
+                admission.digest = liveMutationDigest(batch, index);
+            },
+            else => unreachable,
+        }
+        batch.mutation_count += 1;
+        batch.working_simulation = next_simulation;
+        batch.working_simulation_digest =
+            liveSimulationDigest(&batch.working_simulation, batch.mutation_count);
+        batch.progress_digest = liveProgressDigest(batch);
+        return .{ .planned = @intCast(index) };
+    }
+
+    pub fn prepareLiveMerge(
+        self: *ExternalInboxLedger,
+        batch: *PreparedLiveBatch,
+        destination: LiveTokenRef,
+        next_semantic: PayloadSemantic,
+        incoming_range: ?external_rx_types.RxRange,
+        source: *PreparedLiveMergeSource,
+        replacement: *PreparedLiveReplacement,
+    ) PrepareLiveError!void {
+        try self.requirePreparingLiveBatch(batch);
+        if (batch.mutation_count >= max_live_mutations) return error.ItemCapExceeded;
+        try validateIncomingLiveOwners(self, batch, source, replacement);
+        const index: usize = batch.mutation_count;
+        const prior = batch.working_simulation;
+        const destination_node = try resolveVirtualRef(
+            self,
+            batch,
+            &prior,
+            index,
+            destination,
+        );
+        var next_generation = prior.next_generation;
+        var generation_exhausted = prior.generation_exhausted;
+        const generation = try advanceVirtualGeneration(
+            &next_generation,
+            &generation_exhausted,
+        );
+        const result_token = Token{
+            .slot = destination_node.token.slot,
+            .generation = generation,
+        };
+        const source_fingerprint = switch (source.*) {
+            .owned => |owned_source| blk: {
+                try validatePayload(&owned_source, owned_source.logical_len);
+                break :blk fingerprint(owned_source);
+            },
+            .existing => |source_ref| (try resolveVirtualRef(
+                self,
+                batch,
+                &prior,
+                index,
+                source_ref,
+            )).payload_fingerprint,
+        };
+        const expected_source_digest = switch (source.*) {
+            .owned => [_]u8{0} ** 32,
+            .existing => |source_ref| liveNodeDigest(try resolveVirtualRef(
+                self,
+                batch,
+                &prior,
+                index,
+                source_ref,
+            )),
+        };
+        const replacement_fingerprint = switch (replacement.*) {
+            .coalesced => PayloadFingerprint{
+                .allocator = std.heap.page_allocator,
+                .address = 0,
+                .logical_len = 0,
+            },
+            .prebuilt => |owned_replacement| blk: {
+                try validatePayload(&owned_replacement, owned_replacement.logical_len);
+                break :blk fingerprint(owned_replacement);
+            },
+        };
+        batch.mutations[index] = .{ .merge = .{
+            .saved_self_addr = @intFromPtr(&batch.mutations[index]),
+            .ledger_addr = @intFromPtr(self),
+            .batch_addr = @intFromPtr(batch),
+            .destination = destination,
+            .expected_destination_generation = destination_node.token.generation,
+            .next_semantic = next_semantic,
+            .source = source.*,
+            .source_fingerprint = source_fingerprint,
+            .incoming_range = incoming_range,
+            .expected_source_digest = expected_source_digest,
+            .replacement = replacement.*,
+            .replacement_fingerprint = replacement_fingerprint,
+            .expected_accounting_digest = liveAccountingDigest(self),
+            .expected_destination_digest = liveNodeDigest(destination_node),
+            .expected_destination_fingerprint = destination_node.payload_fingerprint,
+            .result_token = result_token,
+            .lifecycle = .prepared,
+        } };
+        const next_simulation = simulateLiveBatchFrom(
+            self,
+            batch,
+            index,
+            index + 1,
+            prior,
+        ) catch |err| {
+            batch.mutations[index] = .empty;
+            return err;
+        };
+        switch (batch.mutations[index]) {
+            .merge => |*merge| {
+                switch (source.*) {
+                    .owned => |*owned_source| {
+                        merge.source = .{ .owned = owned_source.take() };
+                        merge.source_fingerprint = fingerprint(merge.source.owned);
+                    },
+                    .existing => {},
+                }
+                switch (replacement.*) {
+                    .coalesced => {},
+                    .prebuilt => |*owned_replacement| {
+                        merge.replacement = .{ .prebuilt = owned_replacement.take() };
+                        merge.replacement_fingerprint =
+                            fingerprint(merge.replacement.prebuilt);
+                    },
+                }
+                merge.digest = liveMutationDigest(batch, index);
+            },
+            else => unreachable,
+        }
+        batch.mutation_count += 1;
+        batch.working_simulation = next_simulation;
+        batch.working_simulation_digest =
+            liveSimulationDigest(&batch.working_simulation, batch.mutation_count);
+        batch.progress_digest = liveProgressDigest(batch);
+    }
+
+    pub fn prepareLiveRelease(
+        self: *ExternalInboxLedger,
+        batch: *PreparedLiveBatch,
+        token: LiveTokenRef,
+        expected_phase: PayloadPhase,
+    ) PrepareLiveError!void {
+        try self.requirePreparingLiveBatch(batch);
+        if (batch.mutation_count >= max_live_mutations) return error.ItemCapExceeded;
+        const index: usize = batch.mutation_count;
+        const prior = batch.working_simulation;
+        const target = try resolveVirtualRef(self, batch, &prior, index, token);
+        batch.mutations[index] = .{ .release = .{
+            .saved_self_addr = @intFromPtr(&batch.mutations[index]),
+            .ledger_addr = @intFromPtr(self),
+            .batch_addr = @intFromPtr(batch),
+            .token = token,
+            .expected_phase = expected_phase,
+            .expected_token_generation = target.token.generation,
+            .expected_accounting_digest = liveAccountingDigest(self),
+            .expected_token_digest = liveNodeDigest(target),
+            .expected_token_fingerprint = target.payload_fingerprint,
+            .lifecycle = .prepared,
+        } };
+        const next_simulation = simulateLiveBatchFrom(
+            self,
+            batch,
+            index,
+            index + 1,
+            prior,
+        ) catch |err| {
+            batch.mutations[index] = .empty;
+            return err;
+        };
+        switch (batch.mutations[index]) {
+            .release => |*prepared_release| {
+                prepared_release.digest = liveMutationDigest(batch, index);
+            },
+            else => unreachable,
+        }
+        batch.mutation_count += 1;
+        batch.working_simulation = next_simulation;
+        batch.working_simulation_digest =
+            liveSimulationDigest(&batch.working_simulation, batch.mutation_count);
+        batch.progress_digest = liveProgressDigest(batch);
+    }
+
+    pub fn finishLiveBatch(
+        self: *ExternalInboxLedger,
+        batch: *PreparedLiveBatch,
+    ) PrepareLiveError!void {
+        try self.requirePreparingLiveBatch(batch);
+        if (batch.mutation_count == 0) return error.InvalidPlan;
+        if (batch.replacement_count != 0 or batch.replacement_bytes != 0)
+            return error.InvalidPlan;
+        var simulation = try simulateLiveBatch(self, batch, batch.mutation_count);
+        if (!std.mem.eql(
+            u8,
+            &batch.working_simulation_digest,
+            &liveSimulationDigest(&simulation, batch.mutation_count),
+        )) return error.StalePlan;
+        for (0..batch.mutation_count) |index| {
+            const current_digest = liveMutationDigest(batch, index);
+            const sealed_digest = switch (batch.mutations[index]) {
+                .admission => |value| value.digest,
+                .merge => |value| value.digest,
+                .release => |value| value.digest,
+                else => return error.InvalidPlan,
+            };
+            if (!std.mem.eql(u8, &current_digest, &sealed_digest))
+                return error.StalePlan;
+        }
+        const allocation_allocator = batch.sealed_allocator;
+        const ReplacementAllocationPlan = struct {
+            mutation_index: u8,
+            logical_len: usize,
+        };
+        var allocation_plans =
+            [_]ReplacementAllocationPlan{.{
+                .mutation_index = 0,
+                .logical_len = 0,
+            }} ** max_live_mutations;
+        var allocation_plan_count: u8 = 0;
+        var allocation_plan_bytes: usize = 0;
+        for (batch.mutations[0..batch.mutation_count], 0..) |mutation, index| {
+            switch (mutation) {
+                .merge => |merge| {
+                    if (!simulation.nodes[index].live) continue;
+                    if (merge.replacement != .coalesced) continue;
+                    if (allocation_plan_count >= max_live_mutations)
+                        return error.ItemCapExceeded;
+                    const len = simulation.nodes[index].logical_len;
+                    allocation_plan_bytes = std.math.add(
+                        usize,
+                        allocation_plan_bytes,
+                        len,
+                    ) catch return error.ByteCapExceeded;
+                    if (allocation_plan_bytes > max_bytes)
+                        return error.ByteCapExceeded;
+                    allocation_plans[allocation_plan_count] = .{
+                        .mutation_index = @intCast(index),
+                        .logical_len = len,
+                    };
+                    allocation_plan_count += 1;
+                },
+                else => {},
+            }
+        }
+        var pending_replacements =
+            [_]OwnedPayload{OwnedPayload.empty(allocation_allocator)} **
+            max_live_mutations;
+        var pending_replacement_count: u8 = 0;
+        defer for (pending_replacements[0..pending_replacement_count]) |*pending|
+            pending.deinit();
+        for (allocation_plans[0..allocation_plan_count]) |plan| {
+            var allocation =
+                try allocation_allocator.alloc(u8, plan.logical_len);
+            errdefer allocation_allocator.free(allocation);
+            @memset(allocation, 0);
+            pending_replacements[pending_replacement_count] =
+                OwnedPayload.takeOwned(allocation_allocator, &allocation);
+            pending_replacement_count += 1;
+        }
+        // Allocation callbacks may mutate ledger-backed source bytes. Defer every source
+        // read until all callbacks are complete, then validate the complete virtual batch once.
+        try self.requirePreparingLiveBatch(batch);
+        simulation = try simulateLiveBatch(self, batch, batch.mutation_count);
+        var pending_replacement_index: u8 = 0;
+        for (batch.mutations[0..batch.mutation_count], 0..) |*mutation, index| {
+            switch (mutation.*) {
+                .merge => |*merge| {
+                    if (!simulation.nodes[index].live) continue;
+                    switch (merge.replacement) {
+                        .prebuilt => |prebuilt| {
+                            var cursor: usize = 0;
+                            try matchRefBytes(
+                                self,
+                                batch,
+                                merge.destination,
+                                index,
+                                prebuilt.bytes(),
+                                &cursor,
+                            );
+                            switch (merge.source) {
+                                .owned => |source| {
+                                    const end = std.math.add(
+                                        usize,
+                                        cursor,
+                                        source.logical_len,
+                                    ) catch return error.InvalidPayload;
+                                    if (end != prebuilt.logical_len or
+                                        !std.mem.eql(
+                                            u8,
+                                            prebuilt.bytes()[cursor..end],
+                                            source.bytes(),
+                                        ))
+                                        return error.InvalidPayload;
+                                    cursor = end;
+                                },
+                                .existing => |source_ref| try matchRefBytes(
+                                    self,
+                                    batch,
+                                    source_ref,
+                                    index,
+                                    prebuilt.bytes(),
+                                    &cursor,
+                                ),
+                            }
+                            if (cursor != prebuilt.logical_len)
+                                return error.InvalidPayload;
+                        },
+                        .coalesced => {
+                            if (pending_replacement_index >= pending_replacement_count or
+                                batch.replacement_count >= max_live_mutations)
+                                return error.InvalidPlan;
+                            const pending =
+                                &pending_replacements[pending_replacement_index];
+                            if (allocation_plans[pending_replacement_index].mutation_index !=
+                                index)
+                                return error.StalePlan;
+                            var cursor: usize = 0;
+                            try appendRefBytes(
+                                self,
+                                batch,
+                                merge.destination,
+                                index,
+                                pending.mutableBytes(),
+                                &cursor,
+                            );
+                            switch (merge.source) {
+                                .owned => |source| {
+                                    const end = std.math.add(
+                                        usize,
+                                        cursor,
+                                        source.logical_len,
+                                    ) catch return error.InvalidPayload;
+                                    if (end != pending.logical_len)
+                                        return error.InvalidPayload;
+                                    @memcpy(
+                                        pending.mutableBytes()[cursor..end],
+                                        source.bytes(),
+                                    );
+                                    cursor = end;
+                                },
+                                .existing => |source_ref| try appendRefBytes(
+                                    self,
+                                    batch,
+                                    source_ref,
+                                    index,
+                                    pending.mutableBytes(),
+                                    &cursor,
+                                ),
+                            }
+                            if (cursor != pending.logical_len)
+                                return error.InvalidPayload;
+                            const replacement_index = batch.replacement_count;
+                            batch.coalesced_replacements[replacement_index] =
+                                pending.*;
+                            pending.* = OwnedPayload.empty(batch.allocator);
+                            batch.coalesced_replacement_fingerprints[replacement_index] =
+                                fingerprint(
+                                    batch.coalesced_replacements[replacement_index],
+                                );
+                            merge.coalesced_replacement_index = replacement_index;
+                            batch.replacement_count += 1;
+                            batch.replacement_bytes = std.math.add(
+                                usize,
+                                batch.replacement_bytes,
+                                batch.coalesced_replacements[replacement_index].logical_len,
+                            ) catch return error.ByteCapExceeded;
+                            pending_replacement_index += 1;
+                        },
+                    }
+                    merge.digest = liveMutationDigest(batch, index);
+                    batch.progress_digest = liveProgressDigest(batch);
+                },
+                else => {},
+            }
+        }
+        if (pending_replacement_index != pending_replacement_count)
+            return error.InvalidPlan;
+        simulation = try simulateLiveBatch(self, batch, batch.mutation_count);
+        batch.accepted_source_bytes = simulation.accepted_source_bytes;
+        batch.expected_next_generation = simulation.next_generation;
+        batch.expected_generation_exhausted = simulation.generation_exhausted;
+        batch.expected_next_slot_hint = simulation.next_slot_hint;
+        batch.expected_charged_bytes = simulation.charged_bytes;
+        batch.expected_charged_items = simulation.charged_items;
+        batch.lifecycle = .prepared;
+        batch.digest = batchDigest(batch);
+    }
+
+    pub fn commitPreparedLiveBatch(
+        self: *ExternalInboxLedger,
+        batch: *PreparedLiveBatch,
+        retirement: *PreparedLiveRetirement,
+        dispositions: *[max_live_mutations]LiveCommitDisposition,
+    ) CommitLiveError!u8 {
+        if (batch.saved_self_addr != @intFromPtr(batch) or
+            batch.ledger_addr != @intFromPtr(self) or
+            batch.lifecycle != .prepared)
+            return error.InvalidPlan;
+        if (batch.mutation_count > max_live_mutations or
+            batch.replacement_count > max_live_mutations)
+            return error.InvalidPlan;
+        if (!hasCanonicalLiveBatchTails(batch))
+            return error.InvalidPlan;
+        if (!std.meta.eql(batch.allocator, batch.sealed_allocator))
+            return error.InvalidPlan;
+        if (!std.mem.eql(u8, &batch.digest, &batchDigest(batch)))
+            return error.InvalidPlan;
+        if (!isCanonicalEmptyLiveRetirement(retirement))
+            return error.InvalidPlan;
+        for (dispositions) |disposition|
+            if (disposition != .unused) return error.InvalidPlan;
+        if (self.teardown_active) return error.TeardownActive;
+        if (self.draining_or_drained) return error.Drained;
+        if (!batch.cleanup_only and
+            (self.invariant_failed or self.planning_disabled))
+            return error.PlanningDisabled;
+        if (self.mutation_epoch != batch.expected_mutation_epoch or
+            !std.mem.eql(
+                u8,
+                &batch.expected_accounting_digest,
+                &liveAccountingDigest(self),
+            ))
+            return error.StalePlan;
+        if (batch.expected_external_identity) |identity|
+            self.validateExternalIdentityForLivePrepare(identity) catch
+                return error.InvalidSemantic;
+        for (
+            batch.coalesced_replacements[0..batch.replacement_count],
+            batch.coalesced_replacement_fingerprints[0..batch.replacement_count],
+        ) |replacement, sealed| {
+            if (!fingerprintMatches(sealed, replacement))
+                return error.StalePlan;
+        }
+        try validateLiveCommitAliases(self, batch, retirement, dispositions);
+        const simulation = simulateLiveBatch(
+            self,
+            batch,
+            batch.mutation_count,
+        ) catch |err| return mapPrepareToCommitLive(err);
+        if (simulation.next_generation != batch.expected_next_generation or
+            simulation.generation_exhausted != batch.expected_generation_exhausted or
+            simulation.next_slot_hint != batch.expected_next_slot_hint or
+            simulation.charged_bytes != batch.expected_charged_bytes or
+            simulation.charged_items != batch.expected_charged_items or
+            simulation.accepted_source_bytes != batch.accepted_source_bytes)
+            return error.StalePlan;
+        for (0..batch.mutation_count) |index| {
+            const sealed = switch (batch.mutations[index]) {
+                .admission => |value| value.digest,
+                .merge => |value| value.digest,
+                .release => |value| value.digest,
+                else => return error.InvalidPlan,
+            };
+            if (!std.mem.eql(
+                u8,
+                &sealed,
+                &liveMutationDigest(batch, index),
+            )) return error.StalePlan;
+        }
+        return self.commitPreparedLiveBatchUnchecked(
+            batch,
+            retirement,
+            dispositions,
+            simulation,
+        );
+    }
+
+    /// Exact-one callback-free mutation leaf. All hostile validation and every fallible branch
+    /// end in `commitPreparedLiveBatch` before this function is entered.
+    fn commitPreparedLiveBatchUnchecked(
+        self: *ExternalInboxLedger,
+        batch: *PreparedLiveBatch,
+        retirement: *PreparedLiveRetirement,
+        dispositions: *[max_live_mutations]LiveCommitDisposition,
+        simulation: LiveSimulation,
+    ) u8 {
+        retirement.saved_self_addr = @intFromPtr(retirement);
+        for (0..batch.mutation_count) |index| {
+            switch (batch.mutations[index]) {
+                .admission => |*admission| {
+                    const token = admission.reserved_token.?;
+                    self.slots[token.slot] = .{
+                        .active = true,
+                        .generation = token.generation,
+                        .semantic = storeSemantic(admission.semantic) catch unreachable,
+                        .payload = admission.owned_payload.take(),
+                    };
+                    admission.lifecycle = .committed;
+                },
+                .merge => |*merge| {
+                    const destination_token = liveTokenAtCommit(batch, merge.destination);
+                    const destination = &self.slots[destination_token.slot];
+                    switch (merge.source) {
+                        .owned => |*source| {
+                            appendLiveRetirementUnchecked(retirement, source.take());
+                        },
+                        .existing => |source_ref| {
+                            const source_token = liveTokenAtCommit(batch, source_ref);
+                            const source_slot = &self.slots[source_token.slot];
+                            appendLiveRetirementUnchecked(
+                                retirement,
+                                source_slot.payload.take(),
+                            );
+                            source_slot.* = .{ .generation = source_token.generation };
+                        },
+                    }
+                    const result_token = merge.result_token.?;
+                    if (simulation.nodes[index].live) {
+                        appendLiveRetirementUnchecked(
+                            retirement,
+                            destination.payload.take(),
+                        );
+                        var replacement = switch (merge.replacement) {
+                            .prebuilt => |*prebuilt| prebuilt.take(),
+                            .coalesced => batch.coalesced_replacements[
+                                merge.coalesced_replacement_index.?
+                            ].take(),
+                        };
+                        destination.* = .{
+                            .active = true,
+                            .generation = result_token.generation,
+                            .semantic = storeSemantic(merge.next_semantic) catch unreachable,
+                            .payload = replacement.take(),
+                        };
+                    } else {
+                        switch (merge.replacement) {
+                            .prebuilt => |*prebuilt| {
+                                appendLiveRetirementUnchecked(
+                                    retirement,
+                                    prebuilt.take(),
+                                );
+                            },
+                            .coalesced => {},
+                        }
+                        destination.generation = result_token.generation;
+                        destination.semantic =
+                            storeSemantic(merge.next_semantic) catch unreachable;
+                    }
+                    merge.lifecycle = .committed;
+                },
+                .release => |*prepared_release| {
+                    const token = liveTokenAtCommit(batch, prepared_release.token);
+                    const slot = &self.slots[token.slot];
+                    appendLiveRetirementUnchecked(retirement, slot.payload.take());
+                    slot.* = .{ .generation = token.generation };
+                    prepared_release.lifecycle = .committed;
+                },
+                else => unreachable,
+            }
+        }
+        self.charged_bytes = simulation.charged_bytes;
+        self.charged_items = simulation.charged_items;
+        self.next_generation = simulation.next_generation;
+        self.generation_exhausted = simulation.generation_exhausted;
+        self.next_slot_hint = simulation.next_slot_hint;
+        if (self.mutation_epoch < std.math.maxInt(u64))
+            self.mutation_epoch += 1;
+        if (self.generation_exhausted or
+            self.mutation_epoch == std.math.maxInt(u64))
+            self.planning_disabled = true;
+        if (batch.expected_external_identity) |identity| {
+            if (self.external_identity_seal.lifecycle == .empty) {
+                self.external_identity_seal = makeExternalIdentitySeal(
+                    self,
+                    identity,
+                    1,
+                    .bound,
+                );
+            }
+        }
+
+        var final_count: u8 = 0;
+        for (0..batch.mutation_count) |index| {
+            if (simulation.nodes[index].live) {
+                const phase = switch (std.meta.activeTag(
+                    simulation.nodes[index].semantic,
+                )) {
+                    .partial => FinalLiveRoot{
+                        .token = simulation.nodes[index].token,
+                        .phase = .partial,
+                    },
+                    .completed => FinalLiveRoot{
+                        .token = simulation.nodes[index].token,
+                        .phase = .completed,
+                    },
+                    else => unreachable,
+                };
+                dispositions[index] = .{ .final_live = phase };
+                final_count += 1;
+                const live_slot = &self.slots[simulation.nodes[index].token.slot];
+                appendPublishedReplacementUnchecked(
+                    retirement,
+                    &live_slot.payload,
+                );
+            } else {
+                dispositions[index] = .superseded_tombstone;
+            }
+        }
+        for (batch.mutation_count..max_live_mutations) |index|
+            dispositions[index] = .unused;
+        if (retirement.cleanup_count == 0) {
+            retirement.* = .{ .lifecycle = .retired };
+        } else {
+            retirement.lifecycle = .prepared;
+            retirement.digest = liveRetirementDigest(retirement);
+        }
+        batch.* = .{ .lifecycle = .committed };
+        return final_count;
+    }
+
+    pub fn abortPreparedLiveBatch(
+        self: *ExternalInboxLedger,
+        batch: *PreparedLiveBatch,
+    ) AbortLiveResult {
+        if (batch.saved_self_addr != @intFromPtr(batch) or
+            batch.ledger_addr != @intFromPtr(self) or
+            (batch.lifecycle != .preparing and batch.lifecycle != .prepared))
+            return .ignored_untrusted;
+        if (!batchOwnedAbortValid(self, batch)) {
+            batch.* = .{ .lifecycle = .aborted };
+            return .quarantined;
+        }
+        var cleanup: [max_live_cleanup_owners + max_live_mutations]OwnedPayload =
+            [_]OwnedPayload{.{ .allocator = std.heap.page_allocator }} **
+            (max_live_cleanup_owners + max_live_mutations);
+        var count: usize = 0;
+        for (batch.mutations[0..batch.mutation_count]) |*mutation| {
+            switch (mutation.*) {
+                .admission => |*admission| {
+                    cleanup[count] = admission.owned_payload.take();
+                    count += 1;
+                },
+                .merge => |*merge| {
+                    switch (merge.source) {
+                        .owned => |*source| {
+                            cleanup[count] = source.take();
+                            count += 1;
+                        },
+                        .existing => {},
+                    }
+                    switch (merge.replacement) {
+                        .prebuilt => |*replacement| {
+                            cleanup[count] = replacement.take();
+                            count += 1;
+                        },
+                        .coalesced => {},
+                    }
+                },
+                else => {},
+            }
+            mutation.* = .aborted;
+        }
+        for (batch.coalesced_replacements[0..batch.replacement_count]) |*replacement| {
+            cleanup[count] = replacement.take();
+            count += 1;
+        }
+        batch.* = .{ .lifecycle = .aborted };
+        for (cleanup[0..count]) |*payload| payload.deinit();
+        return .aborted;
+    }
+
+    fn requirePreparingLiveBatch(
+        self: *const ExternalInboxLedger,
+        batch: *const PreparedLiveBatch,
+    ) PrepareLiveError!void {
+        if (batch.saved_self_addr != @intFromPtr(batch) or
+            batch.ledger_addr != @intFromPtr(self) or
+            batch.lifecycle != .preparing or
+            batch.mutation_count > max_live_mutations or
+            batch.replacement_count > max_live_mutations or
+            !hasCanonicalLiveBatchTails(batch) or
+            !std.mem.eql(
+                u8,
+                &batch.working_simulation_digest,
+                &liveSimulationDigest(
+                    &batch.working_simulation,
+                    batch.mutation_count,
+                ),
+            ) or
+            !std.mem.eql(
+                u8,
+                &batch.progress_digest,
+                &liveProgressDigest(batch),
+            ) or
+            !std.meta.eql(batch.allocator, batch.sealed_allocator))
+            return error.InvalidPlan;
+        if (self.teardown_active) return error.TeardownActive;
+        if (self.draining_or_drained) return error.Drained;
+        if (self.mutation_epoch != batch.expected_mutation_epoch or
+            !std.mem.eql(
+                u8,
+                &batch.expected_accounting_digest,
+                &liveAccountingDigest(self),
+            ))
+            return error.StalePlan;
+    }
 
     pub fn beginOwnerTeardown(
         self: *ExternalInboxLedger,
@@ -791,6 +3492,22 @@ pub const ExternalInboxLedger = struct {
             return error.InvalidPermit;
         if (self.teardown_active) return error.AlreadyFinished;
         if (!self.hasValidAccounting()) return error.InvariantFailure;
+        if (self.external_identity_seal.generation == std.math.maxInt(u64))
+            return error.InvariantFailure;
+        const terminal_identity_generation =
+            self.external_identity_seal.generation + 1;
+        const terminal_identity_seal = LedgerExternalIdentitySeal{
+            .ledger_addr = @intFromPtr(self),
+            .identity = null,
+            .generation = terminal_identity_generation,
+            .lifecycle = .drained_tombstone,
+            .digest = externalIdentityDigest(
+                @intFromPtr(self),
+                null,
+                terminal_identity_generation,
+                .drained_tombstone,
+            ),
+        };
 
         var summary: LedgerTeardownSummary = .{
             .had_invariant = self.invariant_failed,
@@ -806,7 +3523,7 @@ pub const ExternalInboxLedger = struct {
             }
             validatePayload(&slot.payload, slot.payload.logical_len) catch
                 return error.InvariantFailure;
-            validateSemantic(slot.semantic, slot.payload.logical_len) catch
+            validateSemantic(loadSemantic(slot.semantic), slot.payload.logical_len) catch
                 return error.InvariantFailure;
             const owned_range = rangeOfPayload(&slot.payload);
             for (self.slots[slot_index + 1 ..]) |later|
@@ -856,6 +3573,7 @@ pub const ExternalInboxLedger = struct {
             .expected_charged_bytes = self.charged_bytes,
             .expected_retired_items = self.retired_items,
             .expected_retired_bytes = self.retired_bytes,
+            .terminal_external_identity_seal = terminal_identity_seal,
             .summary = summary,
             .lifecycle = .prepared,
         };
@@ -901,6 +3619,8 @@ pub const ExternalInboxLedger = struct {
         std.debug.assert(prepared.expected_charged_bytes == self.charged_bytes);
         std.debug.assert(prepared.expected_retired_items == self.retired_items);
         std.debug.assert(prepared.expected_retired_bytes == self.retired_bytes);
+        std.debug.assert(prepared.terminal_external_identity_seal.ledger_addr ==
+            @intFromPtr(self));
         std.debug.assert(out.saved_self_addr == 0 and out.lifecycle == .empty);
 
         out.saved_self_addr = @intFromPtr(out);
@@ -912,6 +3632,7 @@ pub const ExternalInboxLedger = struct {
             }
             slot.* = .{ .generation = slot.generation };
         }
+        self.external_identity_seal = prepared.terminal_external_identity_seal;
         self.charged_bytes = 0;
         self.charged_items = 0;
         self.retired_bytes = 0;
@@ -939,9 +3660,23 @@ pub const ExternalInboxLedger = struct {
     pub fn restoreFinishedOwnerTeardownUnchecked(
         self: *ExternalInboxLedger,
         owner_teardown_generation: u64,
+        external_identity_generation: u64,
     ) void {
         std.debug.assert(owner_teardown_generation != 0);
+        std.debug.assert(external_identity_generation != 0);
         for (&self.slots) |*slot| slot.* = .{};
+        self.external_identity_seal = .{
+            .ledger_addr = @intFromPtr(self),
+            .identity = null,
+            .generation = external_identity_generation,
+            .lifecycle = .drained_tombstone,
+            .digest = externalIdentityDigest(
+                @intFromPtr(self),
+                null,
+                external_identity_generation,
+                .drained_tombstone,
+            ),
+        };
         self.charged_bytes = 0;
         self.charged_items = 0;
         self.retired_bytes = 0;
@@ -985,7 +3720,7 @@ pub const ExternalInboxLedger = struct {
         self.slots[slot_index] = .{
             .active = true,
             .generation = generation,
-            .semantic = tagged,
+            .semantic = try storeSemantic(tagged),
             .payload = payload.take(),
         };
         self.charged_bytes = next_charged;
@@ -1149,7 +3884,7 @@ pub const ExternalInboxLedger = struct {
             self.slots[entry.slot] = .{
                 .active = true,
                 .generation = entry.generation,
-                .semantic = entry.spec.semantic,
+                .semantic = storeSemantic(entry.spec.semantic) catch unreachable,
                 .payload = payload.take(),
             };
             output.* = .{ .slot = entry.slot, .generation = entry.generation };
@@ -1172,12 +3907,13 @@ pub const ExternalInboxLedger = struct {
         if (self.draining_or_drained) return error.Drained;
         if (self.invariant_failed) return error.InvariantFailure;
         const slot = try self.resolveActive(token);
-        const semantic = slot.semantic;
-        if (std.meta.activeTag(semantic) != expected_phase) return self.failInvariant();
+        const stored_semantic = loadSemantic(slot.semantic);
+        if (std.meta.activeTag(stored_semantic) != expected_phase) return self.failInvariant();
         const payload = slot.payload;
         return .{
-            .phase = std.meta.activeTag(semantic),
-            .semantic = semantic,
+            .phase = std.meta.activeTag(stored_semantic),
+            .semantic = self.observeSemantic(stored_semantic) catch
+                return self.failInvariant(),
             .bytes = payload.bytes(),
         };
     }
@@ -1191,7 +3927,106 @@ pub const ExternalInboxLedger = struct {
         return .{
             .is_snapshot = semantic.is_snapshot,
             .stream_id = semantic.stream_id,
+            .provenance = semantic.provenance,
             .bytes = view.bytes,
+        };
+    }
+
+    pub fn partialSnapshot(
+        self: *const ExternalInboxLedger,
+        token: Token,
+    ) InvariantError!ObservedPartialSemantic {
+        if (self.teardown_active) return error.TeardownActive;
+        if (self.draining_or_drained) return error.Drained;
+        if (self.invariant_failed or !self.hasValidAccounting())
+            return error.InvariantFailure;
+        if (@as(usize, token.slot) >= max_items) return error.InvariantFailure;
+        const slot = &self.slots[token.slot];
+        if (!slot.active or slot.generation != token.generation or
+            std.meta.activeTag(slot.semantic) != .partial)
+            return error.InvariantFailure;
+        return self.observePartial(loadSemantic(slot.semantic).partial) catch
+            return error.InvariantFailure;
+    }
+
+    pub fn validateExternalIdentityForLivePrepare(
+        self: *const ExternalInboxLedger,
+        identity: external_rx_types.RxIdentity,
+    ) error{InvalidSemantic}!void {
+        try validateRxIdentity(identity);
+        switch (self.external_identity_seal.lifecycle) {
+            .empty => {
+                if (!isCanonicalEmptyIdentitySeal(self.external_identity_seal))
+                    return error.InvalidSemantic;
+            },
+            .bound => {
+                if (!self.hasValidExternalIdentitySeal() or
+                    !std.meta.eql(self.external_identity_seal.identity.?, identity))
+                    return error.InvalidSemantic;
+            },
+            .drained_tombstone => return error.InvalidSemantic,
+        }
+    }
+
+    pub fn observeProvenance(
+        self: *const ExternalInboxLedger,
+        provenance: StoredRxBatchProvenance,
+    ) error{InvalidSemantic}!ObservedRxBatchProvenance {
+        return switch (provenance) {
+            .untracked => .untracked,
+            .external => |compact| blk: {
+                if (!self.hasValidExternalIdentitySeal() or
+                    self.external_identity_seal.lifecycle != .bound)
+                    return error.InvalidSemantic;
+                try validateCompactExternalRange(compact);
+                const end_absolute = std.math.add(
+                    u64,
+                    compact.start_absolute,
+                    compact.span,
+                ) catch return error.InvalidSemantic;
+                break :blk .{ .external = .{
+                    .identity = self.external_identity_seal.identity.?,
+                    .start_absolute = compact.start_absolute,
+                    .end_absolute = end_absolute,
+                } };
+            },
+        };
+    }
+
+    fn observeBatch(
+        self: *const ExternalInboxLedger,
+        semantic: BatchSemantic,
+    ) error{InvalidSemantic}!ObservedBatchSemantic {
+        return .{
+            .stream_id = semantic.stream_id,
+            .is_snapshot = semantic.is_snapshot,
+            .recovery_intent = semantic.recovery_intent,
+            .provenance = try self.observeProvenance(semantic.provenance),
+        };
+    }
+
+    fn observePartial(
+        self: *const ExternalInboxLedger,
+        semantic: PartialSemantic,
+    ) error{InvalidSemantic}!ObservedPartialSemantic {
+        return .{
+            .stream_id = semantic.stream_id,
+            .is_snapshot = semantic.is_snapshot,
+            .chunk_count = semantic.chunk_count,
+            .recovery_intent = semantic.recovery_intent,
+            .provenance = try self.observeProvenance(semantic.provenance),
+        };
+    }
+
+    fn observeSemantic(
+        self: *const ExternalInboxLedger,
+        semantic: PayloadSemantic,
+    ) error{InvalidSemantic}!ObservedPayloadSemantic {
+        return switch (semantic) {
+            .frame => |header| .{ .frame = header },
+            .partial => |partial| .{ .partial = try self.observePartial(partial) },
+            .completed => |batch| .{ .completed = try self.observeBatch(batch) },
+            .lease => |batch| .{ .lease = try self.observeBatch(batch) },
         };
     }
 
@@ -1204,15 +4039,69 @@ pub const ExternalInboxLedger = struct {
     ) TransitionError!Token {
         try self.ensureTransitionMutation();
         const slot = try self.resolveActive(token);
-        const current = slot.semantic;
+        const current = loadSemantic(slot.semantic);
         if (std.meta.activeTag(current) != expected_phase) return self.failInvariant();
         const next = try relabeledSemantic(current, next_phase, recovery_intent);
         try validateSemantic(next, slot.payload.logical_len);
         const generation = try self.prepareGeneration();
-        slot.semantic = next;
+        slot.semantic = try storeSemantic(next);
         slot.generation = generation;
         self.commitAuthorityMutation();
         return .{ .slot = token.slot, .generation = generation };
+    }
+
+    fn commitPreparedLegacyMerge(
+        self: *ExternalInboxLedger,
+        batch: *PreparedLiveBatch,
+        retirement: *PreparedLiveRetirement,
+        token_out: *Token,
+    ) CommitLiveError!void {
+        if (batch.mutation_count != 1 or
+            std.meta.activeTag(batch.mutations[0]) != .merge)
+            return error.InvalidPlan;
+        const simulation = simulateLiveBatch(self, batch, 1) catch |err|
+            return mapPrepareToCommitLive(err);
+        if (!simulation.nodes[0].live) return error.InvalidPlan;
+        switch (std.meta.activeTag(simulation.nodes[0].semantic)) {
+            .partial, .completed => {},
+            else => return error.InvalidPlan,
+        }
+        var dispositions =
+            [_]LiveCommitDisposition{.unused} ** max_live_mutations;
+        const final_count = try self.commitPreparedLiveBatch(
+            batch,
+            retirement,
+            &dispositions,
+        );
+        std.debug.assert(final_count == 1);
+        token_out.* = switch (dispositions[0]) {
+            .final_live => |root| root.token,
+            else => unreachable,
+        };
+        dispositions[0] = .superseded_tombstone;
+    }
+
+    fn commitPreparedLegacyRelease(
+        self: *ExternalInboxLedger,
+        batch: *PreparedLiveBatch,
+        retirement: *PreparedLiveRetirement,
+    ) CommitLiveError!void {
+        if (batch.mutation_count != 1 or
+            std.meta.activeTag(batch.mutations[0]) != .release)
+            return error.InvalidPlan;
+        const simulation = simulateLiveBatch(self, batch, 1) catch |err|
+            return mapPrepareToCommitLive(err);
+        if (simulation.nodes[0].live) return error.InvalidPlan;
+        var dispositions =
+            [_]LiveCommitDisposition{.unused} ** max_live_mutations;
+        const final_count = try self.commitPreparedLiveBatch(
+            batch,
+            retirement,
+            &dispositions,
+        );
+        std.debug.assert(final_count == 0);
+        std.debug.assert(dispositions[0] == .superseded_tombstone);
+        dispositions[0] = .superseded_tombstone;
     }
 
     pub fn mergeInto(
@@ -1223,10 +4112,9 @@ pub const ExternalInboxLedger = struct {
         next_phase: PayloadPhase,
         expected_recovery_intent: RecoveryIntent,
     ) TransitionError!Token {
-        try self.ensureTransitionMutation();
+        const dst = pureSlot(self, dst_token) catch return self.failInvariant();
+        const src = pureSlot(self, src_token) catch return self.failInvariant();
         if (dst_token.slot == src_token.slot) return error.InvalidAlias;
-        const dst = try self.resolveActive(dst_token);
-        const src = try self.resolveActive(src_token);
         if (std.meta.activeTag(dst.semantic) != .partial or
             std.meta.activeTag(src.semantic) != .frame)
             return self.failInvariant();
@@ -1234,57 +4122,15 @@ pub const ExternalInboxLedger = struct {
         const src_header = src.semantic.frame;
         if (!std.meta.eql(dst_semantic.recovery_intent, expected_recovery_intent))
             return error.InvalidSemantic;
-        if (rangeOverlapsLedgerOrActiveExcept(
-            rangeOfValue(replacement),
-            self,
-            dst_token.slot,
-            src_token.slot,
-        ) or rangeOverlapsLedgerOrActiveExcept(
-            rangeOfPayload(replacement),
-            self,
-            dst_token.slot,
-            src_token.slot,
-        )) return error.InvalidAlias;
-        const dst_payload = dst.payload;
-        const src_payload = src.payload;
-        if (rangesOverlap(rangeOfValue(replacement), rangeOfPayload(replacement)))
-            return error.InvalidAlias;
-        if (rangesOverlap(rangeOfPayload(&dst_payload), rangeOfPayload(&src_payload)))
-            return self.failInvariant();
-        if (rangesOverlap(rangeOfPayload(replacement), rangeOfPayload(&dst_payload)) or
-            rangesOverlap(rangeOfPayload(replacement), rangeOfPayload(&src_payload)) or
-            rangesOverlap(rangeOfValue(replacement), rangeOfPayload(&dst_payload)) or
-            rangesOverlap(rangeOfValue(replacement), rangeOfPayload(&src_payload)))
-            return error.InvalidAlias;
-        const next_len = std.math.add(
-            usize,
-            dst_payload.logical_len,
-            src_payload.logical_len,
-        ) catch return error.InvalidPayload;
-        try validatePayload(replacement, next_len);
-        if (next_len > max_batch_bytes or
-            dst_semantic.chunk_count >= max_batch_chunks or
-            src_header.stream_id != dst_semantic.stream_id or
-            (src_header.kind == .snapshot_chunk) != dst_semantic.is_snapshot)
-            return error.InvalidSemantic;
         const end_stream = protocol.Flags.hasEndStream(src_header.flags);
         if ((end_stream and next_phase != .completed) or
             (!end_stream and next_phase != .partial))
             return error.InvalidTransition;
-        if (!replacementMatches(dst_payload.bytes(), src_payload.bytes(), replacement.bytes()))
-            return error.InvalidPayload;
-        const source_bytes = std.math.add(
-            usize,
-            dst_payload.logical_len,
-            src_payload.logical_len,
-        ) catch return self.failInvariant();
-        if (self.charged_items < 2 or self.charged_bytes < source_bytes)
-            return self.failInvariant();
-        const generation = try self.prepareGeneration();
-        const next_batch = BatchSemantic{
+        const next_batch: BatchSemantic = .{
             .stream_id = dst_semantic.stream_id,
             .is_snapshot = dst_semantic.is_snapshot,
             .recovery_intent = dst_semantic.recovery_intent,
+            .provenance = dst_semantic.provenance,
         };
         const next_semantic: PayloadSemantic = if (next_phase == .partial)
             .{ .partial = .{
@@ -1292,22 +4138,48 @@ pub const ExternalInboxLedger = struct {
                 .is_snapshot = next_batch.is_snapshot,
                 .chunk_count = dst_semantic.chunk_count + 1,
                 .recovery_intent = next_batch.recovery_intent,
+                .provenance = next_batch.provenance,
             } }
         else
             .{ .completed = next_batch };
 
-        var old_dst = dst.payload.take();
-        var old_src = src.payload.take();
-        dst.payload = replacement.take();
-        dst.semantic = next_semantic;
-        dst.generation = generation;
-        src.* = .{ .generation = src_token.generation };
-        self.charged_items -= 1;
-        self.next_slot_hint = src_token.slot;
-        self.commitAuthorityMutation();
-        old_dst.deinit();
-        old_src.deinit();
-        return .{ .slot = dst_token.slot, .generation = generation };
+        var batch: PreparedLiveBatch = .{};
+        self.beginLiveBatch(&batch, replacement.allocator, null) catch |err|
+            return mapPrepareToTransition(err);
+        var source: PreparedLiveMergeSource = .{ .existing = .{
+            .existing = src_token,
+        } };
+        var prepared_replacement: PreparedLiveReplacement =
+            .{ .prebuilt = replacement.* };
+        self.prepareLiveMerge(
+            &batch,
+            .{ .existing = dst_token },
+            next_semantic,
+            null,
+            &source,
+            &prepared_replacement,
+        ) catch |err| {
+            _ = self.abortPreparedLiveBatch(&batch);
+            return mapPrepareToTransition(err);
+        };
+        replacement.* = .{ .allocator = replacement.allocator };
+        self.finishLiveBatch(&batch) catch |err| {
+            _ = self.abortPreparedLiveBatch(&batch);
+            return mapPrepareToTransition(err);
+        };
+        var retirement = PreparedLiveRetirement.init(replacement.allocator);
+        var token: Token = undefined;
+        self.commitPreparedLegacyMerge(
+            &batch,
+            &retirement,
+            &token,
+        ) catch |err| {
+            _ = self.abortPreparedLiveBatch(&batch);
+            return mapCommitToTransition(err);
+        };
+        const retire_result = retirement.retire();
+        if (retire_result == .quarantined) return error.InvariantFailure;
+        return token;
     }
 
     pub fn release(
@@ -1315,26 +4187,39 @@ pub const ExternalInboxLedger = struct {
         token: Token,
         expected_phase: PayloadPhase,
     ) InvariantError!void {
-        if (self.teardown_active) return error.TeardownActive;
-        if (self.draining_or_drained) return error.Drained;
-        const slot = try self.resolveActive(token);
-        const semantic = slot.semantic;
-        if (std.meta.activeTag(semantic) != expected_phase) return self.failInvariant();
-        var payload = slot.payload;
-        const charged = slot.payload.logical_len;
-        if (rangeOverlapsActiveExceptSlot(
-            rangeOfPayload(&payload),
-            self,
-            token.slot,
-        )) return self.failInvariant();
-        if (self.charged_items == 0 or self.charged_bytes < charged)
-            return self.failInvariant();
-        slot.* = .{ .generation = token.generation };
-        self.charged_bytes -= charged;
-        self.charged_items -= 1;
-        self.next_slot_hint = token.slot;
-        self.commitCleanupMutation();
-        payload.deinit();
+        const inspected = pureSlot(self, token) catch return error.InvariantFailure;
+        switch (inspected.semantic) {
+            .partial => |semantic| if (semantic.provenance != .untracked)
+                return error.InvariantFailure,
+            .completed, .lease => |semantic| if (semantic.provenance != .untracked)
+                return error.InvariantFailure,
+            .frame => {},
+        }
+        var batch: PreparedLiveBatch = .{};
+        self.beginLiveCleanupBatch(&batch) catch |err|
+            return mapPrepareToInvariant(err);
+        self.prepareLiveRelease(
+            &batch,
+            .{ .existing = token },
+            expected_phase,
+        ) catch |err| {
+            _ = self.abortPreparedLiveBatch(&batch);
+            return mapPrepareToInvariant(err);
+        };
+        self.finishLiveBatch(&batch) catch |err| {
+            _ = self.abortPreparedLiveBatch(&batch);
+            return mapPrepareToInvariant(err);
+        };
+        var retirement = PreparedLiveRetirement.init(std.heap.page_allocator);
+        self.commitPreparedLegacyRelease(
+            &batch,
+            &retirement,
+        ) catch |err| {
+            _ = self.abortPreparedLiveBatch(&batch);
+            return mapCommitToInvariant(err);
+        };
+        if (retirement.retire() == .quarantined)
+            return error.InvariantFailure;
     }
 
     pub fn releaseLease(
@@ -1356,9 +4241,11 @@ pub const ExternalInboxLedger = struct {
         self.draining_or_drained = true;
         self.planning_disabled = true;
         self.commitCleanupMutation();
+        const identity_generation_overflow =
+            self.tombstoneExternalIdentityUnchecked();
         var active_count: usize = 0;
         var bytes: usize = 0;
-        var anomaly = self.invariant_failed;
+        var anomaly = self.invariant_failed or identity_generation_overflow;
         var observed_active: usize = 0;
         var observed_charge: usize = 0;
         for (&self.slots, 0..) |*slot, index| {
@@ -1377,14 +4264,14 @@ pub const ExternalInboxLedger = struct {
                 validatePayload(&slot.payload, slot.payload.logical_len) catch {
                     anomaly = true;
                 };
-                validateSemantic(slot.semantic, slot.payload.logical_len) catch {
+                validateSemantic(loadSemantic(slot.semantic), slot.payload.logical_len) catch {
                     anomaly = true;
                 };
             } else if (slot.retired) {
                 validatePayload(&slot.payload, slot.payload.logical_len) catch {
                     anomaly = true;
                 };
-                validateSemantic(slot.semantic, slot.payload.logical_len) catch {
+                validateSemantic(loadSemantic(slot.semantic), slot.payload.logical_len) catch {
                     anomaly = true;
                 };
             } else if (slot.payload.allocation_ptr != null or
@@ -1465,6 +4352,17 @@ pub const ExternalInboxLedger = struct {
     pub fn projectionAuthorityDigest(self: *const ExternalInboxLedger) owner_seal.Digest {
         var writer = owner_seal.Writer.init("MARULPA1");
         writer.writeUsize(@intFromPtr(self));
+        writer.writeUsize(self.external_identity_seal.ledger_addr);
+        if (self.external_identity_seal.identity) |identity| {
+            writer.writeBool(true);
+            writer.writeU64(identity.attach_instance_id);
+            writer.writeUsize(identity.destination_slot_addr);
+        } else {
+            writer.writeBool(false);
+        }
+        writer.writeU64(self.external_identity_seal.generation);
+        writer.writeU8(@intFromEnum(self.external_identity_seal.lifecycle));
+        writer.writeBytes(&self.external_identity_seal.digest);
         writer.writeUsize(self.charged_bytes);
         writer.writeUsize(self.charged_items);
         writer.writeUsize(self.retired_bytes);
@@ -1482,7 +4380,7 @@ pub const ExternalInboxLedger = struct {
             writer.writeBool(slot.retired);
             writer.writeU64(slot.generation);
             writer.writeU8(@intFromEnum(std.meta.activeTag(slot.semantic)));
-            switch (slot.semantic) {
+            switch (loadSemantic(slot.semantic)) {
                 .frame => |header| {
                     const encoded = header.encode();
                     writer.writeBytes(&encoded);
@@ -1492,11 +4390,13 @@ pub const ExternalInboxLedger = struct {
                     writer.writeBool(semantic.is_snapshot);
                     writer.writeU8(semantic.chunk_count);
                     writeRecoveryIntent(&writer, semantic.recovery_intent);
+                    writeStoredProvenance(&writer, semantic.provenance);
                 },
                 .completed, .lease => |semantic| {
                     writer.writeU64(semantic.stream_id);
                     writer.writeBool(semantic.is_snapshot);
                     writeRecoveryIntent(&writer, semantic.recovery_intent);
+                    writeStoredProvenance(&writer, semantic.provenance);
                 },
             }
             writer.writeUsize(@intFromPtr(slot.payload.allocator.ptr));
@@ -1586,7 +4486,7 @@ pub const ExternalInboxLedger = struct {
 
     fn hasValidAccounting(self: *const ExternalInboxLedger) bool {
         if (self.residentItems() > max_items or self.residentBytes() > max_bytes or
-            self.next_slot_hint >= max_items)
+            self.next_slot_hint >= max_items or !self.hasValidExternalIdentitySeal())
             return false;
         var items: usize = 0;
         var bytes: usize = 0;
@@ -1599,7 +4499,7 @@ pub const ExternalInboxLedger = struct {
                 bytes = std.math.add(usize, bytes, slot.payload.logical_len) catch return false;
             } else if (slot.retired) {
                 validatePayload(&slot.payload, slot.payload.logical_len) catch return false;
-                validateSemantic(slot.semantic, slot.payload.logical_len) catch return false;
+                validateSemantic(loadSemantic(slot.semantic), slot.payload.logical_len) catch return false;
                 retired_items = std.math.add(usize, retired_items, 1) catch return false;
                 retired_bytes = std.math.add(
                     usize,
@@ -1621,7 +4521,8 @@ pub const ExternalInboxLedger = struct {
             self.retired_bytes != 0 or self.retired_items != 0 or
             self.next_slot_hint != 0 or self.next_generation != 1 or
             self.generation_exhausted or self.mutation_epoch != 0 or
-            self.planning_disabled or self.invariant_failed or self.draining_or_drained)
+            self.planning_disabled or self.invariant_failed or self.draining_or_drained or
+            !isCanonicalEmptyIdentitySeal(self.external_identity_seal))
             return false;
         for (self.slots) |slot| {
             if (slot.active or slot.retired or slot.generation != 0 or
@@ -1630,6 +4531,66 @@ pub const ExternalInboxLedger = struct {
                 return false;
         }
         return true;
+    }
+
+    fn hasValidExternalIdentitySeal(self: *const ExternalInboxLedger) bool {
+        const seal = self.external_identity_seal;
+        return switch (seal.lifecycle) {
+            .empty => isCanonicalEmptyIdentitySeal(seal),
+            .bound => blk: {
+                const identity = seal.identity orelse break :blk false;
+                validateRxIdentity(identity) catch break :blk false;
+                if (seal.ledger_addr != @intFromPtr(self) or seal.generation == 0)
+                    break :blk false;
+                break :blk std.mem.eql(
+                    u8,
+                    &seal.digest,
+                    &externalIdentityDigest(
+                        seal.ledger_addr,
+                        identity,
+                        seal.generation,
+                        seal.lifecycle,
+                    ),
+                );
+            },
+            .drained_tombstone => blk: {
+                if (seal.ledger_addr != @intFromPtr(self) or
+                    seal.identity != null or seal.generation == 0)
+                    break :blk false;
+                break :blk std.mem.eql(
+                    u8,
+                    &seal.digest,
+                    &externalIdentityDigest(
+                        seal.ledger_addr,
+                        null,
+                        seal.generation,
+                        seal.lifecycle,
+                    ),
+                );
+            },
+        };
+    }
+
+    fn tombstoneExternalIdentityUnchecked(self: *ExternalInboxLedger) bool {
+        const current = self.external_identity_seal;
+        const overflow = current.generation == std.math.maxInt(u64);
+        const generation = if (overflow)
+            current.generation
+        else
+            current.generation + 1;
+        self.external_identity_seal = .{
+            .ledger_addr = @intFromPtr(self),
+            .identity = null,
+            .generation = generation,
+            .lifecycle = .drained_tombstone,
+            .digest = externalIdentityDigest(
+                @intFromPtr(self),
+                null,
+                generation,
+                .drained_tombstone,
+            ),
+        };
+        return overflow;
     }
 
     fn resolveActive(self: *ExternalInboxLedger, token: Token) InvariantError!*Slot {
@@ -1647,6 +4608,18 @@ pub const ExternalInboxLedger = struct {
 };
 
 pub const projection_test = if (builtin.is_test) struct {
+    pub fn bindExternalIdentityForTest(
+        ledger: *ExternalInboxLedger,
+        identity: external_rx_types.RxIdentity,
+    ) void {
+        ledger.external_identity_seal = makeExternalIdentitySeal(
+            ledger,
+            identity,
+            1,
+            .bound,
+        );
+    }
+
     /// Test-only hostile callback seam. Product code cannot name ledger slots directly.
     pub fn driftFirstActiveGeneration(ledger: *ExternalInboxLedger) bool {
         for (&ledger.slots) |*slot| {
@@ -1707,18 +4680,36 @@ fn rangesOverlap(a: ByteRange, b: ByteRange) bool {
 }
 
 fn fingerprint(payload: OwnedPayload) PayloadFingerprint {
+    var writer = owner_seal.Writer.init("MARULPF1");
+    writer.writeBytes(payload.bytes());
     return .{
         .allocator = payload.allocator,
         .address = if (payload.allocation_ptr) |ptr| @intFromPtr(ptr) else 0,
         .logical_len = payload.logical_len,
+        .content_digest = writer.finish(),
     };
 }
 
 fn fingerprintMatches(expected: PayloadFingerprint, actual: OwnedPayload) bool {
-    const current = fingerprint(actual);
-    return expected.address == current.address and
-        expected.logical_len == current.logical_len and
-        std.meta.eql(expected.allocator, current.allocator);
+    if (!payloadDescriptorMatches(expected, actual)) return false;
+    var writer = owner_seal.Writer.init("MARULPF1");
+    writer.writeBytes(actual.bytes());
+    const content_digest = writer.finish();
+    return std.mem.eql(
+        u8,
+        &expected.content_digest,
+        &content_digest,
+    );
+}
+
+fn payloadDescriptorMatches(
+    expected: PayloadFingerprint,
+    actual: OwnedPayload,
+) bool {
+    const address = if (actual.allocation_ptr) |ptr| @intFromPtr(ptr) else 0;
+    return expected.address == address and
+        expected.logical_len == actual.logical_len and
+        std.meta.eql(expected.allocator, actual.allocator);
 }
 
 fn validatePayload(payload: *const OwnedPayload, expected_len: usize) error{InvalidPayload}!void {
@@ -1735,6 +4726,121 @@ fn validateRecoveryIntent(intent: RecoveryIntent) error{InvalidSemantic}!void {
         .none => {},
         .host, .client => |epoch| if (epoch == 0) return error.InvalidSemantic,
     }
+}
+
+fn validateStoredProvenance(
+    provenance: StoredRxBatchProvenance,
+) error{InvalidSemantic}!void {
+    switch (provenance) {
+        .untracked => {},
+        .external => |range| try validateCompactExternalRange(range),
+    }
+}
+
+fn storedRecovery(intent: RecoveryIntent) StoredBatchSemantic {
+    var result: StoredBatchSemantic = .{
+        .stream_id = 0,
+        .provenance_start_absolute = 0,
+        .recovery_epoch = 0,
+        .provenance_span = 0,
+        .chunk_count = 0,
+        .is_snapshot = false,
+        .provenance_external = false,
+        .recovery_tag = .none,
+    };
+    switch (intent) {
+        .none => {},
+        .host => |epoch| {
+            result.recovery_tag = .host;
+            result.recovery_epoch = epoch;
+        },
+        .client => |epoch| {
+            result.recovery_tag = .client;
+            result.recovery_epoch = epoch;
+        },
+    }
+    return result;
+}
+
+fn loadRecovery(stored: StoredBatchSemantic) RecoveryIntent {
+    return switch (stored.recovery_tag) {
+        .none => .none,
+        .host => .{ .host = stored.recovery_epoch },
+        .client => .{ .client = stored.recovery_epoch },
+    };
+}
+
+fn storeBatchSemantic(
+    semantic: BatchSemantic,
+    chunk_count: u8,
+) error{InvalidSemantic}!StoredBatchSemantic {
+    try validateRecoveryIntent(semantic.recovery_intent);
+    try validateStoredProvenance(semantic.provenance);
+    var stored = storedRecovery(semantic.recovery_intent);
+    stored.stream_id = semantic.stream_id;
+    stored.chunk_count = chunk_count;
+    stored.is_snapshot = semantic.is_snapshot;
+    switch (semantic.provenance) {
+        .untracked => {},
+        .external => |range| {
+            stored.provenance_external = true;
+            stored.provenance_start_absolute = range.start_absolute;
+            stored.provenance_span = range.span;
+        },
+    }
+    return stored;
+}
+
+fn loadBatchSemantic(stored: StoredBatchSemantic) BatchSemantic {
+    return .{
+        .stream_id = stored.stream_id,
+        .is_snapshot = stored.is_snapshot,
+        .recovery_intent = loadRecovery(stored),
+        .provenance = if (stored.provenance_external)
+            .{ .external = .{
+                .start_absolute = stored.provenance_start_absolute,
+                .span = stored.provenance_span,
+            } }
+        else
+            .untracked,
+    };
+}
+
+fn storeSemantic(
+    semantic: PayloadSemantic,
+) error{InvalidSemantic}!StoredPayloadSemantic {
+    return switch (semantic) {
+        .frame => |header| .{ .frame = header },
+        .partial => |partial| .{ .partial = try storeBatchSemantic(
+            .{
+                .stream_id = partial.stream_id,
+                .is_snapshot = partial.is_snapshot,
+                .recovery_intent = partial.recovery_intent,
+                .provenance = partial.provenance,
+            },
+            partial.chunk_count,
+        ) },
+        .completed => |batch| .{ .completed = try storeBatchSemantic(batch, 0) },
+        .lease => |batch| .{ .lease = try storeBatchSemantic(batch, 0) },
+    };
+}
+
+fn loadSemantic(semantic: StoredPayloadSemantic) PayloadSemantic {
+    return switch (semantic) {
+        .frame => |header| .{ .frame = header },
+        .partial => |stored| blk: {
+            const batch = loadBatchSemantic(stored);
+            break :blk .{ .partial = .{
+                .stream_id = batch.stream_id,
+                .is_snapshot = batch.is_snapshot,
+                .chunk_count = stored.chunk_count,
+                .recovery_intent = batch.recovery_intent,
+                .provenance = batch.provenance,
+            } };
+        },
+        .completed => |stored| .{ .completed = loadBatchSemantic(stored) },
+        .lease => |stored| .{ .lease = loadBatchSemantic(stored) },
+    };
 }
 
 fn validateSemantic(
@@ -1755,11 +4861,13 @@ fn validateSemantic(
                 batch.chunk_count > max_batch_chunks or logical_len > max_batch_bytes)
                 return error.InvalidSemantic;
             try validateRecoveryIntent(batch.recovery_intent);
+            try validateStoredProvenance(batch.provenance);
         },
         .completed, .lease => |batch| {
             if (batch.stream_id == 0 or logical_len > max_batch_bytes)
                 return error.InvalidSemantic;
             try validateRecoveryIntent(batch.recovery_intent);
+            try validateStoredProvenance(batch.provenance);
         },
     }
 }
@@ -1918,12 +5026,14 @@ fn relabeledSemantic(
                 .stream_id = header.stream_id,
                 .is_snapshot = header.kind == .snapshot_chunk,
                 .recovery_intent = recovery_intent,
+                .provenance = .untracked,
             };
             if (!end_stream and next_phase == .partial) break :blk .{ .partial = .{
                 .stream_id = batch.stream_id,
                 .is_snapshot = batch.is_snapshot,
                 .chunk_count = 1,
                 .recovery_intent = batch.recovery_intent,
+                .provenance = batch.provenance,
             } };
             if (end_stream and next_phase == .completed) break :blk .{ .completed = batch };
             return error.InvalidTransition;
@@ -1951,6 +5061,80 @@ fn leaseSemantic(stream_id: u64, is_snapshot: bool) BatchSemantic {
 fn owned(allocator: std.mem.Allocator, text: []const u8) !OwnedPayload {
     var allocation = try allocator.dupe(u8, text);
     return OwnedPayload.takeOwned(allocator, &allocation);
+}
+
+fn seedLegacyMergePairForTest(
+    allocator: std.mem.Allocator,
+    ledger: *ExternalInboxLedger,
+    tokens: *[2]Token,
+) !void {
+    var payloads = [_]OwnedPayload{
+        try owned(allocator, "a"),
+        try owned(allocator, "b"),
+    };
+    defer for (&payloads) |*payload| payload.deinit();
+    const specs = [_]SeedSpec{
+        .{ .semantic = .{ .partial = .{
+            .stream_id = 7,
+            .is_snapshot = false,
+            .chunk_count = 1,
+        } }, .logical_len = 1 },
+        .{ .semantic = .{ .frame = .{
+            .major = protocol.version_major,
+            .kind = .delta_chunk,
+            .flags = protocol.Flags.end_stream,
+            .stream_id = 7,
+            .payload_len = 1,
+        } }, .logical_len = 1 },
+    };
+    var plan: PreparedSeedPlan = .{};
+    try PreparedSeedPlan.initInPlace(
+        &plan,
+        allocator,
+        ledger,
+        &specs,
+        &payloads,
+    );
+    defer plan.deinit();
+    try ledger.commitSeeds(&plan, &payloads, tokens);
+}
+
+fn releaseExternalLiveForTest(
+    ledger: *ExternalInboxLedger,
+    allocator: std.mem.Allocator,
+    identity: external_rx_types.RxIdentity,
+    token: Token,
+    phase: PayloadPhase,
+) !void {
+    var batch: PreparedLiveBatch = .{};
+    try ledger.beginLiveBatch(&batch, allocator, identity);
+    try ledger.prepareLiveRelease(&batch, .{ .existing = token }, phase);
+    try ledger.finishLiveBatch(&batch);
+    var retirement = PreparedLiveRetirement.init(allocator);
+    var dispositions =
+        [_]LiveCommitDisposition{.unused} ** max_live_mutations;
+    try std.testing.expectEqual(
+        @as(u8, 0),
+        try ledger.commitPreparedLiveBatch(
+            &batch,
+            &retirement,
+            &dispositions,
+        ),
+    );
+    try std.testing.expectEqual(
+        LiveCommitDisposition.superseded_tombstone,
+        dispositions[0],
+    );
+    try std.testing.expectEqual(
+        RetireLiveResult.retired,
+        retirement.retire(),
+    );
+}
+
+fn sealLiveRetirementForTest(retirement: *PreparedLiveRetirement) void {
+    retirement.saved_self_addr = @intFromPtr(retirement);
+    retirement.lifecycle = .prepared;
+    retirement.digest = liveRetirementDigest(retirement);
 }
 
 const FrozenCleanupMutationProbe = struct {
@@ -2038,6 +5222,182 @@ const FrozenCleanupMutationProbe = struct {
             self.ledger.?.slots[1].payload = .{ .allocator = std.heap.page_allocator };
             self.ledger.?.charged_items = max_items;
         }
+        self.parent.vtable.free(
+            self.parent.ptr,
+            memory,
+            alignment,
+            ret_addr,
+        );
+    }
+};
+
+const LiveRetirementMutationProbe = struct {
+    parent: std.mem.Allocator,
+    retirement: ?*PreparedLiveRetirement = null,
+    fired: bool = false,
+    free_count: usize = 0,
+    nested_result: ?RetireLiveResult = null,
+
+    fn allocator(self: *LiveRetirementMutationProbe) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &.{
+            .alloc = alloc,
+            .resize = resize,
+            .remap = remap,
+            .free = free,
+        } };
+    }
+
+    fn alloc(
+        context: *anyopaque,
+        len: usize,
+        alignment: std.mem.Alignment,
+        ret_addr: usize,
+    ) ?[*]u8 {
+        const self: *LiveRetirementMutationProbe = @ptrCast(@alignCast(context));
+        return self.parent.vtable.alloc(self.parent.ptr, len, alignment, ret_addr);
+    }
+
+    fn resize(
+        context: *anyopaque,
+        memory: []u8,
+        alignment: std.mem.Alignment,
+        new_len: usize,
+        ret_addr: usize,
+    ) bool {
+        const self: *LiveRetirementMutationProbe = @ptrCast(@alignCast(context));
+        return self.parent.vtable.resize(
+            self.parent.ptr,
+            memory,
+            alignment,
+            new_len,
+            ret_addr,
+        );
+    }
+
+    fn remap(
+        context: *anyopaque,
+        memory: []u8,
+        alignment: std.mem.Alignment,
+        new_len: usize,
+        ret_addr: usize,
+    ) ?[*]u8 {
+        const self: *LiveRetirementMutationProbe = @ptrCast(@alignCast(context));
+        return self.parent.vtable.remap(
+            self.parent.ptr,
+            memory,
+            alignment,
+            new_len,
+            ret_addr,
+        );
+    }
+
+    fn free(
+        context: *anyopaque,
+        memory: []u8,
+        alignment: std.mem.Alignment,
+        ret_addr: usize,
+    ) void {
+        const self: *LiveRetirementMutationProbe = @ptrCast(@alignCast(context));
+        self.free_count += 1;
+        if (!self.fired) {
+            self.fired = true;
+            self.retirement.?.cleanup_count = 0;
+            self.retirement.?.cleanup_owners[1] =
+                .{ .allocator = std.heap.page_allocator };
+            self.nested_result = self.retirement.?.retire();
+        }
+        self.parent.vtable.free(
+            self.parent.ptr,
+            memory,
+            alignment,
+            ret_addr,
+        );
+    }
+};
+
+const LiveAllocationMutationProbe = struct {
+    parent: std.mem.Allocator,
+    target: ?*u8 = null,
+    batch: ?*PreparedLiveBatch = null,
+    mutate_batch_on_first_allocation: bool = false,
+    alloc_count: usize = 0,
+    free_count: usize = 0,
+
+    fn allocator(self: *LiveAllocationMutationProbe) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &.{
+            .alloc = alloc,
+            .resize = resize,
+            .remap = remap,
+            .free = free,
+        } };
+    }
+
+    fn alloc(
+        context: *anyopaque,
+        len: usize,
+        alignment: std.mem.Alignment,
+        ret_addr: usize,
+    ) ?[*]u8 {
+        const self: *LiveAllocationMutationProbe = @ptrCast(@alignCast(context));
+        const result = self.parent.vtable.alloc(
+            self.parent.ptr,
+            len,
+            alignment,
+            ret_addr,
+        );
+        self.alloc_count += 1;
+        if (self.alloc_count == 1 and self.mutate_batch_on_first_allocation) {
+            const batch = self.batch.?;
+            batch.allocator = std.heap.page_allocator;
+            batch.mutations[max_live_mutations - 1] = .committed;
+            batch.coalesced_replacements[max_live_mutations - 1].logical_len = 1;
+        }
+        if (self.target) |target| target.* = 'z';
+        return result;
+    }
+
+    fn resize(
+        context: *anyopaque,
+        memory: []u8,
+        alignment: std.mem.Alignment,
+        new_len: usize,
+        ret_addr: usize,
+    ) bool {
+        const self: *LiveAllocationMutationProbe = @ptrCast(@alignCast(context));
+        return self.parent.vtable.resize(
+            self.parent.ptr,
+            memory,
+            alignment,
+            new_len,
+            ret_addr,
+        );
+    }
+
+    fn remap(
+        context: *anyopaque,
+        memory: []u8,
+        alignment: std.mem.Alignment,
+        new_len: usize,
+        ret_addr: usize,
+    ) ?[*]u8 {
+        const self: *LiveAllocationMutationProbe = @ptrCast(@alignCast(context));
+        return self.parent.vtable.remap(
+            self.parent.ptr,
+            memory,
+            alignment,
+            new_len,
+            ret_addr,
+        );
+    }
+
+    fn free(
+        context: *anyopaque,
+        memory: []u8,
+        alignment: std.mem.Alignment,
+        ret_addr: usize,
+    ) void {
+        const self: *LiveAllocationMutationProbe = @ptrCast(@alignCast(context));
+        self.free_count += 1;
         self.parent.vtable.free(
             self.parent.ptr,
             memory,
@@ -2716,6 +6076,110 @@ test "merge takes exact replacement and frees both source payloads" {
     try ledger.finish();
 }
 
+test "legacy merge and release wrappers match direct live batch authority results" {
+    const allocator = std.testing.allocator;
+    var legacy: ExternalInboxLedger = .{};
+    var direct: ExternalInboxLedger = .{};
+    var legacy_tokens: [2]Token = undefined;
+    var direct_tokens: [2]Token = undefined;
+    try seedLegacyMergePairForTest(allocator, &legacy, &legacy_tokens);
+    try seedLegacyMergePairForTest(allocator, &direct, &direct_tokens);
+
+    var legacy_replacement = try owned(allocator, "ab");
+    defer legacy_replacement.deinit();
+    const legacy_result = try legacy.mergeInto(
+        legacy_tokens[0],
+        legacy_tokens[1],
+        &legacy_replacement,
+        .completed,
+        .none,
+    );
+
+    var direct_batch: PreparedLiveBatch = .{};
+    try direct.beginLiveBatch(&direct_batch, allocator, null);
+    var direct_source: PreparedLiveMergeSource = .{ .existing = .{
+        .existing = direct_tokens[1],
+    } };
+    var direct_replacement_owner = try owned(allocator, "ab");
+    var direct_replacement: PreparedLiveReplacement =
+        .{ .prebuilt = direct_replacement_owner };
+    direct_replacement_owner = OwnedPayload.empty(allocator);
+    try direct.prepareLiveMerge(
+        &direct_batch,
+        .{ .existing = direct_tokens[0] },
+        .{ .completed = .{
+            .stream_id = 7,
+            .is_snapshot = false,
+        } },
+        null,
+        &direct_source,
+        &direct_replacement,
+    );
+    try direct.finishLiveBatch(&direct_batch);
+    var direct_retirement = PreparedLiveRetirement.init(allocator);
+    var direct_dispositions =
+        [_]LiveCommitDisposition{.unused} ** max_live_mutations;
+    try std.testing.expectEqual(
+        @as(u8, 1),
+        try direct.commitPreparedLiveBatch(
+            &direct_batch,
+            &direct_retirement,
+            &direct_dispositions,
+        ),
+    );
+    const direct_result = direct_dispositions[0].final_live.token;
+    try std.testing.expectEqual(
+        RetireLiveResult.retired,
+        direct_retirement.retire(),
+    );
+    try std.testing.expectEqualDeep(legacy_result, direct_result);
+    try std.testing.expectEqualDeep(
+        legacy.accountingView(),
+        direct.accountingView(),
+    );
+    try std.testing.expectEqualStrings(
+        (try legacy.borrow(legacy_result, .completed)).bytes,
+        (try direct.borrow(direct_result, .completed)).bytes,
+    );
+
+    try legacy.release(legacy_result, .completed);
+    var release_batch: PreparedLiveBatch = .{};
+    try direct.beginLiveCleanupBatch(&release_batch);
+    try direct.prepareLiveRelease(
+        &release_batch,
+        .{ .existing = direct_result },
+        .completed,
+    );
+    try direct.finishLiveBatch(&release_batch);
+    var release_retirement = PreparedLiveRetirement.init(allocator);
+    var release_dispositions =
+        [_]LiveCommitDisposition{.unused} ** max_live_mutations;
+    try std.testing.expectEqual(
+        @as(u8, 0),
+        try direct.commitPreparedLiveBatch(
+            &release_batch,
+            &release_retirement,
+            &release_dispositions,
+        ),
+    );
+    try std.testing.expectEqual(
+        LiveCommitDisposition.superseded_tombstone,
+        release_dispositions[0],
+    );
+    for (release_dispositions[1..]) |tail|
+        try std.testing.expectEqual(LiveCommitDisposition.unused, tail);
+    try std.testing.expectEqual(
+        RetireLiveResult.retired,
+        release_retirement.retire(),
+    );
+    try std.testing.expectEqualDeep(
+        legacy.accountingView(),
+        direct.accountingView(),
+    );
+    try legacy.finish();
+    try direct.finish();
+}
+
 test "merge wrong bytes is mutation-free" {
     const allocator = std.testing.allocator;
     var ledger: ExternalInboxLedger = .{};
@@ -2755,6 +6219,1710 @@ test "merge wrong bytes is mutation-free" {
     try std.testing.expectEqualStrings("b", (try ledger.borrow(tokens[1], .frame)).bytes);
     try ledger.release(tokens[0], .partial);
     try ledger.release(tokens[1], .frame);
+}
+
+test "compact external provenance expands only through the sealed ledger identity" {
+    var ledger: ExternalInboxLedger = .{};
+    const identity = external_rx_types.RxIdentity{
+        .attach_instance_id = 41,
+        .destination_slot_addr = 0x9000,
+    };
+    projection_test.bindExternalIdentityForTest(&ledger, identity);
+
+    const observed = try ledger.observeProvenance(.{ .external = .{
+        .start_absolute = 100,
+        .span = 32,
+    } });
+    try std.testing.expect(std.meta.eql(
+        ObservedRxBatchProvenance{ .external = .{
+            .identity = identity,
+            .start_absolute = 100,
+            .end_absolute = 132,
+        } },
+        observed,
+    ));
+
+    try std.testing.expectError(
+        error.InvalidSemantic,
+        ledger.validateExternalIdentityForLivePrepare(.{
+            .attach_instance_id = identity.attach_instance_id + 1,
+            .destination_slot_addr = identity.destination_slot_addr,
+        }),
+    );
+}
+
+test "compact external range accepts exact cap and rejects cap plus one and end overflow" {
+    try validateCompactExternalRange(.{
+        .start_absolute = 0,
+        .span = @intCast(max_stored_external_span),
+    });
+    try std.testing.expectError(
+        error.InvalidSemantic,
+        validateCompactExternalRange(.{
+            .start_absolute = 0,
+            .span = @intCast(max_stored_external_span + 1),
+        }),
+    );
+    try std.testing.expectError(
+        error.InvalidSemantic,
+        validateCompactExternalRange(.{
+            .start_absolute = std.math.maxInt(u64),
+            .span = 1,
+        }),
+    );
+}
+
+test "legacy seed and relabel preserve untracked observed provenance" {
+    const allocator = std.testing.allocator;
+    var ledger: ExternalInboxLedger = .{};
+    var payloads = [_]OwnedPayload{try owned(allocator, "x")};
+    defer payloads[0].deinit();
+    const specs = [_]SeedSpec{.{
+        .semantic = .{ .frame = .{
+            .kind = .snapshot_chunk,
+            .flags = protocol.Flags.end_stream,
+            .stream_id = 7,
+            .payload_len = 1,
+        } },
+        .logical_len = 1,
+    }};
+    var plan: PreparedSeedPlan = .{};
+    try PreparedSeedPlan.initInPlace(&plan, allocator, &ledger, &specs, &payloads);
+    defer plan.deinit();
+    var tokens: [1]Token = undefined;
+    try ledger.commitSeeds(&plan, &payloads, &tokens);
+    const completed = try ledger.relabel(tokens[0], .frame, .completed, .none);
+    const view = try ledger.borrow(completed, .completed);
+    try std.testing.expect(std.meta.eql(
+        ObservedRxBatchProvenance.untracked,
+        view.semantic.completed.provenance,
+    ));
+    try ledger.release(completed, .completed);
+    try ledger.finish();
+}
+
+test "live batch binds external identity and publishes one partial root atomically" {
+    const allocator = std.testing.allocator;
+    var ledger: ExternalInboxLedger = .{};
+    const identity = external_rx_types.RxIdentity{
+        .attach_instance_id = 51,
+        .destination_slot_addr = 0x5100,
+    };
+    var batch: PreparedLiveBatch = .{};
+    try ledger.beginLiveBatch(&batch, allocator, identity);
+    var payload = try owned(allocator, "a");
+    const root_ref = try ledger.prepareLiveAdmission(
+        &batch,
+        .{ .partial = .{
+            .stream_id = 7,
+            .is_snapshot = false,
+            .chunk_count = 1,
+            .provenance = .{ .external = .{
+                .start_absolute = 100,
+                .span = protocol.header_size + 1,
+            } },
+        } },
+        &payload,
+    );
+    try std.testing.expectEqual(LiveTokenRef{ .planned = 0 }, root_ref);
+    try std.testing.expectEqual(@as(usize, 0), payload.logical_len);
+    try ledger.finishLiveBatch(&batch);
+    var retirement = PreparedLiveRetirement.init(allocator);
+    var dispositions =
+        [_]LiveCommitDisposition{.unused} ** max_live_mutations;
+    try std.testing.expectEqual(
+        @as(u8, 1),
+        try ledger.commitPreparedLiveBatch(
+            &batch,
+            &retirement,
+            &dispositions,
+        ),
+    );
+    const root = dispositions[0].final_live;
+    try std.testing.expectEqual(.partial, root.phase);
+    const observed = try ledger.partialSnapshot(root.token);
+    try std.testing.expect(std.meta.eql(
+        ObservedRxBatchProvenance{ .external = .{
+            .identity = identity,
+            .start_absolute = 100,
+            .end_absolute = 100 + protocol.header_size + 1,
+        } },
+        observed.provenance,
+    ));
+    try std.testing.expectEqual(
+        RetireLiveResult.already_retired,
+        retirement.retire(),
+    );
+    try releaseExternalLiveForTest(
+        &ledger,
+        allocator,
+        identity,
+        root.token,
+        .partial,
+    );
+    try ledger.finish();
+}
+
+test "legacy release rejects external provenance and preserves live token" {
+    const allocator = std.testing.allocator;
+    var ledger: ExternalInboxLedger = .{};
+    const identity = external_rx_types.RxIdentity{
+        .attach_instance_id = 511,
+        .destination_slot_addr = 0x5110,
+    };
+    var batch: PreparedLiveBatch = .{};
+    try ledger.beginLiveBatch(&batch, allocator, identity);
+    var payload = try owned(allocator, "external");
+    _ = try ledger.prepareLiveAdmission(
+        &batch,
+        .{ .completed = .{
+            .stream_id = 8,
+            .is_snapshot = false,
+            .provenance = .{ .external = .{
+                .start_absolute = 1,
+                .span = protocol.header_size + "external".len,
+            } },
+        } },
+        &payload,
+    );
+    try ledger.finishLiveBatch(&batch);
+    var retirement = PreparedLiveRetirement.init(allocator);
+    var dispositions =
+        [_]LiveCommitDisposition{.unused} ** max_live_mutations;
+    _ = try ledger.commitPreparedLiveBatch(
+        &batch,
+        &retirement,
+        &dispositions,
+    );
+    const token = dispositions[0].final_live.token;
+
+    try std.testing.expectError(
+        error.InvariantFailure,
+        ledger.release(token, .completed),
+    );
+    const preserved = try ledger.borrow(token, .completed);
+    try std.testing.expectEqualStrings("external", preserved.bytes);
+
+    try releaseExternalLiveForTest(
+        &ledger,
+        allocator,
+        identity,
+        token,
+        .completed,
+    );
+    try ledger.finish();
+}
+
+test "two-mutation live chain allocates one final replacement and retires sources" {
+    const allocator = std.testing.allocator;
+    var ledger: ExternalInboxLedger = .{};
+    const identity = external_rx_types.RxIdentity{
+        .attach_instance_id = 52,
+        .destination_slot_addr = 0x5200,
+    };
+    var batch: PreparedLiveBatch = .{};
+    try ledger.beginLiveBatch(&batch, allocator, identity);
+    var first = try owned(allocator, "a");
+    const first_ref = try ledger.prepareLiveAdmission(
+        &batch,
+        .{ .partial = .{
+            .stream_id = 9,
+            .is_snapshot = true,
+            .chunk_count = 1,
+            .provenance = .{ .external = .{
+                .start_absolute = 200,
+                .span = protocol.header_size + 1,
+            } },
+        } },
+        &first,
+    );
+    var second_payload = try owned(allocator, "b");
+    var source: PreparedLiveMergeSource = .{ .owned = second_payload };
+    second_payload = OwnedPayload.empty(allocator);
+    var replacement: PreparedLiveReplacement = .coalesced;
+    try ledger.prepareLiveMerge(
+        &batch,
+        first_ref,
+        .{ .completed = .{
+            .stream_id = 9,
+            .is_snapshot = true,
+            .provenance = .{ .external = .{
+                .start_absolute = 200,
+                .span = 2 * (protocol.header_size + 1),
+            } },
+        } },
+        .{
+            .identity = identity,
+            .start_absolute = 200 + protocol.header_size + 1,
+            .end_absolute = 200 + 2 * (protocol.header_size + 1),
+        },
+        &source,
+        &replacement,
+    );
+    try ledger.finishLiveBatch(&batch);
+    try std.testing.expectEqual(@as(u8, 1), batch.replacement_count);
+    var retirement = PreparedLiveRetirement.init(allocator);
+    var dispositions =
+        [_]LiveCommitDisposition{.unused} ** max_live_mutations;
+    _ = try ledger.commitPreparedLiveBatch(
+        &batch,
+        &retirement,
+        &dispositions,
+    );
+    try std.testing.expectEqual(
+        LiveCommitDisposition.superseded_tombstone,
+        dispositions[0],
+    );
+    const root = dispositions[1].final_live;
+    try std.testing.expectEqual(.completed, root.phase);
+    const view = try ledger.borrow(root.token, .completed);
+    try std.testing.expectEqualStrings("ab", view.bytes);
+    try std.testing.expectEqual(
+        RetireLiveResult.retired,
+        retirement.retire(),
+    );
+    try releaseExternalLiveForTest(
+        &ledger,
+        allocator,
+        identity,
+        root.token,
+        .completed,
+    );
+    try ledger.finish();
+}
+
+test "three-chunk chain allocates no intermediate replacement" {
+    const allocator = std.testing.allocator;
+    var ledger: ExternalInboxLedger = .{};
+    const identity = external_rx_types.RxIdentity{
+        .attach_instance_id = 53,
+        .destination_slot_addr = 0x5300,
+    };
+    var batch: PreparedLiveBatch = .{};
+    try ledger.beginLiveBatch(&batch, allocator, identity);
+    var first = try owned(allocator, "a");
+    const first_ref = try ledger.prepareLiveAdmission(
+        &batch,
+        .{ .partial = .{
+            .stream_id = 10,
+            .is_snapshot = false,
+            .chunk_count = 1,
+            .provenance = .{ .external = .{
+                .start_absolute = 300,
+                .span = protocol.header_size + 1,
+            } },
+        } },
+        &first,
+    );
+    var second_owner = try owned(allocator, "b");
+    var second_source: PreparedLiveMergeSource = .{ .owned = second_owner };
+    second_owner = OwnedPayload.empty(allocator);
+    var second_replacement: PreparedLiveReplacement = .coalesced;
+    try ledger.prepareLiveMerge(
+        &batch,
+        first_ref,
+        .{ .partial = .{
+            .stream_id = 10,
+            .is_snapshot = false,
+            .chunk_count = 2,
+            .provenance = .{ .external = .{
+                .start_absolute = 300,
+                .span = 2 * (protocol.header_size + 1),
+            } },
+        } },
+        .{
+            .identity = identity,
+            .start_absolute = 300 + protocol.header_size + 1,
+            .end_absolute = 300 + 2 * (protocol.header_size + 1),
+        },
+        &second_source,
+        &second_replacement,
+    );
+    var third_owner = try owned(allocator, "c");
+    var third_source: PreparedLiveMergeSource = .{ .owned = third_owner };
+    third_owner = OwnedPayload.empty(allocator);
+    var third_replacement: PreparedLiveReplacement = .coalesced;
+    try ledger.prepareLiveMerge(
+        &batch,
+        .{ .planned = 1 },
+        .{ .completed = .{
+            .stream_id = 10,
+            .is_snapshot = false,
+            .provenance = .{ .external = .{
+                .start_absolute = 300,
+                .span = 3 * (protocol.header_size + 1),
+            } },
+        } },
+        .{
+            .identity = identity,
+            .start_absolute = 300 + 2 * (protocol.header_size + 1),
+            .end_absolute = 300 + 3 * (protocol.header_size + 1),
+        },
+        &third_source,
+        &third_replacement,
+    );
+    try ledger.finishLiveBatch(&batch);
+    try std.testing.expectEqual(@as(u8, 1), batch.replacement_count);
+    var retirement = PreparedLiveRetirement.init(allocator);
+    var dispositions =
+        [_]LiveCommitDisposition{.unused} ** max_live_mutations;
+    _ = try ledger.commitPreparedLiveBatch(
+        &batch,
+        &retirement,
+        &dispositions,
+    );
+    const root = dispositions[2].final_live;
+    const view = try ledger.borrow(root.token, .completed);
+    try std.testing.expectEqualStrings("abc", view.bytes);
+    try std.testing.expectEqual(RetireLiveResult.retired, retirement.retire());
+    try releaseExternalLiveForTest(
+        &ledger,
+        allocator,
+        identity,
+        root.token,
+        .completed,
+    );
+    try ledger.finish();
+}
+
+test "live continuation rejects foreign gap and overlap incoming ranges before take" {
+    const allocator = std.testing.allocator;
+    const identity = external_rx_types.RxIdentity{
+        .attach_instance_id = 531,
+        .destination_slot_addr = 0x5310,
+    };
+    const first_start: u64 = 700;
+    const first_end = first_start + protocol.header_size + 1;
+    const cases = [_]external_rx_types.RxRange{
+        .{
+            .identity = .{
+                .attach_instance_id = identity.attach_instance_id + 1,
+                .destination_slot_addr = identity.destination_slot_addr,
+            },
+            .start_absolute = first_end,
+            .end_absolute = first_end + protocol.header_size + 1,
+        },
+        .{
+            .identity = .{
+                .attach_instance_id = identity.attach_instance_id,
+                .destination_slot_addr = identity.destination_slot_addr + 1,
+            },
+            .start_absolute = first_end,
+            .end_absolute = first_end + protocol.header_size + 1,
+        },
+        .{
+            .identity = identity,
+            .start_absolute = first_end + 1,
+            .end_absolute = first_end + 1 + protocol.header_size + 1,
+        },
+        .{
+            .identity = identity,
+            .start_absolute = first_end - 1,
+            .end_absolute = first_end - 1 + protocol.header_size + 1,
+        },
+    };
+    for (cases) |incoming| {
+        var ledger: ExternalInboxLedger = .{};
+        var batch: PreparedLiveBatch = .{};
+        try ledger.beginLiveBatch(&batch, allocator, identity);
+        var first = try owned(allocator, "a");
+        const first_ref = try ledger.prepareLiveAdmission(
+            &batch,
+            .{ .partial = .{
+                .stream_id = 1,
+                .is_snapshot = false,
+                .chunk_count = 1,
+                .provenance = .{ .external = .{
+                    .start_absolute = first_start,
+                    .span = protocol.header_size + 1,
+                } },
+            } },
+            &first,
+        );
+        var source_owner = try owned(allocator, "b");
+        var source: PreparedLiveMergeSource = .{ .owned = source_owner };
+        source_owner = OwnedPayload.empty(allocator);
+        var replacement: PreparedLiveReplacement = .coalesced;
+        try std.testing.expectError(
+            error.InvalidSemantic,
+            ledger.prepareLiveMerge(
+                &batch,
+                first_ref,
+                .{ .completed = .{
+                    .stream_id = 1,
+                    .is_snapshot = false,
+                    .provenance = .{ .external = .{
+                        .start_absolute = first_start,
+                        .span = 2 * (protocol.header_size + 1),
+                    } },
+                } },
+                incoming,
+                &source,
+                &replacement,
+            ),
+        );
+        source.owned.deinit();
+        try std.testing.expectEqual(
+            AbortLiveResult.aborted,
+            ledger.abortPreparedLiveBatch(&batch),
+        );
+        try std.testing.expect(ledger.accountingView().pristine_zero);
+        try ledger.finish();
+    }
+}
+
+test "external identity remains bound at zero live slots and rejects A-B-A reuse" {
+    const allocator = std.testing.allocator;
+    var ledger: ExternalInboxLedger = .{};
+    const first_identity = external_rx_types.RxIdentity{
+        .attach_instance_id = 61,
+        .destination_slot_addr = 0x6100,
+    };
+    var first_batch: PreparedLiveBatch = .{};
+    try ledger.beginLiveBatch(&first_batch, allocator, first_identity);
+    var payload = try owned(allocator, "x");
+    _ = try ledger.prepareLiveAdmission(
+        &first_batch,
+        .{ .completed = .{
+            .stream_id = 1,
+            .is_snapshot = false,
+            .provenance = .{ .external = .{
+                .start_absolute = 0,
+                .span = protocol.header_size + 1,
+            } },
+        } },
+        &payload,
+    );
+    try ledger.finishLiveBatch(&first_batch);
+    var retirement = PreparedLiveRetirement.init(allocator);
+    var dispositions =
+        [_]LiveCommitDisposition{.unused} ** max_live_mutations;
+    _ = try ledger.commitPreparedLiveBatch(
+        &first_batch,
+        &retirement,
+        &dispositions,
+    );
+    const token = dispositions[0].final_live.token;
+    try releaseExternalLiveForTest(
+        &ledger,
+        allocator,
+        first_identity,
+        token,
+        .completed,
+    );
+
+    var rejected: PreparedLiveBatch = .{};
+    try std.testing.expectError(
+        error.InvalidSemantic,
+        ledger.beginLiveBatch(&rejected, allocator, .{
+            .attach_instance_id = first_identity.attach_instance_id + 1,
+            .destination_slot_addr = first_identity.destination_slot_addr,
+        }),
+    );
+    var same: PreparedLiveBatch = .{};
+    try ledger.beginLiveBatch(&same, allocator, first_identity);
+    try std.testing.expectEqual(
+        AbortLiveResult.aborted,
+        ledger.abortPreparedLiveBatch(&same),
+    );
+    try ledger.finish();
+}
+
+test "drain advances bound external identity to canonical tombstone" {
+    var ledger: ExternalInboxLedger = .{};
+    const identity = external_rx_types.RxIdentity{
+        .attach_instance_id = 611,
+        .destination_slot_addr = 0x6110,
+    };
+    var batch: PreparedLiveBatch = .{};
+    try ledger.beginLiveBatch(&batch, std.testing.allocator, identity);
+    var payload = OwnedPayload.empty(std.testing.allocator);
+    _ = try ledger.prepareLiveAdmission(
+        &batch,
+        .{ .completed = .{
+            .stream_id = 1,
+            .is_snapshot = false,
+            .provenance = .{ .external = .{
+                .start_absolute = 0,
+                .span = protocol.header_size,
+            } },
+        } },
+        &payload,
+    );
+    try ledger.finishLiveBatch(&batch);
+    var retirement = PreparedLiveRetirement.init(std.testing.allocator);
+    var dispositions =
+        [_]LiveCommitDisposition{.unused} ** max_live_mutations;
+    _ = try ledger.commitPreparedLiveBatch(
+        &batch,
+        &retirement,
+        &dispositions,
+    );
+    const bound_generation = ledger.external_identity_seal.generation;
+    const bound_authority = ledger.projectionAuthorityDigest();
+    const report = try ledger.drainAll();
+    try std.testing.expectEqual(@as(usize, 1), report.drained_active_count);
+    try std.testing.expectEqual(
+        LedgerExternalIdentityLifecycle.drained_tombstone,
+        ledger.external_identity_seal.lifecycle,
+    );
+    try std.testing.expectEqual(
+        bound_generation + 1,
+        ledger.external_identity_seal.generation,
+    );
+    try std.testing.expectEqual(@as(?external_rx_types.RxIdentity, null), ledger.external_identity_seal.identity);
+    try std.testing.expect(ledger.hasValidExternalIdentitySeal());
+    try std.testing.expect(!std.mem.eql(
+        u8,
+        &bound_authority,
+        &ledger.projectionAuthorityDigest(),
+    ));
+    try ledger.finish();
+}
+
+test "owner teardown commits and restores canonical external identity tombstone" {
+    const allocator = std.testing.allocator;
+    var ledger: ExternalInboxLedger = .{};
+    const identity = external_rx_types.RxIdentity{
+        .attach_instance_id = 612,
+        .destination_slot_addr = 0x6120,
+    };
+    var batch: PreparedLiveBatch = .{};
+    try ledger.beginLiveBatch(&batch, allocator, identity);
+    var payload = try owned(allocator, "x");
+    _ = try ledger.prepareLiveAdmission(
+        &batch,
+        .{ .completed = .{
+            .stream_id = 1,
+            .is_snapshot = false,
+            .provenance = .{ .external = .{
+                .start_absolute = 0,
+                .span = protocol.header_size + 1,
+            } },
+        } },
+        &payload,
+    );
+    try ledger.finishLiveBatch(&batch);
+    var retirement = PreparedLiveRetirement.init(allocator);
+    var dispositions =
+        [_]LiveCommitDisposition{.unused} ** max_live_mutations;
+    _ = try ledger.commitPreparedLiveBatch(
+        &batch,
+        &retirement,
+        &dispositions,
+    );
+    const token = dispositions[0].final_live.token;
+    const bound_generation = ledger.external_identity_seal.generation;
+
+    var permit: OwnerTeardownPermit = .{};
+    try ledger.beginOwnerTeardown(12, &permit);
+    var token_plan: FrozenScreenTokenPlan = .{};
+    try token_plan.initInPlace(
+        &.{token},
+        std.StaticBitSet(max_items).initEmpty(),
+    );
+    var prepared: PreparedLedgerTeardown = .{};
+    var frozen: FrozenLedgerCleanup = .{};
+    try ledger.prepareFreezeAllForOwnerTeardown(
+        &permit,
+        &token_plan,
+        &prepared,
+        &frozen,
+    );
+    const terminal_generation =
+        prepared.terminal_external_identity_seal.generation;
+    try std.testing.expectEqual(bound_generation + 1, terminal_generation);
+    _ = ledger.commitFreezeAllForOwnerTeardownUnchecked(
+        &permit,
+        &prepared,
+        &frozen,
+    );
+    try std.testing.expectEqual(
+        LedgerExternalIdentityLifecycle.drained_tombstone,
+        ledger.external_identity_seal.lifecycle,
+    );
+    try std.testing.expectEqual(terminal_generation, ledger.external_identity_seal.generation);
+    try std.testing.expect(ledger.hasValidExternalIdentitySeal());
+    try std.testing.expectEqual(
+        FrozenLedgerCleanupFinishResult.cleaned,
+        frozen.finishCallbackHidden(),
+    );
+    ledger.restoreFinishedOwnerTeardownUnchecked(12, terminal_generation);
+    try std.testing.expectEqual(
+        LedgerExternalIdentityLifecycle.drained_tombstone,
+        ledger.external_identity_seal.lifecycle,
+    );
+    try std.testing.expectEqual(terminal_generation, ledger.external_identity_seal.generation);
+    try std.testing.expect(ledger.hasValidExternalIdentitySeal());
+}
+
+test "live batch accepts exact 64 mutations and rejects cap plus one before take" {
+    const allocator = std.testing.allocator;
+    var ledger: ExternalInboxLedger = .{};
+    const identity = external_rx_types.RxIdentity{
+        .attach_instance_id = 62,
+        .destination_slot_addr = 0x6200,
+    };
+    var batch: PreparedLiveBatch = .{};
+    try ledger.beginLiveBatch(&batch, allocator, identity);
+    for (0..max_live_mutations) |index| {
+        var payload = OwnedPayload.empty(allocator);
+        _ = try ledger.prepareLiveAdmission(
+            &batch,
+            .{ .completed = .{
+                .stream_id = index + 1,
+                .is_snapshot = false,
+                .provenance = .{ .external = .{
+                    .start_absolute = index * protocol.header_size,
+                    .span = protocol.header_size,
+                } },
+            } },
+            &payload,
+        );
+    }
+    var excess = OwnedPayload.empty(allocator);
+    try std.testing.expectError(
+        error.ItemCapExceeded,
+        ledger.prepareLiveAdmission(
+            &batch,
+            .{ .completed = .{
+                .stream_id = 65,
+                .is_snapshot = false,
+                .provenance = .{ .external = .{
+                    .start_absolute = 64 * protocol.header_size,
+                    .span = protocol.header_size,
+                } },
+            } },
+            &excess,
+        ),
+    );
+    try ledger.finishLiveBatch(&batch);
+    var retirement = PreparedLiveRetirement.init(allocator);
+    var dispositions =
+        [_]LiveCommitDisposition{.unused} ** max_live_mutations;
+    try std.testing.expectEqual(
+        @as(u8, max_live_mutations),
+        try ledger.commitPreparedLiveBatch(
+            &batch,
+            &retirement,
+            &dispositions,
+        ),
+    );
+    for (dispositions) |disposition|
+        try std.testing.expect(disposition == .final_live);
+    const report = try ledger.drainAll();
+    try std.testing.expectEqual(@as(usize, max_live_mutations), report.drained_active_count);
+    try ledger.finish();
+}
+
+test "stale checked live commit publishes nothing and canonical abort cleans source" {
+    const allocator = std.testing.allocator;
+    var ledger: ExternalInboxLedger = .{};
+    const identity = external_rx_types.RxIdentity{
+        .attach_instance_id = 63,
+        .destination_slot_addr = 0x6300,
+    };
+    var batch: PreparedLiveBatch = .{};
+    try ledger.beginLiveBatch(&batch, allocator, identity);
+    var payload = try owned(allocator, "owned");
+    _ = try ledger.prepareLiveAdmission(
+        &batch,
+        .{ .completed = .{
+            .stream_id = 1,
+            .is_snapshot = false,
+            .provenance = .{ .external = .{
+                .start_absolute = 0,
+                .span = protocol.header_size + "owned".len,
+            } },
+        } },
+        &payload,
+    );
+    try ledger.finishLiveBatch(&batch);
+    var sibling_payload = try owned(allocator, "s");
+    const sibling = try ledger.reserveLease(
+        leaseSemantic(9, false),
+        &sibling_payload,
+    );
+    var retirement = PreparedLiveRetirement.init(allocator);
+    var dispositions =
+        [_]LiveCommitDisposition{.unused} ** max_live_mutations;
+    try std.testing.expectError(
+        error.StalePlan,
+        ledger.commitPreparedLiveBatch(
+            &batch,
+            &retirement,
+            &dispositions,
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 1), ledger.charged_items);
+    try std.testing.expectEqual(
+        AbortLiveResult.aborted,
+        ledger.abortPreparedLiveBatch(&batch),
+    );
+    try ledger.releaseLease(sibling);
+    try ledger.finish();
+}
+
+test "checked live merge rejects existing payload content drift" {
+    const allocator = std.testing.allocator;
+    const identity = external_rx_types.RxIdentity{
+        .attach_instance_id = 633,
+        .destination_slot_addr = 0x6330,
+    };
+    var ledger: ExternalInboxLedger = .{};
+    var first_batch: PreparedLiveBatch = .{};
+    try ledger.beginLiveBatch(&first_batch, allocator, identity);
+    var first = try owned(allocator, "a");
+    _ = try ledger.prepareLiveAdmission(
+        &first_batch,
+        .{ .partial = .{
+            .stream_id = 1,
+            .is_snapshot = false,
+            .chunk_count = 1,
+            .provenance = .{ .external = .{
+                .start_absolute = 0,
+                .span = protocol.header_size + 1,
+            } },
+        } },
+        &first,
+    );
+    try ledger.finishLiveBatch(&first_batch);
+    var first_retirement = PreparedLiveRetirement.init(allocator);
+    var first_dispositions =
+        [_]LiveCommitDisposition{.unused} ** max_live_mutations;
+    _ = try ledger.commitPreparedLiveBatch(
+        &first_batch,
+        &first_retirement,
+        &first_dispositions,
+    );
+    const token = first_dispositions[0].final_live.token;
+
+    var merge_batch: PreparedLiveBatch = .{};
+    try ledger.beginLiveBatch(&merge_batch, allocator, identity);
+    var second_owner = try owned(allocator, "b");
+    var source: PreparedLiveMergeSource = .{ .owned = second_owner };
+    second_owner = OwnedPayload.empty(allocator);
+    var replacement: PreparedLiveReplacement = .coalesced;
+    try ledger.prepareLiveMerge(
+        &merge_batch,
+        .{ .existing = token },
+        .{ .completed = .{
+            .stream_id = 1,
+            .is_snapshot = false,
+            .provenance = .{ .external = .{
+                .start_absolute = 0,
+                .span = 2 * (protocol.header_size + 1),
+            } },
+        } },
+        .{
+            .identity = identity,
+            .start_absolute = protocol.header_size + 1,
+            .end_absolute = 2 * (protocol.header_size + 1),
+        },
+        &source,
+        &replacement,
+    );
+    try ledger.finishLiveBatch(&merge_batch);
+    ledger.slots[token.slot].payload.allocation_ptr.?[0] = 'z';
+    var retirement = PreparedLiveRetirement.init(allocator);
+    var dispositions =
+        [_]LiveCommitDisposition{.unused} ** max_live_mutations;
+    try std.testing.expectError(
+        error.StalePlan,
+        ledger.commitPreparedLiveBatch(
+            &merge_batch,
+            &retirement,
+            &dispositions,
+        ),
+    );
+    ledger.slots[token.slot].payload.allocation_ptr.?[0] = 'a';
+    try std.testing.expectEqual(
+        AbortLiveResult.aborted,
+        ledger.abortPreparedLiveBatch(&merge_batch),
+    );
+    const preserved = try ledger.borrow(token, .partial);
+    try std.testing.expectEqualStrings("a", preserved.bytes);
+    try releaseExternalLiveForTest(
+        &ledger,
+        allocator,
+        identity,
+        token,
+        .partial,
+    );
+    try ledger.finish();
+}
+
+test "live replacement allocation callback cannot rewrite existing payload authority" {
+    const allocator = std.testing.allocator;
+    const identity = external_rx_types.RxIdentity{
+        .attach_instance_id = 635,
+        .destination_slot_addr = 0x6350,
+    };
+    var ledger: ExternalInboxLedger = .{};
+    var admission: PreparedLiveBatch = .{};
+    try ledger.beginLiveBatch(&admission, allocator, identity);
+    var first = try owned(allocator, "a");
+    _ = try ledger.prepareLiveAdmission(
+        &admission,
+        .{ .partial = .{
+            .stream_id = 1,
+            .is_snapshot = false,
+            .chunk_count = 1,
+            .provenance = .{ .external = .{
+                .start_absolute = 0,
+                .span = protocol.header_size + 1,
+            } },
+        } },
+        &first,
+    );
+    try ledger.finishLiveBatch(&admission);
+    var admission_retirement = PreparedLiveRetirement.init(allocator);
+    var admission_dispositions =
+        [_]LiveCommitDisposition{.unused} ** max_live_mutations;
+    _ = try ledger.commitPreparedLiveBatch(
+        &admission,
+        &admission_retirement,
+        &admission_dispositions,
+    );
+    const token = admission_dispositions[0].final_live.token;
+
+    var probe = LiveAllocationMutationProbe{
+        .parent = allocator,
+        .target = &ledger.slots[token.slot].payload.allocation_ptr.?[0],
+    };
+    var batch: PreparedLiveBatch = .{};
+    try ledger.beginLiveBatch(&batch, probe.allocator(), identity);
+    var second_owner = try owned(allocator, "b");
+    var source: PreparedLiveMergeSource = .{ .owned = second_owner };
+    second_owner = OwnedPayload.empty(allocator);
+    var replacement: PreparedLiveReplacement = .coalesced;
+    try ledger.prepareLiveMerge(
+        &batch,
+        .{ .existing = token },
+        .{ .completed = .{
+            .stream_id = 1,
+            .is_snapshot = false,
+            .provenance = .{ .external = .{
+                .start_absolute = 0,
+                .span = 2 * (protocol.header_size + 1),
+            } },
+        } },
+        .{
+            .identity = identity,
+            .start_absolute = protocol.header_size + 1,
+            .end_absolute = 2 * (protocol.header_size + 1),
+        },
+        &source,
+        &replacement,
+    );
+    try std.testing.expectError(
+        error.StalePlan,
+        ledger.finishLiveBatch(&batch),
+    );
+    try std.testing.expectEqual(@as(usize, 1), probe.alloc_count);
+    try std.testing.expectEqual(@as(usize, 1), probe.free_count);
+    try std.testing.expectEqual(
+        AbortLiveResult.aborted,
+        ledger.abortPreparedLiveBatch(&batch),
+    );
+    ledger.slots[token.slot].payload.allocation_ptr.?[0] = 'a';
+    try releaseExternalLiveForTest(
+        &ledger,
+        allocator,
+        identity,
+        token,
+        .partial,
+    );
+    try ledger.finish();
+}
+
+test "live replacement callbacks cannot redirect later allocation or hide batch tails" {
+    const allocator = std.testing.allocator;
+    const identity = external_rx_types.RxIdentity{
+        .attach_instance_id = 636,
+        .destination_slot_addr = 0x6360,
+    };
+    var ledger: ExternalInboxLedger = .{};
+    var probe = LiveAllocationMutationProbe{
+        .parent = allocator,
+        .mutate_batch_on_first_allocation = true,
+    };
+    var batch: PreparedLiveBatch = .{};
+    probe.batch = &batch;
+    const sealed_allocator = probe.allocator();
+    try ledger.beginLiveBatch(&batch, sealed_allocator, identity);
+    for (0..2) |index| {
+        const start = index * 2 * (protocol.header_size + 1);
+        var first = try owned(allocator, "a");
+        const first_ref = try ledger.prepareLiveAdmission(
+            &batch,
+            .{ .partial = .{
+                .stream_id = index + 1,
+                .is_snapshot = false,
+                .chunk_count = 1,
+                .provenance = .{ .external = .{
+                    .start_absolute = start,
+                    .span = protocol.header_size + 1,
+                } },
+            } },
+            &first,
+        );
+        var second_owner = try owned(allocator, "b");
+        var source: PreparedLiveMergeSource = .{ .owned = second_owner };
+        second_owner = OwnedPayload.empty(allocator);
+        var replacement: PreparedLiveReplacement = .coalesced;
+        try ledger.prepareLiveMerge(
+            &batch,
+            first_ref,
+            .{ .completed = .{
+                .stream_id = index + 1,
+                .is_snapshot = false,
+                .provenance = .{ .external = .{
+                    .start_absolute = start,
+                    .span = 2 * (protocol.header_size + 1),
+                } },
+            } },
+            .{
+                .identity = identity,
+                .start_absolute = start + protocol.header_size + 1,
+                .end_absolute = start + 2 * (protocol.header_size + 1),
+            },
+            &source,
+            &replacement,
+        );
+    }
+    try std.testing.expectError(
+        error.InvalidPlan,
+        ledger.finishLiveBatch(&batch),
+    );
+    try std.testing.expectEqual(@as(usize, 2), probe.alloc_count);
+    try std.testing.expectEqual(@as(usize, 2), probe.free_count);
+
+    // Restore only the injected hostile drift so abort proves all original sources
+    // remained recoverable without trusting callback-mutated cleanup authority.
+    batch.allocator = sealed_allocator;
+    batch.mutations[max_live_mutations - 1] = .empty;
+    batch.coalesced_replacements[max_live_mutations - 1].logical_len = 0;
+    try std.testing.expectEqual(
+        AbortLiveResult.aborted,
+        ledger.abortPreparedLiveBatch(&batch),
+    );
+    try std.testing.expect(ledger.accountingView().pristine_zero);
+    try ledger.finish();
+}
+
+test "checked live release rejects existing allocator semantic and provenance drift" {
+    const allocator = std.testing.allocator;
+    const identity = external_rx_types.RxIdentity{
+        .attach_instance_id = 634,
+        .destination_slot_addr = 0x6340,
+    };
+    var ledger: ExternalInboxLedger = .{};
+    var admission: PreparedLiveBatch = .{};
+    try ledger.beginLiveBatch(&admission, allocator, identity);
+    var payload = try owned(allocator, "x");
+    _ = try ledger.prepareLiveAdmission(
+        &admission,
+        .{ .completed = .{
+            .stream_id = 7,
+            .is_snapshot = false,
+            .provenance = .{ .external = .{
+                .start_absolute = 0,
+                .span = protocol.header_size + 1,
+            } },
+        } },
+        &payload,
+    );
+    try ledger.finishLiveBatch(&admission);
+    var admission_retirement = PreparedLiveRetirement.init(allocator);
+    var admission_dispositions =
+        [_]LiveCommitDisposition{.unused} ** max_live_mutations;
+    _ = try ledger.commitPreparedLiveBatch(
+        &admission,
+        &admission_retirement,
+        &admission_dispositions,
+    );
+    const token = admission_dispositions[0].final_live.token;
+
+    const Drift = enum { address, allocator, semantic, provenance };
+    for ([_]Drift{ .address, .allocator, .semantic, .provenance }) |drift| {
+        var batch: PreparedLiveBatch = .{};
+        try ledger.beginLiveBatch(&batch, allocator, identity);
+        try ledger.prepareLiveRelease(
+            &batch,
+            .{ .existing = token },
+            .completed,
+        );
+        try ledger.finishLiveBatch(&batch);
+        const original_allocator = ledger.slots[token.slot].payload.allocator;
+        const original_ptr = ledger.slots[token.slot].payload.allocation_ptr;
+        const original_semantic = ledger.slots[token.slot].semantic;
+        switch (drift) {
+            .address => ledger.slots[token.slot].payload.allocation_ptr =
+                @ptrFromInt(1),
+            .allocator => ledger.slots[token.slot].payload.allocator =
+                std.heap.page_allocator,
+            .semantic => ledger.slots[token.slot].semantic.completed.stream_id += 1,
+            .provenance => ledger.slots[token.slot].semantic.completed
+                .provenance_span += 1,
+        }
+        var retirement = PreparedLiveRetirement.init(allocator);
+        var dispositions =
+            [_]LiveCommitDisposition{.unused} ** max_live_mutations;
+        try std.testing.expectError(
+            error.StalePlan,
+            ledger.commitPreparedLiveBatch(
+                &batch,
+                &retirement,
+                &dispositions,
+            ),
+        );
+        ledger.slots[token.slot].payload.allocation_ptr = original_ptr;
+        ledger.slots[token.slot].payload.allocator = original_allocator;
+        ledger.slots[token.slot].semantic = original_semantic;
+        try std.testing.expectEqual(
+            AbortLiveResult.aborted,
+            ledger.abortPreparedLiveBatch(&batch),
+        );
+    }
+    try releaseExternalLiveForTest(
+        &ledger,
+        allocator,
+        identity,
+        token,
+        .completed,
+    );
+    try ledger.finish();
+}
+
+test "copied live batch cannot commit or abort and canonical batch remains usable" {
+    const allocator = std.testing.allocator;
+    var ledger: ExternalInboxLedger = .{};
+    const identity = external_rx_types.RxIdentity{
+        .attach_instance_id = 631,
+        .destination_slot_addr = 0x6310,
+    };
+    var batch: PreparedLiveBatch = .{};
+    try ledger.beginLiveBatch(&batch, allocator, identity);
+    var payload = try owned(allocator, "canonical");
+    _ = try ledger.prepareLiveAdmission(
+        &batch,
+        .{ .completed = .{
+            .stream_id = 1,
+            .is_snapshot = false,
+            .provenance = .{ .external = .{
+                .start_absolute = 0,
+                .span = protocol.header_size + "canonical".len,
+            } },
+        } },
+        &payload,
+    );
+    try ledger.finishLiveBatch(&batch);
+
+    var copied = batch;
+    var copied_retirement = PreparedLiveRetirement.init(allocator);
+    var copied_dispositions =
+        [_]LiveCommitDisposition{.unused} ** max_live_mutations;
+    try std.testing.expectError(
+        error.InvalidPlan,
+        ledger.commitPreparedLiveBatch(
+            &copied,
+            &copied_retirement,
+            &copied_dispositions,
+        ),
+    );
+    try std.testing.expectEqual(
+        AbortLiveResult.ignored_untrusted,
+        ledger.abortPreparedLiveBatch(&copied),
+    );
+
+    var retirement = PreparedLiveRetirement.init(allocator);
+    var dispositions =
+        [_]LiveCommitDisposition{.unused} ** max_live_mutations;
+    _ = try ledger.commitPreparedLiveBatch(
+        &batch,
+        &retirement,
+        &dispositions,
+    );
+    const token = dispositions[0].final_live.token;
+    try releaseExternalLiveForTest(
+        &ledger,
+        allocator,
+        identity,
+        token,
+        .completed,
+    );
+    try ledger.finish();
+}
+
+test "live batch descriptor drift quarantines abort without touching ledger" {
+    var ledger: ExternalInboxLedger = .{};
+    var batch: PreparedLiveBatch = .{};
+    try ledger.beginLiveBatch(&batch, std.heap.page_allocator, .{
+        .attach_instance_id = 632,
+        .destination_slot_addr = 0x6320,
+    });
+    var payload = OwnedPayload.empty(std.heap.page_allocator);
+    _ = try ledger.prepareLiveAdmission(
+        &batch,
+        .{ .completed = .{
+            .stream_id = 1,
+            .is_snapshot = false,
+            .provenance = .{ .external = .{
+                .start_absolute = 0,
+                .span = protocol.header_size,
+            } },
+        } },
+        &payload,
+    );
+    try ledger.finishLiveBatch(&batch);
+    batch.mutations[0].admission.payload_fingerprint.logical_len = 1;
+
+    try std.testing.expectEqual(
+        AbortLiveResult.quarantined,
+        ledger.abortPreparedLiveBatch(&batch),
+    );
+    try std.testing.expect(ledger.accountingView().pristine_zero);
+    try ledger.finish();
+}
+
+test "zero-mutation live batch cannot become an epoch writer" {
+    var ledger: ExternalInboxLedger = .{};
+    const before = ledger.accountingView();
+    var batch: PreparedLiveBatch = .{};
+    try ledger.beginLiveBatch(&batch, std.testing.allocator, null);
+    try std.testing.expectError(
+        error.InvalidPlan,
+        ledger.finishLiveBatch(&batch),
+    );
+    try std.testing.expectEqual(
+        AbortLiveResult.aborted,
+        ledger.abortPreparedLiveBatch(&batch),
+    );
+    try std.testing.expectEqualDeep(before, ledger.accountingView());
+    try ledger.finish();
+}
+
+test "preparing live abort rejects hidden tail after mutation count decrease" {
+    var ledger: ExternalInboxLedger = .{};
+    var batch: PreparedLiveBatch = .{};
+    try ledger.beginLiveBatch(&batch, std.testing.allocator, null);
+    var first = OwnedPayload.empty(std.testing.allocator);
+    _ = try ledger.prepareLiveAdmission(
+        &batch,
+        .{ .completed = .{
+            .stream_id = 1,
+            .is_snapshot = false,
+        } },
+        &first,
+    );
+    var second = OwnedPayload.empty(std.testing.allocator);
+    _ = try ledger.prepareLiveAdmission(
+        &batch,
+        .{ .completed = .{
+            .stream_id = 2,
+            .is_snapshot = false,
+        } },
+        &second,
+    );
+    batch.mutation_count = 1;
+    try std.testing.expectEqual(
+        AbortLiveResult.quarantined,
+        ledger.abortPreparedLiveBatch(&batch),
+    );
+    try std.testing.expect(ledger.accountingView().pristine_zero);
+    try ledger.finish();
+}
+
+test "checked live commit validates count bounds before digest slices" {
+    var ledger: ExternalInboxLedger = .{};
+    var batch: PreparedLiveBatch = .{};
+    try ledger.beginLiveBatch(&batch, std.testing.allocator, null);
+    var payload = OwnedPayload.empty(std.testing.allocator);
+    _ = try ledger.prepareLiveAdmission(
+        &batch,
+        .{ .completed = .{
+            .stream_id = 1,
+            .is_snapshot = false,
+        } },
+        &payload,
+    );
+    try ledger.finishLiveBatch(&batch);
+    var retirement = PreparedLiveRetirement.init(std.testing.allocator);
+    var dispositions =
+        [_]LiveCommitDisposition{.unused} ** max_live_mutations;
+
+    batch.mutation_count = @intCast(max_live_mutations + 1);
+    try std.testing.expectError(
+        error.InvalidPlan,
+        ledger.commitPreparedLiveBatch(
+            &batch,
+            &retirement,
+            &dispositions,
+        ),
+    );
+    batch.mutation_count = 1;
+    try std.testing.expectEqual(
+        AbortLiveResult.aborted,
+        ledger.abortPreparedLiveBatch(&batch),
+    );
+    try std.testing.expect(ledger.accountingView().pristine_zero);
+    try ledger.finish();
+}
+
+test "checked live commit rejects noncanonical hidden retirement tail" {
+    var ledger: ExternalInboxLedger = .{};
+    var batch: PreparedLiveBatch = .{};
+    try ledger.beginLiveBatch(&batch, std.testing.allocator, null);
+    var payload = OwnedPayload.empty(std.testing.allocator);
+    _ = try ledger.prepareLiveAdmission(
+        &batch,
+        .{ .completed = .{
+            .stream_id = 1,
+            .is_snapshot = false,
+        } },
+        &payload,
+    );
+    try ledger.finishLiveBatch(&batch);
+    var retirement = PreparedLiveRetirement.init(std.testing.allocator);
+    retirement.cleanup_owners[max_live_cleanup_owners - 1].logical_len = 1;
+    var dispositions =
+        [_]LiveCommitDisposition{.unused} ** max_live_mutations;
+    try std.testing.expectError(
+        error.InvalidPlan,
+        ledger.commitPreparedLiveBatch(
+            &batch,
+            &retirement,
+            &dispositions,
+        ),
+    );
+    retirement = PreparedLiveRetirement.init(std.testing.allocator);
+    try std.testing.expectEqual(
+        AbortLiveResult.aborted,
+        ledger.abortPreparedLiveBatch(&batch),
+    );
+    try std.testing.expect(ledger.accountingView().pristine_zero);
+    try ledger.finish();
+}
+
+test "live replacement allocation fail index preserves ledger and aborts both sources exactly" {
+    const allocator = std.testing.allocator;
+    for (0..2) |fail_index| {
+        var failing = std.testing.FailingAllocator.init(
+            allocator,
+            .{ .fail_index = fail_index },
+        );
+        var ledger: ExternalInboxLedger = .{};
+        const identity = external_rx_types.RxIdentity{
+            .attach_instance_id = 64,
+            .destination_slot_addr = 0x6400,
+        };
+        var batch: PreparedLiveBatch = .{};
+        try ledger.beginLiveBatch(&batch, failing.allocator(), identity);
+        var first = try owned(allocator, "a");
+        const first_ref = try ledger.prepareLiveAdmission(
+            &batch,
+            .{ .partial = .{
+                .stream_id = 1,
+                .is_snapshot = false,
+                .chunk_count = 1,
+                .provenance = .{ .external = .{
+                    .start_absolute = 0,
+                    .span = protocol.header_size + 1,
+                } },
+            } },
+            &first,
+        );
+        var second_owner = try owned(allocator, "b");
+        var source: PreparedLiveMergeSource = .{ .owned = second_owner };
+        second_owner = OwnedPayload.empty(allocator);
+        var replacement: PreparedLiveReplacement = .coalesced;
+        try ledger.prepareLiveMerge(
+            &batch,
+            first_ref,
+            .{ .completed = .{
+                .stream_id = 1,
+                .is_snapshot = false,
+                .provenance = .{ .external = .{
+                    .start_absolute = 0,
+                    .span = 2 * (protocol.header_size + 1),
+                } },
+            } },
+            .{
+                .identity = identity,
+                .start_absolute = protocol.header_size + 1,
+                .end_absolute = 2 * (protocol.header_size + 1),
+            },
+            &source,
+            &replacement,
+        );
+        if (fail_index == 0) {
+            try std.testing.expectError(
+                error.OutOfMemory,
+                ledger.finishLiveBatch(&batch),
+            );
+            try std.testing.expect(ledger.accountingView().pristine_zero);
+            try std.testing.expectEqual(
+                AbortLiveResult.aborted,
+                ledger.abortPreparedLiveBatch(&batch),
+            );
+        } else {
+            try ledger.finishLiveBatch(&batch);
+            var retirement = PreparedLiveRetirement.init(allocator);
+            var dispositions =
+                [_]LiveCommitDisposition{.unused} ** max_live_mutations;
+            _ = try ledger.commitPreparedLiveBatch(
+                &batch,
+                &retirement,
+                &dispositions,
+            );
+            const token = dispositions[1].final_live.token;
+            try std.testing.expectEqual(
+                RetireLiveResult.retired,
+                retirement.retire(),
+            );
+            try releaseExternalLiveForTest(
+                &ledger,
+                allocator,
+                identity,
+                token,
+                .completed,
+            );
+        }
+        try ledger.finish();
+    }
+}
+
+test "64-mutation live batch sweeps every replacement allocation fail index" {
+    const allocator = std.testing.allocator;
+    const allocation_count = max_live_mutations / 2;
+    for (0..allocation_count + 1) |fail_index| {
+        var failing = std.testing.FailingAllocator.init(
+            allocator,
+            .{ .fail_index = fail_index },
+        );
+        var ledger: ExternalInboxLedger = .{};
+        const identity = external_rx_types.RxIdentity{
+            .attach_instance_id = 641,
+            .destination_slot_addr = 0x6410,
+        };
+        var batch: PreparedLiveBatch = .{};
+        try ledger.beginLiveBatch(&batch, failing.allocator(), identity);
+        errdefer _ = ledger.abortPreparedLiveBatch(&batch);
+        for (0..allocation_count) |index| {
+            const stream_id = index + 1;
+            const start = index * 2 * (protocol.header_size + 1);
+            var first = try owned(allocator, "a");
+            const current = try ledger.prepareLiveAdmission(
+                &batch,
+                .{ .partial = .{
+                    .stream_id = stream_id,
+                    .is_snapshot = false,
+                    .chunk_count = 1,
+                    .provenance = .{ .external = .{
+                        .start_absolute = start,
+                        .span = protocol.header_size + 1,
+                    } },
+                } },
+                &first,
+            );
+            var source_owner = try owned(allocator, "a");
+            var source: PreparedLiveMergeSource = .{ .owned = source_owner };
+            source_owner = OwnedPayload.empty(allocator);
+            var replacement: PreparedLiveReplacement = .coalesced;
+            try ledger.prepareLiveMerge(
+                &batch,
+                current,
+                .{ .completed = .{
+                    .stream_id = stream_id,
+                    .is_snapshot = false,
+                    .provenance = .{ .external = .{
+                        .start_absolute = start,
+                        .span = 2 * (protocol.header_size + 1),
+                    } },
+                } },
+                .{
+                    .identity = identity,
+                    .start_absolute = start + protocol.header_size + 1,
+                    .end_absolute = start + 2 * (protocol.header_size + 1),
+                },
+                &source,
+                &replacement,
+            );
+        }
+        try std.testing.expectEqual(
+            @as(u8, max_live_mutations),
+            batch.mutation_count,
+        );
+        if (fail_index < allocation_count) {
+            try std.testing.expectError(
+                error.OutOfMemory,
+                ledger.finishLiveBatch(&batch),
+            );
+            try std.testing.expect(ledger.accountingView().pristine_zero);
+            try std.testing.expectEqual(
+                AbortLiveResult.aborted,
+                ledger.abortPreparedLiveBatch(&batch),
+            );
+        } else {
+            try ledger.finishLiveBatch(&batch);
+            var retirement = PreparedLiveRetirement.init(allocator);
+            var dispositions =
+                [_]LiveCommitDisposition{.unused} ** max_live_mutations;
+            try std.testing.expectEqual(
+                @as(u8, allocation_count),
+                try ledger.commitPreparedLiveBatch(
+                    &batch,
+                    &retirement,
+                    &dispositions,
+                ),
+            );
+            try std.testing.expectEqual(
+                RetireLiveResult.retired,
+                retirement.retire(),
+            );
+            const report = try ledger.drainAll();
+            try std.testing.expectEqual(
+                @as(usize, allocation_count),
+                report.drained_active_count,
+            );
+        }
+        try ledger.finish();
+    }
+}
+
+test "live batch reaches exact 128 cleanup and 64 replacement retirement caps" {
+    const allocator = std.testing.allocator;
+    const identity = external_rx_types.RxIdentity{
+        .attach_instance_id = 642,
+        .destination_slot_addr = 0x6420,
+    };
+    var ledger: ExternalInboxLedger = .{};
+    var admissions: PreparedLiveBatch = .{};
+    try ledger.beginLiveBatch(&admissions, allocator, identity);
+    for (0..max_live_mutations) |index| {
+        var payload = OwnedPayload.empty(allocator);
+        _ = try ledger.prepareLiveAdmission(
+            &admissions,
+            .{ .partial = .{
+                .stream_id = index + 1,
+                .is_snapshot = false,
+                .chunk_count = 1,
+                .provenance = .{ .external = .{
+                    .start_absolute = index * 2 * protocol.header_size,
+                    .span = protocol.header_size,
+                } },
+            } },
+            &payload,
+        );
+    }
+    try ledger.finishLiveBatch(&admissions);
+    var admission_retirement = PreparedLiveRetirement.init(allocator);
+    var admission_dispositions =
+        [_]LiveCommitDisposition{.unused} ** max_live_mutations;
+    _ = try ledger.commitPreparedLiveBatch(
+        &admissions,
+        &admission_retirement,
+        &admission_dispositions,
+    );
+
+    var merges: PreparedLiveBatch = .{};
+    try ledger.beginLiveBatch(&merges, allocator, identity);
+    for (0..max_live_mutations) |index| {
+        const start = index * 2 * protocol.header_size;
+        var source: PreparedLiveMergeSource = .{
+            .owned = OwnedPayload.empty(allocator),
+        };
+        var replacement: PreparedLiveReplacement = .coalesced;
+        try ledger.prepareLiveMerge(
+            &merges,
+            .{ .existing = admission_dispositions[index].final_live.token },
+            .{ .completed = .{
+                .stream_id = index + 1,
+                .is_snapshot = false,
+                .provenance = .{ .external = .{
+                    .start_absolute = start,
+                    .span = 2 * protocol.header_size,
+                } },
+            } },
+            .{
+                .identity = identity,
+                .start_absolute = start + protocol.header_size,
+                .end_absolute = start + 2 * protocol.header_size,
+            },
+            &source,
+            &replacement,
+        );
+    }
+    try ledger.finishLiveBatch(&merges);
+    try std.testing.expectEqual(
+        @as(u8, max_live_mutations),
+        merges.replacement_count,
+    );
+    var retirement = PreparedLiveRetirement.init(allocator);
+    var dispositions =
+        [_]LiveCommitDisposition{.unused} ** max_live_mutations;
+    try std.testing.expectEqual(
+        @as(u8, max_live_mutations),
+        try ledger.commitPreparedLiveBatch(
+            &merges,
+            &retirement,
+            &dispositions,
+        ),
+    );
+    try std.testing.expectEqual(
+        @as(u8, max_live_cleanup_owners),
+        retirement.cleanup_count,
+    );
+    try std.testing.expectEqual(
+        @as(u8, max_live_mutations),
+        retirement.replacement_count,
+    );
+    try std.testing.expectEqual(
+        RetireLiveResult.retired,
+        retirement.retire(),
+    );
+    const report = try ledger.drainAll();
+    try std.testing.expectEqual(
+        @as(usize, max_live_mutations),
+        report.drained_active_count,
+    );
+    try ledger.finish();
+}
+
+test "live retirement tombstones before first callback and keeps later targets local" {
+    var probe = LiveRetirementMutationProbe{
+        .parent = std.testing.allocator,
+    };
+    const allocator = probe.allocator();
+    var retirement = PreparedLiveRetirement.init(allocator);
+    appendLiveRetirementUnchecked(
+        &retirement,
+        try owned(allocator, "first"),
+    );
+    appendLiveRetirementUnchecked(
+        &retirement,
+        try owned(allocator, "second"),
+    );
+    sealLiveRetirementForTest(&retirement);
+    probe.retirement = &retirement;
+
+    try std.testing.expectEqual(
+        RetireLiveResult.retired,
+        retirement.retire(),
+    );
+    try std.testing.expectEqual(
+        RetireLiveResult.already_retired,
+        probe.nested_result.?,
+    );
+    try std.testing.expectEqual(@as(usize, 2), probe.free_count);
+    try std.testing.expectEqual(
+        LiveRetirementLifecycle.retired,
+        retirement.lifecycle,
+    );
+}
+
+test "live retirement rejects exact and partial cleanup aliases before free" {
+    for ([_]bool{ false, true }) |partial| {
+        var probe = LiveRetirementMutationProbe{
+            .parent = std.testing.allocator,
+            .fired = true,
+        };
+        const allocator = probe.allocator();
+        var original = try owned(allocator, "alias");
+        var retirement = PreparedLiveRetirement.init(allocator);
+        appendLiveRetirementUnchecked(&retirement, original);
+        var alias = original;
+        if (partial) {
+            alias.allocation_ptr = original.allocation_ptr.? + 1;
+            alias.logical_len -= 1;
+        }
+        appendLiveRetirementUnchecked(&retirement, alias);
+        sealLiveRetirementForTest(&retirement);
+
+        try std.testing.expectEqual(
+            RetireLiveResult.quarantined,
+            retirement.retire(),
+        );
+        try std.testing.expectEqual(@as(usize, 0), probe.free_count);
+        original.deinit();
+        try std.testing.expectEqual(@as(usize, 1), probe.free_count);
+    }
+}
+
+test "live retirement rejects cleanup replacement overlap before free" {
+    var probe = LiveRetirementMutationProbe{
+        .parent = std.testing.allocator,
+        .fired = true,
+    };
+    const allocator = probe.allocator();
+    var original = try owned(allocator, "overlap");
+    var retirement = PreparedLiveRetirement.init(allocator);
+    appendLiveRetirementUnchecked(&retirement, original);
+    retirement.published_replacements[0] = .{
+        .addr = @intFromPtr(original.allocation_ptr.?) + 1,
+        .len = original.logical_len - 1,
+    };
+    retirement.replacement_count = 1;
+    retirement.replacement_bytes = original.logical_len - 1;
+    sealLiveRetirementForTest(&retirement);
+
+    try std.testing.expectEqual(
+        RetireLiveResult.quarantined,
+        retirement.retire(),
+    );
+    try std.testing.expectEqual(@as(usize, 0), probe.free_count);
+    original.deinit();
+    try std.testing.expectEqual(@as(usize, 1), probe.free_count);
+}
+
+test "live retirement descriptor and digest drift quarantines without free or retry" {
+    var probe = LiveRetirementMutationProbe{
+        .parent = std.testing.allocator,
+        .fired = true,
+    };
+    const allocator = probe.allocator();
+    var original = try owned(allocator, "drift");
+    var retirement = PreparedLiveRetirement.init(allocator);
+    appendLiveRetirementUnchecked(&retirement, original);
+    sealLiveRetirementForTest(&retirement);
+    retirement.cleanup_plans[0].len += 1;
+
+    try std.testing.expectEqual(
+        RetireLiveResult.quarantined,
+        retirement.retire(),
+    );
+    try std.testing.expectEqual(@as(usize, 0), probe.free_count);
+    try std.testing.expectEqual(
+        RetireLiveResult.quarantined,
+        retirement.retire(),
+    );
+    try std.testing.expectEqual(@as(usize, 0), probe.free_count);
+    original.deinit();
+    try std.testing.expectEqual(@as(usize, 1), probe.free_count);
+}
+
+test "live retirement count cap plus one quarantines before slicing" {
+    var cleanup_overflow = PreparedLiveRetirement.init(std.testing.allocator);
+    cleanup_overflow.saved_self_addr = @intFromPtr(&cleanup_overflow);
+    cleanup_overflow.lifecycle = .prepared;
+    cleanup_overflow.cleanup_count = @intCast(max_live_cleanup_owners + 1);
+    try std.testing.expectEqual(
+        RetireLiveResult.quarantined,
+        cleanup_overflow.retire(),
+    );
+
+    var replacement_overflow =
+        PreparedLiveRetirement.init(std.testing.allocator);
+    replacement_overflow.saved_self_addr =
+        @intFromPtr(&replacement_overflow);
+    replacement_overflow.lifecycle = .prepared;
+    replacement_overflow.replacement_count =
+        @intCast(max_live_mutations + 1);
+    try std.testing.expectEqual(
+        RetireLiveResult.quarantined,
+        replacement_overflow.retire(),
+    );
 }
 
 test "merge rejects aliased source owners before any free" {

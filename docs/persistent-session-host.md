@@ -5681,13 +5681,12 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
               callback-free consume suffix에서만 generation을 증가시킨다. payload backing은 복제하거나 매 turn
               hash하지 않으며 revision/pending/support scalar만 O(1)로 재검증한다.
 
-              **d2b1 구현 완료:** pure policy는 terminal/deadline을 inherited blocker보다 먼저 판정하고 blocker가
+              **d2b1 bounded-turn 계약:** pure policy는 terminal/deadline을 inherited blocker보다 먼저 판정하고 blocker가
               있으면 parser/socket/lower-authority mutation 없이 `inherited_work_ready`만 반환한다.
               `parserReadiness`는 sealed provenance의 empty·1/31-byte partial·32-byte header·payload 완성/오류를
               consume/allocation 없이 분류한다. final-address whole-turn lease, copied/moved/stale/double snapshot
               거부, screen/metadata O(1) pending seal의 adoption·consume·teardown lifecycle을
-              Debug/ReleaseFast `test-session-host`가 고정한다. d2b2·d2b3가 남아 있으므로 d2b 전체는 여전히
-              계획 상태다.
+              Debug/ReleaseFast `test-session-host`가 고정한다.
 
               `LivePartialBatch`는 `ExternalPumpStorage`의 persistent single owner이며 turn scratch에 저장하지 않는다.
               완성된 live screen batch는 adoption 전용 backing에 억지로 append하지 않는다.
@@ -5850,6 +5849,23 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
               `.untracked` default와 모든 existing literal을 함께 migration한다. stored compact provenance가
               public view로 그대로 새거나, relabel/merge에서 사라지거나, authority digest 밖에 놓이는 callsite는
               boundary gate가 0개임을 검사한다.
+
+              **d2b2 live-batch 계약:** ledger slot에는 sealed external identity와 first-start 기준 compact span만
+              저장하고 observed view에서 checked `RxRange`를 복원한다. continuation은 exact same identity,
+              `incoming.start == old_end`, exact header+payload span만 허용하며 A→B→A 재결합은
+              drain/teardown tombstone 전까지 거부한다. 최대 64개 admission/merge/release를 incremental virtual
+              simulation으로 준비하고, `finishLiveBatch`는 allocator와 모든 replacement index/length를
+              callback-hidden local plan으로 먼저 동결한다. callback 사이에는 batch를 다시 읽지 않으며, 모든
+              replacement 할당 callback이 끝난 뒤 source
+              descriptor/content를 한 번 재검증한 다음 callback-free checked commit으로 전부 publish하거나 전부
+              거부한다. replacement·cleanup authority는 descriptor-first fingerprint와 content digest로 봉인하며,
+              최대 128개 cleanup owner retirement는 full tail/cap/alias/digest를 검증한 뒤 handle을 먼저
+              tombstone하고 stack-local plan만 실행한다. batch mutation/replacement의 count 밖 전체 tail도
+              canonical empty를 요구한다. zero batch, count 감소 또는 callback이 주입한 숨은 tail, allocator callback
+              mutation, 2/64 mutation의 OOM fail-index 0..첫 성공, 1 mutation의 zero-allocation hostile validation,
+              exact cap/cap+1, legacy/direct batch 동등성과
+              Debug/ReleaseFast component gate를 자동 검증한다. `PreparedLiveBatch`와 aggregate commit stack
+              scratch에는 각각 128 KiB/192 KiB compile-time 상한을 둔다.
 
               d2b3는 d2d에서 필요하던 payload owner/scratch를 조기 도입한다. parser가 만든 pair는 classifier 뒤
               즉시 다음 owner로 move되며 과거 valid pair를 다시 borrow할 copyable API는 없다.

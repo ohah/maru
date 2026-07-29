@@ -121,16 +121,63 @@ describe("rich editing mode", () => {
     expect(unsupportedRichSyntax("---\ntitle: 문서\n---\n\n본문")).toContain("YAML frontmatter");
     expect(unsupportedRichSyntax("텍스트[^1]\n\n[^1]: 각주")).toContain("각주");
     expect(unsupportedRichSyntax('<div class="x">raw</div>')).toContain("원시 HTML");
+    // 주석·doctype도 왕복에서 사라진다 — 태그만 보면 `<!-- toc -->`가 있는 문서가 조용히 손상된다.
+    expect(unsupportedRichSyntax("# 제목\n\n<!-- prettier-ignore -->\n\n본문")).toContain(
+      "원시 HTML",
+    );
+    expect(unsupportedRichSyntax("<!DOCTYPE html>\n\n본문")).toContain("원시 HTML");
+
     // 평범한 문서는 잠그지 않는다.
     expect(unsupportedRichSyntax("# 제목\n\n- 목록\n\n**굵게**")).toEqual([]);
     // 코드펜스 안의 HTML은 내용일 뿐이라 대상이 아니다(HTML 예제를 담은 문서를 잠그면 안 된다).
     expect(unsupportedRichSyntax("```html\n<div>example</div>\n```")).toEqual([]);
+    // 인라인 코드로 태그를 설명하는 문장도 마찬가지다.
+    expect(unsupportedRichSyntax("설정은 `<div>` 태그로 합니다.")).toEqual([]);
+    // frontmatter는 문서 첫 줄의 `---`만이다. 절 구분선으로 `---`를 두 번 쓴 평범한 문서를 잠그면 안 된다.
+    expect(unsupportedRichSyntax("제목\n---\n\n본문\n\n---\n\n다음 절")).toEqual([]);
 
     withEditorDom((dom) => {
       const rich = mountRich(dom, "---\ntitle: 문서\n---\n\n본문");
       try {
         const doc = (globalThis as unknown as { document: Document }).document;
         expect(doc.querySelector(".maru-rich-notice")).not.toBeNull();
+        expect(doc.querySelector(".ProseMirror")?.getAttribute("contenteditable")).toBe("false");
+      } finally {
+        rich.destroy();
+      }
+    });
+  });
+
+  test("내용이 바뀌면 잠금도 다시 판정한다", () => {
+    // 생성 시 한 번만 보면, 소스에서 frontmatter를 붙였다 리치로 돌아온 문서에 잠금이 걸리지 않아
+    // 그대로 저장돼 원문이 파괴된다. 반대로 frontmatter를 지운 문서가 영영 읽기 전용으로 남는 것도 막는다.
+    withEditorDom((dom) => {
+      const doc = (globalThis as unknown as { document: Document }).document;
+      const rich = mountRich(dom, "# 깨끗한 문서");
+      try {
+        expect(doc.querySelector(".maru-rich-notice")).toBeNull();
+
+        rich.setMarkdown("---\ntitle: 문서\n---\n\n본문");
+        expect(doc.querySelector(".maru-rich-notice")).not.toBeNull();
+        expect(doc.querySelector(".ProseMirror")?.getAttribute("contenteditable")).toBe("false");
+
+        rich.setMarkdown("# 다시 깨끗해진 문서");
+        expect(doc.querySelector(".maru-rich-notice")).toBeNull();
+        expect(doc.querySelector(".ProseMirror")?.getAttribute("contenteditable")).toBe("true");
+      } finally {
+        rich.destroy();
+      }
+    });
+  });
+
+  test("close lock이 풀려도 표현 불가 잠금은 유지된다", () => {
+    withEditorDom((dom) => {
+      const doc = (globalThis as unknown as { document: Document }).document;
+      const rich = mountRich(dom, "---\ntitle: 문서\n---\n\n본문");
+      try {
+        rich.setEditable(false); // close lock 획득
+        expect(doc.querySelector(".ProseMirror")?.getAttribute("contenteditable")).toBe("false");
+        rich.setEditable(true); // close lock 해제 — 표현 불가 잠금까지 풀리면 안 된다
         expect(doc.querySelector(".ProseMirror")?.getAttribute("contenteditable")).toBe("false");
       } finally {
         rich.destroy();

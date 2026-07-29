@@ -44,9 +44,13 @@ pub const Geometry = struct {
     dock_size_px: u32 = 0,
 };
 
-/// 헤더 우측의 읽기/소스 편집 토글+dirty 표시 영역. 경로는 이 rect 왼쪽까지만 그린다. 폭이 너무 좁으면
-/// 최소 6칸으로 줄여도 토글 hit target은 유지한다.
-pub const header_control_cols: u32 = 18;
+/// 헤더 우측의 mode 토글 + dirty/conflict 표시 영역. 경로는 이 rect 왼쪽까지만 그린다.
+///
+/// **폭 산정**: markdown은 `읽기|리치|소스` 세 슬롯이고 각 라벨이 CJK 2셀×2글자 = 4칸이다. 여기에 렌더가
+/// 슬롯마다 1칸을 여백으로 쓰므로(`range.start + 1`) 슬롯당 5칸이 필요하고, dirty·conflict 글리프가 둘 다
+/// 보이면 4칸이 더 빠진다. 18칸이면 (18-4)/3 = 4칸/슬롯이라 첫 라벨이 잘렸다 — 19칸으로 올려 세 슬롯 모두
+/// 최소 5칸을 확보한다. 슬롯이 늘면 이 값도 함께 늘려야 한다.
+pub const header_control_cols: u32 = 19;
 
 pub const HeaderCellLayout = struct {
     control_start: u16,
@@ -366,6 +370,22 @@ test "resize pointer maps backing pixels to persisted points and rejects non-fin
     const expected_pt: u32 = @intCast((@as(u64, g.dock_size_px + 100) * 1000) / 2000);
     try std.testing.expectEqual(@as(?u32, expected_pt), sizePtForPointer(g, .right, @floatFromInt(g.dock.x - 100), 0, 2000));
     try std.testing.expectEqual(@as(?u32, null), sizePtForPointer(g, .right, std.math.nan(f64), 0, 2000));
+}
+
+test "markdown 헤더는 상태 글리프가 모두 보여도 세 mode 라벨 폭을 지킨다" {
+    // 회귀: 3분할이 되면서 18칸으로는 dirty ●와 conflict !가 동시에 보일 때 첫 슬롯이 4칸으로 줄어
+    // "읽기"(CJK 2셀×2)가 잘렸다. 렌더가 슬롯마다 1칸을 여백으로 쓰므로 슬롯당 5칸이 필요하다.
+    const header: Rect = .{ .x = 0, .y = 0, .w = 800, .h = 20 };
+    const cell: u32 = 10;
+    inline for (.{ .{ true, true }, .{ true, false }, .{ false, true }, .{ false, false } }) |flags| {
+        const dirty = flags[0];
+        const external = flags[1];
+        inline for (.{ dock_panel.Mode.read, .rich, .source_edit }) |m| {
+            const rect = headerModeRect(header, cell, .markdown, m, dirty, external).?;
+            // rect.w는 픽셀이다 — 라벨 4칸 + 여백 1칸.
+            try std.testing.expect(rect.w >= 5 * cell);
+        }
+    }
 }
 
 test "파일 헤더 밴드 control rect는 우측 정렬되고 좁은 밴드에서도 경계 안이다" {

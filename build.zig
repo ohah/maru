@@ -1152,7 +1152,7 @@ pub fn build(b: *std.Build) void {
                 // hang job이 helper를 재시작시키므로 start 수는 1~2다. 상한은 failure budget이 별도로 강제한다.
                 "/usr/bin/grep -Eq '^mermaid_helper_starts=[12]$' \"$summary\"; " ++
                 // 읽기 프리뷰는 모드를 오갈 때마다 자기 펜스를 다시 렌더하므로 요청 수는 시나리오 길이에 따라 는다.
-                "/usr/bin/grep -Eq '^mermaid_request_frames=[2-9][0-9]*$' \"$summary\"; " ++
+                "/usr/bin/grep -Eq '^mermaid_request_frames=([2-9]|[1-9][0-9]+)$' \"$summary\"; " ++
                 "/usr/bin/grep -Eq '^mermaid_terminal_results=[1-9][0-9]*$' \"$summary\"; " ++
                 "/usr/bin/grep -Eq '^mermaid_deadline_expirations=1$' \"$summary\"; " ++
                 "/usr/bin/grep -Eq '^file_viewer_default_mode=read$' \"$summary\"; " ++
@@ -1187,6 +1187,10 @@ pub fn build(b: *std.Build) void {
         macos_app_html_smoke.setEnvironmentVariable("MARU_MACOS_APP_SMOKE_MS", "6000");
         macos_app_html_smoke.setEnvironmentVariable("MARU_FILE_PANEL", b.pathFromRoot("tests/fixtures/file-panel/fp5-viewer.html"));
         macos_app_html_smoke.setEnvironmentVariable("MARU_WEB_APP_ROOT", b.pathFromRoot("web/dist"));
+        // markdown 스모크와 같은 이유로 전용 HOME에 가둔다 — 사용자 workspace가 복원되면 그 창의 파일
+        // 패널이 함께 열려 probe가 스모크 대상이 아닌 패널을 본다.
+        macos_app_html_smoke.setEnvironmentVariable("HOME", b.pathFromRoot("zig-out/maru-macos-app/home"));
+        macos_app_html_smoke.setEnvironmentVariable("CFFIXED_USER_HOME", b.pathFromRoot("zig-out/maru-macos-app/home"));
         macos_app_html_smoke.step.dependOn(&macos_app_smoke_assert.step);
         const macos_app_html_smoke_assert = b.addSystemCommand(&.{
             "sh", "-eu", "-c",

@@ -196,9 +196,17 @@ flowchart TD
   사용자는 소스 모드에서 손실 없이 고칠 수 있다. 코드펜스 안의 HTML은 내용일 뿐이라 검사에서 제외한다.
 - **손실이 곤란하면 소스로 편집한다.** 소스 모드는 CM6가 텍스트를 그대로 다루므로 왕복 손실이 0이다. 리치에서
   이상한 결과가 보이면 같은 파일을 소스로 열어 원문을 직접 고칠 수 있다. 그래서 리치는 소스를 대체하지 않는다(§1).
-- **모드 전환은 저장 상태를 기준으로 한다.** dirty인 상태로 리치↔소스를 오가면 두 편집기의 문서 표현이 서로
-  달라 어느 쪽이 최신인지 모호해진다. 전환 시점의 내용을 마크다운 텍스트 한 벌로 만들어 상대 편집기에 넘기고,
+- **모드 전환은 저장 상태를 기준으로 한다.** dirty인 상태로 모드를 오가면 두 편집기의 문서 표현이 서로 달라
+  어느 쪽이 최신인지 모호해진다. 전환 시점의 내용을 마크다운 텍스트 한 벌로 만들어 상대 편집기에 넘기고,
   그 텍스트가 이후의 유일한 기준이 된다. 전환만으로 디스크에 쓰지는 않는다(저장은 계속 명시적 `⌘S`다).
+- **세 모드가 공유하는 기준점.** 읽기·소스는 같은 CM6 `Text`와 revision을 쓰고, 리치는 문서모델이라 직렬화
+  결과를 `savedContent`와 견준다. 이 비대칭이 만드는 함정을 셋 고정한다: ⑴ 저장은 **호출 시점 mode를 고정**해
+  큐 콜백이 다른 모드의 기준점을 갱신하지 않는다, ⑵ **외부 디스크 reload는 CM6와 리치를 모두 다시 시드한다** —
+  한쪽만 갱신하면 다음 저장이 외부 편집을 되돌려 쓴다, ⑶ close lock과 IME fail-closed 판정은 지금 **보이는**
+  편집기를 본다(CM6만 보면 리치에서 조합 중에도 탭이 닫힌다).
+- **표현 불가 문법은 편집과 저장을 함께 막는다.** 잠금이 타이핑만 막으면 `⌘S` 한 번에 원문이 파괴되므로
+  저장 경로도 같은 판정을 본다. 판정은 **내용이 바뀔 때마다** 다시 돈다 — 생성 시 한 번만 보면 소스에서
+  frontmatter를 붙였다 돌아온 문서에 잠금이 걸리지 않고, 반대로 지운 문서가 영영 읽기 전용으로 남는다.
 - **툴바 구성(v1)**: 본문·제목 1~3, 굵게·기울임·취소선·인라인 코드, 불릿·번호·체크 목록, 인용·구분선. 각 버튼은
   문서모델 명령 하나에 대응하며 현재 selection에 토글로 적용한다. 이미지·표 **삽입 버튼**과 링크 편집 UI는
   후속이다(§13) — 문서에 이미 있는 이미지·표는 확장이 보존한다.
@@ -302,7 +310,7 @@ flowchart TD
 
 **FP8 다중 그룹 wire(레거시 리더 전용 — writer는 더 이상 이 키를 내지 않는다)**: 단일 그룹은 기존 `dock-entry`만 방출해 byte 고정점을 유지했다. 다중 그룹일 때만 `dock-group-count`·`dock-focused-group`, preorder 반복 `dock-node="leaf:<group>"|"split:<horizontal|vertical>:<ratio-milli>"`, 반복 `dock-entry-v2="<group>:<kind>:<mode>:<active>:<path-byte-len>:<path>"`를 같은 window 줄에 쓴다. 옛 reader는 새 키를 skip해 도크만 빈 상태로 복원하고 terminal/windows는 보존한다. 새 reader는 group 64·node 127·entry 256 상한, full-binary preorder, leaf 1회 참조, ratio 50..950, 도크 전역 path 유일성, 그룹별 active 0/1을 검증한다. 미래 kind/mode/side/direction은 도크만 기본 상태로 강등한다.
 
-flat/v2의 `<mode>` 닫힌 목록은 `read|rich|source-edit`다. `Mode.allowedFor(kind)`가 kind별 허용 mode를 정하고(`markdown`=둘, `html`=`read`만) open·rename kind 전이·serialize·parse·ABI가 이 함수를 공유한다. **폐기된 `live-preview`는 reader 전용 하위호환으로만 남는다** — 라이브 프리뷰를 쓰던 시절 저장된 entry를 만나면 `parseDockEntry`가 `defaultFor`(읽기)로 조용히 clamp한다. 이 clamp가 없으면 그 창의 도크 전체가 빈 상태로 강등되므로(아래 forward-compat 규칙) 옛 workspace 파일을 여는 사용자가 탭을 잃는다. writer는 이 값을 다시 쓰지 않는다. reader는 그 밖의 invalid kind/mode 조합이나 미래 mode 하나를 만나면 현행 forward-compat 규칙대로 **그 창의 도크 전체를 빈 상태로 강등**하고 terminal/windows를 보존한다. 기존 read/source byte 고정점은 바꾸지 않는다.
+flat/v2의 `<mode>` 닫힌 목록은 `read|rich|source-edit`다. `Mode.allowedFor(kind)`가 kind별 허용 mode를 정하고(`markdown`=셋, `svg`=`read|source-edit`, `html`=`read`만) open·rename kind 전이·serialize·parse·ABI가 이 함수를 공유한다. **폐기된 `live-preview`는 reader 전용 하위호환으로만 남는다** — 라이브 프리뷰를 쓰던 시절 저장된 entry를 만나면 `parseDockEntry`가 `defaultFor`(읽기)로 조용히 clamp한다. 이 clamp가 없으면 그 창의 도크 전체가 빈 상태로 강등되므로(아래 forward-compat 규칙) 옛 workspace 파일을 여는 사용자가 탭을 잃는다. writer는 이 값을 다시 쓰지 않는다. reader는 그 밖의 invalid kind/mode 조합이나 미래 mode 하나를 만나면 현행 forward-compat 규칙대로 **그 창의 도크 전체를 빈 상태로 강등**하고 terminal/windows를 보존한다. 기존 read/source byte 고정점은 바꾸지 않는다.
 
 **명시 수용한 downgrade 한계**: 사용자 결정대로 구버전용 adapter를 제공하지 않는다. 현재 mode 목록을 모르는 구버전 Maru로 workspace를 열고 다시 저장하면 그 창의 도크 metadata가 사라질 수 있다. 파일 내용은 workspace에 없고 disk가 SSOT라 영향은 탭/group/mode 배치에 한정되지만 되돌릴 수 없는 downgrade write다. 앱 업데이트 뒤 구버전으로 롤백하는 workflow는 지원 범위 밖이며, 이 한계를 제거하려면 별도 포맷/backup 결정이 필요하다.
 

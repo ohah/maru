@@ -49,6 +49,7 @@
 - [텍스트 필드 에디터(주소창 caret·선택·마우스 편집)](docs/text-field-editor.md)
 - [파일 패널(마크다운·HTML 뷰어/편집기)](docs/file-panel.md)
 - [파일 탐색기(도크 트리·watcher·root)](docs/file-explorer.md)
+- [선택 영역을 에이전트에 보내기(파일 패널 → 터미널 CLI)](docs/send-selection-to-agent.md)
 
 ## 설계 문서
 

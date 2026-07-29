@@ -95,8 +95,8 @@ var app_instance_lease_slot: LeaseSlot = .{};
 // 여기서는 ABI 표면으로 re-export만 한다.
 pub const EventKind = session_mod.EventKind;
 
-test "ABI v149 app instance lease result values match the C header" {
-    try std.testing.expectEqual(@as(u32, 149), abi_version);
+test "ABI v150 app instance lease result values match the C header" {
+    try std.testing.expectEqual(@as(u32, 150), abi_version);
     try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_ACQUIRED), @intFromEnum(AppInstanceLeaseResult.acquired));
     try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_HELD), @intFromEnum(AppInstanceLeaseResult.held));
     try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_UNSAFE), @intFromEnum(AppInstanceLeaseResult.unsafe));
@@ -209,6 +209,7 @@ test "Swift workspace checkpoint validates the assembled manifest before backup 
 test "ABI file panel mode, key route, and asset role values match the C header" {
     try std.testing.expectEqual(@as(u32, c.MARU_FILE_PANEL_MODE_READ), @intFromEnum(maru.session.dock_panel.Mode.read));
     try std.testing.expectEqual(@as(u32, c.MARU_FILE_PANEL_MODE_SOURCE_EDIT), @intFromEnum(maru.session.dock_panel.Mode.source_edit));
+    try std.testing.expectEqual(@as(u32, c.MARU_FILE_PANEL_MODE_RICH), @intFromEnum(maru.session.dock_panel.Mode.rich));
     try std.testing.expectEqual(@as(u32, c.MARU_WEB_KEY_ROUTE_PASS_THROUGH), @intFromEnum(maru.config.keybinding.WebKeyRoute.pass_through));
     try std.testing.expectEqual(@as(u32, c.MARU_WEB_KEY_ROUTE_APP_ACTION), @intFromEnum(maru.config.keybinding.WebKeyRoute.app_action));
     try std.testing.expectEqual(@as(u32, c.MARU_WEB_KEY_ROUTE_CONSUME_UNBOUND), @intFromEnum(maru.config.keybinding.WebKeyRoute.consume_unbound));
@@ -1225,7 +1226,7 @@ pub export fn maru_macos_app_session_file_panel_mode(session: ?*AppSession, surf
 /// 그 kind가 허용하지 않는 mode. v149.
 pub export fn maru_macos_app_session_set_file_panel_mode(session: ?*AppSession, surface_id: u64, raw_mode: u32) u32 {
     const app_session = session orelse return 0;
-    if (raw_mode > @intFromEnum(maru.session.dock_panel.Mode.source_edit)) return 0;
+    if (raw_mode > @intFromEnum(maru.session.dock_panel.Mode.rich)) return 0;
     const mode: maru.session.dock_panel.Mode = @enumFromInt(raw_mode);
     return if (app_session.setFilePanelModeBySurface(surface_id, mode)) 1 else 0;
 }

@@ -3031,7 +3031,8 @@ final class MaruWebPanelView: NSView {
         guard Self.isKnownFilePanelMode(rawMode) else { return }
         requestedFileMode = rawMode
         guard webView.url?.scheme == MaruAppSchemeHandler.scheme, webView.url?.host == "app" else { return }
-        let mode = requestedFileMode == Int32(MARU_FILE_PANEL_MODE_SOURCE_EDIT) ? "source-edit" : "read"
+        let mode = requestedFileMode == Int32(MARU_FILE_PANEL_MODE_SOURCE_EDIT) ? "source-edit"
+            : (requestedFileMode == Int32(MARU_FILE_PANEL_MODE_RICH) ? "rich" : "read")
         webView.evaluateJavaScript(
             "window.dispatchEvent(new CustomEvent('maru:file-mode',{detail:{mode:'\(mode)'}}))",
             completionHandler: nil
@@ -3041,6 +3042,7 @@ final class MaruWebPanelView: NSView {
     static func isKnownFilePanelMode(_ rawMode: Int32) -> Bool {
         rawMode == Int32(MARU_FILE_PANEL_MODE_READ)
             || rawMode == Int32(MARU_FILE_PANEL_MODE_SOURCE_EDIT)
+            || rawMode == Int32(MARU_FILE_PANEL_MODE_RICH)
     }
 
     func requestFileDirtySync(requestId: UInt64 = 0) {

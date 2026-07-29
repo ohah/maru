@@ -4,6 +4,8 @@
 
 이 문서는 [web-panel.md](web-panel.md) §7e가 *"mid-string 커서·선택은 후속"* 으로 남겨둔 그 후속의 상세 설계다. §7e의 주소창 밴드 렌더·nav 버튼·navigate 파이프라인(7e-1~7e-4)은 이미 구현됐고, 여기서 다루는 건 **밴드 안 텍스트의 편집 모델**뿐이다.
 
+> 이 문서가 기술하는 편집 모델은 제품 경로에 배선돼 있다. 모델은 `src/chrome/components/text_field.zig`(L3 순수 — `TextField` + `fieldLayout`/`caretAtColumn`)가 소유하고, 주소창은 `AppSession.addr_field`로 그것을 소비한다. 진행/검증 상태의 단일 출처는 [검증 매트릭스](verification-matrix.md)의 "주소창 텍스트 필드 편집" 행이며, 이 문서는 상태가 아니라 **계약**을 기술한다.
+
 > 이 설계는 두 차례 적대적 검증을 거쳤다(설계 1회 + 문서 1회). 검증이 못박은 제약은 §3·§5·§6에 인라인으로 표기한다.
 
 ## 1. 목표·범위
@@ -156,17 +158,17 @@ TextField = struct {
   - **착수 적기**: 주소창은 짧은 URL 입력이라 위 이득의 실수요가 낮다. **2번째 `TextField` 소비자**(예: 향후 코드 에디터 surface — 긴 한글 문서 편집)가 등장해 선택-대체·재변환 수요가 오를 때 함께 착수하는 게 비용 대비 효율이다(§8 후속의 "향후 2번째 소비자 등장 시 보편 추출 검토"와 동시).
 - **회귀 방지**: [overlay_input.zig] 모듈 주석이 못박은 "커밋 N + 조합 N+1이 다음 조합을 지움" 회귀가 caret 전진과 preedit 앵커 동기에서 재발할 수 있다. v1은 그 흐름(imeInsert→imeMarked 순서)의 헤드리스 IME 테스트를 caret-aware로 **확장**한다([devsession-undefined-test-field-trap]: 새 필드는 기본값 필수).
 
-## 8. 슬라이스 계획
+## 8. 구현 구성 (레이어별 책임)
 
-각 슬라이스는 독립 green·doc 동기·[pr-checklist.md] 준수([drive-multi-pr-plan-to-completion]).
+편집 모델은 아래 다섯 조각으로 나뉜다. 각 조각은 독립 green·doc 동기·[pr-checklist.md] 준수로 들어왔다([drive-multi-pr-plan-to-completion]).
 
-- **0. 설계 문서 (이 문서)** — AGENTS.md 등록 + web-panel.md §7e 포인터 정정.
-- **1. `text_field.zig` 모델·레이아웃·hit-test (순수)** — struct + ops + `fieldLayout`(run 반환)/`caretAtColumn`(그래핌 스냅). 소비자 0, 헤드리스 테스트만(편집 ops·EAW·그래핌·선택·가로 스크롤·역함수 왕복·preedit run).
-- **2. 렌더 교체** — `buildPaneAddressBarDrawList` **editing 경로만** `fieldLayout` 소비(§3.2 범위 한정). caret 열·선택 quad. metrics 단일 계산 스레드. 오프스크린 스크린샷 검증.
-- **3. 마우스 배선** — `app_session.mouse()` 밴드 분기에 클릭 caret·드래그 선택·더블/트리플·autoscroll(nav_end 선제외·드래그 중 addr_edit 유지). `addr_input`(OverlayInput)→`TextField` 교체(IME 라우터 addr arm repoint).
-- **4. 키보드 편집 + 클립보드 브리지** — 화살표·단어·Home/End·shift 선택·⌘A·caret 삭제 + §5.3 ⌘C/X/V 브리지.
-- **5. IME preedit-at-caret** — §7 v1.
-- **후속(별도 이니셔티브)**: macOS marked-text 완전 프로토콜, ⌘Z undo, caret blink 승격(v95), 향후 2번째 소비자 등장 시 보편 추출 검토.
+- **모델·레이아웃·hit-test (순수, `text_field.zig`)**: `TextField` struct + 편집 ops + `fieldLayout`(run 반환)/`caretAtColumn`(그래핌 스냅). 헤드리스 테스트가 편집 ops·EAW·그래핌 경계·선택·가로 스크롤·역함수 왕복·preedit run을 고정한다.
+- **렌더**: `buildPaneAddressBarDrawList`의 **editing 경로만** `fieldLayout`을 소비한다(§3.2 범위 한정) — caret 열·선택 quad, metrics 단일 계산.
+- **마우스**: `app_session.mouse()` 밴드 분기가 클릭 caret(`addrBandOffsetAt`→`caretAtColumn`)·드래그 선택(`selectTo`)·더블클릭 단어(`selectWordAt`)·트리플클릭 전체(`selectAll`)를 라우팅한다. nav 버튼 존은 caret 판정보다 **먼저** 소비한다(§3.2).
+- **키보드·클립보드**: ←/→·⌥단어·⌘Home/End·shift 선택·⌘A·⌃A/⌃E(emacs)·⌫/⌥⌫/⌘⌫ + §5.3 ⌘C/⌘X/⌘V 브리지.
+- **IME**: `inputFocus=.addr_edit` 라우팅으로 `setPreedit`/`commitPreedit`이 caret 자리에 조합을 얹는다(§7 v1).
+
+**이 계약 밖(별도 이니셔티브)**: macOS marked-text 완전 프로토콜(§7 — 양방향 UTF-16 caret 읽기/`replacementRange` 쓰기 ABI가 필요), ⌘Z undo, caret blink 승격(v95), 2번째 소비자가 생길 때의 보편 컴포넌트 추출.
 
 ## 9. 검증
 
@@ -182,7 +184,6 @@ TextField = struct {
 - **`app_session.zig` hot file**: 밴드 hit-test·IME 라우팅이 이 파일(≈40k줄)에 있어 진행 중 작업과 충돌 위험 → §11 타이밍.
 - **밴드가 coretext(L4) 상주 + 두 레이아웃 엔진 공존**: 읽기전용(`appendEllipsizedTitle`)·편집(`fieldLayout`)이 한 밴드에 공존하므로 §3.2 일치 규약을 어기면 전환 시 열 점프. 향후 밴드를 정식 L3 `ChromeDraw` 컴포넌트로 승격하면 lowering만 backend가 맡아 완전 중립화(별도 cleanup, 이 범위 밖).
 
-## 11. 타이밍·기존 문서 정정
+## 11. 기존 문서 정정
 
-- **타이밍**: 코드 슬라이스(1~5)는 사용자 진행 중 작업(executeScript 등)이 main에 머지된 뒤 착수해 리베이스 충돌을 피한다. 슬라이스 0(문서)만 선행.
-- **[web-panel.md] §7e 정정**: 텍스트 입력을 *"공유 OverlayInput 재사용(caret·가로 스크롤 단일 출처)"* 로 적었으나, 실제 `OverlayInput`은 텍스트 저장+EAW+**끝-caret 열(`queryCols`)**만 제공하고 밴드의 표시 caret·가로 스크롤은 coretext `appendEllipsizedTitle`(tail 앵커)이 생성한다(caret/선택/가로 스크롤 **미소유**). 주소창은 이 문서의 `TextField`로 이관하며, §7e의 *"mid-string 커서·선택은 후속"* 이 곧 이 문서다.
+- **[web-panel.md] §7e 정정**: 텍스트 입력을 *"공유 OverlayInput 재사용(caret·가로 스크롤 단일 출처)"* 로 적었으나, `OverlayInput`은 텍스트 저장+EAW+**끝-caret 열(`queryCols`)**만 제공하고 밴드의 표시 caret·가로 스크롤은 coretext `appendEllipsizedTitle`(tail 앵커)이 생성했다(caret/선택/가로 스크롤 **미소유**). 주소창 텍스트는 이제 이 문서의 `TextField`가 소유하며, §7e의 *"mid-string 커서·선택은 후속"* 이 곧 이 문서다.

@@ -645,7 +645,9 @@ projection·fresh adopt는 미구현이다. canonical GUI connection을 유지�
 `restore incomplete` 실행은 종료 시 마지막 완전본을 `.bak`으로 한 번 보존한 뒤 현재 모델을 저장한다. capture/serialize/
 write 자체가 실패한 경우에만 write 0으로 이전 완전본을 유지한다.
 
-### 접속 실패 행렬 (목표 계약)
+### 접속 실패 행렬
+
+이 분류는 배선돼 있다 — `app_session.zig`가 `RuntimeNotFound`/`StaleHostHandle`/`HostIdentityMismatch`를 `PersistentRuntimeGone`으로 접고, `FailureReason.host_gone`·`startup_timeout`을 discovery/resolver가 소비하며, 영구 부재는 `Term.ended_placeholder`로 남는다.
 
 host/host_id/runtime 불일치는 **분류에 따라 갈린다**(아래 표). 영구 부재는 그 Term만 per-Term ended placeholder로 두고
 창 apply를 성공시키며, 일시 실패는 종전처럼 해당 Window apply 실패로 fail-close한다(additional Window는 teardown,

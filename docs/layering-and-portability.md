@@ -82,7 +82,9 @@ flowchart TD
 
 **검증:** 헤드리스 fake `Rt`로 Term/Pane/Tab/PaneTree 구성·workspace round-trip·pane hit-test를 PTY/surface 없이 단언(`session_model.zig` 테스트, tamper로 수집 확인). 매 단계 `zig build test`·`check-boundaries`(session에 pty/platform/OS 타입명 0)·`macos-app-build` + 실기 `zig build macos-app`. `/code-review max` 결함 0.
 
-### 3.2 3차 추출 (계획): `src/app`의 중립 모델을 session core로
+### 3.2 3차 추출: `src/app`의 중립 모델을 session core로
+
+> **현황**: 추출은 끝났다 — `surface`는 `src/session/surface.zig`에 있고 `src/session/*`에서 `../app`로 가는 import는 0건이다(§59가 우려한 "D1만 하면 `session→app`이 잔존하는 절반 정리"는 발생하지 않았다). 아래는 그 추출의 근거·단계 서술이다.
 
 > 실행 플랜·**선결 결정**(`src/app` 정체성 — L4 공통 런타임으로 규정)·단계 D0~D3 상세는 [app-layer-decomposition.md](app-layer-decomposition.md)를 단일 출처로 둔다(아래는 골격).
 

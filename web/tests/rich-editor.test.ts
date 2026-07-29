@@ -9,7 +9,7 @@
 
 import { describe, expect, test } from "bun:test";
 import { withEditorDom } from "./editor-dom";
-import { createRichEditor } from "../src/rich-editor";
+import { createRichEditor, unsupportedRichSyntax } from "../src/rich-editor";
 
 function mountRich(dom: ReturnType<typeof Object>, markdown: string) {
   const host = (globalThis as unknown as { document: Document }).document.querySelector(
@@ -93,6 +93,45 @@ describe("rich editing mode", () => {
         const bullet = buttons.find((b) => b.title === "불릿 목록");
         bullet?.dispatchEvent(new dom.window.Event("click", { bubbles: true }));
         expect(rich.getMarkdown()).toMatch(/^- /m);
+      } finally {
+        rich.destroy();
+      }
+    });
+  });
+
+  test("이미지와 표는 확장이 보존한다", () => {
+    withEditorDom((dom) => {
+      const source = "![alt](img.png)\n\n| a | b |\n| --- | --- |\n| 1 | 2 |\n";
+      const rich = mountRich(dom, source);
+      try {
+        const out = rich.getMarkdown();
+        // 확장이 없으면 이미지는 `alt` 텍스트만 남고 표는 한 줄로 뭉개진다(실측). 둘 다 회귀 가드다.
+        expect(out).toContain("![alt](img.png)");
+        expect(out).toMatch(/\|\s*a\s*\|\s*b\s*\|/);
+        expect(out).toMatch(/\|\s*---\s*\|/);
+        expect(out).toMatch(/\|\s*1\s*\|\s*2\s*\|/);
+      } finally {
+        rich.destroy();
+      }
+    });
+  });
+
+  test("표현할 수 없는 문법이 있는 문서는 편집을 잠근다", () => {
+    // 저장 경로가 열려 있으면 왕복에서 원문이 파괴된다 — frontmatter는 제목으로 변질되고 태그·각주는 사라진다.
+    expect(unsupportedRichSyntax("---\ntitle: 문서\n---\n\n본문")).toContain("YAML frontmatter");
+    expect(unsupportedRichSyntax("텍스트[^1]\n\n[^1]: 각주")).toContain("각주");
+    expect(unsupportedRichSyntax('<div class="x">raw</div>')).toContain("원시 HTML");
+    // 평범한 문서는 잠그지 않는다.
+    expect(unsupportedRichSyntax("# 제목\n\n- 목록\n\n**굵게**")).toEqual([]);
+    // 코드펜스 안의 HTML은 내용일 뿐이라 대상이 아니다(HTML 예제를 담은 문서를 잠그면 안 된다).
+    expect(unsupportedRichSyntax("```html\n<div>example</div>\n```")).toEqual([]);
+
+    withEditorDom((dom) => {
+      const rich = mountRich(dom, "---\ntitle: 문서\n---\n\n본문");
+      try {
+        const doc = (globalThis as unknown as { document: Document }).document;
+        expect(doc.querySelector(".maru-rich-notice")).not.toBeNull();
+        expect(doc.querySelector(".ProseMirror")?.getAttribute("contenteditable")).toBe("false");
       } finally {
         rich.destroy();
       }

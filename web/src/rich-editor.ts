@@ -13,6 +13,28 @@ import StarterKit from "@tiptap/starter-kit";
 import { Markdown } from "@tiptap/markdown";
 import TaskList from "@tiptap/extension-task-list";
 import TaskItem from "@tiptap/extension-task-item";
+import Image from "@tiptap/extension-image";
+import { Table, TableRow, TableCell, TableHeader } from "@tiptap/extension-table";
+
+/**
+ * 리치가 문서모델로 표현하지 못해 **저장할 때 잃어버리는** 문법을 찾는다.
+ *
+ * 실측(왕복 테스트)으로 확인된 것들이다 — frontmatter는 `---` 구분자가 제목으로 변질되고(`## title: 문서`),
+ * 원시 HTML은 태그가 사라지며, 각주는 정의가 인라인 링크로 뭉개진다. 이미지·표는 확장을 넣어 해결했지만
+ * 이 셋은 문서모델에 대응 노드가 없어 확장으로 채울 수 없다.
+ *
+ * 그래서 이런 문서는 리치에서 **읽기만** 하게 하고 편집을 막는다. 저장 경로가 닫히면 원문은 안전하고,
+ * 사용자는 소스 모드에서 손실 없이 고칠 수 있다(docs/file-panel.md §2.5).
+ */
+export function unsupportedRichSyntax(markdown: string): string[] {
+  // 코드펜스 안의 텍스트는 내용일 뿐이라 검사 대상이 아니다(예: HTML 예제를 담은 문서).
+  const withoutFences = markdown.replace(/^ {0,3}(`{3,}|~{3,})[\s\S]*?^ {0,3}\1[ \t]*$/gm, "");
+  const found: string[] = [];
+  if (/^---\r?\n[\s\S]*?^---[ \t]*$/m.test(withoutFences)) found.push("YAML frontmatter");
+  if (/^\[\^[^\]]+\]:/m.test(withoutFences)) found.push("각주");
+  if (/<\/?[a-zA-Z][a-zA-Z0-9-]*(\s[^<>]*)?>/.test(withoutFences)) found.push("원시 HTML");
+  return found;
+}
 
 export type RichEditorHandle = {
   /** 현재 문서를 마크다운으로 직렬화한다. 저장·모드 전환의 유일한 출력 경로다. */
@@ -34,7 +56,7 @@ type ToolbarButton = {
   isActive?: (editor: Editor) => boolean;
 };
 
-/** 툴바 구성(v1, §2.5). 이미지·표·코드블록 삽입은 후속이다. */
+/** 툴바 구성(v1, §2.5). 이미지·표 **삽입 버튼**은 후속이다 — 문서에 이미 있는 이미지·표는 확장이 보존한다. */
 const toolbar_groups: ToolbarButton[][] = [
   [
     {
@@ -182,6 +204,13 @@ export function createRichEditor(
       TaskList,
       // 체크박스를 눌러 바로 토글할 수 있게 한다(GFM `- [ ]`).
       TaskItem.configure({ nested: true }),
+      // 이미지·표 확장이 없으면 문서모델이 그 노드를 만들지 못해 **저장할 때 통째로 사라진다**
+      // (실측: `![alt](img.png)` → `alt`, 표 3줄 → 한 줄로 뭉갬). 리치가 다룰 수 있는 문법은 확장으로 채운다.
+      Image,
+      Table,
+      TableRow,
+      TableCell,
+      TableHeader,
     ],
     onUpdate: () => {
       onChange();
@@ -193,6 +222,16 @@ export function createRichEditor(
   syncToolbar = buildToolbar(shell, editor);
   shell.appendChild(content);
   syncToolbar();
+
+  // 리치가 표현하지 못하는 문법이 있으면 편집을 막는다 — 저장 경로가 닫혀야 원문이 안전하다.
+  const unsupported = unsupportedRichSyntax(markdown);
+  if (unsupported.length > 0) {
+    editor.setEditable(false);
+    const notice = doc.createElement("div");
+    notice.className = "maru-rich-notice";
+    notice.textContent = `이 문서에는 리치 편집이 다루지 못하는 문법이 있어 편집을 잠갔습니다(${unsupported.join(", ")}). 소스 모드에서 고치면 원문이 그대로 보존됩니다.`;
+    shell.insertBefore(notice, content);
+  }
 
   // ⌘S는 편집기가 소유한다 — native가 web_editor로 라우팅한 키가 여기 도달한다(§2.3 키 경계).
   content.addEventListener("keydown", (event) => {

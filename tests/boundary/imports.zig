@@ -740,6 +740,61 @@ test "session host RX unchecked append has one validating aggregate caller" {
     );
 }
 
+test "session host external RX DTO and classifier preserve neutral ownership boundaries" {
+    const allocator = std.testing.allocator;
+    const types_source = try readZigFileZ(
+        allocator,
+        "src/platform/macos/session_host/external_rx_types.zig",
+    );
+    defer allocator.free(types_source);
+    const mode_source = try readZigFileZ(
+        allocator,
+        "src/platform/macos/session_host/client_external_mode.zig",
+    );
+    defer allocator.free(mode_source);
+    const ledger_source = try readZigFileZ(
+        allocator,
+        "src/platform/macos/session_host/external_inbox_ledger.zig",
+    );
+    defer allocator.free(ledger_source);
+    const demux_source = try readZigFileZ(
+        allocator,
+        "src/platform/macos/session_host/external_rx_demux.zig",
+    );
+    defer allocator.free(demux_source);
+    const barrel_source = try readZigFileZ(
+        allocator,
+        "src/platform/macos/session_host.zig",
+    );
+    defer allocator.free(barrel_source);
+
+    try std.testing.expect(!std.mem.containsAtLeast(u8, types_source, 1, "client_external_mode.zig"));
+    try std.testing.expect(!std.mem.containsAtLeast(u8, types_source, 1, "external_inbox_ledger.zig"));
+    try std.testing.expect(std.mem.containsAtLeast(u8, mode_source, 1, "external_rx_types.zig"));
+    try std.testing.expect(!std.mem.containsAtLeast(u8, mode_source, 1, "external_inbox_ledger.zig"));
+    try std.testing.expect(!std.mem.containsAtLeast(u8, ledger_source, 1, "client_external_mode.zig"));
+    try std.testing.expect(!std.mem.containsAtLeast(u8, demux_source, 1, ".alloc("));
+    try std.testing.expect(!std.mem.containsAtLeast(u8, demux_source, 1, "std.json"));
+    try std.testing.expect(!std.mem.containsAtLeast(u8, demux_source, 1, "client_external_pump.zig"));
+    try std.testing.expect(!std.mem.containsAtLeast(u8, demux_source, 1, "external_inbox_ledger.zig"));
+    try std.testing.expect(!std.mem.containsAtLeast(u8, demux_source, 1, "external_owner_seal.zig"));
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        countOccurrences(mode_source, "result.pair_seal = externalRxFrameDigest(&result);"),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        countOccurrences(demux_source, "testing.sealExternalRxFrame(&result);"),
+    );
+    try std.testing.expect(std.mem.containsAtLeast(u8, barrel_source, 1, "external_rx_types.zig"));
+    try std.testing.expect(!std.mem.containsAtLeast(
+        u8,
+        barrel_source,
+        1,
+        "pub const external_rx_demux",
+    ));
+}
+
 test "session host client pump policy imports only std" {
     const allocator = std.testing.allocator;
     const source = try readZigFileZ(

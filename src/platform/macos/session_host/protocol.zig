@@ -40,6 +40,7 @@ pub const max_inventory_pages: usize =
 pub const max_control_json: usize = 256 * 1024;
 pub const max_binary_chunk: usize = 1024 * 1024;
 pub const max_viewport_snapshot: usize = 16 * 1024 * 1024;
+pub const max_screen_batch_chunks: usize = max_viewport_snapshot / max_binary_chunk;
 pub const max_scrollback_page: usize = 1024 * 1024;
 pub const max_client_queue: usize = 8 * 1024 * 1024;
 /// Complete screen inbox across demux/pending RPC paths; mirrors one server connection slot.

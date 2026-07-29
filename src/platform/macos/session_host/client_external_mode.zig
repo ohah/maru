@@ -5,11 +5,13 @@
 //! closes the connection.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const c = std.c;
 const posix = std.posix;
 const protocol = @import("protocol.zig");
 const framing = @import("framing.zig");
 const owner_seal = @import("external_owner_seal.zig");
+const external_rx_types = @import("external_rx_types.zig");
 
 pub const max_tx_frames: usize = 64;
 
@@ -25,10 +27,7 @@ pub const ExternalTxFrame = struct {
 
 pub const RxProvenanceLifecycle = enum { unbound, bound, terminal };
 
-pub const RxIdentity = struct {
-    attach_instance_id: u64 = 0,
-    destination_slot_addr: usize = 0,
-};
+pub const RxIdentity = external_rx_types.RxIdentity;
 
 pub const ParserAuthoritySeal = struct {
     domain: [8]u8 = [_]u8{0} ** 8,
@@ -59,15 +58,14 @@ pub const RxProvenance = struct {
     lifecycle: RxProvenanceLifecycle = .unbound,
 };
 
-pub const RxRange = struct {
-    identity: RxIdentity,
-    start_absolute: u64,
-    end_absolute: u64,
-};
+pub const RxRange = external_rx_types.RxRange;
+pub const RxWatermark = external_rx_types.RxWatermark;
+pub const ExternalRxFrameSeal = owner_seal.Digest;
 
-pub const RxWatermark = struct {
-    identity: RxIdentity,
-    absolute: u64,
+pub const ExternalRxFrame = struct {
+    frame: framing.Frame,
+    range: RxRange,
+    pair_seal: ExternalRxFrameSeal,
 };
 
 pub const MaxReadableResult = union(enum) {
@@ -83,10 +81,7 @@ pub const Freshness = enum { fresh, stale, invalid };
 pub const ExternalRxOutcome = union(enum) {
     incomplete,
     skipped: RxRange,
-    frame: struct {
-        frame: framing.Frame,
-        range: RxRange,
-    },
+    frame: ExternalRxFrame,
 };
 
 pub const State = struct {
@@ -268,6 +263,45 @@ fn bytesDigest(bytes: []const u8) owner_seal.Digest {
     writer.writeBytes(bytes);
     return writer.finish();
 }
+
+fn externalRxFrameDigest(frame: *const ExternalRxFrame) owner_seal.Digest {
+    var writer = owner_seal.Writer.init("external-rx-frame.v1");
+    writer.writeU64(frame.range.identity.attach_instance_id);
+    writer.writeUsize(frame.range.identity.destination_slot_addr);
+    writer.writeU64(frame.range.start_absolute);
+    writer.writeU64(frame.range.end_absolute);
+    const header_bytes = frame.frame.header.encode();
+    writer.writeBytes(&header_bytes);
+    writer.writeBytes(frame.frame.payload);
+    return writer.finish();
+}
+
+pub fn validateExternalRxFrame(frame: *const ExternalRxFrame) bool {
+    if (frame.range.identity.attach_instance_id == 0 or
+        frame.range.identity.destination_slot_addr == 0 or
+        frame.range.start_absolute >= frame.range.end_absolute or
+        frame.frame.payload.len > std.math.maxInt(u32) or
+        frame.frame.header.payload_len != @as(u32, @intCast(frame.frame.payload.len)))
+        return false;
+    const total = std.math.add(
+        usize,
+        protocol.header_size,
+        frame.frame.payload.len,
+    ) catch return false;
+    const observed = std.math.sub(
+        u64,
+        frame.range.end_absolute,
+        frame.range.start_absolute,
+    ) catch return false;
+    return observed == @as(u64, @intCast(total)) and
+        std.mem.eql(u8, &frame.pair_seal, &externalRxFrameDigest(frame));
+}
+
+pub const testing = if (builtin.is_test) struct {
+    pub fn sealExternalRxFrame(frame: *ExternalRxFrame) void {
+        frame.pair_seal = externalRxFrameDigest(frame);
+    }
+} else struct {};
 
 fn rxBindDigest(prepared: *const PreparedRxBind) owner_seal.Digest {
     var writer = owner_seal.Writer.init("rx-bind.v1");
@@ -724,10 +758,13 @@ pub fn nextOutcomeWithRange(
     scratch.payload = null;
     scratch.cleanup_payload = null;
     scratch.lifecycle = .committed;
-    return .{ .frame = .{
+    var result = ExternalRxFrame{
         .frame = .{ .header = header, .payload = payload },
         .range = range,
-    } };
+        .pair_seal = undefined,
+    };
+    result.pair_seal = externalRxFrameDigest(&result);
+    return .{ .frame = result };
 }
 
 fn appendPreparedValid(
@@ -1728,6 +1765,7 @@ test "range-aware RX parser preserves partial start and emits contiguous frames"
     const first_outcome = try nextOutcomeWithRange(&state, &parser, &first_scratch);
     const first_frame = first_outcome.frame;
     defer first_frame.frame.deinit(allocator);
+    try std.testing.expect(validateExternalRxFrame(&first_frame));
     try std.testing.expectEqual(@as(u64, 0), first_frame.range.start_absolute);
     try std.testing.expectEqual(@as(u64, @intCast(first.len)), first_frame.range.end_absolute);
     try std.testing.expectEqualStrings("one", first_frame.frame.payload);
@@ -1737,6 +1775,7 @@ test "range-aware RX parser preserves partial start and emits contiguous frames"
     const second_outcome = try nextOutcomeWithRange(&state, &parser, &second_scratch);
     const second_frame = second_outcome.frame;
     defer second_frame.frame.deinit(allocator);
+    try std.testing.expect(validateExternalRxFrame(&second_frame));
     try std.testing.expectEqual(first_frame.range.end_absolute, second_frame.range.start_absolute);
     try std.testing.expectEqual(
         @as(u64, @intCast(first.len + second.len)),
@@ -1748,6 +1787,18 @@ test "range-aware RX parser preserves partial start and emits contiguous frames"
         state.rx_provenance.buffer_start_absolute,
     );
     try std.testing.expect(parserSealValid(&state, &parser));
+
+    var shifted = second_frame;
+    shifted.range.start_absolute += 1;
+    shifted.range.end_absolute += 1;
+    try std.testing.expect(!validateExternalRxFrame(&shifted));
+    var changed_header = second_frame;
+    changed_header.frame.header.request_id += 1;
+    try std.testing.expect(!validateExternalRxFrame(&changed_header));
+    var changed_payload = second_frame;
+    changed_payload.frame.payload[0] ^= 1;
+    try std.testing.expect(!validateExternalRxFrame(&changed_payload));
+    changed_payload.frame.payload[0] ^= 1;
 }
 
 test "range-aware RX parser charges optional skipped frame one exact range" {

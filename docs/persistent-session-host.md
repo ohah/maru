@@ -4659,10 +4659,7 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
 
             ```zig
             const RxProvenanceLifecycle = enum { unbound, bound, terminal };
-            const RxIdentity = struct {
-                attach_instance_id: u64 = 0,
-                destination_slot_addr: usize = 0,
-            };
+            const RxIdentity = external_rx_types.RxIdentity;
             const ParserAuthoritySeal = struct {
                 domain: [8]u8 = [_]u8{0} ** 8,
                 version: u16 = 0,
@@ -4690,14 +4687,13 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
                 parser_seal: ParserAuthoritySeal = .{},
                 lifecycle: RxProvenanceLifecycle = .unbound,
             };
-            const RxRange = struct {
-                identity: RxIdentity,
-                start_absolute: u64,
-                end_absolute: u64,
-            };
-            const RxWatermark = struct {
-                identity: RxIdentity,
-                absolute: u64,
+            const RxRange = external_rx_types.RxRange;
+            const RxWatermark = external_rx_types.RxWatermark;
+            const ExternalRxFrameSeal = external_owner_seal.Digest;
+            const ExternalRxFrame = struct {
+                frame: framing.Frame,
+                range: RxRange,
+                pair_seal: ExternalRxFrameSeal,
             };
             const RxSource = union(enum) {
                 pre_bind,
@@ -4706,10 +4702,7 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
             const ExternalRxOutcome = union(enum) {
                 incomplete,
                 skipped: RxRange,
-                frame: struct {
-                    frame: framing.Frame,
-                    range: RxRange,
-                },
+                frame: ExternalRxFrame,
             };
             const MaxReadableResult = union(enum) {
                 bytes: usize,
@@ -4994,6 +4987,12 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
             cleanup owner가, publish 뒤 no-fail consume suffix는 성공 move가 각각 단독 소유한다. cleanup callback
             전에 payload authority를 tombstone하고 RX operation lease가 wrapper 재진입을 막으므로 source
             State/parser 복원 권위를 scratch에 중복 저장하지 않는다.
+            성공 move 직전에 parser owner가 domain-separated `external-rx-frame.v1` seal을 한 번 만든다. transcript는
+            range identity/start/end, encoded header, copied payload 전체다. `validateExternalRxFrame`은 nonzero
+            identity, exact header+payload range length, payload_len과 seal을 함께 검증한다. production seal 생성
+            callsite는 `nextOutcomeWithRange` 하나뿐이고 테스트 전용 factory는 `builtin.is_test`에서만 존재한다.
+            이 seal은 persistence/wire credential이 아니라 같은 프로세스 안에서 move-owned frame/range pairing의
+            accidental·hostile substitution을 fail-close하는 관측 증거다.
 
             client-local recovery response barrier는 move-owned `ExternalRxOutcome.frame.range.end_absolute`이고,
             host recovery ACK barrier는 ACK가 fully sent된 순간 같은 external state의
@@ -5068,15 +5067,18 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
               const ScreenCandidate = struct {
                   header: protocol.Header,
                   range: external_rx_types.RxRange,
+                  pair_seal: client_external_mode.ExternalRxFrameSeal,
               };
               const EventCandidate = struct {
                   header: protocol.Header,
                   range: external_rx_types.RxRange,
+                  pair_seal: client_external_mode.ExternalRxFrameSeal,
               };
               const ResponseCandidate = struct {
                   request_id: u64,
                   header: protocol.Header,
                   range: external_rx_types.RxRange,
+                  pair_seal: client_external_mode.ExternalRxFrameSeal,
               };
 
               const ExternalWireClass = union(enum) {
@@ -5087,18 +5089,53 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
               };
 
               fn classifyExternalRx(
-                  frame: *const framing.Frame,
-                  range: external_rx_types.RxRange,
+                  paired: *const client_external_mode.ExternalRxFrame,
+                  expected_identity: external_rx_types.RxIdentity,
                   target_stream_id: u64,
-                  partial: ?LivePartialSnapshot,
+                  partial: ?ValidatedPartialView,
               ) ExternalWireClass;
+
+              const ValidatedPartialView = struct {
+                  stream_id: u64,
+                  is_snapshot: bool,
+                  identity: external_rx_types.RxIdentity,
+                  start_absolute: u64,
+                  end_absolute: u64,
+                  chunk_count: u8,
+              };
 
               const ExternalSemanticIntent = union(enum) {
                   screen: ScreenCandidate,
                   event: runtime_event_types.ValidatedEventView,
                   response: ResponseCandidate,
               };
+
+              const ExternalEventClass = union(enum) {
+                  accepted: runtime_event_types.ValidatedEventView,
+                  protocol_terminal,
+              };
+
+              fn classifyEventCandidate(
+                  identity: runtime_event_types.EventIdentity,
+                  authority: runtime_event_types.EventAuthorityView,
+                  expected_major: u16,
+                  metadata_support: runtime_event_types.MetadataSupport,
+                  paired: *const client_external_mode.ExternalRxFrame,
+                  candidate: EventCandidate,
+                  observer: ?runtime_event_wire.ParseObserver,
+              ) ExternalEventClass;
               ```
+
+              d1 parser만 `ExternalRxFrame`의 `pair_seal`을 만든다. seal transcript
+              `external-rx-frame.v1`은 range identity/start/end, encoded header, payload 전체를 묶으며
+              `classifyExternalRx`는 seal과 current attach의 `expected_identity`가 모두 맞아야 진행한다.
+              따라서 seal 뒤 range·identity·offset·header·payload 내용이 하나라도 바뀌거나, 내용이 다른 paired
+              frame의 candidate를 재사용하면 decode 전에 protocol terminal이다. 동일 값 struct copy나 동일 bytes의
+              다른 allocation을 object identity로 구분하는 credential은 아니다. 이 경우 semantic observation이
+              완전히 같고 cleanup authority도 없으므로 d2a의 위협 모델 밖이며, exact-once move/free는 outer
+              prepared intent가 소유한다. production에서
+              raw `ExternalRxFrame` literal 또는 seal 생성은 금지하고 d1의 move-owned
+              `ExternalRxOutcome.frame`만 borrow한다.
 
               target stream의 screen/event만 허용한다. response는 stream 0, protocol-defined flags와 nonzero
               request ID까지만 검사해 `{request_id,range}` candidate로 넘긴다. expected request/kind,
@@ -5106,13 +5143,17 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
               screen/event/response, known-but-unexpected kind와 structural flags/request ID는 protocol terminal이다.
               d1의 `.skipped`는 outer turn이 frame budget 하나만 charge하고 classifier를 호출하지 않는다.
 
-              event candidate는 공용 `runtime_event_wire` decoder와 `runtime_event_types.classifyEventView`를
+              wire classifier 자체는 decode하지 않는다. `classifyEventCandidate`만 공용
+              `runtime_event_wire` decoder와 `runtime_event_types.classifyEventView`를
               정확히 한 번 사용해 `ValidatedEventView` 또는 protocol terminal을 만든다. 새 JSON
               parser/vocabulary는 금지하고 두 classifier 모두 mutation 0이다. screen
-              candidate는 `LivePartialSnapshot`의 stream, snapshot/delta kind, start generation, chunk count와
-              end-stream expectation을 검증한다. partial 중 event/response/다른 stream/다른 snapshot kind/end
+              candidate는 `ValidatedPartialView`의 stream, snapshot/delta kind, identity, start/end contiguity,
+              chunk count와 end-stream flag를 검증한다. partial 중 event/response/다른 stream/다른 snapshot kind/end
               mismatch는 protocol terminal이다. payload ownership은 outer turn의 prepared intent가 exact once
               move 또는 free한다.
+              raw `LivePartialSnapshot`의 storage/token/generation/digest는 classifier API에 넣지 않는다. d2b owner가
+              storage seal과 ledger `PartialSemantic.provenance`를 검증한 뒤 최소 `ValidatedPartialView` 값을 만들며,
+              production classifier callsite는 이 validator 직후 exact one으로 제한한다.
 
             - **d2b — buffered-only bounded turn:** socket callback을 호출하지 않는다. sealed inherited blocker가
               있으면 기존 consumer/projector wake만 반환하고 parser outcome도 처리하지 않는다. blocker가 없을 때
@@ -5152,6 +5193,7 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
                   is_snapshot: bool,
                   start_identity: external_rx_types.RxIdentity,
                   start_absolute: u64,
+                  end_absolute: u64,
                   chunk_count: u8,
                   ledger_token: external_inbox_ledger.Token,
                   generation: u64,
@@ -5822,8 +5864,8 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
         공유하고 leave가 남은 budget 중 최대 100 ms를 쓴다. signal/revoke/error cleanup은 active/latest와 detach를
         버리고 하나의 100 ms deadline 안에서 leave를 시도한 뒤 즉시 raw restore/signal forwarding으로 간다.
 
-    **P5c3c-1a~2a, 2b1, 2b2a~c2와 2b2c3-c3a1~c3c-3b는 구현 완료다.
-    2b2d1~f3, P5c3c-2b3와 P5c3c-3a~3b는 계획 상태다.**
+    **P5c3c-1a~2a, 2b1, 2b2a~c2와 2b2c3-c3a1~c3c-3b, 2b2d1, 2b2d2a는 구현 완료다.
+    2b2d2b~f3, P5c3c-2b3와 P5c3c-3a~3b는 계획 상태다.**
     2b2c3 전체는 후속 통합 gate가 green이 아니므로 아직 계획 상태다. 각 slice는 P5c3a~b의 Debug/ReleaseFast gate를 재실행하고 다음 slice가 실제
     consumer로 쓰지 않는 임시 public API는 만들지 않는다.
 

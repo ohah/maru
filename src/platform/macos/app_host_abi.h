@@ -8,7 +8,7 @@
 /* 이 header는 실제 앱 동작을 구현하지 않고 Swift/Zig 사이의 약속만 고정한다.
    Swift가 AppKit object나 Swift struct layout을 바로 넘기면 Zig 쪽에서 안전하게
    해석할 수 없으므로, 제품 host가 시작되기 전에 fixed-width C record만 허용한다. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 148u
+#define MARU_MACOS_APP_HOST_ABI_VERSION 149u
 #define MARU_APP_INSTANCE_LEASE_ACQUIRED 0u
 #define MARU_APP_INSTANCE_LEASE_HELD 1u
 #define MARU_APP_INSTANCE_LEASE_UNSAFE 2u
@@ -863,6 +863,9 @@ uint32_t maru_macos_app_session_file_panel_shell_kind(
 );
 /* 도크 entry의 mode(0=read, 1=source-edit). 도크가 아니면 -1. v132. */
 int32_t maru_macos_app_session_file_panel_mode(MaruAppHostSession *session, uint64_t surface_id);
+
+/* 파일 패널 mode를 설정한다(헤더 mode 선택기 클릭과 같은 경로). 1=적용, 0=없는 surface/불허 mode. v149. */
+uint32_t maru_macos_app_session_set_file_panel_mode(MaruAppHostSession *session, uint64_t surface_id, uint32_t raw_mode);
 /* explicit file WKWebView primary-down을 Zig FocusOwner/DockPanel group에 반영한다. 1=승인, 0=stale/아님. v124. */
 uint32_t maru_macos_app_session_focus_file_panel_surface(MaruAppHostSession *session, uint64_t surface_id);
 uint32_t maru_macos_app_session_complete_pending_dock_focus(MaruAppHostSession *session, uint64_t surface_id);

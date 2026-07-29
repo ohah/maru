@@ -2450,7 +2450,12 @@ final class FilePanelEditingSmokeProbe {
             if !editorFontSize.isEmpty { self.editorFontSize = editorFontSize }
             if mermaidRequest == "ok", !self.requestedSourceMode {
                 self.requestedSourceMode = true
-                panel.applyFilePanelMode(Int32(MARU_FILE_PANEL_MODE_SOURCE_EDIT))
+                // Zig가 mode 권위다. Swift 로컬만 바꾸면 web은 소스 편집기를 띄우지만 ⌘S 라우팅 판정
+                // (`Mode.isEditable`)은 여전히 read라 web_editor로 가지 않는다(실제로 wrong-route가 났다).
+                if let session = panel.controller?.bridgeSession(for: panel.surfaceId) {
+                    _ = maru_macos_app_session_set_file_panel_mode(
+                        session, panel.surfaceId, UInt32(MARU_FILE_PANEL_MODE_SOURCE_EDIT))
+                }
             }
             if editorReady, mermaidRequest == "ok" {
                 self.startEditingSave(epoch: epoch)
@@ -2468,11 +2473,23 @@ final class FilePanelEditingSmokeProbe {
     private func startMermaidNavigationProbe(epoch: UInt64, editorEpoch: Int) {
         guard epoch == navigationEpoch, editorEpoch > 0, !mermaidNavigationStarted,
               let panel, let world = panel.bridgeWorld else {
-            mermaidNavigationInFlight = "false"
-            mermaidNavigationCancelled = "false"
+            // 어느 전제가 깨졌는지 남긴다. 이 probe는 저장 성공 뒤 한 번만 돌기 때문에, 조용히 false로
+            // 떨어지면 스모크가 무엇을 못 재고 있는지 알 수 없다.
+            let reason = epoch != navigationEpoch ? "stale-epoch"
+                : editorEpoch <= 0 ? "no-editor-epoch"
+                : mermaidNavigationStarted ? "already-started"
+                : panel == nil ? "no-panel" : "no-bridge-world"
+            mermaidNavigationInFlight = "false(\(reason))"
+            mermaidNavigationCancelled = "false(\(reason))"
             return
         }
         mermaidNavigationStarted = true
+        // Mermaid는 읽기 모드에서만 렌더한다(소스 모드는 생 Markdown 편집이라 admission이 거부한다).
+        // 편집·저장을 마쳤으므로 읽기로 되돌린 뒤 hang job을 넣는다 — 실제 사용 흐름(편집 후 결과 확인)과 같다.
+        if let session = panel.controller?.bridgeSession(for: panel.surfaceId) {
+            _ = maru_macos_app_session_set_file_panel_mode(
+                session, panel.surfaceId, UInt32(MARU_FILE_PANEL_MODE_READ))
+        }
         panel.webView.callAsyncJavaScript(
             """
             void window.maru.file.renderMermaid({
@@ -2524,7 +2541,10 @@ final class FilePanelEditingSmokeProbe {
     func observeMermaidNavigationCancellation(inFlight: Bool, cancelledReplies: Int) {
         guard mermaidNavigationStarted, mermaidNavigationCancelled == "pending" else { return }
         mermaidNavigationInFlight = String(inFlight)
-        mermaidNavigationCancelled = cancelledReplies == 1 ? "true" : "false-\(cancelledReplies)"
+        // 취소 건수는 그 시점 pending 수에 따라 다르다 — 읽기 프리뷰가 자기 펜스를 렌더 중이면 hang job과
+        // 함께 2건이 된다. 계약은 "reload가 pending reply를 남기지 않는다"이고, 남은 0은 별도
+        // `mermaid_pending_replies` 단언이 본다.
+        mermaidNavigationCancelled = cancelledReplies >= 1 ? "true" : "false-\(cancelledReplies)"
     }
 
     private func startEditingSave(epoch: UInt64) {

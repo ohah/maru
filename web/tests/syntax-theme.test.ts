@@ -66,7 +66,10 @@ describe("terminal theme syntax colors", () => {
   test("app.css ships a fallback for every token in both light and dark", () => {
     const css = readRepoFile("web", "src", "app.css");
     // 주입 전(첫 paint)과 주입 실패 시 쓰는 폴백이다. 없으면 그 순간 코드가 무채색으로 보인다.
-    const rootBlock = css.slice(css.indexOf(":root {"), css.indexOf("@media (prefers-color-scheme: dark)"));
+    const rootBlock = css.slice(
+      css.indexOf(":root {"),
+      css.indexOf("@media (prefers-color-scheme: dark)"),
+    );
     const darkBlock = css.slice(css.indexOf("@media (prefers-color-scheme: dark)"));
     for (const token of webConsumedTokens(css)) {
       expect(rootBlock).toContain(`--maru-syntax-${token}:`);
@@ -84,7 +87,9 @@ describe("terminal theme syntax colors", () => {
       "s.setProperty('--maru-editor-selection','#334455');" +
       "s.setProperty('--maru-editor-font-size','14px');" +
       "})(document.documentElement.style)";
-    const dom = new JSDOM("<!doctype html><html><body></body></html>", { runScripts: "outside-only" });
+    const dom = new JSDOM("<!doctype html><html><body></body></html>", {
+      runScripts: "outside-only",
+    });
     try {
       const root = dom.window.document.documentElement;
       root.style.setProperty("--maru-syntax-keyword", "#9333ea"); // 스타일시트 폴백 자리

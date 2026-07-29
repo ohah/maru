@@ -183,7 +183,8 @@ fn navButtonAt(x_px: f64, band_x: u32, cw: u32) ?NavButton {
 // 별도 물리 CAMetalLayer로 분리, 두 drawable을 한 command buffer에 present + 단일 commit으로 전이 원자성). host↔renderer
 // draw 계약 변경이라 버전을 올린다. **MetalFrame/세션 struct·export 시그니처는 불변**(overlay_layer는 Zig가 아니라
 // Swift가 소유한 CAMetalLayer라 struct offset·layout test는 그대로 green). 렌더러 분할·컨테이너 재편은 Swift/ObjC 레이어.
-pub const abi_version: u32 = 148;
+pub const abi_version: u32 = 149;
+// 149: 파일 패널 mode를 surface_id로 설정하는 export를 추가한다(헤더 클릭과 같은 경로·같은 pending action).
 // 148: 라이브 프리뷰 폐기 — file panel mode 2(live-preview)와 앱 전역 live-preview worker budget ABI를 제거하고
 //      `maru.file.livePreviewReady`를 `maru.file.rendererReady`로 개명한다. app origin CSP는 worker-src 'none'.
 // 147: open_terminal_web_link export 추가 + take_file_panel_external_link_action → take_external_link_action rename
@@ -13881,6 +13882,18 @@ pub const AppSession = struct {
         entry.mode = mode;
         self.file_panel_mode_pending = entry.surface_id;
         self.file_tree_rows_dirty = true;
+    }
+
+    /// surface_id로 파일 패널 mode를 바꾼다. 헤더 mode 선택기 클릭과 **같은 경로**를 쓰므로 pending action도
+    /// 똑같이 세워져 Swift가 web에 모드를 전달한다. kind가 허용하지 않는 mode와 없는 surface는 거부한다.
+    /// 헤더 클릭 말고 이 진입점이 필요한 이유: 마우스 좌표 없이 모드를 옮겨야 하는 소비자(제품 스모크,
+    /// 이후의 팔레트·단축키)가 Zig 권위를 우회해 Swift 로컬 상태만 바꾸면 ⌘S 라우팅 같은 판정이 어긋난다.
+    pub fn setFilePanelModeBySurface(self: *AppSession, surface_id: u64, mode: dock_panel.Mode) bool {
+        if (!self.dock_initialized) return false;
+        const entry = self.fileEntryForSurfaceId(surface_id) orelse return false;
+        if (!mode.allowedFor(entry.kind)) return false;
+        self.setFilePanelMode(entry, mode);
+        return true;
     }
 
     pub fn takeFilePanelModeAction(self: *AppSession) ?struct { surface_id: u64, mode: dock_panel.Mode } {

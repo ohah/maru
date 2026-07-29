@@ -1141,9 +1141,11 @@ pub fn build(b: *std.Build) void {
                 "/usr/bin/grep -Eq '^mermaid_product_tick_pump_calls=[1-9][0-9]*$' \"$summary\"; " ++
                 "/usr/bin/grep -Eq '^mermaid_product_tick_drain_calls=[1-9][0-9]*$' \"$summary\"; " ++
                 "awk -F= '$1==\"mermaid_product_tick_max_elapsed_us\" { if ($2 + 0 <= 20000) ok=1 } END { exit !ok }' \"$summary\"; " ++
-                "/usr/bin/grep -Eq '^mermaid_helper_starts=1$' \"$summary\"; " ++
-                "/usr/bin/grep -Eq '^mermaid_request_frames=2$' \"$summary\"; " ++
-                "/usr/bin/grep -Eq '^mermaid_terminal_results=1$' \"$summary\"; " ++
+                // hang job이 helper를 재시작시키므로 start 수는 1~2다. 상한은 failure budget이 별도로 강제한다.
+                "/usr/bin/grep -Eq '^mermaid_helper_starts=[12]$' \"$summary\"; " ++
+                // 읽기 프리뷰는 모드를 오갈 때마다 자기 펜스를 다시 렌더하므로 요청 수는 시나리오 길이에 따라 는다.
+                "/usr/bin/grep -Eq '^mermaid_request_frames=[2-9][0-9]*$' \"$summary\"; " ++
+                "/usr/bin/grep -Eq '^mermaid_terminal_results=[1-9][0-9]*$' \"$summary\"; " ++
                 "/usr/bin/grep -Eq '^mermaid_deadline_expirations=1$' \"$summary\"; " ++
                 "/usr/bin/grep -Eq '^file_viewer_default_mode=read$' \"$summary\"; " ++
                 "/usr/bin/grep -Eq '^file_viewer_edit=true$' \"$summary\"; " ++

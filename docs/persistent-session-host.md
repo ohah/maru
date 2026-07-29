@@ -190,7 +190,7 @@ GUI 0 host-backed 알림은 host가 bounded journal과 stable route를 소유하
 | 기능 | 해석 | 실행 | 정책 |
 |---|---|---|---|
 | 선택 복사 | host `extractSelection`(soft-wrap·스크롤백) | client NSPasteboard | — |
-| Find | host `findMatches` | client 하이라이트 렌더 | client(검색어) |
+| Find | host `findMatches`·매치로의 스크롤 | client 하이라이트 렌더(host `view_offset` 대조 후) | client(검색어) |
 | OSC 9/777 알림 | host 파싱·stable event journal(P4) | GUI-live client fast path / GUI 0 daemon-internal macOS adapter(P4) | app-global notification config snapshot(P4) |
 | 링크 | host span·추출·존재 stat | client 열기(NSWorkspace) | client(`input.link-detection`) |
 | 스크롤·스크롤바 | host view·스크롤백 | client 렌더 | — |
@@ -212,6 +212,18 @@ GUI 0 host-backed 알림은 host가 bounded journal과 stable route를 소유하
 
 **이 규칙으로 이관한 것**(모두 동작한다):
 
+- **스크롤백 Find**. host가 검색(`findMatches`)과 매치로의 스크롤을 소유하고, client는 돌려받은 뷰포트 span을
+  하이라이트로 그린다. **응답에는 host가 그 span을 계산한 기준 `view_offset`(`voff`)이 함께 온다.** client는 자기
+  화면(delta로 조립한 projection)의 `view_offset`이 그 값과 같을 때만 span을 그린다 — `scroll=true` 요청이 host
+  화면을 옮긴 직후의 응답은, client가 아직 그 스크롤 delta를 받지 못한 화면과 **좌표계가 다르다**. 두 시점을 한
+  프레임에 합성하면 엉뚱한 줄이 하이라이트되고, 사용자에겐 "이전 하이라이트가 남는" 잔상으로 보인다.
+  어긋나는 동안은 **직전 span을 유지한다** — 화면이 아직 이전 상태이므로 이전 span이 현재 화면과 정합한다.
+  host가 실제로 스크롤했다면 scroll_state delta가 반드시 뒤따르고, 그 delta가 도착하는 tick은 output이 있어
+  재조회가 일어나므로 별도 재시도 없이 정합 상태로 수렴한다. host가 `voff`를 보내지 않으면(앱보다 오래 사는 구
+  host 데몬) 대조 근거가 없으므로 종전대로 즉시 적용한다 — 새 필드의 부재가 구 host의 유일한 신호라 별도
+  capability 비트를 두지 않는다(find 응답의 `count`/`cur`도 같은 관대한 파싱 규율이다).
+  client 쪽 규율 하나가 더 붙는다: **매치로의 스크롤 요청은 증분 검색(타이핑)과 네비게이션(⌘G)이 같은 경로를
+  쓴다.** 이 분기가 두 곳으로 갈리면 한쪽이 우회해 원격에서만 타이핑 중 스크롤이 죽는다.
 - **벨(BEL)**(P3-e4c-8). host는 관측에 누적 카운터 `bell_count`만 싣고, `bell.*` 정책 판정과
   실제 실행(NSSound.beep·시각 flash·Dock 배지)은 client가 한다. 새 RPC를 만들지 않고 **관측 push에 얹은** 이유는
   벨이 드문 이벤트라 매 tick 폴링이 낭비이고, 관측은 이미 약 100ms마다 변화 시에만 push되기 때문이다.

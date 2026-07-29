@@ -1399,8 +1399,11 @@ pub const RuntimeManager = struct {
         var out: std.ArrayList(u8) = .empty;
         errdefer out.deinit(allocator);
         var buf: [96]u8 = undefined;
+        // voff=아래 span들을 계산한 기준 view_offset. 위 scroll 분기가 host 화면을 옮겼으면 client는 그 스크롤을
+        // **아직 delta로 못 받은 상태**라, 응답 span을 그대로 그리면 좌표계가 다른 화면에 하이라이트를 찍는다
+        // (= 이전 하이라이트가 남아 보이는 증상). client가 자기 화면과 이 값을 대조해 정합할 때만 적용한다.
         // cur=현재 매치의 뷰포트 span(보이면 4정수, 안 보이면 빈 배열).
-        try out.appendSlice(allocator, try std.fmt.bufPrint(&buf, "{{\"count\":{d},\"cur\":[", .{matches.items.len}));
+        try out.appendSlice(allocator, try std.fmt.bufPrint(&buf, "{{\"count\":{d},\"voff\":{d},\"cur\":[", .{ matches.items.len, surface.core.viewOffset() }));
         if (cur_index < matches.items.len) {
             if (surface.core.matchViewportSpan(matches.items[cur_index])) |cs| {
                 try out.appendSlice(allocator, try std.fmt.bufPrint(&buf, "{d},{d},{d},{d}", .{ cs.start.row, cs.start.col, cs.end.row, cs.end.col }));
@@ -2418,6 +2421,62 @@ test "runtime manager: snapshot projects the runtime's live screen through Runti
     try std.testing.expectError(error.RuntimeNotFound, ops.snapshot(ops.ctx, 0xDEADBEEF, allocator));
 
     ops.terminate(ops.ctx, rid);
+}
+
+// host-backed Find의 좌표계 계약. findOp는 scroll 요청을 받으면 host 화면을 먼저 옮기고 **그 스크롤된 화면**
+// 기준으로 span을 계산한다. client는 그 스크롤을 delta로 받기 전이므로, 응답에 기준 view_offset(voff)을 실어
+// client가 자기 화면과 대조해 정합할 때만 그리게 한다 — 안 그러면 좌표계가 다른 화면에 하이라이트를 찍는다.
+test "runtime manager: find는 span을 계산한 기준 view_offset을 응답에 싣는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    var host_registry = reg.TerminalRuntimeRegistry.init(allocator);
+    defer host_registry.deinit();
+    var mgr: RuntimeManager = undefined;
+    mgr.init(allocator, std.testing.io, &host_registry);
+    defer mgr.deinit();
+
+    const ops = mgr.runtimeOps();
+    const rid = try ops.spawn(ops.ctx, .{ .argv = &.{"/bin/cat"}, .cwd = null, .cols = 20, .rows = 4 });
+    defer ops.terminate(ops.ctx, rid);
+
+    // host core에 직접 써 넣는다(PTY 왕복 없이 결정적으로 — 화면 소유자는 host다). 매치는 스크롤백 위쪽에 둬
+    // 바닥 뷰포트에서는 안 보이게 한다.
+    const handle = mgr.handleFor(rid).?;
+    const surface = mgr.backend_impl.surfaceFor(handle).?;
+    {
+        surface.lockCore(mgr.io);
+        defer surface.unlockCore(mgr.io);
+        try surface.core.write("l0\r\nMARUFIND\r\nl2\r\nl3\r\nl4\r\nl5\r\nl6\r\nl7\r\nl8\r\nl9\r\nl10\r\nl11");
+    }
+    const query_hex = "4d41525546494e44"; // "MARUFIND"
+
+    // scroll=false: host 화면이 그대로(바닥)라 voff=0이고, 뷰포트 밖 매치라 그릴 span도 없다.
+    {
+        const body = try ops.find(ops.ctx, rid, query_hex, 0, false, allocator);
+        defer allocator.free(body);
+        try std.testing.expect(std.mem.indexOf(u8, body, "\"count\":1") != null);
+        try std.testing.expect(std.mem.indexOf(u8, body, "\"voff\":0") != null);
+        try std.testing.expect(std.mem.indexOf(u8, body, "\"cur\":[]") != null);
+    }
+
+    // scroll=true: host가 매치로 스크롤한 뒤 **그 화면 기준**으로 span을 낸다 — voff가 0이 아니게 되고, 그 값이
+    // 곧 client가 자기 화면과 대조해야 할 기준이다(같아지기 전에 그리면 엉뚱한 줄이 하이라이트된다).
+    {
+        const body = try ops.find(ops.ctx, rid, query_hex, 0, true, allocator);
+        defer allocator.free(body);
+        try std.testing.expect(std.mem.indexOf(u8, body, "\"voff\":0") == null);
+        try std.testing.expect(std.mem.indexOf(u8, body, "\"cur\":[]") == null); // 스크롤 후엔 현재 매치가 보인다
+        const voff = blk: {
+            const at = std.mem.indexOf(u8, body, "\"voff\":").? + "\"voff\":".len;
+            var v: usize = 0;
+            var i: usize = at;
+            while (i < body.len and body[i] >= '0' and body[i] <= '9') : (i += 1) v = v * 10 + (body[i] - '0');
+            break :blk v;
+        };
+        surface.lockCore(mgr.io);
+        defer surface.unlockCore(mgr.io);
+        try std.testing.expectEqual(surface.core.viewOffset(), voff); // 응답 voff = span을 계산한 실제 화면 위치
+    }
 }
 
 // 원격 Cmd+클릭은 host가 여는 대상을 정한다 — client core는 빈 placeholder라 추출이 불가능하고, file_path의

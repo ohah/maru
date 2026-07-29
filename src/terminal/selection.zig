@@ -868,3 +868,62 @@ fn extractBlockSelection(self: *const TerminalCore, allocator: std.mem.Allocator
     }
     return try out.toOwnedSlice(allocator);
 }
+
+// host-backed Find의 좌표계 계약. `runtime_manager.findOp`는 요청받은 매치로 host 화면을 먼저 스크롤한 뒤
+// 그 **스크롤된 화면 기준**으로 span을 계산해 응답한다. client는 그 스크롤을 delta로 받기 전이라, 응답 span을
+// 그대로 그리면 좌표계가 다른 화면에 하이라이트를 찍는다. 그래서 client가 view_offset을 대조해 정합할 때만
+// 적용한다(app_session.remoteFindSpansApplicable). 이 테스트는 그 대조가 왜 필요한지를 코어 수준에서 고정한다.
+test "find span은 scroll 후 좌표계라 스크롤 전 화면과 어긋난다(host-backed 대조의 근거)" {
+    const allocator = std.testing.allocator;
+    var c = try core.TerminalCore.init(allocator, .{ .cols = 20, .rows = 4 });
+    defer c.deinit();
+    try c.write("l0\r\nMARUFIND\r\nl2\r\nl3\r\nl4\r\nl5\r\nl6\r\nl7\r\nl8\r\nl9\r\nl10\r\nl11");
+
+    // client가 "이번 프레임에" 들고 있는 화면 = 아직 스크롤 delta를 못 받은 상태(바닥).
+    var before: [4][20]u21 = undefined;
+    for (0..4) |r| {
+        const row = c.viewportRow(@intCast(r));
+        for (0..20) |i| before[r][i] = if (i < row.len) row[i].codepoint else ' ';
+    }
+
+    var matches: std.ArrayList(types.Match) = .empty;
+    defer matches.deinit(allocator);
+    try findMatches(&c, allocator, "MARUFIND", &matches);
+    try std.testing.expectEqual(@as(usize, 1), matches.items.len);
+
+    // runtime_manager.findOp와 같은 순서: host 화면을 먼저 스크롤하고(:1396) 그 뒤에 span을 계산해 응답에 싣는다(:1405).
+    c.scrollToAbs(matches.items[0].start.row);
+    const span = matchViewportSpan(&c, matches.items[0]) orelse return error.TestUnexpectedResult;
+
+    // (1) 스크롤 후 host 화면에서는 span이 실제 검색어를 가리킨다.
+    const after = c.viewportRow(span.start.row);
+    for ("MARUFIND", 0..) |ch, i| {
+        try std.testing.expectEqual(@as(u21, ch), after[span.start.col + i].codepoint);
+    }
+
+    // (2) 그런데 client가 이 프레임에 그리는 화면(before)의 같은 좌표는 전혀 다른 줄이다 → 엉뚱한 셀이 하이라이트된다.
+    var mismatched = false;
+    for ("MARUFIND", 0..) |ch, i| {
+        if (before[span.start.row][span.start.col + i] != ch) mismatched = true;
+    }
+    try std.testing.expect(mismatched);
+
+    // 대조군: 매치가 이미 보이는 화면 안이면 host가 스크롤하지 않으므로(findOp의 scrollToAbs가 no-op) 같은
+    // 검사가 통과한다 — 위 (2)는 "스크롤이 끼어든 경우"에만 어긋난다는 뜻이다(항상 참인 단언이 아니다).
+    var c2 = try core.TerminalCore.init(allocator, .{ .cols = 20, .rows = 4 });
+    defer c2.deinit();
+    try c2.write("l0\r\nMARUFIND\r\nl2");
+    var view2: [4][20]u21 = undefined;
+    for (0..4) |r| {
+        const row = c2.viewportRow(@intCast(r));
+        for (0..20) |i| view2[r][i] = if (i < row.len) row[i].codepoint else ' ';
+    }
+    var m2: std.ArrayList(types.Match) = .empty;
+    defer m2.deinit(allocator);
+    try findMatches(&c2, allocator, "MARUFIND", &m2);
+    c2.scrollToAbs(m2.items[0].start.row);
+    const span2 = matchViewportSpan(&c2, m2.items[0]) orelse return error.TestUnexpectedResult;
+    for ("MARUFIND", 0..) |ch, i| {
+        try std.testing.expectEqual(@as(u21, ch), view2[span2.start.row][span2.start.col + i]);
+    }
+}

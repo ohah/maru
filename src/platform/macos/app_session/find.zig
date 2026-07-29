@@ -11,6 +11,8 @@
 //! `app_session.zig`가 import해 얇은 facade로 위임한다 — `core.zig`가 `screen.zig`를 부르는
 //! 방식과 동형(docs/terminal-core-decomposition.md). 그룹 내부 상호 호출은 free 함수 직접.
 
+const builtin = @import("builtin");
+
 const AppSession = @import("../app_session.zig").AppSession;
 
 /// ⌘F: Find 오버레이를 토글한다. 열려 있으면 닫고(매치 하이라이트·⌘G 닫힘-네비 세션 종료),
@@ -76,8 +78,18 @@ pub fn recomputeFind(self: *AppSession) void {
 
 /// 현재(네비게이션) 매치를 뷰포트로 스크롤한다 — 없으면 무동작. 검색·네비게이션 후 호출(scrollToAbs가
 /// 매치를 세로 중앙쯤에 둬 Find 오버레이(활성 pane 상단 한 줄)에 안 가린다). 현재 인덱스는 chrome_host.find.current.
+///
+/// §6c host-backed 분기가 **여기 한 곳**에 있다: 스크롤백 매치로의 스크롤은 host가 소유한 view를 움직여야
+/// 하므로(placeholder는 미렌더) 다음 tick의 `refreshRemoteFind`가 scroll=true로 host를 현재 매치로 스크롤하도록
+/// 표시만 한다(one-shot). 예전엔 이 분기가 app_session의 facade에만 있어, 그룹 내부에서 free 함수로 직접 부르는
+/// `recomputeFind`(증분 검색)가 분기를 우회했다 — 원격에서만 타이핑 중 매치로 스크롤이 안 되던 원인이다.
 pub fn scrollToCurrentMatch(self: *AppSession) void {
     if (!self.surface_initialized) return;
+    if (builtin.os.tag == .macos and self.activeSurface().remote != null) {
+        self.remote_find_scroll_pending = true;
+        self.remote_find_dirty = true;
+        return;
+    }
     const cur = self.chrome_host.find.current;
     if (cur >= self.find_matches.items.len) return;
     const surface = self.activeSurface();

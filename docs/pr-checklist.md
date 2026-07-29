@@ -8,15 +8,58 @@ GitHub PR 본문은 `.github/pull_request_template.md`를 사용한다. 이 문�
 
 모든 PR은 다음을 반드시 갖춘다.
 
-- 라벨: 하나 이상 단다.
+- 라벨: **영역 1개 + 성격 1개**를 단다(워크플로 게이트는 "하나 이상"만 강제하지만, 규율은 둘이다). **예외**: CI·빌드·테스트 하네스·문서 전용처럼 코드 영역이 없는 PR은 성격 라벨(`ci`·`tests`·`perf`·`docs`)만으로 충분하다.
 - assignee: `ohah`로 지정한다.
 
 ```sh
 # 새 PR
-gh pr create --assignee ohah --label <label> ...
+gh pr create --assignee ohah --label <영역>,<성격> ...
 # 이미 만든 PR
-gh pr edit <번호> --add-assignee ohah --add-label <label>
+gh pr edit <번호> --add-assignee ohah --add-label <영역>,<성격>
 ```
+
+### 라벨 목록 (단일 출처)
+
+라벨은 **커밋 scope와 같은 축**이다 — `feat(file-panel): …`이면 `file-panel` + `enhancement`. 여러 영역을 건드리면 영역 라벨을 여러 개 단다.
+
+**영역(area — 파랑 `#0052cc`, 기존 라벨은 색이 섞여 있다)**
+
+| 라벨 | 범위 | 대표 scope |
+|---|---|---|
+| `terminal-core` | 파서·스크린·커서·스크롤백·grapheme·선택·kitty | `terminal` `core` `grapheme` `scrollback` |
+| `pty` | PTY·프로세스 수명·terminfo | `pty` `terminfo` |
+| `ssh` | `maru ssh` 통합·원격 세션 | `ssh` |
+| `renderer` | draw-list·Metal·프레임 투영·스레딩 | `renderer` `render` `io-render` |
+| `font` | 폰트 로딩·셰이핑·글리프 atlas | `font` `glyph` |
+| `chrome` | Zig+GPU UI — 사이드바·탭·모달·팔레트·세팅 GUI·주소창 필드 | `chrome` `sidebar` `settings` `palette` `text-field` |
+| `file-panel` | 파일 패널·뷰어/편집기·파일 트리·도크 | `file-panel` `file-tree` `mermaid` |
+| `web-panel` | WKWebView 합성·인앱 브라우저·`web/` 콘텐츠 | `web-panel` `browser` |
+| `control-plane` | CLI·IPC·`browser.*` 제어·capability | `control` `cli` |
+| `session-host` | 영속 host·runtime 이관·host 업그레이드 | `session-host` |
+| `workspace` | workspace 저장/복원·창 이동성 | `workspace` `window` `mobility` |
+| `input` | 키 입력·IME·키바인딩·마우스 라우팅·링크 | `input` `ime` `keybind` `link` |
+| `agent` | 에이전트 관측·상태줄·사이드바 에이전트 목록 | `agent` |
+| `notifications` | 데스크톱 알림·알림 패널·벨 | `notification` `bell` |
+| `config` | config 스키마·로더·resolve 계약 | `config` |
+| `observability` | snapshot·trace·replay·진단 계측 | `observability` `diag` |
+| `platform` | macOS 어댑터·ABI·앱 호스트 | `platform` `macos` `app-host` |
+| `app-runtime` | 앱 런타임·surface 라우팅·세션 조정 | `app` `session` `runtime` |
+
+**성격(kind)**
+
+| 라벨 | 언제 |
+|---|---|
+| `enhancement` | 새 기능·능력 확장 (`feat`) |
+| `bug` | 잘못된 동작 수정 (`fix`) |
+| `correctness` | 불변식 보존·정합성 수정(동작은 같아 보여도 계약을 지키는 변경) |
+| `refactor` | 동작 변경 없는 구조 개선·이관·삭제 (`refactor`) |
+| `docs` | **문서 변경이 포함된** PR. 문서만 바꾸면 `docs` 단독(`docs(scope):`), 코드와 함께 문서를 고쳤으면 `enhancement`/`bug`에 **더해서** 단다 |
+| `tests` | 테스트 추가·하네스 (`test`) |
+| `perf` | 성능 예산·프로파일링·최적화 (`perf`) |
+| `security` | 격리·capability·sanitize·권한 경계 |
+| `ci` | 워크플로·빌드·릴리스 (`ci` `build` `chore`) |
+
+일회성 분류(`duplicate`·`invalid`·`question`·`wontfix`·`good first issue`·`help wanted`)는 이슈용이며 PR 필수 라벨로 치지 않는다.
 
 이 규칙은 `.github/workflows/pr-metadata.yml`가 확인한다. 체크 실패가 실제로 머지를 막으려면 GitHub branch protection에서 `PR metadata / require label and assignee=ohah`를 required check로 지정한다(저장소 설정이라 코드에는 없다).
 
@@ -32,6 +75,7 @@ PR 설명에는 다음 질문에 대한 답이 있어야 한다.
 테스트/TDD/E2E 전략에 빈틈이 생기지 않았는가?
 로그, snapshot, trace, replay, future inspector가 같은 데이터를 공유하는 방향을 해치지 않았는가?
 구현과 문서가 같은 상태를 설명하는가?
+이 PR이 구현한 절의 `(계획)`·`(목표 계약)`·`(미착수)`·`(진행)` 라벨을 뗐는가? 스펙 문서의 미래형("…한다/이관한다")을 현재형으로 바꿨는가? (아래 "문서 상태 표기 규율")
 새 의존성이 추가되었다면 왜 지금 필요한가?
 메모리 전략을 성급하게 복잡하게 만들지 않았는가?
 플러그인/확장 경계를 나중에 막지 않는가?
@@ -41,6 +85,22 @@ renderer/storage/platform interop를 추가·변경했다면 public spec, platfo
 glyph role, wide-render-symbol, emoji/color glyph, 합성 glyph 분류를 바꿨다면 `src/width.zig`와 `src/platform/macos/coretext_smoke.m`의 주석-동기 미러, [글리프 역할 렌더 모델](glyph-role-render-model.md), 관련 smoke/manual gate를 함께 갱신했는가? (해당 없으면 N/A)
 reference terminal의 코드 표현(자료구조 레이아웃, 함수 분해, control flow)을 옮기지 않았는가?
 ```
+
+## 문서 상태 표기 규율
+
+doc-first로 설계 문서를 먼저 쓰기 때문에, **구현한 뒤 문서의 상태 라벨을 떼지 않는 드리프트**가 구조적으로 생긴다(2026-07-29 감사에서 `web-panel.md` §4.1 "계획"·`persistent-session-host.md` "목표 계약"·`layering-and-portability.md` "3차 추출(계획)"이 전부 구현 완료인 채 남아 있었다). 다음을 지킨다.
+
+- **문서 종류별로 상태를 어디에 쓰는지 고정한다.**
+
+  | 문서 | 성격 | 상태 표기 |
+  |---|---|---|
+  | [실제 구현 계획](implementation-plan.md) | 계획 | "완료 / 미착수 / 보류" — **여기가 계획 진행의 출처** |
+  | [검증 매트릭스](verification-matrix.md) | 상태 추적 | "구현 / 부분 구현 / 구현 전" + 한계·게이트 — **여기가 검증 상태의 출처** |
+  | 그 외 `*.md`("…의 단일 출처다") | 구현 스펙 | **상태를 쓰지 않는다.** "무엇이 계약인가"를 현재형으로만 쓰고, 진행은 위 두 문서를 가리킨다 |
+
+- **스펙 문서에서 금지**: "슬라이스 N 완료", "구현 상태: …", "(계획)·(목표 계약)·(미착수)" 절 라벨. 미구현은 "완료 안 됨"이 아니라 **"이 계약 밖(별도 이니셔티브)"** 으로 적는다.
+- **예외**: 문서가 명시적으로 "이 절은 구현 이력/연대기"라고 선언한 절(예: [file-panel.md](file-panel.md) §10)에서는 날짜와 과거형을 쓴다. 이력은 과거형이 맞다.
+- **PR에서 확인**: 이번 PR이 어떤 절을 현실로 만들었다면 그 절의 라벨을 떼고 미래형을 현재형으로 바꾼다. 새로 "계획" 라벨을 붙일 때는 **그 라벨을 뗄 PR이 어디인지**(슬라이스 이름)를 같이 적는다.
 
 ## 전략 수정 규칙
 

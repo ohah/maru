@@ -26,7 +26,7 @@ const std = @import("std");
 /// 문서로만 들어가(HTML/CSS로 shell DOM에 삽입되지 않음, §7) CSS 주입 벡터가 없으므로 `'unsafe-inline'`이 안전하다.
 /// **render origin은 md 파생·비신뢰 HTML을 materialize하므로 strict style-src(hash 핀)를 그대로 유지**해 sanitizer
 /// 우회 시 style 주입을 막는다. 'unsafe-inline'가 있으면 hash는 무시되므로(CSP 규약) app에서는 hash를 뺀다.
-pub const app_csp_header = "default-src 'none'; script-src 'self'; worker-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; connect-src 'none'; frame-src maru-app://render; base-uri 'none'; form-action 'none'";
+pub const app_csp_header = "default-src 'none'; script-src 'self'; worker-src 'none'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; connect-src 'none'; frame-src maru-app://render; base-uri 'none'; form-action 'none'";
 pub const render_csp_header = "default-src 'none'; script-src 'self'; worker-src 'none'; img-src 'self' data:; style-src 'self' 'sha256-Xeh9es1AoJEyNnawqxMjG30+czqjDUSJ+JDkbXALfVg='; connect-src 'none'; frame-src 'none'; base-uri 'none'; form-action 'none'";
 
 pub const AppAssetRole = enum(u32) {
@@ -141,22 +141,20 @@ test "appOriginAllowed: exact shell/render hosts and no explicit port" {
     try std.testing.expect(!appOriginAllowed("maru-app", "app.evil", false, .shell));
 }
 
-test "asset role pins exact origin CSP and keeps the worker app-only" {
+test "asset role pins exact origin CSP and keeps the Mermaid runtime out of trusted origins" {
     try std.testing.expectEqual(AppAssetRole.app, appAssetRoleForOrigin("maru-app", "app", false).?);
     try std.testing.expectEqual(AppAssetRole.render, appAssetRoleForOrigin("MARU-APP", "RENDER", false).?);
     try std.testing.expect(appAssetRoleForOrigin("maru-app", "app", true) == null);
     try std.testing.expect(appAssetRoleForOrigin("https", "app", false) == null);
-    try std.testing.expect(AppAssetRole.app.pathAllowed("live-preview-worker.js"));
     try std.testing.expect(!AppAssetRole.app.pathAllowed("mermaid-helper.js"));
     try std.testing.expect(!AppAssetRole.app.pathAllowed("MERMAID-HELPER.JS"));
     try std.testing.expect(!AppAssetRole.render.pathAllowed("mermaid-helper.js"));
-    try std.testing.expect(!AppAssetRole.render.pathAllowed("live-preview-worker.js"));
-    try std.testing.expect(!AppAssetRole.render.pathAllowed("LIVE-PREVIEW-WORKER.JS"));
     try std.testing.expect(AppAssetRole.render.pathAllowed("bundle.js"));
     try std.testing.expect(AppAssetRole.render.pathAllowed("render.html"));
     try std.testing.expect(!AppAssetRole.render.pathAllowed("index.html"));
     try std.testing.expect(!AppAssetRole.app.pathAllowed("assets/icon.png"));
-    try std.testing.expect(std.mem.indexOf(u8, AppAssetRole.app.csp(), "worker-src 'self'") != null);
+    // 라이브 프리뷰 폐기로 신뢰 shell이 더 이상 Worker를 만들지 않으므로 app origin도 worker-src를 닫는다.
+    try std.testing.expect(std.mem.indexOf(u8, AppAssetRole.app.csp(), "worker-src 'none'") != null);
     try std.testing.expect(std.mem.indexOf(u8, AppAssetRole.render.csp(), "worker-src 'none'") != null);
     try std.testing.expect(std.mem.indexOf(u8, AppAssetRole.render.csp(), "frame-src 'none'") != null);
 }

@@ -183,7 +183,9 @@ fn navButtonAt(x_px: f64, band_x: u32, cw: u32) ?NavButton {
 // 별도 물리 CAMetalLayer로 분리, 두 drawable을 한 command buffer에 present + 단일 commit으로 전이 원자성). host↔renderer
 // draw 계약 변경이라 버전을 올린다. **MetalFrame/세션 struct·export 시그니처는 불변**(overlay_layer는 Zig가 아니라
 // Swift가 소유한 CAMetalLayer라 struct offset·layout test는 그대로 green). 렌더러 분할·컨테이너 재편은 Swift/ObjC 레이어.
-pub const abi_version: u32 = 147;
+pub const abi_version: u32 = 148;
+// 148: 라이브 프리뷰 폐기 — file panel mode 2(live-preview)와 앱 전역 live-preview worker budget ABI를 제거하고
+//      `maru.file.livePreviewReady`를 `maru.file.rendererReady`로 개명한다. app origin CSP는 worker-src 'none'.
 // 147: open_terminal_web_link export 추가 + take_file_panel_external_link_action → take_external_link_action rename
 // (터미널 웹 링크를 **인앱 브라우저 패널**에서 열기 — config input.link-open-target=auto|in-app|system). 정책은 Zig
 // 단일 출처(openTerminalWebLink: system이면 0 / http(s) 리터럴만 / 활성 탭에서 **보이는** browser 패널 재사용 /
@@ -12786,11 +12788,10 @@ pub const AppSession = struct {
     ) bool {
         if (!self.dock_initialized or editor_epoch == 0) return false;
         const entry = self.fileEntryForSurfaceId(surface_id) orelse return false;
-        // read·live 둘 다 mermaid를 렌더한다(라이브 프리뷰가 UI에서 숨겨진 동안 읽기 프리뷰가 다이어그램을
-        // 그리도록, 사용자 요청 2026-07-23). source 모드는 편집이라 렌더 대상이 아니다. 다른 조건(문서 active·
-        // epoch 일치·recovery 아님·mutation 없음)은 read 모드도 beginDocument로 충족한다.
+        // mermaid를 렌더하는 모드는 읽기뿐이다 — 소스 모드는 생 Markdown 편집이라 렌더 대상이 아니다.
+        // 다른 조건(문서 active·epoch 일치·recovery 아님·mutation 없음)은 read 모드도 beginDocument로 충족한다.
         return entry.kind == .markdown and
-            (entry.mode == .live_preview or entry.mode == .read) and
+            entry.mode == .read and
             entry.editor_document_active and
             entry.editor_epoch == editor_epoch and
             !entry.editor_recovery_required and
@@ -57376,10 +57377,8 @@ test "FP6 file panel write atomically replaces only the pinned markdown and pres
     session.fileEntryAt(1).?.surface_id = 902;
     _ = try session.openFileTermInActivePane(link_path, .markdown);
     session.fileEntryAt(2).?.surface_id = 903;
-    // 라이브 백로그: product 기본은 읽기지만, markdown 편집·write·mermaid 게이트는 아직 코드에 있는 dormant live
-    // 경로로 검증한다(entry.mode 직접 세팅은 allowedFor를 우회 — 런타임 재검증은 복원 clamp뿐).
-    session.fileEntryAt(0).?.mode = .live_preview;
-    session.fileEntryAt(2).?.mode = .live_preview;
+    // markdown 기본 모드는 읽기이며, 편집·write·mermaid 게이트를 모두 그 제품 경로에서 검증한다
+    // (읽기로 전환해도 CM6 buffer가 살아 있어 ⌘S 저장이 성립한다 — docs/file-panel.md §2.4).
 
     const doc_epoch = try session.beginFilePanelDocument(901, 1);
     try std.testing.expect(session.filePanelMermaidDocumentActive(901, doc_epoch));

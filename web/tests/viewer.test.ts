@@ -104,7 +104,7 @@ describe("file viewer bridge boundary", () => {
         "0".repeat(64),
         "graph TD\nA --> B",
       );
-      expect(status?.dataset.liveMermaidRequest).toBe("pending");
+      expect(status?.dataset.mermaidRequest).toBe("pending");
       expect(scheduledTimeouts).toBe(0);
       const node = pending as unknown as HTMLElement;
       node.textContent = JSON.stringify({
@@ -115,7 +115,7 @@ describe("file viewer bridge boundary", () => {
       node.dataset.maruFileRequest = "done";
       document.dispatchEvent(new dom.window.Event("maru:file-response"));
       await expect(result).resolves.toBe("<svg></svg>");
-      expect(status?.dataset.liveMermaidRequest).toBe("ok");
+      expect(status?.dataset.mermaidRequest).toBe("ok");
     } finally {
       globalThis.setTimeout = originalSetTimeout;
     }

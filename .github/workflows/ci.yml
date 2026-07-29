@@ -66,10 +66,10 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-  # FP11f Mermaid 제품 pump는 macOS helper/WKWebView와 native tick adapter가 모두 필요하다.
+  # Mermaid 제품 pump는 macOS helper/WKWebView와 native tick adapter가 모두 필요하다.
   # 1,000 tick artifact가 process/pipe/wait 0과 completion drain 상한을 어기면 merge하지 않는다.
-  live-preview-macos:
-    name: live preview macOS product path
+  mermaid-macos:
+    name: mermaid macOS product path
     runs-on: macos-15
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -80,14 +80,14 @@ jobs:
           version: 2026.2.7
           sha256: f8becf318705e1bd91227ed0efee4f9fd988d1d5c66bb48e996f030792a0d3b7 # macos-arm64 binary
       - run: bun install --cwd web --frozen-lockfile
-      - run: mise run macos-live-preview-perf
-      - name: Upload native live preview performance artifact
+      - run: mise run macos-mermaid-perf
+      - name: Upload native Mermaid performance artifact
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: maru-live-preview-macos-artifacts
+          name: maru-mermaid-macos-artifacts
           path: |
-            tests/artifacts/perf/live-preview-macos.json
+            tests/artifacts/perf/mermaid-macos.json
             zig-out/maru-macos-mermaid-helper-smoke/mermaid-helper.summary.json
           if-no-files-found: error
           retention-days: 14

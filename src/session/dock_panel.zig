@@ -39,19 +39,22 @@ pub const EntryKind = enum {
     }
 };
 
+/// 폐기된 라이브 프리뷰 모드가 workspace 파일에 남긴 wire 이름이다. **writer는 이 값을 다시 쓰지 않는다** —
+/// 옛 파일을 여는 reader만 이 이름을 읽기 모드로 마이그레이션한다(`workspace.parseDockEntry`). 흡수하지 않으면
+/// 알 수 없는 mode가 그 창의 도크 전체를 빈 상태로 강등해 사용자가 열어 둔 파일 탭을 잃는다.
+pub const legacy_live_preview_mode_name = "live-preview";
+
 /// 파일 도크 표시 모드. enum ordinal은 C ABI raw 값, workspaceName/parseWorkspaceName은 workspace 문자열 wire의
 /// 정책 SSOT다. 헤더의 시각 순서·kind별 선택지는 `dock_layout.modesForKind`가 별도로 고정한다. HTML은 read만 허용하고
 /// Markdown의 두 편집 모드는 같은 dirty/save 수명 계약을 소비한다.
 pub const Mode = enum(u32) {
     read = 0,
     source_edit = 1,
-    live_preview = 2,
 
     /// 새 entry의 시작 모드는 kind 정책에서 한 번만 정한다. 복원 entry는 workspace에 저장된 mode를 그대로
     /// 덮어쓰므로 이 기본값과 독립이고, HTML은 실행 가능한 문서라 계속 read-only로 시작한다.
     pub fn defaultFor(kind: EntryKind) Mode {
         return switch (kind) {
-            // 라이브 프리뷰는 백로그(2026-07-22)라 markdown도 읽기로 시작한다. 라이브 재도입 시 .live_preview로 되돌린다.
             .markdown => .read,
             // html·media·pdf=격리 loadFileURL, image=신뢰 뷰어+readSelfImage(FP14) — 넷 다 read 뷰 전용(편집·모드 없음).
             .html, .image, .media, .pdf => .read,
@@ -62,23 +65,21 @@ pub const Mode = enum(u32) {
 
     pub fn allowedFor(self: Mode, kind: EntryKind) bool {
         return switch (kind) {
-            // markdown은 읽기|소스만(라이브 백로그). 저장된 live-preview entry는 복원 시 parseDockEntry가 defaultFor로 clamp한다.
             .markdown => self == .read or self == .source_edit,
             .html, .image, .media, .pdf => self == .read, // read 뷰 전용(편집·모드 없음).
             .text => self == .source_edit,
-            .svg => self == .read or self == .source_edit, // 라이브 없음.
+            .svg => self == .read or self == .source_edit,
         };
     }
 
     pub fn isEditable(self: Mode) bool {
-        return self == .source_edit or self == .live_preview;
+        return self == .source_edit;
     }
 
     pub fn workspaceName(self: Mode) []const u8 {
         return switch (self) {
             .read => "read",
             .source_edit => "source-edit",
-            .live_preview => "live-preview",
         };
     }
 
@@ -267,12 +268,12 @@ test "EntryKind/Mode policy: markdown, html, text (FP12 §2.2)" {
     // media는 격리 loadFileURL(WebKit media document)이라 CM6 편집 브리지를 쓰지 않는다.
     try std.testing.expect(!EntryKind.media.usesEditorBridge());
 
-    // 허용 모드: markdown=읽기|소스(라이브 백로그), html=read만, text=source_edit만, image/pdf=read만(격리 loadFileURL).
-    try std.testing.expect(Mode.read.allowedFor(.markdown) and Mode.source_edit.allowedFor(.markdown) and !Mode.live_preview.allowedFor(.markdown));
-    try std.testing.expect(Mode.read.allowedFor(.html) and !Mode.source_edit.allowedFor(.html) and !Mode.live_preview.allowedFor(.html));
-    try std.testing.expect(Mode.source_edit.allowedFor(.text) and !Mode.read.allowedFor(.text) and !Mode.live_preview.allowedFor(.text));
+    // 허용 모드: markdown=읽기|소스, html=read만, text=source_edit만, image/pdf=read만(격리 loadFileURL).
+    try std.testing.expect(Mode.read.allowedFor(.markdown) and Mode.source_edit.allowedFor(.markdown));
+    try std.testing.expect(Mode.read.allowedFor(.html) and !Mode.source_edit.allowedFor(.html));
+    try std.testing.expect(Mode.source_edit.allowedFor(.text) and !Mode.read.allowedFor(.text));
     inline for (.{ EntryKind.image, EntryKind.media, EntryKind.pdf }) |kind| {
-        try std.testing.expect(Mode.read.allowedFor(kind) and !Mode.source_edit.allowedFor(kind) and !Mode.live_preview.allowedFor(kind));
+        try std.testing.expect(Mode.read.allowedFor(kind) and !Mode.source_edit.allowedFor(kind));
     }
 
     // 새 entry의 기본 모드는 항상 자기 kind에서 허용된다(복원 검증 불변식과 일치). 모든 kind를 exhaustive하게 검증한다.
@@ -290,27 +291,26 @@ test "entry id allocator: monotonic nonzero and exhaustion fails closed" {
     try std.testing.expectEqual(std.math.maxInt(EntryId), ids.next_id);
 }
 
-test "dock mode policy keeps HTML read-only and both Markdown editors dirty-capable" {
+test "dock mode policy keeps HTML read-only and the Markdown source editor dirty-capable" {
     try std.testing.expectEqual(@as(u32, 0), @intFromEnum(Mode.read));
     try std.testing.expectEqual(@as(u32, 1), @intFromEnum(Mode.source_edit));
-    try std.testing.expectEqual(@as(u32, 2), @intFromEnum(Mode.live_preview));
     try std.testing.expect(Mode.read.allowedFor(.markdown));
-    try std.testing.expect(!Mode.live_preview.allowedFor(.markdown)); // 라이브 백로그
     try std.testing.expect(Mode.source_edit.allowedFor(.markdown));
     try std.testing.expect(Mode.read.allowedFor(.html));
-    try std.testing.expect(!Mode.live_preview.allowedFor(.html));
     try std.testing.expect(!Mode.source_edit.allowedFor(.html));
     try std.testing.expect(!Mode.read.isEditable());
-    try std.testing.expect(Mode.live_preview.isEditable());
     try std.testing.expect(Mode.source_edit.isEditable());
     inline for (std.enums.values(Mode)) |mode| {
         try std.testing.expectEqual(mode, Mode.parseWorkspaceName(mode.workspaceName()).?);
     }
     try std.testing.expect(Mode.parseWorkspaceName("future") == null);
+    // 폐기된 라이브 프리뷰의 wire 이름은 더 이상 mode로 파싱되지 않는다 — 옛 workspace 파일의 마이그레이션은
+    // `workspace.parseDockEntry`가 소유하며, 그 경로가 없으면 도크 전체가 강등된다.
+    try std.testing.expect(Mode.parseWorkspaceName(legacy_live_preview_mode_name) == null);
 }
 
 test "dock panel: restore rejects a persisted HTML editor mode" {
     var entry_ids: EntryIdAllocator = .{};
-    const entries = [_]PersistedEntry{.{ .path = "/tmp/a.html", .kind = .html, .mode = .live_preview, .active = true }};
+    const entries = [_]PersistedEntry{.{ .path = "/tmp/a.html", .kind = .html, .mode = .source_edit, .active = true }};
     try std.testing.expectError(error.InvalidPersistedState, DockPanel.restore(std.testing.allocator, &entry_ids, .{ .entries = &entries }));
 }

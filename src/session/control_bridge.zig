@@ -32,7 +32,7 @@ pub const file_resolve_external_change_method = "maru.file.resolveExternalChange
 pub const file_open_link_method = "maru.file.openLink";
 pub const file_render_mermaid_method = "maru.file.renderMermaid";
 pub const file_revoke_mermaid_method = "maru.file.revokeMermaid";
-pub const file_live_preview_ready_method = "maru.file.livePreviewReady";
+pub const file_renderer_ready_method = "maru.file.rendererReady";
 /// 모든 bridge 정수는 JavaScript `Number`를 왕복하므로 이 상한 안에서만 identity가 정확하다.
 pub const max_js_safe_integer: u64 = 9_007_199_254_740_991;
 
@@ -63,7 +63,7 @@ pub const FileAccess = struct {
     open_link_fn: *const fn (context: *anyopaque, editor_epoch: u64, href: []const u8, force_system: bool) anyerror!void,
     render_mermaid_fn: *const fn (context: *anyopaque, request: MermaidRenderRequest) anyerror!u64,
     revoke_mermaid_fn: *const fn (context: *anyopaque, renderer: mermaid_protocol.RendererCapability) anyerror!void,
-    live_preview_ready_fn: *const fn (context: *anyopaque, editor_epoch: u64) anyerror!void,
+    renderer_ready_fn: *const fn (context: *anyopaque, editor_epoch: u64) anyerror!void,
 
     fn beginDocument(self: FileAccess, document_id: u64) anyerror!u64 {
         return self.begin_document_fn(self.context, document_id);
@@ -101,8 +101,8 @@ pub const FileAccess = struct {
         return self.revoke_mermaid_fn(self.context, renderer);
     }
 
-    fn livePreviewReady(self: FileAccess, editor_epoch: u64) anyerror!void {
-        return self.live_preview_ready_fn(self.context, editor_epoch);
+    fn rendererReady(self: FileAccess, editor_epoch: u64) anyerror!void {
+        return self.renderer_ready_fn(self.context, editor_epoch);
     }
 };
 
@@ -220,9 +220,9 @@ pub fn dispatchBridgeWithFileAccess(
         access.revokeMermaid(renderer) catch return errorResponse(gpa, req.id, .internal_error);
         return serializeFileMutationResult(gpa, req.id, "revoked", true);
     }
-    if (std.mem.eql(u8, req.method, file_live_preview_ready_method)) {
+    if (std.mem.eql(u8, req.method, file_renderer_ready_method)) {
         const editor_epoch = positiveIntegerParam(req.params, "editor_epoch") catch return errorResponse(gpa, req.id, .invalid_params);
-        access.livePreviewReady(editor_epoch) catch return errorResponse(gpa, req.id, .internal_error);
+        access.rendererReady(editor_epoch) catch return errorResponse(gpa, req.id, .internal_error);
         return serializeFileMutationResult(gpa, req.id, "ready", true);
     }
     return errorResponse(gpa, req.id, .method_not_found);
@@ -512,7 +512,7 @@ const FakeFileAccess = struct {
     last_open_link_force_system: bool = false,
     mermaid_calls: usize = 0,
     mermaid_revoke_calls: usize = 0,
-    live_preview_ready_calls: usize = 0,
+    renderer_ready_calls: usize = 0,
     last_mermaid: ?MermaidRenderRequest = null,
     last_mermaid_revoke: ?mermaid_protocol.RendererCapability = null,
     last_mermaid_source_len: usize = 0,
@@ -590,10 +590,10 @@ const FakeFileAccess = struct {
         self.last_mermaid_revoke = renderer;
     }
 
-    fn livePreviewReady(context: *anyopaque, _: u64) anyerror!void {
+    fn rendererReady(context: *anyopaque, _: u64) anyerror!void {
         const self: *FakeFileAccess = @ptrCast(@alignCast(context));
         if (self.fail) return error.ReadyFailed;
-        self.live_preview_ready_calls += 1;
+        self.renderer_ready_calls += 1;
     }
 
     fn access(self: *FakeFileAccess) FileAccess {
@@ -608,7 +608,7 @@ const FakeFileAccess = struct {
             .open_link_fn = openLink,
             .render_mermaid_fn = renderMermaid,
             .revoke_mermaid_fn = revokeMermaid,
-            .live_preview_ready_fn = livePreviewReady,
+            .renderer_ready_fn = rendererReady,
         };
     }
 };
@@ -754,21 +754,21 @@ test "dispatchBridge: live preview ready is exact and epoch scoped" {
     var fake: FakeFileAccess = .{};
     const response = try dispatchBridgeWithFileAccess(
         testing.allocator,
-        "{\"jsonrpc\":\"2.0\",\"id\":30,\"method\":\"maru.file.livePreviewReady\",\"params\":{\"editor_epoch\":7}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":30,\"method\":\"maru.file.rendererReady\",\"params\":{\"editor_epoch\":7}}",
         "0.1.0",
         fake.access(),
     );
     defer testing.allocator.free(response);
-    try testing.expectEqual(@as(usize, 1), fake.live_preview_ready_calls);
+    try testing.expectEqual(@as(usize, 1), fake.renderer_ready_calls);
 
     const invalid = try dispatchBridgeWithFileAccess(
         testing.allocator,
-        "{\"jsonrpc\":\"2.0\",\"id\":31,\"method\":\"maru.file.livePreviewReady\",\"params\":{\"editor_epoch\":0}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":31,\"method\":\"maru.file.rendererReady\",\"params\":{\"editor_epoch\":0}}",
         "0.1.0",
         fake.access(),
     );
     defer testing.allocator.free(invalid);
-    try testing.expectEqual(@as(usize, 1), fake.live_preview_ready_calls);
+    try testing.expectEqual(@as(usize, 1), fake.renderer_ready_calls);
 }
 
 test "dispatchBridge: file.openLink is an exact-parameter pinned provider mutation" {

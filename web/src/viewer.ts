@@ -577,7 +577,7 @@ export async function renderMermaidFromBridge(
   source: string,
   signal?: AbortSignal,
 ): Promise<string | null> {
-  if (status !== null) status.dataset.liveMermaidRequest = "pending";
+  if (status !== null) status.dataset.mermaidRequest = "pending";
   try {
     const result = await requestFileBridge(
       document,
@@ -597,10 +597,10 @@ export async function renderMermaidFromBridge(
       signal,
     );
     const svg = typeof result.svg === "string" ? result.svg : null;
-    if (status !== null) status.dataset.liveMermaidRequest = svg === null ? "invalid" : "ok";
+    if (status !== null) status.dataset.mermaidRequest = svg === null ? "invalid" : "ok";
     return svg;
   } catch {
-    if (status !== null) status.dataset.liveMermaidRequest = "error";
+    if (status !== null) status.dataset.mermaidRequest = "error";
     return null;
   }
 }
@@ -1237,7 +1237,7 @@ export function bootShell(document: Document, targetWindow: Window): void {
             source,
           );
           if (typeof svg !== "string")
-            throw new Error(`no-svg(state=${status?.dataset.liveMermaidRequest ?? "?"})`);
+            throw new Error(`no-svg(state=${status?.dataset.mermaidRequest ?? "?"})`);
           response.svg = svg;
         } catch (error) {
           response.error =

@@ -677,11 +677,11 @@ final class MaruAppSchemeHandler: NSObject, WKURLSchemeHandler {
     }
 
     struct RoleSchemeSmokeResult {
-        let appWorkerStatus: Int
-        let appWorkerCSP: String
+        let appShellStatus: Int
+        let appShellCSP: String
         let appMermaidStatus: Int
-        let renderWorkerStatus: Int
-        let renderWorkerCSP: String
+        let renderShellStatus: Int
+        let renderShellCSP: String
         let renderDocumentStatus: Int
         let renderDocumentCSP: String
     }
@@ -693,7 +693,7 @@ final class MaruAppSchemeHandler: NSObject, WKURLSchemeHandler {
         do {
             try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
             defer { try? FileManager.default.removeItem(at: root) }
-            try Data("self.onmessage=()=>{}".utf8).write(to: root.appendingPathComponent("live-preview-worker.js"))
+            try Data("<!doctype html><title>shell</title>".utf8).write(to: root.appendingPathComponent("index.html"))
             try Data("globalThis.mermaid={}".utf8).write(to: root.appendingPathComponent("mermaid-helper.js"))
             try Data("<!doctype html><title>render</title>".utf8).write(to: root.appendingPathComponent("render.html"))
             let handler = MaruAppSchemeHandler(assetRoot: root.path)
@@ -707,22 +707,22 @@ final class MaruAppSchemeHandler: NSObject, WKURLSchemeHandler {
                 }
                 return task.finished ? task : nil
             }
-            guard let appWorker = run("maru-app://app/live-preview-worker.js"),
+            guard let appShell = run("maru-app://app/index.html"),
                   let appMermaid = run("maru-app://app/mermaid-helper.js"),
-                  let renderWorker = run("maru-app://render/live-preview-worker.js"),
+                  let renderShell = run("maru-app://render/index.html"),
                   let renderDocument = run("maru-app://render/render.html") else { return nil }
-            let appWorkerStatus = appWorker.response?.statusCode ?? -1
-            let appWorkerCSP = appWorker.response?.value(forHTTPHeaderField: "Content-Security-Policy") ?? "missing"
-            let renderWorkerStatus = renderWorker.response?.statusCode ?? -1
-            let renderWorkerCSP = renderWorker.response?.value(forHTTPHeaderField: "Content-Security-Policy") ?? "missing"
+            let appShellStatus = appShell.response?.statusCode ?? -1
+            let appShellCSP = appShell.response?.value(forHTTPHeaderField: "Content-Security-Policy") ?? "missing"
+            let renderShellStatus = renderShell.response?.statusCode ?? -1
+            let renderShellCSP = renderShell.response?.value(forHTTPHeaderField: "Content-Security-Policy") ?? "missing"
             let renderDocumentStatus = renderDocument.response?.statusCode ?? -1
             let renderDocumentCSP = renderDocument.response?.value(forHTTPHeaderField: "Content-Security-Policy") ?? "missing"
             return RoleSchemeSmokeResult(
-                appWorkerStatus: appWorkerStatus,
-                appWorkerCSP: appWorkerCSP,
+                appShellStatus: appShellStatus,
+                appShellCSP: appShellCSP,
                 appMermaidStatus: appMermaid.response?.statusCode ?? -1,
-                renderWorkerStatus: renderWorkerStatus,
-                renderWorkerCSP: renderWorkerCSP,
+                renderShellStatus: renderShellStatus,
+                renderShellCSP: renderShellCSP,
                 renderDocumentStatus: renderDocumentStatus,
                 renderDocumentCSP: renderDocumentCSP
             )
@@ -948,10 +948,6 @@ final class MaruBridgeHandler: NSObject, WKScriptMessageHandlerWithReply {
            ) {
             return
         }
-        if body["method"] as? String == "maru.file.livePreviewReady",
-           let reply = replyObj as? [String: Any], reply["result"] != nil {
-            controller?.livePreviewBridgeReady(surfaceId)
-        }
         if body["method"] as? String == "maru.file.revokeMermaid",
            let reply = replyObj as? [String: Any], reply["result"] != nil,
            let params = body["params"] as? [String: Any] {
@@ -966,7 +962,7 @@ final class MaruBridgeHandler: NSObject, WKScriptMessageHandlerWithReply {
         guard let session = controller?.bridgeSession(for: surfaceId) else { return nil }
         // write/dirty/openLink는 side effect라 size-query가 dispatch를 두 번 실행하면 안 된다. 응답은 작은 고정 JSON이므로
         // 단일 1 KiB fill 호출로 끝낸다. read/readAsset만 아래 query/fill 재계산 경로를 쓴다.
-        if method == "maru.file.beginDocument" || method == "maru.file.write" || method == "maru.file.setDirty" || method == "maru.file.resolveExternalChange" || method == "maru.file.openLink" || method == "maru.file.renderMermaid" || method == "maru.file.revokeMermaid" || method == "maru.file.livePreviewReady" {
+        if method == "maru.file.beginDocument" || method == "maru.file.write" || method == "maru.file.setDirty" || method == "maru.file.resolveExternalChange" || method == "maru.file.openLink" || method == "maru.file.renderMermaid" || method == "maru.file.revokeMermaid" || method == "maru.file.rendererReady" {
             var out = [UInt8](repeating: 0, count: 1024)
             let written = reqBytes.withUnsafeBufferPointer { rp in
                 out.withUnsafeMutableBufferPointer { op in
@@ -1032,8 +1028,8 @@ final class MaruBridgeHandler: NSObject, WKScriptMessageHandlerWithReply {
           revokeMermaid: function (request) {
             return window.maru.request("maru.file.revokeMermaid", request);
           },
-          livePreviewReady: function (editorEpoch) {
-            return window.maru.request("maru.file.livePreviewReady", { editor_epoch: editorEpoch });
+          rendererReady: function (editorEpoch) {
+            return window.maru.request("maru.file.rendererReady", { editor_epoch: editorEpoch });
           }
         }
       };
@@ -1103,9 +1099,9 @@ final class MaruBridgeHandler: NSObject, WKScriptMessageHandlerWithReply {
               widget_generation: request.widget_generation,
               renderer_instance: request.renderer_instance
             });
-          } else if (request.method === "livePreviewReady" &&
+          } else if (request.method === "rendererReady" &&
                      Number.isSafeInteger(request.editor_epoch) && request.editor_epoch > 0) {
-            promise = window.maru.file.livePreviewReady(request.editor_epoch);
+            promise = window.maru.file.rendererReady(request.editor_epoch);
           } else {
             node.textContent = JSON.stringify({ error: "invalid request" });
             finish(node);
@@ -2362,16 +2358,9 @@ private func browserCtlExecuteScriptStream(
 final class FilePanelEditingSmokeProbe {
     weak var panel: MaruWebPanelView?
     var editor = "pending"
-    var liveProjection = "pending"
-    var liveProjectionDecorations = "pending"
-    var liveProjectionGeneration = "pending"
-    var liveGeneralFragments = "pending"
-    var liveAtomicMounted = "pending"
-    var liveAtomicRendered = "pending"
-    var liveAtomicAdmitted = "pending"
-    var liveAtomicState = "pending"
-    var liveAtomicFailure = "pending"
-    var liveMermaidRequest = "pending"
+    var mermaidRequestState = "pending"
+    // 읽기 프리뷰 Mermaid 확인 뒤 소스 모드 전환을 한 번만 요청하기 위한 latch.
+    private var requestedSourceMode = false
     var mermaidNavigationInFlight = "pending"
     var mermaidNavigationCancelled = "pending"
     var defaultMode = "pending"
@@ -2398,16 +2387,8 @@ final class FilePanelEditingSmokeProbe {
         // document recovery latch를 의도대로 세우므로, 직전 성공 증거를 지우거나 새 문서에서 편집을 재시작하지 않는다.
         if mermaidNavigationStarted { return }
         editor = "pending"
-        liveProjection = "pending"
-        liveProjectionDecorations = "pending"
-        liveProjectionGeneration = "pending"
-        liveGeneralFragments = "pending"
-        liveAtomicMounted = "pending"
-        liveAtomicRendered = "pending"
-        liveAtomicAdmitted = "pending"
-        liveAtomicState = "pending"
-        liveAtomicFailure = "pending"
-        liveMermaidRequest = "pending"
+        mermaidRequestState = "pending"
+        requestedSourceMode = false
         defaultMode = "pending"
         edit = "pending"
         cmdSRoute = "pending"
@@ -2420,8 +2401,8 @@ final class FilePanelEditingSmokeProbe {
         // callback을 허용하지 않도록 navigation이 없었던 최초 호출만 같은 초기화를 수행한다.
         if navigationEpoch == 0 { invalidateNavigation() }
         let epoch = navigationEpoch
-        defaultMode = requestedMode == Int32(MARU_FILE_PANEL_MODE_LIVE_PREVIEW)
-            ? "live-preview" : "unexpected-\(requestedMode)"
+        defaultMode = requestedMode == Int32(MARU_FILE_PANEL_MODE_READ)
+            ? "read" : "unexpected-\(requestedMode)"
         // A cold signed helper plus its bridge-free WKWebView may finish after the shell/editor is already
         // interactive. Keep the probe alive for the product smoke lifetime instead of declaring failure at 6 s.
         captureEditor(epoch: epoch, attemptsRemaining: 48)
@@ -2429,19 +2410,13 @@ final class FilePanelEditingSmokeProbe {
 
     private func captureEditor(epoch: UInt64, attemptsRemaining: Int) {
         guard epoch == navigationEpoch, let panel else { return }
+        // 읽기 프리뷰가 render iframe 안에서 Mermaid 펜스를 실제 helper로 왕복시킨 뒤에야(mermaidRequest=ok)
+        // 소스 모드로 전환해 CM6 편집·⌘S 저장을 검증한다. 두 모드를 한 스모크가 순서대로 지난다.
         let script = """
         JSON.stringify({
           editor: document.querySelector('.cm-content')?.textContent?.includes('FP4 viewer fixture') === true,
-          projection: document.getElementById('viewer-status')?.dataset.liveProjection || 'pending',
-          decorations: Number(document.getElementById('viewer-status')?.dataset.liveProjectionDecorations || '0'),
-          generation: Number(document.getElementById('viewer-status')?.dataset.liveProjectionGeneration || '0'),
-          generalFragments: document.querySelectorAll('.maru-live-fragment-frame').length,
-          atomicMounted: Number(document.getElementById('viewer-status')?.dataset.liveAtomicMounted || '0'),
-          atomicRendered: document.querySelectorAll('.maru-live-atomic-frame[data-atomic-rendered="true"]').length,
-          atomicAdmitted: document.getElementById('viewer-status')?.dataset.liveAtomicAdmitted || 'pending',
-          atomicState: document.getElementById('viewer-status')?.dataset.liveAtomicState || 'pending',
-          atomicFailure: document.getElementById('viewer-status')?.dataset.liveAtomicFailure || 'pending',
-          mermaidRequest: document.getElementById('viewer-status')?.dataset.liveMermaidRequest || 'pending',
+          previewImages: document.querySelectorAll('iframe').length,
+          mermaidRequest: document.getElementById('viewer-status')?.dataset.mermaidRequestState || 'pending',
           editorEpoch: Number(document.getElementById('viewer-status')?.dataset.editorEpoch || '0')
         })
         """
@@ -2450,31 +2425,16 @@ final class FilePanelEditingSmokeProbe {
                   let raw = value as? String, let data = raw.data(using: .utf8),
                   let probe = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
             let editorReady = probe["editor"] as? Bool ?? false
-            let projection = probe["projection"] as? String ?? "pending"
-            let decorations = probe["decorations"] as? Int ?? 0
-            let generation = probe["generation"] as? Int ?? 0
-            let generalFragments = probe["generalFragments"] as? Int ?? 0
-            let atomicMounted = probe["atomicMounted"] as? Int ?? 0
-            let atomicRendered = probe["atomicRendered"] as? Int ?? 0
-            let atomicAdmitted = probe["atomicAdmitted"] as? String ?? "pending"
-            let atomicState = probe["atomicState"] as? String ?? "pending"
-            let atomicFailure = probe["atomicFailure"] as? String ?? "pending"
             let mermaidRequest = probe["mermaidRequest"] as? String ?? "pending"
             let editorEpoch = probe["editorEpoch"] as? Int ?? 0
             self.observedEditorEpoch = editorEpoch
             self.editor = String(editorReady)
-            self.liveProjection = projection
-            self.liveProjectionDecorations = String(decorations)
-            self.liveProjectionGeneration = String(generation)
-            self.liveGeneralFragments = String(generalFragments)
-            self.liveAtomicMounted = String(max(Int(self.liveAtomicMounted) ?? 0, atomicMounted))
-            self.liveAtomicRendered = String(max(Int(self.liveAtomicRendered) ?? 0, atomicRendered))
-            self.liveAtomicAdmitted = atomicAdmitted
-            self.liveAtomicState = atomicState
-            self.liveAtomicFailure = atomicFailure
-            self.liveMermaidRequest = mermaidRequest
-            if editorReady, projection == "running", decorations > 0, generation > 0,
-               generalFragments == 0, atomicMounted >= 2, atomicRendered >= 2 {
+            self.mermaidRequestState = mermaidRequest
+            if mermaidRequest == "ok", !self.requestedSourceMode {
+                self.requestedSourceMode = true
+                panel.applyFilePanelMode(Int32(MARU_FILE_PANEL_MODE_SOURCE_EDIT))
+            }
+            if editorReady, mermaidRequest == "ok" {
                 self.startEditingSave(epoch: epoch)
                 return
             }
@@ -2762,8 +2722,10 @@ final class MaruWebPanelView: NSView {
     var fileHTMLAboutAttemptProbe: String?
     var fileHTMLPinnedProbe: String?
     private var fileHTMLProbeStarted = false
-    private var requestedFileMode: Int32 = 0 // 0=read, 1=source-edit, 2=live-preview. Zig dock entry가 단일 출처.
-    private var livePreviewPageReady = false
+    private var requestedFileMode: Int32 = 0 // 0=read, 1=source-edit. Zig가 권위이고 여기 값은 마지막 적용본이다.
+    // 신뢰 shell 문서가 로드를 마쳤는가. 같은 URL의 reload/programmatic navigation을 fresh document id로
+    // 치환할지 판단하는 데 쓴다(서로 다른 WebContent document가 editor epoch를 공유하지 못하게).
+    private var documentPageReady = false
     // 일반 탭 이탈 dirty snapshot은 close request와 달리 request_id가 없다. 소비한 Zig one-shot을 WebKit hydration
     // 사이에서 잃지 않도록 view가 한 개의 pending intent와 epoch만 보존하고, 성공한 page→native ACK 뒤에만 내린다.
     private var fileDirtySyncPending = false
@@ -3030,36 +2992,17 @@ final class MaruWebPanelView: NSView {
         guard filePanelKind == 1 else { return }
         guard Self.isKnownFilePanelMode(rawMode) else { return }
         requestedFileMode = rawMode
-        controller?.reconcileLivePreviewBudget()
         guard webView.url?.scheme == MaruAppSchemeHandler.scheme, webView.url?.host == "app" else { return }
-        let mode = requestedFileMode == Int32(MARU_FILE_PANEL_MODE_SOURCE_EDIT) ? "source-edit" : (requestedFileMode == Int32(MARU_FILE_PANEL_MODE_LIVE_PREVIEW) ? "live-preview" : "read")
+        let mode = requestedFileMode == Int32(MARU_FILE_PANEL_MODE_SOURCE_EDIT) ? "source-edit" : "read"
         webView.evaluateJavaScript(
             "window.dispatchEvent(new CustomEvent('maru:file-mode',{detail:{mode:'\(mode)'}}))",
             completionHandler: nil
         )
     }
 
-    var requestsLivePreviewWorker: Bool {
-        filePanelKind == 1
-            && requestedFileMode == Int32(MARU_FILE_PANEL_MODE_LIVE_PREVIEW)
-            && livePreviewPageReady
-            && !isHidden
-            && superview != nil
-    }
-
-    func applyLivePreviewAdmission(_ admitted: Bool, completion: @escaping (Bool) -> Void) {
-        guard filePanelKind == 1, webView.url?.scheme == MaruAppSchemeHandler.scheme,
-              webView.url?.host == "app" else { completion(false); return }
-        webView.evaluateJavaScript(
-            "window.dispatchEvent(new CustomEvent('maru:file-live-preview-active',{detail:{active:\(admitted ? "true" : "false")}}))",
-            completionHandler: { _, error in completion(error == nil) }
-        )
-    }
-
     static func isKnownFilePanelMode(_ rawMode: Int32) -> Bool {
         rawMode == Int32(MARU_FILE_PANEL_MODE_READ)
             || rawMode == Int32(MARU_FILE_PANEL_MODE_SOURCE_EDIT)
-            || rawMode == Int32(MARU_FILE_PANEL_MODE_LIVE_PREVIEW)
     }
 
     func requestFileDirtySync(requestId: UInt64 = 0) {
@@ -3577,8 +3520,8 @@ extension MaruWebPanelView: WKNavigationDelegate {
                 decisionHandler(.cancel)
                 return
             }
-            if livePreviewPageReady {
-                livePreviewPageReady = false
+            if documentPageReady {
+                documentPageReady = false
                 decisionHandler(.cancel)
                 DispatchQueue.main.async { [weak self] in _ = self?.loadFreshTrustedDocument() }
                 return
@@ -3597,10 +3540,9 @@ extension MaruWebPanelView: WKNavigationDelegate {
             applyFilePanelZoom(maru_macos_app_session_file_panel_zoom_milli(session))
         }
         if filePanelKind == 1 {
-            livePreviewPageReady = true
+            documentPageReady = true
             applySyntaxThemeStyle()
             applyFilePanelMode(requestedFileMode)
-            controller?.livePreviewNavigationDidFinish(surfaceId)
             resumeFileDirtySyncIfPending()
         }
         guard controller?.isSmokeMode == true else { return }
@@ -3674,7 +3616,7 @@ extension MaruWebPanelView: WKNavigationDelegate {
     // 결정적 트리거 불가라 헤드리스/손 테스트 대상(§9.5.5). 메인 스레드(델리게이트 콜백).
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
         if filePanelKind == 1 {
-            livePreviewPageReady = false
+            documentPageReady = false
             if controller?.filePanelDidTerminateWebContent(surfaceId, panel: self) == true {
                 _ = loadFreshTrustedDocument()
             }
@@ -3980,204 +3922,6 @@ final class QuickTerminalPanel: NSPanel {
     override var canBecomeMain: Bool { true }
 }
 
-private enum LivePreviewTransitionAction: Equatable {
-    case revoke(UInt64)
-    case admit(UInt64)
-
-    var surfaceId: UInt64 {
-        switch self {
-        case .revoke(let surfaceId), .admit(let surfaceId): surfaceId
-        }
-    }
-}
-
-private struct LivePreviewTransition: Equatable {
-    let action: LivePreviewTransitionAction
-    let epoch: UInt64
-}
-
-private struct LivePreviewTransitionState {
-    private(set) var desired: [UInt64] = []
-    private(set) var applied: [UInt64] = []
-    private(set) var inFlight: LivePreviewTransition?
-    private var epoch: UInt64 = 0
-
-    init(desired: [UInt64] = [], applied: [UInt64] = []) {
-        self.desired = desired
-        self.applied = applied
-    }
-
-    mutating func reserveCapacity(_ limit: Int) {
-        desired.reserveCapacity(limit)
-        applied.reserveCapacity(limit)
-    }
-
-    mutating func replaceDesired(_ value: ArraySlice<UInt64>) {
-        desired.removeAll(keepingCapacity: true)
-        desired.append(contentsOf: value)
-    }
-
-    mutating func begin(limit: Int) -> LivePreviewTransition? {
-        guard inFlight == nil else { return nil }
-        let action: LivePreviewTransitionAction
-        if let surfaceId = applied.first(where: { !desired.contains($0) }) {
-            action = .revoke(surfaceId)
-        } else {
-            guard applied.count < limit,
-                  let surfaceId = desired.first(where: { !applied.contains($0) }) else { return nil }
-            // Reservation precedes the enable eval. An uncertain completion therefore still consumes capacity.
-            applied.append(surfaceId)
-            action = .admit(surfaceId)
-        }
-        epoch &+= 1
-        let transition = LivePreviewTransition(action: action, epoch: epoch)
-        inFlight = transition
-        return transition
-    }
-
-    mutating func complete(epoch expectedEpoch: UInt64, releaseReservation: Bool) -> Bool {
-        guard let transition = inFlight, transition.epoch == expectedEpoch else { return false }
-        inFlight = nil
-        if releaseReservation { applied.removeAll { $0 == transition.action.surfaceId } }
-        return true
-    }
-
-    func isCurrent(_ transition: LivePreviewTransition) -> Bool { inFlight == transition }
-
-    mutating func invalidate(_ surfaceId: UInt64) {
-        desired.removeAll { $0 == surfaceId }
-        applied.removeAll { $0 == surfaceId }
-        if inFlight?.action.surfaceId == surfaceId {
-            epoch &+= 1
-            inFlight = nil
-        }
-    }
-
-    static func selfTest(limit: Int) -> Bool {
-        guard limit >= 2 else { return false }
-        let replacement = UInt64(limit + 1)
-        var state = LivePreviewTransitionState(
-            desired: Array(2 ... limit + 1).map(UInt64.init),
-            applied: Array(1 ... limit).map(UInt64.init)
-        )
-        guard let failedRevoke = state.begin(limit: limit), failedRevoke.action == .revoke(1),
-              state.begin(limit: limit) == nil,
-              state.complete(epoch: failedRevoke.epoch, releaseReservation: false),
-              state.applied.contains(1),
-              let successfulRevoke = state.begin(limit: limit), successfulRevoke.action == .revoke(1),
-              state.complete(epoch: successfulRevoke.epoch, releaseReservation: true),
-              !state.applied.contains(1),
-              let admit = state.begin(limit: limit), admit.action == .admit(replacement),
-              state.applied.count == limit,
-              state.complete(epoch: admit.epoch, releaseReservation: false),
-              state.applied.contains(replacement) else { return false }
-        // WebContent termination revokes capacity and makes an old completion harmless.
-        state.replaceDesired(ArraySlice(Array(2 ... limit).map(UInt64.init)))
-        guard let revokeReplacement = state.begin(limit: limit),
-              revokeReplacement.action == .revoke(replacement) else { return false }
-        state.invalidate(replacement)
-        return !state.complete(epoch: revokeReplacement.epoch, releaseReservation: true) &&
-            !state.applied.contains(replacement)
-    }
-}
-
-private struct LivePreviewRetirementCoordinator<Panel: AnyObject> {
-    private var panels: [UInt64: Panel] = [:]
-
-    mutating func reserveCapacity(_ limit: Int) { panels.reserveCapacity(limit) }
-
-    func panel(for surfaceId: UInt64) -> Panel? { panels[surfaceId] }
-
-    mutating func begin(_ surfaceId: UInt64, panel: Panel, applied: [UInt64]) -> Bool {
-        guard applied.contains(surfaceId) else { return false }
-        if let retained = panels[surfaceId] { return retained === panel }
-        panels[surfaceId] = panel
-        return true
-    }
-
-    mutating func disableDidComplete(
-        _ surfaceId: UInt64,
-        panel: Panel,
-        success: Bool
-    ) -> (releaseReservation: Bool, retiredPanel: Panel?) {
-        guard let retained = panels[surfaceId] else { return (success, nil) }
-        guard retained === panel, success else { return (false, nil) }
-        panels[surfaceId] = nil
-        return (true, retained)
-    }
-
-    mutating func webContentTerminated(
-        _ surfaceId: UInt64,
-        panel: Panel,
-        currentPanel: Panel?
-    ) -> (invalidateTransition: Bool, suppressReload: Bool, retiredPanel: Panel?) {
-        if let retained = panels[surfaceId] {
-            guard retained === panel else { return (false, true, nil) }
-            panels[surfaceId] = nil
-            return (true, true, retained)
-        }
-        guard currentPanel === panel else { return (false, true, nil) }
-        return (true, false, nil)
-    }
-}
-
-private final class LivePreviewRetirementTestPanel {}
-private final class LivePreviewRetirementWeakReference {
-    weak var panel: LivePreviewRetirementTestPanel?
-    init(_ panel: LivePreviewRetirementTestPanel?) { self.panel = panel }
-}
-
-private func livePreviewRetirementCoordinatorSelfTest(limit: Int) -> Bool {
-    guard limit >= 2 else { return false }
-    let replacement = UInt64(limit + 1)
-    var transitions = LivePreviewTransitionState(
-        desired: Array(1 ... limit + 1).map(UInt64.init),
-        applied: Array(1 ... limit).map(UInt64.init)
-    )
-    var retirement = LivePreviewRetirementCoordinator<LivePreviewRetirementTestPanel>()
-    var panel: LivePreviewRetirementTestPanel? = LivePreviewRetirementTestPanel()
-    let weakPanel = LivePreviewRetirementWeakReference(panel)
-    do {
-        guard let retirementPanel = panel,
-              retirement.begin(1, panel: retirementPanel, applied: transitions.applied) else { return false }
-    }
-    transitions.replaceDesired(ArraySlice(Array(2 ... limit + 1).map(UInt64.init)))
-
-    // UI registry가 strong reference를 버려도 coordinator tombstone이 false ack까지 panel을 보존한다.
-    selfTestRelease(&panel)
-    guard let retainedPanel = weakPanel.panel,
-          let failed = transitions.begin(limit: limit), failed.action == .revoke(1) else { return false }
-    let wrongPanel = LivePreviewRetirementTestPanel()
-    let mismatched = retirement.disableDidComplete(1, panel: wrongPanel, success: true)
-    let failedDisable = retirement.disableDidComplete(1, panel: retainedPanel, success: false)
-    guard !mismatched.releaseReservation, mismatched.retiredPanel == nil,
-          !failedDisable.releaseReservation, failedDisable.retiredPanel == nil,
-          transitions.complete(epoch: failed.epoch, releaseReservation: failedDisable.releaseReservation),
-          transitions.applied.count == limit,
-          let successful = transitions.begin(limit: limit), successful.action == .revoke(1) else { return false }
-    let completed = retirement.disableDidComplete(1, panel: retainedPanel, success: true)
-    guard completed.releaseReservation, completed.retiredPanel === retainedPanel,
-          transitions.complete(epoch: successful.epoch, releaseReservation: completed.releaseReservation),
-          let admitReplacement = transitions.begin(limit: limit),
-          admitReplacement.action == .admit(replacement) else { return false }
-
-    // Retiring WebContent 종료는 exact identity일 때만 reservation을 회수하고 reload를 억제한다.
-    let crashPanel = LivePreviewRetirementTestPanel()
-    var crashed = LivePreviewRetirementCoordinator<LivePreviewRetirementTestPanel>()
-    guard crashed.begin(replacement, panel: crashPanel, applied: transitions.applied) else { return false }
-    let wrongCrash = crashed.webContentTerminated(replacement, panel: wrongPanel, currentPanel: nil)
-    let crash = crashed.webContentTerminated(replacement, panel: crashPanel, currentPanel: nil)
-    guard !wrongCrash.invalidateTransition, wrongCrash.suppressReload, wrongCrash.retiredPanel == nil,
-          crash.invalidateTransition, crash.suppressReload, crash.retiredPanel === crashPanel else { return false }
-
-    // Registry에 남은 현재 panel의 종료만 일반 reload를 허용한다.
-    let currentPanel = LivePreviewRetirementTestPanel()
-    let stale = crashed.webContentTerminated(10, panel: wrongPanel, currentPanel: currentPanel)
-    let current = crashed.webContentTerminated(10, panel: currentPanel, currentPanel: currentPanel)
-    return !stale.invalidateTransition && stale.suppressReload &&
-        current.invalidateTransition && !current.suppressReload && current.retiredPanel == nil
-}
-
 private func selfTestRelease<T: AnyObject>(_ value: inout T?) { value = nil }
 
 private func maruWorkspaceFileURL() -> URL? {
@@ -4248,16 +3992,6 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     // restore 중 어느 saved Window라도 apply하지 못했으면 이번 실행의 default/fallback 창으로 마지막 완전
     // checkpoint를 덮지 않는다. 사용자가 새로 저장할 명시 UX가 생기기 전에는 데이터 보존을 우선한다.
     private var workspaceRestoreIncomplete = false
-    // FP10b: Zig LivePreviewBudget 결과의 native mirror. 정책은 Zig가 focused→existing-visible→new-visible 순으로
-    // 최대 8개를 고르고, Swift는 바뀐 surface에 lifecycle event만 보낸다.
-    private var livePreviewCandidates: [MaruAppHostLivePreviewCandidate] = []
-    // desired/applied/in-flight/epoch와 completion 전이를 한 reducer가 소유한다. applied에는 enable eval이 시작된
-    // reservation과 실제 worker가 모두 포함되며, revoke 성공 ack 전에는 slot을 반환하지 않는다.
-    private var livePreviewTransitionState = LivePreviewTransitionState()
-    // UI registry에서 제거된 WKWebView도 page-world disable ack 또는 WebContent crash 전까지 강하게 보존한다.
-    // removeFromSuperview/deinit은 Worker의 동기 종료 증거가 아니므로 이 tombstone 없이는 8-slot을 일찍 반환한다.
-    private var livePreviewRetirement = LivePreviewRetirementCoordinator<MaruWebPanelView>()
-    private var livePreviewOutput = [UInt64](repeating: 0, count: Int(MARU_LIVE_PREVIEW_MAX_WORKERS))
     // FP10c1: 앱 전역 Zig mermaid_queue action을 실행할 유일한 native adapter. Mermaid fence admission과
     // frame-tick pump는 FP10c2의 pending-work/perf gate 전까지 배선하지 않는다.
     private let mermaidRenderCoordinator = MermaidRenderCoordinator()
@@ -4564,9 +4298,6 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
 
         // 라이브 프리뷰 admission은 dock visibility/focus transition에서 반복 호출된다. 평상시 후보 수를
         // 시작 시 한 번 확보해 해당 전환 경로가 배열 storage를 매번 만들지 않게 한다.
-        livePreviewCandidates.reserveCapacity(256)
-        livePreviewTransitionState.reserveCapacity(8)
-        livePreviewRetirement.reserveCapacity(8)
 
         // 메인 창의 per-session 상태를 담을 surface를 가장 먼저 만든다 — 아래 window/appSession/렌더러
         // 대입이 전부 이 첫 창(primary = windows.first)으로 forwarding되므로(forwarder setter), 창이 없으면
@@ -4846,7 +4577,6 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         // 창 포커스 획득 → 그 창 surface에 focus reporting(DECSET 1004 켜졌으면 CSI I). 멀티 창에서 그 창만(notification.object).
         guard let surface = surfaceForWindow(notification.object as? NSWindow), let session = surface.appSession else { return }
         _ = maru_macos_app_session_focus_changed(session, 1)
-        reconcileLivePreviewBudget()
     }
 
     func windowDidResignKey(_ notification: Notification) {
@@ -4858,7 +4588,6 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         cancelKeyHintHold(for: resigning)
         guard let surface = resigning, let session = surface.appSession else { return }
         _ = maru_macos_app_session_focus_changed(session, 0)
-        reconcileLivePreviewBudget()
     }
 
     func applicationDidBecomeActive(_ notification: Notification) {
@@ -4942,11 +4671,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             capabilities.swift_owns_ns_application == 1 &&
             capabilities.zig_owns_frame_loop == 1 &&
             MaruAssetLoadBudget.selfTest(limit: MaruAssetLoadBudget.capacity) &&
-            MaruAssetLoadBudget.selfTest(limit: 3) &&
-            LivePreviewTransitionState.selfTest(limit: Int(MARU_LIVE_PREVIEW_MAX_WORKERS)) &&
-            LivePreviewTransitionState.selfTest(limit: 3) &&
-            livePreviewRetirementCoordinatorSelfTest(limit: Int(MARU_LIVE_PREVIEW_MAX_WORKERS)) &&
-            livePreviewRetirementCoordinatorSelfTest(limit: 3)
+            MaruAssetLoadBudget.selfTest(limit: 3)
     }
 
     private func validateCachedCapabilities() -> Bool {
@@ -5044,165 +4769,17 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         }
         surface.filePanelFocusOverridden = false
         surface.pendingDockFocusActionSurfaceId = nil
-        reconcileLivePreviewBudget()
-    }
-
-    private func livePreviewPanel(byId surfaceId: UInt64) -> MaruWebPanelView? {
-        surfaceOwning(byId: surfaceId)?.webPanels[surfaceId] ?? livePreviewRetirement.panel(for: surfaceId)
-    }
-
-    @discardableResult
-    private func retainRetiringLivePreviewPanel(_ panel: MaruWebPanelView, surfaceId: UInt64) -> Bool {
-        livePreviewRetirement.begin(
-            surfaceId,
-            panel: panel,
-            applied: livePreviewTransitionState.applied
-        )
-    }
-
-    private func finishRetiringLivePreviewPanel(
-        _ surfaceId: UInt64,
-        panel: MaruWebPanelView,
-        disableSucceeded: Bool
-    ) -> (releaseReservation: Bool, retiredPanel: MaruWebPanelView?) {
-        livePreviewRetirement.disableDidComplete(
-            surfaceId,
-            panel: panel,
-            success: disableSucceeded
-        )
-    }
-
-    func livePreviewNavigationDidFinish(_ surfaceId: UInt64) {
-        guard livePreviewTransitionState.applied.contains(surfaceId) else {
-            reconcileLivePreviewBudget()
-            return
-        }
-        // 새 document에는 이전 page-world event가 남지 않는다. reservation은 유지한 채 현재 desired를 다시
-        // 적용하고, 제거 대상이면 일반 revoke-first pump가 false를 보낸다.
-        if livePreviewTransitionState.desired.contains(surfaceId),
-           let panel = surfaceOwning(byId: surfaceId)?.webPanels[surfaceId]
-        {
-            panel.applyLivePreviewAdmission(true) { [weak self] _ in self?.pumpLivePreviewAdmission() }
-        } else {
-            pumpLivePreviewAdmission()
-        }
     }
 
     func filePanelDidTerminateWebContent(_ surfaceId: UInt64, panel: MaruWebPanelView) -> Bool {
         cancelMermaidReplies(surfaceId: surfaceId, error: "file panel terminated")
-        // WebContent crash는 worker termination ack와 동등하다. slot을 회수한 뒤 다른 visible candidate를
-        // 승격하고, reload didFinish가 여전히 desired면 새 page에 reservation을 다시 적용한다.
-        let currentPanel = surfaceOwning(byId: surfaceId)?.webPanels[surfaceId]
-        // retirement tombstone의 종료는 worker slot만 회수하고 현재 replacement의 Zig editor state를 건드리지 않는다.
-        // registry의 exact current panel일 때만 native document-loss latch를 보낸다.
-        let isCurrentPanel = currentPanel === panel
-        let nativeAccepted: Bool
-        if isCurrentPanel, let session = bridgeSession(for: surfaceId) {
-            nativeAccepted = maru_macos_app_session_file_panel_document_terminated(session, surfaceId) != 0
-        } else {
-            nativeAccepted = false
-        }
-        let decision = livePreviewRetirement.webContentTerminated(
-            surfaceId,
-            panel: panel,
-            currentPanel: currentPanel
-        )
-        guard decision.invalidateTransition else { return false }
-        decision.retiredPanel?.controller = nil
-        livePreviewTransitionState.invalidate(surfaceId)
-        reconcileLivePreviewBudget()
-        return isCurrentPanel && nativeAccepted && !decision.suppressReload
+        // registry의 exact current panel일 때만 native document-loss latch를 보낸다 — 이미 교체된 패널의 뒤늦은
+        // 종료가 새 문서의 편집 상태를 건드리면 안 된다. 반환값은 호출부의 reload 여부다.
+        guard surfaceOwning(byId: surfaceId)?.webPanels[surfaceId] === panel,
+              let session = bridgeSession(for: surfaceId) else { return false }
+        return maru_macos_app_session_file_panel_document_terminated(session, surfaceId) != 0
     }
 
-    func reconcileLivePreviewBudget() {
-        livePreviewCandidates.removeAll(keepingCapacity: true)
-        func appendCandidates(from surface: TerminalSurface) {
-            let focusedSurfaceId: UInt64
-            if surface.window?.isKeyWindow == true, let session = surface.appSession {
-                focusedSurfaceId = maru_macos_app_session_focused_dock_surface(session)
-            } else {
-                focusedSurfaceId = 0
-            }
-            for (surfaceId, panel) in surface.webPanels where panel.requestsLivePreviewWorker {
-                livePreviewCandidates.append(.init(surface_id: surfaceId, priority: focusedSurfaceId == surfaceId ? 2 : 1, reserved: 0))
-            }
-        }
-        for surface in windows { appendCandidates(from: surface) }
-        if let quick { appendCandidates(from: quick) }
-
-        let count = livePreviewCandidates.withUnsafeBufferPointer { cp in
-            livePreviewOutput.withUnsafeMutableBufferPointer { op in
-                maru_macos_live_preview_budget_reconcile(cp.baseAddress, cp.count, op.baseAddress, op.count)
-            }
-        }
-        guard count >= 0, count <= livePreviewOutput.count else { return }
-        livePreviewTransitionState.replaceDesired(livePreviewOutput.prefix(Int(count)))
-        pumpLivePreviewAdmission()
-    }
-
-    /// didFinish와 page script boot 사이에 보낸 CustomEvent는 listener가 없어도 JS 평가 자체는 성공한다. Web의
-    /// explicit ready에서는 이미 예약된 slot을 해제/재계산하지 않고 true를 재전달한다. 아직 reservation이 없을 때만
-    /// 같은 Zig budget을 조정해, 중복 ready가 worker 수명·전역 cap 회계를 갈라놓지 않게 한다.
-    func livePreviewBridgeReady(_ surfaceId: UInt64) {
-        if livePreviewTransitionState.applied.contains(surfaceId),
-           let panel = livePreviewPanel(byId: surfaceId) {
-            panel.applyLivePreviewAdmission(true) { _ in }
-            return
-        }
-        reconcileLivePreviewBudget()
-    }
-
-    private func pumpLivePreviewAdmission() {
-        guard let transition = livePreviewTransitionState.begin(limit: livePreviewOutput.count) else { return }
-
-        switch transition.action {
-        case .revoke(let surfaceId):
-            // Revoke-first: false dispatch가 동기적으로 worker.terminate()를 실행했다는 eval completion 뒤에만
-            // applied slot을 반환한다. 서로 다른 WKWebView의 completion 순서는 이 직렬 coordinator 밖으로 새지 않는다.
-            guard let panel = livePreviewPanel(byId: surfaceId) else {
-                // Missing panel is not proof that its WebContent worker stopped. Keep the in-flight reservation
-                // fail-closed; destroy paths must install a tombstone before removing the UI registry entry.
-                return
-            }
-            panel.applyLivePreviewAdmission(false) { [weak self, weak panel] success in
-                guard let self, let panel,
-                      self.livePreviewTransitionState.isCurrent(transition) else { return }
-                let retirement = self.finishRetiringLivePreviewPanel(
-                    surfaceId,
-                    panel: panel,
-                    disableSucceeded: success
-                )
-                retirement.retiredPanel?.controller = nil
-                guard self.livePreviewTransitionState.complete(
-                    epoch: transition.epoch,
-                    releaseReservation: retirement.releaseReservation
-                ) else { return }
-                if retirement.releaseReservation {
-                    self.pumpLivePreviewAdmission()
-                }
-                // 실패는 worker가 여전히 살아 있을 수 있으므로 slot을 유지한다. navigation/destroy/crash의
-                // 다음 lifecycle callback이 다시 reconcile한다.
-            }
-        case .admit(let surfaceId):
-            guard let panel = surfaceOwning(byId: surfaceId)?.webPanels[surfaceId] else {
-                livePreviewTransitionState.invalidate(surfaceId)
-                pumpLivePreviewAdmission()
-                return
-            }
-            // begin이 enable eval 전에 reservation을 잡는다. completion 실패도 실행 여부가 불명확하므로 유지한다.
-            panel.applyLivePreviewAdmission(true) { [weak self] _ in
-                guard let self,
-                      self.livePreviewTransitionState.complete(
-                          epoch: transition.epoch,
-                          releaseReservation: false
-                      ) else { return }
-                self.pumpLivePreviewAdmission()
-            }
-        }
-    }
-
-    // 이 웹 패널을 소유한 surface(창). 배경 창의 웹 패널 hitTest가 활성 창이 아니라 자기 창의 모달 상태로 판정하게
-    // 한다(code-review [9]). webPanels dict의 surface_id·identity로 매칭해 일반 창·quick 패널을 모두 커버한다.
     private func surfaceOwning(_ wp: MaruWebPanelView) -> TerminalSurface? {
         if let s = windows.first(where: { $0.webPanels[wp.surfaceId] === wp }) { return s }
         if let quick, quick.webPanels[wp.surfaceId] === wp { return quick }
@@ -6025,15 +5602,14 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                 browserDidCloseSurface(surfaceId)
             }
             cancelMermaidReplies(surfaceId: surfaceId, error: "file panel closed")
-            let retainedForWorkerAck = retainRetiringLivePreviewPanel(panel, surfaceId: surfaceId)
+            // 패널은 여기서 곧바로 소유권을 놓는다 — 라이브 프리뷰 폐기로 worker 종료 ack를 기다릴 이유가 없다.
             panel.removeFromSuperview()
-            if !retainedForWorkerAck { panel.controller = nil }
+            panel.controller = nil
             surface.webPanels[surfaceId] = nil
         }
         surface.webPanels.removeAll()
         surface.focusedFilePanelSurfaceId = nil
         surface.filePanelFocusOverridden = false
-        reconcileLivePreviewBudget()
     }
 
     /// 셸 종료/fault로 한 창을 닫는다(tick 경로). 마지막 일반 창이면 앱 종료(정리·요약은 applicationWillTerminate —
@@ -7671,11 +7247,10 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                             browserDidCloseSurface(t.surface_id)
                         }
                         cancelMermaidReplies(surfaceId: t.surface_id, error: "file panel closed")
-                        let retainedForWorkerAck = retainRetiringLivePreviewPanel(v, surfaceId: t.surface_id)
+                        // 패널은 여기서 곧바로 소유권을 놓는다 — 라이브 프리뷰 폐기로 worker 종료 ack를 기다릴 이유가 없다.
                         v.removeFromSuperview()
-                        if !retainedForWorkerAck { v.controller = nil }
+                        v.controller = nil
                         surface.webPanels[t.surface_id] = nil
-                        reconcileLivePreviewBudget()
                     }
                 }
             case Int(MaruAppHostWebSurfaceOpReframe.rawValue):
@@ -7689,7 +7264,6 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             case Int(MaruAppHostWebSurfaceOpHide.rawValue):
                 if let v = surface.webPanels[t.surface_id] {
                     v.isHidden = true
-                    reconcileLivePreviewBudget()
                 }
             case Int(MaruAppHostWebSurfaceOpShow.rawValue):
                 if let v = surface.webPanels[t.surface_id] {
@@ -7699,7 +7273,6 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                     v.dividerGrabLeftPt = CGFloat(t.divider_grab_left_pt)
                     v.dividerGrabRightPt = CGFloat(t.divider_grab_right_pt)
                     v.dividerGrabBottomPt = CGFloat(t.divider_grab_bottom_pt)
-                    reconcileLivePreviewBudget()
                 }
             default: break // None — 무동작
             }
@@ -7816,7 +7389,6 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                         if committed {
                             surface.focusedFilePanelSurfaceId = pendingSurfaceId
                             surface.filePanelFocusOverridden = false
-                            reconcileLivePreviewBudget()
                         } else {
                             // A newer Zig focus intent or restore/merge barrier made this native
                             // responder request stale. Return AppKit focus to the Metal view too.
@@ -7832,28 +7404,24 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             surface.focusedFilePanelSurfaceId = nil
             surface.filePanelFocusOverridden = false
             focusTerminalView(surface.window)
-            reconcileLivePreviewBudget()
         }
         // ABI v127: tree 정책/restore target은 Zig FocusOwner가 소유한다. Swift는 AppKit responder 전이만 실행한다.
         if treeFocus {
             surface.focusedFilePanelSurfaceId = nil
             surface.filePanelFocusOverridden = false
             focusTerminalView(surface.window)
-            reconcileLivePreviewBudget()
         }
         if treeRestoreSid != 0 {
             if let panel = surface.webPanels[treeRestoreSid], !panel.isHidden, panel.superview != nil {
                 surface.window?.makeFirstResponder(panel.webView)
                 surface.focusedFilePanelSurfaceId = treeRestoreSid
                 surface.filePanelFocusOverridden = false
-                reconcileLivePreviewBudget()
             } else {
                 // entry는 남았지만 native surface가 이미 retire된 stale restore면 workspace로 fail-closed한다.
                 maru_macos_app_session_focus_workspace_input(session)
                 surface.focusedFilePanelSurfaceId = nil
                 surface.filePanelFocusOverridden = false
                 focusTerminalView(surface.window)
-                reconcileLivePreviewBudget()
             }
         }
         for _ in 0 ..< 4 {
@@ -9602,16 +9170,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             file_viewer_images=\(wp?.fileViewerImagesProbe ?? "pending")
             file_viewer_loaded_images=\(wp?.fileViewerLoadedImagesProbe ?? "pending")
             file_viewer_editor_hydrated=\(wp?.fileEditingSmokeProbe.editor ?? "pending")
-            file_viewer_live_projection=\(wp?.fileEditingSmokeProbe.liveProjection ?? "pending")
-            file_viewer_live_projection_decorations=\(wp?.fileEditingSmokeProbe.liveProjectionDecorations ?? "pending")
-            file_viewer_live_projection_generation=\(wp?.fileEditingSmokeProbe.liveProjectionGeneration ?? "pending")
-            file_viewer_live_general_fragments=\(wp?.fileEditingSmokeProbe.liveGeneralFragments ?? "pending")
-            file_viewer_live_atomic_mounted=\(wp?.fileEditingSmokeProbe.liveAtomicMounted ?? "pending")
-            file_viewer_live_atomic_rendered=\(wp?.fileEditingSmokeProbe.liveAtomicRendered ?? "pending")
-            file_viewer_live_atomic_admitted=\(wp?.fileEditingSmokeProbe.liveAtomicAdmitted ?? "pending")
-            file_viewer_live_atomic_state=\(wp?.fileEditingSmokeProbe.liveAtomicState ?? "pending")
-            file_viewer_live_atomic_failure=\(wp?.fileEditingSmokeProbe.liveAtomicFailure ?? "pending")
-            file_viewer_live_mermaid_request=\(wp?.fileEditingSmokeProbe.liveMermaidRequest ?? "pending")
+            file_viewer_mermaid_request=\(wp?.fileEditingSmokeProbe.mermaidRequestState ?? "pending")
             file_viewer_mermaid_navigation_in_flight=\(wp?.fileEditingSmokeProbe.mermaidNavigationInFlight ?? "pending")
             file_viewer_mermaid_navigation_cancelled=\(wp?.fileEditingSmokeProbe.mermaidNavigationCancelled ?? "pending")
             file_viewer_default_mode=\(wp?.fileEditingSmokeProbe.defaultMode ?? "pending")
@@ -9691,11 +9250,11 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         if smokeMode, let webView = activeSurface?.webPanels.values.first?.webView,
            let roleSmoke = MaruAppSchemeHandler.roleSchemeSmoke(using: webView) {
             summary += """
-            web_role_scheme_app_worker_status=\(roleSmoke.appWorkerStatus)
-            web_role_scheme_app_worker_self=\(roleSmoke.appWorkerCSP.contains("worker-src 'self'"))
+            web_role_scheme_app_shell_status=\(roleSmoke.appShellStatus)
+            web_role_scheme_app_worker_none=\(roleSmoke.appShellCSP.contains("worker-src 'none'"))
             web_role_scheme_app_mermaid_status=\(roleSmoke.appMermaidStatus)
-            web_role_scheme_render_worker_status=\(roleSmoke.renderWorkerStatus)
-            web_role_scheme_render_worker_csp=\(roleSmoke.renderWorkerCSP)
+            web_role_scheme_render_shell_status=\(roleSmoke.renderShellStatus)
+            web_role_scheme_render_shell_csp=\(roleSmoke.renderShellCSP)
             web_role_scheme_render_document_status=\(roleSmoke.renderDocumentStatus)
             web_role_scheme_render_document_none=\(roleSmoke.renderDocumentCSP.contains("worker-src 'none'"))
 

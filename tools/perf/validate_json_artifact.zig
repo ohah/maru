@@ -6,7 +6,7 @@
 //! 부분 문자열 매칭이 원천적으로 불가능하다.
 //!
 //! 베이스·의사결정: 리뷰가 지적한 substring false-green(build.zig의 grep 체인)을 제거하기 위한
-//! Maru 독립 설계. `live-preview-macos` 스키마는 36개 키를 **전체 락**(누락·추가 키·타입·값 모두
+//! Maru 독립 설계. `mermaid-macos` 스키마는 36개 키를 **전체 락**(누락·추가 키·타입·값 모두
 //! 검사)하고, `mermaid-helper-summary`는 기존 grep이 검사하던 boolean invariant subset을 타입
 //! 안전하게 이관한다(추가 키는 스모크 성장에 맞춰 허용).
 
@@ -30,9 +30,9 @@ const Schema = struct {
     exact_keys: bool,
 };
 
-// FP11f 제품 Mermaid tick 성능 artifact(`maru.live-preview-macos.v1`). 예산 상수는 exact,
+// 제품 Mermaid tick 성능 artifact(`maru.mermaid-macos.v1`). 예산 상수는 exact,
 // 실측 최댓값/카운트는 bound. 단일 출처 근거는 docs/performance-budget.md "FP11f Mermaid 계측 해석".
-const live_preview_macos_fields = [_]Field{
+const mermaid_macos_fields = [_]Field{
     .{ .name = "accepted_svg_bytes_max", .rule = .{ .exact_int = 524288 } },
     .{ .name = "actual_svg", .rule = .{ .exact_bool = true } },
     .{ .name = "cold_response_deadline_ms", .rule = .{ .exact_int = 5000 } },
@@ -65,7 +65,7 @@ const live_preview_macos_fields = [_]Field{
     .{ .name = "reply_fallback_grace_ms", .rule = .{ .exact_int = 250 } },
     .{ .name = "reply_fallback_ms", .rule = .{ .exact_int = 5250 } },
     .{ .name = "scenario", .rule = .{ .exact_string = "fp11f-mermaid-cold-start-restart-1000-ticks" } },
-    .{ .name = "schema", .rule = .{ .exact_string = "maru.live-preview-macos.v1" } },
+    .{ .name = "schema", .rule = .{ .exact_string = "maru.mermaid-macos.v1" } },
     .{ .name = "tick_blocking_wait", .rule = .{ .exact_int = 0 } },
     .{ .name = "tick_pipe_read_write", .rule = .{ .exact_int = 0 } },
     .{ .name = "tick_pipe_setup", .rule = .{ .exact_int = 0 } },
@@ -122,9 +122,9 @@ const mermaid_helper_summary_fields = [_]Field{
     .{ .name = "slow_cold_result_before_five_seconds_accepted", .rule = .{ .exact_bool = true } },
 };
 
-const live_preview_macos_schema = Schema{
-    .name = "live-preview-macos",
-    .fields = &live_preview_macos_fields,
+const mermaid_macos_schema = Schema{
+    .name = "mermaid-macos",
+    .fields = &mermaid_macos_fields,
     .exact_keys = true,
 };
 
@@ -135,7 +135,7 @@ const mermaid_helper_summary_schema = Schema{
 };
 
 fn schemaFor(mode: []const u8) ?Schema {
-    if (std.mem.eql(u8, mode, "live-preview-macos")) return live_preview_macos_schema;
+    if (std.mem.eql(u8, mode, "mermaid-macos")) return mermaid_macos_schema;
     if (std.mem.eql(u8, mode, "mermaid-helper-summary")) return mermaid_helper_summary_schema;
     return null;
 }
@@ -279,7 +279,7 @@ pub fn main(init: std.process.Init) !void {
 }
 
 fn usage(stderr: *std.Io.Writer) !void {
-    try stderr.writeAll("usage: maru-perf-validate <live-preview-macos|mermaid-helper-summary> <artifact.json>\n");
+    try stderr.writeAll("usage: maru-perf-validate <mermaid-macos|mermaid-helper-summary> <artifact.json>\n");
     try stderr.flush();
     std.process.exit(2);
 }
@@ -299,7 +299,7 @@ fn countFailures(schema: Schema, bytes: []const u8) !usize {
 }
 
 // 실제 artifact와 같은 형태의 최소 유효 baseline(모든 키 present·기대값).
-const good_live_preview =
+const good_mermaid_macos =
     \\{
     \\  "accepted_svg_bytes_max": 524288,
     \\  "actual_svg": true,
@@ -330,7 +330,7 @@ const good_live_preview =
     \\  "reply_fallback_grace_ms": 250,
     \\  "reply_fallback_ms": 5250,
     \\  "scenario": "fp11f-mermaid-cold-start-restart-1000-ticks",
-    \\  "schema": "maru.live-preview-macos.v1",
+    \\  "schema": "maru.mermaid-macos.v1",
     \\  "tick_blocking_wait": 0,
     \\  "tick_pipe_read_write": 0,
     \\  "tick_pipe_setup": 0,
@@ -343,62 +343,62 @@ const good_live_preview =
     \\}
 ;
 
-test "live-preview baseline passes" {
-    try testing.expectEqual(@as(usize, 0), try countFailures(live_preview_macos_schema, good_live_preview));
+test "mermaid macOS baseline passes" {
+    try testing.expectEqual(@as(usize, 0), try countFailures(mermaid_macos_schema, good_mermaid_macos));
 }
 
 test "10x ticks fails (부분 문자열 false-green 회귀)" {
-    const bad = try std.mem.replaceOwned(u8, testing.allocator, good_live_preview, "\"ticks\": 1000", "\"ticks\": 10000");
+    const bad = try std.mem.replaceOwned(u8, testing.allocator, good_mermaid_macos, "\"ticks\": 1000", "\"ticks\": 10000");
     defer testing.allocator.free(bad);
-    try testing.expect(try countFailures(live_preview_macos_schema, bad) > 0);
+    try testing.expect(try countFailures(mermaid_macos_schema, bad) > 0);
 }
 
 test "10x accepted_svg_bytes_max fails" {
-    const bad = try std.mem.replaceOwned(u8, testing.allocator, good_live_preview, "524288", "5242880");
+    const bad = try std.mem.replaceOwned(u8, testing.allocator, good_mermaid_macos, "524288", "5242880");
     defer testing.allocator.free(bad);
-    try testing.expect(try countFailures(live_preview_macos_schema, bad) > 0);
+    try testing.expect(try countFailures(mermaid_macos_schema, bad) > 0);
 }
 
 test "10x cold deadline fails" {
-    const bad = try std.mem.replaceOwned(u8, testing.allocator, good_live_preview, "\"cold_response_deadline_ms\": 5000", "\"cold_response_deadline_ms\": 50000");
+    const bad = try std.mem.replaceOwned(u8, testing.allocator, good_mermaid_macos, "\"cold_response_deadline_ms\": 5000", "\"cold_response_deadline_ms\": 50000");
     defer testing.allocator.free(bad);
-    try testing.expect(try countFailures(live_preview_macos_schema, bad) > 0);
+    try testing.expect(try countFailures(mermaid_macos_schema, bad) > 0);
 }
 
 test "tick counter nonzero fails" {
-    const bad = try std.mem.replaceOwned(u8, testing.allocator, good_live_preview, "\"tick_blocking_wait\": 0", "\"tick_blocking_wait\": 1");
+    const bad = try std.mem.replaceOwned(u8, testing.allocator, good_mermaid_macos, "\"tick_blocking_wait\": 0", "\"tick_blocking_wait\": 1");
     defer testing.allocator.free(bad);
-    try testing.expect(try countFailures(live_preview_macos_schema, bad) > 0);
+    try testing.expect(try countFailures(mermaid_macos_schema, bad) > 0);
 }
 
 test "elapsed over budget fails" {
-    const bad = try std.mem.replaceOwned(u8, testing.allocator, good_live_preview, "\"product_tick_max_elapsed_us\": 1135", "\"product_tick_max_elapsed_us\": 20001");
+    const bad = try std.mem.replaceOwned(u8, testing.allocator, good_mermaid_macos, "\"product_tick_max_elapsed_us\": 1135", "\"product_tick_max_elapsed_us\": 20001");
     defer testing.allocator.free(bad);
-    try testing.expect(try countFailures(live_preview_macos_schema, bad) > 0);
+    try testing.expect(try countFailures(mermaid_macos_schema, bad) > 0);
 }
 
 test "failure-latch elapsed over budget fails (hang 경로 계측 gate)" {
-    const bad = try std.mem.replaceOwned(u8, testing.allocator, good_live_preview, "\"failure_latch_product_tick_max_elapsed_us\": 1980", "\"failure_latch_product_tick_max_elapsed_us\": 20001");
+    const bad = try std.mem.replaceOwned(u8, testing.allocator, good_mermaid_macos, "\"failure_latch_product_tick_max_elapsed_us\": 1980", "\"failure_latch_product_tick_max_elapsed_us\": 20001");
     defer testing.allocator.free(bad);
-    try testing.expect(try countFailures(live_preview_macos_schema, bad) > 0);
+    try testing.expect(try countFailures(mermaid_macos_schema, bad) > 0);
 }
 
 test "missing key fails" {
-    const bad = try std.mem.replaceOwned(u8, testing.allocator, good_live_preview, "  \"ticks\": 1000,\n", "");
+    const bad = try std.mem.replaceOwned(u8, testing.allocator, good_mermaid_macos, "  \"ticks\": 1000,\n", "");
     defer testing.allocator.free(bad);
-    try testing.expect(try countFailures(live_preview_macos_schema, bad) > 0);
+    try testing.expect(try countFailures(mermaid_macos_schema, bad) > 0);
 }
 
 test "extra key fails (schema lock)" {
-    const bad = try std.mem.replaceOwned(u8, testing.allocator, good_live_preview, "  \"ticks\": 1000,\n", "  \"ticks\": 1000,\n  \"surprise\": 1,\n");
+    const bad = try std.mem.replaceOwned(u8, testing.allocator, good_mermaid_macos, "  \"ticks\": 1000,\n", "  \"ticks\": 1000,\n  \"surprise\": 1,\n");
     defer testing.allocator.free(bad);
-    try testing.expect(try countFailures(live_preview_macos_schema, bad) > 0);
+    try testing.expect(try countFailures(mermaid_macos_schema, bad) > 0);
 }
 
 test "wrong type fails (bool로 바뀐 int)" {
-    const bad = try std.mem.replaceOwned(u8, testing.allocator, good_live_preview, "\"ticks\": 1000", "\"ticks\": true");
+    const bad = try std.mem.replaceOwned(u8, testing.allocator, good_mermaid_macos, "\"ticks\": 1000", "\"ticks\": true");
     defer testing.allocator.free(bad);
-    try testing.expect(try countFailures(live_preview_macos_schema, bad) > 0);
+    try testing.expect(try countFailures(mermaid_macos_schema, bad) > 0);
 }
 
 test "summary baseline passes / false는 실패" {

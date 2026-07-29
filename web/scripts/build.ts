@@ -8,14 +8,12 @@ import { buildRuntimeNotices } from "./runtime-notices";
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const dist = join(root, "dist");
 const entry = join(root, "src", "main.ts");
-const workerEntry = join(root, "src", "live-preview-worker.ts");
 const mermaidHelperEntry = join(root, "src", "mermaid-helper.ts");
 
 await rm(dist, { recursive: true, force: true });
 await mkdir(dist, { recursive: true });
 
 const emitted = await emitZntcBundle(entry, dist);
-const workerEmitted = await emitZntcBundle(workerEntry, dist, "live-preview-worker.js", ["worker"]);
 const mermaidHelperEmitted = await emitZntcBundle(mermaidHelperEntry, dist, "mermaid-helper.js");
 const mermaidRuntime = await readFile(
   join(root, "node_modules", "mermaid", "dist", "mermaid.min.js"),
@@ -29,7 +27,6 @@ await writeFile(join(dist, mermaidHelperEmitted.name), mermaidHelperBytes);
 const scriptName = emitted.name;
 const script = emitted.bytes;
 const sri = `sha384-${createHash("sha384").update(script).digest("base64")}`;
-const workerSri = `sha384-${createHash("sha384").update(workerEmitted.bytes).digest("base64")}`;
 const mermaidHelperSri = `sha384-${createHash("sha384")
   .update(mermaidHelperBytes)
   .digest("base64")}`;
@@ -46,7 +43,6 @@ await writeFile(
   `${JSON.stringify(
     {
       [scriptName]: sri,
-      [workerEmitted.name]: workerSri,
       [mermaidHelperEmitted.name]: mermaidHelperSri,
     },
     null,
@@ -60,9 +56,6 @@ console.log(
     bundle: scriptName,
     bytes: script.byteLength,
     sri,
-    workerBundle: workerEmitted.name,
-    workerBytes: workerEmitted.bytes.byteLength,
-    workerSri,
     mermaidHelperBundle: mermaidHelperEmitted.name,
     mermaidHelperBytes: mermaidHelperBytes.byteLength,
     mermaidHelperSri,

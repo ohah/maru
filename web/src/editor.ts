@@ -4,8 +4,6 @@ import { markdown, markdownLanguage } from "@codemirror/lang-markdown";
 import { bracketMatching, indentOnInput, indentUnit } from "@codemirror/language";
 import { EditorState, type Extension } from "@codemirror/state";
 import { drawSelection, EditorView, keymap, lineNumbers, type ViewUpdate } from "@codemirror/view";
-import { editableProjectionExtension } from "./editable-projection-view";
-import { livePreviewEditorExtension } from "./live-preview-editor";
 import { maruMathMarkdownExtension } from "./markdown-language";
 
 export function createMarkdownEditor(
@@ -28,8 +26,6 @@ export function createMarkdownEditor(
         history(),
         markdown({ base: markdownLanguage, extensions: maruMathMarkdownExtension }),
         indentUnit.of("  "),
-        editableProjectionExtension,
-        livePreviewEditorExtension,
         EditorView.lineWrapping,
         keymap.of([
           {
@@ -40,9 +36,7 @@ export function createMarkdownEditor(
               return true;
             },
           },
-          // Tab/Shift-Tab = 들여쓰기/내어쓰기. live-preview 테이블 안에서는 projection의 keyPressed가
-          // stopImmediatePropagation으로 먼저 셀 이동을 처리하므로, 이 바인딩은 소스 편집(폴백)에만 적용된다.
-          indentWithTab,
+          indentWithTab, // Tab/Shift-Tab = 들여쓰기/내어쓰기
           ...defaultKeymap,
           ...historyKeymap,
         ]),
@@ -52,7 +46,7 @@ export function createMarkdownEditor(
   });
 }
 
-// text kind(docs/file-panel.md §2.2) 소스 전용 편집기. markdown projection/worker/render origin 없이 CM6에
+// text kind(docs/file-panel.md §2.2) 소스 전용 편집기. markdown render origin 없이 CM6에
 // 확장자별 문법 하이라이트만 얹는다. dirty/save/외부변경은 shell의 read/write 브리지 배관을 그대로 공유하고,
 // `languageExtensions`가 빈 배열이면 plain 텍스트로 편집만 된다.
 export function createSourceEditor(

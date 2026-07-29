@@ -16,26 +16,10 @@ import {
   type ResolveExternalChangeRequest,
   type WriteRequest,
 } from "./file-bridge-request";
-import type { EditorView, ViewUpdate } from "@codemirror/view";
+import type { EditorView } from "@codemirror/view";
 import type { Text } from "@codemirror/state";
-import { EditorRevisionClock, isEditableFileMode, type FilePanelMode } from "./live-preview-state";
-import {
-  atomicRendererChannel,
-  capabilitiesEqual,
-  isAtomicRendererInit,
-  isAtomicRendererRender,
-  type RendererCapability,
-} from "./renderer-capability";
-import { EditableProjectionController } from "./editable-projection-view";
-import { AtomicProjectionController } from "./live-preview-editor";
-import type { AssetGrant } from "./atomic-projection";
-import { createLivePreviewDiagnosticsSnapshot } from "./live-preview-diagnostics";
-import {
-  LivePreviewIntentCoordinator,
-  type LivePreviewDispatchResult,
-  type LivePreviewIntentQueueMetrics,
-} from "./live-preview-interaction";
-import type { LivePreviewIntent } from "./live-preview-intent";
+import { EditorRevisionClock, isEditableFileMode, type FilePanelMode } from "./file-panel-state";
+import { type RendererCapability } from "./renderer-capability";
 import { sha256Hex } from "./sha256";
 
 export const viewerChannel = "maru.file.viewer.v1";
@@ -54,18 +38,6 @@ export function assetBase64BudgetAllowed(currentBytes: number, nextBytes: number
     nextBytes >= 0 &&
     currentBytes <= maxAssetBase64Bytes - nextBytes
   );
-}
-
-export function writeLivePreviewIntentQueueMetrics(
-  target: HTMLElement,
-  metrics: LivePreviewIntentQueueMetrics,
-  bridgeCalls: number,
-): void {
-  target.dataset.liveIntentQueueRetained = String(metrics.retained);
-  target.dataset.liveIntentQueueMaxRetained = String(metrics.maxRetained);
-  target.dataset.liveIntentQueueDropped = String(metrics.dropped);
-  target.dataset.liveIntentQueueCompleted = String(metrics.completed);
-  target.dataset.liveIntentBridgeCalls = String(bridgeCalls);
 }
 
 type BridgeResult = Record<string, unknown>;
@@ -294,7 +266,7 @@ export function requestFileBridge(
 ): Promise<BridgeResult>;
 export function requestFileBridge(
   document: Document,
-  method: "livePreviewReady",
+  method: "rendererReady",
   value: ReadRequest,
   timeoutMs?: number,
 ): Promise<BridgeResult>;
@@ -514,13 +486,13 @@ export function requestFileBridge(
           renderer_instance: value.renderer_instance as number,
         };
         break;
-      case "livePreviewReady":
+      case "rendererReady":
         if (
           !isRecord(value) ||
           !Number.isSafeInteger(value.editor_epoch) ||
           value.editor_epoch <= 0
         )
-          throw new TypeError("invalid livePreviewReady payload");
+          throw new TypeError("invalid rendererReady payload");
         request = { method, editor_epoch: value.editor_epoch as number };
         break;
     }
@@ -739,8 +711,8 @@ export function bootShell(document: Document, targetWindow: Window): void {
   if (frame === null || editorHost === null) return;
 
   // text/svg kind(docs/file-panel.md §2.2·§2.3): shell URL `?lang=`은 소스 편집기 문법, `?kind=svg`는 svg의
-  // read(격리 sanitize 프리뷰)+source(xml 편집) 두 모드를 켠다. 둘 다 markdown projection/worker/mermaid 없이
-  // read/write·dirty·⌘S·외부변경 배관만 markdown과 공유하고 livePreviewReady(markdown+live 전용)는 호출하지 않는다.
+  // read(격리 sanitize 프리뷰)+source(xml 편집) 두 모드를 켠다. 둘 다 mermaid 없이 read/write·dirty·⌘S·
+  // 외부변경 배관만 markdown과 공유하고 rendererReady(markdown 전용 gate)는 호출하지 않는다.
   const shellParams = new URL(targetWindow.location.href).searchParams;
   const sourceLanguageWire = shellParams.get("lang");
   const isSvg = shellParams.get("kind") === "svg";
@@ -749,10 +721,6 @@ export function bootShell(document: Document, targetWindow: Window): void {
   const isSourceOnly = sourceLanguageWire !== null && !isSvg;
 
   let editor: EditorView | null = null;
-  let livePreviewController: EditableProjectionController | null = null;
-  let atomicProjectionController: AtomicProjectionController | null = null;
-  let atomicProjectionAdmitted = false;
-  const livePreviewDiagnostics = createLivePreviewDiagnosticsSnapshot();
   let savedContent = "";
   let savedDocument: Text | null = null;
   let contentLoaded = false;
@@ -772,27 +740,18 @@ export function bootShell(document: Document, targetWindow: Window): void {
   let dirtySyncInFlight: Promise<boolean> | null = null;
   let closeLockRequestId: number | null = null;
   let applyingDiskContent = false;
-  let pendingDiskUpdate: ViewUpdate | null = null;
   let assetBase64Bytes = 0;
   let assetRequests = 0;
-  // 읽기 프리뷰 mermaid: render iframe이 펜스별로 SVG를 요청하면 여기서 native 헬퍼로 렌더한다(라이브가 숨겨진
-  // 동안 읽기에서도 다이어그램을 그림, 팔레트 적용). 순차 queue라 헬퍼 1개를 순서대로 태운다. widget_id는 펜스마다
-  // 달라야 coordinator가 dedup 안 한다(단조 증가).
+  // 읽기 프리뷰 mermaid: render iframe이 펜스별로 SVG를 요청하면 여기서 native 헬퍼로 렌더한다.
+  // 순차 queue라 헬퍼 1개를 순서대로 태운다. widget_id는 펜스마다 달라야 coordinator가 dedup 안 한다(단조 증가).
   let readMermaidQueue = Promise.resolve();
   let readMermaidWidget = 0;
-  let liveIntentCm6Transactions = 0;
-  let liveIntentExternalActions = 0;
-  let liveIntentDualEffects = 0;
-  let liveIntentRejections = 0;
-  let liveIntentBridgeCalls = 0;
-  let livePreviewIntentCoordinator: LivePreviewIntentCoordinator | null = null;
 
   const currentDocumentIsDirty = (): boolean =>
     editor !== null && documentIsDirtyAgainstSnapshot(editor.state.doc, savedDocument);
 
   const setCloseLocked = (requestId: number | null) => {
     closeLockRequestId = requestId;
-    if (requestId !== null) livePreviewIntentCoordinator?.clearPending();
     if (editor !== null) editor.contentDOM.contentEditable = requestId === null ? "true" : "false";
   };
 
@@ -974,98 +933,18 @@ export function bootShell(document: Document, targetWindow: Window): void {
     }
   };
 
-  const publishLiveIntentQueueMetrics = (metrics?: LivePreviewIntentQueueMetrics) => {
-    if (status === null) return;
-    const current = metrics ?? livePreviewIntentCoordinator?.metrics();
-    if (current === undefined) return;
-    writeLivePreviewIntentQueueMetrics(status, current, liveIntentBridgeCalls);
-  };
-
-  const recordLivePreviewDispatch = (dispatch: LivePreviewDispatchResult) => {
-    liveIntentCm6Transactions += dispatch.cm6Transactions;
-    liveIntentExternalActions += dispatch.externalActions;
-    liveIntentDualEffects += Number(dispatch.cm6Transactions > 0 && dispatch.externalActions > 0);
-    liveIntentRejections += Number(dispatch.result.type !== "committed");
-    if (status !== null) {
-      status.dataset.liveIntentResult = dispatch.result.type;
-      status.dataset.liveIntentCm6Transactions = String(liveIntentCm6Transactions);
-      status.dataset.liveIntentExternalActions = String(liveIntentExternalActions);
-      status.dataset.liveIntentDualEffects = String(liveIntentDualEffects);
-      status.dataset.liveIntentRejections = String(liveIntentRejections);
-    }
-  };
-
-  livePreviewIntentCoordinator = new LivePreviewIntentCoordinator({
-    scheduleDocumentOperation: (operation) => {
-      const scheduled = mutationQueue.then(operation);
-      mutationQueue = scheduled.then(
-        () => undefined,
-        () => undefined,
-      );
-      return scheduled;
-    },
-    currentContext: (intent) => {
-      if (editor === null || editorEpoch === null || livePreviewController === null) return null;
-      const projectionIdentity = livePreviewController.interactionIdentity();
-      const interaction = livePreviewController.interactionContextForIntent(intent);
-      return {
-        view: editor,
-        guard: {
-          editorEpoch,
-          documentRevision: revisions.documentRevision,
-          projectionGeneration: projectionIdentity.projectionGeneration,
-          mode,
-          closeLockRequestId,
-          composing: editor.composing,
-          readonly: mode !== "live-preview" || editor.contentDOM.contentEditable === "false",
-        },
-        currentEntry: interaction.currentEntry,
-        currentTableCells: interaction.currentTableCells,
-      };
-    },
-    hrefAllowed: (href) =>
-      isLinkActivation({
-        channel: viewerChannel,
-        type: "link-activate",
-        href,
-        forceSystem: false,
-      }),
-    openExternalAction: async (intent, action) => {
-      liveIntentBridgeCalls += 1;
-      publishLiveIntentQueueMetrics();
-      await requestFileBridge(document, "openLink", {
-        editor_epoch: intent.editorEpoch,
-        href: action.href,
-        forceSystem: action.forceSystem,
-      });
-    },
-    onDispatch: recordLivePreviewDispatch,
-    onError: () => {
-      if (status !== null) status.textContent = "라이브 프리뷰 동작을 완료할 수 없습니다.";
-    },
-    onMetricsChanged: publishLiveIntentQueueMetrics,
-  });
-
-  const enqueueLivePreviewIntent = (intent: LivePreviewIntent) => {
-    if (livePreviewIntentCoordinator?.enqueue(intent) !== true && status !== null)
-      status.dataset.liveIntentResult = "queue-full";
-  };
-
   const ensureEditor = (): EditorView => {
     if (editor !== null) return editor;
     if (editorEpoch === null) throw new Error("editor document epoch is unavailable");
     if (isSourceOnly || isSvg) {
-      // text 소스 전용·svg 소스 모드 공용 경로. livePreview/atomic controller를 만들지 않고 onChange는 dirty
-      // 추적만 하며 markdown용 `?.` controller 호출은 null이라 no-op이다. svg는 read 모드에서 프리뷰를 갱신한다.
+      // text 소스 전용·svg 소스 모드 공용 경로. onChange는 dirty 추적만 한다. svg는 read 모드에서 프리뷰를 갱신한다.
       editor = createSourceEditor(
         editorHost,
         savedContent,
         sourceLanguageExtensions(sourceLanguageWire),
         (update) => {
-          if (applyingDiskContent) {
-            pendingDiskUpdate = update;
-            return;
-          }
+          // 디스크 내용을 적용하는 중의 transaction은 사용자 편집이 아니므로 dirty를 올리지 않는다.
+          if (applyingDiskContent) return;
           if (update.docChanged) {
             revisions.documentChanged();
             reportDirty(savedDocument === null || !update.state.doc.eq(savedDocument));
@@ -1077,102 +956,21 @@ export function bootShell(document: Document, targetWindow: Window): void {
       if (closeLockRequestId !== null) editor.contentDOM.contentEditable = "false";
       return editor;
     }
+    // markdown 소스 모드. 읽기 프리뷰는 별도 render iframe이 소유하므로 편집기는 생 Markdown만 다룬다.
     editor = createMarkdownEditor(
       editorHost,
       savedContent,
       (update) => {
-        if (applyingDiskContent) {
-          pendingDiskUpdate = update;
-          return;
-        }
-        const baseRevision = revisions.documentRevision;
+        // 디스크 내용을 적용하는 중의 transaction은 사용자 편집이 아니므로 dirty를 올리지 않는다.
+        if (applyingDiskContent) return;
         if (update.docChanged) {
-          livePreviewIntentCoordinator?.clearPending();
           revisions.documentChanged();
           reportDirty(savedDocument === null || !update.state.doc.eq(savedDocument));
         }
-        atomicProjectionController?.handleUpdate(update, baseRevision, revisions.documentRevision);
-        livePreviewController?.handleUpdate(update);
       },
       () => void save(),
     );
     savedDocument = editor.state.doc;
-    livePreviewController = new EditableProjectionController(
-      editor,
-      editorEpoch,
-      revisions,
-      ({ state, metrics, atomicEntries }) => {
-        const identity = livePreviewController?.interactionIdentity();
-        if (identity !== undefined)
-          atomicProjectionController?.submitEntries(
-            identity.documentRevision,
-            identity.projectionGeneration,
-            atomicEntries,
-          );
-        if (status === null) return;
-        livePreviewController?.writeDiagnostics(livePreviewDiagnostics);
-        const diagnostics = livePreviewDiagnostics;
-        status.dataset.liveProjection = state;
-        status.dataset.liveProjectionDecorations = String(diagnostics.decorationCount);
-        status.dataset.liveProjectionGeneration = String(diagnostics.projectionGeneration);
-        status.dataset.liveProjectionDocumentRevision = String(diagnostics.documentRevision);
-        status.dataset.liveProjectionActiveSourceRanges = String(
-          diagnostics.activeSourceRangeCount,
-        );
-        status.dataset.liveProjectionAtomicFallbacks = String(
-          diagnostics.fallbackCounts["atomic-not-enabled"],
-        );
-        status.dataset.liveProjectionVisitedNodes = String(metrics.visitedSyntaxNodes);
-        status.dataset.liveGeneralFragments = "0";
-      },
-      enqueueLivePreviewIntent,
-    );
-    const currentEditorEpoch = editorEpoch;
-    atomicProjectionController = new AtomicProjectionController(
-      editor,
-      currentEditorEpoch,
-      revisions,
-      targetWindow.Worker ?? null,
-      async (grant: AssetGrant) => {
-        if (grant.editorEpoch !== currentEditorEpoch) return null;
-        assetRequests += 1;
-        if (!assetRequestCountAllowed(assetRequests)) return null;
-        const result = await requestFileBridge(document, "readAsset", grant.normalizedPath);
-        if (typeof result.mime !== "string" || typeof result.data_base64 !== "string") return null;
-        if (!assetBase64BudgetAllowed(assetBase64Bytes, result.data_base64.length)) return null;
-        assetBase64Bytes += result.data_base64.length;
-        const svg = result.mime === "image/svg+xml";
-        if (
-          (grant.expectedMimeFamily === "svg-image" && !svg) ||
-          (grant.expectedMimeFamily === "raster-image" && svg)
-        )
-          return null;
-        return assetDataUrl(result.mime, result.data_base64, targetWindow);
-      },
-      (state, reason) => {
-        if (status === null) return;
-        status.dataset.liveAtomicState = state;
-        if (reason !== undefined) status.dataset.liveAtomicFailure = reason;
-      },
-      (metrics) => {
-        livePreviewController?.updateAtomicDiagnostics(metrics);
-        if (status === null) return;
-        livePreviewController?.writeDiagnostics(livePreviewDiagnostics);
-        status.dataset.liveAtomicDesired = String(metrics.desired);
-        status.dataset.liveAtomicMounted = String(metrics.mounted);
-        status.dataset.liveAtomicStaleTotal = String(metrics.staleCapabilityTotal);
-        status.dataset.liveProjectionAtomicFallbacks = String(
-          livePreviewDiagnostics.fallbackCounts["atomic-not-enabled"],
-        );
-      },
-      enqueueLivePreviewIntent,
-      (capability, fenceId, sourceHash, source, signal) =>
-        renderMermaidFromBridge(document, status, capability, fenceId, sourceHash, source, signal),
-      (capability) => {
-        void revokeMermaidFromBridge(document, capability).catch(() => {});
-      },
-    );
-    if (atomicProjectionAdmitted && mode === "live-preview") atomicProjectionController.enable();
     if (closeLockRequestId !== null) editor.contentDOM.contentEditable = "false";
     return editor;
   };
@@ -1192,24 +990,11 @@ export function bootShell(document: Document, targetWindow: Window): void {
 
   const applyMode = (next: FilePanelMode) => {
     mode = next;
-    if (mode !== "live-preview") livePreviewIntentCoordinator?.clearPending();
     if (isEditableFileMode(mode)) {
       frame.hidden = true;
       editorHost.hidden = false;
-      if (contentLoaded) {
-        ensureEditor().focus();
-        if (mode === "live-preview") {
-          livePreviewController?.enable();
-          if (atomicProjectionAdmitted) atomicProjectionController?.enable();
-          else atomicProjectionController?.disable();
-        } else {
-          atomicProjectionController?.disable();
-          livePreviewController?.disable();
-        }
-      }
+      if (contentLoaded) ensureEditor().focus();
     } else {
-      atomicProjectionController?.disable();
-      livePreviewController?.disable();
       if (editor !== null) reportDirty(currentDocumentIsDirty(), true);
       frame.hidden = false;
       editorHost.hidden = true;
@@ -1221,26 +1006,12 @@ export function bootShell(document: Document, targetWindow: Window): void {
   targetWindow.addEventListener("maru:file-mode", (event) => {
     const detail = (event as CustomEvent<unknown>).detail;
     if (!isRecord(detail)) return;
-    // text는 source_edit 단일 모드라 read/live 신호는 무시한다(native도 보내지 않지만 방어적으로 고정).
+    // text는 source_edit 단일 모드라 read 신호는 무시한다(native도 보내지 않지만 방어적으로 고정).
     if (isSourceOnly) {
       if (detail.mode === "source-edit") applyMode("source-edit");
       return;
     }
-    // svg는 read|source 두 모드만(라이브 없음).
-    if (isSvg) {
-      if (detail.mode === "read" || detail.mode === "source-edit") applyMode(detail.mode);
-      return;
-    }
-    if (detail.mode === "read" || detail.mode === "source-edit" || detail.mode === "live-preview")
-      applyMode(detail.mode);
-  });
-  targetWindow.addEventListener("maru:file-live-preview-active", (event) => {
-    const detail = (event as CustomEvent<unknown>).detail;
-    if (!isRecord(detail) || typeof detail.active !== "boolean") return;
-    atomicProjectionAdmitted = detail.active;
-    if (atomicProjectionAdmitted && mode === "live-preview") atomicProjectionController?.enable();
-    else atomicProjectionController?.disable();
-    if (status !== null) status.dataset.liveAtomicAdmitted = String(detail.active);
+    if (detail.mode === "read" || detail.mode === "source-edit") applyMode(detail.mode);
   });
   // §2.3: ⌘+/− 폰트 줌을 읽기 프리뷰에도 반영한다(사용자 결정 2026-07-23). native가 `maru:file-zoom`으로 현재
   // 배율(현재 폰트/base)을 주면 render iframe에 `setZoom`으로 전달해 iframe이 `documentElement.zoom`으로 페이지
@@ -1281,7 +1052,6 @@ export function bootShell(document: Document, targetWindow: Window): void {
       const previousDocument = editor.state.doc;
       if (dirty || result.content !== previousSavedContent) {
         applyingDiskContent = true;
-        pendingDiskUpdate = null;
         try {
           editor.dispatch({
             changes: { from: 0, to: editor.state.doc.length, insert: result.content },
@@ -1291,17 +1061,7 @@ export function bootShell(document: Document, targetWindow: Window): void {
         }
       }
       savedDocument = editor.state.doc;
-      const reloadBaseRevision = revisions.documentRevision;
       if (!editor.state.doc.eq(previousDocument)) revisions.documentChanged();
-      if (pendingDiskUpdate !== null) {
-        atomicProjectionController?.handleUpdate(
-          pendingDiskUpdate,
-          reloadBaseRevision,
-          revisions.documentRevision,
-        );
-        livePreviewController?.handleUpdate(pendingDiskUpdate);
-        pendingDiskUpdate = null;
-      }
     } else {
       savedDocument = null;
     }
@@ -1350,7 +1110,7 @@ export function bootShell(document: Document, targetWindow: Window): void {
     if (started) return;
     started = true;
     if (status !== null) status.dataset.rendererLoaded = "true";
-    // 실제 파일 읽기(beginDocument + loadFromDisk)와 live-preview gate(livePreviewReady)를 **분리**한다. read가
+    // 실제 파일 읽기(beginDocument + loadFromDisk)와 렌더 admission gate(rendererReady)를 **분리**한다. read가
     // 성공해 내용이 이미 렌더된 뒤 gate가 StaleDocument 등으로 일시 실패해도 "파일을 읽을 수 없습니다"로 덮어
     // 에러 텍스트와 렌더 내용이 겹치던 버그를 없앤다(간헐 race, 2026-07-22). read 실패만 사용자 에러다.
     let readOk = false;
@@ -1376,11 +1136,11 @@ export function bootShell(document: Document, targetWindow: Window): void {
       if (status !== null) status.dataset.fileRead = "false";
       if (status !== null) status.textContent = "파일을 읽을 수 없습니다.";
     }
-    // livePreviewReady는 markdown+live 전용 native gate라 text·svg에서 호출하면 StaleDocument로 실패한다(§2.2).
+    // rendererReady는 markdown 전용 native gate라 text·svg에서 호출하면 StaleDocument로 실패한다(§2.2).
     // read 성공 후에만 시도하고, 일시 실패는 조용히 삼킨다 — 내용은 이미 표시됐으므로 read-error로 덮지 않는다.
     if (readOk && !isSourceOnly && !isSvg && editorEpoch !== null) {
       try {
-        await requestFileBridge(document, "livePreviewReady", { editor_epoch: editorEpoch });
+        await requestFileBridge(document, "rendererReady", { editor_epoch: editorEpoch });
       } catch {
         // live gate 일시 실패 — 렌더된 내용을 유지한다(에러 표시 없음).
       }
@@ -1520,9 +1280,6 @@ export function bootShell(document: Document, targetWindow: Window): void {
   targetWindow.addEventListener(
     "pagehide",
     () => {
-      livePreviewIntentCoordinator?.destroy();
-      atomicProjectionController?.destroy();
-      livePreviewController?.destroy();
       editor?.destroy();
       editor = null;
     },
@@ -1538,9 +1295,6 @@ export function bootRenderer(document: Document, targetWindow: Window): void {
   const pending = new Map<string, (value: AssetResult) => void>();
   // 읽기 프리뷰 mermaid 요청의 대기 resolver(asset과 분리 — 결과 타입이 다름).
   const mermaidPending = new Map<string, (value: MermaidReadResult) => void>();
-  let atomicPort: MessagePort | null = null;
-  let atomicCapability: RendererCapability | null = null;
-  let atomicRenderConsumed = false;
 
   // §2.3: ⌘+/− 페이지 줌. shell이 `setZoom`으로 현재 배율(현재 폰트/base)을 준다. 마크다운 읽기 프리뷰에만
   // `documentElement.zoom`으로 적용한다 — svg 프리뷰는 자체 fit이 크기를 소유하므로 제외하고,
@@ -1556,61 +1310,11 @@ export function bootRenderer(document: Document, targetWindow: Window): void {
     }
   };
 
-  const revokeAtomic = () => {
-    atomicPort?.close();
-    atomicPort = null;
-    atomicCapability = null;
-    atomicRenderConsumed = false;
-  };
-
-  const waitForAtomicImages = async (images: readonly HTMLImageElement[]): Promise<boolean> => {
-    if (images.length === 0) return true;
-    const settled = Promise.all(
-      images.map(
-        (image) =>
-          new Promise<boolean>((resolve) => {
-            if (image.complete) {
-              resolve(image.naturalWidth > 0);
-              return;
-            }
-            if (typeof image.decode === "function") {
-              void image.decode().then(
-                () => resolve(true),
-                () => resolve(false),
-              );
-              return;
-            }
-            const done = (loaded: boolean) => {
-              image.removeEventListener("load", loadedImage);
-              image.removeEventListener("error", failedImage);
-              resolve(loaded);
-            };
-            const loadedImage = () => done(true);
-            const failedImage = () => done(false);
-            image.addEventListener("load", loadedImage, { once: true });
-            image.addEventListener("error", failedImage, { once: true });
-          }),
-      ),
-    ).then((values) => values.every(Boolean));
-    const timeout = new Promise<false>((resolve) =>
-      targetWindow.setTimeout(() => resolve(false), 1_500),
-    );
-    return Promise.race([settled, timeout]);
-  };
-
   root.addEventListener("click", (event) => {
-    // Atomic renderer는 pointer/action capability가 없다. 위젯 outer overlay가 source selection만 소유한다.
     if (!(event instanceof targetWindow.MouseEvent) || event.button !== 0) return;
     const target = event.target;
     if (!(target instanceof targetWindow.Element)) return;
     const link = target.closest<HTMLAnchorElement>("a[href]");
-    if (document.body.dataset.rendererMode === "atomic") {
-      if (link !== null && root.contains(link)) {
-        event.preventDefault();
-        event.stopPropagation();
-      }
-      return;
-    }
     const href = link?.getAttribute("href");
     if (
       link === null ||
@@ -1655,93 +1359,9 @@ export function bootRenderer(document: Document, targetWindow: Window): void {
 
   targetWindow.addEventListener("message", (event) => {
     if (event.source !== targetWindow.parent || !isRecord(event.data)) return;
-    if (isAtomicRendererInit(event.data)) {
-      const port = event.ports[0];
-      if (port === undefined || event.ports.length !== 1) return;
-      revokeAtomic();
-      atomicCapability = event.data.capability;
-      atomicPort = port;
-      atomicRenderConsumed = false;
-      document.body.dataset.rendererMode = "atomic";
-      root.setAttribute("aria-live", "off");
-      root.innerHTML = "";
-      port.onmessage = async (portEvent) => {
-        if (
-          atomicCapability === null ||
-          atomicRenderConsumed ||
-          !isAtomicRendererRender(portEvent.data) ||
-          !capabilitiesEqual(portEvent.data.capability, atomicCapability)
-        ) {
-          return;
-        }
-        atomicRenderConsumed = true;
-        const capability = atomicCapability;
-        const renderPort = port;
-        const payload = portEvent.data.payload;
-        // Mermaid는 색을 SVG 내부 `<style>`로 칠한 `<svg>`를 반환한다. render origin strict CSP(style-src에
-        // unsafe-inline 없음)가 innerHTML로 들어온 그 `<style>`를 막아 노드가 SVG 기본 검정으로 떨어진다. 그래서
-        // FP13 svg처럼 격리 `<img>` data URL로 표시한다 — 이미지 문서는 자기 `<style>`를 적용하고(부모 CSP 무관)
-        // 스크립트/외부요청을 원천 차단한다(헬퍼가 이미 strict 렌더·sanitize). 나머지 atomic role(코드펜스=`<pre>`·
-        // 이미지=`<img>`·KaTeX=HTML)은 CSP·클래스로 스타일되므로 기존 innerHTML 경로를 유지한다.
-        const trimmedPayload = payload.trimStart();
-        if (trimmedPayload.startsWith("<svg") || /^<\?xml[^>]*>\s*<svg\b/i.test(trimmedPayload)) {
-          root.replaceChildren();
-          const svgImage = document.createElement("img");
-          svgImage.src = `data:image/svg+xml;base64,${bytesToBase64(new TextEncoder().encode(payload), targetWindow)}`;
-          svgImage.className = "maru-atomic-svg";
-          root.appendChild(svgImage);
-        } else {
-          root.innerHTML = payload;
-          const assets = new Map(
-            portEvent.data.assets.map((asset) => [asset.opaqueId, asset.dataUrl]),
-          );
-          for (const image of root.querySelectorAll<HTMLImageElement>("img[data-maru-asset-id]")) {
-            const opaqueId = Number(image.dataset.maruAssetId);
-            const dataUrl = assets.get(opaqueId);
-            if (dataUrl !== undefined) image.src = dataUrl;
-            delete image.dataset.maruAssetId;
-          }
-        }
-        const images = [...root.querySelectorAll<HTMLImageElement>("img")];
-        if (!(await waitForAtomicImages(images))) return;
-        // WKWebView may indefinitely throttle requestAnimationFrame inside an offscreen replacement iframe.
-        // The reads below force a current layout after all admitted images settle, so no visual-frame callback
-        // is needed to establish the measured-height acknowledgement.
-        if (
-          atomicPort !== renderPort ||
-          atomicCapability === null ||
-          !capabilitiesEqual(atomicCapability, capability)
-        )
-          return;
-        const measured = Math.max(
-          1,
-          Math.ceil(root.getBoundingClientRect().height),
-          root.scrollHeight,
-        );
-        renderPort.postMessage({
-          channel: atomicRendererChannel,
-          type: "atomic-rendered",
-          capability,
-          height: measured,
-        });
-        renderPort.close();
-        if (atomicPort === renderPort) {
-          atomicPort = null;
-          atomicCapability = null;
-        }
-      };
-      port.start();
-      port.postMessage({
-        channel: atomicRendererChannel,
-        type: "atomic-ready",
-        capability: atomicCapability,
-      });
-      return;
-    }
-    if (document.body.dataset.rendererMode === "atomic") return;
     if (event.data.channel !== viewerChannel) return;
     if (event.data.type === "setZoom" && typeof event.data.zoom === "number") {
-      // ⌘+/− 배율 갱신(§2.3). 메인 읽기 iframe은 atomic 모드가 아니라 여기 도달한다. 마크다운 프리뷰면 즉시
+      // ⌘+/− 배율 갱신(§2.3). 마크다운 프리뷰면 즉시
       // 반영하고, svg/image면 값만 저장했다가 다음 마크다운 render에서 적용한다(applyPreviewZoom이 게이트).
       const zoom = event.data.zoom;
       if (Number.isFinite(zoom)) previewZoom = Math.min(10, Math.max(0.1, zoom));
@@ -1885,15 +1505,10 @@ export function bootRenderer(document: Document, targetWindow: Window): void {
     })();
   });
 
-  if (new URL(targetWindow.location.href).searchParams.get("atomic") === "1") {
-    targetWindow.parent.postMessage({ channel: atomicRendererChannel, type: "atomic-boot" }, "*");
-  } else {
-    const ready: RendererReady = {
-      channel: viewerChannel,
-      type: "renderer-ready",
-      ...rendererCapabilityTypes(targetWindow),
-    };
-    targetWindow.parent.postMessage(ready, "*");
-  }
-  targetWindow.addEventListener("pagehide", revokeAtomic, { once: true });
+  const ready: RendererReady = {
+    channel: viewerChannel,
+    type: "renderer-ready",
+    ...rendererCapabilityTypes(targetWindow),
+  };
+  targetWindow.parent.postMessage(ready, "*");
 }

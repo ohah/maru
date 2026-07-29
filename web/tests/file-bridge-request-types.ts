@@ -27,7 +27,7 @@ void encodeFileBridgeRequest({
   source_hash: "a".repeat(64),
   source: "```mermaid\ngraph TD\n```",
 });
-void encodeFileBridgeRequest({ method: "livePreviewReady", editor_epoch: 1 });
+void encodeFileBridgeRequest({ method: "rendererReady", editor_epoch: 1 });
 
 void encodeFileBridgeRequest({
   method: "setDirty",

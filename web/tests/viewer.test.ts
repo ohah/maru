@@ -2,7 +2,6 @@ import { describe, expect, test } from "bun:test";
 import { EditorState, Text, Transaction } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
 import { JSDOM } from "jsdom";
-import { atomicRendererChannel } from "../src/renderer-capability";
 import {
   assetBase64BudgetAllowed,
   assetDataUrl,
@@ -21,7 +20,6 @@ import {
   maxAssetBase64Bytes,
   maxAssetRequests,
   viewerChannel,
-  writeLivePreviewIntentQueueMetrics,
 } from "../src/viewer";
 
 describe("file viewer bridge boundary", () => {
@@ -37,27 +35,6 @@ describe("file viewer bridge boundary", () => {
     expect(documentIsDirtyAgainstSnapshot(edited, saved)).toBe(true);
     expect(documentIsDirtyAgainstSnapshot(undoneContentAtNewerRevision, saved)).toBe(false);
     expect(documentIsDirtyAgainstSnapshot(saved, null)).toBe(true);
-  });
-
-  test("publishes the exact queue SSOT snapshot after every coordinator transition", () => {
-    const dom = new JSDOM('<!doctype html><p id="status"></p>');
-    const status = dom.window.document.querySelector<HTMLElement>("#status");
-    if (status === null) throw new Error("missing status fixture");
-    writeLivePreviewIntentQueueMetrics(
-      status,
-      { retained: 0, maxRetained: 8, dropped: 1, completed: 9 },
-      2,
-    );
-    expect(status.dataset).toEqual(
-      expect.objectContaining({
-        liveIntentQueueRetained: "0",
-        liveIntentQueueMaxRetained: "8",
-        liveIntentQueueDropped: "1",
-        liveIntentQueueCompleted: "9",
-        liveIntentBridgeCalls: "2",
-      }),
-    );
-    dom.window.close();
   });
 
   test("close lock acquisition is monotonic and same-request idempotent", () => {
@@ -249,8 +226,8 @@ describe("file viewer bridge boundary", () => {
     dom.window.close();
   });
 
-  test("a rejecting livePreviewReady after a successful read keeps the rendered content and shows no read error", async () => {
-    // 회귀: 예전엔 read(loadFromDisk) 성공 뒤 livePreviewReady가 StaleDocument 등으로 실패하면 그 rejection이
+  test("a rejecting rendererReady after a successful read keeps the rendered content and shows no read error", async () => {
+    // 회귀: 예전엔 read(loadFromDisk) 성공 뒤 rendererReady가 StaleDocument 등으로 실패하면 그 rejection이
     // 하나의 catch로 흘러 "파일을 읽을 수 없습니다"를 띄워 이미 렌더된 내용과 겹쳤다. 이제 read 성공과 live-gate
     // 실패를 분리해, gate가 실패해도 read 에러를 표시하지 않는다(내용 유지).
     const dom = new JSDOM(
@@ -258,7 +235,7 @@ describe("file viewer bridge boundary", () => {
       { url: "maru-app://app/index.html?document=1" },
     );
     const document = dom.window.document;
-    let livePreviewReadyRejected = false;
+    let rendererReadyRejected = false;
     document.addEventListener("maru:file-request", () => {
       const node = document.querySelector<HTMLElement>('[data-maru-file-request="pending"]');
       if (node === null) return;
@@ -270,8 +247,8 @@ describe("file viewer bridge boundary", () => {
       };
       if (request.method === "beginDocument") return settle({ result: { editor_epoch: 7 } });
       if (request.method === "read") return settle({ result: { content: "# 렌더된 문서" } });
-      if (request.method === "livePreviewReady") {
-        livePreviewReadyRejected = true;
+      if (request.method === "rendererReady") {
+        rendererReadyRejected = true;
         return settle({ error: "StaleDocument" }); // gate 일시 실패(reject) — read는 이미 성공
       }
       settle({ result: { ok: true } });
@@ -281,7 +258,7 @@ describe("file viewer bridge boundary", () => {
     for (let turn = 0; turn < 24; turn += 1) await Promise.resolve();
 
     const status = document.querySelector<HTMLElement>("#viewer-status");
-    expect(livePreviewReadyRejected).toBe(true); // gate가 실제로 호출·실패했다
+    expect(rendererReadyRejected).toBe(true); // gate가 실제로 호출·실패했다
     expect(status?.dataset.fileRead).toBe("true"); // read는 성공으로 기록
     expect(status?.textContent).toBe(""); // read 에러 텍스트를 렌더 내용 위에 덮지 않는다
     dom.window.close();
@@ -723,23 +700,13 @@ describe("file viewer bridge boundary", () => {
       ).toBe("true");
 
       dom.window.dispatchEvent(
-        new dom.window.CustomEvent("maru:file-mode", { detail: { mode: "live-preview" } }),
-      );
-      dom.window.dispatchEvent(
-        new dom.window.CustomEvent("maru:file-live-preview-active", {
-          detail: { active: false },
-        }),
+        new dom.window.CustomEvent("maru:file-mode", { detail: { mode: "source-edit" } }),
       );
       const editorHost = dom.window.document.querySelector<HTMLElement>("#editor");
       editor = editorHost === null ? null : EditorView.findFromDOM(editorHost);
       expect(editor).not.toBeNull();
-      const status = dom.window.document.querySelector<HTMLElement>("#viewer-status");
-      expect(status?.dataset.liveProjection).toBe("running");
-      expect(status?.dataset.liveProjectionDocumentRevision).toBe("0");
-      expect(status?.dataset.liveAtomicAdmitted).toBe("false");
-      expect(status?.dataset.liveGeneralFragments).toBe("0");
+      // 소스 모드는 순수 CM6다 — worker도, 격리 렌더 위젯도 만들지 않는다.
       expect(workerConstructions).toBe(0);
-      expect(dom.window.document.querySelector(".maru-live-atomic-frame")).toBeNull();
 
       diskContent = "# external\n\n**updated**";
       dom.window.dispatchEvent(
@@ -747,14 +714,12 @@ describe("file viewer bridge boundary", () => {
       );
       for (let turn = 0; turn < 10; turn += 1) await Promise.resolve();
       expect(editor?.state.doc.toString()).toBe(diskContent);
-      expect(status?.dataset.liveProjectionDocumentRevision).toBe("1");
 
       // A duplicate FSEvents notification for the same clean snapshot must not advance document identity.
       dom.window.dispatchEvent(
         new dom.window.CustomEvent("maru:file-reload", { detail: { conflict: false } }),
       );
       for (let turn = 0; turn < 10; turn += 1) await Promise.resolve();
-      expect(status?.dataset.liveProjectionDocumentRevision).toBe("1");
 
       let serializations = 0;
       textPrototype.toString = function (this: Text) {
@@ -791,93 +756,6 @@ describe("file viewer bridge boundary", () => {
 });
 
 describe("bridge-free renderer", () => {
-  test("accepts pathless atomic HTML only through a load-scoped capability MessagePort", async () => {
-    const dom = new JSDOM('<!doctype html><main id="app"></main>', {
-      url: "maru-app://render/render.html",
-    });
-    let finishDecode: () => void = () => {};
-    const decoded = new Promise<void>((resolve) => {
-      finishDecode = resolve;
-    });
-    Object.defineProperty(dom.window.HTMLImageElement.prototype, "decode", {
-      configurable: true,
-      value: () => decoded,
-    });
-    bootRenderer(dom.window.document, dom.window as unknown as Window);
-    const capability = {
-      editorEpoch: 2,
-      documentRevision: 3,
-      projectionGeneration: 4,
-      widgetId: 5,
-      widgetGeneration: 6,
-      rendererInstance: 7,
-    };
-    const channel = new MessageChannel();
-    let renderedSettled = false;
-    let renderedCount = 0;
-    const rendered = new Promise<unknown>((resolve) => {
-      channel.port1.onmessage = (event) => {
-        if ((event.data as { type?: string }).type === "atomic-ready") {
-          channel.port1.postMessage({
-            channel: atomicRendererChannel,
-            type: "atomic-render",
-            capability,
-            payload:
-              '<p>isolated atomic <a href="next.md">next</a><img data-maru-asset-id="1"></p>',
-            assets: [{ opaqueId: 1, dataUrl: "data:image/png;base64,iVBORw0KGgo=" }],
-          });
-          channel.port1.postMessage({
-            channel: atomicRendererChannel,
-            type: "atomic-render",
-            capability,
-            payload: "<p>duplicate must not replace the first render</p>",
-            assets: [],
-          });
-        } else {
-          renderedCount += 1;
-          renderedSettled = true;
-          resolve(event.data);
-        }
-      };
-      channel.port1.start();
-    });
-    dom.window.dispatchEvent(
-      new dom.window.MessageEvent("message", {
-        source: dom.window.parent,
-        data: { channel: atomicRendererChannel, type: "atomic-init", capability },
-        ports: [channel.port2] as unknown as readonly MessagePort[],
-      }),
-    );
-
-    for (
-      let turn = 0;
-      turn < 10 && dom.window.document.querySelector("#app")?.textContent === "";
-      turn += 1
-    )
-      await new Promise((resolve) => dom.window.setTimeout(resolve, 0));
-    expect(renderedSettled).toBe(false);
-    expect(dom.window.document.querySelector("#app")?.textContent).toBe("isolated atomic next");
-    finishDecode();
-    await expect(rendered).resolves.toMatchObject({
-      channel: atomicRendererChannel,
-      type: "atomic-rendered",
-      capability,
-    });
-    expect(dom.window.document.querySelector("#app")?.textContent).toBe("isolated atomic next");
-    expect(dom.window.document.querySelector("img")?.src).toStartWith("data:image/png;base64,");
-    expect(renderedCount).toBe(1);
-    const link = dom.window.document.querySelector("a")!;
-    const click = new dom.window.MouseEvent("click", {
-      bubbles: true,
-      cancelable: true,
-      button: 0,
-    });
-    link.dispatchEvent(click);
-    expect(click.defaultPrevented).toBe(true);
-    channel.port1.close();
-    dom.window.close();
-  });
-
   test("renders sanitized markdown from its parent message without exposing window.maru", () => {
     const dom = new JSDOM('<!doctype html><main id="app"></main>', {
       url: "maru-app://render/render.html",

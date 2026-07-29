@@ -1,8 +1,26 @@
-import { maxAtomicAssetGrants } from "./atomic-projection";
-import { maxLivePreviewResultBytes } from "./live-preview-protocol";
-import { isNonNegativeSafeInteger, isPositiveSafeInteger } from "./live-preview-identity";
+/**
+ * 읽기 프리뷰가 Mermaid 펜스를 native helper로 보낼 때 함께 싣는 6-field 신원(capability)이다.
+ *
+ * 왜 6개나 되는가: 이 값은 Web·Swift·Zig 세 계층이 각자 재검증하는 wire 계약이고, 늦게 도착한
+ * helper 결과가 **다른** 문서·다른 펜스에 적용되는 것을 막는 것이 유일한 목적이다. 그래서 어느
+ * 한 필드라도 현재 값과 다르면 결과를 버린다(부분 일치 허용 없음 — `capabilitiesEqual`).
+ *
+ * 읽기 프리뷰에는 편집 projection이 없으므로 `viewer.ts`가 펜스마다 `widgetId`만 증가시킨 값을
+ * 만든다. 나머지 필드는 admission이 요구하는 non-zero 불변식을 채우는 값이고, 실제 신원 판정은
+ * `editorEpoch`와 source hash가 한다.
+ */
 
-export const atomicRendererChannel = "maru.file.atomic.v1";
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isNonNegativeSafeInteger(value: unknown): value is number {
+  return Number.isSafeInteger(value) && Number(value) >= 0;
+}
+
+function isPositiveSafeInteger(value: unknown): value is number {
+  return Number.isSafeInteger(value) && Number(value) > 0;
+}
 
 export type RendererCapability = Readonly<{
   editorEpoch: number;
@@ -12,39 +30,6 @@ export type RendererCapability = Readonly<{
   widgetGeneration: number;
   rendererInstance: number;
 }>;
-
-export type AtomicRenderAsset = Readonly<{ opaqueId: number; dataUrl: string }>;
-
-export type AtomicRendererInit = Readonly<{
-  channel: typeof atomicRendererChannel;
-  type: "atomic-init";
-  capability: RendererCapability;
-}>;
-
-export type AtomicRendererRender = Readonly<{
-  channel: typeof atomicRendererChannel;
-  type: "atomic-render";
-  capability: RendererCapability;
-  payload: string;
-  assets: readonly AtomicRenderAsset[];
-}>;
-
-export type AtomicRendererReady = Readonly<{
-  channel: typeof atomicRendererChannel;
-  type: "atomic-ready";
-  capability: RendererCapability;
-}>;
-
-export type AtomicRendererRendered = Readonly<{
-  channel: typeof atomicRendererChannel;
-  type: "atomic-rendered";
-  capability: RendererCapability;
-  height: number;
-}>;
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 
 export function isRendererCapability(value: unknown): value is RendererCapability {
   return (
@@ -67,68 +52,4 @@ export function capabilitiesEqual(left: RendererCapability, right: RendererCapab
     left.widgetGeneration === right.widgetGeneration &&
     left.rendererInstance === right.rendererInstance
   );
-}
-
-export function isAtomicRendererInit(value: unknown): value is AtomicRendererInit {
-  return (
-    isRecord(value) &&
-    value.channel === atomicRendererChannel &&
-    value.type === "atomic-init" &&
-    isRendererCapability(value.capability)
-  );
-}
-
-function atomicAssetValid(value: unknown): value is AtomicRenderAsset {
-  return (
-    isRecord(value) &&
-    isPositiveSafeInteger(value.opaqueId) &&
-    typeof value.dataUrl === "string" &&
-    /^data:image\/(?:png|jpeg|gif|webp|avif|svg\+xml);base64,[A-Za-z0-9+/=]+$/.test(value.dataUrl)
-  );
-}
-
-export function isAtomicRendererRender(value: unknown): value is AtomicRendererRender {
-  if (
-    !isRecord(value) ||
-    value.channel !== atomicRendererChannel ||
-    value.type !== "atomic-render" ||
-    !isRendererCapability(value.capability) ||
-    typeof value.payload !== "string" ||
-    new TextEncoder().encode(value.payload).byteLength > maxLivePreviewResultBytes ||
-    !Array.isArray(value.assets) ||
-    value.assets.length > maxAtomicAssetGrants ||
-    !value.assets.every(atomicAssetValid)
-  ) {
-    return false;
-  }
-  return new Set(value.assets.map(({ opaqueId }) => opaqueId)).size === value.assets.length;
-}
-
-export function isAtomicRendererReady(value: unknown): value is AtomicRendererReady {
-  return (
-    isRecord(value) &&
-    value.channel === atomicRendererChannel &&
-    value.type === "atomic-ready" &&
-    isRendererCapability(value.capability)
-  );
-}
-
-export function isAtomicRendererRendered(value: unknown): value is AtomicRendererRendered {
-  return (
-    isRecord(value) &&
-    value.channel === atomicRendererChannel &&
-    value.type === "atomic-rendered" &&
-    isRendererCapability(value.capability) &&
-    typeof value.height === "number" &&
-    Number.isFinite(value.height) &&
-    value.height >= 1 &&
-    value.height <= 1_000_000
-  );
-}
-
-export function atomicRendererMessageMatches(
-  value: AtomicRendererReady | AtomicRendererRendered,
-  current: RendererCapability,
-): boolean {
-  return capabilitiesEqual(value.capability, current);
 }

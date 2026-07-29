@@ -623,7 +623,9 @@ const PreparedAdoptionFinalSeal = struct {
     metadata_take_addr: usize = 0,
     scalar_take_addr: usize = 0,
     committed_screen_addr: usize = 0,
+    screen_pending_summary_addr: usize = 0,
     owner_metadata_addr: usize = 0,
+    metadata_pending_summary_addr: usize = 0,
     owner_resize_addr: usize = 0,
     owner_authority_addr: usize = 0,
     owner_request_ids_addr: usize = 0,
@@ -1207,6 +1209,10 @@ pub const AccessError = error{
     NotActive,
     Terminal,
     MovedStorage,
+    TransactionBusy,
+    InvalidDescriptor,
+    GenerationExhausted,
+    InvalidSnapshot,
 };
 
 pub const ScreenConsumeError =
@@ -1245,9 +1251,185 @@ threadlocal var initializing_storage_addr: usize = 0;
 // Allocation callbacks are arbitrary user code. Prepare, commit, and teardown share one
 // process-thread lease so re-entrant public operations cannot create a second state machine.
 threadlocal var active_external_operation_addr: usize = 0;
+threadlocal var active_external_lease_addr: usize = 0;
+threadlocal var active_external_lease_generation: u64 = 0;
 var cross_owner_quarantine_latched: std.atomic.Value(bool) = .init(false);
 var cross_owner_quarantine_events: std.atomic.Value(u64) = .init(0);
 var active_storage_addr: std.atomic.Value(usize) = .init(0);
+
+const WholeTurnLeaseLifecycle = enum {
+    empty,
+    acquired,
+    released,
+    aborted,
+};
+
+pub const ExternalWholeTurnLease = struct {
+    saved_self_addr: usize = 0,
+    storage_addr: usize = 0,
+    scratch_addr: usize = 0,
+    scratch_len: usize = 0,
+    operation_generation: u64 = 0,
+    lifecycle: WholeTurnLeaseLifecycle = .empty,
+    digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+};
+
+pub const WholeTurnReleaseResult = enum {
+    released,
+    aborted_terminal,
+    ignored_untrusted,
+};
+
+const PendingSummaryLifecycle = enum {
+    empty,
+    bound,
+    tombstone,
+};
+
+const ScreenPendingSummarySeal = struct {
+    screen_owner_addr: usize = 0,
+    storage_addr: usize = 0,
+    owner_incarnation: u64 = 0,
+    retained_count: usize = 0,
+    committed: bool = false,
+    generation: u64 = 0,
+    lifecycle: PendingSummaryLifecycle = .empty,
+    digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+};
+
+const MetadataPendingSummarySeal = struct {
+    metadata_owner_addr: usize = 0,
+    storage_addr: usize = 0,
+    owner_incarnation: u64 = 0,
+    revision: u64 = 0,
+    pending: bool = false,
+    supported: bool = false,
+    generation: u64 = 0,
+    lifecycle: PendingSummaryLifecycle = .empty,
+    digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+};
+
+const InheritedSnapshotLifecycle = enum {
+    empty,
+    prepared,
+    consumed,
+    aborted,
+};
+
+pub const InheritedRxBlockerSnapshot = struct {
+    saved_self_addr: usize = 0,
+    storage_addr: usize = 0,
+    lease_addr: usize = 0,
+    operation_generation: u64 = 0,
+    committed_screen_pending: bool = false,
+    live_screen_pending: bool = false,
+    metadata_projection_pending: bool = false,
+    resize_projection_pending: bool = false,
+    response_correlation_pending: bool = false,
+    authority_generation: AuthorityGeneration = .untracked,
+    generation: u64 = 0,
+    lifecycle: InheritedSnapshotLifecycle = .empty,
+    owner_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+
+    pub fn hasBlocker(self: *const InheritedRxBlockerSnapshot) bool {
+        return self.lifecycle == .prepared and
+            (self.committed_screen_pending or self.live_screen_pending or
+                self.metadata_projection_pending or self.resize_projection_pending or
+                self.response_correlation_pending);
+    }
+};
+
+fn wholeTurnLeaseDigest(lease: ExternalWholeTurnLease) external_owner_seal.Digest {
+    var writer = external_owner_seal.Writer.init("MARUWTL1");
+    writer.writeUsize(lease.saved_self_addr);
+    writer.writeUsize(lease.storage_addr);
+    writer.writeUsize(lease.scratch_addr);
+    writer.writeUsize(lease.scratch_len);
+    writer.writeU64(lease.operation_generation);
+    writer.writeU8(@intFromEnum(lease.lifecycle));
+    return writer.finish();
+}
+
+fn screenPendingSummaryDigest(
+    seal: ScreenPendingSummarySeal,
+) external_owner_seal.Digest {
+    var writer = external_owner_seal.Writer.init("MARUSPS1");
+    writer.writeUsize(seal.screen_owner_addr);
+    writer.writeUsize(seal.storage_addr);
+    writer.writeU64(seal.owner_incarnation);
+    writer.writeUsize(seal.retained_count);
+    writer.writeBool(seal.committed);
+    writer.writeU64(seal.generation);
+    writer.writeU8(@intFromEnum(seal.lifecycle));
+    return writer.finish();
+}
+
+fn metadataPendingSummaryDigest(
+    seal: MetadataPendingSummarySeal,
+) external_owner_seal.Digest {
+    var writer = external_owner_seal.Writer.init("MARUMPS1");
+    writer.writeUsize(seal.metadata_owner_addr);
+    writer.writeUsize(seal.storage_addr);
+    writer.writeU64(seal.owner_incarnation);
+    writer.writeU64(seal.revision);
+    writer.writeBool(seal.pending);
+    writer.writeBool(seal.supported);
+    writer.writeU64(seal.generation);
+    writer.writeU8(@intFromEnum(seal.lifecycle));
+    return writer.finish();
+}
+
+fn metadataPendingSealFromSummary(
+    storage: *const ExternalPumpStorage,
+    summary: external_event_materialization.MetadataStateSummary,
+    generation: u64,
+) MetadataPendingSummarySeal {
+    var seal = MetadataPendingSummarySeal{
+        .metadata_owner_addr = @intFromPtr(&storage.owner_metadata),
+        .storage_addr = @intFromPtr(storage),
+        .owner_incarnation = storage.owner_incarnation,
+        .generation = generation,
+        .lifecycle = .bound,
+    };
+    switch (summary) {
+        .unsupported => {},
+        .unavailable => seal.supported = true,
+        .current => |current| {
+            seal.supported = true;
+            seal.revision = current.revision;
+            seal.pending = current.pending;
+        },
+    }
+    seal.digest = metadataPendingSummaryDigest(seal);
+    return seal;
+}
+
+fn inheritedSnapshotDigest(
+    snapshot: InheritedRxBlockerSnapshot,
+) external_owner_seal.Digest {
+    var writer = external_owner_seal.Writer.init("MARUIRS1");
+    writer.writeUsize(snapshot.saved_self_addr);
+    writer.writeUsize(snapshot.storage_addr);
+    writer.writeUsize(snapshot.lease_addr);
+    writer.writeU64(snapshot.operation_generation);
+    writer.writeBool(snapshot.committed_screen_pending);
+    writer.writeBool(snapshot.live_screen_pending);
+    writer.writeBool(snapshot.metadata_projection_pending);
+    writer.writeBool(snapshot.resize_projection_pending);
+    writer.writeBool(snapshot.response_correlation_pending);
+    switch (snapshot.authority_generation) {
+        .untracked => writer.writeBool(false),
+        .tracked => |generation| {
+            writer.writeBool(true);
+            writer.writeU64(generation);
+        },
+    }
+    writer.writeU64(snapshot.generation);
+    writer.writeU8(@intFromEnum(snapshot.lifecycle));
+    writer.writeBytes(&snapshot.owner_digest);
+    return writer.finish();
+}
 
 pub fn crossOwnerQuarantineStatus() CrossOwnerQuarantineStatus {
     const latched = cross_owner_quarantine_latched.load(.acquire);
@@ -1414,7 +1596,9 @@ pub const ExternalPumpStorage = struct {
     prepared_adoption: PreparedExternalAdoption = .{},
     client_cleanup_take: client_mod.ExternalAdoptionTake = .{},
     committed_screen: client_external_adoption.CommittedScreenBacklog = .{},
+    screen_pending_summary: ScreenPendingSummarySeal = .{},
     owner_metadata: external_event_materialization.OwnerMetadataState = .{},
+    metadata_pending_summary: MetadataPendingSummarySeal = .{},
     owner_resize: OwnerResizeState = .none,
     owner_authority: OwnerAuthorityState = .empty,
     owner_authority_seal: OwnerAuthoritySeal = .{},
@@ -1424,6 +1608,115 @@ pub const ExternalPumpStorage = struct {
     owner_event_projection_generation: u64 = 0,
     operation_generation: u64 = 0,
     owner_teardown_generation: u64 = 0,
+
+    fn bindPendingSummaries(self: *ExternalPumpStorage) void {
+        self.screen_pending_summary = .{
+            .screen_owner_addr = @intFromPtr(&self.committed_screen),
+            .storage_addr = @intFromPtr(self),
+            .owner_incarnation = self.owner_incarnation,
+            .retained_count = self.committed_screen.retained_count,
+            // The final permit proved the destination was pristine and the preceding no-fail take
+            // published the committed owner. Revalidation belongs to readers, not this suffix.
+            .committed = true,
+            .generation = 1,
+            .lifecycle = .bound,
+        };
+        self.screen_pending_summary.digest =
+            screenPendingSummaryDigest(self.screen_pending_summary);
+        const summary = switch (self.owner_metadata.metadata) {
+            .unsupported => external_event_materialization.MetadataStateSummary.unsupported,
+            .unavailable => external_event_materialization.MetadataStateSummary.unavailable,
+            .current => |current| external_event_materialization.MetadataStateSummary{
+                .current = .{
+                    .revision = current.logical.revision,
+                    .pending = current.pending,
+                },
+            },
+        };
+        self.metadata_pending_summary = metadataPendingSealFromSummary(
+            self,
+            summary,
+            1,
+        );
+    }
+
+    fn screenPendingSummaryValid(self: *const ExternalPumpStorage) bool {
+        const seal = self.screen_pending_summary;
+        const retained_count =
+            self.committed_screen.pendingCountSummary(self) orelse return false;
+        return seal.lifecycle == .bound and
+            seal.screen_owner_addr == @intFromPtr(&self.committed_screen) and
+            seal.storage_addr == @intFromPtr(self) and
+            seal.owner_incarnation == self.owner_incarnation and
+            seal.retained_count == retained_count and seal.committed and
+            std.mem.eql(u8, &seal.digest, &screenPendingSummaryDigest(seal));
+    }
+
+    fn metadataPendingSummaryValid(self: *const ExternalPumpStorage) bool {
+        const seal = self.metadata_pending_summary;
+        if (seal.lifecycle != .bound or
+            seal.metadata_owner_addr != @intFromPtr(&self.owner_metadata) or
+            seal.storage_addr != @intFromPtr(self) or
+            seal.owner_incarnation != self.owner_incarnation or
+            !std.mem.eql(u8, &seal.digest, &metadataPendingSummaryDigest(seal)))
+            return false;
+        const summary = self.owner_metadata.pendingStateSummary(self) orelse return false;
+        return switch (summary) {
+            .unsupported => !seal.supported and seal.revision == 0 and !seal.pending,
+            .unavailable => seal.supported and seal.revision == 0 and !seal.pending,
+            .current => |current| seal.supported and
+                seal.revision == current.revision and
+                seal.pending == current.pending,
+        };
+    }
+
+    fn tombstonePendingSummaries(self: *ExternalPumpStorage) void {
+        self.screen_pending_summary = .{ .lifecycle = .tombstone };
+        self.metadata_pending_summary = .{ .lifecycle = .tombstone };
+    }
+
+    fn wholeTurnScratchDisjoint(
+        self: *const ExternalPumpStorage,
+        scratch_addr: usize,
+        scratch_len: usize,
+    ) bool {
+        if (scratch_addr == 0 or scratch_len == 0) return false;
+        _ = std.math.add(usize, scratch_addr, scratch_len) catch return false;
+        if (self.inbox_ledger.overlapsOwnedRange(scratch_addr, scratch_len) or
+            self.committed_screen.overlapsOwnedBacking(scratch_addr, scratch_len))
+            return false;
+        if (self.owner_metadata.metadata == .current) {
+            const current = &self.owner_metadata.metadata.current;
+            if (current.logical.backing) |backing|
+                if (rangesOverlap(
+                    scratch_addr,
+                    scratch_len,
+                    @intFromPtr(backing.ptr),
+                    backing.len,
+                )) return false;
+            if (current.cleanup.backing) |backing|
+                if (rangesOverlap(
+                    scratch_addr,
+                    scratch_len,
+                    @intFromPtr(backing.ptr),
+                    backing.len,
+                )) return false;
+        }
+        const take_overlap = self.client_cleanup_take.overlapsCommittedOwnedRange(
+            scratch_addr,
+            scratch_len,
+        ) orelse return false;
+        if (take_overlap) return false;
+        if (self.owned_client) |*owned| {
+            var source_ranges: client_mod.ExternalSourceOwnerRangeScratch = .{};
+            owned.preflightExternalAdoptionDestinationWithScratch(
+                @ptrFromInt(scratch_addr),
+                scratch_len,
+                &source_ranges,
+            ) catch return false;
+        }
+        return true;
+    }
 
     pub fn initInPlace(
         out: *ExternalPumpStorage,
@@ -1644,6 +1937,221 @@ pub const ExternalPumpStorage = struct {
         };
     }
 
+    /// Hold the process-thread operation reservation across the complete RX policy turn.
+    pub fn acquireWholeTurnLease(
+        self: *ExternalPumpStorage,
+        out: *ExternalWholeTurnLease,
+        scratch_addr: usize,
+        scratch_len: usize,
+    ) AccessError!void {
+        if (active_external_operation_addr != 0) return error.TransactionBusy;
+        try self.requireActive();
+        if (!std.meta.eql(out.*, ExternalWholeTurnLease{}))
+            return error.InvalidDescriptor;
+        const out_addr = @intFromPtr(out);
+        _ = std.math.add(usize, out_addr, @sizeOf(ExternalWholeTurnLease)) catch
+            return error.InvalidDescriptor;
+        _ = std.math.add(usize, scratch_addr, scratch_len) catch
+            return error.InvalidDescriptor;
+        if (rangesOverlap(
+            out_addr,
+            @sizeOf(ExternalWholeTurnLease),
+            @intFromPtr(self),
+            @sizeOf(ExternalPumpStorage),
+        ) or rangesOverlap(
+            out_addr,
+            @sizeOf(ExternalWholeTurnLease),
+            scratch_addr,
+            scratch_len,
+        ) or rangesOverlap(
+            scratch_addr,
+            scratch_len,
+            @intFromPtr(self),
+            @sizeOf(ExternalPumpStorage),
+        ))
+            return error.InvalidDescriptor;
+        if (!self.wholeTurnScratchDisjoint(scratch_addr, scratch_len))
+            return error.InvalidDescriptor;
+        if (self.operation_generation == std.math.maxInt(u64))
+            return error.GenerationExhausted;
+        active_external_operation_addr = @intFromPtr(self);
+        self.operation_generation += 1;
+        out.* = .{
+            .saved_self_addr = out_addr,
+            .storage_addr = @intFromPtr(self),
+            .scratch_addr = scratch_addr,
+            .scratch_len = scratch_len,
+            .operation_generation = self.operation_generation,
+            .lifecycle = .acquired,
+        };
+        out.digest = wholeTurnLeaseDigest(out.*);
+        active_external_lease_addr = out_addr;
+        active_external_lease_generation = self.operation_generation;
+    }
+
+    pub fn validateWholeTurnLease(
+        self: *const ExternalPumpStorage,
+        lease: *const ExternalWholeTurnLease,
+    ) bool {
+        return self.wholeTurnLeaseIdentityValid(lease) and
+            self.lifecycle == .live and
+            self.semantic_state == .active;
+    }
+
+    fn wholeTurnLeaseIdentityValid(
+        self: *const ExternalPumpStorage,
+        lease: *const ExternalWholeTurnLease,
+    ) bool {
+        return active_external_operation_addr == @intFromPtr(self) and
+            self.saved_self_addr == @intFromPtr(self) and
+            active_external_lease_addr == @intFromPtr(lease) and
+            active_external_lease_generation == self.operation_generation and
+            lease.saved_self_addr == @intFromPtr(lease) and
+            lease.storage_addr == @intFromPtr(self) and
+            lease.operation_generation == self.operation_generation and
+            lease.lifecycle == .acquired and
+            std.mem.eql(u8, &lease.digest, &wholeTurnLeaseDigest(lease.*));
+    }
+
+    pub fn releaseWholeTurnLease(
+        self: *ExternalPumpStorage,
+        lease: *ExternalWholeTurnLease,
+    ) WholeTurnReleaseResult {
+        if (active_external_operation_addr != @intFromPtr(self) or
+            active_external_lease_addr != @intFromPtr(lease) or
+            active_external_lease_generation == 0)
+            return .ignored_untrusted;
+        const intact_identity = self.wholeTurnLeaseIdentityValid(lease);
+        if (intact_identity and
+            self.lifecycle == .live and
+            (self.semantic_state == .active or self.semantic_state == .terminal))
+        {
+            lease.* = .{ .lifecycle = .released };
+            active_external_lease_addr = 0;
+            active_external_lease_generation = 0;
+            active_external_operation_addr = 0;
+            return .released;
+        }
+        if (intact_identity)
+            lease.* = .{ .lifecycle = .aborted };
+        // The thread-local final address is the private outer-owner authority. A copied or foreign
+        // lease cannot reach this branch. Restore the lifecycle proven at acquire so a hostile
+        // storage-header drift cannot forge moved/dead and bypass cleanup. If the lease descriptor
+        // drifted, do not dereference it again after the identity verdict.
+        self.saved_self_addr = @intFromPtr(self);
+        self.lifecycle = .live;
+        self.semantic_state = .{ .terminal = .{
+            .reason = .invariant_failure,
+            .fd_disposition = .owner_cleanup,
+        } };
+        active_external_lease_addr = 0;
+        active_external_lease_generation = 0;
+        active_external_operation_addr = 0;
+        return .aborted_terminal;
+    }
+
+    pub fn snapshotInheritedRxBlockersUnderHeldLease(
+        self: *const ExternalPumpStorage,
+        lease: *const ExternalWholeTurnLease,
+        out: *InheritedRxBlockerSnapshot,
+    ) AccessError!void {
+        if (!self.validateWholeTurnLease(lease))
+            return error.TransactionBusy;
+        if (!std.meta.eql(out.*, InheritedRxBlockerSnapshot{}))
+            return error.InvalidSnapshot;
+        if (rangesOverlap(
+            @intFromPtr(out),
+            @sizeOf(InheritedRxBlockerSnapshot),
+            @intFromPtr(self),
+            @sizeOf(ExternalPumpStorage),
+        ) or rangesOverlap(
+            @intFromPtr(out),
+            @sizeOf(InheritedRxBlockerSnapshot),
+            @intFromPtr(lease),
+            @sizeOf(ExternalWholeTurnLease),
+        ))
+            return error.InvalidDescriptor;
+        if (!rangeContains(
+            lease.scratch_addr,
+            lease.scratch_len,
+            @intFromPtr(out),
+            @sizeOf(InheritedRxBlockerSnapshot),
+        ))
+            return error.InvalidDescriptor;
+        const snapshot = try self.expectedInheritedSnapshot(lease, out);
+        out.* = snapshot;
+    }
+
+    pub fn validateAndConsumeInheritedSnapshot(
+        self: *const ExternalPumpStorage,
+        lease: *const ExternalWholeTurnLease,
+        snapshot: *InheritedRxBlockerSnapshot,
+    ) AccessError!bool {
+        if (!self.validateWholeTurnLease(lease))
+            return error.TransactionBusy;
+        if (snapshot.lifecycle != .prepared or
+            snapshot.saved_self_addr != @intFromPtr(snapshot))
+            return error.InvalidSnapshot;
+        const expected = try self.expectedInheritedSnapshot(lease, snapshot);
+        if (!std.meta.eql(snapshot.*, expected))
+            return error.InvalidSnapshot;
+        const blocked = snapshot.hasBlocker();
+        snapshot.* = .{ .lifecycle = .consumed };
+        return blocked;
+    }
+
+    fn expectedInheritedSnapshot(
+        self: *const ExternalPumpStorage,
+        lease: *const ExternalWholeTurnLease,
+        out: *const InheritedRxBlockerSnapshot,
+    ) AccessError!InheritedRxBlockerSnapshot {
+        if (!ownerIncarnationValid(self) or !ownerAuthorityValid(self) or
+            !ownerResizeValid(self) or !self.screenPendingSummaryValid() or
+            !self.metadataPendingSummaryValid())
+            return error.InvalidSnapshot;
+        const authority_generation = self.owner_authority.current.generation;
+        var result = InheritedRxBlockerSnapshot{
+            .saved_self_addr = @intFromPtr(out),
+            .storage_addr = @intFromPtr(self),
+            .lease_addr = @intFromPtr(lease),
+            .operation_generation = self.operation_generation,
+            .committed_screen_pending = self.screen_pending_summary.retained_count != 0,
+            // d2b3 binds these two persistent owners; d2b1 seals their canonical absence.
+            .live_screen_pending = false,
+            .metadata_projection_pending = self.metadata_pending_summary.pending,
+            .resize_projection_pending = switch (self.owner_resize) {
+                .none => false,
+                .current => |current| current.pending,
+            },
+            .response_correlation_pending = false,
+            .authority_generation = authority_generation,
+            .generation = self.operation_generation,
+            .lifecycle = .prepared,
+            .owner_digest = self.inheritedOwnerDigest(),
+        };
+        result.digest = inheritedSnapshotDigest(result);
+        return result;
+    }
+
+    fn inheritedOwnerDigest(
+        self: *const ExternalPumpStorage,
+    ) external_owner_seal.Digest {
+        var writer = external_owner_seal.Writer.init("MARUIRX1");
+        writer.writeBytes(&self.owner_incarnation_seal.digest);
+        writer.writeBytes(&self.screen_pending_summary.digest);
+        writer.writeBytes(&self.metadata_pending_summary.digest);
+        switch (self.owner_resize) {
+            .none => writer.writeBool(false),
+            .current => |current| {
+                writer.writeBool(true);
+                writer.writeBytes(&current.seal.digest);
+            },
+        }
+        writer.writeBytes(&self.owner_authority_seal.digest);
+        writer.writeU64(self.operation_generation);
+        return writer.finish();
+    }
+
     /// Pointer-free metadata query. Invalid committed authority stays distinguishable from ordinary
     /// lifecycle states; this read-only operation never attempts cleanup without caller scratch.
     pub fn metadataState(self: *const ExternalPumpStorage) MetadataStateResult {
@@ -1809,7 +2317,22 @@ pub const ExternalPumpStorage = struct {
                         self.owner_resize.current.pending = false;
                         self.resealOwnerResize();
                     },
-                    .metadata => self.owner_metadata.metadata.current.pending = false,
+                    .metadata => {
+                        if (!self.metadataPendingSummaryValid() or
+                            self.metadata_pending_summary.generation ==
+                                std.math.maxInt(u64))
+                            return self.quarantineProjection(
+                                cleanup_scratch,
+                                true,
+                            );
+                        self.owner_metadata.metadata.current.pending = false;
+                        self.metadata_pending_summary.pending = false;
+                        self.metadata_pending_summary.generation += 1;
+                        self.metadata_pending_summary.digest =
+                            metadataPendingSummaryDigest(
+                                self.metadata_pending_summary,
+                            );
+                    },
                 }
                 return .applied;
             },
@@ -2003,7 +2526,9 @@ pub const ExternalPumpStorage = struct {
         if (!screen.isCommitted(self) or
             screen.ledger_addr != @intFromPtr(ledger) or
             ordinal >= screen.tokens_len or screen.released.isSet(ordinal) or
-            screen.retained_count == 0)
+            screen.retained_count == 0 or
+            !self.screenPendingSummaryValid() or
+            self.screen_pending_summary.generation == std.math.maxInt(u64))
             return error.InvalidRetirement;
         const transfer = screen.primary.transfer;
         const phase: external_inbox_ledger.PayloadPhase =
@@ -2021,6 +2546,10 @@ pub const ExternalPumpStorage = struct {
         ledger.commitScreenRetirementUnchecked(&prepared);
         screen.released.set(ordinal);
         screen.retained_count -= 1;
+        self.screen_pending_summary.retained_count = screen.retained_count;
+        self.screen_pending_summary.generation += 1;
+        self.screen_pending_summary.digest =
+            screenPendingSummaryDigest(self.screen_pending_summary);
     }
 
     pub fn prepareAdoption(
@@ -2768,7 +3297,9 @@ pub const ExternalPumpStorage = struct {
             .metadata_take_addr = @intFromPtr(&plan.metadata_take),
             .scalar_take_addr = @intFromPtr(&plan.scalar_take),
             .committed_screen_addr = @intFromPtr(&self.committed_screen),
+            .screen_pending_summary_addr = @intFromPtr(&self.screen_pending_summary),
             .owner_metadata_addr = @intFromPtr(&self.owner_metadata),
+            .metadata_pending_summary_addr = @intFromPtr(&self.metadata_pending_summary),
             .owner_resize_addr = @intFromPtr(&self.owner_resize),
             .owner_authority_addr = @intFromPtr(&self.owner_authority),
             .owner_request_ids_addr = @intFromPtr(&self.owner_request_ids),
@@ -2791,7 +3322,9 @@ pub const ExternalPumpStorage = struct {
         }
         if (self.operation_generation == 0 or
             !self.committed_screen.isEmpty() or
+            !std.meta.eql(self.screen_pending_summary, ScreenPendingSummarySeal{}) or
             !self.owner_metadata.isEmpty() or
+            !std.meta.eql(self.metadata_pending_summary, MetadataPendingSummarySeal{}) or
             self.owner_resize != .none or
             self.owner_authority != .empty or
             !std.meta.eql(self.owner_authority_seal, OwnerAuthoritySeal{}) or
@@ -3039,6 +3572,7 @@ pub const ExternalPumpStorage = struct {
         bindOwnerIncarnation(self, evidence.attach_instance_id);
         self.commitOwnerScalarTakeUnchecked(&plan.scalar_take);
         bindOwnerAuthority(self);
+        self.bindPendingSummaries();
         self.owner_event_projection_generation = 0;
         recorder.record(.scalar_destination);
         client_mod.commitExternalAdoptionTakeUnchecked(
@@ -3247,6 +3781,7 @@ pub const ExternalPumpStorage = struct {
         if (!self.prepareAggregateOwnerRangeProof(cleanup_scratch))
             return self.quarantineOwnerTeardown(cleanup_scratch, true);
 
+        self.tombstonePendingSummaries();
         self.lifecycle = .tearing_down;
         const terminal_state: client_pump.ExternalPumpState = switch (self.semantic_state) {
             .terminal => self.semantic_state,
@@ -3357,7 +3892,9 @@ pub const ExternalPumpStorage = struct {
         self.inbox_ledger.restoreFinishedOwnerTeardownUnchecked(next_generation);
         self.prepared_adoption = .{ .lifecycle = .committed_tombstone };
         self.committed_screen = .{ .lifecycle = .cleaned_tombstone };
+        self.screen_pending_summary = .{ .lifecycle = .tombstone };
         self.owner_metadata = .{ .lifecycle = .cleaned_tombstone };
+        self.metadata_pending_summary = .{ .lifecycle = .tombstone };
         self.client_cleanup_take = .{ .lifecycle = .aborted };
         self.owner_resize = .none;
         self.owner_authority = .empty;
@@ -3427,6 +3964,7 @@ pub const ExternalPumpStorage = struct {
         cleanup_scratch: *ExternalPumpCleanupScratch,
         scratch_trusted: bool,
     ) TeardownResult {
+        self.tombstonePendingSummaries();
         self.lifecycle = .dead;
         self.semantic_state = .{ .terminal = .{
             .reason = .invariant_failure,
@@ -3717,7 +4255,9 @@ fn adoptionFinalSealDigest(
     writer.writeUsize(permit.metadata_take_addr);
     writer.writeUsize(permit.scalar_take_addr);
     writer.writeUsize(permit.committed_screen_addr);
+    writer.writeUsize(permit.screen_pending_summary_addr);
     writer.writeUsize(permit.owner_metadata_addr);
+    writer.writeUsize(permit.metadata_pending_summary_addr);
     writer.writeUsize(permit.owner_resize_addr);
     writer.writeUsize(permit.owner_authority_addr);
     writer.writeUsize(permit.owner_request_ids_addr);
@@ -3832,7 +4372,7 @@ fn commitHeaderRanges(
     storage: *const ExternalPumpStorage,
     client: *const client_mod.Client,
     evidence: *const PreparedAdoptionEvidence,
-) [15]CommitHeaderRange {
+) [17]CommitHeaderRange {
     const plan = &storage.prepared_adoption;
     return .{
         .{ .addr = @intFromPtr(&plan.backlog), .len = @sizeOf(client_external_adoption.PreparedScreenBacklog) },
@@ -3843,7 +4383,9 @@ fn commitHeaderRanges(
         .{ .addr = @intFromPtr(&plan.final_seal), .len = @sizeOf(PreparedAdoptionFinalSeal) },
         .{ .addr = @intFromPtr(&storage.client_cleanup_take), .len = @sizeOf(client_mod.ExternalAdoptionTake) },
         .{ .addr = @intFromPtr(&storage.committed_screen), .len = @sizeOf(client_external_adoption.CommittedScreenBacklog) },
+        .{ .addr = @intFromPtr(&storage.screen_pending_summary), .len = @sizeOf(ScreenPendingSummarySeal) },
         .{ .addr = @intFromPtr(&storage.owner_metadata), .len = @sizeOf(external_event_materialization.OwnerMetadataState) },
+        .{ .addr = @intFromPtr(&storage.metadata_pending_summary), .len = @sizeOf(MetadataPendingSummarySeal) },
         .{ .addr = @intFromPtr(&storage.owner_resize), .len = @sizeOf(OwnerResizeState) },
         .{ .addr = @intFromPtr(&storage.owner_authority), .len = @sizeOf(OwnerAuthorityState) },
         .{ .addr = @intFromPtr(&storage.owner_request_ids), .len = @sizeOf(?client_pump.RequestIdState) },
@@ -4061,6 +4603,19 @@ fn rangesOverlap(a_start: usize, a_len: usize, b_start: usize, b_len: usize) boo
     const a_end = std.math.add(usize, a_start, a_len) catch return true;
     const b_end = std.math.add(usize, b_start, b_len) catch return true;
     return a_start < b_end and b_start < a_end;
+}
+
+fn rangeContains(
+    outer_start: usize,
+    outer_len: usize,
+    inner_start: usize,
+    inner_len: usize,
+) bool {
+    if (outer_start == 0 or outer_len == 0 or inner_start == 0 or inner_len == 0)
+        return false;
+    const outer_end = std.math.add(usize, outer_start, outer_len) catch return false;
+    const inner_end = std.math.add(usize, inner_start, inner_len) catch return false;
+    return inner_start >= outer_start and inner_end <= outer_end;
 }
 
 const TestClient = struct {
@@ -5454,6 +6009,757 @@ test "c3c-3a screen consume retires ledger payload without callback until aggreg
     try std.testing.expectEqual(StorageLifecycle.dead, storage.lifecycle);
 }
 
+test "d2b1 whole-turn lease snapshots inherited blockers once at final addresses" {
+    var fixture = try TestClient.init();
+    defer fixture.deinitPeer();
+    const payload = try fixture.client.allocator.dupe(u8, "screen");
+    try fixture.client.pending_batches.append(fixture.client.allocator, .{
+        .is_snapshot = false,
+        .stream_id = valid_evidence.stream_id,
+        .bytes = payload,
+        .allocator = fixture.client.allocator,
+    });
+    fixture.client.pending_batch_bytes = payload.len;
+    var storage: ExternalPumpStorage = .{};
+    try std.testing.expect(
+        initTestStorage(&storage, &fixture.client, valid_evidence) ==
+            .initialized,
+    );
+    try std.testing.expect(prepareAdoptionForTest(&storage) == .prepared_adopted);
+    try std.testing.expect(storage.commitAdoption() == .adopted);
+    defer _ = teardownForTest(&storage);
+
+    var turn_scratch = struct {
+        snapshot: InheritedRxBlockerSnapshot = .{},
+        padding: [64]u8 = [_]u8{0} ** 64,
+    }{};
+    var lease: ExternalWholeTurnLease = .{};
+    try storage.acquireWholeTurnLease(
+        &lease,
+        @intFromPtr(&turn_scratch),
+        @sizeOf(@TypeOf(turn_scratch)),
+    );
+    try std.testing.expect(storage.validateWholeTurnLease(&lease));
+    const generation = storage.operation_generation;
+    try storage.snapshotInheritedRxBlockersUnderHeldLease(
+        &lease,
+        &turn_scratch.snapshot,
+    );
+    try std.testing.expect(turn_scratch.snapshot.committed_screen_pending);
+    try std.testing.expect(turn_scratch.snapshot.hasBlocker());
+    try std.testing.expect(
+        try storage.validateAndConsumeInheritedSnapshot(
+            &lease,
+            &turn_scratch.snapshot,
+        ),
+    );
+    try std.testing.expect(turn_scratch.snapshot.lifecycle == .consumed);
+    try std.testing.expectError(
+        error.InvalidSnapshot,
+        storage.validateAndConsumeInheritedSnapshot(
+            &lease,
+            &turn_scratch.snapshot,
+        ),
+    );
+    try std.testing.expectEqual(
+        WholeTurnReleaseResult.released,
+        storage.releaseWholeTurnLease(&lease),
+    );
+    try std.testing.expect(!storage.validateWholeTurnLease(&lease));
+    try std.testing.expectEqual(generation, storage.operation_generation);
+}
+
+test "d2b1 whole-turn lease rejects copy alias stale snapshot and nested operation" {
+    var fixture = try TestClient.init();
+    defer fixture.deinitPeer();
+    var storage: ExternalPumpStorage = .{};
+    try std.testing.expect(
+        initTestStorage(&storage, &fixture.client, valid_evidence) ==
+            .initialized,
+    );
+    try std.testing.expect(prepareAdoptionForTest(&storage) == .prepared_adopted);
+    try std.testing.expect(storage.commitAdoption() == .adopted);
+    defer _ = teardownForTest(&storage);
+
+    var turn_scratch = struct {
+        snapshot: InheritedRxBlockerSnapshot = .{},
+        padding: [64]u8 = [_]u8{0} ** 64,
+    }{};
+    var lease: ExternalWholeTurnLease = .{};
+    try storage.acquireWholeTurnLease(
+        &lease,
+        @intFromPtr(&turn_scratch),
+        @sizeOf(@TypeOf(turn_scratch)),
+    );
+    var copied_lease = lease;
+    try std.testing.expect(!storage.validateWholeTurnLease(&copied_lease));
+    try std.testing.expectEqual(
+        WholeTurnReleaseResult.ignored_untrusted,
+        storage.releaseWholeTurnLease(&copied_lease),
+    );
+    try std.testing.expect(storage.validateWholeTurnLease(&lease));
+    var nested: ExternalWholeTurnLease = .{};
+    try std.testing.expectError(
+        error.TransactionBusy,
+        storage.acquireWholeTurnLease(
+            &nested,
+            @intFromPtr(&turn_scratch),
+            @sizeOf(@TypeOf(turn_scratch)),
+        ),
+    );
+    try storage.snapshotInheritedRxBlockersUnderHeldLease(
+        &lease,
+        &turn_scratch.snapshot,
+    );
+    var copied_snapshot = turn_scratch.snapshot;
+    try std.testing.expectError(
+        error.InvalidSnapshot,
+        storage.validateAndConsumeInheritedSnapshot(
+            &lease,
+            &copied_snapshot,
+        ),
+    );
+    turn_scratch.snapshot.generation += 1;
+    try std.testing.expectError(
+        error.InvalidSnapshot,
+        storage.validateAndConsumeInheritedSnapshot(
+            &lease,
+            &turn_scratch.snapshot,
+        ),
+    );
+    try std.testing.expectEqual(
+        WholeTurnReleaseResult.released,
+        storage.releaseWholeTurnLease(&lease),
+    );
+
+    var aliased: ExternalWholeTurnLease = .{};
+    try std.testing.expectError(
+        error.InvalidDescriptor,
+        storage.acquireWholeTurnLease(
+            &aliased,
+            @intFromPtr(&aliased),
+            @sizeOf(ExternalWholeTurnLease),
+        ),
+    );
+}
+
+test "d2b1 canonical lease drift aborts terminal and releases the operation reservation" {
+    const Drift = enum {
+        digest,
+        lifecycle,
+        storage_addr,
+        generation,
+        saved_self_addr,
+    };
+    inline for (std.meta.tags(Drift)) |drift| {
+        var fixture = try TestClient.init();
+        defer fixture.deinitPeer();
+        var storage: ExternalPumpStorage = .{};
+        try std.testing.expect(
+            initTestStorage(&storage, &fixture.client, valid_evidence) ==
+                .initialized,
+        );
+        try std.testing.expect(prepareAdoptionForTest(&storage) == .prepared_adopted);
+        try std.testing.expect(storage.commitAdoption() == .adopted);
+        var turn_scratch = struct {
+            snapshot: InheritedRxBlockerSnapshot = .{},
+            padding: [64]u8 = [_]u8{0} ** 64,
+        }{};
+        var lease: ExternalWholeTurnLease = .{};
+        try storage.acquireWholeTurnLease(
+            &lease,
+            @intFromPtr(&turn_scratch),
+            @sizeOf(@TypeOf(turn_scratch)),
+        );
+        switch (drift) {
+            .digest => lease.digest[0] ^= 1,
+            .lifecycle => lease.lifecycle = .aborted,
+            .storage_addr => lease.storage_addr +%= 1,
+            .generation => lease.operation_generation +%= 1,
+            .saved_self_addr => lease.saved_self_addr +%= 1,
+        }
+        try std.testing.expectEqual(
+            WholeTurnReleaseResult.aborted_terminal,
+            storage.releaseWholeTurnLease(&lease),
+        );
+        try std.testing.expect(storage.semantic_state == .terminal);
+        var replacement: ExternalWholeTurnLease = .{};
+        try std.testing.expectError(
+            error.Terminal,
+            storage.acquireWholeTurnLease(
+                &replacement,
+                @intFromPtr(&turn_scratch),
+                @sizeOf(@TypeOf(turn_scratch)),
+            ),
+        );
+        try std.testing.expectEqual(
+            TeardownResult.cleaned,
+            teardownForTest(&storage),
+        );
+    }
+}
+
+test "d2b1 intact lease release preserves a terminal latched during the turn" {
+    inline for (.{
+        client_pump.TerminalReason.revoked,
+        client_pump.TerminalReason.protocol_error,
+        client_pump.TerminalReason.deadline_exceeded,
+    }) |reason| {
+        var fixture = try TestClient.init();
+        defer fixture.deinitPeer();
+        var storage: ExternalPumpStorage = .{};
+        try std.testing.expect(
+            initTestStorage(&storage, &fixture.client, valid_evidence) ==
+                .initialized,
+        );
+        try std.testing.expect(prepareAdoptionForTest(&storage) == .prepared_adopted);
+        try std.testing.expect(storage.commitAdoption() == .adopted);
+        var turn_scratch = struct {
+            snapshot: InheritedRxBlockerSnapshot = .{},
+        }{};
+        var lease: ExternalWholeTurnLease = .{};
+        try storage.acquireWholeTurnLease(
+            &lease,
+            @intFromPtr(&turn_scratch),
+            @sizeOf(@TypeOf(turn_scratch)),
+        );
+        storage.semantic_state = .{ .terminal = .{
+            .reason = reason,
+            .fd_disposition = .owner_cleanup,
+        } };
+        try std.testing.expectEqual(
+            WholeTurnReleaseResult.released,
+            storage.releaseWholeTurnLease(&lease),
+        );
+        try std.testing.expect(lease.lifecycle == .released);
+        try std.testing.expectEqual(
+            reason,
+            storage.semantic_state.terminal.reason,
+        );
+        try std.testing.expectEqual(
+            TeardownResult.cleaned,
+            teardownForTest(&storage),
+        );
+    }
+}
+
+test "d2b1 storage lifecycle drift cannot forge dead and bypass cleanup" {
+    inline for (.{
+        StorageLifecycle.empty,
+        StorageLifecycle.tearing_down,
+        StorageLifecycle.dead,
+    }) |forged_lifecycle| {
+        var fixture = try TestClient.init();
+        defer fixture.deinitPeer();
+        var storage: ExternalPumpStorage = .{};
+        try std.testing.expect(
+            initTestStorage(&storage, &fixture.client, valid_evidence) ==
+                .initialized,
+        );
+        try std.testing.expect(prepareAdoptionForTest(&storage) == .prepared_adopted);
+        try std.testing.expect(storage.commitAdoption() == .adopted);
+        var turn_scratch = struct {
+            snapshot: InheritedRxBlockerSnapshot = .{},
+        }{};
+        var lease: ExternalWholeTurnLease = .{};
+        try storage.acquireWholeTurnLease(
+            &lease,
+            @intFromPtr(&turn_scratch),
+            @sizeOf(@TypeOf(turn_scratch)),
+        );
+        storage.lifecycle = forged_lifecycle;
+        try std.testing.expectEqual(
+            WholeTurnReleaseResult.aborted_terminal,
+            storage.releaseWholeTurnLease(&lease),
+        );
+        try std.testing.expect(lease.lifecycle == .aborted);
+        try std.testing.expectEqual(StorageLifecycle.live, storage.lifecycle);
+        try std.testing.expectEqual(
+            client_pump.TerminalReason.invariant_failure,
+            storage.semantic_state.terminal.reason,
+        );
+        try std.testing.expectEqual(
+            TeardownResult.cleaned,
+            teardownForTest(&storage),
+        );
+    }
+}
+
+test "d2b1 canonical storage address drift is restored for terminal cleanup" {
+    var fixture = try TestClient.init();
+    defer fixture.deinitPeer();
+    var storage: ExternalPumpStorage = .{};
+    try std.testing.expect(
+        initTestStorage(&storage, &fixture.client, valid_evidence) ==
+            .initialized,
+    );
+    try std.testing.expect(prepareAdoptionForTest(&storage) == .prepared_adopted);
+    try std.testing.expect(storage.commitAdoption() == .adopted);
+    var turn_scratch = struct {
+        snapshot: InheritedRxBlockerSnapshot = .{},
+    }{};
+    var lease: ExternalWholeTurnLease = .{};
+    try storage.acquireWholeTurnLease(
+        &lease,
+        @intFromPtr(&turn_scratch),
+        @sizeOf(@TypeOf(turn_scratch)),
+    );
+    storage.saved_self_addr +%= 1;
+    try std.testing.expectEqual(
+        WholeTurnReleaseResult.aborted_terminal,
+        storage.releaseWholeTurnLease(&lease),
+    );
+    try std.testing.expectEqual(@intFromPtr(&storage), storage.saved_self_addr);
+    try std.testing.expectEqual(StorageLifecycle.live, storage.lifecycle);
+    try std.testing.expectEqual(
+        client_pump.TerminalReason.invariant_failure,
+        storage.semantic_state.terminal.reason,
+    );
+    try std.testing.expectEqual(
+        TeardownResult.cleaned,
+        teardownForTest(&storage),
+    );
+}
+
+test "d2b1 semantic lifecycle drift aborts without losing cleanup authority" {
+    inline for (.{
+        client_pump.ExternalPumpState.constructing,
+        client_pump.ExternalPumpState.adopting,
+    }) |forged_semantic| {
+        var fixture = try TestClient.init();
+        defer fixture.deinitPeer();
+        var storage: ExternalPumpStorage = .{};
+        try std.testing.expect(
+            initTestStorage(&storage, &fixture.client, valid_evidence) ==
+                .initialized,
+        );
+        try std.testing.expect(prepareAdoptionForTest(&storage) == .prepared_adopted);
+        try std.testing.expect(storage.commitAdoption() == .adopted);
+        var turn_scratch = struct {
+            snapshot: InheritedRxBlockerSnapshot = .{},
+        }{};
+        var lease: ExternalWholeTurnLease = .{};
+        try storage.acquireWholeTurnLease(
+            &lease,
+            @intFromPtr(&turn_scratch),
+            @sizeOf(@TypeOf(turn_scratch)),
+        );
+        storage.semantic_state = forged_semantic;
+        try std.testing.expectEqual(
+            WholeTurnReleaseResult.aborted_terminal,
+            storage.releaseWholeTurnLease(&lease),
+        );
+        try std.testing.expect(lease.lifecycle == .aborted);
+        try std.testing.expectEqual(StorageLifecycle.live, storage.lifecycle);
+        try std.testing.expectEqual(
+            client_pump.TerminalReason.invariant_failure,
+            storage.semantic_state.terminal.reason,
+        );
+        try std.testing.expectEqual(
+            TeardownResult.cleaned,
+            teardownForTest(&storage),
+        );
+    }
+}
+
+test "d2b1 whole-turn snapshot must live inside sealed scratch" {
+    var fixture = try TestClient.init();
+    defer fixture.deinitPeer();
+    var storage: ExternalPumpStorage = .{};
+    try std.testing.expect(
+        initTestStorage(&storage, &fixture.client, valid_evidence) ==
+            .initialized,
+    );
+    try std.testing.expect(prepareAdoptionForTest(&storage) == .prepared_adopted);
+    try std.testing.expect(storage.commitAdoption() == .adopted);
+    defer _ = teardownForTest(&storage);
+    var turn_scratch = struct {
+        snapshot: InheritedRxBlockerSnapshot = .{},
+    }{};
+    var outside: InheritedRxBlockerSnapshot = .{};
+    var lease: ExternalWholeTurnLease = .{};
+    try storage.acquireWholeTurnLease(
+        &lease,
+        @intFromPtr(&turn_scratch),
+        @sizeOf(@TypeOf(turn_scratch)),
+    );
+    try std.testing.expectError(
+        error.InvalidDescriptor,
+        storage.snapshotInheritedRxBlockersUnderHeldLease(
+            &lease,
+            &outside,
+        ),
+    );
+    try std.testing.expectEqual(
+        WholeTurnReleaseResult.released,
+        storage.releaseWholeTurnLease(&lease),
+    );
+}
+
+test "d2b1 moved storage cannot mint an inherited snapshot" {
+    var fixture = try TestClient.init();
+    defer fixture.deinitPeer();
+    var storage: ExternalPumpStorage = .{};
+    try std.testing.expect(
+        initTestStorage(&storage, &fixture.client, valid_evidence) ==
+            .initialized,
+    );
+    try std.testing.expect(prepareAdoptionForTest(&storage) == .prepared_adopted);
+    try std.testing.expect(storage.commitAdoption() == .adopted);
+    defer _ = teardownForTest(&storage);
+    var turn_scratch = struct {
+        snapshot: InheritedRxBlockerSnapshot = .{},
+    }{};
+    var lease: ExternalWholeTurnLease = .{};
+    try storage.acquireWholeTurnLease(
+        &lease,
+        @intFromPtr(&turn_scratch),
+        @sizeOf(@TypeOf(turn_scratch)),
+    );
+    const saved_addr = storage.saved_self_addr;
+    storage.saved_self_addr +%= 1;
+    try std.testing.expectError(
+        error.TransactionBusy,
+        storage.snapshotInheritedRxBlockersUnderHeldLease(
+            &lease,
+            &turn_scratch.snapshot,
+        ),
+    );
+    storage.saved_self_addr = saved_addr;
+    try std.testing.expectEqual(
+        WholeTurnReleaseResult.released,
+        storage.releaseWholeTurnLease(&lease),
+    );
+}
+
+test "d2b1 prior-turn snapshot cannot replay under a fresh lease" {
+    var fixture = try TestClient.init();
+    defer fixture.deinitPeer();
+    var storage: ExternalPumpStorage = .{};
+    try std.testing.expect(
+        initTestStorage(&storage, &fixture.client, valid_evidence) ==
+            .initialized,
+    );
+    try std.testing.expect(prepareAdoptionForTest(&storage) == .prepared_adopted);
+    try std.testing.expect(storage.commitAdoption() == .adopted);
+    defer _ = teardownForTest(&storage);
+    var first_scratch = struct {
+        snapshot: InheritedRxBlockerSnapshot = .{},
+    }{};
+    var first_lease: ExternalWholeTurnLease = .{};
+    try storage.acquireWholeTurnLease(
+        &first_lease,
+        @intFromPtr(&first_scratch),
+        @sizeOf(@TypeOf(first_scratch)),
+    );
+    try storage.snapshotInheritedRxBlockersUnderHeldLease(
+        &first_lease,
+        &first_scratch.snapshot,
+    );
+    var stale_snapshot = first_scratch.snapshot;
+    try std.testing.expectEqual(
+        WholeTurnReleaseResult.released,
+        storage.releaseWholeTurnLease(&first_lease),
+    );
+
+    var second_scratch = struct {
+        snapshot: InheritedRxBlockerSnapshot = .{},
+    }{};
+    var second_lease: ExternalWholeTurnLease = .{};
+    try storage.acquireWholeTurnLease(
+        &second_lease,
+        @intFromPtr(&second_scratch),
+        @sizeOf(@TypeOf(second_scratch)),
+    );
+    try std.testing.expectError(
+        error.InvalidSnapshot,
+        storage.validateAndConsumeInheritedSnapshot(
+            &second_lease,
+            &stale_snapshot,
+        ),
+    );
+    try std.testing.expectEqual(
+        WholeTurnReleaseResult.released,
+        storage.releaseWholeTurnLease(&second_lease),
+    );
+}
+
+test "d2b1 snapshot cannot cross storage authority" {
+    var first_fixture = try TestClient.init();
+    defer first_fixture.deinitPeer();
+    var second_fixture = try TestClient.init();
+    defer second_fixture.deinitPeer();
+    var first: ExternalPumpStorage = .{};
+    var second: ExternalPumpStorage = .{};
+    try std.testing.expect(
+        initTestStorage(&first, &first_fixture.client, valid_evidence) ==
+            .initialized,
+    );
+    try std.testing.expect(
+        initTestStorage(&second, &second_fixture.client, valid_evidence) ==
+            .initialized,
+    );
+    try std.testing.expect(prepareAdoptionForTest(&first) == .prepared_adopted);
+    try std.testing.expect(first.commitAdoption() == .adopted);
+    try std.testing.expect(prepareAdoptionForTest(&second) == .prepared_adopted);
+    try std.testing.expect(second.commitAdoption() == .adopted);
+    defer _ = teardownForTest(&first);
+    defer _ = teardownForTest(&second);
+
+    var first_scratch = struct {
+        snapshot: InheritedRxBlockerSnapshot = .{},
+    }{};
+    var first_lease: ExternalWholeTurnLease = .{};
+    try first.acquireWholeTurnLease(
+        &first_lease,
+        @intFromPtr(&first_scratch),
+        @sizeOf(@TypeOf(first_scratch)),
+    );
+    try first.snapshotInheritedRxBlockersUnderHeldLease(
+        &first_lease,
+        &first_scratch.snapshot,
+    );
+    var foreign_snapshot = first_scratch.snapshot;
+    try std.testing.expectEqual(
+        WholeTurnReleaseResult.released,
+        first.releaseWholeTurnLease(&first_lease),
+    );
+
+    var second_scratch = struct {
+        snapshot: InheritedRxBlockerSnapshot = .{},
+    }{};
+    var second_lease: ExternalWholeTurnLease = .{};
+    try second.acquireWholeTurnLease(
+        &second_lease,
+        @intFromPtr(&second_scratch),
+        @sizeOf(@TypeOf(second_scratch)),
+    );
+    try std.testing.expectError(
+        error.InvalidSnapshot,
+        second.validateAndConsumeInheritedSnapshot(
+            &second_lease,
+            &foreign_snapshot,
+        ),
+    );
+    try std.testing.expectEqual(
+        WholeTurnReleaseResult.released,
+        second.releaseWholeTurnLease(&second_lease),
+    );
+}
+
+test "d2b1 metadata owner drift invalidates O1 inherited summary" {
+    var fixture = try TestClient.init();
+    defer fixture.deinitPeer();
+    fixture.client.metadata_support = .supported;
+    try appendTestEvent(&fixture.client,
+        \\{"event":"runtime.metadata","metadata_revision":2,"metadata":{"cwd":"/repo","window_title":"work","ssh_remote_dest":null,"semantic_state":0,"alt_active":false,"app_cursor_keys":false,"alternate_scroll":true,"observer_generation":1,"title_generation":1,"cols":80,"rows":24,"foreground_available":false,"foreground_pgid":null,"processes":[]}}
+    );
+    var storage: ExternalPumpStorage = .{};
+    try std.testing.expect(
+        initTestStorage(&storage, &fixture.client, valid_evidence) ==
+            .initialized,
+    );
+    try std.testing.expect(prepareAdoptionForTest(&storage) == .prepared_adopted);
+    try std.testing.expect(storage.commitAdoption() == .adopted);
+    defer _ = teardownForTest(&storage);
+    var turn_scratch = struct {
+        snapshot: InheritedRxBlockerSnapshot = .{},
+    }{};
+    var lease: ExternalWholeTurnLease = .{};
+    try storage.acquireWholeTurnLease(
+        &lease,
+        @intFromPtr(&turn_scratch),
+        @sizeOf(@TypeOf(turn_scratch)),
+    );
+    const saved_owner_addr = storage.owner_metadata.saved_self_addr;
+    storage.owner_metadata.saved_self_addr +%= 1;
+    try std.testing.expectError(
+        error.InvalidSnapshot,
+        storage.snapshotInheritedRxBlockersUnderHeldLease(
+            &lease,
+            &turn_scratch.snapshot,
+        ),
+    );
+    storage.owner_metadata.saved_self_addr = saved_owner_addr;
+    try std.testing.expectEqual(
+        WholeTurnReleaseResult.released,
+        storage.releaseWholeTurnLease(&lease),
+    );
+}
+
+test "d2b1 summary scalar and digest drift reject snapshot without consuming it" {
+    const Drift = enum {
+        screen_count,
+        screen_digest,
+        metadata_digest,
+    };
+    inline for (std.meta.tags(Drift)) |drift| {
+        var fixture = try TestClient.init();
+        defer fixture.deinitPeer();
+        var storage: ExternalPumpStorage = .{};
+        try std.testing.expect(
+            initTestStorage(&storage, &fixture.client, valid_evidence) ==
+                .initialized,
+        );
+        try std.testing.expect(prepareAdoptionForTest(&storage) == .prepared_adopted);
+        try std.testing.expect(storage.commitAdoption() == .adopted);
+        defer _ = teardownForTest(&storage);
+        var turn_scratch = struct {
+            snapshot: InheritedRxBlockerSnapshot = .{},
+        }{};
+        var lease: ExternalWholeTurnLease = .{};
+        try storage.acquireWholeTurnLease(
+            &lease,
+            @intFromPtr(&turn_scratch),
+            @sizeOf(@TypeOf(turn_scratch)),
+        );
+        const screen_summary = storage.screen_pending_summary;
+        const metadata_summary = storage.metadata_pending_summary;
+        switch (drift) {
+            .screen_count => storage.screen_pending_summary.retained_count +%= 1,
+            .screen_digest => storage.screen_pending_summary.digest[0] ^= 1,
+            .metadata_digest => storage.metadata_pending_summary.digest[0] ^= 1,
+        }
+        try std.testing.expectError(
+            error.InvalidSnapshot,
+            storage.snapshotInheritedRxBlockersUnderHeldLease(
+                &lease,
+                &turn_scratch.snapshot,
+            ),
+        );
+        storage.screen_pending_summary = screen_summary;
+        storage.metadata_pending_summary = metadata_summary;
+        try std.testing.expectEqual(
+            WholeTurnReleaseResult.released,
+            storage.releaseWholeTurnLease(&lease),
+        );
+    }
+}
+
+test "d2b1 generation exhaustion rejects whole-turn acquire before mutation" {
+    var fixture = try TestClient.init();
+    defer fixture.deinitPeer();
+    var storage: ExternalPumpStorage = .{};
+    try std.testing.expect(
+        initTestStorage(&storage, &fixture.client, valid_evidence) ==
+            .initialized,
+    );
+    try std.testing.expect(prepareAdoptionForTest(&storage) == .prepared_adopted);
+    try std.testing.expect(storage.commitAdoption() == .adopted);
+    defer _ = teardownForTest(&storage);
+    storage.operation_generation = std.math.maxInt(u64);
+    var turn_scratch = struct {
+        snapshot: InheritedRxBlockerSnapshot = .{},
+    }{};
+    var lease: ExternalWholeTurnLease = .{};
+    try std.testing.expectError(
+        error.GenerationExhausted,
+        storage.acquireWholeTurnLease(
+            &lease,
+            @intFromPtr(&turn_scratch),
+            @sizeOf(@TypeOf(turn_scratch)),
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 0), active_external_operation_addr);
+    try std.testing.expectEqual(@as(usize, 0), active_external_lease_addr);
+    try std.testing.expect(std.meta.eql(lease, ExternalWholeTurnLease{}));
+    storage.operation_generation -= 1;
+}
+
+test "d2b1 pending summary reseals after exact screen retirement" {
+    var fixture = try TestClient.init();
+    defer fixture.deinitPeer();
+    const payload = try fixture.client.allocator.dupe(u8, "screen");
+    try fixture.client.pending_batches.append(fixture.client.allocator, .{
+        .is_snapshot = false,
+        .stream_id = valid_evidence.stream_id,
+        .bytes = payload,
+        .allocator = fixture.client.allocator,
+    });
+    fixture.client.pending_batch_bytes = payload.len;
+    var storage: ExternalPumpStorage = .{};
+    try std.testing.expect(
+        initTestStorage(&storage, &fixture.client, valid_evidence) ==
+            .initialized,
+    );
+    try std.testing.expect(prepareAdoptionForTest(&storage) == .prepared_adopted);
+    try std.testing.expect(storage.commitAdoption() == .adopted);
+    defer _ = teardownForTest(&storage);
+    const generation = storage.screen_pending_summary.generation;
+    try storage.consumeScreenRetained(0);
+    try std.testing.expect(storage.screenPendingSummaryValid());
+    try std.testing.expectEqual(
+        generation + 1,
+        storage.screen_pending_summary.generation,
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        storage.screen_pending_summary.retained_count,
+    );
+    try std.testing.expectEqual(
+        TeardownResult.cleaned,
+        teardownForTest(&storage),
+    );
+    try std.testing.expect(storage.screen_pending_summary.lifecycle == .tombstone);
+    try std.testing.expect(storage.metadata_pending_summary.lifecycle == .tombstone);
+}
+
+test "d2b1 whole-turn lease rejects committed owner backing as scratch" {
+    var fixture = try TestClient.init();
+    defer fixture.deinitPeer();
+    const payload = try fixture.client.allocator.dupe(u8, "screen");
+    try fixture.client.pending_batches.append(fixture.client.allocator, .{
+        .is_snapshot = false,
+        .stream_id = valid_evidence.stream_id,
+        .bytes = payload,
+        .allocator = fixture.client.allocator,
+    });
+    fixture.client.pending_batch_bytes = payload.len;
+    var storage: ExternalPumpStorage = .{};
+    try std.testing.expect(
+        initTestStorage(&storage, &fixture.client, valid_evidence) ==
+            .initialized,
+    );
+    try std.testing.expect(prepareAdoptionForTest(&storage) == .prepared_adopted);
+    try std.testing.expect(storage.commitAdoption() == .adopted);
+    defer _ = teardownForTest(&storage);
+    const tokens = storage.committed_screen.primary.transfer.tokens;
+    var lease: ExternalWholeTurnLease = .{};
+    try std.testing.expectError(
+        error.InvalidDescriptor,
+        storage.acquireWholeTurnLease(
+            &lease,
+            @intFromPtr(tokens.ptr),
+            tokens.len * @sizeOf(external_inbox_ledger.Token),
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 0), active_external_operation_addr);
+}
+
+test "d2b1 quarantine tombstones pending summaries before abandoning cleanup" {
+    resetCrossOwnerQuarantineForTest();
+    defer resetCrossOwnerQuarantineForTest();
+    var storage: ExternalPumpStorage = .{};
+    storage.saved_self_addr = @intFromPtr(&storage);
+    storage.lifecycle = .live;
+    storage.semantic_state = .{ .active = .valid };
+    storage.screen_pending_summary.lifecycle = .bound;
+    storage.metadata_pending_summary.lifecycle = .bound;
+    var cleanup_scratch: ExternalPumpCleanupScratch = .{};
+    try std.testing.expect(ExternalPumpCleanupScratch.initInPlace(
+        &cleanup_scratch,
+    ));
+    active_external_operation_addr = @intFromPtr(&storage);
+    try std.testing.expectEqual(
+        TeardownResult.quarantined,
+        storage.quarantineOwnerTeardown(&cleanup_scratch, true),
+    );
+    active_external_operation_addr = 0;
+    try std.testing.expect(storage.screen_pending_summary.lifecycle == .tombstone);
+    try std.testing.expect(storage.metadata_pending_summary.lifecycle == .tombstone);
+    try std.testing.expectEqual(StorageLifecycle.dead, storage.lifecycle);
+}
+
 test "c3c-3a screen bitmap and ledger retirement drift fail closed in both directions" {
     const Drift = enum { bitmap_only, ledger_only };
     inline for (std.meta.tags(Drift)) |drift| {
@@ -5593,7 +6899,9 @@ test "c3c-2b2 final permit rejects bound address and leaf drift before ledger mu
         metadata_take_addr,
         scalar_take_addr,
         committed_screen_addr,
+        screen_pending_summary_addr,
         owner_metadata_addr,
+        metadata_pending_summary_addr,
         owner_resize_addr,
         owner_authority_addr,
         owner_request_ids_addr,
@@ -5630,7 +6938,11 @@ test "c3c-2b2 final permit rejects bound address and leaf drift before ledger mu
             .scalar_take_addr => storage.prepared_adoption.final_seal.scalar_take_addr +%= 1,
             .committed_screen_addr => storage.prepared_adoption.final_seal
                 .committed_screen_addr +%= 1,
+            .screen_pending_summary_addr => storage.prepared_adoption.final_seal
+                .screen_pending_summary_addr +%= 1,
             .owner_metadata_addr => storage.prepared_adoption.final_seal.owner_metadata_addr +%= 1,
+            .metadata_pending_summary_addr => storage.prepared_adoption.final_seal
+                .metadata_pending_summary_addr +%= 1,
             .owner_resize_addr => storage.prepared_adoption.final_seal.owner_resize_addr +%= 1,
             .owner_authority_addr => storage.prepared_adoption.final_seal
                 .owner_authority_addr +%= 1,

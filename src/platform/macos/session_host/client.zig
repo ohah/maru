@@ -1014,6 +1014,52 @@ pub const ExternalAdoptionTake = struct {
         return writer.finish();
     }
 
+    /// Validate the committed cleanup graph and report whether an arbitrary caller range aliases
+    /// any header, container, inventory, or payload allocation that this take may later free.
+    pub fn overlapsCommittedOwnedRange(
+        self: *const ExternalAdoptionTake,
+        address: usize,
+        len: usize,
+    ) ?bool {
+        const target = checkedExternalRange(address, len) catch return null;
+        const present_target = target orelse return null;
+        if (self.projectionAuthorityDigest() == null) return null;
+        const batches = canonicalExternalList(
+            StreamBatch,
+            self.pending_batches,
+            self.cleanup_pending_batches,
+            self.pending_batches_seal,
+        ) orelse return null;
+        const stream = canonicalExternalList(
+            framing.Frame,
+            self.pending_stream,
+            self.cleanup_pending_stream,
+            self.pending_stream_seal,
+        ) orelse return null;
+        const events = canonicalExternalList(
+            BufferedEvent,
+            self.pending_events,
+            self.cleanup_pending_events,
+            self.pending_events_seal,
+        ) orelse return null;
+        const primary = canonicalExternalInventory(
+            self.plan_inventory orelse return null,
+        ) orelse return null;
+        const mirror = canonicalExternalInventory(
+            self.cleanup_plan_inventory orelse return null,
+        ) orelse return null;
+        return externalTakeTargetAliases(
+            present_target,
+            self,
+            batches,
+            stream,
+            events,
+            &primary,
+            &primary,
+            &mirror,
+        );
+    }
+
     pub fn prepareFrozenCleanup(
         self: *const ExternalAdoptionTake,
         cleanup_scratch: *ExternalAdoptionCleanupScratch,
@@ -3149,6 +3195,28 @@ fn externalCleanupScratchAliases(
     mirror_inventory: ?*const ExternalAdoptionInventory,
 ) bool {
     const target = externalRangeOfValue(scratch);
+    return externalTakeTargetAliases(
+        target,
+        take,
+        batches,
+        stream,
+        events,
+        payload_inventory,
+        primary_inventory,
+        mirror_inventory,
+    );
+}
+
+fn externalTakeTargetAliases(
+    target: ExternalRange,
+    take: *const ExternalAdoptionTake,
+    batches: std.ArrayListUnmanaged(StreamBatch),
+    stream: std.ArrayListUnmanaged(framing.Frame),
+    events: std.ArrayListUnmanaged(BufferedEvent),
+    payload_inventory: *const ExternalAdoptionInventory,
+    primary_inventory: ?*const ExternalAdoptionInventory,
+    mirror_inventory: ?*const ExternalAdoptionInventory,
+) bool {
     inline for (.{
         checkedExternalRange(
             take.saved_self_address,

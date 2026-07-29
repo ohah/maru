@@ -448,6 +448,26 @@ pub const CommittedScreenBacklog = struct {
         );
     }
 
+    /// O(1) descriptor-only pending authority for the pump scheduler. This validates fixed owner
+    /// headers and slice descriptors but never reads token/copy/wrapper elements or payload bytes.
+    pub fn pendingCountSummary(
+        self: *const CommittedScreenBacklog,
+        stable_parent: *const anyopaque,
+    ) ?usize {
+        if (!self.isCommitted(stable_parent)) return null;
+        return self.retained_count;
+    }
+
+    /// Reject caller scratch that aliases any container allocation owned by this committed graph.
+    pub fn overlapsOwnedBacking(
+        self: *const CommittedScreenBacklog,
+        address: usize,
+        len: usize,
+    ) bool {
+        return rangeOverlapsScreenBacking(address, len, &self.primary) or
+            rangeOverlapsScreenBacking(address, len, &self.cleanup);
+    }
+
     /// Deep, process-local snapshot of every backing descriptor element that typed teardown may
     /// consume. Payload bytes remain ledger-owned and are deliberately represented by address and
     /// length only; projection must detect authority drift without reading terminal output again.

@@ -46,6 +46,7 @@ pub const TurnResult = struct {
     immediate_rx: bool = false,
     authority_clear: bool = false,
     control_ready: bool = false,
+    inherited_work_ready: bool = false,
     terminal: ?ExternalPumpTerminal = null,
     next_deadline_ns: ?i128 = null,
 };
@@ -128,6 +129,7 @@ pub const PolicyInput = struct {
     rx_budget_exhausted: bool = false,
     tx_pending: bool = false,
     control_ready: bool = false,
+    inherited_blocker: bool = false,
     terminal: ?ExternalPumpTerminal = null,
     deadlines: [5]?i128 = .{null} ** 5,
 };
@@ -156,6 +158,13 @@ pub fn decide(input: PolicyInput) TurnResult {
             result.control_ready = false;
             return result;
         }
+    }
+
+    if (input.inherited_blocker) {
+        result.read_interest = false;
+        result.control_ready = false;
+        result.inherited_work_ready = true;
+        return result;
     }
 
     result.immediate_rx = input.rx_budget_exhausted or input.parser == .complete_or_error;
@@ -264,6 +273,54 @@ test "client pump deadline is checked before readable or writable readiness" {
     try std.testing.expectEqual(TerminalReason.deadline_exceeded, after.terminal.?.reason);
     try std.testing.expect(!after.read_interest);
     try std.testing.expect(!after.write_interest);
+}
+
+test "client pump terminal and deadline dominate inherited blockers" {
+    const terminal = decide(.{
+        .turn = .{ .readable = true, .writable = true, .now_ns = 40 },
+        .parser = .complete_or_error,
+        .socket_rx_drained = false,
+        .inherited_blocker = true,
+        .terminal = .{
+            .reason = .revoked,
+            .fd_disposition = .owner_cleanup,
+        },
+    });
+    try std.testing.expectEqual(TerminalReason.revoked, terminal.terminal.?.reason);
+    try std.testing.expect(!terminal.inherited_work_ready);
+
+    const deadline = decide(.{
+        .turn = .{ .readable = true, .writable = true, .now_ns = 40 },
+        .parser = .complete_or_error,
+        .socket_rx_drained = false,
+        .inherited_blocker = true,
+        .deadlines = .{ 40, null, null, null, null },
+    });
+    try std.testing.expectEqual(
+        TerminalReason.deadline_exceeded,
+        deadline.terminal.?.reason,
+    );
+    try std.testing.expect(!deadline.inherited_work_ready);
+}
+
+test "client pump inherited blocker suppresses parser socket and lower authority" {
+    const result = decide(.{
+        .turn = .{ .readable = true, .writable = true, .now_ns = 39 },
+        .parser = .complete_or_error,
+        .socket_rx_drained = true,
+        .rx_budget_exhausted = true,
+        .tx_pending = true,
+        .control_ready = true,
+        .inherited_blocker = true,
+        .deadlines = .{ 40, null, null, null, null },
+    });
+    try std.testing.expect(result.terminal == null);
+    try std.testing.expect(result.inherited_work_ready);
+    try std.testing.expect(!result.immediate_rx);
+    try std.testing.expect(!result.read_interest);
+    try std.testing.expect(!result.write_interest);
+    try std.testing.expect(!result.control_ready);
+    try std.testing.expect(!result.authority_clear);
 }
 
 test "client pump only clears authority after would-block and an empty parser" {

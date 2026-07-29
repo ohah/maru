@@ -609,6 +609,51 @@ pub fn isFresh(
     return if (range.start_absolute >= barrier.absolute) .fresh else .stale;
 }
 
+pub const RxParserReadiness = enum {
+    empty,
+    incomplete,
+    complete_or_error,
+};
+
+/// Classify whether the sealed parser can make progress without consuming bytes or allocating.
+///
+/// Protocol-invalid complete headers are ready because the next parser outcome can terminate the
+/// connection immediately; invariant drift remains a typed error instead of scheduler readiness.
+pub fn parserReadiness(
+    state: *const State,
+    parser: *const framing.FrameParser,
+) RxParseError!RxParserReadiness {
+    if (state.rx_operation_busy) return error.InvalidState;
+    if (!parserSealValid(state, parser)) return error.InvalidSeal;
+    const provenance = state.rx_provenance;
+    const buffered = std.math.sub(
+        usize,
+        parser.buf.items.len,
+        parser.head,
+    ) catch return error.InvalidDescriptor;
+    const absolute_buffered = std.math.sub(
+        u64,
+        provenance.rx_absolute_next,
+        provenance.buffer_start_absolute,
+    ) catch return error.ArithmeticOverflow;
+    if (absolute_buffered != buffered) return error.InvalidDescriptor;
+    if (buffered == 0) return .empty;
+    if (buffered < protocol.header_size) return .incomplete;
+    const pending = parser.buf.items[parser.head..];
+    const header_bytes: *const [protocol.header_size]u8 = @ptrCast(pending.ptr);
+    const header = protocol.Header.decode(header_bytes) catch
+        return .complete_or_error;
+    if (header.major != parser.expected_major or
+        header.payload_len > protocol.maxPayloadForKind(header.kind))
+        return .complete_or_error;
+    const total = std.math.add(
+        usize,
+        protocol.header_size,
+        @as(usize, header.payload_len),
+    ) catch return .complete_or_error;
+    return if (pending.len < total) .incomplete else .complete_or_error;
+}
+
 fn consumeValidated(
     state: *State,
     parser: *framing.FrameParser,
@@ -1850,4 +1895,118 @@ test "range-aware RX parser preflights generation exhaustion before consume" {
     );
     try std.testing.expectEqual(before_head, parser.head);
     try std.testing.expectEqual(before_start, state.rx_provenance.buffer_start_absolute);
+}
+
+test "RX parser readiness is mutation free at empty partial complete and protocol error boundaries" {
+    const allocator = std.testing.allocator;
+    const wire = try framing.encodeFrame(
+        allocator,
+        .{ .kind = .response, .request_id = 7 },
+        "payload",
+    );
+    defer allocator.free(wire);
+    var state = State{ .saved_flags = 7 };
+    defer state.deinit(allocator);
+    var parser = framing.FrameParser.init(allocator);
+    defer parser.deinit();
+    var destination_slot: usize = 0;
+    try bindParserForTest(&state, &parser, 44, &destination_slot);
+
+    try std.testing.expectEqual(
+        RxParserReadiness.empty,
+        try parserReadiness(&state, &parser),
+    );
+    try admitForTest(&state, &parser, wire[0..1], wire.len);
+    try std.testing.expectEqual(
+        RxParserReadiness.incomplete,
+        try parserReadiness(&state, &parser),
+    );
+    try admitForTest(&state, &parser, wire[1..31], wire.len);
+    try std.testing.expectEqual(
+        RxParserReadiness.incomplete,
+        try parserReadiness(&state, &parser),
+    );
+    try admitForTest(&state, &parser, wire[31..protocol.header_size], wire.len);
+    try std.testing.expectEqual(
+        RxParserReadiness.incomplete,
+        try parserReadiness(&state, &parser),
+    );
+    try admitForTest(
+        &state,
+        &parser,
+        wire[protocol.header_size..],
+        wire.len,
+    );
+    const before_state = state;
+    const before_head = parser.head;
+    const before_len = parser.buf.items.len;
+    try std.testing.expectEqual(
+        RxParserReadiness.complete_or_error,
+        try parserReadiness(&state, &parser),
+    );
+    try std.testing.expect(std.meta.eql(before_state, state));
+    try std.testing.expectEqual(before_head, parser.head);
+    try std.testing.expectEqual(before_len, parser.buf.items.len);
+
+    parser.buf.items[0] = 0;
+    try std.testing.expect(resealParserAuthority(&state, &parser));
+    try std.testing.expectEqual(
+        RxParserReadiness.complete_or_error,
+        try parserReadiness(&state, &parser),
+    );
+}
+
+test "RX parser readiness rejects busy stale and inconsistent provenance without mutation" {
+    var state = State{ .saved_flags = 7 };
+    defer state.deinit(std.testing.allocator);
+    var parser = framing.FrameParser.init(std.testing.allocator);
+    defer parser.deinit();
+    var destination_slot: usize = 0;
+    try bindParserForTest(&state, &parser, 45, &destination_slot);
+
+    state.rx_operation_busy = true;
+    try std.testing.expectError(
+        error.InvalidState,
+        parserReadiness(&state, &parser),
+    );
+    state.rx_operation_busy = false;
+    state.rx_provenance.rx_absolute_next = 1;
+    try std.testing.expect(resealParserAuthority(&state, &parser));
+    const before = state;
+    try std.testing.expectError(
+        error.InvalidDescriptor,
+        parserReadiness(&state, &parser),
+    );
+    try std.testing.expect(std.meta.eql(before, state));
+}
+
+test "RX parser readiness treats exact 32-byte terminal outcomes as ready" {
+    inline for (.{ "complete", "wrong-major", "oversized", "required-unknown" }) |scenario| {
+        var state = State{ .saved_flags = 7 };
+        defer state.deinit(std.testing.allocator);
+        var parser = framing.FrameParser.init(std.testing.allocator);
+        defer parser.deinit();
+        var destination_slot: usize = 0;
+        try bindParserForTest(&state, &parser, 46, &destination_slot);
+        const header = if (std.mem.eql(u8, scenario, "complete"))
+            protocol.Header{ .kind = .ping }
+        else if (std.mem.eql(u8, scenario, "wrong-major"))
+            protocol.Header{ .kind = .ping, .major = protocol.version_major + 1 }
+        else if (std.mem.eql(u8, scenario, "required-unknown"))
+            protocol.Header{ .kind = @enumFromInt(55002) }
+        else
+            protocol.Header{
+                .kind = .response,
+                .payload_len = protocol.max_control_json + 1,
+            };
+        const bytes = header.encode();
+        try admitForTest(&state, &parser, &bytes, bytes.len);
+        const before = state;
+        try std.testing.expectEqual(
+            RxParserReadiness.complete_or_error,
+            try parserReadiness(&state, &parser),
+        );
+        try std.testing.expect(std.meta.eql(before, state));
+        try std.testing.expectEqual(@as(usize, 0), parser.head);
+    }
 }

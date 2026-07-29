@@ -5888,13 +5888,16 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
                 `ExternalRxIntentScratch`가 실제 d1 outcome을 `ClassifiedIntentOwner`로 exact once move하고 source를
                 즉시 tombstone한다. tagged intent의 abort/reset은 최대 64개 payload를 exact once 회수하며
                 storage/ledger/persistent owner publish는 0이다. copied/stale/cross-turn/cross-storage/parser
-                generation drift와 모든 allocation fail-index를 닫는다. `ExternalRxIntentScratch`는 제품 함수
-                stack에 instantiate/copy하지 않는 caller-owned heap-pinned handle이며 별도 384 KiB compile-time
-                상한을 갖는다.
+                generation drift와 모든 allocation fail-index를 닫는다. `ExternalRxIntentScratch`는 caller-owned
+                final-address `ExternalRxIntentHandle` 뒤의 heap-pinned allocation이며 제품 함수 stack
+                instantiate/copy는 0이고 별도 384 KiB compile-time 상한을 갖는다.
               - **d2b3c — aggregate commit core:** scratch intent와 ledger batch를 전검증한 뒤 하나의 private
                 no-fail suffix가 ledger disposition을 즉시 소비해 partial/response owner, token FIFO와 기존
-                event/metadata owner를 publish하고 source/scratch를 tombstone한다. core는 처음부터
-                product-compilable module-private 단일 구현이며, 이 gate 시점의 callsite만 test-only다.
+                event/metadata owner를 publish하고 source/scratch를 tombstone한다.
+                d2b3b intent handle과 별도 heap-pinned sibling `PreparedRxAggregate`가 live batch, retirement,
+                disposition과 192 KiB aggregate scratch를 소유하며 두 handle의 storage/turn generation을 함께
+                봉인한다. core는 처음부터 product-compilable module-private 단일 구현이며, 이 gate 시점의
+                callsite만 test-only다.
                 export와 제품 writer callsite는 boundary상 0이다. 최종 검증 뒤에는 allocation, callback, `try`, checked overflow,
                 disposition 재해석이 0이다. retirement callback은 모든 authority publish/tombstone 뒤 local
                 plan으로만 실행하며 첫 callback 이후 storage/scratch/FIFO를 다시 읽지 않는다. traversal과 product
@@ -5919,6 +5922,7 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
                   payload_addr: usize,
                   payload_len: usize,
                   payload_digest: external_owner_seal.Digest,
+                  classification: ExternalWireClass,
                   semantic_proof_digest: external_owner_seal.Digest,
                   allocator: std.mem.Allocator,
                   cleanup_payload: ?[]u8,
@@ -5938,7 +5942,6 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
                   },
                   response: struct {
                       source: ClassifiedIntentOwner,
-                      candidate: ResponseCandidate,
                   },
                   committed,
                   aborted,
@@ -5949,23 +5952,164 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
                   storage_addr: usize,
                   turn_generation: u64,
                   parser_generation_at_start: u64,
+                  last_parser_generation: u64,
+                  last_moved_end_absolute: u64,
                   intents: [64]PreparedRxIntent,
                   intent_count: u8,
-                  live_batch: external_inbox_ledger.PreparedLiveBatch,
-                  retirement: external_inbox_ledger.PreparedLiveRetirement,
-                  lifecycle: enum { empty, ready, busy, spent },
+                  lifecycle: enum { allocated, ready, busy, spent, poisoned, destroying },
                   digest: external_owner_seal.Digest,
+              };
+
+              const ExternalRxIntentHandle = struct {
+                  saved_self_addr: usize,
+                  scratch_addr: usize,
+                  allocation_addr: usize,
+                  allocation_len: usize,
+                  allocator_ptr_addr: usize,
+                  allocator_vtable_addr: usize,
+                  allocator: std.mem.Allocator,
+                  cleanup_allocator: ?std.mem.Allocator,
+                  lifecycle: enum { empty, allocated, ready, destroying, destroyed, poisoned },
+                  digest: external_owner_seal.Digest,
+              };
+
+              const AuthorityView = struct {
+                  storage_addr: usize,
+                  storage_len: usize,
+                  operation_generation: u64,
+                  parser_generation: u64,
+                  buffer_start_absolute: u64,
+                  identity: external_rx_types.RxIdentity,
+                  allocator: std.mem.Allocator,
+                  forbidden_ranges: []const external_owner_range.Range,
+                  forbidden_ranges_generation: u64,
+                  forbidden_ranges_digest: external_owner_seal.Digest,
+                  reservation_handle_addr: usize,
+                  reservation_generation: u64,
               };
               ```
 
-              scratch는 caller가 heap-pinned final address에 `initInPlace`하며 storage/Client/parser/ledger와 모든
-              live payload range에 disjoint해야 한다. 각 owner seal은 storage address, whole-turn
+              `external_rx_intent.zig` private mechanics가 scratch owner/seal/create/abort/reset/destroy만
+              소유하고 storage/ledger/persistent owner를 import하지 않는다. pump facade는 caller의 final-address
+              `ExternalRxIntentHandle`에 scratch 1개를 할당하고 storage의 `intent_scratch_handle_addr` reservation과
+              결합한다. 같은 storage/attachment에 두 번째 handle/scratch는 거부한다. `ExternalRxIntentScratch`
+              allocation은 storage/Client/parser/ledger와 모든 live payload range에 disjoint해야 한다. facade는
+              이 backing을 기존 aggregate proof SSOT와 같은 최대 22,560개의 start-sorted pairwise-disjoint
+              `forbidden_ranges`와 nonzero generation/content digest로 봉인한다. 따라서 최대 4,096 ledger payload와
+              Client/parser/live owner를 축약하거나 빠뜨리지 않는다. leaf는 scratch allocation과 이후 payload가
+              storage/handle/range-list backing 및 이 목록의 모든 범위와 겹치지 않는지 callback 전후 current
+              view에서 재검증한다. teardown aggregate range proof도
+              scratch allocation과 최대 64개 intent payload cleanup range를 기존 Client/parser/ledger/live-owner
+              범위에 append해 단일 sort/overlap 검사를 수행한다. 빈 목록은 해당 test fixture에 별도 backing이
+              없다는 뜻일 때만 허용하며, d2b3d 제품 facade는 실제 전체 inventory를 제공해야 한다. 각 owner
+              seal은 storage address, whole-turn
               `operation_generation`, parser generation, exact frame header/range/pair seal, payload
-              addr/len/content, allocator primary/cleanup mirror를 묶는다. classifier 진입은 move-owned d1 outcome
-              exact once이고 성공 즉시 source outcome을 tombstone한다. copied/replayed old pair,
+              addr/len/content, allocator primary/cleanup mirror와 기존 `external_rx_demux.ExternalWireClass`의
+              accepted tag/candidate 전체를 묶는다. 새 screen/event/response union을 복제하거나
+              `semantic_proof_digest`만 남기고 실제 classification value를 버려 후속 gate가 header를
+              재분류하는 형태는 금지한다. owner에 저장되는 `ExternalWireClass`는 `.protocol_terminal`을 허용하지
+              않는다. `PreparedRxIntent.response`도 candidate를 복제하지 않고
+              `source.classification.response_candidate`를 SSOT로 쓴다.
+
+              classifier 진입은 move-owned d1 `.frame` outcome exact once이고,
+              성공 즉시 payload와 allocator cleanup mirror를 owner로 옮긴 뒤 source outcome을 `.incomplete`
+              tombstone으로 만든다. `.incomplete`/`.skipped`는 이 move API에 넣지 않으며 d2b1 outer policy가
+              parser/frame budget 결과로 직접 처리한다. d1 outcome 자체는 copyable observation이므로 canonical
+              source 주소만으로 copy를 revoke한다고 주장하지 않는다. descriptor/range/header는 content
+              dereference 전에 검증하고, scratch의 최대 64 live intent payload range와 pairwise disjoint를
+              확인한다. storage reservation으로 scratch는 attachment당 하나이며, 첫 successful move가
+              `last_parser_generation`/`last_moved_end_absolute`을 영구 전진시킨다. 따라서 같은 allocation/range를
+              가진 outcome copy 중 첫 move 하나만 owner가 되고, 두 번째 copy는 live-range overlap 또는 replay
+              watermark에서 bytes dereference/free 전에 거부된다. abort/reset도 replay watermark를 지우지 않는다.
+              copied/replayed old pair,
               same-attach old range, parser generation drift/ABA, cross-turn/cross-storage owner는 decoder/ledger
               publish 0 terminal이다. `resetForNextTurn`은 spent와 모든 intent/live-batch/retirement tombstone을
               확인한 뒤에만 ready로 돌아간다.
+
+              parser 권위는 임의 caller 숫자가 아니라 d1 `nextOutcomeWithRange` 직후 같은 owner-thread
+              Client/parser facade가 읽은 `{generation,buffer_start_absolute,identity,allocator}` sealed view다.
+              d1 consume 자체가 generation을 전진시키고 한 scratch가 최대 64 frame을 받으므로
+              `parser_generation_at_start == owner.parser_generation`을 요구하지 않는다. 대신 각 accepted frame은
+              `owner.parser_generation > scratch.last_parser_generation`,
+              `frame.range.end_absolute == view.buffer_start_absolute`, identity/allocator exact match여야 한다.
+              `moveFrame` leaf가 `AuthorityOps.current()`를 prepare 직전과 source tombstone 직전에 직접 호출해
+              같은 view가 byte-for-byte current인지 재검증한다. 첫 조회에서 source outcome의 exact tag,
+              header/range/pair seal, payload ptr/len/content를 scalar/value snapshot으로 freeze하며, 두 번째 조회
+              뒤 같은 bytes를 가진 다른 allocation으로 payload pointer만 바뀐 경우도 source tombstone 전에
+              거부하고 canonical source descriptor를 복원한다. commit에서
+              `last_parser_generation`과 `last_moved_end_absolute`을 단조 전진시킨다. skipped frame이나 추가 parser
+              진행 뒤의 old outcome은 range end가 current watermark와 달라 payload content를 읽기 전에 거부한다.
+              같은 frame copy의 두 번째 move는 generation/range replay watermark로 거부한다.
+              `resetForNextTurn`은 이 두 replay watermark를 지우지 않으며 scratch는 attachment teardown까지
+              재생성하지 않는다. d2b3b의 test adapter는 이 facade view를 주입하되 제품 callsite는 아직 0이고,
+              d2b3d가 실제 Client facade를 유일한 제품 caller로 연다. allocator도 이 view의 parser allocator
+              하나를 primary/cleanup mirror로 봉인한다. raw outcome만 받고 임의 allocator나 generation을
+              추측하는 API는 금지한다.
+
+              d2b3b에서 새 allocation은 pump facade의 scratch create 1개뿐이다. allocate 전 authority view,
+              allocator와 caller handle pristine descriptor를 local capture하고, callback 뒤 allocation
+              descriptor/disjoint, handle final address, storage reservation 0, storage/turn/parser authority와
+              parser allocator를 재검증한 뒤에만 scratch/handle/reservation을 publish한다. scratch create는
+              pre-raw barrier에서 source frame 없이 실행되므로 source 검증을 가장하지 않는다. 실패 unwind는
+              callback 전 captured allocator만 쓰고 handle/storage는 canonical 원상태다. 단 allocator가 반환한
+              scratch range가 sealed owner/range-list/storage/handle과 겹치거나 callback 뒤 current inventory를
+              증명할 수 없으면 그 포인터의 cleanup authority도 신뢰하지 않는다. 이 경우 `destroy`/free 0으로
+              bounded quarantine하고 storage를 typed terminal로 요청한다. disjoint가 양 시점 모두 증명된 일반
+              authority drift만 captured allocator로 unwind한다. source frame
+              payload는 d1 allocation을 move하고 intent slot은 inline이므로 prepare/abort/reset은 allocation
+              0이다. 따라서 allocation failure gate는 scratch allocation fail-index 0의 source/ledger/storage
+              mutation 0과 최초 성공의 exact destroy를 뜻한다. handle은 allocation addr/len과 allocator
+              primary value/cleanup mirror와 그 ptr/vtable scalar를 함께 봉인한다. destroy preflight는 primary와
+              cleanup mirror가 모두 scalar descriptor와 exact match하는지 확인하고, callback-hidden local
+              cleanup에는 검증된 cleanup mirror만 쓴다. destroy는 canonical final-address handle slot을 먼저
+              `.destroying` tombstone한다. 그 전에 `{storage_addr,handle_addr,reservation_generation,
+              destroyed_handle_digest}`를 callback-hidden local permit으로 freeze하고 storage reservation/handle/
+              scratch authority를 마지막으로 전검증한다. scratch free callback 동안 reservation은 유지되어 nested
+              create/destroy를 거부한다. callback 뒤에는 storage reservation이나 handle header를 다시 읽지 않고,
+              held operation lease 아래 local permit이 exact reservation tombstone과 canonical `.destroyed` handle을
+              재게시한다. callback이 두 header를 변조해도 free는 정확히 1회이고 최종 reservation은 0이다. permit이
+              가리키는 storage/handle address나 held lease 자체를 사전에 증명하지 못하면 callback에 들어가지 않고
+              invariant terminal/quarantine로 수렴한다. copied/moved/stale handle은 scratch memory를
+              dereference하기 전에 saved address/digest로 거부한다.
+
+              destroy와 reservation 해제는 **storage canonical attachment teardown의 held operation lease
+              안에서만** 허용한다. ready/spent라는 이유만으로 실행 중 attachment에서 destroy/recreate할 수 없고,
+              reset은 같은 allocation을 재사용한다. 따라서 replay watermark와 scratch incarnation은 attachment
+              lifetime 동안 사라지지 않는다. teardown에서 busy/nonempty owner는 먼저 abort exact-once cleanup을
+              수행한 뒤 destroy하며, teardown 권위·allocator mirror를 증명하지 못하면 scratch를 poisoned bounded
+              leak으로 남기고 storage는 terminal/dead로 수렴한다. scratch와 payload가
+              storage, cleanup scratch, parser backing, ledger/live owner backing 중 하나와 겹치면 content
+              dereference·classifier·free 전에 거부한다.
+
+              abort는 최대 64 owner의 descriptor/content/allocator mirror와 full pairwise alias를 callback 전에
+              전검증해 stack-local cleanup plan으로 freeze한다. 그 뒤 scratch intents를 전부 `.aborted`, scratch를
+              `.spent`로 tombstone하고 첫 allocator callback을 실행한다. callback 사이에는 scratch/intent를 다시
+              읽지 않는다. canonical owner drift나 alias로 안전한 cleanup authority를 증명하지 못하면 arbitrary
+              free하지 않고 handle/scratch를 `.poisoned`로 만들며 bounded payload leak과 storage terminal 요청을
+              반환한다. `resetForNextTurn`은 intact `.spent`와 모든 intent tombstone/cleanup plan zero만
+              `.ready`로 되돌리고 replay watermark와 storage reservation은 보존한다.
+
+              한 turn의 accepted socket bytes가 최대 1 MiB이고 intents는 turn 종료 전에 모두 commit/abort되므로,
+              poison이 보존할 수 있는 payload 합은 최대 1 MiB다. scratch allocation 상한 384 KiB를 더한 d2b3b
+              quarantine 상한은 attachment당 정확히 `1,441,792 bytes`다. 구현은 이 값을
+              `max_intent_quarantine_bytes`로 두고 기존 `max_cross_owner_quarantine_bytes`와
+              `CrossOwnerQuarantineStatus.leaked_bytes_upper_bound`에 checked add한다. poison event는 기존 latch/
+              counter에 정확히 1회 반영하며, 같은 storage에서 반복 실패해 이 상한을 중복 가산하지 않는다.
+
+              | 결과 | source outcome | scratch/handle | storage 요청 |
+              | --- | --- | --- | --- |
+              | scratch create OOM | N/A(source 전) | handle empty, allocation 0 | retryable, terminal 0 |
+              | scratch create alias/unprovable inventory | N/A(source 전) | handle empty, arbitrary free 0, bounded leak | invariant terminal |
+              | create callback 뒤 authority/disjoint drift | N/A(source 전) | captured allocator로 unwind, handle empty | typed terminal |
+              | move 전 descriptor/alias/generation/replay drift | 보존 | 기존 ready owner 불변 | typed terminal |
+              | classifier protocol terminal | payload를 owner로 move 후 exact abort, source tombstone | spent | protocol terminal |
+              | accepted move | source tombstone | classified owner 1개, replay watermark 전진 | terminal 0 |
+              | abort cleanup authority drift | 이미 tombstone인 source 유지 | poisoned, arbitrary free 0 | invariant terminal |
+              | intact abort/reset | 이미 tombstone인 source 유지 | spent 뒤 ready, replay watermark 보존 | terminal 0 |
+              | destroy free callback의 storage/handle drift | N/A(teardown) | local permit으로 destroyed 재게시, free 1 | reservation 0, invariant terminal |
+
+              d2b3c의 ledger batch/retirement/disposition은 별도 caller-owned `PreparedRxAggregate` sibling handle이
+              처음 소유한다. d2b3b scratch에 canonical-empty ledger region을 미리 넣지 않는다.
 
               `PendingResponseOwner.pending.owner_digest`는 source의 storage/turn/parser generation,
               frame/range/pair seal/payload/allocator proof, candidate와 current authority generation을 모두
@@ -6048,7 +6192,7 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
               const ExternalRxTurnScratch = struct {
                   saved_self_addr: usize,
                   read_buffer: [1024 * 1024]u8,
-                  rx: ExternalRxIntentScratch,
+                  rx: ExternalRxIntentHandle,
                   drain: RxDrainEvidence,
                   permit: PreparedAuthorityPermit,
                   lifecycle: enum { empty, ready, busy, spent },

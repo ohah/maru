@@ -1,5 +1,110 @@
 const std = @import("std");
 
+test "d2b3b classified intent mechanics stay private and test-only at the pump boundary" {
+    const allocator = std.testing.allocator;
+    const root = "src/platform/macos/session_host";
+    const owner_path = "external_rx_intent.zig";
+    const pump_path = "client_external_pump.zig";
+    var owner_seen = false;
+    var pump_seen = false;
+    var dir = try std.Io.Dir.cwd().openDir(std.testing.io, root, .{ .iterate = true });
+    defer dir.close(std.testing.io);
+    var walker = try dir.walk(allocator);
+    defer walker.deinit();
+    while (try walker.next(std.testing.io)) |entry| {
+        if (entry.kind != .file or !std.mem.endsWith(u8, entry.path, ".zig"))
+            continue;
+        const path = try std.fmt.allocPrint(
+            allocator,
+            "{s}/{s}",
+            .{ root, entry.path },
+        );
+        defer allocator.free(path);
+        const source = try readZigFileZ(allocator, path);
+        defer allocator.free(source);
+        const scratch_refs = countOccurrences(source, "ExternalRxIntentScratch");
+        if (std.mem.eql(u8, entry.path, owner_path)) {
+            owner_seen = true;
+            try std.testing.expect(scratch_refs != 0);
+            try std.testing.expectEqual(
+                @as(usize, 0),
+                countOccurrences(source, "client_external_pump.zig"),
+            );
+            try std.testing.expectEqual(
+                @as(usize, 0),
+                countOccurrences(source, "external_inbox_ledger.zig"),
+            );
+        } else {
+            try std.testing.expectEqual(@as(usize, 0), scratch_refs);
+        }
+        if (std.mem.eql(u8, entry.path, pump_path)) {
+            pump_seen = true;
+            try std.testing.expectEqual(
+                @as(usize, 1),
+                countOccurrences(source, "external_rx_intent.moveFrame("),
+            );
+            try std.testing.expectEqual(
+                @as(usize, 1),
+                countOccurrences(source, "external_rx_intent.allocate("),
+            );
+            try std.testing.expect(
+                countOccurrences(
+                    source,
+                    "fn moveIntentFrameForTest(",
+                ) == 1 and
+                    countOccurrences(
+                        source,
+                        "fn createIntentScratchForTest(",
+                    ) == 1,
+            );
+            const move_start = std.mem.indexOf(
+                u8,
+                source,
+                "fn moveIntentFrameForTest(",
+            ) orelse return error.TestUnexpectedResult;
+            const move_end = std.mem.indexOfPos(
+                u8,
+                source,
+                move_start,
+                "fn activateSyntheticLiveOwnersForTest(",
+            ) orelse return error.TestUnexpectedResult;
+            try std.testing.expect(std.mem.indexOf(
+                u8,
+                source[move_start..move_end],
+                "if (comptime !builtin.is_test) unreachable;",
+            ) != null);
+            const create_start = std.mem.indexOf(
+                u8,
+                source,
+                "fn createIntentScratchForTest(",
+            ) orelse return error.TestUnexpectedResult;
+            const create_end = std.mem.indexOfPos(
+                u8,
+                source,
+                create_start,
+                "fn liveScreenOrPartialPending(",
+            ) orelse return error.TestUnexpectedResult;
+            try std.testing.expect(std.mem.indexOf(
+                u8,
+                source[create_start..create_end],
+                "if (comptime !builtin.is_test) unreachable;",
+            ) != null);
+        }
+    }
+    try std.testing.expect(owner_seen);
+    try std.testing.expect(pump_seen);
+
+    const barrel = try readZigFileZ(
+        allocator,
+        "src/platform/macos/session_host.zig",
+    );
+    defer allocator.free(barrel);
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        countOccurrences(barrel, "external_rx_intent"),
+    );
+}
+
 test "session host owner projection capability stays in its reviewed mechanics file" {
     const allocator = std.testing.allocator;
     var dir = try std.Io.Dir.cwd().openDir(std.testing.io, "src", .{ .iterate = true });

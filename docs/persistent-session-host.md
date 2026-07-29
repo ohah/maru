@@ -4640,21 +4640,341 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
               직접 주입한 테스트만으로 c3a를 완료 처리하지 않으며 실제 `external_attach.attachSnapshot` 경로의
               revision N baseline 뒤 N/same, N/different, N-1, N+1을 자동 검증한다.
 
-          - **2b2d1 — RX provenance/parser:** parser는 read마다 sidecar entry를 만들지 않는다. connection에
-            checked nonwrapping `rx_absolute_next`와 `buffer_start_absolute`, parser에 현재 frame의 단일
-            `frame_start_absolute`/`frame_end_absolute`을 둔다. bind 당시 unread partial frame은 보수적으로
-            pre-bind start offset을 받고 compact/normalize 뒤에도 그 scalar를 보존한다. bind/compaction 때
-            `buffer_start_absolute = rx_absolute_next - bufferedBytes`를 checked 계산하고, buffered complete frame이
-            여러 개여도 parser consume offset으로 각 half-open range `[start,end)`를 복원한다.
-            client-local recovery response barrier는 response frame의 `frame_end_absolute`이고, 그래서 같은 socket
-            read 안이라도 그 뒤 header에서 시작한 snapshot은 fresh다. host recovery ACK barrier는 ACK가 fully
-            sent된 순간의 `rx_absolute_next` watermark이고, 이미 읽혔거나 시작된 frame은 stale다. 두 경로 모두
-            candidate의 `frame_start_absolute >= recovery_barrier_absolute`일 때만 fresh다.
-            1-byte drip도 O(1) metadata이고 각 header를 소비하기 직전의 absolute offset이 start가 되며, 다음
-            read까지 이어진 header/payload는 최초 start를 유지한다. counter overflow, parser internal offset 불일치,
-            start/end/barrier 역전은 allocation이나 lower mutation 없이 protocol terminal이다. response/ACK barrier
-            전에 header 1/31/32 byte 또는 payload 마지막 1 byte까지 시작된 snapshot은 barrier 뒤 완성돼도 candidate가
-            아니다. parser read 요청은 turn RX byte 잔여와 resident cap 잔여 중 작은 길이를 넘지 않는다.
+          - **2b2d1 — RX provenance/parser:** absolute offset은 external pump bind에서 시작하는 connection-local
+            epoch이며 blocking hello/read path까지 소급하지 않는다. `client_external_mode.State`가 다음 scalar
+            owner 하나를 가진다. 이 state는 Client와 함께 final `ExternalPumpStorage.owned_client`로 move되고
+            별도 registry/sidecar/frame별 heap allocation을 만들지 않는다.
+
+            ```zig
+            const RxProvenanceLifecycle = enum { unbound, bound, terminal };
+            const RxIdentity = struct {
+                attach_instance_id: u64 = 0,
+                destination_slot_addr: usize = 0,
+            };
+            const ParserAuthoritySeal = struct {
+                domain: [8]u8 = [_]u8{0} ** 8,
+                version: u16 = 0,
+                seal_addr: usize = 0,
+                parser_addr: usize = 0,
+                identity: RxIdentity = .{},
+                allocator_ptr_addr: usize = 0,
+                allocator_vtable_addr: usize = 0,
+                expected_major: u16 = 0,
+                backing_addr: usize = 0,
+                items_len: usize = 0,
+                capacity: usize = 0,
+                head: usize = 0,
+                buffer_start_absolute: u64 = 0,
+                rx_absolute_next: u64 = 0,
+                generation: u64 = 0,
+                digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+            };
+            const RxProvenance = struct {
+                identity: ?RxIdentity = null,
+                rx_absolute_next: u64 = 0,
+                buffer_start_absolute: u64 = 0,
+                parser_seal: ParserAuthoritySeal = .{},
+                lifecycle: RxProvenanceLifecycle = .unbound,
+            };
+            const RxRange = struct {
+                identity: RxIdentity,
+                start_absolute: u64,
+                end_absolute: u64,
+            };
+            const RxWatermark = struct {
+                identity: RxIdentity,
+                absolute: u64,
+            };
+            const RxSource = union(enum) {
+                pre_bind,
+                live: RxRange,
+            };
+            const ExternalRxOutcome = union(enum) {
+                incomplete,
+                skipped: RxRange,
+                frame: struct {
+                    frame: framing.Frame,
+                    range: RxRange,
+                },
+            };
+            const MaxReadableResult = union(enum) {
+                bytes: usize,
+                turn_exhausted,
+                resident_exhausted,
+                counter_exhausted,
+                invalid,
+            };
+            pub const State = struct {
+                saved_flags: c_int,
+                external_tx: std.ArrayListUnmanaged(ExternalTxFrame) = .empty,
+                external_tx_bytes: usize = 0,
+                rx_provenance: RxProvenance = .{},
+            };
+            const PreparedLifecycle = enum { empty, prepared, committed, aborted };
+            const PreparedRxBind = struct {
+                saved_self_addr: usize = 0,
+                source_state_addr: usize = 0,
+                destination_slot_addr: usize = 0,
+                destination_slot_len: usize = 0,
+                normalized_addr: usize = 0,
+                identity: ?RxIdentity = null,
+                unread_len: u64 = 0,
+                unread_digest: [32]u8 = [_]u8{0} ** 32,
+                digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+                lifecycle: PreparedLifecycle = .empty,
+            };
+            const PreparedRxAppend = struct {
+                saved_self_addr: usize = 0,
+                state_addr: usize = 0,
+                parser_addr: usize = 0,
+                expected_start: u64 = 0,
+                bytes_addr: usize = 0,
+                bytes_len: usize = 0,
+                bytes_digest: [32]u8 = [_]u8{0} ** 32,
+                source_seal: ParserAuthoritySeal = .{},
+                unread_digest: [32]u8 = [_]u8{0} ** 32,
+                allocator: std.mem.Allocator = std.heap.page_allocator,
+                replacement: ?[]u8 = null,
+                cleanup_replacement: ?[]u8 = null,
+                digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+                lifecycle: PreparedLifecycle = .empty,
+            };
+            const RxParseScratch = struct {
+                saved_self_addr: usize = 0,
+                parser_addr: usize = 0,
+                source_seal: ParserAuthoritySeal = .{},
+                frame_start_absolute: u64 = 0,
+                frame_end_absolute: u64 = 0,
+                header: ?protocol.Header = null,
+                frame_digest: [32]u8 = [_]u8{0} ** 32,
+                allocator: std.mem.Allocator = std.heap.page_allocator,
+                payload: ?[]u8 = null,
+                cleanup_payload: ?[]u8 = null,
+                lifecycle: PreparedLifecycle = .empty,
+            };
+            const RxPrepareError = error{
+                InvalidState,
+                InvalidDescriptor,
+                InvalidSeal,
+                InvalidIdentity,
+                ArithmeticOverflow,
+                ResidentCap,
+                OutOfMemory,
+            };
+            const RxParseError = error{
+                InvalidState,
+                InvalidDescriptor,
+                InvalidSeal,
+                ArithmeticOverflow,
+                Protocol,
+                OutOfMemory,
+            };
+            const Freshness = enum { fresh, stale, invalid };
+
+            fn prepareRxBind(
+                source_state: *const State,
+                attach_instance_id: u64,
+                normalized: *const framing.PreparedNormalizeExact,
+                destination_slot_addr: usize,
+                destination_slot_len: usize,
+                out: *PreparedRxBind,
+            ) RxPrepareError!void;
+            fn prepareAdmit(
+                state: *State,
+                parser: *framing.FrameParser,
+                bytes: []const u8,
+                expected_start: u64,
+                resident_cap: usize,
+                out: *PreparedRxAppend,
+            ) RxPrepareError!void;
+            fn maxReadable(
+                state: *const State,
+                parser: *const framing.FrameParser,
+                resident_cap: usize,
+                turn_rx_remaining: usize,
+            ) MaxReadableResult;
+            fn commitAdmitUnchecked(
+                state: *State,
+                parser: *framing.FrameParser,
+                prepared: *PreparedRxAppend,
+            ) void;
+            fn nextOutcomeWithRange(
+                state: *State,
+                parser: *framing.FrameParser,
+                scratch: *RxParseScratch,
+            ) RxParseError!ExternalRxOutcome;
+            fn isFresh(
+                range: RxRange,
+                barrier: RxWatermark,
+                current_identity: RxIdentity,
+                rx_absolute_next: u64,
+            ) Freshness;
+            ```
+
+            `FrameParser`는 계속 `buf/head`와 payload allocation의 단일 출처이고 absolute scalar를 중복
+            저장하지 않는다. `client_external_mode.zig`의 provenance-aware private wrapper만 **bound external
+            product RX call graph**에서 parser를 호출한다. 기존 blocking Client/server와 pre-bind fixture의 raw
+            parser 사용은 allowlist로 유지하되, bind 이후 pump action에서 `pushBounded`, `nextOutcome`,
+            `bufferState`, `bufferedBytes`를 직접 부르는 새 callsite는 boundary gate가 금지한다.
+
+            `ParserAuthoritySeal`은 seal/parser final address, allocator ptr/vtable, expected major, backing
+            ptr/len/cap/head, `RxIdentity`, 두 absolute scalar, checked generation과 process-local
+            `MARURXP1`/1 domain/version digest를 가진다. persistent seal은 O(1) descriptor만 bind하고 unread
+            content digest를 넣지 않는다. bind 이후 wrapper만 parser/provenance를 mutate하고 각 commit suffix에서
+            seal을 다시 만든다. 매 진입은 backing을 slice로 만들기 전에 seal의 parser/address/allocator/major와
+            `head <= items.len <= capacity`, zero-cap backing, checked backing range/non-alias를 descriptor-only로
+            비교한다. 따라서 임의 주소가 mapped인지 산술만으로 추측하지 않고, normalize/bind가 봉인하지 않은
+            seal-mismatched backing은 dereference 전에
+            거부한다. 지원 범위는 structurally invalid 또는 seal-mismatched descriptor이며, process 내부 임의
+            memory corruption의 mapped/readable 여부나 seal+descriptor 동시 위조를 탐지한다고 주장하지 않는다.
+            unread/frame/read-buffer content digest는 allocator callback을 건너는 `PreparedRxBind`,
+            `PreparedRxAppend`, `RxParseScratch`에만 ephemeral하게 둔다. replacement append는 어차피 복사할 unread
+            전체를 O(unread), payload allocation은 exact current frame만 O(frame) hash한다. capacity-spare
+            no-allocation append, incomplete, optional skip, persistent reseal의 content hash는 0이므로 1-byte drip이
+            남은 unread 전체를 반복 hash하는 O(n²) 경로를 만들지 않는다.
+
+            `PreparedExternalPumpTransfer`는 `PreparedRxBind`를 함께 소유한다. `client.zig`의 Client-level prepare가
+            ownership/io mode/profile과 nonzero `attach_instance_id`를 먼저 검증하고 source State, attach ID,
+            final `*?Client` slot의 address/length를 Client-free leaf `prepareRxBind`에 넘긴다. 따라서
+            `client_external_mode.zig`는 `client.zig`를 import하지 않는다. leaf의 fallible prepare는 source external
+            state의 exact `.unbound` canonical 값, nonzero `attach_instance_id`, destination slot final range,
+            normalize replacement의 unread bytes/len과 allocator/parser descriptor를 bind token에 봉인한다.
+            OOM/malformed/stale token은 source parser/state/destination mutation 0이다.
+            `Client.finishExternalPumpTransfer`의 기존 no-fail suffix는 normalize를 final parser에 commit한 직후
+            copied `State.rx_provenance`에 `PreparedRxBind.commitUnchecked`를 실행한다. commit은 새 검증/할당/callback
+            없이 `identity={attach_instance_id,destination_slot_addr}`, 다음 두 scalar, parser seal, `.bound`를 한 번
+            publish한다. `destination_slot_addr`와 `destination_slot_len`은 empty optional payload layout을
+            추측하지 않고 기존 transfer가 이미 seal하는 final `*?Client` slot의 address와 `@sizeOf(?Client)`
+            범위와 정확히 같다.
+            이때 unread `buffered = len-head`를 prepare에서 checked 계산해
+            `buffer_start_absolute=0`, `rx_absolute_next=buffered`로 local epoch를 연다. 따라서 bind 당시
+            unread partial header/payload와 여러 complete frame은 normalize/compaction 뒤에도 최초 header가
+            offset 0에서 시작한다. 이미 parser 밖의 `pending_stream`, `pending_events`, `pending_batches`는 range를
+            꾸며내지 않는다. d2 inherited FIFO traversal은 세 기존 queue 타입을 감싸거나 복제하지 않고 호출 전체에
+            `RxSource.pre_bind` 하나를 reducer input으로 전달하며, candidate가 될 때만 그 source tag를 소유한다.
+            `.pre_bind` recovery snapshot은 stale이고 consume/drop 뒤 candidate source도 함께 tombstone된다. live
+            parser outcome만 `RxSource.live(range)`를 쓴다.
+
+            `State.rx_provenance` 자체가 live scalar의 단일 출처다. live external failure linearization에서만
+            `.terminal`을 publish하고 aggregate cleanup 뒤 Client `io_mode`는 기존 계약대로 `.blocking`이 되어
+            State/RxProvenance가 존재하지 않는다. moved source Client도 canonical `.blocking`이고, final owned
+            Client 하나만 `.external{rx_provenance=.bound}`를 가진다. immutable adoption/final owner seal은
+            unbound State address와
+            `PreparedRxBind` identity/initial 값만 bind하며 매 read마다 변하는 live scalar를 넣지 않는다.
+            live scalar/seal은 RX wrapper와 teardown owner가 검증하고, callback-scoped projection은 operation lease
+            아래 Client outer snapshot으로 State drift를 감지하되 별도 persistent projection registry를 만들지 않는다.
+
+            lifecycle/mutation 표는 다음으로 닫는다.
+
+            | 현재/호출 | 결과 | mutation |
+            | --- | --- | --- |
+            | `.unbound` + valid `PreparedRxBind` no-fail commit | `.bound` | identity, initial scalar, parser seal 한 번 publish |
+            | `.unbound` + prepare OOM/malformed/stale | typed prepare error | Client/parser/state/destination 0 |
+            | `.bound`에서 bind/double commit | invalid/stale | 0 |
+            | `.unbound` 또는 `.terminal`에서 admit/parse | `InvalidState` | 0 |
+            | `.bound` + admit prepare OOM/drift | typed error 뒤 connection terminal | parser/provenance/semantic/ledger/TX 0 |
+            | `.bound` + incomplete parse | `.incomplete` | 0 |
+            | `.bound` + skipped/known complete | ranged outcome | consume, buffer start, parser seal exact once |
+            | descriptor/seal/range invalid | typed protocol terminal | invalid backing/payload/ledger/TX 미접근 |
+            | live failure | `.terminal` | aggregate cleanup 전 admission-closed publish |
+            | aggregate cleanup | Client `.blocking` | external State exact once cleanup 뒤 State/RxProvenance 없음 |
+
+            carry mapping도 하나로 고정한다. `PreparedExternalPumpTransfer`가 embedded `PreparedRxBind`를 prepare하고
+            `PreparedNormalizeExact`의 replacement address/len/content digest와 source `.unbound` State address를
+            함께 bind한다. transfer `validate`와 `ExternalPumpStorage` precommit final seal은 token final
+            address, destination slot address/length, identity, initial unread len만 비교한다. finish no-fail
+            commit 뒤 token은
+            consumed tombstone이므로 live offsets를 adoption final seal에 복제하지 않는다.
+            Client external source/adoption inventory는 bind 전 `.unbound` exact state를, aggregate teardown은
+            bind 후 State address/parser seal/cleanup authority를 검증한다. moved-from Client는 canonical
+            `.blocking` mode라 State를 갖지 않고, final owned Client만 `.bound` external State를 갖는다.
+
+            d1 private `maxReadable(parser, provenance, resident_cap, turn_rx_remaining)`은
+            `min(turn_rx_remaining, resident_cap-buffered, maxInt(u64)-rx_absolute_next)`를 전부 checked 계산한다.
+            result precedence는 invalid descriptor/scalar → counter exhausted → resident exhausted → turn exhausted →
+            positive bytes다. `counter_exhausted`만 syscall 0 protocol terminal이고 `turn_exhausted`는 정상 yield다.
+            `resident_exhausted`는 parser complete면 parse-first, incomplete면 resident-cap terminal이라는 d2
+            scheduling input이며 d2가 원인을 재계산하지 않는다.
+            실제 read syscall과 would-block/read-interest/64-frame turn scheduling은 d2 책임이다. d2는 이 값보다
+            큰 read를 요청하지 않는다. syscall이 반환한 `n`은 requested 이하인지 확인한다.
+
+            `prepareAdmit(bytes, expected_start, resident_cap, out)`은 final-address `PreparedRxAppend` transaction이다.
+            capacity가 충분하면 exclusive operation lease 아래 source descriptor, read-buffer address/len과
+            expected start만 seal하고 같은 aggregate caller가 callback 없이 즉시 commit한다. 이 경로의
+            unread/read content hash는 0이며 prepare와 commit 사이 outer action을 허용하지 않는다.
+            부족하면 source mutation/compaction 전에 exact final replacement를 allocate하고, allocator callback 반환
+            뒤 parser/provenance seal, expected start와 caller read-buffer address/len/content digest를 다시 검증한다.
+            성공 commit은 callback 없이 replacement에 unread+read bytes를 copy하거나 validated spare capacity에
+            append하고, old/replacement cleanup authority를 freeze한 no-fail swap 뒤 parser seal과
+            `rx_absolute_next += n`을 publish한다. allocation 전에 `compactAll`을 호출하지 않는다. prepare
+            OOM/drift는 logical/physical parser와 provenance mutation 0이다. 이미 socket에서 소비한 bytes의 prepare
+            실패는 connection terminal이며 semantic/ledger/TX publish 0이지만 socket read 0은 주장하지 않는다.
+            `PreparedRxAppend`는 final address와 state/parser/read buffer/source seal에 묶인
+            `empty→prepared→committed|aborted` owner다. `abort/deinit`은 primary/cleanup replacement slice와 allocator
+            seal 중 canonical authority 하나만 골라 exact once free하고 tombstone한다. commit은 replacement
+            ownership을 parser swap으로 넘기고 old backing은 callback-hidden frozen local cleanup authority로
+            옮긴 뒤 token을 committed tombstone으로 만든다. outer authority/revoke가 prepare와 commit 사이
+            바뀌면 abort가 leak 없이 끝나며 copied/moved/stale/double commit/deinit은 mutation/free 0이다.
+            `commitAdmitUnchecked`의 바로 위 aggregate caller는 ReleaseFast branch로 token final address,
+            parser/provenance/read-buffer/source seal과 no-callback suffix precondition을 마지막으로 재검증한다.
+            unchecked leaf와 이 caller는 각각 exact-one callsite이며 boundary gate가 새 caller를 거부한다.
+
+            `nextOutcomeWithRange`는 검증된 unread head의 `buffer_start_absolute`을 frame start로 한 번만 잡는다.
+            incomplete header/payload는 parser/provenance mutation 0으로 같은 start를 유지한다. complete known
+            frame은 header/payload cap과 `total <= buffered`, `end=start+total <= rx_absolute_next`를 checked
+            검증한다. payload는 `dupe`하지 않고 final destination을 먼저 allocate한다. allocator callback 반환 뒤
+            parser/provenance seal, exact header/total/source unread digest를 다시 검증하고, 그 뒤에만 callback 없는
+            `memcpy`를 실행한다. drift/OOM이면 destination을 canonical cleanup하고 source consume/range mutation
+            0의 protocol terminal이다. 성공 suffix만 parser consume과 `buffer_start_absolute=end`를 commit한다.
+            optional skipped frame은 allocation 없이 동일 range를 반환하고 frame budget 하나를 소비한다.
+            buffer가 비면 `buffer_start_absolute == rx_absolute_next`다. compaction은 물리 head만 바꾸며 두
+            absolute scalar를 바꾸지 않고 commit 뒤 parser seal만 갱신한다.
+            `RxParseScratch`도 final-address `empty→prepared→committed|aborted` owner다. 성공은 payload ownership을
+            `ExternalRxOutcome.frame.frame`으로 move하고 scratch를 tombstone하며, failure/outer abort는 sealed
+            primary/cleanup payload 중 canonical 하나를 callback-hidden local로 옮겨 free한다. free callback 뒤
+            source scalar는 frozen snapshot으로 복원·재검증하고, callback이 cleanup authority까지 다시 바꾸어
+            복원이 불가능하면 panic/free 재시도 대신 bounded quarantine한다.
+
+            client-local recovery response barrier는 move-owned `ExternalRxOutcome.frame.range.end_absolute`이고,
+            host recovery ACK barrier는 ACK가 fully sent된 순간 같은 external state의
+            `RxWatermark{identity,absolute=rx_absolute_next}` snapshot이다. barrier 생성/phase commit은 각각
+            f2/e의 recovery owner 책임이고 d1은 range/watermark 검증과
+            `isFresh(range, barrier, current_identity, rx_absolute_next)` pure comparator만 제공한다.
+            identity equality를 offset보다 먼저 확인하고 `start < end <= rx_absolute_next`,
+            `barrier.absolute <= rx_absolute_next`를 검증하며 fresh 조건은 오직
+            `start_absolute >= barrier.absolute`다. completion 시각이나
+            `end_absolute >= barrier.absolute`로 대체하지 않는다.
+            response/ACK barrier 전에 header 1/31/32 byte 또는 payload 마지막 1 byte까지 시작된 snapshot은 barrier
+            뒤 완성돼도 stale이고, barrier와 같은 offset에서 새 header가 시작한 frame만 fresh다. range/counter
+            overflow, parser offset 불일치, barrier 역전은 allocation/consume/semantic/ledger/TX 0의 protocol
+            terminal이다. `RxRange`는 copyable observation DTO이지 cleanup/commit permit이 아니다. e/f2가 barrier를
+            authority로 저장할 때는 recovery origin/epoch/phase와 `RxIdentity`를 별도 final-address permit에
+            seal하고 stale/double/cross-storage commit을 차단한다.
+
+            d1 component gate는 Debug/ReleaseFast에서 다음을 독립 fixture로 고정한다.
+
+            - header 1/31/32-byte split, payload 마지막 1-byte split, 1-byte drip과 한 read의 2개 이상 complete
+              frame이 연속 gap/overlap 없는 half-open range를 만든다.
+            - optional skipped+known frame도 각각 range와 budget 하나를 가지며 incomplete는 range를 반환하지 않는다.
+            - full consume, compaction threshold 전후, normalize/rebind 성공 뒤 unread bytes와 bind-local offset 0을
+              보존한다. normalize OOM/malformed는 source/provenance mutation 0이다.
+            - forged `head>len`, `len>capacity`, structurally invalid zero-cap/range/known-owner alias,
+              allocator/major drift, parser/provenance/backing exact·partial alias와 parser seal mismatch는 backing
+              dereference/panic 없이 typed terminal이다.
+            - append replacement와 payload allocation callback이 parser head/backing/content, provenance,
+              expected-start 또는 caller read bytes를 바꾸면 callback 반환 뒤 source consume/publish 0으로 terminal이다.
+              allocation fail-index, prepared abandon, copied/moved/stale/double commit/deinit과 cleanup callback
+              재변조도 exact-once free 또는 bounded quarantine으로 닫는다.
+            - `u64` max-1/max/exhaustion, checked sub/add underflow/overflow, resident exact/cap+1과 read min 계산을
+              syscall-injected oracle로 검증한다.
+            - response barrier 전 header/payload가 시작된 stale case와 같은 read의 response→snapshot fresh,
+              snapshot→response stale, ACK watermark 전 partial→후 complete stale를 검증한다.
+            - external transfer/adoption seal은 provenance exact carry와 drift rejection, moved/dead tombstone을
+              검증한다. cross-storage/prior-bind identity range·watermark는 offset이 같아도 거부한다.
+              1-byte drip N bytes의 persistent content-hash work는 0이고 total ephemeral hashed bytes는 실제
+              allocated/copied unread+frame bytes의 선형 상한임을 counter oracle로 검증한다.
+              d2의 EAGAIN/read-interest/64-frame scheduling과 e/f2의 sealed barrier commit/stale·double permit은
+              후속 gate다.
 
           - **2b2d2 — bounded demux + authority barrier:** buffered inherited events, parser outcomes, 새 socket
             RX를 이 순서로 처리하고 authority/revoke/terminal을 판정한 뒤에만 TX write/admission을 허용한다.

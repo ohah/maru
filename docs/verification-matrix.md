@@ -59,7 +59,7 @@
 > inherited blocker와 teardown만 허용하며 exact take/correlation은 2b2f2에서 개방한다.
 > owner가 nonempty 가능해지기 전 d2b3a teardown capability가 항상 선행해야 한다. d2b3d까지 전부
 > green이기 전에는 d2b3 또는 d2b를 완료로 표시하지 않는다.
-> 현재 **d2b3a~b는 구현**, d2b3c~d는 구현 전이다. d2b3a 증거는 private final-address owner 3종,
+> 현재 **d2b3a~c는 구현**, d2b3d는 구현 전이다. d2b3a 증거는 private final-address owner 3종,
 > 공통 `ResponsePayloadSeal`·`FrozenResponsePayloadCleanup`, partial 1+screen 64+response의 canonical aggregate
 > teardown, 동일 `LiveOwnerBlockerProjection`의 true→tombstone false, descriptor/content/allocator drift의
 > callback 전 거부, storage/cleanup scratch/ledger authority alias 거부, callback 재진입 차단, ledger/owner
@@ -128,9 +128,14 @@
 > module-public unchecked seam은 pump exact-one callsite 외 0이다. prepared permit abort는 dispositions unused와
 > permit aborted를 먼저 만들고, consumed/aborted만 canonical reset할 수 있다. abort도 checked consume과 같은
 > sealed batch/ledger/disposition validator를 통과해야 하므로 drift된 graph에서는 output/permit을 포함한 mutation
-> 0이다. 아직 남은 screen transfer·intent permit·aggregate reservation/core는 whole-graph alias preflight,
-> staging/mutation abort와 pump exact-one caller를 같은 변경에서 원자적으로 닫는다. 이 결합 없이 중간 staging
-> owner나 scalar proof API만 먼저 공개하지 않는다.
+> 0이다. d2b3c 증거는 heap-pinned aggregate reservation의 allocation fail-index/callback authority drift,
+> copied lease·copied intent handle, ledger/intent/destination seal·backing drift의 mutation 0, intent-index 고정
+> writer 순서, response/metadata/resize/authority와 screen의 혼합 성공·late-terminal 전체 abort,
+> classified→neutral-owned→ledger-owned→ledger-prepare-rejected→mutation-bound→finalized owner graph의
+> teardown exact-one, intent→neutral→retirement cleanup과 committed destination teardown, cleanup descriptor
+> exact 322/cap+1, Debug/ReleaseFast `test-session-host`, unchecked ledger consume exact-one 및 no-fail suffix
+> 재분류·checked increment 0 boundary다. ReleaseFast suite는 macOS PR CI에서도 별도 실행한다.
+> d2b3c callsite는 계속 module-private/test-only이며 제품 buffered traversal·FIFO consume은 d2b3d에서만 연다.
 > full `RxRange`를 4,096 slot에 저장하는 구현이나 `ExternalPumpStorage` 512 KiB inline cap 증가는 허용하지 않는다.
 >
 > c3b 행의 `descriptor/len/cap/alias ABA`는 최종 상태 drift/stale-plan 검출을 뜻한다. A→B→A

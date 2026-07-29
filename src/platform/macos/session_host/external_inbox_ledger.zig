@@ -6,6 +6,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const frozen_cleanup_guard = @import("frozen_cleanup_guard.zig");
+const owner_cleanup = @import("external_owner_cleanup.zig");
 const limits = @import("external_inbox_limits.zig");
 const owner_seal = @import("external_owner_seal.zig");
 const owner_range = @import("external_owner_range.zig");
@@ -727,6 +728,26 @@ pub const PreparedLiveRetirement = struct {
     }
 };
 
+const LiveBatchAbortLifecycle = enum {
+    empty,
+    prepared,
+    committed,
+    spent,
+};
+
+pub const FrozenLiveBatchAbort = struct {
+    saved_self_addr: usize = 0,
+    ledger_addr: usize = 0,
+    batch_addr: usize = 0,
+    cleanup: [max_live_cleanup_owners]owner_cleanup.FrozenOwnerCleanupDescriptor =
+        [_]owner_cleanup.FrozenOwnerCleanupDescriptor{.{}} **
+        max_live_cleanup_owners,
+    cleanup_count: u8 = 0,
+    cleanup_bytes: usize = 0,
+    lifecycle: LiveBatchAbortLifecycle = .empty,
+    digest: owner_seal.Digest = [_]u8{0} ** 32,
+};
+
 pub const PreparedLiveMutation = union(enum) {
     empty,
     admission: PreparedLiveAdmission,
@@ -834,6 +855,8 @@ comptime {
         @compileError("aggregate live commit state exceeded its heap scratch budget");
     if (@sizeOf(LiveSimulation) > max_live_commit_local_bytes)
         @compileError("live commit simulation exceeded its stack-local budget");
+    if (@sizeOf(FrozenLiveBatchAbort) > max_live_commit_local_bytes)
+        @compileError("frozen live batch abort exceeded its stack-local budget");
 }
 
 pub const PrepareLiveError = std.mem.Allocator.Error || error{
@@ -2091,6 +2114,21 @@ fn preparedLiveCommitDigest(
     return writer.finish();
 }
 
+fn frozenLiveBatchAbortDigest(
+    permit: *const FrozenLiveBatchAbort,
+) owner_seal.Digest {
+    var writer = owner_seal.Writer.init("MARULBA1");
+    writer.writeUsize(permit.saved_self_addr);
+    writer.writeUsize(permit.ledger_addr);
+    writer.writeUsize(permit.batch_addr);
+    writer.writeU8(permit.cleanup_count);
+    writer.writeUsize(permit.cleanup_bytes);
+    writer.writeU8(@intFromEnum(permit.lifecycle));
+    for (permit.cleanup[0..permit.cleanup_count]) |descriptor|
+        writer.writeBytes(&descriptor.digest);
+    return writer.finish();
+}
+
 fn liveAccountingDigest(
     ledger: *const ExternalInboxLedger,
 ) owner_seal.Digest {
@@ -2872,6 +2910,38 @@ pub const ExternalInboxLedger = struct {
         return .{ .planned = @intCast(index) };
     }
 
+    pub fn validatePreparedLiveAdmissionBinding(
+        self: *const ExternalInboxLedger,
+        batch: *const PreparedLiveBatch,
+        mutation_index: u8,
+        semantic: PayloadSemantic,
+        payload_digest: owner_seal.Digest,
+    ) bool {
+        if (batch.saved_self_addr != @intFromPtr(batch) or
+            batch.ledger_addr != @intFromPtr(self) or
+            mutation_index >= batch.mutation_count)
+            return false;
+        const admission = switch (batch.mutations[mutation_index]) {
+            .admission => |*value| value,
+            else => return false,
+        };
+        return admission.saved_self_addr ==
+            @intFromPtr(&batch.mutations[mutation_index]) and
+            admission.batch_addr == @intFromPtr(batch) and
+            admission.ledger_addr == @intFromPtr(self) and
+            std.meta.eql(admission.semantic, semantic) and
+            std.mem.eql(
+                u8,
+                &payload_digest,
+                &owner_cleanup.contentDigest(admission.owned_payload.bytes()),
+            ) and
+            std.mem.eql(
+                u8,
+                &admission.digest,
+                &liveMutationDigest(batch, mutation_index),
+            );
+    }
+
     pub fn prepareLiveMerge(
         self: *ExternalInboxLedger,
         batch: *PreparedLiveBatch,
@@ -3508,6 +3578,28 @@ pub const ExternalInboxLedger = struct {
             return error.StalePlan;
     }
 
+    pub fn validatePreparedLiveCommit(
+        self: *ExternalInboxLedger,
+        batch: *const PreparedLiveBatch,
+        retirement: *const PreparedLiveRetirement,
+        dispositions: *const [max_live_mutations]LiveCommitDisposition,
+        permit: *const PreparedLiveCommit,
+        aggregate_addr: usize,
+        storage_addr: usize,
+        turn_generation: u64,
+    ) bool {
+        self.validatePreparedLiveCommitPermit(
+            batch,
+            retirement,
+            dispositions,
+            permit,
+            aggregate_addr,
+            storage_addr,
+            turn_generation,
+        ) catch return false;
+        return true;
+    }
+
     fn consumePreparedLiveCommitChecked(
         self: *ExternalInboxLedger,
         batch: *PreparedLiveBatch,
@@ -3613,6 +3705,227 @@ pub const ExternalInboxLedger = struct {
             return false;
         permit.* = .{};
         return true;
+    }
+
+    pub fn prepareLiveBatchAbort(
+        self: *ExternalInboxLedger,
+        batch: *PreparedLiveBatch,
+        out: *FrozenLiveBatchAbort,
+    ) CommitLiveError!void {
+        if (out.saved_self_addr != 0 or out.lifecycle != .empty or
+            !std.mem.allEqual(u8, &out.digest, 0))
+            return error.InvalidPlan;
+        if (batch.saved_self_addr != @intFromPtr(batch) or
+            batch.ledger_addr != @intFromPtr(self) or
+            (batch.lifecycle != .preparing and batch.lifecycle != .prepared))
+            return error.InvalidPlan;
+        if (!batchOwnedAbortValid(self, batch)) return error.StalePlan;
+        if (rangesOverlap(rangeOfValue(out), rangeOfValue(self)) or
+            rangesOverlap(rangeOfValue(out), rangeOfValue(batch)) or
+            rangeOverlapsActive(rangeOfValue(out), self))
+            return error.InvalidAlias;
+
+        var owners =
+            [_]?*OwnedPayload{null} ** max_live_cleanup_owners;
+        var count: usize = 0;
+        var bytes: usize = 0;
+        for (batch.mutations[0..batch.mutation_count]) |*mutation| switch (mutation.*) {
+            .admission => |*admission| {
+                if (admission.owned_payload.logical_len != 0) {
+                    if (count == owners.len) return error.InvalidPlan;
+                    owners[count] = &admission.owned_payload;
+                    count += 1;
+                }
+            },
+            .merge => |*merge| {
+                switch (merge.source) {
+                    .owned => |*source| if (source.logical_len != 0) {
+                        if (count == owners.len) return error.InvalidPlan;
+                        owners[count] = source;
+                        count += 1;
+                    },
+                    .existing => {},
+                }
+                switch (merge.replacement) {
+                    .prebuilt => |*replacement| if (replacement.logical_len != 0) {
+                        if (count == owners.len) return error.InvalidPlan;
+                        owners[count] = replacement;
+                        count += 1;
+                    },
+                    .coalesced => {},
+                }
+            },
+            else => {},
+        };
+        for (batch.coalesced_replacements[0..batch.replacement_count]) |*replacement| {
+            if (replacement.logical_len == 0) continue;
+            if (count == owners.len) return error.InvalidPlan;
+            owners[count] = replacement;
+            count += 1;
+        }
+        for (owners[0..count], 0..) |owner_optional, index| {
+            const owner = owner_optional.?;
+            const payload_range = rangeOfPayload(owner);
+            if (rangesOverlap(rangeOfValue(out), payload_range))
+                return error.InvalidAlias;
+            for (owners[0..index]) |prior_optional|
+                if (rangesOverlap(payload_range, rangeOfPayload(prior_optional.?)))
+                    return error.InvalidAlias;
+            bytes = std.math.add(
+                usize,
+                bytes,
+                owner.logical_len,
+            ) catch return error.ByteCapExceeded;
+        }
+
+        out.* = .{
+            .saved_self_addr = @intFromPtr(out),
+            .ledger_addr = @intFromPtr(self),
+            .batch_addr = @intFromPtr(batch),
+            .cleanup_count = @intCast(count),
+            .cleanup_bytes = bytes,
+            .lifecycle = .prepared,
+            .digest = undefined,
+        };
+        for (owners[0..count], 0..) |owner_optional, index|
+            owner_cleanup.freezeOwnedSlice(
+                &out.cleanup[index],
+                owner_optional.?.allocator,
+                @constCast(owner_optional.?.bytes()),
+            ) catch unreachable;
+        out.digest = frozenLiveBatchAbortDigest(out);
+    }
+
+    pub fn validatePreparedLiveBatchAbort(
+        self: *ExternalInboxLedger,
+        batch: *PreparedLiveBatch,
+        permit: *const FrozenLiveBatchAbort,
+    ) bool {
+        if (permit.saved_self_addr != @intFromPtr(permit) or
+            permit.ledger_addr != @intFromPtr(self) or
+            permit.batch_addr != @intFromPtr(batch) or
+            permit.cleanup_count > max_live_cleanup_owners or
+            permit.lifecycle != .prepared or
+            !std.mem.eql(
+                u8,
+                &permit.digest,
+                &frozenLiveBatchAbortDigest(permit),
+            ) or
+            !batchOwnedAbortValid(self, batch))
+            return false;
+        var bytes: usize = 0;
+        for (permit.cleanup[0..permit.cleanup_count]) |*descriptor| {
+            if (!owner_cleanup.validate(descriptor)) return false;
+            bytes = std.math.add(
+                usize,
+                bytes,
+                descriptor.allocation_len,
+            ) catch return false;
+        }
+        return bytes == permit.cleanup_bytes;
+    }
+
+    pub fn commitLiveBatchAbortUnchecked(
+        self: *ExternalInboxLedger,
+        batch: *PreparedLiveBatch,
+        permit: *FrozenLiveBatchAbort,
+    ) void {
+        _ = self;
+        for (batch.mutations[0..batch.mutation_count]) |*mutation| {
+            switch (mutation.*) {
+                .admission => |*admission| {
+                    admission.owned_payload =
+                        OwnedPayload.empty(admission.owned_payload.allocator);
+                },
+                .merge => |*merge| {
+                    switch (merge.source) {
+                        .owned => |*source| source.* =
+                            OwnedPayload.empty(source.allocator),
+                        .existing => {},
+                    }
+                    switch (merge.replacement) {
+                        .prebuilt => |*replacement| replacement.* =
+                            OwnedPayload.empty(replacement.allocator),
+                        .coalesced => {},
+                    }
+                },
+                else => {},
+            }
+            mutation.* = .aborted;
+        }
+        for (batch.coalesced_replacements[0..batch.replacement_count]) |*replacement|
+            replacement.* = OwnedPayload.empty(replacement.allocator);
+        batch.* = .{ .lifecycle = .aborted };
+        permit.lifecycle = .committed;
+        permit.digest = frozenLiveBatchAbortDigest(permit);
+    }
+
+    pub fn finishFrozenLiveBatchAbort(
+        permit: *FrozenLiveBatchAbort,
+    ) AbortLiveResult {
+        if (permit.saved_self_addr != @intFromPtr(permit) or
+            permit.lifecycle != .committed or
+            permit.cleanup_count > max_live_cleanup_owners or
+            !std.mem.eql(
+                u8,
+                &permit.digest,
+                &frozenLiveBatchAbortDigest(permit),
+            ))
+            return .ignored_untrusted;
+        var local =
+            [_]owner_cleanup.FrozenOwnerCleanupDescriptor{.{}} **
+            max_live_cleanup_owners;
+        const count = permit.cleanup_count;
+        for (permit.cleanup[0..count], 0..) |*descriptor, index|
+            owner_cleanup.moveFrozen(descriptor, &local[index]) catch
+                return .quarantined;
+        permit.lifecycle = .spent;
+        permit.digest = frozenLiveBatchAbortDigest(permit);
+        var result: AbortLiveResult = .aborted;
+        for (local[0..count]) |*descriptor| {
+            if (owner_cleanup.finishCallbackHidden(descriptor) != .cleaned) {
+                result = .quarantined;
+            }
+        }
+        return result;
+    }
+
+    pub fn validateLiveBatchAbortCleanupMove(
+        permit: *const FrozenLiveBatchAbort,
+        out: []const owner_cleanup.FrozenOwnerCleanupDescriptor,
+    ) bool {
+        if (permit.saved_self_addr != @intFromPtr(permit) or
+            permit.lifecycle != .prepared or
+            out.len != permit.cleanup_count or
+            !std.mem.eql(
+                u8,
+                &permit.digest,
+                &frozenLiveBatchAbortDigest(permit),
+            ) or rangesOverlap(
+            rangeOfSlice(
+                owner_cleanup.FrozenOwnerCleanupDescriptor,
+                permit.cleanup[0..permit.cleanup_count],
+            ),
+            rangeOfSlice(
+                owner_cleanup.FrozenOwnerCleanupDescriptor,
+                out,
+            ),
+        ))
+            return false;
+        for (permit.cleanup[0..permit.cleanup_count], out) |*source, *destination|
+            owner_cleanup.validateMoveFrozen(source, destination) catch
+                return false;
+        return true;
+    }
+
+    pub fn moveCommittedLiveBatchAbortCleanupUnchecked(
+        permit: *FrozenLiveBatchAbort,
+        out: []owner_cleanup.FrozenOwnerCleanupDescriptor,
+    ) void {
+        for (permit.cleanup[0..permit.cleanup_count], out) |*source, *destination|
+            owner_cleanup.moveFrozenUnchecked(source, destination);
+        permit.lifecycle = .spent;
+        permit.digest = frozenLiveBatchAbortDigest(permit);
     }
 
     /// Callback-free mutation leaf. All hostile validation and every fallible branch end in
@@ -3754,43 +4067,17 @@ pub const ExternalInboxLedger = struct {
             batch.* = .{ .lifecycle = .aborted };
             return .quarantined;
         }
-        var cleanup: [max_live_cleanup_owners + max_live_mutations]OwnedPayload =
-            [_]OwnedPayload{.{ .allocator = std.heap.page_allocator }} **
-            (max_live_cleanup_owners + max_live_mutations);
-        var count: usize = 0;
-        for (batch.mutations[0..batch.mutation_count]) |*mutation| {
-            switch (mutation.*) {
-                .admission => |*admission| {
-                    cleanup[count] = admission.owned_payload.take();
-                    count += 1;
-                },
-                .merge => |*merge| {
-                    switch (merge.source) {
-                        .owned => |*source| {
-                            cleanup[count] = source.take();
-                            count += 1;
-                        },
-                        .existing => {},
-                    }
-                    switch (merge.replacement) {
-                        .prebuilt => |*replacement| {
-                            cleanup[count] = replacement.take();
-                            count += 1;
-                        },
-                        .coalesced => {},
-                    }
-                },
-                else => {},
-            }
-            mutation.* = .aborted;
+        var permit: FrozenLiveBatchAbort = .{};
+        self.prepareLiveBatchAbort(batch, &permit) catch {
+            batch.* = .{ .lifecycle = .aborted };
+            return .quarantined;
+        };
+        if (!self.validatePreparedLiveBatchAbort(batch, &permit)) {
+            batch.* = .{ .lifecycle = .aborted };
+            return .quarantined;
         }
-        for (batch.coalesced_replacements[0..batch.replacement_count]) |*replacement| {
-            cleanup[count] = replacement.take();
-            count += 1;
-        }
-        batch.* = .{ .lifecycle = .aborted };
-        for (cleanup[0..count]) |*payload| payload.deinit();
-        return .aborted;
+        self.commitLiveBatchAbortUnchecked(batch, &permit);
+        return finishFrozenLiveBatchAbort(&permit);
     }
 
     fn requirePreparingLiveBatch(
@@ -3992,6 +4279,20 @@ pub const ExternalInboxLedger = struct {
             if (!slot.active and !slot.retired) continue;
             const range = rangeOfPayload(&slot.payload);
             try out.append(range.start, range.end - range.start);
+        }
+    }
+
+    pub fn appendActiveOwnerRanges(
+        self: *const ExternalInboxLedger,
+        out: *owner_range.Scratch,
+    ) owner_range.Error!void {
+        if (self.teardown_active or self.draining_or_drained)
+            return error.InvalidRange;
+        for (self.slots) |slot| {
+            if (!slot.active and !slot.retired) continue;
+            const range = rangeOfPayload(&slot.payload);
+            if (range.start != range.end)
+                try out.append(range.start, range.end - range.start);
         }
     }
 
@@ -7112,6 +7413,101 @@ test "live commit abort rejects hostile drift without partial mutation" {
         ),
     );
     _ = ledger.abortPreparedLiveBatch(&batch);
+}
+
+test "live batch abort freezes ownership before callback-free tombstone" {
+    const allocator = std.testing.allocator;
+    var ledger: ExternalInboxLedger = .{};
+    const identity = external_rx_types.RxIdentity{
+        .attach_instance_id = 5104,
+        .destination_slot_addr = 0x510400,
+    };
+    var batch: PreparedLiveBatch = .{};
+    try ledger.beginLiveBatch(&batch, allocator, identity);
+    var payload = try owned(allocator, "frozen-abort");
+    _ = try ledger.prepareLiveAdmission(
+        &batch,
+        .{ .completed = .{
+            .stream_id = 74,
+            .is_snapshot = false,
+            .provenance = .{ .external = .{
+                .start_absolute = 1200,
+                .span = protocol.header_size + "frozen-abort".len,
+            } },
+        } },
+        &payload,
+    );
+    try ledger.finishLiveBatch(&batch);
+    const payload_addr =
+        batch.mutations[0].admission.owned_payload.allocation_ptr.?;
+    var permit: FrozenLiveBatchAbort = .{};
+    try ledger.prepareLiveBatchAbort(&batch, &permit);
+    try std.testing.expectEqual(LiveBatchAbortLifecycle.prepared, permit.lifecycle);
+    try std.testing.expectEqual(@as(u8, 1), permit.cleanup_count);
+    try std.testing.expectEqual(
+        @intFromPtr(payload_addr),
+        permit.cleanup[0].allocation_addr,
+    );
+    try std.testing.expect(ledger.validatePreparedLiveBatchAbort(
+        &batch,
+        &permit,
+    ));
+    try std.testing.expect(batch.mutations[0] == .admission);
+
+    ledger.commitLiveBatchAbortUnchecked(&batch, &permit);
+    try std.testing.expectEqual(PreparedLiveBatchLifecycle.aborted, batch.lifecycle);
+    try std.testing.expectEqual(LiveBatchAbortLifecycle.committed, permit.lifecycle);
+    try std.testing.expectEqual(
+        AbortLiveResult.aborted,
+        ExternalInboxLedger.finishFrozenLiveBatchAbort(&permit),
+    );
+    try std.testing.expectEqual(LiveBatchAbortLifecycle.spent, permit.lifecycle);
+}
+
+test "live batch abort validation rejects drift without tombstoning owners" {
+    const allocator = std.testing.allocator;
+    var ledger: ExternalInboxLedger = .{};
+    const identity = external_rx_types.RxIdentity{
+        .attach_instance_id = 5105,
+        .destination_slot_addr = 0x510500,
+    };
+    var batch: PreparedLiveBatch = .{};
+    try ledger.beginLiveBatch(&batch, allocator, identity);
+    var payload = try owned(allocator, "abort-seal");
+    _ = try ledger.prepareLiveAdmission(
+        &batch,
+        .{ .completed = .{
+            .stream_id = 75,
+            .is_snapshot = false,
+            .provenance = .{ .external = .{
+                .start_absolute = 1300,
+                .span = protocol.header_size + "abort-seal".len,
+            } },
+        } },
+        &payload,
+    );
+    try ledger.finishLiveBatch(&batch);
+    var permit: FrozenLiveBatchAbort = .{};
+    try ledger.prepareLiveBatchAbort(&batch, &permit);
+    const before_batch = batch;
+    const before_permit = permit;
+    batch.digest[0] ^= 1;
+    try std.testing.expect(!ledger.validatePreparedLiveBatchAbort(
+        &batch,
+        &permit,
+    ));
+    try std.testing.expect(std.meta.eql(before_permit, permit));
+    batch.digest[0] ^= 1;
+    try std.testing.expect(std.meta.eql(before_batch, batch));
+    try std.testing.expect(ledger.validatePreparedLiveBatchAbort(
+        &batch,
+        &permit,
+    ));
+    ledger.commitLiveBatchAbortUnchecked(&batch, &permit);
+    try std.testing.expectEqual(
+        AbortLiveResult.aborted,
+        ExternalInboxLedger.finishFrozenLiveBatchAbort(&permit),
+    );
 }
 
 test "live commit permit rejects active payload alias before output write" {

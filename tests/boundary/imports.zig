@@ -1,5 +1,26 @@
 const std = @import("std");
 
+test "session host neutral cleanup leaf has no owner reverse dependencies" {
+    const allocator = std.testing.allocator;
+    const source = try readZigFileZ(
+        allocator,
+        "src/platform/macos/session_host/external_owner_cleanup.zig",
+    );
+    defer allocator.free(source);
+    const forbidden = [_][]const u8{
+        "client_external_pump",
+        "external_rx_intent",
+        "external_inbox_ledger",
+        "external_event_materialization",
+        "client.zig",
+    };
+    for (forbidden) |needle|
+        try std.testing.expectEqual(
+            @as(usize, 0),
+            countOccurrences(source, needle),
+        );
+}
+
 test "d2b3b classified intent mechanics stay private and test-only at the pump boundary" {
     const allocator = std.testing.allocator;
     const root = "src/platform/macos/session_host";
@@ -621,8 +642,99 @@ test "session host unchecked teardown authority cannot escape anywhere in src" {
         .{
             .name = "consumePreparedLiveCommitUnchecked",
             .owner_suffixes = &.{"platform/macos/session_host/external_inbox_ledger.zig"},
-            // The ledger-first d2b3c slice publishes the capability before the
-            // aggregate core opens its sole product callsite.
+            .pump_references = 1,
+        },
+        .{
+            .name = "commitLiveBatchAbortUnchecked",
+            .owner_suffixes = &.{"platform/macos/session_host/external_inbox_ledger.zig"},
+            .pump_references = 1,
+        },
+        .{
+            .name = "commitMovedIntentPayloadTransferUnchecked",
+            .owner_suffixes = &.{"platform/macos/session_host/external_rx_intent.zig"},
+            .pump_references = 1,
+        },
+        .{
+            .name = "commitOwnerMetadataCleanupOnlyUnchecked",
+            .owner_suffixes = &.{"platform/macos/session_host/external_event_materialization.zig"},
+            .pump_references = 1,
+        },
+        .{
+            .name = "commitOwnerMetadataPublishFirstUnchecked",
+            .owner_suffixes = &.{"platform/macos/session_host/external_event_materialization.zig"},
+            .pump_references = 1,
+        },
+        .{
+            .name = "commitOwnerMetadataReplaceNewerUnchecked",
+            .owner_suffixes = &.{"platform/macos/session_host/external_event_materialization.zig"},
+            .pump_references = 1,
+        },
+        .{
+            .name = "commitFrozenCleanupToDescriptorUnchecked",
+            .owner_suffixes = &.{"platform/macos/session_host/external_event_materialization.zig"},
+            .pump_references = 1,
+        },
+        .{
+            .name = "commitLiveMetadataAbortUnchecked",
+            .owner_suffixes = &.{"platform/macos/session_host/external_event_materialization.zig"},
+            .pump_references = 1,
+        },
+        .{
+            .name = "commitNeutralRetirementUnchecked",
+            .owner_suffixes = &.{"platform/macos/session_host/external_rx_intent.zig"},
+            .pump_references = 1,
+        },
+        .{
+            .name = "commitIntentAbortUnchecked",
+            .owner_suffixes = &.{"platform/macos/session_host/external_rx_intent.zig"},
+            .pump_references = 1,
+        },
+        .{
+            .name = "consumePreparedIntentCommitUnchecked",
+            .owner_suffixes = &.{"platform/macos/session_host/external_rx_intent.zig"},
+            .pump_references = 1,
+        },
+        .{
+            .name = "moveCommittedLiveBatchAbortCleanupUnchecked",
+            .owner_suffixes = &.{"platform/macos/session_host/external_inbox_ledger.zig"},
+            .pump_references = 1,
+        },
+        .{
+            .name = "moveCommittedIntentAbortCleanupUnchecked",
+            .owner_suffixes = &.{"platform/macos/session_host/external_rx_intent.zig"},
+            .pump_references = 1,
+        },
+        .{
+            .name = "moveFrozenUnchecked",
+            .owner_suffixes = &.{
+                "platform/macos/session_host/external_owner_cleanup.zig",
+                "platform/macos/session_host/external_inbox_ledger.zig",
+                "platform/macos/session_host/external_rx_intent.zig",
+            },
+            .pump_references = 4,
+        },
+        .{
+            .name = "freezeOwnedSliceUnchecked",
+            .owner_suffixes = &.{
+                "platform/macos/session_host/external_owner_cleanup.zig",
+                "platform/macos/session_host/external_event_materialization.zig",
+            },
+            .pump_references = 0,
+        },
+        .{
+            .name = "freezeOwnedSliceAlignedUnchecked",
+            .owner_suffixes = &.{
+                "platform/macos/session_host/external_owner_cleanup.zig",
+            },
+            .pump_references = 2,
+        },
+        .{
+            .name = "freezeOwnedSliceFromSealUnchecked",
+            .owner_suffixes = &.{
+                "platform/macos/session_host/external_owner_cleanup.zig",
+                "platform/macos/session_host/external_event_materialization.zig",
+                "platform/macos/session_host/external_rx_intent.zig",
+            },
             .pump_references = 0,
         },
     };
@@ -663,7 +775,7 @@ test "session host unchecked teardown authority cannot escape anywhere in src" {
             }
         }
     }
-    try std.testing.expectEqual(@as(usize, 11), unchecked_declarations);
+    try std.testing.expectEqual(@as(usize, 27), unchecked_declarations);
     for (symbols) |symbol| {
         var pump_references: usize = 0;
         var dir = try std.Io.Dir.cwd().openDir(std.testing.io, "src", .{ .iterate = true });
@@ -968,8 +1080,9 @@ test "session host live commit permit keeps checked consume ledger-private" {
     }
     try std.testing.expectEqual(@as(usize, 0), checked_outside_ledger);
     try std.testing.expectEqual(@as(usize, 1), unchecked_definitions);
-    // d2b3c opens this exact-one product callsite; the ledger-only first slice keeps it at zero.
-    try std.testing.expect(unchecked_pump_calls <= 1);
+    // d2b3c opens exactly one product callsite. Both removing it and bypassing the aggregate with
+    // another caller violate the single-writer boundary.
+    try std.testing.expectEqual(@as(usize, 1), unchecked_pump_calls);
 }
 
 fn countOccurrences(haystack: []const u8, needle: []const u8) usize {
@@ -1375,7 +1488,10 @@ test "validated metadata token construction and materialization stay in classifi
             "materializeExactEventMetadata",
         );
         if (exact_event_materializer_refs != 0)
-            try std.testing.expect(is_metadata_wire or is_client);
+            try std.testing.expect(
+                is_metadata_wire or is_client or
+                    is_external_event_materialization,
+            );
 
         inline for (.{
             "sealOwnedMetadataDto",
@@ -1523,6 +1639,13 @@ test "d2b3a live owner substrate stays private and has no product writer" {
                 "storage.live_partial = .{ .assembling",
             ),
         );
+        // d2b3c's test-only aggregate writer publishes through the exact presealed destination
+        // address instead of naming the persistent field a second time. Keep that fixed writer
+        // unique; d2b3d is the gate that may add the product traversal callsite.
+        try std.testing.expectEqual(
+            @as(usize, 1),
+            std.mem.count(u8, source, "target.* = .{ .assembling"),
+        );
         try std.testing.expectEqual(
             @as(usize, 1),
             std.mem.count(
@@ -1545,6 +1668,10 @@ test "d2b3a live owner substrate stays private and has no product writer" {
         );
         try std.testing.expectEqual(
             @as(usize, 1),
+            std.mem.count(u8, source, "target.* = .{ .pending"),
+        );
+        try std.testing.expectEqual(
+            @as(usize, 1),
             std.mem.count(
                 u8,
                 activation_source,
@@ -1552,8 +1679,92 @@ test "d2b3a live owner substrate stays private and has no product writer" {
             ),
         );
         try std.testing.expectEqual(
+            @as(usize, 1),
+            std.mem.count(
+                u8,
+                source,
+                "fn commitResponseDestinationPlanUnchecked(",
+            ),
+        );
+        try std.testing.expectEqual(
+            @as(usize, 1),
+            std.mem.count(
+                u8,
+                source,
+                "commitResponseDestinationPlanUnchecked(\n            storage,\n            @ptrFromInt(write.prepared_backing_addr),",
+            ),
+        );
+        try std.testing.expectEqual(
             @as(usize, 0),
             std.mem.count(u8, source, "self.live_partial = .{ .assembling"),
+        );
+        const aggregate_commit_start = std.mem.indexOf(
+            u8,
+            source,
+            "    fn commitRxAggregate(",
+        ) orelse return error.TestUnexpectedResult;
+        const aggregate_commit_tail = source[aggregate_commit_start..];
+        const aggregate_commit_end = std.mem.indexOfPos(
+            u8,
+            aggregate_commit_tail,
+            4,
+            "\n    fn ",
+        ) orelse return error.TestUnexpectedResult;
+        const aggregate_commit_source =
+            aggregate_commit_tail[0..aggregate_commit_end];
+        const first_test = std.mem.indexOf(u8, source, "\ntest \"") orelse
+            return error.TestUnexpectedResult;
+        const product_source = source[0..first_test];
+        try std.testing.expectEqual(
+            @as(usize, 1),
+            std.mem.count(u8, product_source, "commitRxAggregate("),
+        );
+        // The declaration is the only pre-test occurrence. Test-only product exercises may grow
+        // with the hostile matrix without weakening the no-product-caller boundary.
+        try std.testing.expect(
+            std.mem.count(u8, source, "commitRxAggregate(") >= 2,
+        );
+        try std.testing.expectEqual(
+            @as(usize, 0),
+            std.mem.count(
+                u8,
+                aggregate_commit_source,
+                "commitScreenDestinationPlanUnchecked(",
+            ),
+        );
+        try std.testing.expectEqual(
+            @as(usize, 1),
+            std.mem.count(
+                u8,
+                aggregate_commit_source,
+                "commitDestinationWriteUnchecked(self, aggregate, write)",
+            ),
+        );
+        // The suffix consumes the presealed writer kind; it must not reinterpret the ledger
+        // disposition after the aggregate has crossed the commit barrier.
+        try std.testing.expectEqual(
+            @as(usize, 0),
+            std.mem.count(
+                u8,
+                source,
+                "aggregate.dispositions[write.mutation_index]",
+            ),
+        );
+        try std.testing.expectEqual(
+            @as(usize, 0),
+            std.mem.count(
+                u8,
+                aggregate_commit_source,
+                "commitEventScalarDestinationsUnchecked",
+            ),
+        );
+        try std.testing.expectEqual(
+            @as(usize, 0),
+            std.mem.count(
+                u8,
+                product_source,
+                "storage.live_screen.len += 1",
+            ),
         );
         try std.testing.expectEqual(
             @as(usize, 0),
@@ -1582,15 +1793,18 @@ test "d2b3a live owner substrate stays private and has no product writer" {
             @as(usize, 1),
             std.mem.count(u8, source, "self.pending_response == .none"),
         );
-        inline for (.{
-            "storage.live_partial =",
-            "storage.live_screen =",
-            "storage.pending_response =",
-        }) |fixture_lhs|
-            try std.testing.expectEqual(
-                @as(usize, 1),
-                std.mem.count(u8, source, fixture_lhs),
-            );
+        try std.testing.expectEqual(
+            @as(usize, 1),
+            std.mem.count(u8, source, "storage.live_partial = .{"),
+        );
+        try std.testing.expectEqual(
+            @as(usize, 1),
+            std.mem.count(u8, source, "storage.live_screen ="),
+        );
+        try std.testing.expectEqual(
+            @as(usize, 2),
+            std.mem.count(u8, product_source, "storage.pending_response ="),
+        );
         try std.testing.expectEqual(
             @as(usize, 4),
             std.mem.count(u8, source, "self.live_partial = .terminal"),
@@ -1634,16 +1848,18 @@ test "d2b3a live owner substrate stays private and has no product writer" {
             std.mem.count(u8, source, "&self.pending_response"),
         );
         try std.testing.expectEqual(
-            @as(usize, 0),
+            @as(usize, 1),
             std.mem.count(u8, source, "&storage.live_partial"),
         );
         try std.testing.expectEqual(
-            @as(usize, 4),
+            @as(usize, 8),
             std.mem.count(u8, source, "&storage.live_screen"),
         );
         try std.testing.expectEqual(
+            // The product writer is the only pre-test whole-owner address borrow. Hostile
+            // fixtures may inspect a local storage owner without opening another product writer.
             @as(usize, 1),
-            std.mem.count(u8, source, "&storage.pending_response"),
+            std.mem.count(u8, product_source, "&storage.pending_response"),
         );
         try std.testing.expectEqual(
             @as(usize, 0),

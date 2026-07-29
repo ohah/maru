@@ -8,10 +8,13 @@ const std = @import("std");
 const client_external_mode = @import("client_external_mode.zig");
 const external_owner_seal = @import("external_owner_seal.zig");
 const external_owner_range = @import("external_owner_range.zig");
+const external_owner_cleanup = @import("external_owner_cleanup.zig");
 const external_rx_demux = @import("external_rx_demux.zig");
 const external_rx_types = @import("external_rx_types.zig");
 const framing = @import("framing.zig");
 const protocol = @import("protocol.zig");
+const runtime_event_types = @import("runtime_event_types.zig");
+const runtime_event_wire = @import("runtime_event_wire.zig");
 
 pub const max_intents: usize = 64;
 pub const max_authority_ranges: usize = external_owner_range.max_ranges;
@@ -62,6 +65,14 @@ const IntentLifecycle = enum {
     committed,
 };
 
+const MovedIntentPayloadLifecycle = enum {
+    empty,
+    owned,
+    moved,
+    aborted,
+    poisoned,
+};
+
 pub const HandleLifecycle = enum {
     empty,
     allocated,
@@ -106,9 +117,148 @@ const ClassifiedIntentOwner = struct {
     digest: external_owner_seal.Digest = [_]u8{0} ** 32,
 };
 
+pub const MovedIntentPayload = struct {
+    saved_self_addr: usize = 0,
+    source_intent_addr: usize = 0,
+    aggregate_addr: usize = 0,
+    allocator: std.mem.Allocator = std.heap.page_allocator,
+    allocator_ptr_addr: usize = 0,
+    allocator_vtable_addr: usize = 0,
+    allocation_addr: usize = 0,
+    allocation_len: usize = 0,
+    content_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    lifecycle: MovedIntentPayloadLifecycle = .empty,
+    digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+};
+
+pub const BorrowedMovedPayloadView = struct {
+    allocator: std.mem.Allocator,
+    allocation_addr: usize,
+    allocation_len: usize,
+    content_digest: external_owner_seal.Digest,
+};
+
+pub const BorrowedMovedScreenView = struct {
+    payload: BorrowedMovedPayloadView,
+    candidate: external_rx_demux.ScreenCandidate,
+};
+
+pub const BorrowedClassifiedEventView = struct {
+    payload: []const u8,
+    allocator: std.mem.Allocator,
+    payload_digest: external_owner_seal.Digest,
+    candidate: external_rx_demux.EventCandidate,
+};
+
+const ScreenMutationProofLifecycle = enum {
+    empty,
+    prepared,
+    consumed,
+};
+
+pub const StagedScreenMutationProof = struct {
+    saved_self_addr: usize = 0,
+    source_intent_addr: usize = 0,
+    aggregate_addr: usize = 0,
+    batch_addr: usize = 0,
+    intent_index: u8 = 0,
+    mutation_index: u8 = 0,
+    payload_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    lifecycle: ScreenMutationProofLifecycle = .empty,
+    digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+};
+
+const IntentCommitLifecycle = enum {
+    empty,
+    prepared,
+    consumed,
+    aborted,
+};
+
+pub const IntentCommitSlotKind = enum {
+    unused,
+    screen,
+    event,
+    response,
+};
+
+pub const PreparedIntentCommit = struct {
+    saved_self_addr: usize = 0,
+    handle_addr: usize = 0,
+    scratch_addr: usize = 0,
+    aggregate_addr: usize = 0,
+    aggregate_len: usize = 0,
+    proofs_addr: usize = 0,
+    neutral_outputs_addr: usize = 0,
+    proof_count: u8 = 0,
+    intent_count: u8 = 0,
+    final_parser_generation: u64 = 0,
+    final_end_absolute: u64 = 0,
+    slot_kinds: [max_intents]IntentCommitSlotKind =
+        [_]IntentCommitSlotKind{.unused} ** max_intents,
+    response_request_ids: [max_intents]u64 = [_]u64{0} ** max_intents,
+    source_parser_generations: [max_intents]u64 = [_]u64{0} ** max_intents,
+    source_owner_digests: [max_intents]external_owner_seal.Digest =
+        [_]external_owner_seal.Digest{[_]u8{0} ** 32} ** max_intents,
+    payload_digests: [max_intents]external_owner_seal.Digest =
+        [_]external_owner_seal.Digest{[_]u8{0} ** 32} ** max_intents,
+    destination_plan_addr: usize = 0,
+    destination_plan_len: usize = 0,
+    destination_plan_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    lifecycle: IntentCommitLifecycle = .empty,
+    proofs_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    neutral_outputs_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+};
+
+const NeutralRetirementLifecycle = enum {
+    empty,
+    prepared,
+    consumed,
+};
+
+/// Non-owning, final-address proof that one classified event owner will become the exact
+/// aggregate neutral slot named here. Cleanup authority is deliberately absent until the
+/// enclosing intent commit has tombstoned the classified source.
+pub const PreparedNeutralRetirement = struct {
+    saved_self_addr: usize = 0,
+    handle_addr: usize = 0,
+    scratch_addr: usize = 0,
+    intent_commit_addr: usize = 0,
+    aggregate_addr: usize = 0,
+    aggregate_len: usize = 0,
+    neutral_addr: usize = 0,
+    cleanup_output_addr: usize = 0,
+    source_intent_addr: usize = 0,
+    intent_index: u8 = 0,
+    allocator_ptr_addr: usize = 0,
+    allocator_vtable_addr: usize = 0,
+    allocation_addr: usize = 0,
+    allocation_len: usize = 0,
+    content_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    source_owner_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    lifecycle: NeutralRetirementLifecycle = .empty,
+    digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+};
+
+const StagedScreenIntent = struct {
+    saved_self_addr: usize,
+    storage_addr: usize,
+    turn_generation: u64,
+    parser_generation: u64,
+    aggregate_addr: usize,
+    neutral_addr: usize,
+    classification: external_rx_demux.ScreenCandidate,
+    payload_addr: usize,
+    payload_len: usize,
+    payload_digest: external_owner_seal.Digest,
+    digest: external_owner_seal.Digest,
+};
+
 const PreparedRxIntent = union(enum) {
     empty,
     classified: ClassifiedIntentOwner,
+    screen_staging: StagedScreenIntent,
     committed,
     aborted,
 };
@@ -170,6 +320,15 @@ pub const MoveResult = enum {
     poisoned,
 };
 
+pub const MoveScreenResult = enum {
+    moved,
+    invalid_state,
+    invalid_index,
+    wrong_class,
+    authority_drift,
+    alias,
+};
+
 pub fn sealAuthorityRanges(
     ranges: []const external_owner_range.Range,
     generation: u64,
@@ -188,6 +347,27 @@ pub const AbortResult = enum {
 pub const ResetResult = enum {
     ready,
     invalid_state,
+};
+
+const IntentAbortLifecycle = enum {
+    empty,
+    prepared,
+    committed,
+    spent,
+};
+
+pub const FrozenIntentAbort = struct {
+    saved_self_addr: usize = 0,
+    handle_addr: usize = 0,
+    scratch_addr: usize = 0,
+    aggregate_addr: usize = 0,
+    cleanup: [max_intents]external_owner_cleanup.FrozenOwnerCleanupDescriptor =
+        [_]external_owner_cleanup.FrozenOwnerCleanupDescriptor{.{}} **
+        max_intents,
+    cleanup_count: u8 = 0,
+    intent_count: u8 = 0,
+    lifecycle: IntentAbortLifecycle = .empty,
+    digest: external_owner_seal.Digest = [_]u8{0} ** 32,
 };
 
 const DestroyLifecycle = enum { empty, prepared, consumed };
@@ -224,6 +404,8 @@ const FrozenPayloadCleanup = struct {
 comptime {
     if (@sizeOf(ExternalRxIntentScratch) > max_scratch_bytes)
         @compileError("ExternalRxIntentScratch exceeds 384 KiB");
+    if (@sizeOf(FrozenIntentAbort) > 64 * 1024)
+        @compileError("FrozenIntentAbort exceeds 64 KiB");
 }
 
 pub fn allocate(
@@ -520,24 +702,1250 @@ pub fn moveFrame(
     return .classified;
 }
 
-pub fn abortAll(handle: *ExternalRxIntentHandle) AbortResult {
+pub fn moveScreenToNeutral(
+    handle: *ExternalRxIntentHandle,
+    intent_index: u8,
+    authority_ops: AuthorityOps,
+    aggregate_addr: usize,
+    aggregate_len: usize,
+    out: *MovedIntentPayload,
+) MoveScreenResult {
     const scratch = validateHandleAndScratch(handle, .ready, .ready) orelse
-        return .poisoned;
-    if (scratch.intent_count == 0) {
-        scratch.lifecycle = .spent;
-        scratch.digest = scratchDigest(scratch);
-        return .cleaned;
+        return .invalid_state;
+    if (intent_index >= scratch.intent_count)
+        return .invalid_index;
+    if (!movedIntentPayloadPristine(out))
+        return .invalid_state;
+    const aggregate_end = std.math.add(
+        usize,
+        aggregate_addr,
+        aggregate_len,
+    ) catch return .alias;
+    const out_end = std.math.add(
+        usize,
+        @intFromPtr(out),
+        @sizeOf(MovedIntentPayload),
+    ) catch return .alias;
+    if (aggregate_addr == 0 or aggregate_len == 0 or
+        @intFromPtr(out) < aggregate_addr or out_end > aggregate_end)
+        return .alias;
+    const before = authority_ops.current(authority_ops.context) orelse
+        return .authority_drift;
+    if (!authorityMatchesBound(handle, scratch, before) or
+        aggregateRangeAliasesIntentAuthority(
+            handle,
+            scratch,
+            before,
+            aggregate_addr,
+            aggregate_len,
+        ))
+        return .alias;
+    const owner = switch (scratch.intents[intent_index]) {
+        .classified => |*classified| classified,
+        else => return .invalid_state,
+    };
+    const candidate = switch (owner.classification) {
+        .screen_candidate => |screen| screen,
+        else => return .wrong_class,
+    };
+    if (!ownerValid(owner, scratch)) return .invalid_state;
+    const owner_digest = owner.digest;
+    const owner_payload = owner.cleanup_payload orelse return .invalid_state;
+    const after = authority_ops.current(authority_ops.context) orelse
+        return .authority_drift;
+    const current_scratch =
+        validateHandleAndScratch(handle, .ready, .ready) orelse
+        return .authority_drift;
+    if (current_scratch != scratch or
+        !std.meta.eql(before, after) or
+        !authorityMatchesBound(handle, scratch, after) or
+        aggregateRangeAliasesIntentAuthority(
+            handle,
+            scratch,
+            after,
+            aggregate_addr,
+            aggregate_len,
+        ))
+        return .authority_drift;
+    const current_owner = switch (scratch.intents[intent_index]) {
+        .classified => |*classified| classified,
+        else => return .authority_drift,
+    };
+    if (!ownerValid(current_owner, scratch) or
+        !std.mem.eql(u8, &current_owner.digest, &owner_digest) or
+        !std.meta.eql(current_owner.classification, owner.classification))
+        return .authority_drift;
+
+    const intent_addr = @intFromPtr(&scratch.intents[intent_index]);
+    out.* = .{
+        .saved_self_addr = @intFromPtr(out),
+        .source_intent_addr = intent_addr,
+        .aggregate_addr = aggregate_addr,
+        .allocator = current_owner.allocator,
+        .allocator_ptr_addr = current_owner.allocator_ptr_addr,
+        .allocator_vtable_addr = current_owner.allocator_vtable_addr,
+        .allocation_addr = current_owner.payload_addr,
+        .allocation_len = current_owner.payload_len,
+        .content_digest = current_owner.payload_digest,
+        .lifecycle = .owned,
+        .digest = undefined,
+    };
+    out.digest = movedIntentPayloadDigest(out);
+    var staged = StagedScreenIntent{
+        .saved_self_addr = intent_addr,
+        .storage_addr = scratch.storage_addr,
+        .turn_generation = scratch.turn_generation,
+        .parser_generation = current_owner.parser_generation,
+        .aggregate_addr = aggregate_addr,
+        .neutral_addr = @intFromPtr(out),
+        .classification = candidate,
+        .payload_addr = current_owner.payload_addr,
+        .payload_len = current_owner.payload_len,
+        .payload_digest = current_owner.payload_digest,
+        .digest = undefined,
+    };
+    staged.digest = stagedScreenIntentDigest(&staged);
+    scratch.intents[intent_index] = .{ .screen_staging = staged };
+    scratch.digest = scratchDigest(scratch);
+    _ = owner_payload;
+    return .moved;
+}
+
+pub fn borrowMovedIntentPayload(
+    payload: *const MovedIntentPayload,
+    aggregate_addr: usize,
+) ?BorrowedMovedPayloadView {
+    if (!movedIntentPayloadValid(payload, aggregate_addr)) return null;
+    return .{
+        .allocator = payload.allocator,
+        .allocation_addr = payload.allocation_addr,
+        .allocation_len = payload.allocation_len,
+        .content_digest = payload.content_digest,
+    };
+}
+
+pub fn borrowMovedScreen(
+    handle: *ExternalRxIntentHandle,
+    intent_index: u8,
+    payload: *const MovedIntentPayload,
+    aggregate_addr: usize,
+) ?BorrowedMovedScreenView {
+    const scratch = validateHandleAndScratch(handle, .ready, .ready) orelse
+        return null;
+    if (intent_index >= scratch.intent_count) return null;
+    const staged = switch (scratch.intents[intent_index]) {
+        .screen_staging => |*value| value,
+        else => return null,
+    };
+    if (!stagedScreenIntentValid(
+        staged,
+        scratch,
+        @intFromPtr(&scratch.intents[intent_index]),
+        aggregate_addr,
+    ) or
+        staged.neutral_addr != @intFromPtr(payload) or
+        staged.payload_addr != payload.allocation_addr or
+        staged.payload_len != payload.allocation_len or
+        !std.mem.eql(
+            u8,
+            &staged.payload_digest,
+            &payload.content_digest,
+        ))
+        return null;
+    return .{
+        .payload = borrowMovedIntentPayload(payload, aggregate_addr) orelse
+            return null,
+        .candidate = staged.classification,
+    };
+}
+
+pub fn classifyBoundEvent(
+    handle: *ExternalRxIntentHandle,
+    intent_index: u8,
+    identity: runtime_event_types.EventIdentity,
+    authority: runtime_event_types.EventAuthorityView,
+    expected_major: u16,
+    metadata_support: runtime_event_types.MetadataSupport,
+    observer: ?runtime_event_wire.ParseObserver,
+) external_rx_demux.ExternalEventClass {
+    const scratch = validateHandleAndScratch(handle, .ready, .ready) orelse
+        return .protocol_terminal;
+    if (intent_index >= scratch.intent_count)
+        return .protocol_terminal;
+    const owner = switch (scratch.intents[intent_index]) {
+        .classified => |*value| value,
+        else => return .protocol_terminal,
+    };
+    if (!ownerValid(owner, scratch))
+        return .protocol_terminal;
+    const candidate = switch (owner.classification) {
+        .event_candidate => |value| value,
+        else => return .protocol_terminal,
+    };
+    const paired = client_external_mode.ExternalRxFrame{
+        .frame = owner.frame,
+        .range = owner.range,
+        .pair_seal = owner.pair_seal,
+    };
+    return external_rx_demux.classifyEventCandidate(
+        identity,
+        authority,
+        expected_major,
+        metadata_support,
+        &paired,
+        candidate,
+        observer,
+    );
+}
+
+pub fn borrowClassifiedEvent(
+    handle: *ExternalRxIntentHandle,
+    intent_index: u8,
+) ?BorrowedClassifiedEventView {
+    const scratch = validateHandleAndScratch(handle, .ready, .ready) orelse
+        return null;
+    if (intent_index >= scratch.intent_count) return null;
+    const owner = switch (scratch.intents[intent_index]) {
+        .classified => |*value| value,
+        else => return null,
+    };
+    if (!ownerValid(owner, scratch)) return null;
+    const candidate = switch (owner.classification) {
+        .event_candidate => |value| value,
+        else => return null,
+    };
+    return .{
+        .payload = owner.frame.payload,
+        .allocator = owner.allocator,
+        .payload_digest = owner.payload_digest,
+        .candidate = candidate,
+    };
+}
+
+pub fn validateStagedScreenBinding(
+    handle: *ExternalRxIntentHandle,
+    intent_index: u8,
+    aggregate_addr: usize,
+    neutral_addr: usize,
+    header: protocol.Header,
+    range: external_rx_types.RxRange,
+    payload_digest: external_owner_seal.Digest,
+) bool {
+    const scratch = validateHandleAndScratch(handle, .ready, .ready) orelse
+        return false;
+    if (intent_index >= scratch.intent_count) return false;
+    const staged = switch (scratch.intents[intent_index]) {
+        .screen_staging => |*value| value,
+        else => return false,
+    };
+    return stagedScreenIntentValid(
+        staged,
+        scratch,
+        @intFromPtr(&scratch.intents[intent_index]),
+        aggregate_addr,
+    ) and staged.neutral_addr == neutral_addr and
+        std.meta.eql(staged.classification.header, header) and
+        std.meta.eql(staged.classification.range, range) and
+        std.mem.eql(u8, &staged.payload_digest, &payload_digest);
+}
+
+pub fn validateMovedIntentPayloadTombstone(
+    payload: *const MovedIntentPayload,
+    aggregate_addr: usize,
+) bool {
+    return payload.saved_self_addr == @intFromPtr(payload) and
+        payload.source_intent_addr != 0 and
+        payload.aggregate_addr == aggregate_addr and
+        payload.allocator_ptr_addr == 0 and
+        payload.allocator_vtable_addr == 0 and
+        payload.allocation_addr == 0 and
+        payload.allocation_len == 0 and
+        std.mem.allEqual(u8, &payload.content_digest, 0) and
+        payload.lifecycle == .moved and
+        std.mem.eql(
+            u8,
+            &payload.digest,
+            &movedIntentPayloadDigest(payload),
+        );
+}
+
+pub fn validateScreenMutationScalar(
+    handle: *ExternalRxIntentHandle,
+    intent_index: u8,
+    aggregate_addr: usize,
+    proof: *const StagedScreenMutationProof,
+) bool {
+    const scratch = validateHandleAndScratch(handle, .ready, .ready) orelse
+        return false;
+    if (intent_index >= scratch.intent_count) return false;
+    const staged = switch (scratch.intents[intent_index]) {
+        .screen_staging => |*value| value,
+        else => return false,
+    };
+    return stagedScreenIntentValid(
+        staged,
+        scratch,
+        @intFromPtr(&scratch.intents[intent_index]),
+        aggregate_addr,
+    ) and screenMutationProofValid(
+        proof,
+        staged,
+        aggregate_addr,
+        intent_index,
+    );
+}
+
+pub fn commitMovedIntentPayloadTransferUnchecked(
+    payload: *MovedIntentPayload,
+) void {
+    payload.allocator_ptr_addr = 0;
+    payload.allocator_vtable_addr = 0;
+    payload.allocation_addr = 0;
+    payload.allocation_len = 0;
+    payload.content_digest = [_]u8{0} ** 32;
+    payload.lifecycle = .moved;
+    payload.digest = movedIntentPayloadDigest(payload);
+}
+
+pub fn bindScreenMutationScalar(
+    handle: *ExternalRxIntentHandle,
+    intent_index: u8,
+    aggregate_addr: usize,
+    aggregate_len: usize,
+    batch_addr: usize,
+    mutation_index: u8,
+    payload_digest: external_owner_seal.Digest,
+    out: *StagedScreenMutationProof,
+) bool {
+    const scratch = validateHandleAndScratch(handle, .ready, .ready) orelse
+        return false;
+    if (intent_index >= scratch.intent_count or batch_addr == 0 or
+        out.saved_self_addr != 0 or out.lifecycle != .empty or
+        !std.mem.allEqual(u8, &out.digest, 0))
+        return false;
+    const aggregate_end = std.math.add(
+        usize,
+        aggregate_addr,
+        aggregate_len,
+    ) catch return false;
+    const out_end = std.math.add(
+        usize,
+        @intFromPtr(out),
+        @sizeOf(StagedScreenMutationProof),
+    ) catch return false;
+    if (aggregate_addr == 0 or aggregate_len == 0 or
+        @intFromPtr(out) < aggregate_addr or out_end > aggregate_end)
+        return false;
+    const staged = switch (scratch.intents[intent_index]) {
+        .screen_staging => |*value| value,
+        else => return false,
+    };
+    if (!stagedScreenIntentValid(
+        staged,
+        scratch,
+        @intFromPtr(&scratch.intents[intent_index]),
+        aggregate_addr,
+    ) or
+        !std.mem.eql(u8, &staged.payload_digest, &payload_digest))
+        return false;
+    out.* = .{
+        .saved_self_addr = @intFromPtr(out),
+        .source_intent_addr = @intFromPtr(&scratch.intents[intent_index]),
+        .aggregate_addr = aggregate_addr,
+        .batch_addr = batch_addr,
+        .intent_index = intent_index,
+        .mutation_index = mutation_index,
+        .payload_digest = payload_digest,
+        .lifecycle = .prepared,
+        .digest = undefined,
+    };
+    out.digest = screenMutationProofDigest(out);
+    return true;
+}
+
+pub fn prepareIntentCommit(
+    handle: *ExternalRxIntentHandle,
+    aggregate_addr: usize,
+    aggregate_len: usize,
+    proofs: *[max_intents]StagedScreenMutationProof,
+    neutral_outputs: *[max_intents]MovedIntentPayload,
+    permit: *PreparedIntentCommit,
+) error{ InvalidPlan, InvalidAlias }!void {
+    const scratch = validateHandleAndScratch(handle, .ready, .ready) orelse
+        return error.InvalidPlan;
+    if (aggregate_addr == 0 or aggregate_len == 0 or scratch.intent_count == 0 or
+        permit.saved_self_addr != 0 or
+        permit.lifecycle != .empty)
+        return error.InvalidPlan;
+    const aggregate_end = std.math.add(
+        usize,
+        aggregate_addr,
+        aggregate_len,
+    ) catch return error.InvalidPlan;
+    const permit_end = std.math.add(
+        usize,
+        @intFromPtr(permit),
+        @sizeOf(PreparedIntentCommit),
+    ) catch return error.InvalidPlan;
+    const proofs_end = std.math.add(
+        usize,
+        @intFromPtr(proofs),
+        @sizeOf(@TypeOf(proofs.*)),
+    ) catch return error.InvalidPlan;
+    const neutral_end = std.math.add(
+        usize,
+        @intFromPtr(neutral_outputs),
+        @sizeOf(@TypeOf(neutral_outputs.*)),
+    ) catch return error.InvalidPlan;
+    if (@intFromPtr(permit) < aggregate_addr or permit_end > aggregate_end or
+        @intFromPtr(proofs) < aggregate_addr or proofs_end > aggregate_end or
+        @intFromPtr(neutral_outputs) < aggregate_addr or
+        neutral_end > aggregate_end)
+        return error.InvalidAlias;
+    if (rangesOverlap(
+        @intFromPtr(permit),
+        @sizeOf(PreparedIntentCommit),
+        @intFromPtr(proofs),
+        @sizeOf(@TypeOf(proofs.*)),
+    ) or rangesOverlap(
+        @intFromPtr(permit),
+        @sizeOf(PreparedIntentCommit),
+        @intFromPtr(neutral_outputs),
+        @sizeOf(@TypeOf(neutral_outputs.*)),
+    ) or rangesOverlap(
+        @intFromPtr(proofs),
+        @sizeOf(@TypeOf(proofs.*)),
+        @intFromPtr(neutral_outputs),
+        @sizeOf(@TypeOf(neutral_outputs.*)),
+    ))
+        return error.InvalidAlias;
+    var slot_kinds = [_]IntentCommitSlotKind{.unused} ** max_intents;
+    var response_request_ids = [_]u64{0} ** max_intents;
+    var source_parser_generations = [_]u64{0} ** max_intents;
+    var source_owner_digests =
+        [_]external_owner_seal.Digest{[_]u8{0} ** 32} ** max_intents;
+    var payload_digests =
+        [_]external_owner_seal.Digest{[_]u8{0} ** 32} ** max_intents;
+    var proof_count: usize = 0;
+    for (&scratch.intents, 0..) |*intent, index| {
+        if (!movedIntentPayloadPristine(&neutral_outputs[index]))
+            return error.InvalidPlan;
+        if (index >= scratch.intent_count) {
+            if (!screenMutationProofPristine(&proofs[index]) or
+                intent.* != .empty)
+                return error.InvalidPlan;
+            continue;
+        }
+        switch (intent.*) {
+            .screen_staging => |*staged| {
+                if (!stagedScreenIntentValid(
+                    staged,
+                    scratch,
+                    @intFromPtr(intent),
+                    aggregate_addr,
+                ) or !screenMutationProofValid(
+                    &proofs[index],
+                    staged,
+                    aggregate_addr,
+                    @intCast(index),
+                ))
+                    return error.InvalidPlan;
+                slot_kinds[index] = .screen;
+                source_parser_generations[index] = staged.parser_generation;
+                source_owner_digests[index] = staged.digest;
+                payload_digests[index] = staged.payload_digest;
+                proof_count += 1;
+            },
+            .classified => |*owner| {
+                if (!ownerValid(owner, scratch) or
+                    !screenMutationProofPristine(&proofs[index]))
+                    return error.InvalidPlan;
+                payload_digests[index] = owner.payload_digest;
+                source_parser_generations[index] = owner.parser_generation;
+                source_owner_digests[index] = owner.digest;
+                switch (owner.classification) {
+                    .event_candidate => slot_kinds[index] = .event,
+                    .response_candidate => |candidate| {
+                        slot_kinds[index] = .response;
+                        response_request_ids[index] = candidate.request_id;
+                    },
+                    .screen_candidate, .protocol_terminal => return error.InvalidPlan,
+                }
+            },
+            else => return error.InvalidPlan,
+        }
     }
-    var cleanup = [_]FrozenPayloadCleanup{.{}} ** max_intents;
-    if (!freezeClassifiedCleanup(scratch, &cleanup))
-        return poison(scratch, handle);
-    const count = scratch.intent_count;
-    for (0..count) |index| scratch.intents[index] = .aborted;
+    permit.* = .{
+        .saved_self_addr = @intFromPtr(permit),
+        .handle_addr = @intFromPtr(handle),
+        .scratch_addr = @intFromPtr(scratch),
+        .aggregate_addr = aggregate_addr,
+        .aggregate_len = aggregate_len,
+        .proofs_addr = @intFromPtr(proofs),
+        .neutral_outputs_addr = @intFromPtr(neutral_outputs),
+        .proof_count = @intCast(proof_count),
+        .intent_count = scratch.intent_count,
+        .final_parser_generation = scratch.last_parser_generation,
+        .final_end_absolute = scratch.last_moved_end_absolute,
+        .slot_kinds = slot_kinds,
+        .response_request_ids = response_request_ids,
+        .source_parser_generations = source_parser_generations,
+        .source_owner_digests = source_owner_digests,
+        .payload_digests = payload_digests,
+        .lifecycle = .prepared,
+        .proofs_digest = screenMutationProofsDigest(proofs),
+        .neutral_outputs_digest = neutralOutputsDigest(neutral_outputs),
+        .digest = undefined,
+    };
+    permit.digest = preparedIntentCommitDigest(permit);
+}
+
+pub fn validatePreparedIntentCommit(
+    handle: *ExternalRxIntentHandle,
+    proofs: *const [max_intents]StagedScreenMutationProof,
+    neutral_outputs: *const [max_intents]MovedIntentPayload,
+    permit: *const PreparedIntentCommit,
+) bool {
+    const scratch = validateHandleAndScratch(handle, .ready, .ready) orelse
+        return false;
+    const aggregate_end = std.math.add(
+        usize,
+        permit.aggregate_addr,
+        permit.aggregate_len,
+    ) catch return false;
+    const permit_end = std.math.add(
+        usize,
+        @intFromPtr(permit),
+        @sizeOf(PreparedIntentCommit),
+    ) catch return false;
+    const proofs_end = std.math.add(
+        usize,
+        @intFromPtr(proofs),
+        @sizeOf(@TypeOf(proofs.*)),
+    ) catch return false;
+    const neutral_end = std.math.add(
+        usize,
+        @intFromPtr(neutral_outputs),
+        @sizeOf(@TypeOf(neutral_outputs.*)),
+    ) catch return false;
+    if (permit.saved_self_addr != @intFromPtr(permit) or
+        permit.handle_addr != @intFromPtr(handle) or
+        permit.scratch_addr != @intFromPtr(scratch) or
+        permit.aggregate_addr == 0 or
+        permit.aggregate_len == 0 or
+        permit.proofs_addr != @intFromPtr(proofs) or
+        permit.neutral_outputs_addr != @intFromPtr(neutral_outputs) or
+        permit.proof_count > permit.intent_count or
+        permit.intent_count != scratch.intent_count or
+        permit.final_parser_generation != scratch.last_parser_generation or
+        permit.final_end_absolute != scratch.last_moved_end_absolute or
+        @intFromPtr(permit) < permit.aggregate_addr or
+        permit_end > aggregate_end or
+        @intFromPtr(proofs) < permit.aggregate_addr or
+        proofs_end > aggregate_end or
+        @intFromPtr(neutral_outputs) < permit.aggregate_addr or
+        neutral_end > aggregate_end or
+        permit.lifecycle != .prepared or
+        !std.mem.eql(
+            u8,
+            &permit.proofs_digest,
+            &screenMutationProofsDigest(proofs),
+        ) or
+        !std.mem.eql(
+            u8,
+            &permit.neutral_outputs_digest,
+            &neutralOutputsDigest(neutral_outputs),
+        ) or
+        !std.mem.eql(
+            u8,
+            &permit.digest,
+            &preparedIntentCommitDigest(permit),
+        ))
+        return false;
+    var proof_count: usize = 0;
+    for (&scratch.intents, 0..) |*intent, index| {
+        if (!movedIntentPayloadPristine(&neutral_outputs[index]))
+            return false;
+        if (index >= scratch.intent_count) {
+            if (permit.slot_kinds[index] != .unused or
+                permit.response_request_ids[index] != 0 or
+                permit.source_parser_generations[index] != 0 or
+                !std.mem.allEqual(
+                    u8,
+                    &permit.source_owner_digests[index],
+                    0,
+                ) or
+                !std.mem.allEqual(u8, &permit.payload_digests[index], 0) or
+                !screenMutationProofPristine(&proofs[index]) or
+                intent.* != .empty)
+                return false;
+            continue;
+        }
+        switch (intent.*) {
+            .screen_staging => |*staged| {
+                if (permit.slot_kinds[index] != .screen or
+                    permit.response_request_ids[index] != 0 or
+                    permit.source_parser_generations[index] !=
+                        staged.parser_generation or
+                    !std.mem.eql(
+                        u8,
+                        &permit.source_owner_digests[index],
+                        &staged.digest,
+                    ) or
+                    !std.mem.eql(
+                        u8,
+                        &permit.payload_digests[index],
+                        &staged.payload_digest,
+                    ) or !stagedScreenIntentValid(
+                    staged,
+                    scratch,
+                    @intFromPtr(intent),
+                    permit.aggregate_addr,
+                ) or !screenMutationProofValid(
+                    &proofs[index],
+                    staged,
+                    permit.aggregate_addr,
+                    @intCast(index),
+                ))
+                    return false;
+                proof_count += 1;
+            },
+            .classified => |*owner| {
+                if (!ownerValid(owner, scratch) or
+                    !screenMutationProofPristine(&proofs[index]) or
+                    permit.source_parser_generations[index] !=
+                        owner.parser_generation or
+                    !std.mem.eql(
+                        u8,
+                        &permit.source_owner_digests[index],
+                        &owner.digest,
+                    ) or
+                    !std.mem.eql(
+                        u8,
+                        &permit.payload_digests[index],
+                        &owner.payload_digest,
+                    ))
+                    return false;
+                switch (owner.classification) {
+                    .event_candidate => if (permit.slot_kinds[index] != .event or
+                        permit.response_request_ids[index] != 0)
+                        return false,
+                    .response_candidate => |candidate| if (permit.slot_kinds[index] != .response or
+                        permit.response_request_ids[index] != candidate.request_id) return false,
+                    .screen_candidate, .protocol_terminal => return false,
+                }
+            },
+            else => return false,
+        }
+    }
+    return proof_count == permit.proof_count;
+}
+
+/// Returns the exact payload descriptor that a validated classified slot will move into its
+/// neutral destination at commit. The returned view is pre-barrier evidence only; the unchecked
+/// suffix must use sealed scalars from its destination plan instead of borrowing the source again.
+pub fn borrowPreparedClassifiedPayload(
+    handle: *ExternalRxIntentHandle,
+    intent_index: u8,
+    proofs: *const [max_intents]StagedScreenMutationProof,
+    neutral_outputs: *const [max_intents]MovedIntentPayload,
+    permit: *const PreparedIntentCommit,
+) ?BorrowedMovedPayloadView {
+    if (!validatePreparedIntentCommit(
+        handle,
+        proofs,
+        neutral_outputs,
+        permit,
+    ) or intent_index >= permit.intent_count or
+        permit.slot_kinds[intent_index] == .screen)
+        return null;
+    const scratch = validateHandleAndScratch(handle, .ready, .ready) orelse
+        return null;
+    const owner = switch (scratch.intents[intent_index]) {
+        .classified => |*value| value,
+        else => return null,
+    };
+    return .{
+        .allocator = owner.allocator,
+        .allocation_addr = owner.payload_addr,
+        .allocation_len = owner.payload_len,
+        .content_digest = owner.payload_digest,
+    };
+}
+
+fn destinationPlanContentDigest(bytes: []const u8) external_owner_seal.Digest {
+    var writer = external_owner_seal.Writer.init("MARUXDP1");
+    writer.writeBytes(bytes);
+    return writer.finish();
+}
+
+pub fn bindIntentDestinationPlan(
+    handle: *ExternalRxIntentHandle,
+    proofs: *const [max_intents]StagedScreenMutationProof,
+    neutral_outputs: *const [max_intents]MovedIntentPayload,
+    permit: *PreparedIntentCommit,
+    destination_plan: []const u8,
+) error{ InvalidPlan, InvalidAlias }!void {
+    if (!validatePreparedIntentCommit(
+        handle,
+        proofs,
+        neutral_outputs,
+        permit,
+    ) or permit.destination_plan_addr != 0 or
+        permit.destination_plan_len != 0 or
+        !std.mem.allEqual(u8, &permit.destination_plan_digest, 0) or
+        destination_plan.len == 0)
+        return error.InvalidPlan;
+    const plan_addr = @intFromPtr(destination_plan.ptr);
+    const aggregate_end = std.math.add(
+        usize,
+        permit.aggregate_addr,
+        permit.aggregate_len,
+    ) catch return error.InvalidPlan;
+    const plan_end = std.math.add(
+        usize,
+        plan_addr,
+        destination_plan.len,
+    ) catch return error.InvalidPlan;
+    if (plan_addr < permit.aggregate_addr or plan_end > aggregate_end or
+        rangesOverlap(
+            plan_addr,
+            destination_plan.len,
+            @intFromPtr(permit),
+            @sizeOf(PreparedIntentCommit),
+        ) or rangesOverlap(
+        plan_addr,
+        destination_plan.len,
+        permit.proofs_addr,
+        @sizeOf([max_intents]StagedScreenMutationProof),
+    ) or rangesOverlap(
+        plan_addr,
+        destination_plan.len,
+        permit.neutral_outputs_addr,
+        @sizeOf([max_intents]MovedIntentPayload),
+    ))
+        return error.InvalidAlias;
+    permit.destination_plan_addr = plan_addr;
+    permit.destination_plan_len = destination_plan.len;
+    permit.destination_plan_digest =
+        destinationPlanContentDigest(destination_plan);
+    permit.digest = preparedIntentCommitDigest(permit);
+}
+
+pub fn validateIntentDestinationPlan(
+    handle: *ExternalRxIntentHandle,
+    proofs: *const [max_intents]StagedScreenMutationProof,
+    neutral_outputs: *const [max_intents]MovedIntentPayload,
+    permit: *const PreparedIntentCommit,
+    destination_plan: []const u8,
+) bool {
+    if (!validatePreparedIntentCommit(
+        handle,
+        proofs,
+        neutral_outputs,
+        permit,
+    ) or destination_plan.len == 0 or
+        permit.destination_plan_addr != @intFromPtr(destination_plan.ptr) or
+        permit.destination_plan_len != destination_plan.len)
+        return false;
+    return std.mem.eql(
+        u8,
+        &permit.destination_plan_digest,
+        &destinationPlanContentDigest(destination_plan),
+    );
+}
+
+pub fn prepareNeutralRetirement(
+    handle: *ExternalRxIntentHandle,
+    intent_index: u8,
+    proofs: *const [max_intents]StagedScreenMutationProof,
+    neutral_outputs: *const [max_intents]MovedIntentPayload,
+    intent_commit: *const PreparedIntentCommit,
+    cleanup_output: *external_owner_cleanup.FrozenOwnerCleanupDescriptor,
+    out: *PreparedNeutralRetirement,
+) error{ InvalidPlan, InvalidAlias }!void {
+    if (!validatePreparedIntentCommit(
+        handle,
+        proofs,
+        neutral_outputs,
+        intent_commit,
+    ) or intent_index >= intent_commit.intent_count or
+        intent_commit.slot_kinds[intent_index] != .event or
+        !preparedNeutralRetirementPristine(out) or
+        !external_owner_cleanup.isPristine(cleanup_output))
+        return error.InvalidPlan;
+    const scratch: *ExternalRxIntentScratch =
+        @ptrFromInt(intent_commit.scratch_addr);
+    const owner = switch (scratch.intents[intent_index]) {
+        .classified => |*value| value,
+        else => return error.InvalidPlan,
+    };
+    if (!ownerValid(owner, scratch) or owner.payload_len == 0 or
+        std.meta.activeTag(owner.classification) != .event_candidate)
+        return error.InvalidPlan;
+    const expected_neutral_addr =
+        @intFromPtr(neutral_outputs) +
+        @as(usize, intent_index) * @sizeOf(MovedIntentPayload);
+    const aggregate_end = std.math.add(
+        usize,
+        intent_commit.aggregate_addr,
+        intent_commit.aggregate_len,
+    ) catch return error.InvalidPlan;
+    const out_end = std.math.add(
+        usize,
+        @intFromPtr(out),
+        @sizeOf(PreparedNeutralRetirement),
+    ) catch return error.InvalidPlan;
+    const cleanup_end = std.math.add(
+        usize,
+        @intFromPtr(cleanup_output),
+        @sizeOf(external_owner_cleanup.FrozenOwnerCleanupDescriptor),
+    ) catch return error.InvalidPlan;
+    if (@intFromPtr(&neutral_outputs[intent_index]) != expected_neutral_addr or
+        @intFromPtr(out) < intent_commit.aggregate_addr or
+        out_end > aggregate_end or
+        @intFromPtr(cleanup_output) < intent_commit.aggregate_addr or
+        cleanup_end > aggregate_end or
+        rangesOverlap(
+            @intFromPtr(out),
+            @sizeOf(PreparedNeutralRetirement),
+            @intFromPtr(cleanup_output),
+            @sizeOf(external_owner_cleanup.FrozenOwnerCleanupDescriptor),
+        ) or rangesOverlap(
+        @intFromPtr(out),
+        @sizeOf(PreparedNeutralRetirement),
+        expected_neutral_addr,
+        @sizeOf(MovedIntentPayload),
+    ) or rangesOverlap(
+        @intFromPtr(cleanup_output),
+        @sizeOf(external_owner_cleanup.FrozenOwnerCleanupDescriptor),
+        expected_neutral_addr,
+        @sizeOf(MovedIntentPayload),
+    ))
+        return error.InvalidAlias;
+    out.* = .{
+        .saved_self_addr = @intFromPtr(out),
+        .handle_addr = @intFromPtr(handle),
+        .scratch_addr = @intFromPtr(scratch),
+        .intent_commit_addr = @intFromPtr(intent_commit),
+        .aggregate_addr = intent_commit.aggregate_addr,
+        .aggregate_len = intent_commit.aggregate_len,
+        .neutral_addr = expected_neutral_addr,
+        .cleanup_output_addr = @intFromPtr(cleanup_output),
+        .source_intent_addr = @intFromPtr(&scratch.intents[intent_index]),
+        .intent_index = intent_index,
+        .allocator_ptr_addr = owner.allocator_ptr_addr,
+        .allocator_vtable_addr = owner.allocator_vtable_addr,
+        .allocation_addr = owner.payload_addr,
+        .allocation_len = owner.payload_len,
+        .content_digest = owner.payload_digest,
+        .source_owner_digest = owner.digest,
+        .lifecycle = .prepared,
+        .digest = undefined,
+    };
+    out.digest = preparedNeutralRetirementDigest(out);
+}
+
+pub fn validatePreparedNeutralRetirement(
+    handle: *ExternalRxIntentHandle,
+    proofs: *const [max_intents]StagedScreenMutationProof,
+    neutral_outputs: *const [max_intents]MovedIntentPayload,
+    intent_commit: *const PreparedIntentCommit,
+    cleanup_output: *const external_owner_cleanup.FrozenOwnerCleanupDescriptor,
+    permit: *const PreparedNeutralRetirement,
+) bool {
+    if (!validatePreparedIntentCommit(
+        handle,
+        proofs,
+        neutral_outputs,
+        intent_commit,
+    ) or !preparedNeutralRetirementHeaderValid(
+        handle,
+        neutral_outputs,
+        intent_commit,
+        cleanup_output,
+        permit,
+        .prepared,
+    ))
+        return false;
+    const scratch: *ExternalRxIntentScratch =
+        @ptrFromInt(intent_commit.scratch_addr);
+    const owner = switch (scratch.intents[permit.intent_index]) {
+        .classified => |*value| value,
+        else => return false,
+    };
+    return ownerValid(owner, scratch) and
+        std.meta.activeTag(owner.classification) == .event_candidate and
+        owner.payload_len != 0 and
+        permit.source_intent_addr == @intFromPtr(
+            &scratch.intents[permit.intent_index],
+        ) and
+        permit.allocator_ptr_addr == owner.allocator_ptr_addr and
+        permit.allocator_vtable_addr == owner.allocator_vtable_addr and
+        permit.allocation_addr == owner.payload_addr and
+        permit.allocation_len == owner.payload_len and
+        std.mem.eql(u8, &permit.content_digest, &owner.payload_digest) and
+        std.mem.eql(u8, &permit.source_owner_digest, &owner.digest);
+}
+
+/// This is the fallible-prefix gate for `commitNeutralRetirementUnchecked`. It deliberately
+/// remains false until the enclosing intent commit has made the aggregate neutral slot the sole
+/// owner and tombstoned the classified source.
+pub fn neutralRetirementReadyToCommit(
+    handle: *ExternalRxIntentHandle,
+    neutral_outputs: *const [max_intents]MovedIntentPayload,
+    intent_commit: *const PreparedIntentCommit,
+    cleanup_output: *const external_owner_cleanup.FrozenOwnerCleanupDescriptor,
+    permit: *const PreparedNeutralRetirement,
+) bool {
+    const scratch = validateHandleAndScratch(handle, .ready, .spent) orelse
+        return false;
+    if (intent_commit.lifecycle != .consumed or
+        intent_commit.scratch_addr != @intFromPtr(scratch) or
+        !std.mem.eql(
+            u8,
+            &intent_commit.digest,
+            &preparedIntentCommitDigest(intent_commit),
+        ) or !preparedNeutralRetirementHeaderValid(
+        handle,
+        neutral_outputs,
+        intent_commit,
+        cleanup_output,
+        permit,
+        .prepared,
+    ))
+        return false;
+    const neutral = &neutral_outputs[permit.intent_index];
+    return movedIntentPayloadValid(neutral, permit.aggregate_addr) and
+        neutral.source_intent_addr == permit.source_intent_addr and
+        neutral.allocator_ptr_addr == permit.allocator_ptr_addr and
+        neutral.allocator_vtable_addr == permit.allocator_vtable_addr and
+        neutral.allocation_addr == permit.allocation_addr and
+        neutral.allocation_len == permit.allocation_len and
+        std.mem.eql(
+            u8,
+            &neutral.content_digest,
+            &permit.content_digest,
+        );
+}
+
+pub fn commitNeutralRetirementUnchecked(
+    neutral: *MovedIntentPayload,
+    permit: *PreparedNeutralRetirement,
+    cleanup_output: *external_owner_cleanup.FrozenOwnerCleanupDescriptor,
+) void {
+    const allocator = neutral.allocator;
+    const allocation = @as(
+        [*]u8,
+        @ptrFromInt(neutral.allocation_addr),
+    )[0..neutral.allocation_len];
+    commitMovedIntentPayloadTransferUnchecked(neutral);
+    external_owner_cleanup.freezeOwnedSliceFromSealUnchecked(
+        cleanup_output,
+        allocator,
+        allocation,
+        permit.content_digest,
+    );
+    permit.lifecycle = .consumed;
+    permit.digest = preparedNeutralRetirementDigest(permit);
+}
+
+pub fn consumePreparedIntentCommitUnchecked(
+    handle: *ExternalRxIntentHandle,
+    proofs: *[max_intents]StagedScreenMutationProof,
+    neutral_outputs: *[max_intents]MovedIntentPayload,
+    permit: *PreparedIntentCommit,
+) void {
+    const scratch: *ExternalRxIntentScratch = @ptrFromInt(permit.scratch_addr);
+    for (scratch.intents[0..permit.intent_count], 0..) |*intent, index| {
+        switch (permit.slot_kinds[index]) {
+            .screen => {
+                intent.* = .committed;
+                proofs[index].lifecycle = .consumed;
+                proofs[index].digest = screenMutationProofDigest(&proofs[index]);
+            },
+            .event, .response => {
+                const owner = switch (intent.*) {
+                    .classified => |*value| value,
+                    else => unreachable,
+                };
+                neutral_outputs[index] = .{
+                    .saved_self_addr = @intFromPtr(&neutral_outputs[index]),
+                    .source_intent_addr = @intFromPtr(intent),
+                    .aggregate_addr = permit.aggregate_addr,
+                    .allocator = owner.allocator,
+                    .allocator_ptr_addr = owner.allocator_ptr_addr,
+                    .allocator_vtable_addr = owner.allocator_vtable_addr,
+                    .allocation_addr = owner.payload_addr,
+                    .allocation_len = owner.payload_len,
+                    .content_digest = owner.payload_digest,
+                    .lifecycle = .owned,
+                    .digest = undefined,
+                };
+                neutral_outputs[index].digest =
+                    movedIntentPayloadDigest(&neutral_outputs[index]);
+                intent.* = .committed;
+            },
+            .unused => unreachable,
+        }
+    }
     scratch.intent_count = 0;
     scratch.lifecycle = .spent;
     scratch.digest = scratchDigest(scratch);
-    for (cleanup[0..count]) |item| item.allocator.free(item.payload);
+    permit.lifecycle = .consumed;
+    permit.proofs_digest = screenMutationProofsDigest(proofs);
+    permit.neutral_outputs_digest = neutralOutputsDigest(neutral_outputs);
+    permit.digest = preparedIntentCommitDigest(permit);
+    handle.digest = handleDigest(handle);
+}
+
+pub fn abortPreparedIntentCommit(
+    handle: *ExternalRxIntentHandle,
+    proofs: *const [max_intents]StagedScreenMutationProof,
+    neutral_outputs: *const [max_intents]MovedIntentPayload,
+    permit: *PreparedIntentCommit,
+) bool {
+    if (!validatePreparedIntentCommit(
+        handle,
+        proofs,
+        neutral_outputs,
+        permit,
+    ))
+        return false;
+    permit.lifecycle = .aborted;
+    permit.digest = preparedIntentCommitDigest(permit);
+    return true;
+}
+
+pub fn prepareIntentAbort(
+    handle: *ExternalRxIntentHandle,
+    aggregate_addr: usize,
+    out: *FrozenIntentAbort,
+) error{ InvalidPlan, InvalidAlias }!void {
+    const scratch = validateHandleAndScratch(handle, .ready, .ready) orelse
+        return error.InvalidPlan;
+    if (out.saved_self_addr != 0 or out.lifecycle != .empty or
+        !std.mem.allEqual(u8, &out.digest, 0))
+        return error.InvalidPlan;
+    if (rangesOverlap(
+        @intFromPtr(out),
+        @sizeOf(FrozenIntentAbort),
+        @intFromPtr(handle),
+        @sizeOf(ExternalRxIntentHandle),
+    ) or rangesOverlap(
+        @intFromPtr(out),
+        @sizeOf(FrozenIntentAbort),
+        scratch.allocation_addr,
+        scratch.allocation_len,
+    ))
+        return error.InvalidAlias;
+
+    var owners = [_]?*ClassifiedIntentOwner{null} ** max_intents;
+    var cleanup_count: usize = 0;
+    for (scratch.intents[0..scratch.intent_count], 0..) |*intent, index| {
+        switch (intent.*) {
+            .classified => |*owner| {
+                if (!ownerValid(owner, scratch)) return error.InvalidPlan;
+                if (rangesOverlap(
+                    @intFromPtr(out),
+                    @sizeOf(FrozenIntentAbort),
+                    owner.payload_addr,
+                    owner.payload_len,
+                ))
+                    return error.InvalidAlias;
+                for (owners[0..cleanup_count]) |prior_optional| {
+                    const prior = prior_optional.?;
+                    if (rangesOverlap(
+                        owner.payload_addr,
+                        owner.payload_len,
+                        prior.payload_addr,
+                        prior.payload_len,
+                    ))
+                        return error.InvalidAlias;
+                }
+                if (owner.payload_len != 0) {
+                    owners[cleanup_count] = owner;
+                    cleanup_count += 1;
+                }
+            },
+            .screen_staging => |*staged| {
+                if (!stagedScreenIntentValid(
+                    staged,
+                    scratch,
+                    @intFromPtr(&scratch.intents[index]),
+                    aggregate_addr,
+                ))
+                    return error.InvalidPlan;
+            },
+            else => return error.InvalidPlan,
+        }
+    }
+
+    out.* = .{
+        .saved_self_addr = @intFromPtr(out),
+        .handle_addr = @intFromPtr(handle),
+        .scratch_addr = @intFromPtr(scratch),
+        .aggregate_addr = aggregate_addr,
+        .cleanup_count = @intCast(cleanup_count),
+        .intent_count = scratch.intent_count,
+        .lifecycle = .prepared,
+        .digest = undefined,
+    };
+    for (owners[0..cleanup_count], 0..) |owner_optional, index|
+        external_owner_cleanup.freezeOwnedSlice(
+            &out.cleanup[index],
+            owner_optional.?.allocator,
+            owner_optional.?.cleanup_payload.?,
+        ) catch unreachable;
+    out.digest = frozenIntentAbortDigest(out);
+}
+
+pub fn validatePreparedIntentAbort(
+    handle: *ExternalRxIntentHandle,
+    permit: *const FrozenIntentAbort,
+) bool {
+    const scratch = validateHandleAndScratch(handle, .ready, .ready) orelse
+        return false;
+    if (permit.saved_self_addr != @intFromPtr(permit) or
+        permit.handle_addr != @intFromPtr(handle) or
+        permit.scratch_addr != @intFromPtr(scratch) or
+        permit.cleanup_count > max_intents or
+        permit.intent_count != scratch.intent_count or
+        permit.lifecycle != .prepared or
+        !std.mem.eql(
+            u8,
+            &permit.digest,
+            &frozenIntentAbortDigest(permit),
+        ))
+        return false;
+    var cleanup_index: usize = 0;
+    for (scratch.intents[0..scratch.intent_count], 0..) |*intent, index| {
+        switch (intent.*) {
+            .classified => |*owner| {
+                if (!ownerValid(owner, scratch)) return false;
+                if (owner.payload_len == 0) continue;
+                if (cleanup_index >= permit.cleanup_count)
+                    return false;
+                const descriptor = &permit.cleanup[cleanup_index];
+                if (!external_owner_cleanup.validate(descriptor) or
+                    descriptor.allocation_addr != owner.payload_addr or
+                    descriptor.allocation_len != owner.payload_len or
+                    @intFromPtr(descriptor.allocator.ptr) != owner.allocator_ptr_addr or
+                    @intFromPtr(descriptor.allocator.vtable) !=
+                        owner.allocator_vtable_addr)
+                    return false;
+                cleanup_index += 1;
+            },
+            .screen_staging => |*staged| if (!stagedScreenIntentValid(
+                staged,
+                scratch,
+                @intFromPtr(&scratch.intents[index]),
+                permit.aggregate_addr,
+            ))
+                return false,
+            else => return false,
+        }
+    }
+    return cleanup_index == permit.cleanup_count;
+}
+
+pub fn commitIntentAbortUnchecked(
+    handle: *ExternalRxIntentHandle,
+    permit: *FrozenIntentAbort,
+) void {
+    const scratch: *ExternalRxIntentScratch =
+        @ptrFromInt(permit.scratch_addr);
+    for (scratch.intents[0..permit.intent_count]) |*intent|
+        intent.* = .aborted;
+    scratch.intent_count = 0;
+    scratch.lifecycle = .spent;
+    scratch.digest = scratchDigest(scratch);
+    permit.lifecycle = .committed;
+    permit.digest = frozenIntentAbortDigest(permit);
+    handle.digest = handleDigest(handle);
+}
+
+pub fn finishFrozenIntentAbort(
+    permit: *FrozenIntentAbort,
+) AbortResult {
+    if (permit.saved_self_addr != @intFromPtr(permit) or
+        permit.cleanup_count > max_intents or
+        permit.lifecycle != .committed or
+        !std.mem.eql(
+            u8,
+            &permit.digest,
+            &frozenIntentAbortDigest(permit),
+        ))
+        return .poisoned;
+    var local =
+        [_]external_owner_cleanup.FrozenOwnerCleanupDescriptor{.{}} **
+        max_intents;
+    const count = permit.cleanup_count;
+    for (permit.cleanup[0..count], 0..) |*descriptor, index|
+        external_owner_cleanup.moveFrozen(
+            descriptor,
+            &local[index],
+        ) catch return .poisoned;
+    permit.lifecycle = .spent;
+    permit.digest = frozenIntentAbortDigest(permit);
+    for (local[0..count]) |*descriptor| {
+        if (external_owner_cleanup.finishCallbackHidden(descriptor) != .cleaned)
+            return .poisoned;
+    }
     return .cleaned;
+}
+
+pub fn validateIntentAbortCleanupMove(
+    permit: *const FrozenIntentAbort,
+    out: []const external_owner_cleanup.FrozenOwnerCleanupDescriptor,
+) bool {
+    if (permit.saved_self_addr != @intFromPtr(permit) or
+        permit.cleanup_count > max_intents or
+        permit.lifecycle != .prepared or
+        out.len != permit.cleanup_count or
+        !std.mem.eql(
+            u8,
+            &permit.digest,
+            &frozenIntentAbortDigest(permit),
+        ) or rangesOverlap(
+        @intFromPtr(&permit.cleanup),
+        @as(usize, permit.cleanup_count) *
+            @sizeOf(external_owner_cleanup.FrozenOwnerCleanupDescriptor),
+        @intFromPtr(out.ptr),
+        out.len *
+            @sizeOf(external_owner_cleanup.FrozenOwnerCleanupDescriptor),
+    ))
+        return false;
+    for (permit.cleanup[0..permit.cleanup_count], out) |*source, *destination|
+        external_owner_cleanup.validateMoveFrozen(source, destination) catch
+            return false;
+    return true;
+}
+
+pub fn moveCommittedIntentAbortCleanupUnchecked(
+    permit: *FrozenIntentAbort,
+    out: []external_owner_cleanup.FrozenOwnerCleanupDescriptor,
+) void {
+    for (permit.cleanup[0..permit.cleanup_count], out) |*source, *destination|
+        external_owner_cleanup.moveFrozenUnchecked(source, destination);
+    permit.lifecycle = .spent;
+    permit.digest = frozenIntentAbortDigest(permit);
+}
+
+pub fn abortAll(handle: *ExternalRxIntentHandle) AbortResult {
+    var permit: FrozenIntentAbort = .{};
+    prepareIntentAbort(handle, 0, &permit) catch {
+        const scratch = validateHandleAndScratch(handle, .ready, .ready) orelse
+            return .poisoned;
+        return poison(scratch, handle);
+    };
+    if (!validatePreparedIntentAbort(handle, &permit)) {
+        const scratch = validateHandleAndScratch(handle, .ready, .ready) orelse
+            return .poisoned;
+        return poison(scratch, handle);
+    }
+    commitIntentAbortUnchecked(handle, &permit);
+    return finishFrozenIntentAbort(&permit);
 }
 
 pub fn resetForNextTurn(
@@ -679,6 +2087,36 @@ pub fn appendPreparedDestroyRange(
                 @intFromPtr(item.payload.ptr),
             item.payload.len,
         );
+}
+
+pub fn appendBoundOwnerRanges(
+    handle: *ExternalRxIntentHandle,
+    ranges: *external_owner_range.Scratch,
+) external_owner_range.Error!void {
+    const scratch = validateHandleAnyReadyState(handle) orelse
+        return error.InvalidRange;
+    try ranges.append(
+        @intFromPtr(handle),
+        @sizeOf(ExternalRxIntentHandle),
+    );
+    try ranges.append(
+        scratch.allocation_addr,
+        scratch.allocation_len,
+    );
+    if (scratch.lifecycle == .spent) {
+        if (scratch.intent_count != 0) return error.InvalidRange;
+        return;
+    }
+    if (scratch.lifecycle != .ready) return error.InvalidRange;
+    for (scratch.intents[0..scratch.intent_count]) |*intent| {
+        const owner = switch (intent.*) {
+            .classified => |*classified| classified,
+            else => return error.InvalidRange,
+        };
+        if (!ownerValid(owner, scratch)) return error.InvalidRange;
+        if (owner.payload_len != 0)
+            try ranges.append(owner.payload_addr, owner.payload_len);
+    }
 }
 
 pub fn commitPreparedDestroy(
@@ -983,9 +2421,9 @@ fn poison(
 }
 
 fn payloadDigest(bytes: []const u8) external_owner_seal.Digest {
-    var writer = external_owner_seal.Writer.init("MARUXPD1");
-    writer.writeBytes(bytes);
-    return writer.finish();
+    // Cross-owner moves must carry the content seal shared by ledger admission and frozen
+    // cleanup. A private intent-domain hash would make the same bytes unverifiable after move.
+    return external_owner_cleanup.contentDigest(bytes);
 }
 
 fn authorityRangesStructurallyValid(
@@ -1093,6 +2531,340 @@ fn ownerDigest(owner: *const ClassifiedIntentOwner) external_owner_seal.Digest {
     return writer.finish();
 }
 
+fn movedIntentPayloadDigest(
+    payload: *const MovedIntentPayload,
+) external_owner_seal.Digest {
+    var writer = external_owner_seal.Writer.init("MARUXMP1");
+    writer.writeUsize(payload.saved_self_addr);
+    writer.writeUsize(payload.source_intent_addr);
+    writer.writeUsize(payload.aggregate_addr);
+    writer.writeUsize(payload.allocator_ptr_addr);
+    writer.writeUsize(payload.allocator_vtable_addr);
+    writer.writeUsize(payload.allocation_addr);
+    writer.writeUsize(payload.allocation_len);
+    writer.writeBytes(&payload.content_digest);
+    writer.writeU8(@intFromEnum(payload.lifecycle));
+    return writer.finish();
+}
+
+fn movedIntentPayloadPristine(
+    payload: *const MovedIntentPayload,
+) bool {
+    return payload.saved_self_addr == 0 and
+        payload.source_intent_addr == 0 and
+        payload.aggregate_addr == 0 and
+        payload.allocator_ptr_addr == 0 and
+        payload.allocator_vtable_addr == 0 and
+        payload.allocation_addr == 0 and
+        payload.allocation_len == 0 and
+        payload.lifecycle == .empty and
+        std.mem.allEqual(u8, &payload.content_digest, 0) and
+        std.mem.allEqual(u8, &payload.digest, 0);
+}
+
+fn movedIntentPayloadValid(
+    payload: *const MovedIntentPayload,
+    aggregate_addr: usize,
+) bool {
+    if (payload.saved_self_addr != @intFromPtr(payload) or
+        payload.source_intent_addr == 0 or
+        payload.aggregate_addr != aggregate_addr or
+        aggregate_addr == 0 or
+        payload.lifecycle != .owned or
+        @intFromPtr(payload.allocator.ptr) != payload.allocator_ptr_addr or
+        @intFromPtr(payload.allocator.vtable) != payload.allocator_vtable_addr or
+        (if (payload.allocation_len == 0)
+            payload.allocation_addr != 0
+        else
+            payload.allocation_addr == 0) or
+        !std.mem.eql(
+            u8,
+            &payload.digest,
+            &movedIntentPayloadDigest(payload),
+        ))
+        return false;
+    const bytes: []const u8 = if (payload.allocation_len == 0)
+        &.{}
+    else
+        @as([*]const u8, @ptrFromInt(payload.allocation_addr))[0..payload.allocation_len];
+    return std.mem.eql(
+        u8,
+        &payload.content_digest,
+        &payloadDigest(bytes),
+    );
+}
+
+fn stagedScreenIntentDigest(
+    staged: *const StagedScreenIntent,
+) external_owner_seal.Digest {
+    var writer = external_owner_seal.Writer.init("MARUXSS1");
+    writer.writeUsize(staged.saved_self_addr);
+    writer.writeUsize(staged.storage_addr);
+    writer.writeU64(staged.turn_generation);
+    writer.writeU64(staged.parser_generation);
+    writer.writeUsize(staged.aggregate_addr);
+    writer.writeUsize(staged.neutral_addr);
+    writeClassification(
+        &writer,
+        .{ .screen_candidate = staged.classification },
+    );
+    writer.writeUsize(staged.payload_addr);
+    writer.writeUsize(staged.payload_len);
+    writer.writeBytes(&staged.payload_digest);
+    return writer.finish();
+}
+
+fn stagedScreenIntentValid(
+    staged: *const StagedScreenIntent,
+    scratch: *const ExternalRxIntentScratch,
+    expected_addr: usize,
+    aggregate_addr: usize,
+) bool {
+    return staged.saved_self_addr == expected_addr and
+        staged.storage_addr == scratch.storage_addr and
+        staged.turn_generation == scratch.turn_generation and
+        staged.parser_generation > scratch.parser_generation_at_start and
+        staged.aggregate_addr == aggregate_addr and
+        aggregate_addr != 0 and
+        staged.neutral_addr != 0 and
+        (if (staged.payload_len == 0)
+            staged.payload_addr == 0
+        else
+            staged.payload_addr != 0) and
+        std.mem.eql(
+            u8,
+            &staged.digest,
+            &stagedScreenIntentDigest(staged),
+        );
+}
+
+fn screenMutationProofDigest(
+    proof: *const StagedScreenMutationProof,
+) external_owner_seal.Digest {
+    var writer = external_owner_seal.Writer.init("MARUXSP1");
+    writer.writeUsize(proof.saved_self_addr);
+    writer.writeUsize(proof.source_intent_addr);
+    writer.writeUsize(proof.aggregate_addr);
+    writer.writeUsize(proof.batch_addr);
+    writer.writeU8(proof.intent_index);
+    writer.writeU8(proof.mutation_index);
+    writer.writeBytes(&proof.payload_digest);
+    writer.writeU8(@intFromEnum(proof.lifecycle));
+    return writer.finish();
+}
+
+fn screenMutationProofValid(
+    proof: *const StagedScreenMutationProof,
+    staged: *const StagedScreenIntent,
+    aggregate_addr: usize,
+    intent_index: u8,
+) bool {
+    return proof.saved_self_addr == @intFromPtr(proof) and
+        proof.source_intent_addr == @intFromPtr(staged) and
+        proof.aggregate_addr == aggregate_addr and
+        proof.batch_addr != 0 and
+        proof.intent_index == intent_index and
+        proof.lifecycle == .prepared and
+        std.mem.eql(
+            u8,
+            &proof.payload_digest,
+            &staged.payload_digest,
+        ) and
+        std.mem.eql(
+            u8,
+            &proof.digest,
+            &screenMutationProofDigest(proof),
+        );
+}
+
+fn screenMutationProofsDigest(
+    proofs: []const StagedScreenMutationProof,
+) external_owner_seal.Digest {
+    var writer = external_owner_seal.Writer.init("MARUXPS1");
+    writer.writeUsize(@intFromPtr(proofs.ptr));
+    writer.writeUsize(proofs.len);
+    for (proofs) |*proof| writer.writeBytes(&proof.digest);
+    return writer.finish();
+}
+
+fn screenMutationProofPristine(
+    proof: *const StagedScreenMutationProof,
+) bool {
+    return proof.saved_self_addr == 0 and
+        proof.source_intent_addr == 0 and proof.aggregate_addr == 0 and
+        proof.batch_addr == 0 and proof.intent_index == 0 and
+        proof.mutation_index == 0 and proof.lifecycle == .empty and
+        std.mem.allEqual(u8, &proof.payload_digest, 0) and
+        std.mem.allEqual(u8, &proof.digest, 0);
+}
+
+fn neutralOutputsDigest(
+    outputs: *const [max_intents]MovedIntentPayload,
+) external_owner_seal.Digest {
+    var writer = external_owner_seal.Writer.init("MARUXNO1");
+    writer.writeUsize(@intFromPtr(outputs));
+    writer.writeUsize(outputs.len);
+    for (outputs) |*output| writer.writeBytes(&output.digest);
+    return writer.finish();
+}
+
+pub fn preparedNeutralRetirementPristine(
+    permit: *const PreparedNeutralRetirement,
+) bool {
+    const pristine = PreparedNeutralRetirement{};
+    return std.mem.eql(
+        u8,
+        &preparedNeutralRetirementDigest(permit),
+        &preparedNeutralRetirementDigest(&pristine),
+    );
+}
+
+fn preparedNeutralRetirementDigest(
+    permit: *const PreparedNeutralRetirement,
+) external_owner_seal.Digest {
+    var writer = external_owner_seal.Writer.init("MARUXNR1");
+    writer.writeUsize(permit.saved_self_addr);
+    writer.writeUsize(permit.handle_addr);
+    writer.writeUsize(permit.scratch_addr);
+    writer.writeUsize(permit.intent_commit_addr);
+    writer.writeUsize(permit.aggregate_addr);
+    writer.writeUsize(permit.aggregate_len);
+    writer.writeUsize(permit.neutral_addr);
+    writer.writeUsize(permit.cleanup_output_addr);
+    writer.writeUsize(permit.source_intent_addr);
+    writer.writeU8(permit.intent_index);
+    writer.writeUsize(permit.allocator_ptr_addr);
+    writer.writeUsize(permit.allocator_vtable_addr);
+    writer.writeUsize(permit.allocation_addr);
+    writer.writeUsize(permit.allocation_len);
+    writer.writeBytes(&permit.content_digest);
+    writer.writeBytes(&permit.source_owner_digest);
+    writer.writeU8(@intFromEnum(permit.lifecycle));
+    return writer.finish();
+}
+
+fn preparedNeutralRetirementHeaderValid(
+    handle: *const ExternalRxIntentHandle,
+    neutral_outputs: *const [max_intents]MovedIntentPayload,
+    intent_commit: *const PreparedIntentCommit,
+    cleanup_output: *const external_owner_cleanup.FrozenOwnerCleanupDescriptor,
+    permit: *const PreparedNeutralRetirement,
+    expected_lifecycle: NeutralRetirementLifecycle,
+) bool {
+    if (permit.intent_index >= intent_commit.intent_count) return false;
+    const aggregate_end = std.math.add(
+        usize,
+        permit.aggregate_addr,
+        permit.aggregate_len,
+    ) catch return false;
+    const permit_end = std.math.add(
+        usize,
+        @intFromPtr(permit),
+        @sizeOf(PreparedNeutralRetirement),
+    ) catch return false;
+    const cleanup_end = std.math.add(
+        usize,
+        @intFromPtr(cleanup_output),
+        @sizeOf(external_owner_cleanup.FrozenOwnerCleanupDescriptor),
+    ) catch return false;
+    const expected_neutral_addr =
+        @intFromPtr(neutral_outputs) +
+        @as(usize, permit.intent_index) * @sizeOf(MovedIntentPayload);
+    return permit.saved_self_addr == @intFromPtr(permit) and
+        permit.handle_addr == @intFromPtr(handle) and
+        permit.scratch_addr == intent_commit.scratch_addr and
+        permit.intent_commit_addr == @intFromPtr(intent_commit) and
+        permit.aggregate_addr == intent_commit.aggregate_addr and
+        permit.aggregate_len == intent_commit.aggregate_len and
+        permit.neutral_addr == expected_neutral_addr and
+        permit.cleanup_output_addr == @intFromPtr(cleanup_output) and
+        permit.allocation_addr != 0 and permit.allocation_len != 0 and
+        permit.lifecycle == expected_lifecycle and
+        intent_commit.slot_kinds[permit.intent_index] == .event and
+        @intFromPtr(permit) >= permit.aggregate_addr and
+        permit_end <= aggregate_end and
+        @intFromPtr(cleanup_output) >= permit.aggregate_addr and
+        cleanup_end <= aggregate_end and
+        external_owner_cleanup.isPristine(cleanup_output) and
+        std.mem.eql(
+            u8,
+            &permit.digest,
+            &preparedNeutralRetirementDigest(permit),
+        );
+}
+
+fn preparedIntentCommitDigest(
+    permit: *const PreparedIntentCommit,
+) external_owner_seal.Digest {
+    var writer = external_owner_seal.Writer.init("MARUXIC1");
+    writer.writeUsize(permit.saved_self_addr);
+    writer.writeUsize(permit.handle_addr);
+    writer.writeUsize(permit.scratch_addr);
+    writer.writeUsize(permit.aggregate_addr);
+    writer.writeUsize(permit.aggregate_len);
+    writer.writeUsize(permit.proofs_addr);
+    writer.writeUsize(permit.neutral_outputs_addr);
+    writer.writeU8(permit.proof_count);
+    writer.writeU8(permit.intent_count);
+    writer.writeU64(permit.final_parser_generation);
+    writer.writeU64(permit.final_end_absolute);
+    for (permit.slot_kinds) |kind| writer.writeU8(@intFromEnum(kind));
+    for (permit.response_request_ids) |request_id|
+        writer.writeU64(request_id);
+    for (permit.source_parser_generations) |generation|
+        writer.writeU64(generation);
+    for (permit.source_owner_digests) |digest| writer.writeBytes(&digest);
+    for (permit.payload_digests) |digest| writer.writeBytes(&digest);
+    writer.writeUsize(permit.destination_plan_addr);
+    writer.writeUsize(permit.destination_plan_len);
+    writer.writeBytes(&permit.destination_plan_digest);
+    writer.writeU8(@intFromEnum(permit.lifecycle));
+    writer.writeBytes(&permit.proofs_digest);
+    writer.writeBytes(&permit.neutral_outputs_digest);
+    return writer.finish();
+}
+
+fn aggregateRangeAliasesIntentAuthority(
+    handle: *const ExternalRxIntentHandle,
+    scratch: *const ExternalRxIntentScratch,
+    view: AuthorityView,
+    aggregate_addr: usize,
+    aggregate_len: usize,
+) bool {
+    return rangesOverlap(
+        aggregate_addr,
+        aggregate_len,
+        @intFromPtr(handle),
+        @sizeOf(ExternalRxIntentHandle),
+    ) or rangesOverlap(
+        aggregate_addr,
+        aggregate_len,
+        scratch.allocation_addr,
+        scratch.allocation_len,
+    ) or rangesOverlap(
+        aggregate_addr,
+        aggregate_len,
+        view.storage_addr,
+        view.storage_len,
+    ) or rangeAliasesInventory(
+        aggregate_addr,
+        aggregate_len,
+        view.forbidden_ranges,
+    ) or rangesOverlap(
+        aggregate_addr,
+        aggregate_len,
+        if (view.forbidden_ranges.len == 0)
+            0
+        else
+            @intFromPtr(view.forbidden_ranges.ptr),
+        view.forbidden_ranges.len * @sizeOf(external_owner_range.Range),
+    ) or payloadAliasesLiveIntent(
+        scratch,
+        aggregate_addr,
+        aggregate_len,
+    );
+}
+
 fn scratchDigest(
     scratch: *const ExternalRxIntentScratch,
 ) external_owner_seal.Digest {
@@ -1114,8 +2886,12 @@ fn scratchDigest(
             writer.writeU8(1);
             writer.writeBytes(&owner.digest);
         },
-        .committed => writer.writeU8(2),
-        .aborted => writer.writeU8(3),
+        .screen_staging => |staged| {
+            writer.writeU8(2);
+            writer.writeBytes(&staged.digest);
+        },
+        .committed => writer.writeU8(3),
+        .aborted => writer.writeU8(4),
     };
     writer.writeU8(@intFromEnum(scratch.lifecycle));
     return writer.finish();
@@ -1166,6 +2942,22 @@ fn preparedDestroyDigest(
         writer.writeUsize(item.payload.len);
     }
     writer.writeU8(@intFromEnum(prepared.lifecycle));
+    return writer.finish();
+}
+
+fn frozenIntentAbortDigest(
+    permit: *const FrozenIntentAbort,
+) external_owner_seal.Digest {
+    var writer = external_owner_seal.Writer.init("MARUXAB1");
+    writer.writeUsize(permit.saved_self_addr);
+    writer.writeUsize(permit.handle_addr);
+    writer.writeUsize(permit.scratch_addr);
+    writer.writeUsize(permit.aggregate_addr);
+    writer.writeU8(permit.cleanup_count);
+    writer.writeU8(permit.intent_count);
+    writer.writeU8(@intFromEnum(permit.lifecycle));
+    for (permit.cleanup[0..permit.cleanup_count]) |descriptor|
+        writer.writeBytes(&descriptor.digest);
     return writer.finish();
 }
 
@@ -1563,6 +3355,204 @@ test "d2b3b owner preserves every accepted demux candidate without reclassificat
         ));
     }
     try std.testing.expectEqual(AbortResult.cleaned, abortAll(&handle));
+    var prepared: PreparedDestroy = .{};
+    try std.testing.expect(prepareDestroy(
+        &handle,
+        authority.view.storage_addr,
+        1,
+        &prepared,
+    ));
+    finishFrozenDestroy(commitPreparedDestroy(&handle, &prepared));
+}
+
+test "d2b3c mixed event and response intents move into sealed neutral slots once" {
+    var storage_marker: u8 = 0;
+    var authority = TestAuthority{ .view = .{
+        .storage_addr = @intFromPtr(&storage_marker),
+        .storage_len = 1,
+        .operation_generation = 1,
+        .parser_generation = 1,
+        .buffer_start_absolute = 0,
+        .identity = testIdentity(),
+        .allocator = std.testing.allocator,
+        .reservation_handle_addr = 0,
+        .reservation_generation = 0,
+    } };
+    var handle: ExternalRxIntentHandle = .{};
+    try std.testing.expectEqual(
+        CreateResult.allocated,
+        allocate(&handle, std.testing.allocator, authority.ops()),
+    );
+    authority.view.reservation_handle_addr = @intFromPtr(&handle);
+    authority.view.reservation_generation = 1;
+    try std.testing.expectEqual(
+        BindResult.bound,
+        bindReservation(&handle, authority.view),
+    );
+
+    const headers = [_]protocol.Header{
+        .{ .kind = .event, .stream_id = 7 },
+        .{ .kind = .response, .request_id = 91 },
+    };
+    var next_absolute: u64 = 0;
+    for (headers) |header| {
+        var source = try makeTestOutcomeWithHeader(
+            std.testing.allocator,
+            authority.view.identity,
+            next_absolute,
+            header,
+        );
+        authority.view.parser_generation += 1;
+        authority.view.buffer_start_absolute =
+            source.frame.range.end_absolute;
+        next_absolute = authority.view.buffer_start_absolute;
+        try std.testing.expectEqual(
+            MoveResult.classified,
+            moveFrame(&handle, &source, authority.ops(), 7),
+        );
+    }
+
+    const CommitAggregate = struct {
+        proofs: [max_intents]StagedScreenMutationProof =
+            [_]StagedScreenMutationProof{.{}} ** max_intents,
+        neutral: [max_intents]MovedIntentPayload =
+            [_]MovedIntentPayload{.{}} ** max_intents,
+        permit: PreparedIntentCommit = .{},
+        event_retirement: PreparedNeutralRetirement = .{},
+        event_cleanup: external_owner_cleanup.FrozenOwnerCleanupDescriptor = .{},
+    };
+    var aggregate: CommitAggregate = .{};
+    try prepareIntentCommit(
+        &handle,
+        @intFromPtr(&aggregate),
+        @sizeOf(CommitAggregate),
+        &aggregate.proofs,
+        &aggregate.neutral,
+        &aggregate.permit,
+    );
+    try std.testing.expect(validatePreparedIntentCommit(
+        &handle,
+        &aggregate.proofs,
+        &aggregate.neutral,
+        &aggregate.permit,
+    ));
+    try std.testing.expectEqual(@as(u8, 0), aggregate.permit.proof_count);
+    try std.testing.expectEqual(
+        IntentCommitSlotKind.event,
+        aggregate.permit.slot_kinds[0],
+    );
+    try std.testing.expectEqual(
+        IntentCommitSlotKind.response,
+        aggregate.permit.slot_kinds[1],
+    );
+    try std.testing.expectEqual(
+        @as(u64, 91),
+        aggregate.permit.response_request_ids[1],
+    );
+    try prepareNeutralRetirement(
+        &handle,
+        0,
+        &aggregate.proofs,
+        &aggregate.neutral,
+        &aggregate.permit,
+        &aggregate.event_cleanup,
+        &aggregate.event_retirement,
+    );
+    try std.testing.expect(validatePreparedNeutralRetirement(
+        &handle,
+        &aggregate.proofs,
+        &aggregate.neutral,
+        &aggregate.permit,
+        &aggregate.event_cleanup,
+        &aggregate.event_retirement,
+    ));
+    try std.testing.expect(!neutralRetirementReadyToCommit(
+        &handle,
+        &aggregate.neutral,
+        &aggregate.permit,
+        &aggregate.event_cleanup,
+        &aggregate.event_retirement,
+    ));
+    try std.testing.expect(
+        external_owner_cleanup.isPristine(&aggregate.event_cleanup),
+    );
+
+    const scratch_before: *ExternalRxIntentScratch =
+        @ptrFromInt(handle.scratch_addr);
+    const event_owner = &scratch_before.intents[0].classified;
+    const saved_first_byte = event_owner.cleanup_payload.?[0];
+    event_owner.cleanup_payload.?[0] ^= 0xff;
+    try std.testing.expect(!validatePreparedNeutralRetirement(
+        &handle,
+        &aggregate.proofs,
+        &aggregate.neutral,
+        &aggregate.permit,
+        &aggregate.event_cleanup,
+        &aggregate.event_retirement,
+    ));
+    event_owner.cleanup_payload.?[0] = saved_first_byte;
+    try std.testing.expect(validatePreparedNeutralRetirement(
+        &handle,
+        &aggregate.proofs,
+        &aggregate.neutral,
+        &aggregate.permit,
+        &aggregate.event_cleanup,
+        &aggregate.event_retirement,
+    ));
+
+    consumePreparedIntentCommitUnchecked(
+        &handle,
+        &aggregate.proofs,
+        &aggregate.neutral,
+        &aggregate.permit,
+    );
+    try std.testing.expect(neutralRetirementReadyToCommit(
+        &handle,
+        &aggregate.neutral,
+        &aggregate.permit,
+        &aggregate.event_cleanup,
+        &aggregate.event_retirement,
+    ));
+    commitNeutralRetirementUnchecked(
+        &aggregate.neutral[0],
+        &aggregate.event_retirement,
+        &aggregate.event_cleanup,
+    );
+    try std.testing.expect(validateMovedIntentPayloadTombstone(
+        &aggregate.neutral[0],
+        @intFromPtr(&aggregate),
+    ));
+    try std.testing.expectEqual(
+        external_owner_cleanup.FinishResult.cleaned,
+        external_owner_cleanup.finishCallbackHidden(&aggregate.event_cleanup),
+    );
+    try std.testing.expectEqual(
+        external_owner_cleanup.FinishResult.already_spent,
+        external_owner_cleanup.finishCallbackHidden(&aggregate.event_cleanup),
+    );
+
+    for (aggregate.neutral[1..2]) |*payload| {
+        const borrowed = borrowMovedIntentPayload(
+            payload,
+            @intFromPtr(&aggregate),
+        ) orelse return error.TestUnexpectedResult;
+        const allocation = @as(
+            [*]u8,
+            @ptrFromInt(borrowed.allocation_addr),
+        )[0..borrowed.allocation_len];
+        var cleanup: external_owner_cleanup.FrozenOwnerCleanupDescriptor = .{};
+        try external_owner_cleanup.freezeOwnedSlice(
+            &cleanup,
+            borrowed.allocator,
+            allocation,
+        );
+        commitMovedIntentPayloadTransferUnchecked(payload);
+        try std.testing.expectEqual(
+            external_owner_cleanup.FinishResult.cleaned,
+            external_owner_cleanup.finishCallbackHidden(&cleanup),
+        );
+    }
+
     var prepared: PreparedDestroy = .{};
     try std.testing.expect(prepareDestroy(
         &handle,
@@ -2204,4 +4194,13 @@ test "d2b3b frozen response-style cleanup rejects owner content drift without fr
     ));
     const frozen = commitPreparedDestroy(&handle, &prepared);
     finishFrozenDestroy(frozen);
+}
+
+test "d2b3c intent abort cleanup move rejects count above fixed owner cap" {
+    var permit: FrozenIntentAbort = .{
+        .cleanup_count = max_intents + 1,
+        .lifecycle = .prepared,
+    };
+    permit.saved_self_addr = @intFromPtr(&permit);
+    try std.testing.expect(!validateIntentAbortCleanupMove(&permit, &.{}));
 }

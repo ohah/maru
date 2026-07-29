@@ -1,3 +1,20 @@
+@import "tailwindcss";
+
+/* 터미널 색상 테마를 Tailwind 토큰으로 **참조만** 한다(docs/file-panel.md §2.1b). 값의 출처는 계속 native가
+   주입하는 `--maru-*` CSS 변수이므로, 테마를 바꾸면 유틸리티 클래스도 함께 따라온다. Tailwind 기본 팔레트를
+   쓰면 그 부분만 안 따라오는 이중 체계가 된다. `inline`이라야 var() 참조가 값으로 전개된다. */
+@theme inline {
+  --color-syntax-keyword: var(--maru-syntax-keyword);
+  --color-syntax-string: var(--maru-syntax-string);
+  --color-syntax-comment: var(--maru-syntax-comment);
+  --color-editor-selection: var(--maru-editor-selection);
+  --font-editor: var(--maru-editor-font-family, ui-monospace, monospace);
+  /* 나머지 색은 시스템 색을 그대로 쓴다 — 편집기 chrome은 OS 라이트/다크를 따라간다. */
+  --color-canvas: Canvas;
+  --color-canvas-text: CanvasText;
+  --color-accent: AccentColor;
+}
+
 :root {
   color-scheme: light dark;
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;

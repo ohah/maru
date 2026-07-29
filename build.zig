@@ -1121,6 +1121,10 @@ pub fn build(b: *std.Build) void {
                 "/usr/bin/grep -Eq '^file_viewer_loaded_images=1$' \"$summary\"; " ++
                 "/usr/bin/grep -Eq '^file_viewer_editor_hydrated=true$' \"$summary\"; " ++
                 "/usr/bin/grep -Eq '^file_viewer_mermaid_request=ok$' \"$summary\"; " ++
+                // §2.3: 터미널 테마 syntax 색이 제품 WKWebView 문서까지 실제로 주입됐는지(라이브 프리뷰 폐기 뒤에도 유지).
+                "/usr/bin/grep -Eq '^file_viewer_syntax_keyword=#[0-9a-f]{6}$' \"$summary\"; " ++
+                "/usr/bin/grep -Eq '^file_viewer_editor_selection=#[0-9a-f]{6}$' \"$summary\"; " ++
+                "/usr/bin/grep -Eq '^file_viewer_editor_font_size=[0-9]+px$' \"$summary\"; " ++
                 "/usr/bin/grep -Eq '^file_viewer_mermaid_navigation_in_flight=true$' \"$summary\"; " ++
                 "/usr/bin/grep -Eq '^file_viewer_mermaid_navigation_cancelled=true$' \"$summary\"; " ++
                 "/usr/bin/grep -Eq '^mermaid_pending_replies=0$' \"$summary\"; " ++

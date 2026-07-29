@@ -2359,6 +2359,10 @@ final class FilePanelEditingSmokeProbe {
     weak var panel: MaruWebPanelView?
     var editor = "pending"
     var mermaidRequestState = "pending"
+    // §2.3: 터미널 테마에서 파생한 syntax 색·선택 색·편집기 폰트 크기가 실제 문서에 주입됐는지(제품 경로 증거).
+    var syntaxKeyword = "pending"
+    var editorSelection = "pending"
+    var editorFontSize = "pending"
     // 읽기 프리뷰 Mermaid 확인 뒤 소스 모드 전환을 한 번만 요청하기 위한 latch.
     private var requestedSourceMode = false
     var mermaidNavigationInFlight = "pending"
@@ -2388,6 +2392,9 @@ final class FilePanelEditingSmokeProbe {
         if mermaidNavigationStarted { return }
         editor = "pending"
         mermaidRequestState = "pending"
+        syntaxKeyword = "pending"
+        editorSelection = "pending"
+        editorFontSize = "pending"
         requestedSourceMode = false
         defaultMode = "pending"
         edit = "pending"
@@ -2417,7 +2424,12 @@ final class FilePanelEditingSmokeProbe {
           editor: document.querySelector('.cm-content')?.textContent?.includes('FP4 viewer fixture') === true,
           previewImages: document.querySelectorAll('iframe').length,
           mermaidRequest: document.getElementById('viewer-status')?.dataset.mermaidRequestState || 'pending',
-          editorEpoch: Number(document.getElementById('viewer-status')?.dataset.editorEpoch || '0')
+          editorEpoch: Number(document.getElementById('viewer-status')?.dataset.editorEpoch || '0'),
+          // §2.3 터미널 테마 syntax 색이 실제 문서에 주입됐는지. inline style만 읽으므로 app.css의 :root 폴백은
+          // 잡히지 않는다 — 값이 있으면 native `applySyntaxThemeStyle`이 실제로 도달했다는 뜻이다.
+          syntaxKeyword: document.documentElement.style.getPropertyValue('--maru-syntax-keyword').trim(),
+          editorSelection: document.documentElement.style.getPropertyValue('--maru-editor-selection').trim(),
+          editorFontSize: document.documentElement.style.getPropertyValue('--maru-editor-font-size').trim()
         })
         """
         panel.webView.evaluateJavaScript(script) { [weak self] value, _ in
@@ -2430,6 +2442,12 @@ final class FilePanelEditingSmokeProbe {
             self.observedEditorEpoch = editorEpoch
             self.editor = String(editorReady)
             self.mermaidRequestState = mermaidRequest
+            let syntaxKeyword = probe["syntaxKeyword"] as? String ?? ""
+            if !syntaxKeyword.isEmpty { self.syntaxKeyword = syntaxKeyword }
+            let editorSelection = probe["editorSelection"] as? String ?? ""
+            if !editorSelection.isEmpty { self.editorSelection = editorSelection }
+            let editorFontSize = probe["editorFontSize"] as? String ?? ""
+            if !editorFontSize.isEmpty { self.editorFontSize = editorFontSize }
             if mermaidRequest == "ok", !self.requestedSourceMode {
                 self.requestedSourceMode = true
                 panel.applyFilePanelMode(Int32(MARU_FILE_PANEL_MODE_SOURCE_EDIT))
@@ -9171,6 +9189,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             file_viewer_loaded_images=\(wp?.fileViewerLoadedImagesProbe ?? "pending")
             file_viewer_editor_hydrated=\(wp?.fileEditingSmokeProbe.editor ?? "pending")
             file_viewer_mermaid_request=\(wp?.fileEditingSmokeProbe.mermaidRequestState ?? "pending")
+            file_viewer_syntax_keyword=\(wp?.fileEditingSmokeProbe.syntaxKeyword ?? "pending")
+            file_viewer_editor_selection=\(wp?.fileEditingSmokeProbe.editorSelection ?? "pending")
+            file_viewer_editor_font_size=\(wp?.fileEditingSmokeProbe.editorFontSize ?? "pending")
             file_viewer_mermaid_navigation_in_flight=\(wp?.fileEditingSmokeProbe.mermaidNavigationInFlight ?? "pending")
             file_viewer_mermaid_navigation_cancelled=\(wp?.fileEditingSmokeProbe.mermaidNavigationCancelled ?? "pending")
             file_viewer_default_mode=\(wp?.fileEditingSmokeProbe.defaultMode ?? "pending")

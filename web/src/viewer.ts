@@ -2,6 +2,7 @@ import { normalizeAssetReference } from "./asset-path";
 import { renderMarkdown } from "./markdown";
 import { sanitizeMermaidSvg } from "./rich-render";
 import { createMarkdownEditor, createSourceEditor } from "./editor";
+import { createRichEditor, type RichEditorHandle } from "./rich-editor";
 import { sourceLanguageExtensions } from "./source-language";
 import {
   type BeginDocumentRequest,
@@ -721,6 +722,9 @@ export function bootShell(document: Document, targetWindow: Window): void {
   const isSourceOnly = sourceLanguageWire !== null && !isSvg;
 
   let editor: EditorView | null = null;
+  // 리치 모드(§2.5)의 문서모델 편집기. CM6와 동시에 살 수 있지만 화면에는 한 번에 하나만 보인다.
+  let richEditor: RichEditorHandle | null = null;
+  let richHost: HTMLElement | null = null;
   let savedContent = "";
   let savedDocument: Text | null = null;
   let contentLoaded = false;
@@ -747,8 +751,18 @@ export function bootShell(document: Document, targetWindow: Window): void {
   let readMermaidQueue = Promise.resolve();
   let readMermaidWidget = 0;
 
-  const currentDocumentIsDirty = (): boolean =>
-    editor !== null && documentIsDirtyAgainstSnapshot(editor.state.doc, savedDocument);
+  /// 지금 화면이 가진 내용을 마크다운 한 벌로 만든다. 모드 전환·저장·읽기 프리뷰가 모두 이 하나를 쓴다(§2.5).
+  const currentMarkdown = (): string => {
+    if (mode === "rich" && richEditor !== null) return richEditor.getMarkdown();
+    return editor?.state.doc.toString() ?? savedContent;
+  };
+
+  const currentDocumentIsDirty = (): boolean => {
+    // 리치는 문서모델이라 CM6 `Text` 비교를 쓸 수 없다. 직렬화 결과를 마지막 저장 내용과 견준다 —
+    // 왕복 정규화가 일어나면 사용자가 타이핑하지 않아도 dirty가 될 수 있고, 그것이 §2.5가 수용한 대가다.
+    if (mode === "rich") return richEditor !== null && richEditor.getMarkdown() !== savedContent;
+    return editor !== null && documentIsDirtyAgainstSnapshot(editor.state.doc, savedDocument);
+  };
 
   const setCloseLocked = (requestId: number | null) => {
     closeLockRequestId = requestId;
@@ -841,13 +855,14 @@ export function bootShell(document: Document, targetWindow: Window): void {
   };
 
   const save = async (): Promise<boolean> => {
-    if (editor === null || editorEpoch === null) return false;
-    const documentSnapshot = editor.state.doc;
-    const content = documentSnapshot.toString();
+    if (editorEpoch === null) return false;
+    if (editor === null && richEditor === null) return false;
+    const documentSnapshot = editor?.state.doc ?? null;
+    const content = currentMarkdown();
     const operation = mutationQueue.then(async () => {
       await requestFileBridge(document, "write", { editor_epoch: editorEpoch, content });
       savedContent = content;
-      savedDocument = documentSnapshot;
+      if (documentSnapshot !== null && mode !== "rich") savedDocument = documentSnapshot;
       // Native write는 dirty를 임의로 내리지 않는다. 저장 중 문서가 다시 바뀌었는지 같은 직렬 queue에서 판정해
       // 최종 값 하나를 보내므로 write 완료와 재편집 사이에 eviction 가능한 false 구간이 생기지 않는다.
       const nextDirty = currentDocumentIsDirty();
@@ -933,6 +948,27 @@ export function bootShell(document: Document, targetWindow: Window): void {
     }
   };
 
+  const ensureRichEditor = (): RichEditorHandle => {
+    if (richEditor !== null) return richEditor;
+    if (richHost === null) {
+      richHost = document.createElement("div");
+      richHost.id = "rich-editor";
+      editorHost.parentElement?.insertBefore(richHost, editorHost);
+    }
+    richEditor = createRichEditor(
+      richHost,
+      currentMarkdown(),
+      () => {
+        if (applyingDiskContent) return;
+        revisions.documentChanged();
+        reportDirty(currentDocumentIsDirty());
+      },
+      () => void save(),
+    );
+    if (closeLockRequestId !== null) richEditor.setEditable(false);
+    return richEditor;
+  };
+
   const ensureEditor = (): EditorView => {
     if (editor !== null) return editor;
     if (editorEpoch === null) throw new Error("editor document epoch is unavailable");
@@ -979,7 +1015,7 @@ export function bootShell(document: Document, targetWindow: Window): void {
   // text는 프리뷰가 없어 no-op이다. 현재 편집 중 내용(editor)이 있으면 그걸, 없으면 마지막 로드/저장 snapshot을 쓴다.
   const postPreview = () => {
     if (!rendererReady || isSourceOnly) return;
-    const content = editor?.state.doc.toString() ?? savedContent;
+    const content = currentMarkdown();
     frame.contentWindow?.postMessage(
       isSvg
         ? { channel: viewerChannel, type: "renderSvg", svg: content }
@@ -989,15 +1025,32 @@ export function bootShell(document: Document, targetWindow: Window): void {
   };
 
   const applyMode = (next: FilePanelMode) => {
+    const previous = mode;
+    // 전환 시점의 내용을 마크다운 한 벌로 만들어 상대 편집기에 넘긴다(§2.5). 이 텍스트가 이후의 유일한 기준이다.
+    const carried = previous === next ? null : currentMarkdown();
     mode = next;
+    if (carried !== null && contentLoaded) {
+      if (next === "rich") ensureRichEditor().setMarkdown(carried);
+      else if (previous === "rich" && next === "source-edit") {
+        // 리치가 정규화한 결과가 여기서 CM6 문서로 확정된다. 사용자가 소스에서 그대로 다시 고칠 수 있다.
+        const cm = ensureEditor();
+        cm.dispatch({ changes: { from: 0, to: cm.state.doc.length, insert: carried } });
+      }
+    }
     if (isEditableFileMode(mode)) {
       frame.hidden = true;
-      editorHost.hidden = false;
-      if (contentLoaded) ensureEditor().focus();
+      const rich = mode === "rich";
+      editorHost.hidden = rich;
+      if (richHost !== null) richHost.hidden = !rich;
+      if (contentLoaded) {
+        if (rich) ensureRichEditor().focus();
+        else ensureEditor().focus();
+      }
     } else {
-      if (editor !== null) reportDirty(currentDocumentIsDirty(), true);
+      if (editor !== null || richEditor !== null) reportDirty(currentDocumentIsDirty(), true);
       frame.hidden = false;
       editorHost.hidden = true;
+      if (richHost !== null) richHost.hidden = true;
       postPreview();
     }
     document.body.dataset.fileMode = mode;
@@ -1011,7 +1064,8 @@ export function bootShell(document: Document, targetWindow: Window): void {
       if (detail.mode === "source-edit") applyMode("source-edit");
       return;
     }
-    if (detail.mode === "read" || detail.mode === "source-edit") applyMode(detail.mode);
+    if (detail.mode === "read" || detail.mode === "rich" || detail.mode === "source-edit")
+      applyMode(detail.mode);
   });
   // §2.3: ⌘+/− 폰트 줌을 읽기 프리뷰에도 반영한다(사용자 결정 2026-07-23). native가 `maru:file-zoom`으로 현재
   // 배율(현재 폰트/base)을 주면 render iframe에 `setZoom`으로 전달해 iframe이 `documentElement.zoom`으로 페이지
@@ -1282,6 +1336,8 @@ export function bootShell(document: Document, targetWindow: Window): void {
     () => {
       editor?.destroy();
       editor = null;
+      richEditor?.destroy();
+      richEditor = null;
     },
     { once: true },
   );

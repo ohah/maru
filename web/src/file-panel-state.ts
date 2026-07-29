@@ -1,14 +1,14 @@
 /**
  * 파일 패널 shell의 모드와 편집 revision 시계다.
  *
- * 모드는 둘뿐이다 — `read`(격리 render origin이 그린 프리뷰)와 `source-edit`(CM6 생 텍스트).
- * 편집 화면에 렌더를 겹치는 라이브 프리뷰는 폐기했다(docs/file-panel.md §1).
+ * 모드는 셋이다 — `read`(격리 render origin이 그린 프리뷰), `rich`(툴바를 가진 문서모델 WYSIWYG),
+ * `source-edit`(CM6 생 텍스트). 편집 화면에 렌더를 겹치는 라이브 프리뷰는 폐기했다(docs/file-panel.md §1·§2.5).
  */
 
-export type FilePanelMode = "read" | "source-edit";
+export type FilePanelMode = "read" | "rich" | "source-edit";
 
 export function isEditableFileMode(mode: FilePanelMode): boolean {
-  return mode === "source-edit";
+  return mode === "source-edit" || mode === "rich";
 }
 
 /**

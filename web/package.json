@@ -5,7 +5,6 @@
   "scripts": {
     "web:build": "bun run scripts/build.ts && bun run scripts/verify-build.ts",
     "web:test": "bun test",
-    "web:live-preview-perf": "bun run scripts/live-preview-perf.ts",
     "web:typecheck": "tsc -p tsconfig.bridge.json",
     "web:lint": "oxlint src scripts tests",
     "web:fmt": "oxfmt --write src scripts tests package.json tsconfig.json tsconfig.bridge.json",

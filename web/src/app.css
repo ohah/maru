@@ -76,7 +76,7 @@ body {
   color: color-mix(in srgb, CanvasText 65%, Canvas);
 }
 
-/* 라이브 프리뷰 atomic mermaid 다이어그램(격리 <img> data URL). 위젯 폭에 맞춰 비율 유지 축소한다. render iframe이
+/* 읽기 프리뷰 mermaid 다이어그램(격리 <img> data URL). 위젯 폭에 맞춰 비율 유지 축소한다. render iframe이
    높이를 측정하므로 height:auto로 자연 높이를 유지한다(내부 <style>는 이미지 문서 안에서 적용). */
 .maru-atomic-svg {
   display: block;
@@ -205,116 +205,8 @@ body {
   border-right-color: color-mix(in srgb, CanvasText 14%, Canvas);
 }
 
-body[data-file-mode="live-preview"] #editor .cm-gutters,
 body[data-file-mode="source-edit"] #editor .cm-gutters {
   display: none;
-}
-
-/* EditableProjection maps its closed roles to this fixed class set. No source text, URL, or worker HTML is
-   interpolated into trusted shell DOM/CSS. System colors keep the projection readable across native themes. */
-.maru-projection-heading-1 {
-  font-size: 1.8em;
-  font-weight: 700;
-}
-
-.maru-projection-heading-2 {
-  font-size: 1.55em;
-  font-weight: 700;
-}
-
-.maru-projection-heading-3 {
-  font-size: 1.32em;
-  font-weight: 650;
-}
-
-.maru-projection-heading-4,
-.maru-projection-heading-5,
-.maru-projection-heading-6 {
-  font-weight: 650;
-}
-
-.maru-projection-emphasis {
-  font-style: italic;
-}
-
-.maru-projection-strong {
-  font-weight: 700;
-}
-
-.maru-projection-strike {
-  text-decoration: line-through;
-  color: color-mix(in srgb, CanvasText 62%, Canvas);
-}
-
-.maru-projection-inline-code {
-  border-radius: 0.25em;
-  background: color-mix(in srgb, CanvasText 9%, Canvas);
-  color: color-mix(in srgb, LinkText 78%, CanvasText);
-}
-
-.maru-projection-quote {
-  color: color-mix(in srgb, CanvasText 70%, Canvas);
-}
-
-.maru-projection-list {
-  padding-inline-start: 0.15em;
-}
-
-.maru-projection-thematic-break {
-  color: color-mix(in srgb, CanvasText 48%, Canvas);
-}
-
-.maru-projection-link {
-  color: LinkText;
-  text-decoration: underline;
-  text-decoration-color: color-mix(in srgb, LinkText 48%, Canvas);
-  text-underline-offset: 0.16em;
-}
-
-.maru-projection-task,
-.maru-projection-task-checked {
-  border-radius: 0.2em;
-  color: AccentColorText;
-  background: AccentColor;
-}
-
-.maru-projection-task-checked {
-  opacity: 0.72;
-}
-
-.maru-projection-table-cell {
-  background: color-mix(in srgb, CanvasText 4%, Canvas);
-}
-
-.maru-live-atomic {
-  box-sizing: border-box;
-  width: 100%;
-  min-height: 2.25rem;
-  overflow: hidden;
-}
-
-/* 렌더 완료(`data-atomic-rendered`) 전까지 iframe을 투명하게 두고 완료 시 페이드인한다. 이렇게 하면 iframe이
-   render.html을 로드하며 잠깐 보이는 blank/기본 배경과, 렌더 순간의 높이 점프·내용 팝인이 시야에 드러나지 않고
-   완성된 블록만 부드럽게 나타난다(사용자 플리커 제거 요청, 2026-07-22). 실패한 위젯은 removeFailed로 원문 fallback
-   되므로 투명 상태로 남지 않는다. `prefers-reduced-motion`에서는 즉시 표시한다. */
-.maru-live-atomic-frame {
-  display: block;
-  width: 100%;
-  height: 4rem;
-  border: 0;
-  background: transparent;
-  opacity: 0;
-  transition: opacity 160ms ease-out;
-}
-
-.maru-live-atomic-frame[data-atomic-rendered="true"] {
-  opacity: 1;
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .maru-live-atomic-frame {
-    transition: none;
-  }
 }
 
 #app {
@@ -324,18 +216,6 @@ body[data-file-mode="source-edit"] #editor .cm-gutters {
   margin: 0 auto;
   padding: 1.5rem 2rem 4rem;
   line-height: 1.6;
-}
-
-body[data-renderer-mode="atomic"] {
-  overflow: hidden;
-}
-
-body[data-renderer-mode="atomic"] #app {
-  width: 100%;
-  max-width: none;
-  min-height: 1px;
-  margin: 0;
-  padding: 0.35rem 0;
 }
 
 img {

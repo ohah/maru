@@ -1,4 +1,4 @@
-// text kind(docs/file-panel.md §2.2) 소스 편집기의 CM6 언어·하이라이트. markdown live-preview projection과 무관한
+// text kind(docs/file-panel.md §2.2) 소스 편집기의 CM6 언어·하이라이트. markdown 읽기 프리뷰 파이프라인과 무관한
 // 순수 소스 표시라 여기서는 확장자별 문법과 theme 토큰 매핑만 정한다. 색은 theme 책임(§1)이라 HighlightStyle은
 // CSS custom property(app.css/네이티브 주입)만 참조하고 hex를 직접 박지 않는다. 전용 lang 패키지가 없는 언어는
 // @codemirror/legacy-modes의 StreamLanguage로 켠다(toml·shell·rust·go·c/c++ 등).

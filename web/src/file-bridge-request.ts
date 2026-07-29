@@ -41,7 +41,7 @@ export type FileBridgeRequest =
   | ({ method: "openLink" } & OpenLinkRequest)
   | ({ method: "renderMermaid" } & RenderMermaidRequest)
   | ({ method: "revokeMermaid" } & RevokeMermaidRequest)
-  | { method: "livePreviewReady"; editor_epoch: number };
+  | { method: "rendererReady"; editor_epoch: number };
 
 export type FileMethod = FileBridgeRequest["method"];
 
@@ -105,7 +105,7 @@ export function encodeFileBridgeRequest(request: FileBridgeRequest): Record<stri
         widget_generation: request.widget_generation,
         renderer_instance: request.renderer_instance,
       };
-    case "livePreviewReady":
+    case "rendererReady":
       return { method: request.method, editor_epoch: request.editor_epoch };
   }
 }

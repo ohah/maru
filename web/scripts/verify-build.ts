@@ -14,13 +14,9 @@ if ((await readdir(dist, { withFileTypes: true })).some((entry) => entry.isDirec
   throw new Error("web dist must remain flat for the no-follow custom-scheme reader");
 }
 
-if (entries.length !== 3)
-  throw new Error("integrity manifest must contain shell, worker, and Mermaid helper bundles");
-if (
-  !("bundle.js" in manifest) ||
-  !("live-preview-worker.js" in manifest) ||
-  !("mermaid-helper.js" in manifest)
-) {
+if (entries.length !== 2)
+  throw new Error("integrity manifest must contain shell and Mermaid helper bundles");
+if (!("bundle.js" in manifest) || !("mermaid-helper.js" in manifest)) {
   throw new Error("integrity manifest bundle names are not the pinned closed set");
 }
 
@@ -41,12 +37,8 @@ const notices = await readFile(join(dist, "THIRD_PARTY_NOTICES.txt"), "utf8");
 if (pages.some((html) => !html.includes(`src="bundle.js" integrity="${manifest["bundle.js"]}"`))) {
   throw new Error("every HTML entry must pin the emitted bundle SRI");
 }
-if (
-  pages.some(
-    (html) => html.includes("live-preview-worker.js") || html.includes("mermaid-helper.js"),
-  )
-) {
-  throw new Error("worker and Mermaid helper bundles must not be loaded as document scripts");
+if (pages.some((html) => html.includes("mermaid-helper.js"))) {
+  throw new Error("the Mermaid helper bundle must not be loaded as a document script");
 }
 if (!notices.includes("dompurify@3.4.12") || notices.includes("@zntc/core@0.1.4")) {
   throw new Error("runtime notices must cover production dependencies only");

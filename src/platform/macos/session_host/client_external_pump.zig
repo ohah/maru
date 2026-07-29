@@ -20,6 +20,7 @@ const external_inbox_limits = @import("external_inbox_limits.zig");
 const external_owner_seal = @import("external_owner_seal.zig");
 const external_owner_range = @import("external_owner_range.zig");
 const external_source_decision = @import("external_source_decision.zig");
+const external_rx_types = @import("external_rx_types.zig");
 const framing = @import("framing.zig");
 const protocol = @import("protocol.zig");
 const resize_wire = @import("resize_wire.zig");
@@ -1340,6 +1341,170 @@ pub const InheritedRxBlockerSnapshot = struct {
     }
 };
 
+const LivePartialBatch = union(enum) {
+    none,
+    assembling: struct {
+        ledger_token: external_inbox_ledger.Token,
+        generation: u64,
+        owner_digest: external_owner_seal.Digest,
+    },
+    terminal,
+};
+
+const LiveScreenLifecycle = enum {
+    empty,
+    active,
+    terminal,
+    cleaned_tombstone,
+};
+
+const LiveScreenBacklog = struct {
+    saved_self_addr: usize = 0,
+    storage_addr: usize = 0,
+    tokens: [external_inbox_ledger.max_live_mutations]external_inbox_ledger.Token =
+        [_]external_inbox_ledger.Token{.{ .slot = 0, .generation = 0 }} **
+        external_inbox_ledger.max_live_mutations,
+    head: u8 = 0,
+    len: u8 = 0,
+    generation: u64 = 0,
+    lifecycle: LiveScreenLifecycle = .empty,
+    owner_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+};
+
+const ResponsePayloadSeal = struct {
+    payload_addr: usize,
+    payload_len: usize,
+    allocator_ptr_addr: usize,
+    allocator_vtable_addr: usize,
+    payload_digest: external_owner_seal.Digest,
+
+    fn empty() ResponsePayloadSeal {
+        return .{
+            .payload_addr = 0,
+            .payload_len = 0,
+            .allocator_ptr_addr = 0,
+            .allocator_vtable_addr = 0,
+            .payload_digest = [_]u8{0} ** 32,
+        };
+    }
+
+    fn fromPayload(
+        payload: *const external_inbox_ledger.OwnedPayload,
+    ) ResponsePayloadSeal {
+        return .{
+            .payload_addr = if (payload.allocation_ptr) |ptr|
+                @intFromPtr(ptr)
+            else
+                0,
+            .payload_len = payload.logical_len,
+            .allocator_ptr_addr = @intFromPtr(payload.allocator.ptr),
+            .allocator_vtable_addr = @intFromPtr(payload.allocator.vtable),
+            .payload_digest = responsePayloadDigest(payload.bytes()),
+        };
+    }
+
+    /// Descriptor equality is checked before content so a forged address is never dereferenced.
+    fn validatesPayload(
+        self: ResponsePayloadSeal,
+        payload: *const external_inbox_ledger.OwnedPayload,
+    ) bool {
+        const payload_addr = if (payload.allocation_ptr) |ptr|
+            @intFromPtr(ptr)
+        else
+            0;
+        if (payload_addr != self.payload_addr or
+            payload.logical_len != self.payload_len or
+            @intFromPtr(payload.allocator.ptr) != self.allocator_ptr_addr or
+            @intFromPtr(payload.allocator.vtable) != self.allocator_vtable_addr)
+            return false;
+        return std.mem.eql(
+            u8,
+            &self.payload_digest,
+            &responsePayloadDigest(payload.bytes()),
+        );
+    }
+
+    fn writeDigest(
+        self: ResponsePayloadSeal,
+        writer: *external_owner_seal.Writer,
+    ) void {
+        writer.writeUsize(self.payload_addr);
+        writer.writeUsize(self.payload_len);
+        writer.writeUsize(self.allocator_ptr_addr);
+        writer.writeUsize(self.allocator_vtable_addr);
+        writer.writeBytes(&self.payload_digest);
+    }
+};
+
+const PendingResponseState = struct {
+    payload: external_inbox_ledger.OwnedPayload,
+    seal: ResponsePayloadSeal,
+    generation: u64,
+    owner_digest: external_owner_seal.Digest,
+};
+
+const PendingResponseOwner = union(enum) {
+    none,
+    pending: PendingResponseState,
+    terminal,
+};
+
+const LiveOwnerBlockerProjection = struct {
+    screen_or_partial_pending: bool,
+    response_pending: bool,
+};
+
+fn livePartialDigest(
+    storage: *const ExternalPumpStorage,
+    token: external_inbox_ledger.Token,
+    generation: u64,
+) external_owner_seal.Digest {
+    var writer = external_owner_seal.Writer.init("MARULPB1");
+    writer.writeUsize(@intFromPtr(storage));
+    writer.writeU64(storage.owner_incarnation);
+    writer.writeU16(token.slot);
+    writer.writeU64(token.generation);
+    writer.writeU64(generation);
+    return writer.finish();
+}
+
+fn liveScreenDigest(
+    storage: *const ExternalPumpStorage,
+    backlog: *const LiveScreenBacklog,
+) external_owner_seal.Digest {
+    var writer = external_owner_seal.Writer.init("MARULSB1");
+    writer.writeUsize(backlog.saved_self_addr);
+    writer.writeUsize(backlog.storage_addr);
+    writer.writeU64(storage.owner_incarnation);
+    writer.writeU8(backlog.head);
+    writer.writeU8(backlog.len);
+    writer.writeU64(backlog.generation);
+    writer.writeU8(@intFromEnum(backlog.lifecycle));
+    for (backlog.tokens) |token| {
+        writer.writeU16(token.slot);
+        writer.writeU64(token.generation);
+    }
+    return writer.finish();
+}
+
+fn responsePayloadDigest(bytes: []const u8) external_owner_seal.Digest {
+    var writer = external_owner_seal.Writer.init("MARURPD1");
+    writer.writeBytes(bytes);
+    return writer.finish();
+}
+
+fn pendingResponseDigest(
+    storage: *const ExternalPumpStorage,
+    pending: *const PendingResponseState,
+) external_owner_seal.Digest {
+    var writer = external_owner_seal.Writer.init("MARURPO1");
+    writer.writeUsize(@intFromPtr(storage));
+    writer.writeU64(storage.owner_incarnation);
+    pending.seal.writeDigest(&writer);
+    writer.writeU64(pending.generation);
+    return writer.finish();
+}
+
 fn wholeTurnLeaseDigest(lease: ExternalWholeTurnLease) external_owner_seal.Digest {
     var writer = external_owner_seal.Writer.init("MARUWTL1");
     writer.writeUsize(lease.saved_self_addr);
@@ -1452,6 +1617,120 @@ const ExternalPumpCleanupScratchLifecycle = enum {
 };
 const ExternalPumpRangeScratchKind = enum { source, teardown };
 
+const LiveOwnerTeardownLifecycle = enum {
+    empty,
+    prepared,
+    frozen,
+    consumed,
+    aborted,
+};
+
+const PreparedLiveOwnerTeardown = struct {
+    saved_self_addr: usize = 0,
+    storage_addr: usize = 0,
+    known_tokens: [external_inbox_ledger.max_live_mutations + 1]external_inbox_ledger.Token =
+        [_]external_inbox_ledger.Token{.{ .slot = 0, .generation = 0 }} **
+        (external_inbox_ledger.max_live_mutations + 1),
+    known_token_count: u8 = 0,
+    partial_owner_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    screen_owner_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    response_owner_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    response_seal: ResponsePayloadSeal = ResponsePayloadSeal.empty(),
+    lifecycle: LiveOwnerTeardownLifecycle = .empty,
+    digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+};
+
+const FrozenResponsePayloadCleanup = struct {
+    payload: external_inbox_ledger.OwnedPayload =
+        .{ .allocator = std.heap.page_allocator },
+    seal: ResponsePayloadSeal = ResponsePayloadSeal.empty(),
+    has_payload: bool = false,
+
+    fn valid(self: *const FrozenResponsePayloadCleanup) bool {
+        return if (self.has_payload)
+            self.seal.validatesPayload(&self.payload)
+        else
+            self.payload.allocation_ptr == null and
+                self.payload.logical_len == 0 and
+                std.meta.eql(self.seal, ResponsePayloadSeal.empty());
+    }
+
+    /// The primitive owns the only callback-visible step. It tombstones itself before free so
+    /// teardown and the later exact response take can share the same no-reentry cleanup rule.
+    fn finishCallbackHidden(self: *FrozenResponsePayloadCleanup) bool {
+        if (!self.valid()) return false;
+        const has_payload = self.has_payload;
+        var payload = self.payload;
+        self.* = .{};
+        if (has_payload) payload.deinit();
+        return true;
+    }
+};
+
+const FrozenLiveOwnerCleanup = struct {
+    saved_self_addr: usize = 0,
+    response: FrozenResponsePayloadCleanup = .{},
+    lifecycle: LiveOwnerTeardownLifecycle = .empty,
+    digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+
+    fn finishCallbackHidden(self: *FrozenLiveOwnerCleanup) bool {
+        if (self.saved_self_addr != @intFromPtr(self) or
+            self.lifecycle != .frozen or
+            !std.mem.eql(u8, &self.digest, &frozenLiveOwnerDigest(self)))
+            return false;
+        var response = self.response;
+        self.* = .{ .lifecycle = .consumed };
+        return response.finishCallbackHidden();
+    }
+};
+
+fn preparedLiveOwnerTeardownDigest(
+    prepared: *const PreparedLiveOwnerTeardown,
+) external_owner_seal.Digest {
+    var writer = external_owner_seal.Writer.init("MARULOT1");
+    writer.writeUsize(prepared.saved_self_addr);
+    writer.writeUsize(prepared.storage_addr);
+    writer.writeU8(prepared.known_token_count);
+    for (prepared.known_tokens) |token| {
+        writer.writeU16(token.slot);
+        writer.writeU64(token.generation);
+    }
+    writer.writeBytes(&prepared.partial_owner_digest);
+    writer.writeBytes(&prepared.screen_owner_digest);
+    writer.writeBytes(&prepared.response_owner_digest);
+    prepared.response_seal.writeDigest(&writer);
+    writer.writeU8(@intFromEnum(prepared.lifecycle));
+    return writer.finish();
+}
+
+fn frozenLiveOwnerDigest(
+    frozen: *const FrozenLiveOwnerCleanup,
+) external_owner_seal.Digest {
+    var writer = external_owner_seal.Writer.init("MARULOF1");
+    writer.writeUsize(frozen.saved_self_addr);
+    writer.writeBool(frozen.response.has_payload);
+    frozen.response.seal.writeDigest(&writer);
+    writer.writeUsize(if (frozen.response.payload.allocation_ptr) |ptr|
+        @intFromPtr(ptr)
+    else
+        0);
+    writer.writeUsize(frozen.response.payload.logical_len);
+    writer.writeUsize(@intFromPtr(frozen.response.payload.allocator.ptr));
+    writer.writeUsize(@intFromPtr(frozen.response.payload.allocator.vtable));
+    writer.writeU8(@intFromEnum(frozen.lifecycle));
+    return writer.finish();
+}
+
+fn appendPreparedLiveOwnerRanges(
+    prepared: *const PreparedLiveOwnerTeardown,
+    ranges: *external_owner_range.Scratch,
+) external_owner_range.Error!void {
+    try ranges.append(
+        prepared.response_seal.payload_addr,
+        prepared.response_seal.payload_len,
+    );
+}
+
 /// Persistent caller-owned cleanup authority shared by prepare and its immediate suffix.
 ///
 /// The aggregate is initialized only at its final address. A successful recovery or terminal
@@ -1477,6 +1756,8 @@ pub const ExternalPumpCleanupScratch = struct {
     metadata_frozen: external_event_materialization.FrozenOwnerMetadataCleanup = .{},
     take_prepared: client_mod.PreparedExternalAdoptionTakeCleanup = .{},
     take_frozen: client_mod.FrozenExternalAdoptionTakeCleanup = .{},
+    live_prepared: PreparedLiveOwnerTeardown = .{},
+    live_frozen: FrozenLiveOwnerCleanup = .{},
     moved_client: ?client_mod.Client = null,
     moved_evidence: ?PreparedAdoptionEvidence = null,
 
@@ -1497,6 +1778,8 @@ pub const ExternalPumpCleanupScratch = struct {
         out.metadata_frozen = .{};
         out.take_prepared = .{};
         out.take_frozen = .{};
+        out.live_prepared = .{};
+        out.live_frozen = .{};
         out.moved_client = null;
         out.moved_evidence = null;
         return true;
@@ -1517,6 +1800,8 @@ pub const ExternalPumpCleanupScratch = struct {
             self.metadata_frozen.saved_self_addr == 0 and
             self.take_prepared.saved_self_addr == 0 and
             self.take_frozen.saved_self_addr == 0 and
+            self.live_prepared.saved_self_addr == 0 and
+            self.live_frozen.saved_self_addr == 0 and
             self.moved_client == null and self.moved_evidence == null;
     }
 
@@ -1535,6 +1820,8 @@ pub const ExternalPumpCleanupScratch = struct {
         self.metadata_frozen = .{};
         self.take_prepared = .{};
         self.take_frozen = .{};
+        self.live_prepared = .{};
+        self.live_frozen = .{};
         self.moved_client = null;
         self.moved_evidence = null;
         self.lifecycle = .ready;
@@ -1554,6 +1841,7 @@ comptime {
         @sizeOf(client_mod.FrozenExternalAdoptionTakeCleanup) +
         @sizeOf(client_mod.ExternalAdoptionCleanupScratch) +
         @sizeOf(client_external_adoption.FrozenCommittedScreenCleanup) +
+        @sizeOf(FrozenLiveOwnerCleanup) +
         @sizeOf(client_mod.Client) +
         @sizeOf(PreparedAdoptionEvidence);
     if (callback_local_bytes > max_external_pump_callback_local_bytes)
@@ -1596,6 +1884,9 @@ pub const ExternalPumpStorage = struct {
     prepared_adoption: PreparedExternalAdoption = .{},
     client_cleanup_take: client_mod.ExternalAdoptionTake = .{},
     committed_screen: client_external_adoption.CommittedScreenBacklog = .{},
+    live_partial: LivePartialBatch = .none,
+    live_screen: LiveScreenBacklog = .{},
+    pending_response: PendingResponseOwner = .none,
     screen_pending_summary: ScreenPendingSummarySeal = .{},
     owner_metadata: external_event_materialization.OwnerMetadataState = .{},
     metadata_pending_summary: MetadataPendingSummarySeal = .{},
@@ -1667,6 +1958,122 @@ pub const ExternalPumpStorage = struct {
             .current => |current| seal.supported and
                 seal.revision == current.revision and
                 seal.pending == current.pending,
+        };
+    }
+
+    fn livePartialValid(self: *const ExternalPumpStorage) bool {
+        return switch (self.live_partial) {
+            .none, .terminal => true,
+            .assembling => |assembling| assembling.generation != 0 and
+                assembling.ledger_token.generation != 0 and
+                std.mem.eql(
+                    u8,
+                    &assembling.owner_digest,
+                    &livePartialDigest(
+                        self,
+                        assembling.ledger_token,
+                        assembling.generation,
+                    ),
+                ),
+        };
+    }
+
+    fn liveScreenValid(self: *const ExternalPumpStorage) bool {
+        const backlog = &self.live_screen;
+        switch (backlog.lifecycle) {
+            .empty, .terminal, .cleaned_tombstone => {
+                if (backlog.saved_self_addr == 0 and
+                    backlog.storage_addr == 0 and backlog.head == 0 and
+                    backlog.len == 0 and backlog.generation == 0 and
+                    std.mem.allEqual(u8, &backlog.owner_digest, 0))
+                {
+                    for (backlog.tokens) |token|
+                        if (token.slot != 0 or token.generation != 0)
+                            return false;
+                    return true;
+                }
+                return false;
+            },
+            .active => {},
+        }
+        if (backlog.saved_self_addr != @intFromPtr(backlog) or
+            backlog.storage_addr != @intFromPtr(self) or
+            backlog.generation == 0 or
+            backlog.len == 0 or
+            backlog.len > external_inbox_ledger.max_live_mutations or
+            backlog.head >= external_inbox_ledger.max_live_mutations or
+            !std.mem.eql(
+                u8,
+                &backlog.owner_digest,
+                &liveScreenDigest(self, backlog),
+            ))
+            return false;
+        const capacity = external_inbox_ledger.max_live_mutations;
+        for (backlog.tokens, 0..) |token, index| {
+            const offset = (index + capacity - backlog.head) % capacity;
+            const active = offset < backlog.len;
+            if (!active) {
+                if (token.slot != 0 or token.generation != 0) return false;
+                continue;
+            }
+            if (token.generation == 0 or
+                @as(usize, token.slot) >= external_inbox_ledger.max_items)
+                return false;
+            for (0..offset) |prior_offset| {
+                const prior_index = (backlog.head + prior_offset) % capacity;
+                if (backlog.tokens[prior_index].slot == token.slot)
+                    return false;
+            }
+        }
+        return true;
+    }
+
+    fn pendingResponseValid(self: *const ExternalPumpStorage) bool {
+        return switch (self.pending_response) {
+            .none, .terminal => true,
+            .pending => |*pending| blk: {
+                if (pending.generation == 0 or
+                    !pending.seal.validatesPayload(&pending.payload))
+                    break :blk false;
+                break :blk std.mem.eql(
+                    u8,
+                    &pending.owner_digest,
+                    &pendingResponseDigest(self, pending),
+                );
+            },
+        };
+    }
+
+    fn liveOwnersValid(self: *const ExternalPumpStorage) bool {
+        return self.livePartialValid() and self.liveScreenValid() and
+            self.pendingResponseValid();
+    }
+
+    fn liveScreenOrPartialPending(self: *const ExternalPumpStorage) bool {
+        const partial_pending = switch (self.live_partial) {
+            .assembling => true,
+            else => false,
+        };
+        return partial_pending or
+            (self.live_screen.lifecycle == .active and self.live_screen.len != 0);
+    }
+
+    fn responsePending(self: *const ExternalPumpStorage) bool {
+        return switch (self.pending_response) {
+            .pending => true,
+            else => false,
+        };
+    }
+
+    /// Snapshot construction and teardown tests share this projection so blocker truth has one
+    /// source even after the storage lifecycle no longer permits issuing a public snapshot.
+    fn liveOwnerBlockerProjection(
+        self: *const ExternalPumpStorage,
+    ) ?LiveOwnerBlockerProjection {
+        if (!self.liveOwnersValid()) return null;
+        return .{
+            .screen_or_partial_pending = self.liveScreenOrPartialPending(),
+            .response_pending = self.responsePending(),
         };
     }
 
@@ -2107,7 +2514,9 @@ pub const ExternalPumpStorage = struct {
     ) AccessError!InheritedRxBlockerSnapshot {
         if (!ownerIncarnationValid(self) or !ownerAuthorityValid(self) or
             !ownerResizeValid(self) or !self.screenPendingSummaryValid() or
-            !self.metadataPendingSummaryValid())
+            !self.metadataPendingSummaryValid() or !self.liveOwnersValid())
+            return error.InvalidSnapshot;
+        const live_blockers = self.liveOwnerBlockerProjection() orelse
             return error.InvalidSnapshot;
         const authority_generation = self.owner_authority.current.generation;
         var result = InheritedRxBlockerSnapshot{
@@ -2116,14 +2525,13 @@ pub const ExternalPumpStorage = struct {
             .lease_addr = @intFromPtr(lease),
             .operation_generation = self.operation_generation,
             .committed_screen_pending = self.screen_pending_summary.retained_count != 0,
-            // d2b3 binds these two persistent owners; d2b1 seals their canonical absence.
-            .live_screen_pending = false,
+            .live_screen_pending = live_blockers.screen_or_partial_pending,
             .metadata_projection_pending = self.metadata_pending_summary.pending,
             .resize_projection_pending = switch (self.owner_resize) {
                 .none => false,
                 .current => |current| current.pending,
             },
-            .response_correlation_pending = false,
+            .response_correlation_pending = live_blockers.response_pending,
             .authority_generation = authority_generation,
             .generation = self.operation_generation,
             .lifecycle = .prepared,
@@ -2140,6 +2548,24 @@ pub const ExternalPumpStorage = struct {
         writer.writeBytes(&self.owner_incarnation_seal.digest);
         writer.writeBytes(&self.screen_pending_summary.digest);
         writer.writeBytes(&self.metadata_pending_summary.digest);
+        switch (self.live_partial) {
+            .none => writer.writeU8(0),
+            .assembling => |assembling| {
+                writer.writeU8(1);
+                writer.writeBytes(&assembling.owner_digest);
+            },
+            .terminal => writer.writeU8(2),
+        }
+        writer.writeU8(@intFromEnum(self.live_screen.lifecycle));
+        writer.writeBytes(&self.live_screen.owner_digest);
+        switch (self.pending_response) {
+            .none => writer.writeU8(0),
+            .pending => |pending| {
+                writer.writeU8(1);
+                writer.writeBytes(&pending.owner_digest);
+            },
+            .terminal => writer.writeU8(2),
+        }
         switch (self.owner_resize) {
             .none => writer.writeBool(false),
             .current => |current| {
@@ -2997,6 +3423,9 @@ pub const ExternalPumpStorage = struct {
         self.prepared_adoption = .{ .lifecycle = .committed_tombstone };
         self.client_cleanup_take = .{};
         self.committed_screen = .{};
+        self.live_partial = .none;
+        self.live_screen = .{};
+        self.pending_response = .none;
         self.owner_metadata = .{};
         if (!external_event_materialization.commitRecoveryBaseline(
             &self.owner_metadata,
@@ -3092,6 +3521,9 @@ pub const ExternalPumpStorage = struct {
         self.prepared_adoption = .{};
         self.client_cleanup_take = .{ .lifecycle = .aborted };
         self.committed_screen = .{};
+        self.live_partial = .terminal;
+        self.live_screen = .{ .lifecycle = .cleaned_tombstone };
+        self.pending_response = .terminal;
         self.owner_metadata = .{};
         self.owner_resize = .none;
         self.owner_authority = .empty;
@@ -3322,6 +3754,9 @@ pub const ExternalPumpStorage = struct {
         }
         if (self.operation_generation == 0 or
             !self.committed_screen.isEmpty() or
+            self.live_partial != .none or
+            !std.meta.eql(self.live_screen, LiveScreenBacklog{}) or
+            self.pending_response != .none or
             !std.meta.eql(self.screen_pending_summary, ScreenPendingSummarySeal{}) or
             !self.owner_metadata.isEmpty() or
             !std.meta.eql(self.metadata_pending_summary, MetadataPendingSummarySeal{}) or
@@ -3691,6 +4126,158 @@ pub const ExternalPumpStorage = struct {
         return self.teardownUnderHeldOperationLease(cleanup_scratch);
     }
 
+    fn prepareLiveOwnerTeardown(
+        self: *ExternalPumpStorage,
+        prepared: *PreparedLiveOwnerTeardown,
+        frozen: *const FrozenLiveOwnerCleanup,
+    ) bool {
+        if (!self.liveOwnersValid() or prepared.saved_self_addr != 0 or
+            prepared.lifecycle != .empty or frozen.saved_self_addr != 0 or
+            frozen.lifecycle != .empty)
+            return false;
+        var staged: PreparedLiveOwnerTeardown = .{
+            .saved_self_addr = @intFromPtr(prepared),
+            .storage_addr = @intFromPtr(self),
+            .lifecycle = .prepared,
+        };
+        switch (self.live_partial) {
+            .none, .terminal => {},
+            .assembling => |assembling| {
+                staged.known_tokens[0] = assembling.ledger_token;
+                staged.known_token_count = 1;
+                staged.partial_owner_digest = assembling.owner_digest;
+            },
+        }
+        if (self.live_screen.lifecycle == .active) {
+            const capacity = external_inbox_ledger.max_live_mutations;
+            for (0..self.live_screen.len) |offset| {
+                if (staged.known_token_count >= staged.known_tokens.len)
+                    return false;
+                const index = (self.live_screen.head + offset) % capacity;
+                const token = self.live_screen.tokens[index];
+                for (staged.known_tokens[0..staged.known_token_count]) |prior|
+                    if (prior.slot == token.slot) return false;
+                staged.known_tokens[staged.known_token_count] = token;
+                staged.known_token_count += 1;
+            }
+            staged.screen_owner_digest = self.live_screen.owner_digest;
+        }
+        switch (self.pending_response) {
+            .none, .terminal => {},
+            .pending => |pending| {
+                staged.response_owner_digest = pending.owner_digest;
+                staged.response_seal = pending.seal;
+            },
+        }
+        staged.digest = preparedLiveOwnerTeardownDigest(&staged);
+        prepared.* = staged;
+        return true;
+    }
+
+    fn validatePreparedLiveOwnerTeardown(
+        self: *const ExternalPumpStorage,
+        prepared: *const PreparedLiveOwnerTeardown,
+        frozen: *const FrozenLiveOwnerCleanup,
+    ) bool {
+        if (!self.liveOwnersValid() or
+            prepared.saved_self_addr != @intFromPtr(prepared) or
+            prepared.storage_addr != @intFromPtr(self) or
+            prepared.lifecycle != .prepared or
+            prepared.known_token_count > prepared.known_tokens.len or
+            frozen.saved_self_addr != 0 or frozen.lifecycle != .empty or
+            !std.mem.eql(
+                u8,
+                &prepared.digest,
+                &preparedLiveOwnerTeardownDigest(prepared),
+            ))
+            return false;
+        var index: usize = 0;
+        switch (self.live_partial) {
+            .none, .terminal => {
+                if (!std.mem.allEqual(u8, &prepared.partial_owner_digest, 0))
+                    return false;
+            },
+            .assembling => |assembling| {
+                if (prepared.known_token_count == 0 or
+                    !std.meta.eql(prepared.known_tokens[0], assembling.ledger_token) or
+                    !std.mem.eql(
+                        u8,
+                        &prepared.partial_owner_digest,
+                        &assembling.owner_digest,
+                    ))
+                    return false;
+                index = 1;
+            },
+        }
+        if (self.live_screen.lifecycle == .active) {
+            if (!std.mem.eql(
+                u8,
+                &prepared.screen_owner_digest,
+                &self.live_screen.owner_digest,
+            )) return false;
+            const capacity = external_inbox_ledger.max_live_mutations;
+            for (0..self.live_screen.len) |offset| {
+                if (index >= prepared.known_token_count) return false;
+                const token_index = (self.live_screen.head + offset) % capacity;
+                if (!std.meta.eql(
+                    prepared.known_tokens[index],
+                    self.live_screen.tokens[token_index],
+                )) return false;
+                index += 1;
+            }
+        } else if (!std.mem.allEqual(u8, &prepared.screen_owner_digest, 0)) {
+            return false;
+        }
+        if (index != prepared.known_token_count) return false;
+        return switch (self.pending_response) {
+            .none, .terminal => std.meta.eql(
+                prepared.response_seal,
+                ResponsePayloadSeal.empty(),
+            ) and
+                std.mem.allEqual(u8, &prepared.response_owner_digest, 0),
+            .pending => |pending| std.meta.eql(
+                prepared.response_seal,
+                pending.seal,
+            ) and
+                std.mem.eql(
+                    u8,
+                    &prepared.response_owner_digest,
+                    &pending.owner_digest,
+                ),
+        };
+    }
+
+    fn commitLiveOwnerTeardownUnchecked(
+        self: *ExternalPumpStorage,
+        prepared: *PreparedLiveOwnerTeardown,
+        frozen: *FrozenLiveOwnerCleanup,
+    ) void {
+        std.debug.assert(self.validatePreparedLiveOwnerTeardown(
+            prepared,
+            frozen,
+        ));
+        frozen.* = .{
+            .saved_self_addr = @intFromPtr(frozen),
+            .lifecycle = .frozen,
+        };
+        switch (self.pending_response) {
+            .none, .terminal => {},
+            .pending => |*pending| {
+                frozen.response.payload = pending.payload;
+                pending.payload = external_inbox_ledger.OwnedPayload.empty(
+                    pending.payload.allocator,
+                );
+                frozen.response.seal = pending.seal;
+                frozen.response.has_payload = true;
+            },
+        }
+        frozen.digest = frozenLiveOwnerDigest(frozen);
+        self.live_partial = .terminal;
+        self.live_screen = .{ .lifecycle = .cleaned_tombstone };
+        self.pending_response = .terminal;
+        prepared.lifecycle = .consumed;
+    }
+
     fn teardownUnderHeldOperationLease(
         self: *ExternalPumpStorage,
         cleanup_scratch: *ExternalPumpCleanupScratch,
@@ -3719,7 +4306,10 @@ pub const ExternalPumpStorage = struct {
         if (self.lifecycle == .adopting and
             !self.committed_screen.requiresTypedCleanup() and
             !self.owner_metadata.requiresTypedCleanup() and
-            !self.client_cleanup_take.requiresTypedCleanup())
+            !self.client_cleanup_take.requiresTypedCleanup() and
+            self.live_partial == .none and
+            self.live_screen.lifecycle == .empty and
+            self.pending_response == .none)
         {
             return switch (self.closeUncommittedOwned(.invariant_failure)) {
                 .cleaned => .cleaned,
@@ -3735,6 +4325,10 @@ pub const ExternalPumpStorage = struct {
             next_generation,
             &cleanup_scratch.ledger_permit,
         ) catch return self.quarantineOwnerTeardown(cleanup_scratch, true);
+        if (!self.prepareLiveOwnerTeardown(
+            &cleanup_scratch.live_prepared,
+            &cleanup_scratch.live_frozen,
+        )) return self.quarantineOwnerTeardown(cleanup_scratch, true);
 
         if (self.committed_screen.requiresTypedCleanup()) {
             if (!self.committed_screen.prepareFrozenCleanup(
@@ -3749,6 +4343,10 @@ pub const ExternalPumpStorage = struct {
                 std.StaticBitSet(external_inbox_ledger.max_items).initEmpty(),
             ) catch return self.quarantineOwnerTeardown(cleanup_scratch, true);
         }
+        cleanup_scratch.screen_plan.appendRetainedTokens(
+            cleanup_scratch.live_prepared
+                .known_tokens[0..cleanup_scratch.live_prepared.known_token_count],
+        ) catch return self.quarantineOwnerTeardown(cleanup_scratch, true);
         if (self.owner_metadata.requiresTypedCleanup() and
             !self.owner_metadata.prepareFrozenCleanup(
                 self,
@@ -3780,6 +4378,10 @@ pub const ExternalPumpStorage = struct {
         }
         if (!self.prepareAggregateOwnerRangeProof(cleanup_scratch))
             return self.quarantineOwnerTeardown(cleanup_scratch, true);
+        if (!self.validatePreparedLiveOwnerTeardown(
+            &cleanup_scratch.live_prepared,
+            &cleanup_scratch.live_frozen,
+        )) return self.quarantineOwnerTeardown(cleanup_scratch, true);
 
         self.tombstonePendingSummaries();
         self.lifecycle = .tearing_down;
@@ -3815,6 +4417,10 @@ pub const ExternalPumpStorage = struct {
                 &cleanup_scratch.ledger_prepared,
                 &cleanup_scratch.ledger_frozen,
             );
+        self.commitLiveOwnerTeardownUnchecked(
+            &cleanup_scratch.live_prepared,
+            &cleanup_scratch.live_frozen,
+        );
         if (cleanup_scratch.screen_prepared.lifecycle != .empty)
             self.committed_screen.commitFrozenCleanupUnchecked(
                 &cleanup_scratch.screen_prepared,
@@ -3842,6 +4448,7 @@ pub const ExternalPumpStorage = struct {
         var local_moved_client = cleanup_scratch.moved_client;
         var local_moved_evidence = cleanup_scratch.moved_evidence;
         var local_screen = cleanup_scratch.screen_frozen;
+        var local_live = cleanup_scratch.live_frozen;
         cleanup_scratch.* = .{
             .saved_self_addr = @intFromPtr(cleanup_scratch),
             .lifecycle = .frozen,
@@ -3859,6 +4466,12 @@ pub const ExternalPumpStorage = struct {
             0
         else
             @intFromPtr(&local_take);
+        local_live.saved_self_addr = if (local_live.saved_self_addr == 0)
+            0
+        else
+            @intFromPtr(&local_live);
+        if (local_live.saved_self_addr != 0)
+            local_live.digest = frozenLiveOwnerDigest(&local_live);
 
         var had_invariant = ledger_summary.had_invariant or
             ledger_summary.orphan_count != 0;
@@ -3885,6 +4498,9 @@ pub const ExternalPumpStorage = struct {
                 &local_screen,
             ) != .cleaned)
             had_invariant = true;
+        if (local_live.saved_self_addr != 0 and
+            !local_live.finishCallbackHidden())
+            had_invariant = true;
 
         self.saved_self_addr = storage_addr;
         self.evidence_snapshot = evidence_snapshot;
@@ -3897,6 +4513,9 @@ pub const ExternalPumpStorage = struct {
         );
         self.prepared_adoption = .{ .lifecycle = .committed_tombstone };
         self.committed_screen = .{ .lifecycle = .cleaned_tombstone };
+        self.live_partial = .terminal;
+        self.live_screen = .{ .lifecycle = .cleaned_tombstone };
+        self.pending_response = .terminal;
         self.screen_pending_summary = .{ .lifecycle = .tombstone };
         self.owner_metadata = .{ .lifecycle = .cleaned_tombstone };
         self.metadata_pending_summary = .{ .lifecycle = .tombstone };
@@ -3951,6 +4570,10 @@ pub const ExternalPumpStorage = struct {
                 &cleanup_scratch.take_prepared,
                 ranges,
             ) catch return false;
+        appendPreparedLiveOwnerRanges(
+            &cleanup_scratch.live_prepared,
+            ranges,
+        ) catch return false;
         ranges.validate(&.{
             .{
                 .start = @intFromPtr(self),
@@ -3987,6 +4610,9 @@ pub const ExternalPumpStorage = struct {
         self.owner_incarnation = 0;
         self.owner_incarnation_seal = .{};
         self.owner_event_projection_generation = 0;
+        self.live_partial = .terminal;
+        self.live_screen = .{ .lifecycle = .cleaned_tombstone };
+        self.pending_response = .terminal;
         releaseActiveStorage(@intFromPtr(self));
         return .quarantined;
     }
@@ -4059,6 +4685,151 @@ fn teardownForTest(storage: *ExternalPumpStorage) TeardownResult {
     var cleanup_scratch: ExternalPumpCleanupScratch = .{};
     std.debug.assert(ExternalPumpCleanupScratch.initInPlace(&cleanup_scratch));
     return storage.teardown(&cleanup_scratch);
+}
+
+fn activateSyntheticLiveOwnersForTest(
+    storage: *ExternalPumpStorage,
+    partial_token: external_inbox_ledger.Token,
+    screen_tokens: *const [external_inbox_ledger.max_live_mutations]external_inbox_ledger.Token,
+    response_payload: external_inbox_ledger.OwnedPayload,
+) void {
+    if (comptime !builtin.is_test) unreachable;
+    storage.live_partial = .{ .assembling = .{
+        .ledger_token = partial_token,
+        .generation = 1,
+        .owner_digest = livePartialDigest(storage, partial_token, 1),
+    } };
+    storage.live_screen = .{
+        .saved_self_addr = @intFromPtr(&storage.live_screen),
+        .storage_addr = @intFromPtr(storage),
+        .tokens = screen_tokens.*,
+        .len = external_inbox_ledger.max_live_mutations,
+        .generation = 1,
+        .lifecycle = .active,
+    };
+    storage.live_screen.owner_digest =
+        liveScreenDigest(storage, &storage.live_screen);
+    var pending = PendingResponseState{
+        .payload = response_payload,
+        .seal = ResponsePayloadSeal.fromPayload(&response_payload),
+        .generation = 1,
+        .owner_digest = undefined,
+    };
+    pending.owner_digest = pendingResponseDigest(storage, &pending);
+    storage.pending_response = .{ .pending = pending };
+}
+
+fn seedSyntheticLiveOwnersForTest(
+    storage: *ExternalPumpStorage,
+    allocator: std.mem.Allocator,
+) !void {
+    if (comptime !builtin.is_test) unreachable;
+    const identity = external_rx_types.RxIdentity{
+        .attach_instance_id = storage.owner_incarnation,
+        .destination_slot_addr = @intFromPtr(storage),
+    };
+    var partial_batch: external_inbox_ledger.PreparedLiveBatch = .{};
+    try storage.inbox_ledger.beginLiveBatch(
+        &partial_batch,
+        allocator,
+        identity,
+    );
+    var partial_bytes = try allocator.dupe(u8, "p");
+    var partial_payload =
+        external_inbox_ledger.OwnedPayload.takeOwned(allocator, &partial_bytes);
+    _ = try storage.inbox_ledger.prepareLiveAdmission(
+        &partial_batch,
+        .{ .partial = .{
+            .stream_id = 900,
+            .is_snapshot = false,
+            .chunk_count = 1,
+            .provenance = .{ .external = .{
+                .start_absolute = 0,
+                .span = protocol.header_size + 1,
+            } },
+        } },
+        &partial_payload,
+    );
+    try storage.inbox_ledger.finishLiveBatch(&partial_batch);
+    var partial_retirement =
+        external_inbox_ledger.PreparedLiveRetirement.init(allocator);
+    var partial_dispositions =
+        [_]external_inbox_ledger.LiveCommitDisposition{.unused} **
+        external_inbox_ledger.max_live_mutations;
+    _ = try storage.inbox_ledger.commitPreparedLiveBatch(
+        &partial_batch,
+        &partial_retirement,
+        &partial_dispositions,
+    );
+    try std.testing.expect(
+        partial_retirement.lifecycle == .retired,
+    );
+    try std.testing.expectEqual(
+        external_inbox_ledger.RetireLiveResult.already_retired,
+        partial_retirement.retire(),
+    );
+    const partial_token = partial_dispositions[0].final_live.token;
+
+    var screen_batch: external_inbox_ledger.PreparedLiveBatch = .{};
+    try storage.inbox_ledger.beginLiveBatch(
+        &screen_batch,
+        allocator,
+        identity,
+    );
+    for (0..external_inbox_ledger.max_live_mutations) |index| {
+        var bytes = try allocator.dupe(u8, "s");
+        var payload =
+            external_inbox_ledger.OwnedPayload.takeOwned(allocator, &bytes);
+        _ = try storage.inbox_ledger.prepareLiveAdmission(
+            &screen_batch,
+            .{ .completed = .{
+                .stream_id = 1000 + index,
+                .is_snapshot = false,
+                .provenance = .{ .external = .{
+                    .start_absolute = (index + 1) * (protocol.header_size + 1),
+                    .span = protocol.header_size + 1,
+                } },
+            } },
+            &payload,
+        );
+    }
+    try storage.inbox_ledger.finishLiveBatch(&screen_batch);
+    var screen_retirement =
+        external_inbox_ledger.PreparedLiveRetirement.init(allocator);
+    var screen_dispositions =
+        [_]external_inbox_ledger.LiveCommitDisposition{.unused} **
+        external_inbox_ledger.max_live_mutations;
+    _ = try storage.inbox_ledger.commitPreparedLiveBatch(
+        &screen_batch,
+        &screen_retirement,
+        &screen_dispositions,
+    );
+    try std.testing.expect(
+        screen_retirement.lifecycle == .retired,
+    );
+    try std.testing.expectEqual(
+        external_inbox_ledger.RetireLiveResult.already_retired,
+        screen_retirement.retire(),
+    );
+    var screen_tokens =
+        [_]external_inbox_ledger.Token{.{ .slot = 0, .generation = 0 }} **
+        external_inbox_ledger.max_live_mutations;
+    for (0..external_inbox_ledger.max_live_mutations) |index|
+        screen_tokens[index] =
+            screen_dispositions[index].final_live.token;
+
+    var response_bytes = try allocator.dupe(u8, "response");
+    const response_payload =
+        external_inbox_ledger.OwnedPayload.takeOwned(
+            allocator,
+            &response_bytes,
+        );
+    activateSyntheticLiveOwnersForTest(
+        storage,
+        partial_token,
+        &screen_tokens,
+        response_payload,
+    );
 }
 
 fn cleanupScratchRangeOverlapsStorage(
@@ -6487,6 +7258,307 @@ test "d2b1 prior-turn snapshot cannot replay under a fresh lease" {
         WholeTurnReleaseResult.released,
         storage.releaseWholeTurnLease(&second_lease),
     );
+}
+
+test "d2b3a synthetic nonempty live owners block and teardown to final zero" {
+    var fixture = try TestClient.init();
+    defer fixture.deinitPeer();
+    var storage: ExternalPumpStorage = .{};
+    try std.testing.expect(
+        initTestStorage(&storage, &fixture.client, valid_evidence) ==
+            .initialized,
+    );
+    try std.testing.expect(prepareAdoptionForTest(&storage) == .prepared_adopted);
+    try std.testing.expect(storage.commitAdoption() == .adopted);
+    try seedSyntheticLiveOwnersForTest(&storage, std.testing.allocator);
+    try std.testing.expect(storage.liveOwnersValid());
+
+    var turn_scratch = struct {
+        snapshot: InheritedRxBlockerSnapshot = .{},
+    }{};
+    var lease: ExternalWholeTurnLease = .{};
+    try storage.acquireWholeTurnLease(
+        &lease,
+        @intFromPtr(&turn_scratch),
+        @sizeOf(@TypeOf(turn_scratch)),
+    );
+    try storage.snapshotInheritedRxBlockersUnderHeldLease(
+        &lease,
+        &turn_scratch.snapshot,
+    );
+    try std.testing.expect(turn_scratch.snapshot.live_screen_pending);
+    try std.testing.expect(turn_scratch.snapshot.response_correlation_pending);
+    try std.testing.expect(turn_scratch.snapshot.hasBlocker());
+    try std.testing.expectEqual(
+        WholeTurnReleaseResult.released,
+        storage.releaseWholeTurnLease(&lease),
+    );
+
+    var cleanup_scratch: ExternalPumpCleanupScratch = .{};
+    try std.testing.expect(ExternalPumpCleanupScratch.initInPlace(
+        &cleanup_scratch,
+    ));
+    try std.testing.expectEqual(
+        TeardownResult.cleaned,
+        storage.teardown(&cleanup_scratch),
+    );
+    try std.testing.expectEqual(StorageLifecycle.dead, storage.lifecycle);
+    try std.testing.expect(storage.liveOwnersValid());
+    const tombstone_projection = storage.liveOwnerBlockerProjection().?;
+    try std.testing.expect(!tombstone_projection.screen_or_partial_pending);
+    try std.testing.expect(!tombstone_projection.response_pending);
+    const accounting = storage.inbox_ledger.accountingView();
+    try std.testing.expect(accounting.valid);
+    try std.testing.expectEqual(@as(usize, 0), accounting.charged_items);
+    try std.testing.expectEqual(@as(usize, 0), accounting.charged_bytes);
+    try std.testing.expect(accounting.draining_or_drained);
+    try std.testing.expect(cleanup_scratch.isReady());
+}
+
+test "d2b3a live owner teardown rejects cross-owner duplicates and response drift" {
+    var fixture = try TestClient.init();
+    defer fixture.deinitPeer();
+    var storage: ExternalPumpStorage = .{};
+    try std.testing.expect(
+        initTestStorage(&storage, &fixture.client, valid_evidence) ==
+            .initialized,
+    );
+    try std.testing.expect(prepareAdoptionForTest(&storage) == .prepared_adopted);
+    try std.testing.expect(storage.commitAdoption() == .adopted);
+    try seedSyntheticLiveOwnersForTest(&storage, std.testing.allocator);
+
+    const original_token = storage.live_screen.tokens[0];
+    storage.live_screen.tokens[0] =
+        storage.live_partial.assembling.ledger_token;
+    storage.live_screen.owner_digest =
+        liveScreenDigest(&storage, &storage.live_screen);
+    var duplicate_prepared: PreparedLiveOwnerTeardown = .{};
+    var duplicate_frozen: FrozenLiveOwnerCleanup = .{};
+    try std.testing.expect(!storage.prepareLiveOwnerTeardown(
+        &duplicate_prepared,
+        &duplicate_frozen,
+    ));
+    storage.live_screen.tokens[0] = original_token;
+    storage.live_screen.owner_digest =
+        liveScreenDigest(&storage, &storage.live_screen);
+
+    const response_byte =
+        &storage.pending_response.pending.payload.allocation_ptr.?[0];
+    response_byte.* ^= 1;
+    try std.testing.expect(!storage.liveOwnersValid());
+    var drift_prepared: PreparedLiveOwnerTeardown = .{};
+    var drift_frozen: FrozenLiveOwnerCleanup = .{};
+    try std.testing.expect(!storage.prepareLiveOwnerTeardown(
+        &drift_prepared,
+        &drift_frozen,
+    ));
+    response_byte.* ^= 1;
+    try std.testing.expect(storage.liveOwnersValid());
+
+    var sealed_prepared: PreparedLiveOwnerTeardown = .{};
+    var sealed_frozen: FrozenLiveOwnerCleanup = .{};
+    try std.testing.expect(storage.prepareLiveOwnerTeardown(
+        &sealed_prepared,
+        &sealed_frozen,
+    ));
+    response_byte.* ^= 1;
+    try std.testing.expect(!storage.validatePreparedLiveOwnerTeardown(
+        &sealed_prepared,
+        &sealed_frozen,
+    ));
+    response_byte.* ^= 1;
+    try std.testing.expect(storage.validatePreparedLiveOwnerTeardown(
+        &sealed_prepared,
+        &sealed_frozen,
+    ));
+    sealed_prepared.known_token_count -= 1;
+    try std.testing.expect(!storage.validatePreparedLiveOwnerTeardown(
+        &sealed_prepared,
+        &sealed_frozen,
+    ));
+
+    try std.testing.expectEqual(
+        TeardownResult.cleaned,
+        teardownForTest(&storage),
+    );
+}
+
+test "d2b3a response seal rejects descriptor and allocator drift before callbacks" {
+    var fixture = try TestClient.init();
+    defer fixture.deinitPeer();
+    var storage: ExternalPumpStorage = .{};
+    try std.testing.expect(
+        initTestStorage(&storage, &fixture.client, valid_evidence) ==
+            .initialized,
+    );
+    try std.testing.expect(prepareAdoptionForTest(&storage) == .prepared_adopted);
+    try std.testing.expect(storage.commitAdoption() == .adopted);
+    try seedSyntheticLiveOwnersForTest(&storage, std.testing.allocator);
+
+    var probe = AllocatorCallbackProbe{
+        .parent = std.testing.allocator,
+        .storage = &storage,
+    };
+    switch (storage.pending_response) {
+        .pending => |*pending| {
+            pending.payload.deinit();
+            var bytes = try probe.allocator().dupe(u8, "response");
+            pending.payload = external_inbox_ledger.OwnedPayload.takeOwned(
+                probe.allocator(),
+                &bytes,
+            );
+            pending.seal = ResponsePayloadSeal.fromPayload(&pending.payload);
+            pending.owner_digest = pendingResponseDigest(&storage, pending);
+        },
+        else => unreachable,
+    }
+    const callbacks_before = probe.callback_count;
+    const Drift = enum {
+        descriptor_addr,
+        descriptor_len,
+        allocator_ptr_mirror,
+        allocator_vtable_mirror,
+        payload_allocator_ptr,
+        payload_allocator_vtable,
+    };
+    inline for (std.meta.tags(Drift)) |drift| {
+        switch (storage.pending_response) {
+            .pending => |*pending| {
+                const original_seal = pending.seal;
+                const original_allocator = pending.payload.allocator;
+                switch (drift) {
+                    .descriptor_addr => pending.seal.payload_addr +%= 1,
+                    .descriptor_len => pending.seal.payload_len +%= 1,
+                    .allocator_ptr_mirror => pending.seal.allocator_ptr_addr +%= 1,
+                    .allocator_vtable_mirror => pending.seal.allocator_vtable_addr +%= 1,
+                    .payload_allocator_ptr => pending.payload.allocator.ptr = @ptrCast(&storage),
+                    .payload_allocator_vtable => pending.payload.allocator.vtable =
+                        std.heap.page_allocator.vtable,
+                }
+                try std.testing.expect(!storage.liveOwnersValid());
+                var prepared: PreparedLiveOwnerTeardown = .{};
+                var frozen: FrozenLiveOwnerCleanup = .{};
+                try std.testing.expect(!storage.prepareLiveOwnerTeardown(
+                    &prepared,
+                    &frozen,
+                ));
+                try std.testing.expectEqual(
+                    callbacks_before,
+                    probe.callback_count,
+                );
+                pending.seal = original_seal;
+                pending.payload.allocator = original_allocator;
+                try std.testing.expect(storage.liveOwnersValid());
+            },
+            else => unreachable,
+        }
+    }
+    try std.testing.expectEqual(
+        TeardownResult.cleaned,
+        teardownForTest(&storage),
+    );
+}
+
+test "d2b3a response range rejects storage scratch and sibling ledger alias" {
+    const storage_range = external_owner_range.Range{
+        .start = 0x10_0000,
+        .len = @sizeOf(ExternalPumpStorage),
+    };
+    const cleanup_scratch_range = external_owner_range.Range{
+        .start = 0x20_0000,
+        .len = @sizeOf(ExternalPumpCleanupScratch),
+    };
+    var prepared: PreparedLiveOwnerTeardown = .{
+        .response_seal = .{
+            .payload_addr = storage_range.start + 8,
+            .payload_len = 16,
+            .allocator_ptr_addr = 1,
+            .allocator_vtable_addr = 1,
+            .payload_digest = [_]u8{1} ** 32,
+        },
+    };
+    var ranges: external_owner_range.Scratch = .{};
+
+    inline for (.{ storage_range, cleanup_scratch_range }) |forbidden| {
+        prepared.response_seal.payload_addr = forbidden.start + 8;
+        ranges.reset();
+        try appendPreparedLiveOwnerRanges(&prepared, &ranges);
+        try std.testing.expectError(
+            error.OverlappingAuthority,
+            ranges.validate(&.{forbidden}),
+        );
+    }
+
+    // A sibling ledger cleanup authority at the same allocation must also fail the shared proof.
+    const ledger_payload_addr = 0x40_0000;
+    prepared.response_seal.payload_addr = ledger_payload_addr;
+    ranges.reset();
+    try ranges.append(ledger_payload_addr, 16);
+    try appendPreparedLiveOwnerRanges(&prepared, &ranges);
+    try std.testing.expectError(
+        error.OverlappingAuthority,
+        ranges.validate(&.{}),
+    );
+    prepared.response_seal.payload_addr = 0;
+}
+
+test "d2b3a frozen response rejects hidden payload in canonical empty state" {
+    var bytes = try std.testing.allocator.dupe(u8, "hidden");
+    var hidden = FrozenResponsePayloadCleanup{
+        .payload = external_inbox_ledger.OwnedPayload.takeOwned(
+            std.testing.allocator,
+            &bytes,
+        ),
+    };
+    try std.testing.expect(!hidden.valid());
+    try std.testing.expect(!hidden.finishCallbackHidden());
+    hidden.payload.deinit();
+    hidden = .{};
+    try std.testing.expect(hidden.valid());
+    try std.testing.expect(hidden.finishCallbackHidden());
+}
+
+test "d2b3a response cleanup callback cannot reenter owner teardown" {
+    var fixture = try TestClient.init();
+    defer fixture.deinitPeer();
+    var storage: ExternalPumpStorage = .{};
+    try std.testing.expect(
+        initTestStorage(&storage, &fixture.client, valid_evidence) ==
+            .initialized,
+    );
+    try std.testing.expect(prepareAdoptionForTest(&storage) == .prepared_adopted);
+    try std.testing.expect(storage.commitAdoption() == .adopted);
+    try seedSyntheticLiveOwnersForTest(&storage, std.testing.allocator);
+
+    var probe = AllocatorCallbackProbe{
+        .parent = std.testing.allocator,
+        .mode = .teardown_reentry,
+        .storage = &storage,
+    };
+    switch (storage.pending_response) {
+        .pending => |*pending| {
+            pending.payload.deinit();
+            var bytes = try probe.allocator().dupe(u8, "response");
+            pending.payload = external_inbox_ledger.OwnedPayload.takeOwned(
+                probe.allocator(),
+                &bytes,
+            );
+            pending.seal = ResponsePayloadSeal.fromPayload(&pending.payload);
+            pending.owner_digest = pendingResponseDigest(&storage, pending);
+        },
+        else => unreachable,
+    }
+    try std.testing.expectEqual(
+        TeardownResult.cleaned,
+        teardownForTest(&storage),
+    );
+    try std.testing.expect(probe.fired);
+    try std.testing.expectEqual(
+        TeardownResult.transaction_busy,
+        probe.nested_teardown.?,
+    );
+    try std.testing.expect(storage.liveOwnersValid());
+    try std.testing.expect(!storage.responsePending());
 }
 
 test "d2b1 snapshot cannot cross storage authority" {

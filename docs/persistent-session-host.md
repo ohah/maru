@@ -5869,6 +5869,43 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
 
               d2b3는 d2d에서 필요하던 payload owner/scratch를 조기 도입한다. parser가 만든 pair는 classifier 뒤
               즉시 다음 owner로 move되며 과거 valid pair를 다시 borrow할 copyable API는 없다.
+              구현 경계는 type-layer가 아니라 실제 ownership capability 기준의 네 gate다. 네 gate 전체가
+              합쳐져야 이 절의 d2b3 계약을 만족한다.
+
+              - **d2b3a — teardown-first persistent owner substrate:** storage에는 final-address sealed
+                `LivePartialBatch`, token-only `LiveScreenBacklog[64]`, `PendingResponseOwner` header만 둔다.
+                owner가 nonempty가 될 수 있는 첫 gate에서 기존 canonical aggregate teardown graph도 함께 확장한다.
+                ledger token 최대 65개와 response payload cleanup을 하나의
+                `PreparedLiveOwnerTeardown`/`FrozenLiveOwnerCleanup`으로 freeze하고 모든 storage owner를 먼저
+                tombstone한 뒤 callback-hidden local cleanup만 실행한다. 제품 publish API는 아직 0개이며,
+                synthetic nonempty fixture가 duplicate token, descriptor/content/allocator drift, alias,
+                callback 재진입과 final ledger/owner zero를 증명한다. 같은 fixture의 teardown 전 inherited blocker
+                snapshot은 nonempty partial/FIFO/response를 `true`로 봉인한다. snapshot과 같은
+                `LiveOwnerBlockerProjection`은 teardown 전 `true`, canonical tombstone 뒤 `false`임을 증명한다.
+                canonical-empty 구조체만 추가하고 teardown
+                증거를 뒤 gate로 미루는 scaffold는 이 gate를 만족하지 않는다.
+              - **d2b3b — classified scratch ownership:** heap-pinned final-address
+                `ExternalRxIntentScratch`가 실제 d1 outcome을 `ClassifiedIntentOwner`로 exact once move하고 source를
+                즉시 tombstone한다. tagged intent의 abort/reset은 최대 64개 payload를 exact once 회수하며
+                storage/ledger/persistent owner publish는 0이다. copied/stale/cross-turn/cross-storage/parser
+                generation drift와 모든 allocation fail-index를 닫는다. `ExternalRxIntentScratch`는 제품 함수
+                stack에 instantiate/copy하지 않는 caller-owned heap-pinned handle이며 별도 384 KiB compile-time
+                상한을 갖는다.
+              - **d2b3c — aggregate commit core:** scratch intent와 ledger batch를 전검증한 뒤 하나의 private
+                no-fail suffix가 ledger disposition을 즉시 소비해 partial/response owner, token FIFO와 기존
+                event/metadata owner를 publish하고 source/scratch를 tombstone한다. core는 처음부터
+                product-compilable module-private 단일 구현이며, 이 gate 시점의 callsite만 test-only다.
+                export와 제품 writer callsite는 boundary상 0이다. 최종 검증 뒤에는 allocation, callback, `try`, checked overflow,
+                disposition 재해석이 0이다. retirement callback은 모든 authority publish/tombstone 뒤 local
+                plan으로만 실행하며 첫 callback 이후 storage/scratch/FIFO를 다시 읽지 않는다. traversal과 product
+                consumer 정책은 이 core에 넣지 않는다.
+              - **d2b3d — buffered traversal and consume:** d2b1 whole-turn lease/blocker와 d2a classifier를
+                scratch/aggregate core에 연결한다. inherited backlog를 live FIFO보다 먼저 소비하고, 1/64 completed
+                screen, cap+1 pre-consume 거부, callback-free FIFO advance+ledger release, partial lifecycle,
+                response pending blocker, 1/64 mixed event/screen 성공 순서와 mixed event/screen/response
+                late-terminal 전체 abort를 고정한다. partial/screen 제품 writer는 정상 consume과 함께 이 gate에서
+                개방한다. response 제품 publish도 이 gate에서 개방하되 pending owner가 즉시 inherited blocker로
+                RX를 멈추고 teardown만 허용한다. response exact take/correlation은 2b2f2에서 개방한다.
 
               ```zig
               const ClassifiedIntentOwner = struct {

@@ -1262,6 +1262,244 @@ test "validated metadata token construction and materialization stay in classifi
     try std.testing.expectEqual(@as(usize, 1), product_classifier_call_count);
 }
 
+test "d2b3a live owner substrate stays private and has no product writer" {
+    const allocator = std.testing.allocator;
+    var dir = try std.Io.Dir.cwd().openDir(std.testing.io, "src", .{ .iterate = true });
+    defer dir.close(std.testing.io);
+    var walker = try dir.walk(allocator);
+    defer walker.deinit();
+
+    var owner_module_count: usize = 0;
+    while (try walker.next(std.testing.io)) |entry| {
+        if (entry.kind != .file or !std.mem.endsWith(u8, entry.basename, ".zig"))
+            continue;
+        const path = try std.fmt.allocPrint(allocator, "src/{s}", .{entry.path});
+        defer allocator.free(path);
+        const source = try readZigFileZ(allocator, path);
+        defer allocator.free(source);
+        const mentions_owner =
+            std.mem.indexOf(u8, source, "LivePartialBatch") != null or
+            std.mem.indexOf(u8, source, "LiveScreenBacklog") != null or
+            std.mem.indexOf(u8, source, "PendingResponseOwner") != null;
+        if (!mentions_owner) continue;
+        try std.testing.expect(std.mem.eql(
+            u8,
+            entry.path,
+            "platform/macos/session_host/client_external_pump.zig",
+        ));
+        owner_module_count += 1;
+        try std.testing.expect(
+            std.mem.indexOf(u8, source, "pub const LivePartialBatch") == null,
+        );
+        try std.testing.expect(
+            std.mem.indexOf(u8, source, "pub const LiveScreenBacklog") == null,
+        );
+        try std.testing.expect(
+            std.mem.indexOf(u8, source, "pub const PendingResponseOwner") == null,
+        );
+        inline for (.{
+            "pub fn publishLivePartial",
+            "pub fn publishLiveScreen",
+            "pub fn publishPendingResponse",
+            "pub fn takePendingResponse",
+        }) |forbidden_writer|
+            try std.testing.expect(
+                std.mem.indexOf(u8, source, forbidden_writer) == null,
+            );
+        const activation_start = std.mem.indexOf(
+            u8,
+            source,
+            "fn activateSyntheticLiveOwnersForTest(",
+        ) orelse return error.TestUnexpectedResult;
+        const activation_tail = source[activation_start..];
+        const activation_end_rel = std.mem.indexOfPos(
+            u8,
+            activation_tail,
+            3,
+            "\nfn ",
+        ) orelse return error.TestUnexpectedResult;
+        const activation_source = activation_tail[0..activation_end_rel];
+        const fixture_start = activation_start + activation_end_rel + 1;
+        const fixture_tail = source[fixture_start..];
+        const fixture_end_rel = std.mem.indexOfPos(
+            u8,
+            fixture_tail,
+            3,
+            "\nfn ",
+        ) orelse return error.TestUnexpectedResult;
+        const fixture_source = fixture_tail[0..fixture_end_rel];
+        try std.testing.expect(
+            std.mem.indexOf(
+                u8,
+                activation_source,
+                "if (comptime !builtin.is_test) unreachable;",
+            ) != null,
+        );
+        try std.testing.expectEqual(
+            @as(usize, 2),
+            std.mem.count(u8, source, "activateSyntheticLiveOwnersForTest"),
+        );
+        try std.testing.expectEqual(
+            @as(usize, 1),
+            std.mem.count(
+                u8,
+                fixture_source,
+                "activateSyntheticLiveOwnersForTest(",
+            ),
+        );
+        // A private writer or direct field assignment still has to create these active tags.
+        // Keeping each exact activation assignment unique to the guarded synthetic fixture makes
+        // product-writer zero a source boundary instead of a public-name convention.
+        try std.testing.expectEqual(
+            @as(usize, 1),
+            std.mem.count(u8, source, "storage.live_partial = .{ .assembling"),
+        );
+        try std.testing.expectEqual(
+            @as(usize, 1),
+            std.mem.count(
+                u8,
+                activation_source,
+                "storage.live_partial = .{ .assembling",
+            ),
+        );
+        try std.testing.expectEqual(
+            @as(usize, 1),
+            std.mem.count(
+                u8,
+                source,
+                "storage.live_screen = .{\n        .saved_self_addr",
+            ),
+        );
+        try std.testing.expectEqual(
+            @as(usize, 1),
+            std.mem.count(
+                u8,
+                activation_source,
+                "storage.live_screen = .{\n        .saved_self_addr",
+            ),
+        );
+        try std.testing.expectEqual(
+            @as(usize, 1),
+            std.mem.count(u8, source, "storage.pending_response = .{ .pending"),
+        );
+        try std.testing.expectEqual(
+            @as(usize, 1),
+            std.mem.count(
+                u8,
+                activation_source,
+                "storage.pending_response = .{ .pending",
+            ),
+        );
+        try std.testing.expectEqual(
+            @as(usize, 0),
+            std.mem.count(u8, source, "self.live_partial = .{ .assembling"),
+        );
+        try std.testing.expectEqual(
+            @as(usize, 0),
+            std.mem.count(u8, source, "self.pending_response = .{ .pending"),
+        );
+        // Count every canonical raw LHS, not only active literals. `zig fmt --check` makes these
+        // spellings stable; a helper-return assignment such as `self.live_partial = next` or an
+        // extra private writer changes the total even when it avoids the active literal.
+        try std.testing.expectEqual(
+            @as(usize, 6),
+            std.mem.count(u8, source, "self.live_partial ="),
+        );
+        try std.testing.expectEqual(
+            @as(usize, 5),
+            std.mem.count(u8, source, "self.live_screen ="),
+        );
+        try std.testing.expectEqual(
+            @as(usize, 6),
+            std.mem.count(u8, source, "self.pending_response ="),
+        );
+        try std.testing.expectEqual(
+            @as(usize, 1),
+            std.mem.count(u8, source, "self.live_partial == .none"),
+        );
+        try std.testing.expectEqual(
+            @as(usize, 1),
+            std.mem.count(u8, source, "self.pending_response == .none"),
+        );
+        inline for (.{
+            "storage.live_partial =",
+            "storage.live_screen =",
+            "storage.pending_response =",
+        }) |fixture_lhs|
+            try std.testing.expectEqual(
+                @as(usize, 1),
+                std.mem.count(u8, source, fixture_lhs),
+            );
+        try std.testing.expectEqual(
+            @as(usize, 4),
+            std.mem.count(u8, source, "self.live_partial = .terminal"),
+        );
+        try std.testing.expectEqual(
+            @as(usize, 1),
+            std.mem.count(u8, source, "self.live_partial = .none"),
+        );
+        try std.testing.expectEqual(
+            @as(usize, 4),
+            std.mem.count(
+                u8,
+                source,
+                "self.live_screen = .{ .lifecycle = .cleaned_tombstone }",
+            ),
+        );
+        try std.testing.expectEqual(
+            @as(usize, 1),
+            std.mem.count(u8, source, "self.live_screen = .{}"),
+        );
+        try std.testing.expectEqual(
+            @as(usize, 4),
+            std.mem.count(u8, source, "self.pending_response = .terminal"),
+        );
+        try std.testing.expectEqual(
+            @as(usize, 1),
+            std.mem.count(u8, source, "self.pending_response = .none"),
+        );
+        // Whole-owner pointer aliases could otherwise hide `owner.* = active`; keep every
+        // address-taking spelling bounded as well. Nested payload borrows are not whole owners.
+        try std.testing.expectEqual(
+            @as(usize, 0),
+            std.mem.count(u8, source, "&self.live_partial"),
+        );
+        try std.testing.expectEqual(
+            @as(usize, 3),
+            std.mem.count(u8, source, "&self.live_screen"),
+        );
+        try std.testing.expectEqual(
+            @as(usize, 0),
+            std.mem.count(u8, source, "&self.pending_response"),
+        );
+        try std.testing.expectEqual(
+            @as(usize, 0),
+            std.mem.count(u8, source, "&storage.live_partial"),
+        );
+        try std.testing.expectEqual(
+            @as(usize, 4),
+            std.mem.count(u8, source, "&storage.live_screen"),
+        );
+        try std.testing.expectEqual(
+            @as(usize, 1),
+            std.mem.count(u8, source, "&storage.pending_response"),
+        );
+        try std.testing.expectEqual(
+            @as(usize, 0),
+            std.mem.count(u8, source, "@field(self, \"live_partial\")"),
+        );
+        try std.testing.expectEqual(
+            @as(usize, 0),
+            std.mem.count(u8, source, "@field(self, \"live_screen\")"),
+        );
+        try std.testing.expectEqual(
+            @as(usize, 0),
+            std.mem.count(u8, source, "@field(self, \"pending_response\")"),
+        );
+    }
+    try std.testing.expectEqual(@as(usize, 1), owner_module_count);
+}
+
 fn containsForbiddenExternalBuiltin(source: [:0]const u8) bool {
     var tokenizer = std.zig.Tokenizer.init(source);
     while (true) {

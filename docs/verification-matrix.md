@@ -46,6 +46,25 @@
 > 재진입과 count/byte cap을 검증한다. storage teardown은 live token을 별도 release하지 않고 기존 canonical
 > screen/metadata/client/evidence/ledger freeze graph에 partial/response/live-screen owner를 함께 넣어 모든 owner
 > tombstone 뒤 frozen local cleanup만 실행하는지와 final-zero를 검증한다.
+> d2b3은 네 capability gate로 나눈다. d2b3a는 persistent owner header/blocker와 nonempty synthetic
+> partial 1+screen 64+response payload의 teardown-first freeze/range proof/tombstone-first callback cleanup을,
+> d2b3b는 d1 outcome→classified owner→caller-owned scratch exact move/abort/reset을, d2b3c는 ledger
+> disposition→persistent owner/FIFO의 단일 no-fail aggregate commit core를, d2b3d는 inherited-first buffered
+> traversal·FIFO release·partial lifecycle·response pending blocker·late-terminal whole-turn abort를 검증한다.
+> d2b3a의 synthetic nonempty blocker는 true, teardown 뒤 canonical tombstone blocker는 false여야 한다.
+> d2b3b의 caller-owned heap-pinned scratch는 별도 384 KiB compile-time 상한을 가지며 제품 stack 생성/copy는
+> boundary상 0이다. d2b3c core는 기존 event/metadata owner까지 포함하는 product-compilable module-private
+> 단일 구현이고, 이 gate 시점의 callsite만 test-only이며 export/제품 writer callsite는 0이다.
+> d2b3d에서 partial/screen 제품 writer와 정상 consume을 함께 개방한다. response 제품 publish도 개방하지만
+> inherited blocker와 teardown만 허용하며 exact take/correlation은 2b2f2에서 개방한다.
+> owner가 nonempty 가능해지기 전 d2b3a teardown capability가 항상 선행해야 한다. d2b3d까지 전부
+> green이기 전에는 d2b3 또는 d2b를 완료로 표시하지 않는다.
+> 현재 **d2b3a는 구현**, d2b3b~d는 구현 전이다. d2b3a 증거는 private final-address owner 3종,
+> 공통 `ResponsePayloadSeal`·`FrozenResponsePayloadCleanup`, partial 1+screen 64+response의 canonical aggregate
+> teardown, 동일 `LiveOwnerBlockerProjection`의 true→tombstone false, descriptor/content/allocator drift의
+> callback 전 거부, storage/cleanup scratch/ledger authority alias 거부, callback 재진입 차단, ledger/owner
+> final-zero와 test-only activation assignment boundary다. 따라서 d2b3a 구현은 persistent owner를 제품 RX가
+> 아직 publish·consume한다는 뜻이 아니며, 해당 제품 writer와 traversal은 d2b3d까지 0이다.
 > full `RxRange`를 4,096 slot에 저장하는 구현이나 `ExternalPumpStorage` 512 KiB inline cap 증가는 허용하지 않는다.
 >
 > c3b 행의 `descriptor/len/cap/alias ABA`는 최종 상태 drift/stale-plan 검출을 뜻한다. A→B→A

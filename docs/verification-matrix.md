@@ -59,12 +59,42 @@
 > inherited blocker와 teardown만 허용하며 exact take/correlation은 2b2f2에서 개방한다.
 > owner가 nonempty 가능해지기 전 d2b3a teardown capability가 항상 선행해야 한다. d2b3d까지 전부
 > green이기 전에는 d2b3 또는 d2b를 완료로 표시하지 않는다.
-> 현재 **d2b3a는 구현**, d2b3b~d는 구현 전이다. d2b3a 증거는 private final-address owner 3종,
+> 현재 **d2b3a~b는 구현**, d2b3c~d는 구현 전이다. d2b3a 증거는 private final-address owner 3종,
 > 공통 `ResponsePayloadSeal`·`FrozenResponsePayloadCleanup`, partial 1+screen 64+response의 canonical aggregate
 > teardown, 동일 `LiveOwnerBlockerProjection`의 true→tombstone false, descriptor/content/allocator drift의
 > callback 전 거부, storage/cleanup scratch/ledger authority alias 거부, callback 재진입 차단, ledger/owner
 > final-zero와 test-only activation assignment boundary다. 따라서 d2b3a 구현은 persistent owner를 제품 RX가
 > 아직 publish·consume한다는 뜻이 아니며, 해당 제품 writer와 traversal은 d2b3d까지 0이다.
+> d2b3b는 기존 `external_rx_demux.ExternalWireClass`의 accepted tag/candidate 전체를 owner seal에 포함해 후속
+> 재분류와 candidate 복제를 0으로 만들고, d1 `.frame` payload를 allocator primary/cleanup mirror와 함께 exact
+> once move한 직후 source를 tombstone해야 한다. copyable outcome의 source 주소를 credential로 오인하지 않고,
+> attachment당 하나인 storage-bound scratch의 live-range disjoint+영구 replay watermark로 첫 copy 하나만
+> ownership move를 허용한다. parser 권위는 같은 owner-thread facade의 outcome 직후/prepare 직전/tombstone
+> 직전 view가 같아야 하고, owner generation은 scratch의 last generation보다 단조 증가하며 range end는 current
+> parser watermark와 같아야 한다. 새 allocation은 heap-pinned scratch 1개뿐이므로 create callback 전후 authority
+> 재검증, fail-index 0과 final-address sealed handle의 callback-hidden destroy가 전체 allocation gate다.
+> abort는 64 owner 전체를 freeze/tombstone한 뒤 callback-hidden cleanup하며 unsafe drift는 arbitrary free 대신
+> poison+bounded leak으로 수렴한다. poison 상한은 한 turn payload 1 MiB+scratch 384 KiB인 attachment당
+> 1,441,792 bytes이며 기존 cross-owner quarantine status에 checked 합산한다. destroy는 callback 전 local
+> reservation permit을 freeze하고 free callback 뒤 storage/handle을 재독해하지 않은 채 reservation 0과 canonical
+> destroyed handle을 재게시해야 한다. `.incomplete`/`.skipped`는 move API 밖이고, ledger aggregate는 d2b3c sibling
+> handle이 처음 소유한다. d2b3b 제품 callsite, storage/ledger/persistent owner publish와 제품 stack scratch는
+> 모두 0이어야 한다.
+> authority view는 aggregate proof SSOT와 같은 최대 22,560개의 start-sorted sealed pairwise-disjoint forbidden
+> backing range를 운반한다. create/move는
+> storage/handle/range-list backing과 이 전체 inventory alias를 거부하고, canonical teardown range proof는 scratch와
+> 최대 64개 intent payload를 기존 Client/parser/ledger/live-owner 범위에 합쳐 검증한다. late protocol terminal은
+> 기존 classified owner와 현재 payload를 모두 local freeze한 뒤 source/owner/scratch를 먼저 tombstone하고 callback을
+> 실행한다. zero-length accepted payload도 allocator mirror를 보존한 정상 owner이며 abort/destroy에서 poison 없이
+> 회수한다.
+> d2b3b 증거는 file-private classified owner/scratch, heap allocation 1회의 fail-index 0, copied outcome
+> first-move/replay watermark, screen/event/response classification value 보존, 실제 두 `current()` 사이 authority와
+> source header/range/pair/content 및 same-bytes payload-pointer swap 거부, 22,560-range
+> full-cap/hostile scratch·payload alias의 free 0, late terminal과 zero
+> payload, bind/move/reset의 최신 inventory 충돌 거부, nonempty aggregate teardown, allocator free 재진입 거부,
+> poison quarantine exact-once,
+> Debug/ReleaseFast `test-session-host`와 function-local test-only boundary다. 제품 move/publish/stack scratch는
+> 계속 0이며 d2b3d에서만 열린다.
 > full `RxRange`를 4,096 slot에 저장하는 구현이나 `ExternalPumpStorage` 512 KiB inline cap 증가는 허용하지 않는다.
 >
 > c3b 행의 `descriptor/len/cap/alias ABA`는 최종 상태 drift/stale-plan 검출을 뜻한다. A→B→A

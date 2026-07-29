@@ -21,11 +21,16 @@ const external_owner_seal = @import("external_owner_seal.zig");
 const external_owner_range = @import("external_owner_range.zig");
 const external_source_decision = @import("external_source_decision.zig");
 const external_rx_types = @import("external_rx_types.zig");
+const external_rx_intent = @import("external_rx_intent.zig");
 const framing = @import("framing.zig");
 const protocol = @import("protocol.zig");
 const resize_wire = @import("resize_wire.zig");
 const runtime_event_wire = @import("runtime_event_wire.zig");
 const runtime_metadata_wire = @import("runtime_metadata_wire.zig");
+
+comptime {
+    _ = external_rx_intent.max_intent_quarantine_bytes;
+}
 
 pub const AttachmentRole = enum {
     observer,
@@ -1237,7 +1242,8 @@ pub const max_cross_owner_quarantine_bytes: usize =
     external_adoption_limits.max_metadata_bytes +
     (2 * protocol.max_viewport_snapshot) +
     (4 * protocol.max_client_queue) +
-    (4 * protocol.max_control_json);
+    (4 * protocol.max_control_json) +
+    external_rx_intent.max_intent_quarantine_bytes;
 
 pub const CrossOwnerQuarantineStatus = struct {
     latched: bool,
@@ -1449,6 +1455,21 @@ const PendingResponseOwner = union(enum) {
     terminal,
 };
 
+const IntentScratchReservationLifecycle = enum {
+    empty,
+    active,
+    destroying,
+    poisoned_tombstone,
+};
+
+const IntentScratchReservation = struct {
+    storage_addr: usize = 0,
+    handle_addr: usize = 0,
+    generation: u64 = 0,
+    lifecycle: IntentScratchReservationLifecycle = .empty,
+    digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+};
+
 const LiveOwnerBlockerProjection = struct {
     screen_or_partial_pending: bool,
     response_pending: bool,
@@ -1502,6 +1523,17 @@ fn pendingResponseDigest(
     writer.writeU64(storage.owner_incarnation);
     pending.seal.writeDigest(&writer);
     writer.writeU64(pending.generation);
+    return writer.finish();
+}
+
+fn intentScratchReservationDigest(
+    reservation: IntentScratchReservation,
+) external_owner_seal.Digest {
+    var writer = external_owner_seal.Writer.init("MARUXRS1");
+    writer.writeUsize(reservation.storage_addr);
+    writer.writeUsize(reservation.handle_addr);
+    writer.writeU64(reservation.generation);
+    writer.writeU8(@intFromEnum(reservation.lifecycle));
     return writer.finish();
 }
 
@@ -1758,6 +1790,7 @@ pub const ExternalPumpCleanupScratch = struct {
     take_frozen: client_mod.FrozenExternalAdoptionTakeCleanup = .{},
     live_prepared: PreparedLiveOwnerTeardown = .{},
     live_frozen: FrozenLiveOwnerCleanup = .{},
+    intent_destroy_prepared: external_rx_intent.PreparedDestroy = .{},
     moved_client: ?client_mod.Client = null,
     moved_evidence: ?PreparedAdoptionEvidence = null,
 
@@ -1780,6 +1813,7 @@ pub const ExternalPumpCleanupScratch = struct {
         out.take_frozen = .{};
         out.live_prepared = .{};
         out.live_frozen = .{};
+        out.intent_destroy_prepared = .{};
         out.moved_client = null;
         out.moved_evidence = null;
         return true;
@@ -1822,6 +1856,7 @@ pub const ExternalPumpCleanupScratch = struct {
         self.take_frozen = .{};
         self.live_prepared = .{};
         self.live_frozen = .{};
+        self.intent_destroy_prepared = .{};
         self.moved_client = null;
         self.moved_evidence = null;
         self.lifecycle = .ready;
@@ -1842,6 +1877,7 @@ comptime {
         @sizeOf(client_mod.ExternalAdoptionCleanupScratch) +
         @sizeOf(client_external_adoption.FrozenCommittedScreenCleanup) +
         @sizeOf(FrozenLiveOwnerCleanup) +
+        @sizeOf(external_rx_intent.FrozenDestroy) +
         @sizeOf(client_mod.Client) +
         @sizeOf(PreparedAdoptionEvidence);
     if (callback_local_bytes > max_external_pump_callback_local_bytes)
@@ -1851,6 +1887,16 @@ comptime {
 fn resetCrossOwnerQuarantineForTest() void {
     cross_owner_quarantine_events.store(0, .release);
     cross_owner_quarantine_latched.store(false, .release);
+}
+
+fn latchCrossOwnerQuarantine() void {
+    _ = cross_owner_quarantine_latched.cmpxchgStrong(
+        false,
+        true,
+        .acq_rel,
+        .acquire,
+    );
+    _ = cross_owner_quarantine_events.fetchAdd(1, .acq_rel);
 }
 
 fn releaseActiveStorage(address: usize) void {
@@ -1899,6 +1945,8 @@ pub const ExternalPumpStorage = struct {
     owner_event_projection_generation: u64 = 0,
     operation_generation: u64 = 0,
     owner_teardown_generation: u64 = 0,
+    intent_scratch_generation: u64 = 0,
+    intent_scratch_reservation: IntentScratchReservation = .{},
 
     fn bindPendingSummaries(self: *ExternalPumpStorage) void {
         self.screen_pending_summary = .{
@@ -2047,6 +2095,94 @@ pub const ExternalPumpStorage = struct {
     fn liveOwnersValid(self: *const ExternalPumpStorage) bool {
         return self.livePartialValid() and self.liveScreenValid() and
             self.pendingResponseValid();
+    }
+
+    fn intentScratchReservationValid(
+        self: *const ExternalPumpStorage,
+    ) bool {
+        const reservation = self.intent_scratch_reservation;
+        return switch (reservation.lifecycle) {
+            .empty => reservation.storage_addr == 0 and
+                reservation.handle_addr == 0 and reservation.generation == 0 and
+                std.mem.allEqual(u8, &reservation.digest, 0),
+            .active, .destroying => reservation.storage_addr ==
+                @intFromPtr(self) and
+                reservation.handle_addr != 0 and
+                reservation.generation != 0 and
+                reservation.generation == self.intent_scratch_generation and
+                std.mem.eql(
+                    u8,
+                    &reservation.digest,
+                    &intentScratchReservationDigest(reservation),
+                ),
+            .poisoned_tombstone => reservation.storage_addr == 0 and
+                reservation.handle_addr == 0,
+        };
+    }
+
+    fn createIntentScratchForTest(
+        self: *ExternalPumpStorage,
+        handle: *external_rx_intent.ExternalRxIntentHandle,
+        allocator: std.mem.Allocator,
+        authority_ops: external_rx_intent.AuthorityOps,
+    ) external_rx_intent.CreateResult {
+        if (comptime !builtin.is_test) unreachable;
+        if (self.lifecycle != .live or
+            !self.intentScratchReservationValid() or
+            self.intent_scratch_reservation.lifecycle != .empty or
+            self.intent_scratch_generation == std.math.maxInt(u64))
+            return .authority_drift;
+        const result = external_rx_intent.allocate(
+            handle,
+            allocator,
+            authority_ops,
+        );
+        if (result != .allocated) {
+            if (result == .quarantined) {
+                self.intent_scratch_reservation = .{
+                    .lifecycle = .poisoned_tombstone,
+                };
+                self.semantic_state = .{ .terminal = .{
+                    .reason = .invariant_failure,
+                    .fd_disposition = .owner_cleanup,
+                } };
+                latchCrossOwnerQuarantine();
+            }
+            return result;
+        }
+        const current = authority_ops.current(authority_ops.context) orelse {
+            _ = external_rx_intent.discardAllocated(handle);
+            return .authority_drift;
+        };
+        if (current.storage_addr != @intFromPtr(self) or
+            current.storage_len != @sizeOf(ExternalPumpStorage) or
+            current.operation_generation != self.operation_generation or
+            current.reservation_handle_addr != 0 or
+            current.reservation_generation != 0)
+        {
+            _ = external_rx_intent.discardAllocated(handle);
+            return .authority_drift;
+        }
+        const generation = self.intent_scratch_generation + 1;
+        var reservation = IntentScratchReservation{
+            .storage_addr = @intFromPtr(self),
+            .handle_addr = @intFromPtr(handle),
+            .generation = generation,
+            .lifecycle = .active,
+        };
+        reservation.digest = intentScratchReservationDigest(reservation);
+        self.intent_scratch_generation = generation;
+        self.intent_scratch_reservation = reservation;
+        var bound = current;
+        bound.reservation_handle_addr = @intFromPtr(handle);
+        bound.reservation_generation = generation;
+        if (external_rx_intent.bindReservation(handle, bound) != .bound) {
+            self.intent_scratch_reservation = .{};
+            self.intent_scratch_generation -= 1;
+            _ = external_rx_intent.discardAllocated(handle);
+            return .authority_drift;
+        }
+        return .allocated;
     }
 
     fn liveScreenOrPartialPending(self: *const ExternalPumpStorage) bool {
@@ -3524,6 +3660,9 @@ pub const ExternalPumpStorage = struct {
         self.live_partial = .terminal;
         self.live_screen = .{ .lifecycle = .cleaned_tombstone };
         self.pending_response = .terminal;
+        self.intent_scratch_reservation = .{
+            .lifecycle = .poisoned_tombstone,
+        };
         self.owner_metadata = .{};
         self.owner_resize = .none;
         self.owner_authority = .empty;
@@ -3557,13 +3696,7 @@ pub const ExternalPumpStorage = struct {
             .reason = reason,
             .fd_disposition = .owner_cleanup,
         } };
-        _ = cross_owner_quarantine_latched.cmpxchgStrong(
-            false,
-            true,
-            .acq_rel,
-            .acquire,
-        );
-        _ = cross_owner_quarantine_events.fetchAdd(1, .acq_rel);
+        latchCrossOwnerQuarantine();
         self.prepared_adoption = .{ .lifecycle = .aborted_tombstone };
         self.client_cleanup_take = .{ .lifecycle = .aborted };
         self.owned_client = null;
@@ -4329,6 +4462,18 @@ pub const ExternalPumpStorage = struct {
             &cleanup_scratch.live_prepared,
             &cleanup_scratch.live_frozen,
         )) return self.quarantineOwnerTeardown(cleanup_scratch, true);
+        if (!self.intentScratchReservationValid())
+            return self.quarantineOwnerTeardown(cleanup_scratch, true);
+        if (self.intent_scratch_reservation.lifecycle == .active) {
+            const handle: *external_rx_intent.ExternalRxIntentHandle =
+                @ptrFromInt(self.intent_scratch_reservation.handle_addr);
+            if (!external_rx_intent.prepareDestroy(
+                handle,
+                @intFromPtr(self),
+                self.intent_scratch_reservation.generation,
+                &cleanup_scratch.intent_destroy_prepared,
+            )) return self.quarantineOwnerTeardown(cleanup_scratch, true);
+        }
 
         if (self.committed_screen.requiresTypedCleanup()) {
             if (!self.committed_screen.prepareFrozenCleanup(
@@ -4382,6 +4527,14 @@ pub const ExternalPumpStorage = struct {
             &cleanup_scratch.live_prepared,
             &cleanup_scratch.live_frozen,
         )) return self.quarantineOwnerTeardown(cleanup_scratch, true);
+        if (self.intent_scratch_reservation.lifecycle == .active) {
+            const handle: *external_rx_intent.ExternalRxIntentHandle =
+                @ptrFromInt(self.intent_scratch_reservation.handle_addr);
+            if (!external_rx_intent.validatePreparedDestroy(
+                handle,
+                &cleanup_scratch.intent_destroy_prepared,
+            )) return self.quarantineOwnerTeardown(cleanup_scratch, true);
+        }
 
         self.tombstonePendingSummaries();
         self.lifecycle = .tearing_down;
@@ -4399,6 +4552,21 @@ pub const ExternalPumpStorage = struct {
             cleanup_scratch.ledger_prepared.terminal_external_identity_seal.generation;
         self.semantic_state = terminal_state;
         self.owner_teardown_generation = next_generation;
+
+        var local_intent_destroy: ?external_rx_intent.FrozenDestroy = null;
+        if (self.intent_scratch_reservation.lifecycle == .active) {
+            const handle: *external_rx_intent.ExternalRxIntentHandle =
+                @ptrFromInt(self.intent_scratch_reservation.handle_addr);
+            local_intent_destroy = external_rx_intent.commitPreparedDestroy(
+                handle,
+                &cleanup_scratch.intent_destroy_prepared,
+            );
+            self.intent_scratch_reservation.lifecycle = .destroying;
+            self.intent_scratch_reservation.digest =
+                intentScratchReservationDigest(
+                    self.intent_scratch_reservation,
+                );
+        }
 
         if (cleanup_scratch.metadata_prepared.lifecycle != .empty)
             self.owner_metadata.commitFrozenCleanupUnchecked(
@@ -4501,6 +4669,12 @@ pub const ExternalPumpStorage = struct {
         if (local_live.saved_self_addr != 0 and
             !local_live.finishCallbackHidden())
             had_invariant = true;
+        if (local_intent_destroy) |frozen| {
+            external_rx_intent.finishFrozenDestroy(frozen);
+            // The held operation lease and callback-hidden frozen permit are the authority here.
+            // Do not trust callback-mutated reservation or handle headers after the free.
+            self.intent_scratch_reservation = .{};
+        }
 
         self.saved_self_addr = storage_addr;
         self.evidence_snapshot = evidence_snapshot;
@@ -4529,6 +4703,7 @@ pub const ExternalPumpStorage = struct {
         self.owner_event_projection_generation = 0;
         self.operation_generation = operation_generation;
         self.owner_teardown_generation = next_generation;
+        self.intent_scratch_reservation = .{};
         self.semantic_state = terminal_state;
         self.lifecycle = .dead;
         releaseActiveStorage(@intFromPtr(self));
@@ -4574,7 +4749,7 @@ pub const ExternalPumpStorage = struct {
             &cleanup_scratch.live_prepared,
             ranges,
         ) catch return false;
-        ranges.validate(&.{
+        var forbidden = [_]external_owner_range.Range{
             .{
                 .start = @intFromPtr(self),
                 .len = @sizeOf(ExternalPumpStorage),
@@ -4583,7 +4758,21 @@ pub const ExternalPumpStorage = struct {
                 .start = @intFromPtr(cleanup_scratch),
                 .len = @sizeOf(ExternalPumpCleanupScratch),
             },
-        }) catch return false;
+            .{ .start = 0, .len = 0 },
+        };
+        var forbidden_len: usize = 2;
+        if (self.intent_scratch_reservation.lifecycle == .active) {
+            external_rx_intent.appendPreparedDestroyRange(
+                &cleanup_scratch.intent_destroy_prepared,
+                ranges,
+            ) catch return false;
+            forbidden[forbidden_len] = .{
+                .start = self.intent_scratch_reservation.handle_addr,
+                .len = @sizeOf(external_rx_intent.ExternalRxIntentHandle),
+            };
+            forbidden_len += 1;
+        }
+        ranges.validate(forbidden[0..forbidden_len]) catch return false;
         return true;
     }
 
@@ -4613,6 +4802,11 @@ pub const ExternalPumpStorage = struct {
         self.live_partial = .terminal;
         self.live_screen = .{ .lifecycle = .cleaned_tombstone };
         self.pending_response = .terminal;
+        // Quarantine deliberately leaks an untrusted scratch graph. Remove the canonical
+        // dereference authority before releasing the process-wide operation reservation.
+        self.intent_scratch_reservation = .{
+            .lifecycle = .poisoned_tombstone,
+        };
         releaseActiveStorage(@intFromPtr(self));
         return .quarantined;
     }
@@ -4685,6 +4879,69 @@ fn teardownForTest(storage: *ExternalPumpStorage) TeardownResult {
     var cleanup_scratch: ExternalPumpCleanupScratch = .{};
     std.debug.assert(ExternalPumpCleanupScratch.initInPlace(&cleanup_scratch));
     return storage.teardown(&cleanup_scratch);
+}
+
+const IntentScratchAuthorityProbe = struct {
+    storage: *ExternalPumpStorage,
+    allocator: std.mem.Allocator,
+    parser_generation: u64 = 1,
+    buffer_start_absolute: u64 = 0,
+    forbidden_ranges: []const external_owner_range.Range = &.{},
+    forbidden_ranges_generation: u64 = 1,
+    forbidden_ranges_digest: external_owner_seal.Digest = blk: {
+        @setEvalBranchQuota(10_000);
+        break :blk external_rx_intent.sealAuthorityRanges(&.{}, 1).?;
+    },
+
+    fn current(raw: *anyopaque) ?external_rx_intent.AuthorityView {
+        const self: *IntentScratchAuthorityProbe = @ptrCast(@alignCast(raw));
+        const reservation = self.storage.intent_scratch_reservation;
+        return .{
+            .storage_addr = @intFromPtr(self.storage),
+            .storage_len = @sizeOf(ExternalPumpStorage),
+            .operation_generation = self.storage.operation_generation,
+            .parser_generation = self.parser_generation,
+            .buffer_start_absolute = self.buffer_start_absolute,
+            .identity = .{
+                .attach_instance_id = 1,
+                .destination_slot_addr = @intFromPtr(self.storage),
+            },
+            .allocator = self.allocator,
+            .forbidden_ranges = self.forbidden_ranges,
+            .forbidden_ranges_generation = self.forbidden_ranges_generation,
+            .forbidden_ranges_digest = self.forbidden_ranges_digest,
+            .reservation_handle_addr = switch (reservation.lifecycle) {
+                .active, .destroying => reservation.handle_addr,
+                .empty, .poisoned_tombstone => 0,
+            },
+            .reservation_generation = switch (reservation.lifecycle) {
+                .active, .destroying => reservation.generation,
+                .empty, .poisoned_tombstone => 0,
+            },
+        };
+    }
+
+    fn ops(self: *IntentScratchAuthorityProbe) external_rx_intent.AuthorityOps {
+        return .{
+            .context = self,
+            .current = current,
+        };
+    }
+};
+
+fn moveIntentFrameForTest(
+    handle: *external_rx_intent.ExternalRxIntentHandle,
+    source: *client_external_mode.ExternalRxOutcome,
+    authority_ops: external_rx_intent.AuthorityOps,
+    target_stream_id: u64,
+) external_rx_intent.MoveResult {
+    if (comptime !builtin.is_test) unreachable;
+    return external_rx_intent.moveFrame(
+        handle,
+        source,
+        authority_ops,
+        target_stream_id,
+    );
 }
 
 fn activateSyntheticLiveOwnersForTest(
@@ -5545,6 +5802,7 @@ const AllocatorCallbackProbe = struct {
         cleanup_authority_drift,
         cleanup_nested_descriptor_drift,
         suffix_storage_drift,
+        intent_scratch_reentry,
     };
 
     parent: std.mem.Allocator,
@@ -5569,6 +5827,9 @@ const AllocatorCallbackProbe = struct {
     saved_compatibility_profile: ?compatibility.Profile = null,
     screen_copies: ?[]client_mod.ExternalScreenCopy = null,
     screen_wrappers: ?[]external_inbox_ledger.OwnedPayload = null,
+    intent_handle: ?*external_rx_intent.ExternalRxIntentHandle = null,
+    intent_authority: ?*IntentScratchAuthorityProbe = null,
+    nested_intent_create: ?external_rx_intent.CreateResult = null,
 
     fn allocator(self: *AllocatorCallbackProbe) std.mem.Allocator {
         return .{ .ptr = self, .vtable = &.{
@@ -5729,6 +5990,16 @@ const AllocatorCallbackProbe = struct {
         {
             self.fired = true;
             self.nested_teardown = teardownForTest(self.storage.?);
+        } else if (!self.fired and self.mode == .intent_scratch_reentry and
+            self.storage.?.lifecycle == .tearing_down)
+        {
+            self.fired = true;
+            self.nested_intent_create =
+                self.storage.?.createIntentScratchForTest(
+                    self.intent_handle.?,
+                    self.allocator(),
+                    self.intent_authority.?.ops(),
+                );
         } else if (!self.fired and self.mode == .commit_cleanup_reentry and
             self.storage.?.lifecycle == .tearing_down)
         {
@@ -11227,6 +11498,353 @@ test "external pump storage teardown reentry cannot close a reused descriptor nu
     defer _ = c.close(old_fd);
     try std.testing.expectEqual(TeardownResult.already_dead, teardownForTest(&storage));
     try std.testing.expect(c.fcntl(old_fd, c.F.GETFD, @as(c_int, 0)) >= 0);
+}
+
+test "d2b3b storage admits one intent scratch and aggregate teardown destroys it" {
+    var fixture = try TestClient.init();
+    defer fixture.deinitPeer();
+    var storage: ExternalPumpStorage = .{};
+    try std.testing.expect(
+        initTestStorage(&storage, &fixture.client, valid_evidence) ==
+            .initialized,
+    );
+    try std.testing.expect(prepareAdoptionForTest(&storage) == .prepared_adopted);
+    try std.testing.expectEqual(
+        CommitAdoptionResult.adopted,
+        storage.commitAdoption(),
+    );
+
+    var probe = IntentScratchAuthorityProbe{
+        .storage = &storage,
+        .allocator = std.testing.allocator,
+    };
+    var handle: external_rx_intent.ExternalRxIntentHandle = .{};
+    try std.testing.expectEqual(
+        external_rx_intent.CreateResult.allocated,
+        storage.createIntentScratchForTest(
+            &handle,
+            std.testing.allocator,
+            probe.ops(),
+        ),
+    );
+    try std.testing.expectEqual(
+        IntentScratchReservationLifecycle.active,
+        storage.intent_scratch_reservation.lifecycle,
+    );
+
+    var second_handle: external_rx_intent.ExternalRxIntentHandle = .{};
+    try std.testing.expectEqual(
+        external_rx_intent.CreateResult.authority_drift,
+        storage.createIntentScratchForTest(
+            &second_handle,
+            std.testing.allocator,
+            probe.ops(),
+        ),
+    );
+    try std.testing.expectEqual(
+        external_rx_intent.HandleLifecycle.empty,
+        second_handle.lifecycle,
+    );
+
+    try std.testing.expectEqual(TeardownResult.cleaned, teardownForTest(&storage));
+    try std.testing.expectEqual(
+        external_rx_intent.HandleLifecycle.destroyed,
+        handle.lifecycle,
+    );
+    try std.testing.expect(storage.intentScratchReservationValid());
+    try std.testing.expectEqual(
+        IntentScratchReservationLifecycle.empty,
+        storage.intent_scratch_reservation.lifecycle,
+    );
+    const ledger = storage.inbox_ledger.accountingView();
+    try std.testing.expect(ledger.valid);
+    try std.testing.expectEqual(@as(usize, 0), ledger.charged_items);
+    try std.testing.expectEqual(@as(usize, 0), ledger.charged_bytes);
+}
+
+test "d2b3b quarantined scratch create blocks repeated allocation and counts once" {
+    resetCrossOwnerQuarantineForTest();
+    defer resetCrossOwnerQuarantineForTest();
+    var fixture = try TestClient.init();
+    defer fixture.deinitPeer();
+    var storage: ExternalPumpStorage = .{};
+    try std.testing.expect(
+        initTestStorage(&storage, &fixture.client, valid_evidence) ==
+            .initialized,
+    );
+    try std.testing.expect(prepareAdoptionForTest(&storage) == .prepared_adopted);
+    try std.testing.expectEqual(
+        CommitAdoptionResult.adopted,
+        storage.commitAdoption(),
+    );
+
+    var backing: [external_rx_intent.max_scratch_bytes]u8 align(64) =
+        undefined;
+    var fixed = std.heap.FixedBufferAllocator.init(&backing);
+    const ranges = [_]external_owner_range.Range{.{
+        .start = @intFromPtr(&backing),
+        .len = backing.len,
+    }};
+    var probe = IntentScratchAuthorityProbe{
+        .storage = &storage,
+        .allocator = fixed.allocator(),
+        .forbidden_ranges = &ranges,
+        .forbidden_ranges_digest = external_rx_intent.sealAuthorityRanges(&ranges, 1).?,
+    };
+    var handle: external_rx_intent.ExternalRxIntentHandle = .{};
+    try std.testing.expectEqual(
+        external_rx_intent.CreateResult.quarantined,
+        storage.createIntentScratchForTest(
+            &handle,
+            fixed.allocator(),
+            probe.ops(),
+        ),
+    );
+    try std.testing.expectEqual(
+        IntentScratchReservationLifecycle.poisoned_tombstone,
+        storage.intent_scratch_reservation.lifecycle,
+    );
+    var second: external_rx_intent.ExternalRxIntentHandle = .{};
+    try std.testing.expectEqual(
+        external_rx_intent.CreateResult.authority_drift,
+        storage.createIntentScratchForTest(
+            &second,
+            fixed.allocator(),
+            probe.ops(),
+        ),
+    );
+    const status = crossOwnerQuarantineStatus();
+    try std.testing.expect(status.latched);
+    try std.testing.expectEqual(@as(u64, 1), status.event_count);
+    try std.testing.expectEqual(
+        max_cross_owner_quarantine_bytes,
+        status.leaked_bytes_upper_bound,
+    );
+    try std.testing.expectEqual(TeardownResult.cleaned, teardownForTest(&storage));
+}
+
+test "d2b3b aggregate teardown aborts a nonempty intent scratch before destroy" {
+    var fixture = try TestClient.init();
+    defer fixture.deinitPeer();
+    var storage: ExternalPumpStorage = .{};
+    try std.testing.expect(
+        initTestStorage(&storage, &fixture.client, valid_evidence) ==
+            .initialized,
+    );
+    try std.testing.expect(prepareAdoptionForTest(&storage) == .prepared_adopted);
+    try std.testing.expectEqual(
+        CommitAdoptionResult.adopted,
+        storage.commitAdoption(),
+    );
+    var probe = IntentScratchAuthorityProbe{
+        .storage = &storage,
+        .allocator = std.testing.allocator,
+    };
+    var handle: external_rx_intent.ExternalRxIntentHandle = .{};
+    try std.testing.expectEqual(
+        external_rx_intent.CreateResult.allocated,
+        storage.createIntentScratchForTest(
+            &handle,
+            std.testing.allocator,
+            probe.ops(),
+        ),
+    );
+
+    const payload = try std.testing.allocator.dupe(u8, "screen");
+    var paired = client_external_mode.ExternalRxFrame{
+        .frame = .{
+            .header = .{
+                .kind = .snapshot_chunk,
+                .stream_id = valid_evidence.stream_id,
+                .payload_len = @intCast(payload.len),
+            },
+            .payload = payload,
+        },
+        .range = .{
+            .identity = .{
+                .attach_instance_id = 1,
+                .destination_slot_addr = @intFromPtr(&storage),
+            },
+            .start_absolute = 0,
+            .end_absolute = @intCast(protocol.header_size + payload.len),
+        },
+        .pair_seal = undefined,
+    };
+    client_external_mode.testing.sealExternalRxFrame(&paired);
+    var source: client_external_mode.ExternalRxOutcome = .{ .frame = paired };
+    probe.parser_generation = 2;
+    probe.buffer_start_absolute = paired.range.end_absolute;
+    try std.testing.expectEqual(
+        external_rx_intent.MoveResult.classified,
+        moveIntentFrameForTest(
+            &handle,
+            &source,
+            probe.ops(),
+            valid_evidence.stream_id,
+        ),
+    );
+    try std.testing.expect(source == .incomplete);
+
+    try std.testing.expectEqual(TeardownResult.cleaned, teardownForTest(&storage));
+    try std.testing.expectEqual(
+        external_rx_intent.HandleLifecycle.destroyed,
+        handle.lifecycle,
+    );
+    try std.testing.expect(storage.intentScratchReservationValid());
+    try std.testing.expectEqual(
+        IntentScratchReservationLifecycle.empty,
+        storage.intent_scratch_reservation.lifecycle,
+    );
+}
+
+test "d2b3b scratch free callback cannot recreate reservation during teardown" {
+    var fixture = try TestClient.init();
+    defer fixture.deinitPeer();
+    var storage: ExternalPumpStorage = .{};
+    try std.testing.expect(
+        initTestStorage(&storage, &fixture.client, valid_evidence) ==
+            .initialized,
+    );
+    try std.testing.expect(prepareAdoptionForTest(&storage) == .prepared_adopted);
+    try std.testing.expectEqual(
+        CommitAdoptionResult.adopted,
+        storage.commitAdoption(),
+    );
+
+    var allocator_probe = AllocatorCallbackProbe{
+        .parent = std.testing.allocator,
+        .storage = &storage,
+        .mode = .intent_scratch_reentry,
+    };
+    var authority_probe = IntentScratchAuthorityProbe{
+        .storage = &storage,
+        .allocator = allocator_probe.allocator(),
+    };
+    var handle: external_rx_intent.ExternalRxIntentHandle = .{};
+    var nested_handle: external_rx_intent.ExternalRxIntentHandle = .{};
+    allocator_probe.intent_handle = &nested_handle;
+    allocator_probe.intent_authority = &authority_probe;
+    try std.testing.expectEqual(
+        external_rx_intent.CreateResult.allocated,
+        storage.createIntentScratchForTest(
+            &handle,
+            allocator_probe.allocator(),
+            authority_probe.ops(),
+        ),
+    );
+
+    try std.testing.expectEqual(TeardownResult.cleaned, teardownForTest(&storage));
+    try std.testing.expect(allocator_probe.fired);
+    try std.testing.expectEqual(
+        external_rx_intent.CreateResult.authority_drift,
+        allocator_probe.nested_intent_create.?,
+    );
+    try std.testing.expectEqual(
+        external_rx_intent.HandleLifecycle.empty,
+        nested_handle.lifecycle,
+    );
+    try std.testing.expectEqual(
+        external_rx_intent.HandleLifecycle.destroyed,
+        handle.lifecycle,
+    );
+    try std.testing.expect(storage.intentScratchReservationValid());
+    try std.testing.expectEqual(
+        IntentScratchReservationLifecycle.empty,
+        storage.intent_scratch_reservation.lifecycle,
+    );
+}
+
+test "d2b3b poisoned intent teardown latches quarantine exactly once" {
+    resetCrossOwnerQuarantineForTest();
+    defer resetCrossOwnerQuarantineForTest();
+    var fixture = try TestClient.initWithAllocator(std.heap.page_allocator);
+    defer fixture.deinitPeer();
+    var storage: ExternalPumpStorage = .{};
+    try std.testing.expect(
+        initTestStorage(&storage, &fixture.client, valid_evidence) ==
+            .initialized,
+    );
+    try std.testing.expect(prepareAdoptionForTest(&storage) == .prepared_adopted);
+    try std.testing.expectEqual(
+        CommitAdoptionResult.adopted,
+        storage.commitAdoption(),
+    );
+    var probe = IntentScratchAuthorityProbe{
+        .storage = &storage,
+        .allocator = std.heap.page_allocator,
+    };
+    var handle: external_rx_intent.ExternalRxIntentHandle = .{};
+    try std.testing.expectEqual(
+        external_rx_intent.CreateResult.allocated,
+        storage.createIntentScratchForTest(
+            &handle,
+            std.heap.page_allocator,
+            probe.ops(),
+        ),
+    );
+    const payload = try std.heap.page_allocator.dupe(u8, "screen");
+    var paired = client_external_mode.ExternalRxFrame{
+        .frame = .{
+            .header = .{
+                .kind = .snapshot_chunk,
+                .stream_id = valid_evidence.stream_id,
+                .payload_len = @intCast(payload.len),
+            },
+            .payload = payload,
+        },
+        .range = .{
+            .identity = .{
+                .attach_instance_id = 1,
+                .destination_slot_addr = @intFromPtr(&storage),
+            },
+            .start_absolute = 0,
+            .end_absolute = @intCast(protocol.header_size + payload.len),
+        },
+        .pair_seal = undefined,
+    };
+    client_external_mode.testing.sealExternalRxFrame(&paired);
+    var source: client_external_mode.ExternalRxOutcome = .{ .frame = paired };
+    probe.parser_generation = 2;
+    probe.buffer_start_absolute = paired.range.end_absolute;
+    try std.testing.expectEqual(
+        external_rx_intent.MoveResult.classified,
+        moveIntentFrameForTest(
+            &handle,
+            &source,
+            probe.ops(),
+            valid_evidence.stream_id,
+        ),
+    );
+    payload[0] ^= 1;
+
+    try std.testing.expectEqual(
+        TeardownResult.quarantined,
+        teardownForTest(&storage),
+    );
+    try std.testing.expectEqual(
+        IntentScratchReservationLifecycle.poisoned_tombstone,
+        storage.intent_scratch_reservation.lifecycle,
+    );
+    var status = crossOwnerQuarantineStatus();
+    try std.testing.expect(status.latched);
+    try std.testing.expectEqual(@as(u64, 1), status.event_count);
+    try std.testing.expectEqual(
+        max_cross_owner_quarantine_bytes,
+        status.leaked_bytes_upper_bound,
+    );
+    try std.testing.expectEqual(
+        TeardownResult.already_dead,
+        teardownForTest(&storage),
+    );
+    status = crossOwnerQuarantineStatus();
+    try std.testing.expectEqual(@as(u64, 1), status.event_count);
+
+    // The product path intentionally leaks the untrusted scratch/payload graph. The remaining
+    // independently sealed owners are test-only fixture cleanup and never touch that graph.
+    if (storage.owned_client) |*owned| owned.deinit();
+    storage.owned_client = null;
+    if (storage.owned_evidence) |*owned| owned.deinit();
+    storage.owned_evidence = null;
 }
 
 test "external pump storage forged value copy cannot clean the original owner" {

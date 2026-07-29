@@ -725,6 +725,21 @@ fn countOccurrences(haystack: []const u8, needle: []const u8) usize {
     return count;
 }
 
+test "session host RX unchecked append has one validating aggregate caller" {
+    const allocator = std.testing.allocator;
+    const source = try readZigFileZ(
+        allocator,
+        "src/platform/macos/session_host/client_external_mode.zig",
+    );
+    defer allocator.free(source);
+    // One private definition plus one call from `commitPreparedAdmit`. Tests and future d2 callers
+    // must use the validating aggregate entry instead of the unchecked ownership suffix.
+    try std.testing.expectEqual(
+        @as(usize, 2),
+        countOccurrences(source, "commitAdmitUnchecked("),
+    );
+}
+
 test "session host client pump policy imports only std" {
     const allocator = std.testing.allocator;
     const source = try readZigFileZ(
@@ -1196,6 +1211,11 @@ test "session host stable pump storage and Client transfer stay in mechanics bou
             entry.path,
             "platform/macos/session_host/framing.zig",
         );
+        const rx_parser_transaction_file = std.mem.eql(
+            u8,
+            entry.path,
+            "platform/macos/session_host/client_external_mode.zig",
+        );
         const storage_type_allowed = mechanics_file or std.mem.eql(
             u8,
             entry.path,
@@ -1222,7 +1242,7 @@ test "session host stable pump storage and Client transfer stay in mechanics bou
             try std.testing.expect(!containsRestrictedName(source, "cleanup_seed"));
             try std.testing.expect(!containsRestrictedName(source, "cleanup_seed_seal"));
         }
-        if (!framing_file) {
+        if (!framing_file and !rx_parser_transaction_file) {
             try std.testing.expect(!containsRestrictedName(source, "cleanup_replacement"));
             try std.testing.expect(!containsRestrictedName(source, "normalize_cleanup_allocator"));
         }
@@ -1251,7 +1271,7 @@ test "session host stable pump storage and Client transfer stay in mechanics bou
                 "prepareExternalOwnerRangeProof",
             ));
         }
-        if (!framing_file and !transfer_allowed) {
+        if (!framing_file and !transfer_allowed and !rx_parser_transaction_file) {
             // The staged parser swap is a mechanics-only leaf for the same reason: its misuse paths
             // are `@panic`, so the compiler cannot keep a new caller honest. `client.zig` owns the
             // three transfer stages that drive it.

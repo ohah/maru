@@ -151,6 +151,115 @@ body {
   background: Canvas;
 }
 
+/* 리치 편집 모드(docs/file-panel.md §2.5) — 툴바 한 줄 + 문서모델 편집 영역. 색·폰트는 소스 편집기와 같은
+   터미널 테마 변수를 쓴다(§2.3): 두 편집기를 오갈 때 글자 크기·선택 색이 달라 보이면 같은 문서로 안 읽힌다. */
+#rich-editor {
+  box-sizing: border-box;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: Canvas;
+}
+
+#rich-editor[hidden] {
+  display: none;
+}
+
+.maru-rich-shell {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+.maru-rich-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.125rem;
+  padding: 0.25rem 0.4rem;
+  border-bottom: 1px solid color-mix(in srgb, CanvasText 14%, Canvas);
+  background: color-mix(in srgb, CanvasText 4%, Canvas);
+}
+
+.maru-rich-toolbar-separator {
+  width: 1px;
+  height: 1rem;
+  margin: 0 0.25rem;
+  background: color-mix(in srgb, CanvasText 16%, Canvas);
+}
+
+.maru-rich-toolbar-button {
+  min-width: 1.75rem;
+  padding: 0.15rem 0.35rem;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: transparent;
+  color: CanvasText;
+  font-family: var(--maru-editor-font-family, ui-monospace, monospace);
+  font-size: 0.8125rem;
+  line-height: 1.2;
+  cursor: default;
+}
+
+.maru-rich-toolbar-button:hover {
+  background: color-mix(in srgb, CanvasText 8%, Canvas);
+}
+
+/* 지금 selection이 그 서식 안에 있음을 표시한다 — 버튼을 누르기 전에 현재 상태를 알 수 있어야 한다. */
+.maru-rich-toolbar-button[data-active="true"] {
+  border-color: color-mix(in srgb, AccentColor 55%, Canvas);
+  background: color-mix(in srgb, AccentColor 18%, Canvas);
+}
+
+.maru-rich-content {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  padding: 0.5rem 0.75rem;
+}
+
+.maru-rich-content .ProseMirror {
+  outline: none;
+  font-family: var(--maru-editor-font-family, ui-monospace, monospace);
+  font-size: var(--maru-editor-font-size, 13px);
+  line-height: 1.6;
+}
+
+.maru-rich-content .ProseMirror ::selection {
+  background: var(--maru-editor-selection, Highlight);
+}
+
+.maru-rich-content .ProseMirror blockquote {
+  margin: 0.5rem 0;
+  padding-left: 0.75rem;
+  border-left: 3px solid color-mix(in srgb, CanvasText 24%, Canvas);
+  color: color-mix(in srgb, CanvasText 78%, Canvas);
+}
+
+.maru-rich-content .ProseMirror code {
+  padding: 0.05rem 0.25rem;
+  border-radius: 3px;
+  background: color-mix(in srgb, CanvasText 8%, Canvas);
+  color: var(--maru-syntax-string, CanvasText);
+}
+
+.maru-rich-content .ProseMirror pre {
+  padding: 0.5rem 0.75rem;
+  border-radius: 6px;
+  background: color-mix(in srgb, CanvasText 6%, Canvas);
+  overflow-x: auto;
+}
+
+.maru-rich-content .ProseMirror ul[data-type="taskList"] {
+  padding-left: 0.5rem;
+  list-style: none;
+}
+
+.maru-rich-content .ProseMirror ul[data-type="taskList"] li {
+  display: flex;
+  gap: 0.4rem;
+  align-items: flex-start;
+}
+
 #editor[hidden] {
   display: none;
 }

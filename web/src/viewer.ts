@@ -725,6 +725,9 @@ export function bootShell(document: Document, targetWindow: Window): void {
   // 리치 모드(§2.5)의 문서모델 편집기. CM6와 동시에 살 수 있지만 화면에는 한 번에 하나만 보인다.
   let richEditor: RichEditorHandle | null = null;
   let richHost: HTMLElement | null = null;
+  /// 리치가 표현하지 못하는 문법 때문에 잠긴 상태인가. close lock 해제가 이 잠금까지 풀면 안 되고,
+  /// 저장 경로도 이 값을 보고 막는다(잠금이 타이핑만 막으면 원문이 그대로 파괴된다).
+  let richLockedByUnsupportedSyntax = false;
   let savedContent = "";
   let savedDocument: Text | null = null;
   let contentLoaded = false;
@@ -751,6 +754,10 @@ export function bootShell(document: Document, targetWindow: Window): void {
   let readMermaidQueue = Promise.resolve();
   let readMermaidWidget = 0;
 
+  /// 두 편집기 중 지금 보이는 쪽이 IME 조합 중인가. close lock·dirty ACK가 이 판정을 공유한다.
+  const isComposing = (): boolean =>
+    mode === "rich" ? (richEditor?.isComposing() ?? false) : editor?.composing === true;
+
   /// 지금 화면이 가진 내용을 마크다운 한 벌로 만든다. 모드 전환·저장·읽기 프리뷰가 모두 이 하나를 쓴다(§2.5).
   const currentMarkdown = (): string => {
     if (mode === "rich" && richEditor !== null) return richEditor.getMarkdown();
@@ -767,6 +774,9 @@ export function bootShell(document: Document, targetWindow: Window): void {
   const setCloseLocked = (requestId: number | null) => {
     closeLockRequestId = requestId;
     if (editor !== null) editor.contentDOM.contentEditable = requestId === null ? "true" : "false";
+    // 리치도 함께 잠근다. 여기서 빠뜨리면 close-confirm이 떠 있는 동안 사용자가 계속 타이핑하고, ACK가
+    // clean이었다면 native가 프롬프트 없이 탭을 닫아 그 입력이 통째로 버려진다.
+    richEditor?.setEditable(requestId === null && !richLockedByUnsupportedSyntax);
   };
 
   const syncDirty = async (next: boolean, requestId = 0) => {
@@ -792,8 +802,9 @@ export function bootShell(document: Document, targetWindow: Window): void {
     // 오래 지연된 request가 더 최신 close owner를 덮지 못한다. 같은 request 재호출은 idempotent이고 새 request만
     // 이전 owner를 supersede한다. 진행 중 IME marked text는 CM6 state transaction에 아직 없을 수 있으므로
     // contentEditable을 끄기 전에 fail-closed한다(조합이 끝난 뒤 사용자가 다시 닫는다).
-    if (!closeLockCanAcquire(closeLockRequestId, requestId) || editor?.composing === true)
-      return false;
+    // 조합 중이면 fail-closed한다 — CM6든 리치든 marked text가 아직 문서에 없을 수 있다. 리치에서
+    // `editor?.composing`은 항상 undefined라 CM6만 보면 한글 조합 중에도 탭이 닫힌다.
+    if (!closeLockCanAcquire(closeLockRequestId, requestId) || isComposing()) return false;
     setCloseLocked(requestId);
     const operation = mutationQueue.then(async () => {
       const actual = currentDocumentIsDirty();
@@ -857,12 +868,23 @@ export function bootShell(document: Document, targetWindow: Window): void {
   const save = async (): Promise<boolean> => {
     if (editorEpoch === null) return false;
     if (editor === null && richEditor === null) return false;
+    // 리치가 표현하지 못하는 문법이 있는 문서는 저장을 거부한다. 잠금이 타이핑만 막으면 ⌘S 한 번에
+    // frontmatter·원시 HTML·각주가 직렬화 결과로 덮여 원문이 파괴된다(§2.5의 안전 근거가 여기 있다).
+    if (mode === "rich" && richLockedByUnsupportedSyntax) {
+      if (status !== null)
+        status.textContent =
+          "이 문서는 리치 모드에서 저장할 수 없습니다. 소스 모드에서 저장하세요.";
+      return false;
+    }
+    // mode는 **지금** 고정한다. queue 콜백 안에서 읽으면 저장이 끝나기 전 사용자가 모드를 바꿨을 때
+    // 다른 모드의 기준점을 갱신해 dirty 판정이 어긋난다.
+    const savingMode = mode;
     const documentSnapshot = editor?.state.doc ?? null;
     const content = currentMarkdown();
     const operation = mutationQueue.then(async () => {
       await requestFileBridge(document, "write", { editor_epoch: editorEpoch, content });
       savedContent = content;
-      if (documentSnapshot !== null && mode !== "rich") savedDocument = documentSnapshot;
+      if (documentSnapshot !== null && savingMode !== "rich") savedDocument = documentSnapshot;
       // Native write는 dirty를 임의로 내리지 않는다. 저장 중 문서가 다시 바뀌었는지 같은 직렬 queue에서 판정해
       // 최종 값 하나를 보내므로 write 완료와 재편집 사이에 eviction 가능한 false 구간이 생기지 않는다.
       const nextDirty = currentDocumentIsDirty();
@@ -896,7 +918,10 @@ export function bootShell(document: Document, targetWindow: Window): void {
   // DOM만 고른다. CM6 문서 전체를 선택하는 명령을 노출해 native가 이걸 우선 호출한다(키보드 ⌘A는 아래 capture
   // 리스너가 직접 처리). 편집기가 없으면(읽기 프리뷰) false를 돌려 native selectAll:로 폴백.
   const selectWholeDocument = (): boolean => {
-    if (editor === null) return false;
+    // 리치 모드에서는 CM6가 살아 있어도 화면 밖(display:none)이다. mode를 안 보면 숨은 문서를 선택하고
+    // true를 돌려 native selectAll: 폴백까지 막아, 사용자 화면에서는 아무것도 선택되지 않는다.
+    if (mode === "rich") return richEditor?.selectAll() ?? false;
+    if (mode !== "source-edit" || editor === null) return false;
     editor.dispatch({ selection: { anchor: 0, head: editor.state.doc.length } });
     editor.focus();
     return true;
@@ -964,6 +989,9 @@ export function bootShell(document: Document, targetWindow: Window): void {
         reportDirty(currentDocumentIsDirty());
       },
       () => void save(),
+      (locked) => {
+        richLockedByUnsupportedSyntax = locked;
+      },
     );
     if (closeLockRequestId !== null) richEditor.setEditable(false);
     return richEditor;
@@ -1030,8 +1058,12 @@ export function bootShell(document: Document, targetWindow: Window): void {
     const carried = previous === next ? null : currentMarkdown();
     mode = next;
     if (carried !== null && contentLoaded) {
-      if (next === "rich") ensureRichEditor().setMarkdown(carried);
-      else if (previous === "rich") {
+      if (next === "rich") {
+        // 방금 만든 편집기는 이미 그 내용으로 파싱됐다. 다시 setMarkdown하면 같은 문서를 두 번 파싱한다.
+        const existed = richEditor !== null;
+        const rich = ensureRichEditor();
+        if (existed) rich.setMarkdown(carried);
+      } else if (previous === "rich") {
         // 리치를 **어느 모드로 벗어나든** 그 결과를 CM6 문서로 확정한다. 읽기 프리뷰(`postPreview`)와 저장이
         // 모두 CM6/savedContent를 보므로, 여기서 넘기지 않으면 리치에서 편집한 내용이 프리뷰에 반영되지 않는다.
         const cm = ensureEditor();
@@ -1123,6 +1155,10 @@ export function bootShell(document: Document, targetWindow: Window): void {
     } else {
       savedDocument = null;
     }
+    // 리치 편집기도 같은 내용으로 다시 시드한다. **CM6 유무와 무관하게** 해야 한다 — 리치로 바로 들어온
+    // 문서에는 CM6가 아직 없어서 위 블록을 타지 않는다. 여기서 빠뜨리면 리치 화면이 옛 문서를 들고 있다가
+    // 다음 저장에 그 옛 내용을 디스크에 써서 **외부 편집을 조용히 되돌린다**(native는 conflict 해소로 안다).
+    richEditor?.setMarkdown(result.content);
     dirty = false;
     if (syncNative) await syncDirty(false);
     // svg=sanitize 프리뷰, markdown=render. text(source-only)는 프리뷰가 없어 postPreview가 no-op이다.

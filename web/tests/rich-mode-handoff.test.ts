@@ -15,10 +15,13 @@ type Harness = {
   dom: JSDOM;
   writes: string[];
   renders: string[];
+  /** 브리지 read가 돌려줄 내용. 외부 디스크 변경을 흉내 낼 때 바꾼다. */
+  diskContent: string;
   cleanup: () => void;
 };
 
 async function bootMarkdownShell(initial: string): Promise<Harness> {
+  const state = { diskContent: initial };
   const dom = new JSDOM(
     '<!doctype html><p id="viewer-status"></p><iframe id="renderer"></iframe><main id="editor"></main>',
     { pretendToBeVisual: true, url: "maru-app://app/index.html?document=1" },
@@ -54,7 +57,7 @@ async function bootMarkdownShell(initial: string): Promise<Harness> {
       request.method === "beginDocument"
         ? { editor_epoch: 9 }
         : request.method === "read"
-          ? { content: initial }
+          ? { content: state.diskContent }
           : { ok: true };
     node.textContent = JSON.stringify({ jsonrpc: "2.0", id: 1, result });
     node.dataset.maruFileRequest = "done";
@@ -98,6 +101,12 @@ async function bootMarkdownShell(initial: string): Promise<Harness> {
     dom,
     writes,
     renders,
+    get diskContent() {
+      return state.diskContent;
+    },
+    set diskContent(next: string) {
+      state.diskContent = next;
+    },
     cleanup: () => {
       for (const [name, descriptor] of previous) {
         if (descriptor === undefined) delete (globalThis as Record<string, unknown>)[name];
@@ -142,6 +151,53 @@ describe("rich mode hand-off", () => {
       const rendered = harness.renders.at(-1) ?? "";
       expect(rendered).toContain("처음");
       expect(rendered).not.toContain("# 처음"); // 제목이 본문으로 낮아진 편집이 반영됐다
+    } finally {
+      harness.cleanup();
+    }
+  });
+
+  test("잠긴 문서는 리치에서 저장되지 않는다", async () => {
+    // 잠금이 타이핑만 막고 저장 경로가 열려 있으면 ⌘S 한 번에 frontmatter가 `## title: 문서`로 덮인다.
+    const harness = await bootMarkdownShell("---\ntitle: 문서\n---\n\n본문");
+    try {
+      setMode(harness.dom, "rich");
+      for (let turn = 0; turn < 10; turn += 1) await Promise.resolve();
+      expect(harness.dom.window.document.querySelector(".maru-rich-notice")).not.toBeNull();
+
+      harness.writes.length = 0;
+      harness.dom.window.document.querySelector("#rich-editor .maru-rich-content")?.dispatchEvent(
+        new harness.dom.window.KeyboardEvent("keydown", {
+          key: "s",
+          metaKey: true,
+          bubbles: true,
+        }),
+      );
+      for (let turn = 0; turn < 20; turn += 1) await Promise.resolve();
+      expect(harness.writes).toEqual([]); // 디스크로 나간 바이트가 없어야 한다
+    } finally {
+      harness.cleanup();
+    }
+  });
+
+  test("외부 디스크 변경이 리치 편집기에도 반영된다", async () => {
+    // 반영하지 않으면 리치는 옛 문서를 들고 있다가 다음 저장에 외부 편집을 되돌려 쓴다.
+    const harness = await bootMarkdownShell("# 처음\n");
+    try {
+      setMode(harness.dom, "rich");
+      for (let turn = 0; turn < 10; turn += 1) await Promise.resolve();
+
+      harness.diskContent = "# 외부에서 바뀐 문서\n\n새 문단\n";
+      harness.dom.window.dispatchEvent(
+        new harness.dom.window.CustomEvent("maru:file-reload", { detail: { conflict: true } }),
+      );
+      for (let turn = 0; turn < 20; turn += 1) await Promise.resolve();
+
+      harness.renders.length = 0;
+      setMode(harness.dom, "read");
+      for (let turn = 0; turn < 10; turn += 1) await Promise.resolve();
+      const rendered = harness.renders.at(-1) ?? "";
+      expect(rendered).toContain("외부에서 바뀐 문서");
+      expect(rendered).not.toContain("# 처음");
     } finally {
       harness.cleanup();
     }

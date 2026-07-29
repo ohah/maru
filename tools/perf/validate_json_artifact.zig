@@ -64,7 +64,7 @@ const mermaid_macos_fields = [_]Field{
     .{ .name = "product_work_ticks", .rule = .{ .at_least = 1 } },
     .{ .name = "reply_fallback_grace_ms", .rule = .{ .exact_int = 250 } },
     .{ .name = "reply_fallback_ms", .rule = .{ .exact_int = 5250 } },
-    .{ .name = "scenario", .rule = .{ .exact_string = "fp11f-mermaid-cold-start-restart-1000-ticks" } },
+    .{ .name = "scenario", .rule = .{ .exact_string = "mermaid-cold-start-restart-1000-ticks" } },
     .{ .name = "schema", .rule = .{ .exact_string = "maru.mermaid-macos.v1" } },
     .{ .name = "tick_blocking_wait", .rule = .{ .exact_int = 0 } },
     .{ .name = "tick_pipe_read_write", .rule = .{ .exact_int = 0 } },
@@ -72,9 +72,6 @@ const mermaid_macos_fields = [_]Field{
     .{ .name = "tick_process_spawn_terminate", .rule = .{ .exact_int = 0 } },
     .{ .name = "ticks", .rule = .{ .exact_int = 1000 } },
     .{ .name = "warm_response_deadline_ms", .rule = .{ .exact_int = 2000 } },
-    .{ .name = "worker_result_bytes_cap", .rule = .{ .exact_int = 16777216 } },
-    .{ .name = "worker_source_bytes_cap", .rule = .{ .exact_int = 67108864 } },
-    .{ .name = "worker_token_cap", .rule = .{ .exact_int = 8 } },
 };
 
 // 격리 Mermaid helper lifecycle 스모크 요약(`mermaid-helper.summary.json`). 기존 grep이 검사하던
@@ -329,17 +326,14 @@ const good_mermaid_macos =
     \\  "product_work_ticks": 8,
     \\  "reply_fallback_grace_ms": 250,
     \\  "reply_fallback_ms": 5250,
-    \\  "scenario": "fp11f-mermaid-cold-start-restart-1000-ticks",
+    \\  "scenario": "mermaid-cold-start-restart-1000-ticks",
     \\  "schema": "maru.mermaid-macos.v1",
     \\  "tick_blocking_wait": 0,
     \\  "tick_pipe_read_write": 0,
     \\  "tick_pipe_setup": 0,
     \\  "tick_process_spawn_terminate": 0,
     \\  "ticks": 1000,
-    \\  "warm_response_deadline_ms": 2000,
-    \\  "worker_result_bytes_cap": 16777216,
-    \\  "worker_source_bytes_cap": 67108864,
-    \\  "worker_token_cap": 8
+    \\  "warm_response_deadline_ms": 2000
     \\}
 ;
 

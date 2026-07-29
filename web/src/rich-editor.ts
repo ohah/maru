@@ -27,24 +27,44 @@ import { Table, TableRow, TableCell, TableHeader } from "@tiptap/extension-table
  * 사용자는 소스 모드에서 손실 없이 고칠 수 있다(docs/file-panel.md §2.5).
  */
 export function unsupportedRichSyntax(markdown: string): string[] {
-  // 코드펜스 안의 텍스트는 내용일 뿐이라 검사 대상이 아니다(예: HTML 예제를 담은 문서).
-  const withoutFences = markdown.replace(/^ {0,3}(`{3,}|~{3,})[\s\S]*?^ {0,3}\1[ \t]*$/gm, "");
+  // 코드 안의 텍스트는 내용일 뿐이라 검사 대상이 아니다. 코드펜스와 인라인 코드를 모두 지운 뒤 본다 —
+  // `설정은 \`<div>\` 태그로…` 같은 평범한 설명문이 원시 HTML로 오탐되면 그 문서는 영영 리치에서 못 연다.
+  const withoutCode = markdown
+    .replace(/^ {0,3}(`{3,}|~{3,})[\s\S]*?^ {0,3}\1[ \t]*$/gm, "")
+    .replace(/`[^`\n]*`/g, "");
   const found: string[] = [];
-  if (/^---\r?\n[\s\S]*?^---[ \t]*$/m.test(withoutFences)) found.push("YAML frontmatter");
-  if (/^\[\^[^\]]+\]:/m.test(withoutFences)) found.push("각주");
-  if (/<\/?[a-zA-Z][a-zA-Z0-9-]*(\s[^<>]*)?>/.test(withoutFences)) found.push("원시 HTML");
+  // frontmatter는 **문서 첫 줄**의 `---`만이다. 앵커가 없으면 `제목\n---`(setext H2)이나 절 구분선으로 쓴
+  // `---` 두 개짜리 평범한 문서가 전부 잠긴다(실측 오탐).
+  if (/^---\r?\n[\s\S]*?^---[ \t]*$/m.test(withoutCode) && /^---\r?\n/.test(withoutCode)) {
+    found.push("YAML frontmatter");
+  }
+  if (/^\[\^[^\]]+\]:/m.test(withoutCode)) found.push("각주");
+  // 태그뿐 아니라 주석·doctype도 왕복에서 사라진다(`<!-- toc -->`, `<!-- prettier-ignore -->`, `<!DOCTYPE html>`).
+  if (
+    /<!--|<!DOCTYPE/i.test(withoutCode) ||
+    /<\/?[a-zA-Z][a-zA-Z0-9-]*(\s[^<>]*)?>/.test(withoutCode)
+  ) {
+    found.push("원시 HTML");
+  }
   return found;
 }
 
 export type RichEditorHandle = {
   /** 현재 문서를 마크다운으로 직렬화한다. 저장·모드 전환의 유일한 출력 경로다. */
   getMarkdown: () => string;
-  /** 외부 변경(디스크 reload)으로 문서를 통째로 갈아끼운다. dirty 판정은 호출자가 소유한다. */
+  /**
+   * 외부 변경(디스크 reload)이나 모드 인계로 문서를 통째로 갈아끼운다. dirty 판정은 호출자가 소유한다.
+   * **표현 불가 문법 검사도 여기서 다시 돈다** — 내용이 바뀌면 잠금 여부도 바뀌기 때문이다.
+   */
   setMarkdown: (markdown: string) => void;
   focus: () => void;
   destroy: () => void;
   /** 편집 가능 여부. close lock 중에는 native가 편집을 막는다. */
   setEditable: (editable: boolean) => void;
+  /** 문서 전체 선택(⌘A). 리치가 보이는 모드에서 native selectAll: 대신 쓴다. */
+  selectAll: () => boolean;
+  /** IME 조합 중인가. close lock이 조합 중 탭을 닫지 않도록 fail-closed 판정에 쓴다. */
+  isComposing: () => boolean;
 };
 
 type ToolbarButton = {
@@ -185,6 +205,8 @@ export function createRichEditor(
   markdown: string,
   onChange: () => void,
   onSave: () => void,
+  /** 표현 불가 문법 때문에 잠겼는지 알린다. shell이 저장 경로를 막는 데 쓴다. */
+  onLockChanged: (locked: boolean) => void = () => {},
 ): RichEditorHandle {
   const doc = parent.ownerDocument;
   const shell = doc.createElement("div");
@@ -194,6 +216,8 @@ export function createRichEditor(
   parent.appendChild(shell);
 
   let syncToolbar: () => void = () => {};
+  /// close lock으로 잠긴 상태인가(표현 불가 잠금과 독립 — 둘 중 하나라도 걸리면 편집 불가).
+  let closeLocked = false;
   const editor = new Editor({
     element: content,
     content: markdown,
@@ -223,15 +247,28 @@ export function createRichEditor(
   shell.appendChild(content);
   syncToolbar();
 
-  // 리치가 표현하지 못하는 문법이 있으면 편집을 막는다 — 저장 경로가 닫혀야 원문이 안전하다.
-  const unsupported = unsupportedRichSyntax(markdown);
-  if (unsupported.length > 0) {
-    editor.setEditable(false);
-    const notice = doc.createElement("div");
-    notice.className = "maru-rich-notice";
-    notice.textContent = `이 문서에는 리치 편집이 다루지 못하는 문법이 있어 편집을 잠갔습니다(${unsupported.join(", ")}). 소스 모드에서 고치면 원문이 그대로 보존됩니다.`;
-    shell.insertBefore(notice, content);
-  }
+  // 리치가 표현하지 못하는 문법이 있으면 편집을 막는다. **내용이 바뀔 때마다 다시 판정한다** — 생성 시
+  // 한 번만 보면, 소스에서 frontmatter를 붙였다 리치로 돌아온 문서에는 잠금이 걸리지 않는다(그 반대도 마찬가지).
+  let notice: HTMLElement | null = null;
+  let locked = false;
+  const applyLock = (source: string) => {
+    const unsupported = unsupportedRichSyntax(source);
+    locked = unsupported.length > 0;
+    editor.setEditable(!locked && !closeLocked);
+    if (locked) {
+      if (notice === null) {
+        notice = doc.createElement("div");
+        notice.className = "maru-rich-notice";
+        shell.insertBefore(notice, content);
+      }
+      notice.textContent = `이 문서에는 리치 편집이 다루지 못하는 문법이 있어 편집을 잠갔습니다(${unsupported.join(", ")}). 소스 모드에서 고치면 원문이 그대로 보존됩니다.`;
+    } else if (notice !== null) {
+      notice.remove();
+      notice = null;
+    }
+    onLockChanged(locked);
+  };
+  applyLock(markdown);
 
   // ⌘S는 편집기가 소유한다 — native가 web_editor로 라우팅한 키가 여기 도달한다(§2.3 키 경계).
   content.addEventListener("keydown", (event) => {
@@ -244,11 +281,23 @@ export function createRichEditor(
   return {
     getMarkdown: () => editor.getMarkdown(),
     setMarkdown: (next: string) => {
-      editor.commands.setContent(next, { contentType: "markdown" });
+      // emitUpdate=false: 같은 내용을 다시 넣는 것뿐인데 onUpdate가 돌면 revision이 오르고 dirty가 켜져
+      // "리치를 잠깐 들여다보기만 해도 탭에 ●가 붙는" 상태가 된다.
+      editor.commands.setContent(next, { contentType: "markdown", emitUpdate: false });
+      applyLock(next);
       syncToolbar();
     },
     focus: () => editor.commands.focus(),
     destroy: () => editor.destroy(),
-    setEditable: (editable: boolean) => editor.setEditable(editable),
+    setEditable: (editable: boolean) => {
+      closeLocked = !editable;
+      // 표현 불가 잠금이 걸린 문서는 close lock이 풀려도 계속 잠긴 상태여야 한다.
+      editor.setEditable(editable && !locked);
+    },
+    selectAll: () => {
+      editor.commands.focus();
+      return editor.commands.selectAll();
+    },
+    isComposing: () => editor.view.composing,
   };
 }

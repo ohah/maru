@@ -946,11 +946,8 @@ struct MermaidHelperSmoke {
         checks["perf_tick_blocking_wait_zero"] = perfDiagnostics.mainThreadBlockingWaits == 0
         let performance: [String: Any] = [
             "schema": "maru.mermaid-macos.v1",
-            "scenario": "fp11f-mermaid-cold-start-restart-1000-ticks",
+            "scenario": "mermaid-cold-start-restart-1000-ticks",
             "ticks": 1_000,
-            "worker_token_cap": MARU_LIVE_PREVIEW_MAX_WORKERS,
-            "worker_source_bytes_cap": UInt64(MARU_LIVE_PREVIEW_MAX_WORKERS) * UInt64(MARU_LIVE_PREVIEW_SOURCE_BYTES_PER_WORKER),
-            "worker_result_bytes_cap": UInt64(MARU_LIVE_PREVIEW_MAX_WORKERS) * UInt64(MARU_LIVE_PREVIEW_RESULT_BYTES_PER_WORKER),
             "mermaid_pending_jobs_cap": MARU_MERMAID_MAX_PENDING_JOBS,
             "mermaid_pending_source_bytes_cap": MARU_MERMAID_MAX_PENDING_SOURCE_BYTES,
             "mermaid_accepted_svg_bytes_cap": MARU_MERMAID_MAX_ACCEPTED_SVG_BYTES,

@@ -1,0 +1,9 @@
+maru.file-explorer-perf.v1
+rows=16384
+row_visits=16384
+classifier_calls=16384
+pointer_events=1000
+projected_frames=1000
+geometry_builds=1000
+thumb_quads=1000
+allocator_calls=0

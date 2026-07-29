@@ -54,6 +54,8 @@ jobs:
           sha256: f8becf318705e1bd91227ed0efee4f9fd988d1d5c66bb48e996f030792a0d3b7 # macos-arm64 binary
       - name: Verify session host and live-upgrade fixtures
         run: zig build test-session-host
+      - name: Verify session host no-fail paths in ReleaseFast
+        run: zig build test-session-host -Doptimize=ReleaseFast
       - name: Verify provider continuity removal
         run: mise run test-provider-session-removal
       - run: mise run macos-file-explorer-perf

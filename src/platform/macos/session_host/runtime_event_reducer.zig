@@ -71,6 +71,7 @@ pub const TransportViolation = enum {
 
 pub const ReducedState = struct {
     authority: Authority,
+    authority_ordinal: ?u32 = null,
     metadata: ?MetadataCandidate = null,
     resize: ?ResizeCandidate = null,
 };
@@ -96,6 +97,7 @@ pub fn outcomeEql(a: Outcome, b: Outcome) bool {
 
 pub fn reducedStateEql(a: ReducedState, b: ReducedState) bool {
     if (!std.meta.eql(a.authority, b.authority) or
+        a.authority_ordinal != b.authority_ordinal or
         ((a.metadata == null) != (b.metadata == null)) or
         ((a.resize == null) != (b.resize == null)))
         return false;
@@ -158,6 +160,25 @@ pub fn resizeCandidateIsCoherent(candidate: ResizeCandidate) bool {
             &candidate.semantic_digest,
             &resizeSemanticDigest(event),
         );
+}
+
+pub const ResizeBaselineOrder = enum {
+    older,
+    duplicate,
+    newer,
+    equivocation,
+};
+
+pub fn compareResizeBaseline(
+    current: resize_wire.Event,
+    incoming: resize_wire.Event,
+) ResizeBaselineOrder {
+    if (incoming.resize_generation < current.resize_generation) return .older;
+    if (incoming.resize_generation > current.resize_generation) return .newer;
+    return if (std.meta.eql(incoming, current))
+        .duplicate
+    else
+        .equivocation;
 }
 
 pub const InitialMetadataSeed = struct {
@@ -273,6 +294,10 @@ pub const Accumulator = struct {
                         .role = .observer,
                         .generation = .{ .tracked = generation },
                     };
+                    // The aggregate writer must publish the winning authority at the exact FIFO
+                    // intent that produced it. Keep that origin in the reducer SSOT instead of
+                    // making the pump classify the frame a second time.
+                    self.state.authority_ordinal = ordinal;
                 },
                 .resized => |value| self.reduceResize(
                     input.preflight,
@@ -338,13 +363,12 @@ pub const Accumulator = struct {
             self.state.resize = resizeCandidate(ordinal, accepted, value);
             return;
         };
-        if (value.resize_generation < current.event.resize_generation) return;
-        if (value.resize_generation == current.event.resize_generation) {
-            if (!std.meta.eql(value, current.event))
-                self.recordTerminal(.resize_equivocation);
-            return;
+        switch (compareResizeBaseline(current.event, value)) {
+            .older, .duplicate => {},
+            .equivocation => self.recordTerminal(.resize_equivocation),
+            .newer => self.state.resize =
+                resizeCandidate(ordinal, accepted, value),
         }
-        self.state.resize = resizeCandidate(ordinal, accepted, value);
     }
 
     fn reduceMetadata(
@@ -797,6 +821,15 @@ test "reducer applies resize generation and revoke FIFO authority" {
         "{\"event\":\"controller.revoked\",\"data\":{\"runtime_id\":" ++
         "\"000000000000000000000000000000aa\",\"stream_id\":7," ++
         "\"controller_generation\":4,\"reason\":\"takeover\"}}";
+    const single_revoke = [_][]const u8{revoked};
+    const revoked_state = switch (reduce(
+        &single_revoke,
+        .{ .role = .controller, .generation = .{ .tracked = 3 } },
+    )) {
+        .revoked => |state| state,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqual(@as(?u32, 0), revoked_state.authority_ordinal);
     const revoke_payloads = [_][]const u8{ revoked, revoked };
     const reason = switch (reduce(
         &revoke_payloads,

@@ -17,6 +17,10 @@ pub fn leave() void {
     callback_cleanup_active = false;
 }
 
+pub fn active() bool {
+    return callback_cleanup_active;
+}
+
 test "frozen cleanup guard rejects same-kind and cross-kind nesting" {
     try @import("std").testing.expect(enter());
     defer leave();

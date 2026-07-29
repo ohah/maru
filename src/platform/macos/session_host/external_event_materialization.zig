@@ -10,6 +10,7 @@ const posix = std.posix;
 const client_mod = @import("client.zig");
 const compatibility = @import("compatibility.zig");
 const decision_mod = @import("external_source_decision.zig");
+const external_owner_cleanup = @import("external_owner_cleanup.zig");
 const external_owner_seal = @import("external_owner_seal.zig");
 const framing = @import("framing.zig");
 const frozen_cleanup_guard = @import("frozen_cleanup_guard.zig");
@@ -142,6 +143,210 @@ pub const PreparedOwnedMetadata = struct {
         self.lifecycle = .aborted_tombstone;
     }
 };
+
+pub const PrepareExactEventOwnedError =
+    runtime_metadata_wire.DecodeError || error{InvalidPreparedOwner};
+
+const PreparedOwnedMetadataAbortLifecycle = enum {
+    empty,
+    prepared,
+    consumed,
+};
+
+pub const PreparedOwnedMetadataAbort = struct {
+    saved_self_addr: usize = 0,
+    owner_addr: usize = 0,
+    cleanup_output_addr: usize = 0,
+    allocator: std.mem.Allocator = std.heap.page_allocator,
+    allocator_ptr_addr: usize = 0,
+    allocator_vtable_addr: usize = 0,
+    backing_addr: usize = 0,
+    backing_len: usize = 0,
+    content_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    lifecycle: PreparedOwnedMetadataAbortLifecycle = .empty,
+    digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+};
+
+fn preparedOwnedMetadataAbortDigest(
+    prepared: *const PreparedOwnedMetadataAbort,
+) external_owner_seal.Digest {
+    var writer = external_owner_seal.Writer.init("MARUMAB1");
+    writer.writeUsize(prepared.saved_self_addr);
+    writer.writeUsize(prepared.owner_addr);
+    writer.writeUsize(prepared.cleanup_output_addr);
+    writer.writeUsize(prepared.allocator_ptr_addr);
+    writer.writeUsize(prepared.allocator_vtable_addr);
+    writer.writeUsize(prepared.backing_addr);
+    writer.writeUsize(prepared.backing_len);
+    writer.writeBytes(&prepared.content_digest);
+    writer.writeU8(@intFromEnum(prepared.lifecycle));
+    return writer.finish();
+}
+
+fn preparedOwnedMetadataAbortPristine(
+    prepared: *const PreparedOwnedMetadataAbort,
+) bool {
+    return prepared.saved_self_addr == 0 and prepared.owner_addr == 0 and
+        prepared.cleanup_output_addr == 0 and
+        prepared.allocator_ptr_addr == 0 and
+        prepared.allocator_vtable_addr == 0 and prepared.backing_addr == 0 and
+        prepared.backing_len == 0 and prepared.lifecycle == .empty and
+        std.mem.allEqual(u8, &prepared.content_digest, 0) and
+        std.mem.allEqual(u8, &prepared.digest, 0);
+}
+
+/// Materializes the exact payload proof returned by the common event classifier directly into
+/// its final-address aggregate owner. The lexical proof is re-run by
+/// `materializeExactEventMetadata`; callers cannot pair a borrowed semantic view with different
+/// bytes or construct `PreparedOwnedMetadata` field-by-field.
+pub fn prepareExactEventOwnedMetadata(
+    out: *PreparedOwnedMetadata,
+    allocator: std.mem.Allocator,
+    payload: []const u8,
+    identity: runtime_event_wire.ExpectedIdentity,
+    candidate: runtime_event_reducer.MetadataCandidate,
+) PrepareExactEventOwnedError!void {
+    if (!std.meta.eql(out.*, PreparedOwnedMetadata{}))
+        return error.InvalidPreparedOwner;
+    switch (candidate.origin) {
+        .event => {},
+        .initial => return error.InvalidPreparedOwner,
+    }
+    const preflight = switch (candidate.proof) {
+        .event => |proof| proof,
+        .initial => return error.InvalidPreparedOwner,
+    };
+    const metadata = switch (preflight.event) {
+        .metadata => |value| value,
+        else => return error.Malformed,
+    };
+    var dto = try runtime_metadata_wire.materializeExactEventMetadata(
+        allocator,
+        payload,
+        identity,
+        preflight,
+    );
+    defer dto.deinit();
+    const resident = eventResidentBytes(&dto);
+    if (resident == 0) return error.InvalidPreparedOwner;
+    if (!std.mem.eql(u8, &candidate.raw_digest, &preflight.raw_digest) or
+        candidate.semantic_digest != .event or
+        !std.mem.eql(
+            u8,
+            &candidate.semantic_digest.event,
+            &metadata.semantic_digest,
+        ))
+        return error.InvalidPreparedOwner;
+    if (!out.initInPlace(
+        &dto,
+        candidate,
+        .{
+            .resident_delta = resident,
+            .prepare_peak_delta = resident,
+        },
+    ))
+        return error.InvalidPreparedOwner;
+}
+
+pub fn prepareLiveMetadataAbort(
+    owner: *const PreparedOwnedMetadata,
+    cleanup_output: *const external_owner_cleanup.FrozenOwnerCleanupDescriptor,
+    out: *PreparedOwnedMetadataAbort,
+) bool {
+    if (!owner.validate() or
+        !external_owner_cleanup.isPristine(cleanup_output) or
+        !preparedOwnedMetadataAbortPristine(out))
+        return false;
+    const backing = owner.logical.?.backing orelse return false;
+    if (rangesOverlap(
+        @intFromPtr(out),
+        @sizeOf(PreparedOwnedMetadataAbort),
+        @intFromPtr(cleanup_output),
+        @sizeOf(external_owner_cleanup.FrozenOwnerCleanupDescriptor),
+    ) or rangesOverlap(
+        @intFromPtr(out),
+        @sizeOf(PreparedOwnedMetadataAbort),
+        @intFromPtr(backing.ptr),
+        backing.len,
+    ) or rangesOverlap(
+        @intFromPtr(cleanup_output),
+        @sizeOf(external_owner_cleanup.FrozenOwnerCleanupDescriptor),
+        @intFromPtr(backing.ptr),
+        backing.len,
+    ))
+        return false;
+    out.* = .{
+        .saved_self_addr = @intFromPtr(out),
+        .owner_addr = @intFromPtr(owner),
+        .cleanup_output_addr = @intFromPtr(cleanup_output),
+        .allocator = owner.logical.?.allocator,
+        .allocator_ptr_addr = @intFromPtr(owner.logical.?.allocator.ptr),
+        .allocator_vtable_addr = @intFromPtr(owner.logical.?.allocator.vtable),
+        .backing_addr = @intFromPtr(backing.ptr),
+        .backing_len = backing.len,
+        .content_digest = external_owner_cleanup.contentDigest(backing),
+        .lifecycle = .prepared,
+        .digest = undefined,
+    };
+    out.digest = preparedOwnedMetadataAbortDigest(out);
+    return true;
+}
+
+pub fn validateLiveMetadataAbort(
+    owner: *const PreparedOwnedMetadata,
+    cleanup_output: *const external_owner_cleanup.FrozenOwnerCleanupDescriptor,
+    prepared: *const PreparedOwnedMetadataAbort,
+) bool {
+    if (!owner.validate() or
+        prepared.saved_self_addr != @intFromPtr(prepared) or
+        prepared.owner_addr != @intFromPtr(owner) or
+        prepared.cleanup_output_addr != @intFromPtr(cleanup_output) or
+        prepared.lifecycle != .prepared or
+        !std.mem.eql(
+            u8,
+            &prepared.digest,
+            &preparedOwnedMetadataAbortDigest(prepared),
+        ) or !external_owner_cleanup.isPristine(cleanup_output))
+        return false;
+    const backing = owner.logical.?.backing orelse return false;
+    return @intFromPtr(prepared.allocator.ptr) ==
+        prepared.allocator_ptr_addr and
+        @intFromPtr(prepared.allocator.vtable) ==
+            prepared.allocator_vtable_addr and
+        prepared.allocator_ptr_addr == @intFromPtr(owner.logical.?.allocator.ptr) and
+        prepared.allocator_vtable_addr == @intFromPtr(owner.logical.?.allocator.vtable) and
+        prepared.backing_addr == @intFromPtr(backing.ptr) and
+        prepared.backing_len == backing.len and
+        std.mem.eql(
+            u8,
+            &prepared.content_digest,
+            &external_owner_cleanup.contentDigest(backing),
+        );
+}
+
+pub fn commitLiveMetadataAbortUnchecked(
+    owner: *PreparedOwnedMetadata,
+    cleanup_output: *external_owner_cleanup.FrozenOwnerCleanupDescriptor,
+    prepared: *PreparedOwnedMetadataAbort,
+) void {
+    const allocator = prepared.allocator;
+    const backing =
+        @as([*]u8, @ptrFromInt(prepared.backing_addr))[0..prepared.backing_len];
+    owner.logical = null;
+    owner.cleanup = null;
+    owner.logical_seal = null;
+    owner.cleanup_seal = null;
+    owner.candidate = null;
+    owner.lifecycle = .aborted_tombstone;
+    external_owner_cleanup.freezeOwnedSliceFromSealUnchecked(
+        cleanup_output,
+        allocator,
+        backing,
+        prepared.content_digest,
+    );
+    prepared.lifecycle = .consumed;
+    prepared.digest = preparedOwnedMetadataAbortDigest(prepared);
+}
 
 pub const PreparedMetadata = union(enum) {
     unsupported,
@@ -410,6 +615,55 @@ pub const OwnerMetadataState = struct {
         };
     }
 
+    /// Scalar-only baseline used by the live event reducer. The owning DTO and its backing remain
+    /// private to this owner; the reducer receives only the revision and the two immutable
+    /// provenance digests needed to bind an `.initial` candidate.
+    pub fn reductionSeed(
+        self: *const OwnerMetadataState,
+        stable_parent: *const anyopaque,
+    ) ?runtime_event_reducer.InitialMetadataSeed {
+        if (self.storage_addr != @intFromPtr(stable_parent) or !self.isCommitted())
+            return null;
+        return switch (self.metadata) {
+            .unsupported, .unavailable => null,
+            .current => |current| .{
+                .revision = current.logical.revision,
+                .raw_digest = current.logical_seal.raw_digest,
+                .semantic_digest = current.logical_seal.semantic_digest,
+            },
+        };
+    }
+
+    /// Compares an exact classifier proof with the persistent baseline without exposing the
+    /// baseline DTO. This is a fallible prepare-time operation only; the aggregate no-fail suffix
+    /// never decodes or allocates.
+    pub fn compareCurrentWithExactEvent(
+        self: *const OwnerMetadataState,
+        stable_parent: *const anyopaque,
+        allocator: std.mem.Allocator,
+        payload: []const u8,
+        identity: runtime_event_wire.ExpectedIdentity,
+        preflight: runtime_event_wire.EventPreflight,
+    ) runtime_event_reducer.MetadataComparison {
+        if (self.storage_addr != @intFromPtr(stable_parent) or
+            !self.isCommitted() or self.metadata != .current)
+            return .stale;
+        var dto = runtime_metadata_wire.materializeExactEventMetadata(
+            allocator,
+            payload,
+            identity,
+            preflight,
+        ) catch return .stale;
+        defer dto.deinit();
+        return if (runtime_metadata_wire.OwnedMetadataDto.semanticEql(
+            &self.metadata.current.logical,
+            &dto,
+        ))
+            .equal
+        else
+            .different;
+    }
+
     /// O(1) scheduler summary: validate address-bound owner headers without hashing or reading the
     /// metadata backing. Payload consumers still use `metadataStateSummary`/projection validation.
     pub fn pendingStateSummary(
@@ -528,12 +782,6 @@ pub const OwnerMetadataState = struct {
         prepared: *PreparedOwnerMetadataCleanup,
         out: *FrozenOwnerMetadataCleanup,
     ) void {
-        std.debug.assert(prepared.saved_self_addr == @intFromPtr(prepared));
-        std.debug.assert(prepared.owner_addr == @intFromPtr(self));
-        std.debug.assert(prepared.storage_addr == self.storage_addr);
-        std.debug.assert(prepared.frozen_out_addr == @intFromPtr(out));
-        std.debug.assert(prepared.lifecycle == .prepared);
-        std.debug.assert(out.saved_self_addr == 0 and out.lifecycle == .empty);
         out.saved_self_addr = @intFromPtr(out);
         out.had_invariant = prepared.had_invariant;
         out.lifecycle = .frozen;
@@ -705,6 +953,566 @@ pub const PreparedOwnerMetadataTake = struct {
         return @intFromEnum(self.lifecycle);
     }
 };
+
+pub const OwnerMetadataReplacementDisposition = enum {
+    publish_first,
+    cleanup_only_older,
+    cleanup_only_duplicate,
+    replace_newer,
+};
+
+const PreparedOwnerMetadataReplacementLifecycle = enum {
+    empty,
+    prepared,
+    committed_tombstone,
+    aborted_tombstone,
+};
+
+const OwnerMetadataReplacementPayload = struct {
+    logical: runtime_metadata_wire.OwnedMetadataDto,
+    cleanup: runtime_metadata_wire.OwnedMetadataDto,
+    logical_seal: runtime_metadata_wire.OwnedMetadataSeal,
+    cleanup_seal: runtime_metadata_wire.OwnedMetadataSeal,
+};
+
+const OwnerMetadataReplacementPayloadState = union(enum) {
+    none,
+    current: OwnerMetadataReplacementPayload,
+};
+
+/// Final-address permit for replacing an already committed metadata owner. The copied DTO
+/// descriptors are non-owning until the unchecked commit tombstones either the incoming owner or
+/// the old destination at the same linearization point that publishes the corresponding frozen
+/// cleanup owner.
+pub const PreparedOwnerMetadataReplacement = struct {
+    saved_self_addr: usize = 0,
+    destination_addr: usize = 0,
+    storage_addr: usize = 0,
+    incoming_addr: usize = 0,
+    frozen_out_addr: usize = 0,
+    payload_addr: usize = 0,
+    destination_authority_digest: external_owner_seal.Digest =
+        [_]u8{0} ** @sizeOf(external_owner_seal.Digest),
+    disposition: OwnerMetadataReplacementDisposition = .cleanup_only_older,
+    incoming_revision: u64 = 0,
+    incoming_semantic_digest: runtime_event_wire.Digest =
+        [_]u8{0} ** @sizeOf(runtime_event_wire.Digest),
+    payload: OwnerMetadataReplacementPayloadState = .none,
+    old_cleanup: PreparedOwnerMetadataCleanup = .{},
+    lifecycle: PreparedOwnerMetadataReplacementLifecycle = .empty,
+
+    pub fn validate(
+        self: *const PreparedOwnerMetadataReplacement,
+        destination: *const OwnerMetadataState,
+        stable_parent: *const anyopaque,
+        incoming: *const PreparedOwnedMetadata,
+        frozen_out: *const FrozenOwnerMetadataCleanup,
+    ) bool {
+        if (self.lifecycle != .prepared or
+            self.saved_self_addr != @intFromPtr(self) or
+            self.destination_addr != @intFromPtr(destination) or
+            self.storage_addr != @intFromPtr(stable_parent) or
+            self.incoming_addr != @intFromPtr(incoming) or
+            self.frozen_out_addr != @intFromPtr(frozen_out) or
+            !std.meta.eql(frozen_out.*, FrozenOwnerMetadataCleanup{}) or
+            !destination.isCommitted() or
+            destination.storage_addr != self.storage_addr or
+            !incoming.validate())
+            return false;
+        const payload = switch (self.payload) {
+            .none => return false,
+            .current => |*value| value,
+        };
+        if (self.payload_addr != @intFromPtr(payload)) return false;
+        const zero_digest =
+            [_]u8{0} ** @sizeOf(external_owner_seal.Digest);
+        const current_authority_digest = switch (destination.metadata) {
+            .current => |*current| &current.owner_seal.authority_digest,
+            .unavailable => &zero_digest,
+            .unsupported => return false,
+        };
+        if (!std.mem.eql(
+            u8,
+            &self.destination_authority_digest,
+            current_authority_digest,
+        ) or self.incoming_revision != incoming.logical.?.revision or
+            !std.mem.eql(
+                u8,
+                &self.incoming_semantic_digest,
+                &incoming.logical_seal.?.semantic_digest,
+            ) or !replacementPayloadMatches(self, incoming))
+            return false;
+        const semantic_equal = if (destination.metadata == .current)
+            runtime_metadata_wire.OwnedMetadataDto.semanticEql(
+                &destination.metadata.current.logical,
+                &incoming.logical.?,
+            )
+        else
+            false;
+        return switch (self.disposition) {
+            .publish_first => destination.metadata == .unavailable and
+                std.meta.eql(self.old_cleanup, PreparedOwnerMetadataCleanup{}),
+            .cleanup_only_older => destination.metadata == .current and
+                self.incoming_revision <
+                    destination.metadata.current.logical.revision and
+                std.meta.eql(self.old_cleanup, PreparedOwnerMetadataCleanup{}),
+            .cleanup_only_duplicate => destination.metadata == .current and
+                self.incoming_revision ==
+                    destination.metadata.current.logical.revision and
+                semantic_equal and
+                std.meta.eql(self.old_cleanup, PreparedOwnerMetadataCleanup{}),
+            .replace_newer => destination.metadata == .current and
+                self.incoming_revision >
+                    destination.metadata.current.logical.revision and
+                preparedOldCleanupMatches(
+                    &self.old_cleanup,
+                    destination,
+                    frozen_out,
+                ),
+        };
+    }
+
+    /// Abort owns no payload: both the destination and incoming prepared owner remain unchanged.
+    pub fn abort(self: *PreparedOwnerMetadataReplacement) void {
+        if (self.saved_self_addr != 0 and self.saved_self_addr != @intFromPtr(self))
+            return;
+        self.payload = .none;
+        self.payload_addr = 0;
+        self.old_cleanup = .{ .lifecycle = .consumed };
+        self.lifecycle = .aborted_tombstone;
+    }
+};
+
+pub const OwnerMetadataReplacementPrepareError = error{
+    InvalidReplacement,
+    MetadataEquivocation,
+};
+
+pub fn prepareOwnerMetadataReplacement(
+    out: *PreparedOwnerMetadataReplacement,
+    destination: *const OwnerMetadataState,
+    stable_parent: *const anyopaque,
+    incoming: *const PreparedOwnedMetadata,
+    frozen_out: *const FrozenOwnerMetadataCleanup,
+) OwnerMetadataReplacementPrepareError!OwnerMetadataReplacementDisposition {
+    const out_addr = @intFromPtr(out);
+    const destination_addr = @intFromPtr(destination);
+    const incoming_addr = @intFromPtr(incoming);
+    const frozen_addr = @intFromPtr(frozen_out);
+    if (rangesOverlap(
+        out_addr,
+        @sizeOf(PreparedOwnerMetadataReplacement),
+        destination_addr,
+        @sizeOf(OwnerMetadataState),
+    ) or rangesOverlap(
+        out_addr,
+        @sizeOf(PreparedOwnerMetadataReplacement),
+        incoming_addr,
+        @sizeOf(PreparedOwnedMetadata),
+    ) or rangesOverlap(
+        out_addr,
+        @sizeOf(PreparedOwnerMetadataReplacement),
+        frozen_addr,
+        @sizeOf(FrozenOwnerMetadataCleanup),
+    ) or rangesOverlap(
+        destination_addr,
+        @sizeOf(OwnerMetadataState),
+        incoming_addr,
+        @sizeOf(PreparedOwnedMetadata),
+    ) or rangesOverlap(
+        destination_addr,
+        @sizeOf(OwnerMetadataState),
+        frozen_addr,
+        @sizeOf(FrozenOwnerMetadataCleanup),
+    ) or rangesOverlap(
+        incoming_addr,
+        @sizeOf(PreparedOwnedMetadata),
+        frozen_addr,
+        @sizeOf(FrozenOwnerMetadataCleanup),
+    ))
+        return error.InvalidReplacement;
+    if (!std.meta.eql(out.*, PreparedOwnerMetadataReplacement{}) or
+        !std.meta.eql(frozen_out.*, FrozenOwnerMetadataCleanup{}) or
+        !destination.isCommitted() or
+        destination.storage_addr != @intFromPtr(stable_parent) or
+        !incoming.validate())
+        return error.InvalidReplacement;
+    const incoming_dto = &incoming.logical.?;
+    const disposition: OwnerMetadataReplacementDisposition =
+        switch (destination.metadata) {
+            .unsupported => return error.InvalidReplacement,
+            .unavailable => .publish_first,
+            .current => |*current| if (incoming_dto.revision < current.logical.revision)
+                .cleanup_only_older
+            else if (incoming_dto.revision == current.logical.revision)
+                if (runtime_metadata_wire.OwnedMetadataDto.semanticEql(
+                    &current.logical,
+                    incoming_dto,
+                ))
+                    .cleanup_only_duplicate
+                else
+                    return error.MetadataEquivocation
+            else
+                .replace_newer,
+        };
+
+    out.* = .{
+        .saved_self_addr = out_addr,
+        .destination_addr = destination_addr,
+        .storage_addr = destination.storage_addr,
+        .incoming_addr = incoming_addr,
+        .frozen_out_addr = frozen_addr,
+        .payload_addr = 0,
+        .destination_authority_digest = switch (destination.metadata) {
+            .current => |current| current.owner_seal.authority_digest,
+            .unsupported, .unavailable => [_]u8{0} ** @sizeOf(external_owner_seal.Digest),
+        },
+        .disposition = disposition,
+        .incoming_revision = incoming_dto.revision,
+        .incoming_semantic_digest = incoming.logical_seal.?.semantic_digest,
+        .payload = .{ .current = .{
+            .logical = incoming.logical.?,
+            .cleanup = incoming.cleanup.?,
+            .logical_seal = incoming.logical_seal.?,
+            .cleanup_seal = incoming.cleanup_seal.?,
+        } },
+        .lifecycle = .prepared,
+    };
+    // Zig evaluates the aggregate before assignment; bind the copied descriptors only after their
+    // final addresses exist.
+    out.payload.current.logical_seal = rebindOwnedSeal(
+        incoming.logical_seal.?,
+        &out.payload.current.logical,
+    );
+    out.payload.current.cleanup_seal = rebindOwnedSeal(
+        incoming.cleanup_seal.?,
+        &out.payload.current.cleanup,
+    );
+    out.payload_addr = @intFromPtr(&out.payload.current);
+    if (disposition == .replace_newer and
+        !destination.prepareFrozenCleanup(
+            stable_parent,
+            &out.old_cleanup,
+            frozen_out,
+        ))
+    {
+        out.* = .{ .lifecycle = .aborted_tombstone };
+        return error.InvalidReplacement;
+    }
+    if (!out.validate(destination, stable_parent, incoming, frozen_out)) {
+        out.* = .{ .lifecycle = .aborted_tombstone };
+        return error.InvalidReplacement;
+    }
+    return disposition;
+}
+
+fn commitOwnerMetadataIncomingTombstoneUnchecked(
+    prepared: *PreparedOwnerMetadataReplacement,
+    incoming: *PreparedOwnedMetadata,
+) void {
+    incoming.logical = null;
+    incoming.cleanup = null;
+    incoming.logical_seal = null;
+    incoming.cleanup_seal = null;
+    incoming.candidate = null;
+    incoming.lifecycle = .committed_tombstone;
+    prepared.payload = .none;
+    prepared.payload_addr = 0;
+    prepared.lifecycle = .committed_tombstone;
+}
+
+/// Fixed cleanup-only suffix selected by the checked aggregate prefix.
+pub fn commitOwnerMetadataCleanupOnlyUnchecked(
+    prepared: *PreparedOwnerMetadataReplacement,
+    incoming: *PreparedOwnedMetadata,
+    frozen_out: *FrozenOwnerMetadataCleanup,
+) void {
+    const payload: *const OwnerMetadataReplacementPayload =
+        @ptrFromInt(prepared.payload_addr);
+    frozen_out.* = .{
+        .saved_self_addr = @intFromPtr(frozen_out),
+        .selected = .{ .current = payload.logical },
+        .had_invariant = false,
+        .lifecycle = .frozen,
+    };
+    commitOwnerMetadataIncomingTombstoneUnchecked(prepared, incoming);
+}
+
+fn publishOwnerMetadataUnchecked(
+    prepared: *PreparedOwnerMetadataReplacement,
+    destination: *OwnerMetadataState,
+    incoming: *PreparedOwnedMetadata,
+) void {
+    const payload: *const OwnerMetadataReplacementPayload =
+        @ptrFromInt(prepared.payload_addr);
+    destination.* = .{
+        .saved_self_addr = @intFromPtr(destination),
+        .storage_addr = prepared.storage_addr,
+        .source_addr = @intFromPtr(incoming),
+        .metadata = .{ .current = .{
+            .logical = payload.logical,
+            .cleanup = payload.cleanup,
+            .logical_seal = payload.logical_seal,
+            .cleanup_seal = payload.cleanup_seal,
+            .owner_seal = undefined,
+            .cleanup_owner_seal = undefined,
+            .pending = true,
+        } },
+        .lifecycle = .committed,
+    };
+    destination.metadata.current.logical_seal = rebindOwnedSeal(
+        payload.logical_seal,
+        &destination.metadata.current.logical,
+    );
+    destination.metadata.current.cleanup_seal = rebindOwnedSeal(
+        payload.cleanup_seal,
+        &destination.metadata.current.cleanup,
+    );
+    bindOwnerMetadataAuthority(destination);
+    commitOwnerMetadataIncomingTombstoneUnchecked(prepared, incoming);
+}
+
+/// Fixed first-publish suffix selected by the checked aggregate prefix.
+pub fn commitOwnerMetadataPublishFirstUnchecked(
+    prepared: *PreparedOwnerMetadataReplacement,
+    destination: *OwnerMetadataState,
+    incoming: *PreparedOwnedMetadata,
+) void {
+    publishOwnerMetadataUnchecked(prepared, destination, incoming);
+}
+
+/// Fixed replacement suffix selected by the checked aggregate prefix.
+pub fn commitOwnerMetadataReplaceNewerUnchecked(
+    prepared: *PreparedOwnerMetadataReplacement,
+    destination: *OwnerMetadataState,
+    incoming: *PreparedOwnedMetadata,
+    frozen_out: *FrozenOwnerMetadataCleanup,
+) void {
+    destination.commitFrozenCleanupUnchecked(
+        &prepared.old_cleanup,
+        frozen_out,
+    );
+    publishOwnerMetadataUnchecked(prepared, destination, incoming);
+}
+
+pub const PreparedReplacementCleanupRange = struct {
+    address: usize,
+    len: usize,
+    content_digest: external_owner_cleanup.Digest,
+};
+
+pub fn preparedReplacementCleanupRange(
+    prepared: *const PreparedOwnerMetadataReplacement,
+    destination: *const OwnerMetadataState,
+    stable_parent: *const anyopaque,
+    incoming: *const PreparedOwnedMetadata,
+    frozen_out: *const FrozenOwnerMetadataCleanup,
+) ?PreparedReplacementCleanupRange {
+    if (!prepared.validate(destination, stable_parent, incoming, frozen_out))
+        return null;
+    return switch (prepared.disposition) {
+        .publish_first => .{
+            .address = 0,
+            .len = 0,
+            .content_digest = [_]u8{0} ** 32,
+        },
+        .cleanup_only_older, .cleanup_only_duplicate => if (incoming.logical.?.backing) |backing| .{
+            .address = @intFromPtr(backing.ptr),
+            .len = backing.len,
+            .content_digest = external_owner_cleanup.contentDigest(backing),
+        } else .{
+            .address = 0,
+            .len = 0,
+            .content_digest = [_]u8{0} ** 32,
+        },
+        .replace_newer => if (destination.metadata.current.logical.backing) |backing|
+            .{
+                .address = @intFromPtr(backing.ptr),
+                .len = backing.len,
+                .content_digest = external_owner_cleanup.contentDigest(backing),
+            }
+        else
+            .{
+                .address = 0,
+                .len = 0,
+                .content_digest = [_]u8{0} ** 32,
+            },
+    };
+}
+
+/// Converts typed metadata retirement into the common aggregate descriptor after the replacement
+/// linearization point. The typed source is tombstoned before generic authority is published.
+pub fn commitFrozenCleanupToDescriptorUnchecked(
+    frozen: *FrozenOwnerMetadataCleanup,
+    out: *external_owner_cleanup.FrozenOwnerCleanupDescriptor,
+    sealed_content_digest: external_owner_cleanup.Digest,
+) void {
+    const selected = frozen.selected;
+    frozen.* = .{ .lifecycle = .cleaned_tombstone };
+    switch (selected) {
+        .none => {},
+        .current => |dto_value| {
+            var dto = dto_value;
+            const backing = dto.backing orelse return;
+            dto.backing = null;
+            external_owner_cleanup.freezeOwnedSliceFromSealUnchecked(
+                out,
+                dto.allocator,
+                backing,
+                sealed_content_digest,
+            );
+        },
+    }
+}
+
+/// Final-address aggregate-owned backing for one live metadata destination. Keeping the concrete
+/// prepared owner inside this module prevents the pump from constructing or inspecting ownership
+/// mirrors while still allowing the aggregate to pin the complete transaction in one allocation.
+pub const PreparedLiveMetadataDestination = struct {
+    staged: PreparedOwnedMetadata = .{},
+    replacement: PreparedOwnerMetadataReplacement = .{},
+    frozen: FrozenOwnerMetadataCleanup = .{},
+    abort: PreparedOwnedMetadataAbort = .{},
+    abort_cleanup: external_owner_cleanup.FrozenOwnerCleanupDescriptor = .{},
+};
+
+fn writeOptionalOwnedMetadataSeal(
+    writer: *external_owner_seal.Writer,
+    seal: ?runtime_metadata_wire.OwnedMetadataSeal,
+) void {
+    const value = seal orelse {
+        writer.writeBool(false);
+        return;
+    };
+    writer.writeBool(true);
+    writer.writeUsize(value.dto_addr);
+    writer.writeUsize(value.allocator_ptr_addr);
+    writer.writeUsize(value.allocator_vtable_addr);
+    writer.writeBool(value.backing_present);
+    writer.writeUsize(value.backing_addr);
+    writer.writeUsize(value.backing_len);
+    writer.writeU64(value.revision);
+    writer.writeBytes(&value.raw_digest);
+    writer.writeBytes(&value.semantic_digest);
+}
+
+/// Owner-module SSOT for the complete aggregate-bound metadata transaction. Pump-level seals
+/// combine this one digest instead of cherry-picking fields from private ownership mirrors.
+pub fn preparedLiveMetadataDestinationAuthorityDigest(
+    destination: *const PreparedLiveMetadataDestination,
+) external_owner_seal.Digest {
+    var writer = external_owner_seal.Writer.init("MARULMD1");
+    const staged = &destination.staged;
+    writer.writeUsize(staged.saved_self_addr);
+    writer.writeUsize(staged.allocator_ptr_addr);
+    writer.writeUsize(staged.allocator_vtable_addr);
+    writer.writeBool(staged.backing_present);
+    writer.writeUsize(staged.backing_addr);
+    writer.writeUsize(staged.backing_len);
+    writeOptionalOwnedMetadataSeal(&writer, staged.logical_seal);
+    writeOptionalOwnedMetadataSeal(&writer, staged.cleanup_seal);
+    writer.writeUsize(staged.footprint.resident_delta);
+    writer.writeUsize(staged.footprint.prepare_peak_delta);
+    writer.writeU8(@intFromEnum(staged.lifecycle));
+
+    const replacement = &destination.replacement;
+    writer.writeUsize(replacement.saved_self_addr);
+    writer.writeUsize(replacement.destination_addr);
+    writer.writeUsize(replacement.storage_addr);
+    writer.writeUsize(replacement.incoming_addr);
+    writer.writeUsize(replacement.frozen_out_addr);
+    writer.writeUsize(replacement.payload_addr);
+    writer.writeBytes(&replacement.destination_authority_digest);
+    writer.writeU8(@intFromEnum(replacement.disposition));
+    writer.writeU64(replacement.incoming_revision);
+    writer.writeBytes(&replacement.incoming_semantic_digest);
+    switch (replacement.payload) {
+        .none => writer.writeBool(false),
+        .current => |payload| {
+            writer.writeBool(true);
+            writeOptionalOwnedMetadataSeal(&writer, payload.logical_seal);
+            writeOptionalOwnedMetadataSeal(&writer, payload.cleanup_seal);
+        },
+    }
+    writer.writeUsize(replacement.old_cleanup.saved_self_addr);
+    writer.writeUsize(replacement.old_cleanup.owner_addr);
+    writer.writeUsize(replacement.old_cleanup.storage_addr);
+    writer.writeUsize(replacement.old_cleanup.frozen_out_addr);
+    writer.writeU8(@intFromEnum(replacement.old_cleanup.selection));
+    writer.writeBool(replacement.old_cleanup.had_invariant);
+    writer.writeU8(@intFromEnum(replacement.old_cleanup.lifecycle));
+    writer.writeU8(@intFromEnum(replacement.lifecycle));
+
+    writer.writeUsize(destination.frozen.saved_self_addr);
+    switch (destination.frozen.selected) {
+        .none => writer.writeBool(false),
+        .current => |dto| {
+            writer.writeBool(true);
+            writer.writeUsize(@intFromPtr(dto.allocator.ptr));
+            writer.writeUsize(@intFromPtr(dto.allocator.vtable));
+            writer.writeUsize(if (dto.backing) |backing|
+                @intFromPtr(backing.ptr)
+            else
+                0);
+            writer.writeUsize(if (dto.backing) |backing| backing.len else 0);
+            writer.writeU64(dto.revision);
+        },
+    }
+    writer.writeBool(destination.frozen.had_invariant);
+    writer.writeU8(@intFromEnum(destination.frozen.lifecycle));
+    writer.writeBytes(&destination.abort.digest);
+    writer.writeBytes(&destination.abort_cleanup.digest);
+    return writer.finish();
+}
+
+pub fn preparedLiveMetadataDestinationPristine(
+    destination: *const PreparedLiveMetadataDestination,
+) bool {
+    const pristine = PreparedLiveMetadataDestination{};
+    return std.mem.eql(
+        u8,
+        &preparedLiveMetadataDestinationAuthorityDigest(destination),
+        &preparedLiveMetadataDestinationAuthorityDigest(&pristine),
+    );
+}
+
+fn replacementPayloadMatches(
+    prepared: *const PreparedOwnerMetadataReplacement,
+    incoming: *const PreparedOwnedMetadata,
+) bool {
+    const payload = switch (prepared.payload) {
+        .current => |*value| value,
+        .none => return false,
+    };
+    return runtime_metadata_wire.validateOwnedMetadataSeal(
+        payload.logical_seal,
+        &payload.logical,
+    ) and runtime_metadata_wire.validateOwnedMetadataSeal(
+        payload.cleanup_seal,
+        &payload.cleanup,
+    ) and runtime_metadata_wire.OwnedMetadataDto.semanticEql(
+        &payload.logical,
+        &payload.cleanup,
+    ) and std.meta.eql(
+        payload.logical_seal,
+        rebindOwnedSeal(incoming.logical_seal orelse return false, &payload.logical),
+    ) and std.meta.eql(
+        payload.cleanup_seal,
+        rebindOwnedSeal(incoming.cleanup_seal orelse return false, &payload.cleanup),
+    );
+}
+
+fn preparedOldCleanupMatches(
+    cleanup: *const PreparedOwnerMetadataCleanup,
+    destination: *const OwnerMetadataState,
+    frozen_out: *const FrozenOwnerMetadataCleanup,
+) bool {
+    return cleanup.saved_self_addr == @intFromPtr(cleanup) and
+        cleanup.owner_addr == @intFromPtr(destination) and
+        cleanup.storage_addr == destination.storage_addr and
+        cleanup.frozen_out_addr == @intFromPtr(frozen_out) and
+        cleanup.selection != .none and cleanup.lifecycle == .prepared;
+}
 
 fn ownerMetadataCommitPayloadMatches(
     take: *const PreparedOwnerMetadataTake,
@@ -2511,6 +3319,223 @@ test "c3c-3b metadata summary is pointer free and fails closed on parent drift" 
     try std.testing.expect(owner.metadataStateSummary(&wrong_parent) == null);
     owner.saved_self_addr +%= 1;
     try std.testing.expect(owner.metadataStateSummary(&parent) == null);
+}
+
+test "d2b3c metadata replacement retires older incoming without mutating current" {
+    var counting = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    var parent: u8 = 0;
+    var owner: OwnerMetadataState = .{};
+    try initTestMetadataOwner(&owner, &parent, counting.allocator(), 5, 80);
+    defer owner.deinitCommitted();
+    var incoming: PreparedOwnedMetadata = .{};
+    try initTestIncomingMetadata(&incoming, counting.allocator(), 4, 120);
+    defer incoming.deinit();
+    var prepared: PreparedOwnerMetadataReplacement = .{};
+    var frozen: FrozenOwnerMetadataCleanup = .{};
+    try std.testing.expectEqual(
+        OwnerMetadataReplacementDisposition.cleanup_only_older,
+        try prepareOwnerMetadataReplacement(
+            &prepared,
+            &owner,
+            &parent,
+            &incoming,
+            &frozen,
+        ),
+    );
+    try std.testing.expect(prepared.validate(&owner, &parent, &incoming, &frozen));
+    var forged = prepared;
+    forged.saved_self_addr = @intFromPtr(&forged);
+    forged.payload = .none;
+    forged.payload_addr = 0;
+    try std.testing.expect(!forged.validate(
+        &owner,
+        &parent,
+        &incoming,
+        &frozen,
+    ));
+    commitOwnerMetadataCleanupOnlyUnchecked(
+        &prepared,
+        &incoming,
+        &frozen,
+    );
+    try std.testing.expectEqual(@as(u64, 5), owner.metadata.current.logical.revision);
+    try std.testing.expectEqual(@as(u16, 80), owner.metadata.current.logical.cols);
+    try std.testing.expectEqual(FrozenCleanupFinishResult.cleaned, finishFrozenCleanup(&frozen));
+    try std.testing.expectEqual(@as(usize, 1), counting.deallocations);
+}
+
+test "d2b3c metadata replacement retires same-semantic duplicate" {
+    var counting = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    var parent: u8 = 0;
+    var owner: OwnerMetadataState = .{};
+    try initTestMetadataOwner(&owner, &parent, counting.allocator(), 5, 80);
+    defer owner.deinitCommitted();
+    var incoming: PreparedOwnedMetadata = .{};
+    try initTestIncomingMetadata(&incoming, counting.allocator(), 5, 80);
+    defer incoming.deinit();
+    var prepared: PreparedOwnerMetadataReplacement = .{};
+    var frozen: FrozenOwnerMetadataCleanup = .{};
+    try std.testing.expectEqual(
+        OwnerMetadataReplacementDisposition.cleanup_only_duplicate,
+        try prepareOwnerMetadataReplacement(
+            &prepared,
+            &owner,
+            &parent,
+            &incoming,
+            &frozen,
+        ),
+    );
+    commitOwnerMetadataCleanupOnlyUnchecked(
+        &prepared,
+        &incoming,
+        &frozen,
+    );
+    try std.testing.expectEqual(@as(u64, 5), owner.metadata.current.logical.revision);
+    try std.testing.expectEqual(FrozenCleanupFinishResult.cleaned, finishFrozenCleanup(&frozen));
+    try std.testing.expectEqual(@as(usize, 1), counting.deallocations);
+}
+
+test "d2b3c metadata replacement rejects same-revision equivocation without ownership drift" {
+    var counting = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    var parent: u8 = 0;
+    var owner: OwnerMetadataState = .{};
+    try initTestMetadataOwner(&owner, &parent, counting.allocator(), 5, 80);
+    defer owner.deinitCommitted();
+    var incoming: PreparedOwnedMetadata = .{};
+    try initTestIncomingMetadata(&incoming, counting.allocator(), 5, 120);
+    defer incoming.deinit();
+    var prepared: PreparedOwnerMetadataReplacement = .{};
+    var frozen: FrozenOwnerMetadataCleanup = .{};
+    try std.testing.expectError(
+        error.MetadataEquivocation,
+        prepareOwnerMetadataReplacement(
+            &prepared,
+            &owner,
+            &parent,
+            &incoming,
+            &frozen,
+        ),
+    );
+    try std.testing.expect(owner.isCommitted());
+    try std.testing.expect(incoming.validate());
+    try std.testing.expect(std.meta.eql(prepared, PreparedOwnerMetadataReplacement{}));
+    try std.testing.expect(std.meta.eql(frozen, FrozenOwnerMetadataCleanup{}));
+}
+
+test "d2b3c metadata replacement publishes newer and freezes old exact once" {
+    var counting = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    var parent: u8 = 0;
+    var owner: OwnerMetadataState = .{};
+    try initTestMetadataOwner(&owner, &parent, counting.allocator(), 5, 80);
+    defer owner.deinitCommitted();
+    var incoming: PreparedOwnedMetadata = .{};
+    try initTestIncomingMetadata(&incoming, counting.allocator(), 6, 120);
+    defer incoming.deinit();
+    var prepared: PreparedOwnerMetadataReplacement = .{};
+    var frozen: FrozenOwnerMetadataCleanup = .{};
+    try std.testing.expectEqual(
+        OwnerMetadataReplacementDisposition.replace_newer,
+        try prepareOwnerMetadataReplacement(
+            &prepared,
+            &owner,
+            &parent,
+            &incoming,
+            &frozen,
+        ),
+    );
+    prepared.abort();
+    try std.testing.expect(owner.isCommitted());
+    try std.testing.expect(incoming.validate());
+    try std.testing.expectEqual(@as(usize, 0), counting.deallocations);
+
+    prepared = .{};
+    try std.testing.expectEqual(
+        OwnerMetadataReplacementDisposition.replace_newer,
+        try prepareOwnerMetadataReplacement(
+            &prepared,
+            &owner,
+            &parent,
+            &incoming,
+            &frozen,
+        ),
+    );
+    commitOwnerMetadataReplaceNewerUnchecked(
+        &prepared,
+        &owner,
+        &incoming,
+        &frozen,
+    );
+    try std.testing.expect(owner.isCommitted());
+    try std.testing.expectEqual(@as(u64, 6), owner.metadata.current.logical.revision);
+    try std.testing.expectEqual(@as(u16, 120), owner.metadata.current.logical.cols);
+    try std.testing.expectEqual(FrozenCleanupFinishResult.cleaned, finishFrozenCleanup(&frozen));
+    try std.testing.expectEqual(FrozenCleanupFinishResult.already_cleaned, finishFrozenCleanup(&frozen));
+    try std.testing.expectEqual(@as(usize, 1), counting.deallocations);
+    owner.deinitCommitted();
+    try std.testing.expectEqual(@as(usize, 2), counting.deallocations);
+}
+
+fn initTestMetadataOwner(
+    out: *OwnerMetadataState,
+    stable_parent: *const anyopaque,
+    allocator: std.mem.Allocator,
+    revision: u64,
+    cols: u16,
+) !void {
+    var seed = try runtime_metadata_wire.testingCurrentSeed(allocator);
+    var dto = seed.current.take();
+    seed.deinit();
+    dto.revision = revision;
+    dto.cols = cols;
+    const seal = try runtime_metadata_wire.sealOwnedMetadataDto(&dto);
+    out.* = .{
+        .saved_self_addr = @intFromPtr(out),
+        .storage_addr = @intFromPtr(stable_parent),
+        .source_addr = @intFromPtr(stable_parent),
+        .metadata = .{ .current = .{
+            .logical = dto,
+            .cleanup = dto,
+            .logical_seal = seal,
+            .cleanup_seal = seal,
+            .owner_seal = undefined,
+            .cleanup_owner_seal = undefined,
+            .pending = true,
+        } },
+        .lifecycle = .committed,
+    };
+    out.metadata.current.logical_seal = rebindOwnedSeal(
+        seal,
+        &out.metadata.current.logical,
+    );
+    out.metadata.current.cleanup_seal = rebindOwnedSeal(
+        seal,
+        &out.metadata.current.cleanup,
+    );
+    bindOwnerMetadataAuthority(out);
+    try std.testing.expect(out.isCommitted());
+}
+
+fn initTestIncomingMetadata(
+    out: *PreparedOwnedMetadata,
+    allocator: std.mem.Allocator,
+    revision: u64,
+    cols: u16,
+) !void {
+    var seed = try runtime_metadata_wire.testingCurrentSeed(allocator);
+    var dto = seed.current.take();
+    seed.deinit();
+    defer dto.deinit();
+    dto.revision = revision;
+    dto.cols = cols;
+    const footprint = PreparedMetadataFootprint{
+        .resident_delta = eventResidentBytes(&dto),
+        .prepare_peak_delta = eventResidentBytes(&dto),
+    };
+    try std.testing.expect(out.initInPlace(
+        &dto,
+        try testMetadataCandidate(),
+        footprint,
+    ));
 }
 
 fn testMetadataCandidate() !runtime_event_reducer.MetadataCandidate {

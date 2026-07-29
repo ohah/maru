@@ -12,6 +12,8 @@ const compatibility = @import("compatibility.zig");
 const decision_mod = @import("external_source_decision.zig");
 const external_owner_seal = @import("external_owner_seal.zig");
 const framing = @import("framing.zig");
+const frozen_cleanup_guard = @import("frozen_cleanup_guard.zig");
+const owner_range = @import("external_owner_range.zig");
 const protocol = @import("protocol.zig");
 const runtime_event_reducer = @import("runtime_event_reducer.zig");
 const runtime_event_wire = @import("runtime_event_wire.zig");
@@ -286,6 +288,52 @@ pub const OwnerMetadata = union(enum) {
     current: OwnerMetadataCurrent,
 };
 
+pub const MetadataCleanupSelection = enum {
+    none,
+    logical,
+    cleanup,
+};
+
+const PreparedMetadataCleanupLifecycle = enum {
+    empty,
+    prepared,
+    consumed,
+};
+
+pub const PreparedOwnerMetadataCleanup = struct {
+    saved_self_addr: usize = 0,
+    owner_addr: usize = 0,
+    storage_addr: usize = 0,
+    frozen_out_addr: usize = 0,
+    selection: MetadataCleanupSelection = .none,
+    had_invariant: bool = false,
+    lifecycle: PreparedMetadataCleanupLifecycle = .empty,
+};
+
+const FrozenMetadataSelection = union(enum) {
+    none,
+    current: runtime_metadata_wire.OwnedMetadataDto,
+};
+
+const FrozenMetadataCleanupLifecycle = enum {
+    empty,
+    frozen,
+    cleaned_tombstone,
+};
+
+pub const FrozenCleanupFinishResult = enum {
+    cleaned,
+    already_cleaned,
+    invalid,
+};
+
+pub const FrozenOwnerMetadataCleanup = struct {
+    saved_self_addr: usize = 0,
+    selected: FrozenMetadataSelection = .none,
+    had_invariant: bool = false,
+    lifecycle: FrozenMetadataCleanupLifecycle = .empty,
+};
+
 /// Persistent metadata baseline. Delivery borrows arrive in c3c-3; b1 only owns the exact DTO and
 /// keeps initial/event origins indistinguishable after their no-callback take.
 pub const OwnerMetadataState = struct {
@@ -317,8 +365,7 @@ pub const OwnerMetadataState = struct {
             return false;
         return switch (self.metadata) {
             .unsupported, .unavailable => true,
-            .current => |*current| current.pending and
-                ownerMetadataAuthorityPairValid(self, current) and
+            .current => |*current| ownerMetadataAuthorityPairValid(self, current) and
                 ownerMetadataCandidateValid(
                     self,
                     current,
@@ -337,37 +384,152 @@ pub const OwnerMetadataState = struct {
     }
 
     pub fn deinitCommitted(self: *OwnerMetadataState) void {
-        if (self.lifecycle == .empty or self.lifecycle == .cleaned_tombstone) return;
-        if (self.saved_self_addr != @intFromPtr(self)) return;
-        var selected: ?runtime_metadata_wire.OwnedMetadataDto = null;
+        if (self.lifecycle == .empty or self.lifecycle == .cleaned_tombstone)
+            return;
+        const stable_parent: *const anyopaque = if (self.storage_addr == 0)
+            @ptrFromInt(@as(usize, 1))
+        else
+            @ptrFromInt(self.storage_addr);
+        var prepared: PreparedOwnerMetadataCleanup = .{};
+        var frozen: FrozenOwnerMetadataCleanup = .{};
+        if (!self.prepareFrozenCleanup(stable_parent, &prepared, &frozen)) {
+            self.* = .{ .lifecycle = .cleaned_tombstone };
+            return;
+        }
+        self.commitFrozenCleanupUnchecked(&prepared, &frozen);
+        _ = finishFrozenCleanup(&frozen);
+    }
+
+    pub fn prepareFrozenCleanup(
+        self: *const OwnerMetadataState,
+        stable_parent: *const anyopaque,
+        out: *PreparedOwnerMetadataCleanup,
+        frozen_out: *const FrozenOwnerMetadataCleanup,
+    ) bool {
+        const owner_addr = @intFromPtr(self);
+        const out_addr = @intFromPtr(out);
+        const frozen_addr = @intFromPtr(frozen_out);
+        if (rangesOverlap(owner_addr, @sizeOf(OwnerMetadataState), out_addr, @sizeOf(PreparedOwnerMetadataCleanup)) or
+            rangesOverlap(owner_addr, @sizeOf(OwnerMetadataState), frozen_addr, @sizeOf(FrozenOwnerMetadataCleanup)) or
+            rangesOverlap(out_addr, @sizeOf(PreparedOwnerMetadataCleanup), frozen_addr, @sizeOf(FrozenOwnerMetadataCleanup)))
+            return false;
+        if (out.saved_self_addr != 0 or out.lifecycle != .empty or
+            frozen_out.saved_self_addr != 0 or frozen_out.lifecycle != .empty or
+            self.lifecycle != .committed or self.saved_self_addr != owner_addr or
+            self.storage_addr == 0 or self.storage_addr != @intFromPtr(stable_parent) or
+            self.source_addr == 0)
+            return false;
+
+        var selection: MetadataCleanupSelection = .none;
+        var had_invariant = false;
         if (self.metadata == .current) {
             const current = &self.metadata.current;
-            if (ownerMetadataAuthorityPairValid(self, current)) {
-                if (ownerMetadataCandidateValid(
-                    self,
-                    current,
-                    current.owner_seal,
-                    current.logical_seal,
-                    &current.logical,
-                )) {
-                    selected = current.logical;
-                } else if (ownerMetadataCandidateValid(
-                    self,
-                    current,
-                    current.cleanup_owner_seal,
-                    current.cleanup_seal,
-                    &current.cleanup,
-                )) {
-                    selected = current.cleanup;
-                }
-            }
+            if (!ownerMetadataAuthorityPairValid(self, current)) return false;
+            const logical_valid = ownerMetadataCandidateValid(
+                self,
+                current,
+                current.owner_seal,
+                current.logical_seal,
+                &current.logical,
+            );
+            const cleanup_valid = ownerMetadataCandidateValid(
+                self,
+                current,
+                current.cleanup_owner_seal,
+                current.cleanup_seal,
+                &current.cleanup,
+            );
+            if (logical_valid) {
+                selection = .logical;
+                had_invariant = !cleanup_valid;
+            } else if (cleanup_valid) {
+                selection = .cleanup;
+                had_invariant = true;
+            } else return false;
+            const seal = if (selection == .logical)
+                current.logical_seal
+            else
+                current.cleanup_seal;
+            if (seal.backing_present and
+                (rangesOverlap(seal.backing_addr, seal.backing_len, out_addr, @sizeOf(PreparedOwnerMetadataCleanup)) or
+                    rangesOverlap(seal.backing_addr, seal.backing_len, frozen_addr, @sizeOf(FrozenOwnerMetadataCleanup))))
+                return false;
         }
-        // No allocator callback may observe an owning state. The selected descriptor is a
-        // stack-local frozen copy and every owner/mirror field is tombstoned first.
+        out.* = .{
+            .saved_self_addr = out_addr,
+            .owner_addr = owner_addr,
+            .storage_addr = self.storage_addr,
+            .frozen_out_addr = frozen_addr,
+            .selection = selection,
+            .had_invariant = had_invariant,
+            .lifecycle = .prepared,
+        };
+        return true;
+    }
+
+    /// Boundary-gated no-error leaf consumed only by the aggregate pump commit and compatibility
+    /// wrapper after a successful mutation-free prepare.
+    pub fn commitFrozenCleanupUnchecked(
+        self: *OwnerMetadataState,
+        prepared: *PreparedOwnerMetadataCleanup,
+        out: *FrozenOwnerMetadataCleanup,
+    ) void {
+        std.debug.assert(prepared.saved_self_addr == @intFromPtr(prepared));
+        std.debug.assert(prepared.owner_addr == @intFromPtr(self));
+        std.debug.assert(prepared.storage_addr == self.storage_addr);
+        std.debug.assert(prepared.frozen_out_addr == @intFromPtr(out));
+        std.debug.assert(prepared.lifecycle == .prepared);
+        std.debug.assert(out.saved_self_addr == 0 and out.lifecycle == .empty);
+        out.saved_self_addr = @intFromPtr(out);
+        out.had_invariant = prepared.had_invariant;
+        out.lifecycle = .frozen;
+        out.selected = switch (prepared.selection) {
+            .none => .none,
+            .logical => .{ .current = self.metadata.current.logical.take() },
+            .cleanup => .{ .current = self.metadata.current.cleanup.take() },
+        };
         self.* = .{ .lifecycle = .cleaned_tombstone };
-        if (selected) |*dto| dto.deinit();
+        prepared.lifecycle = .consumed;
+    }
+
+    pub fn appendPreparedFrozenCleanupRanges(
+        self: *const OwnerMetadataState,
+        prepared: *const PreparedOwnerMetadataCleanup,
+        out: *owner_range.Scratch,
+    ) owner_range.Error!void {
+        if (prepared.saved_self_addr != @intFromPtr(prepared) or
+            prepared.owner_addr != @intFromPtr(self) or
+            prepared.storage_addr != self.storage_addr or
+            prepared.lifecycle != .prepared)
+            return error.InvalidRange;
+        const seal = switch (prepared.selection) {
+            .none => return,
+            .logical => self.metadata.current.logical_seal,
+            .cleanup => self.metadata.current.cleanup_seal,
+        };
+        if (seal.backing_present)
+            try out.append(seal.backing_addr, seal.backing_len);
     }
 };
+
+pub fn finishFrozenCleanup(
+    frozen: *FrozenOwnerMetadataCleanup,
+) FrozenCleanupFinishResult {
+    const address = @intFromPtr(frozen);
+    if (frozen.lifecycle == .cleaned_tombstone) return .already_cleaned;
+    if (frozen.saved_self_addr != address or frozen.lifecycle != .frozen)
+        return .invalid;
+    if (!frozen_cleanup_guard.enter()) return .invalid;
+    defer frozen_cleanup_guard.leave();
+    defer frozen.* = .{ .lifecycle = .cleaned_tombstone };
+    var local = frozen.*;
+    frozen.* = .{ .lifecycle = .cleaned_tombstone };
+    switch (local.selected) {
+        .none => {},
+        .current => |*dto| dto.deinit(),
+    }
+    return .cleaned;
+}
 
 /// Publishes the allocation-free metadata baseline used by immediate recovery. Keeping this
 /// constructor beside validation/cleanup prevents the pump from duplicating owner lifecycle
@@ -1898,9 +2060,33 @@ test "c3c-2b1 metadata destination takes initial DTO and frees its mirror exactl
     try std.testing.expect(owner.metadata == .current);
     try std.testing.expect(owner.metadata.current.pending);
     owner.metadata.current.logical.revision += 1;
+    owner.metadata.current.pending = false;
     const frees_before = counting.deallocations;
-    owner.deinitCommitted();
-    owner.deinitCommitted();
+    const owner_before = owner;
+    var cleanup_prepared: PreparedOwnerMetadataCleanup = .{};
+    var frozen: FrozenOwnerMetadataCleanup = .{};
+    const stable_parent: *const anyopaque = @ptrFromInt(owner.storage_addr);
+    try std.testing.expect(owner.prepareFrozenCleanup(
+        stable_parent,
+        &cleanup_prepared,
+        &frozen,
+    ));
+    try std.testing.expect(std.meta.eql(owner_before, owner));
+    try std.testing.expectEqual(
+        MetadataCleanupSelection.cleanup,
+        cleanup_prepared.selection,
+    );
+    try std.testing.expect(cleanup_prepared.had_invariant);
+    owner.commitFrozenCleanupUnchecked(&cleanup_prepared, &frozen);
+    try std.testing.expectEqual(OwnerLifecycle.cleaned_tombstone, owner.lifecycle);
+    try std.testing.expectEqual(
+        FrozenCleanupFinishResult.cleaned,
+        finishFrozenCleanup(&frozen),
+    );
+    try std.testing.expectEqual(
+        FrozenCleanupFinishResult.already_cleaned,
+        finishFrozenCleanup(&frozen),
+    );
     try std.testing.expectEqual(frees_before + 1, counting.deallocations);
 }
 

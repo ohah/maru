@@ -102,11 +102,35 @@ pub const launcher = if (builtin.os.tag == .macos)
     @import("session_host/launcher.zig")
 else
     struct {};
-// client(GUI/CLI가 host에 connect)도 실 socket을 써서 macOS에서만 컴파일한다(순수 JSON helper test도 함께 macOS-gated).
-pub const client = if (builtin.os.tag == .macos)
+// client(GUI/CLI가 host에 connect)도 실 socket을 써서 macOS에서만 컴파일한다. Barrel은
+// 제품 소비자가 쓰는 facade만 다시 내보내고 owner의 unchecked commit authority는 숨긴다.
+const client_impl = if (builtin.os.tag == .macos)
     @import("session_host/client.zig")
 else
     struct {};
+pub const client = if (builtin.os.tag == .macos) struct {
+    pub const Client = client_impl.Client;
+    pub const extractRuntimeId = client_impl.extractRuntimeId;
+    pub const extractU64Field = client_impl.extractU64Field;
+} else struct {};
+
+test "client barrel exposes only the supported facade" {
+    if (builtin.os.tag != .macos) return;
+    try @import("std").testing.expect(@hasDecl(client, "Client"));
+    try @import("std").testing.expect(@hasDecl(client, "extractRuntimeId"));
+    try @import("std").testing.expect(@hasDecl(client, "extractU64Field"));
+    try @import("std").testing.expect(!@hasDecl(client, "ExternalAdoptionTake"));
+    try @import("std").testing.expect(
+        !@hasDecl(client, "commitExternalAdoptionTake" ++ "Unchecked"),
+    );
+    try @import("std").testing.expect(
+        !@hasDecl(client.Client, "commitExternalAdoptionTake" ++ "Unchecked"),
+    );
+    try @import("std").testing.expect(
+        !@hasDecl(client.Client, "commitExternalRecoveryDiscard" ++ "Unchecked"),
+    );
+    try @import("std").testing.expect(!@hasDecl(@This(), "external_event_materialization"));
+}
 // client_deadline(P5c3c-1a)는 nonblocking connect/read/write의 absolute deadline과 syscall
 // injection만 소유한다. protocol parser와 hello/capability 상태의 SSOT는 계속 client.zig 하나다.
 pub const client_deadline = if (builtin.os.tag == .macos)
@@ -124,12 +148,7 @@ pub const external_source_decision = if (builtin.os.tag == .macos)
     @import("session_host/external_source_decision.zig")
 else
     struct {};
-// external_event_materialization(P5c3c-2b2c3-c3b)는 decision이 고른 metadata winner
-// 하나만 final-address owner로 준비한다. 실제 take/publish는 후속 c3c paired commit 책임이다.
-pub const external_event_materialization = if (builtin.os.tag == .macos)
-    @import("session_host/external_event_materialization.zig")
-else
-    struct {};
+// Metadata owner 구현은 client_external_pump 내부 전용이며 barrel에서 재노출하지 않는다.
 pub const external_adoption_limits =
     @import("session_host/external_adoption_limits.zig");
 // client_source_transcript(P5c3c-2b2c3-c3b)는 Client/protocol 의미를 모르는 std-only

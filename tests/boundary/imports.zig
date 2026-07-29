@@ -272,6 +272,76 @@ test "session host aggregate screen cleanup has one owner and one caller" {
         try std.testing.expectEqual(@as(usize, 1), owner_definitions);
         try std.testing.expectEqual(@as(usize, 1), aggregate_calls);
     }
+
+    const Symbol = struct {
+        name: []const u8,
+        owner_files: []const []const u8,
+        aggregate_references: usize,
+    };
+    const symbols = [_]Symbol{
+        .{
+            .name = "commitFreezeAllForOwnerTeardownUnchecked",
+            .owner_files = &.{"external_inbox_ledger.zig"},
+            .aggregate_references = 1,
+        },
+        .{
+            .name = "restoreFinishedOwnerTeardownUnchecked",
+            .owner_files = &.{"external_inbox_ledger.zig"},
+            .aggregate_references = 1,
+        },
+        .{
+            .name = "commitFrozenCleanupUnchecked",
+            .owner_files = &.{
+                "client_external_adoption.zig",
+                "external_event_materialization.zig",
+            },
+            .aggregate_references = 2,
+        },
+        .{
+            .name = "commitExternalAdoptionTakeFrozenCleanupUnchecked",
+            .owner_files = &.{"client.zig"},
+            .aggregate_references = 1,
+        },
+    };
+    for (symbols) |symbol| {
+        var aggregate_references: usize = 0;
+        var dir = try std.Io.Dir.cwd().openDir(std.testing.io, root, .{ .iterate = true });
+        defer dir.close(std.testing.io);
+        var walker = try dir.walk(allocator);
+        defer walker.deinit();
+        while (try walker.next(std.testing.io)) |entry| {
+            if (entry.kind != .file or
+                !std.mem.endsWith(u8, entry.basename, ".zig"))
+                continue;
+            var owner_file = false;
+            for (symbol.owner_files) |allowed|
+                owner_file = owner_file or std.mem.eql(u8, entry.path, allowed);
+            const path = try std.fmt.allocPrint(
+                allocator,
+                "{s}/{s}",
+                .{ root, entry.path },
+            );
+            defer allocator.free(path);
+            const source = try readZigFileZ(allocator, path);
+            defer allocator.free(source);
+            // Count the identifier itself, not only direct `symbol(` calls. This also rejects
+            // function-value aliases and facade re-exports of ReleaseFast unchecked authority.
+            const references = countOccurrences(source, symbol.name);
+            if (std.mem.eql(u8, entry.path, "client_external_pump.zig")) {
+                aggregate_references += references;
+            } else if (!owner_file and references != 0) {
+                std.debug.print(
+                    "frozen teardown symbol escaped owner boundary: {s} contains {s}\n",
+                    .{ path, symbol.name },
+                );
+                return error.TestUnexpectedResult;
+            }
+        }
+        try std.testing.expectEqual(
+            symbol.aggregate_references,
+            aggregate_references,
+        );
+    }
 }
 
 test "session host aggregate screen cleanup has no public shortcut" {
@@ -285,6 +355,269 @@ test "session host aggregate screen cleanup has no public shortcut" {
         @as(usize, 0),
         countOccurrences(source, "pub fn deinitForAggregate("),
     );
+}
+
+test "session host screen retirement unchecked commit has one product caller" {
+    const allocator = std.testing.allocator;
+    const root = "src/platform/macos/session_host";
+    const symbol = "commitScreenRetirementUnchecked";
+    var product_references: usize = 0;
+    var dir = try std.Io.Dir.cwd().openDir(std.testing.io, root, .{ .iterate = true });
+    defer dir.close(std.testing.io);
+    var walker = try dir.walk(allocator);
+    defer walker.deinit();
+    while (try walker.next(std.testing.io)) |entry| {
+        if (entry.kind != .file or !std.mem.endsWith(u8, entry.basename, ".zig"))
+            continue;
+        const path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ root, entry.path });
+        defer allocator.free(path);
+        const source = try readZigFileZ(allocator, path);
+        defer allocator.free(source);
+        const references = countOccurrences(source, symbol);
+        if (std.mem.eql(u8, entry.path, "client_external_pump.zig")) {
+            product_references += references;
+        } else if (!std.mem.eql(u8, entry.path, "external_inbox_ledger.zig") and
+            references != 0)
+        {
+            std.debug.print(
+                "screen retirement unchecked authority escaped owner boundary: {s}\n",
+                .{path},
+            );
+            return error.TestUnexpectedResult;
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 1), product_references);
+}
+
+test "session host barrel does not re-export unchecked owner modules" {
+    const allocator = std.testing.allocator;
+    const source = try readZigFileZ(
+        allocator,
+        "src/platform/macos/session_host.zig",
+    );
+    defer allocator.free(source);
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        countOccurrences(source, "pub const external_event_materialization"),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        countOccurrences(source, "pub const client = if (builtin.os.tag == .macos)\n    @import"),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        countOccurrences(source, "pub const Client = client_impl.Client;"),
+    );
+}
+
+test "session host unchecked teardown authority cannot escape anywhere in src" {
+    const allocator = std.testing.allocator;
+    const Symbol = struct {
+        name: []const u8,
+        owner_suffixes: []const []const u8,
+        pump_references: usize,
+    };
+    const symbols = [_]Symbol{
+        .{
+            .name = "commitExternalAdoptionTakeUnchecked",
+            .owner_suffixes = &.{"platform/macos/session_host/client.zig"},
+            .pump_references = 1,
+        },
+        .{
+            .name = "commitExternalRecoveryDiscardUnchecked",
+            .owner_suffixes = &.{"platform/macos/session_host/client.zig"},
+            .pump_references = 1,
+        },
+        .{
+            .name = "commitExternalAdoptionTakeFrozenCleanupUnchecked",
+            .owner_suffixes = &.{"platform/macos/session_host/client.zig"},
+            .pump_references = 1,
+        },
+        .{
+            .name = "commitScreenRetirementUnchecked",
+            .owner_suffixes = &.{"platform/macos/session_host/external_inbox_ledger.zig"},
+            .pump_references = 1,
+        },
+        .{
+            .name = "commitFreezeAllForOwnerTeardownUnchecked",
+            .owner_suffixes = &.{"platform/macos/session_host/external_inbox_ledger.zig"},
+            .pump_references = 1,
+        },
+        .{
+            .name = "restoreFinishedOwnerTeardownUnchecked",
+            .owner_suffixes = &.{"platform/macos/session_host/external_inbox_ledger.zig"},
+            .pump_references = 1,
+        },
+        .{
+            .name = "commitIntoUnchecked",
+            .owner_suffixes = &.{"platform/macos/session_host/client_external_adoption.zig"},
+            .pump_references = 1,
+        },
+        .{
+            .name = "commitOwnerMetadataTakeUnchecked",
+            .owner_suffixes = &.{"platform/macos/session_host/external_event_materialization.zig"},
+            .pump_references = 1,
+        },
+        .{
+            .name = "commitFrozenCleanupUnchecked",
+            .owner_suffixes = &.{
+                "platform/macos/session_host/client_external_adoption.zig",
+                "platform/macos/session_host/external_event_materialization.zig",
+            },
+            .pump_references = 2,
+        },
+    };
+    var unchecked_declarations: usize = 0;
+    var inventory_dir = try std.Io.Dir.cwd().openDir(
+        std.testing.io,
+        "src/platform/macos/session_host",
+        .{ .iterate = true },
+    );
+    defer inventory_dir.close(std.testing.io);
+    var inventory_walker = try inventory_dir.walk(allocator);
+    defer inventory_walker.deinit();
+    while (try inventory_walker.next(std.testing.io)) |entry| {
+        if (entry.kind != .file or !std.mem.endsWith(u8, entry.path, ".zig"))
+            continue;
+        const path = try std.fmt.allocPrint(
+            allocator,
+            "src/platform/macos/session_host/{s}",
+            .{entry.path},
+        );
+        defer allocator.free(path);
+        const source = try readZigFileZ(allocator, path);
+        defer allocator.free(source);
+        var lines = std.mem.splitScalar(u8, source, '\n');
+        while (lines.next()) |line| {
+            const trimmed = std.mem.trimStart(u8, line, " \t");
+            if (!std.mem.startsWith(u8, trimmed, "pub fn ")) continue;
+            const rest = trimmed["pub fn ".len..];
+            const end = std.mem.indexOfScalar(u8, rest, '(') orelse continue;
+            const name = rest[0..end];
+            if (!std.mem.endsWith(u8, name, "Unchecked")) continue;
+            unchecked_declarations += 1;
+            var known = false;
+            for (symbols) |symbol| known = known or std.mem.eql(u8, name, symbol.name);
+            if (!known) {
+                std.debug.print("unchecked authority missing from global inventory: {s}\n", .{name});
+                return error.TestUnexpectedResult;
+            }
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 10), unchecked_declarations);
+    for (symbols) |symbol| {
+        var pump_references: usize = 0;
+        var dir = try std.Io.Dir.cwd().openDir(std.testing.io, "src", .{ .iterate = true });
+        defer dir.close(std.testing.io);
+        var walker = try dir.walk(allocator);
+        defer walker.deinit();
+        while (try walker.next(std.testing.io)) |entry| {
+            if (entry.kind != .file or !std.mem.endsWith(u8, entry.path, ".zig"))
+                continue;
+            const path = try std.fmt.allocPrint(allocator, "src/{s}", .{entry.path});
+            defer allocator.free(path);
+            const source = try readZigFileZ(allocator, path);
+            defer allocator.free(source);
+            const references = countOccurrences(source, symbol.name);
+            if (std.mem.eql(
+                u8,
+                entry.path,
+                "platform/macos/session_host/client_external_pump.zig",
+            )) {
+                pump_references += references;
+                continue;
+            }
+            var owner = false;
+            for (symbol.owner_suffixes) |suffix|
+                owner = owner or std.mem.eql(u8, entry.path, suffix);
+            if (!owner and references != 0) {
+                std.debug.print(
+                    "unchecked session-host authority escaped into {s}: {s}\n",
+                    .{ path, symbol.name },
+                );
+                return error.TestUnexpectedResult;
+            }
+        }
+        try std.testing.expectEqual(symbol.pump_references, pump_references);
+    }
+}
+
+test "session host frozen teardown commits have one aggregate product caller" {
+    const allocator = std.testing.allocator;
+    const root = "src/platform/macos/session_host";
+    const Seam = struct {
+        name: []const u8,
+        owner_file: []const u8,
+        aggregate_call: []const u8,
+    };
+    const seams = [_]Seam{
+        .{
+            .name = "commitFreezeAllForOwnerTeardownUnchecked",
+            .owner_file = "external_inbox_ledger.zig",
+            .aggregate_call = ".inbox_ledger.commitFreezeAllForOwnerTeardownUnchecked(",
+        },
+        .{
+            .name = "restoreFinishedOwnerTeardownUnchecked",
+            .owner_file = "external_inbox_ledger.zig",
+            .aggregate_call = ".inbox_ledger.restoreFinishedOwnerTeardownUnchecked(",
+        },
+        .{
+            .name = "commitFrozenCleanupUnchecked",
+            .owner_file = "client_external_adoption.zig",
+            .aggregate_call = ".committed_screen.commitFrozenCleanupUnchecked(",
+        },
+        .{
+            .name = "commitFrozenCleanupUnchecked",
+            .owner_file = "external_event_materialization.zig",
+            .aggregate_call = ".owner_metadata.commitFrozenCleanupUnchecked(",
+        },
+        .{
+            .name = "commitExternalAdoptionTakeFrozenCleanupUnchecked",
+            .owner_file = "client.zig",
+            .aggregate_call = "client_mod.commitExternalAdoptionTakeFrozenCleanupUnchecked(",
+        },
+    };
+    for (seams) |seam| {
+        const definition_needle = try std.fmt.allocPrint(
+            allocator,
+            "pub fn {s}(",
+            .{seam.name},
+        );
+        defer allocator.free(definition_needle);
+        var definitions: usize = 0;
+        var aggregate_calls: usize = 0;
+        var dir = try std.Io.Dir.cwd().openDir(std.testing.io, root, .{ .iterate = true });
+        defer dir.close(std.testing.io);
+        var walker = try dir.walk(allocator);
+        defer walker.deinit();
+        while (try walker.next(std.testing.io)) |entry| {
+            if (entry.kind != .file or
+                !std.mem.endsWith(u8, entry.basename, ".zig"))
+                continue;
+            const path = try std.fmt.allocPrint(
+                allocator,
+                "{s}/{s}",
+                .{ root, entry.path },
+            );
+            defer allocator.free(path);
+            const source = try readZigFileZ(allocator, path);
+            defer allocator.free(source);
+            if (std.mem.eql(u8, entry.path, seam.owner_file)) {
+                definitions += countOccurrences(source, definition_needle);
+            }
+            if (std.mem.eql(u8, entry.path, "client_external_pump.zig")) {
+                aggregate_calls += countOccurrences(source, seam.aggregate_call);
+            } else if (countOccurrences(source, seam.aggregate_call) != 0) {
+                std.debug.print(
+                    "frozen teardown boundary violation: {s} exposes {s}\n",
+                    .{ path, seam.name },
+                );
+                return error.TestUnexpectedResult;
+            }
+        }
+        try std.testing.expectEqual(@as(usize, 1), definitions);
+        try std.testing.expectEqual(@as(usize, 1), aggregate_calls);
+    }
 }
 
 test "session host deferred seed retirement has one ledger owner and one adoption caller" {

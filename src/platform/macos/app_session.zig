@@ -1487,6 +1487,9 @@ const ScrollRef = struct { pane: *Pane, right: bool }; // #5b: 호버 중인 가
 /// 대칭이되, 밴드는 surface 단위라 surface_id 키가 자연스럽다). hovered_tab처럼 마우스 이동으로만 갱신되는 transient.
 const NavButtonRef = struct { surface_id: u64, button: NavButton };
 
+/// 호버 중인 파일 헤더 mode 선택기 슬롯. 밴드는 활성 탭 기준이라 surface_id로 어느 파일의 헤더인지 고정한다.
+const FileHeaderModeRef = struct { surface_id: u64, mode: dock_panel.Mode };
+
 /// 인라인 rename 중인 대상(어느 계층의 어느 라이브 객체). 커밋 시 그 객체의 custom_name을 쓴다. 모두 heap-pin
 /// 포인터(*Tab/*Pane/*Term)라 ArrayList realloc·트리 회전에도 안정 — 단 그 객체가 teardown(close/exit/reap)으로
 /// 사라지면 호출자가 rename을 취소(null)해야 한다(stale 포인터 방지, invalidateForFreedPane·destroyTerm 경로).
@@ -2436,6 +2439,8 @@ pub const AppSession = struct {
     // pointingHand), 렌더 "1c"가 이 surface·이 버튼 존에 hover 배경 quad를 그려 클릭 영역(3칸)을 드러낸다("버튼이 작아
     // affordance 부족" 피드백). hovered_tab과 같은 transient — 트리/탭 변경 시 함께 null로 정리(stale 하이라이트 방지).
     hovered_nav_button: ?NavButtonRef = null,
+    /// 파일 헤더 `읽기|리치|소스` 선택기 호버. nav 버튼과 같은 규율 — 렌더가 이 값으로 hover 배경을 얹는다.
+    hovered_file_header_mode: ?FileHeaderModeRef = null,
     // 호버 중인 헤더 아이콘 영역(◧ toggle·⚙ view_options·+ new_workspace). 마우스가 그 아이콘 위면 rebuildSidebar가
     // 아이콘 뒤에 둥근 호버 배경(웹 버튼 hover처럼)을 그린다. 검색·빈 영역·아이콘 밖이면 null. 바뀔 때만 재빌드.
     hovered_header_region: ?chrome.components.sidebar.HeaderRegion = null,
@@ -4477,6 +4482,7 @@ pub const AppSession = struct {
         src.active_term = if (src.terms.items.len == 0) 0 else activeIndexAfterRemoval(src.active_term, src_idx, src.terms.items.len);
         self.hovered_tab = null; // 트리/탭 변경 — stale 호버 정리
         self.hovered_nav_button = null; // Phase 7e-4: 밴드 nav 버튼 호버도 함께 정리(stale 하이라이트 방지)
+        self.hovered_file_header_mode = null; // 파일 헤더 mode 호버도 같은 자리에서 정리(stale 강조 방지)
         // **사이드바도 다시 투영한다**: 에이전트 목록 행은 pane/term **인덱스**를 들고 있어, Term이 reap으로 빠지면
         // 남은 행의 인덱스가 다른 Term을 가리킨다(범위 검사만으로는 못 걸러낸다 — 길이는 여전히 유효하므로).
         // 그대로 두면 사용자가 보는 행과 클릭이 닫는 Term이 어긋난다(code-review max).
@@ -4742,6 +4748,7 @@ pub const AppSession = struct {
 
         self.hovered_tab = null; // 트리/탭이 바뀌니 stale 호버 비움
         self.hovered_nav_button = null; // Phase 7e-4: 밴드 nav 버튼 호버도 함께 정리
+        self.hovered_file_header_mode = null; // 파일 헤더 mode 호버도 같은 자리에서 정리(stale 강조 방지)
         if (src.terms.items.len == 0) self.collapsePane(src); // 마지막 Term이 나갔으면 src collapse(형제로)
 
         // dst를 활성 pane으로(collapse로 인덱스가 밀렸을 수 있어 다시 찾는다) + 대표 surface 재바인딩.
@@ -4831,6 +4838,7 @@ pub const AppSession = struct {
         _ = self.detachPaneFromTab(src_tab, pane); // len>1 확인했으므로 true
         self.hovered_tab = null; // 트리/탭 변경 — stale 호버 정리
         self.hovered_nav_button = null; // Phase 7e-4: 밴드 nav 버튼 호버도 함께 정리(stale 하이라이트 방지)
+        self.hovered_file_header_mode = null; // 파일 헤더 mode 호버도 같은 자리에서 정리(stale 강조 방지)
         self.surface_ptrs.items[src_index] = src_tab.activeTerm().surface;
         // 3) 새 Tab에 pane을 단일 leaf로 심고 tabs/surface_ptrs에 끼워 활성으로. **끝 append가 아니라 첫 group_start
         //    마커 직전**(= 최상위 구간 끝)에 넣는다 — §2.1 연속 파티션상 리스트 끝 탭은 그룹이 하나라도 있으면 항상
@@ -4903,6 +4911,7 @@ pub const AppSession = struct {
         }
         self.hovered_tab = null;
         self.hovered_nav_button = null; // Phase 7e-4: 밴드 nav 버튼 호버도 함께 정리
+        self.hovered_file_header_mode = null; // 파일 헤더 mode 호버도 같은 자리에서 정리(stale 강조 방지)
         target_tab.panes.appendAssumeCapacity(pane);
         target_tab.active_pane = target_tab.panes.items.len - 1;
         const landed_index = if (source_workspace_removed and target_index > src_index) target_index - 1 else target_index;
@@ -5095,6 +5104,7 @@ pub const AppSession = struct {
         self.resizeTabPanes(tab);
         self.hovered_tab = null; // 트리/탭 변경 — stale 호버 정리
         self.hovered_nav_button = null; // Phase 7e-4: 밴드 nav 버튼 호버도 함께 정리(stale 하이라이트 방지)
+        self.hovered_file_header_mode = null; // 파일 헤더 mode 호버도 같은 자리에서 정리(stale 강조 방지)
         if (tab_index == self.app_window.active_tab) {
             self.recomputeActivePaneRect();
             self.metal_dirty = true;
@@ -6195,6 +6205,7 @@ pub const AppSession = struct {
             if (ht.pane == pane) self.hovered_tab = null;
         }
         self.hovered_nav_button = null; // Phase 7e-4: 밴드 nav 버튼 호버는 transient(surface_id 키) — pane 해제 시 보수적으로 비운다(다음 이동이 재설정)
+        self.hovered_file_header_mode = null; // 파일 헤더 mode 호버도 같은 자리에서 정리(stale 강조 방지)
         switch (self.pointer_gesture_owner) {
             .terminal_tab => |drag| if (drag.pane == pane) self.finishPointerGesture(),
             .pane => |drag| if (drag.pane == pane) self.finishPointerGesture(),
@@ -20025,6 +20036,7 @@ pub const AppSession = struct {
                         if (on_close) {
                             self.hovered_tab = null; // 닫으면 Pane/Term이 바뀔 수 있으니 stale 호버 비움
                             self.hovered_nav_button = null; // Phase 7e-4: 밴드 nav 버튼 호버도 함께 정리
+                            self.hovered_file_header_mode = null; // 파일 헤더 mode 호버도 같은 자리에서 정리(stale 강조 방지)
                             // 위에서 focusPaneByPtr+focusTerm로 클릭한 Term을 활성으로 만든 뒤라, 활성 cascade로 닫는다.
                             self.requestClose(.term_or_pane); // 실행 중 명령 있으면 확인 모달(없으면 즉시 닫음)
                         } else {
@@ -22040,6 +22052,8 @@ pub const AppSession = struct {
         // 사이드바/탭 바로 나가면 밴드 밖이라 null이 되어 stale 하이라이트가 안 남는다). 밴드는 chrome 영역이라 어느
         // pane에도 안 걸리면 null. 커서 종류(.link) 판정은 아래 탭 바 검사 뒤에서 이 값을 읽는다(밴드=탭 바보다 뒤 우선순위).
         self.setHoveredNavButton(self.navButtonHoverAt(x_px, y_px));
+        // 파일 헤더 mode 선택기도 같은 자리에서 매 이동 갱신한다(밴드 밖으로 나가면 null이라 stale 강조가 안 남는다).
+        self.setHoveredFileHeaderMode(self.fileHeaderModeHoverAt(x_px, y_px));
         self.setHoveredFileTreeRow(if (self.dockVisible()) self.fileTreeRowAt(x_px, y_px) else null);
         // 접힘 펼치기 토글(◧, 신호등 옆) 호버 — 접힘 시 사이드바 폭 0이라 아래 inSidebar(헤더 아이콘) 경로가 안 타고,
         // resize-edge가 x≈0을 잘못 잡을 수 있어 **먼저** 본다. 토글 위면 호버 배경을 켜고 pointingHand(클릭 가능).
@@ -22137,6 +22151,12 @@ pub const AppSession = struct {
         // 바로 아래 chrome 영역이라 탭 바 검사 뒤·divider/터미널 검사 앞(클릭 ①b 우선순위와 동일). hovered_nav_button은
         // 위(스크롤바 옆)에서 이미 갱신됐다 — URL 존(버튼 아님)은 null이라 아래로 흘러 text/기본(편집 클릭이라 iBeam 적절).
         if (self.hovered_nav_button != null) {
+            self.clearHoverUrlAnchor();
+            return .link;
+        }
+        // 파일 헤더 밴드의 mode 선택기(`읽기|리치|소스`)도 클릭 가능한 chrome이라 같은 pointingHand를 준다.
+        // 밴드 자리가 browser 주소창과 상호 배타이므로 바로 다음 순서다.
+        if (self.hovered_file_header_mode != null) {
             self.clearHoverUrlAnchor();
             return .link;
         }
@@ -25946,6 +25966,20 @@ pub const AppSession = struct {
                     //       모드 선택기를 그린다(§3.1). browser 주소창 밴드와 상호 배타다(둘 다 활성 탭 기준).
                     if (self.fileHeaderBandForPane(lr.leaf, lr.rect)) |band| {
                         self.appendBarBgQuad(band.band, self.chromeQuadBg(self.sidebarBg()));
+                        // 호버 중인 mode 슬롯에 배경 quad를 얹는다(밴드 배경 위·글리프 아래 = 나중 append). 클릭 영역이
+                        // 드러나야 "눌리는 곳"임을 알 수 있다 — nav 버튼 호버와 같은 색(sidebarHoverBg)·같은 규율.
+                        if (self.hovered_file_header_mode) |hovered| {
+                            if (hovered.surface_id == band.entry.surface_id) {
+                                if (dock_layout.headerModeRect(
+                                    band.band,
+                                    self.cell_width_px,
+                                    band.entry.kind,
+                                    hovered.mode,
+                                    band.entry.dirty,
+                                    band.entry.external_change,
+                                )) |slot| self.appendBarBgQuad(slot, self.chromeQuadBg(self.sidebarHoverBg()));
+                            }
+                        }
                         const cols: u16 = @intCast(@min(band.band.w / self.cell_width_px, @as(u32, std.math.maxInt(u16))));
                         const header_dl = coretext_frame_builder.buildFilePanelHeaderDrawList(
                             self.allocator,
@@ -26708,6 +26742,7 @@ pub const AppSession = struct {
         self.setHoveredTab(null);
         self.setHoveredFileTreeRow(null);
         self.setHoveredNavButton(null); // Phase 7e-4: 밴드 nav 버튼 호버(모달/알림 패널 열림 시 stale 하이라이트 방지)
+        self.setHoveredFileHeaderMode(null); // 파일 헤더 mode 선택기 호버도 같은 이유로 정리
         self.setHoveredHeaderRegion(.none);
         self.setHoveredCollapsedToggle(false);
         self.setScrollbarHovered(false);
@@ -26784,6 +26819,42 @@ pub const AppSession = struct {
             }
         } else |_| {}
         return null;
+    }
+
+    /// 파일 헤더 밴드의 mode 선택기 위인지 본다. 클릭 라우팅과 같은 `fileHeaderBandForPane`+`headerModeAt`을 써서
+    /// 호버 강조 영역과 실제 클릭 영역이 어긋나지 않는다.
+    fn fileHeaderModeHoverAt(self: *AppSession, x_px: f64, y_px: f64) ?FileHeaderModeRef {
+        if (self.cell_width_px == 0) return null;
+        const leaf_rects = &self.hover_leaf_scratch;
+        leaf_rects.clearRetainingCapacity();
+        if (self.activeTabLeafRects(self.allocator, self.termRect(), leaf_rects)) |_| {
+            for (leaf_rects.items) |lr| {
+                const band = self.fileHeaderBandForPane(lr.leaf, lr.rect) orelse continue;
+                if (!layout_math.pointInRect(x_px, y_px, band.band)) continue;
+                const mode = dock_layout.headerModeAt(
+                    band.band,
+                    self.cell_width_px,
+                    band.entry.kind,
+                    band.entry.dirty,
+                    band.entry.external_change,
+                    x_px,
+                    y_px,
+                ) orelse return null; // 밴드 안이지만 breadcrumb·status 자리
+                return .{ .surface_id = band.entry.surface_id, .mode = mode };
+            }
+        } else |_| {}
+        return null;
+    }
+
+    /// 호버 중인 mode 슬롯을 갱신한다. 바뀔 때만 재드로우한다(setHoveredNavButton 동형).
+    fn setHoveredFileHeaderMode(self: *AppSession, next: ?FileHeaderModeRef) void {
+        const same = (self.hovered_file_header_mode == null and next == null) or
+            (self.hovered_file_header_mode != null and next != null and
+                self.hovered_file_header_mode.?.surface_id == next.?.surface_id and
+                self.hovered_file_header_mode.?.mode == next.?.mode);
+        if (same) return;
+        self.hovered_file_header_mode = next;
+        self.metal_dirty = true;
     }
 
     /// Phase 7e-4: 호버 중인 nav 버튼을 갱신한다. 바뀌면 재드로우(렌더 "1c" hover 배경 quad 추가/제거). 같으면 무동작
@@ -45248,6 +45319,42 @@ test "workspace restore allocation failures preserve the complete live tab dock 
     }
     try std.testing.expect(saw_rollback);
     try std.testing.expect(saw_commit);
+}
+
+test "file header mode selector reports a click cursor and tracks hover per slot" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    _ = try session.resize(1400, 900, 1000);
+    _ = try session.openFileTermInActivePane("/tmp/hover.md", .markdown);
+    session.assignDockSurfaceIds();
+    const entry = session.fileEntryAt(0).?;
+
+    const band = session.fileHeaderBandForPaneLookup(session.activePane()).?;
+    const read_rect = dock_layout.headerModeRect(band.band, session.cell_width_px, .markdown, .read, false, false).?;
+    const rich_rect = dock_layout.headerModeRect(band.band, session.cell_width_px, .markdown, .rich, false, false).?;
+    const read_x: f64 = @floatFromInt(read_rect.x + 1);
+    const rich_x: f64 = @floatFromInt(rich_rect.x + 1);
+    const band_y: f64 = @floatFromInt(band.band.y + 1);
+
+    // 클릭 가능한 chrome이므로 pointingHand를 준다 — 다른 chrome 버튼(탭·nav)과 같은 affordance다.
+    try std.testing.expectEqual(CursorKind.link, session.hoverCursor(read_x, band_y, 0));
+    try std.testing.expectEqual(@as(?u64, entry.surface_id), if (session.hovered_file_header_mode) |h| h.surface_id else null);
+    try std.testing.expectEqual(@as(?dock_panel.Mode, .read), if (session.hovered_file_header_mode) |h| h.mode else null);
+
+    // 슬롯을 옮기면 강조 대상도 옮겨간다(같은 밴드 안에서 슬롯별로 구분된다).
+    _ = session.hoverCursor(rich_x, band_y, 0);
+    try std.testing.expectEqual(@as(?dock_panel.Mode, .rich), if (session.hovered_file_header_mode) |h| h.mode else null);
+
+    // 밴드 밖(breadcrumb 자리)에서는 호버가 풀린다 — stale 강조가 남으면 안 된다.
+    _ = session.hoverCursor(@floatFromInt(band.band.x + 1), band_y, 0);
+    try std.testing.expect(session.hovered_file_header_mode == null);
+
+    // 헤더가 없는 자리로 나가도 정리된다.
+    _ = session.hoverCursor(0, 0, 0);
+    try std.testing.expect(session.hovered_file_header_mode == null);
 }
 
 test "file panel mode toggle: keyboard action walks the same modes the header offers" {

@@ -183,6 +183,48 @@ test "fromTheme darkens vivid colors on a light background" {
     try testing.expect(color.contrastRatio(color.relativeLuminance(c.keyword), bg_lum) >= 4.0);
 }
 
+test "syntax colors follow the terminal theme instead of a fixed palette" {
+    // 왜 중요한가: 편집기·읽기 프리뷰의 코드 색은 시스템 light/dark가 아니라 **터미널 색상 테마**에서 파생한다
+    // (docs/file-panel.md §2.3). 테마를 바꿨는데 같은 색이 나온다면 파생이 끊겨 옆 터미널과 색이 어긋난다.
+    // 라이브 프리뷰 폐기로 web 모듈이 크게 바뀌었어도 이 파생 자체는 그대로여야 한다.
+    var dark: appearance.ResolvedTheme = undefined;
+    dark.foreground = .{ .r = 0xe8, .g = 0xe8, .b = 0xe8 };
+    dark.background = .{ .r = 0x10, .g = 0x10, .b = 0x10 };
+    dark.palette = .{null} ** 16;
+    dark.selection = .{ .r = 0x33, .g = 0x44, .b = 0x55 };
+
+    var light = dark;
+    light.foreground = .{ .r = 0x20, .g = 0x20, .b = 0x20 };
+    light.background = .{ .r = 0xff, .g = 0xff, .b = 0xff };
+    light.selection = .{ .r = 0xcc, .g = 0xdd, .b = 0xee };
+
+    const dc = fromTheme(dark);
+    const lc = fromTheme(light);
+    // 같은 역할이라도 배경이 다르면 대비 보정 결과가 달라야 한다(둘 다 4.0 이상을 만족시키려면 불가피하다).
+    try testing.expect(!std.meta.eql(dc.string, lc.string));
+    try testing.expect(!std.meta.eql(dc.keyword, lc.keyword));
+    const dark_bg = color.relativeLuminance(dark.background);
+    const light_bg = color.relativeLuminance(light.background);
+    inline for (.{ "keyword", "string", "number", "property", "type_name", "function", "tag", "attribute", "invalid" }) |field| {
+        try testing.expect(color.contrastRatio(color.relativeLuminance(@field(dc, field)), dark_bg) >= 4.0);
+        try testing.expect(color.contrastRatio(color.relativeLuminance(@field(lc, field)), light_bg) >= 4.0);
+    }
+
+    // 주입 JS도 테마마다 달라야 한다 — 같은 bytes면 WKWebView가 재도색할 이유가 없어 색이 그대로 남는다.
+    var dark_buf: [1024]u8 = undefined;
+    var light_buf: [1024]u8 = undefined;
+    const dark_js = writeCssVarsJs(dc, dark.selection, "JetBrains Mono", 14, &dark_buf).?;
+    const light_js = writeCssVarsJs(lc, light.selection, "JetBrains Mono", 14, &light_buf).?;
+    try testing.expect(!std.mem.eql(u8, dark_js, light_js));
+    try testing.expect(std.mem.indexOf(u8, dark_js, "--maru-editor-selection','#334455'") != null);
+    try testing.expect(std.mem.indexOf(u8, light_js, "--maru-editor-selection','#ccddee'") != null);
+
+    // config palette override도 테마의 일부다 — 바꾸면 파생 색이 따라와야 한다.
+    var overridden = dark;
+    overridden.palette[13] = .{ .r = 0xff, .g = 0x80, .b = 0xff }; // bright magenta = keyword
+    try testing.expect(!std.meta.eql(fromTheme(overridden).keyword, dc.keyword));
+}
+
 test "writeCssVarsJs emits all vars as hex and fails closed on small buffer" {
     var theme: appearance.ResolvedTheme = undefined;
     theme.foreground = .{ .r = 0xe8, .g = 0xe8, .b = 0xe8 };

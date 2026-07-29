@@ -1031,10 +1031,14 @@ export function bootShell(document: Document, targetWindow: Window): void {
     mode = next;
     if (carried !== null && contentLoaded) {
       if (next === "rich") ensureRichEditor().setMarkdown(carried);
-      else if (previous === "rich" && next === "source-edit") {
-        // 리치가 정규화한 결과가 여기서 CM6 문서로 확정된다. 사용자가 소스에서 그대로 다시 고칠 수 있다.
+      else if (previous === "rich") {
+        // 리치를 **어느 모드로 벗어나든** 그 결과를 CM6 문서로 확정한다. 읽기 프리뷰(`postPreview`)와 저장이
+        // 모두 CM6/savedContent를 보므로, 여기서 넘기지 않으면 리치에서 편집한 내용이 프리뷰에 반영되지 않는다.
         const cm = ensureEditor();
         cm.dispatch({ changes: { from: 0, to: cm.state.doc.length, insert: carried } });
+        // 리치에서 이미 저장을 마쳤다면 이 문서가 곧 saved 상태다. 기준점을 함께 옮기지 않으면 CM6 dirty
+        // 판정이 옛 snapshot과 비교해 저장 직후에도 dirty로 남는다(탭 ●·닫기 확인이 계속 뜬다).
+        if (carried === savedContent) savedDocument = cm.state.doc;
       }
     }
     if (isEditableFileMode(mode)) {

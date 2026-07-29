@@ -715,6 +715,102 @@ test "session host deferred seed retirement has one ledger owner and one adoptio
     try std.testing.expectEqual(@as(usize, 1), adoption_calls);
 }
 
+test "session host live batch unchecked mutation has one checked ledger caller" {
+    const allocator = std.testing.allocator;
+    const root = "src/platform/macos/session_host";
+    const definition_needle = "fn commitPreparedLiveBatchUnchecked(";
+    const call_needle = "self.commitPreparedLiveBatchUnchecked(";
+    var definitions: usize = 0;
+    var calls: usize = 0;
+    var dir = try std.Io.Dir.cwd().openDir(std.testing.io, root, .{ .iterate = true });
+    defer dir.close(std.testing.io);
+    var walker = try dir.walk(allocator);
+    defer walker.deinit();
+    while (try walker.next(std.testing.io)) |entry| {
+        if (entry.kind != .file or
+            !std.mem.endsWith(u8, entry.basename, ".zig"))
+            continue;
+        const path = try std.fmt.allocPrint(
+            allocator,
+            "{s}/{s}",
+            .{ root, entry.path },
+        );
+        defer allocator.free(path);
+        const source = try readZigFileZ(allocator, path);
+        defer allocator.free(source);
+        if (std.mem.eql(u8, entry.path, "external_inbox_ledger.zig")) {
+            definitions += countOccurrences(source, definition_needle);
+            calls += countOccurrences(source, call_needle);
+            try std.testing.expect(std.mem.indexOf(
+                u8,
+                source,
+                "commitPreparedLegacyMergeUnchecked",
+            ) == null);
+            try std.testing.expect(std.mem.indexOf(
+                u8,
+                source,
+                "commitPreparedLegacyReleaseUnchecked",
+            ) == null);
+            try std.testing.expect(std.mem.indexOf(
+                u8,
+                source,
+                "pub const FrozenPayloadCleanup",
+            ) == null);
+            const cleanup_start = std.mem.indexOf(
+                u8,
+                source,
+                "const FrozenPayloadCleanup = struct {",
+            ) orelse return error.TestUnexpectedResult;
+            const cleanup_end = std.mem.indexOfPos(
+                u8,
+                source,
+                cleanup_start,
+                "\n};",
+            ) orelse return error.TestUnexpectedResult;
+            const cleanup_type = source[cleanup_start..cleanup_end];
+            try std.testing.expect(std.mem.indexOf(
+                u8,
+                cleanup_type,
+                "fn ",
+            ) == null);
+            try std.testing.expect(std.mem.indexOf(
+                u8,
+                cleanup_type,
+                ".free(",
+            ) == null);
+            try std.testing.expect(std.mem.indexOf(
+                u8,
+                cleanup_type,
+                ".deinit(",
+            ) == null);
+        } else if (std.mem.eql(u8, entry.path, "client_external_pump.zig")) {
+            try std.testing.expect(std.mem.indexOf(
+                u8,
+                source,
+                "ledger.mergeInto(",
+            ) == null);
+            try std.testing.expect(std.mem.indexOf(
+                u8,
+                source,
+                "ledger.release(",
+            ) == null);
+            if (countOccurrences(source, definition_needle) != 0 or
+                countOccurrences(source, call_needle) != 0)
+                return error.TestUnexpectedResult;
+        } else if (countOccurrences(source, definition_needle) != 0 or
+            countOccurrences(source, call_needle) != 0)
+        {
+            std.debug.print(
+                "live batch unchecked mutation boundary violation: {s}\n",
+                .{path},
+            );
+            return error.TestUnexpectedResult;
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 1), definitions);
+    try std.testing.expectEqual(@as(usize, 1), calls);
+}
+
 fn countOccurrences(haystack: []const u8, needle: []const u8) usize {
     var count: usize = 0;
     var offset: usize = 0;

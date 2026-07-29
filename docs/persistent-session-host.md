@@ -4182,14 +4182,22 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
               allocation-free revoke/permit tombstone과 callback 재진입 fixture를 확장한다. 따라서 active
               projection revoke 완료 주장은 3b에만 속하고, 3a PR은 미래 필드를 추측하지 않는다.
 
-              teardown은 먼저 exclusive operation lease를 획득하고 `lifecycle=.tearing_down`을 publish해 모든
-              재진입 facade call을 allocation/callback/mutation 0의 typed busy/dead 결과로 닫는다. c3c-3b 이후에는
+              teardown은 먼저 exclusive operation lease를 획득해 모든 재진입 facade call을
+              allocation/callback/mutation 0의 `transaction_busy`로 닫는다. owner/scratch prepare 전체가
+              성공한 뒤에만 `lifecycle=.tearing_down`을 publish하므로 callback 전 실패는 기존 lifecycle을
+              부분 게시하지 않는다. c3c-3b 이후에는
               같은 precommit에서 active projection permit revoke를 함께 publish한다.
               먼저 모든 owner와 ledger에 대해 mutation 0의 `validate/prepare`를 끝내고 모든 pairwise
-              alias/backing-first seal을 검증한다. 그 뒤 단일 no-fail `commitFreeze`가 metadata descriptor,
+              alias/backing-first seal을 검증한다. 각 owner는 실제로 free할 canonical allocation만
+              `external_owner_range.Scratch`에 내보낸다. owner 내부 primary/cleanup mirror와 screen의
+              ledger-borrowed payload view는 exporter에서 한 번으로 접고, 최대 22,560개 range를 정렬해
+              storage/scratch forbidden range 및 모든 cross-owner overlap을 마지막 fallible step에서 거부한다.
+              그 뒤 단일 no-fail `commitFreeze`가 metadata descriptor,
               retained token/backing, Client committed take, Client/evidence와 ledger를 aggregate scratch로 move하고
               원본 owner를 모두 tombstone한다. commit 뒤에는 callback 전 typed error/early return이 없다. 첫
               allocator callback 뒤에는 destination/token/metadata/Client/ledger/permit backing을 다시 읽지 않는다.
+              callback이 public storage/scratch header를 변조해도 callback-hidden terminal scalar로 canonical
+              tombstone을 덮어쓸 뿐, 변조된 필드를 결과 계산이나 다음 free authority로 사용하지 않는다.
               ledger도 allocation-free `beginOwnerTeardown(out_permit)`로 address-bound
               `OwnerTeardownPermit{saved_self_addr,ledger_addr,owner_teardown_generation,
               lifecycle:empty|prepared|consumed|finished}`를 먼저 publish한다.
@@ -4217,8 +4225,9 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
                   permit: *OwnerTeardownPermit,
                   screen_tokens: *const FrozenScreenTokenPlan,
                   out: *PreparedLedgerTeardown,
+                  frozen_out: *FrozenLedgerCleanup,
               ) OwnerTeardownError!void;
-              fn commitFreezeAllForOwnerTeardownUnchecked(
+              pub fn commitFreezeAllForOwnerTeardownUnchecked(
                   self: *ExternalInboxLedger,
                   permit: *OwnerTeardownPermit,
                   prepared: *PreparedLedgerTeardown,
@@ -4231,9 +4240,13 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
               `LedgerTeardownSummary{had_invariant:bool,orphan_count:usize}`는 callback 전 확정되는 scalar다.
               `beginOwnerTeardown`은 permit output만 준비하는 ledger mutation 0 preflight다. ordinary ledger API를
               `TeardownActive`로 닫는 선형화점은 outer no-fail commit 안의
-              `commitFreezeAllForOwnerTeardownUnchecked`다. permit은 aggregate scratch 안의 final address에
-              seal되고 복사·moved final address·stale generation·
-              다른 ledger 사용을 거부한다. `beginOwnerTeardown`의 nonempty/moved output은
+              `commitFreezeAllForOwnerTeardownUnchecked`다. permit과 `frozen_out`은 aggregate scratch 안의
+              final address에 seal되고 prepare가 ledger/permit/prepared/screen plan/모든 active payload와의
+              exact nonalias를 검증한다. 복사·moved final address·다른 ledger 사용을 거부한다. 아직 ledger를
+              mutate하지 않은 competing permit 사이의 generation freshness는 ledger가 독자 판정하지 않고 outer
+              storage의 sealed `owner_teardown_generation`과 operation lease가 유일한 authority다. ledger의
+              `StalePermit`은 prepared mutation epoch drift와 consumed/finished permit replay를 뜻한다.
+              `beginOwnerTeardown`의 nonempty/moved output은
               `error.InvalidPermit`이고 ledger mutation 0이다. begin 뒤 permit/ledger seal drift는 prepare 또는
               no-fail commit 진입 전 검증에서 quarantine하며 callback 뒤 drift 검출은 계약하지 않는다.
 
@@ -4254,15 +4267,18 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
               옛 `releaseLeaseForTeardown`/`drainAllForTeardown`/`finishForTeardown` 이름은 public API로
               만들지 않고 freeze transaction 내부 private leaf로만 둔다. copied/moved/stale permit, 같은 permit의
               두 번째 prepare와 다른 output replay는 callback/mutation 0의 typed reject다. unchecked commit은
-              module-private이고 successful prepare capability를 outer commit이 정확히 한 번 소비하는 precondition을
-              가지며 재호출은 제품 call graph/boundary test에서 표현 불가능하게 고정한다.
+              cross-file outer commit을 위한 boundary-gated internal `pub`이며 facade/barrel에는 export하지 않는다.
+              successful prepare capability를 `client_external_pump.zig`의 exact-one callsite가 정확히 한 번 소비하는
+              precondition을 가지고, 다른 import/call과 재호출은 boundary scan으로 금지한다.
 
               `CommittedScreenBacklog`의 partial-consume canonical invariant는
               `retained_count + released.count() == tokens_len`, `retained_count <= tokens_len <= max_items`다.
               screen module의 aggregate seam은
               `prepareFrozenCleanup(self,stable_parent,out_plan:*FrozenScreenTokenPlan,
-              out:*FrozenCommittedScreenCleanup) bool`과
-              `finishFrozenCleanup(frozen:*FrozenCommittedScreenCleanup) void`다.
+              out:*PreparedCommittedScreenCleanup,
+              frozen_out:*FrozenCommittedScreenCleanup) bool`,
+              `commitFrozenCleanupUnchecked(self,prepared,frozen_out) void`,
+              `finishFrozenCleanup(frozen:*FrozenCommittedScreenCleanup) FrozenCleanupFinishResult`다.
               prepare는 allocation/callback/mutation 0의 proof만 만들고, outer `commitFreeze`가 owner tombstone과
               두 output의 final-address authority publish를 no-fail로 수행한다.
               released bit가 false인 token은 freeze 시점 ledger의 exact active lease와 일치해야 하고, true인 token은
@@ -4271,12 +4287,64 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
               identity와 primary/cleanup identity drift는 cleanup을 추측하지 않고 pre-callback quarantine한다.
               canonical 배열은 정상이지만 ledger lookup에서 stale/already-released로 판정된 개별 token과 orphan은
               freeze를 계속하고 `cleaned_with_invariant`로 분류한다. 정상 소비 경로는 별도 two-phase leaf가
-              **exact token 검증 → ledger slot payload callback-free detach/tombstone → released bit set과
-              retained_count 감소 authority commit → detached payload를 bounded retired-payload owner로 move**
-              순서로 실행한다. live consume에서는 allocator callback을 호출하지 않으며 retired payload는
-              `retained_count`와 별도인 fixed-capacity `retired_count <= max_items` authority로 screen owner에
-              봉인한다. aggregate teardown freeze가 unreleased ledger payload와 retired payload를 함께 가져가
-              callback-hidden local에서 exact-once free한다. 제품 배선은 d2가 소유한다.
+              **exact token/phase/accounting 검증 → ledger slot을 active에서 retired로 callback-free 전환 →
+              screen released bit set과 retained_count 감소 authority commit** 순서로 실행한다. retired slot은
+              active charge에서는 빠지되 별도 `retired_items`/`retired_bytes` resident accounting에 들어가며,
+              새 admission의 item/byte cap은 active+retired 합계를 사용한다. payload와 generation은 ledger가
+              계속 단독 소유하고 일반 reserve의 free-slot 후보가 되지 않는다. 따라서 live consume에는 allocator
+              callback과 payload move가 없으며
+              screen bitmap은 token disposition의 semantic SSOT, ledger retired bit는 allocation ownership의
+              SSOT다. aggregate teardown freeze가 active와 retired ledger payload를 함께 callback-hidden local로
+              move해 exact-once free한다. 제품 진입점은 `ExternalPumpStorage.consumeScreenRetained(ordinal)` 하나이며
+              pump의 process-thread operation lease를 먼저 잡은 뒤 ledger prepare/unchecked commit과 screen
+              bitmap/count commit을 한 no-callback suffix로 끝낸다. ledger unchecked leaf의 제품 callsite는 이
+              facade 하나로 boundary scan이 고정한다. 후속 d2 배선은 이 facade만 사용한다.
+
+              metadata cleanup의 exact closed ABI는 다음과 같다.
+
+              ```zig
+              pub const MetadataCleanupSelection = enum { none, logical, cleanup };
+              pub const PreparedOwnerMetadataCleanup = struct {
+                  saved_self_addr: usize,
+                  owner_addr: usize,
+                  storage_addr: usize,
+                  frozen_out_addr: usize,
+                  selection: MetadataCleanupSelection,
+                  had_invariant: bool,
+                  lifecycle: empty | prepared | consumed,
+              };
+              pub const FrozenOwnerMetadataCleanup = struct {
+                  saved_self_addr: usize,
+                  selected: none | current(runtime_metadata_wire.OwnedMetadataDto),
+                  had_invariant: bool,
+                  lifecycle: empty | frozen | cleaned_tombstone,
+              };
+              pub fn prepareFrozenCleanup(
+                  self: *const OwnerMetadataState,
+                  stable_parent: *const anyopaque,
+                  out: *PreparedOwnerMetadataCleanup,
+                  frozen_out: *const FrozenOwnerMetadataCleanup,
+              ) bool;
+              pub fn commitFrozenCleanupUnchecked(
+                  self: *OwnerMetadataState,
+                  prepared: *PreparedOwnerMetadataCleanup,
+                  out: *FrozenOwnerMetadataCleanup,
+              ) void;
+              pub fn finishFrozenCleanup(
+                  frozen: *FrozenOwnerMetadataCleanup,
+              ) FrozenCleanupFinishResult;
+              ```
+
+              metadata prepare는 allocation/callback/owner mutation 0이며 owner/stable parent/prepared/frozen final
+              address와 DTO backing nonalias를 모두 검증한다. prepared에는 `logical|cleanup|none` 선택과 scalar
+              authority만 봉인하고 allocator-bearing DTO를 복사하지 않는다. current는 `pending`과 cleanup validity를
+              분리해 pending true/false 모두 같은 authority 규칙으로 검증한다. valid logical 우선, 아니면 valid
+              cleanup mirror를 선택하며 둘 다 invalid면 false/output mutation 0으로 outer quarantine에 맡긴다.
+              unchecked commit만 선택된 DTO descriptor 하나를 frozen owner로 move하고 metadata owner 전체와
+              prepared를 tombstone한다. finish는 frozen을 callback-hidden local로 옮기고 원본을 먼저 tombstone한 뒤
+              DTO를 exact-once deinit한다. 기존 `deinitCommitted`는 이 세 leaf를 사용하는 compatibility wrapper이며
+              prepare 실패 때 corrupted owner를 tombstone하고 callback/free 0으로 fail closed한다. unchecked commit은
+              pump aggregate exact-one callsite 외 import/call과 facade/barrel export를 boundary scan으로 금지한다.
 
               **모든 owner/ledger graph callback-free freeze+tombstone → ledger frozen payload exact-once free →
               frozen metadata finish → frozen `ExternalAdoptionTake` finish → moved `Client`/evidence finish →
@@ -4286,9 +4354,22 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
               callback-hidden local로 move한 뒤 별도로 `Client.deinit()`한다.
               `ExternalAdoptionTake.deinitCommitted`도 prepare/finish leaf로 분해해 첫 free 뒤 caller scratch의
               다음 descriptor를 다시 읽지 않는다. 기존 one-shot 함수는 같은 leaf를 쓰는 compatibility wrapper만
-              남긴다. `CommittedScreenBacklog`, `OwnerMetadataState`, `ExternalAdoptionTake`, moved
-              `Client`/evidence도 각각 callback-free `prepareFrozenCleanup`/no-fail tombstone/`finishFrozenCleanup`
-              leaf를 하나만 가지며 ordinary one-shot cleanup과 aggregate teardown이 같은 leaf를 공유한다.
+              남긴다. exact seam은
+              `prepareFrozenCleanup(self,scratch,out:*PreparedExternalAdoptionTakeCleanup,
+              frozen_out:*FrozenExternalAdoptionTakeCleanup) bool`,
+              `commitFrozenCleanupUnchecked(self,prepared,frozen_out) void`,
+              `finishFrozenCleanup(frozen,scratch) FrozenCleanupFinishResult`다. prepare가 descriptor 전부를 final
+              scratch에 복사하고 commit이 take를 tombstone한다. ordinary compatibility finish는 frozen header와
+              512 KiB 이하 scratch를 callback-hidden local로 복사하고 원본을 tombstone한 뒤에만 allocator
+              callback을 시작한다. aggregate는 이미 callback-hidden descriptor snapshot을 만들었으므로
+              `finishFrozenCleanupWithHiddenScratch`를 사용해 512 KiB를 중복 복사하지 않는다. aggregate 전체
+              scratch를 통째로 stack 복사하지 않고 ledger/metadata/take/client-descriptor/evidence/screen의
+              frozen suffix만 복사하며 그 합은 compile-time 768 KiB 이하다.
+              `CommittedScreenBacklog`, `OwnerMetadataState`, `ExternalAdoptionTake`는 각각 callback-free
+              `prepareFrozenCleanup`/no-fail tombstone/`finishFrozenCleanup` leaf 하나를 ordinary compatibility
+              cleanup과 공유한다. moved `Client`는 기존 whole-owner range proof를 aggregate range proof에
+              합친 뒤 optional을 callback-hidden local로 move하고 `Client.deinit()`하며, evidence는 canonical
+              seed/cleanup-seed backing exporter를 통과한 뒤 같은 방식으로 move/deinit한다.
               prepared/uncommitted token에는 teardown token 분류를 호출하지 않는다. stale/already-released token,
               cleanup mirror drift, orphan drain은 최초 semantic terminal reason을 덮지 않고 sticky invariant만 추가한다.
 
@@ -4571,8 +4652,8 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
         공유하고 leave가 남은 budget 중 최대 100 ms를 쓴다. signal/revoke/error cleanup은 active/latest와 detach를
         버리고 하나의 100 ms deadline 안에서 leave를 시도한 뒤 즉시 raw restore/signal forwarding으로 간다.
 
-    **P5c3c-1a~2a, 2b1, 2b2a~c2와 2b2c3-c3a1~c3c-2b3는 구현 완료다.
-    c3c-3a~3b, 2b2d1~f3, P5c3c-2b3와 P5c3c-3a~3b는 계획 상태다.**
+    **P5c3c-1a~2a, 2b1, 2b2a~c2와 2b2c3-c3a1~c3c-3a는 구현 완료다.
+    c3c-3b, 2b2d1~f3, P5c3c-2b3와 P5c3c-3a~3b는 계획 상태다.**
     2b2c3 전체는 c3c 전체가 green이 아니므로 아직 계획 상태다. 각 slice는 P5c3a~b의 Debug/ReleaseFast gate를 재실행하고 다음 slice가 실제
     consumer로 쓰지 않는 임시 public API는 만들지 않는다.
 

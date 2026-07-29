@@ -11,8 +11,10 @@ const client_mod = @import("client.zig");
 const compatibility = @import("compatibility.zig");
 const external_adoption_limits = @import("external_adoption_limits.zig");
 const ledger_mod = @import("external_inbox_ledger.zig");
+const owner_range = @import("external_owner_range.zig");
 const owner_seal = @import("external_owner_seal.zig");
 const framing = @import("framing.zig");
+const frozen_cleanup_guard = @import("frozen_cleanup_guard.zig");
 const protocol = @import("protocol.zig");
 const request_id_state = @import("request_id_state.zig");
 
@@ -340,6 +342,44 @@ pub const PreparedCommittedScreenTake = struct {
     }
 };
 
+const PreparedCommittedScreenCleanupLifecycle = enum {
+    empty,
+    prepared,
+    consumed,
+};
+
+const ScreenCleanupSelection = enum {
+    primary,
+    cleanup,
+};
+
+pub const PreparedCommittedScreenCleanup = struct {
+    saved_self_addr: usize = 0,
+    owner_addr: usize = 0,
+    storage_addr: usize = 0,
+    frozen_out_addr: usize = 0,
+    selection: ScreenCleanupSelection = .cleanup,
+    lifecycle: PreparedCommittedScreenCleanupLifecycle = .empty,
+};
+
+const FrozenCommittedScreenCleanupLifecycle = enum {
+    empty,
+    frozen,
+    cleaned_tombstone,
+};
+
+pub const FrozenCleanupFinishResult = enum {
+    cleaned,
+    already_cleaned,
+    invalid,
+};
+
+pub const FrozenCommittedScreenCleanup = struct {
+    saved_self_addr: usize = 0,
+    authority: ScreenBackingAuthority = .{},
+    lifecycle: FrozenCommittedScreenCleanupLifecycle = .empty,
+};
+
 /// Persistent owner of the exact token/backing headers produced by `PreparedScreenBacklog`.
 /// Ledger lease release is deliberately deferred to c3c-3; this b1 type only proves the
 /// final-address take and exact post-ledger backing cleanup.
@@ -386,9 +426,9 @@ pub const CommittedScreenBacklog = struct {
             self.storage_addr == @intFromPtr(stable_parent) and
             self.tokens_addr == sliceAddress(ledger_mod.Token, transfer.tokens) and
             self.tokens_len == transfer.tokens.len and
-            self.retained_count == self.tokens_len and
+            self.retained_count + self.released.count() == self.tokens_len and
             self.retained_count <= ledger_mod.max_items and
-            self.released.count() == 0 and
+            self.tokens_len <= ledger_mod.max_items and
             screenCanonicalAuthorityValid(self, &self.canonical) and
             screenBackingSealMatches(
                 self.primary_seal orelse return false,
@@ -408,15 +448,40 @@ pub const CommittedScreenBacklog = struct {
         );
     }
 
-    /// Private b1 cleanup seam. The permit can only be minted by this file's fixture after it has
-    /// drained and finished the ledger; c3c-3 replaces it with the aggregate teardown permit.
-    fn deinitAfterLedgerFinished(
-        self: *CommittedScreenBacklog,
-        permit: LedgerFinishedPermit,
-    ) void {
-        if (self.lifecycle == .empty or self.lifecycle == .cleaned_tombstone) return;
-        if (self.saved_self_addr != @intFromPtr(self)) return;
-        if (permit.ledger_addr != self.ledger_addr) return;
+    pub fn prepareFrozenCleanup(
+        self: *const CommittedScreenBacklog,
+        stable_parent: *const anyopaque,
+        out_plan: *ledger_mod.FrozenScreenTokenPlan,
+        out: *PreparedCommittedScreenCleanup,
+        frozen_out: *const FrozenCommittedScreenCleanup,
+    ) bool {
+        const owner_addr = @intFromPtr(self);
+        const plan_addr = @intFromPtr(out_plan);
+        const out_addr = @intFromPtr(out);
+        const frozen_addr = @intFromPtr(frozen_out);
+        inline for (.{ plan_addr, out_addr, frozen_addr }) |destination|
+            if (rangesOverlap(
+                owner_addr,
+                @sizeOf(CommittedScreenBacklog),
+                destination,
+                if (destination == plan_addr)
+                    @sizeOf(ledger_mod.FrozenScreenTokenPlan)
+                else if (destination == out_addr)
+                    @sizeOf(PreparedCommittedScreenCleanup)
+                else
+                    @sizeOf(FrozenCommittedScreenCleanup),
+            )) return false;
+        if (rangesOverlap(plan_addr, @sizeOf(ledger_mod.FrozenScreenTokenPlan), out_addr, @sizeOf(PreparedCommittedScreenCleanup)) or
+            rangesOverlap(plan_addr, @sizeOf(ledger_mod.FrozenScreenTokenPlan), frozen_addr, @sizeOf(FrozenCommittedScreenCleanup)) or
+            rangesOverlap(out_addr, @sizeOf(PreparedCommittedScreenCleanup), frozen_addr, @sizeOf(FrozenCommittedScreenCleanup)))
+            return false;
+        if (self.lifecycle != .committed or
+            self.saved_self_addr != owner_addr or
+            self.storage_addr != @intFromPtr(stable_parent) or
+            out_plan.saved_self_addr != 0 or out_plan.len != 0 or
+            out.saved_self_addr != 0 or out.lifecycle != .empty or
+            frozen_out.saved_self_addr != 0 or frozen_out.lifecycle != .empty)
+            return false;
         const canonical_valid =
             screenCanonicalAuthorityValid(self, &self.canonical);
         const cleanup_valid = canonical_valid and if (self.cleanup_seal) |seal|
@@ -429,18 +494,135 @@ pub const CommittedScreenBacklog = struct {
                 screenBackingMatchesCanonical(&self.primary, &self.canonical)
         else
             false;
-        const authority: ?ScreenBackingAuthority = if (cleanup_valid)
-            self.cleanup
-        else if (primary_valid)
-            self.primary
+        if (!cleanup_valid and !primary_valid) return false;
+        const selection: ScreenCleanupSelection = if (cleanup_valid)
+            .cleanup
         else
-            null;
-        // Re-entrant allocator callbacks must observe a spent owner before the first free.
+            .primary;
+        const selected = if (selection == .cleanup)
+            &self.cleanup
+        else
+            &self.primary;
+        if (rangeOverlapsScreenBacking(
+            plan_addr,
+            @sizeOf(ledger_mod.FrozenScreenTokenPlan),
+            selected,
+        ) or rangeOverlapsScreenBacking(
+            out_addr,
+            @sizeOf(PreparedCommittedScreenCleanup),
+            selected,
+        ) or rangeOverlapsScreenBacking(
+            frozen_addr,
+            @sizeOf(FrozenCommittedScreenCleanup),
+            selected,
+        )) return false;
+
+        out_plan.initInPlace(
+            selected.transfer.tokens,
+            self.released,
+        ) catch return false;
+        out.* = .{
+            .saved_self_addr = out_addr,
+            .owner_addr = owner_addr,
+            .storage_addr = self.storage_addr,
+            .frozen_out_addr = frozen_addr,
+            .selection = selection,
+            .lifecycle = .prepared,
+        };
+        return true;
+    }
+
+    pub fn commitFrozenCleanupUnchecked(
+        self: *CommittedScreenBacklog,
+        prepared: *PreparedCommittedScreenCleanup,
+        out: *FrozenCommittedScreenCleanup,
+    ) void {
+        std.debug.assert(prepared.saved_self_addr == @intFromPtr(prepared));
+        std.debug.assert(prepared.owner_addr == @intFromPtr(self));
+        std.debug.assert(prepared.storage_addr == self.storage_addr);
+        std.debug.assert(prepared.frozen_out_addr == @intFromPtr(out));
+        std.debug.assert(prepared.lifecycle == .prepared);
+        std.debug.assert(out.saved_self_addr == 0 and out.lifecycle == .empty);
+        out.* = .{
+            .saved_self_addr = @intFromPtr(out),
+            .authority = if (prepared.selection == .cleanup)
+                self.cleanup
+            else
+                self.primary,
+            .lifecycle = .frozen,
+        };
         self.* = .{ .lifecycle = .cleaned_tombstone };
-        var owned = authority orelse return;
-        deinitScreenBackingAuthority(&owned);
+        prepared.lifecycle = .consumed;
+    }
+
+    pub fn appendPreparedFrozenCleanupRanges(
+        self: *const CommittedScreenBacklog,
+        prepared: *const PreparedCommittedScreenCleanup,
+        out: *owner_range.Scratch,
+    ) owner_range.Error!void {
+        if (prepared.saved_self_addr != @intFromPtr(prepared) or
+            prepared.owner_addr != @intFromPtr(self) or
+            prepared.storage_addr != self.storage_addr or
+            prepared.lifecycle != .prepared)
+            return error.InvalidRange;
+        const authority = if (prepared.selection == .cleanup)
+            &self.cleanup
+        else
+            &self.primary;
+        const transfer = authority.transfer;
+        inline for (.{
+            .{ @sizeOf(client_mod.ExternalScreenCopy), transfer.copies.ptr, transfer.copies.len },
+            .{ @sizeOf(ledger_mod.OwnedPayload), transfer.wrappers.ptr, transfer.wrappers.len },
+            .{ @sizeOf(ledger_mod.Token), transfer.tokens.ptr, transfer.tokens.len },
+        }) |entry| {
+            const bytes = std.math.mul(usize, entry[0], entry[2]) catch
+                return error.ArithmeticOverflow;
+            try out.append(if (entry[2] == 0) 0 else @intFromPtr(entry[1]), bytes);
+        }
+    }
+
+    /// Private b1 cleanup seam. The permit can only be minted by this file's fixture after it has
+    /// drained and finished the ledger; c3c-3 replaces it with the aggregate teardown permit.
+    fn deinitAfterLedgerFinished(
+        self: *CommittedScreenBacklog,
+        permit: LedgerFinishedPermit,
+    ) void {
+        if (self.lifecycle == .empty or self.lifecycle == .cleaned_tombstone) return;
+        if (self.saved_self_addr != @intFromPtr(self)) return;
+        if (permit.ledger_addr != self.ledger_addr) return;
+        const stable_parent: *const anyopaque = @ptrFromInt(self.storage_addr);
+        var plan: ledger_mod.FrozenScreenTokenPlan = .{};
+        var prepared: PreparedCommittedScreenCleanup = .{};
+        var frozen: FrozenCommittedScreenCleanup = .{};
+        if (!self.prepareFrozenCleanup(
+            stable_parent,
+            &plan,
+            &prepared,
+            &frozen,
+        )) {
+            self.* = .{ .lifecycle = .cleaned_tombstone };
+            return;
+        }
+        self.commitFrozenCleanupUnchecked(&prepared, &frozen);
+        _ = finishFrozenCleanup(&frozen);
     }
 };
+
+pub fn finishFrozenCleanup(
+    frozen: *FrozenCommittedScreenCleanup,
+) FrozenCleanupFinishResult {
+    const address = @intFromPtr(frozen);
+    if (frozen.lifecycle == .cleaned_tombstone) return .already_cleaned;
+    if (frozen.saved_self_addr != address or frozen.lifecycle != .frozen)
+        return .invalid;
+    if (!frozen_cleanup_guard.enter()) return .invalid;
+    defer frozen_cleanup_guard.leave();
+    defer frozen.* = .{ .lifecycle = .cleaned_tombstone };
+    var local = frozen.*;
+    frozen.* = .{ .lifecycle = .cleaned_tombstone };
+    deinitScreenBackingAuthority(&local.authority);
+    return .cleaned;
+}
 
 pub const PrepareError = client_mod.ExternalAdoptionInspectError ||
     client_mod.ExternalAdoptionPreflightError || ledger_mod.PlanError || error{
@@ -1371,6 +1553,36 @@ fn deinitScreenBackingAuthority(authority: *ScreenBackingAuthority) void {
     allocator.free(copies);
 }
 
+fn rangeOverlapsScreenBacking(
+    destination_addr: usize,
+    destination_len: usize,
+    authority: *const ScreenBackingAuthority,
+) bool {
+    const transfer = authority.transfer;
+    inline for (.{ .{
+        @sizeOf(client_mod.ExternalScreenCopy),
+        sliceAddress(client_mod.ExternalScreenCopy, transfer.copies),
+        transfer.copies.len,
+    }, .{
+        @sizeOf(ledger_mod.OwnedPayload),
+        sliceAddress(ledger_mod.OwnedPayload, transfer.wrappers),
+        transfer.wrappers.len,
+    }, .{
+        @sizeOf(ledger_mod.Token),
+        sliceAddress(ledger_mod.Token, transfer.tokens),
+        transfer.tokens.len,
+    } }) |entry| {
+        const bytes = std.math.mul(usize, entry[0], entry[2]) catch return true;
+        if (rangesOverlap(
+            destination_addr,
+            destination_len,
+            entry[1],
+            bytes,
+        )) return true;
+    }
+    return false;
+}
+
 fn rangeOverlapsPreparedBacking(
     destination_addr: usize,
     destination_len: usize,
@@ -2046,7 +2258,7 @@ test "prepared external adoption transfers payload cleanup authority to the ledg
         "screen",
         (try ledger.borrow(token, .completed)).bytes,
     );
-    const report = ledger.drainAll();
+    const report = try ledger.drainAll();
     try std.testing.expectEqual(@as(usize, 1), report.drained_active_count);
     try ledger.finish();
 }
@@ -2255,7 +2467,7 @@ test "c3c-2b1 committed screen destination is final-address bound and moves with
     var moved_committed = committed;
     try std.testing.expect(!moved_committed.isCommitted(&stable_parent));
 
-    _ = ledger.drainAll();
+    _ = try ledger.drainAll();
     try ledger.finish();
     const permit = LedgerFinishedPermit{ .ledger_addr = @intFromPtr(&ledger) };
     counting.owner = &committed;

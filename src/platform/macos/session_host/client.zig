@@ -19,6 +19,8 @@ const runtime_event_types = @import("runtime_event_types.zig");
 const runtime_event_wire = @import("runtime_event_wire.zig");
 const runtime_metadata_wire = @import("runtime_metadata_wire.zig");
 const framing = @import("framing.zig");
+const frozen_cleanup_guard = @import("frozen_cleanup_guard.zig");
+const owner_range = @import("external_owner_range.zig");
 const socket_server = @import("socket_server.zig");
 const client_deadline = @import("client_deadline.zig");
 const client_external_mode = @import("client_external_mode.zig");
@@ -733,6 +735,62 @@ pub const ExternalAdoptionCleanupScratch = struct {
     partial: ?ExternalPartialDescriptor = null,
 };
 
+const PreparedTakeCleanupLifecycle = enum {
+    empty,
+    prepared,
+    consumed,
+};
+
+pub const PreparedExternalAdoptionTakeCleanup = struct {
+    saved_self_addr: usize = 0,
+    take_addr: usize = 0,
+    scratch_addr: usize = 0,
+    frozen_out_addr: usize = 0,
+    allocator: std.mem.Allocator = std.heap.page_allocator,
+    batches: std.ArrayListUnmanaged(StreamBatch) = .empty,
+    stream: std.ArrayListUnmanaged(framing.Frame) = .empty,
+    events: std.ArrayListUnmanaged(BufferedEvent) = .empty,
+    partial: ?ExternalPartialDescriptor = null,
+    primary_inventory: ?ExternalAdoptionInventory = null,
+    mirror_inventory: ?ExternalAdoptionInventory = null,
+    payload_inventory_is_primary: bool = true,
+    free_primary_inventory: bool = false,
+    free_mirror_inventory: bool = false,
+    batch_count: usize = 0,
+    stream_count: usize = 0,
+    event_count: usize = 0,
+    lifecycle: PreparedTakeCleanupLifecycle = .empty,
+};
+
+const FrozenTakeCleanupLifecycle = enum {
+    empty,
+    frozen,
+    cleaned_tombstone,
+};
+
+pub const FrozenExternalAdoptionTakeCleanup = struct {
+    saved_self_addr: usize = 0,
+    allocator: std.mem.Allocator = std.heap.page_allocator,
+    batches: std.ArrayListUnmanaged(StreamBatch) = .empty,
+    stream: std.ArrayListUnmanaged(framing.Frame) = .empty,
+    events: std.ArrayListUnmanaged(BufferedEvent) = .empty,
+    partial: ?ExternalPartialDescriptor = null,
+    primary_inventory: ?ExternalAdoptionInventory = null,
+    mirror_inventory: ?ExternalAdoptionInventory = null,
+    free_primary_inventory: bool = false,
+    free_mirror_inventory: bool = false,
+    batch_count: usize = 0,
+    stream_count: usize = 0,
+    event_count: usize = 0,
+    lifecycle: FrozenTakeCleanupLifecycle = .empty,
+};
+
+pub const FrozenTakeCleanupFinishResult = enum {
+    cleaned,
+    already_cleaned,
+    invalid,
+};
+
 pub const max_external_adoption_cleanup_scratch_bytes: usize = 512 * 1024;
 comptime {
     if (@sizeOf(ExternalAdoptionCleanupScratch) >
@@ -914,6 +972,217 @@ pub const ExternalAdoptionTake = struct {
         return @intFromEnum(self.lifecycle);
     }
 
+    pub fn prepareFrozenCleanup(
+        self: *const ExternalAdoptionTake,
+        cleanup_scratch: *ExternalAdoptionCleanupScratch,
+        out: *PreparedExternalAdoptionTakeCleanup,
+        frozen_out: *const FrozenExternalAdoptionTakeCleanup,
+    ) bool {
+        const self_addr = @intFromPtr(self);
+        const out_range = externalRangeOfValue(out);
+        const frozen_range = externalRangeOfValue(frozen_out);
+        if (externalRangesOverlap(out_range, externalRangeOfValue(self)) or
+            externalRangesOverlap(frozen_range, externalRangeOfValue(self)) or
+            externalRangesOverlap(out_range, frozen_range) or
+            out.saved_self_addr != 0 or out.lifecycle != .empty or
+            frozen_out.saved_self_addr != 0 or frozen_out.lifecycle != .empty or
+            self.lifecycle != .committed or self.saved_self_address != self_addr)
+            return false;
+        const captured = self.*;
+        const allocator = externalTakeCleanupAllocator(&captured) orelse return false;
+        const batches = canonicalExternalList(
+            StreamBatch,
+            captured.pending_batches,
+            captured.cleanup_pending_batches,
+            captured.pending_batches_seal,
+        ) orelse return false;
+        const stream = canonicalExternalList(
+            framing.Frame,
+            captured.pending_stream,
+            captured.cleanup_pending_stream,
+            captured.pending_stream_seal,
+        ) orelse return false;
+        const events = canonicalExternalList(
+            BufferedEvent,
+            captured.pending_events,
+            captured.cleanup_pending_events,
+            captured.pending_events_seal,
+        ) orelse return false;
+        const primary_inventory = canonicalExternalInventory(
+            captured.plan_inventory orelse return false,
+        ) orelse return false;
+        const mirror_inventory = canonicalExternalInventory(
+            captured.cleanup_plan_inventory orelse return false,
+        ) orelse return false;
+        if (!externalInventoriesHaveIndependentStorage(
+            &primary_inventory,
+            &mirror_inventory,
+        )) return false;
+        const primary_backing_matches = externalInventoryBackingSealMatches(
+            &primary_inventory,
+            captured.inventory_backing_seal,
+        );
+        const mirror_backing_matches = externalInventoryBackingSealMatches(
+            &mirror_inventory,
+            captured.cleanup_inventory_backing_seal,
+        );
+        const primary_matches = primary_backing_matches and blk: {
+            const digest = externalInventoryCleanupSeal(&primary_inventory);
+            break :blk std.mem.eql(
+                u8,
+                &digest,
+                &captured.inventory_cleanup_seal,
+            );
+        };
+        const mirror_matches = mirror_backing_matches and blk: {
+            const digest = externalInventoryCleanupSeal(&mirror_inventory);
+            break :blk std.mem.eql(
+                u8,
+                &digest,
+                &captured.cleanup_inventory_cleanup_seal,
+            );
+        };
+        const payload_inventory_is_primary = primary_matches;
+        const payload_inventory = if (payload_inventory_is_primary)
+            primary_inventory
+        else if (mirror_matches)
+            mirror_inventory
+        else
+            return false;
+        if (!externalTakeContainersMatchInventory(
+            batches,
+            stream,
+            events,
+            captured.partial,
+            captured.cleanup_partial,
+            captured.partial_seal,
+            &payload_inventory,
+        )) return false;
+        if (payload_inventory.batch_descriptors.len >
+            protocol.max_client_screen_items or
+            payload_inventory.stream_descriptors.len >
+                protocol.max_client_screen_items or
+            payload_inventory.event_descriptors.len >
+                max_pending_event_count)
+            return false;
+        if (externalCleanupScratchAliases(
+            cleanup_scratch,
+            &captured,
+            batches,
+            stream,
+            events,
+            &payload_inventory,
+            if (primary_backing_matches) &primary_inventory else null,
+            if (mirror_backing_matches) &mirror_inventory else null,
+        ) or externalRangesOverlap(
+            out_range,
+            externalRangeOfValue(cleanup_scratch),
+        ) or externalRangesOverlap(
+            frozen_range,
+            externalRangeOfValue(cleanup_scratch),
+        )) return false;
+        @memcpy(
+            cleanup_scratch.batches[0..payload_inventory.batch_descriptors.len],
+            payload_inventory.batch_descriptors,
+        );
+        @memcpy(
+            cleanup_scratch.stream[0..payload_inventory.stream_descriptors.len],
+            payload_inventory.stream_descriptors,
+        );
+        @memcpy(
+            cleanup_scratch.events[0..payload_inventory.event_descriptors.len],
+            payload_inventory.event_descriptors,
+        );
+        cleanup_scratch.partial = payload_inventory.snapshot.partial;
+        out.* = .{
+            .saved_self_addr = @intFromPtr(out),
+            .take_addr = self_addr,
+            .scratch_addr = @intFromPtr(cleanup_scratch),
+            .frozen_out_addr = @intFromPtr(frozen_out),
+            .allocator = allocator,
+            .batches = batches,
+            .stream = stream,
+            .events = events,
+            .partial = payload_inventory.snapshot.partial,
+            .primary_inventory = primary_inventory,
+            .mirror_inventory = mirror_inventory,
+            .payload_inventory_is_primary = payload_inventory_is_primary,
+            .free_primary_inventory = primary_backing_matches,
+            .free_mirror_inventory = mirror_backing_matches,
+            .batch_count = payload_inventory.batch_descriptors.len,
+            .stream_count = payload_inventory.stream_descriptors.len,
+            .event_count = payload_inventory.event_descriptors.len,
+            .lifecycle = .prepared,
+        };
+        return true;
+    }
+
+    fn commitFrozenCleanupImpl(
+        self: *ExternalAdoptionTake,
+        prepared: *PreparedExternalAdoptionTakeCleanup,
+        out: *FrozenExternalAdoptionTakeCleanup,
+    ) void {
+        std.debug.assert(prepared.saved_self_addr == @intFromPtr(prepared));
+        std.debug.assert(prepared.take_addr == @intFromPtr(self));
+        std.debug.assert(prepared.frozen_out_addr == @intFromPtr(out));
+        std.debug.assert(prepared.lifecycle == .prepared);
+        std.debug.assert(out.saved_self_addr == 0 and out.lifecycle == .empty);
+        out.* = .{
+            .saved_self_addr = @intFromPtr(out),
+            .allocator = prepared.allocator,
+            .batches = prepared.batches,
+            .stream = prepared.stream,
+            .events = prepared.events,
+            .partial = prepared.partial,
+            .primary_inventory = prepared.primary_inventory,
+            .mirror_inventory = prepared.mirror_inventory,
+            .free_primary_inventory = prepared.free_primary_inventory,
+            .free_mirror_inventory = prepared.free_mirror_inventory,
+            .batch_count = prepared.batch_count,
+            .stream_count = prepared.stream_count,
+            .event_count = prepared.event_count,
+            .lifecycle = .frozen,
+        };
+        self.* = .{ .lifecycle = .aborted };
+        prepared.lifecycle = .consumed;
+    }
+
+    pub fn appendPreparedFrozenCleanupRanges(
+        self: *const ExternalAdoptionTake,
+        prepared: *const PreparedExternalAdoptionTakeCleanup,
+        out: *owner_range.Scratch,
+    ) owner_range.Error!void {
+        if (prepared.saved_self_addr != @intFromPtr(prepared) or
+            prepared.take_addr != @intFromPtr(self) or
+            prepared.lifecycle != .prepared)
+            return error.InvalidRange;
+        try appendExternalListOwnerRange(StreamBatch, prepared.batches, out);
+        try appendExternalListOwnerRange(framing.Frame, prepared.stream, out);
+        try appendExternalListOwnerRange(BufferedEvent, prepared.events, out);
+        const payload_inventory = if (prepared.payload_inventory_is_primary)
+            &prepared.primary_inventory.?
+        else
+            &prepared.mirror_inventory.?;
+        for (payload_inventory.batch_descriptors) |descriptor|
+            try out.append(descriptor.bytes_address, descriptor.bytes_len);
+        for (payload_inventory.stream_descriptors) |descriptor|
+            try out.append(descriptor.payload_address, descriptor.payload_len);
+        for (payload_inventory.event_descriptors) |descriptor|
+            try out.append(descriptor.payload_address, descriptor.payload_len);
+        if (prepared.partial) |partial|
+            try out.append(partial.bytes.address, partial.bytes.capacity);
+        if (prepared.free_primary_inventory)
+            try appendExternalInventoryBackingRanges(
+                &prepared.primary_inventory.?,
+                out,
+            );
+        if (prepared.free_mirror_inventory)
+            try appendExternalInventoryBackingRanges(
+                &prepared.mirror_inventory.?,
+                out,
+            );
+    }
+
     pub fn deinit(self: *ExternalAdoptionTake) void {
         self.deinitWithScratch(null);
     }
@@ -935,151 +1204,121 @@ pub const ExternalAdoptionTake = struct {
         if (self.lifecycle == .committed) {
             const cleanup_scratch = scratch orelse
                 @panic("committed external adoption take requires cleanup scratch");
-            const captured = self.*;
-            // A failed proof deliberately leaks rather than risking an arbitrary or duplicate
-            // free. Tombstoning first makes every failure path exact-once and fail-closed.
-            self.* = .{ .lifecycle = .aborted };
-            const allocator = externalTakeCleanupAllocator(&captured) orelse return;
-            var batches = canonicalExternalList(
-                StreamBatch,
-                captured.pending_batches,
-                captured.cleanup_pending_batches,
-                captured.pending_batches_seal,
-            ) orelse return;
-            var stream = canonicalExternalList(
-                framing.Frame,
-                captured.pending_stream,
-                captured.cleanup_pending_stream,
-                captured.pending_stream_seal,
-            ) orelse return;
-            var events = canonicalExternalList(
-                BufferedEvent,
-                captured.pending_events,
-                captured.cleanup_pending_events,
-                captured.pending_events_seal,
-            ) orelse return;
-            const primary_inventory = canonicalExternalInventory(
-                captured.plan_inventory orelse return,
-            ) orelse return;
-            const mirror_inventory = canonicalExternalInventory(
-                captured.cleanup_plan_inventory orelse return,
-            ) orelse return;
-            if (!externalInventoriesHaveIndependentStorage(
-                &primary_inventory,
-                &mirror_inventory,
-            ))
-                return;
-            const primary_backing_matches =
-                externalInventoryBackingSealMatches(
-                    &primary_inventory,
-                    captured.inventory_backing_seal,
-                );
-            const mirror_backing_matches =
-                externalInventoryBackingSealMatches(
-                    &mirror_inventory,
-                    captured.cleanup_inventory_backing_seal,
-                );
-            const primary_matches = primary_backing_matches and blk: {
-                const digest =
-                    externalInventoryCleanupSeal(&primary_inventory);
-                break :blk std.mem.eql(
-                    u8,
-                    &digest,
-                    &captured.inventory_cleanup_seal,
-                );
-            };
-            const mirror_matches = mirror_backing_matches and blk: {
-                const digest =
-                    externalInventoryCleanupSeal(&mirror_inventory);
-                break :blk std.mem.eql(
-                    u8,
-                    &digest,
-                    &captured.cleanup_inventory_cleanup_seal,
-                );
-            };
-            const payload_inventory = if (primary_matches)
-                primary_inventory
-            else if (mirror_matches)
-                mirror_inventory
-            else
-                return;
-            if (!externalTakeContainersMatchInventory(
-                batches,
-                stream,
-                events,
-                captured.partial,
-                captured.cleanup_partial,
-                captured.partial_seal,
-                &payload_inventory,
-            ))
-                return;
-
-            if (payload_inventory.batch_descriptors.len >
-                protocol.max_client_screen_items or
-                payload_inventory.stream_descriptors.len >
-                    protocol.max_client_screen_items or
-                payload_inventory.event_descriptors.len >
-                    max_pending_event_count)
-                return;
-            if (externalCleanupScratchAliases(
+            var prepared: PreparedExternalAdoptionTakeCleanup = .{};
+            var frozen: FrozenExternalAdoptionTakeCleanup = .{};
+            if (!self.prepareFrozenCleanup(
                 cleanup_scratch,
-                &captured,
-                batches,
-                stream,
-                events,
-                &payload_inventory,
-                if (primary_backing_matches) &primary_inventory else null,
-                if (mirror_backing_matches) &mirror_inventory else null,
-            )) return;
-            @memcpy(
-                cleanup_scratch.batches[0..payload_inventory.batch_descriptors.len],
-                payload_inventory.batch_descriptors,
+                &prepared,
+                &frozen,
+            )) {
+                self.* = .{ .lifecycle = .aborted };
+                return;
+            }
+            commitExternalAdoptionTakeFrozenCleanupUnchecked(
+                self,
+                &prepared,
+                &frozen,
             );
-            @memcpy(
-                cleanup_scratch.stream[0..payload_inventory.stream_descriptors.len],
-                payload_inventory.stream_descriptors,
-            );
-            @memcpy(
-                cleanup_scratch.events[0..payload_inventory.event_descriptors.len],
-                payload_inventory.event_descriptors,
-            );
-            const frozen_partial = payload_inventory.snapshot.partial;
-
-            // Everything above is allocation-free proof. Nothing below can return or consult a
-            // mutable queue/inventory element. The caller-owned scratch outlives this call and is
-            // not storage returned by the Client allocator whose callbacks run below.
-            for (cleanup_scratch.batches[0..payload_inventory.batch_descriptors.len]) |descriptor|
-                descriptor.allocator.free(externalOwnedBytes(
-                    descriptor.bytes_address,
-                    descriptor.bytes_len,
-                ));
-            for (cleanup_scratch.stream[0..payload_inventory.stream_descriptors.len]) |descriptor|
-                allocator.free(externalOwnedBytes(
-                    descriptor.payload_address,
-                    descriptor.payload_len,
-                ));
-            for (cleanup_scratch.events[0..payload_inventory.event_descriptors.len]) |descriptor|
-                allocator.free(externalOwnedBytes(
-                    descriptor.payload_address,
-                    descriptor.payload_len,
-                ));
-            if (frozen_partial) |partial|
-                allocator.free(externalOwnedBytes(
-                    partial.bytes.address,
-                    partial.bytes.capacity,
-                ));
-            batches.deinit(allocator);
-            stream.deinit(allocator);
-            events.deinit(allocator);
-            var primary_to_free = primary_inventory;
-            var mirror_to_free = mirror_inventory;
-            if (primary_backing_matches) primary_to_free.deinit();
-            if (mirror_backing_matches) mirror_to_free.deinit();
+            _ = finishFrozenCleanup(&frozen, cleanup_scratch);
             return;
         }
         self.* = .{ .lifecycle = .aborted };
     }
 };
+
+fn appendExternalListOwnerRange(
+    comptime T: type,
+    list: std.ArrayListUnmanaged(T),
+    out: *owner_range.Scratch,
+) owner_range.Error!void {
+    const bytes = std.math.mul(usize, list.capacity, @sizeOf(T)) catch
+        return error.ArithmeticOverflow;
+    try out.append(if (list.capacity == 0) 0 else @intFromPtr(list.items.ptr), bytes);
+}
+
+fn appendExternalInventoryBackingRanges(
+    inventory: *const ExternalAdoptionInventory,
+    out: *owner_range.Scratch,
+) owner_range.Error!void {
+    inline for (.{
+        inventory.batch_descriptors,
+        inventory.stream_descriptors,
+        inventory.event_descriptors,
+        inventory.build_id_copy,
+        inventory.lifecycle_copy,
+    }) |slice| {
+        const bytes = std.math.mul(
+            usize,
+            slice.len,
+            @sizeOf(std.meta.Child(@TypeOf(slice))),
+        ) catch return error.ArithmeticOverflow;
+        try out.append(if (slice.len == 0) 0 else @intFromPtr(slice.ptr), bytes);
+    }
+}
+
+pub fn finishFrozenCleanup(
+    frozen: *FrozenExternalAdoptionTakeCleanup,
+    scratch: *ExternalAdoptionCleanupScratch,
+) FrozenTakeCleanupFinishResult {
+    var hidden_scratch = scratch.*;
+    return finishFrozenCleanupWithHiddenScratch(frozen, &hidden_scratch);
+}
+
+/// Aggregate-only finish leaf. `scratch` must already be a callback-hidden local snapshot; keeping
+/// this separate avoids copying the 512 KiB descriptor bank a second time inside pump teardown.
+pub fn finishFrozenCleanupWithHiddenScratch(
+    frozen: *FrozenExternalAdoptionTakeCleanup,
+    scratch: *ExternalAdoptionCleanupScratch,
+) FrozenTakeCleanupFinishResult {
+    const address = @intFromPtr(frozen);
+    if (frozen.lifecycle == .cleaned_tombstone) return .already_cleaned;
+    if (frozen.saved_self_addr != address or frozen.lifecycle != .frozen or
+        frozen.batch_count > protocol.max_client_screen_items or
+        frozen.stream_count > protocol.max_client_screen_items or
+        frozen.event_count > max_pending_event_count)
+        return .invalid;
+    if (!frozen_cleanup_guard.enter()) return .invalid;
+    defer frozen_cleanup_guard.leave();
+    defer frozen.* = .{ .lifecycle = .cleaned_tombstone };
+    var local = frozen.*;
+    frozen.* = .{ .lifecycle = .cleaned_tombstone };
+    for (scratch.batches[0..local.batch_count]) |descriptor|
+        descriptor.allocator.free(externalOwnedBytes(
+            descriptor.bytes_address,
+            descriptor.bytes_len,
+        ));
+    for (scratch.stream[0..local.stream_count]) |descriptor|
+        local.allocator.free(externalOwnedBytes(
+            descriptor.payload_address,
+            descriptor.payload_len,
+        ));
+    for (scratch.events[0..local.event_count]) |descriptor|
+        local.allocator.free(externalOwnedBytes(
+            descriptor.payload_address,
+            descriptor.payload_len,
+        ));
+    if (local.partial) |partial|
+        local.allocator.free(externalOwnedBytes(
+            partial.bytes.address,
+            partial.bytes.capacity,
+        ));
+    local.batches.deinit(local.allocator);
+    local.stream.deinit(local.allocator);
+    local.events.deinit(local.allocator);
+    if (local.primary_inventory) |inventory| {
+        if (local.free_primary_inventory) {
+            var owned = inventory;
+            owned.deinit();
+        }
+    }
+    if (local.mirror_inventory) |inventory| {
+        if (local.free_mirror_inventory) {
+            var owned = inventory;
+            owned.deinit();
+        }
+    }
+    return .cleaned;
+}
 
 const ExternalPumpTransferLifecycle = enum {
     empty,
@@ -3308,6 +3547,37 @@ fn externalPlanRangeOverlapsClient(
 
 /// host와의 한 connection. `host_id`는 hello_ack로 받은 값이다(§4 stale handle 판정에 쓴다). `call`은 read-only
 /// command를 왕복한다.
+pub fn commitExternalRecoveryDiscardUnchecked(
+    client: *Client,
+    seal: *ExternalRecoveryDiscardSeal,
+    cleanup_scratch: *ExternalAdoptionCleanupScratch,
+) void {
+    client.commitExternalRecoveryDiscardImpl(seal, cleanup_scratch);
+}
+
+pub fn commitExternalAdoptionTakeUnchecked(
+    client: *Client,
+    plan: *PreparedClientDisarm,
+    mirror_owner: *?ExternalAdoptionInventory,
+    mirror_cleanup_owner: *?ExternalAdoptionInventory,
+    take: *ExternalAdoptionTake,
+) void {
+    client.commitExternalAdoptionTakeImpl(
+        plan,
+        mirror_owner,
+        mirror_cleanup_owner,
+        take,
+    );
+}
+
+pub fn commitExternalAdoptionTakeFrozenCleanupUnchecked(
+    take: *ExternalAdoptionTake,
+    prepared: *PreparedExternalAdoptionTakeCleanup,
+    out: *FrozenExternalAdoptionTakeCleanup,
+) void {
+    take.commitFrozenCleanupImpl(prepared, out);
+}
+
 pub const Client = struct {
     allocator: std.mem.Allocator,
     fd: c.fd_t,
@@ -3869,7 +4139,7 @@ pub const Client = struct {
 
     /// Requires a successful adjacent `validateExternalRecoveryDiscard`. This suffix tombstones
     /// every mutable queue header before the first allocator callback and never rereads an element.
-    pub fn commitExternalRecoveryDiscardUnchecked(
+    fn commitExternalRecoveryDiscardImpl(
         self: *Client,
         seal: *ExternalRecoveryDiscardSeal,
         cleanup_scratch: *ExternalAdoptionCleanupScratch,
@@ -4323,6 +4593,19 @@ pub const Client = struct {
                 return error.InvalidAlias;
     }
 
+    pub fn appendExternalOwnerRangesForTeardown(
+        self: *const Client,
+        source_scratch: *ExternalSourceOwnerRangeScratch,
+        out: *owner_range.Scratch,
+    ) (ExternalAdoptionInspectError || owner_range.Error)!void {
+        const stats = try validateExternalSourceOwnerRanges(
+            self,
+            source_scratch,
+        );
+        for (source_scratch.ranges[0..stats.total_ranges]) |range|
+            try out.append(range.start, range.len);
+    }
+
     /// Performs the final whole-owner proof for the paired Client/evidence move.
     ///
     /// Unlike `preflightExternalAdoptionDestination`, this retains its scratch allocation. The
@@ -4679,7 +4962,7 @@ pub const Client = struct {
     /// by header; cleanup is deferred to the committed take owner. This is public only across the
     /// session-host module boundary and must be called by `ExternalPumpStorage` after it consumes
     /// an `AdoptedCommitPermit`; ordinary callers use the checked preparation/validation APIs.
-    pub fn commitExternalAdoptionTakeUnchecked(
+    fn commitExternalAdoptionTakeImpl(
         self: *Client,
         plan: *PreparedClientDisarm,
         mirror_owner: *?ExternalAdoptionInventory,
@@ -9562,7 +9845,8 @@ test "external adoption typed take moves queue owners without allocator callback
     ));
 
     const free_calls_before_commit = counting.free_calls;
-    client.commitExternalAdoptionTakeUnchecked(
+    commitExternalAdoptionTakeUnchecked(
+        &client,
         &plan,
         &mirror_owner,
         &mirror_cleanup_owner,
@@ -9682,7 +9966,38 @@ test "external adoption typed take moves queue owners without allocator callback
     );
     defer std.heap.page_allocator.destroy(cleanup_scratch);
     const free_calls_before_cleanup = counting.free_calls;
-    take.deinitCommitted(cleanup_scratch);
+    var prepared_cleanup: PreparedExternalAdoptionTakeCleanup = .{};
+    var frozen_cleanup: FrozenExternalAdoptionTakeCleanup = .{};
+    try std.testing.expect(take.prepareFrozenCleanup(
+        cleanup_scratch,
+        &prepared_cleanup,
+        &frozen_cleanup,
+    ));
+    try std.testing.expect(!prepared_cleanup.payload_inventory_is_primary);
+    var ranges: owner_range.Scratch = .{};
+    try take.appendPreparedFrozenCleanupRanges(&prepared_cleanup, &ranges);
+    const mirror_stream = prepared_cleanup.mirror_inventory.?
+        .stream_descriptors[0];
+    var found_mirror = false;
+    var found_poison = false;
+    for (ranges.ranges[0..ranges.len]) |range| {
+        found_mirror = found_mirror or
+            (range.start == mirror_stream.payload_address and
+                range.len == mirror_stream.payload_len);
+        found_poison = found_poison or
+            (range.start == 0x5000 and range.len == mirror_stream.payload_len);
+    }
+    try std.testing.expect(found_mirror);
+    try std.testing.expect(!found_poison);
+    commitExternalAdoptionTakeFrozenCleanupUnchecked(
+        &take,
+        &prepared_cleanup,
+        &frozen_cleanup,
+    );
+    try std.testing.expectEqual(
+        FrozenTakeCleanupFinishResult.cleaned,
+        finishFrozenCleanup(&frozen_cleanup, cleanup_scratch),
+    );
     try std.testing.expectEqual(@as(usize, 0), forged.free_calls);
     try std.testing.expect(counting.mutation_fired);
     try std.testing.expect(counting.free_calls > free_calls_before_cleanup);
@@ -9825,7 +10140,8 @@ test "external recovery discard freezes queues and preserves transport owners" {
         &seal,
         &cleanup_scratch,
     ));
-    client.commitExternalRecoveryDiscardUnchecked(
+    commitExternalRecoveryDiscardUnchecked(
+        &client,
         &seal,
         &cleanup_scratch,
     );
@@ -9886,7 +10202,8 @@ test "external adoption cleanup scratch freezes every descriptor past old chunk 
         &mirror_cleanup_owner,
         &take,
     );
-    client.commitExternalAdoptionTakeUnchecked(
+    commitExternalAdoptionTakeUnchecked(
+        &client,
         &plan,
         &mirror_owner,
         &mirror_cleanup_owner,
@@ -9939,7 +10256,8 @@ test "external adoption cleanup scratch aliases fail closed before memcpy" {
             &mirror_cleanup_owner,
             &take,
         );
-        client.commitExternalAdoptionTakeUnchecked(
+        commitExternalAdoptionTakeUnchecked(
+            &client,
             &plan,
             &mirror_owner,
             &mirror_cleanup_owner,

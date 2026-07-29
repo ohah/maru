@@ -4,7 +4,9 @@
 //! authority. Tokens contain no pointer, so stale copies can only be rejected by this ledger.
 
 const std = @import("std");
+const frozen_cleanup_guard = @import("frozen_cleanup_guard.zig");
 const limits = @import("external_inbox_limits.zig");
+const owner_range = @import("external_owner_range.zig");
 const protocol = @import("protocol.zig");
 
 pub const max_bytes: usize = limits.max_bytes;
@@ -192,6 +194,7 @@ pub const PreparedSeedPlan = struct {
         payloads: []const OwnedPayload,
     ) PlanError!void {
         if (out.lifecycle != .empty) return error.InvalidPlan;
+        if (ledger.teardown_active) return error.TeardownActive;
         if (ledger.draining_or_drained) return error.Drained;
         if (ledger.invariant_failed or ledger.planning_disabled) return error.PlanningDisabled;
         // Planning is a read-only transaction boundary. Sticky fail-close state belongs to the
@@ -200,7 +203,7 @@ pub const PreparedSeedPlan = struct {
         if (!ledger.hasValidAccounting()) return error.InvariantFailure;
         if (ledger.mutation_epoch == std.math.maxInt(u64)) return error.EpochExhausted;
         if (specs.len != payloads.len) return error.InvalidPlan;
-        if (specs.len > max_items - ledger.charged_items) return error.ItemCapExceeded;
+        if (specs.len > max_items - ledger.residentItems()) return error.ItemCapExceeded;
         try validateInitAliases(ledger, specs, payloads);
         const out_range = rangeOfValue(out);
         if (rangesOverlap(out_range, rangeOfValue(ledger)) or
@@ -247,7 +250,7 @@ pub const PreparedSeedPlan = struct {
                 .payload = fingerprint(payload),
             };
         }
-        const next_bytes = std.math.add(usize, ledger.charged_bytes, total_bytes) catch
+        const next_bytes = std.math.add(usize, ledger.residentBytes(), total_bytes) catch
             return error.ByteCapExceeded;
         if (next_bytes > max_bytes) return error.ByteCapExceeded;
 
@@ -431,6 +434,7 @@ pub const PlanError = std.mem.Allocator.Error || error{
     InvariantFailure,
     PlanningDisabled,
     Drained,
+    TeardownActive,
 };
 
 pub const CommitError = error{
@@ -446,6 +450,7 @@ pub const CommitError = error{
     PlanningDisabled,
     StalePlan,
     Drained,
+    TeardownActive,
 };
 
 pub const ReserveError = error{
@@ -459,9 +464,10 @@ pub const ReserveError = error{
     InvariantFailure,
     PlanningDisabled,
     Drained,
+    TeardownActive,
 };
 
-pub const InvariantError = error{ InvariantFailure, Drained };
+pub const InvariantError = error{ InvariantFailure, Drained, TeardownActive };
 pub const TransitionError = error{
     InvariantFailure,
     GenerationExhausted,
@@ -472,8 +478,10 @@ pub const TransitionError = error{
     InvalidTransition,
     PlanningDisabled,
     Drained,
+    TeardownActive,
 };
-pub const FinishError = error{ ActiveCharges, InvariantFailure };
+pub const FinishError = error{ ActiveCharges, InvariantFailure, TeardownActive };
+pub const DrainError = error{TeardownActive};
 
 pub const DrainReport = struct {
     drained_active_count: usize,
@@ -481,11 +489,193 @@ pub const DrainReport = struct {
     had_sticky_invariant: bool,
 };
 
+pub const OwnerTeardownError = error{
+    InvalidPermit,
+    StalePermit,
+    WrongLedger,
+    AlreadyFinished,
+    InvariantFailure,
+};
+
+const OwnerTeardownPermitLifecycle = enum {
+    empty,
+    prepared,
+    consumed,
+    finished,
+};
+
+pub const OwnerTeardownPermit = struct {
+    saved_self_addr: usize = 0,
+    ledger_addr: usize = 0,
+    owner_teardown_generation: u64 = 0,
+    lifecycle: OwnerTeardownPermitLifecycle = .empty,
+
+    fn isPreparedFor(
+        self: *const OwnerTeardownPermit,
+        ledger: *const ExternalInboxLedger,
+    ) bool {
+        return self.saved_self_addr == @intFromPtr(self) and
+            self.ledger_addr == @intFromPtr(ledger) and
+            self.owner_teardown_generation != 0 and
+            self.lifecycle == .prepared;
+    }
+};
+
+const ScreenTokenDisposition = enum {
+    unused,
+    retained,
+    released,
+};
+
+/// Callback-free, final-address token classification produced by the committed screen owner.
+pub const FrozenScreenTokenPlan = struct {
+    saved_self_addr: usize = 0,
+    tokens: [max_items]Token = [_]Token{.{ .slot = 0, .generation = 0 }} ** max_items,
+    dispositions: [max_items]ScreenTokenDisposition =
+        [_]ScreenTokenDisposition{.unused} ** max_items,
+    len: usize = 0,
+
+    pub fn initInPlace(
+        out: *FrozenScreenTokenPlan,
+        tokens: []const Token,
+        released: std.StaticBitSet(max_items),
+    ) OwnerTeardownError!void {
+        if (rangesOverlap(rangeOfValue(out), rangeOfSlice(Token, tokens)))
+            return error.InvalidPermit;
+        if (out.saved_self_addr != 0 or out.len != 0 or tokens.len > max_items)
+            return error.InvalidPermit;
+        var staged: FrozenScreenTokenPlan = .{
+            .saved_self_addr = @intFromPtr(out),
+            .len = tokens.len,
+        };
+        for (tokens, 0..) |token, index| {
+            if (@as(usize, token.slot) >= max_items or token.generation == 0)
+                return error.InvariantFailure;
+            for (tokens[0..index]) |earlier|
+                if (earlier.slot == token.slot) return error.InvariantFailure;
+            staged.tokens[index] = token;
+            staged.dispositions[index] = if (released.isSet(index))
+                .released
+            else
+                .retained;
+        }
+        for (tokens.len..max_items) |index|
+            if (released.isSet(index)) return error.InvariantFailure;
+        out.* = staged;
+    }
+
+    fn isValid(self: *const FrozenScreenTokenPlan) bool {
+        if (self.saved_self_addr != @intFromPtr(self) or self.len > max_items)
+            return false;
+        for (0..self.len) |index| {
+            const token = self.tokens[index];
+            if (@as(usize, token.slot) >= max_items or token.generation == 0 or
+                self.dispositions[index] == .unused)
+                return false;
+            for (self.tokens[0..index]) |earlier|
+                if (earlier.slot == token.slot) return false;
+        }
+        for (self.dispositions[self.len..]) |disposition|
+            if (disposition != .unused) return false;
+        return true;
+    }
+};
+
+const PreparedLedgerTeardownLifecycle = enum {
+    empty,
+    prepared,
+    consumed,
+};
+
+pub const PreparedLedgerTeardown = struct {
+    saved_self_addr: usize = 0,
+    ledger_addr: usize = 0,
+    permit_addr: usize = 0,
+    screen_plan_addr: usize = 0,
+    cleanup_addr: usize = 0,
+    expected_mutation_epoch: u64 = 0,
+    expected_charged_items: usize = 0,
+    expected_charged_bytes: usize = 0,
+    expected_retired_items: usize = 0,
+    expected_retired_bytes: usize = 0,
+    summary: LedgerTeardownSummary = .{},
+    lifecycle: PreparedLedgerTeardownLifecycle = .empty,
+};
+
+const FrozenLedgerCleanupLifecycle = enum {
+    empty,
+    frozen,
+    cleaned_tombstone,
+};
+
+pub const FrozenLedgerCleanupFinishResult = enum {
+    cleaned,
+    already_cleaned,
+    invalid,
+};
+
+pub const FrozenLedgerCleanup = struct {
+    saved_self_addr: usize = 0,
+    payloads: [max_items]OwnedPayload =
+        [_]OwnedPayload{.{ .allocator = std.heap.page_allocator }} ** max_items,
+    count: usize = 0,
+    lifecycle: FrozenLedgerCleanupLifecycle = .empty,
+
+    pub fn finishCallbackHidden(
+        self: *FrozenLedgerCleanup,
+    ) FrozenLedgerCleanupFinishResult {
+        const address = @intFromPtr(self);
+        if (self.lifecycle == .cleaned_tombstone) return .already_cleaned;
+        if (self.saved_self_addr != address or
+            self.lifecycle != .frozen or self.count > max_items)
+            return .invalid;
+        if (!frozen_cleanup_guard.enter()) return .invalid;
+        defer frozen_cleanup_guard.leave();
+        defer self.* = .{ .lifecycle = .cleaned_tombstone };
+        var local = self.*;
+        self.* = .{ .lifecycle = .cleaned_tombstone };
+        for (local.payloads[0..local.count]) |*payload| payload.deinit();
+        return .cleaned;
+    }
+};
+
+pub const LedgerTeardownSummary = struct {
+    had_invariant: bool = false,
+    orphan_count: usize = 0,
+};
+
+const PreparedScreenRetirementLifecycle = enum {
+    empty,
+    prepared,
+    consumed,
+};
+
+pub const PreparedScreenRetirement = struct {
+    saved_self_addr: usize = 0,
+    ledger_addr: usize = 0,
+    token: Token = .{ .slot = 0, .generation = 0 },
+    expected_phase: PayloadPhase = .frame,
+    expected_mutation_epoch: u64 = 0,
+    expected_charged_bytes: usize = 0,
+    expected_retired_bytes: usize = 0,
+    lifecycle: PreparedScreenRetirementLifecycle = .empty,
+};
+
+pub const ScreenRetirementError = error{
+    InvalidRetirement,
+    InvariantFailure,
+    StaleRetirement,
+    TeardownActive,
+    Drained,
+};
+
 /// Immutable projection for outer transaction seals. Slot storage remains private; callers can
 /// prove a fresh target and exact aggregate accounting without gaining a second mutation path.
 pub const AccountingView = struct {
     charged_bytes: usize,
     charged_items: usize,
+    retired_bytes: usize,
+    retired_items: usize,
     mutation_epoch: u64,
     next_generation: u64,
     next_slot_hint: usize,
@@ -499,6 +689,7 @@ pub const AccountingView = struct {
 
 const Slot = struct {
     active: bool = false,
+    retired: bool = false,
     generation: u64 = 0,
     semantic: PayloadSemantic = inactiveSemantic(),
     payload: OwnedPayload = .{ .allocator = std.heap.page_allocator },
@@ -515,6 +706,8 @@ pub const ExternalInboxLedger = struct {
     slots: [max_items]Slot = [_]Slot{.{}} ** max_items,
     charged_bytes: usize = 0,
     charged_items: usize = 0,
+    retired_bytes: usize = 0,
+    retired_items: usize = 0,
     next_slot_hint: usize = 0,
     next_generation: u64 = 1,
     generation_exhausted: bool = false,
@@ -522,6 +715,232 @@ pub const ExternalInboxLedger = struct {
     planning_disabled: bool = false,
     invariant_failed: bool = false,
     draining_or_drained: bool = false,
+    teardown_active: bool = false,
+    owner_teardown_generation: u64 = 0,
+
+    pub fn beginOwnerTeardown(
+        self: *ExternalInboxLedger,
+        owner_teardown_generation: u64,
+        out: *OwnerTeardownPermit,
+    ) OwnerTeardownError!void {
+        if (rangesOverlap(rangeOfValue(out), rangeOfValue(self)) or
+            rangeOverlapsActive(rangeOfValue(out), self))
+            return error.InvalidPermit;
+        if (owner_teardown_generation == 0 or
+            out.saved_self_addr != 0 or out.lifecycle != .empty)
+            return error.InvalidPermit;
+        if (self.teardown_active or self.draining_or_drained)
+            return error.AlreadyFinished;
+        const staged: OwnerTeardownPermit = .{
+            .saved_self_addr = @intFromPtr(out),
+            .ledger_addr = @intFromPtr(self),
+            .owner_teardown_generation = owner_teardown_generation,
+            .lifecycle = .prepared,
+        };
+        out.* = staged;
+    }
+
+    pub fn prepareFreezeAllForOwnerTeardown(
+        self: *ExternalInboxLedger,
+        permit: *OwnerTeardownPermit,
+        screen_tokens: *const FrozenScreenTokenPlan,
+        out: *PreparedLedgerTeardown,
+        frozen_out: *FrozenLedgerCleanup,
+    ) OwnerTeardownError!void {
+        const out_range = rangeOfValue(out);
+        const frozen_out_range = rangeOfValue(frozen_out);
+        const permit_range = rangeOfValue(permit);
+        const screen_range = rangeOfValue(screen_tokens);
+        const ledger_range = rangeOfValue(self);
+        if (rangesOverlap(frozen_out_range, ledger_range) or
+            rangesOverlap(frozen_out_range, out_range) or
+            rangesOverlap(frozen_out_range, permit_range) or
+            rangesOverlap(frozen_out_range, screen_range) or
+            rangeOverlapsActive(frozen_out_range, self) or
+            rangesOverlap(out_range, ledger_range) or
+            rangesOverlap(out_range, permit_range) or
+            rangesOverlap(out_range, screen_range) or
+            rangesOverlap(permit_range, ledger_range) or
+            rangesOverlap(screen_range, ledger_range) or
+            rangesOverlap(permit_range, screen_range) or
+            rangeOverlapsActive(out_range, self) or
+            rangeOverlapsActive(permit_range, self) or
+            rangeOverlapsActive(screen_range, self))
+            return error.InvalidPermit;
+        if (!permit.isPreparedFor(self)) return permitError(self, permit);
+        if (!screen_tokens.isValid()) return error.InvalidPermit;
+        if (out.saved_self_addr != 0 or out.lifecycle != .empty)
+            return error.InvalidPermit;
+        if (frozen_out.saved_self_addr != 0 or
+            frozen_out.lifecycle != .empty or frozen_out.count != 0)
+            return error.InvalidPermit;
+        if (self.teardown_active) return error.AlreadyFinished;
+        if (!self.hasValidAccounting()) return error.InvariantFailure;
+
+        var summary: LedgerTeardownSummary = .{
+            .had_invariant = self.invariant_failed,
+        };
+        var matched = std.StaticBitSet(max_items).initEmpty();
+        for (self.slots, 0..) |slot, slot_index| {
+            if (!slot.active and !slot.retired) {
+                if (slot.payload.allocation_ptr != null or
+                    slot.payload.logical_len != 0 or
+                    !std.meta.eql(slot.semantic, inactiveSemantic()))
+                    return error.InvariantFailure;
+                continue;
+            }
+            validatePayload(&slot.payload, slot.payload.logical_len) catch
+                return error.InvariantFailure;
+            validateSemantic(slot.semantic, slot.payload.logical_len) catch
+                return error.InvariantFailure;
+            const owned_range = rangeOfPayload(&slot.payload);
+            for (self.slots[slot_index + 1 ..]) |later|
+                if ((later.active or later.retired) and rangesOverlap(
+                    owned_range,
+                    rangeOfPayload(&later.payload),
+                )) return error.InvariantFailure;
+
+            var found = false;
+            for (screen_tokens.tokens[0..screen_tokens.len], 0..) |token, token_index| {
+                if (token.slot != slot_index or token.generation != slot.generation)
+                    continue;
+                // Screen adoption retains frame/partial/completed payloads as well as later lease
+                // payloads. The exact token identity is the ownership proof; restricting teardown
+                // to the lease phase would misclassify every freshly adopted screen seed as an
+                // orphan before the live-consume transition has had a chance to relabel it.
+                const expected_disposition: ScreenTokenDisposition =
+                    if (slot.active) .retained else .released;
+                if (screen_tokens.dispositions[token_index] == expected_disposition) {
+                    found = true;
+                    matched.set(token_index);
+                } else {
+                    summary.had_invariant = true;
+                }
+                break;
+            }
+            if (!found) summary.orphan_count += 1;
+        }
+        for (screen_tokens.dispositions[0..screen_tokens.len], 0..) |disposition, index| {
+            if (disposition != .unused and !matched.isSet(index))
+                summary.had_invariant = true;
+        }
+        var retired_count: usize = 0;
+        for (screen_tokens.dispositions[0..screen_tokens.len]) |disposition|
+            retired_count += @intFromBool(disposition == .released);
+        if (retired_count > max_items - self.charged_items)
+            return error.InvariantFailure;
+
+        out.* = .{
+            .saved_self_addr = @intFromPtr(out),
+            .ledger_addr = @intFromPtr(self),
+            .permit_addr = @intFromPtr(permit),
+            .screen_plan_addr = @intFromPtr(screen_tokens),
+            .cleanup_addr = @intFromPtr(frozen_out),
+            .expected_mutation_epoch = self.mutation_epoch,
+            .expected_charged_items = self.charged_items,
+            .expected_charged_bytes = self.charged_bytes,
+            .expected_retired_items = self.retired_items,
+            .expected_retired_bytes = self.retired_bytes,
+            .summary = summary,
+            .lifecycle = .prepared,
+        };
+    }
+
+    pub fn appendPreparedOwnerTeardownRanges(
+        self: *const ExternalInboxLedger,
+        prepared: *const PreparedLedgerTeardown,
+        out: *owner_range.Scratch,
+    ) owner_range.Error!void {
+        if (prepared.saved_self_addr != @intFromPtr(prepared) or
+            prepared.ledger_addr != @intFromPtr(self) or
+            prepared.lifecycle != .prepared or
+            prepared.expected_mutation_epoch != self.mutation_epoch or
+            prepared.expected_charged_items != self.charged_items or
+            prepared.expected_charged_bytes != self.charged_bytes or
+            prepared.expected_retired_items != self.retired_items or
+            prepared.expected_retired_bytes != self.retired_bytes)
+            return error.InvalidRange;
+        for (self.slots) |slot| {
+            if (!slot.active and !slot.retired) continue;
+            const range = rangeOfPayload(&slot.payload);
+            try out.append(range.start, range.end - range.start);
+        }
+    }
+
+    /// Boundary-gated no-error ownership barrier. The caller must consume one freshly prepared
+    /// capability exactly once; all hostile validation belongs to the fallible prepare phase.
+    pub fn commitFreezeAllForOwnerTeardownUnchecked(
+        self: *ExternalInboxLedger,
+        permit: *OwnerTeardownPermit,
+        prepared: *PreparedLedgerTeardown,
+        out: *FrozenLedgerCleanup,
+    ) LedgerTeardownSummary {
+        std.debug.assert(permit.isPreparedFor(self));
+        std.debug.assert(prepared.saved_self_addr == @intFromPtr(prepared));
+        std.debug.assert(prepared.ledger_addr == @intFromPtr(self));
+        std.debug.assert(prepared.permit_addr == @intFromPtr(permit));
+        std.debug.assert(prepared.cleanup_addr == @intFromPtr(out));
+        std.debug.assert(prepared.lifecycle == .prepared);
+        std.debug.assert(prepared.expected_mutation_epoch == self.mutation_epoch);
+        std.debug.assert(prepared.expected_charged_items == self.charged_items);
+        std.debug.assert(prepared.expected_charged_bytes == self.charged_bytes);
+        std.debug.assert(prepared.expected_retired_items == self.retired_items);
+        std.debug.assert(prepared.expected_retired_bytes == self.retired_bytes);
+        std.debug.assert(out.saved_self_addr == 0 and out.lifecycle == .empty);
+
+        out.saved_self_addr = @intFromPtr(out);
+        out.lifecycle = .frozen;
+        for (&self.slots) |*slot| {
+            if (slot.active or slot.retired) {
+                out.payloads[out.count] = slot.payload.take();
+                out.count += 1;
+            }
+            slot.* = .{ .generation = slot.generation };
+        }
+        self.charged_bytes = 0;
+        self.charged_items = 0;
+        self.retired_bytes = 0;
+        self.retired_items = 0;
+        self.next_slot_hint = 0;
+        self.next_generation = 1;
+        self.generation_exhausted = false;
+        self.mutation_epoch = 0;
+        self.planning_disabled = true;
+        self.invariant_failed = false;
+        self.draining_or_drained = true;
+        self.teardown_active = true;
+        self.owner_teardown_generation = permit.owner_teardown_generation;
+        permit.lifecycle = .consumed;
+        prepared.lifecycle = .consumed;
+        permit.lifecycle = .finished;
+        return prepared.summary;
+    }
+
+    /// Re-publishes the callback-safe terminal ledger image after every frozen payload has been
+    /// retired. Allocator callbacks are allowed to mutate the enclosing aggregate, so the pump
+    /// must not reconstruct private ledger fields itself or trust the image left by those
+    /// callbacks. This leaf is no-fail because the matching generation was already sealed by
+    /// `prepareFreezeAllForOwnerTeardown` and committed before any callback became observable.
+    pub fn restoreFinishedOwnerTeardownUnchecked(
+        self: *ExternalInboxLedger,
+        owner_teardown_generation: u64,
+    ) void {
+        std.debug.assert(owner_teardown_generation != 0);
+        for (&self.slots) |*slot| slot.* = .{};
+        self.charged_bytes = 0;
+        self.charged_items = 0;
+        self.retired_bytes = 0;
+        self.retired_items = 0;
+        self.next_slot_hint = 0;
+        self.next_generation = 1;
+        self.generation_exhausted = false;
+        self.mutation_epoch = 0;
+        self.planning_disabled = true;
+        self.invariant_failed = false;
+        self.draining_or_drained = true;
+        self.teardown_active = true;
+        self.owner_teardown_generation = owner_teardown_generation;
+    }
 
     pub fn reserveLease(
         self: *ExternalInboxLedger,
@@ -536,10 +955,15 @@ pub const ExternalInboxLedger = struct {
             rangeOverlapsLedgerOrActive(rangeOfValue(payload), self) or
             rangeOverlapsLedgerOrActive(rangeOfPayload(payload), self))
             return error.InvalidAlias;
-        const next_bytes = std.math.add(usize, self.charged_bytes, payload.logical_len) catch
+        const next_resident = std.math.add(usize, self.residentBytes(), payload.logical_len) catch
             return error.ByteCapExceeded;
-        if (next_bytes > max_bytes) return error.ByteCapExceeded;
-        if (self.charged_items >= max_items) return error.ItemCapExceeded;
+        if (next_resident > max_bytes) return error.ByteCapExceeded;
+        const next_charged = std.math.add(
+            usize,
+            self.charged_bytes,
+            payload.logical_len,
+        ) catch return error.ByteCapExceeded;
+        if (self.residentItems() >= max_items) return error.ItemCapExceeded;
         const slot_index = self.findFreeSlot() orelse return error.ItemCapExceeded;
         const generation = try self.prepareGeneration();
 
@@ -549,11 +973,76 @@ pub const ExternalInboxLedger = struct {
             .semantic = tagged,
             .payload = payload.take(),
         };
-        self.charged_bytes = next_bytes;
+        self.charged_bytes = next_charged;
         self.charged_items += 1;
         self.next_slot_hint = (slot_index + 1) % max_items;
         self.commitAuthorityMutation();
         return .{ .slot = @intCast(slot_index), .generation = generation };
+    }
+
+    pub fn prepareScreenRetirement(
+        self: *ExternalInboxLedger,
+        token: Token,
+        expected_phase: PayloadPhase,
+        out: *PreparedScreenRetirement,
+    ) ScreenRetirementError!void {
+        if (self.teardown_active) return error.TeardownActive;
+        if (self.draining_or_drained) return error.Drained;
+        if (out.saved_self_addr != 0 or out.lifecycle != .empty or
+            rangesOverlap(rangeOfValue(out), rangeOfValue(self)) or
+            rangeOverlapsActive(rangeOfValue(out), self))
+            return error.InvalidRetirement;
+        if (!self.hasValidAccounting() or self.invariant_failed)
+            return error.InvariantFailure;
+        if (@as(usize, token.slot) >= max_items) return error.InvariantFailure;
+        const slot = &self.slots[token.slot];
+        if (!slot.active or slot.generation != token.generation)
+            return error.StaleRetirement;
+        if (std.meta.activeTag(slot.semantic) != expected_phase)
+            return error.InvariantFailure;
+        validatePayload(&slot.payload, slot.payload.logical_len) catch
+            return error.InvariantFailure;
+        if (rangeOverlapsActiveExceptSlot(
+            rangeOfPayload(&slot.payload),
+            self,
+            token.slot,
+        )) return error.InvariantFailure;
+        out.* = .{
+            .saved_self_addr = @intFromPtr(out),
+            .ledger_addr = @intFromPtr(self),
+            .token = token,
+            .expected_phase = expected_phase,
+            .expected_mutation_epoch = self.mutation_epoch,
+            .expected_charged_bytes = self.charged_bytes,
+            .expected_retired_bytes = self.retired_bytes,
+            .lifecycle = .prepared,
+        };
+    }
+
+    pub fn commitScreenRetirementUnchecked(
+        self: *ExternalInboxLedger,
+        prepared: *PreparedScreenRetirement,
+    ) void {
+        std.debug.assert(prepared.saved_self_addr == @intFromPtr(prepared));
+        std.debug.assert(prepared.ledger_addr == @intFromPtr(self));
+        std.debug.assert(prepared.lifecycle == .prepared);
+        std.debug.assert(prepared.expected_mutation_epoch == self.mutation_epoch);
+        std.debug.assert(prepared.expected_charged_bytes == self.charged_bytes);
+        std.debug.assert(prepared.expected_retired_bytes == self.retired_bytes);
+        const slot = &self.slots[prepared.token.slot];
+        std.debug.assert(slot.active and
+            slot.generation == prepared.token.generation and
+            std.meta.activeTag(slot.semantic) == prepared.expected_phase);
+        const charged = slot.payload.logical_len;
+        slot.active = false;
+        slot.retired = true;
+        self.charged_bytes -= charged;
+        self.charged_items -= 1;
+        self.retired_bytes += charged;
+        self.retired_items += 1;
+        self.next_slot_hint = prepared.token.slot;
+        self.commitCleanupMutation();
+        prepared.lifecycle = .consumed;
     }
 
     pub fn commitSeeds(
@@ -590,6 +1079,7 @@ pub const ExternalInboxLedger = struct {
         const payload_wrappers_addr = if (payloads.len == 0) 0 else @intFromPtr(payloads.ptr);
         if (plan.payload_wrappers_addr != payload_wrappers_addr) return error.InvalidPlan;
         if (plan.entries.len == 0) {
+            if (self.teardown_active) return error.TeardownActive;
             if (self.draining_or_drained) return error.Drained;
             if (self.invariant_failed or self.planning_disabled)
                 return error.PlanningDisabled;
@@ -630,10 +1120,15 @@ pub const ExternalInboxLedger = struct {
             generation_exhausted != plan.expected_generation_exhausted or
             next_hint != plan.expected_next_slot_hint)
             return error.InvalidPlan;
-        const next_bytes = std.math.add(usize, self.charged_bytes, total_bytes) catch
+        const next_resident = std.math.add(usize, self.residentBytes(), total_bytes) catch
             return error.ByteCapExceeded;
-        if (next_bytes > max_bytes) return error.ByteCapExceeded;
-        if (plan.entries.len > max_items - self.charged_items) return error.ItemCapExceeded;
+        if (next_resident > max_bytes) return error.ByteCapExceeded;
+        const next_charged = std.math.add(
+            usize,
+            self.charged_bytes,
+            total_bytes,
+        ) catch return error.ByteCapExceeded;
+        if (plan.entries.len > max_items - self.residentItems()) return error.ItemCapExceeded;
 
         for (plan.entries, payloads, token_output) |entry, *payload, *output| {
             self.slots[entry.slot] = .{
@@ -644,7 +1139,7 @@ pub const ExternalInboxLedger = struct {
             };
             output.* = .{ .slot = entry.slot, .generation = entry.generation };
         }
-        self.charged_bytes = next_bytes;
+        self.charged_bytes = next_charged;
         self.charged_items += plan.entries.len;
         self.next_generation = next_generation;
         self.generation_exhausted = generation_exhausted;
@@ -658,6 +1153,7 @@ pub const ExternalInboxLedger = struct {
         token: Token,
         expected_phase: PayloadPhase,
     ) InvariantError!PayloadView {
+        if (self.teardown_active) return error.TeardownActive;
         if (self.draining_or_drained) return error.Drained;
         if (self.invariant_failed) return error.InvariantFailure;
         const slot = try self.resolveActive(token);
@@ -804,6 +1300,7 @@ pub const ExternalInboxLedger = struct {
         token: Token,
         expected_phase: PayloadPhase,
     ) InvariantError!void {
+        if (self.teardown_active) return error.TeardownActive;
         if (self.draining_or_drained) return error.Drained;
         const slot = try self.resolveActive(token);
         const semantic = slot.semantic;
@@ -832,7 +1329,8 @@ pub const ExternalInboxLedger = struct {
         return self.release(token, .lease);
     }
 
-    pub fn drainAll(self: *ExternalInboxLedger) DrainReport {
+    pub fn drainAll(self: *ExternalInboxLedger) DrainError!DrainReport {
+        if (self.teardown_active) return error.TeardownActive;
         if (self.draining_or_drained) {
             return .{
                 .drained_active_count = 0,
@@ -867,6 +1365,13 @@ pub const ExternalInboxLedger = struct {
                 validateSemantic(slot.semantic, slot.payload.logical_len) catch {
                     anomaly = true;
                 };
+            } else if (slot.retired) {
+                validatePayload(&slot.payload, slot.payload.logical_len) catch {
+                    anomaly = true;
+                };
+                validateSemantic(slot.semantic, slot.payload.logical_len) catch {
+                    anomaly = true;
+                };
             } else if (slot.payload.allocation_ptr != null or
                 slot.payload.logical_len != 0 or !std.meta.eql(slot.semantic, inactiveSemantic()))
             {
@@ -889,6 +1394,8 @@ pub const ExternalInboxLedger = struct {
             anomaly = true;
         self.charged_items = 0;
         self.charged_bytes = 0;
+        self.retired_items = 0;
+        self.retired_bytes = 0;
         self.next_slot_hint = 0;
         self.invariant_failed = anomaly;
         return .{
@@ -899,10 +1406,11 @@ pub const ExternalInboxLedger = struct {
     }
 
     pub fn finish(self: *ExternalInboxLedger) FinishError!void {
+        if (self.teardown_active) return error.TeardownActive;
         if (self.invariant_failed) return error.InvariantFailure;
         if (self.charged_bytes != 0 or self.charged_items != 0) return error.ActiveCharges;
         for (self.slots) |slot| {
-            if (slot.active or slot.payload.allocation_ptr != null or
+            if (slot.active or slot.retired or slot.payload.allocation_ptr != null or
                 slot.payload.logical_len != 0 or !std.meta.eql(slot.semantic, inactiveSemantic()))
                 return error.ActiveCharges;
         }
@@ -913,6 +1421,8 @@ pub const ExternalInboxLedger = struct {
         return .{
             .charged_bytes = self.charged_bytes,
             .charged_items = self.charged_items,
+            .retired_bytes = self.retired_bytes,
+            .retired_items = self.retired_items,
             .mutation_epoch = self.mutation_epoch,
             .next_generation = self.next_generation,
             .next_slot_hint = self.next_slot_hint,
@@ -930,7 +1440,9 @@ pub const ExternalInboxLedger = struct {
         InvariantFailure,
         PlanningDisabled,
         Drained,
+        TeardownActive,
     }!void {
+        if (self.teardown_active) return error.TeardownActive;
         if (self.draining_or_drained) return error.Drained;
         if (self.invariant_failed or self.planning_disabled) return error.PlanningDisabled;
         if (!self.hasValidAccounting()) {
@@ -950,6 +1462,7 @@ pub const ExternalInboxLedger = struct {
             error.InvariantFailure => error.InvariantFailure,
             error.PlanningDisabled => error.PlanningDisabled,
             error.Drained => error.Drained,
+            error.TeardownActive => error.TeardownActive,
         };
     }
 
@@ -983,36 +1496,60 @@ pub const ExternalInboxLedger = struct {
     fn findFreeSlot(self: *const ExternalInboxLedger) ?usize {
         for (0..max_items) |offset| {
             const index = (self.next_slot_hint + offset) % max_items;
-            if (!self.slots[index].active) return index;
+            if (!self.slots[index].active and !self.slots[index].retired) return index;
         }
         return null;
     }
 
+    fn residentBytes(self: *const ExternalInboxLedger) usize {
+        return self.charged_bytes +| self.retired_bytes;
+    }
+
+    fn residentItems(self: *const ExternalInboxLedger) usize {
+        return self.charged_items +| self.retired_items;
+    }
+
     fn hasValidAccounting(self: *const ExternalInboxLedger) bool {
-        if (self.charged_items > max_items or self.charged_bytes > max_bytes or
+        if (self.residentItems() > max_items or self.residentBytes() > max_bytes or
             self.next_slot_hint >= max_items)
             return false;
         var items: usize = 0;
         var bytes: usize = 0;
+        var retired_items: usize = 0;
+        var retired_bytes: usize = 0;
         for (self.slots) |slot| {
             if (slot.active) {
+                if (slot.retired) return false;
                 items = std.math.add(usize, items, 1) catch return false;
                 bytes = std.math.add(usize, bytes, slot.payload.logical_len) catch return false;
-            } else if (slot.payload.allocation_ptr != null or slot.payload.logical_len != 0) {
+            } else if (slot.retired) {
+                validatePayload(&slot.payload, slot.payload.logical_len) catch return false;
+                validateSemantic(slot.semantic, slot.payload.logical_len) catch return false;
+                retired_items = std.math.add(usize, retired_items, 1) catch return false;
+                retired_bytes = std.math.add(
+                    usize,
+                    retired_bytes,
+                    slot.payload.logical_len,
+                ) catch return false;
+            } else if (slot.payload.allocation_ptr != null or slot.payload.logical_len != 0 or
+                !std.meta.eql(slot.semantic, inactiveSemantic()))
+            {
                 return false;
             }
         }
-        return items == self.charged_items and bytes == self.charged_bytes;
+        return items == self.charged_items and bytes == self.charged_bytes and
+            retired_items == self.retired_items and retired_bytes == self.retired_bytes;
     }
 
     fn hasPristineZeroState(self: *const ExternalInboxLedger) bool {
         if (self.charged_bytes != 0 or self.charged_items != 0 or
+            self.retired_bytes != 0 or self.retired_items != 0 or
             self.next_slot_hint != 0 or self.next_generation != 1 or
             self.generation_exhausted or self.mutation_epoch != 0 or
             self.planning_disabled or self.invariant_failed or self.draining_or_drained)
             return false;
         for (self.slots) |slot| {
-            if (slot.active or slot.generation != 0 or
+            if (slot.active or slot.retired or slot.generation != 0 or
                 slot.payload.allocation_ptr != null or slot.payload.logical_len != 0 or
                 !std.meta.eql(slot.semantic, inactiveSemantic()))
                 return false;
@@ -1033,6 +1570,22 @@ pub const ExternalInboxLedger = struct {
         return error.InvariantFailure;
     }
 };
+
+fn permitError(
+    ledger: *const ExternalInboxLedger,
+    permit: *const OwnerTeardownPermit,
+) OwnerTeardownError {
+    if (permit.saved_self_addr != @intFromPtr(permit) or
+        permit.owner_teardown_generation == 0 or permit.lifecycle == .empty)
+        return error.InvalidPermit;
+    if (permit.ledger_addr != @intFromPtr(ledger)) return error.WrongLedger;
+    return switch (permit.lifecycle) {
+        .consumed => error.StalePermit,
+        .finished => error.AlreadyFinished,
+        .empty => error.InvalidPermit,
+        .prepared => error.StalePermit,
+    };
+}
 
 const ByteRange = struct {
     start: usize,
@@ -1195,6 +1748,7 @@ fn rangeOverlapsPayloads(range: ByteRange, payloads: []const OwnedPayload) bool 
 
 fn rangeOverlapsActive(range: ByteRange, ledger: *const ExternalInboxLedger) bool {
     for (ledger.slots) |slot| {
+        if (!slot.active and !slot.retired) continue;
         if (rangesOverlap(range, rangeOfPayload(&slot.payload))) return true;
     }
     return false;
@@ -1213,6 +1767,7 @@ fn rangeOverlapsLedgerOrActiveExcept(
     if (rangesOverlap(range, rangeOfValue(ledger))) return true;
     for (ledger.slots, 0..) |slot, index| {
         if (index == first or index == second) continue;
+        if (!slot.active and !slot.retired) continue;
         if (rangesOverlap(range, rangeOfPayload(&slot.payload))) return true;
     }
     return false;
@@ -1224,7 +1779,7 @@ fn rangeOverlapsActiveExceptSlot(
     excluded: u16,
 ) bool {
     for (ledger.slots, 0..) |slot, index| {
-        if (index == excluded or !slot.active) continue;
+        if (index == excluded or (!slot.active and !slot.retired)) continue;
         if (rangesOverlap(range, rangeOfPayload(&slot.payload))) return true;
     }
     return false;
@@ -1251,7 +1806,7 @@ fn findFreeSlotPlanned(
 ) ?usize {
     for (0..max_items) |offset| {
         const index = (hint + offset) % max_items;
-        if (ledger.slots[index].active) continue;
+        if (ledger.slots[index].active or ledger.slots[index].retired) continue;
         var claimed = false;
         for (prior) |entry| {
             if (entry.slot == index) {
@@ -1311,6 +1866,100 @@ fn owned(allocator: std.mem.Allocator, text: []const u8) !OwnedPayload {
     return OwnedPayload.takeOwned(allocator, &allocation);
 }
 
+const FrozenCleanupMutationProbe = struct {
+    parent: std.mem.Allocator,
+    frozen: ?*FrozenLedgerCleanup = null,
+    ledger: ?*ExternalInboxLedger = null,
+    fired: bool = false,
+    free_count: usize = 0,
+    resurrect: bool = false,
+    saved_frozen: ?FrozenLedgerCleanup = null,
+    nested_finish: ?FrozenLedgerCleanupFinishResult = null,
+
+    fn allocator(self: *FrozenCleanupMutationProbe) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &.{
+            .alloc = alloc,
+            .resize = resize,
+            .remap = remap,
+            .free = free,
+        } };
+    }
+
+    fn alloc(
+        context: *anyopaque,
+        len: usize,
+        alignment: std.mem.Alignment,
+        ret_addr: usize,
+    ) ?[*]u8 {
+        const self: *FrozenCleanupMutationProbe = @ptrCast(@alignCast(context));
+        return self.parent.vtable.alloc(self.parent.ptr, len, alignment, ret_addr);
+    }
+
+    fn resize(
+        context: *anyopaque,
+        memory: []u8,
+        alignment: std.mem.Alignment,
+        new_len: usize,
+        ret_addr: usize,
+    ) bool {
+        const self: *FrozenCleanupMutationProbe = @ptrCast(@alignCast(context));
+        return self.parent.vtable.resize(
+            self.parent.ptr,
+            memory,
+            alignment,
+            new_len,
+            ret_addr,
+        );
+    }
+
+    fn remap(
+        context: *anyopaque,
+        memory: []u8,
+        alignment: std.mem.Alignment,
+        new_len: usize,
+        ret_addr: usize,
+    ) ?[*]u8 {
+        const self: *FrozenCleanupMutationProbe = @ptrCast(@alignCast(context));
+        return self.parent.vtable.remap(
+            self.parent.ptr,
+            memory,
+            alignment,
+            new_len,
+            ret_addr,
+        );
+    }
+
+    fn free(
+        context: *anyopaque,
+        memory: []u8,
+        alignment: std.mem.Alignment,
+        ret_addr: usize,
+    ) void {
+        const self: *FrozenCleanupMutationProbe = @ptrCast(@alignCast(context));
+        self.free_count += 1;
+        if (!self.fired) {
+            self.fired = true;
+            if (self.resurrect) {
+                self.frozen.?.* = self.saved_frozen.?;
+                var moved = self.saved_frozen.?;
+                moved.saved_self_addr = @intFromPtr(&moved);
+                self.nested_finish = moved.finishCallbackHidden();
+            } else {
+                self.frozen.?.payloads[1] = .{ .allocator = std.heap.page_allocator };
+                self.frozen.?.count = 0;
+            }
+            self.ledger.?.slots[1].payload = .{ .allocator = std.heap.page_allocator };
+            self.ledger.?.charged_items = max_items;
+        }
+        self.parent.vtable.free(
+            self.parent.ptr,
+            memory,
+            alignment,
+            ret_addr,
+        );
+    }
+};
+
 test "reserveLease is atomic and enforces exact caps" {
     const allocator = std.testing.allocator;
     var ledger: ExternalInboxLedger = .{};
@@ -1330,6 +1979,100 @@ test "reserveLease is atomic and enforces exact caps" {
     );
     try ledger.releaseLease(token);
     try ledger.releaseLease(exact_token);
+    try ledger.finish();
+}
+
+test "screen retirement rejects prepared output inside owned payload backing" {
+    const allocator = std.heap.page_allocator;
+    var ledger: ExternalInboxLedger = .{};
+    var bytes = try allocator.alloc(u8, @sizeOf(PreparedScreenRetirement));
+    var payload = OwnedPayload.takeOwned(allocator, &bytes);
+    const token = try ledger.reserveLease(leaseSemantic(7, true), &payload);
+    const aliased: *PreparedScreenRetirement =
+        @ptrCast(@alignCast(ledger.slots[token.slot].payload.allocation_ptr.?));
+    try std.testing.expectError(
+        error.InvalidRetirement,
+        ledger.prepareScreenRetirement(token, .lease, aliased),
+    );
+    try ledger.releaseLease(token);
+    try ledger.finish();
+}
+
+test "retired payload remains inside resident byte cap for later admission" {
+    const allocator = std.testing.allocator;
+    var ledger: ExternalInboxLedger = .{};
+    const count = (max_bytes + max_batch_bytes - 1) / max_batch_bytes;
+    var tokens: [count]Token = undefined;
+    var remaining = max_bytes;
+    for (&tokens) |*token| {
+        const len = @min(remaining, max_batch_bytes);
+        var allocation = try allocator.alloc(u8, len);
+        var payload = OwnedPayload.takeOwned(allocator, &allocation);
+        token.* = try ledger.reserveLease(leaseSemantic(7, true), &payload);
+        remaining -= len;
+    }
+    var retirement: PreparedScreenRetirement = .{};
+    try ledger.prepareScreenRetirement(tokens[0], .lease, &retirement);
+    ledger.commitScreenRetirementUnchecked(&retirement);
+    try std.testing.expectEqual(max_batch_bytes, ledger.retired_bytes);
+    try std.testing.expectEqual(@as(usize, 1), ledger.retired_items);
+
+    var excess = try owned(allocator, "x");
+    defer excess.deinit();
+    try std.testing.expectError(
+        error.ByteCapExceeded,
+        ledger.reserveLease(leaseSemantic(7, true), &excess),
+    );
+    const report = try ledger.drainAll();
+    try std.testing.expectEqual(count - 1, report.drained_active_count);
+    try ledger.finish();
+}
+
+test "admission after retirement keeps active and retired byte accounting disjoint" {
+    const allocator = std.testing.allocator;
+    var ledger: ExternalInboxLedger = .{};
+    var first = try owned(allocator, "retired");
+    const first_token = try ledger.reserveLease(leaseSemantic(7, true), &first);
+    var retirement: PreparedScreenRetirement = .{};
+    try ledger.prepareScreenRetirement(first_token, .lease, &retirement);
+    ledger.commitScreenRetirementUnchecked(&retirement);
+
+    var second = try owned(allocator, "active");
+    _ = try ledger.reserveLease(leaseSemantic(7, true), &second);
+    const view = ledger.accountingView();
+    try std.testing.expect(view.valid);
+    try std.testing.expectEqual(@as(usize, "active".len), view.charged_bytes);
+    try std.testing.expectEqual(@as(usize, "retired".len), view.retired_bytes);
+    try std.testing.expectEqual(@as(usize, 1), view.charged_items);
+    try std.testing.expectEqual(@as(usize, 1), view.retired_items);
+    _ = try ledger.drainAll();
+    try ledger.finish();
+}
+
+test "seed admission after retirement keeps active and retired accounting disjoint" {
+    const allocator = std.testing.allocator;
+    var ledger: ExternalInboxLedger = .{};
+    var first = try owned(allocator, "retired");
+    const first_token = try ledger.reserveLease(leaseSemantic(7, true), &first);
+    var retirement: PreparedScreenRetirement = .{};
+    try ledger.prepareScreenRetirement(first_token, .lease, &retirement);
+    ledger.commitScreenRetirementUnchecked(&retirement);
+
+    var payloads = [_]OwnedPayload{try owned(allocator, "seed")};
+    defer for (&payloads) |*payload| payload.deinit();
+    const specs = [_]SeedSpec{.{ .semantic = .{ .completed = leaseSemantic(7, true) }, .logical_len = "seed".len }};
+    var plan: PreparedSeedPlan = .{};
+    try PreparedSeedPlan.initInPlace(&plan, allocator, &ledger, &specs, &payloads);
+    defer plan.deinit();
+    var tokens: [1]Token = undefined;
+    try ledger.commitSeeds(&plan, &payloads, &tokens);
+    const view = ledger.accountingView();
+    try std.testing.expect(view.valid);
+    try std.testing.expectEqual(@as(usize, "seed".len), view.charged_bytes);
+    try std.testing.expectEqual(@as(usize, "retired".len), view.retired_bytes);
+    try std.testing.expectEqual(@as(usize, 1), view.charged_items);
+    try std.testing.expectEqual(@as(usize, 1), view.retired_items);
+    _ = try ledger.drainAll();
     try ledger.finish();
 }
 
@@ -1390,7 +2133,7 @@ test "zero seed transaction still rejects stale and drained ledgers" {
     var drained_plan: PreparedSeedPlan = .{};
     try PreparedSeedPlan.initInPlace(&drained_plan, allocator, &ledger, &.{}, &.{});
     defer drained_plan.deinit();
-    _ = ledger.drainAll();
+    _ = try ledger.drainAll();
     try std.testing.expectError(
         error.Drained,
         ledger.commitSeeds(&drained_plan, &.{}, &.{}),
@@ -1409,7 +2152,7 @@ test "zero seed transaction rejects accounting corruption" {
         ledger.commitSeeds(&plan, &.{}, &.{}),
     );
     try std.testing.expect(ledger.invariant_failed);
-    _ = ledger.drainAll();
+    _ = try ledger.drainAll();
 }
 
 test "seed planning preflight preserves corrupt accounting byte for byte" {
@@ -1773,7 +2516,7 @@ test "relabel invalidates stale token and obeys end_stream" {
     try ledger.commitSeeds(&plan, &payloads, &tokens);
     const partial = try ledger.relabel(tokens[0], .frame, .partial, .none);
     try std.testing.expectError(error.InvariantFailure, ledger.borrow(tokens[0], .frame));
-    const report = ledger.drainAll();
+    const report = try ledger.drainAll();
     try std.testing.expectEqual(@as(usize, 1), report.drained_active_count);
     try std.testing.expectError(error.Drained, ledger.borrow(partial, .partial));
 }
@@ -1977,7 +2720,7 @@ test "release defers duplicate-owner corruption to authoritative drain" {
     defer displaced.deinit();
     ledger.slots[second.slot].payload = ledger.slots[first.slot].payload;
     try std.testing.expectError(error.InvariantFailure, ledger.releaseLease(first));
-    const report = ledger.drainAll();
+    const report = try ledger.drainAll();
     try std.testing.expect(report.had_sticky_invariant);
     try std.testing.expectEqual(@as(usize, 2), report.drained_active_count);
     try std.testing.expectEqual(@as(usize, 0), ledger.charged_items);
@@ -1988,10 +2731,10 @@ test "drain sweeps lost descriptors and is idempotent" {
     var ledger: ExternalInboxLedger = .{};
     var payload = try owned(allocator, "lost");
     _ = try ledger.reserveLease(leaseSemantic(7, true), &payload);
-    const first = ledger.drainAll();
+    const first = try ledger.drainAll();
     try std.testing.expectEqual(@as(usize, 1), first.drained_active_count);
     try std.testing.expectEqual(@as(usize, 4), first.drained_bytes);
-    const second = ledger.drainAll();
+    const second = try ledger.drainAll();
     try std.testing.expectEqual(@as(usize, 0), second.drained_active_count);
     try std.testing.expectError(error.Drained, ledger.reserveLease(leaseSemantic(7, true), &payload));
     try ledger.finish();
@@ -2002,12 +2745,12 @@ test "drain repairs inactive payload and counter corruption without double free"
     var ledger: ExternalInboxLedger = .{};
     ledger.slots[3].payload = try owned(allocator, "orphan");
     ledger.charged_items = 99;
-    const report = ledger.drainAll();
+    const report = try ledger.drainAll();
     try std.testing.expect(report.had_sticky_invariant);
     try std.testing.expectEqual(@as(usize, 0), ledger.charged_items);
     try std.testing.expectEqual(@as(usize, 0), ledger.charged_bytes);
     try std.testing.expectError(error.InvariantFailure, ledger.finish());
-    const second = ledger.drainAll();
+    const second = try ledger.drainAll();
     try std.testing.expectEqual(@as(usize, 0), second.drained_bytes);
 }
 
@@ -2017,7 +2760,7 @@ test "drain reports active semantic corruption" {
     var payload = try owned(allocator, "x");
     const token = try ledger.reserveLease(leaseSemantic(7, false), &payload);
     ledger.slots[token.slot].semantic.lease.stream_id = 0;
-    const report = ledger.drainAll();
+    const report = try ledger.drainAll();
     try std.testing.expect(report.had_sticky_invariant);
     try std.testing.expectError(error.InvariantFailure, ledger.finish());
 }
@@ -2053,7 +2796,7 @@ test "counter corruption cannot underflow release before authoritative drain" {
     const token = try ledger.reserveLease(leaseSemantic(7, false), &payload);
     ledger.charged_items = 0;
     try std.testing.expectError(error.InvariantFailure, ledger.releaseLease(token));
-    const report = ledger.drainAll();
+    const report = try ledger.drainAll();
     try std.testing.expect(report.had_sticky_invariant);
     try std.testing.expectEqual(@as(usize, 1), report.drained_active_count);
     try std.testing.expectEqual(@as(usize, 0), ledger.charged_items);
@@ -2068,6 +2811,275 @@ test "oversized aggregate item counter latches before cap subtraction" {
         ledger.reserveLease(leaseSemantic(7, false), &payload),
     );
     try std.testing.expect(ledger.invariant_failed);
-    const report = ledger.drainAll();
+    const report = try ledger.drainAll();
     try std.testing.expect(report.had_sticky_invariant);
+}
+
+test "owner teardown prepare is mutation-free and rejects copied authority" {
+    var ledger: ExternalInboxLedger = .{};
+    var permit: OwnerTeardownPermit = .{};
+    try ledger.beginOwnerTeardown(1, &permit);
+    var copied_permit = permit;
+    var token_plan: FrozenScreenTokenPlan = .{};
+    try token_plan.initInPlace(&.{}, std.StaticBitSet(max_items).initEmpty());
+    var prepared: PreparedLedgerTeardown = .{};
+    var frozen: FrozenLedgerCleanup = .{};
+
+    const ledger_before = ledger;
+    const permit_before = permit;
+    try std.testing.expectError(
+        error.InvalidPermit,
+        ledger.prepareFreezeAllForOwnerTeardown(
+            &copied_permit,
+            &token_plan,
+            &prepared,
+            &frozen,
+        ),
+    );
+    try std.testing.expect(std.meta.eql(ledger_before, ledger));
+    try std.testing.expect(std.meta.eql(permit_before, permit));
+    try std.testing.expectEqual(
+        PreparedLedgerTeardownLifecycle.empty,
+        prepared.lifecycle,
+    );
+}
+
+test "owner teardown rejects structural aliases before dereferencing outputs" {
+    var ledger: ExternalInboxLedger = .{};
+    const before = ledger;
+    const aliased_permit: *OwnerTeardownPermit = @ptrCast(@alignCast(&ledger));
+    try std.testing.expectError(
+        error.InvalidPermit,
+        ledger.beginOwnerTeardown(1, aliased_permit),
+    );
+    try std.testing.expect(std.meta.eql(before, ledger));
+
+    var permit: OwnerTeardownPermit = .{};
+    try ledger.beginOwnerTeardown(1, &permit);
+    var token_plan: FrozenScreenTokenPlan = .{};
+    try token_plan.initInPlace(&.{}, std.StaticBitSet(max_items).initEmpty());
+    const aliased_prepared: *PreparedLedgerTeardown = @ptrCast(@alignCast(&ledger));
+    var frozen: FrozenLedgerCleanup = .{};
+    const permit_before = permit;
+    try std.testing.expectError(
+        error.InvalidPermit,
+        ledger.prepareFreezeAllForOwnerTeardown(
+            &permit,
+            &token_plan,
+            aliased_prepared,
+            &frozen,
+        ),
+    );
+    try std.testing.expect(std.meta.eql(before, ledger));
+    try std.testing.expect(std.meta.eql(permit_before, permit));
+}
+
+test "screen teardown token plan rejects tail bits and same-slot ABA" {
+    var tail = std.StaticBitSet(max_items).initEmpty();
+    tail.set(1);
+    var tail_plan: FrozenScreenTokenPlan = .{};
+    try std.testing.expectError(
+        error.InvariantFailure,
+        tail_plan.initInPlace(
+            &.{.{ .slot = 0, .generation = 1 }},
+            tail,
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 0), tail_plan.saved_self_addr);
+
+    var aba_plan: FrozenScreenTokenPlan = .{};
+    try std.testing.expectError(
+        error.InvariantFailure,
+        aba_plan.initInPlace(
+            &.{
+                .{ .slot = 0, .generation = 1 },
+                .{ .slot = 0, .generation = 2 },
+            },
+            std.StaticBitSet(max_items).initEmpty(),
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 0), aba_plan.saved_self_addr);
+}
+
+test "owner teardown freezes all payloads before cleanup and closes ordinary APIs" {
+    const allocator = std.testing.allocator;
+    var ledger: ExternalInboxLedger = .{};
+    var first_payload = try owned(allocator, "first");
+    var second_payload = try owned(allocator, "second");
+    const first = try ledger.reserveLease(leaseSemantic(7, false), &first_payload);
+    _ = try ledger.reserveLease(leaseSemantic(8, false), &second_payload);
+
+    var permit: OwnerTeardownPermit = .{};
+    try ledger.beginOwnerTeardown(9, &permit);
+    var token_plan: FrozenScreenTokenPlan = .{};
+    try token_plan.initInPlace(
+        &.{first},
+        std.StaticBitSet(max_items).initEmpty(),
+    );
+    var prepared: PreparedLedgerTeardown = .{};
+    var frozen: FrozenLedgerCleanup = .{};
+    try ledger.prepareFreezeAllForOwnerTeardown(
+        &permit,
+        &token_plan,
+        &prepared,
+        &frozen,
+    );
+    try std.testing.expectEqual(@as(usize, 1), prepared.summary.orphan_count);
+    try std.testing.expect(!prepared.summary.had_invariant);
+    try std.testing.expectEqual(@as(usize, 2), ledger.charged_items);
+
+    const summary = ledger.commitFreezeAllForOwnerTeardownUnchecked(
+        &permit,
+        &prepared,
+        &frozen,
+    );
+    try std.testing.expectEqual(@as(usize, 1), summary.orphan_count);
+    try std.testing.expectEqual(@as(usize, 2), frozen.count);
+    try std.testing.expectEqual(@as(usize, 0), ledger.charged_items);
+    try std.testing.expectEqual(@as(usize, 0), ledger.charged_bytes);
+    try std.testing.expect(ledger.teardown_active);
+    try std.testing.expectEqual(OwnerTeardownPermitLifecycle.finished, permit.lifecycle);
+    try std.testing.expectError(error.TeardownActive, ledger.borrowLease(first));
+    var empty_payload = OwnedPayload.empty(allocator);
+    try std.testing.expectError(
+        error.TeardownActive,
+        ledger.reserveLease(leaseSemantic(9, false), &empty_payload),
+    );
+    try std.testing.expectError(error.TeardownActive, ledger.drainAll());
+    try std.testing.expectError(error.TeardownActive, ledger.finish());
+
+    try std.testing.expectEqual(
+        FrozenLedgerCleanupFinishResult.cleaned,
+        frozen.finishCallbackHidden(),
+    );
+    try std.testing.expectEqual(
+        FrozenLedgerCleanupLifecycle.cleaned_tombstone,
+        frozen.lifecycle,
+    );
+    try std.testing.expectEqual(
+        FrozenLedgerCleanupFinishResult.already_cleaned,
+        frozen.finishCallbackHidden(),
+    );
+}
+
+test "frozen cleanup never rereads descriptors mutated by the first free callback" {
+    var probe: FrozenCleanupMutationProbe = .{ .parent = std.testing.allocator };
+    const allocator = probe.allocator();
+    var ledger: ExternalInboxLedger = .{};
+    probe.ledger = &ledger;
+    var first_payload = try owned(allocator, "first");
+    var second_payload = try owned(allocator, "second");
+    _ = try ledger.reserveLease(leaseSemantic(7, false), &first_payload);
+    _ = try ledger.reserveLease(leaseSemantic(8, false), &second_payload);
+
+    var permit: OwnerTeardownPermit = .{};
+    try ledger.beginOwnerTeardown(1, &permit);
+    var token_plan: FrozenScreenTokenPlan = .{};
+    try token_plan.initInPlace(&.{}, std.StaticBitSet(max_items).initEmpty());
+    var prepared: PreparedLedgerTeardown = .{};
+    var frozen: FrozenLedgerCleanup = .{};
+    try ledger.prepareFreezeAllForOwnerTeardown(
+        &permit,
+        &token_plan,
+        &prepared,
+        &frozen,
+    );
+    _ = ledger.commitFreezeAllForOwnerTeardownUnchecked(
+        &permit,
+        &prepared,
+        &frozen,
+    );
+    probe.frozen = &frozen;
+
+    try std.testing.expectEqual(
+        FrozenLedgerCleanupFinishResult.cleaned,
+        frozen.finishCallbackHidden(),
+    );
+    try std.testing.expect(probe.fired);
+    try std.testing.expectEqual(@as(usize, 2), probe.free_count);
+    try std.testing.expectEqual(
+        FrozenLedgerCleanupLifecycle.cleaned_tombstone,
+        frozen.lifecycle,
+    );
+}
+
+test "frozen cleanup rejects callback resurrection and re-tombstones on return" {
+    var probe: FrozenCleanupMutationProbe = .{
+        .parent = std.testing.allocator,
+        .resurrect = true,
+    };
+    const allocator = probe.allocator();
+    var ledger: ExternalInboxLedger = .{};
+    probe.ledger = &ledger;
+    var first_payload = try owned(allocator, "first");
+    var second_payload = try owned(allocator, "second");
+    _ = try ledger.reserveLease(leaseSemantic(7, false), &first_payload);
+    _ = try ledger.reserveLease(leaseSemantic(8, false), &second_payload);
+    var permit: OwnerTeardownPermit = .{};
+    try ledger.beginOwnerTeardown(1, &permit);
+    var token_plan: FrozenScreenTokenPlan = .{};
+    try token_plan.initInPlace(&.{}, std.StaticBitSet(max_items).initEmpty());
+    var prepared: PreparedLedgerTeardown = .{};
+    var frozen: FrozenLedgerCleanup = .{};
+    try ledger.prepareFreezeAllForOwnerTeardown(
+        &permit,
+        &token_plan,
+        &prepared,
+        &frozen,
+    );
+    _ = ledger.commitFreezeAllForOwnerTeardownUnchecked(
+        &permit,
+        &prepared,
+        &frozen,
+    );
+    probe.frozen = &frozen;
+    probe.saved_frozen = frozen;
+
+    try std.testing.expectEqual(
+        FrozenLedgerCleanupFinishResult.cleaned,
+        frozen.finishCallbackHidden(),
+    );
+    try std.testing.expectEqual(
+        FrozenLedgerCleanupFinishResult.invalid,
+        probe.nested_finish.?,
+    );
+    try std.testing.expectEqual(@as(usize, 2), probe.free_count);
+    try std.testing.expectEqual(
+        FrozenLedgerCleanupLifecycle.cleaned_tombstone,
+        frozen.lifecycle,
+    );
+}
+
+test "owner teardown classifies stale retained token without mutating prepare inputs" {
+    const allocator = std.testing.allocator;
+    var ledger: ExternalInboxLedger = .{};
+    var payload = try owned(allocator, "payload");
+    const token = try ledger.reserveLease(leaseSemantic(7, false), &payload);
+    var permit: OwnerTeardownPermit = .{};
+    try ledger.beginOwnerTeardown(1, &permit);
+    var token_plan: FrozenScreenTokenPlan = .{};
+    try token_plan.initInPlace(
+        &.{.{ .slot = token.slot, .generation = token.generation + 1 }},
+        std.StaticBitSet(max_items).initEmpty(),
+    );
+    var prepared: PreparedLedgerTeardown = .{};
+    var frozen: FrozenLedgerCleanup = .{};
+    try ledger.prepareFreezeAllForOwnerTeardown(
+        &permit,
+        &token_plan,
+        &prepared,
+        &frozen,
+    );
+    try std.testing.expect(prepared.summary.had_invariant);
+    try std.testing.expectEqual(@as(usize, 1), prepared.summary.orphan_count);
+
+    _ = ledger.commitFreezeAllForOwnerTeardownUnchecked(
+        &permit,
+        &prepared,
+        &frozen,
+    );
+    try std.testing.expectEqual(
+        FrozenLedgerCleanupFinishResult.cleaned,
+        frozen.finishCallbackHidden(),
+    );
 }
